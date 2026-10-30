@@ -248,3 +248,14 @@ payload descendants and supplies the structured-route compatibility premise with
 Different variables can diverge; failed opaque projections may become available after substitution.
 Dependency-shape erasure is not full base-type equality. The actual parser/unifier correspondence,
 mutable referent state, authority and artifact provenance remain open, not silently assumed proved.
+
+## Mutable referent state
+
+The [referent study](mutable-referent-state.md) separates carrier storage, current payload support
+and authority. Storage-only tracking and precise carrier state without writeback fail finite
+controls; monotone capture is conservative. Place-keyed state and carrier state with writeback
+both work in the single-cell model, so do not infer one required runtime representation.
+
+Rust's inline/ended-handle and temporary-restoration boundaries motivate the question without
+showing a Rust bug. Stored/generic exclusive access still needs a full lifecycle/authority/inference
+account. The pure shared-data proofs do not automatically establish a heap-dependent dependency law.

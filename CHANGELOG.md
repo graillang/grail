@@ -81,3 +81,8 @@
   compatible descendants; connect that premise to structured forwarding in a restricted model.
 - Check counterexamples for newly revealed opaque paths and different-variable incompatibility;
   keep full source typing, parser/unifier correctness and mutable referent state outside the claim.
+
+- Add eleven isolated Rust referent-state probes and complete finite exploration of five single-cell
+  policies, including retained-old-value and temporary-source controls.
+- Distinguish storage lifetime, current contents and writeback; record two precise ghost-state styles
+  and Aeneas precedent without claiming a general mutable-reference checker or runtime graph requirement.
