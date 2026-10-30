@@ -19,3 +19,7 @@
 
 - Add a bounded typed-IR origin/capture inference experiment, imported contract composition, isolated
   client checking and adversarial tests. Contracts are not independently proof-certified.
+
+- Stress-test origin/capture contracts against separate finite dependency and allocation-epoch models.
+- Measure generic forwarding, source-set growth and root-indexed client lookup; document unsupported
+  ownership/effect features and the trust limit of schema-valid but dishonest contracts.

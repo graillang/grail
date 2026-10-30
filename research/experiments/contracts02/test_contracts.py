@@ -35,6 +35,16 @@ class Tests(unittest.TestCase):
         self.assertEqual(result["failures"], [])
         self.assertEqual(result["no_results"], [])
 
+    def test_root_index_matches_reference(self):
+        for case in clients():
+            with self.subTest(case=case["name"]):
+                try:
+                    Checker(self.summaries, case["steps"], indexed=False).check()
+                    accepted = True
+                except Rejected:
+                    accepted = False
+                self.assertEqual(accepted, case["accept"])
+
     def test_no_lifetime_or_root_annotations_in_inputs(self):
         self.assertNotIn("source_sets", json.dumps(providers()))
         self.assertNotIn("origins", json.dumps(providers()))
@@ -51,6 +61,22 @@ class Tests(unittest.TestCase):
         self.assertEqual(len(artifact["functions"]), 1)
         self.assertEqual(next(iter(contract.flows[("payload",)])).parameter, 0)
         self.assertEqual(next(iter(contract.flows[("payload",)])).kind, "storage")
+
+    def test_owning_value_parameter_is_not_silently_borrowed(self):
+        with self.assertRaisesRegex(Rejected, "owning value moves"):
+            infer([function("consume", ["bytes"], "view", borrow(0), ["value"])])
+
+    def test_import_changes_invalidate_dependency_digest(self):
+        left, _ = infer([function("pick", ["bytes", "bytes"], "view", borrow(0))])
+        right, _ = infer([function("pick", ["bytes", "bytes"], "view", borrow(1))])
+        downstream = [
+            function("forward", ["bytes", "bytes"], "view", call("pick", p(0), p(1)))
+        ]
+        a, _ = infer(downstream, imports=decode(left))
+        b, _ = infer(downstream, imports=decode(right))
+        self.assertEqual(a["body_sha256"], b["body_sha256"])
+        self.assertNotEqual(a["imports_sha256"], b["imports_sha256"])
+        self.assertNotEqual(a["functions"], b["functions"])
 
     def test_owner_drop_is_not_silent_reclamation(self):
         with self.assertRaises(Rejected):

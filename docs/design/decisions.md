@@ -99,3 +99,19 @@ inspected but not executed because Swift 6.3.2+ is unavailable. No Hylo benchmar
 
 Priority: specify and experimentally infer modular origin/capture contracts for the recursive AST,
 generic adapter and callback cases. The Rust baseline demonstrates expressivity, not Grail inference.
+
+## Origin/capture inference experiment
+
+See [results 02](experiment-results-02.md). A restricted typed-IR producer now infers and exports
+shared-view field/capture origins; isolated clients and a downstream provider use contracts without
+upstream bodies. Generic prefix forwarding is compact, while dense distinct source sets still grow
+large. Field-sensitive future uses avoid demonstrated false rejections from whole-result unions.
+
+The callback rule is a fixed scoped protocol, not general higher-order inference. Owning moves,
+exclusive-view returns, general control flow, allocation/drop, real closures and async remain out
+of scope. Source/import hashes are dependency identifiers, not proof certificates. A valid-looking
+forged contract is deliberately shown to fool a client unless producer/evidence trust is established.
+
+Recommendation: retain the candidate architecture, not commit to it. Next specify a formal safety
+statement for this fragment, then investigate a small mutation/control-flow extension. Do not
+interpret passing finite tests as Rust-class guarantees or native compile-speed evidence.

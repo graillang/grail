@@ -9,6 +9,7 @@ No performance or verification claims have been established for Grail.
 
 ## Living design record
 
+- [Origin/capture inference results](docs/design/experiment-results-02.md)
 - [First measured results](docs/design/experiment-results-01.md)
 - [Initial architectural review](docs/design/initial-review.md)
 - [Memory-model competition and response to critique](docs/design/memory-model-competition.md)

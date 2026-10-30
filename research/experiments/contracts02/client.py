@@ -21,7 +21,15 @@ def uses(step: dict[str, Any]) -> list[tuple[str, Path]]:
 
 
 class Checker:
-    def __init__(self, summaries: dict[str, Summary], steps: list[dict[str, Any]]):
+    def __init__(
+        self,
+        summaries: dict[str, Summary],
+        steps: list[dict[str, Any]],
+        *,
+        indexed: bool = True,
+    ):
+        self.indexed = indexed
+        self.by_root: dict[int, list[tuple[str, Path, Origin, int]]] = defaultdict(list)
         self.summaries = summaries
         self.steps = steps
         self.values: dict[str, Info] = {}
@@ -39,6 +47,14 @@ class Checker:
             raise Rejected("client bindings must be fresh SSA names")
         self.defined.add(name)
         self.values[name] = value
+        if self.indexed:
+            for path, origins in value.flows.items():
+                last = max(
+                    (i for i, used in self.future[name] if overlap(path, used)),
+                    default=-1,
+                )
+                for origin in origins:
+                    self.by_root[origin.parameter].append((name, path, origin, last))
 
     def value(self, arg: dict[str, Any]) -> Info:
         if set(arg) - {"var", "path"} or arg.get("var") not in self.values:
@@ -64,7 +80,16 @@ class Checker:
         return result
 
     def modification(self, origin: Origin, point: int) -> None:
-        for name, path, loan in self.live(point):
+        candidates = (
+            [
+                (name, path, loan)
+                for name, path, loan, last in self.by_root[origin.parameter]
+                if last >= point and name in self.values
+            ]
+            if self.indexed
+            else self.live(point)
+        )
+        for name, path, loan in candidates:
             if loan.parameter == origin.parameter and overlap(loan.path, origin.path):
                 owner = self.root_names[origin.parameter]
                 raise Rejected(

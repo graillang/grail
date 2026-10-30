@@ -179,7 +179,11 @@ class Semantics:
 
 
 def check(
-    definitions: list[dict[str, Any]], summaries: dict[str, Summary], *, fuel: int = 8
+    definitions: list[dict[str, Any]],
+    summaries: dict[str, Summary],
+    *,
+    fuel: int = 8,
+    names: set[str] | None = None,
 ) -> dict[str, Any]:
     semantics = Semantics(definitions)
     labels: dict[str, int] = {}
@@ -197,6 +201,8 @@ def check(
         Ty.parse({"tree": "view"}),
     ]
     for f in definitions:
+        if names is not None and f["name"] not in names:
+            continue
         if Ty.parse(f["result"]).kind == "unit":
             continue  # Scoped-callback protocol tested by separate client tests, not this oracle.
         generic = any(

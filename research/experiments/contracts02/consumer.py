@@ -32,7 +32,10 @@ def main() -> None:
     print(
         json.dumps(
             {
-                "provider_body_visible": Path("/experiment/providers.json").exists(),
+                "provider_body_visible": any(
+                    Path("/experiment", name).exists()
+                    for name in ["providers.json", "input-ir.json", "fixtures.py"]
+                ),
                 "inference_module_visible": Path("/experiment/infer.py").exists(),
                 "results": results,
             },

@@ -226,3 +226,9 @@ The prior `hylo-lang/hylo` source findings concern the former implementation. Cu
 
 Current Hylo sources/tests were read, not built. Goose was built and tiny tests were executed in
 isolation. Neither is a formal audit; compare the explicit assurance boundaries in the report.
+
+## Origin/capture contract experiment
+
+[Results 02](experiment-results-02.md) links authored IR, implementation, isolated consumer evidence,
+seeded finite checks and measurements. This is original experimental engineering evidence, not a
+published novelty claim or independently checked soundness theorem. No new language commitment.

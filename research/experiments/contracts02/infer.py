@@ -40,7 +40,6 @@ class Function:
 def evaluate(
     expr: Any,
     params: list[Info],
-    functions: dict[str, Function],
     summaries: dict[str, Summary],
     current: Function,
     depth: int = 0,
@@ -50,7 +49,7 @@ def evaluate(
     op, value = next(iter(expr.items()))
 
     def ev(e: Any) -> Info:
-        return evaluate(e, params, functions, summaries, current, depth + 1)
+        return evaluate(e, params, summaries, current, depth + 1)
 
     if op == "param":
         if type(value) is not int or not 0 <= value < len(params):
@@ -235,7 +234,6 @@ def infer(
         value = evaluate(
             f.body,
             [Info.parameter(i, p.ty) for i, p in enumerate(f.params)],
-            functions,
             summaries,
             f,
         )

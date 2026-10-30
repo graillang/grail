@@ -91,3 +91,10 @@ product workloads. They are hypotheses/gates, never facts derived from language 
 3. Direct-style runtime ABI micro-experiment (stackful vs effect-lowered); include callbacks and FFI.
 4. One modest verified native component with a C ABI, then evaluate developer/agent workflow.
 5. Only then decide backend expansion, accelerator scope, proof automation and commercial integrations.
+
+## Contract-inference follow-up
+
+The [second results](experiment-results-02.md) implement the bounded shared-view contract experiment.
+The open gates now concern formal preservation and extension to mutation/control flow, not whether
+simple field-wise shared-view propagation can be implemented at all. The chosen origin-set encoding
+has an explicit dense-case size limit; compression/widening/annotation policy is still undecided.

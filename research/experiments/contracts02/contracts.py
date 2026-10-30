@@ -25,6 +25,8 @@ class Param:
             raise Rejected(
                 "modify parameters require owning byte places in this fragment"
             )
+        if raw["mode"] == "value" and any(t.kind == "bytes" for _, t in ty.leaves()):
+            raise Rejected("owning value moves are outside this place/loan experiment")
         return Param(ty, raw["mode"])
 
     def raw(self) -> dict[str, Any]:
