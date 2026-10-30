@@ -175,3 +175,13 @@
   providers to rebuild. Test concurrent publication, byte corruption and retained-version linking.
 - Fix TinyCC reproducibility by compiling stable relative source names inside isolated work directories;
   repeated and relocated object generations/executables now match without ELF postprocessing.
+
+- Add field-sensitive by-value nominal records with owned and captured-reference fields, nested
+  partial moves, explicit byte-field borrows and recursive remaining-field cleanup. Share validated
+  layouts; count empty nodes in expansion bounds; expire captures independently of default drop.
+  Export reachable layout definitions in module schema 2/signature payload 4 and invalidate stale
+  layout-only clients. General typed references, generic containers, enums/Result/joins remain open.
+- Distinguish lifetime may-roots from valid-reference authority during reborrow. Validate disjoint
+  returned mutable fields sharing a lifetime, duplicate-borrow rejection, and storage/capture returns.
+- Omit the pinned TinyCC's invalid asynchronous frame tables for Grail's abort-only profile; retain
+  relocation evidence and verify both mixed-backend large-record ABI directions and allocator balance.

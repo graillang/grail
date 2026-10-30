@@ -91,9 +91,9 @@ ancestry can still become expensive; earlier typed-IR timings do not cover this 
 
 `compile FILE OUT IMPORT_DIR [clang|tcc]` checks source, emits C, compiles an object, then publishes
 its `.api`. `build` additionally links an executable with direct imported objects. Imports consume
-`.api`/`.o` files, never provider source. Source module schema 1 carries public function signatures,
-entry identity and direct dependency surface hashes; standalone signature schema 3 remains the
-function payload. Old source artifacts must be rebuilt. Builds validate and link transitive metadata
+`.api`/`.o` files, never provider source. Source module schema 2 carries public function signatures, reachable nominal record layouts,
+entry identity and direct dependency surface hashes; standalone signature schema 4 is the function
+payload. Old source artifacts must be rebuilt. Builds validate and link transitive metadata
 closures once per module, reject cycles/stale contracts, and keep private helpers internal. Body-only
 edits do not invalidate callers; changes to any public member conservatively do. A persistent build
 cache and automatic rebuild scheduling remain unimplemented. Native linking captures immutable
@@ -156,3 +156,14 @@ and the final false edge, while enclosing owners stay live. Borrowed values need
 remain live; a condition-only temporary view may end before the body grows its owner. Entry
 ownership still must balance. General partial-move joins, break/continue and early returns remain
 unfinished rather than being declared unnecessary for v0.
+
+
+### First record core (partial v0)
+
+Explicit modules can declare `struct Token<a>{span:read<a>,name:string,offset:num}` before functions.
+Construct, move/borrow fields, pass/return complete records, and recursively clean remaining owned
+fields. Captured span loans are distinct from record/owned-name storage. Public layout definitions
+participate in hashes; hidden-source clients and layout-only invalidation are tested. General
+references to record/container objects, mutation through invariant reference-containing T, enums,
+Result/generics, field assignment, ownership joins and early returns remain unfinished. See
+[record core](record-core.md) for exact current semantics, bounds and backend limitations.

@@ -31,6 +31,9 @@ fn native(backend: &str, args: Vec<String>, link: bool, cwd: &Path) -> Result<()
                 "-B".into(),
                 root.join("tcclib").display().to_string(),
                 "-I/usr/include".into(),
+                // Grail aborts rather than unwinds. This pinned TCC emits invalid frame-table
+                // relocations for multi-function objects; omit those tables, not ABI checks.
+                "-fno-asynchronous-unwind-tables".into(),
             ];
             if link {
                 cmd.extend([

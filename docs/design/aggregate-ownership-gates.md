@@ -1,6 +1,7 @@
 # Required gates before aggregate/reference expansion
 
-2026-10-30. Follow-up implementation criteria, **not implemented functionality**. The complete v0
+2026-10-30. Follow-up implementation criteria; the [first by-value record core](record-core.md) now passes
+mixed-owned/captured-field gates, but the full list is **not implemented functionality**. The complete v0
 goal stays active. See [bootstrap v0](bootstrap-v0.md), [modern Rust baseline](rust-next-baseline.md),
 and the [Blu/Lust source review and executable aggregate controls](lust-and-blu-notes.md).
 

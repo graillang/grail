@@ -181,7 +181,7 @@ fn interfaces_are_canonical_and_modes_are_not_erased_by_serialization() {
         .is_err()
     );
     for invalid in [
-        a.replace("grail-seed-interface-3", "grail-seed-interface-0"),
+        a.replace("grail-seed-interface-4", "grail-seed-interface-0"),
         a.clone() + "\n",
         a.replace("scan", "bad-name"),
         a.replace("r0", "r00"),

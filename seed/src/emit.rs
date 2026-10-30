@@ -10,12 +10,13 @@ pub fn symbol(name: &str) -> String {
         format!("g_{name}")
     }
 }
-fn cty(t: &Ty) -> &'static str {
+fn cty(t: &Ty) -> String {
     match t {
-        Ty::Num => "uint64_t",
-        Ty::Bytes | Ty::Text => "gb",
-        Ty::Holder(..) => "gh",
-        _ => "gv",
+        Ty::Num => "uint64_t".into(),
+        Ty::Record(n, _) => format!("t_{}", symbol(n)),
+        Ty::Bytes | Ty::Text => "gb".into(),
+        Ty::Holder(..) => "gh".into(),
+        _ => "gv".into(),
     }
 }
 fn signature(s: &Sig) -> String {
@@ -34,6 +35,36 @@ fn signature(s: &Sig) -> String {
                 .join(", ")
         }
     )
+}
+fn field_expr(r: Reg, path: &[usize]) -> String {
+    format!(
+        "r{r}{}",
+        path.iter().map(|i| format!(".f{i}")).collect::<String>()
+    )
+}
+fn owned_paths(t: &Ty, records: &crate::types::Definitions) -> Vec<Vec<usize>> {
+    if !matches!(t, Ty::Record(..)) {
+        return Vec::new();
+    }
+    crate::types::leaves(t, records)
+        .unwrap()
+        .into_iter()
+        .filter_map(|(p, t)| t.heap().then_some(p))
+        .collect()
+}
+fn record_flags(s: &mut String, r: Reg, t: &Ty, records: &crate::types::Definitions, live: bool) {
+    for i in 0..owned_paths(t, records).len() {
+        writeln!(s, "r{r}_live[{i}]={};", u8::from(live)).unwrap();
+    }
+}
+fn view_expr(value: String, t: &Ty) -> String {
+    if t.heap() {
+        format!("((gv){{{value}.p,{value}.n}})")
+    } else if matches!(t, Ty::Holder(..)) {
+        format!("{value}.value")
+    } else {
+        value
+    }
 }
 fn view(r: Reg, types: &BTreeMap<Reg, Ty>) -> String {
     if types[&r].heap() {
@@ -66,7 +97,7 @@ fn buffers(ops: &[Op], out: &mut BTreeMap<Reg, usize>) {
     }
 }
 pub fn c(p: &Checked) -> String {
-    c_functions(&[(p, true)])
+    c_functions(&[(p, true)], &p.records)
 }
 pub fn module_c(p: &crate::module::CheckedModule) -> String {
     c_functions(
@@ -74,12 +105,24 @@ pub fn module_c(p: &crate::module::CheckedModule) -> String {
             .iter()
             .map(|(p, public)| (p, *public))
             .collect::<Vec<_>>(),
+        &p.records,
     )
 }
-fn c_functions(functions: &[(&Checked, bool)]) -> String {
+fn c_functions(functions: &[(&Checked, bool)], records: &crate::types::Definitions) -> String {
     let mut s = String::from(
         "#include <stdint.h>\n#include <stdlib.h>\n#include <string.h>\ntypedef struct { uint8_t *p; uint64_t n; } gv;\ntypedef struct { gv value; } gh;\ntypedef struct {uint8_t*p;uint64_t n,c;} gb;\n#define GRAIL_BYTES_TYPES_DEFINED\n",
     );
+    for n in crate::types::order(records).expect("checked layouts") {
+        let d = &records[&n];
+        writeln!(s, "typedef struct {{").unwrap();
+        if d.fields.is_empty() {
+            s.push_str("uint8_t unit;\n");
+        }
+        for (i, (_, t)) in d.fields.iter().enumerate() {
+            writeln!(s, "{} f{i};", cty(t)).unwrap();
+        }
+        writeln!(s, "}} t_{};", symbol(&n)).unwrap();
+    }
     if functions
         .iter()
         .any(|(p, _)| p.types.values().any(|t| t.heap()))
@@ -123,14 +166,40 @@ fn c_body(p: &Checked, s: &mut String, private: bool) {
             writeln!(s, "{} r{r};", cty(t)).unwrap()
         }
     }
+    for (r, t) in &p.types {
+        if matches!(t, Ty::Record(..)) {
+            let count = owned_paths(t, &p.records).len().max(1);
+            writeln!(s, "uint8_t r{r}_live[{count}]={{0}};").unwrap();
+            if (*r as usize) < p.function.sig.params.len() {
+                record_flags(s, *r, t, &p.records, true);
+            }
+        }
+    }
     let mut bs = BTreeMap::new();
     buffers(&p.function.ops, &mut bs);
     for (r, len) in bs {
         writeln!(s, "uint8_t b{r}[{len}];").unwrap()
     }
-    fn ops(s: &mut String, os: &[Op], types: &BTreeMap<Reg, Ty>) {
+    fn ops(
+        s: &mut String,
+        os: &[Op],
+        types: &BTreeMap<Reg, Ty>,
+        records: &crate::types::Definitions,
+    ) {
         for o in os {
             match o{
+        Op::Record{dst,name,fields}=>{
+            writeln!(s,"r{dst}=({}){{0}};",cty(&types[dst])).unwrap();
+            for(field,src)in fields{let i=records[name].fields.iter().position(|f|f.0==*field).unwrap();writeln!(s,"r{dst}.f{i}=r{src};").unwrap();record_flags(s,*src,&types[src],records,false);}
+            record_flags(s,*dst,&types[dst],records,true);
+        },
+        Op::FieldMove{dst,src,path}=>{
+            let(indices,_)=crate::types::project(&types[src],path,records).unwrap();let value=field_expr(*src,&indices);writeln!(s,"r{dst}={value};").unwrap();
+            for(i,field)in owned_paths(&types[src],records).iter().enumerate(){if field.starts_with(&indices){writeln!(s,"r{src}_live[{i}]=0;").unwrap();}}
+            record_flags(s,*dst,&types[dst],records,true);
+        },
+        Op::FieldBorrow{dst,src,path,..}=>{let(indices,t)=crate::types::project(&types[src],path,records).unwrap();writeln!(s,"r{dst}={};",view_expr(field_expr(*src,&indices),&t)).unwrap();},
+        Op::EndCaptures(_)=>{},
         Op::TextLiteral{dst,data}=>{let values=if data.is_empty(){"0".into()}else{data.iter().map(u8::to_string).collect::<Vec<_>>().join(",")};writeln!(s,"{{static const uint8_t text[]={{ {values} }};r{dst}=gr_copy_bytes((gv){{(uint8_t*)text,UINT64_C({})}});}}",data.len()).unwrap()},
         Op::Text{dst,src}=>{let v=view(*src,types);writeln!(s,"gr_utf8({v});r{dst}=gr_copy_bytes({v});").unwrap()},
         Op::AppendText{owner,src}=>{writeln!(s,"gr_append_text(&r{owner},{});",view(*src,types)).unwrap()},
@@ -142,21 +211,22 @@ fn c_body(p: &Checked, s: &mut String, private: bool) {
         Op::Borrow{dst,src,..}=>{writeln!(s,"r{dst} = {};",view(*src,types)).unwrap()},
         Op::Slice{dst,src,start,end}=>{let v=view(*src,types);writeln!(s,"if(r{start}>r{end} || r{end}>{v}.n) abort(); r{dst}=(gv){{r{start}?{v}.p+r{start}:{v}.p,r{end}-r{start}}};").unwrap()},
         Op::Assert(r)=>{writeln!(s,"if(!r{r}) abort();").unwrap()},
-        Op::If{condition,yes,no}=>{writeln!(s,"if(r{condition}){{").unwrap();ops(s,yes,types);s.push_str("}else{\n");ops(s,no,types);s.push_str("}\n")},
+        Op::If{condition,yes,no}=>{writeln!(s,"if(r{condition}){{").unwrap();ops(s,yes,types,records);s.push_str("}else{\n");ops(s,no,types,records);s.push_str("}\n")},
         Op::Pack{dst,src}=>{writeln!(s,"r{dst} = (gh){{r{src}}};").unwrap()},
-        Op::Move{dst,src}=>{writeln!(s,"r{dst}=r{src};").unwrap()},Op::End(r)=>{if types[r].heap() {writeln!(s,"free(r{r}.p);").unwrap()}},
+        Op::Move{dst,src}=>{writeln!(s,"r{dst}=r{src};").unwrap();record_flags(s,*dst,&types[dst],records,true);record_flags(s,*src,&types[src],records,false);},
+        Op::End(r)=>{if types[r].heap(){writeln!(s,"free(r{r}.p);").unwrap();}else{for(i,path)in owned_paths(&types[r],records).iter().enumerate(){writeln!(s,"if(r{r}_live[{i}]){{free({}.p);r{r}_live[{i}]=0;}}",field_expr(*r,path)).unwrap();}}},
         Op::Len{dst,src}=>{writeln!(s,"r{dst}={}.n;",view(*src,types)).unwrap()},
         Op::Read{dst,src,index}=>{let v=view(*src,types);writeln!(s,"if (r{index}>={v}.n) abort(); r{dst}={v}.p[r{index}];").unwrap()},
         Op::Write{dst,index,value}=>{let v=view(*dst,types);writeln!(s,"if (r{index}>={v}.n) abort(); {v}.p[r{index}]=(uint8_t)r{value};").unwrap()},
         Op::Binary{dst,op,left,right}=>{let symbol=match op{Bin::Add=>"+",Bin::Sub=>"-",Bin::Lt=>"<",Bin::Mul=>"*",Bin::Xor=>"^",Bin::Rem=>"%",Bin::Eq=>"==",Bin::Ne=>"!=",Bin::And=>"&"};if matches!(op,Bin::Rem){writeln!(s,"if (!r{right}) abort();").unwrap()}writeln!(s,"r{dst}=r{left} {symbol} r{right};").unwrap()},
-        Op::Call{dst,name,args}=>{writeln!(s,"r{dst}={}({});",symbol(name),args.iter().map(|r|format!("r{r}")).collect::<Vec<_>>().join(",")).unwrap()},
-        Op::Block{body}=>{s.push_str("{\n");ops(s,body,types);s.push_str("}\n")},
-        Op::While{condition,test,body}=>{s.push_str("while(1){\n");ops(s,test,types);writeln!(s,"if(!r{condition})break;").unwrap();ops(s,body,types);s.push_str("}\n")},
-        Op::Loop{index,end,body}=>{writeln!(s,"for (r{index}=0; r{index}<r{end}; ++r{index}) {{").unwrap();ops(s,body,types);s.push_str("}\n")},
+        Op::Call{dst,name,args}=>{writeln!(s,"r{dst}={}({});",symbol(name),args.iter().map(|r|format!("r{r}")).collect::<Vec<_>>().join(",")).unwrap();for r in args{record_flags(s,*r,&types[r],records,false);}record_flags(s,*dst,&types[dst],records,true);},
+        Op::Block{body}=>{s.push_str("{\n");ops(s,body,types,records);s.push_str("}\n")},
+        Op::While{condition,test,body}=>{s.push_str("while(1){\n");ops(s,test,types,records);writeln!(s,"if(!r{condition})break;").unwrap();ops(s,body,types,records);s.push_str("}\n")},
+        Op::Loop{index,end,body}=>{writeln!(s,"for (r{index}=0; r{index}<r{end}; ++r{index}) {{").unwrap();ops(s,body,types,records);s.push_str("}\n")},
     }
         }
     }
-    ops(s, &p.function.ops, &p.types);
+    ops(s, &p.function.ops, &p.types, &p.records);
     writeln!(s, "return r{};\n}}", p.function.result).unwrap();
 }
 
@@ -209,7 +279,11 @@ impl Ll {
     fn ops(&mut self, os: &[Op]) {
         for o in os {
             match o {
-                Op::Bytes { .. }
+                Op::Record { .. }
+                | Op::FieldMove { .. }
+                | Op::FieldBorrow { .. }
+                | Op::EndCaptures(..)
+                | Op::Bytes { .. }
                 | Op::CopyBytes { .. }
                 | Op::Push { .. }
                 | Op::Text { .. }
@@ -453,9 +527,11 @@ fn llvm_functions(functions: &[(&Checked, bool)]) -> Result<String, String> {
                     .values()
                     .flat_map(|s| s.params.iter().chain([&s.result])),
             )
-            .any(|t| t.heap())
+            .any(|t| t.heap() || matches!(t, Ty::Record(..)))
     }) {
-        return Err("LLVM comparison backend does not yet support owned heap values".into());
+        return Err(
+            "LLVM comparison backend does not yet support owned heap values or records".into(),
+        );
     }
     let locals = functions
         .iter()

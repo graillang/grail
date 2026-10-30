@@ -91,7 +91,7 @@ one text argument. Generic heap containers, Result and type generics are still f
 ## Heap byte owners
 
 [Semantics and limits](../docs/design/heap-ownership.md). `bytes()`, `push`, `copy_bytes` and
-owned `bytes` parameters/results are supported by the C backend. Function-signature payloads are schema 3 (see the source-module format below);
+owned `bytes` parameters/results are supported by the C backend. Function-signature payloads are schema 4 (see the source-module format below);
 rebuild old `.api` files. Heap owners drop at scope exit, not at borrowed-value last use.
 
 ```sh
@@ -171,10 +171,10 @@ inference. Locals/lifetime-name scopes do not cross functions; unused helpers ar
 Duplicate function/import names are errors. Public native symbols are namespace-qualified;
 helpers have internal linkage, so different modules may use the same private name.
 
-`compile` emits `<module>.api` / `.o` / `.c`. Source interfaces now use **module schema 1**, carrying
-all public function signatures, the primary export, and expected direct-dependency surface hashes.
+`compile` emits `<module>.api` / `.o` / `.c`. Source interfaces now use **module schema 2**, carrying
+all public function signatures, reachable nominal type layouts, the primary export, and expected direct-dependency surface hashes.
 Rebuild prior source artifacts: there is no source-schema fallback. The standalone typed-IR fixture
-commands still actively use function-signature schema 3, also the function payload inside a module.
+commands still actively use function-signature schema 4, also the function payload inside a module.
 `source::compile` returns a flat `CheckedModule`; use `emit::module_c` / `module_llvm`. The raw IR
 checker and its single-function emitters remain available for the existing conformance fixtures.
 
@@ -197,7 +197,8 @@ sandbox against hostile filesystem writers modifying a captured generation after
 Power-loss durability/fsync guarantees, generation garbage collection and automatic rebuilds are
 not implemented. Old generations remain available for captured links and reproducible retention. Interfaces are bounded to 8 MiB, modules to 4,096 functions, and
 link closures to 4,096 modules / 256 dependency depth. Native stack exhaustion is not prevented.
-Public type-definition metadata, records/enums/generics and self-hosting remain unfinished.
+Basic by-value records and public layout metadata are implemented; enums, generic containers,
+general mutable references and self-hosting remain unfinished.
 
 ```sh
 seed/target/release/grail-seed build seed/examples/functions.grl seed/.work/functions seed/.work/functions
@@ -209,3 +210,11 @@ embeds the random job path in its ELF `FILE` symbol. The artifact suite tests id
 and executable bytes across repeated and relocated builds for clang and TinyCC, parallel compiler
 jobs, synchronized publishers/readers, corruption detection and linking a previously captured version.
 These primitive-program checks are not stage-2/stage-3 self-hosting.
+
+## By-value records
+
+See [record core](../docs/design/record-core.md) and `examples/records`. Mixed records can own a
+string and capture a borrowed span. Nested field moves preserve remaining cleanup/loans; byte-view
+borrows of fields do not consume them. Default record cleanup is recursive and skips moved fields.
+This is not general `&Record` support, generic containers, full join/early-return cleanup, or v0
+completion. The LLVM comparison backend explicitly refuses record layouts; native C supports them.

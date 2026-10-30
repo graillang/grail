@@ -63,7 +63,7 @@ fn fingerprints_cover_public_contracts_not_dependency_rebuilds() {
     let canonical = h.encode().unwrap();
     for text in [
         canonical.trim_end().to_string(),
-        canonical.replace("grail-seed-module-1", "grail-seed-module-0"),
+        canonical.replace("grail-seed-module-2", "grail-seed-module-1"),
         canonical + "extra\n",
     ] {
         assert!(Interface::decode(&text).is_err());

@@ -1,5 +1,6 @@
 //! Grail bootstrap seed: checked IR and the first .grl source subset.
 //! Reference values are currently affine; this is not a complete language implementation.
+mod aggregate;
 pub mod artifact;
 pub mod driver;
 pub mod emit;
@@ -7,6 +8,7 @@ pub mod fixture;
 pub mod module;
 mod sha256;
 pub mod source;
+pub mod types;
 use std::collections::{BTreeMap, BTreeSet};
 
 pub type Reg = u32;
@@ -18,6 +20,7 @@ pub enum Mode {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Ty {
     Num,
+    Record(String, Vec<u16>),
     Buffer,
     Bytes,
     Text,
@@ -26,7 +29,10 @@ pub enum Ty {
 }
 impl Ty {
     fn owned(&self) -> bool {
-        matches!(self, Self::Buffer | Self::Bytes | Self::Text)
+        matches!(
+            self,
+            Self::Buffer | Self::Bytes | Self::Text | Self::Record(..)
+        )
     }
     fn heap(&self) -> bool {
         matches!(self, Self::Bytes | Self::Text)
@@ -40,6 +46,13 @@ impl Ty {
     fn word(&self) -> String {
         match self {
             Self::Num => "n".into(),
+            Self::Record(n, args) => format!(
+                "t{n}@{}",
+                args.iter()
+                    .map(u16::to_string)
+                    .collect::<Vec<_>>()
+                    .join(":")
+            ),
             Self::Buffer => "b".into(),
             Self::Bytes => "o".into(),
             Self::Text => "s".into(),
@@ -48,6 +61,27 @@ impl Ty {
         }
     }
     fn parse(s: &str) -> Result<Self, String> {
+        if let Some(s) = s.strip_prefix('t') {
+            let (n, args) = s.split_once('@').ok_or("invalid record type")?;
+            if !qualified_ok(n) {
+                return Err("invalid record name".into());
+            }
+            let args = if args.is_empty() {
+                Vec::new()
+            } else {
+                args.split(':')
+                    .map(|r| {
+                        r.parse::<u16>()
+                            .map_err(|_| "invalid record region".to_string())
+                    })
+                    .collect::<Result<Vec<_>, _>>()?
+            };
+            if args.len() > 64 {
+                return Err("record lifetime arity limit".into());
+            }
+            return Ok(Self::Record(n.into(), args));
+        }
+
         if s == "n" {
             return Ok(Self::Num);
         }
@@ -91,16 +125,22 @@ fn name_ok(n: &str) -> bool {
         && n.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
         && n.as_bytes()[0].is_ascii_alphabetic()
 }
+fn qualified_ok(n: &str) -> bool {
+    n.split_once("::")
+        .is_some_and(|(a, b)| name_ok(a) && name_ok(b))
+}
 impl Sig {
     pub fn validate(&self) -> Result<(), String> {
-        if !(name_ok(&self.name)
-            || self
-                .name
-                .split_once("::")
-                .is_some_and(|(a, b)| name_ok(a) && name_ok(b)))
-            || self.params.len() > 64
-        {
+        if !(name_ok(&self.name) || qualified_ok(&self.name)) || self.params.len() > 64 {
             return Err("invalid signature name/arity".into());
+        }
+        if self
+            .params
+            .iter()
+            .chain([&self.result])
+            .any(|t| matches!(t,Ty::Record(n,args)if !qualified_ok(n)||args.len()>64))
+        {
+            return Err("invalid nominal signature type".into());
         }
         if self
             .params
@@ -111,6 +151,7 @@ impl Sig {
             return Err("owned buffers cannot cross seed interfaces".into());
         }
         if let Some((mode, r)) = self.result.reference()
+            && !self.params.iter().any(|t| matches!(t, Ty::Record(..)))
             && !self.params.iter().any(|t| {
                 t.reference()
                     .is_some_and(|(m, p)| p == r && (mode == Mode::Read || m == Mode::Write))
@@ -123,7 +164,7 @@ impl Sig {
     pub fn encode(&self) -> Result<String, String> {
         self.validate()?;
         Ok(format!(
-            "grail-seed-interface-3\n{}\n{}\n{}\n",
+            "grail-seed-interface-4\n{}\n{}\n{}\n",
             self.name,
             self.params
                 .iter()
@@ -134,11 +175,11 @@ impl Sig {
         ))
     }
     pub fn decode(text: &str) -> Result<Self, String> {
-        if text.len() > 8192 {
+        if text.len() > 65536 {
             return Err("interface too large".into());
         }
         let lines = text.lines().collect::<Vec<_>>();
-        if lines.len() != 4 || lines[0] != "grail-seed-interface-3" {
+        if lines.len() != 4 || lines[0] != "grail-seed-interface-4" {
             return Err("invalid interface schema".into());
         }
         let params = if lines[2].is_empty() {
@@ -176,6 +217,23 @@ pub enum Bin {
 #[derive(Clone, Debug)]
 pub enum Op {
     Num(Reg, u64),
+    Record {
+        dst: Reg,
+        name: String,
+        fields: Vec<(String, Reg)>,
+    },
+    FieldMove {
+        dst: Reg,
+        src: Reg,
+        path: Vec<String>,
+    },
+    FieldBorrow {
+        dst: Reg,
+        src: Reg,
+        path: Vec<String>,
+        mode: Mode,
+    },
+    EndCaptures(Reg),
     TextLiteral {
         dst: Reg,
         data: Vec<u8>,
@@ -277,8 +335,8 @@ pub struct Function {
 }
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Root {
-    Local(Reg),
-    Param(usize),
+    Local(Reg, Vec<usize>),
+    Param(usize, Vec<usize>),
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Value {
@@ -286,32 +344,31 @@ struct Value {
     roots: BTreeSet<Root>,
     loan: usize,
     ancestors: BTreeSet<usize>,
+    fields: Vec<Option<Value>>,
+    active: bool,
 }
 #[derive(Clone, Debug, Default)]
 struct State {
+    records: types::Context,
     values: BTreeMap<Reg, Value>,
     resources: BTreeSet<Reg>,
     next: usize,
     types: BTreeMap<Reg, Ty>,
     access: BTreeMap<Root, (usize, usize)>,
-    loans: BTreeMap<usize, (Mode, BTreeSet<Root>)>,
     blocked: BTreeMap<usize, usize>,
 }
 impl State {
-    fn parameters(params: &[Ty]) -> Result<Self, String> {
-        let mut s = Self::default();
+    fn parameters(params: &[Ty], records: types::Context) -> Result<Self, String> {
+        let mut s = Self {
+            records,
+            ..Self::default()
+        };
         for (i, t) in params.iter().enumerate() {
-            let roots = if t.reference().is_some() || t.owned() {
-                BTreeSet::from([Root::Param(i)])
-            } else {
-                BTreeSet::new()
-            };
-            let v = s.new_value(t.clone(), roots, BTreeSet::new());
+            let v = s.parameter_value(t, i, &mut Vec::new())?;
             s.put(i as Reg, v)?;
         }
         Ok(s)
     }
-
     fn get(&self, r: Reg) -> Result<&Value, String> {
         self.values
             .get(&r)
@@ -319,9 +376,7 @@ impl State {
     }
     fn usable(&self, r: Reg) -> Result<Value, String> {
         let v = self.get(r)?;
-        if self.blocked.contains_key(&v.loan) {
-            return Err(format!("r{r}: carrier restricted by live child"));
-        }
+        self.usable_value(v)?;
         Ok(v.clone())
     }
     fn put(&mut self, r: Reg, v: Value) -> Result<(), String> {
@@ -340,20 +395,7 @@ impl State {
         }
         self.remove(r);
         self.types.insert(r, v.ty.clone());
-        if let Some((mode, _)) = v.ty.reference() {
-            for root in &v.roots {
-                let counts = self.access.entry(root.clone()).or_default();
-                if mode == Mode::Read {
-                    counts.0 += 1;
-                } else {
-                    counts.1 += 1;
-                }
-            }
-            self.loans.insert(v.loan, (mode, v.roots.clone()));
-        }
-        for ancestor in &v.ancestors {
-            *self.blocked.entry(*ancestor).or_default() += 1;
-        }
+        self.index_add(&v);
         if v.ty != Ty::Num {
             self.resources.insert(r);
         }
@@ -363,31 +405,15 @@ impl State {
     fn remove(&mut self, r: Reg) {
         if let Some(v) = self.values.remove(&r) {
             self.resources.remove(&r);
-            if let Some((mode, _)) = v.ty.reference() {
-                self.loans.remove(&v.loan);
-                for root in &v.roots {
-                    let counts = self.access.get_mut(root).expect("indexed root");
-                    if mode == Mode::Read {
-                        counts.0 -= 1;
-                    } else {
-                        counts.1 -= 1;
-                    }
-                    if *counts == (0, 0) {
-                        self.access.remove(root);
-                    }
-                }
-            }
-            for ancestor in v.ancestors {
-                let count = self.blocked.get_mut(&ancestor).expect("indexed parent");
-                *count -= 1;
-                if *count == 0 {
-                    self.blocked.remove(&ancestor);
-                }
-            }
+            self.index_remove(&v);
         }
     }
     fn owner_borrowed(&self, v: &Value) -> bool {
-        v.roots.iter().any(|r| self.access.contains_key(r))
+        (v.ty.owned() && v.roots.iter().any(|r| self.access.contains_key(r)))
+            || v.fields
+                .iter()
+                .flatten()
+                .any(|f| f.ty.owned() && self.owner_borrowed(f))
     }
     fn new_value(&mut self, ty: Ty, roots: BTreeSet<Root>, ancestors: BTreeSet<usize>) -> Value {
         self.next += 1;
@@ -396,6 +422,8 @@ impl State {
             roots,
             loan: self.next,
             ancestors,
+            fields: Vec::new(),
+            active: true,
         }
     }
     fn num(&mut self, r: Reg) -> Result<(), String> {
@@ -410,7 +438,7 @@ impl State {
     }
     fn readable(&self, r: Reg) -> Result<(), String> {
         let v = self.usable(r)?;
-        if v.ty.owned() {
+        if matches!(v.ty, Ty::Buffer | Ty::Bytes | Ty::Text) {
             if v.roots
                 .iter()
                 .any(|root| self.access.get(root).is_some_and(|(_, writes)| *writes > 0))
@@ -423,7 +451,8 @@ impl State {
         Ok(())
     }
     fn end(&mut self, r: Reg) -> Result<(), String> {
-        let v = self.usable(r)?;
+        let v = self.get(r)?.clone();
+        self.drop_usable(&v)?;
         if v.ty.owned() && self.owner_borrowed(&v) {
             return Err(format!("r{r}: owner still borrowed"));
         }
@@ -480,7 +509,7 @@ impl State {
                     }
                     let v = self.new_value(
                         Ty::Text,
-                        BTreeSet::from([Root::Local(*dst)]),
+                        BTreeSet::from([Root::Local(*dst, vec![])]),
                         BTreeSet::new(),
                     );
                     self.put(*dst, v)?;
@@ -489,7 +518,7 @@ impl State {
                     self.readable(*src)?;
                     let v = self.new_value(
                         Ty::Text,
-                        BTreeSet::from([Root::Local(*dst)]),
+                        BTreeSet::from([Root::Local(*dst, vec![])]),
                         BTreeSet::new(),
                     );
                     self.put(*dst, v)?;
@@ -510,7 +539,7 @@ impl State {
                 Op::Bytes { dst } => {
                     let v = self.new_value(
                         Ty::Bytes,
-                        BTreeSet::from([Root::Local(*dst)]),
+                        BTreeSet::from([Root::Local(*dst, vec![])]),
                         BTreeSet::new(),
                     );
                     self.put(*dst, v)?;
@@ -519,7 +548,7 @@ impl State {
                     self.readable(*src)?;
                     let v = self.new_value(
                         Ty::Bytes,
-                        BTreeSet::from([Root::Local(*dst)]),
+                        BTreeSet::from([Root::Local(*dst, vec![])]),
                         BTreeSet::new(),
                     );
                     self.put(*dst, v)?;
@@ -540,51 +569,31 @@ impl State {
                     }
                     let v = self.new_value(
                         Ty::Buffer,
-                        BTreeSet::from([Root::Local(*dst)]),
+                        BTreeSet::from([Root::Local(*dst, vec![])]),
                         BTreeSet::new(),
                     );
                     self.put(*dst, v)?;
                 }
                 Op::Borrow { dst, src, mode } => {
                     let p = self.usable(*src)?;
-                    let mut ancestors = p.ancestors.clone();
-                    if p.ty == Ty::Text && *mode == Mode::Write {
-                        return Err("string bytes cannot be mutably borrowed".into());
-                    }
-                    let region = if p.ty.owned() {
-                        0
-                    } else {
-                        let (m, r) = p.ty.reference().ok_or("borrow of nonstorage")?;
-                        if *mode == Mode::Write && m != Mode::Write {
-                            return Err("write reborrow from read view".into());
-                        }
-                        // A readonly byte-view descriptor is copied, not borrowed as storage.
-                        // Preserve exclusive ancestors, but do not freeze the readonly carrier.
-                        if m == Mode::Write {
-                            ancestors.insert(p.loan);
-                        }
-                        r
-                    };
-                    for root in &p.roots {
-                        let (mut reads, mut writes) =
-                            self.access.get(root).copied().unwrap_or_default();
-                        for ancestor in &ancestors {
-                            if let Some((m, roots)) = self.loans.get(ancestor)
-                                && roots.contains(root)
-                            {
-                                if *m == Mode::Read {
-                                    reads -= 1;
-                                } else {
-                                    writes -= 1;
-                                }
-                            }
-                        }
-                        if writes > 0 || (*mode == Mode::Write && reads > 0) {
-                            return Err("conflicting access".into());
-                        }
-                    }
-                    let v = self.new_value(Ty::View(*mode, region), p.roots, ancestors);
+                    let v = self.borrow_value(p, *mode)?;
                     self.put(*dst, v)?;
+                }
+                Op::Record { dst, name, fields } => self.record_value(*dst, name, fields)?,
+                Op::FieldMove { dst, src, path } => self.field_move(*dst, *src, path)?,
+                Op::FieldBorrow {
+                    dst,
+                    src,
+                    path,
+                    mode,
+                } => {
+                    let (indices, _) = types::project(&self.get(*src)?.ty, path, &self.records)?;
+                    let p = self.get(*src)?.at(&indices)?.clone();
+                    let v = self.borrow_value(p, *mode)?;
+                    self.put(*dst, v)?;
+                }
+                Op::EndCaptures(src) => {
+                    self.expire_captures(*src)?;
                 }
                 Op::Slice {
                     dst,
@@ -671,7 +680,7 @@ impl State {
                 }
                 Op::Call { dst, name, args } => {
                     let sig = imports.get(name).ok_or("unknown imported function")?;
-                    sig.validate()?;
+                    types::validate_sig(sig, &self.records)?;
                     if sig.params.len() != args.len() {
                         return Err("call arity".into());
                     }
@@ -680,6 +689,7 @@ impl State {
                     for (r, t) in args.iter().zip(&sig.params) {
                         let v = self.usable(*r)?;
                         let matches = match (&v.ty, t) {
+                            (Ty::Record(a, _), Ty::Record(b, _)) => a == b,
                             (Ty::Num, Ty::Num) | (Ty::Bytes, Ty::Bytes) | (Ty::Text, Ty::Text) => {
                                 true
                             }
@@ -698,26 +708,11 @@ impl State {
                         }
                         actuals.push(v);
                     }
-                    let mut roots = BTreeSet::new();
-                    let mut ancestors = BTreeSet::new();
-                    if let Some((out_mode, out_r)) = sig.result.reference() {
-                        for (t, v) in sig.params.iter().zip(&actuals) {
-                            if let Some((m, r)) = t.reference()
-                                && r == out_r
-                                && (out_mode == Mode::Read || m == Mode::Write)
-                            {
-                                roots.extend(v.roots.clone());
-                                ancestors.extend(v.ancestors.clone());
-                            }
-                        }
-                    }
-                    if sig.result.heap() {
-                        roots.insert(Root::Local(*dst));
-                    }
+                    let inputs = sig.params.iter().cloned().zip(actuals).collect::<Vec<_>>();
+                    let v = self.result_value(&sig.result, *dst, &mut Vec::new(), &inputs)?;
                     for r in consumed {
                         self.remove(r);
                     }
-                    let v = self.new_value(sig.result.clone(), roots, ancestors);
                     self.put(*dst, v)?;
                 }
                 Op::Block { body } => {
@@ -771,6 +766,7 @@ pub struct Checked {
     pub(crate) function: Function,
     pub(crate) imports: BTreeMap<String, Sig>,
     pub(crate) types: BTreeMap<Reg, Ty>,
+    pub(crate) records: types::Context,
 }
 impl Checked {
     pub fn interface(&self) -> String {
@@ -778,25 +774,33 @@ impl Checked {
     }
 }
 pub fn check(function: Function, imports: BTreeMap<String, Sig>) -> Result<Checked, String> {
-    function.sig.validate()?;
+    check_with_records(function, imports, crate::types::Context::default())
+}
+pub fn check_with_records(
+    function: Function,
+    imports: BTreeMap<String, Sig>,
+    records: types::Context,
+) -> Result<Checked, String> {
+    types::validate_sig(&function.sig, &records)?;
     for (name, sig) in &imports {
-        sig.validate()?;
+        types::validate_sig(sig, &records)?;
         if name != &sig.name || name == &function.sig.name {
             return Err("invalid import key/self import".into());
         }
     }
-    let mut s = State::parameters(&function.sig.params)?;
+    let mut s = State::parameters(&function.sig.params, records.clone())?;
     let mut callable = imports.clone();
     callable.insert(function.sig.name.clone(), function.sig.clone());
     s.ops(&function.ops, &callable, 0)?;
     let result = s.usable(function.result)?;
     if s.values
         .iter()
-        .any(|(r, v)| v.ty.heap() && *r != function.result)
+        .any(|(r, v)| v.has_heap() && *r != function.result)
     {
         return Err("heap owner must be ended or returned".into());
     }
     let compatible = match (&result.ty, &function.sig.result) {
+        (Ty::Record(a, _), Ty::Record(b, _)) => a == b,
         (Ty::Num, Ty::Num) | (Ty::Bytes, Ty::Bytes) | (Ty::Text, Ty::Text) => true,
         (Ty::View(m, _), Ty::View(n, _)) | (Ty::Holder(m, _), Ty::Holder(n, _)) => m == n,
         _ => false,
@@ -804,16 +808,19 @@ pub fn check(function: Function, imports: BTreeMap<String, Sig>) -> Result<Check
     if !compatible {
         return Err("return type mismatch".into());
     }
-    if let Some((mode, region)) = function.sig.result.reference() {
-        for root in &result.roots {
-            let Root::Param(i) = root else {
-                return Err("local owner escapes".into());
-            };
-            let Some((m, r)) = function.sig.params[*i].reference() else {
-                return Err("invalid return origin".into());
-            };
-            if r != region || (mode == Mode::Write && m != Mode::Write) {
-                return Err("return violates written region relationship".into());
+    for (path, ty) in types::leaves(&function.sig.result, &records)? {
+        if let Some((mode, region)) = ty.reference() {
+            for root in &result.at(&path)?.roots {
+                let Root::Param(i, p) = root else {
+                    return Err("local owner escapes".into());
+                };
+                let input = types::at(&function.sig.params[*i], p, &records)?;
+                let Some((m, r)) = input.reference() else {
+                    return Err("invalid return origin".into());
+                };
+                if r != region || (mode == Mode::Write && m != Mode::Write) {
+                    return Err("return violates written region relationship".into());
+                }
             }
         }
     }
@@ -821,5 +828,6 @@ pub fn check(function: Function, imports: BTreeMap<String, Sig>) -> Result<Check
         function,
         imports,
         types: s.types,
+        records,
     })
 }

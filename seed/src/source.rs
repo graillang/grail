@@ -1,5 +1,5 @@
 //! Borrowed-token parser and local loan ending for the first .grl slice.
-use crate::{Bin, Function, Mode, Op, Reg, Sig, State, Ty, check};
+use crate::{Bin, Function, Mode, Op, Reg, Sig, State, Ty, check_with_records};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Copy)]
@@ -96,7 +96,7 @@ fn lex(text: &str) -> Result<Vec<Token<'_>>, String> {
                 .any(|s| b[i..].starts_with(*s))
         {
             i += 2
-        } else if b"(){}<>,:;=+-*%&^".contains(&b[i]) {
+        } else if b"(){}<>,:;=+-*%&^.".contains(&b[i]) {
             i += 1
         } else {
             return Err(format!("byte {i}: unexpected character"));
@@ -123,6 +123,8 @@ struct Parser<'a> {
     next: Reg,
     vars: BTreeMap<String, Binding>,
     regions: BTreeMap<String, u16>,
+    module: String,
+    records: crate::types::Context,
 }
 impl Parser<'_> {
     fn error(&self, msg: &str) -> String {
@@ -177,6 +179,9 @@ impl Parser<'_> {
         let public = self.eat("pub");
         self.expect("fn")?;
         let name = self.ident()?;
+        if self.module.is_empty() {
+            self.module = name.clone();
+        }
         if self.eat("<") {
             loop {
                 let n = self.ident()?;
@@ -217,7 +222,7 @@ impl Parser<'_> {
             params,
             result: result_ty,
         };
-        sig.validate()?;
+        crate::types::validate_sig(&sig, &self.records)?;
         self.expect("{")?;
         let mut ops = self.statements(0)?;
         self.expect("return")?;
@@ -226,34 +231,138 @@ impl Parser<'_> {
         self.expect("}")?;
         Ok((Function { sig, ops, result }, public))
     }
-    fn ty(&mut self) -> Result<Ty, String> {
-        let name = self.ident()?;
-        if name == "string" {
-            return Ok(Ty::Text);
+    fn path_name(&mut self) -> Result<String, String> {
+        let mut n = self.ident()?;
+        if self.eat("::") {
+            n.push_str("::");
+            n.push_str(&self.ident()?);
         }
-        if name == "num" {
-            return Ok(Ty::Num);
-        }
-        if name == "bytes" {
-            return Ok(Ty::Bytes);
-        }
-        let mode = match name.as_str() {
-            "read" | "read_holder" => Mode::Read,
-            "mut" | "mut_holder" => Mode::Write,
-            _ => return Err(self.error("unknown type")),
-        };
-        self.expect("<")?;
-        let r = self.ident()?;
-        let region = *self
-            .regions
-            .get(&r)
-            .ok_or_else(|| self.error("undeclared region"))?;
-        self.expect(">")?;
-        Ok(if name.ends_with("holder") {
-            Ty::Holder(mode, region)
+        Ok(n)
+    }
+    fn nominal(&self, n: &str) -> String {
+        if n.contains("::") {
+            n.into()
         } else {
-            Ty::View(mode, region)
-        })
+            format!("{}::{n}", self.module)
+        }
+    }
+    fn lifetime_args(&mut self) -> Result<Vec<u16>, String> {
+        let mut out = Vec::new();
+        if self.eat("<") {
+            loop {
+                let n = self.ident()?;
+                out.push(
+                    *self
+                        .regions
+                        .get(&n)
+                        .ok_or_else(|| self.error("undeclared region"))?,
+                );
+                if self.eat(">") {
+                    break;
+                }
+                self.expect(",")?;
+            }
+        }
+        Ok(out)
+    }
+    fn ty(&mut self) -> Result<Ty, String> {
+        let name = self.path_name()?;
+        match name.as_str() {
+            "num" => return Ok(Ty::Num),
+            "bytes" => return Ok(Ty::Bytes),
+            "string" => return Ok(Ty::Text),
+            _ => {}
+        }
+        let args = self.lifetime_args()?;
+        if matches!(name.as_str(), "read" | "mut" | "read_holder" | "mut_holder") {
+            if args.len() != 1 {
+                return Err(self.error("view needs one region"));
+            }
+            let mode = if name.starts_with("mut") {
+                Mode::Write
+            } else {
+                Mode::Read
+            };
+            return Ok(if name.ends_with("holder") {
+                Ty::Holder(mode, args[0])
+            } else {
+                Ty::View(mode, args[0])
+            });
+        }
+        Ok(Ty::Record(self.nominal(&name), args))
+    }
+    fn record(&mut self) -> Result<(String, crate::types::Record), String> {
+        if self.module.is_empty() {
+            return Err(self.error("record declarations need an explicit module"));
+        }
+        self.regions.clear();
+        self.expect("struct")?;
+        let name = self.ident()?;
+        if self.eat("<") {
+            loop {
+                let n = self.ident()?;
+                let r = self.regions.len() as u16;
+                if r >= 64 || self.regions.insert(n, r).is_some() {
+                    return Err(self.error("duplicate/excess record region"));
+                }
+                if self.eat(">") {
+                    break;
+                }
+                self.expect(",")?;
+            }
+        }
+        let regions = self.regions.len() as u16;
+        self.expect("{")?;
+        let mut fields = Vec::new();
+        if !self.eat("}") {
+            loop {
+                let n = self.ident()?;
+                self.expect(":")?;
+                let t = self.ty()?;
+                fields.push((n, t));
+                if self.eat("}") {
+                    break;
+                }
+                self.expect(",")?;
+                if self.eat("}") {
+                    break;
+                }
+            }
+        }
+        self.eat(";");
+        Ok((
+            self.nominal(&name),
+            crate::types::Record { regions, fields },
+        ))
+    }
+    fn storage_expr(&mut self, ops: &mut Vec<Op>, mode: Mode, depth: usize) -> Result<Reg, String> {
+        if depth > 64 {
+            return Err(self.error("expression depth limit"));
+        }
+        if self.eat("(") {
+            let r = self.storage_expr(ops, mode, depth + 1)?;
+            self.expect(")")?;
+            return Ok(r);
+        }
+        if self.vars.contains_key(self.peek())
+            && self.tokens.get(self.at + 1).is_some_and(|t| t.text == ".")
+        {
+            let name = self.ident()?;
+            let src = self.vars[&name].reg;
+            let mut path = Vec::new();
+            while self.eat(".") {
+                path.push(self.ident()?);
+            }
+            let dst = self.fresh()?;
+            ops.push(Op::FieldBorrow {
+                dst,
+                src,
+                path,
+                mode,
+            });
+            return Ok(dst);
+        }
+        self.expr(ops, 0, depth)
     }
     fn expr(&mut self, ops: &mut Vec<Op>, minimum: u8, depth: usize) -> Result<Reg, String> {
         if depth > 128 {
@@ -300,7 +409,24 @@ impl Parser<'_> {
                 };
                 if !self.eat(")") {
                     loop {
-                        let value = self.expr(ops, 0, depth + 1)?;
+                        let storage = args.is_empty()
+                            && matches!(
+                                name.as_str(),
+                                "read" | "mut" | "len" | "at" | "slice" | "copy_bytes" | "text"
+                            );
+                        let value = if storage {
+                            self.storage_expr(
+                                ops,
+                                if name == "mut" {
+                                    Mode::Write
+                                } else {
+                                    Mode::Read
+                                },
+                                depth + 1,
+                            )?
+                        } else {
+                            self.expr(ops, 0, depth + 1)?
+                        };
                         // User calls pass values, not deferred places. Move/copy each before
                         // evaluating the next operand; builtin places follow their own rules.
                         let arg = if arity.is_some() {
@@ -362,11 +488,52 @@ impl Parser<'_> {
                     _ => Op::Call { dst: r, name, args },
                 });
                 r
+            } else if self.records.contains_key(&self.nominal(&name))
+                && !self.vars.contains_key(&name)
+                && self.eat("{")
+            {
+                let mut fields = Vec::new();
+                if !self.eat("}") {
+                    loop {
+                        let field = self.ident()?;
+                        self.expect(":")?;
+                        let value = self.expr(ops, 0, depth + 1)?;
+                        let dst = self.fresh()?;
+                        ops.push(Op::Move { dst, src: value });
+                        fields.push((field, dst));
+                        if self.eat("}") {
+                            break;
+                        }
+                        self.expect(",")?;
+                        if self.eat("}") {
+                            break;
+                        }
+                    }
+                }
+                let dst = self.fresh()?;
+                ops.push(Op::Record {
+                    dst,
+                    name: self.nominal(&name),
+                    fields,
+                });
+                dst
             } else {
-                self.vars
+                let src = self
+                    .vars
                     .get(&name)
                     .ok_or_else(|| self.error("undefined variable"))?
-                    .reg
+                    .reg;
+                let mut path = Vec::new();
+                while self.eat(".") {
+                    path.push(self.ident()?);
+                }
+                if path.is_empty() {
+                    src
+                } else {
+                    let dst = self.fresh()?;
+                    ops.push(Op::FieldMove { dst, src, path });
+                    dst
+                }
             }
         };
         loop {
@@ -517,7 +684,7 @@ impl Parser<'_> {
                 ops.push(Op::Push { owner, value });
             } else if self.eat("write") {
                 self.expect("(")?;
-                let dst = self.expr(&mut ops, 0, 0)?;
+                let dst = self.storage_expr(&mut ops, Mode::Write, 0)?;
                 self.expect(",")?;
                 let index = self.expr(&mut ops, 0, 0)?;
                 self.expect(",")?;
@@ -560,6 +727,8 @@ pub fn imports(text: &str) -> Result<Vec<String>, String> {
         next: 0,
         vars: BTreeMap::new(),
         regions: BTreeMap::new(),
+        module: String::new(),
+        records: crate::types::Context::default(),
     };
     if p.eat("module") {
         p.ident()?;
@@ -586,6 +755,8 @@ pub fn compile(
         next: 0,
         vars: BTreeMap::new(),
         regions: BTreeMap::new(),
+        module: String::new(),
+        records: crate::types::Context::default(),
     };
     let explicit = if p.eat("module") {
         let name = p.ident()?;
@@ -594,6 +765,8 @@ pub fn compile(
     } else {
         None
     };
+    p.module = explicit.clone().unwrap_or_default();
+    let mut definitions = crate::types::Definitions::new();
     let mut callable = BTreeMap::new();
     let mut dependencies = BTreeMap::new();
     while p.eat("use") {
@@ -602,6 +775,14 @@ pub fn compile(
             .get(&name)
             .ok_or_else(|| p.error("missing imported module interface"))?;
         header.validate()?;
+        for (n, d) in &header.records {
+            if let Some(old) = definitions.insert(n.clone(), d.clone())
+                && old != *d
+            {
+                return Err(p.error("conflicting imported record layouts"));
+            }
+        }
+
         if header.name != name {
             return Err(p.error("import name does not match module"));
         }
@@ -612,6 +793,14 @@ pub fn compile(
         callable.insert(header.name.clone(), header.exports[&header.entry].clone());
         p.expect(";")?;
     }
+    while p.peek() == "struct" {
+        let (n, d) = p.record()?;
+        if definitions.insert(n, d).is_some() {
+            return Err(p.error("duplicate record declaration"));
+        }
+    }
+    let records = crate::types::Context::new(definitions)?;
+    p.records = records.clone();
     let mut functions = Vec::new();
     while !p.peek().is_empty() {
         if functions.len() >= 4096 {
@@ -654,10 +843,12 @@ pub fn compile(
         .sig
         .name
         .clone();
+    let exposed = crate::types::exposed(&exports, &records)?;
     let header = crate::module::Interface {
         name,
         entry,
         exports,
+        records: exposed,
         dependencies,
     };
     header.validate()?;
@@ -673,7 +864,7 @@ pub fn compile(
         }
         let mut available = imports.clone();
         available.insert(f.sig.name.clone(), f.sig.clone());
-        let mut state = State::parameters(&f.sig.params)?;
+        let mut state = State::parameters(&f.sig.params, records.clone())?;
         let ops = ending(
             &f.ops,
             &mut state,
@@ -681,10 +872,14 @@ pub fn compile(
             &BTreeSet::from([f.result]),
             &BTreeSet::new(),
         )?;
-        checked.push((check(Function { ops, ..f }, imports)?, public));
+        checked.push((
+            check_with_records(Function { ops, ..f }, imports, records.clone())?,
+            public,
+        ));
     }
     Ok(crate::module::CheckedModule {
         functions: checked,
+        records,
         header,
     })
 }
@@ -719,6 +914,11 @@ fn resolve_calls(
 fn live_before(op: &Op, after: &BTreeSet<Reg>) -> BTreeSet<Reg> {
     let mut live = after.clone();
     let (defs, uses): (Vec<Reg>, Vec<Reg>) = match op {
+        Op::Record { dst, fields, .. } => (vec![*dst], fields.iter().map(|(_, r)| *r).collect()),
+        Op::FieldMove { dst, src, .. } | Op::FieldBorrow { dst, src, .. } => {
+            (vec![*dst], vec![*src])
+        }
+        Op::EndCaptures(src) => (vec![], vec![*src]),
         Op::Num(r, _)
         | Op::Buffer { dst: r, .. }
         | Op::Bytes { dst: r }
@@ -808,6 +1008,22 @@ fn clean(state: &mut State, live: &BTreeSet<Reg>, protected: &BTreeSet<Reg>, ops
             if state.end(r).is_ok() {
                 ops.push(Op::End(r));
                 changed = true
+            }
+        }
+        let records = state
+            .resources
+            .iter()
+            .filter(|r| {
+                matches!(state.values[r].ty, Ty::Record(..))
+                    && !live.contains(r)
+                    && !protected.contains(r)
+            })
+            .copied()
+            .collect::<Vec<_>>();
+        for r in records {
+            if state.expire_captures(r).unwrap_or(false) {
+                ops.push(Op::EndCaptures(r));
+                changed = true;
             }
         }
         if !changed {
