@@ -173,7 +173,8 @@ Generic Result/Option, field assignment and unequal ownership joins remain unfin
 Postfix `!` now unwraps a two-variant `Ok/Err` or `Some/None` value: e.g.
 `let token = result::parse(input)!;`. Failure aborts; it does not propagate or promise cleanup.
 Exhaustive consuming `match` supports explicit recovery. Current enums have concrete payload types;
-generic Result/Option and postfix `?` propagation remain subsequent v0 work. See
+generic Result/Option remain subsequent v0 work. Postfix `?` now propagates matching errors or None
+with ordinary checked return cleanup; see [propagation](error-propagation.md). See
 [tagged enums](tagged-enums.md) for ownership, ABI, evidence and exact scope.
 
 ### Early return checkpoint

@@ -1,0 +1,2 @@
+use std::time::Instant;
+fn main(){for count in[8,32,128,512]{let mut source="module flow;enum R{Ok(num),Err(string)}pub fn run(r:R)->R{let first=r?;".to_string();for i in 0..count{source.push_str(&format!("let n{i}=R::Ok({i})?;"));}source.push_str("return R::Ok(first);}");let t=Instant::now();let checked=grail_seed::source::compile(&source,Default::default()).unwrap();let check=t.elapsed().as_secs_f64();let t=Instant::now();let c=grail_seed::emit::module_c(&checked);println!("{count} {} {} {check:.9} {:.9}",source.len(),c.len(),t.elapsed().as_secs_f64());}}

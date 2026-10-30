@@ -223,5 +223,6 @@ Structured bodies support early returns in branches, blocks and loops. Cleanup r
 return, excluding the returned owner; every exit checks its written lifetime contract. Equal resource
 states (including equal partial moves) may join; unequal continuing resource states still diagnose.
 Postfix `!` consumes an `Ok/Err` or `Some/None` enum, transfers success, and aborts on failure.
-Exhaustive `match` provides explicit recovery. `?` and generic Result/Option remain unfinished.
+Exhaustive `match` provides explicit recovery; postfix `?` propagates matching errors/None with
+normal return cleanup. Generic Result/Option remain unfinished.
 See [tagged enums](../docs/design/tagged-enums.md).

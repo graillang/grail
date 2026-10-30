@@ -96,7 +96,7 @@ fn lex(text: &str) -> Result<Vec<Token<'_>>, String> {
                 .any(|s| b[i..].starts_with(*s))
         {
             i += 2
-        } else if b"(){}<>,:;=+-*%&^.!".contains(&b[i]) {
+        } else if b"(){}<>,:;=+-*%&^.!?".contains(&b[i]) {
             i += 1
         } else {
             return Err(format!("byte {i}: unexpected character"));
@@ -125,6 +125,7 @@ struct Parser<'a> {
     regions: BTreeMap<String, u16>,
     module: String,
     layouts: crate::types::Context,
+    return_ty: Option<Ty>,
 }
 impl Parser<'_> {
     fn error(&self, msg: &str) -> String {
@@ -223,6 +224,7 @@ impl Parser<'_> {
             result: result_ty,
         };
         crate::types::validate_sig(&sig, &self.layouts)?;
+        self.return_ty = Some(sig.result.clone());
         self.expect("{")?;
         let ops = self.statements(0)?;
         self.expect("}")?;
@@ -356,6 +358,47 @@ impl Parser<'_> {
                 fields,
             },
         ))
+    }
+    /// `?` is ordinary checked control flow, not a second cleanup/exception runtime.
+    fn propagate(&mut self, src: Reg, ops: &mut Vec<Op>) -> Result<Reg, String> {
+        let result = self
+            .return_ty
+            .clone()
+            .ok_or_else(|| self.error("propagation outside function"))?;
+        let success = crate::types::success(&result, &self.layouts)
+            .map_err(|e| self.error(&format!("? return type: {e}")))?;
+        let fields = crate::types::fields(&result, &self.layouts)?;
+        let Ty::Named(name, _) = result else {
+            unreachable!("checked enum return type")
+        };
+        let failure = 1 - success;
+        let dst = self.fresh()?;
+        let error = self.fresh()?;
+        let returned = self.fresh()?;
+        ops.push(Op::Match {
+            src,
+            arms: vec![
+                Arm {
+                    variant: fields[success].0.clone(),
+                    binding: Some(dst),
+                    body: vec![],
+                },
+                Arm {
+                    variant: fields[failure].0.clone(),
+                    binding: Some(error),
+                    body: vec![
+                        Op::Variant {
+                            dst: returned,
+                            name,
+                            variant: failure,
+                            payload: Some(error),
+                        },
+                        Op::Return(returned),
+                    ],
+                },
+            ],
+        });
+        Ok(dst)
     }
     fn storage_expr(&mut self, ops: &mut Vec<Op>, mode: Mode, depth: usize) -> Result<Reg, String> {
         if depth > 64 {
@@ -592,6 +635,10 @@ impl Parser<'_> {
             }
         };
         loop {
+            if self.eat("?") {
+                left = self.propagate(left, ops)?;
+                continue;
+            }
             if self.eat("!") {
                 let dst = self.fresh()?;
                 ops.push(Op::Unwrap { dst, src: left });
@@ -829,6 +876,7 @@ pub fn imports(text: &str) -> Result<Vec<String>, String> {
         regions: BTreeMap::new(),
         module: String::new(),
         layouts: crate::types::Context::default(),
+        return_ty: None,
     };
     if p.eat("module") {
         p.ident()?;
@@ -857,6 +905,7 @@ pub fn compile(
         regions: BTreeMap::new(),
         module: String::new(),
         layouts: crate::types::Context::default(),
+        return_ty: None,
     };
     let explicit = if p.eat("module") {
         let name = p.ident()?;

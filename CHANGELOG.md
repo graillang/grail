@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Implement postfix `?` for Result/Option-shaped enum propagation by lowering to independently
+  checked match/return operations. Preserve success payloads, transfer matching errors/None and
+  clean remaining owners on failure, including earlier call arguments and loop conditions. Test
+  hidden-module composition, mixed native backends, complete release traces, side-effect retention
+  and Rust controls; no rollback, implicit error conversion, or additional exception runtime.
+
 - Implement tagged enums, exhaustive consuming match, unit values/interfaces and postfix `!`
   unwrap-or-abort for Ok/Err and Some/None shapes. Transfer only the selected payload; recursively
   destroy active owned leaves without reading inactive union data. Validate borrowed token/owned

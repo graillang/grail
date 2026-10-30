@@ -14,7 +14,8 @@ wildcard arms and direct multi-field variant syntax remain to implement.
 
 Postfix `value!` consumes a two-variant `Ok/Err` or `Some/None` value, transfers the success payload,
 and aborts on failure. It has higher precedence than arithmetic and may chain. There is no implicit
-error conversion and no cleanup promise after abort. `?` is reserved, not implemented yet. Current
+error conversion and no cleanup promise after abort. Postfix `?` now propagates matching errors or
+None through ordinary checked return cleanup; see [propagation](error-propagation.md). Current
 Result/Option-shaped enums have concrete payload types; generic `Result<T,E>` / `Option<T>` and
 standard-library constructors remain subsequent v0 work, not a concession to permanent monomorphic
 APIs. `unit` / `()` are genuine scalar unit type/value operations, including function interfaces.
@@ -51,5 +52,5 @@ allocation auditing, both mixed-backend directions, compile-only Rust negatives,
 controls and checking-cost samples. Recoverable decimal parsing tests zero, leading zeros, bad
 bytes, empty input, maximum u64 and overflow; it does not claim a completed stdlib/compiler port.
 The allocator wrapper and separate native execution are falsification evidence, not formal proofs.
-Generic containers, general typed references/invariance, richer patterns, propagation and self-hosting
+Generic containers, general typed references/invariance, richer patterns and self-hosting
 remain required v0 work.

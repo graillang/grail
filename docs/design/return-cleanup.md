@@ -38,7 +38,8 @@ regains source growth after the span's last use. Primitive C/LLVM paths execute 
 input-miss cases equally.
 
 This is not a full CFG ownership join solution. Unequal continuing field states, owned assignment,
-`break`/`continue`, generic Result/Option and propagation remain to implement. Concrete tagged enum
+`break`/`continue` and generic Result/Option remain to implement. Postfix `?` uses this same return
+cleanup; see [propagation](error-propagation.md). Concrete tagged enum
 matching and unwrap are now implemented; see [tagged enums](tagged-enums.md). The synthetic flat
 branch cost harness reveals cumulative-state clone overhead (roughly quadratic); retain the raw
 measurements and address this before claiming self-hosting ergonomics/performance. It is a Rust seed
