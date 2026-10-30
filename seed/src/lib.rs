@@ -17,12 +17,16 @@ pub enum Ty {
     Num,
     Buffer,
     Bytes,
+    Text,
     View(Mode, u16),
     Holder(Mode, u16),
 }
 impl Ty {
     fn owned(&self) -> bool {
-        matches!(self, Self::Buffer | Self::Bytes)
+        matches!(self, Self::Buffer | Self::Bytes | Self::Text)
+    }
+    fn heap(&self) -> bool {
+        matches!(self, Self::Bytes | Self::Text)
     }
     fn reference(&self) -> Option<(Mode, u16)> {
         match self {
@@ -35,6 +39,7 @@ impl Ty {
             Self::Num => "n".into(),
             Self::Buffer => "b".into(),
             Self::Bytes => "o".into(),
+            Self::Text => "s".into(),
             Self::View(m, r) => format!("{}{}", if *m == Mode::Read { "r" } else { "w" }, r),
             Self::Holder(m, r) => format!("h{}{}", if *m == Mode::Read { "r" } else { "w" }, r),
         }
@@ -42,6 +47,9 @@ impl Ty {
     fn parse(s: &str) -> Result<Self, String> {
         if s == "n" {
             return Ok(Self::Num);
+        }
+        if s == "s" {
+            return Ok(Self::Text);
         }
         if s == "o" {
             return Ok(Self::Bytes);
@@ -106,7 +114,7 @@ impl Sig {
     pub fn encode(&self) -> Result<String, String> {
         self.validate()?;
         Ok(format!(
-            "grail-seed-interface-2\n{}\n{}\n{}\n",
+            "grail-seed-interface-3\n{}\n{}\n{}\n",
             self.name,
             self.params
                 .iter()
@@ -121,7 +129,7 @@ impl Sig {
             return Err("interface too large".into());
         }
         let lines = text.lines().collect::<Vec<_>>();
-        if lines.len() != 4 || lines[0] != "grail-seed-interface-2" {
+        if lines.len() != 4 || lines[0] != "grail-seed-interface-3" {
             return Err("invalid interface schema".into());
         }
         let params = if lines[2].is_empty() {
@@ -159,6 +167,18 @@ pub enum Bin {
 #[derive(Clone, Debug)]
 pub enum Op {
     Num(Reg, u64),
+    TextLiteral {
+        dst: Reg,
+        data: Vec<u8>,
+    },
+    Text {
+        dst: Reg,
+        src: Reg,
+    },
+    AppendText {
+        owner: Reg,
+        src: Reg,
+    },
     Bytes {
         dst: Reg,
     },
@@ -413,6 +433,39 @@ impl State {
         for op in ops {
             match op {
                 Op::Num(r, _) => self.num(*r)?,
+                Op::TextLiteral { dst, data } => {
+                    if data.len() > 1024 * 1024 || std::str::from_utf8(data).is_err() {
+                        return Err("invalid UTF-8 literal or literal size limit".into());
+                    }
+                    let v = self.new_value(
+                        Ty::Text,
+                        BTreeSet::from([Root::Local(*dst)]),
+                        BTreeSet::new(),
+                    );
+                    self.put(*dst, v)?;
+                }
+                Op::Text { dst, src } => {
+                    self.readable(*src)?;
+                    let v = self.new_value(
+                        Ty::Text,
+                        BTreeSet::from([Root::Local(*dst)]),
+                        BTreeSet::new(),
+                    );
+                    self.put(*dst, v)?;
+                }
+                Op::AppendText { owner, src } => {
+                    let v = self.usable(*owner)?;
+                    if v.ty != Ty::Text {
+                        return Err("append_text expects owned string".into());
+                    }
+                    if self.owner_borrowed(&v) {
+                        return Err("text growth while borrowed".into());
+                    }
+                    self.readable(*src)?;
+                    if !self.get(*src)?.roots.is_disjoint(&v.roots) {
+                        return Err("self-append requires an explicit copy".into());
+                    }
+                }
                 Op::Bytes { dst } => {
                     let v = self.new_value(
                         Ty::Bytes,
@@ -454,6 +507,9 @@ impl State {
                 Op::Borrow { dst, src, mode } => {
                     let p = self.usable(*src)?;
                     let mut ancestors = p.ancestors.clone();
+                    if p.ty == Ty::Text && *mode == Mode::Write {
+                        return Err("string bytes cannot be mutably borrowed".into());
+                    }
                     let region = if p.ty.owned() {
                         0
                     } else {
@@ -579,7 +635,9 @@ impl State {
                     for (r, t) in args.iter().zip(&sig.params) {
                         let v = self.usable(*r)?;
                         let matches = match (&v.ty, t) {
-                            (Ty::Num, Ty::Num) | (Ty::Bytes, Ty::Bytes) => true,
+                            (Ty::Num, Ty::Num) | (Ty::Bytes, Ty::Bytes) | (Ty::Text, Ty::Text) => {
+                                true
+                            }
                             (Ty::View(a, _), Ty::View(b, _))
                             | (Ty::Holder(a, _), Ty::Holder(b, _)) => a == b,
                             _ => false,
@@ -608,7 +666,7 @@ impl State {
                             }
                         }
                     }
-                    if sig.result == Ty::Bytes {
+                    if sig.result.heap() {
                         roots.insert(Root::Local(*dst));
                     }
                     for r in consumed {
@@ -679,12 +737,12 @@ pub fn check(function: Function, imports: BTreeMap<String, Sig>) -> Result<Check
     let result = s.usable(function.result)?;
     if s.values
         .iter()
-        .any(|(r, v)| v.ty == Ty::Bytes && *r != function.result)
+        .any(|(r, v)| v.ty.heap() && *r != function.result)
     {
         return Err("heap owner must be ended or returned".into());
     }
     let compatible = match (&result.ty, &function.sig.result) {
-        (Ty::Num, Ty::Num) | (Ty::Bytes, Ty::Bytes) => true,
+        (Ty::Num, Ty::Num) | (Ty::Bytes, Ty::Bytes) | (Ty::Text, Ty::Text) => true,
         (Ty::View(m, _), Ty::View(n, _)) | (Ty::Holder(m, _), Ty::Holder(n, _)) => m == n,
         _ => false,
     };

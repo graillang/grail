@@ -128,3 +128,8 @@
 - Audit stable and pinned modern Rust (2026-10-29 nightly) with Polonius/next-solver flag isolation:
   conditional reborrows and get-or-insert now pass; stored-referent replacement/restoration still
   reject in the tested forms. Correct the comparison baseline without claiming a soundness proof.
+
+- Add owned UTF-8 strings, validated literals/escapes, checked text copying and append, while
+  rejecting raw byte mutation and growth under live views. Bump seed interfaces to schema 3.
+- Differentially validate text construction on 26 byte sequences through clang/TinyCC, including
+  malformed encodings, and exercise owned string calls/returns across a hidden-source boundary.

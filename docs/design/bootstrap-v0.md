@@ -110,3 +110,10 @@ growth restrictions and lexical cleanup, including ownership transfer through sc
 They are the first heap gate, not generic containers or a completed standard library. The earlier
 source-slice description above is historical where it excludes all heap ownership. Follow-up gates
 remain records/enums, reference-containing elements, Result, general generics and self-hosting.
+
+## Owned text checkpoint
+
+[Owned UTF-8 text](owned-text.md) adds a distinct string invariant, explicit checked copying,
+append operations and literal decoding, with schema-3 interfaces. Byte views remain byte views;
+borrowed UTF-8 abstractions, recoverable conversion errors, generic containers and self-hosting
+are still unfinished. Neither this nor heap byte ownership completes bootstrap v0.

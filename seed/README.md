@@ -90,7 +90,7 @@ one text argument. Generic heap containers, Result and type generics are still f
 ## Heap byte owners
 
 [Semantics and limits](../docs/design/heap-ownership.md). `bytes()`, `push`, `copy_bytes` and
-owned `bytes` parameters/results are now supported by the C backend. Signatures are schema 2;
+owned `bytes` parameters/results are supported by the C backend. Signatures are schema 3;
 rebuild old `.api` files. Heap owners drop at scope exit, not at borrowed-value last use.
 
 ```sh
@@ -98,4 +98,17 @@ seed/target/release/grail-seed compile seed/examples/make_bytes.grl seed/.work/h
 seed/target/release/grail-seed build seed/examples/use_bytes.grl seed/.work/heap seed/.work/heap
 seed/.work/heap/use_bytes  # 125717
 cargo test --manifest-path seed/Cargo.toml --offline --test heap_native -- --ignored
+```
+
+## Owned text
+
+[UTF-8 contract and limits](../docs/design/owned-text.md). `string` values, quoted literals,
+`text(...)` copying/validation and `append_text(...)` are supported in the C path. Reading text
+produces byte views; arbitrary mutable byte access to strings is rejected. Rebuild schema-2 APIs.
+
+```sh
+seed/target/release/grail-seed compile seed/examples/echo_text.grl seed/.work/text seed/.work/text
+seed/target/release/grail-seed build seed/examples/text_check.grl seed/.work/text seed/.work/text
+seed/.work/text/text_check 'hé🙂'  # 389107
+cargo test --manifest-path seed/Cargo.toml --offline --test text_native -- --ignored
 ```

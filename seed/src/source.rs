@@ -7,6 +7,40 @@ struct Token<'a> {
     text: &'a str,
     offset: usize,
 }
+fn literal(text: &str) -> Result<Vec<u8>, String> {
+    let bytes = &text.as_bytes()[1..text.len() - 1];
+    let mut out = vec![];
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        i += 1;
+        if c != b'\\' {
+            out.push(c);
+            continue;
+        }
+        let c = *bytes.get(i).ok_or("unterminated escape")?;
+        i += 1;
+        out.push(match c {
+            b'n' => b'\n',
+            b'r' => b'\r',
+            b't' => b'\t',
+            b'0' => 0,
+            b'"' => b'"',
+            b'\\' => b'\\',
+            b'x' => {
+                let h = *bytes.get(i).ok_or("short hex escape")?;
+                let l = *bytes.get(i + 1).ok_or("short hex escape")?;
+                i += 2;
+                let h = (h as char).to_digit(16).ok_or("invalid hex escape")?;
+                let l = (l as char).to_digit(16).ok_or("invalid hex escape")?;
+                (h * 16 + l) as u8
+            }
+            _ => return Err("unknown string escape".into()),
+        });
+    }
+    std::str::from_utf8(&out).map_err(|_| "literal is not valid UTF-8")?;
+    Ok(out)
+}
 fn lex(text: &str) -> Result<Vec<Token<'_>>, String> {
     let b = text.as_bytes();
     let mut out = vec![];
@@ -23,7 +57,30 @@ fn lex(text: &str) -> Result<Vec<Token<'_>>, String> {
             continue;
         }
         let start = i;
-        if b[i].is_ascii_alphabetic() || b[i] == b'_' {
+        if b[i] == b'"' {
+            i += 1;
+            let mut closed = false;
+            while i < b.len() {
+                if b[i] == b'"' {
+                    i += 1;
+                    closed = true;
+                    break;
+                }
+                if b[i] < 32 {
+                    return Err(format!("byte {i}: control character in literal"));
+                }
+                if b[i] == b'\\' {
+                    i += 1;
+                    if i == b.len() {
+                        break;
+                    }
+                }
+                i += 1;
+            }
+            if !closed {
+                return Err(format!("byte {start}: unterminated string literal"));
+            }
+        } else if b[i].is_ascii_alphabetic() || b[i] == b'_' {
             i += 1;
             while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_') {
                 i += 1
@@ -115,6 +172,9 @@ impl Parser<'_> {
     }
     fn ty(&mut self) -> Result<Ty, String> {
         let name = self.ident()?;
+        if name == "string" {
+            return Ok(Ty::Text);
+        }
         if name == "num" {
             return Ok(Ty::Num);
         }
@@ -147,6 +207,12 @@ impl Parser<'_> {
             let r = self.expr(ops, 0, depth + 1)?;
             self.expect(")")?;
             r
+        } else if self.peek().starts_with('"') {
+            let data = literal(self.peek()).map_err(|e| self.error(&e))?;
+            self.at += 1;
+            let dst = self.fresh()?;
+            ops.push(Op::TextLiteral { dst, data });
+            dst
         } else if self
             .peek()
             .as_bytes()
@@ -177,7 +243,7 @@ impl Parser<'_> {
                 let r = self.fresh()?;
                 let arity = match name.as_str() {
                     "bytes" => Some(0),
-                    "read" | "mut" | "hold" | "len" | "copy_bytes" => Some(1),
+                    "read" | "mut" | "hold" | "len" | "copy_bytes" | "text" => Some(1),
                     "at" => Some(2),
                     "slice" => Some(3),
                     _ => None,
@@ -186,6 +252,10 @@ impl Parser<'_> {
                     return Err(self.error("builtin arity"));
                 }
                 ops.push(match name.as_str() {
+                    "text" => Op::Text {
+                        dst: r,
+                        src: args[0],
+                    },
                     "bytes" => Op::Bytes { dst: r },
                     "copy_bytes" => Op::CopyBytes {
                         dst: r,
@@ -340,6 +410,14 @@ impl Parser<'_> {
                 self.expect(")")?;
                 self.expect(";")?;
                 ops.push(Op::End(r));
+            } else if self.eat("append_text") {
+                self.expect("(")?;
+                let owner = self.expr(&mut ops, 0, 0)?;
+                self.expect(",")?;
+                let src = self.expr(&mut ops, 0, 0)?;
+                self.expect(")")?;
+                self.expect(";")?;
+                ops.push(Op::AppendText { owner, src });
             } else if self.eat("push") {
                 self.expect("(")?;
                 let owner = self.expr(&mut ops, 0, 0)?;
@@ -496,12 +574,16 @@ pub fn compile(text: &str, available: BTreeMap<String, Sig>) -> Result<Checked, 
 fn live_before(op: &Op, after: &BTreeSet<Reg>) -> BTreeSet<Reg> {
     let mut live = after.clone();
     let (defs, uses): (Vec<Reg>, Vec<Reg>) = match op {
-        Op::Num(r, _) | Op::Buffer { dst: r, .. } | Op::Bytes { dst: r } => (vec![*r], vec![]),
+        Op::Num(r, _)
+        | Op::Buffer { dst: r, .. }
+        | Op::Bytes { dst: r }
+        | Op::TextLiteral { dst: r, .. } => (vec![*r], vec![]),
         Op::Borrow { dst, src, .. }
         | Op::Move { dst, src }
         | Op::Pack { dst, src }
         | Op::Len { dst, src }
-        | Op::CopyBytes { dst, src } => (vec![*dst], vec![*src]),
+        | Op::CopyBytes { dst, src }
+        | Op::Text { dst, src } => (vec![*dst], vec![*src]),
         Op::Slice {
             dst,
             src,
@@ -510,6 +592,7 @@ fn live_before(op: &Op, after: &BTreeSet<Reg>) -> BTreeSet<Reg> {
         } => (vec![*dst], vec![*src, *start, *end]),
         Op::End(r) => (vec![*r], vec![*r]),
         Op::Assert(r) => (vec![], vec![*r]),
+        Op::AppendText { owner, src } => (vec![], vec![*owner, *src]),
         Op::Push { owner, value } => (vec![], vec![*owner, *value]),
         Op::Read { dst, src, index } => (vec![*dst], vec![*src, *index]),
         Op::Write { dst, index, value } => (vec![], vec![*dst, *index, *value]),

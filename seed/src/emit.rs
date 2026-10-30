@@ -5,7 +5,7 @@ use std::fmt::Write;
 fn cty(t: &Ty) -> &'static str {
     match t {
         Ty::Num => "uint64_t",
-        Ty::Bytes => "gb",
+        Ty::Bytes | Ty::Text => "gb",
         Ty::Holder(..) => "gh",
         _ => "gv",
     }
@@ -28,7 +28,7 @@ fn signature(s: &Sig) -> String {
     )
 }
 fn view(r: Reg, types: &BTreeMap<Reg, Ty>) -> String {
-    if types[&r] == Ty::Bytes {
+    if types[&r].heap() {
         return format!("((gv){{r{r}.p,r{r}.n}})");
     }
     if matches!(types[&r], Ty::Holder(..)) {
@@ -57,7 +57,7 @@ pub fn c(p: &Checked) -> String {
     let mut s = String::from(
         "#include <stdint.h>\n#include <stdlib.h>\n#include <string.h>\ntypedef struct { uint8_t *p; uint64_t n; } gv;\ntypedef struct { gv value; } gh;\ntypedef struct {uint8_t*p;uint64_t n,c;} gb;\n#define GRAIL_BYTES_TYPES_DEFINED\n",
     );
-    if p.types.values().any(|t| *t == Ty::Bytes) {
+    if p.types.values().any(|t| t.heap()) {
         s.push_str(include_str!("bytes_runtime.h"));
     }
     for sig in p.imports.values() {
@@ -77,6 +77,9 @@ pub fn c(p: &Checked) -> String {
     fn ops(s: &mut String, os: &[Op], types: &BTreeMap<Reg, Ty>) {
         for o in os {
             match o{
+        Op::TextLiteral{dst,data}=>{let values=if data.is_empty(){"0".into()}else{data.iter().map(u8::to_string).collect::<Vec<_>>().join(",")};writeln!(s,"{{static const uint8_t text[]={{ {values} }};r{dst}=gr_copy_bytes((gv){{(uint8_t*)text,UINT64_C({})}});}}",data.len()).unwrap()},
+        Op::Text{dst,src}=>{let v=view(*src,types);writeln!(s,"gr_utf8({v});r{dst}=gr_copy_bytes({v});").unwrap()},
+        Op::AppendText{owner,src}=>{writeln!(s,"gr_append_text(&r{owner},{});",view(*src,types)).unwrap()},
         Op::Bytes{dst}=>{writeln!(s,"r{dst}=(gb){{0,0,0}};").unwrap()},
         Op::CopyBytes{dst,src}=>{writeln!(s,"r{dst}=gr_copy_bytes({});",view(*src,types)).unwrap()},
         Op::Push{owner,value}=>{writeln!(s,"gr_push(&r{owner},r{value});").unwrap()},
@@ -87,7 +90,7 @@ pub fn c(p: &Checked) -> String {
         Op::Assert(r)=>{writeln!(s,"if(!r{r}) abort();").unwrap()},
         Op::If{condition,yes,no}=>{writeln!(s,"if(r{condition}){{").unwrap();ops(s,yes,types);s.push_str("}else{\n");ops(s,no,types);s.push_str("}\n")},
         Op::Pack{dst,src}=>{writeln!(s,"r{dst} = (gh){{r{src}}};").unwrap()},
-        Op::Move{dst,src}=>{writeln!(s,"r{dst}=r{src};").unwrap()},Op::End(r)=>{if types[r]==Ty::Bytes {writeln!(s,"free(r{r}.p);").unwrap()}},
+        Op::Move{dst,src}=>{writeln!(s,"r{dst}=r{src};").unwrap()},Op::End(r)=>{if types[r].heap() {writeln!(s,"free(r{r}.p);").unwrap()}},
         Op::Len{dst,src}=>{writeln!(s,"r{dst}={}.n;",view(*src,types)).unwrap()},
         Op::Read{dst,src,index}=>{let v=view(*src,types);writeln!(s,"if (r{index}>={v}.n) abort(); r{dst}={v}.p[r{index}];").unwrap()},
         Op::Write{dst,index,value}=>{let v=view(*dst,types);writeln!(s,"if (r{index}>={v}.n) abort(); {v}.p[r{index}]=(uint8_t)r{value};").unwrap()},
@@ -150,7 +153,12 @@ impl Ll {
     fn ops(&mut self, os: &[Op]) {
         for o in os {
             match o {
-                Op::Bytes { .. } | Op::CopyBytes { .. } | Op::Push { .. } => {
+                Op::Bytes { .. }
+                | Op::CopyBytes { .. }
+                | Op::Push { .. }
+                | Op::Text { .. }
+                | Op::TextLiteral { .. }
+                | Op::AppendText { .. } => {
                     unreachable!("heap layouts rejected before LLVM lowering")
                 }
                 Op::Num(r, n) => self.store(*r, &n.to_string()),
@@ -355,9 +363,9 @@ pub fn llvm(p: &Checked) -> Result<String, String> {
                 .values()
                 .flat_map(|s| s.params.iter().chain([&s.result])),
         )
-        .any(|t| *t == Ty::Bytes)
+        .any(|t| t.heap())
     {
-        return Err("LLVM comparison backend does not yet support owned bytes".into());
+        return Err("LLVM comparison backend does not yet support owned heap values".into());
     }
 
     let mut ll = Ll {
