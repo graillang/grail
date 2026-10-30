@@ -220,3 +220,21 @@ fn loop_cannot_drop_an_entry_resource_or_leak_a_fresh_loan() {
         Op::End(0)
     ]));
 }
+
+#[test]
+fn ending_one_shared_view_does_not_release_other_views_or_moved_carriers() {
+    let prefix = vec![
+        owner(),
+        borrow(1, 0, Mode::Read),
+        borrow(2, 0, Mode::Read),
+        Op::Pack { dst: 3, src: 2 },
+        Op::Move { dst: 4, src: 3 },
+        Op::End(1),
+    ];
+    let mut invalid = prefix.clone();
+    invalid.push(Op::End(0));
+    assert!(!accepted(invalid));
+    let mut valid = prefix;
+    valid.extend([Op::End(4), Op::End(0)]);
+    assert!(accepted(valid));
+}

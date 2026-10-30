@@ -105,3 +105,9 @@
 - Start a dependency-free Rust typed-IR seed with explicit signature regions, affine views,
   carrier reborrows, guarded C/LLVM lowering and body-hidden interface tests. The first scan-based
   checker is a measured baseline, not the final algorithm or a complete language implementation.
+
+- Replace repeated live-value scans with indexed origin/parent-loan checks in the Rust seed;
+  preserve owner/authority checks across carrier moves and shared-view ending.
+- Add reproducible paired checker, native backend and module-edit measurements with an independent
+  checksum oracle, raw CPU/RSS/commands and explicit limits. Retain TinyCC as a measured development
+  candidate, without claiming full-language performance, soundness or self-hosting.

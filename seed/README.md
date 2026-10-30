@@ -35,7 +35,8 @@ They are demonstration commands, not a surface-language parser or general build 
 No general generics, arbitrary records, branches, Result/error flow, closures, heap ownership,
 async, destructors, capabilities, interface authentication or language soundness theorem yet.
 The compiler's own safe Rust is not a proof that the new checker is sound. The first scaling
-probe exposes repeated whole-state scans; optimizing those is the immediate next step.
+probe exposed repeated whole-state scans. Indexed loan checks now remove those scans; deep
+ancestry and origin unions still need measurement.
 
 ## Native boundary
 
@@ -47,3 +48,17 @@ are not optimized or portable-ABI-certified. Native execution is currently check
 The TinyCC driver in the prior Goose build is usable, but is configured for embedded/JIT use.
 Standalone linking needs explicit host CRT objects, libc paths and its staged support archive;
 this is recorded by the measurement harness rather than changing third-party sources.
+
+## Measurements
+
+[Results and limitations](../docs/design/seed-measurements.md). Reproduce with:
+
+```sh
+python seed/measure.py --pairs 10 --length 262144 --repeats 16
+```
+
+Requires Linux wait4/bubblewrap, clang, rustc/cargo, and the existing pinned Goose/TinyCC build
+under `research/experiments/memory01/.work/goose-build`. It rebuilds baseline `d6ac951` in owned
+scratch, preserves all measured samples and aborts on nonzero exits or checksum mismatches.
+The driver is Python orchestration; it is not a replacement for the Rust seed or its future
+Grail implementation. It does not download tools, contact models, or modify external sources.

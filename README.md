@@ -6,7 +6,8 @@ We are evaluating the foundations with a [narrow Rust seed](seed/README.md), not
 a full compiler yet.
 The ambition is a small, practical systems language with fast builds, deterministic
 memory management, explicit effects, and independently checkable correctness evidence.
-No performance or verification claims have been established for Grail.
+Initial [seed measurements](docs/design/seed-measurements.md) cover a restricted typed IR,
+not full-language performance or safety.
 
 ## Living design record
 

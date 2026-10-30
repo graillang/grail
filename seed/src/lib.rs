@@ -219,6 +219,9 @@ struct State {
     values: BTreeMap<Reg, Value>,
     next: usize,
     types: BTreeMap<Reg, Ty>,
+    access: BTreeMap<Root, (usize, usize)>,
+    loans: BTreeMap<usize, (Mode, BTreeSet<Root>)>,
+    blocked: BTreeMap<usize, usize>,
 }
 impl State {
     fn get(&self, r: Reg) -> Result<&Value, String> {
@@ -228,7 +231,7 @@ impl State {
     }
     fn usable(&self, r: Reg) -> Result<Value, String> {
         let v = self.get(r)?;
-        if self.values.values().any(|c| c.ancestors.contains(&v.loan)) {
+        if self.blocked.contains_key(&v.loan) {
             return Err(format!("r{r}: carrier restricted by live child"));
         }
         Ok(v.clone())
@@ -247,9 +250,52 @@ impl State {
         {
             return Err(format!("r{r}: register changes type"));
         }
+        self.remove(r);
         self.types.insert(r, v.ty.clone());
+        if let Some((mode, _)) = v.ty.reference() {
+            for root in &v.roots {
+                let counts = self.access.entry(root.clone()).or_default();
+                if mode == Mode::Read {
+                    counts.0 += 1;
+                } else {
+                    counts.1 += 1;
+                }
+            }
+            self.loans.insert(v.loan, (mode, v.roots.clone()));
+        }
+        for ancestor in &v.ancestors {
+            *self.blocked.entry(*ancestor).or_default() += 1;
+        }
         self.values.insert(r, v);
         Ok(())
+    }
+    fn remove(&mut self, r: Reg) {
+        if let Some(v) = self.values.remove(&r) {
+            if let Some((mode, _)) = v.ty.reference() {
+                self.loans.remove(&v.loan);
+                for root in &v.roots {
+                    let counts = self.access.get_mut(root).expect("indexed root");
+                    if mode == Mode::Read {
+                        counts.0 -= 1;
+                    } else {
+                        counts.1 -= 1;
+                    }
+                    if *counts == (0, 0) {
+                        self.access.remove(root);
+                    }
+                }
+            }
+            for ancestor in v.ancestors {
+                let count = self.blocked.get_mut(&ancestor).expect("indexed parent");
+                *count -= 1;
+                if *count == 0 {
+                    self.blocked.remove(&ancestor);
+                }
+            }
+        }
+    }
+    fn owner_borrowed(&self, v: &Value) -> bool {
+        v.roots.iter().any(|r| self.access.contains_key(r))
     }
     fn new_value(&mut self, ty: Ty, roots: BTreeSet<Root>, ancestors: BTreeSet<usize>) -> Value {
         self.next += 1;
@@ -272,15 +318,10 @@ impl State {
     }
     fn end(&mut self, r: Reg) -> Result<(), String> {
         let v = self.usable(r)?;
-        if v.ty == Ty::Buffer
-            && self
-                .values
-                .values()
-                .any(|c| c.ty.reference().is_some() && !c.roots.is_disjoint(&v.roots))
-        {
+        if v.ty == Ty::Buffer && self.owner_borrowed(&v) {
             return Err(format!("r{r}: owner still borrowed"));
         }
-        self.values.remove(&r);
+        self.remove(r);
         Ok(())
     }
     fn ops(
@@ -319,13 +360,21 @@ impl State {
                         ancestors.insert(p.loan);
                         r
                     };
-                    for q in self.values.values() {
-                        if q.ty.reference().is_some()
-                            && !q.roots.is_disjoint(&p.roots)
-                            && !ancestors.contains(&q.loan)
-                            && (*mode == Mode::Write
-                                || q.ty.reference().is_some_and(|(m, _)| m == Mode::Write))
-                        {
+                    for root in &p.roots {
+                        let (mut reads, mut writes) =
+                            self.access.get(root).copied().unwrap_or_default();
+                        for ancestor in &ancestors {
+                            if let Some((m, roots)) = self.loans.get(ancestor)
+                                && roots.contains(root)
+                            {
+                                if *m == Mode::Read {
+                                    reads -= 1;
+                                } else {
+                                    writes -= 1;
+                                }
+                            }
+                        }
+                        if writes > 0 || (*mode == Mode::Write && reads > 0) {
                             return Err("conflicting access".into());
                         }
                     }
@@ -341,26 +390,21 @@ impl State {
                     if dst == src {
                         return Err("pack needs new register".into());
                     }
+                    self.remove(*src);
                     self.put(*dst, v)?;
-                    self.values.remove(src);
                 }
                 Op::Move { dst, src } => {
                     if dst == src {
                         return Err("self move".into());
                     }
                     let v = self.usable(*src)?;
-                    if v.ty == Ty::Buffer
-                        && self
-                            .values
-                            .values()
-                            .any(|c| c.ty.reference().is_some() && !c.roots.is_disjoint(&v.roots))
-                    {
+                    if v.ty == Ty::Buffer && self.owner_borrowed(&v) {
                         return Err("move of borrowed owner".into());
                     }
-                    self.put(*dst, v.clone())?;
                     if v.ty != Ty::Num {
-                        self.values.remove(src);
+                        self.remove(*src);
                     }
+                    self.put(*dst, v)?;
                 }
                 Op::End(r) => self.end(*r)?,
                 Op::Len { dst, src } => {
@@ -433,7 +477,7 @@ impl State {
                         }
                     }
                     for r in consumed {
-                        self.values.remove(&r);
+                        self.remove(r);
                     }
                     let v = self.new_value(sig.result.clone(), roots, ancestors);
                     self.put(*dst, v)?;

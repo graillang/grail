@@ -295,3 +295,16 @@ This is not a new required ABI or a bug in the earlier upper-only shared-data co
 what a particular check depends on, but do not treat a stable memory/coverage contract as a stable
 value proof, optimized body or arbitrary artifact. Multiplicity, loan/state and scope composition
 remain open beyond the interval abstraction.
+
+## First implementation: explicit interfaces, not full G1
+
+After discussing AI-assisted lifetime authoring, compilation complexity and early self-hosting,
+the human approved a bounded real seed slice. The first implementation uses explicit signature
+regions and local affine access checking, not full G1 place-content/post-state inference. This is
+not an adoption of every rule in the external complexity reassessment, nor an approval of automatic
+expressiveness fallbacks. Earlier pure results remain evidence, not the current compiler foundation.
+
+[The seed](../../seed/README.md) checks body-hidden clients and lowers the same validated IR to
+C and LLVM. [Measured results](seed-measurements.md) favor retaining TinyCC as a development
+candidate for this slice. Optimized C/LLVM execution is promising, but broad runtime/build claims
+remain unestablished. The native emitters remain experimental; no self-hosting has occurred.
