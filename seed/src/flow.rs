@@ -1,6 +1,40 @@
 //! Terminating paths do not participate in continuation ownership joins.
 use super::*;
 impl State {
+    pub(super) fn copy_defined(&self, r: Reg) -> bool {
+        self.copy_defined
+            .get(r as usize / 64)
+            .is_some_and(|word| word & (1u64 << (r % 64)) != 0)
+    }
+    pub(super) fn mark_copy(&mut self, r: Reg, defined: bool) {
+        let index = r as usize / 64;
+        if defined && self.copy_defined.len() <= index {
+            self.copy_defined.resize(index + 1, 0);
+        }
+        if let Some(word) = self.copy_defined.get_mut(index) {
+            if defined {
+                *word |= 1u64 << (r % 64);
+            } else {
+                *word &= !(1u64 << (r % 64));
+            }
+        }
+    }
+    pub(super) fn prune_scalars(&mut self, live: &BTreeSet<Reg>) {
+        self.values.retain(|r, v| {
+            if v.ty.copy() {
+                debug_assert!(v.roots.is_empty() && v.ancestors.is_empty() && v.fields.is_empty());
+                live.contains(r)
+            } else {
+                true
+            }
+        });
+    }
+    pub(super) fn scalars(&self) -> BTreeSet<Reg> {
+        self.values
+            .iter()
+            .filter_map(|(r, v)| v.ty.copy().then_some(*r))
+            .collect()
+    }
     pub(super) fn validate_return(&self, r: Reg) -> Result<(), String> {
         let sig = self.signature.as_ref();
         let result = self.usable(r)?;
@@ -33,24 +67,12 @@ impl State {
         }
         Ok(())
     }
-    pub(super) fn merge_types(&mut self, other: &BTreeMap<Reg, Ty>) -> Result<(), String> {
-        for (r, t) in other {
-            if self.types.get(r).is_some_and(|old| old != t) {
-                return Err("branches change register type".into());
-            }
-            self.types.insert(*r, t.clone());
-        }
-        Ok(())
-    }
     pub(super) fn join(&mut self, mut yes: Self, no: Self) -> Result<(), String> {
         let next = yes.next.max(no.next);
-        let mut types = yes.types.clone();
-        for (r, t) in &no.types {
-            if types.get(r).is_some_and(|old| old != t) {
-                return Err("branches change register type".into());
-            }
-            types.insert(*r, t.clone());
-        }
+        debug_assert!(
+            std::rc::Rc::ptr_eq(&self.types, &yes.types)
+                && std::rc::Rc::ptr_eq(&self.types, &no.types)
+        );
         match (yes.terminated, no.terminated) {
             (true, true) => self.terminated = true,
             (true, false) => *self = no,
@@ -63,10 +85,12 @@ impl State {
                 }
                 yes.values
                     .retain(|r, v| !v.ty.copy() || no.values.contains_key(r));
+                for (index, word) in yes.copy_defined.iter_mut().enumerate() {
+                    *word &= no.copy_defined.get(index).copied().unwrap_or(0);
+                }
                 *self = yes;
             }
         }
-        self.types = types;
         self.next = next;
         Ok(())
     }
@@ -76,16 +100,21 @@ impl State {
         index: Option<Reg>,
         imports: &BTreeMap<String, Sig>,
         depth: usize,
+        out: Option<&BTreeSet<Reg>>,
     ) -> Result<(), String> {
         let mut inner = self.clone();
         if let Some(r) = index {
             inner.num(r)?;
         }
-        inner.ops(body, imports, depth)?;
+        let live = out.map(|out| {
+            let mut live = inner.scalars();
+            live.extend(out);
+            live
+        });
+        inner.ops_inner(body, imports, depth, live.as_ref())?;
         if !inner.terminated {
             inner.validate_closed(&self.values)?;
         }
-        self.merge_types(&inner.types)?;
         self.next = self.next.max(inner.next);
         Ok(())
     }
@@ -101,4 +130,119 @@ pub(crate) fn terminates(ops: &[Op]) -> bool {
         }
         _ => false,
     }
+}
+
+pub(super) fn live_before(op: &Op, after: &BTreeSet<Reg>) -> BTreeSet<Reg> {
+    let mut live = after.clone();
+    let (defs, uses): (Vec<Reg>, Vec<Reg>) = match op {
+        Op::Return(r) => return BTreeSet::from([*r]),
+        Op::Unit(r) => (vec![*r], vec![]),
+        Op::Variant { dst, payload, .. } => (vec![*dst], payload.iter().copied().collect()),
+        Op::Unwrap { dst, src } => (vec![*dst], vec![*src]),
+        Op::Match { src, arms } => {
+            live.clear(); // Arm bindings are definitions, not live-in values.
+            for arm in arms {
+                let mut arm_live = after.clone();
+                for op in arm.body.iter().rev() {
+                    arm_live = live_before(op, &arm_live);
+                }
+                if let Some(r) = arm.binding {
+                    arm_live.remove(&r);
+                }
+                live.extend(arm_live);
+            }
+            live.insert(*src);
+            return live;
+        }
+        Op::Record { dst, fields, .. } => (vec![*dst], fields.iter().map(|(_, r)| *r).collect()),
+        Op::FieldMove { dst, src, .. } | Op::FieldBorrow { dst, src, .. } => {
+            (vec![*dst], vec![*src])
+        }
+        Op::EndCaptures(src) => (vec![], vec![*src]),
+        Op::Num(r, _)
+        | Op::Buffer { dst: r, .. }
+        | Op::Bytes { dst: r }
+        | Op::TextLiteral { dst: r, .. } => (vec![*r], vec![]),
+        Op::Borrow { dst, src, .. }
+        | Op::Move { dst, src }
+        | Op::Pack { dst, src }
+        | Op::Len { dst, src }
+        | Op::CopyBytes { dst, src }
+        | Op::Text { dst, src } => (vec![*dst], vec![*src]),
+        Op::Slice {
+            dst,
+            src,
+            start,
+            end,
+        } => (vec![*dst], vec![*src, *start, *end]),
+        Op::End(r) => (vec![*r], vec![*r]),
+        Op::Assert(r) => (vec![], vec![*r]),
+        Op::AppendText { owner, src } => (vec![], vec![*owner, *src]),
+        Op::Push { owner, value } => (vec![], vec![*owner, *value]),
+        Op::Read { dst, src, index } => (vec![*dst], vec![*src, *index]),
+        Op::Write { dst, index, value } => (vec![], vec![*dst, *index, *value]),
+        Op::Binary {
+            dst, left, right, ..
+        } => (vec![*dst], vec![*left, *right]),
+        Op::Call { dst, args, .. } => (vec![*dst], args.clone()),
+        Op::If { condition, yes, no } => {
+            live = before(yes, after);
+            live.extend(before(no, after));
+            live.insert(*condition);
+            return live;
+        }
+        Op::Block { body } => return before(body, after),
+        Op::While {
+            condition,
+            test,
+            body,
+        } => {
+            loop {
+                let mut exit = before(body, &live);
+                exit.extend(after);
+                exit.insert(*condition);
+                let mut next = live.clone();
+                next.extend(before(test, &exit));
+                if next == live {
+                    break;
+                }
+                live = next;
+            }
+            return live;
+        }
+        Op::Loop { index, end, body } => {
+            loop {
+                let mut next = live.clone();
+                next.extend(before(body, &live));
+                next.remove(index);
+                if next == live {
+                    break;
+                }
+                live = next;
+            }
+            live.insert(*end);
+            return live;
+        }
+    };
+    for r in defs {
+        live.remove(&r);
+    }
+    live.extend(uses);
+    live
+}
+fn before(ops: &[Op], after: &BTreeSet<Reg>) -> BTreeSet<Reg> {
+    ops.iter()
+        .rev()
+        .fold(after.clone(), |live, op| live_before(op, &live))
+}
+
+pub(super) fn afters(ops: &[Op], out: &BTreeSet<Reg>) -> Vec<BTreeSet<Reg>> {
+    let mut result = Vec::with_capacity(ops.len());
+    let mut live = out.clone();
+    for op in ops.iter().rev() {
+        result.push(live.clone());
+        live = live_before(op, &live);
+    }
+    result.reverse();
+    result
 }

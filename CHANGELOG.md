@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Remove cumulative scalar/type-map cloning from the checker: share a monotonic function-local
+  type ledger, retain scalar definedness in a compact bitmap and prune only dead scalar values.
+  Correct match/if live-in definitions without changing loan/owner cleanup. Frozen-compiler
+  differential checks retain identical acceptance/C/interfaces; three-run 1,000-site medians improve
+  from 406 ms to 4.2 ms (branches) and 1.69 s to 12 ms (`?`), without an ABI/schema change.
+
 - Implement postfix `?` for Result/Option-shaped enum propagation by lowering to independently
   checked match/return operations. Preserve success payloads, transfer matching errors/None and
   clean remaining owners on failure, including earlier call arguments and loop conditions. Test

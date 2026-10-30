@@ -387,7 +387,8 @@ struct State {
     values: BTreeMap<Reg, Value>,
     resources: BTreeSet<Reg>,
     next: usize,
-    types: BTreeMap<Reg, Ty>,
+    copy_defined: Vec<u64>,
+    types: std::rc::Rc<std::cell::RefCell<BTreeMap<Reg, Ty>>>,
     access: BTreeMap<Root, (usize, usize)>,
     blocked: BTreeMap<usize, usize>,
 }
@@ -400,7 +401,8 @@ impl State {
             values: BTreeMap::new(),
             resources: BTreeSet::new(),
             next: 0,
-            types: BTreeMap::new(),
+            copy_defined: Vec::new(),
+            types: std::rc::Rc::new(std::cell::RefCell::new(BTreeMap::new())),
             access: BTreeMap::new(),
             blocked: BTreeMap::new(),
         };
@@ -429,13 +431,16 @@ impl State {
         {
             return Err(format!("r{r}: overwrite needs explicit end"));
         }
-        if let Some(t) = self.types.get(&r)
+        if let Some(t) = self.types.borrow().get(&r)
             && *t != v.ty
         {
             return Err(format!("r{r}: register changes type"));
         }
         self.remove(r);
-        self.types.insert(r, v.ty.clone());
+        self.types.borrow_mut().insert(r, v.ty.clone());
+        if v.ty.copy() {
+            self.mark_copy(r, true);
+        }
         self.index_add(&v);
         if !v.ty.copy() {
             self.resources.insert(r);
@@ -444,6 +449,7 @@ impl State {
         Ok(())
     }
     fn remove(&mut self, r: Reg) {
+        self.mark_copy(r, false);
         if let Some(v) = self.values.remove(&r) {
             self.resources.remove(&r);
             self.index_remove(&v);
@@ -529,10 +535,21 @@ impl State {
         imports: &BTreeMap<String, Sig>,
         depth: usize,
     ) -> Result<(), String> {
+        self.ops_inner(ops, imports, depth, None)
+    }
+    fn ops_inner(
+        &mut self,
+        ops: &[Op],
+        imports: &BTreeMap<String, Sig>,
+        depth: usize,
+        out: Option<&BTreeSet<Reg>>,
+    ) -> Result<(), String> {
         if depth > 64 {
             return Err("loop nesting limit".into());
         }
-        for op in ops {
+        let afters = out.map(|out| flow::afters(ops, out));
+        for (position, op) in ops.iter().enumerate() {
+            let after = afters.as_ref().map(|v| &v[position]);
             if self.terminated {
                 return Err("unreachable operation after return".into());
             }
@@ -563,7 +580,7 @@ impl State {
                     for (a, k) in arms.iter().zip(indices) {
                         let mut branch = entry.clone();
                         branch.payload(*src, k, a.binding)?;
-                        branch.ops(&a.body, imports, depth + 1)?;
+                        branch.ops_inner(&a.body, imports, depth + 1, after)?;
                         if let Some(acc) = joined.take() {
                             self.join(acc, branch)?;
                             joined = Some(self.clone());
@@ -696,9 +713,9 @@ impl State {
                 Op::If { condition, yes, no } => {
                     self.require_num(*condition)?;
                     let mut y = self.clone();
-                    y.ops(yes, imports, depth + 1)?;
+                    y.ops_inner(yes, imports, depth + 1, after)?;
                     let mut n = self.clone();
-                    n.ops(no, imports, depth + 1)?;
+                    n.ops_inner(no, imports, depth + 1, after)?;
                     self.join(y, n)?;
                 }
                 Op::Pack { dst, src } => {
@@ -788,7 +805,7 @@ impl State {
                 }
                 Op::Block { body } => {
                     let entry = self.resources.clone();
-                    self.ops(body, imports, depth + 1)?;
+                    self.ops_inner(body, imports, depth + 1, after)?;
                     if !self.terminated {
                         self.validate_resource_frame(&entry)?;
                     }
@@ -799,22 +816,39 @@ impl State {
                     body,
                 } => {
                     let entry = self.values.clone();
-                    self.ops(test, imports, depth + 1)?;
+                    let entry_defined = self.copy_defined.clone();
+                    let condition_out = after.map(|out| {
+                        let mut live = self.scalars();
+                        live.extend(out);
+                        live.insert(*condition);
+                        live
+                    });
+                    self.ops_inner(test, imports, depth + 1, condition_out.as_ref())?;
                     if self.terminated {
                         return Err("return in loop condition".into());
                     }
                     self.require_num(*condition)?;
                     self.validate_closed(&entry)?;
                     self.values = entry;
-                    self.loop_body(body, None, imports, depth + 1)?;
+                    self.copy_defined = entry_defined;
+                    let body_out = after.map(|out| {
+                        let mut live = flow::live_before(op, out);
+                        live.extend(out);
+                        live
+                    });
+                    self.loop_body(body, None, imports, depth + 1, body_out.as_ref())?;
                 }
                 Op::Loop { index, end, body } => {
                     self.require_num(*end)?;
-                    if index == end || self.values.contains_key(index) {
+                    if index == end || self.values.contains_key(index) || self.copy_defined(*index)
+                    {
                         return Err("loop index must be fresh".into());
                     }
-                    self.loop_body(body, Some(*index), imports, depth + 1)?;
+                    self.loop_body(body, Some(*index), imports, depth + 1, after)?;
                 }
+            }
+            if let Some(live) = after {
+                self.prune_scalars(live);
             }
         }
         Ok(())
@@ -851,7 +885,8 @@ pub fn check_with_types(
     let mut s = State::parameters(&function.sig, layouts.clone())?;
     let mut callable = imports.clone();
     callable.insert(function.sig.name.clone(), function.sig.clone());
-    s.ops(&function.ops, &callable, 0)?;
+    let tail_live = function.result.into_iter().collect();
+    s.ops_inner(&function.ops, &callable, 0, Some(&tail_live))?;
     let return_tail = if s.terminated {
         None
     } else {
@@ -864,7 +899,9 @@ pub fn check_with_types(
     Ok(Checked {
         function,
         imports,
-        types: s.types,
+        types: std::rc::Rc::try_unwrap(s.types)
+            .expect("body type ledger escaped")
+            .into_inner(),
         layouts,
         return_tail,
     })

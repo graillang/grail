@@ -1,4 +1,5 @@
 //! Borrowed-token parser and local loan ending for the first .grl slice.
+use crate::flow::live_before;
 use crate::{Arm, Bin, Function, Mode, Op, Reg, Sig, State, Ty, check_with_types};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -1065,108 +1066,6 @@ fn resolve_calls(
     }
     Ok(())
 }
-fn live_before(op: &Op, after: &BTreeSet<Reg>) -> BTreeSet<Reg> {
-    let mut live = after.clone();
-    let (defs, uses): (Vec<Reg>, Vec<Reg>) = match op {
-        Op::Return(r) => return BTreeSet::from([*r]),
-        Op::Unit(r) => (vec![*r], vec![]),
-        Op::Variant { dst, payload, .. } => (vec![*dst], payload.iter().copied().collect()),
-        Op::Unwrap { dst, src } => (vec![*dst], vec![*src]),
-        Op::Match { src, arms } => {
-            for arm in arms {
-                let mut arm_live = after.clone();
-                for op in arm.body.iter().rev() {
-                    arm_live = live_before(op, &arm_live);
-                }
-                if let Some(r) = arm.binding {
-                    arm_live.remove(&r);
-                }
-                live.extend(arm_live);
-            }
-            live.insert(*src);
-            return live;
-        }
-        Op::Record { dst, fields, .. } => (vec![*dst], fields.iter().map(|(_, r)| *r).collect()),
-        Op::FieldMove { dst, src, .. } | Op::FieldBorrow { dst, src, .. } => {
-            (vec![*dst], vec![*src])
-        }
-        Op::EndCaptures(src) => (vec![], vec![*src]),
-        Op::Num(r, _)
-        | Op::Buffer { dst: r, .. }
-        | Op::Bytes { dst: r }
-        | Op::TextLiteral { dst: r, .. } => (vec![*r], vec![]),
-        Op::Borrow { dst, src, .. }
-        | Op::Move { dst, src }
-        | Op::Pack { dst, src }
-        | Op::Len { dst, src }
-        | Op::CopyBytes { dst, src }
-        | Op::Text { dst, src } => (vec![*dst], vec![*src]),
-        Op::Slice {
-            dst,
-            src,
-            start,
-            end,
-        } => (vec![*dst], vec![*src, *start, *end]),
-        Op::End(r) => (vec![*r], vec![*r]),
-        Op::Assert(r) => (vec![], vec![*r]),
-        Op::AppendText { owner, src } => (vec![], vec![*owner, *src]),
-        Op::Push { owner, value } => (vec![], vec![*owner, *value]),
-        Op::Read { dst, src, index } => (vec![*dst], vec![*src, *index]),
-        Op::Write { dst, index, value } => (vec![], vec![*dst, *index, *value]),
-        Op::Binary {
-            dst, left, right, ..
-        } => (vec![*dst], vec![*left, *right]),
-        Op::Call { dst, args, .. } => (vec![*dst], args.clone()),
-        Op::If { condition, yes, no } => {
-            live.extend(before(yes, after));
-            live.extend(before(no, after));
-            live.insert(*condition);
-            return live;
-        }
-        Op::Block { body } => return before(body, after),
-        Op::While {
-            condition,
-            test,
-            body,
-        } => {
-            loop {
-                let mut exit = before(body, &live);
-                exit.extend(after);
-                exit.insert(*condition);
-                let mut next = live.clone();
-                next.extend(before(test, &exit));
-                if next == live {
-                    break;
-                }
-                live = next;
-            }
-            return live;
-        }
-        Op::Loop { index, end, body } => {
-            loop {
-                let mut next = live.clone();
-                next.extend(before(body, &live));
-                next.remove(index);
-                if next == live {
-                    break;
-                }
-                live = next;
-            }
-            live.insert(*end);
-            return live;
-        }
-    };
-    for r in defs {
-        live.remove(&r);
-    }
-    live.extend(uses);
-    live
-}
-fn before(ops: &[Op], after: &BTreeSet<Reg>) -> BTreeSet<Reg> {
-    ops.iter()
-        .rev()
-        .fold(after.clone(), |live, op| live_before(op, &live))
-}
 fn clean(state: &mut State, live: &BTreeSet<Reg>, protected: &BTreeSet<Reg>, ops: &mut Vec<Op>) {
     loop {
         let candidates = state
@@ -1211,13 +1110,7 @@ fn ending(
     protected: &BTreeSet<Reg>,
 ) -> Result<Vec<Op>, String> {
     let entry_owners = protected.clone();
-    let mut afters = vec![];
-    let mut live = out.clone();
-    for op in ops.iter().rev() {
-        afters.push(live.clone());
-        live = live_before(op, &live)
-    }
-    afters.reverse();
+    let afters = crate::flow::afters(ops, out);
     let mut result = vec![];
     for (op, after) in ops.iter().zip(afters) {
         if state.terminated {
@@ -1255,6 +1148,7 @@ fn ending(
             result.push(Op::Block { body });
             if !state.terminated {
                 clean(state, &after, protected, &mut result);
+                state.prune_scalars(&after);
             }
             continue;
         }
@@ -1329,6 +1223,7 @@ fn ending(
         result.push(op);
         if !state.terminated {
             clean(state, &after, protected, &mut result);
+            state.prune_scalars(&after);
         }
     }
     if state.terminated {

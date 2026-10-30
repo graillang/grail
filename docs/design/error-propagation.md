@@ -37,6 +37,7 @@ independently confirms release order **3, 2, 4, 1** (pending argument, enclosing
 error, outer source). Rust and Grail both preserve the preceding mutation (9), and reject mismatched
 error payloads/lifetimes. Negative controls compile only and are never executed.
 
-Costs retain the expanded source/checked C sizes and host release-seed timings. The known cumulative
-state-cloning overhead is still open, not hidden by this shorthand. This is not full generic error
+Costs retain the expanded source/checked C sizes and host release-seed timings. The measured scalar
+state-cloning overhead is now addressed in [checker state](checker-state.md); live-resource graphs
+can still be expensive and no general complexity bound is claimed. This is not full generic error
 handling, a complete stdlib/compiler port or self-hosting evidence.

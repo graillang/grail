@@ -41,6 +41,7 @@ This is not a full CFG ownership join solution. Unequal continuing field states,
 `break`/`continue` and generic Result/Option remain to implement. Postfix `?` uses this same return
 cleanup; see [propagation](error-propagation.md). Concrete tagged enum
 matching and unwrap are now implemented; see [tagged enums](tagged-enums.md). The synthetic flat
-branch cost harness reveals cumulative-state clone overhead (roughly quadratic); retain the raw
-measurements and address this before claiming self-hosting ergonomics/performance. It is a Rust seed
+branch cost harness revealed cumulative-state clone overhead (roughly quadratic). The scalar/type
+ledger issue is now addressed in [checker state](checker-state.md), retaining frozen before/after
+measurements; this does not establish full self-hosting ergonomics/performance. It is a Rust seed
 measurement, not a cost bound or a representative completed Grail compiler benchmark.
