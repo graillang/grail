@@ -162,3 +162,15 @@ variance, backing-storage borrows, effectful destruction and exceptional post-st
 Next connect error exits and pending-work cleanup to the preservation obligation, and test Bundle
 projection/call authority rather than expanding the compiler surface. The source/contract producer
 remains trusted: a forged but schema-valid empty post-state still fools the isolated consumer.
+
+## Error-cleanup ownership boundary
+
+The [finite cleanup study](cleanup-boundary.md) distinguishes user handles from scope-retained work.
+Normal-path handle consumption and error-path abandonment do not by themselves keep buffers alive.
+Pending borrowed work needs an owner through every exit; acknowledgment must correspond to that
+operation's final storage use, not merely a cancel request or another operation's completion.
+
+Completing one of several operations sharing a root cannot erase the whole dependency union. A
+join-all barrier is a conservative candidate; more precise release needs operation/loan identity.
+Cleanup suspension must contribute to effect summaries. Safety does not imply a cleanup deadline.
+These are research constraints, not an adopted registry implementation or new surface syntax.

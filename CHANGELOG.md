@@ -41,3 +41,8 @@
   returns and disjoint-place updates, with independent concrete comparisons and body-hidden clients.
 - State the restricted preservation obligation and expose the remaining forged-artifact trust gap;
   no full memory-model, allocation-reuse or runtime-performance claim follows.
+
+- Exhaustively explore finite error-cleanup models with separate user handles and scope-owned work;
+  expose premature buffer release and incorrect all-on-one-acknowledgment policies.
+- Record status-specific liburing cancellation guarantees and distinguish storage safety, resource
+  discipline, cleanup effects and bounded progress. No actual device/runtime verification claimed.
