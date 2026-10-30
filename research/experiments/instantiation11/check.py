@@ -28,6 +28,7 @@ def main() -> None:
         HERE / "Instantiation.lean",
         HERE / "Routes.lean",
         HERE / "Shapes.lean",
+        HERE / "Coverage.lean",
     ]
     hashes = {}
     for source in sources:
@@ -126,8 +127,28 @@ def main() -> None:
             "distinct_vars_can_diverge",
         ]
     }
+    required |= {
+        "GrailCore.Coverage." + n
+        for n in [
+            "no_fresh_cover",
+            "overwrite_member",
+            "complete_transfer",
+            "arity_without_cover",
+            "duplication_without_cover",
+            "lifetime_union_same",
+        ]
+    }
+    choice_targets = {
+        "GrailCore.Coverage.no_fresh_cover",
+        "GrailCore.Coverage.complete_transfer",
+    }
     audit = set(axioms) == required and all(
-        set(used) <= {"propext", "Quot.sound"} for used in axioms.values()
+        set(used)
+        <= (
+            {"propext", "Quot.sound"}
+            | ({"Classical.choice"} if name in choice_targets else set())
+        )
+        for name, used in axioms.items()
     )
     for source in inputs.glob("*.lean"):
         audit = audit and not re.search(
@@ -150,7 +171,7 @@ def main() -> None:
         "modules": reports,
         "compiler_sha256": hashlib.sha256((tool / "bin/lean").read_bytes()).hexdigest(),
         "runner_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
-        "isolation": "bubblewrap; no network/home; immutable input snapshots; fresh Core.olean, Instantiation.olean and Routes.olean",
+        "isolation": "bubblewrap; no network/home; immutable input snapshots; fresh Core.olean, Instantiation.olean, Routes.olean and Shapes.olean",
     }
     if opts.output:
         opts.output.parent.mkdir(parents=True, exist_ok=True)

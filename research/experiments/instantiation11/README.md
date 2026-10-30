@@ -15,11 +15,12 @@ pyright research/experiments/instantiation11/check.py
 Alternatively `instantiation11.check --fetch` obtains the same official pinned toolchain in
 core10's ignored cache, not a second installation. No global Lean/Lake/Mathlib installation.
 
-The runner snapshots the four Lean sources into owned `.work/inputs`, mounts them read-only,
-freshly compiles Core, Instantiation and Routes in order, then checks `Shapes.lean`. It stops
-on any failed import compile rather than using an older output. All four commands run without
-network or home access. It records all four source hashes, compiler/runner hashes, outputs and
-28 target axiom reports. Only standard `propext` and `Quot.sound` are allowed; proof holes,
+The runner snapshots the five Lean sources into owned `.work/inputs`, mounts them read-only,
+freshly compiles Core, Instantiation, Routes and Shapes, then checks `Coverage.lean`. It stops
+on any failed import compile rather than using an older output. All five commands run without
+network or home access. It records all five source hashes, compiler/runner hashes, outputs and
+34 target axiom reports. Standard `propext`/`Quot.sound` are allowed; only two Coverage counting targets may also use
+`Classical.choice`. Proof holes,
 missing reports and the known kernel-check bypass setting fail the accidental-hole audit.
 This is not a hostile-source certificate validator or an independent compiler/kernel audit.
 
@@ -42,7 +43,7 @@ of the mathematical state, not a proposed hidden source-language parameter.
 
 Function extensionality in the new equality proofs uses Lean's standard quotient-soundness
 axiom (`Quot.sound`), alongside propositional extensionality. There are no introduced domain
-axioms, admitted proofs or classical-choice dependencies in the reported targets.
+axioms, admitted proofs or classical-choice dependencies in this initial symbolic target group.
 
 ## Structured-route extension
 
@@ -57,4 +58,11 @@ three modules and 21 targets. All compiled imports are rebuilt before the final 
 [Shapes.lean](Shapes.lean) adds seven targets connecting successful formal path projections
 and same-T descendants to substitution, plus checked counterexamples to stronger claims.
 See [scope and representation premises](../../../docs/design/shape-substitution.md).
-The current runner checks four modules and 28 targets; earlier reports are historical.
+That checkpoint checks four modules and 28 targets; the current coverage extension is below.
+
+## Target-coverage extension
+
+[Coverage.lean](Coverage.lean) adds six conditional target-list/post-bound statements and
+counterexamples. [Transfer results](../../../docs/design/target-coverage.md) explain why these
+are not lifetime-support or general mutable-reference theorems. Current checks are five modules
+and 34 targets; the earlier 13/21/28-target reports remain historical.

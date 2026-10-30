@@ -272,3 +272,14 @@ Do not infer universal loan/work discharge from take-T or empty output captures.
 proof needs resource-parametric transfer and effect/ambient-scope rules in addition to root routes.
 Whether Grail permits forget/leaks or enforces stronger disposal remains a design choice, not an
 imported Rust requirement. Safety and cleanup progress stay separate.
+
+## Target coverage versus lifetime bounds
+
+The [transfer study](target-coverage.md) contrasts a permutation helper and same-Rust-signature
+fresh-target helper. Output uniqueness/arity and lifetime validity alone do not establish that
+writing all results updated all original cells. Exact provenance, frame/backward transfer or a
+checked no-outside-targets condition may supply the missing fact; no extra annotation is mandated.
+
+Conditional list-level coverage/update lemmas and finite policies check the distinction. They do
+not certify the producer or a full pointer/affinity/erasure model. Keep conservative weak updates
+when exact transfer is unknown rather than inventing a coverage guarantee from root upper bounds.

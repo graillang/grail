@@ -91,3 +91,8 @@
   effects and scoped work; retain an expected bounded stall separately from completed executions.
 - Record public-source-matched scope accounting and distinguish root captures, logical loans,
   destructor effects and ambient work obligations without adopting safe forget or Rust's runtime ABI.
+
+- Test target coverage beyond lifetime validity with five Rust cases and 2,140 finite transfer/write
+  combinations; distinguish conservative weak updates from unsupported strong may-target updates.
+- Add six conditional coverage/post-bound Lean targets with explicit logical dependencies; retain
+  target-provenance, producer checking and full ownership/erasure composition as separate obligations.
