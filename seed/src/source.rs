@@ -163,12 +163,8 @@ impl Parser<'_> {
         }
         Ok(r)
     }
-    fn bind(&mut self, name: String, reg: Reg, mutable: bool) -> Result<(), String> {
-        if self.vars.contains_key(&name) {
-            return Err(self.error("shadowing is not supported yet"));
-        }
+    fn bind(&mut self, name: String, reg: Reg, mutable: bool) {
         self.vars.insert(name, Binding { reg, mutable });
-        Ok(())
     }
     fn ty(&mut self) -> Result<Ty, String> {
         let name = self.ident()?;
@@ -334,7 +330,13 @@ impl Parser<'_> {
         }
         let mut ops = vec![];
         while !matches!(self.peek(), "}" | "return" | "") {
-            if self.peek() == "let" || self.peek() == "var" {
+            if self.eat("{") {
+                let outer = self.vars.clone();
+                let body = self.statements(depth + 1)?;
+                self.expect("}")?;
+                self.vars = outer;
+                ops.push(Op::Block { body });
+            } else if self.peek() == "let" || self.peek() == "var" {
                 let mutable = self.eat("var");
                 if !mutable {
                     self.expect("let")?;
@@ -363,7 +365,7 @@ impl Parser<'_> {
                 };
                 let dst = self.fresh()?;
                 ops.push(Op::Move { dst, src: value });
-                self.bind(name, dst, mutable)?;
+                self.bind(name, dst, mutable);
                 self.expect(";")?;
             } else if self.eat("while") {
                 let mut test = vec![];
@@ -389,7 +391,7 @@ impl Parser<'_> {
                 });
                 let index = self.fresh()?;
                 let outer = self.vars.clone();
-                self.bind(name, index, false)?;
+                self.bind(name, index, false);
                 self.expect("{")?;
                 let body = self.statements(depth + 1)?;
                 self.expect("}")?;
@@ -536,10 +538,13 @@ pub fn compile(text: &str, available: BTreeMap<String, Sig>) -> Result<Checked, 
     if !p.eat(")") {
         loop {
             let n = p.ident()?;
+            if p.vars.contains_key(&n) {
+                return Err(p.error("duplicate parameter"));
+            }
             p.expect(":")?;
             let t = p.ty()?;
             let r = p.fresh()?;
-            p.bind(n, r, false)?;
+            p.bind(n, r, false);
             params.push(t);
             if p.eat(")") {
                 break;
@@ -619,6 +624,7 @@ fn live_before(op: &Op, after: &BTreeSet<Reg>) -> BTreeSet<Reg> {
             live.insert(*condition);
             return live;
         }
+        Op::Block { body } => return before(body, after),
         Op::While {
             condition,
             test,
@@ -699,6 +705,20 @@ fn ending(
     afters.reverse();
     let mut result = vec![];
     for (op, after) in ops.iter().zip(afters) {
+        if let Op::Block { body } = op {
+            // Unconditional execution: keep its actual effects, without cloning or replaying state.
+            let entry = state.resources.clone();
+            let owners = entry
+                .iter()
+                .filter(|r| state.values[r].ty.owned())
+                .copied()
+                .collect();
+            let body = ending(body, state, imports, &after, &owners)?;
+            state.validate_resource_frame(&entry)?;
+            result.push(Op::Block { body });
+            clean(state, &after, protected, &mut result);
+            continue;
+        }
         let keep = if matches!(op, Op::Loop { .. } | Op::If { .. } | Op::While { .. }) {
             protected.union(&state.resources).copied().collect()
         } else {

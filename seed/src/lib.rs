@@ -246,6 +246,9 @@ pub enum Op {
         name: String,
         args: Vec<Reg>,
     },
+    Block {
+        body: Vec<Op>,
+    },
     While {
         condition: Reg,
         test: Vec<Op>,
@@ -402,6 +405,12 @@ impl State {
             return Err(format!("r{r}: owner still borrowed"));
         }
         self.remove(r);
+        Ok(())
+    }
+    fn validate_resource_frame(&self, entry: &BTreeSet<Reg>) -> Result<(), String> {
+        if self.resources.difference(entry).next().is_some() {
+            return Err("block-local resource must end or move out".into());
+        }
         Ok(())
     }
     fn validate_closed(&self, entry: &BTreeMap<Reg, Value>) -> Result<(), String> {
@@ -687,6 +696,11 @@ impl State {
                     }
                     let v = self.new_value(sig.result.clone(), roots, ancestors);
                     self.put(*dst, v)?;
+                }
+                Op::Block { body } => {
+                    let entry = self.resources.clone();
+                    self.ops(body, imports, depth + 1)?;
+                    self.validate_resource_frame(&entry)?;
                 }
                 Op::While {
                     condition,

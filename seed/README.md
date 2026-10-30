@@ -125,3 +125,19 @@ and early returns are not yet implemented.
 seed/target/release/grail-seed build seed/examples/while_sum.grl seed/.work/while seed/.work/while
 seed/.work/while/while_sum 123  # 150
 ```
+
+## Lexical binding scopes
+
+`let`/`var` may shadow an earlier binding, including a parameter or loop index. The initializer
+still sees the old binding; each declaration creates a distinct register/storage identity. Inner
+bindings leave the name environment at `}`. Duplicate parameter names remain errors.
+
+Standalone `{ statements }` blocks create a lexical cleanup boundary without a branch. New owners
+are released in reverse binding order there; shadowed enclosing owners remain alive until their own
+scope ends. Unlike a conditional join or loop back edge, unconditional blocks preserve actual moves
+and explicit drops of enclosing values: using a consumed outer binding afterward is rejected.
+Borrowed temporaries still end at last use. Blocks do not yet yield expressions or support early
+returns, `break`, or `continue`. Assignment remains numeric-only; shadowing can change a name's type.
+
+See `examples/scopes.grl`. The source/IR checks and allocator-audited native suite cover shadowed
+owners, moved/dropped outer owners, name restoration, and loans surviving name shadowing.

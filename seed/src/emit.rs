@@ -44,7 +44,7 @@ fn buffers(ops: &[Op], out: &mut BTreeMap<Reg, usize>) {
                 let v = out.entry(*dst).or_default();
                 *v = (*v).max((*len).max(1));
             }
-            Op::Loop { body, .. } => buffers(body, out),
+            Op::Loop { body, .. } | Op::Block { body } => buffers(body, out),
             Op::While { test, body, .. } => {
                 buffers(test, out);
                 buffers(body, out);
@@ -100,6 +100,7 @@ pub fn c(p: &Checked) -> String {
         Op::Write{dst,index,value}=>{let v=view(*dst,types);writeln!(s,"if (r{index}>={v}.n) abort(); {v}.p[r{index}]=(uint8_t)r{value};").unwrap()},
         Op::Binary{dst,op,left,right}=>{let symbol=match op{Bin::Add=>"+",Bin::Sub=>"-",Bin::Lt=>"<",Bin::Mul=>"*",Bin::Xor=>"^",Bin::Rem=>"%",Bin::Eq=>"==",Bin::Ne=>"!=",Bin::And=>"&"};if matches!(op,Bin::Rem){writeln!(s,"if (!r{right}) abort();").unwrap()}writeln!(s,"r{dst}=r{left} {symbol} r{right};").unwrap()},
         Op::Call{dst,name,args}=>{writeln!(s,"r{dst}=g_{name}({});",args.iter().map(|r|format!("r{r}")).collect::<Vec<_>>().join(",")).unwrap()},
+        Op::Block{body}=>{s.push_str("{\n");ops(s,body,types);s.push_str("}\n")},
         Op::While{condition,test,body}=>{s.push_str("while(1){\n");ops(s,test,types);writeln!(s,"if(!r{condition})break;").unwrap();ops(s,body,types);s.push_str("}\n")},
         Op::Loop{index,end,body}=>{writeln!(s,"for (r{index}=0; r{index}<r{end}; ++r{index}) {{").unwrap();ops(s,body,types);s.push_str("}\n")},
     }
@@ -335,6 +336,7 @@ impl Ll {
                     ));
                     self.store(*dst, &format!("%{x}"))
                 }
+                Op::Block { body } => self.ops(body),
                 Op::While {
                     condition,
                     test,

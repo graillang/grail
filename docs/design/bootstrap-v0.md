@@ -63,8 +63,9 @@ base types/generics arrive; this is not a claim that these byte-specific aliases
 
 The compiler tokenizes borrowed spans of its UTF-8 source file; identifiers/numbers in the grammar
 are ASCII and comments begin `//`. Parsing errors carry byte offsets. Ownership errors currently
-name registers and the source file, not rich source spans. Shadowing and nested/early returns are
-not supported; assignment requires `var` and currently succeeds only for numeric registers.
+name registers and the source file, not rich source spans. Lexical shadowing and standalone blocks
+are supported; nested/early returns are not. Assignment requires `var` and currently succeeds only
+for numeric registers. Shadowing creates a fresh binding and may change the name's type.
 
 ## Local loan ending, conservatively
 
@@ -74,7 +75,10 @@ before their parents/owners. Root/access indexes keep numeric temporaries out of
 
 Branch and loop entry resources are kept across their structured body, and back edges/joins
 require unchanged ownership. Local loans may end inside those blocks. This is not Rust's complete
-NLL/partial-move/conditional-initialization analysis. Origin sets, liveness snapshots and deep
+NLL/partial-move/conditional-initialization analysis. Unconditional standalone blocks instead keep
+actual ownership effects: an enclosing owner may be consumed there, but cannot then be used outside.
+New block owners clean up there; shadowed outer owners retain their original lexical lifetime.
+Origin sets, liveness snapshots and deep
 ancestry can still become expensive; earlier typed-IR timings do not cover this source frontend.
 
 ## Module/native boundary

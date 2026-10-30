@@ -238,3 +238,23 @@ fn ending_one_shared_view_does_not_release_other_views_or_moved_carriers() {
     valid.extend([Op::End(4), Op::End(0)]);
     assert!(accepted(valid));
 }
+
+#[test]
+fn unconditional_blocks_keep_effects_and_cannot_leak_resources() {
+    assert!(accepted(vec![
+        owner(),
+        Op::Block {
+            body: vec![Op::End(0)]
+        }
+    ]));
+    assert!(!accepted(vec![Op::Block {
+        body: vec![owner()]
+    }]));
+    assert!(!accepted(vec![
+        owner(),
+        Op::Block {
+            body: vec![Op::End(0)]
+        },
+        borrow(1, 0, Mode::Read)
+    ]));
+}

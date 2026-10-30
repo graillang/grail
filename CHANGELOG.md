@@ -142,3 +142,8 @@
   temporary owner/loan scope on both outgoing edges, and preserve loop-carried resource obligations.
 - Validate zero-iteration execution, mutable counters, condition allocations and retained-view
   growth rejection with native and allocator-audited cases.
+
+- Add lexical shadowing and standalone source blocks with reverse lexical cleanup. Keep old storage
+  identities and outer-owner lifetimes distinct from names, restore names on scope exit, preserve
+  explicit unconditional moves/drops, and reject duplicate parameters and use after scope/consumption.
+  Validate C/LLVM behavior, live-loan rejection and allocator-audited shadowed-owner cleanup.

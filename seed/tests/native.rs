@@ -123,7 +123,7 @@ fn two_modules_parse_borrowed_tokens_and_abort_on_invalid_input() {
     assert!(p.status.success());
     assert_eq!(p.stdout, b"3\n");
     let loop_file = dir.join("loop.grl");
-    let loop_source = "fn loop_sum<a>(input:read<a>)->num {var i=0;var sum=0;while i<len(input) {sum=sum+at(input,i);i=i+1;}return sum;}";
+    let loop_source = "fn loop_sum<a>(input:read<a>)->num {var i=0;var sum=0;while i<len(input) {{let i=i;sum=sum+at(input,i);}i=i+1;}return sum;}";
     fs::write(&loop_file, loop_source).unwrap();
     let p = Command::new(binary)
         .args([
