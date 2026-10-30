@@ -58,16 +58,47 @@ fn buffers(ops: &[Op], out: &mut BTreeMap<Reg, usize>) {
     }
 }
 pub fn c(p: &Checked) -> String {
+    let functions = std::iter::once(p)
+        .chain(p.local_functions.iter())
+        .collect::<Vec<_>>();
     let mut s = String::from(
         "#include <stdint.h>\n#include <stdlib.h>\n#include <string.h>\ntypedef struct { uint8_t *p; uint64_t n; } gv;\ntypedef struct { gv value; } gh;\ntypedef struct {uint8_t*p;uint64_t n,c;} gb;\n#define GRAIL_BYTES_TYPES_DEFINED\n",
     );
-    if p.types.values().any(|t| t.heap()) {
+    if functions.iter().any(|p| p.types.values().any(|t| t.heap())) {
         s.push_str(include_str!("bytes_runtime.h"));
     }
-    for sig in p.imports.values() {
-        writeln!(s, "extern {};", signature(sig)).unwrap()
+    let locals = functions
+        .iter()
+        .map(|p| p.function.sig.name.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut declarations = BTreeMap::new();
+    for p in &functions {
+        declarations.extend(p.imports.iter().map(|(n, s)| (n.clone(), s.clone())));
+        declarations.insert(p.function.sig.name.clone(), p.function.sig.clone());
     }
-    writeln!(s, "{} {{", signature(&p.function.sig)).unwrap();
+    for sig in declarations.values() {
+        let private = locals.contains(sig.name.as_str()) && sig.name != p.function.sig.name;
+        writeln!(
+            s,
+            "{} {};",
+            if private { "static" } else { "extern" },
+            signature(sig)
+        )
+        .unwrap();
+    }
+    for (i, p) in functions.iter().enumerate() {
+        c_body(p, &mut s, i != 0);
+    }
+    s
+}
+fn c_body(p: &Checked, s: &mut String, private: bool) {
+    writeln!(
+        s,
+        "{}{} {{",
+        if private { "static " } else { "" },
+        signature(&p.function.sig)
+    )
+    .unwrap();
     for (r, t) in &p.types {
         if *r as usize >= p.function.sig.params.len() {
             writeln!(s, "{} r{r};", cty(t)).unwrap()
@@ -106,10 +137,10 @@ pub fn c(p: &Checked) -> String {
     }
         }
     }
-    ops(&mut s, &p.function.ops, &p.types);
+    ops(s, &p.function.ops, &p.types);
     writeln!(s, "return r{};\n}}", p.function.result).unwrap();
-    s
 }
+
 fn lty(t: &Ty) -> &'static str {
     if *t == Ty::Num { "i64" } else { "{ ptr, i64 }" }
 }
@@ -383,36 +414,60 @@ impl Ll {
     }
 }
 pub fn llvm(p: &Checked) -> Result<String, String> {
-    if p.types
-        .values()
-        .chain(
-            p.imports
-                .values()
-                .flat_map(|s| s.params.iter().chain([&s.result])),
-        )
-        .any(|t| t.heap())
-    {
+    let functions = std::iter::once(p)
+        .chain(p.local_functions.iter())
+        .collect::<Vec<_>>();
+    if functions.iter().any(|p| {
+        p.types
+            .values()
+            .chain(
+                p.imports
+                    .values()
+                    .flat_map(|s| s.params.iter().chain([&s.result])),
+            )
+            .any(|t| t.heap())
+    }) {
         return Err("LLVM comparison backend does not yet support owned heap values".into());
     }
-
+    let locals = functions
+        .iter()
+        .map(|p| p.function.sig.name.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut declarations = BTreeMap::new();
+    for p in &functions {
+        declarations.extend(
+            p.imports
+                .iter()
+                .filter(|(n, _)| !locals.contains(n.as_str()))
+                .map(|(n, s)| (n.clone(), s.clone())),
+        );
+    }
+    let mut s = String::from("declare void @abort() noreturn\n");
+    for sig in declarations.values() {
+        writeln!(
+            s,
+            "declare {} @g_{}({})",
+            lty(&sig.result),
+            sig.name,
+            sig.params.iter().map(lty).collect::<Vec<_>>().join(", ")
+        )
+        .unwrap();
+    }
+    for (i, p) in functions.iter().enumerate() {
+        s.push_str(&llvm_body(p, i != 0));
+    }
+    Ok(s)
+}
+fn llvm_body(p: &Checked, private: bool) -> String {
     let mut ll = Ll {
-        s: "declare void @abort() noreturn\n".into(),
+        s: String::new(),
         id: 0,
         types: p.types.clone(),
     };
-    for s in p.imports.values() {
-        writeln!(
-            ll.s,
-            "declare {} @g_{}({})",
-            lty(&s.result),
-            s.name,
-            s.params.iter().map(lty).collect::<Vec<_>>().join(", ")
-        )
-        .unwrap()
-    }
     writeln!(
         ll.s,
-        "define {} @g_{}({}) {{\nentry:",
+        "define {}{} @g_{}({}) {{\nentry:",
+        if private { "internal " } else { "" },
         lty(&p.function.sig.result),
         p.function.sig.name,
         p.function
@@ -441,5 +496,5 @@ pub fn llvm(p: &Checked) -> Result<String, String> {
     let v = ll.load(p.function.result);
     ll.line(format!("ret {} {v}", lty(&p.function.sig.result)));
     ll.s.push_str("trap:\n  call void @abort()\n  unreachable\n}\n");
-    Ok(ll.s)
+    ll.s
 }

@@ -166,6 +166,61 @@ impl Parser<'_> {
     fn bind(&mut self, name: String, reg: Reg, mutable: bool) {
         self.vars.insert(name, Binding { reg, mutable });
     }
+    fn function(&mut self) -> Result<Function, String> {
+        self.vars.clear();
+        self.regions.clear();
+        self.next = 0;
+        self.expect("fn")?;
+        let name = self.ident()?;
+        if self.eat("<") {
+            loop {
+                let n = self.ident()?;
+                let id =
+                    u16::try_from(self.regions.len()).map_err(|_| self.error("region limit"))?;
+                if self.regions.insert(n, id).is_some() {
+                    return Err(self.error("duplicate region"));
+                }
+                if self.eat(">") {
+                    break;
+                }
+                self.expect(",")?;
+            }
+        }
+        self.expect("(")?;
+        let mut params = vec![];
+        if !self.eat(")") {
+            loop {
+                let n = self.ident()?;
+                if self.vars.contains_key(&n) {
+                    return Err(self.error("duplicate parameter"));
+                }
+                self.expect(":")?;
+                let t = self.ty()?;
+                let r = self.fresh()?;
+                self.bind(n, r, false);
+                params.push(t);
+                if self.eat(")") {
+                    break;
+                }
+                self.expect(",")?;
+            }
+        }
+        self.expect("->")?;
+        let result_ty = self.ty()?;
+        let sig = Sig {
+            name,
+            params,
+            result: result_ty,
+        };
+        sig.validate()?;
+        self.expect("{")?;
+        let mut ops = self.statements(0)?;
+        self.expect("return")?;
+        let result = self.expr(&mut ops, 0, 0)?;
+        self.expect(";")?;
+        self.expect("}")?;
+        Ok(Function { sig, ops, result })
+    }
     fn ty(&mut self) -> Result<Ty, String> {
         let name = self.ident()?;
         if name == "string" {
@@ -488,7 +543,7 @@ impl Parser<'_> {
         Ok(ops)
     }
 }
-/// One source module exports one function; imports are names resolved by the caller.
+/// One source module exports its first function; later functions are private helpers.
 pub fn imports(text: &str) -> Result<Vec<String>, String> {
     let mut p = Parser {
         tokens: lex(text)?,
@@ -516,89 +571,85 @@ pub fn compile(text: &str, available: BTreeMap<String, Sig>) -> Result<Checked, 
         vars: BTreeMap::new(),
         regions: BTreeMap::new(),
     };
-    let mut imported = BTreeMap::new();
+    let mut callable = BTreeMap::new();
     while p.eat("use") {
         let name = p.ident()?;
         let sig = available
             .get(&name)
             .ok_or_else(|| p.error("missing imported interface"))?
             .clone();
-        if imported.insert(name, sig).is_some() {
+        if sig.name != name {
+            return Err(p.error("import name does not match signature"));
+        }
+        sig.validate()?;
+        if callable.insert(name, sig).is_some() {
             return Err(p.error("duplicate import"));
         }
         p.expect(";")?;
     }
-    p.expect("fn")?;
-    let name = p.ident()?;
-    if p.eat("<") {
-        loop {
-            let n = p.ident()?;
-            let id = u16::try_from(p.regions.len()).map_err(|_| p.error("region limit"))?;
-            if p.regions.insert(n, id).is_some() {
-                return Err(p.error("duplicate region"));
-            }
-            if p.eat(">") {
-                break;
-            }
-            p.expect(",")?;
+    let mut functions = Vec::new();
+    while !p.peek().is_empty() {
+        if functions.len() >= 4096 {
+            return Err(p.error("function limit"));
         }
-    }
-    p.expect("(")?;
-    let mut params = vec![];
-    if !p.eat(")") {
-        loop {
-            let n = p.ident()?;
-            if p.vars.contains_key(&n) {
-                return Err(p.error("duplicate parameter"));
-            }
-            p.expect(":")?;
-            let t = p.ty()?;
-            let r = p.fresh()?;
-            p.bind(n, r, false);
-            params.push(t);
-            if p.eat(")") {
-                break;
-            }
-            p.expect(",")?;
+        let f = p.function()?;
+        if callable.insert(f.sig.name.clone(), f.sig.clone()).is_some() {
+            return Err(p.error("duplicate function/import name"));
         }
+        functions.push(f);
     }
-    p.expect("->")?;
-    let result_ty = p.ty()?;
-    let sig = Sig {
-        name,
-        params,
-        result: result_ty,
-    };
-    sig.validate()?;
-    p.expect("{")?;
-    let mut ops = p.statements(0)?;
-    p.expect("return")?;
-    let result = p.expr(&mut ops, 0, 0)?;
-    p.expect(";")?;
-    p.expect("}")?;
-    if !p.peek().is_empty() {
-        return Err(p.error("only one function per module is supported"));
+    if functions.is_empty() {
+        return Err(p.error("expected function"));
     }
-    let f = Function { sig, ops, result };
-    let mut state = State::default();
-    for (i, t) in f.sig.params.iter().enumerate() {
-        let roots = if t.reference().is_some() || t.owned() {
-            BTreeSet::from([crate::Root::Param(i)])
-        } else {
-            BTreeSet::new()
-        };
-        let v = state.new_value(t.clone(), roots, BTreeSet::new());
-        state.put(i as Reg, v)?;
+    let mut checked = Vec::new();
+    for f in functions {
+        let mut names = BTreeSet::new();
+        callees(&f.ops, &mut names);
+        let mut imports = BTreeMap::new();
+        for name in names {
+            let sig = callable
+                .get(&name)
+                .ok_or_else(|| format!("undefined function {name}"))?;
+            if name != f.sig.name {
+                imports.insert(name, sig.clone());
+            }
+        }
+        let mut available = imports.clone();
+        available.insert(f.sig.name.clone(), f.sig.clone());
+        let mut state = State::parameters(&f.sig.params)?;
+        let ops = ending(
+            &f.ops,
+            &mut state,
+            &available,
+            &BTreeSet::from([f.result]),
+            &BTreeSet::new(),
+        )?;
+        checked.push(check(Function { ops, ..f }, imports)?);
     }
-    let ops = ending(
-        &f.ops,
-        &mut state,
-        &imported,
-        &BTreeSet::from([result]),
-        &BTreeSet::new(),
-    )?;
-    check(Function { ops, ..f }, imported)
+    let mut entry = checked.remove(0);
+    entry.local_functions = checked;
+    Ok(entry)
 }
+fn callees(ops: &[Op], names: &mut BTreeSet<String>) {
+    for op in ops {
+        match op {
+            Op::Call { name, .. } => {
+                names.insert(name.clone());
+            }
+            Op::Block { body } | Op::Loop { body, .. } => callees(body, names),
+            Op::While { test, body, .. } => {
+                callees(test, names);
+                callees(body, names);
+            }
+            Op::If { yes, no, .. } => {
+                callees(yes, names);
+                callees(no, names);
+            }
+            _ => {}
+        }
+    }
+}
+
 fn live_before(op: &Op, after: &BTreeSet<Reg>) -> BTreeSet<Reg> {
     let mut live = after.clone();
     let (defs, uses): (Vec<Reg>, Vec<Reg>) = match op {

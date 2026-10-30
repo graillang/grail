@@ -34,7 +34,10 @@ choices should be explicit decisions with examples, rather than silent inference
 
 ## What the first source slice actually accepts
 
-One function per file, preceded by `use name;` imports. Functions optionally declare region names:
+One exported function per file (the first), followed by optional private helper functions and
+preceded by `use name;` imports. Headers are collected before body checking, allowing forward,
+self-recursive and mutually recursive calls. Each body is checked against signatures independently;
+variables and lifetime-name scopes do not cross functions. Functions optionally declare region names:
 
 ```grl
 fn first<a>(input: read<a>) -> read<a> {
@@ -86,7 +89,9 @@ ancestry can still become expensive; earlier typed-IR timings do not cover this 
 `compile FILE OUT IMPORT_DIR [clang|tcc]` checks source, emits C, compiles an object, then publishes
 its `.api`. `build` additionally links an executable with direct imported objects. Imports consume
 `.api`/`.o` files, never provider source; transitive module graphs and a persistent build cache are
-not yet implemented. An executable accepts no parameters, or one read byte view backed by argv[1],
+not yet implemented. Private helpers share the exported function's object, are not exported in its
+interface and have internal native linkage. Multiple public exports per module remain future work.
+An executable accepts no parameters, or one read byte view backed by argv[1],
 and returns a number printed by the generated C entry shim.
 
 Producer checks must succeed before the signature is published; a rejected body does not overwrite

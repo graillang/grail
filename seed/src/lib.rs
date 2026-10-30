@@ -289,6 +289,20 @@ struct State {
     blocked: BTreeMap<usize, usize>,
 }
 impl State {
+    fn parameters(params: &[Ty]) -> Result<Self, String> {
+        let mut s = Self::default();
+        for (i, t) in params.iter().enumerate() {
+            let roots = if t.reference().is_some() || t.owned() {
+                BTreeSet::from([Root::Param(i)])
+            } else {
+                BTreeSet::new()
+            };
+            let v = s.new_value(t.clone(), roots, BTreeSet::new());
+            s.put(i as Reg, v)?;
+        }
+        Ok(s)
+    }
+
     fn get(&self, r: Reg) -> Result<&Value, String> {
         self.values
             .get(&r)
@@ -746,6 +760,7 @@ impl State {
 /// Only this validated wrapper can reach native lowering.
 pub struct Checked {
     pub(crate) function: Function,
+    pub(crate) local_functions: Vec<Checked>,
     pub(crate) imports: BTreeMap<String, Sig>,
     pub(crate) types: BTreeMap<Reg, Ty>,
 }
@@ -762,17 +777,10 @@ pub fn check(function: Function, imports: BTreeMap<String, Sig>) -> Result<Check
             return Err("invalid import key/self import".into());
         }
     }
-    let mut s = State::default();
-    for (i, t) in function.sig.params.iter().enumerate() {
-        let roots = if t.reference().is_some() || t.owned() {
-            BTreeSet::from([Root::Param(i)])
-        } else {
-            BTreeSet::new()
-        };
-        let v = s.new_value(t.clone(), roots, BTreeSet::new());
-        s.put(i as Reg, v)?;
-    }
-    s.ops(&function.ops, &imports, 0)?;
+    let mut s = State::parameters(&function.sig.params)?;
+    let mut callable = imports.clone();
+    callable.insert(function.sig.name.clone(), function.sig.clone());
+    s.ops(&function.ops, &callable, 0)?;
     let result = s.usable(function.result)?;
     if s.values
         .iter()
@@ -802,6 +810,7 @@ pub fn check(function: Function, imports: BTreeMap<String, Sig>) -> Result<Check
         }
     }
     Ok(Checked {
+        local_functions: Vec::new(),
         function,
         imports,
         types: s.types,

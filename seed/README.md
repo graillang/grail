@@ -150,3 +150,23 @@ is invalid when `take` consumes `b`; compute `let n=len(b);` first and call `tak
 readonly reborrows such as `take(read(p),len(p))` retain `p` when the types permit them.
 Builtin storage operations (`len`, `read`, `copy_bytes`, etc.) use their documented borrowing/place
 rules; they do not consume an owner simply because it appears as an operand.
+
+## Private helpers and recursion
+
+A source file's first function remains its exported entry/interface. Additional functions are
+private helpers in the same object; their names, locals and declared lifetime scopes do not leak.
+All headers are collected before checking any body, so forward, self and mutual calls work without
+cross-body ownership inference. Even an unused helper must type/borrow check. Duplicate function names
+or a function/import collision are rejected. Calls refer to declared signatures and preserve the
+same eager argument/loan rules as imported calls.
+
+The C and pure-subset LLVM emitters give helpers internal linkage. Different modules may use the
+same helper name. Only the exported entry produces `.api`/`.o`; clients still do not read provider
+source. The interface remains schema 3. Multiple public exports, module paths, type-definition
+metadata and transitive build graphs are still pending. Source modules are bounded to 4,096 functions;
+there is no runtime recursion limit or prevention of native stack exhaustion.
+
+```sh
+seed/target/release/grail-seed build seed/examples/functions.grl seed/.work/functions seed/.work/functions
+seed/.work/functions/functions  # 146
+```

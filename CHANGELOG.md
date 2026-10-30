@@ -156,3 +156,8 @@
   acceptance pairs and seven equal native executions for aggregate/region gates. Record the useful
   field/variance/drop-liveness distinctions, remaining Grail work and Lust's older NLL restrictions
   without treating external subset/performance claims as Grail guarantees.
+
+- Add private source-module helpers, forward calls and self/mutual recursion. Collect signatures
+  before independent body checks, keep only used callee headers per body, and emit private native
+  linkage in C/LLVM. Validate hidden-source clients, repeated helper names across modules, invalid
+  unused helpers and allocator-audited owner transfer. The first function is still the sole export.
