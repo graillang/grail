@@ -316,3 +316,12 @@ The first source path uses explicit interfaces plus conservative local loan endi
 checked IR with slices, byte writes and numeric branches. Source modules remain one-function,
 direct-import units, not a package system. The zero-copy parser is a real `.grl` example; owned
 heap containers, general generics, Result and self-hosting remain subsequent gates, not claims.
+
+## Modern Rust baseline, not stable-only limitations
+
+The human requested next-generation Rust coverage. The [pinned audit](rust-next-baseline.md)
+compiles 49 configurations/cases and isolates Polonius from the next trait solver. Modern Rust
+accepts conditional-return/get-or-insert cases that stable-default rejects, while the tested
+stored-referent replacement/restoration cases remain rejected. Explicit interfaces do not imply
+these older stable borrow limitations. Compare v0's later control-flow/generic work with modern
+Rust, and do not treat external Rust modeling/correctness work as automatically proving Grail.

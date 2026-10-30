@@ -124,3 +124,7 @@
   cleanup separately from last-use loan ending. Bump seed interfaces to schema 2.
 - Validate heap cleanup and reverse drop order with independent allocator wrappers, including loops,
   clones and returned owners. LLVM comparison explicitly rejects unsupported heap layouts.
+
+- Audit stable and pinned modern Rust (2026-10-29 nightly) with Polonius/next-solver flag isolation:
+  conditional reborrows and get-or-insert now pass; stored-referent replacement/restoration still
+  reject in the tested forms. Correct the comparison baseline without claiming a soundness proof.
