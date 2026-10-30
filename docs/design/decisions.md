@@ -209,3 +209,16 @@ alias mutable storage. Moved targets must be checked again at activation.
 The finite model supports a stable named-place subset, not general indexed/pointee selectors.
 Reservation or precisely defined deferred resolution remain alternatives. Specify selector effect,
 address-stability and bounds-check timing before promising a general no-two-phase-borrow rule.
+
+## Restricted kernel-checked preservation
+
+The [preservation core](preservation-core.md) establishes unbounded dependency coverage for a small
+pure list/slot grammar, public-bound widening and conditional tracked-data validity. It separates
+base shape, current support, access authority, activation and cleanup obligations without requiring
+five new surface concepts. Seven Lean declarations check with no domain axioms or admitted proofs;
+only standard propositional extensionality occurs in their axiom reports.
+
+This does not certify earlier Python artifacts, physical ownership/alias safety or a complete Grail
+architecture. Require a checked connection to body/interface semantics before advertising independent
+contract certification. Symbolic pre-source instantiation and structured generic forwarding remain
+useful next proof boundaries; no full compiler is authorized by this research result.

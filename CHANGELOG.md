@@ -61,3 +61,8 @@
   materialized storage views and copied-view aliasing, with five Rust reference probes.
 - Document stable-place premises and unresolved selector/address/bounds-check timing; no frontend
   implementation, general safety proof or bug in the older restricted IR is claimed.
+
+- Add a pinned, isolated Lean preservation core for pure shared-data dependency state, public-bound
+  composition and conditional tracked-root validity, with checked counterexamples and axiom reports.
+- Consolidate distinct shape/support/authority/activation/cleanup obligations; explicitly exclude
+  earlier artifact certification, physical ownership/alias safety and full-language verification.

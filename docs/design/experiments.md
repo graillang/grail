@@ -98,3 +98,9 @@ The [second results](experiment-results-02.md) implement the bounded shared-view
 The open gates now concern formal preservation and extension to mutation/control flow, not whether
 simple field-wise shared-view propagation can be implemented at all. The chosen origin-set encoding
 has an explicit dense-case size limit; compression/widening/annotation policy is still undecided.
+
+## Kernel-checked dependency core
+
+The [core10 synthesis](preservation-core.md) moves one restricted coverage obligation from finite
+examples to a Lean-checked induction over all finite programs in a pure list/slot grammar. It also
+makes explicit what is not inherited by the Python prototypes or by authority/cleanup models.
