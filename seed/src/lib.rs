@@ -9,6 +9,7 @@ mod flow;
 pub mod module;
 mod sha256;
 pub mod source;
+mod sum;
 pub mod types;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -21,7 +22,8 @@ pub enum Mode {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Ty {
     Num,
-    Record(String, Vec<u16>),
+    Named(String, Vec<u16>),
+    Unit,
     Buffer,
     Bytes,
     Text,
@@ -29,10 +31,13 @@ pub enum Ty {
     Holder(Mode, u16),
 }
 impl Ty {
+    fn copy(&self) -> bool {
+        matches!(self, Self::Num | Self::Unit)
+    }
     fn owned(&self) -> bool {
         matches!(
             self,
-            Self::Buffer | Self::Bytes | Self::Text | Self::Record(..)
+            Self::Buffer | Self::Bytes | Self::Text | Self::Named(..)
         )
     }
     fn heap(&self) -> bool {
@@ -46,8 +51,9 @@ impl Ty {
     }
     fn word(&self) -> String {
         match self {
+            Self::Unit => "u".into(),
             Self::Num => "n".into(),
-            Self::Record(n, args) => format!(
+            Self::Named(n, args) => format!(
                 "t{n}@{}",
                 args.iter()
                     .map(u16::to_string)
@@ -80,9 +86,12 @@ impl Ty {
             if args.len() > 64 {
                 return Err("record lifetime arity limit".into());
             }
-            return Ok(Self::Record(n.into(), args));
+            return Ok(Self::Named(n.into(), args));
         }
 
+        if s == "u" {
+            return Ok(Self::Unit);
+        }
         if s == "n" {
             return Ok(Self::Num);
         }
@@ -139,7 +148,7 @@ impl Sig {
             .params
             .iter()
             .chain([&self.result])
-            .any(|t| matches!(t,Ty::Record(n,args)if !qualified_ok(n)||args.len()>64))
+            .any(|t| matches!(t,Ty::Named(n,args)if !qualified_ok(n)||args.len()>64))
         {
             return Err("invalid nominal signature type".into());
         }
@@ -152,7 +161,7 @@ impl Sig {
             return Err("owned buffers cannot cross seed interfaces".into());
         }
         if let Some((mode, r)) = self.result.reference()
-            && !self.params.iter().any(|t| matches!(t, Ty::Record(..)))
+            && !self.params.iter().any(|t| matches!(t, Ty::Named(..)))
             && !self.params.iter().any(|t| {
                 t.reference()
                     .is_some_and(|(m, p)| p == r && (mode == Mode::Read || m == Mode::Write))
@@ -165,7 +174,7 @@ impl Sig {
     pub fn encode(&self) -> Result<String, String> {
         self.validate()?;
         Ok(format!(
-            "grail-seed-interface-4\n{}\n{}\n{}\n",
+            "grail-seed-interface-5\n{}\n{}\n{}\n",
             self.name,
             self.params
                 .iter()
@@ -180,7 +189,7 @@ impl Sig {
             return Err("interface too large".into());
         }
         let lines = text.lines().collect::<Vec<_>>();
-        if lines.len() != 4 || lines[0] != "grail-seed-interface-4" {
+        if lines.len() != 4 || lines[0] != "grail-seed-interface-5" {
             return Err("invalid interface schema".into());
         }
         let params = if lines[2].is_empty() {
@@ -216,9 +225,30 @@ pub enum Bin {
     And,
 }
 #[derive(Clone, Debug)]
+pub struct Arm {
+    pub variant: String,
+    pub binding: Option<Reg>,
+    pub body: Vec<Op>,
+}
+#[derive(Clone, Debug)]
 pub enum Op {
     Return(Reg),
     Num(Reg, u64),
+    Unit(Reg),
+    Variant {
+        dst: Reg,
+        name: String,
+        variant: usize,
+        payload: Option<Reg>,
+    },
+    Unwrap {
+        dst: Reg,
+        src: Reg,
+    },
+    Match {
+        src: Reg,
+        arms: Vec<Arm>,
+    },
     Record {
         dst: Reg,
         name: String,
@@ -353,7 +383,7 @@ struct Value {
 struct State {
     signature: std::sync::Arc<Sig>,
     terminated: bool,
-    records: types::Context,
+    layouts: types::Context,
     values: BTreeMap<Reg, Value>,
     resources: BTreeSet<Reg>,
     next: usize,
@@ -362,9 +392,9 @@ struct State {
     blocked: BTreeMap<usize, usize>,
 }
 impl State {
-    fn parameters(signature: &Sig, records: types::Context) -> Result<Self, String> {
+    fn parameters(signature: &Sig, layouts: types::Context) -> Result<Self, String> {
         let mut s = Self {
-            records,
+            layouts,
             signature: std::sync::Arc::new(signature.clone()),
             terminated: false,
             values: BTreeMap::new(),
@@ -395,7 +425,7 @@ impl State {
             return Err("register limit".into());
         }
         if let Some(old) = self.values.get(&r)
-            && (old.ty != Ty::Num || v.ty != Ty::Num)
+            && (!old.ty.copy() || !v.ty.copy())
         {
             return Err(format!("r{r}: overwrite needs explicit end"));
         }
@@ -407,7 +437,7 @@ impl State {
         self.remove(r);
         self.types.insert(r, v.ty.clone());
         self.index_add(&v);
-        if v.ty != Ty::Num {
+        if !v.ty.copy() {
             self.resources.insert(r);
         }
         self.values.insert(r, v);
@@ -481,13 +511,13 @@ impl State {
     }
     fn validate_closed(&self, entry: &BTreeMap<Reg, Value>) -> Result<(), String> {
         for (r, v) in &self.values {
-            if !entry.contains_key(r) && v.ty != Ty::Num {
+            if !entry.contains_key(r) && !v.ty.copy() {
                 return Err("block-local resource must end".into());
             }
         }
         for (r, v) in entry {
             let after = self.get(*r)?;
-            if v.ty != after.ty || (v.ty != Ty::Num && v != after) {
+            if v.ty != after.ty || (!v.ty.copy() && v != after) {
                 return Err("block changes entry ownership".into());
             }
         }
@@ -507,6 +537,43 @@ impl State {
                 return Err("unreachable operation after return".into());
             }
             match op {
+                Op::Unit(r) => {
+                    let v = self.new_value(Ty::Unit, BTreeSet::new(), BTreeSet::new());
+                    self.put(*r, v)?;
+                }
+                Op::Variant {
+                    dst,
+                    name,
+                    variant,
+                    payload,
+                } => self.variant_value(*dst, name, *variant, *payload)?,
+                Op::Unwrap { dst, src } => {
+                    let k = self.success(*src)?;
+                    let unit = types::fields(&self.get(*src)?.ty, &self.layouts)?[k].1 == Ty::Unit;
+                    self.payload(*src, k, if unit { None } else { Some(*dst) })?;
+                    if unit {
+                        let v = self.new_value(Ty::Unit, BTreeSet::new(), BTreeSet::new());
+                        self.put(*dst, v)?;
+                    }
+                }
+                Op::Match { src, arms } => {
+                    let indices = self.arms(*src, arms)?;
+                    let entry = self.clone();
+                    let mut joined: Option<State> = None;
+                    for (a, k) in arms.iter().zip(indices) {
+                        let mut branch = entry.clone();
+                        branch.payload(*src, k, a.binding)?;
+                        branch.ops(&a.body, imports, depth + 1)?;
+                        if let Some(acc) = joined.take() {
+                            self.join(acc, branch)?;
+                            joined = Some(self.clone());
+                        } else {
+                            joined = Some(branch);
+                        }
+                    }
+                    *self = joined.expect("nonempty exhaustive match");
+                }
+
                 Op::Return(r) => {
                     self.validate_return(*r)?;
                     self.terminated = true;
@@ -596,7 +663,7 @@ impl State {
                     path,
                     mode,
                 } => {
-                    let (indices, _) = types::project(&self.get(*src)?.ty, path, &self.records)?;
+                    let (indices, _) = types::project(&self.get(*src)?.ty, path, &self.layouts)?;
                     let p = self.get(*src)?.at(&indices)?.clone();
                     let v = self.borrow_value(p, *mode)?;
                     self.put(*dst, v)?;
@@ -654,7 +721,7 @@ impl State {
                     if v.ty.owned() && self.owner_borrowed(&v) {
                         return Err("move of borrowed owner".into());
                     }
-                    if v.ty != Ty::Num {
+                    if !v.ty.copy() {
                         self.remove(*src);
                     }
                     self.put(*dst, v)?;
@@ -692,7 +759,7 @@ impl State {
                 }
                 Op::Call { dst, name, args } => {
                     let sig = imports.get(name).ok_or("unknown imported function")?;
-                    types::validate_sig(sig, &self.records)?;
+                    types::validate_sig(sig, &self.layouts)?;
                     if sig.params.len() != args.len() {
                         return Err("call arity".into());
                     }
@@ -700,22 +767,14 @@ impl State {
                     let mut consumed = BTreeSet::new();
                     for (r, t) in args.iter().zip(&sig.params) {
                         let v = self.usable(*r)?;
-                        let matches = match (&v.ty, t) {
-                            (Ty::Record(a, _), Ty::Record(b, _)) => a == b,
-                            (Ty::Num, Ty::Num) | (Ty::Bytes, Ty::Bytes) | (Ty::Text, Ty::Text) => {
-                                true
-                            }
-                            (Ty::View(a, _), Ty::View(b, _))
-                            | (Ty::Holder(a, _), Ty::Holder(b, _)) => a == b,
-                            _ => false,
-                        };
+                        let matches = aggregate::compatible(t, &v.ty);
                         if !matches {
                             return Err("call argument type/mode".into());
                         }
                         if v.ty.owned() && self.owner_borrowed(&v) {
                             return Err("call moves borrowed owner".into());
                         }
-                        if *t != Ty::Num && !consumed.insert(*r) {
+                        if !t.copy() && !consumed.insert(*r) {
                             return Err("affine argument duplicated".into());
                         }
                         actuals.push(v);
@@ -766,7 +825,7 @@ pub struct Checked {
     pub(crate) function: Function,
     pub(crate) imports: BTreeMap<String, Sig>,
     pub(crate) types: BTreeMap<Reg, Ty>,
-    pub(crate) records: types::Context,
+    pub(crate) layouts: types::Context,
     pub(crate) return_tail: Option<Reg>,
 }
 impl Checked {
@@ -775,21 +834,21 @@ impl Checked {
     }
 }
 pub fn check(function: Function, imports: BTreeMap<String, Sig>) -> Result<Checked, String> {
-    check_with_records(function, imports, crate::types::Context::default())
+    check_with_types(function, imports, crate::types::Context::default())
 }
-pub fn check_with_records(
+pub fn check_with_types(
     function: Function,
     imports: BTreeMap<String, Sig>,
-    records: types::Context,
+    layouts: types::Context,
 ) -> Result<Checked, String> {
-    types::validate_sig(&function.sig, &records)?;
+    types::validate_sig(&function.sig, &layouts)?;
     for (name, sig) in &imports {
-        types::validate_sig(sig, &records)?;
+        types::validate_sig(sig, &layouts)?;
         if name != &sig.name || name == &function.sig.name {
             return Err("invalid import key/self import".into());
         }
     }
-    let mut s = State::parameters(&function.sig, records.clone())?;
+    let mut s = State::parameters(&function.sig, layouts.clone())?;
     let mut callable = imports.clone();
     callable.insert(function.sig.name.clone(), function.sig.clone());
     s.ops(&function.ops, &callable, 0)?;
@@ -806,7 +865,7 @@ pub fn check_with_records(
         function,
         imports,
         types: s.types,
-        records,
+        layouts,
         return_tail,
     })
 }

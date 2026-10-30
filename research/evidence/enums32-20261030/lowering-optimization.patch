@@ -1,0 +1,41 @@
+--- a/seed/src/types.rs
++++ b/seed/src/types.rs
+@@ -69,0 +70,11 @@
++/// Resolve only the selected child; do not clone a whole union table for a path step.
++pub fn field(t: &Ty, index: usize, defs: &Definitions) -> Result<Ty, String> {
++    let Ty::Named(n, args) = t else {
++        return Err("expected nominal type".into());
++    };
++    let d = defs.get(n).ok_or("unknown nominal type")?;
++    if args.len() != d.regions as usize {
++        return Err("nominal lifetime arity".into());
++    }
++    substitute(&d.fields.get(index).ok_or("field index")?.1, args)
++}
+@@ -118 +129 @@
+-        t = fields(&t, defs)?.get(*i).ok_or("field index")?.1.clone();
++        t = field(&t, *i, defs)?;
+--- a/seed/src/emit.rs
++++ b/seed/src/emit.rs
+@@ -56 +56 @@
+-        t = crate::types::fields(&t, layouts).unwrap()[*i].1.clone();
++        t = crate::types::field(&t, *i, layouts).unwrap();
+@@ -83,0 +84,13 @@
++    }
++}
++fn clear_variant_flags(
++    s: &mut String,
++    r: Reg,
++    t: &Ty,
++    layouts: &crate::types::Definitions,
++    variant: usize,
++) {
++    for (i, path) in owned_paths(t, layouts).iter().enumerate() {
++        if path.first() == Some(&variant) {
++            writeln!(s, "r{r}_live[{i}]=0;").unwrap();
++        }
+@@ -238,2 +251,2 @@
+-        Op::Unwrap{dst,src}=>{let k=crate::types::success(&types[src],layouts).unwrap();writeln!(s,"if(r{src}.tag!={k})abort();").unwrap();if types[dst]==Ty::Unit{writeln!(s,"r{dst}=0;").unwrap();}else{writeln!(s,"r{dst}=r{src}.data.f{k};").unwrap();}record_flags(s,*dst,&types[dst],layouts,true);record_flags(s,*src,&types[src],layouts,false);},
+-        Op::Match{src,arms}=>{let fields=crate::types::fields(&types[src],layouts).unwrap();writeln!(s,"switch(r{src}.tag){{").unwrap();for a in arms{let k=fields.iter().position(|(n,_)|*n==a.variant).unwrap();writeln!(s,"case {k}:{{").unwrap();if let Some(r)=a.binding{if types[&r]==Ty::Unit{writeln!(s,"r{r}=0;").unwrap();}else{writeln!(s,"r{r}=r{src}.data.f{k};").unwrap();}record_flags(s,r,&types[&r],layouts,true);}record_flags(s,*src,&types[src],layouts,false);ops(s,&a.body,types,layouts);if !crate::flow::terminates(&a.body){s.push_str("break;");}s.push_str("}\n");}s.push_str("default:abort();}\n");},
++        Op::Unwrap{dst,src}=>{let k=crate::types::success(&types[src],layouts).unwrap();writeln!(s,"if(r{src}.tag!={k})abort();").unwrap();if types[dst]==Ty::Unit{writeln!(s,"r{dst}=0;").unwrap();}else{writeln!(s,"r{dst}=r{src}.data.f{k};").unwrap();}record_flags(s,*dst,&types[dst],layouts,true);clear_variant_flags(s,*src,&types[src],layouts,k);},
++        Op::Match{src,arms}=>{let fields=crate::types::fields(&types[src],layouts).unwrap();writeln!(s,"switch(r{src}.tag){{").unwrap();for a in arms{let k=fields.iter().position(|(n,_)|*n==a.variant).unwrap();writeln!(s,"case {k}:{{").unwrap();if let Some(r)=a.binding{if types[&r]==Ty::Unit{writeln!(s,"r{r}=0;").unwrap();}else{writeln!(s,"r{r}=r{src}.data.f{k};").unwrap();}record_flags(s,r,&types[&r],layouts,true);}clear_variant_flags(s,*src,&types[src],layouts,k);ops(s,&a.body,types,layouts);if !crate::flow::terminates(&a.body){s.push_str("break;");}s.push_str("}\n");}s.push_str("default:abort();}\n");},

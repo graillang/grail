@@ -89,10 +89,10 @@ fn record_constructors_do_not_steal_shadowed_condition_names() {
 
 #[test]
 fn nominal_payload_bounds_roundtrip_before_artifact_publication() {
-    use grail_seed::{Sig, Ty, module::Interface, types::Record};
+    use grail_seed::{Sig, Ty, module::Interface, types::Definition};
     let sig = Sig {
         name: "wide".into(),
-        params: vec![Ty::Record("many::T".into(), vec![65535; 64]); 64],
+        params: vec![Ty::Named("many::T".into(), vec![65535; 64]); 64],
         result: Ty::Num,
     };
     let text = sig.encode().unwrap();
@@ -107,9 +107,10 @@ fn nominal_payload_bounds_roundtrip_before_artifact_publication() {
         .map(|i| (format!("field_{i}_{}", "x".repeat(65)), Ty::Num))
         .collect::<Vec<_>>();
     for i in 0..4096 {
-        header.records.insert(
+        header.layouts.insert(
             format!("large::R{i}"),
-            Record {
+            Definition {
+                kind: grail_seed::types::Kind::Record,
                 regions: 0,
                 fields: fields.clone(),
             },

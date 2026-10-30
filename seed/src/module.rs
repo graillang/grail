@@ -6,7 +6,7 @@ pub struct Interface {
     pub name: String,
     pub entry: String,
     pub exports: BTreeMap<String, Sig>,
-    pub records: crate::types::Definitions,
+    pub layouts: crate::types::Definitions,
     pub dependencies: BTreeMap<String, String>,
 }
 impl Interface {
@@ -15,7 +15,7 @@ impl Interface {
             name: sig.name.clone(),
             entry: sig.name.clone(),
             exports: BTreeMap::from([(sig.name.clone(), sig)]),
-            records: BTreeMap::new(),
+            layouts: BTreeMap::new(),
             dependencies: BTreeMap::new(),
         }
     }
@@ -31,19 +31,25 @@ impl Interface {
         // Enforce the byte bound before publication too, not only during decoding. Otherwise
         // a producer could atomically publish an interface that no consumer can admit.
         let mut bytes = format!(
-            "grail-seed-module-2\n{}\n{}\n{}\n{}\n{}\n",
+            "grail-seed-module-3\n{}\n{}\n{}\n{}\n{}\n",
             self.name,
             self.entry,
             self.exports.len(),
             self.dependencies.len(),
-            self.records.len()
+            self.layouts.len()
         )
         .len();
         for sig in self.exports.values() {
             bytes += sig.encode()?.len();
         }
-        for (n, d) in &self.records {
-            bytes += format!("{n}\n{}\n{}\n", d.regions, d.fields.len()).len();
+        for (n, d) in &self.layouts {
+            bytes += format!(
+                "{n}\n{}\n{}\n{}\n",
+                d.kind.word(),
+                d.regions,
+                d.fields.len()
+            )
+            .len();
             for (n, t) in &d.fields {
                 bytes += n.len() + t.word().len() + 2;
                 if bytes > 8 * 1024 * 1024 {
@@ -57,9 +63,9 @@ impl Interface {
         if bytes > 8 * 1024 * 1024 {
             return Err("module interface too large".into());
         }
-        crate::types::validate(&self.records)?;
+        crate::types::validate(&self.layouts)?;
         for (name, sig) in &self.exports {
-            crate::types::validate_sig(sig, &self.records)?;
+            crate::types::validate_sig(sig, &self.layouts)?;
             let member = name.strip_prefix(&format!("{}::", self.name));
             if name != &sig.name || (name != &self.name && !member.is_some_and(name_ok)) {
                 return Err("export does not belong to module".into());
@@ -81,11 +87,11 @@ impl Interface {
     fn surface(&self) -> Result<String, String> {
         self.validate()?;
         let mut s = format!(
-            "grail-seed-surface-2\n{}\n{}\n{}\n{}\n",
+            "grail-seed-surface-3\n{}\n{}\n{}\n{}\n",
             self.name,
             self.entry,
             self.exports.len(),
-            self.records.len()
+            self.layouts.len()
         );
         for sig in self.exports.values() {
             s.push_str(&sig.encode()?);
@@ -101,12 +107,12 @@ impl Interface {
     pub fn encode(&self) -> Result<String, String> {
         self.validate()?;
         let mut s = format!(
-            "grail-seed-module-2\n{}\n{}\n{}\n{}\n{}\n",
+            "grail-seed-module-3\n{}\n{}\n{}\n{}\n{}\n",
             self.name,
             self.entry,
             self.exports.len(),
             self.dependencies.len(),
-            self.records.len()
+            self.layouts.len()
         );
         for sig in self.exports.values() {
             s.push_str(&sig.encode()?);
@@ -122,8 +128,13 @@ impl Interface {
     }
     fn record_text(&self) -> String {
         let mut s = String::new();
-        for (n, d) in &self.records {
-            s.push_str(&format!("{n}\n{}\n{}\n", d.regions, d.fields.len()));
+        for (n, d) in &self.layouts {
+            s.push_str(&format!(
+                "{n}\n{}\n{}\n{}\n",
+                d.kind.word(),
+                d.regions,
+                d.fields.len()
+            ));
             for (name, t) in &d.fields {
                 s.push_str(&format!("{name}={}\n", t.word()));
             }
@@ -135,13 +146,13 @@ impl Interface {
             return Err("module interface too large".into());
         }
         let lines = text.lines().collect::<Vec<_>>();
-        if lines.len() < 6 || lines[0] != "grail-seed-module-2" {
+        if lines.len() < 6 || lines[0] != "grail-seed-module-3" {
             return Err("invalid source module schema; rebuild source artifacts".into());
         }
         let n: usize = lines[3].parse().map_err(|_| "invalid export count")?;
         let d: usize = lines[4].parse().map_err(|_| "invalid dependency count")?;
-        let records: usize = lines[5].parse().map_err(|_| "invalid type count")?;
-        if n == 0 || n > 4096 || d > 4096 || records > 4096 || lines.len() < 6 + n * 4 + d * 2 {
+        let layouts: usize = lines[5].parse().map_err(|_| "invalid type count")?;
+        if n == 0 || n > 4096 || d > 4096 || layouts > 4096 || lines.len() < 6 + n * 4 + d * 2 {
             return Err("invalid module counts".into());
         }
         let mut exports = BTreeMap::new();
@@ -154,18 +165,23 @@ impl Interface {
             at += 4;
         }
         let mut types = BTreeMap::new();
-        for _ in 0..records {
-            if at + 3 > lines.len() {
+        for _ in 0..layouts {
+            if at + 4 > lines.len() {
                 return Err("truncated record".into());
             }
             let name = lines[at].to_string();
-            let regions = lines[at + 1]
+            let kind = match lines[at + 1] {
+                "record" => crate::types::Kind::Record,
+                "enum" => crate::types::Kind::Enum,
+                _ => return Err("invalid nominal layout kind".into()),
+            };
+            let regions = lines[at + 2]
                 .parse::<u16>()
                 .map_err(|_| "invalid record lifetime count")?;
-            let count = lines[at + 2]
+            let count = lines[at + 3]
                 .parse::<usize>()
                 .map_err(|_| "invalid field count")?;
-            at += 3;
+            at += 4;
             if count > 64 || at + count > lines.len() {
                 return Err("invalid field count".into());
             }
@@ -176,7 +192,14 @@ impl Interface {
             }
             at += count;
             if types
-                .insert(name, crate::types::Record { regions, fields })
+                .insert(
+                    name,
+                    crate::types::Definition {
+                        kind,
+                        regions,
+                        fields,
+                    },
+                )
                 .is_some()
             {
                 return Err("duplicate record".into());
@@ -199,7 +222,7 @@ impl Interface {
             name: lines[1].into(),
             entry: lines[2].into(),
             exports,
-            records: types,
+            layouts: types,
             dependencies,
         };
         module.validate()?;
@@ -213,7 +236,7 @@ impl Interface {
 pub struct CheckedModule {
     pub(crate) functions: Vec<(Checked, bool)>,
     pub(crate) header: Interface,
-    pub(crate) records: crate::types::Context,
+    pub(crate) layouts: crate::types::Context,
 }
 impl CheckedModule {
     pub fn interface(&self) -> String {

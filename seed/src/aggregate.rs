@@ -96,8 +96,8 @@ impl State {
             BTreeSet::new()
         };
         let mut v = self.new_value(t.clone(), roots, BTreeSet::new());
-        if matches!(t, Ty::Record(..)) {
-            for (i, (_, field)) in types::fields(t, &self.records)?.iter().enumerate() {
+        if matches!(t, Ty::Named(..)) {
+            for (i, (_, field)) in types::fields(t, &self.layouts)?.iter().enumerate() {
                 path.push(i);
                 v.fields
                     .push(Some(self.parameter_value(field, input, path)?));
@@ -140,13 +140,13 @@ impl State {
         if path.is_empty() || dst == src {
             return Err("invalid field move".into());
         }
-        let (indices, _) = types::project(&self.get(src)?.ty, path, &self.records)?;
+        let (indices, _) = types::project(&self.get(src)?.ty, path, &self.layouts)?;
         let v = self.get(src)?.at(&indices)?.clone();
         self.usable_value(&v)?;
         if v.ty.owned() && self.owner_borrowed(&v) {
             return Err("move of borrowed field".into());
         }
-        if v.ty != Ty::Num {
+        if !v.ty.copy() {
             self.index_remove(&v);
             let last = *indices.last().unwrap();
             let parent = self
@@ -171,7 +171,7 @@ impl State {
                 }
             }
         }
-        if !matches!(self.get(r)?.ty, Ty::Record(..)) {
+        if !matches!(self.get(r)?.ty, Ty::Named(..)) {
             return Err("capture ending expects record".into());
         }
         let mut todo = Vec::new();
@@ -194,12 +194,15 @@ impl State {
         fields: &[(String, Reg)],
     ) -> Result<(), String> {
         let d = self
-            .records
+            .layouts
             .get(name)
             .ok_or("unknown record constructor")?
             .clone();
         if fields.len() != d.fields.len() {
             return Err("record constructor field count".into());
+        }
+        if d.kind != types::Kind::Record {
+            return Err("enum needs a variant constructor".into());
         }
         let mut values = vec![None; d.fields.len()];
         let mut consumed = BTreeSet::new();
@@ -217,7 +220,7 @@ impl State {
             if v.ty.owned() && self.owner_borrowed(&v) {
                 return Err("construct from borrowed owner".into());
             }
-            if v.ty != Ty::Num && !consumed.insert(*r) {
+            if !v.ty.copy() && !consumed.insert(*r) {
                 return Err("affine constructor field duplicated".into());
             }
             values[i] = Some(v);
@@ -226,7 +229,7 @@ impl State {
             self.remove(r);
         }
         let mut v = self.new_value(
-            Ty::Record(name.into(), vec![0; d.regions as usize]),
+            Ty::Named(name.into(), vec![0; d.regions as usize]),
             BTreeSet::from([Root::Local(dst, vec![])]),
             BTreeSet::new(),
         );
@@ -244,7 +247,7 @@ impl State {
         let mut ancestors = BTreeSet::new();
         if let Some((mode, region)) = t.reference() {
             for (ty, value) in inputs {
-                for (p, leaf) in types::leaves(ty, &self.records)? {
+                for (p, leaf) in types::leaves(ty, &self.layouts)? {
                     if leaf.reference().is_some_and(|(m, r)| {
                         r == region && (mode == Mode::Read || m == Mode::Write)
                     }) {
@@ -258,8 +261,8 @@ impl State {
             roots.insert(Root::Local(dst, path.clone()));
         }
         let mut v = self.new_value(t.clone(), roots, ancestors);
-        if matches!(t, Ty::Record(..)) {
-            for (i, (_, field)) in types::fields(t, &self.records)?.iter().enumerate() {
+        if matches!(t, Ty::Named(..)) {
+            for (i, (_, field)) in types::fields(t, &self.layouts)?.iter().enumerate() {
                 path.push(i);
                 v.fields
                     .push(Some(self.result_value(field, dst, path, inputs)?));
@@ -269,9 +272,9 @@ impl State {
         Ok(v)
     }
 }
-fn compatible(a: &Ty, b: &Ty) -> bool {
+pub(super) fn compatible(a: &Ty, b: &Ty) -> bool {
     match (a, b) {
-        (Ty::Record(a, _), Ty::Record(b, _)) => a == b,
+        (Ty::Named(a, _), Ty::Named(b, _)) => a == b,
         (Ty::View(a, _), Ty::View(b, _)) | (Ty::Holder(a, _), Ty::Holder(b, _)) => a == b,
         _ => a == b,
     }

@@ -59,9 +59,9 @@ consume exponential work without adding primitive leaves. Each declaration has a
 and 64 lifetime slots. Empty records have a one-byte C representation. Numeric/view/owned layouts
 remain the existing native C ABI; this evidence is Linux x86-64 only.
 
-Public signatures retain nominal IDs and lifetime arguments. Module schema **2** includes the
+Public signatures retain nominal IDs and lifetime arguments. Module schema **3** includes the
 reachable definition closure (including imported types used by public signatures); function payloads
-are schema **4**. Private-only definitions do not enter a public surface. Layout/name/order/lifetime
+are schema **5**. Private-only definitions do not enter a public surface. Layout/name/order/lifetime
 changes therefore invalidate stale native dependents even when nominal function signature words do
 not change. Rebuild earlier source/function artifacts; there is no old-schema parser fallback.
 
@@ -78,7 +78,7 @@ There is no exception-unwinding/backtrace metadata guarantee for this TinyCC pro
 ## Remaining work / no completion claim
 
 General `&T` / `&mut T` references, invariant reference-containing setters, type/const generics,
-generic vectors/maps, enums/Result, field assignment/reinitialization, unbalanced ownership joins,
+generic vectors/maps/Result, field assignment/reinitialization, unbalanced ownership joins,
 user destructors and full self-hosting remain unfinished. Early-return cleanup is now implemented;
 see [return cleanup](return-cleanup.md). Grow/mutate owned
 record containers by moving the field out for now; the complete goal still requires normal mutable

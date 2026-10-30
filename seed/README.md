@@ -91,7 +91,7 @@ one text argument. Generic heap containers, Result and type generics are still f
 ## Heap byte owners
 
 [Semantics and limits](../docs/design/heap-ownership.md). `bytes()`, `push`, `copy_bytes` and
-owned `bytes` parameters/results are supported by the C backend. Function-signature payloads are schema 4 (see the source-module format below);
+owned `bytes` parameters/results are supported by the C backend. Function-signature payloads are schema 5 (see the source-module format below);
 rebuild old `.api` files. Heap owners drop at scope exit, not at borrowed-value last use.
 
 ```sh
@@ -171,10 +171,10 @@ inference. Locals/lifetime-name scopes do not cross functions; unused helpers ar
 Duplicate function/import names are errors. Public native symbols are namespace-qualified;
 helpers have internal linkage, so different modules may use the same private name.
 
-`compile` emits `<module>.api` / `.o` / `.c`. Source interfaces now use **module schema 2**, carrying
+`compile` emits `<module>.api` / `.o` / `.c`. Source interfaces now use **module schema 3**, carrying
 all public function signatures, reachable nominal type layouts, the primary export, and expected direct-dependency surface hashes.
 Rebuild prior source artifacts: there is no source-schema fallback. The standalone typed-IR fixture
-commands still actively use function-signature schema 4, also the function payload inside a module.
+commands still actively use function-signature schema 5, also the function payload inside a module.
 `source::compile` returns a flat `CheckedModule`; use `emit::module_c` / `module_llvm`. The raw IR
 checker and its single-function emitters remain available for the existing conformance fixtures.
 
@@ -197,7 +197,7 @@ sandbox against hostile filesystem writers modifying a captured generation after
 Power-loss durability/fsync guarantees, generation garbage collection and automatic rebuilds are
 not implemented. Old generations remain available for captured links and reproducible retention. Interfaces are bounded to 8 MiB, modules to 4,096 functions, and
 link closures to 4,096 modules / 256 dependency depth. Native stack exhaustion is not prevented.
-Basic by-value records and public layout metadata are implemented; enums, generic containers,
+Basic by-value records, tagged enums and public layout metadata are implemented; generic containers,
 general mutable references and self-hosting remain unfinished.
 
 ```sh
@@ -222,4 +222,6 @@ completion. The LLVM comparison backend explicitly refuses record layouts; nativ
 Structured bodies support early returns in branches, blocks and loops. Cleanup runs before each
 return, excluding the returned owner; every exit checks its written lifetime contract. Equal resource
 states (including equal partial moves) may join; unequal continuing resource states still diagnose.
-`!` unwrap and `?` propagation are chosen future syntax, not implemented operations yet.
+Postfix `!` consumes an `Ok/Err` or `Some/None` enum, transfers success, and aborts on failure.
+Exhaustive `match` provides explicit recovery. `?` and generic Result/Option remain unfinished.
+See [tagged enums](../docs/design/tagged-enums.md).

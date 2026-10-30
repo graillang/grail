@@ -11,21 +11,17 @@ impl State {
         {
             return Err("heap owner must be ended or returned".into());
         }
-        let compatible = match (&result.ty, &sig.result) {
-            (Ty::Record(a, _), Ty::Record(b, _)) => a == b,
-            (Ty::View(a, _), Ty::View(b, _)) | (Ty::Holder(a, _), Ty::Holder(b, _)) => a == b,
-            (a, b) => a == b,
-        };
+        let compatible = aggregate::compatible(&result.ty, &sig.result);
         if !compatible {
             return Err("return type mismatch".into());
         }
-        for (path, t) in types::leaves(&sig.result, &self.records)? {
+        for (path, t) in types::leaves(&sig.result, &self.layouts)? {
             if let Some((mode, region)) = t.reference() {
                 for root in &result.at(&path)?.roots {
                     let Root::Param(i, p) = root else {
                         return Err("local owner escapes".into());
                     };
-                    let input = types::at(&sig.params[*i], p, &self.records)?;
+                    let input = types::at(&sig.params[*i], p, &self.layouts)?;
                     let Some((m, r)) = input.reference() else {
                         return Err("invalid return origin".into());
                     };
@@ -66,7 +62,7 @@ impl State {
                     return Err("branch ownership states differ; join not yet supported".into());
                 }
                 yes.values
-                    .retain(|r, v| v.ty != Ty::Num || no.values.contains_key(r));
+                    .retain(|r, v| !v.ty.copy() || no.values.contains_key(r));
                 *self = yes;
             }
         }
@@ -92,5 +88,17 @@ impl State {
         self.merge_types(&inner.types)?;
         self.next = self.next.max(inner.next);
         Ok(())
+    }
+}
+
+pub(crate) fn terminates(ops: &[Op]) -> bool {
+    match ops.last() {
+        Some(Op::Return(_)) => true,
+        Some(Op::Block { body }) => terminates(body),
+        Some(Op::If { yes, no, .. }) => terminates(yes) && terminates(no),
+        Some(Op::Match { arms, .. }) => {
+            !arms.is_empty() && arms.iter().all(|a| terminates(&a.body))
+        }
+        _ => false,
     }
 }

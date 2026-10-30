@@ -29,7 +29,7 @@ fn success(p: Output) {
 fn record_abi_hidden_sources_partial_moves_and_allocator_balance() {
     let backend = std::env::var("GRAIL_RECORD_TEST_BACKEND").unwrap_or_else(|_| "clang".into());
     let dir = std::env::temp_dir().join(format!(
-        "grail-records-{}-{}",
+        "grail-layouts-{}-{}",
         std::process::id(),
         SystemTime::now()
             .duration_since(UNIX_EPOCH)

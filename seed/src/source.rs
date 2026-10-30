@@ -1,5 +1,5 @@
 //! Borrowed-token parser and local loan ending for the first .grl slice.
-use crate::{Bin, Function, Mode, Op, Reg, Sig, State, Ty, check_with_records};
+use crate::{Arm, Bin, Function, Mode, Op, Reg, Sig, State, Ty, check_with_types};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Copy)]
@@ -91,12 +91,12 @@ fn lex(text: &str) -> Result<Vec<Token<'_>>, String> {
                 i += 1
             }
         } else if i + 1 < b.len()
-            && [b"->", b"==", b"!=", b"::"]
+            && [b"->", b"=>", b"==", b"!=", b"::"]
                 .iter()
                 .any(|s| b[i..].starts_with(*s))
         {
             i += 2
-        } else if b"(){}<>,:;=+-*%&^.".contains(&b[i]) {
+        } else if b"(){}<>,:;=+-*%&^.!".contains(&b[i]) {
             i += 1
         } else {
             return Err(format!("byte {i}: unexpected character"));
@@ -124,7 +124,7 @@ struct Parser<'a> {
     vars: BTreeMap<String, Binding>,
     regions: BTreeMap<String, u16>,
     module: String,
-    records: crate::types::Context,
+    layouts: crate::types::Context,
 }
 impl Parser<'_> {
     fn error(&self, msg: &str) -> String {
@@ -222,7 +222,7 @@ impl Parser<'_> {
             params,
             result: result_ty,
         };
-        crate::types::validate_sig(&sig, &self.records)?;
+        crate::types::validate_sig(&sig, &self.layouts)?;
         self.expect("{")?;
         let ops = self.statements(0)?;
         self.expect("}")?;
@@ -273,6 +273,7 @@ impl Parser<'_> {
         let name = self.path_name()?;
         match name.as_str() {
             "num" => return Ok(Ty::Num),
+            "unit" => return Ok(Ty::Unit),
             "bytes" => return Ok(Ty::Bytes),
             "string" => return Ok(Ty::Text),
             _ => {}
@@ -293,14 +294,19 @@ impl Parser<'_> {
                 Ty::View(mode, args[0])
             });
         }
-        Ok(Ty::Record(self.nominal(&name), args))
+        Ok(Ty::Named(self.nominal(&name), args))
     }
-    fn record(&mut self) -> Result<(String, crate::types::Record), String> {
+    fn record(&mut self) -> Result<(String, crate::types::Definition), String> {
         if self.module.is_empty() {
             return Err(self.error("record declarations need an explicit module"));
         }
         self.regions.clear();
-        self.expect("struct")?;
+        let kind = if self.eat("struct") {
+            crate::types::Kind::Record
+        } else {
+            self.expect("enum")?;
+            crate::types::Kind::Enum
+        };
         let name = self.ident()?;
         if self.eat("<") {
             loop {
@@ -321,8 +327,16 @@ impl Parser<'_> {
         if !self.eat("}") {
             loop {
                 let n = self.ident()?;
-                self.expect(":")?;
-                let t = self.ty()?;
+                let t = if kind == crate::types::Kind::Record {
+                    self.expect(":")?;
+                    self.ty()?
+                } else if self.eat("(") {
+                    let t = self.ty()?;
+                    self.expect(")")?;
+                    t
+                } else {
+                    Ty::Unit
+                };
                 fields.push((n, t));
                 if self.eat("}") {
                     break;
@@ -336,7 +350,11 @@ impl Parser<'_> {
         self.eat(";");
         Ok((
             self.nominal(&name),
-            crate::types::Record { regions, fields },
+            crate::types::Definition {
+                kind,
+                regions,
+                fields,
+            },
         ))
     }
     fn storage_expr(&mut self, ops: &mut Vec<Op>, mode: Mode, depth: usize) -> Result<Reg, String> {
@@ -372,7 +390,12 @@ impl Parser<'_> {
         if depth > 128 {
             return Err(self.error("expression nesting limit"));
         }
-        let mut left = if self.eat("(") {
+        let grouped = self.eat("(");
+        let mut left = if grouped && self.eat(")") {
+            let r = self.fresh()?;
+            ops.push(Op::Unit(r));
+            r
+        } else if grouped {
             let r = self.expr(ops, 0, depth + 1)?;
             self.expect(")")?;
             r
@@ -398,11 +421,39 @@ impl Parser<'_> {
             r
         } else {
             let mut name = self.ident()?;
-            if self.eat("::") {
+            while self.eat("::") {
                 name.push_str("::");
                 name.push_str(&self.ident()?);
             }
-            if self.eat("(") {
+            let variant = name.rsplit_once("::").and_then(|(base, v)| {
+                let n = self.nominal(base);
+                self.layouts
+                    .get(&n)
+                    .filter(|d| d.kind == crate::types::Kind::Enum)
+                    .and_then(|d| {
+                        d.fields
+                            .iter()
+                            .position(|(name, _)| name == v)
+                            .map(|k| (n, k))
+                    })
+            });
+            if let Some((name, variant)) = variant {
+                let payload = if self.eat("(") {
+                    let r = self.expr(ops, 0, depth + 1)?;
+                    self.expect(")")?;
+                    Some(r)
+                } else {
+                    None
+                };
+                let dst = self.fresh()?;
+                ops.push(Op::Variant {
+                    dst,
+                    name,
+                    variant,
+                    payload,
+                });
+                dst
+            } else if self.eat("(") {
                 let mut args = vec![];
                 let arity = match name.as_str() {
                     "bytes" => Some(0),
@@ -492,7 +543,7 @@ impl Parser<'_> {
                     _ => Op::Call { dst: r, name, args },
                 });
                 r
-            } else if self.records.contains_key(&self.nominal(&name))
+            } else if self.layouts.contains_key(&self.nominal(&name))
                 && !self.vars.contains_key(&name)
                 && self.eat("{")
             {
@@ -541,6 +592,12 @@ impl Parser<'_> {
             }
         };
         loop {
+            if self.eat("!") {
+                let dst = self.fresh()?;
+                ops.push(Op::Unwrap { dst, src: left });
+                left = dst;
+                continue;
+            }
             let (precedence, op) = match self.peek() {
                 "&" => (1, Bin::And),
                 "^" => (2, Bin::Xor),
@@ -646,6 +703,41 @@ impl Parser<'_> {
                 self.expect("}")?;
                 self.vars = outer;
                 ops.push(Op::Loop { index, end, body });
+            } else if self.eat("match") {
+                let src = self.expr(&mut ops, 0, 0)?;
+                self.expect("{")?;
+                let outer = self.vars.clone();
+                let mut arms = Vec::new();
+                while !self.eat("}") {
+                    let variant = self.ident()?;
+                    let binding = if self.eat("(") {
+                        let r = self.fresh()?;
+                        if self.eat("_") {
+                        } else {
+                            let name = self.ident()?;
+                            self.bind(name, r, false);
+                        }
+                        self.expect(")")?;
+                        Some(r)
+                    } else {
+                        None
+                    };
+                    self.expect("=>")?;
+                    self.expect("{")?;
+                    let body = self.statements(depth + 1)?;
+                    self.expect("}")?;
+                    self.vars = outer.clone();
+                    arms.push(Arm {
+                        variant,
+                        binding,
+                        body,
+                    });
+                    if !self.eat(",") {
+                        self.expect("}")?;
+                        break;
+                    }
+                }
+                ops.push(Op::Match { src, arms });
             } else if self.eat("if") {
                 let condition = self.expr(&mut ops, 0, 0)?;
                 let outer = self.vars.clone();
@@ -736,7 +828,7 @@ pub fn imports(text: &str) -> Result<Vec<String>, String> {
         vars: BTreeMap::new(),
         regions: BTreeMap::new(),
         module: String::new(),
-        records: crate::types::Context::default(),
+        layouts: crate::types::Context::default(),
     };
     if p.eat("module") {
         p.ident()?;
@@ -764,7 +856,7 @@ pub fn compile(
         vars: BTreeMap::new(),
         regions: BTreeMap::new(),
         module: String::new(),
-        records: crate::types::Context::default(),
+        layouts: crate::types::Context::default(),
     };
     let explicit = if p.eat("module") {
         let name = p.ident()?;
@@ -783,7 +875,7 @@ pub fn compile(
             .get(&name)
             .ok_or_else(|| p.error("missing imported module interface"))?;
         header.validate()?;
-        for (n, d) in &header.records {
+        for (n, d) in &header.layouts {
             if let Some(old) = definitions.insert(n.clone(), d.clone())
                 && old != *d
             {
@@ -801,14 +893,14 @@ pub fn compile(
         callable.insert(header.name.clone(), header.exports[&header.entry].clone());
         p.expect(";")?;
     }
-    while p.peek() == "struct" {
+    while matches!(p.peek(), "struct" | "enum") {
         let (n, d) = p.record()?;
         if definitions.insert(n, d).is_some() {
             return Err(p.error("duplicate record declaration"));
         }
     }
-    let records = crate::types::Context::new(definitions)?;
-    p.records = records.clone();
+    let layouts = crate::types::Context::new(definitions)?;
+    p.layouts = layouts.clone();
     let mut functions = Vec::new();
     while !p.peek().is_empty() {
         if functions.len() >= 4096 {
@@ -851,12 +943,12 @@ pub fn compile(
         .sig
         .name
         .clone();
-    let exposed = crate::types::exposed(&exports, &records)?;
+    let exposed = crate::types::exposed(&exports, &layouts)?;
     let header = crate::module::Interface {
         name,
         entry,
         exports,
-        records: exposed,
+        layouts: exposed,
         dependencies,
     };
     header.validate()?;
@@ -872,7 +964,7 @@ pub fn compile(
         }
         let mut available = imports.clone();
         available.insert(f.sig.name.clone(), f.sig.clone());
-        let mut state = State::parameters(&f.sig, records.clone())?;
+        let mut state = State::parameters(&f.sig, layouts.clone())?;
         let ops = ending(
             &f.ops,
             &mut state,
@@ -881,13 +973,13 @@ pub fn compile(
             &BTreeSet::new(),
         )?;
         checked.push((
-            check_with_records(Function { ops, ..f }, imports, records.clone())?,
+            check_with_types(Function { ops, ..f }, imports, layouts.clone())?,
             public,
         ));
     }
     Ok(crate::module::CheckedModule {
         functions: checked,
-        records,
+        layouts,
         header,
     })
 }
@@ -910,6 +1002,11 @@ fn resolve_calls(
                 resolve_calls(test, callable, names)?;
                 resolve_calls(body, callable, names)?;
             }
+            Op::Match { arms, .. } => {
+                for a in arms {
+                    resolve_calls(&mut a.body, callable, names)?;
+                }
+            }
             Op::If { yes, no, .. } => {
                 resolve_calls(yes, callable, names)?;
                 resolve_calls(no, callable, names)?;
@@ -923,6 +1020,23 @@ fn live_before(op: &Op, after: &BTreeSet<Reg>) -> BTreeSet<Reg> {
     let mut live = after.clone();
     let (defs, uses): (Vec<Reg>, Vec<Reg>) = match op {
         Op::Return(r) => return BTreeSet::from([*r]),
+        Op::Unit(r) => (vec![*r], vec![]),
+        Op::Variant { dst, payload, .. } => (vec![*dst], payload.iter().copied().collect()),
+        Op::Unwrap { dst, src } => (vec![*dst], vec![*src]),
+        Op::Match { src, arms } => {
+            for arm in arms {
+                let mut arm_live = after.clone();
+                for op in arm.body.iter().rev() {
+                    arm_live = live_before(op, &arm_live);
+                }
+                if let Some(r) = arm.binding {
+                    arm_live.remove(&r);
+                }
+                live.extend(arm_live);
+            }
+            live.insert(*src);
+            return live;
+        }
         Op::Record { dst, fields, .. } => (vec![*dst], fields.iter().map(|(_, r)| *r).collect()),
         Op::FieldMove { dst, src, .. } | Op::FieldBorrow { dst, src, .. } => {
             (vec![*dst], vec![*src])
@@ -1019,17 +1133,17 @@ fn clean(state: &mut State, live: &BTreeSet<Reg>, protected: &BTreeSet<Reg>, ops
                 changed = true
             }
         }
-        let records = state
+        let layouts = state
             .resources
             .iter()
             .filter(|r| {
-                matches!(state.values[r].ty, Ty::Record(..))
+                matches!(state.values[r].ty, Ty::Named(..))
                     && !live.contains(r)
                     && !protected.contains(r)
             })
             .copied()
             .collect::<Vec<_>>();
-        for r in records {
+        for r in layouts {
             if state.expire_captures(r).unwrap_or(false) {
                 ops.push(Op::EndCaptures(r));
                 changed = true;
@@ -1095,7 +1209,10 @@ fn ending(
             }
             continue;
         }
-        let keep = if matches!(op, Op::Loop { .. } | Op::If { .. } | Op::While { .. }) {
+        let keep = if matches!(
+            op,
+            Op::Loop { .. } | Op::If { .. } | Op::While { .. } | Op::Match { .. }
+        ) {
             protected.union(&state.resources).copied().collect()
         } else {
             BTreeSet::new()
@@ -1128,6 +1245,26 @@ fn ending(
                     body: ending(body, &mut inner, imports, &after, &keep)?,
                 }
             }
+            Op::Match { src, arms } => {
+                let indices = state.arms(*src, arms)?;
+                let mut output = Vec::new();
+                for (a, k) in arms.iter().zip(indices) {
+                    let mut branch = state.clone();
+                    branch.payload(*src, k, a.binding)?;
+                    let mut keep = keep.clone();
+                    keep.remove(src);
+                    let body = ending(&a.body, &mut branch, imports, &after, &keep)?;
+                    output.push(Arm {
+                        variant: a.variant.clone(),
+                        binding: a.binding,
+                        body,
+                    });
+                }
+                Op::Match {
+                    src: *src,
+                    arms: output,
+                }
+            }
             Op::If { condition, yes, no } => {
                 let mut y = state.clone();
                 let mut n = state.clone();
@@ -1148,6 +1285,8 @@ fn ending(
     if state.terminated {
         return Ok(result);
     }
+    // An empty match arm can still introduce a payload loan. Close it before its owners.
+    clean(state, out, protected, &mut result);
     // Owner cleanup is lexical and reverse-binding, unlike last-use loan ending.
     let owners = state
         .resources

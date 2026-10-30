@@ -91,8 +91,8 @@ ancestry can still become expensive; earlier typed-IR timings do not cover this 
 
 `compile FILE OUT IMPORT_DIR [clang|tcc]` checks source, emits C, compiles an object, then publishes
 its `.api`. `build` additionally links an executable with direct imported objects. Imports consume
-`.api`/`.o` files, never provider source. Source module schema 2 carries public function signatures, reachable nominal record layouts,
-entry identity and direct dependency surface hashes; standalone signature schema 4 is the function
+`.api`/`.o` files, never provider source. Source module schema 3 carries public function signatures, reachable nominal record/enum layouts,
+entry identity and direct dependency surface hashes; standalone signature schema 5 is the function
 payload. Old source artifacts must be rebuilt. Builds validate and link transitive metadata
 closures once per module, reject cycles/stale contracts, and keep private helpers internal. Body-only
 edits do not invalidate callers; changes to any public member conservatively do. A persistent build
@@ -164,17 +164,17 @@ Explicit modules can declare `struct Token<a>{span:read<a>,name:string,offset:nu
 Construct, move/borrow fields, pass/return complete records, and recursively clean remaining owned
 fields. Captured span loans are distinct from record/owned-name storage. Public layout definitions
 participate in hashes; hidden-source clients and layout-only invalidation are tested. General
-references to record/container objects, mutation through invariant reference-containing T, enums,
-Result/generics, field assignment and unequal ownership joins remain unfinished. See
+references to record/container objects, mutation through invariant reference-containing T, richer enum patterns,
+Generic Result/Option, field assignment and unequal ownership joins remain unfinished. See
 [record core](record-core.md) for exact current semantics, bounds and backend limitations.
 
-### Chosen unwrap shorthand
+### Unwrap shorthand and tagged enums
 
-Postfix `!` is the chosen shorthand for unwrapping an `Ok`/`Some` payload, e.g.
-`let value = parse(input)!;`. Failure aborts rather than propagating. Reserve postfix `?` for error
-propagation with normal ownership cleanup. Neither operator is implemented yet: enum/Result/Option
-representation follows the ongoing early-return cleanup work. Do not treat `!` as implemented syntax
-or promise cleanup after an abort.
+Postfix `!` now unwraps a two-variant `Ok/Err` or `Some/None` value: e.g.
+`let token = result::parse(input)!;`. Failure aborts; it does not propagate or promise cleanup.
+Exhaustive consuming `match` supports explicit recovery. Current enums have concrete payload types;
+generic Result/Option and postfix `?` propagation remain subsequent v0 work. See
+[tagged enums](tagged-enums.md) for ownership, ABI, evidence and exact scope.
 
 ### Early return checkpoint
 

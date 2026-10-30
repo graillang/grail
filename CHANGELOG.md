@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Implement tagged enums, exhaustive consuming match, unit values/interfaces and postfix `!`
+  unwrap-or-abort for Ok/Err and Some/None shapes. Transfer only the selected payload; recursively
+  destroy active owned leaves without reading inactive union data. Validate borrowed token/owned
+  error APIs, recoverable u64 parsing, modern Rust controls, allocation/free behavior, variant-layout
+  invalidation and clang/TinyCC ABIs in both directions. Use module schema 3 / function schema 5;
+  previous artifacts rebuild. Generic payload parameters, richer patterns and `?` remain unfinished.
+
 - Check early returns through branches/blocks/loops, emit path-local recursive cleanup before each
   return, and preserve only continuing ownership states at joins. Equal partial-move states can join;
   unmatched continuing states still diagnose. Validate C/TinyCC objects with hidden-source record
