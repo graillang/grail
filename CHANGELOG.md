@@ -46,3 +46,8 @@
   expose premature buffer release and incorrect all-on-one-acknowledgment policies.
 - Record status-specific liburing cancellation guarantees and distinguish storage safety, resource
   discipline, cleanup effects and bounded progress. No actual device/runtime verification claimed.
+
+- Add eighteen isolated Rust/Yoke/self_cell probes for Bundle projection, variance, owned ASTs,
+  inline-owner stabilization, external dependencies and dependent-before-owner destruction.
+- Distinguish scoped covariant field projection from whole invariant-container escape; document
+  candidate Bundle rules and explicit allocation choices without adopting a language primitive.

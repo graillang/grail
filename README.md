@@ -9,6 +9,7 @@ No performance or verification claims have been established for Grail.
 
 ## Living design record
 
+- [Bundle construction, projection and ownership boundaries](docs/design/bundle-boundary.md)
 - [Pending-work ownership and error cleanup](docs/design/cleanup-boundary.md)
 - [Dependency state-transformer experiment](docs/design/experiment-results-05.md)
 - [Assessment of the rooted-value proposal](docs/design/rooted-values-review.md)

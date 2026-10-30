@@ -174,3 +174,16 @@ Completing one of several operations sharing a root cannot erase the whole depen
 join-all barrier is a conservative candidate; more precise release needs operation/loan identity.
 Cleanup suspension must contribute to effect summaries. Safety does not imply a cleanup deadline.
 These are research constraints, not an adopted registry implementation or new surface syntax.
+
+
+## Bundle projection boundary
+
+[Bundle findings](bundle-boundary.md) test actual Yoke/self_cell APIs. Shared access cannot silently
+move an owning AST or duplicate exclusive access. An internal view-family/variance rule may be
+compiler-derived without source lifetime parameters; it still needs a precise interface meaning.
+Noncovariant callbacks may return selected shared projections, not a shortened invariant container.
+
+A stable cell allocation supports inline owners; descriptor-moving with already-stable referents
+is a different cost policy. Always-owned Bundle results require owned owners, otherwise owner
+external dependencies must remain visible. Drop/rebuild/partial construction must respect internal
+and external loans. These are tested design constraints and candidate restrictions, not an adoption.

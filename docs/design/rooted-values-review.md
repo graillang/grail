@@ -108,6 +108,10 @@ lifetime variance and restrict mutations that could install shorter references. 
 covariant accessors from callback-based access. Neither precedent is just StableBorrow plus any V.
 Language support may improve on these APIs, but needs a corresponding rule/proof, not their names.
 
+The [Bundle follow-up](bundle-boundary.md) now records eighteen concrete Rust/library probes,
+including successful shared field escape from a noncovariant callback and inline-owner stabilization.
+Those distinctions refine the needed rules; they are not a Grail implementation or crate audit.
+
 ## 6. Pending operation values are the cleanup boundary to settle
 
 Non-droppable running tasks, stable frames, cooperative cancel and join-before-release are a strong
