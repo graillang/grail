@@ -36,3 +36,8 @@
 
 - Assess the external rooted-value proposal without merging it; add six isolated Rust probes for
   cache-reset and callable/thread-sharing distinctions, and identify mutation/cleanup contract gaps.
+
+- Add a bounded pre/post dependency-state experiment for generic append, clear, replacement, old-value
+  returns and disjoint-place updates, with independent concrete comparisons and body-hidden clients.
+- State the restricted preservation obligation and expose the remaining forged-artifact trust gap;
+  no full memory-model, allocation-reuse or runtime-performance claim follows.

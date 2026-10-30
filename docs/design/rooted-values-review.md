@@ -43,6 +43,10 @@ the plain clear/reuse example, but accepts a consuming retyped-empty helper writ
 That helper does not establish allocation reuse. The problem is therefore not an impossibility
 result or proof of Grail novelty: API and type-state design can expose the necessary transition.
 
+The [state-transformer experiment](experiment-results-05.md) now exercises this gap in a restricted
+view-data fragment. It tests generic strong updates and returned old values, not general mutable-view
+variance or arbitrary resource cleanup.
+
 Generic `remember[T](cache: mut Vec[T], x: T)` also needs precise rules. Under read-by-default,
 moving noncopyable T into the vector requires `take x` or an appropriate copy bound. More deeply,
 how do the different incoming qualifiers of cache elements and x combine under one T? Is a flow

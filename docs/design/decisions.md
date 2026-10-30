@@ -150,3 +150,15 @@ The external [rooted-value review assessment](rooted-values-review.md) identifie
 pre/post input dependency transformers, independent callable access/sharing, split/reborrow authority,
 nominal-slot precision, Bundle projection, and pending operation ownership on error. The external
 branch was read, not merged. No recommendation in it has become an agreed language rule.
+
+## Dependency state-transformer experiment
+
+[Results 05](experiment-results-05.md) exercise preserve/add/replace/empty post-states with explicit
+entry snapshots, opaque view-data generics and disjoint exact caller places. Finite concrete tests
+support investigating this interface mechanism; they do not settle full ownership or source syntax.
+Base types and per-value dependency state are separated in this prototype. First-class mutable-view
+variance, backing-storage borrows, effectful destruction and exceptional post-states remain open.
+
+Next connect error exits and pending-work cleanup to the preservation obligation, and test Bundle
+projection/call authority rather than expanding the compiler surface. The source/contract producer
+remains trusted: a forged but schema-valid empty post-state still fools the isolated consumer.
