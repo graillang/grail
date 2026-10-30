@@ -259,3 +259,16 @@ both work in the single-cell model, so do not infer one required runtime represe
 Rust's inline/ended-handle and temporary-restoration boundaries motivate the question without
 showing a Rust bug. Stored/generic exclusive access still needs a full lifecycle/authority/inference
 account. The pure shared-data proofs do not automatically establish a heap-dependent dependency law.
+
+## Opaque ownership and ambient work
+
+The [resource study](opaque-resource-boundary.md) distinguishes root support, affine ownership,
+logical access ending, destruction effects and independently scope-owned work. Generic forgetting
+can make an ordinary cursor container unreachable without running destructors, but forgetting a
+scoped-thread handle does not permit early storage use and stalls this pinned runtime's scope exit.
+Normal drop is a returning control; an 8s observation is not called completion or a general proof.
+
+Do not infer universal loan/work discharge from take-T or empty output captures. A full opaque-T
+proof needs resource-parametric transfer and effect/ambient-scope rules in addition to root routes.
+Whether Grail permits forget/leaks or enforces stronger disposal remains a design choice, not an
+imported Rust requirement. Safety and cleanup progress stay separate.

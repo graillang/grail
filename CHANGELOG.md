@@ -86,3 +86,8 @@
   policies, including retained-old-value and temporary-source controls.
 - Distinguish storage lifetime, current contents and writeback; record two precise ghost-state styles
   and Aeneas precedent without claiming a general mutable-reference checker or runtime graph requirement.
+
+- Add seven pinned Rust generic/resource controls for ownership forwarding, skipped/destructor
+  effects and scoped work; retain an expected bounded stall separately from completed executions.
+- Record public-source-matched scope accounting and distinguish root captures, logical loans,
+  destructor effects and ambient work obligations without adopting safe forget or Rust's runtime ABI.
