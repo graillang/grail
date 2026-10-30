@@ -16,10 +16,14 @@ pub enum Mode {
 pub enum Ty {
     Num,
     Buffer,
+    Bytes,
     View(Mode, u16),
     Holder(Mode, u16),
 }
 impl Ty {
+    fn owned(&self) -> bool {
+        matches!(self, Self::Buffer | Self::Bytes)
+    }
     fn reference(&self) -> Option<(Mode, u16)> {
         match self {
             Self::View(m, r) | Self::Holder(m, r) => Some((*m, *r)),
@@ -30,6 +34,7 @@ impl Ty {
         match self {
             Self::Num => "n".into(),
             Self::Buffer => "b".into(),
+            Self::Bytes => "o".into(),
             Self::View(m, r) => format!("{}{}", if *m == Mode::Read { "r" } else { "w" }, r),
             Self::Holder(m, r) => format!("h{}{}", if *m == Mode::Read { "r" } else { "w" }, r),
         }
@@ -37,6 +42,9 @@ impl Ty {
     fn parse(s: &str) -> Result<Self, String> {
         if s == "n" {
             return Ok(Self::Num);
+        }
+        if s == "o" {
+            return Ok(Self::Bytes);
         }
         let (holder, s) = if let Some(s) = s.strip_prefix('h') {
             (true, s)
@@ -98,7 +106,7 @@ impl Sig {
     pub fn encode(&self) -> Result<String, String> {
         self.validate()?;
         Ok(format!(
-            "grail-seed-interface-1\n{}\n{}\n{}\n",
+            "grail-seed-interface-2\n{}\n{}\n{}\n",
             self.name,
             self.params
                 .iter()
@@ -113,7 +121,7 @@ impl Sig {
             return Err("interface too large".into());
         }
         let lines = text.lines().collect::<Vec<_>>();
-        if lines.len() != 4 || lines[0] != "grail-seed-interface-1" {
+        if lines.len() != 4 || lines[0] != "grail-seed-interface-2" {
             return Err("invalid interface schema".into());
         }
         let params = if lines[2].is_empty() {
@@ -151,6 +159,17 @@ pub enum Bin {
 #[derive(Clone, Debug)]
 pub enum Op {
     Num(Reg, u64),
+    Bytes {
+        dst: Reg,
+    },
+    CopyBytes {
+        dst: Reg,
+        src: Reg,
+    },
+    Push {
+        owner: Reg,
+        value: Reg,
+    },
     Buffer {
         dst: Reg,
         len: usize,
@@ -338,9 +357,23 @@ impl State {
         }
         Ok(())
     }
+    fn readable(&self, r: Reg) -> Result<(), String> {
+        let v = self.usable(r)?;
+        if v.ty.owned() {
+            if v.roots
+                .iter()
+                .any(|root| self.access.get(root).is_some_and(|(_, writes)| *writes > 0))
+            {
+                return Err("owner restricted by write loan".into());
+            }
+        } else if v.ty.reference().is_none() {
+            return Err("expected byte storage or view".into());
+        }
+        Ok(())
+    }
     fn end(&mut self, r: Reg) -> Result<(), String> {
         let v = self.usable(r)?;
-        if v.ty == Ty::Buffer && self.owner_borrowed(&v) {
+        if v.ty.owned() && self.owner_borrowed(&v) {
             return Err(format!("r{r}: owner still borrowed"));
         }
         self.remove(r);
@@ -380,6 +413,33 @@ impl State {
         for op in ops {
             match op {
                 Op::Num(r, _) => self.num(*r)?,
+                Op::Bytes { dst } => {
+                    let v = self.new_value(
+                        Ty::Bytes,
+                        BTreeSet::from([Root::Local(*dst)]),
+                        BTreeSet::new(),
+                    );
+                    self.put(*dst, v)?;
+                }
+                Op::CopyBytes { dst, src } => {
+                    self.readable(*src)?;
+                    let v = self.new_value(
+                        Ty::Bytes,
+                        BTreeSet::from([Root::Local(*dst)]),
+                        BTreeSet::new(),
+                    );
+                    self.put(*dst, v)?;
+                }
+                Op::Push { owner, value } => {
+                    let v = self.usable(*owner)?;
+                    if v.ty != Ty::Bytes {
+                        return Err("push expects owned bytes".into());
+                    }
+                    if self.owner_borrowed(&v) {
+                        return Err("growth while owner is borrowed".into());
+                    }
+                    self.require_num(*value)?;
+                }
                 Op::Buffer { dst, len, .. } => {
                     if *len > 1024 * 1024 {
                         return Err("buffer size limit".into());
@@ -394,7 +454,7 @@ impl State {
                 Op::Borrow { dst, src, mode } => {
                     let p = self.usable(*src)?;
                     let mut ancestors = p.ancestors.clone();
-                    let region = if p.ty == Ty::Buffer {
+                    let region = if p.ty.owned() {
                         0
                     } else {
                         let (m, r) = p.ty.reference().ok_or("borrow of nonstorage")?;
@@ -469,7 +529,7 @@ impl State {
                         return Err("self move".into());
                     }
                     let v = self.usable(*src)?;
-                    if v.ty == Ty::Buffer && self.owner_borrowed(&v) {
+                    if v.ty.owned() && self.owner_borrowed(&v) {
                         return Err("move of borrowed owner".into());
                     }
                     if v.ty != Ty::Num {
@@ -479,9 +539,7 @@ impl State {
                 }
                 Op::End(r) => self.end(*r)?,
                 Op::Len { dst, src } => {
-                    if self.usable(*src)?.ty.reference().is_none() {
-                        return Err("len expects view".into());
-                    }
+                    self.readable(*src)?;
                     self.num(*dst)?;
                 }
                 Op::Read { dst, src, index } => {
@@ -521,13 +579,16 @@ impl State {
                     for (r, t) in args.iter().zip(&sig.params) {
                         let v = self.usable(*r)?;
                         let matches = match (&v.ty, t) {
-                            (Ty::Num, Ty::Num) => true,
+                            (Ty::Num, Ty::Num) | (Ty::Bytes, Ty::Bytes) => true,
                             (Ty::View(a, _), Ty::View(b, _))
                             | (Ty::Holder(a, _), Ty::Holder(b, _)) => a == b,
                             _ => false,
                         };
                         if !matches {
                             return Err("call argument type/mode".into());
+                        }
+                        if v.ty.owned() && self.owner_borrowed(&v) {
+                            return Err("call moves borrowed owner".into());
                         }
                         if *t != Ty::Num && !consumed.insert(*r) {
                             return Err("affine argument duplicated".into());
@@ -546,6 +607,9 @@ impl State {
                                 ancestors.extend(v.ancestors.clone());
                             }
                         }
+                    }
+                    if sig.result == Ty::Bytes {
+                        roots.insert(Root::Local(*dst));
                     }
                     for r in consumed {
                         self.remove(r);
@@ -603,7 +667,7 @@ pub fn check(function: Function, imports: BTreeMap<String, Sig>) -> Result<Check
     }
     let mut s = State::default();
     for (i, t) in function.sig.params.iter().enumerate() {
-        let roots = if t.reference().is_some() {
+        let roots = if t.reference().is_some() || t.owned() {
             BTreeSet::from([Root::Param(i)])
         } else {
             BTreeSet::new()
@@ -613,8 +677,14 @@ pub fn check(function: Function, imports: BTreeMap<String, Sig>) -> Result<Check
     }
     s.ops(&function.ops, &imports, 0)?;
     let result = s.usable(function.result)?;
+    if s.values
+        .iter()
+        .any(|(r, v)| v.ty == Ty::Bytes && *r != function.result)
+    {
+        return Err("heap owner must be ended or returned".into());
+    }
     let compatible = match (&result.ty, &function.sig.result) {
-        (Ty::Num, Ty::Num) => true,
+        (Ty::Num, Ty::Num) | (Ty::Bytes, Ty::Bytes) => true,
         (Ty::View(m, _), Ty::View(n, _)) | (Ty::Holder(m, _), Ty::Holder(n, _)) => m == n,
         _ => false,
     };

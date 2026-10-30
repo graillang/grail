@@ -18,7 +18,7 @@ They are demonstration commands, not a surface-language parser or general build 
 
 ## Supported semantics
 
-- Owned local byte buffers; affine read/write views; one-field carriers containing a view.
+- Owned local byte buffers and growable heap byte vectors; affine read/write views and carriers.
 - Explicit region labels in signatures. Labels describe lifetime relationships, **not** target
   identity. Separate mutable input parameters have distinct abstract targets even with one label.
 - Reborrows restrict the parent carrier; moves preserve loan identity. Owner release/movement
@@ -26,13 +26,15 @@ They are demonstration commands, not a surface-language parser or general build 
 - Returned references may originate only from suitable input regions. No local-buffer escape.
   Imported return bounds conservatively retain every compatible argument origin and parent.
 - Counted loops require the same resource state at their back edge. Numeric state may change;
-  loop-local resources must explicitly end. The lowered IR has explicit `End`, not source-level NLL.
+  loop-local resources must end. The lowered IR has explicit `End`; the source frontend infers
+  borrowed-value endings and inserts lexical owner cleanup.
 - Numbers are wrapping u64; buffers hold bytes. Native indexing and remainder have abort guards.
-  Local buffers are stack allocated (individual maximum 1 MiB); stack exhaustion is not prevented.
+  `buffer` is stack allocated (individual maximum 1 MiB); `bytes` is heap allocated and grows
+  only when unborrowed. Stack exhaustion is not prevented.
 - A private validated wrapper gates lowering. Interfaces describe types/regions only, no G1
   post-state inference. Signature decoding validates schema and canonical form, not producer honesty.
 
-No general generics, arbitrary records, Result/error flow, closures, heap ownership,
+No general generics, arbitrary records, Result/error flow, closures, reference-containing heap elements,
 async, destructors, capabilities, interface authentication or language soundness theorem yet.
 Numeric branches and byte slicing are now supported in both emitters.
 The compiler's own safe Rust is not a proof that the new checker is sound. The first scaling
@@ -41,7 +43,8 @@ ancestry and origin unions still need measurement.
 
 ## Native boundary
 
-C and LLVM lower the same checked IR. The workload scans bytes, counts word starts, computes a
+C lowers the checked IR, including heap owners. LLVM currently rejects owned heap layouts
+explicitly and remains a comparison backend for the earlier subset. The workload scans bytes, counts word starts, computes a
 rolling hash and updates a byte bucket table. The client holds its input view in a carrier and
 calls the body-hidden provider repeatedly. LLVM uses simple alloca-based locals; these emitters
 are not optimized or portable-ABI-certified. Native execution is currently checked on Linux x86-64.
@@ -82,4 +85,17 @@ For the configured TinyCC driver, set `GRAIL_TCC_ROOT` to the existing Goose bui
 `tcc` to both compile/build commands. There is no silent fallback or download. Source modules have
 one exported function; only direct imports are linked. The parser example borrows slices rather
 than allocating token copies. Malformed numeric input aborts, and the executable expects exactly
-one text argument. General heap containers, Result and type generics are still follow-up work.
+one text argument. Generic heap containers, Result and type generics are still follow-up work.
+
+## Heap byte owners
+
+[Semantics and limits](../docs/design/heap-ownership.md). `bytes()`, `push`, `copy_bytes` and
+owned `bytes` parameters/results are now supported by the C backend. Signatures are schema 2;
+rebuild old `.api` files. Heap owners drop at scope exit, not at borrowed-value last use.
+
+```sh
+seed/target/release/grail-seed compile seed/examples/make_bytes.grl seed/.work/heap seed/.work/heap
+seed/target/release/grail-seed build seed/examples/use_bytes.grl seed/.work/heap seed/.work/heap
+seed/.work/heap/use_bytes  # 125717
+cargo test --manifest-path seed/Cargo.toml --offline --test heap_native -- --ignored
+```

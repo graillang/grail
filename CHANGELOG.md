@@ -118,3 +118,9 @@
 - Add a two-module zero-copy decimal-token parser and source/native safety checks, including
   hidden producer source, wrong-region/local escapes, live-child write conflicts and abort guards.
   Heap containers, general generics, Result and self-hosting remain unimplemented.
+
+- Add owned heap byte vectors, explicit deep copying, geometric growth and owned parameter/return
+  transfer in the C backend. Reject growth/movement while borrowed and insert reverse lexical owner
+  cleanup separately from last-use loan ending. Bump seed interfaces to schema 2.
+- Validate heap cleanup and reverse drop order with independent allocator wrappers, including loops,
+  clones and returned owners. LLVM comparison explicitly rejects unsupported heap layouts.

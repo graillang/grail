@@ -80,8 +80,12 @@ fn two_modules_parse_borrowed_tokens_and_abort_on_invalid_input() {
         std::collections::BTreeMap::from([(sig.name.clone(), sig)]),
     )
     .unwrap();
-    fs::write(dir.join("number.ll"), grail_seed::emit::llvm(&checked)).unwrap();
-    fs::write(dir.join("sum.ll"), grail_seed::emit::llvm(&app)).unwrap();
+    fs::write(
+        dir.join("number.ll"),
+        grail_seed::emit::llvm(&checked).unwrap(),
+    )
+    .unwrap();
+    fs::write(dir.join("sum.ll"), grail_seed::emit::llvm(&app).unwrap()).unwrap();
     let p = Command::new("clang")
         .args(["-O0", "-Wno-override-module"])
         .arg(dir.join("number.ll"))

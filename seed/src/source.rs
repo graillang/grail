@@ -118,6 +118,9 @@ impl Parser<'_> {
         if name == "num" {
             return Ok(Ty::Num);
         }
+        if name == "bytes" {
+            return Ok(Ty::Bytes);
+        }
         let mode = match name.as_str() {
             "read" | "read_holder" => Mode::Read,
             "mut" | "mut_holder" => Mode::Write,
@@ -173,7 +176,8 @@ impl Parser<'_> {
                 }
                 let r = self.fresh()?;
                 let arity = match name.as_str() {
-                    "read" | "mut" | "hold" | "len" => Some(1),
+                    "bytes" => Some(0),
+                    "read" | "mut" | "hold" | "len" | "copy_bytes" => Some(1),
                     "at" => Some(2),
                     "slice" => Some(3),
                     _ => None,
@@ -182,6 +186,11 @@ impl Parser<'_> {
                     return Err(self.error("builtin arity"));
                 }
                 ops.push(match name.as_str() {
+                    "bytes" => Op::Bytes { dst: r },
+                    "copy_bytes" => Op::CopyBytes {
+                        dst: r,
+                        src: args[0],
+                    },
                     "read" | "mut" => Op::Borrow {
                         dst: r,
                         src: args[0],
@@ -331,6 +340,14 @@ impl Parser<'_> {
                 self.expect(")")?;
                 self.expect(";")?;
                 ops.push(Op::End(r));
+            } else if self.eat("push") {
+                self.expect("(")?;
+                let owner = self.expr(&mut ops, 0, 0)?;
+                self.expect(",")?;
+                let value = self.expr(&mut ops, 0, 0)?;
+                self.expect(")")?;
+                self.expect(";")?;
+                ops.push(Op::Push { owner, value });
             } else if self.eat("write") {
                 self.expect("(")?;
                 let dst = self.expr(&mut ops, 0, 0)?;
@@ -459,7 +476,7 @@ pub fn compile(text: &str, available: BTreeMap<String, Sig>) -> Result<Checked, 
     let f = Function { sig, ops, result };
     let mut state = State::default();
     for (i, t) in f.sig.params.iter().enumerate() {
-        let roots = if t.reference().is_some() {
+        let roots = if t.reference().is_some() || t.owned() {
             BTreeSet::from([crate::Root::Param(i)])
         } else {
             BTreeSet::new()
@@ -479,11 +496,12 @@ pub fn compile(text: &str, available: BTreeMap<String, Sig>) -> Result<Checked, 
 fn live_before(op: &Op, after: &BTreeSet<Reg>) -> BTreeSet<Reg> {
     let mut live = after.clone();
     let (defs, uses): (Vec<Reg>, Vec<Reg>) = match op {
-        Op::Num(r, _) | Op::Buffer { dst: r, .. } => (vec![*r], vec![]),
+        Op::Num(r, _) | Op::Buffer { dst: r, .. } | Op::Bytes { dst: r } => (vec![*r], vec![]),
         Op::Borrow { dst, src, .. }
         | Op::Move { dst, src }
         | Op::Pack { dst, src }
-        | Op::Len { dst, src } => (vec![*dst], vec![*src]),
+        | Op::Len { dst, src }
+        | Op::CopyBytes { dst, src } => (vec![*dst], vec![*src]),
         Op::Slice {
             dst,
             src,
@@ -492,6 +510,7 @@ fn live_before(op: &Op, after: &BTreeSet<Reg>) -> BTreeSet<Reg> {
         } => (vec![*dst], vec![*src, *start, *end]),
         Op::End(r) => (vec![*r], vec![*r]),
         Op::Assert(r) => (vec![], vec![*r]),
+        Op::Push { owner, value } => (vec![], vec![*owner, *value]),
         Op::Read { dst, src, index } => (vec![*dst], vec![*src, *index]),
         Op::Write { dst, index, value } => (vec![], vec![*dst, *index, *value]),
         Op::Binary {
@@ -534,7 +553,7 @@ fn clean(state: &mut State, live: &BTreeSet<Reg>, protected: &BTreeSet<Reg>, ops
         let candidates = state
             .resources
             .iter()
-            .filter(|r| !live.contains(r) && !protected.contains(r))
+            .filter(|r| !state.values[r].ty.owned() && !live.contains(r) && !protected.contains(r))
             .copied()
             .collect::<Vec<_>>();
         let mut changed = false;
@@ -556,6 +575,7 @@ fn ending(
     out: &BTreeSet<Reg>,
     protected: &BTreeSet<Reg>,
 ) -> Result<Vec<Op>, String> {
+    let entry_owners = protected.clone();
     let mut afters = vec![];
     let mut live = out.clone();
     for op in ops.iter().rev() {
@@ -594,6 +614,18 @@ fn ending(
         state.ops(std::slice::from_ref(&op), imports, 0)?;
         result.push(op);
         clean(state, &after, protected, &mut result);
+    }
+    // Owner cleanup is lexical and reverse-binding, unlike last-use loan ending.
+    let owners = state
+        .resources
+        .iter()
+        .rev()
+        .filter(|r| state.values[r].ty.owned() && !entry_owners.contains(r) && !out.contains(r))
+        .copied()
+        .collect::<Vec<_>>();
+    for r in owners {
+        state.end(r)?;
+        result.push(Op::End(r));
     }
     Ok(result)
 }

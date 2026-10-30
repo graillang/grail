@@ -59,7 +59,7 @@ fn run() -> Result<(), String> {
     let start = Instant::now();
     let (text, ext) = match a[5].as_str() {
         "c" => (emit::c(&checked), "c"),
-        "llvm" => (emit::llvm(&checked), "ll"),
+        "llvm" => (emit::llvm(&checked)?, "ll"),
         _ => return Err("backend must be c or llvm".into()),
     };
     let emit_ns = start.elapsed().as_nanos();

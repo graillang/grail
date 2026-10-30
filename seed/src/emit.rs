@@ -5,6 +5,7 @@ use std::fmt::Write;
 fn cty(t: &Ty) -> &'static str {
     match t {
         Ty::Num => "uint64_t",
+        Ty::Bytes => "gb",
         Ty::Holder(..) => "gh",
         _ => "gv",
     }
@@ -27,6 +28,9 @@ fn signature(s: &Sig) -> String {
     )
 }
 fn view(r: Reg, types: &BTreeMap<Reg, Ty>) -> String {
+    if types[&r] == Ty::Bytes {
+        return format!("((gv){{r{r}.p,r{r}.n}})");
+    }
     if matches!(types[&r], Ty::Holder(..)) {
         format!("r{r}.value")
     } else {
@@ -51,8 +55,11 @@ fn buffers(ops: &[Op], out: &mut BTreeMap<Reg, usize>) {
 }
 pub fn c(p: &Checked) -> String {
     let mut s = String::from(
-        "#include <stdint.h>\n#include <stdlib.h>\ntypedef struct { uint8_t *p; uint64_t n; } gv;\ntypedef struct { gv value; } gh;\n",
+        "#include <stdint.h>\n#include <stdlib.h>\n#include <string.h>\ntypedef struct { uint8_t *p; uint64_t n; } gv;\ntypedef struct { gv value; } gh;\ntypedef struct {uint8_t*p;uint64_t n,c;} gb;\n#define GRAIL_BYTES_TYPES_DEFINED\n",
     );
+    if p.types.values().any(|t| *t == Ty::Bytes) {
+        s.push_str(include_str!("bytes_runtime.h"));
+    }
     for sig in p.imports.values() {
         writeln!(s, "extern {};", signature(sig)).unwrap()
     }
@@ -70,14 +77,17 @@ pub fn c(p: &Checked) -> String {
     fn ops(s: &mut String, os: &[Op], types: &BTreeMap<Reg, Ty>) {
         for o in os {
             match o{
+        Op::Bytes{dst}=>{writeln!(s,"r{dst}=(gb){{0,0,0}};").unwrap()},
+        Op::CopyBytes{dst,src}=>{writeln!(s,"r{dst}=gr_copy_bytes({});",view(*src,types)).unwrap()},
+        Op::Push{owner,value}=>{writeln!(s,"gr_push(&r{owner},r{value});").unwrap()},
         Op::Num(r,n)=>{writeln!(s,"r{r} = UINT64_C({n});").unwrap()},
         Op::Buffer{dst,len,seed}=>{writeln!(s,"r{dst} = (gv){{b{dst}, UINT64_C({len})}};\nfor (uint64_t j=0; j<UINT64_C({len}); ++j) b{dst}[j]=(uint8_t)((j*UINT64_C(17)+UINT64_C({seed}))%UINT64_C(251));").unwrap()},
         Op::Borrow{dst,src,..}=>{writeln!(s,"r{dst} = {};",view(*src,types)).unwrap()},
-        Op::Slice{dst,src,start,end}=>{let v=view(*src,types);writeln!(s,"if(r{start}>r{end} || r{end}>{v}.n) abort(); r{dst}=(gv){{{v}.p+r{start},r{end}-r{start}}};").unwrap()},
+        Op::Slice{dst,src,start,end}=>{let v=view(*src,types);writeln!(s,"if(r{start}>r{end} || r{end}>{v}.n) abort(); r{dst}=(gv){{r{start}?{v}.p+r{start}:{v}.p,r{end}-r{start}}};").unwrap()},
         Op::Assert(r)=>{writeln!(s,"if(!r{r}) abort();").unwrap()},
         Op::If{condition,yes,no}=>{writeln!(s,"if(r{condition}){{").unwrap();ops(s,yes,types);s.push_str("}else{\n");ops(s,no,types);s.push_str("}\n")},
         Op::Pack{dst,src}=>{writeln!(s,"r{dst} = (gh){{r{src}}};").unwrap()},
-        Op::Move{dst,src}=>{writeln!(s,"r{dst}=r{src};").unwrap()},Op::End(_)=>{},
+        Op::Move{dst,src}=>{writeln!(s,"r{dst}=r{src};").unwrap()},Op::End(r)=>{if types[r]==Ty::Bytes {writeln!(s,"free(r{r}.p);").unwrap()}},
         Op::Len{dst,src}=>{writeln!(s,"r{dst}={}.n;",view(*src,types)).unwrap()},
         Op::Read{dst,src,index}=>{let v=view(*src,types);writeln!(s,"if (r{index}>={v}.n) abort(); r{dst}={v}.p[r{index}];").unwrap()},
         Op::Write{dst,index,value}=>{let v=view(*dst,types);writeln!(s,"if (r{index}>={v}.n) abort(); {v}.p[r{index}]=(uint8_t)r{value};").unwrap()},
@@ -140,6 +150,9 @@ impl Ll {
     fn ops(&mut self, os: &[Op]) {
         for o in os {
             match o {
+                Op::Bytes { .. } | Op::CopyBytes { .. } | Op::Push { .. } => {
+                    unreachable!("heap layouts rejected before LLVM lowering")
+                }
                 Op::Num(r, n) => self.store(*r, &n.to_string()),
                 Op::Buffer { dst, len, seed } => {
                     let base = self.fresh();
@@ -334,7 +347,19 @@ impl Ll {
         }
     }
 }
-pub fn llvm(p: &Checked) -> String {
+pub fn llvm(p: &Checked) -> Result<String, String> {
+    if p.types
+        .values()
+        .chain(
+            p.imports
+                .values()
+                .flat_map(|s| s.params.iter().chain([&s.result])),
+        )
+        .any(|t| *t == Ty::Bytes)
+    {
+        return Err("LLVM comparison backend does not yet support owned bytes".into());
+    }
+
     let mut ll = Ll {
         s: "declare void @abort() noreturn\n".into(),
         id: 0,
@@ -381,5 +406,5 @@ pub fn llvm(p: &Checked) -> String {
     let v = ll.load(p.function.result);
     ll.line(format!("ret {} {v}", lty(&p.function.sig.result)));
     ll.s.push_str("trap:\n  call void @abort()\n  unreachable\n}\n");
-    ll.s
+    Ok(ll.s)
 }

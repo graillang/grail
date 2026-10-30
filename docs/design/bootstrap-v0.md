@@ -102,3 +102,11 @@ This milestone is **not self-hosting**. Next are real owned strings/vectors and 
 records/enums and Result, then basic generics and source-level module tooling needed by the compiler.
 No heap ownership, arbitrary stored references, closures, async, capabilities, optional verification
 or general soundness proof is supplied by this first path. Existing restricted proofs remain separate.
+
+## Heap byte checkpoint
+
+[Owned byte vectors](heap-ownership.md) now implement real heap allocation, explicit deep copies,
+growth restrictions and lexical cleanup, including ownership transfer through schema-2 interfaces.
+They are the first heap gate, not generic containers or a completed standard library. The earlier
+source-slice description above is historical where it excludes all heap ownership. Follow-up gates
+remain records/enums, reference-containing elements, Result, general generics and self-hosting.
