@@ -1,5 +1,6 @@
 //! Grail bootstrap seed: checked IR and the first .grl source subset.
 //! Reference values are currently affine; this is not a complete language implementation.
+pub mod artifact;
 pub mod driver;
 pub mod emit;
 pub mod fixture;

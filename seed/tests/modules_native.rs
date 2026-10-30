@@ -147,6 +147,18 @@ fn cyclic_metadata_is_rejected_before_an_otherwise_valid_link() {
                 .unwrap(),
         );
     }
+    for name in ["aa", "bb"] {
+        let header =
+            Interface::decode(&fs::read_to_string(dir.join(format!("{name}.api"))).unwrap())
+                .unwrap();
+        grail_seed::artifact::publish(
+            &dir,
+            &header,
+            &fs::read(dir.join(format!("{name}.c"))).unwrap(),
+            &fs::read(dir.join(format!("{name}.o"))).unwrap(),
+        )
+        .unwrap();
+    }
     let file = dir.join("client.grl");
     fs::write(&file, "use aa;fn client()->num{return aa();}").unwrap();
     let p = compile(&dir, &file, true);

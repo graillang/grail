@@ -168,3 +168,10 @@
   surface hashes before linking, reject cycles/stale callers, and keep body-only rebuilds compatible.
   Verify C/LLVM/TinyCC execution and borrowed export contracts. Artifact-byte authentication,
   concurrent publication safety, public type definitions and full bootstrap remain unfinished.
+
+- Publish immutable, manifest-verified native module generations behind atomic pointers; link captured
+  generation objects instead of replaceable convenience files and atomically install successful binaries.
+  Preserve prior outputs on native failure, retain metadata-only checking, and require old flat native
+  providers to rebuild. Test concurrent publication, byte corruption and retained-version linking.
+- Fix TinyCC reproducibility by compiling stable relative source names inside isolated work directories;
+  repeated and relocated object generations/executables now match without ELF postprocessing.

@@ -185,9 +185,17 @@ SHA-256 over the canonical **public** surface, not implementation bodies or depe
 A change to any public member conservatively invalidates every direct module-dependent artifact.
 There is no persistent incremental build cache or automatic dependency rebuild yet.
 
-The flat artifact directory assumes honest, nonconcurrent producers. API fingerprints do **not**
-authenticate object bytes or solve concurrent `.api`/`.o` replacement races; an atomic/content-addressed
-artifact store is still unfinished. Interfaces are bounded to 8 MiB, modules to 4,096 functions, and
+Native builds use immutable, content-verified generations under `.grail-store/<id>/`, selected by
+an atomically replaced `<module>.artifact` pointer. Each generation binds header, C and object
+hashes in its manifest. Compiler link inputs are captured once from these generations, not from
+the replaceable `.api`/`.o`/`.c` convenience copies. Metadata-only declarations can still be checked;
+linking old flat objects requires rebuilding their producers. Failed native builds do not replace
+the previous executable; successful binaries are also installed by atomic rename.
+
+Compiler-owned concurrent publication is supported. This is not producer authentication or a
+sandbox against hostile filesystem writers modifying a captured generation after verification.
+Power-loss durability/fsync guarantees, generation garbage collection and automatic rebuilds are
+not implemented. Old generations remain available for captured links and reproducible retention. Interfaces are bounded to 8 MiB, modules to 4,096 functions, and
 link closures to 4,096 modules / 256 dependency depth. Native stack exhaustion is not prevented.
 Public type-definition metadata, records/enums/generics and self-hosting remain unfinished.
 
@@ -195,3 +203,9 @@ Public type-definition metadata, records/enums/generics and self-hosting remain 
 seed/target/release/grail-seed build seed/examples/functions.grl seed/.work/functions seed/.work/functions
 seed/.work/functions/functions  # 146
 ```
+
+Native C inputs use stable relative basenames inside isolated work directories. TinyCC otherwise
+embeds the random job path in its ELF `FILE` symbol. The artifact suite tests identical generations
+and executable bytes across repeated and relocated builds for clang and TinyCC, parallel compiler
+jobs, synchronized publishers/readers, corruption detection and linking a previously captured version.
+These primitive-program checks are not stage-2/stage-3 self-hosting.

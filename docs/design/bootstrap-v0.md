@@ -96,9 +96,13 @@ entry identity and direct dependency surface hashes; standalone signature schema
 function payload. Old source artifacts must be rebuilt. Builds validate and link transitive metadata
 closures once per module, reject cycles/stale contracts, and keep private helpers internal. Body-only
 edits do not invalidate callers; changes to any public member conservatively do. A persistent build
-cache and automatic rebuild scheduling remain unimplemented. The flat artifact store still assumes
-honest, nonconcurrent producers: metadata hashes do not authenticate object bytes or prevent artifact
-replacement races. An atomic/content-addressed artifact store remains required work.
+cache and automatic rebuild scheduling remain unimplemented. Native linking captures immutable
+content-verified module generations, with atomic generation-pointer and executable replacement.
+A manifest binds header/C/object hashes; the replaceable convenience files are not link snapshots.
+Compiler-owned concurrent publication is covered, but producers and host filesystems remain trusted:
+a hostile mutation after verification is not prevented. Power-loss/fsync durability and generation
+collection are not implemented. Stable relative native source basenames remove temporary paths from
+TinyCC ELF file symbols; repeated/relocated native outputs are tested, not self-hosting stages.
 An executable accepts no parameters, or one read byte view backed by argv[1],
 and returns a number printed by the generated C entry shim.
 
