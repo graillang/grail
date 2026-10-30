@@ -111,3 +111,10 @@
 - Add reproducible paired checker, native backend and module-edit measurements with an independent
   checksum oracle, raw CPU/RSS/commands and explicit limits. Retain TinyCC as a measured development
   candidate, without claiming full-language performance, soundness or self-hosting.
+
+- Freeze bootstrap-v0 decisions and add the first `.grl` source-to-native path: borrowed-token
+  parsing, explicit signature regions, inferred local loan endings, counted loops, numeric branches,
+  guarded byte slices/writes, imported interfaces and clang/TinyCC source builds.
+- Add a two-module zero-copy decimal-token parser and source/native safety checks, including
+  hidden producer source, wrong-region/local escapes, live-child write conflicts and abort guards.
+  Heap containers, general generics, Result and self-hosting remain unimplemented.

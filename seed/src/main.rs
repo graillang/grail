@@ -2,6 +2,15 @@ use grail_seed::{Sig, check, emit, fixture};
 use std::{collections::BTreeMap, env, fs, path::Path, time::Instant};
 fn run() -> Result<(), String> {
     let a = env::args().collect::<Vec<_>>();
+    if (a.len() == 5 || a.len() == 6) && (a[1] == "compile" || a[1] == "build") {
+        return grail_seed::driver::compile(
+            Path::new(&a[2]),
+            Path::new(&a[3]),
+            Path::new(&a[4]),
+            a[1] == "build",
+            a.get(5).map(String::as_str).unwrap_or("clang"),
+        );
+    }
     if a.len() == 3 && a[1] == "scale" {
         let n: u32 = a[2].parse().map_err(|_| "scale size")?;
         if !(1..=4096).contains(&n) {

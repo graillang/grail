@@ -1,7 +1,7 @@
 # Grail seed slice
 
-A reusable Rust typed-IR checker and C/LLVM emitters. This is the first implementation slice,
-not a `.grl` parser or a complete Grail compiler. No external Rust crates or network are required.
+A reusable Rust checker, first `.grl` source frontend, and C/LLVM emitters. This is a narrow
+implementation slice, not a complete Grail compiler. No external Rust crates or network are required.
 
 ```sh
 cargo test --manifest-path seed/Cargo.toml --offline
@@ -32,8 +32,9 @@ They are demonstration commands, not a surface-language parser or general build 
 - A private validated wrapper gates lowering. Interfaces describe types/regions only, no G1
   post-state inference. Signature decoding validates schema and canonical form, not producer honesty.
 
-No general generics, arbitrary records, branches, Result/error flow, closures, heap ownership,
+No general generics, arbitrary records, Result/error flow, closures, heap ownership,
 async, destructors, capabilities, interface authentication or language soundness theorem yet.
+Numeric branches and byte slicing are now supported in both emitters.
 The compiler's own safe Rust is not a proof that the new checker is sound. The first scaling
 probe exposed repeated whole-state scans. Indexed loan checks now remove those scans; deep
 ancestry and origin unions still need measurement.
@@ -62,3 +63,23 @@ under `research/experiments/memory01/.work/goose-build`. It rebuilds baseline `d
 scratch, preserves all measured samples and aborts on nonzero exits or checksum mismatches.
 The driver is Python orchestration; it is not a replacement for the Rust seed or its future
 Grail implementation. It does not download tools, contact models, or modify external sources.
+
+## First source-to-native path
+
+[Bootstrap v0 rules and limits](../docs/design/bootstrap-v0.md). Requires clang for the default
+native driver; Cargo itself still has no third-party crates.
+
+```sh
+cargo build --manifest-path seed/Cargo.toml --release --offline
+seed/target/release/grail-seed compile seed/examples/number.grl seed/.work/source seed/.work/source
+seed/target/release/grail-seed build seed/examples/sum.grl seed/.work/source seed/.work/source
+seed/.work/source/sum '12+34+5'  # 51
+cargo test --manifest-path seed/Cargo.toml --offline
+cargo test --manifest-path seed/Cargo.toml --offline --test native -- --ignored
+```
+
+For the configured TinyCC driver, set `GRAIL_TCC_ROOT` to the existing Goose build root and append
+`tcc` to both compile/build commands. There is no silent fallback or download. Source modules have
+one exported function; only direct imports are linked. The parser example borrows slices rather
+than allocating token copies. Malformed numeric input aborts, and the executable expects exactly
+one text argument. General heap containers, Result and type generics are still follow-up work.

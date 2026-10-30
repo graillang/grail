@@ -1,6 +1,9 @@
-//! Typed-IR seed, not the Grail surface language. All reference values are affine.
+//! Grail bootstrap seed: checked IR and the first .grl source subset.
+//! Reference values are currently affine; this is not a complete language implementation.
+pub mod driver;
 pub mod emit;
 pub mod fixture;
+pub mod source;
 use std::collections::{BTreeMap, BTreeSet};
 
 pub type Reg = u32;
@@ -136,6 +139,8 @@ impl Sig {
 #[derive(Clone, Copy, Debug)]
 pub enum Bin {
     Add,
+    Sub,
+    Lt,
     Mul,
     Xor,
     Rem,
@@ -155,6 +160,18 @@ pub enum Op {
         dst: Reg,
         src: Reg,
         mode: Mode,
+    },
+    Slice {
+        dst: Reg,
+        src: Reg,
+        start: Reg,
+        end: Reg,
+    },
+    Assert(Reg),
+    If {
+        condition: Reg,
+        yes: Vec<Op>,
+        no: Vec<Op>,
     },
     Pack {
         dst: Reg,
@@ -217,6 +234,7 @@ struct Value {
 #[derive(Clone, Debug, Default)]
 struct State {
     values: BTreeMap<Reg, Value>,
+    resources: BTreeSet<Reg>,
     next: usize,
     types: BTreeMap<Reg, Ty>,
     access: BTreeMap<Root, (usize, usize)>,
@@ -266,11 +284,15 @@ impl State {
         for ancestor in &v.ancestors {
             *self.blocked.entry(*ancestor).or_default() += 1;
         }
+        if v.ty != Ty::Num {
+            self.resources.insert(r);
+        }
         self.values.insert(r, v);
         Ok(())
     }
     fn remove(&mut self, r: Reg) {
         if let Some(v) = self.values.remove(&r) {
+            self.resources.remove(&r);
             if let Some((mode, _)) = v.ty.reference() {
                 self.loans.remove(&v.loan);
                 for root in &v.roots {
@@ -322,6 +344,28 @@ impl State {
             return Err(format!("r{r}: owner still borrowed"));
         }
         self.remove(r);
+        Ok(())
+    }
+    fn closed(
+        &mut self,
+        ops: &[Op],
+        imports: &BTreeMap<String, Sig>,
+        depth: usize,
+    ) -> Result<(), String> {
+        let entry = self.values.clone();
+        self.ops(ops, imports, depth)?;
+        for (r, v) in &self.values {
+            if !entry.contains_key(r) && v.ty != Ty::Num {
+                return Err("block-local resource must end".into());
+            }
+        }
+        for (r, v) in &entry {
+            let after = self.get(*r)?;
+            if v.ty != after.ty || (v.ty != Ty::Num && v != after) {
+                return Err("block changes entry ownership".into());
+            }
+        }
+        self.values = entry;
         Ok(())
     }
     fn ops(
@@ -380,6 +424,33 @@ impl State {
                     }
                     let v = self.new_value(Ty::View(*mode, region), p.roots, ancestors);
                     self.put(*dst, v)?;
+                }
+                Op::Slice {
+                    dst,
+                    src,
+                    start,
+                    end,
+                } => {
+                    self.require_num(*start)?;
+                    self.require_num(*end)?;
+                    if self.get(*src)?.ty.reference().is_none() {
+                        return Err("slice expects view".into());
+                    }
+                    self.ops(
+                        &[Op::Borrow {
+                            dst: *dst,
+                            src: *src,
+                            mode: Mode::Read,
+                        }],
+                        imports,
+                        depth,
+                    )?;
+                }
+                Op::Assert(r) => self.require_num(*r)?,
+                Op::If { condition, yes, no } => {
+                    self.require_num(*condition)?;
+                    self.closed(yes, imports, depth + 1)?;
+                    self.closed(no, imports, depth + 1)?;
                 }
                 Op::Pack { dst, src } => {
                     let mut v = self.usable(*src)?;

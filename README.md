@@ -2,7 +2,7 @@
 
 A programming-language research project. Source files use **`.grl`**.
 
-We are evaluating the foundations with a [narrow Rust seed](seed/README.md), not building
+We are evaluating the foundations with a [narrow source-to-native Rust seed](seed/README.md), not building
 a full compiler yet.
 The ambition is a small, practical systems language with fast builds, deterministic
 memory management, explicit effects, and independently checkable correctness evidence.
@@ -10,6 +10,8 @@ Initial [seed measurements](docs/design/seed-measurements.md) cover a restricted
 not full-language performance or safety.
 
 ## Living design record
+
+- [Bootstrap v0 decisions and implemented source subset](docs/design/bootstrap-v0.md)
 
 - [Argument evaluation and call activation](docs/design/call-activation-boundary.md)
 - [Lifetime roots and exclusive-access authority](docs/design/authority-boundary.md)

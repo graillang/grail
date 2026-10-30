@@ -308,3 +308,11 @@ expressiveness fallbacks. Earlier pure results remain evidence, not the current 
 C and LLVM. [Measured results](seed-measurements.md) favor retaining TinyCC as a development
 candidate for this slice. Optimized C/LLVM execution is promising, but broad runtime/build claims
 remain unestablished. The native emitters remain experimental; no self-hosting has occurred.
+
+## Bootstrap v0 source path
+
+The human approved the [bootstrap v0 rules](bootstrap-v0.md) and implementation toward self-hosting.
+The first source path uses explicit interfaces plus conservative local loan ending, and extends
+checked IR with slices, byte writes and numeric branches. Source modules remain one-function,
+direct-import units, not a package system. The zero-copy parser is a real `.grl` example; owned
+heap containers, general generics, Result and self-hosting remain subsequent gates, not claims.

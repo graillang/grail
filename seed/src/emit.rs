@@ -41,6 +41,10 @@ fn buffers(ops: &[Op], out: &mut BTreeMap<Reg, usize>) {
                 *v = (*v).max((*len).max(1));
             }
             Op::Loop { body, .. } => buffers(body, out),
+            Op::If { yes, no, .. } => {
+                buffers(yes, out);
+                buffers(no, out);
+            }
             _ => {}
         }
     }
@@ -69,12 +73,15 @@ pub fn c(p: &Checked) -> String {
         Op::Num(r,n)=>{writeln!(s,"r{r} = UINT64_C({n});").unwrap()},
         Op::Buffer{dst,len,seed}=>{writeln!(s,"r{dst} = (gv){{b{dst}, UINT64_C({len})}};\nfor (uint64_t j=0; j<UINT64_C({len}); ++j) b{dst}[j]=(uint8_t)((j*UINT64_C(17)+UINT64_C({seed}))%UINT64_C(251));").unwrap()},
         Op::Borrow{dst,src,..}=>{writeln!(s,"r{dst} = {};",view(*src,types)).unwrap()},
+        Op::Slice{dst,src,start,end}=>{let v=view(*src,types);writeln!(s,"if(r{start}>r{end} || r{end}>{v}.n) abort(); r{dst}=(gv){{{v}.p+r{start},r{end}-r{start}}};").unwrap()},
+        Op::Assert(r)=>{writeln!(s,"if(!r{r}) abort();").unwrap()},
+        Op::If{condition,yes,no}=>{writeln!(s,"if(r{condition}){{").unwrap();ops(s,yes,types);s.push_str("}else{\n");ops(s,no,types);s.push_str("}\n")},
         Op::Pack{dst,src}=>{writeln!(s,"r{dst} = (gh){{r{src}}};").unwrap()},
         Op::Move{dst,src}=>{writeln!(s,"r{dst}=r{src};").unwrap()},Op::End(_)=>{},
         Op::Len{dst,src}=>{writeln!(s,"r{dst}={}.n;",view(*src,types)).unwrap()},
         Op::Read{dst,src,index}=>{let v=view(*src,types);writeln!(s,"if (r{index}>={v}.n) abort(); r{dst}={v}.p[r{index}];").unwrap()},
         Op::Write{dst,index,value}=>{let v=view(*dst,types);writeln!(s,"if (r{index}>={v}.n) abort(); {v}.p[r{index}]=(uint8_t)r{value};").unwrap()},
-        Op::Binary{dst,op,left,right}=>{let symbol=match op{Bin::Add=>"+",Bin::Mul=>"*",Bin::Xor=>"^",Bin::Rem=>"%",Bin::Eq=>"==",Bin::Ne=>"!=",Bin::And=>"&"};if matches!(op,Bin::Rem){writeln!(s,"if (!r{right}) abort();").unwrap()}writeln!(s,"r{dst}=r{left} {symbol} r{right};").unwrap()},
+        Op::Binary{dst,op,left,right}=>{let symbol=match op{Bin::Add=>"+",Bin::Sub=>"-",Bin::Lt=>"<",Bin::Mul=>"*",Bin::Xor=>"^",Bin::Rem=>"%",Bin::Eq=>"==",Bin::Ne=>"!=",Bin::And=>"&"};if matches!(op,Bin::Rem){writeln!(s,"if (!r{right}) abort();").unwrap()}writeln!(s,"r{dst}=r{left} {symbol} r{right};").unwrap()},
         Op::Call{dst,name,args}=>{writeln!(s,"r{dst}=g_{name}({});",args.iter().map(|r|format!("r{r}")).collect::<Vec<_>>().join(",")).unwrap()},
         Op::Loop{index,end,body}=>{writeln!(s,"for (r{index}=0; r{index}<r{end}; ++r{index}) {{").unwrap();ops(s,body,types);s.push_str("}\n")},
     }
@@ -180,6 +187,57 @@ impl Ll {
                     self.store(*dst, &v)
                 }
                 Op::End(_) => {}
+                Op::Assert(r) => {
+                    let value = self.load(*r);
+                    let condition = self.fresh();
+                    self.line(format!("%{condition} = icmp ne i64 {value}, 0"));
+                    self.guard(&format!("%{condition}"));
+                }
+                Op::Slice {
+                    dst,
+                    src,
+                    start,
+                    end,
+                } => {
+                    let value = self.load(*src);
+                    let ptr = self.field(&value, 0);
+                    let len = self.field(&value, 1);
+                    let a = self.load(*start);
+                    let b = self.load(*end);
+                    let x = self.fresh();
+                    self.line(format!("%{x} = icmp ule i64 {a}, {b}"));
+                    self.guard(&format!("%{x}"));
+                    let x = self.fresh();
+                    self.line(format!("%{x} = icmp ule i64 {b}, {len}"));
+                    self.guard(&format!("%{x}"));
+                    let p = self.fresh();
+                    self.line(format!("%{p} = getelementptr i8, ptr {ptr}, i64 {a}"));
+                    let n = self.fresh();
+                    self.line(format!("%{n} = sub i64 {b}, {a}"));
+                    let v = self.fresh();
+                    self.line(format!(
+                        "%{v} = insertvalue {{ptr,i64}} poison, ptr %{p}, 0"
+                    ));
+                    let w = self.fresh();
+                    self.line(format!("%{w} = insertvalue {{ptr,i64}} %{v}, i64 %{n}, 1"));
+                    self.store(*dst, &format!("%{w}"));
+                }
+                Op::If { condition, yes, no } => {
+                    let v = self.load(*condition);
+                    let c = self.fresh();
+                    self.line(format!("%{c} = icmp ne i64 {v}, 0"));
+                    let y = self.fresh();
+                    let n = self.fresh();
+                    let done = self.fresh();
+                    self.line(format!("br i1 %{c}, label %{y}, label %{n}"));
+                    writeln!(self.s, "{y}:").unwrap();
+                    self.ops(yes);
+                    self.line(format!("br label %{done}"));
+                    writeln!(self.s, "{n}:").unwrap();
+                    self.ops(no);
+                    self.line(format!("br label %{done}"));
+                    writeln!(self.s, "{done}:").unwrap();
+                }
                 Op::Len { dst, src } => {
                     let v = self.load(*src);
                     let n = self.field(&v, 1);
@@ -216,6 +274,8 @@ impl Ll {
                     let x = self.fresh();
                     let opcode = match op {
                         Bin::Add => "add",
+                        Bin::Sub => "sub",
+                        Bin::Lt => "icmp ult",
                         Bin::Mul => "mul",
                         Bin::Xor => "xor",
                         Bin::Rem => "urem",
@@ -224,7 +284,7 @@ impl Ll {
                         Bin::And => "and",
                     };
                     self.line(format!("%{x} = {opcode} i64 {a}, {b}"));
-                    let value = if matches!(op, Bin::Eq | Bin::Ne) {
+                    let value = if matches!(op, Bin::Eq | Bin::Ne | Bin::Lt) {
                         let wide = self.fresh();
                         self.line(format!("%{wide} = zext i1 %{x} to i64"));
                         format!("%{wide}")
