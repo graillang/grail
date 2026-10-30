@@ -26,3 +26,6 @@
 
 - Record assessment of the external Opus design review, checked prior-art updates, and unresolved
   public-contract and scoped-exclusivity choices without treating peer recommendations as decisions.
+
+- Add isolated Quint effect/cancellation experiments and distinguish sampled counterexamples from
+  verification; record version-matched source provenance and design lessons.
