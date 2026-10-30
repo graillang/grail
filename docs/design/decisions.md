@@ -115,3 +115,10 @@ forged contract is deliberately shown to fool a client unless producer/evidence 
 Recommendation: retain the candidate architecture, not commit to it. Next specify a formal safety
 statement for this fragment, then investigate a small mutation/control-flow extension. Do not
 interpret passing finite tests as Rust-class guarantees or native compile-speed evidence.
+
+## External Opus review
+
+The [review assessment](opus-review-response.md) records useful recommendations and qualifications.
+Favor investigating stable, checked public contract bounds and mutation/input-flow semantics next.
+Scoped exclusivity, stackful fibers, a single pervasive surface effect, linear must-close resources
+and a verified-component product are still proposals, not adopted decisions.

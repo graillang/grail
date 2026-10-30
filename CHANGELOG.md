@@ -23,3 +23,6 @@
 - Stress-test origin/capture contracts against separate finite dependency and allocation-epoch models.
 - Measure generic forwarding, source-set growth and root-indexed client lookup; document unsupported
   ownership/effect features and the trust limit of schema-valid but dishonest contracts.
+
+- Record assessment of the external Opus design review, checked prior-art updates, and unresolved
+  public-contract and scoped-exclusivity choices without treating peer recommendations as decisions.
