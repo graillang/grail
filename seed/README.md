@@ -26,7 +26,7 @@ They are demonstration commands, not a surface-language parser or general build 
   requires all views to end. Calls consume view arguments; explicit reborrows retain a parent.
 - Returned references may originate only from suitable input regions. No local-buffer escape.
   Imported return bounds conservatively retain every compatible argument origin and parent.
-- Counted loops require the same resource state at their back edge. Numeric state may change;
+- Counted and while loops require the same resource state at their back edge. Numeric state may change;
   loop-local resources must end. The lowered IR has explicit `End`; the source frontend infers
   borrowed-value endings and inserts lexical owner cleanup.
 - Numbers are wrapping u64; buffers hold bytes. Native indexing and remainder have abort guards.
@@ -112,4 +112,16 @@ seed/target/release/grail-seed compile seed/examples/echo_text.grl seed/.work/te
 seed/target/release/grail-seed build seed/examples/text_check.grl seed/.work/text seed/.work/text
 seed/.work/text/text_check 'hé🙂'  # 389107
 cargo test --manifest-path seed/Cargo.toml --offline --test text_native -- --ignored
+```
+
+## While loops
+
+`while condition { ... }` re-evaluates the condition each time (unlike a counted range's captured
+bound). Temporary owners/loans created by the condition end before entering the body or taking
+its false exit. The current balanced-ownership back-edge restriction remains; `break`, `continue`
+and early returns are not yet implemented.
+
+```sh
+seed/target/release/grail-seed build seed/examples/while_sum.grl seed/.work/while seed/.work/while
+seed/.work/while/while_sum 123  # 150
 ```

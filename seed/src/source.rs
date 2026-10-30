@@ -365,6 +365,19 @@ impl Parser<'_> {
                 ops.push(Op::Move { dst, src: value });
                 self.bind(name, dst, mutable)?;
                 self.expect(";")?;
+            } else if self.eat("while") {
+                let mut test = vec![];
+                let condition = self.expr(&mut test, 0, 0)?;
+                let outer = self.vars.clone();
+                self.expect("{")?;
+                let body = self.statements(depth + 1)?;
+                self.expect("}")?;
+                self.vars = outer;
+                ops.push(Op::While {
+                    condition,
+                    test,
+                    body,
+                });
             } else if self.eat("for") {
                 let name = self.ident()?;
                 self.expect("in")?;
@@ -606,6 +619,24 @@ fn live_before(op: &Op, after: &BTreeSet<Reg>) -> BTreeSet<Reg> {
             live.insert(*condition);
             return live;
         }
+        Op::While {
+            condition,
+            test,
+            body,
+        } => {
+            loop {
+                let mut exit = before(body, &live);
+                exit.extend(after);
+                exit.insert(*condition);
+                let mut next = live.clone();
+                next.extend(before(test, &exit));
+                if next == live {
+                    break;
+                }
+                live = next;
+            }
+            return live;
+        }
         Op::Loop { index, end, body } => {
             loop {
                 let mut next = live.clone();
@@ -668,12 +699,30 @@ fn ending(
     afters.reverse();
     let mut result = vec![];
     for (op, after) in ops.iter().zip(afters) {
-        let keep = if matches!(op, Op::Loop { .. } | Op::If { .. }) {
+        let keep = if matches!(op, Op::Loop { .. } | Op::If { .. } | Op::While { .. }) {
             protected.union(&state.resources).copied().collect()
         } else {
             BTreeSet::new()
         };
         let op = match op {
+            Op::While {
+                condition,
+                test,
+                body,
+            } => {
+                let mut condition_state = state.clone();
+                let condition_out = BTreeSet::from([*condition]);
+                let test = ending(test, &mut condition_state, imports, &condition_out, &keep)?;
+                let mut body_state = state.clone();
+                let mut body_out = live_before(op, &after);
+                body_out.extend(&after);
+                let body = ending(body, &mut body_state, imports, &body_out, &keep)?;
+                Op::While {
+                    condition: *condition,
+                    test,
+                    body,
+                }
+            }
             Op::Loop { index, end, body } => {
                 let mut inner = state.clone();
                 inner.num(*index)?;

@@ -122,6 +122,49 @@ fn two_modules_parse_borrowed_tokens_and_abort_on_invalid_input() {
     let p = Command::new(dir.join("bound")).output().unwrap();
     assert!(p.status.success());
     assert_eq!(p.stdout, b"3\n");
+    let loop_file = dir.join("loop.grl");
+    let loop_source = "fn loop_sum<a>(input:read<a>)->num {var i=0;var sum=0;while i<len(input) {sum=sum+at(input,i);i=i+1;}return sum;}";
+    fs::write(&loop_file, loop_source).unwrap();
+    let p = Command::new(binary)
+        .args([
+            "build",
+            loop_file.to_str().unwrap(),
+            dir.to_str().unwrap(),
+            dir.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(p.status.success(), "{}", String::from_utf8_lossy(&p.stderr));
+    for (input, expected) in [("123", b"150\n".as_slice()), ("", b"0\n".as_slice())] {
+        let p = Command::new(dir.join("loop_sum"))
+            .arg(input)
+            .output()
+            .unwrap();
+        assert!(p.status.success());
+        assert_eq!(p.stdout, expected);
+    }
+    let checked =
+        grail_seed::source::compile(loop_source, std::collections::BTreeMap::new()).unwrap();
+    fs::write(
+        dir.join("loop_sum.ll"),
+        grail_seed::emit::llvm(&checked).unwrap(),
+    )
+    .unwrap();
+    let p = Command::new("clang")
+        .args(["-O0", "-Wno-override-module"])
+        .arg(dir.join("loop_sum.ll"))
+        .arg(dir.join("loop_sum-main.c"))
+        .arg("-o")
+        .arg(dir.join("loop-llvm"))
+        .output()
+        .unwrap();
+    assert!(p.status.success(), "{}", String::from_utf8_lossy(&p.stderr));
+    let p = Command::new(dir.join("loop-llvm"))
+        .arg("123")
+        .output()
+        .unwrap();
+    assert!(p.status.success());
+    assert_eq!(p.stdout, b"150\n");
     // A producer failure must not publish a new interface over the valid one.
     let before = fs::read(dir.join("number.api")).unwrap();
     let invalid = dir.join("invalid.grl");

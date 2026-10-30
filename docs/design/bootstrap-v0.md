@@ -126,3 +126,12 @@ carrier may be read, moved or ended while the derived view lives. Its data owner
 and any exclusive ancestor stays restricted until **all** readonly descendants end. This is local
 checking precision, not G1 post-state inference or a claim that arbitrary family projections are Copy.
 It enables retaining lexer tokens while continuing to read the same source.
+
+## While-loop checkpoint
+
+The source/IR/C/LLVM paths now support `while condition { ... }` with repeated condition evaluation.
+Condition temporaries have a distinct closed scope: owners are released before both body entry
+and the final false edge, while enclosing owners stay live. Borrowed values needed on a back edge
+remain live; a condition-only temporary view may end before the body grows its owner. Entry
+ownership still must balance. General partial-move joins, break/continue and early returns remain
+unfinished rather than being declared unnecessary for v0.

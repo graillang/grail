@@ -246,6 +246,11 @@ pub enum Op {
         name: String,
         args: Vec<Reg>,
     },
+    While {
+        condition: Reg,
+        test: Vec<Op>,
+        body: Vec<Op>,
+    },
     Loop {
         index: Reg,
         end: Reg,
@@ -399,6 +404,20 @@ impl State {
         self.remove(r);
         Ok(())
     }
+    fn validate_closed(&self, entry: &BTreeMap<Reg, Value>) -> Result<(), String> {
+        for (r, v) in &self.values {
+            if !entry.contains_key(r) && v.ty != Ty::Num {
+                return Err("block-local resource must end".into());
+            }
+        }
+        for (r, v) in entry {
+            let after = self.get(*r)?;
+            if v.ty != after.ty || (v.ty != Ty::Num && v != after) {
+                return Err("block changes entry ownership".into());
+            }
+        }
+        Ok(())
+    }
     fn closed(
         &mut self,
         ops: &[Op],
@@ -407,17 +426,7 @@ impl State {
     ) -> Result<(), String> {
         let entry = self.values.clone();
         self.ops(ops, imports, depth)?;
-        for (r, v) in &self.values {
-            if !entry.contains_key(r) && v.ty != Ty::Num {
-                return Err("block-local resource must end".into());
-            }
-        }
-        for (r, v) in &entry {
-            let after = self.get(*r)?;
-            if v.ty != after.ty || (v.ty != Ty::Num && v != after) {
-                return Err("block changes entry ownership".into());
-            }
-        }
+        self.validate_closed(&entry)?;
         self.values = entry;
         Ok(())
     }
@@ -678,6 +687,18 @@ impl State {
                     }
                     let v = self.new_value(sig.result.clone(), roots, ancestors);
                     self.put(*dst, v)?;
+                }
+                Op::While {
+                    condition,
+                    test,
+                    body,
+                } => {
+                    let entry = self.values.clone();
+                    self.ops(test, imports, depth + 1)?;
+                    self.require_num(*condition)?;
+                    self.validate_closed(&entry)?;
+                    self.values = entry;
+                    self.closed(body, imports, depth + 1)?;
                 }
                 Op::Loop { index, end, body } => {
                     self.require_num(*end)?;

@@ -137,3 +137,8 @@
 - Allow readonly byte-view descriptors to be read, moved or ended while derived readonly views
   live, without releasing their data owners or exclusive ancestors. Add paired positive/negative
   source checks for lexer-style retained slices.
+
+- Add while loops to source, checked IR and C/LLVM lowering. Re-evaluate conditions, close their
+  temporary owner/loan scope on both outgoing edges, and preserve loop-carried resource obligations.
+- Validate zero-iteration execution, mutable counters, condition allocations and retained-view
+  growth rejection with native and allocator-audited cases.

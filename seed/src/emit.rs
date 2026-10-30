@@ -45,6 +45,10 @@ fn buffers(ops: &[Op], out: &mut BTreeMap<Reg, usize>) {
                 *v = (*v).max((*len).max(1));
             }
             Op::Loop { body, .. } => buffers(body, out),
+            Op::While { test, body, .. } => {
+                buffers(test, out);
+                buffers(body, out);
+            }
             Op::If { yes, no, .. } => {
                 buffers(yes, out);
                 buffers(no, out);
@@ -96,6 +100,7 @@ pub fn c(p: &Checked) -> String {
         Op::Write{dst,index,value}=>{let v=view(*dst,types);writeln!(s,"if (r{index}>={v}.n) abort(); {v}.p[r{index}]=(uint8_t)r{value};").unwrap()},
         Op::Binary{dst,op,left,right}=>{let symbol=match op{Bin::Add=>"+",Bin::Sub=>"-",Bin::Lt=>"<",Bin::Mul=>"*",Bin::Xor=>"^",Bin::Rem=>"%",Bin::Eq=>"==",Bin::Ne=>"!=",Bin::And=>"&"};if matches!(op,Bin::Rem){writeln!(s,"if (!r{right}) abort();").unwrap()}writeln!(s,"r{dst}=r{left} {symbol} r{right};").unwrap()},
         Op::Call{dst,name,args}=>{writeln!(s,"r{dst}=g_{name}({});",args.iter().map(|r|format!("r{r}")).collect::<Vec<_>>().join(",")).unwrap()},
+        Op::While{condition,test,body}=>{s.push_str("while(1){\n");ops(s,test,types);writeln!(s,"if(!r{condition})break;").unwrap();ops(s,body,types);s.push_str("}\n")},
         Op::Loop{index,end,body}=>{writeln!(s,"for (r{index}=0; r{index}<r{end}; ++r{index}) {{").unwrap();ops(s,body,types);s.push_str("}\n")},
     }
         }
@@ -329,6 +334,26 @@ impl Ll {
                         values.join(", ")
                     ));
                     self.store(*dst, &format!("%{x}"))
+                }
+                Op::While {
+                    condition,
+                    test,
+                    body,
+                } => {
+                    let head = self.fresh();
+                    let block = self.fresh();
+                    let done = self.fresh();
+                    self.line(format!("br label %{head}"));
+                    writeln!(self.s, "{head}:").unwrap();
+                    self.ops(test);
+                    let value = self.load(*condition);
+                    let cmp = self.fresh();
+                    self.line(format!("%{cmp} = icmp ne i64 {value}, 0"));
+                    self.line(format!("br i1 %{cmp}, label %{block}, label %{done}"));
+                    writeln!(self.s, "{block}:").unwrap();
+                    self.ops(body);
+                    self.line(format!("br label %{head}"));
+                    writeln!(self.s, "{done}:").unwrap();
                 }
                 Op::Loop { index, end, body } => {
                     self.store(*index, "0");
