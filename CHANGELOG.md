@@ -101,3 +101,7 @@
   acceptance when coverage guarantees are omitted from dependencies; no production compiler cache claimed.
 - Keep body-contract truthfulness, memory-interface invalidation and value/code proof dependencies
   separate; make the transfer smoke check report the actual shared proof-corpus target count.
+
+- Start a dependency-free Rust typed-IR seed with explicit signature regions, affine views,
+  carrier reborrows, guarded C/LLVM lowering and body-hidden interface tests. The first scan-based
+  checker is a measured baseline, not the final algorithm or a complete language implementation.

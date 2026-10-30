@@ -2,7 +2,8 @@
 
 A programming-language research project. Source files use **`.grl`**.
 
-We are settling the semantic foundations, not building a full compiler yet.
+We are evaluating the foundations with a [narrow Rust seed](seed/README.md), not building
+a full compiler yet.
 The ambition is a small, practical systems language with fast builds, deterministic
 memory management, explicit effects, and independently checkable correctness evidence.
 No performance or verification claims have been established for Grail.
