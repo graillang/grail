@@ -15,11 +15,11 @@ pyright research/experiments/instantiation11/check.py
 Alternatively `instantiation11.check --fetch` obtains the same official pinned toolchain in
 core10's ignored cache, not a second installation. No global Lean/Lake/Mathlib installation.
 
-The runner snapshots the three Lean sources into owned `.work/inputs`, mounts them read-only,
-freshly compiles `Core.olean`, compiles `Instantiation.lean` against that output, then checks `Routes.lean`. It stops
-on a failed core compile rather than using an older output. Both commands run without network
-or home access. It records both source hashes, compiler/runner hashes, command outputs and
-21 target axiom reports. Only standard `propext` and `Quot.sound` are allowed; proof holes,
+The runner snapshots the four Lean sources into owned `.work/inputs`, mounts them read-only,
+freshly compiles Core, Instantiation and Routes in order, then checks `Shapes.lean`. It stops
+on any failed import compile rather than using an older output. All four commands run without
+network or home access. It records all four source hashes, compiler/runner hashes, outputs and
+28 target axiom reports. Only standard `propext` and `Quot.sound` are allowed; proof holes,
 missing reports and the known kernel-check bypass setting fail the accidental-hole audit.
 This is not a hostile-source certificate validator or an independent compiler/kernel audit.
 
@@ -49,5 +49,12 @@ axioms, admitted proofs or classical-choice dependencies in the reported targets
 [Routes.lean](Routes.lean) adds eight targets for exact suffix forwarding, its slicing
 implementation, root substitution, supported dependency positions and subtree replacement.
 See [results and remaining typing premises](../../../docs/design/structured-routes.md).
-The earlier 13-target evidence records the initial two-module version; current checks include
-three modules and 21 targets. Both compiled imports are rebuilt before the final check.
+The earlier 13-target evidence records the initial two-module version; that checkpoint includes
+three modules and 21 targets. All compiled imports are rebuilt before the final check.
+
+## Dependency-shape extension
+
+[Shapes.lean](Shapes.lean) adds seven targets connecting successful formal path projections
+and same-T descendants to substitution, plus checked counterexamples to stronger claims.
+See [scope and representation premises](../../../docs/design/shape-substitution.md).
+The current runner checks four modules and 28 targets; earlier reports are historical.

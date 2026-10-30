@@ -240,3 +240,11 @@ substitution/union compatibility plus dependency-subtree replacement. It does no
 payload into one root union. Shape-compatible suffixes are an explicit premise, not yet a theorem
 about the actual type substitution/validator. Dependency-prefix separation does not prove physical
 place disjointness or exclusive authority.
+
+## Same-T shape connection
+
+The [shape theorem](shape-substitution.md) connects successful formal projections to substituted
+payload descendants and supplies the structured-route compatibility premise within the model.
+Different variables can diverge; failed opaque projections may become available after substitution.
+Dependency-shape erasure is not full base-type equality. The actual parser/unifier correspondence,
+mutable referent state, authority and artifact provenance remain open, not silently assumed proved.

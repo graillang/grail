@@ -27,6 +27,7 @@ def main() -> None:
         core.HERE / "Core.lean",
         HERE / "Instantiation.lean",
         HERE / "Routes.lean",
+        HERE / "Shapes.lean",
     ]
     hashes = {}
     for source in sources:
@@ -113,6 +114,18 @@ def main() -> None:
             "replace_outside",
         ]
     }
+    required |= {
+        "GrailCore.Shapes." + n
+        for n in [
+            "lookup_substitute",
+            "at_substitute",
+            "at_append",
+            "same_var_descendants",
+            "generic_route_supported",
+            "unknown_path_can_appear",
+            "distinct_vars_can_diverge",
+        ]
+    }
     audit = set(axioms) == required and all(
         set(used) <= {"propext", "Quot.sound"} for used in axioms.values()
     )
@@ -137,7 +150,7 @@ def main() -> None:
         "modules": reports,
         "compiler_sha256": hashlib.sha256((tool / "bin/lean").read_bytes()).hexdigest(),
         "runner_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
-        "isolation": "bubblewrap; no network/home; immutable input snapshots; fresh Core.olean and Instantiation.olean",
+        "isolation": "bubblewrap; no network/home; immutable input snapshots; fresh Core.olean, Instantiation.olean and Routes.olean",
     }
     if opts.output:
         opts.output.parent.mkdir(parents=True, exist_ok=True)

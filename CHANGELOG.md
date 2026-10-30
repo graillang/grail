@@ -76,3 +76,8 @@
   root substitution and dependency-subtree replacement; extend the existing runner to three modules.
 - Keep shape-substitution validation, Python implementation correspondence and physical disjointness
   explicit open premises rather than inferring them from dependency-path separation.
+
+- Prove successful dependency-shape projections survive substitution and same-T prefixes have
+  compatible descendants; connect that premise to structured forwarding in a restricted model.
+- Check counterexamples for newly revealed opaque paths and different-variable incompatibility;
+  keep full source typing, parser/unifier correctness and mutable referent state outside the claim.

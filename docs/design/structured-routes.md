@@ -74,3 +74,11 @@ The next discriminating step is the type-substitution/allowed-descendant connect
 checked same-T route remains shape-correct after substituting an arbitrary supported payload, without
 silently flattening its fields. Keep that obligation distinct from physical loan preservation and
 from an end-to-end certificate checker. No full compiler or adopted qualifier representation follows.
+
+
+## Shape follow-up
+
+The [shape-substitution proof](shape-substitution.md) supplies the suffix-compatibility premise
+within a dependency-shape model when both formal prefixes reach the same T. The actual Python
+parser/unifier and representation correspondence, full source typing and physical authority remain
+unverified; this does not retroactively certify the earlier artifact pipeline.
