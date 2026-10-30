@@ -29,6 +29,7 @@ def main() -> None:
         HERE / "Routes.lean",
         HERE / "Shapes.lean",
         HERE / "Coverage.lean",
+        HERE / "Refinement.lean",
     ]
     hashes = {}
     for source in sources:
@@ -138,6 +139,15 @@ def main() -> None:
             "lifetime_union_same",
         ]
     }
+    required |= {
+        "GrailCore.Refinement." + n
+        for n in [
+            "extremes_model",
+            "refinement_sound",
+            "refinement_complete",
+            "refinement_iff_models",
+        ]
+    }
     choice_targets = {
         "GrailCore.Coverage.no_fresh_cover",
         "GrailCore.Coverage.complete_transfer",
@@ -171,7 +181,7 @@ def main() -> None:
         "modules": reports,
         "compiler_sha256": hashlib.sha256((tool / "bin/lean").read_bytes()).hexdigest(),
         "runner_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
-        "isolation": "bubblewrap; no network/home; immutable input snapshots; fresh Core.olean, Instantiation.olean, Routes.olean and Shapes.olean",
+        "isolation": "bubblewrap; no network/home; immutable input snapshots; fresh Core.olean, Instantiation.olean, Routes.olean, Shapes.olean and Coverage.olean",
     }
     if opts.output:
         opts.output.parent.mkdir(parents=True, exist_ok=True)

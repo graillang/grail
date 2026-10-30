@@ -85,6 +85,8 @@ def main() -> None:
     )
     (HERE / ".work/kernel-stdout.json").write_text(kernel.stdout)
     assert kernel.returncode == 0, (kernel.stdout, kernel.stderr)
+    kernel_report = json.loads((OUT / "kernel.json").read_text())
+    assert kernel_report["passed"] and kernel_report["axiom_audit_passed"]
     report = {
         "compiler": subprocess.check_output(["rustc", "-Vv"], text=True),
         "cases": rows,
@@ -109,7 +111,7 @@ def main() -> None:
                 "rust_matched": len(rows),
                 "runtime_completed": 3,
                 "finite_cases": report["model"]["cases"],
-                "audited_kernel_targets": 34,
+                "audited_kernel_targets": len(kernel_report["theorem_axioms"]),
             },
             indent=2,
         )

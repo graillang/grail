@@ -283,3 +283,15 @@ checked no-outside-targets condition may supply the missing fact; no extra annot
 Conditional list-level coverage/update lemmas and finite policies check the distinction. They do
 not certify the producer or a full pointer/affinity/erasure model. Keep conservative weak updates
 when exact transfer is unknown rather than inventing a coverage guarantee from root upper bounds.
+
+## Refinement polarity and proof dependencies
+
+The [interval study](contract-refinement.md) proves may-subset/must-superset refinement equivalent
+to semantic implication in its consistent footprint domain. A may-only comparator/key loses a
+coverage guarantee under weakening; a body violating an unchanged strong claim instead fails the
+producer-verification obligation. These are separate boundaries.
+
+This is not a new required ABI or a bug in the earlier upper-only shared-data comparison. Hash only
+what a particular check depends on, but do not treat a stable memory/coverage contract as a stable
+value proof, optimized body or arbitrary artifact. Multiplicity, loan/state and scope composition
+remain open beyond the interval abstraction.

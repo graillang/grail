@@ -96,3 +96,8 @@
   combinations; distinguish conservative weak updates from unsupported strong may-target updates.
 - Add six conditional coverage/post-bound Lean targets with explicit logical dependencies; retain
   target-provenance, producer checking and full ownership/erasure composition as separate obligations.
+
+- Prove may/must interval refinement polarity and test 7,380 interval pairs plus a toy stale-cache
+  acceptance when coverage guarantees are omitted from dependencies; no production compiler cache claimed.
+- Keep body-contract truthfulness, memory-interface invalidation and value/code proof dependencies
+  separate; make the transfer smoke check report the actual shared proof-corpus target count.

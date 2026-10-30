@@ -15,11 +15,11 @@ pyright research/experiments/instantiation11/check.py
 Alternatively `instantiation11.check --fetch` obtains the same official pinned toolchain in
 core10's ignored cache, not a second installation. No global Lean/Lake/Mathlib installation.
 
-The runner snapshots the five Lean sources into owned `.work/inputs`, mounts them read-only,
-freshly compiles Core, Instantiation, Routes and Shapes, then checks `Coverage.lean`. It stops
-on any failed import compile rather than using an older output. All five commands run without
-network or home access. It records all five source hashes, compiler/runner hashes, outputs and
-34 target axiom reports. Standard `propext`/`Quot.sound` are allowed; only two Coverage counting targets may also use
+The runner snapshots the six Lean sources into owned `.work/inputs`, mounts them read-only,
+freshly compiles Core, Instantiation, Routes, Shapes and Coverage, then checks `Refinement.lean`. It stops
+on any failed import compile rather than using an older output. All six commands run without
+network or home access. It records all six source hashes, compiler/runner hashes, outputs and
+38 target axiom reports. Standard `propext`/`Quot.sound` are allowed; only two Coverage counting targets may also use
 `Classical.choice`. Proof holes,
 missing reports and the known kernel-check bypass setting fail the accidental-hole audit.
 This is not a hostile-source certificate validator or an independent compiler/kernel audit.
@@ -64,5 +64,11 @@ That checkpoint checks four modules and 28 targets; the current coverage extensi
 
 [Coverage.lean](Coverage.lean) adds six conditional target-list/post-bound statements and
 counterexamples. [Transfer results](../../../docs/design/target-coverage.md) explain why these
-are not lifetime-support or general mutable-reference theorems. Current checks are five modules
+are not lifetime-support or general mutable-reference theorems. That checkpoint is five modules
 and 34 targets; the earlier 13/21/28-target reports remain historical.
+
+## Refinement extension
+
+[Refinement.lean](Refinement.lean) adds four no-axiom interval-domain targets for may/must
+contract implication. [Refinement results](../../../docs/design/contract-refinement.md) delimit
+its completeness and toy cache experiment. Current checks are six modules and 38 target reports.
