@@ -187,7 +187,6 @@ is a different cost policy. Always-owned Bundle results require owned owners, ot
 external dependencies must remain visible. Drop/rebuild/partial construction must respect internal
 and external loans. These are tested design constraints and candidate restrictions, not an adoption.
 
-
 ## Lifetime versus authority investigation
 
 [Authority findings](authority-boundary.md) distinguish a temporary carrier loan, a moved stored
@@ -198,3 +197,15 @@ Source-root bounds do not themselves establish permission validity; checked cons
 trusted split/transfer primitives can supply it without additional public root slots or runtime
 loan tables. Define view validity and access-through relations before extending first-class mutable
 reference inference. Loop/branch joins, generic referent state and formal preservation remain open.
+
+
+## Call activation investigation
+
+[Call findings](call-activation-boundary.md) show why permitting later argument mutation requires
+entry snapshots at activation, not at initial place encounter. Materialized value/callee loans are
+not deferred merely because second-class parameter accesses are; incoming copied views can still
+alias mutable storage. Moved targets must be checked again at activation.
+
+The finite model supports a stable named-place subset, not general indexed/pointee selectors.
+Reservation or precisely defined deferred resolution remain alternatives. Specify selector effect,
+address-stability and bounds-check timing before promising a general no-two-phase-borrow rule.

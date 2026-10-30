@@ -9,6 +9,7 @@ No performance or verification claims have been established for Grail.
 
 ## Living design record
 
+- [Argument evaluation and call activation](docs/design/call-activation-boundary.md)
 - [Lifetime roots and exclusive-access authority](docs/design/authority-boundary.md)
 - [Bundle construction, projection and ownership boundaries](docs/design/bundle-boundary.md)
 - [Pending-work ownership and error cleanup](docs/design/cleanup-boundary.md)

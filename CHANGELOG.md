@@ -56,3 +56,8 @@
   isolated Rust probes and bounded interval/cell permission comparisons.
 - Record minimal construction/permission proof obligations and Aeneas/Hylo precedent; do not infer
   that extra public lifetime syntax, a runtime loan graph or a full checker is required or implemented.
+
+- Test delayed call activation against nested argument effects, early dependency snapshots,
+  materialized storage views and copied-view aliasing, with five Rust reference probes.
+- Document stable-place premises and unresolved selector/address/bounds-check timing; no frontend
+  implementation, general safety proof or bug in the older restricted IR is claimed.
