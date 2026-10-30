@@ -33,3 +33,7 @@
 - Record evidence-backed Haskell successes/costs, retention and inference lessons; distinguish
   community pain reports from causal adoption/performance claims.
 - Add Swift/OxCaml/Mojo ownership findings and inspected Quint Connect adapter boundaries.
+
+- Add an independent first-principles architecture review: rooted value semantics, a precise
+  escape-boundary table, contract refinement/publication policy, suspension commitments S1–S6,
+  finish-or-abandon cleanup, formal statements and kill-criteria experiments. Proposals only.

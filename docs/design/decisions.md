@@ -139,3 +139,23 @@ See [Quint](quint-lessons.md), [Haskell](haskell-lessons.md), and the
 Quint Connect already implements model-to-Rust trace replay/state comparison. This is prior art, not
 a newly discovered Grail product differentiation. Swift/OxCaml/Mojo offer important mechanisms but
 none was benchmarked or shown here to satisfy the entire Grail brief.
+
+## Independent first-principles review
+
+See the [architecture review](first-principles-architecture.md). Proposals, not adopted rules:
+
+- Rooted value semantics: second-class `read`/`mut`/`take` accesses plus type-structured,
+  value-named shared/exclusive qualifiers on views, closures, iterators and in-flight operations.
+  A precise escape table (§1.4) answers the open "scoped exclusivity boundary" item.
+- Contracts inferred within a package, frozen into generated, reviewed API files at package
+  boundaries; written contracts for interface methods, `extern` and function types; a defined
+  refinement order; flow clauses (`s -> cache`) name parameters rather than origin variables.
+- Concurrency semantics fixed independently of implementation: suspended computations are not
+  droppable values, frames are address-stable, static `suspend`, scopes always join, cancellation
+  is an error at suspension points. Fibers plus stackless jobs first; frame lowering is plan B.
+- Finish-or-abandon resources (linear on success paths, affine on failure paths); panics abort in v1.
+- Kill-criteria experiments X1–X8, led by a hand-classified contract-vocabulary corpus (X1).
+
+This review and the earlier external review were produced by AI models of the same family;
+agreement between them is not independent confirmation.
+
