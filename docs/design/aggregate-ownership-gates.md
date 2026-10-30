@@ -38,9 +38,10 @@ wrong: an owner's **storage** and the loans **captured in its contents** are dif
   Type/region constraints must account for other values admitted by invariant T. This can come from
   written types and local region facts; it need not adopt G1's precise post-state transformer.
 - Calls must honor value materialization/evaluation order before adding general mutable references.
-  The present parser often retains register operands until call lowering; mutations of an earlier
-  operand through later arguments would expose snapshot bugs once richer references are available.
-  Recheck the earlier call-activation study rather than assuming the byte-only subset proves this.
+  The source frontend now copies/moves each user-call argument into a fresh value immediately,
+  rather than retaining its register place until the final call. The primitive affine-use regression
+  is covered. Richer mutable-reference effects and indexed/field operands still need their own
+  execution cases; recheck the earlier call-activation study, not just the byte-only subset.
 - Exported type definitions/layouts, lifetime bounds and recursive drop behavior must be part of the
   checked interface/invalidation boundary. A bare record name is not a complete ABI fingerprint.
 

@@ -147,3 +147,7 @@
   identities and outer-owner lifetimes distinct from names, restore names on scope exit, preserve
   explicit unconditional moves/drops, and reject duplicate parameters and use after scope/consumption.
   Validate C/LLVM behavior, live-loan rejection and allocator-audited shadowed-owner cleanup.
+
+- Fix source call evaluation to copy/move each user-function argument left-to-right before evaluating
+  the next. Reject later use of an already moved owner/view, retain builtin borrowing rules, and
+  preserve explicit precomputed values/reborrows. No interface-schema or runtime-borrow-check change.

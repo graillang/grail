@@ -227,16 +227,6 @@ impl Parser<'_> {
             let name = self.ident()?;
             if self.eat("(") {
                 let mut args = vec![];
-                if !self.eat(")") {
-                    loop {
-                        args.push(self.expr(ops, 0, depth + 1)?);
-                        if self.eat(")") {
-                            break;
-                        }
-                        self.expect(",")?;
-                    }
-                }
-                let r = self.fresh()?;
                 let arity = match name.as_str() {
                     "bytes" => Some(0),
                     "read" | "mut" | "hold" | "len" | "copy_bytes" | "text" => Some(1),
@@ -244,6 +234,26 @@ impl Parser<'_> {
                     "slice" => Some(3),
                     _ => None,
                 };
+                if !self.eat(")") {
+                    loop {
+                        let value = self.expr(ops, 0, depth + 1)?;
+                        // User calls pass values, not deferred places. Move/copy each before
+                        // evaluating the next operand; builtin places follow their own rules.
+                        let arg = if arity.is_some() {
+                            value
+                        } else {
+                            let dst = self.fresh()?;
+                            ops.push(Op::Move { dst, src: value });
+                            dst
+                        };
+                        args.push(arg);
+                        if self.eat(")") {
+                            break;
+                        }
+                        self.expect(",")?;
+                    }
+                }
+                let r = self.fresh()?;
                 if arity.is_some_and(|n| n != args.len()) {
                     return Err(self.error("builtin arity"));
                 }
