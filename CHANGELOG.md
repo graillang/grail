@@ -66,3 +66,8 @@
   composition and conditional tracked-root validity, with checked counterexamples and axiom reports.
 - Consolidate distinct shape/support/authority/activation/cleanup obligations; explicitly exclude
   earlier artifact certification, physical ownership/alias safety and full-language verification.
+
+- Prove symbolic pre-source substitution commutes with the restricted core analysis and preserves
+  public bounds under arbitrary overlapping/empty source images; check the one-entry-snapshot boundary.
+- Record separate-module proof provenance and standard quotient-soundness dependencies; do not claim
+  physical alias safety, structured generic-route correctness or a certified artifact pipeline.

@@ -222,3 +222,13 @@ This does not certify earlier Python artifacts, physical ownership/alias safety 
 architecture. Require a checked connection to body/interface semantics before advertising independent
 contract certification. Symbolic pre-source instantiation and structured generic forwarding remain
 useful next proof boundaries; no full compiler is authorized by this research result.
+
+## Symbolic summary substitution
+
+The [instantiation proof](symbolic-instantiation.md) shows that symbolic pre-source substitution
+commutes with the restricted core analysis and preserves checked public upper bounds. Source images
+may overlap or be empty; one entry snapshot must remain fixed across every result/post-state.
+A checked counterexample loses an old source if the lookup is repeated after writing a slot.
+
+This is not permission for aliased mutable places, nor certification of the Python artifact pipeline.
+Structured/opaque-T routes and their implementation correspondence remain the next proof boundary.
