@@ -71,3 +71,8 @@
   public bounds under arbitrary overlapping/empty source images; check the one-entry-snapshot boundary.
 - Record separate-module proof provenance and standard quotient-soundness dependencies; do not claim
   physical alias safety, structured generic-route correctness or a certified artifact pipeline.
+
+- Add eight checked structured-route targets for suffix-preserving opaque payload forwarding,
+  root substitution and dependency-subtree replacement; extend the existing runner to three modules.
+- Keep shape-substitution validation, Python implementation correspondence and physical disjointness
+  explicit open premises rather than inferring them from dependency-path separation.

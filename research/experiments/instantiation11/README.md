@@ -15,11 +15,11 @@ pyright research/experiments/instantiation11/check.py
 Alternatively `instantiation11.check --fetch` obtains the same official pinned toolchain in
 core10's ignored cache, not a second installation. No global Lean/Lake/Mathlib installation.
 
-The runner snapshots the two Lean sources into owned `.work/inputs`, mounts them read-only,
-freshly compiles `Core.olean`, then checks `Instantiation.lean` against that output. It stops
+The runner snapshots the three Lean sources into owned `.work/inputs`, mounts them read-only,
+freshly compiles `Core.olean`, compiles `Instantiation.lean` against that output, then checks `Routes.lean`. It stops
 on a failed core compile rather than using an older output. Both commands run without network
 or home access. It records both source hashes, compiler/runner hashes, command outputs and
-13 target axiom reports. Only standard `propext` and `Quot.sound` are allowed; proof holes,
+21 target axiom reports. Only standard `propext` and `Quot.sound` are allowed; proof holes,
 missing reports and the known kernel-check bypass setting fail the accidental-hole audit.
 This is not a hostile-source certificate validator or an independent compiler/kernel audit.
 
@@ -43,3 +43,11 @@ of the mathematical state, not a proposed hidden source-language parameter.
 Function extensionality in the new equality proofs uses Lean's standard quotient-soundness
 axiom (`Quot.sound`), alongside propositional extensionality. There are no introduced domain
 axioms, admitted proofs or classical-choice dependencies in the reported targets.
+
+## Structured-route extension
+
+[Routes.lean](Routes.lean) adds eight targets for exact suffix forwarding, its slicing
+implementation, root substitution, supported dependency positions and subtree replacement.
+See [results and remaining typing premises](../../../docs/design/structured-routes.md).
+The earlier 13-target evidence records the initial two-module version; current checks include
+three modules and 21 targets. Both compiled imports are rebuilt before the final check.

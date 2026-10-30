@@ -101,3 +101,11 @@ proof connects this substitution function to transforms05's actual instantiation
 The next useful question is the structured/opaque-T boundary, not more finite root aliases in this
 already universally quantified theorem. Keep interface size/precision, authority preservation and
 artifact provenance as distinct open gates; ordinary compilation need not invoke Lean or an SMT solver.
+
+
+## Structured-route follow-up
+
+The [route extension](structured-routes.md) checks pointwise descendant forwarding and subtree
+replacement. Its evidence records the updated three-module runner with 21 target reports; the
+13-target result above remains the historical initial checkpoint. The same-T shape-substitution
+connection and Python implementation correspondence remain explicit open obligations.

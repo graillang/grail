@@ -23,7 +23,11 @@ def main() -> None:
     tool = core.fetch() if opts.fetch else core.WORK / core.PIN["directory"]
     inputs = WORK / "inputs"
     inputs.mkdir(parents=True, exist_ok=True)
-    sources = [core.HERE / "Core.lean", HERE / "Instantiation.lean"]
+    sources = [
+        core.HERE / "Core.lean",
+        HERE / "Instantiation.lean",
+        HERE / "Routes.lean",
+    ]
     hashes = {}
     for source in sources:
         data = source.read_bytes()
@@ -45,8 +49,8 @@ def main() -> None:
             "--root=/experiment",
             "-DwarningAsError=true",
         ]
-        if source.name == "Core.lean":
-            args += ["-o", "/work/Core.olean"]
+        if source != sources[-1]:
+            args += ["-o", "/work/" + source.stem + ".olean"]
         args += ["/experiment/" + source.name]
         result = sandbox.run(
             args,
@@ -96,6 +100,19 @@ def main() -> None:
             "imported_public",
         ]
     }
+    required |= {
+        "GrailCore.Routes." + n
+        for n in [
+            "sliced_iff_forward",
+            "descendant_exact",
+            "no_unrelated_output",
+            "forward_union",
+            "instantiate_forward",
+            "forward_supported",
+            "replace_project",
+            "replace_outside",
+        ]
+    }
     audit = set(axioms) == required and all(
         set(used) <= {"propext", "Quot.sound"} for used in axioms.values()
     )
@@ -106,7 +123,7 @@ def main() -> None:
     ok = (
         not version.returncode
         and f"version {core.PIN['version']}" in version.stdout
-        and len(reports) == 2
+        and len(reports) == len(sources)
         and all(not r["exit"] for r in reports)
         and bool(audit)
     )
@@ -120,7 +137,7 @@ def main() -> None:
         "modules": reports,
         "compiler_sha256": hashlib.sha256((tool / "bin/lean").read_bytes()).hexdigest(),
         "runner_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
-        "isolation": "bubblewrap; no network/home; immutable input snapshots; fresh Core.olean",
+        "isolation": "bubblewrap; no network/home; immutable input snapshots; fresh Core.olean and Instantiation.olean",
     }
     if opts.output:
         opts.output.parent.mkdir(parents=True, exist_ok=True)

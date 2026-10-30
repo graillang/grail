@@ -232,3 +232,11 @@ A checked counterexample loses an old source if the lookup is repeated after wri
 
 This is not permission for aliased mutable places, nor certification of the Python artifact pipeline.
 Structured/opaque-T routes and their implementation correspondence remain the next proof boundary.
+
+## Structured-route precision
+
+The [route extension](structured-routes.md) preserves unknown payload suffixes pointwise and proves
+substitution/union compatibility plus dependency-subtree replacement. It does not flatten a generic
+payload into one root union. Shape-compatible suffixes are an explicit premise, not yet a theorem
+about the actual type substitution/validator. Dependency-prefix separation does not prove physical
+place disjointness or exclusive authority.
