@@ -161,3 +161,10 @@
   before independent body checks, keep only used callee headers per body, and emit private native
   linkage in C/LLVM. Validate hidden-source clients, repeated helper names across modules, invalid
   unused helpers and allocator-audited owner transfer. The first function is still the sole export.
+
+- Add explicit module identities, multiple `pub fn` exports, qualified calls and flat checked modules.
+  Replace the source artifact protocol with canonical module schema 1 (signature-3 payloads); retire
+  nested helper-module storage and rebuild old source artifacts. Validate transitive dependency
+  surface hashes before linking, reject cycles/stale callers, and keep body-only rebuilds compatible.
+  Verify C/LLVM/TinyCC execution and borrowed export contracts. Artifact-byte authentication,
+  concurrent publication safety, public type definitions and full bootstrap remain unfinished.

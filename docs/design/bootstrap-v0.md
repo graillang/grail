@@ -34,10 +34,13 @@ choices should be explicit decisions with examples, rather than silent inference
 
 ## What the first source slice actually accepts
 
-One exported function per file (the first), followed by optional private helper functions and
-preceded by `use name;` imports. Headers are collected before body checking, allowing forward,
-self-recursive and mutually recursive calls. Each body is checked against signatures independently;
-variables and lifetime-name scopes do not cross functions. Functions optionally declare region names:
+A source file may begin `module name;` followed by imports, private helpers and `pub fn` exports.
+Explicit modules use their first public function as the primary export/build entry; no dummy
+function matching the module name is required. Without a module declaration, its first function
+supplies the implicit module name and is exported. Headers are collected before independent body
+checks, allowing forward/self/mutual calls. Local variables and lifetime-name scopes do not cross
+functions. Other module exports are called through `module::function`; the imported module name
+also aliases its primary export. Functions optionally declare region names:
 
 ```grl
 fn first<a>(input: read<a>) -> read<a> {
@@ -88,9 +91,14 @@ ancestry can still become expensive; earlier typed-IR timings do not cover this 
 
 `compile FILE OUT IMPORT_DIR [clang|tcc]` checks source, emits C, compiles an object, then publishes
 its `.api`. `build` additionally links an executable with direct imported objects. Imports consume
-`.api`/`.o` files, never provider source; transitive module graphs and a persistent build cache are
-not yet implemented. Private helpers share the exported function's object, are not exported in its
-interface and have internal native linkage. Multiple public exports per module remain future work.
+`.api`/`.o` files, never provider source. Source module schema 1 carries public function signatures,
+entry identity and direct dependency surface hashes; standalone signature schema 3 remains the
+function payload. Old source artifacts must be rebuilt. Builds validate and link transitive metadata
+closures once per module, reject cycles/stale contracts, and keep private helpers internal. Body-only
+edits do not invalidate callers; changes to any public member conservatively do. A persistent build
+cache and automatic rebuild scheduling remain unimplemented. The flat artifact store still assumes
+honest, nonconcurrent producers: metadata hashes do not authenticate object bytes or prevent artifact
+replacement races. An atomic/content-addressed artifact store remains required work.
 An executable accepts no parameters, or one read byte view backed by argv[1],
 and returns a number printed by the generated C entry shim.
 

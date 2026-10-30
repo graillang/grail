@@ -1,5 +1,5 @@
 //! Source command driver. Interfaces and objects, never provider source, are imported.
-use crate::{Mode, Sig, Ty, emit, source};
+use crate::{Mode, Ty, emit, source};
 use std::{collections::BTreeMap, fs, path::Path, process::Command};
 fn write(path: &Path, text: &str) -> Result<(), String> {
     fs::write(path, text).map_err(|e| format!("{}: {e}", path.display()))
@@ -69,7 +69,7 @@ pub fn compile(
     let mut available = BTreeMap::new();
     for n in &names {
         let path = imports.join(format!("{n}.api"));
-        let sig = Sig::decode(
+        let sig = crate::module::Interface::decode(
             &fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?,
         )?;
         if sig.name != *n {
@@ -79,11 +79,16 @@ pub fn compile(
     }
     let checked =
         source::compile(&text, available).map_err(|e| format!("{}: {e}", file.display()))?;
-    let name = &checked.function.sig.name;
+    let linked = if build {
+        dependencies(checked.header(), imports)?
+    } else {
+        Vec::new()
+    };
+    let name = &checked.header().name;
     fs::create_dir_all(out).map_err(|e| e.to_string())?;
     let c = out.join(format!("{name}.c"));
     let object = out.join(format!("{name}.o"));
-    write(&c, &emit::c(&checked))?;
+    write(&c, &emit::module_c(&checked))?;
     native(
         backend,
         vec![
@@ -97,7 +102,7 @@ pub fn compile(
     // Publish the signature only after provider checking and object generation succeed.
     write(&out.join(format!("{name}.api")), &checked.interface())?;
     if build {
-        let sig = &checked.function.sig;
+        let sig = checked.entry_signature();
         let params = match sig.params.as_slice() {
             [] => "void",
             [Ty::View(Mode::Read, _)] => "gv",
@@ -106,10 +111,11 @@ pub fn compile(
         if sig.result != Ty::Num {
             return Err("executable entry must return num".into());
         }
+        let symbol = emit::symbol(&sig.name);
         let call = if params == "void" {
-            format!("g_{name}()")
+            format!("{symbol}()")
         } else {
-            format!("g_{name}((gv){{(unsigned char*)argv[1],strlen(argv[1])}})")
+            format!("{symbol}((gv){{(unsigned char*)argv[1],strlen(argv[1])}})")
         };
         let argc = if params == "void" {
             "(void)argc; (void)argv;"
@@ -120,15 +126,86 @@ pub fn compile(
         write(
             &main,
             &format!(
-                "#include <stdint.h>\n#include <stdio.h>\n#include <string.h>\ntypedef struct{{unsigned char*p;uint64_t n;}}gv;\nuint64_t g_{name}({params});\nint main(int argc,char**argv){{{argc}printf(\"%llu\\n\",(unsigned long long){call});return 0;}}\n"
+                "#include <stdint.h>\n#include <stdio.h>\n#include <string.h>\ntypedef struct{{unsigned char*p;uint64_t n;}}gv;\nuint64_t {symbol}({params});\nint main(int argc,char**argv){{{argc}printf(\"%llu\\n\",(unsigned long long){call});return 0;}}\n"
             ),
         )?;
         let mut args = vec![main.display().to_string(), object.display().to_string()];
-        for n in &names {
+        for n in &linked {
             args.push(imports.join(format!("{n}.o")).display().to_string());
         }
         args.extend(["-o".into(), out.join(name).display().to_string()]);
         native(backend, args, true)?;
     }
     Ok(())
+}
+
+/// Validate the metadata closure before linking. Interface identity is not object authentication;
+/// the current flat artifact directory still assumes honest, nonconcurrent producers.
+fn dependencies(root: &crate::module::Interface, dir: &Path) -> Result<Vec<String>, String> {
+    use std::{
+        collections::{BTreeMap, BTreeSet},
+        rc::Rc,
+    };
+    fn visit(
+        header: Rc<crate::module::Interface>,
+        dir: &Path,
+        cache: &mut BTreeMap<String, (Rc<crate::module::Interface>, String)>,
+        active: &mut BTreeSet<String>,
+        done: &mut BTreeSet<String>,
+        order: &mut Vec<String>,
+    ) -> Result<(), String> {
+        if done.contains(&header.name) {
+            return Ok(());
+        }
+        if !active.insert(header.name.clone()) {
+            return Err(format!("cyclic module dependency at {}", header.name));
+        }
+        if active.len() > 256 {
+            return Err("module dependency depth limit".into());
+        }
+        for (name, want) in &header.dependencies {
+            let (child, hash) = if let Some(child) = cache.get(name) {
+                child.clone()
+            } else {
+                if cache.len() >= 4096 {
+                    return Err("module dependency count limit".into());
+                }
+                let path = dir.join(format!("{name}.api"));
+                let child = crate::module::Interface::decode(
+                    &fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?,
+                )?;
+                if child.name != *name {
+                    return Err("dependency name does not match module interface".into());
+                }
+                let hash = child.fingerprint()?;
+                let child = Rc::new(child);
+                cache.insert(name.clone(), (child.clone(), hash.clone()));
+                (child, hash)
+            };
+            if hash != *want {
+                return Err(format!(
+                    "stale module {}: dependency {name} interface changed; rebuild {}",
+                    header.name, header.name
+                ));
+            }
+            visit(child, dir, cache, active, done, order)?;
+        }
+        active.remove(&header.name);
+        done.insert(header.name.clone());
+        order.push(header.name.clone());
+        Ok(())
+    }
+    let root = Rc::new(root.clone());
+    let mut cache = BTreeMap::from([(root.name.clone(), (root.clone(), root.fingerprint()?))]);
+    let mut order = Vec::new();
+    visit(
+        root.clone(),
+        dir,
+        &mut cache,
+        &mut BTreeSet::new(),
+        &mut BTreeSet::new(),
+        &mut order,
+    )?;
+    order.retain(|name| name != &root.name);
+    Ok(order)
 }

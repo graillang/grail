@@ -2,6 +2,14 @@
 use crate::{Bin, Checked, Op, Reg, Sig, Ty};
 use std::collections::BTreeMap;
 use std::fmt::Write;
+/// Distinct prefixes and component lengths keep qualified names disjoint from plain symbols.
+pub fn symbol(name: &str) -> String {
+    if let Some((module, member)) = name.split_once("::") {
+        format!("q_{}_{}_{}_{}", module.len(), module, member.len(), member)
+    } else {
+        format!("g_{name}")
+    }
+}
 fn cty(t: &Ty) -> &'static str {
     match t {
         Ty::Num => "uint64_t",
@@ -12,9 +20,9 @@ fn cty(t: &Ty) -> &'static str {
 }
 fn signature(s: &Sig) -> String {
     format!(
-        "{} g_{}({})",
+        "{} {}({})",
         cty(&s.result),
-        s.name,
+        symbol(&s.name),
         if s.params.is_empty() {
             "void".into()
         } else {
@@ -58,26 +66,37 @@ fn buffers(ops: &[Op], out: &mut BTreeMap<Reg, usize>) {
     }
 }
 pub fn c(p: &Checked) -> String {
-    let functions = std::iter::once(p)
-        .chain(p.local_functions.iter())
-        .collect::<Vec<_>>();
+    c_functions(&[(p, true)])
+}
+pub fn module_c(p: &crate::module::CheckedModule) -> String {
+    c_functions(
+        &p.functions
+            .iter()
+            .map(|(p, public)| (p, *public))
+            .collect::<Vec<_>>(),
+    )
+}
+fn c_functions(functions: &[(&Checked, bool)]) -> String {
     let mut s = String::from(
         "#include <stdint.h>\n#include <stdlib.h>\n#include <string.h>\ntypedef struct { uint8_t *p; uint64_t n; } gv;\ntypedef struct { gv value; } gh;\ntypedef struct {uint8_t*p;uint64_t n,c;} gb;\n#define GRAIL_BYTES_TYPES_DEFINED\n",
     );
-    if functions.iter().any(|p| p.types.values().any(|t| t.heap())) {
+    if functions
+        .iter()
+        .any(|(p, _)| p.types.values().any(|t| t.heap()))
+    {
         s.push_str(include_str!("bytes_runtime.h"));
     }
     let locals = functions
         .iter()
-        .map(|p| p.function.sig.name.as_str())
-        .collect::<std::collections::BTreeSet<_>>();
+        .map(|(p, public)| (p.function.sig.name.as_str(), *public))
+        .collect::<BTreeMap<_, _>>();
     let mut declarations = BTreeMap::new();
-    for p in &functions {
+    for (p, _) in functions {
         declarations.extend(p.imports.iter().map(|(n, s)| (n.clone(), s.clone())));
         declarations.insert(p.function.sig.name.clone(), p.function.sig.clone());
     }
     for sig in declarations.values() {
-        let private = locals.contains(sig.name.as_str()) && sig.name != p.function.sig.name;
+        let private = locals.get(sig.name.as_str()) == Some(&false);
         writeln!(
             s,
             "{} {};",
@@ -86,8 +105,8 @@ pub fn c(p: &Checked) -> String {
         )
         .unwrap();
     }
-    for (i, p) in functions.iter().enumerate() {
-        c_body(p, &mut s, i != 0);
+    for (p, public) in functions {
+        c_body(p, &mut s, !public);
     }
     s
 }
@@ -130,7 +149,7 @@ fn c_body(p: &Checked, s: &mut String, private: bool) {
         Op::Read{dst,src,index}=>{let v=view(*src,types);writeln!(s,"if (r{index}>={v}.n) abort(); r{dst}={v}.p[r{index}];").unwrap()},
         Op::Write{dst,index,value}=>{let v=view(*dst,types);writeln!(s,"if (r{index}>={v}.n) abort(); {v}.p[r{index}]=(uint8_t)r{value};").unwrap()},
         Op::Binary{dst,op,left,right}=>{let symbol=match op{Bin::Add=>"+",Bin::Sub=>"-",Bin::Lt=>"<",Bin::Mul=>"*",Bin::Xor=>"^",Bin::Rem=>"%",Bin::Eq=>"==",Bin::Ne=>"!=",Bin::And=>"&"};if matches!(op,Bin::Rem){writeln!(s,"if (!r{right}) abort();").unwrap()}writeln!(s,"r{dst}=r{left} {symbol} r{right};").unwrap()},
-        Op::Call{dst,name,args}=>{writeln!(s,"r{dst}=g_{name}({});",args.iter().map(|r|format!("r{r}")).collect::<Vec<_>>().join(",")).unwrap()},
+        Op::Call{dst,name,args}=>{writeln!(s,"r{dst}={}({});",symbol(name),args.iter().map(|r|format!("r{r}")).collect::<Vec<_>>().join(",")).unwrap()},
         Op::Block{body}=>{s.push_str("{\n");ops(s,body,types);s.push_str("}\n")},
         Op::While{condition,test,body}=>{s.push_str("while(1){\n");ops(s,test,types);writeln!(s,"if(!r{condition})break;").unwrap();ops(s,body,types);s.push_str("}\n")},
         Op::Loop{index,end,body}=>{writeln!(s,"for (r{index}=0; r{index}<r{end}; ++r{index}) {{").unwrap();ops(s,body,types);s.push_str("}\n")},
@@ -361,8 +380,9 @@ impl Ll {
                         .collect::<Vec<_>>();
                     let x = self.fresh();
                     self.line(format!(
-                        "%{x} = call {} @g_{name}({})",
+                        "%{x} = call {} @{}({})",
                         lty(&self.types[dst]),
+                        symbol(name),
                         values.join(", ")
                     ));
                     self.store(*dst, &format!("%{x}"))
@@ -414,10 +434,18 @@ impl Ll {
     }
 }
 pub fn llvm(p: &Checked) -> Result<String, String> {
-    let functions = std::iter::once(p)
-        .chain(p.local_functions.iter())
-        .collect::<Vec<_>>();
-    if functions.iter().any(|p| {
+    llvm_functions(&[(p, true)])
+}
+pub fn module_llvm(p: &crate::module::CheckedModule) -> Result<String, String> {
+    llvm_functions(
+        &p.functions
+            .iter()
+            .map(|(p, public)| (p, *public))
+            .collect::<Vec<_>>(),
+    )
+}
+fn llvm_functions(functions: &[(&Checked, bool)]) -> Result<String, String> {
+    if functions.iter().any(|(p, _)| {
         p.types
             .values()
             .chain(
@@ -431,10 +459,10 @@ pub fn llvm(p: &Checked) -> Result<String, String> {
     }
     let locals = functions
         .iter()
-        .map(|p| p.function.sig.name.as_str())
+        .map(|(p, _)| p.function.sig.name.as_str())
         .collect::<std::collections::BTreeSet<_>>();
     let mut declarations = BTreeMap::new();
-    for p in &functions {
+    for (p, _) in functions {
         declarations.extend(
             p.imports
                 .iter()
@@ -446,15 +474,15 @@ pub fn llvm(p: &Checked) -> Result<String, String> {
     for sig in declarations.values() {
         writeln!(
             s,
-            "declare {} @g_{}({})",
+            "declare {} @{}({})",
             lty(&sig.result),
-            sig.name,
+            symbol(&sig.name),
             sig.params.iter().map(lty).collect::<Vec<_>>().join(", ")
         )
         .unwrap();
     }
-    for (i, p) in functions.iter().enumerate() {
-        s.push_str(&llvm_body(p, i != 0));
+    for (p, public) in functions {
+        s.push_str(&llvm_body(p, !public));
     }
     Ok(s)
 }
@@ -466,10 +494,10 @@ fn llvm_body(p: &Checked, private: bool) -> String {
     };
     writeln!(
         ll.s,
-        "define {}{} @g_{}({}) {{\nentry:",
+        "define {}{} @{}({}) {{\nentry:",
         if private { "internal " } else { "" },
         lty(&p.function.sig.result),
-        p.function.sig.name,
+        symbol(&p.function.sig.name),
         p.function
             .sig
             .params

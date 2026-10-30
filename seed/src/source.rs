@@ -1,5 +1,5 @@
 //! Borrowed-token parser and local loan ending for the first .grl slice.
-use crate::{Bin, Checked, Function, Mode, Op, Reg, Sig, State, Ty, check};
+use crate::{Bin, Function, Mode, Op, Reg, Sig, State, Ty, check};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Copy)]
@@ -90,7 +90,11 @@ fn lex(text: &str) -> Result<Vec<Token<'_>>, String> {
             while i < b.len() && b[i].is_ascii_digit() {
                 i += 1
             }
-        } else if i + 1 < b.len() && [b"->", b"==", b"!="].iter().any(|s| b[i..].starts_with(*s)) {
+        } else if i + 1 < b.len()
+            && [b"->", b"==", b"!=", b"::"]
+                .iter()
+                .any(|s| b[i..].starts_with(*s))
+        {
             i += 2
         } else if b"(){}<>,:;=+-*%&^".contains(&b[i]) {
             i += 1
@@ -166,10 +170,11 @@ impl Parser<'_> {
     fn bind(&mut self, name: String, reg: Reg, mutable: bool) {
         self.vars.insert(name, Binding { reg, mutable });
     }
-    fn function(&mut self) -> Result<Function, String> {
+    fn function(&mut self) -> Result<(Function, bool), String> {
         self.vars.clear();
         self.regions.clear();
         self.next = 0;
+        let public = self.eat("pub");
         self.expect("fn")?;
         let name = self.ident()?;
         if self.eat("<") {
@@ -219,7 +224,7 @@ impl Parser<'_> {
         let result = self.expr(&mut ops, 0, 0)?;
         self.expect(";")?;
         self.expect("}")?;
-        Ok(Function { sig, ops, result })
+        Ok((Function { sig, ops, result }, public))
     }
     fn ty(&mut self) -> Result<Ty, String> {
         let name = self.ident()?;
@@ -279,7 +284,11 @@ impl Parser<'_> {
             ops.push(Op::Num(r, n));
             r
         } else {
-            let name = self.ident()?;
+            let mut name = self.ident()?;
+            if self.eat("::") {
+                name.push_str("::");
+                name.push_str(&self.ident()?);
+            }
             if self.eat("(") {
                 let mut args = vec![];
                 let arity = match name.as_str() {
@@ -552,6 +561,10 @@ pub fn imports(text: &str) -> Result<Vec<String>, String> {
         vars: BTreeMap::new(),
         regions: BTreeMap::new(),
     };
+    if p.eat("module") {
+        p.ident()?;
+        p.expect(";")?;
+    }
     let mut names = vec![];
     while p.eat("use") {
         let n = p.ident()?;
@@ -563,7 +576,10 @@ pub fn imports(text: &str) -> Result<Vec<String>, String> {
     }
     Ok(names)
 }
-pub fn compile(text: &str, available: BTreeMap<String, Sig>) -> Result<Checked, String> {
+pub fn compile(
+    text: &str,
+    available: BTreeMap<String, crate::module::Interface>,
+) -> Result<crate::module::CheckedModule, String> {
     let mut p = Parser {
         tokens: lex(text)?,
         at: 0,
@@ -571,20 +587,29 @@ pub fn compile(text: &str, available: BTreeMap<String, Sig>) -> Result<Checked, 
         vars: BTreeMap::new(),
         regions: BTreeMap::new(),
     };
+    let explicit = if p.eat("module") {
+        let name = p.ident()?;
+        p.expect(";")?;
+        Some(name)
+    } else {
+        None
+    };
     let mut callable = BTreeMap::new();
+    let mut dependencies = BTreeMap::new();
     while p.eat("use") {
         let name = p.ident()?;
-        let sig = available
+        let header = available
             .get(&name)
-            .ok_or_else(|| p.error("missing imported interface"))?
-            .clone();
-        if sig.name != name {
-            return Err(p.error("import name does not match signature"));
+            .ok_or_else(|| p.error("missing imported module interface"))?;
+        header.validate()?;
+        if header.name != name {
+            return Err(p.error("import name does not match module"));
         }
-        sig.validate()?;
-        if callable.insert(name, sig).is_some() {
+        if dependencies.insert(name, header.fingerprint()?).is_some() {
             return Err(p.error("duplicate import"));
         }
+        callable.extend(header.exports.iter().map(|(n, s)| (n.clone(), s.clone())));
+        callable.insert(header.name.clone(), header.exports[&header.entry].clone());
         p.expect(";")?;
     }
     let mut functions = Vec::new();
@@ -592,26 +617,58 @@ pub fn compile(text: &str, available: BTreeMap<String, Sig>) -> Result<Checked, 
         if functions.len() >= 4096 {
             return Err(p.error("function limit"));
         }
-        let f = p.function()?;
-        if callable.insert(f.sig.name.clone(), f.sig.clone()).is_some() {
-            return Err(p.error("duplicate function/import name"));
-        }
-        functions.push(f);
+        functions.push(p.function()?);
     }
     if functions.is_empty() {
         return Err(p.error("expected function"));
     }
+    let implicit = explicit.is_none();
+    let name = explicit.unwrap_or_else(|| functions[0].0.sig.name.clone());
+    let mut locals = BTreeMap::new();
+    let mut exports = BTreeMap::new();
+    for (i, (f, public)) in functions.iter_mut().enumerate() {
+        *public |= implicit && i == 0;
+        let local = f.sig.name.clone();
+        if callable.contains_key(&local) {
+            return Err(p.error("function/import collision"));
+        }
+        if *public {
+            f.sig.name = format!("{name}::{local}");
+        }
+        if locals.insert(local, f.sig.clone()).is_some() {
+            return Err(p.error("duplicate function"));
+        }
+        if *public {
+            exports.insert(f.sig.name.clone(), f.sig.clone());
+        }
+    }
+    for (alias, sig) in locals {
+        callable.insert(alias, sig.clone());
+        callable.insert(sig.name.clone(), sig);
+    }
+    let entry = functions
+        .iter()
+        .find(|(_, public)| *public)
+        .ok_or_else(|| p.error("explicit module needs a pub function"))?
+        .0
+        .sig
+        .name
+        .clone();
+    let header = crate::module::Interface {
+        name,
+        entry,
+        exports,
+        dependencies,
+    };
+    header.validate()?;
     let mut checked = Vec::new();
-    for f in functions {
+    for (mut f, public) in functions {
         let mut names = BTreeSet::new();
-        callees(&f.ops, &mut names);
+        resolve_calls(&mut f.ops, &callable, &mut names)?;
         let mut imports = BTreeMap::new();
         for name in names {
-            let sig = callable
-                .get(&name)
-                .ok_or_else(|| format!("undefined function {name}"))?;
             if name != f.sig.name {
-                imports.insert(name, sig.clone());
+                imports.insert(name.clone(), callable[&name].clone());
             }
         }
         let mut available = imports.clone();
@@ -624,32 +681,41 @@ pub fn compile(text: &str, available: BTreeMap<String, Sig>) -> Result<Checked, 
             &BTreeSet::from([f.result]),
             &BTreeSet::new(),
         )?;
-        checked.push(check(Function { ops, ..f }, imports)?);
+        checked.push((check(Function { ops, ..f }, imports)?, public));
     }
-    let mut entry = checked.remove(0);
-    entry.local_functions = checked;
-    Ok(entry)
+    Ok(crate::module::CheckedModule {
+        functions: checked,
+        header,
+    })
 }
-fn callees(ops: &[Op], names: &mut BTreeSet<String>) {
+fn resolve_calls(
+    ops: &mut [Op],
+    callable: &BTreeMap<String, Sig>,
+    names: &mut BTreeSet<String>,
+) -> Result<(), String> {
     for op in ops {
         match op {
             Op::Call { name, .. } => {
+                let sig = callable
+                    .get(name)
+                    .ok_or_else(|| format!("undefined function {name}"))?;
+                *name = sig.name.clone();
                 names.insert(name.clone());
             }
-            Op::Block { body } | Op::Loop { body, .. } => callees(body, names),
+            Op::Block { body } | Op::Loop { body, .. } => resolve_calls(body, callable, names)?,
             Op::While { test, body, .. } => {
-                callees(test, names);
-                callees(body, names);
+                resolve_calls(test, callable, names)?;
+                resolve_calls(body, callable, names)?;
             }
             Op::If { yes, no, .. } => {
-                callees(yes, names);
-                callees(no, names);
+                resolve_calls(yes, callable, names)?;
+                resolve_calls(no, callable, names)?;
             }
             _ => {}
         }
     }
+    Ok(())
 }
-
 fn live_before(op: &Op, after: &BTreeSet<Reg>) -> BTreeSet<Reg> {
     let mut live = after.clone();
     let (defs, uses): (Vec<Reg>, Vec<Reg>) = match op {

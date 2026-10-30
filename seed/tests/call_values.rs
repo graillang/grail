@@ -7,7 +7,11 @@ fn checked(text: &str, first: Ty) -> bool {
         params: vec![first, Ty::Num],
         result: Ty::Num,
     };
-    source::compile(text, BTreeMap::from([("take".into(), sig)])).is_ok()
+    source::compile(
+        text,
+        BTreeMap::from([("take".into(), grail_seed::module::Interface::single(sig))]),
+    )
+    .is_ok()
 }
 #[test]
 fn earlier_affine_argument_is_moved_before_later_argument() {

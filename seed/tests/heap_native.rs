@@ -65,7 +65,13 @@ fn returned_cloned_and_loop_local_owners_are_freed_once_at_scope_exit() {
         params: vec![],
         result: grail_seed::Ty::Num,
     };
-    fs::write(dir.join("live.api"), live.encode().unwrap()).unwrap();
+    fs::write(
+        dir.join("live.api"),
+        grail_seed::module::Interface::single(live)
+            .encode()
+            .unwrap(),
+    )
+    .unwrap();
     let scope = dir.join("scope.grl");
     fs::write(&scope,"use live; fn scope()->num {let a=bytes();push(a,1);let b=moved(copy_bytes(a));assert(live()==2);for i in 20 {let c=bytes();push(c,i);assert(live()==3);}assert(live()==2);if 1 {let d=bytes();push(d,4);assert(live()==3);}assert(live()==2);{let b=bytes();push(b,9);assert(live()==3);}assert(live()==2);var j=0;while j<len(copy_bytes(b)) {assert(live()==2);j=j+1;}assert(j==1);assert(live()==2);let b=copy_bytes(b);assert(live()==3);assert(len(b)==1);return 0;}fn moved(b:bytes)->bytes{let s=\"x\";assert(len(s)==1);return b;}").unwrap();
     let p = Command::new(binary)
@@ -78,9 +84,15 @@ fn returned_cloned_and_loop_local_owners_are_freed_once_at_scope_exit() {
         .output()
         .unwrap();
     assert!(p.status.success(), "{}", String::from_utf8_lossy(&p.stderr));
+    let header =
+        grail_seed::module::Interface::decode(&fs::read_to_string(dir.join("scope.api")).unwrap())
+            .unwrap();
+    let symbol = grail_seed::emit::symbol(&header.entry);
     fs::write(
         dir.join("scope-main.c"),
-        "#include <stdint.h>\nuint64_t g_scope(void);int main(void){return (int)g_scope();}",
+        format!(
+            "#include <stdint.h>\nuint64_t {symbol}(void);int main(void){{return (int){symbol}();}}"
+        ),
     )
     .unwrap();
     let p = Command::new("clang")

@@ -58,7 +58,7 @@ fn literal_escaping_and_raw_ir_are_checked() {
 #[test]
 fn strings_move_and_return_through_written_interfaces() {
     let f = source::compile("fn echo(s:string)->string {return s;}", BTreeMap::new()).unwrap();
-    let sig = Sig::decode(&f.interface()).unwrap();
+    let sig = grail_seed::module::Interface::decode(&f.interface()).unwrap();
     assert!(
         source::compile(
             "use echo; fn f()->num {let s=echo(\"hello\");return len(s);}",

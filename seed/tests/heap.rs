@@ -34,11 +34,14 @@ fn moving_or_returning_an_owner_cannot_leave_dangling_views() {
     assert!(
         source::compile(
             "use take; fn f()->num {let b=bytes();push(b,7);let c=take(b);return len(c);}",
-            BTreeMap::from([("take".into(), take.clone())])
+            BTreeMap::from([(
+                "take".into(),
+                grail_seed::module::Interface::single(take.clone())
+            )])
         )
         .is_ok()
     );
-    assert!(source::compile("use take; fn f()->num {let b=bytes();push(b,7);let v=read(b);let c=take(b);return len(c)+at(v,0);}",BTreeMap::from([("take".into(),take)])).is_err());
+    assert!(source::compile("use take; fn f()->num {let b=bytes();push(b,7);let v=read(b);let c=take(b);return len(c)+at(v,0);}",BTreeMap::from([("take".into(),grail_seed::module::Interface::single(take))])).is_err());
 }
 #[test]
 fn lexical_heap_cleanup_composes_with_loops_and_branches() {
@@ -57,7 +60,7 @@ fn lexical_heap_cleanup_composes_with_loops_and_branches() {
     )
     .unwrap();
     assert!(
-        grail_seed::emit::llvm(&checked).is_err(),
+        grail_seed::emit::module_llvm(&checked).is_err(),
         "unsupported heap layout must never be silently emitted as a view"
     );
 }

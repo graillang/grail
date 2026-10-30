@@ -91,7 +91,7 @@ one text argument. Generic heap containers, Result and type generics are still f
 ## Heap byte owners
 
 [Semantics and limits](../docs/design/heap-ownership.md). `bytes()`, `push`, `copy_bytes` and
-owned `bytes` parameters/results are supported by the C backend. Signatures are schema 3;
+owned `bytes` parameters/results are supported by the C backend. Function-signature payloads are schema 3 (see the source-module format below);
 rebuild old `.api` files. Heap owners drop at scope exit, not at borrowed-value last use.
 
 ```sh
@@ -151,20 +151,45 @@ readonly reborrows such as `take(read(p),len(p))` retain `p` when the types perm
 Builtin storage operations (`len`, `read`, `copy_bytes`, etc.) use their documented borrowing/place
 rules; they do not consume an owner simply because it appears as an operand.
 
-## Private helpers and recursion
+## Source modules, exports and recursion
 
-A source file's first function remains its exported entry/interface. Additional functions are
-private helpers in the same object; their names, locals and declared lifetime scopes do not leak.
-All headers are collected before checking any body, so forward, self and mutual calls work without
-cross-body ownership inference. Even an unused helper must type/borrow check. Duplicate function names
-or a function/import collision are rejected. Calls refer to declared signatures and preserve the
-same eager argument/loan rules as imported calls.
+An implicit module is named after its first function, which is exported. For a library, use an
+explicit identity and mark its real public functions (private helpers may appear first):
 
-The C and pure-subset LLVM emitters give helpers internal linkage. Different modules may use the
-same helper name. Only the exported entry produces `.api`/`.o`; clients still do not read provider
-source. The interface remains schema 3. Multiple public exports, module paths, type-definition
-metadata and transitive build graphs are still pending. Source modules are bounded to 4,096 functions;
-there is no runtime recursion limit or prevention of native stack exhaustion.
+```grl
+module arithmetic;
+fn next(n:num)->num { return n+1; }
+pub fn add(n:num)->num { return next(n); }
+pub fn twice(n:num)->num { return n*2; }
+```
+
+A client writes `use arithmetic;` and calls `arithmetic::add(7)`. Imported module names also alias
+their primary export (the first public function); existing `use number; number(...)` source remains
+usable. Within a module, local functions resolve by bare name. Headers are collected before each
+independent body check, allowing forward, self and mutual calls without cross-body ownership
+inference. Locals/lifetime-name scopes do not cross functions; unused helpers are also checked.
+Duplicate function/import names are errors. Public native symbols are namespace-qualified;
+helpers have internal linkage, so different modules may use the same private name.
+
+`compile` emits `<module>.api` / `.o` / `.c`. Source interfaces now use **module schema 1**, carrying
+all public function signatures, the primary export, and expected direct-dependency surface hashes.
+Rebuild prior source artifacts: there is no source-schema fallback. The standalone typed-IR fixture
+commands still actively use function-signature schema 3, also the function payload inside a module.
+`source::compile` returns a flat `CheckedModule`; use `emit::module_c` / `module_llvm`. The raw IR
+checker and its single-function emitters remain available for the existing conformance fixtures.
+
+`build` follows transitive metadata dependencies and links each object once, without provider
+source. It rejects cycles, wrong module identities and stale dependency contracts before replacing
+the client's artifacts. A private-body-only rebuild does not invalidate callers. Fingerprints use
+SHA-256 over the canonical **public** surface, not implementation bodies or dependency build state.
+A change to any public member conservatively invalidates every direct module-dependent artifact.
+There is no persistent incremental build cache or automatic dependency rebuild yet.
+
+The flat artifact directory assumes honest, nonconcurrent producers. API fingerprints do **not**
+authenticate object bytes or solve concurrent `.api`/`.o` replacement races; an atomic/content-addressed
+artifact store is still unfinished. Interfaces are bounded to 8 MiB, modules to 4,096 functions, and
+link closures to 4,096 modules / 256 dependency depth. Native stack exhaustion is not prevented.
+Public type-definition metadata, records/enums/generics and self-hosting remain unfinished.
 
 ```sh
 seed/target/release/grail-seed build seed/examples/functions.grl seed/.work/functions seed/.work/functions

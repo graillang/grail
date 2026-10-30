@@ -3,6 +3,8 @@
 pub mod driver;
 pub mod emit;
 pub mod fixture;
+pub mod module;
+mod sha256;
 pub mod source;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -90,7 +92,13 @@ fn name_ok(n: &str) -> bool {
 }
 impl Sig {
     pub fn validate(&self) -> Result<(), String> {
-        if !name_ok(&self.name) || self.params.len() > 64 {
+        if !(name_ok(&self.name)
+            || self
+                .name
+                .split_once("::")
+                .is_some_and(|(a, b)| name_ok(a) && name_ok(b)))
+            || self.params.len() > 64
+        {
             return Err("invalid signature name/arity".into());
         }
         if self
@@ -760,7 +768,6 @@ impl State {
 /// Only this validated wrapper can reach native lowering.
 pub struct Checked {
     pub(crate) function: Function,
-    pub(crate) local_functions: Vec<Checked>,
     pub(crate) imports: BTreeMap<String, Sig>,
     pub(crate) types: BTreeMap<Reg, Ty>,
 }
@@ -810,7 +817,6 @@ pub fn check(function: Function, imports: BTreeMap<String, Sig>) -> Result<Check
         }
     }
     Ok(Checked {
-        local_functions: Vec::new(),
         function,
         imports,
         types: s.types,

@@ -41,7 +41,7 @@ fn recursive_modules_hide_helpers_and_allow_repeated_private_names() {
     .unwrap();
     fs::write(
         dir.join("functions.ll"),
-        grail_seed::emit::llvm(&checked).unwrap(),
+        grail_seed::emit::module_llvm(&checked).unwrap(),
     )
     .unwrap();
     run(Command::new("clang")

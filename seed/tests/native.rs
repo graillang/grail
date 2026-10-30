@@ -74,7 +74,7 @@ fn two_modules_parse_borrowed_tokens_and_abort_on_invalid_input() {
         std::collections::BTreeMap::new(),
     )
     .unwrap();
-    let sig = grail_seed::Sig::decode(&checked.interface()).unwrap();
+    let sig = grail_seed::module::Interface::decode(&checked.interface()).unwrap();
     let app = grail_seed::source::compile(
         include_str!("../examples/sum.grl"),
         std::collections::BTreeMap::from([(sig.name.clone(), sig)]),
@@ -82,10 +82,14 @@ fn two_modules_parse_borrowed_tokens_and_abort_on_invalid_input() {
     .unwrap();
     fs::write(
         dir.join("number.ll"),
-        grail_seed::emit::llvm(&checked).unwrap(),
+        grail_seed::emit::module_llvm(&checked).unwrap(),
     )
     .unwrap();
-    fs::write(dir.join("sum.ll"), grail_seed::emit::llvm(&app).unwrap()).unwrap();
+    fs::write(
+        dir.join("sum.ll"),
+        grail_seed::emit::module_llvm(&app).unwrap(),
+    )
+    .unwrap();
     let p = Command::new("clang")
         .args(["-O0", "-Wno-override-module"])
         .arg(dir.join("number.ll"))
@@ -147,7 +151,7 @@ fn two_modules_parse_borrowed_tokens_and_abort_on_invalid_input() {
         grail_seed::source::compile(loop_source, std::collections::BTreeMap::new()).unwrap();
     fs::write(
         dir.join("loop_sum.ll"),
-        grail_seed::emit::llvm(&checked).unwrap(),
+        grail_seed::emit::module_llvm(&checked).unwrap(),
     )
     .unwrap();
     let p = Command::new("clang")

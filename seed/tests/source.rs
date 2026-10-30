@@ -1,5 +1,5 @@
 //! Source safety contracts: host Rust checks cannot guard the new compiler's loan ending.
-use grail_seed::{Sig, source};
+use grail_seed::source;
 use std::collections::BTreeMap;
 fn ok(s: &str) -> bool {
     source::compile(s, BTreeMap::new()).is_ok()
@@ -34,7 +34,7 @@ fn slice_keeps_origin_and_parent_until_its_last_use() {
 fn imported_signature_suffices_and_wrong_modes_fail() {
     let provider =
         source::compile(include_str!("../examples/number.grl"), BTreeMap::new()).unwrap();
-    let sig = Sig::decode(&provider.interface()).unwrap();
+    let sig = grail_seed::module::Interface::decode(&provider.interface()).unwrap();
     assert!(
         source::compile(
             include_str!("../examples/sum.grl"),
@@ -43,7 +43,8 @@ fn imported_signature_suffices_and_wrong_modes_fail() {
         .is_ok()
     );
     let mut changed = sig;
-    changed.params[0] = grail_seed::Ty::View(grail_seed::Mode::Write, 0);
+    changed.exports.get_mut("number::number").unwrap().params[0] =
+        grail_seed::Ty::View(grail_seed::Mode::Write, 0);
     assert!(
         source::compile(
             include_str!("../examples/sum.grl"),

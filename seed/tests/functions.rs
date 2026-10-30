@@ -42,5 +42,5 @@ fn private_heap_code_cannot_bypass_backend_layout_checks() {
         BTreeMap::new(),
     )
     .unwrap();
-    assert!(grail_seed::emit::llvm(&p).is_err());
+    assert!(grail_seed::emit::module_llvm(&p).is_err());
 }
