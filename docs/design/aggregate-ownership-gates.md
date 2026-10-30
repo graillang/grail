@@ -1,7 +1,8 @@
 # Required gates before aggregate/reference expansion
 
 2026-10-30. Follow-up implementation criteria, **not implemented functionality**. The complete v0
-goal stays active. See [bootstrap v0](bootstrap-v0.md) and [modern Rust baseline](rust-next-baseline.md).
+goal stays active. See [bootstrap v0](bootstrap-v0.md), [modern Rust baseline](rust-next-baseline.md),
+and the [Blu/Lust source review and executable aggregate controls](lust-and-blu-notes.md).
 
 The primitive seed is deliberately simpler than a general ownership checker. Its byte/string owners
 contain no references. Extending that representation by unioning every root into one set would be

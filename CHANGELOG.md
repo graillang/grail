@@ -151,3 +151,8 @@
 - Fix source call evaluation to copy/move each user-function argument left-to-right before evaluating
   the next. Reject later use of an already moved owner/view, retain builtin borrowing rules, and
   preserve explicit precomputed values/reborrows. No interface-schema or runtime-borrow-check change.
+
+- Review pinned Blu/Lust frontend and ownership implementations; retain 15 modern-Rust/Lust
+  acceptance pairs and seven equal native executions for aggregate/region gates. Record the useful
+  field/variance/drop-liveness distinctions, remaining Grail work and Lust's older NLL restrictions
+  without treating external subset/performance claims as Grail guarantees.
