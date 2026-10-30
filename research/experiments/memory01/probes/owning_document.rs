@@ -1,0 +1,1 @@
+fn main() { let source=String::from("alpha beta"); let before=source.as_ptr(); let document=view_api::Document::parse(source); let moved=document; let texts:Vec<_>=moved.texts().collect(); assert_eq!(texts,vec!["alpha","beta"]); assert_eq!(texts[0].as_ptr(),before); }
