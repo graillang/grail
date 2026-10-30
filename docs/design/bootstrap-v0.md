@@ -117,3 +117,12 @@ remain records/enums, reference-containing elements, Result, general generics an
 append operations and literal decoding, with schema-3 interfaces. Byte views remain byte views;
 borrowed UTF-8 abstractions, recoverable conversion errors, generic containers and self-hosting
 are still unfinished. Neither this nor heap byte ownership completes bootstrap v0.
+
+## Readonly descriptor derivation
+
+A readonly byte view is a pointer/length value: `read(read_view)` and a slice of it derive an
+independent readonly descriptor, not a borrow of the old descriptor's storage. The old readonly
+carrier may be read, moved or ended while the derived view lives. Its data owner must remain live,
+and any exclusive ancestor stays restricted until **all** readonly descendants end. This is local
+checking precision, not G1 post-state inference or a claim that arbitrary family projections are Copy.
+It enables retaining lexer tokens while continuing to read the same source.

@@ -517,7 +517,11 @@ impl State {
                         if *mode == Mode::Write && m != Mode::Write {
                             return Err("write reborrow from read view".into());
                         }
-                        ancestors.insert(p.loan);
+                        // A readonly byte-view descriptor is copied, not borrowed as storage.
+                        // Preserve exclusive ancestors, but do not freeze the readonly carrier.
+                        if m == Mode::Write {
+                            ancestors.insert(p.loan);
+                        }
                         r
                     };
                     for root in &p.roots {

@@ -325,3 +325,12 @@ accepts conditional-return/get-or-insert cases that stable-default rejects, whil
 stored-referent replacement/restoration cases remain rejected. Explicit interfaces do not imply
 these older stable borrow limitations. Compare v0's later control-flow/generic work with modern
 Rust, and do not treat external Rust modeling/correctness work as automatically proving Grail.
+
+## Aggregate expansion gates
+
+Before building records/generic reference-containing containers on the primitive seed, enforce the
+[aggregate ownership gates](aggregate-ownership-gates.md): separate storage and captured loans,
+retain newly installed sources under written reference bounds, track moved fields/variant payloads,
+and recheck argument materialization and hidden-body interfaces. These are implementation obligations,
+not features claimed complete. Readonly byte-view descriptor derivation is safe copying of a concrete
+pointer/length value; it does not authorize copying arbitrary mutable accesses.

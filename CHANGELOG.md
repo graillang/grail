@@ -133,3 +133,7 @@
   rejecting raw byte mutation and growth under live views. Bump seed interfaces to schema 3.
 - Differentially validate text construction on 26 byte sequences through clang/TinyCC, including
   malformed encodings, and exercise owned string calls/returns across a hidden-source boundary.
+
+- Allow readonly byte-view descriptors to be read, moved or ended while derived readonly views
+  live, without releasing their data owners or exclusive ancestors. Add paired positive/negative
+  source checks for lexer-style retained slices.

@@ -21,7 +21,8 @@ They are demonstration commands, not a surface-language parser or general build 
 - Owned local byte buffers and growable heap byte vectors; affine read/write views and carriers.
 - Explicit region labels in signatures. Labels describe lifetime relationships, **not** target
   identity. Separate mutable input parameters have distinct abstract targets even with one label.
-- Reborrows restrict the parent carrier; moves preserve loan identity. Owner release/movement
+- Reborrows of exclusive carriers restrict them; readonly byte-view derivation copies the
+  descriptor without freezing that readonly carrier. Moves preserve loan identity. Owner release/movement
   requires all views to end. Calls consume view arguments; explicit reborrows retain a parent.
 - Returned references may originate only from suitable input regions. No local-buffer escape.
   Imported return bounds conservatively retain every compatible argument origin and parent.
