@@ -139,3 +139,14 @@ See [Quint](quint-lessons.md), [Haskell](haskell-lessons.md), and the
 Quint Connect already implements model-to-Rust trace replay/state comparison. This is prior art, not
 a newly discovered Grail product differentiation. Swift/OxCaml/Mojo offer important mechanisms but
 none was benchmarked or shown here to satisfy the entire Grail brief.
+
+## Ongoing research direction (human-authorized)
+
+Continue research, counterexamples, formalization and bounded experiments until explicitly told to
+stop. Keep tested milestones committed/pushed. This authorizes continued investigation, not adoption
+of a candidate or premature construction of a full compiler.
+
+The external [rooted-value review assessment](rooted-values-review.md) identifies precise next tests:
+pre/post input dependency transformers, independent callable access/sharing, split/reborrow authority,
+nominal-slot precision, Bundle projection, and pending operation ownership on error. The external
+branch was read, not merged. No recommendation in it has become an agreed language rule.

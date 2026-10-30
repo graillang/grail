@@ -33,3 +33,6 @@
 - Record evidence-backed Haskell successes/costs, retention and inference lessons; distinguish
   community pain reports from causal adoption/performance claims.
 - Add Swift/OxCaml/Mojo ownership findings and inspected Quint Connect adapter boundaries.
+
+- Assess the external rooted-value proposal without merging it; add six isolated Rust probes for
+  cache-reset and callable/thread-sharing distinctions, and identify mutation/cleanup contract gaps.
