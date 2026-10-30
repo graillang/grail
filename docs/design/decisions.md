@@ -175,7 +175,6 @@ join-all barrier is a conservative candidate; more precise release needs operati
 Cleanup suspension must contribute to effect summaries. Safety does not imply a cleanup deadline.
 These are research constraints, not an adopted registry implementation or new surface syntax.
 
-
 ## Bundle projection boundary
 
 [Bundle findings](bundle-boundary.md) test actual Yoke/self_cell APIs. Shared access cannot silently
@@ -187,3 +186,15 @@ A stable cell allocation supports inline owners; descriptor-moving with already-
 is a different cost policy. Always-owned Bundle results require owned owners, otherwise owner
 external dependencies must remain visible. Drop/rebuild/partial construction must respect internal
 and external loans. These are tested design constraints and candidate restrictions, not an adoption.
+
+
+## Lifetime versus authority investigation
+
+[Authority findings](authority-boundary.md) distinguish a temporary carrier loan, a moved stored
+reference and a consuming split. Retained mutable iterator items keep source storage, not the
+iterator object. A parent can be live yet temporarily restricted, while a moved parent cannot resume.
+
+Source-root bounds do not themselves establish permission validity; checked construction and
+trusted split/transfer primitives can supply it without additional public root slots or runtime
+loan tables. Define view validity and access-through relations before extending first-class mutable
+reference inference. Loop/branch joins, generic referent state and formal preservation remain open.

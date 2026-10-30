@@ -51,3 +51,8 @@
   inline-owner stabilization, external dependencies and dependent-before-owner destruction.
 - Distinguish scoped covariant field projection from whole invariant-container escape; document
   candidate Bundle rules and explicit allocation choices without adopting a language primitive.
+
+- Distinguish owner lifetimes, carrier loans, authority transfer and temporary reborrows with fifteen
+  isolated Rust probes and bounded interval/cell permission comparisons.
+- Record minimal construction/permission proof obligations and Aeneas/Hylo precedent; do not infer
+  that extra public lifetime syntax, a runtime loan graph or a full checker is required or implemented.
