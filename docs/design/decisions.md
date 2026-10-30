@@ -122,3 +122,20 @@ The [review assessment](opus-review-response.md) records useful recommendations 
 Favor investigating stable, checked public contract bounds and mutation/input-flow semantics next.
 Scoped exclusivity, stackful fibers, a single pervasive surface effect, linear must-close resources
 and a verified-component product are still proposals, not adopted decisions.
+
+## Quint, Haskell and ownership precedent research
+
+See [Quint](quint-lessons.md), [Haskell](haskell-lessons.md), and the
+[ownership update](ownership-prior-art-update.md). Proposed priorities, not adopted language rules:
+
+- Eager, ordered ordinary evaluation; explicit deferred streams/computations and latent effects.
+- Explain retention/capture dependencies as well as invalid borrowing; no hidden copy to reduce retention.
+- Count static inference/search/metadata complexity, not only core size or keyword count.
+- Keep proof, type checking, sampled testing, bounded model checking and implementation conformance
+  visibly distinct. Counterexamples must identify the model and assumptions they concern.
+- Study scoped generics/wrappers and stateful input-flow contracts before more pure-origin prototypes.
+- Consider an optional explicit batch/query domain, learning from Haxl without hidden global spawning.
+
+Quint Connect already implements model-to-Rust trace replay/state comparison. This is prior art, not
+a newly discovered Grail product differentiation. Swift/OxCaml/Mojo offer important mechanisms but
+none was benchmarked or shown here to satisfy the entire Grail brief.

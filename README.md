@@ -9,6 +9,9 @@ No performance or verification claims have been established for Grail.
 
 ## Living design record
 
+- [Quint lessons and executed models](docs/design/quint-lessons.md)
+- [Haskell successes, costs, and design lessons](docs/design/haskell-lessons.md)
+- [Ownership/capture prior-art update](docs/design/ownership-prior-art-update.md)
 - [Origin/capture inference results](docs/design/experiment-results-02.md)
 - [First measured results](docs/design/experiment-results-01.md)
 - [Initial architectural review](docs/design/initial-review.md)

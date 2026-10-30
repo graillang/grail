@@ -29,3 +29,7 @@
 
 - Add isolated Quint effect/cancellation experiments and distinguish sampled counterexamples from
   verification; record version-matched source provenance and design lessons.
+
+- Record evidence-backed Haskell successes/costs, retention and inference lessons; distinguish
+  community pain reports from causal adoption/performance claims.
+- Add Swift/OxCaml/Mojo ownership findings and inspected Quint Connect adapter boundaries.

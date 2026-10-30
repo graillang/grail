@@ -232,3 +232,14 @@ isolation. Neither is a formal audit; compare the explicit assurance boundaries 
 [Results 02](experiment-results-02.md) links authored IR, implementation, isolated consumer evidence,
 seeded finite checks and measurements. This is original experimental engineering evidence, not a
 published novelty claim or independently checked soundness theorem. No new language commitment.
+
+## Quint, Haskell and ownership update
+
+- [Quint evidence and version-specific implementation links](quint-lessons.md)
+- [Haskell primary history, contemporary survey, production and debugging sources](haskell-lessons.md)
+- [Swift/OxCaml/Mojo/Quint Connect scope and sources](ownership-prior-art-update.md)
+- [Fetch metadata and hashes](../../research/evidence/prior-art03-20261030/sources.json)
+- [Additional source snapshots](../../research/evidence/prior-art03-20261030/external-source-refs.json)
+
+Downloaded full papers/pages are excluded from Git. Published findings distinguish tested behavior,
+documentation, first-party experience, qualitative opinion and design recommendations.
