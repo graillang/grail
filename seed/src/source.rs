@@ -224,12 +224,16 @@ impl Parser<'_> {
         };
         crate::types::validate_sig(&sig, &self.records)?;
         self.expect("{")?;
-        let mut ops = self.statements(0)?;
-        self.expect("return")?;
-        let result = self.expr(&mut ops, 0, 0)?;
-        self.expect(";")?;
+        let ops = self.statements(0)?;
         self.expect("}")?;
-        Ok((Function { sig, ops, result }, public))
+        Ok((
+            Function {
+                sig,
+                ops,
+                result: None,
+            },
+            public,
+        ))
     }
     fn path_name(&mut self) -> Result<String, String> {
         let mut n = self.ident()?;
@@ -570,8 +574,12 @@ impl Parser<'_> {
             return Err(self.error("block nesting limit"));
         }
         let mut ops = vec![];
-        while !matches!(self.peek(), "}" | "return" | "") {
-            if self.eat("{") {
+        while !matches!(self.peek(), "}" | "") {
+            if self.eat("return") {
+                let r = self.expr(&mut ops, 0, 0)?;
+                self.expect(";")?;
+                ops.push(Op::Return(r));
+            } else if self.eat("{") {
                 let outer = self.vars.clone();
                 let body = self.statements(depth + 1)?;
                 self.expect("}")?;
@@ -864,12 +872,12 @@ pub fn compile(
         }
         let mut available = imports.clone();
         available.insert(f.sig.name.clone(), f.sig.clone());
-        let mut state = State::parameters(&f.sig.params, records.clone())?;
+        let mut state = State::parameters(&f.sig, records.clone())?;
         let ops = ending(
             &f.ops,
             &mut state,
             &available,
-            &BTreeSet::from([f.result]),
+            &BTreeSet::new(),
             &BTreeSet::new(),
         )?;
         checked.push((
@@ -914,6 +922,7 @@ fn resolve_calls(
 fn live_before(op: &Op, after: &BTreeSet<Reg>) -> BTreeSet<Reg> {
     let mut live = after.clone();
     let (defs, uses): (Vec<Reg>, Vec<Reg>) = match op {
+        Op::Return(r) => return BTreeSet::from([*r]),
         Op::Record { dst, fields, .. } => (vec![*dst], fields.iter().map(|(_, r)| *r).collect()),
         Op::FieldMove { dst, src, .. } | Op::FieldBorrow { dst, src, .. } => {
             (vec![*dst], vec![*src])
@@ -1048,6 +1057,26 @@ fn ending(
     afters.reverse();
     let mut result = vec![];
     for (op, after) in ops.iter().zip(afters) {
+        if state.terminated {
+            return Err("unreachable statement after return".into());
+        }
+        if let Op::Return(r) = op {
+            clean(state, &BTreeSet::from([*r]), &BTreeSet::new(), &mut result);
+            let owners = state
+                .resources
+                .iter()
+                .rev()
+                .filter(|v| state.values[v].ty.owned() && **v != *r)
+                .copied()
+                .collect::<Vec<_>>();
+            for owner in owners {
+                state.end(owner)?;
+                result.push(Op::End(owner));
+            }
+            state.ops(std::slice::from_ref(op), imports, 0)?;
+            result.push(op.clone());
+            continue;
+        }
         if let Op::Block { body } = op {
             // Unconditional execution: keep its actual effects, without cloning or replaying state.
             let entry = state.resources.clone();
@@ -1057,9 +1086,13 @@ fn ending(
                 .copied()
                 .collect();
             let body = ending(body, state, imports, &after, &owners)?;
-            state.validate_resource_frame(&entry)?;
+            if !state.terminated {
+                state.validate_resource_frame(&entry)?;
+            }
             result.push(Op::Block { body });
-            clean(state, &after, protected, &mut result);
+            if !state.terminated {
+                clean(state, &after, protected, &mut result);
+            }
             continue;
         }
         let keep = if matches!(op, Op::Loop { .. } | Op::If { .. } | Op::While { .. }) {
@@ -1108,7 +1141,12 @@ fn ending(
         };
         state.ops(std::slice::from_ref(&op), imports, 0)?;
         result.push(op);
-        clean(state, &after, protected, &mut result);
+        if !state.terminated {
+            clean(state, &after, protected, &mut result);
+        }
+    }
+    if state.terminated {
+        return Ok(result);
     }
     // Owner cleanup is lexical and reverse-binding, unlike last-use loan ending.
     let owners = state

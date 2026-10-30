@@ -48,7 +48,7 @@ fn literal_escaping_and_raw_ir_are_checked() {
                     dst: 0,
                     data: vec![255]
                 }],
-                result: 0
+                result: Some(0)
             },
             BTreeMap::new()
         )

@@ -79,7 +79,8 @@ There is no exception-unwinding/backtrace metadata guarantee for this TinyCC pro
 
 General `&T` / `&mut T` references, invariant reference-containing setters, type/const generics,
 generic vectors/maps, enums/Result, field assignment/reinitialization, unbalanced ownership joins,
-early-return cleanup, user destructors and full self-hosting remain unfinished. Grow/mutate owned
+user destructors and full self-hosting remain unfinished. Early-return cleanup is now implemented;
+see [return cleanup](return-cleanup.md). Grow/mutate owned
 record containers by moving the field out for now; the complete goal still requires normal mutable
 container APIs, not a permanent move-out workaround. LLVM comparison explicitly refuses record
 layouts; C is the implemented production path. The field tree and slot table do not by themselves

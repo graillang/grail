@@ -188,6 +188,7 @@ fn c_body(p: &Checked, s: &mut String, private: bool) {
     ) {
         for o in os {
             match o{
+        Op::Return(r)=>{writeln!(s,"return r{r};").unwrap()},
         Op::Record{dst,name,fields}=>{
             writeln!(s,"r{dst}=({}){{0}};",cty(&types[dst])).unwrap();
             for(field,src)in fields{let i=records[name].fields.iter().position(|f|f.0==*field).unwrap();writeln!(s,"r{dst}.f{i}=r{src};").unwrap();record_flags(s,*src,&types[src],records,false);}
@@ -227,7 +228,10 @@ fn c_body(p: &Checked, s: &mut String, private: bool) {
         }
     }
     ops(s, &p.function.ops, &p.types, &p.records);
-    writeln!(s, "return r{};\n}}", p.function.result).unwrap();
+    if let Some(r) = p.return_tail {
+        writeln!(s, "return r{r};").unwrap();
+    }
+    s.push_str("}\n");
 }
 
 fn lty(t: &Ty) -> &'static str {
@@ -276,9 +280,14 @@ impl Ll {
         self.line(format!("%{ptr} = getelementptr i8, ptr {p}, i64 {index}"));
         format!("%{ptr}")
     }
-    fn ops(&mut self, os: &[Op]) {
+    fn ops(&mut self, os: &[Op]) -> bool {
         for o in os {
             match o {
+                Op::Return(r) => {
+                    let v = self.load(*r);
+                    self.line(format!("ret {} {v}", lty(&self.types[r])));
+                    return false;
+                }
                 Op::Record { .. }
                 | Op::FieldMove { .. }
                 | Op::FieldBorrow { .. }
@@ -382,12 +391,20 @@ impl Ll {
                     let done = self.fresh();
                     self.line(format!("br i1 %{c}, label %{y}, label %{n}"));
                     writeln!(self.s, "{y}:").unwrap();
-                    self.ops(yes);
-                    self.line(format!("br label %{done}"));
+                    let y_cont = self.ops(yes);
+                    if y_cont {
+                        self.line(format!("br label %{done}"));
+                    }
                     writeln!(self.s, "{n}:").unwrap();
-                    self.ops(no);
-                    self.line(format!("br label %{done}"));
-                    writeln!(self.s, "{done}:").unwrap();
+                    let n_cont = self.ops(no);
+                    if n_cont {
+                        self.line(format!("br label %{done}"));
+                    }
+                    if y_cont || n_cont {
+                        writeln!(self.s, "{done}:").unwrap();
+                    } else {
+                        return false;
+                    }
                 }
                 Op::Len { dst, src } => {
                     let v = self.load(*src);
@@ -461,7 +478,11 @@ impl Ll {
                     ));
                     self.store(*dst, &format!("%{x}"))
                 }
-                Op::Block { body } => self.ops(body),
+                Op::Block { body } => {
+                    if !self.ops(body) {
+                        return false;
+                    }
+                }
                 Op::While {
                     condition,
                     test,
@@ -472,14 +493,15 @@ impl Ll {
                     let done = self.fresh();
                     self.line(format!("br label %{head}"));
                     writeln!(self.s, "{head}:").unwrap();
-                    self.ops(test);
+                    assert!(self.ops(test), "checked loop condition");
                     let value = self.load(*condition);
                     let cmp = self.fresh();
                     self.line(format!("%{cmp} = icmp ne i64 {value}, 0"));
                     self.line(format!("br i1 %{cmp}, label %{block}, label %{done}"));
                     writeln!(self.s, "{block}:").unwrap();
-                    self.ops(body);
-                    self.line(format!("br label %{head}"));
+                    if self.ops(body) {
+                        self.line(format!("br label %{head}"));
+                    }
                     writeln!(self.s, "{done}:").unwrap();
                 }
                 Op::Loop { index, end, body } => {
@@ -495,16 +517,18 @@ impl Ll {
                     self.line(format!("%{cmp} = icmp ult i64 {a}, {b}"));
                     self.line(format!("br i1 %{cmp}, label %{block}, label %{done}"));
                     writeln!(self.s, "{block}:").unwrap();
-                    self.ops(body);
-                    let a = self.load(*index);
-                    let next = self.fresh();
-                    self.line(format!("%{next} = add i64 {a}, 1"));
-                    self.store(*index, &format!("%{next}"));
-                    self.line(format!("br label %{head}"));
+                    if self.ops(body) {
+                        let a = self.load(*index);
+                        let next = self.fresh();
+                        self.line(format!("%{next} = add i64 {a}, 1"));
+                        self.store(*index, &format!("%{next}"));
+                        self.line(format!("br label %{head}"));
+                    }
                     writeln!(self.s, "{done}:").unwrap();
                 }
             }
         }
+        true
     }
 }
 pub fn llvm(p: &Checked) -> Result<String, String> {
@@ -597,8 +621,10 @@ fn llvm_body(p: &Checked, private: bool) -> String {
         ll.store(i as Reg, &format!("%arg{i}"))
     }
     ll.ops(&p.function.ops);
-    let v = ll.load(p.function.result);
-    ll.line(format!("ret {} {v}", lty(&p.function.sig.result)));
+    if let Some(r) = p.return_tail {
+        let v = ll.load(r);
+        ll.line(format!("ret {} {v}", lty(&p.function.sig.result)));
+    }
     ll.s.push_str("trap:\n  call void @abort()\n  unreachable\n}\n");
     ll.s
 }

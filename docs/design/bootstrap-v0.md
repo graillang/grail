@@ -70,7 +70,7 @@ base types/generics arrive; this is not a claim that these byte-specific aliases
 The compiler tokenizes borrowed spans of its UTF-8 source file; identifiers/numbers in the grammar
 are ASCII and comments begin `//`. Parsing errors carry byte offsets. Ownership errors currently
 name registers and the source file, not rich source spans. Lexical shadowing and standalone blocks
-are supported; nested/early returns are not. Assignment requires `var` and currently succeeds only
+and nested/early returns are supported. Assignment requires `var` and currently succeeds only
 for numeric registers. Shadowing creates a fresh binding and may change the name's type.
 
 ## Local loan ending, conservatively
@@ -154,7 +154,7 @@ The source/IR/C/LLVM paths now support `while condition { ... }` with repeated c
 Condition temporaries have a distinct closed scope: owners are released before both body entry
 and the final false edge, while enclosing owners stay live. Borrowed values needed on a back edge
 remain live; a condition-only temporary view may end before the body grows its owner. Entry
-ownership still must balance. General partial-move joins, break/continue and early returns remain
+ownership still must balance. General unequal partial-move joins and break/continue remain
 unfinished rather than being declared unnecessary for v0.
 
 
@@ -165,5 +165,22 @@ Construct, move/borrow fields, pass/return complete records, and recursively cle
 fields. Captured span loans are distinct from record/owned-name storage. Public layout definitions
 participate in hashes; hidden-source clients and layout-only invalidation are tested. General
 references to record/container objects, mutation through invariant reference-containing T, enums,
-Result/generics, field assignment, ownership joins and early returns remain unfinished. See
+Result/generics, field assignment and unequal ownership joins remain unfinished. See
 [record core](record-core.md) for exact current semantics, bounds and backend limitations.
+
+### Chosen unwrap shorthand
+
+Postfix `!` is the chosen shorthand for unwrapping an `Ok`/`Some` payload, e.g.
+`let value = parse(input)!;`. Failure aborts rather than propagating. Reserve postfix `?` for error
+propagation with normal ownership cleanup. Neither operator is implemented yet: enum/Result/Option
+representation follows the ongoing early-return cleanup work. Do not treat `!` as implemented syntax
+or promise cleanup after an abort.
+
+### Early return checkpoint
+
+A `return value;` may terminate a block, either arm of an `if`, or an iteration of a loop.
+Each exit checks the declared type and lifetime relationships. Remaining owned bindings are cleaned
+in reverse-binding order (owned record fields recursively in declaration order), except for the
+returned value. A moved-out field is not freed again. Default destruction ignores captured view
+descriptors; live loans into owned fields still prevent release. Both native C and primitive LLVM
+lowering honor terminators. See [return cleanup](return-cleanup.md) for join and performance limits.

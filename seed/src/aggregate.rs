@@ -106,15 +106,6 @@ impl State {
         }
         Ok(v)
     }
-    pub(super) fn drop_usable(&self, v: &Value) -> Result<(), String> {
-        if v.active && self.blocked.contains_key(&v.loan) {
-            return Err("field restricted by live child".into());
-        }
-        for f in v.fields.iter().flatten() {
-            self.drop_usable(f)?;
-        }
-        Ok(())
-    }
     pub(super) fn borrow_value(&mut self, p: Value, mode: Mode) -> Result<Value, String> {
         self.usable_value(&p)?;
         if p.ty == Ty::Text && mode == Mode::Write {

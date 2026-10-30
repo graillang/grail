@@ -87,7 +87,7 @@ pub fn provider(bias: u64, version: u8) -> Function {
             Op::Num(41, bias),
             bin(40, Bin::Add, 40, 41),
         ],
-        result: 40,
+        result: Some(40),
     }
 }
 pub fn client(sig: &Sig, len: usize, repeats: u64) -> Function {
@@ -137,7 +137,7 @@ pub fn client(sig: &Sig, len: usize, repeats: u64) -> Function {
             Op::End(2),
             Op::End(0),
         ],
-        result: 6,
+        result: Some(6),
     }
 }
 /// Distinguish ordinary growing IR from many simultaneously live loans of one owner.
@@ -173,6 +173,6 @@ pub fn scaling(n: u32, fanout: bool) -> Function {
             result: Ty::Num,
         },
         ops,
-        result: n + 2,
+        result: Some(n + 2),
     }
 }

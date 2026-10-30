@@ -5,6 +5,7 @@ pub mod artifact;
 pub mod driver;
 pub mod emit;
 pub mod fixture;
+mod flow;
 pub mod module;
 mod sha256;
 pub mod source;
@@ -216,6 +217,7 @@ pub enum Bin {
 }
 #[derive(Clone, Debug)]
 pub enum Op {
+    Return(Reg),
     Num(Reg, u64),
     Record {
         dst: Reg,
@@ -331,7 +333,7 @@ pub enum Op {
 pub struct Function {
     pub sig: Sig,
     pub ops: Vec<Op>,
-    pub result: Reg,
+    pub result: Option<Reg>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Root {
@@ -347,8 +349,10 @@ struct Value {
     fields: Vec<Option<Value>>,
     active: bool,
 }
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 struct State {
+    signature: std::sync::Arc<Sig>,
+    terminated: bool,
     records: types::Context,
     values: BTreeMap<Reg, Value>,
     resources: BTreeSet<Reg>,
@@ -358,12 +362,19 @@ struct State {
     blocked: BTreeMap<usize, usize>,
 }
 impl State {
-    fn parameters(params: &[Ty], records: types::Context) -> Result<Self, String> {
+    fn parameters(signature: &Sig, records: types::Context) -> Result<Self, String> {
         let mut s = Self {
             records,
-            ..Self::default()
+            signature: std::sync::Arc::new(signature.clone()),
+            terminated: false,
+            values: BTreeMap::new(),
+            resources: BTreeSet::new(),
+            next: 0,
+            types: BTreeMap::new(),
+            access: BTreeMap::new(),
+            blocked: BTreeMap::new(),
         };
-        for (i, t) in params.iter().enumerate() {
+        for (i, t) in signature.params.iter().enumerate() {
             let v = s.parameter_value(t, i, &mut Vec::new())?;
             s.put(i as Reg, v)?;
         }
@@ -452,7 +463,10 @@ impl State {
     }
     fn end(&mut self, r: Reg) -> Result<(), String> {
         let v = self.get(r)?.clone();
-        self.drop_usable(&v)?;
+        // Default record drop destroys owned storage, not the referents of captured descriptors.
+        if v.ty.reference().is_some() {
+            self.usable_value(&v)?;
+        }
         if v.ty.owned() && self.owner_borrowed(&v) {
             return Err(format!("r{r}: owner still borrowed"));
         }
@@ -479,18 +493,6 @@ impl State {
         }
         Ok(())
     }
-    fn closed(
-        &mut self,
-        ops: &[Op],
-        imports: &BTreeMap<String, Sig>,
-        depth: usize,
-    ) -> Result<(), String> {
-        let entry = self.values.clone();
-        self.ops(ops, imports, depth)?;
-        self.validate_closed(&entry)?;
-        self.values = entry;
-        Ok(())
-    }
     fn ops(
         &mut self,
         ops: &[Op],
@@ -501,7 +503,14 @@ impl State {
             return Err("loop nesting limit".into());
         }
         for op in ops {
+            if self.terminated {
+                return Err("unreachable operation after return".into());
+            }
             match op {
+                Op::Return(r) => {
+                    self.validate_return(*r)?;
+                    self.terminated = true;
+                }
                 Op::Num(r, _) => self.num(*r)?,
                 Op::TextLiteral { dst, data } => {
                     if data.len() > 1024 * 1024 || std::str::from_utf8(data).is_err() {
@@ -619,8 +628,11 @@ impl State {
                 Op::Assert(r) => self.require_num(*r)?,
                 Op::If { condition, yes, no } => {
                     self.require_num(*condition)?;
-                    self.closed(yes, imports, depth + 1)?;
-                    self.closed(no, imports, depth + 1)?;
+                    let mut y = self.clone();
+                    y.ops(yes, imports, depth + 1)?;
+                    let mut n = self.clone();
+                    n.ops(no, imports, depth + 1)?;
+                    self.join(y, n)?;
                 }
                 Op::Pack { dst, src } => {
                     let mut v = self.usable(*src)?;
@@ -718,7 +730,9 @@ impl State {
                 Op::Block { body } => {
                     let entry = self.resources.clone();
                     self.ops(body, imports, depth + 1)?;
-                    self.validate_resource_frame(&entry)?;
+                    if !self.terminated {
+                        self.validate_resource_frame(&entry)?;
+                    }
                 }
                 Op::While {
                     condition,
@@ -727,34 +741,20 @@ impl State {
                 } => {
                     let entry = self.values.clone();
                     self.ops(test, imports, depth + 1)?;
+                    if self.terminated {
+                        return Err("return in loop condition".into());
+                    }
                     self.require_num(*condition)?;
                     self.validate_closed(&entry)?;
                     self.values = entry;
-                    self.closed(body, imports, depth + 1)?;
+                    self.loop_body(body, None, imports, depth + 1)?;
                 }
                 Op::Loop { index, end, body } => {
                     self.require_num(*end)?;
                     if index == end || self.values.contains_key(index) {
                         return Err("loop index must be fresh".into());
                     }
-                    let entry = self.values.clone();
-                    self.num(*index)?;
-                    self.ops(body, imports, depth + 1)?;
-                    for (r, v) in &self.values {
-                        if !entry.contains_key(r) && v.ty != Ty::Num {
-                            return Err("loop-local resource must end each iteration".into());
-                        }
-                    }
-                    for (r, v) in &entry {
-                        let after = self.get(*r)?;
-                        if v.ty != Ty::Num && v != after {
-                            return Err("loop changes ownership at back edge".into());
-                        }
-                        if v.ty != after.ty {
-                            return Err("loop changes type".into());
-                        }
-                    }
-                    self.values = entry;
+                    self.loop_body(body, Some(*index), imports, depth + 1)?;
                 }
             }
         }
@@ -767,6 +767,7 @@ pub struct Checked {
     pub(crate) imports: BTreeMap<String, Sig>,
     pub(crate) types: BTreeMap<Reg, Ty>,
     pub(crate) records: types::Context,
+    pub(crate) return_tail: Option<Reg>,
 }
 impl Checked {
     pub fn interface(&self) -> String {
@@ -788,46 +789,24 @@ pub fn check_with_records(
             return Err("invalid import key/self import".into());
         }
     }
-    let mut s = State::parameters(&function.sig.params, records.clone())?;
+    let mut s = State::parameters(&function.sig, records.clone())?;
     let mut callable = imports.clone();
     callable.insert(function.sig.name.clone(), function.sig.clone());
     s.ops(&function.ops, &callable, 0)?;
-    let result = s.usable(function.result)?;
-    if s.values
-        .iter()
-        .any(|(r, v)| v.has_heap() && *r != function.result)
-    {
-        return Err("heap owner must be ended or returned".into());
-    }
-    let compatible = match (&result.ty, &function.sig.result) {
-        (Ty::Record(a, _), Ty::Record(b, _)) => a == b,
-        (Ty::Num, Ty::Num) | (Ty::Bytes, Ty::Bytes) | (Ty::Text, Ty::Text) => true,
-        (Ty::View(m, _), Ty::View(n, _)) | (Ty::Holder(m, _), Ty::Holder(n, _)) => m == n,
-        _ => false,
+    let return_tail = if s.terminated {
+        None
+    } else {
+        let r = function
+            .result
+            .ok_or("function may fall through without return")?;
+        s.validate_return(r)?;
+        Some(r)
     };
-    if !compatible {
-        return Err("return type mismatch".into());
-    }
-    for (path, ty) in types::leaves(&function.sig.result, &records)? {
-        if let Some((mode, region)) = ty.reference() {
-            for root in &result.at(&path)?.roots {
-                let Root::Param(i, p) = root else {
-                    return Err("local owner escapes".into());
-                };
-                let input = types::at(&function.sig.params[*i], p, &records)?;
-                let Some((m, r)) = input.reference() else {
-                    return Err("invalid return origin".into());
-                };
-                if r != region || (mode == Mode::Write && m != Mode::Write) {
-                    return Err("return violates written region relationship".into());
-                }
-            }
-        }
-    }
     Ok(Checked {
         function,
         imports,
         types: s.types,
         records,
+        return_tail,
     })
 }

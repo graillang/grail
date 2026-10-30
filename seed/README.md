@@ -118,8 +118,8 @@ cargo test --manifest-path seed/Cargo.toml --offline --test text_native -- --ign
 
 `while condition { ... }` re-evaluates the condition each time (unlike a counted range's captured
 bound). Temporary owners/loans created by the condition end before entering the body or taking
-its false exit. The current balanced-ownership back-edge restriction remains; `break`, `continue`
-and early returns are not yet implemented.
+its false exit. Continuing paths keep the balanced-ownership back-edge restriction. Early returns
+clean the whole function; `break` and `continue` are not yet implemented.
 
 ```sh
 seed/target/release/grail-seed build seed/examples/while_sum.grl seed/.work/while seed/.work/while
@@ -218,3 +218,8 @@ string and capture a borrowed span. Nested field moves preserve remaining cleanu
 borrows of fields do not consume them. Default record cleanup is recursive and skips moved fields.
 This is not general `&Record` support, generic containers, full join/early-return cleanup, or v0
 completion. The LLVM comparison backend explicitly refuses record layouts; native C supports them.
+
+Structured bodies support early returns in branches, blocks and loops. Cleanup runs before each
+return, excluding the returned owner; every exit checks its written lifetime contract. Equal resource
+states (including equal partial moves) may join; unequal continuing resource states still diagnose.
+`!` unwrap and `?` propagation are chosen future syntax, not implemented operations yet.

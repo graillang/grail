@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Check early returns through branches/blocks/loops, emit path-local recursive cleanup before each
+  return, and preserve only continuing ownership states at joins. Equal partial-move states can join;
+  unmatched continuing states still diagnose. Validate C/TinyCC objects with hidden-source record
+  calls, allocator balance/free order, and primitive LLVM terminators; retain modern Rust controls
+  and seed checking-cost measurements. Record destruction does not access captured descriptors.
+- Choose postfix `!` for Result/Option unwrap-or-abort and reserve `?` for propagation; syntax is
+  documented but awaits the actual enum/Result implementation, not an error-only parser stub.
+
 - Establish the Grail research workspace and living architectural design record.
 - Record `.grl` as the agreed source-file extension.
 - Add an initial source-backed comparison, provisional semantic core, syntax sketches,

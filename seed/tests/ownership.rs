@@ -10,7 +10,7 @@ fn local(mut ops: Vec<Op>) -> Function {
             result: Ty::Num,
         },
         ops,
-        result: 100,
+        result: Some(100),
     }
 }
 fn owner() -> Op {
@@ -89,7 +89,7 @@ fn written_region_is_checked_at_producer() {
             Function {
                 sig: sig.clone(),
                 ops: vec![],
-                result: 0
+                result: Some(0)
             },
             BTreeMap::new()
         )
@@ -100,7 +100,7 @@ fn written_region_is_checked_at_producer() {
             Function {
                 sig: sig.clone(),
                 ops: vec![],
-                result: 1
+                result: Some(1)
             },
             BTreeMap::new()
         )
@@ -118,7 +118,7 @@ fn written_region_is_checked_at_producer() {
                     },
                     borrow(3, 2, Mode::Read)
                 ],
-                result: 3
+                result: Some(3)
             },
             BTreeMap::new()
         )
