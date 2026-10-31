@@ -1,5 +1,5 @@
 //! Checked IR lowering. Byte accesses and division are guarded; u64 arithmetic wraps.
-use crate::{Bin, Checked, Op, Reg, Sig, Ty};
+use crate::{Bin, Checked, Mode, Op, Reg, Sig, Ty};
 use std::collections::BTreeMap;
 use std::fmt::Write;
 /// Distinct prefixes and component lengths keep qualified names disjoint from plain symbols.
@@ -12,6 +12,11 @@ pub fn symbol(name: &str) -> String {
 }
 fn cty(t: &Ty) -> String {
     match t {
+        Ty::Ref(m, _, t) => format!(
+            "{}{}*",
+            if *m == Mode::Read { "const " } else { "" },
+            cty(t)
+        ),
         Ty::Num => "uint64_t".into(),
         Ty::Unit => "uint8_t".into(),
         Ty::Named(n, _, args) => {
@@ -53,8 +58,11 @@ fn path_expr(
     path: &[usize],
     layouts: &crate::types::Definitions,
 ) -> (String, Vec<String>) {
-    let mut value = format!("r{r}");
-    let mut t = t.clone();
+    let (mut value, mut t) = if let Ty::Ref(_, _, inner) = t {
+        (format!("(*r{r})"), (**inner).clone())
+    } else {
+        (format!("r{r}"), t.clone())
+    };
     let mut guards = Vec::new();
     for i in path {
         if crate::types::is_enum(&t, layouts).unwrap() {
@@ -107,6 +115,9 @@ fn clear_variant_flags(
     }
 }
 fn view_expr(value: String, t: &Ty) -> String {
+    if matches!(t, Ty::Ref(..)) {
+        return format!("((gv){{{value}->p,{value}->n}})");
+    }
     if t.heap() {
         format!("((gv){{{value}.p,{value}.n}})")
     } else if matches!(t, Ty::Holder(..)) {
@@ -116,6 +127,9 @@ fn view_expr(value: String, t: &Ty) -> String {
     }
 }
 fn view(r: Reg, types: &BTreeMap<Reg, Ty>) -> String {
+    if matches!(types[&r], Ty::Ref(..)) {
+        return format!("((gv){{r{r}->p,r{r}->n}})");
+    }
     if types[&r].heap() {
         return format!("((gv){{r{r}.p,r{r}.n}})");
     }
@@ -224,10 +238,11 @@ fn c_functions(functions: &[(&Checked, bool)], layouts: &crate::types::Definitio
         }
         writeln!(s, "}} {};", cty(&t)).unwrap();
     }
-    if functions
-        .iter()
-        .any(|(p, _)| p.types.values().any(|t| t.heap()))
-    {
+    if functions.iter().any(|(p, _)| {
+        p.types
+            .values()
+            .any(|t| t.heap() || matches!(t,Ty::Ref(_,_,inner)if inner.heap()))
+    }) {
         s.push_str(include_str!("bytes_runtime.h"));
     }
     let locals = functions
@@ -295,6 +310,14 @@ fn c_body(p: &Checked, s: &mut String, private: bool) {
     ) {
         for o in os {
             match o{
+        Op::Address{dst,src,path,..}=>{
+            let (base,ty)=if let Ty::Ref(_,_,t)=&types[src]{(format!("(*r{src})"),t.as_ref())}else{(format!("r{src}"),&types[src])};
+            let(indices,_)=if path.is_empty(){(vec![],ty.clone())}else{crate::types::project(ty,path,layouts).unwrap()};
+            let mut place=base;for i in indices{place.push_str(&format!(".f{i}"));}
+            writeln!(s,"r{dst}=&({place});").unwrap();
+        },
+        Op::Load{dst,src}=>{writeln!(s,"r{dst}=*r{src};").unwrap();},
+        Op::Exchange{dst,src,value}=>{writeln!(s,"r{dst}=*r{src};*r{src}=r{value};").unwrap();record_flags(s,*dst,&types[dst],layouts,true);record_flags(s,*value,&types[value],layouts,false);},
         Op::Break|Op::Continue=>{let id=jumps.stack.last().expect("checked loop jump");let kind=if matches!(o,Op::Break){"break"}else{"continue"};writeln!(s,"goto loop_{kind}_{id};").unwrap();},
         Op::GenericCall{..}=>unreachable!("generic calls must be materialized before native emission"),
         Op::Return(r)=>{writeln!(s,"return r{r};").unwrap()},
@@ -309,18 +332,18 @@ fn c_body(p: &Checked, s: &mut String, private: bool) {
             record_flags(s,*dst,&types[dst],layouts,true);
         },
         Op::FieldMove{dst,src,path}=>{
-            let(indices,_)=crate::types::project(&types[src],path,layouts).unwrap();let value=field_expr(*src,&types[src],&indices,layouts);writeln!(s,"r{dst}={value};").unwrap();
+            let ty=if let Ty::Ref(_,_,t)=&types[src]{t.as_ref()}else{&types[src]};let(indices,_)=crate::types::project(ty,path,layouts).unwrap();let value=field_expr(*src,&types[src],&indices,layouts);writeln!(s,"r{dst}={value};").unwrap();
             for(i,field)in owned_paths(&types[src],layouts).iter().enumerate(){if field.starts_with(&indices){writeln!(s,"r{src}_live[{i}]=0;").unwrap();}}
             record_flags(s,*dst,&types[dst],layouts,true);
         },
-        Op::FieldBorrow{dst,src,path,..}=>{let(indices,t)=crate::types::project(&types[src],path,layouts).unwrap();writeln!(s,"r{dst}={};",view_expr(field_expr(*src,&types[src],&indices,layouts),&t)).unwrap();},
+        Op::FieldBorrow{dst,src,path,..}=>{let ty=if let Ty::Ref(_,_,t)=&types[src]{t.as_ref()}else{&types[src]};let(indices,t)=crate::types::project(ty,path,layouts).unwrap();writeln!(s,"r{dst}={};",view_expr(field_expr(*src,&types[src],&indices,layouts),&t)).unwrap();},
         Op::EndCaptures(_)=>{},
         Op::TextLiteral{dst,data}=>{let values=if data.is_empty(){"0".into()}else{data.iter().map(u8::to_string).collect::<Vec<_>>().join(",")};writeln!(s,"{{static const uint8_t text[]={{ {values} }};r{dst}=gr_copy_bytes((gv){{(uint8_t*)text,UINT64_C({})}});}}",data.len()).unwrap()},
         Op::Text{dst,src}=>{let v=view(*src,types);writeln!(s,"gr_utf8({v});r{dst}=gr_copy_bytes({v});").unwrap()},
-        Op::AppendText{owner,src}=>{writeln!(s,"gr_append_text(&r{owner},{});",view(*src,types)).unwrap()},
+        Op::AppendText{owner,src}=>{let ptr=if matches!(types[owner],Ty::Ref(..)){format!("r{owner}")}else{format!("&r{owner}")};writeln!(s,"gr_append_text({ptr},{});",view(*src,types)).unwrap()},
         Op::Bytes{dst}=>{writeln!(s,"r{dst}=(gb){{0,0,0}};").unwrap()},
         Op::CopyBytes{dst,src}=>{writeln!(s,"r{dst}=gr_copy_bytes({});",view(*src,types)).unwrap()},
-        Op::Push{owner,value}=>{writeln!(s,"gr_push(&r{owner},r{value});").unwrap()},
+        Op::Push{owner,value}=>{let ptr=if matches!(types[owner],Ty::Ref(..)){format!("r{owner}")}else{format!("&r{owner}")};writeln!(s,"gr_push({ptr},r{value});").unwrap()},
         Op::Num(r,n)=>{writeln!(s,"r{r} = UINT64_C({n});").unwrap()},
         Op::Buffer{dst,len,seed}=>{writeln!(s,"r{dst} = (gv){{b{dst}, UINT64_C({len})}};\nfor (uint64_t j=0; j<UINT64_C({len}); ++j) b{dst}[j]=(uint8_t)((j*UINT64_C(17)+UINT64_C({seed}))%UINT64_C(251));").unwrap()},
         Op::Borrow{dst,src,..}=>{writeln!(s,"r{dst} = {};",view(*src,types)).unwrap()},
@@ -366,6 +389,7 @@ fn c_body(p: &Checked, s: &mut String, private: bool) {
 
 fn lty(t: &Ty) -> &'static str {
     match t {
+        Ty::Ref(..) => "ptr",
         Ty::Num => "i64",
         Ty::Unit => "i8",
         _ => "{ ptr, i64 }",
@@ -418,6 +442,33 @@ impl Ll {
     fn ops(&mut self, os: &[Op]) -> bool {
         for o in os {
             match o {
+                Op::Address { dst, src, path, .. } => {
+                    debug_assert!(path.is_empty());
+                    let ptr = if matches!(self.types[src], Ty::Ref(..)) {
+                        self.load(*src)
+                    } else {
+                        format!("%r{src}")
+                    };
+                    self.store(*dst, &ptr);
+                }
+                Op::Load { dst, src } => {
+                    let ptr = self.load(*src);
+                    let value = self.fresh();
+                    self.line(format!(
+                        "%{value} = load {}, ptr {ptr}",
+                        lty(&self.types[dst])
+                    ));
+                    self.store(*dst, &format!("%{value}"));
+                }
+                Op::Exchange { dst, src, value } => {
+                    let ptr = self.load(*src);
+                    let old = self.fresh();
+                    let new = self.load(*value);
+                    let ty = lty(&self.types[dst]);
+                    self.line(format!("%{old} = load {ty}, ptr {ptr}"));
+                    self.line(format!("store {ty} {new}, ptr {ptr}"));
+                    self.store(*dst, &format!("%{old}"));
+                }
                 Op::Break | Op::Continue => {
                     let targets = self.loops.last().expect("checked loop jump");
                     let label = if matches!(o, Op::Break) {
@@ -728,7 +779,14 @@ fn llvm_functions(functions: &[(&Checked, bool)]) -> Result<String, String> {
                     .values()
                     .flat_map(|s| s.params.iter().chain([&s.result])),
             )
-            .any(|t| t.heap() || matches!(t, Ty::Named(..)))
+            .any(|t| {
+                let t = if let Ty::Ref(_, _, t) = t {
+                    t.as_ref()
+                } else {
+                    t
+                };
+                t.heap() || matches!(t, Ty::Named(..))
+            })
     }) {
         return Err(
             "LLVM comparison backend does not yet support owned heap values or layouts".into(),

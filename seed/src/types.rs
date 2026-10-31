@@ -52,6 +52,7 @@ fn substitute(t: &Ty, regions: &[u16], args: &[Ty]) -> Result<Ty, String> {
             .get(*i as usize)
             .ok_or("layout type slot out of range")?
             .clone(),
+        Ty::Ref(m, r, t) => Ty::Ref(*m, slot(r)?, Box::new(substitute(t, regions, args)?)),
         Ty::View(m, r) => Ty::View(*m, slot(r)?),
         Ty::Holder(m, r) => Ty::Holder(*m, slot(r)?),
         Ty::Named(n, rs, ts) => Ty::Named(
@@ -153,6 +154,9 @@ pub fn instances(roots: &[Ty], defs: &Definitions) -> Result<Vec<Ty>, String> {
         done: &mut BTreeSet<String>,
         out: &mut Vec<Ty>,
     ) -> Result<(), String> {
+        if let Ty::Ref(_, _, inner) = t {
+            return visit(inner, defs, active, done, out);
+        }
         if !matches!(t, Ty::Named(..)) {
             return Ok(());
         }
@@ -185,6 +189,51 @@ pub fn instances(roots: &[Ty], defs: &Definitions) -> Result<Vec<Ty>, String> {
 }
 fn references(t: &Ty, defs: &Definitions, regions: Option<u16>) -> Result<(), String> {
     match t {
+        Ty::Ref(_, r, inner) => {
+            if regions.is_some_and(|count| *r >= count) {
+                return Err("undeclared typed-reference lifetime".into());
+            }
+            references(inner, defs, regions)?;
+            // Capture-bearing referents require invariant lifetime witnesses and opaque writeback.
+            // This first storage gate must fail closed, not treat placeholder region zero as proof.
+            fn plain(
+                t: &Ty,
+                defs: &Definitions,
+                depth: usize,
+                nodes: &mut usize,
+            ) -> Result<bool, String> {
+                *nodes += 1;
+                if depth > 64 || *nodes > 4096 {
+                    return Err("typed referent expansion limit".into());
+                }
+                match t {
+                    Ty::View(..) | Ty::Holder(..) | Ty::Ref(..) => Ok(false),
+                    Ty::Named(_, rs, args) => {
+                        if !rs.is_empty() {
+                            return Ok(false);
+                        }
+                        for t in args {
+                            if !plain(t, defs, depth + 1, nodes)? {
+                                return Ok(false);
+                            }
+                        }
+                        for (_, t) in fields(t, defs)? {
+                            if !plain(&t, defs, depth + 1, nodes)? {
+                                return Ok(false);
+                            }
+                        }
+                        Ok(true)
+                    }
+                    _ => Ok(true),
+                }
+            }
+            if !plain(inner, defs, 0, &mut 0)? {
+                return Err(
+                    "capture-bearing typed referents require the pending invariance/writeback gate"
+                        .into(),
+                );
+            }
+        }
         Ty::Named(_, rs, args) => {
             application(t, defs)?;
             if regions.is_some_and(|count| rs.iter().any(|r| *r >= count)) {
@@ -204,8 +253,44 @@ fn references(t: &Ty, defs: &Definitions, regions: Option<u16>) -> Result<(), St
 pub(crate) fn validate_type(t: &Ty, defs: &Definitions, parameters: u16) -> Result<(), String> {
     t.validate_shape(parameters)?;
     references(t, defs, None)?;
-    leaves(t, defs)?;
+    for (_, leaf) in leaves(t, defs)? {
+        references(&leaf, defs, None)?;
+    }
     Ok(())
+}
+pub(crate) fn required_plain(t: &Ty, defs: &Definitions) -> Result<BTreeSet<u16>, String> {
+    fn collect(
+        t: &Ty,
+        defs: &Definitions,
+        plain: bool,
+        out: &mut BTreeSet<u16>,
+        depth: usize,
+        nodes: &mut usize,
+    ) -> Result<(), String> {
+        *nodes += 1;
+        if depth > 64 || *nodes > 4096 {
+            return Err("reference kind expansion limit".into());
+        }
+        match t {
+            Ty::Param(i) if plain => {
+                out.insert(*i);
+            }
+            Ty::Ref(_, _, t) => collect(t, defs, true, out, depth + 1, nodes)?,
+            Ty::Named(_, _, args) => {
+                for t in args {
+                    collect(t, defs, plain, out, depth + 1, nodes)?;
+                }
+                for (_, t) in fields(t, defs)? {
+                    collect(&t, defs, plain, out, depth + 1, nodes)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+    let mut out = BTreeSet::new();
+    collect(t, defs, false, &mut out, 0, &mut 0)?;
+    Ok(out)
 }
 pub fn validate(defs: &Definitions) -> Result<(), String> {
     if defs.len() > 4096 {
@@ -274,6 +359,9 @@ pub fn exposed(
     defs: &Definitions,
 ) -> Result<Definitions, String> {
     fn add(t: &Ty, defs: &Definitions, out: &mut Definitions) -> Result<(), String> {
+        if let Ty::Ref(_, _, inner) = t {
+            add(inner, defs, out)?;
+        }
         if let Ty::Named(n, _, args) = t {
             if !out.contains_key(n) {
                 let d = defs.get(n).ok_or("missing exported layout")?.clone();

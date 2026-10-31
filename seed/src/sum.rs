@@ -18,6 +18,7 @@ impl State {
         payload: Option<Reg>,
     ) -> Result<(), String> {
         types::validate_type(ty, &self.layouts, self.type_parameters)?;
+        self.validate_kind(ty)?;
         let Ty::Named(name, _, _) = ty else {
             return Err("variant constructor needs nominal type".into());
         };

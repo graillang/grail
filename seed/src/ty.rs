@@ -1,4 +1,4 @@
-//! Bounded canonical type expressions; type parameters occur only in layout templates so far.
+//! Bounded canonical type expressions for layouts and universally checked functions.
 use crate::{Mode, Ty, qualified_ok};
 impl Ty {
     pub(super) fn copy(&self) -> bool {
@@ -15,7 +15,7 @@ impl Ty {
     }
     pub(super) fn reference(&self) -> Option<(Mode, u16)> {
         match self {
-            Self::View(m, r) | Self::Holder(m, r) => Some((*m, *r)),
+            Self::View(m, r) | Self::Holder(m, r) | Self::Ref(m, r, _) => Some((*m, *r)),
             _ => None,
         }
     }
@@ -27,6 +27,12 @@ impl Ty {
             Self::Text => "s".into(),
             Self::Buffer => "b".into(),
             Self::Param(i) => format!("p{i}"),
+            Self::Ref(m, r, t) => format!(
+                "v{}{}#{}",
+                if *m == Mode::Read { 'r' } else { 'w' },
+                r,
+                t.word()
+            ),
             Self::View(m, r) => format!("{}{r}", if *m == Mode::Read { "r" } else { "w" }),
             Self::Holder(m, r) => format!("h{}{r}", if *m == Mode::Read { "r" } else { "w" }),
             Self::Named(n, rs, args) => {
@@ -53,6 +59,19 @@ impl Ty {
         *nodes += 1;
         if depth > 64 || *nodes > 4096 || s.len() > 65536 {
             return Err("type expression limit".into());
+        }
+        if let Some(rest) = s.strip_prefix('v') {
+            let mode = match rest.as_bytes().first() {
+                Some(b'r') => Mode::Read,
+                Some(b'w') => Mode::Write,
+                _ => return Err("invalid typed reference mode".into()),
+            };
+            let (r, t) = rest[1..].split_once('#').ok_or("invalid typed reference")?;
+            return Ok(Self::Ref(
+                mode,
+                r.parse().map_err(|_| "invalid typed reference lifetime")?,
+                Box::new(Self::parse_at(t, depth + 1, nodes)?),
+            ));
         }
         if let Some(s) = s.strip_prefix('t') {
             let (head, tail) = if let Some((h, args)) = s.split_once('[') {
@@ -164,6 +183,9 @@ impl Ty {
                     }
                     bytes
                 }
+                Ty::Ref(_, r, t) => {
+                    3 + r.to_string().len() + visit(t, parameters, depth + 1, nodes)?
+                }
                 Ty::View(_, r) => 1 + r.to_string().len(),
                 Ty::Holder(_, r) => 2 + r.to_string().len(),
                 _ => 1,
@@ -198,6 +220,7 @@ impl Ty {
                 return Err("generic substitution type limit".into());
             }
             Ok(match t {
+                Ty::Ref(m, r, t) => Ty::Ref(*m, *r, Box::new(copy(t, args, depth + 1, nodes)?)),
                 Ty::Named(n, rs, ts) => Ty::Named(
                     n.clone(),
                     rs.clone(),
@@ -216,6 +239,7 @@ impl Ty {
     }
     pub(super) fn erase_regions(&self) -> Self {
         match self {
+            Self::Ref(m, _, t) => Self::Ref(*m, 0, Box::new(t.erase_regions())),
             Self::View(m, _) => Self::View(*m, 0),
             Self::Holder(m, _) => Self::Holder(*m, 0),
             Self::Named(n, rs, args) => Self::Named(

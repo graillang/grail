@@ -47,6 +47,15 @@ impl Signature {
                         *slot = Some(actual.clone());
                     }
                 }
+                Ty::Ref(m, _, t) => {
+                    let Ty::Ref(a, _, v) = actual else {
+                        return Err("generic typed-reference shape".into());
+                    };
+                    if m != a {
+                        return Err("generic typed-reference mode".into());
+                    }
+                    unify(t, v, args)?;
+                }
                 Ty::Named(n, _, ts) => {
                     let Ty::Named(a, _, values) = actual else {
                         return Err("generic nominal argument shape".into());

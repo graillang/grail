@@ -193,3 +193,10 @@ static native materialization and transitive body invalidation (module 5 / artif
 Expression statements close results/temporary owners at statement end. General typed references,
 arbitrary-element collections/cursors, remaining ownership joins and the real seed port plus
 stage-2/stage-3/artifact delivery remain required; this is not completion of bootstrap v0.
+
+## Typed storage groundwork
+
+[Addressed scalar/owned storage](typed-storage.md) now supports lifetime-free typed references,
+explicit reborrows and generic replacement with uniform mutable cell metadata updates. It does not
+yet admit lifetime-bearing pointees; invariant witnesses, stored-source versus outer-frame bounds,
+opaque capture writeback and real reference-containing containers/cursors remain required work.

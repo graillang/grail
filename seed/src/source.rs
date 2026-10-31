@@ -192,6 +192,8 @@ impl Parser<'_> {
                             | "string"
                             | "read"
                             | "mut"
+                            | "ref"
+                            | "ref_mut"
                             | "read_holder"
                             | "mut_holder"
                             | "type"
@@ -378,6 +380,20 @@ impl Parser<'_> {
             return Ok(Ty::Param(*i));
         }
         let (rs, args) = self.type_arguments(depth)?;
+        if matches!(name.as_str(), "ref" | "ref_mut") {
+            if rs.len() != 1 || args.len() != 1 {
+                return Err(self.error("typed reference needs one lifetime and one type"));
+            }
+            return Ok(Ty::Ref(
+                if name == "ref" {
+                    Mode::Read
+                } else {
+                    Mode::Write
+                },
+                rs[0],
+                Box::new(args[0].clone()),
+            ));
+        }
         if matches!(name.as_str(), "read" | "mut" | "read_holder" | "mut_holder") {
             if rs.len() != 1 || !args.is_empty() {
                 return Err(self.error("view needs one lifetime"));
@@ -617,7 +633,9 @@ impl Parser<'_> {
                 } else {
                     match name.as_str() {
                         "bytes" => Some(0),
-                        "read" | "mut" | "hold" | "len" | "copy_bytes" | "text" => Some(1),
+                        "read" | "mut" | "hold" | "len" | "copy_bytes" | "text" | "borrow"
+                        | "borrow_mut" | "load" => Some(1),
+                        "exchange" => Some(2),
                         "at" => Some(2),
                         "slice" => Some(3),
                         _ => None,
@@ -630,7 +648,30 @@ impl Parser<'_> {
                                 name.as_str(),
                                 "read" | "mut" | "len" | "at" | "slice" | "copy_bytes" | "text"
                             );
-                        let value = if storage {
+                        let value = if matches!(name.as_str(), "borrow" | "borrow_mut") {
+                            let n = self.ident()?;
+                            let src = self
+                                .vars
+                                .get(&n)
+                                .ok_or_else(|| self.error("unknown borrowed place"))?
+                                .reg;
+                            let mut path = Vec::new();
+                            while self.eat(".") {
+                                path.push(self.ident()?);
+                            }
+                            let dst = self.fresh()?;
+                            ops.push(Op::Address {
+                                dst,
+                                src,
+                                path,
+                                mode: if name == "borrow_mut" {
+                                    Mode::Write
+                                } else {
+                                    Mode::Read
+                                },
+                            });
+                            dst
+                        } else if storage {
                             self.storage_expr(
                                 ops,
                                 if name == "mut" {
@@ -672,6 +713,19 @@ impl Parser<'_> {
                     }
                 } else {
                     match name.as_str() {
+                        "borrow" | "borrow_mut" => Op::Move {
+                            dst: r,
+                            src: args[0],
+                        },
+                        "load" => Op::Load {
+                            dst: r,
+                            src: args[0],
+                        },
+                        "exchange" => Op::Exchange {
+                            dst: r,
+                            src: args[0],
+                            value: args[1],
+                        },
                         "text" => Op::Text {
                             dst: r,
                             src: args[0],
@@ -1450,6 +1504,7 @@ fn ending(
                 let mut body_out = live_before(op, &after);
                 body_out.extend(&after);
                 body_out.extend(body_state.scalars());
+                body_out.extend(body_state.resources.iter().copied());
                 let body = ending(body, &mut body_state, imports, &body_out, &keep)?;
                 Op::While {
                     condition: *condition,
@@ -1462,6 +1517,7 @@ fn ending(
                 inner.enter_loop(Some(*index))?;
                 let mut body_out = after.clone();
                 body_out.extend(inner.scalars());
+                body_out.extend(inner.resources.iter().copied());
                 Op::Loop {
                     index: *index,
                     end: *end,

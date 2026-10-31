@@ -98,3 +98,16 @@ fn expression_statements_close_temporaries_without_dummy_bindings() {
         );
     }
 }
+
+#[test]
+fn nested_loop_blocks_keep_borrowed_entry_values_live_for_the_backedge() {
+    for text in [
+        "fn f<a>(p:read<a>)->num{var sum=0;for i in len(p){{let n=at(p,i);sum=sum+n;}}return sum;}",
+        "fn f<a>(p:read<a>)->num{var i=0;var sum=0;while i<len(p){{let n=at(p,i);sum=sum+n;i=i+1;}}return sum;}",
+    ] {
+        assert!(
+            grail_seed::source::compile(text, Default::default()).is_ok(),
+            "{text}"
+        );
+    }
+}

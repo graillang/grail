@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Add typed storage references for lifetime-free referents: explicit place borrows, indirect scalar
+  loads, generic/core replacement, owned descriptor/record mutation and C/numeric LLVM lowering.
+  Keep addressed scalar storage alive, enforce indexed field/storage exclusion and preserve owned
+  relocation/recursive drop flags. Expose reference kind requirements in universal signature/body
+  checking, uniformly refresh opaque mutable cell metadata and test source-hidden mixed-profile
+  execution/free traces. Keep borrowed loop-entry values live across nested expression blocks,
+  fixing a backedge rejection exposed by the mutable-state scanner. Captured-reference
+  invariance/witnesses/writeback, general containers,
+  remaining joins and full bootstrap/self-hosting are explicitly unfinished, not passed gates.
+
 - Implement universally checked affine generic function bodies and static native specialization,
   inferred/explicit calls, eager snapshots and statement-end expression cleanup. Ship real Grail
   core Option/Result/Pair helpers, recursive calls, canonical rechecked IR/private helper closures,

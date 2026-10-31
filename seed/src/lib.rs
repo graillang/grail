@@ -8,6 +8,7 @@ pub mod fixture;
 mod flow;
 mod ir;
 pub mod module;
+mod reference;
 mod sha256;
 pub mod source;
 mod specialize;
@@ -34,6 +35,7 @@ pub enum Ty {
     Text,
     View(Mode, u16),
     Holder(Mode, u16),
+    Ref(Mode, u16, Box<Ty>),
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Sig {
@@ -147,6 +149,21 @@ pub struct Arm {
 }
 #[derive(Clone, Debug)]
 pub enum Op {
+    Address {
+        dst: Reg,
+        src: Reg,
+        path: Vec<String>,
+        mode: Mode,
+    },
+    Load {
+        dst: Reg,
+        src: Reg,
+    },
+    Exchange {
+        dst: Reg,
+        src: Reg,
+        value: Reg,
+    },
     Return(Reg),
     Break,
     Continue,
@@ -301,16 +318,20 @@ struct Value {
     ancestors: BTreeSet<usize>,
     fields: Vec<Option<Value>>,
     active: bool,
+    targets: BTreeSet<reference::Place>,
 }
 #[derive(Clone, Debug)]
 struct State {
     signature: std::sync::Arc<Sig>,
     type_parameters: u16,
+    plain_parameters: BTreeSet<u16>,
     generics: std::sync::Arc<BTreeMap<String, template::Signature>>,
     terminated: bool,
     loops: Vec<std::rc::Rc<flow::LoopFrame>>,
     layouts: types::Context,
     values: BTreeMap<Reg, Value>,
+    memory: BTreeMap<Root, Value>,
+    addressed: BTreeSet<Reg>,
     resources: BTreeSet<Reg>,
     next: usize,
     copy_defined: Vec<u64>,
@@ -324,7 +345,14 @@ impl State {
         layouts: types::Context,
         parameters: u16,
     ) -> Result<Self, String> {
+        let mut plain_parameters = BTreeSet::new();
+        if parameters > 0 {
+            for t in signature.params.iter().chain([&signature.result]) {
+                plain_parameters.extend(types::required_plain(t, &layouts)?);
+            }
+        }
         let mut s = Self {
+            plain_parameters,
             layouts,
             signature: std::sync::Arc::new(signature.clone()),
             type_parameters: parameters,
@@ -332,6 +360,8 @@ impl State {
             terminated: false,
             loops: Vec::new(),
             values: BTreeMap::new(),
+            memory: BTreeMap::new(),
+            addressed: BTreeSet::new(),
             resources: BTreeSet::new(),
             next: 0,
             copy_defined: Vec::new(),
@@ -352,10 +382,16 @@ impl State {
     }
     fn usable(&self, r: Reg) -> Result<Value, String> {
         let v = self.get(r)?;
+        if self.place_borrowed(r, &[], true) {
+            return Err("read of exclusively borrowed storage".into());
+        }
         self.usable_value(v)?;
         Ok(v.clone())
     }
-    fn put(&mut self, r: Reg, v: Value) -> Result<(), String> {
+    fn put(&mut self, r: Reg, mut v: Value) -> Result<(), String> {
+        if self.place_borrowed(r, &[], false) {
+            return Err("overwrite of borrowed storage".into());
+        }
         if r > 65535 {
             return Err("register limit".into());
         }
@@ -370,6 +406,7 @@ impl State {
             return Err(format!("r{r}: register changes type"));
         }
         self.remove(r);
+        reference::rename_owned(&mut v, &Root::Local(r, vec![]), &[]);
         self.types.borrow_mut().insert(r, v.ty.clone());
         if v.ty.copy() {
             self.mark_copy(r, true);
@@ -386,10 +423,11 @@ impl State {
         if let Some(v) = self.values.remove(&r) {
             self.resources.remove(&r);
             self.index_remove(&v);
+            self.retire_targets(&v);
         }
     }
     fn owner_borrowed(&self, v: &Value) -> bool {
-        (v.ty.owned() && v.roots.iter().any(|r| self.access.contains_key(r)))
+        (v.ty.owned() && v.roots.iter().any(|r| self.access_conflict(r, false)))
             || v.fields
                 .iter()
                 .flatten()
@@ -404,6 +442,7 @@ impl State {
             ancestors,
             fields: Vec::new(),
             active: true,
+            targets: BTreeSet::new(),
         }
     }
     fn num(&mut self, r: Reg) -> Result<(), String> {
@@ -411,6 +450,7 @@ impl State {
         self.put(r, v)
     }
     fn require_num(&self, r: Reg) -> Result<(), String> {
+        self.usable(r)?;
         if self.get(r)?.ty != Ty::Num {
             return Err(format!("r{r}: expected number"));
         }
@@ -425,13 +465,17 @@ impl State {
             {
                 return Err("owner restricted by write loan".into());
             }
-        } else if v.ty.reference().is_none() {
+        } else if matches!(&v.ty,Ty::Ref(_,_,t) if matches!(**t,Ty::Bytes|Ty::Text)) {
+        } else if !matches!(v.ty, Ty::View(..) | Ty::Holder(..)) {
             return Err("expected byte storage or view".into());
         }
         Ok(())
     }
     fn end(&mut self, r: Reg) -> Result<(), String> {
         let v = self.get(r)?.clone();
+        if self.place_borrowed(r, &[], false) {
+            return Err("storage still borrowed".into());
+        }
         // Default record drop destroys owned storage, not the referents of captured descriptors.
         if v.ty.reference().is_some() {
             self.usable_value(&v)?;
@@ -463,6 +507,9 @@ impl State {
         Ok(())
     }
     fn call(&mut self, sig: &Sig, dst: Reg, args: &[Reg]) -> Result<(), String> {
+        for t in sig.params.iter().chain([&sig.result]) {
+            self.validate_kind(t)?;
+        }
         if sig.params.len() != args.len() {
             return Err("call arity".into());
         }
@@ -483,6 +530,7 @@ impl State {
         }
         let inputs = sig.params.iter().cloned().zip(actuals).collect::<Vec<_>>();
         let v = self.result_value(&sig.result, dst, &mut Vec::new(), &inputs)?;
+        self.writeback(&inputs)?;
         for r in consumed {
             self.remove(r);
         }
@@ -513,6 +561,14 @@ impl State {
                 return Err("unreachable operation after control transfer".into());
             }
             match op {
+                Op::Address {
+                    dst,
+                    src,
+                    path,
+                    mode,
+                } => self.address(*dst, *src, path, *mode)?,
+                Op::Load { dst, src } => self.load_reference(*dst, *src)?,
+                Op::Exchange { dst, src, value } => self.exchange(*dst, *src, *value)?,
                 Op::Unit(r) => {
                     let v = self.new_value(Ty::Unit, BTreeSet::new(), BTreeSet::new());
                     self.put(*r, v)?;
@@ -581,10 +637,11 @@ impl State {
                 }
                 Op::AppendText { owner, src } => {
                     let v = self.usable(*owner)?;
-                    if v.ty != Ty::Text {
+                    let indirect = matches!(&v.ty,Ty::Ref(Mode::Write,_,t) if **t==Ty::Text);
+                    if v.ty != Ty::Text && !indirect {
                         return Err("append_text expects owned string".into());
                     }
-                    if self.owner_borrowed(&v) {
+                    if !indirect && self.owner_borrowed(&v) {
                         return Err("text growth while borrowed".into());
                     }
                     self.readable(*src)?;
@@ -611,10 +668,11 @@ impl State {
                 }
                 Op::Push { owner, value } => {
                     let v = self.usable(*owner)?;
-                    if v.ty != Ty::Bytes {
+                    let indirect = matches!(&v.ty,Ty::Ref(Mode::Write,_,t) if **t==Ty::Bytes);
+                    if v.ty != Ty::Bytes && !indirect {
                         return Err("push expects owned bytes".into());
                     }
-                    if self.owner_borrowed(&v) {
+                    if !indirect && self.owner_borrowed(&v) {
                         return Err("growth while owner is borrowed".into());
                     }
                     self.require_num(*value)?;
@@ -632,7 +690,11 @@ impl State {
                 }
                 Op::Borrow { dst, src, mode } => {
                     let p = self.usable(*src)?;
-                    let v = self.borrow_value(p, *mode)?;
+                    let v = if matches!(p.ty, Ty::Ref(..)) {
+                        self.borrow_reference_bytes(&p, *mode)?
+                    } else {
+                        self.borrow_value(p, *mode)?
+                    };
                     self.put(*dst, v)?;
                 }
                 Op::Record { dst, ty, fields } => self.record_value(*dst, ty, fields)?,
@@ -643,7 +705,15 @@ impl State {
                     path,
                     mode,
                 } => {
+                    if matches!(self.get(*src)?.ty, Ty::Ref(..)) {
+                        let v = self.reference_field_bytes(*src, path, *mode)?;
+                        self.put(*dst, v)?;
+                        continue;
+                    }
                     let (indices, _) = types::project(&self.get(*src)?.ty, path, &self.layouts)?;
+                    if self.place_borrowed(*src, &indices, *mode == Mode::Read) {
+                        return Err("borrow of restricted field storage".into());
+                    }
                     let p = self.get(*src)?.at(&indices)?.clone();
                     let v = self.borrow_value(p, *mode)?;
                     self.put(*dst, v)?;
@@ -659,7 +729,7 @@ impl State {
                 } => {
                     self.require_num(*start)?;
                     self.require_num(*end)?;
-                    if self.get(*src)?.ty.reference().is_none() {
+                    if !matches!(self.get(*src)?.ty, Ty::View(..) | Ty::Holder(..)) {
                         return Err("slice expects view".into());
                     }
                     self.ops(
@@ -698,6 +768,9 @@ impl State {
                         return Err("self move".into());
                     }
                     let v = self.usable(*src)?;
+                    if self.place_borrowed(*src, &[], v.ty.copy()) {
+                        return Err("move/read of borrowed place".into());
+                    }
                     if v.ty.owned() && self.owner_borrowed(&v) {
                         return Err("move of borrowed owner".into());
                     }
@@ -712,19 +785,17 @@ impl State {
                     self.num(*dst)?;
                 }
                 Op::Read { dst, src, index } => {
-                    if self.usable(*src)?.ty.reference().is_none() {
+                    if !matches!(self.usable(*src)?.ty, Ty::View(..) | Ty::Holder(..)) {
                         return Err("read expects view".into());
                     }
                     self.require_num(*index)?;
                     self.num(*dst)?;
                 }
                 Op::Write { dst, index, value } => {
-                    if !self
-                        .usable(*dst)?
-                        .ty
-                        .reference()
-                        .is_some_and(|(m, _)| m == Mode::Write)
-                    {
+                    if !matches!(
+                        self.usable(*dst)?.ty,
+                        Ty::View(Mode::Write, _) | Ty::Holder(Mode::Write, _)
+                    ) {
                         return Err("write expects exclusive view".into());
                     }
                     self.require_num(*index)?;
@@ -758,6 +829,9 @@ impl State {
                         self.type_parameters,
                         &self.layouts,
                     )?;
+                    for t in &types {
+                        self.validate_kind(t)?;
+                    }
                     let sig = generic.instantiate(&types)?;
                     types::validate_sig_bound(&sig, &self.layouts, self.type_parameters)?;
                     self.call(&sig, *dst, args)?;

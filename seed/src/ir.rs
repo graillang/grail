@@ -58,6 +58,29 @@ impl Writer {
         self.num(ops.len() as u64)?;
         for op in ops {
             match op {
+                Op::Address {
+                    dst,
+                    src,
+                    path,
+                    mode,
+                } => {
+                    self.text("address")?;
+                    self.num(*dst as u64)?;
+                    self.num(*src as u64)?;
+                    self.path(path)?;
+                    self.mode(*mode)?;
+                }
+                Op::Load { dst, src } => {
+                    self.text("load")?;
+                    self.num(*dst as u64)?;
+                    self.num(*src as u64)?;
+                }
+                Op::Exchange { dst, src, value } => {
+                    self.text("exchange")?;
+                    self.num(*dst as u64)?;
+                    self.num(*src as u64)?;
+                    self.num(*value as u64)?;
+                }
                 Op::Return(r) | Op::Unit(r) | Op::End(r) | Op::EndCaptures(r) | Op::Assert(r) => {
                     self.text(match op {
                         Op::Return(_) => "return",
@@ -369,6 +392,22 @@ impl<'a> Reader<'a> {
         for _ in 0..n {
             let tag = self.text()?;
             let op = match tag.as_str() {
+                "address" => Op::Address {
+                    dst: self.reg()?,
+                    src: self.reg()?,
+                    path: self.path()?,
+                    mode: self.mode()?,
+                },
+                "load" => Op::Load {
+                    dst: self.reg()?,
+                    src: self.reg()?,
+                },
+                "exchange" => Op::Exchange {
+                    dst: self.reg()?,
+                    src: self.reg()?,
+                    value: self.reg()?,
+                },
+
                 "return" => Op::Return(self.reg()?),
                 "unit" => Op::Unit(self.reg()?),
                 "end" => Op::End(self.reg()?),

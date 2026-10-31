@@ -263,3 +263,11 @@ This is distinct from Cargo's `--release`, which optimizes the **Rust seed execu
 A full linked-executable recipe manifest and hermetic bootstrap toolchain are not implemented yet.
 
 [Loop-exit checking, cleanup, C/LLVM evidence and remaining join restrictions](../docs/design/loop-exits.md).
+
+## Typed storage groundwork
+
+[Rules, examples and incomplete hard gates](../docs/design/typed-storage.md). `ref<a,T>` /
+`ref_mut<a,T>`, `borrow` / `borrow_mut`, scalar `load`, `exchange` and `core::replace` support
+lifetime-free referents, including owned text/bytes and plain records. See `examples/references`.
+Captured-reference pointees/cursors, invariant lifetime witnesses and general opaque capture
+writeback remain unfinished; this limited type gate is not completion of v0.

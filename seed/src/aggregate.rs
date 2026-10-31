@@ -40,6 +40,15 @@ impl State {
         Ok(())
     }
     pub(super) fn index_add(&mut self, v: &Value) {
+        for p in v.targets.iter().filter(|_| v.active) {
+            if let Root::Local(r, _) = p.base
+                && p.path.is_empty()
+                && self.values.get(&r).is_some_and(|v| v.ty.copy())
+            {
+                self.addressed.insert(r);
+                self.resources.insert(r);
+            }
+        }
         if v.active {
             if let Some((mode, _)) = v.ty.reference() {
                 for root in &v.roots {
@@ -106,6 +115,12 @@ impl State {
                 path.pop();
             }
         }
+        if let Ty::Ref(_, _, inner) = t {
+            let base = Root::Param(input, path.clone());
+            let target = self.parameter_value(inner, input, path)?;
+            self.memory.insert(base.clone(), target);
+            v.targets.insert(reference::Place { base, path: vec![] });
+        }
         Ok(v)
     }
     pub(super) fn borrow_value(&mut self, p: Value, mode: Mode) -> Result<Value, String> {
@@ -142,8 +157,14 @@ impl State {
         if path.is_empty() || dst == src {
             return Err("invalid field move".into());
         }
+        if matches!(self.get(src)?.ty, Ty::Ref(..)) {
+            return self.load_reference_field(dst, src, path);
+        }
         let (indices, _) = types::project(&self.get(src)?.ty, path, &self.layouts)?;
         let v = self.get(src)?.at(&indices)?.clone();
+        if self.place_borrowed(src, &indices, v.ty.copy()) {
+            return Err("field storage still borrowed".into());
+        }
         self.usable_value(&v)?;
         if v.ty.owned() && self.owner_borrowed(&v) {
             return Err("move of borrowed field".into());
@@ -183,6 +204,7 @@ impl State {
             let v = self.get(r)?.at(&path)?.clone();
             if self.usable_value(&v).is_ok() {
                 self.index_remove(&v);
+                self.retire_targets(&v);
                 self.values.get_mut(&r).unwrap().at_mut(&path)?.active = false;
                 changed = true;
             }
@@ -196,6 +218,7 @@ impl State {
         fields: &[(String, Reg)],
     ) -> Result<(), String> {
         types::validate_type(ty, &self.layouts, self.type_parameters)?;
+        self.validate_kind(ty)?;
         let Ty::Named(name, _, _) = ty else {
             return Err("record constructor needs nominal type".into());
         };
@@ -267,6 +290,21 @@ impl State {
             roots.insert(Root::Local(dst, path.clone()));
         }
         let mut v = self.new_value(t.clone(), roots, ancestors);
+        if let Ty::Ref(mode, region, target) = t {
+            for (ty, value) in inputs {
+                for (path, leaf) in types::leaves(ty, &self.layouts)? {
+                    if let Ty::Ref(m, r, inner) = leaf
+                        && r == *region
+                        && (*mode == Mode::Read || m == Mode::Write)
+                    {
+                        let input = value.at(&path)?;
+                        for p in &input.targets {
+                            self.matching_places(p, &inner, target, &mut v.targets)?;
+                        }
+                    }
+                }
+            }
+        }
         if matches!(t, Ty::Named(..)) {
             for (i, (_, field)) in types::fields(t, &self.layouts)?.iter().enumerate() {
                 path.push(i);
@@ -283,6 +321,7 @@ pub(super) fn compatible(a: &Ty, b: &Ty) -> bool {
         (Ty::Named(a, _, xs), Ty::Named(b, _, ys)) => {
             a == b && xs.len() == ys.len() && xs.iter().zip(ys).all(|(x, y)| compatible(x, y))
         }
+        (Ty::Ref(a, _, x), Ty::Ref(b, _, y)) => a == b && compatible(x, y),
         (Ty::View(a, _), Ty::View(b, _)) | (Ty::Holder(a, _), Ty::Holder(b, _)) => a == b,
         _ => a == b,
     }

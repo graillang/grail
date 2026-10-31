@@ -48,7 +48,7 @@ impl State {
     }
     pub(super) fn prune_scalars(&mut self, live: &BTreeSet<Reg>) {
         self.values.retain(|r, v| {
-            if v.ty.copy() {
+            if v.ty.copy() && !self.addressed.contains(r) {
                 debug_assert!(v.roots.is_empty() && v.ancestors.is_empty() && v.fields.is_empty());
                 live.contains(r)
             } else {
@@ -105,6 +105,9 @@ impl State {
             (true, false) => *self = no,
             (false, true) => *self = yes,
             (false, false) => {
+                if yes.memory != no.memory {
+                    return Err("branch external storage states differ".into());
+                }
                 if yes.resources != no.resources
                     || yes.resources.iter().any(|r| yes.values[r] != no.values[r])
                 {
@@ -160,6 +163,8 @@ pub(crate) fn terminates(ops: &[Op]) -> bool {
 pub(super) fn live_before(op: &Op, after: &BTreeSet<Reg>) -> BTreeSet<Reg> {
     let mut live = after.clone();
     let (defs, uses): (Vec<Reg>, Vec<Reg>) = match op {
+        Op::Address { dst, src, .. } | Op::Load { dst, src } => (vec![*dst], vec![*src]),
+        Op::Exchange { dst, src, value } => (vec![*dst], vec![*src, *value]),
         Op::Return(r) => return BTreeSet::from([*r]),
         Op::Break | Op::Continue => return live,
         Op::Unit(r) => (vec![*r], vec![]),
