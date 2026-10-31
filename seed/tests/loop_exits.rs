@@ -16,7 +16,7 @@ fn loop_exits_close_local_scopes_and_target_the_innermost_loop() {
         "fn f(n:num)->num{let b=bytes();push(b,7);let p=read(b);for i in n{if at(p,0){continue;}break;}return at(p,0);}",
     ] {
         let p = source::compile(s, BTreeMap::new()).unwrap_or_else(|e| panic!("{s}\n{e}"));
-        emit::module_c(&p);
+        emit::module_c(&p).unwrap();
     }
 }
 #[test]

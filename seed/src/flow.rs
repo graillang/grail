@@ -210,7 +210,9 @@ pub(super) fn live_before(op: &Op, after: &BTreeSet<Reg>) -> BTreeSet<Reg> {
         Op::Binary {
             dst, left, right, ..
         } => (vec![*dst], vec![*left, *right]),
-        Op::Call { dst, args, .. } => (vec![*dst], args.clone()),
+        Op::Call { dst, args, .. } | Op::GenericCall { dst, args, .. } => {
+            (vec![*dst], args.clone())
+        }
         Op::If { condition, yes, no } => {
             live = before(yes, after);
             live.extend(before(no, after));

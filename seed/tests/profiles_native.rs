@@ -28,6 +28,23 @@ fn command(dir: &Path, name: &str, build: bool, profile: &str) -> Command {
         .arg(profile);
     c
 }
+fn republish(dir: &Path, snapshot: &artifact::Snapshot) {
+    let ir = snapshot
+        .templates
+        .as_ref()
+        .map(fs::read)
+        .transpose()
+        .unwrap()
+        .unwrap_or_default();
+    artifact::publish_with_templates(
+        dir,
+        &snapshot.header,
+        &fs::read(snapshot.object.with_extension("c")).unwrap(),
+        &fs::read(&snapshot.object).unwrap(),
+        &ir,
+    )
+    .unwrap();
+}
 const WORKLOAD: &str = r#"module workload;use core;use parse;pub fn run<a>(input:read<a>)->num{let empty=bytes();let zero=slice(read(empty),0,0);let copied=copy_bytes(zero);let text=text(read(copied));let pair=core::Pair<string,string>{first:text,second:""};assert(len(pair.first)==0);let v=bytes();for i in 257{push(v,i);}let owner=carry(v);let view=read(owner);var total=0;for i in len(view){total=total+at(view,i);}let result=parse::parse(input);match result{Ok(token)=>{return total+token.value+len(token.name)+len(token.span);},Err(error)=>{return total+len(error);}}}fn carry(b:bytes)->bytes{return b;}"#;
 #[test]
 #[ignore = "requires Linux clang; optional mixed tcc requires configured root"]
@@ -62,13 +79,7 @@ fn native_profiles_reproduce_objects_and_executables_with_hidden_sources() {
             fs::create_dir(&relocated).unwrap();
             if name == "parse" {
                 let core = artifact::load(&dir, "core").unwrap();
-                artifact::publish(
-                    &relocated,
-                    &core.header,
-                    &fs::read(core.object.with_extension("c")).unwrap(),
-                    &fs::read(&core.object).unwrap(),
-                )
-                .unwrap();
+                republish(&relocated, &core);
             }
             let mut c = Command::new(env!("CARGO_BIN_EXE_grail-seed"));
             c.arg("compile")
@@ -101,13 +112,7 @@ fn native_profiles_reproduce_objects_and_executables_with_hidden_sources() {
         fs::create_dir(&relocated).unwrap();
         for name in ["core", "parse"] {
             let dep = artifact::load(&dir, name).unwrap();
-            artifact::publish(
-                &relocated,
-                &dep.header,
-                &fs::read(dep.object.with_extension("c")).unwrap(),
-                &fs::read(&dep.object).unwrap(),
-            )
-            .unwrap();
+            republish(&relocated, &dep);
         }
         fs::write(relocated.join("workload.grl"), WORKLOAD).unwrap();
         run(&mut command(&relocated, "workload", true, profile));

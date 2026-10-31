@@ -60,6 +60,12 @@ pub(crate) fn hex(input: &[u8]) -> String {
     }
     h.iter().map(|n| format!("{n:08x}")).collect()
 }
+pub(crate) fn is_hex(s: &str) -> bool {
+    s.len() == 64
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
 #[cfg(test)]
 mod tests {
     #[test]

@@ -38,8 +38,9 @@ They are demonstration commands, not a surface-language parser or general build 
 
 Records, tagged enums, consuming match, early returns, `!` unwrap and `?` propagation are supported
 with recursive default cleanup. [Generic value layouts](../docs/design/generic-layouts.md), public
-types and type-only modules support concrete `Result<T,E>`/`Option<T>`/`Pair<T,U>` uses; functions
-remain concretely typed. Generic function bodies, general typed references/containers, closures,
+types and type-only modules support `Result<T,E>`/`Option<T>`/`Pair<T,U>` uses.
+[Generic function bodies](../docs/design/generic-functions.md) check universally as affine values;
+core helpers specialize without caller-root inference. General typed references/containers, closures,
 reference-containing heap elements, async, effectful custom destructors, capabilities, interface
 authentication and a language soundness theorem remain unfinished.
 Numeric branches and byte slicing are now supported in both emitters.
@@ -89,14 +90,14 @@ cargo test --manifest-path seed/Cargo.toml --offline --test native -- --ignored
 
 For the configured TinyCC driver, set `GRAIL_TCC_ROOT` to the existing Goose build root and append
 `tcc` to both compile/build commands. There is no silent fallback or download. Source modules have
-one exported function; only direct imports are linked. The parser example borrows slices rather
+multiple exports and transitive immutable dependency linking. The parser example borrows slices rather
 than allocating token copies. Malformed numeric input aborts, and the executable expects exactly
-one text argument. Generic heap containers, Result and type generics are still follow-up work.
+one text argument. Arbitrary-element heap containers and general typed references remain follow-up work.
 
 ## Heap byte owners
 
 [Semantics and limits](../docs/design/heap-ownership.md). `bytes()`, `push`, `copy_bytes` and
-owned `bytes` parameters/results are supported by the C backend. Function-signature payloads are schema 5 (see the source-module format below);
+owned `bytes` parameters/results are supported by the C backend. Function-signature payloads are schema 6 (see the source-module format below);
 rebuild old `.api` files. Heap owners drop at scope exit, not at borrowed-value last use.
 
 ```sh
@@ -124,7 +125,7 @@ cargo test --manifest-path seed/Cargo.toml --offline --test text_native -- --ign
 `while condition { ... }` re-evaluates the condition each time (unlike a counted range's captured
 bound). Temporary owners/loans created by the condition end before entering the body or taking
 its false exit. Continuing paths keep the balanced-ownership back-edge restriction. Early returns
-clean the whole function; `break` and `continue` are not yet implemented.
+clean the whole function; `break`/`continue` clean local scopes and target the innermost loop.
 
 ```sh
 seed/target/release/grail-seed build seed/examples/while_sum.grl seed/.work/while seed/.work/while
@@ -176,23 +177,25 @@ inference. Locals/lifetime-name scopes do not cross functions; unused helpers ar
 Duplicate function/import names are errors. Public native symbols are namespace-qualified;
 helpers have internal linkage, so different modules may use the same private name.
 
-`compile` emits `<module>.api` / `.o` / `.c`. Source interfaces now use **module schema 3**, carrying
-all public function signatures, reachable nominal type layouts, the primary export, and expected direct-dependency surface hashes.
+`compile` emits `<module>.api` / `.o` / `.c` / `.ir`. Source interfaces use **module schema 5**,
+carrying ordinary/generic contracts, reachable layouts, optional entry, dependency surface hashes
+and separate generic implementation pins.
 Rebuild prior source artifacts: there is no source-schema fallback. The standalone typed-IR fixture
-commands still actively use function-signature schema 5, also the function payload inside a module.
-`source::compile` returns a flat `CheckedModule`; use `emit::module_c` / `module_llvm`. The raw IR
+commands actively use function-signature schema 6, also the function payload inside a module.
+`source::compile` returns `CheckedModule`; `emit::module_c` / `module_llvm` return `Result`.
+External generic bodies use `module_c_with_bundles` or `module_c_with_resolver`. The raw IR
 checker and its single-function emitters remain available for the existing conformance fixtures.
 
 `build` follows transitive metadata dependencies and links each object once, without provider
 source. It rejects cycles, wrong module identities and stale dependency contracts before replacing
-the client's artifacts. A private-body-only rebuild does not invalidate callers. Fingerprints use
+the client's artifacts. Ordinary private-body edits preserve contracts; generic body/closure edits
+invalidate embedded implementations even when public fingerprints are unchanged. Fingerprints use
 SHA-256 over the canonical **public** surface, not implementation bodies or dependency build state.
 A change to any public member conservatively invalidates every direct module-dependent artifact.
 There is no persistent incremental build cache or automatic dependency rebuild yet.
 
 Native builds use immutable, content-verified generations under `.grail-store/<id>/`, selected by
-an atomically replaced `<module>.artifact` pointer. Each generation binds header, C and object
-hashes in its manifest. Compiler link inputs are captured once from these generations, not from
+an atomically replaced `<module>.artifact` pointer. Each schema-2 generation binds header, C, object and checked-IR hashes in its manifest. Compiler link inputs are captured once from these generations, not from
 the replaceable `.api`/`.o`/`.c` convenience copies. Metadata-only declarations can still be checked;
 linking old flat objects requires rebuilding their producers. Failed native builds do not replace
 the previous executable; successful binaries are also installed by atomic rename.
@@ -229,13 +232,14 @@ return, excluding the returned owner; every exit checks its written lifetime con
 states (including equal partial moves) may join; unequal continuing resource states still diagnose.
 Postfix `!` consumes an `Ok/Err` or `Some/None` enum, transfers success, and aborts on failure.
 Exhaustive `match` provides explicit recovery; postfix `?` propagates matching errors/None with
-normal return cleanup. Generic Result/Option remain unfinished.
+normal return cleanup. Generic Result/Option are implemented.
 See [tagged enums](../docs/design/tagged-enums.md).
 
 ## Generic value library
 
 [Rules, evidence and remaining gates](../docs/design/generic-layouts.md). A type-only provider has
-no callable/executable entry. Compile its real source before the concrete provider/client:
+no callable/executable entry. The core library now also has generic function exports, without
+an executable entry. Compile its real source before the concrete provider/client:
 
 ```sh
 mkdir -p seed/.work/generics
@@ -246,7 +250,7 @@ seed/.work/generics/client 42  # 47
 ```
 
 The client needs only immutable checked provider artifacts; source-hidden tests remove both provider
-sources before compiling it. Rebuild prior artifacts for module schema 4 / function schema 6.
+sources before compiling it. Rebuild prior artifacts for module schema 5 / function schema 6 / artifact schema 2.
 
 ## Native profiles
 

@@ -6,10 +6,13 @@ pub mod driver;
 pub mod emit;
 pub mod fixture;
 mod flow;
+mod ir;
 pub mod module;
 mod sha256;
 pub mod source;
+mod specialize;
 mod sum;
+pub mod template;
 mod ty;
 pub mod types;
 use std::collections::{BTreeMap, BTreeSet};
@@ -50,11 +53,17 @@ fn qualified_ok(n: &str) -> bool {
 }
 impl Sig {
     pub fn validate(&self) -> Result<(), String> {
+        self.validate_bound(0)
+    }
+    pub(crate) fn validate_bound(&self, parameters: u16) -> Result<(), String> {
+        if parameters > 64 {
+            return Err("generic parameter limit".into());
+        }
         if !(name_ok(&self.name) || qualified_ok(&self.name)) || self.params.len() > 64 {
             return Err("invalid signature name/arity".into());
         }
         for ty in self.params.iter().chain([&self.result]) {
-            ty.validate_shape(0)?;
+            ty.validate_shape(parameters)?;
         }
         if let Some((mode, r)) = self.result.reference()
             && !self.params.iter().any(|t| matches!(t, Ty::Named(..)))
@@ -68,7 +77,10 @@ impl Sig {
         Ok(())
     }
     pub fn encode(&self) -> Result<String, String> {
-        self.validate()?;
+        self.encode_bound(0)
+    }
+    pub(crate) fn encode_bound(&self, parameters: u16) -> Result<String, String> {
+        self.validate_bound(parameters)?;
         let text = format!(
             "grail-seed-interface-6\n{}\n{}\n{}\n",
             self.name,
@@ -85,6 +97,9 @@ impl Sig {
         Ok(text)
     }
     pub fn decode(text: &str) -> Result<Self, String> {
+        Self::decode_bound(text, 0)
+    }
+    pub(crate) fn decode_bound(text: &str, parameters: u16) -> Result<Self, String> {
         if text.len() > 65536 {
             return Err("interface too large".into());
         }
@@ -105,8 +120,8 @@ impl Sig {
             params,
             result: Ty::parse(lines[3])?,
         };
-        sig.validate()?;
-        if sig.encode()? != text {
+        sig.validate_bound(parameters)?;
+        if sig.encode_bound(parameters)? != text {
             return Err("noncanonical interface".into());
         }
         Ok(sig)
@@ -242,6 +257,12 @@ pub enum Op {
         left: Reg,
         right: Reg,
     },
+    GenericCall {
+        dst: Reg,
+        name: String,
+        type_args: Option<Vec<Ty>>,
+        args: Vec<Reg>,
+    },
     Call {
         dst: Reg,
         name: String,
@@ -284,6 +305,8 @@ struct Value {
 #[derive(Clone, Debug)]
 struct State {
     signature: std::sync::Arc<Sig>,
+    type_parameters: u16,
+    generics: std::sync::Arc<BTreeMap<String, template::Signature>>,
     terminated: bool,
     loops: Vec<std::rc::Rc<flow::LoopFrame>>,
     layouts: types::Context,
@@ -296,10 +319,16 @@ struct State {
     blocked: BTreeMap<usize, usize>,
 }
 impl State {
-    fn parameters(signature: &Sig, layouts: types::Context) -> Result<Self, String> {
+    fn parameters_bound(
+        signature: &Sig,
+        layouts: types::Context,
+        parameters: u16,
+    ) -> Result<Self, String> {
         let mut s = Self {
             layouts,
             signature: std::sync::Arc::new(signature.clone()),
+            type_parameters: parameters,
+            generics: std::sync::Arc::new(BTreeMap::new()),
             terminated: false,
             loops: Vec::new(),
             values: BTreeMap::new(),
@@ -432,6 +461,32 @@ impl State {
             }
         }
         Ok(())
+    }
+    fn call(&mut self, sig: &Sig, dst: Reg, args: &[Reg]) -> Result<(), String> {
+        if sig.params.len() != args.len() {
+            return Err("call arity".into());
+        }
+        let mut actuals = Vec::new();
+        let mut consumed = BTreeSet::new();
+        for (r, t) in args.iter().zip(&sig.params) {
+            let v = self.usable(*r)?;
+            if !aggregate::compatible(t, &v.ty) {
+                return Err("call argument type/mode".into());
+            }
+            if v.ty.owned() && self.owner_borrowed(&v) {
+                return Err("call moves borrowed owner".into());
+            }
+            if !t.copy() && !consumed.insert(*r) {
+                return Err("affine argument duplicated".into());
+            }
+            actuals.push(v);
+        }
+        let inputs = sig.params.iter().cloned().zip(actuals).collect::<Vec<_>>();
+        let v = self.result_value(&sig.result, dst, &mut Vec::new(), &inputs)?;
+        for r in consumed {
+            self.remove(r);
+        }
+        self.put(dst, v)
     }
     fn ops(
         &mut self,
@@ -682,34 +737,35 @@ impl State {
                     self.require_num(*right)?;
                     self.num(*dst)?;
                 }
+                Op::GenericCall {
+                    dst,
+                    name,
+                    type_args,
+                    args,
+                } => {
+                    let generic = self
+                        .generics
+                        .get(name)
+                        .ok_or("unknown generic function")?
+                        .clone();
+                    let actual = args
+                        .iter()
+                        .map(|r| Ok(self.usable(*r)?.ty))
+                        .collect::<Result<Vec<_>, String>>()?;
+                    let types = generic.arguments(
+                        &actual,
+                        type_args.as_deref(),
+                        self.type_parameters,
+                        &self.layouts,
+                    )?;
+                    let sig = generic.instantiate(&types)?;
+                    types::validate_sig_bound(&sig, &self.layouts, self.type_parameters)?;
+                    self.call(&sig, *dst, args)?;
+                }
                 Op::Call { dst, name, args } => {
                     let sig = imports.get(name).ok_or("unknown imported function")?;
-                    types::validate_sig(sig, &self.layouts)?;
-                    if sig.params.len() != args.len() {
-                        return Err("call arity".into());
-                    }
-                    let mut actuals = vec![];
-                    let mut consumed = BTreeSet::new();
-                    for (r, t) in args.iter().zip(&sig.params) {
-                        let v = self.usable(*r)?;
-                        let matches = aggregate::compatible(t, &v.ty);
-                        if !matches {
-                            return Err("call argument type/mode".into());
-                        }
-                        if v.ty.owned() && self.owner_borrowed(&v) {
-                            return Err("call moves borrowed owner".into());
-                        }
-                        if !t.copy() && !consumed.insert(*r) {
-                            return Err("affine argument duplicated".into());
-                        }
-                        actuals.push(v);
-                    }
-                    let inputs = sig.params.iter().cloned().zip(actuals).collect::<Vec<_>>();
-                    let v = self.result_value(&sig.result, *dst, &mut Vec::new(), &inputs)?;
-                    for r in consumed {
-                        self.remove(r);
-                    }
-                    self.put(*dst, v)?;
+                    types::validate_sig_bound(sig, &self.layouts, self.type_parameters)?;
+                    self.call(sig, *dst, args)?;
                 }
                 Op::Block { body } => {
                     let entry = self.resources.clone();
@@ -767,12 +823,15 @@ impl State {
     }
 }
 /// Only this validated wrapper can reach native lowering.
+#[derive(Clone)]
 pub struct Checked {
     pub(crate) function: Function,
     pub(crate) imports: BTreeMap<String, Sig>,
     pub(crate) types: BTreeMap<Reg, Ty>,
     pub(crate) layouts: types::Context,
     pub(crate) return_tail: Option<Reg>,
+    pub(crate) generics: std::sync::Arc<BTreeMap<String, template::Signature>>,
+    pub(crate) type_parameters: u16,
 }
 impl Checked {
     pub fn interface(&self) -> String {
@@ -787,14 +846,30 @@ pub fn check_with_types(
     imports: BTreeMap<String, Sig>,
     layouts: types::Context,
 ) -> Result<Checked, String> {
-    types::validate_sig(&function.sig, &layouts)?;
+    check_bound(function, imports, layouts, 0, BTreeMap::new())
+}
+fn check_bound(
+    function: Function,
+    imports: BTreeMap<String, Sig>,
+    layouts: types::Context,
+    parameters: u16,
+    generics: BTreeMap<String, template::Signature>,
+) -> Result<Checked, String> {
+    types::validate_sig_bound(&function.sig, &layouts, parameters)?;
     for (name, sig) in &imports {
         types::validate_sig(sig, &layouts)?;
         if name != &sig.name || name == &function.sig.name {
             return Err("invalid import key/self import".into());
         }
     }
-    let mut s = State::parameters(&function.sig, layouts.clone())?;
+    for (name, g) in &generics {
+        g.validate(&layouts)?;
+        if name != &g.function.name {
+            return Err("invalid generic import key".into());
+        }
+    }
+    let mut s = State::parameters_bound(&function.sig, layouts.clone(), parameters)?;
+    s.generics = std::sync::Arc::new(generics);
     let mut callable = imports.clone();
     callable.insert(function.sig.name.clone(), function.sig.clone());
     let tail_live = function.result.into_iter().collect();
@@ -816,5 +891,7 @@ pub fn check_with_types(
             .into_inner(),
         layouts,
         return_tail,
+        generics: s.generics,
+        type_parameters: parameters,
     })
 }

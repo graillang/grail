@@ -1,6 +1,6 @@
 //! Borrowed-token parser and local loan ending for the first .grl slice.
 use crate::flow::live_before;
-use crate::{Arm, Bin, Function, Mode, Op, Reg, Sig, State, Ty, check_with_types};
+use crate::{Arm, Bin, Function, Mode, Op, Reg, Sig, State, Ty};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Copy)]
@@ -175,24 +175,45 @@ impl Parser<'_> {
     fn bind(&mut self, name: String, reg: Reg, mutable: bool) {
         self.vars.insert(name, Binding { reg, mutable });
     }
-    fn function(&mut self) -> Result<(Function, bool), String> {
-        self.vars.clear();
+    fn generic_parameters(&mut self, max_regions: usize) -> Result<(), String> {
         self.regions.clear();
         self.type_params.clear();
-        self.next = 0;
-        let public = self.eat("pub");
-        self.expect("fn")?;
-        let name = self.ident()?;
-        if self.module.is_empty() {
-            self.module = name.clone();
-        }
         if self.eat("<") {
             loop {
+                let is_type = self.eat("type");
                 let n = self.ident()?;
-                let id =
-                    u16::try_from(self.regions.len()).map_err(|_| self.error("region limit"))?;
-                if self.regions.insert(n, id).is_some() {
-                    return Err(self.error("duplicate region"));
+                if self.regions.contains_key(&n)
+                    || self.type_params.contains_key(&n)
+                    || matches!(
+                        n.as_str(),
+                        "num"
+                            | "unit"
+                            | "bytes"
+                            | "string"
+                            | "read"
+                            | "mut"
+                            | "read_holder"
+                            | "mut_holder"
+                            | "type"
+                    )
+                {
+                    return Err(self.error("duplicate/reserved generic parameter"));
+                }
+                if is_type {
+                    let i = self.type_params.len();
+                    if i >= 64 {
+                        return Err(self.error("type parameter limit"));
+                    }
+                    self.type_params.insert(n, i as u16);
+                } else {
+                    if !self.type_params.is_empty() {
+                        return Err(self.error("lifetimes precede type parameters"));
+                    }
+                    let i = self.regions.len();
+                    if i >= max_regions {
+                        return Err(self.error("lifetime parameter limit"));
+                    }
+                    self.regions.insert(n, i as u16);
                 }
                 if self.eat(">") {
                     break;
@@ -200,6 +221,41 @@ impl Parser<'_> {
                 self.expect(",")?;
             }
         }
+        Ok(())
+    }
+    fn call_type_arguments(&self) -> bool {
+        let mut depth = 0;
+        for (i, t) in self.tokens[self.at..].iter().enumerate() {
+            match t.text {
+                "<" => depth += 1,
+                ">" => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return self
+                            .tokens
+                            .get(self.at + i + 1)
+                            .is_some_and(|t| t.text == "(");
+                    }
+                }
+                ";" | "{" | "}" => return false,
+                _ => {}
+            }
+            if depth > 64 {
+                return false;
+            }
+        }
+        false
+    }
+    fn function(&mut self) -> Result<(Function, bool, u16), String> {
+        self.vars.clear();
+        self.next = 0;
+        let public = self.eat("pub");
+        self.expect("fn")?;
+        let name = self.ident()?;
+        if self.module.is_empty() {
+            self.module = name.clone();
+        }
+        self.generic_parameters(65536)?;
         self.expect("(")?;
         let mut params = vec![];
         if !self.eat(")") {
@@ -226,7 +282,8 @@ impl Parser<'_> {
             params,
             result: result_ty,
         };
-        crate::types::validate_sig(&sig, &self.layouts)?;
+        let parameters = self.type_params.len() as u16;
+        crate::types::validate_sig_bound(&sig, &self.layouts, parameters)?;
         self.return_ty = Some(sig.result.clone());
         self.expect("{")?;
         let ops = self.statements(0)?;
@@ -238,6 +295,7 @@ impl Parser<'_> {
                 result: None,
             },
             public,
+            parameters,
         ))
     }
     fn path_name(&mut self) -> Result<String, String> {
@@ -341,8 +399,6 @@ impl Parser<'_> {
         if self.module.is_empty() {
             return Err(self.error("record declarations need an explicit module"));
         }
-        self.regions.clear();
-        self.type_params.clear();
         let kind = if self.eat("struct") {
             crate::types::Kind::Record
         } else {
@@ -350,41 +406,7 @@ impl Parser<'_> {
             crate::types::Kind::Enum
         };
         let name = self.ident()?;
-        if self.eat("<") {
-            loop {
-                let is_type = self.eat("type");
-                let n = self.ident()?;
-                if self.regions.contains_key(&n)
-                    || self.type_params.contains_key(&n)
-                    || matches!(
-                        n.as_str(),
-                        "num" | "unit" | "bytes" | "string" | "read" | "mut" | "type"
-                    )
-                {
-                    return Err(self.error("duplicate/reserved generic parameter"));
-                }
-                if is_type {
-                    let i = self.type_params.len();
-                    if i >= 64 {
-                        return Err(self.error("type parameter limit"));
-                    }
-                    self.type_params.insert(n, i as u16);
-                } else {
-                    if !self.type_params.is_empty() {
-                        return Err(self.error("lifetimes precede type parameters"));
-                    }
-                    let i = self.regions.len();
-                    if i >= 64 {
-                        return Err(self.error("lifetime parameter limit"));
-                    }
-                    self.regions.insert(n, i as u16);
-                }
-                if self.eat(">") {
-                    break;
-                }
-                self.expect(",")?;
-            }
-        }
+        self.generic_parameters(64)?;
         let regions = self.regions.len() as u16;
         self.expect("{")?;
         let mut fields = Vec::new();
@@ -542,6 +564,16 @@ impl Parser<'_> {
                     name.push_str(&self.ident()?);
                 }
             }
+            let mut function_args = None;
+            if explicit.is_none() && self.peek() == "<" && self.call_type_arguments() {
+                let (rs, args) = self.type_arguments(0)?;
+                if !rs.is_empty() {
+                    return Err(
+                        self.error("function arguments here are types; lifetimes are implicit")
+                    );
+                }
+                function_args = Some(args);
+            }
             let variant = name.rsplit_once("::").and_then(|(base, v)| {
                 let n = self.nominal(base);
                 self.layouts
@@ -572,12 +604,24 @@ impl Parser<'_> {
                 dst
             } else if self.eat("(") {
                 let mut args = vec![];
-                let arity = match name.as_str() {
-                    "bytes" => Some(0),
-                    "read" | "mut" | "hold" | "len" | "copy_bytes" | "text" => Some(1),
-                    "at" => Some(2),
-                    "slice" => Some(3),
-                    _ => None,
+                if function_args.is_none()
+                    && let Some(Ty::Named(_, rs, args)) = &explicit
+                {
+                    if !rs.is_empty() {
+                        return Err(self.error("function lifetime arguments are implicit"));
+                    }
+                    function_args = Some(args.clone());
+                }
+                let arity = if function_args.is_some() {
+                    None
+                } else {
+                    match name.as_str() {
+                        "bytes" => Some(0),
+                        "read" | "mut" | "hold" | "len" | "copy_bytes" | "text" => Some(1),
+                        "at" => Some(2),
+                        "slice" => Some(3),
+                        _ => None,
+                    }
                 };
                 if !self.eat(")") {
                     loop {
@@ -619,45 +663,54 @@ impl Parser<'_> {
                 if arity.is_some_and(|n| n != args.len()) {
                     return Err(self.error("builtin arity"));
                 }
-                ops.push(match name.as_str() {
-                    "text" => Op::Text {
+                ops.push(if let Some(type_args) = function_args {
+                    Op::GenericCall {
                         dst: r,
-                        src: args[0],
-                    },
-                    "bytes" => Op::Bytes { dst: r },
-                    "copy_bytes" => Op::CopyBytes {
-                        dst: r,
-                        src: args[0],
-                    },
-                    "read" | "mut" => Op::Borrow {
-                        dst: r,
-                        src: args[0],
-                        mode: if name == "read" {
-                            Mode::Read
-                        } else {
-                            Mode::Write
+                        name,
+                        type_args: Some(type_args),
+                        args,
+                    }
+                } else {
+                    match name.as_str() {
+                        "text" => Op::Text {
+                            dst: r,
+                            src: args[0],
                         },
-                    },
-                    "hold" => Op::Pack {
-                        dst: r,
-                        src: args[0],
-                    },
-                    "len" => Op::Len {
-                        dst: r,
-                        src: args[0],
-                    },
-                    "at" => Op::Read {
-                        dst: r,
-                        src: args[0],
-                        index: args[1],
-                    },
-                    "slice" => Op::Slice {
-                        dst: r,
-                        src: args[0],
-                        start: args[1],
-                        end: args[2],
-                    },
-                    _ => Op::Call { dst: r, name, args },
+                        "bytes" => Op::Bytes { dst: r },
+                        "copy_bytes" => Op::CopyBytes {
+                            dst: r,
+                            src: args[0],
+                        },
+                        "read" | "mut" => Op::Borrow {
+                            dst: r,
+                            src: args[0],
+                            mode: if name == "read" {
+                                Mode::Read
+                            } else {
+                                Mode::Write
+                            },
+                        },
+                        "hold" => Op::Pack {
+                            dst: r,
+                            src: args[0],
+                        },
+                        "len" => Op::Len {
+                            dst: r,
+                            src: args[0],
+                        },
+                        "at" => Op::Read {
+                            dst: r,
+                            src: args[0],
+                            index: args[1],
+                        },
+                        "slice" => Op::Slice {
+                            dst: r,
+                            src: args[0],
+                            start: args[1],
+                            end: args[2],
+                        },
+                        _ => Op::Call { dst: r, name, args },
+                    }
                 });
                 r
             } else if self.layouts.contains_key(&self.nominal(&name))
@@ -926,7 +979,7 @@ impl Parser<'_> {
                 self.expect(")")?;
                 self.expect(";")?;
                 ops.push(Op::Assert(r));
-            } else {
+            } else if self.tokens.get(self.at + 1).is_some_and(|t| t.text == "=") {
                 let name = self.ident()?;
                 let b = self
                     .vars
@@ -942,6 +995,12 @@ impl Parser<'_> {
                 if src != b.reg {
                     ops.push(Op::Move { dst: b.reg, src });
                 }
+            } else {
+                let mut expression = Vec::new();
+                let r = self.expr(&mut expression, 0, 0)?;
+                self.expect(";")?;
+                expression.push(Op::End(r));
+                ops.push(Op::Block { body: expression });
             }
         }
         Ok(ops)
@@ -1000,6 +1059,7 @@ pub fn compile(
     p.module = explicit.clone().unwrap_or_default();
     let mut definitions = crate::types::Definitions::new();
     let mut callable = BTreeMap::new();
+    let mut generic_callable = BTreeMap::new();
     let mut dependencies = BTreeMap::new();
     while p.eat("use") {
         let name = p.ident()?;
@@ -1021,6 +1081,7 @@ pub fn compile(
         if dependencies.insert(name, header.fingerprint()?).is_some() {
             return Err(p.error("duplicate import"));
         }
+        generic_callable.extend(header.generics.iter().map(|(n, g)| (n.clone(), g.clone())));
         callable.extend(header.exports.iter().map(|(n, s)| (n.clone(), s.clone())));
         if let Some(entry) = &header.entry {
             callable.insert(header.name.clone(), header.exports[entry].clone());
@@ -1058,101 +1119,199 @@ pub fn compile(
     let implicit = explicit.is_none();
     let name = explicit.unwrap_or_else(|| functions[0].0.sig.name.clone());
     let mut locals = BTreeMap::new();
+    let mut generic_locals = BTreeMap::new();
     let mut exports = BTreeMap::new();
-    for (i, (f, public)) in functions.iter_mut().enumerate() {
+    let mut generic_exports = BTreeMap::new();
+    let mut declared = BTreeSet::new();
+    for (i, (f, public, parameters)) in functions.iter_mut().enumerate() {
         *public |= implicit && i == 0;
         let local = f.sig.name.clone();
-        if callable.contains_key(&local) {
-            return Err(p.error("function/import collision"));
+        if callable.contains_key(&local)
+            || generic_callable.contains_key(&local)
+            || !declared.insert(local.clone())
+        {
+            return Err(p.error("function/import collision or duplicate function"));
         }
-        if *public {
+        if *public || *parameters > 0 {
             f.sig.name = format!("{name}::{local}");
         }
-        if locals.insert(local, f.sig.clone()).is_some() {
-            return Err(p.error("duplicate function"));
-        }
-        if *public {
-            exports.insert(f.sig.name.clone(), f.sig.clone());
+        if *parameters == 0 {
+            locals.insert(local, f.sig.clone());
+            if *public {
+                exports.insert(f.sig.name.clone(), f.sig.clone());
+            }
+        } else {
+            let g = crate::template::Signature {
+                parameters: *parameters,
+                function: f.sig.clone(),
+            };
+            generic_locals.insert(local, g.clone());
+            if *public {
+                generic_exports.insert(f.sig.name.clone(), g);
+            }
         }
     }
     for (alias, sig) in locals {
         callable.insert(alias, sig.clone());
         callable.insert(sig.name.clone(), sig);
     }
+    for (alias, g) in generic_locals {
+        generic_callable.insert(alias, g.clone());
+        generic_callable.insert(g.function.name.clone(), g);
+    }
     let entry = functions
         .iter()
-        .find(|(_, public)| *public)
-        .map(|(f, _)| f.sig.name.clone());
-    if entry.is_none() && public_types.is_empty() {
+        .find(|(_, public, n)| *public && *n == 0)
+        .map(|(f, _, _)| f.sig.name.clone());
+    if entry.is_none() && public_types.is_empty() && generic_exports.is_empty() {
         return Err(p.error("explicit module needs a pub function or type"));
     }
-    let exposed = crate::types::exposed(&exports, &public_types, &layouts)?;
-    let header = crate::module::Interface {
-        name,
+    let mut surfaces = exports.clone();
+    surfaces.extend(
+        generic_exports
+            .iter()
+            .map(|(n, g)| (n.clone(), g.function.clone())),
+    );
+    let exposed = crate::types::exposed(&surfaces, &public_types, &layouts)?;
+    let mut header = crate::module::Interface {
+        name: name.clone(),
         entry,
         exports,
+        generics: generic_exports,
         layouts: exposed,
         dependencies,
+        implementations: BTreeMap::new(),
+        template_hash: None,
     };
     header.validate()?;
     let mut checked = Vec::new();
-    for (mut f, public) in functions {
+    let mut bodies = Vec::new();
+    let has_templates = functions.iter().any(|(_, _, n)| *n > 0);
+    for (mut f, public, parameters) in functions {
         let mut names = BTreeSet::new();
-        resolve_calls(&mut f.ops, &callable, &mut names)?;
+        let mut generic_names = BTreeSet::new();
+        resolve_calls(
+            &mut f.ops,
+            &callable,
+            &generic_callable,
+            &mut names,
+            &mut generic_names,
+        )?;
         let mut imports = BTreeMap::new();
-        for name in names {
-            if name != f.sig.name {
-                imports.insert(name.clone(), callable[&name].clone());
+        for n in names {
+            if n != f.sig.name {
+                imports.insert(n.clone(), callable[&n].clone());
             }
         }
-        let mut available = imports.clone();
-        available.insert(f.sig.name.clone(), f.sig.clone());
-        let mut state = State::parameters(&f.sig, layouts.clone())?;
+        let generics = generic_names
+            .iter()
+            .map(|n| (n.clone(), generic_callable[n].clone()))
+            .collect::<BTreeMap<_, _>>();
+        for n in &generic_names {
+            let (module, _) = n
+                .split_once("::")
+                .ok_or("generic function needs qualified module name")?;
+            if module != name
+                && let Some(h) = available.get(module).and_then(|h| h.template_hash.clone())
+            {
+                header.implementations.insert(module.into(), h);
+            }
+        }
+        let mut available_calls = imports.clone();
+        available_calls.insert(f.sig.name.clone(), f.sig.clone());
+        let mut state = State::parameters_bound(&f.sig, layouts.clone(), parameters)?;
+        state.generics = std::sync::Arc::new(generics.clone());
         let ops = ending(
             &f.ops,
             &mut state,
-            &available,
+            &available_calls,
             &BTreeSet::new(),
             &BTreeSet::new(),
         )?;
-        checked.push((
-            check_with_types(Function { ops, ..f }, imports, layouts.clone())?,
-            public,
-        ));
+        let body = crate::check_bound(
+            Function { ops, ..f },
+            imports,
+            layouts.clone(),
+            parameters,
+            generics,
+        )?;
+        if parameters > 0 {
+            bodies.push(body);
+        } else {
+            if has_templates && !public {
+                bodies.push(body.clone());
+            }
+            checked.push((body, public));
+        }
     }
+    let bundle = if has_templates {
+        let bundle = crate::template::Bundle::from_bodies(
+            &name,
+            layouts.clone(),
+            bodies,
+            header.implementations.clone(),
+        )?;
+        header.template_hash = Some(bundle.hash()?);
+        Some(bundle)
+    } else {
+        None
+    };
+    header.validate()?;
     Ok(crate::module::CheckedModule {
         functions: checked,
         layouts,
         header,
+        bundle,
     })
 }
 fn resolve_calls(
     ops: &mut [Op],
     callable: &BTreeMap<String, Sig>,
+    generics: &BTreeMap<String, crate::template::Signature>,
     names: &mut BTreeSet<String>,
+    generic_names: &mut BTreeSet<String>,
 ) -> Result<(), String> {
     for op in ops {
         match op {
-            Op::Call { name, .. } => {
-                let sig = callable
-                    .get(name)
-                    .ok_or_else(|| format!("undefined function {name}"))?;
-                *name = sig.name.clone();
-                names.insert(name.clone());
+            Op::Call { dst, name, args } => {
+                if let Some(sig) = callable.get(name) {
+                    *name = sig.name.clone();
+                    names.insert(name.clone());
+                } else if let Some(g) = generics.get(name) {
+                    let n = g.function.name.clone();
+                    generic_names.insert(n.clone());
+                    *op = Op::GenericCall {
+                        dst: *dst,
+                        name: n,
+                        type_args: None,
+                        args: args.clone(),
+                    };
+                } else {
+                    return Err(format!("undefined function {name}"));
+                }
             }
-            Op::Block { body } | Op::Loop { body, .. } => resolve_calls(body, callable, names)?,
+            Op::GenericCall { name, .. } => {
+                let g = generics
+                    .get(name)
+                    .ok_or_else(|| format!("undefined generic function {name}"))?;
+                *name = g.function.name.clone();
+                generic_names.insert(name.clone());
+            }
+            Op::Block { body } | Op::Loop { body, .. } => {
+                resolve_calls(body, callable, generics, names, generic_names)?
+            }
             Op::While { test, body, .. } => {
-                resolve_calls(test, callable, names)?;
-                resolve_calls(body, callable, names)?;
+                resolve_calls(test, callable, generics, names, generic_names)?;
+                resolve_calls(body, callable, generics, names, generic_names)?;
             }
             Op::Match { arms, .. } => {
                 for a in arms {
-                    resolve_calls(&mut a.body, callable, names)?;
+                    resolve_calls(&mut a.body, callable, generics, names, generic_names)?;
                 }
             }
             Op::If { yes, no, .. } => {
-                resolve_calls(yes, callable, names)?;
-                resolve_calls(no, callable, names)?;
+                resolve_calls(yes, callable, generics, names, generic_names)?;
+                resolve_calls(no, callable, generics, names, generic_names)?;
             }
             _ => {}
         }

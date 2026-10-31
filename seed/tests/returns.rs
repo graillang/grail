@@ -21,7 +21,7 @@ fn terminated_branches_blocks_and_loop_paths_do_not_join() {
     ] {
         let p = source::compile(s, std::collections::BTreeMap::new())
             .unwrap_or_else(|e| panic!("{s}\n{e}"));
-        emit::module_c(&p);
+        emit::module_c(&p).unwrap();
     }
 }
 #[test]

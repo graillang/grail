@@ -153,14 +153,37 @@ fn buffers(ops: &[Op], out: &mut BTreeMap<Reg, usize>) {
 pub fn c(p: &Checked) -> String {
     c_functions(&[(p, true)], &p.layouts)
 }
-pub fn module_c(p: &crate::module::CheckedModule) -> String {
-    c_functions(
-        &p.functions
+pub fn module_c(p: &crate::module::CheckedModule) -> Result<String, String> {
+    module_c_with_resolver(p, &mut |n| {
+        Err(format!(
+            "native generic body for {n} requires a checked artifact"
+        ))
+    })
+}
+pub fn module_c_with_bundles(
+    p: &crate::module::CheckedModule,
+    bundles: &BTreeMap<String, crate::template::Bundle>,
+) -> Result<String, String> {
+    module_c_with_resolver(p, &mut |n| {
+        bundles
+            .get(n)
+            .cloned()
+            .ok_or_else(|| format!("missing checked template bundle {n}"))
+    })
+}
+pub fn module_c_with_resolver<F: FnMut(&str) -> Result<crate::template::Bundle, String>>(
+    p: &crate::module::CheckedModule,
+    resolve: &mut F,
+) -> Result<String, String> {
+    let native = crate::specialize::materialize(p, resolve)?;
+    Ok(c_functions(
+        &native
+            .functions
             .iter()
             .map(|(p, public)| (p, *public))
             .collect::<Vec<_>>(),
-        &p.layouts,
-    )
+        &native.layouts,
+    ))
 }
 fn c_functions(functions: &[(&Checked, bool)], layouts: &crate::types::Definitions) -> String {
     let mut s = String::from(
@@ -273,6 +296,7 @@ fn c_body(p: &Checked, s: &mut String, private: bool) {
         for o in os {
             match o{
         Op::Break|Op::Continue=>{let id=jumps.stack.last().expect("checked loop jump");let kind=if matches!(o,Op::Break){"break"}else{"continue"};writeln!(s,"goto loop_{kind}_{id};").unwrap();},
+        Op::GenericCall{..}=>unreachable!("generic calls must be materialized before native emission"),
         Op::Return(r)=>{writeln!(s,"return r{r};").unwrap()},
         Op::Unit(r)=>{writeln!(s,"r{r}=0;").unwrap()},
         Op::Variant{dst,variant,payload,..}=>{writeln!(s,"r{dst}=({}){{.tag={variant}}};",cty(&types[dst])).unwrap();if let Some(r)=payload{if types[r]!=Ty::Unit{writeln!(s,"r{dst}.data.f{variant}=r{r};").unwrap();}record_flags(s,*r,&types[r],layouts,false);}record_flags(s,*dst,&types[dst],layouts,true);},
@@ -410,6 +434,9 @@ impl Ll {
                     let v = self.load(*r);
                     self.line(format!("ret {} {v}", lty(&self.types[r])));
                     return false;
+                }
+                Op::GenericCall { .. } => {
+                    unreachable!("generic calls must be materialized before native emission")
                 }
                 Op::Variant { .. }
                 | Op::Match { .. }
@@ -679,8 +706,14 @@ pub fn llvm(p: &Checked) -> Result<String, String> {
     llvm_functions(&[(p, true)])
 }
 pub fn module_llvm(p: &crate::module::CheckedModule) -> Result<String, String> {
+    let native = crate::specialize::materialize(p, &mut |n| {
+        Err(format!(
+            "native generic body for {n} requires a checked artifact"
+        ))
+    })?;
     llvm_functions(
-        &p.functions
+        &native
+            .functions
             .iter()
             .map(|(p, public)| (p, *public))
             .collect::<Vec<_>>(),

@@ -201,8 +201,8 @@ fn references(t: &Ty, defs: &Definitions, regions: Option<u16>) -> Result<(), St
     }
     Ok(())
 }
-pub fn validate_value_type(t: &Ty, defs: &Definitions) -> Result<(), String> {
-    t.validate_shape(0)?;
+pub(crate) fn validate_type(t: &Ty, defs: &Definitions, parameters: u16) -> Result<(), String> {
+    t.validate_shape(parameters)?;
     references(t, defs, None)?;
     leaves(t, defs)?;
     Ok(())
@@ -240,9 +240,16 @@ pub fn validate(defs: &Definitions) -> Result<(), String> {
     Ok(())
 }
 pub fn validate_sig(sig: &Sig, defs: &Definitions) -> Result<(), String> {
-    sig.validate()?;
+    validate_sig_bound(sig, defs, 0)
+}
+pub(crate) fn validate_sig_bound(
+    sig: &Sig,
+    defs: &Definitions,
+    parameters: u16,
+) -> Result<(), String> {
+    sig.validate_bound(parameters)?;
     for t in sig.params.iter().chain([&sig.result]) {
-        validate_value_type(t, defs)?;
+        validate_type(t, defs, parameters)?;
     }
     if let Some((mode, region)) = sig.result.reference() {
         let input = sig

@@ -63,7 +63,7 @@ fn fingerprints_cover_public_contracts_not_dependency_rebuilds() {
     let canonical = h.encode().unwrap();
     for text in [
         canonical.trim_end().to_string(),
-        canonical.replace("grail-seed-module-4", "grail-seed-module-1"),
+        canonical.replace("grail-seed-module-5", "grail-seed-module-1"),
         canonical + "extra\n",
     ] {
         assert!(Interface::decode(&text).is_err());
@@ -85,4 +85,33 @@ fn explicit_library_modules_need_no_dummy_primary_function() {
     );
     assert!(source::compile("module empty;fn hidden()->num{return 0;}", BTreeMap::new()).is_err());
     assert!(source::compile("module empty;", BTreeMap::new()).is_err());
+}
+
+#[test]
+fn generic_contracts_are_public_but_implementation_pins_are_separate() {
+    let mut h = Interface::single(grail_seed::Sig {
+        name: "api".into(),
+        params: vec![],
+        result: Ty::Num,
+    });
+    let g = grail_seed::template::Signature {
+        parameters: 1,
+        function: grail_seed::Sig {
+            name: "api::id".into(),
+            params: vec![Ty::Param(0)],
+            result: Ty::Param(0),
+        },
+    };
+    h.generics.insert(g.function.name.clone(), g);
+    h.template_hash = Some("0".repeat(64));
+    h.dependencies.insert("other".into(), "1".repeat(64));
+    h.implementations.insert("other".into(), "2".repeat(64));
+    let hash = h.fingerprint().unwrap();
+    let wire = h.encode().unwrap();
+    assert_eq!(Interface::decode(&wire).unwrap(), h);
+    h.template_hash = Some("3".repeat(64));
+    h.implementations.insert("other".into(), "4".repeat(64));
+    assert_eq!(h.fingerprint().unwrap(), hash);
+    h.generics.get_mut("api::id").unwrap().function.result = Ty::Num;
+    assert_ne!(h.fingerprint().unwrap(), hash);
 }

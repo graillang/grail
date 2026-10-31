@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Implement universally checked affine generic function bodies and static native specialization,
+  inferred/explicit calls, eager snapshots and statement-end expression cleanup. Ship real Grail
+  core Option/Result/Pair helpers, recursive calls, canonical rechecked IR/private helper closures,
+  lifetime-erased layout-sensitive instance keys and bounded memoization. Bind IR in artifact schema
+  2 / module schema 5, separately pin transitive generic implementations and reject stale/malformed
+  consumers while preserving prior executables. Retain mixed-backend/independent Rust/cleanup and
+  frozen-compiler checks plus token-workload costs. Typed-reference invariance/writeback, arbitrary-T
+  heap collections, ownership joins, the real seed port and self-compilation remain unfinished.
+
 - Implement checked `break`/`continue` for counted/while loops, including blocks, nested loops and
   matches. Close local loans and recursively drop local owners before jumping; preserve entry
   resources/scalar definedness and emit explicit C/LLVM targets/latches. Test source-hidden calls,

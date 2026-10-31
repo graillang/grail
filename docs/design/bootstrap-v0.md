@@ -185,3 +185,11 @@ in reverse-binding order (owned record fields recursively in declaration order),
 returned value. A moved-out field is not freed again. Default destruction ignores captured view
 descriptors; live loans into owned fields still prevent release. Both native C and primitive LLVM
 lowering honor terminators. See [return cleanup](return-cleanup.md) for join and performance limits.
+
+## Generic functions checkpoint
+
+[Universally checked by-value functions](generic-functions.md) now implement core library helpers,
+static native materialization and transitive body invalidation (module 5 / artifact 2 / function 6).
+Expression statements close results/temporary owners at statement end. General typed references,
+arbitrary-element collections/cursors, remaining ownership joins and the real seed port plus
+stage-2/stage-3/artifact delivery remain required; this is not completion of bootstrap v0.

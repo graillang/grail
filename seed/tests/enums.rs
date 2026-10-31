@@ -16,7 +16,7 @@ fn result_option_matching_and_postfix_unwrap_are_real_operations() {
         "module f;enum R{Ok(num),Err(string)}pub fn run()->num{let r=R::Err(\"bad\");var n=0;match r{Ok(x)=>{n=x;},Err(_)=>{n=7;}}return n;}",
     ] {
         let p = source::compile(s, BTreeMap::new()).unwrap_or_else(|e| panic!("{s}\n{e}"));
-        emit::module_c(&p);
+        emit::module_c(&p).unwrap();
         let header = p.header();
         let wire = header.encode().unwrap();
         assert_eq!(

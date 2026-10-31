@@ -84,3 +84,17 @@ fn exclusive_byte_writes_respect_live_read_slices() {
         "fn f()->num {let b=buffer(8,7);let p=mut(b);let s=slice(p,0,1);let n=at(s,0);write(p,0,9);return n;}"
     ));
 }
+
+#[test]
+fn expression_statements_close_temporaries_without_dummy_bindings() {
+    for text in [
+        "fn f()->num{helper();return 7;}fn helper()->unit{return ();}",
+        "fn f()->num{let b=bytes();push(b,7);read(b);push(b,8);copy_bytes(b);return len(b);}",
+        "fn f()->num{();7+8;return 0;}",
+    ] {
+        assert!(
+            grail_seed::source::compile(text, std::collections::BTreeMap::new()).is_ok(),
+            "{text}"
+        );
+    }
+}

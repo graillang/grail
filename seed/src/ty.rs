@@ -7,7 +7,7 @@ impl Ty {
     pub(super) fn owned(&self) -> bool {
         matches!(
             self,
-            Self::Buffer | Self::Bytes | Self::Text | Self::Named(..)
+            Self::Buffer | Self::Bytes | Self::Text | Self::Named(..) | Self::Param(_)
         )
     }
     pub(super) fn heap(&self) -> bool {
@@ -174,6 +174,45 @@ impl Ty {
             Ok(bytes)
         }
         visit(self, parameters, 0, &mut 0).map(|_| ())
+    }
+    pub(crate) fn substitute_types(&self, args: &[Ty]) -> Result<Self, String> {
+        fn copy(
+            t: &Ty,
+            args: Option<&[Ty]>,
+            depth: usize,
+            nodes: &mut usize,
+        ) -> Result<Ty, String> {
+            if let Ty::Param(i) = t
+                && let Some(args) = args
+            {
+                return copy(
+                    args.get(*i as usize)
+                        .ok_or("unbound generic function type slot")?,
+                    None,
+                    depth,
+                    nodes,
+                );
+            }
+            *nodes += 1;
+            if depth > 64 || *nodes > 4096 {
+                return Err("generic substitution type limit".into());
+            }
+            Ok(match t {
+                Ty::Named(n, rs, ts) => Ty::Named(
+                    n.clone(),
+                    rs.clone(),
+                    ts.iter()
+                        .map(|t| copy(t, args, depth + 1, nodes))
+                        .collect::<Result<_, _>>()?,
+                ),
+                _ => t.clone(),
+            })
+        }
+        let result = copy(self, Some(args), 0, &mut 0)?;
+        if result != Ty::Buffer {
+            result.validate_shape(64)?;
+        }
+        Ok(result)
     }
     pub(super) fn erase_regions(&self) -> Self {
         match self {

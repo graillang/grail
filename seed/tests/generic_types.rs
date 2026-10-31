@@ -14,7 +14,7 @@ fn generic_layouts_substitute_nested_owned_and_captured_payloads() {
         "module f;struct Wrap<type T>{v:T}enum O<type T>{None,Some(T)}pub fn run()->num{let x=O<Wrap<string>>::Some(Wrap<string>{v:\"abc\"});let w=x!;return len(w.v);}",
     ] {
         let p = source::compile(s, BTreeMap::new()).unwrap_or_else(|e| panic!("{s}\n{e}"));
-        emit::module_c(&p);
+        emit::module_c(&p).unwrap();
         let wire = p.interface();
         assert_eq!(wire, Interface::decode(&wire).unwrap().encode().unwrap());
     }
@@ -44,7 +44,7 @@ fn public_type_only_surfaces_are_closed_and_independently_decodable() {
     assert!(p.header().layouts.contains_key("types::Hidden"));
     let interface = Interface::decode(&p.interface()).unwrap();
     let c=source::compile("module client;use types;pub fn run()->num{let r=types::Result<types::Box<num>,string>::Ok(types::Box<num>{value:7});let b=r!;return b.value;}",BTreeMap::from([("types".into(),interface.clone())])).unwrap();
-    assert!(emit::module_c(&c).contains("t_g_"));
+    assert!(emit::module_c(&c).unwrap().contains("t_g_"));
     assert!(
         source::compile(
             "use types;fn client()->num{return types();}",
@@ -131,5 +131,5 @@ fn substituting_a_type_argument_preserves_its_own_lifetime_scope() {
     }
     s.push_str("pub fn run(r:R63)->num{return 0;}");
     let p = source::compile(&s, BTreeMap::new()).unwrap();
-    emit::module_c(&p);
+    emit::module_c(&p).unwrap();
 }

@@ -1,8 +1,10 @@
 # Generic value layouts and type-only modules
 
-This is the first **implemented generic-layout slice**, following the
+This records the first **implemented generic-layout slice**, following the
 [lowering assessment](generic-lowering-gates.md). It is not completion of bootstrap v0 or generic
-functions/general typed references. Functions still have concrete, independently checked signatures.
+functions/general typed references at that checkpoint. [Generic functions](generic-functions.md)
+now implement the subsequent by-value body/IR/invalidation gate; the descriptions below of
+concrete-only functions and module schema 4 record the earlier slice, not the current format.
 
 ## Source surface
 

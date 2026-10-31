@@ -95,7 +95,9 @@ pub fn compile(
     let work = crate::artifact::Work::new(out)?;
     let c = work.path.join(format!("{name}.c"));
     let object = work.path.join(format!("{name}.o"));
-    let text = emit::module_c(&checked);
+    let templates = checked.template_ir()?;
+    let text =
+        emit::module_c_with_resolver(&checked, &mut |n| crate::artifact::templates(imports, n))?;
     write(&c, &text)?;
     native(
         backend,
@@ -111,7 +113,7 @@ pub fn compile(
     if build {
         let sig = checked
             .entry_signature()
-            .ok_or("type-only module has no executable entry")?;
+            .ok_or("module has no executable entry (type-only or generic-only)")?;
         let params = match sig.params.as_slice() {
             [] => "void",
             [Ty::View(Mode::Read, _)] => "gv",
@@ -145,20 +147,22 @@ pub fn compile(
         let binary = work.path.join(format!("{name}.bin"));
         args.extend(["-o".into(), format!("{name}.bin")]);
         native(backend, args, true, &work.path)?;
-        crate::artifact::publish(
+        crate::artifact::publish_with_templates(
             out,
             checked.header(),
             text.as_bytes(),
             &fs::read(&object).map_err(|e| e.to_string())?,
+            &templates,
         )?;
         fs::rename(main, out.join(format!("{name}-main.c"))).map_err(|e| e.to_string())?;
         fs::rename(binary, out.join(name)).map_err(|e| e.to_string())?;
     } else {
-        crate::artifact::publish(
+        crate::artifact::publish_with_templates(
             out,
             checked.header(),
             text.as_bytes(),
             &fs::read(&object).map_err(|e| e.to_string())?,
+            &templates,
         )?;
     }
     Ok(())
@@ -212,6 +216,14 @@ fn dependencies(
                 return Err(format!(
                     "stale module {}: dependency {name} interface changed; rebuild {}",
                     header.name, header.name
+                ));
+            }
+            if let Some(want) = header.implementations.get(name)
+                && child.header.template_hash.as_ref() != Some(want)
+            {
+                return Err(format!(
+                    "stale generic implementation {name}; rebuild {}",
+                    header.name
                 ));
             }
             visit(

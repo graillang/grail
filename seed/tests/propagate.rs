@@ -12,7 +12,7 @@ fn question_mark_is_checked_match_with_cleanup_on_failure() {
         "module f;enum Inner{Ok(num),Err(string)}enum Outer{Ok(Inner),Err(string)}pub fn run(o:Outer)->Inner{return Inner::Ok(o??);}",
     ] {
         let p = source::compile(s, BTreeMap::new()).unwrap_or_else(|e| panic!("{s}\n{e}"));
-        emit::module_c(&p);
+        emit::module_c(&p).unwrap();
     }
 }
 #[test]

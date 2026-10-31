@@ -24,7 +24,9 @@ impl Value {
         Ok(v)
     }
     pub(super) fn has_heap(&self) -> bool {
-        self.ty.heap() || self.fields.iter().flatten().any(Self::has_heap)
+        self.ty.heap()
+            || matches!(self.ty, Ty::Param(_))
+            || self.fields.iter().flatten().any(Self::has_heap)
     }
 }
 impl State {
@@ -193,7 +195,7 @@ impl State {
         ty: &Ty,
         fields: &[(String, Reg)],
     ) -> Result<(), String> {
-        types::validate_value_type(ty, &self.layouts)?;
+        types::validate_type(ty, &self.layouts, self.type_parameters)?;
         let Ty::Named(name, _, _) = ty else {
             return Err("record constructor needs nominal type".into());
         };
