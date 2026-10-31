@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Join retained local/external capture sources across branches and loop fixed points instead of
+  requiring identical metadata. Recheck later iterations, separate break exits from backedges,
+  preserve while-condition effects on zero-body paths, and normalize only dead temporary ancestry.
+  Keep stored lifetime/capability bounds and reuse unchanged indexes. Validate hidden Option-pop /
+  mixed-exit modules, C/LLVM execution, destruction, independent Rust, frozen replay and costs.
+  Conditional moves/partial initialization, general heap collections and self-hosting remain unfinished.
+
 - Admit captured mutable referents with invariant lifetime witnesses, universally checked generic
   storage operations and signature-derived opaque capture writeback. Preserve old/incoming sources,
   distinguish unique transfer from short reborrow, filter nested typed targets, and retire internal

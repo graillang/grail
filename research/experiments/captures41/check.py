@@ -15,17 +15,18 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
 CAPTURES = Path(__file__).resolve().parent
-if sys.argv[1:] not in ([], ["--mutable"]):
-    raise SystemExit("usage: check.py [--mutable]")
+if sys.argv[1:] not in ([], ["--mutable"], ["--joins"]):
+    raise SystemExit("usage: check.py [--mutable|--joins]")
+JOINS = sys.argv[1:] == ["--joins"]
 MUTABLE = bool(sys.argv[1:])
-HERE = CAPTURES.parent / "mutable42" if MUTABLE else CAPTURES
+HERE = CAPTURES.parent / ("joins43" if JOINS else "mutable42") if MUTABLE else CAPTURES
 OUT = ROOT / f"research/evidence/{HERE.name}-20261031"
 WORK = HERE / ".work"
 NIGHT = (
     ROOT
     / "research/experiments/rust_next20/.work/rustup/toolchains/nightly-2026-10-29-x86_64-unknown-linux-gnu"
 )
-BASELINE = "3d5eaa18" if MUTABLE else "b755920"
+BASELINE = "b7cf6f9" if JOINS else "3d5eaa18" if MUTABLE else "b755920"
 
 
 def main() -> None:
@@ -151,7 +152,11 @@ def main() -> None:
             references.append(run([binary])["stdout"])
         assert references[0] == references[1]
         assert references[0] == (
-            "46 [3, 4, 5, 6, 2, 1]\n" if MUTABLE else "36 [2, 3, 1]\n"
+            "52 [4, 6, 5, 3, 2, 1]\n"
+            if JOINS
+            else "46 [3, 4, 5, 6, 2, 1]\n"
+            if MUTABLE
+            else "36 [2, 3, 1]\n"
         )
         for label, compiler in [
             ("stable", Path("rustc")),
@@ -168,7 +173,9 @@ def main() -> None:
                     ],
                     success=False,
                 )
-                assert "lifetime" in row["stderr"]
+                assert "lifetime" in row["stderr"] or "error[E0502]" in row["stderr"], (
+                    row
+                )
         scanner_reference = work / "scanner-reference"
         run(
             [
@@ -251,6 +258,11 @@ def main() -> None:
                     ("references", ROOT / "research/experiments/references40/cost.rs"),
                 ]
                 + ([("readonly", CAPTURES / "cost.rs")] if MUTABLE else [])
+                + (
+                    [("mutable", CAPTURES.parent / "mutable42/cost.rs")]
+                    if JOINS
+                    else []
+                )
                 + ([("captures", HERE / "cost.rs")] if label == "after" else [])
             ):
                 binary = work / f"cost-{label}-{style}"
@@ -308,7 +320,7 @@ def main() -> None:
                         if name == "core"
                         else (
                             (
-                                CAPTURES
+                                (CAPTURES.parent / "mutable42" if JOINS else CAPTURES)
                                 if MUTABLE
                                 else ROOT / "research/experiments/templates39"
                             )
@@ -380,6 +392,15 @@ def main() -> None:
             ROOT / "seed/Cargo.lock",
             Path(__file__).resolve(),
             CAPTURES / "cost.rs",
+            *(
+                [
+                    CAPTURES.parent / "mutable42/cost.rs",
+                    CAPTURES.parent / "mutable42/lexer.grl",
+                    CAPTURES.parent / "mutable42/scanner.grl",
+                ]
+                if JOINS
+                else []
+            ),
             *([CAPTURES / "lexer.grl", CAPTURES / "scanner.grl"] if MUTABLE else []),
             *HERE.glob("*.py"),
             *HERE.glob("*.rs"),

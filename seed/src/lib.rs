@@ -507,27 +507,6 @@ impl State {
         }
         Ok(())
     }
-    fn validate_closed(
-        &self,
-        entry: &BTreeMap<Reg, Value>,
-        memory: &BTreeMap<Root, Value>,
-    ) -> Result<(), String> {
-        if &self.memory != memory {
-            return Err("block changes external storage captures; loop join required".into());
-        }
-        for (r, v) in &self.values {
-            if !entry.contains_key(r) && !v.ty.copy() {
-                return Err("block-local resource must end".into());
-            }
-        }
-        for (r, v) in entry {
-            let after = self.get(*r)?;
-            if v.ty != after.ty || (!v.ty.copy() && v != after) {
-                return Err("block changes entry ownership".into());
-            }
-        }
-        Ok(())
-    }
     fn call(&mut self, sig: &Sig, dst: Reg, args: &[Reg]) -> Result<(), String> {
         self.call_pattern(sig, sig, None, dst, args)
     }
@@ -659,7 +638,7 @@ impl State {
                 }
 
                 Op::Break | Op::Continue => {
-                    self.validate_loop_exit()?;
+                    self.record_loop_exit(matches!(op, Op::Break))?;
                     self.terminated = true;
                 }
                 Op::Return(r) => {
@@ -898,46 +877,8 @@ impl State {
                         self.validate_resource_frame(&entry)?;
                     }
                 }
-                Op::While {
-                    condition,
-                    test,
-                    body,
-                } => {
-                    let entry = self.values.clone();
-                    let memory = self.memory.clone();
-                    let entry_defined = self.copy_defined.clone();
-                    let condition_out = after.map(|out| {
-                        let mut live = self.scalars();
-                        live.extend(out);
-                        live.insert(*condition);
-                        live
-                    });
-                    // A condition cannot jump out of a surrounding loop; only its nested loops
-                    // introduce jump targets. Conditional function returns (e.g. `?`) remain valid.
-                    let loops = std::mem::take(&mut self.loops);
-                    self.ops_inner(test, imports, depth + 1, condition_out.as_ref())?;
-                    self.loops = loops;
-                    if self.terminated {
-                        return Err("return in loop condition".into());
-                    }
-                    self.require_num(*condition)?;
-                    self.validate_closed(&entry, &memory)?;
-                    self.values = entry;
-                    self.copy_defined = entry_defined;
-                    let body_out = after.map(|out| {
-                        let mut live = flow::live_before(op, out);
-                        live.extend(out);
-                        live
-                    });
-                    self.loop_body(body, None, imports, depth + 1, body_out.as_ref())?;
-                }
-                Op::Loop { index, end, body } => {
-                    self.require_num(*end)?;
-                    if index == end || self.values.contains_key(index) || self.copy_defined(*index)
-                    {
-                        return Err("loop index must be fresh".into());
-                    }
-                    self.loop_body(body, Some(*index), imports, depth + 1, after)?;
+                Op::While { .. } | Op::Loop { .. } => {
+                    self.loop_op(op, imports, depth + 1, after)?
                 }
             }
             if let Some(live) = after {

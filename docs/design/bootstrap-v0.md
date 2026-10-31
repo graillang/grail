@@ -213,6 +213,15 @@ containers, remaining joins, the real port and self-compilation/artifact deliver
 [Invariant witnesses and signature-derived writeback](mutable-references.md) now admit captured
 mutable cells, unique take/pop, core Option/Result composition and a real updating cursor workload.
 IR/template bundle schema 2 preserves checked lifetime ascriptions; temporary plain-kind machinery
-is removed. Stale external-cell proofs across loop edges are rejected, but safe changing-state joins
-still need implementation. General heap vectors/collections, the real seed port, stage-2/stage-3 and
+is removed. Stale external-cell proofs across loop edges are rejected. Retained capture-source joins now extend
+this checkpoint below; general conditional ownership still needs implementation. General heap vectors/collections, the real seed port, stage-2/stage-3 and
 the reproducible bootstrap artifact remain required; this library gate does not complete v0.
+
+## Retained capture-join checkpoint
+
+[Branch source unions and loop fixed points](capture-joins.md) now accept retained local/external
+storage mutation, recheck later iterations and preserve condition/break/continue effects. Hidden
+Option-pop / mixed-exit modules and a lexer mutating its cursor inside validation loops execute with
+independent controls and measured costs. Conditional ownership/partial initialization, addressed
+scalar joins, general heap collections, the real port and self-compilation/artifact delivery remain
+required. This is not completion of bootstrap v0.

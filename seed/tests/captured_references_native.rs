@@ -272,3 +272,106 @@ fn captured_unique_exchange_runs_in_c_and_llvm() {
     }
     fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+#[ignore = "requires clang allocator wrapping, optimizing sanitizers; optionally configured TinyCC"]
+fn hidden_joined_mutations_cover_zero_iterations_mixed_exits_and_option_pop() {
+    let backend = std::env::var("GRAIL_CAPTURE_TEST_BACKEND").unwrap_or_else(|_| "clang".into());
+    let other = if std::env::var_os("GRAIL_CAPTURE_MIXED_BACKEND").is_some() {
+        if backend == "tcc" {
+            "clang-release"
+        } else {
+            "tcc"
+        }
+    } else {
+        &backend
+    };
+    let dir = dir();
+    for (name, text) in [
+        ("core", include_str!("../std/core.grl")),
+        (
+            "joined",
+            include_str!("../examples/capture_joins/joined.grl"),
+        ),
+    ] {
+        fs::write(dir.join(format!("{name}.grl")), text).unwrap();
+        compile(&dir, name, false, &backend);
+        fs::remove_file(dir.join(format!("{name}.grl"))).unwrap();
+    }
+    fs::write(
+        dir.join("use_joined.grl"),
+        include_str!("../examples/capture_joins/use_joined.grl"),
+    )
+    .unwrap();
+    compile(&dir, "use_joined", true, other);
+    assert_eq!(
+        run(&mut Command::new(dir.join("use_joined"))).stdout,
+        b"52\n"
+    );
+    let artifact = fs::read(dir.join("use_joined.artifact")).unwrap();
+    let binary = fs::read(dir.join("use_joined")).unwrap();
+    compile(&dir, "use_joined", true, other);
+    assert_eq!(artifact, fs::read(dir.join("use_joined.artifact")).unwrap());
+    assert_eq!(binary, fs::read(dir.join("use_joined")).unwrap());
+    fs::write(
+        dir.join("allocator.c"),
+        include_str!("support/allocator_audit.c"),
+    )
+    .unwrap();
+    fs::write(dir.join("native.c"),"#include <stdint.h>\nuint64_t q_10_use_joined_3_run(void),g_live(void);int main(void){return q_10_use_joined_3_run()!=52||g_live()!=0;}\n").unwrap();
+    fs::write(dir.join("main.c"),"#include <stdint.h>\nuint64_t q_10_use_joined_3_run(void),g_free_count(void),g_freed(uint64_t);int main(void){if(q_10_use_joined_3_run()!=52||g_free_count()!=6)return 90;uint64_t order[]={4,6,5,3,2,1};for(unsigned i=0;i<6;++i)if(g_freed(i)!=order[i])return 91;return 0;}\n").unwrap();
+    let objects = ["core", "joined", "use_joined"]
+        .iter()
+        .map(|n| grail_seed::artifact::load(&dir, n).unwrap().object)
+        .collect::<Vec<_>>();
+    run(Command::new("clang")
+        .arg("-Wl,--wrap=malloc,--wrap=realloc,--wrap=free")
+        .args(&objects)
+        .arg(dir.join("native.c"))
+        .arg(dir.join("allocator.c"))
+        .arg("-o")
+        .arg(dir.join("native")));
+    run(&mut Command::new(dir.join("native")));
+    run(Command::new("clang")
+        .args([
+            "-O2",
+            "-fsanitize=address,undefined",
+            "-fno-omit-frame-pointer",
+            "-fno-builtin-malloc",
+            "-fno-builtin-realloc",
+            "-fno-builtin-free",
+            "-Wl,--wrap=malloc,--wrap=realloc,--wrap=free",
+        ])
+        .args(objects.iter().map(|p| p.with_extension("c")))
+        .arg(dir.join("main.c"))
+        .arg(dir.join("allocator.c"))
+        .arg("-o")
+        .arg(dir.join("sanitize")));
+    run(&mut Command::new(dir.join("sanitize")));
+    fs::remove_dir_all(dir).unwrap();
+}
+#[test]
+#[ignore = "requires clang and LLVM descriptor ABI"]
+fn joined_descriptor_branches_and_backedges_run_in_c_and_llvm() {
+    let dir = dir();
+    let p=grail_seed::source::compile("module joins;pub fn fill<outer,data>(p:ref_mut<outer,read<data>>,v:read<data>,n:num)->read<data>{for i in n{exchange(p,read(v));}return load(p);}pub fn choose<outer,data>(p:ref_mut<outer,read<data>>,a:read<data>,b:read<data>,n:num)->read<data>{if n{exchange(p,read(a));}else{exchange(p,read(b));}return load(p);}pub fn probe<outer,data>(p:ref_mut<outer,read<data>>,v:read<data>)->read<data>{while len(exchange(p,read(v))){break;}return load(p);}",Default::default()).unwrap();
+    fs::write(dir.join("joins.c"), grail_seed::emit::module_c(&p).unwrap()).unwrap();
+    fs::write(
+        dir.join("joins.ll"),
+        grail_seed::emit::module_llvm(&p).unwrap(),
+    )
+    .unwrap();
+    fs::write(dir.join("main.c"),"#include <stdint.h>\ntypedef struct{uint8_t*p;uint64_t n;}gv;gv q_5_joins_5_probe(gv*,gv),q_5_joins_4_fill(gv*,gv,uint64_t),q_5_joins_6_choose(gv*,gv,gv,uint64_t);int main(void){uint8_t a[]={1},b[]={2},c[]={3};gv slot={a,1},x={b,1},y={c,1},v=q_5_joins_4_fill(&slot,x,0);if(v.p!=a)return 1;v=q_5_joins_4_fill(&slot,x,3);if(v.p!=b)return 2;v=q_5_joins_6_choose(&slot,x,y,0);if(v.p!=c||slot.p!=c)return 3;slot=(gv){a,0};v=q_5_joins_5_probe(&slot,x);return v.p!=b||slot.p!=b;}\n").unwrap();
+    for file in ["joins.c", "joins.ll"] {
+        for level in ["-O0", "-O2"] {
+            run(Command::new("clang")
+                .args([level, "-Werror", "-Wno-override-module"])
+                .arg(dir.join(file))
+                .arg(dir.join("main.c"))
+                .arg("-o")
+                .arg(dir.join("run")));
+            run(&mut Command::new(dir.join("run")));
+        }
+    }
+    fs::remove_dir_all(dir).unwrap();
+}

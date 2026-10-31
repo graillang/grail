@@ -5,6 +5,10 @@ pub(super) struct LoopFrame {
     pub(super) values: BTreeMap<Reg, Value>,
     memory: BTreeMap<Root, Value>,
     defined: Vec<u64>,
+    resources: BTreeSet<Reg>,
+    live_loans: BTreeSet<usize>,
+    backs: std::cell::RefCell<Option<State>>,
+    breaks: std::cell::RefCell<Option<State>>,
 }
 impl State {
     pub(super) fn enter_loop(&mut self, index: Option<Reg>) -> Result<(), String> {
@@ -12,22 +16,104 @@ impl State {
             values: self.values.clone(),
             memory: self.memory.clone(),
             defined: self.copy_defined.clone(),
+            resources: self.resources.clone(),
+            live_loans: self.live_loans(),
+            backs: Default::default(),
+            breaks: Default::default(),
         }));
         if let Some(r) = index {
             self.num(r)?;
         }
         Ok(())
     }
-    pub(super) fn validate_loop_exit(&self) -> Result<(), String> {
-        let frame = self.loops.last().ok_or("loop exit outside loop body")?;
-        self.validate_closed(&frame.values, &frame.memory)
-            .map_err(|e| format!("loop exit violates entry state: {e}"))?;
+    pub(super) fn record_loop_exit(&self, is_break: bool) -> Result<(), String> {
+        let frame = self
+            .loops
+            .last()
+            .ok_or("loop exit outside loop body")?
+            .clone();
+        let edge = self.clone().loop_edge(&frame)?;
+        Self::collect_edge(
+            if is_break {
+                &frame.breaks
+            } else {
+                &frame.backs
+            },
+            edge,
+        )
+    }
+    fn collect_edge(into: &std::cell::RefCell<Option<State>>, edge: State) -> Result<(), String> {
+        let mut into = into.borrow_mut();
+        if let Some(previous) = into.take() {
+            let mut merged = previous.clone();
+            merged.join(previous, edge)?;
+            *into = Some(merged);
+        } else {
+            *into = Some(edge);
+        }
+        Ok(())
+    }
+    fn live_loans(&self) -> BTreeSet<usize> {
+        fn walk(v: &Value, out: &mut BTreeSet<usize>) {
+            if v.active && v.ty.reference().is_some() {
+                out.insert(v.loan);
+            }
+            for f in v.fields.iter().flatten() {
+                walk(f, out);
+            }
+        }
+        let mut out = BTreeSet::new();
+        for v in self.values.values().chain(self.memory.values()) {
+            walk(v, &mut out);
+        }
+        out
+    }
+    fn normalize_ancestors(&mut self, live: &BTreeSet<usize>) {
+        fn walk(v: &mut Value, live: &BTreeSet<usize>) -> bool {
+            let before = v.ancestors.len();
+            v.ancestors.retain(|id| live.contains(id));
+            let mut changed = before != v.ancestors.len();
+            for f in v.fields.iter_mut().flatten() {
+                changed |= walk(f, live);
+            }
+            changed
+        }
+        let mut changed = false;
+        for v in self.values.values_mut().chain(self.memory.values_mut()) {
+            changed |= walk(v, live);
+        }
+        if changed {
+            self.rebuild_indices();
+        }
+    }
+    fn loop_edge(mut self, frame: &LoopFrame) -> Result<Self, String> {
+        if self.resources != frame.resources || self.memory.keys().ne(frame.memory.keys()) {
+            return Err("loop exit changes retained resource initialization".into());
+        }
+        for (r, before) in &frame.values {
+            self.same_position(before, self.get(*r)?)?;
+        }
+        for (p, before) in &frame.memory {
+            self.same_position(before, &self.memory[p])?;
+        }
         for (index, word) in frame.defined.iter().enumerate() {
             if word & !self.copy_defined.get(index).copied().unwrap_or(0) != 0 {
                 return Err("loop exit loses entry scalar definition".into());
             }
         }
-        Ok(())
+        self.values.retain(|r, _| frame.values.contains_key(r));
+        // Non-reference IDs have no authority; canonicalize them to the retained storage position.
+        for (r, value) in &mut self.values {
+            reference::retain_loans(value, &frame.values[r]);
+        }
+        for (p, value) in &mut self.memory {
+            reference::retain_loans(value, &frame.memory[p]);
+        }
+        self.copy_defined = frame.defined.clone();
+        self.loops.pop();
+        self.normalize_ancestors(&frame.live_loans);
+        self.terminated = false;
+        Ok(self)
     }
 
     pub(super) fn copy_defined(&self, r: Reg) -> bool {
@@ -116,16 +202,24 @@ impl State {
             (true, false) => *self = no,
             (false, true) => *self = yes,
             (false, false) => {
-                if yes.memory != no.memory {
-                    return Err("branch external storage states differ".into());
+                if yes.resources != no.resources || yes.memory.keys().ne(no.memory.keys()) {
+                    return Err("branch ownership states differ; conditional initialization/moves require a join".into());
                 }
-                if yes.resources != no.resources
-                    || yes.resources.iter().any(|r| yes.values[r] != no.values[r])
-                {
-                    return Err("branch ownership states differ; join not yet supported".into());
+                let mut changed = false;
+                for (p, value) in &mut yes.memory {
+                    changed |= self.join_value(value, &no.memory[p])?;
                 }
                 yes.values
                     .retain(|r, v| !v.ty.copy() || no.values.contains_key(r));
+                for (r, value) in &mut yes.values {
+                    changed |= self.join_value(
+                        value,
+                        no.values.get(r).ok_or("branch loses retained storage")?,
+                    )?;
+                }
+                if changed {
+                    yes.rebuild_indices();
+                }
                 for (index, word) in yes.copy_defined.iter_mut().enumerate() {
                     *word &= no.copy_defined.get(index).copied().unwrap_or(0);
                 }
@@ -135,28 +229,151 @@ impl State {
         self.next = next;
         Ok(())
     }
-    pub(super) fn loop_body(
+    fn same_position(&self, a: &Value, b: &Value) -> Result<(), String> {
+        if a == b {
+            return Ok(());
+        }
+        if a.ty != b.ty
+            || a.active != b.active
+            || a.fields.len() != b.fields.len()
+            || (a.ty.reference().is_some() && a.loan != b.loan)
+            || !self.instance_fits(&witness::Instance::of(a), &witness::Instance::of(b), true)?
+        {
+            return Err(
+                "control flow changes capture slot initialization, lifetime or capability identity"
+                    .into(),
+            );
+        }
+        for (a, b) in a.fields.iter().zip(&b.fields) {
+            match (a, b) {
+                (Some(a), Some(b)) => self.same_position(a, b)?,
+                (None, None) => (),
+                _ => return Err("control flow changes partial initialization".into()),
+            }
+        }
+        Ok(())
+    }
+    fn join_value(&self, value: &mut Value, other: &Value) -> Result<bool, String> {
+        self.same_position(value, other)?;
+        self.merge_value(value, other)
+    }
+    fn rebuild_indices(&mut self) {
+        if self.access.is_empty() && self.blocked.is_empty() && self.addressed.is_empty() {
+            // A merge may introduce reference roots into a previously empty index.
+            if self
+                .values
+                .values()
+                .chain(self.memory.values())
+                .all(|v| !has_reference(v))
+            {
+                return;
+            }
+        }
+        self.access.clear();
+        self.blocked.clear();
+        self.addressed.clear();
+        self.resources = self
+            .values
+            .iter()
+            .filter_map(|(r, v)| (!v.ty.copy()).then_some(*r))
+            .collect();
+        let values = self
+            .values
+            .values()
+            .chain(self.memory.values())
+            .cloned()
+            .collect::<Vec<_>>();
+        for value in values {
+            self.index_add(&value);
+        }
+    }
+    pub(super) fn loop_op(
         &mut self,
-        body: &[Op],
-        index: Option<Reg>,
+        op: &Op,
         imports: &BTreeMap<String, Sig>,
         depth: usize,
         out: Option<&BTreeSet<Reg>>,
     ) -> Result<(), String> {
-        let mut inner = self.clone();
-        inner.enter_loop(index)?;
-        let live = out.map(|out| {
-            let mut live = inner.scalars();
-            live.extend(out);
-            live
-        });
-        inner.ops_inner(body, imports, depth, live.as_ref())?;
-        if !inner.terminated {
-            inner.validate_closed(&self.values, &self.memory)?;
+        let (body, index, test) = match op {
+            Op::Loop { index, end, body } => {
+                self.require_num(*end)?;
+                if index == end || self.values.contains_key(index) || self.copy_defined(*index) {
+                    return Err("loop index must be fresh".into());
+                }
+                (body.as_slice(), Some(*index), None)
+            }
+            Op::While {
+                condition,
+                test,
+                body,
+            } => (body.as_slice(), None, Some((*condition, test.as_slice()))),
+            _ => return Err("expected loop operation".into()),
+        };
+        let mut entry = self.clone();
+        let live_loans = entry.live_loans();
+        entry.normalize_ancestors(&live_loans);
+        let mut header = entry.clone();
+        let mut next = entry.next;
+        for _ in 0..4096 {
+            let mut inner = header.clone();
+            inner.enter_loop(index)?;
+            let frame = inner.loops.last().expect("loop frame").clone();
+            let condition_exit = if let Some((condition, test)) = test {
+                let mut live = inner.scalars();
+                if let Some(out) = out {
+                    live.extend(out);
+                }
+                live.insert(condition);
+                let loops = std::mem::take(&mut inner.loops);
+                inner.ops_inner(test, imports, depth, Some(&live))?;
+                inner.loops = loops;
+                if inner.terminated {
+                    return Err("return in loop condition".into());
+                }
+                inner.require_num(condition)?;
+                Some(inner.clone().loop_edge(&frame)?)
+            } else {
+                None
+            };
+            let live = out.map(|out| {
+                let mut live = live_before(op, out);
+                live.extend(out);
+                live.extend(inner.scalars());
+                live
+            });
+            inner.ops_inner(body, imports, depth, live.as_ref())?;
+            next = next.max(inner.next);
+            if !inner.terminated {
+                let edge = inner.loop_edge(&frame)?;
+                Self::collect_edge(&frame.backs, edge)?;
+            }
+            let mut widened = entry.clone();
+            if let Some(back) = frame.backs.borrow_mut().take()
+                && (back.values != entry.values || back.memory != entry.memory)
+            {
+                widened.join(entry.clone(), back)?;
+            }
+            // Temporary capabilities are alpha-local to an iteration; retained slots keep their IDs.
+            widened.next = entry.next;
+            if widened.values == header.values && widened.memory == header.memory {
+                let mut exit = condition_exit.unwrap_or_else(|| header.clone());
+                if let Some(broken) = frame.breaks.borrow_mut().take()
+                    && (broken.values != exit.values || broken.memory != exit.memory)
+                {
+                    exit.join(exit.clone(), broken)?;
+                }
+                exit.next = next;
+                *self = exit;
+                return Ok(());
+            }
+            header = widened;
         }
-        self.next = self.next.max(inner.next);
-        Ok(())
+        Err("loop capture fixed-point iteration limit".into())
     }
+}
+
+fn has_reference(v: &Value) -> bool {
+    v.ty.reference().is_some() || v.fields.iter().flatten().any(has_reference)
 }
 
 pub(crate) fn terminates(ops: &[Op]) -> bool {

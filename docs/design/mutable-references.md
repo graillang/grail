@@ -62,13 +62,12 @@ Default destruction similarly distinguishes internal capture cycles from externa
 not let a live external frame/child lose the descriptor it can still access. Owned fields continue
 to receive deterministic recursive cleanup; descriptor destruction does not free borrowed data.
 
-A reproduced stale-proof bug showed why checking only local loop-entry values was insufficient:
-a loop could overwrite an external cell while continuation checking reused its previous long source.
-Backedges, break/continue and while conditions now also require external capture state closure.
-This rejects that unsafe widening, but is **not** general joining: safe changes to entry source sets,
-conditional ownership and simultaneous disjoint projections through one mutable parent remain open.
-The closure restriction is not an approved permanent concession to v0. It must be revised where
-compiler/container programs need those cases, before treating dependent features as validated.
+A reproduced stale-proof bug showed why checking only local loop-entry values was insufficient.
+[Retained-slot joins and fixed points](capture-joins.md) now widen local/external captures and recheck
+later iterations, while preserving zero paths, live parent freezes and immutable stored bounds.
+The temporary exact external-state barrier was removed. General conditional ownership, differing
+partial initialization, addressed-scalar joins and finer field/parent loan ending still remain; they
+are not approved permanent concessions to v0.
 
 ## Protocol, limits and evidence
 
@@ -79,7 +78,7 @@ captured exchange; the existing nominal/heap LLVM limits remain.
 
 Reference expansion, source/target/projection cardinalities and lifetime comparisons are bounded;
 structural depth is 64, source/target sets and distinct per-call projections cap at 4096. Scope walks
-cap at 262144 operations. Regular recursive reference graphs and general ownership joins are still
+cap at 262144 operations. Loop capture fixed points cap at 4096 rounds. Regular recursive reference graphs and general ownership joins are still
 unfinished, not language requirements silently excluded from bootstrap. The checker, provenance,
 substitution/IR codec, native producers/toolchains/runtime and host remain in the TCB. Passing these
 finite tests is not a soundness theorem or whole-compiler performance result.

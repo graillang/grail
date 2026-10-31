@@ -216,7 +216,10 @@ impl State {
             self.fresh_loans(field);
         }
     }
-    fn merge_value(&self, v: &mut Value, other: &Value) -> Result<(), String> {
+    pub(super) fn merge_value(&self, v: &mut Value, other: &Value) -> Result<bool, String> {
+        if v == other {
+            return Ok(false);
+        }
         if !self.instance_fits(
             &witness::Instance::of(v),
             &witness::Instance::of(other),
@@ -224,20 +227,24 @@ impl State {
         )? {
             return Err("stored lifetime witness differs across possible cells".into());
         }
+        let before = v.roots.len() + v.ancestors.len() + v.targets.len();
         v.roots.extend(other.roots.clone());
         v.ancestors.extend(other.ancestors.clone());
         v.targets.extend(other.targets.clone());
         if v.roots.len() > 4096 || v.ancestors.len() > 4096 || v.targets.len() > 4096 {
             return Err("capture union expansion limit".into());
         }
+        let mut changed = before != v.roots.len() + v.ancestors.len() + v.targets.len();
         for (a, b) in v.fields.iter_mut().zip(&other.fields) {
             match (a, b) {
-                (Some(a), Some(b)) => self.merge_value(a, b)?,
+                (Some(a), Some(b)) => {
+                    changed |= self.merge_value(a, b)?;
+                }
                 (None, None) => (),
                 _ => return Err("possibly uninitialized cell".into()),
             }
         }
-        Ok(())
+        Ok(changed)
     }
     fn owner_has_write(&self, v: &Value) -> bool {
         (v.ty.owned() && v.roots.iter().any(|r| self.access_conflict(r, true)))
@@ -475,7 +482,7 @@ pub(super) fn rename_owned(v: &mut Value, base: &Root, path: &[usize]) {
         }
     }
 }
-fn retain_loans(new: &mut Value, old: &Value) {
+pub(super) fn retain_loans(new: &mut Value, old: &Value) {
     new.loan = old.loan;
     for (a, b) in new.fields.iter_mut().zip(&old.fields) {
         if let (Some(a), Some(b)) = (a, b) {
