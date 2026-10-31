@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Retain a generic-lowering comparison across native development/release profiles with real
+  source-token/owned-node workloads, instance counts, independent checksums and lifetime controls.
+  Select an initial static-specialization implementation while preserving evidence for shared code;
+  document eager snapshots, invariance, outer-loan limits and opaque mutable writeback requirements.
+  This is preimplementation evidence, not delivered Grail generics or general typed references.
+
 - Remove cumulative scalar/type-map cloning from the checker: share a monotonic function-local
   type ledger, retain scalar definedness in a compact bitmap and prune only dead scalar values.
   Correct match/if live-in definitions without changing loan/owner cleanup. Frozen-compiler
