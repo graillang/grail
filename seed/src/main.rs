@@ -29,7 +29,7 @@ fn run() -> Result<(), String> {
     }
 
     if a.len() != 6 {
-        return Err("usage: grail-seed provider OUT BIAS VERSION c|llvm | client OUT API LEN:REPEATS c|llvm".into());
+        return Err("usage: grail-seed compile|build FILE OUT IMPORTS [clang|clang-release|tcc] | provider OUT BIAS VERSION c|llvm | client OUT API LEN:REPEATS c|llvm | scale SIZE".into());
     }
     let start = Instant::now();
     let (f, imports) = match a[1].as_str() {

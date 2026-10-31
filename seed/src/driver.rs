@@ -20,7 +20,14 @@ fn command(args: &[String], cwd: &Path) -> Result<(), String> {
 }
 fn native(backend: &str, args: Vec<String>, link: bool, cwd: &Path) -> Result<(), String> {
     let mut cmd = match backend {
-        "clang" => vec!["clang".into(), "-O0".into()],
+        "clang" | "clang-release" => vec![
+            "clang".into(),
+            if backend == "clang-release" {
+                "-O2".into()
+            } else {
+                "-O0".into()
+            },
+        ],
         "tcc" => {
             let root = std::env::var("GRAIL_TCC_ROOT").map_err(
                 |_| "tcc requires GRAIL_TCC_ROOT pointing to the configured Goose build",
@@ -45,7 +52,7 @@ fn native(backend: &str, args: Vec<String>, link: bool, cwd: &Path) -> Result<()
             }
             cmd
         }
-        _ => return Err("native backend must be clang or tcc".into()),
+        _ => return Err("native backend must be clang, clang-release or tcc".into()),
     };
     cmd.extend(args);
     if backend == "tcc" && link {

@@ -246,3 +246,13 @@ seed/.work/generics/client 42  # 47
 
 The client needs only immutable checked provider artifacts; source-hidden tests remove both provider
 sources before compiling it. Rebuild prior artifacts for module schema 4 / function schema 6.
+
+## Native profiles
+
+The last `compile`/`build` argument is `clang` (default development, `-O0`), `clang-release`
+(optimizing native release, `-O2`) or `tcc` (configured fast development). Both object compilation
+and executable linking use it. Checking/interfaces/emitted C are unchanged across profiles.
+[Reproducibility, tested crossings and limits](../docs/design/native-profiles.md).
+
+This is distinct from Cargo's `--release`, which optimizes the **Rust seed executable itself**.
+A full linked-executable recipe manifest and hermetic bootstrap toolchain are not implemented yet.

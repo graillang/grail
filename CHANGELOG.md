@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Add the actual `clang-release` native driver profile (`-O2`) while preserving default `clang`
+  (`-O0`) and TinyCC. Check source-hidden generic/owned programs, relocation and byte-reproducible
+  objects/executables, mixed-profile ABIs, runtime aborts, malformed UTF-8 and concurrent artifact
+  publication. Retain real-driver scanner build/runtime costs and independent checksums; full
+  executable recipe manifests, hermetic toolchain packaging and stage-2/stage-3 remain unfinished.
+
 - Implement public generic record/enum value layouts and real type-only modules, including a
   `core` library with `Result<T,E>`, `Option<T>` and `Pair<T,U>`. Substitute nested type/lifetime
   arguments without rebinding inserted lifetimes; preserve ownership, origins and error propagation.

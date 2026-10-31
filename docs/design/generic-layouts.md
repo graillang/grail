@@ -108,7 +108,8 @@ C/API checks. See the [retained evidence](../../research/evidence/generic36-2026
 These are compiler-shape/layout workloads, not a self-hosted compiler or proof of generic scalability.
 
 General typed borrowing/mutation of aggregates, mutable-container invariance and opaque writeback,
-real generic function bodies, vectors of arbitrary `T`, reusable cursor APIs, release-profile native
-tooling, the Grail compiler port and deterministic stage-2/stage-3 bootstrap **remain unfinished**.
+real generic function bodies, vectors of arbitrary `T`, reusable cursor APIs, the Grail compiler port
+and deterministic stage-2/stage-3 bootstrap **remain unfinished**.
+Actual [native development/release profiles](native-profiles.md) are now delivered separately.
 The existing by-value byte-view constructor lifetime placeholders are not evidence for a sound
 `&mut T` implementation; the hard invariance/writeback gates have not been weakened.
