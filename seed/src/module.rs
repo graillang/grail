@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Interface {
     pub name: String,
-    pub entry: String,
+    pub entry: Option<String>,
     pub exports: BTreeMap<String, Sig>,
     pub layouts: crate::types::Definitions,
     pub dependencies: BTreeMap<String, String>,
@@ -13,7 +13,7 @@ impl Interface {
     pub fn single(sig: Sig) -> Self {
         Self {
             name: sig.name.clone(),
-            entry: sig.name.clone(),
+            entry: Some(sig.name.clone()),
             exports: BTreeMap::from([(sig.name.clone(), sig)]),
             layouts: BTreeMap::new(),
             dependencies: BTreeMap::new(),
@@ -21,19 +21,22 @@ impl Interface {
     }
     pub fn validate(&self) -> Result<(), String> {
         if !name_ok(&self.name)
-            || self.exports.is_empty()
+            || (self.exports.is_empty() && self.layouts.is_empty())
             || self.exports.len() > 4096
             || self.dependencies.len() > 4096
-            || !self.exports.contains_key(&self.entry)
+            || match &self.entry {
+                Some(n) => !self.exports.contains_key(n),
+                None => !self.exports.is_empty(),
+            }
         {
             return Err("invalid module name/export count/entry".into());
         }
         // Enforce the byte bound before publication too, not only during decoding. Otherwise
         // a producer could atomically publish an interface that no consumer can admit.
         let mut bytes = format!(
-            "grail-seed-module-3\n{}\n{}\n{}\n{}\n{}\n",
+            "grail-seed-module-4\n{}\n{}\n{}\n{}\n{}\n",
             self.name,
-            self.entry,
+            self.entry.as_deref().unwrap_or(""),
             self.exports.len(),
             self.dependencies.len(),
             self.layouts.len()
@@ -44,13 +47,15 @@ impl Interface {
         }
         for (n, d) in &self.layouts {
             bytes += format!(
-                "{n}\n{}\n{}\n{}\n",
+                "{n}\n{}\n{}\n{}\n{}\n",
                 d.kind.word(),
                 d.regions,
+                d.parameters,
                 d.fields.len()
             )
             .len();
             for (n, t) in &d.fields {
+                t.validate_shape(d.parameters)?;
                 bytes += n.len() + t.word().len() + 2;
                 if bytes > 8 * 1024 * 1024 {
                     return Err("module interface too large".into());
@@ -87,9 +92,9 @@ impl Interface {
     fn surface(&self) -> Result<String, String> {
         self.validate()?;
         let mut s = format!(
-            "grail-seed-surface-3\n{}\n{}\n{}\n{}\n",
+            "grail-seed-surface-4\n{}\n{}\n{}\n{}\n",
             self.name,
-            self.entry,
+            self.entry.as_deref().unwrap_or(""),
             self.exports.len(),
             self.layouts.len()
         );
@@ -107,9 +112,9 @@ impl Interface {
     pub fn encode(&self) -> Result<String, String> {
         self.validate()?;
         let mut s = format!(
-            "grail-seed-module-3\n{}\n{}\n{}\n{}\n{}\n",
+            "grail-seed-module-4\n{}\n{}\n{}\n{}\n{}\n",
             self.name,
-            self.entry,
+            self.entry.as_deref().unwrap_or(""),
             self.exports.len(),
             self.dependencies.len(),
             self.layouts.len()
@@ -130,9 +135,10 @@ impl Interface {
         let mut s = String::new();
         for (n, d) in &self.layouts {
             s.push_str(&format!(
-                "{n}\n{}\n{}\n{}\n",
+                "{n}\n{}\n{}\n{}\n{}\n",
                 d.kind.word(),
                 d.regions,
+                d.parameters,
                 d.fields.len()
             ));
             for (name, t) in &d.fields {
@@ -146,13 +152,18 @@ impl Interface {
             return Err("module interface too large".into());
         }
         let lines = text.lines().collect::<Vec<_>>();
-        if lines.len() < 6 || lines[0] != "grail-seed-module-3" {
+        if lines.len() < 6 || lines[0] != "grail-seed-module-4" {
             return Err("invalid source module schema; rebuild source artifacts".into());
         }
         let n: usize = lines[3].parse().map_err(|_| "invalid export count")?;
         let d: usize = lines[4].parse().map_err(|_| "invalid dependency count")?;
         let layouts: usize = lines[5].parse().map_err(|_| "invalid type count")?;
-        if n == 0 || n > 4096 || d > 4096 || layouts > 4096 || lines.len() < 6 + n * 4 + d * 2 {
+        if (n == 0 && layouts == 0)
+            || n > 4096
+            || d > 4096
+            || layouts > 4096
+            || lines.len() < 6 + n * 4 + d * 2
+        {
             return Err("invalid module counts".into());
         }
         let mut exports = BTreeMap::new();
@@ -166,7 +177,7 @@ impl Interface {
         }
         let mut types = BTreeMap::new();
         for _ in 0..layouts {
-            if at + 4 > lines.len() {
+            if at + 5 > lines.len() {
                 return Err("truncated record".into());
             }
             let name = lines[at].to_string();
@@ -178,10 +189,13 @@ impl Interface {
             let regions = lines[at + 2]
                 .parse::<u16>()
                 .map_err(|_| "invalid record lifetime count")?;
-            let count = lines[at + 3]
+            let parameters = lines[at + 3]
+                .parse::<u16>()
+                .map_err(|_| "invalid type parameter count")?;
+            let count = lines[at + 4]
                 .parse::<usize>()
                 .map_err(|_| "invalid field count")?;
-            at += 4;
+            at += 5;
             if count > 64 || at + count > lines.len() {
                 return Err("invalid field count".into());
             }
@@ -197,6 +211,7 @@ impl Interface {
                     crate::types::Definition {
                         kind,
                         regions,
+                        parameters,
                         fields,
                     },
                 )
@@ -220,7 +235,7 @@ impl Interface {
         }
         let module = Self {
             name: lines[1].into(),
-            entry: lines[2].into(),
+            entry: (!lines[2].is_empty()).then(|| lines[2].into()),
             exports,
             layouts: types,
             dependencies,
@@ -245,7 +260,10 @@ impl CheckedModule {
     pub fn header(&self) -> &Interface {
         &self.header
     }
-    pub fn entry_signature(&self) -> &Sig {
-        &self.header.exports[&self.header.entry]
+    pub fn entry_signature(&self) -> Option<&Sig> {
+        self.header
+            .entry
+            .as_ref()
+            .and_then(|n| self.header.exports.get(n))
     }
 }

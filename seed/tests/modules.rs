@@ -6,7 +6,7 @@ fn multiple_exports_are_canonical_and_private_names_do_not_escape() {
     let p=source::compile("fn api()->num{return helper();}pub fn add(n:num)->num{return n+1;}fn helper()->num{return 2;}",BTreeMap::new()).unwrap();
     let h = Interface::decode(&p.interface()).unwrap();
     let mut other = h.clone();
-    other.entry = "api::add".into();
+    other.entry = Some("api::add".into());
     assert_ne!(other.fingerprint().unwrap(), h.fingerprint().unwrap());
     assert_eq!(h.exports.len(), 2);
     assert!(h.exports.contains_key("api::add"));
@@ -63,7 +63,7 @@ fn fingerprints_cover_public_contracts_not_dependency_rebuilds() {
     let canonical = h.encode().unwrap();
     for text in [
         canonical.trim_end().to_string(),
-        canonical.replace("grail-seed-module-3", "grail-seed-module-1"),
+        canonical.replace("grail-seed-module-4", "grail-seed-module-1"),
         canonical + "extra\n",
     ] {
         assert!(Interface::decode(&text).is_err());
@@ -74,7 +74,7 @@ fn fingerprints_cover_public_contracts_not_dependency_rebuilds() {
 fn explicit_library_modules_need_no_dummy_primary_function() {
     let p=source::compile("module arithmetic;fn hidden(n:num)->num{return n+1;}pub fn add(n:num)->num{return hidden(n);}",BTreeMap::new()).unwrap();
     assert_eq!(p.header().name, "arithmetic");
-    assert_eq!(p.header().entry, "arithmetic::add");
+    assert_eq!(p.header().entry.as_deref(), Some("arithmetic::add"));
     assert_eq!(p.header().exports.len(), 1);
     assert!(
         source::compile(

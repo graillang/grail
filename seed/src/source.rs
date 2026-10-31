@@ -124,6 +124,7 @@ struct Parser<'a> {
     next: Reg,
     vars: BTreeMap<String, Binding>,
     regions: BTreeMap<String, u16>,
+    type_params: BTreeMap<String, u16>,
     module: String,
     layouts: crate::types::Context,
     return_ty: Option<Ty>,
@@ -177,6 +178,7 @@ impl Parser<'_> {
     fn function(&mut self) -> Result<(Function, bool), String> {
         self.vars.clear();
         self.regions.clear();
+        self.type_params.clear();
         self.next = 0;
         let public = self.eat("pub");
         self.expect("fn")?;
@@ -253,26 +255,59 @@ impl Parser<'_> {
             format!("{}::{n}", self.module)
         }
     }
-    fn lifetime_args(&mut self) -> Result<Vec<u16>, String> {
-        let mut out = Vec::new();
+    fn constructor_type(&self, name: &str, explicit: Option<Ty>) -> Result<Ty, String> {
+        if let Some(t) = explicit {
+            return Ok(t);
+        }
+        if let Some(t @ Ty::Named(n, _, _)) = &self.return_ty
+            && n == name
+        {
+            return Ok(t.clone());
+        }
+        let d = self
+            .layouts
+            .get(name)
+            .ok_or_else(|| self.error("unknown constructor type"))?;
+        if d.parameters != 0 {
+            return Err(self.error("constructor needs explicit type arguments"));
+        }
+        Ok(Ty::Named(name.into(), vec![0; d.regions as usize], vec![]))
+    }
+    fn type_arguments(&mut self, depth: usize) -> Result<(Vec<u16>, Vec<Ty>), String> {
+        if depth > 64 {
+            return Err(self.error("type nesting limit"));
+        }
+        let mut rs = Vec::new();
+        let mut args = Vec::new();
         if self.eat("<") {
             loop {
-                let n = self.ident()?;
-                out.push(
-                    *self
-                        .regions
-                        .get(&n)
-                        .ok_or_else(|| self.error("undeclared region"))?,
-                );
+                if let Some(r) = self.regions.get(self.peek()).copied() {
+                    if !args.is_empty() {
+                        return Err(self.error("lifetimes precede type arguments"));
+                    }
+                    self.at += 1;
+                    rs.push(r);
+                } else {
+                    args.push(self.ty_at(depth + 1)?);
+                }
+                if rs.len() > 64 || args.len() > 64 {
+                    return Err(self.error("type argument count limit"));
+                }
                 if self.eat(">") {
                     break;
                 }
                 self.expect(",")?;
             }
         }
-        Ok(out)
+        Ok((rs, args))
     }
     fn ty(&mut self) -> Result<Ty, String> {
+        self.ty_at(0)
+    }
+    fn ty_at(&mut self, depth: usize) -> Result<Ty, String> {
+        if depth > 64 {
+            return Err(self.error("type nesting limit"));
+        }
         let name = self.path_name()?;
         match name.as_str() {
             "num" => return Ok(Ty::Num),
@@ -281,10 +316,13 @@ impl Parser<'_> {
             "string" => return Ok(Ty::Text),
             _ => {}
         }
-        let args = self.lifetime_args()?;
+        if let Some(i) = self.type_params.get(&name) {
+            return Ok(Ty::Param(*i));
+        }
+        let (rs, args) = self.type_arguments(depth)?;
         if matches!(name.as_str(), "read" | "mut" | "read_holder" | "mut_holder") {
-            if args.len() != 1 {
-                return Err(self.error("view needs one region"));
+            if rs.len() != 1 || !args.is_empty() {
+                return Err(self.error("view needs one lifetime"));
             }
             let mode = if name.starts_with("mut") {
                 Mode::Write
@@ -292,18 +330,19 @@ impl Parser<'_> {
                 Mode::Read
             };
             return Ok(if name.ends_with("holder") {
-                Ty::Holder(mode, args[0])
+                Ty::Holder(mode, rs[0])
             } else {
-                Ty::View(mode, args[0])
+                Ty::View(mode, rs[0])
             });
         }
-        Ok(Ty::Named(self.nominal(&name), args))
+        Ok(Ty::Named(self.nominal(&name), rs, args))
     }
     fn record(&mut self) -> Result<(String, crate::types::Definition), String> {
         if self.module.is_empty() {
             return Err(self.error("record declarations need an explicit module"));
         }
         self.regions.clear();
+        self.type_params.clear();
         let kind = if self.eat("struct") {
             crate::types::Kind::Record
         } else {
@@ -313,10 +352,32 @@ impl Parser<'_> {
         let name = self.ident()?;
         if self.eat("<") {
             loop {
+                let is_type = self.eat("type");
                 let n = self.ident()?;
-                let r = self.regions.len() as u16;
-                if r >= 64 || self.regions.insert(n, r).is_some() {
-                    return Err(self.error("duplicate/excess record region"));
+                if self.regions.contains_key(&n)
+                    || self.type_params.contains_key(&n)
+                    || matches!(
+                        n.as_str(),
+                        "num" | "unit" | "bytes" | "string" | "read" | "mut" | "type"
+                    )
+                {
+                    return Err(self.error("duplicate/reserved generic parameter"));
+                }
+                if is_type {
+                    let i = self.type_params.len();
+                    if i >= 64 {
+                        return Err(self.error("type parameter limit"));
+                    }
+                    self.type_params.insert(n, i as u16);
+                } else {
+                    if !self.type_params.is_empty() {
+                        return Err(self.error("lifetimes precede type parameters"));
+                    }
+                    let i = self.regions.len();
+                    if i >= 64 {
+                        return Err(self.error("lifetime parameter limit"));
+                    }
+                    self.regions.insert(n, i as u16);
                 }
                 if self.eat(">") {
                     break;
@@ -356,6 +417,7 @@ impl Parser<'_> {
             crate::types::Definition {
                 kind,
                 regions,
+                parameters: self.type_params.len() as u16,
                 fields,
             },
         ))
@@ -369,9 +431,7 @@ impl Parser<'_> {
         let success = crate::types::success(&result, &self.layouts)
             .map_err(|e| self.error(&format!("? return type: {e}")))?;
         let fields = crate::types::fields(&result, &self.layouts)?;
-        let Ty::Named(name, _) = result else {
-            unreachable!("checked enum return type")
-        };
+
         let failure = 1 - success;
         let dst = self.fresh()?;
         let error = self.fresh()?;
@@ -390,7 +450,7 @@ impl Parser<'_> {
                     body: vec![
                         Op::Variant {
                             dst: returned,
-                            name,
+                            ty: result,
                             variant: failure,
                             payload: Some(error),
                         },
@@ -469,6 +529,19 @@ impl Parser<'_> {
                 name.push_str("::");
                 name.push_str(&self.ident()?);
             }
+            let mut explicit = None;
+            if self.layouts.contains_key(&self.nominal(&name))
+                && !self.vars.contains_key(&name)
+                && self.peek() == "<"
+            {
+                let n = self.nominal(&name);
+                let (rs, args) = self.type_arguments(0)?;
+                explicit = Some(Ty::Named(n, rs, args));
+                if self.eat("::") {
+                    name.push_str("::");
+                    name.push_str(&self.ident()?);
+                }
+            }
             let variant = name.rsplit_once("::").and_then(|(base, v)| {
                 let n = self.nominal(base);
                 self.layouts
@@ -492,7 +565,7 @@ impl Parser<'_> {
                 let dst = self.fresh()?;
                 ops.push(Op::Variant {
                     dst,
-                    name,
+                    ty: self.constructor_type(&name, explicit.clone())?,
                     variant,
                     payload,
                 });
@@ -612,7 +685,7 @@ impl Parser<'_> {
                 let dst = self.fresh()?;
                 ops.push(Op::Record {
                     dst,
-                    name: self.nominal(&name),
+                    ty: self.constructor_type(&self.nominal(&name), explicit)?,
                     fields,
                 });
                 dst
@@ -867,7 +940,7 @@ impl Parser<'_> {
         Ok(ops)
     }
 }
-/// One source module exports its first function; later functions are private helpers.
+/// Read import names without provider source or body analysis.
 pub fn imports(text: &str) -> Result<Vec<String>, String> {
     let mut p = Parser {
         tokens: lex(text)?,
@@ -875,6 +948,7 @@ pub fn imports(text: &str) -> Result<Vec<String>, String> {
         next: 0,
         vars: BTreeMap::new(),
         regions: BTreeMap::new(),
+        type_params: BTreeMap::new(),
         module: String::new(),
         layouts: crate::types::Context::default(),
         return_ty: None,
@@ -904,6 +978,7 @@ pub fn compile(
         next: 0,
         vars: BTreeMap::new(),
         regions: BTreeMap::new(),
+        type_params: BTreeMap::new(),
         module: String::new(),
         layouts: crate::types::Context::default(),
         return_ty: None,
@@ -940,11 +1015,23 @@ pub fn compile(
             return Err(p.error("duplicate import"));
         }
         callable.extend(header.exports.iter().map(|(n, s)| (n.clone(), s.clone())));
-        callable.insert(header.name.clone(), header.exports[&header.entry].clone());
+        if let Some(entry) = &header.entry {
+            callable.insert(header.name.clone(), header.exports[entry].clone());
+        }
         p.expect(";")?;
     }
-    while matches!(p.peek(), "struct" | "enum") {
+    let mut public_types = BTreeSet::new();
+    while matches!(p.peek(), "struct" | "enum")
+        || (p.peek() == "pub"
+            && p.tokens
+                .get(p.at + 1)
+                .is_some_and(|s| matches!(s.text, "struct" | "enum")))
+    {
+        let public = p.eat("pub");
         let (n, d) = p.record()?;
+        if public {
+            public_types.insert(n.clone());
+        }
         if definitions.insert(n, d).is_some() {
             return Err(p.error("duplicate record declaration"));
         }
@@ -958,7 +1045,7 @@ pub fn compile(
         }
         functions.push(p.function()?);
     }
-    if functions.is_empty() {
+    if functions.is_empty() && (public_types.is_empty() || explicit.is_none()) {
         return Err(p.error("expected function"));
     }
     let implicit = explicit.is_none();
@@ -988,12 +1075,11 @@ pub fn compile(
     let entry = functions
         .iter()
         .find(|(_, public)| *public)
-        .ok_or_else(|| p.error("explicit module needs a pub function"))?
-        .0
-        .sig
-        .name
-        .clone();
-    let exposed = crate::types::exposed(&exports, &layouts)?;
+        .map(|(f, _)| f.sig.name.clone());
+    if entry.is_none() && public_types.is_empty() {
+        return Err(p.error("explicit module needs a pub function or type"));
+    }
+    let exposed = crate::types::exposed(&exports, &public_types, &layouts)?;
     let header = crate::module::Interface {
         name,
         entry,

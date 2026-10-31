@@ -79,7 +79,7 @@ fn record_abi_hidden_sources_partial_moves_and_allocator_balance() {
     let header =
         grail_seed::module::Interface::decode(&fs::read_to_string(dir.join("audit.api")).unwrap())
             .unwrap();
-    let symbol = grail_seed::emit::symbol(&header.entry);
+    let symbol = grail_seed::emit::symbol(header.entry.as_deref().unwrap());
     fs::write(
         dir.join("main.c"),
         format!(

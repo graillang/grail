@@ -92,7 +92,7 @@ fn nominal_payload_bounds_roundtrip_before_artifact_publication() {
     use grail_seed::{Sig, Ty, module::Interface, types::Definition};
     let sig = Sig {
         name: "wide".into(),
-        params: vec![Ty::Named("many::T".into(), vec![65535; 64]); 64],
+        params: vec![Ty::Named("many::T".into(), vec![65535; 64], vec![]); 64],
         result: Ty::Num,
     };
     let text = sig.encode().unwrap();
@@ -112,6 +112,7 @@ fn nominal_payload_bounds_roundtrip_before_artifact_publication() {
             Definition {
                 kind: grail_seed::types::Kind::Record,
                 regions: 0,
+                parameters: 0,
                 fields: fields.clone(),
             },
         );

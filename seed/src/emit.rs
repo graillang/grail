@@ -14,7 +14,17 @@ fn cty(t: &Ty) -> String {
     match t {
         Ty::Num => "uint64_t".into(),
         Ty::Unit => "uint8_t".into(),
-        Ty::Named(n, _) => format!("t_{}", symbol(n)),
+        Ty::Named(n, _, args) => {
+            if args.is_empty() {
+                format!("t_{}", symbol(n))
+            } else {
+                format!(
+                    "t_g_{}",
+                    crate::sha256::hex(t.erase_regions().word().as_bytes())
+                )
+            }
+        }
+        Ty::Param(_) => unreachable!("unresolved layout type parameter"),
         Ty::Bytes | Ty::Text => "gb".into(),
         Ty::Holder(..) => "gh".into(),
         _ => "gv".into(),
@@ -156,14 +166,25 @@ fn c_functions(functions: &[(&Checked, bool)], layouts: &crate::types::Definitio
     let mut s = String::from(
         "#include <stdint.h>\n#include <stdlib.h>\n#include <string.h>\ntypedef struct { uint8_t *p; uint64_t n; } gv;\ntypedef struct { gv value; } gh;\ntypedef struct {uint8_t*p;uint64_t n,c;} gb;\n#define GRAIL_BYTES_TYPES_DEFINED\n",
     );
-    for n in crate::types::order(layouts).expect("checked layouts") {
-        let d = &layouts[&n];
-        writeln!(s, "typedef struct {{").unwrap();
+    let mut roots = Vec::new();
+    for (p, _) in functions {
+        roots.extend(p.types.values().cloned());
+        for sig in p.imports.values().chain([&p.function.sig]) {
+            roots.extend(sig.params.iter().chain([&sig.result]).cloned());
+        }
+    }
+    for t in crate::types::instances(&roots, layouts).expect("checked layouts") {
+        let Ty::Named(n, _, _) = &t else {
+            unreachable!()
+        };
+        let d = &layouts[n];
+        let fields = crate::types::fields(&t, layouts).unwrap();
+        s.push_str("typedef struct {\n");
         if d.kind == crate::types::Kind::Enum {
             s.push_str("uint64_t tag;\n");
-            if d.fields.iter().any(|(_, t)| *t != Ty::Unit) {
+            if fields.iter().any(|(_, t)| *t != Ty::Unit) {
                 s.push_str("union {\n");
-                for (i, (_, t)) in d.fields.iter().enumerate() {
+                for (i, (_, t)) in fields.iter().enumerate() {
                     if *t != Ty::Unit {
                         writeln!(s, "{} f{i};", cty(t)).unwrap();
                     }
@@ -171,14 +192,14 @@ fn c_functions(functions: &[(&Checked, bool)], layouts: &crate::types::Definitio
                 s.push_str("} data;\n");
             }
         } else {
-            if d.fields.is_empty() {
+            if fields.is_empty() {
                 s.push_str("uint8_t unit;\n");
             }
-            for (i, (_, t)) in d.fields.iter().enumerate() {
+            for (i, (_, t)) in fields.iter().enumerate() {
                 writeln!(s, "{} f{i};", cty(t)).unwrap();
             }
         }
-        writeln!(s, "}} t_{};", symbol(&n)).unwrap();
+        writeln!(s, "}} {};", cty(&t)).unwrap();
     }
     if functions
         .iter()
@@ -251,9 +272,9 @@ fn c_body(p: &Checked, s: &mut String, private: bool) {
         Op::Unwrap{dst,src}=>{let k=crate::types::success(&types[src],layouts).unwrap();writeln!(s,"if(r{src}.tag!={k})abort();").unwrap();if types[dst]==Ty::Unit{writeln!(s,"r{dst}=0;").unwrap();}else{writeln!(s,"r{dst}=r{src}.data.f{k};").unwrap();}record_flags(s,*dst,&types[dst],layouts,true);clear_variant_flags(s,*src,&types[src],layouts,k);},
         Op::Match{src,arms}=>{let fields=crate::types::fields(&types[src],layouts).unwrap();writeln!(s,"switch(r{src}.tag){{").unwrap();for a in arms{let k=fields.iter().position(|(n,_)|*n==a.variant).unwrap();writeln!(s,"case {k}:{{").unwrap();if let Some(r)=a.binding{if types[&r]==Ty::Unit{writeln!(s,"r{r}=0;").unwrap();}else{writeln!(s,"r{r}=r{src}.data.f{k};").unwrap();}record_flags(s,r,&types[&r],layouts,true);}clear_variant_flags(s,*src,&types[src],layouts,k);ops(s,&a.body,types,layouts);if !crate::flow::terminates(&a.body){s.push_str("break;");}s.push_str("}\n");}s.push_str("default:abort();}\n");},
 
-        Op::Record{dst,name,fields}=>{
+        Op::Record{dst,ty,fields}=>{
             writeln!(s,"r{dst}=({}){{0}};",cty(&types[dst])).unwrap();
-            for(field,src)in fields{let i=layouts[name].fields.iter().position(|f|f.0==*field).unwrap();writeln!(s,"r{dst}.f{i}=r{src};").unwrap();record_flags(s,*src,&types[src],layouts,false);}
+            for(field,src)in fields{let i=crate::types::fields(ty,layouts).unwrap().iter().position(|f|f.0==*field).unwrap();writeln!(s,"r{dst}.f{i}=r{src};").unwrap();record_flags(s,*src,&types[src],layouts,false);}
             record_flags(s,*dst,&types[dst],layouts,true);
         },
         Op::FieldMove{dst,src,path}=>{

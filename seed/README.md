@@ -35,8 +35,12 @@ They are demonstration commands, not a surface-language parser or general build 
 - A private validated wrapper gates lowering. Interfaces describe types/regions only, no G1
   post-state inference. Signature decoding validates schema and canonical form, not producer honesty.
 
-No general generics, arbitrary records, Result/error flow, closures, reference-containing heap elements,
-async, destructors, capabilities, interface authentication or language soundness theorem yet.
+Records, tagged enums, consuming match, early returns, `!` unwrap and `?` propagation are supported
+with recursive default cleanup. [Generic value layouts](../docs/design/generic-layouts.md), public
+types and type-only modules support concrete `Result<T,E>`/`Option<T>`/`Pair<T,U>` uses; functions
+remain concretely typed. Generic function bodies, general typed references/containers, closures,
+reference-containing heap elements, async, effectful custom destructors, capabilities, interface
+authentication and a language soundness theorem remain unfinished.
 Numeric branches and byte slicing are now supported in both emitters.
 The compiler's own safe Rust is not a proof that the new checker is sound. The first scaling
 probe exposed repeated whole-state scans. Indexed loan checks now remove those scans; deep
@@ -226,3 +230,19 @@ Postfix `!` consumes an `Ok/Err` or `Some/None` enum, transfers success, and abo
 Exhaustive `match` provides explicit recovery; postfix `?` propagates matching errors/None with
 normal return cleanup. Generic Result/Option remain unfinished.
 See [tagged enums](../docs/design/tagged-enums.md).
+
+## Generic value library
+
+[Rules, evidence and remaining gates](../docs/design/generic-layouts.md). A type-only provider has
+no callable/executable entry. Compile its real source before the concrete provider/client:
+
+```sh
+mkdir -p seed/.work/generics
+seed/target/release/grail-seed compile seed/std/core.grl seed/.work/generics seed/.work/generics clang
+seed/target/release/grail-seed compile seed/examples/generics/parse.grl seed/.work/generics seed/.work/generics clang
+seed/target/release/grail-seed build seed/examples/generics/client.grl seed/.work/generics seed/.work/generics clang
+seed/.work/generics/client 42  # 47
+```
+
+The client needs only immutable checked provider artifacts; source-hidden tests remove both provider
+sources before compiling it. Rebuild prior artifacts for module schema 4 / function schema 6.

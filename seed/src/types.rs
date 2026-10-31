@@ -18,6 +18,7 @@ impl Kind {
 pub struct Definition {
     pub kind: Kind,
     pub regions: u16,
+    pub parameters: u16,
     pub fields: Vec<(String, Ty)>,
 }
 pub type Definitions = BTreeMap<String, Definition>;
@@ -39,44 +40,57 @@ impl std::ops::Deref for Context {
         &self.definitions
     }
 }
-fn substitute(t: &Ty, args: &[u16]) -> Result<Ty, String> {
+fn substitute(t: &Ty, regions: &[u16], args: &[Ty]) -> Result<Ty, String> {
     let slot = |r: &u16| {
-        args.get(*r as usize)
+        regions
+            .get(*r as usize)
             .copied()
-            .ok_or_else(|| "record lifetime slot out of range".to_string())
+            .ok_or_else(|| "layout lifetime slot out of range".to_string())
     };
-    Ok(match t {
+    let result = match t {
+        Ty::Param(i) => args
+            .get(*i as usize)
+            .ok_or("layout type slot out of range")?
+            .clone(),
         Ty::View(m, r) => Ty::View(*m, slot(r)?),
         Ty::Holder(m, r) => Ty::Holder(*m, slot(r)?),
-        Ty::Named(n, rs) => Ty::Named(n.clone(), rs.iter().map(slot).collect::<Result<_, _>>()?),
+        Ty::Named(n, rs, ts) => Ty::Named(
+            n.clone(),
+            rs.iter().map(slot).collect::<Result<_, _>>()?,
+            ts.iter()
+                .map(|t| substitute(t, regions, args))
+                .collect::<Result<_, _>>()?,
+        ),
         _ => t.clone(),
-    })
+    };
+    result.validate_shape(64)?;
+    Ok(result)
 }
-pub fn fields(t: &Ty, defs: &Definitions) -> Result<Vec<(String, Ty)>, String> {
-    let Ty::Named(n, args) = t else {
+fn application<'a, 'b>(
+    t: &'b Ty,
+    defs: &'a Definitions,
+) -> Result<(&'a Definition, &'b [u16], &'b [Ty]), String> {
+    let Ty::Named(n, rs, args) = t else {
         return Err("expected nominal type".into());
     };
     let d = defs
         .get(n)
         .ok_or_else(|| format!("unknown nominal type {n}"))?;
-    if args.len() != d.regions as usize {
-        return Err("record lifetime arity".into());
+    if rs.len() != d.regions as usize || args.len() != d.parameters as usize {
+        return Err("nominal lifetime/type argument arity".into());
     }
+    Ok((d, rs, args))
+}
+pub fn fields(t: &Ty, defs: &Definitions) -> Result<Vec<(String, Ty)>, String> {
+    let (d, rs, args) = application(t, defs)?;
     d.fields
         .iter()
-        .map(|(n, t)| Ok((n.clone(), substitute(t, args)?)))
+        .map(|(n, t)| Ok((n.clone(), substitute(t, rs, args)?)))
         .collect()
 }
-/// Resolve only the selected child; do not clone a whole union table for a path step.
 pub fn field(t: &Ty, index: usize, defs: &Definitions) -> Result<Ty, String> {
-    let Ty::Named(n, args) = t else {
-        return Err("expected nominal type".into());
-    };
-    let d = defs.get(n).ok_or("unknown nominal type")?;
-    if args.len() != d.regions as usize {
-        return Err("nominal lifetime arity".into());
-    }
-    substitute(&d.fields.get(index).ok_or("field index")?.1, args)
+    let (d, rs, args) = application(t, defs)?;
+    substitute(&d.fields.get(index).ok_or("field index")?.1, rs, args)
 }
 pub fn leaves(t: &Ty, defs: &Definitions) -> Result<Vec<(Vec<usize>, Ty)>, String> {
     fn walk(
@@ -130,86 +144,105 @@ pub fn at(t: &Ty, path: &[usize], defs: &Definitions) -> Result<Ty, String> {
     }
     Ok(t)
 }
-pub fn order(defs: &Definitions) -> Result<Vec<String>, String> {
+/// Deterministic physical instance order. Regions never multiply native layouts.
+pub fn instances(roots: &[Ty], defs: &Definitions) -> Result<Vec<Ty>, String> {
     fn visit(
-        n: &str,
+        t: &Ty,
         defs: &Definitions,
         active: &mut BTreeSet<String>,
         done: &mut BTreeSet<String>,
-        out: &mut Vec<String>,
+        out: &mut Vec<Ty>,
     ) -> Result<(), String> {
-        if done.contains(n) {
+        if !matches!(t, Ty::Named(..)) {
             return Ok(());
         }
-        if !active.insert(n.into()) {
-            return Err("recursive by-value nominal layout".into());
+        t.validate_shape(64)?;
+        let t = t.erase_regions();
+        let key = t.word();
+        if done.contains(&key) {
+            return Ok(());
         }
         if active.len() > 64 {
-            return Err("record depth limit".into());
+            return Err("layout depth limit".into());
         }
-        let d = defs
-            .get(n)
-            .ok_or_else(|| format!("unknown nominal type {n}"))?;
-        for (_, t) in &d.fields {
-            if let Ty::Named(child, args) = t {
-                let c = defs
-                    .get(child)
-                    .ok_or_else(|| format!("unknown nominal type {child}"))?;
-                if args.len() != c.regions as usize {
-                    return Err("record lifetime arity".into());
-                }
-                visit(child, defs, active, done, out)?;
-            }
+        if !active.insert(key.clone()) {
+            return Err("recursive by-value nominal layout".into());
         }
-        active.remove(n);
-        done.insert(n.into());
-        out.push(n.into());
+        for (_, field) in fields(&t, defs)? {
+            visit(&field, defs, active, done, out)?;
+        }
+        active.remove(&key);
+        done.insert(key);
+        out.push(t);
         Ok(())
     }
-    let mut out = Vec::new();
+    let mut result = Vec::new();
     let mut done = BTreeSet::new();
-    for n in defs.keys() {
-        visit(n, defs, &mut BTreeSet::new(), &mut done, &mut out)?;
+    for t in roots {
+        visit(t, defs, &mut BTreeSet::new(), &mut done, &mut result)?;
     }
-    Ok(out)
+    Ok(result)
+}
+fn references(t: &Ty, defs: &Definitions, regions: Option<u16>) -> Result<(), String> {
+    match t {
+        Ty::Named(_, rs, args) => {
+            application(t, defs)?;
+            if regions.is_some_and(|count| rs.iter().any(|r| *r >= count)) {
+                return Err("undeclared layout lifetime".into());
+            }
+            for a in args {
+                references(a, defs, regions)?;
+            }
+        }
+        Ty::View(_, r) | Ty::Holder(_, r) if regions.is_some_and(|count| *r >= count) => {
+            return Err("undeclared layout lifetime".into());
+        }
+        _ => {}
+    }
+    Ok(())
+}
+pub fn validate_value_type(t: &Ty, defs: &Definitions) -> Result<(), String> {
+    t.validate_shape(0)?;
+    references(t, defs, None)?;
+    leaves(t, defs)?;
+    Ok(())
 }
 pub fn validate(defs: &Definitions) -> Result<(), String> {
     if defs.len() > 4096 {
-        return Err("record definition count limit".into());
+        return Err("layout definition count limit".into());
     }
     for (n, d) in defs {
         if !qualified_ok(n)
             || d.regions > 64
+            || d.parameters > 64
             || d.fields.len() > 64
             || (d.kind == Kind::Enum && d.fields.is_empty())
         {
-            return Err("invalid record declaration".into());
+            return Err("invalid layout declaration".into());
         }
         let mut names = BTreeSet::new();
         for (name, t) in &d.fields {
-            if !name_ok(name) || !names.insert(name) || *t == Ty::Buffer {
-                return Err("invalid/duplicate record field".into());
+            if !name_ok(name) || !names.insert(name) {
+                return Err("invalid/duplicate layout field".into());
             }
-            let rs = match t {
-                Ty::View(_, r) | Ty::Holder(_, r) => vec![*r],
-                Ty::Named(_, rs) => rs.clone(),
-                _ => vec![],
-            };
-            if rs.iter().any(|r| *r >= d.regions) {
-                return Err("undeclared record lifetime".into());
-            }
+            t.validate_shape(d.parameters)?;
+            references(t, defs, Some(d.regions))?;
         }
     }
-    order(defs)?;
     for (n, d) in defs {
-        leaves(&Ty::Named(n.clone(), (0..d.regions).collect()), defs)?;
+        let t = Ty::Named(
+            n.clone(),
+            (0..d.regions).collect(),
+            (0..d.parameters).map(Ty::Param).collect(),
+        );
+        leaves(&t, defs)?;
     }
     Ok(())
 }
 pub fn validate_sig(sig: &Sig, defs: &Definitions) -> Result<(), String> {
     sig.validate()?;
     for t in sig.params.iter().chain([&sig.result]) {
-        leaves(t, defs)?;
+        validate_value_type(t, defs)?;
     }
     if let Some((mode, region)) = sig.result.reference() {
         let input = sig
@@ -228,31 +261,50 @@ pub fn validate_sig(sig: &Sig, defs: &Definitions) -> Result<(), String> {
     Ok(())
 }
 /// Only layouts reachable from public signatures belong in the public surface.
-pub fn exposed(sigs: &BTreeMap<String, Sig>, defs: &Definitions) -> Result<Definitions, String> {
+pub fn exposed(
+    sigs: &BTreeMap<String, Sig>,
+    public_types: &BTreeSet<String>,
+    defs: &Definitions,
+) -> Result<Definitions, String> {
     fn add(t: &Ty, defs: &Definitions, out: &mut Definitions) -> Result<(), String> {
-        if let Ty::Named(n, _) = t
-            && !out.contains_key(n)
-        {
-            let d = defs.get(n).ok_or("missing exported record")?.clone();
-            out.insert(n.clone(), d.clone());
-            for (_, t) in d.fields {
-                add(&t, defs, out)?;
+        if let Ty::Named(n, _, args) = t {
+            if !out.contains_key(n) {
+                let d = defs.get(n).ok_or("missing exported layout")?.clone();
+                out.insert(n.clone(), d.clone());
+                for (_, t) in &d.fields {
+                    add(t, defs, out)?;
+                }
+            }
+            for a in args {
+                add(a, defs, out)?;
             }
         }
         Ok(())
     }
     let mut out = Definitions::new();
-    for sig in sigs.values() {
-        for t in sig.params.iter().chain([&sig.result]) {
+    for s in sigs.values() {
+        for t in s.params.iter().chain([&s.result]) {
             add(t, defs, &mut out)?;
         }
+    }
+    for n in public_types {
+        let d = defs.get(n).ok_or("unknown public layout")?;
+        add(
+            &Ty::Named(
+                n.clone(),
+                (0..d.regions).collect(),
+                (0..d.parameters).map(Ty::Param).collect(),
+            ),
+            defs,
+            &mut out,
+        )?;
     }
     Ok(out)
 }
 
 pub fn is_enum(t: &Ty, defs: &Definitions) -> Result<bool, String> {
     match t {
-        Ty::Named(n, _) => Ok(defs.get(n).ok_or("unknown nominal type")?.kind == Kind::Enum),
+        Ty::Named(n, _, _) => Ok(defs.get(n).ok_or("unknown nominal type")?.kind == Kind::Enum),
         _ => Ok(false),
     }
 }

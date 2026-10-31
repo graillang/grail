@@ -10,6 +10,7 @@ pub mod module;
 mod sha256;
 pub mod source;
 mod sum;
+mod ty;
 pub mod types;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -22,106 +23,14 @@ pub enum Mode {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Ty {
     Num,
-    Named(String, Vec<u16>),
+    Named(String, Vec<u16>, Vec<Ty>),
+    Param(u16),
     Unit,
     Buffer,
     Bytes,
     Text,
     View(Mode, u16),
     Holder(Mode, u16),
-}
-impl Ty {
-    fn copy(&self) -> bool {
-        matches!(self, Self::Num | Self::Unit)
-    }
-    fn owned(&self) -> bool {
-        matches!(
-            self,
-            Self::Buffer | Self::Bytes | Self::Text | Self::Named(..)
-        )
-    }
-    fn heap(&self) -> bool {
-        matches!(self, Self::Bytes | Self::Text)
-    }
-    fn reference(&self) -> Option<(Mode, u16)> {
-        match self {
-            Self::View(m, r) | Self::Holder(m, r) => Some((*m, *r)),
-            _ => None,
-        }
-    }
-    fn word(&self) -> String {
-        match self {
-            Self::Unit => "u".into(),
-            Self::Num => "n".into(),
-            Self::Named(n, args) => format!(
-                "t{n}@{}",
-                args.iter()
-                    .map(u16::to_string)
-                    .collect::<Vec<_>>()
-                    .join(":")
-            ),
-            Self::Buffer => "b".into(),
-            Self::Bytes => "o".into(),
-            Self::Text => "s".into(),
-            Self::View(m, r) => format!("{}{}", if *m == Mode::Read { "r" } else { "w" }, r),
-            Self::Holder(m, r) => format!("h{}{}", if *m == Mode::Read { "r" } else { "w" }, r),
-        }
-    }
-    fn parse(s: &str) -> Result<Self, String> {
-        if let Some(s) = s.strip_prefix('t') {
-            let (n, args) = s.split_once('@').ok_or("invalid record type")?;
-            if !qualified_ok(n) {
-                return Err("invalid record name".into());
-            }
-            let args = if args.is_empty() {
-                Vec::new()
-            } else {
-                args.split(':')
-                    .map(|r| {
-                        r.parse::<u16>()
-                            .map_err(|_| "invalid record region".to_string())
-                    })
-                    .collect::<Result<Vec<_>, _>>()?
-            };
-            if args.len() > 64 {
-                return Err("record lifetime arity limit".into());
-            }
-            return Ok(Self::Named(n.into(), args));
-        }
-
-        if s == "u" {
-            return Ok(Self::Unit);
-        }
-        if s == "n" {
-            return Ok(Self::Num);
-        }
-        if s == "s" {
-            return Ok(Self::Text);
-        }
-        if s == "o" {
-            return Ok(Self::Bytes);
-        }
-        let (holder, s) = if let Some(s) = s.strip_prefix('h') {
-            (true, s)
-        } else {
-            (false, s)
-        };
-        let m = match s.as_bytes().first() {
-            Some(b'r') => Mode::Read,
-            Some(b'w') => Mode::Write,
-            _ => return Err("invalid interface type".into()),
-        };
-        let r = s
-            .get(1..)
-            .ok_or("invalid region")?
-            .parse::<u16>()
-            .map_err(|_| "invalid region")?;
-        Ok(if holder {
-            Self::Holder(m, r)
-        } else {
-            Self::View(m, r)
-        })
-    }
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Sig {
@@ -144,21 +53,8 @@ impl Sig {
         if !(name_ok(&self.name) || qualified_ok(&self.name)) || self.params.len() > 64 {
             return Err("invalid signature name/arity".into());
         }
-        if self
-            .params
-            .iter()
-            .chain([&self.result])
-            .any(|t| matches!(t,Ty::Named(n,args)if !qualified_ok(n)||args.len()>64))
-        {
-            return Err("invalid nominal signature type".into());
-        }
-        if self
-            .params
-            .iter()
-            .chain([&self.result])
-            .any(|t| *t == Ty::Buffer)
-        {
-            return Err("owned buffers cannot cross seed interfaces".into());
+        for ty in self.params.iter().chain([&self.result]) {
+            ty.validate_shape(0)?;
         }
         if let Some((mode, r)) = self.result.reference()
             && !self.params.iter().any(|t| matches!(t, Ty::Named(..)))
@@ -173,8 +69,8 @@ impl Sig {
     }
     pub fn encode(&self) -> Result<String, String> {
         self.validate()?;
-        Ok(format!(
-            "grail-seed-interface-5\n{}\n{}\n{}\n",
+        let text = format!(
+            "grail-seed-interface-6\n{}\n{}\n{}\n",
             self.name,
             self.params
                 .iter()
@@ -182,14 +78,18 @@ impl Sig {
                 .collect::<Vec<_>>()
                 .join(","),
             self.result.word()
-        ))
+        );
+        if text.len() > 65536 {
+            return Err("interface too large".into());
+        }
+        Ok(text)
     }
     pub fn decode(text: &str) -> Result<Self, String> {
         if text.len() > 65536 {
             return Err("interface too large".into());
         }
         let lines = text.lines().collect::<Vec<_>>();
-        if lines.len() != 4 || lines[0] != "grail-seed-interface-5" {
+        if lines.len() != 4 || lines[0] != "grail-seed-interface-6" {
             return Err("invalid interface schema".into());
         }
         let params = if lines[2].is_empty() {
@@ -237,7 +137,7 @@ pub enum Op {
     Unit(Reg),
     Variant {
         dst: Reg,
-        name: String,
+        ty: Ty,
         variant: usize,
         payload: Option<Reg>,
     },
@@ -251,7 +151,7 @@ pub enum Op {
     },
     Record {
         dst: Reg,
-        name: String,
+        ty: Ty,
         fields: Vec<(String, Reg)>,
     },
     FieldMove {
@@ -560,10 +460,10 @@ impl State {
                 }
                 Op::Variant {
                     dst,
-                    name,
+                    ty,
                     variant,
                     payload,
-                } => self.variant_value(*dst, name, *variant, *payload)?,
+                } => self.variant_value(*dst, ty, *variant, *payload)?,
                 Op::Unwrap { dst, src } => {
                     let k = self.success(*src)?;
                     let unit = types::fields(&self.get(*src)?.ty, &self.layouts)?[k].1 == Ty::Unit;
@@ -672,7 +572,7 @@ impl State {
                     let v = self.borrow_value(p, *mode)?;
                     self.put(*dst, v)?;
                 }
-                Op::Record { dst, name, fields } => self.record_value(*dst, name, fields)?,
+                Op::Record { dst, ty, fields } => self.record_value(*dst, ty, fields)?,
                 Op::FieldMove { dst, src, path } => self.field_move(*dst, *src, path)?,
                 Op::FieldBorrow {
                     dst,

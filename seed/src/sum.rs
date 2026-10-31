@@ -13,15 +13,20 @@ impl State {
     pub(super) fn variant_value(
         &mut self,
         dst: Reg,
-        name: &str,
+        ty: &Ty,
         variant: usize,
         payload: Option<Reg>,
     ) -> Result<(), String> {
-        let d = self.layouts.get(name).ok_or("unknown enum")?.clone();
-        if d.kind != types::Kind::Enum {
+        types::validate_value_type(ty, &self.layouts)?;
+        let Ty::Named(name, _, _) = ty else {
+            return Err("variant constructor needs nominal type".into());
+        };
+        let kind = self.layouts.get(name).ok_or("unknown enum")?.kind;
+        let fields = types::fields(ty, &self.layouts)?;
+        if kind != types::Kind::Enum {
             return Err("variant constructor needs enum".into());
         }
-        let expected = &d.fields.get(variant).ok_or("unknown variant")?.1;
+        let expected = &fields.get(variant).ok_or("unknown variant")?.1;
         let actual = if let Some(r) = payload {
             let v = self.usable(r)?;
             if !aggregate::compatible(&v.ty, expected) {
@@ -41,11 +46,11 @@ impl State {
             self.inactive_value(expected)?
         };
         let mut v = self.new_value(
-            Ty::Named(name.into(), vec![0; d.regions as usize]),
+            ty.clone(),
             BTreeSet::from([Root::Local(dst, vec![])]),
             BTreeSet::new(),
         );
-        for (i, (_, t)) in d.fields.iter().enumerate() {
+        for (i, (_, t)) in fields.iter().enumerate() {
             v.fields.push(Some(if i == variant {
                 actual.clone()
             } else {

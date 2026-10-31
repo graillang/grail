@@ -52,7 +52,7 @@ fn early_returns_cleanup_selected_backend_objects_and_llvm_terminators() {
     )
     .unwrap();
     let header = grail_seed::artifact::load(&dir, "audit").unwrap();
-    let symbol = grail_seed::emit::symbol(&header.header.entry);
+    let symbol = grail_seed::emit::symbol(header.header.entry.as_deref().unwrap());
     for (n, previous) in [(0, 3), (1, 2)] {
         fs::write(dir.join("main.c"),format!("#include <stdint.h>\nuint64_t {symbol}(uint64_t);int main(void){{return {symbol}({n})!=1;}}\n")).unwrap();
         run(Command::new("clang")
@@ -69,7 +69,7 @@ fn early_returns_cleanup_selected_backend_objects_and_llvm_terminators() {
     fs::write(dir.join("capture.grl"),"module capture;struct T<a>{span:mut<a>,name:string}pub fn run()->num{let b=bytes();push(b,7);let t=T{span:mut(b),name:\"n\"};let r=span(t,1);assert(at(r,0)==7);push(b,8);return len(b);}fn span<a>(t:T<a>,n:num)->read<a>{if n{return read(t.span);}return read(t.span);}").unwrap();
     compile(&dir, "capture.grl", &backend);
     let capture = grail_seed::artifact::load(&dir, "capture").unwrap();
-    let symbol = grail_seed::emit::symbol(&capture.header.entry);
+    let symbol = grail_seed::emit::symbol(capture.header.entry.as_deref().unwrap());
     fs::write(
         dir.join("capture-main.c"),
         format!(

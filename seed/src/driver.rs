@@ -102,7 +102,9 @@ pub fn compile(
         &work.path,
     )?;
     if build {
-        let sig = checked.entry_signature();
+        let sig = checked
+            .entry_signature()
+            .ok_or("type-only module has no executable entry")?;
         let params = match sig.params.as_slice() {
             [] => "void",
             [Ty::View(Mode::Read, _)] => "gv",

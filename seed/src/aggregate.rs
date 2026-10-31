@@ -190,25 +190,29 @@ impl State {
     pub(super) fn record_value(
         &mut self,
         dst: Reg,
-        name: &str,
+        ty: &Ty,
         fields: &[(String, Reg)],
     ) -> Result<(), String> {
-        let d = self
+        types::validate_value_type(ty, &self.layouts)?;
+        let Ty::Named(name, _, _) = ty else {
+            return Err("record constructor needs nominal type".into());
+        };
+        let kind = self
             .layouts
             .get(name)
             .ok_or("unknown record constructor")?
-            .clone();
-        if fields.len() != d.fields.len() {
+            .kind;
+        let layout = types::fields(ty, &self.layouts)?;
+        if fields.len() != layout.len() {
             return Err("record constructor field count".into());
         }
-        if d.kind != types::Kind::Record {
+        if kind != types::Kind::Record {
             return Err("enum needs a variant constructor".into());
         }
-        let mut values = vec![None; d.fields.len()];
+        let mut values = vec![None; layout.len()];
         let mut consumed = BTreeSet::new();
         for (name, r) in fields {
-            let (i, (_, expected)) = d
-                .fields
+            let (i, (_, expected)) = layout
                 .iter()
                 .enumerate()
                 .find(|(_, f)| f.0 == *name)
@@ -229,7 +233,7 @@ impl State {
             self.remove(r);
         }
         let mut v = self.new_value(
-            Ty::Named(name.into(), vec![0; d.regions as usize]),
+            ty.clone(),
             BTreeSet::from([Root::Local(dst, vec![])]),
             BTreeSet::new(),
         );
@@ -274,7 +278,9 @@ impl State {
 }
 pub(super) fn compatible(a: &Ty, b: &Ty) -> bool {
     match (a, b) {
-        (Ty::Named(a, _), Ty::Named(b, _)) => a == b,
+        (Ty::Named(a, _, xs), Ty::Named(b, _, ys)) => {
+            a == b && xs.len() == ys.len() && xs.iter().zip(ys).all(|(x, y)| compatible(x, y))
+        }
         (Ty::View(a, _), Ty::View(b, _)) | (Ty::Holder(a, _), Ty::Holder(b, _)) => a == b,
         _ => a == b,
     }

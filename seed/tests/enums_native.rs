@@ -98,7 +98,7 @@ fn hidden_sum_payloads_match_unwrap_abort_and_cleanup() {
     fs::write(dir.join("audit.grl"),r#"module audit;enum R{Ok(string),Err(string)}enum Outer{Ok(R),Err(string)}struct Pair{first:R,second:R}pub fn run()->num{let source=bytes();push(source,7);let a=R::Ok("a");let b=R::Err("bb");let pair=Pair{first:a,second:b};for i in 10{let nested=make(i);assert(discard(make(i))==0);}let chained=make(1)!!;assert(len(chained)==1);drop(chained);let b=pair.second;match b{Ok(s)=>{assert(len(s)==1);},Err(e)=>{assert(len(e)==2);}}let s=pair.first!;assert(len(s)==1);drop(s);return len(source);}fn make(n:num)->Outer{if n%2{return Outer::Ok(R::Ok("x"));}return Outer::Err("yy");}fn discard(r:Outer)->num{return 0;}"#).unwrap();
     compile(&dir, "audit", false, &backend);
     let audit = grail_seed::artifact::load(&dir, "audit").unwrap();
-    let symbol = grail_seed::emit::symbol(&audit.header.entry);
+    let symbol = grail_seed::emit::symbol(audit.header.entry.as_deref().unwrap());
     fs::write(
         dir.join("main.c"),
         format!(

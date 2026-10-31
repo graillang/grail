@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Implement public generic record/enum value layouts and real type-only modules, including a
+  `core` library with `Result<T,E>`, `Option<T>` and `Pair<T,U>`. Substitute nested type/lifetime
+  arguments without rebinding inserted lifetimes; preserve ownership, origins and error propagation.
+  Replace the name-only layout walk with concrete instance ordering; erase lifetime values from
+  native instance keys, not modes/shapes. Bound producer/consumer codecs (module 4 / function 6),
+  reject old artifacts without compatibility branches, and validate source-hidden native composition,
+  recursive cleanup, mixed clang/TinyCC ABIs, invalidation, independent Rust results and costs.
+  Generic functions, general typed references/containers and self-hosting remain unfinished.
+
 - Retain a generic-lowering comparison across native development/release profiles with real
   source-token/owned-node workloads, instance counts, independent checksums and lifetime controls.
   Select an initial static-specialization implementation while preserving evidence for shared code;

@@ -76,7 +76,7 @@ fn propagation_uses_normal_returns_across_hidden_modules_and_every_cleanup_front
         fs::write(dir.join(format!("{name}.grl")), source).unwrap();
         compile(&dir, name, false, &backend);
         let own = grail_seed::artifact::load(&dir, name).unwrap();
-        let symbol = grail_seed::emit::symbol(&own.header.entry);
+        let symbol = grail_seed::emit::symbol(own.header.entry.as_deref().unwrap());
         let order = frees
             .iter()
             .enumerate()

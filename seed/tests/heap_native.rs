@@ -87,7 +87,7 @@ fn returned_cloned_and_loop_local_owners_are_freed_once_at_scope_exit() {
     let header =
         grail_seed::module::Interface::decode(&fs::read_to_string(dir.join("scope.api")).unwrap())
             .unwrap();
-    let symbol = grail_seed::emit::symbol(&header.entry);
+    let symbol = grail_seed::emit::symbol(header.entry.as_deref().unwrap());
     fs::write(
         dir.join("scope-main.c"),
         format!(
