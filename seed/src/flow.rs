@@ -76,18 +76,23 @@ impl State {
         if !compatible {
             return Err("return type mismatch".into());
         }
-        for (path, t) in types::leaves(&sig.result, &self.layouts)? {
-            if let Some((mode, region)) = t.reference() {
-                for root in &result.at(&path)?.roots {
-                    let Root::Param(i, p) = root else {
+        for source in provenance::sources(&sig.result, &self.layouts)? {
+            let (mode, region) = source.ty.reference().expect("reference source");
+            for value in self.path_values(&result, &source.path)? {
+                for root in &value.roots {
+                    let Root::Param(i, path) = root else {
                         return Err("local owner escapes".into());
                     };
-                    let input = types::at(&sig.params[*i], p, &self.layouts)?;
+                    let input = types::at(&sig.params[*i], path, &self.layouts)?;
                     let Some((m, r)) = input.reference() else {
                         return Err("invalid return origin".into());
                     };
-                    if r != region || (mode == Mode::Write && m != Mode::Write) {
-                        return Err("return violates written region relationship".into());
+                    if !self.regions.outlives(r, region)
+                        || (mode == Mode::Write && m != Mode::Write)
+                    {
+                        return Err(
+                            "return violates written region relationship or outer frame".into()
+                        );
                     }
                 }
             }

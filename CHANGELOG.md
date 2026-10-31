@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Support readonly typed references to captured values: distinguish dereferenced stored-source roots
+  from outer frames, derive outlives constraints from written inputs and copy shared descriptors
+  without extending unique-field reborrows. Check nested return bounds, preserve captures under
+  live frame loans, emit proper nested const pointers and execute descriptor loads in C/LLVM.
+  Retain hidden-source cleanup, independent Rust, frozen replay and cursor-token costs. Mutable
+  capture witnesses/invariance/writeback, real general containers and self-hosting remain required.
+
 - Add typed storage references for lifetime-free referents: explicit place borrows, indirect scalar
   loads, generic/core replacement, owned descriptor/record mutation and C/numeric LLVM lowering.
   Keep addressed scalar storage alive, enforce indexed field/storage exclusion and preserve owned

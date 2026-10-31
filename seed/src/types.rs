@@ -141,7 +141,14 @@ pub fn project(t: &Ty, path: &[String], defs: &Definitions) -> Result<(Vec<usize
 pub fn at(t: &Ty, path: &[usize], defs: &Definitions) -> Result<Ty, String> {
     let mut t = t.clone();
     for i in path {
-        t = field(&t, *i, defs)?;
+        t = if *i == crate::provenance::DEREF {
+            let Ty::Ref(_, _, inner) = t else {
+                return Err("invalid dereference provenance".into());
+            };
+            *inner
+        } else {
+            field(&t, *i, defs)?
+        };
     }
     Ok(t)
 }
@@ -189,10 +196,32 @@ pub fn instances(roots: &[Ty], defs: &Definitions) -> Result<Vec<Ty>, String> {
 }
 fn references(t: &Ty, defs: &Definitions, regions: Option<u16>) -> Result<(), String> {
     match t {
-        Ty::Ref(_, r, inner) => {
+        Ty::Ref(mode, r, inner) => {
             if regions.is_some_and(|count| *r >= count) {
                 return Err("undeclared typed-reference lifetime".into());
             }
+            fn graph(
+                t: &Ty,
+                defs: &Definitions,
+                depth: usize,
+                nodes: &mut usize,
+            ) -> Result<(), String> {
+                *nodes += 1;
+                if depth > 64 || *nodes > 4096 {
+                    return Err("reference provenance expansion limit".into());
+                }
+                match t {
+                    Ty::Ref(_, _, inner) => graph(inner, defs, depth + 1, nodes)?,
+                    Ty::Named(..) => {
+                        for (_, f) in fields(t, defs)? {
+                            graph(&f, defs, depth + 1, nodes)?;
+                        }
+                    }
+                    _ => {}
+                }
+                Ok(())
+            }
+            graph(inner, defs, 0, &mut 0)?;
             references(inner, defs, regions)?;
             // Capture-bearing referents require invariant lifetime witnesses and opaque writeback.
             // This first storage gate must fail closed, not treat placeholder region zero as proof.
@@ -227,7 +256,7 @@ fn references(t: &Ty, defs: &Definitions, regions: Option<u16>) -> Result<(), St
                     _ => Ok(true),
                 }
             }
-            if !plain(inner, defs, 0, &mut 0)? {
+            if *mode == crate::Mode::Write && !plain(inner, defs, 0, &mut 0)? {
                 return Err(
                     "capture-bearing typed referents require the pending invariance/writeback gate"
                         .into(),
@@ -275,7 +304,14 @@ pub(crate) fn required_plain(t: &Ty, defs: &Definitions) -> Result<BTreeSet<u16>
             Ty::Param(i) if plain => {
                 out.insert(*i);
             }
-            Ty::Ref(_, _, t) => collect(t, defs, true, out, depth + 1, nodes)?,
+            Ty::Ref(m, _, t) => collect(
+                t,
+                defs,
+                plain || *m == crate::Mode::Write,
+                out,
+                depth + 1,
+                nodes,
+            )?,
             Ty::Named(_, _, args) => {
                 for t in args {
                     collect(t, defs, plain, out, depth + 1, nodes)?;
@@ -336,18 +372,14 @@ pub(crate) fn validate_sig_bound(
     for t in sig.params.iter().chain([&sig.result]) {
         validate_type(t, defs, parameters)?;
     }
-    if let Some((mode, region)) = sig.result.reference() {
-        let input = sig
-            .params
-            .iter()
-            .map(|t| leaves(t, defs))
-            .collect::<Result<Vec<_>, _>>()?;
-        if !input.iter().flatten().any(|(_, t)| {
-            t.reference().is_some_and(|(m, r)| {
-                r == region && (mode == crate::Mode::Read || m == crate::Mode::Write)
-            })
-        }) {
-            return Err("result region has no suitable input capture".into());
+    if sig.result.reference().is_some() {
+        let contract = crate::provenance::Contract::new(sig, defs)?;
+        let mut suitable = false;
+        for source in contract.inputs.iter().flatten() {
+            suitable |= source.eligible(&sig.result, &contract, defs)?;
+        }
+        if !suitable {
+            return Err("result region has no suitable input capture or frame".into());
         }
     }
     Ok(())

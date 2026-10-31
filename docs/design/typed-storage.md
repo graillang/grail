@@ -1,6 +1,8 @@
 # Typed storage foundation — partial reference gate
 
-This implements addressable storage and **lifetime-free referents**. It is not the complete
+This records the initial addressable-storage / **lifetime-free referent** checkpoint.
+[Readonly captured references](captured-references.md) now extend the shared side; mutable
+capture-bearing storage is still pending. The restrictions below describe that initial checkpoint. It is not the complete
 [typed-reference/invariance/writeback gate](generic-lowering-gates.md). Captured-reference cursors,
 mutable cells/vectors of references and arbitrary-element heap containers remain required work.
 Their unsupported cases are not counted as successful rejection proofs.

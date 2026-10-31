@@ -14,8 +14,8 @@ fn cty(t: &Ty) -> String {
     match t {
         Ty::Ref(m, _, t) => format!(
             "{}{}*",
-            if *m == Mode::Read { "const " } else { "" },
-            cty(t)
+            cty(t),
+            if *m == Mode::Read { " const" } else { "" }
         ),
         Ty::Num => "uint64_t".into(),
         Ty::Unit => "uint8_t".into(),
@@ -115,8 +115,8 @@ fn clear_variant_flags(
     }
 }
 fn view_expr(value: String, t: &Ty) -> String {
-    if matches!(t, Ty::Ref(..)) {
-        return format!("((gv){{{value}->p,{value}->n}})");
+    if let Ty::Ref(_, _, inner) = t {
+        return view_expr(format!("(*{value})"), inner);
     }
     if t.heap() {
         format!("((gv){{{value}.p,{value}.n}})")
@@ -127,8 +127,8 @@ fn view_expr(value: String, t: &Ty) -> String {
     }
 }
 fn view(r: Reg, types: &BTreeMap<Reg, Ty>) -> String {
-    if matches!(types[&r], Ty::Ref(..)) {
-        return format!("((gv){{r{r}->p,r{r}->n}})");
+    if let Ty::Ref(_, _, inner) = &types[&r] {
+        return view_expr(format!("(*r{r})"), inner);
     }
     if types[&r].heap() {
         return format!("((gv){{r{r}.p,r{r}.n}})");
@@ -414,6 +414,17 @@ impl Ll {
         self.line(format!("%{v} = load {}, ptr %r{r}", lty(&self.types[&r])));
         format!("%{v}")
     }
+    fn view_load(&mut self, r: Reg) -> String {
+        let value = self.load(r);
+        if let Ty::Ref(_, _, inner) = &self.types[&r] {
+            let ty = lty(inner);
+            let result = self.fresh();
+            self.line(format!("%{result} = load {ty}, ptr {value}"));
+            format!("%{result}")
+        } else {
+            value
+        }
+    }
     fn store(&mut self, r: Reg, v: &str) {
         self.line(format!("store {} {v}, ptr %r{r}", lty(&self.types[&r])))
     }
@@ -546,7 +557,11 @@ impl Ll {
                     self.line(format!("br label %{head}"));
                     writeln!(self.s, "{done}:").unwrap();
                 }
-                Op::Borrow { dst, src, .. } | Op::Move { dst, src } | Op::Pack { dst, src } => {
+                Op::Borrow { dst, src, .. } => {
+                    let v = self.view_load(*src);
+                    self.store(*dst, &v)
+                }
+                Op::Move { dst, src } | Op::Pack { dst, src } => {
                     let v = self.load(*src);
                     self.store(*dst, &v)
                 }

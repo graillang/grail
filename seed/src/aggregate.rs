@@ -117,13 +117,19 @@ impl State {
         }
         if let Ty::Ref(_, _, inner) = t {
             let base = Root::Param(input, path.clone());
-            let target = self.parameter_value(inner, input, path)?;
+            path.push(provenance::DEREF);
+            let mut target = self.parameter_value(inner, input, path)?;
+            path.pop();
+            reference::rename_owned(&mut target, &base, &[]);
             self.memory.insert(base.clone(), target);
             v.targets.insert(reference::Place { base, path: vec![] });
         }
         Ok(v)
     }
     pub(super) fn borrow_value(&mut self, p: Value, mode: Mode) -> Result<Value, String> {
+        if matches!(p.ty, Ty::Ref(..)) {
+            return self.borrow_reference_bytes(&p, mode);
+        }
         self.usable_value(&p)?;
         if p.ty == Ty::Text && mode == Mode::Write {
             return Err("string bytes cannot be mutably borrowed".into());
@@ -202,7 +208,7 @@ impl State {
         let mut changed = false;
         for path in todo {
             let v = self.get(r)?.at(&path)?.clone();
-            if self.usable_value(&v).is_ok() {
+            if !self.place_borrowed(r, &path, false) && self.usable_value(&v).is_ok() {
                 self.index_remove(&v);
                 self.retire_targets(&v);
                 self.values.get_mut(&r).unwrap().at_mut(&path)?.active = false;
@@ -265,24 +271,43 @@ impl State {
         v.fields = values;
         self.put(dst, v)
     }
-    pub(super) fn result_value(
+    pub(super) fn initialized_value(
         &mut self,
         t: &Ty,
         dst: Reg,
         path: &mut Vec<usize>,
-        inputs: &[(Ty, Value)],
+    ) -> Result<Value, String> {
+        self.result_sources(t, dst, path, &[], &provenance::Contract::default())
+    }
+    pub(super) fn result_sources(
+        &mut self,
+        t: &Ty,
+        dst: Reg,
+        path: &mut Vec<usize>,
+        sources: &[provenance::InputSource],
+        contract: &provenance::Contract,
     ) -> Result<Value, String> {
         let mut roots = BTreeSet::new();
         let mut ancestors = BTreeSet::new();
-        if let Some((mode, region)) = t.reference() {
-            for (ty, value) in inputs {
-                for (p, leaf) in types::leaves(ty, &self.layouts)? {
-                    if leaf.reference().is_some_and(|(m, r)| {
-                        r == region && (mode == Mode::Read || m == Mode::Write)
-                    }) {
-                        let v = value.at(&p)?;
-                        roots.extend(v.roots.clone());
-                        ancestors.extend(v.ancestors.clone());
+        let mut targets = BTreeSet::new();
+        if t.reference().is_some() {
+            for source in sources {
+                if !source.spec.eligible(t, contract, &self.layouts)? {
+                    continue;
+                }
+                let v = &source.value;
+                roots.extend(v.roots.clone());
+                ancestors.extend(v.ancestors.clone());
+                if v.ty.reference().is_some_and(|(m, _)| m == Mode::Write)
+                    && !source.spec.frames.is_empty()
+                {
+                    roots.extend(source.frame_roots.clone());
+                    ancestors.extend(source.frame_ancestors.clone());
+                    ancestors.insert(v.loan);
+                }
+                if let (Ty::Ref(_, _, want), Ty::Ref(_, _, inner)) = (t, &v.ty) {
+                    for p in &v.targets {
+                        self.matching_places(p, inner, want, &mut targets)?;
                     }
                 }
             }
@@ -290,26 +315,13 @@ impl State {
             roots.insert(Root::Local(dst, path.clone()));
         }
         let mut v = self.new_value(t.clone(), roots, ancestors);
-        if let Ty::Ref(mode, region, target) = t {
-            for (ty, value) in inputs {
-                for (path, leaf) in types::leaves(ty, &self.layouts)? {
-                    if let Ty::Ref(m, r, inner) = leaf
-                        && r == *region
-                        && (*mode == Mode::Read || m == Mode::Write)
-                    {
-                        let input = value.at(&path)?;
-                        for p in &input.targets {
-                            self.matching_places(p, &inner, target, &mut v.targets)?;
-                        }
-                    }
-                }
-            }
-        }
+        v.targets = targets;
         if matches!(t, Ty::Named(..)) {
             for (i, (_, field)) in types::fields(t, &self.layouts)?.iter().enumerate() {
                 path.push(i);
-                v.fields
-                    .push(Some(self.result_value(field, dst, path, inputs)?));
+                v.fields.push(Some(
+                    self.result_sources(field, dst, path, sources, contract)?,
+                ));
                 path.pop();
             }
         }

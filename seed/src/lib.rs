@@ -8,6 +8,7 @@ pub mod fixture;
 mod flow;
 mod ir;
 pub mod module;
+mod provenance;
 mod reference;
 mod sha256;
 pub mod source;
@@ -68,7 +69,10 @@ impl Sig {
             ty.validate_shape(parameters)?;
         }
         if let Some((mode, r)) = self.result.reference()
-            && !self.params.iter().any(|t| matches!(t, Ty::Named(..)))
+            && !self
+                .params
+                .iter()
+                .any(|t| matches!(t, Ty::Named(..) | Ty::Ref(..)))
             && !self.params.iter().any(|t| {
                 t.reference()
                     .is_some_and(|(m, p)| p == r && (mode == Mode::Read || m == Mode::Write))
@@ -323,6 +327,7 @@ struct Value {
 #[derive(Clone, Debug)]
 struct State {
     signature: std::sync::Arc<Sig>,
+    regions: std::sync::Arc<provenance::Contract>,
     type_parameters: u16,
     plain_parameters: BTreeSet<u16>,
     generics: std::sync::Arc<BTreeMap<String, template::Signature>>,
@@ -351,10 +356,12 @@ impl State {
                 plain_parameters.extend(types::required_plain(t, &layouts)?);
             }
         }
+        let regions = std::sync::Arc::new(provenance::Contract::new(signature, &layouts)?);
         let mut s = Self {
             plain_parameters,
             layouts,
             signature: std::sync::Arc::new(signature.clone()),
+            regions,
             type_parameters: parameters,
             generics: std::sync::Arc::new(BTreeMap::new()),
             terminated: false,
@@ -529,7 +536,16 @@ impl State {
             actuals.push(v);
         }
         let inputs = sig.params.iter().cloned().zip(actuals).collect::<Vec<_>>();
-        let v = self.result_value(&sig.result, dst, &mut Vec::new(), &inputs)?;
+        let v = if types::leaves(&sig.result, &self.layouts)?
+            .iter()
+            .any(|(_, t)| t.reference().is_some())
+        {
+            let contract = provenance::Contract::new(sig, &self.layouts)?;
+            let sources = self.input_sources(&inputs, &contract)?;
+            self.result_sources(&sig.result, dst, &mut Vec::new(), &sources, &contract)?
+        } else {
+            self.initialized_value(&sig.result, dst, &mut Vec::new())?
+        };
         self.writeback(&inputs)?;
         for r in consumed {
             self.remove(r);

@@ -200,3 +200,10 @@ stage-2/stage-3/artifact delivery remain required; this is not completion of boo
 explicit reborrows and generic replacement with uniform mutable cell metadata updates. It does not
 yet admit lifetime-bearing pointees; invariant witnesses, stored-source versus outer-frame bounds,
 opaque capture writeback and real reference-containing containers/cursors remain required work.
+
+## Readonly captured-reference checkpoint
+
+[Stored sources versus outer frames](captured-references.md) now supports shared cursor descriptors,
+short unique-field reborrows and nested return bounds with declared G0 contracts. Mutable capture
+witnesses/invariance/writeback, reference-containing heap containers and mutating cursors remain
+required, as do remaining ownership joins, the real port and self-compilation/artifact delivery.

@@ -92,21 +92,50 @@ impl State {
         p: &Value,
         mode: Mode,
     ) -> Result<Value, String> {
-        let Ty::Ref(m, r, t) = &p.ty else {
+        let Ty::Ref(parent, outer, inner) = &p.ty else {
             return Err("expected typed reference".into());
         };
-        if !matches!(**t, Ty::Bytes | Ty::Text) {
-            return Err("typed referent is not byte storage".into());
-        }
-        if mode == Mode::Write && (*m != Mode::Write || **t == Ty::Text) {
-            return Err("mutable bytes need mutable byte-vector storage".into());
-        }
         self.usable_value(p)?;
+        if mode == Mode::Write && *parent != Mode::Write {
+            return Err("mutable data through shared typed reference".into());
+        }
         let mut ancestors = p.ancestors.clone();
-        if *m == Mode::Write {
+        if *parent == Mode::Write {
             ancestors.insert(p.loan);
         }
-        Ok(self.new_value(Ty::View(mode, *r), p.roots.clone(), ancestors))
+        if matches!(**inner, Ty::Bytes | Ty::Text) {
+            if mode == Mode::Write && **inner == Ty::Text {
+                return Err("string bytes cannot be mutably borrowed".into());
+            }
+            return Ok(self.new_value(Ty::View(mode, *outer), p.roots.clone(), ancestors));
+        }
+        let (stored, region) = match **inner {
+            Ty::View(m, r) | Ty::Holder(m, r) => (m, r),
+            _ => return Err("typed referent is not byte storage or descriptor".into()),
+        };
+        if mode == Mode::Write && stored != Mode::Write {
+            return Err("mutable reborrow from stored shared descriptor".into());
+        }
+        let mut roots = BTreeSet::new();
+        let mut from = BTreeSet::new();
+        for target in &p.targets {
+            let value = self.target(target)?;
+            self.usable_value(value)?;
+            roots.extend(value.roots.clone());
+            from.extend(value.ancestors.clone());
+            if stored == Mode::Write {
+                from.insert(value.loan);
+            }
+        }
+        if stored == Mode::Write {
+            roots.extend(p.roots.clone());
+            from.extend(ancestors);
+        }
+        Ok(self.new_value(
+            Ty::View(mode, if stored == Mode::Read { region } else { *outer }),
+            roots,
+            from,
+        ))
     }
     pub(super) fn reference_field_bytes(
         &mut self,
@@ -115,7 +144,15 @@ impl State {
         mode: Mode,
     ) -> Result<Value, String> {
         let (mut v, m, r, t) = self.reference_parts(src)?;
-        let (_, field) = types::project(&t, path, &self.layouts)?;
+        let (indices, field) = types::project(&t, path, &self.layouts)?;
+        v.targets = v
+            .targets
+            .into_iter()
+            .map(|mut p| {
+                p.path.extend(&indices);
+                p
+            })
+            .collect();
         v.ty = Ty::Ref(m, r, Box::new(field));
         self.borrow_reference_bytes(&v, mode)
     }
@@ -141,7 +178,7 @@ impl State {
                 if let Ty::Ref(Mode::Write, _, inner) = leaf {
                     for p in &v.at(&path)?.targets {
                         let old = self.target(p)?.clone();
-                        let mut next = self.result_value(&inner, 0, &mut Vec::new(), &[])?;
+                        let mut next = self.initialized_value(&inner, 0, &mut Vec::new())?;
                         retain_loans(&mut next, &old);
                         rename_owned(&mut next, &p.base, &p.path);
                         *self.target_mut(p)? = next;
@@ -162,7 +199,7 @@ impl State {
         };
         Ok((v.clone(), *m, *region, (**t).clone()))
     }
-    fn target(&self, p: &Place) -> Result<&Value, String> {
+    pub(super) fn target(&self, p: &Place) -> Result<&Value, String> {
         match &p.base {
             Root::Local(r, base) => {
                 if !base.is_empty() {
@@ -261,11 +298,31 @@ impl State {
         self.put(dst, result)
     }
     pub(super) fn load_reference(&mut self, dst: Reg, src: Reg) -> Result<(), String> {
-        let (_, _, _, t) = self.reference_parts(src)?;
-        if !t.copy() {
-            return Err("load cannot copy affine referent; use exchange".into());
+        let (p, _, _, t) = self.reference_parts(src)?;
+        if t.copy() {
+            let value = self.new_value(t, BTreeSet::new(), BTreeSet::new());
+            return self.put(dst, value);
         }
-        let value = self.new_value(t, BTreeSet::new(), BTreeSet::new());
+        if !matches!(
+            t,
+            Ty::View(Mode::Read, _) | Ty::Holder(Mode::Read, _) | Ty::Ref(Mode::Read, _, _)
+        ) {
+            return Err(
+                "load cannot copy affine referent; use exchange or an explicit reborrow".into(),
+            );
+        }
+        let mut roots = BTreeSet::new();
+        let mut ancestors = BTreeSet::new();
+        let mut targets = BTreeSet::new();
+        for target in &p.targets {
+            let v = self.target(target)?;
+            self.usable_value(v)?;
+            roots.extend(v.roots.clone());
+            ancestors.extend(v.ancestors.clone());
+            targets.extend(v.targets.clone());
+        }
+        let mut value = self.new_value(t, roots, ancestors);
+        value.targets = targets;
         self.put(dst, value)
     }
     pub(super) fn exchange(&mut self, dst: Reg, src: Reg, value: Reg) -> Result<(), String> {
@@ -294,7 +351,7 @@ impl State {
             rename_owned(&mut new, &p.base, &p.path);
             *self.target_mut(p)? = new;
         }
-        let out = self.result_value(&t, dst, &mut Vec::new(), &[])?;
+        let out = self.initialized_value(&t, dst, &mut Vec::new())?;
         self.put(dst, out)
     }
 }

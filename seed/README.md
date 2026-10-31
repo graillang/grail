@@ -271,3 +271,8 @@ A full linked-executable recipe manifest and hermetic bootstrap toolchain are no
 lifetime-free referents, including owned text/bytes and plain records. See `examples/references`.
 Captured-reference pointees/cursors, invariant lifetime witnesses and general opaque capture
 writeback remain unfinished; this limited type gate is not completion of v0.
+
+Readonly references now support [captured values and nested descriptor loads](../docs/design/captured-references.md).
+See `examples/captures`: a shared cursor getter can preserve the stored data lifetime after the
+cursor/name is dropped, whereas a unique source reborrow keeps the short outer frame. Mutable
+capture-bearing pointees/witnesses/writeback remain unfinished, not excluded from bootstrap v0.

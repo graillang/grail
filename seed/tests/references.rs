@@ -199,9 +199,9 @@ fn addressed_heap_fields_cannot_overlap_exclusive_data_views() {
 #[test]
 fn generic_bodies_cannot_hide_reference_kind_requirements_from_their_contracts() {
     for text in [
-        "module f;pub fn bad<type T>(v:T)->num{let p=borrow(v);return 0;}",
-        "module f;struct Phantom<type T>{value:num}pub fn bad<a,type T>(v:T)->num{let p=Phantom<ref<a,T>>{value:0};return 0;}",
-        "module f;fn hidden<a,type T>(slot:ref<a,T>,v:T)->num{return 0;}pub fn bad<type T>(v:T)->num{let p=borrow(v);return hidden(p,v);}",
+        "module f;pub fn bad<type T>(v:T)->num{let p=borrow_mut(v);return 0;}",
+        "module f;struct Phantom<type T>{value:num}pub fn bad<a,type T>(v:T)->num{let p=Phantom<ref_mut<a,T>>{value:0};return 0;}",
+        "module f;fn hidden<a,type T>(slot:ref_mut<a,T>,v:T)->num{return 0;}pub fn bad<type T>(v:T)->num{let p=borrow_mut(v);return hidden(p,v);}",
     ] {
         let error = grail_seed::source::compile(text, BTreeMap::new())
             .err()
@@ -210,8 +210,7 @@ fn generic_bodies_cannot_hide_reference_kind_requirements_from_their_contracts()
     }
     let positive = "module f;pub fn replace<a,type T>(slot:ref_mut<a,T>,value:T)->T{return exchange(slot,value);}";
     assert!(grail_seed::source::compile(positive, BTreeMap::new()).is_ok());
-    let text =
-        "module f;struct C<a,type T>{slot:ref<a,T>}pub fn wrong<a>(v:C<a,read<a>>)->num{return 0;}";
+    let text = "module f;struct C<a,type T>{slot:ref_mut<a,T>}pub fn wrong<a>(v:C<a,read<a>>)->num{return 0;}";
     let error = grail_seed::source::compile(text, BTreeMap::new())
         .err()
         .expect("nested capture-bearing referent must reject");

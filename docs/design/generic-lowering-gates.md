@@ -1,5 +1,13 @@
 # Generic lowering and reference gates
 
+## Implemented checkpoints
+
+Generic value layouts, universal by-value functions/checked IR and lifetime-free typed storage are
+landed. [Readonly captured references](captured-references.md) now implement stored shared-source
+copying versus short outer-frame reborrows, with nested bounds and independent execution. Mutable
+invariant capture witnesses/writeback and real containers are still required. The following records
+the original preimplementation gates; unsupported mutable cases are not counted as passing proof.
+
 ## Decision for the first implementation
 
 Start with static type/layout specialization and explicit instance accounting. This does **not** mean
