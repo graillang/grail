@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Admit captured mutable referents with invariant lifetime witnesses, universally checked generic
+  storage operations and signature-derived opaque capture writeback. Preserve old/incoming sources,
+  distinguish unique transfer from short reborrow, filter nested typed targets, and retire internal
+  captures without losing external loans. Remove the temporary plain-kind machinery; use canonical
+  IR/template bundle schema 2 with checked ascriptions. Close a reproduced stale external-cell proof
+  across loop edges; general changing-state joins remain required. Validate hidden-source mutable
+  cursors, generic Option pop/Result cleanup, mixed backends, independent Rust, allocator/sanitizer
+  traces, frozen replay and measured costs. General heap collections and self-hosting remain unfinished.
+
 - Support readonly typed references to captured values: distinguish dereferenced stored-source roots
   from outer frames, derive outlives constraints from written inputs and copy shared descriptors
   without extending unique-field reborrows. Check nested return bounds, preserve captures under

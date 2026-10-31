@@ -8,19 +8,24 @@ import json
 import os
 import statistics
 import subprocess
+import sys
 import tarfile
 import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
-HERE = Path(__file__).resolve().parent
-OUT = ROOT / "research/evidence/captures41-20261031"
+CAPTURES = Path(__file__).resolve().parent
+if sys.argv[1:] not in ([], ["--mutable"]):
+    raise SystemExit("usage: check.py [--mutable]")
+MUTABLE = bool(sys.argv[1:])
+HERE = CAPTURES.parent / "mutable42" if MUTABLE else CAPTURES
+OUT = ROOT / f"research/evidence/{HERE.name}-20261031"
 WORK = HERE / ".work"
 NIGHT = (
     ROOT
     / "research/experiments/rust_next20/.work/rustup/toolchains/nightly-2026-10-29-x86_64-unknown-linux-gnu"
 )
-BASELINE = "b755920"
+BASELINE = "3d5eaa18" if MUTABLE else "b755920"
 
 
 def main() -> None:
@@ -145,7 +150,9 @@ def main() -> None:
             run([compiler, "--edition=2024", HERE / "reference.rs", "-o", binary])
             references.append(run([binary])["stdout"])
         assert references[0] == references[1]
-        assert references[0] == "36 [2, 3, 1]\n"
+        assert references[0] == (
+            "46 [3, 4, 5, 6, 2, 1]\n" if MUTABLE else "36 [2, 3, 1]\n"
+        )
         for label, compiler in [
             ("stable", Path("rustc")),
             ("nightly", NIGHT / "bin/rustc"),
@@ -238,10 +245,14 @@ def main() -> None:
                     for p in sorted(dest.iterdir())
                 },
             }
-            for style, source in [
-                ("plain", plain),
-                ("references", ROOT / "research/experiments/references40/cost.rs"),
-            ] + ([("captures", HERE / "cost.rs")] if label == "after" else []):
+            for style, source in (
+                [
+                    ("plain", plain),
+                    ("references", ROOT / "research/experiments/references40/cost.rs"),
+                ]
+                + ([("readonly", CAPTURES / "cost.rs")] if MUTABLE else [])
+                + ([("captures", HERE / "cost.rs")] if label == "after" else [])
+            ):
                 binary = work / f"cost-{label}-{style}"
                 rust(source, binary, lib)
                 samples = []
@@ -296,7 +307,11 @@ def main() -> None:
                         ROOT / "seed/std/core.grl"
                         if name == "core"
                         else (
-                            ROOT / "research/experiments/templates39"
+                            (
+                                CAPTURES
+                                if MUTABLE
+                                else ROOT / "research/experiments/templates39"
+                            )
                             if version == "before"
                             else HERE
                         )
@@ -363,6 +378,9 @@ def main() -> None:
             *ROOT.glob("seed/std/*.grl"),
             ROOT / "seed/Cargo.toml",
             ROOT / "seed/Cargo.lock",
+            Path(__file__).resolve(),
+            CAPTURES / "cost.rs",
+            *([CAPTURES / "lexer.grl", CAPTURES / "scanner.grl"] if MUTABLE else []),
             *HERE.glob("*.py"),
             *HERE.glob("*.rs"),
             *HERE.glob("*.grl"),

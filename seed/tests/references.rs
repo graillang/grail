@@ -166,20 +166,6 @@ fn field_move_relocates_owned_storage_without_relocating_external_captures() {
     assert!(grail_seed::source::compile(text, BTreeMap::new()).is_ok());
 }
 #[test]
-fn lifetime_bearing_referents_are_not_counted_as_an_invariance_proof() {
-    for text in [
-        "module f;struct C<a>{view:read<a>}pub fn bad<a,b>(p:ref_mut<a,C<b>>)->num{return 0;}",
-        "module f;struct C<a>{value:num}pub fn bad<a,b>(p:ref_mut<a,C<b>>)->num{return 0;}",
-        "module f;struct C<type T>{value:num}pub fn bad<a,b>(p:ref_mut<a,C<read<b>>>)->num{return 0;}",
-    ] {
-        let e = grail_seed::source::compile(text, BTreeMap::new())
-            .err()
-            .expect("pending hard gate must fail closed");
-        assert!(e.contains("invariance/writeback"), "{e}");
-    }
-}
-
-#[test]
 fn addressed_heap_fields_cannot_overlap_exclusive_data_views() {
     for body in [
         "let p=mut(r.data);let q=borrow(r.data);let s=read(q);write(p,0,8);return len(s);",
@@ -197,22 +183,18 @@ fn addressed_heap_fields_cannot_overlap_exclusive_data_views() {
 }
 
 #[test]
-fn generic_bodies_cannot_hide_reference_kind_requirements_from_their_contracts() {
+fn generic_storage_borrows_are_universal_but_do_not_permit_moving_borrowed_values() {
     for text in [
-        "module f;pub fn bad<type T>(v:T)->num{let p=borrow_mut(v);return 0;}",
-        "module f;struct Phantom<type T>{value:num}pub fn bad<a,type T>(v:T)->num{let p=Phantom<ref_mut<a,T>>{value:0};return 0;}",
-        "module f;fn hidden<a,type T>(slot:ref_mut<a,T>,v:T)->num{return 0;}pub fn bad<type T>(v:T)->num{let p=borrow_mut(v);return hidden(p,v);}",
+        "module f;pub fn inspect<type T>(v:T)->num{let p=borrow_mut(v);return 0;}",
+        "module f;struct Phantom<type T>{value:num}pub fn inspect<a,type T>(v:T)->num{let p=Phantom<ref_mut<a,T>>{value:0};return 0;}",
+        "module f;pub fn replace<a,type T>(slot:ref_mut<a,T>,value:T)->T{return exchange(slot,value);}",
+        "module f;struct C<a,type T>{slot:ref_mut<a,T>}pub fn inspect<a>(v:C<a,read<a>>)->num{return 0;}",
     ] {
-        let error = grail_seed::source::compile(text, BTreeMap::new())
-            .err()
-            .expect("undeclared kind requirement must reject");
-        assert!(error.contains("kind requirement"), "{error}: {text}");
+        assert!(
+            grail_seed::source::compile(text, BTreeMap::new()).is_ok(),
+            "{text}"
+        );
     }
-    let positive = "module f;pub fn replace<a,type T>(slot:ref_mut<a,T>,value:T)->T{return exchange(slot,value);}";
-    assert!(grail_seed::source::compile(positive, BTreeMap::new()).is_ok());
-    let text = "module f;struct C<a,type T>{slot:ref_mut<a,T>}pub fn wrong<a>(v:C<a,read<a>>)->num{return 0;}";
-    let error = grail_seed::source::compile(text, BTreeMap::new())
-        .err()
-        .expect("nested capture-bearing referent must reject");
-    assert!(error.contains("invariance/writeback"), "{error}");
+    let bad = "module f;fn hidden<a,type T>(slot:ref_mut<a,T>,v:T)->num{return 0;}pub fn bad<type T>(v:T)->num{let p=borrow_mut(v);return hidden(p,v);}";
+    assert!(grail_seed::source::compile(bad, BTreeMap::new()).is_err());
 }

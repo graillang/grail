@@ -310,6 +310,7 @@ fn c_body(p: &Checked, s: &mut String, private: bool) {
     ) {
         for o in os {
             match o{
+        Op::Ascribe{..}=>{},
         Op::Address{dst,src,path,..}=>{
             let (base,ty)=if let Ty::Ref(_,_,t)=&types[src]{(format!("(*r{src})"),t.as_ref())}else{(format!("r{src}"),&types[src])};
             let(indices,_)=if path.is_empty(){(vec![],ty.clone())}else{crate::types::project(ty,path,layouts).unwrap()};
@@ -453,6 +454,7 @@ impl Ll {
     fn ops(&mut self, os: &[Op]) -> bool {
         for o in os {
             match o {
+                Op::Ascribe { .. } => {}
                 Op::Address { dst, src, path, .. } => {
                     debug_assert!(path.is_empty());
                     let ptr = if matches!(self.types[src], Ty::Ref(..)) {

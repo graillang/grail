@@ -197,13 +197,22 @@ stage-2/stage-3/artifact delivery remain required; this is not completion of boo
 ## Typed storage groundwork
 
 [Addressed scalar/owned storage](typed-storage.md) now supports lifetime-free typed references,
-explicit reborrows and generic replacement with uniform mutable cell metadata updates. It does not
-yet admit lifetime-bearing pointees; invariant witnesses, stored-source versus outer-frame bounds,
-opaque capture writeback and real reference-containing containers/cursors remain required work.
+explicit reborrows and generic replacement with uniform mutable cell metadata updates. The subsequent
+readonly/mutable capture checkpoints below extend this initial gate. General reference-containing
+heap collections remain required work.
 
 ## Readonly captured-reference checkpoint
 
 [Stored sources versus outer frames](captured-references.md) now supports shared cursor descriptors,
-short unique-field reborrows and nested return bounds with declared G0 contracts. Mutable capture
-witnesses/invariance/writeback, reference-containing heap containers and mutating cursors remain
-required, as do remaining ownership joins, the real port and self-compilation/artifact delivery.
+short unique-field reborrows and nested return bounds with declared G0 contracts. The mutable checkpoint
+below extends this with witnesses/writeback and mutating cursors. Reference-containing heap
+containers, remaining joins, the real port and self-compilation/artifact delivery remain required.
+
+## Mutable captured-storage checkpoint
+
+[Invariant witnesses and signature-derived writeback](mutable-references.md) now admit captured
+mutable cells, unique take/pop, core Option/Result composition and a real updating cursor workload.
+IR/template bundle schema 2 preserves checked lifetime ascriptions; temporary plain-kind machinery
+is removed. Stale external-cell proofs across loop edges are rejected, but safe changing-state joins
+still need implementation. General heap vectors/collections, the real seed port, stage-2/stage-3 and
+the reproducible bootstrap artifact remain required; this library gate does not complete v0.

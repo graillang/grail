@@ -18,7 +18,7 @@ impl State {
         payload: Option<Reg>,
     ) -> Result<(), String> {
         types::validate_type(ty, &self.layouts, self.type_parameters)?;
-        self.validate_kind(ty)?;
+
         let Ty::Named(name, _, _) = ty else {
             return Err("variant constructor needs nominal type".into());
         };
@@ -58,6 +58,7 @@ impl State {
                 self.inactive_value(t)?
             }));
         }
+        self.constructor_witnesses(dst, &mut v, Some(variant))?;
         self.put(dst, v)
     }
     pub(super) fn payload(

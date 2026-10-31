@@ -165,3 +165,110 @@ fn cursor_cleanup_frees_frames_while_long_sources_and_short_reborrows_stay_valid
     run(&mut Command::new(dir.join("sanitize")));
     fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+#[ignore = "requires clang allocator wrapping, optimizing sanitizers; optionally configured TinyCC"]
+fn hidden_mutable_cells_transfer_captures_and_destroy_owners_once() {
+    let backend = std::env::var("GRAIL_CAPTURE_TEST_BACKEND").unwrap_or_else(|_| "clang".into());
+    let other = if std::env::var_os("GRAIL_CAPTURE_MIXED_BACKEND").is_some() {
+        if backend == "tcc" {
+            "clang-release"
+        } else {
+            "tcc"
+        }
+    } else {
+        &backend
+    };
+    let dir = dir();
+    fs::write(dir.join("core.grl"), include_str!("../std/core.grl")).unwrap();
+    compile(&dir, "core", false, &backend);
+    fs::remove_file(dir.join("core.grl")).unwrap();
+    fs::write(
+        dir.join("cells.grl"),
+        include_str!("../examples/mutable_captures/cells.grl"),
+    )
+    .unwrap();
+    compile(&dir, "cells", false, &backend);
+    fs::remove_file(dir.join("cells.grl")).unwrap();
+    fs::write(
+        dir.join("use_cells.grl"),
+        include_str!("../examples/mutable_captures/use_cells.grl"),
+    )
+    .unwrap();
+    compile(&dir, "use_cells", true, other);
+    assert_eq!(
+        run(&mut Command::new(dir.join("use_cells"))).stdout,
+        b"46\n"
+    );
+    let binary = fs::read(dir.join("use_cells")).unwrap();
+    let artifact = fs::read(dir.join("use_cells.artifact")).unwrap();
+    compile(&dir, "use_cells", true, other);
+    assert_eq!(binary, fs::read(dir.join("use_cells")).unwrap());
+    assert_eq!(artifact, fs::read(dir.join("use_cells.artifact")).unwrap());
+    assert!(grail_seed::artifact::templates(&dir, "cells").is_ok());
+    let core = grail_seed::artifact::load(&dir, "core").unwrap();
+    let p = grail_seed::artifact::load(&dir, "cells").unwrap();
+    let c = grail_seed::artifact::load(&dir, "use_cells").unwrap();
+    fs::write(
+        dir.join("allocator.c"),
+        include_str!("support/allocator_audit.c"),
+    )
+    .unwrap();
+    fs::write(dir.join("main.c"),"#include <stdint.h>\nuint64_t q_9_use_cells_3_run(void),g_free_count(void),g_freed(uint64_t);int main(void){if(q_9_use_cells_3_run()!=46||g_free_count()!=6)return 90;uint64_t order[]={3,4,5,6,2,1};for(unsigned i=0;i<6;++i)if(g_freed(i)!=order[i])return 91;return 0;}\n").unwrap();
+    fs::write(dir.join("native.c"),"#include <stdint.h>\nuint64_t q_9_use_cells_3_run(void),g_live(void);int main(void){return q_9_use_cells_3_run()!=46||g_live()!=0;}\n").unwrap();
+    run(Command::new("clang")
+        .args(["-Wl,--wrap=malloc,--wrap=realloc,--wrap=free"])
+        .arg(&core.object)
+        .arg(&p.object)
+        .arg(&c.object)
+        .arg(dir.join("native.c"))
+        .arg(dir.join("allocator.c"))
+        .arg("-o")
+        .arg(dir.join("audit")));
+    run(&mut Command::new(dir.join("audit")));
+    run(Command::new("clang")
+        .args([
+            "-O2",
+            "-fsanitize=address,undefined",
+            "-fno-omit-frame-pointer",
+            "-fno-builtin-malloc",
+            "-fno-builtin-realloc",
+            "-fno-builtin-free",
+            "-Wl,--wrap=malloc,--wrap=realloc,--wrap=free",
+        ])
+        .arg(core.object.with_extension("c"))
+        .arg(p.object.with_extension("c"))
+        .arg(c.object.with_extension("c"))
+        .arg(dir.join("main.c"))
+        .arg(dir.join("allocator.c"))
+        .arg("-o")
+        .arg(dir.join("sanitize")));
+    run(&mut Command::new(dir.join("sanitize")));
+    fs::remove_dir_all(dir).unwrap();
+}
+#[test]
+#[ignore = "requires clang and LLVM mutable descriptor/pointer ABI"]
+fn captured_unique_exchange_runs_in_c_and_llvm() {
+    let dir = dir();
+    let text = "module swaps;pub fn span<outer,data>(slot:ref_mut<outer,mut<data>>,v:mut<data>)->mut<data>{return exchange(slot,v);}pub fn pointer<outer,data>(slot:ref_mut<outer,ref_mut<data,num>>,v:ref_mut<data,num>)->ref_mut<data,num>{return exchange(slot,v);}";
+    let p = grail_seed::source::compile(text, Default::default()).unwrap();
+    fs::write(dir.join("swaps.c"), grail_seed::emit::module_c(&p).unwrap()).unwrap();
+    fs::write(
+        dir.join("swaps.ll"),
+        grail_seed::emit::module_llvm(&p).unwrap(),
+    )
+    .unwrap();
+    fs::write(dir.join("main.c"),"#include <stdint.h>\ntypedef struct{uint8_t*p;uint64_t n;}gv;gv q_5_swaps_4_span(gv*,gv);uint64_t*q_5_swaps_7_pointer(uint64_t**,uint64_t*);int main(void){uint8_t a[]={7},b[]={8};gv slot={a,1},next={b,1},old=q_5_swaps_4_span(&slot,next);uint64_t x=3,y=4,*p=&x,*q=q_5_swaps_7_pointer(&p,&y);return old.p!=a||slot.p!=b||old.n!=1||slot.n!=1||q!=&x||p!=&y;}\n").unwrap();
+    for file in ["swaps.c", "swaps.ll"] {
+        for level in ["-O0", "-O2"] {
+            run(Command::new("clang")
+                .args([level, "-Werror", "-Wno-override-module"])
+                .arg(dir.join(file))
+                .arg(dir.join("main.c"))
+                .arg("-o")
+                .arg(dir.join("run")));
+            run(&mut Command::new(dir.join("run")));
+        }
+    }
+    fs::remove_dir_all(dir).unwrap();
+}

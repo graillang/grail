@@ -306,7 +306,7 @@ impl<F: FnMut(&str) -> Result<Bundle, String>> Engine<'_, F> {
 fn substitute_ops(ops: &mut [Op], args: &[Ty]) -> Result<(), String> {
     for op in ops {
         match op {
-            Op::Record { ty, .. } | Op::Variant { ty, .. } => {
+            Op::Ascribe { ty, .. } | Op::Record { ty, .. } | Op::Variant { ty, .. } => {
                 *ty = ty.substitute_types(args)?.erase_regions()
             }
             Op::GenericCall {

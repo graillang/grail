@@ -1,9 +1,8 @@
 # Readonly references with captured sources
 
-This implements the shared-reference / stored-source versus outer-frame part of the
-[reference gates](generic-lowering-gates.md). Mutable capture-bearing references, invariant local
-witnesses, general opaque capture writeback, containers/cursors using those writes and full
-bootstrap remain required work. This is not completion of v0.
+This records the shared-reference / stored-source versus outer-frame checkpoint. It is now extended
+by [mutable lifetime witnesses and opaque writeback](mutable-references.md). General heap containers,
+ownership joins and bootstrap remain required; this is not completion of v0.
 
 ## Source contracts
 
@@ -35,9 +34,8 @@ rather than checking them as byte views and later emitting an invalid C member a
 
 Readonly typed references now admit captured values, including bounded nested typed references.
 `borrow(value)` is therefore universal over admitted opaque `T` without a hidden plain-type bound.
-**Mutable** reference kind requirements remain: a signature must expose their lifetime-free
-requirements, and concrete mutable pointees carrying lifetimes still fail closed. Those unsupported
-cases are not counted as invariance tests or accepted as a permanent v0 concession.
+Mutable captured references now use invariant witnesses instead of a lifetime-free kind restriction;
+see the [mutable checkpoint](mutable-references.md).
 
 ## Provenance and implied bounds
 
@@ -61,8 +59,8 @@ not private-body post-state inference or caller-root specialization of generic c
 
 Return checking also descends through referenced values. Merely returning the same outer pointer
 cannot change `Cursor<short>` into `Cursor<long>` when its actual stored roots do not satisfy the
-written relationship. Local address/capture escapes still reject. Full mutable referent invariance
-needs more than this readonly covariance/origin check and is explicitly unfinished.
+written relationship. Local address/capture escapes still reject. Mutable referent invariance is
+separately enforced by the witness implementation, not inferred from readonly covariance/origin checks.
 
 Automatic capture ending must respect live storage-frame loans: a cursor's stored descriptor cannot
 expire while a reference can still access it. A long copied shared result releases only the cursor
@@ -95,7 +93,6 @@ Rust positives/negatives, source-hidden mixed-native calls, C/LLVM ABI controls,
 ASan/UBSan traces, frozen old-compiler replay, capture-cardinality checking costs and a real
 131072-token library workload with a borrowed cursor and owned names.
 
-Next required are invariant mutable capture witnesses, writeback retaining all newly admitted
-sources, unique take/pop with residual may-sources, arbitrary-element heap collections and usable
-mutating captured-reference cursors. The real seed port, stage-2/stage-3 self-compilation and retained
-reproducible bootstrap artifact remain mandatory, not replaced by this library workload.
+The [mutable checkpoint](mutable-references.md) extends this evidence with invariant stored bounds,
+opaque writeback, unique take/pop and mutable cursor updates. Arbitrary-element heap collections,
+general joins, the real seed port, stage-2/stage-3 and a reproducible bootstrap artifact remain mandatory.

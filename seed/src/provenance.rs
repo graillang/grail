@@ -69,8 +69,13 @@ pub(crate) fn sources(t: &Ty, defs: &types::Definitions) -> Result<Vec<Source>, 
 impl Contract {
     pub(crate) fn new(sig: &Sig, defs: &types::Definitions) -> Result<Self, String> {
         let mut c = Self::default();
+        let mut count = 0;
         for t in &sig.params {
             let input = sources(t, defs)?;
+            count += input.len();
+            if count > 4096 {
+                return Err("reference contract source limit".into());
+            }
             for source in &input {
                 let (_, r) = source.ty.reference().expect("reference source");
                 for frame in &source.frames {
@@ -116,20 +121,62 @@ fn byte_place(t: &Ty, mode: Mode, defs: &types::Definitions) -> Result<bool, Str
         _ => false,
     })
 }
-fn subplace(t: &Ty, want: &Ty, defs: &types::Definitions) -> Result<bool, String> {
-    if crate::aggregate::compatible(t, want) {
-        return Ok(true);
-    }
-    if matches!(t, Ty::Named(..)) && !types::is_enum(t, defs)? {
-        for (_, field) in types::fields(t, defs)? {
-            if subplace(&field, want, defs)? {
-                return Ok(true);
-            }
-        }
-    }
-    Ok(false)
-}
 impl Source {
+    pub(crate) fn reborrow(&self, result: &Ty, contract: &Contract) -> bool {
+        let Some((mode, r)) = result.reference() else {
+            return false;
+        };
+        self.frames.iter().all(|f| {
+            contract.outlives(f.region, r) && (mode != Mode::Write || f.mode == Mode::Write)
+        })
+    }
+    pub(crate) fn target_paths(
+        &self,
+        result: &Ty,
+        contract: &Contract,
+        defs: &types::Definitions,
+    ) -> Result<Vec<Vec<usize>>, String> {
+        let (Ty::Ref(mode, _, want), Ty::Ref(_, _, inner)) = (result, &self.ty) else {
+            return Ok(vec![]);
+        };
+        fn walk(
+            t: &Ty,
+            want: &Ty,
+            inv: bool,
+            context: (&Contract, &types::Definitions),
+            path: &mut Vec<usize>,
+            out: &mut Vec<Vec<usize>>,
+            nodes: &mut usize,
+        ) -> Result<(), String> {
+            let (c, d) = context;
+            *nodes += 1;
+            if path.len() > 64 || *nodes > 4096 {
+                return Err("typed-reference target expansion limit".into());
+            }
+            if crate::witness::formal_fits(t, want, inv, c, d)? {
+                out.push(path.clone());
+            }
+            if matches!(t, Ty::Named(..)) && !types::is_enum(t, d)? {
+                for (i, (_, field)) in types::fields(t, d)?.iter().enumerate() {
+                    path.push(i);
+                    walk(field, want, inv, context, path, out, nodes)?;
+                    path.pop();
+                }
+            }
+            Ok(())
+        }
+        let mut out = Vec::new();
+        walk(
+            inner,
+            want,
+            *mode == Mode::Write,
+            (contract, defs),
+            &mut Vec::new(),
+            &mut out,
+            &mut 0,
+        )?;
+        Ok(out)
+    }
     pub(crate) fn eligible(
         &self,
         result: &Ty,
@@ -144,14 +191,14 @@ impl Source {
             return Ok(false);
         }
         if m == Mode::Write
-            && self.frames.iter().any(|f| {
-                !contract.outlives(f.region, r) || (mode == Mode::Write && f.mode != Mode::Write)
-            })
+            && !self.reborrow(result, contract)
+            && self.frames.iter().any(|f| f.mode != Mode::Write)
         {
             return Ok(false);
         }
+
         Ok(match (result, &self.ty) {
-            (Ty::Ref(_, _, want), Ty::Ref(_, _, inner)) => subplace(inner, want, defs)?,
+            (Ty::Ref(..), Ty::Ref(..)) => !self.target_paths(result, contract, defs)?.is_empty(),
             (Ty::Ref(..), _) => false,
             (_, Ty::Ref(_, _, inner)) => byte_place(inner, mode, defs)?,
             _ => true,
@@ -214,6 +261,9 @@ impl crate::State {
                     if !v.active {
                         return Err("expired capture behind typed reference".into());
                     }
+                    if out.len() >= 4096 {
+                        return Err("capture-source count limit".into());
+                    }
                     out.push(InputSource {
                         spec: source.clone(),
                         value: v.clone(),
@@ -224,5 +274,70 @@ impl crate::State {
             }
         }
         Ok(out)
+    }
+}
+
+/// One call has one immutable input snapshot. Reuse its projection for equal written result types.
+pub(super) struct Results<'a> {
+    sources: &'a [InputSource],
+    contract: &'a Contract,
+    cache: BTreeMap<Ty, Projection>,
+}
+#[derive(Clone, Default)]
+pub(super) struct Projection {
+    pub(super) roots: BTreeSet<crate::Root>,
+    pub(super) ancestors: BTreeSet<usize>,
+    pub(super) targets: BTreeSet<crate::reference::Place>,
+}
+impl<'a> Results<'a> {
+    pub(super) fn new(sources: &'a [InputSource], contract: &'a Contract) -> Self {
+        Self {
+            sources,
+            contract,
+            cache: BTreeMap::new(),
+        }
+    }
+    pub(super) fn reference(
+        &mut self,
+        t: &Ty,
+        defs: &types::Definitions,
+    ) -> Result<&Projection, String> {
+        if !self.cache.contains_key(t) {
+            if self.cache.len() >= 4096 {
+                return Err("reference projection type limit".into());
+            }
+            let mut result = Projection::default();
+            for source in self.sources {
+                if !source.spec.eligible(t, self.contract, defs)? {
+                    continue;
+                }
+                let v = &source.value;
+                result.roots.extend(v.roots.clone());
+                result.ancestors.extend(v.ancestors.clone());
+                if v.ty.reference().is_some_and(|(m, _)| m == Mode::Write)
+                    && !source.spec.frames.is_empty()
+                    && source.spec.reborrow(t, self.contract)
+                {
+                    result.roots.extend(source.frame_roots.clone());
+                    result.ancestors.extend(source.frame_ancestors.clone());
+                    result.ancestors.insert(v.loan);
+                }
+                for path in source.spec.target_paths(t, self.contract, defs)? {
+                    for p in &v.targets {
+                        let mut p = p.clone();
+                        p.path.extend(&path);
+                        result.targets.insert(p);
+                    }
+                }
+                if result.roots.len() > 4096
+                    || result.ancestors.len() > 4096
+                    || result.targets.len() > 4096
+                {
+                    return Err("reference projection expansion limit".into());
+                }
+            }
+            self.cache.insert(t.clone(), result);
+        }
+        Ok(self.cache.get(t).expect("reference projection"))
     }
 }

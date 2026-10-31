@@ -23,7 +23,9 @@ fn unique_field_reborrows_need_the_outer_frame_even_when_the_stored_source_is_lo
         .err()
         .expect("extra signature anchor must not excuse wrong body");
     assert!(
-        e.contains("outer frame") || e.contains("region relationship"),
+        e.contains("outer frame")
+            || e.contains("region relationship")
+            || e.contains("stored lifetime witness"),
         "{e}"
     );
 }
@@ -33,7 +35,10 @@ fn returning_a_shared_cursor_cannot_widen_its_stored_capture_contract() {
     let e = source::compile(bad, BTreeMap::new())
         .err()
         .expect("nested capture bounds must check");
-    assert!(e.contains("region relationship"), "{e}");
+    assert!(
+        e.contains("region relationship") || e.contains("stored lifetime witness"),
+        "{e}"
+    );
 }
 #[test]
 fn a_live_cursor_frame_prevents_early_capture_expiry() {
@@ -41,15 +46,12 @@ fn a_live_cursor_frame_prevents_early_capture_expiry() {
     assert!(source::compile(bad, BTreeMap::new()).is_err());
 }
 #[test]
-fn opaque_readonly_borrows_are_universal_but_mutable_capture_witnesses_are_still_required() {
+fn opaque_borrows_accept_captured_referents_without_specialization_requirements() {
     let good = "module f;fn inspect<type T>(v:T)->num{let p=borrow(v);return 7;}pub fn run<a>(input:read<a>)->num{return inspect(read(input));}";
     let p = source::compile(good, BTreeMap::new()).unwrap();
     assert!(grail_seed::emit::module_c(&p).is_ok());
-    let bad = "module f;struct Cursor<a>{source:read<a>}pub fn wrong<outer,data>(p:ref_mut<outer,Cursor<data>>)->num{return 0;}";
-    let e = source::compile(bad, BTreeMap::new())
-        .err()
-        .expect("not yet the mutable witness gate");
-    assert!(e.contains("invariance/writeback"), "{e}");
+    let mutable = "module f;struct Cursor<a>{source:read<a>}pub fn inspect<outer,data>(p:ref_mut<outer,Cursor<data>>)->num{return 0;}";
+    assert!(source::compile(mutable, BTreeMap::new()).is_ok());
 }
 
 #[test]
@@ -95,7 +97,10 @@ fn unused_slots_and_output_shapes_do_not_supply_unproved_input_bounds() {
         let e = source::compile(text, BTreeMap::new())
             .err()
             .expect("unproved outlives relationship must reject");
-        assert!(e.contains("region relationship"), "{e}");
+        assert!(
+            e.contains("region relationship") || e.contains("stored lifetime witness"),
+            "{e}"
+        );
     }
 }
 #[test]

@@ -3,12 +3,14 @@ use super::*;
 #[derive(Clone, Debug)]
 pub(super) struct LoopFrame {
     pub(super) values: BTreeMap<Reg, Value>,
+    memory: BTreeMap<Root, Value>,
     defined: Vec<u64>,
 }
 impl State {
     pub(super) fn enter_loop(&mut self, index: Option<Reg>) -> Result<(), String> {
         self.loops.push(std::rc::Rc::new(LoopFrame {
             values: self.values.clone(),
+            memory: self.memory.clone(),
             defined: self.copy_defined.clone(),
         }));
         if let Some(r) = index {
@@ -18,7 +20,7 @@ impl State {
     }
     pub(super) fn validate_loop_exit(&self) -> Result<(), String> {
         let frame = self.loops.last().ok_or("loop exit outside loop body")?;
-        self.validate_closed(&frame.values)
+        self.validate_closed(&frame.values, &frame.memory)
             .map_err(|e| format!("loop exit violates entry state: {e}"))?;
         for (index, word) in frame.defined.iter().enumerate() {
             if word & !self.copy_defined.get(index).copied().unwrap_or(0) != 0 {
@@ -64,7 +66,11 @@ impl State {
     }
     pub(super) fn validate_return(&self, r: Reg) -> Result<(), String> {
         let sig = self.signature.as_ref();
-        let result = self.usable(r)?;
+        let mut result = self.usable(r)?;
+        self.coerce_value(
+            &mut result,
+            &witness::Instance::formal(&self.signature.result),
+        )?;
         if self
             .values
             .iter()
@@ -146,7 +152,7 @@ impl State {
         });
         inner.ops_inner(body, imports, depth, live.as_ref())?;
         if !inner.terminated {
-            inner.validate_closed(&self.values)?;
+            inner.validate_closed(&self.values, &self.memory)?;
         }
         self.next = self.next.max(inner.next);
         Ok(())
@@ -168,6 +174,7 @@ pub(crate) fn terminates(ops: &[Op]) -> bool {
 pub(super) fn live_before(op: &Op, after: &BTreeSet<Reg>) -> BTreeSet<Reg> {
     let mut live = after.clone();
     let (defs, uses): (Vec<Reg>, Vec<Reg>) = match op {
+        Op::Ascribe { src, .. } => (vec![], vec![*src]),
         Op::Address { dst, src, .. } | Op::Load { dst, src } => (vec![*dst], vec![*src]),
         Op::Exchange { dst, src, value } => (vec![*dst], vec![*src, *value]),
         Op::Return(r) => return BTreeSet::from([*r]),
@@ -308,4 +315,48 @@ pub(crate) fn loop_jumps(ops: &[Op]) -> (bool, bool) {
         continues |= c;
     }
     (breaks, continues)
+}
+
+/// Register binding definitions (not End's liveness kill), shared with storage-scope accounting.
+pub(super) fn definitions(op: &Op) -> Vec<Reg> {
+    match op {
+        Op::Address { dst, .. }
+        | Op::Load { dst, .. }
+        | Op::Exchange { dst, .. }
+        | Op::Variant { dst, .. }
+        | Op::Unwrap { dst, .. }
+        | Op::Record { dst, .. }
+        | Op::FieldMove { dst, .. }
+        | Op::FieldBorrow { dst, .. }
+        | Op::Buffer { dst, .. }
+        | Op::Bytes { dst }
+        | Op::TextLiteral { dst, .. }
+        | Op::Borrow { dst, .. }
+        | Op::Move { dst, .. }
+        | Op::Pack { dst, .. }
+        | Op::Len { dst, .. }
+        | Op::CopyBytes { dst, .. }
+        | Op::Text { dst, .. }
+        | Op::Slice { dst, .. }
+        | Op::Read { dst, .. }
+        | Op::Binary { dst, .. }
+        | Op::Call { dst, .. }
+        | Op::GenericCall { dst, .. } => vec![*dst],
+        Op::Num(r, _) | Op::Unit(r) => vec![*r],
+        Op::Ascribe { .. }
+        | Op::End(_)
+        | Op::EndCaptures(_)
+        | Op::Assert(_)
+        | Op::AppendText { .. }
+        | Op::Push { .. }
+        | Op::Write { .. }
+        | Op::Return(_)
+        | Op::Break
+        | Op::Continue
+        | Op::If { .. }
+        | Op::Block { .. }
+        | Op::Loop { .. }
+        | Op::While { .. }
+        | Op::Match { .. } => vec![],
+    }
 }

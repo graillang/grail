@@ -17,15 +17,16 @@ mod sum;
 pub mod template;
 mod ty;
 pub mod types;
+mod witness;
 use std::collections::{BTreeMap, BTreeSet};
 
 pub type Reg = u32;
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Mode {
     Read,
     Write,
 }
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Ty {
     Num,
     Named(String, Vec<u16>, Vec<Ty>),
@@ -153,6 +154,10 @@ pub struct Arm {
 }
 #[derive(Clone, Debug)]
 pub enum Op {
+    Ascribe {
+        src: Reg,
+        ty: Ty,
+    },
     Address {
         dst: Reg,
         src: Reg,
@@ -323,13 +328,14 @@ struct Value {
     fields: Vec<Option<Value>>,
     active: bool,
     targets: BTreeSet<reference::Place>,
+    lives: Vec<witness::Life>,
 }
 #[derive(Clone, Debug)]
 struct State {
     signature: std::sync::Arc<Sig>,
+    scopes: std::sync::Arc<BTreeMap<Reg, witness::Scope>>,
     regions: std::sync::Arc<provenance::Contract>,
     type_parameters: u16,
-    plain_parameters: BTreeSet<u16>,
     generics: std::sync::Arc<BTreeMap<String, template::Signature>>,
     terminated: bool,
     loops: Vec<std::rc::Rc<flow::LoopFrame>>,
@@ -350,15 +356,13 @@ impl State {
         layouts: types::Context,
         parameters: u16,
     ) -> Result<Self, String> {
-        let mut plain_parameters = BTreeSet::new();
-        if parameters > 0 {
-            for t in signature.params.iter().chain([&signature.result]) {
-                plain_parameters.extend(types::required_plain(t, &layouts)?);
-            }
-        }
         let regions = std::sync::Arc::new(provenance::Contract::new(signature, &layouts)?);
         let mut s = Self {
-            plain_parameters,
+            scopes: std::sync::Arc::new(
+                (0..signature.params.len())
+                    .map(|r| (r as Reg, vec![]))
+                    .collect(),
+            ),
             layouts,
             signature: std::sync::Arc::new(signature.clone()),
             regions,
@@ -443,6 +447,7 @@ impl State {
     fn new_value(&mut self, ty: Ty, roots: BTreeSet<Root>, ancestors: BTreeSet<usize>) -> Value {
         self.next += 1;
         Value {
+            lives: witness::formal(&ty),
             ty,
             roots,
             loan: self.next,
@@ -480,16 +485,19 @@ impl State {
     }
     fn end(&mut self, r: Reg) -> Result<(), String> {
         let v = self.get(r)?.clone();
-        if self.place_borrowed(r, &[], false) {
-            return Err("storage still borrowed".into());
-        }
-        // Default record drop destroys owned storage, not the referents of captured descriptors.
-        if v.ty.reference().is_some() {
-            self.usable_value(&v)?;
-        }
-        if v.ty.owned() && self.owner_borrowed(&v) {
-            return Err(format!("r{r}: owner still borrowed"));
-        }
+        // Internal capture cycles die with their container; external users still prevent drop.
+        self.index_remove(&v);
+        let valid = if self.place_borrowed(r, &[], false) {
+            Err("storage still borrowed".into())
+        } else if v.ty.reference().is_some() {
+            self.usable_value(&v)
+        } else if v.ty.owned() && self.owner_borrowed(&v) {
+            Err(format!("r{r}: owner still borrowed"))
+        } else {
+            Ok(())
+        };
+        self.index_add(&v);
+        valid?;
         self.remove(r);
         Ok(())
     }
@@ -499,7 +507,14 @@ impl State {
         }
         Ok(())
     }
-    fn validate_closed(&self, entry: &BTreeMap<Reg, Value>) -> Result<(), String> {
+    fn validate_closed(
+        &self,
+        entry: &BTreeMap<Reg, Value>,
+        memory: &BTreeMap<Root, Value>,
+    ) -> Result<(), String> {
+        if &self.memory != memory {
+            return Err("block changes external storage captures; loop join required".into());
+        }
         for (r, v) in &self.values {
             if !entry.contains_key(r) && !v.ty.copy() {
                 return Err("block-local resource must end".into());
@@ -514,9 +529,16 @@ impl State {
         Ok(())
     }
     fn call(&mut self, sig: &Sig, dst: Reg, args: &[Reg]) -> Result<(), String> {
-        for t in sig.params.iter().chain([&sig.result]) {
-            self.validate_kind(t)?;
-        }
+        self.call_pattern(sig, sig, None, dst, args)
+    }
+    fn call_pattern(
+        &mut self,
+        sig: &Sig,
+        pattern: &Sig,
+        explicit: Option<&[Ty]>,
+        dst: Reg,
+        args: &[Reg],
+    ) -> Result<(), String> {
         if sig.params.len() != args.len() {
             return Err("call arity".into());
         }
@@ -535,22 +557,35 @@ impl State {
             }
             actuals.push(v);
         }
-        let inputs = sig.params.iter().cloned().zip(actuals).collect::<Vec<_>>();
-        let v = if types::leaves(&sig.result, &self.layouts)?
+        let (bindings, actuals) = self.call_witnesses(pattern, explicit, &actuals)?;
+        let effect = bindings.contract_signature(pattern)?;
+        let inputs = effect
+            .params
+            .iter()
+            .cloned()
+            .zip(actuals)
+            .collect::<Vec<_>>();
+        let contract = provenance::Contract::new(&effect, &self.layouts)?;
+        let sources = self.input_sources(&inputs, &contract)?;
+        let mut results = provenance::Results::new(&sources, &contract);
+        let mut v = if types::leaves(&effect.result, &self.layouts)?
             .iter()
             .any(|(_, t)| t.reference().is_some())
         {
-            let contract = provenance::Contract::new(sig, &self.layouts)?;
-            let sources = self.input_sources(&inputs, &contract)?;
-            self.result_sources(&sig.result, dst, &mut Vec::new(), &sources, &contract)?
+            self.result_sources(&effect.result, dst, &mut Vec::new(), &mut results)?
         } else {
             self.initialized_value(&sig.result, dst, &mut Vec::new())?
         };
-        self.writeback(&inputs)?;
+        self.stamp_value(&mut v, &bindings.instantiate(&pattern.result)?)?;
+        let retired = self.writeback(&sources, &mut results)?;
         for r in consumed {
             self.remove(r);
         }
-        self.put(dst, v)
+        self.put(dst, v)?;
+        for old in retired {
+            self.retire_targets(&old);
+        }
+        Ok(())
     }
     fn ops(
         &mut self,
@@ -577,6 +612,7 @@ impl State {
                 return Err("unreachable operation after control transfer".into());
             }
             match op {
+                Op::Ascribe { src, ty } => self.ascribe(*src, ty)?,
                 Op::Address {
                     dst,
                     src,
@@ -845,12 +881,10 @@ impl State {
                         self.type_parameters,
                         &self.layouts,
                     )?;
-                    for t in &types {
-                        self.validate_kind(t)?;
-                    }
                     let sig = generic.instantiate(&types)?;
                     types::validate_sig_bound(&sig, &self.layouts, self.type_parameters)?;
-                    self.call(&sig, *dst, args)?;
+                    let pattern = generic.function.clone();
+                    self.call_pattern(&sig, &pattern, type_args.as_deref(), *dst, args)?;
                 }
                 Op::Call { dst, name, args } => {
                     let sig = imports.get(name).ok_or("unknown imported function")?;
@@ -870,6 +904,7 @@ impl State {
                     body,
                 } => {
                     let entry = self.values.clone();
+                    let memory = self.memory.clone();
                     let entry_defined = self.copy_defined.clone();
                     let condition_out = after.map(|out| {
                         let mut live = self.scalars();
@@ -886,7 +921,7 @@ impl State {
                         return Err("return in loop condition".into());
                     }
                     self.require_num(*condition)?;
-                    self.validate_closed(&entry)?;
+                    self.validate_closed(&entry, &memory)?;
                     self.values = entry;
                     self.copy_defined = entry_defined;
                     let body_out = after.map(|out| {
@@ -960,6 +995,7 @@ fn check_bound(
     }
     let mut s = State::parameters_bound(&function.sig, layouts.clone(), parameters)?;
     s.generics = std::sync::Arc::new(generics);
+    s.install_scopes(&function.ops)?;
     let mut callable = imports.clone();
     callable.insert(function.sig.name.clone(), function.sig.clone());
     let tail_live = function.result.into_iter().collect();

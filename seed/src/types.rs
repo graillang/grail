@@ -196,7 +196,7 @@ pub fn instances(roots: &[Ty], defs: &Definitions) -> Result<Vec<Ty>, String> {
 }
 fn references(t: &Ty, defs: &Definitions, regions: Option<u16>) -> Result<(), String> {
     match t {
-        Ty::Ref(mode, r, inner) => {
+        Ty::Ref(_, r, inner) => {
             if regions.is_some_and(|count| *r >= count) {
                 return Err("undeclared typed-reference lifetime".into());
             }
@@ -223,45 +223,6 @@ fn references(t: &Ty, defs: &Definitions, regions: Option<u16>) -> Result<(), St
             }
             graph(inner, defs, 0, &mut 0)?;
             references(inner, defs, regions)?;
-            // Capture-bearing referents require invariant lifetime witnesses and opaque writeback.
-            // This first storage gate must fail closed, not treat placeholder region zero as proof.
-            fn plain(
-                t: &Ty,
-                defs: &Definitions,
-                depth: usize,
-                nodes: &mut usize,
-            ) -> Result<bool, String> {
-                *nodes += 1;
-                if depth > 64 || *nodes > 4096 {
-                    return Err("typed referent expansion limit".into());
-                }
-                match t {
-                    Ty::View(..) | Ty::Holder(..) | Ty::Ref(..) => Ok(false),
-                    Ty::Named(_, rs, args) => {
-                        if !rs.is_empty() {
-                            return Ok(false);
-                        }
-                        for t in args {
-                            if !plain(t, defs, depth + 1, nodes)? {
-                                return Ok(false);
-                            }
-                        }
-                        for (_, t) in fields(t, defs)? {
-                            if !plain(&t, defs, depth + 1, nodes)? {
-                                return Ok(false);
-                            }
-                        }
-                        Ok(true)
-                    }
-                    _ => Ok(true),
-                }
-            }
-            if *mode == crate::Mode::Write && !plain(inner, defs, 0, &mut 0)? {
-                return Err(
-                    "capture-bearing typed referents require the pending invariance/writeback gate"
-                        .into(),
-                );
-            }
         }
         Ty::Named(_, rs, args) => {
             application(t, defs)?;
@@ -286,47 +247,6 @@ pub(crate) fn validate_type(t: &Ty, defs: &Definitions, parameters: u16) -> Resu
         references(&leaf, defs, None)?;
     }
     Ok(())
-}
-pub(crate) fn required_plain(t: &Ty, defs: &Definitions) -> Result<BTreeSet<u16>, String> {
-    fn collect(
-        t: &Ty,
-        defs: &Definitions,
-        plain: bool,
-        out: &mut BTreeSet<u16>,
-        depth: usize,
-        nodes: &mut usize,
-    ) -> Result<(), String> {
-        *nodes += 1;
-        if depth > 64 || *nodes > 4096 {
-            return Err("reference kind expansion limit".into());
-        }
-        match t {
-            Ty::Param(i) if plain => {
-                out.insert(*i);
-            }
-            Ty::Ref(m, _, t) => collect(
-                t,
-                defs,
-                plain || *m == crate::Mode::Write,
-                out,
-                depth + 1,
-                nodes,
-            )?,
-            Ty::Named(_, _, args) => {
-                for t in args {
-                    collect(t, defs, plain, out, depth + 1, nodes)?;
-                }
-                for (_, t) in fields(t, defs)? {
-                    collect(&t, defs, plain, out, depth + 1, nodes)?;
-                }
-            }
-            _ => {}
-        }
-        Ok(())
-    }
-    let mut out = BTreeSet::new();
-    collect(t, defs, false, &mut out, 0, &mut 0)?;
-    Ok(out)
 }
 pub fn validate(defs: &Definitions) -> Result<(), String> {
     if defs.len() > 4096 {
@@ -379,7 +299,7 @@ pub(crate) fn validate_sig_bound(
             suitable |= source.eligible(&sig.result, &contract, defs)?;
         }
         if !suitable {
-            return Err("result region has no suitable input capture or frame".into());
+            return Err("result region relationship has no suitable input capture or frame".into());
         }
     }
     Ok(())

@@ -67,7 +67,7 @@ Function signature schema remains **6**. Artifact manifest schema **2** binds `.
 and `.ir` hashes. `.ir` is empty for modules without local generic definitions. Rebuild obsolete
 artifacts; there is no compatibility reader or alternate stale-object route.
 
-Template bundle/checked-IR schema 1 uses canonical bounded netstrings, including literal bytes.
+Template bundle/checked-IR schema 2 uses canonical bounded netstrings, including literal bytes.
 The bundle includes generic definitions, private concrete helpers and layout context. This first
 closure is deliberately coarse: unused private helper/layout edits may invalidate consumers too.
 Public concrete helper calls remain separately linked calls. Public fingerprints exclude function
@@ -98,6 +98,6 @@ eager evaluation, ordinary and growing recursion, lifetime-only code sharing, ca
 keys, recursive cleanup and Result propagation, mixed native profiles and independent Rust controls.
 A 131072-token scanner composes borrowed spans/owned spellings with the actual generic library.
 
-General typed references with invariant mutable referents and opaque writeback, arbitrary-element
-owned collections/cursors, remaining conditional ownership joins, the **real seed port**, deterministic
-stage-2/stage-3 and a retained reproducible bootstrap artifact remain required, unfinished gates.
+[Mutable referent witnesses and opaque writeback](mutable-references.md) now extend these generic
+contracts. Arbitrary-element owned heap collections, remaining conditional ownership joins,
+the **real seed port**, deterministic stage-2/stage-3 and a retained reproducible bootstrap artifact remain required, unfinished gates.

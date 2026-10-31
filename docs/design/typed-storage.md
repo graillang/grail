@@ -1,11 +1,9 @@
 # Typed storage foundation — partial reference gate
 
-This records the initial addressable-storage / **lifetime-free referent** checkpoint.
-[Readonly captured references](captured-references.md) now extend the shared side; mutable
-capture-bearing storage is still pending. The restrictions below describe that initial checkpoint. It is not the complete
-[typed-reference/invariance/writeback gate](generic-lowering-gates.md). Captured-reference cursors,
-mutable cells/vectors of references and arbitrary-element heap containers remain required work.
-Their unsupported cases are not counted as successful rejection proofs.
+This records the initial addressable-storage checkpoint, now extended by
+[readonly captures](captured-references.md) and [mutable witnesses/writeback](mutable-references.md).
+The temporary lifetime-free referent/kind gate has been removed. General heap containers, joins and
+self-hosting remain required work, not successful unsupported-type rejection proofs.
 
 ## Source
 
@@ -32,20 +30,6 @@ pub fn run()->num{
 }
 ```
 
-Current formal typed references cannot have any lifetime-bearing referent, including phantom
-lifetime slots or references in unused nominal type arguments. These deliberately fail closed:
-`ref_mut<short,Cell<long>>`, `ref_mut<short,Vec<read<long>>>`, nested reference types and equivalent
-nominal wrappers. Local constructor placeholder labels have **not** been upgraded to invariant
-witnesses. The source/IR type universe for this checkpoint excludes those referents, not v0 itself.
-
-A generic body must not hide a restriction by forming `ref<T>` internally and waiting for native
-specialization to fail. Well-formed reference uses in its **written signature** expose which type
-parameters must have lifetime-free instantiations. Universal body/call/constructor checking admits
-only those requirements. For example, `replace(ref_mut<a,T>,T)->T` exposes its requirement, whereas
-`f<T>(T)->num` cannot silently take a restricted typed borrow of its opaque input. The requirement
-is derived from canonical signature/layout types; there is no unencoded private-body predicate or
-caller-root rechecking. This temporary kind restriction is not an elaborate trait system and must
-be removed/revised with the full witness/writeback implementation, not treated as a v0 concession.
 
 ## Storage, ownership and effects
 
@@ -55,8 +39,8 @@ A result reference conservatively admits compatible subplaces of declared inputs
 retain their own authority even when those may-place/root sets overlap. Mutable calls uniformly
 invalidate/reconstruct possible pointee content metadata according to its declared type, including
 references nested in by-value carriers: they do not inspect private bodies for G1 post-states.
-With no captured references in referents, this concerns initialized ownership/tag metadata only.
-It is **not** the general capture-retaining writeback solution.
+The initial plain-cell implementation refreshed ownership/tag metadata only. The
+[mutable extension](mutable-references.md) now retains old/incoming captures and invariant bounds.
 
 An addressed scalar stays in the checker until its loans end; direct reads, overwrite or end obey
 shared/exclusive storage exclusion. Once no reference remains, the scalar can use the prior compact

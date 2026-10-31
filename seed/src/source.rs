@@ -611,12 +611,16 @@ impl Parser<'_> {
                     None
                 };
                 let dst = self.fresh()?;
+                let ty = self.constructor_type(&name, explicit.clone())?;
                 ops.push(Op::Variant {
                     dst,
-                    ty: self.constructor_type(&name, explicit.clone())?,
+                    ty: ty.clone(),
                     variant,
                     payload,
                 });
+                if explicit.is_some() {
+                    ops.push(Op::Ascribe { src: dst, ty });
+                }
                 dst
             } else if self.eat("(") {
                 let mut args = vec![];
@@ -1275,6 +1279,7 @@ pub fn compile(
         available_calls.insert(f.sig.name.clone(), f.sig.clone());
         let mut state = State::parameters_bound(&f.sig, layouts.clone(), parameters)?;
         state.generics = std::sync::Arc::new(generics.clone());
+        state.install_scopes(&f.ops)?;
         let ops = ending(
             &f.ops,
             &mut state,

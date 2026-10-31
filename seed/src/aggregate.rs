@@ -121,6 +121,7 @@ impl State {
             let mut target = self.parameter_value(inner, input, path)?;
             path.pop();
             reference::rename_owned(&mut target, &base, &[]);
+            self.index_add(&target);
             self.memory.insert(base.clone(), target);
             v.targets.insert(reference::Place { base, path: vec![] });
         }
@@ -157,7 +158,14 @@ impl State {
             }
             r
         };
-        Ok(self.new_value(Ty::View(mode, region), p.roots, ancestors))
+        let life = if p.ty.reference().is_some() {
+            p.lives[0].clone()
+        } else {
+            self.roots_life(&p.roots)?
+        };
+        let mut out = self.new_value(Ty::View(mode, region), p.roots, ancestors);
+        out.lives = vec![life];
+        Ok(out)
     }
     pub(super) fn field_move(&mut self, dst: Reg, src: Reg, path: &[String]) -> Result<(), String> {
         if path.is_empty() || dst == src {
@@ -205,18 +213,39 @@ impl State {
         }
         let mut todo = Vec::new();
         paths(self.get(r)?, &mut Vec::new(), &mut todo);
-        let mut changed = false;
-        for path in todo {
-            let v = self.get(r)?.at(&path)?.clone();
-            if !self.place_borrowed(r, &path, false) && self.usable_value(&v).is_ok() {
-                self.index_remove(&v);
-                self.retire_targets(&v);
-                self.values.get_mut(&r).unwrap().at_mut(&path)?.active = false;
-                changed = true;
+        let mut candidates = todo
+            .into_iter()
+            .map(|path| {
+                let v = self.get(r)?.at(&path)?.clone();
+                Ok((path, v))
+            })
+            .collect::<Result<BTreeMap<_, _>, String>>()?;
+        for v in candidates.values() {
+            self.index_remove(v);
+        }
+        loop {
+            let rejected = candidates
+                .iter()
+                .filter_map(|(path, v)| {
+                    (self.place_borrowed(r, path, false) || self.usable_value(v).is_err())
+                        .then_some(path.clone())
+                })
+                .collect::<Vec<_>>();
+            if rejected.is_empty() {
+                break;
+            }
+            for path in rejected {
+                let v = candidates.remove(&path).expect("candidate");
+                self.index_add(&v);
             }
         }
-        Ok(changed)
+        for (path, v) in &candidates {
+            self.values.get_mut(&r).unwrap().at_mut(path)?.active = false;
+            self.retire_targets(v);
+        }
+        Ok(!candidates.is_empty())
     }
+
     pub(super) fn record_value(
         &mut self,
         dst: Reg,
@@ -224,7 +253,7 @@ impl State {
         fields: &[(String, Reg)],
     ) -> Result<(), String> {
         types::validate_type(ty, &self.layouts, self.type_parameters)?;
-        self.validate_kind(ty)?;
+
         let Ty::Named(name, _, _) = ty else {
             return Err("record constructor needs nominal type".into());
         };
@@ -269,6 +298,7 @@ impl State {
             BTreeSet::new(),
         );
         v.fields = values;
+        self.constructor_witnesses(dst, &mut v, None)?;
         self.put(dst, v)
     }
     pub(super) fn initialized_value(
@@ -277,40 +307,28 @@ impl State {
         dst: Reg,
         path: &mut Vec<usize>,
     ) -> Result<Value, String> {
-        self.result_sources(t, dst, path, &[], &provenance::Contract::default())
+        self.result_sources(
+            t,
+            dst,
+            path,
+            &mut provenance::Results::new(&[], &provenance::Contract::default()),
+        )
     }
     pub(super) fn result_sources(
         &mut self,
         t: &Ty,
         dst: Reg,
         path: &mut Vec<usize>,
-        sources: &[provenance::InputSource],
-        contract: &provenance::Contract,
+        sources: &mut provenance::Results<'_>,
     ) -> Result<Value, String> {
         let mut roots = BTreeSet::new();
         let mut ancestors = BTreeSet::new();
         let mut targets = BTreeSet::new();
         if t.reference().is_some() {
-            for source in sources {
-                if !source.spec.eligible(t, contract, &self.layouts)? {
-                    continue;
-                }
-                let v = &source.value;
-                roots.extend(v.roots.clone());
-                ancestors.extend(v.ancestors.clone());
-                if v.ty.reference().is_some_and(|(m, _)| m == Mode::Write)
-                    && !source.spec.frames.is_empty()
-                {
-                    roots.extend(source.frame_roots.clone());
-                    ancestors.extend(source.frame_ancestors.clone());
-                    ancestors.insert(v.loan);
-                }
-                if let (Ty::Ref(_, _, want), Ty::Ref(_, _, inner)) = (t, &v.ty) {
-                    for p in &v.targets {
-                        self.matching_places(p, inner, want, &mut targets)?;
-                    }
-                }
-            }
+            let result = sources.reference(t, &self.layouts)?;
+            roots = result.roots.clone();
+            ancestors = result.ancestors.clone();
+            targets = result.targets.clone();
         } else if t.owned() {
             roots.insert(Root::Local(dst, path.clone()));
         }
@@ -319,9 +337,8 @@ impl State {
         if matches!(t, Ty::Named(..)) {
             for (i, (_, field)) in types::fields(t, &self.layouts)?.iter().enumerate() {
                 path.push(i);
-                v.fields.push(Some(
-                    self.result_sources(field, dst, path, sources, contract)?,
-                ));
+                v.fields
+                    .push(Some(self.result_sources(field, dst, path, sources)?));
                 path.pop();
             }
         }

@@ -58,6 +58,11 @@ impl Writer {
         self.num(ops.len() as u64)?;
         for op in ops {
             match op {
+                Op::Ascribe { src, ty } => {
+                    self.text("ascribe")?;
+                    self.num(*src as u64)?;
+                    self.text(&ty.word())?;
+                }
                 Op::Address {
                     dst,
                     src,
@@ -392,6 +397,10 @@ impl<'a> Reader<'a> {
         for _ in 0..n {
             let tag = self.text()?;
             let op = match tag.as_str() {
+                "ascribe" => Op::Ascribe {
+                    src: self.reg()?,
+                    ty: self.ty()?,
+                },
                 "address" => Op::Address {
                     dst: self.reg()?,
                     src: self.reg()?,
@@ -612,7 +621,7 @@ fn generic_names(ops: &[Op], out: &mut BTreeSet<String>) {
 }
 pub(crate) fn encode(p: &Checked) -> Result<Vec<u8>, String> {
     let mut w = Writer::default();
-    w.text("grail-seed-checked-ir-1")?;
+    w.text("grail-seed-checked-ir-2")?;
     w.num(p.type_parameters as u64)?;
     w.text(&p.function.sig.encode_bound(p.type_parameters)?)?;
     w.num(p.imports.len() as u64)?;
@@ -636,7 +645,7 @@ pub(crate) fn encode(p: &Checked) -> Result<Vec<u8>, String> {
 }
 pub(crate) fn decode(data: &[u8], layouts: types::Context) -> Result<Checked, String> {
     let mut r = Reader::new(data)?;
-    if r.text()? != "grail-seed-checked-ir-1" {
+    if r.text()? != "grail-seed-checked-ir-2" {
         return Err("invalid checked IR schema".into());
     }
     let parameters = r.count(64)? as u16;
