@@ -133,6 +133,8 @@ pub struct Arm {
 #[derive(Clone, Debug)]
 pub enum Op {
     Return(Reg),
+    Break,
+    Continue,
     Num(Reg, u64),
     Unit(Reg),
     Variant {
@@ -283,6 +285,7 @@ struct Value {
 struct State {
     signature: std::sync::Arc<Sig>,
     terminated: bool,
+    loops: Vec<std::rc::Rc<flow::LoopFrame>>,
     layouts: types::Context,
     values: BTreeMap<Reg, Value>,
     resources: BTreeSet<Reg>,
@@ -298,6 +301,7 @@ impl State {
             layouts,
             signature: std::sync::Arc::new(signature.clone()),
             terminated: false,
+            loops: Vec::new(),
             values: BTreeMap::new(),
             resources: BTreeSet::new(),
             next: 0,
@@ -451,7 +455,7 @@ impl State {
         for (position, op) in ops.iter().enumerate() {
             let after = afters.as_ref().map(|v| &v[position]);
             if self.terminated {
-                return Err("unreachable operation after return".into());
+                return Err("unreachable operation after control transfer".into());
             }
             match op {
                 Op::Unit(r) => {
@@ -491,6 +495,10 @@ impl State {
                     *self = joined.expect("nonempty exhaustive match");
                 }
 
+                Op::Break | Op::Continue => {
+                    self.validate_loop_exit()?;
+                    self.terminated = true;
+                }
                 Op::Return(r) => {
                     self.validate_return(*r)?;
                     self.terminated = true;
@@ -723,7 +731,11 @@ impl State {
                         live.insert(*condition);
                         live
                     });
+                    // A condition cannot jump out of a surrounding loop; only its nested loops
+                    // introduce jump targets. Conditional function returns (e.g. `?`) remain valid.
+                    let loops = std::mem::take(&mut self.loops);
                     self.ops_inner(test, imports, depth + 1, condition_out.as_ref())?;
+                    self.loops = loops;
                     if self.terminated {
                         return Err("return in loop condition".into());
                     }

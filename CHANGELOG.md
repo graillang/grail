@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Implement checked `break`/`continue` for counted/while loops, including blocks, nested loops and
+  matches. Close local loans and recursively drop local owners before jumping; preserve entry
+  resources/scalar definedness and emit explicit C/LLVM targets/latches. Test source-hidden calls,
+  unique-parent reactivation, complete release traces, condition-evaluation counts, mixed native
+  profiles and a frozen 1,600-case replay. The existing conservative entry ownership invariant
+  remains; general conditional ownership joins and full v0/self-hosting are not claimed complete.
+
 - Add the actual `clang-release` native driver profile (`-O2`) while preserving default `clang`
   (`-O0`) and TinyCC. Check source-hidden generic/owned programs, relocation and byte-reproducible
   objects/executables, mixed-profile ABIs, runtime aborts, malformed UTF-8 and concurrent artifact

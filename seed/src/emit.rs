@@ -231,6 +231,11 @@ fn c_functions(functions: &[(&Checked, bool)], layouts: &crate::types::Definitio
     }
     s
 }
+#[derive(Default)]
+struct CLoops {
+    stack: Vec<usize>,
+    next: usize,
+}
 fn c_body(p: &Checked, s: &mut String, private: bool) {
     writeln!(
         s,
@@ -263,14 +268,16 @@ fn c_body(p: &Checked, s: &mut String, private: bool) {
         os: &[Op],
         types: &BTreeMap<Reg, Ty>,
         layouts: &crate::types::Definitions,
+        jumps: &mut CLoops,
     ) {
         for o in os {
             match o{
+        Op::Break|Op::Continue=>{let id=jumps.stack.last().expect("checked loop jump");let kind=if matches!(o,Op::Break){"break"}else{"continue"};writeln!(s,"goto loop_{kind}_{id};").unwrap();},
         Op::Return(r)=>{writeln!(s,"return r{r};").unwrap()},
         Op::Unit(r)=>{writeln!(s,"r{r}=0;").unwrap()},
         Op::Variant{dst,variant,payload,..}=>{writeln!(s,"r{dst}=({}){{.tag={variant}}};",cty(&types[dst])).unwrap();if let Some(r)=payload{if types[r]!=Ty::Unit{writeln!(s,"r{dst}.data.f{variant}=r{r};").unwrap();}record_flags(s,*r,&types[r],layouts,false);}record_flags(s,*dst,&types[dst],layouts,true);},
         Op::Unwrap{dst,src}=>{let k=crate::types::success(&types[src],layouts).unwrap();writeln!(s,"if(r{src}.tag!={k})abort();").unwrap();if types[dst]==Ty::Unit{writeln!(s,"r{dst}=0;").unwrap();}else{writeln!(s,"r{dst}=r{src}.data.f{k};").unwrap();}record_flags(s,*dst,&types[dst],layouts,true);clear_variant_flags(s,*src,&types[src],layouts,k);},
-        Op::Match{src,arms}=>{let fields=crate::types::fields(&types[src],layouts).unwrap();writeln!(s,"switch(r{src}.tag){{").unwrap();for a in arms{let k=fields.iter().position(|(n,_)|*n==a.variant).unwrap();writeln!(s,"case {k}:{{").unwrap();if let Some(r)=a.binding{if types[&r]==Ty::Unit{writeln!(s,"r{r}=0;").unwrap();}else{writeln!(s,"r{r}=r{src}.data.f{k};").unwrap();}record_flags(s,r,&types[&r],layouts,true);}clear_variant_flags(s,*src,&types[src],layouts,k);ops(s,&a.body,types,layouts);if !crate::flow::terminates(&a.body){s.push_str("break;");}s.push_str("}\n");}s.push_str("default:abort();}\n");},
+        Op::Match{src,arms}=>{let fields=crate::types::fields(&types[src],layouts).unwrap();writeln!(s,"switch(r{src}.tag){{").unwrap();for a in arms{let k=fields.iter().position(|(n,_)|*n==a.variant).unwrap();writeln!(s,"case {k}:{{").unwrap();if let Some(r)=a.binding{if types[&r]==Ty::Unit{writeln!(s,"r{r}=0;").unwrap();}else{writeln!(s,"r{r}=r{src}.data.f{k};").unwrap();}record_flags(s,r,&types[&r],layouts,true);}clear_variant_flags(s,*src,&types[src],layouts,k);ops(s,&a.body,types,layouts,jumps);if !crate::flow::terminates(&a.body){s.push_str("break;");}s.push_str("}\n");}s.push_str("default:abort();}\n");},
 
         Op::Record{dst,ty,fields}=>{
             writeln!(s,"r{dst}=({}){{0}};",cty(&types[dst])).unwrap();
@@ -295,7 +302,7 @@ fn c_body(p: &Checked, s: &mut String, private: bool) {
         Op::Borrow{dst,src,..}=>{writeln!(s,"r{dst} = {};",view(*src,types)).unwrap()},
         Op::Slice{dst,src,start,end}=>{let v=view(*src,types);writeln!(s,"if(r{start}>r{end} || r{end}>{v}.n) abort(); r{dst}=(gv){{r{start}?{v}.p+r{start}:{v}.p,r{end}-r{start}}};").unwrap()},
         Op::Assert(r)=>{writeln!(s,"if(!r{r}) abort();").unwrap()},
-        Op::If{condition,yes,no}=>{writeln!(s,"if(r{condition}){{").unwrap();ops(s,yes,types,layouts);s.push_str("}else{\n");ops(s,no,types,layouts);s.push_str("}\n")},
+        Op::If{condition,yes,no}=>{writeln!(s,"if(r{condition}){{").unwrap();ops(s,yes,types,layouts,jumps);s.push_str("}else{\n");ops(s,no,types,layouts,jumps);s.push_str("}\n")},
         Op::Pack{dst,src}=>{writeln!(s,"r{dst} = (gh){{r{src}}};").unwrap()},
         Op::Move{dst,src}=>{writeln!(s,"r{dst}=r{src};").unwrap();record_flags(s,*dst,&types[dst],layouts,true);record_flags(s,*src,&types[src],layouts,false);},
         Op::End(r)=>{if types[r].heap(){writeln!(s,"free(r{r}.p);").unwrap();}else{for(i,path)in owned_paths(&types[r],layouts).iter().enumerate(){writeln!(s,"if(r{r}_live[{i}]){{free({}.p);r{r}_live[{i}]=0;}}",field_expr(*r,&types[r],path,layouts)).unwrap();}}},
@@ -304,13 +311,29 @@ fn c_body(p: &Checked, s: &mut String, private: bool) {
         Op::Write{dst,index,value}=>{let v=view(*dst,types);writeln!(s,"if (r{index}>={v}.n) abort(); {v}.p[r{index}]=(uint8_t)r{value};").unwrap()},
         Op::Binary{dst,op,left,right}=>{let symbol=match op{Bin::Add=>"+",Bin::Sub=>"-",Bin::Lt=>"<",Bin::Mul=>"*",Bin::Xor=>"^",Bin::Rem=>"%",Bin::Eq=>"==",Bin::Ne=>"!=",Bin::And=>"&"};if matches!(op,Bin::Rem){writeln!(s,"if (!r{right}) abort();").unwrap()}writeln!(s,"r{dst}=r{left} {symbol} r{right};").unwrap()},
         Op::Call{dst,name,args}=>{writeln!(s,"r{dst}={}({});",symbol(name),args.iter().map(|r|format!("r{r}")).collect::<Vec<_>>().join(",")).unwrap();for r in args{record_flags(s,*r,&types[r],layouts,false);}record_flags(s,*dst,&types[dst],layouts,true);},
-        Op::Block{body}=>{s.push_str("{\n");ops(s,body,types,layouts);s.push_str("}\n")},
-        Op::While{condition,test,body}=>{s.push_str("while(1){\n");ops(s,test,types,layouts);writeln!(s,"if(!r{condition})break;").unwrap();ops(s,body,types,layouts);s.push_str("}\n")},
-        Op::Loop{index,end,body}=>{writeln!(s,"for (r{index}=0; r{index}<r{end}; ++r{index}) {{").unwrap();ops(s,body,types,layouts);s.push_str("}\n")},
+        Op::Block{body}=>{s.push_str("{\n");ops(s,body,types,layouts,jumps);s.push_str("}\n")},
+        Op::While{condition,test,body}=>{
+            let id=jumps.next;jumps.next+=1;let(b,c)=crate::flow::loop_jumps(body);
+            s.push_str("while(1){\n");ops(s,test,types,layouts,jumps);writeln!(s,"if(!r{condition})break;").unwrap();
+            jumps.stack.push(id);ops(s,body,types,layouts,jumps);jumps.stack.pop();
+            if c{writeln!(s,"loop_continue_{id}:;").unwrap();}s.push_str("}\n");if b{writeln!(s,"loop_break_{id}:;").unwrap();}
+        },
+        Op::Loop{index,end,body}=>{
+            let id=jumps.next;jumps.next+=1;let(b,c)=crate::flow::loop_jumps(body);
+            writeln!(s,"for (r{index}=0; r{index}<r{end}; ++r{index}) {{").unwrap();
+            jumps.stack.push(id);ops(s,body,types,layouts,jumps);jumps.stack.pop();
+            if c{writeln!(s,"loop_continue_{id}:;").unwrap();}s.push_str("}\n");if b{writeln!(s,"loop_break_{id}:;").unwrap();}
+        },
     }
         }
     }
-    ops(s, &p.function.ops, &p.types, &p.layouts);
+    ops(
+        s,
+        &p.function.ops,
+        &p.types,
+        &p.layouts,
+        &mut CLoops::default(),
+    );
     if let Some(r) = p.return_tail {
         writeln!(s, "return r{r};").unwrap();
     }
@@ -328,6 +351,7 @@ struct Ll {
     s: String,
     id: usize,
     types: BTreeMap<Reg, Ty>,
+    loops: Vec<(String, String)>,
 }
 impl Ll {
     fn line(&mut self, s: impl AsRef<str>) {
@@ -370,6 +394,17 @@ impl Ll {
     fn ops(&mut self, os: &[Op]) -> bool {
         for o in os {
             match o {
+                Op::Break | Op::Continue => {
+                    let targets = self.loops.last().expect("checked loop jump");
+                    let label = if matches!(o, Op::Break) {
+                        &targets.0
+                    } else {
+                        &targets.1
+                    }
+                    .clone();
+                    self.line(format!("br label %{label}"));
+                    return false;
+                }
                 Op::Unit(r) => self.store(*r, "0"),
                 Op::Return(r) => {
                     let v = self.load(*r);
@@ -590,7 +625,10 @@ impl Ll {
                     self.line(format!("%{cmp} = icmp ne i64 {value}, 0"));
                     self.line(format!("br i1 %{cmp}, label %{block}, label %{done}"));
                     writeln!(self.s, "{block}:").unwrap();
-                    if self.ops(body) {
+                    self.loops.push((done.clone(), head.clone()));
+                    let continuing = self.ops(body);
+                    self.loops.pop();
+                    if continuing {
                         self.line(format!("br label %{head}"));
                     }
                     writeln!(self.s, "{done}:").unwrap();
@@ -608,7 +646,22 @@ impl Ll {
                     self.line(format!("%{cmp} = icmp ult i64 {a}, {b}"));
                     self.line(format!("br i1 %{cmp}, label %{block}, label %{done}"));
                     writeln!(self.s, "{block}:").unwrap();
-                    if self.ops(body) {
+                    let has_continue = crate::flow::loop_jumps(body).1;
+                    let latch = if has_continue {
+                        self.fresh()
+                    } else {
+                        head.clone()
+                    };
+                    self.loops.push((done.clone(), latch.clone()));
+                    let continuing = self.ops(body);
+                    self.loops.pop();
+                    if has_continue {
+                        if continuing {
+                            self.line(format!("br label %{latch}"));
+                        }
+                        writeln!(self.s, "{latch}:").unwrap();
+                    }
+                    if continuing || has_continue {
                         let a = self.load(*index);
                         let next = self.fresh();
                         self.line(format!("%{next} = add i64 {a}, 1"));
@@ -682,6 +735,7 @@ fn llvm_body(p: &Checked, private: bool) -> String {
         s: String::new(),
         id: 0,
         types: p.types.clone(),
+        loops: Vec::new(),
     };
     writeln!(
         ll.s,

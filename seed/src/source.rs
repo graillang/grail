@@ -753,7 +753,14 @@ impl Parser<'_> {
         }
         let mut ops = vec![];
         while !matches!(self.peek(), "}" | "") {
-            if self.eat("return") {
+            if self.peek() == "break" || self.peek() == "continue" {
+                let is_break = self.eat("break");
+                if !is_break {
+                    self.expect("continue")?;
+                }
+                self.expect(";")?;
+                ops.push(if is_break { Op::Break } else { Op::Continue });
+            } else if self.eat("return") {
                 let r = self.expr(&mut ops, 0, 0)?;
                 self.expect(";")?;
                 ops.push(Op::Return(r));
@@ -1200,7 +1207,30 @@ fn ending(
     let mut result = vec![];
     for (op, after) in ops.iter().zip(afters) {
         if state.terminated {
-            return Err("unreachable statement after return".into());
+            return Err("unreachable statement after control transfer".into());
+        }
+        if matches!(op, Op::Break | Op::Continue) {
+            let frame = state
+                .loops
+                .last()
+                .ok_or("loop exit outside loop body")?
+                .clone();
+            let keep = frame.values.keys().copied().collect();
+            clean(state, &keep, &keep, &mut result);
+            let owners = state
+                .resources
+                .iter()
+                .rev()
+                .filter(|r| state.values[r].ty.owned() && !frame.values.contains_key(r))
+                .copied()
+                .collect::<Vec<_>>();
+            for r in owners {
+                state.end(r)?;
+                result.push(Op::End(r));
+            }
+            state.ops(std::slice::from_ref(op), imports, 0)?;
+            result.push(op.clone());
+            continue;
         }
         if let Op::Return(r) = op {
             clean(state, &BTreeSet::from([*r]), &BTreeSet::new(), &mut result);
@@ -1253,11 +1283,14 @@ fn ending(
                 body,
             } => {
                 let mut condition_state = state.clone();
+                condition_state.loops.clear();
                 let condition_out = BTreeSet::from([*condition]);
                 let test = ending(test, &mut condition_state, imports, &condition_out, &keep)?;
                 let mut body_state = state.clone();
+                body_state.enter_loop(None)?;
                 let mut body_out = live_before(op, &after);
                 body_out.extend(&after);
+                body_out.extend(body_state.scalars());
                 let body = ending(body, &mut body_state, imports, &body_out, &keep)?;
                 Op::While {
                     condition: *condition,
@@ -1267,11 +1300,13 @@ fn ending(
             }
             Op::Loop { index, end, body } => {
                 let mut inner = state.clone();
-                inner.num(*index)?;
+                inner.enter_loop(Some(*index))?;
+                let mut body_out = after.clone();
+                body_out.extend(inner.scalars());
                 Op::Loop {
                     index: *index,
                     end: *end,
-                    body: ending(body, &mut inner, imports, &after, &keep)?,
+                    body: ending(body, &mut inner, imports, &body_out, &keep)?,
                 }
             }
             Op::Match { src, arms } => {

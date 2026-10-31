@@ -1,6 +1,33 @@
 //! Terminating paths do not participate in continuation ownership joins.
 use super::*;
+#[derive(Clone, Debug)]
+pub(super) struct LoopFrame {
+    pub(super) values: BTreeMap<Reg, Value>,
+    defined: Vec<u64>,
+}
 impl State {
+    pub(super) fn enter_loop(&mut self, index: Option<Reg>) -> Result<(), String> {
+        self.loops.push(std::rc::Rc::new(LoopFrame {
+            values: self.values.clone(),
+            defined: self.copy_defined.clone(),
+        }));
+        if let Some(r) = index {
+            self.num(r)?;
+        }
+        Ok(())
+    }
+    pub(super) fn validate_loop_exit(&self) -> Result<(), String> {
+        let frame = self.loops.last().ok_or("loop exit outside loop body")?;
+        self.validate_closed(&frame.values)
+            .map_err(|e| format!("loop exit violates entry state: {e}"))?;
+        for (index, word) in frame.defined.iter().enumerate() {
+            if word & !self.copy_defined.get(index).copied().unwrap_or(0) != 0 {
+                return Err("loop exit loses entry scalar definition".into());
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn copy_defined(&self, r: Reg) -> bool {
         self.copy_defined
             .get(r as usize / 64)
@@ -103,9 +130,7 @@ impl State {
         out: Option<&BTreeSet<Reg>>,
     ) -> Result<(), String> {
         let mut inner = self.clone();
-        if let Some(r) = index {
-            inner.num(r)?;
-        }
+        inner.enter_loop(index)?;
         let live = out.map(|out| {
             let mut live = inner.scalars();
             live.extend(out);
@@ -122,7 +147,7 @@ impl State {
 
 pub(crate) fn terminates(ops: &[Op]) -> bool {
     match ops.last() {
-        Some(Op::Return(_)) => true,
+        Some(Op::Return(_) | Op::Break | Op::Continue) => true,
         Some(Op::Block { body }) => terminates(body),
         Some(Op::If { yes, no, .. }) => terminates(yes) && terminates(no),
         Some(Op::Match { arms, .. }) => {
@@ -136,6 +161,7 @@ pub(super) fn live_before(op: &Op, after: &BTreeSet<Reg>) -> BTreeSet<Reg> {
     let mut live = after.clone();
     let (defs, uses): (Vec<Reg>, Vec<Reg>) = match op {
         Op::Return(r) => return BTreeSet::from([*r]),
+        Op::Break | Op::Continue => return live,
         Op::Unit(r) => (vec![*r], vec![]),
         Op::Variant { dst, payload, .. } => (vec![*dst], payload.iter().copied().collect()),
         Op::Unwrap { dst, src } => (vec![*dst], vec![*src]),
@@ -245,4 +271,29 @@ pub(super) fn afters(ops: &[Op], out: &BTreeSet<Reg>) -> Vec<BTreeSet<Reg>> {
     }
     result.reverse();
     result
+}
+
+/// Exits for the immediately enclosing loop; nested loops establish their own targets.
+pub(crate) fn loop_jumps(ops: &[Op]) -> (bool, bool) {
+    let (mut breaks, mut continues) = (false, false);
+    for op in ops {
+        let (b, c) = match op {
+            Op::Break => (true, false),
+            Op::Continue => (false, true),
+            Op::Block { body } => loop_jumps(body),
+            Op::If { yes, no, .. } => {
+                let (a, b) = loop_jumps(yes);
+                let (c, d) = loop_jumps(no);
+                (a || c, b || d)
+            }
+            Op::Match { arms, .. } => arms
+                .iter()
+                .map(|a| loop_jumps(&a.body))
+                .fold((false, false), |(a, b), (c, d)| (a || c, b || d)),
+            _ => (false, false),
+        };
+        breaks |= b;
+        continues |= c;
+    }
+    (breaks, continues)
 }

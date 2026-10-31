@@ -26,7 +26,8 @@ They are demonstration commands, not a surface-language parser or general build 
   requires all views to end. Calls consume view arguments; explicit reborrows retain a parent.
 - Returned references may originate only from suitable input regions. No local-buffer escape.
   Imported return bounds conservatively retain every compatible argument origin and parent.
-- Counted and while loops require the same resource state at their back edge. Numeric state may change;
+- Counted and while loops support `break`/`continue` with local scope cleanup and innermost-loop
+  targets; their backedges and exits require the same entry resource state. Numeric state may change;
   loop-local resources must end. The lowered IR has explicit `End`; the source frontend infers
   borrowed-value endings and inserts lexical owner cleanup.
 - Numbers are wrapping u64; buffers hold bytes. Native indexing and remainder have abort guards.
@@ -256,3 +257,5 @@ and executable linking use it. Checking/interfaces/emitted C are unchanged acros
 
 This is distinct from Cargo's `--release`, which optimizes the **Rust seed executable itself**.
 A full linked-executable recipe manifest and hermetic bootstrap toolchain are not implemented yet.
+
+[Loop-exit checking, cleanup, C/LLVM evidence and remaining join restrictions](../docs/design/loop-exits.md).
