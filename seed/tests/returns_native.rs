@@ -41,10 +41,10 @@ fn early_returns_cleanup_selected_backend_objects_and_llvm_terminators() {
         result: grail_seed::Ty::Num,
     });
     fs::write(dir.join("live.api"), live.encode().unwrap()).unwrap();
-    fs::write(dir.join("choice.grl"),"module choice;use live;struct Inner{a:string,b:string}struct Token<a>{inner:Inner,span:read<a>}pub fn make<a>(p:read<a>)->Token<a>{return Token{inner:Inner{a:\"a\",b:\"bb\"},span:p};}pub fn pick<a>(t:Token<a>,n:num)->string{let trash=bytes();push(trash,9);assert(live()==4);if n{return t.inner.a;}for i in 2{if i{return t.inner.b;}}return \"fallback\";}").unwrap();
+    fs::write(dir.join("choice.grl"),"module choice;use live;struct Inner{a:string,b:string}struct Token<a>{inner:Inner,span:read<a>}pub fn make<a>(p:read<a>)->Token<a>{return Token{inner:Inner{a:\"a\",b:\"bb\"},span:p};}pub fn pick<a>(t:Token<a>,n:num)->string{var trash =bytes();push(trash,9);assert(live()==4);if n{return t.inner.a;}for i in 2{if i{return t.inner.b;}}return \"fallback\";}").unwrap();
     compile(&dir, "choice.grl", &backend);
     fs::remove_file(dir.join("choice.grl")).unwrap();
-    fs::write(dir.join("audit.grl"),"module audit;use choice;use live;pub fn run(n:num)->num{let source=bytes();push(source,7);let t=choice::make(read(source));assert(live()==3);let name=choice::pick(t,n);assert(live()==2);assert(len(name)==2-n);drop(name);assert(live()==1);return len(source);}").unwrap();
+    fs::write(dir.join("audit.grl"),"module audit;use choice;use live;pub fn run(n:num)->num{var source =bytes();push(source,7);t :=choice::make(read(source));assert(live()==3);name :=choice::pick(t,n);assert(live()==2);assert(len(name)==2-n);drop(name);assert(live()==1);return len(source);}").unwrap();
     compile(&dir, "audit.grl", &backend);
     fs::write(
         dir.join("allocator.c"),
@@ -66,7 +66,7 @@ fn early_returns_cleanup_selected_backend_objects_and_llvm_terminators() {
             .arg(dir.join("audited")));
         run(&mut Command::new(dir.join("audited")));
     }
-    fs::write(dir.join("capture.grl"),"module capture;struct T<a>{span:mut<a>,name:string}pub fn run()->num{let b=bytes();push(b,7);let t=T{span:mut(b),name:\"n\"};let r=span(t,1);assert(at(r,0)==7);push(b,8);return len(b);}fn span<a>(t:T<a>,n:num)->read<a>{if n{return read(t.span);}return read(t.span);}").unwrap();
+    fs::write(dir.join("capture.grl"),"module capture;struct T<a>{span:mut<a>,name:string}pub fn run()->num{var b =bytes();push(b,7);t :=T{span:mut(b),name:\"n\"};r :=span(t,1);assert(at(r,0)==7);push(b,8);return len(b);}fn span<a>(t:T<a>,n:num)->read<a>{if n{return read(t.span);}return read(t.span);}").unwrap();
     compile(&dir, "capture.grl", &backend);
     let capture = grail_seed::artifact::load(&dir, "capture").unwrap();
     let symbol = grail_seed::emit::symbol(capture.header.entry.as_deref().unwrap());
@@ -85,7 +85,7 @@ fn early_returns_cleanup_selected_backend_objects_and_llvm_terminators() {
         .arg("-o")
         .arg(dir.join("capture")));
     run(&mut Command::new(dir.join("capture")));
-    let control = "module control;pub fn run<a>(p:read<a>)->num{let n=len(p);if n==0{return both(0);} {for i in n{if at(p,i)==120{return from_while(n);}}}return both(n);}fn both(n:num)->num{if n{return 7;}else{return 8;}}fn from_while(n:num)->num{while n{return 9;}return 10;}";
+    let control = "module control;pub fn run<a>(p:read<a>)->num{n :=len(p);if n==0{return both(0);} {for i in n{if at(p,i)==120{return from_while(n);}}}return both(n);}fn both(n:num)->num{if n{return 7;}else{return 8;}}fn from_while(n:num)->num{while n{return 9;}return 10;}";
     fs::write(dir.join("control.grl"), control).unwrap();
     run(Command::new(env!("CARGO_BIN_EXE_grail-seed"))
         .arg("build")

@@ -2,7 +2,7 @@ use grail_seed::source;
 use std::collections::BTreeMap;
 #[test]
 fn shared_source_descriptors_escape_the_cursor_frame_without_escaping_the_data_owner() {
-    let text = "module f;struct Cursor<a>{source:read<a>,name:string}fn source<outer,data>(p:ref<outer,Cursor<data>>)->read<data>{return read(p.source);}pub fn run()->num{let b=bytes();push(b,7);let c=Cursor{source:read(b),name:\"owned\"};let span=source(borrow(c));drop(c);return at(span,0);}";
+    let text = "module f;struct Cursor<a>{source:read<a>,name:string}fn source<outer,data>(p:ref<outer,Cursor<data>>)->read<data>{return read(p.source);}pub fn run()->num{var b =bytes();push(b,7);c :=Cursor{source:read(b),name:\"owned\"};span :=source(borrow(c));drop(c);return at(span,0);}";
     assert!(source::compile(text, BTreeMap::new()).is_ok());
     let text = text.replace("drop(c);return", "drop(c);push(b,8);return");
     assert!(source::compile(&text, BTreeMap::new()).is_err());
@@ -42,12 +42,12 @@ fn returning_a_shared_cursor_cannot_widen_its_stored_capture_contract() {
 }
 #[test]
 fn a_live_cursor_frame_prevents_early_capture_expiry() {
-    let bad = "module f;struct Cursor<a>{source:read<a>}fn source<outer,data>(p:ref<outer,Cursor<data>>)->read<data>{return read(p.source);}pub fn run()->num{let b=bytes();push(b,7);let c=Cursor{source:read(b)};let p=borrow(c);push(b,8);let value=source(p);return at(value,0);}";
+    let bad = "module f;struct Cursor<a>{source:read<a>}fn source<outer,data>(p:ref<outer,Cursor<data>>)->read<data>{return read(p.source);}pub fn run()->num{var b =bytes();push(b,7);c :=Cursor{source:read(b)};p :=borrow(c);push(b,8);value :=source(p);return at(value,0);}";
     assert!(source::compile(bad, BTreeMap::new()).is_err());
 }
 #[test]
 fn opaque_borrows_accept_captured_referents_without_specialization_requirements() {
-    let good = "module f;fn inspect<type T>(v:T)->num{let p=borrow(v);return 7;}pub fn run<a>(input:read<a>)->num{return inspect(read(input));}";
+    let good = "module f;fn inspect<type T>(v:T)->num{p :=borrow(v);return 7;}pub fn run<a>(input:read<a>)->num{return inspect(read(input));}";
     let p = source::compile(good, BTreeMap::new()).unwrap();
     assert!(grail_seed::emit::module_c(&p).is_ok());
     let mutable = "module f;struct Cursor<a>{source:read<a>}pub fn inspect<outer,data>(p:ref_mut<outer,Cursor<data>>)->num{return 0;}";

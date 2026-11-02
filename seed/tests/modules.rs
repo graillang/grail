@@ -36,8 +36,14 @@ fn qualified_exports_preserve_modes_and_written_return_regions() {
     )
     .unwrap();
     let h = Interface::decode(&p.interface()).unwrap();
-    assert!(source::compile("use api;fn f()->num{let b=bytes();push(b,7);let p=api::first(read(b));return at(p,0);}",BTreeMap::from([("api".into(),h.clone())])).is_ok());
-    assert!(source::compile("use api;fn f()->num{let b=bytes();push(b,7);let p=api::first(read(b));drop(b);return at(p,0);}",BTreeMap::from([("api".into(),h.clone())])).is_err());
+    assert!(
+        source::compile(
+            "use api;fn f()->num{var b =bytes();push(b,7);p :=api::first(read(b));return at(p,0);}",
+            BTreeMap::from([("api".into(), h.clone())])
+        )
+        .is_ok()
+    );
+    assert!(source::compile("use api;fn f()->num{var b =bytes();push(b,7);p :=api::first(read(b));drop(b);return at(p,0);}",BTreeMap::from([("api".into(),h.clone())])).is_err());
     let mut changed = h;
     changed.exports.get_mut("api::first").unwrap().params[0] = Ty::View(Mode::Write, 0);
     assert!(

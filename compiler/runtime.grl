@@ -6,7 +6,7 @@ unsafe module runtime;
 // Freed blocks return to segregated free lists; mapped arenas are unmapped by rt_shutdown.
 
 fn rt_abort()->num {
-    let pid=raw_syscall(39,0,0,0);
+    pid :=raw_syscall(39,0,0,0);
     raw_syscall(62,pid,6,0);
     raw_syscall(60,134,0,0);
     return 0;
@@ -23,21 +23,21 @@ fn rt_div(n:num,d:num)->num {
     return q;
 }
 fn rt_alloc(n:num)->num {
-    let state=raw_state();
+    state :=raw_state();
     if 1152921504606846976<n { rt_abort(); }
     var size=32; var bin=0;
     while size<n+16 { size=size*2; bin=bin+1; }
-    let head=state+256+bin*8;
+    head :=state+256+bin*8;
     var block=raw_load(head);
     if block!=0 {
         raw_store(head,raw_load(block+8));
     } else {
-        let bump=state+768+bin*8;
-        let left=state+1280+bin*8;
+        bump :=state+768+bin*8;
+        left :=state+1280+bin*8;
         if raw_load(left)==0 {
             var mapsize=1048576;
             if mapsize<size+16 { mapsize=size+16; }
-            let arena=raw_map(mapsize);
+            arena :=raw_map(mapsize);
             if rt_error(arena) { rt_abort(); }
             raw_store(arena,raw_load(state+32));
             raw_store(arena+8,mapsize);
@@ -51,7 +51,7 @@ fn rt_alloc(n:num)->num {
         raw_store(block,size);
     }
     raw_store(block+8,1);
-    let ptr=block+16;
+    ptr :=block+16;
     var i=0;
     while i<size-16 { raw_store(ptr+i,0); i=i+8; }
     raw_store(state+24,raw_load(state+24)+1);
@@ -59,30 +59,30 @@ fn rt_alloc(n:num)->num {
 }
 fn rt_free(ptr:num)->num {
     if ptr==0 { return 0; }
-    let state=raw_state(); let block=ptr-16;
+    state :=raw_state(); block :=ptr-16;
     if raw_load(block+8)!=1 { rt_abort(); }
-    let size=raw_load(block);
+    size :=raw_load(block);
     // Classes of at least 512 KiB occupy their own arena. Return those mappings to the OS
     // immediately; smaller freed objects remain reusable in the segregated slab caches.
     if (size<524288)==0 {
-        let arena=ptr-32; var link=state+32;
-        while raw_load(link)!=arena { let next=raw_load(link); if next==0 { rt_abort(); } link=next; }
-        let length=raw_load(arena+8); raw_store(link,raw_load(arena));
+        arena :=ptr-32; var link=state+32;
+        while raw_load(link)!=arena { next :=raw_load(link); if next==0 { rt_abort(); } link=next; }
+        length :=raw_load(arena+8); raw_store(link,raw_load(arena));
         raw_store(state+24,raw_load(state+24)-1);
-        let err=raw_syscall(11,arena,length,0); if rt_error(err) { rt_abort(); } return 0;
+        err :=raw_syscall(11,arena,length,0); if rt_error(err) { rt_abort(); } return 0;
     }
     var n=32; var bin=0;
     while n<size { n=n*2; bin=bin+1; }
-    let head=state+256+bin*8;
+    head :=state+256+bin*8;
     raw_store(block+8,raw_load(head)); raw_store(head,block);
     raw_store(state+24,raw_load(state+24)-1);
     return 0;
 }
 fn rt_live()->num { return raw_load(raw_state()+24); }
 fn rt_shutdown()->num {
-    let state=raw_state(); var arena=raw_load(state+32);
+    state :=raw_state(); var arena=raw_load(state+32);
     while arena!=0 {
-        let next=raw_load(arena); let size=raw_load(arena+8);
+        next :=raw_load(arena); size :=raw_load(arena+8);
         raw_syscall(11,arena,size,0); arena=next;
     }
     raw_store(state+32,0);
@@ -90,11 +90,11 @@ fn rt_shutdown()->num {
 }
 fn rt_new()->num { return rt_alloc(24); }
 fn rt_push(s:num,v:num)->num {
-    let n=raw_load(s+8); let cap=raw_load(s+16);
+    n :=raw_load(s+8); cap :=raw_load(s+16);
     if n==cap {
         var capacity=cap*2; if capacity==0 { capacity=8; }
         if 144115188075855872<capacity { rt_abort(); }
-        let old=raw_load(s); let ptr=rt_alloc(capacity*8);
+        old :=raw_load(s); ptr :=rt_alloc(capacity*8);
         var i=0; while i<n { raw_store(ptr+i*8,raw_load(old+i*8)); i=i+1; }
         rt_free(old); raw_store(s,ptr); raw_store(s+16,capacity);
     }
@@ -102,8 +102,8 @@ fn rt_push(s:num,v:num)->num {
 }
 fn rt_pushb(s:num,v:num)->num { return rt_push(s,v&255); }
 fn rt_pop(s:num)->num {
-    let n=raw_load(s+8); if n==0 { rt_abort(); }
-    let v=raw_load(raw_load(s)+(n-1)*8);
+    n :=raw_load(s+8); if n==0 { rt_abort(); }
+    v :=raw_load(raw_load(s)+(n-1)*8);
     raw_store(raw_load(s)+(n-1)*8,0); raw_store(s+8,n-1); return v;
 }
 fn rt_len(s:num)->num { return raw_load(s+8); }
@@ -115,49 +115,49 @@ fn rt_at(s:num,i:num)->num { return raw_load(rt_slot(s,i)); }
 fn rt_write(s:num,i:num,v:num)->num { return raw_store(rt_slot(s,i),v&255); }
 fn rt_slice(s:num,a:num,b:num)->num {
     if (b<a)+(raw_load(s+8)<b) { rt_abort(); }
-    let v=rt_alloc(24); raw_store(v,raw_load(s)+a*8); raw_store(v+8,b-a); return v;
+    v :=rt_alloc(24); raw_store(v,raw_load(s)+a*8); raw_store(v+8,b-a); return v;
 }
 fn rt_view(s:num)->num { return rt_slice(s,0,raw_load(s+8)); }
 fn rt_append(dst:num,src:num)->num {
-    let n=raw_load(src+8); var i=0;
+    n :=raw_load(src+8); var i=0;
     while i<n { rt_push(dst,raw_load(raw_load(src)+i*8)); i=i+1; } return 0;
 }
-fn rt_copy(src:num)->num { let dst=rt_new(); rt_append(dst,src); return dst; }
+fn rt_copy(src:num)->num { dst :=rt_new(); rt_append(dst,src); return dst; }
 fn rt_lit(ptr:num,n:num)->num {
-    let s=rt_new(); var i=0;
+    s :=rt_new(); var i=0;
     while i<n { rt_push(s,raw_byte(ptr+i)); i=i+1; } return s;
 }
 fn rt_rec(n:num)->num {
     if 144115188075855872<n { rt_abort(); } return rt_alloc(n*8);
 }
 fn rt_enum(tag:num,payload:num)->num {
-    let p=rt_alloc(16); raw_store(p,tag); raw_store(p+8,payload); return p;
+    p :=rt_alloc(16); raw_store(p,tag); raw_store(p+8,payload); return p;
 }
-fn rt_xchg(p:num,v:num)->num { let old=raw_load(p); raw_store(p,v); return old; }
+fn rt_xchg(p:num,v:num)->num { old :=raw_load(p); raw_store(p,v); return old; }
 fn rt_drop_seq(s:num)->num {
     if s!=0 { rt_free(raw_load(s)); rt_free(s); } return 0;
 }
 fn rt_pack(s:num)->num {
-    let n=raw_load(s+8); let buf=rt_alloc(n+1); var i=0;
+    n :=raw_load(s+8); buf :=rt_alloc(n+1); var i=0;
     while i<n { raw_putbyte(buf+i,raw_load(raw_load(s)+i*8)); i=i+1; } return buf;
 }
 fn rt_cstr(s:num)->num {
-    let buf=rt_pack(s); let n=raw_load(s+8); var i=0;
+    buf :=rt_pack(s); n :=raw_load(s+8); var i=0;
     while i<n { if raw_byte(buf+i)==0 { rt_free(buf); return 0; } i=i+1; }
     return buf;
 }
 fn f_host_argc()->num { return raw_load(raw_state()); }
 fn f_host_arg(i:num)->num {
     if (i<f_host_argc())==0 { rt_abort(); }
-    let p=raw_load(raw_load(raw_state()+8)+i*8); var n=0;
+    p :=raw_load(raw_load(raw_state()+8)+i*8); var n=0;
     while raw_byte(p+n)!=0 { n=n+1; } return rt_lit(p,n);
 }
 fn f_host_read_file(path:num)->num {
-    let name=rt_cstr(path); rt_free(path); if name==0 { rt_abort(); }
-    let fd=raw_syscall(2,name,0,0); rt_free(name); if rt_error(fd) { rt_abort(); }
-    let buf=rt_alloc(4096); let out=rt_new();
+    name :=rt_cstr(path); rt_free(path); if name==0 { rt_abort(); }
+    fd :=raw_syscall(2,name,0,0); rt_free(name); if rt_error(fd) { rt_abort(); }
+    buf :=rt_alloc(4096); out :=rt_new();
     while 1 {
-        let n=raw_syscall(0,fd,buf,4096);
+        n :=raw_syscall(0,fd,buf,4096);
         if n==0 { break; }
         if n==0-4 { continue; }
         if rt_error(n) { rt_abort(); }
@@ -168,7 +168,7 @@ fn f_host_read_file(path:num)->num {
 fn rt_write_all(fd:num,ptr:num,n:num)->num {
     var i=0;
     while i<n {
-        let r=raw_syscall(1,fd,ptr+i,n-i);
+        r :=raw_syscall(1,fd,ptr+i,n-i);
         if r==0-4 { continue; }
         if rt_error(r) { return 0-r; }
         if r==0 { return 5; }
@@ -177,46 +177,51 @@ fn rt_write_all(fd:num,ptr:num,n:num)->num {
     return 0;
 }
 fn f_host_write_file(path:num,data:num)->num {
-    let name=rt_cstr(path); rt_free(path); if name==0 { rt_free(data); return 22; }
-    let fd=raw_syscall(2,name,577,438); rt_free(name);
+    name :=rt_cstr(path); rt_free(path); if name==0 { rt_free(data); return 22; }
+    fd :=raw_syscall(2,name,577,438); rt_free(name);
     if rt_error(fd) { rt_free(data); return 0-fd; }
-    let packed=rt_pack(data); let result=rt_write_all(fd,packed,rt_len(data));
-    let closed=raw_syscall(3,fd,0,0); rt_free(packed); rt_free(data);
+    packed :=rt_pack(data); result :=rt_write_all(fd,packed,rt_len(data));
+    closed :=raw_syscall(3,fd,0,0); rt_free(packed); rt_free(data);
     if result!=0 { return result; }
     if rt_error(closed) { return 0-closed; } return 0;
 }
 fn f_host_print(data:num)->num {
-    let packed=rt_pack(data); let err=rt_write_all(1,packed,rt_len(data)); rt_free(packed); rt_free(data);
+    packed :=rt_pack(data); err :=rt_write_all(1,packed,rt_len(data)); rt_free(packed); rt_free(data);
     if err!=0 { rt_abort(); } return 0;
 }
 // Print the numeric entry result without libc, allocation escape or unchecked formatting.
+fn rt_pow(base:num,exponent:num)->num {
+ var factor=base;var power=exponent;var result=1;
+ while power!=0{if power%2{result=result*factor;}power=rt_div(power,2);factor=factor*factor;}
+ return result;
+}
 fn rt_print_number(n:num,newline:num)->num {
-    let buf=rt_alloc(32); var pos=31; var remaining=n;
+    buf :=rt_alloc(32); var pos=31; var remaining=n;
     if newline{pos=30;raw_putbyte(buf+31,10);}
     while 1 {
         raw_putbyte(buf+pos,48+remaining%10); remaining=rt_div(remaining,10);
         if remaining==0 { break; } pos=pos-1;
     }
-    let err=rt_write_all(1,buf+pos,32-pos); rt_free(buf);
+    err :=rt_write_all(1,buf+pos,32-pos); rt_free(buf);
     if err!=0 { rt_abort(); } return 0;
 }
 fn rt_print_num(n:num)->num {return rt_print_number(n,1);}
 fn rt_print_newline()->num {
-    let buf=rt_alloc(1);raw_putbyte(buf,10);let err=rt_write_all(1,buf,1);rt_free(buf);
+    buf :=rt_alloc(1);raw_putbyte(buf,10);err :=rt_write_all(1,buf,1);rt_free(buf);
     if err!=0{rt_abort();}return 0;
 }
 fn f_host_print_num(n:num)->num {return rt_print_number(n,0);}
 fn f_host_newline()->num {return rt_print_newline();}
 fn rt_exec(file:num,argv:num)->num {
-    let env=raw_load(raw_state()+16);
+    env :=raw_load(raw_state()+16);
     var i=0; var slash=0;
     while raw_byte(file+i)!=0 { if raw_byte(file+i)==47 { slash=1; } i=i+1; }
-    let direct=raw_syscall(59,file,argv,env);
+    direct :=raw_syscall(59,file,argv,env);
     if slash { return direct; }
     // Search PATH (including empty entries as the current directory).
     var ep=env; var path=0;
     while raw_load(ep)!=0 {
-        let p=raw_load(ep);
+        p :=raw_load(ep);
         if raw_byte(p)==80 { if raw_byte(p+1)==65 { if raw_byte(p+2)==84 {
             if raw_byte(p+3)==72 { if raw_byte(p+4)==61 { path=p+5; break; } }
         } } }
@@ -235,7 +240,7 @@ fn rt_exec(file:num,argv:num)->num {
     while 1 {
         var end=start;
         while raw_byte(path+end)!=0 { if raw_byte(path+end)==58 { break; } end=end+1; }
-        let len=end-start; let candidate=rt_alloc(len+i+2); var j=0;
+        len :=end-start; candidate :=rt_alloc(len+i+2); var j=0;
         while j<len { raw_putbyte(candidate+j,raw_byte(path+start+j)); j=j+1; }
         if len!=0 { raw_putbyte(candidate+j,47); j=j+1; }
         var k=0; while k<i { raw_putbyte(candidate+j+k,raw_byte(file+k)); k=k+1; }
@@ -245,26 +250,26 @@ fn rt_exec(file:num,argv:num)->num {
     rt_free(fallback); return direct;
 }
 fn f_host_command(args:num)->num {
-    let n=rt_len(args); var result=278; var made=0;
-    let argv=rt_alloc((n+1)*8);
+    n :=rt_len(args); var result=278; var made=0;
+    argv :=rt_alloc((n+1)*8);
     if n!=0 {
         while made<n {
-            let p=rt_cstr(rt_at(args,made)); if p==0 { break; }
+            p :=rt_cstr(rt_at(args,made)); if p==0 { break; }
             raw_store(argv+made*8,p); made=made+1;
         }
         if made==n {
-            let child=raw_syscall(57,0,0,0);
+            child :=raw_syscall(57,0,0,0);
             if child==0 {
                 rt_exec(raw_load(argv),argv); raw_syscall(60,127,0,0);
             }
             if rt_error(child) { result=256-child; } else {
-                let status=rt_alloc(8); var waited=0;
+                status :=rt_alloc(8); var waited=0;
                 while 1 {
                     waited=raw_syscall(61,child,status,0);
                     if waited!=0-4 { break; }
                 }
                 if rt_error(waited) { result=256-waited; } else {
-                    let code=raw_load(status); let sig=code&127;
+                    code :=raw_load(status); sig :=code&127;
                     if sig!=0 { result=128+sig; } else { result=rt_div(code,256)&255; }
                 }
                 rt_free(status);
@@ -277,26 +282,26 @@ fn f_host_command(args:num)->num {
 }
 // Text is UTF-8 even when its source is binary I/O or a byte view.
 fn rt_utf8(s:num)->num {
-    let n=rt_len(s);var i=0;
+    n :=rt_len(s);var i=0;
     while i<n{
-        let b=rt_at(s,i);var count=0;
+        b :=rt_at(s,i);var count=0;
         if b<128{i=i+1;continue;}
         if (193<b)&(b<224){count=2;}
         if (223<b)&(b<240){count=3;}
         if (239<b)&(b<245){count=4;}
         if (count==0)+(n<i+count){rt_abort();}
-        let second=rt_at(s,i+1);
+        second :=rt_at(s,i+1);
         if (second<128)+(191<second){rt_abort();}
         if (b==224)&(second<160){rt_abort();}
         if (b==237)&(159<second){rt_abort();}
         if (b==240)&(second<144){rt_abort();}
         if (b==244)&(143<second){rt_abort();}
         var j=2;
-        while j<count{let next=rt_at(s,i+j);if (next<128)+(191<next){rt_abort();}j=j+1;}
+        while j<count{next :=rt_at(s,i+j);if (next<128)+(191<next){rt_abort();}j=j+1;}
         i=i+count;
     }
     return 0;
 }
 fn rt_text(s:num)->num {rt_utf8(s);return rt_copy(s);}
-fn rt_string_lit(ptr:num,n:num)->num {let s=rt_lit(ptr,n);rt_utf8(s);return s;}
+fn rt_string_lit(ptr:num,n:num)->num {s :=rt_lit(ptr,n);rt_utf8(s);return s;}
 fn rt_append_text(dst:num,src:num)->num {rt_utf8(src);return rt_append(dst,src);}

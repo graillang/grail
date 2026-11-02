@@ -4,12 +4,12 @@ use std::collections::BTreeMap;
 const SELECT: &str = "module f;struct Cell<a>{source:read<a>}fn select<outer,data>(left:ref_mut<outer,Cell<data>>,right:ref_mut<outer,Cell<data>>,n:num)->ref_mut<outer,Cell<data>>{if n{return left;}else{return right;}}";
 #[test]
 fn exchange_keeps_unselected_cells_possible_old_sources() {
-    let body = "pub fn bad(n:num)->num{let a=bytes();push(a,1);let b=bytes();push(b,2);let c=bytes();push(c,3);let left=Cell{source:read(a)};let right=Cell{source:read(b)};let chosen=select(borrow_mut(left),borrow_mut(right),n);exchange(borrow_mut(chosen.source),read(c));for i in 256{push(a,9);}return at(read(left.source),0)+at(read(right.source),0);}";
+    let body = "pub fn bad(n:num)->num{var a =bytes();push(a,1);var b =bytes();push(b,2);var c =bytes();push(c,3);var left =Cell{source:read(a)};var right =Cell{source:read(b)};var chosen =select(borrow_mut(left),borrow_mut(right),n);exchange(borrow_mut(chosen.source),read(c));for i in 256{push(a,9);}return at(read(left.source),0)+at(read(right.source),0);}";
     assert!(source::compile(&format!("{SELECT}{body}"), BTreeMap::new()).is_err());
 }
 #[test]
 fn all_unselected_and_incoming_owners_remain_protected() {
-    let body = "pub fn bad(n:num)->num{let a=bytes();push(a,1);let b=bytes();push(b,2);let c=bytes();push(c,3);let left=Cell{source:read(a)};let right=Cell{source:read(b)};let chosen=select(borrow_mut(left),borrow_mut(right),n);exchange(borrow_mut(chosen.source),read(c));push(a,9);return at(read(left.source),0)+at(read(right.source),0);}";
+    let body = "pub fn bad(n:num)->num{var a =bytes();push(a,1);var b =bytes();push(b,2);var c =bytes();push(c,3);var left =Cell{source:read(a)};var right =Cell{source:read(b)};var chosen =select(borrow_mut(left),borrow_mut(right),n);exchange(borrow_mut(chosen.source),read(c));push(a,9);return at(read(left.source),0)+at(read(right.source),0);}";
     for owner in ["a", "b", "c"] {
         assert!(
             source::compile(
@@ -32,7 +32,7 @@ fn all_unselected_and_incoming_owners_remain_protected() {
 }
 #[test]
 fn a_single_precise_target_can_release_its_previous_source() {
-    source::compile("module f;struct Cell<a>{source:read<a>}pub fn run()->num{let a=bytes();push(a,1);let c=bytes();push(c,3);let cell=Cell{source:read(a)};exchange(borrow_mut(cell.source),read(c));push(a,9);return at(read(cell.source),0);}",BTreeMap::new()).unwrap();
+    source::compile("module f;struct Cell<a>{source:read<a>}pub fn run()->num{var a =bytes();push(a,1);var c =bytes();push(c,3);var cell =Cell{source:read(a)};exchange(borrow_mut(cell.source),read(c));push(a,9);return at(read(cell.source),0);}",BTreeMap::new()).unwrap();
 }
 #[test]
 #[ignore = "requires clang sanitizers and an independent Rust compiler"]
@@ -47,7 +47,7 @@ fn safe_ambiguous_updates_execute_both_selections_and_bad_borrows_reject_in_rust
             .as_nanos()
     ));
     fs::create_dir_all(&dir).unwrap();
-    let body = "pub fn good(n:num)->num{let a=bytes();push(a,1);let b=bytes();push(b,2);let c=bytes();push(c,3);let left=Cell{source:read(a)};let right=Cell{source:read(b)};let chosen=select(borrow_mut(left),borrow_mut(right),n);exchange(borrow_mut(chosen.source),read(c));return at(read(left.source),0)+at(read(right.source),0);}";
+    let body = "pub fn good(n:num)->num{var a =bytes();push(a,1);var b =bytes();push(b,2);var c =bytes();push(c,3);var left =Cell{source:read(a)};var right =Cell{source:read(b)};var chosen =select(borrow_mut(left),borrow_mut(right),n);exchange(borrow_mut(chosen.source),read(c));return at(read(left.source),0)+at(read(right.source),0);}";
     let p = source::compile(&format!("{SELECT}{body}"), BTreeMap::new()).unwrap();
     fs::write(dir.join("f.c"), grail_seed::emit::module_c(&p).unwrap()).unwrap();
     fs::write(dir.join("main.c"),"#include <stdint.h>\nuint64_t q_1_f_4_good(uint64_t);int main(void){return q_1_f_4_good(0)!=4||q_1_f_4_good(1)!=5;}\n").unwrap();

@@ -288,6 +288,8 @@ impl Writer {
                         Bin::Sub => "sub",
                         Bin::Lt => "lt",
                         Bin::Mul => "mul",
+                        Bin::Div => "div",
+                        Bin::Pow => "pow",
                         Bin::Xor => "xor",
                         Bin::Rem => "rem",
                         Bin::Eq => "eq",
@@ -623,6 +625,8 @@ impl<'a> Reader<'a> {
                         "sub" => Bin::Sub,
                         "lt" => Bin::Lt,
                         "mul" => Bin::Mul,
+                        "div" => Bin::Div,
+                        "pow" => Bin::Pow,
                         "xor" => Bin::Xor,
                         "rem" => Bin::Rem,
                         "eq" => Bin::Eq,
@@ -836,7 +840,7 @@ mod tests {
         for source in [
             include_str!("../examples/loops/control.grl"),
             include_str!("../examples/loops/cleanup.grl"),
-            r#"module all;enum R{Ok(num),Err(string)}struct Pair{first:string,second:string}pub fn run<a>(input:read<a>,n:num)->R{let unit=();let stack=buffer(4,7);let v=read(stack);let part=slice(v,0,1);let held=hold(part);let view=read(held);let value=at(view,0);let text=text(input);append_text(text,"\x00");let pair=Pair{first:text,second:"tail"};let first=pair.first;let b=bytes();push(b,value);let w=mut(b);write(w,0,n);let copied=copy_bytes(read(b));let result=R::Ok(helper(len(first)+len(copied)));match result{Ok(x)=>{return R::Ok(x);},Err(e)=>{return R::Err(e);}}}fn helper(n:num)->num{assert(1);let a=(n+2)*3;let b=(a-1)^4;let c=b&255;let d=c%7;if d!=0{return d;}return 0;}"#,
+            r#"module all;enum R{Ok(num),Err(string)}struct Pair{first:string,second:string}pub fn run<a>(input:read<a>,n:num)->R{unit :=();stack :=buffer(4,7);v :=read(stack);part :=slice(v,0,1);held :=hold(part);view :=read(held);value :=at(view,0);var text =text(input);append_text(text,"\x00");pair :=Pair{first:text,second:"tail"};first :=pair.first;var b =bytes();push(b,value);w :=mut(b);write(w,0,n);copied :=copy_bytes(read(b));result :=R::Ok(helper(len(first)+len(copied)));match result{Ok(x)=>{return R::Ok(x);},Err(e)=>{return R::Err(e);}}}fn helper(n:num)->num{assert(1);a :=(n+2)*3;var b =(a-1)^4;c :=b&255;d :=c%7;if d!=0{return d;}return 0;}"#,
         ] {
             let module = crate::source::compile(source, BTreeMap::new()).unwrap();
             for (body, _) in &module.functions {

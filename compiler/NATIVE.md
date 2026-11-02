@@ -100,6 +100,18 @@ backedges. Lifetime guards retain captured origins separately from access capabi
 reference returns conservatively retain whole input frames, so interior projections cannot free or
 replace a still-borrowed object. Unsafe programs fail before replacing an existing output file.
 
+Declarations use `name := value` for immutable bindings and `var name = value` for mutable
+bindings; `=` only assigns an existing mutable binding. Owned mutation or mutable borrowing
+requires `var`, while a fixed explicit mutable reference/view may use its referent capability.
+Parameters are fixed bindings; a by-value owner can be moved into a mutable local. `let` is not
+a declaration keyword.
+
+Unsigned arithmetic includes `/`, `%`, right-associative `**`, and numeric compound assignments
+`+=`, `-=`, `*=`, `/=`, `%=` and `**=`. Powers use wrapping multiplication; `0 ** 0` is 1.
+Division/remainder by zero abort. `^` remains XOR. Compound targets must be initialized numeric
+storage; the target stays valid while the right-hand side runs once, and conflicting mutation
+is rejected. Power policy is implemented in the Grail runtime, not handwritten assembly.
+
 Generic functions use a specialization worklist and body replay. Unused templates are checked
 with opaque affine type variables; specializing to `num` does not make `T` copyable or numeric.
 Calls infer type arguments or accept explicit `identity<num>(...)` forms, including cross-module

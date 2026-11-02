@@ -54,7 +54,7 @@ fn propagation_uses_normal_returns_across_hidden_modules_and_every_cleanup_front
     };
     compile(&dir, "annotate", false, provider);
     fs::remove_file(dir.join("annotate.grl")).unwrap();
-    fs::write(dir.join("client.grl"),"module client;use annotate;pub fn run<a>(p:read<a>)->num{let result=annotate::parse(p);match result{Ok(t)=>{return t.value+len(t.name)+len(t.span);},Err(e)=>{return len(e);}}}").unwrap();
+    fs::write(dir.join("client.grl"),"module client;use annotate;pub fn run<a>(p:read<a>)->num{result :=annotate::parse(p);match result{Ok(t)=>{return t.value+len(t.name)+len(t.span);},Err(e)=>{return len(e);}}}").unwrap();
     compile(&dir, "client", true, &backend);
     for (input, expected) in [
         ("42", b"49\n".as_slice()),
@@ -99,7 +99,7 @@ fn propagation_uses_normal_returns_across_hidden_modules_and_every_cleanup_front
         audit(
             "audit",
             &format!(
-                "module audit;use annotate;pub fn run()->num{{let source=\"{input}\";let r=annotate::parse(read(source));match r{{Ok(t)=>{{return t.value+len(t.name)+len(t.span);}},Err(e)=>{{return len(e);}}}}}}"
+                "module audit;use annotate;pub fn run()->num{{source :=\"{input}\";r :=annotate::parse(read(source));match r{{Ok(t)=>{{return t.value+len(t.name)+len(t.span);}},Err(e)=>{{return len(e);}}}}}}"
             ),
             3,
             expected,
@@ -108,28 +108,28 @@ fn propagation_uses_normal_returns_across_hidden_modules_and_every_cleanup_front
     }
     audit(
         "args",
-        r#"module args;enum R{Ok(num),Err(string)}pub fn run()->num{let source="root";let r=work();match r{Ok(n)=>{return n;},Err(e)=>{return len(e);}}}fn work()->R{let b=bytes();push(b,1);return R::Ok(consume(copy_bytes(b),fail()?));}fn fail()->R{return R::Err("bad");}fn consume(b:bytes,n:num)->num{return len(b)+n;}"#,
+        r#"module args;enum R{Ok(num),Err(string)}pub fn run()->num{source :="root";r :=work();match r{Ok(n)=>{return n;},Err(e)=>{return len(e);}}}fn work()->R{var b =bytes();push(b,1);return R::Ok(consume(copy_bytes(b),fail()?));}fn fail()->R{return R::Err("bad");}fn consume(b:bytes,n:num)->num{return len(b)+n;}"#,
         4,
         3,
         &[3, 2, 4, 1],
     );
     audit(
         "condition",
-        r#"module condition;enum R{Ok(num),Err(string)}pub fn run()->num{let source="root";let r=work();match r{Ok(n)=>{return n;},Err(e)=>{return len(e);}}}fn work()->R{let b=bytes();push(b,1);var i=0;while test(i)?{let temp=copy_bytes(b);i=i+1;}return R::Ok(len(b));}fn test(n:num)->R{if n==2{return R::Err("bad");}return R::Ok(1);}"#,
+        r#"module condition;enum R{Ok(num),Err(string)}pub fn run()->num{source :="root";r :=work();match r{Ok(n)=>{return n;},Err(e)=>{return len(e);}}}fn work()->R{var b =bytes();push(b,1);var i=0;while test(i)?{temp :=copy_bytes(b);i=i+1;}return R::Ok(len(b));}fn test(n:num)->R{if n==2{return R::Err("bad");}return R::Ok(1);}"#,
         5,
         3,
         &[3, 4, 2, 5, 1],
     );
     audit(
         "option",
-        r#"module option;enum O{Some(num),None}pub fn run()->num{let source="root";let r=work();match r{Some(n)=>{return n;},None=>{return 0;}}}fn work()->O{let b=bytes();push(b,1);let n=none()?;return O::Some(n);}fn none()->O{return O::None;}"#,
+        r#"module option;enum O{Some(num),None}pub fn run()->num{source :="root";r :=work();match r{Some(n)=>{return n;},None=>{return 0;}}}fn work()->O{var b =bytes();push(b,1);n :=none()?;return O::Some(n);}fn none()->O{return O::None;}"#,
         2,
         0,
         &[2, 1],
     );
     audit(
         "effects",
-        r#"module effects;enum R{Ok(num),Err(string)}pub fn run()->num{let b=bytes();push(b,1);let r=work(mut(b));var n=0;match r{Ok(v)=>{n=v;},Err(e)=>{n=len(e);}}assert(at(read(b),0)==9);return n;}fn work<a>(p:mut<a>)->R{write(p,0,9);let n=fail()?;return R::Ok(n);}fn fail()->R{return R::Err("bad");}"#,
+        r#"module effects;enum R{Ok(num),Err(string)}pub fn run()->num{var b =bytes();push(b,1);r :=work(mut(b));var n=0;match r{Ok(v)=>{n=v;},Err(e)=>{n=len(e);}}assert(at(read(b),0)==9);return n;}fn work<a>(p:mut<a>)->R{write(p,0,9);n :=fail()?;return R::Ok(n);}fn fail()->R{return R::Err("bad");}"#,
         2,
         3,
         &[2, 1],

@@ -21,8 +21,9 @@ The runner assembles the checked-in native bootstrap, compiles the example and t
 then uses GNU `as` and `ld` to create a static executable. Artifacts stay under `.work/book/`.
 No global compiler installation is changed. Run `just book-check` to verify every example.
 
-The **Compare Rust** control expands a checked Rust version alongside the Grail version. Its code
-and output are aligned, with a short note below explaining what differs and what is shared.
+A checked Rust version is shown alongside the Grail version by default. Its code and output
+are aligned, with a short note below explaining what differs and what is shared. Use **Hide Rust**
+to turn comparisons off across the book, or collapse just one example.
 On small screens the comparison stacks vertically; you can collapse it at any time.
 
 For raw compiler commands and self-compilation instructions, see `compiler/NATIVE.md`.

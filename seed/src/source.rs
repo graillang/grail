@@ -91,13 +91,17 @@ fn lex(text: &str) -> Result<Vec<Token<'_>>, String> {
             while i < b.len() && b[i].is_ascii_digit() {
                 i += 1
             }
+        } else if b[i..].starts_with(b"**=") {
+            i += 3;
         } else if i + 1 < b.len()
-            && [b"->", b"=>", b"==", b"!=", b"::"]
-                .iter()
-                .any(|s| b[i..].starts_with(*s))
+            && [
+                b"->", b"=>", b"==", b"!=", b"::", b":=", b"+=", b"-=", b"*=", b"/=", b"%=", b"**",
+            ]
+            .iter()
+            .any(|s| b[i..].starts_with(*s))
         {
             i += 2
-        } else if b"(){}<>,:;=+-*%&^.!?".contains(&b[i]) {
+        } else if b"(){}<>,:;=+-*/%&^.!?".contains(&b[i]) {
             i += 1
         } else {
             return Err(format!("byte {i}: unexpected character"));
@@ -145,7 +149,9 @@ impl Parser<'_> {
         while self.tokens.get(end).is_some_and(|t| t.text == ".") {
             end += 2;
         }
-        self.tokens.get(end).is_some_and(|t| t.text == "=")
+        self.tokens
+            .get(end)
+            .is_some_and(|t| matches!(t.text, "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "**="))
     }
     fn eat(&mut self, s: &str) -> bool {
         if self.peek() == s {
@@ -261,7 +267,9 @@ impl Parser<'_> {
         let public = self.eat("pub");
         self.expect("fn")?;
         let name = self.ident()?;
-        if matches!(name.as_str(), "print" | "println") || name.starts_with("__prelude_") {
+        if matches!(name.as_str(), "print" | "println")
+            || (name.starts_with("__prelude_") || name.starts_with("__binding_"))
+        {
             return Err(self.error("print and println are reserved prelude names"));
         }
         if self.module.is_empty() {
@@ -522,6 +530,58 @@ impl Parser<'_> {
         });
         Ok(dst)
     }
+    fn binding_write(
+        &mut self,
+        ops: &mut Vec<Op>,
+        name: &str,
+        path: &[String],
+        storage: bool,
+    ) -> Result<(), String> {
+        let binding = &self.vars[name];
+        if !binding.mutable {
+            let src = binding.reg;
+            let dst = self.fresh()?;
+            ops.push(Op::Call {
+                dst,
+                name: format!(
+                    "__binding_{}:{}",
+                    if storage { "address" } else { "mutate" },
+                    path.join(".")
+                ),
+                args: vec![src],
+            });
+        }
+        Ok(())
+    }
+    fn output_expr(&mut self, ops: &mut Vec<Op>, depth: usize) -> Result<Reg, String> {
+        if depth > 64 {
+            return Err(self.error("expression depth limit"));
+        }
+        if self.eat("(") {
+            let r = self.output_expr(ops, depth + 1)?;
+            self.expect(")")?;
+            return self.expr_tail(ops, r, 0, depth + 1);
+        }
+        if self.vars.contains_key(self.peek())
+            && self.tokens.get(self.at + 1).is_some_and(|t| t.text == ".")
+        {
+            let name = self.ident()?;
+            let src = self.vars[&name].reg;
+            let mut path = Vec::new();
+            while self.eat(".") {
+                path.push(self.ident()?);
+            }
+            let dst = self.fresh()?;
+            ops.push(Op::Address {
+                dst,
+                src,
+                path,
+                mode: Mode::Read,
+            });
+            return Ok(dst);
+        }
+        self.expr(ops, 0, depth + 1)
+    }
     fn storage_expr(&mut self, ops: &mut Vec<Op>, mode: Mode, depth: usize) -> Result<Reg, String> {
         if depth > 64 {
             return Err(self.error("expression depth limit"));
@@ -529,7 +589,19 @@ impl Parser<'_> {
         if self.eat("(") {
             let r = self.storage_expr(ops, mode, depth + 1)?;
             self.expect(")")?;
-            return Ok(r);
+            return self.expr_tail(ops, r, 0, depth + 1);
+        }
+        if mode == Mode::Write && self.vars.contains_key(self.peek()) {
+            let name = self.peek().to_owned();
+            let mut path = Vec::new();
+            let mut at = self.at + 1;
+            while self.tokens.get(at).is_some_and(|t| t.text == ".") {
+                if let Some(t) = self.tokens.get(at + 1) {
+                    path.push(t.text.to_owned());
+                }
+                at += 2;
+            }
+            self.binding_write(ops, &name, &path, false)?;
         }
         if self.vars.contains_key(self.peek())
             && self.tokens.get(self.at + 1).is_some_and(|t| t.text == ".")
@@ -556,7 +628,7 @@ impl Parser<'_> {
             return Err(self.error("expression nesting limit"));
         }
         let grouped = self.eat("(");
-        let mut left = if grouped && self.eat(")") {
+        let left = if grouped && self.eat(")") {
             let r = self.fresh()?;
             ops.push(Op::Unit(r));
             r
@@ -590,7 +662,9 @@ impl Parser<'_> {
                 name.push_str("::");
                 name.push_str(&self.ident()?);
             }
-            if name.starts_with("__prelude_") { return Err(self.error("reserved compiler prelude name")); }
+            if name.starts_with("__prelude_") || name.starts_with("__binding_") {
+                return Err(self.error("reserved compiler prelude name"));
+            }
             let mut explicit = None;
             if self.layouts.contains_key(&self.nominal(&name))
                 && !self.vars.contains_key(&name)
@@ -714,6 +788,9 @@ impl Parser<'_> {
                             while self.eat(".") {
                                 path.push(self.ident()?);
                             }
+                            if name == "borrow_mut" {
+                                self.binding_write(ops, &n, &path, true)?;
+                            }
                             let dst = self.fresh()?;
                             ops.push(Op::Address {
                                 dst,
@@ -726,6 +803,8 @@ impl Parser<'_> {
                                 },
                             });
                             dst
+                        } else if matches!(name.as_str(), "print" | "println") {
+                            self.output_expr(ops, depth + 1)?
                         } else if storage {
                             self.storage_expr(
                                 ops,
@@ -905,6 +984,15 @@ impl Parser<'_> {
                 }
             }
         };
+        self.expr_tail(ops, left, minimum, depth)
+    }
+    fn expr_tail(
+        &mut self,
+        ops: &mut Vec<Op>,
+        mut left: Reg,
+        minimum: u8,
+        depth: usize,
+    ) -> Result<Reg, String> {
         loop {
             if self.eat("?") {
                 left = self.propagate(left, ops)?;
@@ -925,6 +1013,8 @@ impl Parser<'_> {
                 "+" => (4, Bin::Add),
                 "-" => (4, Bin::Sub),
                 "*" => (5, Bin::Mul),
+                "/" => (5, Bin::Div),
+                "**" => (6, Bin::Pow),
                 "%" => (5, Bin::Rem),
                 _ => break,
             };
@@ -932,7 +1022,11 @@ impl Parser<'_> {
                 break;
             }
             self.at += 1;
-            let right = self.expr(ops, precedence + 1, depth + 1)?;
+            let right = self.expr(
+                ops,
+                precedence + u8::from(!matches!(op, Bin::Pow)),
+                depth + 1,
+            )?;
             let dst = self.fresh()?;
             ops.push(Op::Binary {
                 dst,
@@ -967,11 +1061,10 @@ impl Parser<'_> {
                 self.expect("}")?;
                 self.vars = outer;
                 ops.push(Op::Block { body });
-            } else if self.peek() == "let" || self.peek() == "var" {
+            } else if self.peek() == "var"
+                || self.tokens.get(self.at + 1).is_some_and(|t| t.text == ":=")
+            {
                 let mutable = self.eat("var");
-                if !mutable {
-                    self.expect("let")?;
-                }
                 let name = self.ident()?;
                 if self.eat(":") {
                     if !mutable {
@@ -984,7 +1077,7 @@ impl Parser<'_> {
                     self.bind(name, dst, true);
                     continue;
                 }
-                self.expect("=")?;
+                self.expect(if mutable { "=" } else { ":=" })?;
                 let value = if self.eat("buffer") {
                     self.expect("(")?;
                     let len = self
@@ -1104,7 +1197,7 @@ impl Parser<'_> {
                 ops.push(Op::End(r));
             } else if self.eat("append_text") {
                 self.expect("(")?;
-                let owner = self.expr(&mut ops, 0, 0)?;
+                let owner = self.storage_expr(&mut ops, Mode::Write, 0)?;
                 self.expect(",")?;
                 let src = self.expr(&mut ops, 0, 0)?;
                 self.expect(")")?;
@@ -1112,7 +1205,7 @@ impl Parser<'_> {
                 ops.push(Op::AppendText { owner, src });
             } else if self.eat("push") {
                 self.expect("(")?;
-                let owner = self.expr(&mut ops, 0, 0)?;
+                let owner = self.storage_expr(&mut ops, Mode::Write, 0)?;
                 self.expect(",")?;
                 let value = self.expr(&mut ops, 0, 0)?;
                 self.expect(")")?;
@@ -1141,14 +1234,70 @@ impl Parser<'_> {
                     .get(&name)
                     .ok_or_else(|| self.error("undefined assignment"))?
                     .clone();
-                if !b.mutable {
-                    return Err(self.error("assignment requires var"));
-                }
                 let mut path = Vec::new();
                 while self.eat(".") {
                     path.push(self.ident()?);
                 }
-                self.expect("=")?;
+                if !b.mutable {
+                    if path.is_empty() {
+                        return Err(self.error("assignment requires var"));
+                    }
+                    self.binding_write(&mut ops, &name, &path, true)?;
+                }
+                let operator = self.peek().to_owned();
+                self.at += 1;
+                if operator != "=" {
+                    let read = self.fresh()?;
+                    let old = self.fresh()?;
+                    ops.push(Op::Address {
+                        dst: read,
+                        src: b.reg,
+                        path: path.clone(),
+                        mode: Mode::Read,
+                    });
+                    ops.push(Op::Load {
+                        dst: old,
+                        src: read,
+                    });
+                    let value = self.expr(&mut ops, 0, 0)?;
+                    self.expect(";")?;
+                    let rhs = self.fresh()?;
+                    ops.push(Op::Move {
+                        dst: rhs,
+                        src: value,
+                    });
+                    ops.push(Op::End(read));
+                    let dst = self.fresh()?;
+                    let result = self.fresh()?;
+                    let discarded = self.fresh()?;
+                    ops.push(Op::Address {
+                        dst,
+                        src: b.reg,
+                        path,
+                        mode: Mode::Write,
+                    });
+                    let op = match operator.as_str() {
+                        "+=" => Bin::Add,
+                        "-=" => Bin::Sub,
+                        "*=" => Bin::Mul,
+                        "/=" => Bin::Div,
+                        "%=" => Bin::Rem,
+                        "**=" => Bin::Pow,
+                        _ => return Err(self.error("assignment operator")),
+                    };
+                    ops.push(Op::Binary {
+                        dst: result,
+                        op,
+                        left: old,
+                        right: rhs,
+                    });
+                    ops.push(Op::Exchange {
+                        dst: discarded,
+                        src: dst,
+                        value: result,
+                    });
+                    continue;
+                }
                 let src = self.expr(&mut ops, 0, 0)?;
                 self.expect(";")?;
                 if !path.is_empty() {
@@ -1504,6 +1653,7 @@ fn resolve_calls(
 ) -> Result<(), String> {
     for op in ops {
         match op {
+            Op::Call { name, .. } if name.starts_with("__binding_") => {}
             Op::Call { name, .. }
                 if matches!(name.as_str(), "__prelude_print" | "__prelude_println") =>
             {
@@ -1606,14 +1756,58 @@ fn ending(
             return Err("unreachable statement after control transfer".into());
         }
         if let Op::Call { dst, name, args } = op
+            && name.starts_with("__binding_")
+        {
+            let storage = name.starts_with("__binding_address:");
+            let mut ty = state
+                .values
+                .get(&args[0])
+                .ok_or("unknown mutation binding")?
+                .ty
+                .clone();
+            let mut allowed = false;
+            let path = name.split_once(':').unwrap().1;
+            for field in path.split('.').filter(|s| !s.is_empty()) {
+                if matches!(ty, Ty::Ref(Mode::Write, ..)) {
+                    allowed = true;
+                    break;
+                }
+                if matches!(ty, Ty::Ref(Mode::Read, ..)) {
+                    break;
+                }
+                ty = crate::types::project(&ty, &[field.to_owned()], &state.layouts)?.1;
+            }
+            allowed |= matches!(ty, Ty::Ref(Mode::Write, ..))
+                || (!storage && matches!(ty, Ty::View(Mode::Write, ..)));
+            if !allowed {
+                return Err("owned storage mutation requires var".into());
+            }
+            let lowered = Op::Unit(*dst);
+            state.ops(std::slice::from_ref(&lowered), imports, 0)?;
+            result.push(lowered);
+            continue;
+        }
+        if let Op::Call { dst, name, args } = op
             && matches!(name.as_str(), "__prelude_print" | "__prelude_println")
         {
             let newline = name == "__prelude_println";
             let mut lowered = Vec::new();
             if let Some(src) = args.first() {
-                let ty = &state.get(*src)?.ty;
-                let argument = if *ty == Ty::Num {
-                    *src
+                let mut ty = state.get(*src)?.ty.clone();
+                let mut source = *src;
+                if let Ty::Ref(_, _, inner) = &ty {
+                    let inner = inner.as_ref().clone();
+                    if inner == Ty::Num {
+                        source = dst + 3;
+                        lowered.push(Op::Load {
+                            dst: source,
+                            src: *src,
+                        });
+                    }
+                    ty = inner;
+                }
+                let argument = if ty == Ty::Num {
+                    source
                 } else {
                     if !matches!(ty, Ty::Bytes | Ty::Text | Ty::View(..)) {
                         return Err("print requires num, string, bytes or a byte view".into());
@@ -1627,7 +1821,7 @@ fn ending(
                 };
                 lowered.push(Op::Call {
                     dst: if newline { dst + 2 } else { *dst },
-                    name: if *ty == Ty::Num {
+                    name: if ty == Ty::Num {
                         "host::print_num"
                     } else {
                         "host::print"

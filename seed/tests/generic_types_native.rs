@@ -106,11 +106,11 @@ fn hidden_generic_types_owned_payloads_mixed_abis_and_stale_layouts() {
     for (name, source) in [
         (
             "audit",
-            r#"module audit;use core;pub fn run()->num{let source=bytes();push(source,7);let one=core::Result<core::Pair<string,string>,string>::Ok(core::Pair<string,string>{first:"a",second:"bb"});let two=core::Option<core::Result<string,string>>::Some(core::Result<string,string>::Err("ccc"));let pair=one!;let first=pair.first;drop(pair);let inner=two!;match inner{Ok(s)=>{assert(len(s)==0);},Err(e)=>{assert(len(e)==3);}}drop(first);return len(source);}"#,
+            r#"module audit;use core;pub fn run()->num{var source =bytes();push(source,7);one :=core::Result<core::Pair<string,string>,string>::Ok(core::Pair<string,string>{first:"a",second:"bb"});two :=core::Option<core::Result<string,string>>::Some(core::Result<string,string>::Err("ccc"));pair :=one!;first :=pair.first;drop(pair);inner :=two!;match inner{Ok(s)=>{assert(len(s)==0);},Err(e)=>{assert(len(e)==3);}}drop(first);return len(source);}"#,
         ),
         (
             "propagate",
-            r#"module propagate;use core;pub fn run()->num{let source=bytes();push(source,7);let keep="keep";let value=fail();match value{Ok(n)=>{assert(n==0);},Err(e)=>{assert(len(e)==3);}}drop(keep);return len(source);}fn fail()->core::Result<num,string>{let scratch="scratch";let error=core::Result<num,string>::Err("err");let n=error?;return core::Result::Ok(n);}"#,
+            r#"module propagate;use core;pub fn run()->num{var source =bytes();push(source,7);keep :="keep";value :=fail();match value{Ok(n)=>{assert(n==0);},Err(e)=>{assert(len(e)==3);}}drop(keep);return len(source);}fn fail()->core::Result<num,string>{scratch :="scratch";error :=core::Result<num,string>::Err("err");n :=error?;return core::Result::Ok(n);}"#,
         ),
     ] {
         fs::write(dir.join(format!("{name}.grl")), source).unwrap();

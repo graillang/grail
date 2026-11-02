@@ -303,7 +303,7 @@ fn source_generic_definitions_and_body_hidden_calls_check_independently() {
         provider.header().template_hash,
         changed.header().template_hash
     );
-    let client=source::compile("module client;use api;pub fn run()->num{let value=api::some(7);let n=value!;let empty=api::none<num>();match empty{Some(x)=>{return x;},None=>{return n+api::score(\"owned\");}}}",BTreeMap::from([("api".into(),provider.header().clone())])).unwrap();
+    let client=source::compile("module client;use api;pub fn run()->num{value :=api::some(7);n :=value!;empty :=api::none<num>();match empty{Some(x)=>{return x;},None=>{return n+api::score(\"owned\");}}}",BTreeMap::from([("api".into(),provider.header().clone())])).unwrap();
     assert_eq!(
         client.header().implementations["api"],
         provider.header().template_hash.clone().unwrap()
@@ -413,7 +413,7 @@ fn materialization_uses_checked_bodies_and_requires_hidden_implementation_pins()
     assert!(c.contains("g__generic_"));
     assert!(c.contains("g__helper_"));
     assert!(!c.contains("g_helper("));
-    let local=source::compile("module local;enum Option<type T>{None,Some(T)}pub fn run()->num{let wrapped=some(\"x\");let value=unwrap(wrapped);return len(value)+id(7);}fn id<type T>(v:T)->T{return v;}fn some<type T>(v:T)->Option<T>{return Option::Some(v);}fn unwrap<type T>(v:Option<T>)->T{return v!;}",BTreeMap::new()).unwrap();
+    let local=source::compile("module local;enum Option<type T>{None,Some(T)}pub fn run()->num{wrapped :=some(\"x\");value :=unwrap(wrapped);return len(value)+id(7);}fn id<type T>(v:T)->T{return v;}fn some<type T>(v:T)->Option<T>{return Option::Some(v);}fn unwrap<type T>(v:Option<T>)->T{return v!;}",BTreeMap::new()).unwrap();
     assert!(emit::module_c(&local).unwrap().contains("g__generic_"));
     let numeric = source::compile(
         "module numeric;pub fn run()->num{return id(7);}fn id<type T>(v:T)->T{return v;}",
@@ -425,7 +425,7 @@ fn materialization_uses_checked_bodies_and_requires_hidden_implementation_pins()
 #[test]
 fn native_instance_keys_erase_lifetime_values_but_not_type_shapes() {
     use grail_seed::{emit, source};
-    let p=source::compile("module f;pub fn run<a,b>(p:read<a>,q:read<b>)->num{let x=id(read(p));let y=id(read(q));return len(x)+len(y);}fn id<type T>(value:T)->T{return value;}",BTreeMap::new()).unwrap();
+    let p=source::compile("module f;pub fn run<a,b>(p:read<a>,q:read<b>)->num{x :=id(read(p));y :=id(read(q));return len(x)+len(y);}fn id<type T>(value:T)->T{return value;}",BTreeMap::new()).unwrap();
     let c = emit::module_c(&p).unwrap();
     let instances = c
         .lines()
@@ -439,10 +439,10 @@ fn generic_contracts_preserve_origins_parent_loans_and_caller_binders() {
     use grail_seed::{emit, source};
     let pre = "fn id<type T>(value:T)->T{return value;}";
     for body in [
-        "pub fn run<a>(p:read<a>)->read<a>{let b=bytes();push(b,7);return id(read(b));}",
-        "pub fn run()->num{let b=bytes();push(b,7);let p=id(read(b));push(b,8);return len(p);}",
-        "pub fn run()->num{let b=bytes();push(b,7);let p=mut(b);let q=id(read(p));write(p,0,8);return len(q);}",
-        "pub fn run()->num{let b=bytes();push(b,7);let p=pair(mut(b),mut(b));return len(p.first);}fn pair<type T,type U>(a:T,b:U)->Pair<T,U>{return Pair{first:a,second:b};}struct Pair<type T,type U>{first:T,second:U}",
+        "pub fn run<a>(p:read<a>)->read<a>{var b =bytes();push(b,7);return id(read(b));}",
+        "pub fn run()->num{var b =bytes();push(b,7);p :=id(read(b));push(b,8);return len(p);}",
+        "pub fn run()->num{var b =bytes();push(b,7);p :=mut(b);q :=id(read(p));write(p,0,8);return len(q);}",
+        "pub fn run()->num{var b =bytes();push(b,7);p :=pair(mut(b),mut(b));return len(p.first);}fn pair<type T,type U>(a:T,b:U)->Pair<T,U>{return Pair{first:a,second:b};}struct Pair<type T,type U>{first:T,second:U}",
         "pub fn run()->num{return wrong(7);}fn wrong<type T>(x:T)->num{return x+1;}",
         "pub fn run()->num{return id<num,string>(7);}",
     ] {
@@ -451,9 +451,9 @@ fn generic_contracts_preserve_origins_parent_loans_and_caller_binders() {
             "{body}"
         );
     }
-    let p=source::compile(&format!("module f;{pre}fn second<type T,type U>(a:T,b:U)->U{{return id(b);}}pub fn run()->num{{let value=second(7,\"x\");return len(value);}}"),BTreeMap::new()).unwrap();
+    let p=source::compile(&format!("module f;{pre}fn second<type T,type U>(a:T,b:U)->U{{return id(b);}}pub fn run()->num{{value :=second(7,\"x\");return len(value);}}"),BTreeMap::new()).unwrap();
     assert!(emit::module_c(&p).is_ok());
-    let p=source::compile(&format!("module f;{pre}pub fn run<a>(p:mut<a>)->num{{let first=id(read(p));let n=len(first);let second=id(mut(p));return n+len(second);}}"),BTreeMap::new()).unwrap();
+    let p=source::compile(&format!("module f;{pre}pub fn run<a>(p:mut<a>)->num{{first :=id(read(p));n :=len(first);second :=id(mut(p));return n+len(second);}}"),BTreeMap::new()).unwrap();
     let c = emit::module_c(&p).unwrap();
     assert_eq!(
         c.lines()
@@ -475,7 +475,7 @@ fn instance_keys_include_caller_private_layouts_and_growing_recursion_is_bounded
     for ty in ["num", "string"] {
         let literal = if ty == "num" { "7" } else { "\"x\"" };
         let src = format!(
-            "module client;use api;struct Private{{field:{ty}}}pub fn run()->num{{let p=api::id(Private{{field:{literal}}});return 0;}}"
+            "module client;use api;struct Private{{field:{ty}}}pub fn run()->num{{p :=api::id(Private{{field:{literal}}});return 0;}}"
         );
         let p =
             source::compile(&src, BTreeMap::from([("api".into(), api.header().clone())])).unwrap();

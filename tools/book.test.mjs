@@ -28,8 +28,8 @@ test('example code, results, Rust details and notes are included from real sourc
   expect(markdown).toContain('Hello, world!');
   expect(markdown).toContain('language-grl');
   expect(markdown).toContain('language-rust');
-  expect(markdown).toContain('<details class="rust-column">');
-  expect(markdown).not.toContain('<details class="rust-column" open');
+  expect(markdown).toContain('<details class="rust-column" open>');
+  expect(markdown).toContain('<details class="rust-column" open');
   expect(markdown).toContain('checked call-scoped borrowing');
   expect(used.has('hello')).toBe(true);
 });

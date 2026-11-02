@@ -95,7 +95,7 @@ fn hidden_sum_payloads_match_unwrap_abort_and_cleanup() {
     assert_eq!(fs::read(dir.join("app.artifact")).unwrap(), old);
     assert_eq!(run(Command::new(dir.join("app")).arg("abc")).stdout, b"8\n");
     // Actual selected-backend objects; nested sums exercise inactive union payload flags.
-    fs::write(dir.join("audit.grl"),r#"module audit;enum R{Ok(string),Err(string)}enum Outer{Ok(R),Err(string)}struct Pair{first:R,second:R}pub fn run()->num{let source=bytes();push(source,7);let a=R::Ok("a");let b=R::Err("bb");let pair=Pair{first:a,second:b};for i in 10{let nested=make(i);assert(discard(make(i))==0);}let chained=make(1)!!;assert(len(chained)==1);drop(chained);let b=pair.second;match b{Ok(s)=>{assert(len(s)==1);},Err(e)=>{assert(len(e)==2);}}let s=pair.first!;assert(len(s)==1);drop(s);return len(source);}fn make(n:num)->Outer{if n%2{return Outer::Ok(R::Ok("x"));}return Outer::Err("yy");}fn discard(r:Outer)->num{return 0;}"#).unwrap();
+    fs::write(dir.join("audit.grl"),r#"module audit;enum R{Ok(string),Err(string)}enum Outer{Ok(R),Err(string)}struct Pair{first:R,second:R}pub fn run()->num{var source =bytes();push(source,7);a :=R::Ok("a");b :=R::Err("bb");pair :=Pair{first:a,second:b};for i in 10{nested :=make(i);assert(discard(make(i))==0);}chained :=make(1)!!;assert(len(chained)==1);drop(chained);b :=pair.second;match b{Ok(s)=>{assert(len(s)==1);},Err(e)=>{assert(len(e)==2);}}s :=pair.first!;assert(len(s)==1);drop(s);return len(source);}fn make(n:num)->Outer{if n%2{return Outer::Ok(R::Ok("x"));}return Outer::Err("yy");}fn discard(r:Outer)->num{return 0;}"#).unwrap();
     compile(&dir, "audit", false, &backend);
     let audit = grail_seed::artifact::load(&dir, "audit").unwrap();
     let symbol = grail_seed::emit::symbol(audit.header.entry.as_deref().unwrap());
@@ -119,11 +119,11 @@ fn hidden_sum_payloads_match_unwrap_abort_and_cleanup() {
         .arg("-o")
         .arg(dir.join("audited")));
     run(&mut Command::new(dir.join("audited")));
-    let option = r#"module option;enum O{None,Some(string)}enum U{Ok(unit),Err(string)}pub fn run()->num{let none=O::None;match none{None=>{},Some(s)=>{assert(0);}}let some=O::Some("abc");let text=some!;let unit=U::Ok(())!;let passed=carry(unit);return len(text)+number(passed);}fn carry(u:unit)->unit{return u;}fn number(u:unit)->num{return 4;}"#;
+    let option = r#"module option;enum O{None,Some(string)}enum U{Ok(unit),Err(string)}pub fn run()->num{none :=O::None;match none{None=>{},Some(s)=>{assert(0);}}some :=O::Some("abc");text :=some!;unit :=U::Ok(())!;passed :=carry(unit);return len(text)+number(passed);}fn carry(u:unit)->unit{return u;}fn number(u:unit)->num{return 4;}"#;
     fs::write(dir.join("option.grl"), option).unwrap();
     compile(&dir, "option", true, &backend);
     assert_eq!(run(&mut Command::new(dir.join("option"))).stdout, b"7\n");
-    let unit = "module unitabi;pub fn run()->num{let u=carry(());return number(u);}fn carry(u:unit)->unit{return u;}fn number(u:unit)->num{return 4;}";
+    let unit = "module unitabi;pub fn run()->num{u :=carry(());return number(u);}fn carry(u:unit)->unit{return u;}fn number(u:unit)->num{return 4;}";
     fs::write(dir.join("unitabi.grl"), unit).unwrap();
     compile(&dir, "unitabi", true, &backend);
     let checked = grail_seed::source::compile(unit, Default::default()).unwrap();
@@ -169,7 +169,7 @@ fn hidden_sum_payloads_match_unwrap_abort_and_cleanup() {
             expected.as_bytes()
         );
     }
-    fs::write(dir.join("status.grl"),"module status;use number;pub fn run<a>(p:read<a>)->num{let r=number::parse(p);match r{Ok(n)=>{return 1;},Err(e)=>{return 0;}}}").unwrap();
+    fs::write(dir.join("status.grl"),"module status;use number;pub fn run<a>(p:read<a>)->num{r :=number::parse(p);match r{Ok(n)=>{return 1;},Err(e)=>{return 0;}}}").unwrap();
     compile(&dir, "status", true, &backend);
     let mut state = 0x9e3779b97f4a7c15u64;
     for _ in 0..32 {
@@ -193,7 +193,7 @@ fn hidden_sum_payloads_match_unwrap_abort_and_cleanup() {
             b"0\n"
         );
     }
-    fs::write(dir.join("emptyarm.grl"),"module emptyarm;enum O<a>{None,Some(read<a>)}pub fn run()->num{let b=bytes();push(b,1);let o=O::Some(read(b));match o{None=>{},Some(_)=>{}}push(b,2);return len(b);}").unwrap();
+    fs::write(dir.join("emptyarm.grl"),"module emptyarm;enum O<a>{None,Some(read<a>)}pub fn run()->num{var b =bytes();push(b,1);o :=O::Some(read(b));match o{None=>{},Some(_)=>{}}push(b,2);return len(b);}").unwrap();
     compile(&dir, "emptyarm", true, &backend);
     assert_eq!(run(&mut Command::new(dir.join("emptyarm"))).stdout, b"2\n");
     fs::write(

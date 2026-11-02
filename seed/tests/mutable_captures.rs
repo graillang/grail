@@ -22,7 +22,7 @@ fn mutable_cells_preserve_the_declared_capture_bound() {
 }
 #[test]
 fn opaque_mutation_keeps_incoming_and_old_possible_sources() {
-    let s = "module f;struct Cell<a>{source:read<a>}fn set<outer,data>(p:ref_mut<outer,Cell<data>>,v:read<data>)->unit{exchange(borrow_mut(p.source),v);return ();}pub fn run()->num{let a=bytes();push(a,3);let b=bytes();push(b,7);let c=Cell{source:read(a)};set(borrow_mut(c),read(b));return at(read(c.source),0);}";
+    let s = "module f;struct Cell<a>{source:read<a>}fn set<outer,data>(p:ref_mut<outer,Cell<data>>,v:read<data>)->unit{exchange(borrow_mut(p.source),v);return ();}pub fn run()->num{var a =bytes();push(a,3);var b =bytes();push(b,7);var c =Cell{source:read(a)};set(borrow_mut(c),read(b));return at(read(c.source),0);}";
     accepts(s);
     rejects(&s.replace(
         "return at(read(c.source),0);",
@@ -34,12 +34,12 @@ fn opaque_mutation_keeps_incoming_and_old_possible_sources() {
     ));
     rejects(&s.replace(
         "set(borrow_mut(c),read(b));",
-        "{let short=bytes();push(short,9);set(borrow_mut(c),read(short));}",
+        "{var short =bytes();push(short,9);set(borrow_mut(c),read(short));}",
     ));
 }
 #[test]
 fn unique_capture_transfer_is_not_a_long_reborrow() {
-    let s = "module f;struct Cell<a>{source:mut<a>}fn take<outer,data>(p:ref_mut<outer,Cell<data>>,v:mut<data>)->mut<data>{return exchange(borrow_mut(p.source),v);}pub fn run()->num{let a=bytes();push(a,3);let b=bytes();push(b,7);let c=Cell{source:mut(a)};let old=take(borrow_mut(c),mut(b));write(old,0,9);drop(old);return at(read(c.source),0);}";
+    let s = "module f;struct Cell<a>{source:mut<a>}fn take<outer,data>(p:ref_mut<outer,Cell<data>>,v:mut<data>)->mut<data>{return exchange(borrow_mut(p.source),v);}pub fn run()->num{var a =bytes();push(a,3);var b =bytes();push(b,7);var c =Cell{source:mut(a)};var old =take(borrow_mut(c),mut(b));write(old,0,9);drop(old);return at(read(c.source),0);}";
     accepts(s);
     rejects(
         "module f;struct Cell<a>{source:mut<a>}pub fn bad<outer,data>(p:ref_mut<outer,Cell<data>>)->mut<data>{return mut(p.source);}",
@@ -48,16 +48,16 @@ fn unique_capture_transfer_is_not_a_long_reborrow() {
 #[test]
 fn generic_replacement_does_not_capture_the_temporary_slot_borrow() {
     accepts(
-        "module f;fn replace<outer,type T>(p:ref_mut<outer,T>,v:T)->T{return exchange(p,v);}pub fn run()->num{let a=bytes();push(a,3);let b=bytes();push(b,7);let v=mut(a);let old=replace(borrow_mut(v),mut(b));write(old,0,9);drop(old);return at(read(v),0);}",
+        "module f;fn replace<outer,type T>(p:ref_mut<outer,T>,v:T)->T{return exchange(p,v);}pub fn run()->num{var a =bytes();push(a,3);var b =bytes();push(b,7);var v =mut(a);var old =replace(borrow_mut(v),mut(b));write(old,0,9);drop(old);return at(read(v),0);}",
     );
 }
 #[test]
 fn generic_argument_and_callee_lifetime_namespaces_do_not_alias() {
     accepts(
-        "module f;fn keep<a,type T>(discard:T,value:read<a>)->read<a>{return value;}fn pass<a>(value:read<a>)->read<a>{let short=bytes();push(short,9);return keep(read(short),read(value));}pub fn run()->num{let b=bytes();push(b,7);return at(pass(read(b)),0);}",
+        "module f;fn keep<a,type T>(discard:T,value:read<a>)->read<a>{return value;}fn pass<a>(value:read<a>)->read<a>{var short =bytes();push(short,9);return keep(read(short),read(value));}pub fn run()->num{var b =bytes();push(b,7);return at(pass(read(b)),0);}",
     );
     accepts(
-        "module f;fn second<type T,type U>(discard:T,value:U)->U{return value;}fn pass<a>(value:read<a>)->read<a>{let short=bytes();push(short,9);return second(read(short),read(value));}pub fn run()->num{let b=bytes();push(b,7);return at(pass(read(b)),0);}",
+        "module f;fn second<type T,type U>(discard:T,value:U)->U{return value;}fn pass<a>(value:read<a>)->read<a>{var short =bytes();push(short,9);return second(read(short),read(value));}pub fn run()->num{var b =bytes();push(b,7);return at(pass(read(b)),0);}",
     );
 }
 #[test]
@@ -84,6 +84,6 @@ fn loop_writes_cannot_leave_stale_external_capture_proofs() {
 #[test]
 fn opaque_typed_result_targets_are_filtered_by_nested_lifetime_invariance() {
     accepts(
-        "module f;struct Cell<a>{source:read<a>}struct Pair<a,b>{first:Cell<a>,second:Cell<b>}fn first<outer,a,b>(p:ref_mut<outer,Pair<a,b>>)->ref_mut<outer,Cell<a>>{return borrow_mut(p.first);}pub fn select<a,b>(a:read<a>,b:read<b>)->read<a>{let pair=Pair{first:Cell{source:read(a)},second:Cell{source:read(b)}};let p=first(borrow_mut(pair));return read(p.source);}",
+        "module f;struct Cell<a>{source:read<a>}struct Pair<a,b>{first:Cell<a>,second:Cell<b>}fn first<outer,a,b>(p:ref_mut<outer,Pair<a,b>>)->ref_mut<outer,Cell<a>>{return borrow_mut(p.first);}pub fn select<a,b>(a:read<a>,b:read<b>)->read<a>{var pair =Pair{first:Cell{source:read(a)},second:Cell{source:read(b)}};var p =first(borrow_mut(pair));return read(p.source);}",
     );
 }

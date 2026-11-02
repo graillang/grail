@@ -56,13 +56,13 @@ fn ov<a>(c:ref_mut<a,C>,id:num)->unit {
     return ();
 }
 fn fresh<a>(c:ref_mut<a,C>)->num {
-    let id=c.next;
+    id :=c.next;
     exchange(borrow_mut(c.next),id+1);
     return id;
 }
 // Emits "G vN=" and returns N.
 fn def<a>(c:ref_mut<a,C>)->num {
-    let id=fresh(borrow_mut(c));
+    id :=fresh(borrow_mut(c));
     o(borrow_mut(c),read("G "));
     ov(borrow_mut(c),id);
     vec_push(c.out,61);
@@ -72,35 +72,36 @@ fn val(t:num,ty:num)->Val { return Val{t:t,ty:ty}; }
 
 // ---- tokens ----
 fn kind<a>(c:ref_mut<a,C>)->num {
-    let p=c.pos;
-    let t=vec_get(c.toks,p);
+    p :=c.pos;
+    t :=vec_get(c.toks,p);
     return t.kind;
 }
+fn next_kind<a>(c:ref_mut<a,C>)->num{p :=c.pos+1;return kind_at(borrow_mut(c),p);}
 fn kind_at<a>(c:ref_mut<a,C>,i:num)->num {
-    let t=vec_get(c.toks,i);
+    t :=vec_get(c.toks,i);
     return t.kind;
 }
 fn advance<a>(c:ref_mut<a,C>)->unit {
-    let p=c.pos+1;
+    p :=c.pos+1;
     exchange(borrow_mut(c.pos),p);
     return ();
 }
 fn tok_text<a>(c:ref_mut<a,C>,i:num)->bytes {
-    let t=vec_get(c.toks,i);
-    let st=t.start;
-    let en=t.end;
+    t :=vec_get(c.toks,i);
+    st :=t.start;
+    en :=t.end;
     return copy_bytes(slice(read(c.src),st,en));
 }
 fn is<a,b>(c:ref_mut<a,C>,s:read<b>)->num {
-    let p=c.pos;
-    let t=tok_text(borrow_mut(c),p);
+    p :=c.pos;
+    t :=tok_text(borrow_mut(c),p);
     return same(read(t),s);
 }
 fn fail<a,b>(c:ref_mut<a,C>,msg:read<b>)->unit {
-    let p=c.pos;
-    let m=tok_text(borrow_mut(c),p);
-    let t=vec_get(c.toks,p);
-    let st=t.start;
+    p :=c.pos;
+    m :=tok_text(borrow_mut(c),p);
+    t :=vec_get(c.toks,p);
+    st :=t.start;
     exchange(borrow_mut(c.out),vec<num>());
     o(borrow_mut(c),read("grailc: "));
     o(borrow_mut(c),msg);
@@ -109,7 +110,7 @@ fn fail<a,b>(c:ref_mut<a,C>,msg:read<b>)->unit {
     o(borrow_mut(c),read(" near '"));
     o(borrow_mut(c),read(m));
     o(borrow_mut(c),read("'\n"));
-    let line=bytes();
+    var line =bytes();
     for i in len(c.out) { push(line,load(vec_get(c.out,i))); }
     host::print(read(line));
     assert(0);
@@ -120,9 +121,9 @@ fn eat<a,b>(c:ref_mut<a,C>,s:read<b>)->num {
     return 0;
 }
 fn expect<a,b>(c:ref_mut<a,C>,s:read<b>)->unit {
-    let want=copy_bytes(read(s));
+    want :=copy_bytes(read(s));
     if eat(borrow_mut(c),s)==0 {
-        let msg="expected ";
+        var msg ="expected ";
         append_text(msg,read(want));
         fail(borrow_mut(c),read(msg));
     }
@@ -130,8 +131,8 @@ fn expect<a,b>(c:ref_mut<a,C>,s:read<b>)->unit {
 }
 fn ident<a>(c:ref_mut<a,C>)->bytes {
     if kind(borrow_mut(c))!=1 { fail(borrow_mut(c),read("expected identifier")); }
-    let p=c.pos;
-    let t=tok_text(borrow_mut(c),p);
+    p :=c.pos;
+    t :=tok_text(borrow_mut(c),p);
     advance(borrow_mut(c));
     return t;
 }
@@ -140,7 +141,7 @@ fn skip_angle<a>(c:ref_mut<a,C>)->unit {
     if kind(borrow_mut(c))!=60 { return (); }
     var depth=0;
     while 1 {
-        let k=kind(borrow_mut(c));
+        k :=kind(borrow_mut(c));
         if k==60 { depth=depth+1; }
         if k==62 { depth=depth-1; }
         if k==0 { fail(borrow_mut(c),read("unclosed <")); }
@@ -153,7 +154,7 @@ fn skip_angle<a>(c:ref_mut<a,C>)->unit {
 fn skip_braces<a>(c:ref_mut<a,C>)->unit {
     var depth=0;
     while 1 {
-        let k=kind(borrow_mut(c));
+        k :=kind(borrow_mut(c));
         if k==123 { depth=depth+1; }
         if k==125 { depth=depth-1; }
         if k==0 { fail(borrow_mut(c),read("unclosed {")); }
@@ -163,12 +164,12 @@ fn skip_braces<a>(c:ref_mut<a,C>)->unit {
     return ();
 }
 fn load_file<a>(c:ref_mut<a,C>,index:num)->unit {
-    let path=host::arg(index);
-    let src=host::read_file(read(path));
-    let toks=vec<Tok>();
-    let lexed=lexer::tokenize(read(src));
+    path :=host::arg(index);
+    src :=host::read_file(read(path));
+    var toks =vec<Tok>();
+    lexed :=lexer::tokenize(read(src));
     for i in len(lexed) {
-        let t=vec_get(lexed,i);
+        t :=vec_get(lexed,i);
         vec_push(toks,Tok{kind:t.kind,start:t.start,end:t.end});
     }
     drop(lexed);
@@ -181,59 +182,59 @@ fn load_file<a>(c:ref_mut<a,C>,index:num)->unit {
 // ---- types and declarations ----
 fn intern<a>(c:ref_mut<a,C>,k:num,arg:num)->num {
     for i in len(c.types) {
-        let t=vec_get(c.types,i);
+        t :=vec_get(c.types,i);
         if (t.kind==k)&(t.arg==arg) { return i; }
     }
     vec_push(c.types,Ty{kind:k,arg:arg});
     return len(c.types)-1;
 }
 fn ty_kind<a>(c:ref_mut<a,C>,ty:num)->num {
-    let t=vec_get(c.types,ty);
+    t :=vec_get(c.types,ty);
     return t.kind;
 }
 fn ty_arg<a>(c:ref_mut<a,C>,ty:num)->num {
-    let t=vec_get(c.types,ty);
+    t :=vec_get(c.types,ty);
     return t.arg;
 }
 // Declaration index + 1, or 0.
 fn find_decl<a,b,d>(c:ref_mut<a,C>,m:read<b>,n:read<d>)->num {
     for i in len(c.decls) {
-        let x=vec_get(c.decls,i);
+        x :=vec_get(c.decls,i);
         if same(read(x.module),read(m))&same(read(x.name),read(n)) { return i+1; }
     }
     return 0;
 }
 fn find_func<a,b,d>(c:ref_mut<a,C>,m:read<b>,n:read<d>)->num {
     for i in len(c.funcs) {
-        let x=vec_get(c.funcs,i);
+        x :=vec_get(c.funcs,i);
         if same(read(x.module),read(m))&same(read(x.name),read(n)) { return i+1; }
     }
     return 0;
 }
 // Field index within decl, failing when absent.
 fn find_field<a,b>(c:ref_mut<a,C>,decl:num,n:read<b>)->num {
-    let d=vec_get(c.decls,decl);
-    let first=d.first;
-    let count=d.count;
+    d :=vec_get(c.decls,decl);
+    first :=d.first;
+    count :=d.count;
     for i in count {
-        let f=vec_get(c.fields,first+i);
+        f :=vec_get(c.fields,first+i);
         if same(read(f.name),read(n)) { return i; }
     }
     fail(borrow_mut(c),read("unknown field or variant"));
     return 0;
 }
 fn field_ty<a>(c:ref_mut<a,C>,decl:num,index:num)->num {
-    let d=vec_get(c.decls,decl);
-    let k=d.first+index;
-    let f=vec_get(c.fields,k);
+    d :=vec_get(c.decls,decl);
+    k :=d.first+index;
+    f :=vec_get(c.fields,k);
     return f.ty;
 }
 fn module_copy<a>(c:ref_mut<a,C>)->bytes { return copy_bytes(read(c.module)); }
 fn parse_type<a>(c:ref_mut<a,C>)->num {
-    let first=ident(borrow_mut(c));
+    first :=ident(borrow_mut(c));
     if eat(borrow_mut(c),read("::")) {
-        let n=ident(borrow_mut(c));
-        let d=find_decl(borrow_mut(c),read(first),read(n));
+        n :=ident(borrow_mut(c));
+        d :=find_decl(borrow_mut(c),read(first),read(n));
         if d==0 { fail(borrow_mut(c),read("unknown type")); }
         skip_angle(borrow_mut(c));
         return intern(borrow_mut(c),8,d-1);
@@ -248,7 +249,7 @@ fn parse_type<a>(c:ref_mut<a,C>)->num {
     }
     if same(read(first),read("vec")) {
         expect(borrow_mut(c),read("<"));
-        let e=parse_type(borrow_mut(c));
+        e :=parse_type(borrow_mut(c));
         expect(borrow_mut(c),read(">"));
         return intern(borrow_mut(c),6,e);
     }
@@ -256,12 +257,12 @@ fn parse_type<a>(c:ref_mut<a,C>)->num {
         expect(borrow_mut(c),read("<"));
         ident(borrow_mut(c));
         expect(borrow_mut(c),read(","));
-        let e=parse_type(borrow_mut(c));
+        e :=parse_type(borrow_mut(c));
         expect(borrow_mut(c),read(">"));
         return intern(borrow_mut(c),7,e);
     }
-    let m=module_copy(borrow_mut(c));
-    let d=find_decl(borrow_mut(c),read(m),read(first));
+    m :=module_copy(borrow_mut(c));
+    d :=find_decl(borrow_mut(c),read(m),read(first));
     if d==0 { fail(borrow_mut(c),read("unknown type")); }
     skip_angle(borrow_mut(c));
     return intern(borrow_mut(c),8,d-1);
@@ -276,27 +277,27 @@ fn mangle<a,b,d>(c:ref_mut<a,C>,m:read<b>,n:read<d>)->unit {
     return ();
 }
 fn decl<a>(c:ref_mut<a,C>,pass:num)->unit {
-    let is_enum=is(borrow_mut(c),read("enum"));
+    is_enum :=is(borrow_mut(c),read("enum"));
     advance(borrow_mut(c));
-    let name=ident(borrow_mut(c));
+    name :=ident(borrow_mut(c));
     skip_angle(borrow_mut(c));
     if pass!=2 {
         if pass==1 {
-            let m=module_copy(borrow_mut(c));
+            m :=module_copy(borrow_mut(c));
             vec_push(c.decls,Decl{module:m,name:name,is_enum:is_enum,first:0,count:0});
         }
         skip_braces(borrow_mut(c));
         eat(borrow_mut(c),read(";"));
         return ();
     }
-    let m=module_copy(borrow_mut(c));
-    let d=find_decl(borrow_mut(c),read(m),read(name));
-    let first=len(c.fields);
+    m :=module_copy(borrow_mut(c));
+    d :=find_decl(borrow_mut(c),read(m),read(name));
+    first :=len(c.fields);
     var count=0;
     expect(borrow_mut(c),read("{"));
     if eat(borrow_mut(c),read("}"))==0 {
         while 1 {
-            let f=ident(borrow_mut(c));
+            f :=ident(borrow_mut(c));
             var ty=1;
             if is_enum {
                 if eat(borrow_mut(c),read("(")) {
@@ -324,26 +325,26 @@ fn bind<a>(c:ref_mut<a,C>,name:bytes,ty:num,id:num)->unit {
 }
 fn func<a>(c:ref_mut<a,C>,pass:num,public:num)->unit {
     expect(borrow_mut(c),read("fn"));
-    let name=ident(borrow_mut(c));
+    name :=ident(borrow_mut(c));
     skip_angle(borrow_mut(c));
     if pass==1 {
         while kind(borrow_mut(c))!=123 { advance(borrow_mut(c)); }
         skip_braces(borrow_mut(c));
         return ();
     }
-    let m=module_copy(borrow_mut(c));
+    m :=module_copy(borrow_mut(c));
     exchange(borrow_mut(c.locals),vec<Local>());
     exchange(borrow_mut(c.next),0);
-    let first=len(c.params);
+    first :=len(c.params);
     var count=0;
     expect(borrow_mut(c),read("("));
     if eat(borrow_mut(c),read(")"))==0 {
         while 1 {
-            let p=ident(borrow_mut(c));
+            p :=ident(borrow_mut(c));
             expect(borrow_mut(c),read(":"));
-            let ty=parse_type(borrow_mut(c));
+            ty :=parse_type(borrow_mut(c));
             if pass==2 { vec_push(c.params,ty); }
-            let id=fresh(borrow_mut(c));
+            id :=fresh(borrow_mut(c));
             bind(borrow_mut(c),p,ty,id);
             count=count+1;
             if eat(borrow_mut(c),read(")")) { break; }
@@ -351,7 +352,7 @@ fn func<a>(c:ref_mut<a,C>,pass:num,public:num)->unit {
         }
     }
     expect(borrow_mut(c),read("->"));
-    let ret=parse_type(borrow_mut(c));
+    ret :=parse_type(borrow_mut(c));
     o(borrow_mut(c),read("static G "));
     mangle(borrow_mut(c),read(m),read(name));
     vec_push(c.out,40);
@@ -364,9 +365,9 @@ fn func<a>(c:ref_mut<a,C>,pass:num,public:num)->unit {
     vec_push(c.out,41);
     if pass==2 {
         o(borrow_mut(c),read(";\n"));
-        let entry=(c.entry==0)&(c.file==2)&public&(count<2);
+        entry :=(c.entry==0)&(c.file==2)&public&(count<2);
         vec_push(c.funcs,Func{module:m,name:name,first:first,count:count,ret:ret});
-        let index=len(c.funcs);
+        index :=len(c.funcs);
         if entry { exchange(borrow_mut(c.entry),index); }
         skip_braces(borrow_mut(c));
         return ();
@@ -378,7 +379,7 @@ fn func<a>(c:ref_mut<a,C>,pass:num,public:num)->unit {
 }
 fn toplevel<a>(c:ref_mut<a,C>,pass:num)->unit {
     expect(borrow_mut(c),read("module"));
-    let m=ident(borrow_mut(c));
+    m :=ident(borrow_mut(c));
     exchange(borrow_mut(c.module),m);
     expect(borrow_mut(c),read(";"));
     while eat(borrow_mut(c),read("use")) {
@@ -386,7 +387,7 @@ fn toplevel<a>(c:ref_mut<a,C>,pass:num)->unit {
         expect(borrow_mut(c),read(";"));
     }
     while kind(borrow_mut(c))!=0 {
-        let public=eat(borrow_mut(c),read("pub"));
+        public :=eat(borrow_mut(c),read("pub"));
         if is(borrow_mut(c),read("struct"))+is(borrow_mut(c),read("enum")) {
             decl(borrow_mut(c),pass);
         } else {
@@ -401,7 +402,7 @@ fn deref<a>(c:ref_mut<a,C>,v:Val)->Val {
     var t=v.t;
     var ty=v.ty;
     while ty_kind(borrow_mut(c),ty)==7 {
-        let n=def(borrow_mut(c));
+        n :=def(borrow_mut(c));
         o(borrow_mut(c),read("*(G*)"));
         ov(borrow_mut(c),t);
         o(borrow_mut(c),read(";\n"));
@@ -414,13 +415,13 @@ fn find_local<a,b>(c:ref_mut<a,C>,n:read<b>)->num {
     var i=len(c.locals);
     while 0<i {
         i=i-1;
-        let l=vec_get(c.locals,i);
+        l :=vec_get(c.locals,i);
         if same(read(l.name),read(n)) { return i+1; }
     }
     return 0;
 }
-fn local_id<a>(c:ref_mut<a,C>,i:num)->num { let l=vec_get(c.locals,i); return l.id; }
-fn local_ty<a>(c:ref_mut<a,C>,i:num)->num { let l=vec_get(c.locals,i); return l.ty; }
+fn local_id<a>(c:ref_mut<a,C>,i:num)->num { l :=vec_get(c.locals,i); return l.id; }
+fn local_ty<a>(c:ref_mut<a,C>,i:num)->num { l :=vec_get(c.locals,i); return l.ty; }
 fn pop_locals<a>(c:ref_mut<a,C>,mark:num)->unit {
     while mark<len(c.locals) { vec_pop(c.locals); }
     return ();
@@ -439,14 +440,14 @@ fn field_path<a>(c:ref_mut<a,C>,id:num,lty:num,address:num)->Val {
     var t=id;
     var ty=lty;
     while eat(borrow_mut(c),read(".")) {
-        let f=ident(borrow_mut(c));
-        let base=deref(borrow_mut(c),val(t,ty));
-        let b=base.t;
-        let d=ty_arg(borrow_mut(c),base.ty);
-        let k=find_field(borrow_mut(c),d,read(f));
-        let fty=field_ty(borrow_mut(c),d,k);
-        let n=def(borrow_mut(c));
-        let last=(kind(borrow_mut(c))!=46)&address;
+        f :=ident(borrow_mut(c));
+        base :=deref(borrow_mut(c),val(t,ty));
+        b :=base.t;
+        d :=ty_arg(borrow_mut(c),base.ty);
+        k :=find_field(borrow_mut(c),d,read(f));
+        fty :=field_ty(borrow_mut(c),d,k);
+        n :=def(borrow_mut(c));
+        last :=(kind(borrow_mut(c))!=46)&address;
         if last { o(borrow_mut(c),read("(G)&")); }
         slot(borrow_mut(c),b,k);
         o(borrow_mut(c),read(";\n"));
@@ -457,14 +458,14 @@ fn field_path<a>(c:ref_mut<a,C>,id:num,lty:num,address:num)->Val {
     return val(t,ty);
 }
 fn place<a>(c:ref_mut<a,C>)->Val {
-    let name=ident(borrow_mut(c));
-    let l=find_local(borrow_mut(c),read(name));
+    name :=ident(borrow_mut(c));
+    l :=find_local(borrow_mut(c),read(name));
     if l==0 { fail(borrow_mut(c),read("unknown borrowed place")); }
-    let id=local_id(borrow_mut(c),l-1);
-    let ty=local_ty(borrow_mut(c),l-1);
+    id :=local_id(borrow_mut(c),l-1);
+    ty :=local_ty(borrow_mut(c),l-1);
     if kind(borrow_mut(c))==46 { return field_path(borrow_mut(c),id,ty,1); }
     if ty_kind(borrow_mut(c),ty)==7 { return val(id,ty); }
-    let n=def(borrow_mut(c));
+    n :=def(borrow_mut(c));
     o(borrow_mut(c),read("(G)&"));
     ov(borrow_mut(c),id);
     o(borrow_mut(c),read(";\n"));
@@ -476,12 +477,12 @@ fn hex(b:num)->num {
     return b-87;
 }
 fn string_lit<a>(c:ref_mut<a,C>)->Val {
-    let p=c.pos;
-    let t=vec_get(c.toks,p);
-    let st=t.start;
-    let en=t.end;
+    p :=c.pos;
+    t :=vec_get(c.toks,p);
+    st :=t.start;
+    en :=t.end;
     advance(borrow_mut(c));
-    let n=def(borrow_mut(c));
+    n :=def(borrow_mut(c));
     o(borrow_mut(c),read("rt_lit(\""));
     var i=st+1;
     var count=0;
@@ -489,15 +490,15 @@ fn string_lit<a>(c:ref_mut<a,C>)->Val {
         var b=at(read(c.src),i);
         if b==92 {
             i=i+1;
-            let e=at(read(c.src),i);
+            e :=at(read(c.src),i);
             b=e;
             if e==110 { b=10; }
             if e==114 { b=13; }
             if e==116 { b=9; }
             if e==48 { b=0; }
             if e==120 {
-                let h=hex(at(read(c.src),i+1));
-                let l=hex(at(read(c.src),i+2));
+                h :=hex(at(read(c.src),i+1));
+                l :=hex(at(read(c.src),i+2));
                 b=h*16+l;
                 i=i+2;
             }
@@ -516,18 +517,18 @@ fn string_lit<a>(c:ref_mut<a,C>)->Val {
 }
 fn record<a>(c:ref_mut<a,C>,d:num)->Val {
     expect(borrow_mut(c),read("{"));
-    let x=vec_get(c.decls,d);
-    let count=x.count;
-    let n=def(borrow_mut(c));
+    x :=vec_get(c.decls,d);
+    count :=x.count;
+    n :=def(borrow_mut(c));
     o(borrow_mut(c),read("rt_rec("));
     on(borrow_mut(c),count);
     o(borrow_mut(c),read(");\n"));
     if eat(borrow_mut(c),read("}"))==0 {
         while 1 {
-            let f=ident(borrow_mut(c));
+            f :=ident(borrow_mut(c));
             expect(borrow_mut(c),read(":"));
-            let v=expr(borrow_mut(c),0);
-            let k=find_field(borrow_mut(c),d,read(f));
+            var v =expr(borrow_mut(c),0);
+            k :=find_field(borrow_mut(c),d,read(f));
             slot(borrow_mut(c),n,k);
             vec_push(c.out,61);
             ov(borrow_mut(c),v.t);
@@ -540,16 +541,16 @@ fn record<a>(c:ref_mut<a,C>,d:num)->Val {
     return val(n,intern(borrow_mut(c),8,d));
 }
 fn variant<a,b>(c:ref_mut<a,C>,d:num,name:read<b>)->Val {
-    let k=find_field(borrow_mut(c),d,name);
+    k :=find_field(borrow_mut(c),d,name);
     var payload=0;
     var has=0;
     if eat(borrow_mut(c),read("(")) {
-        let v=expr(borrow_mut(c),0);
+        var v =expr(borrow_mut(c),0);
         payload=v.t;
         has=1;
         expect(borrow_mut(c),read(")"));
     }
-    let n=def(borrow_mut(c));
+    n :=def(borrow_mut(c));
     o(borrow_mut(c),read("rt_enum("));
     on(borrow_mut(c),k);
     vec_push(c.out,44);
@@ -558,21 +559,21 @@ fn variant<a,b>(c:ref_mut<a,C>,d:num,name:read<b>)->Val {
     return val(n,intern(borrow_mut(c),8,d));
 }
 fn call<a,b,d>(c:ref_mut<a,C>,m:read<b>,name:read<d>)->Val {
-    let f=find_func(borrow_mut(c),read(m),read(name));
+    f :=find_func(borrow_mut(c),read(m),read(name));
     if f==0 { fail(borrow_mut(c),read("unknown function")); }
     expect(borrow_mut(c),read("("));
-    let args=vec<num>();
+    var args =vec<num>();
     if eat(borrow_mut(c),read(")"))==0 {
         while 1 {
-            let v=expr(borrow_mut(c),0);
+            var v =expr(borrow_mut(c),0);
             vec_push(args,v.t);
             if eat(borrow_mut(c),read(")")) { break; }
             expect(borrow_mut(c),read(","));
         }
     }
-    let x=vec_get(c.funcs,f-1);
-    let ret=x.ret;
-    let n=def(borrow_mut(c));
+    x :=vec_get(c.funcs,f-1);
+    ret :=x.ret;
+    n :=def(borrow_mut(c));
     mangle(borrow_mut(c),m,name);
     vec_push(c.out,40);
     for i in len(args) {
@@ -603,7 +604,7 @@ fn builtin_id<a>(n:read<a>)->num {
 }
 // Emits "G vN=F(vA[,vB[,vE]]);" and returns N.
 fn apply<a,b>(c:ref_mut<a,C>,f:read<b>,args:vec<num>)->num {
-    let n=def(borrow_mut(c));
+    n :=def(borrow_mut(c));
     o(borrow_mut(c),f);
     vec_push(c.out,40);
     for i in len(args) {
@@ -613,8 +614,8 @@ fn apply<a,b>(c:ref_mut<a,C>,f:read<b>,args:vec<num>)->num {
     o(borrow_mut(c),read(");\n"));
     return n;
 }
-fn one(a:num)->vec<num> { let v=vec<num>(); vec_push(v,a); return v; }
-fn two(a:num,b:num)->vec<num> { let v=vec<num>(); vec_push(v,a); vec_push(v,b); return v; }
+fn one(a:num)->vec<num> { var v =vec<num>(); vec_push(v,a); return v; }
+fn two(a:num,b:num)->vec<num> { var v =vec<num>(); vec_push(v,a); vec_push(v,b); return v; }
 fn builtin<a>(c:ref_mut<a,C>,id:num)->Val {
     expect(borrow_mut(c),read("("));
     if id==1 {
@@ -622,30 +623,30 @@ fn builtin<a>(c:ref_mut<a,C>,id:num)->Val {
         return val(apply(borrow_mut(c),read("rt_new"),vec<num>()),2);
     }
     if (id==13)+(id==14) {
-        let v=place(borrow_mut(c));
+        var v =place(borrow_mut(c));
         expect(borrow_mut(c),read(")"));
         return v;
     }
-    let a=expr(borrow_mut(c),0);
+    a :=expr(borrow_mut(c),0);
     if id==16 {
         expect(borrow_mut(c),read(","));
-        let b=expr(borrow_mut(c),0);
+        b :=expr(borrow_mut(c),0);
         expect(borrow_mut(c),read(")"));
-        let ty=ty_arg(borrow_mut(c),a.ty);
+        ty :=ty_arg(borrow_mut(c),a.ty);
         return val(apply(borrow_mut(c),read("rt_xchg"),two(a.t,b.t)),ty);
     }
     if id==15 {
         expect(borrow_mut(c),read(")"));
-        let ty=ty_arg(borrow_mut(c),a.ty);
-        let n=def(borrow_mut(c));
+        ty :=ty_arg(borrow_mut(c),a.ty);
+        n :=def(borrow_mut(c));
         o(borrow_mut(c),read("*(G*)"));
         ov(borrow_mut(c),a.t);
         o(borrow_mut(c),read(";\n"));
         return val(n,ty);
     }
-    let x=deref(borrow_mut(c),a);
-    let xt=x.t;
-    let xty=x.ty;
+    x :=deref(borrow_mut(c),a);
+    xt :=x.t;
+    xty :=x.ty;
     if id<7 {
         expect(borrow_mut(c),read(")"));
         if id<4 {
@@ -657,12 +658,12 @@ fn builtin<a>(c:ref_mut<a,C>,id:num)->Val {
     }
     if id==10 {
         expect(borrow_mut(c),read(")"));
-        let ty=ty_arg(borrow_mut(c),xty);
+        ty :=ty_arg(borrow_mut(c),xty);
         return val(apply(borrow_mut(c),read("rt_pop"),one(xt)),ty);
     }
     expect(borrow_mut(c),read(","));
-    let b=expr(borrow_mut(c),0);
-    let bt=b.t;
+    b :=expr(borrow_mut(c),0);
+    bt :=b.t;
     if id==7 {
         expect(borrow_mut(c),read(")"));
         return val(apply(borrow_mut(c),read("rt_at"),two(xt,bt)),0);
@@ -674,83 +675,83 @@ fn builtin<a>(c:ref_mut<a,C>,id:num)->Val {
         vec_push(c.out,44);
         ov(borrow_mut(c),bt);
         o(borrow_mut(c),read(");\n"));
-        let n=def(borrow_mut(c));
+        n :=def(borrow_mut(c));
         o(borrow_mut(c),read("0;\n"));
         return val(n,1);
     }
     if id!=8 {
         expect(borrow_mut(c),read(")"));
-        let elem=ty_arg(borrow_mut(c),xty);
-        let ty=intern(borrow_mut(c),7,elem);
+        elem :=ty_arg(borrow_mut(c),xty);
+        ty :=intern(borrow_mut(c),7,elem);
         return val(apply(borrow_mut(c),read("rt_slot"),two(xt,bt)),ty);
     }
     expect(borrow_mut(c),read(","));
-    let e=expr(borrow_mut(c),0);
+    e :=expr(borrow_mut(c),0);
     expect(borrow_mut(c),read(")"));
-    let args=two(xt,bt);
+    var args =two(xt,bt);
     vec_push(args,e.t);
     return val(apply(borrow_mut(c),read("rt_slice"),args),4);
 }
 fn primary<a>(c:ref_mut<a,C>)->Val {
-    let k=kind(borrow_mut(c));
+    k :=kind(borrow_mut(c));
     if k==40 {
         advance(borrow_mut(c));
         if eat(borrow_mut(c),read(")")) {
-            let n=def(borrow_mut(c));
+            n :=def(borrow_mut(c));
             o(borrow_mut(c),read("0;\n"));
             return val(n,1);
         }
-        let v=expr(borrow_mut(c),0);
+        var v =expr(borrow_mut(c),0);
         expect(borrow_mut(c),read(")"));
         return v;
     }
     if k==3 { return string_lit(borrow_mut(c)); }
     if k==2 {
-        let p=c.pos;
-        let t=tok_text(borrow_mut(c),p);
+        p :=c.pos;
+        t :=tok_text(borrow_mut(c),p);
         advance(borrow_mut(c));
-        let n=def(borrow_mut(c));
+        n :=def(borrow_mut(c));
         o(borrow_mut(c),read(t));
         o(borrow_mut(c),read("ull;\n"));
         return val(n,0);
     }
-    let first=ident(borrow_mut(c));
+    first :=ident(borrow_mut(c));
     if same(read(first),read("vec"))&is(borrow_mut(c),read("<")) {
         advance(borrow_mut(c));
-        let e=parse_type(borrow_mut(c));
+        e :=parse_type(borrow_mut(c));
         expect(borrow_mut(c),read(">"));
         expect(borrow_mut(c),read("("));
         expect(borrow_mut(c),read(")"));
-        let ty=intern(borrow_mut(c),6,e);
+        ty :=intern(borrow_mut(c),6,e);
         return val(apply(borrow_mut(c),read("rt_new"),vec<num>()),ty);
     }
-    let m=module_copy(borrow_mut(c));
+    m :=module_copy(borrow_mut(c));
     if eat(borrow_mut(c),read("::")) {
-        let second=ident(borrow_mut(c));
+        second :=ident(borrow_mut(c));
         if eat(borrow_mut(c),read("::")) {
-            let third=ident(borrow_mut(c));
-            let d=find_decl(borrow_mut(c),read(first),read(second));
+            third :=ident(borrow_mut(c));
+            d :=find_decl(borrow_mut(c),read(first),read(second));
             if d==0 { fail(borrow_mut(c),read("unknown enum")); }
             return variant(borrow_mut(c),d-1,read(third));
         }
-        let d=find_decl(borrow_mut(c),read(m),read(first));
+        d :=find_decl(borrow_mut(c),read(m),read(first));
         if d!=0 { return variant(borrow_mut(c),d-1,read(second)); }
-        let r=find_decl(borrow_mut(c),read(first),read(second));
+        r :=find_decl(borrow_mut(c),read(first),read(second));
         if (r!=0)&is(borrow_mut(c),read("{")) { return record(borrow_mut(c),r-1); }
         return call(borrow_mut(c),read(first),read(second));
     }
     if is(borrow_mut(c),read("(")) {
-        let b=builtin_id(read(first));
+        b :=builtin_id(read(first));
         if b!=0 { return builtin(borrow_mut(c),b); }
         return call(borrow_mut(c),read(m),read(first));
     }
-    let l=find_local(borrow_mut(c),read(first));
+    l :=find_local(borrow_mut(c),read(first));
     if l!=0 {
-        let id=local_id(borrow_mut(c),l-1);
-        let ty=local_ty(borrow_mut(c),l-1);
+        id :=local_id(borrow_mut(c),l-1);
+        ty :=local_ty(borrow_mut(c),l-1);
         return field_path(borrow_mut(c),id,ty,0);
     }
-    let r=find_decl(borrow_mut(c),read(m),read(first));
+    r :=find_decl(borrow_mut(c),read(m),read(first));
     if r!=0 { return record(borrow_mut(c),r-1); }
     fail(borrow_mut(c),read("undefined name"));
     return val(0,0);
@@ -760,18 +761,19 @@ fn prec(k:num)->num {
     if k==94 { return 2; }
     if (k==258)+(k==259)+(k==60) { return 3; }
     if (k==43)+(k==45) { return 4; }
-    if (k==42)+(k==37) { return 5; }
+    if (k==42)+(k==37)+(k==47) { return 5; }
+    if k==267 {return 6;}
     return 0;
 }
 // `?` returns a failure unchanged (payload layout is shared); `!` aborts on it.
 fn propagate<a>(c:ref_mut<a,C>,v:Val,unwrap:num)->Val {
-    let x=deref(borrow_mut(c),v);
-    let xt=x.t;
-    let d=ty_arg(borrow_mut(c),x.ty);
+    x :=deref(borrow_mut(c),v);
+    xt :=x.t;
+    d :=ty_arg(borrow_mut(c),x.ty);
     var k=0;
-    let dd=vec_get(c.decls,d);
-    let fi=dd.first;
-    let f=vec_get(c.fields,fi);
+    dd :=vec_get(c.decls,d);
+    fi :=dd.first;
+    f :=vec_get(c.fields,fi);
     if same(read(f.name),read("Ok"))+same(read(f.name),read("Some"))==0 { k=1; }
     o(borrow_mut(c),read("if(((G*)"));
     ov(borrow_mut(c),xt);
@@ -783,15 +785,15 @@ fn propagate<a>(c:ref_mut<a,C>,v:Val,unwrap:num)->Val {
         ov(borrow_mut(c),xt);
         o(borrow_mut(c),read(";\n"));
     }
-    let n=def(borrow_mut(c));
+    n :=def(borrow_mut(c));
     slot(borrow_mut(c),xt,1);
     o(borrow_mut(c),read(";\n"));
     return val(n,field_ty(borrow_mut(c),d,k));
 }
 fn binary<a>(c:ref_mut<a,C>,k:num,left:num,right:num)->num {
-    let n=def(borrow_mut(c));
-    if k==37 {
-        o(borrow_mut(c),read("rt_rem("));
+    n :=def(borrow_mut(c));
+    if (k==37)+(k==47)+(k==267) {
+        if k==37{o(borrow_mut(c),read("rt_rem("));}if k==47{o(borrow_mut(c),read("rt_div("));}if k==267{o(borrow_mut(c),read("rt_pow("));}
         ov(borrow_mut(c),left);
         vec_push(c.out,44);
     } else {
@@ -807,22 +809,22 @@ fn binary<a>(c:ref_mut<a,C>,k:num,left:num,right:num)->num {
     return n;
 }
 fn expr<a>(c:ref_mut<a,C>,min:num)->Val {
-    let first=primary(borrow_mut(c));
+    first :=primary(borrow_mut(c));
     var t=first.t;
     var ty=first.ty;
     while 1 {
-        let k=kind(borrow_mut(c));
-        let p=prec(k);
+        k :=kind(borrow_mut(c));
+        p :=prec(k);
         if (k==63)+(k==33) {
             advance(borrow_mut(c));
-            let r=propagate(borrow_mut(c),val(t,ty),k==33);
+            r :=propagate(borrow_mut(c),val(t,ty),k==33);
             t=r.t;
             ty=r.ty;
         } else {
             if p==0 { break; }
             if p<min { break; }
             advance(borrow_mut(c));
-            let right=expr(borrow_mut(c),p+1);
+            right :=expr(borrow_mut(c),p+(k!=267));
             t=binary(borrow_mut(c),k,t,right.t);
             ty=0;
         }
@@ -834,28 +836,31 @@ fn expr<a>(c:ref_mut<a,C>,min:num)->Val {
 fn block<a>(c:ref_mut<a,C>)->unit {
     expect(borrow_mut(c),read("{"));
     o(borrow_mut(c),read("{\n"));
-    let mark=len(c.locals);
+    mark :=len(c.locals);
     while is(borrow_mut(c),read("}"))==0 { stmt(borrow_mut(c)); }
     advance(borrow_mut(c));
     o(borrow_mut(c),read("}\n"));
     pop_locals(borrow_mut(c),mark);
     return ();
 }
+fn compound_operator(k:num)->num{
+ if k==262{return 43;}if k==263{return 45;}if k==264{return 42;}if k==265{return 47;}if k==266{return 37;}return 267;
+}
 fn assignment_ahead<a>(c:ref_mut<a,C>)->num {
     if kind(borrow_mut(c))!=1 { return 0; }
     var e=c.pos+1;
     while kind_at(borrow_mut(c),e)==46 { e=e+2; }
-    return kind_at(borrow_mut(c),e)==61;
+    k :=kind_at(borrow_mut(c),e);return (k==61)+((261<k)&(k<267))+(k==268);
 }
 // Evaluates one argument to its dereferenced value.
 fn operand<a>(c:ref_mut<a,C>)->num {
-    let v=expr(borrow_mut(c),0);
-    let x=deref(borrow_mut(c),v);
+    var v =expr(borrow_mut(c),0);
+    x :=deref(borrow_mut(c),v);
     return x.t;
 }
 fn statement_call<a,b>(c:ref_mut<a,C>,f:read<b>,count:num)->unit {
     expect(borrow_mut(c),read("("));
-    let args=vec<num>();
+    var args =vec<num>();
     for i in count {
         if i!=0 { expect(borrow_mut(c),read(",")); }
         vec_push(args,operand(borrow_mut(c)));
@@ -883,7 +888,7 @@ fn stmt<a>(c:ref_mut<a,C>)->unit {
         return ();
     }
     if eat(borrow_mut(c),read("return")) {
-        let v=expr(borrow_mut(c),0);
+        var v =expr(borrow_mut(c),0);
         expect(borrow_mut(c),read(";"));
         o(borrow_mut(c),read("return "));
         ov(borrow_mut(c),v.t);
@@ -891,21 +896,21 @@ fn stmt<a>(c:ref_mut<a,C>)->unit {
         return ();
     }
     if is(borrow_mut(c),read("{")) { block(borrow_mut(c)); return (); }
-    if is(borrow_mut(c),read("let"))+is(borrow_mut(c),read("var")) {
-        advance(borrow_mut(c));
-        let name=ident(borrow_mut(c));
+    if is(borrow_mut(c),read("var"))+(next_kind(borrow_mut(c))==261) {
+        mutable :=eat(borrow_mut(c),read("var"));
+        name :=ident(borrow_mut(c));
         if eat(borrow_mut(c),read(":")) {
-            let ty=parse_type(borrow_mut(c));
+            ty :=parse_type(borrow_mut(c));
             expect(borrow_mut(c),read(";"));
-            let n=def(borrow_mut(c));
+            n :=def(borrow_mut(c));
             o(borrow_mut(c),read("0;\n"));
             bind(borrow_mut(c),name,ty,n);
             return ();
         }
-        expect(borrow_mut(c),read("="));
-        let v=expr(borrow_mut(c),0);
+        if mutable{expect(borrow_mut(c),read("="));}else{expect(borrow_mut(c),read(":="));}
+        var v =expr(borrow_mut(c),0);
         expect(borrow_mut(c),read(";"));
-        let n=def(borrow_mut(c));
+        n :=def(borrow_mut(c));
         ov(borrow_mut(c),v.t);
         o(borrow_mut(c),read(";\n"));
         bind(borrow_mut(c),name,v.ty,n);
@@ -913,7 +918,7 @@ fn stmt<a>(c:ref_mut<a,C>)->unit {
     }
     if eat(borrow_mut(c),read("while")) {
         o(borrow_mut(c),read("for(;;){\n"));
-        let v=expr(borrow_mut(c),0);
+        var v =expr(borrow_mut(c),0);
         o(borrow_mut(c),read("if(!"));
         ov(borrow_mut(c),v.t);
         o(borrow_mut(c),read(")break;\n"));
@@ -922,13 +927,13 @@ fn stmt<a>(c:ref_mut<a,C>)->unit {
         return ();
     }
     if eat(borrow_mut(c),read("for")) {
-        let name=ident(borrow_mut(c));
+        name :=ident(borrow_mut(c));
         expect(borrow_mut(c),read("in"));
-        let v=expr(borrow_mut(c),0);
-        let e=def(borrow_mut(c));
+        var v =expr(borrow_mut(c),0);
+        e :=def(borrow_mut(c));
         ov(borrow_mut(c),v.t);
         o(borrow_mut(c),read(";\n"));
-        let i=fresh(borrow_mut(c));
+        i :=fresh(borrow_mut(c));
         o(borrow_mut(c),read("for(G "));
         ov(borrow_mut(c),i);
         o(borrow_mut(c),read("=0;"));
@@ -938,35 +943,35 @@ fn stmt<a>(c:ref_mut<a,C>)->unit {
         vec_push(c.out,59);
         ov(borrow_mut(c),i);
         o(borrow_mut(c),read("++)"));
-        let mark=len(c.locals);
+        mark :=len(c.locals);
         bind(borrow_mut(c),name,0,i);
         block(borrow_mut(c));
         pop_locals(borrow_mut(c),mark);
         return ();
     }
     if eat(borrow_mut(c),read("match")) {
-        let s=expr(borrow_mut(c),0);
-        let x=deref(borrow_mut(c),s);
-        let xt=x.t;
-        let d=ty_arg(borrow_mut(c),x.ty);
-        let tag=def(borrow_mut(c));
+        s :=expr(borrow_mut(c),0);
+        x :=deref(borrow_mut(c),s);
+        xt :=x.t;
+        d :=ty_arg(borrow_mut(c),x.ty);
+        tag :=def(borrow_mut(c));
         slot(borrow_mut(c),xt,0);
         o(borrow_mut(c),read(";\n"));
         expect(borrow_mut(c),read("{"));
         while eat(borrow_mut(c),read("}"))==0 {
-            let name=ident(borrow_mut(c));
-            let k=find_field(borrow_mut(c),d,read(name));
-            let pty=field_ty(borrow_mut(c),d,k);
+            name :=ident(borrow_mut(c));
+            k :=find_field(borrow_mut(c),d,read(name));
+            pty :=field_ty(borrow_mut(c),d,k);
             o(borrow_mut(c),read("if("));
             ov(borrow_mut(c),tag);
             o(borrow_mut(c),read("=="));
             on(borrow_mut(c),k);
             o(borrow_mut(c),read("){\n"));
-            let mark=len(c.locals);
+            mark :=len(c.locals);
             if eat(borrow_mut(c),read("(")) {
                 if eat(borrow_mut(c),read("_"))==0 {
-                    let b=ident(borrow_mut(c));
-                    let n=def(borrow_mut(c));
+                    b :=ident(borrow_mut(c));
+                    n :=def(borrow_mut(c));
                     slot(borrow_mut(c),xt,1);
                     o(borrow_mut(c),read(";\n"));
                     bind(borrow_mut(c),b,pty,n);
@@ -986,7 +991,7 @@ fn stmt<a>(c:ref_mut<a,C>)->unit {
         return ();
     }
     if eat(borrow_mut(c),read("if")) {
-        let v=expr(borrow_mut(c),0);
+        var v =expr(borrow_mut(c),0);
         o(borrow_mut(c),read("if("));
         ov(borrow_mut(c),v.t);
         vec_push(c.out,41);
@@ -1009,7 +1014,7 @@ fn stmt<a>(c:ref_mut<a,C>)->unit {
     if eat(borrow_mut(c),read("write")) { statement_call(borrow_mut(c),read("rt_write"),3); return (); }
     if eat(borrow_mut(c),read("assert")) {
         expect(borrow_mut(c),read("("));
-        let v=expr(borrow_mut(c),0);
+        var v =expr(borrow_mut(c),0);
         expect(borrow_mut(c),read(")"));
         expect(borrow_mut(c),read(";"));
         o(borrow_mut(c),read("if(!"));
@@ -1018,21 +1023,23 @@ fn stmt<a>(c:ref_mut<a,C>)->unit {
         return ();
     }
     if assignment_ahead(borrow_mut(c)) {
-        let name=ident(borrow_mut(c));
-        let l=find_local(borrow_mut(c),read(name));
+        name :=ident(borrow_mut(c));
+        l :=find_local(borrow_mut(c),read(name));
         if l==0 { fail(borrow_mut(c),read("undefined assignment")); }
-        let id=local_id(borrow_mut(c),l-1);
-        let ty=local_ty(borrow_mut(c),l-1);
+        id :=local_id(borrow_mut(c),l-1);
+        ty :=local_ty(borrow_mut(c),l-1);
         var target=id;
         var through=0;
         if kind(borrow_mut(c))==46 {
-            let a=field_path(borrow_mut(c),id,ty,1);
+            a :=field_path(borrow_mut(c),id,ty,1);
             target=a.t;
             through=1;
         }
-        expect(borrow_mut(c),read("="));
-        let v=expr(borrow_mut(c),0);
+        operator :=kind(borrow_mut(c));advance(borrow_mut(c));var oldvalue=target;
+        if operator!=61{if through{oldvalue=def(borrow_mut(c));o(borrow_mut(c),read("*(G*)"));ov(borrow_mut(c),target);o(borrow_mut(c),read(";\n"));}else{oldvalue=def(borrow_mut(c));ov(borrow_mut(c),id);o(borrow_mut(c),read(";\n"));}}
+        var v =expr(borrow_mut(c),0);
         expect(borrow_mut(c),read(";"));
+        if operator!=61{value :=binary(borrow_mut(c),compound_operator(operator),oldvalue,v.t);v=val(value,0);}
         if through { o(borrow_mut(c),read("*(G*)")); }
         ov(borrow_mut(c),target);
         vec_push(c.out,61);
@@ -1040,7 +1047,7 @@ fn stmt<a>(c:ref_mut<a,C>)->unit {
         o(borrow_mut(c),read(";\n"));
         return ();
     }
-    let v=expr(borrow_mut(c),0);
+    var v =expr(borrow_mut(c),0);
     expect(borrow_mut(c),read(";"));
     return ();
 }
@@ -1062,7 +1069,7 @@ pub fn main()->num {
     host_fn(borrow_mut(c),read("write_file"),0);
     host_fn(borrow_mut(c),read("print"),1);
     host_fn(borrow_mut(c),read("command"),0);
-    let n=host::argc();
+    n :=host::argc();
     assert(2<n);
     for pass in 3 {
         if pass==1 { o(borrow_mut(c),read("#include \"grail_rt.c\"\n")); }
@@ -1074,12 +1081,12 @@ pub fn main()->num {
             i=i+1;
         }
     }
-    let e=c.entry;
+    e :=c.entry;
     if e==0 { fail(borrow_mut(c),read("no public entry function with at most one parameter")); }
-    let f=vec_get(c.funcs,e-1);
-    let m=copy_bytes(read(f.module));
-    let name=copy_bytes(read(f.name));
-    let count=f.count;
+    f :=vec_get(c.funcs,e-1);
+    m :=copy_bytes(read(f.module));
+    name :=copy_bytes(read(f.name));
+    count :=f.count;
     o(borrow_mut(c),read("int main(int argc,char**argv){rt_argc=argc;rt_argv=argv;"));
     if count==1 { o(borrow_mut(c),read("if(argc!=2)return 2;")); }
     o(borrow_mut(c),read("printf(\"%llu\\n\",(unsigned long long)"));
@@ -1087,8 +1094,8 @@ pub fn main()->num {
     if count==1 { o(borrow_mut(c),read("(rt_view(f_host_arg(1))));return 0;}\n")); } else {
         o(borrow_mut(c),read("());return 0;}\n"));
     }
-    let out=bytes();
+    var out =bytes();
     for i in len(c.out) { push(out,load(vec_get(c.out,i))); }
-    let path=host::arg(1);
+    path :=host::arg(1);
     return host::write_file(read(path),read(out));
 }

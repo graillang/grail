@@ -163,9 +163,9 @@ fn dead_scalar_facts_do_not_create_values_or_erase_register_types() {
 }
 #[test]
 fn thousands_of_dead_scalars_cannot_hide_a_live_loan_or_change_scope_cleanup() {
-    let mut prefix = "fn f()->num{let b=bytes();push(b,1);let p=read(b);".to_string();
+    let mut prefix = "fn f()->num{var b =bytes();push(b,1);p :=read(b);".to_string();
     for i in 0..2000 {
-        prefix.push_str(&format!("let n{i}={i};"));
+        prefix.push_str(&format!("n{i}:={i};"));
     }
     assert!(
         source::compile(
@@ -176,7 +176,7 @@ fn thousands_of_dead_scalars_cannot_hide_a_live_loan_or_change_scope_cleanup() {
     );
     assert!(
         source::compile(
-            &format!("{prefix}let n=len(p);push(b,2);return n+len(b);}}"),
+            &format!("{prefix}n :=len(p);push(b,2);return n+len(b);}}"),
             BTreeMap::new()
         )
         .is_ok()

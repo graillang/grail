@@ -73,7 +73,7 @@ fn returned_cloned_and_loop_local_owners_are_freed_once_at_scope_exit() {
     )
     .unwrap();
     let scope = dir.join("scope.grl");
-    fs::write(&scope,"use live; fn scope()->num {let a=bytes();push(a,1);let b=moved(copy_bytes(a));assert(live()==2);for i in 20 {let c=bytes();push(c,i);assert(live()==3);}assert(live()==2);if 1 {let d=bytes();push(d,4);assert(live()==3);}assert(live()==2);{let b=bytes();push(b,9);assert(live()==3);}assert(live()==2);var j=0;while j<len(copy_bytes(b)) {assert(live()==2);j=j+1;}assert(j==1);assert(live()==2);let b=copy_bytes(b);assert(live()==3);assert(len(b)==1);return 0;}fn moved(b:bytes)->bytes{let s=\"x\";assert(len(s)==1);return b;}").unwrap();
+    fs::write(&scope,"use live; fn scope()->num {var a =bytes();push(a,1);var b =moved(copy_bytes(a));assert(live()==2);for i in 20 {var c =bytes();push(c,i);assert(live()==3);}assert(live()==2);if 1 {var d =bytes();push(d,4);assert(live()==3);}assert(live()==2);{var b =bytes();push(b,9);assert(live()==3);}assert(live()==2);var j=0;while j<len(copy_bytes(b)) {assert(live()==2);j=j+1;}assert(j==1);assert(live()==2);var b =copy_bytes(b);assert(live()==3);assert(len(b)==1);return 0;}fn moved(b:bytes)->bytes{s :=\"x\";assert(len(s)==1);return b;}").unwrap();
     let p = Command::new(binary)
         .args([
             "compile",

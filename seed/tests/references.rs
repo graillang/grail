@@ -162,18 +162,18 @@ fn typed_parameter_reborrows_freeze_the_parent_and_local_addresses_cannot_escape
 
 #[test]
 fn field_move_relocates_owned_storage_without_relocating_external_captures() {
-    let text = "module f;struct R{name:string,other:string}pub fn run()->num{let r=R{name:\"name\",other:\"other\"};let name=r.name;let view=read(name);drop(r);return len(view);}";
+    let text = "module f;struct R{name:string,other:string}pub fn run()->num{r :=R{name:\"name\",other:\"other\"};name :=r.name;view :=read(name);drop(r);return len(view);}";
     assert!(grail_seed::source::compile(text, BTreeMap::new()).is_ok());
 }
 #[test]
 fn addressed_heap_fields_cannot_overlap_exclusive_data_views() {
     for body in [
-        "let p=mut(r.data);let q=borrow(r.data);let s=read(q);write(p,0,8);return len(s);",
-        "let p=mut(r.data);let q=borrow(r);let s=read(q.data);write(p,0,8);return len(s);",
-        "let p=borrow_mut(r.data);let s=read(p);push(p,8);return len(s);",
+        "p :=mut(r.data);q :=borrow(r.data);s :=read(q);write(p,0,8);return len(s);",
+        "p :=mut(r.data);q :=borrow(r);s :=read(q.data);write(p,0,8);return len(s);",
+        "p :=borrow_mut(r.data);s :=read(p);push(p,8);return len(s);",
     ] {
         let text = format!(
-            "module f;struct R{{data:bytes}}pub fn run()->num{{let b=bytes();push(b,7);let r=R{{data:b}};{body}}}"
+            "module f;struct R{{data:bytes}}pub fn run()->num{{var b =bytes();push(b,7);r :=R{{data:b}};{body}}}"
         );
         assert!(
             grail_seed::source::compile(&text, BTreeMap::new()).is_err(),
@@ -185,8 +185,8 @@ fn addressed_heap_fields_cannot_overlap_exclusive_data_views() {
 #[test]
 fn generic_storage_borrows_are_universal_but_do_not_permit_moving_borrowed_values() {
     for text in [
-        "module f;pub fn inspect<type T>(v:T)->num{let p=borrow_mut(v);return 0;}",
-        "module f;struct Phantom<type T>{value:num}pub fn inspect<a,type T>(v:T)->num{let p=Phantom<ref_mut<a,T>>{value:0};return 0;}",
+        "module f;pub fn inspect<type T>(v:T)->num{var local=v;p :=borrow_mut(local);return 0;}",
+        "module f;struct Phantom<type T>{value:num}pub fn inspect<a,type T>(v:T)->num{p :=Phantom<ref_mut<a,T>>{value:0};return 0;}",
         "module f;pub fn replace<a,type T>(slot:ref_mut<a,T>,value:T)->T{return exchange(slot,value);}",
         "module f;struct C<a,type T>{slot:ref_mut<a,T>}pub fn inspect<a>(v:C<a,read<a>>)->num{return 0;}",
     ] {
@@ -195,6 +195,6 @@ fn generic_storage_borrows_are_universal_but_do_not_permit_moving_borrowed_value
             "{text}"
         );
     }
-    let bad = "module f;fn hidden<a,type T>(slot:ref_mut<a,T>,v:T)->num{return 0;}pub fn bad<type T>(v:T)->num{let p=borrow_mut(v);return hidden(p,v);}";
+    let bad = "module f;fn hidden<a,type T>(slot:ref_mut<a,T>,v:T)->num{return 0;}pub fn bad<type T>(v:T)->num{p :=borrow_mut(v);return hidden(p,v);}";
     assert!(grail_seed::source::compile(bad, BTreeMap::new()).is_err());
 }

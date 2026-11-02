@@ -21,8 +21,9 @@ the checked-in bootstrap. Example commands are run from the repository root.
 The book builds as static HTML: no account, CDN, web service, or network is needed to read it.
 Use search, the arrow keys, or the previous/next links. Code blocks have copy buttons.
 
-Selected examples include optional Rust comparisons, collapsed by default. Expand **Compare Rust**
-to see aligned code and output, or use **Show Rust** for every comparison on the current page.
+Selected examples show Rust alongside Grail by default. **Hide Rust** applies across chapters;
+**Show Rust** restores the comparisons. You can also collapse an individual example. Light mode
+is the default, and an explicit theme choice is remembered.
 Comparison notes distinguish actual differences from capabilities both languages share.
 
 **Prerequisites:** Bun 1.4 or newer and `just` for this book. Running Grail examples additionally

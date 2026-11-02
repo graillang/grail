@@ -3,7 +3,7 @@
   const escape = text => text.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   let savedTheme;
   try { savedTheme = localStorage.getItem('grail-book-theme'); } catch {}
-  document.documentElement.dataset.theme = savedTheme || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+  document.documentElement.dataset.theme = savedTheme || 'light';
   $('#theme-toggle').addEventListener('click', () => {
     const theme = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
     document.documentElement.dataset.theme = theme;
@@ -28,7 +28,7 @@
         html += escape(raw.slice(end, match.index));
         const value = match[0];
         const kind = value.startsWith('//') ? 'comment' : value.startsWith('"') ? 'string' : /^\d/.test(value) ? 'number' : 'keyword';
-        html += `<span class="tok-${kind}">${escape(value)}</span>`;
+        html += value === "let" && code.classList.contains("language-grl") ? escape(value) : `<span class="tok-${kind}">${escape(value)}</span>`;
         end = match.index + value.length;
       }
       code.innerHTML = html + escape(raw.slice(end));
@@ -51,10 +51,12 @@
     pre.append(button);
   });
   const comparisons = [...document.querySelectorAll('.rust-column')];
+  let savedRust;try {savedRust=localStorage.getItem('grail-book-rust');} catch {}
+  if(savedRust==='hidden') comparisons.forEach(panel=>{panel.open=false;});
   const rustToggle = $('#rust-toggle');
   rustToggle.hidden = comparisons.length === 0;
   const updateRustToggle = () => { rustToggle.textContent = comparisons.every(panel => panel.open) ? 'Hide Rust' : 'Show Rust'; };
-  rustToggle.addEventListener('click', () => { const open = !comparisons.every(panel => panel.open); comparisons.forEach(panel => { panel.open = open; }); updateRustToggle(); });
+  rustToggle.addEventListener('click', () => { const open = !comparisons.every(panel => panel.open); comparisons.forEach(panel => { panel.open = open; }); try {localStorage.setItem('grail-book-rust',open?'shown':'hidden');} catch {} updateRustToggle(); });
   const alignComparisons = () => {
     for (const panel of comparisons) {
       const workspace = panel.closest('.example-workspace');
@@ -67,6 +69,7 @@
   };
   comparisons.forEach(panel => panel.addEventListener('toggle', () => {updateRustToggle();alignComparisons();}));
   window.addEventListener('resize', alignComparisons);
+  updateRustToggle();alignComparisons();
 
   const search = $('#search'), results = $('#search-results'), status = $('#search-status');
   search.addEventListener('input', () => {

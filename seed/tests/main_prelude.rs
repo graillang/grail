@@ -7,10 +7,10 @@ fn minimal_main_and_borrowed_output_check_without_explicit_imports() {
         "fn main(){println(\"Hello, world!\");}",
         "module quiet;fn main(){}",
         "fn main(){println();print(7);println(8);}",
-        "fn main(){let s=\"kept\";print(s);println(s);}",
-        "fn main(){let b=bytes();push(b,65);println(b);push(b,66);println(b);}",
-        "fn main(){let b=bytes();push(b,65);let m=mut(b);print(m);write(m,0,66);println(m);}",
-        "fn helper(flag:num){let b=bytes();if flag{return ();}println(len(b));}fn main(){helper(0);}",
+        "fn main(){s :=\"kept\";print(s);println(s);}",
+        "fn main(){var b =bytes();push(b,65);println(b);push(b,66);println(b);}",
+        "fn main(){var b =bytes();push(b,65);m :=mut(b);print(m);write(m,0,66);println(m);}",
+        "fn helper(flag:num){b :=bytes();if flag{return ();}println(len(b));}fn main(){helper(0);}",
         "fn helper(flag:num){if flag{return ();}else{return ();}}fn main(){helper(0);}",
     ] {
         let checked =
@@ -30,8 +30,8 @@ fn named_main_takes_priority_over_public_helpers() {
 #[test]
 fn output_cannot_launder_moves_or_exclusive_access() {
     for text in [
-        "fn main(){let b=bytes();let moved=b;println(b);}",
-        "fn main(){let b=bytes();let m=mut(b);println(b);write(m,0,1);}",
+        "fn main(){b :=bytes();moved :=b;println(b);}",
+        "fn main(){var b =bytes();m :=mut(b);println(b);write(m,0,1);}",
         "fn main(){println(vec<num>());}",
         "fn main(){print();}",
         "fn main<type T>(){}",

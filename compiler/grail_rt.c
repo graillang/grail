@@ -41,6 +41,8 @@ static G rt_lit(const char *s, G n) { G r = rt_new(); for (G i = 0; i < n; i++) 
 static G rt_rec(G n) { return (G)rt_alloc(n * sizeof(G)); }
 static G rt_enum(G tag, G payload) { G *e = rt_alloc(2 * sizeof(G)); e[0] = tag; e[1] = payload; return (G)e; }
 static G rt_xchg(G r, G v) { G *p = (G *)r, o = *p; *p = v; return o; }
+static G rt_div(G a,G b){if(!b)abort();return a/b;}
+static G rt_pow(G a,G b){G r=1;while(b){if(b&1)r*=a;b>>=1;a*=a;}return r;}
 static G rt_rem(G a, G b) { if (!b) abort(); return a % b; }
 static char *rt_cstr(G s) {
     Seq *q = (Seq *)s; char *c = rt_alloc(q->n + 1);

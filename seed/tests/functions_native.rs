@@ -86,7 +86,7 @@ fn recursive_modules_hide_helpers_and_allow_repeated_private_names() {
     let heap = dir.join("heap.grl");
     fs::write(
         &heap,
-        "fn heap_entry()->num{return hidden();}fn hidden()->num{let s=\"x\";return len(s);}",
+        "fn heap_entry()->num{return hidden();}fn hidden()->num{s :=\"x\";return len(s);}",
     )
     .unwrap();
     compile(&dir, &heap, true);
@@ -95,7 +95,7 @@ fn recursive_modules_hide_helpers_and_allow_repeated_private_names() {
     let api = fs::read(dir.join("left.api")).unwrap();
     fs::write(
         &provider,
-        "fn left()->num{return 0;}fn bad()->num{let b=bytes();drop(b);return len(b);}",
+        "fn left()->num{return 0;}fn bad()->num{b :=bytes();drop(b);return len(b);}",
     )
     .unwrap();
     let p = Command::new(env!("CARGO_BIN_EXE_grail-seed"))

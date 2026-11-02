@@ -1,8 +1,9 @@
 # Grail by Example
 
 An offline, example-first introduction to the **implemented native language**: 20 chapters,
-30 checked Grail programs, and 24 optional Rust comparisons. Rust is collapsed by default;
-expanding it aligns code and output beside Grail on wide screens, with a comparison note below.
+32 checked Grail programs, and 26 optional Rust comparisons. Rust comparisons are on by default,
+with aligned code and output beside Grail on wide screens and a note below. The global toggle
+remembers an explicit choice across chapters. Light mode is the default; a chosen theme is saved.
 Narrow screens stack the two versions. Search, copy buttons, theme switching and keyboard
 navigation work locally without a server or CDN.
 

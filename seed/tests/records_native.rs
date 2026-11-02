@@ -42,7 +42,7 @@ fn record_abi_hidden_sources_partial_moves_and_allocator_balance() {
     success(compile(&dir, &provider, false, &backend));
     fs::remove_file(&provider).unwrap();
     let client = dir.join("client.grl");
-    fs::write(&client,"use tokens;fn client<a>(p:read<a>)->num{let t=tokens::carry(tokens::make(read(p)));let name=t.name;let n=len(t.span);let span=read(t.span);let offset=t.offset;drop(t);return len(name)+n+len(span)+offset;}").unwrap();
+    fs::write(&client,"use tokens;fn client<a>(p:read<a>)->num{t :=tokens::carry(tokens::make(read(p)));name :=t.name;n :=len(t.span);span :=read(t.span);offset :=t.offset;drop(t);return len(name)+n+len(span)+offset;}").unwrap();
     success(compile(&dir, &client, true, "clang"));
     assert_eq!(run(Command::new(dir.join("client")).arg("abc")), b"16\n");
     // Rebuild the provider with clang before the selected caller backend, covering the reverse ABI.
@@ -74,7 +74,7 @@ fn record_abi_hidden_sources_partial_moves_and_allocator_balance() {
     });
     fs::write(dir.join("live.api"), live.encode().unwrap()).unwrap();
     let audit = dir.join("audit.grl");
-    fs::write(&audit,"module audit;use live;struct Inner{name:string}struct Token<a>{inner:Inner,span:read<a>}pub fn run()->num{let source=bytes();push(source,7);let t=make(read(source));assert(live()==2);let t=carry(t);assert(live()==2);for i in 10 {let local=make(read(source));assert(live()==3);assert(len(local.span)==1);}assert(live()==2);let name=t.inner.name;let span=read(t.span);drop(t);assert(live()==2);assert(at(span,0)==7);drop(name);assert(live()==1);return len(source);}fn make<a>(p:read<a>)->Token<a>{return Token{inner:Inner{name:\"owned\"},span:p};}fn carry<a>(t:Token<a>)->Token<a>{return t;}").unwrap();
+    fs::write(&audit,"module audit;use live;struct Inner{name:string}struct Token<a>{inner:Inner,span:read<a>}pub fn run()->num{var source =bytes();push(source,7);t :=make(read(source));assert(live()==2);t :=carry(t);assert(live()==2);for i in 10 {local :=make(read(source));assert(live()==3);assert(len(local.span)==1);}assert(live()==2);name :=t.inner.name;span :=read(t.span);drop(t);assert(live()==2);assert(at(span,0)==7);drop(name);assert(live()==1);return len(source);}fn make<a>(p:read<a>)->Token<a>{return Token{inner:Inner{name:\"owned\"},span:p};}fn carry<a>(t:Token<a>)->Token<a>{return t;}").unwrap();
     success(compile(&dir, &audit, false, &backend));
     let header =
         grail_seed::module::Interface::decode(&fs::read_to_string(dir.join("audit.api")).unwrap())
@@ -101,7 +101,7 @@ fn record_abi_hidden_sources_partial_moves_and_allocator_balance() {
         .arg(dir.join("audited")));
     run(&mut Command::new(dir.join("audited")));
     let pair = dir.join("pairs.grl");
-    fs::write(&pair,"module pairs;struct Pair<a>{left:mut<a>,right:mut<a>}pub fn run()->num{let a=bytes();push(a,1);let b=bytes();push(b,2);let p=pair(mut(a),mut(b));let l=mut(p.left);let r=mut(p.right);write(l,0,3);write(r,0,4);push(a,5);push(b,6);return at(read(a),0)+at(read(b),0)+len(a)+len(b);}fn pair<a>(x:mut<a>,y:mut<a>)->Pair<a>{return Pair{left:x,right:y};}").unwrap();
+    fs::write(&pair,"module pairs;struct Pair<a>{left:mut<a>,right:mut<a>}pub fn run()->num{var a =bytes();push(a,1);var b =bytes();push(b,2);var p =pair(mut(a),mut(b));l :=mut(p.left);r :=mut(p.right);write(l,0,3);write(r,0,4);push(a,5);push(b,6);return at(read(a),0)+at(read(b),0)+len(a)+len(b);}fn pair<a>(x:mut<a>,y:mut<a>)->Pair<a>{return Pair{left:x,right:y};}").unwrap();
     success(compile(&dir, &pair, true, &backend));
     assert_eq!(run(&mut Command::new(dir.join("pairs"))), b"11\n");
     fs::remove_dir_all(dir).unwrap();

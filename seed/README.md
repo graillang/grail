@@ -35,6 +35,19 @@ seed/target/debug/grail-seed build FILE.grl OUT OUT
 The direct native route used by `just book-run` needs no C host artifact. Older non-main numeric
 entry fixtures retain their printed-result test protocol.
 
+## Declarations and numeric operators
+
+`name := value` declares an immutable binding. `var name = value` declares a mutable binding;
+`=` only reassigns an existing mutable binding. `let` is no longer a declaration keyword.
+Owned storage mutation and taking mutable access require `var`. A fixed binding carrying an
+explicit mutable reference/view may still use that capability. By-value function parameters
+are fixed; move an owner into a `var` local before mutating it, or accept a mutable reference.
+
+Numeric operators include `/`, `%`, right-associative `**`, and `+=`, `-=`, `*=`, `/=`, `%=` and
+`**=`. Powers wrap modulo 2⁶⁴, including `0 ** 0 == 1`. Division/remainder by zero abort.
+`^` remains XOR. Compound targets must be initialized numeric storage, held valid through
+right-hand-side evaluation; conflicting writes during that evaluation are rejected.
+
 ## Supported semantics
 
 - Owned local byte buffers and growable heap byte vectors; affine read/write views and carriers.
@@ -153,7 +166,7 @@ seed/.work/while/while_sum 123  # 150
 
 ## Lexical binding scopes
 
-`let`/`var` may shadow an earlier binding, including a parameter or loop index. The initializer
+`:=`/`var` declarations may shadow an earlier binding, including a parameter or loop index. The initializer
 still sees the old binding; each declaration creates a distinct register/storage identity. Inner
 bindings leave the name environment at `}`. Duplicate parameter names remain errors.
 
@@ -171,7 +184,7 @@ owners, moved/dropped outer owners, name restoration, and loans surviving name s
 
 User-function arguments evaluate left-to-right. Each numeric argument is copied and each affine
 argument is moved to a fresh value **before** the next argument evaluates. Thus `take(b,len(b))`
-is invalid when `take` consumes `b`; compute `let n=len(b);` first and call `take(b,n)`. Explicit
+is invalid when `take` consumes `b`; compute `n := len(b);` first and call `take(b,n)`. Explicit
 readonly reborrows such as `take(read(p),len(p))` retain `p` when the types permit them.
 Builtin storage operations (`len`, `read`, `copy_bytes`, etc.) use their documented borrowing/place
 rules; they do not consume an owner simply because it appears as an operand.

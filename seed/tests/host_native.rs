@@ -24,7 +24,8 @@ fn trusted_interface_is_declared_and_compiler_choice_explicit() {
     assert!(api.generics.is_empty());
     assert!(
         host::publish(Path::new("unused-host-output"), "tcc")
-            .err().unwrap()
+            .err()
+            .unwrap()
             .contains("clang")
     );
 }
@@ -54,27 +55,27 @@ fn native_io_argv_command_and_ownership() {
     let source = r#"module probe;use host;
         pub fn run()->num {
             assert(host::argc()==4);
-            let path=host::arg(1);let destination=host::arg(2);let extra=host::arg(3);
+            path :=host::arg(1);destination :=host::arg(2);extra :=host::arg(3);
             assert(len(extra)==0);
-            let input=host::read_file(read(path));
+            input :=host::read_file(read(path));
             assert(len(input)==5);assert(at(read(input),0)==0);assert(at(read(input),4)==255);
             assert(host::write_file(read(destination),read(input))==0);
             assert(host::write_file(read(path),read(input))==0);
-            let absent="/no/such/grail-host-test-dir/file";
+            absent :="/no/such/grail-host-test-dir/file";
             assert(host::write_file(read(absent),read(input))!=0);
-            let bad=bytes();push(bad,0);
+            var bad =bytes();push(bad,0);
             assert(host::write_file(read(bad),read(input))!=0);
-            let full="/dev/full";
+            full :="/dev/full";
             assert(host::write_file(read(full),read(input))!=0);
-            let args=vec<bytes>();let yes="/bin/true";vec_push(args,copy_bytes(yes));
+            var args =vec<bytes>();yes :="/bin/true";vec_push(args,copy_bytes(yes));
             assert(host::command(args)==0);
-            let args=vec<bytes>();let no="/bin/false";vec_push(args,copy_bytes(no));
+            var args =vec<bytes>();no :="/bin/false";vec_push(args,copy_bytes(no));
             assert(host::command(args)==1);
-            let args=vec<bytes>();let missing="/no/such/grail-executable";vec_push(args,copy_bytes(missing));
+            var args =vec<bytes>();missing :="/no/such/grail-executable";vec_push(args,copy_bytes(missing));
             assert(host::command(args)==127);
-            let args=vec<bytes>();assert(host::command(args)!=0);
-            let args=vec<bytes>();vec_push(args,bad);assert(host::command(args)!=0);
-            let args=vec<bytes>();let cmp="/usr/bin/cmp";vec_push(args,copy_bytes(cmp));
+            var args =vec<bytes>();assert(host::command(args)!=0);
+            var args =vec<bytes>();vec_push(args,bad);assert(host::command(args)!=0);
+            var args =vec<bytes>();cmp :="/usr/bin/cmp";vec_push(args,copy_bytes(cmp));
             vec_push(args,copy_bytes(path));vec_push(args,copy_bytes(destination));
             assert(host::command(args)==0);
             host::print(read(input));return 19;

@@ -7,11 +7,11 @@ fn ok(s: &str) -> bool {
 fn generic_layouts_substitute_nested_owned_and_captured_payloads() {
     for s in [
         "module f;enum R<type T,type E>{Ok(T),Err(E)}pub fn run()->R<num,string>{return R::Ok(3);}",
-        "module f;struct Pair<type T,type U>{first:T,second:U}pub fn run()->num{let p=Pair<num,string>{first:3,second:\"name\"};let q=Pair<string,num>{first:\"q\",second:4};return p.first+len(p.second)+len(q.first)+q.second;}",
+        "module f;struct Pair<type T,type U>{first:T,second:U}pub fn run()->num{p :=Pair<num,string>{first:3,second:\"name\"};q :=Pair<string,num>{first:\"q\",second:4};return p.first+len(p.second)+len(q.first)+q.second;}",
         "module f;struct Token<a>{span:read<a>,name:string}enum R<type T,type E>{Ok(T),Err(E)}pub fn parse<a>(p:read<a>)->R<Token<a>,string>{return R::Ok(Token{span:p,name:\"n\"});}",
-        "module f;enum R<type T,type E>{Ok(T),Err(E)}pub fn change(r:R<num,string>)->R<string,string>{let n=r?;return R::Ok(\"n\");}",
-        "module f;struct Phantom<type T>{n:num}struct A{p:Phantom<A>}pub fn run()->num{let p=Phantom<A>{n:7};let a=A{p:p};return a.p.n;}",
-        "module f;struct Wrap<type T>{v:T}enum O<type T>{None,Some(T)}pub fn run()->num{let x=O<Wrap<string>>::Some(Wrap<string>{v:\"abc\"});let w=x!;return len(w.v);}",
+        "module f;enum R<type T,type E>{Ok(T),Err(E)}pub fn change(r:R<num,string>)->R<string,string>{n :=r?;return R::Ok(\"n\");}",
+        "module f;struct Phantom<type T>{n:num}struct A{p:Phantom<A>}pub fn run()->num{p :=Phantom<A>{n:7};a :=A{p:p};return a.p.n;}",
+        "module f;struct Wrap<type T>{v:T}enum O<type T>{None,Some(T)}pub fn run()->num{x :=O<Wrap<string>>::Some(Wrap<string>{v:\"abc\"});w :=x!;return len(w.v);}",
     ] {
         let p = source::compile(s, BTreeMap::new()).unwrap_or_else(|e| panic!("{s}\n{e}"));
         emit::module_c(&p).unwrap();
@@ -22,11 +22,11 @@ fn generic_layouts_substitute_nested_owned_and_captured_payloads() {
 #[test]
 fn generic_parameters_do_not_erase_shapes_modes_or_return_origins() {
     for s in [
-        "module f;struct R<type T>{v:T}pub fn run()->num{let r=R<num>{v:\"bad\"};return 0;}",
+        "module f;struct R<type T>{v:T}pub fn run()->num{r :=R<num>{v:\"bad\"};return 0;}",
         "module f;struct R<type T>{v:T}pub fn run(r:R<num,string>)->num{return 0;}",
         "module f;struct R<type T>{v:T}pub fn run(r:R)->num{return 0;}",
         "module f;struct R<type T>{v:U}pub fn run()->num{return 0;}",
-        "module f;struct R<type T>{v:T}pub fn bad<a>(p:read<a>)->R<read<a>>{let b=bytes();return R<read<a>>{v:read(b)};}",
+        "module f;struct R<type T>{v:T}pub fn bad<a>(p:read<a>)->R<read<a>>{b :=bytes();return R<read<a>>{v:read(b)};}",
         "module f;struct R<type T>{v:T}pub fn bad<a>(p:read<a>)->R<mut<a>>{return R<mut<a>>{v:p};}",
         "module f;struct Wrap<type T>{v:T}struct R<type T>{next:R<Wrap<T>>}pub fn run()->num{return 0;}",
         "module f;struct Wrap<type T>{v:T}struct R{next:Wrap<R>}pub fn run()->num{return 0;}",
@@ -43,7 +43,7 @@ fn public_type_only_surfaces_are_closed_and_independently_decodable() {
     assert!(p.header().exports.is_empty());
     assert!(p.header().layouts.contains_key("types::Hidden"));
     let interface = Interface::decode(&p.interface()).unwrap();
-    let c=source::compile("module client;use types;pub fn run()->num{let r=types::Result<types::Box<num>,string>::Ok(types::Box<num>{value:7});let b=r!;return b.value;}",BTreeMap::from([("types".into(),interface.clone())])).unwrap();
+    let c=source::compile("module client;use types;pub fn run()->num{r :=types::Result<types::Box<num>,string>::Ok(types::Box<num>{value:7});b :=r!;return b.value;}",BTreeMap::from([("types".into(),interface.clone())])).unwrap();
     assert!(emit::module_c(&c).unwrap().contains("t_g_"));
     assert!(
         source::compile(

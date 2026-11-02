@@ -7,25 +7,23 @@ fn ok(s: &str) -> bool {
 #[test]
 fn growth_requires_all_views_to_end_but_last_use_is_sufficient() {
     assert!(ok(
-        "fn f()->num {let b=bytes();push(b,7);let v=read(b);let n=at(v,0);push(b,8);return n+len(b);}"
+        "fn f()->num {var b =bytes();push(b,7);v :=read(b);n :=at(v,0);push(b,8);return n+len(b);}"
     ));
     assert!(!ok(
-        "fn f()->num {let b=bytes();push(b,7);let v=read(b);push(b,8);return at(v,0);}"
+        "fn f()->num {var b =bytes();push(b,7);v :=read(b);push(b,8);return at(v,0);}"
     ));
     assert!(!ok(
-        "fn f()->num {let b=bytes();let v=read(b);drop(b);return len(v);}"
+        "fn f()->num {b :=bytes();v :=read(b);drop(b);return len(v);}"
     ));
     assert!(!ok(
-        "fn f()->num {let b=bytes();let v=mut(b);let n=len(b);return n+len(v);}"
+        "fn f()->num {var b =bytes();v :=mut(b);n :=len(b);return n+len(v);}"
     ));
 }
 #[test]
 fn moving_or_returning_an_owner_cannot_leave_dangling_views() {
     assert!(ok("fn f(b:bytes)->bytes {return b;}"));
     assert!(!ok("fn f<a>(b:bytes,p:read<a>)->read<a> {return read(b);}"));
-    assert!(!ok(
-        "fn f()->num {let b=bytes();let c=b;return len(b)+len(c);}"
-    ));
+    assert!(!ok("fn f()->num {b :=bytes();c :=b;return len(b)+len(c);}"));
     let take = Sig {
         name: "take".into(),
         params: vec![Ty::Bytes],
@@ -33,7 +31,7 @@ fn moving_or_returning_an_owner_cannot_leave_dangling_views() {
     };
     assert!(
         source::compile(
-            "use take; fn f()->num {let b=bytes();push(b,7);let c=take(b);return len(c);}",
+            "use take; fn f()->num {var b =bytes();push(b,7);c :=take(b);return len(c);}",
             BTreeMap::from([(
                 "take".into(),
                 grail_seed::module::Interface::single(take.clone())
@@ -41,24 +39,21 @@ fn moving_or_returning_an_owner_cannot_leave_dangling_views() {
         )
         .is_ok()
     );
-    assert!(source::compile("use take; fn f()->num {let b=bytes();push(b,7);let v=read(b);let c=take(b);return len(c)+at(v,0);}",BTreeMap::from([("take".into(),grail_seed::module::Interface::single(take))])).is_err());
+    assert!(source::compile("use take; fn f()->num {var b =bytes();push(b,7);v :=read(b);c :=take(b);return len(c)+at(v,0);}",BTreeMap::from([("take".into(),grail_seed::module::Interface::single(take))])).is_err());
 }
 #[test]
 fn lexical_heap_cleanup_composes_with_loops_and_branches() {
     assert!(ok(
-        "fn f()->num {for i in 4 {let b=bytes();push(b,i);} if 1 {let b=bytes();push(b,9);}return 0;}"
+        "fn f()->num {for i in 4 {var b =bytes();push(b,i);} if 1 {var b =bytes();push(b,9);}return 0;}"
     ));
     assert!(ok(
-        "fn f()->num {let b=bytes();if 1 {push(b,9);}for i in 4 {push(b,i);}return len(b);}"
+        "fn f()->num {var b =bytes();if 1 {push(b,9);}for i in 4 {push(b,i);}return len(b);}"
     ));
     assert!(ok(
-        "fn f()->num {let b=bytes();let v=read(b);let c=copy_bytes(v);push(c,1);return len(c);}"
+        "fn f()->num {b :=bytes();v :=read(b);var c =copy_bytes(v);push(c,1);return len(c);}"
     ));
-    let checked = source::compile(
-        "fn f()->num {let b=bytes();return len(b);}",
-        BTreeMap::new(),
-    )
-    .unwrap();
+    let checked =
+        source::compile("fn f()->num {b :=bytes();return len(b);}", BTreeMap::new()).unwrap();
     assert!(
         grail_seed::emit::module_llvm(&checked).is_err(),
         "unsupported heap layout must never be silently emitted as a view"

@@ -2,11 +2,21 @@
 
 ## Unreleased
 
+- Replace `let` with immutable `:=` declarations and require `var` for owned-storage mutation
+  and mutable borrowing. Fixed explicit mutable capabilities may still write their referents.
+  Migrate the maintained Grail compilers, source fixtures and book; regenerate both bootstraps.
+- Add unsigned division, wrapping right-associative `**`, and numeric compound assignments
+  `+=`, `-=`, `*=`, `/=`, `%=` and `**=` across native, C and LLVM lowering. Keep `^` as XOR;
+  guard zero divisors and retain target capabilities through right-hand-side evaluation.
+- Update the book to 32 checked Grail examples and 26 Rust comparisons. Default to light mode
+  and globally visible Rust, remember explicit reader choices, remove decorative labels, and
+  fix the comparison control wrapping across the header corner. Use plain truthy assertions.
+
 - Add a quiet named `main`, optional unit result/final return and optional entry-file module,
   plus `print`/`println` with checked call-local borrowing and numeric output. Numeric main results
   set process status rather than being printed. Preserve the live numeric bootstrap test protocol;
   verify seed/native parity, owner reuse after printing and implicit-return cleanup.
-- Add Grail by Example: 20 chapters, 30 verified Grail examples and 24 collapsible Rust comparisons,
+- Add Grail by Example: 20 chapters, 32 verified Grail examples and 26 collapsible Rust comparisons,
   with aligned code/output workspaces, offline search, copy buttons, themes and mobile navigation.
   `just book` builds and opens the static book; companion recipes verify examples and tooling.
 

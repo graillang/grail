@@ -45,7 +45,7 @@ fn republish(dir: &Path, snapshot: &artifact::Snapshot) {
     )
     .unwrap();
 }
-const WORKLOAD: &str = r#"module workload;use core;use parse;pub fn run<a>(input:read<a>)->num{let empty=bytes();let zero=slice(read(empty),0,0);let copied=copy_bytes(zero);let text=text(read(copied));let pair=core::Pair<string,string>{first:text,second:""};assert(len(pair.first)==0);let v=bytes();for i in 257{push(v,i);}let owner=carry(v);let view=read(owner);var total=0;for i in len(view){total=total+at(view,i);}let result=parse::parse(input);match result{Ok(token)=>{return total+token.value+len(token.name)+len(token.span);},Err(error)=>{return total+len(error);}}}fn carry(b:bytes)->bytes{return b;}"#;
+const WORKLOAD: &str = r#"module workload;use core;use parse;pub fn run<a>(input:read<a>)->num{empty :=bytes();zero :=slice(read(empty),0,0);copied :=copy_bytes(zero);text :=text(read(copied));pair :=core::Pair<string,string>{first:text,second:""};assert(len(pair.first)==0);var v =bytes();for i in 257{push(v,i);}owner :=carry(v);view :=read(owner);var total=0;for i in len(view){total=total+at(view,i);}result :=parse::parse(input);match result{Ok(token)=>{return total+token.value+len(token.name)+len(token.span);},Err(error)=>{return total+len(error);}}}fn carry(b:bytes)->bytes{return b;}"#;
 #[test]
 #[ignore = "requires Linux clang; optional mixed tcc requires configured root"]
 fn native_profiles_reproduce_objects_and_executables_with_hidden_sources() {
@@ -154,7 +154,7 @@ fn native_profiles_reproduce_objects_and_executables_with_hidden_sources() {
         for (name, source) in [
             (
                 "bounds",
-                "module bounds;pub fn run()->num{let b=bytes();return at(read(b),0);}",
+                "module bounds;pub fn run()->num{b :=bytes();return at(read(b),0);}",
             ),
             (
                 "remainder",
@@ -162,7 +162,7 @@ fn native_profiles_reproduce_objects_and_executables_with_hidden_sources() {
             ),
             (
                 "unwrap",
-                "module unwrap;use core;pub fn run()->num{let v=core::Option<num>::None;return v!;}",
+                "module unwrap;use core;pub fn run()->num{v :=core::Option<num>::None;return v!;}",
             ),
         ] {
             fs::write(dir.join(format!("{name}.grl")), source).unwrap();

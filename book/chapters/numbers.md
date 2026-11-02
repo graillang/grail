@@ -13,3 +13,16 @@ Do not assume signed arithmetic, floating-point values, a separate `bool` type, 
 set just because another language has them.
 
 **Try it:** print `0-1` with `println`. The printed value is the largest unsigned 64-bit number.
+
+## Updates, division and powers
+
+{{example:operators}}
+
+`+=`, `-=`, `*=`, `/=`, `%=` and `**=` update writable numeric storage. The target is kept valid
+through right-hand-side evaluation; a conflicting write to that same target is rejected. The
+right-hand side runs once. Ordinary `/` truncates unsigned integer division; both `/` and `%`
+abort on zero divisors.
+
+`**` binds more tightly than multiplication and groups right to left. Its result wraps like the
+other `num` arithmetic, including `0 ** 0 == 1`. `^` remains bitwise XOR. Parenthesize whenever
+explicit grouping makes a calculation easier to read.

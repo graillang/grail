@@ -127,7 +127,7 @@ fn two_modules_parse_borrowed_tokens_and_abort_on_invalid_input() {
     assert!(p.status.success());
     assert_eq!(p.stdout, b"3\n");
     let loop_file = dir.join("loop.grl");
-    let loop_source = "fn loop_sum<a>(input:read<a>)->num {var i=0;var sum=0;while i<len(input) {{let i=i;sum=sum+at(input,i);}i=i+1;}return sum;}";
+    let loop_source = "fn loop_sum<a>(input:read<a>)->num {var i=0;var sum=0;while i<len(input) {{i :=i;sum=sum+at(input,i);}i=i+1;}return sum;}";
     fs::write(&loop_file, loop_source).unwrap();
     let p = Command::new(binary)
         .args([
@@ -174,7 +174,7 @@ fn two_modules_parse_borrowed_tokens_and_abort_on_invalid_input() {
     let invalid = dir.join("invalid.grl");
     fs::write(
         &invalid,
-        "fn number<a>(token:read<a>)->read<a> {let b=buffer(8,7); return read(b);}",
+        "fn number<a>(token:read<a>)->read<a> {b :=buffer(8,7); return read(b);}",
     )
     .unwrap();
     let p = Command::new(binary)

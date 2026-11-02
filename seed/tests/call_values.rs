@@ -16,11 +16,11 @@ fn checked(text: &str, first: Ty) -> bool {
 #[test]
 fn earlier_affine_argument_is_moved_before_later_argument() {
     assert!(!checked(
-        "use take;fn f()->num {let b=bytes();return take(b,len(b));}",
+        "use take;fn f()->num {b :=bytes();return take(b,len(b));}",
         Ty::Bytes
     ));
     assert!(!checked(
-        "use take;fn f()->num {let s=\"x\";return take(s,len(s));}",
+        "use take;fn f()->num {s :=\"x\";return take(s,len(s));}",
         Ty::Text
     ));
     assert!(!checked(
@@ -35,11 +35,11 @@ fn earlier_affine_argument_is_moved_before_later_argument() {
 #[test]
 fn values_may_be_snapshotted_or_explicitly_reborrowed_before_the_call() {
     assert!(checked(
-        "use take;fn f()->num {let b=bytes();let n=len(b);return take(b,n);}",
+        "use take;fn f()->num {b :=bytes();n :=len(b);return take(b,n);}",
         Ty::Bytes
     ));
     assert!(checked(
-        "use take;fn f()->num {let s=\"x\";let n=len(s);return take(s,n);}",
+        "use take;fn f()->num {s :=\"x\";n :=len(s);return take(s,n);}",
         Ty::Text
     ));
     assert!(checked(

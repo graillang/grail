@@ -6,15 +6,15 @@ fn accepted(s: &str) -> bool {
 #[test]
 fn loop_exits_close_local_scopes_and_target_the_innermost_loop() {
     for s in [
-        "fn f<a>(p:mut<a>,n:num)->num{for i in n{let local=read(p);assert(len(local)==1);if i==0{continue;}break;}write(p,0,9);return at(read(p),0);}",
+        "fn f<a>(p:mut<a>,n:num)->num{for i in n{local :=read(p);assert(len(local)==1);if i==0{continue;}break;}write(p,0,9);return at(read(p),0);}",
         "fn f(n:num)->num{var sum=0;for i in n{if i==2{continue;}if i==5{break;}sum=sum+i;}return sum;}",
         "fn f(n:num)->num{var i=0;var sum=0;while i<n{i=i+1;if i==2{continue;}if i==5{break;}sum=sum+i;}return sum;}",
         "fn f(n:num)->num{var sum=0;for outer in n{for inner in 4{if inner==1{continue;}if outer==2{break;}sum=sum+outer*10+inner;}if outer==3{break;}}return sum;}",
-        "module f;enum O{Some(num),None}pub fn f(n:num)->num{var sum=0;for i in n{let v=O::Some(i);match v{Some(x)=>{if x==3{break;}if x==1{continue;}sum=sum+x;},None=>{break;}}}return sum;}",
-        "module f;struct Pair{a:string,b:string}pub fn f()->num{let source=bytes();push(source,7);for i in 6{let pair=Pair{a:\"a\",b:\"bb\"};let first=pair.a;let r=read(first);assert(len(r)==1);if i%2==0{{let inner=\"inner\";continue;}}break;}push(source,9);return len(source);}",
-        "fn f()->num{let b=bytes();push(b,7);for i in 3{drop(b);break;}return 0;}",
+        "module f;enum O{Some(num),None}pub fn f(n:num)->num{var sum=0;for i in n{v :=O::Some(i);match v{Some(x)=>{if x==3{break;}if x==1{continue;}sum=sum+x;},None=>{break;}}}return sum;}",
+        "module f;struct Pair{a:string,b:string}pub fn f()->num{var source =bytes();push(source,7);for i in 6{pair :=Pair{a:\"a\",b:\"bb\"};first :=pair.a;r :=read(first);assert(len(r)==1);if i%2==0{{inner :=\"inner\";continue;}}break;}push(source,9);return len(source);}",
+        "fn f()->num{var b =bytes();push(b,7);for i in 3{drop(b);break;}return 0;}",
         "fn f(n:num)->num{for i in n{if i{continue;}else{break;}}return 0;}",
-        "fn f(n:num)->num{let b=bytes();push(b,7);let p=read(b);for i in n{if at(p,0){continue;}break;}return at(p,0);}",
+        "fn f(n:num)->num{var b =bytes();push(b,7);p :=read(b);for i in n{if at(p,0){continue;}break;}return at(p,0);}",
     ] {
         let p = source::compile(s, BTreeMap::new()).unwrap_or_else(|e| panic!("{s}\n{e}"));
         emit::module_c(&p).unwrap();
@@ -25,11 +25,11 @@ fn loop_exits_cannot_hide_ownership_changes_or_unreachable_operations() {
     for s in [
         "fn f()->num{break;return 0;}",
         "fn f()->num{continue;return 0;}",
-        "fn f()->num{for i in 3{break;let x=1;}return 0;}",
-        "fn f(n:num)->num{while n{if n{break;}else{continue;}let x=1;}return 0;}",
-        "fn f()->num{let b=bytes();push(b,7);for i in 3{let moved=b;continue;}return 0;}",
+        "fn f()->num{for i in 3{break;x :=1;}return 0;}",
+        "fn f(n:num)->num{while n{if n{break;}else{continue;}x :=1;}return 0;}",
+        "fn f()->num{var b =bytes();push(b,7);for i in 3{moved :=b;continue;}return 0;}",
         "fn f()->num{var x=7;for i in 3{drop(x);break;}return x;}",
-        "fn f()->num{let b=bytes();push(b,7);let p=read(b);for i in 3{push(b,9);continue;}return at(p,0);}",
+        "fn f()->num{var b =bytes();push(b,7);p :=read(b);for i in 3{push(b,9);continue;}return at(p,0);}",
     ] {
         assert!(!accepted(s), "{s}");
     }

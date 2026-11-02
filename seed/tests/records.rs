@@ -8,11 +8,11 @@ const DECL: &str = "module tokens;struct Token<a>{span:read<a>,name:string,offse
 #[test]
 fn mixed_records_move_fields_without_losing_other_obligations() {
     for body in [
-        "pub fn f<a>(p:read<a>)->num{let t=Token{span:read(p),name:\"lex\",offset:3};let name=t.name;let n=len(t.span);let span=t.span;return len(name)+n+len(span)+t.offset;}",
-        "pub fn f<a>(p:read<a>)->num{let t=Token{span:read(p),name:\"lex\",offset:3};let q=read(t.span);drop(t);return len(q);}",
-        "pub fn f<a>(p:read<a>)->read<a>{let t=Token{span:p,name:\"lex\",offset:3};return t.span;}",
+        "pub fn f<a>(p:read<a>)->num{t :=Token{span:read(p),name:\"lex\",offset:3};name :=t.name;n :=len(t.span);span :=t.span;return len(name)+n+len(span)+t.offset;}",
+        "pub fn f<a>(p:read<a>)->num{t :=Token{span:read(p),name:\"lex\",offset:3};q :=read(t.span);drop(t);return len(q);}",
+        "pub fn f<a>(p:read<a>)->read<a>{t :=Token{span:p,name:\"lex\",offset:3};return t.span;}",
         "pub fn make<a>(p:read<a>)->Token<a>{return Token{span:p,name:\"lex\",offset:3};}",
-        "pub fn f()->num{let b=bytes();push(b,7);let t=Token{span:read(b),name:\"lex\",offset:3};let n=len(t.name);drop(b);return n;}",
+        "pub fn f()->num{var b =bytes();push(b,7);t :=Token{span:read(b),name:\"lex\",offset:3};n :=len(t.name);drop(b);return n;}",
     ] {
         let s = format!("{DECL}{body}");
         assert!(ok(&s), "{s}");
@@ -21,12 +21,12 @@ fn mixed_records_move_fields_without_losing_other_obligations() {
 #[test]
 fn partial_moves_captured_sources_and_owned_fields_are_checked() {
     for body in [
-        "pub fn f<a>(p:read<a>)->num{let t=Token{span:p,name:\"x\",offset:0};let a=t.name;return len(t.name)+len(a);}",
-        "pub fn f<a>(p:read<a>)->num{let t=Token{span:p,name:\"x\",offset:0};let a=t.name;let moved=t;return len(a);}",
-        "pub fn f()->num{let b=bytes();let t=Token{span:read(b),name:\"x\",offset:0};drop(b);return len(t.span);}",
-        "pub fn f<a>(p:read<a>)->read<a>{let b=bytes();let t=Token{span:read(b),name:\"x\",offset:0};return t.span;}",
-        "pub fn f<a>(p:read<a>)->read<a>{let t=Token{span:p,name:\"x\",offset:0};return read(t.name);}",
-        "pub fn f<a>(p:read<a>)->num{let t=Token{span:p,name:\"x\",offset:0};let q=read(t.name);drop(t);return len(q);}",
+        "pub fn f<a>(p:read<a>)->num{t :=Token{span:p,name:\"x\",offset:0};a :=t.name;return len(t.name)+len(a);}",
+        "pub fn f<a>(p:read<a>)->num{t :=Token{span:p,name:\"x\",offset:0};a :=t.name;moved :=t;return len(a);}",
+        "pub fn f()->num{b :=bytes();t :=Token{span:read(b),name:\"x\",offset:0};drop(b);return len(t.span);}",
+        "pub fn f<a>(p:read<a>)->read<a>{b :=bytes();t :=Token{span:read(b),name:\"x\",offset:0};return t.span;}",
+        "pub fn f<a>(p:read<a>)->read<a>{t :=Token{span:p,name:\"x\",offset:0};return read(t.name);}",
+        "pub fn f<a>(p:read<a>)->num{t :=Token{span:p,name:\"x\",offset:0};q :=read(t.name);drop(t);return len(q);}",
     ] {
         let s = format!("{DECL}{body}");
         assert!(!ok(&s), "{s}");
@@ -35,10 +35,10 @@ fn partial_moves_captured_sources_and_owned_fields_are_checked() {
 
 #[test]
 fn captured_lifetimes_are_not_exclusive_target_identity() {
-    let s = "module pairs;struct Pair<a>{left:mut<a>,right:mut<a>}pub fn run<a,b>(x:mut<a>,y:mut<b>)->num{let p=pair(x,y);let l=mut(p.left);let r=mut(p.right);write(l,0,3);write(r,0,4);return 0;}fn pair<a>(x:mut<a>,y:mut<a>)->Pair<a>{return Pair{left:x,right:y};}";
+    let s = "module pairs;struct Pair<a>{left:mut<a>,right:mut<a>}pub fn run<a,b>(x:mut<a>,y:mut<b>)->num{var p =pair(x,y);l :=mut(p.left);r :=mut(p.right);write(l,0,3);write(r,0,4);return 0;}fn pair<a>(x:mut<a>,y:mut<a>)->Pair<a>{return Pair{left:x,right:y};}";
     assert!(ok(s));
     assert!(!ok(
-        "module pairs;struct Pair<a>{left:mut<a>,right:mut<a>}pub fn run()->num{let b=bytes();let p=Pair{left:mut(b),right:mut(b)};return 0;}"
+        "module pairs;struct Pair<a>{left:mut<a>,right:mut<a>}pub fn run()->num{var b =bytes();p :=Pair{left:mut(b),right:mut(b)};return 0;}"
     ));
 }
 #[test]
@@ -60,10 +60,10 @@ fn parameter_storage_cannot_masquerade_as_a_captured_source() {
 #[test]
 fn constructor_order_and_layout_expansion_are_bounded() {
     assert!(!ok(
-        "module owned;struct R{data:bytes,n:num}pub fn run()->num{let b=bytes();let r=R{data:b,n:len(b)};return r.n;}"
+        "module owned;struct R{data:bytes,n:num}pub fn run()->num{b :=bytes();r :=R{data:b,n:len(b)};return r.n;}"
     ));
     assert!(ok(
-        "module owned;struct R{data:bytes,n:num}pub fn run()->num{let b=bytes();let n=len(b);let r=R{data:b,n:n};return r.n;}"
+        "module owned;struct R{data:bytes,n:num}pub fn run()->num{b :=bytes();n :=len(b);r :=R{data:b,n:n};return r.n;}"
     ));
     let mut s = String::from("module expansion;struct Empty{}");
     for i in 0..8 {
@@ -83,7 +83,7 @@ fn constructor_order_and_layout_expansion_are_bounded() {
 #[test]
 fn record_constructors_do_not_steal_shadowed_condition_names() {
     assert!(ok(
-        "module names;struct n{value:num}pub fn run()->num{let n=1;var value=0;if n {value=3;}return value;}"
+        "module names;struct n{value:num}pub fn run()->num{n :=1;var value=0;if n {value=3;}return value;}"
     ));
 }
 

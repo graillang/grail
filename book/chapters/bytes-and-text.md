@@ -11,7 +11,7 @@ and text are deliberately different concepts.
 
 {{example:text}}
 
-`append_text` mutates the string object, not its binding, so `greeting` need not be `var`.
+`append_text` mutates owned storage, so `greeting` is declared with `var`.
 `print` writes exactly the supplied bytes; `println` adds a newline. Both borrow their input
 for the call, so `greeting` remains usable afterward.
 

@@ -8,6 +8,7 @@ static G f_grailc_fresh(G v0);
 static G f_grailc_def(G v0);
 static G f_grailc_val(G v0,G v1);
 static G f_grailc_kind(G v0);
+static G f_grailc_next_kind(G v0);
 static G f_grailc_kind_at(G v0,G v1);
 static G f_grailc_advance(G v0);
 static G f_grailc_tok_text(G v0,G v1);
@@ -57,6 +58,7 @@ static G f_grailc_propagate(G v0,G v1,G v2);
 static G f_grailc_binary(G v0,G v1,G v2,G v3);
 static G f_grailc_expr(G v0,G v1);
 static G f_grailc_block(G v0);
+static G f_grailc_compound_operator(G v0);
 static G f_grailc_assignment_ahead(G v0);
 static G f_grailc_operand(G v0);
 static G f_grailc_statement_call(G v0,G v1,G v2);
@@ -222,6 +224,16 @@ G v7=v6;
 G v8=*(G*)v7;
 G v9=((G*)v8)[0];
 return v9;
+}
+return 0;}
+static G f_grailc_next_kind(G v0){{
+G v1=*(G*)v0;
+G v2=((G*)v1)[2];
+G v3=1ull;
+G v4=(v2+v3);
+G v5=v4;
+G v6=f_grailc_kind_at(v0,v5);
+return v6;
 }
 return 0;}
 static G f_grailc_kind_at(G v0,G v1){{
@@ -2475,12 +2487,21 @@ G v23=(v0==v22);
 G v24=37ull;
 G v25=(v0==v24);
 G v26=(v23+v25);
-if(v26){
-G v27=5ull;
-return v27;
+G v27=47ull;
+G v28=(v0==v27);
+G v29=(v26+v28);
+if(v29){
+G v30=5ull;
+return v30;
 }
-G v28=0ull;
-return v28;
+G v31=267ull;
+G v32=(v0==v31);
+if(v32){
+G v33=6ull;
+return v33;
+}
+G v34=0ull;
+return v34;
 }
 return 0;}
 static G f_grailc_propagate(G v0,G v1,G v2){{
@@ -2565,61 +2586,85 @@ G v4=f_grailc_def(v0);
 G v5=v4;
 G v6=37ull;
 G v7=(v1==v6);
-if(v7){
-G v8=rt_lit("\162\164\137\162\145\155\050",7);
-G v9=rt_view(v8);
-G v10=f_grailc_o(v0,v9);
-G v11=f_grailc_ov(v0,v2);
-G v12=*(G*)v0;
-G v13=((G*)v12)[3];
-G v14=44ull;
-rt_push(v13,v14);
-G v15=0;
+G v8=47ull;
+G v9=(v1==v8);
+G v10=(v7+v9);
+G v11=267ull;
+G v12=(v1==v11);
+G v13=(v10+v12);
+if(v13){
+G v14=37ull;
+G v15=(v1==v14);
+if(v15){
+G v16=rt_lit("\162\164\137\162\145\155\050",7);
+G v17=rt_view(v16);
+G v18=f_grailc_o(v0,v17);
+}
+G v19=47ull;
+G v20=(v1==v19);
+if(v20){
+G v21=rt_lit("\162\164\137\144\151\166\050",7);
+G v22=rt_view(v21);
+G v23=f_grailc_o(v0,v22);
+}
+G v24=267ull;
+G v25=(v1==v24);
+if(v25){
+G v26=rt_lit("\162\164\137\160\157\167\050",7);
+G v27=rt_view(v26);
+G v28=f_grailc_o(v0,v27);
+}
+G v29=f_grailc_ov(v0,v2);
+G v30=*(G*)v0;
+G v31=((G*)v30)[3];
+G v32=44ull;
+rt_push(v31,v32);
+G v33=0;
 }
 else{
-G v16=*(G*)v0;
-G v17=((G*)v16)[3];
-G v18=40ull;
-rt_push(v17,v18);
-G v19=0;
-G v20=f_grailc_ov(v0,v2);
-G v21=258ull;
-G v22=(v1==v21);
-if(v22){
-G v23=rt_lit("\075\075",2);
-G v24=rt_view(v23);
-G v25=f_grailc_o(v0,v24);
-}
-G v26=259ull;
-G v27=(v1==v26);
-if(v27){
-G v28=rt_lit("\041\075",2);
-G v29=rt_view(v28);
-G v30=f_grailc_o(v0,v29);
-}
-G v31=f_grailc_prec(v1);
-G v32=3ull;
-G v33=(v31!=v32);
-if(v33){
 G v34=*(G*)v0;
 G v35=((G*)v34)[3];
-rt_push(v35,v1);
-G v36=0;
+G v36=40ull;
+rt_push(v35,v36);
+G v37=0;
+G v38=f_grailc_ov(v0,v2);
+G v39=258ull;
+G v40=(v1==v39);
+if(v40){
+G v41=rt_lit("\075\075",2);
+G v42=rt_view(v41);
+G v43=f_grailc_o(v0,v42);
 }
-G v37=60ull;
-G v38=(v1==v37);
-if(v38){
-G v39=*(G*)v0;
-G v40=((G*)v39)[3];
-G v41=60ull;
-rt_push(v40,v41);
-G v42=0;
+G v44=259ull;
+G v45=(v1==v44);
+if(v45){
+G v46=rt_lit("\041\075",2);
+G v47=rt_view(v46);
+G v48=f_grailc_o(v0,v47);
+}
+G v49=f_grailc_prec(v1);
+G v50=3ull;
+G v51=(v49!=v50);
+if(v51){
+G v52=*(G*)v0;
+G v53=((G*)v52)[3];
+rt_push(v53,v1);
+G v54=0;
+}
+G v55=60ull;
+G v56=(v1==v55);
+if(v56){
+G v57=*(G*)v0;
+G v58=((G*)v57)[3];
+G v59=60ull;
+rt_push(v58,v59);
+G v60=0;
 }
 }
-G v43=f_grailc_ov(v0,v3);
-G v44=rt_lit("\051\073\012",3);
-G v45=rt_view(v44);
-G v46=f_grailc_o(v0,v45);
+G v61=f_grailc_ov(v0,v3);
+G v62=rt_lit("\051\073\012",3);
+G v63=rt_view(v62);
+G v64=f_grailc_o(v0,v63);
 return v5;
 }
 return 0;}
@@ -2666,20 +2711,21 @@ if(v28){
 break;
 }
 G v29=f_grailc_advance(v0);
-G v30=1ull;
-G v31=(v12+v30);
-G v32=f_grailc_expr(v0,v31);
-G v33=v32;
-G v34=((G*)v33)[0];
-G v35=f_grailc_binary(v0,v10,v5,v34);
-v5=v35;
-G v36=0ull;
-v7=v36;
+G v30=267ull;
+G v31=(v10!=v30);
+G v32=(v12+v31);
+G v33=f_grailc_expr(v0,v32);
+G v34=v33;
+G v35=((G*)v34)[0];
+G v36=f_grailc_binary(v0,v10,v5,v35);
+v5=v36;
+G v37=0ull;
+v7=v37;
 }
 }
 }
-G v37=f_grailc_val(v5,v7);
-return v37;
+G v38=f_grailc_val(v5,v7);
+return v38;
 }
 return 0;}
 static G f_grailc_block(G v0){{
@@ -2713,6 +2759,41 @@ G v22=0;
 return v22;
 }
 return 0;}
+static G f_grailc_compound_operator(G v0){{
+G v1=262ull;
+G v2=(v0==v1);
+if(v2){
+G v3=43ull;
+return v3;
+}
+G v4=263ull;
+G v5=(v0==v4);
+if(v5){
+G v6=45ull;
+return v6;
+}
+G v7=264ull;
+G v8=(v0==v7);
+if(v8){
+G v9=42ull;
+return v9;
+}
+G v10=265ull;
+G v11=(v0==v10);
+if(v11){
+G v12=47ull;
+return v12;
+}
+G v13=266ull;
+G v14=(v0==v13);
+if(v14){
+G v15=37ull;
+return v15;
+}
+G v16=267ull;
+return v16;
+}
+return 0;}
 static G f_grailc_assignment_ahead(G v0){{
 G v1=f_grailc_kind(v0);
 G v2=1ull;
@@ -2738,9 +2819,19 @@ v9=v14;
 }
 }
 G v15=f_grailc_kind_at(v0,v9);
-G v16=61ull;
-G v17=(v15==v16);
-return v17;
+G v16=v15;
+G v17=61ull;
+G v18=(v16==v17);
+G v19=261ull;
+G v20=(v19<v16);
+G v21=267ull;
+G v22=(v16<v21);
+G v23=(v20&v22);
+G v24=(v18+v23);
+G v25=268ull;
+G v26=(v16==v25);
+G v27=(v24+v26);
+return v27;
 }
 return 0;}
 static G f_grailc_operand(G v0){{
@@ -2863,422 +2954,467 @@ G v42=f_grailc_block(v0);
 G v43=0;
 return v43;
 }
-G v44=rt_lit("\154\145\164",3);
+G v44=rt_lit("\166\141\162",3);
 G v45=rt_view(v44);
 G v46=f_grailc_is(v0,v45);
-G v47=rt_lit("\166\141\162",3);
-G v48=rt_view(v47);
-G v49=f_grailc_is(v0,v48);
+G v47=f_grailc_next_kind(v0);
+G v48=261ull;
+G v49=(v47==v48);
 G v50=(v46+v49);
 if(v50){
-G v51=f_grailc_advance(v0);
-G v52=f_grailc_ident(v0);
-G v53=v52;
-G v54=rt_lit("\072",1);
-G v55=rt_view(v54);
-G v56=f_grailc_eat(v0,v55);
-if(v56){
-G v57=f_grailc_parse_type(v0);
-G v58=v57;
-G v59=rt_lit("\073",1);
-G v60=rt_view(v59);
-G v61=f_grailc_expect(v0,v60);
-G v62=f_grailc_def(v0);
-G v63=v62;
-G v64=rt_lit("\060\073\012",3);
-G v65=rt_view(v64);
-G v66=f_grailc_o(v0,v65);
-G v67=f_grailc_bind(v0,v53,v58,v63);
-G v68=0;
-return v68;
+G v51=rt_lit("\166\141\162",3);
+G v52=rt_view(v51);
+G v53=f_grailc_eat(v0,v52);
+G v54=v53;
+G v55=f_grailc_ident(v0);
+G v56=v55;
+G v57=rt_lit("\072",1);
+G v58=rt_view(v57);
+G v59=f_grailc_eat(v0,v58);
+if(v59){
+G v60=f_grailc_parse_type(v0);
+G v61=v60;
+G v62=rt_lit("\073",1);
+G v63=rt_view(v62);
+G v64=f_grailc_expect(v0,v63);
+G v65=f_grailc_def(v0);
+G v66=v65;
+G v67=rt_lit("\060\073\012",3);
+G v68=rt_view(v67);
+G v69=f_grailc_o(v0,v68);
+G v70=f_grailc_bind(v0,v56,v61,v66);
+G v71=0;
+return v71;
 }
-G v69=rt_lit("\075",1);
-G v70=rt_view(v69);
-G v71=f_grailc_expect(v0,v70);
-G v72=0ull;
-G v73=f_grailc_expr(v0,v72);
-G v74=v73;
-G v75=rt_lit("\073",1);
+if(v54){
+G v72=rt_lit("\075",1);
+G v73=rt_view(v72);
+G v74=f_grailc_expect(v0,v73);
+}
+else{
+G v75=rt_lit("\072\075",2);
 G v76=rt_view(v75);
 G v77=f_grailc_expect(v0,v76);
-G v78=f_grailc_def(v0);
-G v79=v78;
-G v80=((G*)v74)[0];
-G v81=f_grailc_ov(v0,v80);
-G v82=rt_lit("\073\012",2);
-G v83=rt_view(v82);
-G v84=f_grailc_o(v0,v83);
-G v85=((G*)v74)[1];
-G v86=f_grailc_bind(v0,v53,v85,v79);
-G v87=0;
-return v87;
 }
-G v88=rt_lit("\167\150\151\154\145",5);
+G v78=0ull;
+G v79=f_grailc_expr(v0,v78);
+G v80=v79;
+G v81=rt_lit("\073",1);
+G v82=rt_view(v81);
+G v83=f_grailc_expect(v0,v82);
+G v84=f_grailc_def(v0);
+G v85=v84;
+G v86=((G*)v80)[0];
+G v87=f_grailc_ov(v0,v86);
+G v88=rt_lit("\073\012",2);
 G v89=rt_view(v88);
-G v90=f_grailc_eat(v0,v89);
-if(v90){
-G v91=rt_lit("\146\157\162\050\073\073\051\173\012",9);
-G v92=rt_view(v91);
-G v93=f_grailc_o(v0,v92);
-G v94=0ull;
-G v95=f_grailc_expr(v0,v94);
-G v96=v95;
-G v97=rt_lit("\151\146\050\041",4);
+G v90=f_grailc_o(v0,v89);
+G v91=((G*)v80)[1];
+G v92=f_grailc_bind(v0,v56,v91,v85);
+G v93=0;
+return v93;
+}
+G v94=rt_lit("\167\150\151\154\145",5);
+G v95=rt_view(v94);
+G v96=f_grailc_eat(v0,v95);
+if(v96){
+G v97=rt_lit("\146\157\162\050\073\073\051\173\012",9);
 G v98=rt_view(v97);
 G v99=f_grailc_o(v0,v98);
-G v100=((G*)v96)[0];
-G v101=f_grailc_ov(v0,v100);
-G v102=rt_lit("\051\142\162\145\141\153\073\012",8);
-G v103=rt_view(v102);
-G v104=f_grailc_o(v0,v103);
-G v105=f_grailc_block(v0);
-G v106=rt_lit("\175\012",2);
-G v107=rt_view(v106);
-G v108=f_grailc_o(v0,v107);
-G v109=0;
-return v109;
+G v100=0ull;
+G v101=f_grailc_expr(v0,v100);
+G v102=v101;
+G v103=rt_lit("\151\146\050\041",4);
+G v104=rt_view(v103);
+G v105=f_grailc_o(v0,v104);
+G v106=((G*)v102)[0];
+G v107=f_grailc_ov(v0,v106);
+G v108=rt_lit("\051\142\162\145\141\153\073\012",8);
+G v109=rt_view(v108);
+G v110=f_grailc_o(v0,v109);
+G v111=f_grailc_block(v0);
+G v112=rt_lit("\175\012",2);
+G v113=rt_view(v112);
+G v114=f_grailc_o(v0,v113);
+G v115=0;
+return v115;
 }
-G v110=rt_lit("\146\157\162",3);
-G v111=rt_view(v110);
-G v112=f_grailc_eat(v0,v111);
-if(v112){
-G v113=f_grailc_ident(v0);
-G v114=v113;
-G v115=rt_lit("\151\156",2);
-G v116=rt_view(v115);
-G v117=f_grailc_expect(v0,v116);
-G v118=0ull;
-G v119=f_grailc_expr(v0,v118);
+G v116=rt_lit("\146\157\162",3);
+G v117=rt_view(v116);
+G v118=f_grailc_eat(v0,v117);
+if(v118){
+G v119=f_grailc_ident(v0);
 G v120=v119;
-G v121=f_grailc_def(v0);
-G v122=v121;
-G v123=((G*)v120)[0];
-G v124=f_grailc_ov(v0,v123);
-G v125=rt_lit("\073\012",2);
-G v126=rt_view(v125);
-G v127=f_grailc_o(v0,v126);
-G v128=f_grailc_fresh(v0);
-G v129=v128;
-G v130=rt_lit("\146\157\162\050\107\040",6);
-G v131=rt_view(v130);
-G v132=f_grailc_o(v0,v131);
-G v133=f_grailc_ov(v0,v129);
-G v134=rt_lit("\075\060\073",3);
-G v135=rt_view(v134);
-G v136=f_grailc_o(v0,v135);
-G v137=f_grailc_ov(v0,v129);
-G v138=*(G*)v0;
-G v139=((G*)v138)[3];
-G v140=60ull;
-rt_push(v139,v140);
-G v141=0;
-G v142=f_grailc_ov(v0,v122);
-G v143=*(G*)v0;
-G v144=((G*)v143)[3];
-G v145=59ull;
-rt_push(v144,v145);
-G v146=0;
-G v147=f_grailc_ov(v0,v129);
-G v148=rt_lit("\053\053\051",3);
-G v149=rt_view(v148);
-G v150=f_grailc_o(v0,v149);
-G v151=*(G*)v0;
-G v152=((G*)v151)[10];
-G v153=rt_len(v152);
-G v154=v153;
-G v155=0ull;
-G v156=f_grailc_bind(v0,v114,v155,v129);
-G v157=f_grailc_block(v0);
-G v158=f_grailc_pop_locals(v0,v154);
-G v159=0;
-return v159;
+G v121=rt_lit("\151\156",2);
+G v122=rt_view(v121);
+G v123=f_grailc_expect(v0,v122);
+G v124=0ull;
+G v125=f_grailc_expr(v0,v124);
+G v126=v125;
+G v127=f_grailc_def(v0);
+G v128=v127;
+G v129=((G*)v126)[0];
+G v130=f_grailc_ov(v0,v129);
+G v131=rt_lit("\073\012",2);
+G v132=rt_view(v131);
+G v133=f_grailc_o(v0,v132);
+G v134=f_grailc_fresh(v0);
+G v135=v134;
+G v136=rt_lit("\146\157\162\050\107\040",6);
+G v137=rt_view(v136);
+G v138=f_grailc_o(v0,v137);
+G v139=f_grailc_ov(v0,v135);
+G v140=rt_lit("\075\060\073",3);
+G v141=rt_view(v140);
+G v142=f_grailc_o(v0,v141);
+G v143=f_grailc_ov(v0,v135);
+G v144=*(G*)v0;
+G v145=((G*)v144)[3];
+G v146=60ull;
+rt_push(v145,v146);
+G v147=0;
+G v148=f_grailc_ov(v0,v128);
+G v149=*(G*)v0;
+G v150=((G*)v149)[3];
+G v151=59ull;
+rt_push(v150,v151);
+G v152=0;
+G v153=f_grailc_ov(v0,v135);
+G v154=rt_lit("\053\053\051",3);
+G v155=rt_view(v154);
+G v156=f_grailc_o(v0,v155);
+G v157=*(G*)v0;
+G v158=((G*)v157)[10];
+G v159=rt_len(v158);
+G v160=v159;
+G v161=0ull;
+G v162=f_grailc_bind(v0,v120,v161,v135);
+G v163=f_grailc_block(v0);
+G v164=f_grailc_pop_locals(v0,v160);
+G v165=0;
+return v165;
 }
-G v160=rt_lit("\155\141\164\143\150",5);
-G v161=rt_view(v160);
-G v162=f_grailc_eat(v0,v161);
-if(v162){
-G v163=0ull;
-G v164=f_grailc_expr(v0,v163);
-G v165=v164;
-G v166=f_grailc_deref(v0,v165);
-G v167=v166;
-G v168=((G*)v167)[0];
-G v169=v168;
-G v170=((G*)v167)[1];
-G v171=f_grailc_ty_arg(v0,v170);
-G v172=v171;
-G v173=f_grailc_def(v0);
-G v174=v173;
-G v175=0ull;
-G v176=f_grailc_slot(v0,v169,v175);
-G v177=rt_lit("\073\012",2);
-G v178=rt_view(v177);
-G v179=f_grailc_o(v0,v178);
-G v180=rt_lit("\173",1);
-G v181=rt_view(v180);
-G v182=f_grailc_expect(v0,v181);
-for(;;){
-G v183=rt_lit("\175",1);
+G v166=rt_lit("\155\141\164\143\150",5);
+G v167=rt_view(v166);
+G v168=f_grailc_eat(v0,v167);
+if(v168){
+G v169=0ull;
+G v170=f_grailc_expr(v0,v169);
+G v171=v170;
+G v172=f_grailc_deref(v0,v171);
+G v173=v172;
+G v174=((G*)v173)[0];
+G v175=v174;
+G v176=((G*)v173)[1];
+G v177=f_grailc_ty_arg(v0,v176);
+G v178=v177;
+G v179=f_grailc_def(v0);
+G v180=v179;
+G v181=0ull;
+G v182=f_grailc_slot(v0,v175,v181);
+G v183=rt_lit("\073\012",2);
 G v184=rt_view(v183);
-G v185=f_grailc_eat(v0,v184);
-G v186=0ull;
-G v187=(v185==v186);
-if(!v187)break;
-{
-G v188=f_grailc_ident(v0);
-G v189=v188;
+G v185=f_grailc_o(v0,v184);
+G v186=rt_lit("\173",1);
+G v187=rt_view(v186);
+G v188=f_grailc_expect(v0,v187);
+for(;;){
+G v189=rt_lit("\175",1);
 G v190=rt_view(v189);
-G v191=f_grailc_find_field(v0,v172,v190);
-G v192=v191;
-G v193=f_grailc_field_ty(v0,v172,v192);
-G v194=v193;
-G v195=rt_lit("\151\146\050",3);
+G v191=f_grailc_eat(v0,v190);
+G v192=0ull;
+G v193=(v191==v192);
+if(!v193)break;
+{
+G v194=f_grailc_ident(v0);
+G v195=v194;
 G v196=rt_view(v195);
-G v197=f_grailc_o(v0,v196);
-G v198=f_grailc_ov(v0,v174);
-G v199=rt_lit("\075\075",2);
-G v200=rt_view(v199);
-G v201=f_grailc_o(v0,v200);
-G v202=f_grailc_on(v0,v192);
-G v203=rt_lit("\051\173\012",3);
-G v204=rt_view(v203);
-G v205=f_grailc_o(v0,v204);
-G v206=*(G*)v0;
-G v207=((G*)v206)[10];
-G v208=rt_len(v207);
-G v209=v208;
-G v210=rt_lit("\050",1);
-G v211=rt_view(v210);
-G v212=f_grailc_eat(v0,v211);
-if(v212){
-G v213=rt_lit("\137",1);
-G v214=rt_view(v213);
-G v215=f_grailc_eat(v0,v214);
-G v216=0ull;
-G v217=(v215==v216);
-if(v217){
-G v218=f_grailc_ident(v0);
-G v219=v218;
-G v220=f_grailc_def(v0);
-G v221=v220;
-G v222=1ull;
-G v223=f_grailc_slot(v0,v169,v222);
-G v224=rt_lit("\073\012",2);
-G v225=rt_view(v224);
-G v226=f_grailc_o(v0,v225);
-G v227=f_grailc_bind(v0,v219,v194,v221);
+G v197=f_grailc_find_field(v0,v178,v196);
+G v198=v197;
+G v199=f_grailc_field_ty(v0,v178,v198);
+G v200=v199;
+G v201=rt_lit("\151\146\050",3);
+G v202=rt_view(v201);
+G v203=f_grailc_o(v0,v202);
+G v204=f_grailc_ov(v0,v180);
+G v205=rt_lit("\075\075",2);
+G v206=rt_view(v205);
+G v207=f_grailc_o(v0,v206);
+G v208=f_grailc_on(v0,v198);
+G v209=rt_lit("\051\173\012",3);
+G v210=rt_view(v209);
+G v211=f_grailc_o(v0,v210);
+G v212=*(G*)v0;
+G v213=((G*)v212)[10];
+G v214=rt_len(v213);
+G v215=v214;
+G v216=rt_lit("\050",1);
+G v217=rt_view(v216);
+G v218=f_grailc_eat(v0,v217);
+if(v218){
+G v219=rt_lit("\137",1);
+G v220=rt_view(v219);
+G v221=f_grailc_eat(v0,v220);
+G v222=0ull;
+G v223=(v221==v222);
+if(v223){
+G v224=f_grailc_ident(v0);
+G v225=v224;
+G v226=f_grailc_def(v0);
+G v227=v226;
+G v228=1ull;
+G v229=f_grailc_slot(v0,v175,v228);
+G v230=rt_lit("\073\012",2);
+G v231=rt_view(v230);
+G v232=f_grailc_o(v0,v231);
+G v233=f_grailc_bind(v0,v225,v200,v227);
 }
-G v228=rt_lit("\051",1);
-G v229=rt_view(v228);
-G v230=f_grailc_expect(v0,v229);
+G v234=rt_lit("\051",1);
+G v235=rt_view(v234);
+G v236=f_grailc_expect(v0,v235);
 }
-G v231=rt_lit("\075\076",2);
-G v232=rt_view(v231);
-G v233=f_grailc_expect(v0,v232);
-G v234=f_grailc_block(v0);
-G v235=rt_lit("\175\145\154\163\145\040",6);
-G v236=rt_view(v235);
-G v237=f_grailc_o(v0,v236);
-G v238=f_grailc_pop_locals(v0,v209);
-G v239=rt_lit("\054",1);
-G v240=rt_view(v239);
-G v241=f_grailc_eat(v0,v240);
-G v242=0ull;
-G v243=(v241==v242);
-if(v243){
-G v244=rt_lit("\175",1);
-G v245=rt_view(v244);
-G v246=f_grailc_expect(v0,v245);
+G v237=rt_lit("\075\076",2);
+G v238=rt_view(v237);
+G v239=f_grailc_expect(v0,v238);
+G v240=f_grailc_block(v0);
+G v241=rt_lit("\175\145\154\163\145\040",6);
+G v242=rt_view(v241);
+G v243=f_grailc_o(v0,v242);
+G v244=f_grailc_pop_locals(v0,v215);
+G v245=rt_lit("\054",1);
+G v246=rt_view(v245);
+G v247=f_grailc_eat(v0,v246);
+G v248=0ull;
+G v249=(v247==v248);
+if(v249){
+G v250=rt_lit("\175",1);
+G v251=rt_view(v250);
+G v252=f_grailc_expect(v0,v251);
 break;
 }
 }
 }
-G v247=rt_lit("\141\142\157\162\164\050\051\073\012",9);
-G v248=rt_view(v247);
-G v249=f_grailc_o(v0,v248);
-G v250=0;
-return v250;
+G v253=rt_lit("\141\142\157\162\164\050\051\073\012",9);
+G v254=rt_view(v253);
+G v255=f_grailc_o(v0,v254);
+G v256=0;
+return v256;
 }
-G v251=rt_lit("\151\146",2);
-G v252=rt_view(v251);
-G v253=f_grailc_eat(v0,v252);
-if(v253){
-G v254=0ull;
-G v255=f_grailc_expr(v0,v254);
-G v256=v255;
-G v257=rt_lit("\151\146\050",3);
+G v257=rt_lit("\151\146",2);
 G v258=rt_view(v257);
-G v259=f_grailc_o(v0,v258);
-G v260=((G*)v256)[0];
-G v261=f_grailc_ov(v0,v260);
-G v262=*(G*)v0;
-G v263=((G*)v262)[3];
-G v264=41ull;
-rt_push(v263,v264);
-G v265=0;
-G v266=f_grailc_block(v0);
-G v267=rt_lit("\145\154\163\145",4);
-G v268=rt_view(v267);
-G v269=f_grailc_eat(v0,v268);
-if(v269){
-G v270=rt_lit("\145\154\163\145",4);
-G v271=rt_view(v270);
-G v272=f_grailc_o(v0,v271);
-G v273=f_grailc_block(v0);
+G v259=f_grailc_eat(v0,v258);
+if(v259){
+G v260=0ull;
+G v261=f_grailc_expr(v0,v260);
+G v262=v261;
+G v263=rt_lit("\151\146\050",3);
+G v264=rt_view(v263);
+G v265=f_grailc_o(v0,v264);
+G v266=((G*)v262)[0];
+G v267=f_grailc_ov(v0,v266);
+G v268=*(G*)v0;
+G v269=((G*)v268)[3];
+G v270=41ull;
+rt_push(v269,v270);
+G v271=0;
+G v272=f_grailc_block(v0);
+G v273=rt_lit("\145\154\163\145",4);
+G v274=rt_view(v273);
+G v275=f_grailc_eat(v0,v274);
+if(v275){
+G v276=rt_lit("\145\154\163\145",4);
+G v277=rt_view(v276);
+G v278=f_grailc_o(v0,v277);
+G v279=f_grailc_block(v0);
 }
-G v274=0;
-return v274;
+G v280=0;
+return v280;
 }
-G v275=rt_lit("\144\162\157\160",4);
-G v276=rt_view(v275);
-G v277=f_grailc_eat(v0,v276);
-if(v277){
-G v278=rt_lit("\050",1);
-G v279=rt_view(v278);
-G v280=f_grailc_expect(v0,v279);
-G v281=f_grailc_ident(v0);
-G v282=rt_lit("\051",1);
-G v283=rt_view(v282);
-G v284=f_grailc_expect(v0,v283);
-G v285=rt_lit("\073",1);
-G v286=rt_view(v285);
-G v287=f_grailc_expect(v0,v286);
-G v288=0;
-return v288;
+G v281=rt_lit("\144\162\157\160",4);
+G v282=rt_view(v281);
+G v283=f_grailc_eat(v0,v282);
+if(v283){
+G v284=rt_lit("\050",1);
+G v285=rt_view(v284);
+G v286=f_grailc_expect(v0,v285);
+G v287=f_grailc_ident(v0);
+G v288=rt_lit("\051",1);
+G v289=rt_view(v288);
+G v290=f_grailc_expect(v0,v289);
+G v291=rt_lit("\073",1);
+G v292=rt_view(v291);
+G v293=f_grailc_expect(v0,v292);
+G v294=0;
+return v294;
 }
-G v289=rt_lit("\141\160\160\145\156\144\137\164\145\170\164",11);
-G v290=rt_view(v289);
-G v291=f_grailc_eat(v0,v290);
-if(v291){
-G v292=rt_lit("\162\164\137\141\160\160\145\156\144",9);
-G v293=rt_view(v292);
-G v294=2ull;
-G v295=f_grailc_statement_call(v0,v293,v294);
-G v296=0;
-return v296;
+G v295=rt_lit("\141\160\160\145\156\144\137\164\145\170\164",11);
+G v296=rt_view(v295);
+G v297=f_grailc_eat(v0,v296);
+if(v297){
+G v298=rt_lit("\162\164\137\141\160\160\145\156\144",9);
+G v299=rt_view(v298);
+G v300=2ull;
+G v301=f_grailc_statement_call(v0,v299,v300);
+G v302=0;
+return v302;
 }
-G v297=rt_lit("\160\165\163\150",4);
-G v298=rt_view(v297);
-G v299=f_grailc_eat(v0,v298);
-if(v299){
-G v300=rt_lit("\162\164\137\160\165\163\150\142",8);
-G v301=rt_view(v300);
-G v302=2ull;
-G v303=f_grailc_statement_call(v0,v301,v302);
-G v304=0;
-return v304;
+G v303=rt_lit("\160\165\163\150",4);
+G v304=rt_view(v303);
+G v305=f_grailc_eat(v0,v304);
+if(v305){
+G v306=rt_lit("\162\164\137\160\165\163\150\142",8);
+G v307=rt_view(v306);
+G v308=2ull;
+G v309=f_grailc_statement_call(v0,v307,v308);
+G v310=0;
+return v310;
 }
-G v305=rt_lit("\167\162\151\164\145",5);
-G v306=rt_view(v305);
-G v307=f_grailc_eat(v0,v306);
-if(v307){
-G v308=rt_lit("\162\164\137\167\162\151\164\145",8);
-G v309=rt_view(v308);
-G v310=3ull;
-G v311=f_grailc_statement_call(v0,v309,v310);
-G v312=0;
-return v312;
+G v311=rt_lit("\167\162\151\164\145",5);
+G v312=rt_view(v311);
+G v313=f_grailc_eat(v0,v312);
+if(v313){
+G v314=rt_lit("\162\164\137\167\162\151\164\145",8);
+G v315=rt_view(v314);
+G v316=3ull;
+G v317=f_grailc_statement_call(v0,v315,v316);
+G v318=0;
+return v318;
 }
-G v313=rt_lit("\141\163\163\145\162\164",6);
-G v314=rt_view(v313);
-G v315=f_grailc_eat(v0,v314);
-if(v315){
-G v316=rt_lit("\050",1);
-G v317=rt_view(v316);
-G v318=f_grailc_expect(v0,v317);
-G v319=0ull;
-G v320=f_grailc_expr(v0,v319);
-G v321=v320;
-G v322=rt_lit("\051",1);
+G v319=rt_lit("\141\163\163\145\162\164",6);
+G v320=rt_view(v319);
+G v321=f_grailc_eat(v0,v320);
+if(v321){
+G v322=rt_lit("\050",1);
 G v323=rt_view(v322);
 G v324=f_grailc_expect(v0,v323);
-G v325=rt_lit("\073",1);
-G v326=rt_view(v325);
-G v327=f_grailc_expect(v0,v326);
-G v328=rt_lit("\151\146\050\041",4);
+G v325=0ull;
+G v326=f_grailc_expr(v0,v325);
+G v327=v326;
+G v328=rt_lit("\051",1);
 G v329=rt_view(v328);
-G v330=f_grailc_o(v0,v329);
-G v331=((G*)v321)[0];
-G v332=f_grailc_ov(v0,v331);
-G v333=rt_lit("\051\141\142\157\162\164\050\051\073\012",10);
-G v334=rt_view(v333);
-G v335=f_grailc_o(v0,v334);
-G v336=0;
-return v336;
-}
-G v337=f_grailc_assignment_ahead(v0);
-if(v337){
-G v338=f_grailc_ident(v0);
-G v339=v338;
+G v330=f_grailc_expect(v0,v329);
+G v331=rt_lit("\073",1);
+G v332=rt_view(v331);
+G v333=f_grailc_expect(v0,v332);
+G v334=rt_lit("\151\146\050\041",4);
+G v335=rt_view(v334);
+G v336=f_grailc_o(v0,v335);
+G v337=((G*)v327)[0];
+G v338=f_grailc_ov(v0,v337);
+G v339=rt_lit("\051\141\142\157\162\164\050\051\073\012",10);
 G v340=rt_view(v339);
-G v341=f_grailc_find_local(v0,v340);
-G v342=v341;
-G v343=0ull;
-G v344=(v342==v343);
-if(v344){
-G v345=rt_lit("\165\156\144\145\146\151\156\145\144\040\141\163\163\151\147\156\155\145\156\164",20);
+G v341=f_grailc_o(v0,v340);
+G v342=0;
+return v342;
+}
+G v343=f_grailc_assignment_ahead(v0);
+if(v343){
+G v344=f_grailc_ident(v0);
+G v345=v344;
 G v346=rt_view(v345);
-G v347=f_grailc_fail(v0,v346);
+G v347=f_grailc_find_local(v0,v346);
+G v348=v347;
+G v349=0ull;
+G v350=(v348==v349);
+if(v350){
+G v351=rt_lit("\165\156\144\145\146\151\156\145\144\040\141\163\163\151\147\156\155\145\156\164",20);
+G v352=rt_view(v351);
+G v353=f_grailc_fail(v0,v352);
 }
-G v348=1ull;
-G v349=(v342-v348);
-G v350=f_grailc_local_id(v0,v349);
-G v351=v350;
-G v352=1ull;
-G v353=(v342-v352);
-G v354=f_grailc_local_ty(v0,v353);
-G v355=v354;
-G v356=v351;
-G v357=0ull;
-G v358=v357;
-G v359=f_grailc_kind(v0);
-G v360=46ull;
-G v361=(v359==v360);
-if(v361){
-G v362=1ull;
-G v363=f_grailc_field_path(v0,v351,v355,v362);
+G v354=1ull;
+G v355=(v348-v354);
+G v356=f_grailc_local_id(v0,v355);
+G v357=v356;
+G v358=1ull;
+G v359=(v348-v358);
+G v360=f_grailc_local_ty(v0,v359);
+G v361=v360;
+G v362=v357;
+G v363=0ull;
 G v364=v363;
-G v365=((G*)v364)[0];
-v356=v365;
-G v366=1ull;
-v358=v366;
+G v365=f_grailc_kind(v0);
+G v366=46ull;
+G v367=(v365==v366);
+if(v367){
+G v368=1ull;
+G v369=f_grailc_field_path(v0,v357,v361,v368);
+G v370=v369;
+G v371=((G*)v370)[0];
+v362=v371;
+G v372=1ull;
+v364=v372;
 }
-G v367=rt_lit("\075",1);
-G v368=rt_view(v367);
-G v369=f_grailc_expect(v0,v368);
-G v370=0ull;
-G v371=f_grailc_expr(v0,v370);
-G v372=v371;
-G v373=rt_lit("\073",1);
-G v374=rt_view(v373);
-G v375=f_grailc_expect(v0,v374);
-if(v358){
-G v376=rt_lit("\052\050\107\052\051",5);
-G v377=rt_view(v376);
-G v378=f_grailc_o(v0,v377);
+G v373=f_grailc_kind(v0);
+G v374=v373;
+G v375=f_grailc_advance(v0);
+G v376=v362;
+G v377=61ull;
+G v378=(v374!=v377);
+if(v378){
+if(v364){
+G v379=f_grailc_def(v0);
+v376=v379;
+G v380=rt_lit("\052\050\107\052\051",5);
+G v381=rt_view(v380);
+G v382=f_grailc_o(v0,v381);
+G v383=f_grailc_ov(v0,v362);
+G v384=rt_lit("\073\012",2);
+G v385=rt_view(v384);
+G v386=f_grailc_o(v0,v385);
 }
-G v379=f_grailc_ov(v0,v356);
-G v380=*(G*)v0;
-G v381=((G*)v380)[3];
-G v382=61ull;
-rt_push(v381,v382);
-G v383=0;
-G v384=((G*)v372)[0];
-G v385=f_grailc_ov(v0,v384);
-G v386=rt_lit("\073\012",2);
-G v387=rt_view(v386);
-G v388=f_grailc_o(v0,v387);
-G v389=0;
-return v389;
+else{
+G v387=f_grailc_def(v0);
+v376=v387;
+G v388=f_grailc_ov(v0,v357);
+G v389=rt_lit("\073\012",2);
+G v390=rt_view(v389);
+G v391=f_grailc_o(v0,v390);
 }
-G v390=0ull;
-G v391=f_grailc_expr(v0,v390);
-G v392=v391;
-G v393=rt_lit("\073",1);
-G v394=rt_view(v393);
-G v395=f_grailc_expect(v0,v394);
-G v396=0;
-return v396;
+}
+G v392=0ull;
+G v393=f_grailc_expr(v0,v392);
+G v394=v393;
+G v395=rt_lit("\073",1);
+G v396=rt_view(v395);
+G v397=f_grailc_expect(v0,v396);
+G v398=61ull;
+G v399=(v374!=v398);
+if(v399){
+G v400=f_grailc_compound_operator(v374);
+G v401=((G*)v394)[0];
+G v402=f_grailc_binary(v0,v400,v376,v401);
+G v403=v402;
+G v404=0ull;
+G v405=f_grailc_val(v403,v404);
+v394=v405;
+}
+if(v364){
+G v406=rt_lit("\052\050\107\052\051",5);
+G v407=rt_view(v406);
+G v408=f_grailc_o(v0,v407);
+}
+G v409=f_grailc_ov(v0,v362);
+G v410=*(G*)v0;
+G v411=((G*)v410)[3];
+G v412=61ull;
+rt_push(v411,v412);
+G v413=0;
+G v414=((G*)v394)[0];
+G v415=f_grailc_ov(v0,v414);
+G v416=rt_lit("\073\012",2);
+G v417=rt_view(v416);
+G v418=f_grailc_o(v0,v417);
+G v419=0;
+return v419;
+}
+G v420=0ull;
+G v421=f_grailc_expr(v0,v420);
+G v422=v421;
+G v423=rt_lit("\073",1);
+G v424=rt_view(v423);
+G v425=f_grailc_expect(v0,v424);
+G v426=0;
+return v426;
 }
 return 0;}
 static G f_grailc_host_fn(G v0,G v1,G v2){{
@@ -3574,25 +3710,28 @@ G v35=(v32+v34);
 G v36=42ull;
 G v37=(v0==v36);
 G v38=(v35+v37);
-G v39=37ull;
+G v39=47ull;
 G v40=(v0==v39);
 G v41=(v38+v40);
-G v42=38ull;
+G v42=37ull;
 G v43=(v0==v42);
 G v44=(v41+v43);
-G v45=94ull;
+G v45=38ull;
 G v46=(v0==v45);
 G v47=(v44+v46);
-G v48=46ull;
+G v48=94ull;
 G v49=(v0==v48);
 G v50=(v47+v49);
-G v51=33ull;
+G v51=46ull;
 G v52=(v0==v51);
 G v53=(v50+v52);
-G v54=63ull;
+G v54=33ull;
 G v55=(v0==v54);
 G v56=(v53+v55);
-return v56;
+G v57=63ull;
+G v58=(v0==v57);
+G v59=(v56+v58);
+return v59;
 }
 return 0;}
 static G f_lexer_pair_kind(G v0,G v1){{
@@ -3641,8 +3780,71 @@ if(v30){
 G v31=260ull;
 return v31;
 }
-G v32=0ull;
-return v32;
+G v32=58ull;
+G v33=(v0==v32);
+G v34=61ull;
+G v35=(v1==v34);
+G v36=(v33&v35);
+if(v36){
+G v37=261ull;
+return v37;
+}
+G v38=43ull;
+G v39=(v0==v38);
+G v40=61ull;
+G v41=(v1==v40);
+G v42=(v39&v41);
+if(v42){
+G v43=262ull;
+return v43;
+}
+G v44=45ull;
+G v45=(v0==v44);
+G v46=61ull;
+G v47=(v1==v46);
+G v48=(v45&v47);
+if(v48){
+G v49=263ull;
+return v49;
+}
+G v50=42ull;
+G v51=(v0==v50);
+G v52=61ull;
+G v53=(v1==v52);
+G v54=(v51&v53);
+if(v54){
+G v55=264ull;
+return v55;
+}
+G v56=47ull;
+G v57=(v0==v56);
+G v58=61ull;
+G v59=(v1==v58);
+G v60=(v57&v59);
+if(v60){
+G v61=265ull;
+return v61;
+}
+G v62=37ull;
+G v63=(v0==v62);
+G v64=61ull;
+G v65=(v1==v64);
+G v66=(v63&v65);
+if(v66){
+G v67=266ull;
+return v67;
+}
+G v68=42ull;
+G v69=(v0==v68);
+G v70=42ull;
+G v71=(v1==v70);
+G v72=(v69&v71);
+if(v72){
+G v73=267ull;
+return v73;
+}
+G v74=0ull;
+return v74;
 }
 return 0;}
 static G f_lexer_tokenize(G v0){{
@@ -3668,189 +3870,214 @@ continue;
 G v13=47ull;
 G v14=(v9==v13);
 if(v14){
-G v15=1ull;
-G v16=(v6+v15);
-G v17=(v16<v4);
-if(!v17)abort();
-G v18=1ull;
-G v19=(v6+v18);
-G v20=rt_at(v0,v19);
-G v21=47ull;
-G v22=(v20==v21);
-if(!v22)abort();
-G v23=2ull;
-G v24=(v6+v23);
-v6=v24;
+G v15=0ull;
+G v16=v15;
+G v17=1ull;
+G v18=(v6+v17);
+G v19=(v18<v4);
+if(v19){
+G v20=1ull;
+G v21=(v6+v20);
+G v22=rt_at(v0,v21);
+G v23=47ull;
+G v24=(v22==v23);
+if(v24){
+G v25=1ull;
+v16=v25;
+}
+}
+if(v16){
+G v26=2ull;
+G v27=(v6+v26);
+v6=v27;
 for(;;){
-G v25=(v6<v4);
-if(!v25)break;
+G v28=(v6<v4);
+if(!v28)break;
 {
-G v26=rt_at(v0,v6);
-G v27=10ull;
-G v28=(v26==v27);
-if(v28){
+G v29=rt_at(v0,v6);
+G v30=10ull;
+G v31=(v29==v30);
+if(v31){
 break;
 }
-G v29=1ull;
-G v30=(v6+v29);
-v6=v30;
+G v32=1ull;
+G v33=(v6+v32);
+v6=v33;
 }
 }
 continue;
 }
-G v31=v6;
-G v32=0ull;
-G v33=v32;
-G v34=34ull;
-G v35=(v9==v34);
-if(v35){
-G v36=3ull;
-v33=v36;
-G v37=1ull;
-G v38=(v6+v37);
-v6=v38;
-G v39=0ull;
-G v40=v39;
-for(;;){
-G v41=(v6<v4);
-if(!v41)break;
-{
-G v42=rt_at(v0,v6);
+}
+G v34=v6;
+G v35=0ull;
+G v36=v35;
+G v37=34ull;
+G v38=(v9==v37);
+if(v38){
+G v39=3ull;
+v36=v39;
+G v40=1ull;
+G v41=(v6+v40);
+v6=v41;
+G v42=0ull;
 G v43=v42;
-G v44=34ull;
-G v45=(v43==v44);
-if(v45){
-G v46=1ull;
-G v47=(v6+v46);
-v6=v47;
-G v48=1ull;
-v40=v48;
+for(;;){
+G v44=(v6<v4);
+if(!v44)break;
+{
+G v45=rt_at(v0,v6);
+G v46=v45;
+G v47=34ull;
+G v48=(v46==v47);
+if(v48){
+G v49=1ull;
+G v50=(v6+v49);
+v6=v50;
+G v51=1ull;
+v43=v51;
 break;
 }
-G v49=32ull;
-G v50=(v43<v49);
-G v51=0ull;
-G v52=(v50==v51);
-if(!v52)abort();
-G v53=92ull;
-G v54=(v43==v53);
-if(v54){
-G v55=1ull;
-G v56=(v6+v55);
-v6=v56;
-G v57=(v6==v4);
+G v52=32ull;
+G v53=(v46<v52);
+G v54=0ull;
+G v55=(v53==v54);
+if(!v55)abort();
+G v56=92ull;
+G v57=(v46==v56);
 if(v57){
-break;
-}
-}
 G v58=1ull;
 G v59=(v6+v58);
 v6=v59;
-}
-}
-if(!v40)abort();
-}
-else{
-G v60=f_lexer_letter(v9);
+G v60=(v6==v4);
 if(v60){
+break;
+}
+}
 G v61=1ull;
-v33=v61;
-G v62=1ull;
-G v63=(v6+v62);
-v6=v63;
-for(;;){
-G v64=(v6<v4);
-if(!v64)break;
-{
-G v65=rt_at(v0,v6);
-G v66=v65;
-G v67=f_lexer_letter(v66);
-G v68=f_lexer_digit(v66);
-G v69=(v67+v68);
-G v70=0ull;
-G v71=(v69==v70);
-if(v71){
-break;
-}
-G v72=1ull;
-G v73=(v6+v72);
-v6=v73;
+G v62=(v6+v61);
+v6=v62;
 }
 }
+if(!v43)abort();
 }
 else{
-G v74=f_lexer_digit(v9);
+G v63=f_lexer_letter(v9);
+if(v63){
+G v64=1ull;
+v36=v64;
+G v65=1ull;
+G v66=(v6+v65);
+v6=v66;
+for(;;){
+G v67=(v6<v4);
+if(!v67)break;
+{
+G v68=rt_at(v0,v6);
+G v69=v68;
+G v70=f_lexer_letter(v69);
+G v71=f_lexer_digit(v69);
+G v72=(v70+v71);
+G v73=0ull;
+G v74=(v72==v73);
 if(v74){
-G v75=2ull;
-v33=v75;
-G v76=1ull;
-G v77=(v6+v76);
-v6=v77;
-for(;;){
-G v78=(v6<v4);
-if(!v78)break;
-{
-G v79=rt_at(v0,v6);
-G v80=f_lexer_digit(v79);
-G v81=0ull;
-G v82=(v80==v81);
-if(v82){
 break;
 }
-G v83=1ull;
-G v84=(v6+v83);
-v6=v84;
+G v75=1ull;
+G v76=(v6+v75);
+v6=v76;
 }
 }
 }
 else{
-G v85=1ull;
-G v86=(v6+v85);
-G v87=(v86<v4);
-if(v87){
+G v77=f_lexer_digit(v9);
+if(v77){
+G v78=2ull;
+v36=v78;
+G v79=1ull;
+G v80=(v6+v79);
+v6=v80;
+for(;;){
+G v81=(v6<v4);
+if(!v81)break;
+{
+G v82=rt_at(v0,v6);
+G v83=f_lexer_digit(v82);
+G v84=0ull;
+G v85=(v83==v84);
+if(v85){
+break;
+}
+G v86=1ull;
+G v87=(v6+v86);
+v6=v87;
+}
+}
+}
+else{
 G v88=1ull;
 G v89=(v6+v88);
-G v90=rt_at(v0,v89);
-G v91=f_lexer_pair_kind(v9,v90);
-v33=v91;
+G v90=(v89<v4);
+if(v90){
+G v91=1ull;
+G v92=(v6+v91);
+G v93=rt_at(v0,v92);
+G v94=f_lexer_pair_kind(v9,v93);
+v36=v94;
 }
-G v92=0ull;
-G v93=(v33!=v92);
-if(v93){
-G v94=2ull;
-G v95=(v6+v94);
-v6=v95;
-}
-else{
-G v96=f_lexer_punctuation(v9);
-if(!v96)abort();
-v33=v9;
-G v97=1ull;
+G v95=0ull;
+G v96=(v36!=v95);
+if(v96){
+G v97=2ull;
 G v98=(v6+v97);
 v6=v98;
+G v99=267ull;
+G v100=(v36==v99);
+if(v100){
+G v101=(v6<v4);
+if(v101){
+G v102=rt_at(v0,v6);
+G v103=61ull;
+G v104=(v102==v103);
+if(v104){
+G v105=268ull;
+v36=v105;
+G v106=1ull;
+G v107=(v6+v106);
+v6=v107;
 }
 }
 }
 }
-G v99=rt_rec(4);
-((G*)v99)[0]=v33;
-G v100=rt_slice(v0,v31,v6);
-((G*)v99)[1]=v100;
-((G*)v99)[2]=v31;
-((G*)v99)[3]=v6;
-rt_push(v2,v99);
-G v101=0;
+else{
+G v108=f_lexer_punctuation(v9);
+if(!v108)abort();
+v36=v9;
+G v109=1ull;
+G v110=(v6+v109);
+v6=v110;
 }
 }
-G v102=rt_rec(4);
-G v103=0ull;
-((G*)v102)[0]=v103;
-G v104=rt_slice(v0,v4,v4);
-((G*)v102)[1]=v104;
-((G*)v102)[2]=v4;
-((G*)v102)[3]=v4;
-rt_push(v2,v102);
-G v105=0;
+}
+}
+G v111=rt_rec(4);
+((G*)v111)[0]=v36;
+G v112=rt_slice(v0,v34,v6);
+((G*)v111)[1]=v112;
+((G*)v111)[2]=v34;
+((G*)v111)[3]=v6;
+rt_push(v2,v111);
+G v113=0;
+}
+}
+G v114=rt_rec(4);
+G v115=0ull;
+((G*)v114)[0]=v115;
+G v116=rt_slice(v0,v4,v4);
+((G*)v114)[1]=v116;
+((G*)v114)[2]=v4;
+((G*)v114)[3]=v4;
+rt_push(v2,v114);
+G v117=0;
 return v2;
 }
 return 0;}

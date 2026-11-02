@@ -45,7 +45,7 @@ fn counted_while_nested_and_match_jumps_execute_in_c_and_llvm() {
     fs::write(dir.join("control.grl"), provider).unwrap();
     compile(&dir, "control", false, &backend);
     fs::remove_file(dir.join("control.grl")).unwrap();
-    let client = "module client;use control;pub fn run<a>(input:read<a>)->num{let n=len(input);return control::counted(n)+64*control::repeated(n)+4096*control::nested(n);}";
+    let client = "module client;use control;pub fn run<a>(input:read<a>)->num{n :=len(input);return control::counted(n)+64*control::repeated(n)+4096*control::nested(n);}";
     fs::write(dir.join("client.grl"), client).unwrap();
     compile(&dir, "client", true, &backend);
     let p = grail_seed::source::compile(provider, BTreeMap::new()).unwrap();
@@ -106,7 +106,7 @@ fn counted_while_nested_and_match_jumps_execute_in_c_and_llvm() {
             );
         }
     }
-    fs::write(dir.join("unique.grl"),"module unique;use control;pub fn run<a>(p:read<a>)->num{let b=bytes();push(b,7);let n=control::unique(mut(b),len(p));push(b,8);return n+at(read(b),1);}").unwrap();
+    fs::write(dir.join("unique.grl"),"module unique;use control;pub fn run<a>(p:read<a>)->num{var b =bytes();push(b,7);n :=control::unique(mut(b),len(p));push(b,8);return n+at(read(b),1);}").unwrap();
     compile(&dir, "unique", true, &backend);
     for n in [0, 1, 4] {
         assert_eq!(
@@ -115,7 +115,7 @@ fn counted_while_nested_and_match_jumps_execute_in_c_and_llvm() {
         );
     }
     // A match switch must not intercept the enclosing loop's break/continue.
-    fs::write(dir.join("tagged.grl"),"module tagged;enum O{Some(num),None}pub fn run<a>(p:read<a>)->num{var sum=0;for i in len(p){let value=O::Some(i);match value{Some(n)=>{if n==3{break;}if n==1{continue;}sum=sum+n;},None=>{break;}}}return sum;}").unwrap();
+    fs::write(dir.join("tagged.grl"),"module tagged;enum O{Some(num),None}pub fn run<a>(p:read<a>)->num{var sum=0;for i in len(p){value :=O::Some(i);match value{Some(n)=>{if n==3{break;}if n==1{continue;}sum=sum+n;},None=>{break;}}}return sum;}").unwrap();
     compile(&dir, "tagged", true, &backend);
     for n in 0..10 {
         let expected = (0..n)
@@ -193,7 +193,7 @@ fn exits_destroy_local_owners_once_and_break_does_not_retest_condition() {
     );
     audit_program(
         "matched",
-        r#"module matched;enum Signal{Next(string),Stop(string)}pub fn run()->num{let source=bytes();push(source,7);for i in 6{let before="before";let event=choose(i);match event{Next(value)=>{assert(len(value)==4);continue;},Stop(reason)=>{assert(len(reason)==4);break;}}}return len(source);}fn choose(n:num)->Signal{if n==0{return Signal::Next("next");}return Signal::Stop("stop");}"#,
+        r#"module matched;enum Signal{Next(string),Stop(string)}pub fn run()->num{var source =bytes();push(source,7);for i in 6{before :="before";event :=choose(i);match event{Next(value)=>{assert(len(value)==4);continue;},Stop(reason)=>{assert(len(reason)==4);break;}}}return len(source);}fn choose(n:num)->Signal{if n==0{return Signal::Next("next");}return Signal::Stop("stop");}"#,
         1,
         &[3, 2, 5, 4, 1],
         &backend,

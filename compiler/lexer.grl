@@ -3,7 +3,8 @@ module lexer;
 // Stable token kinds: 0 EOF, 1 identifier (keywords included), 2 decimal
 // number, 3 string literal (including both quotes). Single-byte punctuation
 // uses its ASCII byte value: (){}<>,:;=+-*%&^.!?
-// Multibyte punctuation: 256 ->, 257 =>, 258 ==, 259 !=, 260 ::.
+// Multibyte punctuation: 256 ->, 257 =>, 258 ==, 259 !=, 260 ::, 261 :=, 262 +=, 263 -=,
+// 264 *=, 265 /=, 266 %=, 267 **, 268 **=.
 // All spans borrow source, including the empty EOF span at len(source).
 pub struct Token<a> { kind:num, span:read<a>, start:num, end:num }
 
@@ -17,7 +18,7 @@ fn whitespace(c:num)->num {
 fn punctuation(c:num)->num {
     return (c==40)+(c==41)+(c==123)+(c==125)+(c==60)+(c==62)
         +(c==44)+(c==58)+(c==59)+(c==61)+(c==43)+(c==45)
-        +(c==42)+(c==37)+(c==38)+(c==94)+(c==46)+(c==33)+(c==63);
+        +(c==42)+(c==47)+(c==37)+(c==38)+(c==94)+(c==46)+(c==33)+(c==63);
 }
 fn pair_kind(c:num,d:num)->num {
     if (c==45)&(d==62) { return 256; }
@@ -25,6 +26,13 @@ fn pair_kind(c:num,d:num)->num {
     if (c==61)&(d==61) { return 258; }
     if (c==33)&(d==61) { return 259; }
     if (c==58)&(d==58) { return 260; }
+    if (c==58)&(d==61) { return 261; }
+    if (c==43)&(d==61) { return 262; }
+    if (c==45)&(d==61) { return 263; }
+    if (c==42)&(d==61) { return 264; }
+    if (c==47)&(d==61) { return 265; }
+    if (c==37)&(d==61) { return 266; }
+    if (c==42)&(d==42) { return 267; }
     return 0;
 }
 
@@ -34,30 +42,31 @@ fn pair_kind(c:num,d:num)->num {
 // Non-ASCII bytes are accepted inside strings/comments, not identifiers.
 // Invalid characters, raw string control bytes and unclosed strings abort.
 pub fn tokenize<a>(source:read<a>)->vec<Token<a>> {
-    let tokens=vec<Token<a>>();
-    let size=len(source);
+    var tokens =vec<Token<a>>();
+    size :=len(source);
     var i=0;
     while i<size {
-        let c=at(source,i);
+        c :=at(source,i);
         if whitespace(c) { i=i+1; continue; }
         if c==47 {
-            assert(i+1<size);
-            assert(at(source,i+1)==47);
+            var comment=0;if i+1<size{if at(source,i+1)==47{comment=1;}}
+            if comment{
             i=i+2;
             while i<size {
                 if at(source,i)==10 { break; }
                 i=i+1;
             }
             continue;
+            }
         }
-        let start=i;
+        start :=i;
         var kind=0;
         if c==34 {
             kind=3;
             i=i+1;
             var closed=0;
             while i<size {
-                let b=at(source,i);
+                b :=at(source,i);
                 if b==34 { i=i+1; closed=1; break; }
                 assert((b<32)==0);
                 if b==92 {
@@ -72,7 +81,7 @@ pub fn tokenize<a>(source:read<a>)->vec<Token<a>> {
                 kind=1;
                 i=i+1;
                 while i<size {
-                    let b=at(source,i);
+                    b :=at(source,i);
                     if (letter(b)+digit(b))==0 { break; }
                     i=i+1;
                 }
@@ -86,7 +95,7 @@ pub fn tokenize<a>(source:read<a>)->vec<Token<a>> {
                     }
                 } else {
                     if i+1<size { kind=pair_kind(c,at(source,i+1)); }
-                    if kind!=0 { i=i+2; } else {
+                    if kind!=0 { i=i+2;if kind==267{if i<size{if at(source,i)==61{kind=268;i=i+1;}}} } else {
                         assert(punctuation(c));
                         kind=c;
                         i=i+1;

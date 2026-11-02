@@ -143,6 +143,8 @@ pub enum Bin {
     Sub,
     Lt,
     Mul,
+    Div,
+    Pow,
     Xor,
     Rem,
     Eq,
@@ -835,7 +837,11 @@ impl State {
                     mode,
                 } => {
                     let source_ty = &self.get(*src)?.ty;
-                    let inner = if let Ty::Ref(_, _, inner) = source_ty { inner.as_ref() } else { source_ty };
+                    let inner = if let Ty::Ref(_, _, inner) = source_ty {
+                        inner.as_ref()
+                    } else {
+                        source_ty
+                    };
                     let (_, field_ty) = types::project(inner, path, &self.layouts)?;
                     if matches!(field_ty, Ty::Vector(_)) {
                         self.address(*dst, *src, path, *mode)?;

@@ -149,7 +149,7 @@ fn generic_standard_functions_preserve_owned_captures_authority_and_eager_values
     fs::write(dir.join("core.grl"), include_str!("../std/core.grl")).unwrap();
     run(&mut command(&dir, "core", false, &backend));
     fs::remove_file(dir.join("core.grl")).unwrap();
-    let program = r#"module values;use core;struct Token<a>{span:read<a>,name:string}pub fn run<a>(input:read<a>)->num{let left=bytes();push(left,1);let right=bytes();push(right,2);let pair=core::unwrap_option(core::some(core::pair(mut(left),mut(right))));write(pair.first,0,3);write(pair.second,0,4);core::discard(pair);push(left,7);push(right,8);let token=Token{span:read(input),name:"token"};let result=core::ok<Token<a>,string>(token);let value=core::unwrap_result(result);let name=value.name;let label=core::identity("owned");return len(value.span)+len(name)+len(label)+at(read(left),0)+at(read(right),0)+at(read(left),1)+at(read(right),1);}"#;
+    let program = r#"module values;use core;struct Token<a>{span:read<a>,name:string}pub fn run<a>(input:read<a>)->num{var left =bytes();push(left,1);var right =bytes();push(right,2);var pair =core::unwrap_option(core::some(core::pair(mut(left),mut(right))));write(pair.first,0,3);write(pair.second,0,4);core::discard(pair);push(left,7);push(right,8);token :=Token{span:read(input),name:"token"};result :=core::ok<Token<a>,string>(token);value :=core::unwrap_result(result);name :=value.name;label :=core::identity("owned");return len(value.span)+len(name)+len(label)+at(read(left),0)+at(read(right),0)+at(read(left),1)+at(read(right),1);}"#;
     fs::write(dir.join("values.grl"), program).unwrap();
     run(&mut command(&dir, "values", true, &backend));
     for input in ["", "abc", "hé🙂"] {
@@ -158,7 +158,7 @@ fn generic_standard_functions_preserve_owned_captures_authority_and_eager_values
             format!("{}\n", 32 + input.len()).as_bytes()
         );
     }
-    fs::write(dir.join("eager.grl"),"module eager;pub fn run()->num{let b=bytes();push(b,7);return first(at(read(b),0),change(mut(b)));}fn first<type T>(value:T,ignored:num)->T{return value;}fn change<a>(p:mut<a>)->num{write(p,0,99);return 0;}").unwrap();
+    fs::write(dir.join("eager.grl"),"module eager;pub fn run()->num{var b =bytes();push(b,7);return first(at(read(b),0),change(mut(b)));}fn first<type T>(value:T,ignored:num)->T{return value;}fn change<a>(p:mut<a>)->num{write(p,0,99);return 0;}").unwrap();
     run(&mut command(&dir, "eager", true, &backend));
     assert_eq!(run(&mut Command::new(dir.join("eager"))).stdout, b"7\n");
     let numeric = "module numeric;pub fn run()->num{return repeat(7,12);}fn repeat<type T>(value:T,n:num)->num{if n==0{return 0;}return repeat(value,n-1)+1;}";

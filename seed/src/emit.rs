@@ -287,7 +287,7 @@ fn vector_storage(r: Reg, types: &BTreeMap<Reg, Ty>) -> (String, Ty) {
 }
 fn c_functions(functions: &[(&Checked, bool)], layouts: &crate::types::Definitions) -> String {
     let mut s = String::from(
-        "#include <stdint.h>\n#include <stdlib.h>\n#include <string.h>\ntypedef struct { uint8_t *p; uint64_t n; } gv;\ntypedef struct { gv value; } gh;\ntypedef struct {uint8_t*p;uint64_t n,c;} gb;\ntypedef struct {void*p;uint64_t n,c;} ga;\n#define GRAIL_BYTES_TYPES_DEFINED\n",
+        "#include <stdint.h>\n#include <stdlib.h>\n#include <string.h>\ntypedef struct { uint8_t *p; uint64_t n; } gv;\ntypedef struct { gv value; } gh;\ntypedef struct {uint8_t*p;uint64_t n,c;} gb;\ntypedef struct {void*p;uint64_t n,c;} ga;\n#define GRAIL_BYTES_TYPES_DEFINED\nstatic inline uint64_t grail_u64_pow(uint64_t a,uint64_t b){uint64_t r=1;while(b){if(b&1)r*=a;b>>=1;a*=a;}return r;}\n",
     );
     let mut roots = Vec::new();
     for (p, _) in functions {
@@ -473,7 +473,8 @@ fn c_body(p: &Checked, s: &mut String, private: bool) {
         Op::Len{dst,src}=>{let value=if matches!(types[src],Ty::Vector(_))||matches!(&types[src],Ty::Ref(_,_,inner)if matches!(inner.as_ref(),Ty::Vector(_))){vector_storage(*src,types).0}else{view(*src,types)};writeln!(s,"r{dst}={value}.n;").unwrap()},
         Op::Read{dst,src,index}=>{let v=view(*src,types);writeln!(s,"if (r{index}>={v}.n) abort(); r{dst}={v}.p[r{index}];").unwrap()},
         Op::Write{dst,index,value}=>{let v=view(*dst,types);writeln!(s,"if (r{index}>={v}.n) abort(); {v}.p[r{index}]=(uint8_t)r{value};").unwrap()},
-        Op::Binary{dst,op,left,right}=>{let symbol=match op{Bin::Add=>"+",Bin::Sub=>"-",Bin::Lt=>"<",Bin::Mul=>"*",Bin::Xor=>"^",Bin::Rem=>"%",Bin::Eq=>"==",Bin::Ne=>"!=",Bin::And=>"&"};if matches!(op,Bin::Rem){writeln!(s,"if (!r{right}) abort();").unwrap()}writeln!(s,"r{dst}=r{left} {symbol} r{right};").unwrap()},
+        Op::Binary{dst,op,left,right}=>{let symbol=match op{Bin::Add=>"+",Bin::Sub=>"-",Bin::Lt=>"<",Bin::Mul=>"*",Bin::Div=>"/",Bin::Pow=>"",Bin::Xor=>"^",Bin::Rem=>"%",Bin::Eq=>"==",Bin::Ne=>"!=",Bin::And=>"&"};if matches!(op,Bin::Rem|Bin::Div){writeln!(s,"if (!r{right}) abort();").unwrap()}
+        if matches!(op,Bin::Pow){writeln!(s,"r{dst}=grail_u64_pow(r{left},r{right});").unwrap()}else{writeln!(s,"r{dst}=r{left} {symbol} r{right};").unwrap()}},
         Op::Call{dst,name,args}=>{writeln!(s,"r{dst}={}({});",symbol(name),args.iter().map(|r|format!("r{r}")).collect::<Vec<_>>().join(",")).unwrap();for r in args{record_flags(s,*r,&types[r],layouts,false);}record_flags(s,*dst,&types[dst],layouts,true);},
         Op::Block{body}=>{s.push_str("{\n");ops(s,body,types,layouts,jumps);s.push_str("}\n")},
         Op::While{condition,test,body}=>{
@@ -781,7 +782,7 @@ impl Ll {
                 } => {
                     let a = self.load(*left);
                     let b = self.load(*right);
-                    if matches!(op, Bin::Rem) {
+                    if matches!(op, Bin::Rem | Bin::Div) {
                         let cond = self.fresh();
                         self.line(format!("%{cond} = icmp ne i64 {b}, 0"));
                         self.guard(&format!("%{cond}"))
@@ -792,13 +793,19 @@ impl Ll {
                         Bin::Sub => "sub",
                         Bin::Lt => "icmp ult",
                         Bin::Mul => "mul",
+                        Bin::Div => "udiv",
+                        Bin::Pow => "",
                         Bin::Xor => "xor",
                         Bin::Rem => "urem",
                         Bin::Eq => "icmp eq",
                         Bin::Ne => "icmp ne",
                         Bin::And => "and",
                     };
-                    self.line(format!("%{x} = {opcode} i64 {a}, {b}"));
+                    if matches!(op, Bin::Pow) {
+                        self.line(format!("%{x} = call i64 @grail_u64_pow(i64 {a}, i64 {b})"));
+                    } else {
+                        self.line(format!("%{x} = {opcode} i64 {a}, {b}"));
+                    }
                     let value = if matches!(op, Bin::Eq | Bin::Ne | Bin::Lt) {
                         let wide = self.fresh();
                         self.line(format!("%{wide} = zext i1 %{x} to i64"));
@@ -948,7 +955,9 @@ fn llvm_functions(functions: &[(&Checked, bool)]) -> Result<String, String> {
                 .map(|(n, s)| (n.clone(), s.clone())),
         );
     }
-    let mut s = String::from("declare void @abort() noreturn\n");
+    let mut s = String::from(
+        "declare void @abort() noreturn\ndefine internal i64 @grail_u64_pow(i64 %a, i64 %b) {\nentry:\n br label %loop\nloop:\n %r=phi i64 [1,%entry],[%nr,%body]\n %f=phi i64 [%a,%entry],[%nf,%body]\n %e=phi i64 [%b,%entry],[%ne,%body]\n %done=icmp eq i64 %e,0\n br i1 %done,label %exit,label %body\nbody:\n %bit=and i64 %e,1\n %odd=icmp ne i64 %bit,0\n %product=mul i64 %r,%f\n %nr=select i1 %odd,i64 %product,i64 %r\n %nf=mul i64 %f,%f\n %ne=lshr i64 %e,1\n br label %loop\nexit:\n ret i64 %r\n}\n",
+    );
     for sig in declarations.values() {
         writeln!(
             s,
