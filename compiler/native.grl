@@ -12,8 +12,8 @@ use ownership;
 // Type kinds: 1 num, 2 unit, 3 bytes, 4 string, 5 view, 6 vec(arg), 7 ref(arg), 8 named(decl).
 
 struct Tok { kind:num, start:num, end:num }
-struct Ty { kind:num, arg:num, mode:num, regions:vec<num> }
-struct Decl { module:bytes, name:bytes, is_enum:num, first:num, count:num, regions:num }
+struct Ty { kind:num, arg:num, mode:num, regions:vec<num>, args:vec<num> }
+struct Decl { module:bytes, name:bytes, is_enum:num, first:num, count:num, regions:num, types:num }
 struct Field { name:bytes, ty:num }
 struct Func { module:bytes, name:bytes, first:num, count:num, ret:num }
 struct Local { name:bytes, ty:num, id:num, last:num, born:num, mutable:num }
@@ -25,7 +25,7 @@ struct Member { base:num, field:num, place:num }
 struct C {
     src:bytes, toks:vec<Tok>, pos:num, out:vec<num>, module:bytes,
     types:vec<Ty>, decls:vec<Decl>, fields:vec<Field>, funcs:vec<Func>, params:vec<num>,
-    locals:vec<Local>, next:num, entry:num, file:num, label:num, brk:num, cont:num, raw:num, rnames:vec<bytes>, resources:vec<Resource>, loopmark:num, result:num, check:ownership::State, members:vec<Member>, terminated:num, loopcheck:ownership::State, breaks:ownership::State, hasbreak:num, bonds:vec<Bond>, origins:vec<Origin>, scope_end:num, loop_start:num, loop_end:num
+    locals:vec<Local>, next:num, entry:num, file:num, label:num, brk:num, cont:num, raw:num, rnames:vec<bytes>, tnames:vec<bytes>, resources:vec<Resource>, loopmark:num, result:num, check:ownership::State, members:vec<Member>, terminated:num, loopcheck:ownership::State, breaks:ownership::State, hasbreak:num, bonds:vec<Bond>, origins:vec<Origin>, scope_end:num, loop_start:num, loop_end:num
 }
 
 fn same<a,b>(x:read<a>,y:read<b>)->num {
@@ -531,10 +531,16 @@ fn load_file<a>(c:ref_mut<a,C>,index:num)->unit {
 fn numbers_equal<a,b>(a:ref<a,vec<num>>,b:ref<b,vec<num>>)->num {
  if len(a)!=len(b){return 0;}for i in len(a){if load(vec_get(a,i))!=load(vec_get(b,i)){return 0;}}return 1;
 }
-fn intern_full<a>(c:ref_mut<a,C>,k:num,arg:num,mode:num,regions:vec<num>)->num {
+fn intern_args<a>(c:ref_mut<a,C>,k:num,arg:num,mode:num,regions:vec<num>,args:vec<num>)->num {
  for i in len(c.types){let t=vec_get(c.types,i);
- if (t.kind==k)&(t.arg==arg)&(t.mode==mode){if numbers_equal(borrow(t.regions),borrow(regions)){return i;}}}
- vec_push(c.types,Ty{kind:k,arg:arg,mode:mode,regions:regions});return len(c.types)-1;
+ if (t.kind==k)&(t.arg==arg)&(t.mode==mode){if numbers_equal(borrow(t.regions),borrow(regions)){if numbers_equal(borrow(t.args),borrow(args)){return i;}}}}
+ vec_push(c.types,Ty{kind:k,arg:arg,mode:mode,regions:regions,args:args});return len(c.types)-1;
+}
+fn intern_full<a>(c:ref_mut<a,C>,k:num,arg:num,mode:num,regions:vec<num>)->num {
+ return intern_args(borrow_mut(c),k,arg,mode,regions,vec<num>());
+}
+fn type_args<a>(c:ref_mut<a,C>,ty:num)->vec<num>{
+ let args=vec<num>();let t=vec_get(c.types,ty);for i in len(t.args){vec_push(args,load(vec_get(t.args,i)));}return args;
 }
 fn intern<a>(c:ref_mut<a,C>,k:num,arg:num)->num {return intern_full(borrow_mut(c),k,arg,0,vec<num>());}
 fn region_id<a>(c:ref_mut<a,C>)->num {
@@ -543,11 +549,18 @@ fn region_id<a>(c:ref_mut<a,C>)->num {
  fail(borrow_mut(c),read("undeclared lifetime"));return 0;
 }
 fn lifetime_parameters<a>(c:ref_mut<a,C>)->unit {
- exchange(borrow_mut(c.rnames),vec<bytes>());
+ exchange(borrow_mut(c.rnames),vec<bytes>());exchange(borrow_mut(c.tnames),vec<bytes>());
  if eat(borrow_mut(c),read("<")){while 1{
- let n=ident(borrow_mut(c));
+ let is_type=eat(borrow_mut(c),read("type"));let n=ident(borrow_mut(c));
+ if is_type{
+ for i in len(c.tnames){let t=vec_get(c.tnames,i);if same(read(t),read(n)){fail(borrow_mut(c),read("duplicate type parameter"));}}
+ vec_push(c.tnames,n);
+ }else{
+ if len(c.tnames)!=0{fail(borrow_mut(c),read("lifetimes must precede type parameters"));}
  for i in len(c.rnames){let r=vec_get(c.rnames,i);if same(read(r),read(n)){fail(borrow_mut(c),read("duplicate lifetime"));}}
- vec_push(c.rnames,n);if eat(borrow_mut(c),read(">")){break;}expect(borrow_mut(c),read(","));}}
+ vec_push(c.rnames,n);
+ }
+ if eat(borrow_mut(c),read(">")){break;}expect(borrow_mut(c),read(","));}}
  return ();
 }
 fn lifetime_arguments<a>(c:ref_mut<a,C>)->vec<num> {
@@ -557,9 +570,15 @@ fn lifetime_arguments<a>(c:ref_mut<a,C>)->vec<num> {
  return rs;
 }
 fn nominal_type<a>(c:ref_mut<a,C>,d:num)->num {
- let rs=lifetime_arguments(borrow_mut(c));let decl=vec_get(c.decls,d);let count=decl.regions;
- if len(rs)!=count{fail(borrow_mut(c),read("nominal lifetime arity"));}
- return intern_full(borrow_mut(c),8,d,0,rs);
+ let decl=vec_get(c.decls,d);let count=decl.regions;let types=decl.types;
+ let rs=vec<num>();let args=vec<num>();
+ if count+types{
+ expect(borrow_mut(c),read("<"));
+ for i in count+types{if i!=0{expect(borrow_mut(c),read(","));}
+ if i<count{let r=region_id(borrow_mut(c));vec_push(rs,r);}else{let t=parse_type(borrow_mut(c));vec_push(args,t);}}
+ expect(borrow_mut(c),read(">"));
+ }
+ return intern_args(borrow_mut(c),8,d,0,rs,args);
 }
 fn ty_kind<a>(c:ref_mut<a,C>,ty:num)->num {
     let t=vec_get(c.types,ty);
@@ -581,11 +600,26 @@ fn substitute<a,b>(c:ref_mut<a,C>,ty:num,map:ref<b,vec<num>>)->num {
  for i in len(rs){let r=load(vec_get(rs,i));if r!=0{
  if len(map)<r{fail(borrow_mut(c),read("unbound stored lifetime"));}
  let n=load(vec_get(map,r-1));exchange(vec_get_mut(rs,i),n);}}
- return intern_full(borrow_mut(c),k,arg,mode,rs);
+ let args=type_args(borrow_mut(c),ty);
+ for i in len(args){let t=load(vec_get(args,i));let v=substitute(borrow_mut(c),t,borrow(map));exchange(vec_get_mut(args,i),v);}
+ return intern_args(borrow_mut(c),k,arg,mode,rs,args);
+}
+fn bind_types<a,b>(c:ref_mut<a,C>,ty:num,map:ref<b,vec<num>>)->num {
+ let k=ty_kind(borrow_mut(c),ty);let mode=ty_mode(borrow_mut(c),ty);var arg=ty_arg(borrow_mut(c),ty);
+ if k==9{if len(map)<arg+1{fail(borrow_mut(c),read("unbound type parameter"));}return load(vec_get(map,arg));}
+ if (k==6)+(k==7){arg=bind_types(borrow_mut(c),arg,borrow(map));}
+ let args=type_args(borrow_mut(c),ty);for i in len(args){let t=load(vec_get(args,i));let v=bind_types(borrow_mut(c),t,borrow(map));exchange(vec_get_mut(args,i),v);}
+ let rs=type_regions(borrow_mut(c),ty);return intern_args(borrow_mut(c),k,arg,mode,rs,args);
 }
 fn field_type<a>(c:ref_mut<a,C>,ty:num,index:num)->num {
- let d=ty_arg(borrow_mut(c),ty);let t=field_ty(borrow_mut(c),d,index);let rs=type_regions(borrow_mut(c),ty);
- if len(rs)==0{return t;}return substitute(borrow_mut(c),t,borrow(rs));
+ let d=ty_arg(borrow_mut(c),ty);let t=field_ty(borrow_mut(c),d,index);let rs=type_regions(borrow_mut(c),ty);let args=type_args(borrow_mut(c),ty);
+ let field=bind_types(borrow_mut(c),t,borrow(args));if len(rs)==0{return field;}return substitute(borrow_mut(c),field,borrow(rs));
+}
+fn concrete_type<a>(c:ref_mut<a,C>,ty:num)->num {
+ let k=ty_kind(borrow_mut(c),ty);if k==9{return 0;}let arg=ty_arg(borrow_mut(c),ty);
+ if (k==6)+(k==7){if concrete_type(borrow_mut(c),arg)==0{return 0;}}
+ let args=type_args(borrow_mut(c),ty);for i in len(args){let a=load(vec_get(args,i));if concrete_type(borrow_mut(c),a)==0{return 0;}}
+ return 1;
 }
 fn reference_type<a>(c:ref_mut<a,C>,ty:num,mode:num)->num{return intern_full(borrow_mut(c),7,ty,mode,vec<num>());}
 // Shape checking does not discharge lifetime obligations; the loan pass handles those separately.
@@ -594,7 +628,9 @@ fn same_type<a>(c:ref_mut<a,C>,x:num,y:num)->num {
  let aa=ty_arg(borrow_mut(c),x);let bb=ty_arg(borrow_mut(c),y);
  if (a==5)+(a==7){let am=ty_mode(borrow_mut(c),x);let bm=ty_mode(borrow_mut(c),y);if am!=bm{return 0;}}
  if (a==6)+(a==7){return same_type(borrow_mut(c),aa,bb);}
- if a==8{return aa==bb;}return 1;
+ if a==8{if aa!=bb{return 0;}let ax=type_args(borrow_mut(c),x);let bx=type_args(borrow_mut(c),y);if len(ax)!=len(bx){return 0;}
+ for i in len(ax){let x=load(vec_get(ax,i));let y=load(vec_get(bx,i));if same_type(borrow_mut(c),x,y)==0{return 0;}}}
+ if a==9{return aa==bb;}return 1;
 }
 fn contains_borrow<a>(c:ref_mut<a,C>,ty:num,depth:num)->num {
  if 64<depth{fail(borrow_mut(c),read("recursive capture layout unsupported"));}
@@ -642,6 +678,7 @@ fn field_ty<a>(c:ref_mut<a,C>,decl:num,index:num)->num {
 fn module_copy<a>(c:ref_mut<a,C>)->bytes { return copy_bytes(read(c.module)); }
 fn parse_type<a>(c:ref_mut<a,C>)->num {
  let first=ident(borrow_mut(c));
+ for i in len(c.tnames){let t=vec_get(c.tnames,i);if same(read(t),read(first)){return intern(borrow_mut(c),9,i);}}
  if eat(borrow_mut(c),read("::")){
  let n=ident(borrow_mut(c));let d=find_decl(borrow_mut(c),read(first),read(n));
  if d==0{fail(borrow_mut(c),read("unknown type"));}return nominal_type(borrow_mut(c),d-1);}
@@ -669,11 +706,11 @@ fn decl<a>(c:ref_mut<a,C>,pass:num)->unit {
     advance(borrow_mut(c));
     let name=ident(borrow_mut(c));
     lifetime_parameters(borrow_mut(c));
-    let regions=len(c.rnames);
+    let regions=len(c.rnames);let types=len(c.tnames);
     if pass!=2 {
         if pass==1 {
             let m=module_copy(borrow_mut(c));
-            vec_push(c.decls,Decl{module:m,name:name,is_enum:is_enum,first:0,count:0,regions:regions});
+            vec_push(c.decls,Decl{module:m,name:name,is_enum:is_enum,first:0,count:0,regions:regions,types:types});
         }
         skip_braces(borrow_mut(c));
         eat(borrow_mut(c),read(";"));
@@ -705,7 +742,7 @@ fn decl<a>(c:ref_mut<a,C>,pass:num)->unit {
         }
     }
     eat(borrow_mut(c),read(";"));
-    exchange(vec_get_mut(c.decls,d-1),Decl{module:m,name:name,is_enum:is_enum,first:first,count:count,regions:regions});
+    exchange(vec_get_mut(c.decls,d-1),Decl{module:m,name:name,is_enum:is_enum,first:first,count:count,regions:regions,types:types});
     return ();
 }
 fn bind<a>(c:ref_mut<a,C>,name:bytes,ty:num,id:num,mutable:num)->unit {
@@ -716,6 +753,7 @@ fn bind<a>(c:ref_mut<a,C>,name:bytes,ty:num,id:num,mutable:num)->unit {
 }
 fn func<a>(c:ref_mut<a,C>,pass:num,public:num)->unit {
  expect(borrow_mut(c),read("fn"));let name=ident(borrow_mut(c));lifetime_parameters(borrow_mut(c));
+ if len(c.tnames)!=0{fail(borrow_mut(c),read("generic function lowering pending"));}
  if pass==1{while kind(borrow_mut(c))!=123{advance(borrow_mut(c));}skip_braces(borrow_mut(c));return ();}
  let m=module_copy(borrow_mut(c));exchange(borrow_mut(c.locals),vec<Local>());exchange(borrow_mut(c.resources),vec<Resource>());exchange(borrow_mut(c.next),0);
  exchange(borrow_mut(c.scope_end),0);exchange(borrow_mut(c.loop_start),0);exchange(borrow_mut(c.loop_end),0);
@@ -855,24 +893,59 @@ fn string_lit<a>(c:ref_mut<a,C>)->Val{
  let ptr=save(borrow_mut(c));let n=imm(borrow_mut(c),count);
  let t=invoke(borrow_mut(c),read("rt_string_lit"),two(ptr,n));return own(borrow_mut(c),t,3);
 }
-fn record<a>(c:ref_mut<a,C>,d:num)->Val{
- expect(borrow_mut(c),read("{"));let x=vec_get(c.decls,d);let count=x.count;if x.is_enum{fail(borrow_mut(c),read("enum requires variant constructor"));}let seen=vec<num>();
- let sz=imm(borrow_mut(c),count);let n=invoke(borrow_mut(c),read("rt_rec"),one(sz));let ty=intern(borrow_mut(c),8,d);own(borrow_mut(c),n,ty);
+fn infer_type<a,b>(c:ref_mut<a,C>,formal:num,actual:num,map:ref_mut<b,vec<num>>)->unit {
+ let k=ty_kind(borrow_mut(c),formal);let arg=ty_arg(borrow_mut(c),formal);
+ if k==9{
+ let old=load(vec_get(map,arg));if old==18446744073709551615{exchange(vec_get_mut(map,arg),actual);}else{require_type(borrow_mut(c),actual,old);}return ();}
+ let ak=ty_kind(borrow_mut(c),actual);if k!=ak{fail(borrow_mut(c),read("generic argument shape mismatch"));}
+ if k==7{let fm=ty_mode(borrow_mut(c),formal);let am=ty_mode(borrow_mut(c),actual);if fm!=am{fail(borrow_mut(c),read("generic reference mode mismatch"));}}
+ if (k==6)+(k==7){let aa=ty_arg(borrow_mut(c),actual);infer_type(borrow_mut(c),arg,aa,borrow_mut(map));return ();}
+ if k==8{
+ let aa=ty_arg(borrow_mut(c),actual);if arg!=aa{fail(borrow_mut(c),read("generic nominal mismatch"));}
+ let fa=type_args(borrow_mut(c),formal);let ax=type_args(borrow_mut(c),actual);if len(fa)!=len(ax){fail(borrow_mut(c),read("generic arity mismatch"));}
+ for i in len(fa){let f=load(vec_get(fa,i));let a=load(vec_get(ax,i));infer_type(borrow_mut(c),f,a,borrow_mut(map));}return ();}
+ require_type(borrow_mut(c),actual,formal);return ();
+}
+fn constructor_hint<a>(c:ref_mut<a,C>,decl:num,explicit:num)->num {
+ if explicit!=18446744073709551615{return explicit;}
+ let result=c.result;if ty_kind(borrow_mut(c),result)==8{if ty_arg(borrow_mut(c),result)==decl{return result;}}
+ return 18446744073709551615;
+}
+fn constructor_map<a>(c:ref_mut<a,C>,decl:num,hint:num)->vec<num>{
+ let d=vec_get(c.decls,decl);let count=d.types;let map=vec<num>();
+ if hint!=18446744073709551615{return type_args(borrow_mut(c),hint);}
+ for i in count{vec_push(map,18446744073709551615);}return map;
+}
+fn constructed_type<a>(c:ref_mut<a,C>,decl:num,hint:num,map:vec<num>)->num{
+ for i in len(map){if load(vec_get(map,i))==18446744073709551615{fail(borrow_mut(c),read("cannot infer generic type argument"));}}
+ let rs=vec<num>();if hint!=18446744073709551615{let regions=type_regions(borrow_mut(c),hint);
+ for i in len(regions){vec_push(rs,load(vec_get(regions,i)));}}
+ return intern_args(borrow_mut(c),8,decl,0,rs,map);
+}
+fn record<a>(c:ref_mut<a,C>,d:num,explicit:num)->Val{
+ expect(borrow_mut(c),read("{"));let x=vec_get(c.decls,d);let count=x.count;if x.is_enum{fail(borrow_mut(c),read("enum requires variant constructor"));}
+ let hint=constructor_hint(borrow_mut(c),d,explicit);let map=constructor_map(borrow_mut(c),d,hint);let seen=vec<num>();let sources=vec<num>();
+ let sz=imm(borrow_mut(c),count);let n=invoke(borrow_mut(c),read("rt_rec"),one(sz));
  if eat(borrow_mut(c),read("}"))==0{while 1{
- let f=ident(borrow_mut(c));expect(borrow_mut(c),read(":"));let v=expr(borrow_mut(c),0);
- let k=find_field(borrow_mut(c),d,read(f));for i in len(seen){if load(vec_get(seen,i))==k{fail(borrow_mut(c),read("duplicate record field"));}}vec_push(seen,k);if c.raw==0{let expected=field_ty(borrow_mut(c),d,k);require_type(borrow_mut(c),v.ty,expected);}let source=place_of(borrow_mut(c),v.t);move_out(borrow_mut(c),val(v.t,v.ty));rec_store(borrow_mut(c),n,k,v.t);
- let root=place_of(borrow_mut(c),n);let child=member_place(borrow_mut(c),root,k,v.ty);transfer_bonds(borrow_mut(c),source,child);
+ let f=ident(borrow_mut(c));expect(borrow_mut(c),read(":"));let v=expr(borrow_mut(c),0);let k=find_field(borrow_mut(c),d,read(f));
+ for i in len(seen){if load(vec_get(seen,i))==k{fail(borrow_mut(c),read("duplicate record field"));}}
+ vec_push(seen,k);let ft=field_ty(borrow_mut(c),d,k);infer_type(borrow_mut(c),ft,v.ty,borrow_mut(map));
+ let held=move_value(borrow_mut(c),v);vec_push(sources,held.t);rec_store(borrow_mut(c),n,k,held.t);
  if eat(borrow_mut(c),read("}")){break;}expect(borrow_mut(c),read(","));if eat(borrow_mut(c),read("}")){break;}}}
  if len(seen)!=count{fail(borrow_mut(c),read("record construction omits fields"));}
- return val(n,intern(borrow_mut(c),8,d));
+ let ty=constructed_type(borrow_mut(c),d,hint,map);own(borrow_mut(c),n,ty);let root=place_of(borrow_mut(c),n);
+ for i in len(seen){let k=load(vec_get(seen,i));let ft=field_type(borrow_mut(c),ty,k);let slot=load(vec_get(sources,i));let source=place_of(borrow_mut(c),slot);let child=member_place(borrow_mut(c),root,k,ft);transfer_bonds(borrow_mut(c),source,child);move_out(borrow_mut(c),val(slot,ft));}
+ return val(n,ty);
 }
-fn variant<a,b>(c:ref_mut<a,C>,d:num,name:read<b>)->Val{
+fn variant<a,b>(c:ref_mut<a,C>,d:num,name:read<b>,explicit:num)->Val{
  let decl=vec_get(c.decls,d);if decl.is_enum==0{fail(borrow_mut(c),read("variant constructor requires enum"));}
+ let hint=constructor_hint(borrow_mut(c),d,explicit);let map=constructor_map(borrow_mut(c),d,hint);
  let k=find_field(borrow_mut(c),d,name);var payload=imm(borrow_mut(c),0);var source=0;var has=0;
- if eat(borrow_mut(c),read("(")){has=1;let v=expr(borrow_mut(c),0);payload=v.t;source=place_of(borrow_mut(c),v.t);if c.raw==0{let expected=field_ty(borrow_mut(c),d,k);require_type(borrow_mut(c),v.ty,expected);}move_out(borrow_mut(c),v);expect(borrow_mut(c),read(")"));}
+ if eat(borrow_mut(c),read("(")){has=1;let v=expr(borrow_mut(c),0);payload=v.t;source=place_of(borrow_mut(c),v.t);
+ let expected=field_ty(borrow_mut(c),d,k);infer_type(borrow_mut(c),expected,v.ty,borrow_mut(map));move_out(borrow_mut(c),v);expect(borrow_mut(c),read(")"));}
  if has==0{let payloadtype=field_ty(borrow_mut(c),d,k);if payloadtype!=1{fail(borrow_mut(c),read("variant requires payload"));}}
  let tag=imm(borrow_mut(c),k);let n=invoke(borrow_mut(c),read("rt_enum"),two(tag,payload));
- let ty=intern(borrow_mut(c),8,d);own(borrow_mut(c),n,ty);let root=place_of(borrow_mut(c),n);transfer_bonds(borrow_mut(c),source,root);return val(n,ty);
+ let ty=constructed_type(borrow_mut(c),d,hint,map);own(borrow_mut(c),n,ty);let root=place_of(borrow_mut(c),n);transfer_bonds(borrow_mut(c),source,root);return val(n,ty);
 }
 fn call<a,b,d>(c:ref_mut<a,C>,m:read<b>,name:read<d>)->Val{
  if c.raw==0 {if same(read(m),read("runtime")){fail(borrow_mut(c),read("safe code cannot call unsafe runtime functions"));}}
@@ -880,13 +953,14 @@ fn call<a,b,d>(c:ref_mut<a,C>,m:read<b>,name:read<d>)->Val{
  expect(borrow_mut(c),read("("));let args=vec<num>();let argtypes=vec<num>();let sources=vec<num>();
  if eat(borrow_mut(c),read(")"))==0{while 1{
  let v=expr(borrow_mut(c),0);if c.raw==0{let kind=ty_kind(borrow_mut(c),v.ty);if (kind==5)+(kind==7){observe(borrow_mut(c),v.t);}if kind==7{let target=target_of(borrow_mut(c),v.t);capture_authority(borrow_mut(c),target);}}
- vec_push(argtypes,v.ty);vec_push(sources,v.t);get(borrow_mut(c),v.t,read("%rax"));let snap=save(borrow_mut(c));move_out(borrow_mut(c),v);vec_push(args,snap);
+ vec_push(argtypes,v.ty);let held=move_value(borrow_mut(c),v);vec_push(sources,held.t);vec_push(args,held.t);
  if eat(borrow_mut(c),read(")")){break;}expect(borrow_mut(c),read(","));}}
  let x=vec_get(c.funcs,f-1);let ret=x.ret;let count=x.count;let first=x.first;
  if c.raw==0{
  if len(args)!=count{fail(borrow_mut(c),read("function argument count"));}
  for i in count{let actual=load(vec_get(argtypes,i));let formal=load(vec_get(c.params,first+i));require_type(borrow_mut(c),actual,formal);}}
  if 6<len(args){fail(borrow_mut(c),read("native call exceeds six arguments"));}
+ for i in len(args){let slot=load(vec_get(args,i));let ty=load(vec_get(argtypes,i));move_out(borrow_mut(c),val(slot,ty));}
  for i in len(args){let reg=argreg(i);get(borrow_mut(c),load(vec_get(args,i)),read(reg));}
  o(borrow_mut(c),read("call "));mangle(borrow_mut(c),m,name);vec_push(c.out,10);
  let slot=save(borrow_mut(c));own(borrow_mut(c),slot,ret);call_bonds(borrow_mut(c),val(slot,ret),first,borrow(sources));return val(slot,ret);
@@ -1080,18 +1154,27 @@ fn primary<a>(c:ref_mut<a,C>)->Val {
         let slot=apply(borrow_mut(c),read("rt_new"),vec<num>());return own(borrow_mut(c),slot,ty);
     }
     let m=module_copy(borrow_mut(c));
+    if is(borrow_mut(c),read("<")){
+        let local=find_local(borrow_mut(c),read(first));let d=find_decl(borrow_mut(c),read(m),read(first));
+        if (local==0)&(d!=0){let ty=nominal_type(borrow_mut(c),d-1);
+            if eat(borrow_mut(c),read("::")){let name=ident(borrow_mut(c));return variant(borrow_mut(c),d-1,read(name),ty);}
+            return record(borrow_mut(c),d-1,ty);}
+    }
     if eat(borrow_mut(c),read("::")) {
         let second=ident(borrow_mut(c));
+        if is(borrow_mut(c),read("<")){let d=find_decl(borrow_mut(c),read(first),read(second));
+            if d!=0{let ty=nominal_type(borrow_mut(c),d-1);if eat(borrow_mut(c),read("::")){let name=ident(borrow_mut(c));return variant(borrow_mut(c),d-1,read(name),ty);}return record(borrow_mut(c),d-1,ty);}}
+
         if eat(borrow_mut(c),read("::")) {
             let third=ident(borrow_mut(c));
             let d=find_decl(borrow_mut(c),read(first),read(second));
             if d==0 { fail(borrow_mut(c),read("unknown enum")); }
-            return variant(borrow_mut(c),d-1,read(third));
+            return variant(borrow_mut(c),d-1,read(third),18446744073709551615);
         }
         let d=find_decl(borrow_mut(c),read(m),read(first));
-        if d!=0 { return variant(borrow_mut(c),d-1,read(second)); }
+        if d!=0 { return variant(borrow_mut(c),d-1,read(second),18446744073709551615); }
         let r=find_decl(borrow_mut(c),read(first),read(second));
-        if (r!=0)&is(borrow_mut(c),read("{")) { return record(borrow_mut(c),r-1); }
+        if (r!=0)&is(borrow_mut(c),read("{")) { return record(borrow_mut(c),r-1,18446744073709551615); }
         return call(borrow_mut(c),read(first),read(second));
     }
     if is(borrow_mut(c),read("(")) {
@@ -1107,7 +1190,7 @@ fn primary<a>(c:ref_mut<a,C>)->Val {
         return field_path(borrow_mut(c),id,ty,0);
     }
     let r=find_decl(borrow_mut(c),read(m),read(first));
-    if r!=0 { return record(borrow_mut(c),r-1); }
+    if r!=0 { return record(borrow_mut(c),r-1,18446744073709551615); }
     fail(borrow_mut(c),read("undefined name"));
     return val(0,0);
 }
@@ -1342,7 +1425,7 @@ fn emit_drops<a>(c:ref_mut<a,C>)->unit {
  var ty=0;
  while ty<len(c.types){
  let kind=ty_kind(borrow_mut(c),ty);let arg=ty_arg(borrow_mut(c),ty);
- if needs_drop(borrow_mut(c),ty){
+ if concrete_type(borrow_mut(c),ty){if needs_drop(borrow_mut(c),ty){
  let done=label(borrow_mut(c));drop_name(borrow_mut(c),ty);o(borrow_mut(c),read(":\ntestq %rdi,%rdi\n"));jump(borrow_mut(c),read("jz"),done);
  o(borrow_mut(c),read("pushq %rbp\nmovq %rsp,%rbp\npushq %r12\npushq %r13\nmovq %rdi,%r12\n"));
  if (kind==3)+(kind==4){o(borrow_mut(c),read("call rt_drop_seq\n"));}
@@ -1365,7 +1448,7 @@ fn emit_drops<a>(c:ref_mut<a,C>)->unit {
  }else{o(borrow_mut(c),read("movq "));on(borrow_mut(c),i*8);o(borrow_mut(c),read("(%r12),%rdi\n"));drop_call(borrow_mut(c),t);}}}
  o(borrow_mut(c),read("movq %r12,%rdi\ncall rt_free\n"));}
  o(borrow_mut(c),read("popq %r13\npopq %r12\nleave\n"));mark(borrow_mut(c),done);o(borrow_mut(c),read("ret\n"));
- }
+ }}
  ty=ty+1;
  }
  return ();
@@ -1374,7 +1457,7 @@ pub fn main()->num {
     var c=C{
         src:bytes(), toks:vec<Tok>(), pos:0, out:vec<num>(), module:bytes(),
         types:vec<Ty>(), decls:vec<Decl>(), fields:vec<Field>(), funcs:vec<Func>(), params:vec<num>(),
-        locals:vec<Local>(), next:0, entry:0, file:0,label:1,brk:0,cont:0,raw:0,rnames:vec<bytes>(),resources:vec<Resource>(),loopmark:0,result:0,check:ownership::new(),members:vec<Member>(),terminated:0,loopcheck:ownership::new(),breaks:ownership::new(),hasbreak:0,bonds:vec<Bond>(),origins:vec<Origin>(),scope_end:0,loop_start:0,loop_end:0
+        locals:vec<Local>(), next:0, entry:0, file:0,label:1,brk:0,cont:0,raw:0,rnames:vec<bytes>(),tnames:vec<bytes>(),resources:vec<Resource>(),loopmark:0,result:0,check:ownership::new(),members:vec<Member>(),terminated:0,loopcheck:ownership::new(),breaks:ownership::new(),hasbreak:0,bonds:vec<Bond>(),origins:vec<Origin>(),scope_end:0,loop_start:0,loop_end:0
     };
     for k in 5 { intern(borrow_mut(c),k+1,0); }
     host_fn(borrow_mut(c),read("argc"),0);

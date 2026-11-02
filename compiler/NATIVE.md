@@ -79,7 +79,10 @@ reference returns conservatively retain whole input frames, so interior projecti
 replace a still-borrowed object. Unsafe programs fail before replacing an existing output file.
 
 **Remaining work:** invariant replacement of reference-containing storage is currently rejected,
-not silently accepted, and generic functions/types beyond `vec<T>` are not implemented yet.
+not silently accepted, and generic functions are not implemented yet. Generic records/enums accept type arguments,
+including nested containers and borrowed types, with type-specific recursive drops. Constructors
+accept explicit arguments (`Pair<num,bytes>{...}`, `Option<num>::None`), infer from payloads/fields,
+or use a matching function return type. Lifetimes precede `type T` parameters in declarations.
 Those are active delivery tasks. The checker is conservative and not a soundness proof or full
 Rust-seed parity. Inputs involving the explicitly unsafe runtime remain trusted.
 

@@ -143,15 +143,13 @@ fn independent_native_backend_selfhosts_and_matches_seed() {
         "module bad;pub fn run(x:unknown_type)->num{return 0;}",
     )
     .unwrap();
-    assert!(
-        !Command::new(&compiler)
-            .arg(w.join("bad.s"))
-            .arg(bad)
-            .output()
-            .unwrap()
-            .status
-            .success()
-    );
+    assert!(!Command::new(&compiler)
+        .arg(w.join("bad.s"))
+        .arg(bad)
+        .output()
+        .unwrap()
+        .status
+        .success());
     // Native-built C backend must still reproduce the checked-in C bootstrap too.
     let c_sources = [
         root.join("compiler/grailc.grl"),
@@ -166,16 +164,14 @@ fn independent_native_backend_selfhosts_and_matches_seed() {
     );
     let raw = w.join("raw.grl");
     fs::write(&raw, "module raw;pub fn run()->num{return raw_load(0);}").unwrap();
-    assert!(
-        !Command::new(&compiler)
-            .arg(w.join("raw.s"))
-            .arg(raw)
-            .arg(root_runtime())
-            .output()
-            .unwrap()
-            .status
-            .success()
-    );
+    assert!(!Command::new(&compiler)
+        .arg(w.join("raw.s"))
+        .arg(raw)
+        .arg(root_runtime())
+        .output()
+        .unwrap()
+        .status
+        .success());
     // Cross-module calls, loops, record fields and enum recovery against the checked seed.
     let cases: &[(&[&str], Option<&str>)] = &[
         (&["loops/cleanup"], None),
@@ -238,6 +234,52 @@ fn independent_native_backend_selfhosts_and_matches_seed() {
         ],
     );
     assert_eq!(run(&mut Command::new(core)).stdout, b"1\n");
+    run(seed()
+        .arg("build")
+        .arg(root.join("compiler/tests/generic_types.grl"))
+        .arg(&w)
+        .arg(&w));
+    assert_eq!(
+        run(&mut Command::new(w.join("generic_types"))).stdout,
+        b"818\n"
+    );
+    let generics = assemble(
+        &w,
+        &compiler,
+        &[root.join("compiler/tests/generic_types.grl")],
+    );
+    assert_eq!(run(&mut Command::new(generics)).stdout, b"818\n");
+    let inferred = w.join("inferred_generic.grl");
+    fs::write(&inferred,"module inferred_generic;struct Pair<type T,type U>{first:T,second:U}enum Option<type T>{Some(T),None}pub fn run()->num{let p=Pair{first:bytes(),second:17};let some=Option::Some(bytes());match some{Some(b)=>{assert(len(b)==0);},None=>{assert(0);}}let q=generic_types::Pair<num,bytes>{first:p.second,second:bytes()};return q.first;}").unwrap();
+    let inferred = assemble(
+        &w,
+        &compiler,
+        &[inferred, root.join("compiler/tests/generic_types.grl")],
+    );
+    assert_eq!(run(&mut Command::new(inferred)).stdout, b"17\n");
+    for body in [
+        "struct Box<type T>{value:T}fn take(b:Box<bytes>)->num{return len(b.value);}pub fn run()->num{return take(Box<num>{value:1});}",
+        "struct Pair<type T>{first:T,second:T}pub fn run()->num{let p=Pair{first:1,second:bytes()};return 0;}",
+        "enum Option<type T>{Some(T),None}pub fn run()->num{let x=Option::None;return 0;}",
+        "struct Box<type T>{value:T}fn bad<a>()->Box<read<a>>{let b=bytes();return Box{value:read(b)};}pub fn run()->num{return 0;}",
+        "struct Pair<type T>{first:T,second:T}pub fn run()->num{let b=bytes();let p=Pair{first:b,second:b};return 0;}",
+        "struct Refs<a,type T>{r:ref_mut<a,T>}fn bad<a>(r:ref<a,num>)->num{let b=Refs{r:r};return 0;}pub fn run()->num{return 0;}",
+        "struct Pair<type T,type U>{first:T,second:U}pub fn run()->num{let b=bytes();let p=Pair{first:read(b),second:mut(b)};return 0;}",
+        "fn noop()->num{return 0;}fn conflict<a,b>(x:ref_mut<a,bytes>,n:num,y:read<b>)->num{return 0;}pub fn run()->num{let b=bytes();return conflict(borrow_mut(b),noop(),read(b));}",
+    ] {
+        let src = w.join("bad_generic.grl");
+        fs::write(&src, format!("module bad_generic;{body}")).unwrap();
+        let output = w.join("bad_generic.s");
+        fs::write(&output, b"prior valid artifact").unwrap();
+        let result = Command::new(&compiler)
+            .arg(&output)
+            .arg(&src)
+            .arg(root_runtime())
+            .output()
+            .unwrap();
+        assert!(!result.status.success(), "accepted invalid generic: {body}");
+        assert_eq!(fs::read(&output).unwrap(), b"prior valid artifact");
+    }
     let cleanup = assemble(&w, &compiler, &[root.join("compiler/tests/cleanup.grl")]);
     assert_eq!(run(&mut Command::new(cleanup)).stdout, b"777\n");
     let rejected = [

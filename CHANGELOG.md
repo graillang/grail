@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Add native generic records/enums with explicit and inferred constructor arguments, nested and
+  borrowed type substitution, nominal argument checking, and specialized recursive destruction.
+  Keep constructor and call-argument captures live during later argument/field evaluation,
+  including nested calls. Generic functions and invariant
+  captured-storage writeback remain in progress.
+
 - Connect native source-level loan/lifetime enforcement: reject live-borrow moves/growth/writes,
   escaping locals and captures, lifetime laundering, suspended unique carriers and malformed
   aggregate/reference operations. Retain concrete lifetime guards across opaque calls and copies;
