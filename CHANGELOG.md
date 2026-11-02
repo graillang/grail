@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Replace native runtime support with `compiler/runtime.grl`: allocator/free lists, byte and
+  sequence operations, file I/O, PATH search, process execution and numeric printing are Grail.
+  Generated `_start` and narrow raw-memory/syscall intrinsics produce a static `as`/`ld` build,
+  without C support objects, libc or a handwritten assembly runtime. Restrict raw intrinsics to
+  an explicit unsafe runtime module. Verify native self-reproduction, binary I/O/command status,
+  allocator reuse and balanced runtime allocations; program ownership checking and generated
+  cleanup remain in progress. Preserve the older C bootstrap only as an independent cross-check.
+
 - Add a Grail-written Linux x86-64 backend (`compiler/native.grl`) emitting assembly directly,
   with System V calls, stack-slot locals, unsigned arithmetic, control flow, aggregates, typed
   references and the existing runtime ABI. Deliver reproducible `compiler/bootstrap/native.s`;

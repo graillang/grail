@@ -20,21 +20,23 @@ fn run(c: &mut Command) -> Output {
 fn seed() -> Command {
     Command::new(env!("CARGO_BIN_EXE_grail-seed"))
 }
+fn root_runtime() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../compiler/runtime.grl")
+}
 fn assemble(w: &Path, compiler: &Path, sources: &[PathBuf]) -> PathBuf {
     let asm = w.join("program.s");
     let obj = w.join("program.o");
     let exe = w.join("program");
-    run(Command::new(compiler).arg(&asm).args(sources));
+    run(Command::new(compiler)
+        .arg(&asm)
+        .args(sources)
+        .arg(root_runtime()));
     run(Command::new("as").arg("-o").arg(&obj).arg(&asm));
-    run(Command::new("cc")
-        .arg(&obj)
-        .arg(w.join("runtime.o"))
-        .arg("-o")
-        .arg(&exe));
+    run(Command::new("ld").arg(&obj).arg("-o").arg(&exe));
     exe
 }
 #[test]
-#[ignore = "requires Linux x86-64, clang, GNU as and system linker"]
+#[ignore = "requires Linux x86-64, clang for the legacy bootstrap check, GNU as and ld"]
 fn independent_native_backend_selfhosts_and_matches_seed() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
     let w = std::env::temp_dir().join(format!(
@@ -57,13 +59,6 @@ fn independent_native_backend_selfhosts_and_matches_seed() {
         .arg(root.join("compiler/native.grl"))
         .arg(&w)
         .arg(&w));
-    run(Command::new("cc")
-        .arg("-O1")
-        .arg("-DGRAIL_NATIVE_RUNTIME")
-        .arg("-c")
-        .arg(root.join("compiler/grail_rt.c"))
-        .arg("-o")
-        .arg(w.join("runtime.o")));
     let compiler = w.join("native");
     let sources = [
         root.join("compiler/native.grl"),
@@ -163,6 +158,18 @@ fn independent_native_backend_selfhosts_and_matches_seed() {
         fs::read(c_output).unwrap(),
         fs::read(root.join("compiler/bootstrap/grailc.c")).unwrap()
     );
+    let raw = w.join("raw.grl");
+    fs::write(&raw, "module raw;pub fn run()->num{return raw_load(0);}").unwrap();
+    assert!(
+        !Command::new(&compiler)
+            .arg(w.join("raw.s"))
+            .arg(raw)
+            .arg(root_runtime())
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
     // Cross-module calls, loops, record fields and enum recovery against the checked seed.
     let cases: &[(&[&str], Option<&str>)] = &[
         (&["loops/cleanup"], None),
@@ -195,5 +202,23 @@ fn independent_native_backend_selfhosts_and_matches_seed() {
             "{modules:?}"
         );
     }
+    let audit = assemble(
+        &w,
+        &compiler,
+        &[root.join("compiler/tests/runtime_audit.grl")],
+    );
+    assert_eq!(run(&mut Command::new(audit)).stdout, b"0\n");
+    // Execute binary I/O, argv, malformed paths and process status on the assembly runtime.
+    let exe = assemble(
+        &w,
+        &compiler,
+        &[root.join("compiler/examples/native_io.grl")],
+    );
+    let input = w.join("input ; literal.bin");
+    let output = w.join("output.bin");
+    fs::write(&input, [0, 1, 128, 0, 255]).unwrap();
+    let io = run(Command::new(exe).arg(&input).arg(&output).arg(""));
+    assert_eq!(io.stdout, [0, 1, 128, 0, 255, b'1', b'9', b'\n']);
+    assert_eq!(fs::read(output).unwrap(), [0, 1, 128, 0, 255]);
     fs::remove_dir_all(w).unwrap();
 }

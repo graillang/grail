@@ -332,7 +332,7 @@ movq -144(%rbp),%rcx
 movq -136(%rbp),%rax
 testq %rcx,%rcx
 jnz .L21
-call abort@PLT
+call rt_abort
 .L21:
 xorq %rdx,%rdx
 divq %rcx
@@ -1821,7 +1821,7 @@ movq %rax,-608(%rbp)
 movq -608(%rbp),%rax
 testq %rax,%rax
 jnz .L77
-call abort@PLT
+call rt_abort
 .L77:
 movabsq $0,%rax
 movq %rax,-616(%rbp)
@@ -3988,17 +3988,22 @@ subq $.F186,%rsp
 movq %rdi,-8(%rbp)
 movq %rsi,-16(%rbp)
 movq %rdx,-24(%rbp)
-movq -8(%rbp),%rax
+movq -16(%rbp),%rax
 movq %rax,-32(%rbp)
 .pushsection .rodata
 .L187:
-.byte 102
-.byte 95
+.byte 114
+.byte 117
+.byte 110
+.byte 116
+.byte 105
+.byte 109
+.byte 101
 .byte 0
 .popsection
 leaq .L187(%rip),%rax
 movq %rax,-40(%rbp)
-movabsq $2,%rax
+movabsq $7,%rax
 movq %rax,-48(%rbp)
 movq -40(%rbp),%rdi
 movq -48(%rbp),%rsi
@@ -4011,65 +4016,109 @@ movq -64(%rbp),%rax
 movq %rax,-72(%rbp)
 movq -32(%rbp),%rdi
 movq -72(%rbp),%rsi
-call f_native_o
+call f_native_same
 movq %rax,-80(%rbp)
+movq -80(%rbp),%rax
+testq %rax,%rax
+jz .L188
 movq -8(%rbp),%rax
 movq %rax,-88(%rbp)
-movq -16(%rbp),%rax
+movq -24(%rbp),%rax
 movq %rax,-96(%rbp)
 movq -88(%rbp),%rdi
 movq -96(%rbp),%rsi
 call f_native_o
 movq %rax,-104(%rbp)
-movq -8(%rbp),%rax
-movq (%rax),%rax
+movabsq $0,%rax
 movq %rax,-112(%rbp)
 movq -112(%rbp),%rax
-movq 24(%rax),%rax
-movq %rax,-120(%rbp)
-movabsq $95,%rax
-movq %rax,-128(%rbp)
-movq -120(%rbp),%rdi
-movq -128(%rbp),%rsi
-call rt_push
-movq %rax,-136(%rbp)
-movabsq $0,%rax
-movq %rax,-144(%rbp)
+leave
+ret
+jmp .L189
+.L188:
+.L189:
 movq -8(%rbp),%rax
+movq %rax,-120(%rbp)
+.pushsection .rodata
+.L190:
+.byte 102
+.byte 95
+.byte 0
+.popsection
+leaq .L190(%rip),%rax
+movq %rax,-128(%rbp)
+movabsq $2,%rax
+movq %rax,-136(%rbp)
+movq -128(%rbp),%rdi
+movq -136(%rbp),%rsi
+call rt_lit
+movq %rax,-144(%rbp)
+movq -144(%rbp),%rdi
+call rt_view
 movq %rax,-152(%rbp)
-movq -24(%rbp),%rax
+movq -152(%rbp),%rax
 movq %rax,-160(%rbp)
-movq -152(%rbp),%rdi
+movq -120(%rbp),%rdi
 movq -160(%rbp),%rsi
 call f_native_o
 movq %rax,-168(%rbp)
-movabsq $0,%rax
+movq -8(%rbp),%rax
 movq %rax,-176(%rbp)
-movq -176(%rbp),%rax
+movq -16(%rbp),%rax
+movq %rax,-184(%rbp)
+movq -176(%rbp),%rdi
+movq -184(%rbp),%rsi
+call f_native_o
+movq %rax,-192(%rbp)
+movq -8(%rbp),%rax
+movq (%rax),%rax
+movq %rax,-200(%rbp)
+movq -200(%rbp),%rax
+movq 24(%rax),%rax
+movq %rax,-208(%rbp)
+movabsq $95,%rax
+movq %rax,-216(%rbp)
+movq -208(%rbp),%rdi
+movq -216(%rbp),%rsi
+call rt_push
+movq %rax,-224(%rbp)
+movabsq $0,%rax
+movq %rax,-232(%rbp)
+movq -8(%rbp),%rax
+movq %rax,-240(%rbp)
+movq -24(%rbp),%rax
+movq %rax,-248(%rbp)
+movq -240(%rbp),%rdi
+movq -248(%rbp),%rsi
+call f_native_o
+movq %rax,-256(%rbp)
+movabsq $0,%rax
+movq %rax,-264(%rbp)
+movq -264(%rbp),%rax
 leave
 ret
 xorq %rax,%rax
 leave
 ret
-.set .F186,176
+.set .F186,272
 .type f_native_decl,@function
 f_native_decl:
 pushq %rbp
 movq %rsp,%rbp
-subq $.F188,%rsp
+subq $.F191,%rsp
 movq %rdi,-8(%rbp)
 movq %rsi,-16(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-24(%rbp)
 .pushsection .rodata
-.L189:
+.L192:
 .byte 101
 .byte 110
 .byte 117
 .byte 109
 .byte 0
 .popsection
-leaq .L189(%rip),%rax
+leaq .L192(%rip),%rax
 movq %rax,-32(%rbp)
 movabsq $4,%rax
 movq %rax,-40(%rbp)
@@ -4117,7 +4166,7 @@ movzbq %al,%rax
 movq %rax,-160(%rbp)
 movq -160(%rbp),%rax
 testq %rax,%rax
-jz .L190
+jz .L193
 movq -16(%rbp),%rax
 movq %rax,-168(%rbp)
 movabsq $1,%rax
@@ -4130,7 +4179,7 @@ movzbq %al,%rax
 movq %rax,-184(%rbp)
 movq -184(%rbp),%rax
 testq %rax,%rax
-jz .L192
+jz .L195
 movq -8(%rbp),%rax
 movq %rax,-192(%rbp)
 movq -192(%rbp),%rdi
@@ -4174,9 +4223,9 @@ call rt_push
 movq %rax,-264(%rbp)
 movabsq $0,%rax
 movq %rax,-272(%rbp)
-jmp .L193
-.L192:
-.L193:
+jmp .L196
+.L195:
+.L196:
 movq -8(%rbp),%rax
 movq %rax,-280(%rbp)
 movq -280(%rbp),%rdi
@@ -4185,11 +4234,11 @@ movq %rax,-288(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-296(%rbp)
 .pushsection .rodata
-.L194:
+.L197:
 .byte 59
 .byte 0
 .popsection
-leaq .L194(%rip),%rax
+leaq .L197(%rip),%rax
 movq %rax,-304(%rbp)
 movabsq $1,%rax
 movq %rax,-312(%rbp)
@@ -4211,9 +4260,9 @@ movq %rax,-352(%rbp)
 movq -352(%rbp),%rax
 leave
 ret
-jmp .L191
-.L190:
-.L191:
+jmp .L194
+.L193:
+.L194:
 movq -8(%rbp),%rax
 movq %rax,-360(%rbp)
 movq -360(%rbp),%rdi
@@ -4258,11 +4307,11 @@ movq %rax,-480(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-488(%rbp)
 .pushsection .rodata
-.L195:
+.L198:
 .byte 123
 .byte 0
 .popsection
-leaq .L195(%rip),%rax
+leaq .L198(%rip),%rax
 movq %rax,-496(%rbp)
 movabsq $1,%rax
 movq %rax,-504(%rbp)
@@ -4282,11 +4331,11 @@ movq %rax,-536(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-544(%rbp)
 .pushsection .rodata
-.L196:
+.L199:
 .byte 125
 .byte 0
 .popsection
-leaq .L196(%rip),%rax
+leaq .L199(%rip),%rax
 movq %rax,-552(%rbp)
 movabsq $1,%rax
 movq %rax,-560(%rbp)
@@ -4315,13 +4364,13 @@ movzbq %al,%rax
 movq %rax,-616(%rbp)
 movq -616(%rbp),%rax
 testq %rax,%rax
-jz .L197
-.L199:
+jz .L200
+.L202:
 movabsq $1,%rax
 movq %rax,-624(%rbp)
 movq -624(%rbp),%rax
 testq %rax,%rax
-jz .L200
+jz .L203
 movq -8(%rbp),%rax
 movq %rax,-632(%rbp)
 movq -632(%rbp),%rdi
@@ -4335,15 +4384,15 @@ movq -656(%rbp),%rax
 movq %rax,-664(%rbp)
 movq -80(%rbp),%rax
 testq %rax,%rax
-jz .L201
+jz .L204
 movq -8(%rbp),%rax
 movq %rax,-672(%rbp)
 .pushsection .rodata
-.L203:
+.L206:
 .byte 40
 .byte 0
 .popsection
-leaq .L203(%rip),%rax
+leaq .L206(%rip),%rax
 movq %rax,-680(%rbp)
 movabsq $1,%rax
 movq %rax,-688(%rbp)
@@ -4362,7 +4411,7 @@ call f_native_eat
 movq %rax,-720(%rbp)
 movq -720(%rbp),%rax
 testq %rax,%rax
-jz .L204
+jz .L207
 movq -8(%rbp),%rax
 movq %rax,-728(%rbp)
 movq -728(%rbp),%rdi
@@ -4373,11 +4422,11 @@ movq %rax,-664(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-744(%rbp)
 .pushsection .rodata
-.L206:
+.L209:
 .byte 41
 .byte 0
 .popsection
-leaq .L206(%rip),%rax
+leaq .L209(%rip),%rax
 movq %rax,-752(%rbp)
 movabsq $1,%rax
 movq %rax,-760(%rbp)
@@ -4394,19 +4443,19 @@ movq -744(%rbp),%rdi
 movq -784(%rbp),%rsi
 call f_native_expect
 movq %rax,-792(%rbp)
+jmp .L208
+.L207:
+.L208:
 jmp .L205
 .L204:
-.L205:
-jmp .L202
-.L201:
 movq -8(%rbp),%rax
 movq %rax,-800(%rbp)
 .pushsection .rodata
-.L207:
+.L210:
 .byte 58
 .byte 0
 .popsection
-leaq .L207(%rip),%rax
+leaq .L210(%rip),%rax
 movq %rax,-808(%rbp)
 movabsq $1,%rax
 movq %rax,-816(%rbp)
@@ -4430,7 +4479,7 @@ call f_native_parse_type
 movq %rax,-864(%rbp)
 movq -864(%rbp),%rax
 movq %rax,-664(%rbp)
-.L202:
+.L205:
 movq -8(%rbp),%rax
 movq (%rax),%rax
 movq %rax,-872(%rbp)
@@ -4467,11 +4516,11 @@ movq %rax,-480(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-944(%rbp)
 .pushsection .rodata
-.L208:
+.L211:
 .byte 125
 .byte 0
 .popsection
-leaq .L208(%rip),%rax
+leaq .L211(%rip),%rax
 movq %rax,-952(%rbp)
 movabsq $1,%rax
 movq %rax,-960(%rbp)
@@ -4490,19 +4539,19 @@ call f_native_eat
 movq %rax,-992(%rbp)
 movq -992(%rbp),%rax
 testq %rax,%rax
-jz .L209
-jmp .L200
-jmp .L210
-.L209:
-.L210:
+jz .L212
+jmp .L203
+jmp .L213
+.L212:
+.L213:
 movq -8(%rbp),%rax
 movq %rax,-1000(%rbp)
 .pushsection .rodata
-.L211:
+.L214:
 .byte 44
 .byte 0
 .popsection
-leaq .L211(%rip),%rax
+leaq .L214(%rip),%rax
 movq %rax,-1008(%rbp)
 movabsq $1,%rax
 movq %rax,-1016(%rbp)
@@ -4522,11 +4571,11 @@ movq %rax,-1048(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-1056(%rbp)
 .pushsection .rodata
-.L212:
+.L215:
 .byte 125
 .byte 0
 .popsection
-leaq .L212(%rip),%rax
+leaq .L215(%rip),%rax
 movq %rax,-1064(%rbp)
 movabsq $1,%rax
 movq %rax,-1072(%rbp)
@@ -4545,24 +4594,24 @@ call f_native_eat
 movq %rax,-1104(%rbp)
 movq -1104(%rbp),%rax
 testq %rax,%rax
-jz .L213
-jmp .L200
-jmp .L214
-.L213:
-.L214:
-jmp .L199
+jz .L216
+jmp .L203
+jmp .L217
+.L216:
+.L217:
+jmp .L202
+.L203:
+jmp .L201
 .L200:
-jmp .L198
-.L197:
-.L198:
+.L201:
 movq -8(%rbp),%rax
 movq %rax,-1112(%rbp)
 .pushsection .rodata
-.L215:
+.L218:
 .byte 59
 .byte 0
 .popsection
-leaq .L215(%rip),%rax
+leaq .L218(%rip),%rax
 movq %rax,-1120(%rbp)
 movabsq $1,%rax
 movq %rax,-1128(%rbp)
@@ -4629,12 +4678,12 @@ ret
 xorq %rax,%rax
 leave
 ret
-.set .F188,1248
+.set .F191,1248
 .type f_native_bind,@function
 f_native_bind:
 pushq %rbp
 movq %rsp,%rbp
-subq $.F216,%rsp
+subq $.F219,%rsp
 movq %rdi,-8(%rbp)
 movq %rsi,-16(%rbp)
 movq %rdx,-24(%rbp)
@@ -4673,24 +4722,24 @@ ret
 xorq %rax,%rax
 leave
 ret
-.set .F216,96
+.set .F219,96
 .type f_native_func,@function
 f_native_func:
 pushq %rbp
 movq %rsp,%rbp
-subq $.F217,%rsp
+subq $.F220,%rsp
 movq %rdi,-8(%rbp)
 movq %rsi,-16(%rbp)
 movq %rdx,-24(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-32(%rbp)
 .pushsection .rodata
-.L218:
+.L221:
 .byte 102
 .byte 110
 .byte 0
 .popsection
-leaq .L218(%rip),%rax
+leaq .L221(%rip),%rax
 movq %rax,-40(%rbp)
 movabsq $2,%rax
 movq %rax,-48(%rbp)
@@ -4731,8 +4780,8 @@ movzbq %al,%rax
 movq %rax,-144(%rbp)
 movq -144(%rbp),%rax
 testq %rax,%rax
-jz .L219
-.L221:
+jz .L222
+.L224:
 movq -8(%rbp),%rax
 movq %rax,-152(%rbp)
 movq -152(%rbp),%rdi
@@ -4750,14 +4799,14 @@ movzbq %al,%rax
 movq %rax,-184(%rbp)
 movq -184(%rbp),%rax
 testq %rax,%rax
-jz .L222
+jz .L225
 movq -8(%rbp),%rax
 movq %rax,-192(%rbp)
 movq -192(%rbp),%rdi
 call f_native_advance
 movq %rax,-200(%rbp)
-jmp .L221
-.L222:
+jmp .L224
+.L225:
 movq -8(%rbp),%rax
 movq %rax,-208(%rbp)
 movq -208(%rbp),%rdi
@@ -4768,9 +4817,9 @@ movq %rax,-224(%rbp)
 movq -224(%rbp),%rax
 leave
 ret
-jmp .L220
-.L219:
-.L220:
+jmp .L223
+.L222:
+.L223:
 movq -8(%rbp),%rax
 movq %rax,-232(%rbp)
 movq -232(%rbp),%rdi
@@ -4820,11 +4869,11 @@ movq %rax,-360(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-368(%rbp)
 .pushsection .rodata
-.L223:
+.L226:
 .byte 40
 .byte 0
 .popsection
-leaq .L223(%rip),%rax
+leaq .L226(%rip),%rax
 movq %rax,-376(%rbp)
 movabsq $1,%rax
 movq %rax,-384(%rbp)
@@ -4844,11 +4893,11 @@ movq %rax,-416(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-424(%rbp)
 .pushsection .rodata
-.L224:
+.L227:
 .byte 41
 .byte 0
 .popsection
-leaq .L224(%rip),%rax
+leaq .L227(%rip),%rax
 movq %rax,-432(%rbp)
 movabsq $1,%rax
 movq %rax,-440(%rbp)
@@ -4877,13 +4926,13 @@ movzbq %al,%rax
 movq %rax,-496(%rbp)
 movq -496(%rbp),%rax
 testq %rax,%rax
-jz .L225
-.L227:
+jz .L228
+.L230:
 movabsq $1,%rax
 movq %rax,-504(%rbp)
 movq -504(%rbp),%rax
 testq %rax,%rax
-jz .L228
+jz .L231
 movq -8(%rbp),%rax
 movq %rax,-512(%rbp)
 movq -512(%rbp),%rdi
@@ -4894,11 +4943,11 @@ movq %rax,-528(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-536(%rbp)
 .pushsection .rodata
-.L229:
+.L232:
 .byte 58
 .byte 0
 .popsection
-leaq .L229(%rip),%rax
+leaq .L232(%rip),%rax
 movq %rax,-544(%rbp)
 movabsq $1,%rax
 movq %rax,-552(%rbp)
@@ -4934,7 +4983,7 @@ movzbq %al,%rax
 movq %rax,-632(%rbp)
 movq -632(%rbp),%rax
 testq %rax,%rax
-jz .L230
+jz .L233
 movq -8(%rbp),%rax
 movq (%rax),%rax
 movq %rax,-640(%rbp)
@@ -4947,9 +4996,9 @@ call rt_push
 movq %rax,-656(%rbp)
 movabsq $0,%rax
 movq %rax,-664(%rbp)
-jmp .L231
-.L230:
-.L231:
+jmp .L234
+.L233:
+.L234:
 movq -8(%rbp),%rax
 movq %rax,-672(%rbp)
 movq -672(%rbp),%rdi
@@ -4984,11 +5033,11 @@ movq %rax,-360(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-760(%rbp)
 .pushsection .rodata
-.L232:
+.L235:
 .byte 41
 .byte 0
 .popsection
-leaq .L232(%rip),%rax
+leaq .L235(%rip),%rax
 movq %rax,-768(%rbp)
 movabsq $1,%rax
 movq %rax,-776(%rbp)
@@ -5007,19 +5056,19 @@ call f_native_eat
 movq %rax,-808(%rbp)
 movq -808(%rbp),%rax
 testq %rax,%rax
-jz .L233
-jmp .L228
-jmp .L234
-.L233:
-.L234:
+jz .L236
+jmp .L231
+jmp .L237
+.L236:
+.L237:
 movq -8(%rbp),%rax
 movq %rax,-816(%rbp)
 .pushsection .rodata
-.L235:
+.L238:
 .byte 44
 .byte 0
 .popsection
-leaq .L235(%rip),%rax
+leaq .L238(%rip),%rax
 movq %rax,-824(%rbp)
 movabsq $1,%rax
 movq %rax,-832(%rbp)
@@ -5036,11 +5085,11 @@ movq -816(%rbp),%rdi
 movq -856(%rbp),%rsi
 call f_native_expect
 movq %rax,-864(%rbp)
-jmp .L227
+jmp .L230
+.L231:
+jmp .L229
 .L228:
-jmp .L226
-.L225:
-.L226:
+.L229:
 movabsq $6,%rax
 movq %rax,-872(%rbp)
 movq -872(%rbp),%rax
@@ -5053,11 +5102,11 @@ movzbq %al,%rax
 movq %rax,-888(%rbp)
 movq -888(%rbp),%rax
 testq %rax,%rax
-jz .L236
+jz .L239
 movq -8(%rbp),%rax
 movq %rax,-896(%rbp)
 .pushsection .rodata
-.L238:
+.L241:
 .byte 110
 .byte 97
 .byte 116
@@ -5098,7 +5147,7 @@ movq %rax,-896(%rbp)
 .byte 115
 .byte 0
 .popsection
-leaq .L238(%rip),%rax
+leaq .L241(%rip),%rax
 movq %rax,-904(%rbp)
 movabsq $38,%rax
 movq %rax,-912(%rbp)
@@ -5115,18 +5164,18 @@ movq -896(%rbp),%rdi
 movq -936(%rbp),%rsi
 call f_native_fail
 movq %rax,-944(%rbp)
-jmp .L237
-.L236:
-.L237:
+jmp .L240
+.L239:
+.L240:
 movq -8(%rbp),%rax
 movq %rax,-952(%rbp)
 .pushsection .rodata
-.L239:
+.L242:
 .byte 45
 .byte 62
 .byte 0
 .popsection
-leaq .L239(%rip),%rax
+leaq .L242(%rip),%rax
 movq %rax,-960(%rbp)
 movabsq $2,%rax
 movq %rax,-968(%rbp)
@@ -5162,7 +5211,7 @@ movzbq %al,%rax
 movq %rax,-1048(%rbp)
 movq -1048(%rbp),%rax
 testq %rax,%rax
-jz .L240
+jz .L243
 movq -8(%rbp),%rax
 movq (%rax),%rax
 movq %rax,-1056(%rbp)
@@ -5270,7 +5319,7 @@ movq -1280(%rbp),%rax
 movq %rax,-1288(%rbp)
 movq -1208(%rbp),%rax
 testq %rax,%rax
-jz .L242
+jz .L245
 movq -8(%rbp),%rax
 movq (%rax),%rax
 movq %rax,-1296(%rbp)
@@ -5281,9 +5330,9 @@ movq -1304(%rbp),%rdi
 movq -1288(%rbp),%rsi
 call rt_xchg
 movq %rax,-1312(%rbp)
-jmp .L243
-.L242:
-.L243:
+jmp .L246
+.L245:
+.L246:
 movq -8(%rbp),%rax
 movq %rax,-1320(%rbp)
 movq -1320(%rbp),%rdi
@@ -5294,13 +5343,13 @@ movq %rax,-1336(%rbp)
 movq -1336(%rbp),%rax
 leave
 ret
-jmp .L241
-.L240:
-.L241:
+jmp .L244
+.L243:
+.L244:
 movq -8(%rbp),%rax
 movq %rax,-1344(%rbp)
 .pushsection .rodata
-.L244:
+.L247:
 .byte 46
 .byte 116
 .byte 121
@@ -5309,7 +5358,7 @@ movq %rax,-1344(%rbp)
 .byte 32
 .byte 0
 .popsection
-leaq .L244(%rip),%rax
+leaq .L247(%rip),%rax
 movq %rax,-1352(%rbp)
 movabsq $6,%rax
 movq %rax,-1360(%rbp)
@@ -5346,7 +5395,7 @@ movq %rax,-1440(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-1448(%rbp)
 .pushsection .rodata
-.L245:
+.L248:
 .byte 44
 .byte 64
 .byte 102
@@ -5360,7 +5409,7 @@ movq %rax,-1448(%rbp)
 .byte 10
 .byte 0
 .popsection
-leaq .L245(%rip),%rax
+leaq .L248(%rip),%rax
 movq %rax,-1456(%rbp)
 movabsq $11,%rax
 movq %rax,-1464(%rbp)
@@ -5397,7 +5446,7 @@ movq %rax,-1544(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-1552(%rbp)
 .pushsection .rodata
-.L246:
+.L249:
 .byte 58
 .byte 10
 .byte 112
@@ -5436,7 +5485,7 @@ movq %rax,-1552(%rbp)
 .byte 70
 .byte 0
 .popsection
-leaq .L246(%rip),%rax
+leaq .L249(%rip),%rax
 movq %rax,-1560(%rbp)
 movabsq $36,%rax
 movq %rax,-1568(%rbp)
@@ -5471,7 +5520,7 @@ movq %rax,-1648(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-1656(%rbp)
 .pushsection .rodata
-.L247:
+.L250:
 .byte 44
 .byte 37
 .byte 114
@@ -5480,7 +5529,7 @@ movq %rax,-1656(%rbp)
 .byte 10
 .byte 0
 .popsection
-leaq .L247(%rip),%rax
+leaq .L250(%rip),%rax
 movq %rax,-1664(%rbp)
 movabsq $6,%rax
 movq %rax,-1672(%rbp)
@@ -5501,11 +5550,11 @@ movq -360(%rbp),%rax
 movq %rax,-1712(%rbp)
 movabsq $0,%rax
 movq %rax,-1720(%rbp)
-.L248:
+.L251:
 movq -1712(%rbp),%rcx
 movq -1720(%rbp),%rax
 cmpq %rcx,%rax
-jae .L250
+jae .L253
 movq -1720(%rbp),%rax
 movq %rax,-1728(%rbp)
 movq -1728(%rbp),%rdi
@@ -5516,7 +5565,7 @@ movq %rax,-1744(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-1752(%rbp)
 .pushsection .rodata
-.L251:
+.L254:
 .byte 109
 .byte 111
 .byte 118
@@ -5524,7 +5573,7 @@ movq %rax,-1752(%rbp)
 .byte 32
 .byte 0
 .popsection
-leaq .L251(%rip),%rax
+leaq .L254(%rip),%rax
 movq %rax,-1760(%rbp)
 movabsq $5,%rax
 movq %rax,-1768(%rbp)
@@ -5588,10 +5637,10 @@ call rt_push
 movq %rax,-1928(%rbp)
 movabsq $0,%rax
 movq %rax,-1936(%rbp)
-.L249:
+.L252:
 incq -1720(%rbp)
-jmp .L248
-.L250:
+jmp .L251
+.L253:
 movq -8(%rbp),%rax
 movq %rax,-1944(%rbp)
 movq -1944(%rbp),%rdi
@@ -5600,7 +5649,7 @@ movq %rax,-1952(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-1960(%rbp)
 .pushsection .rodata
-.L252:
+.L255:
 .byte 120
 .byte 111
 .byte 114
@@ -5635,7 +5684,7 @@ movq %rax,-1960(%rbp)
 .byte 70
 .byte 0
 .popsection
-leaq .L252(%rip),%rax
+leaq .L255(%rip),%rax
 movq %rax,-1968(%rbp)
 movabsq $32,%rax
 movq %rax,-1976(%rbp)
@@ -5738,27 +5787,27 @@ ret
 xorq %rax,%rax
 leave
 ret
-.set .F217,2256
+.set .F220,2256
 .type f_native_toplevel,@function
 f_native_toplevel:
 pushq %rbp
 movq %rsp,%rbp
-subq $.F253,%rsp
+subq $.F256,%rsp
 movq %rdi,-8(%rbp)
 movq %rsi,-16(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-24(%rbp)
 .pushsection .rodata
-.L254:
-.byte 109
-.byte 111
-.byte 100
+.L257:
 .byte 117
-.byte 108
+.byte 110
+.byte 115
+.byte 97
+.byte 102
 .byte 101
 .byte 0
 .popsection
-leaq .L254(%rip),%rax
+leaq .L257(%rip),%rax
 movq %rax,-32(%rbp)
 movabsq $6,%rax
 movq %rax,-40(%rbp)
@@ -5773,172 +5822,215 @@ movq -56(%rbp),%rax
 movq %rax,-64(%rbp)
 movq -24(%rbp),%rdi
 movq -64(%rbp),%rsi
-call f_native_expect
+call f_native_eat
 movq %rax,-72(%rbp)
-movq -8(%rbp),%rax
+movq -72(%rbp),%rax
 movq %rax,-80(%rbp)
-movq -80(%rbp),%rdi
-call f_native_ident
-movq %rax,-88(%rbp)
-movq -88(%rbp),%rax
-movq %rax,-96(%rbp)
 movq -8(%rbp),%rax
 movq (%rax),%rax
-movq %rax,-104(%rbp)
-movq -104(%rbp),%rax
-leaq 32(%rax),%rax
-movq %rax,-112(%rbp)
-movq -112(%rbp),%rdi
-movq -96(%rbp),%rsi
+movq %rax,-88(%rbp)
+movq -88(%rbp),%rax
+leaq 136(%rax),%rax
+movq %rax,-96(%rbp)
+movq -96(%rbp),%rdi
+movq -80(%rbp),%rsi
 call rt_xchg
-movq %rax,-120(%rbp)
+movq %rax,-104(%rbp)
 movq -8(%rbp),%rax
-movq %rax,-128(%rbp)
+movq %rax,-112(%rbp)
 .pushsection .rodata
-.L255:
+.L258:
+.byte 109
+.byte 111
+.byte 100
+.byte 117
+.byte 108
+.byte 101
+.byte 0
+.popsection
+leaq .L258(%rip),%rax
+movq %rax,-120(%rbp)
+movabsq $6,%rax
+movq %rax,-128(%rbp)
+movq -120(%rbp),%rdi
+movq -128(%rbp),%rsi
+call rt_lit
+movq %rax,-136(%rbp)
+movq -136(%rbp),%rdi
+call rt_view
+movq %rax,-144(%rbp)
+movq -144(%rbp),%rax
+movq %rax,-152(%rbp)
+movq -112(%rbp),%rdi
+movq -152(%rbp),%rsi
+call f_native_expect
+movq %rax,-160(%rbp)
+movq -8(%rbp),%rax
+movq %rax,-168(%rbp)
+movq -168(%rbp),%rdi
+call f_native_ident
+movq %rax,-176(%rbp)
+movq -176(%rbp),%rax
+movq %rax,-184(%rbp)
+movq -80(%rbp),%rax
+testq %rax,%rax
+jz .L259
+movq -184(%rbp),%rdi
+call rt_view
+movq %rax,-192(%rbp)
+movq -192(%rbp),%rax
+movq %rax,-200(%rbp)
+.pushsection .rodata
+.L261:
+.byte 114
+.byte 117
+.byte 110
+.byte 116
+.byte 105
+.byte 109
+.byte 101
+.byte 0
+.popsection
+leaq .L261(%rip),%rax
+movq %rax,-208(%rbp)
+movabsq $7,%rax
+movq %rax,-216(%rbp)
+movq -208(%rbp),%rdi
+movq -216(%rbp),%rsi
+call rt_lit
+movq %rax,-224(%rbp)
+movq -224(%rbp),%rdi
+call rt_view
+movq %rax,-232(%rbp)
+movq -232(%rbp),%rax
+movq %rax,-240(%rbp)
+movq -200(%rbp),%rdi
+movq -240(%rbp),%rsi
+call f_native_same
+movq %rax,-248(%rbp)
+movq -248(%rbp),%rax
+movq %rax,-256(%rbp)
+movabsq $0,%rax
+movq %rax,-264(%rbp)
+movq -264(%rbp),%rcx
+movq -256(%rbp),%rax
+cmpq %rcx,%rax
+sete %al
+movzbq %al,%rax
+movq %rax,-272(%rbp)
+movq -272(%rbp),%rax
+testq %rax,%rax
+jz .L262
+movq -8(%rbp),%rax
+movq %rax,-280(%rbp)
+.pushsection .rodata
+.L264:
+.byte 117
+.byte 110
+.byte 115
+.byte 97
+.byte 102
+.byte 101
+.byte 32
+.byte 109
+.byte 111
+.byte 100
+.byte 117
+.byte 108
+.byte 101
+.byte 32
+.byte 114
+.byte 101
+.byte 115
+.byte 101
+.byte 114
+.byte 118
+.byte 101
+.byte 100
+.byte 32
+.byte 102
+.byte 111
+.byte 114
+.byte 32
+.byte 114
+.byte 117
+.byte 110
+.byte 116
+.byte 105
+.byte 109
+.byte 101
+.byte 0
+.popsection
+leaq .L264(%rip),%rax
+movq %rax,-288(%rbp)
+movabsq $34,%rax
+movq %rax,-296(%rbp)
+movq -288(%rbp),%rdi
+movq -296(%rbp),%rsi
+call rt_lit
+movq %rax,-304(%rbp)
+movq -304(%rbp),%rdi
+call rt_view
+movq %rax,-312(%rbp)
+movq -312(%rbp),%rax
+movq %rax,-320(%rbp)
+movq -280(%rbp),%rdi
+movq -320(%rbp),%rsi
+call f_native_fail
+movq %rax,-328(%rbp)
+jmp .L263
+.L262:
+.L263:
+jmp .L260
+.L259:
+.L260:
+movq -8(%rbp),%rax
+movq (%rax),%rax
+movq %rax,-336(%rbp)
+movq -336(%rbp),%rax
+leaq 32(%rax),%rax
+movq %rax,-344(%rbp)
+movq -344(%rbp),%rdi
+movq -184(%rbp),%rsi
+call rt_xchg
+movq %rax,-352(%rbp)
+movq -8(%rbp),%rax
+movq %rax,-360(%rbp)
+.pushsection .rodata
+.L265:
 .byte 59
 .byte 0
 .popsection
-leaq .L255(%rip),%rax
-movq %rax,-136(%rbp)
+leaq .L265(%rip),%rax
+movq %rax,-368(%rbp)
 movabsq $1,%rax
-movq %rax,-144(%rbp)
-movq -136(%rbp),%rdi
-movq -144(%rbp),%rsi
+movq %rax,-376(%rbp)
+movq -368(%rbp),%rdi
+movq -376(%rbp),%rsi
 call rt_lit
-movq %rax,-152(%rbp)
-movq -152(%rbp),%rdi
+movq %rax,-384(%rbp)
+movq -384(%rbp),%rdi
 call rt_view
-movq %rax,-160(%rbp)
-movq -160(%rbp),%rax
-movq %rax,-168(%rbp)
-movq -128(%rbp),%rdi
-movq -168(%rbp),%rsi
+movq %rax,-392(%rbp)
+movq -392(%rbp),%rax
+movq %rax,-400(%rbp)
+movq -360(%rbp),%rdi
+movq -400(%rbp),%rsi
 call f_native_expect
-movq %rax,-176(%rbp)
-.L256:
+movq %rax,-408(%rbp)
+.L266:
 movq -8(%rbp),%rax
-movq %rax,-184(%rbp)
+movq %rax,-416(%rbp)
 .pushsection .rodata
-.L258:
+.L268:
 .byte 117
 .byte 115
 .byte 101
 .byte 0
 .popsection
-leaq .L258(%rip),%rax
-movq %rax,-192(%rbp)
-movabsq $3,%rax
-movq %rax,-200(%rbp)
-movq -192(%rbp),%rdi
-movq -200(%rbp),%rsi
-call rt_lit
-movq %rax,-208(%rbp)
-movq -208(%rbp),%rdi
-call rt_view
-movq %rax,-216(%rbp)
-movq -216(%rbp),%rax
-movq %rax,-224(%rbp)
-movq -184(%rbp),%rdi
-movq -224(%rbp),%rsi
-call f_native_eat
-movq %rax,-232(%rbp)
-movq -232(%rbp),%rax
-testq %rax,%rax
-jz .L257
-movq -8(%rbp),%rax
-movq %rax,-240(%rbp)
-movq -240(%rbp),%rdi
-call f_native_ident
-movq %rax,-248(%rbp)
-movq -8(%rbp),%rax
-movq %rax,-256(%rbp)
-.pushsection .rodata
-.L259:
-.byte 59
-.byte 0
-.popsection
-leaq .L259(%rip),%rax
-movq %rax,-264(%rbp)
-movabsq $1,%rax
-movq %rax,-272(%rbp)
-movq -264(%rbp),%rdi
-movq -272(%rbp),%rsi
-call rt_lit
-movq %rax,-280(%rbp)
-movq -280(%rbp),%rdi
-call rt_view
-movq %rax,-288(%rbp)
-movq -288(%rbp),%rax
-movq %rax,-296(%rbp)
-movq -256(%rbp),%rdi
-movq -296(%rbp),%rsi
-call f_native_expect
-movq %rax,-304(%rbp)
-jmp .L256
-.L257:
-.L260:
-movq -8(%rbp),%rax
-movq %rax,-312(%rbp)
-movq -312(%rbp),%rdi
-call f_native_kind
-movq %rax,-320(%rbp)
-movq -320(%rbp),%rax
-movq %rax,-328(%rbp)
-movabsq $0,%rax
-movq %rax,-336(%rbp)
-movq -336(%rbp),%rcx
-movq -328(%rbp),%rax
-cmpq %rcx,%rax
-setne %al
-movzbq %al,%rax
-movq %rax,-344(%rbp)
-movq -344(%rbp),%rax
-testq %rax,%rax
-jz .L261
-movq -8(%rbp),%rax
-movq %rax,-352(%rbp)
-.pushsection .rodata
-.L262:
-.byte 112
-.byte 117
-.byte 98
-.byte 0
-.popsection
-leaq .L262(%rip),%rax
-movq %rax,-360(%rbp)
-movabsq $3,%rax
-movq %rax,-368(%rbp)
-movq -360(%rbp),%rdi
-movq -368(%rbp),%rsi
-call rt_lit
-movq %rax,-376(%rbp)
-movq -376(%rbp),%rdi
-call rt_view
-movq %rax,-384(%rbp)
-movq -384(%rbp),%rax
-movq %rax,-392(%rbp)
-movq -352(%rbp),%rdi
-movq -392(%rbp),%rsi
-call f_native_eat
-movq %rax,-400(%rbp)
-movq -400(%rbp),%rax
-movq %rax,-408(%rbp)
-movq -8(%rbp),%rax
-movq %rax,-416(%rbp)
-.pushsection .rodata
-.L263:
-.byte 115
-.byte 116
-.byte 114
-.byte 117
-.byte 99
-.byte 116
-.byte 0
-.popsection
-leaq .L263(%rip),%rax
+leaq .L268(%rip),%rax
 movq %rax,-424(%rbp)
-movabsq $6,%rax
+movabsq $3,%rax
 movq %rax,-432(%rbp)
 movq -424(%rbp),%rdi
 movq -432(%rbp),%rsi
@@ -5951,82 +6043,192 @@ movq -448(%rbp),%rax
 movq %rax,-456(%rbp)
 movq -416(%rbp),%rdi
 movq -456(%rbp),%rsi
-call f_native_is
+call f_native_eat
 movq %rax,-464(%rbp)
 movq -464(%rbp),%rax
-movq %rax,-472(%rbp)
+testq %rax,%rax
+jz .L267
 movq -8(%rbp),%rax
+movq %rax,-472(%rbp)
+movq -472(%rbp),%rdi
+call f_native_ident
 movq %rax,-480(%rbp)
+movq -8(%rbp),%rax
+movq %rax,-488(%rbp)
 .pushsection .rodata
-.L264:
+.L269:
+.byte 59
+.byte 0
+.popsection
+leaq .L269(%rip),%rax
+movq %rax,-496(%rbp)
+movabsq $1,%rax
+movq %rax,-504(%rbp)
+movq -496(%rbp),%rdi
+movq -504(%rbp),%rsi
+call rt_lit
+movq %rax,-512(%rbp)
+movq -512(%rbp),%rdi
+call rt_view
+movq %rax,-520(%rbp)
+movq -520(%rbp),%rax
+movq %rax,-528(%rbp)
+movq -488(%rbp),%rdi
+movq -528(%rbp),%rsi
+call f_native_expect
+movq %rax,-536(%rbp)
+jmp .L266
+.L267:
+.L270:
+movq -8(%rbp),%rax
+movq %rax,-544(%rbp)
+movq -544(%rbp),%rdi
+call f_native_kind
+movq %rax,-552(%rbp)
+movq -552(%rbp),%rax
+movq %rax,-560(%rbp)
+movabsq $0,%rax
+movq %rax,-568(%rbp)
+movq -568(%rbp),%rcx
+movq -560(%rbp),%rax
+cmpq %rcx,%rax
+setne %al
+movzbq %al,%rax
+movq %rax,-576(%rbp)
+movq -576(%rbp),%rax
+testq %rax,%rax
+jz .L271
+movq -8(%rbp),%rax
+movq %rax,-584(%rbp)
+.pushsection .rodata
+.L272:
+.byte 112
+.byte 117
+.byte 98
+.byte 0
+.popsection
+leaq .L272(%rip),%rax
+movq %rax,-592(%rbp)
+movabsq $3,%rax
+movq %rax,-600(%rbp)
+movq -592(%rbp),%rdi
+movq -600(%rbp),%rsi
+call rt_lit
+movq %rax,-608(%rbp)
+movq -608(%rbp),%rdi
+call rt_view
+movq %rax,-616(%rbp)
+movq -616(%rbp),%rax
+movq %rax,-624(%rbp)
+movq -584(%rbp),%rdi
+movq -624(%rbp),%rsi
+call f_native_eat
+movq %rax,-632(%rbp)
+movq -632(%rbp),%rax
+movq %rax,-640(%rbp)
+movq -8(%rbp),%rax
+movq %rax,-648(%rbp)
+.pushsection .rodata
+.L273:
+.byte 115
+.byte 116
+.byte 114
+.byte 117
+.byte 99
+.byte 116
+.byte 0
+.popsection
+leaq .L273(%rip),%rax
+movq %rax,-656(%rbp)
+movabsq $6,%rax
+movq %rax,-664(%rbp)
+movq -656(%rbp),%rdi
+movq -664(%rbp),%rsi
+call rt_lit
+movq %rax,-672(%rbp)
+movq -672(%rbp),%rdi
+call rt_view
+movq %rax,-680(%rbp)
+movq -680(%rbp),%rax
+movq %rax,-688(%rbp)
+movq -648(%rbp),%rdi
+movq -688(%rbp),%rsi
+call f_native_is
+movq %rax,-696(%rbp)
+movq -696(%rbp),%rax
+movq %rax,-704(%rbp)
+movq -8(%rbp),%rax
+movq %rax,-712(%rbp)
+.pushsection .rodata
+.L274:
 .byte 101
 .byte 110
 .byte 117
 .byte 109
 .byte 0
 .popsection
-leaq .L264(%rip),%rax
-movq %rax,-488(%rbp)
+leaq .L274(%rip),%rax
+movq %rax,-720(%rbp)
 movabsq $4,%rax
-movq %rax,-496(%rbp)
-movq -488(%rbp),%rdi
-movq -496(%rbp),%rsi
+movq %rax,-728(%rbp)
+movq -720(%rbp),%rdi
+movq -728(%rbp),%rsi
 call rt_lit
-movq %rax,-504(%rbp)
-movq -504(%rbp),%rdi
+movq %rax,-736(%rbp)
+movq -736(%rbp),%rdi
 call rt_view
-movq %rax,-512(%rbp)
-movq -512(%rbp),%rax
-movq %rax,-520(%rbp)
-movq -480(%rbp),%rdi
-movq -520(%rbp),%rsi
+movq %rax,-744(%rbp)
+movq -744(%rbp),%rax
+movq %rax,-752(%rbp)
+movq -712(%rbp),%rdi
+movq -752(%rbp),%rsi
 call f_native_is
-movq %rax,-528(%rbp)
-movq -528(%rbp),%rcx
-movq -472(%rbp),%rax
+movq %rax,-760(%rbp)
+movq -760(%rbp),%rcx
+movq -704(%rbp),%rax
 addq %rcx,%rax
-movq %rax,-536(%rbp)
-movq -536(%rbp),%rax
+movq %rax,-768(%rbp)
+movq -768(%rbp),%rax
 testq %rax,%rax
-jz .L265
+jz .L275
 movq -8(%rbp),%rax
-movq %rax,-544(%rbp)
+movq %rax,-776(%rbp)
 movq -16(%rbp),%rax
-movq %rax,-552(%rbp)
-movq -544(%rbp),%rdi
-movq -552(%rbp),%rsi
+movq %rax,-784(%rbp)
+movq -776(%rbp),%rdi
+movq -784(%rbp),%rsi
 call f_native_decl
-movq %rax,-560(%rbp)
-jmp .L266
-.L265:
+movq %rax,-792(%rbp)
+jmp .L276
+.L275:
 movq -8(%rbp),%rax
-movq %rax,-568(%rbp)
+movq %rax,-800(%rbp)
 movq -16(%rbp),%rax
-movq %rax,-576(%rbp)
-movq -408(%rbp),%rax
-movq %rax,-584(%rbp)
-movq -568(%rbp),%rdi
-movq -576(%rbp),%rsi
-movq -584(%rbp),%rdx
+movq %rax,-808(%rbp)
+movq -640(%rbp),%rax
+movq %rax,-816(%rbp)
+movq -800(%rbp),%rdi
+movq -808(%rbp),%rsi
+movq -816(%rbp),%rdx
 call f_native_func
-movq %rax,-592(%rbp)
-.L266:
-jmp .L260
-.L261:
+movq %rax,-824(%rbp)
+.L276:
+jmp .L270
+.L271:
 movabsq $0,%rax
-movq %rax,-600(%rbp)
-movq -600(%rbp),%rax
+movq %rax,-832(%rbp)
+movq -832(%rbp),%rax
 leave
 ret
 xorq %rax,%rax
 leave
 ret
-.set .F253,608
+.set .F256,832
 .type f_native_deref,@function
 f_native_deref:
 pushq %rbp
 movq %rsp,%rbp
-subq $.F267,%rsp
+subq $.F277,%rsp
 movq %rdi,-8(%rbp)
 movq %rsi,-16(%rbp)
 movq -16(%rbp),%rax
@@ -6039,7 +6241,7 @@ movq 8(%rax),%rax
 movq %rax,-40(%rbp)
 movq -40(%rbp),%rax
 movq %rax,-48(%rbp)
-.L268:
+.L278:
 movq -8(%rbp),%rax
 movq %rax,-56(%rbp)
 movq -48(%rbp),%rax
@@ -6060,20 +6262,20 @@ movzbq %al,%rax
 movq %rax,-96(%rbp)
 movq -96(%rbp),%rax
 testq %rax,%rax
-jz .L269
+jz .L279
 movq -8(%rbp),%rax
 movq %rax,-104(%rbp)
 movq -32(%rbp),%rax
 movq %rax,-112(%rbp)
 .pushsection .rodata
-.L270:
+.L280:
 .byte 37
 .byte 114
 .byte 97
 .byte 120
 .byte 0
 .popsection
-leaq .L270(%rip),%rax
+leaq .L280(%rip),%rax
 movq %rax,-120(%rbp)
 movabsq $4,%rax
 movq %rax,-128(%rbp)
@@ -6094,7 +6296,7 @@ movq %rax,-160(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-168(%rbp)
 .pushsection .rodata
-.L271:
+.L281:
 .byte 109
 .byte 111
 .byte 118
@@ -6114,7 +6316,7 @@ movq %rax,-168(%rbp)
 .byte 10
 .byte 0
 .popsection
-leaq .L271(%rip),%rax
+leaq .L281(%rip),%rax
 movq %rax,-176(%rbp)
 movabsq $17,%rax
 movq %rax,-184(%rbp)
@@ -6148,8 +6350,8 @@ call f_native_ty_arg
 movq %rax,-256(%rbp)
 movq -256(%rbp),%rax
 movq %rax,-48(%rbp)
-jmp .L268
-.L269:
+jmp .L278
+.L279:
 movq -32(%rbp),%rax
 movq %rax,-264(%rbp)
 movq -48(%rbp),%rax
@@ -6164,12 +6366,12 @@ ret
 xorq %rax,%rax
 leave
 ret
-.set .F267,288
+.set .F277,288
 .type f_native_find_local,@function
 f_native_find_local:
 pushq %rbp
 movq %rsp,%rbp
-subq $.F272,%rsp
+subq $.F282,%rsp
 movq %rdi,-8(%rbp)
 movq %rsi,-16(%rbp)
 movq -8(%rbp),%rax
@@ -6183,7 +6385,7 @@ call rt_len
 movq %rax,-40(%rbp)
 movq -40(%rbp),%rax
 movq %rax,-48(%rbp)
-.L273:
+.L283:
 movabsq $0,%rax
 movq %rax,-56(%rbp)
 movq -56(%rbp),%rax
@@ -6196,7 +6398,7 @@ movzbq %al,%rax
 movq %rax,-72(%rbp)
 movq -72(%rbp),%rax
 testq %rax,%rax
-jz .L274
+jz .L284
 movq -48(%rbp),%rax
 movq %rax,-80(%rbp)
 movabsq $1,%rax
@@ -6238,7 +6440,7 @@ call f_native_same
 movq %rax,-176(%rbp)
 movq -176(%rbp),%rax
 testq %rax,%rax
-jz .L275
+jz .L285
 movq -48(%rbp),%rax
 movq %rax,-184(%rbp)
 movabsq $1,%rax
@@ -6250,11 +6452,11 @@ movq %rax,-200(%rbp)
 movq -200(%rbp),%rax
 leave
 ret
-jmp .L276
-.L275:
-.L276:
-jmp .L273
-.L274:
+jmp .L286
+.L285:
+.L286:
+jmp .L283
+.L284:
 movabsq $0,%rax
 movq %rax,-208(%rbp)
 movq -208(%rbp),%rax
@@ -6263,12 +6465,12 @@ ret
 xorq %rax,%rax
 leave
 ret
-.set .F272,208
+.set .F282,208
 .type f_native_local_id,@function
 f_native_local_id:
 pushq %rbp
 movq %rsp,%rbp
-subq $.F277,%rsp
+subq $.F287,%rsp
 movq %rdi,-8(%rbp)
 movq %rsi,-16(%rbp)
 movq -8(%rbp),%rax
@@ -6295,12 +6497,12 @@ ret
 xorq %rax,%rax
 leave
 ret
-.set .F277,64
+.set .F287,64
 .type f_native_local_ty,@function
 f_native_local_ty:
 pushq %rbp
 movq %rsp,%rbp
-subq $.F278,%rsp
+subq $.F288,%rsp
 movq %rdi,-8(%rbp)
 movq %rsi,-16(%rbp)
 movq -8(%rbp),%rax
@@ -6327,15 +6529,15 @@ ret
 xorq %rax,%rax
 leave
 ret
-.set .F278,64
+.set .F288,64
 .type f_native_pop_locals,@function
 f_native_pop_locals:
 pushq %rbp
 movq %rsp,%rbp
-subq $.F279,%rsp
+subq $.F289,%rsp
 movq %rdi,-8(%rbp)
 movq %rsi,-16(%rbp)
-.L280:
+.L290:
 movq -16(%rbp),%rax
 movq %rax,-24(%rbp)
 movq -8(%rbp),%rax
@@ -6355,7 +6557,7 @@ movzbq %al,%rax
 movq %rax,-56(%rbp)
 movq -56(%rbp),%rax
 testq %rax,%rax
-jz .L281
+jz .L291
 movq -8(%rbp),%rax
 movq (%rax),%rax
 movq %rax,-64(%rbp)
@@ -6365,8 +6567,8 @@ movq %rax,-72(%rbp)
 movq -72(%rbp),%rdi
 call rt_pop
 movq %rax,-80(%rbp)
-jmp .L280
-.L281:
+jmp .L290
+.L291:
 movabsq $0,%rax
 movq %rax,-88(%rbp)
 movq -88(%rbp),%rax
@@ -6375,12 +6577,12 @@ ret
 xorq %rax,%rax
 leave
 ret
-.set .F279,96
+.set .F289,96
 .type f_native_rec_load,@function
 f_native_rec_load:
 pushq %rbp
 movq %rsp,%rbp
-subq $.F282,%rsp
+subq $.F292,%rsp
 movq %rdi,-8(%rbp)
 movq %rsi,-16(%rbp)
 movq %rdx,-24(%rbp)
@@ -6390,14 +6592,14 @@ movq %rax,-40(%rbp)
 movq -16(%rbp),%rax
 movq %rax,-48(%rbp)
 .pushsection .rodata
-.L283:
+.L293:
 .byte 37
 .byte 114
 .byte 97
 .byte 120
 .byte 0
 .popsection
-leaq .L283(%rip),%rax
+leaq .L293(%rip),%rax
 movq %rax,-56(%rbp)
 movabsq $4,%rax
 movq %rax,-64(%rbp)
@@ -6417,11 +6619,11 @@ call f_native_get
 movq %rax,-96(%rbp)
 movq -32(%rbp),%rax
 testq %rax,%rax
-jz .L284
+jz .L294
 movq -8(%rbp),%rax
 movq %rax,-104(%rbp)
 .pushsection .rodata
-.L286:
+.L296:
 .byte 108
 .byte 101
 .byte 97
@@ -6429,7 +6631,7 @@ movq %rax,-104(%rbp)
 .byte 32
 .byte 0
 .popsection
-leaq .L286(%rip),%rax
+leaq .L296(%rip),%rax
 movq %rax,-112(%rbp)
 movabsq $5,%rax
 movq %rax,-120(%rbp)
@@ -6446,12 +6648,12 @@ movq -104(%rbp),%rdi
 movq -144(%rbp),%rsi
 call f_native_o
 movq %rax,-152(%rbp)
-jmp .L285
-.L284:
+jmp .L295
+.L294:
 movq -8(%rbp),%rax
 movq %rax,-160(%rbp)
 .pushsection .rodata
-.L287:
+.L297:
 .byte 109
 .byte 111
 .byte 118
@@ -6459,7 +6661,7 @@ movq %rax,-160(%rbp)
 .byte 32
 .byte 0
 .popsection
-leaq .L287(%rip),%rax
+leaq .L297(%rip),%rax
 movq %rax,-168(%rbp)
 movabsq $5,%rax
 movq %rax,-176(%rbp)
@@ -6476,7 +6678,7 @@ movq -160(%rbp),%rdi
 movq -200(%rbp),%rsi
 call f_native_o
 movq %rax,-208(%rbp)
-.L285:
+.L295:
 movq -8(%rbp),%rax
 movq %rax,-216(%rbp)
 movq -24(%rbp),%rax
@@ -6496,7 +6698,7 @@ movq %rax,-256(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-264(%rbp)
 .pushsection .rodata
-.L288:
+.L298:
 .byte 40
 .byte 37
 .byte 114
@@ -6511,7 +6713,7 @@ movq %rax,-264(%rbp)
 .byte 10
 .byte 0
 .popsection
-leaq .L288(%rip),%rax
+leaq .L298(%rip),%rax
 movq %rax,-272(%rbp)
 movabsq $12,%rax
 movq %rax,-280(%rbp)
@@ -6539,12 +6741,12 @@ ret
 xorq %rax,%rax
 leave
 ret
-.set .F282,336
+.set .F292,336
 .type f_native_rec_store,@function
 f_native_rec_store:
 pushq %rbp
 movq %rsp,%rbp
-subq $.F289,%rsp
+subq $.F299,%rsp
 movq %rdi,-8(%rbp)
 movq %rsi,-16(%rbp)
 movq %rdx,-24(%rbp)
@@ -6554,14 +6756,14 @@ movq %rax,-40(%rbp)
 movq -16(%rbp),%rax
 movq %rax,-48(%rbp)
 .pushsection .rodata
-.L290:
+.L300:
 .byte 37
 .byte 114
 .byte 99
 .byte 120
 .byte 0
 .popsection
-leaq .L290(%rip),%rax
+leaq .L300(%rip),%rax
 movq %rax,-56(%rbp)
 movabsq $4,%rax
 movq %rax,-64(%rbp)
@@ -6584,14 +6786,14 @@ movq %rax,-104(%rbp)
 movq -32(%rbp),%rax
 movq %rax,-112(%rbp)
 .pushsection .rodata
-.L291:
+.L301:
 .byte 37
 .byte 114
 .byte 97
 .byte 120
 .byte 0
 .popsection
-leaq .L291(%rip),%rax
+leaq .L301(%rip),%rax
 movq %rax,-120(%rbp)
 movabsq $4,%rax
 movq %rax,-128(%rbp)
@@ -6612,7 +6814,7 @@ movq %rax,-160(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-168(%rbp)
 .pushsection .rodata
-.L292:
+.L302:
 .byte 109
 .byte 111
 .byte 118
@@ -6625,7 +6827,7 @@ movq %rax,-168(%rbp)
 .byte 44
 .byte 0
 .popsection
-leaq .L292(%rip),%rax
+leaq .L302(%rip),%rax
 movq %rax,-176(%rbp)
 movabsq $10,%rax
 movq %rax,-184(%rbp)
@@ -6661,7 +6863,7 @@ movq %rax,-264(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-272(%rbp)
 .pushsection .rodata
-.L293:
+.L303:
 .byte 40
 .byte 37
 .byte 114
@@ -6671,7 +6873,7 @@ movq %rax,-272(%rbp)
 .byte 10
 .byte 0
 .popsection
-leaq .L293(%rip),%rax
+leaq .L303(%rip),%rax
 movq %rax,-280(%rbp)
 movabsq $7,%rax
 movq %rax,-288(%rbp)
@@ -6696,12 +6898,12 @@ ret
 xorq %rax,%rax
 leave
 ret
-.set .F289,336
+.set .F299,336
 .type f_native_field_path,@function
 f_native_field_path:
 pushq %rbp
 movq %rsp,%rbp
-subq $.F294,%rsp
+subq $.F304,%rsp
 movq %rdi,-8(%rbp)
 movq %rsi,-16(%rbp)
 movq %rdx,-24(%rbp)
@@ -6710,15 +6912,15 @@ movq -16(%rbp),%rax
 movq %rax,-40(%rbp)
 movq -24(%rbp),%rax
 movq %rax,-48(%rbp)
-.L295:
+.L305:
 movq -8(%rbp),%rax
 movq %rax,-56(%rbp)
 .pushsection .rodata
-.L297:
+.L307:
 .byte 46
 .byte 0
 .popsection
-leaq .L297(%rip),%rax
+leaq .L307(%rip),%rax
 movq %rax,-64(%rbp)
 movabsq $1,%rax
 movq %rax,-72(%rbp)
@@ -6737,7 +6939,7 @@ call f_native_eat
 movq %rax,-104(%rbp)
 movq -104(%rbp),%rax
 testq %rax,%rax
-jz .L296
+jz .L306
 movq -8(%rbp),%rax
 movq %rax,-112(%rbp)
 movq -112(%rbp),%rdi
@@ -6851,7 +7053,7 @@ movq -432(%rbp),%rax
 movq %rax,-440(%rbp)
 movq -392(%rbp),%rax
 testq %rax,%rax
-jz .L298
+jz .L308
 movq -440(%rbp),%rax
 movq %rax,-448(%rbp)
 movq -8(%rbp),%rax
@@ -6876,15 +7078,15 @@ movq %rax,-504(%rbp)
 movq -504(%rbp),%rax
 leave
 ret
-jmp .L299
-.L298:
-.L299:
+jmp .L309
+.L308:
+.L309:
 movq -440(%rbp),%rax
 movq %rax,-40(%rbp)
 movq -328(%rbp),%rax
 movq %rax,-48(%rbp)
-jmp .L295
-.L296:
+jmp .L305
+.L306:
 movq -40(%rbp),%rax
 movq %rax,-512(%rbp)
 movq -48(%rbp),%rax
@@ -6899,12 +7101,12 @@ ret
 xorq %rax,%rax
 leave
 ret
-.set .F294,528
+.set .F304,528
 .type f_native_place,@function
 f_native_place:
 pushq %rbp
 movq %rsp,%rbp
-subq $.F300,%rsp
+subq $.F310,%rsp
 movq %rdi,-8(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-16(%rbp)
@@ -6938,11 +7140,11 @@ movzbq %al,%rax
 movq %rax,-96(%rbp)
 movq -96(%rbp),%rax
 testq %rax,%rax
-jz .L301
+jz .L311
 movq -8(%rbp),%rax
 movq %rax,-104(%rbp)
 .pushsection .rodata
-.L303:
+.L313:
 .byte 117
 .byte 110
 .byte 107
@@ -6967,7 +7169,7 @@ movq %rax,-104(%rbp)
 .byte 101
 .byte 0
 .popsection
-leaq .L303(%rip),%rax
+leaq .L313(%rip),%rax
 movq %rax,-112(%rbp)
 movabsq $22,%rax
 movq %rax,-120(%rbp)
@@ -6984,9 +7186,9 @@ movq -104(%rbp),%rdi
 movq -144(%rbp),%rsi
 call f_native_fail
 movq %rax,-152(%rbp)
-jmp .L302
-.L301:
-.L302:
+jmp .L312
+.L311:
+.L312:
 movq -8(%rbp),%rax
 movq %rax,-160(%rbp)
 movq -72(%rbp),%rax
@@ -7040,7 +7242,7 @@ movzbq %al,%rax
 movq %rax,-304(%rbp)
 movq -304(%rbp),%rax
 testq %rax,%rax
-jz .L304
+jz .L314
 movq -8(%rbp),%rax
 movq %rax,-312(%rbp)
 movq -208(%rbp),%rax
@@ -7060,9 +7262,9 @@ movq %rax,-352(%rbp)
 movq -352(%rbp),%rax
 leave
 ret
-jmp .L305
-.L304:
-.L305:
+jmp .L315
+.L314:
+.L315:
 movq -8(%rbp),%rax
 movq %rax,-360(%rbp)
 movq -264(%rbp),%rax
@@ -7083,7 +7285,7 @@ movzbq %al,%rax
 movq %rax,-400(%rbp)
 movq -400(%rbp),%rax
 testq %rax,%rax
-jz .L306
+jz .L316
 movq -208(%rbp),%rax
 movq %rax,-408(%rbp)
 movq -264(%rbp),%rax
@@ -7095,13 +7297,13 @@ movq %rax,-424(%rbp)
 movq -424(%rbp),%rax
 leave
 ret
-jmp .L307
-.L306:
-.L307:
+jmp .L317
+.L316:
+.L317:
 movq -8(%rbp),%rax
 movq %rax,-432(%rbp)
 .pushsection .rodata
-.L308:
+.L318:
 .byte 108
 .byte 101
 .byte 97
@@ -7109,7 +7311,7 @@ movq %rax,-432(%rbp)
 .byte 32
 .byte 0
 .popsection
-leaq .L308(%rip),%rax
+leaq .L318(%rip),%rax
 movq %rax,-440(%rbp)
 movabsq $5,%rax
 movq %rax,-448(%rbp)
@@ -7137,7 +7339,7 @@ movq %rax,-504(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-512(%rbp)
 .pushsection .rodata
-.L309:
+.L319:
 .byte 44
 .byte 37
 .byte 114
@@ -7146,7 +7348,7 @@ movq %rax,-512(%rbp)
 .byte 10
 .byte 0
 .popsection
-leaq .L309(%rip),%rax
+leaq .L319(%rip),%rax
 movq %rax,-520(%rbp)
 movabsq $6,%rax
 movq %rax,-528(%rbp)
@@ -7197,12 +7399,12 @@ ret
 xorq %rax,%rax
 leave
 ret
-.set .F300,656
+.set .F310,656
 .type f_native_hex,@function
 f_native_hex:
 pushq %rbp
 movq %rsp,%rbp
-subq $.F310,%rsp
+subq $.F320,%rsp
 movq %rdi,-8(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-16(%rbp)
@@ -7216,7 +7418,7 @@ movzbq %al,%rax
 movq %rax,-32(%rbp)
 movq -32(%rbp),%rax
 testq %rax,%rax
-jz .L311
+jz .L321
 movq -8(%rbp),%rax
 movq %rax,-40(%rbp)
 movabsq $48,%rax
@@ -7228,9 +7430,9 @@ movq %rax,-56(%rbp)
 movq -56(%rbp),%rax
 leave
 ret
-jmp .L312
-.L311:
-.L312:
+jmp .L322
+.L321:
+.L322:
 movq -8(%rbp),%rax
 movq %rax,-64(%rbp)
 movabsq $71,%rax
@@ -7243,7 +7445,7 @@ movzbq %al,%rax
 movq %rax,-80(%rbp)
 movq -80(%rbp),%rax
 testq %rax,%rax
-jz .L313
+jz .L323
 movq -8(%rbp),%rax
 movq %rax,-88(%rbp)
 movabsq $55,%rax
@@ -7255,9 +7457,9 @@ movq %rax,-104(%rbp)
 movq -104(%rbp),%rax
 leave
 ret
-jmp .L314
-.L313:
-.L314:
+jmp .L324
+.L323:
+.L324:
 movq -8(%rbp),%rax
 movq %rax,-112(%rbp)
 movabsq $87,%rax
@@ -7272,12 +7474,12 @@ ret
 xorq %rax,%rax
 leave
 ret
-.set .F310,128
+.set .F320,128
 .type f_native_string_lit,@function
 f_native_string_lit:
 pushq %rbp
 movq %rsp,%rbp
-subq $.F315,%rsp
+subq $.F325,%rsp
 movq %rdi,-8(%rbp)
 movq -8(%rbp),%rax
 movq (%rax),%rax
@@ -7330,7 +7532,7 @@ movq %rax,-152(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-160(%rbp)
 .pushsection .rodata
-.L316:
+.L326:
 .byte 46
 .byte 112
 .byte 117
@@ -7354,7 +7556,7 @@ movq %rax,-160(%rbp)
 .byte 10
 .byte 0
 .popsection
-leaq .L316(%rip),%rax
+leaq .L326(%rip),%rax
 movq %rax,-168(%rbp)
 movabsq $21,%rax
 movq %rax,-176(%rbp)
@@ -7393,7 +7595,7 @@ movabsq $0,%rax
 movq %rax,-272(%rbp)
 movq -272(%rbp),%rax
 movq %rax,-280(%rbp)
-.L317:
+.L327:
 movq -264(%rbp),%rax
 movq %rax,-288(%rbp)
 movq -112(%rbp),%rax
@@ -7412,7 +7614,7 @@ movzbq %al,%rax
 movq %rax,-320(%rbp)
 movq -320(%rbp),%rax
 testq %rax,%rax
-jz .L318
+jz .L328
 movq -8(%rbp),%rax
 movq (%rax),%rax
 movq %rax,-328(%rbp)
@@ -7440,7 +7642,7 @@ movzbq %al,%rax
 movq %rax,-384(%rbp)
 movq -384(%rbp),%rax
 testq %rax,%rax
-jz .L319
+jz .L329
 movq -264(%rbp),%rax
 movq %rax,-392(%rbp)
 movabsq $1,%rax
@@ -7480,14 +7682,14 @@ movzbq %al,%rax
 movq %rax,-472(%rbp)
 movq -472(%rbp),%rax
 testq %rax,%rax
-jz .L321
+jz .L331
 movabsq $10,%rax
 movq %rax,-480(%rbp)
 movq -480(%rbp),%rax
 movq %rax,-360(%rbp)
-jmp .L322
-.L321:
-.L322:
+jmp .L332
+.L331:
+.L332:
 movq -448(%rbp),%rax
 movq %rax,-488(%rbp)
 movabsq $114,%rax
@@ -7500,14 +7702,14 @@ movzbq %al,%rax
 movq %rax,-504(%rbp)
 movq -504(%rbp),%rax
 testq %rax,%rax
-jz .L323
+jz .L333
 movabsq $13,%rax
 movq %rax,-512(%rbp)
 movq -512(%rbp),%rax
 movq %rax,-360(%rbp)
-jmp .L324
-.L323:
-.L324:
+jmp .L334
+.L333:
+.L334:
 movq -448(%rbp),%rax
 movq %rax,-520(%rbp)
 movabsq $116,%rax
@@ -7520,14 +7722,14 @@ movzbq %al,%rax
 movq %rax,-536(%rbp)
 movq -536(%rbp),%rax
 testq %rax,%rax
-jz .L325
+jz .L335
 movabsq $9,%rax
 movq %rax,-544(%rbp)
 movq -544(%rbp),%rax
 movq %rax,-360(%rbp)
-jmp .L326
-.L325:
-.L326:
+jmp .L336
+.L335:
+.L336:
 movq -448(%rbp),%rax
 movq %rax,-552(%rbp)
 movabsq $48,%rax
@@ -7540,14 +7742,14 @@ movzbq %al,%rax
 movq %rax,-568(%rbp)
 movq -568(%rbp),%rax
 testq %rax,%rax
-jz .L327
+jz .L337
 movabsq $0,%rax
 movq %rax,-576(%rbp)
 movq -576(%rbp),%rax
 movq %rax,-360(%rbp)
-jmp .L328
-.L327:
-.L328:
+jmp .L338
+.L337:
+.L338:
 movq -448(%rbp),%rax
 movq %rax,-584(%rbp)
 movabsq $120,%rax
@@ -7560,7 +7762,7 @@ movzbq %al,%rax
 movq %rax,-600(%rbp)
 movq -600(%rbp),%rax
 testq %rax,%rax
-jz .L329
+jz .L339
 movq -8(%rbp),%rax
 movq (%rax),%rax
 movq %rax,-608(%rbp)
@@ -7643,16 +7845,16 @@ addq %rcx,%rax
 movq %rax,-824(%rbp)
 movq -824(%rbp),%rax
 movq %rax,-264(%rbp)
+jmp .L340
+.L339:
+.L340:
 jmp .L330
 .L329:
 .L330:
-jmp .L320
-.L319:
-.L320:
 movq -8(%rbp),%rax
 movq %rax,-832(%rbp)
 .pushsection .rodata
-.L331:
+.L341:
 .byte 46
 .byte 98
 .byte 121
@@ -7661,7 +7863,7 @@ movq %rax,-832(%rbp)
 .byte 32
 .byte 0
 .popsection
-leaq .L331(%rip),%rax
+leaq .L341(%rip),%rax
 movq %rax,-840(%rbp)
 movabsq $6,%rax
 movq %rax,-848(%rbp)
@@ -7720,12 +7922,12 @@ addq %rcx,%rax
 movq %rax,-992(%rbp)
 movq -992(%rbp),%rax
 movq %rax,-264(%rbp)
-jmp .L317
-.L318:
+jmp .L327
+.L328:
 movq -8(%rbp),%rax
 movq %rax,-1000(%rbp)
 .pushsection .rodata
-.L332:
+.L342:
 .byte 46
 .byte 98
 .byte 121
@@ -7753,7 +7955,7 @@ movq %rax,-1000(%rbp)
 .byte 32
 .byte 0
 .popsection
-leaq .L332(%rip),%rax
+leaq .L342(%rip),%rax
 movq %rax,-1008(%rbp)
 movabsq $25,%rax
 movq %rax,-1016(%rbp)
@@ -7781,7 +7983,7 @@ movq %rax,-1072(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-1080(%rbp)
 .pushsection .rodata
-.L333:
+.L343:
 .byte 40
 .byte 37
 .byte 114
@@ -7796,7 +7998,7 @@ movq %rax,-1080(%rbp)
 .byte 10
 .byte 0
 .popsection
-leaq .L333(%rip),%rax
+leaq .L343(%rip),%rax
 movq %rax,-1088(%rbp)
 movabsq $12,%rax
 movq %rax,-1096(%rbp)
@@ -7833,7 +8035,7 @@ movq %rax,-1184(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-1192(%rbp)
 .pushsection .rodata
-.L334:
+.L344:
 .byte 114
 .byte 116
 .byte 95
@@ -7842,7 +8044,7 @@ movq %rax,-1192(%rbp)
 .byte 116
 .byte 0
 .popsection
-leaq .L334(%rip),%rax
+leaq .L344(%rip),%rax
 movq %rax,-1200(%rbp)
 movabsq $6,%rax
 movq %rax,-1208(%rbp)
@@ -7886,22 +8088,22 @@ ret
 xorq %rax,%rax
 leave
 ret
-.set .F315,1312
+.set .F325,1312
 .type f_native_record,@function
 f_native_record:
 pushq %rbp
 movq %rsp,%rbp
-subq $.F335,%rsp
+subq $.F345,%rsp
 movq %rdi,-8(%rbp)
 movq %rsi,-16(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-24(%rbp)
 .pushsection .rodata
-.L336:
+.L346:
 .byte 123
 .byte 0
 .popsection
-leaq .L336(%rip),%rax
+leaq .L346(%rip),%rax
 movq %rax,-32(%rbp)
 movabsq $1,%rax
 movq %rax,-40(%rbp)
@@ -7951,7 +8153,7 @@ movq %rax,-160(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-168(%rbp)
 .pushsection .rodata
-.L337:
+.L347:
 .byte 114
 .byte 116
 .byte 95
@@ -7960,7 +8162,7 @@ movq %rax,-168(%rbp)
 .byte 99
 .byte 0
 .popsection
-leaq .L337(%rip),%rax
+leaq .L347(%rip),%rax
 movq %rax,-176(%rbp)
 movabsq $6,%rax
 movq %rax,-184(%rbp)
@@ -7990,11 +8192,11 @@ movq %rax,-248(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-256(%rbp)
 .pushsection .rodata
-.L338:
+.L348:
 .byte 125
 .byte 0
 .popsection
-leaq .L338(%rip),%rax
+leaq .L348(%rip),%rax
 movq %rax,-264(%rbp)
 movabsq $1,%rax
 movq %rax,-272(%rbp)
@@ -8023,13 +8225,13 @@ movzbq %al,%rax
 movq %rax,-328(%rbp)
 movq -328(%rbp),%rax
 testq %rax,%rax
-jz .L339
-.L341:
+jz .L349
+.L351:
 movabsq $1,%rax
 movq %rax,-336(%rbp)
 movq -336(%rbp),%rax
 testq %rax,%rax
-jz .L342
+jz .L352
 movq -8(%rbp),%rax
 movq %rax,-344(%rbp)
 movq -344(%rbp),%rdi
@@ -8040,11 +8242,11 @@ movq %rax,-360(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-368(%rbp)
 .pushsection .rodata
-.L343:
+.L353:
 .byte 58
 .byte 0
 .popsection
-leaq .L343(%rip),%rax
+leaq .L353(%rip),%rax
 movq %rax,-376(%rbp)
 movabsq $1,%rax
 movq %rax,-384(%rbp)
@@ -8109,11 +8311,11 @@ movq %rax,-552(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-560(%rbp)
 .pushsection .rodata
-.L344:
+.L354:
 .byte 125
 .byte 0
 .popsection
-leaq .L344(%rip),%rax
+leaq .L354(%rip),%rax
 movq %rax,-568(%rbp)
 movabsq $1,%rax
 movq %rax,-576(%rbp)
@@ -8132,19 +8334,19 @@ call f_native_eat
 movq %rax,-608(%rbp)
 movq -608(%rbp),%rax
 testq %rax,%rax
-jz .L345
-jmp .L342
-jmp .L346
-.L345:
-.L346:
+jz .L355
+jmp .L352
+jmp .L356
+.L355:
+.L356:
 movq -8(%rbp),%rax
 movq %rax,-616(%rbp)
 .pushsection .rodata
-.L347:
+.L357:
 .byte 44
 .byte 0
 .popsection
-leaq .L347(%rip),%rax
+leaq .L357(%rip),%rax
 movq %rax,-624(%rbp)
 movabsq $1,%rax
 movq %rax,-632(%rbp)
@@ -8164,11 +8366,11 @@ movq %rax,-664(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-672(%rbp)
 .pushsection .rodata
-.L348:
+.L358:
 .byte 125
 .byte 0
 .popsection
-leaq .L348(%rip),%rax
+leaq .L358(%rip),%rax
 movq %rax,-680(%rbp)
 movabsq $1,%rax
 movq %rax,-688(%rbp)
@@ -8187,16 +8389,16 @@ call f_native_eat
 movq %rax,-720(%rbp)
 movq -720(%rbp),%rax
 testq %rax,%rax
-jz .L349
-jmp .L342
+jz .L359
+jmp .L352
+jmp .L360
+.L359:
+.L360:
+jmp .L351
+.L352:
 jmp .L350
 .L349:
 .L350:
-jmp .L341
-.L342:
-jmp .L340
-.L339:
-.L340:
 movq -248(%rbp),%rax
 movq %rax,-728(%rbp)
 movq -8(%rbp),%rax
@@ -8224,12 +8426,12 @@ ret
 xorq %rax,%rax
 leave
 ret
-.set .F335,784
+.set .F345,784
 .type f_native_variant,@function
 f_native_variant:
 pushq %rbp
 movq %rsp,%rbp
-subq $.F351,%rsp
+subq $.F361,%rsp
 movq %rdi,-8(%rbp)
 movq %rsi,-16(%rbp)
 movq %rdx,-24(%rbp)
@@ -8261,11 +8463,11 @@ movq %rax,-104(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-112(%rbp)
 .pushsection .rodata
-.L352:
+.L362:
 .byte 40
 .byte 0
 .popsection
-leaq .L352(%rip),%rax
+leaq .L362(%rip),%rax
 movq %rax,-120(%rbp)
 movabsq $1,%rax
 movq %rax,-128(%rbp)
@@ -8284,7 +8486,7 @@ call f_native_eat
 movq %rax,-160(%rbp)
 movq -160(%rbp),%rax
 testq %rax,%rax
-jz .L353
+jz .L363
 movq -8(%rbp),%rax
 movq %rax,-168(%rbp)
 movabsq $0,%rax
@@ -8305,11 +8507,11 @@ movq %rax,-104(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-216(%rbp)
 .pushsection .rodata
-.L355:
+.L365:
 .byte 41
 .byte 0
 .popsection
-leaq .L355(%rip),%rax
+leaq .L365(%rip),%rax
 movq %rax,-224(%rbp)
 movabsq $1,%rax
 movq %rax,-232(%rbp)
@@ -8326,9 +8528,9 @@ movq -216(%rbp),%rdi
 movq -256(%rbp),%rsi
 call f_native_expect
 movq %rax,-264(%rbp)
-jmp .L354
-.L353:
-.L354:
+jmp .L364
+.L363:
+.L364:
 movq -8(%rbp),%rax
 movq %rax,-272(%rbp)
 movq -64(%rbp),%rax
@@ -8342,7 +8544,7 @@ movq %rax,-296(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-304(%rbp)
 .pushsection .rodata
-.L356:
+.L366:
 .byte 114
 .byte 116
 .byte 95
@@ -8352,7 +8554,7 @@ movq %rax,-304(%rbp)
 .byte 109
 .byte 0
 .popsection
-leaq .L356(%rip),%rax
+leaq .L366(%rip),%rax
 movq %rax,-312(%rbp)
 movabsq $7,%rax
 movq %rax,-320(%rbp)
@@ -8409,12 +8611,12 @@ ret
 xorq %rax,%rax
 leave
 ret
-.set .F351,464
+.set .F361,464
 .type f_native_call,@function
 f_native_call:
 pushq %rbp
 movq %rsp,%rbp
-subq $.F357,%rsp
+subq $.F367,%rsp
 movq %rdi,-8(%rbp)
 movq %rsi,-16(%rbp)
 movq %rdx,-24(%rbp)
@@ -8443,11 +8645,11 @@ movzbq %al,%rax
 movq %rax,-88(%rbp)
 movq -88(%rbp),%rax
 testq %rax,%rax
-jz .L358
+jz .L368
 movq -8(%rbp),%rax
 movq %rax,-96(%rbp)
 .pushsection .rodata
-.L360:
+.L370:
 .byte 117
 .byte 110
 .byte 107
@@ -8466,7 +8668,7 @@ movq %rax,-96(%rbp)
 .byte 110
 .byte 0
 .popsection
-leaq .L360(%rip),%rax
+leaq .L370(%rip),%rax
 movq %rax,-104(%rbp)
 movabsq $16,%rax
 movq %rax,-112(%rbp)
@@ -8483,17 +8685,17 @@ movq -96(%rbp),%rdi
 movq -136(%rbp),%rsi
 call f_native_fail
 movq %rax,-144(%rbp)
-jmp .L359
-.L358:
-.L359:
+jmp .L369
+.L368:
+.L369:
 movq -8(%rbp),%rax
 movq %rax,-152(%rbp)
 .pushsection .rodata
-.L361:
+.L371:
 .byte 40
 .byte 0
 .popsection
-leaq .L361(%rip),%rax
+leaq .L371(%rip),%rax
 movq %rax,-160(%rbp)
 movabsq $1,%rax
 movq %rax,-168(%rbp)
@@ -8517,11 +8719,11 @@ movq %rax,-216(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-224(%rbp)
 .pushsection .rodata
-.L362:
+.L372:
 .byte 41
 .byte 0
 .popsection
-leaq .L362(%rip),%rax
+leaq .L372(%rip),%rax
 movq %rax,-232(%rbp)
 movabsq $1,%rax
 movq %rax,-240(%rbp)
@@ -8550,13 +8752,13 @@ movzbq %al,%rax
 movq %rax,-296(%rbp)
 movq -296(%rbp),%rax
 testq %rax,%rax
-jz .L363
-.L365:
+jz .L373
+.L375:
 movabsq $1,%rax
 movq %rax,-304(%rbp)
 movq -304(%rbp),%rax
 testq %rax,%rax
-jz .L366
+jz .L376
 movq -8(%rbp),%rax
 movq %rax,-312(%rbp)
 movabsq $0,%rax
@@ -8577,14 +8779,14 @@ movq %rax,-360(%rbp)
 movq -360(%rbp),%rax
 movq %rax,-368(%rbp)
 .pushsection .rodata
-.L367:
+.L377:
 .byte 37
 .byte 114
 .byte 97
 .byte 120
 .byte 0
 .popsection
-leaq .L367(%rip),%rax
+leaq .L377(%rip),%rax
 movq %rax,-376(%rbp)
 movabsq $4,%rax
 movq %rax,-384(%rbp)
@@ -8618,11 +8820,11 @@ movq %rax,-456(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-464(%rbp)
 .pushsection .rodata
-.L368:
+.L378:
 .byte 41
 .byte 0
 .popsection
-leaq .L368(%rip),%rax
+leaq .L378(%rip),%rax
 movq %rax,-472(%rbp)
 movabsq $1,%rax
 movq %rax,-480(%rbp)
@@ -8641,19 +8843,19 @@ call f_native_eat
 movq %rax,-512(%rbp)
 movq -512(%rbp),%rax
 testq %rax,%rax
-jz .L369
-jmp .L366
-jmp .L370
-.L369:
-.L370:
+jz .L379
+jmp .L376
+jmp .L380
+.L379:
+.L380:
 movq -8(%rbp),%rax
 movq %rax,-520(%rbp)
 .pushsection .rodata
-.L371:
+.L381:
 .byte 44
 .byte 0
 .popsection
-leaq .L371(%rip),%rax
+leaq .L381(%rip),%rax
 movq %rax,-528(%rbp)
 movabsq $1,%rax
 movq %rax,-536(%rbp)
@@ -8670,11 +8872,11 @@ movq -520(%rbp),%rdi
 movq -560(%rbp),%rsi
 call f_native_expect
 movq %rax,-568(%rbp)
-jmp .L365
-.L366:
-jmp .L364
-.L363:
-.L364:
+jmp .L375
+.L376:
+jmp .L374
+.L373:
+.L374:
 movq -8(%rbp),%rax
 movq (%rax),%rax
 movq %rax,-576(%rbp)
@@ -8718,11 +8920,11 @@ movzbq %al,%rax
 movq %rax,-680(%rbp)
 movq -680(%rbp),%rax
 testq %rax,%rax
-jz .L372
+jz .L382
 movq -8(%rbp),%rax
 movq %rax,-688(%rbp)
 .pushsection .rodata
-.L374:
+.L384:
 .byte 110
 .byte 97
 .byte 116
@@ -8758,7 +8960,7 @@ movq %rax,-688(%rbp)
 .byte 115
 .byte 0
 .popsection
-leaq .L374(%rip),%rax
+leaq .L384(%rip),%rax
 movq %rax,-696(%rbp)
 movabsq $33,%rax
 movq %rax,-704(%rbp)
@@ -8775,9 +8977,9 @@ movq -688(%rbp),%rdi
 movq -728(%rbp),%rsi
 call f_native_fail
 movq %rax,-736(%rbp)
-jmp .L373
-.L372:
-.L373:
+jmp .L383
+.L382:
+.L383:
 movq -216(%rbp),%rdi
 call rt_len
 movq %rax,-744(%rbp)
@@ -8785,11 +8987,11 @@ movq -744(%rbp),%rax
 movq %rax,-752(%rbp)
 movabsq $0,%rax
 movq %rax,-760(%rbp)
-.L375:
+.L385:
 movq -752(%rbp),%rcx
 movq -760(%rbp),%rax
 cmpq %rcx,%rax
-jae .L377
+jae .L387
 movq -760(%rbp),%rax
 movq %rax,-768(%rbp)
 movq -768(%rbp),%rdi
@@ -8818,14 +9020,14 @@ movq -816(%rbp),%rsi
 movq -832(%rbp),%rdx
 call f_native_get
 movq %rax,-840(%rbp)
-.L376:
+.L386:
 incq -760(%rbp)
-jmp .L375
-.L377:
+jmp .L385
+.L387:
 movq -8(%rbp),%rax
 movq %rax,-848(%rbp)
 .pushsection .rodata
-.L378:
+.L388:
 .byte 99
 .byte 97
 .byte 108
@@ -8833,7 +9035,7 @@ movq %rax,-848(%rbp)
 .byte 32
 .byte 0
 .popsection
-leaq .L378(%rip),%rax
+leaq .L388(%rip),%rax
 movq %rax,-856(%rbp)
 movabsq $5,%rax
 movq %rax,-864(%rbp)
@@ -8894,17 +9096,17 @@ ret
 xorq %rax,%rax
 leave
 ret
-.set .F357,1008
+.set .F367,1008
 .type f_native_builtin_id,@function
 f_native_builtin_id:
 pushq %rbp
 movq %rsp,%rbp
-subq $.F379,%rsp
+subq $.F389,%rsp
 movq %rdi,-8(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-16(%rbp)
 .pushsection .rodata
-.L380:
+.L390:
 .byte 98
 .byte 121
 .byte 116
@@ -8912,7 +9114,7 @@ movq %rax,-16(%rbp)
 .byte 115
 .byte 0
 .popsection
-leaq .L380(%rip),%rax
+leaq .L390(%rip),%rax
 movq %rax,-24(%rbp)
 movabsq $5,%rax
 movq %rax,-32(%rbp)
@@ -8931,26 +9133,26 @@ call f_native_same
 movq %rax,-64(%rbp)
 movq -64(%rbp),%rax
 testq %rax,%rax
-jz .L381
+jz .L391
 movabsq $1,%rax
 movq %rax,-72(%rbp)
 movq -72(%rbp),%rax
 leave
 ret
-jmp .L382
-.L381:
-.L382:
+jmp .L392
+.L391:
+.L392:
 movq -8(%rbp),%rax
 movq %rax,-80(%rbp)
 .pushsection .rodata
-.L383:
+.L393:
 .byte 114
 .byte 101
 .byte 97
 .byte 100
 .byte 0
 .popsection
-leaq .L383(%rip),%rax
+leaq .L393(%rip),%rax
 movq %rax,-88(%rbp)
 movabsq $4,%rax
 movq %rax,-96(%rbp)
@@ -8969,25 +9171,25 @@ call f_native_same
 movq %rax,-128(%rbp)
 movq -128(%rbp),%rax
 testq %rax,%rax
-jz .L384
+jz .L394
 movabsq $2,%rax
 movq %rax,-136(%rbp)
 movq -136(%rbp),%rax
 leave
 ret
-jmp .L385
-.L384:
-.L385:
+jmp .L395
+.L394:
+.L395:
 movq -8(%rbp),%rax
 movq %rax,-144(%rbp)
 .pushsection .rodata
-.L386:
+.L396:
 .byte 109
 .byte 117
 .byte 116
 .byte 0
 .popsection
-leaq .L386(%rip),%rax
+leaq .L396(%rip),%rax
 movq %rax,-152(%rbp)
 movabsq $3,%rax
 movq %rax,-160(%rbp)
@@ -9006,25 +9208,25 @@ call f_native_same
 movq %rax,-192(%rbp)
 movq -192(%rbp),%rax
 testq %rax,%rax
-jz .L387
+jz .L397
 movabsq $3,%rax
 movq %rax,-200(%rbp)
 movq -200(%rbp),%rax
 leave
 ret
-jmp .L388
-.L387:
-.L388:
+jmp .L398
+.L397:
+.L398:
 movq -8(%rbp),%rax
 movq %rax,-208(%rbp)
 .pushsection .rodata
-.L389:
+.L399:
 .byte 108
 .byte 101
 .byte 110
 .byte 0
 .popsection
-leaq .L389(%rip),%rax
+leaq .L399(%rip),%rax
 movq %rax,-216(%rbp)
 movabsq $3,%rax
 movq %rax,-224(%rbp)
@@ -9043,19 +9245,19 @@ call f_native_same
 movq %rax,-256(%rbp)
 movq -256(%rbp),%rax
 testq %rax,%rax
-jz .L390
+jz .L400
 movabsq $4,%rax
 movq %rax,-264(%rbp)
 movq -264(%rbp),%rax
 leave
 ret
-jmp .L391
-.L390:
-.L391:
+jmp .L401
+.L400:
+.L401:
 movq -8(%rbp),%rax
 movq %rax,-272(%rbp)
 .pushsection .rodata
-.L392:
+.L402:
 .byte 99
 .byte 111
 .byte 112
@@ -9068,7 +9270,7 @@ movq %rax,-272(%rbp)
 .byte 115
 .byte 0
 .popsection
-leaq .L392(%rip),%rax
+leaq .L402(%rip),%rax
 movq %rax,-280(%rbp)
 movabsq $10,%rax
 movq %rax,-288(%rbp)
@@ -9087,26 +9289,26 @@ call f_native_same
 movq %rax,-320(%rbp)
 movq -320(%rbp),%rax
 testq %rax,%rax
-jz .L393
+jz .L403
 movabsq $5,%rax
 movq %rax,-328(%rbp)
 movq -328(%rbp),%rax
 leave
 ret
-jmp .L394
-.L393:
-.L394:
+jmp .L404
+.L403:
+.L404:
 movq -8(%rbp),%rax
 movq %rax,-336(%rbp)
 .pushsection .rodata
-.L395:
+.L405:
 .byte 116
 .byte 101
 .byte 120
 .byte 116
 .byte 0
 .popsection
-leaq .L395(%rip),%rax
+leaq .L405(%rip),%rax
 movq %rax,-344(%rbp)
 movabsq $4,%rax
 movq %rax,-352(%rbp)
@@ -9125,24 +9327,24 @@ call f_native_same
 movq %rax,-384(%rbp)
 movq -384(%rbp),%rax
 testq %rax,%rax
-jz .L396
+jz .L406
 movabsq $6,%rax
 movq %rax,-392(%rbp)
 movq -392(%rbp),%rax
 leave
 ret
-jmp .L397
-.L396:
-.L397:
+jmp .L407
+.L406:
+.L407:
 movq -8(%rbp),%rax
 movq %rax,-400(%rbp)
 .pushsection .rodata
-.L398:
+.L408:
 .byte 97
 .byte 116
 .byte 0
 .popsection
-leaq .L398(%rip),%rax
+leaq .L408(%rip),%rax
 movq %rax,-408(%rbp)
 movabsq $2,%rax
 movq %rax,-416(%rbp)
@@ -9161,19 +9363,19 @@ call f_native_same
 movq %rax,-448(%rbp)
 movq -448(%rbp),%rax
 testq %rax,%rax
-jz .L399
+jz .L409
 movabsq $7,%rax
 movq %rax,-456(%rbp)
 movq -456(%rbp),%rax
 leave
 ret
-jmp .L400
-.L399:
-.L400:
+jmp .L410
+.L409:
+.L410:
 movq -8(%rbp),%rax
 movq %rax,-464(%rbp)
 .pushsection .rodata
-.L401:
+.L411:
 .byte 115
 .byte 108
 .byte 105
@@ -9181,7 +9383,7 @@ movq %rax,-464(%rbp)
 .byte 101
 .byte 0
 .popsection
-leaq .L401(%rip),%rax
+leaq .L411(%rip),%rax
 movq %rax,-472(%rbp)
 movabsq $5,%rax
 movq %rax,-480(%rbp)
@@ -9200,19 +9402,19 @@ call f_native_same
 movq %rax,-512(%rbp)
 movq -512(%rbp),%rax
 testq %rax,%rax
-jz .L402
+jz .L412
 movabsq $8,%rax
 movq %rax,-520(%rbp)
 movq -520(%rbp),%rax
 leave
 ret
-jmp .L403
-.L402:
-.L403:
+jmp .L413
+.L412:
+.L413:
 movq -8(%rbp),%rax
 movq %rax,-528(%rbp)
 .pushsection .rodata
-.L404:
+.L414:
 .byte 118
 .byte 101
 .byte 99
@@ -9223,7 +9425,7 @@ movq %rax,-528(%rbp)
 .byte 104
 .byte 0
 .popsection
-leaq .L404(%rip),%rax
+leaq .L414(%rip),%rax
 movq %rax,-536(%rbp)
 movabsq $8,%rax
 movq %rax,-544(%rbp)
@@ -9242,19 +9444,19 @@ call f_native_same
 movq %rax,-576(%rbp)
 movq -576(%rbp),%rax
 testq %rax,%rax
-jz .L405
+jz .L415
 movabsq $9,%rax
 movq %rax,-584(%rbp)
 movq -584(%rbp),%rax
 leave
 ret
-jmp .L406
-.L405:
-.L406:
+jmp .L416
+.L415:
+.L416:
 movq -8(%rbp),%rax
 movq %rax,-592(%rbp)
 .pushsection .rodata
-.L407:
+.L417:
 .byte 118
 .byte 101
 .byte 99
@@ -9264,7 +9466,7 @@ movq %rax,-592(%rbp)
 .byte 112
 .byte 0
 .popsection
-leaq .L407(%rip),%rax
+leaq .L417(%rip),%rax
 movq %rax,-600(%rbp)
 movabsq $7,%rax
 movq %rax,-608(%rbp)
@@ -9283,19 +9485,19 @@ call f_native_same
 movq %rax,-640(%rbp)
 movq -640(%rbp),%rax
 testq %rax,%rax
-jz .L408
+jz .L418
 movabsq $10,%rax
 movq %rax,-648(%rbp)
 movq -648(%rbp),%rax
 leave
 ret
-jmp .L409
-.L408:
-.L409:
+jmp .L419
+.L418:
+.L419:
 movq -8(%rbp),%rax
 movq %rax,-656(%rbp)
 .pushsection .rodata
-.L410:
+.L420:
 .byte 118
 .byte 101
 .byte 99
@@ -9305,7 +9507,7 @@ movq %rax,-656(%rbp)
 .byte 116
 .byte 0
 .popsection
-leaq .L410(%rip),%rax
+leaq .L420(%rip),%rax
 movq %rax,-664(%rbp)
 movabsq $7,%rax
 movq %rax,-672(%rbp)
@@ -9324,19 +9526,19 @@ call f_native_same
 movq %rax,-704(%rbp)
 movq -704(%rbp),%rax
 testq %rax,%rax
-jz .L411
+jz .L421
 movabsq $11,%rax
 movq %rax,-712(%rbp)
 movq -712(%rbp),%rax
 leave
 ret
-jmp .L412
-.L411:
-.L412:
+jmp .L422
+.L421:
+.L422:
 movq -8(%rbp),%rax
 movq %rax,-720(%rbp)
 .pushsection .rodata
-.L413:
+.L423:
 .byte 118
 .byte 101
 .byte 99
@@ -9350,7 +9552,7 @@ movq %rax,-720(%rbp)
 .byte 116
 .byte 0
 .popsection
-leaq .L413(%rip),%rax
+leaq .L423(%rip),%rax
 movq %rax,-728(%rbp)
 movabsq $11,%rax
 movq %rax,-736(%rbp)
@@ -9369,19 +9571,19 @@ call f_native_same
 movq %rax,-768(%rbp)
 movq -768(%rbp),%rax
 testq %rax,%rax
-jz .L414
+jz .L424
 movabsq $12,%rax
 movq %rax,-776(%rbp)
 movq -776(%rbp),%rax
 leave
 ret
-jmp .L415
-.L414:
-.L415:
+jmp .L425
+.L424:
+.L425:
 movq -8(%rbp),%rax
 movq %rax,-784(%rbp)
 .pushsection .rodata
-.L416:
+.L426:
 .byte 98
 .byte 111
 .byte 114
@@ -9390,7 +9592,7 @@ movq %rax,-784(%rbp)
 .byte 119
 .byte 0
 .popsection
-leaq .L416(%rip),%rax
+leaq .L426(%rip),%rax
 movq %rax,-792(%rbp)
 movabsq $6,%rax
 movq %rax,-800(%rbp)
@@ -9409,19 +9611,19 @@ call f_native_same
 movq %rax,-832(%rbp)
 movq -832(%rbp),%rax
 testq %rax,%rax
-jz .L417
+jz .L427
 movabsq $13,%rax
 movq %rax,-840(%rbp)
 movq -840(%rbp),%rax
 leave
 ret
-jmp .L418
-.L417:
-.L418:
+jmp .L428
+.L427:
+.L428:
 movq -8(%rbp),%rax
 movq %rax,-848(%rbp)
 .pushsection .rodata
-.L419:
+.L429:
 .byte 98
 .byte 111
 .byte 114
@@ -9434,7 +9636,7 @@ movq %rax,-848(%rbp)
 .byte 116
 .byte 0
 .popsection
-leaq .L419(%rip),%rax
+leaq .L429(%rip),%rax
 movq %rax,-856(%rbp)
 movabsq $10,%rax
 movq %rax,-864(%rbp)
@@ -9453,26 +9655,26 @@ call f_native_same
 movq %rax,-896(%rbp)
 movq -896(%rbp),%rax
 testq %rax,%rax
-jz .L420
+jz .L430
 movabsq $14,%rax
 movq %rax,-904(%rbp)
 movq -904(%rbp),%rax
 leave
 ret
-jmp .L421
-.L420:
-.L421:
+jmp .L431
+.L430:
+.L431:
 movq -8(%rbp),%rax
 movq %rax,-912(%rbp)
 .pushsection .rodata
-.L422:
+.L432:
 .byte 108
 .byte 111
 .byte 97
 .byte 100
 .byte 0
 .popsection
-leaq .L422(%rip),%rax
+leaq .L432(%rip),%rax
 movq %rax,-920(%rbp)
 movabsq $4,%rax
 movq %rax,-928(%rbp)
@@ -9491,19 +9693,19 @@ call f_native_same
 movq %rax,-960(%rbp)
 movq -960(%rbp),%rax
 testq %rax,%rax
-jz .L423
+jz .L433
 movabsq $15,%rax
 movq %rax,-968(%rbp)
 movq -968(%rbp),%rax
 leave
 ret
-jmp .L424
-.L423:
-.L424:
+jmp .L434
+.L433:
+.L434:
 movq -8(%rbp),%rax
 movq %rax,-976(%rbp)
 .pushsection .rodata
-.L425:
+.L435:
 .byte 101
 .byte 120
 .byte 99
@@ -9514,7 +9716,7 @@ movq %rax,-976(%rbp)
 .byte 101
 .byte 0
 .popsection
-leaq .L425(%rip),%rax
+leaq .L435(%rip),%rax
 movq %rax,-984(%rbp)
 movabsq $8,%rax
 movq %rax,-992(%rbp)
@@ -9533,29 +9735,330 @@ call f_native_same
 movq %rax,-1024(%rbp)
 movq -1024(%rbp),%rax
 testq %rax,%rax
-jz .L426
+jz .L436
 movabsq $16,%rax
 movq %rax,-1032(%rbp)
 movq -1032(%rbp),%rax
 leave
 ret
-jmp .L427
-.L426:
-.L427:
-movabsq $0,%rax
+jmp .L437
+.L436:
+.L437:
+movq -8(%rbp),%rax
 movq %rax,-1040(%rbp)
-movq -1040(%rbp),%rax
+.pushsection .rodata
+.L438:
+.byte 114
+.byte 97
+.byte 119
+.byte 95
+.byte 108
+.byte 111
+.byte 97
+.byte 100
+.byte 0
+.popsection
+leaq .L438(%rip),%rax
+movq %rax,-1048(%rbp)
+movabsq $8,%rax
+movq %rax,-1056(%rbp)
+movq -1048(%rbp),%rdi
+movq -1056(%rbp),%rsi
+call rt_lit
+movq %rax,-1064(%rbp)
+movq -1064(%rbp),%rdi
+call rt_view
+movq %rax,-1072(%rbp)
+movq -1072(%rbp),%rax
+movq %rax,-1080(%rbp)
+movq -1040(%rbp),%rdi
+movq -1080(%rbp),%rsi
+call f_native_same
+movq %rax,-1088(%rbp)
+movq -1088(%rbp),%rax
+testq %rax,%rax
+jz .L439
+movabsq $101,%rax
+movq %rax,-1096(%rbp)
+movq -1096(%rbp),%rax
+leave
+ret
+jmp .L440
+.L439:
+.L440:
+movq -8(%rbp),%rax
+movq %rax,-1104(%rbp)
+.pushsection .rodata
+.L441:
+.byte 114
+.byte 97
+.byte 119
+.byte 95
+.byte 115
+.byte 116
+.byte 111
+.byte 114
+.byte 101
+.byte 0
+.popsection
+leaq .L441(%rip),%rax
+movq %rax,-1112(%rbp)
+movabsq $9,%rax
+movq %rax,-1120(%rbp)
+movq -1112(%rbp),%rdi
+movq -1120(%rbp),%rsi
+call rt_lit
+movq %rax,-1128(%rbp)
+movq -1128(%rbp),%rdi
+call rt_view
+movq %rax,-1136(%rbp)
+movq -1136(%rbp),%rax
+movq %rax,-1144(%rbp)
+movq -1104(%rbp),%rdi
+movq -1144(%rbp),%rsi
+call f_native_same
+movq %rax,-1152(%rbp)
+movq -1152(%rbp),%rax
+testq %rax,%rax
+jz .L442
+movabsq $102,%rax
+movq %rax,-1160(%rbp)
+movq -1160(%rbp),%rax
+leave
+ret
+jmp .L443
+.L442:
+.L443:
+movq -8(%rbp),%rax
+movq %rax,-1168(%rbp)
+.pushsection .rodata
+.L444:
+.byte 114
+.byte 97
+.byte 119
+.byte 95
+.byte 98
+.byte 121
+.byte 116
+.byte 101
+.byte 0
+.popsection
+leaq .L444(%rip),%rax
+movq %rax,-1176(%rbp)
+movabsq $8,%rax
+movq %rax,-1184(%rbp)
+movq -1176(%rbp),%rdi
+movq -1184(%rbp),%rsi
+call rt_lit
+movq %rax,-1192(%rbp)
+movq -1192(%rbp),%rdi
+call rt_view
+movq %rax,-1200(%rbp)
+movq -1200(%rbp),%rax
+movq %rax,-1208(%rbp)
+movq -1168(%rbp),%rdi
+movq -1208(%rbp),%rsi
+call f_native_same
+movq %rax,-1216(%rbp)
+movq -1216(%rbp),%rax
+testq %rax,%rax
+jz .L445
+movabsq $103,%rax
+movq %rax,-1224(%rbp)
+movq -1224(%rbp),%rax
+leave
+ret
+jmp .L446
+.L445:
+.L446:
+movq -8(%rbp),%rax
+movq %rax,-1232(%rbp)
+.pushsection .rodata
+.L447:
+.byte 114
+.byte 97
+.byte 119
+.byte 95
+.byte 112
+.byte 117
+.byte 116
+.byte 98
+.byte 121
+.byte 116
+.byte 101
+.byte 0
+.popsection
+leaq .L447(%rip),%rax
+movq %rax,-1240(%rbp)
+movabsq $11,%rax
+movq %rax,-1248(%rbp)
+movq -1240(%rbp),%rdi
+movq -1248(%rbp),%rsi
+call rt_lit
+movq %rax,-1256(%rbp)
+movq -1256(%rbp),%rdi
+call rt_view
+movq %rax,-1264(%rbp)
+movq -1264(%rbp),%rax
+movq %rax,-1272(%rbp)
+movq -1232(%rbp),%rdi
+movq -1272(%rbp),%rsi
+call f_native_same
+movq %rax,-1280(%rbp)
+movq -1280(%rbp),%rax
+testq %rax,%rax
+jz .L448
+movabsq $104,%rax
+movq %rax,-1288(%rbp)
+movq -1288(%rbp),%rax
+leave
+ret
+jmp .L449
+.L448:
+.L449:
+movq -8(%rbp),%rax
+movq %rax,-1296(%rbp)
+.pushsection .rodata
+.L450:
+.byte 114
+.byte 97
+.byte 119
+.byte 95
+.byte 109
+.byte 97
+.byte 112
+.byte 0
+.popsection
+leaq .L450(%rip),%rax
+movq %rax,-1304(%rbp)
+movabsq $7,%rax
+movq %rax,-1312(%rbp)
+movq -1304(%rbp),%rdi
+movq -1312(%rbp),%rsi
+call rt_lit
+movq %rax,-1320(%rbp)
+movq -1320(%rbp),%rdi
+call rt_view
+movq %rax,-1328(%rbp)
+movq -1328(%rbp),%rax
+movq %rax,-1336(%rbp)
+movq -1296(%rbp),%rdi
+movq -1336(%rbp),%rsi
+call f_native_same
+movq %rax,-1344(%rbp)
+movq -1344(%rbp),%rax
+testq %rax,%rax
+jz .L451
+movabsq $105,%rax
+movq %rax,-1352(%rbp)
+movq -1352(%rbp),%rax
+leave
+ret
+jmp .L452
+.L451:
+.L452:
+movq -8(%rbp),%rax
+movq %rax,-1360(%rbp)
+.pushsection .rodata
+.L453:
+.byte 114
+.byte 97
+.byte 119
+.byte 95
+.byte 115
+.byte 116
+.byte 97
+.byte 116
+.byte 101
+.byte 0
+.popsection
+leaq .L453(%rip),%rax
+movq %rax,-1368(%rbp)
+movabsq $9,%rax
+movq %rax,-1376(%rbp)
+movq -1368(%rbp),%rdi
+movq -1376(%rbp),%rsi
+call rt_lit
+movq %rax,-1384(%rbp)
+movq -1384(%rbp),%rdi
+call rt_view
+movq %rax,-1392(%rbp)
+movq -1392(%rbp),%rax
+movq %rax,-1400(%rbp)
+movq -1360(%rbp),%rdi
+movq -1400(%rbp),%rsi
+call f_native_same
+movq %rax,-1408(%rbp)
+movq -1408(%rbp),%rax
+testq %rax,%rax
+jz .L454
+movabsq $106,%rax
+movq %rax,-1416(%rbp)
+movq -1416(%rbp),%rax
+leave
+ret
+jmp .L455
+.L454:
+.L455:
+movq -8(%rbp),%rax
+movq %rax,-1424(%rbp)
+.pushsection .rodata
+.L456:
+.byte 114
+.byte 97
+.byte 119
+.byte 95
+.byte 115
+.byte 121
+.byte 115
+.byte 99
+.byte 97
+.byte 108
+.byte 108
+.byte 0
+.popsection
+leaq .L456(%rip),%rax
+movq %rax,-1432(%rbp)
+movabsq $11,%rax
+movq %rax,-1440(%rbp)
+movq -1432(%rbp),%rdi
+movq -1440(%rbp),%rsi
+call rt_lit
+movq %rax,-1448(%rbp)
+movq -1448(%rbp),%rdi
+call rt_view
+movq %rax,-1456(%rbp)
+movq -1456(%rbp),%rax
+movq %rax,-1464(%rbp)
+movq -1424(%rbp),%rdi
+movq -1464(%rbp),%rsi
+call f_native_same
+movq %rax,-1472(%rbp)
+movq -1472(%rbp),%rax
+testq %rax,%rax
+jz .L457
+movabsq $107,%rax
+movq %rax,-1480(%rbp)
+movq -1480(%rbp),%rax
+leave
+ret
+jmp .L458
+.L457:
+.L458:
+movabsq $0,%rax
+movq %rax,-1488(%rbp)
+movq -1488(%rbp),%rax
 leave
 ret
 xorq %rax,%rax
 leave
 ret
-.set .F379,1040
+.set .F389,1488
 .type f_native_apply,@function
 f_native_apply:
 pushq %rbp
 movq %rsp,%rbp
-subq $.F428,%rsp
+subq $.F459,%rsp
 movq %rdi,-8(%rbp)
 movq %rsi,-16(%rbp)
 movq %rdx,-24(%rbp)
@@ -9576,12 +10079,12 @@ ret
 xorq %rax,%rax
 leave
 ret
-.set .F428,64
+.set .F459,64
 .type f_native_one,@function
 f_native_one:
 pushq %rbp
 movq %rsp,%rbp
-subq $.F429,%rsp
+subq $.F460,%rsp
 movq %rdi,-8(%rbp)
 call rt_new
 movq %rax,-16(%rbp)
@@ -9599,12 +10102,12 @@ ret
 xorq %rax,%rax
 leave
 ret
-.set .F429,48
+.set .F460,48
 .type f_native_two,@function
 f_native_two:
 pushq %rbp
 movq %rsp,%rbp
-subq $.F430,%rsp
+subq $.F461,%rsp
 movq %rdi,-8(%rbp)
 movq %rsi,-16(%rbp)
 call rt_new
@@ -9629,437 +10132,580 @@ ret
 xorq %rax,%rax
 leave
 ret
-.set .F430,64
-.type f_native_builtin,@function
-f_native_builtin:
+.set .F461,64
+.type f_native_raw_builtin,@function
+f_native_raw_builtin:
 pushq %rbp
 movq %rsp,%rbp
-subq $.F431,%rsp
+subq $.F462,%rsp
 movq %rdi,-8(%rbp)
 movq %rsi,-16(%rbp)
 movq -8(%rbp),%rax
+movq (%rax),%rax
 movq %rax,-24(%rbp)
+movq -24(%rbp),%rax
+movq 136(%rax),%rax
+movq %rax,-32(%rbp)
+movq -32(%rbp),%rax
+movq %rax,-40(%rbp)
+movabsq $0,%rax
+movq %rax,-48(%rbp)
+movq -48(%rbp),%rcx
+movq -40(%rbp),%rax
+cmpq %rcx,%rax
+sete %al
+movzbq %al,%rax
+movq %rax,-56(%rbp)
+movq -56(%rbp),%rax
+testq %rax,%rax
+jz .L463
+movq -8(%rbp),%rax
+movq %rax,-64(%rbp)
 .pushsection .rodata
-.L432:
+.L465:
+.byte 114
+.byte 97
+.byte 119
+.byte 32
+.byte 105
+.byte 110
+.byte 116
+.byte 114
+.byte 105
+.byte 110
+.byte 115
+.byte 105
+.byte 99
+.byte 32
+.byte 114
+.byte 101
+.byte 113
+.byte 117
+.byte 105
+.byte 114
+.byte 101
+.byte 115
+.byte 32
+.byte 117
+.byte 110
+.byte 115
+.byte 97
+.byte 102
+.byte 101
+.byte 32
+.byte 114
+.byte 117
+.byte 110
+.byte 116
+.byte 105
+.byte 109
+.byte 101
+.byte 32
+.byte 109
+.byte 111
+.byte 100
+.byte 117
+.byte 108
+.byte 101
+.byte 0
+.popsection
+leaq .L465(%rip),%rax
+movq %rax,-72(%rbp)
+movabsq $44,%rax
+movq %rax,-80(%rbp)
+movq -72(%rbp),%rdi
+movq -80(%rbp),%rsi
+call rt_lit
+movq %rax,-88(%rbp)
+movq -88(%rbp),%rdi
+call rt_view
+movq %rax,-96(%rbp)
+movq -96(%rbp),%rax
+movq %rax,-104(%rbp)
+movq -64(%rbp),%rdi
+movq -104(%rbp),%rsi
+call f_native_fail
+movq %rax,-112(%rbp)
+jmp .L464
+.L463:
+.L464:
+movq -8(%rbp),%rax
+movq %rax,-120(%rbp)
+.pushsection .rodata
+.L466:
 .byte 40
 .byte 0
 .popsection
-leaq .L432(%rip),%rax
-movq %rax,-32(%rbp)
+leaq .L466(%rip),%rax
+movq %rax,-128(%rbp)
 movabsq $1,%rax
-movq %rax,-40(%rbp)
-movq -32(%rbp),%rdi
-movq -40(%rbp),%rsi
+movq %rax,-136(%rbp)
+movq -128(%rbp),%rdi
+movq -136(%rbp),%rsi
 call rt_lit
-movq %rax,-48(%rbp)
-movq -48(%rbp),%rdi
+movq %rax,-144(%rbp)
+movq -144(%rbp),%rdi
 call rt_view
-movq %rax,-56(%rbp)
-movq -56(%rbp),%rax
-movq %rax,-64(%rbp)
-movq -24(%rbp),%rdi
-movq -64(%rbp),%rsi
+movq %rax,-152(%rbp)
+movq -152(%rbp),%rax
+movq %rax,-160(%rbp)
+movq -120(%rbp),%rdi
+movq -160(%rbp),%rsi
 call f_native_expect
-movq %rax,-72(%rbp)
-movq -16(%rbp),%rax
-movq %rax,-80(%rbp)
-movabsq $1,%rax
-movq %rax,-88(%rbp)
-movq -88(%rbp),%rcx
-movq -80(%rbp),%rax
-cmpq %rcx,%rax
-sete %al
-movzbq %al,%rax
-movq %rax,-96(%rbp)
-movq -96(%rbp),%rax
-testq %rax,%rax
-jz .L433
+movq %rax,-168(%rbp)
+call rt_new
+movq %rax,-176(%rbp)
+movq -176(%rbp),%rax
+movq %rax,-184(%rbp)
 movq -8(%rbp),%rax
-movq %rax,-104(%rbp)
+movq %rax,-192(%rbp)
 .pushsection .rodata
-.L435:
+.L467:
 .byte 41
 .byte 0
 .popsection
-leaq .L435(%rip),%rax
-movq %rax,-112(%rbp)
-movabsq $1,%rax
-movq %rax,-120(%rbp)
-movq -112(%rbp),%rdi
-movq -120(%rbp),%rsi
-call rt_lit
-movq %rax,-128(%rbp)
-movq -128(%rbp),%rdi
-call rt_view
-movq %rax,-136(%rbp)
-movq -136(%rbp),%rax
-movq %rax,-144(%rbp)
-movq -104(%rbp),%rdi
-movq -144(%rbp),%rsi
-call f_native_expect
-movq %rax,-152(%rbp)
-movq -8(%rbp),%rax
-movq %rax,-160(%rbp)
-.pushsection .rodata
-.L436:
-.byte 114
-.byte 116
-.byte 95
-.byte 110
-.byte 101
-.byte 119
-.byte 0
-.popsection
-leaq .L436(%rip),%rax
-movq %rax,-168(%rbp)
-movabsq $6,%rax
-movq %rax,-176(%rbp)
-movq -168(%rbp),%rdi
-movq -176(%rbp),%rsi
-call rt_lit
-movq %rax,-184(%rbp)
-movq -184(%rbp),%rdi
-call rt_view
-movq %rax,-192(%rbp)
-movq -192(%rbp),%rax
+leaq .L467(%rip),%rax
 movq %rax,-200(%rbp)
-call rt_new
+movabsq $1,%rax
 movq %rax,-208(%rbp)
-movq -208(%rbp),%rax
+movq -200(%rbp),%rdi
+movq -208(%rbp),%rsi
+call rt_lit
 movq %rax,-216(%rbp)
-movq -160(%rbp),%rdi
-movq -200(%rbp),%rsi
-movq -216(%rbp),%rdx
-call f_native_apply
+movq -216(%rbp),%rdi
+call rt_view
 movq %rax,-224(%rbp)
 movq -224(%rbp),%rax
 movq %rax,-232(%rbp)
-movabsq $2,%rax
+movq -192(%rbp),%rdi
+movq -232(%rbp),%rsi
+call f_native_eat
 movq %rax,-240(%rbp)
 movq -240(%rbp),%rax
 movq %rax,-248(%rbp)
-movq -232(%rbp),%rdi
-movq -248(%rbp),%rsi
-call f_native_val
+movabsq $0,%rax
 movq %rax,-256(%rbp)
-movq -256(%rbp),%rax
-leave
-ret
-jmp .L434
-.L433:
-.L434:
-movq -16(%rbp),%rax
+movq -256(%rbp),%rcx
+movq -248(%rbp),%rax
+cmpq %rcx,%rax
+sete %al
+movzbq %al,%rax
 movq %rax,-264(%rbp)
-movabsq $13,%rax
-movq %rax,-272(%rbp)
-movq -272(%rbp),%rcx
 movq -264(%rbp),%rax
-cmpq %rcx,%rax
-sete %al
-movzbq %al,%rax
+testq %rax,%rax
+jz .L468
+.L470:
+movabsq $1,%rax
+movq %rax,-272(%rbp)
+movq -272(%rbp),%rax
+testq %rax,%rax
+jz .L471
+movq -8(%rbp),%rax
 movq %rax,-280(%rbp)
-movq -280(%rbp),%rax
+movabsq $0,%rax
 movq %rax,-288(%rbp)
-movq -16(%rbp),%rax
-movq %rax,-296(%rbp)
-movabsq $14,%rax
-movq %rax,-304(%rbp)
-movq -304(%rbp),%rcx
-movq -296(%rbp),%rax
-cmpq %rcx,%rax
-sete %al
-movzbq %al,%rax
-movq %rax,-312(%rbp)
-movq -312(%rbp),%rcx
 movq -288(%rbp),%rax
-addq %rcx,%rax
+movq %rax,-296(%rbp)
+movq -280(%rbp),%rdi
+movq -296(%rbp),%rsi
+call f_native_expr
+movq %rax,-304(%rbp)
+movq -304(%rbp),%rax
+movq %rax,-312(%rbp)
+movq -8(%rbp),%rax
 movq %rax,-320(%rbp)
-movq -320(%rbp),%rax
-testq %rax,%rax
-jz .L437
-movq -8(%rbp),%rax
+movq -312(%rbp),%rax
+movq 0(%rax),%rax
 movq %rax,-328(%rbp)
-movq -328(%rbp),%rdi
-call f_native_place
+movq -328(%rbp),%rax
 movq %rax,-336(%rbp)
-movq -336(%rbp),%rax
-movq %rax,-344(%rbp)
-movq -8(%rbp),%rax
-movq %rax,-352(%rbp)
 .pushsection .rodata
-.L439:
-.byte 41
-.byte 0
-.popsection
-leaq .L439(%rip),%rax
-movq %rax,-360(%rbp)
-movabsq $1,%rax
-movq %rax,-368(%rbp)
-movq -360(%rbp),%rdi
-movq -368(%rbp),%rsi
-call rt_lit
-movq %rax,-376(%rbp)
-movq -376(%rbp),%rdi
-call rt_view
-movq %rax,-384(%rbp)
-movq -384(%rbp),%rax
-movq %rax,-392(%rbp)
-movq -352(%rbp),%rdi
-movq -392(%rbp),%rsi
-call f_native_expect
-movq %rax,-400(%rbp)
-movq -344(%rbp),%rax
-leave
-ret
-jmp .L438
-.L437:
-.L438:
-movq -8(%rbp),%rax
-movq %rax,-408(%rbp)
-movabsq $0,%rax
-movq %rax,-416(%rbp)
-movq -416(%rbp),%rax
-movq %rax,-424(%rbp)
-movq -408(%rbp),%rdi
-movq -424(%rbp),%rsi
-call f_native_expr
-movq %rax,-432(%rbp)
-movq -432(%rbp),%rax
-movq %rax,-440(%rbp)
-movq -16(%rbp),%rax
-movq %rax,-448(%rbp)
-movabsq $16,%rax
-movq %rax,-456(%rbp)
-movq -456(%rbp),%rcx
-movq -448(%rbp),%rax
-cmpq %rcx,%rax
-sete %al
-movzbq %al,%rax
-movq %rax,-464(%rbp)
-movq -464(%rbp),%rax
-testq %rax,%rax
-jz .L440
-movq -8(%rbp),%rax
-movq %rax,-472(%rbp)
-.pushsection .rodata
-.L442:
-.byte 44
-.byte 0
-.popsection
-leaq .L442(%rip),%rax
-movq %rax,-480(%rbp)
-movabsq $1,%rax
-movq %rax,-488(%rbp)
-movq -480(%rbp),%rdi
-movq -488(%rbp),%rsi
-call rt_lit
-movq %rax,-496(%rbp)
-movq -496(%rbp),%rdi
-call rt_view
-movq %rax,-504(%rbp)
-movq -504(%rbp),%rax
-movq %rax,-512(%rbp)
-movq -472(%rbp),%rdi
-movq -512(%rbp),%rsi
-call f_native_expect
-movq %rax,-520(%rbp)
-movq -8(%rbp),%rax
-movq %rax,-528(%rbp)
-movabsq $0,%rax
-movq %rax,-536(%rbp)
-movq -536(%rbp),%rax
-movq %rax,-544(%rbp)
-movq -528(%rbp),%rdi
-movq -544(%rbp),%rsi
-call f_native_expr
-movq %rax,-552(%rbp)
-movq -552(%rbp),%rax
-movq %rax,-560(%rbp)
-movq -8(%rbp),%rax
-movq %rax,-568(%rbp)
-.pushsection .rodata
-.L443:
-.byte 41
-.byte 0
-.popsection
-leaq .L443(%rip),%rax
-movq %rax,-576(%rbp)
-movabsq $1,%rax
-movq %rax,-584(%rbp)
-movq -576(%rbp),%rdi
-movq -584(%rbp),%rsi
-call rt_lit
-movq %rax,-592(%rbp)
-movq -592(%rbp),%rdi
-call rt_view
-movq %rax,-600(%rbp)
-movq -600(%rbp),%rax
-movq %rax,-608(%rbp)
-movq -568(%rbp),%rdi
-movq -608(%rbp),%rsi
-call f_native_expect
-movq %rax,-616(%rbp)
-movq -8(%rbp),%rax
-movq %rax,-624(%rbp)
-movq -440(%rbp),%rax
-movq 8(%rax),%rax
-movq %rax,-632(%rbp)
-movq -632(%rbp),%rax
-movq %rax,-640(%rbp)
-movq -624(%rbp),%rdi
-movq -640(%rbp),%rsi
-call f_native_ty_arg
-movq %rax,-648(%rbp)
-movq -648(%rbp),%rax
-movq %rax,-656(%rbp)
-movq -8(%rbp),%rax
-movq %rax,-664(%rbp)
-.pushsection .rodata
-.L444:
-.byte 114
-.byte 116
-.byte 95
-.byte 120
-.byte 99
-.byte 104
-.byte 103
-.byte 0
-.popsection
-leaq .L444(%rip),%rax
-movq %rax,-672(%rbp)
-movabsq $7,%rax
-movq %rax,-680(%rbp)
-movq -672(%rbp),%rdi
-movq -680(%rbp),%rsi
-call rt_lit
-movq %rax,-688(%rbp)
-movq -688(%rbp),%rdi
-call rt_view
-movq %rax,-696(%rbp)
-movq -696(%rbp),%rax
-movq %rax,-704(%rbp)
-movq -440(%rbp),%rax
-movq 0(%rax),%rax
-movq %rax,-712(%rbp)
-movq -712(%rbp),%rax
-movq %rax,-720(%rbp)
-movq -560(%rbp),%rax
-movq 0(%rax),%rax
-movq %rax,-728(%rbp)
-movq -728(%rbp),%rax
-movq %rax,-736(%rbp)
-movq -720(%rbp),%rdi
-movq -736(%rbp),%rsi
-call f_native_two
-movq %rax,-744(%rbp)
-movq -744(%rbp),%rax
-movq %rax,-752(%rbp)
-movq -664(%rbp),%rdi
-movq -704(%rbp),%rsi
-movq -752(%rbp),%rdx
-call f_native_apply
-movq %rax,-760(%rbp)
-movq -760(%rbp),%rax
-movq %rax,-768(%rbp)
-movq -656(%rbp),%rax
-movq %rax,-776(%rbp)
-movq -768(%rbp),%rdi
-movq -776(%rbp),%rsi
-call f_native_val
-movq %rax,-784(%rbp)
-movq -784(%rbp),%rax
-leave
-ret
-jmp .L441
-.L440:
-.L441:
-movq -16(%rbp),%rax
-movq %rax,-792(%rbp)
-movabsq $15,%rax
-movq %rax,-800(%rbp)
-movq -800(%rbp),%rcx
-movq -792(%rbp),%rax
-cmpq %rcx,%rax
-sete %al
-movzbq %al,%rax
-movq %rax,-808(%rbp)
-movq -808(%rbp),%rax
-testq %rax,%rax
-jz .L445
-movq -8(%rbp),%rax
-movq %rax,-816(%rbp)
-.pushsection .rodata
-.L447:
-.byte 41
-.byte 0
-.popsection
-leaq .L447(%rip),%rax
-movq %rax,-824(%rbp)
-movabsq $1,%rax
-movq %rax,-832(%rbp)
-movq -824(%rbp),%rdi
-movq -832(%rbp),%rsi
-call rt_lit
-movq %rax,-840(%rbp)
-movq -840(%rbp),%rdi
-call rt_view
-movq %rax,-848(%rbp)
-movq -848(%rbp),%rax
-movq %rax,-856(%rbp)
-movq -816(%rbp),%rdi
-movq -856(%rbp),%rsi
-call f_native_expect
-movq %rax,-864(%rbp)
-movq -8(%rbp),%rax
-movq %rax,-872(%rbp)
-movq -440(%rbp),%rax
-movq 8(%rax),%rax
-movq %rax,-880(%rbp)
-movq -880(%rbp),%rax
-movq %rax,-888(%rbp)
-movq -872(%rbp),%rdi
-movq -888(%rbp),%rsi
-call f_native_ty_arg
-movq %rax,-896(%rbp)
-movq -896(%rbp),%rax
-movq %rax,-904(%rbp)
-movq -8(%rbp),%rax
-movq %rax,-912(%rbp)
-movq -440(%rbp),%rax
-movq 0(%rax),%rax
-movq %rax,-920(%rbp)
-movq -920(%rbp),%rax
-movq %rax,-928(%rbp)
-.pushsection .rodata
-.L448:
+.L472:
 .byte 37
 .byte 114
 .byte 97
 .byte 120
 .byte 0
 .popsection
-leaq .L448(%rip),%rax
-movq %rax,-936(%rbp)
+leaq .L472(%rip),%rax
+movq %rax,-344(%rbp)
 movabsq $4,%rax
-movq %rax,-944(%rbp)
-movq -936(%rbp),%rdi
-movq -944(%rbp),%rsi
+movq %rax,-352(%rbp)
+movq -344(%rbp),%rdi
+movq -352(%rbp),%rsi
 call rt_lit
-movq %rax,-952(%rbp)
-movq -952(%rbp),%rdi
+movq %rax,-360(%rbp)
+movq -360(%rbp),%rdi
 call rt_view
-movq %rax,-960(%rbp)
-movq -960(%rbp),%rax
-movq %rax,-968(%rbp)
-movq -912(%rbp),%rdi
-movq -928(%rbp),%rsi
-movq -968(%rbp),%rdx
+movq %rax,-368(%rbp)
+movq -368(%rbp),%rax
+movq %rax,-376(%rbp)
+movq -320(%rbp),%rdi
+movq -336(%rbp),%rsi
+movq -376(%rbp),%rdx
 call f_native_get
-movq %rax,-976(%rbp)
+movq %rax,-384(%rbp)
 movq -8(%rbp),%rax
-movq %rax,-984(%rbp)
+movq %rax,-392(%rbp)
+movq -392(%rbp),%rdi
+call f_native_save
+movq %rax,-400(%rbp)
+movq -400(%rbp),%rax
+movq %rax,-408(%rbp)
+movq -184(%rbp),%rdi
+movq -408(%rbp),%rsi
+call rt_push
+movq %rax,-416(%rbp)
+movabsq $0,%rax
+movq %rax,-424(%rbp)
+movq -8(%rbp),%rax
+movq %rax,-432(%rbp)
 .pushsection .rodata
-.L449:
+.L473:
+.byte 41
+.byte 0
+.popsection
+leaq .L473(%rip),%rax
+movq %rax,-440(%rbp)
+movabsq $1,%rax
+movq %rax,-448(%rbp)
+movq -440(%rbp),%rdi
+movq -448(%rbp),%rsi
+call rt_lit
+movq %rax,-456(%rbp)
+movq -456(%rbp),%rdi
+call rt_view
+movq %rax,-464(%rbp)
+movq -464(%rbp),%rax
+movq %rax,-472(%rbp)
+movq -432(%rbp),%rdi
+movq -472(%rbp),%rsi
+call f_native_eat
+movq %rax,-480(%rbp)
+movq -480(%rbp),%rax
+testq %rax,%rax
+jz .L474
+jmp .L471
+jmp .L475
+.L474:
+.L475:
+movq -8(%rbp),%rax
+movq %rax,-488(%rbp)
+.pushsection .rodata
+.L476:
+.byte 44
+.byte 0
+.popsection
+leaq .L476(%rip),%rax
+movq %rax,-496(%rbp)
+movabsq $1,%rax
+movq %rax,-504(%rbp)
+movq -496(%rbp),%rdi
+movq -504(%rbp),%rsi
+call rt_lit
+movq %rax,-512(%rbp)
+movq -512(%rbp),%rdi
+call rt_view
+movq %rax,-520(%rbp)
+movq -520(%rbp),%rax
+movq %rax,-528(%rbp)
+movq -488(%rbp),%rdi
+movq -528(%rbp),%rsi
+call f_native_expect
+movq %rax,-536(%rbp)
+jmp .L470
+.L471:
+jmp .L469
+.L468:
+.L469:
+movabsq $1,%rax
+movq %rax,-544(%rbp)
+movq -544(%rbp),%rax
+movq %rax,-552(%rbp)
+movq -16(%rbp),%rax
+movq %rax,-560(%rbp)
+movabsq $102,%rax
+movq %rax,-568(%rbp)
+movq -568(%rbp),%rcx
+movq -560(%rbp),%rax
+cmpq %rcx,%rax
+sete %al
+movzbq %al,%rax
+movq %rax,-576(%rbp)
+movq -576(%rbp),%rax
+movq %rax,-584(%rbp)
+movq -16(%rbp),%rax
+movq %rax,-592(%rbp)
+movabsq $104,%rax
+movq %rax,-600(%rbp)
+movq -600(%rbp),%rcx
+movq -592(%rbp),%rax
+cmpq %rcx,%rax
+sete %al
+movzbq %al,%rax
+movq %rax,-608(%rbp)
+movq -608(%rbp),%rcx
+movq -584(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-616(%rbp)
+movq -616(%rbp),%rax
+testq %rax,%rax
+jz .L477
+movabsq $2,%rax
+movq %rax,-624(%rbp)
+movq -624(%rbp),%rax
+movq %rax,-552(%rbp)
+jmp .L478
+.L477:
+.L478:
+movq -16(%rbp),%rax
+movq %rax,-632(%rbp)
+movabsq $106,%rax
+movq %rax,-640(%rbp)
+movq -640(%rbp),%rcx
+movq -632(%rbp),%rax
+cmpq %rcx,%rax
+sete %al
+movzbq %al,%rax
+movq %rax,-648(%rbp)
+movq -648(%rbp),%rax
+testq %rax,%rax
+jz .L479
+movabsq $0,%rax
+movq %rax,-656(%rbp)
+movq -656(%rbp),%rax
+movq %rax,-552(%rbp)
+jmp .L480
+.L479:
+.L480:
+movq -16(%rbp),%rax
+movq %rax,-664(%rbp)
+movabsq $107,%rax
+movq %rax,-672(%rbp)
+movq -672(%rbp),%rcx
+movq -664(%rbp),%rax
+cmpq %rcx,%rax
+sete %al
+movzbq %al,%rax
+movq %rax,-680(%rbp)
+movq -680(%rbp),%rax
+testq %rax,%rax
+jz .L481
+movabsq $4,%rax
+movq %rax,-688(%rbp)
+movq -688(%rbp),%rax
+movq %rax,-552(%rbp)
+jmp .L482
+.L481:
+.L482:
+movq -184(%rbp),%rdi
+call rt_len
+movq %rax,-696(%rbp)
+movq -696(%rbp),%rax
+movq %rax,-704(%rbp)
+movq -552(%rbp),%rcx
+movq -704(%rbp),%rax
+cmpq %rcx,%rax
+setne %al
+movzbq %al,%rax
+movq %rax,-712(%rbp)
+movq -712(%rbp),%rax
+testq %rax,%rax
+jz .L483
+movq -8(%rbp),%rax
+movq %rax,-720(%rbp)
+.pushsection .rodata
+.L485:
+.byte 114
+.byte 97
+.byte 119
+.byte 32
+.byte 105
+.byte 110
+.byte 116
+.byte 114
+.byte 105
+.byte 110
+.byte 115
+.byte 105
+.byte 99
+.byte 32
+.byte 97
+.byte 114
+.byte 105
+.byte 116
+.byte 121
+.byte 0
+.popsection
+leaq .L485(%rip),%rax
+movq %rax,-728(%rbp)
+movabsq $19,%rax
+movq %rax,-736(%rbp)
+movq -728(%rbp),%rdi
+movq -736(%rbp),%rsi
+call rt_lit
+movq %rax,-744(%rbp)
+movq -744(%rbp),%rdi
+call rt_view
+movq %rax,-752(%rbp)
+movq -752(%rbp),%rax
+movq %rax,-760(%rbp)
+movq -720(%rbp),%rdi
+movq -760(%rbp),%rsi
+call f_native_fail
+movq %rax,-768(%rbp)
+jmp .L484
+.L483:
+.L484:
+movq -16(%rbp),%rax
+movq %rax,-776(%rbp)
+movabsq $106,%rax
+movq %rax,-784(%rbp)
+movq -784(%rbp),%rcx
+movq -776(%rbp),%rax
+cmpq %rcx,%rax
+sete %al
+movzbq %al,%rax
+movq %rax,-792(%rbp)
+movq -792(%rbp),%rax
+testq %rax,%rax
+jz .L486
+movq -8(%rbp),%rax
+movq %rax,-800(%rbp)
+.pushsection .rodata
+.L488:
+.byte 108
+.byte 101
+.byte 97
+.byte 113
+.byte 32
+.byte 114
+.byte 116
+.byte 95
+.byte 115
+.byte 116
+.byte 97
+.byte 116
+.byte 101
+.byte 40
+.byte 37
+.byte 114
+.byte 105
+.byte 112
+.byte 41
+.byte 44
+.byte 37
+.byte 114
+.byte 97
+.byte 120
+.byte 10
+.byte 0
+.popsection
+leaq .L488(%rip),%rax
+movq %rax,-808(%rbp)
+movabsq $25,%rax
+movq %rax,-816(%rbp)
+movq -808(%rbp),%rdi
+movq -816(%rbp),%rsi
+call rt_lit
+movq %rax,-824(%rbp)
+movq -824(%rbp),%rdi
+call rt_view
+movq %rax,-832(%rbp)
+movq -832(%rbp),%rax
+movq %rax,-840(%rbp)
+movq -800(%rbp),%rdi
+movq -840(%rbp),%rsi
+call f_native_o
+movq %rax,-848(%rbp)
+jmp .L487
+.L486:
+.L487:
+movq -16(%rbp),%rax
+movq %rax,-856(%rbp)
+movabsq $101,%rax
+movq %rax,-864(%rbp)
+movq -864(%rbp),%rcx
+movq -856(%rbp),%rax
+cmpq %rcx,%rax
+sete %al
+movzbq %al,%rax
+movq %rax,-872(%rbp)
+movq -872(%rbp),%rax
+movq %rax,-880(%rbp)
+movq -16(%rbp),%rax
+movq %rax,-888(%rbp)
+movabsq $103,%rax
+movq %rax,-896(%rbp)
+movq -896(%rbp),%rcx
+movq -888(%rbp),%rax
+cmpq %rcx,%rax
+sete %al
+movzbq %al,%rax
+movq %rax,-904(%rbp)
+movq -904(%rbp),%rcx
+movq -880(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-912(%rbp)
+movq -912(%rbp),%rax
+testq %rax,%rax
+jz .L489
+movq -8(%rbp),%rax
+movq %rax,-920(%rbp)
+movabsq $0,%rax
+movq %rax,-928(%rbp)
+movq -184(%rbp),%rdi
+movq -928(%rbp),%rsi
+call rt_slot
+movq %rax,-936(%rbp)
+movq -936(%rbp),%rax
+movq (%rax),%rax
+movq %rax,-944(%rbp)
+movq -944(%rbp),%rax
+movq %rax,-952(%rbp)
+.pushsection .rodata
+.L491:
+.byte 37
+.byte 114
+.byte 97
+.byte 120
+.byte 0
+.popsection
+leaq .L491(%rip),%rax
+movq %rax,-960(%rbp)
+movabsq $4,%rax
+movq %rax,-968(%rbp)
+movq -960(%rbp),%rdi
+movq -968(%rbp),%rsi
+call rt_lit
+movq %rax,-976(%rbp)
+movq -976(%rbp),%rdi
+call rt_view
+movq %rax,-984(%rbp)
+movq -984(%rbp),%rax
+movq %rax,-992(%rbp)
+movq -920(%rbp),%rdi
+movq -952(%rbp),%rsi
+movq -992(%rbp),%rdx
+call f_native_get
+movq %rax,-1000(%rbp)
+movq -16(%rbp),%rax
+movq %rax,-1008(%rbp)
+movabsq $101,%rax
+movq %rax,-1016(%rbp)
+movq -1016(%rbp),%rcx
+movq -1008(%rbp),%rax
+cmpq %rcx,%rax
+sete %al
+movzbq %al,%rax
+movq %rax,-1024(%rbp)
+movq -1024(%rbp),%rax
+testq %rax,%rax
+jz .L492
+movq -8(%rbp),%rax
+movq %rax,-1032(%rbp)
+.pushsection .rodata
+.L494:
 .byte 109
 .byte 111
 .byte 118
@@ -10079,165 +10725,163 @@ movq %rax,-984(%rbp)
 .byte 10
 .byte 0
 .popsection
-leaq .L449(%rip),%rax
-movq %rax,-992(%rbp)
-movabsq $17,%rax
-movq %rax,-1000(%rbp)
-movq -992(%rbp),%rdi
-movq -1000(%rbp),%rsi
-call rt_lit
-movq %rax,-1008(%rbp)
-movq -1008(%rbp),%rdi
-call rt_view
-movq %rax,-1016(%rbp)
-movq -1016(%rbp),%rax
-movq %rax,-1024(%rbp)
-movq -984(%rbp),%rdi
-movq -1024(%rbp),%rsi
-call f_native_o
-movq %rax,-1032(%rbp)
-movq -8(%rbp),%rax
+leaq .L494(%rip),%rax
 movq %rax,-1040(%rbp)
-movq -1040(%rbp),%rdi
-call f_native_save
+movabsq $17,%rax
 movq %rax,-1048(%rbp)
-movq -1048(%rbp),%rax
+movq -1040(%rbp),%rdi
+movq -1048(%rbp),%rsi
+call rt_lit
 movq %rax,-1056(%rbp)
-movq -904(%rbp),%rax
-movq %rax,-1064(%rbp)
 movq -1056(%rbp),%rdi
-movq -1064(%rbp),%rsi
-call f_native_val
+call rt_view
+movq %rax,-1064(%rbp)
+movq -1064(%rbp),%rax
 movq %rax,-1072(%rbp)
-movq -1072(%rbp),%rax
-leave
-ret
-jmp .L446
-.L445:
-.L446:
-movq -8(%rbp),%rax
+movq -1032(%rbp),%rdi
+movq -1072(%rbp),%rsi
+call f_native_o
 movq %rax,-1080(%rbp)
-movq -440(%rbp),%rax
+jmp .L493
+.L492:
+movq -8(%rbp),%rax
 movq %rax,-1088(%rbp)
-movq -1080(%rbp),%rdi
-movq -1088(%rbp),%rsi
-call f_native_deref
+.pushsection .rodata
+.L495:
+.byte 109
+.byte 111
+.byte 118
+.byte 122
+.byte 98
+.byte 113
+.byte 32
+.byte 40
+.byte 37
+.byte 114
+.byte 97
+.byte 120
+.byte 41
+.byte 44
+.byte 37
+.byte 114
+.byte 97
+.byte 120
+.byte 10
+.byte 0
+.popsection
+leaq .L495(%rip),%rax
 movq %rax,-1096(%rbp)
-movq -1096(%rbp),%rax
+movabsq $19,%rax
 movq %rax,-1104(%rbp)
-movq -1104(%rbp),%rax
-movq 0(%rax),%rax
+movq -1096(%rbp),%rdi
+movq -1104(%rbp),%rsi
+call rt_lit
 movq %rax,-1112(%rbp)
-movq -1112(%rbp),%rax
+movq -1112(%rbp),%rdi
+call rt_view
 movq %rax,-1120(%rbp)
-movq -1104(%rbp),%rax
-movq 8(%rax),%rax
+movq -1120(%rbp),%rax
 movq %rax,-1128(%rbp)
-movq -1128(%rbp),%rax
+movq -1088(%rbp),%rdi
+movq -1128(%rbp),%rsi
+call f_native_o
 movq %rax,-1136(%rbp)
+.L493:
+jmp .L490
+.L489:
+.L490:
 movq -16(%rbp),%rax
 movq %rax,-1144(%rbp)
-movabsq $7,%rax
+movabsq $102,%rax
 movq %rax,-1152(%rbp)
 movq -1152(%rbp),%rcx
 movq -1144(%rbp),%rax
 cmpq %rcx,%rax
-setb %al
+sete %al
 movzbq %al,%rax
 movq %rax,-1160(%rbp)
 movq -1160(%rbp),%rax
-testq %rax,%rax
-jz .L450
-movq -8(%rbp),%rax
 movq %rax,-1168(%rbp)
-.pushsection .rodata
-.L452:
-.byte 41
-.byte 0
-.popsection
-leaq .L452(%rip),%rax
-movq %rax,-1176(%rbp)
-movabsq $1,%rax
-movq %rax,-1184(%rbp)
-movq -1176(%rbp),%rdi
-movq -1184(%rbp),%rsi
-call rt_lit
-movq %rax,-1192(%rbp)
-movq -1192(%rbp),%rdi
-call rt_view
-movq %rax,-1200(%rbp)
-movq -1200(%rbp),%rax
-movq %rax,-1208(%rbp)
-movq -1168(%rbp),%rdi
-movq -1208(%rbp),%rsi
-call f_native_expect
-movq %rax,-1216(%rbp)
 movq -16(%rbp),%rax
-movq %rax,-1224(%rbp)
-movabsq $4,%rax
-movq %rax,-1232(%rbp)
-movq -1232(%rbp),%rcx
-movq -1224(%rbp),%rax
-cmpq %rcx,%rax
-setb %al
-movzbq %al,%rax
-movq %rax,-1240(%rbp)
-movq -1240(%rbp),%rax
-testq %rax,%rax
-jz .L453
-movq -8(%rbp),%rax
-movq %rax,-1248(%rbp)
-movq -1136(%rbp),%rax
-movq %rax,-1256(%rbp)
-movq -1248(%rbp),%rdi
-movq -1256(%rbp),%rsi
-call f_native_ty_kind
-movq %rax,-1264(%rbp)
-movq -1264(%rbp),%rax
-movq %rax,-1272(%rbp)
-movabsq $5,%rax
-movq %rax,-1280(%rbp)
-movq -1280(%rbp),%rcx
-movq -1272(%rbp),%rax
+movq %rax,-1176(%rbp)
+movabsq $104,%rax
+movq %rax,-1184(%rbp)
+movq -1184(%rbp),%rcx
+movq -1176(%rbp),%rax
 cmpq %rcx,%rax
 sete %al
 movzbq %al,%rax
-movq %rax,-1288(%rbp)
-movq -1288(%rbp),%rax
+movq %rax,-1192(%rbp)
+movq -1192(%rbp),%rcx
+movq -1168(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-1200(%rbp)
+movq -1200(%rbp),%rax
 testq %rax,%rax
-jz .L455
-movq -1120(%rbp),%rax
-movq %rax,-1296(%rbp)
-movabsq $4,%rax
-movq %rax,-1304(%rbp)
-movq -1304(%rbp),%rax
-movq %rax,-1312(%rbp)
-movq -1296(%rbp),%rdi
-movq -1312(%rbp),%rsi
-call f_native_val
-movq %rax,-1320(%rbp)
-movq -1320(%rbp),%rax
-leave
-ret
-jmp .L456
-.L455:
-.L456:
+jz .L496
 movq -8(%rbp),%rax
-movq %rax,-1328(%rbp)
+movq %rax,-1208(%rbp)
+movabsq $0,%rax
+movq %rax,-1216(%rbp)
+movq -184(%rbp),%rdi
+movq -1216(%rbp),%rsi
+call rt_slot
+movq %rax,-1224(%rbp)
+movq -1224(%rbp),%rax
+movq (%rax),%rax
+movq %rax,-1232(%rbp)
+movq -1232(%rbp),%rax
+movq %rax,-1240(%rbp)
 .pushsection .rodata
-.L457:
+.L498:
+.byte 37
 .byte 114
-.byte 116
-.byte 95
-.byte 118
-.byte 105
-.byte 101
-.byte 119
+.byte 99
+.byte 120
 .byte 0
 .popsection
-leaq .L457(%rip),%rax
+leaq .L498(%rip),%rax
+movq %rax,-1248(%rbp)
+movabsq $4,%rax
+movq %rax,-1256(%rbp)
+movq -1248(%rbp),%rdi
+movq -1256(%rbp),%rsi
+call rt_lit
+movq %rax,-1264(%rbp)
+movq -1264(%rbp),%rdi
+call rt_view
+movq %rax,-1272(%rbp)
+movq -1272(%rbp),%rax
+movq %rax,-1280(%rbp)
+movq -1208(%rbp),%rdi
+movq -1240(%rbp),%rsi
+movq -1280(%rbp),%rdx
+call f_native_get
+movq %rax,-1288(%rbp)
+movq -8(%rbp),%rax
+movq %rax,-1296(%rbp)
+movabsq $1,%rax
+movq %rax,-1304(%rbp)
+movq -184(%rbp),%rdi
+movq -1304(%rbp),%rsi
+call rt_slot
+movq %rax,-1312(%rbp)
+movq -1312(%rbp),%rax
+movq (%rax),%rax
+movq %rax,-1320(%rbp)
+movq -1320(%rbp),%rax
+movq %rax,-1328(%rbp)
+.pushsection .rodata
+.L499:
+.byte 37
+.byte 114
+.byte 97
+.byte 120
+.byte 0
+.popsection
+leaq .L499(%rip),%rax
 movq %rax,-1336(%rbp)
-movabsq $7,%rax
+movabsq $4,%rax
 movq %rax,-1344(%rbp)
 movq -1336(%rbp),%rdi
 movq -1344(%rbp),%rsi
@@ -10248,62 +10892,91 @@ call rt_view
 movq %rax,-1360(%rbp)
 movq -1360(%rbp),%rax
 movq %rax,-1368(%rbp)
-movq -1120(%rbp),%rax
+movq -1296(%rbp),%rdi
+movq -1328(%rbp),%rsi
+movq -1368(%rbp),%rdx
+call f_native_get
 movq %rax,-1376(%rbp)
-movq -1376(%rbp),%rdi
-call f_native_one
-movq %rax,-1384(%rbp)
-movq -1384(%rbp),%rax
-movq %rax,-1392(%rbp)
-movq -1328(%rbp),%rdi
-movq -1368(%rbp),%rsi
-movq -1392(%rbp),%rdx
-call f_native_apply
-movq %rax,-1400(%rbp)
-movq -1400(%rbp),%rax
-movq %rax,-1408(%rbp)
-movabsq $4,%rax
-movq %rax,-1416(%rbp)
-movq -1416(%rbp),%rax
-movq %rax,-1424(%rbp)
-movq -1408(%rbp),%rdi
-movq -1424(%rbp),%rsi
-call f_native_val
-movq %rax,-1432(%rbp)
-movq -1432(%rbp),%rax
-leave
-ret
-jmp .L454
-.L453:
-.L454:
 movq -16(%rbp),%rax
-movq %rax,-1440(%rbp)
-movabsq $4,%rax
-movq %rax,-1448(%rbp)
-movq -1448(%rbp),%rcx
-movq -1440(%rbp),%rax
+movq %rax,-1384(%rbp)
+movabsq $102,%rax
+movq %rax,-1392(%rbp)
+movq -1392(%rbp),%rcx
+movq -1384(%rbp),%rax
 cmpq %rcx,%rax
 sete %al
 movzbq %al,%rax
-movq %rax,-1456(%rbp)
-movq -1456(%rbp),%rax
+movq %rax,-1400(%rbp)
+movq -1400(%rbp),%rax
 testq %rax,%rax
-jz .L458
+jz .L500
+movq -8(%rbp),%rax
+movq %rax,-1408(%rbp)
+.pushsection .rodata
+.L502:
+.byte 109
+.byte 111
+.byte 118
+.byte 113
+.byte 32
+.byte 37
+.byte 114
+.byte 97
+.byte 120
+.byte 44
+.byte 40
+.byte 37
+.byte 114
+.byte 99
+.byte 120
+.byte 41
+.byte 10
+.byte 0
+.popsection
+leaq .L502(%rip),%rax
+movq %rax,-1416(%rbp)
+movabsq $17,%rax
+movq %rax,-1424(%rbp)
+movq -1416(%rbp),%rdi
+movq -1424(%rbp),%rsi
+call rt_lit
+movq %rax,-1432(%rbp)
+movq -1432(%rbp),%rdi
+call rt_view
+movq %rax,-1440(%rbp)
+movq -1440(%rbp),%rax
+movq %rax,-1448(%rbp)
+movq -1408(%rbp),%rdi
+movq -1448(%rbp),%rsi
+call f_native_o
+movq %rax,-1456(%rbp)
+jmp .L501
+.L500:
 movq -8(%rbp),%rax
 movq %rax,-1464(%rbp)
 .pushsection .rodata
-.L460:
-.byte 114
-.byte 116
-.byte 95
+.L503:
+.byte 109
+.byte 111
+.byte 118
+.byte 98
+.byte 32
+.byte 37
+.byte 97
 .byte 108
-.byte 101
-.byte 110
+.byte 44
+.byte 40
+.byte 37
+.byte 114
+.byte 99
+.byte 120
+.byte 41
+.byte 10
 .byte 0
 .popsection
-leaq .L460(%rip),%rax
+leaq .L503(%rip),%rax
 movq %rax,-1472(%rbp)
-movabsq $6,%rax
+movabsq $16,%rax
 movq %rax,-1480(%rbp)
 movq -1472(%rbp),%rdi
 movq -1480(%rbp),%rsi
@@ -10314,38 +10987,1237 @@ call rt_view
 movq %rax,-1496(%rbp)
 movq -1496(%rbp),%rax
 movq %rax,-1504(%rbp)
-movq -1120(%rbp),%rax
-movq %rax,-1512(%rbp)
-movq -1512(%rbp),%rdi
-call f_native_one
-movq %rax,-1520(%rbp)
-movq -1520(%rbp),%rax
-movq %rax,-1528(%rbp)
 movq -1464(%rbp),%rdi
 movq -1504(%rbp),%rsi
-movq -1528(%rbp),%rdx
-call f_native_apply
+call f_native_o
+movq %rax,-1512(%rbp)
+.L501:
+movq -8(%rbp),%rax
+movq %rax,-1520(%rbp)
+.pushsection .rodata
+.L504:
+.byte 120
+.byte 111
+.byte 114
+.byte 113
+.byte 32
+.byte 37
+.byte 114
+.byte 97
+.byte 120
+.byte 44
+.byte 37
+.byte 114
+.byte 97
+.byte 120
+.byte 10
+.byte 0
+.popsection
+leaq .L504(%rip),%rax
+movq %rax,-1528(%rbp)
+movabsq $15,%rax
 movq %rax,-1536(%rbp)
-movq -1536(%rbp),%rax
+movq -1528(%rbp),%rdi
+movq -1536(%rbp),%rsi
+call rt_lit
 movq %rax,-1544(%rbp)
-movabsq $0,%rax
+movq -1544(%rbp),%rdi
+call rt_view
 movq %rax,-1552(%rbp)
 movq -1552(%rbp),%rax
 movq %rax,-1560(%rbp)
-movq -1544(%rbp),%rdi
+movq -1520(%rbp),%rdi
 movq -1560(%rbp),%rsi
-call f_native_val
+call f_native_o
 movq %rax,-1568(%rbp)
-movq -1568(%rbp),%rax
+jmp .L497
+.L496:
+.L497:
+movq -16(%rbp),%rax
+movq %rax,-1576(%rbp)
+movabsq $105,%rax
+movq %rax,-1584(%rbp)
+movq -1584(%rbp),%rcx
+movq -1576(%rbp),%rax
+cmpq %rcx,%rax
+sete %al
+movzbq %al,%rax
+movq %rax,-1592(%rbp)
+movq -1592(%rbp),%rax
+testq %rax,%rax
+jz .L505
+movq -8(%rbp),%rax
+movq %rax,-1600(%rbp)
+movabsq $0,%rax
+movq %rax,-1608(%rbp)
+movq -184(%rbp),%rdi
+movq -1608(%rbp),%rsi
+call rt_slot
+movq %rax,-1616(%rbp)
+movq -1616(%rbp),%rax
+movq (%rax),%rax
+movq %rax,-1624(%rbp)
+movq -1624(%rbp),%rax
+movq %rax,-1632(%rbp)
+.pushsection .rodata
+.L507:
+.byte 37
+.byte 114
+.byte 115
+.byte 105
+.byte 0
+.popsection
+leaq .L507(%rip),%rax
+movq %rax,-1640(%rbp)
+movabsq $4,%rax
+movq %rax,-1648(%rbp)
+movq -1640(%rbp),%rdi
+movq -1648(%rbp),%rsi
+call rt_lit
+movq %rax,-1656(%rbp)
+movq -1656(%rbp),%rdi
+call rt_view
+movq %rax,-1664(%rbp)
+movq -1664(%rbp),%rax
+movq %rax,-1672(%rbp)
+movq -1600(%rbp),%rdi
+movq -1632(%rbp),%rsi
+movq -1672(%rbp),%rdx
+call f_native_get
+movq %rax,-1680(%rbp)
+movq -8(%rbp),%rax
+movq %rax,-1688(%rbp)
+.pushsection .rodata
+.L508:
+.byte 109
+.byte 111
+.byte 118
+.byte 108
+.byte 32
+.byte 36
+.byte 57
+.byte 44
+.byte 37
+.byte 101
+.byte 97
+.byte 120
+.byte 10
+.byte 120
+.byte 111
+.byte 114
+.byte 108
+.byte 32
+.byte 37
+.byte 101
+.byte 100
+.byte 105
+.byte 44
+.byte 37
+.byte 101
+.byte 100
+.byte 105
+.byte 10
+.byte 109
+.byte 111
+.byte 118
+.byte 108
+.byte 32
+.byte 36
+.byte 51
+.byte 44
+.byte 37
+.byte 101
+.byte 100
+.byte 120
+.byte 10
+.byte 109
+.byte 111
+.byte 118
+.byte 108
+.byte 32
+.byte 36
+.byte 51
+.byte 52
+.byte 44
+.byte 37
+.byte 114
+.byte 49
+.byte 48
+.byte 100
+.byte 10
+.byte 109
+.byte 111
+.byte 118
+.byte 113
+.byte 32
+.byte 36
+.byte 45
+.byte 49
+.byte 44
+.byte 37
+.byte 114
+.byte 56
+.byte 10
+.byte 120
+.byte 111
+.byte 114
+.byte 108
+.byte 32
+.byte 37
+.byte 114
+.byte 57
+.byte 100
+.byte 44
+.byte 37
+.byte 114
+.byte 57
+.byte 100
+.byte 10
+.byte 115
+.byte 121
+.byte 115
+.byte 99
+.byte 97
+.byte 108
+.byte 108
+.byte 10
+.byte 0
+.popsection
+leaq .L508(%rip),%rax
+movq %rax,-1696(%rbp)
+movabsq $92,%rax
+movq %rax,-1704(%rbp)
+movq -1696(%rbp),%rdi
+movq -1704(%rbp),%rsi
+call rt_lit
+movq %rax,-1712(%rbp)
+movq -1712(%rbp),%rdi
+call rt_view
+movq %rax,-1720(%rbp)
+movq -1720(%rbp),%rax
+movq %rax,-1728(%rbp)
+movq -1688(%rbp),%rdi
+movq -1728(%rbp),%rsi
+call f_native_o
+movq %rax,-1736(%rbp)
+jmp .L506
+.L505:
+.L506:
+movq -16(%rbp),%rax
+movq %rax,-1744(%rbp)
+movabsq $107,%rax
+movq %rax,-1752(%rbp)
+movq -1752(%rbp),%rcx
+movq -1744(%rbp),%rax
+cmpq %rcx,%rax
+sete %al
+movzbq %al,%rax
+movq %rax,-1760(%rbp)
+movq -1760(%rbp),%rax
+testq %rax,%rax
+jz .L509
+movq -8(%rbp),%rax
+movq %rax,-1768(%rbp)
+movabsq $0,%rax
+movq %rax,-1776(%rbp)
+movq -184(%rbp),%rdi
+movq -1776(%rbp),%rsi
+call rt_slot
+movq %rax,-1784(%rbp)
+movq -1784(%rbp),%rax
+movq (%rax),%rax
+movq %rax,-1792(%rbp)
+movq -1792(%rbp),%rax
+movq %rax,-1800(%rbp)
+.pushsection .rodata
+.L511:
+.byte 37
+.byte 114
+.byte 97
+.byte 120
+.byte 0
+.popsection
+leaq .L511(%rip),%rax
+movq %rax,-1808(%rbp)
+movabsq $4,%rax
+movq %rax,-1816(%rbp)
+movq -1808(%rbp),%rdi
+movq -1816(%rbp),%rsi
+call rt_lit
+movq %rax,-1824(%rbp)
+movq -1824(%rbp),%rdi
+call rt_view
+movq %rax,-1832(%rbp)
+movq -1832(%rbp),%rax
+movq %rax,-1840(%rbp)
+movq -1768(%rbp),%rdi
+movq -1800(%rbp),%rsi
+movq -1840(%rbp),%rdx
+call f_native_get
+movq %rax,-1848(%rbp)
+movq -8(%rbp),%rax
+movq %rax,-1856(%rbp)
+movabsq $1,%rax
+movq %rax,-1864(%rbp)
+movq -184(%rbp),%rdi
+movq -1864(%rbp),%rsi
+call rt_slot
+movq %rax,-1872(%rbp)
+movq -1872(%rbp),%rax
+movq (%rax),%rax
+movq %rax,-1880(%rbp)
+movq -1880(%rbp),%rax
+movq %rax,-1888(%rbp)
+.pushsection .rodata
+.L512:
+.byte 37
+.byte 114
+.byte 100
+.byte 105
+.byte 0
+.popsection
+leaq .L512(%rip),%rax
+movq %rax,-1896(%rbp)
+movabsq $4,%rax
+movq %rax,-1904(%rbp)
+movq -1896(%rbp),%rdi
+movq -1904(%rbp),%rsi
+call rt_lit
+movq %rax,-1912(%rbp)
+movq -1912(%rbp),%rdi
+call rt_view
+movq %rax,-1920(%rbp)
+movq -1920(%rbp),%rax
+movq %rax,-1928(%rbp)
+movq -1856(%rbp),%rdi
+movq -1888(%rbp),%rsi
+movq -1928(%rbp),%rdx
+call f_native_get
+movq %rax,-1936(%rbp)
+movq -8(%rbp),%rax
+movq %rax,-1944(%rbp)
+movabsq $2,%rax
+movq %rax,-1952(%rbp)
+movq -184(%rbp),%rdi
+movq -1952(%rbp),%rsi
+call rt_slot
+movq %rax,-1960(%rbp)
+movq -1960(%rbp),%rax
+movq (%rax),%rax
+movq %rax,-1968(%rbp)
+movq -1968(%rbp),%rax
+movq %rax,-1976(%rbp)
+.pushsection .rodata
+.L513:
+.byte 37
+.byte 114
+.byte 115
+.byte 105
+.byte 0
+.popsection
+leaq .L513(%rip),%rax
+movq %rax,-1984(%rbp)
+movabsq $4,%rax
+movq %rax,-1992(%rbp)
+movq -1984(%rbp),%rdi
+movq -1992(%rbp),%rsi
+call rt_lit
+movq %rax,-2000(%rbp)
+movq -2000(%rbp),%rdi
+call rt_view
+movq %rax,-2008(%rbp)
+movq -2008(%rbp),%rax
+movq %rax,-2016(%rbp)
+movq -1944(%rbp),%rdi
+movq -1976(%rbp),%rsi
+movq -2016(%rbp),%rdx
+call f_native_get
+movq %rax,-2024(%rbp)
+movq -8(%rbp),%rax
+movq %rax,-2032(%rbp)
+movabsq $3,%rax
+movq %rax,-2040(%rbp)
+movq -184(%rbp),%rdi
+movq -2040(%rbp),%rsi
+call rt_slot
+movq %rax,-2048(%rbp)
+movq -2048(%rbp),%rax
+movq (%rax),%rax
+movq %rax,-2056(%rbp)
+movq -2056(%rbp),%rax
+movq %rax,-2064(%rbp)
+.pushsection .rodata
+.L514:
+.byte 37
+.byte 114
+.byte 100
+.byte 120
+.byte 0
+.popsection
+leaq .L514(%rip),%rax
+movq %rax,-2072(%rbp)
+movabsq $4,%rax
+movq %rax,-2080(%rbp)
+movq -2072(%rbp),%rdi
+movq -2080(%rbp),%rsi
+call rt_lit
+movq %rax,-2088(%rbp)
+movq -2088(%rbp),%rdi
+call rt_view
+movq %rax,-2096(%rbp)
+movq -2096(%rbp),%rax
+movq %rax,-2104(%rbp)
+movq -2032(%rbp),%rdi
+movq -2064(%rbp),%rsi
+movq -2104(%rbp),%rdx
+call f_native_get
+movq %rax,-2112(%rbp)
+movq -8(%rbp),%rax
+movq %rax,-2120(%rbp)
+.pushsection .rodata
+.L515:
+.byte 120
+.byte 111
+.byte 114
+.byte 108
+.byte 32
+.byte 37
+.byte 114
+.byte 49
+.byte 48
+.byte 100
+.byte 44
+.byte 37
+.byte 114
+.byte 49
+.byte 48
+.byte 100
+.byte 10
+.byte 120
+.byte 111
+.byte 114
+.byte 108
+.byte 32
+.byte 37
+.byte 114
+.byte 56
+.byte 100
+.byte 44
+.byte 37
+.byte 114
+.byte 56
+.byte 100
+.byte 10
+.byte 120
+.byte 111
+.byte 114
+.byte 108
+.byte 32
+.byte 37
+.byte 114
+.byte 57
+.byte 100
+.byte 44
+.byte 37
+.byte 114
+.byte 57
+.byte 100
+.byte 10
+.byte 115
+.byte 121
+.byte 115
+.byte 99
+.byte 97
+.byte 108
+.byte 108
+.byte 10
+.byte 0
+.popsection
+leaq .L515(%rip),%rax
+movq %rax,-2128(%rbp)
+movabsq $55,%rax
+movq %rax,-2136(%rbp)
+movq -2128(%rbp),%rdi
+movq -2136(%rbp),%rsi
+call rt_lit
+movq %rax,-2144(%rbp)
+movq -2144(%rbp),%rdi
+call rt_view
+movq %rax,-2152(%rbp)
+movq -2152(%rbp),%rax
+movq %rax,-2160(%rbp)
+movq -2120(%rbp),%rdi
+movq -2160(%rbp),%rsi
+call f_native_o
+movq %rax,-2168(%rbp)
+jmp .L510
+.L509:
+.L510:
+movq -8(%rbp),%rax
+movq %rax,-2176(%rbp)
+movq -2176(%rbp),%rdi
+call f_native_save
+movq %rax,-2184(%rbp)
+movq -2184(%rbp),%rax
+movq %rax,-2192(%rbp)
+movabsq $0,%rax
+movq %rax,-2200(%rbp)
+movq -2200(%rbp),%rax
+movq %rax,-2208(%rbp)
+movq -2192(%rbp),%rdi
+movq -2208(%rbp),%rsi
+call f_native_val
+movq %rax,-2216(%rbp)
+movq -2216(%rbp),%rax
 leave
 ret
-jmp .L459
-.L458:
-.L459:
+xorq %rax,%rax
+leave
+ret
+.set .F462,2224
+.type f_native_builtin,@function
+f_native_builtin:
+pushq %rbp
+movq %rsp,%rbp
+subq $.F516,%rsp
+movq %rdi,-8(%rbp)
+movq %rsi,-16(%rbp)
+movabsq $100,%rax
+movq %rax,-24(%rbp)
+movq -24(%rbp),%rax
+movq %rax,-32(%rbp)
+movq -16(%rbp),%rcx
+movq -32(%rbp),%rax
+cmpq %rcx,%rax
+setb %al
+movzbq %al,%rax
+movq %rax,-40(%rbp)
+movq -40(%rbp),%rax
+testq %rax,%rax
+jz .L517
 movq -8(%rbp),%rax
-movq %rax,-1576(%rbp)
+movq %rax,-48(%rbp)
+movq -16(%rbp),%rax
+movq %rax,-56(%rbp)
+movq -48(%rbp),%rdi
+movq -56(%rbp),%rsi
+call f_native_raw_builtin
+movq %rax,-64(%rbp)
+movq -64(%rbp),%rax
+leave
+ret
+jmp .L518
+.L517:
+.L518:
+movq -8(%rbp),%rax
+movq %rax,-72(%rbp)
 .pushsection .rodata
-.L461:
+.L519:
+.byte 40
+.byte 0
+.popsection
+leaq .L519(%rip),%rax
+movq %rax,-80(%rbp)
+movabsq $1,%rax
+movq %rax,-88(%rbp)
+movq -80(%rbp),%rdi
+movq -88(%rbp),%rsi
+call rt_lit
+movq %rax,-96(%rbp)
+movq -96(%rbp),%rdi
+call rt_view
+movq %rax,-104(%rbp)
+movq -104(%rbp),%rax
+movq %rax,-112(%rbp)
+movq -72(%rbp),%rdi
+movq -112(%rbp),%rsi
+call f_native_expect
+movq %rax,-120(%rbp)
+movq -16(%rbp),%rax
+movq %rax,-128(%rbp)
+movabsq $1,%rax
+movq %rax,-136(%rbp)
+movq -136(%rbp),%rcx
+movq -128(%rbp),%rax
+cmpq %rcx,%rax
+sete %al
+movzbq %al,%rax
+movq %rax,-144(%rbp)
+movq -144(%rbp),%rax
+testq %rax,%rax
+jz .L520
+movq -8(%rbp),%rax
+movq %rax,-152(%rbp)
+.pushsection .rodata
+.L522:
+.byte 41
+.byte 0
+.popsection
+leaq .L522(%rip),%rax
+movq %rax,-160(%rbp)
+movabsq $1,%rax
+movq %rax,-168(%rbp)
+movq -160(%rbp),%rdi
+movq -168(%rbp),%rsi
+call rt_lit
+movq %rax,-176(%rbp)
+movq -176(%rbp),%rdi
+call rt_view
+movq %rax,-184(%rbp)
+movq -184(%rbp),%rax
+movq %rax,-192(%rbp)
+movq -152(%rbp),%rdi
+movq -192(%rbp),%rsi
+call f_native_expect
+movq %rax,-200(%rbp)
+movq -8(%rbp),%rax
+movq %rax,-208(%rbp)
+.pushsection .rodata
+.L523:
+.byte 114
+.byte 116
+.byte 95
+.byte 110
+.byte 101
+.byte 119
+.byte 0
+.popsection
+leaq .L523(%rip),%rax
+movq %rax,-216(%rbp)
+movabsq $6,%rax
+movq %rax,-224(%rbp)
+movq -216(%rbp),%rdi
+movq -224(%rbp),%rsi
+call rt_lit
+movq %rax,-232(%rbp)
+movq -232(%rbp),%rdi
+call rt_view
+movq %rax,-240(%rbp)
+movq -240(%rbp),%rax
+movq %rax,-248(%rbp)
+call rt_new
+movq %rax,-256(%rbp)
+movq -256(%rbp),%rax
+movq %rax,-264(%rbp)
+movq -208(%rbp),%rdi
+movq -248(%rbp),%rsi
+movq -264(%rbp),%rdx
+call f_native_apply
+movq %rax,-272(%rbp)
+movq -272(%rbp),%rax
+movq %rax,-280(%rbp)
+movabsq $2,%rax
+movq %rax,-288(%rbp)
+movq -288(%rbp),%rax
+movq %rax,-296(%rbp)
+movq -280(%rbp),%rdi
+movq -296(%rbp),%rsi
+call f_native_val
+movq %rax,-304(%rbp)
+movq -304(%rbp),%rax
+leave
+ret
+jmp .L521
+.L520:
+.L521:
+movq -16(%rbp),%rax
+movq %rax,-312(%rbp)
+movabsq $13,%rax
+movq %rax,-320(%rbp)
+movq -320(%rbp),%rcx
+movq -312(%rbp),%rax
+cmpq %rcx,%rax
+sete %al
+movzbq %al,%rax
+movq %rax,-328(%rbp)
+movq -328(%rbp),%rax
+movq %rax,-336(%rbp)
+movq -16(%rbp),%rax
+movq %rax,-344(%rbp)
+movabsq $14,%rax
+movq %rax,-352(%rbp)
+movq -352(%rbp),%rcx
+movq -344(%rbp),%rax
+cmpq %rcx,%rax
+sete %al
+movzbq %al,%rax
+movq %rax,-360(%rbp)
+movq -360(%rbp),%rcx
+movq -336(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-368(%rbp)
+movq -368(%rbp),%rax
+testq %rax,%rax
+jz .L524
+movq -8(%rbp),%rax
+movq %rax,-376(%rbp)
+movq -376(%rbp),%rdi
+call f_native_place
+movq %rax,-384(%rbp)
+movq -384(%rbp),%rax
+movq %rax,-392(%rbp)
+movq -8(%rbp),%rax
+movq %rax,-400(%rbp)
+.pushsection .rodata
+.L526:
+.byte 41
+.byte 0
+.popsection
+leaq .L526(%rip),%rax
+movq %rax,-408(%rbp)
+movabsq $1,%rax
+movq %rax,-416(%rbp)
+movq -408(%rbp),%rdi
+movq -416(%rbp),%rsi
+call rt_lit
+movq %rax,-424(%rbp)
+movq -424(%rbp),%rdi
+call rt_view
+movq %rax,-432(%rbp)
+movq -432(%rbp),%rax
+movq %rax,-440(%rbp)
+movq -400(%rbp),%rdi
+movq -440(%rbp),%rsi
+call f_native_expect
+movq %rax,-448(%rbp)
+movq -392(%rbp),%rax
+leave
+ret
+jmp .L525
+.L524:
+.L525:
+movq -8(%rbp),%rax
+movq %rax,-456(%rbp)
+movabsq $0,%rax
+movq %rax,-464(%rbp)
+movq -464(%rbp),%rax
+movq %rax,-472(%rbp)
+movq -456(%rbp),%rdi
+movq -472(%rbp),%rsi
+call f_native_expr
+movq %rax,-480(%rbp)
+movq -480(%rbp),%rax
+movq %rax,-488(%rbp)
+movq -16(%rbp),%rax
+movq %rax,-496(%rbp)
+movabsq $16,%rax
+movq %rax,-504(%rbp)
+movq -504(%rbp),%rcx
+movq -496(%rbp),%rax
+cmpq %rcx,%rax
+sete %al
+movzbq %al,%rax
+movq %rax,-512(%rbp)
+movq -512(%rbp),%rax
+testq %rax,%rax
+jz .L527
+movq -8(%rbp),%rax
+movq %rax,-520(%rbp)
+.pushsection .rodata
+.L529:
+.byte 44
+.byte 0
+.popsection
+leaq .L529(%rip),%rax
+movq %rax,-528(%rbp)
+movabsq $1,%rax
+movq %rax,-536(%rbp)
+movq -528(%rbp),%rdi
+movq -536(%rbp),%rsi
+call rt_lit
+movq %rax,-544(%rbp)
+movq -544(%rbp),%rdi
+call rt_view
+movq %rax,-552(%rbp)
+movq -552(%rbp),%rax
+movq %rax,-560(%rbp)
+movq -520(%rbp),%rdi
+movq -560(%rbp),%rsi
+call f_native_expect
+movq %rax,-568(%rbp)
+movq -8(%rbp),%rax
+movq %rax,-576(%rbp)
+movabsq $0,%rax
+movq %rax,-584(%rbp)
+movq -584(%rbp),%rax
+movq %rax,-592(%rbp)
+movq -576(%rbp),%rdi
+movq -592(%rbp),%rsi
+call f_native_expr
+movq %rax,-600(%rbp)
+movq -600(%rbp),%rax
+movq %rax,-608(%rbp)
+movq -8(%rbp),%rax
+movq %rax,-616(%rbp)
+.pushsection .rodata
+.L530:
+.byte 41
+.byte 0
+.popsection
+leaq .L530(%rip),%rax
+movq %rax,-624(%rbp)
+movabsq $1,%rax
+movq %rax,-632(%rbp)
+movq -624(%rbp),%rdi
+movq -632(%rbp),%rsi
+call rt_lit
+movq %rax,-640(%rbp)
+movq -640(%rbp),%rdi
+call rt_view
+movq %rax,-648(%rbp)
+movq -648(%rbp),%rax
+movq %rax,-656(%rbp)
+movq -616(%rbp),%rdi
+movq -656(%rbp),%rsi
+call f_native_expect
+movq %rax,-664(%rbp)
+movq -8(%rbp),%rax
+movq %rax,-672(%rbp)
+movq -488(%rbp),%rax
+movq 8(%rax),%rax
+movq %rax,-680(%rbp)
+movq -680(%rbp),%rax
+movq %rax,-688(%rbp)
+movq -672(%rbp),%rdi
+movq -688(%rbp),%rsi
+call f_native_ty_arg
+movq %rax,-696(%rbp)
+movq -696(%rbp),%rax
+movq %rax,-704(%rbp)
+movq -8(%rbp),%rax
+movq %rax,-712(%rbp)
+.pushsection .rodata
+.L531:
+.byte 114
+.byte 116
+.byte 95
+.byte 120
+.byte 99
+.byte 104
+.byte 103
+.byte 0
+.popsection
+leaq .L531(%rip),%rax
+movq %rax,-720(%rbp)
+movabsq $7,%rax
+movq %rax,-728(%rbp)
+movq -720(%rbp),%rdi
+movq -728(%rbp),%rsi
+call rt_lit
+movq %rax,-736(%rbp)
+movq -736(%rbp),%rdi
+call rt_view
+movq %rax,-744(%rbp)
+movq -744(%rbp),%rax
+movq %rax,-752(%rbp)
+movq -488(%rbp),%rax
+movq 0(%rax),%rax
+movq %rax,-760(%rbp)
+movq -760(%rbp),%rax
+movq %rax,-768(%rbp)
+movq -608(%rbp),%rax
+movq 0(%rax),%rax
+movq %rax,-776(%rbp)
+movq -776(%rbp),%rax
+movq %rax,-784(%rbp)
+movq -768(%rbp),%rdi
+movq -784(%rbp),%rsi
+call f_native_two
+movq %rax,-792(%rbp)
+movq -792(%rbp),%rax
+movq %rax,-800(%rbp)
+movq -712(%rbp),%rdi
+movq -752(%rbp),%rsi
+movq -800(%rbp),%rdx
+call f_native_apply
+movq %rax,-808(%rbp)
+movq -808(%rbp),%rax
+movq %rax,-816(%rbp)
+movq -704(%rbp),%rax
+movq %rax,-824(%rbp)
+movq -816(%rbp),%rdi
+movq -824(%rbp),%rsi
+call f_native_val
+movq %rax,-832(%rbp)
+movq -832(%rbp),%rax
+leave
+ret
+jmp .L528
+.L527:
+.L528:
+movq -16(%rbp),%rax
+movq %rax,-840(%rbp)
+movabsq $15,%rax
+movq %rax,-848(%rbp)
+movq -848(%rbp),%rcx
+movq -840(%rbp),%rax
+cmpq %rcx,%rax
+sete %al
+movzbq %al,%rax
+movq %rax,-856(%rbp)
+movq -856(%rbp),%rax
+testq %rax,%rax
+jz .L532
+movq -8(%rbp),%rax
+movq %rax,-864(%rbp)
+.pushsection .rodata
+.L534:
+.byte 41
+.byte 0
+.popsection
+leaq .L534(%rip),%rax
+movq %rax,-872(%rbp)
+movabsq $1,%rax
+movq %rax,-880(%rbp)
+movq -872(%rbp),%rdi
+movq -880(%rbp),%rsi
+call rt_lit
+movq %rax,-888(%rbp)
+movq -888(%rbp),%rdi
+call rt_view
+movq %rax,-896(%rbp)
+movq -896(%rbp),%rax
+movq %rax,-904(%rbp)
+movq -864(%rbp),%rdi
+movq -904(%rbp),%rsi
+call f_native_expect
+movq %rax,-912(%rbp)
+movq -8(%rbp),%rax
+movq %rax,-920(%rbp)
+movq -488(%rbp),%rax
+movq 8(%rax),%rax
+movq %rax,-928(%rbp)
+movq -928(%rbp),%rax
+movq %rax,-936(%rbp)
+movq -920(%rbp),%rdi
+movq -936(%rbp),%rsi
+call f_native_ty_arg
+movq %rax,-944(%rbp)
+movq -944(%rbp),%rax
+movq %rax,-952(%rbp)
+movq -8(%rbp),%rax
+movq %rax,-960(%rbp)
+movq -488(%rbp),%rax
+movq 0(%rax),%rax
+movq %rax,-968(%rbp)
+movq -968(%rbp),%rax
+movq %rax,-976(%rbp)
+.pushsection .rodata
+.L535:
+.byte 37
+.byte 114
+.byte 97
+.byte 120
+.byte 0
+.popsection
+leaq .L535(%rip),%rax
+movq %rax,-984(%rbp)
+movabsq $4,%rax
+movq %rax,-992(%rbp)
+movq -984(%rbp),%rdi
+movq -992(%rbp),%rsi
+call rt_lit
+movq %rax,-1000(%rbp)
+movq -1000(%rbp),%rdi
+call rt_view
+movq %rax,-1008(%rbp)
+movq -1008(%rbp),%rax
+movq %rax,-1016(%rbp)
+movq -960(%rbp),%rdi
+movq -976(%rbp),%rsi
+movq -1016(%rbp),%rdx
+call f_native_get
+movq %rax,-1024(%rbp)
+movq -8(%rbp),%rax
+movq %rax,-1032(%rbp)
+.pushsection .rodata
+.L536:
+.byte 109
+.byte 111
+.byte 118
+.byte 113
+.byte 32
+.byte 40
+.byte 37
+.byte 114
+.byte 97
+.byte 120
+.byte 41
+.byte 44
+.byte 37
+.byte 114
+.byte 97
+.byte 120
+.byte 10
+.byte 0
+.popsection
+leaq .L536(%rip),%rax
+movq %rax,-1040(%rbp)
+movabsq $17,%rax
+movq %rax,-1048(%rbp)
+movq -1040(%rbp),%rdi
+movq -1048(%rbp),%rsi
+call rt_lit
+movq %rax,-1056(%rbp)
+movq -1056(%rbp),%rdi
+call rt_view
+movq %rax,-1064(%rbp)
+movq -1064(%rbp),%rax
+movq %rax,-1072(%rbp)
+movq -1032(%rbp),%rdi
+movq -1072(%rbp),%rsi
+call f_native_o
+movq %rax,-1080(%rbp)
+movq -8(%rbp),%rax
+movq %rax,-1088(%rbp)
+movq -1088(%rbp),%rdi
+call f_native_save
+movq %rax,-1096(%rbp)
+movq -1096(%rbp),%rax
+movq %rax,-1104(%rbp)
+movq -952(%rbp),%rax
+movq %rax,-1112(%rbp)
+movq -1104(%rbp),%rdi
+movq -1112(%rbp),%rsi
+call f_native_val
+movq %rax,-1120(%rbp)
+movq -1120(%rbp),%rax
+leave
+ret
+jmp .L533
+.L532:
+.L533:
+movq -8(%rbp),%rax
+movq %rax,-1128(%rbp)
+movq -488(%rbp),%rax
+movq %rax,-1136(%rbp)
+movq -1128(%rbp),%rdi
+movq -1136(%rbp),%rsi
+call f_native_deref
+movq %rax,-1144(%rbp)
+movq -1144(%rbp),%rax
+movq %rax,-1152(%rbp)
+movq -1152(%rbp),%rax
+movq 0(%rax),%rax
+movq %rax,-1160(%rbp)
+movq -1160(%rbp),%rax
+movq %rax,-1168(%rbp)
+movq -1152(%rbp),%rax
+movq 8(%rax),%rax
+movq %rax,-1176(%rbp)
+movq -1176(%rbp),%rax
+movq %rax,-1184(%rbp)
+movq -16(%rbp),%rax
+movq %rax,-1192(%rbp)
+movabsq $7,%rax
+movq %rax,-1200(%rbp)
+movq -1200(%rbp),%rcx
+movq -1192(%rbp),%rax
+cmpq %rcx,%rax
+setb %al
+movzbq %al,%rax
+movq %rax,-1208(%rbp)
+movq -1208(%rbp),%rax
+testq %rax,%rax
+jz .L537
+movq -8(%rbp),%rax
+movq %rax,-1216(%rbp)
+.pushsection .rodata
+.L539:
+.byte 41
+.byte 0
+.popsection
+leaq .L539(%rip),%rax
+movq %rax,-1224(%rbp)
+movabsq $1,%rax
+movq %rax,-1232(%rbp)
+movq -1224(%rbp),%rdi
+movq -1232(%rbp),%rsi
+call rt_lit
+movq %rax,-1240(%rbp)
+movq -1240(%rbp),%rdi
+call rt_view
+movq %rax,-1248(%rbp)
+movq -1248(%rbp),%rax
+movq %rax,-1256(%rbp)
+movq -1216(%rbp),%rdi
+movq -1256(%rbp),%rsi
+call f_native_expect
+movq %rax,-1264(%rbp)
+movq -16(%rbp),%rax
+movq %rax,-1272(%rbp)
+movabsq $4,%rax
+movq %rax,-1280(%rbp)
+movq -1280(%rbp),%rcx
+movq -1272(%rbp),%rax
+cmpq %rcx,%rax
+setb %al
+movzbq %al,%rax
+movq %rax,-1288(%rbp)
+movq -1288(%rbp),%rax
+testq %rax,%rax
+jz .L540
+movq -8(%rbp),%rax
+movq %rax,-1296(%rbp)
+movq -1184(%rbp),%rax
+movq %rax,-1304(%rbp)
+movq -1296(%rbp),%rdi
+movq -1304(%rbp),%rsi
+call f_native_ty_kind
+movq %rax,-1312(%rbp)
+movq -1312(%rbp),%rax
+movq %rax,-1320(%rbp)
+movabsq $5,%rax
+movq %rax,-1328(%rbp)
+movq -1328(%rbp),%rcx
+movq -1320(%rbp),%rax
+cmpq %rcx,%rax
+sete %al
+movzbq %al,%rax
+movq %rax,-1336(%rbp)
+movq -1336(%rbp),%rax
+testq %rax,%rax
+jz .L542
+movq -1168(%rbp),%rax
+movq %rax,-1344(%rbp)
+movabsq $4,%rax
+movq %rax,-1352(%rbp)
+movq -1352(%rbp),%rax
+movq %rax,-1360(%rbp)
+movq -1344(%rbp),%rdi
+movq -1360(%rbp),%rsi
+call f_native_val
+movq %rax,-1368(%rbp)
+movq -1368(%rbp),%rax
+leave
+ret
+jmp .L543
+.L542:
+.L543:
+movq -8(%rbp),%rax
+movq %rax,-1376(%rbp)
+.pushsection .rodata
+.L544:
+.byte 114
+.byte 116
+.byte 95
+.byte 118
+.byte 105
+.byte 101
+.byte 119
+.byte 0
+.popsection
+leaq .L544(%rip),%rax
+movq %rax,-1384(%rbp)
+movabsq $7,%rax
+movq %rax,-1392(%rbp)
+movq -1384(%rbp),%rdi
+movq -1392(%rbp),%rsi
+call rt_lit
+movq %rax,-1400(%rbp)
+movq -1400(%rbp),%rdi
+call rt_view
+movq %rax,-1408(%rbp)
+movq -1408(%rbp),%rax
+movq %rax,-1416(%rbp)
+movq -1168(%rbp),%rax
+movq %rax,-1424(%rbp)
+movq -1424(%rbp),%rdi
+call f_native_one
+movq %rax,-1432(%rbp)
+movq -1432(%rbp),%rax
+movq %rax,-1440(%rbp)
+movq -1376(%rbp),%rdi
+movq -1416(%rbp),%rsi
+movq -1440(%rbp),%rdx
+call f_native_apply
+movq %rax,-1448(%rbp)
+movq -1448(%rbp),%rax
+movq %rax,-1456(%rbp)
+movabsq $4,%rax
+movq %rax,-1464(%rbp)
+movq -1464(%rbp),%rax
+movq %rax,-1472(%rbp)
+movq -1456(%rbp),%rdi
+movq -1472(%rbp),%rsi
+call f_native_val
+movq %rax,-1480(%rbp)
+movq -1480(%rbp),%rax
+leave
+ret
+jmp .L541
+.L540:
+.L541:
+movq -16(%rbp),%rax
+movq %rax,-1488(%rbp)
+movabsq $4,%rax
+movq %rax,-1496(%rbp)
+movq -1496(%rbp),%rcx
+movq -1488(%rbp),%rax
+cmpq %rcx,%rax
+sete %al
+movzbq %al,%rax
+movq %rax,-1504(%rbp)
+movq -1504(%rbp),%rax
+testq %rax,%rax
+jz .L545
+movq -8(%rbp),%rax
+movq %rax,-1512(%rbp)
+.pushsection .rodata
+.L547:
+.byte 114
+.byte 116
+.byte 95
+.byte 108
+.byte 101
+.byte 110
+.byte 0
+.popsection
+leaq .L547(%rip),%rax
+movq %rax,-1520(%rbp)
+movabsq $6,%rax
+movq %rax,-1528(%rbp)
+movq -1520(%rbp),%rdi
+movq -1528(%rbp),%rsi
+call rt_lit
+movq %rax,-1536(%rbp)
+movq -1536(%rbp),%rdi
+call rt_view
+movq %rax,-1544(%rbp)
+movq -1544(%rbp),%rax
+movq %rax,-1552(%rbp)
+movq -1168(%rbp),%rax
+movq %rax,-1560(%rbp)
+movq -1560(%rbp),%rdi
+call f_native_one
+movq %rax,-1568(%rbp)
+movq -1568(%rbp),%rax
+movq %rax,-1576(%rbp)
+movq -1512(%rbp),%rdi
+movq -1552(%rbp),%rsi
+movq -1576(%rbp),%rdx
+call f_native_apply
+movq %rax,-1584(%rbp)
+movq -1584(%rbp),%rax
+movq %rax,-1592(%rbp)
+movabsq $0,%rax
+movq %rax,-1600(%rbp)
+movq -1600(%rbp),%rax
+movq %rax,-1608(%rbp)
+movq -1592(%rbp),%rdi
+movq -1608(%rbp),%rsi
+call f_native_val
+movq %rax,-1616(%rbp)
+movq -1616(%rbp),%rax
+leave
+ret
+jmp .L546
+.L545:
+.L546:
+movq -8(%rbp),%rax
+movq %rax,-1624(%rbp)
+.pushsection .rodata
+.L548:
 .byte 114
 .byte 116
 .byte 95
@@ -10355,104 +12227,104 @@ movq %rax,-1576(%rbp)
 .byte 121
 .byte 0
 .popsection
-leaq .L461(%rip),%rax
-movq %rax,-1584(%rbp)
-movabsq $7,%rax
-movq %rax,-1592(%rbp)
-movq -1584(%rbp),%rdi
-movq -1592(%rbp),%rsi
-call rt_lit
-movq %rax,-1600(%rbp)
-movq -1600(%rbp),%rdi
-call rt_view
-movq %rax,-1608(%rbp)
-movq -1608(%rbp),%rax
-movq %rax,-1616(%rbp)
-movq -1120(%rbp),%rax
-movq %rax,-1624(%rbp)
-movq -1624(%rbp),%rdi
-call f_native_one
+leaq .L548(%rip),%rax
 movq %rax,-1632(%rbp)
-movq -1632(%rbp),%rax
+movabsq $7,%rax
 movq %rax,-1640(%rbp)
-movq -1576(%rbp),%rdi
-movq -1616(%rbp),%rsi
-movq -1640(%rbp),%rdx
-call f_native_apply
+movq -1632(%rbp),%rdi
+movq -1640(%rbp),%rsi
+call rt_lit
 movq %rax,-1648(%rbp)
-movq -1648(%rbp),%rax
+movq -1648(%rbp),%rdi
+call rt_view
 movq %rax,-1656(%rbp)
-movq -16(%rbp),%rax
+movq -1656(%rbp),%rax
 movq %rax,-1664(%rbp)
-movabsq $3,%rax
+movq -1168(%rbp),%rax
 movq %rax,-1672(%rbp)
-movq -1672(%rbp),%rcx
-movq -1664(%rbp),%rax
-subq %rcx,%rax
+movq -1672(%rbp),%rdi
+call f_native_one
 movq %rax,-1680(%rbp)
 movq -1680(%rbp),%rax
 movq %rax,-1688(%rbp)
-movq -1656(%rbp),%rdi
-movq -1688(%rbp),%rsi
-call f_native_val
+movq -1624(%rbp),%rdi
+movq -1664(%rbp),%rsi
+movq -1688(%rbp),%rdx
+call f_native_apply
 movq %rax,-1696(%rbp)
 movq -1696(%rbp),%rax
+movq %rax,-1704(%rbp)
+movq -16(%rbp),%rax
+movq %rax,-1712(%rbp)
+movabsq $3,%rax
+movq %rax,-1720(%rbp)
+movq -1720(%rbp),%rcx
+movq -1712(%rbp),%rax
+subq %rcx,%rax
+movq %rax,-1728(%rbp)
+movq -1728(%rbp),%rax
+movq %rax,-1736(%rbp)
+movq -1704(%rbp),%rdi
+movq -1736(%rbp),%rsi
+call f_native_val
+movq %rax,-1744(%rbp)
+movq -1744(%rbp),%rax
 leave
 ret
-jmp .L451
-.L450:
-.L451:
+jmp .L538
+.L537:
+.L538:
 movq -16(%rbp),%rax
-movq %rax,-1704(%rbp)
+movq %rax,-1752(%rbp)
 movabsq $10,%rax
-movq %rax,-1712(%rbp)
-movq -1712(%rbp),%rcx
-movq -1704(%rbp),%rax
+movq %rax,-1760(%rbp)
+movq -1760(%rbp),%rcx
+movq -1752(%rbp),%rax
 cmpq %rcx,%rax
 sete %al
 movzbq %al,%rax
-movq %rax,-1720(%rbp)
-movq -1720(%rbp),%rax
+movq %rax,-1768(%rbp)
+movq -1768(%rbp),%rax
 testq %rax,%rax
-jz .L462
+jz .L549
 movq -8(%rbp),%rax
-movq %rax,-1728(%rbp)
+movq %rax,-1776(%rbp)
 .pushsection .rodata
-.L464:
+.L551:
 .byte 41
 .byte 0
 .popsection
-leaq .L464(%rip),%rax
-movq %rax,-1736(%rbp)
-movabsq $1,%rax
-movq %rax,-1744(%rbp)
-movq -1736(%rbp),%rdi
-movq -1744(%rbp),%rsi
-call rt_lit
-movq %rax,-1752(%rbp)
-movq -1752(%rbp),%rdi
-call rt_view
-movq %rax,-1760(%rbp)
-movq -1760(%rbp),%rax
-movq %rax,-1768(%rbp)
-movq -1728(%rbp),%rdi
-movq -1768(%rbp),%rsi
-call f_native_expect
-movq %rax,-1776(%rbp)
-movq -8(%rbp),%rax
+leaq .L551(%rip),%rax
 movq %rax,-1784(%rbp)
-movq -1136(%rbp),%rax
+movabsq $1,%rax
 movq %rax,-1792(%rbp)
 movq -1784(%rbp),%rdi
 movq -1792(%rbp),%rsi
-call f_native_ty_arg
+call rt_lit
 movq %rax,-1800(%rbp)
-movq -1800(%rbp),%rax
+movq -1800(%rbp),%rdi
+call rt_view
 movq %rax,-1808(%rbp)
-movq -8(%rbp),%rax
+movq -1808(%rbp),%rax
 movq %rax,-1816(%rbp)
+movq -1776(%rbp),%rdi
+movq -1816(%rbp),%rsi
+call f_native_expect
+movq %rax,-1824(%rbp)
+movq -8(%rbp),%rax
+movq %rax,-1832(%rbp)
+movq -1184(%rbp),%rax
+movq %rax,-1840(%rbp)
+movq -1832(%rbp),%rdi
+movq -1840(%rbp),%rsi
+call f_native_ty_arg
+movq %rax,-1848(%rbp)
+movq -1848(%rbp),%rax
+movq %rax,-1856(%rbp)
+movq -8(%rbp),%rax
+movq %rax,-1864(%rbp)
 .pushsection .rodata
-.L465:
+.L552:
 .byte 114
 .byte 116
 .byte 95
@@ -10461,127 +12333,127 @@ movq %rax,-1816(%rbp)
 .byte 112
 .byte 0
 .popsection
-leaq .L465(%rip),%rax
-movq %rax,-1824(%rbp)
-movabsq $6,%rax
-movq %rax,-1832(%rbp)
-movq -1824(%rbp),%rdi
-movq -1832(%rbp),%rsi
-call rt_lit
-movq %rax,-1840(%rbp)
-movq -1840(%rbp),%rdi
-call rt_view
-movq %rax,-1848(%rbp)
-movq -1848(%rbp),%rax
-movq %rax,-1856(%rbp)
-movq -1120(%rbp),%rax
-movq %rax,-1864(%rbp)
-movq -1864(%rbp),%rdi
-call f_native_one
+leaq .L552(%rip),%rax
 movq %rax,-1872(%rbp)
-movq -1872(%rbp),%rax
+movabsq $6,%rax
 movq %rax,-1880(%rbp)
-movq -1816(%rbp),%rdi
-movq -1856(%rbp),%rsi
-movq -1880(%rbp),%rdx
-call f_native_apply
+movq -1872(%rbp),%rdi
+movq -1880(%rbp),%rsi
+call rt_lit
 movq %rax,-1888(%rbp)
-movq -1888(%rbp),%rax
+movq -1888(%rbp),%rdi
+call rt_view
 movq %rax,-1896(%rbp)
-movq -1808(%rbp),%rax
+movq -1896(%rbp),%rax
 movq %rax,-1904(%rbp)
-movq -1896(%rbp),%rdi
-movq -1904(%rbp),%rsi
-call f_native_val
+movq -1168(%rbp),%rax
 movq %rax,-1912(%rbp)
-movq -1912(%rbp),%rax
+movq -1912(%rbp),%rdi
+call f_native_one
+movq %rax,-1920(%rbp)
+movq -1920(%rbp),%rax
+movq %rax,-1928(%rbp)
+movq -1864(%rbp),%rdi
+movq -1904(%rbp),%rsi
+movq -1928(%rbp),%rdx
+call f_native_apply
+movq %rax,-1936(%rbp)
+movq -1936(%rbp),%rax
+movq %rax,-1944(%rbp)
+movq -1856(%rbp),%rax
+movq %rax,-1952(%rbp)
+movq -1944(%rbp),%rdi
+movq -1952(%rbp),%rsi
+call f_native_val
+movq %rax,-1960(%rbp)
+movq -1960(%rbp),%rax
 leave
 ret
-jmp .L463
-.L462:
-.L463:
+jmp .L550
+.L549:
+.L550:
 movq -8(%rbp),%rax
-movq %rax,-1920(%rbp)
+movq %rax,-1968(%rbp)
 .pushsection .rodata
-.L466:
+.L553:
 .byte 44
 .byte 0
 .popsection
-leaq .L466(%rip),%rax
-movq %rax,-1928(%rbp)
-movabsq $1,%rax
-movq %rax,-1936(%rbp)
-movq -1928(%rbp),%rdi
-movq -1936(%rbp),%rsi
-call rt_lit
-movq %rax,-1944(%rbp)
-movq -1944(%rbp),%rdi
-call rt_view
-movq %rax,-1952(%rbp)
-movq -1952(%rbp),%rax
-movq %rax,-1960(%rbp)
-movq -1920(%rbp),%rdi
-movq -1960(%rbp),%rsi
-call f_native_expect
-movq %rax,-1968(%rbp)
-movq -8(%rbp),%rax
+leaq .L553(%rip),%rax
 movq %rax,-1976(%rbp)
-movabsq $0,%rax
+movabsq $1,%rax
 movq %rax,-1984(%rbp)
-movq -1984(%rbp),%rax
-movq %rax,-1992(%rbp)
 movq -1976(%rbp),%rdi
-movq -1992(%rbp),%rsi
-call f_native_expr
+movq -1984(%rbp),%rsi
+call rt_lit
+movq %rax,-1992(%rbp)
+movq -1992(%rbp),%rdi
+call rt_view
 movq %rax,-2000(%rbp)
 movq -2000(%rbp),%rax
 movq %rax,-2008(%rbp)
-movq -2008(%rbp),%rax
-movq 0(%rax),%rax
+movq -1968(%rbp),%rdi
+movq -2008(%rbp),%rsi
+call f_native_expect
 movq %rax,-2016(%rbp)
-movq -2016(%rbp),%rax
+movq -8(%rbp),%rax
 movq %rax,-2024(%rbp)
-movq -16(%rbp),%rax
+movabsq $0,%rax
 movq %rax,-2032(%rbp)
-movabsq $7,%rax
-movq %rax,-2040(%rbp)
-movq -2040(%rbp),%rcx
 movq -2032(%rbp),%rax
+movq %rax,-2040(%rbp)
+movq -2024(%rbp),%rdi
+movq -2040(%rbp),%rsi
+call f_native_expr
+movq %rax,-2048(%rbp)
+movq -2048(%rbp),%rax
+movq %rax,-2056(%rbp)
+movq -2056(%rbp),%rax
+movq 0(%rax),%rax
+movq %rax,-2064(%rbp)
+movq -2064(%rbp),%rax
+movq %rax,-2072(%rbp)
+movq -16(%rbp),%rax
+movq %rax,-2080(%rbp)
+movabsq $7,%rax
+movq %rax,-2088(%rbp)
+movq -2088(%rbp),%rcx
+movq -2080(%rbp),%rax
 cmpq %rcx,%rax
 sete %al
 movzbq %al,%rax
-movq %rax,-2048(%rbp)
-movq -2048(%rbp),%rax
+movq %rax,-2096(%rbp)
+movq -2096(%rbp),%rax
 testq %rax,%rax
-jz .L467
+jz .L554
 movq -8(%rbp),%rax
-movq %rax,-2056(%rbp)
+movq %rax,-2104(%rbp)
 .pushsection .rodata
-.L469:
+.L556:
 .byte 41
 .byte 0
 .popsection
-leaq .L469(%rip),%rax
-movq %rax,-2064(%rbp)
-movabsq $1,%rax
-movq %rax,-2072(%rbp)
-movq -2064(%rbp),%rdi
-movq -2072(%rbp),%rsi
-call rt_lit
-movq %rax,-2080(%rbp)
-movq -2080(%rbp),%rdi
-call rt_view
-movq %rax,-2088(%rbp)
-movq -2088(%rbp),%rax
-movq %rax,-2096(%rbp)
-movq -2056(%rbp),%rdi
-movq -2096(%rbp),%rsi
-call f_native_expect
-movq %rax,-2104(%rbp)
-movq -8(%rbp),%rax
+leaq .L556(%rip),%rax
 movq %rax,-2112(%rbp)
+movabsq $1,%rax
+movq %rax,-2120(%rbp)
+movq -2112(%rbp),%rdi
+movq -2120(%rbp),%rsi
+call rt_lit
+movq %rax,-2128(%rbp)
+movq -2128(%rbp),%rdi
+call rt_view
+movq %rax,-2136(%rbp)
+movq -2136(%rbp),%rax
+movq %rax,-2144(%rbp)
+movq -2104(%rbp),%rdi
+movq -2144(%rbp),%rsi
+call f_native_expect
+movq %rax,-2152(%rbp)
+movq -8(%rbp),%rax
+movq %rax,-2160(%rbp)
 .pushsection .rodata
-.L470:
+.L557:
 .byte 114
 .byte 116
 .byte 95
@@ -10589,91 +12461,91 @@ movq %rax,-2112(%rbp)
 .byte 116
 .byte 0
 .popsection
-leaq .L470(%rip),%rax
-movq %rax,-2120(%rbp)
-movabsq $5,%rax
-movq %rax,-2128(%rbp)
-movq -2120(%rbp),%rdi
-movq -2128(%rbp),%rsi
-call rt_lit
-movq %rax,-2136(%rbp)
-movq -2136(%rbp),%rdi
-call rt_view
-movq %rax,-2144(%rbp)
-movq -2144(%rbp),%rax
-movq %rax,-2152(%rbp)
-movq -1120(%rbp),%rax
-movq %rax,-2160(%rbp)
-movq -2024(%rbp),%rax
+leaq .L557(%rip),%rax
 movq %rax,-2168(%rbp)
-movq -2160(%rbp),%rdi
-movq -2168(%rbp),%rsi
-call f_native_two
+movabsq $5,%rax
 movq %rax,-2176(%rbp)
-movq -2176(%rbp),%rax
+movq -2168(%rbp),%rdi
+movq -2176(%rbp),%rsi
+call rt_lit
 movq %rax,-2184(%rbp)
-movq -2112(%rbp),%rdi
-movq -2152(%rbp),%rsi
-movq -2184(%rbp),%rdx
-call f_native_apply
+movq -2184(%rbp),%rdi
+call rt_view
 movq %rax,-2192(%rbp)
 movq -2192(%rbp),%rax
 movq %rax,-2200(%rbp)
-movabsq $0,%rax
+movq -1168(%rbp),%rax
 movq %rax,-2208(%rbp)
-movq -2208(%rbp),%rax
+movq -2072(%rbp),%rax
 movq %rax,-2216(%rbp)
-movq -2200(%rbp),%rdi
+movq -2208(%rbp),%rdi
 movq -2216(%rbp),%rsi
-call f_native_val
+call f_native_two
 movq %rax,-2224(%rbp)
 movq -2224(%rbp),%rax
+movq %rax,-2232(%rbp)
+movq -2160(%rbp),%rdi
+movq -2200(%rbp),%rsi
+movq -2232(%rbp),%rdx
+call f_native_apply
+movq %rax,-2240(%rbp)
+movq -2240(%rbp),%rax
+movq %rax,-2248(%rbp)
+movabsq $0,%rax
+movq %rax,-2256(%rbp)
+movq -2256(%rbp),%rax
+movq %rax,-2264(%rbp)
+movq -2248(%rbp),%rdi
+movq -2264(%rbp),%rsi
+call f_native_val
+movq %rax,-2272(%rbp)
+movq -2272(%rbp),%rax
 leave
 ret
-jmp .L468
-.L467:
-.L468:
+jmp .L555
+.L554:
+.L555:
 movq -16(%rbp),%rax
-movq %rax,-2232(%rbp)
+movq %rax,-2280(%rbp)
 movabsq $9,%rax
-movq %rax,-2240(%rbp)
-movq -2240(%rbp),%rcx
-movq -2232(%rbp),%rax
+movq %rax,-2288(%rbp)
+movq -2288(%rbp),%rcx
+movq -2280(%rbp),%rax
 cmpq %rcx,%rax
 sete %al
 movzbq %al,%rax
-movq %rax,-2248(%rbp)
-movq -2248(%rbp),%rax
+movq %rax,-2296(%rbp)
+movq -2296(%rbp),%rax
 testq %rax,%rax
-jz .L471
+jz .L558
 movq -8(%rbp),%rax
-movq %rax,-2256(%rbp)
+movq %rax,-2304(%rbp)
 .pushsection .rodata
-.L473:
+.L560:
 .byte 41
 .byte 0
 .popsection
-leaq .L473(%rip),%rax
-movq %rax,-2264(%rbp)
-movabsq $1,%rax
-movq %rax,-2272(%rbp)
-movq -2264(%rbp),%rdi
-movq -2272(%rbp),%rsi
-call rt_lit
-movq %rax,-2280(%rbp)
-movq -2280(%rbp),%rdi
-call rt_view
-movq %rax,-2288(%rbp)
-movq -2288(%rbp),%rax
-movq %rax,-2296(%rbp)
-movq -2256(%rbp),%rdi
-movq -2296(%rbp),%rsi
-call f_native_expect
-movq %rax,-2304(%rbp)
-movq -8(%rbp),%rax
+leaq .L560(%rip),%rax
 movq %rax,-2312(%rbp)
+movabsq $1,%rax
+movq %rax,-2320(%rbp)
+movq -2312(%rbp),%rdi
+movq -2320(%rbp),%rsi
+call rt_lit
+movq %rax,-2328(%rbp)
+movq -2328(%rbp),%rdi
+call rt_view
+movq %rax,-2336(%rbp)
+movq -2336(%rbp),%rax
+movq %rax,-2344(%rbp)
+movq -2304(%rbp),%rdi
+movq -2344(%rbp),%rsi
+call f_native_expect
+movq %rax,-2352(%rbp)
+movq -8(%rbp),%rax
+movq %rax,-2360(%rbp)
 .pushsection .rodata
-.L474:
+.L561:
 .byte 114
 .byte 116
 .byte 95
@@ -10683,126 +12555,126 @@ movq %rax,-2312(%rbp)
 .byte 104
 .byte 0
 .popsection
-leaq .L474(%rip),%rax
-movq %rax,-2320(%rbp)
-movabsq $7,%rax
-movq %rax,-2328(%rbp)
-movq -2320(%rbp),%rdi
-movq -2328(%rbp),%rsi
-call rt_lit
-movq %rax,-2336(%rbp)
-movq -2336(%rbp),%rdi
-call rt_view
-movq %rax,-2344(%rbp)
-movq -2344(%rbp),%rax
-movq %rax,-2352(%rbp)
-movq -1120(%rbp),%rax
-movq %rax,-2360(%rbp)
-movq -2024(%rbp),%rax
+leaq .L561(%rip),%rax
 movq %rax,-2368(%rbp)
-movq -2360(%rbp),%rdi
-movq -2368(%rbp),%rsi
-call f_native_two
+movabsq $7,%rax
 movq %rax,-2376(%rbp)
-movq -2376(%rbp),%rax
+movq -2368(%rbp),%rdi
+movq -2376(%rbp),%rsi
+call rt_lit
 movq %rax,-2384(%rbp)
-movq -2312(%rbp),%rdi
-movq -2352(%rbp),%rsi
-movq -2384(%rbp),%rdx
-call f_native_invoke
+movq -2384(%rbp),%rdi
+call rt_view
 movq %rax,-2392(%rbp)
-movq -8(%rbp),%rax
+movq -2392(%rbp),%rax
 movq %rax,-2400(%rbp)
-movabsq $0,%rax
+movq -1168(%rbp),%rax
 movq %rax,-2408(%rbp)
-movq -2408(%rbp),%rax
+movq -2072(%rbp),%rax
 movq %rax,-2416(%rbp)
-movq -2400(%rbp),%rdi
+movq -2408(%rbp),%rdi
 movq -2416(%rbp),%rsi
-call f_native_imm
+call f_native_two
 movq %rax,-2424(%rbp)
 movq -2424(%rbp),%rax
 movq %rax,-2432(%rbp)
-movabsq $1,%rax
+movq -2360(%rbp),%rdi
+movq -2400(%rbp),%rsi
+movq -2432(%rbp),%rdx
+call f_native_invoke
 movq %rax,-2440(%rbp)
-movq -2440(%rbp),%rax
+movq -8(%rbp),%rax
 movq %rax,-2448(%rbp)
-movq -2432(%rbp),%rdi
-movq -2448(%rbp),%rsi
-call f_native_val
+movabsq $0,%rax
 movq %rax,-2456(%rbp)
 movq -2456(%rbp),%rax
+movq %rax,-2464(%rbp)
+movq -2448(%rbp),%rdi
+movq -2464(%rbp),%rsi
+call f_native_imm
+movq %rax,-2472(%rbp)
+movq -2472(%rbp),%rax
+movq %rax,-2480(%rbp)
+movabsq $1,%rax
+movq %rax,-2488(%rbp)
+movq -2488(%rbp),%rax
+movq %rax,-2496(%rbp)
+movq -2480(%rbp),%rdi
+movq -2496(%rbp),%rsi
+call f_native_val
+movq %rax,-2504(%rbp)
+movq -2504(%rbp),%rax
 leave
 ret
-jmp .L472
-.L471:
-.L472:
+jmp .L559
+.L558:
+.L559:
 movq -16(%rbp),%rax
-movq %rax,-2464(%rbp)
+movq %rax,-2512(%rbp)
 movabsq $8,%rax
-movq %rax,-2472(%rbp)
-movq -2472(%rbp),%rcx
-movq -2464(%rbp),%rax
+movq %rax,-2520(%rbp)
+movq -2520(%rbp),%rcx
+movq -2512(%rbp),%rax
 cmpq %rcx,%rax
 setne %al
 movzbq %al,%rax
-movq %rax,-2480(%rbp)
-movq -2480(%rbp),%rax
+movq %rax,-2528(%rbp)
+movq -2528(%rbp),%rax
 testq %rax,%rax
-jz .L475
+jz .L562
 movq -8(%rbp),%rax
-movq %rax,-2488(%rbp)
+movq %rax,-2536(%rbp)
 .pushsection .rodata
-.L477:
+.L564:
 .byte 41
 .byte 0
 .popsection
-leaq .L477(%rip),%rax
-movq %rax,-2496(%rbp)
-movabsq $1,%rax
-movq %rax,-2504(%rbp)
-movq -2496(%rbp),%rdi
-movq -2504(%rbp),%rsi
-call rt_lit
-movq %rax,-2512(%rbp)
-movq -2512(%rbp),%rdi
-call rt_view
-movq %rax,-2520(%rbp)
-movq -2520(%rbp),%rax
-movq %rax,-2528(%rbp)
-movq -2488(%rbp),%rdi
-movq -2528(%rbp),%rsi
-call f_native_expect
-movq %rax,-2536(%rbp)
-movq -8(%rbp),%rax
+leaq .L564(%rip),%rax
 movq %rax,-2544(%rbp)
-movq -1136(%rbp),%rax
+movabsq $1,%rax
 movq %rax,-2552(%rbp)
 movq -2544(%rbp),%rdi
 movq -2552(%rbp),%rsi
-call f_native_ty_arg
+call rt_lit
 movq %rax,-2560(%rbp)
-movq -2560(%rbp),%rax
+movq -2560(%rbp),%rdi
+call rt_view
 movq %rax,-2568(%rbp)
-movq -8(%rbp),%rax
-movq %rax,-2576(%rbp)
-movabsq $7,%rax
-movq %rax,-2584(%rbp)
-movq -2584(%rbp),%rax
-movq %rax,-2592(%rbp)
 movq -2568(%rbp),%rax
+movq %rax,-2576(%rbp)
+movq -2536(%rbp),%rdi
+movq -2576(%rbp),%rsi
+call f_native_expect
+movq %rax,-2584(%rbp)
+movq -8(%rbp),%rax
+movq %rax,-2592(%rbp)
+movq -1184(%rbp),%rax
 movq %rax,-2600(%rbp)
-movq -2576(%rbp),%rdi
-movq -2592(%rbp),%rsi
-movq -2600(%rbp),%rdx
-call f_native_intern
+movq -2592(%rbp),%rdi
+movq -2600(%rbp),%rsi
+call f_native_ty_arg
 movq %rax,-2608(%rbp)
 movq -2608(%rbp),%rax
 movq %rax,-2616(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-2624(%rbp)
+movabsq $7,%rax
+movq %rax,-2632(%rbp)
+movq -2632(%rbp),%rax
+movq %rax,-2640(%rbp)
+movq -2616(%rbp),%rax
+movq %rax,-2648(%rbp)
+movq -2624(%rbp),%rdi
+movq -2640(%rbp),%rsi
+movq -2648(%rbp),%rdx
+call f_native_intern
+movq %rax,-2656(%rbp)
+movq -2656(%rbp),%rax
+movq %rax,-2664(%rbp)
+movq -8(%rbp),%rax
+movq %rax,-2672(%rbp)
 .pushsection .rodata
-.L478:
+.L565:
 .byte 114
 .byte 116
 .byte 95
@@ -10812,131 +12684,131 @@ movq %rax,-2624(%rbp)
 .byte 116
 .byte 0
 .popsection
-leaq .L478(%rip),%rax
-movq %rax,-2632(%rbp)
-movabsq $7,%rax
-movq %rax,-2640(%rbp)
-movq -2632(%rbp),%rdi
-movq -2640(%rbp),%rsi
-call rt_lit
-movq %rax,-2648(%rbp)
-movq -2648(%rbp),%rdi
-call rt_view
-movq %rax,-2656(%rbp)
-movq -2656(%rbp),%rax
-movq %rax,-2664(%rbp)
-movq -1120(%rbp),%rax
-movq %rax,-2672(%rbp)
-movq -2024(%rbp),%rax
+leaq .L565(%rip),%rax
 movq %rax,-2680(%rbp)
-movq -2672(%rbp),%rdi
-movq -2680(%rbp),%rsi
-call f_native_two
+movabsq $7,%rax
 movq %rax,-2688(%rbp)
-movq -2688(%rbp),%rax
+movq -2680(%rbp),%rdi
+movq -2688(%rbp),%rsi
+call rt_lit
 movq %rax,-2696(%rbp)
-movq -2624(%rbp),%rdi
-movq -2664(%rbp),%rsi
-movq -2696(%rbp),%rdx
-call f_native_apply
+movq -2696(%rbp),%rdi
+call rt_view
 movq %rax,-2704(%rbp)
 movq -2704(%rbp),%rax
 movq %rax,-2712(%rbp)
-movq -2616(%rbp),%rax
+movq -1168(%rbp),%rax
 movq %rax,-2720(%rbp)
-movq -2712(%rbp),%rdi
-movq -2720(%rbp),%rsi
-call f_native_val
+movq -2072(%rbp),%rax
 movq %rax,-2728(%rbp)
-movq -2728(%rbp),%rax
+movq -2720(%rbp),%rdi
+movq -2728(%rbp),%rsi
+call f_native_two
+movq %rax,-2736(%rbp)
+movq -2736(%rbp),%rax
+movq %rax,-2744(%rbp)
+movq -2672(%rbp),%rdi
+movq -2712(%rbp),%rsi
+movq -2744(%rbp),%rdx
+call f_native_apply
+movq %rax,-2752(%rbp)
+movq -2752(%rbp),%rax
+movq %rax,-2760(%rbp)
+movq -2664(%rbp),%rax
+movq %rax,-2768(%rbp)
+movq -2760(%rbp),%rdi
+movq -2768(%rbp),%rsi
+call f_native_val
+movq %rax,-2776(%rbp)
+movq -2776(%rbp),%rax
 leave
 ret
-jmp .L476
-.L475:
-.L476:
+jmp .L563
+.L562:
+.L563:
 movq -8(%rbp),%rax
-movq %rax,-2736(%rbp)
+movq %rax,-2784(%rbp)
 .pushsection .rodata
-.L479:
+.L566:
 .byte 44
 .byte 0
 .popsection
-leaq .L479(%rip),%rax
-movq %rax,-2744(%rbp)
-movabsq $1,%rax
-movq %rax,-2752(%rbp)
-movq -2744(%rbp),%rdi
-movq -2752(%rbp),%rsi
-call rt_lit
-movq %rax,-2760(%rbp)
-movq -2760(%rbp),%rdi
-call rt_view
-movq %rax,-2768(%rbp)
-movq -2768(%rbp),%rax
-movq %rax,-2776(%rbp)
-movq -2736(%rbp),%rdi
-movq -2776(%rbp),%rsi
-call f_native_expect
-movq %rax,-2784(%rbp)
-movq -8(%rbp),%rax
+leaq .L566(%rip),%rax
 movq %rax,-2792(%rbp)
-movabsq $0,%rax
+movabsq $1,%rax
 movq %rax,-2800(%rbp)
-movq -2800(%rbp),%rax
-movq %rax,-2808(%rbp)
 movq -2792(%rbp),%rdi
-movq -2808(%rbp),%rsi
-call f_native_expr
+movq -2800(%rbp),%rsi
+call rt_lit
+movq %rax,-2808(%rbp)
+movq -2808(%rbp),%rdi
+call rt_view
 movq %rax,-2816(%rbp)
 movq -2816(%rbp),%rax
 movq %rax,-2824(%rbp)
-movq -8(%rbp),%rax
+movq -2784(%rbp),%rdi
+movq -2824(%rbp),%rsi
+call f_native_expect
 movq %rax,-2832(%rbp)
-.pushsection .rodata
-.L480:
-.byte 41
-.byte 0
-.popsection
-leaq .L480(%rip),%rax
+movq -8(%rbp),%rax
 movq %rax,-2840(%rbp)
-movabsq $1,%rax
+movabsq $0,%rax
 movq %rax,-2848(%rbp)
-movq -2840(%rbp),%rdi
-movq -2848(%rbp),%rsi
-call rt_lit
+movq -2848(%rbp),%rax
 movq %rax,-2856(%rbp)
-movq -2856(%rbp),%rdi
-call rt_view
+movq -2840(%rbp),%rdi
+movq -2856(%rbp),%rsi
+call f_native_expr
 movq %rax,-2864(%rbp)
 movq -2864(%rbp),%rax
 movq %rax,-2872(%rbp)
-movq -2832(%rbp),%rdi
-movq -2872(%rbp),%rsi
-call f_native_expect
+movq -8(%rbp),%rax
 movq %rax,-2880(%rbp)
-movq -1120(%rbp),%rax
+.pushsection .rodata
+.L567:
+.byte 41
+.byte 0
+.popsection
+leaq .L567(%rip),%rax
 movq %rax,-2888(%rbp)
-movq -2024(%rbp),%rax
+movabsq $1,%rax
 movq %rax,-2896(%rbp)
 movq -2888(%rbp),%rdi
 movq -2896(%rbp),%rsi
-call f_native_two
+call rt_lit
 movq %rax,-2904(%rbp)
-movq -2904(%rbp),%rax
+movq -2904(%rbp),%rdi
+call rt_view
 movq %rax,-2912(%rbp)
-movq -2824(%rbp),%rax
-movq 0(%rax),%rax
+movq -2912(%rbp),%rax
 movq %rax,-2920(%rbp)
-movq -2912(%rbp),%rdi
+movq -2880(%rbp),%rdi
 movq -2920(%rbp),%rsi
-call rt_push
+call f_native_expect
 movq %rax,-2928(%rbp)
-movabsq $0,%rax
+movq -1168(%rbp),%rax
 movq %rax,-2936(%rbp)
-movq -8(%rbp),%rax
+movq -2072(%rbp),%rax
 movq %rax,-2944(%rbp)
+movq -2936(%rbp),%rdi
+movq -2944(%rbp),%rsi
+call f_native_two
+movq %rax,-2952(%rbp)
+movq -2952(%rbp),%rax
+movq %rax,-2960(%rbp)
+movq -2872(%rbp),%rax
+movq 0(%rax),%rax
+movq %rax,-2968(%rbp)
+movq -2960(%rbp),%rdi
+movq -2968(%rbp),%rsi
+call rt_push
+movq %rax,-2976(%rbp)
+movabsq $0,%rax
+movq %rax,-2984(%rbp)
+movq -8(%rbp),%rax
+movq %rax,-2992(%rbp)
 .pushsection .rodata
-.L481:
+.L568:
 .byte 114
 .byte 116
 .byte 95
@@ -10947,48 +12819,48 @@ movq %rax,-2944(%rbp)
 .byte 101
 .byte 0
 .popsection
-leaq .L481(%rip),%rax
-movq %rax,-2952(%rbp)
-movabsq $8,%rax
-movq %rax,-2960(%rbp)
-movq -2952(%rbp),%rdi
-movq -2960(%rbp),%rsi
-call rt_lit
-movq %rax,-2968(%rbp)
-movq -2968(%rbp),%rdi
-call rt_view
-movq %rax,-2976(%rbp)
-movq -2976(%rbp),%rax
-movq %rax,-2984(%rbp)
-movq -2912(%rbp),%rax
-movq %rax,-2992(%rbp)
-movq -2944(%rbp),%rdi
-movq -2984(%rbp),%rsi
-movq -2992(%rbp),%rdx
-call f_native_apply
+leaq .L568(%rip),%rax
 movq %rax,-3000(%rbp)
-movq -3000(%rbp),%rax
+movabsq $8,%rax
 movq %rax,-3008(%rbp)
-movabsq $4,%rax
+movq -3000(%rbp),%rdi
+movq -3008(%rbp),%rsi
+call rt_lit
 movq %rax,-3016(%rbp)
-movq -3016(%rbp),%rax
+movq -3016(%rbp),%rdi
+call rt_view
 movq %rax,-3024(%rbp)
-movq -3008(%rbp),%rdi
-movq -3024(%rbp),%rsi
-call f_native_val
+movq -3024(%rbp),%rax
 movq %rax,-3032(%rbp)
-movq -3032(%rbp),%rax
+movq -2960(%rbp),%rax
+movq %rax,-3040(%rbp)
+movq -2992(%rbp),%rdi
+movq -3032(%rbp),%rsi
+movq -3040(%rbp),%rdx
+call f_native_apply
+movq %rax,-3048(%rbp)
+movq -3048(%rbp),%rax
+movq %rax,-3056(%rbp)
+movabsq $4,%rax
+movq %rax,-3064(%rbp)
+movq -3064(%rbp),%rax
+movq %rax,-3072(%rbp)
+movq -3056(%rbp),%rdi
+movq -3072(%rbp),%rsi
+call f_native_val
+movq %rax,-3080(%rbp)
+movq -3080(%rbp),%rax
 leave
 ret
 xorq %rax,%rax
 leave
 ret
-.set .F431,3040
+.set .F516,3088
 .type f_native_primary,@function
 f_native_primary:
 pushq %rbp
 movq %rsp,%rbp
-subq $.F482,%rsp
+subq $.F569,%rsp
 movq %rdi,-8(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-16(%rbp)
@@ -11009,7 +12881,7 @@ movzbq %al,%rax
 movq %rax,-56(%rbp)
 movq -56(%rbp),%rax
 testq %rax,%rax
-jz .L483
+jz .L570
 movq -8(%rbp),%rax
 movq %rax,-64(%rbp)
 movq -64(%rbp),%rdi
@@ -11018,11 +12890,11 @@ movq %rax,-72(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-80(%rbp)
 .pushsection .rodata
-.L485:
+.L572:
 .byte 41
 .byte 0
 .popsection
-leaq .L485(%rip),%rax
+leaq .L572(%rip),%rax
 movq %rax,-88(%rbp)
 movabsq $1,%rax
 movq %rax,-96(%rbp)
@@ -11041,7 +12913,7 @@ call f_native_eat
 movq %rax,-128(%rbp)
 movq -128(%rbp),%rax
 testq %rax,%rax
-jz .L486
+jz .L573
 movq -8(%rbp),%rax
 movq %rax,-136(%rbp)
 movabsq $0,%rax
@@ -11065,9 +12937,9 @@ movq %rax,-192(%rbp)
 movq -192(%rbp),%rax
 leave
 ret
-jmp .L487
-.L486:
-.L487:
+jmp .L574
+.L573:
+.L574:
 movq -8(%rbp),%rax
 movq %rax,-200(%rbp)
 movabsq $0,%rax
@@ -11083,11 +12955,11 @@ movq %rax,-232(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-240(%rbp)
 .pushsection .rodata
-.L488:
+.L575:
 .byte 41
 .byte 0
 .popsection
-leaq .L488(%rip),%rax
+leaq .L575(%rip),%rax
 movq %rax,-248(%rbp)
 movabsq $1,%rax
 movq %rax,-256(%rbp)
@@ -11107,9 +12979,9 @@ movq %rax,-288(%rbp)
 movq -232(%rbp),%rax
 leave
 ret
-jmp .L484
-.L483:
-.L484:
+jmp .L571
+.L570:
+.L571:
 movq -32(%rbp),%rax
 movq %rax,-296(%rbp)
 movabsq $3,%rax
@@ -11122,7 +12994,7 @@ movzbq %al,%rax
 movq %rax,-312(%rbp)
 movq -312(%rbp),%rax
 testq %rax,%rax
-jz .L489
+jz .L576
 movq -8(%rbp),%rax
 movq %rax,-320(%rbp)
 movq -320(%rbp),%rdi
@@ -11131,9 +13003,9 @@ movq %rax,-328(%rbp)
 movq -328(%rbp),%rax
 leave
 ret
-jmp .L490
-.L489:
-.L490:
+jmp .L577
+.L576:
+.L577:
 movq -32(%rbp),%rax
 movq %rax,-336(%rbp)
 movabsq $2,%rax
@@ -11146,7 +13018,7 @@ movzbq %al,%rax
 movq %rax,-352(%rbp)
 movq -352(%rbp),%rax
 testq %rax,%rax
-jz .L491
+jz .L578
 movq -8(%rbp),%rax
 movq (%rax),%rax
 movq %rax,-360(%rbp)
@@ -11173,7 +13045,7 @@ movq %rax,-424(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-432(%rbp)
 .pushsection .rodata
-.L493:
+.L580:
 .byte 109
 .byte 111
 .byte 118
@@ -11185,7 +13057,7 @@ movq %rax,-432(%rbp)
 .byte 36
 .byte 0
 .popsection
-leaq .L493(%rip),%rax
+leaq .L580(%rip),%rax
 movq %rax,-440(%rbp)
 movabsq $9,%rax
 movq %rax,-448(%rbp)
@@ -11216,7 +13088,7 @@ movq %rax,-512(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-520(%rbp)
 .pushsection .rodata
-.L494:
+.L581:
 .byte 44
 .byte 37
 .byte 114
@@ -11225,7 +13097,7 @@ movq %rax,-520(%rbp)
 .byte 10
 .byte 0
 .popsection
-leaq .L494(%rip),%rax
+leaq .L581(%rip),%rax
 movq %rax,-528(%rbp)
 movabsq $6,%rax
 movq %rax,-536(%rbp)
@@ -11260,9 +13132,9 @@ movq %rax,-616(%rbp)
 movq -616(%rbp),%rax
 leave
 ret
-jmp .L492
-.L491:
-.L492:
+jmp .L579
+.L578:
+.L579:
 movq -8(%rbp),%rax
 movq %rax,-624(%rbp)
 movq -624(%rbp),%rdi
@@ -11276,13 +13148,13 @@ movq %rax,-648(%rbp)
 movq -648(%rbp),%rax
 movq %rax,-656(%rbp)
 .pushsection .rodata
-.L495:
+.L582:
 .byte 118
 .byte 101
 .byte 99
 .byte 0
 .popsection
-leaq .L495(%rip),%rax
+leaq .L582(%rip),%rax
 movq %rax,-664(%rbp)
 movabsq $3,%rax
 movq %rax,-672(%rbp)
@@ -11304,11 +13176,11 @@ movq %rax,-712(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-720(%rbp)
 .pushsection .rodata
-.L496:
+.L583:
 .byte 60
 .byte 0
 .popsection
-leaq .L496(%rip),%rax
+leaq .L583(%rip),%rax
 movq %rax,-728(%rbp)
 movabsq $1,%rax
 movq %rax,-736(%rbp)
@@ -11331,7 +13203,7 @@ andq %rcx,%rax
 movq %rax,-776(%rbp)
 movq -776(%rbp),%rax
 testq %rax,%rax
-jz .L497
+jz .L584
 movq -8(%rbp),%rax
 movq %rax,-784(%rbp)
 movq -784(%rbp),%rdi
@@ -11347,11 +13219,11 @@ movq %rax,-816(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-824(%rbp)
 .pushsection .rodata
-.L499:
+.L586:
 .byte 62
 .byte 0
 .popsection
-leaq .L499(%rip),%rax
+leaq .L586(%rip),%rax
 movq %rax,-832(%rbp)
 movabsq $1,%rax
 movq %rax,-840(%rbp)
@@ -11371,11 +13243,11 @@ movq %rax,-872(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-880(%rbp)
 .pushsection .rodata
-.L500:
+.L587:
 .byte 40
 .byte 0
 .popsection
-leaq .L500(%rip),%rax
+leaq .L587(%rip),%rax
 movq %rax,-888(%rbp)
 movabsq $1,%rax
 movq %rax,-896(%rbp)
@@ -11395,11 +13267,11 @@ movq %rax,-928(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-936(%rbp)
 .pushsection .rodata
-.L501:
+.L588:
 .byte 41
 .byte 0
 .popsection
-leaq .L501(%rip),%rax
+leaq .L588(%rip),%rax
 movq %rax,-944(%rbp)
 movabsq $1,%rax
 movq %rax,-952(%rbp)
@@ -11434,7 +13306,7 @@ movq %rax,-1032(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-1040(%rbp)
 .pushsection .rodata
-.L502:
+.L589:
 .byte 114
 .byte 116
 .byte 95
@@ -11443,7 +13315,7 @@ movq %rax,-1040(%rbp)
 .byte 119
 .byte 0
 .popsection
-leaq .L502(%rip),%rax
+leaq .L589(%rip),%rax
 movq %rax,-1048(%rbp)
 movabsq $6,%rax
 movq %rax,-1056(%rbp)
@@ -11476,9 +13348,9 @@ movq %rax,-1128(%rbp)
 movq -1128(%rbp),%rax
 leave
 ret
-jmp .L498
-.L497:
-.L498:
+jmp .L585
+.L584:
+.L585:
 movq -8(%rbp),%rax
 movq %rax,-1136(%rbp)
 movq -1136(%rbp),%rdi
@@ -11489,12 +13361,12 @@ movq %rax,-1152(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-1160(%rbp)
 .pushsection .rodata
-.L503:
+.L590:
 .byte 58
 .byte 58
 .byte 0
 .popsection
-leaq .L503(%rip),%rax
+leaq .L590(%rip),%rax
 movq %rax,-1168(%rbp)
 movabsq $2,%rax
 movq %rax,-1176(%rbp)
@@ -11513,7 +13385,7 @@ call f_native_eat
 movq %rax,-1208(%rbp)
 movq -1208(%rbp),%rax
 testq %rax,%rax
-jz .L504
+jz .L591
 movq -8(%rbp),%rax
 movq %rax,-1216(%rbp)
 movq -1216(%rbp),%rdi
@@ -11524,12 +13396,12 @@ movq %rax,-1232(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-1240(%rbp)
 .pushsection .rodata
-.L506:
+.L593:
 .byte 58
 .byte 58
 .byte 0
 .popsection
-leaq .L506(%rip),%rax
+leaq .L593(%rip),%rax
 movq %rax,-1248(%rbp)
 movabsq $2,%rax
 movq %rax,-1256(%rbp)
@@ -11548,7 +13420,7 @@ call f_native_eat
 movq %rax,-1288(%rbp)
 movq -1288(%rbp),%rax
 testq %rax,%rax
-jz .L507
+jz .L594
 movq -8(%rbp),%rax
 movq %rax,-1296(%rbp)
 movq -1296(%rbp),%rdi
@@ -11587,11 +13459,11 @@ movzbq %al,%rax
 movq %rax,-1392(%rbp)
 movq -1392(%rbp),%rax
 testq %rax,%rax
-jz .L509
+jz .L596
 movq -8(%rbp),%rax
 movq %rax,-1400(%rbp)
 .pushsection .rodata
-.L511:
+.L598:
 .byte 117
 .byte 110
 .byte 107
@@ -11606,7 +13478,7 @@ movq %rax,-1400(%rbp)
 .byte 109
 .byte 0
 .popsection
-leaq .L511(%rip),%rax
+leaq .L598(%rip),%rax
 movq %rax,-1408(%rbp)
 movabsq $12,%rax
 movq %rax,-1416(%rbp)
@@ -11623,9 +13495,9 @@ movq -1400(%rbp),%rdi
 movq -1440(%rbp),%rsi
 call f_native_fail
 movq %rax,-1448(%rbp)
-jmp .L510
-.L509:
-.L510:
+jmp .L597
+.L596:
+.L597:
 movq -8(%rbp),%rax
 movq %rax,-1456(%rbp)
 movq -1368(%rbp),%rax
@@ -11651,9 +13523,9 @@ movq %rax,-1512(%rbp)
 movq -1512(%rbp),%rax
 leave
 ret
-jmp .L508
-.L507:
-.L508:
+jmp .L595
+.L594:
+.L595:
 movq -8(%rbp),%rax
 movq %rax,-1520(%rbp)
 movq -1152(%rbp),%rdi
@@ -11685,7 +13557,7 @@ movzbq %al,%rax
 movq %rax,-1592(%rbp)
 movq -1592(%rbp),%rax
 testq %rax,%rax
-jz .L512
+jz .L599
 movq -8(%rbp),%rax
 movq %rax,-1600(%rbp)
 movq -1568(%rbp),%rax
@@ -11711,9 +13583,9 @@ movq %rax,-1656(%rbp)
 movq -1656(%rbp),%rax
 leave
 ret
-jmp .L513
-.L512:
-.L513:
+jmp .L600
+.L599:
+.L600:
 movq -8(%rbp),%rax
 movq %rax,-1664(%rbp)
 movq -640(%rbp),%rdi
@@ -11748,11 +13620,11 @@ movq %rax,-1744(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-1752(%rbp)
 .pushsection .rodata
-.L514:
+.L601:
 .byte 123
 .byte 0
 .popsection
-leaq .L514(%rip),%rax
+leaq .L601(%rip),%rax
 movq %rax,-1760(%rbp)
 movabsq $1,%rax
 movq %rax,-1768(%rbp)
@@ -11775,7 +13647,7 @@ andq %rcx,%rax
 movq %rax,-1808(%rbp)
 movq -1808(%rbp),%rax
 testq %rax,%rax
-jz .L515
+jz .L602
 movq -8(%rbp),%rax
 movq %rax,-1816(%rbp)
 movq -1712(%rbp),%rax
@@ -11795,9 +13667,9 @@ movq %rax,-1856(%rbp)
 movq -1856(%rbp),%rax
 leave
 ret
-jmp .L516
-.L515:
-.L516:
+jmp .L603
+.L602:
+.L603:
 movq -8(%rbp),%rax
 movq %rax,-1864(%rbp)
 movq -640(%rbp),%rdi
@@ -11818,17 +13690,17 @@ movq %rax,-1904(%rbp)
 movq -1904(%rbp),%rax
 leave
 ret
-jmp .L505
-.L504:
-.L505:
+jmp .L592
+.L591:
+.L592:
 movq -8(%rbp),%rax
 movq %rax,-1912(%rbp)
 .pushsection .rodata
-.L517:
+.L604:
 .byte 40
 .byte 0
 .popsection
-leaq .L517(%rip),%rax
+leaq .L604(%rip),%rax
 movq %rax,-1920(%rbp)
 movabsq $1,%rax
 movq %rax,-1928(%rbp)
@@ -11847,7 +13719,7 @@ call f_native_is
 movq %rax,-1960(%rbp)
 movq -1960(%rbp),%rax
 testq %rax,%rax
-jz .L518
+jz .L605
 movq -640(%rbp),%rdi
 call rt_view
 movq %rax,-1968(%rbp)
@@ -11870,7 +13742,7 @@ movzbq %al,%rax
 movq %rax,-2016(%rbp)
 movq -2016(%rbp),%rax
 testq %rax,%rax
-jz .L520
+jz .L607
 movq -8(%rbp),%rax
 movq %rax,-2024(%rbp)
 movq -1992(%rbp),%rax
@@ -11882,9 +13754,9 @@ movq %rax,-2040(%rbp)
 movq -2040(%rbp),%rax
 leave
 ret
-jmp .L521
-.L520:
-.L521:
+jmp .L608
+.L607:
+.L608:
 movq -8(%rbp),%rax
 movq %rax,-2048(%rbp)
 movq -1152(%rbp),%rdi
@@ -11905,9 +13777,9 @@ movq %rax,-2088(%rbp)
 movq -2088(%rbp),%rax
 leave
 ret
-jmp .L519
-.L518:
-.L519:
+jmp .L606
+.L605:
+.L606:
 movq -8(%rbp),%rax
 movq %rax,-2096(%rbp)
 movq -640(%rbp),%rdi
@@ -11933,7 +13805,7 @@ movzbq %al,%rax
 movq %rax,-2152(%rbp)
 movq -2152(%rbp),%rax
 testq %rax,%rax
-jz .L522
+jz .L609
 movq -8(%rbp),%rax
 movq %rax,-2160(%rbp)
 movq -2128(%rbp),%rax
@@ -11989,9 +13861,9 @@ movq %rax,-2312(%rbp)
 movq -2312(%rbp),%rax
 leave
 ret
-jmp .L523
-.L522:
-.L523:
+jmp .L610
+.L609:
+.L610:
 movq -8(%rbp),%rax
 movq %rax,-2320(%rbp)
 movq -1152(%rbp),%rdi
@@ -12023,7 +13895,7 @@ movzbq %al,%rax
 movq %rax,-2392(%rbp)
 movq -2392(%rbp),%rax
 testq %rax,%rax
-jz .L524
+jz .L611
 movq -8(%rbp),%rax
 movq %rax,-2400(%rbp)
 movq -2368(%rbp),%rax
@@ -12043,13 +13915,13 @@ movq %rax,-2440(%rbp)
 movq -2440(%rbp),%rax
 leave
 ret
-jmp .L525
-.L524:
-.L525:
+jmp .L612
+.L611:
+.L612:
 movq -8(%rbp),%rax
 movq %rax,-2448(%rbp)
 .pushsection .rodata
-.L526:
+.L613:
 .byte 117
 .byte 110
 .byte 100
@@ -12066,7 +13938,7 @@ movq %rax,-2448(%rbp)
 .byte 101
 .byte 0
 .popsection
-leaq .L526(%rip),%rax
+leaq .L613(%rip),%rax
 movq %rax,-2456(%rbp)
 movabsq $14,%rax
 movq %rax,-2464(%rbp)
@@ -12101,12 +13973,12 @@ ret
 xorq %rax,%rax
 leave
 ret
-.set .F482,2544
+.set .F569,2544
 .type f_native_prec,@function
 f_native_prec:
 pushq %rbp
 movq %rsp,%rbp
-subq $.F527,%rsp
+subq $.F614,%rsp
 movq %rdi,-8(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-16(%rbp)
@@ -12120,15 +13992,15 @@ movzbq %al,%rax
 movq %rax,-32(%rbp)
 movq -32(%rbp),%rax
 testq %rax,%rax
-jz .L528
+jz .L615
 movabsq $1,%rax
 movq %rax,-40(%rbp)
 movq -40(%rbp),%rax
 leave
 ret
-jmp .L529
-.L528:
-.L529:
+jmp .L616
+.L615:
+.L616:
 movq -8(%rbp),%rax
 movq %rax,-48(%rbp)
 movabsq $94,%rax
@@ -12141,15 +14013,15 @@ movzbq %al,%rax
 movq %rax,-64(%rbp)
 movq -64(%rbp),%rax
 testq %rax,%rax
-jz .L530
+jz .L617
 movabsq $2,%rax
 movq %rax,-72(%rbp)
 movq -72(%rbp),%rax
 leave
 ret
-jmp .L531
-.L530:
-.L531:
+jmp .L618
+.L617:
+.L618:
 movq -8(%rbp),%rax
 movq %rax,-80(%rbp)
 movabsq $258,%rax
@@ -12194,15 +14066,15 @@ addq %rcx,%rax
 movq %rax,-176(%rbp)
 movq -176(%rbp),%rax
 testq %rax,%rax
-jz .L532
+jz .L619
 movabsq $3,%rax
 movq %rax,-184(%rbp)
 movq -184(%rbp),%rax
 leave
 ret
-jmp .L533
-.L532:
-.L533:
+jmp .L620
+.L619:
+.L620:
 movq -8(%rbp),%rax
 movq %rax,-192(%rbp)
 movabsq $43,%rax
@@ -12231,15 +14103,15 @@ addq %rcx,%rax
 movq %rax,-248(%rbp)
 movq -248(%rbp),%rax
 testq %rax,%rax
-jz .L534
+jz .L621
 movabsq $4,%rax
 movq %rax,-256(%rbp)
 movq -256(%rbp),%rax
 leave
 ret
-jmp .L535
-.L534:
-.L535:
+jmp .L622
+.L621:
+.L622:
 movq -8(%rbp),%rax
 movq %rax,-264(%rbp)
 movabsq $42,%rax
@@ -12268,15 +14140,15 @@ addq %rcx,%rax
 movq %rax,-320(%rbp)
 movq -320(%rbp),%rax
 testq %rax,%rax
-jz .L536
+jz .L623
 movabsq $5,%rax
 movq %rax,-328(%rbp)
 movq -328(%rbp),%rax
 leave
 ret
-jmp .L537
-.L536:
-.L537:
+jmp .L624
+.L623:
+.L624:
 movabsq $0,%rax
 movq %rax,-336(%rbp)
 movq -336(%rbp),%rax
@@ -12285,12 +14157,12 @@ ret
 xorq %rax,%rax
 leave
 ret
-.set .F527,336
+.set .F614,336
 .type f_native_propagate,@function
 f_native_propagate:
 pushq %rbp
 movq %rsp,%rbp
-subq $.F538,%rsp
+subq $.F625,%rsp
 movq %rdi,-8(%rbp)
 movq %rsi,-16(%rbp)
 movq %rdx,-24(%rbp)
@@ -12370,12 +14242,12 @@ movq %rax,-240(%rbp)
 movq -240(%rbp),%rax
 movq %rax,-248(%rbp)
 .pushsection .rodata
-.L539:
+.L626:
 .byte 79
 .byte 107
 .byte 0
 .popsection
-leaq .L539(%rip),%rax
+leaq .L626(%rip),%rax
 movq %rax,-256(%rbp)
 movabsq $2,%rax
 movq %rax,-264(%rbp)
@@ -12406,14 +14278,14 @@ movq %rax,-328(%rbp)
 movq -328(%rbp),%rax
 movq %rax,-336(%rbp)
 .pushsection .rodata
-.L540:
+.L627:
 .byte 83
 .byte 111
 .byte 109
 .byte 101
 .byte 0
 .popsection
-leaq .L540(%rip),%rax
+leaq .L627(%rip),%rax
 movq %rax,-344(%rbp)
 movabsq $4,%rax
 movq %rax,-352(%rbp)
@@ -12446,27 +14318,27 @@ movzbq %al,%rax
 movq %rax,-416(%rbp)
 movq -416(%rbp),%rax
 testq %rax,%rax
-jz .L541
+jz .L628
 movabsq $1,%rax
 movq %rax,-424(%rbp)
 movq -424(%rbp),%rax
 movq %rax,-128(%rbp)
-jmp .L542
-.L541:
-.L542:
+jmp .L629
+.L628:
+.L629:
 movq -8(%rbp),%rax
 movq %rax,-432(%rbp)
 movq -72(%rbp),%rax
 movq %rax,-440(%rbp)
 .pushsection .rodata
-.L543:
+.L630:
 .byte 37
 .byte 114
 .byte 97
 .byte 120
 .byte 0
 .popsection
-leaq .L543(%rip),%rax
+leaq .L630(%rip),%rax
 movq %rax,-448(%rbp)
 movabsq $4,%rax
 movq %rax,-456(%rbp)
@@ -12487,7 +14359,7 @@ movq %rax,-488(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-496(%rbp)
 .pushsection .rodata
-.L544:
+.L631:
 .byte 99
 .byte 109
 .byte 112
@@ -12496,7 +14368,7 @@ movq %rax,-496(%rbp)
 .byte 36
 .byte 0
 .popsection
-leaq .L544(%rip),%rax
+leaq .L631(%rip),%rax
 movq %rax,-504(%rbp)
 movabsq $6,%rax
 movq %rax,-512(%rbp)
@@ -12524,7 +14396,7 @@ movq %rax,-568(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-576(%rbp)
 .pushsection .rodata
-.L545:
+.L632:
 .byte 44
 .byte 40
 .byte 37
@@ -12535,7 +14407,7 @@ movq %rax,-576(%rbp)
 .byte 10
 .byte 0
 .popsection
-leaq .L545(%rip),%rax
+leaq .L632(%rip),%rax
 movq %rax,-584(%rbp)
 movabsq $8,%rax
 movq %rax,-592(%rbp)
@@ -12562,12 +14434,12 @@ movq %rax,-648(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-656(%rbp)
 .pushsection .rodata
-.L546:
+.L633:
 .byte 106
 .byte 101
 .byte 0
 .popsection
-leaq .L546(%rip),%rax
+leaq .L633(%rip),%rax
 movq %rax,-664(%rbp)
 movabsq $2,%rax
 movq %rax,-672(%rbp)
@@ -12589,31 +14461,30 @@ call f_native_jump
 movq %rax,-712(%rbp)
 movq -24(%rbp),%rax
 testq %rax,%rax
-jz .L547
+jz .L634
 movq -8(%rbp),%rax
 movq %rax,-720(%rbp)
 .pushsection .rodata
-.L549:
+.L636:
 .byte 99
 .byte 97
 .byte 108
 .byte 108
 .byte 32
+.byte 114
+.byte 116
+.byte 95
 .byte 97
 .byte 98
 .byte 111
 .byte 114
 .byte 116
-.byte 64
-.byte 80
-.byte 76
-.byte 84
 .byte 10
 .byte 0
 .popsection
-leaq .L549(%rip),%rax
+leaq .L636(%rip),%rax
 movq %rax,-728(%rbp)
-movabsq $15,%rax
+movabsq $14,%rax
 movq %rax,-736(%rbp)
 movq -728(%rbp),%rdi
 movq -736(%rbp),%rsi
@@ -12628,12 +14499,12 @@ movq -720(%rbp),%rdi
 movq -760(%rbp),%rsi
 call f_native_o
 movq %rax,-768(%rbp)
-jmp .L548
-.L547:
+jmp .L635
+.L634:
 movq -8(%rbp),%rax
 movq %rax,-776(%rbp)
 .pushsection .rodata
-.L550:
+.L637:
 .byte 108
 .byte 101
 .byte 97
@@ -12646,7 +14517,7 @@ movq %rax,-776(%rbp)
 .byte 10
 .byte 0
 .popsection
-leaq .L550(%rip),%rax
+leaq .L637(%rip),%rax
 movq %rax,-784(%rbp)
 movabsq $10,%rax
 movq %rax,-792(%rbp)
@@ -12663,7 +14534,7 @@ movq -776(%rbp),%rdi
 movq -816(%rbp),%rsi
 call f_native_o
 movq %rax,-824(%rbp)
-.L548:
+.L635:
 movq -8(%rbp),%rax
 movq %rax,-832(%rbp)
 movq -648(%rbp),%rax
@@ -12717,12 +14588,12 @@ ret
 xorq %rax,%rax
 leave
 ret
-.set .F538,976
+.set .F625,976
 .type f_native_binary,@function
 f_native_binary:
 pushq %rbp
 movq %rsp,%rbp
-subq $.F551,%rsp
+subq $.F638,%rsp
 movq %rdi,-8(%rbp)
 movq %rsi,-16(%rbp)
 movq %rdx,-24(%rbp)
@@ -12739,14 +14610,14 @@ movq %rax,-64(%rbp)
 movq -32(%rbp),%rax
 movq %rax,-72(%rbp)
 .pushsection .rodata
-.L552:
+.L639:
 .byte 37
 .byte 114
 .byte 99
 .byte 120
 .byte 0
 .popsection
-leaq .L552(%rip),%rax
+leaq .L639(%rip),%rax
 movq %rax,-80(%rbp)
 movabsq $4,%rax
 movq %rax,-88(%rbp)
@@ -12769,14 +14640,14 @@ movq %rax,-128(%rbp)
 movq -24(%rbp),%rax
 movq %rax,-136(%rbp)
 .pushsection .rodata
-.L553:
+.L640:
 .byte 37
 .byte 114
 .byte 97
 .byte 120
 .byte 0
 .popsection
-leaq .L553(%rip),%rax
+leaq .L640(%rip),%rax
 movq %rax,-144(%rbp)
 movabsq $4,%rax
 movq %rax,-152(%rbp)
@@ -12806,11 +14677,11 @@ movzbq %al,%rax
 movq %rax,-208(%rbp)
 movq -208(%rbp),%rax
 testq %rax,%rax
-jz .L554
+jz .L641
 movq -8(%rbp),%rax
 movq %rax,-216(%rbp)
 .pushsection .rodata
-.L556:
+.L643:
 .byte 97
 .byte 100
 .byte 100
@@ -12828,7 +14699,7 @@ movq %rax,-216(%rbp)
 .byte 10
 .byte 0
 .popsection
-leaq .L556(%rip),%rax
+leaq .L643(%rip),%rax
 movq %rax,-224(%rbp)
 movabsq $15,%rax
 movq %rax,-232(%rbp)
@@ -12845,9 +14716,9 @@ movq -216(%rbp),%rdi
 movq -256(%rbp),%rsi
 call f_native_o
 movq %rax,-264(%rbp)
-jmp .L555
-.L554:
-.L555:
+jmp .L642
+.L641:
+.L642:
 movq -16(%rbp),%rax
 movq %rax,-272(%rbp)
 movabsq $45,%rax
@@ -12860,11 +14731,11 @@ movzbq %al,%rax
 movq %rax,-288(%rbp)
 movq -288(%rbp),%rax
 testq %rax,%rax
-jz .L557
+jz .L644
 movq -8(%rbp),%rax
 movq %rax,-296(%rbp)
 .pushsection .rodata
-.L559:
+.L646:
 .byte 115
 .byte 117
 .byte 98
@@ -12882,7 +14753,7 @@ movq %rax,-296(%rbp)
 .byte 10
 .byte 0
 .popsection
-leaq .L559(%rip),%rax
+leaq .L646(%rip),%rax
 movq %rax,-304(%rbp)
 movabsq $15,%rax
 movq %rax,-312(%rbp)
@@ -12899,9 +14770,9 @@ movq -296(%rbp),%rdi
 movq -336(%rbp),%rsi
 call f_native_o
 movq %rax,-344(%rbp)
-jmp .L558
-.L557:
-.L558:
+jmp .L645
+.L644:
+.L645:
 movq -16(%rbp),%rax
 movq %rax,-352(%rbp)
 movabsq $42,%rax
@@ -12914,11 +14785,11 @@ movzbq %al,%rax
 movq %rax,-368(%rbp)
 movq -368(%rbp),%rax
 testq %rax,%rax
-jz .L560
+jz .L647
 movq -8(%rbp),%rax
 movq %rax,-376(%rbp)
 .pushsection .rodata
-.L562:
+.L649:
 .byte 105
 .byte 109
 .byte 117
@@ -12937,7 +14808,7 @@ movq %rax,-376(%rbp)
 .byte 10
 .byte 0
 .popsection
-leaq .L562(%rip),%rax
+leaq .L649(%rip),%rax
 movq %rax,-384(%rbp)
 movabsq $16,%rax
 movq %rax,-392(%rbp)
@@ -12954,9 +14825,9 @@ movq -376(%rbp),%rdi
 movq -416(%rbp),%rsi
 call f_native_o
 movq %rax,-424(%rbp)
-jmp .L561
-.L560:
-.L561:
+jmp .L648
+.L647:
+.L648:
 movq -16(%rbp),%rax
 movq %rax,-432(%rbp)
 movabsq $38,%rax
@@ -12969,11 +14840,11 @@ movzbq %al,%rax
 movq %rax,-448(%rbp)
 movq -448(%rbp),%rax
 testq %rax,%rax
-jz .L563
+jz .L650
 movq -8(%rbp),%rax
 movq %rax,-456(%rbp)
 .pushsection .rodata
-.L565:
+.L652:
 .byte 97
 .byte 110
 .byte 100
@@ -12991,7 +14862,7 @@ movq %rax,-456(%rbp)
 .byte 10
 .byte 0
 .popsection
-leaq .L565(%rip),%rax
+leaq .L652(%rip),%rax
 movq %rax,-464(%rbp)
 movabsq $15,%rax
 movq %rax,-472(%rbp)
@@ -13008,9 +14879,9 @@ movq -456(%rbp),%rdi
 movq -496(%rbp),%rsi
 call f_native_o
 movq %rax,-504(%rbp)
-jmp .L564
-.L563:
-.L564:
+jmp .L651
+.L650:
+.L651:
 movq -16(%rbp),%rax
 movq %rax,-512(%rbp)
 movabsq $94,%rax
@@ -13023,11 +14894,11 @@ movzbq %al,%rax
 movq %rax,-528(%rbp)
 movq -528(%rbp),%rax
 testq %rax,%rax
-jz .L566
+jz .L653
 movq -8(%rbp),%rax
 movq %rax,-536(%rbp)
 .pushsection .rodata
-.L568:
+.L655:
 .byte 120
 .byte 111
 .byte 114
@@ -13045,7 +14916,7 @@ movq %rax,-536(%rbp)
 .byte 10
 .byte 0
 .popsection
-leaq .L568(%rip),%rax
+leaq .L655(%rip),%rax
 movq %rax,-544(%rbp)
 movabsq $15,%rax
 movq %rax,-552(%rbp)
@@ -13062,9 +14933,9 @@ movq -536(%rbp),%rdi
 movq -576(%rbp),%rsi
 call f_native_o
 movq %rax,-584(%rbp)
-jmp .L567
-.L566:
-.L567:
+jmp .L654
+.L653:
+.L654:
 movq -16(%rbp),%rax
 movq %rax,-592(%rbp)
 movabsq $37,%rax
@@ -13077,11 +14948,11 @@ movzbq %al,%rax
 movq %rax,-608(%rbp)
 movq -608(%rbp),%rax
 testq %rax,%rax
-jz .L569
+jz .L656
 movq -8(%rbp),%rax
 movq %rax,-616(%rbp)
 .pushsection .rodata
-.L571:
+.L658:
 .byte 116
 .byte 101
 .byte 115
@@ -13100,7 +14971,7 @@ movq %rax,-616(%rbp)
 .byte 10
 .byte 0
 .popsection
-leaq .L571(%rip),%rax
+leaq .L658(%rip),%rax
 movq %rax,-624(%rbp)
 movabsq $16,%rax
 movq %rax,-632(%rbp)
@@ -13127,13 +14998,13 @@ movq %rax,-688(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-696(%rbp)
 .pushsection .rodata
-.L572:
+.L659:
 .byte 106
 .byte 110
 .byte 122
 .byte 0
 .popsection
-leaq .L572(%rip),%rax
+leaq .L659(%rip),%rax
 movq %rax,-704(%rbp)
 movabsq $3,%rax
 movq %rax,-712(%rbp)
@@ -13156,27 +15027,26 @@ movq %rax,-752(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-760(%rbp)
 .pushsection .rodata
-.L573:
+.L660:
 .byte 99
 .byte 97
 .byte 108
 .byte 108
 .byte 32
+.byte 114
+.byte 116
+.byte 95
 .byte 97
 .byte 98
 .byte 111
 .byte 114
 .byte 116
-.byte 64
-.byte 80
-.byte 76
-.byte 84
 .byte 10
 .byte 0
 .popsection
-leaq .L573(%rip),%rax
+leaq .L660(%rip),%rax
 movq %rax,-768(%rbp)
-movabsq $15,%rax
+movabsq $14,%rax
 movq %rax,-776(%rbp)
 movq -768(%rbp),%rdi
 movq -776(%rbp),%rsi
@@ -13202,7 +15072,7 @@ movq %rax,-832(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-840(%rbp)
 .pushsection .rodata
-.L574:
+.L661:
 .byte 120
 .byte 111
 .byte 114
@@ -13245,7 +15115,7 @@ movq %rax,-840(%rbp)
 .byte 10
 .byte 0
 .popsection
-leaq .L574(%rip),%rax
+leaq .L661(%rip),%rax
 movq %rax,-848(%rbp)
 movabsq $40,%rax
 movq %rax,-856(%rbp)
@@ -13262,9 +15132,9 @@ movq -840(%rbp),%rdi
 movq -880(%rbp),%rsi
 call f_native_o
 movq %rax,-888(%rbp)
-jmp .L570
-.L569:
-.L570:
+jmp .L657
+.L656:
+.L657:
 movq -56(%rbp),%rax
 movq %rax,-896(%rbp)
 movabsq $3,%rax
@@ -13277,11 +15147,11 @@ movzbq %al,%rax
 movq %rax,-912(%rbp)
 movq -912(%rbp),%rax
 testq %rax,%rax
-jz .L575
+jz .L662
 movq -8(%rbp),%rax
 movq %rax,-920(%rbp)
 .pushsection .rodata
-.L577:
+.L664:
 .byte 99
 .byte 109
 .byte 112
@@ -13299,7 +15169,7 @@ movq %rax,-920(%rbp)
 .byte 10
 .byte 0
 .popsection
-leaq .L577(%rip),%rax
+leaq .L664(%rip),%rax
 movq %rax,-928(%rbp)
 movabsq $15,%rax
 movq %rax,-936(%rbp)
@@ -13328,11 +15198,11 @@ movzbq %al,%rax
 movq %rax,-992(%rbp)
 movq -992(%rbp),%rax
 testq %rax,%rax
-jz .L578
+jz .L665
 movq -8(%rbp),%rax
 movq %rax,-1000(%rbp)
 .pushsection .rodata
-.L580:
+.L667:
 .byte 115
 .byte 101
 .byte 116
@@ -13344,7 +15214,7 @@ movq %rax,-1000(%rbp)
 .byte 10
 .byte 0
 .popsection
-leaq .L580(%rip),%rax
+leaq .L667(%rip),%rax
 movq %rax,-1008(%rbp)
 movabsq $9,%rax
 movq %rax,-1016(%rbp)
@@ -13361,9 +15231,9 @@ movq -1000(%rbp),%rdi
 movq -1040(%rbp),%rsi
 call f_native_o
 movq %rax,-1048(%rbp)
-jmp .L579
-.L578:
-.L579:
+jmp .L666
+.L665:
+.L666:
 movq -16(%rbp),%rax
 movq %rax,-1056(%rbp)
 movabsq $259,%rax
@@ -13376,11 +15246,11 @@ movzbq %al,%rax
 movq %rax,-1072(%rbp)
 movq -1072(%rbp),%rax
 testq %rax,%rax
-jz .L581
+jz .L668
 movq -8(%rbp),%rax
 movq %rax,-1080(%rbp)
 .pushsection .rodata
-.L583:
+.L670:
 .byte 115
 .byte 101
 .byte 116
@@ -13393,7 +15263,7 @@ movq %rax,-1080(%rbp)
 .byte 10
 .byte 0
 .popsection
-leaq .L583(%rip),%rax
+leaq .L670(%rip),%rax
 movq %rax,-1088(%rbp)
 movabsq $10,%rax
 movq %rax,-1096(%rbp)
@@ -13410,9 +15280,9 @@ movq -1080(%rbp),%rdi
 movq -1120(%rbp),%rsi
 call f_native_o
 movq %rax,-1128(%rbp)
-jmp .L582
-.L581:
-.L582:
+jmp .L669
+.L668:
+.L669:
 movq -16(%rbp),%rax
 movq %rax,-1136(%rbp)
 movabsq $60,%rax
@@ -13425,11 +15295,11 @@ movzbq %al,%rax
 movq %rax,-1152(%rbp)
 movq -1152(%rbp),%rax
 testq %rax,%rax
-jz .L584
+jz .L671
 movq -8(%rbp),%rax
 movq %rax,-1160(%rbp)
 .pushsection .rodata
-.L586:
+.L673:
 .byte 115
 .byte 101
 .byte 116
@@ -13441,7 +15311,7 @@ movq %rax,-1160(%rbp)
 .byte 10
 .byte 0
 .popsection
-leaq .L586(%rip),%rax
+leaq .L673(%rip),%rax
 movq %rax,-1168(%rbp)
 movabsq $9,%rax
 movq %rax,-1176(%rbp)
@@ -13458,13 +15328,13 @@ movq -1160(%rbp),%rdi
 movq -1200(%rbp),%rsi
 call f_native_o
 movq %rax,-1208(%rbp)
-jmp .L585
-.L584:
-.L585:
+jmp .L672
+.L671:
+.L672:
 movq -8(%rbp),%rax
 movq %rax,-1216(%rbp)
 .pushsection .rodata
-.L587:
+.L674:
 .byte 109
 .byte 111
 .byte 118
@@ -13483,7 +15353,7 @@ movq %rax,-1216(%rbp)
 .byte 10
 .byte 0
 .popsection
-leaq .L587(%rip),%rax
+leaq .L674(%rip),%rax
 movq %rax,-1224(%rbp)
 movabsq $16,%rax
 movq %rax,-1232(%rbp)
@@ -13500,9 +15370,9 @@ movq -1216(%rbp),%rdi
 movq -1256(%rbp),%rsi
 call f_native_o
 movq %rax,-1264(%rbp)
-jmp .L576
-.L575:
-.L576:
+jmp .L663
+.L662:
+.L663:
 movq -8(%rbp),%rax
 movq %rax,-1272(%rbp)
 movq -1272(%rbp),%rdi
@@ -13514,12 +15384,12 @@ ret
 xorq %rax,%rax
 leave
 ret
-.set .F551,1280
+.set .F638,1280
 .type f_native_expr,@function
 f_native_expr:
 pushq %rbp
 movq %rsp,%rbp
-subq $.F588,%rsp
+subq $.F675,%rsp
 movq %rdi,-8(%rbp)
 movq %rsi,-16(%rbp)
 movq -8(%rbp),%rax
@@ -13539,12 +15409,12 @@ movq 8(%rax),%rax
 movq %rax,-64(%rbp)
 movq -64(%rbp),%rax
 movq %rax,-72(%rbp)
-.L589:
+.L676:
 movabsq $1,%rax
 movq %rax,-80(%rbp)
 movq -80(%rbp),%rax
 testq %rax,%rax
-jz .L590
+jz .L677
 movq -8(%rbp),%rax
 movq %rax,-88(%rbp)
 movq -88(%rbp),%rdi
@@ -13587,7 +15457,7 @@ addq %rcx,%rax
 movq %rax,-192(%rbp)
 movq -192(%rbp),%rax
 testq %rax,%rax
-jz .L591
+jz .L678
 movq -8(%rbp),%rax
 movq %rax,-200(%rbp)
 movq -200(%rbp),%rdi
@@ -13634,8 +15504,8 @@ movq 8(%rax),%rax
 movq %rax,-312(%rbp)
 movq -312(%rbp),%rax
 movq %rax,-72(%rbp)
-jmp .L592
-.L591:
+jmp .L679
+.L678:
 movq -128(%rbp),%rax
 movq %rax,-320(%rbp)
 movabsq $0,%rax
@@ -13648,11 +15518,11 @@ movzbq %al,%rax
 movq %rax,-336(%rbp)
 movq -336(%rbp),%rax
 testq %rax,%rax
-jz .L593
-jmp .L590
-jmp .L594
-.L593:
-.L594:
+jz .L680
+jmp .L677
+jmp .L681
+.L680:
+.L681:
 movq -128(%rbp),%rax
 movq %rax,-344(%rbp)
 movq -16(%rbp),%rcx
@@ -13663,11 +15533,11 @@ movzbq %al,%rax
 movq %rax,-352(%rbp)
 movq -352(%rbp),%rax
 testq %rax,%rax
-jz .L595
-jmp .L590
-jmp .L596
-.L595:
-.L596:
+jz .L682
+jmp .L677
+jmp .L683
+.L682:
+.L683:
 movq -8(%rbp),%rax
 movq %rax,-360(%rbp)
 movq -360(%rbp),%rdi
@@ -13678,14 +15548,14 @@ movq %rax,-376(%rbp)
 movq -56(%rbp),%rax
 movq %rax,-384(%rbp)
 .pushsection .rodata
-.L597:
+.L684:
 .byte 37
 .byte 114
 .byte 97
 .byte 120
 .byte 0
 .popsection
-leaq .L597(%rip),%rax
+leaq .L684(%rip),%rax
 movq %rax,-392(%rbp)
 movabsq $4,%rax
 movq %rax,-400(%rbp)
@@ -13751,9 +15621,9 @@ movabsq $0,%rax
 movq %rax,-568(%rbp)
 movq -568(%rbp),%rax
 movq %rax,-72(%rbp)
-.L592:
-jmp .L589
-.L590:
+.L679:
+jmp .L676
+.L677:
 movq -56(%rbp),%rax
 movq %rax,-576(%rbp)
 movq -72(%rbp),%rax
@@ -13768,21 +15638,21 @@ ret
 xorq %rax,%rax
 leave
 ret
-.set .F588,592
+.set .F675,592
 .type f_native_block,@function
 f_native_block:
 pushq %rbp
 movq %rsp,%rbp
-subq $.F598,%rsp
+subq $.F685,%rsp
 movq %rdi,-8(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-16(%rbp)
 .pushsection .rodata
-.L599:
+.L686:
 .byte 123
 .byte 0
 .popsection
-leaq .L599(%rip),%rax
+leaq .L686(%rip),%rax
 movq %rax,-24(%rbp)
 movabsq $1,%rax
 movq %rax,-32(%rbp)
@@ -13810,15 +15680,15 @@ call rt_len
 movq %rax,-88(%rbp)
 movq -88(%rbp),%rax
 movq %rax,-96(%rbp)
-.L600:
+.L687:
 movq -8(%rbp),%rax
 movq %rax,-104(%rbp)
 .pushsection .rodata
-.L602:
+.L689:
 .byte 125
 .byte 0
 .popsection
-leaq .L602(%rip),%rax
+leaq .L689(%rip),%rax
 movq %rax,-112(%rbp)
 movabsq $1,%rax
 movq %rax,-120(%rbp)
@@ -13847,14 +15717,14 @@ movzbq %al,%rax
 movq %rax,-176(%rbp)
 movq -176(%rbp),%rax
 testq %rax,%rax
-jz .L601
+jz .L688
 movq -8(%rbp),%rax
 movq %rax,-184(%rbp)
 movq -184(%rbp),%rdi
 call f_native_stmt
 movq %rax,-192(%rbp)
-jmp .L600
-.L601:
+jmp .L687
+.L688:
 movq -8(%rbp),%rax
 movq %rax,-200(%rbp)
 movq -200(%rbp),%rdi
@@ -13876,12 +15746,12 @@ ret
 xorq %rax,%rax
 leave
 ret
-.set .F598,240
+.set .F685,240
 .type f_native_assignment_ahead,@function
 f_native_assignment_ahead:
 pushq %rbp
 movq %rsp,%rbp
-subq $.F603,%rsp
+subq $.F690,%rsp
 movq %rdi,-8(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-16(%rbp)
@@ -13900,15 +15770,15 @@ movzbq %al,%rax
 movq %rax,-48(%rbp)
 movq -48(%rbp),%rax
 testq %rax,%rax
-jz .L604
+jz .L691
 movabsq $0,%rax
 movq %rax,-56(%rbp)
 movq -56(%rbp),%rax
 leave
 ret
-jmp .L605
-.L604:
-.L605:
+jmp .L692
+.L691:
+.L692:
 movq -8(%rbp),%rax
 movq (%rax),%rax
 movq %rax,-64(%rbp)
@@ -13925,7 +15795,7 @@ addq %rcx,%rax
 movq %rax,-96(%rbp)
 movq -96(%rbp),%rax
 movq %rax,-104(%rbp)
-.L606:
+.L693:
 movq -8(%rbp),%rax
 movq %rax,-112(%rbp)
 movq -104(%rbp),%rax
@@ -13946,7 +15816,7 @@ movzbq %al,%rax
 movq %rax,-152(%rbp)
 movq -152(%rbp),%rax
 testq %rax,%rax
-jz .L607
+jz .L694
 movq -104(%rbp),%rax
 movq %rax,-160(%rbp)
 movabsq $2,%rax
@@ -13957,8 +15827,8 @@ addq %rcx,%rax
 movq %rax,-176(%rbp)
 movq -176(%rbp),%rax
 movq %rax,-104(%rbp)
-jmp .L606
-.L607:
+jmp .L693
+.L694:
 movq -8(%rbp),%rax
 movq %rax,-184(%rbp)
 movq -104(%rbp),%rax
@@ -13983,12 +15853,12 @@ ret
 xorq %rax,%rax
 leave
 ret
-.set .F603,224
+.set .F690,224
 .type f_native_operand,@function
 f_native_operand:
 pushq %rbp
 movq %rsp,%rbp
-subq $.F608,%rsp
+subq $.F695,%rsp
 movq %rdi,-8(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-16(%rbp)
@@ -14021,23 +15891,23 @@ ret
 xorq %rax,%rax
 leave
 ret
-.set .F608,96
+.set .F695,96
 .type f_native_statement_call,@function
 f_native_statement_call:
 pushq %rbp
 movq %rsp,%rbp
-subq $.F609,%rsp
+subq $.F696,%rsp
 movq %rdi,-8(%rbp)
 movq %rsi,-16(%rbp)
 movq %rdx,-24(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-32(%rbp)
 .pushsection .rodata
-.L610:
+.L697:
 .byte 40
 .byte 0
 .popsection
-leaq .L610(%rip),%rax
+leaq .L697(%rip),%rax
 movq %rax,-40(%rbp)
 movabsq $1,%rax
 movq %rax,-48(%rbp)
@@ -14062,11 +15932,11 @@ movq -24(%rbp),%rax
 movq %rax,-104(%rbp)
 movabsq $0,%rax
 movq %rax,-112(%rbp)
-.L611:
+.L698:
 movq -104(%rbp),%rcx
 movq -112(%rbp),%rax
 cmpq %rcx,%rax
-jae .L613
+jae .L700
 movq -112(%rbp),%rax
 movq %rax,-120(%rbp)
 movabsq $0,%rax
@@ -14079,15 +15949,15 @@ movzbq %al,%rax
 movq %rax,-136(%rbp)
 movq -136(%rbp),%rax
 testq %rax,%rax
-jz .L614
+jz .L701
 movq -8(%rbp),%rax
 movq %rax,-144(%rbp)
 .pushsection .rodata
-.L616:
+.L703:
 .byte 44
 .byte 0
 .popsection
-leaq .L616(%rip),%rax
+leaq .L703(%rip),%rax
 movq %rax,-152(%rbp)
 movabsq $1,%rax
 movq %rax,-160(%rbp)
@@ -14104,9 +15974,9 @@ movq -144(%rbp),%rdi
 movq -184(%rbp),%rsi
 call f_native_expect
 movq %rax,-192(%rbp)
-jmp .L615
-.L614:
-.L615:
+jmp .L702
+.L701:
+.L702:
 movq -8(%rbp),%rax
 movq %rax,-200(%rbp)
 movq -200(%rbp),%rdi
@@ -14119,14 +15989,14 @@ movq %rax,-224(%rbp)
 movq -216(%rbp),%rax
 movq %rax,-232(%rbp)
 .pushsection .rodata
-.L617:
+.L704:
 .byte 37
 .byte 114
 .byte 97
 .byte 120
 .byte 0
 .popsection
-leaq .L617(%rip),%rax
+leaq .L704(%rip),%rax
 movq %rax,-240(%rbp)
 movabsq $4,%rax
 movq %rax,-248(%rbp)
@@ -14157,18 +16027,18 @@ call rt_push
 movq %rax,-312(%rbp)
 movabsq $0,%rax
 movq %rax,-320(%rbp)
-.L612:
+.L699:
 incq -112(%rbp)
-jmp .L611
-.L613:
+jmp .L698
+.L700:
 movq -8(%rbp),%rax
 movq %rax,-328(%rbp)
 .pushsection .rodata
-.L618:
+.L705:
 .byte 41
 .byte 0
 .popsection
-leaq .L618(%rip),%rax
+leaq .L705(%rip),%rax
 movq %rax,-336(%rbp)
 movabsq $1,%rax
 movq %rax,-344(%rbp)
@@ -14188,11 +16058,11 @@ movq %rax,-376(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-384(%rbp)
 .pushsection .rodata
-.L619:
+.L706:
 .byte 59
 .byte 0
 .popsection
-leaq .L619(%rip),%rax
+leaq .L706(%rip),%rax
 movq %rax,-392(%rbp)
 movabsq $1,%rax
 movq %rax,-400(%rbp)
@@ -14228,17 +16098,17 @@ ret
 xorq %rax,%rax
 leave
 ret
-.set .F609,480
+.set .F696,480
 .type f_native_stmt,@function
 f_native_stmt:
 pushq %rbp
 movq %rsp,%rbp
-subq $.F620,%rsp
+subq $.F707,%rsp
 movq %rdi,-8(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-16(%rbp)
 .pushsection .rodata
-.L621:
+.L708:
 .byte 98
 .byte 114
 .byte 101
@@ -14246,7 +16116,7 @@ movq %rax,-16(%rbp)
 .byte 107
 .byte 0
 .popsection
-leaq .L621(%rip),%rax
+leaq .L708(%rip),%rax
 movq %rax,-24(%rbp)
 movabsq $5,%rax
 movq %rax,-32(%rbp)
@@ -14268,7 +16138,7 @@ movq %rax,-72(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-80(%rbp)
 .pushsection .rodata
-.L622:
+.L709:
 .byte 99
 .byte 111
 .byte 110
@@ -14279,7 +16149,7 @@ movq %rax,-80(%rbp)
 .byte 101
 .byte 0
 .popsection
-leaq .L622(%rip),%rax
+leaq .L709(%rip),%rax
 movq %rax,-88(%rbp)
 movabsq $8,%rax
 movq %rax,-96(%rbp)
@@ -14302,11 +16172,11 @@ addq %rcx,%rax
 movq %rax,-136(%rbp)
 movq -136(%rbp),%rax
 testq %rax,%rax
-jz .L623
+jz .L710
 movq -8(%rbp),%rax
 movq %rax,-144(%rbp)
 .pushsection .rodata
-.L625:
+.L712:
 .byte 98
 .byte 114
 .byte 101
@@ -14314,7 +16184,7 @@ movq %rax,-144(%rbp)
 .byte 107
 .byte 0
 .popsection
-leaq .L625(%rip),%rax
+leaq .L712(%rip),%rax
 movq %rax,-152(%rbp)
 movabsq $5,%rax
 movq %rax,-160(%rbp)
@@ -14345,11 +16215,11 @@ movzbq %al,%rax
 movq %rax,-224(%rbp)
 movq -224(%rbp),%rax
 testq %rax,%rax
-jz .L626
+jz .L713
 movq -8(%rbp),%rax
 movq %rax,-232(%rbp)
 .pushsection .rodata
-.L628:
+.L715:
 .byte 99
 .byte 111
 .byte 110
@@ -14360,7 +16230,7 @@ movq %rax,-232(%rbp)
 .byte 101
 .byte 0
 .popsection
-leaq .L628(%rip),%rax
+leaq .L715(%rip),%rax
 movq %rax,-240(%rbp)
 movabsq $8,%rax
 movq %rax,-248(%rbp)
@@ -14377,17 +16247,17 @@ movq -232(%rbp),%rdi
 movq -272(%rbp),%rsi
 call f_native_expect
 movq %rax,-280(%rbp)
-jmp .L627
-.L626:
-.L627:
+jmp .L714
+.L713:
+.L714:
 movq -8(%rbp),%rax
 movq %rax,-288(%rbp)
 .pushsection .rodata
-.L629:
+.L716:
 .byte 59
 .byte 0
 .popsection
-leaq .L629(%rip),%rax
+leaq .L716(%rip),%rax
 movq %rax,-296(%rbp)
 movabsq $1,%rax
 movq %rax,-304(%rbp)
@@ -14414,7 +16284,7 @@ movq -352(%rbp),%rax
 movq %rax,-360(%rbp)
 movq -200(%rbp),%rax
 testq %rax,%rax
-jz .L630
+jz .L717
 movq -8(%rbp),%rax
 movq (%rax),%rax
 movq %rax,-368(%rbp)
@@ -14423,9 +16293,9 @@ movq 120(%rax),%rax
 movq %rax,-376(%rbp)
 movq -376(%rbp),%rax
 movq %rax,-360(%rbp)
-jmp .L631
-.L630:
-.L631:
+jmp .L718
+.L717:
+.L718:
 movq -360(%rbp),%rax
 movq %rax,-384(%rbp)
 movabsq $0,%rax
@@ -14438,11 +16308,11 @@ movzbq %al,%rax
 movq %rax,-400(%rbp)
 movq -400(%rbp),%rax
 testq %rax,%rax
-jz .L632
+jz .L719
 movq -8(%rbp),%rax
 movq %rax,-408(%rbp)
 .pushsection .rodata
-.L634:
+.L721:
 .byte 106
 .byte 117
 .byte 109
@@ -14462,7 +16332,7 @@ movq %rax,-408(%rbp)
 .byte 112
 .byte 0
 .popsection
-leaq .L634(%rip),%rax
+leaq .L721(%rip),%rax
 movq %rax,-416(%rbp)
 movabsq $17,%rax
 movq %rax,-424(%rbp)
@@ -14479,19 +16349,19 @@ movq -408(%rbp),%rdi
 movq -448(%rbp),%rsi
 call f_native_fail
 movq %rax,-456(%rbp)
-jmp .L633
-.L632:
-.L633:
+jmp .L720
+.L719:
+.L720:
 movq -8(%rbp),%rax
 movq %rax,-464(%rbp)
 .pushsection .rodata
-.L635:
+.L722:
 .byte 106
 .byte 109
 .byte 112
 .byte 0
 .popsection
-leaq .L635(%rip),%rax
+leaq .L722(%rip),%rax
 movq %rax,-472(%rbp)
 movabsq $3,%rax
 movq %rax,-480(%rbp)
@@ -14516,13 +16386,13 @@ movq %rax,-528(%rbp)
 movq -528(%rbp),%rax
 leave
 ret
-jmp .L624
-.L623:
-.L624:
+jmp .L711
+.L710:
+.L711:
 movq -8(%rbp),%rax
 movq %rax,-536(%rbp)
 .pushsection .rodata
-.L636:
+.L723:
 .byte 114
 .byte 101
 .byte 116
@@ -14531,7 +16401,7 @@ movq %rax,-536(%rbp)
 .byte 110
 .byte 0
 .popsection
-leaq .L636(%rip),%rax
+leaq .L723(%rip),%rax
 movq %rax,-544(%rbp)
 movabsq $6,%rax
 movq %rax,-552(%rbp)
@@ -14550,7 +16420,7 @@ call f_native_eat
 movq %rax,-584(%rbp)
 movq -584(%rbp),%rax
 testq %rax,%rax
-jz .L637
+jz .L724
 movq -8(%rbp),%rax
 movq %rax,-592(%rbp)
 movabsq $0,%rax
@@ -14566,11 +16436,11 @@ movq %rax,-624(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-632(%rbp)
 .pushsection .rodata
-.L639:
+.L726:
 .byte 59
 .byte 0
 .popsection
-leaq .L639(%rip),%rax
+leaq .L726(%rip),%rax
 movq %rax,-640(%rbp)
 movabsq $1,%rax
 movq %rax,-648(%rbp)
@@ -14595,14 +16465,14 @@ movq %rax,-696(%rbp)
 movq -696(%rbp),%rax
 movq %rax,-704(%rbp)
 .pushsection .rodata
-.L640:
+.L727:
 .byte 37
 .byte 114
 .byte 97
 .byte 120
 .byte 0
 .popsection
-leaq .L640(%rip),%rax
+leaq .L727(%rip),%rax
 movq %rax,-712(%rbp)
 movabsq $4,%rax
 movq %rax,-720(%rbp)
@@ -14623,7 +16493,7 @@ movq %rax,-752(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-760(%rbp)
 .pushsection .rodata
-.L641:
+.L728:
 .byte 108
 .byte 101
 .byte 97
@@ -14636,7 +16506,7 @@ movq %rax,-760(%rbp)
 .byte 10
 .byte 0
 .popsection
-leaq .L641(%rip),%rax
+leaq .L728(%rip),%rax
 movq %rax,-768(%rbp)
 movabsq $10,%rax
 movq %rax,-776(%rbp)
@@ -14658,17 +16528,17 @@ movq %rax,-816(%rbp)
 movq -816(%rbp),%rax
 leave
 ret
-jmp .L638
-.L637:
-.L638:
+jmp .L725
+.L724:
+.L725:
 movq -8(%rbp),%rax
 movq %rax,-824(%rbp)
 .pushsection .rodata
-.L642:
+.L729:
 .byte 123
 .byte 0
 .popsection
-leaq .L642(%rip),%rax
+leaq .L729(%rip),%rax
 movq %rax,-832(%rbp)
 movabsq $1,%rax
 movq %rax,-840(%rbp)
@@ -14687,7 +16557,7 @@ call f_native_is
 movq %rax,-872(%rbp)
 movq -872(%rbp),%rax
 testq %rax,%rax
-jz .L643
+jz .L730
 movq -8(%rbp),%rax
 movq %rax,-880(%rbp)
 movq -880(%rbp),%rdi
@@ -14698,19 +16568,19 @@ movq %rax,-896(%rbp)
 movq -896(%rbp),%rax
 leave
 ret
-jmp .L644
-.L643:
-.L644:
+jmp .L731
+.L730:
+.L731:
 movq -8(%rbp),%rax
 movq %rax,-904(%rbp)
 .pushsection .rodata
-.L645:
+.L732:
 .byte 108
 .byte 101
 .byte 116
 .byte 0
 .popsection
-leaq .L645(%rip),%rax
+leaq .L732(%rip),%rax
 movq %rax,-912(%rbp)
 movabsq $3,%rax
 movq %rax,-920(%rbp)
@@ -14732,13 +16602,13 @@ movq %rax,-960(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-968(%rbp)
 .pushsection .rodata
-.L646:
+.L733:
 .byte 118
 .byte 97
 .byte 114
 .byte 0
 .popsection
-leaq .L646(%rip),%rax
+leaq .L733(%rip),%rax
 movq %rax,-976(%rbp)
 movabsq $3,%rax
 movq %rax,-984(%rbp)
@@ -14761,7 +16631,7 @@ addq %rcx,%rax
 movq %rax,-1024(%rbp)
 movq -1024(%rbp),%rax
 testq %rax,%rax
-jz .L647
+jz .L734
 movq -8(%rbp),%rax
 movq %rax,-1032(%rbp)
 movq -1032(%rbp),%rdi
@@ -14777,11 +16647,11 @@ movq %rax,-1064(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-1072(%rbp)
 .pushsection .rodata
-.L649:
+.L736:
 .byte 58
 .byte 0
 .popsection
-leaq .L649(%rip),%rax
+leaq .L736(%rip),%rax
 movq %rax,-1080(%rbp)
 movabsq $1,%rax
 movq %rax,-1088(%rbp)
@@ -14800,7 +16670,7 @@ call f_native_eat
 movq %rax,-1120(%rbp)
 movq -1120(%rbp),%rax
 testq %rax,%rax
-jz .L650
+jz .L737
 movq -8(%rbp),%rax
 movq %rax,-1128(%rbp)
 movq -1128(%rbp),%rdi
@@ -14811,11 +16681,11 @@ movq %rax,-1144(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-1152(%rbp)
 .pushsection .rodata
-.L652:
+.L739:
 .byte 59
 .byte 0
 .popsection
-leaq .L652(%rip),%rax
+leaq .L739(%rip),%rax
 movq %rax,-1160(%rbp)
 movabsq $1,%rax
 movq %rax,-1168(%rbp)
@@ -14863,17 +16733,17 @@ movq %rax,-1288(%rbp)
 movq -1288(%rbp),%rax
 leave
 ret
-jmp .L651
-.L650:
-.L651:
+jmp .L738
+.L737:
+.L738:
 movq -8(%rbp),%rax
 movq %rax,-1296(%rbp)
 .pushsection .rodata
-.L653:
+.L740:
 .byte 61
 .byte 0
 .popsection
-leaq .L653(%rip),%rax
+leaq .L740(%rip),%rax
 movq %rax,-1304(%rbp)
 movabsq $1,%rax
 movq %rax,-1312(%rbp)
@@ -14905,11 +16775,11 @@ movq %rax,-1384(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-1392(%rbp)
 .pushsection .rodata
-.L654:
+.L741:
 .byte 59
 .byte 0
 .popsection
-leaq .L654(%rip),%rax
+leaq .L741(%rip),%rax
 movq %rax,-1400(%rbp)
 movabsq $1,%rax
 movq %rax,-1408(%rbp)
@@ -14934,14 +16804,14 @@ movq %rax,-1456(%rbp)
 movq -1456(%rbp),%rax
 movq %rax,-1464(%rbp)
 .pushsection .rodata
-.L655:
+.L742:
 .byte 37
 .byte 114
 .byte 97
 .byte 120
 .byte 0
 .popsection
-leaq .L655(%rip),%rax
+leaq .L742(%rip),%rax
 movq %rax,-1472(%rbp)
 movabsq $4,%rax
 movq %rax,-1480(%rbp)
@@ -14988,13 +16858,13 @@ movq %rax,-1592(%rbp)
 movq -1592(%rbp),%rax
 leave
 ret
-jmp .L648
-.L647:
-.L648:
+jmp .L735
+.L734:
+.L735:
 movq -8(%rbp),%rax
 movq %rax,-1600(%rbp)
 .pushsection .rodata
-.L656:
+.L743:
 .byte 119
 .byte 104
 .byte 105
@@ -15002,7 +16872,7 @@ movq %rax,-1600(%rbp)
 .byte 101
 .byte 0
 .popsection
-leaq .L656(%rip),%rax
+leaq .L743(%rip),%rax
 movq %rax,-1608(%rbp)
 movabsq $5,%rax
 movq %rax,-1616(%rbp)
@@ -15021,7 +16891,7 @@ call f_native_eat
 movq %rax,-1648(%rbp)
 movq -1648(%rbp),%rax
 testq %rax,%rax
-jz .L657
+jz .L744
 movq -8(%rbp),%rax
 movq %rax,-1656(%rbp)
 movq -1656(%rbp),%rdi
@@ -15100,14 +16970,14 @@ movq %rax,-1872(%rbp)
 movq -1872(%rbp),%rax
 movq %rax,-1880(%rbp)
 .pushsection .rodata
-.L659:
+.L746:
 .byte 37
 .byte 114
 .byte 97
 .byte 120
 .byte 0
 .popsection
-leaq .L659(%rip),%rax
+leaq .L746(%rip),%rax
 movq %rax,-1888(%rbp)
 movabsq $4,%rax
 movq %rax,-1896(%rbp)
@@ -15128,7 +16998,7 @@ movq %rax,-1928(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-1936(%rbp)
 .pushsection .rodata
-.L660:
+.L747:
 .byte 116
 .byte 101
 .byte 115
@@ -15147,7 +17017,7 @@ movq %rax,-1936(%rbp)
 .byte 10
 .byte 0
 .popsection
-leaq .L660(%rip),%rax
+leaq .L747(%rip),%rax
 movq %rax,-1944(%rbp)
 movabsq $16,%rax
 movq %rax,-1952(%rbp)
@@ -15167,12 +17037,12 @@ movq %rax,-1984(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-1992(%rbp)
 .pushsection .rodata
-.L661:
+.L748:
 .byte 106
 .byte 122
 .byte 0
 .popsection
-leaq .L661(%rip),%rax
+leaq .L748(%rip),%rax
 movq %rax,-2000(%rbp)
 movabsq $2,%rax
 movq %rax,-2008(%rbp)
@@ -15200,13 +17070,13 @@ movq %rax,-2064(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-2072(%rbp)
 .pushsection .rodata
-.L662:
+.L749:
 .byte 106
 .byte 109
 .byte 112
 .byte 0
 .popsection
-leaq .L662(%rip),%rax
+leaq .L749(%rip),%rax
 movq %rax,-2080(%rbp)
 movabsq $3,%rax
 movq %rax,-2088(%rbp)
@@ -15259,19 +17129,19 @@ movq %rax,-2208(%rbp)
 movq -2208(%rbp),%rax
 leave
 ret
-jmp .L658
-.L657:
-.L658:
+jmp .L745
+.L744:
+.L745:
 movq -8(%rbp),%rax
 movq %rax,-2216(%rbp)
 .pushsection .rodata
-.L663:
+.L750:
 .byte 102
 .byte 111
 .byte 114
 .byte 0
 .popsection
-leaq .L663(%rip),%rax
+leaq .L750(%rip),%rax
 movq %rax,-2224(%rbp)
 movabsq $3,%rax
 movq %rax,-2232(%rbp)
@@ -15290,7 +17160,7 @@ call f_native_eat
 movq %rax,-2264(%rbp)
 movq -2264(%rbp),%rax
 testq %rax,%rax
-jz .L664
+jz .L751
 movq -8(%rbp),%rax
 movq %rax,-2272(%rbp)
 movq -2272(%rbp),%rdi
@@ -15301,12 +17171,12 @@ movq %rax,-2288(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-2296(%rbp)
 .pushsection .rodata
-.L666:
+.L753:
 .byte 105
 .byte 110
 .byte 0
 .popsection
-leaq .L666(%rip),%rax
+leaq .L753(%rip),%rax
 movq %rax,-2304(%rbp)
 movabsq $2,%rax
 movq %rax,-2312(%rbp)
@@ -15343,14 +17213,14 @@ movq %rax,-2400(%rbp)
 movq -2400(%rbp),%rax
 movq %rax,-2408(%rbp)
 .pushsection .rodata
-.L667:
+.L754:
 .byte 37
 .byte 114
 .byte 97
 .byte 120
 .byte 0
 .popsection
-leaq .L667(%rip),%rax
+leaq .L754(%rip),%rax
 movq %rax,-2416(%rbp)
 movabsq $4,%rax
 movq %rax,-2424(%rbp)
@@ -15457,14 +17327,14 @@ movq %rax,-2720(%rbp)
 movq -2480(%rbp),%rax
 movq %rax,-2728(%rbp)
 .pushsection .rodata
-.L668:
+.L755:
 .byte 37
 .byte 114
 .byte 99
 .byte 120
 .byte 0
 .popsection
-leaq .L668(%rip),%rax
+leaq .L755(%rip),%rax
 movq %rax,-2736(%rbp)
 movabsq $4,%rax
 movq %rax,-2744(%rbp)
@@ -15487,14 +17357,14 @@ movq %rax,-2784(%rbp)
 movq -2520(%rbp),%rax
 movq %rax,-2792(%rbp)
 .pushsection .rodata
-.L669:
+.L756:
 .byte 37
 .byte 114
 .byte 97
 .byte 120
 .byte 0
 .popsection
-leaq .L669(%rip),%rax
+leaq .L756(%rip),%rax
 movq %rax,-2800(%rbp)
 movabsq $4,%rax
 movq %rax,-2808(%rbp)
@@ -15515,7 +17385,7 @@ movq %rax,-2840(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-2848(%rbp)
 .pushsection .rodata
-.L670:
+.L757:
 .byte 99
 .byte 109
 .byte 112
@@ -15533,7 +17403,7 @@ movq %rax,-2848(%rbp)
 .byte 10
 .byte 0
 .popsection
-leaq .L670(%rip),%rax
+leaq .L757(%rip),%rax
 movq %rax,-2856(%rbp)
 movabsq $15,%rax
 movq %rax,-2864(%rbp)
@@ -15553,13 +17423,13 @@ movq %rax,-2896(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-2904(%rbp)
 .pushsection .rodata
-.L671:
+.L758:
 .byte 106
 .byte 97
 .byte 101
 .byte 0
 .popsection
-leaq .L671(%rip),%rax
+leaq .L758(%rip),%rax
 movq %rax,-2912(%rbp)
 movabsq $3,%rax
 movq %rax,-2920(%rbp)
@@ -15630,7 +17500,7 @@ movq %rax,-3104(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-3112(%rbp)
 .pushsection .rodata
-.L672:
+.L759:
 .byte 105
 .byte 110
 .byte 99
@@ -15638,7 +17508,7 @@ movq %rax,-3112(%rbp)
 .byte 32
 .byte 0
 .popsection
-leaq .L672(%rip),%rax
+leaq .L759(%rip),%rax
 movq %rax,-3120(%rbp)
 movabsq $5,%rax
 movq %rax,-3128(%rbp)
@@ -15680,13 +17550,13 @@ movq %rax,-3224(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-3232(%rbp)
 .pushsection .rodata
-.L673:
+.L760:
 .byte 106
 .byte 109
 .byte 112
 .byte 0
 .popsection
-leaq .L673(%rip),%rax
+leaq .L760(%rip),%rax
 movq %rax,-3240(%rbp)
 movabsq $3,%rax
 movq %rax,-3248(%rbp)
@@ -15739,13 +17609,13 @@ movq %rax,-3368(%rbp)
 movq -3368(%rbp),%rax
 leave
 ret
-jmp .L665
-.L664:
-.L665:
+jmp .L752
+.L751:
+.L752:
 movq -8(%rbp),%rax
 movq %rax,-3376(%rbp)
 .pushsection .rodata
-.L674:
+.L761:
 .byte 109
 .byte 97
 .byte 116
@@ -15753,7 +17623,7 @@ movq %rax,-3376(%rbp)
 .byte 104
 .byte 0
 .popsection
-leaq .L674(%rip),%rax
+leaq .L761(%rip),%rax
 movq %rax,-3384(%rbp)
 movabsq $5,%rax
 movq %rax,-3392(%rbp)
@@ -15772,7 +17642,7 @@ call f_native_eat
 movq %rax,-3424(%rbp)
 movq -3424(%rbp),%rax
 testq %rax,%rax
-jz .L675
+jz .L762
 movq -8(%rbp),%rax
 movq %rax,-3432(%rbp)
 movabsq $0,%rax
@@ -15843,11 +17713,11 @@ movq %rax,-3640(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-3648(%rbp)
 .pushsection .rodata
-.L677:
+.L764:
 .byte 123
 .byte 0
 .popsection
-leaq .L677(%rip),%rax
+leaq .L764(%rip),%rax
 movq %rax,-3656(%rbp)
 movabsq $1,%rax
 movq %rax,-3664(%rbp)
@@ -15864,15 +17734,15 @@ movq -3648(%rbp),%rdi
 movq -3688(%rbp),%rsi
 call f_native_expect
 movq %rax,-3696(%rbp)
-.L678:
+.L765:
 movq -8(%rbp),%rax
 movq %rax,-3704(%rbp)
 .pushsection .rodata
-.L680:
+.L767:
 .byte 125
 .byte 0
 .popsection
-leaq .L680(%rip),%rax
+leaq .L767(%rip),%rax
 movq %rax,-3712(%rbp)
 movabsq $1,%rax
 movq %rax,-3720(%rbp)
@@ -15901,7 +17771,7 @@ movzbq %al,%rax
 movq %rax,-3776(%rbp)
 movq -3776(%rbp),%rax
 testq %rax,%rax
-jz .L679
+jz .L766
 movq -8(%rbp),%rax
 movq %rax,-3784(%rbp)
 movq -3784(%rbp),%rdi
@@ -15950,14 +17820,14 @@ movq %rax,-3920(%rbp)
 movq -3616(%rbp),%rax
 movq %rax,-3928(%rbp)
 .pushsection .rodata
-.L681:
+.L768:
 .byte 37
 .byte 114
 .byte 97
 .byte 120
 .byte 0
 .popsection
-leaq .L681(%rip),%rax
+leaq .L768(%rip),%rax
 movq %rax,-3936(%rbp)
 movabsq $4,%rax
 movq %rax,-3944(%rbp)
@@ -15978,7 +17848,7 @@ movq %rax,-3976(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-3984(%rbp)
 .pushsection .rodata
-.L682:
+.L769:
 .byte 99
 .byte 109
 .byte 112
@@ -15987,7 +17857,7 @@ movq %rax,-3984(%rbp)
 .byte 36
 .byte 0
 .popsection
-leaq .L682(%rip),%rax
+leaq .L769(%rip),%rax
 movq %rax,-3992(%rbp)
 movabsq $6,%rax
 movq %rax,-4000(%rbp)
@@ -16015,7 +17885,7 @@ movq %rax,-4056(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-4064(%rbp)
 .pushsection .rodata
-.L683:
+.L770:
 .byte 44
 .byte 37
 .byte 114
@@ -16024,7 +17894,7 @@ movq %rax,-4064(%rbp)
 .byte 10
 .byte 0
 .popsection
-leaq .L683(%rip),%rax
+leaq .L770(%rip),%rax
 movq %rax,-4072(%rbp)
 movabsq $6,%rax
 movq %rax,-4080(%rbp)
@@ -16044,13 +17914,13 @@ movq %rax,-4112(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-4120(%rbp)
 .pushsection .rodata
-.L684:
+.L771:
 .byte 106
 .byte 110
 .byte 101
 .byte 0
 .popsection
-leaq .L684(%rip),%rax
+leaq .L771(%rip),%rax
 movq %rax,-4128(%rbp)
 movabsq $3,%rax
 movq %rax,-4136(%rbp)
@@ -16084,11 +17954,11 @@ movq %rax,-4208(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-4216(%rbp)
 .pushsection .rodata
-.L685:
+.L772:
 .byte 40
 .byte 0
 .popsection
-leaq .L685(%rip),%rax
+leaq .L772(%rip),%rax
 movq %rax,-4224(%rbp)
 movabsq $1,%rax
 movq %rax,-4232(%rbp)
@@ -16107,15 +17977,15 @@ call f_native_eat
 movq %rax,-4264(%rbp)
 movq -4264(%rbp),%rax
 testq %rax,%rax
-jz .L686
+jz .L773
 movq -8(%rbp),%rax
 movq %rax,-4272(%rbp)
 .pushsection .rodata
-.L688:
+.L775:
 .byte 95
 .byte 0
 .popsection
-leaq .L688(%rip),%rax
+leaq .L775(%rip),%rax
 movq %rax,-4280(%rbp)
 movabsq $1,%rax
 movq %rax,-4288(%rbp)
@@ -16144,7 +18014,7 @@ movzbq %al,%rax
 movq %rax,-4344(%rbp)
 movq -4344(%rbp),%rax
 testq %rax,%rax
-jz .L689
+jz .L776
 movq -8(%rbp),%rax
 movq %rax,-4352(%rbp)
 movq -4352(%rbp),%rdi
@@ -16186,17 +18056,17 @@ movq -4456(%rbp),%rdx
 movq -4464(%rbp),%rcx
 call f_native_bind
 movq %rax,-4472(%rbp)
-jmp .L690
-.L689:
-.L690:
+jmp .L777
+.L776:
+.L777:
 movq -8(%rbp),%rax
 movq %rax,-4480(%rbp)
 .pushsection .rodata
-.L691:
+.L778:
 .byte 41
 .byte 0
 .popsection
-leaq .L691(%rip),%rax
+leaq .L778(%rip),%rax
 movq %rax,-4488(%rbp)
 movabsq $1,%rax
 movq %rax,-4496(%rbp)
@@ -16213,18 +18083,18 @@ movq -4480(%rbp),%rdi
 movq -4520(%rbp),%rsi
 call f_native_expect
 movq %rax,-4528(%rbp)
-jmp .L687
-.L686:
-.L687:
+jmp .L774
+.L773:
+.L774:
 movq -8(%rbp),%rax
 movq %rax,-4536(%rbp)
 .pushsection .rodata
-.L692:
+.L779:
 .byte 61
 .byte 62
 .byte 0
 .popsection
-leaq .L692(%rip),%rax
+leaq .L779(%rip),%rax
 movq %rax,-4544(%rbp)
 movabsq $2,%rax
 movq %rax,-4552(%rbp)
@@ -16257,13 +18127,13 @@ movq %rax,-4624(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-4632(%rbp)
 .pushsection .rodata
-.L693:
+.L780:
 .byte 106
 .byte 109
 .byte 112
 .byte 0
 .popsection
-leaq .L693(%rip),%rax
+leaq .L780(%rip),%rax
 movq %rax,-4640(%rbp)
 movabsq $3,%rax
 movq %rax,-4648(%rbp)
@@ -16294,11 +18164,11 @@ movq %rax,-4712(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-4720(%rbp)
 .pushsection .rodata
-.L694:
+.L781:
 .byte 44
 .byte 0
 .popsection
-leaq .L694(%rip),%rax
+leaq .L781(%rip),%rax
 movq %rax,-4728(%rbp)
 movabsq $1,%rax
 movq %rax,-4736(%rbp)
@@ -16327,15 +18197,15 @@ movzbq %al,%rax
 movq %rax,-4792(%rbp)
 movq -4792(%rbp),%rax
 testq %rax,%rax
-jz .L695
+jz .L782
 movq -8(%rbp),%rax
 movq %rax,-4800(%rbp)
 .pushsection .rodata
-.L697:
+.L784:
 .byte 125
 .byte 0
 .popsection
-leaq .L697(%rip),%rax
+leaq .L784(%rip),%rax
 movq %rax,-4808(%rbp)
 movabsq $1,%rax
 movq %rax,-4816(%rbp)
@@ -16352,36 +18222,35 @@ movq -4800(%rbp),%rdi
 movq -4840(%rbp),%rsi
 call f_native_expect
 movq %rax,-4848(%rbp)
-jmp .L679
-jmp .L696
-.L695:
-.L696:
-jmp .L678
-.L679:
+jmp .L766
+jmp .L783
+.L782:
+.L783:
+jmp .L765
+.L766:
 movq -8(%rbp),%rax
 movq %rax,-4856(%rbp)
 .pushsection .rodata
-.L698:
+.L785:
 .byte 99
 .byte 97
 .byte 108
 .byte 108
 .byte 32
+.byte 114
+.byte 116
+.byte 95
 .byte 97
 .byte 98
 .byte 111
 .byte 114
 .byte 116
-.byte 64
-.byte 80
-.byte 76
-.byte 84
 .byte 10
 .byte 0
 .popsection
-leaq .L698(%rip),%rax
+leaq .L785(%rip),%rax
 movq %rax,-4864(%rbp)
-movabsq $15,%rax
+movabsq $14,%rax
 movq %rax,-4872(%rbp)
 movq -4864(%rbp),%rdi
 movq -4872(%rbp),%rsi
@@ -16409,18 +18278,18 @@ movq %rax,-4936(%rbp)
 movq -4936(%rbp),%rax
 leave
 ret
-jmp .L676
-.L675:
-.L676:
+jmp .L763
+.L762:
+.L763:
 movq -8(%rbp),%rax
 movq %rax,-4944(%rbp)
 .pushsection .rodata
-.L699:
+.L786:
 .byte 105
 .byte 102
 .byte 0
 .popsection
-leaq .L699(%rip),%rax
+leaq .L786(%rip),%rax
 movq %rax,-4952(%rbp)
 movabsq $2,%rax
 movq %rax,-4960(%rbp)
@@ -16439,7 +18308,7 @@ call f_native_eat
 movq %rax,-4992(%rbp)
 movq -4992(%rbp),%rax
 testq %rax,%rax
-jz .L700
+jz .L787
 movq -8(%rbp),%rax
 movq %rax,-5000(%rbp)
 movabsq $0,%rax
@@ -16460,14 +18329,14 @@ movq %rax,-5048(%rbp)
 movq -5048(%rbp),%rax
 movq %rax,-5056(%rbp)
 .pushsection .rodata
-.L702:
+.L789:
 .byte 37
 .byte 114
 .byte 97
 .byte 120
 .byte 0
 .popsection
-leaq .L702(%rip),%rax
+leaq .L789(%rip),%rax
 movq %rax,-5064(%rbp)
 movabsq $4,%rax
 movq %rax,-5072(%rbp)
@@ -16502,7 +18371,7 @@ movq %rax,-5152(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-5160(%rbp)
 .pushsection .rodata
-.L703:
+.L790:
 .byte 116
 .byte 101
 .byte 115
@@ -16521,7 +18390,7 @@ movq %rax,-5160(%rbp)
 .byte 10
 .byte 0
 .popsection
-leaq .L703(%rip),%rax
+leaq .L790(%rip),%rax
 movq %rax,-5168(%rbp)
 movabsq $16,%rax
 movq %rax,-5176(%rbp)
@@ -16541,12 +18410,12 @@ movq %rax,-5208(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-5216(%rbp)
 .pushsection .rodata
-.L704:
+.L791:
 .byte 106
 .byte 122
 .byte 0
 .popsection
-leaq .L704(%rip),%rax
+leaq .L791(%rip),%rax
 movq %rax,-5224(%rbp)
 movabsq $2,%rax
 movq %rax,-5232(%rbp)
@@ -16574,13 +18443,13 @@ movq %rax,-5288(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-5296(%rbp)
 .pushsection .rodata
-.L705:
+.L792:
 .byte 106
 .byte 109
 .byte 112
 .byte 0
 .popsection
-leaq .L705(%rip),%rax
+leaq .L792(%rip),%rax
 movq %rax,-5304(%rbp)
 movabsq $3,%rax
 movq %rax,-5312(%rbp)
@@ -16611,14 +18480,14 @@ movq %rax,-5376(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-5384(%rbp)
 .pushsection .rodata
-.L706:
+.L793:
 .byte 101
 .byte 108
 .byte 115
 .byte 101
 .byte 0
 .popsection
-leaq .L706(%rip),%rax
+leaq .L793(%rip),%rax
 movq %rax,-5392(%rbp)
 movabsq $4,%rax
 movq %rax,-5400(%rbp)
@@ -16637,15 +18506,15 @@ call f_native_eat
 movq %rax,-5432(%rbp)
 movq -5432(%rbp),%rax
 testq %rax,%rax
-jz .L707
+jz .L794
 movq -8(%rbp),%rax
 movq %rax,-5440(%rbp)
 movq -5440(%rbp),%rdi
 call f_native_block
 movq %rax,-5448(%rbp)
-jmp .L708
-.L707:
-.L708:
+jmp .L795
+.L794:
+.L795:
 movq -8(%rbp),%rax
 movq %rax,-5456(%rbp)
 movq -5152(%rbp),%rax
@@ -16659,20 +18528,20 @@ movq %rax,-5480(%rbp)
 movq -5480(%rbp),%rax
 leave
 ret
-jmp .L701
-.L700:
-.L701:
+jmp .L788
+.L787:
+.L788:
 movq -8(%rbp),%rax
 movq %rax,-5488(%rbp)
 .pushsection .rodata
-.L709:
+.L796:
 .byte 100
 .byte 114
 .byte 111
 .byte 112
 .byte 0
 .popsection
-leaq .L709(%rip),%rax
+leaq .L796(%rip),%rax
 movq %rax,-5496(%rbp)
 movabsq $4,%rax
 movq %rax,-5504(%rbp)
@@ -16691,15 +18560,15 @@ call f_native_eat
 movq %rax,-5536(%rbp)
 movq -5536(%rbp),%rax
 testq %rax,%rax
-jz .L710
+jz .L797
 movq -8(%rbp),%rax
 movq %rax,-5544(%rbp)
 .pushsection .rodata
-.L712:
+.L799:
 .byte 40
 .byte 0
 .popsection
-leaq .L712(%rip),%rax
+leaq .L799(%rip),%rax
 movq %rax,-5552(%rbp)
 movabsq $1,%rax
 movq %rax,-5560(%rbp)
@@ -16724,11 +18593,11 @@ movq %rax,-5608(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-5616(%rbp)
 .pushsection .rodata
-.L713:
+.L800:
 .byte 41
 .byte 0
 .popsection
-leaq .L713(%rip),%rax
+leaq .L800(%rip),%rax
 movq %rax,-5624(%rbp)
 movabsq $1,%rax
 movq %rax,-5632(%rbp)
@@ -16748,11 +18617,11 @@ movq %rax,-5664(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-5672(%rbp)
 .pushsection .rodata
-.L714:
+.L801:
 .byte 59
 .byte 0
 .popsection
-leaq .L714(%rip),%rax
+leaq .L801(%rip),%rax
 movq %rax,-5680(%rbp)
 movabsq $1,%rax
 movq %rax,-5688(%rbp)
@@ -16774,13 +18643,13 @@ movq %rax,-5728(%rbp)
 movq -5728(%rbp),%rax
 leave
 ret
-jmp .L711
-.L710:
-.L711:
+jmp .L798
+.L797:
+.L798:
 movq -8(%rbp),%rax
 movq %rax,-5736(%rbp)
 .pushsection .rodata
-.L715:
+.L802:
 .byte 97
 .byte 112
 .byte 112
@@ -16794,7 +18663,7 @@ movq %rax,-5736(%rbp)
 .byte 116
 .byte 0
 .popsection
-leaq .L715(%rip),%rax
+leaq .L802(%rip),%rax
 movq %rax,-5744(%rbp)
 movabsq $11,%rax
 movq %rax,-5752(%rbp)
@@ -16813,11 +18682,11 @@ call f_native_eat
 movq %rax,-5784(%rbp)
 movq -5784(%rbp),%rax
 testq %rax,%rax
-jz .L716
+jz .L803
 movq -8(%rbp),%rax
 movq %rax,-5792(%rbp)
 .pushsection .rodata
-.L718:
+.L805:
 .byte 114
 .byte 116
 .byte 95
@@ -16829,7 +18698,7 @@ movq %rax,-5792(%rbp)
 .byte 100
 .byte 0
 .popsection
-leaq .L718(%rip),%rax
+leaq .L805(%rip),%rax
 movq %rax,-5800(%rbp)
 movabsq $9,%rax
 movq %rax,-5808(%rbp)
@@ -16856,20 +18725,20 @@ movq %rax,-5864(%rbp)
 movq -5864(%rbp),%rax
 leave
 ret
-jmp .L717
-.L716:
-.L717:
+jmp .L804
+.L803:
+.L804:
 movq -8(%rbp),%rax
 movq %rax,-5872(%rbp)
 .pushsection .rodata
-.L719:
+.L806:
 .byte 112
 .byte 117
 .byte 115
 .byte 104
 .byte 0
 .popsection
-leaq .L719(%rip),%rax
+leaq .L806(%rip),%rax
 movq %rax,-5880(%rbp)
 movabsq $4,%rax
 movq %rax,-5888(%rbp)
@@ -16888,11 +18757,11 @@ call f_native_eat
 movq %rax,-5920(%rbp)
 movq -5920(%rbp),%rax
 testq %rax,%rax
-jz .L720
+jz .L807
 movq -8(%rbp),%rax
 movq %rax,-5928(%rbp)
 .pushsection .rodata
-.L722:
+.L809:
 .byte 114
 .byte 116
 .byte 95
@@ -16903,7 +18772,7 @@ movq %rax,-5928(%rbp)
 .byte 98
 .byte 0
 .popsection
-leaq .L722(%rip),%rax
+leaq .L809(%rip),%rax
 movq %rax,-5936(%rbp)
 movabsq $8,%rax
 movq %rax,-5944(%rbp)
@@ -16930,13 +18799,13 @@ movq %rax,-6000(%rbp)
 movq -6000(%rbp),%rax
 leave
 ret
-jmp .L721
-.L720:
-.L721:
+jmp .L808
+.L807:
+.L808:
 movq -8(%rbp),%rax
 movq %rax,-6008(%rbp)
 .pushsection .rodata
-.L723:
+.L810:
 .byte 119
 .byte 114
 .byte 105
@@ -16944,7 +18813,7 @@ movq %rax,-6008(%rbp)
 .byte 101
 .byte 0
 .popsection
-leaq .L723(%rip),%rax
+leaq .L810(%rip),%rax
 movq %rax,-6016(%rbp)
 movabsq $5,%rax
 movq %rax,-6024(%rbp)
@@ -16963,11 +18832,11 @@ call f_native_eat
 movq %rax,-6056(%rbp)
 movq -6056(%rbp),%rax
 testq %rax,%rax
-jz .L724
+jz .L811
 movq -8(%rbp),%rax
 movq %rax,-6064(%rbp)
 .pushsection .rodata
-.L726:
+.L813:
 .byte 114
 .byte 116
 .byte 95
@@ -16978,7 +18847,7 @@ movq %rax,-6064(%rbp)
 .byte 101
 .byte 0
 .popsection
-leaq .L726(%rip),%rax
+leaq .L813(%rip),%rax
 movq %rax,-6072(%rbp)
 movabsq $8,%rax
 movq %rax,-6080(%rbp)
@@ -17005,13 +18874,13 @@ movq %rax,-6136(%rbp)
 movq -6136(%rbp),%rax
 leave
 ret
-jmp .L725
-.L724:
-.L725:
+jmp .L812
+.L811:
+.L812:
 movq -8(%rbp),%rax
 movq %rax,-6144(%rbp)
 .pushsection .rodata
-.L727:
+.L814:
 .byte 97
 .byte 115
 .byte 115
@@ -17020,7 +18889,7 @@ movq %rax,-6144(%rbp)
 .byte 116
 .byte 0
 .popsection
-leaq .L727(%rip),%rax
+leaq .L814(%rip),%rax
 movq %rax,-6152(%rbp)
 movabsq $6,%rax
 movq %rax,-6160(%rbp)
@@ -17039,15 +18908,15 @@ call f_native_eat
 movq %rax,-6192(%rbp)
 movq -6192(%rbp),%rax
 testq %rax,%rax
-jz .L728
+jz .L815
 movq -8(%rbp),%rax
 movq %rax,-6200(%rbp)
 .pushsection .rodata
-.L730:
+.L817:
 .byte 40
 .byte 0
 .popsection
-leaq .L730(%rip),%rax
+leaq .L817(%rip),%rax
 movq %rax,-6208(%rbp)
 movabsq $1,%rax
 movq %rax,-6216(%rbp)
@@ -17079,11 +18948,11 @@ movq %rax,-6288(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-6296(%rbp)
 .pushsection .rodata
-.L731:
+.L818:
 .byte 41
 .byte 0
 .popsection
-leaq .L731(%rip),%rax
+leaq .L818(%rip),%rax
 movq %rax,-6304(%rbp)
 movabsq $1,%rax
 movq %rax,-6312(%rbp)
@@ -17103,11 +18972,11 @@ movq %rax,-6344(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-6352(%rbp)
 .pushsection .rodata
-.L732:
+.L819:
 .byte 59
 .byte 0
 .popsection
-leaq .L732(%rip),%rax
+leaq .L819(%rip),%rax
 movq %rax,-6360(%rbp)
 movabsq $1,%rax
 movq %rax,-6368(%rbp)
@@ -17132,14 +19001,14 @@ movq %rax,-6416(%rbp)
 movq -6416(%rbp),%rax
 movq %rax,-6424(%rbp)
 .pushsection .rodata
-.L733:
+.L820:
 .byte 37
 .byte 114
 .byte 97
 .byte 120
 .byte 0
 .popsection
-leaq .L733(%rip),%rax
+leaq .L820(%rip),%rax
 movq %rax,-6432(%rbp)
 movabsq $4,%rax
 movq %rax,-6440(%rbp)
@@ -17160,7 +19029,7 @@ movq %rax,-6472(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-6480(%rbp)
 .pushsection .rodata
-.L734:
+.L821:
 .byte 116
 .byte 101
 .byte 115
@@ -17179,7 +19048,7 @@ movq %rax,-6480(%rbp)
 .byte 10
 .byte 0
 .popsection
-leaq .L734(%rip),%rax
+leaq .L821(%rip),%rax
 movq %rax,-6488(%rbp)
 movabsq $16,%rax
 movq %rax,-6496(%rbp)
@@ -17206,13 +19075,13 @@ movq %rax,-6552(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-6560(%rbp)
 .pushsection .rodata
-.L735:
+.L822:
 .byte 106
 .byte 110
 .byte 122
 .byte 0
 .popsection
-leaq .L735(%rip),%rax
+leaq .L822(%rip),%rax
 movq %rax,-6568(%rbp)
 movabsq $3,%rax
 movq %rax,-6576(%rbp)
@@ -17235,27 +19104,26 @@ movq %rax,-6616(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-6624(%rbp)
 .pushsection .rodata
-.L736:
+.L823:
 .byte 99
 .byte 97
 .byte 108
 .byte 108
 .byte 32
+.byte 114
+.byte 116
+.byte 95
 .byte 97
 .byte 98
 .byte 111
 .byte 114
 .byte 116
-.byte 64
-.byte 80
-.byte 76
-.byte 84
 .byte 10
 .byte 0
 .popsection
-leaq .L736(%rip),%rax
+leaq .L823(%rip),%rax
 movq %rax,-6632(%rbp)
-movabsq $15,%rax
+movabsq $14,%rax
 movq %rax,-6640(%rbp)
 movq -6632(%rbp),%rdi
 movq -6640(%rbp),%rsi
@@ -17283,9 +19151,9 @@ movq %rax,-6704(%rbp)
 movq -6704(%rbp),%rax
 leave
 ret
-jmp .L729
-.L728:
-.L729:
+jmp .L816
+.L815:
+.L816:
 movq -8(%rbp),%rax
 movq %rax,-6712(%rbp)
 movq -6712(%rbp),%rdi
@@ -17293,7 +19161,7 @@ call f_native_assignment_ahead
 movq %rax,-6720(%rbp)
 movq -6720(%rbp),%rax
 testq %rax,%rax
-jz .L737
+jz .L824
 movq -8(%rbp),%rax
 movq %rax,-6728(%rbp)
 movq -6728(%rbp),%rdi
@@ -17326,11 +19194,11 @@ movzbq %al,%rax
 movq %rax,-6808(%rbp)
 movq -6808(%rbp),%rax
 testq %rax,%rax
-jz .L739
+jz .L826
 movq -8(%rbp),%rax
 movq %rax,-6816(%rbp)
 .pushsection .rodata
-.L741:
+.L828:
 .byte 117
 .byte 110
 .byte 100
@@ -17353,7 +19221,7 @@ movq %rax,-6816(%rbp)
 .byte 116
 .byte 0
 .popsection
-leaq .L741(%rip),%rax
+leaq .L828(%rip),%rax
 movq %rax,-6824(%rbp)
 movabsq $20,%rax
 movq %rax,-6832(%rbp)
@@ -17370,9 +19238,9 @@ movq -6816(%rbp),%rdi
 movq -6856(%rbp),%rsi
 call f_native_fail
 movq %rax,-6864(%rbp)
-jmp .L740
-.L739:
-.L740:
+jmp .L827
+.L826:
+.L827:
 movq -8(%rbp),%rax
 movq %rax,-6872(%rbp)
 movq -6784(%rbp),%rax
@@ -17432,7 +19300,7 @@ movzbq %al,%rax
 movq %rax,-7040(%rbp)
 movq -7040(%rbp),%rax
 testq %rax,%rax
-jz .L742
+jz .L829
 movq -8(%rbp),%rax
 movq %rax,-7048(%rbp)
 movq -6920(%rbp),%rax
@@ -17460,17 +19328,17 @@ movabsq $1,%rax
 movq %rax,-7112(%rbp)
 movq -7112(%rbp),%rax
 movq %rax,-7000(%rbp)
-jmp .L743
-.L742:
-.L743:
+jmp .L830
+.L829:
+.L830:
 movq -8(%rbp),%rax
 movq %rax,-7120(%rbp)
 .pushsection .rodata
-.L744:
+.L831:
 .byte 61
 .byte 0
 .popsection
-leaq .L744(%rip),%rax
+leaq .L831(%rip),%rax
 movq %rax,-7128(%rbp)
 movabsq $1,%rax
 movq %rax,-7136(%rbp)
@@ -17502,11 +19370,11 @@ movq %rax,-7208(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-7216(%rbp)
 .pushsection .rodata
-.L745:
+.L832:
 .byte 59
 .byte 0
 .popsection
-leaq .L745(%rip),%rax
+leaq .L832(%rip),%rax
 movq %rax,-7224(%rbp)
 movabsq $1,%rax
 movq %rax,-7232(%rbp)
@@ -17531,14 +19399,14 @@ movq %rax,-7280(%rbp)
 movq -7280(%rbp),%rax
 movq %rax,-7288(%rbp)
 .pushsection .rodata
-.L746:
+.L833:
 .byte 37
 .byte 114
 .byte 97
 .byte 120
 .byte 0
 .popsection
-leaq .L746(%rip),%rax
+leaq .L833(%rip),%rax
 movq %rax,-7296(%rbp)
 movabsq $4,%rax
 movq %rax,-7304(%rbp)
@@ -17558,20 +19426,20 @@ call f_native_get
 movq %rax,-7336(%rbp)
 movq -7000(%rbp),%rax
 testq %rax,%rax
-jz .L747
+jz .L834
 movq -8(%rbp),%rax
 movq %rax,-7344(%rbp)
 movq -6984(%rbp),%rax
 movq %rax,-7352(%rbp)
 .pushsection .rodata
-.L749:
+.L836:
 .byte 37
 .byte 114
 .byte 99
 .byte 120
 .byte 0
 .popsection
-leaq .L749(%rip),%rax
+leaq .L836(%rip),%rax
 movq %rax,-7360(%rbp)
 movabsq $4,%rax
 movq %rax,-7368(%rbp)
@@ -17592,7 +19460,7 @@ movq %rax,-7400(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-7408(%rbp)
 .pushsection .rodata
-.L750:
+.L837:
 .byte 109
 .byte 111
 .byte 118
@@ -17612,7 +19480,7 @@ movq %rax,-7408(%rbp)
 .byte 10
 .byte 0
 .popsection
-leaq .L750(%rip),%rax
+leaq .L837(%rip),%rax
 movq %rax,-7416(%rbp)
 movabsq $17,%rax
 movq %rax,-7424(%rbp)
@@ -17629,12 +19497,12 @@ movq -7408(%rbp),%rdi
 movq -7448(%rbp),%rsi
 call f_native_o
 movq %rax,-7456(%rbp)
-jmp .L748
-.L747:
+jmp .L835
+.L834:
 movq -8(%rbp),%rax
 movq %rax,-7464(%rbp)
 .pushsection .rodata
-.L751:
+.L838:
 .byte 109
 .byte 111
 .byte 118
@@ -17647,7 +19515,7 @@ movq %rax,-7464(%rbp)
 .byte 44
 .byte 0
 .popsection
-leaq .L751(%rip),%rax
+leaq .L838(%rip),%rax
 movq %rax,-7472(%rbp)
 movabsq $10,%rax
 movq %rax,-7480(%rbp)
@@ -17686,15 +19554,15 @@ call rt_push
 movq %rax,-7568(%rbp)
 movabsq $0,%rax
 movq %rax,-7576(%rbp)
-.L748:
+.L835:
 movabsq $0,%rax
 movq %rax,-7584(%rbp)
 movq -7584(%rbp),%rax
 leave
 ret
-jmp .L738
-.L737:
-.L738:
+jmp .L825
+.L824:
+.L825:
 movq -8(%rbp),%rax
 movq %rax,-7592(%rbp)
 movabsq $0,%rax
@@ -17708,11 +19576,11 @@ movq %rax,-7616(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-7624(%rbp)
 .pushsection .rodata
-.L752:
+.L839:
 .byte 59
 .byte 0
 .popsection
-leaq .L752(%rip),%rax
+leaq .L839(%rip),%rax
 movq %rax,-7632(%rbp)
 movabsq $1,%rax
 movq %rax,-7640(%rbp)
@@ -17737,12 +19605,12 @@ ret
 xorq %rax,%rax
 leave
 ret
-.set .F620,7680
+.set .F707,7680
 .type f_native_host_fn,@function
 f_native_host_fn:
 pushq %rbp
 movq %rsp,%rbp
-subq $.F753,%rsp
+subq $.F840,%rsp
 movq %rdi,-8(%rbp)
 movq %rsi,-16(%rbp)
 movq %rdx,-24(%rbp)
@@ -17758,14 +19626,14 @@ movq -48(%rbp),%rdi
 call rt_rec
 movq %rax,-56(%rbp)
 .pushsection .rodata
-.L754:
+.L841:
 .byte 104
 .byte 111
 .byte 115
 .byte 116
 .byte 0
 .popsection
-leaq .L754(%rip),%rax
+leaq .L841(%rip),%rax
 movq %rax,-64(%rbp)
 movabsq $4,%rax
 movq %rax,-72(%rbp)
@@ -17815,13 +19683,13 @@ ret
 xorq %rax,%rax
 leave
 ret
-.set .F753,144
+.set .F840,144
 .type f_native_main,@function
 f_native_main:
 pushq %rbp
 movq %rsp,%rbp
-subq $.F755,%rsp
-movabsq $17,%rax
+subq $.F842,%rsp
+movabsq $18,%rax
 movq %rax,-8(%rbp)
 movq -8(%rbp),%rdi
 call rt_rec
@@ -17911,119 +19779,124 @@ movq %rax,-152(%rbp)
 movq -16(%rbp),%rcx
 movq -152(%rbp),%rax
 movq %rax,128(%rcx)
-movq -16(%rbp),%rax
+movabsq $0,%rax
 movq %rax,-160(%rbp)
-movabsq $5,%rax
+movq -16(%rbp),%rcx
+movq -160(%rbp),%rax
+movq %rax,136(%rcx)
+movq -16(%rbp),%rax
 movq %rax,-168(%rbp)
-movq -168(%rbp),%rax
+movabsq $5,%rax
 movq %rax,-176(%rbp)
-movabsq $0,%rax
+movq -176(%rbp),%rax
 movq %rax,-184(%rbp)
-.L756:
-movq -176(%rbp),%rcx
-movq -184(%rbp),%rax
-cmpq %rcx,%rax
-jae .L758
-leaq -160(%rbp),%rax
-movq %rax,-192(%rbp)
-movq -192(%rbp),%rax
-movq %rax,-200(%rbp)
-movq -184(%rbp),%rax
-movq %rax,-208(%rbp)
-movabsq $1,%rax
-movq %rax,-216(%rbp)
-movq -216(%rbp),%rcx
-movq -208(%rbp),%rax
-addq %rcx,%rax
-movq %rax,-224(%rbp)
-movq -224(%rbp),%rax
-movq %rax,-232(%rbp)
 movabsq $0,%rax
+movq %rax,-192(%rbp)
+.L843:
+movq -184(%rbp),%rcx
+movq -192(%rbp),%rax
+cmpq %rcx,%rax
+jae .L845
+leaq -168(%rbp),%rax
+movq %rax,-200(%rbp)
+movq -200(%rbp),%rax
+movq %rax,-208(%rbp)
+movq -192(%rbp),%rax
+movq %rax,-216(%rbp)
+movabsq $1,%rax
+movq %rax,-224(%rbp)
+movq -224(%rbp),%rcx
+movq -216(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-232(%rbp)
+movq -232(%rbp),%rax
 movq %rax,-240(%rbp)
-movq -240(%rbp),%rax
+movabsq $0,%rax
 movq %rax,-248(%rbp)
-movq -200(%rbp),%rdi
-movq -232(%rbp),%rsi
-movq -248(%rbp),%rdx
-call f_native_intern
+movq -248(%rbp),%rax
 movq %rax,-256(%rbp)
-.L757:
-incq -184(%rbp)
-jmp .L756
-.L758:
-leaq -160(%rbp),%rax
+movq -208(%rbp),%rdi
+movq -240(%rbp),%rsi
+movq -256(%rbp),%rdx
+call f_native_intern
 movq %rax,-264(%rbp)
-movq -264(%rbp),%rax
+.L844:
+incq -192(%rbp)
+jmp .L843
+.L845:
+leaq -168(%rbp),%rax
 movq %rax,-272(%rbp)
+movq -272(%rbp),%rax
+movq %rax,-280(%rbp)
 .pushsection .rodata
-.L759:
+.L846:
 .byte 97
 .byte 114
 .byte 103
 .byte 99
 .byte 0
 .popsection
-leaq .L759(%rip),%rax
-movq %rax,-280(%rbp)
-movabsq $4,%rax
+leaq .L846(%rip),%rax
 movq %rax,-288(%rbp)
-movq -280(%rbp),%rdi
-movq -288(%rbp),%rsi
-call rt_lit
+movabsq $4,%rax
 movq %rax,-296(%rbp)
-movq -296(%rbp),%rdi
-call rt_view
+movq -288(%rbp),%rdi
+movq -296(%rbp),%rsi
+call rt_lit
 movq %rax,-304(%rbp)
-movq -304(%rbp),%rax
+movq -304(%rbp),%rdi
+call rt_view
 movq %rax,-312(%rbp)
-movabsq $0,%rax
+movq -312(%rbp),%rax
 movq %rax,-320(%rbp)
-movq -320(%rbp),%rax
+movabsq $0,%rax
 movq %rax,-328(%rbp)
-movq -272(%rbp),%rdi
-movq -312(%rbp),%rsi
-movq -328(%rbp),%rdx
-call f_native_host_fn
+movq -328(%rbp),%rax
 movq %rax,-336(%rbp)
-leaq -160(%rbp),%rax
+movq -280(%rbp),%rdi
+movq -320(%rbp),%rsi
+movq -336(%rbp),%rdx
+call f_native_host_fn
 movq %rax,-344(%rbp)
-movq -344(%rbp),%rax
+leaq -168(%rbp),%rax
 movq %rax,-352(%rbp)
+movq -352(%rbp),%rax
+movq %rax,-360(%rbp)
 .pushsection .rodata
-.L760:
+.L847:
 .byte 97
 .byte 114
 .byte 103
 .byte 0
 .popsection
-leaq .L760(%rip),%rax
-movq %rax,-360(%rbp)
-movabsq $3,%rax
+leaq .L847(%rip),%rax
 movq %rax,-368(%rbp)
-movq -360(%rbp),%rdi
-movq -368(%rbp),%rsi
-call rt_lit
+movabsq $3,%rax
 movq %rax,-376(%rbp)
-movq -376(%rbp),%rdi
-call rt_view
+movq -368(%rbp),%rdi
+movq -376(%rbp),%rsi
+call rt_lit
 movq %rax,-384(%rbp)
-movq -384(%rbp),%rax
+movq -384(%rbp),%rdi
+call rt_view
 movq %rax,-392(%rbp)
-movabsq $2,%rax
+movq -392(%rbp),%rax
 movq %rax,-400(%rbp)
-movq -400(%rbp),%rax
+movabsq $2,%rax
 movq %rax,-408(%rbp)
-movq -352(%rbp),%rdi
-movq -392(%rbp),%rsi
-movq -408(%rbp),%rdx
-call f_native_host_fn
+movq -408(%rbp),%rax
 movq %rax,-416(%rbp)
-leaq -160(%rbp),%rax
+movq -360(%rbp),%rdi
+movq -400(%rbp),%rsi
+movq -416(%rbp),%rdx
+call f_native_host_fn
 movq %rax,-424(%rbp)
-movq -424(%rbp),%rax
+leaq -168(%rbp),%rax
 movq %rax,-432(%rbp)
+movq -432(%rbp),%rax
+movq %rax,-440(%rbp)
 .pushsection .rodata
-.L761:
+.L848:
 .byte 114
 .byte 101
 .byte 97
@@ -18035,34 +19908,34 @@ movq %rax,-432(%rbp)
 .byte 101
 .byte 0
 .popsection
-leaq .L761(%rip),%rax
-movq %rax,-440(%rbp)
-movabsq $9,%rax
+leaq .L848(%rip),%rax
 movq %rax,-448(%rbp)
-movq -440(%rbp),%rdi
-movq -448(%rbp),%rsi
-call rt_lit
+movabsq $9,%rax
 movq %rax,-456(%rbp)
-movq -456(%rbp),%rdi
-call rt_view
+movq -448(%rbp),%rdi
+movq -456(%rbp),%rsi
+call rt_lit
 movq %rax,-464(%rbp)
-movq -464(%rbp),%rax
+movq -464(%rbp),%rdi
+call rt_view
 movq %rax,-472(%rbp)
-movabsq $2,%rax
+movq -472(%rbp),%rax
 movq %rax,-480(%rbp)
-movq -480(%rbp),%rax
+movabsq $2,%rax
 movq %rax,-488(%rbp)
-movq -432(%rbp),%rdi
-movq -472(%rbp),%rsi
-movq -488(%rbp),%rdx
-call f_native_host_fn
+movq -488(%rbp),%rax
 movq %rax,-496(%rbp)
-leaq -160(%rbp),%rax
+movq -440(%rbp),%rdi
+movq -480(%rbp),%rsi
+movq -496(%rbp),%rdx
+call f_native_host_fn
 movq %rax,-504(%rbp)
-movq -504(%rbp),%rax
+leaq -168(%rbp),%rax
 movq %rax,-512(%rbp)
+movq -512(%rbp),%rax
+movq %rax,-520(%rbp)
 .pushsection .rodata
-.L762:
+.L849:
 .byte 119
 .byte 114
 .byte 105
@@ -18075,34 +19948,34 @@ movq %rax,-512(%rbp)
 .byte 101
 .byte 0
 .popsection
-leaq .L762(%rip),%rax
-movq %rax,-520(%rbp)
-movabsq $10,%rax
+leaq .L849(%rip),%rax
 movq %rax,-528(%rbp)
-movq -520(%rbp),%rdi
-movq -528(%rbp),%rsi
-call rt_lit
+movabsq $10,%rax
 movq %rax,-536(%rbp)
-movq -536(%rbp),%rdi
-call rt_view
+movq -528(%rbp),%rdi
+movq -536(%rbp),%rsi
+call rt_lit
 movq %rax,-544(%rbp)
-movq -544(%rbp),%rax
+movq -544(%rbp),%rdi
+call rt_view
 movq %rax,-552(%rbp)
-movabsq $0,%rax
+movq -552(%rbp),%rax
 movq %rax,-560(%rbp)
-movq -560(%rbp),%rax
+movabsq $0,%rax
 movq %rax,-568(%rbp)
-movq -512(%rbp),%rdi
-movq -552(%rbp),%rsi
-movq -568(%rbp),%rdx
-call f_native_host_fn
+movq -568(%rbp),%rax
 movq %rax,-576(%rbp)
-leaq -160(%rbp),%rax
+movq -520(%rbp),%rdi
+movq -560(%rbp),%rsi
+movq -576(%rbp),%rdx
+call f_native_host_fn
 movq %rax,-584(%rbp)
-movq -584(%rbp),%rax
+leaq -168(%rbp),%rax
 movq %rax,-592(%rbp)
+movq -592(%rbp),%rax
+movq %rax,-600(%rbp)
 .pushsection .rodata
-.L763:
+.L850:
 .byte 112
 .byte 114
 .byte 105
@@ -18110,34 +19983,34 @@ movq %rax,-592(%rbp)
 .byte 116
 .byte 0
 .popsection
-leaq .L763(%rip),%rax
-movq %rax,-600(%rbp)
-movabsq $5,%rax
+leaq .L850(%rip),%rax
 movq %rax,-608(%rbp)
-movq -600(%rbp),%rdi
-movq -608(%rbp),%rsi
-call rt_lit
+movabsq $5,%rax
 movq %rax,-616(%rbp)
-movq -616(%rbp),%rdi
-call rt_view
+movq -608(%rbp),%rdi
+movq -616(%rbp),%rsi
+call rt_lit
 movq %rax,-624(%rbp)
-movq -624(%rbp),%rax
+movq -624(%rbp),%rdi
+call rt_view
 movq %rax,-632(%rbp)
-movabsq $1,%rax
+movq -632(%rbp),%rax
 movq %rax,-640(%rbp)
-movq -640(%rbp),%rax
+movabsq $1,%rax
 movq %rax,-648(%rbp)
-movq -592(%rbp),%rdi
-movq -632(%rbp),%rsi
-movq -648(%rbp),%rdx
-call f_native_host_fn
+movq -648(%rbp),%rax
 movq %rax,-656(%rbp)
-leaq -160(%rbp),%rax
+movq -600(%rbp),%rdi
+movq -640(%rbp),%rsi
+movq -656(%rbp),%rdx
+call f_native_host_fn
 movq %rax,-664(%rbp)
-movq -664(%rbp),%rax
+leaq -168(%rbp),%rax
 movq %rax,-672(%rbp)
+movq -672(%rbp),%rax
+movq %rax,-680(%rbp)
 .pushsection .rodata
-.L764:
+.L851:
 .byte 99
 .byte 111
 .byte 109
@@ -18147,77 +20020,77 @@ movq %rax,-672(%rbp)
 .byte 100
 .byte 0
 .popsection
-leaq .L764(%rip),%rax
-movq %rax,-680(%rbp)
-movabsq $7,%rax
+leaq .L851(%rip),%rax
 movq %rax,-688(%rbp)
-movq -680(%rbp),%rdi
-movq -688(%rbp),%rsi
-call rt_lit
+movabsq $7,%rax
 movq %rax,-696(%rbp)
-movq -696(%rbp),%rdi
-call rt_view
+movq -688(%rbp),%rdi
+movq -696(%rbp),%rsi
+call rt_lit
 movq %rax,-704(%rbp)
-movq -704(%rbp),%rax
+movq -704(%rbp),%rdi
+call rt_view
 movq %rax,-712(%rbp)
-movabsq $0,%rax
+movq -712(%rbp),%rax
 movq %rax,-720(%rbp)
-movq -720(%rbp),%rax
+movabsq $0,%rax
 movq %rax,-728(%rbp)
-movq -672(%rbp),%rdi
-movq -712(%rbp),%rsi
-movq -728(%rbp),%rdx
-call f_native_host_fn
+movq -728(%rbp),%rax
 movq %rax,-736(%rbp)
-call f_host_argc
+movq -680(%rbp),%rdi
+movq -720(%rbp),%rsi
+movq -736(%rbp),%rdx
+call f_native_host_fn
 movq %rax,-744(%rbp)
-movq -744(%rbp),%rax
+call f_host_argc
 movq %rax,-752(%rbp)
-movabsq $2,%rax
+movq -752(%rbp),%rax
 movq %rax,-760(%rbp)
-movq -760(%rbp),%rax
+movabsq $2,%rax
 movq %rax,-768(%rbp)
-movq -752(%rbp),%rcx
 movq -768(%rbp),%rax
+movq %rax,-776(%rbp)
+movq -760(%rbp),%rcx
+movq -776(%rbp),%rax
 cmpq %rcx,%rax
 setb %al
 movzbq %al,%rax
-movq %rax,-776(%rbp)
-movq -776(%rbp),%rax
-testq %rax,%rax
-jnz .L765
-call abort@PLT
-.L765:
-movabsq $3,%rax
 movq %rax,-784(%rbp)
 movq -784(%rbp),%rax
+testq %rax,%rax
+jnz .L852
+call rt_abort
+.L852:
+movabsq $3,%rax
 movq %rax,-792(%rbp)
-movabsq $0,%rax
+movq -792(%rbp),%rax
 movq %rax,-800(%rbp)
-.L766:
-movq -792(%rbp),%rcx
-movq -800(%rbp),%rax
-cmpq %rcx,%rax
-jae .L768
-movq -800(%rbp),%rax
+movabsq $0,%rax
 movq %rax,-808(%rbp)
-movabsq $1,%rax
-movq %rax,-816(%rbp)
-movq -816(%rbp),%rcx
+.L853:
+movq -800(%rbp),%rcx
 movq -808(%rbp),%rax
+cmpq %rcx,%rax
+jae .L855
+movq -808(%rbp),%rax
+movq %rax,-816(%rbp)
+movabsq $1,%rax
+movq %rax,-824(%rbp)
+movq -824(%rbp),%rcx
+movq -816(%rbp),%rax
 cmpq %rcx,%rax
 sete %al
 movzbq %al,%rax
-movq %rax,-824(%rbp)
-movq -824(%rbp),%rax
-testq %rax,%rax
-jz .L769
-leaq -160(%rbp),%rax
 movq %rax,-832(%rbp)
 movq -832(%rbp),%rax
+testq %rax,%rax
+jz .L856
+leaq -168(%rbp),%rax
 movq %rax,-840(%rbp)
+movq -840(%rbp),%rax
+movq %rax,-848(%rbp)
 .pushsection .rodata
-.L771:
+.L858:
 .byte 46
 .byte 116
 .byte 101
@@ -18226,117 +20099,117 @@ movq %rax,-840(%rbp)
 .byte 10
 .byte 0
 .popsection
-leaq .L771(%rip),%rax
-movq %rax,-848(%rbp)
-movabsq $6,%rax
+leaq .L858(%rip),%rax
 movq %rax,-856(%rbp)
-movq -848(%rbp),%rdi
-movq -856(%rbp),%rsi
-call rt_lit
+movabsq $6,%rax
 movq %rax,-864(%rbp)
-movq -864(%rbp),%rdi
-call rt_view
+movq -856(%rbp),%rdi
+movq -864(%rbp),%rsi
+call rt_lit
 movq %rax,-872(%rbp)
-movq -872(%rbp),%rax
+movq -872(%rbp),%rdi
+call rt_view
 movq %rax,-880(%rbp)
-movq -840(%rbp),%rdi
-movq -880(%rbp),%rsi
-call f_native_o
+movq -880(%rbp),%rax
 movq %rax,-888(%rbp)
-jmp .L770
-.L769:
-.L770:
-movabsq $2,%rax
+movq -848(%rbp),%rdi
+movq -888(%rbp),%rsi
+call f_native_o
 movq %rax,-896(%rbp)
-movq -896(%rbp),%rax
+jmp .L857
+.L856:
+.L857:
+movabsq $2,%rax
 movq %rax,-904(%rbp)
-.L772:
 movq -904(%rbp),%rax
 movq %rax,-912(%rbp)
-movq -752(%rbp),%rcx
+.L859:
 movq -912(%rbp),%rax
+movq %rax,-920(%rbp)
+movq -760(%rbp),%rcx
+movq -920(%rbp),%rax
 cmpq %rcx,%rax
 setb %al
 movzbq %al,%rax
-movq %rax,-920(%rbp)
-movq -920(%rbp),%rax
-testq %rax,%rax
-jz .L773
-leaq -160(%rbp),%rax
 movq %rax,-928(%rbp)
 movq -928(%rbp),%rax
+testq %rax,%rax
+jz .L860
+leaq -168(%rbp),%rax
 movq %rax,-936(%rbp)
-movq -904(%rbp),%rax
+movq -936(%rbp),%rax
 movq %rax,-944(%rbp)
-movq -936(%rbp),%rdi
-movq -944(%rbp),%rsi
-call f_native_load_file
+movq -912(%rbp),%rax
 movq %rax,-952(%rbp)
-movq -160(%rbp),%rax
-leaq 104(%rax),%rax
+movq -944(%rbp),%rdi
+movq -952(%rbp),%rsi
+call f_native_load_file
 movq %rax,-960(%rbp)
-movq -960(%rbp),%rdi
-movq -904(%rbp),%rsi
-call rt_xchg
+movq -168(%rbp),%rax
+leaq 104(%rax),%rax
 movq %rax,-968(%rbp)
-leaq -160(%rbp),%rax
+movq -968(%rbp),%rdi
+movq -912(%rbp),%rsi
+call rt_xchg
 movq %rax,-976(%rbp)
-movq -976(%rbp),%rax
+leaq -168(%rbp),%rax
 movq %rax,-984(%rbp)
-movq -800(%rbp),%rax
+movq -984(%rbp),%rax
 movq %rax,-992(%rbp)
-movabsq $1,%rax
+movq -808(%rbp),%rax
 movq %rax,-1000(%rbp)
-movq -1000(%rbp),%rcx
-movq -992(%rbp),%rax
-addq %rcx,%rax
-movq %rax,-1008(%rbp)
-movq -1008(%rbp),%rax
-movq %rax,-1016(%rbp)
-movq -984(%rbp),%rdi
-movq -1016(%rbp),%rsi
-call f_native_toplevel
-movq %rax,-1024(%rbp)
-movq -904(%rbp),%rax
-movq %rax,-1032(%rbp)
 movabsq $1,%rax
-movq %rax,-1040(%rbp)
-movq -1040(%rbp),%rcx
-movq -1032(%rbp),%rax
+movq %rax,-1008(%rbp)
+movq -1008(%rbp),%rcx
+movq -1000(%rbp),%rax
 addq %rcx,%rax
+movq %rax,-1016(%rbp)
+movq -1016(%rbp),%rax
+movq %rax,-1024(%rbp)
+movq -992(%rbp),%rdi
+movq -1024(%rbp),%rsi
+call f_native_toplevel
+movq %rax,-1032(%rbp)
+movq -912(%rbp),%rax
+movq %rax,-1040(%rbp)
+movabsq $1,%rax
 movq %rax,-1048(%rbp)
-movq -1048(%rbp),%rax
-movq %rax,-904(%rbp)
-jmp .L772
-.L773:
-.L767:
-incq -800(%rbp)
-jmp .L766
-.L768:
-movq -160(%rbp),%rax
-movq 96(%rax),%rax
+movq -1048(%rbp),%rcx
+movq -1040(%rbp),%rax
+addq %rcx,%rax
 movq %rax,-1056(%rbp)
 movq -1056(%rbp),%rax
+movq %rax,-912(%rbp)
+jmp .L859
+.L860:
+.L854:
+incq -808(%rbp)
+jmp .L853
+.L855:
+movq -168(%rbp),%rax
+movq 96(%rax),%rax
 movq %rax,-1064(%rbp)
 movq -1064(%rbp),%rax
 movq %rax,-1072(%rbp)
-movabsq $0,%rax
-movq %rax,-1080(%rbp)
-movq -1080(%rbp),%rcx
 movq -1072(%rbp),%rax
+movq %rax,-1080(%rbp)
+movabsq $0,%rax
+movq %rax,-1088(%rbp)
+movq -1088(%rbp),%rcx
+movq -1080(%rbp),%rax
 cmpq %rcx,%rax
 sete %al
 movzbq %al,%rax
-movq %rax,-1088(%rbp)
-movq -1088(%rbp),%rax
-testq %rax,%rax
-jz .L774
-leaq -160(%rbp),%rax
 movq %rax,-1096(%rbp)
 movq -1096(%rbp),%rax
+testq %rax,%rax
+jz .L861
+leaq -168(%rbp),%rax
 movq %rax,-1104(%rbp)
+movq -1104(%rbp),%rax
+movq %rax,-1112(%rbp)
 .pushsection .rodata
-.L776:
+.L863:
 .byte 110
 .byte 111
 .byte 32
@@ -18390,85 +20263,85 @@ movq %rax,-1104(%rbp)
 .byte 114
 .byte 0
 .popsection
-leaq .L776(%rip),%rax
-movq %rax,-1112(%rbp)
-movabsq $51,%rax
+leaq .L863(%rip),%rax
 movq %rax,-1120(%rbp)
-movq -1112(%rbp),%rdi
-movq -1120(%rbp),%rsi
-call rt_lit
+movabsq $51,%rax
 movq %rax,-1128(%rbp)
-movq -1128(%rbp),%rdi
-call rt_view
+movq -1120(%rbp),%rdi
+movq -1128(%rbp),%rsi
+call rt_lit
 movq %rax,-1136(%rbp)
-movq -1136(%rbp),%rax
+movq -1136(%rbp),%rdi
+call rt_view
 movq %rax,-1144(%rbp)
-movq -1104(%rbp),%rdi
-movq -1144(%rbp),%rsi
-call f_native_fail
+movq -1144(%rbp),%rax
 movq %rax,-1152(%rbp)
-jmp .L775
-.L774:
-.L775:
-movq -160(%rbp),%rax
-movq 64(%rax),%rax
+movq -1112(%rbp),%rdi
+movq -1152(%rbp),%rsi
+call f_native_fail
 movq %rax,-1160(%rbp)
-movq -1064(%rbp),%rax
+jmp .L862
+.L861:
+.L862:
+movq -168(%rbp),%rax
+movq 64(%rax),%rax
 movq %rax,-1168(%rbp)
-movabsq $1,%rax
+movq -1072(%rbp),%rax
 movq %rax,-1176(%rbp)
-movq -1176(%rbp),%rcx
-movq -1168(%rbp),%rax
-subq %rcx,%rax
+movabsq $1,%rax
 movq %rax,-1184(%rbp)
-movq -1160(%rbp),%rdi
-movq -1184(%rbp),%rsi
-call rt_slot
+movq -1184(%rbp),%rcx
+movq -1176(%rbp),%rax
+subq %rcx,%rax
 movq %rax,-1192(%rbp)
-movq -1192(%rbp),%rax
+movq -1168(%rbp),%rdi
+movq -1192(%rbp),%rsi
+call rt_slot
 movq %rax,-1200(%rbp)
 movq -1200(%rbp),%rax
-movq (%rax),%rax
 movq %rax,-1208(%rbp)
 movq -1208(%rbp),%rax
-movq 0(%rax),%rax
+movq (%rax),%rax
 movq %rax,-1216(%rbp)
-movq -1216(%rbp),%rdi
-call rt_view
+movq -1216(%rbp),%rax
+movq 0(%rax),%rax
 movq %rax,-1224(%rbp)
 movq -1224(%rbp),%rdi
-call rt_copy
-movq %rax,-1232(%rbp)
-movq -1232(%rbp),%rax
-movq %rax,-1240(%rbp)
-movq -1200(%rbp),%rax
-movq (%rax),%rax
-movq %rax,-1248(%rbp)
-movq -1248(%rbp),%rax
-movq 8(%rax),%rax
-movq %rax,-1256(%rbp)
-movq -1256(%rbp),%rdi
 call rt_view
+movq %rax,-1232(%rbp)
+movq -1232(%rbp),%rdi
+call rt_copy
+movq %rax,-1240(%rbp)
+movq -1240(%rbp),%rax
+movq %rax,-1248(%rbp)
+movq -1208(%rbp),%rax
+movq (%rax),%rax
+movq %rax,-1256(%rbp)
+movq -1256(%rbp),%rax
+movq 8(%rax),%rax
 movq %rax,-1264(%rbp)
 movq -1264(%rbp),%rdi
-call rt_copy
+call rt_view
 movq %rax,-1272(%rbp)
-movq -1272(%rbp),%rax
+movq -1272(%rbp),%rdi
+call rt_copy
 movq %rax,-1280(%rbp)
-movq -1200(%rbp),%rax
-movq (%rax),%rax
+movq -1280(%rbp),%rax
 movq %rax,-1288(%rbp)
-movq -1288(%rbp),%rax
-movq 24(%rax),%rax
+movq -1208(%rbp),%rax
+movq (%rax),%rax
 movq %rax,-1296(%rbp)
 movq -1296(%rbp),%rax
+movq 24(%rax),%rax
 movq %rax,-1304(%rbp)
-leaq -160(%rbp),%rax
+movq -1304(%rbp),%rax
 movq %rax,-1312(%rbp)
-movq -1312(%rbp),%rax
+leaq -168(%rbp),%rax
 movq %rax,-1320(%rbp)
+movq -1320(%rbp),%rax
+movq %rax,-1328(%rbp)
 .pushsection .rodata
-.L777:
+.L864:
 .byte 46
 .byte 103
 .byte 108
@@ -18476,33 +20349,64 @@ movq %rax,-1320(%rbp)
 .byte 98
 .byte 108
 .byte 32
-.byte 109
-.byte 97
-.byte 105
-.byte 110
-.byte 10
-.byte 109
-.byte 97
-.byte 105
-.byte 110
-.byte 58
-.byte 10
-.byte 112
-.byte 117
+.byte 95
 .byte 115
-.byte 104
-.byte 113
-.byte 32
-.byte 37
+.byte 116
+.byte 97
 .byte 114
-.byte 98
-.byte 112
+.byte 116
+.byte 10
+.byte 95
+.byte 115
+.byte 116
+.byte 97
+.byte 114
+.byte 116
+.byte 58
 .byte 10
 .byte 109
 .byte 111
 .byte 118
 .byte 113
 .byte 32
+.byte 40
+.byte 37
+.byte 114
+.byte 115
+.byte 112
+.byte 41
+.byte 44
+.byte 37
+.byte 114
+.byte 100
+.byte 105
+.byte 10
+.byte 108
+.byte 101
+.byte 97
+.byte 113
+.byte 32
+.byte 56
+.byte 40
+.byte 37
+.byte 114
+.byte 115
+.byte 112
+.byte 41
+.byte 44
+.byte 37
+.byte 114
+.byte 115
+.byte 105
+.byte 10
+.byte 108
+.byte 101
+.byte 97
+.byte 113
+.byte 32
+.byte 49
+.byte 54
+.byte 40
 .byte 37
 .byte 114
 .byte 115
@@ -18510,26 +20414,35 @@ movq %rax,-1320(%rbp)
 .byte 44
 .byte 37
 .byte 114
-.byte 98
-.byte 112
+.byte 100
+.byte 105
+.byte 44
+.byte 56
+.byte 41
+.byte 44
+.byte 37
+.byte 114
+.byte 100
+.byte 120
 .byte 10
 .byte 109
 .byte 111
 .byte 118
-.byte 108
+.byte 113
 .byte 32
 .byte 37
-.byte 101
+.byte 114
 .byte 100
 .byte 105
 .byte 44
 .byte 114
 .byte 116
 .byte 95
+.byte 115
+.byte 116
 .byte 97
-.byte 114
-.byte 103
-.byte 99
+.byte 116
+.byte 101
 .byte 40
 .byte 37
 .byte 114
@@ -18550,10 +20463,13 @@ movq %rax,-1320(%rbp)
 .byte 114
 .byte 116
 .byte 95
+.byte 115
+.byte 116
 .byte 97
-.byte 114
-.byte 103
-.byte 118
+.byte 116
+.byte 101
+.byte 43
+.byte 56
 .byte 40
 .byte 37
 .byte 114
@@ -18561,53 +20477,96 @@ movq %rax,-1320(%rbp)
 .byte 112
 .byte 41
 .byte 10
+.byte 109
+.byte 111
+.byte 118
+.byte 113
+.byte 32
+.byte 37
+.byte 114
+.byte 100
+.byte 120
+.byte 44
+.byte 114
+.byte 116
+.byte 95
+.byte 115
+.byte 116
+.byte 97
+.byte 116
+.byte 101
+.byte 43
+.byte 49
+.byte 54
+.byte 40
+.byte 37
+.byte 114
+.byte 105
+.byte 112
+.byte 41
+.byte 10
+.byte 97
+.byte 110
+.byte 100
+.byte 113
+.byte 32
+.byte 36
+.byte 45
+.byte 49
+.byte 54
+.byte 44
+.byte 37
+.byte 114
+.byte 115
+.byte 112
+.byte 10
 .byte 0
 .popsection
-leaq .L777(%rip),%rax
-movq %rax,-1328(%rbp)
-movabsq $92,%rax
+leaq .L864(%rip),%rax
 movq %rax,-1336(%rbp)
-movq -1328(%rbp),%rdi
-movq -1336(%rbp),%rsi
-call rt_lit
+movabsq $178,%rax
 movq %rax,-1344(%rbp)
-movq -1344(%rbp),%rdi
-call rt_view
+movq -1336(%rbp),%rdi
+movq -1344(%rbp),%rsi
+call rt_lit
 movq %rax,-1352(%rbp)
-movq -1352(%rbp),%rax
+movq -1352(%rbp),%rdi
+call rt_view
 movq %rax,-1360(%rbp)
-movq -1320(%rbp),%rdi
-movq -1360(%rbp),%rsi
-call f_native_o
+movq -1360(%rbp),%rax
 movq %rax,-1368(%rbp)
-movq -1304(%rbp),%rax
+movq -1328(%rbp),%rdi
+movq -1368(%rbp),%rsi
+call f_native_o
 movq %rax,-1376(%rbp)
-movabsq $1,%rax
+movq -1312(%rbp),%rax
 movq %rax,-1384(%rbp)
-movq -1384(%rbp),%rcx
-movq -1376(%rbp),%rax
+movabsq $1,%rax
+movq %rax,-1392(%rbp)
+movq -1392(%rbp),%rcx
+movq -1384(%rbp),%rax
 cmpq %rcx,%rax
 sete %al
 movzbq %al,%rax
-movq %rax,-1392(%rbp)
-movq -1392(%rbp),%rax
-testq %rax,%rax
-jz .L778
-leaq -160(%rbp),%rax
 movq %rax,-1400(%rbp)
 movq -1400(%rbp),%rax
+testq %rax,%rax
+jz .L865
+leaq -168(%rbp),%rax
 movq %rax,-1408(%rbp)
-movq -1408(%rbp),%rdi
-call f_native_label
+movq -1408(%rbp),%rax
 movq %rax,-1416(%rbp)
-movq -1416(%rbp),%rax
+movq -1416(%rbp),%rdi
+call f_native_label
 movq %rax,-1424(%rbp)
-leaq -160(%rbp),%rax
+movq -1424(%rbp),%rax
 movq %rax,-1432(%rbp)
-movq -1432(%rbp),%rax
+leaq -168(%rbp),%rax
 movq %rax,-1440(%rbp)
+movq -1440(%rbp),%rax
+movq %rax,-1448(%rbp)
 .pushsection .rodata
-.L780:
+.L867:
 .byte 99
 .byte 109
 .byte 112
@@ -18623,117 +20582,129 @@ movq %rax,-1440(%rbp)
 .byte 10
 .byte 0
 .popsection
-leaq .L780(%rip),%rax
-movq %rax,-1448(%rbp)
-movabsq $13,%rax
+leaq .L867(%rip),%rax
 movq %rax,-1456(%rbp)
-movq -1448(%rbp),%rdi
-movq -1456(%rbp),%rsi
-call rt_lit
+movabsq $13,%rax
 movq %rax,-1464(%rbp)
-movq -1464(%rbp),%rdi
-call rt_view
+movq -1456(%rbp),%rdi
+movq -1464(%rbp),%rsi
+call rt_lit
 movq %rax,-1472(%rbp)
-movq -1472(%rbp),%rax
+movq -1472(%rbp),%rdi
+call rt_view
 movq %rax,-1480(%rbp)
-movq -1440(%rbp),%rdi
-movq -1480(%rbp),%rsi
-call f_native_o
+movq -1480(%rbp),%rax
 movq %rax,-1488(%rbp)
-leaq -160(%rbp),%rax
+movq -1448(%rbp),%rdi
+movq -1488(%rbp),%rsi
+call f_native_o
 movq %rax,-1496(%rbp)
-movq -1496(%rbp),%rax
+leaq -168(%rbp),%rax
 movq %rax,-1504(%rbp)
+movq -1504(%rbp),%rax
+movq %rax,-1512(%rbp)
 .pushsection .rodata
-.L781:
+.L868:
 .byte 106
 .byte 101
 .byte 0
 .popsection
-leaq .L781(%rip),%rax
-movq %rax,-1512(%rbp)
-movabsq $2,%rax
+leaq .L868(%rip),%rax
 movq %rax,-1520(%rbp)
-movq -1512(%rbp),%rdi
-movq -1520(%rbp),%rsi
-call rt_lit
+movabsq $2,%rax
 movq %rax,-1528(%rbp)
-movq -1528(%rbp),%rdi
-call rt_view
+movq -1520(%rbp),%rdi
+movq -1528(%rbp),%rsi
+call rt_lit
 movq %rax,-1536(%rbp)
-movq -1536(%rbp),%rax
+movq -1536(%rbp),%rdi
+call rt_view
 movq %rax,-1544(%rbp)
-movq -1424(%rbp),%rax
+movq -1544(%rbp),%rax
 movq %rax,-1552(%rbp)
-movq -1504(%rbp),%rdi
-movq -1544(%rbp),%rsi
-movq -1552(%rbp),%rdx
-call f_native_jump
+movq -1432(%rbp),%rax
 movq %rax,-1560(%rbp)
-leaq -160(%rbp),%rax
+movq -1512(%rbp),%rdi
+movq -1552(%rbp),%rsi
+movq -1560(%rbp),%rdx
+call f_native_jump
 movq %rax,-1568(%rbp)
-movq -1568(%rbp),%rax
+leaq -168(%rbp),%rax
 movq %rax,-1576(%rbp)
+movq -1576(%rbp),%rax
+movq %rax,-1584(%rbp)
 .pushsection .rodata
-.L782:
+.L869:
 .byte 109
 .byte 111
 .byte 118
 .byte 108
 .byte 32
 .byte 36
-.byte 50
+.byte 54
+.byte 48
 .byte 44
 .byte 37
 .byte 101
 .byte 97
 .byte 120
 .byte 10
-.byte 108
-.byte 101
-.byte 97
+.byte 109
+.byte 111
 .byte 118
+.byte 108
+.byte 32
+.byte 36
+.byte 50
+.byte 44
+.byte 37
 .byte 101
+.byte 100
+.byte 105
 .byte 10
-.byte 114
-.byte 101
-.byte 116
+.byte 115
+.byte 121
+.byte 115
+.byte 99
+.byte 97
+.byte 108
+.byte 108
 .byte 10
 .byte 0
 .popsection
-leaq .L782(%rip),%rax
-movq %rax,-1584(%rbp)
-movabsq $23,%rax
+leaq .L869(%rip),%rax
 movq %rax,-1592(%rbp)
-movq -1584(%rbp),%rdi
-movq -1592(%rbp),%rsi
-call rt_lit
+movabsq $35,%rax
 movq %rax,-1600(%rbp)
-movq -1600(%rbp),%rdi
-call rt_view
+movq -1592(%rbp),%rdi
+movq -1600(%rbp),%rsi
+call rt_lit
 movq %rax,-1608(%rbp)
-movq -1608(%rbp),%rax
+movq -1608(%rbp),%rdi
+call rt_view
 movq %rax,-1616(%rbp)
-movq -1576(%rbp),%rdi
-movq -1616(%rbp),%rsi
-call f_native_o
+movq -1616(%rbp),%rax
 movq %rax,-1624(%rbp)
-leaq -160(%rbp),%rax
+movq -1584(%rbp),%rdi
+movq -1624(%rbp),%rsi
+call f_native_o
 movq %rax,-1632(%rbp)
-movq -1632(%rbp),%rax
+leaq -168(%rbp),%rax
 movq %rax,-1640(%rbp)
-movq -1424(%rbp),%rax
+movq -1640(%rbp),%rax
 movq %rax,-1648(%rbp)
-movq -1640(%rbp),%rdi
-movq -1648(%rbp),%rsi
-call f_native_mark
+movq -1432(%rbp),%rax
 movq %rax,-1656(%rbp)
-leaq -160(%rbp),%rax
+movq -1648(%rbp),%rdi
+movq -1656(%rbp),%rsi
+call f_native_mark
 movq %rax,-1664(%rbp)
-movq -1664(%rbp),%rax
+leaq -168(%rbp),%rax
 movq %rax,-1672(%rbp)
+movq -1672(%rbp),%rax
+movq %rax,-1680(%rbp)
 .pushsection .rodata
-.L783:
+.L870:
 .byte 109
 .byte 111
 .byte 118
@@ -18808,32 +20779,32 @@ movq %rax,-1672(%rbp)
 .byte 10
 .byte 0
 .popsection
-leaq .L783(%rip),%rax
-movq %rax,-1680(%rbp)
-movabsq $72,%rax
+leaq .L870(%rip),%rax
 movq %rax,-1688(%rbp)
-movq -1680(%rbp),%rdi
-movq -1688(%rbp),%rsi
-call rt_lit
+movabsq $72,%rax
 movq %rax,-1696(%rbp)
-movq -1696(%rbp),%rdi
-call rt_view
+movq -1688(%rbp),%rdi
+movq -1696(%rbp),%rsi
+call rt_lit
 movq %rax,-1704(%rbp)
-movq -1704(%rbp),%rax
+movq -1704(%rbp),%rdi
+call rt_view
 movq %rax,-1712(%rbp)
-movq -1672(%rbp),%rdi
-movq -1712(%rbp),%rsi
-call f_native_o
+movq -1712(%rbp),%rax
 movq %rax,-1720(%rbp)
-jmp .L779
-.L778:
-.L779:
-leaq -160(%rbp),%rax
+movq -1680(%rbp),%rdi
+movq -1720(%rbp),%rsi
+call f_native_o
 movq %rax,-1728(%rbp)
-movq -1728(%rbp),%rax
+jmp .L866
+.L865:
+.L866:
+leaq -168(%rbp),%rax
 movq %rax,-1736(%rbp)
+movq -1736(%rbp),%rax
+movq %rax,-1744(%rbp)
 .pushsection .rodata
-.L784:
+.L871:
 .byte 99
 .byte 97
 .byte 108
@@ -18841,48 +20812,48 @@ movq %rax,-1736(%rbp)
 .byte 32
 .byte 0
 .popsection
-leaq .L784(%rip),%rax
-movq %rax,-1744(%rbp)
-movabsq $5,%rax
+leaq .L871(%rip),%rax
 movq %rax,-1752(%rbp)
-movq -1744(%rbp),%rdi
-movq -1752(%rbp),%rsi
-call rt_lit
+movabsq $5,%rax
 movq %rax,-1760(%rbp)
-movq -1760(%rbp),%rdi
-call rt_view
+movq -1752(%rbp),%rdi
+movq -1760(%rbp),%rsi
+call rt_lit
 movq %rax,-1768(%rbp)
-movq -1768(%rbp),%rax
+movq -1768(%rbp),%rdi
+call rt_view
 movq %rax,-1776(%rbp)
-movq -1736(%rbp),%rdi
-movq -1776(%rbp),%rsi
-call f_native_o
+movq -1776(%rbp),%rax
 movq %rax,-1784(%rbp)
-leaq -160(%rbp),%rax
+movq -1744(%rbp),%rdi
+movq -1784(%rbp),%rsi
+call f_native_o
 movq %rax,-1792(%rbp)
-movq -1792(%rbp),%rax
+leaq -168(%rbp),%rax
 movq %rax,-1800(%rbp)
-movq -1240(%rbp),%rdi
-call rt_view
+movq -1800(%rbp),%rax
 movq %rax,-1808(%rbp)
-movq -1808(%rbp),%rax
-movq %rax,-1816(%rbp)
-movq -1280(%rbp),%rdi
+movq -1248(%rbp),%rdi
 call rt_view
+movq %rax,-1816(%rbp)
+movq -1816(%rbp),%rax
 movq %rax,-1824(%rbp)
-movq -1824(%rbp),%rax
+movq -1288(%rbp),%rdi
+call rt_view
 movq %rax,-1832(%rbp)
-movq -1800(%rbp),%rdi
-movq -1816(%rbp),%rsi
-movq -1832(%rbp),%rdx
-call f_native_mangle
+movq -1832(%rbp),%rax
 movq %rax,-1840(%rbp)
-leaq -160(%rbp),%rax
+movq -1808(%rbp),%rdi
+movq -1824(%rbp),%rsi
+movq -1840(%rbp),%rdx
+call f_native_mangle
 movq %rax,-1848(%rbp)
-movq -1848(%rbp),%rax
+leaq -168(%rbp),%rax
 movq %rax,-1856(%rbp)
+movq -1856(%rbp),%rax
+movq %rax,-1864(%rbp)
 .pushsection .rodata
-.L785:
+.L872:
 .byte 10
 .byte 109
 .byte 111
@@ -18896,126 +20867,121 @@ movq %rax,-1856(%rbp)
 .byte 44
 .byte 37
 .byte 114
-.byte 115
-.byte 105
-.byte 10
-.byte 108
-.byte 101
-.byte 97
-.byte 113
-.byte 32
-.byte 46
-.byte 76
-.byte 102
-.byte 109
-.byte 116
-.byte 40
-.byte 37
-.byte 114
-.byte 105
-.byte 112
-.byte 41
-.byte 44
-.byte 37
-.byte 114
 .byte 100
 .byte 105
-.byte 10
-.byte 120
-.byte 111
-.byte 114
-.byte 108
-.byte 32
-.byte 37
-.byte 101
-.byte 97
-.byte 120
-.byte 44
-.byte 37
-.byte 101
-.byte 97
-.byte 120
 .byte 10
 .byte 99
 .byte 97
 .byte 108
 .byte 108
 .byte 32
+.byte 114
+.byte 116
+.byte 95
 .byte 112
 .byte 114
 .byte 105
 .byte 110
 .byte 116
-.byte 102
-.byte 64
-.byte 80
-.byte 76
-.byte 84
+.byte 95
+.byte 110
+.byte 117
+.byte 109
 .byte 10
-.byte 120
-.byte 111
-.byte 114
+.byte 99
+.byte 97
+.byte 108
 .byte 108
 .byte 32
-.byte 37
-.byte 101
-.byte 97
-.byte 120
-.byte 44
-.byte 37
-.byte 101
-.byte 97
-.byte 120
+.byte 114
+.byte 116
+.byte 95
+.byte 115
+.byte 104
+.byte 117
+.byte 116
+.byte 100
+.byte 111
+.byte 119
+.byte 110
 .byte 10
-.byte 108
-.byte 101
-.byte 97
+.byte 109
+.byte 111
 .byte 118
+.byte 108
+.byte 32
+.byte 36
+.byte 54
+.byte 48
+.byte 44
+.byte 37
 .byte 101
+.byte 97
+.byte 120
 .byte 10
+.byte 120
+.byte 111
 .byte 114
+.byte 108
+.byte 32
+.byte 37
 .byte 101
-.byte 116
+.byte 100
+.byte 105
+.byte 44
+.byte 37
+.byte 101
+.byte 100
+.byte 105
+.byte 10
+.byte 115
+.byte 121
+.byte 115
+.byte 99
+.byte 97
+.byte 108
+.byte 108
+.byte 10
+.byte 117
+.byte 100
+.byte 50
 .byte 10
 .byte 46
+.byte 98
 .byte 115
-.byte 101
-.byte 99
-.byte 116
+.byte 115
+.byte 10
+.byte 46
+.byte 112
+.byte 50
+.byte 97
+.byte 108
 .byte 105
-.byte 111
+.byte 103
 .byte 110
 .byte 32
-.byte 46
-.byte 114
-.byte 111
-.byte 100
-.byte 97
-.byte 116
-.byte 97
+.byte 51
 .byte 10
-.byte 46
-.byte 76
-.byte 102
-.byte 109
+.byte 114
 .byte 116
+.byte 95
+.byte 115
+.byte 116
+.byte 97
+.byte 116
+.byte 101
 .byte 58
 .byte 32
 .byte 46
-.byte 97
-.byte 115
-.byte 99
-.byte 105
 .byte 122
+.byte 101
+.byte 114
+.byte 111
 .byte 32
-.byte 34
-.byte 37
-.byte 108
-.byte 108
-.byte 117
-.byte 92
-.byte 110
-.byte 34
+.byte 52
+.byte 48
+.byte 57
+.byte 54
 .byte 10
 .byte 46
 .byte 115
@@ -19057,99 +21023,99 @@ movq %rax,-1856(%rbp)
 .byte 10
 .byte 0
 .popsection
-leaq .L785(%rip),%rax
-movq %rax,-1864(%rbp)
-movabsq $172,%rax
+leaq .L872(%rip),%rax
 movq %rax,-1872(%rbp)
-movq -1864(%rbp),%rdi
-movq -1872(%rbp),%rsi
-call rt_lit
+movabsq $167,%rax
 movq %rax,-1880(%rbp)
-movq -1880(%rbp),%rdi
-call rt_view
+movq -1872(%rbp),%rdi
+movq -1880(%rbp),%rsi
+call rt_lit
 movq %rax,-1888(%rbp)
-movq -1888(%rbp),%rax
+movq -1888(%rbp),%rdi
+call rt_view
 movq %rax,-1896(%rbp)
-movq -1856(%rbp),%rdi
-movq -1896(%rbp),%rsi
-call f_native_o
+movq -1896(%rbp),%rax
 movq %rax,-1904(%rbp)
-call rt_new
+movq -1864(%rbp),%rdi
+movq -1904(%rbp),%rsi
+call f_native_o
 movq %rax,-1912(%rbp)
-movq -1912(%rbp),%rax
+call rt_new
 movq %rax,-1920(%rbp)
-movq -160(%rbp),%rax
-movq 24(%rax),%rax
-movq %rax,-1928(%rbp)
-movq -1928(%rbp),%rdi
-call rt_len
-movq %rax,-1936(%rbp)
-movq -1936(%rbp),%rax
-movq %rax,-1944(%rbp)
-movabsq $0,%rax
-movq %rax,-1952(%rbp)
-.L786:
-movq -1944(%rbp),%rcx
-movq -1952(%rbp),%rax
-cmpq %rcx,%rax
-jae .L788
 movq -1920(%rbp),%rax
-movq %rax,-1960(%rbp)
-movq -160(%rbp),%rax
+movq %rax,-1928(%rbp)
+movq -168(%rbp),%rax
 movq 24(%rax),%rax
+movq %rax,-1936(%rbp)
+movq -1936(%rbp),%rdi
+call rt_len
+movq %rax,-1944(%rbp)
+movq -1944(%rbp),%rax
+movq %rax,-1952(%rbp)
+movabsq $0,%rax
+movq %rax,-1960(%rbp)
+.L873:
+movq -1952(%rbp),%rcx
+movq -1960(%rbp),%rax
+cmpq %rcx,%rax
+jae .L875
+movq -1928(%rbp),%rax
 movq %rax,-1968(%rbp)
-movq -1968(%rbp),%rdi
-movq -1952(%rbp),%rsi
-call rt_slot
+movq -168(%rbp),%rax
+movq 24(%rax),%rax
 movq %rax,-1976(%rbp)
-movq -1976(%rbp),%rax
-movq (%rax),%rax
+movq -1976(%rbp),%rdi
+movq -1960(%rbp),%rsi
+call rt_slot
 movq %rax,-1984(%rbp)
 movq -1984(%rbp),%rax
+movq (%rax),%rax
 movq %rax,-1992(%rbp)
-movq -1960(%rbp),%rdi
-movq -1992(%rbp),%rsi
-call rt_pushb
+movq -1992(%rbp),%rax
 movq %rax,-2000(%rbp)
-.L787:
-incq -1952(%rbp)
-jmp .L786
-.L788:
-movabsq $1,%rax
+movq -1968(%rbp),%rdi
+movq -2000(%rbp),%rsi
+call rt_pushb
 movq %rax,-2008(%rbp)
-movq -2008(%rbp),%rax
+.L874:
+incq -1960(%rbp)
+jmp .L873
+.L875:
+movabsq $1,%rax
 movq %rax,-2016(%rbp)
-movq -2016(%rbp),%rdi
-call f_host_arg
+movq -2016(%rbp),%rax
 movq %rax,-2024(%rbp)
-movq -2024(%rbp),%rax
+movq -2024(%rbp),%rdi
+call f_host_arg
 movq %rax,-2032(%rbp)
-movq -2032(%rbp),%rdi
-call rt_view
+movq -2032(%rbp),%rax
 movq %rax,-2040(%rbp)
-movq -2040(%rbp),%rax
-movq %rax,-2048(%rbp)
-movq -1920(%rbp),%rdi
+movq -2040(%rbp),%rdi
 call rt_view
+movq %rax,-2048(%rbp)
+movq -2048(%rbp),%rax
 movq %rax,-2056(%rbp)
-movq -2056(%rbp),%rax
+movq -1928(%rbp),%rdi
+call rt_view
 movq %rax,-2064(%rbp)
-movq -2048(%rbp),%rdi
-movq -2064(%rbp),%rsi
-call f_host_write_file
+movq -2064(%rbp),%rax
 movq %rax,-2072(%rbp)
-movq -2072(%rbp),%rax
+movq -2056(%rbp),%rdi
+movq -2072(%rbp),%rsi
+call f_host_write_file
+movq %rax,-2080(%rbp)
+movq -2080(%rbp),%rax
 leave
 ret
 xorq %rax,%rax
 leave
 ret
-.set .F755,2080
+.set .F842,2080
 .type f_lexer_letter,@function
 f_lexer_letter:
 pushq %rbp
 movq %rsp,%rbp
-subq $.F789,%rsp
+subq $.F876,%rsp
 movq %rdi,-8(%rbp)
 movabsq $64,%rax
 movq %rax,-16(%rbp)
@@ -19231,12 +21197,12 @@ ret
 xorq %rax,%rax
 leave
 ret
-.set .F789,192
+.set .F876,192
 .type f_lexer_digit,@function
 f_lexer_digit:
 pushq %rbp
 movq %rsp,%rbp
-subq $.F790,%rsp
+subq $.F877,%rsp
 movq %rdi,-8(%rbp)
 movabsq $47,%rax
 movq %rax,-16(%rbp)
@@ -19270,12 +21236,12 @@ ret
 xorq %rax,%rax
 leave
 ret
-.set .F790,80
+.set .F877,80
 .type f_lexer_whitespace,@function
 f_lexer_whitespace:
 pushq %rbp
 movq %rsp,%rbp
-subq $.F791,%rsp
+subq $.F878,%rsp
 movq %rdi,-8(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-16(%rbp)
@@ -19357,12 +21323,12 @@ ret
 xorq %rax,%rax
 leave
 ret
-.set .F791,192
+.set .F878,192
 .type f_lexer_punctuation,@function
 f_lexer_punctuation:
 pushq %rbp
 movq %rsp,%rbp
-subq $.F792,%rsp
+subq $.F879,%rsp
 movq %rdi,-8(%rbp)
 movq -8(%rbp),%rax
 movq %rax,-16(%rbp)
@@ -19668,12 +21634,12 @@ ret
 xorq %rax,%rax
 leave
 ret
-.set .F792,752
+.set .F879,752
 .type f_lexer_pair_kind,@function
 f_lexer_pair_kind:
 pushq %rbp
 movq %rsp,%rbp
-subq $.F793,%rsp
+subq $.F880,%rsp
 movq %rdi,-8(%rbp)
 movq %rsi,-16(%rbp)
 movq -8(%rbp),%rax
@@ -19704,15 +21670,15 @@ andq %rcx,%rax
 movq %rax,-80(%rbp)
 movq -80(%rbp),%rax
 testq %rax,%rax
-jz .L794
+jz .L881
 movabsq $256,%rax
 movq %rax,-88(%rbp)
 movq -88(%rbp),%rax
 leave
 ret
-jmp .L795
-.L794:
-.L795:
+jmp .L882
+.L881:
+.L882:
 movq -8(%rbp),%rax
 movq %rax,-96(%rbp)
 movabsq $61,%rax
@@ -19741,15 +21707,15 @@ andq %rcx,%rax
 movq %rax,-152(%rbp)
 movq -152(%rbp),%rax
 testq %rax,%rax
-jz .L796
+jz .L883
 movabsq $257,%rax
 movq %rax,-160(%rbp)
 movq -160(%rbp),%rax
 leave
 ret
-jmp .L797
-.L796:
-.L797:
+jmp .L884
+.L883:
+.L884:
 movq -8(%rbp),%rax
 movq %rax,-168(%rbp)
 movabsq $61,%rax
@@ -19778,15 +21744,15 @@ andq %rcx,%rax
 movq %rax,-224(%rbp)
 movq -224(%rbp),%rax
 testq %rax,%rax
-jz .L798
+jz .L885
 movabsq $258,%rax
 movq %rax,-232(%rbp)
 movq -232(%rbp),%rax
 leave
 ret
-jmp .L799
-.L798:
-.L799:
+jmp .L886
+.L885:
+.L886:
 movq -8(%rbp),%rax
 movq %rax,-240(%rbp)
 movabsq $33,%rax
@@ -19815,15 +21781,15 @@ andq %rcx,%rax
 movq %rax,-296(%rbp)
 movq -296(%rbp),%rax
 testq %rax,%rax
-jz .L800
+jz .L887
 movabsq $259,%rax
 movq %rax,-304(%rbp)
 movq -304(%rbp),%rax
 leave
 ret
-jmp .L801
-.L800:
-.L801:
+jmp .L888
+.L887:
+.L888:
 movq -8(%rbp),%rax
 movq %rax,-312(%rbp)
 movabsq $58,%rax
@@ -19852,15 +21818,15 @@ andq %rcx,%rax
 movq %rax,-368(%rbp)
 movq -368(%rbp),%rax
 testq %rax,%rax
-jz .L802
+jz .L889
 movabsq $260,%rax
 movq %rax,-376(%rbp)
 movq -376(%rbp),%rax
 leave
 ret
-jmp .L803
-.L802:
-.L803:
+jmp .L890
+.L889:
+.L890:
 movabsq $0,%rax
 movq %rax,-384(%rbp)
 movq -384(%rbp),%rax
@@ -19869,12 +21835,12 @@ ret
 xorq %rax,%rax
 leave
 ret
-.set .F793,384
+.set .F880,384
 .type f_lexer_tokenize,@function
 f_lexer_tokenize:
 pushq %rbp
 movq %rsp,%rbp
-subq $.F804,%rsp
+subq $.F891,%rsp
 movq %rdi,-8(%rbp)
 call rt_new
 movq %rax,-16(%rbp)
@@ -19889,7 +21855,7 @@ movabsq $0,%rax
 movq %rax,-48(%rbp)
 movq -48(%rbp),%rax
 movq %rax,-56(%rbp)
-.L805:
+.L892:
 movq -56(%rbp),%rax
 movq %rax,-64(%rbp)
 movq -40(%rbp),%rcx
@@ -19900,7 +21866,7 @@ movzbq %al,%rax
 movq %rax,-72(%rbp)
 movq -72(%rbp),%rax
 testq %rax,%rax
-jz .L806
+jz .L893
 movq -8(%rbp),%rdi
 movq -56(%rbp),%rsi
 call rt_at
@@ -19914,7 +21880,7 @@ call f_lexer_whitespace
 movq %rax,-104(%rbp)
 movq -104(%rbp),%rax
 testq %rax,%rax
-jz .L807
+jz .L894
 movq -56(%rbp),%rax
 movq %rax,-112(%rbp)
 movabsq $1,%rax
@@ -19925,10 +21891,10 @@ addq %rcx,%rax
 movq %rax,-128(%rbp)
 movq -128(%rbp),%rax
 movq %rax,-56(%rbp)
-jmp .L805
-jmp .L808
-.L807:
-.L808:
+jmp .L892
+jmp .L895
+.L894:
+.L895:
 movq -88(%rbp),%rax
 movq %rax,-136(%rbp)
 movabsq $47,%rax
@@ -19941,7 +21907,7 @@ movzbq %al,%rax
 movq %rax,-152(%rbp)
 movq -152(%rbp),%rax
 testq %rax,%rax
-jz .L809
+jz .L896
 movq -56(%rbp),%rax
 movq %rax,-160(%rbp)
 movabsq $1,%rax
@@ -19960,9 +21926,9 @@ movzbq %al,%rax
 movq %rax,-192(%rbp)
 movq -192(%rbp),%rax
 testq %rax,%rax
-jnz .L811
-call abort@PLT
-.L811:
+jnz .L898
+call rt_abort
+.L898:
 movq -56(%rbp),%rax
 movq %rax,-200(%rbp)
 movabsq $1,%rax
@@ -19987,9 +21953,9 @@ movzbq %al,%rax
 movq %rax,-248(%rbp)
 movq -248(%rbp),%rax
 testq %rax,%rax
-jnz .L812
-call abort@PLT
-.L812:
+jnz .L899
+call rt_abort
+.L899:
 movq -56(%rbp),%rax
 movq %rax,-256(%rbp)
 movabsq $2,%rax
@@ -20000,7 +21966,7 @@ addq %rcx,%rax
 movq %rax,-272(%rbp)
 movq -272(%rbp),%rax
 movq %rax,-56(%rbp)
-.L813:
+.L900:
 movq -56(%rbp),%rax
 movq %rax,-280(%rbp)
 movq -40(%rbp),%rcx
@@ -20011,7 +21977,7 @@ movzbq %al,%rax
 movq %rax,-288(%rbp)
 movq -288(%rbp),%rax
 testq %rax,%rax
-jz .L814
+jz .L901
 movq -8(%rbp),%rdi
 movq -56(%rbp),%rsi
 call rt_at
@@ -20028,11 +21994,11 @@ movzbq %al,%rax
 movq %rax,-320(%rbp)
 movq -320(%rbp),%rax
 testq %rax,%rax
-jz .L815
-jmp .L814
-jmp .L816
-.L815:
-.L816:
+jz .L902
+jmp .L901
+jmp .L903
+.L902:
+.L903:
 movq -56(%rbp),%rax
 movq %rax,-328(%rbp)
 movabsq $1,%rax
@@ -20043,12 +22009,12 @@ addq %rcx,%rax
 movq %rax,-344(%rbp)
 movq -344(%rbp),%rax
 movq %rax,-56(%rbp)
-jmp .L813
-.L814:
-jmp .L805
-jmp .L810
-.L809:
-.L810:
+jmp .L900
+.L901:
+jmp .L892
+jmp .L897
+.L896:
+.L897:
 movq -56(%rbp),%rax
 movq %rax,-352(%rbp)
 movabsq $0,%rax
@@ -20067,7 +22033,7 @@ movzbq %al,%rax
 movq %rax,-392(%rbp)
 movq -392(%rbp),%rax
 testq %rax,%rax
-jz .L817
+jz .L904
 movabsq $3,%rax
 movq %rax,-400(%rbp)
 movq -400(%rbp),%rax
@@ -20086,7 +22052,7 @@ movabsq $0,%rax
 movq %rax,-432(%rbp)
 movq -432(%rbp),%rax
 movq %rax,-440(%rbp)
-.L819:
+.L906:
 movq -56(%rbp),%rax
 movq %rax,-448(%rbp)
 movq -40(%rbp),%rcx
@@ -20097,7 +22063,7 @@ movzbq %al,%rax
 movq %rax,-456(%rbp)
 movq -456(%rbp),%rax
 testq %rax,%rax
-jz .L820
+jz .L907
 movq -8(%rbp),%rdi
 movq -56(%rbp),%rsi
 call rt_at
@@ -20116,7 +22082,7 @@ movzbq %al,%rax
 movq %rax,-496(%rbp)
 movq -496(%rbp),%rax
 testq %rax,%rax
-jz .L821
+jz .L908
 movq -56(%rbp),%rax
 movq %rax,-504(%rbp)
 movabsq $1,%rax
@@ -20131,10 +22097,10 @@ movabsq $1,%rax
 movq %rax,-528(%rbp)
 movq -528(%rbp),%rax
 movq %rax,-440(%rbp)
-jmp .L820
-jmp .L822
-.L821:
-.L822:
+jmp .L907
+jmp .L909
+.L908:
+.L909:
 movq -472(%rbp),%rax
 movq %rax,-536(%rbp)
 movabsq $32,%rax
@@ -20157,9 +22123,9 @@ movzbq %al,%rax
 movq %rax,-576(%rbp)
 movq -576(%rbp),%rax
 testq %rax,%rax
-jnz .L823
-call abort@PLT
-.L823:
+jnz .L910
+call rt_abort
+.L910:
 movq -472(%rbp),%rax
 movq %rax,-584(%rbp)
 movabsq $92,%rax
@@ -20172,7 +22138,7 @@ movzbq %al,%rax
 movq %rax,-600(%rbp)
 movq -600(%rbp),%rax
 testq %rax,%rax
-jz .L824
+jz .L911
 movq -56(%rbp),%rax
 movq %rax,-608(%rbp)
 movabsq $1,%rax
@@ -20193,14 +22159,14 @@ movzbq %al,%rax
 movq %rax,-640(%rbp)
 movq -640(%rbp),%rax
 testq %rax,%rax
-jz .L826
-jmp .L820
-jmp .L827
-.L826:
-.L827:
-jmp .L825
-.L824:
-.L825:
+jz .L913
+jmp .L907
+jmp .L914
+.L913:
+.L914:
+jmp .L912
+.L911:
+.L912:
 movq -56(%rbp),%rax
 movq %rax,-648(%rbp)
 movabsq $1,%rax
@@ -20211,15 +22177,15 @@ addq %rcx,%rax
 movq %rax,-664(%rbp)
 movq -664(%rbp),%rax
 movq %rax,-56(%rbp)
-jmp .L819
-.L820:
+jmp .L906
+.L907:
 movq -440(%rbp),%rax
 testq %rax,%rax
-jnz .L828
-call abort@PLT
-.L828:
-jmp .L818
-.L817:
+jnz .L915
+call rt_abort
+.L915:
+jmp .L905
+.L904:
 movq -88(%rbp),%rax
 movq %rax,-672(%rbp)
 movq -672(%rbp),%rdi
@@ -20227,7 +22193,7 @@ call f_lexer_letter
 movq %rax,-680(%rbp)
 movq -680(%rbp),%rax
 testq %rax,%rax
-jz .L829
+jz .L916
 movabsq $1,%rax
 movq %rax,-688(%rbp)
 movq -688(%rbp),%rax
@@ -20242,7 +22208,7 @@ addq %rcx,%rax
 movq %rax,-712(%rbp)
 movq -712(%rbp),%rax
 movq %rax,-56(%rbp)
-.L831:
+.L918:
 movq -56(%rbp),%rax
 movq %rax,-720(%rbp)
 movq -40(%rbp),%rcx
@@ -20253,7 +22219,7 @@ movzbq %al,%rax
 movq %rax,-728(%rbp)
 movq -728(%rbp),%rax
 testq %rax,%rax
-jz .L832
+jz .L919
 movq -8(%rbp),%rdi
 movq -56(%rbp),%rsi
 call rt_at
@@ -20288,11 +22254,11 @@ movzbq %al,%rax
 movq %rax,-816(%rbp)
 movq -816(%rbp),%rax
 testq %rax,%rax
-jz .L833
-jmp .L832
-jmp .L834
-.L833:
-.L834:
+jz .L920
+jmp .L919
+jmp .L921
+.L920:
+.L921:
 movq -56(%rbp),%rax
 movq %rax,-824(%rbp)
 movabsq $1,%rax
@@ -20303,10 +22269,10 @@ addq %rcx,%rax
 movq %rax,-840(%rbp)
 movq -840(%rbp),%rax
 movq %rax,-56(%rbp)
-jmp .L831
-.L832:
-jmp .L830
-.L829:
+jmp .L918
+.L919:
+jmp .L917
+.L916:
 movq -88(%rbp),%rax
 movq %rax,-848(%rbp)
 movq -848(%rbp),%rdi
@@ -20314,7 +22280,7 @@ call f_lexer_digit
 movq %rax,-856(%rbp)
 movq -856(%rbp),%rax
 testq %rax,%rax
-jz .L835
+jz .L922
 movabsq $2,%rax
 movq %rax,-864(%rbp)
 movq -864(%rbp),%rax
@@ -20329,7 +22295,7 @@ addq %rcx,%rax
 movq %rax,-888(%rbp)
 movq -888(%rbp),%rax
 movq %rax,-56(%rbp)
-.L837:
+.L924:
 movq -56(%rbp),%rax
 movq %rax,-896(%rbp)
 movq -40(%rbp),%rcx
@@ -20340,7 +22306,7 @@ movzbq %al,%rax
 movq %rax,-904(%rbp)
 movq -904(%rbp),%rax
 testq %rax,%rax
-jz .L838
+jz .L925
 movq -8(%rbp),%rdi
 movq -56(%rbp),%rsi
 call rt_at
@@ -20362,11 +22328,11 @@ movzbq %al,%rax
 movq %rax,-952(%rbp)
 movq -952(%rbp),%rax
 testq %rax,%rax
-jz .L839
-jmp .L838
-jmp .L840
-.L839:
-.L840:
+jz .L926
+jmp .L925
+jmp .L927
+.L926:
+.L927:
 movq -56(%rbp),%rax
 movq %rax,-960(%rbp)
 movabsq $1,%rax
@@ -20377,10 +22343,10 @@ addq %rcx,%rax
 movq %rax,-976(%rbp)
 movq -976(%rbp),%rax
 movq %rax,-56(%rbp)
-jmp .L837
-.L838:
-jmp .L836
-.L835:
+jmp .L924
+.L925:
+jmp .L923
+.L922:
 movq -56(%rbp),%rax
 movq %rax,-984(%rbp)
 movabsq $1,%rax
@@ -20399,7 +22365,7 @@ movzbq %al,%rax
 movq %rax,-1016(%rbp)
 movq -1016(%rbp),%rax
 testq %rax,%rax
-jz .L841
+jz .L928
 movq -88(%rbp),%rax
 movq %rax,-1024(%rbp)
 movq -56(%rbp),%rax
@@ -20422,9 +22388,9 @@ call f_lexer_pair_kind
 movq %rax,-1072(%rbp)
 movq -1072(%rbp),%rax
 movq %rax,-368(%rbp)
-jmp .L842
-.L841:
-.L842:
+jmp .L929
+.L928:
+.L929:
 movq -368(%rbp),%rax
 movq %rax,-1080(%rbp)
 movabsq $0,%rax
@@ -20437,7 +22403,7 @@ movzbq %al,%rax
 movq %rax,-1096(%rbp)
 movq -1096(%rbp),%rax
 testq %rax,%rax
-jz .L843
+jz .L930
 movq -56(%rbp),%rax
 movq %rax,-1104(%rbp)
 movabsq $2,%rax
@@ -20448,8 +22414,8 @@ addq %rcx,%rax
 movq %rax,-1120(%rbp)
 movq -1120(%rbp),%rax
 movq %rax,-56(%rbp)
-jmp .L844
-.L843:
+jmp .L931
+.L930:
 movq -88(%rbp),%rax
 movq %rax,-1128(%rbp)
 movq -1128(%rbp),%rdi
@@ -20457,9 +22423,9 @@ call f_lexer_punctuation
 movq %rax,-1136(%rbp)
 movq -1136(%rbp),%rax
 testq %rax,%rax
-jnz .L845
-call abort@PLT
-.L845:
+jnz .L932
+call rt_abort
+.L932:
 movq -88(%rbp),%rax
 movq %rax,-368(%rbp)
 movq -56(%rbp),%rax
@@ -20472,10 +22438,10 @@ addq %rcx,%rax
 movq %rax,-1160(%rbp)
 movq -1160(%rbp),%rax
 movq %rax,-56(%rbp)
-.L844:
-.L836:
-.L830:
-.L818:
+.L931:
+.L923:
+.L917:
+.L905:
 movabsq $4,%rax
 movq %rax,-1168(%rbp)
 movq -1168(%rbp),%rdi
@@ -20504,8 +22470,8 @@ call rt_push
 movq %rax,-1192(%rbp)
 movabsq $0,%rax
 movq %rax,-1200(%rbp)
-jmp .L805
-.L806:
+jmp .L892
+.L893:
 movabsq $4,%rax
 movq %rax,-1208(%rbp)
 movq -1208(%rbp),%rdi
@@ -20542,21 +22508,5020 @@ ret
 xorq %rax,%rax
 leave
 ret
-.set .F804,1248
-.globl main
-main:
+.set .F891,1248
+.type rt_abort,@function
+rt_abort:
 pushq %rbp
 movq %rsp,%rbp
-movl %edi,rt_argc(%rip)
-movq %rsi,rt_argv(%rip)
-call f_native_main
-movq %rax,%rsi
-leaq .Lfmt(%rip),%rdi
-xorl %eax,%eax
-call printf@PLT
-xorl %eax,%eax
+subq $.F933,%rsp
+movabsq $39,%rax
+movq %rax,-8(%rbp)
+movq -8(%rbp),%rax
+movq %rax,-16(%rbp)
+movabsq $0,%rax
+movq %rax,-24(%rbp)
+movq -24(%rbp),%rax
+movq %rax,-32(%rbp)
+movabsq $0,%rax
+movq %rax,-40(%rbp)
+movq -40(%rbp),%rax
+movq %rax,-48(%rbp)
+movabsq $0,%rax
+movq %rax,-56(%rbp)
+movq -56(%rbp),%rax
+movq %rax,-64(%rbp)
+movq -16(%rbp),%rax
+movq -32(%rbp),%rdi
+movq -48(%rbp),%rsi
+movq -64(%rbp),%rdx
+xorl %r10d,%r10d
+xorl %r8d,%r8d
+xorl %r9d,%r9d
+syscall
+movq %rax,-72(%rbp)
+movq -72(%rbp),%rax
+movq %rax,-80(%rbp)
+movabsq $62,%rax
+movq %rax,-88(%rbp)
+movq -88(%rbp),%rax
+movq %rax,-96(%rbp)
+movq -80(%rbp),%rax
+movq %rax,-104(%rbp)
+movabsq $6,%rax
+movq %rax,-112(%rbp)
+movq -112(%rbp),%rax
+movq %rax,-120(%rbp)
+movabsq $0,%rax
+movq %rax,-128(%rbp)
+movq -128(%rbp),%rax
+movq %rax,-136(%rbp)
+movq -96(%rbp),%rax
+movq -104(%rbp),%rdi
+movq -120(%rbp),%rsi
+movq -136(%rbp),%rdx
+xorl %r10d,%r10d
+xorl %r8d,%r8d
+xorl %r9d,%r9d
+syscall
+movq %rax,-144(%rbp)
+movabsq $60,%rax
+movq %rax,-152(%rbp)
+movq -152(%rbp),%rax
+movq %rax,-160(%rbp)
+movabsq $134,%rax
+movq %rax,-168(%rbp)
+movq -168(%rbp),%rax
+movq %rax,-176(%rbp)
+movabsq $0,%rax
+movq %rax,-184(%rbp)
+movq -184(%rbp),%rax
+movq %rax,-192(%rbp)
+movabsq $0,%rax
+movq %rax,-200(%rbp)
+movq -200(%rbp),%rax
+movq %rax,-208(%rbp)
+movq -160(%rbp),%rax
+movq -176(%rbp),%rdi
+movq -192(%rbp),%rsi
+movq -208(%rbp),%rdx
+xorl %r10d,%r10d
+xorl %r8d,%r8d
+xorl %r9d,%r9d
+syscall
+movq %rax,-216(%rbp)
+movabsq $0,%rax
+movq %rax,-224(%rbp)
+movq -224(%rbp),%rax
 leave
 ret
-.section .rodata
-.Lfmt: .asciz "%llu\n"
+xorq %rax,%rax
+leave
+ret
+.set .F933,224
+.type rt_error,@function
+rt_error:
+pushq %rbp
+movq %rsp,%rbp
+subq $.F934,%rsp
+movq %rdi,-8(%rbp)
+movabsq $18446744073709547520,%rax
+movq %rax,-16(%rbp)
+movq -16(%rbp),%rax
+movq %rax,-24(%rbp)
+movq -8(%rbp),%rcx
+movq -24(%rbp),%rax
+cmpq %rcx,%rax
+setb %al
+movzbq %al,%rax
+movq %rax,-32(%rbp)
+movq -32(%rbp),%rax
+leave
+ret
+xorq %rax,%rax
+leave
+ret
+.set .F934,32
+.type rt_div,@function
+rt_div:
+pushq %rbp
+movq %rsp,%rbp
+subq $.F935,%rsp
+movq %rdi,-8(%rbp)
+movq %rsi,-16(%rbp)
+movq -16(%rbp),%rax
+movq %rax,-24(%rbp)
+movabsq $0,%rax
+movq %rax,-32(%rbp)
+movq -32(%rbp),%rcx
+movq -24(%rbp),%rax
+cmpq %rcx,%rax
+sete %al
+movzbq %al,%rax
+movq %rax,-40(%rbp)
+movq -40(%rbp),%rax
+testq %rax,%rax
+jz .L936
+call rt_abort
+movq %rax,-48(%rbp)
+jmp .L937
+.L936:
+.L937:
+movabsq $0,%rax
+movq %rax,-56(%rbp)
+movq -56(%rbp),%rax
+movq %rax,-64(%rbp)
+movq -8(%rbp),%rax
+movq %rax,-72(%rbp)
+.L938:
+movq -72(%rbp),%rax
+movq %rax,-80(%rbp)
+movq -16(%rbp),%rcx
+movq -80(%rbp),%rax
+cmpq %rcx,%rax
+setb %al
+movzbq %al,%rax
+movq %rax,-88(%rbp)
+movq -88(%rbp),%rax
+movq %rax,-96(%rbp)
+movabsq $0,%rax
+movq %rax,-104(%rbp)
+movq -104(%rbp),%rcx
+movq -96(%rbp),%rax
+cmpq %rcx,%rax
+sete %al
+movzbq %al,%rax
+movq %rax,-112(%rbp)
+movq -112(%rbp),%rax
+testq %rax,%rax
+jz .L939
+movq -16(%rbp),%rax
+movq %rax,-120(%rbp)
+movabsq $1,%rax
+movq %rax,-128(%rbp)
+movq -128(%rbp),%rax
+movq %rax,-136(%rbp)
+.L940:
+movq -72(%rbp),%rax
+movq %rax,-144(%rbp)
+movq -120(%rbp),%rax
+movq %rax,-152(%rbp)
+movq -120(%rbp),%rcx
+movq -152(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-160(%rbp)
+movq -160(%rbp),%rcx
+movq -144(%rbp),%rax
+cmpq %rcx,%rax
+setb %al
+movzbq %al,%rax
+movq %rax,-168(%rbp)
+movq -168(%rbp),%rax
+movq %rax,-176(%rbp)
+movabsq $0,%rax
+movq %rax,-184(%rbp)
+movq -184(%rbp),%rcx
+movq -176(%rbp),%rax
+cmpq %rcx,%rax
+sete %al
+movzbq %al,%rax
+movq %rax,-192(%rbp)
+movq -192(%rbp),%rax
+movq %rax,-200(%rbp)
+movq -120(%rbp),%rax
+movq %rax,-208(%rbp)
+movq -120(%rbp),%rcx
+movq -208(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-216(%rbp)
+movq -216(%rbp),%rax
+movq %rax,-224(%rbp)
+movq -120(%rbp),%rcx
+movq -224(%rbp),%rax
+cmpq %rcx,%rax
+setb %al
+movzbq %al,%rax
+movq %rax,-232(%rbp)
+movq -232(%rbp),%rax
+movq %rax,-240(%rbp)
+movabsq $0,%rax
+movq %rax,-248(%rbp)
+movq -248(%rbp),%rcx
+movq -240(%rbp),%rax
+cmpq %rcx,%rax
+sete %al
+movzbq %al,%rax
+movq %rax,-256(%rbp)
+movq -256(%rbp),%rcx
+movq -200(%rbp),%rax
+andq %rcx,%rax
+movq %rax,-264(%rbp)
+movq -264(%rbp),%rax
+testq %rax,%rax
+jz .L941
+movq -120(%rbp),%rax
+movq %rax,-272(%rbp)
+movq -120(%rbp),%rcx
+movq -272(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-280(%rbp)
+movq -280(%rbp),%rax
+movq %rax,-120(%rbp)
+movq -136(%rbp),%rax
+movq %rax,-288(%rbp)
+movq -136(%rbp),%rcx
+movq -288(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-296(%rbp)
+movq -296(%rbp),%rax
+movq %rax,-136(%rbp)
+jmp .L940
+.L941:
+movq -72(%rbp),%rax
+movq %rax,-304(%rbp)
+movq -120(%rbp),%rcx
+movq -304(%rbp),%rax
+subq %rcx,%rax
+movq %rax,-312(%rbp)
+movq -312(%rbp),%rax
+movq %rax,-72(%rbp)
+movq -64(%rbp),%rax
+movq %rax,-320(%rbp)
+movq -136(%rbp),%rcx
+movq -320(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-328(%rbp)
+movq -328(%rbp),%rax
+movq %rax,-64(%rbp)
+jmp .L938
+.L939:
+movq -64(%rbp),%rax
+leave
+ret
+xorq %rax,%rax
+leave
+ret
+.set .F935,336
+.type rt_alloc,@function
+rt_alloc:
+pushq %rbp
+movq %rsp,%rbp
+subq $.F942,%rsp
+movq %rdi,-8(%rbp)
+leaq rt_state(%rip),%rax
+movq %rax,-16(%rbp)
+movq -16(%rbp),%rax
+movq %rax,-24(%rbp)
+movabsq $1152921504606846976,%rax
+movq %rax,-32(%rbp)
+movq -32(%rbp),%rax
+movq %rax,-40(%rbp)
+movq -8(%rbp),%rcx
+movq -40(%rbp),%rax
+cmpq %rcx,%rax
+setb %al
+movzbq %al,%rax
+movq %rax,-48(%rbp)
+movq -48(%rbp),%rax
+testq %rax,%rax
+jz .L943
+call rt_abort
+movq %rax,-56(%rbp)
+jmp .L944
+.L943:
+.L944:
+movabsq $32,%rax
+movq %rax,-64(%rbp)
+movq -64(%rbp),%rax
+movq %rax,-72(%rbp)
+movabsq $0,%rax
+movq %rax,-80(%rbp)
+movq -80(%rbp),%rax
+movq %rax,-88(%rbp)
+.L945:
+movq -72(%rbp),%rax
+movq %rax,-96(%rbp)
+movq -8(%rbp),%rax
+movq %rax,-104(%rbp)
+movabsq $16,%rax
+movq %rax,-112(%rbp)
+movq -112(%rbp),%rcx
+movq -104(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-120(%rbp)
+movq -120(%rbp),%rcx
+movq -96(%rbp),%rax
+cmpq %rcx,%rax
+setb %al
+movzbq %al,%rax
+movq %rax,-128(%rbp)
+movq -128(%rbp),%rax
+testq %rax,%rax
+jz .L946
+movq -72(%rbp),%rax
+movq %rax,-136(%rbp)
+movabsq $2,%rax
+movq %rax,-144(%rbp)
+movq -144(%rbp),%rcx
+movq -136(%rbp),%rax
+imulq %rcx,%rax
+movq %rax,-152(%rbp)
+movq -152(%rbp),%rax
+movq %rax,-72(%rbp)
+movq -88(%rbp),%rax
+movq %rax,-160(%rbp)
+movabsq $1,%rax
+movq %rax,-168(%rbp)
+movq -168(%rbp),%rcx
+movq -160(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-176(%rbp)
+movq -176(%rbp),%rax
+movq %rax,-88(%rbp)
+jmp .L945
+.L946:
+movq -24(%rbp),%rax
+movq %rax,-184(%rbp)
+movabsq $256,%rax
+movq %rax,-192(%rbp)
+movq -192(%rbp),%rcx
+movq -184(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-200(%rbp)
+movq -200(%rbp),%rax
+movq %rax,-208(%rbp)
+movq -88(%rbp),%rax
+movq %rax,-216(%rbp)
+movabsq $8,%rax
+movq %rax,-224(%rbp)
+movq -224(%rbp),%rcx
+movq -216(%rbp),%rax
+imulq %rcx,%rax
+movq %rax,-232(%rbp)
+movq -232(%rbp),%rcx
+movq -208(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-240(%rbp)
+movq -240(%rbp),%rax
+movq %rax,-248(%rbp)
+movq -248(%rbp),%rax
+movq %rax,-256(%rbp)
+movq -256(%rbp),%rax
+movq (%rax),%rax
+movq %rax,-264(%rbp)
+movq -264(%rbp),%rax
+movq %rax,-272(%rbp)
+movq -272(%rbp),%rax
+movq %rax,-280(%rbp)
+movabsq $0,%rax
+movq %rax,-288(%rbp)
+movq -288(%rbp),%rcx
+movq -280(%rbp),%rax
+cmpq %rcx,%rax
+setne %al
+movzbq %al,%rax
+movq %rax,-296(%rbp)
+movq -296(%rbp),%rax
+testq %rax,%rax
+jz .L947
+movq -248(%rbp),%rax
+movq %rax,-304(%rbp)
+movq -272(%rbp),%rax
+movq %rax,-312(%rbp)
+movabsq $8,%rax
+movq %rax,-320(%rbp)
+movq -320(%rbp),%rcx
+movq -312(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-328(%rbp)
+movq -328(%rbp),%rax
+movq %rax,-336(%rbp)
+movq -336(%rbp),%rax
+movq (%rax),%rax
+movq %rax,-344(%rbp)
+movq -344(%rbp),%rax
+movq %rax,-352(%rbp)
+movq -304(%rbp),%rcx
+movq -352(%rbp),%rax
+movq %rax,(%rcx)
+xorq %rax,%rax
+movq %rax,-360(%rbp)
+jmp .L948
+.L947:
+movq -24(%rbp),%rax
+movq %rax,-368(%rbp)
+movabsq $768,%rax
+movq %rax,-376(%rbp)
+movq -376(%rbp),%rcx
+movq -368(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-384(%rbp)
+movq -384(%rbp),%rax
+movq %rax,-392(%rbp)
+movq -88(%rbp),%rax
+movq %rax,-400(%rbp)
+movabsq $8,%rax
+movq %rax,-408(%rbp)
+movq -408(%rbp),%rcx
+movq -400(%rbp),%rax
+imulq %rcx,%rax
+movq %rax,-416(%rbp)
+movq -416(%rbp),%rcx
+movq -392(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-424(%rbp)
+movq -424(%rbp),%rax
+movq %rax,-432(%rbp)
+movq -24(%rbp),%rax
+movq %rax,-440(%rbp)
+movabsq $1280,%rax
+movq %rax,-448(%rbp)
+movq -448(%rbp),%rcx
+movq -440(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-456(%rbp)
+movq -456(%rbp),%rax
+movq %rax,-464(%rbp)
+movq -88(%rbp),%rax
+movq %rax,-472(%rbp)
+movabsq $8,%rax
+movq %rax,-480(%rbp)
+movq -480(%rbp),%rcx
+movq -472(%rbp),%rax
+imulq %rcx,%rax
+movq %rax,-488(%rbp)
+movq -488(%rbp),%rcx
+movq -464(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-496(%rbp)
+movq -496(%rbp),%rax
+movq %rax,-504(%rbp)
+movq -504(%rbp),%rax
+movq %rax,-512(%rbp)
+movq -512(%rbp),%rax
+movq (%rax),%rax
+movq %rax,-520(%rbp)
+movq -520(%rbp),%rax
+movq %rax,-528(%rbp)
+movabsq $0,%rax
+movq %rax,-536(%rbp)
+movq -536(%rbp),%rcx
+movq -528(%rbp),%rax
+cmpq %rcx,%rax
+sete %al
+movzbq %al,%rax
+movq %rax,-544(%rbp)
+movq -544(%rbp),%rax
+testq %rax,%rax
+jz .L949
+movabsq $1048576,%rax
+movq %rax,-552(%rbp)
+movq -552(%rbp),%rax
+movq %rax,-560(%rbp)
+movq -560(%rbp),%rax
+movq %rax,-568(%rbp)
+movq -72(%rbp),%rax
+movq %rax,-576(%rbp)
+movabsq $16,%rax
+movq %rax,-584(%rbp)
+movq -584(%rbp),%rcx
+movq -576(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-592(%rbp)
+movq -592(%rbp),%rcx
+movq -568(%rbp),%rax
+cmpq %rcx,%rax
+setb %al
+movzbq %al,%rax
+movq %rax,-600(%rbp)
+movq -600(%rbp),%rax
+testq %rax,%rax
+jz .L951
+movq -72(%rbp),%rax
+movq %rax,-608(%rbp)
+movabsq $16,%rax
+movq %rax,-616(%rbp)
+movq -616(%rbp),%rcx
+movq -608(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-624(%rbp)
+movq -624(%rbp),%rax
+movq %rax,-560(%rbp)
+jmp .L952
+.L951:
+.L952:
+movq -560(%rbp),%rax
+movq %rax,-632(%rbp)
+movq -632(%rbp),%rsi
+movl $9,%eax
+xorl %edi,%edi
+movl $3,%edx
+movl $34,%r10d
+movq $-1,%r8
+xorl %r9d,%r9d
+syscall
+movq %rax,-640(%rbp)
+movq -640(%rbp),%rax
+movq %rax,-648(%rbp)
+movq -648(%rbp),%rax
+movq %rax,-656(%rbp)
+movq -656(%rbp),%rdi
+call rt_error
+movq %rax,-664(%rbp)
+movq -664(%rbp),%rax
+testq %rax,%rax
+jz .L953
+call rt_abort
+movq %rax,-672(%rbp)
+jmp .L954
+.L953:
+.L954:
+movq -648(%rbp),%rax
+movq %rax,-680(%rbp)
+movq -24(%rbp),%rax
+movq %rax,-688(%rbp)
+movabsq $32,%rax
+movq %rax,-696(%rbp)
+movq -696(%rbp),%rcx
+movq -688(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-704(%rbp)
+movq -704(%rbp),%rax
+movq %rax,-712(%rbp)
+movq -712(%rbp),%rax
+movq (%rax),%rax
+movq %rax,-720(%rbp)
+movq -720(%rbp),%rax
+movq %rax,-728(%rbp)
+movq -680(%rbp),%rcx
+movq -728(%rbp),%rax
+movq %rax,(%rcx)
+xorq %rax,%rax
+movq %rax,-736(%rbp)
+movq -648(%rbp),%rax
+movq %rax,-744(%rbp)
+movabsq $8,%rax
+movq %rax,-752(%rbp)
+movq -752(%rbp),%rcx
+movq -744(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-760(%rbp)
+movq -760(%rbp),%rax
+movq %rax,-768(%rbp)
+movq -560(%rbp),%rax
+movq %rax,-776(%rbp)
+movq -768(%rbp),%rcx
+movq -776(%rbp),%rax
+movq %rax,(%rcx)
+xorq %rax,%rax
+movq %rax,-784(%rbp)
+movq -24(%rbp),%rax
+movq %rax,-792(%rbp)
+movabsq $32,%rax
+movq %rax,-800(%rbp)
+movq -800(%rbp),%rcx
+movq -792(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-808(%rbp)
+movq -808(%rbp),%rax
+movq %rax,-816(%rbp)
+movq -648(%rbp),%rax
+movq %rax,-824(%rbp)
+movq -816(%rbp),%rcx
+movq -824(%rbp),%rax
+movq %rax,(%rcx)
+xorq %rax,%rax
+movq %rax,-832(%rbp)
+movq -432(%rbp),%rax
+movq %rax,-840(%rbp)
+movq -648(%rbp),%rax
+movq %rax,-848(%rbp)
+movabsq $16,%rax
+movq %rax,-856(%rbp)
+movq -856(%rbp),%rcx
+movq -848(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-864(%rbp)
+movq -864(%rbp),%rax
+movq %rax,-872(%rbp)
+movq -840(%rbp),%rcx
+movq -872(%rbp),%rax
+movq %rax,(%rcx)
+xorq %rax,%rax
+movq %rax,-880(%rbp)
+movq -504(%rbp),%rax
+movq %rax,-888(%rbp)
+movq -560(%rbp),%rax
+movq %rax,-896(%rbp)
+movabsq $16,%rax
+movq %rax,-904(%rbp)
+movq -904(%rbp),%rcx
+movq -896(%rbp),%rax
+subq %rcx,%rax
+movq %rax,-912(%rbp)
+movq -912(%rbp),%rax
+movq %rax,-920(%rbp)
+movq -72(%rbp),%rax
+movq %rax,-928(%rbp)
+movq -920(%rbp),%rdi
+movq -928(%rbp),%rsi
+call rt_div
+movq %rax,-936(%rbp)
+movq -936(%rbp),%rax
+movq %rax,-944(%rbp)
+movq -888(%rbp),%rcx
+movq -944(%rbp),%rax
+movq %rax,(%rcx)
+xorq %rax,%rax
+movq %rax,-952(%rbp)
+jmp .L950
+.L949:
+.L950:
+movq -432(%rbp),%rax
+movq %rax,-960(%rbp)
+movq -960(%rbp),%rax
+movq (%rax),%rax
+movq %rax,-968(%rbp)
+movq -968(%rbp),%rax
+movq %rax,-272(%rbp)
+movq -432(%rbp),%rax
+movq %rax,-976(%rbp)
+movq -272(%rbp),%rax
+movq %rax,-984(%rbp)
+movq -72(%rbp),%rcx
+movq -984(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-992(%rbp)
+movq -992(%rbp),%rax
+movq %rax,-1000(%rbp)
+movq -976(%rbp),%rcx
+movq -1000(%rbp),%rax
+movq %rax,(%rcx)
+xorq %rax,%rax
+movq %rax,-1008(%rbp)
+movq -504(%rbp),%rax
+movq %rax,-1016(%rbp)
+movq -504(%rbp),%rax
+movq %rax,-1024(%rbp)
+movq -1024(%rbp),%rax
+movq (%rax),%rax
+movq %rax,-1032(%rbp)
+movq -1032(%rbp),%rax
+movq %rax,-1040(%rbp)
+movabsq $1,%rax
+movq %rax,-1048(%rbp)
+movq -1048(%rbp),%rcx
+movq -1040(%rbp),%rax
+subq %rcx,%rax
+movq %rax,-1056(%rbp)
+movq -1056(%rbp),%rax
+movq %rax,-1064(%rbp)
+movq -1016(%rbp),%rcx
+movq -1064(%rbp),%rax
+movq %rax,(%rcx)
+xorq %rax,%rax
+movq %rax,-1072(%rbp)
+movq -272(%rbp),%rax
+movq %rax,-1080(%rbp)
+movq -72(%rbp),%rax
+movq %rax,-1088(%rbp)
+movq -1080(%rbp),%rcx
+movq -1088(%rbp),%rax
+movq %rax,(%rcx)
+xorq %rax,%rax
+movq %rax,-1096(%rbp)
+.L948:
+movq -272(%rbp),%rax
+movq %rax,-1104(%rbp)
+movabsq $8,%rax
+movq %rax,-1112(%rbp)
+movq -1112(%rbp),%rcx
+movq -1104(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-1120(%rbp)
+movq -1120(%rbp),%rax
+movq %rax,-1128(%rbp)
+movabsq $1,%rax
+movq %rax,-1136(%rbp)
+movq -1136(%rbp),%rax
+movq %rax,-1144(%rbp)
+movq -1128(%rbp),%rcx
+movq -1144(%rbp),%rax
+movq %rax,(%rcx)
+xorq %rax,%rax
+movq %rax,-1152(%rbp)
+movq -272(%rbp),%rax
+movq %rax,-1160(%rbp)
+movabsq $16,%rax
+movq %rax,-1168(%rbp)
+movq -1168(%rbp),%rcx
+movq -1160(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-1176(%rbp)
+movq -1176(%rbp),%rax
+movq %rax,-1184(%rbp)
+movabsq $0,%rax
+movq %rax,-1192(%rbp)
+movq -1192(%rbp),%rax
+movq %rax,-1200(%rbp)
+.L955:
+movq -1200(%rbp),%rax
+movq %rax,-1208(%rbp)
+movq -72(%rbp),%rax
+movq %rax,-1216(%rbp)
+movabsq $16,%rax
+movq %rax,-1224(%rbp)
+movq -1224(%rbp),%rcx
+movq -1216(%rbp),%rax
+subq %rcx,%rax
+movq %rax,-1232(%rbp)
+movq -1232(%rbp),%rcx
+movq -1208(%rbp),%rax
+cmpq %rcx,%rax
+setb %al
+movzbq %al,%rax
+movq %rax,-1240(%rbp)
+movq -1240(%rbp),%rax
+testq %rax,%rax
+jz .L956
+movq -1184(%rbp),%rax
+movq %rax,-1248(%rbp)
+movq -1200(%rbp),%rcx
+movq -1248(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-1256(%rbp)
+movq -1256(%rbp),%rax
+movq %rax,-1264(%rbp)
+movabsq $0,%rax
+movq %rax,-1272(%rbp)
+movq -1272(%rbp),%rax
+movq %rax,-1280(%rbp)
+movq -1264(%rbp),%rcx
+movq -1280(%rbp),%rax
+movq %rax,(%rcx)
+xorq %rax,%rax
+movq %rax,-1288(%rbp)
+movq -1200(%rbp),%rax
+movq %rax,-1296(%rbp)
+movabsq $8,%rax
+movq %rax,-1304(%rbp)
+movq -1304(%rbp),%rcx
+movq -1296(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-1312(%rbp)
+movq -1312(%rbp),%rax
+movq %rax,-1200(%rbp)
+jmp .L955
+.L956:
+movq -24(%rbp),%rax
+movq %rax,-1320(%rbp)
+movabsq $24,%rax
+movq %rax,-1328(%rbp)
+movq -1328(%rbp),%rcx
+movq -1320(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-1336(%rbp)
+movq -1336(%rbp),%rax
+movq %rax,-1344(%rbp)
+movq -24(%rbp),%rax
+movq %rax,-1352(%rbp)
+movabsq $24,%rax
+movq %rax,-1360(%rbp)
+movq -1360(%rbp),%rcx
+movq -1352(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-1368(%rbp)
+movq -1368(%rbp),%rax
+movq %rax,-1376(%rbp)
+movq -1376(%rbp),%rax
+movq (%rax),%rax
+movq %rax,-1384(%rbp)
+movq -1384(%rbp),%rax
+movq %rax,-1392(%rbp)
+movabsq $1,%rax
+movq %rax,-1400(%rbp)
+movq -1400(%rbp),%rcx
+movq -1392(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-1408(%rbp)
+movq -1408(%rbp),%rax
+movq %rax,-1416(%rbp)
+movq -1344(%rbp),%rcx
+movq -1416(%rbp),%rax
+movq %rax,(%rcx)
+xorq %rax,%rax
+movq %rax,-1424(%rbp)
+movq -1184(%rbp),%rax
+leave
+ret
+xorq %rax,%rax
+leave
+ret
+.set .F942,1424
+.type rt_free,@function
+rt_free:
+pushq %rbp
+movq %rsp,%rbp
+subq $.F957,%rsp
+movq %rdi,-8(%rbp)
+movq -8(%rbp),%rax
+movq %rax,-16(%rbp)
+movabsq $0,%rax
+movq %rax,-24(%rbp)
+movq -24(%rbp),%rcx
+movq -16(%rbp),%rax
+cmpq %rcx,%rax
+sete %al
+movzbq %al,%rax
+movq %rax,-32(%rbp)
+movq -32(%rbp),%rax
+testq %rax,%rax
+jz .L958
+movabsq $0,%rax
+movq %rax,-40(%rbp)
+movq -40(%rbp),%rax
+leave
+ret
+jmp .L959
+.L958:
+.L959:
+leaq rt_state(%rip),%rax
+movq %rax,-48(%rbp)
+movq -48(%rbp),%rax
+movq %rax,-56(%rbp)
+movq -8(%rbp),%rax
+movq %rax,-64(%rbp)
+movabsq $16,%rax
+movq %rax,-72(%rbp)
+movq -72(%rbp),%rcx
+movq -64(%rbp),%rax
+subq %rcx,%rax
+movq %rax,-80(%rbp)
+movq -80(%rbp),%rax
+movq %rax,-88(%rbp)
+movq -88(%rbp),%rax
+movq %rax,-96(%rbp)
+movabsq $8,%rax
+movq %rax,-104(%rbp)
+movq -104(%rbp),%rcx
+movq -96(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-112(%rbp)
+movq -112(%rbp),%rax
+movq %rax,-120(%rbp)
+movq -120(%rbp),%rax
+movq (%rax),%rax
+movq %rax,-128(%rbp)
+movq -128(%rbp),%rax
+movq %rax,-136(%rbp)
+movabsq $1,%rax
+movq %rax,-144(%rbp)
+movq -144(%rbp),%rcx
+movq -136(%rbp),%rax
+cmpq %rcx,%rax
+setne %al
+movzbq %al,%rax
+movq %rax,-152(%rbp)
+movq -152(%rbp),%rax
+testq %rax,%rax
+jz .L960
+call rt_abort
+movq %rax,-160(%rbp)
+jmp .L961
+.L960:
+.L961:
+movq -88(%rbp),%rax
+movq %rax,-168(%rbp)
+movq -168(%rbp),%rax
+movq (%rax),%rax
+movq %rax,-176(%rbp)
+movq -176(%rbp),%rax
+movq %rax,-184(%rbp)
+movabsq $32,%rax
+movq %rax,-192(%rbp)
+movq -192(%rbp),%rax
+movq %rax,-200(%rbp)
+movabsq $0,%rax
+movq %rax,-208(%rbp)
+movq -208(%rbp),%rax
+movq %rax,-216(%rbp)
+.L962:
+movq -200(%rbp),%rax
+movq %rax,-224(%rbp)
+movq -184(%rbp),%rcx
+movq -224(%rbp),%rax
+cmpq %rcx,%rax
+setb %al
+movzbq %al,%rax
+movq %rax,-232(%rbp)
+movq -232(%rbp),%rax
+testq %rax,%rax
+jz .L963
+movq -200(%rbp),%rax
+movq %rax,-240(%rbp)
+movabsq $2,%rax
+movq %rax,-248(%rbp)
+movq -248(%rbp),%rcx
+movq -240(%rbp),%rax
+imulq %rcx,%rax
+movq %rax,-256(%rbp)
+movq -256(%rbp),%rax
+movq %rax,-200(%rbp)
+movq -216(%rbp),%rax
+movq %rax,-264(%rbp)
+movabsq $1,%rax
+movq %rax,-272(%rbp)
+movq -272(%rbp),%rcx
+movq -264(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-280(%rbp)
+movq -280(%rbp),%rax
+movq %rax,-216(%rbp)
+jmp .L962
+.L963:
+movq -56(%rbp),%rax
+movq %rax,-288(%rbp)
+movabsq $256,%rax
+movq %rax,-296(%rbp)
+movq -296(%rbp),%rcx
+movq -288(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-304(%rbp)
+movq -304(%rbp),%rax
+movq %rax,-312(%rbp)
+movq -216(%rbp),%rax
+movq %rax,-320(%rbp)
+movabsq $8,%rax
+movq %rax,-328(%rbp)
+movq -328(%rbp),%rcx
+movq -320(%rbp),%rax
+imulq %rcx,%rax
+movq %rax,-336(%rbp)
+movq -336(%rbp),%rcx
+movq -312(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-344(%rbp)
+movq -344(%rbp),%rax
+movq %rax,-352(%rbp)
+movq -88(%rbp),%rax
+movq %rax,-360(%rbp)
+movabsq $8,%rax
+movq %rax,-368(%rbp)
+movq -368(%rbp),%rcx
+movq -360(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-376(%rbp)
+movq -376(%rbp),%rax
+movq %rax,-384(%rbp)
+movq -352(%rbp),%rax
+movq %rax,-392(%rbp)
+movq -392(%rbp),%rax
+movq (%rax),%rax
+movq %rax,-400(%rbp)
+movq -400(%rbp),%rax
+movq %rax,-408(%rbp)
+movq -384(%rbp),%rcx
+movq -408(%rbp),%rax
+movq %rax,(%rcx)
+xorq %rax,%rax
+movq %rax,-416(%rbp)
+movq -352(%rbp),%rax
+movq %rax,-424(%rbp)
+movq -88(%rbp),%rax
+movq %rax,-432(%rbp)
+movq -424(%rbp),%rcx
+movq -432(%rbp),%rax
+movq %rax,(%rcx)
+xorq %rax,%rax
+movq %rax,-440(%rbp)
+movq -56(%rbp),%rax
+movq %rax,-448(%rbp)
+movabsq $24,%rax
+movq %rax,-456(%rbp)
+movq -456(%rbp),%rcx
+movq -448(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-464(%rbp)
+movq -464(%rbp),%rax
+movq %rax,-472(%rbp)
+movq -56(%rbp),%rax
+movq %rax,-480(%rbp)
+movabsq $24,%rax
+movq %rax,-488(%rbp)
+movq -488(%rbp),%rcx
+movq -480(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-496(%rbp)
+movq -496(%rbp),%rax
+movq %rax,-504(%rbp)
+movq -504(%rbp),%rax
+movq (%rax),%rax
+movq %rax,-512(%rbp)
+movq -512(%rbp),%rax
+movq %rax,-520(%rbp)
+movabsq $1,%rax
+movq %rax,-528(%rbp)
+movq -528(%rbp),%rcx
+movq -520(%rbp),%rax
+subq %rcx,%rax
+movq %rax,-536(%rbp)
+movq -536(%rbp),%rax
+movq %rax,-544(%rbp)
+movq -472(%rbp),%rcx
+movq -544(%rbp),%rax
+movq %rax,(%rcx)
+xorq %rax,%rax
+movq %rax,-552(%rbp)
+movabsq $0,%rax
+movq %rax,-560(%rbp)
+movq -560(%rbp),%rax
+leave
+ret
+xorq %rax,%rax
+leave
+ret
+.set .F957,560
+.type rt_live,@function
+rt_live:
+pushq %rbp
+movq %rsp,%rbp
+subq $.F964,%rsp
+leaq rt_state(%rip),%rax
+movq %rax,-8(%rbp)
+movq -8(%rbp),%rax
+movq %rax,-16(%rbp)
+movabsq $24,%rax
+movq %rax,-24(%rbp)
+movq -24(%rbp),%rcx
+movq -16(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-32(%rbp)
+movq -32(%rbp),%rax
+movq %rax,-40(%rbp)
+movq -40(%rbp),%rax
+movq (%rax),%rax
+movq %rax,-48(%rbp)
+movq -48(%rbp),%rax
+leave
+ret
+xorq %rax,%rax
+leave
+ret
+.set .F964,48
+.type rt_shutdown,@function
+rt_shutdown:
+pushq %rbp
+movq %rsp,%rbp
+subq $.F965,%rsp
+leaq rt_state(%rip),%rax
+movq %rax,-8(%rbp)
+movq -8(%rbp),%rax
+movq %rax,-16(%rbp)
+movq -16(%rbp),%rax
+movq %rax,-24(%rbp)
+movabsq $32,%rax
+movq %rax,-32(%rbp)
+movq -32(%rbp),%rcx
+movq -24(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-40(%rbp)
+movq -40(%rbp),%rax
+movq %rax,-48(%rbp)
+movq -48(%rbp),%rax
+movq (%rax),%rax
+movq %rax,-56(%rbp)
+movq -56(%rbp),%rax
+movq %rax,-64(%rbp)
+.L966:
+movq -64(%rbp),%rax
+movq %rax,-72(%rbp)
+movabsq $0,%rax
+movq %rax,-80(%rbp)
+movq -80(%rbp),%rcx
+movq -72(%rbp),%rax
+cmpq %rcx,%rax
+setne %al
+movzbq %al,%rax
+movq %rax,-88(%rbp)
+movq -88(%rbp),%rax
+testq %rax,%rax
+jz .L967
+movq -64(%rbp),%rax
+movq %rax,-96(%rbp)
+movq -96(%rbp),%rax
+movq (%rax),%rax
+movq %rax,-104(%rbp)
+movq -104(%rbp),%rax
+movq %rax,-112(%rbp)
+movq -64(%rbp),%rax
+movq %rax,-120(%rbp)
+movabsq $8,%rax
+movq %rax,-128(%rbp)
+movq -128(%rbp),%rcx
+movq -120(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-136(%rbp)
+movq -136(%rbp),%rax
+movq %rax,-144(%rbp)
+movq -144(%rbp),%rax
+movq (%rax),%rax
+movq %rax,-152(%rbp)
+movq -152(%rbp),%rax
+movq %rax,-160(%rbp)
+movabsq $11,%rax
+movq %rax,-168(%rbp)
+movq -168(%rbp),%rax
+movq %rax,-176(%rbp)
+movq -64(%rbp),%rax
+movq %rax,-184(%rbp)
+movq -160(%rbp),%rax
+movq %rax,-192(%rbp)
+movabsq $0,%rax
+movq %rax,-200(%rbp)
+movq -200(%rbp),%rax
+movq %rax,-208(%rbp)
+movq -176(%rbp),%rax
+movq -184(%rbp),%rdi
+movq -192(%rbp),%rsi
+movq -208(%rbp),%rdx
+xorl %r10d,%r10d
+xorl %r8d,%r8d
+xorl %r9d,%r9d
+syscall
+movq %rax,-216(%rbp)
+movq -112(%rbp),%rax
+movq %rax,-64(%rbp)
+jmp .L966
+.L967:
+movq -16(%rbp),%rax
+movq %rax,-224(%rbp)
+movabsq $32,%rax
+movq %rax,-232(%rbp)
+movq -232(%rbp),%rcx
+movq -224(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-240(%rbp)
+movq -240(%rbp),%rax
+movq %rax,-248(%rbp)
+movabsq $0,%rax
+movq %rax,-256(%rbp)
+movq -256(%rbp),%rax
+movq %rax,-264(%rbp)
+movq -248(%rbp),%rcx
+movq -264(%rbp),%rax
+movq %rax,(%rcx)
+xorq %rax,%rax
+movq %rax,-272(%rbp)
+movabsq $0,%rax
+movq %rax,-280(%rbp)
+movq -280(%rbp),%rax
+leave
+ret
+xorq %rax,%rax
+leave
+ret
+.set .F965,288
+.type rt_new,@function
+rt_new:
+pushq %rbp
+movq %rsp,%rbp
+subq $.F968,%rsp
+movabsq $24,%rax
+movq %rax,-8(%rbp)
+movq -8(%rbp),%rax
+movq %rax,-16(%rbp)
+movq -16(%rbp),%rdi
+call rt_alloc
+movq %rax,-24(%rbp)
+movq -24(%rbp),%rax
+leave
+ret
+xorq %rax,%rax
+leave
+ret
+.set .F968,32
+.type rt_push,@function
+rt_push:
+pushq %rbp
+movq %rsp,%rbp
+subq $.F969,%rsp
+movq %rdi,-8(%rbp)
+movq %rsi,-16(%rbp)
+movq -8(%rbp),%rax
+movq %rax,-24(%rbp)
+movabsq $8,%rax
+movq %rax,-32(%rbp)
+movq -32(%rbp),%rcx
+movq -24(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-40(%rbp)
+movq -40(%rbp),%rax
+movq %rax,-48(%rbp)
+movq -48(%rbp),%rax
+movq (%rax),%rax
+movq %rax,-56(%rbp)
+movq -56(%rbp),%rax
+movq %rax,-64(%rbp)
+movq -8(%rbp),%rax
+movq %rax,-72(%rbp)
+movabsq $16,%rax
+movq %rax,-80(%rbp)
+movq -80(%rbp),%rcx
+movq -72(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-88(%rbp)
+movq -88(%rbp),%rax
+movq %rax,-96(%rbp)
+movq -96(%rbp),%rax
+movq (%rax),%rax
+movq %rax,-104(%rbp)
+movq -104(%rbp),%rax
+movq %rax,-112(%rbp)
+movq -64(%rbp),%rax
+movq %rax,-120(%rbp)
+movq -112(%rbp),%rcx
+movq -120(%rbp),%rax
+cmpq %rcx,%rax
+sete %al
+movzbq %al,%rax
+movq %rax,-128(%rbp)
+movq -128(%rbp),%rax
+testq %rax,%rax
+jz .L970
+movq -112(%rbp),%rax
+movq %rax,-136(%rbp)
+movabsq $2,%rax
+movq %rax,-144(%rbp)
+movq -144(%rbp),%rcx
+movq -136(%rbp),%rax
+imulq %rcx,%rax
+movq %rax,-152(%rbp)
+movq -152(%rbp),%rax
+movq %rax,-160(%rbp)
+movq -160(%rbp),%rax
+movq %rax,-168(%rbp)
+movabsq $0,%rax
+movq %rax,-176(%rbp)
+movq -176(%rbp),%rcx
+movq -168(%rbp),%rax
+cmpq %rcx,%rax
+sete %al
+movzbq %al,%rax
+movq %rax,-184(%rbp)
+movq -184(%rbp),%rax
+testq %rax,%rax
+jz .L972
+movabsq $8,%rax
+movq %rax,-192(%rbp)
+movq -192(%rbp),%rax
+movq %rax,-160(%rbp)
+jmp .L973
+.L972:
+.L973:
+movabsq $144115188075855872,%rax
+movq %rax,-200(%rbp)
+movq -200(%rbp),%rax
+movq %rax,-208(%rbp)
+movq -160(%rbp),%rcx
+movq -208(%rbp),%rax
+cmpq %rcx,%rax
+setb %al
+movzbq %al,%rax
+movq %rax,-216(%rbp)
+movq -216(%rbp),%rax
+testq %rax,%rax
+jz .L974
+call rt_abort
+movq %rax,-224(%rbp)
+jmp .L975
+.L974:
+.L975:
+movq -8(%rbp),%rax
+movq %rax,-232(%rbp)
+movq -232(%rbp),%rax
+movq (%rax),%rax
+movq %rax,-240(%rbp)
+movq -240(%rbp),%rax
+movq %rax,-248(%rbp)
+movq -160(%rbp),%rax
+movq %rax,-256(%rbp)
+movabsq $8,%rax
+movq %rax,-264(%rbp)
+movq -264(%rbp),%rcx
+movq -256(%rbp),%rax
+imulq %rcx,%rax
+movq %rax,-272(%rbp)
+movq -272(%rbp),%rax
+movq %rax,-280(%rbp)
+movq -280(%rbp),%rdi
+call rt_alloc
+movq %rax,-288(%rbp)
+movq -288(%rbp),%rax
+movq %rax,-296(%rbp)
+movabsq $0,%rax
+movq %rax,-304(%rbp)
+movq -304(%rbp),%rax
+movq %rax,-312(%rbp)
+.L976:
+movq -312(%rbp),%rax
+movq %rax,-320(%rbp)
+movq -64(%rbp),%rcx
+movq -320(%rbp),%rax
+cmpq %rcx,%rax
+setb %al
+movzbq %al,%rax
+movq %rax,-328(%rbp)
+movq -328(%rbp),%rax
+testq %rax,%rax
+jz .L977
+movq -296(%rbp),%rax
+movq %rax,-336(%rbp)
+movq -312(%rbp),%rax
+movq %rax,-344(%rbp)
+movabsq $8,%rax
+movq %rax,-352(%rbp)
+movq -352(%rbp),%rcx
+movq -344(%rbp),%rax
+imulq %rcx,%rax
+movq %rax,-360(%rbp)
+movq -360(%rbp),%rcx
+movq -336(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-368(%rbp)
+movq -368(%rbp),%rax
+movq %rax,-376(%rbp)
+movq -248(%rbp),%rax
+movq %rax,-384(%rbp)
+movq -312(%rbp),%rax
+movq %rax,-392(%rbp)
+movabsq $8,%rax
+movq %rax,-400(%rbp)
+movq -400(%rbp),%rcx
+movq -392(%rbp),%rax
+imulq %rcx,%rax
+movq %rax,-408(%rbp)
+movq -408(%rbp),%rcx
+movq -384(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-416(%rbp)
+movq -416(%rbp),%rax
+movq %rax,-424(%rbp)
+movq -424(%rbp),%rax
+movq (%rax),%rax
+movq %rax,-432(%rbp)
+movq -432(%rbp),%rax
+movq %rax,-440(%rbp)
+movq -376(%rbp),%rcx
+movq -440(%rbp),%rax
+movq %rax,(%rcx)
+xorq %rax,%rax
+movq %rax,-448(%rbp)
+movq -312(%rbp),%rax
+movq %rax,-456(%rbp)
+movabsq $1,%rax
+movq %rax,-464(%rbp)
+movq -464(%rbp),%rcx
+movq -456(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-472(%rbp)
+movq -472(%rbp),%rax
+movq %rax,-312(%rbp)
+jmp .L976
+.L977:
+movq -248(%rbp),%rax
+movq %rax,-480(%rbp)
+movq -480(%rbp),%rdi
+call rt_free
+movq %rax,-488(%rbp)
+movq -8(%rbp),%rax
+movq %rax,-496(%rbp)
+movq -296(%rbp),%rax
+movq %rax,-504(%rbp)
+movq -496(%rbp),%rcx
+movq -504(%rbp),%rax
+movq %rax,(%rcx)
+xorq %rax,%rax
+movq %rax,-512(%rbp)
+movq -8(%rbp),%rax
+movq %rax,-520(%rbp)
+movabsq $16,%rax
+movq %rax,-528(%rbp)
+movq -528(%rbp),%rcx
+movq -520(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-536(%rbp)
+movq -536(%rbp),%rax
+movq %rax,-544(%rbp)
+movq -160(%rbp),%rax
+movq %rax,-552(%rbp)
+movq -544(%rbp),%rcx
+movq -552(%rbp),%rax
+movq %rax,(%rcx)
+xorq %rax,%rax
+movq %rax,-560(%rbp)
+jmp .L971
+.L970:
+.L971:
+movq -8(%rbp),%rax
+movq %rax,-568(%rbp)
+movq -568(%rbp),%rax
+movq (%rax),%rax
+movq %rax,-576(%rbp)
+movq -576(%rbp),%rax
+movq %rax,-584(%rbp)
+movq -64(%rbp),%rax
+movq %rax,-592(%rbp)
+movabsq $8,%rax
+movq %rax,-600(%rbp)
+movq -600(%rbp),%rcx
+movq -592(%rbp),%rax
+imulq %rcx,%rax
+movq %rax,-608(%rbp)
+movq -608(%rbp),%rcx
+movq -584(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-616(%rbp)
+movq -616(%rbp),%rax
+movq %rax,-624(%rbp)
+movq -16(%rbp),%rax
+movq %rax,-632(%rbp)
+movq -624(%rbp),%rcx
+movq -632(%rbp),%rax
+movq %rax,(%rcx)
+xorq %rax,%rax
+movq %rax,-640(%rbp)
+movq -8(%rbp),%rax
+movq %rax,-648(%rbp)
+movabsq $8,%rax
+movq %rax,-656(%rbp)
+movq -656(%rbp),%rcx
+movq -648(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-664(%rbp)
+movq -664(%rbp),%rax
+movq %rax,-672(%rbp)
+movq -64(%rbp),%rax
+movq %rax,-680(%rbp)
+movabsq $1,%rax
+movq %rax,-688(%rbp)
+movq -688(%rbp),%rcx
+movq -680(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-696(%rbp)
+movq -696(%rbp),%rax
+movq %rax,-704(%rbp)
+movq -672(%rbp),%rcx
+movq -704(%rbp),%rax
+movq %rax,(%rcx)
+xorq %rax,%rax
+movq %rax,-712(%rbp)
+movabsq $0,%rax
+movq %rax,-720(%rbp)
+movq -720(%rbp),%rax
+leave
+ret
+xorq %rax,%rax
+leave
+ret
+.set .F969,720
+.type rt_pushb,@function
+rt_pushb:
+pushq %rbp
+movq %rsp,%rbp
+subq $.F978,%rsp
+movq %rdi,-8(%rbp)
+movq %rsi,-16(%rbp)
+movq -8(%rbp),%rax
+movq %rax,-24(%rbp)
+movq -16(%rbp),%rax
+movq %rax,-32(%rbp)
+movabsq $255,%rax
+movq %rax,-40(%rbp)
+movq -40(%rbp),%rcx
+movq -32(%rbp),%rax
+andq %rcx,%rax
+movq %rax,-48(%rbp)
+movq -48(%rbp),%rax
+movq %rax,-56(%rbp)
+movq -24(%rbp),%rdi
+movq -56(%rbp),%rsi
+call rt_push
+movq %rax,-64(%rbp)
+movq -64(%rbp),%rax
+leave
+ret
+xorq %rax,%rax
+leave
+ret
+.set .F978,64
+.type rt_pop,@function
+rt_pop:
+pushq %rbp
+movq %rsp,%rbp
+subq $.F979,%rsp
+movq %rdi,-8(%rbp)
+movq -8(%rbp),%rax
+movq %rax,-16(%rbp)
+movabsq $8,%rax
+movq %rax,-24(%rbp)
+movq -24(%rbp),%rcx
+movq -16(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-32(%rbp)
+movq -32(%rbp),%rax
+movq %rax,-40(%rbp)
+movq -40(%rbp),%rax
+movq (%rax),%rax
+movq %rax,-48(%rbp)
+movq -48(%rbp),%rax
+movq %rax,-56(%rbp)
+movq -56(%rbp),%rax
+movq %rax,-64(%rbp)
+movabsq $0,%rax
+movq %rax,-72(%rbp)
+movq -72(%rbp),%rcx
+movq -64(%rbp),%rax
+cmpq %rcx,%rax
+sete %al
+movzbq %al,%rax
+movq %rax,-80(%rbp)
+movq -80(%rbp),%rax
+testq %rax,%rax
+jz .L980
+call rt_abort
+movq %rax,-88(%rbp)
+jmp .L981
+.L980:
+.L981:
+movq -8(%rbp),%rax
+movq %rax,-96(%rbp)
+movq -96(%rbp),%rax
+movq (%rax),%rax
+movq %rax,-104(%rbp)
+movq -104(%rbp),%rax
+movq %rax,-112(%rbp)
+movq -56(%rbp),%rax
+movq %rax,-120(%rbp)
+movabsq $1,%rax
+movq %rax,-128(%rbp)
+movq -128(%rbp),%rcx
+movq -120(%rbp),%rax
+subq %rcx,%rax
+movq %rax,-136(%rbp)
+movq -136(%rbp),%rax
+movq %rax,-144(%rbp)
+movabsq $8,%rax
+movq %rax,-152(%rbp)
+movq -152(%rbp),%rcx
+movq -144(%rbp),%rax
+imulq %rcx,%rax
+movq %rax,-160(%rbp)
+movq -160(%rbp),%rcx
+movq -112(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-168(%rbp)
+movq -168(%rbp),%rax
+movq %rax,-176(%rbp)
+movq -176(%rbp),%rax
+movq (%rax),%rax
+movq %rax,-184(%rbp)
+movq -184(%rbp),%rax
+movq %rax,-192(%rbp)
+movq -8(%rbp),%rax
+movq %rax,-200(%rbp)
+movq -200(%rbp),%rax
+movq (%rax),%rax
+movq %rax,-208(%rbp)
+movq -208(%rbp),%rax
+movq %rax,-216(%rbp)
+movq -56(%rbp),%rax
+movq %rax,-224(%rbp)
+movabsq $1,%rax
+movq %rax,-232(%rbp)
+movq -232(%rbp),%rcx
+movq -224(%rbp),%rax
+subq %rcx,%rax
+movq %rax,-240(%rbp)
+movq -240(%rbp),%rax
+movq %rax,-248(%rbp)
+movabsq $8,%rax
+movq %rax,-256(%rbp)
+movq -256(%rbp),%rcx
+movq -248(%rbp),%rax
+imulq %rcx,%rax
+movq %rax,-264(%rbp)
+movq -264(%rbp),%rcx
+movq -216(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-272(%rbp)
+movq -272(%rbp),%rax
+movq %rax,-280(%rbp)
+movabsq $0,%rax
+movq %rax,-288(%rbp)
+movq -288(%rbp),%rax
+movq %rax,-296(%rbp)
+movq -280(%rbp),%rcx
+movq -296(%rbp),%rax
+movq %rax,(%rcx)
+xorq %rax,%rax
+movq %rax,-304(%rbp)
+movq -8(%rbp),%rax
+movq %rax,-312(%rbp)
+movabsq $8,%rax
+movq %rax,-320(%rbp)
+movq -320(%rbp),%rcx
+movq -312(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-328(%rbp)
+movq -328(%rbp),%rax
+movq %rax,-336(%rbp)
+movq -56(%rbp),%rax
+movq %rax,-344(%rbp)
+movabsq $1,%rax
+movq %rax,-352(%rbp)
+movq -352(%rbp),%rcx
+movq -344(%rbp),%rax
+subq %rcx,%rax
+movq %rax,-360(%rbp)
+movq -360(%rbp),%rax
+movq %rax,-368(%rbp)
+movq -336(%rbp),%rcx
+movq -368(%rbp),%rax
+movq %rax,(%rcx)
+xorq %rax,%rax
+movq %rax,-376(%rbp)
+movq -192(%rbp),%rax
+leave
+ret
+xorq %rax,%rax
+leave
+ret
+.set .F979,384
+.type rt_len,@function
+rt_len:
+pushq %rbp
+movq %rsp,%rbp
+subq $.F982,%rsp
+movq %rdi,-8(%rbp)
+movq -8(%rbp),%rax
+movq %rax,-16(%rbp)
+movabsq $8,%rax
+movq %rax,-24(%rbp)
+movq -24(%rbp),%rcx
+movq -16(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-32(%rbp)
+movq -32(%rbp),%rax
+movq %rax,-40(%rbp)
+movq -40(%rbp),%rax
+movq (%rax),%rax
+movq %rax,-48(%rbp)
+movq -48(%rbp),%rax
+leave
+ret
+xorq %rax,%rax
+leave
+ret
+.set .F982,48
+.type rt_slot,@function
+rt_slot:
+pushq %rbp
+movq %rsp,%rbp
+subq $.F983,%rsp
+movq %rdi,-8(%rbp)
+movq %rsi,-16(%rbp)
+movq -16(%rbp),%rax
+movq %rax,-24(%rbp)
+movq -8(%rbp),%rax
+movq %rax,-32(%rbp)
+movabsq $8,%rax
+movq %rax,-40(%rbp)
+movq -40(%rbp),%rcx
+movq -32(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-48(%rbp)
+movq -48(%rbp),%rax
+movq %rax,-56(%rbp)
+movq -56(%rbp),%rax
+movq (%rax),%rax
+movq %rax,-64(%rbp)
+movq -64(%rbp),%rcx
+movq -24(%rbp),%rax
+cmpq %rcx,%rax
+setb %al
+movzbq %al,%rax
+movq %rax,-72(%rbp)
+movq -72(%rbp),%rax
+movq %rax,-80(%rbp)
+movabsq $0,%rax
+movq %rax,-88(%rbp)
+movq -88(%rbp),%rcx
+movq -80(%rbp),%rax
+cmpq %rcx,%rax
+sete %al
+movzbq %al,%rax
+movq %rax,-96(%rbp)
+movq -96(%rbp),%rax
+testq %rax,%rax
+jz .L984
+call rt_abort
+movq %rax,-104(%rbp)
+jmp .L985
+.L984:
+.L985:
+movq -8(%rbp),%rax
+movq %rax,-112(%rbp)
+movq -112(%rbp),%rax
+movq (%rax),%rax
+movq %rax,-120(%rbp)
+movq -120(%rbp),%rax
+movq %rax,-128(%rbp)
+movq -16(%rbp),%rax
+movq %rax,-136(%rbp)
+movabsq $8,%rax
+movq %rax,-144(%rbp)
+movq -144(%rbp),%rcx
+movq -136(%rbp),%rax
+imulq %rcx,%rax
+movq %rax,-152(%rbp)
+movq -152(%rbp),%rcx
+movq -128(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-160(%rbp)
+movq -160(%rbp),%rax
+leave
+ret
+xorq %rax,%rax
+leave
+ret
+.set .F983,160
+.type rt_at,@function
+rt_at:
+pushq %rbp
+movq %rsp,%rbp
+subq $.F986,%rsp
+movq %rdi,-8(%rbp)
+movq %rsi,-16(%rbp)
+movq -8(%rbp),%rax
+movq %rax,-24(%rbp)
+movq -16(%rbp),%rax
+movq %rax,-32(%rbp)
+movq -24(%rbp),%rdi
+movq -32(%rbp),%rsi
+call rt_slot
+movq %rax,-40(%rbp)
+movq -40(%rbp),%rax
+movq %rax,-48(%rbp)
+movq -48(%rbp),%rax
+movq (%rax),%rax
+movq %rax,-56(%rbp)
+movq -56(%rbp),%rax
+leave
+ret
+xorq %rax,%rax
+leave
+ret
+.set .F986,64
+.type rt_write,@function
+rt_write:
+pushq %rbp
+movq %rsp,%rbp
+subq $.F987,%rsp
+movq %rdi,-8(%rbp)
+movq %rsi,-16(%rbp)
+movq %rdx,-24(%rbp)
+movq -8(%rbp),%rax
+movq %rax,-32(%rbp)
+movq -16(%rbp),%rax
+movq %rax,-40(%rbp)
+movq -32(%rbp),%rdi
+movq -40(%rbp),%rsi
+call rt_slot
+movq %rax,-48(%rbp)
+movq -48(%rbp),%rax
+movq %rax,-56(%rbp)
+movq -24(%rbp),%rax
+movq %rax,-64(%rbp)
+movabsq $255,%rax
+movq %rax,-72(%rbp)
+movq -72(%rbp),%rcx
+movq -64(%rbp),%rax
+andq %rcx,%rax
+movq %rax,-80(%rbp)
+movq -80(%rbp),%rax
+movq %rax,-88(%rbp)
+movq -56(%rbp),%rcx
+movq -88(%rbp),%rax
+movq %rax,(%rcx)
+xorq %rax,%rax
+movq %rax,-96(%rbp)
+movq -96(%rbp),%rax
+leave
+ret
+xorq %rax,%rax
+leave
+ret
+.set .F987,96
+.type rt_slice,@function
+rt_slice:
+pushq %rbp
+movq %rsp,%rbp
+subq $.F988,%rsp
+movq %rdi,-8(%rbp)
+movq %rsi,-16(%rbp)
+movq %rdx,-24(%rbp)
+movq -24(%rbp),%rax
+movq %rax,-32(%rbp)
+movq -16(%rbp),%rcx
+movq -32(%rbp),%rax
+cmpq %rcx,%rax
+setb %al
+movzbq %al,%rax
+movq %rax,-40(%rbp)
+movq -40(%rbp),%rax
+movq %rax,-48(%rbp)
+movq -8(%rbp),%rax
+movq %rax,-56(%rbp)
+movabsq $8,%rax
+movq %rax,-64(%rbp)
+movq -64(%rbp),%rcx
+movq -56(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-72(%rbp)
+movq -72(%rbp),%rax
+movq %rax,-80(%rbp)
+movq -80(%rbp),%rax
+movq (%rax),%rax
+movq %rax,-88(%rbp)
+movq -88(%rbp),%rax
+movq %rax,-96(%rbp)
+movq -24(%rbp),%rcx
+movq -96(%rbp),%rax
+cmpq %rcx,%rax
+setb %al
+movzbq %al,%rax
+movq %rax,-104(%rbp)
+movq -104(%rbp),%rcx
+movq -48(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-112(%rbp)
+movq -112(%rbp),%rax
+testq %rax,%rax
+jz .L989
+call rt_abort
+movq %rax,-120(%rbp)
+jmp .L990
+.L989:
+.L990:
+movabsq $24,%rax
+movq %rax,-128(%rbp)
+movq -128(%rbp),%rax
+movq %rax,-136(%rbp)
+movq -136(%rbp),%rdi
+call rt_alloc
+movq %rax,-144(%rbp)
+movq -144(%rbp),%rax
+movq %rax,-152(%rbp)
+movq -152(%rbp),%rax
+movq %rax,-160(%rbp)
+movq -8(%rbp),%rax
+movq %rax,-168(%rbp)
+movq -168(%rbp),%rax
+movq (%rax),%rax
+movq %rax,-176(%rbp)
+movq -176(%rbp),%rax
+movq %rax,-184(%rbp)
+movq -16(%rbp),%rax
+movq %rax,-192(%rbp)
+movabsq $8,%rax
+movq %rax,-200(%rbp)
+movq -200(%rbp),%rcx
+movq -192(%rbp),%rax
+imulq %rcx,%rax
+movq %rax,-208(%rbp)
+movq -208(%rbp),%rcx
+movq -184(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-216(%rbp)
+movq -216(%rbp),%rax
+movq %rax,-224(%rbp)
+movq -160(%rbp),%rcx
+movq -224(%rbp),%rax
+movq %rax,(%rcx)
+xorq %rax,%rax
+movq %rax,-232(%rbp)
+movq -152(%rbp),%rax
+movq %rax,-240(%rbp)
+movabsq $8,%rax
+movq %rax,-248(%rbp)
+movq -248(%rbp),%rcx
+movq -240(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-256(%rbp)
+movq -256(%rbp),%rax
+movq %rax,-264(%rbp)
+movq -24(%rbp),%rax
+movq %rax,-272(%rbp)
+movq -16(%rbp),%rcx
+movq -272(%rbp),%rax
+subq %rcx,%rax
+movq %rax,-280(%rbp)
+movq -280(%rbp),%rax
+movq %rax,-288(%rbp)
+movq -264(%rbp),%rcx
+movq -288(%rbp),%rax
+movq %rax,(%rcx)
+xorq %rax,%rax
+movq %rax,-296(%rbp)
+movq -152(%rbp),%rax
+leave
+ret
+xorq %rax,%rax
+leave
+ret
+.set .F988,304
+.type rt_view,@function
+rt_view:
+pushq %rbp
+movq %rsp,%rbp
+subq $.F991,%rsp
+movq %rdi,-8(%rbp)
+movq -8(%rbp),%rax
+movq %rax,-16(%rbp)
+movabsq $0,%rax
+movq %rax,-24(%rbp)
+movq -24(%rbp),%rax
+movq %rax,-32(%rbp)
+movq -8(%rbp),%rax
+movq %rax,-40(%rbp)
+movabsq $8,%rax
+movq %rax,-48(%rbp)
+movq -48(%rbp),%rcx
+movq -40(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-56(%rbp)
+movq -56(%rbp),%rax
+movq %rax,-64(%rbp)
+movq -64(%rbp),%rax
+movq (%rax),%rax
+movq %rax,-72(%rbp)
+movq -72(%rbp),%rax
+movq %rax,-80(%rbp)
+movq -16(%rbp),%rdi
+movq -32(%rbp),%rsi
+movq -80(%rbp),%rdx
+call rt_slice
+movq %rax,-88(%rbp)
+movq -88(%rbp),%rax
+leave
+ret
+xorq %rax,%rax
+leave
+ret
+.set .F991,96
+.type rt_append,@function
+rt_append:
+pushq %rbp
+movq %rsp,%rbp
+subq $.F992,%rsp
+movq %rdi,-8(%rbp)
+movq %rsi,-16(%rbp)
+movq -16(%rbp),%rax
+movq %rax,-24(%rbp)
+movabsq $8,%rax
+movq %rax,-32(%rbp)
+movq -32(%rbp),%rcx
+movq -24(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-40(%rbp)
+movq -40(%rbp),%rax
+movq %rax,-48(%rbp)
+movq -48(%rbp),%rax
+movq (%rax),%rax
+movq %rax,-56(%rbp)
+movq -56(%rbp),%rax
+movq %rax,-64(%rbp)
+movabsq $0,%rax
+movq %rax,-72(%rbp)
+movq -72(%rbp),%rax
+movq %rax,-80(%rbp)
+.L993:
+movq -80(%rbp),%rax
+movq %rax,-88(%rbp)
+movq -64(%rbp),%rcx
+movq -88(%rbp),%rax
+cmpq %rcx,%rax
+setb %al
+movzbq %al,%rax
+movq %rax,-96(%rbp)
+movq -96(%rbp),%rax
+testq %rax,%rax
+jz .L994
+movq -8(%rbp),%rax
+movq %rax,-104(%rbp)
+movq -16(%rbp),%rax
+movq %rax,-112(%rbp)
+movq -112(%rbp),%rax
+movq (%rax),%rax
+movq %rax,-120(%rbp)
+movq -120(%rbp),%rax
+movq %rax,-128(%rbp)
+movq -80(%rbp),%rax
+movq %rax,-136(%rbp)
+movabsq $8,%rax
+movq %rax,-144(%rbp)
+movq -144(%rbp),%rcx
+movq -136(%rbp),%rax
+imulq %rcx,%rax
+movq %rax,-152(%rbp)
+movq -152(%rbp),%rcx
+movq -128(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-160(%rbp)
+movq -160(%rbp),%rax
+movq %rax,-168(%rbp)
+movq -168(%rbp),%rax
+movq (%rax),%rax
+movq %rax,-176(%rbp)
+movq -176(%rbp),%rax
+movq %rax,-184(%rbp)
+movq -104(%rbp),%rdi
+movq -184(%rbp),%rsi
+call rt_push
+movq %rax,-192(%rbp)
+movq -80(%rbp),%rax
+movq %rax,-200(%rbp)
+movabsq $1,%rax
+movq %rax,-208(%rbp)
+movq -208(%rbp),%rcx
+movq -200(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-216(%rbp)
+movq -216(%rbp),%rax
+movq %rax,-80(%rbp)
+jmp .L993
+.L994:
+movabsq $0,%rax
+movq %rax,-224(%rbp)
+movq -224(%rbp),%rax
+leave
+ret
+xorq %rax,%rax
+leave
+ret
+.set .F992,224
+.type rt_copy,@function
+rt_copy:
+pushq %rbp
+movq %rsp,%rbp
+subq $.F995,%rsp
+movq %rdi,-8(%rbp)
+call rt_new
+movq %rax,-16(%rbp)
+movq -16(%rbp),%rax
+movq %rax,-24(%rbp)
+movq -24(%rbp),%rax
+movq %rax,-32(%rbp)
+movq -8(%rbp),%rax
+movq %rax,-40(%rbp)
+movq -32(%rbp),%rdi
+movq -40(%rbp),%rsi
+call rt_append
+movq %rax,-48(%rbp)
+movq -24(%rbp),%rax
+leave
+ret
+xorq %rax,%rax
+leave
+ret
+.set .F995,48
+.type rt_lit,@function
+rt_lit:
+pushq %rbp
+movq %rsp,%rbp
+subq $.F996,%rsp
+movq %rdi,-8(%rbp)
+movq %rsi,-16(%rbp)
+call rt_new
+movq %rax,-24(%rbp)
+movq -24(%rbp),%rax
+movq %rax,-32(%rbp)
+movabsq $0,%rax
+movq %rax,-40(%rbp)
+movq -40(%rbp),%rax
+movq %rax,-48(%rbp)
+.L997:
+movq -48(%rbp),%rax
+movq %rax,-56(%rbp)
+movq -16(%rbp),%rcx
+movq -56(%rbp),%rax
+cmpq %rcx,%rax
+setb %al
+movzbq %al,%rax
+movq %rax,-64(%rbp)
+movq -64(%rbp),%rax
+testq %rax,%rax
+jz .L998
+movq -32(%rbp),%rax
+movq %rax,-72(%rbp)
+movq -8(%rbp),%rax
+movq %rax,-80(%rbp)
+movq -48(%rbp),%rcx
+movq -80(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-88(%rbp)
+movq -88(%rbp),%rax
+movq %rax,-96(%rbp)
+movq -96(%rbp),%rax
+movzbq (%rax),%rax
+movq %rax,-104(%rbp)
+movq -104(%rbp),%rax
+movq %rax,-112(%rbp)
+movq -72(%rbp),%rdi
+movq -112(%rbp),%rsi
+call rt_push
+movq %rax,-120(%rbp)
+movq -48(%rbp),%rax
+movq %rax,-128(%rbp)
+movabsq $1,%rax
+movq %rax,-136(%rbp)
+movq -136(%rbp),%rcx
+movq -128(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-144(%rbp)
+movq -144(%rbp),%rax
+movq %rax,-48(%rbp)
+jmp .L997
+.L998:
+movq -32(%rbp),%rax
+leave
+ret
+xorq %rax,%rax
+leave
+ret
+.set .F996,144
+.type rt_rec,@function
+rt_rec:
+pushq %rbp
+movq %rsp,%rbp
+subq $.F999,%rsp
+movq %rdi,-8(%rbp)
+movabsq $144115188075855872,%rax
+movq %rax,-16(%rbp)
+movq -16(%rbp),%rax
+movq %rax,-24(%rbp)
+movq -8(%rbp),%rcx
+movq -24(%rbp),%rax
+cmpq %rcx,%rax
+setb %al
+movzbq %al,%rax
+movq %rax,-32(%rbp)
+movq -32(%rbp),%rax
+testq %rax,%rax
+jz .L1000
+call rt_abort
+movq %rax,-40(%rbp)
+jmp .L1001
+.L1000:
+.L1001:
+movq -8(%rbp),%rax
+movq %rax,-48(%rbp)
+movabsq $8,%rax
+movq %rax,-56(%rbp)
+movq -56(%rbp),%rcx
+movq -48(%rbp),%rax
+imulq %rcx,%rax
+movq %rax,-64(%rbp)
+movq -64(%rbp),%rax
+movq %rax,-72(%rbp)
+movq -72(%rbp),%rdi
+call rt_alloc
+movq %rax,-80(%rbp)
+movq -80(%rbp),%rax
+leave
+ret
+xorq %rax,%rax
+leave
+ret
+.set .F999,80
+.type rt_enum,@function
+rt_enum:
+pushq %rbp
+movq %rsp,%rbp
+subq $.F1002,%rsp
+movq %rdi,-8(%rbp)
+movq %rsi,-16(%rbp)
+movabsq $16,%rax
+movq %rax,-24(%rbp)
+movq -24(%rbp),%rax
+movq %rax,-32(%rbp)
+movq -32(%rbp),%rdi
+call rt_alloc
+movq %rax,-40(%rbp)
+movq -40(%rbp),%rax
+movq %rax,-48(%rbp)
+movq -48(%rbp),%rax
+movq %rax,-56(%rbp)
+movq -8(%rbp),%rax
+movq %rax,-64(%rbp)
+movq -56(%rbp),%rcx
+movq -64(%rbp),%rax
+movq %rax,(%rcx)
+xorq %rax,%rax
+movq %rax,-72(%rbp)
+movq -48(%rbp),%rax
+movq %rax,-80(%rbp)
+movabsq $8,%rax
+movq %rax,-88(%rbp)
+movq -88(%rbp),%rcx
+movq -80(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-96(%rbp)
+movq -96(%rbp),%rax
+movq %rax,-104(%rbp)
+movq -16(%rbp),%rax
+movq %rax,-112(%rbp)
+movq -104(%rbp),%rcx
+movq -112(%rbp),%rax
+movq %rax,(%rcx)
+xorq %rax,%rax
+movq %rax,-120(%rbp)
+movq -48(%rbp),%rax
+leave
+ret
+xorq %rax,%rax
+leave
+ret
+.set .F1002,128
+.type rt_xchg,@function
+rt_xchg:
+pushq %rbp
+movq %rsp,%rbp
+subq $.F1003,%rsp
+movq %rdi,-8(%rbp)
+movq %rsi,-16(%rbp)
+movq -8(%rbp),%rax
+movq %rax,-24(%rbp)
+movq -24(%rbp),%rax
+movq (%rax),%rax
+movq %rax,-32(%rbp)
+movq -32(%rbp),%rax
+movq %rax,-40(%rbp)
+movq -8(%rbp),%rax
+movq %rax,-48(%rbp)
+movq -16(%rbp),%rax
+movq %rax,-56(%rbp)
+movq -48(%rbp),%rcx
+movq -56(%rbp),%rax
+movq %rax,(%rcx)
+xorq %rax,%rax
+movq %rax,-64(%rbp)
+movq -40(%rbp),%rax
+leave
+ret
+xorq %rax,%rax
+leave
+ret
+.set .F1003,64
+.type rt_drop_seq,@function
+rt_drop_seq:
+pushq %rbp
+movq %rsp,%rbp
+subq $.F1004,%rsp
+movq %rdi,-8(%rbp)
+movq -8(%rbp),%rax
+movq %rax,-16(%rbp)
+movabsq $0,%rax
+movq %rax,-24(%rbp)
+movq -24(%rbp),%rcx
+movq -16(%rbp),%rax
+cmpq %rcx,%rax
+setne %al
+movzbq %al,%rax
+movq %rax,-32(%rbp)
+movq -32(%rbp),%rax
+testq %rax,%rax
+jz .L1005
+movq -8(%rbp),%rax
+movq %rax,-40(%rbp)
+movq -40(%rbp),%rax
+movq (%rax),%rax
+movq %rax,-48(%rbp)
+movq -48(%rbp),%rax
+movq %rax,-56(%rbp)
+movq -56(%rbp),%rdi
+call rt_free
+movq %rax,-64(%rbp)
+movq -8(%rbp),%rax
+movq %rax,-72(%rbp)
+movq -72(%rbp),%rdi
+call rt_free
+movq %rax,-80(%rbp)
+jmp .L1006
+.L1005:
+.L1006:
+movabsq $0,%rax
+movq %rax,-88(%rbp)
+movq -88(%rbp),%rax
+leave
+ret
+xorq %rax,%rax
+leave
+ret
+.set .F1004,96
+.type rt_pack,@function
+rt_pack:
+pushq %rbp
+movq %rsp,%rbp
+subq $.F1007,%rsp
+movq %rdi,-8(%rbp)
+movq -8(%rbp),%rax
+movq %rax,-16(%rbp)
+movabsq $8,%rax
+movq %rax,-24(%rbp)
+movq -24(%rbp),%rcx
+movq -16(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-32(%rbp)
+movq -32(%rbp),%rax
+movq %rax,-40(%rbp)
+movq -40(%rbp),%rax
+movq (%rax),%rax
+movq %rax,-48(%rbp)
+movq -48(%rbp),%rax
+movq %rax,-56(%rbp)
+movq -56(%rbp),%rax
+movq %rax,-64(%rbp)
+movabsq $1,%rax
+movq %rax,-72(%rbp)
+movq -72(%rbp),%rcx
+movq -64(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-80(%rbp)
+movq -80(%rbp),%rax
+movq %rax,-88(%rbp)
+movq -88(%rbp),%rdi
+call rt_alloc
+movq %rax,-96(%rbp)
+movq -96(%rbp),%rax
+movq %rax,-104(%rbp)
+movabsq $0,%rax
+movq %rax,-112(%rbp)
+movq -112(%rbp),%rax
+movq %rax,-120(%rbp)
+.L1008:
+movq -120(%rbp),%rax
+movq %rax,-128(%rbp)
+movq -56(%rbp),%rcx
+movq -128(%rbp),%rax
+cmpq %rcx,%rax
+setb %al
+movzbq %al,%rax
+movq %rax,-136(%rbp)
+movq -136(%rbp),%rax
+testq %rax,%rax
+jz .L1009
+movq -104(%rbp),%rax
+movq %rax,-144(%rbp)
+movq -120(%rbp),%rcx
+movq -144(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-152(%rbp)
+movq -152(%rbp),%rax
+movq %rax,-160(%rbp)
+movq -8(%rbp),%rax
+movq %rax,-168(%rbp)
+movq -168(%rbp),%rax
+movq (%rax),%rax
+movq %rax,-176(%rbp)
+movq -176(%rbp),%rax
+movq %rax,-184(%rbp)
+movq -120(%rbp),%rax
+movq %rax,-192(%rbp)
+movabsq $8,%rax
+movq %rax,-200(%rbp)
+movq -200(%rbp),%rcx
+movq -192(%rbp),%rax
+imulq %rcx,%rax
+movq %rax,-208(%rbp)
+movq -208(%rbp),%rcx
+movq -184(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-216(%rbp)
+movq -216(%rbp),%rax
+movq %rax,-224(%rbp)
+movq -224(%rbp),%rax
+movq (%rax),%rax
+movq %rax,-232(%rbp)
+movq -232(%rbp),%rax
+movq %rax,-240(%rbp)
+movq -160(%rbp),%rcx
+movq -240(%rbp),%rax
+movb %al,(%rcx)
+xorq %rax,%rax
+movq %rax,-248(%rbp)
+movq -120(%rbp),%rax
+movq %rax,-256(%rbp)
+movabsq $1,%rax
+movq %rax,-264(%rbp)
+movq -264(%rbp),%rcx
+movq -256(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-272(%rbp)
+movq -272(%rbp),%rax
+movq %rax,-120(%rbp)
+jmp .L1008
+.L1009:
+movq -104(%rbp),%rax
+leave
+ret
+xorq %rax,%rax
+leave
+ret
+.set .F1007,272
+.type rt_cstr,@function
+rt_cstr:
+pushq %rbp
+movq %rsp,%rbp
+subq $.F1010,%rsp
+movq %rdi,-8(%rbp)
+movq -8(%rbp),%rax
+movq %rax,-16(%rbp)
+movq -16(%rbp),%rdi
+call rt_pack
+movq %rax,-24(%rbp)
+movq -24(%rbp),%rax
+movq %rax,-32(%rbp)
+movq -8(%rbp),%rax
+movq %rax,-40(%rbp)
+movabsq $8,%rax
+movq %rax,-48(%rbp)
+movq -48(%rbp),%rcx
+movq -40(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-56(%rbp)
+movq -56(%rbp),%rax
+movq %rax,-64(%rbp)
+movq -64(%rbp),%rax
+movq (%rax),%rax
+movq %rax,-72(%rbp)
+movq -72(%rbp),%rax
+movq %rax,-80(%rbp)
+movabsq $0,%rax
+movq %rax,-88(%rbp)
+movq -88(%rbp),%rax
+movq %rax,-96(%rbp)
+.L1011:
+movq -96(%rbp),%rax
+movq %rax,-104(%rbp)
+movq -80(%rbp),%rcx
+movq -104(%rbp),%rax
+cmpq %rcx,%rax
+setb %al
+movzbq %al,%rax
+movq %rax,-112(%rbp)
+movq -112(%rbp),%rax
+testq %rax,%rax
+jz .L1012
+movq -32(%rbp),%rax
+movq %rax,-120(%rbp)
+movq -96(%rbp),%rcx
+movq -120(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-128(%rbp)
+movq -128(%rbp),%rax
+movq %rax,-136(%rbp)
+movq -136(%rbp),%rax
+movzbq (%rax),%rax
+movq %rax,-144(%rbp)
+movq -144(%rbp),%rax
+movq %rax,-152(%rbp)
+movabsq $0,%rax
+movq %rax,-160(%rbp)
+movq -160(%rbp),%rcx
+movq -152(%rbp),%rax
+cmpq %rcx,%rax
+sete %al
+movzbq %al,%rax
+movq %rax,-168(%rbp)
+movq -168(%rbp),%rax
+testq %rax,%rax
+jz .L1013
+movq -32(%rbp),%rax
+movq %rax,-176(%rbp)
+movq -176(%rbp),%rdi
+call rt_free
+movq %rax,-184(%rbp)
+movabsq $0,%rax
+movq %rax,-192(%rbp)
+movq -192(%rbp),%rax
+leave
+ret
+jmp .L1014
+.L1013:
+.L1014:
+movq -96(%rbp),%rax
+movq %rax,-200(%rbp)
+movabsq $1,%rax
+movq %rax,-208(%rbp)
+movq -208(%rbp),%rcx
+movq -200(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-216(%rbp)
+movq -216(%rbp),%rax
+movq %rax,-96(%rbp)
+jmp .L1011
+.L1012:
+movq -32(%rbp),%rax
+leave
+ret
+xorq %rax,%rax
+leave
+ret
+.set .F1010,224
+.type f_host_argc,@function
+f_host_argc:
+pushq %rbp
+movq %rsp,%rbp
+subq $.F1015,%rsp
+leaq rt_state(%rip),%rax
+movq %rax,-8(%rbp)
+movq -8(%rbp),%rax
+movq %rax,-16(%rbp)
+movq -16(%rbp),%rax
+movq (%rax),%rax
+movq %rax,-24(%rbp)
+movq -24(%rbp),%rax
+leave
+ret
+xorq %rax,%rax
+leave
+ret
+.set .F1015,32
+.type f_host_arg,@function
+f_host_arg:
+pushq %rbp
+movq %rsp,%rbp
+subq $.F1016,%rsp
+movq %rdi,-8(%rbp)
+movq -8(%rbp),%rax
+movq %rax,-16(%rbp)
+call f_host_argc
+movq %rax,-24(%rbp)
+movq -24(%rbp),%rcx
+movq -16(%rbp),%rax
+cmpq %rcx,%rax
+setb %al
+movzbq %al,%rax
+movq %rax,-32(%rbp)
+movq -32(%rbp),%rax
+movq %rax,-40(%rbp)
+movabsq $0,%rax
+movq %rax,-48(%rbp)
+movq -48(%rbp),%rcx
+movq -40(%rbp),%rax
+cmpq %rcx,%rax
+sete %al
+movzbq %al,%rax
+movq %rax,-56(%rbp)
+movq -56(%rbp),%rax
+testq %rax,%rax
+jz .L1017
+call rt_abort
+movq %rax,-64(%rbp)
+jmp .L1018
+.L1017:
+.L1018:
+leaq rt_state(%rip),%rax
+movq %rax,-72(%rbp)
+movq -72(%rbp),%rax
+movq %rax,-80(%rbp)
+movabsq $8,%rax
+movq %rax,-88(%rbp)
+movq -88(%rbp),%rcx
+movq -80(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-96(%rbp)
+movq -96(%rbp),%rax
+movq %rax,-104(%rbp)
+movq -104(%rbp),%rax
+movq (%rax),%rax
+movq %rax,-112(%rbp)
+movq -112(%rbp),%rax
+movq %rax,-120(%rbp)
+movq -8(%rbp),%rax
+movq %rax,-128(%rbp)
+movabsq $8,%rax
+movq %rax,-136(%rbp)
+movq -136(%rbp),%rcx
+movq -128(%rbp),%rax
+imulq %rcx,%rax
+movq %rax,-144(%rbp)
+movq -144(%rbp),%rcx
+movq -120(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-152(%rbp)
+movq -152(%rbp),%rax
+movq %rax,-160(%rbp)
+movq -160(%rbp),%rax
+movq (%rax),%rax
+movq %rax,-168(%rbp)
+movq -168(%rbp),%rax
+movq %rax,-176(%rbp)
+movabsq $0,%rax
+movq %rax,-184(%rbp)
+movq -184(%rbp),%rax
+movq %rax,-192(%rbp)
+.L1019:
+movq -176(%rbp),%rax
+movq %rax,-200(%rbp)
+movq -192(%rbp),%rcx
+movq -200(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-208(%rbp)
+movq -208(%rbp),%rax
+movq %rax,-216(%rbp)
+movq -216(%rbp),%rax
+movzbq (%rax),%rax
+movq %rax,-224(%rbp)
+movq -224(%rbp),%rax
+movq %rax,-232(%rbp)
+movabsq $0,%rax
+movq %rax,-240(%rbp)
+movq -240(%rbp),%rcx
+movq -232(%rbp),%rax
+cmpq %rcx,%rax
+setne %al
+movzbq %al,%rax
+movq %rax,-248(%rbp)
+movq -248(%rbp),%rax
+testq %rax,%rax
+jz .L1020
+movq -192(%rbp),%rax
+movq %rax,-256(%rbp)
+movabsq $1,%rax
+movq %rax,-264(%rbp)
+movq -264(%rbp),%rcx
+movq -256(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-272(%rbp)
+movq -272(%rbp),%rax
+movq %rax,-192(%rbp)
+jmp .L1019
+.L1020:
+movq -176(%rbp),%rax
+movq %rax,-280(%rbp)
+movq -192(%rbp),%rax
+movq %rax,-288(%rbp)
+movq -280(%rbp),%rdi
+movq -288(%rbp),%rsi
+call rt_lit
+movq %rax,-296(%rbp)
+movq -296(%rbp),%rax
+leave
+ret
+xorq %rax,%rax
+leave
+ret
+.set .F1016,304
+.type f_host_read_file,@function
+f_host_read_file:
+pushq %rbp
+movq %rsp,%rbp
+subq $.F1021,%rsp
+movq %rdi,-8(%rbp)
+movq -8(%rbp),%rax
+movq %rax,-16(%rbp)
+movq -16(%rbp),%rdi
+call rt_cstr
+movq %rax,-24(%rbp)
+movq -24(%rbp),%rax
+movq %rax,-32(%rbp)
+movq -32(%rbp),%rax
+movq %rax,-40(%rbp)
+movabsq $0,%rax
+movq %rax,-48(%rbp)
+movq -48(%rbp),%rcx
+movq -40(%rbp),%rax
+cmpq %rcx,%rax
+sete %al
+movzbq %al,%rax
+movq %rax,-56(%rbp)
+movq -56(%rbp),%rax
+testq %rax,%rax
+jz .L1022
+call rt_abort
+movq %rax,-64(%rbp)
+jmp .L1023
+.L1022:
+.L1023:
+movabsq $2,%rax
+movq %rax,-72(%rbp)
+movq -72(%rbp),%rax
+movq %rax,-80(%rbp)
+movq -32(%rbp),%rax
+movq %rax,-88(%rbp)
+movabsq $0,%rax
+movq %rax,-96(%rbp)
+movq -96(%rbp),%rax
+movq %rax,-104(%rbp)
+movabsq $0,%rax
+movq %rax,-112(%rbp)
+movq -112(%rbp),%rax
+movq %rax,-120(%rbp)
+movq -80(%rbp),%rax
+movq -88(%rbp),%rdi
+movq -104(%rbp),%rsi
+movq -120(%rbp),%rdx
+xorl %r10d,%r10d
+xorl %r8d,%r8d
+xorl %r9d,%r9d
+syscall
+movq %rax,-128(%rbp)
+movq -128(%rbp),%rax
+movq %rax,-136(%rbp)
+movq -32(%rbp),%rax
+movq %rax,-144(%rbp)
+movq -144(%rbp),%rdi
+call rt_free
+movq %rax,-152(%rbp)
+movq -136(%rbp),%rax
+movq %rax,-160(%rbp)
+movq -160(%rbp),%rdi
+call rt_error
+movq %rax,-168(%rbp)
+movq -168(%rbp),%rax
+testq %rax,%rax
+jz .L1024
+call rt_abort
+movq %rax,-176(%rbp)
+jmp .L1025
+.L1024:
+.L1025:
+movabsq $4096,%rax
+movq %rax,-184(%rbp)
+movq -184(%rbp),%rax
+movq %rax,-192(%rbp)
+movq -192(%rbp),%rdi
+call rt_alloc
+movq %rax,-200(%rbp)
+movq -200(%rbp),%rax
+movq %rax,-208(%rbp)
+call rt_new
+movq %rax,-216(%rbp)
+movq -216(%rbp),%rax
+movq %rax,-224(%rbp)
+.L1026:
+movabsq $1,%rax
+movq %rax,-232(%rbp)
+movq -232(%rbp),%rax
+testq %rax,%rax
+jz .L1027
+movabsq $0,%rax
+movq %rax,-240(%rbp)
+movq -240(%rbp),%rax
+movq %rax,-248(%rbp)
+movq -136(%rbp),%rax
+movq %rax,-256(%rbp)
+movq -208(%rbp),%rax
+movq %rax,-264(%rbp)
+movabsq $4096,%rax
+movq %rax,-272(%rbp)
+movq -272(%rbp),%rax
+movq %rax,-280(%rbp)
+movq -248(%rbp),%rax
+movq -256(%rbp),%rdi
+movq -264(%rbp),%rsi
+movq -280(%rbp),%rdx
+xorl %r10d,%r10d
+xorl %r8d,%r8d
+xorl %r9d,%r9d
+syscall
+movq %rax,-288(%rbp)
+movq -288(%rbp),%rax
+movq %rax,-296(%rbp)
+movq -296(%rbp),%rax
+movq %rax,-304(%rbp)
+movabsq $0,%rax
+movq %rax,-312(%rbp)
+movq -312(%rbp),%rcx
+movq -304(%rbp),%rax
+cmpq %rcx,%rax
+sete %al
+movzbq %al,%rax
+movq %rax,-320(%rbp)
+movq -320(%rbp),%rax
+testq %rax,%rax
+jz .L1028
+jmp .L1027
+jmp .L1029
+.L1028:
+.L1029:
+movq -296(%rbp),%rax
+movq %rax,-328(%rbp)
+movabsq $0,%rax
+movq %rax,-336(%rbp)
+movq -336(%rbp),%rax
+movq %rax,-344(%rbp)
+movabsq $4,%rax
+movq %rax,-352(%rbp)
+movq -352(%rbp),%rcx
+movq -344(%rbp),%rax
+subq %rcx,%rax
+movq %rax,-360(%rbp)
+movq -360(%rbp),%rcx
+movq -328(%rbp),%rax
+cmpq %rcx,%rax
+sete %al
+movzbq %al,%rax
+movq %rax,-368(%rbp)
+movq -368(%rbp),%rax
+testq %rax,%rax
+jz .L1030
+jmp .L1026
+jmp .L1031
+.L1030:
+.L1031:
+movq -296(%rbp),%rax
+movq %rax,-376(%rbp)
+movq -376(%rbp),%rdi
+call rt_error
+movq %rax,-384(%rbp)
+movq -384(%rbp),%rax
+testq %rax,%rax
+jz .L1032
+call rt_abort
+movq %rax,-392(%rbp)
+jmp .L1033
+.L1032:
+.L1033:
+movabsq $0,%rax
+movq %rax,-400(%rbp)
+movq -400(%rbp),%rax
+movq %rax,-408(%rbp)
+.L1034:
+movq -408(%rbp),%rax
+movq %rax,-416(%rbp)
+movq -296(%rbp),%rcx
+movq -416(%rbp),%rax
+cmpq %rcx,%rax
+setb %al
+movzbq %al,%rax
+movq %rax,-424(%rbp)
+movq -424(%rbp),%rax
+testq %rax,%rax
+jz .L1035
+movq -224(%rbp),%rax
+movq %rax,-432(%rbp)
+movq -208(%rbp),%rax
+movq %rax,-440(%rbp)
+movq -408(%rbp),%rcx
+movq -440(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-448(%rbp)
+movq -448(%rbp),%rax
+movq %rax,-456(%rbp)
+movq -456(%rbp),%rax
+movzbq (%rax),%rax
+movq %rax,-464(%rbp)
+movq -464(%rbp),%rax
+movq %rax,-472(%rbp)
+movq -432(%rbp),%rdi
+movq -472(%rbp),%rsi
+call rt_push
+movq %rax,-480(%rbp)
+movq -408(%rbp),%rax
+movq %rax,-488(%rbp)
+movabsq $1,%rax
+movq %rax,-496(%rbp)
+movq -496(%rbp),%rcx
+movq -488(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-504(%rbp)
+movq -504(%rbp),%rax
+movq %rax,-408(%rbp)
+jmp .L1034
+.L1035:
+jmp .L1026
+.L1027:
+movabsq $3,%rax
+movq %rax,-512(%rbp)
+movq -512(%rbp),%rax
+movq %rax,-520(%rbp)
+movq -136(%rbp),%rax
+movq %rax,-528(%rbp)
+movabsq $0,%rax
+movq %rax,-536(%rbp)
+movq -536(%rbp),%rax
+movq %rax,-544(%rbp)
+movabsq $0,%rax
+movq %rax,-552(%rbp)
+movq -552(%rbp),%rax
+movq %rax,-560(%rbp)
+movq -520(%rbp),%rax
+movq -528(%rbp),%rdi
+movq -544(%rbp),%rsi
+movq -560(%rbp),%rdx
+xorl %r10d,%r10d
+xorl %r8d,%r8d
+xorl %r9d,%r9d
+syscall
+movq %rax,-568(%rbp)
+movq -208(%rbp),%rax
+movq %rax,-576(%rbp)
+movq -576(%rbp),%rdi
+call rt_free
+movq %rax,-584(%rbp)
+movq -224(%rbp),%rax
+leave
+ret
+xorq %rax,%rax
+leave
+ret
+.set .F1021,592
+.type rt_write_all,@function
+rt_write_all:
+pushq %rbp
+movq %rsp,%rbp
+subq $.F1036,%rsp
+movq %rdi,-8(%rbp)
+movq %rsi,-16(%rbp)
+movq %rdx,-24(%rbp)
+movabsq $0,%rax
+movq %rax,-32(%rbp)
+movq -32(%rbp),%rax
+movq %rax,-40(%rbp)
+.L1037:
+movq -40(%rbp),%rax
+movq %rax,-48(%rbp)
+movq -24(%rbp),%rcx
+movq -48(%rbp),%rax
+cmpq %rcx,%rax
+setb %al
+movzbq %al,%rax
+movq %rax,-56(%rbp)
+movq -56(%rbp),%rax
+testq %rax,%rax
+jz .L1038
+movabsq $1,%rax
+movq %rax,-64(%rbp)
+movq -64(%rbp),%rax
+movq %rax,-72(%rbp)
+movq -8(%rbp),%rax
+movq %rax,-80(%rbp)
+movq -16(%rbp),%rax
+movq %rax,-88(%rbp)
+movq -40(%rbp),%rcx
+movq -88(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-96(%rbp)
+movq -96(%rbp),%rax
+movq %rax,-104(%rbp)
+movq -24(%rbp),%rax
+movq %rax,-112(%rbp)
+movq -40(%rbp),%rcx
+movq -112(%rbp),%rax
+subq %rcx,%rax
+movq %rax,-120(%rbp)
+movq -120(%rbp),%rax
+movq %rax,-128(%rbp)
+movq -72(%rbp),%rax
+movq -80(%rbp),%rdi
+movq -104(%rbp),%rsi
+movq -128(%rbp),%rdx
+xorl %r10d,%r10d
+xorl %r8d,%r8d
+xorl %r9d,%r9d
+syscall
+movq %rax,-136(%rbp)
+movq -136(%rbp),%rax
+movq %rax,-144(%rbp)
+movq -144(%rbp),%rax
+movq %rax,-152(%rbp)
+movabsq $0,%rax
+movq %rax,-160(%rbp)
+movq -160(%rbp),%rax
+movq %rax,-168(%rbp)
+movabsq $4,%rax
+movq %rax,-176(%rbp)
+movq -176(%rbp),%rcx
+movq -168(%rbp),%rax
+subq %rcx,%rax
+movq %rax,-184(%rbp)
+movq -184(%rbp),%rcx
+movq -152(%rbp),%rax
+cmpq %rcx,%rax
+sete %al
+movzbq %al,%rax
+movq %rax,-192(%rbp)
+movq -192(%rbp),%rax
+testq %rax,%rax
+jz .L1039
+jmp .L1037
+jmp .L1040
+.L1039:
+.L1040:
+movq -144(%rbp),%rax
+movq %rax,-200(%rbp)
+movq -200(%rbp),%rdi
+call rt_error
+movq %rax,-208(%rbp)
+movq -208(%rbp),%rax
+testq %rax,%rax
+jz .L1041
+movabsq $0,%rax
+movq %rax,-216(%rbp)
+movq -216(%rbp),%rax
+movq %rax,-224(%rbp)
+movq -144(%rbp),%rcx
+movq -224(%rbp),%rax
+subq %rcx,%rax
+movq %rax,-232(%rbp)
+movq -232(%rbp),%rax
+leave
+ret
+jmp .L1042
+.L1041:
+.L1042:
+movq -144(%rbp),%rax
+movq %rax,-240(%rbp)
+movabsq $0,%rax
+movq %rax,-248(%rbp)
+movq -248(%rbp),%rcx
+movq -240(%rbp),%rax
+cmpq %rcx,%rax
+sete %al
+movzbq %al,%rax
+movq %rax,-256(%rbp)
+movq -256(%rbp),%rax
+testq %rax,%rax
+jz .L1043
+movabsq $5,%rax
+movq %rax,-264(%rbp)
+movq -264(%rbp),%rax
+leave
+ret
+jmp .L1044
+.L1043:
+.L1044:
+movq -40(%rbp),%rax
+movq %rax,-272(%rbp)
+movq -144(%rbp),%rcx
+movq -272(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-280(%rbp)
+movq -280(%rbp),%rax
+movq %rax,-40(%rbp)
+jmp .L1037
+.L1038:
+movabsq $0,%rax
+movq %rax,-288(%rbp)
+movq -288(%rbp),%rax
+leave
+ret
+xorq %rax,%rax
+leave
+ret
+.set .F1036,288
+.type f_host_write_file,@function
+f_host_write_file:
+pushq %rbp
+movq %rsp,%rbp
+subq $.F1045,%rsp
+movq %rdi,-8(%rbp)
+movq %rsi,-16(%rbp)
+movq -8(%rbp),%rax
+movq %rax,-24(%rbp)
+movq -24(%rbp),%rdi
+call rt_cstr
+movq %rax,-32(%rbp)
+movq -32(%rbp),%rax
+movq %rax,-40(%rbp)
+movq -40(%rbp),%rax
+movq %rax,-48(%rbp)
+movabsq $0,%rax
+movq %rax,-56(%rbp)
+movq -56(%rbp),%rcx
+movq -48(%rbp),%rax
+cmpq %rcx,%rax
+sete %al
+movzbq %al,%rax
+movq %rax,-64(%rbp)
+movq -64(%rbp),%rax
+testq %rax,%rax
+jz .L1046
+movabsq $22,%rax
+movq %rax,-72(%rbp)
+movq -72(%rbp),%rax
+leave
+ret
+jmp .L1047
+.L1046:
+.L1047:
+movabsq $2,%rax
+movq %rax,-80(%rbp)
+movq -80(%rbp),%rax
+movq %rax,-88(%rbp)
+movq -40(%rbp),%rax
+movq %rax,-96(%rbp)
+movabsq $577,%rax
+movq %rax,-104(%rbp)
+movq -104(%rbp),%rax
+movq %rax,-112(%rbp)
+movabsq $438,%rax
+movq %rax,-120(%rbp)
+movq -120(%rbp),%rax
+movq %rax,-128(%rbp)
+movq -88(%rbp),%rax
+movq -96(%rbp),%rdi
+movq -112(%rbp),%rsi
+movq -128(%rbp),%rdx
+xorl %r10d,%r10d
+xorl %r8d,%r8d
+xorl %r9d,%r9d
+syscall
+movq %rax,-136(%rbp)
+movq -136(%rbp),%rax
+movq %rax,-144(%rbp)
+movq -40(%rbp),%rax
+movq %rax,-152(%rbp)
+movq -152(%rbp),%rdi
+call rt_free
+movq %rax,-160(%rbp)
+movq -144(%rbp),%rax
+movq %rax,-168(%rbp)
+movq -168(%rbp),%rdi
+call rt_error
+movq %rax,-176(%rbp)
+movq -176(%rbp),%rax
+testq %rax,%rax
+jz .L1048
+movabsq $0,%rax
+movq %rax,-184(%rbp)
+movq -184(%rbp),%rax
+movq %rax,-192(%rbp)
+movq -144(%rbp),%rcx
+movq -192(%rbp),%rax
+subq %rcx,%rax
+movq %rax,-200(%rbp)
+movq -200(%rbp),%rax
+leave
+ret
+jmp .L1049
+.L1048:
+.L1049:
+movq -16(%rbp),%rax
+movq %rax,-208(%rbp)
+movq -208(%rbp),%rdi
+call rt_pack
+movq %rax,-216(%rbp)
+movq -216(%rbp),%rax
+movq %rax,-224(%rbp)
+movq -144(%rbp),%rax
+movq %rax,-232(%rbp)
+movq -224(%rbp),%rax
+movq %rax,-240(%rbp)
+movq -16(%rbp),%rax
+movq %rax,-248(%rbp)
+movq -248(%rbp),%rdi
+call rt_len
+movq %rax,-256(%rbp)
+movq -256(%rbp),%rax
+movq %rax,-264(%rbp)
+movq -232(%rbp),%rdi
+movq -240(%rbp),%rsi
+movq -264(%rbp),%rdx
+call rt_write_all
+movq %rax,-272(%rbp)
+movq -272(%rbp),%rax
+movq %rax,-280(%rbp)
+movabsq $3,%rax
+movq %rax,-288(%rbp)
+movq -288(%rbp),%rax
+movq %rax,-296(%rbp)
+movq -144(%rbp),%rax
+movq %rax,-304(%rbp)
+movabsq $0,%rax
+movq %rax,-312(%rbp)
+movq -312(%rbp),%rax
+movq %rax,-320(%rbp)
+movabsq $0,%rax
+movq %rax,-328(%rbp)
+movq -328(%rbp),%rax
+movq %rax,-336(%rbp)
+movq -296(%rbp),%rax
+movq -304(%rbp),%rdi
+movq -320(%rbp),%rsi
+movq -336(%rbp),%rdx
+xorl %r10d,%r10d
+xorl %r8d,%r8d
+xorl %r9d,%r9d
+syscall
+movq %rax,-344(%rbp)
+movq -344(%rbp),%rax
+movq %rax,-352(%rbp)
+movq -224(%rbp),%rax
+movq %rax,-360(%rbp)
+movq -360(%rbp),%rdi
+call rt_free
+movq %rax,-368(%rbp)
+movq -280(%rbp),%rax
+movq %rax,-376(%rbp)
+movabsq $0,%rax
+movq %rax,-384(%rbp)
+movq -384(%rbp),%rcx
+movq -376(%rbp),%rax
+cmpq %rcx,%rax
+setne %al
+movzbq %al,%rax
+movq %rax,-392(%rbp)
+movq -392(%rbp),%rax
+testq %rax,%rax
+jz .L1050
+movq -280(%rbp),%rax
+leave
+ret
+jmp .L1051
+.L1050:
+.L1051:
+movq -352(%rbp),%rax
+movq %rax,-400(%rbp)
+movq -400(%rbp),%rdi
+call rt_error
+movq %rax,-408(%rbp)
+movq -408(%rbp),%rax
+testq %rax,%rax
+jz .L1052
+movabsq $0,%rax
+movq %rax,-416(%rbp)
+movq -416(%rbp),%rax
+movq %rax,-424(%rbp)
+movq -352(%rbp),%rcx
+movq -424(%rbp),%rax
+subq %rcx,%rax
+movq %rax,-432(%rbp)
+movq -432(%rbp),%rax
+leave
+ret
+jmp .L1053
+.L1052:
+.L1053:
+movabsq $0,%rax
+movq %rax,-440(%rbp)
+movq -440(%rbp),%rax
+leave
+ret
+xorq %rax,%rax
+leave
+ret
+.set .F1045,448
+.type f_host_print,@function
+f_host_print:
+pushq %rbp
+movq %rsp,%rbp
+subq $.F1054,%rsp
+movq %rdi,-8(%rbp)
+movq -8(%rbp),%rax
+movq %rax,-16(%rbp)
+movq -16(%rbp),%rdi
+call rt_pack
+movq %rax,-24(%rbp)
+movq -24(%rbp),%rax
+movq %rax,-32(%rbp)
+movabsq $1,%rax
+movq %rax,-40(%rbp)
+movq -40(%rbp),%rax
+movq %rax,-48(%rbp)
+movq -32(%rbp),%rax
+movq %rax,-56(%rbp)
+movq -8(%rbp),%rax
+movq %rax,-64(%rbp)
+movq -64(%rbp),%rdi
+call rt_len
+movq %rax,-72(%rbp)
+movq -72(%rbp),%rax
+movq %rax,-80(%rbp)
+movq -48(%rbp),%rdi
+movq -56(%rbp),%rsi
+movq -80(%rbp),%rdx
+call rt_write_all
+movq %rax,-88(%rbp)
+movq -88(%rbp),%rax
+movq %rax,-96(%rbp)
+movq -32(%rbp),%rax
+movq %rax,-104(%rbp)
+movq -104(%rbp),%rdi
+call rt_free
+movq %rax,-112(%rbp)
+movq -96(%rbp),%rax
+movq %rax,-120(%rbp)
+movabsq $0,%rax
+movq %rax,-128(%rbp)
+movq -128(%rbp),%rcx
+movq -120(%rbp),%rax
+cmpq %rcx,%rax
+setne %al
+movzbq %al,%rax
+movq %rax,-136(%rbp)
+movq -136(%rbp),%rax
+testq %rax,%rax
+jz .L1055
+call rt_abort
+movq %rax,-144(%rbp)
+jmp .L1056
+.L1055:
+.L1056:
+movabsq $0,%rax
+movq %rax,-152(%rbp)
+movq -152(%rbp),%rax
+leave
+ret
+xorq %rax,%rax
+leave
+ret
+.set .F1054,160
+.type rt_print_num,@function
+rt_print_num:
+pushq %rbp
+movq %rsp,%rbp
+subq $.F1057,%rsp
+movq %rdi,-8(%rbp)
+movabsq $32,%rax
+movq %rax,-16(%rbp)
+movq -16(%rbp),%rax
+movq %rax,-24(%rbp)
+movq -24(%rbp),%rdi
+call rt_alloc
+movq %rax,-32(%rbp)
+movq -32(%rbp),%rax
+movq %rax,-40(%rbp)
+movabsq $30,%rax
+movq %rax,-48(%rbp)
+movq -48(%rbp),%rax
+movq %rax,-56(%rbp)
+movq -8(%rbp),%rax
+movq %rax,-64(%rbp)
+movq -40(%rbp),%rax
+movq %rax,-72(%rbp)
+movabsq $31,%rax
+movq %rax,-80(%rbp)
+movq -80(%rbp),%rcx
+movq -72(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-88(%rbp)
+movq -88(%rbp),%rax
+movq %rax,-96(%rbp)
+movabsq $10,%rax
+movq %rax,-104(%rbp)
+movq -104(%rbp),%rax
+movq %rax,-112(%rbp)
+movq -96(%rbp),%rcx
+movq -112(%rbp),%rax
+movb %al,(%rcx)
+xorq %rax,%rax
+movq %rax,-120(%rbp)
+.L1058:
+movabsq $1,%rax
+movq %rax,-128(%rbp)
+movq -128(%rbp),%rax
+testq %rax,%rax
+jz .L1059
+movq -40(%rbp),%rax
+movq %rax,-136(%rbp)
+movq -56(%rbp),%rcx
+movq -136(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-144(%rbp)
+movq -144(%rbp),%rax
+movq %rax,-152(%rbp)
+movabsq $48,%rax
+movq %rax,-160(%rbp)
+movq -160(%rbp),%rax
+movq %rax,-168(%rbp)
+movq -64(%rbp),%rax
+movq %rax,-176(%rbp)
+movabsq $10,%rax
+movq %rax,-184(%rbp)
+movq -184(%rbp),%rcx
+movq -176(%rbp),%rax
+testq %rcx,%rcx
+jnz .L1060
+call rt_abort
+.L1060:
+xorq %rdx,%rdx
+divq %rcx
+movq %rdx,%rax
+movq %rax,-192(%rbp)
+movq -192(%rbp),%rcx
+movq -168(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-200(%rbp)
+movq -200(%rbp),%rax
+movq %rax,-208(%rbp)
+movq -152(%rbp),%rcx
+movq -208(%rbp),%rax
+movb %al,(%rcx)
+xorq %rax,%rax
+movq %rax,-216(%rbp)
+movq -64(%rbp),%rax
+movq %rax,-224(%rbp)
+movabsq $10,%rax
+movq %rax,-232(%rbp)
+movq -232(%rbp),%rax
+movq %rax,-240(%rbp)
+movq -224(%rbp),%rdi
+movq -240(%rbp),%rsi
+call rt_div
+movq %rax,-248(%rbp)
+movq -248(%rbp),%rax
+movq %rax,-64(%rbp)
+movq -64(%rbp),%rax
+movq %rax,-256(%rbp)
+movabsq $0,%rax
+movq %rax,-264(%rbp)
+movq -264(%rbp),%rcx
+movq -256(%rbp),%rax
+cmpq %rcx,%rax
+sete %al
+movzbq %al,%rax
+movq %rax,-272(%rbp)
+movq -272(%rbp),%rax
+testq %rax,%rax
+jz .L1061
+jmp .L1059
+jmp .L1062
+.L1061:
+.L1062:
+movq -56(%rbp),%rax
+movq %rax,-280(%rbp)
+movabsq $1,%rax
+movq %rax,-288(%rbp)
+movq -288(%rbp),%rcx
+movq -280(%rbp),%rax
+subq %rcx,%rax
+movq %rax,-296(%rbp)
+movq -296(%rbp),%rax
+movq %rax,-56(%rbp)
+jmp .L1058
+.L1059:
+movabsq $1,%rax
+movq %rax,-304(%rbp)
+movq -304(%rbp),%rax
+movq %rax,-312(%rbp)
+movq -40(%rbp),%rax
+movq %rax,-320(%rbp)
+movq -56(%rbp),%rcx
+movq -320(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-328(%rbp)
+movq -328(%rbp),%rax
+movq %rax,-336(%rbp)
+movabsq $32,%rax
+movq %rax,-344(%rbp)
+movq -344(%rbp),%rax
+movq %rax,-352(%rbp)
+movq -56(%rbp),%rcx
+movq -352(%rbp),%rax
+subq %rcx,%rax
+movq %rax,-360(%rbp)
+movq -360(%rbp),%rax
+movq %rax,-368(%rbp)
+movq -312(%rbp),%rdi
+movq -336(%rbp),%rsi
+movq -368(%rbp),%rdx
+call rt_write_all
+movq %rax,-376(%rbp)
+movq -376(%rbp),%rax
+movq %rax,-384(%rbp)
+movq -40(%rbp),%rax
+movq %rax,-392(%rbp)
+movq -392(%rbp),%rdi
+call rt_free
+movq %rax,-400(%rbp)
+movq -384(%rbp),%rax
+movq %rax,-408(%rbp)
+movabsq $0,%rax
+movq %rax,-416(%rbp)
+movq -416(%rbp),%rcx
+movq -408(%rbp),%rax
+cmpq %rcx,%rax
+setne %al
+movzbq %al,%rax
+movq %rax,-424(%rbp)
+movq -424(%rbp),%rax
+testq %rax,%rax
+jz .L1063
+call rt_abort
+movq %rax,-432(%rbp)
+jmp .L1064
+.L1063:
+.L1064:
+movabsq $0,%rax
+movq %rax,-440(%rbp)
+movq -440(%rbp),%rax
+leave
+ret
+xorq %rax,%rax
+leave
+ret
+.set .F1057,448
+.type rt_exec,@function
+rt_exec:
+pushq %rbp
+movq %rsp,%rbp
+subq $.F1065,%rsp
+movq %rdi,-8(%rbp)
+movq %rsi,-16(%rbp)
+leaq rt_state(%rip),%rax
+movq %rax,-24(%rbp)
+movq -24(%rbp),%rax
+movq %rax,-32(%rbp)
+movabsq $16,%rax
+movq %rax,-40(%rbp)
+movq -40(%rbp),%rcx
+movq -32(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-48(%rbp)
+movq -48(%rbp),%rax
+movq %rax,-56(%rbp)
+movq -56(%rbp),%rax
+movq (%rax),%rax
+movq %rax,-64(%rbp)
+movq -64(%rbp),%rax
+movq %rax,-72(%rbp)
+movabsq $0,%rax
+movq %rax,-80(%rbp)
+movq -80(%rbp),%rax
+movq %rax,-88(%rbp)
+movabsq $0,%rax
+movq %rax,-96(%rbp)
+movq -96(%rbp),%rax
+movq %rax,-104(%rbp)
+.L1066:
+movq -8(%rbp),%rax
+movq %rax,-112(%rbp)
+movq -88(%rbp),%rcx
+movq -112(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-120(%rbp)
+movq -120(%rbp),%rax
+movq %rax,-128(%rbp)
+movq -128(%rbp),%rax
+movzbq (%rax),%rax
+movq %rax,-136(%rbp)
+movq -136(%rbp),%rax
+movq %rax,-144(%rbp)
+movabsq $0,%rax
+movq %rax,-152(%rbp)
+movq -152(%rbp),%rcx
+movq -144(%rbp),%rax
+cmpq %rcx,%rax
+setne %al
+movzbq %al,%rax
+movq %rax,-160(%rbp)
+movq -160(%rbp),%rax
+testq %rax,%rax
+jz .L1067
+movq -8(%rbp),%rax
+movq %rax,-168(%rbp)
+movq -88(%rbp),%rcx
+movq -168(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-176(%rbp)
+movq -176(%rbp),%rax
+movq %rax,-184(%rbp)
+movq -184(%rbp),%rax
+movzbq (%rax),%rax
+movq %rax,-192(%rbp)
+movq -192(%rbp),%rax
+movq %rax,-200(%rbp)
+movabsq $47,%rax
+movq %rax,-208(%rbp)
+movq -208(%rbp),%rcx
+movq -200(%rbp),%rax
+cmpq %rcx,%rax
+sete %al
+movzbq %al,%rax
+movq %rax,-216(%rbp)
+movq -216(%rbp),%rax
+testq %rax,%rax
+jz .L1068
+movabsq $1,%rax
+movq %rax,-224(%rbp)
+movq -224(%rbp),%rax
+movq %rax,-104(%rbp)
+jmp .L1069
+.L1068:
+.L1069:
+movq -88(%rbp),%rax
+movq %rax,-232(%rbp)
+movabsq $1,%rax
+movq %rax,-240(%rbp)
+movq -240(%rbp),%rcx
+movq -232(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-248(%rbp)
+movq -248(%rbp),%rax
+movq %rax,-88(%rbp)
+jmp .L1066
+.L1067:
+movabsq $59,%rax
+movq %rax,-256(%rbp)
+movq -256(%rbp),%rax
+movq %rax,-264(%rbp)
+movq -8(%rbp),%rax
+movq %rax,-272(%rbp)
+movq -16(%rbp),%rax
+movq %rax,-280(%rbp)
+movq -72(%rbp),%rax
+movq %rax,-288(%rbp)
+movq -264(%rbp),%rax
+movq -272(%rbp),%rdi
+movq -280(%rbp),%rsi
+movq -288(%rbp),%rdx
+xorl %r10d,%r10d
+xorl %r8d,%r8d
+xorl %r9d,%r9d
+syscall
+movq %rax,-296(%rbp)
+movq -296(%rbp),%rax
+movq %rax,-304(%rbp)
+movq -104(%rbp),%rax
+testq %rax,%rax
+jz .L1070
+movq -304(%rbp),%rax
+leave
+ret
+jmp .L1071
+.L1070:
+.L1071:
+movq -72(%rbp),%rax
+movq %rax,-312(%rbp)
+movabsq $0,%rax
+movq %rax,-320(%rbp)
+movq -320(%rbp),%rax
+movq %rax,-328(%rbp)
+.L1072:
+movq -312(%rbp),%rax
+movq %rax,-336(%rbp)
+movq -336(%rbp),%rax
+movq (%rax),%rax
+movq %rax,-344(%rbp)
+movq -344(%rbp),%rax
+movq %rax,-352(%rbp)
+movabsq $0,%rax
+movq %rax,-360(%rbp)
+movq -360(%rbp),%rcx
+movq -352(%rbp),%rax
+cmpq %rcx,%rax
+setne %al
+movzbq %al,%rax
+movq %rax,-368(%rbp)
+movq -368(%rbp),%rax
+testq %rax,%rax
+jz .L1073
+movq -312(%rbp),%rax
+movq %rax,-376(%rbp)
+movq -376(%rbp),%rax
+movq (%rax),%rax
+movq %rax,-384(%rbp)
+movq -384(%rbp),%rax
+movq %rax,-392(%rbp)
+movq -392(%rbp),%rax
+movq %rax,-400(%rbp)
+movq -400(%rbp),%rax
+movzbq (%rax),%rax
+movq %rax,-408(%rbp)
+movq -408(%rbp),%rax
+movq %rax,-416(%rbp)
+movabsq $80,%rax
+movq %rax,-424(%rbp)
+movq -424(%rbp),%rcx
+movq -416(%rbp),%rax
+cmpq %rcx,%rax
+sete %al
+movzbq %al,%rax
+movq %rax,-432(%rbp)
+movq -432(%rbp),%rax
+testq %rax,%rax
+jz .L1074
+movq -392(%rbp),%rax
+movq %rax,-440(%rbp)
+movabsq $1,%rax
+movq %rax,-448(%rbp)
+movq -448(%rbp),%rcx
+movq -440(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-456(%rbp)
+movq -456(%rbp),%rax
+movq %rax,-464(%rbp)
+movq -464(%rbp),%rax
+movzbq (%rax),%rax
+movq %rax,-472(%rbp)
+movq -472(%rbp),%rax
+movq %rax,-480(%rbp)
+movabsq $65,%rax
+movq %rax,-488(%rbp)
+movq -488(%rbp),%rcx
+movq -480(%rbp),%rax
+cmpq %rcx,%rax
+sete %al
+movzbq %al,%rax
+movq %rax,-496(%rbp)
+movq -496(%rbp),%rax
+testq %rax,%rax
+jz .L1076
+movq -392(%rbp),%rax
+movq %rax,-504(%rbp)
+movabsq $2,%rax
+movq %rax,-512(%rbp)
+movq -512(%rbp),%rcx
+movq -504(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-520(%rbp)
+movq -520(%rbp),%rax
+movq %rax,-528(%rbp)
+movq -528(%rbp),%rax
+movzbq (%rax),%rax
+movq %rax,-536(%rbp)
+movq -536(%rbp),%rax
+movq %rax,-544(%rbp)
+movabsq $84,%rax
+movq %rax,-552(%rbp)
+movq -552(%rbp),%rcx
+movq -544(%rbp),%rax
+cmpq %rcx,%rax
+sete %al
+movzbq %al,%rax
+movq %rax,-560(%rbp)
+movq -560(%rbp),%rax
+testq %rax,%rax
+jz .L1078
+movq -392(%rbp),%rax
+movq %rax,-568(%rbp)
+movabsq $3,%rax
+movq %rax,-576(%rbp)
+movq -576(%rbp),%rcx
+movq -568(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-584(%rbp)
+movq -584(%rbp),%rax
+movq %rax,-592(%rbp)
+movq -592(%rbp),%rax
+movzbq (%rax),%rax
+movq %rax,-600(%rbp)
+movq -600(%rbp),%rax
+movq %rax,-608(%rbp)
+movabsq $72,%rax
+movq %rax,-616(%rbp)
+movq -616(%rbp),%rcx
+movq -608(%rbp),%rax
+cmpq %rcx,%rax
+sete %al
+movzbq %al,%rax
+movq %rax,-624(%rbp)
+movq -624(%rbp),%rax
+testq %rax,%rax
+jz .L1080
+movq -392(%rbp),%rax
+movq %rax,-632(%rbp)
+movabsq $4,%rax
+movq %rax,-640(%rbp)
+movq -640(%rbp),%rcx
+movq -632(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-648(%rbp)
+movq -648(%rbp),%rax
+movq %rax,-656(%rbp)
+movq -656(%rbp),%rax
+movzbq (%rax),%rax
+movq %rax,-664(%rbp)
+movq -664(%rbp),%rax
+movq %rax,-672(%rbp)
+movabsq $61,%rax
+movq %rax,-680(%rbp)
+movq -680(%rbp),%rcx
+movq -672(%rbp),%rax
+cmpq %rcx,%rax
+sete %al
+movzbq %al,%rax
+movq %rax,-688(%rbp)
+movq -688(%rbp),%rax
+testq %rax,%rax
+jz .L1082
+movq -392(%rbp),%rax
+movq %rax,-696(%rbp)
+movabsq $5,%rax
+movq %rax,-704(%rbp)
+movq -704(%rbp),%rcx
+movq -696(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-712(%rbp)
+movq -712(%rbp),%rax
+movq %rax,-328(%rbp)
+jmp .L1073
+jmp .L1083
+.L1082:
+.L1083:
+jmp .L1081
+.L1080:
+.L1081:
+jmp .L1079
+.L1078:
+.L1079:
+jmp .L1077
+.L1076:
+.L1077:
+jmp .L1075
+.L1074:
+.L1075:
+movq -312(%rbp),%rax
+movq %rax,-720(%rbp)
+movabsq $8,%rax
+movq %rax,-728(%rbp)
+movq -728(%rbp),%rcx
+movq -720(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-736(%rbp)
+movq -736(%rbp),%rax
+movq %rax,-312(%rbp)
+jmp .L1072
+.L1073:
+movabsq $0,%rax
+movq %rax,-744(%rbp)
+movq -744(%rbp),%rax
+movq %rax,-752(%rbp)
+movq -328(%rbp),%rax
+movq %rax,-760(%rbp)
+movabsq $0,%rax
+movq %rax,-768(%rbp)
+movq -768(%rbp),%rcx
+movq -760(%rbp),%rax
+cmpq %rcx,%rax
+sete %al
+movzbq %al,%rax
+movq %rax,-776(%rbp)
+movq -776(%rbp),%rax
+testq %rax,%rax
+jz .L1084
+movabsq $14,%rax
+movq %rax,-784(%rbp)
+movq -784(%rbp),%rax
+movq %rax,-792(%rbp)
+movq -792(%rbp),%rdi
+call rt_alloc
+movq %rax,-800(%rbp)
+movq -800(%rbp),%rax
+movq %rax,-752(%rbp)
+movq -752(%rbp),%rax
+movq %rax,-808(%rbp)
+movabsq $47,%rax
+movq %rax,-816(%rbp)
+movq -816(%rbp),%rax
+movq %rax,-824(%rbp)
+movq -808(%rbp),%rcx
+movq -824(%rbp),%rax
+movb %al,(%rcx)
+xorq %rax,%rax
+movq %rax,-832(%rbp)
+movq -752(%rbp),%rax
+movq %rax,-840(%rbp)
+movabsq $1,%rax
+movq %rax,-848(%rbp)
+movq -848(%rbp),%rcx
+movq -840(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-856(%rbp)
+movq -856(%rbp),%rax
+movq %rax,-864(%rbp)
+movabsq $98,%rax
+movq %rax,-872(%rbp)
+movq -872(%rbp),%rax
+movq %rax,-880(%rbp)
+movq -864(%rbp),%rcx
+movq -880(%rbp),%rax
+movb %al,(%rcx)
+xorq %rax,%rax
+movq %rax,-888(%rbp)
+movq -752(%rbp),%rax
+movq %rax,-896(%rbp)
+movabsq $2,%rax
+movq %rax,-904(%rbp)
+movq -904(%rbp),%rcx
+movq -896(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-912(%rbp)
+movq -912(%rbp),%rax
+movq %rax,-920(%rbp)
+movabsq $105,%rax
+movq %rax,-928(%rbp)
+movq -928(%rbp),%rax
+movq %rax,-936(%rbp)
+movq -920(%rbp),%rcx
+movq -936(%rbp),%rax
+movb %al,(%rcx)
+xorq %rax,%rax
+movq %rax,-944(%rbp)
+movq -752(%rbp),%rax
+movq %rax,-952(%rbp)
+movabsq $3,%rax
+movq %rax,-960(%rbp)
+movq -960(%rbp),%rcx
+movq -952(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-968(%rbp)
+movq -968(%rbp),%rax
+movq %rax,-976(%rbp)
+movabsq $110,%rax
+movq %rax,-984(%rbp)
+movq -984(%rbp),%rax
+movq %rax,-992(%rbp)
+movq -976(%rbp),%rcx
+movq -992(%rbp),%rax
+movb %al,(%rcx)
+xorq %rax,%rax
+movq %rax,-1000(%rbp)
+movq -752(%rbp),%rax
+movq %rax,-1008(%rbp)
+movabsq $4,%rax
+movq %rax,-1016(%rbp)
+movq -1016(%rbp),%rcx
+movq -1008(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-1024(%rbp)
+movq -1024(%rbp),%rax
+movq %rax,-1032(%rbp)
+movabsq $58,%rax
+movq %rax,-1040(%rbp)
+movq -1040(%rbp),%rax
+movq %rax,-1048(%rbp)
+movq -1032(%rbp),%rcx
+movq -1048(%rbp),%rax
+movb %al,(%rcx)
+xorq %rax,%rax
+movq %rax,-1056(%rbp)
+movq -752(%rbp),%rax
+movq %rax,-1064(%rbp)
+movabsq $5,%rax
+movq %rax,-1072(%rbp)
+movq -1072(%rbp),%rcx
+movq -1064(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-1080(%rbp)
+movq -1080(%rbp),%rax
+movq %rax,-1088(%rbp)
+movabsq $47,%rax
+movq %rax,-1096(%rbp)
+movq -1096(%rbp),%rax
+movq %rax,-1104(%rbp)
+movq -1088(%rbp),%rcx
+movq -1104(%rbp),%rax
+movb %al,(%rcx)
+xorq %rax,%rax
+movq %rax,-1112(%rbp)
+movq -752(%rbp),%rax
+movq %rax,-1120(%rbp)
+movabsq $6,%rax
+movq %rax,-1128(%rbp)
+movq -1128(%rbp),%rcx
+movq -1120(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-1136(%rbp)
+movq -1136(%rbp),%rax
+movq %rax,-1144(%rbp)
+movabsq $117,%rax
+movq %rax,-1152(%rbp)
+movq -1152(%rbp),%rax
+movq %rax,-1160(%rbp)
+movq -1144(%rbp),%rcx
+movq -1160(%rbp),%rax
+movb %al,(%rcx)
+xorq %rax,%rax
+movq %rax,-1168(%rbp)
+movq -752(%rbp),%rax
+movq %rax,-1176(%rbp)
+movabsq $7,%rax
+movq %rax,-1184(%rbp)
+movq -1184(%rbp),%rcx
+movq -1176(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-1192(%rbp)
+movq -1192(%rbp),%rax
+movq %rax,-1200(%rbp)
+movabsq $115,%rax
+movq %rax,-1208(%rbp)
+movq -1208(%rbp),%rax
+movq %rax,-1216(%rbp)
+movq -1200(%rbp),%rcx
+movq -1216(%rbp),%rax
+movb %al,(%rcx)
+xorq %rax,%rax
+movq %rax,-1224(%rbp)
+movq -752(%rbp),%rax
+movq %rax,-1232(%rbp)
+movabsq $8,%rax
+movq %rax,-1240(%rbp)
+movq -1240(%rbp),%rcx
+movq -1232(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-1248(%rbp)
+movq -1248(%rbp),%rax
+movq %rax,-1256(%rbp)
+movabsq $114,%rax
+movq %rax,-1264(%rbp)
+movq -1264(%rbp),%rax
+movq %rax,-1272(%rbp)
+movq -1256(%rbp),%rcx
+movq -1272(%rbp),%rax
+movb %al,(%rcx)
+xorq %rax,%rax
+movq %rax,-1280(%rbp)
+movq -752(%rbp),%rax
+movq %rax,-1288(%rbp)
+movabsq $9,%rax
+movq %rax,-1296(%rbp)
+movq -1296(%rbp),%rcx
+movq -1288(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-1304(%rbp)
+movq -1304(%rbp),%rax
+movq %rax,-1312(%rbp)
+movabsq $47,%rax
+movq %rax,-1320(%rbp)
+movq -1320(%rbp),%rax
+movq %rax,-1328(%rbp)
+movq -1312(%rbp),%rcx
+movq -1328(%rbp),%rax
+movb %al,(%rcx)
+xorq %rax,%rax
+movq %rax,-1336(%rbp)
+movq -752(%rbp),%rax
+movq %rax,-1344(%rbp)
+movabsq $10,%rax
+movq %rax,-1352(%rbp)
+movq -1352(%rbp),%rcx
+movq -1344(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-1360(%rbp)
+movq -1360(%rbp),%rax
+movq %rax,-1368(%rbp)
+movabsq $98,%rax
+movq %rax,-1376(%rbp)
+movq -1376(%rbp),%rax
+movq %rax,-1384(%rbp)
+movq -1368(%rbp),%rcx
+movq -1384(%rbp),%rax
+movb %al,(%rcx)
+xorq %rax,%rax
+movq %rax,-1392(%rbp)
+movq -752(%rbp),%rax
+movq %rax,-1400(%rbp)
+movabsq $11,%rax
+movq %rax,-1408(%rbp)
+movq -1408(%rbp),%rcx
+movq -1400(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-1416(%rbp)
+movq -1416(%rbp),%rax
+movq %rax,-1424(%rbp)
+movabsq $105,%rax
+movq %rax,-1432(%rbp)
+movq -1432(%rbp),%rax
+movq %rax,-1440(%rbp)
+movq -1424(%rbp),%rcx
+movq -1440(%rbp),%rax
+movb %al,(%rcx)
+xorq %rax,%rax
+movq %rax,-1448(%rbp)
+movq -752(%rbp),%rax
+movq %rax,-1456(%rbp)
+movabsq $12,%rax
+movq %rax,-1464(%rbp)
+movq -1464(%rbp),%rcx
+movq -1456(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-1472(%rbp)
+movq -1472(%rbp),%rax
+movq %rax,-1480(%rbp)
+movabsq $110,%rax
+movq %rax,-1488(%rbp)
+movq -1488(%rbp),%rax
+movq %rax,-1496(%rbp)
+movq -1480(%rbp),%rcx
+movq -1496(%rbp),%rax
+movb %al,(%rcx)
+xorq %rax,%rax
+movq %rax,-1504(%rbp)
+movq -752(%rbp),%rax
+movq %rax,-328(%rbp)
+jmp .L1085
+.L1084:
+.L1085:
+movabsq $0,%rax
+movq %rax,-1512(%rbp)
+movq -1512(%rbp),%rax
+movq %rax,-1520(%rbp)
+.L1086:
+movabsq $1,%rax
+movq %rax,-1528(%rbp)
+movq -1528(%rbp),%rax
+testq %rax,%rax
+jz .L1087
+movq -1520(%rbp),%rax
+movq %rax,-1536(%rbp)
+.L1088:
+movq -328(%rbp),%rax
+movq %rax,-1544(%rbp)
+movq -1536(%rbp),%rcx
+movq -1544(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-1552(%rbp)
+movq -1552(%rbp),%rax
+movq %rax,-1560(%rbp)
+movq -1560(%rbp),%rax
+movzbq (%rax),%rax
+movq %rax,-1568(%rbp)
+movq -1568(%rbp),%rax
+movq %rax,-1576(%rbp)
+movabsq $0,%rax
+movq %rax,-1584(%rbp)
+movq -1584(%rbp),%rcx
+movq -1576(%rbp),%rax
+cmpq %rcx,%rax
+setne %al
+movzbq %al,%rax
+movq %rax,-1592(%rbp)
+movq -1592(%rbp),%rax
+testq %rax,%rax
+jz .L1089
+movq -328(%rbp),%rax
+movq %rax,-1600(%rbp)
+movq -1536(%rbp),%rcx
+movq -1600(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-1608(%rbp)
+movq -1608(%rbp),%rax
+movq %rax,-1616(%rbp)
+movq -1616(%rbp),%rax
+movzbq (%rax),%rax
+movq %rax,-1624(%rbp)
+movq -1624(%rbp),%rax
+movq %rax,-1632(%rbp)
+movabsq $58,%rax
+movq %rax,-1640(%rbp)
+movq -1640(%rbp),%rcx
+movq -1632(%rbp),%rax
+cmpq %rcx,%rax
+sete %al
+movzbq %al,%rax
+movq %rax,-1648(%rbp)
+movq -1648(%rbp),%rax
+testq %rax,%rax
+jz .L1090
+jmp .L1089
+jmp .L1091
+.L1090:
+.L1091:
+movq -1536(%rbp),%rax
+movq %rax,-1656(%rbp)
+movabsq $1,%rax
+movq %rax,-1664(%rbp)
+movq -1664(%rbp),%rcx
+movq -1656(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-1672(%rbp)
+movq -1672(%rbp),%rax
+movq %rax,-1536(%rbp)
+jmp .L1088
+.L1089:
+movq -1536(%rbp),%rax
+movq %rax,-1680(%rbp)
+movq -1520(%rbp),%rcx
+movq -1680(%rbp),%rax
+subq %rcx,%rax
+movq %rax,-1688(%rbp)
+movq -1688(%rbp),%rax
+movq %rax,-1696(%rbp)
+movq -1696(%rbp),%rax
+movq %rax,-1704(%rbp)
+movq -88(%rbp),%rcx
+movq -1704(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-1712(%rbp)
+movq -1712(%rbp),%rax
+movq %rax,-1720(%rbp)
+movabsq $2,%rax
+movq %rax,-1728(%rbp)
+movq -1728(%rbp),%rcx
+movq -1720(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-1736(%rbp)
+movq -1736(%rbp),%rax
+movq %rax,-1744(%rbp)
+movq -1744(%rbp),%rdi
+call rt_alloc
+movq %rax,-1752(%rbp)
+movq -1752(%rbp),%rax
+movq %rax,-1760(%rbp)
+movabsq $0,%rax
+movq %rax,-1768(%rbp)
+movq -1768(%rbp),%rax
+movq %rax,-1776(%rbp)
+.L1092:
+movq -1776(%rbp),%rax
+movq %rax,-1784(%rbp)
+movq -1696(%rbp),%rcx
+movq -1784(%rbp),%rax
+cmpq %rcx,%rax
+setb %al
+movzbq %al,%rax
+movq %rax,-1792(%rbp)
+movq -1792(%rbp),%rax
+testq %rax,%rax
+jz .L1093
+movq -1760(%rbp),%rax
+movq %rax,-1800(%rbp)
+movq -1776(%rbp),%rcx
+movq -1800(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-1808(%rbp)
+movq -1808(%rbp),%rax
+movq %rax,-1816(%rbp)
+movq -328(%rbp),%rax
+movq %rax,-1824(%rbp)
+movq -1520(%rbp),%rcx
+movq -1824(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-1832(%rbp)
+movq -1832(%rbp),%rax
+movq %rax,-1840(%rbp)
+movq -1776(%rbp),%rcx
+movq -1840(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-1848(%rbp)
+movq -1848(%rbp),%rax
+movq %rax,-1856(%rbp)
+movq -1856(%rbp),%rax
+movzbq (%rax),%rax
+movq %rax,-1864(%rbp)
+movq -1864(%rbp),%rax
+movq %rax,-1872(%rbp)
+movq -1816(%rbp),%rcx
+movq -1872(%rbp),%rax
+movb %al,(%rcx)
+xorq %rax,%rax
+movq %rax,-1880(%rbp)
+movq -1776(%rbp),%rax
+movq %rax,-1888(%rbp)
+movabsq $1,%rax
+movq %rax,-1896(%rbp)
+movq -1896(%rbp),%rcx
+movq -1888(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-1904(%rbp)
+movq -1904(%rbp),%rax
+movq %rax,-1776(%rbp)
+jmp .L1092
+.L1093:
+movq -1696(%rbp),%rax
+movq %rax,-1912(%rbp)
+movabsq $0,%rax
+movq %rax,-1920(%rbp)
+movq -1920(%rbp),%rcx
+movq -1912(%rbp),%rax
+cmpq %rcx,%rax
+setne %al
+movzbq %al,%rax
+movq %rax,-1928(%rbp)
+movq -1928(%rbp),%rax
+testq %rax,%rax
+jz .L1094
+movq -1760(%rbp),%rax
+movq %rax,-1936(%rbp)
+movq -1776(%rbp),%rcx
+movq -1936(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-1944(%rbp)
+movq -1944(%rbp),%rax
+movq %rax,-1952(%rbp)
+movabsq $47,%rax
+movq %rax,-1960(%rbp)
+movq -1960(%rbp),%rax
+movq %rax,-1968(%rbp)
+movq -1952(%rbp),%rcx
+movq -1968(%rbp),%rax
+movb %al,(%rcx)
+xorq %rax,%rax
+movq %rax,-1976(%rbp)
+movq -1776(%rbp),%rax
+movq %rax,-1984(%rbp)
+movabsq $1,%rax
+movq %rax,-1992(%rbp)
+movq -1992(%rbp),%rcx
+movq -1984(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-2000(%rbp)
+movq -2000(%rbp),%rax
+movq %rax,-1776(%rbp)
+jmp .L1095
+.L1094:
+.L1095:
+movabsq $0,%rax
+movq %rax,-2008(%rbp)
+movq -2008(%rbp),%rax
+movq %rax,-2016(%rbp)
+.L1096:
+movq -2016(%rbp),%rax
+movq %rax,-2024(%rbp)
+movq -88(%rbp),%rcx
+movq -2024(%rbp),%rax
+cmpq %rcx,%rax
+setb %al
+movzbq %al,%rax
+movq %rax,-2032(%rbp)
+movq -2032(%rbp),%rax
+testq %rax,%rax
+jz .L1097
+movq -1760(%rbp),%rax
+movq %rax,-2040(%rbp)
+movq -1776(%rbp),%rcx
+movq -2040(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-2048(%rbp)
+movq -2048(%rbp),%rax
+movq %rax,-2056(%rbp)
+movq -2016(%rbp),%rcx
+movq -2056(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-2064(%rbp)
+movq -2064(%rbp),%rax
+movq %rax,-2072(%rbp)
+movq -8(%rbp),%rax
+movq %rax,-2080(%rbp)
+movq -2016(%rbp),%rcx
+movq -2080(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-2088(%rbp)
+movq -2088(%rbp),%rax
+movq %rax,-2096(%rbp)
+movq -2096(%rbp),%rax
+movzbq (%rax),%rax
+movq %rax,-2104(%rbp)
+movq -2104(%rbp),%rax
+movq %rax,-2112(%rbp)
+movq -2072(%rbp),%rcx
+movq -2112(%rbp),%rax
+movb %al,(%rcx)
+xorq %rax,%rax
+movq %rax,-2120(%rbp)
+movq -2016(%rbp),%rax
+movq %rax,-2128(%rbp)
+movabsq $1,%rax
+movq %rax,-2136(%rbp)
+movq -2136(%rbp),%rcx
+movq -2128(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-2144(%rbp)
+movq -2144(%rbp),%rax
+movq %rax,-2016(%rbp)
+jmp .L1096
+.L1097:
+movabsq $59,%rax
+movq %rax,-2152(%rbp)
+movq -2152(%rbp),%rax
+movq %rax,-2160(%rbp)
+movq -1760(%rbp),%rax
+movq %rax,-2168(%rbp)
+movq -16(%rbp),%rax
+movq %rax,-2176(%rbp)
+movq -72(%rbp),%rax
+movq %rax,-2184(%rbp)
+movq -2160(%rbp),%rax
+movq -2168(%rbp),%rdi
+movq -2176(%rbp),%rsi
+movq -2184(%rbp),%rdx
+xorl %r10d,%r10d
+xorl %r8d,%r8d
+xorl %r9d,%r9d
+syscall
+movq %rax,-2192(%rbp)
+movq -1760(%rbp),%rax
+movq %rax,-2200(%rbp)
+movq -2200(%rbp),%rdi
+call rt_free
+movq %rax,-2208(%rbp)
+movq -328(%rbp),%rax
+movq %rax,-2216(%rbp)
+movq -1536(%rbp),%rcx
+movq -2216(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-2224(%rbp)
+movq -2224(%rbp),%rax
+movq %rax,-2232(%rbp)
+movq -2232(%rbp),%rax
+movzbq (%rax),%rax
+movq %rax,-2240(%rbp)
+movq -2240(%rbp),%rax
+movq %rax,-2248(%rbp)
+movabsq $0,%rax
+movq %rax,-2256(%rbp)
+movq -2256(%rbp),%rcx
+movq -2248(%rbp),%rax
+cmpq %rcx,%rax
+sete %al
+movzbq %al,%rax
+movq %rax,-2264(%rbp)
+movq -2264(%rbp),%rax
+testq %rax,%rax
+jz .L1098
+jmp .L1087
+jmp .L1099
+.L1098:
+.L1099:
+movq -1536(%rbp),%rax
+movq %rax,-2272(%rbp)
+movabsq $1,%rax
+movq %rax,-2280(%rbp)
+movq -2280(%rbp),%rcx
+movq -2272(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-2288(%rbp)
+movq -2288(%rbp),%rax
+movq %rax,-1520(%rbp)
+jmp .L1086
+.L1087:
+movq -752(%rbp),%rax
+movq %rax,-2296(%rbp)
+movq -2296(%rbp),%rdi
+call rt_free
+movq %rax,-2304(%rbp)
+movq -304(%rbp),%rax
+leave
+ret
+xorq %rax,%rax
+leave
+ret
+.set .F1065,2304
+.type f_host_command,@function
+f_host_command:
+pushq %rbp
+movq %rsp,%rbp
+subq $.F1100,%rsp
+movq %rdi,-8(%rbp)
+movq -8(%rbp),%rax
+movq %rax,-16(%rbp)
+movq -16(%rbp),%rdi
+call rt_len
+movq %rax,-24(%rbp)
+movq -24(%rbp),%rax
+movq %rax,-32(%rbp)
+movabsq $278,%rax
+movq %rax,-40(%rbp)
+movq -40(%rbp),%rax
+movq %rax,-48(%rbp)
+movabsq $0,%rax
+movq %rax,-56(%rbp)
+movq -56(%rbp),%rax
+movq %rax,-64(%rbp)
+movq -32(%rbp),%rax
+movq %rax,-72(%rbp)
+movabsq $1,%rax
+movq %rax,-80(%rbp)
+movq -80(%rbp),%rcx
+movq -72(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-88(%rbp)
+movq -88(%rbp),%rax
+movq %rax,-96(%rbp)
+movabsq $8,%rax
+movq %rax,-104(%rbp)
+movq -104(%rbp),%rcx
+movq -96(%rbp),%rax
+imulq %rcx,%rax
+movq %rax,-112(%rbp)
+movq -112(%rbp),%rax
+movq %rax,-120(%rbp)
+movq -120(%rbp),%rdi
+call rt_alloc
+movq %rax,-128(%rbp)
+movq -128(%rbp),%rax
+movq %rax,-136(%rbp)
+movq -32(%rbp),%rax
+movq %rax,-144(%rbp)
+movabsq $0,%rax
+movq %rax,-152(%rbp)
+movq -152(%rbp),%rcx
+movq -144(%rbp),%rax
+cmpq %rcx,%rax
+setne %al
+movzbq %al,%rax
+movq %rax,-160(%rbp)
+movq -160(%rbp),%rax
+testq %rax,%rax
+jz .L1101
+.L1103:
+movq -64(%rbp),%rax
+movq %rax,-168(%rbp)
+movq -32(%rbp),%rcx
+movq -168(%rbp),%rax
+cmpq %rcx,%rax
+setb %al
+movzbq %al,%rax
+movq %rax,-176(%rbp)
+movq -176(%rbp),%rax
+testq %rax,%rax
+jz .L1104
+movq -8(%rbp),%rax
+movq %rax,-184(%rbp)
+movq -64(%rbp),%rax
+movq %rax,-192(%rbp)
+movq -184(%rbp),%rdi
+movq -192(%rbp),%rsi
+call rt_at
+movq %rax,-200(%rbp)
+movq -200(%rbp),%rax
+movq %rax,-208(%rbp)
+movq -208(%rbp),%rdi
+call rt_cstr
+movq %rax,-216(%rbp)
+movq -216(%rbp),%rax
+movq %rax,-224(%rbp)
+movq -224(%rbp),%rax
+movq %rax,-232(%rbp)
+movabsq $0,%rax
+movq %rax,-240(%rbp)
+movq -240(%rbp),%rcx
+movq -232(%rbp),%rax
+cmpq %rcx,%rax
+sete %al
+movzbq %al,%rax
+movq %rax,-248(%rbp)
+movq -248(%rbp),%rax
+testq %rax,%rax
+jz .L1105
+jmp .L1104
+jmp .L1106
+.L1105:
+.L1106:
+movq -136(%rbp),%rax
+movq %rax,-256(%rbp)
+movq -64(%rbp),%rax
+movq %rax,-264(%rbp)
+movabsq $8,%rax
+movq %rax,-272(%rbp)
+movq -272(%rbp),%rcx
+movq -264(%rbp),%rax
+imulq %rcx,%rax
+movq %rax,-280(%rbp)
+movq -280(%rbp),%rcx
+movq -256(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-288(%rbp)
+movq -288(%rbp),%rax
+movq %rax,-296(%rbp)
+movq -224(%rbp),%rax
+movq %rax,-304(%rbp)
+movq -296(%rbp),%rcx
+movq -304(%rbp),%rax
+movq %rax,(%rcx)
+xorq %rax,%rax
+movq %rax,-312(%rbp)
+movq -64(%rbp),%rax
+movq %rax,-320(%rbp)
+movabsq $1,%rax
+movq %rax,-328(%rbp)
+movq -328(%rbp),%rcx
+movq -320(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-336(%rbp)
+movq -336(%rbp),%rax
+movq %rax,-64(%rbp)
+jmp .L1103
+.L1104:
+movq -64(%rbp),%rax
+movq %rax,-344(%rbp)
+movq -32(%rbp),%rcx
+movq -344(%rbp),%rax
+cmpq %rcx,%rax
+sete %al
+movzbq %al,%rax
+movq %rax,-352(%rbp)
+movq -352(%rbp),%rax
+testq %rax,%rax
+jz .L1107
+movabsq $57,%rax
+movq %rax,-360(%rbp)
+movq -360(%rbp),%rax
+movq %rax,-368(%rbp)
+movabsq $0,%rax
+movq %rax,-376(%rbp)
+movq -376(%rbp),%rax
+movq %rax,-384(%rbp)
+movabsq $0,%rax
+movq %rax,-392(%rbp)
+movq -392(%rbp),%rax
+movq %rax,-400(%rbp)
+movabsq $0,%rax
+movq %rax,-408(%rbp)
+movq -408(%rbp),%rax
+movq %rax,-416(%rbp)
+movq -368(%rbp),%rax
+movq -384(%rbp),%rdi
+movq -400(%rbp),%rsi
+movq -416(%rbp),%rdx
+xorl %r10d,%r10d
+xorl %r8d,%r8d
+xorl %r9d,%r9d
+syscall
+movq %rax,-424(%rbp)
+movq -424(%rbp),%rax
+movq %rax,-432(%rbp)
+movq -432(%rbp),%rax
+movq %rax,-440(%rbp)
+movabsq $0,%rax
+movq %rax,-448(%rbp)
+movq -448(%rbp),%rcx
+movq -440(%rbp),%rax
+cmpq %rcx,%rax
+sete %al
+movzbq %al,%rax
+movq %rax,-456(%rbp)
+movq -456(%rbp),%rax
+testq %rax,%rax
+jz .L1109
+movq -136(%rbp),%rax
+movq %rax,-464(%rbp)
+movq -464(%rbp),%rax
+movq (%rax),%rax
+movq %rax,-472(%rbp)
+movq -472(%rbp),%rax
+movq %rax,-480(%rbp)
+movq -136(%rbp),%rax
+movq %rax,-488(%rbp)
+movq -480(%rbp),%rdi
+movq -488(%rbp),%rsi
+call rt_exec
+movq %rax,-496(%rbp)
+movabsq $60,%rax
+movq %rax,-504(%rbp)
+movq -504(%rbp),%rax
+movq %rax,-512(%rbp)
+movabsq $127,%rax
+movq %rax,-520(%rbp)
+movq -520(%rbp),%rax
+movq %rax,-528(%rbp)
+movabsq $0,%rax
+movq %rax,-536(%rbp)
+movq -536(%rbp),%rax
+movq %rax,-544(%rbp)
+movabsq $0,%rax
+movq %rax,-552(%rbp)
+movq -552(%rbp),%rax
+movq %rax,-560(%rbp)
+movq -512(%rbp),%rax
+movq -528(%rbp),%rdi
+movq -544(%rbp),%rsi
+movq -560(%rbp),%rdx
+xorl %r10d,%r10d
+xorl %r8d,%r8d
+xorl %r9d,%r9d
+syscall
+movq %rax,-568(%rbp)
+jmp .L1110
+.L1109:
+.L1110:
+movq -432(%rbp),%rax
+movq %rax,-576(%rbp)
+movq -576(%rbp),%rdi
+call rt_error
+movq %rax,-584(%rbp)
+movq -584(%rbp),%rax
+testq %rax,%rax
+jz .L1111
+movabsq $256,%rax
+movq %rax,-592(%rbp)
+movq -592(%rbp),%rax
+movq %rax,-600(%rbp)
+movq -432(%rbp),%rcx
+movq -600(%rbp),%rax
+subq %rcx,%rax
+movq %rax,-608(%rbp)
+movq -608(%rbp),%rax
+movq %rax,-48(%rbp)
+jmp .L1112
+.L1111:
+movabsq $8,%rax
+movq %rax,-616(%rbp)
+movq -616(%rbp),%rax
+movq %rax,-624(%rbp)
+movq -624(%rbp),%rdi
+call rt_alloc
+movq %rax,-632(%rbp)
+movq -632(%rbp),%rax
+movq %rax,-640(%rbp)
+movabsq $0,%rax
+movq %rax,-648(%rbp)
+movq -648(%rbp),%rax
+movq %rax,-656(%rbp)
+.L1113:
+movabsq $1,%rax
+movq %rax,-664(%rbp)
+movq -664(%rbp),%rax
+testq %rax,%rax
+jz .L1114
+movabsq $61,%rax
+movq %rax,-672(%rbp)
+movq -672(%rbp),%rax
+movq %rax,-680(%rbp)
+movq -432(%rbp),%rax
+movq %rax,-688(%rbp)
+movq -640(%rbp),%rax
+movq %rax,-696(%rbp)
+movabsq $0,%rax
+movq %rax,-704(%rbp)
+movq -704(%rbp),%rax
+movq %rax,-712(%rbp)
+movq -680(%rbp),%rax
+movq -688(%rbp),%rdi
+movq -696(%rbp),%rsi
+movq -712(%rbp),%rdx
+xorl %r10d,%r10d
+xorl %r8d,%r8d
+xorl %r9d,%r9d
+syscall
+movq %rax,-720(%rbp)
+movq -720(%rbp),%rax
+movq %rax,-656(%rbp)
+movq -656(%rbp),%rax
+movq %rax,-728(%rbp)
+movabsq $0,%rax
+movq %rax,-736(%rbp)
+movq -736(%rbp),%rax
+movq %rax,-744(%rbp)
+movabsq $4,%rax
+movq %rax,-752(%rbp)
+movq -752(%rbp),%rcx
+movq -744(%rbp),%rax
+subq %rcx,%rax
+movq %rax,-760(%rbp)
+movq -760(%rbp),%rcx
+movq -728(%rbp),%rax
+cmpq %rcx,%rax
+setne %al
+movzbq %al,%rax
+movq %rax,-768(%rbp)
+movq -768(%rbp),%rax
+testq %rax,%rax
+jz .L1115
+jmp .L1114
+jmp .L1116
+.L1115:
+.L1116:
+jmp .L1113
+.L1114:
+movq -656(%rbp),%rax
+movq %rax,-776(%rbp)
+movq -776(%rbp),%rdi
+call rt_error
+movq %rax,-784(%rbp)
+movq -784(%rbp),%rax
+testq %rax,%rax
+jz .L1117
+movabsq $256,%rax
+movq %rax,-792(%rbp)
+movq -792(%rbp),%rax
+movq %rax,-800(%rbp)
+movq -656(%rbp),%rcx
+movq -800(%rbp),%rax
+subq %rcx,%rax
+movq %rax,-808(%rbp)
+movq -808(%rbp),%rax
+movq %rax,-48(%rbp)
+jmp .L1118
+.L1117:
+movq -640(%rbp),%rax
+movq %rax,-816(%rbp)
+movq -816(%rbp),%rax
+movq (%rax),%rax
+movq %rax,-824(%rbp)
+movq -824(%rbp),%rax
+movq %rax,-832(%rbp)
+movq -832(%rbp),%rax
+movq %rax,-840(%rbp)
+movabsq $127,%rax
+movq %rax,-848(%rbp)
+movq -848(%rbp),%rcx
+movq -840(%rbp),%rax
+andq %rcx,%rax
+movq %rax,-856(%rbp)
+movq -856(%rbp),%rax
+movq %rax,-864(%rbp)
+movq -864(%rbp),%rax
+movq %rax,-872(%rbp)
+movabsq $0,%rax
+movq %rax,-880(%rbp)
+movq -880(%rbp),%rcx
+movq -872(%rbp),%rax
+cmpq %rcx,%rax
+setne %al
+movzbq %al,%rax
+movq %rax,-888(%rbp)
+movq -888(%rbp),%rax
+testq %rax,%rax
+jz .L1119
+movabsq $128,%rax
+movq %rax,-896(%rbp)
+movq -896(%rbp),%rax
+movq %rax,-904(%rbp)
+movq -864(%rbp),%rcx
+movq -904(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-912(%rbp)
+movq -912(%rbp),%rax
+movq %rax,-48(%rbp)
+jmp .L1120
+.L1119:
+movq -832(%rbp),%rax
+movq %rax,-920(%rbp)
+movabsq $256,%rax
+movq %rax,-928(%rbp)
+movq -928(%rbp),%rax
+movq %rax,-936(%rbp)
+movq -920(%rbp),%rdi
+movq -936(%rbp),%rsi
+call rt_div
+movq %rax,-944(%rbp)
+movq -944(%rbp),%rax
+movq %rax,-952(%rbp)
+movabsq $255,%rax
+movq %rax,-960(%rbp)
+movq -960(%rbp),%rcx
+movq -952(%rbp),%rax
+andq %rcx,%rax
+movq %rax,-968(%rbp)
+movq -968(%rbp),%rax
+movq %rax,-48(%rbp)
+.L1120:
+.L1118:
+movq -640(%rbp),%rax
+movq %rax,-976(%rbp)
+movq -976(%rbp),%rdi
+call rt_free
+movq %rax,-984(%rbp)
+.L1112:
+jmp .L1108
+.L1107:
+.L1108:
+jmp .L1102
+.L1101:
+.L1102:
+movabsq $0,%rax
+movq %rax,-992(%rbp)
+movq -992(%rbp),%rax
+movq %rax,-1000(%rbp)
+.L1121:
+movq -1000(%rbp),%rax
+movq %rax,-1008(%rbp)
+movq -64(%rbp),%rcx
+movq -1008(%rbp),%rax
+cmpq %rcx,%rax
+setb %al
+movzbq %al,%rax
+movq %rax,-1016(%rbp)
+movq -1016(%rbp),%rax
+testq %rax,%rax
+jz .L1122
+movq -136(%rbp),%rax
+movq %rax,-1024(%rbp)
+movq -1000(%rbp),%rax
+movq %rax,-1032(%rbp)
+movabsq $8,%rax
+movq %rax,-1040(%rbp)
+movq -1040(%rbp),%rcx
+movq -1032(%rbp),%rax
+imulq %rcx,%rax
+movq %rax,-1048(%rbp)
+movq -1048(%rbp),%rcx
+movq -1024(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-1056(%rbp)
+movq -1056(%rbp),%rax
+movq %rax,-1064(%rbp)
+movq -1064(%rbp),%rax
+movq (%rax),%rax
+movq %rax,-1072(%rbp)
+movq -1072(%rbp),%rax
+movq %rax,-1080(%rbp)
+movq -1080(%rbp),%rdi
+call rt_free
+movq %rax,-1088(%rbp)
+movq -1000(%rbp),%rax
+movq %rax,-1096(%rbp)
+movabsq $1,%rax
+movq %rax,-1104(%rbp)
+movq -1104(%rbp),%rcx
+movq -1096(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-1112(%rbp)
+movq -1112(%rbp),%rax
+movq %rax,-1000(%rbp)
+jmp .L1121
+.L1122:
+movq -136(%rbp),%rax
+movq %rax,-1120(%rbp)
+movq -1120(%rbp),%rdi
+call rt_free
+movq %rax,-1128(%rbp)
+movabsq $0,%rax
+movq %rax,-1136(%rbp)
+movq -1136(%rbp),%rax
+movq %rax,-1000(%rbp)
+.L1123:
+movq -1000(%rbp),%rax
+movq %rax,-1144(%rbp)
+movq -32(%rbp),%rcx
+movq -1144(%rbp),%rax
+cmpq %rcx,%rax
+setb %al
+movzbq %al,%rax
+movq %rax,-1152(%rbp)
+movq -1152(%rbp),%rax
+testq %rax,%rax
+jz .L1124
+movq -8(%rbp),%rax
+movq %rax,-1160(%rbp)
+movq -1000(%rbp),%rax
+movq %rax,-1168(%rbp)
+movq -1160(%rbp),%rdi
+movq -1168(%rbp),%rsi
+call rt_at
+movq %rax,-1176(%rbp)
+movq -1176(%rbp),%rax
+movq %rax,-1184(%rbp)
+movq -1184(%rbp),%rdi
+call rt_drop_seq
+movq %rax,-1192(%rbp)
+movq -1000(%rbp),%rax
+movq %rax,-1200(%rbp)
+movabsq $1,%rax
+movq %rax,-1208(%rbp)
+movq -1208(%rbp),%rcx
+movq -1200(%rbp),%rax
+addq %rcx,%rax
+movq %rax,-1216(%rbp)
+movq -1216(%rbp),%rax
+movq %rax,-1000(%rbp)
+jmp .L1123
+.L1124:
+movq -8(%rbp),%rax
+movq %rax,-1224(%rbp)
+movq -1224(%rbp),%rdi
+call rt_drop_seq
+movq %rax,-1232(%rbp)
+movq -48(%rbp),%rax
+leave
+ret
+xorq %rax,%rax
+leave
+ret
+.set .F1100,1232
+.globl _start
+_start:
+movq (%rsp),%rdi
+leaq 8(%rsp),%rsi
+leaq 16(%rsp,%rdi,8),%rdx
+movq %rdi,rt_state(%rip)
+movq %rsi,rt_state+8(%rip)
+movq %rdx,rt_state+16(%rip)
+andq $-16,%rsp
+call f_native_main
+movq %rax,%rdi
+call rt_print_num
+call rt_shutdown
+movl $60,%eax
+xorl %edi,%edi
+syscall
+ud2
+.bss
+.p2align 3
+rt_state: .zero 4096
 .section .note.GNU-stack,"",@progbits
