@@ -2,16 +2,21 @@
 
 ## Unreleased
 
+- Add invariant captured-storage assignment/replacement, captured vector updates and caller-side
+  guard propagation, including generic `replace<T>`. Retain opaque local frame witnesses and
+  attach new captures to their real storage owners. Ignore retired access-capability history
+  after reassignment while preserving live-loan checks and branch restoration. Opaque external
+  writes lacking a recoverable invariant contract remain conservatively rejected.
+
 - Add native generic functions with inferred/explicit type arguments, cross-module specialization,
   regular recursion, and lifted capture lifetimes. Validate unused templates and keep opaque `T`
   affine even in numeric specializations; reject unsupported operations rather than exploiting
-  the concrete instantiation. Invariant captured-storage writeback remains in progress.
+  the concrete instantiation.
 
 - Add native generic records/enums with explicit and inferred constructor arguments, nested and
   borrowed type substitution, nominal argument checking, and specialized recursive destruction.
   Keep constructor and call-argument captures live during later argument/field evaluation,
-  including nested calls. Generic functions and invariant
-  captured-storage writeback remain in progress.
+  including nested calls.
 
 - Connect native source-level loan/lifetime enforcement: reject live-borrow moves/growth/writes,
   escaping locals and captures, lifetime laundering, suspended unique carriers and malformed
@@ -19,7 +24,7 @@
   end loans at lexical last uses without confusing shadows, field names or loop iterations.
 - Add positive seed/native borrow conformance and adversarial rejection cases, including opaque
   interior-reference returns and descriptor-copy provenance. Native stages reproduce exactly and
-  normal exits require zero live allocations. Captured-storage writeback and generics remain open.
+  normal exits require zero live allocations.
 - Return large allocation arenas to the OS immediately; verify unmapping with `mincore` in the
   Grail runtime audit. Validate UTF-8 text construction/appending in the Grail runtime.
 
@@ -27,7 +32,7 @@
   Grail ownership graph with field-sensitive moves, loan authority and conservative joins.
   Wire move/initialization checks into source compilation, rejecting moved/uninitialized values,
   conditional moves and repeated consumption on backedges/continue, without replacing a prior
-  artifact on rejection. Source-level loan/return-lifetime enforcement remains unfinished.
+  artifact on rejection.
 - Generate guarded recursive cleanup for native owned values, including partial fields, vectors,
   enum matches, returns, propagation and loop exits. Transfer ownership explicitly on moves and
   close consumed host-call descriptors. Require zero live allocations at normal program exit;
@@ -38,8 +43,8 @@
   Generated `_start` and narrow raw-memory/syscall intrinsics produce a static `as`/`ld` build,
   without C support objects, libc or a handwritten assembly runtime. Restrict raw intrinsics to
   an explicit unsafe runtime module. Verify native self-reproduction, binary I/O/command status,
-  allocator reuse and balanced runtime allocations; program ownership checking and generated
-  cleanup remain in progress. Preserve the older C bootstrap only as an independent cross-check.
+  allocator reuse and balanced runtime allocations. Preserve the older C bootstrap only as an
+  independent cross-check.
 
 - Add a Grail-written Linux x86-64 backend (`compiler/native.grl`) emitting assembly directly,
   with System V calls, stack-slot locals, unsigned arithmetic, control flow, aggregates, typed

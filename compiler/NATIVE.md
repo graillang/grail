@@ -78,16 +78,20 @@ backedges. Lifetime guards retain captured origins separately from access capabi
 reference returns conservatively retain whole input frames, so interior projections cannot free or
 replace a still-borrowed object. Unsafe programs fail before replacing an existing output file.
 
-**Remaining work:** invariant replacement of reference-containing storage is currently rejected,
-not silently accepted, while generic functions now use a specialization worklist and body replay. Unused templates are
-checked with opaque affine type variables; specialization does not make `T` copyable or numeric.
+Generic functions use a specialization worklist and body replay. Unused templates are checked
+with opaque affine type variables; specializing to `num` does not make `T` copyable or numeric.
 Calls infer type arguments or accept explicit `identity<num>(...)` forms, including cross-module
-calls and regular recursion. Expanding polymorphic recursion is bounded. Generic records/enums accept type arguments,
-including nested containers and borrowed types, with type-specific recursive drops. Constructors
-accept explicit arguments (`Pair<num,bytes>{...}`, `Option<num>::None`), infer from payloads/fields,
-or use a matching function return type. Lifetimes precede `type T` parameters in declarations.
-Those are active delivery tasks. The checker is conservative and not a soundness proof or full
-Rust-seed parity. Inputs involving the explicitly unsafe runtime remain trusted.
+calls and regular recursion. Expanding polymorphic recursion is bounded. Generic records/enums
+support nested/borrowed type arguments, constructor inference and specialized recursive drops.
+Lifetimes precede `type T` parameters in declarations.
+
+Captured storage supports assignment, `exchange`, generic `replace<T>`, vector push/pop and
+caller-side writeback. External writes are checked against declared data-lifetime bounds; weak
+updates retain historical guards across control-flow joins. Opaque writes with retained local
+frame witnesses propagate incoming guards into every possible frame owner, not just the temporary
+reference. **Conservative limit:** opaque external-frame writes without a recoverable invariant
+contract are rejected. Whole-frame guards and weak updates may retain borrows longer than needed.
+This is not a soundness proof or full Rust-seed parity; the explicitly unsafe runtime is trusted.
 
 There is no optimizer, portable target, or implicit-module support. Panic/failed assertions abort
 without unwinding. Older C bootstrap files remain only as an independent recovery/cross-check route;

@@ -6,10 +6,11 @@ use ownership;
 // Direct Linux x86-64 backend: Grail function bodies lower directly to assembly.
 // Usage: native OUT.s ENTRY.grl [MODULE.grl...]. The first public function of the
 // first file is the entry; it takes nothing or argv[1] as a byte view. Move/initialization
-// checks, loan/lifetime enforcement and deterministic drops are active. Captured-storage
-// writeback remains in progress. Generic types/functions use typed specialization. Include runtime.grl as source.
+// checks, loans/lifetimes, captured-storage writeback and deterministic drops are active.
+// Generic types/functions use typed specialization. Include runtime.grl as source.
 // Type ids: 0 num, 1 unit, 2 bytes, 3 string, 4 view; others are interned below.
-// Type kinds: 1 num, 2 unit, 3 bytes, 4 string, 5 view, 6 vec(arg), 7 ref(arg), 8 named(decl).
+// Type kinds: 1 num, 2 unit, 3 bytes, 4 string, 5 view, 6 vec(arg), 7 ref(arg),
+// 8 named(decl, args), 9 opaque template parameter, 10 opaque bound parameter (arg, identity).
 
 struct Tok { kind:num, start:num, end:num }
 struct Ty { kind:num, arg:num, mode:num, regions:vec<num>, args:vec<num> }
@@ -121,16 +122,17 @@ fn bond_kind<a>(c:ref_mut<a,C>,holder:num,loan:num,guard:num)->unit {
  vec_push(c.bonds,Bond{holder:holder,loan:loan,guard:guard});return ();
 }
 fn bond<a>(c:ref_mut<a,C>,holder:num,loan:num)->unit {bond_kind(borrow_mut(c),holder,loan,0);return ();}
+fn loan_live<a>(c:ref_mut<a,C>,loan:num)->num{let l=vec_get(c.check.loans,loan-1);return l.live;}
 fn transfer_bonds<a>(c:ref_mut<a,C>,src:num,dst:num)->unit {
  if (src==0)+(dst==0){return ();}let n=len(c.bonds);
  for i in n{let b=vec_get(c.bonds,i);let holder=b.holder;let loan=b.loan;let guard=b.guard;
- if ownership::ancestor(borrow(c.check),src,holder){bond_kind(borrow_mut(c),dst,loan,guard);}}
+ if loan_live(borrow_mut(c),loan){if ownership::ancestor(borrow(c.check),src,holder){bond_kind(borrow_mut(c),dst,loan,guard);}}}
  return ();
 }
 fn return_bonds<a>(c:ref_mut<a,C>,src:num,dst:num,aggregate:num)->unit {
  if (src==0)+(dst==0){return ();}let n=len(c.bonds);
  for i in n{let b=vec_get(c.bonds,i);let holder=b.holder;let loan=b.loan;let guard=b.guard;
- if ownership::ancestor(borrow(c.check),src,holder){bond_kind(borrow_mut(c),dst,loan,(guard+aggregate)!=0);}}
+ if loan_live(borrow_mut(c),loan){if ownership::ancestor(borrow(c.check),src,holder){var role=guard;if aggregate{role=1;}if guard==3{role=3;}if aggregate==3{role=3;}bond_kind(borrow_mut(c),dst,loan,role);}}}
  return ();
 }
 fn close_loans<a>(c:ref_mut<a,C>)->unit {
@@ -200,9 +202,10 @@ fn normalize_readonly<a>(c:ref_mut<a,C>,slot:num,ty:num)->unit {
  let k=ty_kind(borrow_mut(c),ty);if (k!=5)&(k!=7){return ();}if ty_mode(borrow_mut(c),ty){return ();}
  let root=place_of(borrow_mut(c),slot);let n=len(c.bonds);
  for i in n{let b=vec_get(c.bonds,i);let holder=b.holder;let loan=b.loan;let guard=b.guard;
- if (holder==root)&(guard==0){let l=vec_get(c.check.loans,loan-1);let mode=l.mode;
+ if (holder==root)&(guard==0){let l=vec_get(c.check.loans,loan-1);let mode=l.mode;let live=l.live;
+ if live{
  if mode{let child=ownership::reborrow(borrow_mut(c.check),loan,0);if child==0{fail(borrow_mut(c),read("readonly result cannot borrow suspended authority"));}
- let b=vec_get_mut(c.bonds,i);exchange(borrow_mut(b.guard),1);bond(borrow_mut(c),root,child);}}}
+ let b=vec_get_mut(c.bonds,i);exchange(borrow_mut(b.guard),1);bond(borrow_mut(c),root,child);}}}}
  return ();
 }
 fn call_bonds<a>(c:ref_mut<a,C>,result:Val,first:num,args:ref<a,vec<num>>,capture_type:num)->unit {
@@ -211,7 +214,7 @@ fn call_bonds<a>(c:ref_mut<a,C>,result:Val,first:num,args:ref<a,vec<num>>,captur
  let slot=load(vec_get(args,i));let source=place_of(borrow_mut(c),slot);let ty=load(vec_get(c.params,first+i));let kind=ty_kind(borrow_mut(c),ty);
  var rs=type_caps(borrow_mut(c),ty,0);if kind==7{rs=type_regions(borrow_mut(c),ty);}
  if intersects(borrow(rs),borrow(captures)){
- return_bonds(borrow_mut(c),source,holder,aggregate);}
+ var role=aggregate;if (kind==7)&(resultkind==7){role=3;}return_bonds(borrow_mut(c),source,holder,role);}
  if kind==7{
  let inner=ty_arg(borrow_mut(c),ty);let data=type_caps(borrow_mut(c),inner,0);
  if intersects(borrow(data),borrow(captures)){let storage=target_of(borrow_mut(c),slot);return_bonds(borrow_mut(c),storage,holder,aggregate);}}
@@ -219,6 +222,63 @@ fn call_bonds<a>(c:ref_mut<a,C>,result:Val,first:num,args:ref<a,vec<num>>,captur
  if ty_kind(borrow_mut(c),result.ty)==7{stored_source(borrow_mut(c),result.t,result.ty);if target_of(borrow_mut(c),result.t)==0{fail(borrow_mut(c),read("reference result has no declared frame source"));}}
  let k=ty_kind(borrow_mut(c),result.ty);if (k==5)+(k==7){stored_source(borrow_mut(c),result.t,result.ty);if has_bonds(borrow_mut(c),holder)==0{fail(borrow_mut(c),read("borrowed result has no declared input source"));}}
  normalize_readonly(borrow_mut(c),result.t,result.ty);close_loans(borrow_mut(c));return ();
+}
+// Weak updates retain historical guards across branch restoration. External storage
+// accepts only origins explicitly present in its invariant data-lifetime contract.
+fn check_writeback<a>(c:ref_mut<a,C>,destination:num,ty:num,source:num)->unit{
+ if c.raw{return ();}if contains_borrow(borrow_mut(c),ty,0)==0{return ();}
+ let region=region_of(borrow_mut(c),destination);if region==0{return ();}
+ if region==18446744073709551615{
+ var found=0;for i in len(c.bonds){let b=vec_get(c.bonds,i);let holder=b.holder;let guard=b.guard;let loan=b.loan;
+ if (guard==3)&ownership::ancestor(borrow(c.check),destination,holder){if loan_live(borrow_mut(c),loan){let l=vec_get(c.check.loans,loan-1);let source=l.source;let r=region_of(borrow_mut(c),source);
+ if r!=18446744073709551615{if r!=0{fail(borrow_mut(c),read("opaque external captured storage has no concrete invariant contract"));}found=1;}}}}
+ if found==0{fail(borrow_mut(c),read("opaque captured storage lacks a checked local frame"));}return ();
+ }
+ let allowed=type_caps(borrow_mut(c),ty,0);
+ for i in len(c.bonds){let b=vec_get(c.bonds,i);let holder=b.holder;let loan=b.loan;
+ if ownership::ancestor(borrow(c.check),source,holder){if loan_live(borrow_mut(c),loan){let l=vec_get(c.check.loans,loan-1);let origin=l.source;let r=region_of(borrow_mut(c),origin);
+ if r!=18446744073709551615{var found=0;for j in len(allowed){if load(vec_get(allowed,j))==r{found=1;}}
+ if (r==0)+(found==0){fail(borrow_mut(c),read("captured writeback violates invariant lifetime"));}}}}}
+ return ();
+}
+fn seed_storage<a>(c:ref_mut<a,C>,storage:num,ty:num)->unit{
+ let region=region_of(borrow_mut(c),storage);if (region==0)+(region==18446744073709551615){return ();}
+ for i in len(c.bonds){let b=vec_get(c.bonds,i);let holder=b.holder;if ownership::ancestor(borrow(c.check),storage,holder){return ();}}
+ let k=ty_kind(borrow_mut(c),ty);if (k==5)+(k==7){let slot=imm(borrow_mut(c),0);
+ vec_push(c.resources,Resource{slot:slot,ty:ty,flag:0,base:1,field:0,via:1,place:storage,target:0,authority:0});stored_source(borrow_mut(c),slot,ty);return ();}
+ let caps=type_caps(borrow_mut(c),ty,0);for i in len(caps){let r=load(vec_get(caps,i));let source=external_place(borrow_mut(c),r,0);let loan=ownership::borrow_place(borrow_mut(c.check),source,0);bond_kind(borrow_mut(c),storage,loan,1);}return ();
+}
+fn frame_storage<a>(c:ref_mut<a,C>,slot:num,destination:num)->unit{
+ let root=place_of(borrow_mut(c),slot);let n=len(c.bonds);for i in n{let b=vec_get(c.bonds,i);let holder=b.holder;let guard=b.guard;let loan=b.loan;
+ if (holder==root)&guard{if loan_live(borrow_mut(c),loan){bond_kind(borrow_mut(c),destination,loan,guard);}}}return ();
+}
+fn storage_bonds<a>(c:ref_mut<a,C>,source:num,destination:num)->unit{
+ let owners=vec<num>();let n=len(c.bonds);
+ if region_of(borrow_mut(c),destination)==18446744073709551615{
+ for i in n{let b=vec_get(c.bonds,i);let holder=b.holder;let guard=b.guard;let loan=b.loan;
+ if (guard==3)&ownership::ancestor(borrow(c.check),destination,holder){if loan_live(borrow_mut(c),loan){let l=vec_get(c.check.loans,loan-1);let owner=l.source;if region_of(borrow_mut(c),owner)==0{vec_push(owners,owner);}}}}}
+ for i in n{let b=vec_get(c.bonds,i);let holder=b.holder;let loan=b.loan;let guard=b.guard;
+ if ownership::ancestor(borrow(c.check),source,holder){if ((source==destination)&(guard==3))==0{if loan_live(borrow_mut(c),loan){var role=guard;if role==3{role=1;}bond_kind(borrow_mut(c),destination,loan,role);
+ for j in len(owners){let owner=load(vec_get(owners,j));bond_kind(borrow_mut(c),owner,loan,1);}}}}}
+ return ();
+}
+fn writeback_source<a>(c:ref_mut<a,C>,destination:num,ty:num,source:num)->unit{
+ check_writeback(borrow_mut(c),destination,ty,source);storage_bonds(borrow_mut(c),source,destination);return ();
+}
+fn call_writebacks<a,b,d>(c:ref_mut<a,C>,first:num,args:ref<b,vec<num>>,actuals:ref<d,vec<num>>)->unit{
+ if c.raw{return ();}
+ for i in len(args){let formal=load(vec_get(c.params,first+i));let k=ty_kind(borrow_mut(c),formal);let mode=ty_mode(borrow_mut(c),formal);
+ if (k==7)&mode{let inner=ty_arg(borrow_mut(c),formal);if contains_borrow(borrow_mut(c),inner,0){
+ let rs=type_caps(borrow_mut(c),inner,0);let slot=load(vec_get(args,i));let destination=target_of(borrow_mut(c),slot);let actual=load(vec_get(actuals,i));let storage=ty_arg(borrow_mut(c),actual);frame_storage(borrow_mut(c),slot,destination);seed_storage(borrow_mut(c),destination,storage);
+ for j in len(args){let ty=load(vec_get(c.params,first+j));let kind=ty_kind(borrow_mut(c),ty);let argument=load(vec_get(args,j));
+ var caps=type_caps(borrow_mut(c),ty,0);if kind==7{caps=type_regions(borrow_mut(c),ty);}
+ if intersects(borrow(rs),borrow(caps)){let source=place_of(borrow_mut(c),argument);writeback_source(borrow_mut(c),destination,storage,source);}
+ if kind==7{let inner=ty_arg(borrow_mut(c),ty);let data=type_caps(borrow_mut(c),inner,0);
+ if intersects(borrow(rs),borrow(data)){var source=target_of(borrow_mut(c),argument);let actual=load(vec_get(actuals,j));let inner=ty_arg(borrow_mut(c),actual);seed_storage(borrow_mut(c),source,inner);
+ if (region_of(borrow_mut(c),source)==18446744073709551615)&(source!=destination){source=place_of(borrow_mut(c),argument);}writeback_source(borrow_mut(c),destination,storage,source);}}
+ }
+ }}}
+ return ();
 }
 fn block_end<a>(c:ref_mut<a,C>,start:num)->num {
  var i=start;var depth=0;
@@ -277,7 +337,7 @@ fn require_write<a>(c:ref_mut<a,C>,slot:num)->unit {
  else{if ownership::initialize(borrow_mut(c.check),target)!=0{fail(borrow_mut(c),read("field assignment conflicts with live borrow or moved storage"));}}return ();}
  if (k==5)+(k==7){if ty_mode(borrow_mut(c),ty)==0{fail(borrow_mut(c),read("mutation through readonly reference"));}var allowed=0;
  for i in len(c.bonds){let b=vec_get(c.bonds,i);let holder=b.holder;let loan=b.loan;let guard=b.guard;
- if (guard==0)&ownership::ancestor(borrow(c.check),holder,place){allowed=1;if ownership::use_loan(borrow(c.check),loan,1)!=0{fail(borrow_mut(c),read("write authority is suspended"));}}}if allowed==0{fail(borrow_mut(c),read("write lacks checked source"));}
+ if (guard==0)&ownership::ancestor(borrow(c.check),holder,place){if loan_live(borrow_mut(c),loan){allowed=1;if ownership::use_loan(borrow(c.check),loan,1)!=0{fail(borrow_mut(c),read("write authority is suspended"));}}}}if allowed==0{fail(borrow_mut(c),read("write lacks checked source"));}
  }else{
  if authority!=0{let r=resource(borrow_mut(c),authority-1);let info=vec_get(c.resources,r-1);let ty=info.ty;if ty_mode(borrow_mut(c),ty)==0{fail(borrow_mut(c),read("mutation through readonly frame"));}
  let loan=authority_loan(borrow_mut(c),authority,place);if loan==0{fail(borrow_mut(c),read("write has no reference authority"));}
@@ -308,7 +368,7 @@ fn init_parameter<a>(c:ref_mut<a,C>,slot:num,ty:num)->unit {
  for i in len(captures){let r=load(vec_get(captures,i));let target=external_place(borrow_mut(c),r,0);let loan=ownership::borrow_place(borrow_mut(c.check),target,0);bond_kind(borrow_mut(c),holder,loan,1);}return ();
 }
 fn has_bonds<a>(c:ref_mut<a,C>,holder:num)->num {
- for i in len(c.bonds){let b=vec_get(c.bonds,i);if (b.holder==holder)&(b.guard==0){return 1;}}return 0;
+ for i in len(c.bonds){let b=vec_get(c.bonds,i);let h=b.holder;let guard=b.guard;let loan=b.loan;if (h==holder)&(guard==0){if loan_live(borrow_mut(c),loan){return 1;}}}return 0;
 }
 // Stored captures in an abstract input referent have their declared data lifetime,
 // distinct from the lifetime of the outer reference frame.
@@ -317,10 +377,10 @@ fn stored_source<a>(c:ref_mut<a,C>,slot:num,ty:num)->unit {
  let k=ty_kind(borrow_mut(c),ty);if (k!=5)&(k!=7){return ();}
  if has_bonds(borrow_mut(c),place){if k==7{
  for i in len(c.bonds){let b=vec_get(c.bonds,i);let holder=b.holder;let loan=b.loan;let guard=b.guard;
- if (holder==place)&(guard==0){let l=vec_get(c.check.loans,loan-1);let source=l.source;let authority=authority_of(borrow_mut(c),slot);set_target(borrow_mut(c),slot,source,authority);break;}}}return ();}
+ if (holder==place)&(guard==0){if loan_live(borrow_mut(c),loan){let l=vec_get(c.check.loans,loan-1);let source=l.source;let authority=authority_of(borrow_mut(c),slot);set_target(borrow_mut(c),slot,source,authority);break;}}}}return ();}
  var guarded=0;let n=len(c.bonds);
  for i in n{let b=vec_get(c.bonds,i);let holder=b.holder;let loan=b.loan;let guard=b.guard;
- if guard{if ownership::ancestor(borrow(c.check),holder,place){bond_kind(borrow_mut(c),place,loan,1);guarded=1;}}}
+ if guard{if loan_live(borrow_mut(c),loan){if ownership::ancestor(borrow(c.check),holder,place){bond_kind(borrow_mut(c),place,loan,guard);guarded=1;}}}}
  if guarded{
  let mode=ty_mode(borrow_mut(c),ty);let source=external_place(borrow_mut(c),18446744073709551615,0);let loan=ownership::borrow_place(borrow_mut(c.check),source,mode);bond(borrow_mut(c),place,loan);
  if k==7{var authority=authority_of(borrow_mut(c),slot);let r=resource(borrow_mut(c),slot);let info=vec_get(c.resources,r-1);if info.base==0{authority=slot+1;}set_target(borrow_mut(c),slot,source,authority);}return ();}
@@ -338,8 +398,8 @@ fn bind_loan<a>(c:ref_mut<a,C>,value:num,source:num,target:num,mode:num)->unit {
  loan=ownership::reborrow_place(borrow_mut(c.check),parent,target,mode);
  let owner=place_of(borrow_mut(c),authority-1);let holder=place_of(borrow_mut(c),value);let n=len(c.bonds);
  for i in n{let b=vec_get(c.bonds,i);let old=b.loan;let h=b.holder;let guard=b.guard;if (h==owner)&(guard!=0){bond_kind(borrow_mut(c),holder,old,1);}
- if (h==owner)&(old!=parent)&(guard==0){
- let extra=ownership::reborrow(borrow_mut(c.check),old,mode);if extra==0{fail(borrow_mut(c),read("ambiguous reborrow lacks authority"));}bond(borrow_mut(c),holder,extra);}}
+ if (h==owner)&(old!=parent)&(guard==0){if loan_live(borrow_mut(c),old){
+ let extra=ownership::reborrow(borrow_mut(c.check),old,mode);if extra==0{fail(borrow_mut(c),read("ambiguous reborrow lacks authority"));}bond(borrow_mut(c),holder,extra);}}}
  }else{loan=ownership::borrow_place(borrow_mut(c.check),target,mode);}
  if loan==0{fail(borrow_mut(c),read("borrow conflicts with active access"));}
  let holder=place_of(borrow_mut(c),value);bond(borrow_mut(c),holder,loan);return ();
@@ -358,7 +418,7 @@ fn view_bonds<a>(c:ref_mut<a,C>,slot:num,source:num,mode:num)->unit {
  else{if ownership::can_cleanup(borrow(c.check),root)==0{fail(borrow_mut(c),read("field frame is shared"));}}}}
  var found=0;let n=len(c.bonds);
  for i in n{let b=vec_get(c.bonds,i);let h=b.holder;let parent=b.loan;let guard=b.guard;
- if ownership::ancestor(borrow(c.check),h,root){if guard{bond_kind(borrow_mut(c),holder,parent,1);}else{let loan=ownership::reborrow(borrow_mut(c.check),parent,mode);if loan==0{fail(borrow_mut(c),read("view reborrow lacks authority"));}bond(borrow_mut(c),holder,loan);found=1;}}}
+ if loan_live(borrow_mut(c),parent){if ownership::ancestor(borrow(c.check),h,root){if guard{bond_kind(borrow_mut(c),holder,parent,1);}else{let loan=ownership::reborrow(borrow_mut(c.check),parent,mode);if loan==0{fail(borrow_mut(c),read("view reborrow lacks authority"));}bond(borrow_mut(c),holder,loan);found=1;}}}}
  if found==0{fail(borrow_mut(c),read("view has no lifetime source"));}
  }else{bind_loan(borrow_mut(c),slot,source,root,mode);}return ();
 }
@@ -366,10 +426,10 @@ fn validate_return<a>(c:ref_mut<a,C>,v:Val)->unit {
  if c.raw{return ();}if contains_borrow(borrow_mut(c),v.ty,0)==0{return ();}let place=place_of(borrow_mut(c),v.t);if place==0{return ();}
  let result=c.result;let rs=type_caps(borrow_mut(c),result,0);var found=0;
  for i in len(c.bonds){let b=vec_get(c.bonds,i);let holder=b.holder;let loan=b.loan;
- if ownership::ancestor(borrow(c.check),place,holder){
+ if ownership::ancestor(borrow(c.check),place,holder){if loan_live(borrow_mut(c),loan){
  let l=vec_get(c.check.loans,loan-1);let source=l.source;let region=region_of(borrow_mut(c),source);var allowed=0;
  for j in len(rs){if load(vec_get(rs,j))==region{allowed=1;}}
- if region!=18446744073709551615{if (region==0)+(allowed==0){fail(borrow_mut(c),read("returned borrow escapes its declared input lifetime"));}}found=1;}}
+ if region!=18446744073709551615{if (region==0)+(allowed==0){fail(borrow_mut(c),read("returned borrow escapes its declared input lifetime"));}}found=1;}}}
  let k=ty_kind(borrow_mut(c),v.ty);if (k==5)+(k==7){if found==0{fail(borrow_mut(c),read("returned reference has no checked source"));}}return ();
 }
 fn place_of<a>(c:ref_mut<a,C>,slot:num)->num {
@@ -385,7 +445,7 @@ fn observe<a>(c:ref_mut<a,C>,slot:num)->unit {
  }else{if ownership::read(borrow(c.check),place)!=0{fail(borrow_mut(c),read("use of moved, borrowed or partially initialized value"));}}
  let k=ty_kind(borrow_mut(c),ty);if (k==5)+(k==7){var checked=0;
  for i in len(c.bonds){let b=vec_get(c.bonds,i);let h=b.holder;let loan=b.loan;let guard=b.guard;
- if (guard==0)&ownership::ancestor(borrow(c.check),h,place){checked=1;if ownership::use_loan(borrow(c.check),loan,0)!=0{fail(borrow_mut(c),read("reference is suspended or expired"));}}}if checked==0{fail(borrow_mut(c),read("reference lacks checked source"));}}
+ if (guard==0)&ownership::ancestor(borrow(c.check),h,place){if loan_live(borrow_mut(c),loan){checked=1;if ownership::use_loan(borrow(c.check),loan,0)!=0{fail(borrow_mut(c),read("reference is suspended or expired"));}}}}if checked==0{fail(borrow_mut(c),read("reference lacks checked source"));}}
  return ();
 }
 fn inherit_guards<a>(c:ref_mut<a,C>,place:num)->unit {
@@ -396,8 +456,8 @@ fn inherit_guards<a>(c:ref_mut<a,C>,place:num)->unit {
 fn capture_authority<a>(c:ref_mut<a,C>,place:num)->unit {
  if place==0{return ();}
  for i in len(c.bonds){let b=vec_get(c.bonds,i);let holder=b.holder;let loan=b.loan;let guard=b.guard;
- if guard==0{if ownership::ancestor(borrow(c.check),place,holder){
- if ownership::use_loan(borrow(c.check),loan,0)!=0{fail(borrow_mut(c),read("captured authority is suspended"));}}}}
+ if guard==0{if loan_live(borrow_mut(c),loan){if ownership::ancestor(borrow(c.check),place,holder){
+ if ownership::use_loan(borrow(c.check),loan,0)!=0{fail(borrow_mut(c),read("captured authority is suspended"));}}}}}
  return ();
 }
 fn alias_field<a>(c:ref_mut<a,C>,slot:num,ty:num,base:num,field:num,via:num)->Val {
@@ -819,7 +879,7 @@ fn deref<a>(c:ref_mut<a,C>,v:Val)->Val {
  vec_push(c.resources,Resource{slot:t,ty:ty,flag:0,base:old+1,field:0,via:1,place:target,target:0,authority:old+1});
  let owner=place_of(borrow_mut(c),old);let n=len(c.bonds);
  for i in n{let b=vec_get(c.bonds,i);let holder=b.holder;let loan=b.loan;let guard=b.guard;
- if (holder==owner)&guard{bond_kind(borrow_mut(c),target,loan,1);}}
+ if (holder==owner)&guard{bond_kind(borrow_mut(c),target,loan,guard);}}
  stored_source(borrow_mut(c),t,ty);}
  }
  return val(t,ty);
@@ -1020,7 +1080,7 @@ fn call<a,b,d>(c:ref_mut<a,C>,m:read<b>,name:read<d>)->Val{
  for i in len(args){let slot=load(vec_get(args,i));let ty=load(vec_get(argtypes,i));move_out(borrow_mut(c),val(slot,ty));}
  for i in len(args){let reg=argreg(i);get(borrow_mut(c),load(vec_get(args,i)),read(reg));}
  o(borrow_mut(c),read("call "));mangle(borrow_mut(c),m,read(symbol));vec_push(c.out,10);
- let slot=save(borrow_mut(c));own(borrow_mut(c),slot,ret);call_bonds(borrow_mut(c),val(slot,ret),first,borrow(sources),signature_ret);return val(slot,ret);
+ let slot=save(borrow_mut(c));own(borrow_mut(c),slot,ret);call_writebacks(borrow_mut(c),first,borrow(sources),borrow(argtypes));call_bonds(borrow_mut(c),val(slot,ret),first,borrow(sources),signature_ret);return val(slot,ret);
 }
 fn builtin_id<a>(n:read<a>)->num {
     if same(read(n),read("bytes")) { return 1; }
@@ -1105,8 +1165,11 @@ fn builtin<a>(c:ref_mut<a,C>,id:num)->Val {
         let b=expr(borrow_mut(c),0);
         expect(borrow_mut(c),read(")"));
         let ty=ty_arg(borrow_mut(c),a.ty);
-        if c.raw==0{require_type(borrow_mut(c),b.ty,ty);if contains_borrow(borrow_mut(c),ty,0){fail(borrow_mut(c),read("captured storage replacement requires invariant writeback support"));}}
-        require_write(borrow_mut(c),a.t);move_out(borrow_mut(c),val(b.t,b.ty));let slot=apply(borrow_mut(c),read("rt_xchg"),two(a.t,b.t));return own(borrow_mut(c),slot,ty);
+        if c.raw==0{require_type(borrow_mut(c),b.ty,ty);let destination=target_of(borrow_mut(c),a.t);frame_storage(borrow_mut(c),a.t,destination);let source=place_of(borrow_mut(c),b.t);check_writeback(borrow_mut(c),destination,ty,source);}
+        require_write(borrow_mut(c),a.t);let destination=target_of(borrow_mut(c),a.t);seed_storage(borrow_mut(c),destination,ty);
+        let slot=apply(borrow_mut(c),read("rt_xchg"),two(a.t,b.t));own(borrow_mut(c),slot,ty);let result=place_of(borrow_mut(c),slot);return_bonds(borrow_mut(c),destination,result,0);
+        let source=place_of(borrow_mut(c),b.t);storage_bonds(borrow_mut(c),source,destination);move_out(borrow_mut(c),val(b.t,b.ty));
+        if c.raw==0{stored_source(borrow_mut(c),slot,ty);}return val(slot,ty);
     }
     if id==15 {
         observe(borrow_mut(c),a.t);
@@ -1121,7 +1184,7 @@ fn builtin<a>(c:ref_mut<a,C>,id:num)->Val {
                 vec_push(c.resources,Resource{slot:n,ty:ty,flag:0,base:a.t+1,field:0,via:1,place:target,target:0,authority:a.t+1});
                 let frame=place_of(borrow_mut(c),a.t);let count=len(c.bonds);
                 for i in count{let b=vec_get(c.bonds,i);let holder=b.holder;let loan=b.loan;let guard=b.guard;
-                    if (holder==frame)&guard{bond_kind(borrow_mut(c),target,loan,1);}}
+                    if (holder==frame)&guard{bond_kind(borrow_mut(c),target,loan,guard);}}
                 stored_source(borrow_mut(c),n,ty);view_bonds(borrow_mut(c),slot,n,0);
                 release_temporary(borrow_mut(c),a.t);return val(slot,ty);
             }
@@ -1150,7 +1213,7 @@ fn builtin<a>(c:ref_mut<a,C>,id:num)->Val {
     if id==10 {
         expect(borrow_mut(c),read(")"));
         let ty=ty_arg(borrow_mut(c),xty);
-        let root=place_of(borrow_mut(c),xt);if c.raw==0{if region_of(borrow_mut(c),root)!=0{if contains_borrow(borrow_mut(c),ty,0){fail(borrow_mut(c),read("captured vector pop requires invariant writeback support"));}}}
+        let root=place_of(borrow_mut(c),xt);if c.raw==0{seed_storage(borrow_mut(c),root,xty);}
         capture_authority(borrow_mut(c),root);require_write(borrow_mut(c),xt);let slot=apply(borrow_mut(c),read("rt_pop"),one(xt));own(borrow_mut(c),slot,ty);let result=place_of(borrow_mut(c),slot);return_bonds(borrow_mut(c),root,result,1);stored_source(borrow_mut(c),slot,ty);return val(slot,ty);
     }
     expect(borrow_mut(c),read(","));
@@ -1163,7 +1226,7 @@ fn builtin<a>(c:ref_mut<a,C>,id:num)->Val {
     if id==9 {
         expect(borrow_mut(c),read(")"));
         if c.raw==0{if ty_kind(borrow_mut(c),xty)!=6{fail(borrow_mut(c),read("push requires vector"));}let expected=ty_arg(borrow_mut(c),xty);require_type(borrow_mut(c),b.ty,expected);
-        let target=place_of(borrow_mut(c),xt);if region_of(borrow_mut(c),target)!=0{if contains_borrow(borrow_mut(c),expected,0){fail(borrow_mut(c),read("captured vector writeback requires invariant support"));}}}
+        let target=place_of(borrow_mut(c),xt);let source=place_of(borrow_mut(c),b.t);check_writeback(borrow_mut(c),target,expected,source);}
         require_write(borrow_mut(c),xt);let source=place_of(borrow_mut(c),b.t);move_out(borrow_mut(c),val(b.t,b.ty));invoke(borrow_mut(c),read("rt_push"),two(xt,bt));let root=place_of(borrow_mut(c),xt);transfer_bonds(borrow_mut(c),source,root);return val(imm(borrow_mut(c),0),1);
     }
     if id!=8 {
@@ -1447,16 +1510,19 @@ fn statement<a>(c:ref_mut<a,C>)->unit{
  let entry=vec_get(c.locals,l-1);if entry.mutable==0{fail(borrow_mut(c),read("assignment requires var"));}
  let id=local_id(borrow_mut(c),l-1);let ty=local_ty(borrow_mut(c),l-1);var target=id;var through=0;var fieldty=0;
  if kind(borrow_mut(c))==46{let a=field_path(borrow_mut(c),id,ty,2);target=a.t;through=1;fieldty=ty_arg(borrow_mut(c),a.ty);}
- expect(borrow_mut(c),read("="));let v=expr(borrow_mut(c),0);expect(borrow_mut(c),read(";"));expire_locals(borrow_mut(c));
- if c.raw==0{var storage=ty;if through{storage=fieldty;}if contains_borrow(borrow_mut(c),storage,0){fail(borrow_mut(c),read("captured storage assignment requires invariant writeback support"));}
+ expect(borrow_mut(c),read("="));let v=expr(borrow_mut(c),0);expect(borrow_mut(c),read(";"));
+ var storage=ty;if through{storage=fieldty;}if contains_borrow(borrow_mut(c),storage,0)==0{expire_locals(borrow_mut(c));}
+ let source=place_of(borrow_mut(c),v.t);var destination=place_of(borrow_mut(c),target);if through{destination=target_of(borrow_mut(c),target);}
+ if c.raw==0{check_writeback(borrow_mut(c),destination,storage,source);
  if through{require_write(borrow_mut(c),target);}else{let place=place_of(borrow_mut(c),target);if place!=0{if ownership::can_cleanup(borrow(c.check),place)==0{fail(borrow_mut(c),read("assignment conflicts with live borrow"));}}}var expected=ty;if through{expected=fieldty;}require_type(borrow_mut(c),v.ty,expected);}
- if through==0{if target==v.t{return ();}}
- move_out(borrow_mut(c),val(v.t,v.ty));
+ if through==0{if target==v.t{return ();}}else{if (destination!=0)&(destination==source){return ();}}
+ if through{storage_bonds(borrow_mut(c),source,destination);move_out(borrow_mut(c),val(v.t,v.ty));}
  if through==0{let old=resource(borrow_mut(c),target);if old!=0{release(borrow_mut(c),old-1);}}
  if through{if needs_drop(borrow_mut(c),fieldty){get(borrow_mut(c),target,read("%rax"));o(borrow_mut(c),read("movq (%rax),%rdi\n"));drop_call(borrow_mut(c),fieldty);}}
  get(borrow_mut(c),v.t,read("%rax"));
  if through{get(borrow_mut(c),target,read("%rcx"));o(borrow_mut(c),read("movq %rax,(%rcx)\n"));}else{o(borrow_mut(c),read("movq %rax,"));stack_slot(borrow_mut(c),target);vec_push(c.out,10);let old=resource(borrow_mut(c),target);if old!=0{let r=vec_get(c.resources,old-1);let flag=r.flag;let place=place_of(borrow_mut(c),target);if place!=0{ownership::initialize(borrow_mut(c.check),place);}if flag!=0{
- o(borrow_mut(c),read("movq $1,"));stack_slot(borrow_mut(c),flag-1);vec_push(c.out,10);}}}return ();}
+ o(borrow_mut(c),read("movq $1,"));stack_slot(borrow_mut(c),flag-1);vec_push(c.out,10);}}}
+ if through==0{transfer_bonds(borrow_mut(c),source,destination);let newtarget=target_of(borrow_mut(c),v.t);move_out(borrow_mut(c),val(v.t,v.ty));if ty_kind(borrow_mut(c),ty)==7{set_target(borrow_mut(c),target,newtarget,target+1);}}return ();}
  let v=expr(borrow_mut(c),0);expect(borrow_mut(c),read(";"));let r=resource(borrow_mut(c),v.t);if r!=0{let info=vec_get(c.resources,r-1);let base=info.base;let kind=ty_kind(borrow_mut(c),v.ty);
  if base!=0{if needs_drop(borrow_mut(c),v.ty)+(kind==7){let moved=move_value(borrow_mut(c),v);let owner=resource(borrow_mut(c),moved.t);release(borrow_mut(c),owner-1);}else{release(borrow_mut(c),r-1);}}
  else{release(borrow_mut(c),r-1);}}return ();

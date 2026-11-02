@@ -320,6 +320,31 @@ fn independent_native_backend_selfhosts_and_matches_seed() {
         assert!(!result.status.success(),"accepted invalid generic function: {body}");
         assert_eq!(fs::read(output).unwrap(),b"prior valid artifact");
     }
+    run(seed()
+        .arg("build")
+        .arg(root.join("compiler/tests/writeback.grl"))
+        .arg(&w)
+        .arg(&w));
+    assert_eq!(run(&mut Command::new(w.join("writeback"))).stdout, b"626\n");
+    let writeback = assemble(&w, &compiler, &[root.join("compiler/tests/writeback.grl")]);
+    assert_eq!(run(&mut Command::new(writeback)).stdout, b"626\n");
+    for body in [
+        "fn set<a,b>(r:ref_mut<a,read<b>>,v:read<b>)->num{let old=exchange(r,v);return 0;}fn bad<a,b>(r:ref_mut<a,read<b>>)->num{let local=bytes();return set(r,read(local));}pub fn run()->num{return 0;}",
+        "fn replace<a,type T>(r:ref_mut<a,T>,v:T)->T{return exchange(r,v);}fn bad<a,b>(r:ref_mut<a,read<b>>)->num{let local=bytes();let old=replace(r,read(local));return 0;}pub fn run()->num{return 0;}",
+        "struct Cell<a>{v:read<a>}fn bad<a,b>(r:ref_mut<a,Cell<b>>)->num{var p=r;let local=bytes();p.v=read(local);return 0;}pub fn run()->num{return 0;}",
+        "fn set<a,b>(r:ref_mut<a,read<b>>,v:read<b>)->num{let old=exchange(r,v);return 0;}pub fn run()->num{let a=bytes();let b=bytes();var v=read(a);set(borrow_mut(v),read(b));push(b,1);return len(v);}",
+        "fn add<a,b>(r:ref_mut<a,vec<read<b>>>,v:read<b>)->num{vec_push(r,v);return 0;}fn bad<a,b>(r:ref_mut<a,vec<read<b>>>)->num{let local=bytes();return add(r,read(local));}pub fn run()->num{return 0;}",
+        "fn pop<a,b>(r:ref_mut<a,vec<read<b>>>)->read<b>{return vec_pop(r);}fn bad<a>()->read<a>{let local=bytes();let v=vec<read<a>>();vec_push(v,read(local));return pop(borrow_mut(v));}pub fn run()->num{return 0;}",
+        "pub fn run()->num{let a=bytes();let b=bytes();var v=read(a);v=read(b);push(b,1);return len(v);}",
+        "struct Cell<a>{v:read<a>}fn access<a,b>(r:ref_mut<a,Cell<b>>)->ref_mut<a,read<b>>{return borrow_mut(r.v);}pub fn run()->num{let a=bytes();let b=bytes();var p=Cell{v:read(a)};let old=exchange(access(borrow_mut(p)),read(b));drop(old);push(b,1);return len(p.v);}",
+        "struct Cell<a>{v:read<a>}fn access<a,b>(r:ref_mut<a,Cell<b>>)->ref_mut<a,read<b>>{return borrow_mut(r.v);}fn bad<a,b>(r:ref_mut<a,Cell<b>>)->num{let local=bytes();let old=exchange(access(r),read(local));return 0;}pub fn run()->num{return 0;}",
+    ] {
+        let src=w.join("bad_writeback.grl");fs::write(&src,format!("module bad_writeback;{body}")).unwrap();
+        let output=w.join("bad_writeback.s");fs::write(&output,b"prior valid artifact").unwrap();
+        let result=Command::new(&compiler).arg(&output).arg(&src).arg(root_runtime()).output().unwrap();
+        assert!(!result.status.success(),"accepted invalid writeback: {body}");
+        assert_eq!(fs::read(output).unwrap(),b"prior valid artifact");
+    }
     let cleanup = assemble(&w, &compiler, &[root.join("compiler/tests/cleanup.grl")]);
     assert_eq!(run(&mut Command::new(cleanup)).stdout, b"777\n");
     let rejected = [
