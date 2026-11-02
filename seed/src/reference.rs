@@ -197,19 +197,23 @@ impl State {
         }
         let mut retired = Vec::new();
         for (p, (old, next)) in updates {
-            self.replace_target(&p, next)?;
+            self.replace_target(&p, next, false)?;
             retired.push(old);
         }
         Ok(retired)
     }
-    fn replace_target(&mut self, p: &Place, next: Value) -> Result<(), String> {
+    fn replace_target(&mut self, p: &Place, mut next: Value, weak: bool) -> Result<(), String> {
         let old = self.target(p)?.clone();
+        // Only one feasible target is actually overwritten; all others may retain their contents.
+        if weak {
+            self.merge_value(&mut next, &old)?;
+        }
         self.index_remove(&old);
         *self.target_mut(p)? = next.clone();
         self.index_add(&next);
         Ok(())
     }
-    fn fresh_loans(&mut self, v: &mut Value) {
+    pub(super) fn fresh_loans(&mut self, v: &mut Value) {
         self.next += 1;
         v.loan = self.next;
         for field in v.fields.iter_mut().flatten() {
@@ -250,7 +254,7 @@ impl State {
         (v.ty.owned() && v.roots.iter().any(|r| self.access_conflict(r, true)))
             || v.fields.iter().flatten().any(|v| self.owner_has_write(v))
     }
-    fn reference_parts(&self, r: Reg) -> Result<(Value, Mode, u16, Ty), String> {
+    pub(super) fn reference_parts(&self, r: Reg) -> Result<(Value, Mode, u16, Ty), String> {
         let v = self.usable(r)?;
         let Ty::Ref(m, region, t) = &v.ty else {
             return Err("expected typed reference".into());
@@ -293,6 +297,16 @@ impl State {
         path: &[String],
         mode: Mode,
     ) -> Result<(), String> {
+        self.address_inner(dst, src, path, None, mode)
+    }
+    pub(super) fn address_inner(
+        &mut self,
+        dst: Reg,
+        src: Reg,
+        path: &[String],
+        element: Option<usize>,
+        mode: Mode,
+    ) -> Result<(), String> {
         if dst == src {
             return Err("address needs a fresh register".into());
         }
@@ -318,7 +332,9 @@ impl State {
                 0,
             )
         };
-        let (indices, inner) = if path.is_empty() {
+        let (indices, inner) = if let Some(i) = element {
+            (vec![i], types::field(&ty, i, &self.layouts)?)
+        } else if path.is_empty() {
             (vec![], ty)
         } else {
             types::project(&ty, path, &self.layouts)?
@@ -450,7 +466,7 @@ impl State {
             let mut next = incoming.clone();
             retain_loans(&mut next, old);
             rename_owned(&mut next, &p.base, &p.path);
-            self.replace_target(p, next)?;
+            self.replace_target(p, next, reference.targets.len() > 1)?;
         }
         self.put(dst, out)?;
         for old in olds {

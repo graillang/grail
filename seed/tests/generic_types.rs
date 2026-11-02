@@ -99,7 +99,7 @@ fn generic_codec_bounds_producers_and_rejects_noncanonical_consumers() {
         text.replace("1#n", "01#n"),
         text.replace("1#n", "2#n"),
         text.replace("1#n", "0#n"),
-        text.replace("interface-6", "interface-5"),
+        text.replace("interface-7", "interface-5"),
         text.replace("[1#n1#s]", "[]"),
         text.replace("1#n", "1#p"),
         text.replace("1#n", "9999999999999999999999999999999999999999999999#n"),

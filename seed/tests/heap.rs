@@ -73,5 +73,5 @@ fn owned_interface_roundtrips_and_old_schema_is_rejected() {
     };
     let encoded = sig.encode().unwrap();
     assert_eq!(Sig::decode(&encoded).unwrap(), sig);
-    assert!(Sig::decode(&encoded.replace("interface-6", "interface-5")).is_err());
+    assert!(Sig::decode(&encoded.replace("interface-7", "interface-5")).is_err());
 }

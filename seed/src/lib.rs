@@ -6,6 +6,7 @@ pub mod driver;
 pub mod emit;
 pub mod fixture;
 mod flow;
+pub mod host;
 mod ir;
 pub mod module;
 mod provenance;
@@ -17,6 +18,7 @@ mod sum;
 pub mod template;
 mod ty;
 pub mod types;
+mod vector;
 mod witness;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -28,6 +30,7 @@ pub enum Mode {
 }
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Ty {
+    Vector(Box<Ty>),
     Num,
     Named(String, Vec<u16>, Vec<Ty>),
     Param(u16),
@@ -73,7 +76,7 @@ impl Sig {
             && !self
                 .params
                 .iter()
-                .any(|t| matches!(t, Ty::Named(..) | Ty::Ref(..)))
+                .any(|t| matches!(t, Ty::Named(..) | Ty::Vector(_) | Ty::Ref(..)))
             && !self.params.iter().any(|t| {
                 t.reference()
                     .is_some_and(|(m, p)| p == r && (mode == Mode::Read || m == Mode::Write))
@@ -89,7 +92,7 @@ impl Sig {
     pub(crate) fn encode_bound(&self, parameters: u16) -> Result<String, String> {
         self.validate_bound(parameters)?;
         let text = format!(
-            "grail-seed-interface-6\n{}\n{}\n{}\n",
+            "grail-seed-interface-7\n{}\n{}\n{}\n",
             self.name,
             self.params
                 .iter()
@@ -111,7 +114,7 @@ impl Sig {
             return Err("interface too large".into());
         }
         let lines = text.lines().collect::<Vec<_>>();
-        if lines.len() != 4 || lines[0] != "grail-seed-interface-6" {
+        if lines.len() != 4 || lines[0] != "grail-seed-interface-7" {
             return Err("invalid interface schema".into());
         }
         let params = if lines[2].is_empty() {
@@ -154,6 +157,38 @@ pub struct Arm {
 }
 #[derive(Clone, Debug)]
 pub enum Op {
+    FieldAssign {
+        dst: Reg,
+        path: Vec<String>,
+        src: Reg,
+    },
+    Declare {
+        dst: Reg,
+        ty: Ty,
+    },
+    Assign {
+        dst: Reg,
+        src: Reg,
+    },
+    Vector {
+        dst: Reg,
+        element: Ty,
+    },
+    VectorPush {
+        dst: Reg,
+        owner: Reg,
+        value: Reg,
+    },
+    VectorPop {
+        dst: Reg,
+        owner: Reg,
+    },
+    VectorGet {
+        dst: Reg,
+        owner: Reg,
+        index: Reg,
+        mode: Mode,
+    },
     Ascribe {
         src: Reg,
         ty: Ty,
@@ -263,6 +298,8 @@ pub enum Op {
         src: Reg,
     },
     End(Reg),
+    /// Checked cleanup of a possibly initialized binding; native drop flags guard destruction.
+    EndIfLive(Reg),
     Len {
         dst: Reg,
         src: Reg,
@@ -327,6 +364,7 @@ struct Value {
     ancestors: BTreeSet<usize>,
     fields: Vec<Option<Value>>,
     active: bool,
+    initialized: bool,
     targets: BTreeSet<reference::Place>,
     lives: Vec<witness::Life>,
 }
@@ -344,6 +382,7 @@ struct State {
     memory: BTreeMap<Root, Value>,
     addressed: BTreeSet<Reg>,
     resources: BTreeSet<Reg>,
+    declared: BTreeSet<Reg>,
     next: usize,
     copy_defined: Vec<u64>,
     types: std::rc::Rc<std::cell::RefCell<BTreeMap<Reg, Ty>>>,
@@ -374,6 +413,7 @@ impl State {
             memory: BTreeMap::new(),
             addressed: BTreeSet::new(),
             resources: BTreeSet::new(),
+            declared: BTreeSet::new(),
             next: 0,
             copy_defined: Vec::new(),
             types: std::rc::Rc::new(std::cell::RefCell::new(BTreeMap::new())),
@@ -454,6 +494,7 @@ impl State {
             ancestors,
             fields: Vec::new(),
             active: true,
+            initialized: true,
             targets: BTreeSet::new(),
         }
     }
@@ -484,7 +525,14 @@ impl State {
         Ok(())
     }
     fn end(&mut self, r: Reg) -> Result<(), String> {
-        let v = self.get(r)?.clone();
+        if !self.get(r)?.initialized {
+            return Err("explicit drop of possibly uninitialized binding".into());
+        }
+        self.end_if_live(r)
+    }
+    fn end_if_live(&mut self, r: Reg) -> Result<(), String> {
+        let mut v = self.get(r)?.clone();
+        v.initialized = true;
         // Internal capture cycles die with their container; external users still prevent drop.
         self.index_remove(&v);
         let valid = if self.place_borrowed(r, &[], false) {
@@ -547,10 +595,7 @@ impl State {
         let contract = provenance::Contract::new(&effect, &self.layouts)?;
         let sources = self.input_sources(&inputs, &contract)?;
         let mut results = provenance::Results::new(&sources, &contract);
-        let mut v = if types::leaves(&effect.result, &self.layouts)?
-            .iter()
-            .any(|(_, t)| t.reference().is_some())
-        {
+        let mut v = if !provenance::sources(&effect.result, &self.layouts)?.is_empty() {
             self.result_sources(&effect.result, dst, &mut Vec::new(), &mut results)?
         } else {
             self.initialized_value(&sig.result, dst, &mut Vec::new())?
@@ -591,6 +636,59 @@ impl State {
                 return Err("unreachable operation after control transfer".into());
             }
             match op {
+                Op::FieldAssign { dst, path, src } => self.field_assign(*dst, path, *src)?,
+                Op::Declare { dst, ty } => {
+                    types::validate_type(ty, &self.layouts, self.type_parameters)?;
+                    if *dst > 65535
+                        || self.values.contains_key(dst)
+                        || self.types.borrow().get(dst).is_some_and(|t| t != ty)
+                    {
+                        return Err("declaration needs unused storage of the declared type".into());
+                    }
+                    self.types.borrow_mut().insert(*dst, ty.clone());
+                    self.declared.insert(*dst);
+                }
+                Op::Assign { dst, src } => {
+                    if dst == src {
+                        self.usable(*src)?;
+                        continue;
+                    }
+                    let incoming = self.usable(*src)?;
+                    let expected = self
+                        .types
+                        .borrow()
+                        .get(dst)
+                        .cloned()
+                        .ok_or("assignment needs a declared binding")?;
+                    if !aggregate::compatible(&incoming.ty, &expected) {
+                        return Err("assignment type mismatch".into());
+                    }
+                    if self.owner_borrowed(&incoming)
+                        || self.place_borrowed(*src, &[], incoming.ty.copy())
+                    {
+                        return Err("assignment moves borrowed storage".into());
+                    }
+                    if self.values.contains_key(dst) {
+                        self.end_if_live(*dst)?;
+                    }
+                    if !incoming.ty.copy() {
+                        self.remove(*src);
+                    }
+                    self.put(*dst, incoming)?;
+                }
+                Op::Vector { dst, element } => self.vector_new(*dst, element)?,
+                Op::VectorPush { dst, owner, value } => self.vector_push(*dst, *owner, *value)?,
+                Op::VectorPop { dst, owner } => self.vector_pop(*dst, *owner)?,
+                Op::VectorGet {
+                    dst,
+                    owner,
+                    index,
+                    mode,
+                } => {
+                    self.require_num(*index)?;
+                    self.vector_element(*owner)?;
+                    self.address_inner(*dst, *owner, &[], Some(0), *mode)?;
+                }
                 Op::Ascribe { src, ty } => self.ascribe(*src, ty)?,
                 Op::Address {
                     dst,
@@ -736,6 +834,13 @@ impl State {
                     path,
                     mode,
                 } => {
+                    let source_ty = &self.get(*src)?.ty;
+                    let inner = if let Ty::Ref(_, _, inner) = source_ty { inner.as_ref() } else { source_ty };
+                    let (_, field_ty) = types::project(inner, path, &self.layouts)?;
+                    if matches!(field_ty, Ty::Vector(_)) {
+                        self.address(*dst, *src, path, *mode)?;
+                        continue;
+                    }
                     if matches!(self.get(*src)?.ty, Ty::Ref(..)) {
                         let v = self.reference_field_bytes(*src, path, *mode)?;
                         self.put(*dst, v)?;
@@ -811,8 +916,11 @@ impl State {
                     self.put(*dst, v)?;
                 }
                 Op::End(r) => self.end(*r)?,
+                Op::EndIfLive(r) => self.end_if_live(*r)?,
                 Op::Len { dst, src } => {
-                    self.readable(*src)?;
+                    if self.vector_element(*src).is_err() {
+                        self.readable(*src)?;
+                    }
                     self.num(*dst)?;
                 }
                 Op::Read { dst, src, index } => {
@@ -871,7 +979,7 @@ impl State {
                     self.call(sig, *dst, args)?;
                 }
                 Op::Block { body } => {
-                    let entry = self.resources.clone();
+                    let entry = self.resources.union(&self.declared).copied().collect();
                     self.ops_inner(body, imports, depth + 1, after)?;
                     if !self.terminated {
                         self.validate_resource_frame(&entry)?;

@@ -25,6 +25,7 @@ pub(super) fn formal(t: &Ty) -> Vec<Life> {
                 out.push(Life::formal(*r));
                 walk(inner, out);
             }
+            Ty::Vector(t) => walk(t, out),
             Ty::Named(_, rs, args) => {
                 out.extend(rs.iter().map(|r| Life::formal(*r)));
                 for t in args {
@@ -224,6 +225,12 @@ impl Instance {
         })
     }
     pub(super) fn fields(&self, defs: &types::Definitions) -> Result<Vec<Self>, String> {
+        if let Ty::Vector(t) = &self.ty {
+            return Ok(vec![Self {
+                ty: (**t).clone(),
+                lives: self.lives.clone(),
+            }]);
+        }
         let Ty::Named(name, rs, _) = &self.ty else {
             return Err("nominal instance expected".into());
         };
@@ -266,6 +273,13 @@ fn apply(
                     Ty::Holder(*m, n)
                 },
                 lives: vec![life],
+            }
+        }
+        Ty::Vector(t) => {
+            let inner = apply(t, region, argument)?;
+            Instance {
+                ty: Ty::Vector(Box::new(inner.ty)),
+                lives: inner.lives,
             }
         }
         Ty::Ref(m, r, inner) => {
@@ -422,6 +436,7 @@ impl Bindings {
             return Ok(());
         }
         let shape = match (p, &a.ty) {
+            (Ty::Vector(_), Ty::Vector(_)) => true,
             (Ty::Ref(m, ..), Ty::Ref(n, ..)) => m == n,
             (Ty::Named(n, rs, args), Ty::Named(other, other_rs, other_args)) => {
                 n == other && rs.len() == other_rs.len() && args.len() == other_args.len()
@@ -434,7 +449,7 @@ impl Bindings {
         fn parameters(t: &Ty) -> bool {
             match t {
                 Ty::Param(_) => true,
-                Ty::Ref(_, _, t) => parameters(t),
+                Ty::Ref(_, _, t) | Ty::Vector(t) => parameters(t),
                 Ty::Named(_, _, args) => args.iter().any(parameters),
                 _ => false,
             }
@@ -452,6 +467,10 @@ impl Bindings {
                         inv,
                     )?;
                 }
+            }
+            Ty::Vector(t) => {
+                let value = a.fields(&state.layouts)?.remove(0);
+                self.walk(state, t, &value, (inv, pins_only), depth + 1, nodes)?;
             }
             Ty::Ref(m, r, t) => {
                 if !pins_only || inv {
@@ -515,7 +534,7 @@ impl State {
         if !aggregate::compatible(&v.ty, &want.ty) {
             return Err("lifetime stamp changes value shape".into());
         }
-        if matches!(want.ty, Ty::Named(..)) {
+        if matches!(want.ty, Ty::Named(..) | Ty::Vector(_)) {
             for (f, bound) in v.fields.iter_mut().zip(want.fields(&self.layouts)?) {
                 if let Some(f) = f {
                     self.stamp_value(f, &bound)?;
@@ -554,7 +573,7 @@ impl State {
                     }
                 }
             }
-        } else if matches!(v.ty, Ty::Named(..)) {
+        } else if matches!(v.ty, Ty::Named(..) | Ty::Vector(_)) {
             for (f, bound) in v.fields.iter_mut().zip(want.fields(&self.layouts)?) {
                 self.coerce_value(f.as_mut().ok_or("partially moved lifetime value")?, &bound)?;
             }
@@ -647,7 +666,7 @@ impl Instance {
             }
             match t.ty {
                 Ty::Ref(..) => walk(&t.inner()?, defs, out, depth + 1)?,
-                Ty::Named(..) => {
+                Ty::Named(..) | Ty::Vector(_) => {
                     for f in t.fields(defs)? {
                         walk(&f, defs, out, depth + 1)?;
                     }
@@ -699,8 +718,8 @@ impl Bindings {
                     }
                     walk(bindings, state, inner, changed, depth + 1)?;
                 }
-                Ty::Named(..) => {
-                    for (_, field) in types::fields(t, &state.layouts)? {
+                Ty::Named(..) | Ty::Vector(_) => {
+                    for (_, field) in types::children(t, &state.layouts)? {
                         walk(bindings, state, &field, changed, depth + 1)?;
                     }
                 }
@@ -770,6 +789,7 @@ impl Bindings {
             Ok(match t {
                 Ty::View(m, _) => Ty::View(*m, slot(next)?),
                 Ty::Holder(m, _) => Ty::Holder(*m, slot(next)?),
+                Ty::Vector(t) => Ty::Vector(Box::new(rename(t, next)?)),
                 Ty::Ref(m, _, inner) => Ty::Ref(*m, slot(next)?, Box::new(rename(inner, next)?)),
                 Ty::Named(n, rs, args) => {
                     let mut regions = Vec::new();
@@ -869,7 +889,7 @@ fn compare(
                     nodes,
                 )?
         }
-        Ty::Named(..) => {
+        Ty::Named(..) | Ty::Vector(_) => {
             let mut yes = true;
             for (a, b) in a.fields(defs)?.iter().zip(b.fields(defs)?) {
                 yes &= compare(a, &b, false, defs, ge, depth + 1, nodes)?;

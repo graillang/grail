@@ -7,11 +7,19 @@ impl Ty {
     pub(super) fn owned(&self) -> bool {
         matches!(
             self,
-            Self::Buffer | Self::Bytes | Self::Text | Self::Named(..) | Self::Param(_)
+            Self::Buffer
+                | Self::Bytes
+                | Self::Text
+                | Self::Vector(_)
+                | Self::Named(..)
+                | Self::Param(_)
         )
     }
-    pub(super) fn heap(&self) -> bool {
+    pub(super) fn byte_owner(&self) -> bool {
         matches!(self, Self::Bytes | Self::Text)
+    }
+    pub(super) fn heap(&self) -> bool {
+        self.byte_owner() || matches!(self, Self::Vector(_))
     }
     pub(super) fn reference(&self) -> Option<(Mode, u16)> {
         match self {
@@ -21,6 +29,7 @@ impl Ty {
     }
     pub(super) fn word(&self) -> String {
         match self {
+            Self::Vector(t) => format!("a#{}", t.word()),
             Self::Num => "n".into(),
             Self::Unit => "u".into(),
             Self::Bytes => "o".into(),
@@ -59,6 +68,9 @@ impl Ty {
         *nodes += 1;
         if depth > 64 || *nodes > 4096 || s.len() > 65536 {
             return Err("type expression limit".into());
+        }
+        if let Some(t) = s.strip_prefix("a#") {
+            return Ok(Self::Vector(Box::new(Self::parse_at(t, depth + 1, nodes)?)));
         }
         if let Some(rest) = s.strip_prefix('v') {
             let mode = match rest.as_bytes().first() {
@@ -183,6 +195,7 @@ impl Ty {
                     }
                     bytes
                 }
+                Ty::Vector(t) => 2 + visit(t, parameters, depth + 1, nodes)?,
                 Ty::Ref(_, r, t) => {
                     3 + r.to_string().len() + visit(t, parameters, depth + 1, nodes)?
                 }
@@ -220,6 +233,7 @@ impl Ty {
                 return Err("generic substitution type limit".into());
             }
             Ok(match t {
+                Ty::Vector(t) => Ty::Vector(Box::new(copy(t, args, depth + 1, nodes)?)),
                 Ty::Ref(m, r, t) => Ty::Ref(*m, *r, Box::new(copy(t, args, depth + 1, nodes)?)),
                 Ty::Named(n, rs, ts) => Ty::Named(
                     n.clone(),
@@ -239,6 +253,7 @@ impl Ty {
     }
     pub(super) fn erase_regions(&self) -> Self {
         match self {
+            Self::Vector(t) => Self::Vector(Box::new(t.erase_regions())),
             Self::Ref(m, _, t) => Self::Ref(*m, 0, Box::new(t.erase_regions())),
             Self::View(m, _) => Self::View(*m, 0),
             Self::Holder(m, _) => Self::Holder(*m, 0),

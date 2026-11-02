@@ -1,0 +1,101 @@
+module lexer;
+
+// Stable token kinds: 0 EOF, 1 identifier (keywords included), 2 decimal
+// number, 3 string literal (including both quotes). Single-byte punctuation
+// uses its ASCII byte value: (){}<>,:;=+-*%&^.!?
+// Multibyte punctuation: 256 ->, 257 =>, 258 ==, 259 !=, 260 ::.
+// All spans borrow source, including the empty EOF span at len(source).
+pub struct Token<a> { kind:num, span:read<a>, start:num, end:num }
+
+fn letter(c:num)->num {
+    return ((64<c)&(c<91))+((96<c)&(c<123))+(c==95);
+}
+fn digit(c:num)->num { return (47<c)&(c<58); }
+fn whitespace(c:num)->num {
+    return (c==32)+(c==9)+(c==10)+(c==12)+(c==13);
+}
+fn punctuation(c:num)->num {
+    return (c==40)+(c==41)+(c==123)+(c==125)+(c==60)+(c==62)
+        +(c==44)+(c==58)+(c==59)+(c==61)+(c==43)+(c==45)
+        +(c==42)+(c==37)+(c==38)+(c==94)+(c==46)+(c==33)+(c==63);
+}
+fn pair_kind(c:num,d:num)->num {
+    if (c==45)&(d==62) { return 256; }
+    if (c==61)&(d==62) { return 257; }
+    if (c==61)&(d==61) { return 258; }
+    if (c==33)&(d==61) { return 259; }
+    if (c==58)&(d==58) { return 260; }
+    return 0;
+}
+
+// This is the seed's lexical boundary scanner, not string decoding: a
+// backslash protects the following byte, including a quote or backslash.
+// Escape validity and decoded UTF-8 validity belong to the literal parser.
+// Non-ASCII bytes are accepted inside strings/comments, not identifiers.
+// Invalid characters, raw string control bytes and unclosed strings abort.
+pub fn tokenize<a>(source:read<a>)->vec<Token<a>> {
+    let tokens=vec<Token<a>>();
+    let size=len(source);
+    var i=0;
+    while i<size {
+        let c=at(source,i);
+        if whitespace(c) { i=i+1; continue; }
+        if c==47 {
+            assert(i+1<size);
+            assert(at(source,i+1)==47);
+            i=i+2;
+            while i<size {
+                if at(source,i)==10 { break; }
+                i=i+1;
+            }
+            continue;
+        }
+        let start=i;
+        var kind=0;
+        if c==34 {
+            kind=3;
+            i=i+1;
+            var closed=0;
+            while i<size {
+                let b=at(source,i);
+                if b==34 { i=i+1; closed=1; break; }
+                assert((b<32)==0);
+                if b==92 {
+                    i=i+1;
+                    if i==size { break; }
+                }
+                i=i+1;
+            }
+            assert(closed);
+        } else {
+            if letter(c) {
+                kind=1;
+                i=i+1;
+                while i<size {
+                    let b=at(source,i);
+                    if (letter(b)+digit(b))==0 { break; }
+                    i=i+1;
+                }
+            } else {
+                if digit(c) {
+                    kind=2;
+                    i=i+1;
+                    while i<size {
+                        if digit(at(source,i))==0 { break; }
+                        i=i+1;
+                    }
+                } else {
+                    if i+1<size { kind=pair_kind(c,at(source,i+1)); }
+                    if kind!=0 { i=i+2; } else {
+                        assert(punctuation(c));
+                        kind=c;
+                        i=i+1;
+                    }
+                }
+            }
+        }
+        vec_push(tokens,Token{kind:kind,span:slice(source,start,i),start:start,end:i});
+    }
+    vec_push(tokens,Token{kind:0,span:slice(source,size,size),start:size,end:size});
+    return tokens;
+}

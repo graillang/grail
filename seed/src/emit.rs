@@ -17,6 +17,7 @@ fn cty(t: &Ty) -> String {
             cty(t),
             if *m == Mode::Read { " const" } else { "" }
         ),
+        Ty::Vector(_) => "ga".into(),
         Ty::Num => "uint64_t".into(),
         Ty::Unit => "uint8_t".into(),
         Ty::Named(n, _, args) => {
@@ -79,6 +80,9 @@ fn field_expr(r: Reg, t: &Ty, path: &[usize], layouts: &crate::types::Definition
     path_expr(r, t, path, layouts).0
 }
 fn owned_paths(t: &Ty, layouts: &crate::types::Definitions) -> Vec<Vec<usize>> {
+    if t.heap() {
+        return vec![vec![]];
+    }
     if !matches!(t, Ty::Named(..)) {
         return Vec::new();
     }
@@ -118,7 +122,7 @@ fn view_expr(value: String, t: &Ty) -> String {
     if let Ty::Ref(_, _, inner) = t {
         return view_expr(format!("(*{value})"), inner);
     }
-    if t.heap() {
+    if t.byte_owner() {
         format!("((gv){{{value}.p,{value}.n}})")
     } else if matches!(t, Ty::Holder(..)) {
         format!("{value}.value")
@@ -130,7 +134,7 @@ fn view(r: Reg, types: &BTreeMap<Reg, Ty>) -> String {
     if let Ty::Ref(_, _, inner) = &types[&r] {
         return view_expr(format!("(*r{r})"), inner);
     }
-    if types[&r].heap() {
+    if types[&r].byte_owner() {
         return format!("((gv){{r{r}.p,r{r}.n}})");
     }
     if matches!(types[&r], Ty::Holder(..)) {
@@ -199,9 +203,91 @@ pub fn module_c_with_resolver<F: FnMut(&str) -> Result<crate::template::Bundle, 
         &native.layouts,
     ))
 }
+fn vector_drop_name(t: &Ty) -> String {
+    format!(
+        "gr_drop_{}",
+        crate::sha256::hex(t.erase_regions().word().as_bytes())
+    )
+}
+fn drop_value(s: &mut String, value: &str, t: &Ty, layouts: &crate::types::Definitions) {
+    match t {
+        Ty::Bytes | Ty::Text => {
+            writeln!(s, "free(({value}).p);").unwrap();
+        }
+        Ty::Vector(_) => {
+            writeln!(s, "{}({value});", vector_drop_name(t)).unwrap();
+        }
+        Ty::Named(..) => {
+            let en = crate::types::is_enum(t, layouts).unwrap();
+            for (i, (_, field)) in crate::types::fields(t, layouts).unwrap().iter().enumerate() {
+                if en {
+                    writeln!(s, "if(({value}).tag=={i}){{").unwrap();
+                }
+                drop_value(
+                    s,
+                    &format!("({value}).{}f{i}", if en { "data." } else { "" }),
+                    field,
+                    layouts,
+                );
+                if en {
+                    s.push_str("}\n");
+                }
+            }
+        }
+        _ => (),
+    }
+}
+fn vector_runtime(s: &mut String, roots: &[Ty], layouts: &crate::types::Definitions) {
+    fn collect(t: &Ty, layouts: &crate::types::Definitions, out: &mut BTreeMap<String, Ty>) {
+        match t {
+            Ty::Vector(inner) => {
+                if out.insert(vector_drop_name(t), t.erase_regions()).is_none() {
+                    collect(inner, layouts, out);
+                }
+            }
+            Ty::Ref(_, _, inner) => collect(inner, layouts, out),
+            Ty::Named(..) => {
+                for (_, f) in crate::types::fields(t, layouts).unwrap() {
+                    collect(&f, layouts, out);
+                }
+            }
+            _ => (),
+        }
+    }
+    let mut vectors = BTreeMap::new();
+    for t in roots {
+        collect(t, layouts, &mut vectors);
+    }
+    if vectors.is_empty() {
+        return;
+    }
+    s.push_str(include_str!("vector_runtime.h"));
+    for name in vectors.keys() {
+        writeln!(s, "static void {name}(ga v);").unwrap();
+    }
+    for (name, ty) in vectors {
+        let Ty::Vector(inner) = ty else {
+            unreachable!()
+        };
+        writeln!(s, "static void {name}(ga v){{for(uint64_t i=0;i<v.n;i++){{").unwrap();
+        drop_value(s, &format!("(({}*)v.p)[i]", cty(&inner)), &inner, layouts);
+        s.push_str("}free(v.p); }\n");
+    }
+}
+fn vector_storage(r: Reg, types: &BTreeMap<Reg, Ty>) -> (String, Ty) {
+    let (value, ty) = if let Ty::Ref(_, _, inner) = &types[&r] {
+        (format!("(*r{r})"), inner.as_ref())
+    } else {
+        (format!("r{r}"), &types[&r])
+    };
+    let Ty::Vector(inner) = ty else {
+        unreachable!("checked vector")
+    };
+    (value, (**inner).clone())
+}
 fn c_functions(functions: &[(&Checked, bool)], layouts: &crate::types::Definitions) -> String {
     let mut s = String::from(
-        "#include <stdint.h>\n#include <stdlib.h>\n#include <string.h>\ntypedef struct { uint8_t *p; uint64_t n; } gv;\ntypedef struct { gv value; } gh;\ntypedef struct {uint8_t*p;uint64_t n,c;} gb;\n#define GRAIL_BYTES_TYPES_DEFINED\n",
+        "#include <stdint.h>\n#include <stdlib.h>\n#include <string.h>\ntypedef struct { uint8_t *p; uint64_t n; } gv;\ntypedef struct { gv value; } gh;\ntypedef struct {uint8_t*p;uint64_t n,c;} gb;\ntypedef struct {void*p;uint64_t n,c;} ga;\n#define GRAIL_BYTES_TYPES_DEFINED\n",
     );
     let mut roots = Vec::new();
     for (p, _) in functions {
@@ -241,10 +327,11 @@ fn c_functions(functions: &[(&Checked, bool)], layouts: &crate::types::Definitio
     if functions.iter().any(|(p, _)| {
         p.types
             .values()
-            .any(|t| t.heap() || matches!(t,Ty::Ref(_,_,inner)if inner.heap()))
+            .any(|t| t.byte_owner() || matches!(t,Ty::Ref(_,_,inner)if inner.byte_owner()))
     }) {
         s.push_str(include_str!("bytes_runtime.h"));
     }
+    vector_runtime(&mut s, &roots, layouts);
     let locals = functions
         .iter()
         .map(|(p, public)| (p.function.sig.name.as_str(), *public))
@@ -288,7 +375,7 @@ fn c_body(p: &Checked, s: &mut String, private: bool) {
         }
     }
     for (r, t) in &p.types {
-        if matches!(t, Ty::Named(..)) {
+        if matches!(t, Ty::Named(..)) || t.heap() {
             let count = owned_paths(t, &p.layouts).len().max(1);
             writeln!(s, "uint8_t r{r}_live[{count}]={{0}};").unwrap();
             if (*r as usize) < p.function.sig.params.len() {
@@ -310,6 +397,35 @@ fn c_body(p: &Checked, s: &mut String, private: bool) {
     ) {
         for o in os {
             match o{
+        Op::FieldAssign{dst,path,src}=>{
+            let (indices,_) = crate::types::project(&types[dst],path,layouts).unwrap();
+            for(i,p)in owned_paths(&types[dst],layouts).iter().enumerate(){if p.starts_with(&indices){writeln!(s,"if(r{dst}_live[{i}]){{").unwrap();drop_value(s,&field_expr(*dst,&types[dst],p,layouts),&crate::types::at(&types[dst],p,layouts).unwrap(),layouts);writeln!(s,"r{dst}_live[{i}]=0;}}").unwrap();}}
+            writeln!(s,"{}=r{src};",field_expr(*dst,&types[dst],&indices,layouts)).unwrap();
+            for(i,p)in owned_paths(&types[dst],layouts).iter().enumerate(){if p.starts_with(&indices){let guards=path_expr(*dst,&types[dst],p,layouts).1;writeln!(s,"r{dst}_live[{i}]={};",if guards.is_empty(){"1".into()}else{guards.join("&&")}).unwrap();}}
+            record_flags(s,*src,&types[src],layouts,false);
+        },
+        Op::Declare{..}=>{},
+        Op::Assign{dst,src}=>{
+            if dst!=src {
+                for(i,path)in owned_paths(&types[dst],layouts).iter().enumerate(){writeln!(s,"if(r{dst}_live[{i}]){{").unwrap();drop_value(s,&field_expr(*dst,&types[dst],path,layouts),&crate::types::at(&types[dst],path,layouts).unwrap(),layouts);writeln!(s,"r{dst}_live[{i}]=0;}}").unwrap();}
+                writeln!(s,"r{dst}=r{src};").unwrap();record_flags(s,*dst,&types[dst],layouts,true);record_flags(s,*src,&types[src],layouts,false);
+            }
+        },
+        Op::Vector{dst,..}=>{writeln!(s,"r{dst}=(ga){{0,0,0}};").unwrap();record_flags(s,*dst,&types[dst],layouts,true);},
+        Op::VectorPush{dst,owner,value}=>{
+            let(v,element)=vector_storage(*owner,types);
+            writeln!(s,"gr_vec_reserve(&{v},sizeof({}));(({}*){v}.p)[{v}.n++]=r{value};r{dst}=0;",cty(&element),cty(&element)).unwrap();
+            record_flags(s,*value,&types[value],layouts,false);
+        },
+        Op::VectorPop{dst,owner}=>{
+            let(v,element)=vector_storage(*owner,types);
+            writeln!(s,"if(!{v}.n)abort();r{dst}=(({}*){v}.p)[--{v}.n];",cty(&element)).unwrap();
+            record_flags(s,*dst,&types[dst],layouts,true);
+        },
+        Op::VectorGet{dst,owner,index,..}=>{
+            let(v,element)=vector_storage(*owner,types);
+            writeln!(s,"if(r{index}>={v}.n)abort();r{dst}=&(({}*){v}.p)[r{index}];",cty(&element)).unwrap();
+        },
         Op::Ascribe{..}=>{},
         Op::Address{dst,src,path,..}=>{
             let (base,ty)=if let Ty::Ref(_,_,t)=&types[src]{(format!("(*r{src})"),t.as_ref())}else{(format!("r{src}"),&types[src])};
@@ -337,13 +453,13 @@ fn c_body(p: &Checked, s: &mut String, private: bool) {
             for(i,field)in owned_paths(&types[src],layouts).iter().enumerate(){if field.starts_with(&indices){writeln!(s,"r{src}_live[{i}]=0;").unwrap();}}
             record_flags(s,*dst,&types[dst],layouts,true);
         },
-        Op::FieldBorrow{dst,src,path,..}=>{let ty=if let Ty::Ref(_,_,t)=&types[src]{t.as_ref()}else{&types[src]};let(indices,t)=crate::types::project(ty,path,layouts).unwrap();writeln!(s,"r{dst}={};",view_expr(field_expr(*src,&types[src],&indices,layouts),&t)).unwrap();},
+        Op::FieldBorrow{dst,src,path,..}=>{let ty=if let Ty::Ref(_,_,t)=&types[src]{t.as_ref()}else{&types[src]};let(indices,t)=crate::types::project(ty,path,layouts).unwrap();if matches!(t,Ty::Vector(_)){writeln!(s,"r{dst}=&({});",field_expr(*src,&types[src],&indices,layouts)).unwrap();}else{writeln!(s,"r{dst}={};",view_expr(field_expr(*src,&types[src],&indices,layouts),&t)).unwrap();}},
         Op::EndCaptures(_)=>{},
-        Op::TextLiteral{dst,data}=>{let values=if data.is_empty(){"0".into()}else{data.iter().map(u8::to_string).collect::<Vec<_>>().join(",")};writeln!(s,"{{static const uint8_t text[]={{ {values} }};r{dst}=gr_copy_bytes((gv){{(uint8_t*)text,UINT64_C({})}});}}",data.len()).unwrap()},
-        Op::Text{dst,src}=>{let v=view(*src,types);writeln!(s,"gr_utf8({v});r{dst}=gr_copy_bytes({v});").unwrap()},
+        Op::TextLiteral{dst,data}=>{let values=if data.is_empty(){"0".into()}else{data.iter().map(u8::to_string).collect::<Vec<_>>().join(",")};writeln!(s,"{{static const uint8_t text[]={{ {values} }};r{dst}=gr_copy_bytes((gv){{(uint8_t*)text,UINT64_C({})}});}}",data.len()).unwrap();record_flags(s,*dst,&types[dst],layouts,true);},
+        Op::Text{dst,src}=>{let v=view(*src,types);writeln!(s,"gr_utf8({v});r{dst}=gr_copy_bytes({v});").unwrap();record_flags(s,*dst,&types[dst],layouts,true);},
         Op::AppendText{owner,src}=>{let ptr=if matches!(types[owner],Ty::Ref(..)){format!("r{owner}")}else{format!("&r{owner}")};writeln!(s,"gr_append_text({ptr},{});",view(*src,types)).unwrap()},
-        Op::Bytes{dst}=>{writeln!(s,"r{dst}=(gb){{0,0,0}};").unwrap()},
-        Op::CopyBytes{dst,src}=>{writeln!(s,"r{dst}=gr_copy_bytes({});",view(*src,types)).unwrap()},
+        Op::Bytes{dst}=>{writeln!(s,"r{dst}=(gb){{0,0,0}};").unwrap();record_flags(s,*dst,&types[dst],layouts,true);},
+        Op::CopyBytes{dst,src}=>{writeln!(s,"r{dst}=gr_copy_bytes({});",view(*src,types)).unwrap();record_flags(s,*dst,&types[dst],layouts,true);},
         Op::Push{owner,value}=>{let ptr=if matches!(types[owner],Ty::Ref(..)){format!("r{owner}")}else{format!("&r{owner}")};writeln!(s,"gr_push({ptr},r{value});").unwrap()},
         Op::Num(r,n)=>{writeln!(s,"r{r} = UINT64_C({n});").unwrap()},
         Op::Buffer{dst,len,seed}=>{writeln!(s,"r{dst} = (gv){{b{dst}, UINT64_C({len})}};\nfor (uint64_t j=0; j<UINT64_C({len}); ++j) b{dst}[j]=(uint8_t)((j*UINT64_C(17)+UINT64_C({seed}))%UINT64_C(251));").unwrap()},
@@ -353,8 +469,8 @@ fn c_body(p: &Checked, s: &mut String, private: bool) {
         Op::If{condition,yes,no}=>{writeln!(s,"if(r{condition}){{").unwrap();ops(s,yes,types,layouts,jumps);s.push_str("}else{\n");ops(s,no,types,layouts,jumps);s.push_str("}\n")},
         Op::Pack{dst,src}=>{writeln!(s,"r{dst} = (gh){{r{src}}};").unwrap()},
         Op::Move{dst,src}=>{writeln!(s,"r{dst}=r{src};").unwrap();record_flags(s,*dst,&types[dst],layouts,true);record_flags(s,*src,&types[src],layouts,false);},
-        Op::End(r)=>{if types[r].heap(){writeln!(s,"free(r{r}.p);").unwrap();}else{for(i,path)in owned_paths(&types[r],layouts).iter().enumerate(){writeln!(s,"if(r{r}_live[{i}]){{free({}.p);r{r}_live[{i}]=0;}}",field_expr(*r,&types[r],path,layouts)).unwrap();}}},
-        Op::Len{dst,src}=>{writeln!(s,"r{dst}={}.n;",view(*src,types)).unwrap()},
+        Op::End(r)|Op::EndIfLive(r)=>{for(i,path)in owned_paths(&types[r],layouts).iter().enumerate(){writeln!(s,"if(r{r}_live[{i}]){{").unwrap();drop_value(s,&field_expr(*r,&types[r],path,layouts),&crate::types::at(&types[r],path,layouts).unwrap(),layouts);writeln!(s,"r{r}_live[{i}]=0;}}").unwrap();}},
+        Op::Len{dst,src}=>{let value=if matches!(types[src],Ty::Vector(_))||matches!(&types[src],Ty::Ref(_,_,inner)if matches!(inner.as_ref(),Ty::Vector(_))){vector_storage(*src,types).0}else{view(*src,types)};writeln!(s,"r{dst}={value}.n;").unwrap()},
         Op::Read{dst,src,index}=>{let v=view(*src,types);writeln!(s,"if (r{index}>={v}.n) abort(); r{dst}={v}.p[r{index}];").unwrap()},
         Op::Write{dst,index,value}=>{let v=view(*dst,types);writeln!(s,"if (r{index}>={v}.n) abort(); {v}.p[r{index}]=(uint8_t)r{value};").unwrap()},
         Op::Binary{dst,op,left,right}=>{let symbol=match op{Bin::Add=>"+",Bin::Sub=>"-",Bin::Lt=>"<",Bin::Mul=>"*",Bin::Xor=>"^",Bin::Rem=>"%",Bin::Eq=>"==",Bin::Ne=>"!=",Bin::And=>"&"};if matches!(op,Bin::Rem){writeln!(s,"if (!r{right}) abort();").unwrap()}writeln!(s,"r{dst}=r{left} {symbol} r{right};").unwrap()},
@@ -454,6 +570,16 @@ impl Ll {
     fn ops(&mut self, os: &[Op]) -> bool {
         for o in os {
             match o {
+                Op::FieldAssign { .. } => unreachable!("LLVM record layout rejected"),
+                Op::Declare { .. } => {}
+                Op::Assign { dst, src } => {
+                    let value = self.load(*src);
+                    self.store(*dst, &value);
+                }
+                Op::Vector { .. }
+                | Op::VectorPush { .. }
+                | Op::VectorPop { .. }
+                | Op::VectorGet { .. } => unreachable!("LLVM vector layout rejected"),
                 Op::Ascribe { .. } => {}
                 Op::Address { dst, src, path, .. } => {
                     debug_assert!(path.is_empty());
@@ -567,7 +693,7 @@ impl Ll {
                     let v = self.load(*src);
                     self.store(*dst, &v)
                 }
-                Op::End(_) => {}
+                Op::End(_) | Op::EndIfLive(_) => {}
                 Op::Assert(r) => {
                     let value = self.load(*r);
                     let condition = self.fresh();

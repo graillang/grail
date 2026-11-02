@@ -47,6 +47,12 @@ impl Signature {
                         *slot = Some(actual.clone());
                     }
                 }
+                Ty::Vector(t) => {
+                    let Ty::Vector(v) = actual else {
+                        return Err("generic vector argument".into());
+                    };
+                    unify(t, v, args)?;
+                }
                 Ty::Ref(m, _, t) => {
                     let Ty::Ref(a, _, v) = actual else {
                         return Err("generic typed-reference shape".into());
@@ -283,7 +289,7 @@ impl Bundle {
     }
     pub fn encode(&self) -> Result<Vec<u8>, String> {
         let mut w = crate::ir::Writer::default();
-        w.text("grail-seed-template-bundle-2")?;
+        w.text("grail-seed-template-bundle-3")?;
         w.text(&self.module)?;
         w.num(self.implementations.len() as u64)?;
         for (n, h) in &self.implementations {
@@ -299,7 +305,7 @@ impl Bundle {
     }
     pub fn decode(data: &[u8]) -> Result<Self, String> {
         let mut r = crate::ir::Reader::new(data)?;
-        if r.text()? != "grail-seed-template-bundle-2" {
+        if r.text()? != "grail-seed-template-bundle-3" {
             return Err("invalid template bundle schema".into());
         }
         let module = r.text()?;

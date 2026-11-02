@@ -27,7 +27,7 @@ impl Interface {
     }
     fn prefix(&self) -> String {
         format!(
-            "grail-seed-module-5\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n",
+            "grail-seed-module-6\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n",
             self.name,
             self.entry.as_deref().unwrap_or(""),
             self.exports.len(),
@@ -182,7 +182,7 @@ impl Interface {
             return Err("module interface too large".into());
         }
         let lines = text.lines().collect::<Vec<_>>();
-        if lines.len() < 9 || lines[0] != "grail-seed-module-5" {
+        if lines.len() < 9 || lines[0] != "grail-seed-module-6" {
             return Err("invalid source module schema; rebuild source artifacts".into());
         }
         let count = |i: usize| -> Result<usize, String> {

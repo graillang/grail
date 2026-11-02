@@ -52,6 +52,7 @@ fn substitute(t: &Ty, regions: &[u16], args: &[Ty]) -> Result<Ty, String> {
             .get(*i as usize)
             .ok_or("layout type slot out of range")?
             .clone(),
+        Ty::Vector(t) => Ty::Vector(Box::new(substitute(t, regions, args)?)),
         Ty::Ref(m, r, t) => Ty::Ref(*m, slot(r)?, Box::new(substitute(t, regions, args)?)),
         Ty::View(m, r) => Ty::View(*m, slot(r)?),
         Ty::Holder(m, r) => Ty::Holder(*m, slot(r)?),
@@ -89,7 +90,21 @@ pub fn fields(t: &Ty, defs: &Definitions) -> Result<Vec<(String, Ty)>, String> {
         .map(|(n, t)| Ok((n.clone(), substitute(t, rs, args)?)))
         .collect()
 }
+/// Logical element zero summarizes every vector element; it is not a source-level field.
+pub(crate) fn children(t: &Ty, defs: &Definitions) -> Result<Vec<(String, Ty)>, String> {
+    if let Ty::Vector(t) = t {
+        return Ok(vec![("element".into(), (**t).clone())]);
+    }
+    fields(t, defs)
+}
 pub fn field(t: &Ty, index: usize, defs: &Definitions) -> Result<Ty, String> {
+    if let Ty::Vector(t) = t {
+        return if index == 0 {
+            Ok((**t).clone())
+        } else {
+            Err("vector summary index".into())
+        };
+    }
     let (d, rs, args) = application(t, defs)?;
     substitute(&d.fields.get(index).ok_or("field index")?.1, rs, args)
 }
@@ -161,7 +176,7 @@ pub fn instances(roots: &[Ty], defs: &Definitions) -> Result<Vec<Ty>, String> {
         done: &mut BTreeSet<String>,
         out: &mut Vec<Ty>,
     ) -> Result<(), String> {
-        if let Ty::Ref(_, _, inner) = t {
+        if let Ty::Ref(_, _, inner) | Ty::Vector(inner) = t {
             return visit(inner, defs, active, done, out);
         }
         if !matches!(t, Ty::Named(..)) {
@@ -196,6 +211,7 @@ pub fn instances(roots: &[Ty], defs: &Definitions) -> Result<Vec<Ty>, String> {
 }
 fn references(t: &Ty, defs: &Definitions, regions: Option<u16>) -> Result<(), String> {
     match t {
+        Ty::Vector(inner) => references(inner, defs, regions)?,
         Ty::Ref(_, r, inner) => {
             if regions.is_some_and(|count| *r >= count) {
                 return Err("undeclared typed-reference lifetime".into());
@@ -211,7 +227,9 @@ fn references(t: &Ty, defs: &Definitions, regions: Option<u16>) -> Result<(), St
                     return Err("reference provenance expansion limit".into());
                 }
                 match t {
-                    Ty::Ref(_, _, inner) => graph(inner, defs, depth + 1, nodes)?,
+                    Ty::Ref(_, _, inner) | Ty::Vector(inner) => {
+                        graph(inner, defs, depth + 1, nodes)?
+                    }
                     Ty::Named(..) => {
                         for (_, f) in fields(t, defs)? {
                             graph(&f, defs, depth + 1, nodes)?;
@@ -311,7 +329,7 @@ pub fn exposed(
     defs: &Definitions,
 ) -> Result<Definitions, String> {
     fn add(t: &Ty, defs: &Definitions, out: &mut Definitions) -> Result<(), String> {
-        if let Ty::Ref(_, _, inner) = t {
+        if let Ty::Ref(_, _, inner) | Ty::Vector(inner) = t {
             add(inner, defs, out)?;
         }
         if let Ty::Named(n, _, args) = t {

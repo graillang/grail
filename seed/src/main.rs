@@ -2,6 +2,13 @@ use grail_seed::{Sig, check, emit, fixture};
 use std::{collections::BTreeMap, env, fs, path::Path, time::Instant};
 fn run() -> Result<(), String> {
     let a = env::args().collect::<Vec<_>>();
+    if (a.len() == 3 || a.len() == 4) && a[1] == "host" {
+        grail_seed::host::publish(
+            Path::new(&a[2]),
+            a.get(3).map(String::as_str).unwrap_or("clang"),
+        )?;
+        return Ok(());
+    }
     if (a.len() == 5 || a.len() == 6) && (a[1] == "compile" || a[1] == "build") {
         return grail_seed::driver::compile(
             Path::new(&a[2]),
@@ -29,7 +36,7 @@ fn run() -> Result<(), String> {
     }
 
     if a.len() != 6 {
-        return Err("usage: grail-seed compile|build FILE OUT IMPORTS [clang|clang-release|tcc] | provider OUT BIAS VERSION c|llvm | client OUT API LEN:REPEATS c|llvm | scale SIZE".into());
+        return Err("usage: grail-seed host OUT [clang|clang-release] | compile|build FILE OUT IMPORTS [clang|clang-release|tcc] | provider OUT BIAS VERSION c|llvm | client OUT API LEN:REPEATS c|llvm | scale SIZE".into());
     }
     let start = Instant::now();
     let (f, imports) = match a[1].as_str() {

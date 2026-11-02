@@ -58,6 +58,50 @@ impl Writer {
         self.num(ops.len() as u64)?;
         for op in ops {
             match op {
+                Op::FieldAssign { dst, path, src } => {
+                    self.text("field-assign")?;
+                    self.num(*dst as u64)?;
+                    self.path(path)?;
+                    self.num(*src as u64)?;
+                }
+                Op::Declare { dst, ty } => {
+                    self.text("declare")?;
+                    self.num(*dst as u64)?;
+                    self.text(&ty.word())?;
+                }
+                Op::Assign { dst, src } => {
+                    self.text("assign")?;
+                    self.num(*dst as u64)?;
+                    self.num(*src as u64)?;
+                }
+                Op::Vector { dst, element } => {
+                    self.text("vector")?;
+                    self.num(*dst as u64)?;
+                    self.text(&element.word())?;
+                }
+                Op::VectorPush { dst, owner, value } => {
+                    self.text("vector-push")?;
+                    self.num(*dst as u64)?;
+                    self.num(*owner as u64)?;
+                    self.num(*value as u64)?;
+                }
+                Op::VectorPop { dst, owner } => {
+                    self.text("vector-pop")?;
+                    self.num(*dst as u64)?;
+                    self.num(*owner as u64)?;
+                }
+                Op::VectorGet {
+                    dst,
+                    owner,
+                    index,
+                    mode,
+                } => {
+                    self.text("vector-get")?;
+                    self.num(*dst as u64)?;
+                    self.num(*owner as u64)?;
+                    self.num(*index as u64)?;
+                    self.mode(*mode)?;
+                }
                 Op::Ascribe { src, ty } => {
                     self.text("ascribe")?;
                     self.num(*src as u64)?;
@@ -86,11 +130,17 @@ impl Writer {
                     self.num(*src as u64)?;
                     self.num(*value as u64)?;
                 }
-                Op::Return(r) | Op::Unit(r) | Op::End(r) | Op::EndCaptures(r) | Op::Assert(r) => {
+                Op::Return(r)
+                | Op::Unit(r)
+                | Op::End(r)
+                | Op::EndIfLive(r)
+                | Op::EndCaptures(r)
+                | Op::Assert(r) => {
                     self.text(match op {
                         Op::Return(_) => "return",
                         Op::Unit(_) => "unit",
                         Op::End(_) => "end",
+                        Op::EndIfLive(_) => "end-if-live",
                         Op::EndCaptures(_) => "end-captures",
                         _ => "assert",
                     })?;
@@ -417,9 +467,42 @@ impl<'a> Reader<'a> {
                     value: self.reg()?,
                 },
 
+                "field-assign" => Op::FieldAssign {
+                    dst: self.reg()?,
+                    path: self.path()?,
+                    src: self.reg()?,
+                },
+                "declare" => Op::Declare {
+                    dst: self.reg()?,
+                    ty: self.ty()?,
+                },
+                "assign" => Op::Assign {
+                    dst: self.reg()?,
+                    src: self.reg()?,
+                },
+                "vector" => Op::Vector {
+                    dst: self.reg()?,
+                    element: self.ty()?,
+                },
+                "vector-push" => Op::VectorPush {
+                    dst: self.reg()?,
+                    owner: self.reg()?,
+                    value: self.reg()?,
+                },
+                "vector-pop" => Op::VectorPop {
+                    dst: self.reg()?,
+                    owner: self.reg()?,
+                },
+                "vector-get" => Op::VectorGet {
+                    dst: self.reg()?,
+                    owner: self.reg()?,
+                    index: self.reg()?,
+                    mode: self.mode()?,
+                },
                 "return" => Op::Return(self.reg()?),
                 "unit" => Op::Unit(self.reg()?),
                 "end" => Op::End(self.reg()?),
+                "end-if-live" => Op::EndIfLive(self.reg()?),
                 "end-captures" => Op::EndCaptures(self.reg()?),
                 "assert" => Op::Assert(self.reg()?),
                 "break" => Op::Break,
@@ -621,7 +704,7 @@ fn generic_names(ops: &[Op], out: &mut BTreeSet<String>) {
 }
 pub(crate) fn encode(p: &Checked) -> Result<Vec<u8>, String> {
     let mut w = Writer::default();
-    w.text("grail-seed-checked-ir-2")?;
+    w.text("grail-seed-checked-ir-3")?;
     w.num(p.type_parameters as u64)?;
     w.text(&p.function.sig.encode_bound(p.type_parameters)?)?;
     w.num(p.imports.len() as u64)?;
@@ -645,7 +728,7 @@ pub(crate) fn encode(p: &Checked) -> Result<Vec<u8>, String> {
 }
 pub(crate) fn decode(data: &[u8], layouts: types::Context) -> Result<Checked, String> {
     let mut r = Reader::new(data)?;
-    if r.text()? != "grail-seed-checked-ir-2" {
+    if r.text()? != "grail-seed-checked-ir-3" {
         return Err("invalid checked IR schema".into());
     }
     let parameters = r.count(64)? as u16;

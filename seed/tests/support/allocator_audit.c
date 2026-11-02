@@ -20,4 +20,7 @@ uint64_t g_live(void){return (uint64_t)live;}
 #ifndef GRAIL_AUDIT_PREVIOUS
 #define GRAIL_AUDIT_PREVIOUS 2
 #endif
-__attribute__((destructor)) static void check_leaks(void){if(live || previous!=GRAIL_AUDIT_PREVIOUS || last!=1)abort();}
+#ifndef GRAIL_AUDIT_ORDER
+#define GRAIL_AUDIT_ORDER 1
+#endif
+__attribute__((destructor)) static void check_leaks(void){if(live || (GRAIL_AUDIT_ORDER && (previous!=GRAIL_AUDIT_PREVIOUS || last!=1)))abort();}

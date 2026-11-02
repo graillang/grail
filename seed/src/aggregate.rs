@@ -4,6 +4,9 @@ impl Value {
     pub(super) fn at(&self, path: &[usize]) -> Result<&Self, String> {
         let mut v = self;
         for i in path {
+            if !v.initialized {
+                return Err("projection of possibly uninitialized storage".into());
+            }
             v = v
                 .fields
                 .get(*i)
@@ -31,6 +34,9 @@ impl Value {
 }
 impl State {
     pub(super) fn usable_value(&self, v: &Value) -> Result<(), String> {
+        if !v.initialized {
+            return Err("value/field is not initialized on every path".into());
+        }
         if !v.active || self.blocked.contains_key(&v.loan) {
             return Err("value/field expired or restricted by live child".into());
         }
@@ -107,8 +113,8 @@ impl State {
             BTreeSet::new()
         };
         let mut v = self.new_value(t.clone(), roots, BTreeSet::new());
-        if matches!(t, Ty::Named(..)) {
-            for (i, (_, field)) in types::fields(t, &self.layouts)?.iter().enumerate() {
+        if matches!(t, Ty::Named(..) | Ty::Vector(_)) {
+            for (i, (_, field)) in types::children(t, &self.layouts)?.iter().enumerate() {
                 path.push(i);
                 v.fields
                     .push(Some(self.parameter_value(field, input, path)?));
@@ -166,6 +172,68 @@ impl State {
         let mut out = self.new_value(Ty::View(mode, region), p.roots, ancestors);
         out.lives = vec![life];
         Ok(out)
+    }
+    pub(super) fn field_assign(
+        &mut self,
+        dst: Reg,
+        path: &[String],
+        src: Reg,
+    ) -> Result<(), String> {
+        if dst == src || path.is_empty() {
+            return Err("invalid field assignment".into());
+        }
+        let container = self.get(dst)?.clone();
+        if !container.initialized {
+            return Err("field assignment needs initialized outer storage".into());
+        }
+        let (indices, _) = types::project(&container.ty, path, &self.layouts)?;
+        let mut bound = witness::Instance::of(&container);
+        for i in &indices {
+            bound = bound
+                .fields(&self.layouts)?
+                .get(*i)
+                .cloned()
+                .ok_or("field lifetime bound")?;
+        }
+        let mut incoming = self.usable(src)?;
+        if self.owner_borrowed(&incoming) || self.place_borrowed(src, &[], incoming.ty.copy()) {
+            return Err("assignment moves borrowed field source".into());
+        }
+        self.coerce_value(&mut incoming, &bound)?;
+        if self.place_borrowed(dst, &indices, false) {
+            return Err("assignment to borrowed field".into());
+        }
+        let parent_path = &indices[..indices.len() - 1];
+        let last = *indices.last().unwrap();
+        let parent = container.at(parent_path)?;
+        if !parent.initialized {
+            return Err("field assignment needs initialized parent".into());
+        }
+        let old = parent.fields[last].clone();
+        if let Some(old) = &old {
+            self.index_remove(old);
+            let blocked = self.owner_borrowed(old)
+                || (old.ty.reference().is_some() && self.blocked.contains_key(&old.loan));
+            self.index_add(old);
+            if blocked {
+                return Err("replaced field still borrowed".into());
+            }
+        }
+        if !incoming.ty.copy() {
+            self.remove(src);
+        }
+        if let Some(old) = old {
+            self.index_remove(&old);
+            self.retire_targets(&old);
+        }
+        reference::rename_owned(&mut incoming, &Root::Local(dst, vec![]), &indices);
+        self.index_add(&incoming);
+        self.values
+            .get_mut(&dst)
+            .unwrap()
+            .at_mut(parent_path)?
+            .fields[last] = Some(incoming);
+        Ok(())
     }
     pub(super) fn field_move(&mut self, dst: Reg, src: Reg, path: &[String]) -> Result<(), String> {
         if path.is_empty() || dst == src {
@@ -334,8 +402,8 @@ impl State {
         }
         let mut v = self.new_value(t.clone(), roots, ancestors);
         v.targets = targets;
-        if matches!(t, Ty::Named(..)) {
-            for (i, (_, field)) in types::fields(t, &self.layouts)?.iter().enumerate() {
+        if matches!(t, Ty::Named(..) | Ty::Vector(_)) {
+            for (i, (_, field)) in types::children(t, &self.layouts)?.iter().enumerate() {
                 path.push(i);
                 v.fields
                     .push(Some(self.result_sources(field, dst, path, sources)?));
@@ -350,6 +418,7 @@ pub(super) fn compatible(a: &Ty, b: &Ty) -> bool {
         (Ty::Named(a, _, xs), Ty::Named(b, _, ys)) => {
             a == b && xs.len() == ys.len() && xs.iter().zip(ys).all(|(x, y)| compatible(x, y))
         }
+        (Ty::Vector(a), Ty::Vector(b)) => compatible(a, b),
         (Ty::Ref(a, _, x), Ty::Ref(b, _, y)) => a == b && compatible(x, y),
         (Ty::View(a, _), Ty::View(b, _)) | (Ty::Holder(a, _), Ty::Holder(b, _)) => a == b,
         _ => a == b,

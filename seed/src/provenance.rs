@@ -51,8 +51,8 @@ pub(crate) fn sources(t: &Ty, defs: &types::Definitions) -> Result<Vec<Source>, 
                 path.pop();
                 frames.pop();
             }
-            Ty::Named(..) => {
-                for (i, (_, field)) in types::fields(t, defs)?.iter().enumerate() {
+            Ty::Named(..) | Ty::Vector(_) => {
+                for (i, (_, field)) in types::children(t, defs)?.iter().enumerate() {
                     path.push(i);
                     walk(field, defs, path, frames, out, nodes)?;
                     path.pop();
@@ -156,8 +156,8 @@ impl Source {
             if crate::witness::formal_fits(t, want, inv, c, d)? {
                 out.push(path.clone());
             }
-            if matches!(t, Ty::Named(..)) && !types::is_enum(t, d)? {
-                for (i, (_, field)) in types::fields(t, d)?.iter().enumerate() {
+            if matches!(t, Ty::Named(..) | Ty::Vector(_)) && !types::is_enum(t, d)? {
+                for (i, (_, field)) in types::children(t, d)?.iter().enumerate() {
                     path.push(i);
                     walk(field, want, inv, context, path, out, nodes)?;
                     path.pop();

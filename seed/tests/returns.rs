@@ -17,6 +17,7 @@ fn terminated_branches_blocks_and_loop_paths_do_not_join() {
         "fn f(n:num)->bytes{let b=bytes();push(b,1);for i in n{if i{return b;}}return b;}",
         "module f;struct R{a:string,b:string}pub fn f(n:num)->string{let r=R{a:\"a\",b:\"b\"};if n{return r.a;}return r.b;}",
         "module f;struct R{a:string,b:string}pub fn f(n:num)->string{let r=R{a:\"a\",b:\"b\"};if n{let x=r.a;}else{let y=r.a;}return r.b;}",
+        "module f;struct R{a:string,b:string}pub fn f(n:num)->string{let r=R{a:\"a\",b:\"b\"};if n{let x=r.a;}return r.b;}",
         "fn f<a>(n:num,v:read<a>)->read<a>{if n{let b=bytes();push(b,1);return read(v);}return v;}",
     ] {
         let p = source::compile(s, std::collections::BTreeMap::new())
@@ -39,7 +40,6 @@ fn every_exit_checks_type_origin_and_cleanup_obligations() {
         "fn f<a,b>(n:num,v:read<a>,w:read<b>)->read<a>{if n{return w;}return v;}",
         "fn f(n:num)->bytes{let b=bytes();push(b,1);if n{drop(b);}return b;}",
         "fn f(n:num)->num{let b=bytes();push(b,1);while n{drop(b);}return 0;}",
-        "module f;struct R{a:string,b:string}pub fn f(n:num)->string{let r=R{a:\"a\",b:\"b\"};if n{let x=r.a;}return r.b;}",
         "module f;struct R{a:string,b:string}pub fn f(n:num)->R{let r=R{a:\"a\",b:\"b\"};if n{let x=r.a;}else{let y=r.a;}return r;}",
     ] {
         assert!(!accepted(s), "{s}");

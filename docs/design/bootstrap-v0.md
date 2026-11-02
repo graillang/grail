@@ -225,3 +225,10 @@ Option-pop / mixed-exit modules and a lexer mutating its cursor inside validatio
 independent controls and measured costs. Conditional ownership/partial initialization, addressed
 scalar joins, general heap collections, the real port and self-compilation/artifact delivery remain
 required. This is not completion of bootstrap v0.
+
+## Conditional ownership checkpoint
+
+[Initialization joins and guarded destruction](ownership-joins.md) now support conditional
+whole/partial moves and consume-then-break loops without double destruction. Possibly moved
+values cannot be used; untouched fields remain accessible. General heap collections, the real
+compiler port, stage-2/stage-3 and reproducible bootstrap delivery remain required.

@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Add generic owned `vec<T>` with push/pop/get and `std/collections.grl`; a trusted `host` module
+  (argc/arg, read_file, write_file, print, command) for compiler drivers; and the first Grail-written
+  compiler module, `compiler/lexer.grl`, returning borrowed tokens.
+
+- Join conditional owned bindings/fields with definite-use checking and guarded native cleanup.
+  Keep untouched fields usable, support consume-then-break exits, and reject repeated consumption.
+  Checked IR/template bundles advance to schema 3; native O0/O2 ASan/UBSan paths are covered.
+- Preserve all possible old captures when an opaque mutable reference can select multiple cells;
+  precise single-target replacement still releases old captures. Add alias regression and native checks.
+
 - Join retained local/external capture sources across branches and loop fixed points instead of
   requiring identical metadata. Recheck later iterations, separate break exits from backedges,
   preserve while-condition effects on zero-body paths, and normalize only dead temporary ancestry.

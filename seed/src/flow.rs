@@ -6,6 +6,7 @@ pub(super) struct LoopFrame {
     memory: BTreeMap<Root, Value>,
     defined: Vec<u64>,
     resources: BTreeSet<Reg>,
+    declared: BTreeSet<Reg>,
     live_loans: BTreeSet<usize>,
     backs: std::cell::RefCell<Option<State>>,
     breaks: std::cell::RefCell<Option<State>>,
@@ -16,7 +17,8 @@ impl State {
             values: self.values.clone(),
             memory: self.memory.clone(),
             defined: self.copy_defined.clone(),
-            resources: self.resources.clone(),
+            resources: self.resources.union(&self.declared).copied().collect(),
+            declared: self.declared.clone(),
             live_loans: self.live_loans(),
             backs: Default::default(),
             breaks: Default::default(),
@@ -87,11 +89,14 @@ impl State {
         }
     }
     fn loop_edge(mut self, frame: &LoopFrame) -> Result<Self, String> {
-        if self.resources != frame.resources || self.memory.keys().ne(frame.memory.keys()) {
+        if !self.resources.is_subset(&frame.resources) || self.memory.keys().ne(frame.memory.keys())
+        {
             return Err("loop exit changes retained resource initialization".into());
         }
         for (r, before) in &frame.values {
-            self.same_position(before, self.get(*r)?)?;
+            if let Some(after) = self.values.get(r) {
+                self.same_position(before, after)?;
+            }
         }
         for (p, before) in &frame.memory {
             self.same_position(before, &self.memory[p])?;
@@ -101,10 +106,14 @@ impl State {
                 return Err("loop exit loses entry scalar definition".into());
             }
         }
-        self.values.retain(|r, _| frame.values.contains_key(r));
+        self.values
+            .retain(|r, _| frame.values.contains_key(r) || frame.declared.contains(r));
+        self.declared = frame.declared.clone();
         // Non-reference IDs have no authority; canonicalize them to the retained storage position.
         for (r, value) in &mut self.values {
-            reference::retain_loans(value, &frame.values[r]);
+            if let Some(before) = frame.values.get(r) {
+                reference::retain_loans(value, before);
+            }
         }
         for (p, value) in &mut self.memory {
             reference::retain_loans(value, &frame.memory[p]);
@@ -202,24 +211,38 @@ impl State {
             (true, false) => *self = no,
             (false, true) => *self = yes,
             (false, false) => {
-                if yes.resources != no.resources || yes.memory.keys().ne(no.memory.keys()) {
-                    return Err("branch ownership states differ; conditional initialization/moves require a join".into());
+                if yes.memory.keys().ne(no.memory.keys()) {
+                    return Err("branch external storage states differ".into());
                 }
-                let mut changed = false;
                 for (p, value) in &mut yes.memory {
-                    changed |= self.join_value(value, &no.memory[p])?;
+                    self.join_value(value, &no.memory[p])?;
                 }
-                yes.values
-                    .retain(|r, v| !v.ty.copy() || no.values.contains_key(r));
-                for (r, value) in &mut yes.values {
-                    changed |= self.join_value(
-                        value,
-                        no.values.get(r).ok_or("branch loses retained storage")?,
-                    )?;
+                // Keep the may-initialized state for cleanup and loan safety, but expose only
+                // definitely initialized values to ordinary operations.
+                let keys = yes
+                    .values
+                    .keys()
+                    .chain(no.values.keys())
+                    .copied()
+                    .collect::<BTreeSet<_>>();
+                for r in keys {
+                    match (yes.values.get_mut(&r), no.values.get(&r)) {
+                        (Some(a), Some(b)) => {
+                            self.join_value(a, b)?;
+                        }
+                        (Some(a), None) => {
+                            a.initialized = false;
+                        }
+                        (None, Some(b)) => {
+                            let mut b = b.clone();
+                            b.initialized = false;
+                            yes.values.insert(r, b);
+                        }
+                        (None, None) => unreachable!(),
+                    }
                 }
-                if changed {
-                    yes.rebuild_indices();
-                }
+                yes.declared = yes.declared.intersection(&no.declared).copied().collect();
+                yes.rebuild_indices();
                 for (index, word) in yes.copy_defined.iter_mut().enumerate() {
                     *word &= no.copy_defined.get(index).copied().unwrap_or(0);
                 }
@@ -234,7 +257,6 @@ impl State {
             return Ok(());
         }
         if a.ty != b.ty
-            || a.active != b.active
             || a.fields.len() != b.fields.len()
             || (a.ty.reference().is_some() && a.loan != b.loan)
             || !self.instance_fits(&witness::Instance::of(a), &witness::Instance::of(b), true)?
@@ -248,27 +270,53 @@ impl State {
             match (a, b) {
                 (Some(a), Some(b)) => self.same_position(a, b)?,
                 (None, None) => (),
-                _ => return Err("control flow changes partial initialization".into()),
+                _ => (),
             }
         }
         Ok(())
     }
     fn join_value(&self, value: &mut Value, other: &Value) -> Result<bool, String> {
         self.same_position(value, other)?;
-        self.merge_value(value, other)
-    }
-    fn rebuild_indices(&mut self) {
-        if self.access.is_empty() && self.blocked.is_empty() && self.addressed.is_empty() {
-            // A merge may introduce reference roots into a previously empty index.
-            if self
-                .values
-                .values()
-                .chain(self.memory.values())
-                .all(|v| !has_reference(v))
-            {
-                return;
+        // Initialization is an intersection; capture roots and authority restrictions are unions.
+        let mut changed = false;
+        let initialized = value.initialized && other.initialized && value.active == other.active;
+        if value.initialized != initialized {
+            value.initialized = initialized;
+            changed = true;
+        }
+        if !value.active && other.active {
+            value.active = true;
+            changed = true;
+        }
+        let before = value.roots.len() + value.ancestors.len() + value.targets.len();
+        value.roots.extend(other.roots.clone());
+        value.ancestors.extend(other.ancestors.clone());
+        value.targets.extend(other.targets.clone());
+        if value.roots.len() > 4096 || value.ancestors.len() > 4096 || value.targets.len() > 4096 {
+            return Err("capture union expansion limit".into());
+        }
+        changed |= before != value.roots.len() + value.ancestors.len() + value.targets.len();
+        for (a, b) in value.fields.iter_mut().zip(&other.fields) {
+            match (a.as_mut(), b) {
+                (Some(a), Some(b)) => {
+                    changed |= self.join_value(a, b)?;
+                }
+                (Some(a), None) => {
+                    changed |= a.initialized;
+                    a.initialized = false;
+                }
+                (None, Some(b)) => {
+                    let mut b = b.clone();
+                    b.initialized = false;
+                    *a = Some(b);
+                    changed = true;
+                }
+                (None, None) => (),
             }
         }
+        Ok(changed)
+    }
+    fn rebuild_indices(&mut self) {
         self.access.clear();
         self.blocked.clear();
         self.addressed.clear();
@@ -372,10 +420,6 @@ impl State {
     }
 }
 
-fn has_reference(v: &Value) -> bool {
-    v.ty.reference().is_some() || v.fields.iter().flatten().any(has_reference)
-}
-
 pub(crate) fn terminates(ops: &[Op]) -> bool {
     match ops.last() {
         Some(Op::Return(_) | Op::Break | Op::Continue) => true,
@@ -391,6 +435,15 @@ pub(crate) fn terminates(ops: &[Op]) -> bool {
 pub(super) fn live_before(op: &Op, after: &BTreeSet<Reg>) -> BTreeSet<Reg> {
     let mut live = after.clone();
     let (defs, uses): (Vec<Reg>, Vec<Reg>) = match op {
+        Op::FieldAssign { dst, src, .. } => (vec![], vec![*dst, *src]),
+        Op::Declare { dst, .. } => (vec![*dst], vec![]),
+        Op::Assign { dst, src } => (vec![*dst], vec![*src]),
+        Op::Vector { dst, .. } => (vec![*dst], vec![]),
+        Op::VectorPush { dst, owner, value } => (vec![*dst], vec![*owner, *value]),
+        Op::VectorPop { dst, owner } => (vec![*dst], vec![*owner]),
+        Op::VectorGet {
+            dst, owner, index, ..
+        } => (vec![*dst], vec![*owner, *index]),
         Op::Ascribe { src, .. } => (vec![], vec![*src]),
         Op::Address { dst, src, .. } | Op::Load { dst, src } => (vec![*dst], vec![*src]),
         Op::Exchange { dst, src, value } => (vec![*dst], vec![*src, *value]),
@@ -435,7 +488,7 @@ pub(super) fn live_before(op: &Op, after: &BTreeSet<Reg>) -> BTreeSet<Reg> {
             start,
             end,
         } => (vec![*dst], vec![*src, *start, *end]),
-        Op::End(r) => (vec![*r], vec![*r]),
+        Op::End(r) | Op::EndIfLive(r) => (vec![*r], vec![*r]),
         Op::Assert(r) => (vec![], vec![*r]),
         Op::AppendText { owner, src } => (vec![], vec![*owner, *src]),
         Op::Push { owner, value } => (vec![], vec![*owner, *value]),
@@ -537,7 +590,13 @@ pub(crate) fn loop_jumps(ops: &[Op]) -> (bool, bool) {
 /// Register binding definitions (not End's liveness kill), shared with storage-scope accounting.
 pub(super) fn definitions(op: &Op) -> Vec<Reg> {
     match op {
-        Op::Address { dst, .. }
+        Op::Declare { dst, .. }
+        | Op::Assign { dst, .. }
+        | Op::Vector { dst, .. }
+        | Op::VectorPush { dst, .. }
+        | Op::VectorPop { dst, .. }
+        | Op::VectorGet { dst, .. }
+        | Op::Address { dst, .. }
         | Op::Load { dst, .. }
         | Op::Exchange { dst, .. }
         | Op::Variant { dst, .. }
@@ -560,7 +619,9 @@ pub(super) fn definitions(op: &Op) -> Vec<Reg> {
         | Op::Call { dst, .. }
         | Op::GenericCall { dst, .. } => vec![*dst],
         Op::Num(r, _) | Op::Unit(r) => vec![*r],
-        Op::Ascribe { .. }
+        Op::FieldAssign { .. }
+        | Op::Ascribe { .. }
+        | Op::EndIfLive(_)
         | Op::End(_)
         | Op::EndCaptures(_)
         | Op::Assert(_)

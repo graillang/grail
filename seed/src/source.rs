@@ -140,6 +140,13 @@ impl Parser<'_> {
     fn peek(&self) -> &str {
         self.tokens[self.at].text
     }
+    fn assignment_ahead(&self) -> bool {
+        let mut end = self.at + 1;
+        while self.tokens.get(end).is_some_and(|t| t.text == ".") {
+            end += 2;
+        }
+        self.tokens.get(end).is_some_and(|t| t.text == "=")
+    }
     fn eat(&mut self, s: &str) -> bool {
         if self.peek() == s {
             self.at += 1;
@@ -380,6 +387,12 @@ impl Parser<'_> {
             return Ok(Ty::Param(*i));
         }
         let (rs, args) = self.type_arguments(depth)?;
+        if name == "vec" {
+            if !rs.is_empty() || args.len() != 1 {
+                return Err(self.error("vec needs one element type"));
+            }
+            return Ok(Ty::Vector(Box::new(args[0].clone())));
+        }
         if matches!(name.as_str(), "ref" | "ref_mut") {
             if rs.len() != 1 || args.len() != 1 {
                 return Err(self.error("typed reference needs one lifetime and one type"));
@@ -632,14 +645,29 @@ impl Parser<'_> {
                     }
                     function_args = Some(args.clone());
                 }
-                let arity = if function_args.is_some() {
+                let vector_element = if name == "vec" {
+                    let types = function_args
+                        .take()
+                        .ok_or_else(|| self.error("vec needs one element type"))?;
+                    if types.len() != 1 {
+                        return Err(self.error("vec needs one element type"));
+                    }
+                    Some(types[0].clone())
+                } else {
+                    None
+                };
+                let arity = if vector_element.is_some() {
+                    Some(0)
+                } else if function_args.is_some() {
                     None
                 } else {
                     match name.as_str() {
                         "bytes" => Some(0),
                         "read" | "mut" | "hold" | "len" | "copy_bytes" | "text" | "borrow"
                         | "borrow_mut" | "load" => Some(1),
-                        "exchange" => Some(2),
+                        "exchange" | "vec_push" => Some(2),
+                        "vec_pop" => Some(1),
+                        "vec_get" | "vec_get_mut" => Some(2),
                         "at" => Some(2),
                         "slice" => Some(3),
                         _ => None,
@@ -650,7 +678,17 @@ impl Parser<'_> {
                         let storage = args.is_empty()
                             && matches!(
                                 name.as_str(),
-                                "read" | "mut" | "len" | "at" | "slice" | "copy_bytes" | "text"
+                                "read"
+                                    | "mut"
+                                    | "len"
+                                    | "at"
+                                    | "slice"
+                                    | "copy_bytes"
+                                    | "text"
+                                    | "vec_push"
+                                    | "vec_pop"
+                                    | "vec_get"
+                                    | "vec_get_mut"
                             );
                         let value = if matches!(name.as_str(), "borrow" | "borrow_mut") {
                             let n = self.ident()?;
@@ -678,7 +716,7 @@ impl Parser<'_> {
                         } else if storage {
                             self.storage_expr(
                                 ops,
-                                if name == "mut" {
+                                if matches!(name.as_str(), "mut" | "vec_push" | "vec_pop" | "vec_get_mut") {
                                     Mode::Write
                                 } else {
                                     Mode::Read
@@ -708,7 +746,9 @@ impl Parser<'_> {
                 if arity.is_some_and(|n| n != args.len()) {
                     return Err(self.error("builtin arity"));
                 }
-                ops.push(if let Some(type_args) = function_args {
+                ops.push(if let Some(element) = vector_element {
+                    Op::Vector { dst: r, element }
+                } else if let Some(type_args) = function_args {
                     Op::GenericCall {
                         dst: r,
                         name,
@@ -720,6 +760,25 @@ impl Parser<'_> {
                         "borrow" | "borrow_mut" => Op::Move {
                             dst: r,
                             src: args[0],
+                        },
+                        "vec_push" => Op::VectorPush {
+                            dst: r,
+                            owner: args[0],
+                            value: args[1],
+                        },
+                        "vec_pop" => Op::VectorPop {
+                            dst: r,
+                            owner: args[0],
+                        },
+                        "vec_get" | "vec_get_mut" => Op::VectorGet {
+                            dst: r,
+                            owner: args[0],
+                            index: args[1],
+                            mode: if name == "vec_get_mut" {
+                                Mode::Write
+                            } else {
+                                Mode::Read
+                            },
                         },
                         "load" => Op::Load {
                             dst: r,
@@ -887,6 +946,17 @@ impl Parser<'_> {
                     self.expect("let")?;
                 }
                 let name = self.ident()?;
+                if self.eat(":") {
+                    if !mutable {
+                        return Err(self.error("uninitialized declarations require var"));
+                    }
+                    let ty = self.ty()?;
+                    self.expect(";")?;
+                    let dst = self.fresh()?;
+                    ops.push(Op::Declare { dst, ty });
+                    self.bind(name, dst, true);
+                    continue;
+                }
                 self.expect("=")?;
                 let value = if self.eat("buffer") {
                     self.expect("(")?;
@@ -1037,7 +1107,7 @@ impl Parser<'_> {
                 self.expect(")")?;
                 self.expect(";")?;
                 ops.push(Op::Assert(r));
-            } else if self.tokens.get(self.at + 1).is_some_and(|t| t.text == "=") {
+            } else if self.assignment_ahead() {
                 let name = self.ident()?;
                 let b = self
                     .vars
@@ -1047,11 +1117,21 @@ impl Parser<'_> {
                 if !b.mutable {
                     return Err(self.error("assignment requires var"));
                 }
+                let mut path = Vec::new();
+                while self.eat(".") {
+                    path.push(self.ident()?);
+                }
                 self.expect("=")?;
                 let src = self.expr(&mut ops, 0, 0)?;
                 self.expect(";")?;
-                if src != b.reg {
-                    ops.push(Op::Move { dst: b.reg, src });
+                if !path.is_empty() {
+                    ops.push(Op::FieldAssign {
+                        dst: b.reg,
+                        path,
+                        src,
+                    });
+                } else if src != b.reg {
+                    ops.push(Op::Assign { dst: b.reg, src });
                 }
             } else {
                 let mut expression = Vec::new();
@@ -1387,8 +1467,8 @@ fn clean(state: &mut State, live: &BTreeSet<Reg>, protected: &BTreeSet<Reg>, ops
             .collect::<Vec<_>>();
         let mut changed = false;
         for r in candidates {
-            if state.end(r).is_ok() {
-                ops.push(Op::End(r));
+            if state.end_if_live(r).is_ok() {
+                ops.push(Op::EndIfLive(r));
                 changed = true
             }
         }
@@ -1443,8 +1523,8 @@ fn ending(
                 .copied()
                 .collect::<Vec<_>>();
             for r in owners {
-                state.end(r)?;
-                result.push(Op::End(r));
+                state.end_if_live(r)?;
+                result.push(Op::EndIfLive(r));
             }
             state.ops(std::slice::from_ref(op), imports, 0)?;
             result.push(op.clone());
@@ -1460,8 +1540,8 @@ fn ending(
                 .copied()
                 .collect::<Vec<_>>();
             for owner in owners {
-                state.end(owner)?;
-                result.push(Op::End(owner));
+                state.end_if_live(owner)?;
+                result.push(Op::EndIfLive(owner));
             }
             state.ops(std::slice::from_ref(op), imports, 0)?;
             result.push(op.clone());
@@ -1469,10 +1549,14 @@ fn ending(
         }
         if let Op::Block { body } = op {
             // Unconditional execution: keep its actual effects, without cloning or replaying state.
-            let entry = state.resources.clone();
+            let entry = state
+                .resources
+                .union(&state.declared)
+                .copied()
+                .collect::<BTreeSet<_>>();
             let owners = entry
                 .iter()
-                .filter(|r| state.values[r].ty.owned())
+                .filter(|r| state.values.get(r).is_none_or(|v| v.ty.owned()))
                 .copied()
                 .collect();
             let body = ending(body, state, imports, &after, &owners)?;
@@ -1490,7 +1574,11 @@ fn ending(
             op,
             Op::Loop { .. } | Op::If { .. } | Op::While { .. } | Op::Match { .. }
         ) {
-            protected.union(&state.resources).copied().collect()
+            protected
+                .union(&state.resources)
+                .chain(&state.declared)
+                .copied()
+                .collect()
         } else {
             BTreeSet::new()
         };
@@ -1581,8 +1669,8 @@ fn ending(
         .copied()
         .collect::<Vec<_>>();
     for r in owners {
-        state.end(r)?;
-        result.push(Op::End(r));
+        state.end_if_live(r)?;
+        result.push(Op::EndIfLive(r));
     }
     Ok(result)
 }
