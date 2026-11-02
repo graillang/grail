@@ -267,6 +267,151 @@ fn independent_native_backend_selfhosts_and_matches_seed() {
         );
         assert_eq!(fs::read(output).unwrap(), b"prior valid artifact");
     }
+    run(seed()
+        .arg("build")
+        .arg(root.join("compiler/tests/borrows.grl"))
+        .arg(&w)
+        .arg(&w));
+    assert_eq!(run(&mut Command::new(w.join("borrows"))).stdout, b"4242\n");
+    let borrows = assemble(&w, &compiler, &[root.join("compiler/tests/borrows.grl")]);
+    assert_eq!(run(&mut Command::new(borrows)).stdout, b"4242\n");
+    let unsafe_sources: &[(&str, &str)] = &[
+        (
+            "pub fn run()->num{let b=bytes();let r=read(b);drop(b);return len(r);}",
+            "drop",
+        ),
+        (
+            "pub fn run()->num{let b=bytes();let r=read(b);push(b,1);return len(r);}",
+            "borrow",
+        ),
+        (
+            "pub fn run()->num{let v=vec<num>();vec_push(v,1);let r=vec_get(v,0);vec_push(v,2);return load(r);}",
+            "borrow",
+        ),
+        (
+            "pub fn run()->num{let b=bytes();push(b,0);let r=read(b);write(r,0,7);return 0;}",
+            "mutable byte view",
+        ),
+        (
+            "pub fn run()->num{var n=1;let r=borrow(n);exchange(r,2);return n;}",
+            "readonly",
+        ),
+        (
+            "pub fn run()->num{var n=1;let r=borrow_mut(n);let q=borrow(n);return load(r)+load(q);}",
+            "borrow",
+        ),
+        (
+            "fn bad<a>()->read<a>{let b=bytes();return read(b);}pub fn run()->num{return 0;}",
+            "escapes",
+        ),
+        (
+            "fn bad<a>()->ref<a,num>{var n=7;return borrow(n);}pub fn run()->num{return 0;}",
+            "escapes",
+        ),
+        (
+            "fn bad<a,b>(x:read<a>)->read<b>{return x;}pub fn run()->num{return 0;}",
+            "escapes",
+        ),
+        (
+            "struct R<a>{s:read<a>}fn bad<a>()->R<a>{let b=bytes();return R{s:read(b)};}pub fn run()->num{return 0;}",
+            "escapes",
+        ),
+        (
+            "struct R<a>{s:read<a>}fn bad<a>()->vec<R<a>>{let b=bytes();let v=vec<R<a>>();vec_push(v,R{s:read(b)});return v;}pub fn run()->num{return 0;}",
+            "escapes",
+        ),
+        (
+            "struct R<a>{s:read<a>}pub fn run()->num{let b=bytes();let r=R{s:read(b)};drop(b);return len(r.s);}",
+            "drop",
+        ),
+        (
+            "pub fn run<a>()->num{let v=vec<read<a>>();{let b=bytes();vec_push(v,read(b));}return len(v);}",
+            "cleanup",
+        ),
+        (
+            "struct R{b:bytes}pub fn run()->num{var r=R{b:bytes()};let v=read(r.b);r.b=bytes();return len(v);}",
+            "borrow",
+        ),
+        (
+            "struct P<a>{s:mut<a>}pub fn run()->num{let b=bytes();let p=P{s:mut(b)};let q=read(p.s);let other=p;return len(q);}",
+            "suspended",
+        ),
+        (
+            "struct P<a>{s:mut<a>}fn peek<o,d>(p:ref<o,P<d>>)->num{return at(read(p.s),0);}pub fn run()->num{let b=bytes();push(b,1);let p=P{s:mut(b)};let q=mut(p.s);let r=borrow(p);let n=peek(r);write(q,0,2);return n;}",
+            "suspended",
+        ),
+        (
+            "fn freeze<a>(r:ref_mut<a,bytes>)->ref<a,bytes>{return borrow(r);}pub fn run()->num{var b=bytes();let r=freeze(borrow_mut(b));push(r,1);return 0;}",
+            "readonly",
+        ),
+        (
+            "struct I{n:num}struct O{left:I,right:I}fn choose<a>(r:ref<a,O>)->ref<a,I>{return borrow(r.right);}pub fn run()->num{var p=O{left:I{n:1},right:I{n:2}};let r=choose(borrow(p));let c=borrow(r.n);drop(r);p.right=I{n:8};return load(c);}",
+            "borrow",
+        ),
+        (
+            "fn bad<a,b,c>(v:ref_mut<a,vec<read<b>>>,r:read<c>)->unit{vec_push(v,r);return ();}pub fn run()->num{return 0;}",
+            "writeback",
+        ),
+        (
+            "pub fn run()->num{var b=bytes();exchange(borrow_mut(b),1);return len(b);}",
+            "type mismatch",
+        ),
+        (
+            "struct R{b:bytes}pub fn run()->num{let r=R{};return 0;}",
+            "omits fields",
+        ),
+        (
+            "struct R{b:bytes}pub fn run()->num{let r=R{b:bytes(),b:bytes()};return 0;}",
+            "duplicate",
+        ),
+        (
+            "enum E{A(num),B(num),C(bytes)}pub fn run()->num{let e=E{A:2,B:1,C:bytes()};return 0;}",
+            "variant constructor",
+        ),
+        (
+            "struct R{a:bytes,b:num}pub fn run()->num{let r=R::b(1);return 0;}",
+            "requires enum",
+        ),
+        (
+            "enum E{Some(bytes),None}pub fn run()->num{let e=E::Some(bytes());return len(e.Some);}",
+            "requires match",
+        ),
+        (
+            "struct R{x:num,y:num}pub fn run()->num{return 1!;}",
+            "requires enum",
+        ),
+        ("pub fn run()->num{return load(1);}", "typed reference"),
+        (
+            "struct R{n:num}pub fn run()->num{let r=R{n:7};return len(read(r.n));}",
+            "requires sequence",
+        ),
+        ("pub fn run()->num{var n:num;return n;}", "initialized"),
+        ("pub fn run()->num{let n=1;n=2;return n;}", "requires var"),
+        ("pub fn run()->num{let n=1;}", "fall through"),
+        (
+            "fn addr<a>(r:ref<a,read<a>>)->ref<a,read<a>>{return r;}fn bad<a>()->read<a>{let b=bytes();let v=read(b);return load(addr(borrow(v)));}pub fn run()->num{return 0;}",
+            "escapes",
+        ),
+    ];
+    for (source, diagnostic) in unsafe_sources {
+        let input = w.join("unsafe_source.grl");
+        fs::write(&input, format!("module unsafe_source;{source}")).unwrap();
+        let output = w.join("unsafe_source.s");
+        fs::write(&output, b"prior valid artifact").unwrap();
+        let result = Command::new(&compiler)
+            .arg(&output)
+            .arg(input)
+            .arg(root_runtime())
+            .output()
+            .unwrap();
+        assert!(!result.status.success(), "accepted: {source}");
+        assert!(
+            String::from_utf8_lossy(&result.stdout).contains(diagnostic),
+            "wrong rejection for {source}: {}",
+            String::from_utf8_lossy(&result.stdout)
+        );
+        assert_eq!(fs::read(output).unwrap(), b"prior valid artifact");
+    }
     // Execute binary I/O, argv, malformed paths and process status on the Grail runtime.
     let exe = assemble(
         &w,

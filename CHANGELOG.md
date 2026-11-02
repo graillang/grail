@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Connect native source-level loan/lifetime enforcement: reject live-borrow moves/growth/writes,
+  escaping locals and captures, lifetime laundering, suspended unique carriers and malformed
+  aggregate/reference operations. Retain concrete lifetime guards across opaque calls and copies;
+  end loans at lexical last uses without confusing shadows, field names or loop iterations.
+- Add positive seed/native borrow conformance and adversarial rejection cases, including opaque
+  interior-reference returns and descriptor-copy provenance. Native stages reproduce exactly and
+  normal exits require zero live allocations. Captured-storage writeback and generics remain open.
+- Return large allocation arenas to the OS immediately; verify unmapping with `mincore` in the
+  Grail runtime audit. Validate UTF-8 text construction/appending in the Grail runtime.
+
 - Preserve native lifetime arguments and reference mutability; add type-shape checks and a
   Grail ownership graph with field-sensitive moves, loan authority and conservative joins.
   Wire move/initialization checks into source compilation, rejecting moved/uninitialized values,

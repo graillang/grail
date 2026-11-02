@@ -54,8 +54,10 @@ build `native`), or compile both Grail modules with the existing C bootstrap.
   load/store/byte, mapping, process-state and syscall intrinsics. Ordinary modules cannot invoke
   raw intrinsics. This is the trusted runtime boundary, not proof of runtime memory safety.
 - The allocator caches mapped arenas, reuses freed blocks by size class, checks double-free state,
-  counts live allocations, and unmaps arenas at shutdown. `runtime_audit.grl` checks reuse and a
-  balanced live count after 1,000 allocation/descriptor/free cycles and command execution.
+  counts live allocations, immediately unmaps single-object large arenas, and unmaps cached slabs
+  at shutdown. `runtime_audit.grl` checks reuse and a
+  balanced live count after 1,000 allocation/descriptor/free cycles and command execution. `mincore` also verifies that freeing a large allocation really removes
+  its mapping.
 
 ## Ownership and cleanup checkpoint
 
@@ -70,13 +72,20 @@ enum payloads and vector elements; moves clear source flags/fields. Lexical exit
 cleanup and numeric printing, before unmapping cached arenas. This check runs during native
 self-compilation as well as application tests. Abort paths do not unwind.
 
-**Not v1 yet:** source-level loan and return-lifetime enforcement is **not fully connected** to the
-frontend. A passing move check or zero allocation count is not a borrow-safety proof; continue to
-check programs with the Rust seed. There are also no general generic functions/types other than
-`vec<T>`, no implicit modules, no portable targets or optimizer. This is the shortest independent
-native-codegen path to the existing self-hosting subset, not a safety or performance claim.
-Inputs should still be checked by the Rust seed. The C backend remains available as a bootstrap
-and cross-check, not as an intermediate in this native path.
+Source-level loans and return-lifetime checks are now connected: live shared/unique borrows
+exclude conflicting moves and writes; last-use ending respects lexical scopes, shadows and loop
+backedges. Lifetime guards retain captured origins separately from access capabilities. Opaque
+reference returns conservatively retain whole input frames, so interior projections cannot free or
+replace a still-borrowed object. Unsafe programs fail before replacing an existing output file.
+
+**Remaining work:** invariant replacement of reference-containing storage is currently rejected,
+not silently accepted, and generic functions/types beyond `vec<T>` are not implemented yet.
+Those are active delivery tasks. The checker is conservative and not a soundness proof or full
+Rust-seed parity. Inputs involving the explicitly unsafe runtime remain trusted.
+
+There is no optimizer, portable target, or implicit-module support. Panic/failed assertions abort
+without unwinding. Older C bootstrap files remain only as an independent recovery/cross-check route;
+the native build does not use them.
 
 ## Verification and artifact regeneration
 

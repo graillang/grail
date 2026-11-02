@@ -61,7 +61,17 @@ fn rt_free(ptr:num)->num {
     if ptr==0 { return 0; }
     let state=raw_state(); let block=ptr-16;
     if raw_load(block+8)!=1 { rt_abort(); }
-    let size=raw_load(block); var n=32; var bin=0;
+    let size=raw_load(block);
+    // Classes of at least 512 KiB occupy their own arena. Return those mappings to the OS
+    // immediately; smaller freed objects remain reusable in the segregated slab caches.
+    if (size<524288)==0 {
+        let arena=ptr-32; var link=state+32;
+        while raw_load(link)!=arena { let next=raw_load(link); if next==0 { rt_abort(); } link=next; }
+        let length=raw_load(arena+8); raw_store(link,raw_load(arena));
+        raw_store(state+24,raw_load(state+24)-1);
+        let err=raw_syscall(11,arena,length,0); if rt_error(err) { rt_abort(); } return 0;
+    }
+    var n=32; var bin=0;
     while n<size { n=n*2; bin=bin+1; }
     let head=state+256+bin*8;
     raw_store(block+8,raw_load(head)); raw_store(head,block);
@@ -258,3 +268,28 @@ fn f_host_command(args:num)->num {
     i=0; while i<n { rt_drop_seq(rt_at(args,i)); i=i+1; } rt_drop_seq(args);
     return result;
 }
+// Text is UTF-8 even when its source is binary I/O or a byte view.
+fn rt_utf8(s:num)->num {
+    let n=rt_len(s);var i=0;
+    while i<n{
+        let b=rt_at(s,i);var count=0;
+        if b<128{i=i+1;continue;}
+        if (193<b)&(b<224){count=2;}
+        if (223<b)&(b<240){count=3;}
+        if (239<b)&(b<245){count=4;}
+        if (count==0)+(n<i+count){rt_abort();}
+        let second=rt_at(s,i+1);
+        if (second<128)+(191<second){rt_abort();}
+        if (b==224)&(second<160){rt_abort();}
+        if (b==237)&(159<second){rt_abort();}
+        if (b==240)&(second<144){rt_abort();}
+        if (b==244)&(143<second){rt_abort();}
+        var j=2;
+        while j<count{let next=rt_at(s,i+j);if (next<128)+(191<next){rt_abort();}j=j+1;}
+        i=i+count;
+    }
+    return 0;
+}
+fn rt_text(s:num)->num {rt_utf8(s);return rt_copy(s);}
+fn rt_string_lit(ptr:num,n:num)->num {let s=rt_lit(ptr,n);rt_utf8(s);return s;}
+fn rt_append_text(dst:num,src:num)->num {rt_utf8(src);return rt_append(dst,src);}
