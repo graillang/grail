@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Reach bootstrap v0: `compiler/grailc.grl`, a Grail-written compiler to C, is built by the seed
+  and reproduces itself byte for byte (stage 2 = stage 3). Commit the stage-2 output as
+  `compiler/bootstrap/grailc.c` with its runtime `compiler/grail_rt.c`, and check both plus
+  seed-equivalent behaviour on examples in `bootstrap_native`. `grailc` does not check ownership.
+- Fix seed liveness across `break`/`continue`: values read after a loop are no longer pruned when
+  later body statements reassign them. Checker errors now include the function and register.
+
 - Add generic owned `vec<T>` with push/pop/get and `std/collections.grl`; a trusted `host` module
   (argc/arg, read_file, write_file, print, command) for compiler drivers; and the first Grail-written
   compiler module, `compiler/lexer.grl`, returning borrowed tokens.

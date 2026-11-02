@@ -142,3 +142,17 @@ fn raw_jumps_validate_frames_even_when_all_branch_paths_terminate() {
         4
     ));
 }
+#[test]
+fn loop_exits_keep_values_that_are_reassigned_later_in_the_body() {
+    // A `break` leaves the body: values read after the loop stay live at the jump even when
+    // the rest of the body would reassign them first. Likewise for `continue` and the head.
+    for s in [
+        "fn f()->num{var ty=0;var t=0;while 1{if t==3{break;}ty=0;t=t+1;}return ty;}",
+        "fn f()->num{var t=0;var ty=0;while 1{if t==3{break;}t=t+1;ty=t;}return t+ty;}",
+        "fn f(n:num)->num{var last=7;for i in n{if i==2{break;}last=i;}return last;}",
+        "fn f(n:num)->num{var i=0;var seen=0;while i<n{i=i+1;if i==2{continue;}seen=i;}return seen;}",
+    ] {
+        let p = source::compile(s, BTreeMap::new()).unwrap_or_else(|e| panic!("{s}\n{e}"));
+        emit::module_c(&p).unwrap();
+    }
+}

@@ -389,7 +389,10 @@ impl State {
                 live.extend(inner.scalars());
                 live
             });
-            inner.ops_inner(body, imports, depth, live.as_ref())?;
+            match &live {
+                Some(l) => in_loop_body(l, || inner.ops_inner(body, imports, depth, Some(l)))?,
+                None => inner.ops_inner(body, imports, depth, None)?,
+            }
             next = next.max(inner.next);
             if !inner.terminated {
                 let edge = inner.loop_edge(&frame)?;
@@ -432,6 +435,19 @@ pub(crate) fn terminates(ops: &[Op]) -> bool {
     }
 }
 
+thread_local! {
+    /// Live-out sets of the enclosing loop bodies being analysed. A `break` or `continue`
+    /// leaves its block, so it keeps everything the innermost loop body keeps live on exit
+    /// (which covers both the loop exit and the next iteration), not the rest of its block.
+    static JUMP_LIVE: std::cell::RefCell<Vec<BTreeSet<Reg>>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+/// Runs `f` with `live` as the target liveness of `break`/`continue` in a loop body.
+pub(super) fn in_loop_body<T>(live: &BTreeSet<Reg>, f: impl FnOnce() -> T) -> T {
+    JUMP_LIVE.with(|s| s.borrow_mut().push(live.clone()));
+    let result = f();
+    JUMP_LIVE.with(|s| s.borrow_mut().pop());
+    result
+}
 pub(super) fn live_before(op: &Op, after: &BTreeSet<Reg>) -> BTreeSet<Reg> {
     let mut live = after.clone();
     let (defs, uses): (Vec<Reg>, Vec<Reg>) = match op {
@@ -448,7 +464,14 @@ pub(super) fn live_before(op: &Op, after: &BTreeSet<Reg>) -> BTreeSet<Reg> {
         Op::Address { dst, src, .. } | Op::Load { dst, src } => (vec![*dst], vec![*src]),
         Op::Exchange { dst, src, value } => (vec![*dst], vec![*src, *value]),
         Op::Return(r) => return BTreeSet::from([*r]),
-        Op::Break | Op::Continue => return live,
+        Op::Break | Op::Continue => {
+            JUMP_LIVE.with(|s| {
+                if let Some(target) = s.borrow().last() {
+                    live.extend(target);
+                }
+            });
+            return live;
+        }
         Op::Unit(r) => (vec![*r], vec![]),
         Op::Variant { dst, payload, .. } => (vec![*dst], payload.iter().copied().collect()),
         Op::Unwrap { dst, src } => (vec![*dst], vec![*src]),
@@ -513,7 +536,7 @@ pub(super) fn live_before(op: &Op, after: &BTreeSet<Reg>) -> BTreeSet<Reg> {
             body,
         } => {
             loop {
-                let mut exit = before(body, &live);
+                let mut exit = in_loop_body(&live, || before(body, &live));
                 exit.extend(after);
                 exit.insert(*condition);
                 let mut next = live.clone();
@@ -528,7 +551,7 @@ pub(super) fn live_before(op: &Op, after: &BTreeSet<Reg>) -> BTreeSet<Reg> {
         Op::Loop { index, end, body } => {
             loop {
                 let mut next = live.clone();
-                next.extend(before(body, &live));
+                next.extend(in_loop_body(&live, || before(body, &live)));
                 next.remove(index);
                 if next == live {
                     break;

@@ -232,3 +232,16 @@ required. This is not completion of bootstrap v0.
 whole/partial moves and consume-then-break loops without double destruction. Possibly moved
 values cannot be used; untouched fields remain accessible. General heap collections, the real
 compiler port, stage-2/stage-3 and reproducible bootstrap delivery remain required.
+
+## Self-hosting checkpoint (bootstrap v0 reached)
+
+[`compiler/grailc.grl`](../../compiler/README.md) is a Grail compiler written in Grail. The seed
+checks and builds it (stage 1); it compiles itself to C (stage 2), and that compiler's output
+(stage 3) is byte-identical. The stage-2 C is committed as `compiler/bootstrap/grailc.c` and
+rebuilds the compiler with only a C compiler. `seed/tests/bootstrap_native.rs` checks all of this
+and compares seed-built and grailc-built example programs. Deliberate v0 shortcut: `grailc` does
+not check ownership, uses uniform one-word values and never frees; the seed remains the only
+checker. Porting the checker and restoring measurements are the next steps, not v0 gates.
+Writing the port exposed and fixed a seed liveness bug: `break`/`continue` now keep the loop
+body's live-out set, so a value read after a loop is not pruned when the rest of the body would
+reassign it. Checker errors now name the function and register.

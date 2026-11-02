@@ -3,7 +3,8 @@
 A programming-language research project. Source files use **`.grl`**.
 
 We are evaluating the foundations with a [narrow source-to-native Rust seed](seed/README.md), not building
-a full compiler yet.
+a full compiler yet. Bootstrap v0 is reached: a [Grail-written compiler](compiler/README.md),
+built by the seed, reproduces itself byte for byte (it does not yet check ownership itself).
 The ambition is a small, practical systems language with fast builds, deterministic
 memory management, explicit effects, and independently checkable correctness evidence.
 Initial [seed measurements](docs/design/seed-measurements.md) cover a restricted typed IR,
@@ -12,6 +13,7 @@ not full-language performance or safety.
 ## Living design record
 
 - [Bootstrap v0 decisions and implemented source subset](docs/design/bootstrap-v0.md)
+- [Self-hosted compiler and bootstrap artifact](compiler/README.md)
 
 - [Argument evaluation and call activation](docs/design/call-activation-boundary.md)
 - [Lifetime roots and exclusive-access authority](docs/design/authority-boundary.md)

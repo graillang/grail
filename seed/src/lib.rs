@@ -436,7 +436,7 @@ impl State {
         if self.place_borrowed(r, &[], true) {
             return Err("read of exclusively borrowed storage".into());
         }
-        self.usable_value(v)?;
+        self.usable_value(v).map_err(|e| format!("r{r}: {e}"))?;
         Ok(v.clone())
     }
     fn put(&mut self, r: Reg, mut v: Value) -> Result<(), String> {

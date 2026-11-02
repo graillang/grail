@@ -1325,55 +1325,20 @@ pub fn compile(
     let mut checked = Vec::new();
     let mut bodies = Vec::new();
     let has_templates = functions.iter().any(|(_, _, n)| *n > 0);
-    for (mut f, public, parameters) in functions {
-        let mut names = BTreeSet::new();
-        let mut generic_names = BTreeSet::new();
-        resolve_calls(
-            &mut f.ops,
+    for (f, public, parameters) in functions {
+        let label = f.sig.name.clone();
+        let (body, public, parameters) = check_function(
+            f,
+            public,
+            parameters,
             &callable,
             &generic_callable,
-            &mut names,
-            &mut generic_names,
-        )?;
-        let mut imports = BTreeMap::new();
-        for n in names {
-            if n != f.sig.name {
-                imports.insert(n.clone(), callable[&n].clone());
-            }
-        }
-        let generics = generic_names
-            .iter()
-            .map(|n| (n.clone(), generic_callable[n].clone()))
-            .collect::<BTreeMap<_, _>>();
-        for n in &generic_names {
-            let (module, _) = n
-                .split_once("::")
-                .ok_or("generic function needs qualified module name")?;
-            if module != name
-                && let Some(h) = available.get(module).and_then(|h| h.template_hash.clone())
-            {
-                header.implementations.insert(module.into(), h);
-            }
-        }
-        let mut available_calls = imports.clone();
-        available_calls.insert(f.sig.name.clone(), f.sig.clone());
-        let mut state = State::parameters_bound(&f.sig, layouts.clone(), parameters)?;
-        state.generics = std::sync::Arc::new(generics.clone());
-        state.install_scopes(&f.ops)?;
-        let ops = ending(
-            &f.ops,
-            &mut state,
-            &available_calls,
-            &BTreeSet::new(),
-            &BTreeSet::new(),
-        )?;
-        let body = crate::check_bound(
-            Function { ops, ..f },
-            imports,
-            layouts.clone(),
-            parameters,
-            generics,
-        )?;
+            &available,
+            &name,
+            &mut header,
+            &layouts,
+        )
+        .map_err(|e| format!("fn {label}: {e}"))?;
         if parameters > 0 {
             bodies.push(body);
         } else {
@@ -1402,6 +1367,68 @@ pub fn compile(
         header,
         bundle,
     })
+}
+#[allow(clippy::too_many_arguments)]
+fn check_function(
+    mut f: Function,
+    public: bool,
+    parameters: u16,
+    callable: &BTreeMap<String, Sig>,
+    generic_callable: &BTreeMap<String, crate::template::Signature>,
+    available: &BTreeMap<String, crate::module::Interface>,
+    name: &str,
+    header: &mut crate::module::Interface,
+    layouts: &crate::types::Context,
+) -> Result<(crate::Checked, bool, u16), String> {
+    let mut names = BTreeSet::new();
+    let mut generic_names = BTreeSet::new();
+    resolve_calls(
+        &mut f.ops,
+        callable,
+        generic_callable,
+        &mut names,
+        &mut generic_names,
+    )?;
+    let mut imports = BTreeMap::new();
+    for n in names {
+        if n != f.sig.name {
+            imports.insert(n.clone(), callable[&n].clone());
+        }
+    }
+    let generics = generic_names
+        .iter()
+        .map(|n| (n.clone(), generic_callable[n].clone()))
+        .collect::<BTreeMap<_, _>>();
+    for n in &generic_names {
+        let (module, _) = n
+            .split_once("::")
+            .ok_or("generic function needs qualified module name")?;
+        if module != name
+            && let Some(h) = available.get(module).and_then(|h| h.template_hash.clone())
+        {
+            header.implementations.insert(module.into(), h);
+        }
+    }
+    let mut available_calls = imports.clone();
+    available_calls.insert(f.sig.name.clone(), f.sig.clone());
+    let mut state = State::parameters_bound(&f.sig, layouts.clone(), parameters)?;
+    state.generics = std::sync::Arc::new(generics.clone());
+    state.install_scopes(&f.ops)?;
+    let ops = ending(
+        &f.ops,
+        &mut state,
+        &available_calls,
+        &BTreeSet::new(),
+        &BTreeSet::new(),
+    )?;
+    let body = crate::check_bound(
+        Function { ops, ..f },
+        imports,
+        layouts.clone(),
+        parameters,
+        generics,
+    )?;
+    Ok((body, public, parameters))
 }
 fn resolve_calls(
     ops: &mut [Op],
@@ -1598,7 +1625,9 @@ fn ending(
                 body_out.extend(&after);
                 body_out.extend(body_state.scalars());
                 body_out.extend(body_state.resources.iter().copied());
-                let body = ending(body, &mut body_state, imports, &body_out, &keep)?;
+                let body = crate::flow::in_loop_body(&body_out, || {
+                    ending(body, &mut body_state, imports, &body_out, &keep)
+                })?;
                 Op::While {
                     condition: *condition,
                     test,
@@ -1614,7 +1643,9 @@ fn ending(
                 Op::Loop {
                     index: *index,
                     end: *end,
-                    body: ending(body, &mut inner, imports, &body_out, &keep)?,
+                    body: crate::flow::in_loop_body(&body_out, || {
+                        ending(body, &mut inner, imports, &body_out, &keep)
+                    })?,
                 }
             }
             Op::Match { src, arms } => {
