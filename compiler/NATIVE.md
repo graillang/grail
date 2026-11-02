@@ -6,7 +6,7 @@ linker produces a static executable with a generated `_start`. There is no libc 
 
 ## Build without Rust or the C backend
 
-The committed `bootstrap/native.s` is generated from `native.grl`, `lexer.grl` and the
+The committed `bootstrap/native.s` is generated from `native.grl`, `lexer.grl`, `ownership.grl` and the
 Grail-written `runtime.grl`. No support object, C compiler, libc or handwritten assembly runtime
 is required:
 
@@ -15,10 +15,10 @@ mkdir -p seed/.work/native
 W=seed/.work/native
 as --64 compiler/bootstrap/native.s -o $W/bootstrap.o
 ld $W/bootstrap.o -o $W/native
-$W/native $W/stage2.s compiler/native.grl compiler/lexer.grl compiler/runtime.grl
+$W/native $W/stage2.s compiler/native.grl compiler/lexer.grl compiler/ownership.grl compiler/runtime.grl
 as --64 $W/stage2.s -o $W/stage2.o
 ld $W/stage2.o -o $W/stage2
-$W/stage2 $W/stage3.s compiler/native.grl compiler/lexer.grl compiler/runtime.grl
+$W/stage2 $W/stage3.s compiler/native.grl compiler/lexer.grl compiler/ownership.grl compiler/runtime.grl
 cmp $W/stage2.s $W/stage3.s
 cmp $W/stage2.s compiler/bootstrap/native.s
 ```
@@ -57,7 +57,22 @@ build `native`), or compile both Grail modules with the existing C bootstrap.
   counts live allocations, and unmaps arenas at shutdown. `runtime_audit.grl` checks reuse and a
   balanced live count after 1,000 allocation/descriptor/free cycles and command execution.
 
-**Not v1 yet:** no ownership checking or compiler-generated deterministic cleanup, no general generic functions/types other than
+## Ownership and cleanup checkpoint
+
+Move/initialization checks reject use after move/drop, conditional use of possibly moved storage,
+repeating-edge consumption and uninitialized owned values. Type checks preserve lifetime arguments
+and shared/mutable modes, and validate argument/return/field shapes. `ownership.grl` also has a
+field/loan graph tested independently for disjoint borrowing, reborrow authority and branch joins.
+
+Owned values have runtime live flags. Generated destructors recursively release records, active
+enum payloads and vector elements; moves clear source flags/fields. Lexical exits, returns, `?`,
+`break` and `continue` perform guarded cleanup. The entry shim checks `rt_live()==0` after program
+cleanup and numeric printing, before unmapping cached arenas. This check runs during native
+self-compilation as well as application tests. Abort paths do not unwind.
+
+**Not v1 yet:** source-level loan and return-lifetime enforcement is **not fully connected** to the
+frontend. A passing move check or zero allocation count is not a borrow-safety proof; continue to
+check programs with the Rust seed. There are also no general generic functions/types other than
 `vec<T>`, no implicit modules, no portable targets or optimizer. This is the shortest independent
 native-codegen path to the existing self-hosting subset, not a safety or performance claim.
 Inputs should still be checked by the Rust seed. The C backend remains available as a bootstrap
@@ -73,4 +88,4 @@ The test builds the backend with both the seed and the C bootstrap, compares emi
 checks native stage-2/stage-3 equality and the committed artifact, executes differential programs
 and abort cases, and uses a native-built C backend to reproduce the existing C bootstrap. To
 regenerate `bootstrap/native.s`, copy a fresh stage-2 assembly output after editing `native.grl`,
-`lexer.grl` or `runtime.grl`; the test rejects stale artifacts.
+`lexer.grl`, `ownership.grl` or `runtime.grl`; the test rejects stale artifacts.

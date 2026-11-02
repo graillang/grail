@@ -1,0 +1,66 @@
+module ownership_core;
+use ownership;
+
+pub fn run()->num {
+    let s=ownership::new();
+    let owner=ownership::root(borrow_mut(s),0,1);
+    let left=ownership::field(borrow_mut(s),owner,0);
+    let right=ownership::field(borrow_mut(s),owner,0);
+    // Disjoint mutable field loans are allowed; borrowing the enclosing owner is not.
+    let a=ownership::borrow_place(borrow_mut(s),left,1);
+    let b=ownership::borrow_place(borrow_mut(s),right,1);
+    assert(a!=0); assert(b!=0);
+    assert(ownership::borrow_place(borrow_mut(s),owner,0)==0);
+    assert(ownership::take(borrow_mut(s),left)==3);
+    assert(ownership::end_loan(borrow_mut(s),a)==0);
+    assert(ownership::end_loan(borrow_mut(s),b)==0);
+    // Partial moves preserve siblings but disallow moving/reading the whole aggregate.
+    assert(ownership::take(borrow_mut(s),left)==0);
+    assert(ownership::take(borrow_mut(s),left)==2);
+    assert(ownership::read(borrow(s),right)==0);
+    assert(ownership::read(borrow(s),owner)==5);
+    assert(ownership::take(borrow_mut(s),owner)==5);
+    assert(ownership::initialize(borrow_mut(s),left)==0);
+    // A unique parent is suspended until every readonly descendant ends.
+    let u=ownership::borrow_place(borrow_mut(s),owner,1);
+    let v=ownership::reborrow(borrow_mut(s),u,0);
+    assert(v!=0); assert(ownership::use_loan(borrow(s),u,1)==6);
+    let w=ownership::reborrow(borrow_mut(s),v,0);
+    assert(w!=0); assert(ownership::reborrow(borrow_mut(s),v,1)==0);
+    assert(ownership::end_loan(borrow_mut(s),u)==6);
+    assert(ownership::end_loan(borrow_mut(s),v)==0);
+    assert(ownership::use_loan(borrow(s),w,0)==0);
+    assert(ownership::use_loan(borrow(s),u,1)==6);
+    assert(ownership::end_loan(borrow_mut(s),w)==0);
+    assert(ownership::use_loan(borrow(s),u,1)==0);
+    assert(ownership::end_loan(borrow_mut(s),u)==0);
+    // Shared access permits owner reads but not owner movement or mutation.
+    let r=ownership::borrow_place(borrow_mut(s),owner,0);
+    assert(ownership::read(borrow(s),owner)==0);
+    assert(ownership::take(borrow_mut(s),owner)==3);
+    assert(ownership::initialize(borrow_mut(s),left)==3);
+    assert(ownership::end_loan(borrow_mut(s),r)==0);
+    let yes=ownership::snapshot(borrow(s));
+    let no=ownership::snapshot(borrow(s));
+    assert(ownership::take(borrow_mut(yes),left)==0);
+    assert(ownership::join(borrow_mut(yes),borrow(no))==0);
+    assert(ownership::status(borrow(yes),left)==3);
+    assert(ownership::read(borrow(yes),left)==2);
+    assert(ownership::read(borrow(yes),right)==0);
+    assert(ownership::cleanup(borrow_mut(yes),owner)==0);
+    assert(ownership::status(borrow(yes),owner)==2);
+    // Possible active loans at a join must still block conflicting operations.
+    let q=ownership::borrow_place(borrow_mut(s),right,0);
+    let branch=ownership::snapshot(borrow(s));
+    assert(ownership::end_loan(borrow_mut(branch),q)==0);
+    assert(ownership::join(borrow_mut(branch),borrow(s))==0);
+    assert(ownership::take(borrow_mut(branch),right)==3);
+    assert(ownership::end_loan(borrow_mut(s),q)==0);
+    assert(ownership::cleanup(borrow_mut(s),owner)==0);
+    assert(ownership::read(borrow(s),right)==2);
+    // Numeric copies do not consume storage.
+    let n=ownership::root(borrow_mut(s),1,1);
+    assert(ownership::take(borrow_mut(s),n)==0);
+    assert(ownership::take(borrow_mut(s),n)==0);
+    return 1;
+}

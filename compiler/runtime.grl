@@ -143,7 +143,7 @@ fn f_host_arg(i:num)->num {
     while raw_byte(p+n)!=0 { n=n+1; } return rt_lit(p,n);
 }
 fn f_host_read_file(path:num)->num {
-    let name=rt_cstr(path); if name==0 { rt_abort(); }
+    let name=rt_cstr(path); rt_free(path); if name==0 { rt_abort(); }
     let fd=raw_syscall(2,name,0,0); rt_free(name); if rt_error(fd) { rt_abort(); }
     let buf=rt_alloc(4096); let out=rt_new();
     while 1 {
@@ -167,16 +167,16 @@ fn rt_write_all(fd:num,ptr:num,n:num)->num {
     return 0;
 }
 fn f_host_write_file(path:num,data:num)->num {
-    let name=rt_cstr(path); if name==0 { return 22; }
+    let name=rt_cstr(path); rt_free(path); if name==0 { rt_free(data); return 22; }
     let fd=raw_syscall(2,name,577,438); rt_free(name);
-    if rt_error(fd) { return 0-fd; }
+    if rt_error(fd) { rt_free(data); return 0-fd; }
     let packed=rt_pack(data); let result=rt_write_all(fd,packed,rt_len(data));
-    let closed=raw_syscall(3,fd,0,0); rt_free(packed);
+    let closed=raw_syscall(3,fd,0,0); rt_free(packed); rt_free(data);
     if result!=0 { return result; }
     if rt_error(closed) { return 0-closed; } return 0;
 }
 fn f_host_print(data:num)->num {
-    let packed=rt_pack(data); let err=rt_write_all(1,packed,rt_len(data)); rt_free(packed);
+    let packed=rt_pack(data); let err=rt_write_all(1,packed,rt_len(data)); rt_free(packed); rt_free(data);
     if err!=0 { rt_abort(); } return 0;
 }
 // Print the numeric entry result without libc, allocation escape or unchecked formatting.

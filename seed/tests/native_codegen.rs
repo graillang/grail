@@ -55,6 +55,11 @@ fn independent_native_backend_selfhosts_and_matches_seed() {
         .arg(&w)
         .arg(&w));
     run(seed()
+        .arg("compile")
+        .arg(root.join("compiler/ownership.grl"))
+        .arg(&w)
+        .arg(&w));
+    run(seed()
         .arg("build")
         .arg(root.join("compiler/native.grl"))
         .arg(&w)
@@ -63,6 +68,7 @@ fn independent_native_backend_selfhosts_and_matches_seed() {
     let sources = [
         root.join("compiler/native.grl"),
         root.join("compiler/lexer.grl"),
+        root.join("compiler/ownership.grl"),
     ];
     // Native stage 2 and 3, including equality with the delivered assembly bootstrap.
     let native2 = assemble(&w, &compiler, &sources);
@@ -208,7 +214,60 @@ fn independent_native_backend_selfhosts_and_matches_seed() {
         &[root.join("compiler/tests/runtime_audit.grl")],
     );
     assert_eq!(run(&mut Command::new(audit)).stdout, b"0\n");
-    // Execute binary I/O, argv, malformed paths and process status on the assembly runtime.
+    // The ownership graph is checked and executed by both independent compiler paths.
+    run(seed()
+        .arg("compile")
+        .arg(root.join("compiler/ownership.grl"))
+        .arg(&w)
+        .arg(&w));
+    run(seed()
+        .arg("build")
+        .arg(root.join("compiler/tests/ownership_core.grl"))
+        .arg(&w)
+        .arg(&w));
+    assert_eq!(
+        run(&mut Command::new(w.join("ownership_core"))).stdout,
+        b"1\n"
+    );
+    let core = assemble(
+        &w,
+        &compiler,
+        &[
+            root.join("compiler/tests/ownership_core.grl"),
+            root.join("compiler/ownership.grl"),
+        ],
+    );
+    assert_eq!(run(&mut Command::new(core)).stdout, b"1\n");
+    let cleanup = assemble(&w, &compiler, &[root.join("compiler/tests/cleanup.grl")]);
+    assert_eq!(run(&mut Command::new(cleanup)).stdout, b"777\n");
+    let rejected = [
+        "let b=bytes();let moved=b;return len(b);",
+        "let b=bytes();drop(b);drop(b);return 0;",
+        "let b=bytes();if 1{let moved=b;}return len(b);",
+        "let b=bytes();while 1{let moved=b;continue;}return 0;",
+        "var b:bytes;return len(b);",
+        "let b=bytes();while 1{let moved=b;}return 0;",
+        "return missing(1);",
+        "return 1+bytes();",
+    ];
+    for body in rejected {
+        let src = w.join("rejected.grl");
+        fs::write(&src, format!("module rejected;pub fn run()->num{{{body}}}")).unwrap();
+        let output = w.join("rejected.s");
+        fs::write(&output, b"prior valid artifact").unwrap();
+        let rejected = Command::new(&compiler)
+            .arg(&output)
+            .arg(src)
+            .arg(root_runtime())
+            .output()
+            .unwrap();
+        assert!(
+            !rejected.status.success(),
+            "accepted unsafe program: {body}"
+        );
+        assert_eq!(fs::read(output).unwrap(), b"prior valid artifact");
+    }
+    // Execute binary I/O, argv, malformed paths and process status on the Grail runtime.
     let exe = assemble(
         &w,
         &compiler,

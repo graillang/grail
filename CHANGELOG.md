@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Preserve native lifetime arguments and reference mutability; add type-shape checks and a
+  Grail ownership graph with field-sensitive moves, loan authority and conservative joins.
+  Wire move/initialization checks into source compilation, rejecting moved/uninitialized values,
+  conditional moves and repeated consumption on backedges/continue, without replacing a prior
+  artifact on rejection. Source-level loan/return-lifetime enforcement remains unfinished.
+- Generate guarded recursive cleanup for native owned values, including partial fields, vectors,
+  enum matches, returns, propagation and loop exits. Transfer ownership explicitly on moves and
+  close consumed host-call descriptors. Require zero live allocations at normal program exit;
+  native self-compilation and cleanup fixtures pass that check and reproduce their output.
+
 - Replace native runtime support with `compiler/runtime.grl`: allocator/free lists, byte and
   sequence operations, file I/O, PATH search, process execution and numeric printing are Grail.
   Generated `_start` and narrow raw-memory/syscall intrinsics produce a static `as`/`ld` build,
