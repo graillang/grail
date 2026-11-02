@@ -79,7 +79,10 @@ reference returns conservatively retain whole input frames, so interior projecti
 replace a still-borrowed object. Unsafe programs fail before replacing an existing output file.
 
 **Remaining work:** invariant replacement of reference-containing storage is currently rejected,
-not silently accepted, and generic functions are not implemented yet. Generic records/enums accept type arguments,
+not silently accepted, while generic functions now use a specialization worklist and body replay. Unused templates are
+checked with opaque affine type variables; specialization does not make `T` copyable or numeric.
+Calls infer type arguments or accept explicit `identity<num>(...)` forms, including cross-module
+calls and regular recursion. Expanding polymorphic recursion is bounded. Generic records/enums accept type arguments,
 including nested containers and borrowed types, with type-specific recursive drops. Constructors
 accept explicit arguments (`Pair<num,bytes>{...}`, `Option<num>::None`), infer from payloads/fields,
 or use a matching function return type. Lifetimes precede `type T` parameters in declarations.

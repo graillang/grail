@@ -280,6 +280,46 @@ fn independent_native_backend_selfhosts_and_matches_seed() {
         assert!(!result.status.success(), "accepted invalid generic: {body}");
         assert_eq!(fs::read(&output).unwrap(), b"prior valid artifact");
     }
+    run(seed()
+        .arg("build")
+        .arg(root.join("compiler/tests/generic_functions.grl"))
+        .arg(&w)
+        .arg(&w));
+    assert_eq!(
+        run(&mut Command::new(w.join("generic_functions"))).stdout,
+        b"919\n"
+    );
+    let functions = assemble(
+        &w,
+        &compiler,
+        &[root.join("compiler/tests/generic_functions.grl")],
+    );
+    assert_eq!(run(&mut Command::new(functions)).stdout, b"919\n");
+    let imported = w.join("imported_generic.grl");
+    fs::write(&imported,"module imported_generic;use generic_functions;pub fn run()->num{let b=generic_functions::identity<bytes>(bytes());return len(b)+33;}").unwrap();
+    let imported = assemble(
+        &w,
+        &compiler,
+        &[imported, root.join("compiler/tests/generic_functions.grl")],
+    );
+    assert_eq!(run(&mut Command::new(imported)).stdout, b"33\n");
+    for body in [
+        "fn bad<type T>(x:T)->T{let y=x;return x;}pub fn run()->num{return bad(7);}",
+        "fn bad<type T>(x:T)->T{return x+x;}pub fn run()->num{return bad(7);}",
+        "fn unused<type T>(x:T)->T{let y=x;return x;}pub fn run()->num{return 0;}",
+        "fn unused<type T>(x:T)->num{return x+1;}pub fn run()->num{return 0;}",
+        "fn wrong<type T,type U>(x:T,y:U)->T{return y;}pub fn run()->num{return wrong(1,2);}",
+        "fn id<type T>(x:T)->T{return x;}fn bad<a>()->read<a>{let b=bytes();return id(read(b));}pub fn run()->num{return 0;}",
+        "fn id<type T>(x:T)->T{return x;}pub fn run()->num{let b=bytes();let v=id(read(b));push(b,1);return len(v);}",
+        "fn bad<type T>(x:T)->T{return load(borrow(x));}pub fn run()->num{return bad(1);}",
+        "fn phantom<type T>()->num{return 0;}pub fn run()->num{return phantom();}",
+    ] {
+        let src=w.join("bad_generic_fn.grl");fs::write(&src,format!("module bad_generic_fn;{body}")).unwrap();
+        let output=w.join("bad_generic_fn.s");fs::write(&output,b"prior valid artifact").unwrap();
+        let result=Command::new(&compiler).arg(&output).arg(&src).arg(root_runtime()).output().unwrap();
+        assert!(!result.status.success(),"accepted invalid generic function: {body}");
+        assert_eq!(fs::read(output).unwrap(),b"prior valid artifact");
+    }
     let cleanup = assemble(&w, &compiler, &[root.join("compiler/tests/cleanup.grl")]);
     assert_eq!(run(&mut Command::new(cleanup)).stdout, b"777\n");
     let rejected = [

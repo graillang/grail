@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Add native generic functions with inferred/explicit type arguments, cross-module specialization,
+  regular recursion, and lifted capture lifetimes. Validate unused templates and keep opaque `T`
+  affine even in numeric specializations; reject unsupported operations rather than exploiting
+  the concrete instantiation. Invariant captured-storage writeback remains in progress.
+
 - Add native generic records/enums with explicit and inferred constructor arguments, nested and
   borrowed type substitution, nominal argument checking, and specialized recursive destruction.
   Keep constructor and call-argument captures live during later argument/field evaluation,
