@@ -2,13 +2,34 @@
 
 A programming-language research project. Source files use **`.grl`**.
 
-We are evaluating the foundations with a [narrow source-to-native Rust seed](seed/README.md), not building
-a full compiler yet. Bootstrap v0 is reached: a [Grail-written compiler](compiler/README.md),
-built by the seed, reproduces itself byte for byte (it does not yet check ownership itself).
-An independent [Linux x86-64 native backend](compiler/NATIVE.md) also self-compiles directly
-through assembly, without translating Grail function bodies to C.
-The ambition is a small, practical systems language with fast builds, deterministic
-memory management, explicit effects, and independently checkable correctness evidence.
+## Learn by example
+
+```sh
+just book
+```
+
+Open **[Grail by Example](book/README.md)**: 20 chapters, runnable examples, and collapsible
+side-by-side Rust comparisons. Building the offline book needs Bun 1.4+ and `just`.
+
+```grl
+fn main() {
+    println("Hello, world!");
+}
+```
+
+Run it with `just book-run hello`. Check all Grail examples and their Rust comparisons with
+`just book-check` (Linux x86-64, GNU as/ld and rustc).
+
+## Current implementation
+
+The [Grail-written native compiler](compiler/NATIVE.md) self-compiles directly through assembly,
+with a Grail-written runtime, ownership/borrow checking, deterministic cleanup and generic
+specialization. Its Linux x86-64 path needs neither a C compiler nor libc. The
+[Rust seed](seed/README.md) and [older C bootstrap](compiler/README.md) remain independent
+checking and recovery routes.
+
+This is still a research implementation, not a proof of language soundness or a portable,
+release-qualified language. See the native implementation boundaries and the book's final chapter.
 Initial [seed measurements](docs/design/seed-measurements.md) cover a restricted typed IR,
 not full-language performance or safety.
 

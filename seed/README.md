@@ -16,6 +16,25 @@ seed/target/release/grail-seed scale 4096
 workloads through the public typed-IR API. They write native source plus a canonical signature.
 They are demonstration commands, not a surface-language parser or general build system.
 
+## Application entry and output prelude
+
+The source frontend also accepts `fn main() { println("Hello, world!"); }`. A private named main
+wins over public helpers, defaults to unit, returns implicitly, and produces no automatic numeric
+output. Explicit numeric main results become process exit status. Ordinary unit functions may
+omit `->unit` and their final return too.
+
+`print`/`println` accept numbers and byte/text values. They lower to checked call-local borrows
+and the trusted host interface, not implicit copies of owners. In this independent seed route,
+publish the current host artifact before building a program that uses output:
+
+```sh
+seed/target/debug/grail-seed host OUT
+seed/target/debug/grail-seed build FILE.grl OUT OUT
+```
+
+The direct native route used by `just book-run` needs no C host artifact. Older non-main numeric
+entry fixtures retain their printed-result test protocol.
+
 ## Supported semantics
 
 - Owned local byte buffers and growable heap byte vectors; affine read/write views and carriers.

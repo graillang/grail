@@ -33,8 +33,30 @@ $W/example  # 171
 ```
 
 Invocation: `native OUT.s ENTRY.grl [MODULE.grl...]`. All modules are supplied as source files, including `compiler/runtime.grl` last.
-The first public function of the entry module takes no parameters or one argv byte view and
-returns `num`. An argv entry with an incorrect argument count exits with status 2.
+A named `main` in the entry file takes priority and needs no `pub`. Its result defaults to
+`unit`, with an implicit return at the end. The entry file may omit its `module` declaration;
+dependency files still declare their modules explicitly.
+
+```grl
+fn main() {
+    println("Hello, world!");
+}
+```
+
+`print(value)` and `println(value)` are builtin prelude operations for `num`, strings, byte owners
+and byte views; `println()` emits an empty line. Text/buffer output takes a checked readonly borrow
+for the call, does not consume the owner, and releases temporary views with normal cleanup.
+There is no formatting/interpolation or general display trait. The names `print`/`println` are
+reserved. Ordinary unit-returning functions may also omit the result annotation and final return.
+
+Named `main` never prints its return value. Unit main exits with status 0; explicit `->num`
+sets the OS exit status (low eight bits on Linux). A main may accept one readonly argv view;
+an incorrect argument count exits with status 2. All cleanup and zero-live-allocation checks still
+run before normal process exit.
+
+Existing bootstrap/regression sources without named main retain their first-public-function
+entry protocol: zero parameters or one argv view, explicit `num` result, printed by the legacy
+numeric harness. This is not the recommended application entry convention.
 
 Alternatively, build with the Rust seed just like `grailc.grl` (publish `host`, compile `lexer`,
 build `native`), or compile both Grail modules with the existing C bootstrap.

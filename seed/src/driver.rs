@@ -119,7 +119,8 @@ pub fn compile(
             [Ty::View(Mode::Read, _)] => "gv",
             _ => return Err("executable entry needs zero arguments or one read byte view".into()),
         };
-        if sig.result != Ty::Num {
+        let named_main = sig.name.ends_with("::main");
+        if sig.result != Ty::Num && !(named_main && sig.result == Ty::Unit) {
             return Err("executable entry must return num".into());
         }
         let symbol = emit::symbol(&sig.name);
@@ -133,11 +134,25 @@ pub fn compile(
         } else {
             "if(argc!=2)return 2;"
         };
+        let invoke = if named_main {
+            if sig.result == Ty::Unit {
+                format!("{call};return 0;")
+            } else {
+                format!("return (int){call};")
+            }
+        } else {
+            format!("printf(\"%llu\\n\",(unsigned long long){call});return 0;")
+        };
+        let return_c = if sig.result == Ty::Unit {
+            "uint8_t"
+        } else {
+            "uint64_t"
+        };
         let main = work.path.join(format!("{name}-main.c"));
         write(
             &main,
             &format!(
-                "#include <stdint.h>\n#include <stdio.h>\n#include <string.h>\ntypedef struct{{unsigned char*p;uint64_t n;}}gv;\nuint64_t {symbol}({params});\nint main(int argc,char**argv){{{argc}printf(\"%llu\\n\",(unsigned long long){call});return 0;}}\n"
+                "#include <stdint.h>\n#include <stdio.h>\n#include <string.h>\ntypedef struct{{unsigned char*p;uint64_t n;}}gv;\n{return_c} {symbol}({params});\nint main(int argc,char**argv){{{argc}{invoke}}}\n"
             ),
         )?;
         let mut args = vec![format!("{name}-main.c"), format!("{name}.o")];

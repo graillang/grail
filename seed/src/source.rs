@@ -261,6 +261,9 @@ impl Parser<'_> {
         let public = self.eat("pub");
         self.expect("fn")?;
         let name = self.ident()?;
+        if matches!(name.as_str(), "print" | "println") || name.starts_with("__prelude_") {
+            return Err(self.error("print and println are reserved prelude names"));
+        }
         if self.module.is_empty() {
             self.module = name.clone();
         }
@@ -284,19 +287,26 @@ impl Parser<'_> {
                 self.expect(",")?;
             }
         }
-        self.expect("->")?;
-        let result_ty = self.ty()?;
+        let result_ty = if self.eat("->") { self.ty()? } else { Ty::Unit };
         let sig = Sig {
             name,
             params,
             result: result_ty,
         };
         let parameters = self.type_params.len() as u16;
+        if sig.name == "main" && parameters != 0 {
+            return Err(self.error("main cannot have type parameters"));
+        }
         crate::types::validate_sig_bound(&sig, &self.layouts, parameters)?;
         self.return_ty = Some(sig.result.clone());
         self.expect("{")?;
-        let ops = self.statements(0)?;
+        let mut ops = self.statements(0)?;
         self.expect("}")?;
+        if sig.result == Ty::Unit && !terminates(&ops) {
+            let r = self.fresh()?;
+            ops.push(Op::Unit(r));
+            ops.push(Op::Return(r));
+        }
         Ok((
             Function {
                 sig,
@@ -580,6 +590,7 @@ impl Parser<'_> {
                 name.push_str("::");
                 name.push_str(&self.ident()?);
             }
+            if name.starts_with("__prelude_") { return Err(self.error("reserved compiler prelude name")); }
             let mut explicit = None;
             if self.layouts.contains_key(&self.nominal(&name))
                 && !self.vars.contains_key(&name)
@@ -664,7 +675,7 @@ impl Parser<'_> {
                     match name.as_str() {
                         "bytes" => Some(0),
                         "read" | "mut" | "hold" | "len" | "copy_bytes" | "text" | "borrow"
-                        | "borrow_mut" | "load" => Some(1),
+                        | "borrow_mut" | "load" | "print" | "println" => Some(1),
                         "exchange" | "vec_push" => Some(2),
                         "vec_pop" => Some(1),
                         "vec_get" | "vec_get_mut" => Some(2),
@@ -689,6 +700,8 @@ impl Parser<'_> {
                                     | "vec_pop"
                                     | "vec_get"
                                     | "vec_get_mut"
+                                    | "print"
+                                    | "println"
                             );
                         let value = if matches!(name.as_str(), "borrow" | "borrow_mut") {
                             let n = self.ident()?;
@@ -716,7 +729,10 @@ impl Parser<'_> {
                         } else if storage {
                             self.storage_expr(
                                 ops,
-                                if matches!(name.as_str(), "mut" | "vec_push" | "vec_pop" | "vec_get_mut") {
+                                if matches!(
+                                    name.as_str(),
+                                    "mut" | "vec_push" | "vec_pop" | "vec_get_mut"
+                                ) {
                                     Mode::Write
                                 } else {
                                     Mode::Read
@@ -743,8 +759,14 @@ impl Parser<'_> {
                     }
                 }
                 let r = self.fresh()?;
-                if arity.is_some_and(|n| n != args.len()) {
+                if arity.is_some_and(|n| n != args.len()) && !(name == "println" && args.is_empty())
+                {
                     return Err(self.error("builtin arity"));
+                }
+                if matches!(name.as_str(), "print" | "println") {
+                    self.fresh()?;
+                    self.fresh()?;
+                    self.fresh()?;
                 }
                 ops.push(if let Some(element) = vector_element {
                     Op::Vector { dst: r, element }
@@ -757,6 +779,11 @@ impl Parser<'_> {
                     }
                 } else {
                     match name.as_str() {
+                        "print" | "println" => Op::Call {
+                            dst: r,
+                            name: format!("__prelude_{name}"),
+                            args,
+                        },
                         "borrow" | "borrow_mut" => Op::Move {
                             dst: r,
                             src: args[0],
@@ -1144,7 +1171,25 @@ impl Parser<'_> {
         Ok(ops)
     }
 }
-/// Read import names without provider source or body analysis.
+fn terminates(ops: &[Op]) -> bool {
+    match ops.last() {
+        Some(Op::Return(_)) => true,
+        Some(Op::Block { body }) => terminates(body),
+        Some(Op::If { yes, no, .. }) => terminates(yes) && terminates(no),
+        Some(Op::Match { arms, .. }) => {
+            !arms.is_empty() && arms.iter().all(|a| terminates(&a.body))
+        }
+        _ => false,
+    }
+}
+fn uses_output(tokens: &[Token<'_>]) -> bool {
+    tokens.iter().enumerate().any(|(i, t)| {
+        matches!(t.text, "print" | "println")
+            && tokens.get(i + 1).is_some_and(|t| t.text == "(")
+            && (i == 0 || !matches!(tokens[i - 1].text, "::" | "fn"))
+    })
+}
+/// Read explicit imports and the implicit output-prelude dependency from tokens.
 pub fn imports(text: &str) -> Result<Vec<String>, String> {
     let mut p = Parser {
         tokens: lex(text)?,
@@ -1170,11 +1215,14 @@ pub fn imports(text: &str) -> Result<Vec<String>, String> {
         names.push(n);
         p.expect(";")?;
     }
+    if uses_output(&p.tokens) && !names.iter().any(|n| n == "host") {
+        names.push("host".into());
+    }
     Ok(names)
 }
 pub fn compile(
     text: &str,
-    available: BTreeMap<String, crate::module::Interface>,
+    mut available: BTreeMap<String, crate::module::Interface>,
 ) -> Result<crate::module::CheckedModule, String> {
     let mut p = Parser {
         tokens: lex(text)?,
@@ -1226,6 +1274,14 @@ pub fn compile(
         }
         p.expect(";")?;
     }
+    if uses_output(&p.tokens) && !dependencies.contains_key("host") {
+        let host = available
+            .entry("host".into())
+            .or_insert_with(crate::host::interface);
+        host.validate()?;
+        dependencies.insert("host".into(), host.fingerprint()?);
+        callable.extend(host.exports.iter().map(|(n, s)| (n.clone(), s.clone())));
+    }
     let mut public_types = BTreeSet::new();
     while matches!(p.peek(), "struct" | "enum")
         || (p.peek() == "pub"
@@ -1262,7 +1318,7 @@ pub fn compile(
     let mut generic_exports = BTreeMap::new();
     let mut declared = BTreeSet::new();
     for (i, (f, public, parameters)) in functions.iter_mut().enumerate() {
-        *public |= implicit && i == 0;
+        *public |= (implicit && i == 0) || (f.sig.name == "main" && *parameters == 0);
         let local = f.sig.name.clone();
         if callable.contains_key(&local)
             || generic_callable.contains_key(&local)
@@ -1299,7 +1355,8 @@ pub fn compile(
     }
     let entry = functions
         .iter()
-        .find(|(_, public, n)| *public && *n == 0)
+        .find(|(f, _, n)| f.sig.name.ends_with("::main") && *n == 0)
+        .or_else(|| functions.iter().find(|(_, public, n)| *public && *n == 0))
         .map(|(f, _, _)| f.sig.name.clone());
     if entry.is_none() && public_types.is_empty() && generic_exports.is_empty() {
         return Err(p.error("explicit module needs a pub function or type"));
@@ -1392,7 +1449,15 @@ fn check_function(
     let mut imports = BTreeMap::new();
     for n in names {
         if n != f.sig.name {
-            imports.insert(n.clone(), callable[&n].clone());
+            imports.insert(
+                n.clone(),
+                callable
+                    .get(&n)
+                    .ok_or_else(|| {
+                        format!("missing prelude function {n}; publish the current host runtime")
+                    })?
+                    .clone(),
+            );
         }
     }
     let generics = generic_names
@@ -1439,6 +1504,12 @@ fn resolve_calls(
 ) -> Result<(), String> {
     for op in ops {
         match op {
+            Op::Call { name, .. }
+                if matches!(name.as_str(), "__prelude_print" | "__prelude_println") =>
+            {
+                names
+                    .extend(["host::print", "host::print_num", "host::newline"].map(str::to_owned));
+            }
             Op::Call { dst, name, args } => {
                 if let Some(sig) = callable.get(name) {
                     *name = sig.name.clone();
@@ -1533,6 +1604,50 @@ fn ending(
     for (op, after) in ops.iter().zip(afters) {
         if state.terminated {
             return Err("unreachable statement after control transfer".into());
+        }
+        if let Op::Call { dst, name, args } = op
+            && matches!(name.as_str(), "__prelude_print" | "__prelude_println")
+        {
+            let newline = name == "__prelude_println";
+            let mut lowered = Vec::new();
+            if let Some(src) = args.first() {
+                let ty = &state.get(*src)?.ty;
+                let argument = if *ty == Ty::Num {
+                    *src
+                } else {
+                    if !matches!(ty, Ty::Bytes | Ty::Text | Ty::View(..)) {
+                        return Err("print requires num, string, bytes or a byte view".into());
+                    }
+                    lowered.push(Op::Borrow {
+                        dst: dst + 1,
+                        src: *src,
+                        mode: Mode::Read,
+                    });
+                    dst + 1
+                };
+                lowered.push(Op::Call {
+                    dst: if newline { dst + 2 } else { *dst },
+                    name: if *ty == Ty::Num {
+                        "host::print_num"
+                    } else {
+                        "host::print"
+                    }
+                    .into(),
+                    args: vec![argument],
+                });
+            }
+            if newline {
+                lowered.push(Op::Call {
+                    dst: *dst,
+                    name: "host::newline".into(),
+                    args: vec![],
+                });
+            }
+            state.ops(&lowered, imports, 0)?;
+            result.extend(lowered);
+            clean(state, &after, protected, &mut result);
+            state.prune_scalars(&after);
+            continue;
         }
         if matches!(op, Op::Break | Op::Continue) {
             let frame = state

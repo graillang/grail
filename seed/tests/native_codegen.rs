@@ -114,6 +114,56 @@ fn independent_native_backend_selfhosts_and_matches_seed() {
         "C-bootstrap and seed-built native backends differ"
     );
     let compiler = stage3;
+    // Named main is quiet, uses implicit unit, and output borrows rather than consumes.
+    let modern_cases = [
+        (
+            "fn main(){println(\"Hello, world!\");}",
+            "Hello, world!\n",
+            0,
+        ),
+        ("module quiet;fn main(){}", "", 0),
+        (
+            "module chosen;pub fn other()->num{return 99;}fn main(){println(7);}",
+            "7\n",
+            0,
+        ),
+        ("module status;fn main()->num{return 7;}", "", 7),
+        (
+            "module output;fn greet(){print(\"hello\");println(\", world!\");}fn main(){greet();println();print(0);println(18446744073709551615);}",
+            "hello, world!\n\n018446744073709551615\n",
+            0,
+        ),
+        (
+            "module borrowed;fn main(){let s=\"kept\";print(s);println(s);let b=bytes();push(b,65);println(b);push(b,66);println(b);let m=mut(b);print(m);write(m,0,67);println(m);}",
+            "keptkept\nA\nAB\nABCB\n",
+            0,
+        ),
+        (
+            "module implicit;fn work(flag:num){let b=bytes();push(b,1);if flag{return ();}println(len(b));}fn main(){work(0);work(1);println(copy_bytes(read(\"temporary\")));}",
+            "1\ntemporary\n",
+            0,
+        ),
+    ];
+    for (source, expected, status) in modern_cases {
+        let input = w.join("modern_main.grl");
+        fs::write(&input, source).unwrap();
+        let exe = assemble(&w, &compiler, std::slice::from_ref(&input));
+        let result = Command::new(exe).output().unwrap();
+        assert_eq!(result.status.code(), Some(status));
+        assert_eq!(result.stdout, expected.as_bytes());
+        run(seed().arg("build").arg(&input).arg(&w).arg(&w));
+        let name = grail_seed::source::compile(
+            source,
+            std::collections::BTreeMap::from([("host".into(), grail_seed::host::interface())]),
+        )
+        .unwrap()
+        .header()
+        .name
+        .clone();
+        let result = Command::new(w.join(name)).output().unwrap();
+        assert_eq!(result.status.code(), Some(status));
+        assert_eq!(result.stdout, expected.as_bytes());
+    }
     let example = root.join("compiler/examples/native_numbers.grl");
     let exe = assemble(&w, &compiler, std::slice::from_ref(&example));
     assert_eq!(run(&mut Command::new(exe)).stdout, b"171\n");
@@ -143,13 +193,15 @@ fn independent_native_backend_selfhosts_and_matches_seed() {
         "module bad;pub fn run(x:unknown_type)->num{return 0;}",
     )
     .unwrap();
-    assert!(!Command::new(&compiler)
-        .arg(w.join("bad.s"))
-        .arg(bad)
-        .output()
-        .unwrap()
-        .status
-        .success());
+    assert!(
+        !Command::new(&compiler)
+            .arg(w.join("bad.s"))
+            .arg(bad)
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
     // Native-built C backend must still reproduce the checked-in C bootstrap too.
     let c_sources = [
         root.join("compiler/grailc.grl"),
@@ -164,14 +216,16 @@ fn independent_native_backend_selfhosts_and_matches_seed() {
     );
     let raw = w.join("raw.grl");
     fs::write(&raw, "module raw;pub fn run()->num{return raw_load(0);}").unwrap();
-    assert!(!Command::new(&compiler)
-        .arg(w.join("raw.s"))
-        .arg(raw)
-        .arg(root_runtime())
-        .output()
-        .unwrap()
-        .status
-        .success());
+    assert!(
+        !Command::new(&compiler)
+            .arg(w.join("raw.s"))
+            .arg(raw)
+            .arg(root_runtime())
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
     // Cross-module calls, loops, record fields and enum recovery against the checked seed.
     let cases: &[(&[&str], Option<&str>)] = &[
         (&["loops/cleanup"], None),
@@ -314,11 +368,21 @@ fn independent_native_backend_selfhosts_and_matches_seed() {
         "fn bad<type T>(x:T)->T{return load(borrow(x));}pub fn run()->num{return bad(1);}",
         "fn phantom<type T>()->num{return 0;}pub fn run()->num{return phantom();}",
     ] {
-        let src=w.join("bad_generic_fn.grl");fs::write(&src,format!("module bad_generic_fn;{body}")).unwrap();
-        let output=w.join("bad_generic_fn.s");fs::write(&output,b"prior valid artifact").unwrap();
-        let result=Command::new(&compiler).arg(&output).arg(&src).arg(root_runtime()).output().unwrap();
-        assert!(!result.status.success(),"accepted invalid generic function: {body}");
-        assert_eq!(fs::read(output).unwrap(),b"prior valid artifact");
+        let src = w.join("bad_generic_fn.grl");
+        fs::write(&src, format!("module bad_generic_fn;{body}")).unwrap();
+        let output = w.join("bad_generic_fn.s");
+        fs::write(&output, b"prior valid artifact").unwrap();
+        let result = Command::new(&compiler)
+            .arg(&output)
+            .arg(&src)
+            .arg(root_runtime())
+            .output()
+            .unwrap();
+        assert!(
+            !result.status.success(),
+            "accepted invalid generic function: {body}"
+        );
+        assert_eq!(fs::read(output).unwrap(), b"prior valid artifact");
     }
     run(seed()
         .arg("build")
@@ -339,11 +403,21 @@ fn independent_native_backend_selfhosts_and_matches_seed() {
         "struct Cell<a>{v:read<a>}fn access<a,b>(r:ref_mut<a,Cell<b>>)->ref_mut<a,read<b>>{return borrow_mut(r.v);}pub fn run()->num{let a=bytes();let b=bytes();var p=Cell{v:read(a)};let old=exchange(access(borrow_mut(p)),read(b));drop(old);push(b,1);return len(p.v);}",
         "struct Cell<a>{v:read<a>}fn access<a,b>(r:ref_mut<a,Cell<b>>)->ref_mut<a,read<b>>{return borrow_mut(r.v);}fn bad<a,b>(r:ref_mut<a,Cell<b>>)->num{let local=bytes();let old=exchange(access(r),read(local));return 0;}pub fn run()->num{return 0;}",
     ] {
-        let src=w.join("bad_writeback.grl");fs::write(&src,format!("module bad_writeback;{body}")).unwrap();
-        let output=w.join("bad_writeback.s");fs::write(&output,b"prior valid artifact").unwrap();
-        let result=Command::new(&compiler).arg(&output).arg(&src).arg(root_runtime()).output().unwrap();
-        assert!(!result.status.success(),"accepted invalid writeback: {body}");
-        assert_eq!(fs::read(output).unwrap(),b"prior valid artifact");
+        let src = w.join("bad_writeback.grl");
+        fs::write(&src, format!("module bad_writeback;{body}")).unwrap();
+        let output = w.join("bad_writeback.s");
+        fs::write(&output, b"prior valid artifact").unwrap();
+        let result = Command::new(&compiler)
+            .arg(&output)
+            .arg(&src)
+            .arg(root_runtime())
+            .output()
+            .unwrap();
+        assert!(
+            !result.status.success(),
+            "accepted invalid writeback: {body}"
+        );
+        assert_eq!(fs::read(output).unwrap(), b"prior valid artifact");
     }
     let cleanup = assemble(&w, &compiler, &[root.join("compiler/tests/cleanup.grl")]);
     assert_eq!(run(&mut Command::new(cleanup)).stdout, b"777\n");

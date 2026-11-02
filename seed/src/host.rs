@@ -13,6 +13,8 @@ pub fn interface() -> Interface {
         ("read_file", vec![read(0)], Ty::Bytes),
         ("write_file", vec![read(0), read(1)], Ty::Num),
         ("print", vec![read(0)], Ty::Unit),
+        ("print_num", vec![Ty::Num], Ty::Unit),
+        ("newline", vec![], Ty::Unit),
         ("command", vec![Ty::Vector(Box::new(Ty::Bytes))], Ty::Num),
     ]
     .into_iter()

@@ -20,7 +20,7 @@ fn run(command: &mut Command) -> std::process::Output {
 fn trusted_interface_is_declared_and_compiler_choice_explicit() {
     let api = host::interface();
     api.validate().unwrap();
-    assert_eq!(api.exports.len(), 6);
+    assert_eq!(api.exports.len(), 8);
     assert!(api.generics.is_empty());
     assert!(
         host::publish(Path::new("unused-host-output"), "tcc")

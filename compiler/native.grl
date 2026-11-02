@@ -814,6 +814,7 @@ fn bind<a>(c:ref_mut<a,C>,name:bytes,ty:num,id:num,mutable:num)->unit {
 }
 fn func<a>(c:ref_mut<a,C>,pass:num,public:num)->unit {
  let position=c.pos;expect(borrow_mut(c),read("fn"));var name=ident(borrow_mut(c));lifetime_parameters(borrow_mut(c));
+ if same(read(name),read("print"))+same(read(name),read("println")){fail(borrow_mut(c),read("print and println are reserved prelude names"));}
  let typecount=len(c.tnames);let regioncount=len(c.rnames);
  if (pass==3)&(typecount!=0){while kind(borrow_mut(c))!=123{advance(borrow_mut(c));}skip_braces(borrow_mut(c));return ();}
  if pass==1{while kind(borrow_mut(c))!=123{advance(borrow_mut(c));}skip_braces(borrow_mut(c));return ();}
@@ -827,9 +828,12 @@ fn func<a>(c:ref_mut<a,C>,pass:num,public:num)->unit {
  if pass==2{vec_push(c.params,ty);}let id=fresh(borrow_mut(c));bind(borrow_mut(c),p,ty,id,0);count=count+1;
  if eat(borrow_mut(c),read(")")){break;}expect(borrow_mut(c),read(","));}}
  if 6<count{fail(borrow_mut(c),read("native function exceeds six parameters"));}
- expect(borrow_mut(c),read("->"));let ret=parse_type(borrow_mut(c));exchange(borrow_mut(c.result),ret);
+ var ret=1;if eat(borrow_mut(c),read("->")){ret=parse_type(borrow_mut(c));}exchange(borrow_mut(c.result),ret);
  if pass==2{
- let entry=(c.entry==0)&(c.file==2)&public&(count<2)&(typecount==0);
+ if find_func(borrow_mut(c),read(m),read(name))!=0{fail(borrow_mut(c),read("duplicate function"));}
+ let main=(c.file==2)&same(read(name),read("main"));
+ if main{if (1<count)+(typecount!=0){fail(borrow_mut(c),read("main needs zero arguments or one readonly byte view and no type parameters"));}}
+ let entry=main+((c.entry==0)&(c.file==2)&public&(count<2)&(typecount==0));
  let file=c.file;let raw=c.raw;vec_push(c.funcs,Func{module:m,name:name,first:first,count:count,ret:ret,types:typecount,regions:regioncount,file:file,pos:position,raw:raw});
  let index=len(c.funcs);if entry{exchange(borrow_mut(c.entry),index);}skip_braces(borrow_mut(c));return ();}
  if c.current_spec{let spec=c.current_spec;name=special_name(borrow_mut(c),spec-1);}
@@ -842,18 +846,18 @@ fn func<a>(c:ref_mut<a,C>,pass:num,public:num)->unit {
  o(borrow_mut(c),read("leaq -.F"));on(borrow_mut(c),frame);o(borrow_mut(c),read("(%rbp),%rdi\nmovq $.F"));on(borrow_mut(c),frame);
  o(borrow_mut(c),read("/8-"));on(borrow_mut(c),count);o(borrow_mut(c),read(",%rcx\nxorl %eax,%eax\nrep stosq\n"));
  for i in count{let l=vec_get(c.locals,i);let slot=l.id;let ty=l.ty;own(borrow_mut(c),slot,ty);init_parameter(borrow_mut(c),slot,ty);}
- block(borrow_mut(c));if c.raw==0{if c.terminated==0{fail(borrow_mut(c),read("function may fall through without return"));}}cleanup(borrow_mut(c),0);o(borrow_mut(c),read("xorq %rax,%rax\nleave\nret\n.set .F"));on(borrow_mut(c),frame);vec_push(c.out,44);
+ block(borrow_mut(c));if c.raw==0{if (c.terminated==0)&(ret!=1){fail(borrow_mut(c),read("function may fall through without return"));}}cleanup(borrow_mut(c),0);o(borrow_mut(c),read("xorq %rax,%rax\nleave\nret\n.set .F"));on(borrow_mut(c),frame);vec_push(c.out,44);
  let n=c.next;on(borrow_mut(c),div(n+1,2)*16);vec_push(c.out,10);return ();
 }
 fn toplevel<a>(c:ref_mut<a,C>,pass:num)->unit {
     let raw=eat(borrow_mut(c),read("unsafe"));
     exchange(borrow_mut(c.raw),raw);
-    expect(borrow_mut(c),read("module"));
-    let m=ident(borrow_mut(c));
+    var m=copy_bytes(read("main"));
+    if eat(borrow_mut(c),read("module")){m=ident(borrow_mut(c));expect(borrow_mut(c),read(";"));}
+    else{if (c.file!=2)+raw{fail(borrow_mut(c),read("dependency files require an explicit module"));}}
     if same(read(m),read("runtime")){if raw==0{fail(borrow_mut(c),read("runtime module must be explicitly unsafe"));}}
     if raw { if same(read(m),read("runtime"))==0 { fail(borrow_mut(c),read("unsafe module reserved for runtime")); } }
     exchange(borrow_mut(c.module),m);
-    expect(borrow_mut(c),read(";"));
     while eat(borrow_mut(c),read("use")) {
         ident(borrow_mut(c));
         expect(borrow_mut(c),read(";"));
@@ -1099,6 +1103,8 @@ fn builtin_id<a>(n:read<a>)->num {
     if same(read(n),read("borrow_mut")) { return 14; }
     if same(read(n),read("load")) { return 15; }
     if same(read(n),read("exchange")) { return 16; }
+    if same(read(n),read("print")) { return 17; }
+    if same(read(n),read("println")) { return 18; }
     if same(read(n),read("raw_load")) { return 101; }
     if same(read(n),read("raw_store")) { return 102; }
     if same(read(n),read("raw_byte")) { return 103; }
@@ -1145,7 +1151,20 @@ fn raw_builtin<a>(c:ref_mut<a,C>,id:num)->Val {
     }
     return val(save(borrow_mut(c)),0);
 }
+fn print_builtin<a>(c:ref_mut<a,C>,newline:num)->Val{
+ expect(borrow_mut(c),read("("));
+ if eat(borrow_mut(c),read(")")){if newline==0{fail(borrow_mut(c),read("print requires an argument"));}invoke(borrow_mut(c),read("rt_print_newline"),vec<num>());return val(imm(borrow_mut(c),0),1);}
+ let input=expr(borrow_mut(c),0);expect(borrow_mut(c),read(")"));let original=input.t;let value=input;let k=ty_kind(borrow_mut(c),value.ty);observe(borrow_mut(c),value.t);
+ if k==1{let line=imm(borrow_mut(c),newline);invoke(borrow_mut(c),read("rt_print_number"),two(value.t,line));}
+ else{
+ if (k!=3)&(k!=4)&(k!=5){fail(borrow_mut(c),read("print requires num, string, bytes or a byte view"));}
+ let ty=intern_full(borrow_mut(c),5,0,0,vec<num>());let slot=apply(borrow_mut(c),read("rt_view"),one(value.t));own(borrow_mut(c),slot,ty);view_bonds(borrow_mut(c),slot,value.t,0);move_out(borrow_mut(c),val(slot,ty));invoke(borrow_mut(c),read("f_host_print"),one(slot));close_loans(borrow_mut(c));release_temporary(borrow_mut(c),original);
+ if newline{invoke(borrow_mut(c),read("rt_print_newline"),vec<num>());}
+ }
+ return val(imm(borrow_mut(c),0),1);
+}
 fn builtin<a>(c:ref_mut<a,C>,id:num)->Val {
+    if (id==17)+(id==18){return print_builtin(borrow_mut(c),id==18);}
     if 100<id { return raw_builtin(borrow_mut(c),id); }
     expect(borrow_mut(c),read("("));
     if id==1 {
@@ -1535,7 +1554,7 @@ fn stmt<a>(c:ref_mut<a,C>)->unit {
 }
 fn host_fn<a,b>(c:ref_mut<a,C>,name:read<b>,ret:num)->unit {
  let first=len(c.params);
- if same(read(name),read("arg")){vec_push(c.params,0);}
+ if same(read(name),read("arg"))+same(read(name),read("print_num")){vec_push(c.params,0);}
  if same(read(name),read("read_file"))+same(read(name),read("print")){vec_push(c.params,4);}
  if same(read(name),read("write_file")){vec_push(c.params,4);vec_push(c.params,4);}
  if same(read(name),read("command")){let ty=intern(borrow_mut(c),6,2);vec_push(c.params,ty);}
@@ -1590,6 +1609,8 @@ pub fn main()->num {
     host_fn(borrow_mut(c),read("read_file"),2);
     host_fn(borrow_mut(c),read("write_file"),0);
     host_fn(borrow_mut(c),read("print"),1);
+    host_fn(borrow_mut(c),read("print_num"),1);
+    host_fn(borrow_mut(c),read("newline"),1);
     host_fn(borrow_mut(c),read("command"),0);
     let n=host::argc();
     assert(2<n);
@@ -1611,7 +1632,8 @@ pub fn main()->num {
     let m=copy_bytes(read(f.module));
     let name=copy_bytes(read(f.name));
     let count=f.count;let result=f.ret;let first=f.first;
-    if result!=0{fail(borrow_mut(c),read("executable entry must return num"));}
+    let named_main=same(read(name),read("main"));
+    if named_main{if (result!=0)&(result!=1){fail(borrow_mut(c),read("main must return unit or num"));}}else{if result!=0{fail(borrow_mut(c),read("executable entry must return num"));}}
     if count==1{let param=load(vec_get(c.params,first));let mode=ty_mode(borrow_mut(c),param);if (ty_kind(borrow_mut(c),param)!=5)+mode{fail(borrow_mut(c),read("executable entry requires readonly argv view"));}}
     o(borrow_mut(c),read(".globl _start\n_start:\nmovq (%rsp),%rdi\nleaq 8(%rsp),%rsi\nleaq 16(%rsp,%rdi,8),%rdx\nmovq %rdi,rt_state(%rip)\nmovq %rsi,rt_state+8(%rip)\nmovq %rdx,rt_state+16(%rip)\nandq $-16,%rsp\n"));
     if count==1 {
@@ -1621,9 +1643,11 @@ pub fn main()->num {
     }
     o(borrow_mut(c),read("call "));mangle(borrow_mut(c),read(m),read(name));
     if count==1{o(borrow_mut(c),read("\nmovq %rax,%r13\nmovq %r12,%rdi\ncall rt_drop_seq\nmovq %r13,%rax"));}
-    o(borrow_mut(c),read("\nmovq %rax,%rdi\ncall rt_print_num\ncall rt_live\ntestq %rax,%rax\n"));
+    if named_main{if result==0{o(borrow_mut(c),read("\nmovq %rax,%r14\n"));}else{o(borrow_mut(c),read("\nxorq %r14,%r14\n"));}}
+    else{o(borrow_mut(c),read("\nmovq %rax,%rdi\ncall rt_print_num\nxorq %r14,%r14\n"));}
+    o(borrow_mut(c),read("call rt_live\ntestq %rax,%rax\n"));
     let balanced=label(borrow_mut(c));jump(borrow_mut(c),read("jz"),balanced);o(borrow_mut(c),read("call rt_abort\n"));mark(borrow_mut(c),balanced);
-    o(borrow_mut(c),read("call rt_shutdown\nmovl $60,%eax\nxorl %edi,%edi\nsyscall\nud2\n.bss\n.p2align 3\nrt_state: .zero 4096\n.section .note.GNU-stack,\"\",@progbits\n"));
+    o(borrow_mut(c),read("call rt_shutdown\nmovl $60,%eax\nmovq %r14,%rdi\nsyscall\nud2\n.bss\n.p2align 3\nrt_state: .zero 4096\n.section .note.GNU-stack,\"\",@progbits\n"));
     let out=bytes();
     for i in len(c.out) { push(out,load(vec_get(c.out,i))); }
     let path=host::arg(1);

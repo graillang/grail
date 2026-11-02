@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Add a quiet named `main`, optional unit result/final return and optional entry-file module,
+  plus `print`/`println` with checked call-local borrowing and numeric output. Numeric main results
+  set process status rather than being printed. Preserve the live numeric bootstrap test protocol;
+  verify seed/native parity, owner reuse after printing and implicit-return cleanup.
+- Add Grail by Example: 20 chapters, 30 verified Grail examples and 24 collapsible Rust comparisons,
+  with aligned code/output workspaces, offline search, copy buttons, themes and mobile navigation.
+  `just book` builds and opens the static book; companion recipes verify examples and tooling.
+
 - Add invariant captured-storage assignment/replacement, captured vector updates and caller-side
   guard propagation, including generic `replace<T>`. Retain opaque local frame witnesses and
   attach new captures to their real storage owners. Ignore retired access-capability history

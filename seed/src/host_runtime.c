@@ -139,3 +139,14 @@ uint64_t q_4_host_7_command(ga args) {
     for (uint64_t i=0; i<made; ++i) free(argv[i]);
     free(argv); return error;
 }
+
+uint8_t q_4_host_9_print_num(uint64_t value) {
+    unsigned char buffer[32]; size_t end=sizeof(buffer), pos=end;
+    do {buffer[--pos]=(unsigned char)('0'+value%10);value/=10;} while(value);
+    if(host_write(STDOUT_FILENO,(gv){buffer+pos,end-pos})) abort();
+    return 0;
+}
+uint8_t q_4_host_7_newline(void) {
+    if(host_write(STDOUT_FILENO,(gv){(unsigned char*)"\n",1})) abort();
+    return 0;
+}
