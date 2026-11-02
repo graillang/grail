@@ -5,6 +5,8 @@ A programming-language research project. Source files use **`.grl`**.
 We are evaluating the foundations with a [narrow source-to-native Rust seed](seed/README.md), not building
 a full compiler yet. Bootstrap v0 is reached: a [Grail-written compiler](compiler/README.md),
 built by the seed, reproduces itself byte for byte (it does not yet check ownership itself).
+An independent [Linux x86-64 native backend](compiler/NATIVE.md) also self-compiles directly
+through assembly, without translating Grail function bodies to C.
 The ambition is a small, practical systems language with fast builds, deterministic
 memory management, explicit effects, and independently checkable correctness evidence.
 Initial [seed measurements](docs/design/seed-measurements.md) cover a restricted typed IR,

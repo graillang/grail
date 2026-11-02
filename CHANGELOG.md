@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Add a Grail-written Linux x86-64 backend (`compiler/native.grl`) emitting assembly directly,
+  with System V calls, stack-slot locals, unsigned arithmetic, control flow, aggregates, typed
+  references and the existing runtime ABI. Deliver reproducible `compiler/bootstrap/native.s`;
+  native stages 2/3 are byte-identical. Verify both bootstrap routes, existing C artifact replay,
+  differential programs and native abort paths. Runtime support is compiled separately from C;
+  ownership checking, freeing and optimization remain unfinished. See `compiler/NATIVE.md`.
+
 - Reach bootstrap v0: `compiler/grailc.grl`, a Grail-written compiler to C, is built by the seed
   and reproduces itself byte for byte (stage 2 = stage 3). Commit the stage-2 output as
   `compiler/bootstrap/grailc.c` with its runtime `compiler/grail_rt.c`, and check both plus

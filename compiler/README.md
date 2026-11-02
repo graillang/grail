@@ -1,4 +1,9 @@
-# Grail-written compiler (bootstrap v0)
+# Grail-written compilers
+
+**[Direct native backend: Linux x86-64](NATIVE.md)** — Grail → assembly → executable,
+with reproducible native self-compilation. The C backend below remains a bootstrap and cross-check.
+
+## C backend (bootstrap v0)
 
 `grailc.grl` (with `lexer.grl`) is a Grail compiler written in Grail. It translates the source
 subset it is itself written in to C, and reproduces itself byte for byte.
