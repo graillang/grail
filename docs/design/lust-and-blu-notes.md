@@ -53,7 +53,7 @@ of body-hidden separate-compilation validation follows from these single-file co
    `src/borrowck/mod.rs` represent local-plus-projection places, field-sensitive initialization and
    moves. Distinct fields can be disjoint while their reference types share one lifetime label.
    Blu's snapshots exposed a current Grail frontend weakness: we reproduced acceptance of
-   `take(b,len(b))`, then fixed user-call arguments to materialize immediately. This primitive
+   `take(b,b.len())`, then fixed user-call arguments to materialize immediately. This primitive
    regression is retained in `call-values25`; general mutable-reference/field effects still need tests.
 2. **Give lifetime roles their own slots.** `src/borrowck/regions.rs` enumerates a reference's own
    region before pointee regions, plus ADT lifetime parameters and type-argument slots. Relating

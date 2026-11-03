@@ -8,17 +8,17 @@ concrete-only functions and module schema 4 record the earlier slice, not the cu
 
 ## Source surface
 
-`seed/std/core.grl` is a real source-hidden type-only library, not a module with a dummy entry:
+`lib/core.grl` is a real source-hidden type-only library, not a module with a dummy entry:
 
 ```grl
 module core;
-pub enum Option<type T> { None, Some(T) }
-pub enum Result<type T, type E> { Ok(T), Err(E) }
-pub struct Pair<type T, type U> { first: T, second: U }
+pub enum Option<T> { None, Some(T) }
+pub enum Result<T, E> { Ok(T), Err(E) }
+pub struct Pair<T, U> { first: T, second: U }
 ```
 
 Declarations distinguish lifetime parameters from type parameters explicitly. Lifetimes precede
-`type` parameters, e.g. `struct Mixed<a, type T> { span: read<a>, value: T }`. Applications use
+`type` parameters, e.g. `struct Mixed<a, T> { span: read<a>, value: T }`. Applications use
 `Mixed<a, string>` or `Result<Token<a>, string>`. Parameters are positional within their respective
 namespaces, and duplicate/reserved parameter names diagnose. Named type arguments must resolve even
 when physically unused by a phantom layout.

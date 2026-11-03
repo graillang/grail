@@ -1,3 +1,4 @@
+import { buildCompiler, assemble, execute, hostTarget, targetName } from './native.mjs';
 import { readFileSync, mkdirSync, writeFileSync, copyFileSync, rmSync } from 'node:fs';
 import { resolve, dirname, relative, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -12,8 +13,8 @@ export function sourcePath(path) {
   if (relative(source, result).startsWith('..') || result === source) throw new Error(`Invalid book source: ${path}`);
   return result;
 }
-export function loadBook() {
-  const book = JSON.parse(readFileSync(join(source, 'book.json'), 'utf8'));
+export function loadBook(manifest = join(source, 'book.json')) {
+  const book = JSON.parse(readFileSync(manifest, 'utf8'));
   for (const [items, key] of [[book.chapters, 'slug'], [book.examples, 'id']]) {
     if (!Array.isArray(items) || !items.length) throw new Error('Empty book manifest');
     const seen = new Set();
@@ -24,8 +25,11 @@ export function loadBook() {
   }
   for (const example of book.examples) {
     if ((typeof example.output === 'string') === (typeof example.diagnostic === 'string')) throw new Error(`Example ${example.id} needs exactly one output or rejection diagnostic`);
-    if (example.rust && (typeof example.rust.output === 'string') === (typeof example.rust.diagnostic === 'string')) throw new Error(`Rust comparison ${example.id} needs output or diagnostic`);
-    if (example.rust) readFileSync(sourcePath(example.rust.source));
+    if (!example.rust || typeof example.rust.source !== 'string' || typeof example.rust.note !== 'string' || !example.rust.note.trim()) throw new Error(`Example ${example.id} needs a Rust comparison with source and note`);
+    if ((typeof example.rust.output === 'string') === (typeof example.rust.diagnostic === 'string')) throw new Error(`Rust comparison ${example.id} needs output or diagnostic`);
+    readFileSync(sourcePath(example.rust.source));
+    if ((example.modules ?? []).length !== (example.rust.modules ?? []).length) throw new Error(`Example ${example.id} needs a Rust counterpart for each supporting module`);
+    for (const path of example.rust.modules ?? []) readFileSync(sourcePath(path));
     for (const path of [example.entry, ...(example.modules ?? [])]) readFileSync(sourcePath(path));
   }
   return book;
@@ -42,14 +46,15 @@ export function expand(text, book, used = new Set()) {
     const grailResult = example.diagnostic ? outcome('Expected compiler rejection', `Diagnostic contains: ${example.diagnostic}\n`, true) : outcome('Output', example.output, false);
     const command = codeBlock(`$ just book-run ${id}\n`, 'sh', 'run-command');
     const grail = `<section class="grail-column" aria-label="Grail example"><div class="code-heading"><strong>Grail</strong><span>${escape(example.entry)}</span></div>${codeBlock(code, 'grl', 'source-code')}${grailResult}${command}</section>`;
-    let rust = '', note = '';
-    if (example.rust) {
-      const r = example.rust;
-      const result = r.diagnostic ? outcome('Expected compiler rejection', `${r.diagnostic}\n`, true) : outcome('Output', r.output, false);
-      rust = `<details class="rust-column" open><summary><span class="compare-show">Compare Rust ＋</span><span class="compare-hide">Hide Rust −</span></summary><div class="code-heading"><strong>Rust</strong><span>${escape(r.source)}</span></div>${codeBlock(readFileSync(sourcePath(r.source), 'utf8'), 'rust', 'source-code')}${result}<p class="comparison-verified">Rust 2024 · checked by <code>just book-check</code></p></details>`;
-      note = `<div class="comparison-note"><strong>Notes</strong><p>${escape(r.note)}</p></div>`;
-    }
-    return `\n<figure class="example-workspace${rust ? ' has-comparison' : ''}" id="example-${id}"><figcaption>Example <span>${escape(id)}</span>${example.diagnostic ? '<em>intentional compile error</em>' : ''}</figcaption><div class="example-grid">${grail}${rust}</div>${note}</figure>\n`;
+    const r = example.rust;
+    const result = r.diagnostic ? outcome('Expected compiler rejection', `${r.diagnostic}\n`, true) : outcome('Output', r.output, false);
+    const rust = `<details class="rust-column" open><summary><span class="compare-show">Compare Rust ＋</span><span class="compare-hide">Hide Rust −</span></summary><div class="code-heading"><strong>Rust</strong><span>${escape(r.source)}</span></div>${codeBlock(readFileSync(sourcePath(r.source), 'utf8'), 'rust', 'source-code')}${result}<p class="comparison-verified">Rust 2024 · overflow checks on · panic abort · checked by <code>just book-check</code></p></details>`;
+    const note = `<div class="comparison-note"><strong>Notes</strong><p>${escape(r.note)}</p></div>`;
+    const supporting = (example.modules ?? []).map((file, i) => {
+      const other = r.modules[i];
+      return `<div class="comparison-note"><strong>Supporting module files</strong></div><div class="example-grid"><section class="grail-column"><div class="code-heading"><strong>Grail</strong><span>${escape(file)}</span></div>${codeBlock(readFileSync(sourcePath(file), 'utf8'), 'grl', 'source-code')}</section><details class="rust-column" open><summary><span class="compare-show">Compare Rust ＋</span><span class="compare-hide">Hide Rust −</span></summary><div class="code-heading"><strong>Rust</strong><span>${escape(other)}</span></div>${codeBlock(readFileSync(sourcePath(other), 'utf8'), 'rust', 'source-code')}</details></div>`;
+    }).join('');
+    return `\n<figure class="example-workspace has-comparison" id="example-${id}"><figcaption>Example <span>${escape(id)}</span>${example.diagnostic ? '<em>intentional compile error</em>' : ''}</figcaption><div class="example-grid">${grail}${rust}</div>${note}${supporting}</figure>\n`;
 
   });
 }
@@ -83,22 +88,16 @@ export function runCommand(args, options = {}) {
   if (!result.success) throw new Error(`${args[0]} failed (${result.exitCode}):\n${result.stdout.toString()}${result.stderr.toString()}`);
   return result;
 }
-function nativeCompiler() {
-  if (process.platform !== 'linux' || process.arch !== 'x64') throw new Error('Running examples currently requires Linux x86-64 with GNU as and ld. The static book can still be built/read.');
-  mkdirSync(work, { recursive: true });
-  runCommand(['as', '--64', join(root, 'compiler/bootstrap/native.s'), '-o', join(work, 'native.o')]);
-  runCommand(['ld', join(work, 'native.o'), '-o', join(work, 'native')]);
-  return join(work, 'native');
-}
-export function verifyExample(example, compiler, suppliedArgs) {
+export function verifyExample(example, compiler, suppliedArgs, target = hostTarget) {
+  targetName(target);
   if (!/^[a-z][a-z0-9-]*$/.test(example.id)) throw new Error('Invalid example id');
-  const directory = join(work, 'runs', example.id);
+  const directory = join(work, 'runs', target, example.id);
   rmSync(directory, { recursive: true, force: true });
   mkdirSync(directory, { recursive: true });
   const asm = join(directory, 'program.s');
   const prior = 'prior valid artifact\n';
   writeFileSync(asm, prior);
-  const args = [compiler, asm, sourcePath(example.entry), ...(example.modules ?? []).map(sourcePath), join(root, 'compiler/runtime.grl')];
+  const args = [compiler, '--target', target, asm, sourcePath(example.entry), ...(example.modules ?? []).map(sourcePath), join(root, 'compiler/runtime.grl')];
   const result = Bun.spawnSync(args, { cwd: root, stdout: 'pipe', stderr: 'pipe' });
   if (example.diagnostic !== undefined) {
     const diagnostic = result.stdout.toString() + result.stderr.toString();
@@ -106,32 +105,47 @@ export function verifyExample(example, compiler, suppliedArgs) {
     return diagnostic;
   }
   if (!result.success) throw new Error(`${example.id}: compilation failed\n${result.stdout}${result.stderr}`);
-  const object = join(directory, 'program.o'), exe = join(directory, 'program');
-  runCommand(['as', '--64', asm, '-o', object]);
-  runCommand(['ld', object, '-o', exe]);
-  for (const [name, contents] of Object.entries(example.fixtures ?? {})) {
-    if (resolve(directory, name) !== join(directory, name) || name.includes('..')) throw new Error('Fixture path must stay inside its scratch directory');
-    mkdirSync(dirname(join(directory, name)), { recursive: true });
-    writeFileSync(join(directory, name), contents);
-  }
-  const stdout = runCommand([exe, ...(suppliedArgs ?? example.args ?? [])], { cwd: directory }).stdout.toString();
+  const exe = assemble(asm, join(directory, 'program'), target);
+  writeFixtures(directory, example.fixtures);
+  const execution = execute(exe, suppliedArgs ?? example.args ?? [], target, { cwd: directory });
+  if (execution.error) throw execution.error;
+  if (execution.status !== 0) throw new Error(`${example.id}: execution failed (${execution.signal ?? execution.status})\n${execution.stderr}`);
+  const stdout = execution.stdout.toString();
   if (suppliedArgs === undefined && stdout !== example.output) throw new Error(`${example.id}: stdout mismatch\nexpected ${JSON.stringify(example.output)}\nreceived ${JSON.stringify(stdout)}`);
-  for (const [name, contents] of Object.entries(example.files ?? {})) if (readFileSync(join(directory, name), 'utf8') !== contents) throw new Error(`${example.id}: output file mismatch: ${name}`);
+  verifyFiles(directory, example.files, example.id);
   return stdout;
+}
+function fixturePath(directory, name) {
+  const target = resolve(directory, name);
+  const path = relative(directory, target);
+  if (!path || path.startsWith('..') || resolve(directory, path) !== join(directory, name)) throw new Error('Fixture path must stay inside its scratch directory');
+  return target;
+}
+function writeFixtures(directory, fixtures = {}) {
+  for (const [name, contents] of Object.entries(fixtures)) {
+    const path = fixturePath(directory, name);
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, contents);
+  }
+}
+function verifyFiles(directory, files = {}, label) {
+  for (const [name, contents] of Object.entries(files)) if (readFileSync(fixturePath(directory, name), 'utf8') !== contents) throw new Error(`${label}: output file mismatch: ${name}`);
 }
 export function verifyRust(example) {
   const rust = example.rust;
-  if (!rust) return;
-  const directory = join(work, 'runs', example.id);
+  const directory = join(work, 'runs', example.id, 'rust');
+  rmSync(directory, { recursive: true, force: true });
   mkdirSync(directory, { recursive: true });
   const exe = join(directory, 'rust-example');
-  const result = Bun.spawnSync(['rustc', '--edition=2024', sourcePath(rust.source), '-o', exe], { cwd: root, stdout: 'pipe', stderr: 'pipe' });
+  const result = Bun.spawnSync(['rustc', '--edition=2024', '-C', 'overflow-checks=on', '-C', 'panic=abort', sourcePath(rust.source), '-o', exe], { cwd: root, stdout: 'pipe', stderr: 'pipe' });
   if (rust.diagnostic) {
     if (result.success || !result.stderr.toString().includes(rust.diagnostic)) throw new Error(`${example.id}: expected Rust rejection ${rust.diagnostic}\n${result.stderr}`);
   } else {
     if (!result.success) throw new Error(`${example.id}: Rust compilation failed\n${result.stderr}`);
-    const stdout = runCommand([exe], { cwd: directory }).stdout.toString();
+    writeFixtures(directory, rust.fixtures);
+    const stdout = runCommand([exe, ...(rust.args ?? [])], { cwd: directory }).stdout.toString();
     if (stdout !== rust.output) throw new Error(`${example.id}: Rust stdout mismatch: ${JSON.stringify(stdout)}`);
+    verifyFiles(directory, rust.files, `${example.id}: Rust`);
   }
 }
 export function openBook(index, opener = process.env.GRAIL_BOOK_OPENER) {
@@ -139,7 +153,15 @@ export function openBook(index, opener = process.env.GRAIL_BOOK_OPENER) {
   runCommand(commands);
 }
 export function main(args) {
-  const [command = 'open', id, ...argv] = args;
+  const [command = 'open', ...rest] = args;
+  let target = hostTarget, grailOnly = false;
+  while (rest[0]?.startsWith('--')) {
+    const option = rest.shift();
+    if (option.startsWith('--target=')) target = targetName(option.slice(9));
+    else if (option === '--grail-only') grailOnly = true;
+    else throw new Error(`Unknown book option ${option}`);
+  }
+  const [id, ...argv] = rest;
   if (command === 'build' || command === 'open') {
     const index = buildBook();
     console.log(`Built ${index}`);
@@ -151,16 +173,16 @@ export function main(args) {
     if (command === 'check') buildBook();
     const selected = command === 'run' ? book.examples.filter(e => e.id === id) : book.examples;
     if (!selected.length) throw new Error(`Unknown example ${id ?? '(missing)'}; choose: ${book.examples.map(e => e.id).join(', ')}`);
-    const compiler = nativeCompiler();
+    const compiler = buildCompiler();
     for (const example of selected) {
-      const stdout = verifyExample(example, compiler, command === 'run' && argv.length ? argv : undefined);
+      const stdout = verifyExample(example, compiler, command === 'run' && argv.length ? argv : undefined, target);
       if (command === 'run') process.stdout.write(stdout);
       else {
-        if (id !== '--grail-only') verifyRust(example);
-        console.log(`✓ ${example.id}${example.diagnostic ? ' (expected rejection)' : ''}${example.rust && id !== '--grail-only' ? ' + Rust' : ''}`);
+        if (!grailOnly) verifyRust(example);
+        console.log(`✓ ${example.id}${example.diagnostic ? ' (expected rejection)' : ''}${!grailOnly ? ' + Rust' : ''}`);
       }
     }
-    if (command === 'check') console.log(`${selected.length} Grail examples${id !== '--grail-only' ? ` and ${selected.filter(e => e.rust).length} Rust comparisons` : ''} verified; stdout, file outputs and intentional rejections match.`);
+    if (command === 'check') console.log(`${selected.length} Grail examples${!grailOnly ? ` and ${selected.length} Rust comparisons` : ''} verified; stdout, file outputs and intentional rejections match.`);
   } else throw new Error('Usage: bun tools/book.mjs [open|build|check|run EXAMPLE [ARGS...]]');
 }
 if (import.meta.main) {

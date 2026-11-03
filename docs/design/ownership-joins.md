@@ -1,5 +1,8 @@
 # Conditional ownership checkpoint
 
+> Design history: seed/C prototype details below are historical. The authoritative implementation
+> and current build/test commands are in [compiler/README.md](../../compiler/README.md).
+
 The checker joins initialization by intersection and cleanup obligations by union.
 A binding or field moved on only one continuing branch cannot subsequently be read,
 borrowed or moved. Disjoint, definitely initialized fields remain usable. Loan roots

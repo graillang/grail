@@ -136,7 +136,7 @@ def read_origin(raw: Any, params: tuple[Param, ...]) -> Origin:
         raise Rejected("origin parameter out of bounds")
     path = read_path(raw["path"])
     kind = raw["kind"]
-    expected = {"storage": "bytes", "loan": "view", "prefix": "var"}
+    expected = {"storage": "bytes", "loan": "view", "prefix": 'mut'}
     if kind not in expected or params[i].ty.at(path).kind != expected[kind]:
         raise Rejected("origin kind/type mismatch")
     return Origin(i, path, kind)
@@ -188,7 +188,7 @@ def decode(raw: Any) -> dict[str, Summary]:
             for origin in sets[index]:
                 source_ty = params[origin.parameter].ty.at(origin.path)
                 if origin.kind == "prefix":
-                    if out_ty.kind != "var" or out_ty != source_ty:
+                    if out_ty.kind != 'mut' or out_ty != source_ty:
                         raise Rejected("generic prefix output mismatch")
                 elif out_ty.kind != "view":
                     raise Rejected("view route output mismatch")
@@ -197,7 +197,7 @@ def decode(raw: Any) -> dict[str, Summary]:
             for path, leaf in ty.leaves():
                 if (
                     "*" not in path
-                    and leaf.kind in {"view", "var"}
+                    and leaf.kind in {"view", 'mut'}
                     and not flows.get(path)
                 ):
                     raise Rejected("missing non-container result provenance")

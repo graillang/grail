@@ -9,17 +9,17 @@ fn main() {
             for i in 0..fields {
                 s.push_str(&format!("p{i}:read<a>,"));
             }
-            s.push_str("}fn update<outer,data>(p:ref_mut<outer,Cursor<data>>,value:read<data>)->num{exchange(borrow_mut(p.p0),value);return len(read(p.p0));}pub fn run(n:num)->num{");
+            s.push_str("}fn update<outer,data>(p:ref_mut<outer,Cursor<data>>,value:read<data>)->num{exchange(borrow_mut(p.p0),value);return (&p.p0).len();}pub fn run(n:num)->num{");
             for i in 0..fields {
-                s.push_str(&format!("let b{i}=bytes();push(b{i},{i});"));
+                s.push_str(&format!("let b{i}=bytes[];(b{i}).push({i});"));
             }
             s.push_str("let cursor=Cursor{");
             for i in 0..fields {
-                s.push_str(&format!("p{i}:read(b{i}),"));
+                s.push_str(&format!("p{i}:&(b{i}),"));
             }
-            s.push_str("};var sum=0;");
+            s.push_str("};mut sum=0;");
             for i in 0..count {
-                s.push_str(&format!("for i{i} in n{{sum=sum+update(borrow_mut(cursor),read(b0));}}"));
+                s.push_str(&format!("for i{i} in n{{sum=sum+update(borrow_mut(cursor),&b0);}}"));
             }
             s.push_str("return sum;}");
             let t = Instant::now();

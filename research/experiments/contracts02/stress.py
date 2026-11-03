@@ -70,7 +70,7 @@ def concrete_client(
             elif op == "call":
                 args = []
                 for arg in step["args"]:
-                    name = arg["var"]
+                    name = arg['mut']
                     if owners.get(name) is None:
                         return False, len(states)
                     args.append(Concrete(Ty("bytes"), f"{name}@{owners[name]}"))
@@ -80,17 +80,17 @@ def concrete_client(
                     next_states.append((owners.copy(), branch))
                 continue
             elif op == "use":
-                if step["var"] not in values:
+                if step['mut'] not in values:
                     return False, len(states)
-                for atoms in values[step["var"]].dependencies().values():
+                for atoms in values[step['mut']].dependencies().values():
                     for atom in atoms:
                         name, epoch = atom.rsplit("@", 1)
                         if owners.get(name) != int(epoch):
                             return False, len(states)
             elif op == "drop":
-                if step["var"] not in values:
+                if step['mut'] not in values:
                     return False, len(states)
-                del values[step["var"]]
+                del values[step['mut']]
             else:
                 raise ValueError("unsupported stress client operation")
             next_states.append((owners, values))

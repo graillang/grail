@@ -1,41 +1,66 @@
 unsafe module runtime;
 
+// Native system-call numbers stay behind this portable runtime boundary.
+// Operation IDs are stable runtime identifiers, not the target's Linux syscall ABI.
+fn rt_syscall(n:num,a:num,b:num,c:num)->num {
+    if raw_target()==0{return raw_syscall(n,a,b,c);}
+    if n==0{return raw_syscall(63,a,b,c);}
+    if n==1{return raw_syscall(64,a,b,c);}
+    if n==2{return raw_syscall4(56,wrapping_sub(0,100),a,b,c);}
+    if n==3{return raw_syscall(57,a,b,c);}
+    if n==11{return raw_syscall(215,a,b,c);}
+    if n==27{return raw_syscall(232,a,b,c);}
+    if n==39{return raw_syscall(172,a,b,c);}
+    if n==57{return raw_syscall(220,17,0,0);}
+    if n==59{return raw_syscall(221,a,b,c);}
+    if n==60{return raw_syscall(93,a,b,c);}
+    if n==61{return raw_syscall(260,a,b,c);}
+    if n==62{return raw_syscall(129,a,b,c);}
+    return wrapping_sub(0,38);
+}
+
 // Trusted native runtime, entirely Grail. Raw intrinsics below are the compiler/OS boundary.
 // All runtime values are words. Sequence = {data,length,capacity}; allocation header = {class,link}.
 // Process state: argc,argv,envp,live allocation count,arena chain; allocator bins start at byte 256.
 // Freed blocks return to segregated free lists; mapped arenas are unmapped by rt_shutdown.
 
 fn rt_abort()->num {
-    pid :=raw_syscall(39,0,0,0);
-    raw_syscall(62,pid,6,0);
-    raw_syscall(60,134,0,0);
+    pid :=rt_syscall(39,0,0,0);
+    rt_syscall(62,pid,6,0);
+    rt_syscall(60,134,0,0);
     return 0;
 }
 fn rt_error(n:num)->num { return 18446744073709547520<n; }
 fn rt_div(n:num,d:num)->num {
     if d==0 { rt_abort(); }
-    var q=0; var r=n;
+    mut q=0; mut r=n;
     while (r<d)==0 {
-        var m=d; var k=1;
-        while ((r<m+m)==0)&((m+m<m)==0) { m=m+m; k=k+k; }
+        mut m=d; mut k=1;
+        while ((r<wrapping_add(m,m))==0)&((wrapping_add(m,m)<m)==0) { m=m+m; k=k+k; }
         r=r-m; q=q+k;
     }
     return q;
 }
-fn rt_alloc(n:num)->num {
+// The allocator state is shared by workers; every mutation is serialized.
+// This lock uses reserved process-state storage, never allocates or suspends while held.
+fn rt_allocator_lock()->num {lock:=raw_state()+64;while raw_atomic_cas(lock,0,1)!=0{}return 0;}
+fn rt_allocator_unlock()->num {raw_atomic_store_release(raw_state()+64,0);return 0;}
+fn rt_alloc(n:num)->num {rt_allocator_lock();p:=rt_alloc_unlocked(n);rt_allocator_unlock();return p;}
+fn rt_free(p:num)->num {rt_allocator_lock();rt_free_unlocked(p);rt_allocator_unlock();return 0;}
+fn rt_alloc_unlocked(n:num)->num {
     state :=raw_state();
     if 1152921504606846976<n { rt_abort(); }
-    var size=32; var bin=0;
+    mut size=32; mut bin=0;
     while size<n+16 { size=size*2; bin=bin+1; }
     head :=state+256+bin*8;
-    var block=raw_load(head);
+    mut block=raw_load(head);
     if block!=0 {
         raw_store(head,raw_load(block+8));
     } else {
         bump :=state+768+bin*8;
         left :=state+1280+bin*8;
         if raw_load(left)==0 {
-            var mapsize=1048576;
+            mut mapsize=1048576;
             if mapsize<size+16 { mapsize=size+16; }
             arena :=raw_map(mapsize);
             if rt_error(arena) { rt_abort(); }
@@ -52,12 +77,12 @@ fn rt_alloc(n:num)->num {
     }
     raw_store(block+8,1);
     ptr :=block+16;
-    var i=0;
+    mut i=0;
     while i<size-16 { raw_store(ptr+i,0); i=i+8; }
     raw_store(state+24,raw_load(state+24)+1);
     return ptr;
 }
-fn rt_free(ptr:num)->num {
+fn rt_free_unlocked(ptr:num)->num {
     if ptr==0 { return 0; }
     state :=raw_state(); block :=ptr-16;
     if raw_load(block+8)!=1 { rt_abort(); }
@@ -65,25 +90,25 @@ fn rt_free(ptr:num)->num {
     // Classes of at least 512 KiB occupy their own arena. Return those mappings to the OS
     // immediately; smaller freed objects remain reusable in the segregated slab caches.
     if (size<524288)==0 {
-        arena :=ptr-32; var link=state+32;
+        arena :=ptr-32; mut link=state+32;
         while raw_load(link)!=arena { next :=raw_load(link); if next==0 { rt_abort(); } link=next; }
         length :=raw_load(arena+8); raw_store(link,raw_load(arena));
         raw_store(state+24,raw_load(state+24)-1);
-        err :=raw_syscall(11,arena,length,0); if rt_error(err) { rt_abort(); } return 0;
+        err :=rt_syscall(11,arena,length,0); if rt_error(err) { rt_abort(); } return 0;
     }
-    var n=32; var bin=0;
+    mut n=32; mut bin=0;
     while n<size { n=n*2; bin=bin+1; }
     head :=state+256+bin*8;
     raw_store(block+8,raw_load(head)); raw_store(head,block);
     raw_store(state+24,raw_load(state+24)-1);
     return 0;
 }
-fn rt_live()->num { return raw_load(raw_state()+24); }
+fn rt_live()->num {rt_allocator_lock();n:=raw_load(raw_state()+24);rt_allocator_unlock();return n;}
 fn rt_shutdown()->num {
-    state :=raw_state(); var arena=raw_load(state+32);
+    state :=raw_state(); mut arena=raw_load(state+32);
     while arena!=0 {
         next :=raw_load(arena); size :=raw_load(arena+8);
-        raw_syscall(11,arena,size,0); arena=next;
+        rt_syscall(11,arena,size,0); arena=next;
     }
     raw_store(state+32,0);
     return 0;
@@ -92,10 +117,10 @@ fn rt_new()->num { return rt_alloc(24); }
 fn rt_push(s:num,v:num)->num {
     n :=raw_load(s+8); cap :=raw_load(s+16);
     if n==cap {
-        var capacity=cap*2; if capacity==0 { capacity=8; }
+        mut capacity=cap*2; if capacity==0 { capacity=8; }
         if 144115188075855872<capacity { rt_abort(); }
         old :=raw_load(s); ptr :=rt_alloc(capacity*8);
-        var i=0; while i<n { raw_store(ptr+i*8,raw_load(old+i*8)); i=i+1; }
+        mut i=0; while i<n { raw_store(ptr+i*8,raw_load(old+i*8)); i=i+1; }
         rt_free(old); raw_store(s,ptr); raw_store(s+16,capacity);
     }
     raw_store(raw_load(s)+n*8,v); raw_store(s+8,n+1); return 0;
@@ -119,12 +144,12 @@ fn rt_slice(s:num,a:num,b:num)->num {
 }
 fn rt_view(s:num)->num { return rt_slice(s,0,raw_load(s+8)); }
 fn rt_append(dst:num,src:num)->num {
-    n :=raw_load(src+8); var i=0;
+    n :=raw_load(src+8); mut i=0;
     while i<n { rt_push(dst,raw_load(raw_load(src)+i*8)); i=i+1; } return 0;
 }
 fn rt_copy(src:num)->num { dst :=rt_new(); rt_append(dst,src); return dst; }
 fn rt_lit(ptr:num,n:num)->num {
-    s :=rt_new(); var i=0;
+    s :=rt_new(); mut i=0;
     while i<n { rt_push(s,raw_byte(ptr+i)); i=i+1; } return s;
 }
 fn rt_rec(n:num)->num {
@@ -138,39 +163,40 @@ fn rt_drop_seq(s:num)->num {
     if s!=0 { rt_free(raw_load(s)); rt_free(s); } return 0;
 }
 fn rt_pack(s:num)->num {
-    n :=raw_load(s+8); buf :=rt_alloc(n+1); var i=0;
+    n :=raw_load(s+8); buf :=rt_alloc(n+1); mut i=0;
     while i<n { raw_putbyte(buf+i,raw_load(raw_load(s)+i*8)); i=i+1; } return buf;
 }
 fn rt_cstr(s:num)->num {
-    buf :=rt_pack(s); n :=raw_load(s+8); var i=0;
+    buf :=rt_pack(s); n :=raw_load(s+8); mut i=0;
     while i<n { if raw_byte(buf+i)==0 { rt_free(buf); return 0; } i=i+1; }
     return buf;
 }
+fn f_host_target()->num {return raw_target();}
 fn f_host_argc()->num { return raw_load(raw_state()); }
 fn f_host_arg(i:num)->num {
     if (i<f_host_argc())==0 { rt_abort(); }
-    p :=raw_load(raw_load(raw_state()+8)+i*8); var n=0;
+    p :=raw_load(raw_load(raw_state()+8)+i*8); mut n=0;
     while raw_byte(p+n)!=0 { n=n+1; } return rt_lit(p,n);
 }
 fn f_host_read_file(path:num)->num {
     name :=rt_cstr(path); rt_free(path); if name==0 { rt_abort(); }
-    fd :=raw_syscall(2,name,0,0); rt_free(name); if rt_error(fd) { rt_abort(); }
+    fd :=rt_syscall(2,name,524288,0); rt_free(name); if rt_error(fd) { rt_abort(); }
     buf :=rt_alloc(4096); out :=rt_new();
     while 1 {
-        n :=raw_syscall(0,fd,buf,4096);
+        n :=rt_syscall(0,fd,buf,4096);
         if n==0 { break; }
-        if n==0-4 { continue; }
+        if n==wrapping_sub(0,4) { continue; }
         if rt_error(n) { rt_abort(); }
-        var i=0; while i<n { rt_push(out,raw_byte(buf+i)); i=i+1; }
+        mut i=0; while i<n { rt_push(out,raw_byte(buf+i)); i=i+1; }
     }
-    raw_syscall(3,fd,0,0); rt_free(buf); return out;
+    rt_syscall(3,fd,0,0); rt_free(buf); return out;
 }
 fn rt_write_all(fd:num,ptr:num,n:num)->num {
-    var i=0;
+    mut i=0;
     while i<n {
-        r :=raw_syscall(1,fd,ptr+i,n-i);
-        if r==0-4 { continue; }
-        if rt_error(r) { return 0-r; }
+        r :=rt_syscall(1,fd,ptr+i,n-i);
+        if r==wrapping_sub(0,4) { continue; }
+        if rt_error(r) { return wrapping_sub(0,r); }
         if r==0 { return 5; }
         i=i+r;
     }
@@ -178,12 +204,12 @@ fn rt_write_all(fd:num,ptr:num,n:num)->num {
 }
 fn f_host_write_file(path:num,data:num)->num {
     name :=rt_cstr(path); rt_free(path); if name==0 { rt_free(data); return 22; }
-    fd :=raw_syscall(2,name,577,438); rt_free(name);
-    if rt_error(fd) { rt_free(data); return 0-fd; }
+    fd :=rt_syscall(2,name,524865,438); rt_free(name);
+    if rt_error(fd) { rt_free(data); return wrapping_sub(0,fd); }
     packed :=rt_pack(data); result :=rt_write_all(fd,packed,rt_len(data));
-    closed :=raw_syscall(3,fd,0,0); rt_free(packed); rt_free(data);
+    closed :=rt_syscall(3,fd,0,0); rt_free(packed); rt_free(data);
     if result!=0 { return result; }
-    if rt_error(closed) { return 0-closed; } return 0;
+    if rt_error(closed) { return wrapping_sub(0,closed); } return 0;
 }
 fn f_host_print(data:num)->num {
     packed :=rt_pack(data); err :=rt_write_all(1,packed,rt_len(data)); rt_free(packed); rt_free(data);
@@ -191,12 +217,17 @@ fn f_host_print(data:num)->num {
 }
 // Print the numeric entry result without libc, allocation escape or unchecked formatting.
 fn rt_pow(base:num,exponent:num)->num {
- var factor=base;var power=exponent;var result=1;
- while power!=0{if power%2{result=result*factor;}power=rt_div(power,2);factor=factor*factor;}
+ mut factor=base;mut power=exponent;mut result=1;
+ while power!=0{if power%2{result=result*factor;}power=rt_div(power,2);if power!=0{factor=factor*factor;}}
+ return result;
+}
+fn rt_wrapping_pow(base:num,exponent:num)->num {
+ mut factor=base;mut power=exponent;mut result=1;
+ while power!=0{if power%2{result=wrapping_mul(result,factor);}power=rt_div(power,2);if power!=0{factor=wrapping_mul(factor,factor);}}
  return result;
 }
 fn rt_print_number(n:num,newline:num)->num {
-    buf :=rt_alloc(32); var pos=31; var remaining=n;
+    buf :=rt_alloc(32); mut pos=31; mut remaining=n;
     if newline{pos=30;raw_putbyte(buf+31,10);}
     while 1 {
         raw_putbyte(buf+pos,48+remaining%10); remaining=rt_div(remaining,10);
@@ -212,14 +243,16 @@ fn rt_print_newline()->num {
 }
 fn f_host_print_num(n:num)->num {return rt_print_number(n,0);}
 fn f_host_newline()->num {return rt_print_newline();}
-fn rt_exec(file:num,argv:num)->num {
+// Build all executable names in the parent. A fork child must never acquire an
+// allocator lock inherited while another worker owned it.
+fn rt_exec_paths(file:num)->num {
+    paths :=rt_new();rt_push(paths,file);
     env :=raw_load(raw_state()+16);
-    var i=0; var slash=0;
+    mut i=0; mut slash=0;
     while raw_byte(file+i)!=0 { if raw_byte(file+i)==47 { slash=1; } i=i+1; }
-    direct :=raw_syscall(59,file,argv,env);
-    if slash { return direct; }
+    if slash { return paths; }
     // Search PATH (including empty entries as the current directory).
-    var ep=env; var path=0;
+    mut ep=env; mut path=0;
     while raw_load(ep)!=0 {
         p :=raw_load(ep);
         if raw_byte(p)==80 { if raw_byte(p+1)==65 { if raw_byte(p+2)==84 {
@@ -227,7 +260,7 @@ fn rt_exec(file:num,argv:num)->num {
         } } }
         ep=ep+8;
     }
-    var fallback=0;
+    mut fallback=0;
     if path==0 {
         fallback=rt_alloc(14);
         // /bin:/usr/bin
@@ -236,21 +269,30 @@ fn rt_exec(file:num,argv:num)->num {
         raw_putbyte(fallback+8,114); raw_putbyte(fallback+9,47); raw_putbyte(fallback+10,98); raw_putbyte(fallback+11,105);
         raw_putbyte(fallback+12,110); path=fallback;
     }
-    var start=0;
+    mut start=0;
     while 1 {
-        var end=start;
+        mut end=start;
         while raw_byte(path+end)!=0 { if raw_byte(path+end)==58 { break; } end=end+1; }
-        len :=end-start; candidate :=rt_alloc(len+i+2); var j=0;
+        len :=end-start; candidate :=rt_alloc(len+i+2); mut j=0;
         while j<len { raw_putbyte(candidate+j,raw_byte(path+start+j)); j=j+1; }
         if len!=0 { raw_putbyte(candidate+j,47); j=j+1; }
-        var k=0; while k<i { raw_putbyte(candidate+j+k,raw_byte(file+k)); k=k+1; }
-        raw_syscall(59,candidate,argv,env); rt_free(candidate);
+        mut k=0; while k<i { raw_putbyte(candidate+j+k,raw_byte(file+k)); k=k+1; }
+        rt_push(paths,candidate);
         if raw_byte(path+end)==0 { break; } start=end+1;
     }
-    rt_free(fallback); return direct;
+    rt_free(fallback); return paths;
+}
+// No allocations, frees, runtime locks or cleanup in the post-fork child.
+fn rt_exec(paths:num,argv:num)->num {
+    env :=raw_load(raw_state()+16);n :=rt_len(paths);mut i=0;
+    while i<n{rt_syscall(59,rt_at(paths,i),argv,env);i+=1;}return 0;
+}
+fn rt_drop_exec_paths(paths:num)->num {
+    n :=rt_len(paths);mut i=1;while i<n{rt_free(rt_at(paths,i));i+=1;}
+    rt_drop_seq(paths);return 0;
 }
 fn f_host_command(args:num)->num {
-    n :=rt_len(args); var result=278; var made=0;
+    n :=rt_len(args); mut result=278; mut made=0;
     argv :=rt_alloc((n+1)*8);
     if n!=0 {
         while made<n {
@@ -258,33 +300,35 @@ fn f_host_command(args:num)->num {
             raw_store(argv+made*8,p); made=made+1;
         }
         if made==n {
-            child :=raw_syscall(57,0,0,0);
+            paths :=rt_exec_paths(raw_load(argv));
+            child :=rt_syscall(57,0,0,0);
             if child==0 {
-                rt_exec(raw_load(argv),argv); raw_syscall(60,127,0,0);
+                rt_exec(paths,argv); rt_syscall(60,127,0,0);
             }
-            if rt_error(child) { result=256-child; } else {
-                status :=rt_alloc(8); var waited=0;
+            if rt_error(child) { result=256+wrapping_sub(0,child); } else {
+                status :=rt_alloc(8); mut waited=0;
                 while 1 {
-                    waited=raw_syscall(61,child,status,0);
-                    if waited!=0-4 { break; }
+                    waited=rt_syscall(61,child,status,0);
+                    if waited!=wrapping_sub(0,4) { break; }
                 }
-                if rt_error(waited) { result=256-waited; } else {
+                if rt_error(waited) { result=256+wrapping_sub(0,waited); } else {
                     code :=raw_load(status); sig :=code&127;
                     if sig!=0 { result=128+sig; } else { result=rt_div(code,256)&255; }
                 }
                 rt_free(status);
             }
+            rt_drop_exec_paths(paths);
         }
     }
-    var i=0; while i<made { rt_free(raw_load(argv+i*8)); i=i+1; } rt_free(argv);
+    mut i=0; while i<made { rt_free(raw_load(argv+i*8)); i=i+1; } rt_free(argv);
     i=0; while i<n { rt_drop_seq(rt_at(args,i)); i=i+1; } rt_drop_seq(args);
     return result;
 }
 // Text is UTF-8 even when its source is binary I/O or a byte view.
 fn rt_utf8(s:num)->num {
-    n :=rt_len(s);var i=0;
+    n :=rt_len(s);mut i=0;
     while i<n{
-        b :=rt_at(s,i);var count=0;
+        b :=rt_at(s,i);mut count=0;
         if b<128{i=i+1;continue;}
         if (193<b)&(b<224){count=2;}
         if (223<b)&(b<240){count=3;}
@@ -296,7 +340,7 @@ fn rt_utf8(s:num)->num {
         if (b==237)&(159<second){rt_abort();}
         if (b==240)&(second<144){rt_abort();}
         if (b==244)&(143<second){rt_abort();}
-        var j=2;
+        mut j=2;
         while j<count{next :=rt_at(s,i+j);if (next<128)+(191<next){rt_abort();}j=j+1;}
         i=i+count;
     }
@@ -305,3 +349,22 @@ fn rt_utf8(s:num)->num {
 fn rt_text(s:num)->num {rt_utf8(s);return rt_copy(s);}
 fn rt_string_lit(ptr:num,n:num)->num {s :=rt_lit(ptr,n);rt_utf8(s);return s;}
 fn rt_append_text(dst:num,src:num)->num {rt_utf8(src);return rt_append(dst,src);}
+
+// Opaque atomic words. Public safe types never expose these numeric addresses.
+fn rt_atomic_new(value:num)->num {p:=rt_alloc(8);raw_atomic_store(p,value);return p;}
+fn rt_atomic_load(p:num)->num {return raw_atomic_load(p);}
+fn rt_atomic_load_relaxed(p:num)->num {return raw_atomic_load_relaxed(p);}
+fn rt_atomic_load_acquire(p:num)->num {return raw_atomic_load_acquire(p);}
+fn rt_atomic_store(p:num,value:num)->num {raw_atomic_store(p,value);return 0;}
+fn rt_atomic_store_relaxed(p:num,value:num)->num {raw_atomic_store_relaxed(p,value);return 0;}
+fn rt_atomic_store_release(p:num,value:num)->num {raw_atomic_store_release(p,value);return 0;}
+fn rt_atomic_compare_exchange(p:num,expected:num,value:num)->num {return raw_atomic_cas(p,expected,value);}
+fn rt_atomic_fetch_add(p:num,value:num)->num {
+    mut old=raw_atomic_load(p);while true{next:=wrapping_add(old,value);observed:=raw_atomic_cas(p,old,next);if observed==old{return old;}old=observed;}return 0;
+}
+fn rt_atomic_fetch_sub(p:num,value:num)->num {
+    mut old=raw_atomic_load(p);while true{next:=wrapping_sub(old,value);observed:=raw_atomic_cas(p,old,next);if observed==old{return old;}old=observed;}return 0;
+}
+fn rt_atomic_swap(p:num,value:num)->num {
+    mut old=raw_atomic_load(p);while true{observed:=raw_atomic_cas(p,old,value);if observed==old{return old;}old=observed;}return 0;
+}

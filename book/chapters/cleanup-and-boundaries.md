@@ -12,16 +12,16 @@ small slabs for reuse, while large single-object arenas are released immediately
 
 ## What this book does not promise
 
-- The native target is Linux x86-64, with GNU assembler/linker and at most six parameters per call.
-- There is no optimizer, implicit module loading, portable target, closure/async system or general
-  trait-based generic programming covered here.
+- The native targets are Linux x86-64, ARM64 and RISC-V 64, with at most six word parameters per call.
+- There is no optimizing middle end, implicit module loading, async/task runtime or general
+  trait system covered here. CPU support does not imply support for macOS or Windows.
 - Abort paths, including failed assertions and `!` on an error, do not unwind or run normal cleanup.
 - Borrow checking intentionally rejects some valid programs. Whole-frame guards, weak updates
   and opaque external invariant boundaries are conservative.
 - The Grail-written unsafe runtime and compiler intrinsics form a trusted boundary. The rejection
   tests and self-compilation checks are not a proof of language or machine-code soundness.
-- The older C bootstrap and Rust seed are independent recovery/checking routes, not dependencies
-  of the direct native runtime.
+- The Grail-written compiler is authoritative. Only generated assembly bootstraps are retained;
+  the duplicate Rust seed and unchecked C compiler have been removed.
 
 ## Where to go next
 
@@ -31,3 +31,6 @@ Design sketches may describe things the current compiler does not implement.
 
 **Try it:** add an owned temporary before each early exit in a small program. Run the book checks
 and the native conformance test to keep cleanup and ownership behavior observable.
+
+Temporary owned arguments to a method expression statement end with that statement. Named owners
+still follow lexical cleanup, including early returns and loop exits.

@@ -384,7 +384,7 @@ def main() -> None:
             }
         )
     # A valid schema does not certify that a producer's memory contract describes its body.
-    honest_preserve = procedure("clear", [{"list": {"var": "T"}}], ["mut"], "unit", [])
+    honest_preserve = procedure("clear", [{"list": {'mut': "T"}}], ["mut"], "unit", [])
     old = make(Ty.parse({"list": "view"}), "old", 1)
     actual, post = run(honest_preserve, [old], {"clear": honest_preserve}, iter(()))
     claimed, claimed_post = decoded["clear"].apply([abstract(old)])

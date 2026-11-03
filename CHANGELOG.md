@@ -2,7 +2,61 @@
 
 ## Unreleased
 
-- Replace `let` with immutable `:=` declarations and require `var` for owned-storage mutation
+- Add explicit user-defined interfaces, concrete implementations, checked generic bounds and
+  static method dispatch, including module-qualified calls and method values. Check ownership
+  and lifetime contracts; reject overlapping/orphan implementations and unsafe-runtime exposure.
+  Generic interfaces, associated types, blanket implementations and dynamic dispatch remain absent.
+
+- Add typed capture-free function values (`fn(T)->U`), generic callbacks, returned function
+  values, indirect calls and explicit generic function items (`identity<num>`). Preserve
+  callable lifetime/return-origin contracts; capturing closures remain in progress.
+- Add checked structural `T:Send+Share` bounds and opaque `atomic<num>` with sequentially
+  consistent operations, explicit valid load/store orderings and modular fetch arithmetic.
+  Atomic receiver loans prevent argument evaluation from moving or replacing their owner.
+  ARM64 uses exclusive operations/barriers; RISC-V now explicitly requires RV64IMA / LP64.
+- Serialize runtime allocation and prepare executable paths before fork, keeping allocations
+  and locks out of the child. Runtime file descriptors are close-on-exec. These are concurrency
+  prerequisites, not a claim that worker tasks or colourless I/O are implemented.
+
+- Audit all 32 Rust/Grail book pairs: remove unnecessary entry-module headers, use current
+  collection literals, pair separate module files in both languages, align fail-fast I/O behavior,
+  exercise Unicode argv byte lengths, and clarify ownership, truth-value and arithmetic differences.
+  Rust verification now explicitly enables overflow checks and abort-on-panic; supporting modules
+  require a checked counterpart instead of displaying an unpaired Grail-only snippet.
+
+- Make the Grail-written compiler the sole language implementation: remove the Rust seed and
+  unchecked C compiler/runtime/bootstrap, migrate maintained examples/library sources and 149
+  language regression cases, and replace duplicate compiler tests/builds with seed-free tooling.
+- Add direct ARM64 and RISC-V 64 Linux assembly lowering alongside x86-64, native syscall/ABI
+  handling, target-default self-hosting, executable cross tests and verified compressed bootstraps.
+  Add explicit `--target` selection and `--overflow=checked|wrap`; wrapping opts out of user
+  arithmetic checks only, retaining runtime allocation/arithmetic, bounds and ownership guards.
+- Extend the book runner to native/cross Linux targets without a Rust seed or C backend. CPU
+  support does not imply macOS or Windows support; those operating systems are not implemented.
+
+- Unify collection expressions: add `bytes[...]` / `vec<T>[...]` literals and postfix `.push`,
+  `.pop`, `.len`, `.copy`, `.text` and string `.append`; use `[i]`, `&v[i]` and `&mut v[i]`
+  for vector access as well as byte indexing. Remove old free collection helpers. Add reserved
+  `true` / `false` truth literals and bare uppercase generic parameters (`identity<T>`, `replace<a,T>`),
+  retaining checked ownership and universal generic-body validation. Method-statement argument
+  temporaries end at the full statement. Migrate the book and compilers.
+
+- Unify mutable declarations and borrowing around `mut`: replace `var` with `mut`, and byte-view
+  `read(x)` / `mut(x)` with `&x` / `&mut x`. Replace `at` and `slice` calls with byte indexing
+  `x[i]` and half-open `x[start:end]`, including omitted bounds. Indexing automatically borrows
+  byte storage readonly and preserves borrow, evaluation-order and bounds checks. Migrate the
+  maintained compilers, examples, tests and book; remove old builtin routes and regenerate bootstraps.
+
+- Complete Rust comparisons for all 32 book examples, including control flow, modules, arguments,
+  files and commands. Require comparison coverage and verify independent Rust arguments, fixtures
+  and file outputs in isolated scratch directories.
+
+- Make ordinary `num` addition, subtraction, multiplication and powers (including compound
+  assignments) abort on overflow/underflow in every build profile across native, C and LLVM.
+  Add explicit `wrapping_add`, `wrapping_sub`, `wrapping_mul` and `wrapping_pow` operations;
+  migrate modular hashes and syscall error handling, update the book and regenerate both bootstraps.
+
+- Replace `let` with immutable `:=` declarations and require `mut` for owned-storage mutation
   and mutable borrowing. Fixed explicit mutable capabilities may still write their referents.
   Migrate the maintained Grail compilers, source fixtures and book; regenerate both bootstraps.
 - Add unsigned division, wrapping right-associative `**`, and numeric compound assignments

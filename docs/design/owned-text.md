@@ -1,5 +1,8 @@
 # Owned UTF-8 text checkpoint
 
+> Design history: seed/C prototype details below are historical. The authoritative implementation
+> and current build/test commands are in [compiler/README.md](../../compiler/README.md).
+
 2026-10-30. An extension of [heap byte ownership](heap-ownership.md), not complete strings,
 generic collections or self-hosting.
 
@@ -10,16 +13,16 @@ generic collections or self-hosting.
 - A quoted literal constructs an owned string. Source decoding supports `\n`, `\r`, `\t`, `\0`,
   `\\`, `\"` and `\xHH`. Decoded UTF-8 is checked in the source frontend **and** in the typed-IR
   checker, so directly constructing a bad literal IR cannot bypass the invariant.
-- `text(storage_or_view)` explicitly validates and copies bytes into independent owned text.
+- `storage_or_view.text()` explicitly validates and copies bytes into independent owned text.
   Invalid UTF-8 aborts for now; a recoverable Result-based constructor remains a future gate.
-- `append_text(owner,storage_or_view)` validates its source and appends, preserving UTF-8.
+- `owner.append(storage_or_view)` validates its source and appends, preserving UTF-8.
   It requires the destination to be unborrowed. Direct self-append is rejected; make an explicit
   copy when needed. No hidden copy-on-write, reference counting or dynamic borrow tracking.
-- `read(string)` yields a **byte view**, not a separately typed UTF-8 `str` view. Byte slicing
-  may split a code point; converting that slice back to text validates again. `len` counts bytes.
-- Mutable byte borrowing of strings and raw byte `push` on strings are rejected. `copy_bytes`
+- `&string` yields a **byte view**, not a separately typed UTF-8 `str` view. Byte slicing
+  may split a code point; converting that slice back to text validates again. `.len()` counts bytes.
+- Mutable byte borrowing of strings and raw byte `.push(...)` on strings are rejected. `.copy()`
   can make an independently mutable byte-vector copy without weakening the string invariant.
-- `let` fixes the binding; uniquely owned contents may be modified by their operations. `var`
+- `let` fixes the binding; uniquely owned contents may be modified by their operations. `mut`
   permits rebinding (currently numerical rebinding only). This matches the already implemented
   vector operations; it is not Rust's binding-mutability syntax.
 

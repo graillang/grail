@@ -1,21 +1,21 @@
 module writeback;
 struct Cell<a>{value:read<a>}
 fn access<a,b>(r:ref_mut<a,Cell<b>>)->ref_mut<a,read<b>>{return borrow_mut(r.value);}
-fn replace<a,type T>(r:ref_mut<a,T>,value:T)->T{return exchange(r,value);}
+fn replace<a,T>(r:ref_mut<a,T>,value:T)->T{return exchange(r,value);}
 fn set<a,b>(r:ref_mut<a,read<b>>,value:read<b>)->num{old :=exchange(r,value);return 0;}
-fn add<a,b>(r:ref_mut<a,vec<read<b>>>,v:read<b>)->num{vec_push(r,v);return 0;}
-fn pop<a,b>(r:ref_mut<a,vec<read<b>>>)->read<b>{return vec_pop(r);}
+fn add<a,b>(r:ref_mut<a,vec<read<b>>>,v:read<b>)->num{r.push(v);return 0;}
+fn pop<a,b>(r:ref_mut<a,vec<read<b>>>)->read<b>{return r.pop();}
 fn field<a,b>(r:ref_mut<a,Cell<b>>,v:read<b>)->num{old :=exchange(borrow_mut(r.value),v);return 0;}
-fn vector_test<x>(v:read<x>)->num{var views =vec<read<x>>();add(borrow_mut(views),v);out :=pop(borrow_mut(views));return at(out,0);}
+fn vector_test<x>(v:read<x>)->num{mut views =vec<read<x>>[];add(borrow_mut(views),v);out :=pop(borrow_mut(views));return out[0];}
 pub fn run()->num{
- var a =bytes();push(a,1);var b =bytes();push(b,2);
- var view=read(a);old :=replace(borrow_mut(view),read(b));assert(at(old,0)==1);assert(at(view,0)==2);
- drop(old);drop(view);push(a,3);push(b,4);
- var next=read(a);set(borrow_mut(next),read(b));assert(at(next,0)==2);drop(next);
- var left=read(a);right :=read(b);left=right;assert(at(left,0)==2);drop(left);
- var cell=Cell{value:read(a)};cell.value=read(b);assert(at(cell.value,0)==2);field(borrow_mut(cell),read(a));assert(at(cell.value,0)==1);drop(cell);
- var opaque=Cell{value:read(a)};var r =access(borrow_mut(opaque));old :=exchange(r,read(b));drop(old);assert(at(opaque.value,0)==2);drop(opaque);
- var through=Cell{value:read(a)};set(access(borrow_mut(through)),read(b));assert(at(through.value,0)==2);drop(through);
- assert(vector_test(read(a))==1);
+ mut a =bytes[];a.push(1);mut b =bytes[];b.push(2);
+ mut view=&a;old :=replace(borrow_mut(view),&b);assert(old[0]==1);assert(view[0]==2);
+ drop(old);drop(view);a.push(3);b.push(4);
+ mut next=&a;set(borrow_mut(next),&b);assert(next[0]==2);drop(next);
+ mut left=&a;right :=&b;left=right;assert(left[0]==2);drop(left);
+ mut cell=Cell{value:&a};cell.value=&b;assert(cell.value[0]==2);field(borrow_mut(cell),&a);assert(cell.value[0]==1);drop(cell);
+ mut opaque=Cell{value:&a};mut r =access(borrow_mut(opaque));old :=exchange(r,&b);drop(old);assert(opaque.value[0]==2);drop(opaque);
+ mut through=Cell{value:&a};set(access(borrow_mut(through)),&b);assert(through.value[0]==2);drop(through);
+ assert(vector_test(&a)==1);
  return 626;
 }

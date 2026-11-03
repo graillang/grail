@@ -5,14 +5,18 @@ The remaining fields are still released when the record ends.
 
 {{example:records}}
 
-`vec<T>()` creates an owned vector. `vec_push` consumes an element, `vec_pop` removes and returns
-one, and `vec_get` returns a typed reference rather than copying an arbitrary element.
+`vec<T>[]` creates an empty vector; `vec<num>[10, 20, 30]` initializes one directly.
+`values.push(value)` consumes an element, and `values.pop()` removes and returns the last element.
 
 {{example:vectors}}
 
-`load(slot)` copies a numeric element. After the reference's last use, growth may reallocate the
-vector. `vec_get_mut` grants mutable element storage when exclusive access is available.
-Popping an empty vector or indexing out of bounds aborts. Vectors of owners recursively drop their
-remaining elements; callers own popped elements.
+`values[i]` copies a numeric element. `&values[i]` borrows an element slot readonly;
+`&mut values[i]` borrows it exclusively when mutable access is available. Non-numeric indexed
+values remain borrowed rather than moving owned elements out of the vector. `load(slot)` copies
+a numeric referent. After the reference's last use, growth may reallocate the vector.
 
-**Try it:** use `vec<bytes>()`, push `bytes()`, and inspect the popped buffer's length.
+Popping an empty collection or indexing out of bounds aborts. Vectors of owners recursively drop
+their remaining elements; callers own popped elements. Byte buffers use the same `.push`, `.pop`,
+`.len` and indexing syntax. Generic vector slicing is not implemented yet; byte slicing is.
+
+**Try it:** use `vec<bytes>[]`, push `bytes[]`, and inspect the popped buffer's length.

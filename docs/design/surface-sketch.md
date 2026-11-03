@@ -7,7 +7,7 @@ The [follow-up competition](memory-model-competition.md) compares three access s
 capability contexts; the `&` / `&mut` and explicit argument conventions here are not commitments.
 
 Conventions across examples:
-- `let` immutable, `var` mutable; by-value ownership moves nontrivial values, with no implicit clone.
+- `let` immutable, `mut` mutable; by-value ownership moves nontrivial values, with no implicit clone.
 - `&T` / `&mut T` are shared/exclusive loans; no named lifetime variables. Calls use explicit loans.
 - `[T]` is generic application, `Slice[T]` a scoped slice view, `.f()` ordinary-function notation.
 - `fn(x) { ... }` is a closure; capture ownership/effects must be checked, never guessed unsafely.
@@ -58,7 +58,7 @@ inputs if trapping counts as failure. Explicit wrapping arithmetic is a separate
 ## 4. Mutation and ownership
 
 ```grl
-var xs = Vec[U32].new(mem)
+mut xs = Vec[U32].new(mem)
 xs.push(10)?
 let ys = xs                  // ownership transfer
 // xs.len()                  // rejected: moved
@@ -66,7 +66,7 @@ let ys = xs                  // ownership transfer
 
 `mem` is an allocator capability supplied by the surrounding function. Mutation methods request
 exclusive access by a declared receiver convention; the exact receiver sugar remains a design choice.
-Without such sugar, write `push(&mut xs, 10)?`. No method may silently clone to make a call legal.
+Without such sugar, write `(&mut xs).push(10)?`. No method may silently clone to make a call legal.
 
 ## 5. Shared/mutable borrowing, no lifetime names
 
@@ -90,7 +90,7 @@ The origin summary is part of the checked library interface, even if inferred an
 
 ```grl
 struct Node { value: U32, edges: Vec[Id[Node]] }
-var graph = Arena[Node].new(mem)
+mut graph = Arena[Node].new(mem)
 let a = graph.insert(Node { value: 7, edges: Vec.new(mem) })?
 let b = graph.insert(Node { value: 9, edges: Vec.new(mem) })?
 graph.get_mut(a)?.edges.push(b)?
@@ -130,7 +130,7 @@ an ever-growing global error universe. The omitted parser is illustrative, not a
 
 ```grl
 fn read_config(fs: &Dir, path: Path, mem: &Allocator) !Bytes {
-    var file = fs.open(path)?
+    mut file = fs.open(path)?
     defer file.release()
     return file.read_all(mem)?
 }
@@ -144,7 +144,7 @@ explicit call; async cleanup cannot be smuggled into this `defer` contract.
 
 ```grl
 fn fetch(net: &Net, address: Address, mem: &Allocator) !Bytes {
-    var socket = net.connect(address)?
+    mut socket = net.connect(address)?
     defer socket.release()
     socket.write_all("GET / HTTP/1.0\r\n\r\n")?
     return socket.read_to_end(mem)?

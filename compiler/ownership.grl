@@ -10,43 +10,43 @@ pub struct Place { parent:num, status:num, copy:num }
 pub struct Loan { source:num, parent:num, mode:num, live:num }
 pub struct State { places:vec<Place>, loans:vec<Loan> }
 
-pub fn new()->State { return State{places:vec<Place>(),loans:vec<Loan>()}; }
+pub fn new()->State { return State{places:vec<Place>[],loans:vec<Loan>[]}; }
 pub fn root<a>(s:ref_mut<a,State>,copy:num,initialized:num)->num {
-    vec_push(s.places,Place{parent:0,status:initialized,copy:copy});
-    return len(s.places);
+    s.places.push(Place{parent:0,status:initialized,copy:copy});
+    return s.places.len();
 }
 pub fn field<a>(s:ref_mut<a,State>,parent:num,copy:num)->num {
-    if (parent==0)+(len(s.places)<parent) { return 0; }
-    var p =vec_get(s.places,parent-1); status :=p.status;
-    vec_push(s.places,Place{parent:parent,status:status,copy:copy});
-    return len(s.places);
+    if (parent==0)+(s.places.len()<parent) { return 0; }
+    mut p =&s.places[parent-1]; status :=p.status;
+    s.places.push(Place{parent:parent,status:status,copy:copy});
+    return s.places.len();
 }
-fn parent_of<a>(s:ref<a,State>,id:num)->num { var p =vec_get(s.places,id-1); return p.parent; }
+fn parent_of<a>(s:ref<a,State>,id:num)->num { mut p =&s.places[id-1]; return p.parent; }
 pub fn status<a>(s:ref<a,State>,id:num)->num {
-    if (id==0)+(len(s.places)<id) { return 0; }
-    var p =vec_get(s.places,id-1); return p.status;
+    if (id==0)+(s.places.len()<id) { return 0; }
+    mut p =&s.places[id-1]; return p.status;
 }
 pub fn ancestor<a>(s:ref<a,State>,outer:num,inner:num)->num {
-    if (outer==0)+(inner==0)+(len(s.places)<inner)+(len(s.places)<outer) { return 0; }
-    var p=inner;
+    if (outer==0)+(inner==0)+(s.places.len()<inner)+(s.places.len()<outer) { return 0; }
+    mut p=inner;
     while p!=0 { if p==outer { return 1; } p=parent_of(borrow(s),p); }
     return 0;
 }
 fn overlaps<a>(s:ref<a,State>,a:num,b:num)->num { return ancestor(borrow(s),a,b)+ancestor(borrow(s),b,a); }
 fn present<a>(s:ref<a,State>,id:num)->num {
-    if (id==0)+(len(s.places)<id) { return 1; }
-    var p=id;
+    if (id==0)+(s.places.len()<id) { return 1; }
+    mut p=id;
     while p!=0 { if status(borrow(s),p)!=1 { return 2; } p=parent_of(borrow(s),p); }
     return 0;
 }
 fn complete<a>(s:ref<a,State>,id:num)->num {
     e :=present(borrow(s),id); if e!=0 { return e; }
-    for i in len(s.places) { if ancestor(borrow(s),id,i+1) { if status(borrow(s),i+1)!=1 { return 5; } } }
+    for i in s.places.len() { if ancestor(borrow(s),id,i+1) { if status(borrow(s),i+1)!=1 { return 5; } } }
     return 0;
 }
 fn conflict<a>(s:ref<a,State>,id:num,exclusive:num)->num {
-    for i in len(s.loans) {
-        var l =vec_get(s.loans,i);
+    for i in s.loans.len() {
+        mut l =&s.loans[i];
         source :=l.source; live :=l.live; mode :=l.mode;
         if live { if exclusive+mode { if overlaps(borrow(s),id,source) { return 3; } } }
     }
@@ -56,22 +56,22 @@ pub fn read<a>(s:ref<a,State>,id:num)->num {
     e :=complete(borrow(s),id); if e!=0 { return e; } return conflict(borrow(s),id,0);
 }
 fn set_tree<a>(s:ref_mut<a,State>,id:num,status:num)->unit {
-    for i in len(s.places) {
+    for i in s.places.len() {
         if ancestor(borrow(s),id,i+1) {
-            var p =vec_get_mut(s.places,i); exchange(borrow_mut(p.status),status);
+            mut p =&mut s.places[i]; exchange(borrow_mut(p.status),status);
         }
     }
     return ();
 }
 pub fn take<a>(s:ref_mut<a,State>,id:num)->num {
     e :=complete(borrow(s),id); if e!=0 { return e; }
-    var p =vec_get(s.places,id-1); copy :=p.copy;
+    mut p =&s.places[id-1]; copy :=p.copy;
     c :=conflict(borrow(s),id,copy==0); if c!=0 { return c; }
     if copy==0 { set_tree(borrow_mut(s),id,2); } return 0;
 }
 // Compiler-generated cleanup may close possibly initialized storage; emitted flags guard frees.
 pub fn cleanup<a>(s:ref_mut<a,State>,id:num)->num {
-    if (id==0)+(len(s.places)<id) { return 1; }
+    if (id==0)+(s.places.len()<id) { return 1; }
     if status(borrow(s),id)==2 { return 0; }
     c :=conflict(borrow(s),id,1); if c!=0 { return c; }
     set_tree(borrow_mut(s),id,2); return 0;
@@ -81,7 +81,7 @@ pub fn drop_value<a>(s:ref_mut<a,State>,id:num)->num {
     return cleanup(borrow_mut(s),id);
 }
 pub fn initialize<a>(s:ref_mut<a,State>,id:num)->num {
-    if (id==0)+(len(s.places)<id) { return 1; }
+    if (id==0)+(s.places.len()<id) { return 1; }
     parent :=parent_of(borrow(s),id);
     if parent!=0 { e :=present(borrow(s),parent); if e!=0 { return e; } }
     c :=conflict(borrow(s),id,1); if c!=0 { return c; }
@@ -92,21 +92,21 @@ pub fn borrow_place<a>(s:ref_mut<a,State>,id:num,mode:num)->num {
     if 1<mode { return 0; }
     if complete(borrow(s),id)!=0 { return 0; }
     if conflict(borrow(s),id,mode)!=0 { return 0; }
-    vec_push(s.loans,Loan{source:id,parent:0,mode:mode,live:1}); return len(s.loans);
+    s.loans.push(Loan{source:id,parent:0,mode:mode,live:1}); return s.loans.len();
 }
-fn loan_parent<a>(s:ref<a,State>,id:num)->num { var l =vec_get(s.loans,id-1); return l.parent; }
+fn loan_parent<a>(s:ref<a,State>,id:num)->num { mut l =&s.loans[id-1]; return l.parent; }
 fn loan_ancestor<a>(s:ref<a,State>,outer:num,inner:num)->num {
-    var p=inner;
+    mut p=inner;
     while p!=0 { if p==outer { return 1; } p=loan_parent(borrow(s),p); } return 0;
 }
 pub fn use_loan<a>(s:ref<a,State>,id:num,write:num)->num {
-    if (id==0)+(len(s.loans)<id) { return 1; }
-    var l =vec_get(s.loans,id-1); live :=l.live; mode :=l.mode;
+    if (id==0)+(s.loans.len()<id) { return 1; }
+    mut l =&s.loans[id-1]; live :=l.live; mode :=l.mode;
     if live==0 { return 2; }
     if write&(mode==0) { return 4; }
     if mode {
-        for i in len(s.loans) {
-            child :=vec_get(s.loans,i); active :=child.live;
+        for i in s.loans.len() {
+            child :=&s.loans[i]; active :=child.live;
             if active&(i+1!=id) { if loan_ancestor(borrow(s),id,i+1) { return 6; } }
         }
     }
@@ -115,115 +115,115 @@ pub fn use_loan<a>(s:ref<a,State>,id:num,write:num)->num {
 pub fn reborrow<a>(s:ref_mut<a,State>,parent:num,mode:num)->num {
     if 1<mode { return 0; }
     if use_loan(borrow(s),parent,mode)!=0 { return 0; }
-    var l =vec_get(s.loans,parent-1); source :=l.source; pmode :=l.mode; gp :=l.parent;
-    var authority=parent; if pmode==0 { authority=gp; }
-    for i in len(s.loans) {
-        other :=vec_get(s.loans,i); live :=other.live; omode :=other.mode; osource :=other.source;
+    mut l =&s.loans[parent-1]; source :=l.source; pmode :=l.mode; gp :=l.parent;
+    mut authority=parent; if pmode==0 { authority=gp; }
+    for i in s.loans.len() {
+        other :=&s.loans[i]; live :=other.live; omode :=other.mode; osource :=other.source;
         if live&(i+1!=parent) {
             if loan_ancestor(borrow(s),i+1,parent)==0 {
                 if mode+omode { if overlaps(borrow(s),source,osource) { return 0; } }
             }
         }
     }
-    vec_push(s.loans,Loan{source:source,parent:authority,mode:mode,live:1}); return len(s.loans);
+    s.loans.push(Loan{source:source,parent:authority,mode:mode,live:1}); return s.loans.len();
 }
 pub fn end_loan<a>(s:ref_mut<a,State>,id:num)->num {
-    if (id==0)+(len(s.loans)<id) { return 1; }
-    var l =vec_get(s.loans,id-1); if l.live==0 { return 2; }
-    for i in len(s.loans) {
-        child :=vec_get(s.loans,i); active :=child.live;
+    if (id==0)+(s.loans.len()<id) { return 1; }
+    mut l =&s.loans[id-1]; if l.live==0 { return 2; }
+    for i in s.loans.len() {
+        child :=&s.loans[i]; active :=child.live;
         if active&(i+1!=id) { if loan_ancestor(borrow(s),id,i+1) { return 6; } }
     }
-    var p =vec_get_mut(s.loans,id-1); exchange(borrow_mut(p.live),0); return 0;
+    mut p =&mut s.loans[id-1]; exchange(borrow_mut(p.live),0); return 0;
 }
 pub fn snapshot<a>(s:ref<a,State>)->State {
-    var places =vec<Place>(); var loans =vec<Loan>();
-    for i in len(s.places) { var p =vec_get(s.places,i); vec_push(places,Place{parent:p.parent,status:p.status,copy:p.copy}); }
-    for i in len(s.loans) { var l =vec_get(s.loans,i); vec_push(loans,Loan{source:l.source,parent:l.parent,mode:l.mode,live:l.live}); }
+    mut places =vec<Place>[]; mut loans =vec<Loan>[];
+    for i in s.places.len() { mut p =&s.places[i]; places.push(Place{parent:p.parent,status:p.status,copy:p.copy}); }
+    for i in s.loans.len() { mut l =&s.loans[i]; loans.push(Loan{source:l.source,parent:l.parent,mode:l.mode,live:l.live}); }
     return State{places:places,loans:loans};
 }
 // Conservative join: definitely initialized places intersect, possible live loans union.
 // Different storage/authority shapes are rejected instead of pretending they are interchangeable.
 pub fn join<a,b>(s:ref_mut<a,State>,other:ref<b,State>)->num {
-    if (len(s.places)!=len(other.places))+(len(s.loans)!=len(other.loans)) { return 7; }
-    for i in len(s.places) {
-        var a =vec_get(s.places,i); b :=vec_get(other.places,i);
+    if (s.places.len()!=other.places.len())+(s.loans.len()!=other.loans.len()) { return 7; }
+    for i in s.places.len() {
+        mut a =&s.places[i]; b :=&other.places[i];
         if (a.parent!=b.parent)+(a.copy!=b.copy) { return 7; }
     }
-    for i in len(s.loans) {
-        var a =vec_get(s.loans,i); b :=vec_get(other.loans,i);
+    for i in s.loans.len() {
+        mut a =&s.loans[i]; b :=&other.loans[i];
         if (a.source!=b.source)+(a.parent!=b.parent)+(a.mode!=b.mode) { return 7; }
     }
-    for i in len(s.places) {
-        var a =vec_get(s.places,i); old :=a.status; b :=vec_get(other.places,i); incoming :=b.status;
-        if old!=incoming { var a =vec_get_mut(s.places,i); exchange(borrow_mut(a.status),3); }
+    for i in s.places.len() {
+        mut a =&s.places[i]; old :=a.status; b :=&other.places[i]; incoming :=b.status;
+        if old!=incoming { mut a =&mut s.places[i]; exchange(borrow_mut(a.status),3); }
     }
-    for i in len(s.loans) {
-        var a =vec_get(s.loans,i); live :=a.live; b :=vec_get(other.loans,i); incoming :=b.live;
-        if (live==0)&incoming { var a =vec_get_mut(s.loans,i); exchange(borrow_mut(a.live),1); }
+    for i in s.loans.len() {
+        mut a =&s.loans[i]; live :=a.live; b :=&other.loans[i]; incoming :=b.live;
+        if (live==0)&incoming { mut a =&mut s.loans[i]; exchange(borrow_mut(a.live),1); }
     }
     return 0;
 }
 // Restore an earlier control-flow point without reusing place IDs allocated in another arm.
 // Newly seen fields of old storage inherit the parent's state; arm-local roots are dead.
 pub fn restore<a,b>(s:ref_mut<a,State>,saved:ref<b,State>)->unit {
-    for i in len(s.places) {
-        var state=2;
-        if i<len(saved.places) { var p =vec_get(saved.places,i); state=p.status; } else {
-            var p =vec_get(s.places,i); parent :=p.parent;
+    for i in s.places.len() {
+        mut state=2;
+        if i<saved.places.len() { mut p =&saved.places[i]; state=p.status; } else {
+            mut p =&s.places[i]; parent :=p.parent;
             if parent!=0 { state=status(borrow(s),parent); }
         }
-        var p =vec_get_mut(s.places,i); exchange(borrow_mut(p.status),state);
+        mut p =&mut s.places[i]; exchange(borrow_mut(p.status),state);
     }
-    for i in len(s.loans) {
-        var live=0;
-        if i<len(saved.loans) { var l =vec_get(saved.loans,i); live=l.live; }
-        var l =vec_get_mut(s.loans,i); exchange(borrow_mut(l.live),live);
+    for i in s.loans.len() {
+        mut live=0;
+        if i<saved.loans.len() { mut l =&saved.loans[i]; live=l.live; }
+        mut l =&mut s.loans[i]; exchange(borrow_mut(l.live),live);
     }
     return ();
 }
 fn inherited_status<a,b>(s:ref<a,State>,saved:ref<b,State>,id:num)->num {
-    var p=id;
+    mut p=id;
     while p!=0 {
-        if p<len(saved.places)+1 { v :=vec_get(saved.places,p-1); return v.status; }
+        if p<saved.places.len()+1 { v :=&saved.places[p-1]; return v.status; }
         p=parent_of(borrow(s),p);
     }
     return 2;
 }
 pub fn merge<a,b>(s:ref_mut<a,State>,saved:ref<b,State>)->unit {
-    var i=len(s.places);
-    while i<len(saved.places) {
-        var p =vec_get(saved.places,i);parent :=p.parent;copy :=p.copy;var state=2;
+    mut i=s.places.len();
+    while i<saved.places.len() {
+        mut p =&saved.places[i];parent :=p.parent;copy :=p.copy;mut state=2;
         if parent!=0 {state=status(borrow(s),parent);}
-        vec_push(s.places,Place{parent:parent,status:state,copy:copy});i=i+1;
+        s.places.push(Place{parent:parent,status:state,copy:copy});i=i+1;
     }
-    for i in len(s.places) {
+    for i in s.places.len() {
         old :=status(borrow(s),i+1); incoming :=inherited_status(borrow(s),borrow(saved),i+1);
-        if old!=incoming { var p =vec_get_mut(s.places,i); exchange(borrow_mut(p.status),3); }
+        if old!=incoming { mut p =&mut s.places[i]; exchange(borrow_mut(p.status),3); }
     }
-    var j=len(s.loans);
-    while j<len(saved.loans){var l =vec_get(saved.loans,j);vec_push(s.loans,Loan{source:l.source,parent:l.parent,mode:l.mode,live:0});j=j+1;}
-    for i in len(saved.loans) {
-        if i<len(s.loans) {
-            var l =vec_get(saved.loans,i); live :=l.live;
-            if live { var l =vec_get_mut(s.loans,i); exchange(borrow_mut(l.live),1); }
+    mut j=s.loans.len();
+    while j<saved.loans.len(){mut l =&saved.loans[j];s.loans.push(Loan{source:l.source,parent:l.parent,mode:l.mode,live:0});j=j+1;}
+    for i in saved.loans.len() {
+        if i<s.loans.len() {
+            mut l =&saved.loans[i]; live :=l.live;
+            if live { mut l =&mut s.loans[i]; exchange(borrow_mut(l.live),1); }
         }
     }
     return ();
 }
 // Entry storage cannot be consumed on a repeating backedge. Dead loop-local roots are irrelevant.
 pub fn backedge<a,b>(s:ref<a,State>,entry:ref<b,State>)->num {
-    for i in len(entry.places) {
-        var p =vec_get(entry.places,i);
+    for i in entry.places.len() {
+        mut p =&entry.places[i];
         if p.status==1 { if complete(borrow(s),i+1)!=0 { return 2; } }
     }
-    for i in len(entry.loans){old :=vec_get(entry.loans,i);live :=old.live;
-        if i<len(s.loans){current :=vec_get(s.loans,i);if current.live!=live{return 3;}}
+    for i in entry.loans.len(){old :=&entry.loans[i];live :=old.live;
+        if i<s.loans.len(){current :=&s.loans[i];if current.live!=live{return 3;}}
     }
-    var i=len(entry.loans);
-    while i<len(s.loans){current :=vec_get(s.loans,i);live :=current.live;mode :=current.mode;source :=current.source;parent :=current.parent;
-        if live{var stable=0;
-            if mode==0{for j in len(entry.loans){old :=vec_get(entry.loans,j);
+    mut i=entry.loans.len();
+    while i<s.loans.len(){current :=&s.loans[i];live :=current.live;mode :=current.mode;source :=current.source;parent :=current.parent;
+        if live{mut stable=0;
+            if mode==0{for j in entry.loans.len(){old :=&entry.loans[j];
                 if old.live&(old.mode==0)&(old.source==source)&(old.parent==parent){stable=1;break;}}}
             if stable==0{return 3;}
         }
@@ -234,14 +234,14 @@ pub fn backedge<a,b>(s:ref<a,State>,entry:ref<b,State>)->num {
 // Access through an existing loan may project disjoint fields even when a sibling is reborrowed.
 // The parent authority and its ancestors are ignored; every other overlapping loan still counts.
 pub fn access_loan<a>(s:ref<a,State>,parent:num,target:num,write:num)->num {
-    if (parent==0)+(len(s.loans)<parent) { return 1; }
-    var p =vec_get(s.loans,parent-1);live :=p.live;mode :=p.mode;source :=p.source;
+    if (parent==0)+(s.loans.len()<parent) { return 1; }
+    mut p =&s.loans[parent-1];live :=p.live;mode :=p.mode;source :=p.source;
     if live==0 { return 2; }
     if write&(mode==0) { return 4; }
     if ancestor(borrow(s),source,target)==0 { return 4; }
     e :=complete(borrow(s),target);if e!=0{return e;}
-    for i in len(s.loans) {
-        var l =vec_get(s.loans,i);active :=l.live;m :=l.mode;var p =l.source;
+    for i in s.loans.len() {
+        mut l =&s.loans[i];active :=l.live;m :=l.mode;mut p =l.source;
         if active {if loan_ancestor(borrow(s),i+1,parent)==0{
             if write+m {if overlaps(borrow(s),target,p){return 3;}}
         }}
@@ -251,11 +251,11 @@ pub fn access_loan<a>(s:ref<a,State>,parent:num,target:num,write:num)->num {
 pub fn reborrow_place<a>(s:ref_mut<a,State>,parent:num,target:num,mode:num)->num {
     if 1<mode{return 0;}
     if access_loan(borrow(s),parent,target,mode)!=0{return 0;}
-    var p =vec_get(s.loans,parent-1);pmode :=p.mode;gp :=p.parent;var authority=parent;
+    mut p =&s.loans[parent-1];pmode :=p.mode;gp :=p.parent;mut authority=parent;
     if pmode==0{authority=gp;}
-    vec_push(s.loans,Loan{source:target,parent:authority,mode:mode,live:1});return len(s.loans);
+    s.loans.push(Loan{source:target,parent:authority,mode:mode,live:1});return s.loans.len();
 }
 pub fn can_cleanup<a>(s:ref<a,State>,id:num)->num {
-    if (id==0)+(len(s.places)<id){return 0;}
+    if (id==0)+(s.places.len()<id){return 0;}
     return conflict(borrow(s),id,1)==0;
 }

@@ -1,0 +1,230 @@
+module machine;
+use host;
+
+// Final lowering of the compiler's closed word-machine instruction stream.
+// Target 0 retains x86-64 spelling; 1 is AArch64, 2 is RV64IM (Linux ELF).
+// This is static instruction selection in Grail, not execution or an external translator.
+struct Out { text:bytes, target:num, next:num }
+fn eq<a,b>(a:read<a>,b:read<b>)->num {
+    if a.len()!=b.len(){return false;}
+    for i in a.len(){if a[i]!=b[i]{return false;}}return true;
+}
+fn starts<a,b>(a:read<a>,b:read<b>)->num {
+    if a.len()<b.len(){return false;}return eq(&(a[:b.len()]),&(b));
+}
+fn trim<a>(s:read<a>)->read<a> {
+    mut a=0;mut b=s.len();
+    while a<b{if (s[a]!=32)&(s[a]!=9)&(s[a]!=13){break;}a+=1;}
+    while a<b{if (s[b-1]!=32)&(s[b-1]!=9)&(s[b-1]!=13){break;}b-=1;}
+    return s[a:b];
+}
+fn bad<a>(s:read<a>)->unit {host::print(&"machine lowering: unsupported instruction/operand: ");host::print(s);host::print(&"\n");assert(false);return ();}
+fn put<a,b>(o:ref_mut<a,Out>,s:read<b>)->unit {for i in s.len(){o.text.push(s[i]);}return ();}
+fn num<a>(o:ref_mut<a,Out>,n:num)->unit {if 9<n{num(borrow_mut(o),n/10);}o.text.push(48+n%10);return ();}
+fn fresh<a>(o:ref_mut<a,Out>)->num {n:=o.next;exchange(borrow_mut(o.next),n+1);return n;}
+fn label<a>(o:ref_mut<a,Out>,n:num)->unit {put(borrow_mut(o),&".Lmachine");num(borrow_mut(o),n);return ();}
+fn mark<a>(o:ref_mut<a,Out>,n:num)->unit {label(borrow_mut(o),n);put(borrow_mut(o),&":\n");return ();}
+fn split<a>(s:read<a>,delimiter:num)->vec<bytes> {
+    mut out=vec<bytes>[];mut start=0;mut depth=0;
+    for i in s.len(){b:=s[i];if b==40{depth+=1;}if b==41{assert(depth!=0);depth-=1;}
+        if (b==delimiter)&(depth==0){out.push((trim(&(s[start:i]))).copy());start=i+1;}}
+    out.push((trim(&(s[start:]))).copy());return out;
+}
+fn reg<a>(target:num,s:read<a>)->string {
+    if eq(&(s),&"%rax")+eq(&(s),&"%eax")+eq(&(s),&"%al"){if target==1{return "x9";}return "t0";}
+    if eq(&(s),&"%rdi")+eq(&(s),&"%edi"){if target==1{return "x0";}return "a0";}
+    if eq(&(s),&"%rsi")+eq(&(s),&"%esi"){if target==1{return "x1";}return "a1";}
+    if eq(&(s),&"%rdx")+eq(&(s),&"%edx"){if target==1{return "x2";}return "a2";}
+    if eq(&(s),&"%rcx")+eq(&(s),&"%ecx"){if target==1{return "x3";}return "a3";}
+    if eq(&(s),&"%r8")+eq(&(s),&"%r8d"){if target==1{return "x4";}return "a4";}
+    if eq(&(s),&"%r9")+eq(&(s),&"%r9d"){if target==1{return "x5";}return "a5";}
+    if eq(&(s),&"%r10")+eq(&(s),&"%r10d"){if target==1{return "x6";}return "a6";}
+    if eq(&(s),&"%r11")+eq(&(s),&"%r11d"){if target==1{return "x7";}return "a7";}
+    if eq(&(s),&"%r12"){if target==1{return "x19";}return "s1";}
+    if eq(&(s),&"%r13"){if target==1{return "x20";}return "s2";}
+    if eq(&(s),&"%r14"){if target==1{return "x21";}return "s3";}
+    if eq(&(s),&"%r15"){if target==1{return "x22";}return "s4";}
+    if eq(&(s),&"%rbx"){if target==1{return "x23";}return "s5";}
+    if eq(&(s),&"%rbp"){if target==1{return "x29";}return "s0";}
+    if eq(&(s),&"%rsp"){return "sp";}bad(&(s));return "";
+}
+fn small_reg<a>(s:read<a>)->num {return eq(&(s),&"%eax")+eq(&(s),&"%edi")+eq(&(s),&"%esi")+eq(&(s),&"%edx")+eq(&(s),&"%ecx")+eq(&(s),&"%r8d")+eq(&(s),&"%r9d")+eq(&(s),&"%r10d")+eq(&(s),&"%r11d");}
+fn armword<a>(s:read<a>)->string {if eq(&(s),&"sp"){return "wsp";}mut out="w";out.append(s[1:]);return out;}
+// Recognize only small decimal literals; expressions stay assembler constants.
+fn small_literal<a>(value:read<a>)->num {
+    if value.len()==0{return 0;}mut n=0;
+    for i in value.len(){b:=value[i];if (b<48)+(57<b){return 0;}if 6553<n{return 0;}n=n*10+b-48;if 65536<n{return 0;}}
+    return n+1;
+}
+fn constant<a,b,c>(o:ref_mut<a,Out>,dst:read<b>,value:read<c>)->unit {
+    if o.target==2{put(borrow_mut(o),&"li ");put(borrow_mut(o),&(dst));put(borrow_mut(o),&",");put(borrow_mut(o),&(value));put(borrow_mut(o),&"\n");return ();}
+    short:=small_literal(&value);
+    if (short!=0)&(short<65537){put(borrow_mut(o),&"movz ");put(borrow_mut(o),&dst);put(borrow_mut(o),&",#");num(borrow_mut(o),short-1);put(borrow_mut(o),&"\n");return ();}
+    if value.len()!=0{if value[0]==45{negative:=small_literal(value[1:]);if 1<negative{put(borrow_mut(o),&"movn ");put(borrow_mut(o),&dst);put(borrow_mut(o),&",#");num(borrow_mut(o),negative-2);put(borrow_mut(o),&"\n");return ();}}}
+    put(borrow_mut(o),&"movz ");put(borrow_mut(o),&(dst));put(borrow_mut(o),&",#((");put(borrow_mut(o),&(value));put(borrow_mut(o),&")&65535)\n");
+    for i in 3{put(borrow_mut(o),&"movk ");put(borrow_mut(o),&(dst));put(borrow_mut(o),&",#(((");put(borrow_mut(o),&(value));put(borrow_mut(o),&")>>");num(borrow_mut(o),(i+1)*16);put(borrow_mut(o),&")&65535),lsl #");num(borrow_mut(o),(i+1)*16);put(borrow_mut(o),&"\n");}
+    return ();
+}
+fn move<a,b,c>(o:ref_mut<a,Out>,dst:read<b>,src:read<c>)->unit {
+    if o.target==1{put(borrow_mut(o),&"mov ");}else{put(borrow_mut(o),&"mv ");}put(borrow_mut(o),&(dst));put(borrow_mut(o),&",");put(borrow_mut(o),&(src));put(borrow_mut(o),&"\n");return ();
+}
+// Address scratch is x13/t3; x12/t2 is used only while forming an address.
+fn address<a,b>(o:ref_mut<a,Out>,operand:read<b>)->unit {
+    target:=o.target;mut open=operand.len();for i in operand.len(){if operand[i]==40{open=i;break;}}
+    if open==operand.len(){bad(&(operand));}
+    parts:=split(&(operand[open+1:operand.len()-1]),44);base:=parts[0].copy();disp:=operand[:open];
+    if eq(&base,&"%rip"){
+        if target==1{put(borrow_mut(o),&"adrp x13,");put(borrow_mut(o),&(disp));put(borrow_mut(o),&"\nadd x13,x13,:lo12:");put(borrow_mut(o),&(disp));put(borrow_mut(o),&"\n");}
+        else{put(borrow_mut(o),&"lla t3,");put(borrow_mut(o),&(disp));put(borrow_mut(o),&"\n");}return ();
+    }
+    r:=reg(target,&base);if target==1{move(borrow_mut(o),&"x13",&r);}else{move(borrow_mut(o),&"t3",&r);}
+    if 1<parts.len(){index:=parts[1].copy();ir:=reg(target,&index);scale:=parts[2].copy();mut shift=0;
+        if eq(&scale,&"2"){shift=1;}else{if eq(&scale,&"4"){shift=2;}else{if eq(&scale,&"8"){shift=3;}else{if eq(&scale,&"1")==0{bad(&scale);}}}}
+        if target==1{put(borrow_mut(o),&"add x13,x13,");put(borrow_mut(o),&ir);put(borrow_mut(o),&",lsl #");num(borrow_mut(o),shift);put(borrow_mut(o),&"\n");}
+        else{put(borrow_mut(o),&"slli t2,");put(borrow_mut(o),&ir);put(borrow_mut(o),&",");num(borrow_mut(o),shift);put(borrow_mut(o),&"\nadd t3,t3,t2\n");}
+    }
+    if (disp.len()!=0)&(eq(&(disp),&"0")==0){
+        if target==1{constant(borrow_mut(o),&"x12",&(disp));put(borrow_mut(o),&"add x13,x13,x12\n");}
+        else{constant(borrow_mut(o),&"t2",&(disp));put(borrow_mut(o),&"add t3,t3,t2\n");}
+    }return ();
+}
+fn read_operand<a,b,c>(o:ref_mut<a,Out>,operand:read<b>,dst:read<c>,byte:num)->unit {
+    assert(operand.len()!=0);target:=o.target;
+    if operand[0]==36{constant(borrow_mut(o),&(dst),&(operand[1:]));return ();}
+    if operand[0]==37{r:=reg(target,&(operand));move(borrow_mut(o),&(dst),&r);if byte{if target==1{put(borrow_mut(o),&"and ");put(borrow_mut(o),&(dst));put(borrow_mut(o),&",");put(borrow_mut(o),&(dst));put(borrow_mut(o),&",#255\n");}else{put(borrow_mut(o),&"andi ");put(borrow_mut(o),&(dst));put(borrow_mut(o),&",");put(borrow_mut(o),&(dst));put(borrow_mut(o),&",255\n");}}return ();}
+    address(borrow_mut(o),&(operand));
+    if target==1{if byte{put(borrow_mut(o),&"ldrb ");w:=armword(&(dst));put(borrow_mut(o),&w);}else{put(borrow_mut(o),&"ldr ");put(borrow_mut(o),&(dst));}put(borrow_mut(o),&",[x13]\n");}
+    else{if byte{put(borrow_mut(o),&"lbu ");}else{put(borrow_mut(o),&"ld ");}put(borrow_mut(o),&(dst));put(borrow_mut(o),&",0(t3)\n");}return ();
+}
+fn store<a,b>(o:ref_mut<a,Out>,operand:read<b>,byte:num)->unit {
+    target:=o.target;assert(operand.len()!=0);
+    if operand[0]==37{r:=reg(target,&(operand));
+        if eq(&(operand),&"%al"){if target==1{put(borrow_mut(o),&"bfi x9,x10,#0,#8\n");}else{put(borrow_mut(o),&"andi t2,t1,255\nli t3,-256\nand t0,t0,t3\nor t0,t0,t2\n");}return ();}
+        if small_reg(&(operand)){if target==1{w:=armword(&r);put(borrow_mut(o),&"mov ");put(borrow_mut(o),&w);put(borrow_mut(o),&",w10\n");}else{put(borrow_mut(o),&"slli ");put(borrow_mut(o),&r);put(borrow_mut(o),&",t1,32\nsrli ");put(borrow_mut(o),&r);put(borrow_mut(o),&",");put(borrow_mut(o),&r);put(borrow_mut(o),&",32\n");}return ();}
+        if target==1{move(borrow_mut(o),&r,&"x10");}else{move(borrow_mut(o),&r,&"t1");}return ();
+    }
+    address(borrow_mut(o),&(operand));
+    if target==1{if byte{put(borrow_mut(o),&"strb w10,[x13]\n");}else{put(borrow_mut(o),&"str x10,[x13]\n");}}
+    else{if byte{put(borrow_mut(o),&"sb t1,0(t3)\n");}else{put(borrow_mut(o),&"sd t1,0(t3)\n");}}return ();
+}
+fn branch<a,b,c>(o:ref_mut<a,Out>,op:read<b>,dest:read<c>)->unit {
+    if eq(&(op),&"jmp"){if o.target==1{put(borrow_mut(o),&"b ");put(borrow_mut(o),&(dest));put(borrow_mut(o),&"\n");}else{put(borrow_mut(o),&"lla t1,");put(borrow_mut(o),&(dest));put(borrow_mut(o),&"\njr t1\n");}return ();}
+    n:=fresh(borrow_mut(o));
+    if o.target==1{
+        if eq(&(op),&"je")+eq(&(op),&"jz"){put(borrow_mut(o),&"b.ne ");}
+        else{if eq(&(op),&"jne")+eq(&(op),&"jnz"){put(borrow_mut(o),&"b.eq ");}else{if eq(&(op),&"jnc")+eq(&(op),&"jae"){put(borrow_mut(o),&"cbnz x15,");}else{bad(&(op));}}}
+        label(borrow_mut(o),n);put(borrow_mut(o),&"\nb ");put(borrow_mut(o),&(dest));put(borrow_mut(o),&"\n");
+    }else{
+        if eq(&(op),&"je")+eq(&(op),&"jz"){put(borrow_mut(o),&"beqz t4,");}
+        else{if eq(&(op),&"jne")+eq(&(op),&"jnz"){put(borrow_mut(o),&"bnez t4,");}else{if eq(&(op),&"jnc")+eq(&(op),&"jae"){put(borrow_mut(o),&"bnez t6,");}else{bad(&(op));}}}
+        label(borrow_mut(o),n);put(borrow_mut(o),&"\nlla t1,");put(borrow_mut(o),&(dest));put(borrow_mut(o),&"\njr t1\n");
+    }mark(borrow_mut(o),n);return ();
+}
+fn arithmetic<a,b,c,d>(o:ref_mut<a,Out>,op:read<b>,src:read<c>,dst:read<d>)->unit {
+    target:=o.target;if target==1{read_operand(borrow_mut(o),&(src),&"x10",0);read_operand(borrow_mut(o),&(dst),&"x11",0);}
+    else{read_operand(borrow_mut(o),&(src),&"t1",0);read_operand(borrow_mut(o),&(dst),&"t2",0);}
+    if eq(&(op),&"cmpq"){
+        if target==1{put(borrow_mut(o),&"cmp x11,x10\ncset x15,cc\n");}else{put(borrow_mut(o),&"xor t4,t2,t1\nseqz t4,t4\nsltu t5,t2,t1\nmv t6,t5\n");}return ();
+    }
+    if eq(&(op),&"testq"){
+        if target==1{put(borrow_mut(o),&"tst x11,x10\nmov x15,#0\n");}else{put(borrow_mut(o),&"and t4,t2,t1\nseqz t4,t4\nli t5,0\nli t6,0\n");}return ();
+    }
+    if eq(&(op),&"addq"){if target==1{put(borrow_mut(o),&"adds x10,x11,x10\ncset x15,cs\n");}else{put(borrow_mut(o),&"add t1,t2,t1\nsltu t6,t1,t2\nseqz t4,t1\n");}}
+    else{if eq(&(op),&"subq"){if target==1{put(borrow_mut(o),&"subs x10,x11,x10\ncset x15,cc\n");}else{put(borrow_mut(o),&"sltu t6,t2,t1\nsub t1,t2,t1\nseqz t4,t1\n");}}
+    else{if eq(&(op),&"imulq"){if target==1{put(borrow_mut(o),&"smulh x12,x11,x10\nmul x10,x11,x10\nasr x14,x10,#63\ncmp x12,x14\ncset x15,ne\n");}else{put(borrow_mut(o),&"mulh t3,t2,t1\nmul t1,t2,t1\nsrai t2,t1,63\nxor t6,t3,t2\nsnez t6,t6\n");}}
+    else{if eq(&(op),&"xorq")+eq(&(op),&"xorl"){if target==1{put(borrow_mut(o),&"eor x10,x11,x10\ncmp x10,#0\nmov x15,#0\n");}else{put(borrow_mut(o),&"xor t1,t2,t1\nseqz t4,t1\nli t6,0\n");}}
+    else{if eq(&(op),&"andq"){if target==1{put(borrow_mut(o),&"ands x10,x11,x10\nmov x15,#0\n");}else{put(borrow_mut(o),&"and t1,t2,t1\nseqz t4,t1\nli t6,0\n");}}else{bad(&(op));}}}}}
+    store(borrow_mut(o),&(dst),0);return ();
+}
+fn atomic_instruction<a,b,c>(o:ref_mut<a,Out>,op:read<b>,rest:read<c>)->num {
+    target:=o.target;
+    if eq(&op,&"mfence")+eq(&op,&"lfence")+eq(&op,&"sfence"){
+        if target==1{
+            if eq(&op,&"lfence"){put(borrow_mut(o),&"dmb ishld\n");}else{put(borrow_mut(o),&"dmb ish\n");}
+        }else{
+            if eq(&op,&"lfence"){put(borrow_mut(o),&"fence r,rw\n");}else{if eq(&op,&"sfence"){put(borrow_mut(o),&"fence rw,w\n");}else{put(borrow_mut(o),&"fence rw,rw\n");}}
+        }return true;
+    }
+    if eq(&op,&"xchgq"){
+        args:=split(&rest,44);if args.len()!=2{bad(&rest);}source:=args[0].copy();destination:=args[1].copy();
+        if eq(&source,&"%rax")==0{bad(&rest);}address(borrow_mut(o),&destination);
+        if target==1{
+            n:=fresh(borrow_mut(o));put(borrow_mut(o),&"dmb ish\nmov x11,x9\n");mark(borrow_mut(o),n);
+            put(borrow_mut(o),&"ldaxr x10,[x13]\nstlxr w12,x11,[x13]\ncbnz w12,");label(borrow_mut(o),n);put(borrow_mut(o),&"\nmov x9,x10\ndmb ish\n");
+        }else{put(borrow_mut(o),&"fence rw,rw\namoswap.d.aqrl t0,t0,(t3)\nfence rw,rw\n");}return true;
+    }
+    if eq(&op,&"lock"){
+        if starts(&rest,&"cmpxchgq ")==0{bad(&rest);}args:=split(rest[9:],44);if args.len()!=2{bad(&rest);}source:=args[0].copy();destination:=args[1].copy();
+        if eq(&source,&"%rcx")==0{bad(&rest);}address(borrow_mut(o),&destination);again:=fresh(borrow_mut(o));done:=fresh(borrow_mut(o));
+        if target==1{
+            put(borrow_mut(o),&"dmb ish\nmov x14,x9\nmov x11,x3\n");mark(borrow_mut(o),again);
+            put(borrow_mut(o),&"ldaxr x10,[x13]\ncmp x10,x14\nb.ne ");label(borrow_mut(o),done);
+            put(borrow_mut(o),&"\nstlxr w12,x11,[x13]\ncbnz w12,");label(borrow_mut(o),again);put(borrow_mut(o),&"\n");mark(borrow_mut(o),done);
+            put(borrow_mut(o),&"clrex\nmov x9,x10\ncmp x14,x10\ncset x15,cc\ndmb ish\n");
+        }else{
+            put(borrow_mut(o),&"fence rw,rw\nmv t2,t0\n");mark(borrow_mut(o),again);put(borrow_mut(o),&"lr.d.aq t0,(t3)\nbne t0,t2,");label(borrow_mut(o),done);
+            put(borrow_mut(o),&"\nsc.d.rl t5,a3,(t3)\nbnez t5,");label(borrow_mut(o),again);put(borrow_mut(o),&"\n");mark(borrow_mut(o),done);
+            put(borrow_mut(o),&"xor t4,t2,t0\nseqz t4,t4\nsltu t6,t2,t0\nfence rw,rw\n");
+        }return true;
+    }
+    return false;
+}
+fn instruction<a,b>(o:ref_mut<a,Out>,line:read<b>)->unit {
+    target:=o.target;mut space=line.len();for i in line.len(){if line[i]==32{space=i;break;}}
+    op:=line[:space];mut rest=bytes[];if space<line.len(){rest=(trim(&(line[space+1:]))).copy();}
+    if atomic_instruction(borrow_mut(o),&op,&rest){return ();}
+    if starts(&(op),&"j"){branch(borrow_mut(o),&(op),&rest);return ();}
+    if eq(&op,&"call"){if rest.len()!=0{if rest[0]==42{r:=reg(target,rest[1:]);if target==1{put(borrow_mut(o),&"blr ");put(borrow_mut(o),&r);put(borrow_mut(o),&"\nmov x9,x0\n");}else{put(borrow_mut(o),&"jalr ra,");put(borrow_mut(o),&r);put(borrow_mut(o),&",0\nmv t0,a0\n");}return ();}}}
+    if eq(&(op),&"call"){if target==1{put(borrow_mut(o),&"bl ");put(borrow_mut(o),&rest);put(borrow_mut(o),&"\nmov x9,x0\n");}else{put(borrow_mut(o),&"call ");put(borrow_mut(o),&rest);put(borrow_mut(o),&"\nmv t0,a0\n");}return ();}
+    if eq(&(op),&"ret"){if target==1{put(borrow_mut(o),&"mov x0,x9\nret\n");}else{put(borrow_mut(o),&"mv a0,t0\nret\n");}return ();}
+    if eq(&(op),&"leave"){if target==1{put(borrow_mut(o),&"mov sp,x29\nldp x29,x30,[sp],#16\n");}else{put(borrow_mut(o),&"mv sp,s0\nld s0,0(sp)\nld ra,8(sp)\naddi sp,sp,16\n");}return ();}
+    if eq(&(op),&"pushq")+eq(&(op),&"popq"){
+        push:=eq(&(op),&"pushq");r:=reg(target,&rest);
+        if eq(&rest,&"%rbp"){
+            if target==1{if push{put(borrow_mut(o),&"stp x29,x30,[sp,#-16]!\n");}else{put(borrow_mut(o),&"ldp x29,x30,[sp],#16\n");}}
+            else{if push{put(borrow_mut(o),&"addi sp,sp,-16\nsd s0,0(sp)\nsd ra,8(sp)\n");}else{put(borrow_mut(o),&"ld s0,0(sp)\nld ra,8(sp)\naddi sp,sp,16\n");}}return ();
+        }
+        if target==1{if push{put(borrow_mut(o),&"str ");put(borrow_mut(o),&r);put(borrow_mut(o),&",[sp,#-16]!\n");}else{put(borrow_mut(o),&"ldr ");put(borrow_mut(o),&r);put(borrow_mut(o),&",[sp],#16\n");}}
+        else{if push{put(borrow_mut(o),&"addi sp,sp,-16\nsd ");put(borrow_mut(o),&r);put(borrow_mut(o),&",0(sp)\n");}else{put(borrow_mut(o),&"ld ");put(borrow_mut(o),&r);put(borrow_mut(o),&",0(sp)\naddi sp,sp,16\n");}}return ();
+    }
+    if eq(&(op),&"syscall"){if target==1{put(borrow_mut(o),&"mov x8,x9\nmov x3,x6\nsvc #0\nmov x9,x0\n");}else{put(borrow_mut(o),&"mv a7,t0\nmv a3,a6\necall\nmv t0,a0\n");}return ();}
+    if eq(&(op),&"ud2"){if target==1{put(borrow_mut(o),&"brk #0\n");}else{put(borrow_mut(o),&"ebreak\n");}return ();}
+    if eq(&(op),&"rep"){
+        if eq(&rest,&"stosq")==0{bad(&(line));}n:=fresh(borrow_mut(o));end:=fresh(borrow_mut(o));mark(borrow_mut(o),n);
+        if target==1{put(borrow_mut(o),&"cbz x3,");label(borrow_mut(o),end);put(borrow_mut(o),&"\nstr x9,[x0],#8\nsub x3,x3,#1\nb ");label(borrow_mut(o),n);put(borrow_mut(o),&"\n");}
+        else{put(borrow_mut(o),&"beqz a3,");label(borrow_mut(o),end);put(borrow_mut(o),&"\nsd t0,0(a0)\naddi a0,a0,8\naddi a3,a3,-1\nj ");label(borrow_mut(o),n);put(borrow_mut(o),&"\n");}mark(borrow_mut(o),end);return ();
+    }
+    if eq(&(op),&"sete")+eq(&(op),&"setne")+eq(&(op),&"setb"){
+        if target==1{if eq(&(op),&"setb"){put(borrow_mut(o),&"mov x10,x15\n");}else{put(borrow_mut(o),&"cset x10,");if eq(&(op),&"sete"){put(borrow_mut(o),&"eq\n");}else{put(borrow_mut(o),&"ne\n");}}}
+        else{if eq(&(op),&"sete"){put(borrow_mut(o),&"mv t1,t4\n");}else{if eq(&(op),&"setne"){put(borrow_mut(o),&"xori t1,t4,1\n");}else{put(borrow_mut(o),&"mv t1,t6\n");}}}store(borrow_mut(o),&rest,0);return ();
+    }
+    if eq(&(op),&"incq"){
+        if target==1{read_operand(borrow_mut(o),&rest,&"x10",0);put(borrow_mut(o),&"adds x10,x10,#1\n");}else{read_operand(borrow_mut(o),&rest,&"t1",0);put(borrow_mut(o),&"addi t1,t1,1\nseqz t4,t1\n");}store(borrow_mut(o),&rest,0);return ();
+    }
+    if eq(&(op),&"mulq")+eq(&(op),&"divq"){
+        if target==1{read_operand(borrow_mut(o),&rest,&"x10",0);if eq(&(op),&"mulq"){put(borrow_mut(o),&"umulh x11,x9,x10\nmul x10,x9,x10\nmov x2,x11\ncmp x11,#0\ncset x15,ne\nmov x9,x10\n");}else{put(borrow_mut(o),&"udiv x11,x9,x10\nmsub x2,x11,x10,x9\nmov x9,x11\n");}}
+        else{read_operand(borrow_mut(o),&rest,&"t1",0);if eq(&(op),&"mulq"){put(borrow_mut(o),&"mulhu t2,t0,t1\nmul t1,t0,t1\nmv a2,t2\nsltu t6,zero,t2\nmv t0,t1\n");}else{put(borrow_mut(o),&"divu t2,t0,t1\nremu a2,t0,t1\nmv t0,t2\n");}}return ();
+    }
+    args:=split(&rest,44);if args.len()!=2{bad(&(line));}src:=args[0].copy();dst:=args[1].copy();
+    if eq(&(op),&"movq")+eq(&(op),&"movl")+eq(&(op),&"movabsq")+eq(&(op),&"movb")+eq(&(op),&"movzbq"){
+        if target==1{read_operand(borrow_mut(o),&src,&"x10",eq(&op,&"movzbq"));}else{read_operand(borrow_mut(o),&src,&"t1",eq(&op,&"movzbq"));}store(borrow_mut(o),&dst,eq(&op,&"movb"));return ();
+    }
+    if eq(&(op),&"leaq"){address(borrow_mut(o),&src);if target==1{move(borrow_mut(o),&"x10",&"x13");}else{move(borrow_mut(o),&"t1",&"t3");}store(borrow_mut(o),&dst,0);return ();}
+    arithmetic(borrow_mut(o),&(op),&src,&dst);return ();
+}
+pub fn lower<a>(input:read<a>,target:num)->bytes {
+    assert((target==1)+(target==2));mut out=Out{text:bytes[],target:target,next:1};
+    // Frame constants are known before instruction selection (no unresolved immediate expressions).
+    mut start=0;
+    for i in input.len(){if input[i]==10{line:=trim(&(input[start:i]));if starts(&(line),&".set "){put(borrow_mut(out),&(line));put(borrow_mut(out),&"\n");}start=i+1;}}
+    if target==2{put(borrow_mut(out),&".option norelax\n.option norvc\n");}
+    start=0;
+    for i in input.len(){if input[i]==10{
+        line:=trim(&(input[start:i]));start=i+1;if line.len()!=0{
+            if starts(&(line),&".set ")==0{
+                if (line[0]==46)+(line[line.len()-1]==58)+starts(&line,&"rt_state:"){put(borrow_mut(out),&(line));put(borrow_mut(out),&"\n");}
+                else{instruction(borrow_mut(out),&(line));}
+            }
+        }
+    }}assert(start==input.len());return out.text;
+}

@@ -1,7 +1,7 @@
 # First field-sensitive record core
 
 2026-10-30. Implemented by-value nominal records, **not full bootstrap v0**. The mixed token example
-in `seed/examples/records` executes under clang and TinyCC. A separate Rust control produces the
+in `examples/records` executes under clang and TinyCC. A separate Rust control produces the
 same 16 / 11 / 5 outputs. See `research/evidence/records30-20261030` and the broader aggregate gates.
 
 ```grl
@@ -26,7 +26,7 @@ Unqualified type names refer to the current module; imported types use `module::
 - Number-field reads copy. Other field values move on ordinary projection (`let name=t.name`),
   including affine view fields. Partial state is tracked at every nested field. A whole record can
   cross a call/return only when complete and usable. Moving one field does not erase its siblings.
-- Byte builtins borrow field operands: `len(t.name)`, `read(t.span)`, `slice(t.span,...)`, etc. These
+- Byte builtins borrow field operands: `t.name.len()`, `&t.span`, `t.span[start:end]`, etc. These
   do not silently move an owner out. Mutable byte borrowing of a string remains forbidden. This is
   still a byte-view operation, **not a general reference to the record/descriptor object**.
 - Default destruction visits remaining owned leaves in declaration order, recursively. Bindings

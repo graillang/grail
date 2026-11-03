@@ -10,13 +10,13 @@ fn main() {
                 s.push_str(&format!("struct P{i}{{value:num}}"));
             }
             if style != "concrete" {
-                s.push_str("fn id<type T>(value:T)->T{return value;}");
+                s.push_str("fn id<T>(value:T)->T{return value;}");
             } else {
                 for i in 0..count {
                     s.push_str(&format!("fn id{i}(value:P{i})->P{i}{{return value;}}"));
                 }
             }
-            s.push_str("pub fn run()->num{var sum=0;");
+            s.push_str("pub fn run()->num{mut sum=0;");
             for i in 0..count {
                 let ty = if style == "repeat" { 0 } else { i };
                 let call = if style == "concrete" {

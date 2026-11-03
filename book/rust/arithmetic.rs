@@ -1,0 +1,1 @@
+pub fn twice(n: u64) -> u64 { n * 2 }

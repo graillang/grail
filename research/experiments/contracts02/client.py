@@ -12,9 +12,9 @@ from model import Info, Origin, Path, Rejected, Ty, overlap
 def uses(step: dict[str, Any]) -> list[tuple[str, Path]]:
     op = step.get("op")
     if op == "call":
-        return [(a["var"], tuple(a.get("path", []))) for a in step["args"]]
+        return [(a['mut'], tuple(a.get("path", []))) for a in step["args"]]
     if op in {"use", "project"}:
-        return [(step["var"], tuple(step.get("path", [])))]
+        return [(step['mut'], tuple(step.get("path", [])))]
     if op == "callback":
         return [(name, ()) for name in step["captures"]]
     return []
@@ -57,9 +57,9 @@ class Checker:
                     self.by_root[origin.parameter].append((name, path, origin, last))
 
     def value(self, arg: dict[str, Any]) -> Info:
-        if set(arg) - {"var", "path"} or arg.get("var") not in self.values:
+        if set(arg) - {'mut', "path"} or arg.get('mut') not in self.values:
             raise Rejected("unknown client value or argument syntax")
-        result = self.values[arg["var"]].project(tuple(arg.get("path", [])))
+        result = self.values[arg['mut']].project(tuple(arg.get("path", [])))
         for origin in [
             *result.stores.values(),
             *(o for v in result.flows.values() for o in v),
@@ -212,21 +212,21 @@ class Checker:
                     ),
                 )
             elif op == "alias":
-                self.put(step["name"], self.value({"var": step["of"]}))
+                self.put(step["name"], self.value({'mut': step["of"]}))
             elif op in {"use", "project"}:
-                value = self.value({"var": step["var"], "path": step.get("path", [])})
+                value = self.value({'mut': step['mut'], "path": step.get("path", [])})
                 if op == "project":
                     self.put(step["dest"], value)
             elif op == "drop":
-                if step["var"] not in self.values:
+                if step['mut'] not in self.values:
                     raise Rejected("drop of unknown value")
-                if self.values[step["var"]].stores:
+                if self.values[step['mut']].stores:
                     raise Rejected(
                         "use end, not drop, to release owning storage in this fragment"
                     )
-                del self.values[step["var"]]
+                del self.values[step['mut']]
             elif op in {"invalidate", "end"}:
-                value = self.value({"var": step["owner"], "path": step.get("path", [])})
+                value = self.value({'mut': step["owner"], "path": step.get("path", [])})
                 if not value.stores:
                     raise Rejected("invalidation requires owning storage")
                 for source in value.stores.values():
@@ -239,7 +239,7 @@ class Checker:
                     )
             elif op == "callback":
                 captures = {
-                    name: self.value({"var": name}) for name in step["captures"]
+                    name: self.value({'mut': name}) for name in step["captures"]
                 }
                 ident = len(self.callbacks)
                 self.callbacks[ident] = {"body": step["body"], "values": captures}

@@ -128,7 +128,7 @@ def read_routes(raw: Any, ty: Ty, params: tuple[Parameter, ...]) -> Value[Pre]:
             raise Rejected("invalid route")
         output = path(route["out"])
         target = ty.at(output)
-        if target.kind not in {"view", "var"} or output in value.flows:
+        if target.kind not in {"view", 'mut'} or output in value.flows:
             raise Rejected("invalid/duplicate output position")
         if not isinstance(route["pre"], list) or len(route["pre"]) > 10000:
             raise Rejected("invalid source collection")
@@ -150,7 +150,7 @@ def read_routes(raw: Any, ty: Ty, params: tuple[Parameter, ...]) -> Value[Pre]:
             source_path = path(raw_source["path"])
             source_ty = params[index].ty.at(source_path)
             if raw_source["tail"]:
-                if source_ty.kind != "var" or target != source_ty:
+                if source_ty.kind != 'mut' or target != source_ty:
                     raise Rejected("opaque prefix source/target mismatch")
             elif source_ty.kind != "view" or target.kind != "view":
                 raise Rejected("view source/target mismatch")
@@ -158,7 +158,7 @@ def read_routes(raw: Any, ty: Ty, params: tuple[Parameter, ...]) -> Value[Pre]:
         value.flows[output] = frozenset(sources)
     for position, leaf in ty.leaves():
         if (
-            leaf.kind in {"view", "var"}
+            leaf.kind in {"view", 'mut'}
             and "*" not in position
             and not value.flows.get(position)
         ):

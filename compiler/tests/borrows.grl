@@ -6,34 +6,34 @@ struct Borrowed<a> { views:vec<read<a>> }
 fn relay<a>(r:ref_mut<a,num>)->ref_mut<a,num> { return r; }
 fn right<a>(r:ref<a,Outer>)->ref<a,Inner> { return borrow(r.right); }
 fn keep_views<a>(r:read<a>)->Borrowed<a> {
-    var v =vec<read<a>>(); vec_push(v,r); return Borrowed{views:v};
+    mut v =vec<read<a>>[]; v.push(r); return Borrowed{views:v};
 }
 fn count<a>(v:vec<read<a>>)->num {
-    r :=vec_get(v,0); return len(read(load(r)));
+    r :=&v[0]; return (&(load(r))).len();
 }
 pub fn run()->num {
-    var b =bytes(); push(b,7);
-    parent :=read(b); child :=read(parent); drop(parent);
-    assert(at(child,0)==7);
+    mut b =bytes[]; b.push(7);
+    parent :=&b; child :=&parent; drop(parent);
+    assert(child[0]==7);
     // A unique carrier resumes after its readonly derivation's last use.
-    m :=mut(b); r :=read(m); assert(at(r,0)==7); write(m,0,9);
-    assert(at(read(b),0)==9);
+    m :=&mut b; r :=&m; assert(r[0]==7); write(m,0,9);
+    assert(b[0]==9);
     // Numeric storage and references do not need heap allocations.
-    var n=1; r :=relay(borrow_mut(n)); exchange(r,8); assert(n==8);
-    var pair=Numbers{first:1,second:2};
+    mut n=1; r :=relay(borrow_mut(n)); exchange(r,8); assert(n==8);
+    mut pair=Numbers{first:1,second:2};
     a :=borrow_mut(pair.first); b :=borrow_mut(pair.second);
     exchange(a,7); exchange(b,8); assert(pair.first+pair.second==15);
     // A copied scalar ends an element loan before vector reallocation.
-    var values =vec<num>(); vec_push(values,1);
-    slot :=vec_get(values,0); copied :=load(slot);
-    vec_push(values,2); assert(copied+len(values)==3);
+    mut values =vec<num>[]; values.push(1);
+    slot :=&values[0]; copied :=load(slot);
+    values.push(2); assert(copied+values.len()==3);
     // Hidden return targets keep the whole compatible frame, not a guessed projection.
-    var outer=Outer{left:Inner{n:1},right:Inner{n:2}};
+    mut outer=Outer{left:Inner{n:1},right:Inner{n:2}};
     p :=right(borrow(outer)); q :=borrow(p.n); saved :=load(q);
     outer.right=Inner{n:8}; assert(saved==2);
     // Moving a reference-containing field retains its data-source guards.
-    var bytes =bytes(); push(bytes,42);
-    box :=keep_views(read(bytes)); views :=box.views; drop(box);
+    mut bytes =bytes[]; bytes.push(42);
+    box :=keep_views(&bytes); views :=box.views; drop(box);
     assert(count(views)==1);
     return 4242;
 }

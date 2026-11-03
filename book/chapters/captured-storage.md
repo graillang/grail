@@ -14,4 +14,4 @@ can retain old guards longer than strictly necessary, and opaque local-frame wri
 retained owner witness. Opaque external writes without a recoverable invariant contract are
 rejected rather than accepted on the strength of an erased lifetime label.
 
-**Try it:** add `push(second,3)` before reading `current`. The live stored view should prevent it.
+**Try it:** add `second.push(3)` before reading `current`. The live stored view should prevent it.

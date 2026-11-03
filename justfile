@@ -23,3 +23,15 @@ book-test:
 # Verify Grail examples without compiling the optional Rust comparisons.
 book-check-grail:
     bun tools/book.mjs check --grail-only
+
+# Build the sole Grail-written compiler from its assembly bootstrap.
+build:
+    bun tools/native.mjs build
+
+# Run preserved language safety/execution regressions on a selected CPU.
+test *args:
+    bun tools/test-native.mjs "$@"
+
+# Verify direct compiler self-hosting on all supported CPUs (QEMU needed for cross execution).
+bootstrap-check:
+    bun tools/bootstrap.mjs verify all

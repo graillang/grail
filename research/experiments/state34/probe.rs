@@ -123,28 +123,28 @@ fn main() {
     for case in 0..400 {
         let hold = case % 5 == 0;
         let mut text =
-            "module p;enum R{Ok(num),Err(string)}pub fn run(n:num)->R{let b=bytes();push(b,1);"
+            "module p;enum R{Ok(num),Err(string)}pub fn run(n:num)->R{let b=bytes[];b.push(1);"
                 .to_string();
         if hold {
-            text.push_str("let held=read(b);");
+            text.push_str("let held=&b;");
         }
         for _ in 0..8 {
             let value = next(&mut random);
             text.push_str(match value % 8 {
                 0 => "let temp=n+1;let copied=temp;",
-                1 => "let view=read(b);let size=len(view);",
-                2 => "let view=read(b);push(b,2);assert(len(view)==1);",
-                3 => "let view=mut(b);write(view,0,3);",
+                1 => "let view=&b;let size=view.len();",
+                2 => "let view=&b;b.push(2);assert(view.len()==1);",
+                3 => "let view=&mut b;write(view,0,3);",
                 4 => "let scalar=R::Ok(n)?;",
-                5 => "while 0{let copy=copy_bytes(b);}",
+                5 => "while 0{let copy=b.copy();}",
                 6 => "if n{return R::Err(\"bad\");}",
-                _ => "{let name=\"x\";assert(len(name)==1);}",
+                _ => "{let name=\"x\";assert(name.len()==1);}",
             });
         }
         text.push_str(if hold {
-            "return R::Ok(len(held));}"
+            "return R::Ok(held.len());}"
         } else {
-            "return R::Ok(len(b));}"
+            "return R::Ok(b.len());}"
         });
         match grail_seed::source::compile(&text, Default::default()) {
             Ok(p) => {

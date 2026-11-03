@@ -6,7 +6,7 @@ fn main() {
     for count in [8, 32, 128, 256] {
         let mut s = "module bench;".to_string();
         if generic {
-            s.push_str("enum Result<type T,type E>{Ok(T),Err(E)}");
+            s.push_str("enum Result<T,E>{Ok(T),Err(E)}");
         }
         for i in 0..count {
             s.push_str(&format!(

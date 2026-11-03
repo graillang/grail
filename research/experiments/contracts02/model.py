@@ -37,7 +37,7 @@ class Ty:
             )
         if kind in {"list", "tree"}:
             return Ty(kind, inner=Ty.parse(value, depth + 1))
-        if kind == "var" and isinstance(value, str) and value:
+        if kind == 'mut' and isinstance(value, str) and value:
             return Ty(kind, name=value)
         raise Rejected(f"unsupported type: {raw!r}")
 
@@ -47,8 +47,8 @@ class Ty:
         if self.kind in {"list", "tree"}:
             assert self.inner is not None
             return {self.kind: self.inner.raw()}
-        if self.kind == "var":
-            return {"var": self.name}
+        if self.kind == 'mut':
+            return {'mut': self.name}
         return self.kind
 
     def leaves(self, path: Path = ()) -> list[tuple[Path, Ty]]:
@@ -75,7 +75,7 @@ class Ty:
         return value
 
     def substitute(self, bindings: dict[str, Ty]) -> Ty:
-        if self.kind == "var":
+        if self.kind == 'mut':
             return bindings.get(self.name, self)
         return Ty(
             self.kind,
@@ -86,7 +86,7 @@ class Ty:
 
 
 def unify(expected: Ty, actual: Ty, bindings: dict[str, Ty]) -> None:
-    if expected.kind == "var":
+    if expected.kind == 'mut':
         old = bindings.setdefault(expected.name, actual)
         if old != actual:
             raise Rejected("inconsistent generic argument")
@@ -132,9 +132,9 @@ class Info:
     def parameter(index: int, ty: Ty) -> Info:
         result = Info(ty, callback=index if ty.kind == "callback" else None)
         for path, leaf in ty.leaves():
-            if leaf.kind in {"view", "var"}:
+            if leaf.kind in {"view", 'mut'}:
                 result.flows[path] = frozenset(
-                    {Origin(index, path, "prefix" if leaf.kind == "var" else "loan")}
+                    {Origin(index, path, "prefix" if leaf.kind == 'mut' else "loan")}
                 )
             elif leaf.kind == "bytes":
                 result.stores[path] = Origin(index, path, "storage")

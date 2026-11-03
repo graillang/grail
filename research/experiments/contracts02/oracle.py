@@ -206,7 +206,7 @@ def check(
         if Ty.parse(f["result"]).kind == "unit":
             continue  # Scoped-callback protocol tested by separate client tests, not this oracle.
         generic = any(
-            t.kind == "var"
+            t.kind == 'mut'
             for p in f["params"]
             for _, t in Ty.parse(p["type"]).leaves()
         )

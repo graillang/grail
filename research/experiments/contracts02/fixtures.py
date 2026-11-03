@@ -32,7 +32,7 @@ def function(
 
 
 def providers() -> list[dict[str, Any]]:
-    generic = {"var": "T"}
+    generic = {'mut': "T"}
     tree = {"tree": "view"}
     return [
         function("first", ["bytes"], "view", borrow(0)),
@@ -130,11 +130,11 @@ def owner(name: str, ty: Any = "bytes") -> dict[str, Any]:
 
 
 def invoke(dest: str, name: str, *args: str) -> dict[str, Any]:
-    return {"op": "call", "dest": dest, "fn": name, "args": [{"var": a} for a in args]}
+    return {"op": "call", "dest": dest, "fn": name, "args": [{'mut': a} for a in args]}
 
 
 def use(name: str, *path: str) -> dict[str, Any]:
-    return {"op": "use", "var": name, "path": list(path)}
+    return {"op": "use", 'mut': name, "path": list(path)}
 
 
 def callback(body: list[Any], captures: list[str] | None = None) -> dict[str, Any]:
@@ -153,7 +153,7 @@ def clients() -> list[dict[str, Any]]:
         owner("input"),
         invoke("ast", "parse", "input"),
         invoke("leaves", "leaves", "ast"),
-        {"op": "drop", "var": "ast"},
+        {"op": "drop", 'mut': "ast"},
         use("leaves"),
         {"op": "end", "owner": "input"},
     )
@@ -170,7 +170,7 @@ def clients() -> list[dict[str, Any]]:
         "field_projection_survives_other_owner",
         True,
         *prefix,
-        {"op": "project", "dest": "kept", "var": "pair", "path": ["long"]},
+        {"op": "project", "dest": "kept", 'mut': "pair", "path": ["long"]},
         {"op": "end", "owner": "short"},
         use("kept"),
     )
@@ -327,7 +327,7 @@ def clients() -> list[dict[str, Any]]:
         False,
         owner("a"),
         invoke("v", "first", "a"),
-        {"op": "drop", "var": "v"},
+        {"op": "drop", 'mut': "v"},
         use("v"),
     )
     add(

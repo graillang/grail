@@ -1,5 +1,8 @@
 # Design ledger
 
+> Design history: seed/C prototype details below are historical. The authoritative implementation
+> and current build/test commands are in [compiler/README.md](../../compiler/README.md).
+
 Status: second research tranche, 2026-10-30. Recommendations are **not agreements**.
 See [the memory-model competition](memory-model-competition.md) for revisions prompted by the critique.
 

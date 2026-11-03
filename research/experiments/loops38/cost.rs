@@ -10,11 +10,11 @@ fn main() {
         vec!["counted", "while"]
     } {
         for count in [32, 128, 512, 1000] {
-            let mut s = "fn f(n:num)->num{var sum=0;".to_string();
+            let mut s = "fn f(n:num)->num{mut sum=0;".to_string();
             for i in 0..count {
                 s.push_str(&match kind {
                     "counted" => format!("for i{i} in n{{sum=sum+i{i};}}"),
-                    "while" => "{var i=0;while i<n{sum=sum+i;i=i+1;}}".into(),
+                    "while" => "{mut i=0;while i<n{sum=sum+i;i=i+1;}}".into(),
                     "break" => format!("for i{i} in n{{let local=\"x\";if n{{break;}}continue;}}"),
                     "continue" => {
                         format!("for i{i} in n{{let local=\"x\";if i{i}{{continue;}}break;}}")

@@ -80,7 +80,7 @@ class Tests(unittest.TestCase):
 
     def test_owner_drop_is_not_silent_reclamation(self):
         with self.assertRaises(Rejected):
-            Checker(self.summaries, [owner("a"), {"op": "drop", "var": "a"}]).check()
+            Checker(self.summaries, [owner("a"), {"op": "drop", 'mut': "a"}]).check()
 
     def test_recursive_summary_converges(self):
         self.assertEqual(len(self.summaries["parse"].flows[("*",)]), 1)
@@ -169,7 +169,7 @@ class Tests(unittest.TestCase):
                     "op": "call",
                     "dest": "v",
                     "fn": "pick",
-                    "args": [{"var": "a"}, {"var": "b"}],
+                    "args": [{'mut': "a"}, {'mut': "b"}],
                 },
                 {"op": "end", "owner": "b"},
                 use("v"),

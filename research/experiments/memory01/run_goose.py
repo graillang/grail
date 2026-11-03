@@ -73,7 +73,7 @@ def main() -> None:
     for count in [16, 64, 256]:
         text = [
             "fn head(xs: i64[:]) -> i64& { return xs[0]; }",
-            "fn main() { var total:i64=0;",
+            'fn main() { mut total:i64=0;',
         ]
         text += [f"var a{i}:i64[1]=[{i}]; total+=head(a{i}[..]);" for i in range(count)]
         text += ["print(total); }"]

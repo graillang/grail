@@ -1,38 +1,18 @@
-# Direct native backend — Linux x86-64
+# Direct native compiler — Linux x86-64, ARM64 and RISC-V 64
 
-`native.grl` emits GNU assembler syntax directly from Grail source. Grail function bodies do
-not go through C, LLVM, a JIT or an interpreter. GNU `as` encodes the instructions; the system
-linker produces a static executable with a generated `_start`. There is no libc dependency. The backend is written in Grail and compiles itself.
+`native.grl` checks Grail source and emits a closed word-machine stream. `machine.grl` performs
+static target instruction selection for ARM64 and RISC-V; x86-64 retains the stream's original
+register spelling. This is direct native compilation: no C source, LLVM IR, JIT or interpreter.
+The compiler, checker, lowering and trusted runtime are all Grail. An assembler and linker encode
+instructions and produce static Linux ELF executables; no libc is linked.
 
-## Build without Rust or the C backend
+See [README.md](README.md) for seed-free builds and cross execution. Generated bootstraps exist
+for all three CPUs and are accepted only after execution and byte-for-byte self-compilation.
+The Rust seed and unchecked C compiler have been removed, not retained as alternative build routes.
 
-The committed `bootstrap/native.s` is generated from `native.grl`, `lexer.grl`, `ownership.grl` and the
-Grail-written `runtime.grl`. No support object, C compiler, libc or handwritten assembly runtime
-is required:
+## Invocation and entry
 
-```sh
-mkdir -p seed/.work/native
-W=seed/.work/native
-as --64 compiler/bootstrap/native.s -o $W/bootstrap.o
-ld $W/bootstrap.o -o $W/native
-$W/native $W/stage2.s compiler/native.grl compiler/lexer.grl compiler/ownership.grl compiler/runtime.grl
-as --64 $W/stage2.s -o $W/stage2.o
-ld $W/stage2.o -o $W/stage2
-$W/stage2 $W/stage3.s compiler/native.grl compiler/lexer.grl compiler/ownership.grl compiler/runtime.grl
-cmp $W/stage2.s $W/stage3.s
-cmp $W/stage2.s compiler/bootstrap/native.s
-```
-
-Compile an application:
-
-```sh
-$W/native $W/example.s compiler/examples/native_numbers.grl compiler/runtime.grl
-as --64 $W/example.s -o $W/example.o
-ld $W/example.o -o $W/example
-$W/example  # 171
-```
-
-Invocation: `native OUT.s ENTRY.grl [MODULE.grl...]`. All modules are supplied as source files, including `compiler/runtime.grl` last.
+Invocation: `native [--target x86_64|aarch64|riscv64] [--overflow=checked|wrap] OUT.s ENTRY.grl [MODULE.grl...]`. All modules are supplied as source files, including `compiler/runtime.grl` last.
 A named `main` in the entry file takes priority and needs no `pub`. Its result defaults to
 `unit`, with an implicit return at the end. The entry file may omit its `module` declaration;
 dependency files still declare their modules explicitly.
@@ -58,28 +38,31 @@ Existing bootstrap/regression sources without named main retain their first-publ
 entry protocol: zero parameters or one argv view, explicit `num` result, printed by the legacy
 numeric harness. This is not the recommended application entry convention.
 
-Alternatively, build with the Rust seed just like `grailc.grl` (publish `host`, compile `lexer`,
-build `native`), or compile both Grail modules with the existing C bootstrap.
-
 ## Implementation boundary
 
-- System V AMD64 calling convention, up to six one-word parameters, one-word result in `rax`.
-- Each local/temporary gets its own stack slot; frames are 16-byte aligned at calls. No register
-  allocator or optimization pipeline. Return uses `leave; ret`; recursion works.
-- Explicit branch labels for conditionals, loops, break/continue, and enum matches.
-- Wrapping u64 arithmetic and unsigned comparisons/remainder; zero remainder divisors abort.
-- Operands and call arguments are evaluated left to right, with snapshots before later operands.
-- Record fields, enum payloads, typed references, vectors, strings and views use the same uniform
-  one-word value ABI as the C bootstrap. Type-directed loads/addressing lower to native instructions.
-- Allocation, sequences, byte/text operations, file I/O, PATH search, process execution and numeric
-  printing are implemented in `runtime.grl`. Its explicit `unsafe module runtime` can use raw
-  load/store/byte, mapping, process-state and syscall intrinsics. Ordinary modules cannot invoke
-  raw intrinsics. This is the trusted runtime boundary, not proof of runtime memory safety.
-- The allocator caches mapped arenas, reuses freed blocks by size class, checks double-free state,
-  counts live allocations, immediately unmaps single-object large arenas, and unmaps cached slabs
-  at shutdown. `runtime_audit.grl` checks reuse and a
-  balanced live count after 1,000 allocation/descriptor/free cycles and command execution. `mincore` also verifies that freeing a large allocation really removes
-  its mapping.
+| Target | Argument registers (up to six word values) | Result | Runtime |
+| --- | --- | --- | --- |
+| x86-64 | rdi, rsi, rdx, rcx, r8, r9 | rax | Linux syscall ABI |
+| ARM64 | x0–x5 | x0 | Linux AArch64 syscall ABI |
+| RISC-V 64 | a0–a5 | a0 | Linux RV64 syscall ABI, RV64IMA / LP64 |
+
+- Uniform one-word value representation and eight-byte local slots; calls have 16-byte-aligned
+  frames and architecture-specific return-address/callee-save handling. Recursion works.
+- Target lowering preserves unsigned comparison, carry/borrow overflow checks, byte accesses,
+  division/remainder, long branches, address relocation and frame constants. Unsupported emitted
+  operations fail instead of silently dropping instructions.
+- Typed references, generic layouts, records, enums, vectors, text and views share the same checked
+  language semantics on each target. No register allocator or optimizing middle end exists yet.
+- Allocation, UTF-8, collection operations, numeric printing, arguments/environment, file I/O,
+  PATH search and process commands are implemented in `runtime.grl`. Its syscall-operation boundary
+  maps to native Linux numbers, including openat and clone where open/fork syscalls do not exist.
+- Raw memory, mapping and native syscalls are confined to `unsafe module runtime`; safe modules
+  cannot call its raw functions or intrinsics. Raw native syscall numbers are architecture-specific;
+  portable runtime code calls `rt_syscall` instead. This trusted boundary is not a memory-safety proof.
+- Runtime allocation guards, checked size arithmetic, bounds checks and UTF-8 validation remain
+  enabled under user `--overflow=wrap` mode. Large allocation unmapping is verified with mincore.
+- These are **Linux ports**, not macOS/Windows ports. Other executable formats and OS APIs need
+  separate implementations, regardless of CPU architecture.
 
 ## Ownership and cleanup checkpoint
 
@@ -100,14 +83,16 @@ backedges. Lifetime guards retain captured origins separately from access capabi
 reference returns conservatively retain whole input frames, so interior projections cannot free or
 replace a still-borrowed object. Unsafe programs fail before replacing an existing output file.
 
-Declarations use `name := value` for immutable bindings and `var name = value` for mutable
+Declarations use `name := value` for immutable bindings and `mut name = value` for mutable
 bindings; `=` only assigns an existing mutable binding. Owned mutation or mutable borrowing
-requires `var`, while a fixed explicit mutable reference/view may use its referent capability.
-Parameters are fixed bindings; a by-value owner can be moved into a mutable local. `let` is not
-a declaration keyword.
+requires `mut`, while a fixed explicit mutable reference/view may use its referent capability.
+Parameters are fixed bindings; a by-value owner can be moved into a mutable local. `let` and `var` are not declaration keywords.
 
 Unsigned arithmetic includes `/`, `%`, right-associative `**`, and numeric compound assignments
-`+=`, `-=`, `*=`, `/=`, `%=` and `**=`. Powers use wrapping multiplication; `0 ** 0` is 1.
+`+=`, `-=`, `*=`, `/=`, `%=` and `**=`. Addition, subtraction, multiplication and powers abort on
+overflow/underflow by default on every target; `0 ** 0` is 1. Explicit `wrapping_add(a,b)`,
+`wrapping_sub(a,b)`, `wrapping_mul(a,b)` and `wrapping_pow(a,b)` compute modulo 2⁶⁴. Their numeric
+arguments run once, left to right.
 Division/remainder by zero abort. `^` remains XOR. Compound targets must be initialized numeric
 storage; the target stays valid while the right-hand side runs once, and conflicting mutation
 is rejected. Power policy is implemented in the Grail runtime, not handwritten assembly.
@@ -117,7 +102,7 @@ with opaque affine type variables; specializing to `num` does not make `T` copya
 Calls infer type arguments or accept explicit `identity<num>(...)` forms, including cross-module
 calls and regular recursion. Expanding polymorphic recursion is bounded. Generic records/enums
 support nested/borrowed type arguments, constructor inference and specialized recursive drops.
-Lifetimes precede `type T` parameters in declarations.
+Lifetimes precede `T` parameters in declarations.
 
 Captured storage supports assignment, `exchange`, generic `replace<T>`, vector push/pop and
 caller-side writeback. External writes are checked against declared data-lifetime bounds; weak
@@ -125,20 +110,66 @@ updates retain historical guards across control-flow joins. Opaque writes with r
 frame witnesses propagate incoming guards into every possible frame owner, not just the temporary
 reference. **Conservative limit:** opaque external-frame writes without a recoverable invariant
 contract are rejected. Whole-frame guards and weak updates may retain borrows longer than needed.
-This is not a soundness proof or full Rust-seed parity; the explicitly unsafe runtime is trusted.
+This is not a soundness proof; the explicitly unsafe runtime is trusted.
 
-There is no optimizer, portable target, or implicit-module support. Panic/failed assertions abort
-without unwinding. Older C bootstrap files remain only as an independent recovery/cross-check route;
-the native build does not use them.
+There is no optimizing middle end yet. Failed assertions and guards abort without unwinding.
+`--overflow=wrap` opts user arithmetic into modulo 2⁶⁴, including powers and compound assignments;
+checked runtime arithmetic, bounds, UTF-8 and ownership checks remain enabled.
 
 ## Verification and artifact regeneration
 
 ```sh
-cargo test --manifest-path seed/Cargo.toml --offline --test native_codegen -- --ignored
+bun tools/test-native.mjs x86_64
+bun tools/test-native.mjs aarch64
+bun tools/test-native.mjs riscv64
+bun tools/bootstrap.mjs verify all
+bun tools/book.mjs check
 ```
 
-The test builds the backend with both the seed and the C bootstrap, compares emitted assembly,
-checks native stage-2/stage-3 equality and the committed artifact, executes differential programs
-and abort cases, and uses a native-built C backend to reproduce the existing C bootstrap. To
-regenerate `bootstrap/native.s`, copy a fresh stage-2 assembly output after editing `native.grl`,
-`lexer.grl`, `ownership.grl` or `runtime.grl`; the test rejects stale artifacts.
+Cross execution uses QEMU user emulation when the target differs from the host. Tests preserve
+existing output on rejection, execute runtime/ownership/generic audits, check guarded failure and
+both arithmetic policies, and compare target self-compilation output byte-for-byte. To regenerate
+bootstraps, run `bun tools/bootstrap.mjs update all`; failed checks do not replace an artifact.
+`manifest.json` records uncompressed bootstrap SHA-256 hashes and Grail source provenance.
+
+## Borrowing and byte indexing syntax
+
+Use `mut name = value` for mutable declarations and `name := value` for fixed bindings.
+`&value` creates a readonly byte view; `&mut value` creates an exclusive writable byte view.
+The latter requires mutable owned storage or an existing writable capability. Prefix borrowing
+binds tighter than binary operators, including bitwise `&`; postfix indexing binds tighter still.
+Typed storage references remain `borrow(value)` / `borrow_mut(value)`.
+
+Byte buffers, strings and views support `value[index]` and readonly `value[start:end]` slices.
+Either slice bound may be omitted. Indexing implicitly borrows its source readonly and retains
+normal lifetime, conflict and bounds checks; a slice is not an owning copy. Bounds run once,
+left to right. String bytes cannot be mutably borrowed. Vectors use the same `v[i]` syntax: numeric elements copy, while non-numeric elements remain
+borrowed. `&v[i]` and `&mut v[i]` explicitly borrow element slots. Byte writes use `write` through
+a writable view.
+
+The old `var` declaration and `read(...)`, `mut(...)`, `at(...)`, `slice(...)` builtins are removed.
+Lifetime-bearing byte-view types remain `read<a>` and `mut<a>`; this change replaces expression
+syntax, not the type system.
+
+## Collection expressions and generic parameters
+
+Collection literals are `bytes[10, 20, 30]` and `vec<T>[...]` (empty forms use `[]`). Use postfix
+`.push(value)`, `.pop()`, `.len()`, `.copy()` and `.text()`; strings append with `.append(source)`.
+Free collection helper spellings and constructor parentheses are removed. `.pop()` aborts on an
+empty collection, unlike Rust's Option-returning pop. Generic user functions and types are checked and specialized by the Grail-written compiler.
+
+`true` and `false` are reserved numeric truth literals (one and zero). Generic type parameters
+are uppercase names without a `type` keyword, e.g. `fn identity<T>` and `fn replace<a,T>`;
+lowercase names are lifetimes, which precede type parameters. Existing universal checking remains.
+
+## Callable and concurrency foundations
+
+Typed capture-free function values, structural `Send`/`Share` bounds and opaque `atomic<num>`
+are implemented in the sole compiler, including cross-target lowering. See
+[callables and transfer](../docs/design/callables-and-transfer.md) for syntax and restrictions.
+These foundations do **not** yet provide capturing closures, worker scheduling, task scopes,
+cancellation or colourless readiness I/O; those remain in progress.
+
+Explicit static user-defined interfaces and concrete implementations share the bound syntax with
+structural capabilities. See [interfaces](../docs/design/interfaces.md) for dispatch, coherence and
+current restrictions; generic interfaces, associated types and dynamic objects are not implemented.

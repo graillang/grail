@@ -2,7 +2,7 @@ import { test, expect, afterAll } from 'bun:test';
 import { mkdtempSync, readFileSync, existsSync, readdirSync, rmSync, writeFileSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { loadBook, expand, buildBook, openBook, sourcePath, root } from './book.mjs';
+import { loadBook, expand, buildBook, openBook, sourcePath, root, verifyRust } from './book.mjs';
 
 const scratch = mkdtempSync(join(tmpdir(), 'grail-book-test-'));
 afterAll(() => rmSync(scratch, { recursive: true, force: true }));
@@ -11,7 +11,8 @@ const book = loadBook();
 test('manifest has substantial example-led coverage in both languages', () => {
   expect(book.chapters.length).toBeGreaterThanOrEqual(20);
   expect(book.examples.length).toBeGreaterThanOrEqual(30);
-  expect(book.examples.filter(e => e.rust).length).toBeGreaterThanOrEqual(20);
+  expect(book.examples.every(e => e.rust)).toBe(true);
+  for (const example of book.examples) expect(expand(`{{example:${example.id}}}`, book)).toContain('language-rust');
   expect(book.examples.filter(e => e.diagnostic).length).toBeGreaterThanOrEqual(4);
   for (const e of book.examples) expect(readFileSync(sourcePath(e.entry), 'utf8')).toContain('fn main');
 });
@@ -77,4 +78,31 @@ test('just book invokes build and browser opener end-to-end', () => {
   expect(result.success).toBe(true);
   expect(readFileSync(record, 'utf8')).toBe(join(root, '.work/book/html/index.html'));
   expect(result.stdout.toString()).toContain('Built ');
+});
+
+test('missing Rust comparisons are rejected at manifest validation', () => {
+  const manifest = structuredClone(book);
+  delete manifest.examples[0].rust;
+  const path = join(scratch, 'missing-comparison.json');
+  writeFileSync(path, JSON.stringify(manifest));
+  expect(() => loadBook(path)).toThrow('needs a Rust comparison');
+});
+test('Rust host examples independently verify arguments, fixtures and file outputs', () => {
+  for (const id of ['arguments', 'files', 'commands']) verifyRust(book.examples.find(e => e.id === id));
+  const example = book.examples.find(e => e.id === 'files');
+  expect(() => verifyRust({ ...example, rust: { ...example.rust, files: { 'copy.txt': 'wrong' } } })).toThrow('output file mismatch');
+  expect(() => verifyRust({ ...example, rust: { ...example.rust, fixtures: { '../outside.txt': 'bad' } } })).toThrow('Fixture path');
+});
+
+test('supporting module files have real side-by-side Rust analogues', () => {
+  const html = expand('{{example:modules}}', book);
+  expect(html).toContain('examples/arithmetic.grl');
+  expect(html).toContain('rust/arithmetic.rs');
+  expect(html).toContain('mod arithmetic;');
+  expect(html).toContain('pub fn twice');
+  const manifest = structuredClone(book);
+  delete manifest.examples.find(e => e.id === 'modules').rust.modules;
+  const path = join(scratch, 'missing-module-comparison.json');
+  writeFileSync(path, JSON.stringify(manifest));
+  expect(() => loadBook(path)).toThrow('counterpart for each supporting module');
 });

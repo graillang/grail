@@ -9,11 +9,11 @@ ownership joins and bootstrap remain required; this is not completion of v0.
 ```grl
 struct Cursor<data>{source:read<data>,name:string}
 fn source<outer,data>(cursor:ref<outer,Cursor<data>>)->read<data>{
-    return read(cursor.source);
+    return &cursor.source;
 }
 struct Unique<data>{source:mut<data>}
 fn short<outer,data>(cursor:ref<outer,Unique<data>>)->read<outer>{
-    return read(cursor.source);
+    return &cursor.source;
 }
 ```
 

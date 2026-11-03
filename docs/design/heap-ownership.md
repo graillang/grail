@@ -1,11 +1,14 @@
 # First heap ownership gate: byte vectors
 
+> Design history: seed/C prototype details below are historical. The authoritative implementation
+> and current build/test commands are in [compiler/README.md](../../compiler/README.md).
+
 2026-10-30. This is a v0 progress checkpoint, not complete strings, generic vectors or self-hosting.
 
 ## Implemented
 
-- `bytes()` creates an empty owned byte vector; `push(owner,value)` grows it geometrically and
-  stores the low eight bits. `len(owner)` reads its length. `copy_bytes(owner_or_view)` explicitly
+- `bytes[]` creates an empty owned byte vector; `owner.push(value)` grows it geometrically and
+  stores the low eight bits. `owner.len()` reads its length. `owner_or_view.copy()` explicitly
   deep-copies bytes into an independent owner. No implicit owner copy, GC or reference counts.
 - `bytes` parameters/results transfer ownership through separately checked interfaces. Returning
   a local owner is supported; returning a view into a consumed owned parameter is not.

@@ -12,7 +12,7 @@ Atom = TypeVar("Atom", bound=Hashable)
 
 
 def data_type(ty: Ty) -> None:
-    if ty.kind not in {"unit", "view", "record", "list", "var"}:
+    if ty.kind not in {"unit", "view", "record", "list", 'mut'}:
         raise Rejected("type outside the shared view-data experiment")
     for _, child in ty.fields:
         data_type(child)
@@ -62,9 +62,9 @@ def entry(index: int, ty: Ty) -> Value[Pre]:
     return Value(
         ty,
         {
-            p: frozenset({Pre(index, p, t.kind == "var")})
+            p: frozenset({Pre(index, p, t.kind == 'mut')})
             for p, t in ty.leaves()
-            if t.kind in {"view", "var"}
+            if t.kind in {"view", 'mut'}
         },
     )
 

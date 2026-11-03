@@ -9,17 +9,17 @@ fn main() {
             for i in 0..fields {
                 s.push_str(&format!("p{i}:read<a>,"));
             }
-            s.push_str("}fn source<outer,data>(p:ref<outer,Cursor<data>>)->read<data>{return read(p.p0);}pub fn run()->num{");
+            s.push_str("}fn source<outer,data>(p:ref<outer,Cursor<data>>)->read<data>{return &p.p0;}pub fn run()->num{");
             for i in 0..fields {
-                s.push_str(&format!("let b{i}=bytes();push(b{i},{i});"));
+                s.push_str(&format!("let b{i}=bytes[];(b{i}).push({i});"));
             }
             s.push_str("let cursor=Cursor{");
             for i in 0..fields {
-                s.push_str(&format!("p{i}:read(b{i}),"));
+                s.push_str(&format!("p{i}:&(b{i}),"));
             }
-            s.push_str("};var sum=0;");
+            s.push_str("};mut sum=0;");
             for _ in 0..count {
-                s.push_str("{let v=source(borrow(cursor));sum=sum+len(v);}");
+                s.push_str("{let v=source(borrow(cursor));sum=sum+v.len();}");
             }
             s.push_str("return sum;}");
             let t = Instant::now();

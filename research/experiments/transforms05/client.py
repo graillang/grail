@@ -50,7 +50,7 @@ def call(
             ):
                 raise Rejected("overlapping mutable/move client arguments")
     result, post = contract.apply(actuals)
-    if any(leaf.kind == "var" for _, leaf in result.ty.leaves()):
+    if any(leaf.kind == 'mut' for _, leaf in result.ty.leaves()):
         raise Rejected(
             "unresolved result type; contextual type arguments outside this client fragment"
         )

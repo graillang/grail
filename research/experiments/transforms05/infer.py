@@ -99,7 +99,7 @@ class State:
         if op == "empty":
             ty = Ty.parse(value)
             data_type(ty)
-            if any(t.kind in {"view", "var"} and "*" not in p for p, t in ty.leaves()):
+            if any(t.kind in {"view", 'mut'} and "*" not in p for p, t in ty.leaves()):
                 raise Rejected("cannot fabricate a nonempty view/opaque value")
             return Value(ty)
         if op == "record" and isinstance(value, dict):

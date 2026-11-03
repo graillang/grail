@@ -1,45 +1,71 @@
-# Grail-written compilers
+# The Grail compiler
 
-**[Direct native backend: Linux x86-64](NATIVE.md)** — Grail → assembly → executable,
-with reproducible native self-compilation. The C backend below remains a bootstrap and cross-check.
+The compiler, ownership checker, machine lowering, and Linux runtime are written in Grail:
 
-## C backend (bootstrap v0)
+- `native.grl`: syntax, types, generic checking/specialization, ownership and word-machine emission.
+- `ownership.grl`: loan/place graph and control-flow joins.
+- `lexer.grl`: tokenization.
+- `machine.grl`: direct ARM64 / RISC-V instruction selection from the internal word stream.
+- `runtime.grl`: allocation, UTF-8, collections, process I/O and the Linux syscall boundary.
 
-`grailc.grl` (with `lexer.grl`) is a Grail compiler written in Grail. It translates the source
-subset it is itself written in to C, and reproduces itself byte for byte.
+There is no Rust seed or unchecked C compiler. Generated assembly bootstraps are the only
+bootstrap inputs; the hash manifest records their source provenance and uncompressed contents.
+
+## Build
+
+On Linux x86-64, ARM64 or RISC-V 64, install Bun, Clang (used **only as an assembler**) and LLD:
 
 ```sh
-# Stage 1: the Rust seed checks and builds the compiler.
-cargo build --manifest-path seed/Cargo.toml --release --offline
-W=seed/.work/bootstrap; mkdir -p $W
-seed/target/release/grail-seed host $W
-seed/target/release/grail-seed compile compiler/lexer.grl $W $W
-seed/target/release/grail-seed build compiler/grailc.grl $W $W
-# Stage 2 and 3: the compiler compiles itself; the outputs are identical.
-$W/grailc $W/stage2.c compiler/grailc.grl compiler/lexer.grl
-clang -O1 -I compiler $W/stage2.c -o $W/stage2
-$W/stage2 $W/stage3.c compiler/grailc.grl compiler/lexer.grl
-cmp $W/stage2.c $W/stage3.c
-# Automated check, including seed-versus-grailc behaviour on examples:
-cargo test --manifest-path seed/Cargo.toml --offline --test bootstrap_native -- --ignored
+bun tools/native.mjs build
 ```
 
-`grailc OUT.c ENTRY.grl [MODULE.grl...]` compiles whole programs: every module is passed as a
-source file, and the first public function of the first file (no parameters, or `argv[1]` as a
-byte view) is the entry. The output `#include`s `grail_rt.c`, so compile it with `-I compiler`.
+The printed path is the compiler executable. It self-compiles the Grail sources from the delivered
+bootstrap. Normal compilation uses no Rust compiler, C source, C compiler backend, or LLVM IR.
+The compiler writes assembly; assemble and link it with the corresponding tools:
 
-`bootstrap/grailc.c` is the committed stage-2 output. It builds the compiler with only a C
-compiler (`cc -I compiler compiler/bootstrap/grailc.c -o grailc`), without the Rust seed. The
-bootstrap test fails when it is stale; regenerate it by copying a fresh stage-2 output.
+```sh
+GRAIL=$(bun tools/native.mjs build)
+"$GRAIL" --target aarch64 hello.s book/examples/hello.grl compiler/runtime.grl
+clang --target=aarch64-linux-gnu -c hello.s -o hello.o
+ld.lld -m aarch64elf hello.o -o hello
+```
 
-## What it does not do
+Targets: `x86_64`, `aarch64`, `riscv64`. The default is the architecture the compiler itself was
+built for. RV64 requires the integer multiply/divide and atomic extensions (RV64IMA), uses the LP64 ABI, and
+needs `-march=rv64ima -mabi=lp64` when assembling. All three currently target **Linux ELF**.
+macOS, Windows and other operating systems are not implemented; sharing a CPU does not imply
+sharing an executable format or syscall ABI.
 
-- **No ownership or borrow checking.** Programs are assumed to have passed the seed; `grailc`
-  only parses, resolves names and field/variant indices, and emits C. Its own source is checked
-  by the seed when stage 1 is built.
-- **Uniform values and no freeing.** Every value is one 64-bit word; sequences, records and enums
-  are heap objects that are never freed. Fine for a short-lived compiler, not for general use.
-- **Subset:** explicit `module` files; records, enums, `match`, `?`/`!`, loops, typed references,
-  `vec<T>`, bytes/strings/views and the host interface. Not supported: implicit modules, generic
-  functions or types (other than `vec<T>`), holders, `buffer`, `hold`. Unknown names abort with a
-  byte offset.
+## Checks and profiles
+
+Ordinary `+`, `-`, `*`, `**` and their compound assignments check overflow by default, independently
+of target. `--overflow=wrap` explicitly requests wrapping **user arithmetic**; bounds, ownership,
+UTF-8 and runtime allocation/arithmetic guards remain enabled. `--overflow=checked` is explicit
+default mode. Target and overflow options precede the output path. Explicit `wrapping_*` functions
+remain available for local modular arithmetic without changing the entire application.
+
+## Verification
+
+```sh
+bun tools/test-native.mjs x86_64
+bun tools/test-native.mjs aarch64
+bun tools/test-native.mjs riscv64
+bun tools/bootstrap.mjs verify all
+bun tools/book.mjs check
+bun tools/book.mjs check --target=aarch64 --grail-only
+```
+
+Cross execution needs the matching `qemu-ARCH-static` executable (including `qemu-x86_64-static`
+when cross-running x86-64 from another host), or an executable path in `GRAIL_QEMU_X86_64`,
+`GRAIL_QEMU_AARCH64` or `GRAIL_QEMU_RISCV64`. Native hosts execute their own architecture directly.
+The tooling preserves arguments as argv entries, validates targets, rejects failed compilation,
+and checks that a rejected program cannot overwrite an existing output artifact.
+
+`bun tools/bootstrap.mjs update all` regenerates bootstrap artifacts only after each compiled
+compiler executes and reproduces its assembly byte-for-byte. ARM64 and RISC-V bootstraps are
+compressed assembly, not opaque executables. Use `gzip -dc` to inspect them.
+
+The regression corpus in `tests/native-cases.json` preserves checked language cases from the
+retired independent implementation, supplemented by runtime/ownership/generic audits and all
+book examples. Historical research records describe earlier compiler experiments, not supported
+build paths.

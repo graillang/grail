@@ -8,7 +8,7 @@ reproduces itself through assembly. Owned values are released deterministically;
 tracing garbage collector or C runtime in the native path. The checker rejects conflicting
 borrows and escaping locals, and generic code treats unknown values as affine.
 
-**This book teaches the current Linux x86-64 native backend, not a promised final language.**
+**This book teaches the current Linux x86-64, ARM64 and RISC-V 64 native compiler, not a promised final language.**
 The syntax and tooling are still evolving. See *Current boundaries* before depending on an
 unsupported feature. Tests are evidence of behavior, not a language soundness proof.
 
@@ -21,11 +21,10 @@ the checked-in bootstrap. Example commands are run from the repository root.
 The book builds as static HTML: no account, CDN, web service, or network is needed to read it.
 Use search, the arrow keys, or the previous/next links. Code blocks have copy buttons.
 
-Selected examples show Rust alongside Grail by default. **Hide Rust** applies across chapters;
+Every example shows Rust alongside Grail by default. **Hide Rust** applies across chapters;
 **Show Rust** restores the comparisons. You can also collapse an individual example. Light mode
 is the default, and an explicit theme choice is remembered.
 Comparison notes distinguish actual differences from capabilities both languages share.
 
 **Prerequisites:** Bun 1.4 or newer and `just` for this book. Running Grail examples additionally
-requires Linux x86-64 and GNU `as`/`ld`. Checking the Rust comparisons also needs `rustc` (edition 2024). Reading/building the book does not require a C compiler,
-Rust, or the example toolchain.
+requires a supported Linux CPU, Clang used only as an assembler, and LLD. Checking the Rust comparisons also needs `rustc` (edition 2024). Reading/building the static book needs neither compiler toolchains nor Rust.

@@ -7,9 +7,9 @@ aggregate references, arbitrary-element heap vectors or the real compiler port.
 ## Source and ordinary checking
 
 ```grl
-pub fn identity<type T>(value:T)->T{return value;}
-pub fn some<type T>(value:T)->Option<T>{return Option::Some(value);}
-fn second<type T,type U>(first:T,second:U)->U{return identity(second);}
+pub fn identity<T>(value:T)->T{return value;}
+pub fn some<T>(value:T)->Option<T>{return Option::Some(value);}
+fn second<T,U>(first:T,second:U)->U{return identity(second);}
 ```
 
 Lifetime parameters precede `type` parameters. Calls infer type arguments from their actual inputs,
@@ -41,7 +41,7 @@ keep their lexical lifetime unless consumed. Explicit binding/return retain valu
 
 ## Standard library and native materialization
 
-`seed/std/core.grl` now provides `some`, `none`, `ok`, `err`, `pair`, `unwrap_option`, `unwrap_result`,
+`lib/core.grl` now provides `some`, `none`, `ok`, `err`, `pair`, `unwrap_option`, `unwrap_result`,
 `discard` and `identity` in real Grail source, alongside Option/Result/Pair layouts. It has generic
 exports but no executable entry. Modules with concrete exports select the first public **nongeneric**
 function as entry; type-only modules remain valid without a dummy function.
