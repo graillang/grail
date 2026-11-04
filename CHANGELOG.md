@@ -2,6 +2,77 @@
 
 ## Unreleased
 
+- References to `bytes`/`string` coerce to views (`read<a>`) in calls, like `&String` to `&str`.
+- `parallel_map` accepts closures; realistic sample programs (CSV report, inventory CLI, parallel primes) join the test suite.
+- Text operators read through references (`words[0] == "GET"`); clearer error for borrowing a temporary.
+- Recursive data types (`enum Tree { Leaf, Node(Branch) }` with `Branch` holding `Tree`) are supported.
+- `borrow(v[i])`/`borrow_mut(s.items[i])` borrow vector elements; calculator and binary-tree sample programs.
+- `to_upper`/`to_lower` map Latin-1, Latin Extended-A, Greek and Cyrillic letters; word-frequency sample program.
+- JSON parser/printer and HTTP server/client sample programs join the test suite.
+
+- Add tuples (`(num, bytes)` types, `(a, b)` values, `t.0` access, `(q, r) := f();` destructuring,
+  Debug-style printing), `match` on integers/bytes/bools with literal, range (`0..10`), binding and
+  guard (`n if n > 3`) patterns, `_` default arms for enum matches, typed bindings
+  (`mut total: i32 = 0;`), `for p in borrow(v)` over non-scalar elements, closures inside generic
+  functions, dot-call syntax for implemented interface methods, hex/binary/octal literals with `_`
+  separators, `f64` constants, and contextual literal typing for returns, assignments and vector
+  literals.
+- Formatting: width/fill/alignment specs (`{:>8}`, `{:*^9}`, `{:05}`, `{:8.2}`), Rust-Debug-style
+  printing of vectors and tuples. Diagnostics show the source line with a caret; missing input
+  files are reported. `grail check` type-checks without building.
+- Libraries: `math` (exp, ln, log2, log10, sin, cos, tan, atan, atan2, pow, round, ... within 1 ulp
+  of Rust's std except pow), insertion-ordered `hashmap` with `key_at`/`value_at` iteration,
+  `order::Ord` with a stable generic `vecs::sort`, Unicode `strings::chars`/`push_char`,
+  `replace`/`repeat`, `env::args`/`env::var`, `process::exit`, and typed `io::Error` results from
+  `fs` (`read_text`, `create_dir`, `remove_file`, `remove_dir`, `list_dir`).
+- Text: `==`/`<` comparisons and `+` concatenation for strings, bytes and views; built-in
+  `trim`, `split`, `contains`, `starts_with`, `ends_with`, `replace`, `repeat`, `to_upper`,
+  `to_lower`, `is_empty`. Vectors: `insert`, `remove`, `swap`, `reverse`, `truncate`, `clear`,
+  `contains`. Borrowing a method result now gives a clear error. Book: Working with text,
+  Collections, Tuples and patterns chapters.
+- Structural `==`/`!=` for structs, tuples and enums (including `Option`/`Result`).
+
+- Add `f64`: correctly rounded literals, IEEE arithmetic and comparisons in hardware on x86-64,
+  ARM64 and RV64 (RISC-V now assembles for `rv64imafd`), checked conversions, `sqrt`/`abs`/`floor`/
+  `is_nan`, and shortest round-trip printing identical to Rust's `{}` (checked on 408 values), and `{:.N}` fixed
+  precision with exact half-to-even rounding. Compound assignment works on all integer types and f64.
+  Add `Option`/`Result` methods (`is_some`, `unwrap_or`, `map`, `ok_or`, `is_ok`, `ok`, ...).
+
+- Add inherent methods (`impl Type { ... }`, including generic `impl<T> Stack<T>`), method calls on
+  variables, fields, references and temporaries, `Type::function` associated functions, enum
+  methods with `match` through references (payloads bound as references), `show()` for printing
+  user types, formatted `print`/`println("{} {}", a, b)` and `format(...)`, `if let`, `while let`,
+  `else if`, `loop`, `for i in a..b`, module `const` values, byte character literals (`'a'`),
+  struct field shorthand, and the `vecs`/`strings` libraries. Book: Methods and Printing chapters.
+
+- Add sized integers (`u8`..`u32`, `i8`..`i64`) with literal suffixes, contextual literals,
+  checked/wrapping/bit conversions and signed arithmetic; `bool` with `&&`/`||` (short-circuit) and
+  `!`; the operators `>`, `<=`, `>=`, `|`, `<<`, `>>`; and capturing closures `|x: T| -> R body` of
+  type `Fn(T) -> R` that copy or move their captures. Diagnostics now report `file:line:column`.
+- Add `for x in v` over scalar vectors and byte sequences, TCP sockets on the colourless reactor
+  (`host::tcp_listen/accept/connect`), recoverable file errors (`lib/fs.grl`: `fs::read`/`fs::write`
+  return `Result`), `?` across Result types with the same error type, and lex `x!==y` as unwrap
+  then `==`.
+
+- Add the `grail` command-line tool in the compiler binary: `build`, `run`, `test`, `fmt
+  [--check]`, `new`, `add` (git dependencies pinned in `grail.lock`) and `fetch`, plus
+  `just install`. Add a comment-preserving, idempotent rustfmt-style formatter whose output
+  compiles to byte-identical assembly. Existing compiler invocation is unchanged.
+
+- Add structured task scopes (`task_scope`, `spawn`, `join`, `cancel_token`) and colourless
+  suspension: tasks are stackful green threads on a worker pool with an epoll reactor; pipe I/O
+  and sleeps suspend only the calling task, blocking file/process calls move to offload threads,
+  and cancellation wakes waiting tasks. Handles cannot outlive their scope; dropping one never
+  blocks. Processes now exit with exit_group. Verified on x86-64, ARM64 and RV64.
+
+- Add real multi-threaded structured parallelism: `parallel_map(items, context, f)` runs on
+  clone-based worker threads with dynamic work claiming and joins all workers before returning;
+  Send/Share/borrow rules are checked. Add futex-based `mutex<T>` with lock-scoped `lock_with`
+  access whose loans cannot escape, keyed SipHash-2-4 `hash` interfaces, a checked
+  `hashmap::Map` and a sharded `concurrent_map::Map`. Verified on x86-64, ARM64 and RV64,
+  including a barrier proving simultaneous execution and contention tests. Closures, cancellation
+  and colourless suspension remain unimplemented.
+
 - Add explicit user-defined interfaces, concrete implementations, checked generic bounds and
   static method dispatch, including module-qualified calls and method values. Check ownership
   and lifetime contracts; reject overlapping/orphan implementations and unsafe-runtime exposure.

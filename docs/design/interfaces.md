@@ -11,7 +11,9 @@ fn read<a,T:Value>(value:ref<a,T>)->num{return Value::value(value);}
 fn main(){n:=42;assert(read(borrow(n))==42);}
 ```
 
-`Self` is the implementation's type, not an implicit receiver. Parameters and passing modes
+`Self` is the implementation's type, not an implicit receiver. For a struct or enum, an implemented
+interface method can also be called with dot syntax, `version.less(borrow(other))`, resolved
+statically like an inherent method (ambiguity between interfaces is an error). Parameters and passing modes
 remain explicit. Calls use `Interface::method(...)` or `module::Interface::method(...)`.
 The compiler infers Self from arguments; use an explicit type argument for return-only Self
 or a function value, e.g. `Value::value<num>`. There is no runtime method search or vtable.

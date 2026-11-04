@@ -1182,5 +1182,1489 @@
     ],
     "reject": true,
     "diagnostic": "type does not satisfy interface bound"
+  },
+  {
+    "name": "mutex-lock-scoped-exclusive-access",
+    "files": [
+      "compiler/tests/mutex.grl"
+    ],
+    "stdout": "42\n"
+  },
+  {
+    "name": "mutex-reject-borrowed-payload",
+    "source": "fn main(){b:=bytes[1];m:=mutex(&b);}",
+    "reject": true,
+    "diagnostic": "mutex payload cannot contain borrows"
+  },
+  {
+    "name": "mutex-reject-borrowed-payload-type",
+    "source": "fn f<a>(m:mutex<read<a>>){}fn main(){}",
+    "reject": true,
+    "diagnostic": "mutex payload cannot contain borrows"
+  },
+  {
+    "name": "mutex-reject-result-escape",
+    "source": "fn leak<a>(v:ref_mut<a,bytes>,n:num)->ref_mut<a,bytes>{return v;}fn main(){m:=mutex(bytes[1]);r:=m.lock_with(0,leak);}",
+    "reject": true,
+    "diagnostic": "lock_with result cannot contain borrows"
+  },
+  {
+    "name": "mutex-reject-context-escape",
+    "source": "struct Out<a>{slot:vec<ref_mut<a,bytes>>}fn leak<a,b>(v:ref_mut<a,bytes>,out:ref_mut<b,Out<a>>)->num{out.slot.push(v);return 0;}fn run<b>(m:ref<b,mutex<bytes>>,out:ref_mut<b,Out<b>>)->num{return m.lock_with(out,leak);}fn main(){}",
+    "reject": true,
+    "diagnostic": "context cannot carry the guarded payload lifetime"
+  },
+  {
+    "name": "mutex-reject-shared-payload-ref",
+    "source": "fn peek<a>(v:ref<a,bytes>,n:num)->num{return v.len();}fn main(){m:=mutex(bytes[1]);m.lock_with(0,peek);}",
+    "reject": true,
+    "diagnostic": "exclusive payload reference"
+  },
+  {
+    "name": "mutex-reject-wrong-payload",
+    "source": "fn f<a>(v:ref_mut<a,num>,n:num)->num{return 0;}fn main(){m:=mutex(bytes[1]);m.lock_with(0,f);}",
+    "reject": true,
+    "diagnostic": "type mismatch"
+  },
+  {
+    "name": "mutex-reject-drop-while-locked-arg",
+    "source": "fn consume(m:mutex<bytes>)->num{return 0;}fn f<a>(v:ref_mut<a,bytes>,n:num)->num{return 0;}fn main(){m:=mutex(bytes[1]);m.lock_with(consume(m),f);}",
+    "reject": true,
+    "diagnostic": "move of unavailable or borrowed value"
+  },
+  {
+    "name": "mutex-reject-moved-context",
+    "source": "fn f<a>(v:ref_mut<a,bytes>,x:bytes)->num{return x.len();}fn main(){m:=mutex(bytes[1]);x:=bytes[2];m.lock_with(x,f);println(x.len());}",
+    "reject": true,
+    "diagnostic": "use of moved"
+  },
+  {
+    "name": "parallel-map-real-threads-contention",
+    "files": [
+      "compiler/tests/parallel.grl",
+      "lib/concurrent_map.grl",
+      "lib/hashmap.grl",
+      "lib/hash.grl",
+      "lib/core.grl"
+    ],
+    "stdout": "42\n"
+  },
+  {
+    "name": "concurrent-map-sharded-operations",
+    "files": [
+      "compiler/tests/concurrent_map.grl",
+      "lib/concurrent_map.grl",
+      "lib/hashmap.grl",
+      "lib/hash.grl",
+      "lib/core.grl"
+    ],
+    "stdout": "42\n"
+  },
+  {
+    "name": "parallel-reject-exclusive-context",
+    "source": "fn f<a>(x:num,c:ref_mut<a,num>)->num{return x;}fn main(){mut n=0;r:=parallel_map(vec<num>[1],borrow_mut(n),f);}",
+    "reject": true,
+    "diagnostic": "does not satisfy Share"
+  },
+  {
+    "name": "parallel-reject-owned-context",
+    "source": "fn f(x:num,c:bytes)->num{return x;}fn main(){r:=parallel_map(vec<num>[1],bytes[1],f);}",
+    "reject": true,
+    "diagnostic": "context must be a shared reference"
+  },
+  {
+    "name": "parallel-reject-borrowed-result",
+    "source": "fn f<a>(x:num,c:ref<a,bytes>)->ref<a,bytes>{return c;}fn main(){b:=bytes[1];r:=parallel_map(vec<num>[1],borrow(b),f);}",
+    "reject": true,
+    "diagnostic": "result cannot contain borrows"
+  },
+  {
+    "name": "parallel-reject-moved-items",
+    "source": "fn f(x:num,c:num)->num{return x;}fn main(){v:=vec<num>[1];r:=parallel_map(v,0,f);println(v.len());}",
+    "reject": true,
+    "diagnostic": "use of moved"
+  },
+  {
+    "name": "parallel-reject-mutate-context-during",
+    "source": "fn f<a>(x:num,c:ref<a,bytes>)->num{return x;}fn main(){mut b=bytes[1];r:=borrow(b);out:=parallel_map(vec<num>[1],r,f);b.push(2);println(load(r).len());}",
+    "reject": true,
+    "diagnostic": ""
+  },
+  {
+    "name": "parallel-reject-callback-shape",
+    "source": "fn f(x:num)->num{return x;}fn main(){r:=parallel_map(vec<num>[1],0,f);}",
+    "reject": true,
+    "diagnostic": "callback takes (item, context)"
+  },
+  {
+    "name": "parallel-reject-item-type",
+    "source": "fn f(x:bytes,c:num)->num{return 0;}fn main(){r:=parallel_map(vec<num>[1],0,f);}",
+    "reject": true,
+    "diagnostic": "type mismatch"
+  },
+  {
+    "name": "parallel-reject-non-send-context-mutex-borrow",
+    "source": "fn f<a>(x:num,c:ref<a,mutex<num>>)->num{return x;}fn main(){m:=mutex(1);r:=borrow(m);drop(m);out:=parallel_map(vec<num>[1],r,f);}",
+    "reject": true,
+    "diagnostic": ""
+  },
+  {
+    "name": "task-scopes-join-cancel-abandon",
+    "files": [
+      "compiler/tests/tasks.grl"
+    ],
+    "stdout": "42\n"
+  },
+  {
+    "name": "task-reject-handle-escape",
+    "source": "fn id(n:num,c:num)->num{return n;}fn b<s>(sc:ref<s,scope<num>>,c:num)->task<num>{return spawn(sc,1,id);}fn main(){t:=task_scope(0,b);}",
+    "reject": true,
+    "diagnostic": "result cannot contain borrows or task handles"
+  },
+  {
+    "name": "task-reject-double-join",
+    "source": "fn id(n:num,c:num)->num{return n;}fn b<s>(sc:ref<s,scope<num>>,c:num)->num{t:=spawn(sc,1,id);x:=join(t);return join(t);}fn main(){}",
+    "reject": true,
+    "diagnostic": "use of moved"
+  },
+  {
+    "name": "task-reject-borrowed-item",
+    "source": "fn f<a>(v:ref<a,bytes>,c:num)->num{return 0;}fn b<s>(sc:ref<s,scope<num>>,c:num)->num{local:=bytes[1];t:=spawn(sc,borrow(local),f);return join(t);}fn main(){}",
+    "reject": true,
+    "diagnostic": "spawned item must be an owned Send value"
+  },
+  {
+    "name": "task-reject-borrowed-result",
+    "source": "fn f<a>(n:num,c:ref<a,bytes>)->ref<a,bytes>{return c;}fn b<s,a>(sc:ref<s,scope<ref<a,bytes>>>,c:ref<a,bytes>)->num{t:=spawn(sc,1,f);return 0;}fn main(){}",
+    "reject": true,
+    "diagnostic": "spawned result must be an owned Send value"
+  },
+  {
+    "name": "task-reject-exclusive-context",
+    "source": "fn id(n:num,c:num)->num{return n;}fn b<s,a>(sc:ref<s,scope<ref_mut<a,num>>>,c:ref_mut<a,num>)->num{return 0;}fn main(){mut n=0;r:=task_scope(borrow_mut(n),b);}",
+    "reject": true,
+    "diagnostic": "context must be a plain value or shared reference"
+  },
+  {
+    "name": "task-reject-owned-context",
+    "source": "fn b<s>(sc:ref<s,scope<bytes>>,c:bytes)->num{return 0;}fn main(){r:=task_scope(bytes[1],b);}",
+    "reject": true,
+    "diagnostic": "context must be a plain value or shared reference"
+  },
+  {
+    "name": "task-reject-handle-in-mutex",
+    "source": "fn id(n:num,c:num)->num{return n;}fn b<s>(sc:ref<s,scope<num>>,c:num)->num{t:=spawn(sc,1,id);m:=mutex(t);return 0;}fn main(){}",
+    "reject": true,
+    "diagnostic": "mutex payload cannot hold task handles"
+  },
+  {
+    "name": "task-reject-scope-shared-to-threads",
+    "source": "fn w<s>(n:num,sc:ref<s,scope<num>>)->num{return n;}fn b<s>(sc:ref<s,scope<num>>,c:num)->num{r:=parallel_map(vec<num>[1],sc,w);return 0;}fn main(){}",
+    "reject": true,
+    "diagnostic": "does not satisfy Share"
+  },
+  {
+    "name": "task-reject-wrong-token",
+    "source": "fn f(n:num,c:num,t:num)->num{return n;}fn b<s>(sc:ref<s,scope<num>>,c:num)->num{t:=spawn(sc,1,f);return 0;}fn main(){}",
+    "reject": true,
+    "diagnostic": "must be cancel_token"
+  },
+  {
+    "name": "task-reject-context-mismatch",
+    "source": "fn f(n:num,c:bytes)->num{return n;}fn b<s>(sc:ref<s,scope<num>>,c:num)->num{t:=spawn(sc,1,f);return 0;}fn main(){}",
+    "reject": true,
+    "diagnostic": "type mismatch"
+  },
+  {
+    "name": "task-reject-mutate-context-during-scope",
+    "source": "fn b<s,a>(sc:ref<s,scope<ref<a,bytes>>>,c:ref<a,bytes>)->num{return 0;}fn main(){mut x=bytes[1];r:=borrow(x);n:=task_scope(r,b);x.push(1);println(load(r).len());}",
+    "reject": true,
+    "diagnostic": ""
+  },
+  {
+    "name": "colourless-io-suspension-cancel-blocking",
+    "files": [
+      "compiler/tests/async_io.grl"
+    ],
+    "stdout": "42\n"
+  },
+  {
+    "name": "task-reject-token-without-scope",
+    "source": "fn f(t:cancel_token)->num{return 0;}fn main(){f(0);}",
+    "reject": true,
+    "diagnostic": "type mismatch"
+  },
+  {
+    "name": "argv-entry-after-thread-init",
+    "source": "fn main<a>(args:read<a>)->num{return args.len();}",
+    "args": [
+      "four"
+    ],
+    "status": 4,
+    "stdout": ""
+  },
+  {
+    "name": "sized-integers",
+    "files": [
+      "compiler/tests/integers.grl",
+      "lib/hashmap.grl",
+      "lib/hash.grl",
+      "lib/core.grl"
+    ],
+    "stdout": "-7\n-9223372036854775807\n200\n"
+  },
+  {
+    "name": "comparison-operators",
+    "source": "fn main(){a:=3;b:=5;assert(b>a);assert(a<=b);assert(b>=5);assert((a>b)==0);x:=-2i32;y:=4i32;assert(y>x);assert(x<=y);assert(x>=-2);assert(-5i64<=-5);println(42);}",
+    "stdout": "42\n"
+  },
+  {
+    "name": "integer-overflow-wrap-mode",
+    "source": "fn main(){a:=250u8;b:=a+10u8;println(b);c:=127i8;println(c+1);}",
+    "overflow": "wrap",
+    "stdout": "4\n-128\n"
+  },
+  {
+    "name": "u8-add-overflow-traps",
+    "source": "fn main(){a:=200u8;b:=a+100u8;}",
+    "signal": "SIGABRT"
+  },
+  {
+    "name": "u32-underflow-traps",
+    "source": "fn main(){a:=1u32;b:=a-2u32;}",
+    "signal": "SIGABRT"
+  },
+  {
+    "name": "i8-overflow-traps",
+    "source": "fn main(){a:=127i8;b:=a+1;}",
+    "signal": "SIGABRT"
+  },
+  {
+    "name": "i64-mul-overflow-traps",
+    "source": "fn main(){a:=4611686018427387904i64;b:=a*2;}",
+    "signal": "SIGABRT"
+  },
+  {
+    "name": "min-div-minus-one-traps",
+    "source": "fn main(){a:=-128i8;b:=a/-1;}",
+    "signal": "SIGABRT"
+  },
+  {
+    "name": "narrowing-cast-traps",
+    "source": "fn main(){a:=u8(256);}",
+    "signal": "SIGABRT"
+  },
+  {
+    "name": "negative-to-num-traps",
+    "source": "fn main(){a:=num(-1i32);}",
+    "signal": "SIGABRT"
+  },
+  {
+    "name": "int-literal-out-of-range",
+    "source": "fn main(){a:=256u8;}",
+    "reject": true,
+    "diagnostic": "out of range"
+  },
+  {
+    "name": "int-adopted-literal-out-of-range",
+    "source": "fn main(){a:=1u8;b:=a+300;}",
+    "reject": true,
+    "diagnostic": "out of range"
+  },
+  {
+    "name": "int-mixed-widths-rejected",
+    "source": "fn main(){a:=1u8;b:=2u16;c:=a+b;}",
+    "reject": true,
+    "diagnostic": "type mismatch"
+  },
+  {
+    "name": "int-num-mixed-rejected",
+    "source": "fn main(){a:=1u8;n:=5;c:=a+n;}",
+    "reject": true,
+    "diagnostic": "type mismatch"
+  },
+  {
+    "name": "negate-unsigned-rejected",
+    "source": "fn main(){a:=1u8;b:=-a;}",
+    "reject": true,
+    "diagnostic": "signed integer"
+  },
+  {
+    "name": "negate-num-rejected",
+    "source": "fn main(){n:=5;b:=-n;}",
+    "reject": true,
+    "diagnostic": "signed integer"
+  },
+  {
+    "name": "negative-unsigned-literal-rejected",
+    "source": "fn main(){a:=-1u8;}",
+    "reject": true,
+    "diagnostic": "signed integer"
+  },
+  {
+    "name": "bitwise-or-and-shifts",
+    "source": "fn main(){\n    assert((5|2)==7);assert((1<<4)==16);assert((256>>4)==16);assert((18446744073709551615>>63)==1);\n    a:=3u8;assert((a<<2)==12);assert((200u8<<1)==144);assert((-16i32>>2)==-4);assert((-1i32>>31)==-1);assert((5u8|8u8)==13);\n    v:=vec<vec<num>>[vec<num>[1]];assert(v.len()==1);\n    assert((1<2)|(3<2));\n    println(42);\n}\n",
+    "stdout": "42\n"
+  },
+  {
+    "name": "oversized-shift-traps",
+    "source": "fn main(){n:=64;x:=1<<n;}",
+    "signal": "SIGABRT"
+  },
+  {
+    "name": "narrow-shift-count-traps",
+    "source": "fn main(){a:=1u8;n:=8u8;b:=a<<n;}",
+    "signal": "SIGABRT"
+  },
+  {
+    "name": "bool-logic-short-circuit",
+    "files": [
+      "compiler/tests/booleans.grl"
+    ],
+    "stdout": "true\nfalse\nfalse\n"
+  },
+  {
+    "name": "not-on-sized-int-rejected",
+    "source": "fn main(){a:=1u8;b:=!a;}",
+    "reject": true,
+    "diagnostic": "! needs a bool"
+  },
+  {
+    "name": "num-where-bool-expected-rejected",
+    "source": "fn f(x:bool)->num{return 0;}fn main(){f(1);}",
+    "reject": true,
+    "diagnostic": "type mismatch"
+  },
+  {
+    "name": "logical-and-bytes-rejected",
+    "source": "fn main(){x:=true&&bytes[];}",
+    "reject": true,
+    "diagnostic": "need bool"
+  },
+  {
+    "name": "bool-reassigned-num-rejected",
+    "source": "fn main(){mut b=true;b=5;}",
+    "reject": true,
+    "diagnostic": "type mismatch"
+  },
+  {
+    "name": "closures-capture-copy-move-return",
+    "files": [
+      "compiler/tests/closures.grl"
+    ],
+    "stdout": "42\n"
+  },
+  {
+    "name": "literal-arguments-adopt-sized-params",
+    "source": "fn f(x:i32)->i32{return x;}fn g(b:u8)->u8{return b;}fn main(){assert(f(-3)==-3);assert(f(5)==5);assert(g(255)==255u8);println(42);}",
+    "stdout": "42\n"
+  },
+  {
+    "name": "closure-use-after-move-rejected",
+    "source": "fn main(){d:=bytes[1];f:=|| -> num d.len();println(d.len());}",
+    "reject": true,
+    "diagnostic": "use of moved"
+  },
+  {
+    "name": "closure-capture-mutation-rejected",
+    "source": "fn main(){mut n=1;f:=|| -> num {n=2;return n;};}",
+    "reject": true,
+    "diagnostic": "read-only"
+  },
+  {
+    "name": "closure-borrowed-capture-rejected",
+    "source": "fn g<a>(r:read<a>){f:=|| -> num r.len();}fn main(){}",
+    "reject": true,
+    "diagnostic": "cannot capture borrowed"
+  },
+  {
+    "name": "closure-copy-rejected",
+    "source": "fn main(){f:=|x: num| -> num x;y:=f;z:=f;}",
+    "reject": true,
+    "diagnostic": "use of moved"
+  },
+  {
+    "name": "closure-capture-borrow-mut-rejected",
+    "source": "fn main(){d:=bytes[1];f:=|| -> num {mut b=borrow_mut(d);return 0;};}",
+    "reject": true,
+    "diagnostic": "read-only"
+  },
+  {
+    "name": "closure-argument-type-rejected",
+    "source": "fn main(){f:=|x: num| -> num x;f(bytes[]);}",
+    "reject": true,
+    "diagnostic": "type mismatch"
+  },
+  {
+    "name": "closure-literal-arg-range-rejected",
+    "source": "fn g(b:u8)->u8{return b;}fn main(){g(256);}",
+    "reject": true,
+    "diagnostic": "out of range"
+  },
+  {
+    "name": "tcp-echo-100-concurrent-tasks",
+    "files": [
+      "compiler/tests/tcp.grl"
+    ],
+    "stdout": "42\n"
+  },
+  {
+    "name": "tcp-connect-refused-returns-error",
+    "source": "use host;fn main(){l:=host::tcp_listen(0);port:=host::tcp_port(l);host::close(l);fd:=host::tcp_connect(&\"127.0.0.1\",port);assert(fd>9223372036854775807);println(wrapping_sub(0,fd));}",
+    "stdout": "111\n"
+  },
+  {
+    "name": "for-in-scalar-elements",
+    "files": [
+      "compiler/tests/iteration.grl"
+    ],
+    "stdout": "42\n"
+  },
+  {
+    "name": "for-in-non-scalar-rejected",
+    "source": "fn main(){v:=vec<bytes>[bytes[1]];for x in v{}}",
+    "reject": true,
+    "diagnostic": "needs borrow(v)"
+  },
+  {
+    "name": "for-in-move-collection-rejected",
+    "source": "fn consume(v:vec<num>){}fn main(){v:=vec<num>[1];for x in v{consume(v);}}",
+    "reject": true,
+    "diagnostic": "backedge"
+  },
+  {
+    "name": "fs-result-errors-and-question-mark",
+    "files": [
+      "compiler/tests/fs.grl",
+      "lib/fs.grl",
+      "lib/io.grl",
+      "lib/core.grl"
+    ],
+    "stdout": "not found\nnot found\nhello\nnot found\nalready exists\n1\ndirectory not empty\nfs ok\n"
+  },
+  {
+    "name": "unwrap-then-equals-lexing",
+    "source": "use core;fn main(){x:=core::some(5);assert(x!==5);a:=3;assert(a!=4);println(42);}",
+    "modules": [
+      "lib/core.grl"
+    ],
+    "stdout": "42\n"
+  },
+  {
+    "name": "question-mark-error-type-mismatch-rejected",
+    "source": "use core;fn f(x:core::Result<num,bytes>)->core::Result<bytes,num>{v:=x?;return core::ok<bytes,num>(bytes[]);}fn main(){}",
+    "modules": [
+      "lib/core.grl"
+    ],
+    "reject": true,
+    "diagnostic": "type mismatch"
+  },
+  {
+    "name": "else-if-chains",
+    "source": "fn classify(n:i32)->num{if n<0{return 0;}else if n==0{return 1;}else if n<10{return 2;}else{return 3;}}\nfn main(){assert(classify(-5)==0);assert(classify(0)==1);assert(classify(7)==2);assert(classify(70)==3);\n b:=bytes[1];mut x=0;if false{x=1;}else if true{x=2;}assert(x==2);println(42);}\n",
+    "stdout": "42\n"
+  },
+  {
+    "name": "for-range-loops",
+    "source": "fn main(){mut s=0;for i in 2..5{s+=i;}assert(s==9);mut t=0;n:=10;for i in n-3..n{t+=i;}assert(t==24);mut e=0;for i in 5..5{e+=1;}assert(e==0);v:=vec<num>[1,2];assert(v.len()==2);println(42);}\n",
+    "stdout": "42\n"
+  },
+  {
+    "name": "inherent-methods-and-associated-functions",
+    "files": [
+      "compiler/tests/methods.grl"
+    ],
+    "stdout": "42\n"
+  },
+  {
+    "name": "method-self-by-value-moves-receiver",
+    "source": "struct P{x:num}impl P{fn take(self:P)->num{return 0;}}fn main(){p:=P{x:1};p.take();println(p.x);}",
+    "reject": true,
+    "diagnostic": "use of moved"
+  },
+  {
+    "name": "method-ref-mut-needs-mut-binding",
+    "source": "struct P{x:num}impl P{fn bump<a>(self:ref_mut<a,P>){self.x=1;}}fn main(){p:=P{x:1};p.bump();}",
+    "reject": true,
+    "diagnostic": "requires mut"
+  },
+  {
+    "name": "associated-function-as-method-rejected",
+    "source": "struct P{x:num}impl P{fn make()->P{return P{x:1};}}fn main(){p:=P{x:1};p.make();}",
+    "reject": true,
+    "diagnostic": "associated function"
+  },
+  {
+    "name": "impl-unknown-type-rejected",
+    "source": "impl Missing{fn f(){}}fn main(){}",
+    "reject": true,
+    "diagnostic": "impl needs a struct or enum"
+  },
+  {
+    "name": "formatted-print",
+    "source": "fn main(){x:=7;y:=-3i32;ok:=x>5;name:=\"Grail\".text();\n println(\"x = {}, y = {}, ok = {}\", x, y, ok);println(\"hello {}!\", name);print(\"{{literal}} {}\\n\", 42u8);println(\"no args\");}\n",
+    "stdout": "x = 7, y = -3, ok = true\nhello Grail!\n{literal} 42\nno args\n"
+  },
+  {
+    "name": "format-missing-argument",
+    "source": "fn main(){println(\"{} {}\", 1);}",
+    "reject": true,
+    "diagnostic": "missing argument"
+  },
+  {
+    "name": "format-extra-argument",
+    "source": "fn main(){println(\"{}\", 1, 2);}",
+    "reject": true,
+    "diagnostic": "more arguments"
+  },
+  {
+    "name": "format-unmatched-brace",
+    "source": "fn main(){println(\"a } b\", 1);}",
+    "reject": true,
+    "diagnostic": "unmatched brace"
+  },
+  {
+    "name": "format-unprintable-value",
+    "source": "struct P{x:num}fn main(){p:=P{x:1};println(\"{}\", p);}",
+    "reject": true,
+    "diagnostic": "print requires"
+  },
+  {
+    "name": "method-calls-on-fields",
+    "source": "struct Point{x:i32,y:i32}\nimpl Point{fn sum<a>(self:ref<a,Point>)->i32{return self.x+self.y;}fn shift<a>(self:ref_mut<a,Point>,dx:i32){self.x=self.x+dx;}}\nstruct Shape{origin:Point,size:num}\nimpl Shape{fn moved<a>(self:ref_mut<a,Shape>){self.origin.shift(5);}fn total<a>(self:ref<a,Shape>)->i32{return self.origin.sum();}}\nfn main(){mut s=Shape{origin:Point{x:1,y:2},size:3};assert(s.origin.sum()==3);s.origin.shift(1);assert(s.origin.sum()==4);s.moved();assert(s.total()==9);println(42);}\n",
+    "stdout": "42\n"
+  },
+  {
+    "name": "field-method-needs-mut-binding",
+    "source": "struct P{x:num}impl P{fn bump<a>(self:ref_mut<a,P>){self.x=1;}}struct W{p:P}fn main(){w:=W{p:P{x:1}};w.p.bump();}",
+    "reject": true,
+    "diagnostic": "requires mut"
+  },
+  {
+    "name": "field-method-through-readonly-ref",
+    "source": "struct P{x:num}impl P{fn bump<a>(self:ref_mut<a,P>){self.x=1;}}struct W{p:P}fn f<a>(w:ref<a,W>){w.p.bump();}fn main(){}",
+    "reject": true,
+    "diagnostic": "readonly"
+  },
+  {
+    "name": "record-field-literal-out-of-range",
+    "source": "struct P{x:u8}fn main(){p:=P{x:300};}",
+    "reject": true,
+    "diagnostic": "out of range"
+  },
+  {
+    "name": "format-to-string",
+    "source": "fn label(n:i32)->string{return format(\"item #{} ({})\", n, n<0);}\nfn main(){s:=format(\"{} + {} = {}\", 2, 3u8, 5);assert(s.len()==9);println(s);name:=\"w\u00f6rld\".text();g:=format(\"hi {}!\", name);println(g);println(label(-4));e:=format(\"plain\");println(e);}\n",
+    "stdout": "2 + 3 = 5\nhi w\u00f6rld!\nitem #-4 (true)\nplain\n"
+  },
+  {
+    "name": "format-missing-argument-rejected",
+    "source": "fn main(){s:=format(\"{} {}\", 1);}",
+    "reject": true,
+    "diagnostic": "missing argument"
+  },
+  {
+    "name": "generic-inherent-impls",
+    "files": [
+      "compiler/tests/generic_methods.grl"
+    ],
+    "stdout": "42\n"
+  },
+  {
+    "name": "impl-args-must-be-params",
+    "source": "struct S<T>{x:T}impl<T> S<num>{fn f(){}}fn main(){}",
+    "reject": true,
+    "diagnostic": "own parameters"
+  },
+  {
+    "name": "method-calls-on-temporaries",
+    "source": "struct Point{x:i32,y:i32}\nimpl Point{fn new(x:i32,y:i32)->Point{return Point{x:x,y:y};}fn sum<a>(self:ref<a,Point>)->i32{return self.x+self.y;}fn grow<a>(self:ref_mut<a,Point>)->i32{self.x=self.x+1;return self.x;}}\nstruct Bag{items:vec<bytes>}\nimpl Bag{fn make()->Bag{return Bag{items:vec<bytes>[bytes[1],bytes[2]]};}fn count<a>(self:ref<a,Bag>)->num{return self.items.len();}}\nfn main(){assert(Point::new(1,2).sum()==3);assert(Point::new(5,0).grow()==6);assert(Bag::make().count()==2);println(42);}\n",
+    "stdout": "42\n"
+  },
+  {
+    "name": "loop-keyword",
+    "source": "fn find(v:vec<num>,want:num)->num{mut i=0;loop{if v[i]==want{return i;}i+=1;}}\nfn main(){mut n=0;loop{n+=1;if n==5{break;}}assert(n==5);assert(find(vec<num>[4,5,6],6)==2);println(42);}\n",
+    "stdout": "42\n"
+  },
+  {
+    "name": "loop-with-break-needs-return",
+    "source": "fn f()->num{loop{break;}}fn main(){}",
+    "reject": true,
+    "diagnostic": "fall through"
+  },
+  {
+    "name": "if-let",
+    "source": "use core;\nfn first(v:vec<num>)->core::Option<num>{if v.len()==0{return core::none<num>();}return core::some(v[0]);}\nfn label(o:core::Option<bytes>)->num{if let Some(b) = o {return b.len();} else {return 0;}}\nfn main(){\n    if let Some(x) = first(vec<num>[7,8]) {assert(x==7);} else {assert(false);}\n    if let Some(x) = first(vec<num>[]) {assert(false);}\n    assert(label(core::some(bytes[1,2,3]))==3);assert(label(core::none<bytes>())==0);\n    r:=core::err<num,bytes>(bytes[5]);if let Ok(v) = r {assert(false);} else if true {println(42);}\n}\n",
+    "modules": [
+      "lib/core.grl"
+    ],
+    "stdout": "42\n"
+  },
+  {
+    "name": "if-let-consumes-value",
+    "source": "use core;fn main(){o:=core::some(bytes[1]);if let Some(b) = o {}println(o!.len());}",
+    "modules": [
+      "lib/core.grl"
+    ],
+    "reject": true,
+    "diagnostic": "use of moved"
+  },
+  {
+    "name": "while-let",
+    "source": "use core;\nfn pop<a>(v:ref_mut<a,vec<bytes>>)->core::Option<bytes>{if v.len()==0{return core::none<bytes>();}return core::some(v.pop());}\nfn main(){\n    mut stack=vec<bytes>[bytes[1],bytes[2,2],bytes[3,3,3]];mut total=0;\n    while let Some(item) = pop(borrow_mut(stack)) {total+=item.len();}\n    assert(total==6);\n    mut n=0;mut more=vec<bytes>[bytes[1],bytes[2]];\n    while let Some(x) = pop(borrow_mut(more)) {n+=1;if n==1{break;}}\n    assert(n==1);println(42);\n}\n",
+    "modules": [
+      "lib/core.grl"
+    ],
+    "stdout": "42\n"
+  },
+  {
+    "name": "vecs-library-closures-generics",
+    "files": [
+      "compiler/tests/vecs.grl",
+      "lib/vecs.grl",
+      "lib/hash.grl",
+      "lib/order.grl"
+    ],
+    "stdout": "42\n"
+  },
+  {
+    "name": "strings-library",
+    "files": [
+      "compiler/tests/strings.grl",
+      "lib/strings.grl",
+      "lib/core.grl"
+    ],
+    "stdout": "42\n"
+  },
+  {
+    "name": "range-from-variable",
+    "source": "fn main(){a:=2;b:=5;mut s=0;for i in a..b{s+=i;}assert(s==9);println(42);}",
+    "stdout": "42\n"
+  },
+  {
+    "name": "constants-across-modules",
+    "files": [
+      "compiler/tests/constants.grl",
+      "compiler/tests/limits.grl"
+    ],
+    "stdout": "hello -5\n"
+  },
+  {
+    "name": "huge-literal-codegen",
+    "source": "fn main(){x:=-9223372036854775807i64;y:=18446744073709551615;println(\"{} {}\", x, y);}",
+    "stdout": "-9223372036854775807 18446744073709551615\n"
+  },
+  {
+    "name": "const-out-of-range",
+    "source": "const X: u8 = 300;fn main(){}",
+    "reject": true,
+    "diagnostic": "out of range"
+  },
+  {
+    "name": "const-duplicate",
+    "source": "const X: num = 1;const X: num = 2;fn main(){}",
+    "reject": true,
+    "diagnostic": "duplicate constant"
+  },
+  {
+    "name": "const-text-type",
+    "source": "const X: num = \"a\";fn main(){}",
+    "reject": true,
+    "diagnostic": "text constant needs type string"
+  },
+  {
+    "name": "byte-character-literals",
+    "source": "fn count_slashes<a>(path:read<a>)->num{mut n=0;for b in path{if b=='/'{n+=1;}}return n;}\nfn main(){assert('a'==97);assert('\\n'==10);assert('\\''==39);assert('\\\\'==92);x:='z'-'a';assert(x==25);u:=1u8;assert(u+'0'==49);\n assert(count_slashes(&\"/usr/local/bin\")==3);println(42);}\n",
+    "stdout": "42\n"
+  },
+  {
+    "name": "show-method-printing",
+    "source": "struct Point{x:i32,y:i32}\nimpl Point{fn show<a>(self:ref<a,Point>)->string{return format(\"({}, {})\", self.x, self.y);}}\nstruct Line{from:Point,to:Point}\nimpl Line{fn show<a>(self:ref<a,Line>)->string{return format(\"{} -> {}\", self.from, self.to);}}\nfn main(){p:=Point{x:1,y:-2};println(p);println(\"p = {}\", p);l:=Line{from:Point{x:0,y:0},to:Point{x:3,y:4}};s:=format(\"line {}\", l);println(s);println(p.x);}\n",
+    "stdout": "(1, -2)\np = (1, -2)\nline (0, 0) -> (3, 4)\n1\n"
+  },
+  {
+    "name": "show-wrong-signature",
+    "source": "struct P{x:num}impl P{fn show(self:P)->string{return \"p\".text();}}fn main(){p:=P{x:1};println(p);}",
+    "reject": true,
+    "diagnostic": "show must take self by reference"
+  },
+  {
+    "name": "reference-receiver-reused",
+    "source": "struct P{x:num}impl P{fn get<a>(self:ref<a,P>)->num{return self.x;}}fn f<a>(p:ref<a,P>)->num{return p.get()+p.get();}fn main(){q:=P{x:21};println(f(borrow(q)));}",
+    "stdout": "42\n"
+  },
+  {
+    "name": "mutating-method-through-shared-ref",
+    "source": "struct P{x:num}impl P{fn bump<a>(self:ref_mut<a,P>){self.x=1;}}fn f<a>(p:ref<a,P>){p.bump();}fn main(){}",
+    "reject": true,
+    "diagnostic": "mutable receiver"
+  },
+  {
+    "name": "struct-field-shorthand",
+    "source": "struct P{x:i32,name:bytes}fn make(x:i32,name:bytes)->P{return P{x,name};}fn main(){p:=make(4,bytes[1,2]);assert(p.x==4);assert(p.name.len()==2);y:=3i32;q:=P{x:y,name:bytes[]};assert(q.x==3);println(42);}\n",
+    "stdout": "42\n"
+  },
+  {
+    "name": "struct-field-shorthand-unknown",
+    "source": "struct P{x:num}fn main(){p:=P{x};}",
+    "reject": true,
+    "diagnostic": "field shorthand"
+  },
+  {
+    "name": "enum-methods-and-show",
+    "source": "enum Shape{Circle(num),Square(num),Empty}\nimpl Shape{\n    fn area<a>(self:ref<a,Shape>)->num{match self{Circle(r)=>{return 3*r*r;},Square(s)=>{return s*s;},Empty=>{return 0;}}}\n    fn show<a>(self:ref<a,Shape>)->string{return format(\"shape with area {}\", self.area());}\n}\nfn main(){c:=Shape::Circle(2);assert(c.area()==12);s:=Shape::Square(3);println(s);e:=Shape::Empty;assert(e.area()==0);println(42);}\n",
+    "stdout": "shape with area 9\n42\n"
+  },
+  {
+    "name": "match-through-reference",
+    "source": "use core;\nenum Message{Text(bytes),Count(num),Quit}\nfn describe<a>(m:ref<a,Message>)->num{match m{Text(t)=>{return t.len();},Count(n)=>{return n;},Quit=>{return 0;}}}\nfn grow<a>(m:ref_mut<a,Message>){match m{Text(t)=>{t.push(9);},Count(n)=>{},Quit=>{}}}\nfn main(){mut m=Message::Text(bytes[1,2]);assert(describe(borrow(m))==2);grow(borrow_mut(m));assert(describe(borrow(m))==3);\n assert(describe(borrow(m))==3);c:=Message::Count(7);assert(describe(borrow(c))==7);\n o:=core::some(bytes[5]);match borrow(o){Some(b)=>{assert(b[0]==5);},None=>{}}assert(o!.len()==1);println(42);}\n",
+    "modules": [
+      "lib/core.grl"
+    ],
+    "stdout": "42\n"
+  },
+  {
+    "name": "match-shared-ref-payload-mutation",
+    "source": "enum M{T(bytes),Q}fn f<a>(m:ref<a,M>){match m{T(t)=>{t.push(1);},Q=>{}}}fn main(){}",
+    "reject": true,
+    "diagnostic": "readonly"
+  },
+  {
+    "name": "match-ref-drop-owner-while-borrowed",
+    "source": "enum M{T(bytes),Q}fn main(){mut m=M::T(bytes[1]);match borrow_mut(m){T(t)=>{drop(m);t.push(1);},Q=>{}}}",
+    "reject": true,
+    "diagnostic": "drop of moved"
+  },
+  {
+    "name": "match-ref-payload-not-owned",
+    "source": "enum M{T(bytes),Q}fn f<a>(m:ref<a,M>)->bytes{match m{T(t)=>{return t;},Q=>{return bytes[];}}}fn main(){}",
+    "reject": true,
+    "diagnostic": "type mismatch"
+  },
+  {
+    "name": "option-result-methods",
+    "files": [
+      "compiler/tests/option_methods.grl",
+      "lib/core.grl",
+      "lib/strings.grl"
+    ],
+    "stdout": "42\n"
+  },
+  {
+    "name": "f64-arithmetic-printing-conversions",
+    "files": [
+      "compiler/tests/floats.grl"
+    ],
+    "stdout": "0.30000000000000004\n1.5\n2\n-0\ninf\n-inf\nNaN\n1000000000000000000000\n0.0000001\n123456.789\n0.000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000005\n179769313486231570000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\n0.3\n3.5\n-3\n2500000000\n1.4142135623730951\n4.5\n-3\ntrue\n2.3333333333333335\n18446744073709552000\n9007199254740992\npi is about 3.141592653589793\n0.5|-1.25\n"
+  },
+  {
+    "name": "f64-literals-shortest-roundtrip-408",
+    "files": [
+      "compiler/tests/float_literals.grl"
+    ],
+    "stdout": "0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000878510821552522\n855127.4266649145\n268622.1661748289\n0.00000000000000000000000000000000000000000006294675241195386\n4708325160387546000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\n0.000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000009973130378568733\n0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001258177620951647\n0.000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001306052388527796\n895417.8849140112\n206639.0506984397\n80223864665986990000000000000000000000000\n0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000008425134221823577\n141827.37929346878\n364005.38952240907\n0.000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000021385097871442245\n0.0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000008722783496930154\n128736.58626677329\n7171.009773016442\n554457.549961614\n0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001008370115413841\n0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001767552995173136\n0.0000001084406323928777\n0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000013593855381697515\n0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001623068625455899\n0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000002180960980217298\n4189310710358099000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\n0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000029599107635242675\n5650362001550442000000000000\n0.000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000012625943181009154\n636706.6847346353\n0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001322515521834056\n0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001015090207546528\n2356773684544542600000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\n0.0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000002981159638324064\n0.0000000000000000000000000000000000000000000000000000000000032641743650562687\n0.000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000022097118353800755\n108718.46549815661\n774080.5844761836\n0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001027306842365992\n0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000260546305570799\n0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001709374172448056\n0.0024030278220090627\n0.000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000019389798434662677\n0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000999475224543737\n0.000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000019655946807656444\n716561744613332000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\n412793.4189930039\n0.0000000021749994550888448\n0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000003337733639824717\n20284108606212458000000000000000000000000000000000000000000000000000000000000000000000000000000000000\n474506.7614029241\n0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000005224362650831876\n0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000708934531585702\n943906148808496500000000000000\n86712.55559425056\n565477608645.2194\n0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001071423480508924\n875504.3567626248\n22990284766219708000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\n0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000018578815093690756\n0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000026098858497543247\n413858046811059500000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\n0.000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001564569257764464\n0.000054220365566812186\n910936.0478429426\n51697.073536482174\n1171121085214916300000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\n697279.2423548016\n0.8321939001977995\n0.000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000010649687114205473\n0.000000000000744116448314026\n0.0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000008051699977655874\n0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001208599021035314\n761085.9326784516\n1311600490124866000000000000000\n528470107083018500000000000000000000000000000\n0.00000000000000000000000000000000060055116385069545\n558109.7826763543\n0.000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000013644777188168084\n28123509645762955000000000000000000000\n0.0000000000006911586757278118\n745996013554778100\n0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000002201939921889851\n22423152312153185000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\n0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000005088065966122347\n5037109292.827032\n0.00000000000000000000000000005859122346581956\n0.000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004547465366771627\n0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000002003253119192859\n996183.3733398704\n1221786616439577800000000000000000000000\n819554.2751034459\n500280.9196609168\n0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000965514829698915\n334965.60027078015\n667484664043.7146\n830161.501097699\n0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000005152041848693916\n181667697991560720000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\n0.000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000003252481745927407\n191740.512554436\n0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000779682658784899\n0.0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000037786473232507753\n477721628100115760000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\n794455.8929416384\n721498.5425202633\n0.0000000000003041440663813224\n0.0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000003131546820234317\n10447978103344436000000000000000000000000000000000000000000000000000000000000000000000000000000\n133504618160455540000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\n0.0000000000007824968581153925\n0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001474055958388662\n808593.5490840797\n0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001953990843611661\n63649.92487186752\n962590.26418916\n0.000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000013540777327059755\n0.0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000006016814057252644\n0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000817386611297425\n112951.24980442645\n0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001180904489580708\n568544.950730951\n0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000013400878900335163\n0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000012298676311984402\n15427.98358464113\n519986.2851800332\n46925869687028240000000000\n0.07381024824071546\n95308.41547018068\n43927.36393583042\n7540245744162855000000000000000000000000000\n3741119206266703600000000000000000000000000000\n886534.0680269676\n0.0000006004372499144655\n0.000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001614208903265303\n143322.6455283052\n1396495310203356000000000000000000000000000\n0.0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000003198930682126134\n9515299316.18165\n0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000020067197319688217\n135649066761.13286\n23269708568802154000000000000000\n0.0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000089850716190124\n0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000793493155455544\n0.000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000008142728552723403\n412123806108937700000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\n0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000855194050069963\n0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000657408351986415\n871418.4148184962\n3293808180921377700000000000000000000000000\n2211234252027217000000000000\n0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000084136843870646\n224752364232157600000000000000000000000000000000000000000000000000000000000000000000000\n0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001504091648614579\n0.00005850324529815227\n29565.23851446691\n0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000199058753158637\n0.00000000000000000000000000000000000000000000000000000000000000000000000000013058078984142765\n0.0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000022778207928904514\n0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000006823779649628285\n0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000020121367211070264\n555184.0205993871\n379487134758231700000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\n0.0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000031649077036466187\n0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000596009022335827\n913588.6203212289\n876251.8332816877\n0.0007260480129962478\n0.000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000005067916012413824\n0.000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004580789650435624\n0.000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000002164624347165682\n3149198996783744800000000000000000000000000000000000000000000000000\n0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004269909809342208\n0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000010813714171954622\n621087.0070124432\n0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000994732072234757\n0.000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001387293858333159\n0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001214682369038763\n4435621250113016600000000000000\n4231188872750861000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\n0.000000000000000000000000000000000000000000000000000009121043034477272\n720562.3775020584\n783821645313570400000000000000000000000\n0.000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000547826333884099\n488812.24646060617\n0.000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000006182877315721382\n72914057205354770000000000000\n3490656329095853000000000000000\n0.00000000000000000000000000000000000000000000000000000000000000000000000000000004054645726352462\n0.0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000003351410497355744\n43798912244341460000000000000000000000000000000000000000000000000000000000000000000000000000000000\n46.62615013516908\n53946607470650674000000000000000000000000000000000000000000000000000000000\n0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000024534094041869293\n0.000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000010561153611830395\n0.000000000000000000000000000000000000000000000000000000000000755664792212261\n0.000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000014901717654283264\n0.000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000005451146046533131\n0.000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000027769637934400558\n0.000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000006769660990687897\n831034.5771076789\n94762028781968050000000000000000000000000000\n758181.38713478\n0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001603558959356369\n409541587817737200000000000000000\n710495.5756099811\n90408088826461.31\n624437.8314247881\n7142.927827176874\n669875.1868740527\n989310060949371500000000\n422372.2917272949\n0.000000003313795178249756\n0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000013797116466337447\n0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000838001824433996\n73182143543798430000000000\n0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000006437414113149029\n0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000014358855869881856\n0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001664945632313009\n0.000000007713042242220813\n867899.2875556961\n495612.93707461987\n0.0000000000000000003647054345568561\n589564.9458358269\n951470.1882055409\n0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000170751447103332\n0.000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000006393057327242976\n233948.03155649942\n845056.3609643986\n0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000008155320375298298\n391165.7240815349\n975061.5733501212\n48363656242692760000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\n384370.34514089604\n418287.043141262\n70674.29325137136\n0.000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000022101649675424435\n0.00000000449170523051819\n4173415434074011.5\n181122175188660700000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\n38717592549.23633\n8534732479625377000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\n0.000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000025169978242547252\n770967312082294.6\n869541646876282500000000000000000000000\n440864.20704629784\n0.000000000000000000000023124698428524953\n0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001081699823599997\n0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000007987529693034\n649614047542.3514\n0.000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000009260328957699945\n0.000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000002690315410864426\n46772232515624840000000000000000000\n0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000267100699305491\n417.693332255932\n0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000868136897760005\n1101049908.6141455\n39654053310018200000000000000000000000000\n0.000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000052186777327944765\n9150788294558359000000000000000000000000000000\n52460882927878320000\n0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000422428493808042\n570285.3494311161\n0.000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000018066757659728776\n199916.67697692092\n0.7915211788681018\n901047.9311128655\n98279.15407845285\n288981.4208370275\n89089139036953310000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\n24609510317848972\n0.000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000006625640756517464\n2165911948395431500000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\n187581.46977431583\n0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000054967885951798856\n760514.9571995072\n849658.8139552994\n623653.1063478556\n94027.84844846441\n0.000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000010011952992266205\n0.000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004281201792127236\n507498966539038300000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\n361424.5170484993\n0.0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000126744221745348\n0.7987728214653628\n5964690972329007000000000000000000\n246268.37268114323\n0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001108409779130207\n13430700733141117000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\n0.000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000012632380060369488\n725722.6981018824\n20787107511232485000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\n0.000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000006710338120406624\n0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000694259631185946\n0.0000000000018338226252373942\n0.000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000019929906774021246\n846210518473297900\n3634691818955381000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\n76072846544719990000000000000000000000000\n0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000552853004074249\n552399.1710785272\n0.000000000000000000000000000000000000000000000000000000000000000000000000000000000003663986289029834\n0.000000000000000000000000000000000029556768293368446\n693017.0322179873\n794796543727882500000000000000000000\n0.0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000009962390673323765\n0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000025097659555525164\n392435.47674365505\n0.0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000007971075747276146\n397163.83462911914\n253132772294544500000000000000000000000000000000000000000000000\n165781.94784673676\n0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001758890955636508\n979076.7202157332\n0.000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000006199144619687984\n34927412286260172\n94004.470811164\n0.0000000000000000000000000000000000000000000000000000000257216748441146\n889382.5706573222\n0.0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000015355467627197785\n837815.8620408755\n2011490992124202000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\n0.0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000007586876153832\n436664.4832574851\n0.000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004407414888497346\n0.00000000000008374709845478653\n295751150251051500\n2.794873010649921\n0.000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000016921033480448826\n71447226028920280000000000\n138462034669493420000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\n0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000125532316757743\n0.07833867418979101\n0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000011163032555068528\n0.000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001338060729120534\n1005812511001890200000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\n371600.0656377709\n167969709754537860000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\n0.00000000000000000000000000000000000000000000000000000000000000000000000000000006267692472195742\n49595.15849215444\n0.000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000014784057392403464\n678253.9989632906\n0.000000024393071089380893\n0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004392587354282653\n0.000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000019695748608986884\n146391952820.95615\n260918870024767200000000\n0.000000000012647585327415289\n608568.334986055\n107305.00231644232\n0.000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000019958765357187696\n0.000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000009140637593174143\n750938435240680800000\n0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000077553377125415\n0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000002047239583929587\n0.0009212699695217657\n137441531560421450000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\n0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000002130930104052096\n3778303364854078000000000000000000\n367032.73766893044\n0.000000000000000000000000000000000018768053051120073\n832919.207299625\n886500.2850492611\n0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000002120392444758765\n0.000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000010363147487244782\n1912513500625647000000000000000000000000000000\n0.000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000017857719423465465\n87.51455492090071\n0.000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000010252726524271196\n0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001325514818737907\n10632582074790389000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\n505384.97555618343\n9534606781930243000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\n348483.29185407795\n0.00000000015164004308313257\n0.000000000000000000000000000000000000000000000000000912022232180334\n2066781930105449600000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\n106073.79416835518\n239087831671147130000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\n348217.2375162437\n693974.1488378306\n757670.525018117\n40265336841653900000000\n0.000000000000003993947554329338\n0.0014352597663158239\n0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001248797716021303\n0.000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000038924678026254797\n2699415574625149000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\n0.000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000011960302400936158\n299281.3111609651\n2556296547744271000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\n28863528159719176000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\n581675741913787800000000000000000000000000\n0.000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001604376955428067\n2522498261071663800000000000000000000000000000000000000000000000000000000000000000000000000000000\n860347.4956023183\n0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000395526999383936\n0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001724427699162213\n891404.1669121312\n0.000000000000000000000000000000000000000000000000041827417712013665\n9007199254740992\n0.00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000002225073858507201\n0.000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000022250738585072014\n0.000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000005\n0.000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000005\n179769313486231570000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\n0.1\n123456789012345680000000000000\n"
+  },
+  {
+    "name": "f64-nan-to-int-traps",
+    "source": "fn main(){x:=i64(0.0/0.0);}",
+    "signal": "SIGABRT"
+  },
+  {
+    "name": "f64-negative-to-num-traps",
+    "source": "fn main(){x:=num(-1.0);}",
+    "signal": "SIGABRT"
+  },
+  {
+    "name": "f64-to-u8-overflow-traps",
+    "source": "fn main(){x:=u8(256.0);}",
+    "signal": "SIGABRT"
+  },
+  {
+    "name": "f64-to-i8-underflow-traps",
+    "source": "fn main(){x:=i8(-129.0);}",
+    "signal": "SIGABRT"
+  },
+  {
+    "name": "f64-to-num-overflow-traps",
+    "source": "fn main(){x:=num(1.8446744073709552e19);}",
+    "signal": "SIGABRT"
+  },
+  {
+    "name": "f64-int-mix-rejected",
+    "source": "fn main(){x:=1.5+1;}",
+    "reject": true,
+    "diagnostic": "type mismatch"
+  },
+  {
+    "name": "f64-remainder-rejected",
+    "source": "fn main(){x:=5.0%2.0;}",
+    "reject": true,
+    "diagnostic": "operator not defined for f64"
+  },
+  {
+    "name": "f64-condition-rejected",
+    "source": "fn main(){x:=1.5;if x{}}",
+    "reject": true,
+    "diagnostic": "type mismatch"
+  },
+  {
+    "name": "f64-literal-overflow-rejected",
+    "source": "fn main(){x:=1.0e999;}",
+    "reject": true,
+    "diagnostic": "out of range"
+  },
+  {
+    "name": "compound-assignment-typed",
+    "source": "struct Acc{total:f64,count:u32}\nfn main(){mut s=1.5;s+=2.0;s*=2.0;s-=1.0;s/=2.0;println(s);mut a=200u8;a+=50;println(a);mut b=-3i32;b*=2;b-=1;b%=4;println(b);\n mut acc=Acc{total:0.0,count:0};acc.total+=2.5;acc.count+=1;acc.count+=1;println(\"{} {}\", acc.total, acc.count);mut n=5;n+=1;println(n);}\n",
+    "stdout": "3\n250\n-3\n2.5 2\n6\n"
+  },
+  {
+    "name": "compound-u8-overflow-traps",
+    "source": "fn main(){mut a=250u8;a+=10;}",
+    "signal": "SIGABRT"
+  },
+  {
+    "name": "compound-literal-out-of-range",
+    "source": "fn main(){mut a=1u8;a+=300;}",
+    "reject": true,
+    "diagnostic": "out of range"
+  },
+  {
+    "name": "compound-f64-remainder",
+    "source": "fn main(){mut s=1.5;s%=2.0;}",
+    "reject": true,
+    "diagnostic": "operator not defined for f64"
+  },
+  {
+    "name": "compound-f64-int-mix",
+    "source": "fn main(){mut s=1.5;s+=2;}",
+    "reject": true,
+    "diagnostic": "type mismatch"
+  },
+  {
+    "name": "compound-on-bool",
+    "source": "fn main(){mut t=true;t+=1;}",
+    "reject": true,
+    "diagnostic": "numeric variable"
+  },
+  {
+    "name": "f64-fixed-precision-316",
+    "files": [
+      "compiler/tests/float_precision.grl"
+    ],
+    "stdout": "0.2\n0.3\n2\n4\n-1.00\n0.000\n-0.00\n1000000000000000000000.00\n0.00000\n123\n0.00000123\n1000.00\n1\n0.12\n179769313486231570814527423731704356798070567525844996598917476803157260780028538760589558632766878171540458953514382464234321326889464182768467546703537516986049910576551282076245490090389328944075868508455133942304583236903222948165808559332123348274797826204144723168738177180919299881250404026184124858368.0\n119544772160.9919128\n0.0000000175\n-62.77\n-818.658925016\n964.386841598\n-969.999\n199236169905.70102\n-118.9377666867\n-0.0000000001\n0.00000\n515.980098094\n-0.0\n916.085\n-0.895355\n258909824468.04834\n-825.71\n-0.000000000008\n0.00000036\n0.0000000046\n-232.4964\n949714\n-579\n978.603395020345\n220.7\n-819.765654076\n0.000000002\n-728.5241\n816.85\n0.0000009\n207\n-48964269103.9932\n809.64812035\n-649.133\n-41.4002\n-575.2\n-461.61\n-436.07623\n-723.183380202\n-0\n-957.48164358180\n-377.8738928\n92.190718170641\n-0.0\n-0.000000000\n-970.934933052\n-0.000000\n-22312733628.9711723\n-74.7555\n202.5705291\n320\n-264.09729867\n811443199.8509804\n-346078762.341\n268.346\n-231.16\n-730.8945\n-774.341\n-2349.0378818313\n6782368.24898\n-850.6415660869\n417.2618580024\n-0.000\n558.5085622\n7078316.3\n-601.32\n428.45\n-547.086771\n697.523680\n0.0000000\n0.00000000\n0.00759\n302.645\n-0.00000000\n953.49717\n-0.009257302666\n-449.486412\n599.7197335\n3304983527.3134985\n157.9022847\n53.32680879\n0.0000814424\n-237.5660\n9368.807307588\n-4.704800234\n0.00000000\n602.13713332119\n86.165168194049\n-461.57\n801.8\n-617.09656686277\n558.578\n-43183795627.829\n239.53267185\n4353924572\n-248.52760683\n-591.46751666\n-567.657\n829.64702\n206.254993602461\n996.71\n-0.000000\n0.0000004097\n-0.00000\n11361846844.27932167\n0.0\n5239943.94\n-620.8577\n853.7846307894\n0.0052944\n-0\n268.012624\n-92.098037011\n0.0\n40934309.178035356\n0.0001\n822.598057\n-34017.858088252680\n-136.7\n594.66602\n981.1582\n889.3513673756\n-0.00000000\n999.774031305238\n-209.25098687281\n-525.937836518385\n-0.0000\n-31830.44560245\n99021031.110941886902\n289.309443\n860.3076628\n1.931245\n-0.00020286\n31022.3091688093\n433.203559335\n-686825150120\n0.0\n-55259005085.3554\n946.336146526026\n445\n248.49594\n56.1994188238\n20210196.46843\n0.00000000062\n-377.922935207404\n0.000069312\n370.0776804250\n-442.7186585464\n-0.000088\n-0.0\n511.5763557917\n962.98023\n-312.5989512\n618.3660153\n-0.00\n0.00978361\n0.0000000652\n-261.47898166\n128.4326\n646.9925012514\n390.2100\n-562494615.34915\n-35.5109577\n98.473\n-200.8\n-0.026887153\n-610079.158263915102\n-219.51\n-820.521\n88303\n0.000000000061\n90.91026\n-830.60018679559\n632.5037725\n43108378919.485710\n-299.1191396\n-23.917697\n514.092845115545\n-244.04692897\n-0.000000\n-0.0000000509\n-5.9127\n939.5206\n295.960637264182\n0.0\n-604.751375548\n0.00\n-195026663355.3303527832\n634.2567883\n774.8380065\n725.154716089446\n9520.575184760421\n980.4913261\n-0.000001000\n-168454510615.61\n-481.1533256157\n483.35\n143.75\n-835.1470180\n-83428216047\n578.643309887687\n-58318.33923277\n0.0009\n-189.07723\n-718891946.8857048750\n0\n727.3579\n128.231810232\n25554.37442\n0.000\n0.0046\n0.004476\n-815.4525741657\n-0\n673.839\n9.748284090177\n-854.6349802367\n-7040528383.6859531\n-0.000000000\n399.7614\n-31552663.0\n-0.0\n-683316003473.41784668\n-532.169694415\n426.842364642\n889.78\n1529732855.78131\n0.0\n-95.42584459\n-66293066875.143402100\n0.0000000000\n-518276.99\n0\n-193.2195\n512.21\n-0.0\n139.0348\n-511.73607158610\n341.9891862\n7933954540.461703300476\n77.835660\n-7707.46917944\n-0\n2.324181333\n-356.180\n-1061\n-0.0000078925\n-0.00000000\n0.000006105\n-754.6\n764.3457\n-512.1\n-999.24\n0\n-0.00\n867.872\n-409.30329\n675.83\n270.75627267\n264.7884\n-0.00003740242\n-330131296873.825256\n-842.02088163207\n382.29580516\n329.183106057\n31.8255\n-734.9118793\n834.327243690\n173.12\n-429.6926\n468.374588312\n-76.7353935\n-871946088135.16333\n5659.90835904\n654.136789522\n-6696497.930\n336.8781\n-557528.5725\n-929.333311282\n-103.240715371\n-0.07791015414\n-474.11\n137.794429658\n-0.000000000\n561415318619.1\n0.021\n3813339\n-368.40701981440\n941.07\n489.208\n0.00000000\n-403.8649131076\n992.2450\n0.0000010\n-0.000545525\n-563.35094511994\n-313.5958974\n0.000001\n562.69\n586.555608\n-0.0000646\n[0.667] 1\n"
+  },
+  {
+    "name": "precision-needs-f64",
+    "source": "fn main(){println(\"{:.2}\", 5);}",
+    "reject": true,
+    "diagnostic": "needs an f64"
+  },
+  {
+    "name": "precision-bad-spec",
+    "source": "fn main(){println(\"{:x}\", 1.5);}",
+    "reject": true,
+    "diagnostic": "bad format spec"
+  },
+  {
+    "name": "precision-missing-digits",
+    "source": "fn main(){s:=format(\"{:.}\", 1.5);}",
+    "reject": true,
+    "diagnostic": "bad format spec"
+  },
+  {
+    "name": "math-library-ulp-1150",
+    "files": [
+      "compiler/tests/math.grl",
+      "lib/math.grl"
+    ],
+    "stdout": "math ok\n"
+  },
+  {
+    "name": "math-helpers-match-rust",
+    "files": [
+      "compiler/tests/math_helpers.grl",
+      "lib/math.grl"
+    ],
+    "stdout": "2\n-1\n3\n-3\n0\n3\n3\n0.4444444444444444\n3.141593\n2.718281828459045\n0\n1\n0\n3.141592653589793\n1024\n"
+  },
+  {
+    "name": "literal-adopts-return-and-assignment",
+    "source": "fn f()->i32{return -5;}fn main(){mut k=0i64;k=1;k=-3;println(f());println(k);}",
+    "stdout": "-5\n-3\n"
+  },
+  {
+    "name": "literal-left-of-parenthesized-operand",
+    "source": "fn main(){h:=5i64;x:=(1048575&(2+h))<3;println(x);}",
+    "stdout": "false\n"
+  },
+  {
+    "name": "f64-constants",
+    "source": "const PI: f64 = 3.141592653589793;const NEG: f64 = -0.5;fn main(){println(PI*2.0);println(NEG);}",
+    "stdout": "6.283185307179586\n-0.5\n"
+  },
+  {
+    "name": "return-literal-out-of-range",
+    "source": "fn f()->u8{return 300;}fn main(){}",
+    "reject": true,
+    "diagnostic": "out of range"
+  },
+  {
+    "name": "assign-negative-to-unsigned",
+    "source": "fn main(){mut k=0u8;k=-1;}",
+    "reject": true,
+    "diagnostic": "out of range"
+  },
+  {
+    "name": "hashmap-iteration-order-and-model-3000",
+    "files": [
+      "compiler/tests/hashmap_iteration.grl",
+      "lib/hashmap.grl",
+      "lib/hash.grl",
+      "lib/core.grl"
+    ],
+    "stdout": "pear = 3\napple = 1\nfig = 2\nmodel ok 125\n"
+  },
+  {
+    "name": "strings-unicode-replace-repeat",
+    "files": [
+      "compiler/tests/unicode.grl",
+      "lib/strings.grl",
+      "lib/core.grl"
+    ],
+    "stdout": "a + b + c\nababab\n\u20ac\n"
+  },
+  {
+    "name": "radix-and-separated-literals",
+    "source": "fn main(){println(0xFF);println(0b1010_1010);println(0o17);println(1_000_000);println(0xFFu8);println(0xFFFF_FFFF_FFFF_FFFF);x:=-0x80i8;println(x);println(\"{}\", 0x10+1);}\n",
+    "stdout": "255\n170\n15\n1000000\n255\n18446744073709551615\n-128\n17\n"
+  },
+  {
+    "name": "hex-invalid-digit",
+    "source": "fn main(){x:=0xG1;}",
+    "reject": true,
+    "diagnostic": "invalid digit"
+  },
+  {
+    "name": "binary-invalid-digit",
+    "source": "fn main(){x:=0b102;}",
+    "reject": true,
+    "diagnostic": "invalid digit"
+  },
+  {
+    "name": "hex-exceeds-64-bits",
+    "source": "fn main(){x:=0x1_0000_0000_0000_0000;}",
+    "reject": true,
+    "diagnostic": "exceeds 64 bits"
+  },
+  {
+    "name": "hex-suffix-out-of-range",
+    "source": "fn main(){x:=0x100u8;}",
+    "reject": true,
+    "diagnostic": "out of range"
+  },
+  {
+    "name": "match-on-integers-bytes-bools",
+    "source": "fn name(n:num)->string{match n{0=>{return \"zero\".text();},1|2=>{return \"small\".text();},_=>{return format(\"{}\", n);}}}\nfn sign(x:i32)->i32{match x{0=>{return 0;},-1=>{return -1;},_=>{if x<0{return -1;}return 1;}}}\nfn kind(b:u8)->num{match b{'a'|'e'|'i'|'o'|'u'=>{return 1;},' '=>{return 2;},_=>{return 0;}}}\nfn yes(f:bool)->num{match f{true=>{return 1;},false=>{return 0;}}}\nfn main(){println(name(0));println(name(2));println(name(42));println(sign(-1));println(sign(-7));println(sign(9));\n mut vowels=0;for b in \"education is fun\"{if kind(u8(b))==1{vowels+=1;}}println(vowels);println(yes(3>2));\n owned:=bytes[1];mut n=0;match owned.len(){1=>{n=10;},_=>{n=20;}}println(n);}\n",
+    "stdout": "zero\nsmall\n42\n-1\n-1\n1\n7\n1\n10\n"
+  },
+  {
+    "name": "scalar-match-non-exhaustive",
+    "source": "fn main(){x:=3;match x{1=>{}}}",
+    "reject": true,
+    "diagnostic": "non-exhaustive"
+  },
+  {
+    "name": "scalar-match-out-of-range",
+    "source": "fn main(){x:=3u8;match x{300=>{},_=>{}}}",
+    "reject": true,
+    "diagnostic": "out of range"
+  },
+  {
+    "name": "scalar-match-duplicate",
+    "source": "fn main(){x:=3;match x{1=>{},1=>{},_=>{}}}",
+    "reject": true,
+    "diagnostic": "duplicate match pattern"
+  },
+  {
+    "name": "bool-match-non-exhaustive",
+    "source": "fn main(){x:=true;match x{true=>{}}}",
+    "reject": true,
+    "diagnostic": "non-exhaustive"
+  },
+  {
+    "name": "match-f64-rejected",
+    "source": "fn main(){x:=1.5;match x{_=>{}}}",
+    "reject": true,
+    "diagnostic": "match requires"
+  },
+  {
+    "name": "generic-stable-sort-ord",
+    "files": [
+      "compiler/tests/sorting.grl",
+      "lib/vecs.grl",
+      "lib/order.grl",
+      "lib/hash.grl"
+    ],
+    "stdout": "1 3 3 5 7 9 \napple fig pear \u00e4pfel \nBob:25 Di:25 Ann:40 Cy:40 \n-1 0.5 2.5 NaN \n5\nsorted\n"
+  },
+  {
+    "name": "sort-needs-ord",
+    "source": "use vecs;struct P{x:num}fn main(){mut v=vec<P>[P{x:1}];vecs::sort(borrow_mut(v));}",
+    "modules": [
+      "lib/vecs.grl",
+      "lib/order.grl",
+      "lib/hash.grl"
+    ],
+    "reject": true,
+    "diagnostic": "interface bound"
+  },
+  {
+    "name": "match-range-patterns",
+    "source": "fn grade(score:num)->u8{match score{90..101=>{return 'A';},80..90=>{return 'B';},0..80=>{return 'C';},_=>{return '?';}}}\nfn band(t:i32)->num{match t{-40..0=>{return 0;},0..25=>{return 1;},25..50=>{return 2;},_=>{return 9;}}}\nfn main(){println(grade(95));println(grade(85));println(grade(12));println(grade(200));println(band(-10));println(band(0));println(band(30));println(band(-41));println(band(50));}\n",
+    "stdout": "65\n66\n67\n63\n0\n1\n2\n9\n9\n"
+  },
+  {
+    "name": "match-empty-range",
+    "source": "fn main(){x:=3;match x{5..2=>{},_=>{}}}",
+    "reject": true,
+    "diagnostic": "empty range pattern"
+  },
+  {
+    "name": "match-range-bound-out-of-range",
+    "source": "fn main(){x:=3u8;match x{0..300=>{},_=>{}}}",
+    "reject": true,
+    "diagnostic": "out of range"
+  },
+  {
+    "name": "env-args-var-process-exit",
+    "files": [
+      "compiler/tests/env_process.grl",
+      "lib/env.grl",
+      "lib/process.grl",
+      "lib/core.grl"
+    ],
+    "args": [
+      "first",
+      "second"
+    ],
+    "status": 7,
+    "stdout": "3\nfirst\nunset\ntrue\n"
+  },
+  {
+    "name": "print-vectors-like-rust-debug",
+    "source": "fn main(){v:=vec<num>[1,2,3];println(v);println(vec<i32>[-1,0,5]);println(vec<bool>[true,false]);println(vec<f64>[0.5,2.0]);\n println(vec<string>[\"a\".text(),\"b c\".text()]);println(vec<vec<num>>[vec<num>[1],vec<num>[],vec<num>[2,3]]);e:=vec<num>[];println(e);\n s:=format(\"v={} n={}\", v, 4);println(s);println(\"{}\", vec<u8>[255u8]);}\n",
+    "stdout": "[1, 2, 3]\n[-1, 0, 5]\n[true, false]\n[0.5, 2.0]\n[\"a\", \"b c\"]\n[[1], [], [2, 3]]\n[]\nv=[1, 2, 3] n=4\n[255]\n"
+  },
+  {
+    "name": "print-vector-of-records-rejected",
+    "source": "struct P{x:num}fn main(){v:=vec<P>[P{x:1}];println(v);}",
+    "reject": true,
+    "diagnostic": "can be printed"
+  },
+  {
+    "name": "vector-literal-adopts-element-type",
+    "source": "fn main(){v:=vec<i32>[-1,0,5];println(v[0]+v[2]);}",
+    "stdout": "4\n"
+  },
+  {
+    "name": "vector-literal-out-of-range",
+    "source": "fn main(){v:=vec<u8>[300];}",
+    "reject": true,
+    "diagnostic": "out of range"
+  },
+  {
+    "name": "enum-match-default-arm",
+    "source": "enum M{Text(bytes),Num(num),Quit}\nfn kind(m:M)->num{match m{Num(n)=>{return n;},_=>{return 0;}}}\nfn peek<a>(m:ref<a,M>)->num{match m{Text(t)=>{return t.len();},_=>{return 99;}}}\nfn main(){assert(kind(M::Text(bytes[1,2,3]))==0);assert(kind(M::Num(5))==5);assert(kind(M::Quit)==0);t:=M::Text(bytes[9]);assert(peek(borrow(t))==1);q:=M::Quit;assert(peek(borrow(q))==99);println(42);}\n",
+    "stdout": "42\n"
+  },
+  {
+    "name": "enum-default-arm-unreachable",
+    "source": "enum M{A,B}fn main(){m:=M::A;match m{A=>{},B=>{},_=>{}}}",
+    "reject": true,
+    "diagnostic": "unreachable _ arm"
+  },
+  {
+    "name": "enum-default-arm-not-last",
+    "source": "enum M{A,B}fn main(){m:=M::A;match m{_=>{},A=>{}}}",
+    "reject": true,
+    "diagnostic": "must be last"
+  },
+  {
+    "name": "match-bindings-and-guards",
+    "source": "fn describe(n:i32)->string{match n{0=>{return \"zero\".text();},x if x<0=>{return format(\"negative {}\", x);},x if x%2==0=>{return format(\"even {}\", x);},other=>{return format(\"odd {}\", other);}}}\nfn main(){println(describe(0));println(describe(-3));println(describe(8));println(describe(7));\n limit:=5;mut hits=0;for i in 10{match i{1|2 if limit>3=>{hits+=10;},n if n>=limit=>{hits+=1;},_=>{}}}println(hits);}\n",
+    "stdout": "zero\nnegative -3\neven 8\nodd 7\n25\n"
+  },
+  {
+    "name": "guarded-arm-not-exhaustive",
+    "source": "fn main(){x:=3;match x{n if n>1=>{}}}",
+    "reject": true,
+    "diagnostic": "non-exhaustive"
+  },
+  {
+    "name": "duplicate-catch-all",
+    "source": "fn main(){x:=3;match x{a=>{},b=>{}}}",
+    "reject": true,
+    "diagnostic": "duplicate catch-all"
+  },
+  {
+    "name": "guard-move-then-use",
+    "source": "fn eat(b:bytes)->bool{return b.len()>0;}fn main(){x:=3;d:=bytes[1];match x{n if eat(d)=>{},_=>{println(d.len());}}}",
+    "reject": true,
+    "diagnostic": "use of moved"
+  },
+  {
+    "name": "interface-methods-dot-call",
+    "source": "use order;\nuse hash;\nstruct Version{major:num,minor:num}\nimpl order::Ord for Version{fn less<a,b>(left:ref<a,Self>,right:ref<b,Self>)->bool{if left.major!=right.major{return left.major<right.major;}return left.minor<right.minor;}}\ninterface Area{fn area<a>(shape:ref<a,Self>)->num;}\nstruct Square{side:num}\nimpl Area for Square{fn area<a>(shape:ref<a,Self>)->num{return shape.side*shape.side;}}\nfn main(){a:=Version{major:1,minor:4};b:=Version{major:1,minor:10};println(a.less(borrow(b)));println(b.less(borrow(a)));s:=Square{side:7};println(s.area());r:=borrow(s);println(r.area());}\n",
+    "modules": [
+      "lib/order.grl",
+      "lib/hash.grl"
+    ],
+    "stdout": "true\nfalse\n49\n49\n"
+  },
+  {
+    "name": "format-width-fill-align",
+    "source": "fn main(){\n    println(\"[{:5}]\", 42);println(\"[{:<5}]\", 42);println(\"[{:^6}]\", 42);println(\"[{:05}]\", -42i32);println(\"[{:3}]\", 12345);\n    println(\"[{:8}]\", \"abc\");println(\"[{:>8}]\", \"h\u00e9llo\");println(\"[{:*^9}]\", \"mid\");println(\"[{:8.2}]\", 3.14159);println(\"[{:<8.3}]\", -2.5);\n    println(\"[{:6}]\", true);println(\"[{:>6}]\", 1.5);println(\"[{:07.2}]\", -3.14159);s:=format(\"{:>4}|{:<4}|\", 7, 8);println(s);\n    for i in 3{println(\"{:>3} {:<6} {:6.1}\", i*7, \"row\", f64(i)*1.25);}\n}\n",
+    "stdout": "[   42]\n[42   ]\n[  42  ]\n[-0042]\n[12345]\n[abc     ]\n[   h\u00e9llo]\n[***mid***]\n[    3.14]\n[-2.500  ]\n[true  ]\n[   1.5]\n[-003.14]\n   7|8   |\n  0 row       0.0\n  7 row       1.2\n 14 row       2.5\n"
+  },
+  {
+    "name": "format-bad-spec",
+    "source": "fn main(){println(\"{:x}\", 1);}",
+    "reject": true,
+    "diagnostic": "bad format spec"
+  },
+  {
+    "name": "tuples-types-literals-destructuring",
+    "source": "fn divide(a:num,b:num)->(num,num){return (a/b,a%b);}\nfn min_max(v:vec<i32>)->(i32,i32){mut lo=v[0];mut hi=v[0];for x in v{if x<lo{lo=x;}if x>hi{hi=x;}}return (lo,hi);}\nfn split<a>(text:read<a>)->(bytes,bytes){mut l=bytes[];mut r=bytes[];mut seen=false;for b in text{if b=='='{seen=true;}else{if seen{r.push(b);}else{l.push(b);}}}return (l,r);}\nfn first<a>(pair:ref<a,(num,bytes)>)->num{return pair.0;}\nfn main(){\n    (q,r):=divide(17,5);println(\"{} {}\", q, r);\n    t:=min_max(vec<i32>[3,-2,9]);println(\"{} {}\", t.0, t.1);\n    (key,value):=split(&\"name=grail\");println(\"{} -> {}\", key, value);\n    p:=(7,bytes[1,2]);println(first(borrow(p)));println(p.1.len());\n    mut m=(1,2.5,true);m.0=5;println(\"{} {} {}\", m.0, m.1, m.2);\n    (_,kept):=(bytes[9],bytes[8,8]);println(kept.len());\n    nested:=((1,2),3);inner:=nested.0;println(inner.1+nested.1);\n}\n",
+    "stdout": "3 2\n-2 9\nname -> grail\n7\n2\n5 2.5 true\n2\n5\n"
+  },
+  {
+    "name": "tuple-field-moved-twice",
+    "source": "fn main(){t:=(bytes[1],2);u:=t.0;v:=t.0;}",
+    "reject": true,
+    "diagnostic": "use of moved"
+  },
+  {
+    "name": "tuple-pattern-arity",
+    "source": "fn main(){(a,b):=(1,2,3);}",
+    "reject": true,
+    "diagnostic": "wrong number of names"
+  },
+  {
+    "name": "tuple-pattern-non-tuple",
+    "source": "fn main(){(a,b):=5;}",
+    "reject": true,
+    "diagnostic": "needs a tuple value"
+  },
+  {
+    "name": "tuple-return-type-mismatch",
+    "source": "fn f()->(num,bytes){return (1,2);}fn main(){}",
+    "reject": true,
+    "diagnostic": "type mismatch"
+  },
+  {
+    "name": "print-tuples-like-rust-debug",
+    "source": "fn main(){t:=(1,\"a\".text(),vec<num>[2,3]);println(t);println((true,2.0,-3i32));s:=format(\"{} | {}\", (1,(2,\"x\".text())), 4);println(s);}\n",
+    "stdout": "(1, \"a\", [2, 3])\n(true, 2.0, -3)\n(1, (2, \"x\")) | 4\n"
+  },
+  {
+    "name": "typed-bindings",
+    "source": "fn main(){mut total: i32 = 0;for v in vec<i32>[3,-5,9]{total+=v;}println(total);limit: u8 := 200;println(limit);ratio: f64 := 0.25;println(ratio);\n names: vec<string> := vec<string>[];println(names.len());mut flag: bool = false;flag=true;println(flag);mut count: num;count=4;println(count);}\n",
+    "stdout": "7\n200\n0.25\n0\ntrue\n4\n"
+  },
+  {
+    "name": "typed-binding-out-of-range",
+    "source": "fn main(){x: u8 := 300;}",
+    "reject": true,
+    "diagnostic": "out of range"
+  },
+  {
+    "name": "typed-binding-mismatch",
+    "source": "fn main(){x: i32 := bytes[];}",
+    "reject": true,
+    "diagnostic": "type mismatch"
+  },
+  {
+    "name": "typed-binding-bool-to-num",
+    "source": "fn main(){x: num := true;}",
+    "reject": true,
+    "diagnostic": "type mismatch"
+  },
+  {
+    "name": "typed-binding-immutable-needs-colon-eq",
+    "source": "fn main(){x: i32 = 5;}",
+    "reject": true,
+    "diagnostic": "expected :="
+  },
+  {
+    "name": "for-in-borrowed-elements",
+    "source": "struct Person{name:string,age:u32}\nfn total<a>(people:ref<a,vec<Person>>)->u32{mut sum: u32 = 0;for p in people{sum+=p.age;}return sum;}\nfn birthday<a>(people:ref_mut<a,vec<Person>>){for p in people{p.age+=1;}}\nfn main(){mut people=vec<Person>[Person{name:\"Ann\".text(),age:30},Person{name:\"Bo\".text(),age:25}];\n for p in borrow(people){println(\"{} {}\", p.name, p.age);}println(total(borrow(people)));birthday(borrow_mut(people));println(total(borrow(people)));\n words:=vec<bytes>[bytes[1,2],bytes[3]];mut n=0;for w in borrow(words){n+=w.len();if n>100{break;}}println(n);people.push(Person{name:\"Cy\".text(),age:1});println(people.len());}\n",
+    "stdout": "Ann 30\nBo 25\n55\n57\n3\n3\n"
+  },
+  {
+    "name": "for-borrow-mutate-vector-rejected",
+    "source": "struct P{x:num}fn main(){mut v=vec<P>[P{x:1}];for p in borrow(v){v.push(P{x:2});}}",
+    "reject": true,
+    "diagnostic": "conflicts with live borrow"
+  },
+  {
+    "name": "for-owned-non-scalar-rejected",
+    "source": "fn main(){v:=vec<bytes>[bytes[1]];for w in v{}}",
+    "reject": true,
+    "diagnostic": "needs borrow(v)"
+  },
+  {
+    "name": "for-shared-element-mutation-rejected",
+    "source": "struct P{x:num}fn main(){mut v=vec<P>[P{x:1}];for p in borrow(v){p.x=5;}}",
+    "reject": true,
+    "diagnostic": "readonly"
+  },
+  {
+    "name": "closures-in-generic-functions",
+    "source": "use vecs;\nfn scale_all<T>(items:vec<T>,factor:num,f:Fn(T,num)->T)->vec<T>{offset:=factor;return vecs::map(items,|x: T| -> T f(x,offset));}\nfn times(x:num,k:num)->num{return x*k;}\nfn twice<T>(v:T,g:Fn(T)->T)->T{h:=|y: T| -> T g(y);return h(v);}\nfn main(){r:=scale_all(vec<num>[1,2,3],10,|x: num, k: num| -> num x*k);println(r);println(twice(5,|x: num| -> num x+1));s:=twice(bytes[1],|b: bytes| -> bytes b);println(s.len());}\n",
+    "modules": [
+      "lib/vecs.grl",
+      "lib/order.grl",
+      "lib/hash.grl"
+    ],
+    "stdout": "[10, 20, 30]\n6\n1\n"
+  },
+  {
+    "name": "generic-closure-capture-moves",
+    "source": "fn g<T>(x:T)->T{f:=|| -> num {y:=x;return 1;};return x;}fn main(){}",
+    "reject": true,
+    "diagnostic": "use of moved"
+  },
+  {
+    "name": "text-comparison-and-concatenation",
+    "source": "fn greet(name:string)->string{return \"hello, \".text()+name+\"!\";}\nfn main(){a:=\"x\".text();b:=\"x\".text();println(a==b);println(a!=\"y\");println(\"apple\"<\"banana\");println(bytes[1,2]<bytes[1,2,0]);\n g:=greet(\"Grail\".text());println(g);c:=bytes[1]+bytes[2,3];println(c.len());mut s=\"\".text();for i in 3{s=s+\"ab\";}println(s);println(a>=b);}\n",
+    "stdout": "true\ntrue\ntrue\ntrue\nhello, Grail!\n3\nababab\ntrue\n"
+  },
+  {
+    "name": "text-operator-not-defined",
+    "source": "fn main(){a:=\"x\".text();b:=\"y\".text();c:=a-b;}",
+    "reject": true,
+    "diagnostic": "operator not defined for text"
+  },
+  {
+    "name": "builtin-text-methods",
+    "source": "fn main(){s:=\"  Hello, World  \".text();t:=s.trim();println(t);println(t.to_upper());println(t.to_lower());println(t.contains(\"lo, W\"));println(t.starts_with(\"Hell\"));println(t.ends_with(\"x\"));\n println(t.replace(\"World\",\"Grail\"));println(\"ab\".repeat(3));parts:=\"a,b,,c\".text().split(',');println(parts);println(parts.len());e:=\"\".text();println(e.is_empty());\n b:=bytes[104,105];println(b.to_upper());println(vec<num>[].is_empty());}\n",
+    "stdout": "Hello, World\nHELLO, WORLD\nhello, world\ntrue\ntrue\nfalse\nHello, Grail\nababab\n[\"a\", \"b\", \"\", \"c\"]\n4\ntrue\nHI\ntrue\n"
+  },
+  {
+    "name": "text-method-bad-argument",
+    "source": "fn main(){s:=\"x\".text();b:=s.contains(5);}",
+    "reject": true,
+    "diagnostic": "argument must be text"
+  },
+  {
+    "name": "vector-methods",
+    "source": "fn main(){mut v=vec<num>[1,2,3];v.insert(0,9);v.insert(4,7);println(v);r:=v.remove(1);println(r);println(v);v.swap(0,1);v.reverse();println(v);v.truncate(2);println(v);v.clear();println(v);\n mut w=vec<bytes>[bytes[1],bytes[2,2]];w.insert(1,bytes[3,3,3]);x:=w.remove(0);println(x.len());println(w.len());w.truncate(1);w.clear();println(w.len());mut i=vec<i32>[];i.insert(0,-5);println(i);}\n",
+    "stdout": "[9, 1, 2, 3, 7]\n1\n[9, 2, 3, 7]\n[7, 3, 9, 2]\n[7, 3]\n[]\n1\n2\n0\n[-5]\n"
+  },
+  {
+    "name": "vector-insert-out-of-bounds",
+    "source": "fn main(){mut v=vec<num>[1];v.insert(5,2);}",
+    "signal": "SIGABRT"
+  },
+  {
+    "name": "vector-remove-out-of-bounds",
+    "source": "fn main(){mut v=vec<num>[1];x:=v.remove(3);}",
+    "signal": "SIGABRT"
+  },
+  {
+    "name": "vector-method-needs-mut",
+    "source": "fn main(){v:=vec<num>[1];v.reverse();}",
+    "reject": true,
+    "diagnostic": "requires mut"
+  },
+  {
+    "name": "vector-contains",
+    "source": "fn main(){v:=vec<i32>[3,-4];println(v.contains(-4));println(v.contains(5));b:=vec<bool>[false];println(b.contains(true));}\n",
+    "stdout": "true\nfalse\nfalse\n"
+  },
+  {
+    "name": "vector-contains-f64-rejected",
+    "source": "fn main(){v:=vec<f64>[1.0];println(v.contains(1.0));}",
+    "reject": true,
+    "diagnostic": "integer or bool elements"
+  },
+  {
+    "name": "structural-equality",
+    "source": "struct Point{x:i32,y:i32}\nstruct Named{name:string,at:Point,tags:vec<num>,w:f64}\nfn main(){a:=Point{x:1,y:2};b:=Point{x:1,y:2};c:=Point{x:1,y:3};println(a==b);println(a!=c);println(a==Point{x:1,y:2});\n n1:=Named{name:\"p\".text(),at:Point{x:0,y:0},tags:vec<num>[1,2],w:0.5};n2:=Named{name:\"p\".text(),at:Point{x:0,y:0},tags:vec<num>[1,2],w:0.5};n3:=Named{name:\"p\".text(),at:Point{x:0,y:0},tags:vec<num>[1],w:0.5};\n println(n1==n2);println(n1==n3);println((1,\"a\".text())==(1,\"a\".text()));println((1,2)!=(1,3));}\n",
+    "stdout": "true\ntrue\ntrue\ntrue\nfalse\ntrue\ntrue\n"
+  },
+  {
+    "name": "structural-equality-unsupported-field",
+    "source": "struct B{v:vec<bytes>}fn main(){a:=B{v:vec<bytes>[]};b:=B{v:vec<bytes>[]};println(a==b);}",
+    "reject": true,
+    "diagnostic": "== on records needs"
+  },
+  {
+    "name": "structural-equality-different-types",
+    "source": "struct P{x:num}struct Q{x:num}fn main(){println(P{x:1}==Q{x:1});}",
+    "reject": true,
+    "diagnostic": "type mismatch"
+  },
+  {
+    "name": "enum-structural-equality",
+    "source": "use core;\nenum Shape{Circle(f64),Square(num),Label(string),Empty}\nstruct Item{shape:Shape,count:u8}\nfn main(){println(Shape::Circle(1.5)==Shape::Circle(1.5));println(Shape::Circle(1.5)==Shape::Square(1));println(Shape::Label(\"a\".text())==Shape::Label(\"a\".text()));\n println(Shape::Empty==Shape::Empty);println(Shape::Empty!=Shape::Square(2));println(Item{shape:Shape::Square(3),count:1}==Item{shape:Shape::Square(3),count:1});\n println(core::some(5)==core::some(5));println(core::some(5)==core::none<num>());}\n",
+    "modules": [
+      "lib/core.grl"
+    ],
+    "stdout": "true\nfalse\ntrue\ntrue\ntrue\ntrue\ntrue\nfalse\n"
+  },
+  {
+    "name": "program-sales-report",
+    "files": [
+      "compiler/tests/sales_report.grl",
+      "lib/fs.grl",
+      "lib/io.grl",
+      "lib/hashmap.grl",
+      "lib/hash.grl",
+      "lib/vecs.grl",
+      "lib/order.grl",
+      "lib/strings.grl",
+      "lib/core.grl"
+    ],
+    "stdout": "region     revenue\neast        149.99\nnorth       100.00\nsouth        42.50\n6 sales, 48 units, best region: east\n"
+  },
+  {
+    "name": "reference-to-text-coerces-to-view",
+    "source": "fn count<a>(t:read<a>)->num{return t.len();}fn main(){v:=vec<bytes>[bytes[1,2,3]];s:=\"hey\".text();r:=&s;println(count(&v[0]));println(count(r));println(count(borrow(s)));}",
+    "stdout": "3\n3\n3\n"
+  },
+  {
+    "name": "coerced-view-escape-rejected",
+    "source": "fn id<a>(t:read<a>)->read<a>{return t;}fn bad<a>()->read<a>{b:=bytes[1];return id(borrow(b));}fn main(){}",
+    "reject": true,
+    "diagnostic": "escapes"
+  },
+  {
+    "name": "coerced-view-mutation-rejected",
+    "source": "fn id<a>(t:read<a>)->read<a>{return t;}fn main(){mut b=bytes[1];v:=id(borrow(b));b.push(2);println(v.len());}",
+    "reject": true,
+    "diagnostic": "conflicts with live borrow"
+  },
+  {
+    "name": "program-inventory-cli",
+    "files": [
+      "compiler/tests/inventory.grl",
+      "lib/env.grl",
+      "lib/core.grl",
+      "lib/vecs.grl",
+      "lib/order.grl",
+      "lib/hash.grl",
+      "lib/strings.grl"
+    ],
+    "args": [
+      "add:chain",
+      "list",
+      "rm:2",
+      "rm:9",
+      "list"
+    ],
+    "stdout": "  2 anchor   x2\n  1 bolt     x40\n  3 chain    x1\nremoved anchor\nno item 9\n  1 bolt     x40\n  3 chain    x1\n"
+  },
+  {
+    "name": "program-inventory-unknown-command",
+    "files": [
+      "compiler/tests/inventory.grl",
+      "lib/env.grl",
+      "lib/core.grl",
+      "lib/vecs.grl",
+      "lib/order.grl",
+      "lib/hash.grl",
+      "lib/strings.grl"
+    ],
+    "args": [
+      "frobnicate"
+    ],
+    "status": 2,
+    "stdout": "unknown command: frobnicate\n"
+  },
+  {
+    "name": "parallel-map-with-closures",
+    "source": "fn main(){offset:=100;words:=vec<string>[\"ab\".text(),\"cde\".text()];lens:=parallel_map(vec<num>[0,1,2,3,4,5,6,7],0,|i: num, unused: num| -> num i*i+offset);println(lens);\n table:=vec<num>[5,6,7];picked:=parallel_map(vec<num>[2,0,1],0,|i: num, unused: num| -> num table[i]+words.len());println(picked);}\n",
+    "stdout": "[100, 101, 104, 109, 116, 125, 136, 149]\n[9, 7, 8]\n"
+  },
+  {
+    "name": "program-parallel-primes",
+    "files": [
+      "compiler/tests/parallel_primes.grl",
+      "lib/concurrent_map.grl",
+      "lib/hashmap.grl",
+      "lib/hash.grl",
+      "lib/core.grl"
+    ],
+    "stdout": "primes below 80000: 7837\nchunks recorded: 8\n"
+  },
+  {
+    "name": "program-http-server-client",
+    "files": [
+      "compiler/tests/http_demo.grl"
+    ],
+    "stdout": "/              -> 200 OK\n/hello/grail   -> 200 OK\n/missing       -> 404 Not Found\n"
+  },
+  {
+    "name": "text-reference-comparison",
+    "source": "fn main(){w:=vec<string>[\"GET\".text(),\"x\".text()];println(w[0]==\"GET\");println(w[1]<w[0]);s:=w[0]+\"!\";println(s);}",
+    "stdout": "true\nfalse\nGET!\n"
+  },
+  {
+    "name": "borrow-temporary-rejected",
+    "source": "fn main(){for x in borrow(vec<num>[1]){}}",
+    "reject": true,
+    "diagnostic": "bind the value first"
+  },
+  {
+    "name": "program-recursive-binary-search-tree",
+    "files": [
+      "compiler/tests/bst.grl"
+    ],
+    "stdout": "[-5, 20, 30, 40, 50, 60, 70, 80]\ntrue false depth 4\n"
+  },
+  {
+    "name": "recursive-type-borrow-rejected",
+    "source": "enum L{Nil,Cons(C)}struct C{v:bytes,next:L}fn main(){mut l=L::Cons(C{v:bytes[1],next:L::Nil});r:=borrow(l);drop(l);match r{Nil=>{},Cons(c)=>{println(c.v.len());}}}",
+    "reject": true
+  },
+  {
+    "name": "program-calculator",
+    "files": [
+      "compiler/tests/calculator.grl",
+      "lib/core.grl"
+    ],
+    "stdout": "1 + 2 * 3 = 7\n(1 + 2) * 3 = 9\n10 / 4 - 1 = 1.5\n2 * (3 + 4) * 5 = 70\n7 $ 3 -> error: unexpected character at 2\n(1 + -> error: unexpected end\n"
+  },
+  {
+    "name": "borrow-indexed-elements",
+    "source": "struct S{items:vec<bytes>}fn main(){mut s=S{items:vec<bytes>[bytes[1],bytes[2,3]]};r:=borrow(s.items[1]);println(r.len());w:=borrow_mut(s.items[0]);w.push(9);println(s.items[0].len());}",
+    "stdout": "2\n2\n"
+  },
+  {
+    "name": "unicode-case-mapping",
+    "source": "fn main(){println(\"\u00dcn\u00efcode \u00c9COLE Stra\u00dfe \u03a9\u03bc\u03ad\u03b3\u03b1 \u041f\u0420\u0418\u0412\u0415\u0422\".text().to_lower());println(\"\u00fcn\u00efcode \u00e9cole \u03c9\u03bc\u03ad\u03b3\u03b1 \u043f\u0440\u0438\u0432\u0435\u0442 \u00ff\".text().to_upper());}\n",
+    "stdout": "\u00fcn\u00efcode \u00e9cole stra\u00dfe \u03c9\u03bc\u03ad\u03b3\u03b1 \u043f\u0440\u0438\u0432\u0435\u0442\n\u00dcN\u00cfCODE \u00c9COLE \u03a9\u039c\u0388\u0393\u0391 \u041f\u0420\u0418\u0412\u0415\u0422 \u0178\n"
+  },
+  {
+    "name": "program-word-frequency",
+    "files": [
+      "compiler/tests/word_frequency.grl",
+      "lib/hashmap.grl",
+      "lib/hash.grl",
+      "lib/vecs.grl",
+      "lib/order.grl",
+      "lib/core.grl"
+    ],
+    "stdout": "20 words, 14 distinct\n 1. the      4\n 2. dog      2\n 3. fox      2\n 4. \u00fcn\u00efcode  2\n 5. brown    1\n"
+  },
+  {
+    "name": "program-json-parser",
+    "files": [
+      "compiler/tests/json.grl",
+      "lib/core.grl"
+    ],
+    "stdout": "{\"name\":\"grail\",\"version\":1,\"tags\":[\"fast\",\"safe\"],\"stable\":false,\"extra\":null}\n[1,-2,[3,[]]]\nerror: unexpected input at 6\n"
   }
 ]

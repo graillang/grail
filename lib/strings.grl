@@ -1,0 +1,73 @@
+module strings;
+use core;
+
+// Byte-oriented text helpers. Inputs are read-only views (`&text`); results are new values.
+pub fn starts_with<a,b>(text:read<a>,prefix:read<b>)->bool{
+    if text.len()<prefix.len(){return false;}for i in prefix.len(){if text[i]!=prefix[i]{return false;}}return true;
+}
+pub fn ends_with<a,b>(text:read<a>,suffix:read<b>)->bool{
+    if text.len()<suffix.len(){return false;}d:=text.len()-suffix.len();for i in suffix.len(){if text[d+i]!=suffix[i]{return false;}}return true;
+}
+// Index of the first occurrence of needle, or None.
+pub fn find<a,b>(text:read<a>,needle:read<b>)->core::Option<num>{
+    if needle.len()==0{return core::some(0);}if text.len()<needle.len(){return core::none<num>();}
+    for i in text.len()-needle.len()+1{mut same=true;for j in needle.len(){if text[i+j]!=needle[j]{same=false;break;}}if same{return core::some(i);}}
+    return core::none<num>();
+}
+pub fn contains<a,b>(text:read<a>,needle:read<b>)->bool{if let Some(i) = find(text,needle) {return true;}return false;}
+pub fn split<a>(text:read<a>,separator:num)->vec<bytes>{
+    mut parts=vec<bytes>[];mut current=bytes[];
+    for b in text{if b==separator{parts.push(current);current=bytes[];}else{current.push(b);}}
+    parts.push(current);return parts;
+}
+pub fn trim<a>(text:read<a>)->bytes{
+    mut start=0;mut end=text.len();
+    while start<end{b:=text[start];if (b!=32)&(b!=9)&(b!=10)&(b!=13){break;}start+=1;}
+    while start<end{b:=text[end-1];if (b!=32)&(b!=9)&(b!=10)&(b!=13){break;}end-=1;}
+    mut out=bytes[];for i in start..end{out.push(text[i]);}return out;
+}
+pub fn join_with<a,b>(parts:ref<a,vec<bytes>>,separator:read<b>)->bytes{
+    mut out=bytes[];for i in parts.len(){if i>0{for b in separator{out.push(b);}}part:=&parts[i];for b in part{out.push(b);}}return out;
+}
+pub fn to_upper<a>(text:read<a>)->bytes{mut out=bytes[];for b in text{if (b>=97)&(b<=122){out.push(b-32);}else{out.push(b);}}return out;}
+pub fn to_lower<a>(text:read<a>)->bytes{mut out=bytes[];for b in text{if (b>=65)&(b<=90){out.push(b+32);}else{out.push(b);}}return out;}
+// Decimal digits only; None for empty input, other characters or overflow.
+pub fn parse_num<a>(text:read<a>)->core::Option<num>{
+    if text.len()==0{return core::none<num>();}mut value=0;
+    for b in text{if (b<48)+(b>57){return core::none<num>();}if value>1844674407370955161{return core::none<num>();}
+        next:=value*10;if next>18446744073709551615-(b-48){return core::none<num>();}value=next+(b-48);}
+    return core::some(value);
+}
+
+// Unicode code points of UTF-8 text (`string` values are always valid UTF-8; for raw bytes, invalid
+// sequences decode to U+FFFD per byte).
+pub fn chars<a>(text:read<a>)->vec<u32>{
+    mut out=vec<u32>[];mut i=0;n:=text.len();
+    while i<n{
+        b:=text[i];mut cp=65533u32;mut width=1;
+        if b<128{cp=u32(b);}
+        else{if (b>=194)&(b<=223)&(i+1<n){c1:=text[i+1];if (c1&192)==128{cp=u32((b&31)*64+(c1&63));width=2;}}
+        else{if (b>=224)&(b<=239)&(i+2<n){c1:=text[i+1];c2:=text[i+2];if ((c1&192)==128)&((c2&192)==128){v:=(b&15)*4096+(c1&63)*64+(c2&63);if (v>=2048)&((v<55296)+(v>57343)){cp=u32(v);width=3;}}}
+        else{if (b>=240)&(b<=244)&(i+3<n){c1:=text[i+1];c2:=text[i+2];c3:=text[i+3];if ((c1&192)==128)&((c2&192)==128)&((c3&192)==128){v:=(b&7)*262144+(c1&63)*4096+(c2&63)*64+(c3&63);if (v>=65536)&(v<=1114111){cp=u32(v);width=4;}}}}}}
+        out.push(cp);i+=width;
+    }
+    return out;
+}
+pub fn char_count<a>(text:read<a>)->num{v:=chars(text);return v.len();}
+// Appends the UTF-8 encoding of a code point (invalid code points become U+FFFD).
+pub fn push_char<a>(out:ref_mut<a,bytes>,code:u32){
+    mut v=num(code);if (v>1114111)+((v>=55296)&(v<=57343)){v=65533;}
+    if v<128{out.push(v);return ();}
+    if v<2048{out.push(192+v/64);out.push(128+v%64);return ();}
+    if v<65536{out.push(224+v/4096);out.push(128+(v/64)%64);out.push(128+v%64);return ();}
+    out.push(240+v/262144);out.push(128+(v/4096)%64);out.push(128+(v/64)%64);out.push(128+v%64);
+}
+pub fn replace<a,b,d>(text:read<a>,from:read<b>,to:read<d>)->bytes{
+    mut out=bytes[];if from.len()==0{for b in text{out.push(b);}return out;}mut i=0;
+    while i<text.len(){
+        mut hit=i+from.len()<=text.len();if hit{for j in from.len(){if text[i+j]!=from[j]{hit=false;break;}}}
+        if hit{for b in to{out.push(b);}i+=from.len();}else{out.push(text[i]);i+=1;}
+    }
+    return out;
+}
+pub fn repeat<a>(text:read<a>,count:num)->bytes{mut out=bytes[];for i in count{for b in text{out.push(b);}}return out;}

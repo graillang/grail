@@ -35,3 +35,19 @@ test *args:
 # Verify direct compiler self-hosting on all supported CPUs (QEMU needed for cross execution).
 bootstrap-check:
     bun tools/bootstrap.mjs verify all
+
+# Install the `grail` tool: PREFIX/bin/grail plus runtime and standard library in PREFIX/lib/grail.
+install prefix="~/.local":
+    #!/usr/bin/env sh
+    set -eu
+    prefix=$(eval echo "{{prefix}}")
+    grail=$(bun tools/native.mjs build)
+    mkdir -p "$prefix/bin" "$prefix/lib/grail/std"
+    cp "$grail" "$prefix/bin/grail.new" && mv "$prefix/bin/grail.new" "$prefix/bin/grail"
+    cp compiler/runtime.grl "$prefix/lib/grail/runtime.grl"
+    cp lib/*.grl "$prefix/lib/grail/std/"
+    echo "installed $prefix/bin/grail (needs clang and ld.lld for building programs)"
+
+# Formatter and grail tool regressions (also checks ARM64/RV64 under qemu).
+test-cli:
+    bun tools/test-cli.mjs

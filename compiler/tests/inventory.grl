@@ -1,0 +1,82 @@
+use env;
+use core;
+use vecs;
+use order;
+use strings;
+
+enum Command {
+    Add(string),
+    Remove(num),
+    List,
+    Unknown(string),
+}
+struct Item {
+    id: num,
+    name: string,
+    qty: u32,
+}
+impl order::Ord for Item {
+    fn less<a, b>(left: ref<a, Self>, right: ref<b, Self>) -> bool {
+        return left.name < right.name;
+    }
+}
+fn parse(arg: string) -> Command {
+    if arg == "list" {
+        return Command::List;
+    }
+    if arg.starts_with("add:") {
+        return Command::Add(arg.replace("add:", ""));
+    }
+    if arg.starts_with("rm:") {
+        rest := arg.replace("rm:", "");
+        if let Some(n) = strings::parse_num(&rest) {
+            return Command::Remove(n);
+        }
+    }
+    return Command::Unknown(arg);
+}
+fn find<x>(items: ref<x, vec<Item>>, id: num) -> core::Option<num> {
+    for i in items.len() {
+        if items[i].id == id {
+            return core::some(i);
+        }
+    }
+    return core::none<num>();
+}
+fn main() -> num {
+    mut items = vec<Item>[Item { id: 1, name: "bolt".text(), qty: 40 }, Item { id: 2, name: "anchor".text(), qty: 2 }];
+    mut next = 3;
+    args := env::args();
+    for i in 1..args.len() {
+        cmd := parse(args[i].copy().text());
+        match cmd {
+            Add(name) => {
+                items.push(Item { id: next, name, qty: 1 });
+                next += 1;
+            },
+            Remove(id) => {
+                match find(borrow(items), id) {
+                    Some(at) => {
+                        gone := items.remove(at);
+                        println("removed {}", gone.name);
+                    },
+                    None => {
+                        println("no item {}", id);
+                    },
+                }
+            },
+            List => {
+                vecs::sort(borrow_mut(items));
+                for it in borrow(items) {
+                    println("{:>3} {:<8} x{}", it.id, it.name, it.qty);
+                }
+            },
+            Unknown(text) => {
+                println("unknown command: {}", text);
+                return 2;
+            },
+        }
+    }
+    total := vecs::map(vec<num>[1, 2], |x: num| -> num x);
+    return 0;
+}

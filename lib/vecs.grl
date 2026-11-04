@@ -1,0 +1,51 @@
+module vecs;
+use hash;
+use order;
+
+// Everyday vector operations. Closures passed here own their captures (see closures.md).
+pub fn map<T,U>(items:vec<T>,f:Fn(T)->U)->vec<U>{
+    mut source=items;mut reversed=vec<T>[];while source.len()!=0{reversed.push(source.pop());}
+    mut out=vec<U>[];while reversed.len()!=0{out.push(f(reversed.pop()));}return out;
+}
+pub fn filter_nums(items:vec<num>,keep:Fn(num)->bool)->vec<num>{
+    mut out=vec<num>[];for x in items{if keep(x){out.push(x);}}return out;
+}
+pub fn sum(items:vec<num>)->num{mut total=0;for x in items{total+=x;}return total;}
+pub fn max_num(items:vec<num>)->num{assert(items.len()!=0);mut best=items[0];for x in items{if x>best{best=x;}}return best;}
+pub fn reverse<a,T>(items:ref_mut<a,vec<T>>){
+    mut taken=vec<T>[];while items.len()!=0{taken.push(items.pop());}
+    mut back=vec<T>[];while taken.len()!=0{back.push(taken.pop());}
+    while back.len()!=0{items.push(back.pop());}
+}
+// In-place merge-free insertion sort for numbers (stable, O(n^2); fine for small vectors).
+pub fn sort_nums<a>(items:ref_mut<a,vec<num>>){
+    n:=items.len();for i in 1..n{mut j=i;while j>0{left:=items[j-1];right:=items[j];if left<=right{break;}
+        exchange(&mut items[j-1],right);exchange(&mut items[j],left);j-=1;}}
+}
+pub fn contains<a,b,T:hash::Equal>(items:ref<a,vec<T>>,wanted:ref<b,T>)->bool{
+    for i in items.len(){item:=&items[i];if hash::Equal::equal(item,borrow(wanted)){return true;}}return false;
+}
+
+// Stable merge sort for any element type with an order::Ord implementation; elements are moved,
+// never copied. O(n log n).
+fn reversed<T>(items:vec<T>)->vec<T>{mut source=items;mut out=vec<T>[];while source.len()!=0{out.push(source.pop());}return out;}
+fn merge_sorted<T:order::Ord>(items:vec<T>)->vec<T>{
+    if items.len()<2{return items;}
+    mut left=items;half:=left.len()/2;mut right_rev=vec<T>[];
+    while left.len()>half{right_rev.push(left.pop());}
+    mut a=merge_sorted(left);mut b=merge_sorted(reversed(right_rev));
+    // Take the larger tail element each time (ties prefer the right half) to build a reversed
+    // result, then reverse it; this keeps equal elements in their original order.
+    mut out_rev=vec<T>[];
+    while (a.len()!=0)&&(b.len()!=0){
+        take_left:=order::less(&b[b.len()-1],&a[a.len()-1]);
+        if take_left{out_rev.push(a.pop());}else{out_rev.push(b.pop());}
+    }
+    while a.len()!=0{out_rev.push(a.pop());}while b.len()!=0{out_rev.push(b.pop());}
+    return reversed(out_rev);
+}
+pub fn sort<a,T:order::Ord>(items:ref_mut<a,vec<T>>){taken:=exchange(items,vec<T>[]);sorted:=merge_sorted(taken);exchange(items,sorted);}
+pub fn is_sorted<a,T:order::Ord>(items:ref<a,vec<T>>)->bool{for i in 1..items.len(){if order::less(&items[i],&items[i-1]){return false;}}return true;}
+// Index of the smallest/largest element (first one on ties); the vector must not be empty.
+pub fn min_index<a,T:order::Ord>(items:ref<a,vec<T>>)->num{assert(items.len()!=0);mut best=0;for i in 1..items.len(){if order::less(&items[i],&items[best]){best=i;}}return best;}
+pub fn max_index<a,T:order::Ord>(items:ref<a,vec<T>>)->num{assert(items.len()!=0);mut best=0;for i in 1..items.len(){if order::less(&items[best],&items[i]){best=i;}}return best;}

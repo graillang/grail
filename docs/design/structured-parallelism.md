@@ -1,0 +1,138 @@
+# Mutexes, maps and structured parallelism (implemented subset)
+
+Everything here is compiled by the sole Grail compiler and executed on x86-64, ARM64 and RV64
+Linux. It is a real multi-threaded runtime, not a sequential stand-in.
+
+## `mutex<T>`
+
+```grl
+fn add<a>(total:ref_mut<a,num>,amount:num)->num{exchange(total,load(total)+amount);return 0;}
+fn main(){m:=mutex(0);m.lock_with(42,add);}
+```
+
+`mutex(value)` owns its payload. `m.lock_with(context, callback)` locks, passes the callback an
+exclusive `ref_mut` to the payload plus the moved `context`, unlocks, and returns the result.
+The exclusive reference exists only during the call. The compiler rejects callbacks whose result
+contains borrows or whose context type mentions the payload reference's lifetime, so no loan of
+the guarded data can escape the critical section. Only read access to the mutex itself is needed,
+so `ref<a,mutex<T>>` may be shared between threads; `mutex<T>` is Send+Share when T is Send.
+
+Locking uses a futex (0 unlocked / 1 locked / 2 contended): waiters sleep in the kernel.
+Limitations: payloads cannot contain borrows yet; there is no try-lock, timeout, poisoning or
+lock ordering check. Locking the same mutex again inside its callback deadlocks (not memory
+unsafety). Panics abort the process, so no lock is left held by an unwinding thread.
+
+## `hashmap::Map<K,V>` (lib/hashmap.grl, lib/hash.grl)
+
+Keys implement the `hash::Hash` and `hash::Equal` interfaces (`num`, sized integers, `bytes`,
+`string` provided; user records implement them). Hashing is keyed SipHash-2-4 with explicit seeds
+(`hashmap::with_seed`), verified against all 64 reference vectors. The map is compact and
+insertion-ordered (like Python's dict): entries are stored densely and buckets hold entry indices,
+growing at 3/4 load. `insert`/`get`/`get_mut`/`remove`/`contains`/`len`; iterate by position with
+`key_at(map, i)`, `value_at(map, i)` and `value_at_mut(map, i)` for `i` in `0..len`. Removal moves the
+last entry into the hole. Lookups return borrows tied to the map, so it cannot be mutated or dropped
+while one is live. Not yet: an entry API and random default seeds.
+
+## `concurrent_map::Map<K,V>` (DashMap-style)
+
+Sixteen `mutex<hashmap::Map<K,V>>` shards selected by an independently keyed hash. All
+operations take `ref<a,Map>`, so many threads can insert/remove/query concurrently; only keys
+on the same shard contend. Values never leave a shard lock as references (insert/remove move
+values; `contains`/`len` return numbers). `len` counts shard by shard and is not a linearizable
+snapshot under concurrent mutation.
+
+## `parallel_map(items, context, callback)`
+
+```grl
+fn work<a>(id:num,shared:ref<a,Shared>)->num{...}
+results:=parallel_map(ids,borrow(shared),work);
+```
+
+The callback may be a function or a closure (closures capture only owned values and read them, so
+every worker can share one). Structured fork-join: `items:vec<T>` is moved, each item is passed with the read-only `context`
+to `callback(item, context)`, results come back in order as `vec<R>`, and every worker thread is
+joined before the call returns. Therefore no task can outlive borrowed data. Checked rules:
+T and R are Send, the context is Share and a plain value, shared reference or readonly view,
+R holds no borrows, and borrowed items are references whose exclusive referents hold no borrows.
+
+Runtime: workers are OS threads created with `clone` (1 MiB stacks with a guard page), joined
+via the kernel's clear-TID futex wake. Work is claimed dynamically through an atomic index;
+the caller participates. Worker count is max(4, available CPUs), capped at 64 and at the item
+count. Allocation is serialized by the allocator lock. Results are published by each worker's
+final sequentially consistent counter increment before the caller reads them.
+
+Tests (`compiler/tests/parallel.grl`) include a barrier that only completes when four tasks run
+simultaneously, 16-thread atomic and mutex contention with exact totals, and 8-way concurrent map
+insertion; negative cases reject exclusive/owned contexts, borrowed results, use after move and
+mutation of the shared context while it is in use.
+
+## Task scopes, handles and cancellation
+
+```grl
+fn work(n:num,base:num)->num{return n+base;}
+fn wait(n:num,base:num,token:cancel_token)->num{while token.cancelled()==0{host::sleep_ms(1);}return n;}
+fn body<s>(sc:ref<s,scope<num>>,base:num)->num{
+    a:=spawn(sc,1,work);b:=spawn(sc,2,wait);
+    sc.cancel();return join(a)+join(b);
+}
+fn main(){total:=task_scope(40,body);}
+```
+
+`task_scope(context, body)` runs `body(ref scope, context)` on the calling thread. Inside, `spawn(scope,
+item, f)` starts `f(item, context)` (or `f(item, context, cancel_token)`) as a task and returns an
+affine `task<R>`; `join(handle)` consumes it and returns R exactly once. `task_scope` returns only
+after **every** task has finished, including tasks whose handle was dropped: dropping a handle
+never blocks, the scope exit joins it and destroys its result. Checked rules: the context is a
+plain value or shared reference that satisfies Share; items/results are owned Send values with no
+borrows and no task handles; the body result and mutex payloads cannot contain handles, so a
+handle cannot outlive its scope; scope references are neither Send nor Share.
+
+Cancellation is cooperative and observable: `sc.cancel()` sets the scope flag, `sc.cancelled()` /
+`token.cancelled()` read it, and tasks waiting in cancellable operations (pipe reads/writes,
+`host::sleep_ms`) are woken and return early. Cancellation never abandons a stack: the task
+returns normally and its owned values are cleaned up as usual. It does not yet propagate into
+nested scopes, and code that never checks the token is not interrupted.
+
+## Colourless suspension
+
+Spawned tasks are stackful green threads (256 KiB stacks with a guard page) multiplexed on a
+worker pool of max(4, CPUs) OS threads (at most 64), started on first use. There is no `async`
+keyword and no future type: ordinary functions call `host::read_fd`, `host::write_fd` or
+`host::sleep_ms`, and inside a task these suspend only that task. Non-blocking pipe descriptors
+are registered with an epoll reactor thread (one-shot readiness); sleeps use timerfds. The same
+functions block normally on plain OS threads (main thread, `parallel_map` workers).
+A per-target stack-switch intrinsic saves callee-saved registers on x86-64, AArch64 and RV64;
+each OS thread finds its worker record through the thread pointer (FS base, tpidr_el0, tp).
+A wake that races with suspension is never lost (park-state handshake), and a finished task's
+stack is released only after its worker has switched away from it.
+
+**Blocking-call boundary:** `host::command`, `host::read_file` and `host::write_file` are handed
+to a dedicated offload thread when called from a task; the task suspends and its worker keeps
+running other tasks. Mutex acquisition from a task yields instead of sleeping on the futex, so a
+lock holder that suspended for I/O can always resume. Mutex guards are not thread-affine (the
+futex word has no owner), so resuming on another worker while holding one is allowed.
+
+Tests (`compiler/tests/tasks.grl`, `compiler/tests/async_io.grl`): heterogeneous tasks, a two-task
+barrier, cancellation of a busy task and of a pipe read that would otherwise wait forever,
+abandoned results, nested scopes, 100 suspended pipe readers (more than the maximum worker
+count) fed by one writer task, 300 concurrent sleeps, and 100 tasks blocked in FIFO opens through
+the offload boundary while another task releases them. Negative cases reject handle escape,
+double join, borrowed items/results, exclusive or owned contexts, handles in mutexes, sharing a
+scope with other threads and malformed callbacks.
+
+## TCP
+
+`host::tcp_listen(port)` (0 picks a free port; `host::tcp_port(fd)` reports it),
+`host::tcp_accept(listener)` and `host::tcp_connect("a.b.c.d", port)` create non-blocking sockets;
+`host::read_fd`/`write_fd`/`close` work on them. In a task, accept/connect/read/write suspend only
+that task on the reactor. `tcp_connect` returns a negative errno value (e.g. 111, connection
+refused, as `wrapping_sub(0, fd)`) instead of aborting; listen/accept failures still abort until
+typed I/O errors exist. `compiler/tests/tcp.grl` serves 100 concurrent client tasks from one
+server task.
+
+## Still missing (not claimed)
+
+Checked suspension effects (a static "does not suspend" contract);
+cancellation propagation into nested scopes; timeouts on joins; DNS/IPv6 (TCP over IPv4 addresses only); work stealing (one shared run queue);
+channels; lifetime-carrying mutex payloads; read-write locks. `parallel_map` called from a
+task still blocks that worker while its threads run.

@@ -1,0 +1,91 @@
+use fs;
+use hashmap;
+use vecs;
+use order;
+use strings;
+use core;
+
+struct Sale {
+    region: string,
+    product: string,
+    units: num,
+    price: f64,
+}
+struct Total {
+    region: string,
+    revenue: f64,
+}
+impl order::Ord for Total {
+    fn less<a, b>(left: ref<a, Self>, right: ref<b, Self>) -> bool {
+        return left.revenue > right.revenue;
+    }
+}
+fn parse_price<a>(text: read<a>) -> f64 {
+    parts := text.split('.');
+    whole := strings::parse_num(&parts[0]).unwrap_or(0);
+    mut cents = 0;
+    if parts.len() > 1 {
+        cents = strings::parse_num(&parts[1]).unwrap_or(0);
+    }
+    return f64(whole) + f64(cents) / 100.0;
+}
+fn parse(text: string) -> vec<Sale> {
+    mut sales = vec<Sale>[];
+    lines := text.split('\n');
+    for i in 1..lines.len() {
+        line := &lines[i];
+        if line.is_empty() {
+            continue;
+        }
+        f := line.split(',');
+        if f.len() != 4 {
+            continue;
+        }
+        sales.push(Sale {
+            region: f[0].copy().text(),
+            product: f[1].copy().text(),
+            units: strings::parse_num(&f[2]).unwrap_or(0),
+            price: parse_price(&f[3]),
+        });
+    }
+    return sales;
+}
+fn main() -> num {
+    fs::write(&"sales.csv", &"region,product,units,price\nnorth,widget,12,2.50\nsouth,gadget,3,10.00\nnorth,gadget,7,10.00\neast,widget,20,2.50\nsouth,widget,5,2.50\neast,gizmo,1,99.99\n")!;
+    match fs::read_text(&"sales.csv") {
+        Err(e) => {
+            println("cannot read sales: {}", e);
+            return 1;
+        },
+        Ok(text) => {
+            sales := parse(text);
+            mut by_region = hashmap::with_seed<string, f64>(7, 11);
+            mut units = 0;
+            for s in borrow(sales) {
+                units += s.units;
+                revenue := f64(s.units) * s.price;
+                if hashmap::contains(borrow(by_region), borrow(s.region)) {
+                    slot := hashmap::get_mut(borrow_mut(by_region), borrow(s.region))!;
+                    exchange(slot, load(slot) + revenue);
+                } else {
+                    hashmap::insert(borrow_mut(by_region), s.region.copy().text(), revenue);
+                }
+            }
+            mut totals = vec<Total>[];
+            for i in hashmap::len(borrow(by_region)) {
+                totals.push(Total {
+                    region: hashmap::key_at(borrow(by_region), i).copy().text(),
+                    revenue: load(hashmap::value_at(borrow(by_region), i)),
+                });
+            }
+            vecs::sort(borrow_mut(totals));
+            println("{:<8}{:>10}", "region", "revenue");
+            for t in borrow(totals) {
+                println("{:<8}{:>10.2}", t.region, t.revenue);
+            }
+            (best, count) := (totals[0].region.copy().text(), sales.len());
+            println("{} sales, {} units, best region: {}", count, units, best);
+            return 0;
+        },
+    }
+}

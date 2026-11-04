@@ -1,0 +1,60 @@
+use hashmap;
+use vecs;
+use order;
+
+struct Count {
+    word: string,
+    n: num,
+}
+impl order::Ord for Count {
+    fn less<a, b>(left: ref<a, Self>, right: ref<b, Self>) -> bool {
+        if left.n != right.n {
+            return left.n > right.n;
+        }
+        return left.word < right.word;
+    }
+}
+fn words_of(text: string) -> vec<string> {
+    mut out = vec<string>[];
+    mut current = bytes[];
+    for b in text.to_lower() {
+        letter := (b >= 'a' && b <= 'z') || b >= 128 || b == '\'';
+        if letter {
+            current.push(b);
+        } else {
+            if !current.is_empty() {
+                out.push(current.text());
+                current = bytes[];
+            }
+        }
+    }
+    if !current.is_empty() {
+        out.push(current.text());
+    }
+    return out;
+}
+fn main() {
+    text := "The quick brown fox jumps over the lazy dog. The dog sleeps; the fox runs! Ünïcode wörds count too, ünïcode.".text();
+    mut counts = hashmap::with_seed<string, num>(3, 5);
+    mut words = words_of(text);
+    total := words.len();
+    while !words.is_empty() {
+        w := words.pop();
+        if hashmap::contains(borrow(counts), borrow(w)) {
+            slot := hashmap::get_mut(borrow_mut(counts), borrow(w))!;
+            exchange(slot, load(slot) + 1);
+        } else {
+            hashmap::insert(borrow_mut(counts), w, 1);
+        }
+    }
+    mut ranked = vec<Count>[];
+    for i in hashmap::len(borrow(counts)) {
+        ranked.push(Count { word: hashmap::key_at(borrow(counts), i).copy().text(), n: load(hashmap::value_at(borrow(counts), i)) });
+    }
+    vecs::sort(borrow_mut(ranked));
+    println("{} words, {} distinct", total, ranked.len());
+    for i in 5 {
+        c := &ranked[i];
+        println("{:>2}. {:<8} {}", i + 1, c.word, c.n);
+    }
+}

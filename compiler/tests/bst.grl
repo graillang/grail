@@ -1,0 +1,76 @@
+enum Tree {
+    Leaf,
+    Node(Branch),
+}
+struct Branch {
+    key: i32,
+    left: Tree,
+    right: Tree,
+}
+fn insert(tree: Tree, key: i32) -> Tree {
+    match tree {
+        Leaf => {
+            return Tree::Node(Branch { key, left: Tree::Leaf, right: Tree::Leaf });
+        },
+        Node(b) => {
+            if key < b.key {
+                return Tree::Node(Branch { key: b.key, left: insert(b.left, key), right: b.right });
+            }
+            if key > b.key {
+                return Tree::Node(Branch { key: b.key, left: b.left, right: insert(b.right, key) });
+            }
+            return Tree::Node(b);
+        },
+    }
+}
+fn contains<a>(tree: ref<a, Tree>, key: i32) -> bool {
+    match tree {
+        Leaf => {
+            return false;
+        },
+        Node(b) => {
+            if key == b.key {
+                return true;
+            }
+            if key < b.key {
+                return contains(borrow(b.left), key);
+            }
+            return contains(borrow(b.right), key);
+        },
+    }
+}
+fn walk<a, b>(tree: ref<a, Tree>, out: ref_mut<b, vec<i32>>) {
+    match tree {
+        Leaf => {},
+        Node(n) => {
+            walk(borrow(n.left), borrow_mut(out));
+            out.push(n.key);
+            walk(borrow(n.right), borrow_mut(out));
+        },
+    }
+}
+fn depth<a>(tree: ref<a, Tree>) -> num {
+    match tree {
+        Leaf => {
+            return 0;
+        },
+        Node(b) => {
+            l := depth(borrow(b.left));
+            r := depth(borrow(b.right));
+            if l > r {
+                return l + 1;
+            }
+            return r + 1;
+        },
+    }
+}
+fn main() {
+    mut tree = Tree::Leaf;
+    for k in vec<i32>[50, 30, 70, 20, 40, 60, 80, 30, -5] {
+        tree = insert(tree, k);
+    }
+    mut keys = vec<i32>[];
+    walk(borrow(tree), borrow_mut(keys));
+    println(keys);
+    println("{} {} depth {}", contains(borrow(tree), 60), contains(borrow(tree), 65), depth(borrow(tree)));
+}

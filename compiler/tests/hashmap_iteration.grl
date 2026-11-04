@@ -1,0 +1,22 @@
+use hashmap;
+use core;
+fn model_find<a>(keys:ref<a,vec<num>>,key:num)->num{for i in keys.len(){if keys[i]==key{return i;}}return keys.len();}
+fn main(){
+    mut m=hashmap::with_seed<bytes,num>(3,4);
+    hashmap::insert(borrow_mut(m),"pear".copy(),3);hashmap::insert(borrow_mut(m),"apple".copy(),1);hashmap::insert(borrow_mut(m),"fig".copy(),2);
+    for i in hashmap::len(borrow(m)){k:=hashmap::key_at(borrow(m),i);v:=hashmap::value_at(borrow(m),i);println("{} = {}", k, load(v));}
+    for i in hashmap::len(borrow(m)){v:=hashmap::value_at_mut(borrow_mut(m),i);exchange(v,load(v)*10);}
+    key:="fig".copy();assert(load(hashmap::get(borrow(m),borrow(key))!)==20);
+    // randomized operations checked against a vector model
+    mut map=hashmap::with_seed<num,num>(9,9);mut keys=vec<num>[];mut values=vec<num>[];mut state=12345;
+    for step in 3000{
+        state=(state*1103515245+12345)%2147483648;k:=state%200;op:=(state/256)%3;
+        if op<2{old:=hashmap::insert(borrow_mut(map),k,step);pos:=model_find(borrow(keys),k);
+            if pos<keys.len(){assert(old!==values[pos]);exchange(&mut values[pos],step);}else{assert(old.is_none());keys.push(k);values.push(step);}}
+        else{got:=hashmap::remove(borrow_mut(map),borrow(k));pos:=model_find(borrow(keys),k);
+            if pos<keys.len(){assert(got!==values[pos]);lk:=keys.pop();lv:=values.pop();if pos<keys.len(){exchange(&mut keys[pos],lk);exchange(&mut values[pos],lv);}}else{assert(got.is_none());}}
+        assert(hashmap::len(borrow(map))==keys.len());
+    }
+    for i in keys.len(){k:=keys[i];assert(load(hashmap::get(borrow(map),borrow(k))!)==values[i]);assert(load(hashmap::key_at(borrow(map),i))==k);}
+    println("model ok {}", keys.len());
+}

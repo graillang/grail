@@ -1,0 +1,135 @@
+use core;
+
+enum Token {
+    Number(f64),
+    Op(u8),
+    Open,
+    Close,
+}
+struct Parser {
+    tokens: vec<Token>,
+    pos: num,
+}
+fn tokenize<a>(text: read<a>) -> core::Result<vec<Token>, string> {
+    mut out = vec<Token>[];
+    mut i = 0;
+    while i < text.len() {
+        b := text[i];
+        match b {
+            ' ' => {
+                i += 1;
+            },
+            '+' | '-' | '*' | '/' => {
+                out.push(Token::Op(u8(b)));
+                i += 1;
+            },
+            '(' => {
+                out.push(Token::Open);
+                i += 1;
+            },
+            ')' => {
+                out.push(Token::Close);
+                i += 1;
+            },
+            '0'..58 => {
+                mut value = 0.0;
+                while i < text.len() && text[i] >= '0' && text[i] <= '9' {
+                    value = value * 10.0 + f64(text[i] - '0');
+                    i += 1;
+                }
+                out.push(Token::Number(value));
+            },
+            _ => {
+                return core::err<vec<Token>, string>(format("unexpected character at {}", i));
+            },
+        }
+    }
+    return core::ok<vec<Token>, string>(out);
+}
+impl Parser {
+    fn peek_op<a>(self: ref<a, Parser>) -> u8 {
+        if self.pos < self.tokens.len() {
+            match borrow(self.tokens[self.pos]) {
+                Op(o) => {
+                    return o;
+                },
+                _ => {},
+            }
+        }
+        return 0;
+    }
+    fn atom<a>(self: ref_mut<a, Parser>) -> core::Result<f64, string> {
+        if self.pos >= self.tokens.len() {
+            return core::err<f64, string>("unexpected end".text());
+        }
+        at := self.pos;
+        self.pos += 1;
+        mut kind = 0;
+        mut number = 0.0;
+        match borrow(self.tokens[at]) {
+            Number(n) => {
+                kind = 1;
+                number = n;
+            },
+            Open => {
+                kind = 2;
+            },
+            _ => {},
+        }
+        if kind == 1 {
+            return core::ok<f64, string>(number);
+        }
+        if kind == 2 {
+            v := self.sum()?;
+            self.pos += 1;
+            return core::ok<f64, string>(v);
+        }
+        return core::err<f64, string>(format("unexpected token at {}", at));
+    }
+    fn product<a>(self: ref_mut<a, Parser>) -> core::Result<f64, string> {
+        mut value = self.atom()?;
+        while self.peek_op() == '*' || self.peek_op() == '/' {
+            op := self.peek_op();
+            self.pos += 1;
+            rhs := self.atom()?;
+            if op == '*' {
+                value = value * rhs;
+            } else {
+                value = value / rhs;
+            }
+        }
+        return core::ok<f64, string>(value);
+    }
+    fn sum<a>(self: ref_mut<a, Parser>) -> core::Result<f64, string> {
+        mut value = self.product()?;
+        while self.peek_op() == '+' || self.peek_op() == '-' {
+            op := self.peek_op();
+            self.pos += 1;
+            rhs := self.product()?;
+            if op == '+' {
+                value = value + rhs;
+            } else {
+                value = value - rhs;
+            }
+        }
+        return core::ok<f64, string>(value);
+    }
+}
+fn evaluate<a>(text: read<a>) -> core::Result<f64, string> {
+    tokens := tokenize(text)?;
+    mut parser = Parser { tokens, pos: 0 };
+    return parser.sum();
+}
+fn main() {
+    inputs := vec<string>["1 + 2 * 3".text(), "(1 + 2) * 3".text(), "10 / 4 - 1".text(), "2 * (3 + 4) * 5".text(), "7 $ 3".text(), "(1 +".text()];
+    for e in borrow(inputs) {
+        match evaluate(e) {
+            Ok(v) => {
+                println("{} = {}", e, v);
+            },
+            Err(msg) => {
+                println("{} -> error: {}", e, msg);
+            },
+        }
+    }
+}

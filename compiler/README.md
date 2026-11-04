@@ -11,6 +11,37 @@ The compiler, ownership checker, machine lowering, and Linux runtime are written
 There is no Rust seed or unchecked C compiler. Generated assembly bootstraps are the only
 bootstrap inputs; the hash manifest records their source provenance and uncompressed contents.
 
+## The `grail` tool
+
+The compiler binary is also the project tool:
+
+```sh
+just install                  # grail -> ~/.local/bin, runtime/std -> ~/.local/lib/grail
+grail new hello && cd hello   # grail.pkg, src/main.grl, tests/smoke.grl
+grail check                   # type-check only (fast feedback, no assembler needed)
+grail run                     # build target/hello and run it (arguments after --)
+grail test                    # compile and run every program in tests/ (exit 0 = pass)
+grail fmt                     # format every .grl file; grail fmt --check for CI
+grail build --target aarch64  # cross-compile (x86_64, aarch64, riscv64)
+grail add json https://example.org/json.git v1.0   # git dependency, pinned in grail.lock
+grail fetch                   # re-fetch dependencies at the locked commits
+```
+
+A project is a directory with `grail.pkg` (`name NAME`, optional `entry PATH`, and
+`dep NAME GIT-URL [REV]` lines). Its modules are all `.grl` files under `src/`, the `src/`
+directories of fetched dependencies (`.grail/deps/NAME`) and the standard library. Dependencies
+are cloned with git and their commits are recorded in `grail.lock`; `grail fetch` checks out
+the locked commits. There is no registry yet. The runtime/standard library are found through
+`GRAIL_HOME`, `PREFIX/lib/grail` next to an installed binary, or the source tree.
+
+`grail fmt` produces the canonical layout: 4-space indentation, one statement per line, braces
+on the header line, spaces around binary operators, struct/enum fields one per line, short struct
+literals on one line, at most one blank line, comments preserved, and lines over 100 columns
+broken at the outermost bracket with one argument per line (long strings/comments are kept).
+Formatting is idempotent and does not change meaning: formatted compiler sources compile to
+byte-identical assembly. It is a token-level pretty-printer, not yet an expression reflow engine
+(e.g. it does not split long operator chains).
+
 ## Build
 
 On Linux x86-64, ARM64 or RISC-V 64, install Bun, Clang (used **only as an assembler**) and LLD:
@@ -32,7 +63,7 @@ ld.lld -m aarch64elf hello.o -o hello
 
 Targets: `x86_64`, `aarch64`, `riscv64`. The default is the architecture the compiler itself was
 built for. RV64 requires the integer multiply/divide and atomic extensions (RV64IMA), uses the LP64 ABI, and
-needs `-march=rv64ima -mabi=lp64` when assembling. All three currently target **Linux ELF**.
+needs `-march=rv64imafd -mabi=lp64` when assembling. All three currently target **Linux ELF**.
 macOS, Windows and other operating systems are not implemented; sharing a CPU does not imply
 sharing an executable format or syscall ABI.
 

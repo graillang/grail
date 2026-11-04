@@ -1,0 +1,48 @@
+module concurrent_map;
+use hash;
+use hashmap;
+use core;
+
+// DashMap-style sharded map: each shard is a mutex-guarded checked hashmap. Operations
+// take a shared reference to the map, so many threads may use it concurrently; only keys
+// hashing to the same shard contend. Values never escape a shard lock as references.
+pub struct Map<K:hash::Hash+hash::Equal+Send,V:Send>{shards:vec<mutex<hashmap::Map<K,V>>>,seed0:num,seed1:num}
+struct Insert<K,V>{key:K,value:V}
+
+pub fn with_seed<K:hash::Hash+hash::Equal+Send,V:Send>(seed0:num,seed1:num)->Map<K,V>{
+    mut shards=vec<mutex<hashmap::Map<K,V>>>[];
+    for i in 16{shards.push(mutex(hashmap::with_seed<K,V>(seed0,seed1)));}
+    return Map{shards:shards,seed0:seed0,seed1:seed1};
+}
+// Shard selection uses an independent key so it does not correlate with in-shard buckets.
+fn shard<a,b,K:hash::Hash+hash::Equal+Send,V:Send>(map:ref<a,Map<K,V>>,key:ref<b,K>)->num{
+    return hash::hash(key,map.seed0^6148914691236517205,map.seed1^3074457345618258602)%map.shards.len();
+}
+fn insert_locked<a,K:hash::Hash+hash::Equal+Send,V:Send>(m:ref_mut<a,hashmap::Map<K,V>>,job:Insert<K,V>)->core::Option<V>{
+    return hashmap::insert(m,job.key,job.value);
+}
+fn remove_locked<a,b,K:hash::Hash+hash::Equal+Send,V:Send>(m:ref_mut<a,hashmap::Map<K,V>>,key:ref<b,K>)->core::Option<V>{
+    return hashmap::remove(m,key);
+}
+fn contains_locked<a,b,K:hash::Hash+hash::Equal+Send,V:Send>(m:ref_mut<a,hashmap::Map<K,V>>,key:ref<b,K>)->num{
+    return hashmap::contains(borrow(m),key);
+}
+fn len_locked<a,K:hash::Hash+hash::Equal+Send,V:Send>(m:ref_mut<a,hashmap::Map<K,V>>,unused:num)->num{
+    return hashmap::len(borrow(m));
+}
+pub fn insert<a,K:hash::Hash+hash::Equal+Send,V:Send>(map:ref<a,Map<K,V>>,key:K,value:V)->core::Option<V>{
+    index:=shard(borrow(map),borrow(key));target:=&map.shards[index];
+    return target.lock_with(Insert{key:key,value:value},insert_locked<K,V>);
+}
+pub fn remove<a,b,K:hash::Hash+hash::Equal+Send,V:Send>(map:ref<a,Map<K,V>>,key:ref<b,K>)->core::Option<V>{
+    index:=shard(borrow(map),borrow(key));target:=&map.shards[index];
+    return target.lock_with(key,remove_locked<K,V>);
+}
+pub fn contains<a,b,K:hash::Hash+hash::Equal+Send,V:Send>(map:ref<a,Map<K,V>>,key:ref<b,K>)->num{
+    index:=shard(borrow(map),borrow(key));target:=&map.shards[index];
+    return target.lock_with(key,contains_locked<K,V>);
+}
+// Not a linearizable snapshot while other threads mutate: shards are counted one at a time.
+pub fn len<a,K:hash::Hash+hash::Equal+Send,V:Send>(map:ref<a,Map<K,V>>)->num{
+    mut total=0;for i in map.shards.len(){target:=&map.shards[i];total+=target.lock_with(0,len_locked<K,V>);}return total;
+}

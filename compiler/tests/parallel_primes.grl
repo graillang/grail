@@ -1,0 +1,43 @@
+use concurrent_map;
+
+fn is_prime(n: num) -> bool {
+    if n < 2 {
+        return false;
+    }
+    mut d = 2;
+    while d * d <= n {
+        if n % d == 0 {
+            return false;
+        }
+        d += 1;
+    }
+    return true;
+}
+fn count_range<r>(chunk: num, results: ref<r, concurrent_map::Map<num, num>>) -> num {
+    mut found = 0;
+    for n in chunk * 10000..(chunk + 1) * 10000 {
+        if is_prime(n) {
+            found += 1;
+        }
+    }
+    concurrent_map::insert(results, chunk, found);
+    return found;
+}
+fn body<s, r>(sc: ref<s, scope<ref<r, concurrent_map::Map<num, num>>>>, results: ref<r, concurrent_map::Map<num, num>>) -> num {
+    mut handles = vec<task<num>>[];
+    for chunk in 8 {
+        handles.push(spawn(sc, chunk, count_range));
+    }
+    mut total = 0;
+    while handles.len() != 0 {
+        total += join(handles.pop());
+    }
+    return total;
+}
+fn main() {
+    results := concurrent_map::with_seed<num, num>(1, 2);
+    total := task_scope(borrow(results), body);
+    println("primes below 80000: {}", total);
+    println("chunks recorded: {}", concurrent_map::len(borrow(results)));
+    counts := parallel_map(vec<num>[0, 1, 2, 3], 0, |c: num, unused: num| -> num c);
+}

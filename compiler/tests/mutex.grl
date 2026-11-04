@@ -1,0 +1,21 @@
+struct Counter{hits:num,log:bytes}
+fn bump<a>(counter:ref_mut<a,Counter>,amount:num)->num{
+    counter.hits+=amount;counter.log.push(amount);return counter.hits;
+}
+fn take<a>(data:ref_mut<a,bytes>,replacement:bytes)->bytes{return exchange(data,replacement);}
+fn read_len<a,b>(data:ref_mut<a,bytes>,extra:read<b>)->num{return data.len()+extra.len();}
+fn shared_bump<a,b>(m:ref<a,mutex<Counter>>,amount:num)->num{return m.lock_with(amount,bump);}
+fn share<T:Share>(value:T)->T{return value;}
+fn send<T:Send>(value:T)->T{return value;}
+fn main(){
+    m:=mutex(Counter{hits:0,log:bytes[]});
+    assert(m.lock_with(40,bump)==40);
+    assert(shared_bump(borrow(m),2)==42);
+    r:=share(borrow(m));assert(r.lock_with(0,bump)==42);
+    bytes_lock:=send(mutex(bytes[1,2,3]));
+    old:=bytes_lock.lock_with(bytes[9],take);assert(old.len()==3);
+    extra:=bytes[1,1];assert(bytes_lock.lock_with(&extra,read_len)==3);
+    vecs:=vec<mutex<bytes>>[mutex(bytes[1]),mutex(bytes[2])];
+    first:=&vecs[0];assert(first.lock_with(&extra,read_len)==3);
+    println(42);
+}

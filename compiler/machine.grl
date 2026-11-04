@@ -2,7 +2,7 @@ module machine;
 use host;
 
 // Final lowering of the compiler's closed word-machine instruction stream.
-// Target 0 retains x86-64 spelling; 1 is AArch64, 2 is RV64IM (Linux ELF).
+// Target 0 retains x86-64 spelling; 1 is AArch64, 2 is RV64IMAFD (Linux ELF).
 // This is static instruction selection in Grail, not execution or an external translator.
 struct Out { text:bytes, target:num, next:num }
 fn eq<a,b>(a:read<a>,b:read<b>)->num {
@@ -112,11 +112,11 @@ fn branch<a,b,c>(o:ref_mut<a,Out>,op:read<b>,dest:read<c>)->unit {
     n:=fresh(borrow_mut(o));
     if o.target==1{
         if eq(&(op),&"je")+eq(&(op),&"jz"){put(borrow_mut(o),&"b.ne ");}
-        else{if eq(&(op),&"jne")+eq(&(op),&"jnz"){put(borrow_mut(o),&"b.eq ");}else{if eq(&(op),&"jnc")+eq(&(op),&"jae"){put(borrow_mut(o),&"cbnz x15,");}else{bad(&(op));}}}
+        else{if eq(&(op),&"jne")+eq(&(op),&"jnz"){put(borrow_mut(o),&"b.eq ");}else{if eq(&(op),&"jnc")+eq(&(op),&"jae"){put(borrow_mut(o),&"cbnz x15,");}else{if eq(&(op),&"jb")+eq(&(op),&"jc"){put(borrow_mut(o),&"cbz x15,");}else{bad(&(op));}}}}
         label(borrow_mut(o),n);put(borrow_mut(o),&"\nb ");put(borrow_mut(o),&(dest));put(borrow_mut(o),&"\n");
     }else{
         if eq(&(op),&"je")+eq(&(op),&"jz"){put(borrow_mut(o),&"beqz t4,");}
-        else{if eq(&(op),&"jne")+eq(&(op),&"jnz"){put(borrow_mut(o),&"bnez t4,");}else{if eq(&(op),&"jnc")+eq(&(op),&"jae"){put(borrow_mut(o),&"bnez t6,");}else{bad(&(op));}}}
+        else{if eq(&(op),&"jne")+eq(&(op),&"jnz"){put(borrow_mut(o),&"bnez t4,");}else{if eq(&(op),&"jnc")+eq(&(op),&"jae"){put(borrow_mut(o),&"bnez t6,");}else{if eq(&(op),&"jb")+eq(&(op),&"jc"){put(borrow_mut(o),&"beqz t6,");}else{bad(&(op));}}}}
         label(borrow_mut(o),n);put(borrow_mut(o),&"\nlla t1,");put(borrow_mut(o),&(dest));put(borrow_mut(o),&"\njr t1\n");
     }mark(borrow_mut(o),n);return ();
 }
@@ -133,7 +133,11 @@ fn arithmetic<a,b,c,d>(o:ref_mut<a,Out>,op:read<b>,src:read<c>,dst:read<d>)->uni
     else{if eq(&(op),&"subq"){if target==1{put(borrow_mut(o),&"subs x10,x11,x10\ncset x15,cc\n");}else{put(borrow_mut(o),&"sltu t6,t2,t1\nsub t1,t2,t1\nseqz t4,t1\n");}}
     else{if eq(&(op),&"imulq"){if target==1{put(borrow_mut(o),&"smulh x12,x11,x10\nmul x10,x11,x10\nasr x14,x10,#63\ncmp x12,x14\ncset x15,ne\n");}else{put(borrow_mut(o),&"mulh t3,t2,t1\nmul t1,t2,t1\nsrai t2,t1,63\nxor t6,t3,t2\nsnez t6,t6\n");}}
     else{if eq(&(op),&"xorq")+eq(&(op),&"xorl"){if target==1{put(borrow_mut(o),&"eor x10,x11,x10\ncmp x10,#0\nmov x15,#0\n");}else{put(borrow_mut(o),&"xor t1,t2,t1\nseqz t4,t1\nli t6,0\n");}}
-    else{if eq(&(op),&"andq"){if target==1{put(borrow_mut(o),&"ands x10,x11,x10\nmov x15,#0\n");}else{put(borrow_mut(o),&"and t1,t2,t1\nseqz t4,t1\nli t6,0\n");}}else{bad(&(op));}}}}}
+    else{if eq(&(op),&"andq"){if target==1{put(borrow_mut(o),&"ands x10,x11,x10\nmov x15,#0\n");}else{put(borrow_mut(o),&"and t1,t2,t1\nseqz t4,t1\nli t6,0\n");}}
+    else{if eq(&(op),&"orq"){if target==1{put(borrow_mut(o),&"orr x10,x11,x10\ncmp x10,#0\nmov x15,#0\n");}else{put(borrow_mut(o),&"or t1,t2,t1\nseqz t4,t1\nli t6,0\n");}}
+    else{if eq(&(op),&"shlq"){if target==1{put(borrow_mut(o),&"lsl x10,x11,x10\n");}else{put(borrow_mut(o),&"sll t1,t2,t1\n");}}
+    else{if eq(&(op),&"shrq"){if target==1{put(borrow_mut(o),&"lsr x10,x11,x10\n");}else{put(borrow_mut(o),&"srl t1,t2,t1\n");}}
+    else{bad(&(op));}}}}}}}}
     store(borrow_mut(o),&(dst),0);return ();
 }
 fn atomic_instruction<a,b,c>(o:ref_mut<a,Out>,op:read<b>,rest:read<c>)->num {
@@ -188,6 +192,47 @@ fn instruction<a,b>(o:ref_mut<a,Out>,line:read<b>)->unit {
         else{if push{put(borrow_mut(o),&"addi sp,sp,-16\nsd ");put(borrow_mut(o),&r);put(borrow_mut(o),&",0(sp)\n");}else{put(borrow_mut(o),&"ld ");put(borrow_mut(o),&r);put(borrow_mut(o),&",0(sp)\naddi sp,sp,16\n");}}return ();
     }
     if eq(&(op),&"syscall"){if target==1{put(borrow_mut(o),&"mov x8,x9\nmov x3,x6\nsvc #0\nmov x9,x0\n");}else{put(borrow_mut(o),&"mv a7,t0\nmv a3,a6\necall\nmv t0,a0\n");}return ();}
+    // Thread clone: x0/a0 flags, x1/a1 child stack holding {entry,arg}, x2/a2 parent/child TID word.
+    if eq(&(op),&"clonethread"){
+        if target==1{put(borrow_mut(o),&"mov x4,x2\nmov x3,xzr\nmov x8,#220\nsvc #0\ncbnz x0,1f\nldp x9,x0,[sp],#16\nmov x29,xzr\nblr x9\nmov x0,xzr\nmov x8,#93\nsvc #0\nbrk #0\n1:\nmov x9,x0\n");}
+        else{put(borrow_mut(o),&"mv a4,a2\nli a3,0\nli a7,220\necall\nbnez a0,1f\nld t0,0(sp)\nld a0,8(sp)\naddi sp,sp,16\nli s0,0\njalr ra,t0,0\nli a0,0\nli a7,93\necall\nebreak\n1:\nmv t0,a0\n");}
+        return ();
+    }
+    // IEEE double operations on the bit patterns in rax (left) and rcx (right); result in rax.
+    if eq(&(op),&"fop"){
+        if target==1{
+            if eq(&rest,&"fromi"){put(borrow_mut(o),&"scvtf d0,x9\nfmov x9,d0\n");return ();}
+            if eq(&rest,&"toi"){put(borrow_mut(o),&"fmov d0,x9\nfcvtzs x9,d0\n");return ();}
+            if eq(&rest,&"sqrt"){put(borrow_mut(o),&"fmov d0,x9\nfsqrt d0,d0\nfmov x9,d0\n");return ();}
+            put(borrow_mut(o),&"fmov d0,x9\nfmov d1,x3\n");
+            if eq(&rest,&"add"){put(borrow_mut(o),&"fadd d0,d0,d1\nfmov x9,d0\n");return ();}
+            if eq(&rest,&"sub"){put(borrow_mut(o),&"fsub d0,d0,d1\nfmov x9,d0\n");return ();}
+            if eq(&rest,&"mul"){put(borrow_mut(o),&"fmul d0,d0,d1\nfmov x9,d0\n");return ();}
+            if eq(&rest,&"div"){put(borrow_mut(o),&"fdiv d0,d0,d1\nfmov x9,d0\n");return ();}
+            if eq(&rest,&"lt"){put(borrow_mut(o),&"fcmp d0,d1\ncset x9,mi\n");return ();}
+            if eq(&rest,&"eq"){put(borrow_mut(o),&"fcmp d0,d1\ncset x9,eq\n");return ();}
+        }else{
+            if eq(&rest,&"fromi"){put(borrow_mut(o),&"fcvt.d.l ft0,t0\nfmv.x.d t0,ft0\n");return ();}
+            if eq(&rest,&"toi"){put(borrow_mut(o),&"fmv.d.x ft0,t0\nfcvt.l.d t0,ft0,rtz\n");return ();}
+            if eq(&rest,&"sqrt"){put(borrow_mut(o),&"fmv.d.x ft0,t0\nfsqrt.d ft0,ft0\nfmv.x.d t0,ft0\n");return ();}
+            put(borrow_mut(o),&"fmv.d.x ft0,t0\nfmv.d.x ft1,a3\n");
+            if eq(&rest,&"add"){put(borrow_mut(o),&"fadd.d ft0,ft0,ft1\nfmv.x.d t0,ft0\n");return ();}
+            if eq(&rest,&"sub"){put(borrow_mut(o),&"fsub.d ft0,ft0,ft1\nfmv.x.d t0,ft0\n");return ();}
+            if eq(&rest,&"mul"){put(borrow_mut(o),&"fmul.d ft0,ft0,ft1\nfmv.x.d t0,ft0\n");return ();}
+            if eq(&rest,&"div"){put(borrow_mut(o),&"fdiv.d ft0,ft0,ft1\nfmv.x.d t0,ft0\n");return ();}
+            if eq(&rest,&"lt"){put(borrow_mut(o),&"flt.d t0,ft0,ft1\n");return ();}
+            if eq(&rest,&"eq"){put(borrow_mut(o),&"feq.d t0,ft0,ft1\n");return ();}
+        }
+        bad(&rest);return ();
+    }
+    if eq(&(op),&"tpget"){if target==1{put(borrow_mut(o),&"mrs x9,tpidr_el0\n");}else{put(borrow_mut(o),&"mv t0,tp\n");}return ();}
+    if eq(&(op),&"tpset"){if target==1{put(borrow_mut(o),&"msr tpidr_el0,x0\n");}else{put(borrow_mut(o),&"mv tp,a0\n");}return ();}
+    // Stack switch: x0/a0 receives the saved stack pointer, x1/a1 is the stack to resume.
+    if eq(&(op),&"switchctx"){
+        if target==1{put(borrow_mut(o),&"adr x9,1f\nstp x29,x30,[sp,#-16]!\nstp x19,x20,[sp,#-16]!\nstp x21,x22,[sp,#-16]!\nstp x23,x9,[sp,#-16]!\nmov x10,sp\nstr x10,[x0]\nmov sp,x1\nldp x23,x9,[sp],#16\nldp x21,x22,[sp],#16\nldp x19,x20,[sp],#16\nldp x29,x30,[sp],#16\nbr x9\n1:\n");}
+        else{put(borrow_mut(o),&"lla t0,1f\naddi sp,sp,-64\nsd s0,0(sp)\nsd s1,8(sp)\nsd s2,16(sp)\nsd s3,24(sp)\nsd s4,32(sp)\nsd s5,40(sp)\nsd ra,48(sp)\nsd t0,56(sp)\nsd sp,0(a0)\nmv sp,a1\nld s0,0(sp)\nld s1,8(sp)\nld s2,16(sp)\nld s3,24(sp)\nld s4,32(sp)\nld s5,40(sp)\nld ra,48(sp)\nld t0,56(sp)\naddi sp,sp,64\njr t0\n1:\n");}
+        return ();
+    }
     if eq(&(op),&"ud2"){if target==1{put(borrow_mut(o),&"brk #0\n");}else{put(borrow_mut(o),&"ebreak\n");}return ();}
     if eq(&(op),&"rep"){
         if eq(&rest,&"stosq")==0{bad(&(line));}n:=fresh(borrow_mut(o));end:=fresh(borrow_mut(o));mark(borrow_mut(o),n);

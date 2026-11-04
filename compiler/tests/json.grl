@@ -1,0 +1,178 @@
+use core;
+
+enum Json {
+    Null,
+    Bool(bool),
+    Number(f64),
+    Text(string),
+    List(vec<Json>),
+    Object(vec<Field>),
+}
+struct Field {
+    key: string,
+    value: Json,
+}
+struct Reader {
+    text: bytes,
+    pos: num,
+}
+impl Reader {
+    fn skip<a>(self: ref_mut<a, Reader>) {
+        while self.pos < self.text.len() && (self.text[self.pos] == ' ' || self.text[self.pos] == '\n') {
+            self.pos += 1;
+        }
+    }
+    fn peek<a>(self: ref_mut<a, Reader>) -> u8 {
+        self.skip();
+        if self.pos < self.text.len() {
+            return u8(self.text[self.pos]);
+        }
+        return 0;
+    }
+    fn expect<a>(self: ref_mut<a, Reader>, b: u8) -> core::Result<unit, string> {
+        if self.peek() != b {
+            return core::err<unit, string>(format("expected '{}' at {}", bytes[num(b)], self.pos));
+        }
+        self.pos += 1;
+        return core::ok<unit, string>(());
+    }
+    fn string<a>(self: ref_mut<a, Reader>) -> core::Result<string, string> {
+        self.expect('"')?;
+        mut out = bytes[];
+        while self.pos < self.text.len() && self.text[self.pos] != '"' {
+            out.push(self.text[self.pos]);
+            self.pos += 1;
+        }
+        self.pos += 1;
+        return core::ok<string, string>(out.text());
+    }
+    fn value<a>(self: ref_mut<a, Reader>) -> core::Result<Json, string> {
+        c := self.peek();
+        if c == '"' {
+            s := self.string()?;
+            return core::ok<Json, string>(Json::Text(s));
+        }
+        if c == '[' {
+            self.pos += 1;
+            mut items = vec<Json>[];
+            if self.peek() == ']' {
+                self.pos += 1;
+                return core::ok<Json, string>(Json::List(items));
+            }
+            loop {
+                v := self.value()?;
+                items.push(v);
+                if self.peek() == ',' {
+                    self.pos += 1;
+                } else {
+                    break;
+                }
+            }
+            self.expect(']')?;
+            return core::ok<Json, string>(Json::List(items));
+        }
+        if c == '{' {
+            self.pos += 1;
+            mut fields = vec<Field>[];
+            loop {
+                key := self.string()?;
+                self.expect(':')?;
+                value := self.value()?;
+                fields.push(Field { key, value });
+                if self.peek() == ',' {
+                    self.pos += 1;
+                } else {
+                    break;
+                }
+            }
+            self.expect('}')?;
+            return core::ok<Json, string>(Json::Object(fields));
+        }
+        if c >= '0' && c <= '9' || c == '-' {
+            negative := c == '-';
+            if negative {
+                self.pos += 1;
+            }
+            mut n = 0.0;
+            while self.pos < self.text.len() && self.text[self.pos] >= '0' && self.text[self.pos] <= '9' {
+                n = n * 10.0 + f64(self.text[self.pos] - '0');
+                self.pos += 1;
+            }
+            if negative {
+                n = -n;
+            }
+            return core::ok<Json, string>(Json::Number(n));
+        }
+        rest := self.text[self.pos:];
+        if rest.starts_with("true") {
+            self.pos += 4;
+            return core::ok<Json, string>(Json::Bool(true));
+        }
+        if rest.starts_with("false") {
+            self.pos += 5;
+            return core::ok<Json, string>(Json::Bool(false));
+        }
+        if rest.starts_with("null") {
+            self.pos += 4;
+            return core::ok<Json, string>(Json::Null);
+        }
+        return core::err<Json, string>(format("unexpected input at {}", self.pos));
+    }
+}
+impl Json {
+    fn show<a>(self: ref<a, Json>) -> string {
+        match self {
+            Null => {
+                return "null".text();
+            },
+            Bool(b) => {
+                return format("{}", b);
+            },
+            Number(n) => {
+                return format("{}", n);
+            },
+            Text(s) => {
+                return "\"".text() + s + "\"";
+            },
+            List(items) => {
+                mut out = "[".text();
+                for i in items.len() {
+                    if i > 0 {
+                        out = out + ",";
+                    }
+                    item := &items[i];
+                    out = out + item.show();
+                }
+                return out + "]";
+            },
+            Object(fields) => {
+                mut out = "{".text();
+                for i in fields.len() {
+                    if i > 0 {
+                        out = out + ",";
+                    }
+                    f := &fields[i];
+                    out = out + format("\"{}\":", f.key) + f.value.show();
+                }
+                return out + "}";
+            },
+        }
+    }
+}
+fn parse<a>(text: read<a>) -> core::Result<Json, string> {
+    mut reader = Reader { text: text.copy(), pos: 0 };
+    return reader.value();
+}
+fn main() {
+    inputs := vec<string>["{\"name\": \"grail\", \"version\": 1, \"tags\": [\"fast\", \"safe\"], \"stable\": false, \"extra\": null}".text(), "[1, -2, [3, []]]".text(), "{\"a\": tru}".text()];
+    for s in borrow(inputs) {
+        match parse(s) {
+            Ok(j) => {
+                println(j);
+            },
+            Err(e) => {
+                println("error: {}", e);
+            },
+        }
+    }
+}

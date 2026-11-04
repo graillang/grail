@@ -173,3 +173,9 @@ cancellation or colourless readiness I/O; those remain in progress.
 Explicit static user-defined interfaces and concrete implementations share the bound syntax with
 structural capabilities. See [interfaces](../docs/design/interfaces.md) for dispatch, coherence and
 current restrictions; generic interfaces, associated types and dynamic objects are not implemented.
+
+Real worker threads (`parallel_map`), `mutex<T>`, hash maps and a sharded concurrent map are
+described with their limits in [structured parallelism](../docs/design/structured-parallelism.md).
+
+Sized integers, `bool`, the full operator set and capturing closures are described in
+[integers](../docs/design/integers.md) and [closures](../docs/design/closures.md).

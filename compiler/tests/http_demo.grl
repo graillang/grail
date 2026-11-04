@@ -1,0 +1,59 @@
+use host;
+
+fn respond(path: string) -> string {
+    if path == "/" {
+        return "200 OK\nwelcome".text();
+    }
+    if path.starts_with("/hello/") {
+        name := path.replace("/hello/", "");
+        return format("200 OK\nhello, {}", name);
+    }
+    return "404 Not Found\nno such page".text();
+}
+fn serve(listener: num, count: num) -> num {
+    for i in count {
+        client := host::tcp_accept(listener);
+        request := host::read_fd(client, 1024).text();
+        lines := request.split('\n');
+        words := lines[0].split(' ');
+        mut reply = "400 Bad Request\n".text();
+        if words.len() >= 2 && words[0] == "GET" {
+            reply = respond(words[1].copy().text());
+        }
+        host::write_fd(client, &reply);
+        host::close(client);
+    }
+    return count;
+}
+fn fetch(path: string, port: num) -> string {
+    fd := host::tcp_connect(&"127.0.0.1", port);
+    request := format("GET {} HTTP/1.0\n\n", path);
+    host::write_fd(fd, &request);
+    mut reply = bytes[];
+    while true {
+        chunk := host::read_fd(fd, 1024);
+        if chunk.is_empty() {
+            break;
+        }
+        reply = reply + chunk;
+    }
+    host::close(fd);
+    return reply.text();
+}
+fn body<s>(sc: ref<s, scope<num>>, count: num) -> num {
+    listener := host::tcp_listen(0);
+    port := host::tcp_port(listener);
+    server := spawn(sc, listener, serve);
+    paths := vec<string>["/".text(), "/hello/grail".text(), "/missing".text()];
+    for path in borrow(paths) {
+        reply := fetch(path.copy().text(), port);
+        status := reply.split('\n');
+        println("{:<14} -> {}", path, status[0]);
+    }
+    join(server);
+    host::close(listener);
+    return 0;
+}
+fn main() {
+    task_scope(3, body);
+}

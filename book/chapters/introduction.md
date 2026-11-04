@@ -28,3 +28,8 @@ Comparison notes distinguish actual differences from capabilities both languages
 
 **Prerequisites:** Bun 1.4 or newer and `just` for this book. Running Grail examples additionally
 requires a supported Linux CPU, Clang used only as an assembler, and LLD. Checking the Rust comparisons also needs `rustc` (edition 2024). Reading/building the static book needs neither compiler toolchains nor Rust.
+
+**Your own programs:** `just install` puts the `grail` tool on your path. `grail new hello`
+creates a project, `grail run` builds and runs it, `grail test` runs the programs in `tests/`,
+`grail fmt` applies the canonical layout used in this book, and `grail add NAME GIT-URL` adds a
+dependency pinned in `grail.lock`.
