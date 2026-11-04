@@ -2,9 +2,8 @@
 
 `num` is an unsigned 64-bit integer. Ordinary `+`, `-`, `*` and `**` abort on
 overflow or underflow in every build mode; it is not a mathematical integer or a signed integer.
-Comparisons produce numeric zero or one. `true` and `false` are reserved truth literals, currently
-represented by numeric one and zero. Zero is false in a condition; a separate `bool` type is not
-implemented yet.
+Comparisons produce `bool` values (`true`/`false`). A `num` condition is also accepted: zero is
+false.
 
 {{example:numbers}}
 
@@ -12,8 +11,8 @@ The example uses addition, subtraction, multiplication, remainder, xor and bitwi
 make evaluation and comparison grouping obvious. Operands are evaluated from left to right.
 
 Division/remainder by zero and out-of-bounds accesses abort instead of continuing with an invalid result.
-Do not assume signed arithmetic, floating-point values, a separate `bool` type, or a full operator
-set just because another language has them.
+`num` itself is unsigned: signed and sized integers, `f64`/`f32` and `char` are separate types
+covered in [Numbers and booleans](integers.html).
 
 Use `wrapping_add(a,b)`, `wrapping_sub(a,b)`, `wrapping_mul(a,b)` and `wrapping_pow(a,b)`
 when you intentionally want arithmetic modulo 2⁶⁴, such as a rolling hash. Both arguments must be

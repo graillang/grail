@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Indexed assignment: `v[i] = x`, `v[i] += x` and `s.items[i] = x` on vectors (the old element is
+  dropped) and `buf[i] = b` on bytes; the right-hand side is evaluated first.
+- `f32` closures and function values accept float literal arguments; exponent-only float literals
+  (`1e9`, `2E-3`) are accepted.
 - Optimized code generation: a per-function optimizer (`compiler/optimize.grl`) forwards stack
   slots through registers, removes dead stores and moves, keeps hot variables in callee-saved
   registers, fuses compare-and-branch sequences, turns division by powers of two into shifts and

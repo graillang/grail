@@ -1571,7 +1571,9 @@ fn indirect_call<a>(c:ref_mut<a,C>,value:Val,opened:num)->Val {
  if opened==0{expect(borrow_mut(c),&"(");}
  if eat(borrow_mut(c),&")")==0{while true{
   index :=args.len();if (index<signature.len())==0{fail(borrow_mut(c),&"callable arity mismatch");}
-  astart :=c.pos;value :=expr(borrow_mut(c),0);aend :=c.pos;slot :=value.t;mut actual=value.ty;expected :=signature[index];
+  astart :=c.pos;mut value=expr(borrow_mut(c),0);aend :=c.pos;expected :=signature[index];
+  if c.raw==0{if is_f32(borrow_mut(c),expected){value=adopt_float(borrow_mut(c),value,astart,aend,expected);}}
+  slot :=value.t;mut actual=value.ty;
   if ((actual==0)+((c.lit_negative!=0)&(c.lit_start==astart)&(c.lit_end==aend)))&literal_target(borrow_mut(c),expected){if adopt_literal(borrow_mut(c),astart,aend,expected){actual=expected;}}
   require_type(borrow_mut(c),actual,expected);
   kind :=ty_kind(borrow_mut(c),actual);if (kind==5)+(kind==7){observe(borrow_mut(c),slot);}if kind==7{place :=target_of(borrow_mut(c),slot);capture_authority(borrow_mut(c),place);}
@@ -1882,6 +1884,15 @@ fn print_value<a>(c:ref_mut<a,C>,input:Val,newline:num)->unit{
  }}}
  return ();
 }
+// Stores b through the mutable reference a and returns the previous (owned) value.
+fn exchange_into<a>(c:ref_mut<a,C>,a:Val,b:Val)->Val {
+ ty :=ty_arg(borrow_mut(c),a.ty);
+ if c.raw==0{require_type(borrow_mut(c),b.ty,ty);destination :=target_of(borrow_mut(c),a.t);frame_storage(borrow_mut(c),a.t,destination);source :=place_of(borrow_mut(c),b.t);check_writeback(borrow_mut(c),destination,ty,source);}
+ require_write(borrow_mut(c),a.t);destination :=target_of(borrow_mut(c),a.t);seed_storage(borrow_mut(c),destination,ty);
+ slot :=apply(borrow_mut(c),&"rt_xchg",two(a.t,b.t));own(borrow_mut(c),slot,ty);result :=place_of(borrow_mut(c),slot);return_bonds(borrow_mut(c),destination,result,0);
+ source :=place_of(borrow_mut(c),b.t);storage_bonds(borrow_mut(c),source,destination);move_out(borrow_mut(c),val(b.t,b.ty));
+ if c.raw==0{stored_source(borrow_mut(c),slot,ty);}return val(slot,ty);
+}
 fn builtin<a>(c:ref_mut<a,C>,id:num)->Val {
     if (id==17)+(id==18){return print_builtin(borrow_mut(c),id==18);}
     if id==36{return format_builtin(borrow_mut(c));}
@@ -1925,12 +1936,7 @@ fn builtin<a>(c:ref_mut<a,C>,id:num)->Val {
         expect(borrow_mut(c),&",");
         mut b =expr(borrow_mut(c),0);
         expect(borrow_mut(c),&")");
-        ty :=ty_arg(borrow_mut(c),a.ty);
-        if c.raw==0{require_type(borrow_mut(c),b.ty,ty);destination :=target_of(borrow_mut(c),a.t);frame_storage(borrow_mut(c),a.t,destination);source :=place_of(borrow_mut(c),b.t);check_writeback(borrow_mut(c),destination,ty,source);}
-        require_write(borrow_mut(c),a.t);destination :=target_of(borrow_mut(c),a.t);seed_storage(borrow_mut(c),destination,ty);
-        slot :=apply(borrow_mut(c),&"rt_xchg",two(a.t,b.t));own(borrow_mut(c),slot,ty);result :=place_of(borrow_mut(c),slot);return_bonds(borrow_mut(c),destination,result,0);
-        source :=place_of(borrow_mut(c),b.t);storage_bonds(borrow_mut(c),source,destination);move_out(borrow_mut(c),val(b.t,b.ty));
-        if c.raw==0{stored_source(borrow_mut(c),slot,ty);}return val(slot,ty);
+        return exchange_into(borrow_mut(c),a,b);
     }
     if id==15 {
         observe(borrow_mut(c),a.t);
@@ -2983,6 +2989,59 @@ fn reserve_compound<a>(c:ref_mut<a,C>,slot:num,through:num)->num{
 fn compound_operator(k:num)->num{
  if k==262{return 43;}if k==263{return 45;}if k==264{return 42;}if k==265{return 47;}if k==266{return 37;}return 267;
 }
+// `xs[i] = v;`, `s.items[i] += v;`, `buf[i] = b;`: the operator token position, or 0.
+fn index_assignment_ahead<a>(c:ref_mut<a,C>)->num {
+ if kind(borrow_mut(c))!=1{return 0;}mut e=c.pos+1;
+ while (kind_at(borrow_mut(c),e)==46)&(kind_at(borrow_mut(c),e+1)==1){e=e+2;}
+ if kind_at(borrow_mut(c),e)!=91{return 0;}mut depth=0;
+ while true{k :=kind_at(borrow_mut(c),e);if k==0{return 0;}if k==91{depth=depth+1;}if k==93{depth=depth-1;if depth==0{break;}}if k==59{return 0;}e=e+1;}
+ k :=kind_at(borrow_mut(c),e+1);if (k==61)+((261<k)&(k<267))+(k==268){return e+1;}return 0;
+}
+// Combines an old numeric value with an operand for a compound assignment of type ty.
+fn compound_value<a>(c:ref_mut<a,C>,op:num,old:num,v:Val,ty:num)->Val {
+ if (c.raw==0)&is_float(borrow_mut(c),ty){require_type(borrow_mut(c),v.ty,ty);if (op!=43)&(op!=45)&(op!=42)&(op!=47){fail(borrow_mut(c),&"operator not defined for floats");}
+  opv :=imm(borrow_mut(c),op);mut value=invoke(borrow_mut(c),&"rt_f64_op",three(opv,old,v.t));if is_f32(borrow_mut(c),ty){value=invoke(borrow_mut(c),&"rt_f32_round",one(value));}return val(value,ty);}
+ if (c.raw==0)&(ty_kind(borrow_mut(c),ty)==18){require_type(borrow_mut(c),v.ty,ty);r :=int_binary(borrow_mut(c),op,old,v.t,ty);return val(r.t,ty);}
+ if c.raw==0{require_type(borrow_mut(c),ty,0);require_type(borrow_mut(c),v.ty,0);}value :=binary(borrow_mut(c),op,old,v.t);return val(value,0);
+}
+// Element assignment. The right-hand side is evaluated first (so it may read the same
+// collection), then the target is parsed as a mutable element borrow and written through.
+fn index_assignment<a>(c:ref_mut<a,C>)->unit {
+ start :=c.pos;oppos :=index_assignment_ahead(borrow_mut(c));operator :=kind_at(borrow_mut(c),oppos);
+ exchange(borrow_mut(c.pos),oppos+1);vstart :=c.pos;mut v=expr(borrow_mut(c),0);vend :=c.pos;expect(borrow_mut(c),&";");after :=c.pos;
+ ls :=c.lit_start;le :=c.lit_end;lv :=c.lit_value;ln :=c.lit_negative;fs :=c.flit_start;fe :=c.flit_end;ft :=c.flit_tok;fneg :=c.flit_neg;
+ exchange(borrow_mut(c.pos),start);
+ // A binding holding a mutable view/reference writes through its capability (no `mut` needed).
+ mut capability=0;name :=tok_text(borrow_mut(c),start);l :=find_local(borrow_mut(c),&name);
+ if (l!=0)&(kind_at(borrow_mut(c),start+1)==91){lt :=local_ty(borrow_mut(c),l-1);lk :=ty_kind(borrow_mut(c),lt);if ((lk==5)+(lk==7))&(ty_mode(borrow_mut(c),lt)!=0){capability=1;}}
+ mut base=val(0,0);if capability{base=primary(borrow_mut(c));}else{base=place(borrow_mut(c),1);}
+ x :=deref(borrow_mut(c),val(base.t,base.ty));k :=ty_kind(borrow_mut(c),x.ty);
+ mut op=0;if operator!=61{op=compound_operator(operator);}
+ if k==6{
+  elem :=ty_arg(borrow_mut(c),x.ty);r :=index_view(borrow_mut(c),base,2);
+  exchange(borrow_mut(c.lit_start),ls);exchange(borrow_mut(c.lit_end),le);exchange(borrow_mut(c.lit_value),lv);exchange(borrow_mut(c.lit_negative),ln);
+  exchange(borrow_mut(c.flit_start),fs);exchange(borrow_mut(c.flit_end),fe);exchange(borrow_mut(c.flit_tok),ft);exchange(borrow_mut(c.flit_neg),fneg);
+  if c.raw==0{v=adopt_value(borrow_mut(c),v,vstart,vend,elem);}
+  if operator!=61{
+   if c.raw==0{if (integer(borrow_mut(c),elem)+is_float(borrow_mut(c),elem))==0{fail(borrow_mut(c),&"compound assignment needs numeric elements");}}
+   get(borrow_mut(c),r.t,&"%rax");o(borrow_mut(c),&"movq (%rax),%rax\n");old :=save(borrow_mut(c));v=compound_value(borrow_mut(c),op,old,v,elem);}
+  exchange_into(borrow_mut(c),r,v);
+ }else{
+  // Bytes: buf[i] = b stores the low byte of a u8/num value.
+  if c.raw==0{if (k!=3)&((k!=5)+(ty_mode(borrow_mut(c),x.ty)==0)){fail(borrow_mut(c),&"index assignment needs a vector, bytes or a mutable byte view");}}
+  expect(borrow_mut(c),&"[");index :=expr(borrow_mut(c),0);if c.raw==0{require_type(borrow_mut(c),index.ty,0);}expect(borrow_mut(c),&"]");
+  exchange(borrow_mut(c.lit_start),ls);exchange(borrow_mut(c.lit_end),le);exchange(borrow_mut(c.lit_value),lv);exchange(borrow_mut(c.lit_negative),ln);
+  u :=int_type(borrow_mut(c),8,0);
+  if c.raw==0{if (c.lit_start==vstart)&(c.lit_end==vend)&(v.ty==0){if adopt_literal(borrow_mut(c),vstart,vend,u){v=val(v.t,u);}}
+   if v.ty!=u{require_type(borrow_mut(c),v.ty,0);}}
+  if operator!=61{old :=invoke(borrow_mut(c),&"rt_at",two(x.t,index.t));v=compound_value(borrow_mut(c),op,old,val(v.t,0),0);}
+  require_write(borrow_mut(c),x.t);mut args=two(x.t,index.t);args.push(v.t);
+  // A num value must fit in a byte; u8 values always do.
+  if v.ty!=u{lim :=imm(borrow_mut(c),256);get(borrow_mut(c),lim,&"%rcx");get(borrow_mut(c),v.t,&"%rax");o(borrow_mut(c),&"cmpq %rcx,%rax\n");ok :=label(borrow_mut(c));jump(borrow_mut(c),&"jb",ok);o(borrow_mut(c),&"call rt_abort\n");mark(borrow_mut(c),ok);}
+  invoke(borrow_mut(c),&"rt_write",args);
+ }
+ exchange(borrow_mut(c.pos),after);return ();
+}
 fn assignment_ahead<a>(c:ref_mut<a,C>)->num {
     if kind(borrow_mut(c))!=1 { return 0; }
     mut e=c.pos+1;
@@ -3249,6 +3308,7 @@ fn statement<a>(c:ref_mut<a,C>)->unit{
  if eat(borrow_mut(c),&"assert"){
  expect(borrow_mut(c),&"(");mut v =expr(borrow_mut(c),0);if c.raw==0{require_type(borrow_mut(c),v.ty,0);}expect(borrow_mut(c),&")");expect(borrow_mut(c),&";");
  get(borrow_mut(c),v.t,&"%rax");o(borrow_mut(c),&"testq %rax,%rax\n");ok :=label(borrow_mut(c));jump(borrow_mut(c),&"jnz",ok);o(borrow_mut(c),&"call rt_abort\n");mark(borrow_mut(c),ok);return ();}
+ if index_assignment_ahead(borrow_mut(c)){index_assignment(borrow_mut(c));return ();}
  if assignment_ahead(borrow_mut(c)){
  name :=ident(borrow_mut(c));mut l =find_local(borrow_mut(c),&name);if l==0{captured :=capture_field(borrow_mut(c),&name,0);if captured.ty!=18446744073709551615{fail(borrow_mut(c),&"captured values are read-only inside a closure");}fail(borrow_mut(c),&"undefined assignment");}
  entry :=&c.locals[l-1];mutable :=entry.mutable;if mutable==0{if kind(borrow_mut(c))!=46{fail(borrow_mut(c),&"assignment requires mut");}}

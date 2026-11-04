@@ -16,7 +16,7 @@ Comparisons produce `bool` values (`true`/`false`) that combine with `&&`, `||` 
 `||` only evaluate their right side when needed. `&`, `|`, `^`, `<<` and `>>` work on integers, and
 `>>` on a signed value keeps its sign.
 
-For fractions, use `f64`. Literals need a decimal point (`2.0`), and mixing `f64` with integers
+For fractions, use `f64`. Literals need a decimal point or an exponent (`2.0`, `1e9`), and mixing `f64` with integers
 requires a conversion such as `f64(values.len())`. Results print with the fewest digits that
 identify the value exactly, which is why `0.1 + 0.2` shows its rounding error.
 
