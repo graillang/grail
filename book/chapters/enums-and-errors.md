@@ -14,4 +14,12 @@ Propagation is an early return with cleanup, not an exception or a garbage-colle
 `!` is appropriate for an invariant, not routine failure handling. For expected failures, match
 both variants or propagate them to a caller.
 
+## Matching through a borrow
+
+`match borrow(value)` inspects the enum in place: payloads are bound as references instead of being
+moved out. The borrow ends at the last use of those payload references, so an arm may then assign
+`value` itself. Using a payload after that assignment is rejected.
+
+{{example:match-update}}
+
 **Try it:** swap which flag reaches `forward`, and use `match` to inspect both paths.

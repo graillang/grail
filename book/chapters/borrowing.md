@@ -16,4 +16,12 @@ Last-use analysis respects shadows and loop backedges, but remains conservative.
 opaque returned references may keep whole possible input frames borrowed rather than identifying
 one exact field.
 
+## Borrowing a temporary
+
+`borrow(...)` and `borrow_mut(...)` also accept any expression, not just a variable or field. The
+value is kept alive until the end of the enclosing block, like a hidden binding, so the reference
+can outlive its statement but never its block:
+
+{{example:borrow-temporary}}
+
 **Try it:** reorder the last two operations in the rejected example without changing the owner.

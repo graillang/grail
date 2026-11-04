@@ -9,6 +9,19 @@ these local declarations. Statements end with semicolons.
 `answer += 2` is shorthand for adding to its current value. The next chapter covers the arithmetic
 and compound operators. `assert` aborts when its numeric condition is zero.
 
+## Literal bindings take their type from use
+
+A binding initialized with a bare number takes its type from how it is used later. `full := 200`
+passed to a `u8` parameter is a `u8` there; the compiler checks that the literal fits at each such
+use. A `mut` binding settles its type at its first assignment: `sum += x` with an `i32` `x` makes
+`sum` an `i32`. Without such a use, integer literals are `num` and float literals are `f64`.
+
+{{example:literal-inference}}
+
+Once a `mut` binding has been assigned, borrowed or had a method called on it, its type is fixed.
+Reads inside a loop that starts after the declaration do not adopt a type either, because an
+update later in the loop may already have changed the value.
+
 ## Owned data needs a mutable binding to change
 
 An immutable owner may be read, borrowed readonly, or moved to a new binding. Mutating its owned

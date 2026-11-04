@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- Optimized code generation: a per-function optimizer (`compiler/optimize.grl`) forwards stack
+  slots through registers, removes dead stores and moves, keeps hot variables in callee-saved
+  registers, fuses compare-and-branch sequences, turns division by powers of two into shifts and
+  inlines bounds-checked element access. On x86-64 a Collatz loop runs in 213 ms instead of 620 ms
+  (Rust -O: 85 ms), a 5M-element sieve in 207 ms instead of 689 ms (Rust -O: 33 ms), and the
+  compiler builds itself in 15 s instead of 27 s. All three targets share it; output stays byte-identical on self-compilation.
+- `borrow(...)`/`borrow_mut(...)` accept temporaries (`borrow(make())`, `borrow(v.len())`,
+  `borrow(Point { x: 1, y: 2 })`); the value lives until the end of the enclosing block.
+- In `match borrow(x)`, the borrow ends at the last use of the payload references, so an arm may
+  then modify `x`.
+- Unsuffixed literal bindings infer their type from later use: `n := 5; takes_u8(n)` works, and
+  `mut sum = 0; sum += x_i32;` makes `sum` an `i32`. Float literal bindings adopt `f32` the same way.
+- New `f32` type (`1.5f32`, contextual literals, `f32(x)`, arithmetic rounded to binary32, shortest
+  round-trip printing identical to Rust) and `char` type (Unicode scalar values, `'é'`, `'\u{1F600}'`,
+  `chars()`, `push_char`, `char(n)`, `u32(c)`, comparisons, `match`, classification and case
+  methods). ASCII literals like `'a'` stay byte values unless a `char` context adopts them.
+
 - References to `bytes`/`string` coerce to views (`read<a>`) in calls, like `&String` to `&str`.
 - `parallel_map` accepts closures; realistic sample programs (CSV report, inventory CLI, parallel primes) join the test suite.
 - Text operators read through references (`words[0] == "GET"`); clearer error for borrowing a temporary.

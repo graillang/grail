@@ -1,0 +1,18 @@
+struct Point {
+    x: u64,
+    y: u64,
+}
+
+fn origin() -> Point {
+    Point { x: 0, y: 0 }
+}
+
+fn manhattan(p: &Point) -> u64 {
+    p.x + p.y
+}
+
+fn main() {
+    println!("{}", manhattan(&Point { x: 3, y: 4 }));
+    let start = &origin();
+    println!("{}", start.x);
+}

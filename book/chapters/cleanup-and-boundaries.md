@@ -13,8 +13,9 @@ small slabs for reuse, while large single-object arenas are released immediately
 ## What this book does not promise
 
 - The native targets are Linux x86-64, ARM64 and RISC-V 64, with at most six word parameters per call.
-- There is no optimizing middle end, implicit module loading, async/task runtime or general
-  trait system covered here. CPU support does not imply support for macOS or Windows.
+- The optimizer is a per-function pass (slot forwarding, dead-code removal, callee-saved register
+  promotion, branch fusion); there is no general inlining or loop optimization yet. Implicit module
+  loading, an async/task runtime and a general trait system are not covered here. CPU support does not imply support for macOS or Windows.
 - Abort paths, including failed assertions and `!` on an error, do not unwind or run normal cleanup.
 - Borrow checking intentionally rejects some valid programs. Whole-frame guards, weak updates
   and opaque external invariant boundaries are conservative.

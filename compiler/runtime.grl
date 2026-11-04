@@ -913,7 +913,12 @@ fn rt_fmt_f64(acc:num,v:num)->num {
     if (exponent==0)&(fraction==0){rt_push(acc,48);return 0;}
     mut f=fraction;mut e=0;mut eneg=0; // value = f * 2^(+/-e)
     if exponent==0{e=1074;eneg=1;}else{f=fraction+4503599627370496;if exponent<1075{e=1075-exponent;eneg=1;}else{e=exponent-1075;}}
-    even:=(f&1)==0;boundary:=(fraction==0)&(1<exponent);
+    return rt_fmt_shortest(acc,f,e,eneg,(fraction==0)&(1<exponent));
+}
+// Burger & Dybvig digit generation for value = f * 2^(+/-e); `boundary` marks a power of two
+// whose lower neighbour is closer (the gap below is half the gap above).
+fn rt_fmt_shortest(acc:num,f:num,e:num,eneg:num,boundary:num)->num {
+    even:=(f&1)==0;
     r:=rt_big(f);s:=rt_big(1);mp:=rt_big(1);mm:=rt_big(1);
     if eneg==0{rt_big_shift(r,e);rt_big_shift(mp,e);rt_big_shift(mm,e);}else{rt_big_shift(s,e);}
     rt_big_mul(r,2);rt_big_mul(s,2);
@@ -941,6 +946,83 @@ fn rt_fmt_f64(acc:num,v:num)->num {
 fn rt_print_f64(v:num,newline:num)->num {
     acc:=rt_new();rt_fmt_f64(acc,v);if newline{rt_push(acc,10);}n:=rt_len(acc);packed:=rt_pack(acc);
     if rt_write_all(1,packed,n)!=0{rt_abort();}rt_free(packed);rt_drop_seq(acc);return 0;
+}
+
+// ---- f32: binary32 values carried as the binary64 with the same value ----
+// Round to the nearest binary32 (ties to even; overflow gives infinity). Arithmetic computes in
+// binary64 and rounds once: for + - * / and sqrt that equals the correctly rounded binary32.
+fn rt_f32_round(v:num)->num {
+    sign:=v&9223372036854775808;e:=rt_div(v,4503599627370496)&2047;
+    if e==2047{return v;}
+    if e==0{return sign;}
+    m:=(v&4503599627370495)+4503599627370496; // value = m * 2^(e-1075)
+    mut shift=29;if e<897{shift=926-e;}       // keep 24 bits, fewer below 2^-126
+    if 53<shift{return sign;}
+    q0:=m>>shift;rem:=m-(q0<<shift);half:=1<<(shift-1);
+    mut q=q0;if (half<rem)+((rem==half)&((q0&1)==1)){q+=1;}
+    if q==0{return sign;}
+    mut top=0;while (1<<(top+1))<q+1{top+=1;}
+    biased:=e-52+shift+top;                    // value = q * 2^(e-1075+shift)
+    if 1150<biased{return sign+9218868437227405312;}
+    return sign+biased*4503599627370496+((q<<(52-top))-4503599627370496);
+}
+fn rt_f32_from_int(v:num,code:num)->num {
+    mut x=v;mut negative=0;if ((code/256)&1)&rt_int_neg(v){negative=1;x=wrapping_sub(0,v);}
+    // Halve below 2^53 with a sticky low bit, convert exactly, rescale, then round once.
+    mut s=0;while 9007199254740991<x{lost:=x&1;x=rt_div(x,2);if lost{x=x|1;}s+=1;}
+    mut f=raw_f64_from_i64(x);if (s!=0)&(x!=0){f=f+s*4503599627370496;}
+    out:=rt_f32_round(f);if negative{return rt_f64_neg(out);}return out;
+}
+// Shortest decimal digits that read back to the same binary32 (like Rust's Display for f32).
+fn rt_fmt_f32(acc:num,v:num)->num {
+    if raw_feq(v,v)==0{return rt_push_text(acc,78,97,78);}
+    if 9223372036854775807<v{rt_push(acc,45);}
+    e64:=rt_div(v,4503599627370496)&2047;frac:=v&4503599627370495;
+    if e64==2047{return rt_push_text(acc,105,110,102);}
+    if (e64==0)&(frac==0){rt_push(acc,48);return 0;}
+    if 896<e64{
+        e32:=e64-896;fraction:=rt_div(frac,536870912);f:=fraction+8388608; // value = f * 2^(e32-150)
+        if e32<150{return rt_fmt_shortest(acc,f,150-e32,1,(fraction==0)&(1<e32));}
+        return rt_fmt_shortest(acc,f,e32-150,0,fraction==0);
+    }
+    f:=(frac+4503599627370496)>>(926-e64);     // binary32 subnormal: value = f * 2^-149
+    return rt_fmt_shortest(acc,f,149,1,0);
+}
+fn rt_print_f32(v:num,newline:num)->num {
+    acc:=rt_new();rt_fmt_f32(acc,v);if newline{rt_push(acc,10);}n:=rt_len(acc);packed:=rt_pack(acc);
+    if rt_write_all(1,packed,n)!=0{rt_abort();}rt_free(packed);rt_drop_seq(acc);return 0;
+}
+
+// ---- char: a Unicode scalar value (0..0x10FFFF without surrogates) in one word ----
+fn rt_char_from(v:num)->num {if (1114111<v)+((55295<v)&(v<57344)){rt_abort();}return v;}
+fn rt_print_char(v:num,newline:num)->num {
+    acc:=rt_new();rt_push_utf8(acc,v);if newline{rt_push(acc,10);}n:=rt_len(acc);packed:=rt_pack(acc);
+    if rt_write_all(1,packed,n)!=0{rt_abort();}rt_free(packed);rt_drop_seq(acc);return 0;
+}
+fn rt_char_upper(v:num)->num {return rt_case_map(v,1);}
+fn rt_char_lower(v:num)->num {return rt_case_map(v,0);}
+fn rt_char_is_upper(v:num)->num {return rt_case_map(v,0)!=v;}
+fn rt_char_is_lower(v:num)->num {return (rt_case_map(v,1)!=v)+(v==223)+(v==312)+(v==329);}
+// Letters of the scripts with case mapping (Latin-1, Latin Extended-A, Greek, Cyrillic), plus
+// the caseless ª º, ß and CJK ideographs.
+fn rt_char_is_alpha(v:num)->num {return rt_char_is_upper(v)+rt_char_is_lower(v)+(v==170)+(v==186)+((19967<v)&(v<40960));}
+fn rt_char_is_digit(v:num)->num {return (47<v)&(v<58);}
+fn rt_char_is_alnum(v:num)->num {return rt_char_is_alpha(v)+rt_char_is_digit(v);}
+fn rt_char_is_space(v:num)->num {
+    return ((8<v)&(v<14))+(v==32)+(v==133)+(v==160)+(v==5760)+((8191<v)&(v<8203))+(v==8232)+(v==8233)+(v==8239)+(v==8287)+(v==12288);
+}
+fn rt_char_is_ascii(v:num)->num {return v<128;}
+fn rt_char_len_utf8(v:num)->num {if v<128{return 1;}if v<2048{return 2;}if v<65536{return 3;}return 4;}
+// UTF-8 text to scalar values; malformed sequences become U+FFFD.
+fn rt_seq_chars(a:num)->num {
+    out:=rt_new();n:=rt_len(a);mut i=0;
+    while i<n{b:=rt_at(a,i);mut need=0;mut cp=b;mut min=0;
+        if b<128{need=0;}else{if (b&224)==192{need=1;cp=b&31;min=128;}else{if (b&240)==224{need=2;cp=b&15;min=2048;}else{if (b&248)==240{need=3;cp=b&7;min=65536;}else{need=99;}}}}
+        if need==99{rt_push(out,65533);i+=1;continue;}
+        mut ok=1;mut j=1;while j<need+1{if n<i+j+1{ok=0;break;}d:=rt_at(a,i+j);if (d&192)!=128{ok=0;break;}cp=cp*64+(d&63);j+=1;}
+        if ok{if (cp<min)+(1114111<cp)+((55295<cp)&(cp<57344)){ok=0;}}
+        if ok{rt_push(out,cp);i+=need+1;}else{rt_push(out,65533);i+=1;}}
+    return out;
 }
 
 // Exactly `digits` decimals: round(value * 10^digits) computed exactly, ties to even (like Rust).
@@ -980,6 +1062,10 @@ fn rt_fmt_value(acc:num,v:num,code:num)->num {
         while i<n{b:=rt_at(acc,i);if (b==46)+(b==101)+(b==110)+(b==78){plain=0;}i+=1;}
         if plain{rt_push(acc,46);rt_push(acc,48);}return 0;} // like Rust's {:?}: 2.0, not 2
     if code==4{rt_push(acc,34);rt_fmt_seq(acc,v);rt_push(acc,34);return 0;}
+    if code==6{rt_push(acc,39);rt_push_utf8(acc,v);rt_push(acc,39);return 0;} // char, like {:?}
+    if code==7{start:=rt_len(acc);rt_fmt_f32(acc,v);mut plain=1;mut i=start;n:=rt_len(acc);
+        while i<n{b:=rt_at(acc,i);if (b==46)+(b==101)+(b==110)+(b==78){plain=0;}i+=1;}
+        if plain{rt_push(acc,46);rt_push(acc,48);}return 0;}
     if (code&4095)==5{
         inner:=rt_div(code,4096);n:=rt_len(v);rt_push(acc,91);mut i=0;
         while i<n{if i!=0{rt_push(acc,44);rt_push(acc,32);}rt_fmt_value(acc,rt_at(v,i),inner);i+=1;}

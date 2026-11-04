@@ -5,6 +5,7 @@ The compiler, ownership checker, machine lowering, and Linux runtime are written
 - `native.grl`: syntax, types, generic checking/specialization, ownership and word-machine emission.
 - `ownership.grl`: loan/place graph and control-flow joins.
 - `lexer.grl`: tokenization.
+- `optimize.grl`: per-function slot forwarding, dead-code removal, register promotion and peepholes.
 - `machine.grl`: direct ARM64 / RISC-V instruction selection from the internal word stream.
 - `runtime.grl`: allocation, UTF-8, collections, process I/O and the Linux syscall boundary.
 

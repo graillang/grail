@@ -52,7 +52,8 @@ numeric harness. This is not the recommended application entry convention.
   division/remainder, long branches, address relocation and frame constants. Unsupported emitted
   operations fail instead of silently dropping instructions.
 - Typed references, generic layouts, records, enums, vectors, text and views share the same checked
-  language semantics on each target. No register allocator or optimizing middle end exists yet.
+  language semantics on each target. `optimize.grl` rewrites each function's word stream before
+  target lowering (see *Optimization* below); there is no general register allocator.
 - Allocation, UTF-8, collection operations, numeric printing, arguments/environment, file I/O,
   PATH search and process commands are implemented in `runtime.grl`. Its syscall-operation boundary
   maps to native Linux numbers, including openat and clone where open/fork syscalls do not exist.
@@ -112,7 +113,27 @@ reference. **Conservative limit:** opaque external-frame writes without a recove
 contract are rejected. Whole-frame guards and weak updates may retain borrows longer than needed.
 This is not a soundness proof; the explicitly unsafe runtime is trusted.
 
-There is no optimizing middle end yet. Failed assertions and guards abort without unwinding.
+## Optimization
+
+`optimize.grl` runs on every function of the x86-64-spelled word stream before `machine.grl`
+lowers it, so all three targets share it. It is not a general optimizing middle end. Per function:
+
+- forwards frame-slot values already held in a register or known constant within a basic block,
+  folds small constants into instructions and propagates register copies;
+- removes stores to slots that are never read and register definitions that are dead under
+  function-wide liveness; `jcc L; call rt_abort; L:` checks are transparent because `rt_abort`
+  never returns;
+- promotes the hottest non-escaping slots (weighted by loop depth) into the callee-saved registers
+  (rbx, r12–r15 / x19–x23 / s1–s5), saved below the frame and restored before each `leave`;
+- fuses `set/test/branch` sequences, replaces division by a power-of-two constant with shift/mask,
+  expands the leaf runtime accessors `rt_slot`, `rt_at`, `rt_len` and `rt_xchg` inline, and compacts
+  the frame to the slots still referenced, so entry zeroing clears less.
+
+Functions whose prologue, epilogue or frame accesses it does not recognize are copied unchanged.
+Self-compilation must still reproduce its own assembly byte for byte. There is no inlining of user
+functions, loop-invariant motion, vectorization or instruction scheduling.
+
+Failed assertions and guards abort without unwinding.
 `--overflow=wrap` opts user arithmetic into modulo 2⁶⁴, including powers and compound assignments;
 checked runtime arithmetic, bounds, UTF-8 and ownership checks remain enabled.
 

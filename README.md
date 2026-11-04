@@ -17,7 +17,7 @@ fn main() {
 - **Build / cross-compile:** [compiler/README.md](compiler/README.md).
 - **Semantics:** [compiler/NATIVE.md](compiler/NATIVE.md).
 - **Tests:** `bun tools/test-native.mjs` and `bun tools/book.mjs check`.
-- **Proposed numeric types:** [docs/design/numeric-types.md](docs/design/numeric-types.md) (not yet implemented).
+- **Proposed numeric types:** [docs/design/numeric-types.md](docs/design/numeric-types.md) (partly implemented: sized integers, `f64`, `f32`, `char`).
 
 Build the compiler with `bun tools/native.mjs build` (Bun, Clang assembler and LLD required).
 There is no Rust seed or C-backend dependency. `just book` builds and opens the offline book;
