@@ -30,16 +30,18 @@ struct Constant { module:bytes, name:bytes, ty:num, value:num, text:bytes }
 struct Spec { template:num, args:vec<num>, first:num, ret:num }
 // flex: an untyped integer literal binding (`x := 5`) whose uses adopt their context's integer
 // type; lit/neg hold the literal. A mutable one settles at its first assignment.
-struct Local { name:bytes, ty:num, id:num, last:num, born:num, mutable:num, flex:num, lit:num, neg:num }
+// origin: declared from a bare literal (name token at `at`); a committed one may still learn its
+// type from a later sized use, which recompiles the function with a hint.
+struct Local { name:bytes, ty:num, id:num, last:num, born:num, mutable:num, flex:num, lit:num, neg:num, origin:num, at:num }
 struct Val { t:num, ty:num }
 struct Resource { slot:num, ty:num, flag:num, base:num, field:num, via:num, place:num, target:num, authority:num }
 struct Bond { holder:num, loan:num, guard:num }
 struct Origin { place:num, region:num }
 struct Member { base:num, field:num, place:num }
 struct C {
-    src:bytes, toks:vec<Tok>, pos:num, out:vec<num>, module:bytes, target:num, arg_offset:num, overflow:num,
+    src:bytes, toks:vec<Tok>, pos:num, out:bytes, module:bytes, target:num, arg_offset:num, overflow:num,
     specs:vec<Spec>, bindings:vec<num>, current_spec:num, validating:num, alias_next:num, types:vec<Ty>, decls:vec<Decl>, fields:vec<Field>, funcs:vec<Func>, params:vec<num>,
-    locals:vec<Local>, next:num, entry:num, file:num, label:num, brk:num, cont:num, raw:num, rnames:vec<bytes>, tnames:vec<bytes>, closures:vec<Closure>, closure_env:num, inherent:num, constants:vec<Constant>, impl_params:vec<ImplParams>, receiver:num, receiver_ty:num, has_receiver:num, lit_start:num, lit_end:num, lit_value:num, lit_negative:num, flit_start:num, flit_end:num, flit_tok:num, flit_neg:num, type_bounds:vec<num>, type_interfaces:vec<vec<num>>, interfaces:vec<Interface>, implementations:vec<Implementation>, self_type:num, current_impl:num, headers_complete:num, resources:vec<Resource>, loopmark:num, result:num, check:ownership::State, members:vec<Member>, terminated:num, loopcheck:ownership::State, breaks:ownership::State, hasbreak:num, bonds:vec<Bond>, origins:vec<Origin>, scope_end:num, loop_start:num, loop_end:num
+    locals:vec<Local>, next:num, entry:num, file:num, label:num, brk:num, cont:num, raw:num, rnames:vec<bytes>, tnames:vec<bytes>, closures:vec<Closure>, closure_env:num, inherent:num, constants:vec<Constant>, impl_params:vec<ImplParams>, receiver:num, receiver_ty:num, has_receiver:num, lit_start:num, lit_end:num, lit_value:num, hints:vec<num>, tolerant:num, retry:num, attempts:num, cf_start:num, cf_end:num, cf_local:num, bce_index:bytes, bce_base:bytes, lit_negative:num, flit_start:num, flit_end:num, flit_tok:num, flit_neg:num, type_bounds:vec<num>, type_interfaces:vec<vec<num>>, interfaces:vec<Interface>, implementations:vec<Implementation>, self_type:num, current_impl:num, headers_complete:num, resources:vec<Resource>, loopmark:num, result:num, check:ownership::State, members:vec<Member>, terminated:num, loopcheck:ownership::State, breaks:ownership::State, hasbreak:num, bonds:vec<Bond>, origins:vec<Origin>, scope_end:num, loop_start:num, loop_end:num
 }
 
 fn same<a,b>(x:read<a>,y:read<b>)->num {
@@ -564,7 +566,7 @@ fn fail<a,b>(c:ref_mut<a,C>,msg:read<b>)->unit {
     m :=tok_text(borrow_mut(c),p);
     t :=&c.toks[p];
     st :=t.start;
-    exchange(borrow_mut(c.out),vec<num>[]);
+    exchange(borrow_mut(c.out),bytes[]);
     // file:line:column: message (byte offset kept for tools)
     mut line=1;mut column=1;for i in st{if c.src[i]==10{line+=1;column=1;}else{column+=1;}}
     offset :=c.arg_offset;file :=c.file;path :=host::arg(file+offset);
@@ -579,9 +581,7 @@ fn fail<a,b>(c:ref_mut<a,C>,msg:read<b>)->unit {
     mut begin=st;while 0<begin{if c.src[begin-1]==10{break;}begin-=1;}mut finish=st;while finish<c.src.len(){if c.src[finish]==10{break;}finish+=1;}
     o(borrow_mut(c),&"  | ");for i in finish-begin{b :=c.src[begin+i];if b==9{c.out.push(32);}else{c.out.push(b);}}c.out.push(10);
     o(borrow_mut(c),&"  | ");for i in column-1{c.out.push(32);}mut width=m.len();if width==0{width=1;}if 60<width{width=60;}for i in width{c.out.push(94);}c.out.push(10);
-    mut text =bytes[];
-    for i in c.out.len() { text.push(c.out[i]); }
-    host::print(&text);
+    host::print(&c.out);
     assert(0);
     return ();
 }
@@ -831,6 +831,8 @@ fn borrow_walk<a,b>(c:ref_mut<a,C>,ty:num,trail:ref_mut<b,vec<num>>)->num {
  for i in count{t :=field_type(borrow_mut(c),ty,i);if borrow_walk(borrow_mut(c),t,borrow_mut(trail)){trail.pop();return 1;}}trail.pop();}return 0;
 }
 fn require_type<a>(c:ref_mut<a,C>,actual:num,expected:num)->unit {
+ // While a type hint is pending the function is recompiled anyway; mismatches are not final.
+ if c.tolerant{return ();}
  if (expected==0)&is_bool(borrow_mut(c),actual){return ();}
  if same_type(borrow_mut(c),actual,expected)==0{fail(borrow_mut(c),&"type mismatch");}return ();
 }
@@ -969,11 +971,11 @@ fn decl<a>(c:ref_mut<a,C>,pass:num)->unit {
 fn bind<a>(c:ref_mut<a,C>,name:bytes,ty:num,id:num,mutable:num)->unit {
     if c.raw==0{if place_of(borrow_mut(c),id)==0{kind :=ty_kind(borrow_mut(c),ty);if (kind==1)+(kind==2)+(kind==12)+(kind==17)+(kind==18)+(kind==19)+(kind==21)+(kind==22){place :=ownership::root(borrow_mut(c.check),1,1);c.resources.push(Resource{slot:id,ty:ty,flag:0,base:0,field:0,via:0,place:place,target:0,authority:0});}}}
     from :=c.pos;to :=c.scope_end;last :=last_name(borrow_mut(c),&name,from,to);
-    c.locals.push(Local{name:name,ty:ty,id:id,last:last,born:from,mutable:mutable,flex:0,lit:0,neg:0});
+    c.locals.push(Local{name:name,ty:ty,id:id,last:last,born:from,mutable:mutable,flex:0,lit:0,neg:0,origin:0,at:0});
     return ();
 }
 fn func<a>(c:ref_mut<a,C>,pass:num,public:num)->unit {
- position :=c.pos;expect(borrow_mut(c),&"fn");mut name=ident(borrow_mut(c));lifetime_parameters(borrow_mut(c));if c.inherent{prepend_impl_params(borrow_mut(c));}
+ position :=c.pos;out_mark :=c.out.len();closure_mark :=c.closures.len();expect(borrow_mut(c),&"fn");mut name=ident(borrow_mut(c));lifetime_parameters(borrow_mut(c));if c.inherent{prepend_impl_params(borrow_mut(c));}
  if same(&name,&"print")+same(&name,&"println"){fail(borrow_mut(c),&"print and println are reserved prelude names");}
  typecount :=c.tnames.len();regioncount :=c.rnames.len();
  if (pass==3)&(typecount!=0){while kind(borrow_mut(c))!=123{advance(borrow_mut(c));}skip_braces(borrow_mut(c));return ();}
@@ -1007,7 +1009,13 @@ fn func<a>(c:ref_mut<a,C>,pass:num,public:num)->unit {
  o(borrow_mut(c),&"/8-");on(borrow_mut(c),count);o(borrow_mut(c),&",%rcx\nxorl %eax,%eax\nrep stosq\n");
  for i in count{mut l =&c.locals[i];slot :=l.id;ty :=l.ty;own(borrow_mut(c),slot,ty);init_parameter(borrow_mut(c),slot,ty);}
  block(borrow_mut(c));if c.raw==0{if (c.terminated==0)&(ret!=1){fail(borrow_mut(c),&"function may fall through without return");}}cleanup(borrow_mut(c),0);o(borrow_mut(c),&"xorq %rax,%rax\nleave\nret\n.set .F");on(borrow_mut(c),frame);c.out.push(44);
- n :=c.next;on(borrow_mut(c),div(n+1,2)*16);c.out.push(10);return ();
+ n :=c.next;on(borrow_mut(c),div(n+1,2)*16);c.out.push(10);
+ // A literal binding learned its type from a later use: discard this attempt and recompile.
+ if c.retry{
+  while out_mark<c.out.len(){c.out.pop();}while closure_mark<c.closures.len(){c.closures.pop();}
+  exchange(borrow_mut(c.retry),0);exchange(borrow_mut(c.tolerant),0);a :=c.attempts+1;exchange(borrow_mut(c.attempts),a);
+  exchange(borrow_mut(c.pos),position);func(borrow_mut(c),pass,public);exchange(borrow_mut(c.attempts),0);return ();}
+ exchange(borrow_mut(c.hints),vec<num>[]);return ();
 }
 fn interface_declaration<a>(c:ref_mut<a,C>,pass:num)->unit{
  if c.raw{fail(borrow_mut(c),&"unsafe runtime cannot publish safe interfaces");}
@@ -1347,11 +1355,11 @@ fn format_tuple<a>(c:ref_mut<a,C>,acc:num,t:num,ty:num)->unit{
 fn structural_eq<a>(c:ref_mut<a,C>,x:num,y:num,ty:num,depth:num)->num{
  if 16<depth{fail(borrow_mut(c),&"structural equality nests too deeply");}
  k :=ty_kind(borrow_mut(c),ty);
- if (ty==0)+(k==18)+(k==19){get(borrow_mut(c),y,&"%rcx");get(borrow_mut(c),x,&"%rax");o(borrow_mut(c),&"cmpq %rcx,%rax\nsete %al\nmovzbq %al,%rax\n");return save(borrow_mut(c));}
+ if (ty==0)+(k==18)+(k==19)+(k==22){get(borrow_mut(c),y,&"%rcx");get(borrow_mut(c),x,&"%rax");o(borrow_mut(c),&"cmpq %rcx,%rax\nsete %al\nmovzbq %al,%rax\n");return save(borrow_mut(c));}
  op :=imm(borrow_mut(c),258);
  if k==21{return invoke(borrow_mut(c),&"rt_f64_cmp",three(op,x,y));}
  if (k==3)+(k==4)+(k==5){return invoke(borrow_mut(c),&"rt_seq_cmp",three(op,x,y));}
- if k==6{e :=ty_arg(borrow_mut(c),ty);ek :=ty_kind(borrow_mut(c),e);if (e==0)+(ek==18)+(ek==19){return invoke(borrow_mut(c),&"rt_seq_cmp",three(op,x,y));}}
+ if k==6{e :=ty_arg(borrow_mut(c),ty);ek :=ty_kind(borrow_mut(c),e);if (e==0)+(ek==18)+(ek==19)+(ek==22){return invoke(borrow_mut(c),&"rt_vec_cmp",three(op,x,y));}}
  if k==8{d :=ty_arg(borrow_mut(c),ty);decl :=&c.decls[d];count :=decl.count;enum_decl :=decl.is_enum;
   if enum_decl==0{
    mut acc=imm(borrow_mut(c),1);
@@ -1426,7 +1434,7 @@ fn record<a>(c:ref_mut<a,C>,d:num,explicit:num)->Val{
  for i in seen.len(){if seen[i]==k{fail(borrow_mut(c),&"duplicate record field");}}
  seen.push(k);ft :=field_ty(borrow_mut(c),d,k);
  if literal_target(borrow_mut(c),ft)&(c.lit_start==astart)&(c.lit_end==aend){if adopt_literal(borrow_mut(c),astart,aend,ft){v=val(v.t,ft);}}
- if is_f32(borrow_mut(c),ft){v=adopt_float(borrow_mut(c),v,astart,aend,ft);}
+ if is_f32(borrow_mut(c),ft){v=adopt_float(borrow_mut(c),v,astart,aend,ft);}v=hint_use(borrow_mut(c),v,astart,aend,ft);
  infer_type(borrow_mut(c),ft,v.ty,borrow_mut(map));
  held :=move_value(borrow_mut(c),v);sources.push(held.t);rec_store(borrow_mut(c),n,k,held.t);
  if eat(borrow_mut(c),&"}"){break;}expect(borrow_mut(c),&",");if eat(borrow_mut(c),&"}"){break;}}}
@@ -1512,7 +1520,7 @@ fn call<a,b,d>(c:ref_mut<a,C>,m:read<b>,name:read<d>)->Val{
  mut more=0;if method!=2{more=eat(borrow_mut(c),&")")==0;}
  if more{while 1{
  astart :=c.pos;mut v =expr(borrow_mut(c),0);aend :=c.pos;if c.raw==0{if ((v.ty==0)+((c.lit_negative!=0)&(c.lit_start==astart)&(c.lit_end==aend)))&(args.len()<count){formal :=c.params[template_first+args.len()];if (types==0)&literal_target(borrow_mut(c),formal){if adopt_literal(borrow_mut(c),astart,aend,formal){v=val(v.t,formal);}}}}
- if (c.raw==0)&(args.len()<count){formal :=c.params[template_first+args.len()];if (types==0)&is_f32(borrow_mut(c),formal){v=adopt_float(borrow_mut(c),v,astart,aend,formal);}}if c.raw==0{kind :=ty_kind(borrow_mut(c),v.ty);if (kind==5)+(kind==7){observe(borrow_mut(c),v.t);}if kind==7{target :=target_of(borrow_mut(c),v.t);capture_authority(borrow_mut(c),target);}}
+ if (c.raw==0)&(args.len()<count){formal :=c.params[template_first+args.len()];if (types==0)&is_f32(borrow_mut(c),formal){v=adopt_float(borrow_mut(c),v,astart,aend,formal);}if types==0{v=hint_use(borrow_mut(c),v,astart,aend,formal);}}if c.raw==0{kind :=ty_kind(borrow_mut(c),v.ty);if (kind==5)+(kind==7){observe(borrow_mut(c),v.t);}if kind==7{target :=target_of(borrow_mut(c),v.t);capture_authority(borrow_mut(c),target);}}
  index :=args.len();if count<index+1{fail(borrow_mut(c),&"function argument count");}
  if c.raw==0{formal :=c.params[template_first+index];v=coerce_view(borrow_mut(c),v,formal);}
  if c.raw==0{formal :=c.params[template_first+index];if types{infer_type(borrow_mut(c),formal,v.ty,borrow_mut(map));}else{require_type(borrow_mut(c),v.ty,formal);}}
@@ -1572,7 +1580,7 @@ fn indirect_call<a>(c:ref_mut<a,C>,value:Val,opened:num)->Val {
  if eat(borrow_mut(c),&")")==0{while true{
   index :=args.len();if (index<signature.len())==0{fail(borrow_mut(c),&"callable arity mismatch");}
   astart :=c.pos;mut value=expr(borrow_mut(c),0);aend :=c.pos;expected :=signature[index];
-  if c.raw==0{if is_f32(borrow_mut(c),expected){value=adopt_float(borrow_mut(c),value,astart,aend,expected);}}
+  if c.raw==0{if is_f32(borrow_mut(c),expected){value=adopt_float(borrow_mut(c),value,astart,aend,expected);}value=hint_use(borrow_mut(c),value,astart,aend,expected);}
   slot :=value.t;mut actual=value.ty;
   if ((actual==0)+((c.lit_negative!=0)&(c.lit_start==astart)&(c.lit_end==aend)))&literal_target(borrow_mut(c),expected){if adopt_literal(borrow_mut(c),astart,aend,expected){actual=expected;}}
   require_type(borrow_mut(c),actual,expected);
@@ -2201,6 +2209,7 @@ fn adopt_literal<a>(c:ref_mut<a,C>,start:num,end:num,ty:num)->num{
 }
 // A bare literal (including a negated one) takes a sized integer type from its context.
 fn adopt_value<a>(c:ref_mut<a,C>,v:Val,start:num,end:num,expected:num)->Val{
+ mut v=hint_use(borrow_mut(c),v,start,end,expected);
  if is_f32(borrow_mut(c),expected){return adopt_float(borrow_mut(c),v,start,end,expected);}
  if literal_target(borrow_mut(c),expected)==0{return v;}
  if (c.lit_start!=start)+(c.lit_end!=end){return v;}
@@ -2217,6 +2226,44 @@ fn float_literal_slot<a>(c:ref_mut<a,C>,tok:num,negative:num)->num{
  o(borrow_mut(c),&"movabsq $");on(borrow_mut(c),bits);o(borrow_mut(c),&",%rax\n");return save(borrow_mut(c));
 }
 fn int_binary<a>(c:ref_mut<a,C>,k:num,left:num,right:num,ty:num)->Val{
+ // Sized integers are canonical (sign-extended) words, so most operations are emitted inline.
+ bits :=ty_arg(borrow_mut(c),ty);signed :=ty_mode(borrow_mut(c),ty);checked :=(c.overflow!=0)+(c.raw!=0);
+ if is_comparison(k){
+  if signed{msb :=imm(borrow_mut(c),9223372036854775808);get(borrow_mut(c),msb,&"%rcx");get(borrow_mut(c),left,&"%rax");o(borrow_mut(c),&"xorq %rcx,%rax\n");l2 :=save(borrow_mut(c));
+   get(borrow_mut(c),msb,&"%rcx");get(borrow_mut(c),right,&"%rax");o(borrow_mut(c),&"xorq %rcx,%rax\n");r2 :=save(borrow_mut(c));slot :=binary(borrow_mut(c),k,l2,r2);ty2 :=bool_type(borrow_mut(c));return val(slot,ty2);}
+  slot :=binary(borrow_mut(c),k,left,right);ty2 :=bool_type(borrow_mut(c));return val(slot,ty2);}
+ if (k==38)+(k==94)+(k==124){get(borrow_mut(c),right,&"%rcx");get(borrow_mut(c),left,&"%rax");
+  if k==38{o(borrow_mut(c),&"andq %rcx,%rax\n");}if k==94{o(borrow_mut(c),&"xorq %rcx,%rax\n");}if k==124{o(borrow_mut(c),&"orq %rcx,%rax\n");}return val(save(borrow_mut(c)),ty);}
+ if checked&((k==43)+(k==45)+(k==42))&(bits<64){
+  // Exact in 64 bits for these widths; then the result must fit the type.
+  get(borrow_mut(c),right,&"%rcx");get(borrow_mut(c),left,&"%rax");
+  if k==43{o(borrow_mut(c),&"addq %rcx,%rax\n");}if k==45{o(borrow_mut(c),&"subq %rcx,%rax\n");}if k==42{o(borrow_mut(c),&"imulq %rcx,%rax\n");}
+  mut span=1;for i in bits{span=span*2;}
+  o(borrow_mut(c),&"movq %rax,%rdx\n");if signed{o(borrow_mut(c),&"movabsq $");on(borrow_mut(c),span/2);o(borrow_mut(c),&",%rcx\naddq %rcx,%rdx\n");}
+  o(borrow_mut(c),&"movabsq $");on(borrow_mut(c),span);o(borrow_mut(c),&",%rcx\ncmpq %rcx,%rdx\n");ok :=label(borrow_mut(c));jump(borrow_mut(c),&"jb",ok);o(borrow_mut(c),&"call rt_abort\n");mark(borrow_mut(c),ok);
+  return val(save(borrow_mut(c)),ty);}
+ if checked&((k==43)+(k==45))&(bits==64)&(signed!=0){
+  // i64: overflow when the sign of the result disagrees with both (add) / the minuend (sub).
+  get(borrow_mut(c),right,&"%rcx");get(borrow_mut(c),left,&"%rax");o(borrow_mut(c),&"movq %rax,%rdx\n");
+  if k==43{o(borrow_mut(c),&"addq %rcx,%rax\nxorq %rax,%rdx\nmovq %rcx,%r11\nxorq %rax,%r11\nandq %r11,%rdx\n");}
+  else{o(borrow_mut(c),&"subq %rcx,%rax\nmovq %rdx,%r11\nxorq %rcx,%r11\nxorq %rax,%rdx\nandq %r11,%rdx\n");}
+  o(borrow_mut(c),&"shrq $63,%rdx\ntestq %rdx,%rdx\n");ok :=label(borrow_mut(c));jump(borrow_mut(c),&"jz",ok);o(borrow_mut(c),&"call rt_abort\n");mark(borrow_mut(c),ok);
+  return val(save(borrow_mut(c)),ty);}
+ if checked&((k==47)+(k==37)){
+  // Hardware unsigned division; signed operands divide magnitudes and restore the signs.
+  get(borrow_mut(c),right,&"%rcx");get(borrow_mut(c),left,&"%rax");o(borrow_mut(c),&"testq %rcx,%rcx\n");nz :=label(borrow_mut(c));jump(borrow_mut(c),&"jnz",nz);o(borrow_mut(c),&"call rt_abort\n");mark(borrow_mut(c),nz);
+  if signed{
+   o(borrow_mut(c),&"movq %rax,%r10\nshrq $63,%r10\ntestq %r10,%r10\n");pa :=label(borrow_mut(c));jump(borrow_mut(c),&"jz",pa);o(borrow_mut(c),&"movq $0,%rdx\nsubq %rax,%rdx\nmovq %rdx,%rax\n");mark(borrow_mut(c),pa);
+   o(borrow_mut(c),&"movq %rcx,%r11\nshrq $63,%r11\ntestq %r11,%r11\n");pb :=label(borrow_mut(c));jump(borrow_mut(c),&"jz",pb);o(borrow_mut(c),&"movq $0,%rdx\nsubq %rcx,%rdx\nmovq %rdx,%rcx\n");mark(borrow_mut(c),pb);}
+  o(borrow_mut(c),&"xorq %rdx,%rdx\ndivq %rcx\n");
+  if k==37{o(borrow_mut(c),&"movq %rdx,%rax\n");if signed{o(borrow_mut(c),&"testq %r10,%r10\n");done :=label(borrow_mut(c));jump(borrow_mut(c),&"jz",done);o(borrow_mut(c),&"movq $0,%rdx\nsubq %rax,%rdx\nmovq %rdx,%rax\n");mark(borrow_mut(c),done);}}
+  else{if signed{
+   o(borrow_mut(c),&"xorq %r11,%r10\ntestq %r10,%r10\n");pos :=label(borrow_mut(c));done :=label(borrow_mut(c));jump(borrow_mut(c),&"jz",pos);
+   o(borrow_mut(c),&"movq $0,%rdx\nsubq %rax,%rdx\nmovq %rdx,%rax\n");jump(borrow_mut(c),&"jmp",done);mark(borrow_mut(c),pos);
+   // MIN / -1 is the only overflow: the positive quotient 2^(bits-1) does not fit.
+   mut half=9223372036854775808;if bits<64{half=1;for i in bits-1{half=half*2;}}
+   o(borrow_mut(c),&"movabsq $");on(borrow_mut(c),half);o(borrow_mut(c),&",%rcx\ncmpq %rcx,%rax\n");jump(borrow_mut(c),&"jb",done);o(borrow_mut(c),&"call rt_abort\n");mark(borrow_mut(c),done);}}
+  return val(save(borrow_mut(c)),ty);}
  code :=int_code(borrow_mut(c),ty);op :=imm(borrow_mut(c),k);cv :=imm(borrow_mut(c),code);
  mut args=vec<num>[];args.push(op);args.push(left);args.push(right);args.push(cv);
  slot :=invoke(borrow_mut(c),&"rt_int",args);if is_comparison(k){ty2 :=bool_type(borrow_mut(c));return val(slot,ty2);}return val(slot,ty);
@@ -2518,7 +2565,7 @@ fn collection_method<a>(c:ref_mut<a,C>,value:Val)->Val {
     if same(&name,&"pop"){
         expect(borrow_mut(c),&")");mut ty=0;if k==6{ty=ty_arg(borrow_mut(c),xty);}
         if c.raw==0{if (k!=3)&(k!=6){fail(borrow_mut(c),&"pop requires bytes/vector");}}
-        if k==3{require_write(borrow_mut(c),xt);return val(apply(borrow_mut(c),&"rt_pop",one(xt)),0);}
+        if k==3{require_write(borrow_mut(c),xt);return val(apply(borrow_mut(c),&"rt_popb",one(xt)),0);}
         root :=place_of(borrow_mut(c),xt);if c.raw==0{seed_storage(borrow_mut(c),root,xty);}
         capture_authority(borrow_mut(c),root);require_write(borrow_mut(c),xt);slot :=apply(borrow_mut(c),&"rt_pop",one(xt));own(borrow_mut(c),slot,ty);result :=place_of(borrow_mut(c),slot);return_bonds(borrow_mut(c),root,result,1);stored_source(borrow_mut(c),slot,ty);return val(slot,ty);
     }
@@ -2757,6 +2804,8 @@ fn primary<a>(c:ref_mut<a,C>)->Val {
                 if floating{exchange(borrow_mut(c.flit_start),p-1);exchange(borrow_mut(c.flit_end),p);exchange(borrow_mut(c.flit_tok),value);exchange(borrow_mut(c.flit_neg),negative);}
                 else{exchange(borrow_mut(c.lit_start),p-1);exchange(borrow_mut(c.lit_end),p);exchange(borrow_mut(c.lit_value),value);exchange(borrow_mut(c.lit_negative),negative);}}}
         else{commit_flex(borrow_mut(c),l-1);}
+        if (c.raw==0)&(kind(borrow_mut(c))!=46){entry :=&c.locals[l-1];if entry.origin!=0{if flex_read(borrow_mut(c),l-1)==0{p :=c.pos;
+            exchange(borrow_mut(c.cf_start),p-1);exchange(borrow_mut(c.cf_end),p);exchange(borrow_mut(c.cf_local),l);}}}
         return field_path(borrow_mut(c),id,ty,0);
     }
     captured :=capture_field(borrow_mut(c),&first,0);if captured.ty!=18446744073709551615{return captured;}
@@ -2843,12 +2892,38 @@ fn binary<a>(c:ref_mut<a,C>,k:num,left:num,right:num)->num{
         }
  return save(borrow_mut(c));
 }
+// `for i in a..v.len() { .. v[i] .. }`: the body never names v except as v[..] or v.len(), so the
+// length cannot change and v[i] is in bounds. Returns v's name, or empty when not provable.
+fn len_bound_ahead<a,b>(c:ref_mut<a,C>,name:read<b>)->bytes {
+ p :=c.pos;if c.toks.len()<p+7{return bytes[];}if (kind_at(borrow_mut(c),p)!=1)+(kind_at(borrow_mut(c),p+1)!=46)+(kind_at(borrow_mut(c),p+3)!=40)+(kind_at(borrow_mut(c),p+4)!=41)+(kind_at(borrow_mut(c),p+5)!=123){return bytes[];}
+ method :=tok_text(borrow_mut(c),p+2);if same(&method,&"len")==0{return bytes[];}
+ base :=tok_text(borrow_mut(c),p);if find_local(borrow_mut(c),&base)==0{return bytes[];}
+ end :=block_end(borrow_mut(c),p+5);mut j=p+6;
+ while j<end{k :=kind_at(borrow_mut(c),j);
+  if (k==124)+(k==274){return bytes[];}
+  if k==1{t :=tok_text(borrow_mut(c),j);
+   if same(&t,&"for")+same(&t,&"mut"){nt :=tok_text(borrow_mut(c),j+1);if same(&nt,&name)+same(&nt,&base){return bytes[];}}
+   if same(&t,&name){if kind_at(borrow_mut(c),j+1)==261{return bytes[];}}
+   if same(&t,&base){mut ok=0;nk :=kind_at(borrow_mut(c),j+1);if nk==91{ok=1;}
+    if (nk==46)&(j+5<c.toks.len()){if (kind_at(borrow_mut(c),j+3)==40)&(kind_at(borrow_mut(c),j+4)==41){m :=tok_text(borrow_mut(c),j+2);if same(&m,&"len"){ok=1;}}}
+    if (j!=0)&ok{pk :=kind_at(borrow_mut(c),j-1);if (pk==46)+(pk==38){ok=0;}}
+    if ok==0{return bytes[];}}}
+  j+=1;}
+ return base.copy();
+}
+// Whether `[ i ]` at the cursor indexes the proven base with the proven loop variable.
+fn proven_index<a>(c:ref_mut<a,C>,value:Val)->num {
+ if c.bce_index.len()==0{return false;}p :=c.pos;if c.toks.len()<p+3{return false;}if (kind_at(borrow_mut(c),p+1)!=1)+(kind_at(borrow_mut(c),p+2)!=93){return false;}
+ t :=tok_text(borrow_mut(c),p+1);ix :=c.bce_index.copy();if same(&t,&ix)==0{return false;}
+ base :=c.bce_base.copy();l :=find_local(borrow_mut(c),&base);if l==0{return false;}return local_id(borrow_mut(c),l-1)==value.t;
+}
 fn index_view<a>(c:ref_mut<a,C>,value:Val,access:num)->Val {
+    unchecked :=(c.raw==0)&proven_index(borrow_mut(c),val(value.t,value.ty));
     advance(borrow_mut(c));input :=value.t;x :=deref(borrow_mut(c),value);
     if ty_kind(borrow_mut(c),x.ty)==6{
         xt :=x.t;xty :=x.ty;bound :=expr(borrow_mut(c),0);index :=bound.t;expect(borrow_mut(c),&"]");elem :=ty_arg(borrow_mut(c),xty);
         if c.raw==0{require_type(borrow_mut(c),bound.ty,0);}if access==2{require_mutable_binding(borrow_mut(c),xt,0);}
-        ty :=reference_type(borrow_mut(c),elem,access==2);slot :=apply(borrow_mut(c),&"rt_slot",two(xt,index));root :=place_of(borrow_mut(c),xt);target :=member_place(borrow_mut(c),root,0,elem);
+        mut f="rt_slot";if unchecked{f="rt_slotu";}ty :=reference_type(borrow_mut(c),elem,access==2);slot :=apply(borrow_mut(c),&f,two(xt,index));root :=place_of(borrow_mut(c),xt);target :=member_place(borrow_mut(c),root,0,elem);
         own(borrow_mut(c),slot,ty);bind_loan(borrow_mut(c),slot,xt,root,access==2);set_target(borrow_mut(c),slot,target,slot+1);
         if (access==0)&scalar(borrow_mut(c),elem){get(borrow_mut(c),slot,&"%rax");o(borrow_mut(c),&"movq (%rax),%rax\n");result :=save(borrow_mut(c));release_temporary(borrow_mut(c),slot);return val(result,elem);}
         return val(slot,ty);
@@ -2866,7 +2941,7 @@ fn index_view<a>(c:ref_mut<a,C>,value:Val,access:num)->Val {
         result :=apply(borrow_mut(c),&"rt_slice",args);
         own(borrow_mut(c),result,vty);view_bonds(borrow_mut(c),result,slot,0);release_temporary(borrow_mut(c),slot);return val(result,vty);
     }
-    expect(borrow_mut(c),&"]");result :=apply(borrow_mut(c),&"rt_at",two(slot,start));
+    mut f="rt_atb";if unchecked{f="rt_atbu";}expect(borrow_mut(c),&"]");result :=apply(borrow_mut(c),&f,two(slot,start));
     release_temporary(borrow_mut(c),slot);
     return val(result,0);
 }
@@ -2874,6 +2949,7 @@ fn expr<a>(c:ref_mut<a,C>,min:num)->Val {
     lstart :=c.pos;first :=primary(borrow_mut(c));lend :=c.pos;
     mut left_lit=(c.lit_start==lstart)&(c.lit_end==lend);lvalue :=c.lit_value;lneg :=c.lit_negative;
     mut left_flit=(c.flit_start==lstart)&(c.flit_end==lend);lftok :=c.flit_tok;lfneg :=c.flit_neg;
+    mut left_cf=(c.cf_start==lstart)&(c.cf_end==lend);lcf :=c.cf_local;
     mut t=first.t;
     mut ty=first.ty;
     while 1 {
@@ -2915,6 +2991,13 @@ fn expr<a>(c:ref_mut<a,C>,min:num)->Val {
                 if (ty!=rty)&literal_target(borrow_mut(c),ty)&rlit{if adopt_literal(borrow_mut(c),rstart,rend,ty){rty=ty;}}
                 if (ty!=rty)&literal_target(borrow_mut(c),rty)&llit{if literal_fits(borrow_mut(c),rty,lvalue,lneg)==0{fail(borrow_mut(c),&"integer literal out of range for its type");}ty=rty;}
                 lflit :=left_flit;left_flit=false;
+                // A committed literal binding beside a sized operand learns that operand's type.
+                if (ty!=rty)&(literal_target(borrow_mut(c),ty)+is_f32(borrow_mut(c),ty)){hinted :=hint_use(borrow_mut(c),val(right.t,rty),rstart,rend,ty);rty=hinted.ty;}
+                if left_cf&(ty!=rty)&(literal_target(borrow_mut(c),rty)+is_f32(borrow_mut(c),rty)){ss :=c.cf_start;se :=c.cf_end;sl :=c.cf_local;
+                    exchange(borrow_mut(c.cf_start),lstart);exchange(borrow_mut(c.cf_end),lend);exchange(borrow_mut(c.cf_local),lcf);
+                    hinted :=hint_use(borrow_mut(c),val(snap,ty),lstart,lend,rty);ty=hinted.ty;
+                    exchange(borrow_mut(c.cf_start),ss);exchange(borrow_mut(c.cf_end),se);exchange(borrow_mut(c.cf_local),sl);}
+                left_cf=false;
                 if is_f32(borrow_mut(c),ty)&(is_f32(borrow_mut(c),rty)==0){right=adopt_float(borrow_mut(c),right,rstart,rend,ty);rty=right.ty;}
                 if is_f32(borrow_mut(c),rty)&lflit&(is_f32(borrow_mut(c),ty)==0)&is_float(borrow_mut(c),ty){snap=float_literal_slot(borrow_mut(c),lftok,lfneg);ty=rty;}
             }
@@ -3034,7 +3117,7 @@ fn index_assignment<a>(c:ref_mut<a,C>)->unit {
   u :=int_type(borrow_mut(c),8,0);
   if c.raw==0{if (c.lit_start==vstart)&(c.lit_end==vend)&(v.ty==0){if adopt_literal(borrow_mut(c),vstart,vend,u){v=val(v.t,u);}}
    if v.ty!=u{require_type(borrow_mut(c),v.ty,0);}}
-  if operator!=61{old :=invoke(borrow_mut(c),&"rt_at",two(x.t,index.t));v=compound_value(borrow_mut(c),op,old,val(v.t,0),0);}
+  if operator!=61{old :=invoke(borrow_mut(c),&"rt_atb",two(x.t,index.t));v=compound_value(borrow_mut(c),op,old,val(v.t,0),0);}
   require_write(borrow_mut(c),x.t);mut args=two(x.t,index.t);args.push(v.t);
   // A num value must fit in a byte; u8 values always do.
   if v.ty!=u{lim :=imm(borrow_mut(c),256);get(borrow_mut(c),lim,&"%rcx");get(borrow_mut(c),v.t,&"%rax");o(borrow_mut(c),&"cmpq %rcx,%rax\n");ok :=label(borrow_mut(c));jump(borrow_mut(c),&"jb",ok);o(borrow_mut(c),&"call rt_abort\n");mark(borrow_mut(c),ok);}
@@ -3162,10 +3245,17 @@ fn statement<a>(c:ref_mut<a,C>)->unit{
   if c.raw==0{v=adopt_value(borrow_mut(c),v,vstart,vend,ty);if (ty==0)&is_bool(borrow_mut(c),v.ty){fail(borrow_mut(c),&"type mismatch");}require_type(borrow_mut(c),v.ty,ty);}
   held :=move_value(borrow_mut(c),val(v.t,ty));bind(borrow_mut(c),name,ty,held.t,mutable);return ();}}
  if eat(borrow_mut(c),&":"){if mutable==0{fail(borrow_mut(c),&"uninitialized binding requires mut");}ty :=parse_type(borrow_mut(c));expect(borrow_mut(c),&";");n :=imm(borrow_mut(c),0);if c.raw==0{mut flag=0;copy :=needs_drop(borrow_mut(c),ty)==0;if copy==0{flag=imm(borrow_mut(c),0)+1;}place :=ownership::root(borrow_mut(c.check),copy,0);c.resources.push(Resource{slot:n,ty:ty,flag:flag,base:0,field:0,via:0,place:place,target:0,authority:0});}bind(borrow_mut(c),name,ty,n,mutable);return ();}
+ name_at :=c.pos-1;
  if mutable{expect(borrow_mut(c),&"=");}else{expect(borrow_mut(c),&":=");}vstart :=c.pos;mut v =expr(borrow_mut(c),0);vend :=c.pos;expect(borrow_mut(c),&";");
  literal :=(c.raw==0)&(c.lit_start==vstart)&(c.lit_end==vend)&((v.ty==0)+(c.lit_negative!=0));value :=c.lit_value;negative :=c.lit_negative;
  mut floating=0;if (c.raw==0)&(c.flit_start==vstart)&(c.flit_end==vend)&is_float(borrow_mut(c),v.ty){if is_f32(borrow_mut(c),v.ty)==0{floating=1;}}ftok :=c.flit_tok;fneg :=c.flit_neg;
+ // A hint from an earlier attempt fixes the literal's type at the declaration.
+ hint :=find_hint(borrow_mut(c),name_at);
+ if (hint!=0)&literal{ht :=hint-1;if literal_fits(borrow_mut(c),ht,value,negative){v=val(v.t,ht);}}
+ if (hint!=0)&floating{ht :=hint-1;if is_f32(borrow_mut(c),ht){slot :=float_literal_slot(borrow_mut(c),ftok,fneg);v=val(slot,ht);}}
  mut v =move_value(borrow_mut(c),v);bind(borrow_mut(c),name,v.ty,v.t,mutable);
+ if hint!=0{return ();}
+ if mutable&(literal+floating){mut l =&mut c.locals[c.locals.len()-1];exchange(borrow_mut(l.origin),1+floating);exchange(borrow_mut(l.at),name_at);}
  if literal{mut l =&mut c.locals[c.locals.len()-1];exchange(borrow_mut(l.flex),1);exchange(borrow_mut(l.lit),value);exchange(borrow_mut(l.neg),negative);}
  if floating{mut l =&mut c.locals[c.locals.len()-1];exchange(borrow_mut(l.flex),2);exchange(borrow_mut(l.lit),ftok);exchange(borrow_mut(l.neg),fneg);}
  return ();}
@@ -3204,13 +3294,13 @@ fn statement<a>(c:ref_mut<a,C>)->unit{
  exchange(borrow_mut(c.brk),oldb);exchange(borrow_mut(c.cont),oldc);exchange(borrow_mut(c.loopmark),oldmark);exchange(borrow_mut(c.loopcheck),oldloop);exchange(borrow_mut(c.breaks),oldbreak);exchange(borrow_mut(c.hasbreak),oldhas);exchange(borrow_mut(c.loop_start),oldstart);exchange(borrow_mut(c.loop_end),oldend);
  if endless&(broke==0){exchange(borrow_mut(c.terminated),1);}return ();}
  if eat(borrow_mut(c),&"for"){
- name :=ident(borrow_mut(c));expect(borrow_mut(c),&"in");mut v =expr(borrow_mut(c),0);
+ name :=ident(borrow_mut(c));expect(borrow_mut(c),&"in");counted :=len_bound_ahead(borrow_mut(c),&name);mut v =expr(borrow_mut(c),0);
  // `for x in v` copies scalar elements of a vector or byte sequence; the collection is observed
  // before every iteration, so moving it inside the body is rejected.
- mut seq=0;mut elemty=0;mut iterable=0;mut byref=0;mut refmode=0;
+ mut seq=0;mut elemty=0;mut iterable=0;mut byref=0;mut refmode=0;mut bytewise=0;
  if (c.raw==0)&(v.ty!=0)&(is_bool(borrow_mut(c),v.ty)==0){
   x :=deref(borrow_mut(c),val(v.t,v.ty));k :=ty_kind(borrow_mut(c),x.ty);
-  if (k==3)+(k==4)+(k==5){iterable=1;seq=x.t;}
+  if (k==3)+(k==4)+(k==5){iterable=1;seq=x.t;bytewise=1;}
   else{if k==6{a :=ty_arg(borrow_mut(c),x.ty);
    // Non-scalar elements are borrowed one at a time from a borrowed vector: for p in borrow(v).
    if scalar(borrow_mut(c),a)==0{if ty_kind(borrow_mut(c),v.ty)!=7{fail(borrow_mut(c),&"for x in v over non-scalar elements needs borrow(v) (each element is borrowed)");}byref=1;refmode=ty_mode(borrow_mut(c),v.ty);}
@@ -3222,6 +3312,9 @@ fn statement<a>(c:ref_mut<a,C>)->unit{
  // `for i in a..b` counts from a up to (not including) b.
  mut range=0;if (iterable==0)&(kind(borrow_mut(c))==46)&(next_kind(borrow_mut(c))==46){advance(borrow_mut(c));advance(borrow_mut(c));range=1;}
  mut e=0;mut i=0;
+ mut proven=bytes[];mut proven_base=bytes[];
+ if range{proven_base=len_bound_ahead(borrow_mut(c),&name);}else{if iterable==0{proven_base=counted.copy();}}
+ if proven_base.len()!=0{proven=name.copy();}
  if range{get(borrow_mut(c),v.t,&"%rax");i=save(borrow_mut(c));limit :=expr(borrow_mut(c),0);if c.raw==0{require_type(borrow_mut(c),limit.ty,0);}get(borrow_mut(c),limit.t,&"%rax");e=save(borrow_mut(c));}
  else{if iterable{e=invoke(borrow_mut(c),&"rt_len",one(seq));}else{get(borrow_mut(c),v.t,&"%rax");e=save(borrow_mut(c));}i=imm(borrow_mut(c),0);}
  head :=label(borrow_mut(c));step :=label(borrow_mut(c));end :=label(borrow_mut(c));
@@ -3235,10 +3328,11 @@ fn statement<a>(c:ref_mut<a,C>)->unit{
  if iterable{observe(borrow_mut(c),seq);
   if byref{index :=apply(borrow_mut(c),&"rt_slot",two(seq,i));rty :=reference_type(borrow_mut(c),elemty,refmode);root :=place_of(borrow_mut(c),seq);target :=member_place(borrow_mut(c),root,0,elemty);
    own(borrow_mut(c),index,rty);bind_loan(borrow_mut(c),index,seq,root,refmode);set_target(borrow_mut(c),index,target,index+1);bind(borrow_mut(c),name,rty,index,0);}
-  else{element :=invoke(borrow_mut(c),&"rt_at",two(seq,i));bind(borrow_mut(c),name,elemty,element,0);}}
+  else{mut f="rt_at";if bytewise{f="rt_atb";}element :=invoke(borrow_mut(c),&f,two(seq,i));bind(borrow_mut(c),name,elemty,element,0);}}
  else{bind(borrow_mut(c),name,0,i,0);}
  if byref==0{entry=ownership::snapshot(borrow(c.check));}exchange(borrow_mut(c.terminated),0);
- block(borrow_mut(c));if byref{if c.terminated==0{cleanup(borrow_mut(c),loopmark);}}if c.terminated==0{loopstate :=ownership::snapshot(borrow(c.loopcheck));if ownership::backedge(borrow(c.check),borrow(loopstate))!=0{fail(borrow_mut(c),&"loop backedge consumes entry storage");}}
+ oldi :=exchange(borrow_mut(c.bce_index),proven);oldb2 :=exchange(borrow_mut(c.bce_base),proven_base);
+ block(borrow_mut(c));exchange(borrow_mut(c.bce_index),oldi);exchange(borrow_mut(c.bce_base),oldb2);if byref{if c.terminated==0{cleanup(borrow_mut(c),loopmark);}}if c.terminated==0{loopstate :=ownership::snapshot(borrow(c.loopcheck));if ownership::backedge(borrow(c.check),borrow(loopstate))!=0{fail(borrow_mut(c),&"loop backedge consumes entry storage");}}
  ownership::merge(borrow_mut(c.check),borrow(entry));if c.hasbreak{broken :=ownership::snapshot(borrow(c.breaks));ownership::merge(borrow_mut(c.check),borrow(broken));}exchange(borrow_mut(c.terminated),0);pop_locals(borrow_mut(c),mark);
  mark(borrow_mut(c),step);o(borrow_mut(c),&"incq ");stack_slot(borrow_mut(c),i);c.out.push(10);jump(borrow_mut(c),&"jmp",head);mark(borrow_mut(c),end);
  exchange(borrow_mut(c.brk),oldb);exchange(borrow_mut(c.cont),oldc);exchange(borrow_mut(c.loopmark),oldmark);exchange(borrow_mut(c.loopcheck),oldloop);exchange(borrow_mut(c.breaks),oldbreak);exchange(borrow_mut(c.hasbreak),oldhas);exchange(borrow_mut(c.loop_start),oldstart);exchange(borrow_mut(c.loop_end),oldend);return ();}
@@ -3331,7 +3425,7 @@ fn statement<a>(c:ref_mut<a,C>)->unit{
   if (c.raw==0)&is_float(borrow_mut(c),expected){v=adopt_float(borrow_mut(c),v,vstart,vend,expected);require_type(borrow_mut(c),v.ty,expected);
    if (op!=43)&(op!=45)&(op!=42)&(op!=47){fail(borrow_mut(c),&"operator not defined for floats");}
    opv :=imm(borrow_mut(c),op);mut value=invoke(borrow_mut(c),&"rt_f64_op",three(opv,oldvalue,v.t));if is_f32(borrow_mut(c),expected){value=invoke(borrow_mut(c),&"rt_f32_round",one(value));}v=val(value,expected);}
-  else{if (c.raw==0)&(ty_kind(borrow_mut(c),expected)==18){mut vty=v.ty;
+  else{if (c.raw==0)&(ty_kind(borrow_mut(c),expected)==18){v=hint_use(borrow_mut(c),v,vstart,vend,expected);mut vty=v.ty;
    if (vty==0)&(c.lit_start==vstart)&(c.lit_end==vend){if adopt_literal(borrow_mut(c),vstart,vend,expected){vty=expected;}}
    require_type(borrow_mut(c),vty,expected);r :=int_binary(borrow_mut(c),op,oldvalue,v.t,expected);v=val(r.t,expected);}
   else{if c.raw==0{require_type(borrow_mut(c),v.ty,0);}value :=binary(borrow_mut(c),op,oldvalue,v.t);v=val(value,0);}}}
@@ -3357,7 +3451,7 @@ fn statement<a>(c:ref_mut<a,C>)->unit{
 // statement boundary where nothing borrows from it, so the arm may then modify `s`.
 fn arm_scrutinee<a>(c:ref_mut<a,C>,slot:num,ty:num)->unit {
  if c.raw{return ();}if is_local_slot(borrow_mut(c),slot){return ();}if resource(borrow_mut(c),slot)==0{return ();}
- c.locals.push(Local{name:copy_bytes(&".scrutinee"),ty:ty,id:slot,last:c.pos,born:c.pos,mutable:0,flex:0,lit:0,neg:0});return ();
+ c.locals.push(Local{name:copy_bytes(&".scrutinee"),ty:ty,id:slot,last:c.pos,born:c.pos,mutable:0,flex:0,lit:0,neg:0,origin:0,at:0});return ();
 }
 // Whether a read of local index i still denotes its literal. A mutable binding qualifies only
 // before any assignment can have run: not inside a loop opened after its declaration.
@@ -3376,7 +3470,22 @@ fn settle_flex<a>(c:ref_mut<a,C>,i:num,value_ty:num)->num {
   if neg{wide=wide^9223372036854775808;narrow=narrow^9223372036854775808;}
   if wide!=narrow{done :=label(borrow_mut(c));o(borrow_mut(c),&"movabsq $");on(borrow_mut(c),wide);o(borrow_mut(c),&",%rcx\n");get(borrow_mut(c),id,&"%rax");o(borrow_mut(c),&"cmpq %rcx,%rax\n");jump(borrow_mut(c),&"jne",done);
    o(borrow_mut(c),&"movabsq $");on(borrow_mut(c),narrow);o(borrow_mut(c),&",%rax\nmovq %rax,");stack_slot(borrow_mut(c),id);c.out.push(10);mark(borrow_mut(c),done);}}
- mut m =&mut c.locals[i];exchange(borrow_mut(m.flex),0);exchange(borrow_mut(m.ty),out);return out;
+ mut m =&mut c.locals[i];exchange(borrow_mut(m.flex),0);exchange(borrow_mut(m.ty),out);if out!=ty{exchange(borrow_mut(m.origin),0);}return out;
+}
+fn find_hint<a>(c:ref_mut<a,C>,at:num)->num {
+ mut i=0;while i+1<c.hints.len(){if c.hints[i]==at{return c.hints[i+1]+1;}i+=2;}return 0;
+}
+// `show(count)` where count is a committed literal binding and show wants a u8: remember that
+// count should have been a u8 and finish this attempt tolerantly; the function is recompiled.
+fn hint_use<a>(c:ref_mut<a,C>,v:Val,start:num,end:num,expected:num)->Val {
+ if (c.raw!=0)+(c.cf_local==0){return v;}if (c.cf_start!=start)+(c.cf_end!=end){return v;}
+ if v.ty==expected{return v;}if 3<c.attempts{return v;}
+ l :=&c.locals[c.cf_local-1];origin :=l.origin;at :=l.at;lit :=l.lit;neg :=l.neg;
+ mut ok=0;if (origin==1)&literal_target(borrow_mut(c),expected){ok=literal_fits(borrow_mut(c),expected,lit,neg);}
+ if (origin==2)&is_f32(borrow_mut(c),expected){ok=1;}
+ if ok==0{return v;}
+ if find_hint(borrow_mut(c),at)==0{c.hints.push(at);c.hints.push(expected);exchange(borrow_mut(c.retry),1);exchange(borrow_mut(c.tolerant),1);}
+ return val(v.t,expected);
 }
 fn stmt<a>(c:ref_mut<a,C>)->unit {
  if c.raw==0{if c.terminated{fail(borrow_mut(c),&"unreachable statement after transfer");}}
@@ -3447,9 +3556,9 @@ fn emit_exit<a,b>(c:ref_mut<a,C>,argument:read<b>)->unit {
 }
 pub fn main()->num {
     mut c=C{
-        src:bytes[], toks:vec<Tok>[], pos:0, out:vec<num>[], module:bytes[], target:0,arg_offset:0,overflow:1,
+        src:bytes[], toks:vec<Tok>[], pos:0, out:bytes[], module:bytes[], target:0,arg_offset:0,overflow:1,
         specs:vec<Spec>[],bindings:vec<num>[],current_spec:0,validating:0,alias_next:1,types:vec<Ty>[], decls:vec<Decl>[], fields:vec<Field>[], funcs:vec<Func>[], params:vec<num>[],
-        locals:vec<Local>[], next:0, entry:0, file:0,label:1,brk:0,cont:0,raw:0,rnames:vec<bytes>[],tnames:vec<bytes>[],closures:vec<Closure>[],closure_env:0,inherent:0,constants:vec<Constant>[],impl_params:vec<ImplParams>[],receiver:0,receiver_ty:0,has_receiver:0,lit_start:0,lit_end:0,lit_value:0,lit_negative:0,flit_start:0,flit_end:0,flit_tok:0,flit_neg:0,type_bounds:vec<num>[],type_interfaces:vec<vec<num>>[],interfaces:vec<Interface>[],implementations:vec<Implementation>[],self_type:0,current_impl:0,headers_complete:0,resources:vec<Resource>[],loopmark:0,result:0,check:ownership::new(),members:vec<Member>[],terminated:0,loopcheck:ownership::new(),breaks:ownership::new(),hasbreak:0,bonds:vec<Bond>[],origins:vec<Origin>[],scope_end:0,loop_start:0,loop_end:0
+        locals:vec<Local>[], next:0, entry:0, file:0,label:1,brk:0,cont:0,raw:0,rnames:vec<bytes>[],tnames:vec<bytes>[],closures:vec<Closure>[],closure_env:0,inherent:0,constants:vec<Constant>[],impl_params:vec<ImplParams>[],receiver:0,receiver_ty:0,has_receiver:0,lit_start:0,lit_end:0,lit_value:0,hints:vec<num>[],tolerant:0,retry:0,attempts:0,cf_start:0,cf_end:0,cf_local:0,bce_index:bytes[],bce_base:bytes[],lit_negative:0,flit_start:0,flit_end:0,flit_tok:0,flit_neg:0,type_bounds:vec<num>[],type_interfaces:vec<vec<num>>[],interfaces:vec<Interface>[],implementations:vec<Implementation>[],self_type:0,current_impl:0,headers_complete:0,resources:vec<Resource>[],loopmark:0,result:0,check:ownership::new(),members:vec<Member>[],terminated:0,loopcheck:ownership::new(),breaks:ownership::new(),hasbreak:0,bonds:vec<Bond>[],origins:vec<Origin>[],scope_end:0,loop_start:0,loop_end:0
     };
     exchange(borrow_mut(c.target),host::target());
     for k in 5 { intern(borrow_mut(c),k+1,0); }
@@ -3533,9 +3642,7 @@ pub fn main()->num {
     o(borrow_mut(c),&"call rt_live\ntestq %rax,%rax\n");
     balanced :=label(borrow_mut(c));jump(borrow_mut(c),&"jz",balanced);o(borrow_mut(c),&"call rt_abort\n");mark(borrow_mut(c),balanced);
     o(borrow_mut(c),&"call rt_shutdown\n");emit_exit(borrow_mut(c),&"movq %r14,%rdi\n");o(borrow_mut(c),&"ud2\n.bss\n.p2align 3\nrt_state: .zero 4096\n.section .note.GNU-stack,\"\",@progbits\n");
-    mut raw =bytes[];
-    for i in c.out.len() { raw.push(c.out[i]); }
-    out :=optimize::optimize(&raw);
+    out :=optimize::optimize(&c.out);
     path :=host::arg(1+offset);target :=c.target;
     if target==0{return host::write_file(&path,&out);}
     native :=machine::lower(&out,target);return host::write_file(&path,&native);

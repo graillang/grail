@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Faster generated code: inline `push` fast path (growth only calls the runtime, large buffers grow in
+  place with `mremap`, fresh memory is not re-zeroed), inline sized-integer arithmetic, comparisons
+  and division, bounds checks dropped in `for i in v.len()` loops that cannot change `v`, and
+  inlining of small leaf functions. A 5M-element sieve runs in 83 ms (was 207 ms), an `i32` loop in
+  0.17 s (was 4.7 s).
+- `bytes` and `string` store one byte per element instead of one word; the compiler's own peak memory
+  for self-compilation drops from 1.5 GB to 0.18 GB.
+- `mut` literal bindings take the type of their first sized use anywhere in the function
+  (`mut count = 0; count += 1; show(count)` with `show(level: u8)`); the function is recompiled with
+  that type. Conflicting uses are rejected.
+- Equality on structs, tuples and vectors containing `char` works.
 - Indexed assignment: `v[i] = x`, `v[i] += x` and `s.items[i] = x` on vectors (the old element is
   dropped) and `buf[i] = b` on bytes; the right-hand side is evaluated first.
 - `f32` closures and function values accept float literal arguments; exponent-only float literals

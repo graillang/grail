@@ -12,7 +12,8 @@ struct O {
     ls:vec<num>, le:vec<num>, op:vec<num>, chg:vec<num>, del:vec<num>, lab:vec<num>, tr:vec<num>,
     k0:vec<num>, v0:vec<num>, s0:vec<num>, e0:vec<num>, m0:vec<num>,
     k1:vec<num>, v1:vec<num>, s1:vec<num>, e1:vec<num>, m1:vec<num>,
-    gen:bytes, out:bytes, weird:num, maxslot:num, table:vec<num>, base:num, data:num, uniq:num, zline:num, zfrom:num, zto:num
+    gen:bytes, out:bytes, weird:num, maxslot:num, table:vec<num>, base:num, data:num, uniq:num, zline:num, zfrom:num, zto:num,
+    inl_names:vec<bytes>, inl_bodies:vec<bytes>, inl_head:vec<num>, inl_next:vec<num>
 }
 fn put<a>(v:ref_mut<a,vec<num>>,i:num,x:num){exchange(&mut v[i],x);}
 fn same<b,d>(s:read<b>,a:num,e:num,w:read<d>)->num{
@@ -167,11 +168,15 @@ fn parse<a,b>(o:ref_mut<a,O>,s:read<b>,a:num,e:num){
     classify(borrow_mut(o),&s,first,comma,0);
     if comma<e{classify(borrow_mut(o),&s,comma+1,e,1);}else{classify(borrow_mut(o),&s,e,e,1);}
     // Calls to the leaf runtime accessors become pseudo-instructions expanded inline at emission:
-    // 40 rt_slot, 41 rt_at (bounds-checked element address / load), 42 rt_len, 43 rt_xchg.
+    // 40 rt_slot, 41 rt_at (bounds-checked element address / load), 42 rt_len, 43 rt_xchg, 44 rt_atb (byte load),
+    // 45 rt_push / 46 rt_pushb (inline store when capacity remains, runtime call to grow),
+    // 47 rt_slotu / 48 rt_atbu (proven in-bounds element address / byte load).
     if (op==15)&(comma==e)&(e-first>5)&(e-first<9){if (s[first]==114)&(s[first+1]==116)&(s[first+2]==95){
         mut fast=0;
         if same(&s,first,e,&"rt_slot"){fast=40;}if same(&s,first,e,&"rt_at"){fast=41;}
-        if same(&s,first,e,&"rt_len"){fast=42;}if same(&s,first,e,&"rt_xchg"){fast=43;}
+        if same(&s,first,e,&"rt_len"){fast=42;}if same(&s,first,e,&"rt_xchg"){fast=43;}if same(&s,first,e,&"rt_atb"){fast=44;}
+        if same(&s,first,e,&"rt_push"){fast=45;}if same(&s,first,e,&"rt_pushb"){fast=46;}
+        if same(&s,first,e,&"rt_slotu"){fast=47;}if same(&s,first,e,&"rt_atbu"){fast=48;}
         if fast!=0{exchange(&mut o.op[o.op.len()-1],fast);}
     }}
 }
@@ -193,7 +198,7 @@ fn reads<a>(o:ref<a,O>,i:num)->num{
     if arith(op)+(op==6)+(op==7){return src|dst;}
     if op==11{return dst;}if op==12{return src|1;}if op==13{return src|5;}
     if (op==25)+(op==26)+(op==27)+(op==30){return 1;}if op==31{return src;}
-    if (op==40)+(op==41)+(op==43){return 192;}if op==42{return 128;}
+    if (op==40)+(op==41)+(op==43)+(op==44)+(op==45)+(op==46)+(op==47)+(op==48){return 192;}if op==42{return 128;}
     return all_regs();
 }
 fn writes<a>(o:ref<a,O>,i:num)->num{
@@ -202,7 +207,7 @@ fn writes<a>(o:ref<a,O>,i:num)->num{
     if op==15{return caller_saved();}if is_jump(op){return 0;}
     if movelike(op)+arith(op)+(op==11)+(op==32){return dst_writes(borrow(o),i);}
     if (op==12)+(op==13){return 5;}if (op==25)+(op==26)+(op==27){return 1;}
-    if (39<op)&(op<44){return 1;}
+    if (39<op)&(op<45){return 1;}if (op==45)+(op==46){return caller_saved();}if (op==47)+(op==48){return 1;}
     return all_regs();
 }
 // Whether operand j of instruction i reads / writes a frame slot.
@@ -461,15 +466,27 @@ fn reg_name<a>(o:ref_mut<a,O>,r:num){
 fn out_number<a>(o:ref_mut<a,O>,n:num){if 9<n{out_number(borrow_mut(o),n/10);}o.out.push(48+n%10);}
 fn emit_line<a,b>(o:ref_mut<a,O>,s:read<b>,i:num){
     op:=o.op[i];
-    if (op==40)+(op==41){
+    if (op==40)+(op==41)+(op==44){
         n:=o.uniq+1;exchange(borrow_mut(o.uniq),n);
         app(borrow_mut(o.out),&"cmpq 8(%rdi),%rsi\njb .Lopt");out_number(borrow_mut(o),n);
         app(borrow_mut(o.out),&"\ncall rt_abort\n.Lopt");out_number(borrow_mut(o),n);
         if op==40{app(borrow_mut(o.out),&":\nmovq (%rdi),%rax\nleaq (%rax,%rsi,8),%rax\n");}
-        else{app(borrow_mut(o.out),&":\nmovq (%rdi),%rax\nmovq (%rax,%rsi,8),%rax\n");}
+        else{if op==41{app(borrow_mut(o.out),&":\nmovq (%rdi),%rax\nmovq (%rax,%rsi,8),%rax\n");}
+        else{app(borrow_mut(o.out),&":\nmovq (%rdi),%rax\nmovzbq (%rax,%rsi,1),%rax\n");}}
         return ();
     }
     if op==42{app(borrow_mut(o.out),&"movq 8(%rdi),%rax\n");return ();}
+    if op==47{app(borrow_mut(o.out),&"movq (%rdi),%rax\nleaq (%rax,%rsi,8),%rax\n");return ();}
+    if op==48{app(borrow_mut(o.out),&"movq (%rdi),%rax\nmovzbq (%rax,%rsi,1),%rax\n");return ();}
+    if (op==45)+(op==46){
+        fast:=o.uniq+1;done:=o.uniq+2;exchange(borrow_mut(o.uniq),done);
+        app(borrow_mut(o.out),&"movq 8(%rdi),%rcx\ncmpq 16(%rdi),%rcx\njb .Lopt");out_number(borrow_mut(o),fast);
+        if op==45{app(borrow_mut(o.out),&"\ncall rt_push\njmp .Lopt");}else{app(borrow_mut(o.out),&"\ncall rt_pushb\njmp .Lopt");}
+        out_number(borrow_mut(o),done);app(borrow_mut(o.out),&"\n.Lopt");out_number(borrow_mut(o),fast);
+        if op==45{app(borrow_mut(o.out),&":\nmovq (%rdi),%rdx\nmovq %rsi,(%rdx,%rcx,8)\nincq %rcx\nmovq %rcx,8(%rdi)\n");}
+        else{app(borrow_mut(o.out),&":\nleaq 1(%rcx),%rdx\nmovq %rdx,8(%rdi)\naddq (%rdi),%rcx\nmovq %rsi,%rax\nmovb %al,(%rcx)\n");}
+        app(borrow_mut(o.out),&"movq $0,%rax\n.Lopt");out_number(borrow_mut(o),done);app(borrow_mut(o.out),&":\n");return ();
+    }
     if op==43{app(borrow_mut(o.out),&"movq (%rdi),%rax\nmovq %rsi,(%rdi)\n");return ();}
     if o.chg[i]==0{for x in o.le[i]-o.ls[i]{o.out.push(s[o.ls[i]+x]);}o.out.push(10);return ();}
     code:=o.op[i];opname(borrow_mut(o),code);
@@ -552,6 +569,65 @@ fn function<a,b>(o:ref_mut<a,O>,s:read<b>){
             for c in chosen.len(){app(borrow_mut(o.out),&"movq $0,%");reg_name(borrow_mut(o),chosen[c]);o.out.push(10);}
         }
     }
+    if (prologue!=0)&(chosen.len()==0)&(o.zline!=0){inline_candidate(borrow_mut(o),&s,prologue);}
+}
+fn name_hash<b>(s:read<b>,a:num,e:num)->num{mut h=0;for i in e-a{h=(h*31+s[a+i])%4093;}return h;}
+// A small leaf (no calls but rt_abort, no callee-saved registers, small cleared frame) gets a
+// frameless copy of its body: slots move to free scratch registers, returns jump to the end.
+// Calls to it are replaced by that body after all functions are optimized.
+fn inline_candidate<a,b>(o:ref_mut<a,O>,s:read<b>,prologue:num){
+    last:=o.op.len();mut count=0;mut used=0;
+    // rbx, rsp, rbp (outside slots) and r12..r15 must not appear.
+    forbidden:=8+16+32+4096+8192+16384+32768;
+    for i in last{if (prologue<i)&(o.del[i]==0){op:=o.op[i];
+        if op==101{if i+1!=last{return ();}}
+        else{if op!=100{
+            count+=1;if 24<count{return ();}
+            if (op==0)+(op==31)+(op==32)+(op==45)+(op==46){return ();}
+            if op==15{if o.k0[i]!=4{return ();}if same(&s,o.s0[i],o.e0[i],&"rt_abort")==0{return ();}}
+            m:=mask_of(o.k0[i],o.v0[i],o.m0[i])|mask_of(o.k1[i],o.v1[i],o.m1[i]);if (m&forbidden)!=0{return ();}used=used|m;
+        }}
+    }}
+    // Map every slot in the body to a free caller-saved register.
+    free:=vec<num>[8,9,10,11,2,1,6,7];mut slots=vec<num>[];mut regs=vec<num>[];
+    for i in last{if (prologue<i)&(o.del[i]==0){for j in 2{mut k=o.k0[i];mut v=o.v0[i];if j{k=o.k1[i];v=o.v1[i];}
+        if k==2{mut known=0;for x in slots.len(){if slots[x]==v{known=1;}}
+            if known==0{mut pick=99;for f in free.len(){r:=free[f];mut taken=(used>>r)&1;for y in regs.len(){if regs[y]==r{taken=1;}}if (taken==0)&(pick==99){pick=r;}}
+                if pick==99{return ();}slots.push(v);regs.push(pick);}}}}}
+    for i in last{if (prologue<i)&(o.del[i]==0){for j in 2{mut k=o.k0[i];mut v=o.v0[i];if j{k=o.k1[i];v=o.v1[i];}
+        if k==2{for x in slots.len(){if slots[x]==v{r:=regs[x];set_operand(borrow_mut(o),i,j,1,r);}}}}}}
+    mark:=o.out.len();
+    // Cleared (non-parameter) slots start at zero, as the frame zeroing guaranteed.
+    for x in slots.len(){if o.zfrom*8<slots[x]+1{app(borrow_mut(o.out),&"movq $0,%");reg_name(borrow_mut(o),regs[x]);o.out.push(10);}}
+    for i in last{if (prologue<i)&(o.del[i]==0)&(i+1!=last){op:=o.op[i];
+        if op==30{app(borrow_mut(o.out),&"jmp .Lret\n");}else{if op!=29{emit_line(borrow_mut(o),&s,i);}}}}
+    app(borrow_mut(o.out),&".Lret:\n");
+    mut body=bytes[];for x in o.out.len()-mark{c:=o.out[mark+x];body.push(c);}
+    while mark<o.out.len(){o.out.pop();}
+    na:=o.ls[1];ne:=o.le[1]-1;mut name=bytes[];for x in ne-na{name.push(s[na+x]);}
+    h:=name_hash(&s,na,ne);index:=o.inl_names.len();o.inl_names.push(name);o.inl_bodies.push(body);
+    old:=o.inl_head[h];o.inl_next.push(old);put(borrow_mut(o.inl_head),h,index+1);
+}
+// Replaces `call NAME` lines for inlinable functions by their bodies with per-site labels.
+fn inline_calls<a>(o:ref_mut<a,O>){
+    text:=exchange(borrow_mut(o.out),bytes[]);mut start=0;mut site=0;
+    for i in text.len(){if text[i]==10{
+        a:=start;e:=i;start=i+1;mut done=0;
+        if (e-a>5)&(text[a]==99){if same(&text,a,a+5,&"call "){
+            h:=name_hash(&text,a+5,e);mut k=o.inl_head[h];
+            while k!=0{n:=&o.inl_names[k-1];if same(&text,a+5,e,&n){site+=1;emit_body(borrow_mut(o),k-1,site);done=1;break;}k=o.inl_next[k-1];}
+        }}
+        if done==0{for x in e-a{o.out.push(text[a+x]);}o.out.push(10);}
+    }}
+    for x in text.len()-start{o.out.push(text[start+x]);}
+}
+fn emit_body<a>(o:ref_mut<a,O>,k:num,site:num){
+    body:=o.inl_bodies[k].copy();mut i=0;n:=body.len();
+    while i<n{c:=body[i];
+        mut label=0;if (c==46)&(i+1<n){if body[i+1]==76{if i==0{label=1;}else{p:=body[i-1];if alnum(p)+(p==95)==0{label=1;}}}}
+        if label{while i<n{d:=body[i];if (alnum(d)+(d==95)+(d==46))==0{break;}o.out.push(d);i+=1;}app(borrow_mut(o.out),&"_i");out_number(borrow_mut(o),site);}
+        else{o.out.push(c);i+=1;}
+    }
 }
 // Renumber the slots still referenced into a dense frame (parameters keep the top slots), so
 // the entry zeroing only clears live storage. Returns the new frame size, or 0 if unchanged.
@@ -589,7 +665,9 @@ fn reset<a>(o:ref_mut<a,O>){
 pub fn optimize<b>(s:read<b>)->bytes{
     mut o=O{ls:vec<num>[],le:vec<num>[],op:vec<num>[],chg:vec<num>[],del:vec<num>[],lab:vec<num>[],tr:vec<num>[],
         k0:vec<num>[],v0:vec<num>[],s0:vec<num>[],e0:vec<num>[],m0:vec<num>[],
-        k1:vec<num>[],v1:vec<num>[],s1:vec<num>[],e1:vec<num>[],m1:vec<num>[],gen:bytes[],out:bytes[],weird:0,maxslot:0,table:vec<num>[],base:0,data:0,uniq:0,zline:0,zfrom:0,zto:0};
+        k1:vec<num>[],v1:vec<num>[],s1:vec<num>[],e1:vec<num>[],m1:vec<num>[],gen:bytes[],out:bytes[],weird:0,maxslot:0,table:vec<num>[],base:0,data:0,uniq:0,zline:0,zfrom:0,zto:0,
+        inl_names:vec<bytes>[],inl_bodies:vec<bytes>[],inl_head:vec<num>[],inl_next:vec<num>[]};
+    for i in 4096{o.inl_head.push(0);}
     mut start=0;mut inside=0;
     for i in s.len(){if s[i]==10{
         a:=start;e:=i;start=i+1;
@@ -602,5 +680,6 @@ pub fn optimize<b>(s:read<b>)->bytes{
     }}
     if inside{function(borrow_mut(o),&s);}
     for x in s.len()-start{o.out.push(s[start+x]);}
+    if o.inl_names.len()!=0{inline_calls(borrow_mut(o));}
     return exchange(borrow_mut(o.out),bytes[]);
 }

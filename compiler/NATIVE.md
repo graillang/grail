@@ -126,12 +126,27 @@ lowers it, so all three targets share it. It is not a general optimizing middle 
 - promotes the hottest non-escaping slots (weighted by loop depth) into the callee-saved registers
   (rbx, r12–r15 / x19–x23 / s1–s5), saved below the frame and restored before each `leave`;
 - fuses `set/test/branch` sequences, replaces division by a power-of-two constant with shift/mask,
-  expands the leaf runtime accessors `rt_slot`, `rt_at`, `rt_len` and `rt_xchg` inline, and compacts
-  the frame to the slots still referenced, so entry zeroing clears less.
+  expands the leaf runtime accessors `rt_slot`, `rt_at`, `rt_atb`, `rt_len` and `rt_xchg` inline,
+  inlines the fast path of `push` (a runtime call only grows the buffer), and compacts the frame to
+  the slots still referenced; small frames are cleared with direct stores instead of `rep stosq`;
+- inlines small leaf functions (no calls but `rt_abort`, no callee-saved registers, at most 24
+  instructions): their slots move to free scratch registers and each call site gets a copy with
+  its own labels. The function itself is still emitted for indirect calls.
+
+The compiler also emits sized-integer comparisons, `& | ^`, checked `+ - *` (8–32 bit, and `+ -` on
+`i64`) and division/remainder inline instead of calling `rt_int`, and drops the bounds check of
+`v[i]` inside `for i in a..v.len()` / `for i in v.len()` when the body names `v` only as `v[..]` or
+`v.len()` and never redeclares `i` or `v`.
 
 Functions whose prologue, epilogue or frame accesses it does not recognize are copied unchanged.
-Self-compilation must still reproduce its own assembly byte for byte. There is no inlining of user
-functions, loop-invariant motion, vectorization or instruction scheduling.
+Self-compilation must still reproduce its own assembly byte for byte. There is no loop-invariant
+motion, vectorization or instruction scheduling.
+
+## Storage
+
+`bytes`, `string` and byte views store one byte per element (`rt_pushb`, `rt_atb`, `rt_popb`,
+byte-offset views and slices); `vec<T>` stores eight-byte words. Allocations from fresh arena
+memory are not re-zeroed, and blocks of at least 512 KiB grow in place with `mremap`.
 
 Failed assertions and guards abort without unwinding.
 `--overflow=wrap` opts user arithmetic into modulo 2⁶⁴, including powers and compound assignments;

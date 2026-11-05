@@ -48,6 +48,7 @@ fn rt_syscall4(n:num,a:num,b:num,c:num,d:num)->num {
     if n==233{return raw_syscall4(21,a,b,c,d);}
     if n==281{return raw_syscall4(22,a,b,c,d);}
     if n==286{return raw_syscall4(86,a,b,c,d);}
+    if n==25{return raw_syscall4(216,a,b,c,d);}
     return wrapping_sub(0,38);
 }
 fn rt_readlinkat(path:num,buf:num,size:num)->num {
@@ -88,9 +89,9 @@ fn rt_alloc_unlocked(n:num)->num {
     mut size=32; mut bin=0;
     while size<n+16 { size=size*2; bin=bin+1; }
     head :=state+256+bin*8;
-    mut block=raw_load(head);
+    mut block=raw_load(head);mut reused=0;
     if block!=0 {
-        raw_store(head,raw_load(block+8));
+        raw_store(head,raw_load(block+8));reused=1;
     } else {
         bump :=state+768+bin*8;
         left :=state+1280+bin*8;
@@ -112,8 +113,8 @@ fn rt_alloc_unlocked(n:num)->num {
     }
     raw_store(block+8,1);
     ptr :=block+16;
-    mut i=0;
-    while i<size-16 { raw_store(ptr+i,0); i=i+8; }
+    // Bump allocations come from freshly mapped (already zero) memory; only reuse is cleared.
+    if reused { mut i=0; while i<size-16 { raw_store(ptr+i,0); i=i+8; } }
     raw_store(state+24,raw_load(state+24)+1);
     return ptr;
 }
@@ -138,6 +139,23 @@ fn rt_free_unlocked(ptr:num)->num {
     raw_store(state+24,raw_load(state+24)-1);
     return 0;
 }
+// Resizes an allocation to hold at least `need` bytes, keeping the first `used`. A block in its own
+// arena (>= 512 KiB) grows in place with mremap, without copying or touching its pages.
+fn rt_grow(ptr:num,used:num,need:num)->num {
+    if ptr==0 { return rt_alloc(need); }
+    size :=raw_load(ptr-16);
+    if (size<524288)==0 {
+        mut newsize=size; while newsize<need+16 { newsize=newsize*2; }
+        if newsize==size { return ptr; }
+        rt_allocator_lock();
+        state :=raw_state(); arena :=ptr-32; mut link=state+32;
+        while raw_load(link)!=arena { next :=raw_load(link); if next==0 { rt_abort(); } link=next; }
+        moved :=rt_syscall4(25,arena,raw_load(arena+8),newsize+16,1); if rt_error(moved) { rt_abort(); }
+        raw_store(link,moved); raw_store(moved+8,newsize+16); raw_store(moved+16,newsize);
+        rt_allocator_unlock(); return moved+32;
+    }
+    fresh :=rt_alloc(need); rt_copy_bytes(fresh,ptr,used); rt_free(ptr); return fresh;
+}
 fn rt_live()->num {rt_allocator_lock();n:=raw_load(raw_state()+24);rt_allocator_unlock();return n;}
 fn rt_shutdown()->num {
     state :=raw_state(); mut arena=raw_load(state+32);
@@ -154,13 +172,36 @@ fn rt_push(s:num,v:num)->num {
     if n==cap {
         mut capacity=cap*2; if capacity==0 { capacity=8; }
         if 144115188075855872<capacity { rt_abort(); }
-        old :=raw_load(s); ptr :=rt_alloc(capacity*8);
-        mut i=0; while i<n { raw_store(ptr+i*8,raw_load(old+i*8)); i=i+1; }
-        rt_free(old); raw_store(s,ptr); raw_store(s+16,capacity);
+        ptr :=rt_grow(raw_load(s),n*8,capacity*8); raw_store(s,ptr); raw_store(s+16,capacity);
     }
     raw_store(raw_load(s)+n*8,v); raw_store(s+8,n+1); return 0;
 }
-fn rt_pushb(s:num,v:num)->num { return rt_push(s,v&255); }
+// Byte sequences (bytes, string, views) store one byte per element; vectors store words.
+fn rt_pushb(s:num,v:num)->num {
+    n :=raw_load(s+8); cap :=raw_load(s+16);
+    if n==cap { rt_reserveb(s,n+1); }
+    raw_putbyte(raw_load(s)+n,v&255); raw_store(s+8,n+1); return 0;
+}
+// Grows a byte sequence's capacity to at least `need` bytes (doubling, minimum 16).
+fn rt_reserveb(s:num,need:num)->num {
+    cap :=raw_load(s+16); if need<cap+1 { return 0; }
+    mut capacity=cap*2; if capacity<16 { capacity=16; } while capacity<need { capacity=capacity*2; }
+    if 1152921504606846976<capacity { rt_abort(); }
+    n :=raw_load(s+8); ptr :=rt_grow(raw_load(s),n,capacity); raw_store(s,ptr); raw_store(s+16,capacity); return 0;
+}
+// Copies n bytes, a word at a time while possible.
+fn rt_copy_bytes(dst:num,src:num,n:num)->num {
+    mut i=0; while i+8<n+1 { raw_store(dst+i,raw_load(src+i)); i=i+8; }
+    while i<n { raw_putbyte(dst+i,raw_byte(src+i)); i=i+1; } return 0;
+}
+fn rt_popb(s:num)->num {
+    n :=raw_load(s+8); if n==0 { rt_abort(); }
+    v :=raw_byte(raw_load(s)+n-1); raw_store(s+8,n-1); return v;
+}
+// Unchecked accessors, used only where the compiler proved the index is in bounds.
+fn rt_slotu(s:num,i:num)->num { return raw_load(s)+i*8; }
+fn rt_atbu(s:num,i:num)->num { return raw_byte(raw_load(s)+i); }
+fn rt_atb(s:num,i:num)->num { if (i<raw_load(s+8))==0 { rt_abort(); } return raw_byte(raw_load(s)+i); }
 fn rt_pop(s:num)->num {
     n :=raw_load(s+8); if n==0 { rt_abort(); }
     v :=raw_load(raw_load(s)+(n-1)*8);
@@ -172,20 +213,19 @@ fn rt_slot(s:num,i:num)->num {
     return raw_load(s)+i*8;
 }
 fn rt_at(s:num,i:num)->num { return raw_load(rt_slot(s,i)); }
-fn rt_write(s:num,i:num,v:num)->num { return raw_store(rt_slot(s,i),v&255); }
+fn rt_write(s:num,i:num,v:num)->num { if (i<raw_load(s+8))==0 { rt_abort(); } raw_putbyte(raw_load(s)+i,v&255); return 0; }
 fn rt_slice(s:num,a:num,b:num)->num {
     if (b<a)+(raw_load(s+8)<b) { rt_abort(); }
-    v :=rt_alloc(24); raw_store(v,raw_load(s)+a*8); raw_store(v+8,b-a); return v;
+    v :=rt_alloc(24); raw_store(v,raw_load(s)+a); raw_store(v+8,b-a); return v;
 }
 fn rt_view(s:num)->num { return rt_slice(s,0,raw_load(s+8)); }
 fn rt_append(dst:num,src:num)->num {
-    n :=raw_load(src+8); mut i=0;
-    while i<n { rt_push(dst,raw_load(raw_load(src)+i*8)); i=i+1; } return 0;
+    n :=raw_load(src+8); have :=raw_load(dst+8); rt_reserveb(dst,have+n);
+    rt_copy_bytes(raw_load(dst)+have,raw_load(src),n); raw_store(dst+8,have+n); return 0;
 }
 fn rt_copy(src:num)->num { dst :=rt_new(); rt_append(dst,src); return dst; }
 fn rt_lit(ptr:num,n:num)->num {
-    s :=rt_new(); mut i=0;
-    while i<n { rt_push(s,raw_byte(ptr+i)); i=i+1; } return s;
+    s :=rt_new(); rt_reserveb(s,n); rt_copy_bytes(raw_load(s),ptr,n); raw_store(s+8,n); return s;
 }
 fn rt_rec(n:num)->num {
     if 144115188075855872<n { rt_abort(); } return rt_alloc(n*8);
@@ -198,8 +238,7 @@ fn rt_drop_seq(s:num)->num {
     if s!=0 { rt_free(raw_load(s)); rt_free(s); } return 0;
 }
 fn rt_pack(s:num)->num {
-    n :=raw_load(s+8); buf :=rt_alloc(n+1); mut i=0;
-    while i<n { raw_putbyte(buf+i,raw_load(raw_load(s)+i*8)); i=i+1; } return buf;
+    n :=raw_load(s+8); buf :=rt_alloc(n+1); rt_copy_bytes(buf,raw_load(s),n); raw_putbyte(buf+n,0); return buf;
 }
 fn rt_cstr(s:num)->num {
     buf :=rt_pack(s); n :=raw_load(s+8); mut i=0;
@@ -223,7 +262,7 @@ fn rt_read_file_blocking(path:num)->num {
         if n==0 { break; }
         if n==wrapping_sub(0,4) { continue; }
         if rt_error(n) { rt_abort(); }
-        mut i=0; while i<n { rt_push(out,raw_byte(buf+i)); i=i+1; }
+        mut i=0; while i<n { rt_pushb(out,raw_byte(buf+i)); i=i+1; }
     }
     rt_syscall(3,fd,0,0); rt_free(buf); return out;
 }
@@ -366,20 +405,20 @@ fn rt_command_blocking(args:num)->num {
 fn rt_utf8(s:num)->num {
     n :=rt_len(s);mut i=0;
     while i<n{
-        b :=rt_at(s,i);mut count=0;
+        b :=rt_atb(s,i);mut count=0;
         if b<128{i=i+1;continue;}
         if (193<b)&(b<224){count=2;}
         if (223<b)&(b<240){count=3;}
         if (239<b)&(b<245){count=4;}
         if (count==0)+(n<i+count){rt_abort();}
-        second :=rt_at(s,i+1);
+        second :=rt_atb(s,i+1);
         if (second<128)+(191<second){rt_abort();}
         if (b==224)&(second<160){rt_abort();}
         if (b==237)&(159<second){rt_abort();}
         if (b==240)&(second<144){rt_abort();}
         if (b==244)&(143<second){rt_abort();}
         mut j=2;
-        while j<count{next :=rt_at(s,i+j);if (next<128)+(191<next){rt_abort();}j=j+1;}
+        while j<count{next :=rt_atb(s,i+j);if (next<128)+(191<next){rt_abort();}j=j+1;}
         i=i+count;
     }
     return 0;
@@ -652,7 +691,7 @@ fn f_host_read_fd(fd:num,max:num)->num {
     while true{
         n:=rt_syscall(0,fd,buf,max);
         if n==wrapping_sub(0,11){if rt_wait_fd(fd,1)!=0{break;}}
-        else{if rt_error(n)==0{mut i=0;while i<n{rt_push(out,raw_byte(buf+i));i+=1;}}break;}
+        else{if rt_error(n)==0{mut i=0;while i<n{rt_pushb(out,raw_byte(buf+i));i+=1;}}break;}
     }
     rt_free(buf);return out;
 }
@@ -681,12 +720,12 @@ fn rt_offload(f:num,a:num,b:num)->num {
 }
 
 // ---- host services for the grail command-line tool ----
-fn rt_bytes_from(p:num,n:num)->num {out:=rt_new();mut i=0;while i<n{rt_push(out,raw_byte(p+i));i+=1;}return out;}
+fn rt_bytes_from(p:num,n:num)->num {out:=rt_new();mut i=0;while i<n{rt_pushb(out,raw_byte(p+i));i+=1;}return out;}
 fn f_host_env(name:num)->num {
     n:=rt_len(name);mut ep=raw_load(raw_state()+16);
     while raw_load(ep)!=0{
         p:=raw_load(ep);mut i=0;mut same=1;
-        while i<n{if raw_byte(p+i)!=rt_at(name,i){same=0;break;}i+=1;}
+        while i<n{if raw_byte(p+i)!=rt_atb(name,i){same=0;break;}i+=1;}
         if same{if raw_byte(p+n)==61{mut m=0;while raw_byte(p+n+1+m)!=0{m+=1;}rt_free(name);return rt_bytes_from(p+n+1,m);}}
         ep=ep+8;
     }
@@ -717,7 +756,7 @@ fn f_host_list_dir(path:num)->num {
             record:=buf+at;length:=raw_byte(record+16)+raw_byte(record+17)*256;kind:=raw_byte(record+18);
             mut m=0;while raw_byte(record+19+m)!=0{m+=1;}
             dot:=(raw_byte(record+19)==46)&((m==1)+((m==2)&(raw_byte(record+20)==46)));
-            if dot==0{entry:=rt_bytes_from(record+19,m);if kind==4{rt_push(entry,47);}rt_push(out,entry);}
+            if dot==0{entry:=rt_bytes_from(record+19,m);if kind==4{rt_pushb(entry,47);}rt_push(out,entry);}
             at+=length;
         }
     }
@@ -811,7 +850,7 @@ fn f_host_tcp_accept(fd:num)->num {
 // "a.b.c.d" -> IPv4 in network byte order (as a little-endian word).
 fn rt_ipv4(text:num)->num {
     n:=rt_len(text);mut part=0;mut shift=1;mut addr=0;mut i=0;
-    while i<n{d:=rt_at(text,i);if d==46{addr=addr+part*shift;shift=shift*256;part=0;}else{part=part*10+d-48;}i+=1;}
+    while i<n{d:=rt_atb(text,i);if d==46{addr=addr+part*shift;shift=shift*256;part=0;}else{part=part*10+d-48;}i+=1;}
     addr=addr+part*shift;rt_free(text);return addr;
 }
 fn f_host_tcp_connect(host:num,port:num)->num {
@@ -836,19 +875,19 @@ fn f_host_open(path:num,write:num)->num {
 fn rt_print_raw(p:num,n:num)->num {if rt_write_all(1,p,n)!=0{rt_abort();}return 0;}
 
 // ---- format(...) helpers: append to a byte accumulator, then validate it as text ----
-fn rt_fmt_raw(acc:num,p:num,n:num)->num {mut i=0;while i<n{rt_push(acc,raw_byte(p+i));i+=1;}return 0;}
+fn rt_fmt_raw(acc:num,p:num,n:num)->num {mut i=0;while i<n{rt_pushb(acc,raw_byte(p+i));i+=1;}return 0;}
 fn rt_fmt_num(acc:num,v:num)->num {
     buf:=rt_alloc(24);mut pos=24;mut r=v;while true{pos=pos-1;raw_putbyte(buf+pos,48+r%10);r=rt_div(r,10);if r==0{break;}}
     rt_fmt_raw(acc,buf+pos,24-pos);rt_free(buf);return 0;
 }
 fn rt_fmt_int(acc:num,v:num,code:num)->num {
-    if ((code/256)&1)&rt_int_neg(v){rt_push(acc,45);return rt_fmt_num(acc,wrapping_sub(0,v));}return rt_fmt_num(acc,v);
+    if ((code/256)&1)&rt_int_neg(v){rt_pushb(acc,45);return rt_fmt_num(acc,wrapping_sub(0,v));}return rt_fmt_num(acc,v);
 }
 fn rt_fmt_bool(acc:num,v:num)->num {
-    if v{rt_push(acc,116);rt_push(acc,114);rt_push(acc,117);rt_push(acc,101);}
-    else{rt_push(acc,102);rt_push(acc,97);rt_push(acc,108);rt_push(acc,115);rt_push(acc,101);}return 0;
+    if v{rt_pushb(acc,116);rt_pushb(acc,114);rt_pushb(acc,117);rt_pushb(acc,101);}
+    else{rt_pushb(acc,102);rt_pushb(acc,97);rt_pushb(acc,108);rt_pushb(acc,115);rt_pushb(acc,101);}return 0;
 }
-fn rt_fmt_seq(acc:num,s:num)->num {n:=rt_len(s);mut i=0;while i<n{rt_push(acc,rt_at(s,i));i+=1;}return 0;}
+fn rt_fmt_seq(acc:num,s:num)->num {n:=rt_len(s);mut i=0;while i<n{rt_pushb(acc,rt_atb(s,i));i+=1;}return 0;}
 fn rt_fmt_finish(acc:num)->num {out:=rt_text(acc);rt_drop_seq(acc);return out;}
 
 // ---- f64: IEEE binary64 values carried as their bit pattern in one word ----
@@ -902,15 +941,15 @@ fn rt_big_sub(a:num,b:num)->num {mut borrow=0;mut i=0;while i<48{x:=raw_load(a+i
 // 0 less, 1 equal, 2 greater
 fn rt_big_cmp(a:num,b:num)->num {mut i=48;while 0<i{i-=1;x:=raw_load(a+i*8);y:=raw_load(b+i*8);if x<y{return 0;}if y<x{return 2;}}return 1;}
 fn rt_big_shift(p:num,n:num)->num {mut i=0;while i<n{rt_big_mul(p,2);i+=1;}return 0;}
-fn rt_push_text(acc:num,a:num,b:num,c:num)->num {rt_push(acc,a);if b!=0{rt_push(acc,b);}if c!=0{rt_push(acc,c);}return 0;}
+fn rt_push_text(acc:num,a:num,b:num,c:num)->num {rt_pushb(acc,a);if b!=0{rt_pushb(acc,b);}if c!=0{rt_pushb(acc,c);}return 0;}
 // Shortest decimal digits that read back to the same double (Burger & Dybvig free-format),
 // laid out like Rust's Display for f64: no exponent, "-0", "inf", "NaN".
 fn rt_fmt_f64(acc:num,v:num)->num {
     if raw_feq(v,v)==0{return rt_push_text(acc,78,97,78);}
-    negative:=9223372036854775807<v;if negative{rt_push(acc,45);}
+    negative:=9223372036854775807<v;if negative{rt_pushb(acc,45);}
     exponent:=rt_div(v,4503599627370496)&2047;fraction:=v&4503599627370495;
     if exponent==2047{return rt_push_text(acc,105,110,102);}
-    if (exponent==0)&(fraction==0){rt_push(acc,48);return 0;}
+    if (exponent==0)&(fraction==0){rt_pushb(acc,48);return 0;}
     mut f=fraction;mut e=0;mut eneg=0; // value = f * 2^(+/-e)
     if exponent==0{e=1074;eneg=1;}else{f=fraction+4503599627370496;if exponent<1075{e=1075-exponent;eneg=1;}else{e=exponent-1075;}}
     return rt_fmt_shortest(acc,f,e,eneg,(fraction==0)&(1<exponent));
@@ -939,12 +978,12 @@ fn rt_fmt_shortest(acc:num,f:num,e:num,eneg:num,boundary:num)->num {
         rt_big_add(t,r,r);if rt_big_cmp(t,s)==0{rt_push(digits,d);}else{rt_push(digits,d+1);}break;
     }
     n:=rt_len(digits);
-    if kneg+(k==0){rt_push(acc,48);rt_push(acc,46);mut z=0;if kneg{z=k;}mut i=0;while i<z{rt_push(acc,48);i+=1;}i=0;while i<n{rt_push(acc,48+rt_at(digits,i));i+=1;}}
-    else{mut i=0;while i<n{if i==k{rt_push(acc,46);}rt_push(acc,48+rt_at(digits,i));i+=1;}while i<k{rt_push(acc,48);i+=1;}}
+    if kneg+(k==0){rt_pushb(acc,48);rt_pushb(acc,46);mut z=0;if kneg{z=k;}mut i=0;while i<z{rt_pushb(acc,48);i+=1;}i=0;while i<n{rt_pushb(acc,48+rt_at(digits,i));i+=1;}}
+    else{mut i=0;while i<n{if i==k{rt_pushb(acc,46);}rt_pushb(acc,48+rt_at(digits,i));i+=1;}while i<k{rt_pushb(acc,48);i+=1;}}
     rt_drop_seq(digits);rt_free(r);rt_free(s);rt_free(mp);rt_free(mm);rt_free(t);return 0;
 }
 fn rt_print_f64(v:num,newline:num)->num {
-    acc:=rt_new();rt_fmt_f64(acc,v);if newline{rt_push(acc,10);}n:=rt_len(acc);packed:=rt_pack(acc);
+    acc:=rt_new();rt_fmt_f64(acc,v);if newline{rt_pushb(acc,10);}n:=rt_len(acc);packed:=rt_pack(acc);
     if rt_write_all(1,packed,n)!=0{rt_abort();}rt_free(packed);rt_drop_seq(acc);return 0;
 }
 
@@ -976,10 +1015,10 @@ fn rt_f32_from_int(v:num,code:num)->num {
 // Shortest decimal digits that read back to the same binary32 (like Rust's Display for f32).
 fn rt_fmt_f32(acc:num,v:num)->num {
     if raw_feq(v,v)==0{return rt_push_text(acc,78,97,78);}
-    if 9223372036854775807<v{rt_push(acc,45);}
+    if 9223372036854775807<v{rt_pushb(acc,45);}
     e64:=rt_div(v,4503599627370496)&2047;frac:=v&4503599627370495;
     if e64==2047{return rt_push_text(acc,105,110,102);}
-    if (e64==0)&(frac==0){rt_push(acc,48);return 0;}
+    if (e64==0)&(frac==0){rt_pushb(acc,48);return 0;}
     if 896<e64{
         e32:=e64-896;fraction:=rt_div(frac,536870912);f:=fraction+8388608; // value = f * 2^(e32-150)
         if e32<150{return rt_fmt_shortest(acc,f,150-e32,1,(fraction==0)&(1<e32));}
@@ -989,14 +1028,14 @@ fn rt_fmt_f32(acc:num,v:num)->num {
     return rt_fmt_shortest(acc,f,149,1,0);
 }
 fn rt_print_f32(v:num,newline:num)->num {
-    acc:=rt_new();rt_fmt_f32(acc,v);if newline{rt_push(acc,10);}n:=rt_len(acc);packed:=rt_pack(acc);
+    acc:=rt_new();rt_fmt_f32(acc,v);if newline{rt_pushb(acc,10);}n:=rt_len(acc);packed:=rt_pack(acc);
     if rt_write_all(1,packed,n)!=0{rt_abort();}rt_free(packed);rt_drop_seq(acc);return 0;
 }
 
 // ---- char: a Unicode scalar value (0..0x10FFFF without surrogates) in one word ----
 fn rt_char_from(v:num)->num {if (1114111<v)+((55295<v)&(v<57344)){rt_abort();}return v;}
 fn rt_print_char(v:num,newline:num)->num {
-    acc:=rt_new();rt_push_utf8(acc,v);if newline{rt_push(acc,10);}n:=rt_len(acc);packed:=rt_pack(acc);
+    acc:=rt_new();rt_push_utf8(acc,v);if newline{rt_pushb(acc,10);}n:=rt_len(acc);packed:=rt_pack(acc);
     if rt_write_all(1,packed,n)!=0{rt_abort();}rt_free(packed);rt_drop_seq(acc);return 0;
 }
 fn rt_char_upper(v:num)->num {return rt_case_map(v,1);}
@@ -1016,10 +1055,10 @@ fn rt_char_len_utf8(v:num)->num {if v<128{return 1;}if v<2048{return 2;}if v<655
 // UTF-8 text to scalar values; malformed sequences become U+FFFD.
 fn rt_seq_chars(a:num)->num {
     out:=rt_new();n:=rt_len(a);mut i=0;
-    while i<n{b:=rt_at(a,i);mut need=0;mut cp=b;mut min=0;
+    while i<n{b:=rt_atb(a,i);mut need=0;mut cp=b;mut min=0;
         if b<128{need=0;}else{if (b&224)==192{need=1;cp=b&31;min=128;}else{if (b&240)==224{need=2;cp=b&15;min=2048;}else{if (b&248)==240{need=3;cp=b&7;min=65536;}else{need=99;}}}}
         if need==99{rt_push(out,65533);i+=1;continue;}
-        mut ok=1;mut j=1;while j<need+1{if n<i+j+1{ok=0;break;}d:=rt_at(a,i+j);if (d&192)!=128{ok=0;break;}cp=cp*64+(d&63);j+=1;}
+        mut ok=1;mut j=1;while j<need+1{if n<i+j+1{ok=0;break;}d:=rt_atb(a,i+j);if (d&192)!=128{ok=0;break;}cp=cp*64+(d&63);j+=1;}
         if ok{if (cp<min)+(1114111<cp)+((55295<cp)&(cp<57344)){ok=0;}}
         if ok{rt_push(out,cp);i+=need+1;}else{rt_push(out,65533);i+=1;}}
     return out;
@@ -1030,7 +1069,7 @@ fn rt_big_half(p:num)->num {mut carry=0;mut i=48;while 0<i{i-=1;v:=raw_load(p+i*
 fn rt_big_is_zero(p:num)->num {mut i=0;while i<48{if raw_load(p+i*8)!=0{return 0;}i+=1;}return 1;}
 fn rt_fmt_f64_fixed(acc:num,v:num,digits:num)->num {
     if raw_feq(v,v)==0{return rt_push_text(acc,78,97,78);}
-    if 9223372036854775807<v{rt_push(acc,45);}
+    if 9223372036854775807<v{rt_pushb(acc,45);}
     exponent:=rt_div(v,4503599627370496)&2047;fraction:=v&4503599627370495;
     if exponent==2047{return rt_push_text(acc,105,110,102);}
     mut f=fraction;mut e=0;mut eneg=0;
@@ -1044,13 +1083,13 @@ fn rt_fmt_f64_fixed(acc:num,v:num,digits:num)->num {
     // decimal digits of q, most significant first
     text:=rt_new();mut top=47;while (0<top)&(raw_load(q+top*8)==0){top-=1;}
     mut first=raw_load(q+top*8);rt_fmt_num(text,first);i=top;
-    while 0<i{i-=1;limb:=raw_load(q+i*8);mut scale=100000000;while 0<scale{rt_push(text,48+rt_div(limb,scale)%10);scale=rt_div(scale,10);}}
+    while 0<i{i-=1;limb:=raw_load(q+i*8);mut scale=100000000;while 0<scale{rt_pushb(text,48+rt_div(limb,scale)%10);scale=rt_div(scale,10);}}
     n:=rt_len(text);
-    if n<digits+1{mut z=digits+1-n;rt_push(acc,48);if digits{rt_push(acc,46);}z-=1;while 0<z{rt_push(acc,48);z-=1;}i=0;while i<n{rt_push(acc,rt_at(text,i));i+=1;}}
-    else{i=0;while i<n{if (i==n-digits)&(digits!=0){rt_push(acc,46);}rt_push(acc,rt_at(text,i));i+=1;}}
+    if n<digits+1{mut z=digits+1-n;rt_pushb(acc,48);if digits{rt_pushb(acc,46);}z-=1;while 0<z{rt_pushb(acc,48);z-=1;}i=0;while i<n{rt_pushb(acc,rt_atb(text,i));i+=1;}}
+    else{i=0;while i<n{if (i==n-digits)&(digits!=0){rt_pushb(acc,46);}rt_pushb(acc,rt_atb(text,i));i+=1;}}
     rt_drop_seq(text);rt_free(q);return 0;
 }
-fn rt_print_acc(acc:num,newline:num)->num {if newline{rt_push(acc,10);}n:=rt_len(acc);packed:=rt_pack(acc);if rt_write_all(1,packed,n)!=0{rt_abort();}rt_free(packed);rt_drop_seq(acc);return 0;}
+fn rt_print_acc(acc:num,newline:num)->num {if newline{rt_pushb(acc,10);}n:=rt_len(acc);packed:=rt_pack(acc);if rt_write_all(1,packed,n)!=0{rt_abort();}rt_free(packed);rt_drop_seq(acc);return 0;}
 
 // Ends the whole process immediately with the given status (no cleanup runs).
 fn f_host_exit(code:num)->num {rt_syscall(231,code&255,0,0);return 0;}
@@ -1059,17 +1098,17 @@ fn f_host_exit(code:num)->num {rt_syscall(231,code&255,0,0);return 0;}
 fn rt_fmt_value(acc:num,v:num,code:num)->num {
     if code==1{return rt_fmt_num(acc,v);}if code==2{return rt_fmt_bool(acc,v);}
     if code==3{start:=rt_len(acc);rt_fmt_f64(acc,v);mut plain=1;mut i=start;n:=rt_len(acc);
-        while i<n{b:=rt_at(acc,i);if (b==46)+(b==101)+(b==110)+(b==78){plain=0;}i+=1;}
-        if plain{rt_push(acc,46);rt_push(acc,48);}return 0;} // like Rust's {:?}: 2.0, not 2
-    if code==4{rt_push(acc,34);rt_fmt_seq(acc,v);rt_push(acc,34);return 0;}
-    if code==6{rt_push(acc,39);rt_push_utf8(acc,v);rt_push(acc,39);return 0;} // char, like {:?}
+        while i<n{b:=rt_atb(acc,i);if (b==46)+(b==101)+(b==110)+(b==78){plain=0;}i+=1;}
+        if plain{rt_pushb(acc,46);rt_pushb(acc,48);}return 0;} // like Rust's {:?}: 2.0, not 2
+    if code==4{rt_pushb(acc,34);rt_fmt_seq(acc,v);rt_pushb(acc,34);return 0;}
+    if code==6{rt_pushb(acc,39);rt_push_utf8(acc,v);rt_pushb(acc,39);return 0;} // char, like {:?}
     if code==7{start:=rt_len(acc);rt_fmt_f32(acc,v);mut plain=1;mut i=start;n:=rt_len(acc);
-        while i<n{b:=rt_at(acc,i);if (b==46)+(b==101)+(b==110)+(b==78){plain=0;}i+=1;}
-        if plain{rt_push(acc,46);rt_push(acc,48);}return 0;}
+        while i<n{b:=rt_atb(acc,i);if (b==46)+(b==101)+(b==110)+(b==78){plain=0;}i+=1;}
+        if plain{rt_pushb(acc,46);rt_pushb(acc,48);}return 0;}
     if (code&4095)==5{
-        inner:=rt_div(code,4096);n:=rt_len(v);rt_push(acc,91);mut i=0;
-        while i<n{if i!=0{rt_push(acc,44);rt_push(acc,32);}rt_fmt_value(acc,rt_at(v,i),inner);i+=1;}
-        rt_push(acc,93);return 0;
+        inner:=rt_div(code,4096);n:=rt_len(v);rt_pushb(acc,91);mut i=0;
+        while i<n{if i!=0{rt_pushb(acc,44);rt_pushb(acc,32);}rt_fmt_value(acc,rt_at(v,i),inner);i+=1;}
+        rt_pushb(acc,93);return 0;
     }
     if 1023<code{return rt_fmt_int(acc,v,code-1024);}
     rt_abort();return 0;
@@ -1089,28 +1128,36 @@ fn f_host_create_dir(path:num)->num {
 // Appends tmp to acc padded to `width` characters (UTF-8 aware); align 1 left, 2 right, 3 center.
 // Zero padding goes after a leading minus sign, as in Rust.
 fn rt_fmt_pad(acc:num,tmp:num,width:num,align:num,zero:num,fill:num)->num {
-    n:=rt_len(tmp);mut chars=0;mut i=0;while i<n{if (rt_at(tmp,i)&192)!=128{chars+=1;}i+=1;}
+    n:=rt_len(tmp);mut chars=0;mut i=0;while i<n{if (rt_atb(tmp,i)&192)!=128{chars+=1;}i+=1;}
     mut pad=0;if chars<width{pad=width-chars;}
-    if zero{i=0;if n!=0{if rt_at(tmp,0)==45{rt_push(acc,45);i=1;}}mut k=0;while k<pad{rt_push(acc,48);k+=1;}while i<n{rt_push(acc,rt_at(tmp,i));i+=1;}rt_drop_seq(tmp);return 0;}
+    if zero{i=0;if n!=0{if rt_atb(tmp,0)==45{rt_pushb(acc,45);i=1;}}mut k=0;while k<pad{rt_pushb(acc,48);k+=1;}while i<n{rt_pushb(acc,rt_atb(tmp,i));i+=1;}rt_drop_seq(tmp);return 0;}
     mut before=0;if align==2{before=pad;}if align==3{before=rt_div(pad,2);}after:=pad-before;
-    mut k=0;while k<before{rt_push_char(acc,fill);k+=1;}i=0;while i<n{rt_push(acc,rt_at(tmp,i));i+=1;}k=0;while k<after{rt_push_char(acc,fill);k+=1;}
+    mut k=0;while k<before{rt_push_char(acc,fill);k+=1;}i=0;while i<n{rt_pushb(acc,rt_atb(tmp,i));i+=1;}k=0;while k<after{rt_push_char(acc,fill);k+=1;}
     rt_drop_seq(tmp);return 0;
 }
-fn rt_push_char(acc:num,b:num)->num {rt_push(acc,b);return 0;}
+fn rt_push_char(acc:num,b:num)->num {rt_pushb(acc,b);return 0;}
 
 // Byte-lexicographic comparison of two byte sequences / strings / views (op as in rt_int).
 fn rt_seq_cmp(op:num,a:num,b:num)->num {
+    n:=rt_len(a);m:=rt_len(b);mut i=0;mut order=1; // 0 less, 1 equal, 2 greater
+    while (i<n)&(i<m){x:=rt_atb(a,i);y:=rt_atb(b,i);if x!=y{if x<y{order=0;}else{order=2;}break;}i+=1;}
+    if order==1{if n<m{order=0;}if m<n{order=2;}}
+    if op==258{return order==1;}if op==259{return order!=1;}if op==60{return order==0;}if op==62{return order==2;}
+    if op==269{return order!=2;}if op==270{return order!=0;}rt_abort();return 0;
+}
+// Element-wise comparison of word vectors (vec<num>, sized integers, bool).
+fn rt_vec_cmp(op:num,a:num,b:num)->num {
     n:=rt_len(a);m:=rt_len(b);mut i=0;mut order=1; // 0 less, 1 equal, 2 greater
     while (i<n)&(i<m){x:=rt_at(a,i);y:=rt_at(b,i);if x!=y{if x<y{order=0;}else{order=2;}break;}i+=1;}
     if order==1{if n<m{order=0;}if m<n{order=2;}}
     if op==258{return order==1;}if op==259{return order!=1;}if op==60{return order==0;}if op==62{return order==2;}
     if op==269{return order!=2;}if op==270{return order!=0;}rt_abort();return 0;
 }
-fn rt_concat(a:num,b:num)->num {out:=rt_new();n:=rt_len(a);mut i=0;while i<n{rt_push(out,rt_at(a,i));i+=1;}m:=rt_len(b);i=0;while i<m{rt_push(out,rt_at(b,i));i+=1;}return out;}
+fn rt_concat(a:num,b:num)->num {out:=rt_new();n:=rt_len(a);mut i=0;while i<n{rt_pushb(out,rt_atb(a,i));i+=1;}m:=rt_len(b);i=0;while i<m{rt_pushb(out,rt_atb(b,i));i+=1;}return out;}
 fn rt_concat_text(a:num,b:num)->num {out:=rt_concat(a,b);rt_utf8(out);return out;}
 
 // ---- built-in text methods ----
-fn rt_seq_match(a:num,at:num,b:num)->num {m:=rt_len(b);if rt_len(a)<at+m{return 0;}mut j=0;while j<m{if rt_at(a,at+j)!=rt_at(b,j){return 0;}j+=1;}return 1;}
+fn rt_seq_match(a:num,at:num,b:num)->num {m:=rt_len(b);if rt_len(a)<at+m{return 0;}mut j=0;while j<m{if rt_atb(a,at+j)!=rt_atb(b,j){return 0;}j+=1;}return 1;}
 fn rt_seq_contains(a:num,b:num)->num {n:=rt_len(a);m:=rt_len(b);if n<m{return 0;}mut i=0;while i<n-m+1{if rt_seq_match(a,i,b){return 1;}i+=1;}return 0;}
 fn rt_seq_starts(a:num,b:num)->num {return rt_seq_match(a,0,b);}
 fn rt_seq_ends(a:num,b:num)->num {n:=rt_len(a);m:=rt_len(b);if n<m{return 0;}return rt_seq_match(a,n-m,b);}
@@ -1137,36 +1184,36 @@ fn rt_case_map(cp:num,upper:num)->num {
     return cp;
 }
 fn rt_push_utf8(out:num,v:num)->num {
-    if v<128{rt_push(out,v);return 0;}
-    if v<2048{rt_push(out,192+rt_div(v,64));rt_push(out,128+v%64);return 0;}
-    if v<65536{rt_push(out,224+rt_div(v,4096));rt_push(out,128+rt_div(v,64)%64);rt_push(out,128+v%64);return 0;}
-    rt_push(out,240+rt_div(v,262144));rt_push(out,128+rt_div(v,4096)%64);rt_push(out,128+rt_div(v,64)%64);rt_push(out,128+v%64);return 0;
+    if v<128{rt_pushb(out,v);return 0;}
+    if v<2048{rt_pushb(out,192+rt_div(v,64));rt_pushb(out,128+v%64);return 0;}
+    if v<65536{rt_pushb(out,224+rt_div(v,4096));rt_pushb(out,128+rt_div(v,64)%64);rt_pushb(out,128+v%64);return 0;}
+    rt_pushb(out,240+rt_div(v,262144));rt_pushb(out,128+rt_div(v,4096)%64);rt_pushb(out,128+rt_div(v,64)%64);rt_pushb(out,128+v%64);return 0;
 }
 fn rt_seq_case(a:num,upper:num)->num {
     out:=rt_new();n:=rt_len(a);mut i=0;
-    while i<n{b:=rt_at(a,i);
-        if b<128{rt_push(out,rt_case_map(b,upper));i+=1;}
-        else{if ((b&224)==192)&(i+1<n){c1:=rt_at(a,i+1);if (c1&192)==128{rt_push_utf8(out,rt_case_map((b&31)*64+(c1&63),upper));i+=2;}else{rt_push(out,b);i+=1;}}
-        else{rt_push(out,b);i+=1;}}}
+    while i<n{b:=rt_atb(a,i);
+        if b<128{rt_pushb(out,rt_case_map(b,upper));i+=1;}
+        else{if ((b&224)==192)&(i+1<n){c1:=rt_atb(a,i+1);if (c1&192)==128{rt_push_utf8(out,rt_case_map((b&31)*64+(c1&63),upper));i+=2;}else{rt_pushb(out,b);i+=1;}}
+        else{rt_pushb(out,b);i+=1;}}}
     return out;
 }
 fn rt_seq_upper(a:num)->num {return rt_seq_case(a,1);}
 fn rt_seq_lower(a:num)->num {return rt_seq_case(a,0);}
 fn rt_space(b:num)->num {return (b==32)+(b==9)+(b==10)+(b==13);}
 fn rt_seq_trim(a:num)->num {
-    mut start=0;mut end=rt_len(a);while start<end{if rt_space(rt_at(a,start))==0{break;}start+=1;}while start<end{if rt_space(rt_at(a,end-1))==0{break;}end-=1;}
-    out:=rt_new();mut i=start;while i<end{rt_push(out,rt_at(a,i));i+=1;}return out;
+    mut start=0;mut end=rt_len(a);while start<end{if rt_space(rt_atb(a,start))==0{break;}start+=1;}while start<end{if rt_space(rt_atb(a,end-1))==0{break;}end-=1;}
+    out:=rt_new();mut i=start;while i<end{rt_pushb(out,rt_atb(a,i));i+=1;}return out;
 }
 fn rt_seq_replace(a:num,from:num,to:num,valid:num)->num {
     out:=rt_new();n:=rt_len(a);m:=rt_len(from);t:=rt_len(to);mut i=0;
-    while i<n{if (m!=0)&rt_seq_match(a,i,from){mut j=0;while j<t{rt_push(out,rt_at(to,j));j+=1;}i+=m;}else{rt_push(out,rt_at(a,i));i+=1;}}
+    while i<n{if (m!=0)&rt_seq_match(a,i,from){mut j=0;while j<t{rt_pushb(out,rt_atb(to,j));j+=1;}i+=m;}else{rt_pushb(out,rt_atb(a,i));i+=1;}}
     if valid{rt_utf8(out);}return out;
 }
-fn rt_seq_repeat(a:num,count:num)->num {out:=rt_new();n:=rt_len(a);mut k=0;while k<count{mut i=0;while i<n{rt_push(out,rt_at(a,i));i+=1;}k+=1;}return out;}
+fn rt_seq_repeat(a:num,count:num)->num {out:=rt_new();n:=rt_len(a);mut k=0;while k<count{mut i=0;while i<n{rt_pushb(out,rt_atb(a,i));i+=1;}k+=1;}return out;}
 // Splits on one byte; every field is kept (empty ones too), like Rust's split(char).
 fn rt_seq_split(a:num,sep:num,valid:num)->num {
     parts:=rt_new();mut cur=rt_new();n:=rt_len(a);mut i=0;
-    while i<n{b:=rt_at(a,i);if b==sep{if valid{rt_utf8(cur);}rt_push(parts,cur);cur=rt_new();}else{rt_push(cur,b);}i+=1;}
+    while i<n{b:=rt_atb(a,i);if b==sep{if valid{rt_utf8(cur);}rt_push(parts,cur);cur=rt_new();}else{rt_pushb(cur,b);}i+=1;}
     if valid{rt_utf8(cur);}rt_push(parts,cur);return parts;
 }
 

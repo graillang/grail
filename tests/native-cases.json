@@ -2836,5 +2836,71 @@
       "lib/core.grl"
     ],
     "stdout": "{\"name\":\"grail\",\"version\":1,\"tags\":[\"fast\",\"safe\"],\"stable\":false,\"extra\":null}\n[1,-2,[3,[]]]\nerror: unexpected input at 6\n"
+  },
+  {
+    "name": "bounds-check-elimination",
+    "source": "fn total(v: vec<num>) -> num {\n    mut sum = 0;\n    for i in 0..v.len() { sum += v[i]; }\n    return sum;\n}\nfn main() {\n    v := vec<num>[3, 4, 5];\n    println(total(v));\n    b := bytes[1, 2, 250];\n    mut s = 0;\n    for i in b.len() { s += b[i]; }\n    println(s);\n    mut w = vec<num>[1, 2, 3];\n    for i in 0..w.len() { w[i] = w[i] * 10; }\n    println(w);\n}\n",
+    "stdout": "12\n253\n[10, 20, 30]\n"
+  },
+  {
+    "name": "bounds-check-kept-when-body-shrinks",
+    "source": "fn main(){ mut v = vec<num>[1, 2, 3]; for i in 0..v.len() { v.pop(); println(v[i]); } }\n",
+    "signal": "SIGABRT"
+  },
+  {
+    "name": "bounds-check-kept-when-index-shadowed",
+    "source": "fn main(){ v := vec<num>[1, 2, 3]; for i in 0..v.len() { i := 10; println(v[i]); } }\n",
+    "signal": "SIGABRT"
+  },
+  {
+    "name": "inlined-small-functions",
+    "source": "fn sq(x: num) -> num { return x * x; }\nfn clamp(x: i32, lo: i32, hi: i32) -> i32 {\n    if x < lo { return lo; }\n    if x > hi { return hi; }\n    return x;\n}\nfn first<a>(v: read<a>) -> num {\n    if v.len() == 0 { return 0; }\n    return v[0];\n}\nfn main() {\n    mut acc = 0;\n    for i in 1..1001 { acc += sq(i); }\n    println(acc);\n    println(\"{} {} {}\", clamp(-5, 0, 10), clamp(5, 0, 10), clamp(50, 0, 10));\n    b := bytes[9, 8];\n    e := bytes[];\n    println(\"{} {}\", first(&b), first(&e));\n}\n",
+    "stdout": "333833500\n0 5 10\n9 0\n"
+  },
+  {
+    "name": "inlined-function-overflow-aborts",
+    "source": "fn add1(x: u8) -> u8 { return x + 1; }\nfn main(){ mut x: u8 = 250; for i in 10 { x = add1(x); println(x); } }\n",
+    "signal": "SIGABRT"
+  },
+  {
+    "name": "packed-bytes-large-buffer",
+    "source": "fn main() {\n    mut buf = bytes[];\n    for i in 1000000 { buf.push(i % 251); }\n    mut sum = 0;\n    for i in buf.len() { sum += buf[i]; }\n    println(\"{} {}\", buf.len(), sum);\n    part := &buf[1000:1010];\n    println(part.len());\n    println(part[3]);\n    buf[5] = 77;\n    println(buf[5]);\n    mut t = \"abc\".text();\n    for i in 1000 { t.append(&\"xyz\"); }\n    println(t.len());\n    println(t.ends_with(&\"zxyz\"));\n}\n",
+    "stdout": "1000000 124998120\n10\n250\n77\n3003\ntrue\n"
+  },
+  {
+    "name": "sized-integer-division-matches-rust",
+    "source": "fn main() {\n    vals := vec<i32>[7, -7, 0, 2147483647, -2147483648];\n    divs := vec<i32>[3, -3, 1, -1, 2];\n    for i in vals.len() { for j in divs.len() {\n        a := vals[i]; b := divs[j];\n        if (a == -2147483648) && (b == -1) { continue; }\n        print(\"{} {} \", a / b, a % b);\n    } }\n    println();\n    u := vec<u8>[255, 7, 200];\n    for i in u.len() { print(\"{} {} \", u[i] / 3u8, u[i] % 7u8); }\n    println();\n    x: i64 := -9223372036854775807;\n    println(\"{} {}\", x / 2, x % 10);\n    s: i16 := -300;\n    println(\"{} {} {}\", s + 100, s * 3, s - 32000);\n}\n",
+    "stdout": "2 1 -2 1 7 0 -7 0 3 1 -2 -1 2 -1 -7 0 7 0 -3 -1 0 0 0 0 0 0 0 0 0 0 715827882 1 -715827882 1 2147483647 0 -2147483647 0 1073741823 1 -715827882 -2 715827882 -2 -2147483648 0 -1073741824 0 \n85 3 2 0 66 4 \n-4611686018427387903 -7\n-200 -900 -32300\n"
+  },
+  {
+    "name": "i16-overflow-aborts",
+    "source": "fn main(){ s: i16 := -300; t := s - 32500; println(t); }\n",
+    "signal": "SIGABRT"
+  },
+  {
+    "name": "i32-min-divided-by-minus-one-aborts",
+    "source": "fn main(){ a: i32 := -2147483647; b := a - 1; c: i32 := -1; println(b / c); }\n",
+    "signal": "SIGABRT"
+  },
+  {
+    "name": "i64-add-overflow-aborts",
+    "source": "fn main(){ a: i64 := 9223372036854775807; println(a + 1); }\n",
+    "signal": "SIGABRT"
+  },
+  {
+    "name": "literal-binding-type-from-later-use",
+    "source": "fn show(level: u8) { println(level); }\nfn scale(x: i32) -> i32 { return x * 2; }\nfn half(x: f32) -> f32 { return x / 2.0; }\nfn main() {\n    mut count = 0;\n    count += 1;\n    count += 254;\n    show(count);\n    mut total = 0;\n    mut i = 0;\n    while i < 3 { total += 5; i += 1; }\n    println(scale(total));\n    mut ratio = 0.5;\n    ratio *= 3.0;\n    println(half(ratio));\n    mut level = 7;\n    level -= 2;\n    small: u8 := level;\n    println(small);\n}\n",
+    "stdout": "255\n30\n0.75\n5\n"
+  },
+  {
+    "name": "literal-binding-conflicting-uses-rejected",
+    "source": "fn show(level: u8) { println(level); }\nfn scale(x: i32) -> i32 { return x * 2; }\nfn main() { mut n = 0; n += 1; show(n); println(scale(n)); }\n",
+    "reject": true,
+    "diagnostic": "type mismatch"
+  },
+  {
+    "name": "literal-binding-inferred-u8-overflow-aborts",
+    "source": "fn show(level: u8) { println(level); }\nfn main() { mut count = 250; for i in 10 { count += 1; } show(count); }\n",
+    "signal": "SIGABRT"
   }
 ]
