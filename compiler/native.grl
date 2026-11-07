@@ -41,6 +41,10 @@ struct Decl {
     bounds: u64[],
     constraints: u64[][]
 }
+struct Import {
+    module: u8[],
+    name: u8[]
+}
 struct Alias {
     module: u8[],
     name: u8[],
@@ -175,6 +179,7 @@ struct C {
     types: Ty[],
     decls: Decl[],
     aliases: Alias[],
+    imports: Import[],
     fields: Field[],
     funcs: Func[],
     params: u64[],
@@ -2320,6 +2325,22 @@ fn find_interface<a, b, d>(c: (&a C), module: read<b>, name: read<d>) -> u64 {
     }
     return 0;
 }
+fn resolve_import<a, b>(c: (&mut a C), n: read<b>) -> u8[] {
+    mut found = 0;
+    mut module = u8[];
+    for i in c.imports.len() {
+        im_name := c.imports[i].name.copy();
+        im_module := c.imports[i].module.copy();
+        if same(&im_name, &n) {
+            found += 1;
+            module = im_module;
+        }
+    }
+    if found > 1 {
+        fail(borrow_mut(c), &"ambiguous imported name");
+    }
+    return module;
+}
 fn ensure_interface<a>(c: (&mut a C), module: u8[], name: u8[]) -> u64 {
     existing := find_interface(borrow(c), &module, &name);
     if existing {
@@ -2431,9 +2452,17 @@ fn lifetime_parameters<a>(c: (&mut a C)) -> unit {
                         if bit == 0 {
                             mut m = module_copy(borrow_mut(c));
                             mut n = constraint.copy();
+                            mut qualified = 0;
                             if eat(borrow_mut(c), &"::") {
+                                qualified = 1;
                                 m = constraint.copy();
                                 n = ident(borrow_mut(c));
+                            }
+                            if qualified == 0 {
+                                imported := resolve_import(borrow_mut(c), &n);
+                                if imported.len() != 0 {
+                                    m = imported;
+                                }
                             }
                             id := ensure_interface(borrow_mut(c), m, n);
                             for i in requirements.len() {
@@ -3419,7 +3448,7 @@ fn base_named<a>(c: (&mut a C), first: u8[]) -> u64 {
         return mutex_type(borrow_mut(c), e);
     }
 
-    m := module_copy(borrow_mut(c));
+    mut m = module_copy(borrow_mut(c));
     a := find_alias(borrow_mut(c), &m, &first);
     if a != 0 {
         aty := c.aliases[a - 1].ty;
@@ -3427,6 +3456,10 @@ fn base_named<a>(c: (&mut a C), first: u8[]) -> u64 {
             fail(borrow_mut(c), &"recursive or unresolved type alias");
         }
         return aty;
+    }
+    imported := resolve_import(borrow_mut(c), &first);
+    if imported.len() != 0 {
+        m = imported;
     }
     d := find_decl(borrow_mut(c), &m, &first);
     if d == 0 {
@@ -4099,9 +4132,17 @@ fn implementation<a>(c: (&mut a C), pass: u64) -> unit {
     exchange(borrow_mut(c.type_interfaces), u64[][]);
     mut module = module_copy(borrow_mut(c));
     mut name = ident(borrow_mut(c));
+    mut qualified = 0;
     if eat(borrow_mut(c), &"::") {
+        qualified = 1;
         module = name;
         name = ident(borrow_mut(c));
+    }
+    if qualified == 0 {
+        imported := resolve_import(borrow_mut(c), &name);
+        if imported.len() != 0 {
+            module = imported;
+        }
     }
     contract := find_interface(borrow(c), &module, &name);
     if contract == 0 {
@@ -4374,8 +4415,13 @@ fn toplevel<a>(c: (&mut a C), pass: u64) -> unit {
         }
     }
     exchange(borrow_mut(c.module), m);
+    exchange(borrow_mut(c.imports), Import[]);
     while eat(borrow_mut(c), &"use") {
-        ident(borrow_mut(c));
+        m = ident(borrow_mut(c));
+        if eat(borrow_mut(c), &"::") {
+            n := ident(borrow_mut(c));
+            c.imports.push(Import { module: m, name: n });
+        }
         expect(borrow_mut(c), &";");
     }
     while kind(borrow_mut(c)) != 0 {
@@ -13459,6 +13505,7 @@ pub fn main() -> u64 {
         types: Ty[],
         decls: Decl[],
         aliases: Alias[],
+        imports: Import[],
         fields: Field[],
         funcs: Func[],
         params: u64[],
