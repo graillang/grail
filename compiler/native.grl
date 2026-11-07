@@ -41,6 +41,11 @@ struct Decl {
     bounds: num[],
     constraints: num[][]
 }
+struct Alias {
+    module: u8[],
+    name: u8[],
+    ty: num
+}
 struct Field {
     name: u8[],
     ty: num
@@ -169,6 +174,7 @@ struct C {
     alias_next: num,
     types: Ty[],
     decls: Decl[],
+    aliases: Alias[],
     fields: Field[],
     funcs: Func[],
     params: num[],
@@ -2802,6 +2808,16 @@ fn require_type<a>(c: (&mut a C), actual: num, expected: num) -> unit {
     }
     return ();
 }
+// Type alias index + 1, or 0.
+fn find_alias<a, b, d>(c: (&mut a C), m: read<b>, n: read<d>) -> num {
+    for i in c.aliases.len() {
+        a := &c.aliases[i];
+        if same(&a.module, &m) & same(&a.name, &n) {
+            return i + 1;
+        }
+    }
+    return 0;
+}
 // Declaration index + 1, or 0.
 fn find_decl_internal<a, b, d>(c: (&mut a C), m: read<b>, n: read<d>) -> num {
     for i in c.decls.len() {
@@ -3281,6 +3297,14 @@ fn base_named<a>(c: (&mut a C), first: u8[]) -> num {
     }
     if eat(borrow_mut(c), &"::") {
         n := ident(borrow_mut(c));
+        a := find_alias(borrow_mut(c), &first, &n);
+        if a != 0 {
+            aty := c.aliases[a - 1].ty;
+            if aty == 0 {
+                fail(borrow_mut(c), &"recursive or unresolved type alias");
+            }
+            return aty;
+        }
         d := find_decl(borrow_mut(c), &first, &n);
         if d == 0 {
             fail(borrow_mut(c), &"unknown type");
@@ -3392,6 +3416,14 @@ fn base_named<a>(c: (&mut a C), first: u8[]) -> num {
     }
 
     m := module_copy(borrow_mut(c));
+    a := find_alias(borrow_mut(c), &m, &first);
+    if a != 0 {
+        aty := c.aliases[a - 1].ty;
+        if aty == 18446744073709551615 {
+            fail(borrow_mut(c), &"recursive or unresolved type alias");
+        }
+        return aty;
+    }
     d := find_decl(borrow_mut(c), &m, &first);
     if d == 0 {
         fail(borrow_mut(c), &"unknown type");
@@ -3408,6 +3440,39 @@ fn mangle<a, b, d>(c: (&mut a C), m: read<b>, n: read<d>) -> unit {
     o(borrow_mut(c), m);
     c.out.push(95);
     o(borrow_mut(c), n);
+    return ();
+}
+fn alias_declaration<a>(c: (&mut a C), pass: num) -> unit {
+    expect(borrow_mut(c), &"type");
+    name := ident(borrow_mut(c));
+    module := module_copy(borrow_mut(c));
+    expect(borrow_mut(c), &"=");
+    if pass == 1 {
+        while is(borrow_mut(c), &";") == 0 {
+            advance(borrow_mut(c));
+        }
+        expect(borrow_mut(c), &";");
+        if find_alias(borrow_mut(c), &module, &name) != 0 {
+            fail(borrow_mut(c), &"duplicate type alias");
+        }
+        c.aliases.push(Alias { module: module, name: name, ty: 18446744073709551615 });
+        return ();
+    }
+    if pass == 3 {
+        while is(borrow_mut(c), &";") == 0 {
+            advance(borrow_mut(c));
+        }
+        expect(borrow_mut(c), &";");
+        return ();
+    }
+    ty := parse_type(borrow_mut(c));
+    expect(borrow_mut(c), &";");
+    a := find_alias(borrow_mut(c), &module, &name);
+    if a == 0 {
+        fail(borrow_mut(c), &"unknown type alias");
+    }
+    entry := &mut c.aliases[a - 1];
+    exchange(borrow_mut(entry.ty), ty);
     return ();
 }
 fn decl<a>(c: (&mut a C), pass: num) -> unit {
@@ -4311,6 +4376,9 @@ fn toplevel<a>(c: (&mut a C), pass: num) -> unit {
     }
     while kind(borrow_mut(c)) != 0 {
         public := eat(borrow_mut(c), &"pub");
+        if is(borrow_mut(c), &"type") {
+            alias_declaration(borrow_mut(c), pass);
+        } else {
         if is(borrow_mut(c), &"const") {
             constant_declaration(borrow_mut(c), pass);
         } else {
@@ -4327,6 +4395,7 @@ fn toplevel<a>(c: (&mut a C), pass: num) -> unit {
                     }
                 }
             }
+        }
         }
     }
     return ();
@@ -13359,6 +13428,7 @@ pub fn main() -> num {
         alias_next: 1,
         types: Ty[],
         decls: Decl[],
+        aliases: Alias[],
         fields: Field[],
         funcs: Func[],
         params: num[],
