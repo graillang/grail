@@ -1,6 +1,6 @@
 # Collections
 
-`hashmap::Map` stores key/value pairs and remembers the order keys were first inserted, so a loop
+`[K: V]` is a map; `hashmap::with_seed<K, V>` creates one. It stores key/value pairs and remembers the order keys were first inserted, so a loop
 over `0..len` visits them in that order. `key_at(map, i)` and `value_at(map, i)` borrow the i-th
 entry. `vecs::sort` sorts any vector whose element type implements the `order::Ord` interface;
 numbers and text already do, and here `Score` sorts by points, highest first.

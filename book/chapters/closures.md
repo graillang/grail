@@ -11,7 +11,6 @@ text in `words` are moved into it, and the original name can no longer be used. 
 captured values are read-only. A closure is called like a function and can be called many times;
 when it goes out of scope, the values it captured are cleaned up with it.
 
-Grail closures always own their captures, like Rust's `move` closures. Capturing a borrowed
-reference, mutating captured state and closures inside generic functions are not supported yet.
+Grail closures always own their captures, like Rust's `move` closures. Capturing a borrowed reference and mutating captured state are rejected. Closures work inside generic functions; the checker keeps their captures affine like other values.
 
 **Try it:** use `words` again after creating `length` and read the compiler's message.

@@ -15,12 +15,18 @@ try to return or stash a reference to the guarded value, so the lock cannot be b
 Waiting threads sleep in the kernel (futex) instead of spinning.
 
 Rust's `std::thread::scope` gives the same "joined before the scope ends" guarantee with
-closures. Grail does not have capturing closures yet, so shared state is passed explicitly as the
-`context` argument and callbacks are named functions. A Rust `MutexGuard` is a value you can hold;
+closures. Grail closures capture by value, so shared state is passed explicitly as the `context`
+argument; callbacks may be named functions or value-capturing closures. A Rust `MutexGuard` is a value you can hold;
 Grail scopes the guard to a callback instead.
 
-The library also provides `hashmap::Map` (keyed SipHash, user key types via the `hash::Hash` and
-`hash::Equal` interfaces) and `concurrent_map::Map`, a sharded map usable from many threads at once.
-Task handles, cancellation and suspending I/O are not implemented yet.
+The library also provides `[K: V]` maps (keyed SipHash, user key types via the `hash::Hash` and
+`hash::Equal` interfaces) and a sharded `concurrent_map::Map` usable from many threads at once.
+
+`task_scope(context, body)` starts structured tasks. Inside the body, `spawn(scope, context, f)`
+returns a `task<R>` handle and `join(handle)` waits for its result; every task is joined or
+cancelled before the scope ends. `scope.cancel()` cancels the scope, and an optional
+`cancel_token` parameter lets a task observe cancellation. Blocking host reads inside a green
+task suspend that task and are resumed by the reactor, so other tasks keep running. General
+`async`/`await` syntax is not provided; the scope and task APIs are the current surface.
 
 **Try it:** remove `shared.total.lock_with(1, add);` and compare the two totals.
