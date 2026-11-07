@@ -37,6 +37,7 @@ struct Decl {
     count: num,
     regions: num,
     types: num,
+    success: num,
     bounds: num[],
     constraints: num[][]
 }
@@ -2877,7 +2878,7 @@ fn named_type<a>(c: (&mut a C), m: u8[], n: u8[], args: num[]) -> num {
     return intern_args(borrow_mut(c), 8, d, 0, num[], args);
 }
 // Union members use an internal tagged layout, independent of library declarations.
-fn is_union<a>(c: (&mut a C), ty: num) -> num {
+fn is_ordinary_union<a>(c: (&mut a C), ty: num) -> num {
     if ty_kind(borrow_mut(c), ty) != 8 {
         return false;
     }
@@ -2885,35 +2886,59 @@ fn is_union<a>(c: (&mut a C), ty: num) -> num {
     decl := &c.decls[d];
     return same(&decl.module, &".union");
 }
-fn union_type<a>(c: (&mut a C), left: num, right: num) -> num {
-    mut args = num[];
-    if is_union(borrow_mut(c), left) {
-        items := type_args(borrow_mut(c), left);
+fn is_result_union<a>(c: (&mut a C), ty: num) -> num {
+    if ty_kind(borrow_mut(c), ty) != 8 {
+        return false;
+    }
+    d := ty_arg(borrow_mut(c), ty);
+    decl := &c.decls[d];
+    return same(&decl.module, &".result");
+}
+fn is_union<a>(c: (&mut a C), ty: num) -> num {
+    return is_ordinary_union(borrow_mut(c), ty) + is_result_union(borrow_mut(c), ty);
+}
+fn result_success_count<a>(c: (&mut a C), ty: num) -> num {
+    d := ty_arg(borrow_mut(c), ty);
+    decl := &c.decls[d];
+    return decl.success;
+}
+fn append_ordinary<a>(c: (&mut a C), ty: num, args: (&mut a num[])) -> unit {
+    if is_ordinary_union(borrow_mut(c), ty) {
+        items := type_args(borrow_mut(c), ty);
         for i in items.len() {
             args.push(items[i]);
         }
     } else {
-        args.push(left);
+        args.push(ty);
     }
-    if is_union(borrow_mut(c), right) {
-        items := type_args(borrow_mut(c), right);
-        for i in items.len() {
-            args.push(items[i]);
-        }
-    } else {
-        args.push(right);
-    }
+    return ();
+}
+fn check_distinct_members<a>(c: (&mut a C), args: (&a num[]), success: num) -> unit {
     for i in args.len() {
         for j in i {
             if same_type(borrow_mut(c), args[i], args[j]) {
                 fail(borrow_mut(c), &"duplicate union member");
             }
         }
+        if (success != 0) & (i < success) {
+            for j in success..args.len() {
+                if same_type(borrow_mut(c), args[i], args[j]) {
+                    fail(borrow_mut(c), &"overlapping result union");
+                }
+            }
+        }
     }
-    module := copy_bytes(&".union");
-    mut name = copy_bytes(&"Union");
+    return ();
+}
+fn make_union<a>(c: (&mut a C), args: num[], success: num, module: u8[], prefix: read<a>) -> num {
+    check_distinct_members(borrow_mut(c), borrow(args), success);
+    mut name = prefix.copy();
     decimal(borrow_mut(name), args.len());
-    mut d = find_decl(borrow_mut(c), &module, &name);
+    if success != 0 {
+        name.push(95);
+        decimal(borrow_mut(name), success);
+    }
+    mut d = find_decl_internal(borrow_mut(c), &module, &name);
     if d == 0 {
         first := c.fields.len();
         for i in args.len() {
@@ -2928,25 +2953,40 @@ fn union_type<a>(c: (&mut a C), left: num, right: num) -> num {
             bounds.push(0);
             constraints.push(num[]);
         }
-        c
-            .decls
-            .push(
-                Decl {
-                    module: module,
-                    name: name,
-                    is_enum: 1,
-                    first: first,
-                    count: args.len(),
-                    regions: 0,
-                    types: args.len(),
-                    bounds: bounds,
-                    constraints: constraints,
-                }
-            );
+        c.decls.push(Decl {
+            module: module,
+            name: name,
+            is_enum: 1,
+            first: first,
+            count: args.len(),
+            regions: 0,
+            types: args.len(),
+            success: success,
+            bounds: bounds,
+            constraints: constraints,
+        });
         d = c.decls.len();
     }
     return intern_args(borrow_mut(c), 8, d - 1, 0, num[], args);
 }
+fn union_type<a>(c: (&mut a C), left: num, right: num) -> num {
+    mut args = num[];
+    append_ordinary(borrow_mut(c), left, borrow_mut(args));
+    append_ordinary(borrow_mut(c), right, borrow_mut(args));
+    return make_union(borrow_mut(c), args, 0, copy_bytes(&".union"), &"Union");
+}
+fn result_union_type<a>(c: (&mut a C), successes: num[], failures: num[]) -> num {
+    mut args = num[];
+    for i in successes.len() {
+        append_ordinary(borrow_mut(c), successes[i], borrow_mut(args));
+    }
+    success := args.len();
+    for i in failures.len() {
+        append_ordinary(borrow_mut(c), failures[i], borrow_mut(args));
+    }
+    return make_union(borrow_mut(c), args, success, copy_bytes(&".result"), &"Result");
+}
+
 fn parse_type<a>(c: (&mut a C)) -> num {
     mut t = 0;
     // Maps participate in postfix and union composition like other types.
@@ -2972,16 +3012,42 @@ fn parse_type<a>(c: (&mut a C)) -> num {
         oa.push(t);
         t = named_type(borrow_mut(c), copy_bytes(&"core"), copy_bytes(&"OptionStorage"), oa);
     }
-    // `T | E` constructs a structural union.
-    if (c.no_union == 0) & is(borrow_mut(c), &"|") {
-        here := c.pos + 1;
-        nk := kind_at(borrow_mut(c), here);
-        if (nk == 1) + (nk == 40) + (nk == 91) + (nk == 38) {
+    if c.no_union == 0 {
+        mut members = num[];
+        append_ordinary(borrow_mut(c), t, borrow_mut(members));
+        while is(borrow_mut(c), &"|") {
+            mut p = c.pos;
+            if is_at(borrow_mut(c), p + 1, &"?") {
+                advance(borrow_mut(c));
+                advance(borrow_mut(c));
+                mut failures = num[];
+                mut f = parse_union_member(borrow_mut(c));
+                append_ordinary(borrow_mut(c), f, borrow_mut(failures));
+                while is(borrow_mut(c), &"|") {
+                    p = c.pos;
+                    if is_at(borrow_mut(c), p + 1, &"?") {
+                        fail(borrow_mut(c), &"result union |? is non-associative");
+                    }
+                    advance(borrow_mut(c));
+                    f = parse_union_member(borrow_mut(c));
+                    append_ordinary(borrow_mut(c), f, borrow_mut(failures));
+                }
+                return result_union_type(borrow_mut(c), members, failures);
+            }
             advance(borrow_mut(c));
-            e := parse_type(borrow_mut(c));
-            return union_type(borrow_mut(c), t, e);
+            m := parse_union_member(borrow_mut(c));
+            append_ordinary(borrow_mut(c), m, borrow_mut(members));
+        }
+        if 1 < members.len() {
+            return make_union(borrow_mut(c), members, 0, copy_bytes(&".union"), &"Union");
         }
     }
+    return t;
+}
+fn parse_union_member<a>(c: (&mut a C)) -> num {
+    old := exchange(borrow_mut(c.no_union), 1);
+    t := parse_type(borrow_mut(c));
+    exchange(borrow_mut(c.no_union), old);
     return t;
 }
 fn type_suffixes<a>(c: (&mut a C), base: num) -> num {
@@ -3367,6 +3433,7 @@ fn decl<a>(c: (&mut a C), pass: num) -> unit {
                         count: 0,
                         regions: regions,
                         types: types,
+                        success: 0,
                         bounds: bounds,
                         constraints: constraints,
                     }
@@ -3424,6 +3491,7 @@ fn decl<a>(c: (&mut a C), pass: num) -> unit {
             count: count,
             regions: c.rnames.len(),
             types: types,
+            success: 0,
             bounds: bounds,
             constraints: constraints,
         }
@@ -7893,9 +7961,20 @@ fn adopt_value<a>(c: (&mut a C), v: Val, start: num, end: num, expected: num) ->
     if is_union(borrow_mut(c), expected) & (same_type(borrow_mut(c), v.ty, expected) == 0) {
         args := type_args(borrow_mut(c), expected);
         if is_union(borrow_mut(c), v.ty) {
+            expected_result := is_result_union(borrow_mut(c), expected);
+            actual_result := is_result_union(borrow_mut(c), v.ty);
+            if expected_result != actual_result {
+                fail(borrow_mut(c), &"result and ordinary unions do not implicitly convert");
+            }
             from := type_args(borrow_mut(c), v.ty);
             mut mapping = num[];
             mut valid = 1;
+            mut from_success = 0;
+            mut to_success = 0;
+            if expected_result {
+                from_success = result_success_count(borrow_mut(c), v.ty);
+                to_success = result_success_count(borrow_mut(c), expected);
+            }
             for i in from.len() {
                 mut found = 0;
                 mut target = 0;
@@ -7907,6 +7986,17 @@ fn adopt_value<a>(c: (&mut a C), v: Val, start: num, end: num, expected: num) ->
                 }
                 if found != 1 {
                     valid = 0;
+                }
+                if expected_result {
+                    if (i < from_success) {
+                        if to_success <= target {
+                            fail(borrow_mut(c), &"result union conversion changes success/failure partition");
+                        }
+                    } else {
+                        if target < to_success {
+                            fail(borrow_mut(c), &"result union conversion changes success/failure partition");
+                        }
+                    }
                 }
                 mapping.push(target);
             }
@@ -8382,6 +8472,7 @@ fn closure_literal<a>(c: (&mut a C)) -> Val {
                 count: count,
                 regions: 0,
                 types: 0,
+                success: 0,
                 bounds: num[],
                 constraints: num[][],
             }
@@ -10218,6 +10309,110 @@ fn prec(k: num) -> num {
     }
     return 0;
 }
+// `?` on `S |? F` yields the union of S and remaps each F by identity.
+fn success_members<a>(c: (&mut a C), ty: num) -> num {
+    args := type_args(borrow_mut(c), ty);
+    s := result_success_count(borrow_mut(c), ty);
+    if s == 1 {
+        return args[0];
+    }
+    mut members = num[];
+    for i in s {
+        members.push(args[i]);
+    }
+    return make_union(borrow_mut(c), members, 0, copy_bytes(&".union"), &"Union");
+}
+fn propagate_result_union<a>(c: (&mut a C), x: Val, unwrap: num) -> Val {
+    xt := x.t;
+    ty := x.ty;
+    args := type_args(borrow_mut(c), ty);
+    s := result_success_count(borrow_mut(c), ty);
+    result := c.result;
+    mut failure_targets = num[];
+    if unwrap == 0 {
+        if is_result_union(borrow_mut(c), result) == 0 {
+            fail(borrow_mut(c), &"result propagation requires a result return type");
+        }
+        returned := type_args(borrow_mut(c), result);
+        rs := result_success_count(borrow_mut(c), result);
+        for i in s..args.len() {
+            mut found = 0;
+            mut target = 0;
+            for j in rs..returned.len() {
+                if same_type(borrow_mut(c), args[i], returned[j]) {
+                    found += 1;
+                    target = j;
+                }
+            }
+            if found != 1 {
+                fail(borrow_mut(c), &"result failure type is not in the return failure set");
+            }
+            failure_targets.push(target);
+        }
+    }
+    success := label(borrow_mut(c));
+    failure := label(borrow_mut(c));
+    get(borrow_mut(c), xt, &"%rax");
+    o(borrow_mut(c), &"cmpq $");
+    on(borrow_mut(c), s);
+    o(borrow_mut(c), &",(%rax)\n");
+    jump(borrow_mut(c), &"jb", success);
+    jump(borrow_mut(c), &"jmp", failure);
+    // Failure path.
+    before := ownership::snapshot(borrow(c.check));
+    mark(borrow_mut(c), failure);
+    if unwrap {
+        o(borrow_mut(c), &"call rt_abort\n");
+    } else {
+        for i in s..args.len() {
+            next := label(borrow_mut(c));
+            get(borrow_mut(c), xt, &"%rax");
+            o(borrow_mut(c), &"cmpq $");
+            on(borrow_mut(c), i);
+            o(borrow_mut(c), &",(%rax)\n");
+            jump(borrow_mut(c), &"jne", next);
+            target := imm(borrow_mut(c), failure_targets[i - s]);
+            move_out(borrow_mut(c), val(xt, ty));
+            source := place_of(borrow_mut(c), xt);
+            ns := invoke(borrow_mut(c), &"rt_enum_retag", two(xt, target));
+            own(borrow_mut(c), ns, result);
+            dest := place_of(borrow_mut(c), ns);
+            transfer_bonds(borrow_mut(c), source, dest);
+            validate_return(borrow_mut(c), val(ns, result));
+            move_out(borrow_mut(c), val(ns, result));
+            cleanup(borrow_mut(c), 0);
+            get(borrow_mut(c), ns, &"%rax");
+            o(borrow_mut(c), &"leave\nret\n");
+            mark(borrow_mut(c), next);
+        }
+        o(borrow_mut(c), &"call rt_abort\n");
+    }
+    ownership::restore(borrow_mut(c.check), borrow(before));
+    // Success path.
+    mark(borrow_mut(c), success);
+    sty := success_members(borrow_mut(c), ty);
+    if s == 1 {
+        payload := rec_load(borrow_mut(c), xt, 1, 0);
+        move_out(borrow_mut(c), val(xt, ty));
+        invoke(borrow_mut(c), &"rt_free", one(xt));
+        source := place_of(borrow_mut(c), xt);
+        own(borrow_mut(c), payload, sty);
+        dest := place_of(borrow_mut(c), payload);
+        transfer_bonds(borrow_mut(c), source, dest);
+        stored_source(borrow_mut(c), payload, sty);
+        return val(payload, sty);
+    } else {
+        tag := rec_load(borrow_mut(c), xt, 0, 0);
+        move_out(borrow_mut(c), val(xt, ty));
+        source := place_of(borrow_mut(c), xt);
+        ns := invoke(borrow_mut(c), &"rt_enum_retag", two(xt, tag));
+        own(borrow_mut(c), ns, sty);
+        dest := place_of(borrow_mut(c), ns);
+        transfer_bonds(borrow_mut(c), source, dest);
+        stored_source(borrow_mut(c), ns, sty);
+        return val(ns, sty);
+    }
+}
 // A union's first member is success; other members propagate by type.
 fn propagate_union<a>(c: (&mut a C), x: Val, unwrap: num) -> Val {
     xt := x.t;
@@ -10296,6 +10491,9 @@ fn propagate_union<a>(c: (&mut a C), x: Val, unwrap: num) -> Val {
 // `?` returns a failure unchanged (payload layout is shared); `!` aborts on it.
 fn propagate<a>(c: (&mut a C), v: Val, unwrap: num) -> Val {
     x := deref(borrow_mut(c), v);
+    if is_result_union(borrow_mut(c), x.ty) {
+        return propagate_result_union(borrow_mut(c), x, unwrap);
+    }
     if is_union(borrow_mut(c), x.ty) {
         return propagate_union(borrow_mut(c), x, unwrap);
     }
