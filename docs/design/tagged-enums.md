@@ -1,5 +1,9 @@
 # Tagged values, matching and unwrap
 
+> Historical design record: examples and implementation status below describe an earlier compiler.
+> The current language uses `T[]`, `T?`, `[K: V]`, and structural unions `T | E`;
+> `core::Option`, `core::Result`, `core::Pair`, and tuple syntax are not current APIs.
+
 Source modules may declare `enum Parsed<a>{Ok(Token<a>),Err(string)}`. Variants currently carry
 one value or unit; use a record for a multi-field payload. Construct with `Parsed::Ok(value)` or
 `Parsed::Err(error)`. A payload-free alternative is written `None` and constructed as `Option::None`.

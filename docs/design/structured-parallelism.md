@@ -6,25 +6,25 @@ Linux. It is a real multi-threaded runtime, not a sequential stand-in.
 ## `mutex<T>`
 
 ```grl
-fn add<a>(total:ref_mut<a,num>,amount:num)->num{exchange(total,load(total)+amount);return 0;}
+fn add<a>(total:(&mut a num),amount:num)->num{exchange(total,load(total)+amount);return 0;}
 fn main(){m:=mutex(0);m.lock_with(42,add);}
 ```
 
 `mutex(value)` owns its payload. `m.lock_with(context, callback)` locks, passes the callback an
-exclusive `ref_mut` to the payload plus the moved `context`, unlocks, and returns the result.
+exclusive typed reference to the payload plus the moved `context`, unlocks, and returns the result.
 The exclusive reference exists only during the call. The compiler rejects callbacks whose result
 contains borrows or whose context type mentions the payload reference's lifetime, so no loan of
 the guarded data can escape the critical section. Only read access to the mutex itself is needed,
-so `ref<a,mutex<T>>` may be shared between threads; `mutex<T>` is Send+Share when T is Send.
+so `(&a mutex<T>)` may be shared between threads; `mutex<T>` is Send+Share when T is Send.
 
 Locking uses a futex (0 unlocked / 1 locked / 2 contended): waiters sleep in the kernel.
 Limitations: payloads cannot contain borrows yet; there is no try-lock, timeout, poisoning or
 lock ordering check. Locking the same mutex again inside its callback deadlocks (not memory
 unsafety). Panics abort the process, so no lock is left held by an unwinding thread.
 
-## `hashmap::Map<K,V>` (lib/hashmap.grl, lib/hash.grl)
+## `[K: V]` maps (lib/hashmap.grl, lib/hash.grl)
 
-Keys implement the `hash::Hash` and `hash::Equal` interfaces (`num`, sized integers, `bytes`,
+Keys implement the `hash::Hash` and `hash::Equal` interfaces (`num`, sized integers, `u8[]`,
 `string` provided; user records implement them). Hashing is keyed SipHash-2-4 with explicit seeds
 (`hashmap::with_seed`), verified against all 64 reference vectors. The map is compact and
 insertion-ordered (like Python's dict): entries are stored densely and buckets hold entry indices,
@@ -35,8 +35,8 @@ while one is live. Not yet: an entry API and random default seeds.
 
 ## `concurrent_map::Map<K,V>` (DashMap-style)
 
-Sixteen `mutex<hashmap::Map<K,V>>` shards selected by an independently keyed hash. All
-operations take `ref<a,Map>`, so many threads can insert/remove/query concurrently; only keys
+Sixteen `mutex<[K: V]>` shards selected by an independently keyed hash. All
+operations take `(&a Map)`, so many threads can insert/remove/query concurrently; only keys
 on the same shard contend. Values never leave a shard lock as references (insert/remove move
 values; `contains`/`len` return numbers). `len` counts shard by shard and is not a linearizable
 snapshot under concurrent mutation.
@@ -44,13 +44,13 @@ snapshot under concurrent mutation.
 ## `parallel_map(items, context, callback)`
 
 ```grl
-fn work<a>(id:num,shared:ref<a,Shared>)->num{...}
+fn work<a>(id:num,shared:(&a Shared))->num{...}
 results:=parallel_map(ids,borrow(shared),work);
 ```
 
 The callback may be a function or a closure (closures capture only owned values and read them, so
-every worker can share one). Structured fork-join: `items:vec<T>` is moved, each item is passed with the read-only `context`
-to `callback(item, context)`, results come back in order as `vec<R>`, and every worker thread is
+every worker can share one). Structured fork-join: `items:T[]` is moved, each item is passed with the read-only `context`
+to `callback(item, context)`, results come back in order as `R[]`, and every worker thread is
 joined before the call returns. Therefore no task can outlive borrowed data. Checked rules:
 T and R are Send, the context is Share and a plain value, shared reference or readonly view,
 R holds no borrows, and borrowed items are references whose exclusive referents hold no borrows.
@@ -71,7 +71,7 @@ mutation of the shared context while it is in use.
 ```grl
 fn work(n:num,base:num)->num{return n+base;}
 fn wait(n:num,base:num,token:cancel_token)->num{while token.cancelled()==0{host::sleep_ms(1);}return n;}
-fn body<s>(sc:ref<s,scope<num>>,base:num)->num{
+fn body<s>(sc:(&s scope<num>),base:num)->num{
     a:=spawn(sc,1,work);b:=spawn(sc,2,wait);
     sc.cancel();return join(a)+join(b);
 }

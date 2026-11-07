@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Type syntax is concise and postfix: `T[]` vectors, `u8[]` byte vectors, `T?` optional
+  values, `[K: V]` maps, and `&a T` / `&mut a T` typed references. `vec<T>`, `bytes`,
+  `Option<T>`, `hashmap::Map<K,V>`, `ref<a,T>`, `ref_mut<a,T>`, and tuple syntax are removed
+  without compatibility shims.
+- `T | E` is a structural tagged union. A value of any member type converts implicitly, and
+  `match` arms select members by type; matches are exhaustive unless a final `_` arm is used.
+  Postfix `?` propagates non-success members to a compatible return union, and `!` extracts
+  success or aborts. Generic functions and constructors infer a unique member type and reject
+  ambiguous or duplicate-member unions.
 - Type syntax is now postfix and concise: `T[]` is a vector (`vec<T>` is gone), `u8[]` is the
   byte buffer (`bytes` is gone), and `T[...]` / `T[]` are the element and empty literals. A type
   may be parenthesized when its literal needs one, e.g. `(fn(num)->num)[f]`. The byte-buffer

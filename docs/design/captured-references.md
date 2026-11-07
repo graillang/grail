@@ -8,11 +8,11 @@ ownership joins and bootstrap remain required; this is not completion of v0.
 
 ```grl
 struct Cursor<data>{source:read<data>,name:string}
-fn source<outer,data>(cursor:ref<outer,Cursor<data>>)->read<data>{
+fn source<outer,data>(cursor:(&outer Cursor<data>))->read<data>{
     return &cursor.source;
 }
 struct Unique<data>{source:mut<data>}
-fn short<outer,data>(cursor:ref<outer,Unique<data>>)->read<outer>{
+fn short<outer,data>(cursor:(&outer Unique<data>))->read<outer>{
     return &cursor.source;
 }
 ```
@@ -26,7 +26,7 @@ Neither same lifetime labels nor origin unions establish aliasing or unique auth
 
 Known shared descriptors can be explicitly copied with `load`: readonly byte views/holders and
 readonly typed-reference descriptors. Affine owners and unique descriptors cannot be copied by
-`load`. Numeric/unit loads remain as before. For example, loading `ref<outer,ref<data,num>>` returns
+`load`. Numeric/unit loads remain as before. For example, loading `(&outer (&data num))` returns
 a pointer retaining `data`, not the short descriptor-storage lifetime. This is an explicit operation,
 not a new blanket Copy trait or arbitrary projection rule. `read` also copies/reborrows byte
 view/holder descriptors behind a typed reference. Typed field byte access rejects numeric pointers,
@@ -45,7 +45,7 @@ possible places remain separate from data/capability roots. No root, loan, lifet
 is added to native specialization keys.
 
 Written input types determine a reference-source contract and implied outlives graph. In
-`ref<outer,Cursor<data>>`, the physically stored source must outlive the outer borrow (`data ≥ outer`).
+`(&outer Cursor<data>)`, the physically stored source must outlive the outer borrow (`data ≥ outer`).
 Nested references add the corresponding transitive constraints. Unused nominal lifetime/type
 arguments do **not** invent physical-capture outlives facts. Output types do not supply assumptions
 that their own producer was supposed to prove.

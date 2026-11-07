@@ -1,5 +1,3 @@
-use core;
-
 enum Token {
     Number(f64),
     Op(u8),
@@ -10,7 +8,7 @@ struct Parser {
     tokens: Token[],
     pos: num,
 }
-fn tokenize<a>(text: read<a>) -> core::Result<Token[], string> {
+fn tokenize<a>(text: read<a>) -> Token[] | string {
     mut out = Token[];
     mut i = 0;
     while i < text.len() {
@@ -40,14 +38,14 @@ fn tokenize<a>(text: read<a>) -> core::Result<Token[], string> {
                 out.push(Token::Number(value));
             },
             _ => {
-                return core::err<Token[], string>(format("unexpected character at {}", i));
+                return format("unexpected character at {}", i);
             },
         }
     }
-    return core::ok<Token[], string>(out);
+    return out;
 }
 impl Parser {
-    fn peek_op<a>(self: ref<a, Parser>) -> u8 {
+    fn peek_op<a>(self: (&a Parser)) -> u8 {
         if self.pos < self.tokens.len() {
             match borrow(self.tokens[self.pos]) {
                 Op(o) => {
@@ -58,9 +56,9 @@ impl Parser {
         }
         return 0;
     }
-    fn atom<a>(self: ref_mut<a, Parser>) -> core::Result<f64, string> {
+    fn atom<a>(self: (&mut a Parser)) -> f64 | string {
         if self.pos >= self.tokens.len() {
-            return core::err<f64, string>("unexpected end".text());
+            return "unexpected end".text();
         }
         at := self.pos;
         self.pos += 1;
@@ -77,16 +75,16 @@ impl Parser {
             _ => {},
         }
         if kind == 1 {
-            return core::ok<f64, string>(number);
+            return number;
         }
         if kind == 2 {
             v := self.sum()?;
             self.pos += 1;
-            return core::ok<f64, string>(v);
+            return v;
         }
-        return core::err<f64, string>(format("unexpected token at {}", at));
+        return format("unexpected token at {}", at);
     }
-    fn product<a>(self: ref_mut<a, Parser>) -> core::Result<f64, string> {
+    fn product<a>(self: (&mut a Parser)) -> f64 | string {
         mut value = self.atom()?;
         while self.peek_op() == '*' || self.peek_op() == '/' {
             op := self.peek_op();
@@ -98,9 +96,9 @@ impl Parser {
                 value = value / rhs;
             }
         }
-        return core::ok<f64, string>(value);
+        return value;
     }
-    fn sum<a>(self: ref_mut<a, Parser>) -> core::Result<f64, string> {
+    fn sum<a>(self: (&mut a Parser)) -> f64 | string {
         mut value = self.product()?;
         while self.peek_op() == '+' || self.peek_op() == '-' {
             op := self.peek_op();
@@ -112,22 +110,29 @@ impl Parser {
                 value = value - rhs;
             }
         }
-        return core::ok<f64, string>(value);
+        return value;
     }
 }
-fn evaluate<a>(text: read<a>) -> core::Result<f64, string> {
+fn evaluate<a>(text: read<a>) -> f64 | string {
     tokens := tokenize(text)?;
     mut parser = Parser { tokens, pos: 0 };
     return parser.sum();
 }
 fn main() {
-    inputs := string["1 + 2 * 3".text(), "(1 + 2) * 3".text(), "10 / 4 - 1".text(), "2 * (3 + 4) * 5".text(), "7 $ 3".text(), "(1 +".text()];
+    inputs := string[
+        "1 + 2 * 3".text(),
+        "(1 + 2) * 3".text(),
+        "10 / 4 - 1".text(),
+        "2 * (3 + 4) * 5".text(),
+        "7 $ 3".text(),
+        "(1 +".text()
+    ];
     for e in borrow(inputs) {
         match evaluate(e) {
-            Ok(v) => {
+            f64(v) => {
                 println("{} = {}", e, v);
             },
-            Err(msg) => {
+            string(msg) => {
                 println("{} -> error: {}", e, msg);
             },
         }

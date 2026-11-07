@@ -7,343 +7,1131 @@ module fmt;
 // operator, in that order, using tokens only so the program is never reparsed or changed.
 // Token kinds: 1 word, 2 number, 3 string, 4 punctuation (byte or lexer multi-byte code), 5 comment.
 struct F {
-    kind:num[], start:num[], end:num[], nl:num[], code:num[], generic:num[],
-    ltoken:num[], lspace:num[], lfirst:num[], lindent:num[], out:u8[]
+    kind: num[],
+    start: num[],
+    end: num[],
+    nl: num[],
+    code: num[],
+    generic: num[],
+    ltoken: num[],
+    lspace: num[],
+    lfirst: num[],
+    lindent: num[],
+    out: u8[]
 }
-fn letter(c:num)->num {return ((64<c)&(c<91))+((96<c)&(c<123))+(c==95);}
-fn digit(c:num)->num {return (47<c)&(c<58);}
-fn pair(c:num,d:num)->num {
-    if (c==45)&(d==62){return 256;}if (c==61)&(d==62){return 257;}if (c==61)&(d==61){return 258;}
-    if (c==33)&(d==61){return 259;}if (c==58)&(d==58){return 260;}if (c==58)&(d==61){return 261;}
-    if (c==43)&(d==61){return 262;}if (c==45)&(d==61){return 263;}if (c==42)&(d==61){return 264;}
-    if (c==47)&(d==61){return 265;}if (c==37)&(d==61){return 266;}if (c==42)&(d==42){return 267;}if (c==60)&(d==61){return 269;}if (c==62)&(d==61){return 270;}if (c==38)&(d==38){return 273;}if (c==124)&(d==124){return 274;}
+fn letter(c: num) -> num {
+    return ((64 < c) & (c < 91)) + ((96 < c) & (c < 123)) + (c == 95);
+}
+fn digit(c: num) -> num {
+    return (47 < c) & (c < 58);
+}
+fn pair(c: num, d: num) -> num {
+    if (c == 45) & (d == 62) {
+        return 256;
+    }
+    if (c == 61) & (d == 62) {
+        return 257;
+    }
+    if (c == 61) & (d == 61) {
+        return 258;
+    }
+    if (c == 33) & (d == 61) {
+        return 259;
+    }
+    if (c == 58) & (d == 58) {
+        return 260;
+    }
+    if (c == 58) & (d == 61) {
+        return 261;
+    }
+    if (c == 43) & (d == 61) {
+        return 262;
+    }
+    if (c == 45) & (d == 61) {
+        return 263;
+    }
+    if (c == 42) & (d == 61) {
+        return 264;
+    }
+    if (c == 47) & (d == 61) {
+        return 265;
+    }
+    if (c == 37) & (d == 61) {
+        return 266;
+    }
+    if (c == 42) & (d == 42) {
+        return 267;
+    }
+    if (c == 60) & (d == 61) {
+        return 269;
+    }
+    if (c == 62) & (d == 61) {
+        return 270;
+    }
+    if (c == 38) & (d == 38) {
+        return 273;
+    }
+    if (c == 124) & (d == 124) {
+        return 274;
+    }
     return 0;
 }
-fn token<a>(f:ref_mut<a,F>,kind:num,start:num,end:num,nl:num,code:num){
-    f.kind.push(kind);f.start.push(start);f.end.push(end);f.nl.push(nl);f.code.push(code);f.generic.push(0);
+fn token<a>(f: (&mut a F), kind: num, start: num, end: num, nl: num, code: num) {
+    f.kind.push(kind);
+    f.start.push(start);
+    f.end.push(end);
+    f.nl.push(nl);
+    f.code.push(code);
+    f.generic.push(0);
 }
-fn scan<a,b>(f:ref_mut<a,F>,s:read<b>){
-    n:=s.len();mut i=0;mut nl=0;
-    while i<n{
-        c:=s[i];
-        if c==10{nl+=1;i+=1;continue;}
-        if (c==32)+(c==9)+(c==13)+(c==12){i+=1;continue;}
-        start:=i;
-        if (c==47)&(i+1<n){if s[i+1]==47{
-            while i<n{if s[i]==10{break;}i+=1;}
-            mut end=i;while start<end{last:=s[end-1];if (last!=32)&(last!=9)&(last!=13){break;}end-=1;}
-            token(borrow_mut(f),5,start,end,nl,0);nl=0;continue;
-        }}
-        if c==39{
-            i+=1;while i<n{d:=s[i];if d==92{i+=2;continue;}i+=1;if d==39{break;}}if n<i{i=n;}
-            token(borrow_mut(f),3,start,i,nl,0);nl=0;continue;
+fn scan<a, b>(f: (&mut a F), s: read<b>) {
+    n := s.len();
+    mut i = 0;
+    mut nl = 0;
+    while i < n {
+        c := s[i];
+        if c == 10 {
+            nl += 1;
+            i += 1;
+            continue;
         }
-        if c==34{
-            i+=1;while i<n{d:=s[i];if d==92{i+=2;continue;}i+=1;if d==34{break;}}
-            token(borrow_mut(f),3,start,i,nl,0);nl=0;continue;
+        if (c == 32) + (c == 9) + (c == 13) + (c == 12) {
+            i += 1;
+            continue;
         }
-        if letter(c){while i<n{d:=s[i];if (letter(d)+digit(d))==0{break;}i+=1;}token(borrow_mut(f),1,start,i,nl,0);nl=0;continue;}
-        if digit(c){
-            while i<n{d:=s[i];
-                if (letter(d)+digit(d))==0{
-                    mut keep=0;
-                    if (d==46)&(i+1<n){if digit(s[i+1]){if s[i-1]!=46{keep=1;}}}
-                    if ((d==43)+(d==45))&(i+1<n){p:=s[i-1];if ((p==101)+(p==69))&digit(s[i+1]){keep=1;}}
-                    if keep==0{break;}
+        start := i;
+        if (c == 47) & (i + 1 < n) {
+            if s[i + 1] == 47 {
+                while i < n {
+                    if s[i] == 10 {
+                        break;
+                    }
+                    i += 1;
                 }
-                i+=1;}
-            token(borrow_mut(f),2,start,i,nl,0);nl=0;continue;}
-        mut code=c;mut width=1;
-        if i+1<n{mut p=pair(c,s[i+1]);if (p==259)&(i+2<n){if s[i+2]==61{p=0;}}if p!=0{code=p;width=2;if (p==267)&(i+2<n){if s[i+2]==61{code=268;width=3;}}}}
-        i+=width;token(borrow_mut(f),4,start,i,nl,code);nl=0;
-    }
-}
-fn is<a,b,d>(f:ref<a,F>,s:read<b>,i:num,word:read<d>)->num{
-    if f.kind[i]!=1{return false;}start:=f.start[i];if f.end[i]-start!=word.len(){return false;}
-    for j in word.len(){if s[start+j]!=word[j]{return false;}}return true;
-}
-fn punct<a>(f:ref<a,F>,i:num,code:num)->num{return (f.kind[i]==4)&(f.code[i]==code);}
-fn keyword<a,b>(f:ref<a,F>,s:read<b>,i:num)->num{
-    return is(borrow(f),&s,i,&"return")+is(borrow(f),&s,i,&"in")+is(borrow(f),&s,i,&"if")+is(borrow(f),&s,i,&"while")
-        +is(borrow(f),&s,i,&"match")+is(borrow(f),&s,i,&"else")+is(borrow(f),&s,i,&"for");
-}
-// Binary operators (spaced). '<' / '>' count only when not generic brackets.
-fn binary<a>(f:ref<a,F>,i:num)->num{
-    if f.kind[i]!=4{return false;}c:=f.code[i];if 255<c{return (c!=260);}
-    if f.generic[i]{return false;}
-    return (c==61)+(c==60)+(c==62)+(c==43)+(c==45)+(c==42)+(c==47)+(c==37)+(c==38)+(c==94)+(c==124);
-}
-// A '<' after a word opens generic arguments if a matching '>' follows with only type tokens.
-fn mark_generics<a,b>(f:ref_mut<a,F>,s:read<b>){
-    n:=f.kind.len();
-    for i in n{
-        if punct(borrow(f),i,60)&(0<i){if f.kind[i-1]==1{
-            mut depth=0;mut j=i;mut found=0;
-            while j<n{
-                k:=f.kind[j];c:=f.code[j];mut ok=(k==1)+(k==2);
-                if k==4{ok=(c==60)+(c==62)+(c==44)+(c==260)+(c==40)+(c==41)+(c==256)+(c==43)+(c==58)+(c==91)+(c==93);}
-                if ok==0{break;}
-                if (k==4)&(c==60){depth+=1;}
-                if (k==4)&(c==62){depth-=1;if depth==0{found=j;break;}}
-                j+=1;
+                mut end = i;
+                while start < end {
+                    last := s[end - 1];
+                    if (last != 32) & (last != 9) & (last != 13) {
+                        break;
+                    }
+                    end -= 1;
+                }
+                token(borrow_mut(f), 5, start, end, nl, 0);
+                nl = 0;
+                continue;
             }
-            if found!=0{
-                mut d=0;for m in found-i+1{at:=i+m;if punct(borrow(f),at,60){d+=1;mut g=&mut f.generic[at];exchange(g,1);}
-                    if punct(borrow(f),at,62){d-=1;mut g=&mut f.generic[at];exchange(g,1);}}
-            }
-        }}
-    }
-}
-fn mark_pipes<a,b>(f:ref_mut<a,F>,s:read<b>){
-    n:=f.kind.len();mut i=0;
-    while i<n{
-        if punct(borrow(f),i,124)&prefix_position(borrow(f),&s,i){
-            mut j=i+1;mut depth=0;
-            while j<n{k:=f.kind[j];c:=f.code[j];if k==4{if (c==40)+(c==91)+(c==123){depth+=1;}if (c==41)+(c==93)+(c==125){if depth==0{break;}depth-=1;}if (c==124)&(depth==0){break;}}j+=1;}
-            if j<n{if punct(borrow(f),j,124){mut g=&mut f.generic[i];exchange(g,2);mut h=&mut f.generic[j];exchange(h,3);i=j;}}
         }
-        i+=1;
+        if c == 39 {
+            i += 1;
+            while i < n {
+                d := s[i];
+                if d == 92 {
+                    i += 2;
+                    continue;
+                }
+                i += 1;
+                if d == 39 {
+                    break;
+                }
+            }
+            if n < i {
+                i = n;
+            }
+            token(borrow_mut(f), 3, start, i, nl, 0);
+            nl = 0;
+            continue;
+        }
+        if c == 34 {
+            i += 1;
+            while i < n {
+                d := s[i];
+                if d == 92 {
+                    i += 2;
+                    continue;
+                }
+                i += 1;
+                if d == 34 {
+                    break;
+                }
+            }
+            token(borrow_mut(f), 3, start, i, nl, 0);
+            nl = 0;
+            continue;
+        }
+        if letter(c) {
+            while i < n {
+                d := s[i];
+                if (letter(d) + digit(d)) == 0 {
+                    break;
+                }
+                i += 1;
+            }
+            token(borrow_mut(f), 1, start, i, nl, 0);
+            nl = 0;
+            continue;
+        }
+        if digit(c) {
+            while i < n {
+                d := s[i];
+                if (letter(d) + digit(d)) == 0 {
+                    mut keep = 0;
+                    if (d == 46) & (i + 1 < n) {
+                        if digit(s[i + 1]) {
+                            if s[i - 1] != 46 {
+                                keep = 1;
+                            }
+                        }
+                    }
+                    if ((d == 43) + (d == 45)) & (i + 1 < n) {
+                        p := s[i - 1];
+                        if ((p == 101) + (p == 69)) & digit(s[i + 1]) {
+                            keep = 1;
+                        }
+                    }
+                    if keep == 0 {
+                        break;
+                    }
+                }
+                i += 1;
+            }
+            token(borrow_mut(f), 2, start, i, nl, 0);
+            nl = 0;
+            continue;
+        }
+        mut code = c;
+        mut width = 1;
+        if i + 1 < n {
+            mut p = pair(c, s[i + 1]);
+            if (p == 259) & (i + 2 < n) {
+                if s[i + 2] == 61 {
+                    p = 0;
+                }
+            }
+            if p != 0 {
+                code = p;
+                width = 2;
+                if (p == 267) & (i + 2 < n) {
+                    if s[i + 2] == 61 {
+                        code = 268;
+                        width = 3;
+                    }
+                }
+            }
+        }
+        i += width;
+        token(borrow_mut(f), 4, start, i, nl, code);
+        nl = 0;
     }
 }
-fn prefix_position<a,b>(f:ref<a,F>,s:read<b>,i:num)->num{
-    if i==0{return true;}p:=i-1;k:=f.kind[p];
-    if (k==2)+(k==3){return false;}
-    if k==1{return keyword(borrow(f),&s,p);}
-    if k==4{c:=f.code[p];if (c==41)+(c==93)+(c==125)+(c==33)+(c==63){return false;}if f.generic[p]&(c==62){return false;}}
+fn is<a, b, d>(f: (&a F), s: read<b>, i: num, word: read<d>) -> num {
+    if f.kind[i] != 1 {
+        return false;
+    }
+    start := f.start[i];
+    if f.end[i] - start != word.len() {
+        return false;
+    }
+    for j in word.len() {
+        if s[start + j] != word[j] {
+            return false;
+        }
+    }
     return true;
 }
-fn unary<a,b>(f:ref<a,F>,s:read<b>,i:num)->num{
-    if f.kind[i]!=4{return false;}c:=f.code[i];if (c!=38)&(c!=45){return false;}return prefix_position(borrow(f),&s,i);
+fn punct<a>(f: (&a F), i: num, code: num) -> num {
+    return (f.kind[i] == 4) & (f.code[i] == code);
 }
-// Space between two tokens on the same line (0/1). inline: the brace context is a literal.
-fn space<a,b>(f:ref<a,F>,s:read<b>,p:num,i:num,inline:num)->num{
-    pk:=f.kind[p];k:=f.kind[i];pc:=f.code[p];c:=f.code[i];
-    if k==5{return true;}
-    if k==4{if (c==41)+(c==93)+(c==44)+(c==59)+(c==46)+(c==260)+(c==63)+(c==58){return false;}if c==33{return prefix_position(borrow(f),&s,i);}}
-    if (pk==4)&(pc==33){if prefix_position(borrow(f),&s,p){return false;}}
-    if pk==4{if (pc==46)+(pc==260)+(pc==40)+(pc==91){return false;}}
-    if (pk==4)&(pc==125){return true;}
-    if (k==4)&(c==125){return punct(borrow(f),p,123)==0;}
-    if (pk==4)&(pc==123){return true;}
-    if (pk==4)&(pc==58){return true;}
-    // Adjacent << / >> (two tokens, never generic) stay together as a shift operator.
-    if (pk==4)&(k==4)&(f.generic[i]==0)&(f.generic[p]==0)&(((pc==60)&(c==60))+((pc==62)&(c==62))){if f.start[i]==f.end[p]{return false;}}
-    if f.generic[p]==2{return false;}
-    if f.generic[i]==2{return true;}
-    if f.generic[i]==3{return false;}
-    if f.generic[i]==1{return false;}
-    if f.generic[p]==1{if pc==60{return false;}if k==4{if (c==40)+(c==91)+(c==260)+(c==46)+(c==123)==0{return true;}if c==123{return true;}return false;}return true;}
-    if (pk==4)&(unary(borrow(f),&s,p)){return false;}
-    if (k==4)&(c==40){if pk==1{if keyword(borrow(f),&s,p){return true;}return false;}if pk==4{if (pc==41)+(pc==93)+(pc==33)+(pc==63){return false;}}return true;}
-    if (k==4)&(c==91){if pk==1{return keyword(borrow(f),&s,p);}if pk==4{if (pc==41)+(pc==93){return false;}}return true;}
-    if (k==4)&(c==123){return true;}
-    if binary(borrow(f),i){return true;}
-    if binary(borrow(f),p){return true;}
-    if (pk==4)&(pc==44){return true;}
-    if (pk!=4)&(k!=4){return true;}
-    if (pk==4)&((pc==41)+(pc==93)+(pc==33)+(pc==63)){return k!=4;}
-    if (k==4)&(c==38){return pk!=4;}
-    return false;
+fn keyword<a, b>(f: (&a F), s: read<b>, i: num) -> num {
+    return is(borrow(f), &s, i, &"return")
+        + is(borrow(f), &s, i, &"in")
+        + is(borrow(f), &s, i, &"if")
+        + is(borrow(f), &s, i, &"while")
+        + is(borrow(f), &s, i, &"match")
+        + is(borrow(f), &s, i, &"else")
+        + is(borrow(f), &s, i, &"for");
 }
-fn new_line<a>(f:ref_mut<a,F>,indent:num){f.lfirst.push(f.ltoken.len());f.lindent.push(indent);}
-fn emit<a>(f:ref_mut<a,F>,i:num,sp:num){f.ltoken.push(i);f.lspace.push(sp);}
-// Context kinds: 1 block, 2 declaration (one item per line), 3 match, 4 inline literal, 5 paren, 6 bracket.
-fn layout<a,b>(f:ref_mut<a,F>,s:read<b>){
-    n:=f.kind.len();mut stack=num[];mut indent=0;mut pending=1;mut header=0;mut start=1;mut lines=0;
-    for i in n{
-        k:=f.kind[i];c:=f.code[i];mut top=0;if stack.len(){top=stack[stack.len()-1];}
-        closes:=(k==4)&(c==125)&((top==1)+(top==2)+(top==3));
-        if closes{stack.pop();indent-=1;
-            empty:=punct(borrow(f),i-1,123);
-            if empty&(pending!=0){pending=0;emit(borrow_mut(f),i,0);start=1;header=0;
-                if i+1<n{if (punct(borrow(f),i+1,44)+punct(borrow(f),i+1,41)+punct(borrow(f),i+1,59)+punct(borrow(f),i+1,93)+is(borrow(f),&s,i+1,&"else"))==0{pending=1;}}else{pending=1;}
-                continue;}
-            pending=1;}
-        if (k==5)&(f.nl[i]==0)&(pending!=0)&(0<i){pending=0;emit(borrow_mut(f),i,1);pending=1;continue;}
-        if pending{
-            if (1<f.nl[i])&(lines!=0)&(closes==0){if punct(borrow(f),i-1,123)==0{new_line(borrow_mut(f),0);}}
-            new_line(borrow_mut(f),indent);lines+=1;emit(borrow_mut(f),i,0);pending=0;
-        }else{
-            mut inline=0;if top==4{inline=1;}sp:=space(borrow(f),&s,i-1,i,inline);emit(borrow_mut(f),i,sp);
+// Binary operators (spaced). '<' / '>' count only when not generic brackets.
+fn binary<a>(f: (&a F), i: num) -> num {
+    if f.kind[i] != 4 {
+        return false;
+    }
+    c := f.code[i];
+    if 255 < c {
+        return (c != 260);
+    }
+    if f.generic[i] {
+        return false;
+    }
+    return (c == 61)
+        + (c == 60)
+        + (c == 62)
+        + (c == 43)
+        + (c == 45)
+        + (c == 42)
+        + (c == 47)
+        + (c == 37)
+        + (c == 38)
+        + (c == 94)
+        + (c == 124);
+}
+// A '<' after a word opens generic arguments if a matching '>' follows with only type tokens.
+fn mark_generics<a, b>(f: (&mut a F), s: read<b>) {
+    n := f.kind.len();
+    for i in n {
+        if punct(borrow(f), i, 60) & (0 < i) {
+            if f.kind[i - 1] == 1 {
+                mut depth = 0;
+                mut j = i;
+                mut found = 0;
+                while j < n {
+                    k := f.kind[j];
+                    c := f.code[j];
+                    mut ok = (k == 1) + (k == 2);
+                    if k == 4 {
+                        ok = (c == 60)
+                            + (c == 62)
+                            + (c == 44)
+                            + (c == 260)
+                            + (c == 40)
+                            + (c == 41)
+                            + (c == 256)
+                            + (c == 43)
+                            + (c == 58)
+                            + (c == 91)
+                            + (c == 93);
+                    }
+                    if ok == 0 {
+                        break;
+                    }
+                    if (k == 4) & (c == 60) {
+                        depth += 1;
+                    }
+                    if (k == 4) & (c == 62) {
+                        depth -= 1;
+                        if depth == 0 {
+                            found = j;
+                            break;
+                        }
+                    }
+                    j += 1;
+                }
+                if found != 0 {
+                    mut d = 0;
+                    for m in found - i + 1 {
+                        at := i + m;
+                        if punct(borrow(f), at, 60) {
+                            d += 1;
+                            mut g = &mut f.generic[at];
+                            exchange(g, 1);
+                        }
+                        if punct(borrow(f), at, 62) {
+                            d -= 1;
+                            mut g = &mut f.generic[at];
+                            exchange(g, 1);
+                        }
+                    }
+                }
+            }
         }
-        if start&(k==1){
-            mut word=i;if is(borrow(f),&s,i,&"pub")+is(borrow(f),&s,i,&"unsafe"){word=i;}
-            if is(borrow(f),&s,word,&"struct")+is(borrow(f),&s,word,&"enum"){header=1;}
-            else{if is(borrow(f),&s,word,&"match"){header=3;}
-            else{if is(borrow(f),&s,word,&"fn")+is(borrow(f),&s,word,&"if")+is(borrow(f),&s,word,&"while")+is(borrow(f),&s,word,&"for")+is(borrow(f),&s,word,&"else")+is(borrow(f),&s,word,&"loop")+is(borrow(f),&s,word,&"impl")+is(borrow(f),&s,word,&"interface"){header=2;}}}
-            if (is(borrow(f),&s,i,&"pub")+is(borrow(f),&s,i,&"unsafe"))==0{start=0;}
-        }
-        if start&(k!=1)&(k!=5){start=0;}
-        if k==5{pending=1;continue;}
-        if k!=4{continue;}
-        if c==123{
-            mut kind=4;
-            nested:=(top==4)+(top==5)+(top==6);
-            if punct(borrow(f),i-1,257){kind=1;}
-            else{if (header==1)&(nested==0){kind=2;}else{if (header==3)&(nested==0){kind=3;}else{if (header==2)&(nested==0){kind=1;}}}}
-            stack.push(kind);
-            if kind!=4{indent+=1;pending=1;header=0;start=1;}
-            continue;
-        }
-        if (c==125)&(closes==0){if top==4{stack.pop();}continue;}
-        if closes{
-            start=1;header=0;pending=1;
-            if i+1<n{if (punct(borrow(f),i+1,44)+punct(borrow(f),i+1,41)+punct(borrow(f),i+1,59)+punct(borrow(f),i+1,93)+is(borrow(f),&s,i+1,&"else"))!=0{pending=0;}}
-            continue;
-        }
-        if c==40{stack.push(5);continue;}if c==91{stack.push(6);continue;}
-        if (c==41)+(c==93){if (top==5)+(top==6){stack.pop();}continue;}
-        if c==59{if (top==1)+(top==0){pending=1;start=1;header=0;}continue;}
-        if c==44{if (top==2)+(top==3){pending=1;start=1;}continue;}
     }
 }
-fn put<a,b>(out:ref_mut<a,u8[]>,s:read<b>){for i in s.len(){out.push(s[i]);}}
-fn token_width<a>(f:ref<a,F>,i:num)->num{return f.end[i]-f.start[i];}
-fn range_width<a>(f:ref<a,F>,lo:num,hi:num)->num{
-    mut w=0;mut j=lo;while j<hi{if (j!=lo)&(f.lspace[j]!=0){w+=1;}w+=token_width(borrow(f),f.ltoken[j]);j+=1;}return w;
+fn mark_pipes<a, b>(f: (&mut a F), s: read<b>) {
+    n := f.kind.len();
+    mut i = 0;
+    while i < n {
+        if punct(borrow(f), i, 124) & prefix_position(borrow(f), &s, i) {
+            mut j = i + 1;
+            mut depth = 0;
+            while j < n {
+                k := f.kind[j];
+                c := f.code[j];
+                if k == 4 {
+                    if (c == 40) + (c == 91) + (c == 123) {
+                        depth += 1;
+                    }
+                    if (c == 41) + (c == 93) + (c == 125) {
+                        if depth == 0 {
+                            break;
+                        }
+                        depth -= 1;
+                    }
+                    if (c == 124) & (depth == 0) {
+                        break;
+                    }
+                }
+                j += 1;
+            }
+            if j < n {
+                if punct(borrow(f), j, 124) {
+                    mut g = &mut f.generic[i];
+                    exchange(g, 2);
+                    mut h = &mut f.generic[j];
+                    exchange(h, 3);
+                    i = j;
+                }
+            }
+        }
+        i += 1;
+    }
 }
-fn write_range<a,b>(f:ref_mut<a,F>,s:read<b>,lo:num,hi:num,indent:num){
-    for i in indent*4{f.out.push(32);}
-    mut j=lo;while j<hi{if (j!=lo)&(f.lspace[j]!=0){f.out.push(32);}t:=f.ltoken[j];for m in f.end[t]-f.start[t]{f.out.push(s[f.start[t]+m]);}j+=1;}
+fn prefix_position<a, b>(f: (&a F), s: read<b>, i: num) -> num {
+    if i == 0 {
+        return true;
+    }
+    p := i - 1;
+    k := f.kind[p];
+    if (k == 2) + (k == 3) {
+        return false;
+    }
+    if k == 1 {
+        return keyword(borrow(f), &s, p);
+    }
+    if k == 4 {
+        c := f.code[p];
+        if (c == 41) + (c == 93) + (c == 125) + (c == 33) + (c == 63) {
+            return false;
+        }
+        if f.generic[p] & (c == 62) {
+            return false;
+        }
+    }
+    return true;
+}
+fn unary<a, b>(f: (&a F), s: read<b>, i: num) -> num {
+    if f.kind[i] != 4 {
+        return false;
+    }
+    c := f.code[i];
+    if (c != 38) & (c != 45) {
+        return false;
+    }
+    return prefix_position(borrow(f), &s, i);
+}
+// Space between two tokens on the same line (0/1). inline: the brace context is a literal.
+fn space<a, b>(f: (&a F), s: read<b>, p: num, i: num, inline: num) -> num {
+    pk := f.kind[p];
+    k := f.kind[i];
+    pc := f.code[p];
+    c := f.code[i];
+    if k == 5 {
+        return true;
+    }
+    if k == 4 {
+        if (c == 41)
+            + (c == 93)
+            + (c == 44)
+            + (c == 59)
+            + (c == 46)
+            + (c == 260)
+            + (c == 63)
+            + (c == 58) {
+            return false;
+        }
+        if c == 33 {
+            if (pk == 4) & ((pc == 40) + (pc == 91) + (pc == 123)) {
+                return false;
+            }
+            return prefix_position(borrow(f), &s, i);
+        }
+    }
+    if (pk == 4) & (pc == 33) {
+        if prefix_position(borrow(f), &s, p) {
+            return false;
+        }
+    }
+    if pk == 4 {
+        if (pc == 46) + (pc == 260) + (pc == 40) + (pc == 91) {
+            return false;
+        }
+    }
+    if (pk == 4) & (pc == 125) {
+        return true;
+    }
+    if (k == 4) & (c == 125) {
+        return punct(borrow(f), p, 123) == 0;
+    }
+    if (pk == 4) & (pc == 123) {
+        return true;
+    }
+    if (pk == 4) & (pc == 58) {
+        return true;
+    }
+    // Adjacent << / >> (two tokens, never generic) stay together as a shift operator.
+    if (pk == 4)
+        & (k == 4)
+        & (f.generic[i] == 0)
+        & (f.generic[p] == 0)
+        & (((pc == 60) & (c == 60)) + ((pc == 62) & (c == 62))) {
+        if f.start[i] == f.end[p] {
+            return false;
+        }
+    }
+    if f.generic[p] == 2 {
+        return false;
+    }
+    if f.generic[i] == 2 {
+        return true;
+    }
+    if f.generic[i] == 3 {
+        return false;
+    }
+    if f.generic[i] == 1 {
+        return false;
+    }
+    if f.generic[p] == 1 {
+        if pc == 60 {
+            return false;
+        }
+        if k == 4 {
+            if (c == 40) + (c == 91) + (c == 260) + (c == 46) + (c == 123) == 0 {
+                return true;
+            }
+            if c == 123 {
+                return true;
+            }
+            return false;
+        }
+        return true;
+    }
+    if (pk == 4) & (unary(borrow(f), &s, p)) {
+        return false;
+    }
+    if (k == 4) & (c == 40) {
+        if pk == 1 {
+            if keyword(borrow(f), &s, p) {
+                return true;
+            }
+            return false;
+        }
+        if pk == 4 {
+            if (pc == 41) + (pc == 93) + (pc == 33) + (pc == 63) {
+                return false;
+            }
+        }
+        return true;
+    }
+    if (k == 4) & (c == 91) {
+        if pk == 1 {
+            return keyword(borrow(f), &s, p);
+        }
+        if pk == 4 {
+            if (pc == 41) + (pc == 93) {
+                return false;
+            }
+        }
+        return true;
+    }
+    if (k == 4) & (c == 123) {
+        return true;
+    }
+    if binary(borrow(f), i) {
+        return true;
+    }
+    if binary(borrow(f), p) {
+        return true;
+    }
+    if (pk == 4) & (pc == 44) {
+        return true;
+    }
+    if (pk != 4) & (k != 4) {
+        return true;
+    }
+    if (pk == 4) & ((pc == 41) + (pc == 93) + (pc == 33) + (pc == 63)) {
+        return k != 4;
+    }
+    if (k == 4) & (c == 38) {
+        return pk != 4;
+    }
+    return false;
+}
+fn new_line<a>(f: (&mut a F), indent: num) {
+    f.lfirst.push(f.ltoken.len());
+    f.lindent.push(indent);
+}
+fn emit<a>(f: (&mut a F), i: num, sp: num) {
+    f.ltoken.push(i);
+    f.lspace.push(sp);
+}
+// Context kinds: 1 block, 2 declaration (one item per line), 3 match, 4 inline literal, 5 paren, 6 bracket.
+fn layout<a, b>(f: (&mut a F), s: read<b>) {
+    n := f.kind.len();
+    mut stack = num[];
+    mut indent = 0;
+    mut pending = 1;
+    mut header = 0;
+    mut start = 1;
+    mut lines = 0;
+    for i in n {
+        k := f.kind[i];
+        c := f.code[i];
+        mut top = 0;
+        if stack.len() {
+            top = stack[stack.len() - 1];
+        }
+        closes := (k == 4) & (c == 125) & ((top == 1) + (top == 2) + (top == 3));
+        if closes {
+            stack.pop();
+            indent -= 1;
+            empty := punct(borrow(f), i - 1, 123);
+            if empty & (pending != 0) {
+                pending = 0;
+                emit(borrow_mut(f), i, 0);
+                start = 1;
+                header = 0;
+                if i + 1 < n {
+                    if (
+                        punct(borrow(f), i + 1, 44)
+                            + punct(borrow(f), i + 1, 41)
+                            + punct(borrow(f), i + 1, 59)
+                            + punct(borrow(f), i + 1, 93)
+                            + is(borrow(f), &s, i + 1, &"else")
+                    )
+                        == 0 {
+                        pending = 1;
+                    }
+                } else {
+                    pending = 1;
+                }
+                continue;
+            }
+            pending = 1;
+        }
+        if (k == 5) & (f.nl[i] == 0) & (pending != 0) & (0 < i) {
+            pending = 0;
+            emit(borrow_mut(f), i, 1);
+            pending = 1;
+            continue;
+        }
+        if pending {
+            if (1 < f.nl[i]) & (lines != 0) & (closes == 0) {
+                if punct(borrow(f), i - 1, 123) == 0 {
+                    new_line(borrow_mut(f), 0);
+                }
+            }
+            new_line(borrow_mut(f), indent);
+            lines += 1;
+            emit(borrow_mut(f), i, 0);
+            pending = 0;
+        } else {
+            mut inline = 0;
+            if top == 4 {
+                inline = 1;
+            }
+            sp := space(borrow(f), &s, i - 1, i, inline);
+            emit(borrow_mut(f), i, sp);
+        }
+        if start & (k == 1) {
+            mut word = i;
+            if is(borrow(f), &s, i, &"pub") + is(borrow(f), &s, i, &"unsafe") {
+                word = i;
+            }
+            if is(borrow(f), &s, word, &"struct") + is(borrow(f), &s, word, &"enum") {
+                header = 1;
+            } else {
+                if is(borrow(f), &s, word, &"match") {
+                    header = 3;
+                } else {
+                    if is(borrow(f), &s, word, &"fn")
+                        + is(borrow(f), &s, word, &"if")
+                        + is(borrow(f), &s, word, &"while")
+                        + is(borrow(f), &s, word, &"for")
+                        + is(borrow(f), &s, word, &"else")
+                        + is(borrow(f), &s, word, &"loop")
+                        + is(borrow(f), &s, word, &"impl")
+                        + is(borrow(f), &s, word, &"interface") {
+                        header = 2;
+                    }
+                }
+            }
+            if (is(borrow(f), &s, i, &"pub") + is(borrow(f), &s, i, &"unsafe")) == 0 {
+                start = 0;
+            }
+        }
+        if start & (k != 1) & (k != 5) {
+            start = 0;
+        }
+        if k == 5 {
+            pending = 1;
+            continue;
+        }
+        if k != 4 {
+            continue;
+        }
+        if c == 123 {
+            mut kind = 4;
+            nested := (top == 4) + (top == 5) + (top == 6);
+            if punct(borrow(f), i - 1, 257) {
+                kind = 1;
+            } else {
+                if (header == 1) & (nested == 0) {
+                    kind = 2;
+                } else {
+                    if (header == 3) & (nested == 0) {
+                        kind = 3;
+                    } else {
+                        if (header == 2) & (nested == 0) {
+                            kind = 1;
+                        }
+                    }
+                }
+            }
+            stack.push(kind);
+            if kind != 4 {
+                indent += 1;
+                pending = 1;
+                header = 0;
+                start = 1;
+            }
+            continue;
+        }
+        if (c == 125) & (closes == 0) {
+            if top == 4 {
+                stack.pop();
+            }
+            continue;
+        }
+        if closes {
+            start = 1;
+            header = 0;
+            pending = 1;
+            if i + 1 < n {
+                if (
+                    punct(borrow(f), i + 1, 44)
+                        + punct(borrow(f), i + 1, 41)
+                        + punct(borrow(f), i + 1, 59)
+                        + punct(borrow(f), i + 1, 93)
+                        + is(borrow(f), &s, i + 1, &"else")
+                )
+                    != 0 {
+                    pending = 0;
+                }
+            }
+            continue;
+        }
+        if c == 40 {
+            stack.push(5);
+            continue;
+        }
+        if c == 91 {
+            stack.push(6);
+            continue;
+        }
+        if (c == 41) + (c == 93) {
+            if (top == 5) + (top == 6) {
+                stack.pop();
+            }
+            continue;
+        }
+        if c == 59 {
+            if (top == 1) + (top == 0) {
+                pending = 1;
+                start = 1;
+                header = 0;
+            }
+            continue;
+        }
+        if c == 44 {
+            if (top == 2) + (top == 3) {
+                pending = 1;
+                start = 1;
+            }
+            continue;
+        }
+    }
+}
+fn put<a, b>(out: (&mut a u8[]), s: read<b>) {
+    for i in s.len() {
+        out.push(s[i]);
+    }
+}
+fn token_width<a>(f: (&a F), i: num) -> num {
+    return f.end[i] - f.start[i];
+}
+fn range_width<a>(f: (&a F), lo: num, hi: num) -> num {
+    mut w = 0;
+    mut j = lo;
+    while j < hi {
+        if (j != lo) & (f.lspace[j] != 0) {
+            w += 1;
+        }
+        w += token_width(borrow(f), f.ltoken[j]);
+        j += 1;
+    }
+    return w;
+}
+fn write_range<a, b>(f: (&mut a F), s: read<b>, lo: num, hi: num, indent: num) {
+    for i in indent * 4 {
+        f.out.push(32);
+    }
+    mut j = lo;
+    while j < hi {
+        if (j != lo) & (f.lspace[j] != 0) {
+            f.out.push(32);
+        }
+        t := f.ltoken[j];
+        for m in f.end[t] - f.start[t] {
+            f.out.push(s[f.start[t] + m]);
+        }
+        j += 1;
+    }
     f.out.push(10);
 }
-fn opener<a>(f:ref<a,F>,j:num)->num{t:=f.ltoken[j];if f.kind[t]!=4{return false;}c:=f.code[t];return (c==40)+(c==91)+(c==123);}
-fn closer<a>(f:ref<a,F>,j:num)->num{t:=f.ltoken[j];if f.kind[t]!=4{return false;}c:=f.code[t];return (c==41)+(c==93)+(c==125);}
+fn opener<a>(f: (&a F), j: num) -> num {
+    t := f.ltoken[j];
+    if f.kind[t] != 4 {
+        return false;
+    }
+    c := f.code[t];
+    return (c == 40) + (c == 91) + (c == 123);
+}
+fn closer<a>(f: (&a F), j: num) -> num {
+    t := f.ltoken[j];
+    if f.kind[t] != 4 {
+        return false;
+    }
+    c := f.code[t];
+    return (c == 41) + (c == 93) + (c == 125);
+}
 // A line over 100 columns is broken in rustfmt order: a match arm after `=>`, then a binary
 // operator chain before each operator, then a postfix chain before each `.`, then a bracket
 // list one item per line. Every rule reads tokens only, so formatting never changes the program.
-fn code_at<a>(f:ref<a,F>,j:num)->num{t:=f.ltoken[j];if f.kind[t]!=4{return 0;}return f.code[t];}
-fn opens(c:num)->num{return (c==40)+(c==91)+(c==123);}
-fn shuts(c:num)->num{return (c==41)+(c==93)+(c==125);}
+fn code_at<a>(f: (&a F), j: num) -> num {
+    t := f.ltoken[j];
+    if f.kind[t] != 4 {
+        return 0;
+    }
+    return f.code[t];
+}
+fn opens(c: num) -> num {
+    return (c == 40) + (c == 91) + (c == 123);
+}
+fn shuts(c: num) -> num {
+    return (c == 41) + (c == 93) + (c == 125);
+}
 // Index of the token closing the opener at j, or hi when it is not closed on this line.
-fn close_of<a>(f:ref<a,F>,j:num,hi:num)->num{
-    mut d=0;mut m=j;
-    while m<hi{if opener(borrow(f),m){d+=1;}if closer(borrow(f),m){d-=1;if d==0{return m;}}m+=1;}
+fn close_of<a>(f: (&a F), j: num, hi: num) -> num {
+    mut d = 0;
+    mut m = j;
+    while m < hi {
+        if opener(borrow(f), m) {
+            d += 1;
+        }
+        if closer(borrow(f), m) {
+            d -= 1;
+            if d == 0 {
+                return m;
+            }
+        }
+        m += 1;
+    }
     return hi;
 }
 // A binary operator that may start a continuation line: not assignment, not a unary sign.
-fn breakable<a,b>(f:ref<a,F>,s:read<b>,j:num)->num{
-    t:=f.ltoken[j];if f.kind[t]!=4{return false;}if binary(borrow(f),t)==0{return false;}
-    c:=f.code[t];if (c==61)+(c==256)+(c==257)+(c==261)+(c==262)+(c==263)+(c==264)+(c==265)+(c==266){return false;}
-    if unary(borrow(f),&s,t){return false;}
+fn breakable<a, b>(f: (&a F), s: read<b>, j: num) -> num {
+    t := f.ltoken[j];
+    if f.kind[t] != 4 {
+        return false;
+    }
+    if binary(borrow(f), t) == 0 {
+        return false;
+    }
+    c := f.code[t];
+    if (c == 61)
+        + (c == 256)
+        + (c == 257)
+        + (c == 261)
+        + (c == 262)
+        + (c == 263)
+        + (c == 264)
+        + (c == 265)
+        + (c == 266) {
+        return false;
+    }
+    if unary(borrow(f), &s, t) {
+        return false;
+    }
     return true;
 }
 // A `{ ... }` body that accepts a trailing comma: comma-separated items, no statements or arms.
-fn trailing_ok<a>(f:ref<a,F>,lo:num,hi:num)->num{
-    mut d=0;mut j=lo;mut commas=0;
-    while j<hi{
-        c:=code_at(borrow(f),j);if opens(c){d+=1;}if shuts(c){d-=1;}
-        if d==0{if (c==59)+(c==261)+(c==257){return false;}if c==44{commas+=1;}}
-        j+=1;
+fn trailing_ok<a>(f: (&a F), lo: num, hi: num) -> num {
+    mut d = 0;
+    mut j = lo;
+    mut commas = 0;
+    while j < hi {
+        c := code_at(borrow(f), j);
+        if opens(c) {
+            d += 1;
+        }
+        if shuts(c) {
+            d -= 1;
+        }
+        if d == 0 {
+            if (c == 59) + (c == 261) + (c == 257) {
+                return false;
+            }
+            if c == 44 {
+                commas += 1;
+            }
+        }
+        j += 1;
     }
-    return 0<commas;
+    return 0 < commas;
 }
-fn write_range_comma<a,b>(f:ref_mut<a,F>,s:read<b>,lo:num,hi:num,indent:num){
-    for i in indent*4{f.out.push(32);}
-    mut j=lo;while j<hi{if (j!=lo)&(f.lspace[j]!=0){f.out.push(32);}t:=f.ltoken[j];for m in f.end[t]-f.start[t]{f.out.push(s[f.start[t]+m]);}j+=1;}
-    f.out.push(44);f.out.push(10);
+fn write_range_comma<a, b>(f: (&mut a F), s: read<b>, lo: num, hi: num, indent: num) {
+    for i in indent * 4 {
+        f.out.push(32);
+    }
+    mut j = lo;
+    while j < hi {
+        if (j != lo) & (f.lspace[j] != 0) {
+            f.out.push(32);
+        }
+        t := f.ltoken[j];
+        for m in f.end[t] - f.start[t] {
+            f.out.push(s[f.start[t] + m]);
+        }
+        j += 1;
+    }
+    f.out.push(44);
+    f.out.push(10);
 }
 // Long match arm: the pattern and `=>` stay, the body moves to the next line.
-fn arm_break<a,b>(f:ref_mut<a,F>,s:read<b>,lo:num,hi:num,indent:num)->num{
-    mut d=0;mut j=lo;
-    while j<hi{
-        c:=code_at(borrow(f),j);if opens(c){d+=1;}if shuts(c){d-=1;}
-        if (d==0)&(c==257)&(j+2<hi){
-            write_range(borrow_mut(f),&s,lo,j+1,indent);
-            render(borrow_mut(f),&s,j+1,hi,indent+1);return true;
+fn arm_break<a, b>(f: (&mut a F), s: read<b>, lo: num, hi: num, indent: num) -> num {
+    mut d = 0;
+    mut j = lo;
+    while j < hi {
+        c := code_at(borrow(f), j);
+        if opens(c) {
+            d += 1;
         }
-        j+=1;
+        if shuts(c) {
+            d -= 1;
+        }
+        if (d == 0) & (c == 257) & (j + 2 < hi) {
+            write_range(borrow_mut(f), &s, lo, j + 1, indent);
+            render(borrow_mut(f), &s, j + 1, hi, indent + 1);
+            return true;
+        }
+        j += 1;
     }
     return false;
 }
 // A single `.` used as a postfix separator, never one half of a `..` range.
-fn chain_dot<a>(f:ref<a,F>,j:num,lo:num,hi:num)->num{
-    if code_at(borrow(f),j)!=46{return false;}
-    if lo<j{if code_at(borrow(f),j-1)==46{return false;}}
-    if j+1<hi{if code_at(borrow(f),j+1)==46{return false;}}
+fn chain_dot<a>(f: (&a F), j: num, lo: num, hi: num) -> num {
+    if code_at(borrow(f), j) != 46 {
+        return false;
+    }
+    if lo < j {
+        if code_at(borrow(f), j - 1) == 46 {
+            return false;
+        }
+    }
+    if j + 1 < hi {
+        if code_at(borrow(f), j + 1) == 46 {
+            return false;
+        }
+    }
     return true;
 }
 // Long postfix chain: the head stays on the line, then one `.segment` per line.
-fn chain_break<a,b>(f:ref_mut<a,F>,s:read<b>,lo:num,hi:num,indent:num)->num{
-    if chain_dot(borrow(f),lo,lo,hi){return false;}
-    mut d=0;mut j=lo;mut dots=0;
-    while j<hi{c:=code_at(borrow(f),j);if opens(c){d+=1;}if shuts(c){d-=1;}if (d==0)&chain_dot(borrow(f),j,lo,hi){dots+=1;}j+=1;}
-    if dots<2{return false;}
-    mut seg=lo;d=0;j=lo;
-    while j<hi{
-        c:=code_at(borrow(f),j);if opens(c){d+=1;}if shuts(c){d-=1;}
-        if (d==0)&chain_dot(borrow(f),j,lo,hi){
-            mut ind=indent;if seg!=lo{ind=indent+1;}
-            render(borrow_mut(f),&s,seg,j,ind);seg=j;
-        }
-        j+=1;
+fn chain_break<a, b>(f: (&mut a F), s: read<b>, lo: num, hi: num, indent: num) -> num {
+    if chain_dot(borrow(f), lo, lo, hi) {
+        return false;
     }
-    render(borrow_mut(f),&s,seg,hi,indent+1);
+    mut d = 0;
+    mut j = lo;
+    mut dots = 0;
+    while j < hi {
+        c := code_at(borrow(f), j);
+        if opens(c) {
+            d += 1;
+        }
+        if shuts(c) {
+            d -= 1;
+        }
+        if (d == 0) & chain_dot(borrow(f), j, lo, hi) {
+            dots += 1;
+        }
+        j += 1;
+    }
+    if dots < 2 {
+        return false;
+    }
+    mut seg = lo;
+    d = 0;
+    j = lo;
+    while j < hi {
+        c := code_at(borrow(f), j);
+        if opens(c) {
+            d += 1;
+        }
+        if shuts(c) {
+            d -= 1;
+        }
+        if (d == 0) & chain_dot(borrow(f), j, lo, hi) {
+            mut ind = indent;
+            if seg != lo {
+                ind = indent + 1;
+            }
+            render(borrow_mut(f), &s, seg, j, ind);
+            seg = j;
+        }
+        j += 1;
+    }
+    render(borrow_mut(f), &s, seg, hi, indent + 1);
     return true;
 }
 // Bracket list that does not fit: head, one item per line, tail. A `{` record body also takes a
 // trailing comma, which the language accepts there.
-fn list_break<a,b>(f:ref_mut<a,F>,s:read<b>,lo:num,hi:num,indent:num)->num{
-    mut open=hi;mut close=hi;mut j=lo;
-    while j<hi{
-        if opener(borrow(f),j){m:=close_of(borrow(f),j,hi);if (m<hi)&(j+1<m){open=j;close=m;break;}}
-        j+=1;
+fn list_break<a, b>(f: (&mut a F), s: read<b>, lo: num, hi: num, indent: num) -> num {
+    mut open = hi;
+    mut close = hi;
+    mut j = lo;
+    while j < hi {
+        if opener(borrow(f), j) {
+            m := close_of(borrow(f), j, hi);
+            if (m < hi) & (j + 1 < m) {
+                open = j;
+                close = m;
+                break;
+            }
+        }
+        j += 1;
     }
-    if open==hi{return false;}
-    write_range(borrow_mut(f),&s,lo,open+1,indent);
-    mut comma=0;if code_at(borrow(f),open)==123{comma=trailing_ok(borrow(f),open+1,close);}
-    mut item=open+1;mut d=0;mut m=open+1;
-    while m<close{
-        c:=code_at(borrow(f),m);if opens(c){d+=1;}if shuts(c){d-=1;}
-        if (d==0)&(c==44){render(borrow_mut(f),&s,item,m+1,indent+1);item=m+1;}
-        m+=1;
+    if open == hi {
+        return false;
     }
-    if item<close{
-        w:=(indent+1)*4+range_width(borrow(f),item,close);
-        if comma&(w<101)&(code_at(borrow(f),close-1)!=44){write_range_comma(borrow_mut(f),&s,item,close,indent+1);}
-        else{render(borrow_mut(f),&s,item,close,indent+1);}
+    write_range(borrow_mut(f), &s, lo, open + 1, indent);
+    mut comma = 0;
+    if code_at(borrow(f), open) == 123 {
+        comma = trailing_ok(borrow(f), open + 1, close);
     }
-    render(borrow_mut(f),&s,close,hi,indent);
+    mut item = open + 1;
+    mut d = 0;
+    mut m = open + 1;
+    while m < close {
+        c := code_at(borrow(f), m);
+        if opens(c) {
+            d += 1;
+        }
+        if shuts(c) {
+            d -= 1;
+        }
+        if (d == 0) & (c == 44) {
+            render(borrow_mut(f), &s, item, m + 1, indent + 1);
+            item = m + 1;
+        }
+        m += 1;
+    }
+    if item < close {
+        w := (indent + 1) * 4 + range_width(borrow(f), item, close);
+        if comma & (w < 101) & (code_at(borrow(f), close - 1) != 44) {
+            write_range_comma(borrow_mut(f), &s, item, close, indent + 1);
+        } else {
+            render(borrow_mut(f), &s, item, close, indent + 1);
+        }
+    }
+    render(borrow_mut(f), &s, close, hi, indent);
     return true;
 }
 // Binary operator chain: each operator starts its continuation line.
-fn op_break<a,b>(f:ref_mut<a,F>,s:read<b>,lo:num,hi:num,indent:num)->num{
-    mut d=0;mut j=lo;mut count=0;
-    while j<hi{
-        c:=code_at(borrow(f),j);if opens(c){d+=1;}if shuts(c){d-=1;}
-        if (d==0)&(lo<j)&breakable(borrow(f),&s,j){count+=1;}
-        j+=1;
-    }
-    if count==0{return false;}
-    mut seg=lo;d=0;j=lo;mut rest=0;
-    while j<hi{
-        c:=code_at(borrow(f),j);if opens(c){d+=1;}if shuts(c){d-=1;}
-        if (d==0)&(lo<j)&breakable(borrow(f),&s,j){
-            mut ind=indent;if rest!=0{ind=indent+1;}
-            render(borrow_mut(f),&s,seg,j,ind);rest=1;seg=j;
+fn op_break<a, b>(f: (&mut a F), s: read<b>, lo: num, hi: num, indent: num) -> num {
+    mut d = 0;
+    mut j = lo;
+    mut count = 0;
+    while j < hi {
+        c := code_at(borrow(f), j);
+        if opens(c) {
+            d += 1;
         }
-        j+=1;
+        if shuts(c) {
+            d -= 1;
+        }
+        if (d == 0) & (lo < j) & breakable(borrow(f), &s, j) {
+            count += 1;
+        }
+        j += 1;
     }
-    render(borrow_mut(f),&s,seg,hi,indent+1);
+    if count == 0 {
+        return false;
+    }
+    mut seg = lo;
+    d = 0;
+    j = lo;
+    mut rest = 0;
+    while j < hi {
+        c := code_at(borrow(f), j);
+        if opens(c) {
+            d += 1;
+        }
+        if shuts(c) {
+            d -= 1;
+        }
+        if (d == 0) & (lo < j) & breakable(borrow(f), &s, j) {
+            mut ind = indent;
+            if rest != 0 {
+                ind = indent + 1;
+            }
+            render(borrow_mut(f), &s, seg, j, ind);
+            rest = 1;
+            seg = j;
+        }
+        j += 1;
+    }
+    render(borrow_mut(f), &s, seg, hi, indent + 1);
     return true;
 }
-fn render<a,b>(f:ref_mut<a,F>,s:read<b>,lo:num,hi:num,indent:num){
-    if (indent*4+range_width(borrow(f),lo,hi)<101)+(hi-lo<3){write_range(borrow_mut(f),&s,lo,hi,indent);return ();}
-    if arm_break(borrow_mut(f),&s,lo,hi,indent){return ();}
-    if op_break(borrow_mut(f),&s,lo,hi,indent){return ();}
-    if chain_break(borrow_mut(f),&s,lo,hi,indent){return ();}
-    if list_break(borrow_mut(f),&s,lo,hi,indent){return ();}
-    write_range(borrow_mut(f),&s,lo,hi,indent);
+fn render<a, b>(f: (&mut a F), s: read<b>, lo: num, hi: num, indent: num) {
+    if (indent * 4 + range_width(borrow(f), lo, hi) < 101) + (hi - lo < 3) {
+        write_range(borrow_mut(f), &s, lo, hi, indent);
+        return ();
+    }
+    if arm_break(borrow_mut(f), &s, lo, hi, indent) {
+        return ();
+    }
+    if op_break(borrow_mut(f), &s, lo, hi, indent) {
+        return ();
+    }
+    if chain_break(borrow_mut(f), &s, lo, hi, indent) {
+        return ();
+    }
+    if list_break(borrow_mut(f), &s, lo, hi, indent) {
+        return ();
+    }
+    write_range(borrow_mut(f), &s, lo, hi, indent);
 }
 
-pub fn format<a>(source:read<a>)->u8[]{
-    mut f=F{kind:num[],start:num[],end:num[],nl:num[],code:num[],generic:num[],
-        ltoken:num[],lspace:num[],lfirst:num[],lindent:num[],out:u8[]};
-    scan(borrow_mut(f),&source);mark_generics(borrow_mut(f),&source);mark_pipes(borrow_mut(f),&source);layout(borrow_mut(f),&source);
-    count:=f.lfirst.len();
-    for i in count{
-        lo:=f.lfirst[i];mut hi=f.ltoken.len();if i+1<count{hi=f.lfirst[i+1];}indent:=f.lindent[i];
-        if lo==hi{f.out.push(10);}else{render(borrow_mut(f),&source,lo,hi,indent);}
+pub fn format<a>(source: read<a>) -> u8[] {
+    mut f = F {
+        kind: num[],
+        start: num[],
+        end: num[],
+        nl: num[],
+        code: num[],
+        generic: num[],
+        ltoken: num[],
+        lspace: num[],
+        lfirst: num[],
+        lindent: num[],
+        out: u8[],
+    };
+    scan(borrow_mut(f), &source);
+    mark_generics(borrow_mut(f), &source);
+    mark_pipes(borrow_mut(f), &source);
+    layout(borrow_mut(f), &source);
+    count := f.lfirst.len();
+    for i in count {
+        lo := f.lfirst[i];
+        mut hi = f.ltoken.len();
+        if i + 1 < count {
+            hi = f.lfirst[i + 1];
+        }
+        indent := f.lindent[i];
+        if lo == hi {
+            f.out.push(10);
+        } else {
+            render(borrow_mut(f), &source, lo, hi, indent);
+        }
     }
-    return exchange(borrow_mut(f.out),u8[]);
+    return exchange(borrow_mut(f.out), u8[]);
 }

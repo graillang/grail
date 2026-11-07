@@ -1,5 +1,9 @@
 # Checked by-value generic functions
 
+> Historical design record: examples and implementation status below describe an earlier compiler.
+> The current language uses `T[]`, `T?`, `[K: V]`, and structural unions `T | E`;
+> `core::Option`, `core::Result`, `core::Pair`, and tuple syntax are not current APIs.
+
 This implements the first function gate in [generic lowering](generic-lowering-gates.md), on top
 of [generic value layouts](generic-layouts.md). It does **not** complete bootstrap v0, typed
 aggregate references, arbitrary-element heap vectors or the real compiler port.

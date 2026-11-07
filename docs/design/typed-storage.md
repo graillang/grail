@@ -7,7 +7,7 @@ self-hosting remain required work, not successful unsupported-type rejection pro
 
 ## Source
 
-- `ref<a,T>` and `ref_mut<a,T>` reference a storage object, unlike byte-data `read<a>` / `mut<a>`.
+- `(&a T)` and `(&mut a T)` reference a storage object, unlike byte-data `read<a>` / `mut<a>`.
 - `borrow(place)` / `borrow_mut(place)` take or reborrow a typed reference. Places include record
   fields. Reborrowing a mutable reference freezes its parent until the child ends. Existing
   byte-data borrow syntax and the UTF-8 prohibition on mutable string bytes are unchanged.
@@ -22,7 +22,7 @@ self-hosting remain required work, not successful unsupported-type rejection pro
   mutable access remains explicit, as with the prior `&mut bytes_owner` operations.
 
 ```grl
-fn change<a>(slot:ref_mut<a,string>,value:string)->string{return exchange(slot,value);}
+fn change<a>(slot:(&mut a string),value:string)->string{return exchange(slot,value);}
 pub fn run()->num{
     let name="old";
     let previous=change(borrow_mut(name),"newer");

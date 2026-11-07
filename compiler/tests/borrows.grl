@@ -1,39 +1,77 @@
 module borrows;
-struct Numbers { first:num, second:num }
-struct Inner { n:num }
-struct Outer { left:Inner, right:Inner }
-struct Borrowed<a> { views:read<a>[] }
-fn relay<a>(r:ref_mut<a,num>)->ref_mut<a,num> { return r; }
-fn right<a>(r:ref<a,Outer>)->ref<a,Inner> { return borrow(r.right); }
-fn keep_views<a>(r:read<a>)->Borrowed<a> {
-    mut v =read<a>[]; v.push(r); return Borrowed{views:v};
+struct Numbers {
+    first: num,
+    second: num
 }
-fn count<a>(v:read<a>[])->num {
-    r :=&v[0]; return (&(load(r))).len();
+struct Inner {
+    n: num
 }
-pub fn run()->num {
-    mut b =u8[]; b.push(7);
-    parent :=&b; child :=&parent; drop(parent);
-    assert(child[0]==7);
+struct Outer {
+    left: Inner,
+    right: Inner
+}
+struct Borrowed<a> {
+    views: read<a>[]
+}
+fn relay<a>(r: (&mut a num)) -> (&mut a num) {
+    return r;
+}
+fn right<a>(r: (&a Outer)) -> (&a Inner) {
+    return borrow(r.right);
+}
+fn keep_views<a>(r: read<a>) -> Borrowed<a> {
+    mut v = read<a>[];
+    v.push(r);
+    return Borrowed { views: v };
+}
+fn count<a>(v: read<a>[]) -> num {
+    r := &v[0];
+    return (&(load(r))).len();
+}
+pub fn run() -> num {
+    mut b = u8[];
+    b.push(7);
+    parent := &b;
+    child := &parent;
+    drop(parent);
+    assert(child[0] == 7);
     // A unique carrier resumes after its readonly derivation's last use.
-    m :=&mut b; r :=&m; assert(r[0]==7); write(m,0,9);
-    assert(b[0]==9);
+    m := &mut b;
+    r := &m;
+    assert(r[0] == 7);
+    write(m, 0, 9);
+    assert(b[0] == 9);
     // Numeric storage and references do not need heap allocations.
-    mut n=1; r :=relay(borrow_mut(n)); exchange(r,8); assert(n==8);
-    mut pair=Numbers{first:1,second:2};
-    a :=borrow_mut(pair.first); b :=borrow_mut(pair.second);
-    exchange(a,7); exchange(b,8); assert(pair.first+pair.second==15);
+    mut n = 1;
+    r := relay(borrow_mut(n));
+    exchange(r, 8);
+    assert(n == 8);
+    mut pair = Numbers { first: 1, second: 2 };
+    a := borrow_mut(pair.first);
+    b := borrow_mut(pair.second);
+    exchange(a, 7);
+    exchange(b, 8);
+    assert(pair.first + pair.second == 15);
     // A copied scalar ends an element loan before vector reallocation.
-    mut values =num[]; values.push(1);
-    slot :=&values[0]; copied :=load(slot);
-    values.push(2); assert(copied+values.len()==3);
+    mut values = num[];
+    values.push(1);
+    slot := &values[0];
+    copied := load(slot);
+    values.push(2);
+    assert(copied + values.len() == 3);
     // Hidden return targets keep the whole compatible frame, not a guessed projection.
-    mut outer=Outer{left:Inner{n:1},right:Inner{n:2}};
-    p :=right(borrow(outer)); q :=borrow(p.n); saved :=load(q);
-    outer.right=Inner{n:8}; assert(saved==2);
+    mut outer = Outer { left: Inner { n: 1 }, right: Inner { n: 2 } };
+    p := right(borrow(outer));
+    q := borrow(p.n);
+    saved := load(q);
+    outer.right = Inner { n: 8 };
+    assert(saved == 2);
     // Moving a reference-containing field retains its data-source guards.
-    mut bytes =u8[]; bytes.push(42);
-    box :=keep_views(&bytes); views :=box.views; drop(box);
-    assert(count(views)==1);
+    mut bytes = u8[];
+    bytes.push(42);
+    box := keep_views(&bytes);
+    views := box.views;
+    drop(box);
+    assert(count(views) == 1);
     return 4242;
 }

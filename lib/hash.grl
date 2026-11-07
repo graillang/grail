@@ -3,8 +3,8 @@ module hash;
 // SipHash-2-4 for keyed table hashing, not a digest/authentication API.
 // Callers supply both seed words explicitly; there is no silently fixed security seed.
 pub struct Hasher{v0:num,v1:num,v2:num,v3:num,tail:num,used:num,factor:num,total:num}
-pub interface Hash{fn hash<a,b>(value:ref<a,Self>,state:ref_mut<b,Hasher>);}
-pub interface Equal{fn equal<a,b>(left:ref<a,Self>,right:ref<b,Self>)->num;}
+pub interface Hash{fn hash<a,b>(value:(&a Self),state:(&mut b Hasher));}
+pub interface Equal{fn equal<a,b>(left:(&a Self),right:(&b Self))->num;}
 
 pub fn hasher(seed0:num,seed1:num)->Hasher{
     return Hasher{v0:8317987319222330741^seed0,v1:7237128888997146477^seed1,
@@ -16,21 +16,21 @@ fn rotate16(n:num)->num{return wrapping_mul(n,65536)^(n/281474976710656);}
 fn rotate17(n:num)->num{return wrapping_mul(n,131072)^(n/140737488355328);}
 fn rotate21(n:num)->num{return wrapping_mul(n,2097152)^(n/8796093022208);}
 fn rotate32(n:num)->num{return wrapping_mul(n,4294967296)^(n/4294967296);}
-fn round<a>(state:ref_mut<a,Hasher>){
+fn round<a>(state:(&mut a Hasher)){
     state.v0=wrapping_add(state.v0,state.v1);state.v1=rotate13(state.v1)^state.v0;state.v0=rotate32(state.v0);
     state.v2=wrapping_add(state.v2,state.v3);state.v3=rotate16(state.v3)^state.v2;
     state.v0=wrapping_add(state.v0,state.v3);state.v3=rotate21(state.v3)^state.v0;
     state.v2=wrapping_add(state.v2,state.v1);state.v1=rotate17(state.v1)^state.v2;state.v2=rotate32(state.v2);
 }
-fn compress<a>(state:ref_mut<a,Hasher>,word:num){
+fn compress<a>(state:(&mut a Hasher),word:num){
     state.v3=state.v3^word;round(borrow_mut(state));round(borrow_mut(state));state.v0=state.v0^word;
 }
-pub fn write_byte<a>(state:ref_mut<a,Hasher>,value:num){
+pub fn write_byte<a>(state:(&mut a Hasher),value:num){
     assert(value<256);state.tail=state.tail^(value*state.factor);state.used+=1;state.total=wrapping_add(state.total,1);
     if state.used==8{word:=state.tail;compress(borrow_mut(state),word);state.tail=0;state.used=0;state.factor=1;}
     else{state.factor=state.factor*256;}
 }
-pub fn write_num<a>(state:ref_mut<a,Hasher>,value:num){
+pub fn write_num<a>(state:(&mut a Hasher),value:num){
     mut remaining=value;for i in 8{write_byte(borrow_mut(state),remaining&255);remaining=remaining/256;}
 }
 pub fn finish(state:Hasher)->num{
@@ -39,36 +39,36 @@ pub fn finish(state:Hasher)->num{
     round(borrow_mut(current));round(borrow_mut(current));round(borrow_mut(current));round(borrow_mut(current));
     return current.v0^current.v1^current.v2^current.v3;
 }
-impl Hash for num{fn hash<a,b>(value:ref<a,Self>,state:ref_mut<b,Hasher>){write_num(state,load(value));}}
-impl Equal for num{fn equal<a,b>(left:ref<a,Self>,right:ref<b,Self>)->num{return load(left)==load(right);}}
-impl Hash for u8[]{fn hash<a,b>(value:ref<a,Self>,state:ref_mut<b,Hasher>){
+impl Hash for num{fn hash<a,b>(value:(&a Self),state:(&mut b Hasher)){write_num(state,load(value));}}
+impl Equal for num{fn equal<a,b>(left:(&a Self),right:(&b Self))->num{return load(left)==load(right);}}
+impl Hash for u8[]{fn hash<a,b>(value:(&a Self),state:(&mut b Hasher)){
     length:=value.len();write_num(borrow_mut(state),length);for i in length{write_byte(borrow_mut(state),value[i]);}
 }}
-impl Equal for u8[]{fn equal<a,b>(left:ref<a,Self>,right:ref<b,Self>)->num{
+impl Equal for u8[]{fn equal<a,b>(left:(&a Self),right:(&b Self))->num{
     if left.len()!=right.len(){return false;}for i in left.len(){if left[i]!=right[i]{return false;}}return true;
 }}
-impl Hash for string{fn hash<a,b>(value:ref<a,Self>,state:ref_mut<b,Hasher>){
+impl Hash for string{fn hash<a,b>(value:(&a Self),state:(&mut b Hasher)){
     length:=value.len();write_num(borrow_mut(state),length);for i in length{write_byte(borrow_mut(state),value[i]);}
 }}
-impl Equal for string{fn equal<a,b>(left:ref<a,Self>,right:ref<b,Self>)->num{
+impl Equal for string{fn equal<a,b>(left:(&a Self),right:(&b Self))->num{
     if left.len()!=right.len(){return false;}for i in left.len(){if left[i]!=right[i]{return false;}}return true;
 }}
 // Sized integers hash their canonical 64-bit word (sign-extended for signed types).
-impl Hash for u8{fn hash<a,b>(value:ref<a,Self>,state:ref_mut<b,Hasher>){write_num(state,bits(load(value)));}}
-impl Equal for u8{fn equal<a,b>(left:ref<a,Self>,right:ref<b,Self>)->num{return load(left)==load(right);}}
-impl Hash for u16{fn hash<a,b>(value:ref<a,Self>,state:ref_mut<b,Hasher>){write_num(state,bits(load(value)));}}
-impl Equal for u16{fn equal<a,b>(left:ref<a,Self>,right:ref<b,Self>)->num{return load(left)==load(right);}}
-impl Hash for u32{fn hash<a,b>(value:ref<a,Self>,state:ref_mut<b,Hasher>){write_num(state,bits(load(value)));}}
-impl Equal for u32{fn equal<a,b>(left:ref<a,Self>,right:ref<b,Self>)->num{return load(left)==load(right);}}
-impl Hash for i8{fn hash<a,b>(value:ref<a,Self>,state:ref_mut<b,Hasher>){write_num(state,bits(load(value)));}}
-impl Equal for i8{fn equal<a,b>(left:ref<a,Self>,right:ref<b,Self>)->num{return load(left)==load(right);}}
-impl Hash for i16{fn hash<a,b>(value:ref<a,Self>,state:ref_mut<b,Hasher>){write_num(state,bits(load(value)));}}
-impl Equal for i16{fn equal<a,b>(left:ref<a,Self>,right:ref<b,Self>)->num{return load(left)==load(right);}}
-impl Hash for i32{fn hash<a,b>(value:ref<a,Self>,state:ref_mut<b,Hasher>){write_num(state,bits(load(value)));}}
-impl Equal for i32{fn equal<a,b>(left:ref<a,Self>,right:ref<b,Self>)->num{return load(left)==load(right);}}
-impl Hash for i64{fn hash<a,b>(value:ref<a,Self>,state:ref_mut<b,Hasher>){write_num(state,bits(load(value)));}}
-impl Equal for i64{fn equal<a,b>(left:ref<a,Self>,right:ref<b,Self>)->num{return load(left)==load(right);}}
-pub fn hash<a,T:Hash>(value:ref<a,T>,seed0:num,seed1:num)->num{
+impl Hash for u8{fn hash<a,b>(value:(&a Self),state:(&mut b Hasher)){write_num(state,bits(load(value)));}}
+impl Equal for u8{fn equal<a,b>(left:(&a Self),right:(&b Self))->num{return load(left)==load(right);}}
+impl Hash for u16{fn hash<a,b>(value:(&a Self),state:(&mut b Hasher)){write_num(state,bits(load(value)));}}
+impl Equal for u16{fn equal<a,b>(left:(&a Self),right:(&b Self))->num{return load(left)==load(right);}}
+impl Hash for u32{fn hash<a,b>(value:(&a Self),state:(&mut b Hasher)){write_num(state,bits(load(value)));}}
+impl Equal for u32{fn equal<a,b>(left:(&a Self),right:(&b Self))->num{return load(left)==load(right);}}
+impl Hash for i8{fn hash<a,b>(value:(&a Self),state:(&mut b Hasher)){write_num(state,bits(load(value)));}}
+impl Equal for i8{fn equal<a,b>(left:(&a Self),right:(&b Self))->num{return load(left)==load(right);}}
+impl Hash for i16{fn hash<a,b>(value:(&a Self),state:(&mut b Hasher)){write_num(state,bits(load(value)));}}
+impl Equal for i16{fn equal<a,b>(left:(&a Self),right:(&b Self))->num{return load(left)==load(right);}}
+impl Hash for i32{fn hash<a,b>(value:(&a Self),state:(&mut b Hasher)){write_num(state,bits(load(value)));}}
+impl Equal for i32{fn equal<a,b>(left:(&a Self),right:(&b Self))->num{return load(left)==load(right);}}
+impl Hash for i64{fn hash<a,b>(value:(&a Self),state:(&mut b Hasher)){write_num(state,bits(load(value)));}}
+impl Equal for i64{fn equal<a,b>(left:(&a Self),right:(&b Self))->num{return load(left)==load(right);}}
+pub fn hash<a,T:Hash>(value:(&a T),seed0:num,seed1:num)->num{
     mut state=hasher(seed0,seed1);Hash::hash(value,borrow_mut(state));return finish(state);
 }
-pub fn equal<a,b,T:Equal>(left:ref<a,T>,right:ref<b,T>)->num{return Equal::equal(left,right);}
+pub fn equal<a,b,T:Equal>(left:(&a T),right:(&b T))->num{return Equal::equal(left,right);}

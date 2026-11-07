@@ -1,26 +1,44 @@
 unsafe module runtime;
 // Tests the trusted runtime directly; this is deliberately not a safe application module.
-pub fn audit()->num {
-    before :=rt_live();
-    a :=rt_alloc(24); rt_free(a);
-    b :=rt_alloc(24); assert(a==b); rt_free(b);
-    mut i=0;
-    while i<1000 {
-        s :=rt_new(); rt_pushb(s,7); rt_pushb(s,9);
-        v :=rt_view(s); tail :=rt_slice(v,1,2);
-        assert(rt_atb(tail,0)==9); rt_free(tail); rt_free(v); rt_drop_seq(s);
-        i=i+1;
+pub fn audit() -> num {
+    before := rt_live();
+    a := rt_alloc(24);
+    rt_free(a);
+    b := rt_alloc(24);
+    assert(a == b);
+    rt_free(b);
+    mut i = 0;
+    while i < 1000 {
+        s := rt_new();
+        rt_pushb(s, 7);
+        rt_pushb(s, 9);
+        v := rt_view(s);
+        tail := rt_slice(v, 1, 2);
+        assert(rt_atb(tail, 0) == 9);
+        rt_free(tail);
+        rt_free(v);
+        rt_drop_seq(s);
+        i = i + 1;
     }
     // mincore proves the large arena was unmapped, not merely hidden from the live counter.
-    residency :=rt_alloc(8); large :=rt_alloc(2097152); arena :=large-32;
-    assert(rt_syscall(27,arena,4096,residency)==0);
-    rt_free(large); assert(rt_syscall(27,arena,4096,residency)==wrapping_sub(0,12));
+    residency := rt_alloc(8);
+    large := rt_alloc(2097152);
+    arena := large - 32;
+    assert(rt_syscall(27, arena, 4096, residency) == 0);
+    rt_free(large);
+    assert(rt_syscall(27, arena, 4096, residency) == wrapping_sub(0, 12));
     rt_free(residency);
-    arg :=f_host_arg(0); rt_drop_seq(arg);
-    args :=rt_new(); command :=rt_new();
+    arg := f_host_arg(0);
+    rt_drop_seq(arg);
+    args := rt_new();
+    command := rt_new();
     // PATH search as well as fork/exec/wait and consumption of byte buffers.
-    rt_pushb(command,116); rt_pushb(command,114); rt_pushb(command,117); rt_pushb(command,101);
-    rt_push(args,command); assert(f_host_command(args)==0);
-    assert(rt_live()==before);
-    return rt_live()-before;
+    rt_pushb(command, 116);
+    rt_pushb(command, 114);
+    rt_pushb(command, 117);
+    rt_pushb(command, 101);
+    rt_push(args, command);
+    assert(f_host_command(args) == 0);
+    assert(rt_live() == before);
+    return rt_live() - before;
 }

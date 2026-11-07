@@ -1,5 +1,9 @@
 # Generic value layouts and type-only modules
 
+> Historical design record: examples and implementation status below describe an earlier compiler.
+> The current language uses `T[]`, `T?`, `[K: V]`, and structural unions `T | E`;
+> `core::Option`, `core::Result`, `core::Pair`, and tuple syntax are not current APIs.
+
 This records the first **implemented generic-layout slice**, following the
 [lowering assessment](generic-lowering-gates.md). It is not completion of bootstrap v0 or generic
 functions/general typed references at that checkpoint. [Generic functions](generic-functions.md)

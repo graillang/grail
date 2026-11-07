@@ -6,8 +6,8 @@
 struct Point { x: i32, y: i32 }
 impl Point {
     fn new(x: i32, y: i32) -> Point { return Point { x: x, y: y }; }
-    fn sum<a>(self: ref<a, Point>) -> i32 { return self.x + self.y; }
-    fn shift<a>(self: ref_mut<a, Point>, dx: i32) { self.x = self.x + dx; }
+    fn sum<a>(self: (&a Point)) -> i32 { return self.x + self.y; }
+    fn shift<a>(self: (&mut a Point), dx: i32) { self.x = self.x + dx; }
 }
 fn main() {
     mut p = Point::new(3, 4);
@@ -17,14 +17,14 @@ fn main() {
 ```
 
 `impl Type { ... }` adds functions to a struct or enum declared in the same module. A function
-whose first parameter is `ref<a, Type>`, `ref_mut<a, Type>` or `Type` can be called with
+whose first parameter is `(&a Type)`, `(&mut a Type)` or `Type` can be called with
 `value.name(args)`: the receiver is borrowed, mutably borrowed (the binding must be `mut`) or moved
 accordingly; a reference receiver is passed through, field receivers (`shape.origin.shift(1)`)
 are borrowed in place, and temporaries (`Point::new(1, 2).sum()`) live until the end of the
 statement. Other functions are called as `Type::name(args)`. Methods are checked exactly like
 functions (ownership, lifetimes).
 
-Generic types work too: `impl<T> Stack<T> { fn push<a>(self: ref_mut<a, Stack<T>>, v: T) ... }`.
+Generic types work too: `impl<T> Stack<T> { fn push<a>(self: (&mut a Stack<T>), v: T) ... }`.
 The impl's parameters are added to each method's; the type arguments after the type name must be
 exactly those parameters, in order. Associated functions take explicit type arguments when they
 cannot be inferred: `Stack::new<num>()`.
@@ -83,7 +83,7 @@ checked (and an unsuffixed literal adopts the type). `mut x: T;` declares a bind
 `print` and `println` accept a format string: `println("x = {}, y = {}", x, y)`. Each `{}` prints
 the next argument (`num`, sized integers, `bool`, text, byte views); `{{` and `}}` print braces.
 Vectors of printable elements (numbers, `bool`, `f64`, text, nested vectors) print like Rust's
-`{:?}`: `[1, 2, 3]`, `["a", "b"]`, `[0.5, 2.0]`. A struct or enum with an inherent `show(self: ref<a, Self>) -> string` method is printed
+`{:?}`: `[1, 2, 3]`, `["a", "b"]`, `[0.5, 2.0]`. A struct or enum with an inherent `show(self: (&a Self)) -> string` method is printed
 (and formatted) through it. The string is split at compile time, so printing allocates nothing extra; the number of `{}` must
 match the arguments. `format("...", args)` builds a `string` the same way. Format specs follow Rust: `{:8}` pads to 8 characters (numbers right-aligned, text left-aligned),
 `{:<8}`/`{:>8}`/`{:^8}` choose alignment, `{:*^8}` sets the fill character, `{:05}` zero-pads after
@@ -102,10 +102,10 @@ a stable merge sort that moves elements instead of copying them. `vecs::is_sorte
 
 ## Text helpers (`lib/strings.grl`)
 
-`strings::starts_with`, `ends_with`, `find` (→ `Option<num>`), `contains`, `split` (on a byte),
-`trim`, `join_with`, ASCII `to_upper`/`to_lower`, and `parse_num` (→ `Option<num>`, `None` for
+`strings::starts_with`, `ends_with`, `find` (→ `num?`), `contains`, `split` (on a byte),
+`trim`, `join_with`, ASCII `to_upper`/`to_lower`, and `parse_num` (→ `num?`, `None` for
 non-digits or overflow), `replace` and `repeat`. Unicode: `chars` decodes UTF-8 into code points
-(`vec<u32>`, invalid bytes become U+FFFD), `char_count` counts them and `push_char` appends a code
+(`u32[]`, invalid bytes become U+FFFD), `char_count` counts them and `push_char` appends a code
 point's UTF-8 encoding. `strings::to_upper/to_lower` are ASCII-only; the built-in methods also map
 Latin, Greek and Cyrillic letters.
 
@@ -115,22 +115,22 @@ Latin, Greek and Cyrillic letters.
 `bool` and `string`. `pub const` makes it usable as `module::NAME`. Each use inlines the value; a
 text constant yields a new owned `string`. Computed constant expressions are future work.
 
-## Option and Result methods (`lib/core.grl`)
+## Optional values (`lib/core.grl`)
 
-`Option`: `is_some()`, `is_none()`, `unwrap_or(fallback)`, `map(f)` (with a closure), `ok_or(error)`.
-`Result`: `is_ok()`, `is_err()`, `unwrap_or(fallback)`, `ok()`. The `is_*` methods borrow; the others
-consume the value. They are ordinary Grail code using generic `impl` blocks.
+`T?` supports `is_some()`, `is_none()`, `unwrap_or(fallback)`, `map(f)` and `ok_or(error)`.
+The `is_*` methods borrow; the others consume the value. Unions are matched by member type or
+propagated with `?`, rather than using `Result` methods.
 
 ## Program environment (`lib/env.grl`, `lib/process.grl`)
 
-`env::args()` returns the command-line arguments as `vec<string>` (index 0 is the program path),
-`env::var(name)` returns `Option<string>`, and `process::exit(code)` ends the program immediately
+`env::args()` returns the command-line arguments as `string[]` (index 0 is the program path),
+`env::var(name)` returns `string?`, and `process::exit(code)` ends the program immediately
 with that status (no cleanup runs). `fn main() -> num` also sets the exit status.
 
 ## Files and I/O errors (`lib/fs.grl`, `lib/io.grl`)
 
 `fs::read`, `read_text`, `write`, `create_dir`, `remove_file`, `remove_dir` return
-`Result<_, io::Error>`; `fs::exists` and `fs::list_dir` (names, directories end with `/`) do not fail.
+a union of the success type and `io::Error`; `fs::exists` and `fs::list_dir` (names, directories end with `/`) do not fail.
 `io::Error` is `NotFound`, `PermissionDenied`, `AlreadyExists`, `NotADirectory`, `IsADirectory`,
 `NotEmpty` or `Other(errno)`, prints readably (`not found`) and has `is_not_found()`. `?` propagates
 it. The older `host::` functions remain for the compiler and runtime.

@@ -1,7 +1,7 @@
 # Typed references and exchange
 
-`borrow(value)` refers to storage as `ref<a,T>`; `borrow_mut(value)` grants mutable storage
-access as `ref_mut<a,T>`. Local references infer their lifetime. Numeric references do not require
+`borrow(value)` refers to storage as `&a T`; `borrow_mut(value)` grants mutable storage
+access as `&mut a T`. Local references infer their lifetime. Numeric references do not require
 a heap allocation for the referent.
 
 {{example:references}}

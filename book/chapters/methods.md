@@ -6,8 +6,8 @@ called through the type, like `Counter::new(...)`.
 
 {{example:methods}}
 
-The receiver parameter says how the method uses the value: `ref<a, Counter>` reads it,
-`ref_mut<a, Counter>` changes it (so `visits` must be declared `mut`), and `Counter` takes
+The receiver parameter says how the method uses the value: `&a Counter` reads it,
+`&mut a Counter` changes it (so `visits` must be declared `mut`), and `Counter` takes
 ownership. Grail borrows the receiver automatically, just as Rust does for `&self` and
 `&mut self`. `format` builds a `string` with `{}` placeholders, `for day in 1..4` counts 1, 2, 3,
 and `else if` chains conditions.

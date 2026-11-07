@@ -7,7 +7,7 @@ self-compilation are still required. See [the retained gate](../../research/evid
 
 ```grl
 struct Cell<data>{source:mut<data>,name:string}
-fn take<outer,data>(slot:ref_mut<outer,Cell<data>>,next:mut<data>)->mut<data>{
+fn take<outer,data>(slot:(&mut outer Cell<data>),next:mut<data>)->mut<data>{
     return exchange(borrow_mut(slot.source),next);
 }
 ```
@@ -30,7 +30,7 @@ live reference. Finite phantom layouts do not recursively expand unused argument
 
 Generic type arguments keep lifetime namespaces independent of callee binders and other type
 arguments. Instantiating opaque `T` does not accidentally equate its captured lifetimes with the
-short borrow of `ref_mut<outer,T>`. Bodies still check universally; caller roots do not recheck them.
+short borrow of `(&mut outer T)`. Bodies still check universally; caller roots do not recheck them.
 Witnesses, scopes and roots do not enter native instance keys or runtime descriptors.
 
 ## Exchange, transfer and opaque calls

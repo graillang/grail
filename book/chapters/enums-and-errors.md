@@ -5,14 +5,17 @@ enum and hands the active payload to its arm. Cover every variant.
 
 {{example:enums}}
 
-A conventional `Result` uses `Ok` and `Err`. The postfix `?` propagates an error through a
-compatible result-returning function; postfix `!` unwraps success and aborts on error.
+`T?` represents an optional value, with `Some` and `None` variants. A structural union such as
+`T | E` holds a value of either member type: return a member directly and match it by type.
+Matches must cover every member, or use a final `_` arm. In a union used for propagation, the
+first member is success; postfix `?` returns any other member to a compatible return union, while
+postfix `!` extracts success and aborts on failure.
 
 {{example:errors}}
 
 Propagation is an early return with cleanup, not an exception or a garbage-collector operation.
 `!` is appropriate for an invariant, not routine failure handling. For expected failures, match
-both variants or propagate them to a caller.
+all member types or propagate failures to a caller.
 
 ## Matching through a borrow
 

@@ -18,4 +18,4 @@ Distinct mutable inputs remain distinct abstract targets even if they use one li
 Returned borrows conservatively retain compatible input origins; this is deliberately more
 restrictive than guessing which projection an opaque function returned.
 
-**Try it:** change `wrong` to return `bytes` and move `local` out.
+**Try it:** change `wrong` to return `u8[]` and move `local` out.

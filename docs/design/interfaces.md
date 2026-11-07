@@ -3,11 +3,11 @@
 The current compiler supports explicit user-defined interfaces and concrete implementations:
 
 ```grl
-interface Value{fn value<a>(self:ref<a,Self>)->num;}
+interface Value{fn value<a>(self:(&a Self))->num;}
 impl Value for num{
-    fn value<a>(self:ref<a,Self>)->num{return load(self);}
+    fn value<a>(self:(&a Self))->num{return load(self);}
 }
-fn read<a,T:Value>(value:ref<a,T>)->num{return Value::value(value);}
+fn read<a,T:Value>(value:(&a T))->num{return Value::value(value);}
 fn main(){n:=42;assert(read(borrow(n))==42);}
 ```
 

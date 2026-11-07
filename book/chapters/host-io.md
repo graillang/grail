@@ -13,7 +13,7 @@ access is explicit through `host`. File byte buffers remain owned values:
 The runner creates `note.txt` containing `Grail` and a newline in this example's scratch directory.
 It verifies that `copy.txt` contains the same bytes. It never writes those names into your project
 root. The low-level host interface is not a rich error-handling library; for example, file-read failures
-abort in the current native runtime rather than returning a typed `Result`.
+abort in the current native runtime rather than returning a typed error union.
 
 {{example:commands}}
 

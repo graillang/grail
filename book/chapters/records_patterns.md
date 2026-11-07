@@ -1,9 +1,9 @@
-# Tuples and patterns
+# Records and patterns
 
-A function can return several values as a tuple. `(low, high, mean) := stats(...)` takes the tuple
-apart into three new names.
+A function can return several values in a named record. `Stats` gives each result a clear name,
+and callers access its fields with `.`.
 
-{{example:tuples}}
+{{example:records-patterns}}
 
 `match` works on integers too: a name with a guard (`t if t < 0`) catches values that pass the test,
 `0..15` matches 0 up to but not including 15, and `_` handles everything else. `{:>4}` right-aligns a
