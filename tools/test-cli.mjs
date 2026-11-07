@@ -48,7 +48,7 @@ writeFileSync(join(demo, 'src/main.grl'), 'use mathlib;\nfn main(){println(mathl
 assert.equal(run(['fmt', '--check'], demo, false).status, 1, 'fmt --check must fail on unformatted code');
 run(['fmt'], demo); assert.equal(run(['fmt', '--check'], demo).status, 0);
 const lib = join(work, 'mathlib'); mkdirSync(join(lib, 'src'), { recursive: true });
-writeFileSync(join(lib, 'src/mathlib.grl'), 'module mathlib;\npub fn triple(n: num) -> num {\n    return n * 3;\n}\n');
+writeFileSync(join(lib, 'src/mathlib.grl'), 'module mathlib;\npub fn triple(n: u64) -> u64 {\n    return n * 3;\n}\n');
 const git = args => assert.equal(spawnSync('git', args, { cwd: lib }).status, 0, `git ${args.join(' ')}`);
 git(['init', '-q']); git(['add', '.']); git(['-c', 'user.name=grail', '-c', 'user.email=grail@localhost', 'commit', '-qm', 'init']);
 run(['add', 'mathlib', lib], demo);
@@ -59,7 +59,7 @@ rmSync(join(demo, '.grail'), { recursive: true }); run(['fetch'], demo);
 assert.equal(run(['run'], demo).stdout.trim(), '42');
 writeFileSync(join(demo, 'tests/bad.grl'), 'fn main() {\n    assert(1 == 2);\n}\n');
 const failing = run(['test'], demo, false); assert.equal(failing.status, 1); assert.match(failing.stdout, /1 passed, 1 failed/);
-writeFileSync(join(work, 'args.grl'), 'fn main<a>(argument: read<a>) -> num {\n    return argument.len();\n}\n');
+writeFileSync(join(work, 'args.grl'), 'fn main<a>(argument: read<a>) -> u64 {\n    return argument.len();\n}\n');
 assert.equal(run(['run', 'args.grl', '--', 'seven!!'], work, false).status, 7);
 writeFileSync(join(work, 'bad.grl'), 'fn main() {\n    x := 1;\n    x = 2;\n}\n');
 const badCheck = run(['check', 'bad.grl'], work, false);
