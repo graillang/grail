@@ -75,7 +75,7 @@ for (const target of ['x86_64', 'aarch64', 'riscv64']) {
   run(['build', 'hello.grl', '--target', target, '-o', out]);
   const r = execute(out, [], target); assert.equal(String(r.stdout), '42\n', `${target} program`);
   const asm = join(work, `grail-${target}.s`);
-  command([grail, '--target', target, asm, ...compilerSources]);
+  command([grail, '--default-u64', '--target', target, asm, ...compilerSources]);
   const tool = assemble(asm, join(work, `grail-${target}`), target);
   const sample = join(work, `messy-${target}.grl`); copyFileSync(join(root, 'tests/fmt/messy.grl'), sample);
   const f = execute(tool, ['fmt', sample], target); assert.equal(f.status, 0, `${target} grail fmt: ${f.stderr}`);

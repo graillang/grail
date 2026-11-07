@@ -73,13 +73,14 @@ export function buildCompiler() {
   renameSync(pending, executable);
   return executable;
 }
-export function compileProgram(compiler, inputs, directory, { target = hostTarget, overflow = 'checked', name = 'program', runtime = join(root, 'compiler/runtime.grl') } = {}) {
+export function compileProgram(compiler, inputs, directory, { target = hostTarget, overflow = 'checked', name = 'program', defaultU64 = true, runtime = join(root, 'compiler/runtime.grl') } = {}) {
   targetName(target);
   if (!['checked', 'wrap'].includes(overflow)) throw new Error('overflow must be checked or wrap');
   mkdirSync(directory, { recursive: true });
   const assembly = join(directory, `${name}.s`);
   const files = [...inputs.map(p => resolve(root, p)), resolve(root, runtime)];
-  command([compiler, '--target', target, `--overflow=${overflow}`, assembly, ...files]);
+  const numeric = defaultU64 ? ['--default-u64'] : [];
+  command([compiler, ...numeric, '--target', target, `--overflow=${overflow}`, assembly, ...files]);
   return assemble(assembly, join(directory, name), target);
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

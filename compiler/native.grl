@@ -171,6 +171,8 @@ struct C {
     target: u64,
     arg_offset: u64,
     overflow: u64,
+    default_u64: u64,
+    default_u64_flag: u64,
     specs: Spec[],
     bindings: u64[],
     current_spec: u64,
@@ -4392,6 +4394,18 @@ fn constant_value<a, b, d>(c: (&mut a C), module: read<b>, name: read<d>) -> Val
     }
     return val(0, 18446744073709551615);
 }
+fn stdlib_module<a, b>(m: read<b>) -> u64 {
+    if same(&m, &"core") + same(&m, &"vecs") + same(&m, &"strings") {
+        return true;
+    }
+    if same(&m, &"hash") + same(&m, &"hashmap") + same(&m, &"concurrent_map") {
+        return true;
+    }
+    if same(&m, &"fs") + same(&m, &"io") + same(&m, &"order") + same(&m, &"env") {
+        return true;
+    }
+    return same(&m, &"runtime");
+}
 fn toplevel<a>(c: (&mut a C), pass: u64) -> unit {
     raw := eat(borrow_mut(c), &"unsafe");
     exchange(borrow_mut(c.raw), raw);
@@ -4414,7 +4428,12 @@ fn toplevel<a>(c: (&mut a C), pass: u64) -> unit {
             fail(borrow_mut(c), &"unsafe module reserved for runtime");
         }
     }
+    is_std := stdlib_module(&m);
     exchange(borrow_mut(c.module), m);
+    exchange(borrow_mut(c.default_u64), c.default_u64_flag);
+    if is_std {
+        exchange(borrow_mut(c.default_u64), 1);
+    }
     exchange(borrow_mut(c.imports), Import[]);
     while eat(borrow_mut(c), &"use") {
         m = ident(borrow_mut(c));
@@ -8087,6 +8106,9 @@ fn is_option_storage<a>(c: (&mut a C), ty: u64) -> u64 {
 // A bare literal (including a negated one) takes a sized integer type from its context.
 fn adopt_value<a>(c: (&mut a C), v: Val, start: u64, end: u64, expected: u64) -> Val {
     mut v = hint_use(borrow_mut(c), v, start, end, expected);
+    if (expected == 0) & is_default_i64(borrow_mut(c), v.ty) {
+        return widen_to_u64(borrow_mut(c), v);
+    }
     if (c.none_start == start) & (c.none_end == end) & is_option_storage(borrow_mut(c), expected) {
         tag := imm(borrow_mut(c), 0);
         payload := imm(borrow_mut(c), 0);
@@ -8266,6 +8288,24 @@ fn float_literal_slot<a>(c: (&mut a C), tok: u64, negative: u64) -> u64 {
     on(borrow_mut(c), bits);
     o(borrow_mut(c), &",%rax\n");
     return save(borrow_mut(c));
+}
+fn is_default_i64<a>(c: (&mut a C), ty: u64) -> u64 {
+    return (ty_kind(borrow_mut(c), ty) == 18) & (ty_arg(borrow_mut(c), ty) == 64) &
+        (ty_mode(borrow_mut(c), ty) == 1);
+}
+fn widen_to_u64<a>(c: (&mut a C), v: Val) -> Val {
+    if is_default_i64(borrow_mut(c), v.ty) == 0 {
+        return v;
+    }
+    held := move_value(borrow_mut(c), v);
+    slot := held.t;
+    get(borrow_mut(c), slot, &"%rax");
+    o(borrow_mut(c), &"testq %rax,%rax\n");
+    ok := label(borrow_mut(c));
+    jump(borrow_mut(c), &"jns", ok);
+    o(borrow_mut(c), &"call rt_abort\n");
+    mark(borrow_mut(c), ok);
+    return val(slot, 0);
 }
 fn int_binary<a>(c: (&mut a C), k: u64, left: u64, right: u64, ty: u64) -> Val {
     // Sized integers are canonical (sign-extended) words, so most operations are emitted inline.
@@ -10943,7 +10983,12 @@ fn index_view<a>(c: (&mut a C), value: Val, access: u64) -> Val {
     if ty_kind(borrow_mut(c), x.ty) == 6 {
         xt := x.t;
         xty := x.ty;
-        bound := expr(borrow_mut(c), 0);
+        bstart := c.pos;
+        mut bound = expr(borrow_mut(c), 0);
+        bend := c.pos;
+        if c.raw == 0 {
+            bound = adopt_value(borrow_mut(c), bound, bstart, bend, 0);
+        }
         index := bound.t;
         expect(borrow_mut(c), &"]");
         elem := ty_arg(borrow_mut(c), xty);
@@ -10989,8 +11034,11 @@ fn index_view<a>(c: (&mut a C), value: Val, access: u64) -> Val {
     if is(borrow_mut(c), &":") {
         start = imm(borrow_mut(c), 0);
     } else {
-        bound := expr(borrow_mut(c), 0);
+        bstart := c.pos;
+        mut bound = expr(borrow_mut(c), 0);
+        bend := c.pos;
         if c.raw == 0 {
+            bound = adopt_value(borrow_mut(c), bound, bstart, bend, 0);
             require_type(borrow_mut(c), bound.ty, 0);
         }
         get(borrow_mut(c), bound.t, &"%rax");
@@ -11001,8 +11049,11 @@ fn index_view<a>(c: (&mut a C), value: Val, access: u64) -> Val {
         if is(borrow_mut(c), &"]") {
             end = apply(borrow_mut(c), &"rt_len", one(slot));
         } else {
-            bound := expr(borrow_mut(c), 0);
+            bstart := c.pos;
+            mut bound = expr(borrow_mut(c), 0);
+            bend := c.pos;
             if c.raw == 0 {
+                bound = adopt_value(borrow_mut(c), bound, bstart, bend, 0);
                 require_type(borrow_mut(c), bound.ty, 0);
             }
             end = bound.t;
@@ -12207,6 +12258,9 @@ fn statement<a>(c: (&mut a C)) -> unit {
                 slot := float_literal_slot(borrow_mut(c), ftok, fneg);
                 v = val(slot, ht);
             }
+        }
+        if literal & (hint == 0) & (c.default_u64 == 0) {
+            v = val(v.t, int_type(borrow_mut(c), 64, 1));
         }
         mut v = move_value(borrow_mut(c), v);
         bind(borrow_mut(c), name, v.ty, v.t, mutable);
@@ -13497,6 +13551,8 @@ pub fn main() -> u64 {
         target: 0,
         arg_offset: 0,
         overflow: 1,
+        default_u64: 0,
+        default_u64_flag: 0,
         specs: Spec[],
         bindings: u64[],
         current_spec: 0,
@@ -13648,7 +13704,13 @@ pub fn main() -> u64 {
                     exchange(borrow_mut(c.overflow), 1);
                     offset += 1;
                 } else {
-                    break;
+                    if same(&option, &"--default-u64") {
+                        exchange(borrow_mut(c.default_u64), 1);
+                        exchange(borrow_mut(c.default_u64_flag), 1);
+                        offset += 1;
+                    } else {
+                        break;
+                    }
                 }
             }
         }

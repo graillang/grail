@@ -30,12 +30,13 @@ for (const test of cases) {
   if (test.reject) {
     const assembly = join(directory, 'prior.s');
     writeFileSync(assembly, 'prior valid artifact');
-    const result = execute(compiler, ['--target', target, assembly, ...files, runtime]);
+    const numeric = test.defaultU64 === false ? [] : ['--default-u64'];
+    const result = execute(compiler, [...numeric, '--target', target, assembly, ...files, runtime]);
     assert.notEqual(result.status, 0, `${test.name}: unsafe/invalid program was accepted`);
     if (test.diagnostic) assert.ok(`${result.stdout}${result.stderr}`.includes(test.diagnostic), `${test.name}: expected diagnostic ${test.diagnostic}: ${result.stdout}${result.stderr}`);
     assert.equal(readFileSync(assembly, 'utf8'), 'prior valid artifact', `${test.name}: invalid program overwrote prior output`);
   } else {
-    const executable = compileProgram(compiler, files, directory, { target, overflow: test.overflow ?? 'checked', runtime });
+    const executable = compileProgram(compiler, files, directory, { target, overflow: test.overflow ?? 'checked', defaultU64: test.defaultU64 !== false, runtime });
     if (test.compileOnly) { passed++; continue; }
     const result = execute(executable, test.args ?? [], target, { cwd: directory });
     if (result.error) throw result.error;
