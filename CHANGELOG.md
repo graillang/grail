@@ -2,15 +2,21 @@
 
 ## Unreleased
 
-- Type syntax is concise and postfix: `T[]` vectors, `u8[]` byte vectors, `T?` optional
-  values, `[K: V]` maps, and `&a T` / `&mut a T` typed references. `vec<T>`, `bytes`,
-  `Option<T>`, `hashmap::Map<K,V>`, `ref<a,T>`, `ref_mut<a,T>`, and tuple syntax are removed
-  without compatibility shims.
-- `T | E` is a structural tagged union. A value of any member type converts implicitly, and
-  `match` arms select members by type; matches are exhaustive unless a final `_` arm is used.
-  Postfix `?` propagates non-success members to a compatible return union, and `!` extracts
-  success or aborts. Generic functions and constructors infer a unique member type and reject
-  ambiguous or duplicate-member unions.
+- Concise type syntax: `T[]` vectors, `u8[]` byte buffers, `T?` optional values and
+  `[K: V]` maps. The `num` spelling is removed; user modules default to `i64`, while lengths,
+  indices and byte counts are explicit `u64`. `Option`, `Result`, `Pair`, tuple syntax,
+  `ref`, `ref_mut`, and the public map/option storage names are not exposed.
+- Structural results use `S |? F`: success and failure alternatives are normalized
+  separately, bare values convert implicitly, matching is exhaustive by type, and generic
+  instantiation rejects overlapping or duplicate members. Ordinary `A | B` unions are
+  unordered and carry no success/failure meaning. `?` and result-`!` apply only to `|?`.
+- Prelude `Some(value)` and context-inferred `None` construct `T?`; typed patterns use
+  `data: T` or a bare `T`, and nominal enum variant patterns remain available. Type aliases
+  such as `type LoadError = IoError | ParseError` are supported.
+- `use module::Name;` imports a type or interface member. `use order::Ord;` resolves bounds
+  and impls through the canonical `order::Ord` path instead of creating a local phantom.
+- Nominal concurrency types are capitalized: `Atomic<T>`, `Mutex<T>`, `Scope<C>`, `Task<R>`
+  and `CancelToken`, with `Atomic::new` / `Mutex::new` constructors.
 - Type syntax is now postfix and concise: `T[]` is a vector (`vec<T>` is gone), `u8[]` is the
   byte buffer (`bytes` is gone), and `T[...]` / `T[]` are the element and empty literals. A type
   may be parenthesized when its literal needs one, e.g. `(fn(num)->num)[f]`. The byte-buffer
@@ -32,7 +38,7 @@
 - `mut` literal bindings take the type of their first sized use anywhere in the function
   (`mut count = 0; count += 1; show(count)` with `show(level: u8)`); the function is recompiled with
   that type. Conflicting uses are rejected.
-- Equality on structs, tuples and vectors containing `char` works.
+- Equality on structs, enums and vectors containing `char` works.
 - Indexed assignment: `v[i] = x`, `v[i] += x` and `s.items[i] = x` on vectors (the old element is
   dropped) and `buf[i] = b` on bytes; the right-hand side is evaluated first.
 - `f32` closures and function values accept float literal arguments; exponent-only float literals
