@@ -36,8 +36,8 @@ for (const [i, file] of sources.entries()) {
 }
 checks += sources.length;
 const original = join(work, 'original.s'), reformatted = join(work, 'reformatted.s');
-command([grail, original, ...compilerSources]);
-command([grail, reformatted, ...compilerSources.map(f => formatted.get(f))]);
+command([grail, '--default-u64', original, ...compilerSources]);
+command([grail, '--default-u64', reformatted, ...compilerSources.map(f => formatted.get(f))]);
 assert.ok(readFileSync(original).equals(readFileSync(reformatted)), 'formatted compiler compiles to different assembly'); checks++;
 
 // 3. Project workflow: new / run / test / fmt / add / fetch / build.
