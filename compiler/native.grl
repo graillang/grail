@@ -227,7 +227,11 @@ struct C {
     scope_end: num,
     loop_start: num,
     loop_end: num,
-    no_union: num
+    no_union: num,
+    parsing_input: num,
+    output_region: num,
+    receiver_region: num,
+    input_regions: num[]
 }
 
 fn same<a, b>(x: read<a>, y: read<b>) -> num {
@@ -3101,6 +3105,22 @@ fn parse_slice_reference<a>(c: (&mut a C), mode: num, r: num) -> num {
     rs.push(r);
     return intern_full(borrow_mut(c), 5, 0, mode, rs);
 }
+fn note_input_region<a>(c: (&mut a C), r: num) -> unit {
+    for i in c.input_regions.len() {
+        if c.input_regions[i] == r {
+            return ();
+        }
+    }
+    c.input_regions.push(r);
+    return ();
+}
+fn outer_region<a>(c: (&mut a C), ty: num) -> num {
+    rs := type_regions(borrow_mut(c), ty);
+    if rs.len() == 0 {
+        return 0;
+    }
+    return rs[0];
+}
 fn parse_reference<a>(c: (&mut a C)) -> num {
     mut mode = 0;
     mut r = 0;
@@ -3125,7 +3145,17 @@ fn parse_reference<a>(c: (&mut a C)) -> num {
         }
     }
     if r == 0 {
-        r = fresh_lifetime(borrow_mut(c));
+        if c.parsing_input {
+            r = fresh_lifetime(borrow_mut(c));
+        } else {
+            if c.output_region == 0 {
+                fail(borrow_mut(c), &"elided output reference needs one input lifetime");
+            }
+            r = c.output_region;
+        }
+    }
+    if c.parsing_input {
+        note_input_region(borrow_mut(c), r);
     }
     p = c.pos;
     if is(borrow_mut(c), &"[") & slice_ahead(borrow_mut(c), p) {
@@ -3317,6 +3347,8 @@ fn decl<a>(c: (&mut a C), pass: num) -> unit {
     advance(borrow_mut(c));
     name := ident(borrow_mut(c));
     lifetime_parameters(borrow_mut(c));
+    exchange(borrow_mut(c.parsing_input), 0);
+    exchange(borrow_mut(c.output_region), 0);
     regions := c.rnames.len();
     types := c.tnames.len();
     bounds := copy_numbers(borrow(c.type_bounds));
@@ -3458,6 +3490,10 @@ fn func<a>(c: (&mut a C), pass: num, public: num) -> unit {
     expect(borrow_mut(c), &"fn");
     mut name = ident(borrow_mut(c));
     lifetime_parameters(borrow_mut(c));
+    exchange(borrow_mut(c.input_regions), num[]);
+    exchange(borrow_mut(c.receiver_region), 0);
+    exchange(borrow_mut(c.output_region), 0);
+    exchange(borrow_mut(c.parsing_input), 1);
     if c.inherent {
         prepend_impl_params(borrow_mut(c));
     }
@@ -3506,6 +3542,10 @@ fn func<a>(c: (&mut a C), pass: num, public: num) -> unit {
             p := ident(borrow_mut(c));
             expect(borrow_mut(c), &":");
             ty := parse_type(borrow_mut(c));
+            if same(&p, &"self") & (ty_kind(borrow_mut(c), ty) == 7) {
+                rr := outer_region(borrow_mut(c), ty);
+                exchange(borrow_mut(c.receiver_region), rr);
+            }
             if pass == 2 {
                 c.params.push(ty);
             }
@@ -3521,10 +3561,19 @@ fn func<a>(c: (&mut a C), pass: num, public: num) -> unit {
     if 6 < count {
         fail(borrow_mut(c), &"native function exceeds six parameters");
     }
+    exchange(borrow_mut(c.parsing_input), 0);
+    if c.receiver_region != 0 {
+        exchange(borrow_mut(c.output_region), c.receiver_region);
+    } else {
+        if c.input_regions.len() == 1 {
+            exchange(borrow_mut(c.output_region), c.input_regions[0]);
+        }
+    }
     mut ret = 1;
     if eat(borrow_mut(c), &"->") {
         ret = parse_type(borrow_mut(c));
     }
+    exchange(borrow_mut(c.output_region), 0);
     exchange(borrow_mut(c.result), ret);
     if pass == 2 {
         if find_func(borrow_mut(c), &m, &name) != 0 {
@@ -4824,20 +4873,38 @@ fn coerce_view<a>(c: (&mut a C), v: Val, formal: num) -> Val {
     if ty_kind(borrow_mut(c), formal) != 5 {
         return v;
     }
-    if ty_kind(borrow_mut(c), v.ty) != 7 {
-        return v;
+    mode := ty_mode(borrow_mut(c), formal);
+    if ty_kind(borrow_mut(c), v.ty) == 7 {
+        if mode & (ty_mode(borrow_mut(c), v.ty) == 0) {
+            fail(borrow_mut(c), &"mutable view requires a mutable reference");
+        }
+        inner := ty_arg(borrow_mut(c), v.ty);
+        ik := ty_kind(borrow_mut(c), inner);
+        if (ik != 2) & (ik != 3) & (ik != 4) & (ik != 5) {
+            return v;
+        }
+        if mode & (ik == 4) {
+            fail(borrow_mut(c), &"string bytes cannot be mutably viewed");
+        }
+        x := deref(borrow_mut(c), v);
+        vty := intern_full(borrow_mut(c), 5, 0, mode, num[]);
+        slot := apply(borrow_mut(c), &"rt_view", one(x.t));
+        own(borrow_mut(c), slot, vty);
+        view_bonds(borrow_mut(c), slot, x.t, mode);
+        return val(slot, vty);
     }
-    inner := ty_arg(borrow_mut(c), v.ty);
-    ik := ty_kind(borrow_mut(c), inner);
-    if (ik != 3) & (ik != 4) {
-        return v;
+    // Direct owned byte/text arguments may be viewed for an immutable view parameter.
+    if mode == 0 {
+        k := ty_kind(borrow_mut(c), v.ty);
+        if (k == 2) + (k == 3) + (k == 4) {
+            vty := intern_full(borrow_mut(c), 5, 0, 0, num[]);
+            slot := apply(borrow_mut(c), &"rt_view", one(v.t));
+            own(borrow_mut(c), slot, vty);
+            view_bonds(borrow_mut(c), slot, v.t, 0);
+            return val(slot, vty);
+        }
     }
-    x := deref(borrow_mut(c), v);
-    vty := intern_full(borrow_mut(c), 5, 0, 0, num[]);
-    slot := apply(borrow_mut(c), &"rt_view", one(x.t));
-    own(borrow_mut(c), slot, vty);
-    view_bonds(borrow_mut(c), slot, x.t, 0);
-    return val(slot, vty);
+    return v;
 }
 fn record<a>(c: (&mut a C), d: num, explicit: num) -> Val {
     expect(borrow_mut(c), &"{");
@@ -5666,6 +5733,12 @@ fn builtin_id<a>(n: read<a>) -> num {
     }
     if same(&n, &"format") {
         return 36;
+    }
+    if same(&n, &"view") {
+        return 37;
+    }
+    if same(&n, &"view_mut") {
+        return 38;
     }
     if same(&n, &"borrow") {
         return 13;
@@ -6714,6 +6787,31 @@ fn builtin<a>(c: (&mut a C), id: num) -> Val {
         return v;
     }
     a := expr(borrow_mut(c), 0);
+    if (id == 37) + (id == 38) {
+        expect(borrow_mut(c), &")");
+        input := a.t;
+        x := deref(borrow_mut(c), a);
+        xt := x.t;
+        write := id == 38;
+        if c.raw == 0 {
+            k := ty_kind(borrow_mut(c), x.ty);
+            if (k != 2) & (k != 3) & (k != 4) & (k != 5) {
+                fail(borrow_mut(c), &"view requires byte sequence or view");
+            }
+            if write {
+                require_mutable_binding(borrow_mut(c), xt, 0);
+                if k == 4 {
+                    fail(borrow_mut(c), &"string bytes cannot be mutably viewed");
+                }
+            }
+        }
+        ty := intern_full(borrow_mut(c), 5, 0, write, num[]);
+        slot := apply(borrow_mut(c), &"rt_view", one(xt));
+        own(borrow_mut(c), slot, ty);
+        view_bonds(borrow_mut(c), slot, xt, write);
+        release_temporary(borrow_mut(c), input);
+        return val(slot, ty);
+    }
     if id == 32 {
         return parallel_map_builtin(borrow_mut(c), a);
     }
@@ -9363,6 +9461,17 @@ fn collection_literal<a>(c: (&mut a C), ty: num, bytes: num) -> Val {
         }
     }
     return val(slot, ty);
+}
+// `&place` and `&mut place` create typed references; indexing still returns element refs.
+fn reference_borrow<a>(c: (&mut a C), write: num) -> Val {
+    if borrow_place_ahead(borrow_mut(c)) == 0 {
+        return borrow_temporary(borrow_mut(c), write);
+    }
+    mut v = place(borrow_mut(c), write);
+    if is(borrow_mut(c), &"[") {
+        v = index_view(borrow_mut(c), v, 1 + write);
+    }
+    return v;
 }
 // Prefix byte-view borrowing binds tighter than binary operators.
 fn view_borrow<a>(c: (&mut a C)) -> Val {
@@ -13078,6 +13187,10 @@ pub fn main() -> num {
         loop_start: 0,
         loop_end: 0,
         no_union: 0,
+        parsing_input: 0,
+        output_region: 0,
+        receiver_region: 0,
+        input_regions: num[],
     };
     exchange(borrow_mut(c.target), host::target());
     for k in 5 {
