@@ -1,7 +1,7 @@
 # Closures
 
 A closure is a function written inline that can use values from where it was created.
-`|x: num| -> num x + offset` takes a `num`, returns a `num`, and captures `offset`.
+`|x: u64| -> u64 x + offset` takes a `u64`, returns a `u64`, and captures `offset`.
 
 {{example:closures}}
 

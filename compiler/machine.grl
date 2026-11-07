@@ -6,10 +6,10 @@ use host;
 // This is static instruction selection in Grail, not execution or an external translator.
 struct Out {
     text: u8[],
-    target: num,
-    next: num
+    target: u64,
+    next: u64
 }
-fn eq<a, b>(a: read<a>, b: read<b>) -> num {
+fn eq<a, b>(a: read<a>, b: read<b>) -> u64 {
     if a.len() != b.len() {
         return false;
     }
@@ -20,7 +20,7 @@ fn eq<a, b>(a: read<a>, b: read<b>) -> num {
     }
     return true;
 }
-fn starts<a, b>(a: read<a>, b: read<b>) -> num {
+fn starts<a, b>(a: read<a>, b: read<b>) -> u64 {
     if a.len() < b.len() {
         return false;
     }
@@ -56,29 +56,29 @@ fn put<a, b>(o: (&mut a Out), s: read<b>) -> unit {
     }
     return ();
 }
-fn num<a>(o: (&mut a Out), n: num) -> unit {
+fn u64<a>(o: (&mut a Out), n: u64) -> unit {
     if 9 < n {
-        num(borrow_mut(o), n / 10);
+        u64(borrow_mut(o), n / 10);
     }
     o.text.push(48 + n % 10);
     return ();
 }
-fn fresh<a>(o: (&mut a Out)) -> num {
+fn fresh<a>(o: (&mut a Out)) -> u64 {
     n := o.next;
     exchange(borrow_mut(o.next), n + 1);
     return n;
 }
-fn label<a>(o: (&mut a Out), n: num) -> unit {
+fn label<a>(o: (&mut a Out), n: u64) -> unit {
     put(borrow_mut(o), &".Lmachine");
-    num(borrow_mut(o), n);
+    u64(borrow_mut(o), n);
     return ();
 }
-fn mark<a>(o: (&mut a Out), n: num) -> unit {
+fn mark<a>(o: (&mut a Out), n: u64) -> unit {
     label(borrow_mut(o), n);
     put(borrow_mut(o), &":\n");
     return ();
 }
-fn split<a>(s: read<a>, delimiter: num) -> u8[][] {
+fn split<a>(s: read<a>, delimiter: u64) -> u8[][] {
     mut out = u8[][];
     mut start = 0;
     mut depth = 0;
@@ -99,7 +99,7 @@ fn split<a>(s: read<a>, delimiter: num) -> u8[][] {
     out.push((trim(&(s[start:]))).copy());
     return out;
 }
-fn reg<a>(target: num, s: read<a>) -> string {
+fn reg<a>(target: u64, s: read<a>) -> string {
     if eq(&(s), &"%rax") + eq(&(s), &"%eax") + eq(&(s), &"%al") {
         if target == 1 {
             return "x9";
@@ -196,7 +196,7 @@ fn reg<a>(target: num, s: read<a>) -> string {
     bad(&(s));
     return "";
 }
-fn small_reg<a>(s: read<a>) -> num {
+fn small_reg<a>(s: read<a>) -> u64 {
     return eq(&(s), &"%eax")
         + eq(&(s), &"%edi")
         + eq(&(s), &"%esi")
@@ -216,7 +216,7 @@ fn armword<a>(s: read<a>) -> string {
     return out;
 }
 // Recognize only small decimal literals; expressions stay assembler constants.
-fn small_literal<a>(value: read<a>) -> num {
+fn small_literal<a>(value: read<a>) -> u64 {
     if value.len() == 0 {
         return 0;
     }
@@ -250,7 +250,7 @@ fn constant<a, b, c>(o: (&mut a Out), dst: read<b>, value: read<c>) -> unit {
         put(borrow_mut(o), &"movz ");
         put(borrow_mut(o), &dst);
         put(borrow_mut(o), &",#");
-        num(borrow_mut(o), short - 1);
+        u64(borrow_mut(o), short - 1);
         put(borrow_mut(o), &"\n");
         return ();
     }
@@ -261,7 +261,7 @@ fn constant<a, b, c>(o: (&mut a Out), dst: read<b>, value: read<c>) -> unit {
                 put(borrow_mut(o), &"movn ");
                 put(borrow_mut(o), &dst);
                 put(borrow_mut(o), &",#");
-                num(borrow_mut(o), negative - 2);
+                u64(borrow_mut(o), negative - 2);
                 put(borrow_mut(o), &"\n");
                 return ();
             }
@@ -278,9 +278,9 @@ fn constant<a, b, c>(o: (&mut a Out), dst: read<b>, value: read<c>) -> unit {
         put(borrow_mut(o), &",#(((");
         put(borrow_mut(o), &(value));
         put(borrow_mut(o), &")>>");
-        num(borrow_mut(o), (i + 1) * 16);
+        u64(borrow_mut(o), (i + 1) * 16);
         put(borrow_mut(o), &")&65535),lsl #");
-        num(borrow_mut(o), (i + 1) * 16);
+        u64(borrow_mut(o), (i + 1) * 16);
         put(borrow_mut(o), &"\n");
     }
     return ();
@@ -357,13 +357,13 @@ fn address<a, b>(o: (&mut a Out), operand: read<b>) -> unit {
             put(borrow_mut(o), &"add x13,x13,");
             put(borrow_mut(o), &ir);
             put(borrow_mut(o), &",lsl #");
-            num(borrow_mut(o), shift);
+            u64(borrow_mut(o), shift);
             put(borrow_mut(o), &"\n");
         } else {
             put(borrow_mut(o), &"slli t2,");
             put(borrow_mut(o), &ir);
             put(borrow_mut(o), &",");
-            num(borrow_mut(o), shift);
+            u64(borrow_mut(o), shift);
             put(borrow_mut(o), &"\nadd t3,t3,t2\n");
         }
     }
@@ -378,7 +378,7 @@ fn address<a, b>(o: (&mut a Out), operand: read<b>) -> unit {
     }
     return ();
 }
-fn read_operand<a, b, c>(o: (&mut a Out), operand: read<b>, dst: read<c>, byte: num) -> unit {
+fn read_operand<a, b, c>(o: (&mut a Out), operand: read<b>, dst: read<c>, byte: u64) -> unit {
     assert(operand.len() != 0);
     target := o.target;
     if operand[0] == 36 {
@@ -427,7 +427,7 @@ fn read_operand<a, b, c>(o: (&mut a Out), operand: read<b>, dst: read<c>, byte: 
     }
     return ();
 }
-fn store<a, b>(o: (&mut a Out), operand: read<b>, byte: num) -> unit {
+fn store<a, b>(o: (&mut a Out), operand: read<b>, byte: u64) -> unit {
     target := o.target;
     assert(operand.len() != 0);
     if operand[0] == 37 {
@@ -641,7 +641,7 @@ fn arithmetic<a, b, c, d>(o: (&mut a Out), op: read<b>, src: read<c>, dst: read<
     store(borrow_mut(o), &(dst), 0);
     return ();
 }
-fn atomic_instruction<a, b, c>(o: (&mut a Out), op: read<b>, rest: read<c>) -> num {
+fn atomic_instruction<a, b, c>(o: (&mut a Out), op: read<b>, rest: read<c>) -> u64 {
     target := o.target;
     if eq(&op, &"mfence") + eq(&op, &"lfence") + eq(&op, &"sfence") {
         if target == 1 {
@@ -1095,7 +1095,7 @@ fn instruction<a, b>(o: (&mut a Out), line: read<b>) -> unit {
     arithmetic(borrow_mut(o), &(op), &src, &dst);
     return ();
 }
-pub fn lower<a>(input: read<a>, target: num) -> u8[] {
+pub fn lower<a>(input: read<a>, target: u64) -> u8[] {
     assert((target == 1) + (target == 2));
     mut out = Out { text: u8[], target: target, next: 1 };
     // Frame constants are known before instruction selection (no unresolved immediate expressions).

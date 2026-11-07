@@ -2,7 +2,7 @@
 
 Declare a type parameter directly: `fn identity<T>(value:T)->T`. Uppercase generic names are
 types. Lowercase lifetime names appear directly in reference and view types and are inferred;
-they are never listed in `<...>`. Concrete arguments are ordinary types, such as `num`,
+they are never listed in `<...>`. Concrete arguments are ordinary types, such as `u64`,
 `u8[]`, or `u8[][]`. If a declaration also has lifetimes, put them before type parameters.
 
 Interface bounds can use an imported name:
@@ -24,11 +24,11 @@ type. A payload-free variant needs a context or explicit arguments to determine 
 {{example:generic-functions}}
 
 The compiler specializes generic functions and their drops. Calls infer arguments, or spell them
-explicitly as `identity<num>(42)`. But the body must remain valid for an unknown affine `T`:
+explicitly as `identity<u64>(42)`. But the body must remain valid for an unknown affine `T`:
 
 {{example:affine-generic}}
 
-Even specializing this function to `num` does not make duplicating `T` valid. Generic definitions
+Even specializing this function to `u64` does not make duplicating `T` valid. Generic definitions
 are checked even when unused. Unconstrained `T` also does not support arbitrary arithmetic, field
 access or copy-loads. No trait system is promised by these examples.
 

@@ -6,7 +6,7 @@ elide the lifetime; all elided references in one function signature share one in
 separate lifetime groups when one shared lifetime is not the contract you want:
 
 ```grl
-fn choose(left: &a num, right: &b num) -> &a num
+fn choose(left: &a u64, right: &b u64) -> &a u64
 ```
 
 `a` and `b` are implicitly bound by the signature; no `<a, b>` declaration is needed. A lifetime

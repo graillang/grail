@@ -1,12 +1,12 @@
 use host;
 // Each reader suspends on its own empty pipe. There are more readers than the worker pool can
 // ever have threads, so the writer only runs if waiting tasks do not occupy workers.
-fn reader(fd: num, c: num) -> num {
+fn reader(fd: u64, c: u64) -> u64 {
     data := host::read_fd(fd, 64);
     host::close(fd);
     return data.len();
 }
-fn writer(fds: num[], c: num) -> num {
+fn writer(fds: u64[], c: u64) -> u64 {
     host::sleep_ms(20);
     mut total = 0;
     for i in fds.len() {
@@ -15,9 +15,9 @@ fn writer(fds: num[], c: num) -> num {
     }
     return total;
 }
-fn readers<s>(sc: (&s scope<num>), count: num) -> num {
-    mut handles = task<num>[];
-    mut ends = num[];
+fn readers<s>(sc: (&s scope<u64>), count: u64) -> u64 {
+    mut handles = task<u64>[];
+    mut ends = u64[];
     for i in count {
         p := host::pipe();
         handles.push(spawn(sc, p[0], reader));
@@ -31,13 +31,13 @@ fn readers<s>(sc: (&s scope<num>), count: num) -> num {
     assert(join(w) == count * 4);
     return got;
 }
-fn forever(fd: num, c: num, token: cancel_token) -> num {
+fn forever(fd: u64, c: u64, token: cancel_token) -> u64 {
     data := host::read_fd(fd, 8);
     assert(token.cancelled());
     host::close(fd);
     return data.len() + 7;
 }
-fn cancelling<s>(sc: (&s scope<num>), unused: num) -> num {
+fn cancelling<s>(sc: (&s scope<u64>), unused: u64) -> u64 {
     p := host::pipe();
     t := spawn(sc, p[0], forever);
     host::sleep_ms(30);
@@ -46,12 +46,12 @@ fn cancelling<s>(sc: (&s scope<num>), unused: num) -> num {
     host::close(p[1]);
     return r;
 }
-fn nap(ms: num, c: num) -> num {
+fn nap(ms: u64, c: u64) -> u64 {
     host::sleep_ms(ms);
     return 1;
 }
-fn napping<s>(sc: (&s scope<num>), count: num) -> num {
-    mut handles = task<num>[];
+fn napping<s>(sc: (&s scope<u64>), count: u64) -> u64 {
+    mut handles = task<u64>[];
     for i in count {
         handles.push(spawn(sc, 100, nap));
     }
@@ -61,18 +61,18 @@ fn napping<s>(sc: (&s scope<num>), count: num) -> num {
     }
     return n;
 }
-fn fifo(i: num) -> u8[] {
+fn fifo(i: u64) -> u8[] {
     return u8[102, 48 + i / 10, 48 + i % 10];
 }
 // read_file/write_file block in the kernel (FIFO open waits for the other side). From green
 // tasks they run on offload threads, so 100 blocked readers (more than the maximum worker count)
 // cannot stop the writer task that releases them.
-fn slurp(i: num, c: num) -> num {
+fn slurp(i: u64, c: u64) -> u64 {
     name := fifo(i);
     data := host::read_file(&name);
     return data.len();
 }
-fn feed(count: num, c: num) -> num {
+fn feed(count: u64, c: u64) -> u64 {
     mut failures = 0;
     for i in count {
         name := fifo(i);
@@ -80,8 +80,8 @@ fn feed(count: num, c: num) -> num {
     }
     return failures;
 }
-fn blocking<s>(sc: (&s scope<num>), count: num) -> num {
-    mut handles = task<num>[];
+fn blocking<s>(sc: (&s scope<u64>), count: u64) -> u64 {
+    mut handles = task<u64>[];
     for i in count {
         handles.push(spawn(sc, i, slurp));
     }
@@ -93,11 +93,11 @@ fn blocking<s>(sc: (&s scope<num>), count: num) -> num {
     assert(join(w) == 0);
     return total;
 }
-fn run(n: num, c: num) -> num {
+fn run(n: u64, c: u64) -> u64 {
     return host::command(u8[]["true".copy()]);
 }
-fn commands<s>(sc: (&s scope<num>), count: num) -> num {
-    mut handles = task<num>[];
+fn commands<s>(sc: (&s scope<u64>), count: u64) -> u64 {
+    mut handles = task<u64>[];
     for i in count {
         handles.push(spawn(sc, i, run));
     }

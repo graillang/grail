@@ -1,28 +1,28 @@
 struct Ctx {
-    hits: atomic<num>,
-    arrived: atomic<num>
+    hits: atomic<u64>,
+    arrived: atomic<u64>
 }
-fn mul7<a>(n: num, c: (&a Ctx)) -> num {
+fn mul7<a>(n: u64, c: (&a Ctx)) -> u64 {
     c.hits.fetch_add(1);
     return n * 7;
 }
-fn count<a>(b: u8[], c: (&a Ctx)) -> num {
+fn count<a>(b: u8[], c: (&a Ctx)) -> u64 {
     return b.len();
 }
-fn wait_cancel<a>(n: num, c: (&a Ctx), token: cancel_token) -> num {
+fn wait_cancel<a>(n: u64, c: (&a Ctx), token: cancel_token) -> u64 {
     while token.cancelled() == 0 {}
     return n;
 }
-fn make<a>(n: num, c: (&a Ctx)) -> u8[] {
+fn make<a>(n: u64, c: (&a Ctx)) -> u8[] {
     return u8[n, n, n];
 }
 // Both tasks only finish once both are running simultaneously.
-fn meet<a>(n: num, c: (&a Ctx)) -> num {
+fn meet<a>(n: u64, c: (&a Ctx)) -> u64 {
     c.arrived.fetch_add(1);
     while c.arrived.load() < 2 {}
     return n;
 }
-fn body<s, a>(sc: (&s scope < (&a Ctx) >), ctx: (&a Ctx)) -> num {
+fn body<s, a>(sc: (&s scope < (&a Ctx) >), ctx: (&a Ctx)) -> u64 {
     product := spawn(sc, 6, mul7);
     length := spawn(sc, u8[1, 2, 3], count);
     waiter := spawn(sc, 5, wait_cancel);
@@ -30,7 +30,7 @@ fn body<s, a>(sc: (&s scope < (&a Ctx) >), ctx: (&a Ctx)) -> num {
     right := spawn(sc, 2, meet);
     abandoned := spawn(sc, 9, make);
     drop(abandoned);
-    mut many = task<num>[];
+    mut many = task<u64>[];
     for i in 8 {
         many.push(spawn(sc, i, mul7));
     }
@@ -45,17 +45,17 @@ fn body<s, a>(sc: (&s scope < (&a Ctx) >), ctx: (&a Ctx)) -> num {
     }
     return total;
 }
-fn nested<s, a>(sc: (&s scope<num>), base: num) -> num {
+fn nested<s, a>(sc: (&s scope<u64>), base: u64) -> u64 {
     t := spawn(sc, base, plus);
     return join(t);
 }
-fn plus(n: num, base: num) -> num {
+fn plus(n: u64, base: u64) -> u64 {
     return n + base;
 }
-fn inner_scope<a>(n: num, c: (&a Ctx)) -> num {
+fn inner_scope<a>(n: u64, c: (&a Ctx)) -> u64 {
     return task_scope(n, nested);
 }
-fn outer<s, a>(sc: (&s scope < (&a Ctx) >), ctx: (&a Ctx)) -> num {
+fn outer<s, a>(sc: (&s scope < (&a Ctx) >), ctx: (&a Ctx)) -> u64 {
     t := spawn(sc, 20, inner_scope);
     return join(t);
 }

@@ -1,8 +1,8 @@
 # Numbers and booleans
 
-`num` is Grail's everyday 64-bit unsigned integer. When you need a particular width or negative
+`u64` is Grail's everyday 64-bit unsigned integer. When you need a particular width or negative
 numbers, use the sized types `u8`, `u16`, `u32`, `i8`, `i16`, `i32` and `i64` (`u64` and `usize`
-are `num`; `isize` is `i64`).
+are `u64`; `isize` is `i64`).
 
 {{example:integers}}
 

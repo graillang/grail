@@ -12,19 +12,19 @@ first member is success; postfix `?` returns any other member to a compatible re
 postfix `!` extracts success and aborts on failure.
 
 A union may contain records, vectors, maps and optional values. Type arguments compose:
-`u8[] | io::Error`, `[K: V]?`, and `(num | string)[]` are all ordinary types. Parentheses are
+`u8[] | io::Error`, `[K: V]?`, and `(u64 | string)[]` are all ordinary types. Parentheses are
 needed when a union is an element type or the referent of a reference: `&T`, `&a T`, or
 `&a mut T`. An enum payload may itself be
 a union.
 
 ```grl
 struct ParseError { message: string }
-fn parse(flag: num) -> num | ParseError {
+fn parse(flag: u64) -> u64 | ParseError {
     if flag == 0 { return ParseError { message: "missing" }; }
     return 42;
 }
-fn forward(flag: num) -> bool | num | ParseError {
-    value := parse(flag)?; // Returns ParseError early; success continues as num.
+fn forward(flag: u64) -> bool | u64 | ParseError {
+    value := parse(flag)?; // Returns ParseError early; success continues as u64.
     return value;
 }
 ```

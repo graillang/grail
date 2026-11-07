@@ -1,26 +1,26 @@
 use concurrent_map;
 struct Shared {
-    arrived: atomic<num>,
-    counter: atomic<num>,
-    total: mutex<num>,
-    log: mutex<num[]>
+    arrived: atomic<u64>,
+    counter: atomic<u64>,
+    total: mutex<u64>,
+    log: mutex<u64[]>
 }
 // Real overlap: every task waits until four tasks are running at the same time.
 // A sequential implementation would never return from the first task.
-fn barrier<a>(id: num, shared: (&a Shared)) -> num {
+fn barrier<a>(id: u64, shared: (&a Shared)) -> u64 {
     shared.arrived.fetch_add(1);
     while shared.arrived.load() < 4 {}
     return id * 10;
 }
-fn add<a>(total: (&mut a num), amount: num) -> num {
+fn add<a>(total: (&mut a u64), amount: u64) -> u64 {
     exchange(total, load(total) + amount);
     return 0;
 }
-fn record<a>(log: (&mut a num[]), value: num) -> num {
+fn record<a>(log: (&mut a u64[]), value: u64) -> u64 {
     log.push(value);
     return 0;
 }
-fn contend<a>(id: num, shared: (&a Shared)) -> num {
+fn contend<a>(id: u64, shared: (&a Shared)) -> u64 {
     for i in 1000 {
         shared.counter.fetch_add(1);
         shared.total.lock_with(1, add);
@@ -28,35 +28,35 @@ fn contend<a>(id: num, shared: (&a Shared)) -> num {
     shared.log.lock_with(id, record);
     return id;
 }
-fn insert_many<a>(base: num, map: (&a concurrent_map::Map<num, u8[]>)) -> num {
+fn insert_many<a>(base: u64, map: (&a concurrent_map::Map<u64, u8[]>)) -> u64 {
     for i in 250 {
         concurrent_map::insert(borrow(map), base * 250 + i, u8[i % 256]);
     }
     return 250;
 }
-fn length(data: u8[], unused: num) -> num {
+fn length(data: u8[], unused: u64) -> u64 {
     return data.len();
 }
-fn get<a>(total: (&mut a num), unused: num) -> num {
+fn get<a>(total: (&mut a u64), unused: u64) -> u64 {
     return load(total);
 }
-fn borrowed_lengths<a>(x: (&a u8[]), y: (&a u8[])) -> num[] {
+fn borrowed_lengths<a>(x: (&a u8[]), y: (&a u8[])) -> u64[] {
     mut v = (&a u8[])[];
     v.push(x);
     v.push(y);
     return parallel_map(v, 0, count);
 }
-fn count<a>(item: (&a u8[]), unused: num) -> num {
+fn count<a>(item: (&a u8[]), unused: u64) -> u64 {
     return item.len();
 }
 fn main() {
-    shared := Shared { arrived: atomic(0), counter: atomic(0), total: mutex(0), log: mutex(num[]) };
-    ids := parallel_map(num[0, 1, 2, 3], borrow(shared), barrier);
+    shared := Shared { arrived: atomic(0), counter: atomic(0), total: mutex(0), log: mutex(u64[]) };
+    ids := parallel_map(u64[0, 1, 2, 3], borrow(shared), barrier);
     assert(ids.len() == 4);
     for i in 4 {
         assert(ids[i] == i * 10);
     }
-    mut work = num[];
+    mut work = u64[];
     for i in 16 {
         work.push(i);
     }
@@ -66,8 +66,8 @@ fn main() {
     }
     assert(shared.counter.load() == 16000);
     assert(shared.total.lock_with(0, get) == 16000);
-    map := concurrent_map::with_seed<num, u8[]>(5, 6);
-    mut bases = num[];
+    map := concurrent_map::with_seed<u64, u8[]>(5, 6);
+    mut bases = u64[];
     for i in 8 {
         bases.push(i);
     }

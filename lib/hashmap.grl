@@ -6,26 +6,26 @@ use core;
 // `entries`; each bucket lists entry indices. Iterate with `len`, `key_at`, `value_at`.
 // Removal moves the last entry into the hole, so order is insertion order until a removal.
 pub struct Entry<K,V>{key:K,value:V}
-pub struct Map<K:hash::Hash+hash::Equal,V>{entries:Entry<K,V>[],buckets:num[][],seed0:num,seed1:num}
-fn empty_buckets(capacity:num)->num[][]{mut out=num[][];for i in capacity{out.push(num[]);}return out;}
-pub fn with_seed<K:hash::Hash+hash::Equal,V>(seed0:num,seed1:num)->[K: V]{
+pub struct Map<K:hash::Hash+hash::Equal,V>{entries:Entry<K,V>[],buckets:u64[][],seed0:u64,seed1:u64}
+fn empty_buckets(capacity:u64)->u64[][]{mut out=u64[][];for i in capacity{out.push(u64[]);}return out;}
+pub fn with_seed<K:hash::Hash+hash::Equal,V>(seed0:u64,seed1:u64)->[K: V]{
     return Map{entries:Entry<K,V>[],buckets:empty_buckets(16),seed0:seed0,seed1:seed1};
 }
-pub fn len<a,K:hash::Hash+hash::Equal,V>(map:(&a [K: V]))->num{return map.entries.len();}
-fn bucket_of<a,b,K:hash::Hash+hash::Equal,V>(map:(&a [K: V]),key:(&b K))->num{
+pub fn len<a,K:hash::Hash+hash::Equal,V>(map:(&a [K: V]))->u64{return map.entries.len();}
+fn bucket_of<a,b,K:hash::Hash+hash::Equal,V>(map:(&a [K: V]),key:(&b K))->u64{
     return hash::hash(key,map.seed0,map.seed1)%map.buckets.len();
 }
 // Entry index of key, or len() when absent.
-fn find<a,b,K:hash::Hash+hash::Equal,V>(map:(&a [K: V]),key:(&b K))->num{
+fn find<a,b,K:hash::Hash+hash::Equal,V>(map:(&a [K: V]),key:(&b K))->u64{
     slot:=bucket_of(borrow(map),borrow(key));bucket:=&map.buckets[slot];
     for i in bucket.len(){index:=bucket[i];entry:=&map.entries[index];if hash::equal(borrow(entry.key),borrow(key)){return index;}}
     return map.entries.len();
 }
-fn rebuild<a,K:hash::Hash+hash::Equal,V>(map:(&mut a [K: V]),capacity:num){
+fn rebuild<a,K:hash::Hash+hash::Equal,V>(map:(&mut a [K: V]),capacity:u64){
     exchange(borrow_mut(map.buckets),empty_buckets(capacity));
     for i in map.entries.len(){entry:=&map.entries[i];slot:=bucket_of(borrow(map),borrow(entry.key));target:=&mut map.buckets[slot];target.push(i);}
 }
-pub fn contains<a,b,K:hash::Hash+hash::Equal,V>(map:(&a [K: V]),key:(&b K))->num{return find(borrow(map),key)<map.entries.len();}
+pub fn contains<a,b,K:hash::Hash+hash::Equal,V>(map:(&a [K: V]),key:(&b K))->u64{return find(borrow(map),key)<map.entries.len();}
 pub fn get<a,b,K:hash::Hash+hash::Equal,V>(map:(&a [K: V]),key:(&b K))->(&a V)?{
     index:=find(borrow(map),key);if index<map.entries.len(){entry:=&map.entries[index];return core::some(borrow(entry.value));}
     return core::none<(&a V)>();
@@ -42,11 +42,11 @@ pub fn insert<a,K:hash::Hash+hash::Equal,V>(map:(&mut a [K: V]),key:K,value:V)->
     capacity:=map.buckets.len();if (map.entries.len()<capacity*3/4)==0{rebuild(borrow_mut(map),capacity*2);}
     return core::none<V>();
 }
-fn unlink<a,K:hash::Hash+hash::Equal,V>(map:(&mut a [K: V]),slot:num,index:num){
+fn unlink<a,K:hash::Hash+hash::Equal,V>(map:(&mut a [K: V]),slot:u64,index:u64){
     bucket:=&mut map.buckets[slot];
     for i in bucket.len(){if bucket[i]==index{last:=bucket.pop();if i<bucket.len(){exchange(&mut bucket[i],last);}return ();}}
 }
-fn relink<a,K:hash::Hash+hash::Equal,V>(map:(&mut a [K: V]),slot:num,from:num,to:num){
+fn relink<a,K:hash::Hash+hash::Equal,V>(map:(&mut a [K: V]),slot:u64,from:u64,to:u64){
     bucket:=&mut map.buckets[slot];for i in bucket.len(){if bucket[i]==from{exchange(&mut bucket[i],to);return ();}}
 }
 pub fn remove<a,b,K:hash::Hash+hash::Equal,V>(map:(&mut a [K: V]),key:(&b K))->V?{
@@ -59,6 +59,6 @@ pub fn remove<a,b,K:hash::Hash+hash::Equal,V>(map:(&mut a [K: V]),key:(&b K))->V
     return core::some(removed.value);
 }
 // Iteration by position: for i in hashmap::len(borrow(m)) { k := hashmap::key_at(borrow(m), i); ... }
-pub fn key_at<a,K:hash::Hash+hash::Equal,V>(map:(&a [K: V]),index:num)->(&a K){entry:=&map.entries[index];return borrow(entry.key);}
-pub fn value_at<a,K:hash::Hash+hash::Equal,V>(map:(&a [K: V]),index:num)->(&a V){entry:=&map.entries[index];return borrow(entry.value);}
-pub fn value_at_mut<a,K:hash::Hash+hash::Equal,V>(map:(&mut a [K: V]),index:num)->(&mut a V){entry:=&mut map.entries[index];return borrow_mut(entry.value);}
+pub fn key_at<a,K:hash::Hash+hash::Equal,V>(map:(&a [K: V]),index:u64)->(&a K){entry:=&map.entries[index];return borrow(entry.key);}
+pub fn value_at<a,K:hash::Hash+hash::Equal,V>(map:(&a [K: V]),index:u64)->(&a V){entry:=&map.entries[index];return borrow(entry.value);}
+pub fn value_at_mut<a,K:hash::Hash+hash::Equal,V>(map:(&mut a [K: V]),index:u64)->(&mut a V){entry:=&mut map.entries[index];return borrow_mut(entry.value);}

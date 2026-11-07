@@ -9,43 +9,43 @@ module optimize;
 // Kinds: 0 none, 1 register, 2 frame slot -N(%rbp), 3 immediate/other text, 4 other operand,
 // 5 generated text (range in O.gen). Ops: see opcode(); 100 label, 101 directive, 0 unknown.
 struct O {
-    ls: num[],
-    le: num[],
-    op: num[],
-    chg: num[],
-    del: num[],
-    lab: num[],
-    tr: num[],
-    k0: num[],
-    v0: num[],
-    s0: num[],
-    e0: num[],
-    m0: num[],
-    k1: num[],
-    v1: num[],
-    s1: num[],
-    e1: num[],
-    m1: num[],
+    ls: u64[],
+    le: u64[],
+    op: u64[],
+    chg: u64[],
+    del: u64[],
+    lab: u64[],
+    tr: u64[],
+    k0: u64[],
+    v0: u64[],
+    s0: u64[],
+    e0: u64[],
+    m0: u64[],
+    k1: u64[],
+    v1: u64[],
+    s1: u64[],
+    e1: u64[],
+    m1: u64[],
     gen: u8[],
     out: u8[],
-    weird: num,
-    maxslot: num,
-    table: num[],
-    base: num,
-    data: num,
-    uniq: num,
-    zline: num,
-    zfrom: num,
-    zto: num,
+    weird: u64,
+    maxslot: u64,
+    table: u64[],
+    base: u64,
+    data: u64,
+    uniq: u64,
+    zline: u64,
+    zfrom: u64,
+    zto: u64,
     inl_names: u8[][],
     inl_bodies: u8[][],
-    inl_head: num[],
-    inl_next: num[]
+    inl_head: u64[],
+    inl_next: u64[]
 }
-fn put<a>(v: (&mut a num[]), i: num, x: num) {
+fn put<a>(v: (&mut a u64[]), i: u64, x: u64) {
     exchange(&mut v[i], x);
 }
-fn same<b, d>(s: read<b>, a: num, e: num, w: read<d>) -> num {
+fn same<b, d>(s: read<b>, a: u64, e: u64, w: read<d>) -> u64 {
     if e - a != w.len() {
         return false;
     }
@@ -61,20 +61,20 @@ fn app<a, b>(out: (&mut a u8[]), s: read<b>) {
         out.push(s[i]);
     }
 }
-fn bit(r: num) -> num {
+fn bit(r: u64) -> u64 {
     return 1 << r;
 }
 // 0xFFCF: every general register except rsp/rbp; caller-saved; argument registers.
-fn all_regs() -> num {
+fn all_regs() -> u64 {
     return 65487;
 }
-fn caller_saved() -> num {
+fn caller_saved() -> u64 {
     return 4039;
 }
-fn arg_regs() -> num {
+fn arg_regs() -> u64 {
     return 966;
 }
-fn opcode_key(k: num) -> num {
+fn opcode_key(k: u64) -> u64 {
     if k == 1903587181 {
         return 1;
     }
@@ -179,7 +179,7 @@ fn opcode_key(k: num) -> num {
     }
     return 0;
 }
-fn opname<a>(o: (&mut a O), op: num) {
+fn opname<a>(o: (&mut a O), op: u64) {
     mut t = "";
     if op == 1 {
         t = "movq";
@@ -287,7 +287,7 @@ fn opname<a>(o: (&mut a O), op: num) {
     app(borrow_mut(o.out), &t);
 }
 // 0..15 for 64-bit names, 16+n for a narrower spelling of register n, 99 otherwise.
-fn reg_key(k: num) -> num {
+fn reg_key(k: u64) -> u64 {
     if k == 7889266 {
         return 0;
     }
@@ -404,7 +404,7 @@ fn reg_key(k: num) -> num {
     }
     return 99;
 }
-fn regcode<b>(s: read<b>, a: num, e: num) -> num {
+fn regcode<b>(s: read<b>, a: u64, e: u64) -> u64 {
     if (e <= a) + (e - a > 4) {
         return 99;
     }
@@ -414,11 +414,11 @@ fn regcode<b>(s: read<b>, a: num, e: num) -> num {
     }
     return reg_key(k);
 }
-fn alnum(c: num) -> num {
+fn alnum(c: u64) -> u64 {
     return ((47 < c) & (c < 58)) + ((96 < c) & (c < 123)) + ((64 < c) & (c < 91));
 }
 // Registers mentioned anywhere in s[a:e] (bit 5 marks an rbp use).
-fn mentions<b>(s: read<b>, a: num, e: num) -> num {
+fn mentions<b>(s: read<b>, a: u64, e: u64) -> u64 {
     mut m = 0;
     mut i = a;
     while i < e {
@@ -442,7 +442,7 @@ fn mentions<b>(s: read<b>, a: num, e: num) -> num {
     return m;
 }
 // Classifies one operand: returns kind and fills value/mask through the pair encoding.
-fn classify<a, b>(o: (&mut a O), s: read<b>, a: num, e: num, second: num) {
+fn classify<a, b>(o: (&mut a O), s: read<b>, a: u64, e: u64, second: u64) {
     mut k = 4;
     mut v = 0;
     mut m = 0;
@@ -528,7 +528,7 @@ fn classify<a, b>(o: (&mut a O), s: read<b>, a: num, e: num, second: num) {
         o.m0.push(m);
     }
 }
-fn parse<a, b>(o: (&mut a O), s: read<b>, a: num, e: num) {
+fn parse<a, b>(o: (&mut a O), s: read<b>, a: u64, e: u64) {
     o.ls.push(a);
     o.le.push(e);
     o.chg.push(0);
@@ -689,10 +689,10 @@ fn parse<a, b>(o: (&mut a O), s: read<b>, a: num, e: num) {
         }
     }
 }
-fn movelike(op: num) -> num {
+fn movelike(op: u64) -> u64 {
     return (op == 1) + (op == 2) + (op == 3) + (op == 28);
 }
-fn arith(op: num) -> num {
+fn arith(op: u64) -> u64 {
     return (op == 4)
         + (op == 5)
         + (op == 8)
@@ -702,17 +702,17 @@ fn arith(op: num) -> num {
         + (op == 33)
         + (op == 34);
 }
-fn is_jump(op: num) -> num {
+fn is_jump(op: u64) -> u64 {
     return (15 < op) & (op < 25);
 }
-fn mask_of(k: num, v: num, m: num) -> num {
+fn mask_of(k: u64, v: u64, m: u64) -> u64 {
     if k == 1 {
         return bit(v);
     }
     return m;
 }
 // Registers written by a destination operand (narrow register spellings count as written).
-fn dst_writes<a>(o: (&a O), i: num) -> num {
+fn dst_writes<a>(o: (&a O), i: u64) -> u64 {
     k := o.k1[i];
     if k == 1 {
         return bit(o.v1[i]);
@@ -722,13 +722,13 @@ fn dst_writes<a>(o: (&a O), i: num) -> num {
     }
     return 0;
 }
-fn dst_address<a>(o: (&a O), i: num) -> num {
+fn dst_address<a>(o: (&a O), i: u64) -> u64 {
     if o.k1[i] == 1 {
         return 0;
     }
     return o.m1[i];
 }
-fn reads<a>(o: (&a O), i: num) -> num {
+fn reads<a>(o: (&a O), i: u64) -> u64 {
     op := o.op[i];
     src := mask_of(o.k0[i], o.v0[i], o.m0[i]);
     dst := mask_of(o.k1[i], o.v1[i], o.m1[i]);
@@ -779,7 +779,7 @@ fn reads<a>(o: (&a O), i: num) -> num {
     }
     return all_regs();
 }
-fn writes<a>(o: (&a O), i: num) -> num {
+fn writes<a>(o: (&a O), i: u64) -> u64 {
     op := o.op[i];
     if (op == 100) + (op == 101) + (op == 29) + (op == 30) + (op == 31) + (op == 6) + (op == 7) {
         return 0;
@@ -811,7 +811,7 @@ fn writes<a>(o: (&a O), i: num) -> num {
     return all_regs();
 }
 // Whether operand j of instruction i reads / writes a frame slot.
-fn slot_read<a>(o: (&a O), i: num, j: num) -> num {
+fn slot_read<a>(o: (&a O), i: u64, j: u64) -> u64 {
     op := o.op[i];
     if j == 0 {
         return o.k0[i] == 2;
@@ -824,14 +824,14 @@ fn slot_read<a>(o: (&a O), i: num, j: num) -> num {
     }
     return 1;
 }
-fn slot_written<a>(o: (&a O), i: num) -> num {
+fn slot_written<a>(o: (&a O), i: u64) -> u64 {
     op := o.op[i];
     if o.k1[i] != 2 {
         return false;
     }
     return movelike(op) + arith(op) + (op == 11) + (op == 0);
 }
-fn set_operand<a>(o: (&mut a O), i: num, j: num, k: num, v: num) {
+fn set_operand<a>(o: (&mut a O), i: u64, j: u64, k: u64, v: u64) {
     if j == 0 {
         put(borrow_mut(o.k0), i, k);
         put(borrow_mut(o.v0), i, v);
@@ -843,7 +843,7 @@ fn set_operand<a>(o: (&mut a O), i: num, j: num, k: num, v: num) {
     }
     put(borrow_mut(o.chg), i, 1);
 }
-fn set_range<a>(o: (&mut a O), i: num, j: num, a: num, e: num) {
+fn set_range<a>(o: (&mut a O), i: u64, j: u64, a: u64, e: u64) {
     if j == 0 {
         put(borrow_mut(o.s0), i, a);
         put(borrow_mut(o.e0), i, e);
@@ -852,36 +852,36 @@ fn set_range<a>(o: (&mut a O), i: num, j: num, a: num, e: num) {
         put(borrow_mut(o.e1), i, e);
     }
 }
-fn kill<a>(o: (&mut a O), i: num) {
+fn kill<a>(o: (&mut a O), i: u64) {
     put(borrow_mut(o.del), i, 1);
 }
 struct F {
     // Slot facts (index N/8): register holding the value (+1) and its version, known
     // immediate line (+1), copy-of slot (+1) and its version; valid while ver/epoch match.
-    sver: num[],
-    sep: num[],
-    sfv: num[],
-    sreg: num[],
-    sregv: num[],
-    simm: num[],
-    scopy: num[],
-    scopyv: num[],
-    bad: num[],
-    reads: num[],
-    weight: num[],
-    rver: num[],
-    rep: num[],
-    rimm: num[],
-    rslot: num[],
-    rslotv: num[],
-    rcopy: num[],
-    rcopyv: num[],
-    epoch: num
+    sver: u64[],
+    sep: u64[],
+    sfv: u64[],
+    sreg: u64[],
+    sregv: u64[],
+    simm: u64[],
+    scopy: u64[],
+    scopyv: u64[],
+    bad: u64[],
+    reads: u64[],
+    weight: u64[],
+    rver: u64[],
+    rep: u64[],
+    rimm: u64[],
+    rslot: u64[],
+    rslotv: u64[],
+    rcopy: u64[],
+    rcopyv: u64[],
+    epoch: u64
 }
-fn facts_valid<a>(f: (&a F), n: num) -> num {
+fn facts_valid<a>(f: (&a F), n: u64) -> u64 {
     return (f.sep[n] == f.epoch) & (f.sfv[n] == f.sver[n]);
 }
-fn fresh_facts<a>(f: (&mut a F), n: num) {
+fn fresh_facts<a>(f: (&mut a F), n: u64) {
     put(borrow_mut(f.sep), n, f.epoch);
     t1 := f.sver[n];
     put(borrow_mut(f.sfv), n, t1);
@@ -889,17 +889,17 @@ fn fresh_facts<a>(f: (&mut a F), n: num) {
     put(borrow_mut(f.simm), n, 0);
     put(borrow_mut(f.scopy), n, 0);
 }
-fn reg_written<a>(f: (&mut a F), r: num) {
+fn reg_written<a>(f: (&mut a F), r: u64) {
     t2 := f.rver[r] + 1;
     put(borrow_mut(f.rver), r, t2);
     put(borrow_mut(f.rimm), r, 0);
     put(borrow_mut(f.rslot), r, 0);
     put(borrow_mut(f.rcopy), r, 0);
 }
-fn reg_fact_valid<a>(f: (&a F), r: num) -> num {
+fn reg_fact_valid<a>(f: (&a F), r: u64) -> u64 {
     return f.rep[r] == f.epoch;
 }
-fn copy_source<a>(f: (&a F), q: num) -> num {
+fn copy_source<a>(f: (&a F), q: u64) -> u64 {
     if reg_fact_valid(borrow(f), q) == 0 {
         return q;
     }
@@ -914,7 +914,7 @@ fn copy_source<a>(f: (&a F), q: num) -> num {
     return r;
 }
 // Replace a read of slot n (operand j of i) by a register or constant already holding it.
-fn forward_read<a, c>(o: (&mut a O), f: (&mut c F), i: num, j: num, n: num) {
+fn forward_read<a, c>(o: (&mut a O), f: (&mut c F), i: u64, j: u64, n: u64) {
     if facts_valid(borrow(f), n) == 0 {
         return ();
     }
@@ -952,26 +952,26 @@ fn forward_read<a, c>(o: (&mut a O), f: (&mut c F), i: num, j: num, n: num) {
         }
     }
 }
-fn new_facts(ns: num) -> F {
+fn new_facts(ns: u64) -> F {
     mut f = F {
-        sver: num[],
-        sep: num[],
-        sfv: num[],
-        sreg: num[],
-        sregv: num[],
-        simm: num[],
-        scopy: num[],
-        scopyv: num[],
-        bad: num[],
-        reads: num[],
-        weight: num[],
-        rver: num[],
-        rep: num[],
-        rimm: num[],
-        rslot: num[],
-        rslotv: num[],
-        rcopy: num[],
-        rcopyv: num[],
+        sver: u64[],
+        sep: u64[],
+        sfv: u64[],
+        sreg: u64[],
+        sregv: u64[],
+        simm: u64[],
+        scopy: u64[],
+        scopyv: u64[],
+        bad: u64[],
+        reads: u64[],
+        weight: u64[],
+        rver: u64[],
+        rep: u64[],
+        rimm: u64[],
+        rslot: u64[],
+        rslotv: u64[],
+        rcopy: u64[],
+        rcopyv: u64[],
         epoch: 1,
     };
     for i in ns {
@@ -998,7 +998,7 @@ fn new_facts(ns: num) -> F {
     }
     return f;
 }
-fn forward<a, b, c>(o: (&mut a O), f: (&mut c F), s: read<b>, first: num, last: num) {
+fn forward<a, b, c>(o: (&mut a O), f: (&mut c F), s: read<b>, first: u64, last: u64) {
     mut i = first;
     while i < last {
         op := o.op[i];
@@ -1178,7 +1178,7 @@ fn forward<a, b, c>(o: (&mut a O), f: (&mut c F), s: read<b>, first: num, last: 
         i += 1;
     }
 }
-fn count_reads<a, c>(o: (&a O), f: (&mut c F), first: num, last: num) {
+fn count_reads<a, c>(o: (&a O), f: (&mut c F), first: u64, last: u64) {
     for n in f.reads.len() {
         put(borrow_mut(f.reads), n, 0);
     }
@@ -1198,7 +1198,7 @@ fn count_reads<a, c>(o: (&a O), f: (&mut c F), first: num, last: num) {
         }
     }
 }
-fn dead_stores<a, c>(o: (&mut a O), f: (&mut c F), first: num, last: num) {
+fn dead_stores<a, c>(o: (&mut a O), f: (&mut c F), first: u64, last: u64) {
     count_reads(borrow(o), borrow_mut(f), first, last);
     for i in last - first {
         j := first + i;
@@ -1212,7 +1212,7 @@ fn dead_stores<a, c>(o: (&mut a O), f: (&mut c F), first: num, last: num) {
 }
 // Function-wide backward liveness over the label graph (iterated to a fixed point); unknown
 // jump targets and unrecognized instructions make every register live.
-fn live_pass<a, c>(o: (&mut a O), lin: (&mut c num[]), remove: num) -> num {
+fn live_pass<a, c>(o: (&mut a O), lin: (&mut c u64[]), remove: u64) -> u64 {
     last := o.op.len();
     mut live = 0;
     mut i = last;
@@ -1271,8 +1271,8 @@ fn live_pass<a, c>(o: (&mut a O), lin: (&mut c num[]), remove: num) -> num {
     }
     return changed;
 }
-fn dead_defs<a, b>(o: (&mut a O), s: read<b>, first: num, last: num) {
-    mut lin = num[];
+fn dead_defs<a, b>(o: (&mut a O), s: read<b>, first: u64, last: u64) {
+    mut lin = u64[];
     for i in last {
         lin.push(0);
     }
@@ -1287,7 +1287,7 @@ fn dead_defs<a, b>(o: (&mut a O), s: read<b>, first: num, last: num) {
         live_pass(borrow_mut(o), borrow_mut(lin), 1);
     }
 }
-fn next_live<a>(o: (&a O), i: num, last: num) -> num {
+fn next_live<a>(o: (&a O), i: u64, last: u64) -> u64 {
     mut j = i + 1;
     while j < last {
         if (o.del[j] == 0) & (o.op[j] != 101) {
@@ -1297,7 +1297,7 @@ fn next_live<a>(o: (&a O), i: num, last: num) -> num {
     }
     return last;
 }
-fn next_insn<a>(o: (&a O), i: num, last: num) -> num {
+fn next_insn<a>(o: (&a O), i: u64, last: u64) -> u64 {
     mut j = next_live(borrow(o), i, last);
     while j < last {
         if o.op[j] != 100 {
@@ -1308,7 +1308,7 @@ fn next_insn<a>(o: (&a O), i: num, last: num) -> num {
     return last;
 }
 // Whether register r is dead after instruction i: followed forward through jumps (bounded).
-fn dead_after<a>(o: (&a O), i: num, r: num, budget: num) -> num {
+fn dead_after<a>(o: (&a O), i: u64, r: u64, budget: u64) -> u64 {
     last := o.op.len();
     if budget == 0 {
         return false;
@@ -1352,7 +1352,7 @@ fn dead_after<a>(o: (&a O), i: num, r: num, budget: num) -> num {
     }
     return false;
 }
-fn jump_target<a>(o: (&a O), j: num) -> num {
+fn jump_target<a>(o: (&a O), j: u64) -> u64 {
     last := o.op.len();
     if (o.k0[j] != 4) + (o.v0[j] == 0) {
         return last;
@@ -1374,7 +1374,7 @@ fn jump_target<a>(o: (&a O), j: num) -> num {
     }
     return t - 1;
 }
-fn gen_number<a>(o: (&mut a O), n: num) -> num {
+fn gen_number<a>(o: (&mut a O), n: u64) -> u64 {
     start := o.gen.len();
     if 9 < n {
         gen_number(borrow_mut(o), n / 10);
@@ -1382,7 +1382,7 @@ fn gen_number<a>(o: (&mut a O), n: num) -> num {
     o.gen.push(48 + n % 10);
     return start;
 }
-fn gen_imm<a>(o: (&mut a O), n: num, i: num, j: num) {
+fn gen_imm<a>(o: (&mut a O), n: u64, i: u64, j: u64) {
     start := o.gen.len();
     o.gen.push(36);
     gen_number(borrow_mut(o), n);
@@ -1390,7 +1390,7 @@ fn gen_imm<a>(o: (&mut a O), n: num, i: num, j: num) {
     set_operand(borrow_mut(o), i, j, 5, 0);
     set_range(borrow_mut(o), i, j, start, end);
 }
-fn imm_value<a, b>(o: (&a O), s: read<b>, i: num) -> num {
+fn imm_value<a, b>(o: (&a O), s: read<b>, i: u64) -> u64 {
     // Decimal immediate of operand 0 (+1), or 0.
     if o.k0[i] != 3 {
         return 0;
@@ -1410,7 +1410,7 @@ fn imm_value<a, b>(o: (&a O), s: read<b>, i: num) -> num {
     }
     return n + 1;
 }
-fn peephole<a, b>(o: (&mut a O), s: read<b>, first: num, last: num) {
+fn peephole<a, b>(o: (&mut a O), s: read<b>, first: u64, last: u64) {
     mut i = first;
     while i < last {
         if o.del[i] {
@@ -1574,7 +1574,7 @@ fn peephole<a, b>(o: (&mut a O), s: read<b>, first: num, last: num) {
     }
 }
 // Slot use permitted after promotion: the instruction stays valid with a register operand.
-fn promotable_use<a>(o: (&a O), i: num) -> num {
+fn promotable_use<a>(o: (&a O), i: u64) -> u64 {
     op := o.op[i];
     if (op == 1)
         + (op == 4)
@@ -1593,7 +1593,7 @@ fn promotable_use<a>(o: (&a O), i: num) -> num {
     }
     return (op == 11) + (op == 12) + (op == 13);
 }
-fn emit_operand<a, b>(o: (&mut a O), s: read<b>, i: num, j: num) {
+fn emit_operand<a, b>(o: (&mut a O), s: read<b>, i: u64, j: u64) {
     mut k = o.k0[i];
     mut v = o.v0[i];
     mut a = o.s0[i];
@@ -1626,7 +1626,7 @@ fn emit_operand<a, b>(o: (&mut a O), s: read<b>, i: num, j: num) {
         o.out.push(s[a + x]);
     }
 }
-fn reg_name<a>(o: (&mut a O), r: num) {
+fn reg_name<a>(o: (&mut a O), r: u64) {
     mut t = "";
     if r == 0 {
         t = "rax";
@@ -1678,13 +1678,13 @@ fn reg_name<a>(o: (&mut a O), r: num) {
     }
     app(borrow_mut(o.out), &t);
 }
-fn out_number<a>(o: (&mut a O), n: num) {
+fn out_number<a>(o: (&mut a O), n: u64) {
     if 9 < n {
         out_number(borrow_mut(o), n / 10);
     }
     o.out.push(48 + n % 10);
 }
-fn emit_line<a, b>(o: (&mut a O), s: read<b>, i: num) {
+fn emit_line<a, b>(o: (&mut a O), s: read<b>, i: u64) {
     op := o.op[i];
     if (op == 40) + (op == 41) + (op == 44) {
         n := o.uniq + 1;
@@ -1769,7 +1769,7 @@ fn emit_line<a, b>(o: (&mut a O), s: read<b>, i: num) {
     }
     o.out.push(10);
 }
-fn emit_frame_slot<a, b>(o: (&mut a O), s: read<b>, p: num, k: num) {
+fn emit_frame_slot<a, b>(o: (&mut a O), s: read<b>, p: u64, k: u64) {
     // -.FN-8(k+1)(%rbp), where .FN is the frame constant named by the prologue subq.
     app(borrow_mut(o.out), &"-");
     for x in o.e0[p] - o.s0[p] - 1 {
@@ -1856,7 +1856,7 @@ fn function<a, b>(o: (&mut a O), s: read<b>) {
         base = minlab - 1;
     }
     exchange(borrow_mut(o.base), base);
-    mut refs = num[];
+    mut refs = u64[];
     if minlab != 0 {
         for x in maxlab - base + 1 {
             o.table.push(0);
@@ -1917,11 +1917,11 @@ fn function<a, b>(o: (&mut a O), s: read<b>) {
     dead_stores(borrow_mut(o), borrow_mut(f), first, last);
     dead_defs(borrow_mut(o), &s, first, last);
     // Promotion: weights grow 4x per loop nesting level (backward jumps).
-    mut chosen = num[];
-    mut slots = num[];
+    mut chosen = u64[];
+    mut slots = u64[];
     if prologue != 0 {
-        mut opens = num[];
-        mut closes = num[];
+        mut opens = u64[];
+        mut closes = u64[];
         for i in last + 1 {
             opens.push(0);
             closes.push(0);
@@ -1973,7 +1973,7 @@ fn function<a, b>(o: (&mut a O), s: read<b>) {
                 }
             }
         }
-        free := num[3, 12, 13, 14, 15];
+        free := u64[3, 12, 13, 14, 15];
         for r in free.len() {
             reg := free[r];
             if ((regs_used >> reg) & 1) == 0 {
@@ -2080,7 +2080,7 @@ fn function<a, b>(o: (&mut a O), s: read<b>) {
         inline_candidate(borrow_mut(o), &s, prologue);
     }
 }
-fn name_hash<b>(s: read<b>, a: num, e: num) -> num {
+fn name_hash<b>(s: read<b>, a: u64, e: u64) -> u64 {
     mut h = 0;
     for i in e - a {
         h = (h * 31 + s[a + i]) % 4093;
@@ -2090,7 +2090,7 @@ fn name_hash<b>(s: read<b>, a: num, e: num) -> num {
 // A small leaf (no calls but rt_abort, no callee-saved registers, small cleared frame) gets a
 // frameless copy of its body: slots move to free scratch registers, returns jump to the end.
 // Calls to it are replaced by that body after all functions are optimized.
-fn inline_candidate<a, b>(o: (&mut a O), s: read<b>, prologue: num) {
+fn inline_candidate<a, b>(o: (&mut a O), s: read<b>, prologue: u64) {
     last := o.op.len();
     mut count = 0;
     mut used = 0;
@@ -2130,9 +2130,9 @@ fn inline_candidate<a, b>(o: (&mut a O), s: read<b>, prologue: num) {
         }
     }
     // Map every slot in the body to a free caller-saved register.
-    free := num[8, 9, 10, 11, 2, 1, 6, 7];
-    mut slots = num[];
-    mut regs = num[];
+    free := u64[8, 9, 10, 11, 2, 1, 6, 7];
+    mut slots = u64[];
+    mut regs = u64[];
     for i in last {
         if (prologue < i) & (o.del[i] == 0) {
             for j in 2 {
@@ -2276,7 +2276,7 @@ fn inline_calls<a>(o: (&mut a O)) {
         o.out.push(text[start + x]);
     }
 }
-fn emit_body<a>(o: (&mut a O), k: num, site: num) {
+fn emit_body<a>(o: (&mut a O), k: u64, site: u64) {
     body := o.inl_bodies[k].copy();
     mut i = 0;
     n := body.len();
@@ -2314,7 +2314,7 @@ fn emit_body<a>(o: (&mut a O), k: num, site: num) {
 }
 // Renumber the slots still referenced into a dense frame (parameters keep the top slots), so
 // the entry zeroing only clears live storage. Returns the new frame size, or 0 if unchanged.
-fn compact<a, b>(o: (&mut a O), s: read<b>, prologue: num, ns: num) -> num {
+fn compact<a, b>(o: (&mut a O), s: read<b>, prologue: u64, ns: u64) -> u64 {
     if prologue == 0 {
         return 0;
     }
@@ -2354,7 +2354,7 @@ fn compact<a, b>(o: (&mut a O), s: read<b>, prologue: num, ns: num) -> num {
     if params >= ns {
         return 0;
     }
-    mut map = num[];
+    mut map = u64[];
     for n in ns {
         map.push(0);
     }
@@ -2454,28 +2454,28 @@ fn reset<a>(o: (&mut a O)) {
 }
 pub fn optimize<b>(s: read<b>) -> u8[] {
     mut o = O {
-        ls: num[],
-        le: num[],
-        op: num[],
-        chg: num[],
-        del: num[],
-        lab: num[],
-        tr: num[],
-        k0: num[],
-        v0: num[],
-        s0: num[],
-        e0: num[],
-        m0: num[],
-        k1: num[],
-        v1: num[],
-        s1: num[],
-        e1: num[],
-        m1: num[],
+        ls: u64[],
+        le: u64[],
+        op: u64[],
+        chg: u64[],
+        del: u64[],
+        lab: u64[],
+        tr: u64[],
+        k0: u64[],
+        v0: u64[],
+        s0: u64[],
+        e0: u64[],
+        m0: u64[],
+        k1: u64[],
+        v1: u64[],
+        s1: u64[],
+        e1: u64[],
+        m1: u64[],
         gen: u8[],
         out: u8[],
         weird: 0,
         maxslot: 0,
-        table: num[],
+        table: u64[],
         base: 0,
         data: 0,
         uniq: 0,
@@ -2484,8 +2484,8 @@ pub fn optimize<b>(s: read<b>) -> u8[] {
         zto: 0,
         inl_names: u8[][],
         inl_bodies: u8[][],
-        inl_head: num[],
-        inl_next: num[],
+        inl_head: u64[],
+        inl_next: u64[],
     };
     for i in 4096 {
         o.inl_head.push(0);

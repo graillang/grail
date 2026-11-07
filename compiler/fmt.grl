@@ -7,25 +7,25 @@ module fmt;
 // operator, in that order, using tokens only so the program is never reparsed or changed.
 // Token kinds: 1 word, 2 number, 3 string, 4 punctuation (byte or lexer multi-byte code), 5 comment.
 struct F {
-    kind: num[],
-    start: num[],
-    end: num[],
-    nl: num[],
-    code: num[],
-    generic: num[],
-    ltoken: num[],
-    lspace: num[],
-    lfirst: num[],
-    lindent: num[],
+    kind: u64[],
+    start: u64[],
+    end: u64[],
+    nl: u64[],
+    code: u64[],
+    generic: u64[],
+    ltoken: u64[],
+    lspace: u64[],
+    lfirst: u64[],
+    lindent: u64[],
     out: u8[]
 }
-fn letter(c: num) -> num {
+fn letter(c: u64) -> u64 {
     return ((64 < c) & (c < 91)) + ((96 < c) & (c < 123)) + (c == 95);
 }
-fn digit(c: num) -> num {
+fn digit(c: u64) -> u64 {
     return (47 < c) & (c < 58);
 }
-fn pair(c: num, d: num) -> num {
+fn pair(c: u64, d: u64) -> u64 {
     if (c == 45) & (d == 62) {
         return 256;
     }
@@ -76,7 +76,7 @@ fn pair(c: num, d: num) -> num {
     }
     return 0;
 }
-fn token<a>(f: (&mut a F), kind: num, start: num, end: num, nl: num, code: num) {
+fn token<a>(f: (&mut a F), kind: u64, start: u64, end: u64, nl: u64, code: u64) {
     f.kind.push(kind);
     f.start.push(start);
     f.end.push(end);
@@ -223,7 +223,7 @@ fn scan<a, b>(f: (&mut a F), s: read<b>) {
         nl = 0;
     }
 }
-fn is<a, b, d>(f: (&a F), s: read<b>, i: num, word: read<d>) -> num {
+fn is<a, b, d>(f: (&a F), s: read<b>, i: u64, word: read<d>) -> u64 {
     if f.kind[i] != 1 {
         return false;
     }
@@ -238,10 +238,10 @@ fn is<a, b, d>(f: (&a F), s: read<b>, i: num, word: read<d>) -> num {
     }
     return true;
 }
-fn punct<a>(f: (&a F), i: num, code: num) -> num {
+fn punct<a>(f: (&a F), i: u64, code: u64) -> u64 {
     return (f.kind[i] == 4) & (f.code[i] == code);
 }
-fn keyword<a, b>(f: (&a F), s: read<b>, i: num) -> num {
+fn keyword<a, b>(f: (&a F), s: read<b>, i: u64) -> u64 {
     return is(borrow(f), &s, i, &"return")
         + is(borrow(f), &s, i, &"in")
         + is(borrow(f), &s, i, &"if")
@@ -251,7 +251,7 @@ fn keyword<a, b>(f: (&a F), s: read<b>, i: num) -> num {
         + is(borrow(f), &s, i, &"for");
 }
 // Binary operators (spaced). '<' / '>' count only when not generic brackets.
-fn binary<a>(f: (&a F), i: num) -> num {
+fn binary<a>(f: (&a F), i: u64) -> u64 {
     if f.kind[i] != 4 {
         return false;
     }
@@ -374,7 +374,7 @@ fn mark_pipes<a, b>(f: (&mut a F), s: read<b>) {
         i += 1;
     }
 }
-fn prefix_position<a, b>(f: (&a F), s: read<b>, i: num) -> num {
+fn prefix_position<a, b>(f: (&a F), s: read<b>, i: u64) -> u64 {
     if i == 0 {
         return true;
     }
@@ -397,7 +397,7 @@ fn prefix_position<a, b>(f: (&a F), s: read<b>, i: num) -> num {
     }
     return true;
 }
-fn unary<a, b>(f: (&a F), s: read<b>, i: num) -> num {
+fn unary<a, b>(f: (&a F), s: read<b>, i: u64) -> u64 {
     if f.kind[i] != 4 {
         return false;
     }
@@ -408,7 +408,7 @@ fn unary<a, b>(f: (&a F), s: read<b>, i: num) -> num {
     return prefix_position(borrow(f), &s, i);
 }
 // Space between two tokens on the same line (0/1). inline: the brace context is a literal.
-fn space<a, b>(f: (&a F), s: read<b>, p: num, i: num, inline: num) -> num {
+fn space<a, b>(f: (&a F), s: read<b>, p: u64, i: u64, inline: u64) -> u64 {
     pk := f.kind[p];
     k := f.kind[i];
     pc := f.code[p];
@@ -547,18 +547,18 @@ fn space<a, b>(f: (&a F), s: read<b>, p: num, i: num, inline: num) -> num {
     }
     return false;
 }
-fn new_line<a>(f: (&mut a F), indent: num) {
+fn new_line<a>(f: (&mut a F), indent: u64) {
     f.lfirst.push(f.ltoken.len());
     f.lindent.push(indent);
 }
-fn emit<a>(f: (&mut a F), i: num, sp: num) {
+fn emit<a>(f: (&mut a F), i: u64, sp: u64) {
     f.ltoken.push(i);
     f.lspace.push(sp);
 }
 // Context kinds: 1 block, 2 declaration (one item per line), 3 match, 4 inline literal, 5 paren, 6 bracket.
 fn layout<a, b>(f: (&mut a F), s: read<b>) {
     n := f.kind.len();
-    mut stack = num[];
+    mut stack = u64[];
     mut indent = 0;
     mut pending = 1;
     mut header = 0;
@@ -747,10 +747,10 @@ fn put<a, b>(out: (&mut a u8[]), s: read<b>) {
         out.push(s[i]);
     }
 }
-fn token_width<a>(f: (&a F), i: num) -> num {
+fn token_width<a>(f: (&a F), i: u64) -> u64 {
     return f.end[i] - f.start[i];
 }
-fn range_width<a>(f: (&a F), lo: num, hi: num) -> num {
+fn range_width<a>(f: (&a F), lo: u64, hi: u64) -> u64 {
     mut w = 0;
     mut j = lo;
     while j < hi {
@@ -762,7 +762,7 @@ fn range_width<a>(f: (&a F), lo: num, hi: num) -> num {
     }
     return w;
 }
-fn write_range<a, b>(f: (&mut a F), s: read<b>, lo: num, hi: num, indent: num) {
+fn write_range<a, b>(f: (&mut a F), s: read<b>, lo: u64, hi: u64, indent: u64) {
     for i in indent * 4 {
         f.out.push(32);
     }
@@ -779,7 +779,7 @@ fn write_range<a, b>(f: (&mut a F), s: read<b>, lo: num, hi: num, indent: num) {
     }
     f.out.push(10);
 }
-fn opener<a>(f: (&a F), j: num) -> num {
+fn opener<a>(f: (&a F), j: u64) -> u64 {
     t := f.ltoken[j];
     if f.kind[t] != 4 {
         return false;
@@ -787,7 +787,7 @@ fn opener<a>(f: (&a F), j: num) -> num {
     c := f.code[t];
     return (c == 40) + (c == 91) + (c == 123);
 }
-fn closer<a>(f: (&a F), j: num) -> num {
+fn closer<a>(f: (&a F), j: u64) -> u64 {
     t := f.ltoken[j];
     if f.kind[t] != 4 {
         return false;
@@ -798,21 +798,21 @@ fn closer<a>(f: (&a F), j: num) -> num {
 // A line over 100 columns is broken in rustfmt order: a match arm after `=>`, then a binary
 // operator chain before each operator, then a postfix chain before each `.`, then a bracket
 // list one item per line. Every rule reads tokens only, so formatting never changes the program.
-fn code_at<a>(f: (&a F), j: num) -> num {
+fn code_at<a>(f: (&a F), j: u64) -> u64 {
     t := f.ltoken[j];
     if f.kind[t] != 4 {
         return 0;
     }
     return f.code[t];
 }
-fn opens(c: num) -> num {
+fn opens(c: u64) -> u64 {
     return (c == 40) + (c == 91) + (c == 123);
 }
-fn shuts(c: num) -> num {
+fn shuts(c: u64) -> u64 {
     return (c == 41) + (c == 93) + (c == 125);
 }
 // Index of the token closing the opener at j, or hi when it is not closed on this line.
-fn close_of<a>(f: (&a F), j: num, hi: num) -> num {
+fn close_of<a>(f: (&a F), j: u64, hi: u64) -> u64 {
     mut d = 0;
     mut m = j;
     while m < hi {
@@ -830,7 +830,7 @@ fn close_of<a>(f: (&a F), j: num, hi: num) -> num {
     return hi;
 }
 // A binary operator that may start a continuation line: not assignment, not a unary sign.
-fn breakable<a, b>(f: (&a F), s: read<b>, j: num) -> num {
+fn breakable<a, b>(f: (&a F), s: read<b>, j: u64) -> u64 {
     t := f.ltoken[j];
     if f.kind[t] != 4 {
         return false;
@@ -856,7 +856,7 @@ fn breakable<a, b>(f: (&a F), s: read<b>, j: num) -> num {
     return true;
 }
 // A `{ ... }` body that accepts a trailing comma: comma-separated items, no statements or arms.
-fn trailing_ok<a>(f: (&a F), lo: num, hi: num) -> num {
+fn trailing_ok<a>(f: (&a F), lo: u64, hi: u64) -> u64 {
     mut d = 0;
     mut j = lo;
     mut commas = 0;
@@ -880,7 +880,7 @@ fn trailing_ok<a>(f: (&a F), lo: num, hi: num) -> num {
     }
     return 0 < commas;
 }
-fn write_range_comma<a, b>(f: (&mut a F), s: read<b>, lo: num, hi: num, indent: num) {
+fn write_range_comma<a, b>(f: (&mut a F), s: read<b>, lo: u64, hi: u64, indent: u64) {
     for i in indent * 4 {
         f.out.push(32);
     }
@@ -899,7 +899,7 @@ fn write_range_comma<a, b>(f: (&mut a F), s: read<b>, lo: num, hi: num, indent: 
     f.out.push(10);
 }
 // Long match arm: the pattern and `=>` stay, the body moves to the next line.
-fn arm_break<a, b>(f: (&mut a F), s: read<b>, lo: num, hi: num, indent: num) -> num {
+fn arm_break<a, b>(f: (&mut a F), s: read<b>, lo: u64, hi: u64, indent: u64) -> u64 {
     mut d = 0;
     mut j = lo;
     while j < hi {
@@ -920,7 +920,7 @@ fn arm_break<a, b>(f: (&mut a F), s: read<b>, lo: num, hi: num, indent: num) -> 
     return false;
 }
 // A single `.` used as a postfix separator, never one half of a `..` range.
-fn chain_dot<a>(f: (&a F), j: num, lo: num, hi: num) -> num {
+fn chain_dot<a>(f: (&a F), j: u64, lo: u64, hi: u64) -> u64 {
     if code_at(borrow(f), j) != 46 {
         return false;
     }
@@ -937,7 +937,7 @@ fn chain_dot<a>(f: (&a F), j: num, lo: num, hi: num) -> num {
     return true;
 }
 // Long postfix chain: the head stays on the line, then one `.segment` per line.
-fn chain_break<a, b>(f: (&mut a F), s: read<b>, lo: num, hi: num, indent: num) -> num {
+fn chain_break<a, b>(f: (&mut a F), s: read<b>, lo: u64, hi: u64, indent: u64) -> u64 {
     if chain_dot(borrow(f), lo, lo, hi) {
         return false;
     }
@@ -986,7 +986,7 @@ fn chain_break<a, b>(f: (&mut a F), s: read<b>, lo: num, hi: num, indent: num) -
 }
 // Bracket list that does not fit: head, one item per line, tail. A `{` record body also takes a
 // trailing comma, which the language accepts there.
-fn list_break<a, b>(f: (&mut a F), s: read<b>, lo: num, hi: num, indent: num) -> num {
+fn list_break<a, b>(f: (&mut a F), s: read<b>, lo: u64, hi: u64, indent: u64) -> u64 {
     mut open = hi;
     mut close = hi;
     mut j = lo;
@@ -1038,7 +1038,7 @@ fn list_break<a, b>(f: (&mut a F), s: read<b>, lo: num, hi: num, indent: num) ->
     return true;
 }
 // Binary operator chain: each operator starts its continuation line.
-fn op_break<a, b>(f: (&mut a F), s: read<b>, lo: num, hi: num, indent: num) -> num {
+fn op_break<a, b>(f: (&mut a F), s: read<b>, lo: u64, hi: u64, indent: u64) -> u64 {
     mut d = 0;
     mut j = lo;
     mut count = 0;
@@ -1084,7 +1084,7 @@ fn op_break<a, b>(f: (&mut a F), s: read<b>, lo: num, hi: num, indent: num) -> n
     render(borrow_mut(f), &s, seg, hi, indent + 1);
     return true;
 }
-fn render<a, b>(f: (&mut a F), s: read<b>, lo: num, hi: num, indent: num) {
+fn render<a, b>(f: (&mut a F), s: read<b>, lo: u64, hi: u64, indent: u64) {
     if (indent * 4 + range_width(borrow(f), lo, hi) < 101) + (hi - lo < 3) {
         write_range(borrow_mut(f), &s, lo, hi, indent);
         return ();
@@ -1106,16 +1106,16 @@ fn render<a, b>(f: (&mut a F), s: read<b>, lo: num, hi: num, indent: num) {
 
 pub fn format<a>(source: read<a>) -> u8[] {
     mut f = F {
-        kind: num[],
-        start: num[],
-        end: num[],
-        nl: num[],
-        code: num[],
-        generic: num[],
-        ltoken: num[],
-        lspace: num[],
-        lfirst: num[],
-        lindent: num[],
+        kind: u64[],
+        start: u64[],
+        end: u64[],
+        nl: u64[],
+        code: u64[],
+        generic: u64[],
+        ltoken: u64[],
+        lspace: u64[],
+        lfirst: u64[],
+        lindent: u64[],
         out: u8[],
     };
     scan(borrow_mut(f), &source);

@@ -17,7 +17,7 @@ use. A `mut` binding gets the type of its first sized use anywhere in the functi
 an `i32` `x` makes `sum` an `i32`, and `mut count = 0; count += 1; show(count)` with
 `show(level: u8)` makes `count` a `u8` from the start, so `count += 1` is checked against 255.
 Using one binding as two different sized types is an error. Without any sized use, integer
-literals are `num` and float literals are `f64`.
+literals are `u64` and float literals are `f64`.
 
 {{example:literal-inference}}
 

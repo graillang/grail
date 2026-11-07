@@ -27,7 +27,7 @@ to turn comparisons off across the book, or collapse just one example.
 On small screens the comparison stacks vertically; you can collapse it at any time.
 
 For raw compiler commands and self-compilation instructions, see `compiler/NATIVE.md`.
-A `main` may explicitly return `num` to set the process exit status; it does not print that number.
+A `main` may explicitly return `u64` to set the process exit status; it does not print that number.
 Ordinary functions use explicit result types when returning values. A source file may also declare
 an explicit `module`, as later examples do to make their names clear.
 

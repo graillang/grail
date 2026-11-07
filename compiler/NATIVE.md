@@ -23,19 +23,19 @@ fn main() {
 }
 ```
 
-`print(value)` and `println(value)` are builtin prelude operations for `num`, strings, byte owners
+`print(value)` and `println(value)` are builtin prelude operations for `u64`, strings, byte owners
 and byte views; `println()` emits an empty line. Text/buffer output takes a checked readonly borrow
 for the call, does not consume the owner, and releases temporary views with normal cleanup.
 There is no formatting/interpolation or general display trait. The names `print`/`println` are
 reserved. Ordinary unit-returning functions may also omit the result annotation and final return.
 
-Named `main` never prints its return value. Unit main exits with status 0; explicit `->num`
+Named `main` never prints its return value. Unit main exits with status 0; explicit `->u64`
 sets the OS exit status (low eight bits on Linux). A main may accept one readonly argv view;
 an incorrect argument count exits with status 2. All cleanup and zero-live-allocation checks still
 run before normal process exit.
 
 Existing bootstrap/regression sources without named main retain their first-public-function
-entry protocol: zero parameters or one argv view, explicit `num` result, printed by the legacy
+entry protocol: zero parameters or one argv view, explicit `u64` result, printed by the legacy
 numeric harness. This is not the recommended application entry convention.
 
 ## Implementation boundary
@@ -99,8 +99,8 @@ storage; the target stays valid while the right-hand side runs once, and conflic
 is rejected. Power policy is implemented in the Grail runtime, not handwritten assembly.
 
 Generic functions use a specialization worklist and body replay. Unused templates are checked
-with opaque affine type variables; specializing to `num` does not make `T` copyable or numeric.
-Calls infer type arguments or accept explicit `identity<num>(...)` forms, including cross-module
+with opaque affine type variables; specializing to `u64` does not make `T` copyable or numeric.
+Calls infer type arguments or accept explicit `identity<u64>(...)` forms, including cross-module
 calls and regular recursion. Expanding polymorphic recursion is bounded. Generic records/enums
 support nested/borrowed type arguments, constructor inference and specialized recursive drops.
 Lifetimes precede `T` parameters in declarations.
@@ -200,7 +200,7 @@ lowercase names are lifetimes, which precede type parameters. Existing universal
 
 ## Callable and concurrency foundations
 
-Typed capture-free function values, structural `Send`/`Share` bounds and opaque `atomic<num>`
+Typed capture-free function values, structural `Send`/`Share` bounds and opaque `atomic<u64>`
 are implemented in the sole compiler, including cross-target lowering. See
 [callables and transfer](../docs/design/callables-and-transfer.md) for syntax and restrictions.
 These foundations do **not** yet provide capturing closures, worker scheduling, task scopes,

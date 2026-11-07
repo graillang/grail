@@ -5,7 +5,7 @@ The remaining fields are still released when the record ends.
 
 {{example:records}}
 
-`T[]` creates an empty vector; `num[10, 20, 30]` initializes one directly.
+`T[]` creates an empty vector; `u64[10, 20, 30]` initializes one directly.
 `values.push(value)` consumes an element, and `values.pop()` removes and returns the last element.
 
 {{example:vectors}}

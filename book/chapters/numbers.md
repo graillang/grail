@@ -1,8 +1,8 @@
 # Numbers and conditions
 
-`num` is an unsigned 64-bit integer. Ordinary `+`, `-`, `*` and `**` abort on
+`u64` is an unsigned 64-bit integer. Ordinary `+`, `-`, `*` and `**` abort on
 overflow or underflow in every build mode; it is not a mathematical integer or a signed integer.
-Comparisons produce `bool` values (`true`/`false`). A `num` condition is also accepted: zero is
+Comparisons produce `bool` values (`true`/`false`). A `u64` condition is also accepted: zero is
 false.
 
 {{example:numbers}}
@@ -11,12 +11,12 @@ The example uses addition, subtraction, multiplication, remainder, xor and bitwi
 make evaluation and comparison grouping obvious. Operands are evaluated from left to right.
 
 Division/remainder by zero and out-of-bounds accesses abort instead of continuing with an invalid result.
-`num` itself is unsigned: signed and sized integers, `f64`/`f32` and `char` are separate types
+`u64` itself is unsigned: signed and sized integers, `f64`/`f32` and `char` are separate types
 covered in [Numbers and booleans](integers.html).
 
 Use `wrapping_add(a,b)`, `wrapping_sub(a,b)`, `wrapping_mul(a,b)` and `wrapping_pow(a,b)`
 when you intentionally want arithmetic modulo 2⁶⁴, such as a rolling hash. Both arguments must be
-`num` and are evaluated once, left to right.
+`u64` and are evaluated once, left to right.
 
 **Try it:** print `wrapping_sub(0,1)` with `println`: it produces the largest unsigned 64-bit
 number. Ordinary `0-1` instead aborts.

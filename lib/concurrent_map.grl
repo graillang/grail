@@ -6,16 +6,16 @@ use core;
 // DashMap-style sharded map: each shard is a mutex-guarded checked hashmap. Operations
 // take a shared reference to the map, so many threads may use it concurrently; only keys
 // hashing to the same shard contend. Values never escape a shard lock as references.
-pub struct Map<K:hash::Hash+hash::Equal+Send,V:Send>{shards:mutex<[K: V]>[],seed0:num,seed1:num}
+pub struct Map<K:hash::Hash+hash::Equal+Send,V:Send>{shards:mutex<[K: V]>[],seed0:u64,seed1:u64}
 struct Insert<K,V>{key:K,value:V}
 
-pub fn with_seed<K:hash::Hash+hash::Equal+Send,V:Send>(seed0:num,seed1:num)->Map<K,V>{
+pub fn with_seed<K:hash::Hash+hash::Equal+Send,V:Send>(seed0:u64,seed1:u64)->Map<K,V>{
     mut shards=mutex<[K: V]>[];
     for i in 16{shards.push(mutex(hashmap::with_seed<K,V>(seed0,seed1)));}
     return Map{shards:shards,seed0:seed0,seed1:seed1};
 }
 // Shard selection uses an independent key so it does not correlate with in-shard buckets.
-fn shard<a,b,K:hash::Hash+hash::Equal+Send,V:Send>(map:(&a Map<K,V>),key:(&b K))->num{
+fn shard<a,b,K:hash::Hash+hash::Equal+Send,V:Send>(map:(&a Map<K,V>),key:(&b K))->u64{
     return hash::hash(key,map.seed0^6148914691236517205,map.seed1^3074457345618258602)%map.shards.len();
 }
 fn insert_locked<a,K:hash::Hash+hash::Equal+Send,V:Send>(m:(&mut a [K: V]),job:Insert<K,V>)->V?{
@@ -24,10 +24,10 @@ fn insert_locked<a,K:hash::Hash+hash::Equal+Send,V:Send>(m:(&mut a [K: V]),job:I
 fn remove_locked<a,b,K:hash::Hash+hash::Equal+Send,V:Send>(m:(&mut a [K: V]),key:(&b K))->V?{
     return hashmap::remove(m,key);
 }
-fn contains_locked<a,b,K:hash::Hash+hash::Equal+Send,V:Send>(m:(&mut a [K: V]),key:(&b K))->num{
+fn contains_locked<a,b,K:hash::Hash+hash::Equal+Send,V:Send>(m:(&mut a [K: V]),key:(&b K))->u64{
     return hashmap::contains(borrow(m),key);
 }
-fn len_locked<a,K:hash::Hash+hash::Equal+Send,V:Send>(m:(&mut a [K: V]),unused:num)->num{
+fn len_locked<a,K:hash::Hash+hash::Equal+Send,V:Send>(m:(&mut a [K: V]),unused:u64)->u64{
     return hashmap::len(borrow(m));
 }
 pub fn insert<a,K:hash::Hash+hash::Equal+Send,V:Send>(map:(&a Map<K,V>),key:K,value:V)->V?{
@@ -38,11 +38,11 @@ pub fn remove<a,b,K:hash::Hash+hash::Equal+Send,V:Send>(map:(&a Map<K,V>),key:(&
     index:=shard(borrow(map),borrow(key));target:=&map.shards[index];
     return target.lock_with(key,remove_locked<K,V>);
 }
-pub fn contains<a,b,K:hash::Hash+hash::Equal+Send,V:Send>(map:(&a Map<K,V>),key:(&b K))->num{
+pub fn contains<a,b,K:hash::Hash+hash::Equal+Send,V:Send>(map:(&a Map<K,V>),key:(&b K))->u64{
     index:=shard(borrow(map),borrow(key));target:=&map.shards[index];
     return target.lock_with(key,contains_locked<K,V>);
 }
 // Not a linearizable snapshot while other threads mutate: shards are counted one at a time.
-pub fn len<a,K:hash::Hash+hash::Equal+Send,V:Send>(map:(&a Map<K,V>))->num{
+pub fn len<a,K:hash::Hash+hash::Equal+Send,V:Send>(map:(&a Map<K,V>))->u64{
     mut total=0;for i in map.shards.len(){target:=&map.shards[i];total+=target.lock_with(0,len_locked<K,V>);}return total;
 }
