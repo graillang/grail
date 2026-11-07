@@ -12469,6 +12469,7 @@ fn statement<a>(c: (&mut a C)) -> unit {
             ownership::restore(borrow_mut(c.check), borrow(before));
             exchange(borrow_mut(c.terminated), 0);
             mut name = u8[];
+            mut binder = u8[];
             mut pattern = 0;
             mut union_arm = 0;
             if is(borrow_mut(c), &"_") {
@@ -12476,8 +12477,13 @@ fn statement<a>(c: (&mut a C)) -> unit {
                 name = copy_bytes(&"_");
             } else {
                 if is_union(borrow_mut(c), x.ty) {
-                    pattern = parse_type(borrow_mut(c));
                     union_arm = 1;
+                    p := c.pos;
+                    if (kind_at(borrow_mut(c), p) == 1) & is_at(borrow_mut(c), p + 1, &":") {
+                        binder = ident(borrow_mut(c));
+                        expect(borrow_mut(c), &":");
+                    }
+                    pattern = parse_type(borrow_mut(c));
                 } else {
                     name = ident(borrow_mut(c));
                 }
@@ -12555,38 +12561,37 @@ fn statement<a>(c: (&mut a C)) -> unit {
             mark := c.locals.len();
             payloads := c.resources.len();
             if byref {
+                mut b = binder;
                 if eat(borrow_mut(c), &"(") {
                     if eat(borrow_mut(c), &"_") == 0 {
-                        mut b = ident(borrow_mut(c));
-                        if scalar(borrow_mut(c), pty) {
-                            value := rec_load(borrow_mut(c), xt, 1, 0);
-                            bind(borrow_mut(c), b, pty, value, 0);
-                        } else {
-                            n := rec_load(borrow_mut(c), xt, 1, 1);
-                            refty := reference_type(borrow_mut(c), pty, refmode);
-                            root := place_of(borrow_mut(c), xt);
-                            target := member_place(borrow_mut(c), root, 1, pty);
-                            authority := authority_of(borrow_mut(c), xt);
-                            c
-                                .resources
-                                .push(
-                                    Resource {
-                                        slot: n,
-                                        ty: refty,
-                                        flag: 0,
-                                        base: xt + 1,
-                                        field: 1,
-                                        via: 1,
-                                        place: 0,
-                                        target: target,
-                                        authority: authority,
-                                    }
-                                );
-                            r := borrow_reference(borrow_mut(c), n, refty, xt, target, refmode);
-                            bind(borrow_mut(c), b, r.ty, r.t, 0);
-                        }
+                        b = ident(borrow_mut(c));
                     }
                     expect(borrow_mut(c), &")");
+                }
+                if b.len() != 0 {
+                    if scalar(borrow_mut(c), pty) {
+                        value := rec_load(borrow_mut(c), xt, 1, 0);
+                        bind(borrow_mut(c), b, pty, value, 0);
+                    } else {
+                        n := rec_load(borrow_mut(c), xt, 1, 1);
+                        refty := reference_type(borrow_mut(c), pty, refmode);
+                        root := place_of(borrow_mut(c), xt);
+                        target := member_place(borrow_mut(c), root, 1, pty);
+                        authority := authority_of(borrow_mut(c), xt);
+                        c.resources.push(Resource {
+                            slot: n,
+                            ty: refty,
+                            flag: 0,
+                            base: xt + 1,
+                            field: 1,
+                            via: 1,
+                            place: 0,
+                            target: target,
+                            authority: authority,
+                        });
+                        r := borrow_reference(borrow_mut(c), n, refty, xt, target, refmode);
+                        bind(borrow_mut(c), b, r.ty, r.t, 0);
+                    }
                 }
             } else {
                 payload := rec_load(borrow_mut(c), xt, 1, 0);
@@ -12598,12 +12603,15 @@ fn statement<a>(c: (&mut a C)) -> unit {
                 }
                 stored_source(borrow_mut(c), payload, pty);
                 invoke(borrow_mut(c), &"rt_free", one(xt));
+                mut b = binder;
                 if eat(borrow_mut(c), &"(") {
                     if eat(borrow_mut(c), &"_") == 0 {
-                        mut b = ident(borrow_mut(c));
-                        bind(borrow_mut(c), b, pty, payload, 0);
+                        b = ident(borrow_mut(c));
                     }
                     expect(borrow_mut(c), &")");
+                }
+                if b.len() != 0 {
+                    bind(borrow_mut(c), b, pty, payload, 0);
                 }
             }
             expect(borrow_mut(c), &"=>");
