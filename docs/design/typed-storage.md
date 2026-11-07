@@ -14,18 +14,18 @@ self-hosting remain required work, not successful unsupported-type rejection pro
 - `load(reference)` copies a number/unit, not an arbitrary affine value. `exchange(reference,value)`
   replaces a whole initialized referent and returns its previous value by move. `core::replace`
   is a real universally checked Grail wrapper around that operation.
-- Numbers/unit, owned text/bytes and lifetime-free records/enums can be referents. Numeric fields
+- Numbers/unit, owned text and byte vectors and lifetime-free records/enums can be referents. Numeric fields
   can be read through references; byte fields can be read/borrowed, and fields can be separately
   addressed. `.push(...)` / `.append(...)` accept a suitable mutable reference to the owner descriptor.
   `.len()` accepts referenced byte/text storage; use `&reference` for indexed byte access.
 - `mut` still governs bare `=` syntax. It is not deep const qualification of owned values; requesting
-  mutable access remains explicit, as with the prior `&mut bytes_owner` operations.
+  mutable access remains explicit, as with the prior mutable byte-owner operations.
 
 ```grl
 fn change<a>(slot:(&mut a string),value:string)->string{return exchange(slot,value);}
 pub fn run()->num{
-    let name="old";
-    let previous=change(borrow_mut(name),"newer");
+    mut name="old";
+    previous := change(borrow_mut(name), "newer");
     return name.len()+previous.len();
 }
 ```

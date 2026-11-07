@@ -29,9 +29,9 @@ The impl's parameters are added to each method's; the type arguments after the t
 exactly those parameters, in order. Associated functions take explicit type arguments when they
 cannot be inferred: `Stack::new<num>()`.
 
-## Matching integers, bytes and bools
+## Matching integers, byte values and bools
 
-`match n { 0 => {..}, 1 | 2 => {..}, 'a' => {..}, -1 => {..}, _ => {..} }` compares an integer, byte
+`match n { 0 => {..}, 1 | 2 => {..}, 'a' => {..}, -1 => {..}, _ => {..} }` compares an integer, `u8`
 or `bool` against literal patterns. Patterns are range-checked against the value's type, duplicates
 are errors, and a `_` arm is required unless a `bool` match covers both `true` and `false`.
 `lo..hi` matches `lo <= n < hi` (signed or unsigned, per the value's type). A name pattern binds the value
@@ -51,13 +51,11 @@ references of the same mode (shared or mutable), so methods on enums can take `s
 and the value remains usable afterwards. The owner cannot be moved or dropped while a payload
 reference is live.
 
-## Tuples
+## Parenthesized types
 
-`(num, bytes)` is a tuple type, `(1, bytes[2])` a tuple value (2 to 8 elements), and `t.0`, `t.1`
-access elements (readable and assignable like fields). `(q, r) := divide(17, 5);` destructures a
-tuple into new bindings, consuming it; `_` drops an element. Tuples own their elements like records,
-so moving `t.0` out leaves `t` partially moved. Nested access needs parentheses (`(t.0).1`), because
-`t.0.1` reads as a float literal. Tuples print like Rust's `{:?}`: `(1, "a", [2, 3])`.
+`()` is the unit type and value. Parentheses group a type or expression, so `(A)` is just `A` and
+`(T | E)[]` is a vector of union values. Tuple types, tuple values and tuple destructuring are
+not part of the language.
 
 ## Typed bindings
 
@@ -76,7 +74,7 @@ checked (and an unsuffixed literal adopts the type). `mut x: T;` declares a bind
 - `while let Some(x) = next() { }` repeats while the value matches (a non-matching value is dropped).
 - `loop { }` repeats until `break` or `return`; code after a loop without `break` is unreachable.
 - `for i in a..b` counts from `a` up to, not including, `b`; `for i in n` counts from 0.
-- `for x in v` copies scalar elements of a vector, or the bytes of `bytes`/`string`/a view.
+- `for x in v` copies scalar elements of a vector, or the bytes of `u8[]`/`string`/a view.
 
 ## Formatted printing
 
@@ -96,7 +94,7 @@ the sign, and `{:.2}` (alone or as `{:8.2}`) gives an `f64` exactly 2 decimals.
 (for `hash::Equal` element types).
 
 `vecs::sort(borrow_mut(v))` sorts any vector whose element type implements `order::Ord`
-(`less(left, right) -> bool`; provided for integers, `f64` with NaN last, `bytes` and `string`). It is
+(`less(left, right) -> bool`; provided for integers, `f64` with NaN last, `u8[]` and `string`). It is
 a stable merge sort that moves elements instead of copying them. `vecs::is_sorted`, `min_index` and
 `max_index` use the same order. Implement `order::Ord` for your own types to sort them.
 
@@ -137,14 +135,14 @@ it. The older `host::` functions remain for the compiler and runtime.
 
 ## Text operators
 
-`==`, `!=`, `<`, `<=`, `>`, `>=` compare any two of `string`, `bytes` and byte views by content
+`==`, `!=`, `<`, `<=`, `>`, `>=` compare any two of `string`, `u8[]` and byte views by content
 (byte-lexicographic, which is code point order for UTF-8): `name == "admin"`. `a + b` creates a new
 value without consuming the operands: a `string` (checked UTF-8) when either side is a `string`,
-otherwise `bytes`.
+otherwise `u8[]`.
 
 ## References to text as views
 
-A reference to `bytes` or `string` (`&v[0]`, `borrow(s)`) passed to a parameter of view type
+A reference to `u8[]` or `string` (`&v[0]`, `borrow(s)`) passed to a parameter of view type
 `read<a>` becomes a view of the same storage, like Rust's `&String` to `&str`. The view keeps the
 original borrow alive, so the owner cannot change or go away while it is used.
 
@@ -156,11 +154,11 @@ mutably inside an arm is rejected; finish the match first (copy what you need), 
 
 ## Built-in text methods
 
-On `string`, `bytes` and views: `is_empty()`, `contains(t)`, `starts_with(t)`, `ends_with(t)`,
+On `string`, `u8[]` and views: `is_empty()`, `contains(t)`, `starts_with(t)`, `ends_with(t)`,
 `trim()`, `to_upper()`, `to_lower()` (ASCII, Latin-1, Latin Extended-A, Greek and Cyrillic; other
 scripts unchanged), `replace(from, to)`, `repeat(n)` and `split(byte)`
 (every field kept, like Rust's `split`). Transforming methods return a new `string` for `string`
-input and `bytes` otherwise. `lib/strings.grl` adds `find` (returning `Option`), Unicode `chars` and
+input and `u8[]` otherwise. `lib/strings.grl` adds `find` (returning `num?`), Unicode `chars` and
 `parse_num`.
 
 ## Built-in vector methods
@@ -171,7 +169,6 @@ moved, never copied; indices out of range stop the program; changing methods nee
 
 ## Structural equality
 
-`==` and `!=` compare two structs, tuples or enums of the same type: numbers and `bool` by value,
-`f64` by IEEE rules, text by content, vectors of integers/bools element by element, nested structs and
-tuples field by field, and enums by variant and then payload (`some(5) == some(5)`). Other field types
+`==` and `!=` compare two structs or enums of the same type: numbers and `bool` by value,
+`f64` by IEEE rules, text by content, vectors of integers/bools element by element, nested structs field by field, and enums by variant and then payload (`some(5) == some(5)`). Other field types
 (vectors of non-scalars, closures, handles) are a compile-time error.
