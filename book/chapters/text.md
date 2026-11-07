@@ -8,7 +8,7 @@ Text values (`string`, `u8[]` and string literals) compare by content with `==` 
 
 Methods that change text return a new value and leave the original alone. `split('=')` returns a
 vector of borrowed byte views, so `fields[1]` is the text after the `=`. `part[:1]` is a view of the
-first byte. A `for` loop over a collection borrows non-scalar elements, so iterating
-`name.split(' ')` directly does not require a temporary `parts` binding.
+first byte. Iterating `borrow(parts)` visits each part without moving it out. Direct
+temporary iteration is part of the pending consume-loop migration.
 
 **Try it:** print `clean.len()` and `line.len()` to see what `trim` removed.
