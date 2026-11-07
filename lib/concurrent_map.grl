@@ -6,12 +6,12 @@ use core;
 // DashMap-style sharded map: each shard is a mutex-guarded checked hashmap. Operations
 // take a shared reference to the map, so many threads may use it concurrently; only keys
 // hashing to the same shard contend. Values never escape a shard lock as references.
-pub struct Map<K:hash::Hash+hash::Equal+Send,V:Send>{shards:mutex<[K: V]>[],seed0:u64,seed1:u64}
+pub struct Map<K:hash::Hash+hash::Equal+Send,V:Send>{shards:Mutex<[K: V]>[],seed0:u64,seed1:u64}
 struct Insert<K,V>{key:K,value:V}
 
 pub fn with_seed<K:hash::Hash+hash::Equal+Send,V:Send>(seed0:u64,seed1:u64)->Map<K,V>{
-    mut shards=mutex<[K: V]>[];
-    for i in 16{shards.push(mutex(hashmap::with_seed<K,V>(seed0,seed1)));}
+    mut shards=Mutex<[K: V]>[];
+    for i in 16{shards.push(Mutex::new(hashmap::with_seed<K,V>(seed0,seed1)));}
     return Map{shards:shards,seed0:seed0,seed1:seed1};
 }
 // Shard selection uses an independent key so it does not correlate with in-shard buckets.

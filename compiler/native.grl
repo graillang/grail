@@ -14,8 +14,8 @@ use cli;
 // Type ids: 0 u64, 1 unit, 2 bytes, 3 string, 4 view; others are interned below.
 // Type kinds: 1 u64, 2 unit, 3 bytes, 4 string, 5 view, 6 vec(arg), 7 ref(arg),
 // 8 named(decl, args), 9 opaque template parameter, 10 opaque bound parameter (arg, identity),
-// 11 atomic<u64>, 12 capture-free typed function pointer, 13 mutex<T>, 14 scope<C>, 15 interface proof,
-// 16 task<R>, 17 cancel_token, 18 sized integer (arg bits, mode signed), 19 bool, 20 closure Fn(..)->R, 21 f64.
+// 11 Atomic<u64>, 12 capture-free typed function pointer, 13 Mutex<T>, 14 Scope<C>, 15 interface proof,
+// 16 Task<R>, 17 CancelToken, 18 sized integer (arg bits, mode signed), 19 bool, 20 closure Fn(..)->R, 21 f64.
 
 struct Tok {
     kind: u64,
@@ -3105,10 +3105,10 @@ fn type_keyword<a>(c: (&mut a C), n: read<a>) -> u64 {
     if same(&n, &"f32") + same(&n, &"f64") + same(&n, &"unit") + same(&n, &"read") {
         return true;
     }
-    if same(&n, &"mut") + same(&n, &"atomic") + same(&n, &"mutex") + same(&n, &"scope") {
+    if same(&n, &"mut") + same(&n, &"Atomic") + same(&n, &"Mutex") + same(&n, &"Scope") {
         return true;
     }
-    return same(&n, &"task") + same(&n, &"cancel_token") + same(&n, &"fn") + same(&n, &"Fn");
+    return same(&n, &"Task") + same(&n, &"CancelToken") + same(&n, &"fn") + same(&n, &"Fn");
 }
 fn lifetime_candidate<a>(c: (&mut a C), p: u64) -> u64 {
     if kind_at(borrow_mut(c), p) != 1 {
@@ -3384,31 +3384,31 @@ fn base_named<a>(c: (&mut a C), first: u8[]) -> u64 {
         mode := same(&first, &"mut");
         return intern_full(borrow_mut(c), 5, 0, mode, rs);
     }
-    if same(&first, &"atomic") {
+    if same(&first, &"Atomic") {
         expect(borrow_mut(c), &"<");
         e := parse_type(borrow_mut(c));
         expect(borrow_mut(c), &">");
         if e != 0 {
-            fail(borrow_mut(c), &"atomic currently requires u64 (one aligned 64-bit word)");
+            fail(borrow_mut(c), &"Atomic currently requires u64 (one aligned 64-bit word)");
         }
         return intern(borrow_mut(c), 11, 0);
     }
-    if same(&first, &"scope") {
+    if same(&first, &"Scope") {
         expect(borrow_mut(c), &"<");
         e := parse_type(borrow_mut(c));
         expect(borrow_mut(c), &">");
         return intern(borrow_mut(c), 14, e);
     }
-    if same(&first, &"task") {
+    if same(&first, &"Task") {
         expect(borrow_mut(c), &"<");
         e := parse_type(borrow_mut(c));
         expect(borrow_mut(c), &">");
         return intern(borrow_mut(c), 16, e);
     }
-    if same(&first, &"cancel_token") {
+    if same(&first, &"CancelToken") {
         return intern(borrow_mut(c), 17, 0);
     }
-    if same(&first, &"mutex") {
+    if same(&first, &"Mutex") {
         expect(borrow_mut(c), &"<");
         e := parse_type(borrow_mut(c));
         expect(borrow_mut(c), &">");
@@ -5852,10 +5852,10 @@ fn indirect_call<a>(c: (&mut a C), value: Val, opened: u64) -> Val {
     return val(slot, resulttype);
 }
 fn builtin_id<a>(n: read<a>) -> u64 {
-    if same(&n, &"atomic") {
+    if same(&n, &"Atomic") {
         return 30;
     }
-    if same(&n, &"mutex") {
+    if same(&n, &"Mutex") {
         return 31;
     }
     if same(&n, &"parallel_map") {
@@ -7162,7 +7162,7 @@ fn parallel_map_builtin<a>(c: (&mut a C), items: Val) -> Val {
         fail(borrow_mut(c), &"parallel_map result cannot contain borrows");
     }
     if contains_task(borrow_mut(c), result, 0) + contains_task(borrow_mut(c), item, 0) {
-        fail(borrow_mut(c), &"parallel_map cannot move task handles between threads");
+        fail(borrow_mut(c), &"parallel_map cannot move Task handles between threads");
     }
     if contains_borrow(borrow_mut(c), item, 0) {
         if ty_kind(borrow_mut(c), item) != 7 {
@@ -7279,22 +7279,22 @@ fn task_scope_builtin<a>(c: (&mut a C), context: Val) -> Val {
     signature := type_args(borrow_mut(c), body.ty);
     result := ty_arg(borrow_mut(c), body.ty);
     if signature.len() != 2 {
-        fail(borrow_mut(c), &"task_scope body takes (ref scope<C>, C)");
+        fail(borrow_mut(c), &"task_scope body takes (ref Scope<C>, C)");
     }
     sref := signature[0];
     if (ty_kind(borrow_mut(c), sref) != 7) + (ty_mode(borrow_mut(c), sref) != 0) {
-        fail(borrow_mut(c), &"task_scope body must take a shared scope reference");
+        fail(borrow_mut(c), &"task_scope body must take a shared Scope reference");
     }
     sty := ty_arg(borrow_mut(c), sref);
     if ty_kind(borrow_mut(c), sty) != 14 {
-        fail(borrow_mut(c), &"task_scope body must take &s scope<C>");
+        fail(borrow_mut(c), &"task_scope body must take &s Scope<C>");
     }
     inner := ty_arg(borrow_mut(c), sty);
     require_type(borrow_mut(c), ct, inner);
     second := signature[1];
     require_type(borrow_mut(c), ct, second);
     if contains_borrow(borrow_mut(c), result, 0) + contains_task(borrow_mut(c), result, 0) {
-        fail(borrow_mut(c), &"task_scope result cannot contain borrows or task handles");
+        fail(borrow_mut(c), &"task_scope result cannot contain borrows or Task handles");
     }
     observe(borrow_mut(c), context.t);
     if ck == 7 {
@@ -7313,7 +7313,7 @@ fn task_scope_builtin<a>(c: (&mut a C), context: Val) -> Val {
     close_loans(borrow_mut(c));
     return own(borrow_mut(c), slot, result);
 }
-// spawn(scope, item, f): f(item, context) or f(item, context, cancel_token) on its own thread.
+// spawn(scope, item, f): f(item, context) or f(item, context, CancelToken) on its own thread.
 fn spawn_builtin<a>(c: (&mut a C), scope: Val) -> Val {
     expect(borrow_mut(c), &",");
     item := expr(borrow_mut(c), 0);
@@ -7322,12 +7322,12 @@ fn spawn_builtin<a>(c: (&mut a C), scope: Val) -> Val {
     expect(borrow_mut(c), &")");
     input := callee.t;
     if ty_kind(borrow_mut(c), scope.ty) != 7 {
-        fail(borrow_mut(c), &"spawn requires a scope reference");
+        fail(borrow_mut(c), &"spawn requires a Scope reference");
     }
     sref := scope.t;
     sv := deref(borrow_mut(c), scope);
     if ty_kind(borrow_mut(c), sv.ty) != 14 {
-        fail(borrow_mut(c), &"spawn requires a scope reference");
+        fail(borrow_mut(c), &"spawn requires a Scope reference");
     }
     observe(borrow_mut(c), sv.t);
     context := ty_arg(borrow_mut(c), sv.ty);
@@ -7338,7 +7338,7 @@ fn spawn_builtin<a>(c: (&mut a C), scope: Val) -> Val {
     if (count != 2) & (count != 3) {
         fail(
             borrow_mut(c),
-            &"spawned callback takes (item, context) or (item, context, cancel_token)"
+            &"spawned callback takes (item, context) or (item, context, CancelToken)"
         );
     }
     first := signature[0];
@@ -7348,18 +7348,18 @@ fn spawn_builtin<a>(c: (&mut a C), scope: Val) -> Val {
     if count == 3 {
         third := signature[2];
         if ty_kind(borrow_mut(c), third) != 17 {
-            fail(borrow_mut(c), &"third spawned callback parameter must be cancel_token");
+            fail(borrow_mut(c), &"third spawned callback parameter must be CancelToken");
         }
     }
     require_sendable_owned(
         borrow_mut(c),
         item.ty,
-        &"spawned item must be an owned Send value without borrows or task handles"
+        &"spawned item must be an owned Send value without borrows or Task handles"
     );
     require_sendable_owned(
         borrow_mut(c),
         result,
-        &"spawned result must be an owned Send value without borrows or task handles"
+        &"spawned result must be an owned Send value without borrows or Task handles"
     );
     value := item.t;
     if c.raw == 0 {
@@ -7389,7 +7389,7 @@ fn spawn_builtin<a>(c: (&mut a C), scope: Val) -> Val {
 fn join_builtin<a>(c: (&mut a C), handle: Val) -> Val {
     expect(borrow_mut(c), &")");
     if ty_kind(borrow_mut(c), handle.ty) != 16 {
-        fail(borrow_mut(c), &"join requires an owned task handle");
+        fail(borrow_mut(c), &"join requires an owned Task handle");
     }
     result := ty_arg(borrow_mut(c), handle.ty);
     value := handle.t;
@@ -7417,7 +7417,7 @@ fn scope_method<a, b>(c: (&mut a C), value: u64, kind: u64, name: read<b>) -> Va
             return val(slot, ty);
         }
     }
-    fail(borrow_mut(c), &"unknown scope/cancel_token method (expected cancel, cancelled or token)");
+    fail(borrow_mut(c), &"unknown Scope/CancelToken method (expected cancel, cancelled or token)");
     return val(0, 0);
 }
 // ---- sized integers: kind 18 (arg = bits, mode = signed). u64/usize are u64. ----
@@ -8540,7 +8540,7 @@ fn closure_literal<a>(c: (&mut a C)) -> Val {
             fail(borrow_mut(c), &"closures cannot capture borrowed values yet");
         }
         if contains_task(borrow_mut(c), ty, 0) {
-            fail(borrow_mut(c), &"closures cannot capture task handles");
+            fail(borrow_mut(c), &"closures cannot capture Task handles");
         }
         c.fields.push(Field { name: name.copy(), ty: ty });
         slots.push(id);
@@ -8807,12 +8807,12 @@ fn mutex_type<a>(c: (&mut a C), payload: u64) -> u64 {
     // outlives its source after the lock is released. Lifetime-parameterized mutexes are future work.
     if c.raw == 0 {
         if contains_borrow(borrow_mut(c), payload, 0) {
-            fail(borrow_mut(c), &"mutex payload cannot contain borrows yet");
+            fail(borrow_mut(c), &"Mutex payload cannot contain borrows yet");
         }
         if contains_task(borrow_mut(c), payload, 0) {
             fail(
                 borrow_mut(c),
-                &"mutex payload cannot hold task handles (they would escape their scope)"
+                &"Mutex payload cannot hold Task handles (they would escape their Scope)"
             );
         }
     }
@@ -8822,7 +8822,7 @@ fn mutex_type<a>(c: (&mut a C), payload: u64) -> u64 {
 // duration. The callback is capture-free; its result and context cannot carry the payload loan.
 fn mutex_method<a, b>(c: (&mut a C), value: Val, name: read<b>) -> Val {
     if same(&name, &"lock_with") == 0 {
-        fail(borrow_mut(c), &"unknown mutex method (expected lock_with)");
+        fail(borrow_mut(c), &"unknown Mutex method (expected lock_with)");
     }
     cell := value.t;
     payload := ty_arg(borrow_mut(c), value.ty);
@@ -8962,7 +8962,7 @@ fn atomic_method<a, b>(c: (&mut a C), value: Val, name: read<b>) -> Val {
         arity = 2;
     }
     if f.len() == 0 {
-        fail(borrow_mut(c), &"unknown atomic method or invalid ordering");
+        fail(borrow_mut(c), &"unknown Atomic method or invalid ordering");
     }
     for i in arity {
         if i != 0 {
@@ -9716,19 +9716,19 @@ fn simple_type_head<a, b>(c: (&mut a C), name: read<b>) -> u64 {
     if same(&n, &"unit") {
         return true;
     }
-    if same(&n, &"mutex") {
+    if same(&n, &"Mutex") {
         return true;
     }
-    if same(&n, &"atomic") {
+    if same(&n, &"Atomic") {
         return true;
     }
-    if same(&n, &"scope") {
+    if same(&n, &"Scope") {
         return true;
     }
-    if same(&n, &"task") {
+    if same(&n, &"Task") {
         return true;
     }
-    if same(&n, &"cancel_token") {
+    if same(&n, &"CancelToken") {
         return true;
     }
     if same(&n, &"read") {
@@ -10069,6 +10069,22 @@ fn primary<a>(c: (&mut a C)) -> Val {
             }
             return record(borrow_mut(c), d - 1, ty);
         }
+    }
+    if same(&first, &"Atomic") & is(borrow_mut(c), &"::") {
+        advance(borrow_mut(c));
+        n := ident(borrow_mut(c));
+        if same(&n, &"new") {
+            return builtin(borrow_mut(c), 30);
+        }
+        fail(borrow_mut(c), &"unknown Atomic constructor");
+    }
+    if same(&first, &"Mutex") & is(borrow_mut(c), &"::") {
+        advance(borrow_mut(c));
+        n := ident(borrow_mut(c));
+        if same(&n, &"new") {
+            return builtin(borrow_mut(c), 31);
+        }
+        fail(borrow_mut(c), &"unknown Mutex constructor");
     }
     if eat(borrow_mut(c), &"::") {
         second := ident(borrow_mut(c));

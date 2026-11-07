@@ -1,6 +1,6 @@
 struct Ctx {
-    hits: atomic<u64>,
-    arrived: atomic<u64>
+    hits: Atomic<u64>,
+    arrived: Atomic<u64>
 }
 fn mul7<a>(n: u64, c: (&a Ctx)) -> u64 {
     c.hits.fetch_add(1);
@@ -9,7 +9,7 @@ fn mul7<a>(n: u64, c: (&a Ctx)) -> u64 {
 fn count<a>(b: u8[], c: (&a Ctx)) -> u64 {
     return b.len();
 }
-fn wait_cancel<a>(n: u64, c: (&a Ctx), token: cancel_token) -> u64 {
+fn wait_cancel<a>(n: u64, c: (&a Ctx), token: CancelToken) -> u64 {
     while token.cancelled() == 0 {}
     return n;
 }
@@ -22,7 +22,7 @@ fn meet<a>(n: u64, c: (&a Ctx)) -> u64 {
     while c.arrived.load() < 2 {}
     return n;
 }
-fn body<s, a>(sc: (&s scope < (&a Ctx) >), ctx: (&a Ctx)) -> u64 {
+fn body<s, a>(sc: (&s Scope< (&a Ctx) >), ctx: (&a Ctx)) -> u64 {
     product := spawn(sc, 6, mul7);
     length := spawn(sc, u8[1, 2, 3], count);
     waiter := spawn(sc, 5, wait_cancel);
@@ -30,7 +30,7 @@ fn body<s, a>(sc: (&s scope < (&a Ctx) >), ctx: (&a Ctx)) -> u64 {
     right := spawn(sc, 2, meet);
     abandoned := spawn(sc, 9, make);
     drop(abandoned);
-    mut many = task<u64>[];
+    mut many = Task<u64>[];
     for i in 8 {
         many.push(spawn(sc, i, mul7));
     }
@@ -45,7 +45,7 @@ fn body<s, a>(sc: (&s scope < (&a Ctx) >), ctx: (&a Ctx)) -> u64 {
     }
     return total;
 }
-fn nested<s, a>(sc: (&s scope<u64>), base: u64) -> u64 {
+fn nested<s, a>(sc: (&s Scope<u64>), base: u64) -> u64 {
     t := spawn(sc, base, plus);
     return join(t);
 }
@@ -55,12 +55,12 @@ fn plus(n: u64, base: u64) -> u64 {
 fn inner_scope<a>(n: u64, c: (&a Ctx)) -> u64 {
     return task_scope(n, nested);
 }
-fn outer<s, a>(sc: (&s scope < (&a Ctx) >), ctx: (&a Ctx)) -> u64 {
+fn outer<s, a>(sc: (&s Scope< (&a Ctx) >), ctx: (&a Ctx)) -> u64 {
     t := spawn(sc, 20, inner_scope);
     return join(t);
 }
 fn main() {
-    ctx := Ctx { hits: atomic(0), arrived: atomic(0) };
+    ctx := Ctx { hits: Atomic::new(0), arrived: Atomic::new(0) };
     total := task_scope(borrow(ctx), body);
     assert(total == 42 + 3 + 5 + 1 + 2 + 7 * 28);
     assert(ctx.hits.load() == 9);

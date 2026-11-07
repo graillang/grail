@@ -780,57 +780,57 @@
   },
   {
     "name": "atomic-interior-access-and-aggregate-drop",
-    "source": "struct Shared{count:atomic<u64>,data:u8[]}fn get<a>(s:(&a Shared))->u64{s.count.store_release(2);return s.count.load_acquire();}fn main(){s:=Shared{count:atomic(1),data:u8[7]};assert(get(borrow(s))==2);assert(s.count.load()==2);assert(s.data[0]==7);mut v=atomic<u64>[atomic(3),atomic(4)];slot:=&v[0];slot.store(5);assert(v[0].load()==5);last:=v.pop();assert(last.load()==4);}",
+    "source": "struct Shared{count:Atomic<u64>,data:u8[]}fn get<a>(s:(&a Shared))->u64{s.count.store_release(2);return s.count.load_acquire();}fn main(){s:=Shared{count:Atomic::new(1),data:u8[7]};assert(get(borrow(s))==2);assert(s.count.load()==2);assert(s.data[0]==7);mut v=Atomic<u64>[Atomic::new(3),Atomic::new(4)];slot:=&v[0];slot.store(5);assert(v[0].load()==5);last:=v.pop();assert(last.load()==4);}",
     "stdout": ""
   },
   {
     "name": "atomic-reject-0",
-    "source": "fn main(){a:=atomic(1);b:=a;println(a.load());}",
+    "source": "fn main(){a:=Atomic::new(1);b:=a;println(a.load());}",
     "reject": true
   },
   {
     "name": "atomic-reject-1",
-    "source": "fn main(){a:=atomic(1);r:=borrow(a);drop(a);println(r.load());}",
+    "source": "fn main(){a:=Atomic::new(1);r:=borrow(a);drop(a);println(r.load());}",
     "reject": true
   },
   {
     "name": "atomic-reject-2",
-    "source": "fn main(){a:=atomic(1);b:=load(borrow(a));}",
+    "source": "fn main(){a:=Atomic::new(1);b:=load(borrow(a));}",
     "reject": true
   },
   {
     "name": "atomic-reject-3",
-    "source": "fn main(){atomic(u8[]);}",
+    "source": "fn main(){Atomic::new(u8[]);}",
     "reject": true
   },
   {
     "name": "atomic-reject-4",
-    "source": "fn bad(a:atomic<string>)->u64{return 0;}fn main(){}",
+    "source": "fn bad(a:Atomic<string>)->u64{return 0;}fn main(){}",
     "reject": true
   },
   {
     "name": "atomic-reject-5",
-    "source": "fn main(){a:=atomic(1);a.load_release();}",
+    "source": "fn main(){a:=Atomic::new(1);a.load_release();}",
     "reject": true
   },
   {
     "name": "atomic-reject-6",
-    "source": "fn main(){a:=atomic(1);a.store_acquire(2);}",
+    "source": "fn main(){a:=Atomic::new(1);a.store_acquire(2);}",
     "reject": true
   },
   {
     "name": "atomic-reject-7",
-    "source": "fn main(){a:=atomic(1);a.store(2,3);}",
+    "source": "fn main(){a:=Atomic::new(1);a.store(2,3);}",
     "reject": true
   },
   {
     "name": "atomic-reject-8",
-    "source": "fn main(){a:=atomic(1);a[0];}",
+    "source": "fn main(){a:=Atomic::new(1);a[0];}",
     "reject": true
   },
   {
     "name": "atomic-reject-9",
-    "source": "struct S{count:atomic<u64>,data:u8[]}fn bad<a>(s:(&a S))->unit{s.count.store(1);s.data.push(2);}fn main(){}",
+    "source": "struct S{count:Atomic<u64>,data:u8[]}fn bad<a>(s:(&a S))->unit{s.count.store(1);s.data.push(2);}fn main(){}",
     "reject": true
   },
   {
@@ -920,7 +920,7 @@
   },
   {
     "name": "share-atomic-does-not-bless-fields",
-    "source": "struct Box<a>{count:atomic<u64>,view:mut<a>}fn shared<T:Share>(v:T)->T{return v;}fn main(){mut b=u8[1];r:=shared(Box{count:atomic(1),view:&mut b});}",
+    "source": "struct Box<a>{count:Atomic<u64>,view:mut<a>}fn shared<T:Share>(v:T)->T{return v;}fn main(){mut b=u8[1];r:=shared(Box{count:Atomic::new(1),view:&mut b});}",
     "reject": true,
     "diagnostic": "type does not satisfy Share"
   },
@@ -985,23 +985,23 @@
   },
   {
     "name": "atomic-receiver-owner-move",
-    "source": "fn consume(value:atomic<u64>)->u64{return 0;}fn main(){a:=atomic(1);a.store(consume(a));}",
+    "source": "fn consume(value:Atomic<u64>)->u64{return 0;}fn main(){a:=Atomic::new(1);a.store(consume(a));}",
     "reject": true,
     "diagnostic": "move of unavailable or borrowed value"
   },
   {
     "name": "atomic-receiver-owner-replace",
-    "source": "fn replace<a>(value:(&mut a atomic<u64>))->u64{old:=exchange(value,atomic(2));return 0;}fn main(){mut a=atomic(1);a.store(replace(borrow_mut(a)));}",
+    "source": "fn replace<a>(value:(&mut a Atomic<u64>))->u64{old:=exchange(value,Atomic::new(2));return 0;}fn main(){mut a=Atomic::new(1);a.store(replace(borrow_mut(a)));}",
     "reject": true
   },
   {
     "name": "atomic-receiver-parent-replace",
-    "source": "struct Box{value:atomic<u64>}fn replace<a>(value:(&mut a Box))->u64{old:=exchange(value,Box{value:atomic(2)});return 0;}fn main(){mut a=Box{value:atomic(1)};a.value.store(replace(borrow_mut(a)));}",
+    "source": "struct Box{value:Atomic<u64>}fn replace<a>(value:(&mut a Box))->u64{old:=exchange(value,Box{value:Atomic::new(2)});return 0;}fn main(){mut a=Box{value:Atomic::new(1)};a.value.store(replace(borrow_mut(a)));}",
     "reject": true
   },
   {
     "name": "atomic-nested-shared-receivers",
-    "source": "fn main(){a:=atomic(1);a.store(a.swap(2));assert(a.load()==1);r:=borrow(a);r.store(r.swap(3));assert(r.load()==1);mut b=atomic(4);u:=borrow_mut(b);shared:=borrow(u);shared.store(shared.swap(5));assert(shared.load()==4);}",
+    "source": "fn main(){a:=Atomic::new(1);a.store(a.swap(2));assert(a.load()==1);r:=borrow(a);r.store(r.swap(3));assert(r.load()==1);mut b=Atomic::new(4);u:=borrow_mut(b);shared:=borrow(u);shared.store(shared.swap(5));assert(shared.load()==4);}",
     "stdout": ""
   },
   {
@@ -1192,49 +1192,49 @@
   },
   {
     "name": "mutex-reject-borrowed-payload",
-    "source": "fn main(){b:=u8[1];m:=mutex(&b);}",
+    "source": "fn main(){b:=u8[1];m:=Mutex::new(&b);}",
     "reject": true,
-    "diagnostic": "mutex payload cannot contain borrows"
+    "diagnostic": "Mutex payload cannot contain borrows"
   },
   {
     "name": "mutex-reject-borrowed-payload-type",
-    "source": "fn f<a>(m:mutex<read<a>>){}fn main(){}",
+    "source": "fn f<a>(m:Mutex<read<a>>){}fn main(){}",
     "reject": true,
-    "diagnostic": "mutex payload cannot contain borrows"
+    "diagnostic": "Mutex payload cannot contain borrows"
   },
   {
     "name": "mutex-reject-result-escape",
-    "source": "fn leak<a>(v:(&mut a u8[]),n:u64)->(&mut a u8[]){return v;}fn main(){m:=mutex(u8[1]);r:=m.lock_with(0,leak);}",
+    "source": "fn leak<a>(v:(&mut a u8[]),n:u64)->(&mut a u8[]){return v;}fn main(){m:=Mutex::new(u8[1]);r:=m.lock_with(0,leak);}",
     "reject": true,
     "diagnostic": "lock_with result cannot contain borrows"
   },
   {
     "name": "mutex-reject-context-escape",
-    "source": "struct Out<a>{slot:(&mut a u8[])[]}fn leak<a,b>(v:(&mut a u8[]),out:(&mut b Out<a>))->u64{out.slot.push(v);return 0;}fn run<b>(m:(&b mutex<u8[]>),out:(&mut b Out<b>))->u64{return m.lock_with(out,leak);}fn main(){}",
+    "source": "struct Out<a>{slot:(&mut a u8[])[]}fn leak<a,b>(v:(&mut a u8[]),out:(&mut b Out<a>))->u64{out.slot.push(v);return 0;}fn run<b>(m:(&b Mutex<u8[]>),out:(&mut b Out<b>))->u64{return m.lock_with(out,leak);}fn main(){}",
     "reject": true,
     "diagnostic": "context cannot carry the guarded payload lifetime"
   },
   {
     "name": "mutex-reject-shared-payload-ref",
-    "source": "fn peek<a>(v:(&a u8[]),n:u64)->u64{return v.len();}fn main(){m:=mutex(u8[1]);m.lock_with(0,peek);}",
+    "source": "fn peek<a>(v:(&a u8[]),n:u64)->u64{return v.len();}fn main(){m:=Mutex::new(u8[1]);m.lock_with(0,peek);}",
     "reject": true,
     "diagnostic": "exclusive payload reference"
   },
   {
     "name": "mutex-reject-wrong-payload",
-    "source": "fn f<a>(v:(&mut a u64),n:u64)->u64{return 0;}fn main(){m:=mutex(u8[1]);m.lock_with(0,f);}",
+    "source": "fn f<a>(v:(&mut a u64),n:u64)->u64{return 0;}fn main(){m:=Mutex::new(u8[1]);m.lock_with(0,f);}",
     "reject": true,
     "diagnostic": "type mismatch"
   },
   {
     "name": "mutex-reject-drop-while-locked-arg",
-    "source": "fn consume(m:mutex<u8[]>)->u64{return 0;}fn f<a>(v:(&mut a u8[]),n:u64)->u64{return 0;}fn main(){m:=mutex(u8[1]);m.lock_with(consume(m),f);}",
+    "source": "fn consume(m:Mutex<u8[]>)->u64{return 0;}fn f<a>(v:(&mut a u8[]),n:u64)->u64{return 0;}fn main(){m:=Mutex::new(u8[1]);m.lock_with(consume(m),f);}",
     "reject": true,
     "diagnostic": "move of unavailable or borrowed value"
   },
   {
     "name": "mutex-reject-moved-context",
-    "source": "fn f<a>(v:(&mut a u8[]),x:u8[])->u64{return x.len();}fn main(){m:=mutex(u8[1]);x:=u8[2];m.lock_with(x,f);println(x.len());}",
+    "source": "fn f<a>(v:(&mut a u8[]),x:u8[])->u64{return x.len();}fn main(){m:=Mutex::new(u8[1]);x:=u8[2];m.lock_with(x,f);println(x.len());}",
     "reject": true,
     "diagnostic": "use of moved"
   },
@@ -1304,7 +1304,7 @@
   },
   {
     "name": "parallel-reject-non-send-context-mutex-borrow",
-    "source": "fn f<a>(x:u64,c:(&a mutex<u64>))->u64{return x;}fn main(){m:=mutex(1);r:=borrow(m);drop(m);out:=parallel_map(u64[1],r,f);}",
+    "source": "fn f<a>(x:u64,c:(&a Mutex<u64>))->u64{return x;}fn main(){m:=Mutex::new(1);r:=borrow(m);drop(m);out:=parallel_map(u64[1],r,f);}",
     "reject": true,
     "diagnostic": ""
   },
@@ -1317,67 +1317,67 @@
   },
   {
     "name": "task-reject-handle-escape",
-    "source": "fn id(n:u64,c:u64)->u64{return n;}fn b<s>(sc:(&s scope<u64>),c:u64)->task<u64>{return spawn(sc,1,id);}fn main(){t:=task_scope(0,b);}",
+    "source": "fn id(n:u64,c:u64)->u64{return n;}fn b<s>(sc:(&s Scope<u64>),c:u64)->Task<u64>{return spawn(sc,1,id);}fn main(){t:=task_scope(0,b);}",
     "reject": true,
-    "diagnostic": "result cannot contain borrows or task handles"
+    "diagnostic": "result cannot contain borrows or Task handles"
   },
   {
     "name": "task-reject-double-join",
-    "source": "fn id(n:u64,c:u64)->u64{return n;}fn b<s>(sc:(&s scope<u64>),c:u64)->u64{t:=spawn(sc,1,id);x:=join(t);return join(t);}fn main(){}",
+    "source": "fn id(n:u64,c:u64)->u64{return n;}fn b<s>(sc:(&s Scope<u64>),c:u64)->u64{t:=spawn(sc,1,id);x:=join(t);return join(t);}fn main(){}",
     "reject": true,
     "diagnostic": "use of moved"
   },
   {
     "name": "task-reject-borrowed-item",
-    "source": "fn f<a>(v:(&a u8[]),c:u64)->u64{return 0;}fn b<s>(sc:(&s scope<u64>),c:u64)->u64{local:=u8[1];t:=spawn(sc,borrow(local),f);return join(t);}fn main(){}",
+    "source": "fn f<a>(v:(&a u8[]),c:u64)->u64{return 0;}fn b<s>(sc:(&s Scope<u64>),c:u64)->u64{local:=u8[1];t:=spawn(sc,borrow(local),f);return join(t);}fn main(){}",
     "reject": true,
     "diagnostic": "spawned item must be an owned Send value"
   },
   {
     "name": "task-reject-borrowed-result",
-    "source": "fn f<a>(n:u64,c:(&a u8[]))->(&a u8[]){return c;}fn b<s,a>(sc:(&s scope<(&a u8[])>),c:(&a u8[]))->u64{t:=spawn(sc,1,f);return 0;}fn main(){}",
+    "source": "fn f<a>(n:u64,c:(&a u8[]))->(&a u8[]){return c;}fn b<s,a>(sc:(&s Scope<(&a u8[])>),c:(&a u8[]))->u64{t:=spawn(sc,1,f);return 0;}fn main(){}",
     "reject": true,
     "diagnostic": "spawned result must be an owned Send value"
   },
   {
     "name": "task-reject-exclusive-context",
-    "source": "fn id(n:u64,c:u64)->u64{return n;}fn b<s,a>(sc:(&s scope<(&mut a u64)>),c:(&mut a u64))->u64{return 0;}fn main(){mut n=0;r:=task_scope(borrow_mut(n),b);}",
+    "source": "fn id(n:u64,c:u64)->u64{return n;}fn b<s,a>(sc:(&s Scope<(&mut a u64)>),c:(&mut a u64))->u64{return 0;}fn main(){mut n=0;r:=task_scope(borrow_mut(n),b);}",
     "reject": true,
     "diagnostic": "context must be a plain value or shared reference"
   },
   {
     "name": "task-reject-owned-context",
-    "source": "fn b<s>(sc:(&s scope<u8[]>),c:u8[])->u64{return 0;}fn main(){r:=task_scope(u8[1],b);}",
+    "source": "fn b<s>(sc:(&s Scope<u8[]>),c:u8[])->u64{return 0;}fn main(){r:=task_scope(u8[1],b);}",
     "reject": true,
     "diagnostic": "context must be a plain value or shared reference"
   },
   {
     "name": "task-reject-handle-in-mutex",
-    "source": "fn id(n:u64,c:u64)->u64{return n;}fn b<s>(sc:(&s scope<u64>),c:u64)->u64{t:=spawn(sc,1,id);m:=mutex(t);return 0;}fn main(){}",
+    "source": "fn id(n:u64,c:u64)->u64{return n;}fn b<s>(sc:(&s Scope<u64>),c:u64)->u64{t:=spawn(sc,1,id);m:=Mutex::new(t);return 0;}fn main(){}",
     "reject": true,
-    "diagnostic": "mutex payload cannot hold task handles"
+    "diagnostic": "Mutex payload cannot hold Task handles"
   },
   {
     "name": "task-reject-scope-shared-to-threads",
-    "source": "fn w<s>(n:u64,sc:(&s scope<u64>))->u64{return n;}fn b<s>(sc:(&s scope<u64>),c:u64)->u64{r:=parallel_map(u64[1],sc,w);return 0;}fn main(){}",
+    "source": "fn w<s>(n:u64,sc:(&s Scope<u64>))->u64{return n;}fn b<s>(sc:(&s Scope<u64>),c:u64)->u64{r:=parallel_map(u64[1],sc,w);return 0;}fn main(){}",
     "reject": true,
     "diagnostic": "does not satisfy Share"
   },
   {
     "name": "task-reject-wrong-token",
-    "source": "fn f(n:u64,c:u64,t:u64)->u64{return n;}fn b<s>(sc:(&s scope<u64>),c:u64)->u64{t:=spawn(sc,1,f);return 0;}fn main(){}",
+    "source": "fn f(n:u64,c:u64,t:u64)->u64{return n;}fn b<s>(sc:(&s Scope<u64>),c:u64)->u64{t:=spawn(sc,1,f);return 0;}fn main(){}",
     "reject": true,
-    "diagnostic": "must be cancel_token"
+    "diagnostic": "must be CancelToken"
   },
   {
     "name": "task-reject-context-mismatch",
-    "source": "fn f(n:u64,c:u8[])->u64{return n;}fn b<s>(sc:(&s scope<u64>),c:u64)->u64{t:=spawn(sc,1,f);return 0;}fn main(){}",
+    "source": "fn f(n:u64,c:u8[])->u64{return n;}fn b<s>(sc:(&s Scope<u64>),c:u64)->u64{t:=spawn(sc,1,f);return 0;}fn main(){}",
     "reject": true,
     "diagnostic": "type mismatch"
   },
   {
     "name": "task-reject-mutate-context-during-scope",
-    "source": "fn b<s,a>(sc:(&s scope<(&a u8[])>),c:(&a u8[]))->u64{return 0;}fn main(){mut x=u8[1];r:=borrow(x);n:=task_scope(r,b);x.push(1);println(load(r).len());}",
+    "source": "fn b<s,a>(sc:(&s Scope<(&a u8[])>),c:(&a u8[]))->u64{return 0;}fn main(){mut x=u8[1];r:=borrow(x);n:=task_scope(r,b);x.push(1);println(load(r).len());}",
     "reject": true,
     "diagnostic": ""
   },
@@ -1390,7 +1390,7 @@
   },
   {
     "name": "task-reject-token-without-scope",
-    "source": "fn f(t:cancel_token)->u64{return 0;}fn main(){f(0);}",
+    "source": "fn f(t:CancelToken)->u64{return 0;}fn main(){f(0);}",
     "reject": true,
     "diagnostic": "type mismatch"
   },
