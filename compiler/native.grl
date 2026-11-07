@@ -232,7 +232,9 @@ struct C {
     parsing_input: num,
     output_region: num,
     receiver_region: num,
-    input_regions: num[]
+    input_regions: num[],
+    none_start: num,
+    none_end: num
 }
 
 fn same<a, b>(x: read<a>, y: read<b>) -> num {
@@ -7955,9 +7957,24 @@ fn adopt_literal<a>(c: (&mut a C), start: num, end: num, ty: num) -> num {
     }
     return true;
 }
+fn is_option_storage<a>(c: (&mut a C), ty: num) -> num {
+    if ty_kind(borrow_mut(c), ty) != 8 {
+        return false;
+    }
+    d := ty_arg(borrow_mut(c), ty);
+    decl := &c.decls[d];
+    return same(&decl.module, &"core") & same(&decl.name, &"OptionStorage");
+}
 // A bare literal (including a negated one) takes a sized integer type from its context.
 fn adopt_value<a>(c: (&mut a C), v: Val, start: num, end: num, expected: num) -> Val {
     mut v = hint_use(borrow_mut(c), v, start, end, expected);
+    if (c.none_start == start) & (c.none_end == end) & is_option_storage(borrow_mut(c), expected) {
+        tag := imm(borrow_mut(c), 0);
+        payload := imm(borrow_mut(c), 0);
+        slot := invoke(borrow_mut(c), &"rt_enum", two(tag, payload));
+        own(borrow_mut(c), slot, expected);
+        return val(slot, expected);
+    }
     if is_union(borrow_mut(c), expected) & (same_type(borrow_mut(c), v.ty, expected) == 0) {
         args := type_args(borrow_mut(c), expected);
         if is_union(borrow_mut(c), v.ty) {
@@ -9955,6 +9972,15 @@ fn primary<a>(c: (&mut a C)) -> Val {
         return val(imm(borrow_mut(c), truth), ty);
     }
     first := ident(borrow_mut(c));
+    if same(&first, &"Some") & is(borrow_mut(c), &"(") {
+        return call(borrow_mut(c), &"core", &"some");
+    }
+    if same(&first, &"None") {
+        p := c.pos - 1;
+        exchange(borrow_mut(c.none_start), p);
+        exchange(borrow_mut(c.none_end), c.pos);
+        return val(imm(borrow_mut(c), 0), 0);
+    }
     if type_literal_ahead(borrow_mut(c), &first) != 0 {
         // Rewind and re-read the whole head as a type so `<...>` arguments work.
         back := c.pos - 1;
@@ -13389,6 +13415,8 @@ pub fn main() -> num {
         output_region: 0,
         receiver_region: 0,
         input_regions: num[],
+        none_start: 0,
+        none_end: 0,
     };
     exchange(borrow_mut(c.target), host::target());
     for k in 5 {
