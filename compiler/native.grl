@@ -2989,16 +2989,158 @@ fn type_suffixes<a>(c: (&mut a C), base: num) -> num {
     }
     return out;
 }
+fn token_starts_type<a>(c: (&mut a C), p: num) -> num {
+    k := kind_at(borrow_mut(c), p);
+    if k == 1 {
+        return true;
+    }
+    return (k == 40) + (k == 91) + (k == 38);
+}
+fn type_keyword<a>(c: (&mut a C), n: read<a>) -> num {
+    if same(&n, &"bool") + same(&n, &"char") + same(&n, &"string") + same(&n, &"num") {
+        return true;
+    }
+    if same(&n, &"u8")
+        + same(&n, &"u16")
+        + same(&n, &"u32")
+        + same(&n, &"u64")
+        + same(&n, &"usize") {
+        return true;
+    }
+    if same(&n, &"i8")
+        + same(&n, &"i16")
+        + same(&n, &"i32")
+        + same(&n, &"i64")
+        + same(&n, &"isize") {
+        return true;
+    }
+    if same(&n, &"f32") + same(&n, &"f64") + same(&n, &"unit") + same(&n, &"read") {
+        return true;
+    }
+    if same(&n, &"mut") + same(&n, &"atomic") + same(&n, &"mutex") + same(&n, &"scope") {
+        return true;
+    }
+    return same(&n, &"task") + same(&n, &"cancel_token") + same(&n, &"fn") + same(&n, &"Fn");
+}
+fn lifetime_candidate<a>(c: (&mut a C), p: num) -> num {
+    if kind_at(borrow_mut(c), p) != 1 {
+        return false;
+    }
+    n := tok_text(borrow_mut(c), p);
+    if n.len() == 0 {
+        return false;
+    }
+    if (n[0] < 97) + (122 < n[0]) {
+        return false;
+    }
+    if type_keyword(borrow_mut(c), &n) {
+        return false;
+    }
+    return token_starts_type(borrow_mut(c), p + 1) + is_at(borrow_mut(c), p + 1, &"mut");
+}
+fn is_at<a, b>(c: (&mut a C), p: num, text: read<b>) -> num {
+    if p < c.toks.len() {
+        t := tok_text(borrow_mut(c), p);
+        return same(&t, &text);
+    }
+    return false;
+}
+fn lifetime_region<a>(c: (&mut a C), name: read<a>) -> num {
+    for i in c.rnames.len() {
+        r := &c.rnames[i];
+        if same(&r, &name) {
+            return i + 1;
+        }
+    }
+    if (name.len() != 0) & (96 < name[0]) & (name[0] < 123) {
+        c.rnames.push(name.copy());
+        return c.rnames.len();
+    }
+    fail(borrow_mut(c), &"undeclared lifetime");
+    return 0;
+}
+fn fresh_lifetime<a>(c: (&mut a C)) -> num {
+    mut name = u8[];
+    name.push(35);
+    decimal(borrow_mut(name), c.rnames.len());
+    c.rnames.push(name);
+    return c.rnames.len();
+}
+fn slice_ahead<a>(c: (&mut a C), p: num) -> num {
+    mut i = p + 1;
+    mut depth = 0;
+    while i < c.toks.len() {
+        k := kind_at(borrow_mut(c), i);
+        if k == 0 {
+            return false;
+        }
+        if (k == 40) + (k == 91) + (k == 123) {
+            depth += 1;
+        }
+        if (k == 41) + (k == 93) + (k == 125) {
+            if depth == 0 {
+                return k == 93;
+            }
+            depth -= 1;
+        }
+        if (depth == 0) & (k == 58) {
+            return false;
+        }
+        i += 1;
+    }
+    return false;
+}
+fn parse_slice_reference<a>(c: (&mut a C), mode: num, r: num) -> num {
+    expect(borrow_mut(c), &"[");
+    elem := parse_type(borrow_mut(c));
+    expect(borrow_mut(c), &"]");
+    if elem != int_type(borrow_mut(c), 8, 0) {
+        fail(borrow_mut(c), &"only [u8] slices are supported");
+    }
+    mut rs = num[];
+    rs.push(r);
+    return intern_full(borrow_mut(c), 5, 0, mode, rs);
+}
+fn parse_reference<a>(c: (&mut a C)) -> num {
+    mut mode = 0;
+    mut r = 0;
+    mut p = c.pos;
+    if is(borrow_mut(c), &"mut") {
+        advance(borrow_mut(c));
+        mode = 1;
+        p = c.pos;
+        if lifetime_candidate(borrow_mut(c), p) {
+            n := tok_text(borrow_mut(c), p);
+            r = lifetime_region(borrow_mut(c), &n);
+            advance(borrow_mut(c));
+        }
+    } else {
+        if lifetime_candidate(borrow_mut(c), p) {
+            n := tok_text(borrow_mut(c), p);
+            r = lifetime_region(borrow_mut(c), &n);
+            advance(borrow_mut(c));
+            if eat(borrow_mut(c), &"mut") {
+                mode = 1;
+            }
+        }
+    }
+    if r == 0 {
+        r = fresh_lifetime(borrow_mut(c));
+    }
+    p = c.pos;
+    if is(borrow_mut(c), &"[") & slice_ahead(borrow_mut(c), p) {
+        return parse_slice_reference(borrow_mut(c), mode, r);
+    }
+    old := exchange(borrow_mut(c.no_union), 1);
+    e := parse_type(borrow_mut(c));
+    exchange(borrow_mut(c.no_union), old);
+    mut rs = num[];
+    rs.push(r);
+    return intern_full(borrow_mut(c), 7, e, mode, rs);
+}
 fn parse_type_base<a>(c: (&mut a C)) -> num {
     if eat(borrow_mut(c), &"&") {
-        mode := eat(borrow_mut(c), &"mut");
-        r := region_id(borrow_mut(c));
-        old := exchange(borrow_mut(c.no_union), 1);
-        e := parse_type(borrow_mut(c));
-        exchange(borrow_mut(c.no_union), old);
-        mut rs = num[];
-        rs.push(r);
-        return intern_full(borrow_mut(c), 7, e, mode, rs);
+        return parse_reference(borrow_mut(c));
     }
     if eat(borrow_mut(c), &"(") {
         if eat(borrow_mut(c), &")") {
@@ -3248,7 +3390,7 @@ fn decl<a>(c: (&mut a C), pass: num) -> unit {
             is_enum: is_enum,
             first: first,
             count: count,
-            regions: regions,
+            regions: c.rnames.len(),
             types: types,
             bounds: bounds,
             constraints: constraints,
@@ -3421,7 +3563,7 @@ fn func<a>(c: (&mut a C), pass: num, public: num) -> unit {
                     count: count,
                     ret: ret,
                     types: typecount,
-                    regions: regioncount,
+                    regions: c.rnames.len(),
                     file: file,
                     pos: position,
                     raw: raw,
