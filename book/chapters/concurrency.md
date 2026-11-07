@@ -19,8 +19,8 @@ closures. Grail closures capture by value, so shared state is passed explicitly 
 argument; callbacks may be named functions or value-capturing closures. A Rust `MutexGuard` is a value you can hold;
 Grail scopes the guard to a callback instead.
 
-The library also provides `[K: V]` maps (keyed SipHash, user key types via the `hash::Hash` and
-`hash::Equal` interfaces) and a sharded `concurrent_map::Map` usable from many threads at once.
+The library also provides `[K: V]` maps (keyed SipHash, user key types via the `Hash` and
+`Equal` interfaces, imported with `use hash::Hash;` and `use hash::Equal;`) and a sharded `concurrent_map::Map` usable from many threads at once.
 
 `task_scope(context, body)` starts structured tasks. Inside the body, `spawn(scope, context, f)`
 returns a `task<R>` handle and `join(handle)` waits for its result; every task is joined or

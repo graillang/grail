@@ -1,8 +1,10 @@
 # Typed references and exchange
 
-`borrow(value)` refers to storage as `&a T`; `borrow_mut(value)` grants mutable storage
-access as `&mut a T`. Local references infer their lifetime. Numeric references do not require
-a heap allocation for the referent.
+`borrow(value)` refers to storage as `&T`; `borrow_mut(value)` grants mutable storage access as
+`&mut T`. Both elide the lifetime; all elided references in one signature share an inferred
+lifetime. When separate relationships matter, name them directly: `&a T` and `&a mut T`. The names
+are implicit, so no `<a>` declaration is required. Local references infer their lifetime. Numeric
+references do not require a heap allocation for the referent.
 
 {{example:references}}
 

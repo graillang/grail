@@ -6,7 +6,7 @@ reports its length. Read an individual byte with `data[index]`.
 
 {{example:bytes}}
 
-A quoted literal is an owned UTF-8 `string`. Text length is measured in **bytes**, not Unicode
+A quoted literal is already an owned UTF-8 `string`; no `.text()` call is needed. `.text()` converts a borrowed byte view into owned text. Text length is measured in **bytes**, not Unicode
 characters or grapheme clusters. `greeting.append(text)` appends validated text; arbitrary byte sequences
 and text are deliberately different concepts.
 

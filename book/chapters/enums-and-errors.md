@@ -13,13 +13,14 @@ postfix `!` extracts success and aborts on failure.
 
 A union may contain records, vectors, maps and optional values. Type arguments compose:
 `u8[] | io::Error`, `[K: V]?`, and `(num | string)[]` are all ordinary types. Parentheses are
-needed when a union is an element type or the referent of `&a T`. An enum payload may itself be
+needed when a union is an element type or the referent of a reference: `&T`, `&a T`, or
+`&a mut T`. An enum payload may itself be
 a union.
 
 ```grl
 struct ParseError { message: string }
 fn parse(flag: num) -> num | ParseError {
-    if flag == 0 { return ParseError { message: "missing".text() }; }
+    if flag == 0 { return ParseError { message: "missing" }; }
     return 42;
 }
 fn forward(flag: num) -> bool | num | ParseError {

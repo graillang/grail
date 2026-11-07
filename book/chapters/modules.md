@@ -12,6 +12,17 @@ Unlike an implicit package loader, today's native compiler needs every source fi
 The example manifest lists its helper, and `just book-run modules` supplies both files plus the
 Grail runtime. The entry file comes first. `use arithmetic` by itself does not search the disk.
 
+A `use` declaration can name a module or import one member:
+
+```grl
+use hashmap;
+use order::Ord;
+```
+
+After `use order::Ord;`, write `Ord` unqualified in bounds and implementations. Keep
+`order::Ord` when a name is ambiguous or the qualified form is clearer. Module functions, types,
+variants and interfaces all use `::` for qualification; `.` remains field and method access.
+
 The Grail-written compiler is the sole implementation; declarations, generic bodies and
 dependencies are checked before an output artifact is replaced.
 
