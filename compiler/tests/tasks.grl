@@ -1,17 +1,17 @@
 struct Ctx{hits:atomic<num>,arrived:atomic<num>}
 fn mul7<a>(n:num,c:ref<a,Ctx>)->num{c.hits.fetch_add(1);return n*7;}
-fn count<a>(b:bytes,c:ref<a,Ctx>)->num{return b.len();}
+fn count<a>(b:u8[],c:ref<a,Ctx>)->num{return b.len();}
 fn wait_cancel<a>(n:num,c:ref<a,Ctx>,token:cancel_token)->num{while token.cancelled()==0{}return n;}
-fn make<a>(n:num,c:ref<a,Ctx>)->bytes{return bytes[n,n,n];}
+fn make<a>(n:num,c:ref<a,Ctx>)->u8[]{return u8[n,n,n];}
 // Both tasks only finish once both are running simultaneously.
 fn meet<a>(n:num,c:ref<a,Ctx>)->num{c.arrived.fetch_add(1);while c.arrived.load()<2{}return n;}
 fn body<s,a>(sc:ref<s,scope<ref<a,Ctx>>>,ctx:ref<a,Ctx>)->num{
     product:=spawn(sc,6,mul7);
-    length:=spawn(sc,bytes[1,2,3],count);
+    length:=spawn(sc,u8[1,2,3],count);
     waiter:=spawn(sc,5,wait_cancel);
     left:=spawn(sc,1,meet);right:=spawn(sc,2,meet);
     abandoned:=spawn(sc,9,make);drop(abandoned);
-    mut many=vec<task<num>>[];for i in 8{many.push(spawn(sc,i,mul7));}
+    mut many=task<num>[];for i in 8{many.push(spawn(sc,i,mul7));}
     assert(sc.cancelled()==0);sc.cancel();assert(sc.cancelled());token:=sc.token();assert(token.cancelled());
     mut total=join(product)+join(length)+join(waiter)+join(left)+join(right);
     while many.len()!=0{total+=join(many.pop());}

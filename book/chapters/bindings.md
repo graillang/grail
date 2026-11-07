@@ -32,7 +32,7 @@ storage—growing a buffer, updating a vector, changing a field, or taking mutab
 
 {{example:immutable-owner}}
 
-Repair this by writing `mut data = bytes[];`. A `mut` binding permits mutation but does not override
+Repair this by writing `mut data = u8[];`. A `mut` binding permits mutation but does not override
 the borrow checker: an outstanding reader can still prevent a write or growth.
 
 ## A fixed binding may carry a mutable capability

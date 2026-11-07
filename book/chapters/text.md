@@ -1,6 +1,6 @@
 # Working with text
 
-Text values (`string`, `bytes` and string literals) compare by content with `==` and `<`, join with
+Text values (`string`, `u8[]` and string literals) compare by content with `==` and `<`, join with
 `+`, and have methods for everyday work: `trim`, `split`, `contains`, `starts_with`, `replace`,
 `to_upper` and more.
 

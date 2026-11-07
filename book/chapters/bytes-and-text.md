@@ -1,6 +1,6 @@
 # Byte buffers and text
 
-`bytes[]` creates an empty owned growable byte sequence; `bytes[10, 20, 30]` initializes one
+`u8[]` creates an empty owned growable byte sequence; `u8[10, 20, 30]` initializes one
 directly. `data.push(byte)` appends a byte, `data.pop()` removes the last byte, and `data.len()`
 reports its length. Read an individual byte with `data[index]`.
 
@@ -13,7 +13,7 @@ and text are deliberately different concepts.
 {{example:text}}
 
 `.append(...)` mutates owned storage, so `greeting` is declared with `mut`.
-`print` writes exactly the supplied bytes; `println` adds a newline. Both borrow their input
+`print` writes exactly the supplied byte buffer; `println` adds a newline. Both borrow their input
 for the call, so `greeting` remains usable afterward.
 
 **Try it:** use a non-ASCII greeting and compare its byte length with the number of visible letters.

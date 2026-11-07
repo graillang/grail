@@ -5,7 +5,7 @@ The remaining fields are still released when the record ends.
 
 {{example:records}}
 
-`vec<T>[]` creates an empty vector; `vec<num>[10, 20, 30]` initializes one directly.
+`T[]` creates an empty vector; `num[10, 20, 30]` initializes one directly.
 `values.push(value)` consumes an element, and `values.pop()` removes and returns the last element.
 
 {{example:vectors}}
@@ -24,4 +24,4 @@ Popping an empty collection or indexing out of bounds aborts. Vectors of owners 
 their remaining elements; callers own popped elements. Byte buffers use the same `.push`, `.pop`,
 `.len` and indexing syntax. Generic vector slicing is not implemented yet; byte slicing is.
 
-**Try it:** use `vec<bytes>[]`, push `bytes[]`, and inspect the popped buffer's length.
+**Try it:** use `u8[][]`, push `u8[]`, and inspect the popped buffer's length.

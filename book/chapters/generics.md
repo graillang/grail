@@ -2,7 +2,7 @@
 
 Declare a type parameter directly: `fn identity<T>(value:T)->T`. Uppercase generic names
 are types; lowercase names such as `a` are lifetime parameters (`fn replace<a,T>(...)`). Concrete arguments are ordinary types, such as `num`,
-`bytes`, or `vec<bytes>`. If a declaration also has lifetimes, put them before type parameters.
+`u8[]`, or `u8[][]`. If a declaration also has lifetimes, put them before type parameters.
 
 {{example:generic-types}}
 

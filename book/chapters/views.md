@@ -1,7 +1,7 @@
 # Readonly views and slices
 
 `&owner` creates a readonly byte view. The view has a descriptor but does not own the
-underlying bytes; it retains a checked relationship to their owner. `view[start:end]`
+underlying byte buffer; it retains a checked relationship to their owner. `view[start:end]`
 uses a half-open range: start is included and end is excluded.
 
 `owner[index]` reads a byte directly; indexing borrows its source readonly for the access.

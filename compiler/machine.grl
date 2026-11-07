@@ -4,7 +4,7 @@ use host;
 // Final lowering of the compiler's closed word-machine instruction stream.
 // Target 0 retains x86-64 spelling; 1 is AArch64, 2 is RV64IMAFD (Linux ELF).
 // This is static instruction selection in Grail, not execution or an external translator.
-struct Out { text:bytes, target:num, next:num }
+struct Out { text:u8[], target:num, next:num }
 fn eq<a,b>(a:read<a>,b:read<b>)->num {
     if a.len()!=b.len(){return false;}
     for i in a.len(){if a[i]!=b[i]{return false;}}return true;
@@ -24,8 +24,8 @@ fn num<a>(o:ref_mut<a,Out>,n:num)->unit {if 9<n{num(borrow_mut(o),n/10);}o.text.
 fn fresh<a>(o:ref_mut<a,Out>)->num {n:=o.next;exchange(borrow_mut(o.next),n+1);return n;}
 fn label<a>(o:ref_mut<a,Out>,n:num)->unit {put(borrow_mut(o),&".Lmachine");num(borrow_mut(o),n);return ();}
 fn mark<a>(o:ref_mut<a,Out>,n:num)->unit {label(borrow_mut(o),n);put(borrow_mut(o),&":\n");return ();}
-fn split<a>(s:read<a>,delimiter:num)->vec<bytes> {
-    mut out=vec<bytes>[];mut start=0;mut depth=0;
+fn split<a>(s:read<a>,delimiter:num)->u8[][] {
+    mut out=u8[][];mut start=0;mut depth=0;
     for i in s.len(){b:=s[i];if b==40{depth+=1;}if b==41{assert(depth!=0);depth-=1;}
         if (b==delimiter)&(depth==0){out.push((trim(&(s[start:i]))).copy());start=i+1;}}
     out.push((trim(&(s[start:]))).copy());return out;
@@ -175,7 +175,7 @@ fn atomic_instruction<a,b,c>(o:ref_mut<a,Out>,op:read<b>,rest:read<c>)->num {
 }
 fn instruction<a,b>(o:ref_mut<a,Out>,line:read<b>)->unit {
     target:=o.target;mut space=line.len();for i in line.len(){if line[i]==32{space=i;break;}}
-    op:=line[:space];mut rest=bytes[];if space<line.len(){rest=(trim(&(line[space+1:]))).copy();}
+    op:=line[:space];mut rest=u8[];if space<line.len(){rest=(trim(&(line[space+1:]))).copy();}
     if atomic_instruction(borrow_mut(o),&op,&rest){return ();}
     if starts(&(op),&"j"){branch(borrow_mut(o),&(op),&rest);return ();}
     if eq(&op,&"call"){if rest.len()!=0{if rest[0]==42{r:=reg(target,rest[1:]);if target==1{put(borrow_mut(o),&"blr ");put(borrow_mut(o),&r);put(borrow_mut(o),&"\nmov x9,x0\n");}else{put(borrow_mut(o),&"jalr ra,");put(borrow_mut(o),&r);put(borrow_mut(o),&",0\nmv t0,a0\n");}return ();}}}
@@ -257,8 +257,8 @@ fn instruction<a,b>(o:ref_mut<a,Out>,line:read<b>)->unit {
     if eq(&(op),&"leaq"){address(borrow_mut(o),&src);if target==1{move(borrow_mut(o),&"x10",&"x13");}else{move(borrow_mut(o),&"t1",&"t3");}store(borrow_mut(o),&dst,0);return ();}
     arithmetic(borrow_mut(o),&(op),&src,&dst);return ();
 }
-pub fn lower<a>(input:read<a>,target:num)->bytes {
-    assert((target==1)+(target==2));mut out=Out{text:bytes[],target:target,next:1};
+pub fn lower<a>(input:read<a>,target:num)->u8[] {
+    assert((target==1)+(target==2));mut out=Out{text:u8[],target:target,next:1};
     // Frame constants are known before instruction selection (no unresolved immediate expressions).
     mut start=0;
     for i in input.len(){if input[i]==10{line:=trim(&(input[start:i]));if starts(&(line),&".set "){put(borrow_mut(out),&(line));put(borrow_mut(out),&"\n");}start=i+1;}}

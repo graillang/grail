@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Type syntax is now postfix and concise: `T[]` is a vector (`vec<T>` is gone), `u8[]` is the
+  byte buffer (`bytes` is gone), and `T[...]` / `T[]` are the element and empty literals. A type
+  may be parenthesized when its literal needs one, e.g. `(fn(num)->num)[f]`. The byte-buffer
+  literal rejects elements above 255. Compiler, standard library, book, examples, tests, docs and
+  the checked-in bootstrap have all been migrated; `grail fmt` understands the new spelling.
+- `grail fmt` breaks long lines the way rustfmt does: a match arm moves its body after `=>`,
+  binary operator chains break before each operator, postfix chains put one `.method()` per
+  line, and bracket lists put one item per line. Record literals expanded this way also take a
+  trailing comma, which the language accepts there (call arguments, parameter lists and generic
+  arguments reject one, so they stay comma-free). The formatter is still token-level and
+  idempotent; formatted sources compile to byte-identical assembly.
 - Faster generated code: inline `push` fast path (growth only calls the runtime, large buffers grow in
   place with `mremap`, fresh memory is not re-zeroed), inline sized-integer arithmetic, comparisons
   and division, bounds checks dropped in `for i in v.len()` loops that cannot change `v`, and

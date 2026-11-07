@@ -1,5 +1,5 @@
 use concurrent_map;
-struct Shared{arrived:atomic<num>,counter:atomic<num>,total:mutex<num>,log:mutex<vec<num>>}
+struct Shared{arrived:atomic<num>,counter:atomic<num>,total:mutex<num>,log:mutex<num[]>}
 // Real overlap: every task waits until four tasks are running at the same time.
 // A sequential implementation would never return from the first task.
 fn barrier<a>(id:num,shared:ref<a,Shared>)->num{
@@ -7,37 +7,37 @@ fn barrier<a>(id:num,shared:ref<a,Shared>)->num{
     return id*10;
 }
 fn add<a>(total:ref_mut<a,num>,amount:num)->num{exchange(total,load(total)+amount);return 0;}
-fn record<a>(log:ref_mut<a,vec<num>>,value:num)->num{log.push(value);return 0;}
+fn record<a>(log:ref_mut<a,num[]>,value:num)->num{log.push(value);return 0;}
 fn contend<a>(id:num,shared:ref<a,Shared>)->num{
     for i in 1000{shared.counter.fetch_add(1);shared.total.lock_with(1,add);}
     shared.log.lock_with(id,record);return id;
 }
-fn insert_many<a>(base:num,map:ref<a,concurrent_map::Map<num,bytes>>)->num{
-    for i in 250{concurrent_map::insert(borrow(map),base*250+i,bytes[i%256]);}return 250;
+fn insert_many<a>(base:num,map:ref<a,concurrent_map::Map<num,u8[]>>)->num{
+    for i in 250{concurrent_map::insert(borrow(map),base*250+i,u8[i%256]);}return 250;
 }
-fn length(data:bytes,unused:num)->num{return data.len();}
+fn length(data:u8[],unused:num)->num{return data.len();}
 fn get<a>(total:ref_mut<a,num>,unused:num)->num{return load(total);}
-fn borrowed_lengths<a>(x:ref<a,bytes>,y:ref<a,bytes>)->vec<num>{mut v=vec<ref<a,bytes>>[];v.push(x);v.push(y);return parallel_map(v,0,count);}
-fn count<a>(item:ref<a,bytes>,unused:num)->num{return item.len();}
+fn borrowed_lengths<a>(x:ref<a,u8[]>,y:ref<a,u8[]>)->num[]{mut v=ref<a,u8[]>[];v.push(x);v.push(y);return parallel_map(v,0,count);}
+fn count<a>(item:ref<a,u8[]>,unused:num)->num{return item.len();}
 fn main(){
-    shared:=Shared{arrived:atomic(0),counter:atomic(0),total:mutex(0),log:mutex(vec<num>[])};
-    ids:=parallel_map(vec<num>[0,1,2,3],borrow(shared),barrier);
+    shared:=Shared{arrived:atomic(0),counter:atomic(0),total:mutex(0),log:mutex(num[])};
+    ids:=parallel_map(num[0,1,2,3],borrow(shared),barrier);
     assert(ids.len()==4);for i in 4{assert(ids[i]==i*10);}
-    mut work=vec<num>[];for i in 16{work.push(i);}
+    mut work=num[];for i in 16{work.push(i);}
     done:=parallel_map(work,borrow(shared),contend);
     for i in 16{assert(done[i]==i);}
     assert(shared.counter.load()==16000);
     assert(shared.total.lock_with(0,get)==16000);
-    map:=concurrent_map::with_seed<num,bytes>(5,6);
-    mut bases=vec<num>[];for i in 8{bases.push(i);}
+    map:=concurrent_map::with_seed<num,u8[]>(5,6);
+    mut bases=num[];for i in 8{bases.push(i);}
     inserted:=parallel_map(bases,borrow(map),insert_many);
     for i in 8{assert(inserted[i]==250);}
     assert(concurrent_map::len(borrow(map))==2000);
-    owned:=parallel_map(vec<bytes>[bytes[1],bytes[1,2],bytes[1,2,3]],0,length);
+    owned:=parallel_map(u8[][u8[1],u8[1,2],u8[1,2,3]],0,length);
     assert(owned[2]==3);
-    a:=bytes[1,2];b:=bytes[1,2,3,4];
+    a:=u8[1,2];b:=u8[1,2,3,4];
     lengths:=borrowed_lengths(borrow(a),borrow(b));
     assert(lengths[0]+lengths[1]==6);mut extended=a;extended.push(3);
-    empty:=parallel_map(vec<bytes>[],0,length);assert(empty.len()==0);
+    empty:=parallel_map(u8[][],0,length);assert(empty.len()==0);
     println(42);
 }

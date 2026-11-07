@@ -28,7 +28,7 @@ that read back as the same `f32`. `f32(x)` converts from integers or `f64`; `f64
 
 `char` is a Unicode scalar value. `'ï'` is a `char`; an ASCII literal such as `'g'` is a byte value
 (like Rust's `b'g'`) unless a `char` context adopts it. Text's `chars()` decodes UTF-8 into a
-`vec<char>`, `push_char` appends one, and characters compare with `<`/`==`, convert with `u32(c)`
+`char[]`, `push_char` appends one, and characters compare with `<`/`==`, convert with `u32(c)`
 and the checked `char(n)`, and offer `is_alphabetic`, `is_whitespace`, `to_uppercase` and similar
 methods. Case mapping covers Latin-1, Latin Extended-A, Greek and Cyrillic.
 

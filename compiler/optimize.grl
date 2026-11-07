@@ -9,17 +9,17 @@ module optimize;
 // Kinds: 0 none, 1 register, 2 frame slot -N(%rbp), 3 immediate/other text, 4 other operand,
 // 5 generated text (range in O.gen). Ops: see opcode(); 100 label, 101 directive, 0 unknown.
 struct O {
-    ls:vec<num>, le:vec<num>, op:vec<num>, chg:vec<num>, del:vec<num>, lab:vec<num>, tr:vec<num>,
-    k0:vec<num>, v0:vec<num>, s0:vec<num>, e0:vec<num>, m0:vec<num>,
-    k1:vec<num>, v1:vec<num>, s1:vec<num>, e1:vec<num>, m1:vec<num>,
-    gen:bytes, out:bytes, weird:num, maxslot:num, table:vec<num>, base:num, data:num, uniq:num, zline:num, zfrom:num, zto:num,
-    inl_names:vec<bytes>, inl_bodies:vec<bytes>, inl_head:vec<num>, inl_next:vec<num>
+    ls:num[], le:num[], op:num[], chg:num[], del:num[], lab:num[], tr:num[],
+    k0:num[], v0:num[], s0:num[], e0:num[], m0:num[],
+    k1:num[], v1:num[], s1:num[], e1:num[], m1:num[],
+    gen:u8[], out:u8[], weird:num, maxslot:num, table:num[], base:num, data:num, uniq:num, zline:num, zfrom:num, zto:num,
+    inl_names:u8[][], inl_bodies:u8[][], inl_head:num[], inl_next:num[]
 }
-fn put<a>(v:ref_mut<a,vec<num>>,i:num,x:num){exchange(&mut v[i],x);}
+fn put<a>(v:ref_mut<a,num[]>,i:num,x:num){exchange(&mut v[i],x);}
 fn same<b,d>(s:read<b>,a:num,e:num,w:read<d>)->num{
     if e-a!=w.len(){return false;}for i in w.len(){if s[a+i]!=w[i]{return false;}}return true;
 }
-fn app<a,b>(out:ref_mut<a,bytes>,s:read<b>){for i in s.len(){out.push(s[i]);}}
+fn app<a,b>(out:ref_mut<a,u8[]>,s:read<b>){for i in s.len(){out.push(s[i]);}}
 fn bit(r:num)->num{return 1<<r;}
 // 0xFFCF: every general register except rsp/rbp; caller-saved; argument registers.
 fn all_regs()->num{return 65487;}
@@ -230,9 +230,9 @@ fn kill<a>(o:ref_mut<a,O>,i:num){put(borrow_mut(o.del),i,1);}
 struct F {
     // Slot facts (index N/8): register holding the value (+1) and its version, known
     // immediate line (+1), copy-of slot (+1) and its version; valid while ver/epoch match.
-    sver:vec<num>, sep:vec<num>, sfv:vec<num>, sreg:vec<num>, sregv:vec<num>, simm:vec<num>,
-    scopy:vec<num>, scopyv:vec<num>, bad:vec<num>, reads:vec<num>, weight:vec<num>,
-    rver:vec<num>, rep:vec<num>, rimm:vec<num>, rslot:vec<num>, rslotv:vec<num>, rcopy:vec<num>, rcopyv:vec<num>, epoch:num
+    sver:num[], sep:num[], sfv:num[], sreg:num[], sregv:num[], simm:num[],
+    scopy:num[], scopyv:num[], bad:num[], reads:num[], weight:num[],
+    rver:num[], rep:num[], rimm:num[], rslot:num[], rslotv:num[], rcopy:num[], rcopyv:num[], epoch:num
 }
 fn facts_valid<a>(f:ref<a,F>,n:num)->num{return (f.sep[n]==f.epoch)&(f.sfv[n]==f.sver[n]);}
 fn fresh_facts<a>(f:ref_mut<a,F>,n:num){
@@ -260,9 +260,9 @@ fn forward_read<a,c>(o:ref_mut<a,O>,f:ref_mut<c,F>,i:num,j:num,n:num){
     }}
 }
 fn new_facts(ns:num)->F{
-    mut f=F{sver:vec<num>[],sep:vec<num>[],sfv:vec<num>[],sreg:vec<num>[],sregv:vec<num>[],simm:vec<num>[],
-        scopy:vec<num>[],scopyv:vec<num>[],bad:vec<num>[],reads:vec<num>[],weight:vec<num>[],
-        rver:vec<num>[],rep:vec<num>[],rimm:vec<num>[],rslot:vec<num>[],rslotv:vec<num>[],rcopy:vec<num>[],rcopyv:vec<num>[],epoch:1};
+    mut f=F{sver:num[],sep:num[],sfv:num[],sreg:num[],sregv:num[],simm:num[],
+        scopy:num[],scopyv:num[],bad:num[],reads:num[],weight:num[],
+        rver:num[],rep:num[],rimm:num[],rslot:num[],rslotv:num[],rcopy:num[],rcopyv:num[],epoch:1};
     for i in ns{f.sver.push(0);f.sep.push(0);f.sfv.push(0);f.sreg.push(0);f.sregv.push(0);f.simm.push(0);
         f.scopy.push(0);f.scopyv.push(0);f.bad.push(0);f.reads.push(0);f.weight.push(0);}
     for i in 16{f.rver.push(0);f.rep.push(0);f.rimm.push(0);f.rslot.push(0);f.rslotv.push(0);f.rcopy.push(0);f.rcopyv.push(0);}
@@ -330,7 +330,7 @@ fn dead_stores<a,c>(o:ref_mut<a,O>,f:ref_mut<c,F>,first:num,last:num){
 }
 // Function-wide backward liveness over the label graph (iterated to a fixed point); unknown
 // jump targets and unrecognized instructions make every register live.
-fn live_pass<a,c>(o:ref_mut<a,O>,lin:ref_mut<c,vec<num>>,remove:num)->num{
+fn live_pass<a,c>(o:ref_mut<a,O>,lin:ref_mut<c,num[]>,remove:num)->num{
     last:=o.op.len();mut live=0;mut i=last;mut changed=0;
     while 0<i{i-=1;
         if (o.del[i]==0)&(o.tr[i]==0){op:=o.op[i];
@@ -349,7 +349,7 @@ fn live_pass<a,c>(o:ref_mut<a,O>,lin:ref_mut<c,vec<num>>,remove:num)->num{
     return changed;
 }
 fn dead_defs<a,b>(o:ref_mut<a,O>,s:read<b>,first:num,last:num){
-    mut lin=vec<num>[];for i in last{lin.push(0);}
+    mut lin=num[];for i in last{lin.push(0);}
     mut rounds=0;while rounds<50{rounds+=1;if live_pass(borrow_mut(o),borrow_mut(lin),0)==0{break;}}
     if rounds<50{live_pass(borrow_mut(o),borrow_mut(lin),1);}
 }
@@ -513,7 +513,7 @@ fn function<a,b>(o:ref_mut<a,O>,s:read<b>){
     }
     if o.weird{for i in last{emit_line(borrow_mut(o),&s,i);}return ();}
     o.table.clear();mut base=0;if minlab!=0{base=minlab-1;}exchange(borrow_mut(o.base),base);
-    mut refs=vec<num>[];
+    mut refs=num[];
     if minlab!=0{for x in maxlab-base+1{o.table.push(0);refs.push(0);}for i in last{if o.lab[i]!=0{li:=o.lab[i]-1-base;put(borrow_mut(o.table),li,i+1);}}
         for i in last{for j in 2{mut v=o.v0[i];if j{v=o.v1[i];}mut k=o.k0[i];if j{k=o.k1[i];}
             if (k==4)&(v!=0){n:=v-1;if n>=base{if n-base<refs.len(){x:=refs[n-base]+1;put(borrow_mut(refs),n-base,x);}}}}}}
@@ -527,9 +527,9 @@ fn function<a,b>(o:ref_mut<a,O>,s:read<b>){
     dead_stores(borrow_mut(o),borrow_mut(f),first,last);
     dead_defs(borrow_mut(o),&s,first,last);
     // Promotion: weights grow 4x per loop nesting level (backward jumps).
-    mut chosen=vec<num>[];mut slots=vec<num>[];
+    mut chosen=num[];mut slots=num[];
     if prologue!=0{
-        mut opens=vec<num>[];mut closes=vec<num>[];for i in last+1{opens.push(0);closes.push(0);}
+        mut opens=num[];mut closes=num[];for i in last+1{opens.push(0);closes.push(0);}
         for i in last{op:=o.op[i];if is_jump(op)&(op!=15)&(o.del[i]==0){t:=jump_target(borrow(o),i);if t<i{x:=opens[t]+1;put(borrow_mut(opens),t,x);y:=closes[i+1]+1;put(borrow_mut(closes),i+1,y);}}}
         mut d=0;
         for i in last{d+=opens[i];d-=closes[i];if o.del[i]==0{
@@ -537,7 +537,7 @@ fn function<a,b>(o:ref_mut<a,O>,s:read<b>){
             for j in 2{mut k=o.k0[i];mut v=o.v0[i];if j{k=o.k1[i];v=o.v1[i];}
                 if k==2{n:=v/8;if f.bad[n]==0{if promotable_use(borrow(o),i){t11:=f.weight[n]+w;put(borrow_mut(f.weight),n,t11);}else{put(borrow_mut(f.bad),n,1);}}}}
         }}
-        free:=vec<num>[3,12,13,14,15];
+        free:=num[3,12,13,14,15];
         for r in free.len(){reg:=free[r];if ((regs_used>>reg)&1)==0{
             mut best=0;mut bw=3;for n in ns{if (f.bad[n]==0)&(f.weight[n]>bw){best=n;bw=f.weight[n];}}
             if best!=0{chosen.push(reg);slots.push(best);put(borrow_mut(f.bad),best,1);}
@@ -589,7 +589,7 @@ fn inline_candidate<a,b>(o:ref_mut<a,O>,s:read<b>,prologue:num){
         }}
     }}
     // Map every slot in the body to a free caller-saved register.
-    free:=vec<num>[8,9,10,11,2,1,6,7];mut slots=vec<num>[];mut regs=vec<num>[];
+    free:=num[8,9,10,11,2,1,6,7];mut slots=num[];mut regs=num[];
     for i in last{if (prologue<i)&(o.del[i]==0){for j in 2{mut k=o.k0[i];mut v=o.v0[i];if j{k=o.k1[i];v=o.v1[i];}
         if k==2{mut known=0;for x in slots.len(){if slots[x]==v{known=1;}}
             if known==0{mut pick=99;for f in free.len(){r:=free[f];mut taken=(used>>r)&1;for y in regs.len(){if regs[y]==r{taken=1;}}if (taken==0)&(pick==99){pick=r;}}
@@ -602,15 +602,15 @@ fn inline_candidate<a,b>(o:ref_mut<a,O>,s:read<b>,prologue:num){
     for i in last{if (prologue<i)&(o.del[i]==0)&(i+1!=last){op:=o.op[i];
         if op==30{app(borrow_mut(o.out),&"jmp .Lret\n");}else{if op!=29{emit_line(borrow_mut(o),&s,i);}}}}
     app(borrow_mut(o.out),&".Lret:\n");
-    mut body=bytes[];for x in o.out.len()-mark{c:=o.out[mark+x];body.push(c);}
+    mut body=u8[];for x in o.out.len()-mark{c:=o.out[mark+x];body.push(c);}
     while mark<o.out.len(){o.out.pop();}
-    na:=o.ls[1];ne:=o.le[1]-1;mut name=bytes[];for x in ne-na{name.push(s[na+x]);}
+    na:=o.ls[1];ne:=o.le[1]-1;mut name=u8[];for x in ne-na{name.push(s[na+x]);}
     h:=name_hash(&s,na,ne);index:=o.inl_names.len();o.inl_names.push(name);o.inl_bodies.push(body);
     old:=o.inl_head[h];o.inl_next.push(old);put(borrow_mut(o.inl_head),h,index+1);
 }
 // Replaces `call NAME` lines for inlinable functions by their bodies with per-site labels.
 fn inline_calls<a>(o:ref_mut<a,O>){
-    text:=exchange(borrow_mut(o.out),bytes[]);mut start=0;mut site=0;
+    text:=exchange(borrow_mut(o.out),u8[]);mut start=0;mut site=0;
     for i in text.len(){if text[i]==10{
         a:=start;e:=i;start=i+1;mut done=0;
         if (e-a>5)&(text[a]==99){if same(&text,a,a+5,&"call "){
@@ -639,7 +639,7 @@ fn compact<a,b>(o:ref_mut<a,O>,s:read<b>,prologue:num,ns:num)->num{
         a:=o.s0[i];e:=o.e0[i];if (e-a>4)&(s[a+1]==46){mut j=e;while a<j{if s[j-1]==45{break;}j-=1;}
             if a<j{mut n=0;mut ok=1;for x in e-j{d:=s[j+x];if (d<48)+(57<d){ok=0;}else{n=n*10+d-48;}}if ok{params=n;}}}}}
     if params>=ns{return 0;}
-    mut map=vec<num>[];for n in ns{map.push(0);}
+    mut map=num[];for n in ns{map.push(0);}
     for n in params+1{put(borrow_mut(map),n,1);}
     for i in last{if o.del[i]==0{if o.k0[i]==2{put(borrow_mut(map),o.v0[i]/8,1);}if o.k1[i]==2{put(borrow_mut(map),o.v1[i]/8,1);}}}
     mut used=0;for n in ns{if n!=0{if map[n]!=0{used+=1;put(borrow_mut(map),n,used);}}}
@@ -660,13 +660,13 @@ fn compact<a,b>(o:ref_mut<a,O>,s:read<b>,prologue:num,ns:num)->num{
 fn reset<a>(o:ref_mut<a,O>){
     o.ls.clear();o.le.clear();o.op.clear();o.chg.clear();o.del.clear();o.lab.clear();o.tr.clear();
     o.k0.clear();o.v0.clear();o.s0.clear();o.e0.clear();o.m0.clear();
-    o.k1.clear();o.v1.clear();o.s1.clear();o.e1.clear();o.m1.clear();exchange(borrow_mut(o.gen),bytes[]);exchange(borrow_mut(o.weird),0);exchange(borrow_mut(o.zline),0);exchange(borrow_mut(o.maxslot),0);
+    o.k1.clear();o.v1.clear();o.s1.clear();o.e1.clear();o.m1.clear();exchange(borrow_mut(o.gen),u8[]);exchange(borrow_mut(o.weird),0);exchange(borrow_mut(o.zline),0);exchange(borrow_mut(o.maxslot),0);
 }
-pub fn optimize<b>(s:read<b>)->bytes{
-    mut o=O{ls:vec<num>[],le:vec<num>[],op:vec<num>[],chg:vec<num>[],del:vec<num>[],lab:vec<num>[],tr:vec<num>[],
-        k0:vec<num>[],v0:vec<num>[],s0:vec<num>[],e0:vec<num>[],m0:vec<num>[],
-        k1:vec<num>[],v1:vec<num>[],s1:vec<num>[],e1:vec<num>[],m1:vec<num>[],gen:bytes[],out:bytes[],weird:0,maxslot:0,table:vec<num>[],base:0,data:0,uniq:0,zline:0,zfrom:0,zto:0,
-        inl_names:vec<bytes>[],inl_bodies:vec<bytes>[],inl_head:vec<num>[],inl_next:vec<num>[]};
+pub fn optimize<b>(s:read<b>)->u8[]{
+    mut o=O{ls:num[],le:num[],op:num[],chg:num[],del:num[],lab:num[],tr:num[],
+        k0:num[],v0:num[],s0:num[],e0:num[],m0:num[],
+        k1:num[],v1:num[],s1:num[],e1:num[],m1:num[],gen:u8[],out:u8[],weird:0,maxslot:0,table:num[],base:0,data:0,uniq:0,zline:0,zfrom:0,zto:0,
+        inl_names:u8[][],inl_bodies:u8[][],inl_head:num[],inl_next:num[]};
     for i in 4096{o.inl_head.push(0);}
     mut start=0;mut inside=0;
     for i in s.len(){if s[i]==10{
@@ -681,5 +681,5 @@ pub fn optimize<b>(s:read<b>)->bytes{
     if inside{function(borrow_mut(o),&s);}
     for x in s.len()-start{o.out.push(s[start+x]);}
     if o.inl_names.len()!=0{inline_calls(borrow_mut(o));}
-    return exchange(borrow_mut(o.out),bytes[]);
+    return exchange(borrow_mut(o.out),u8[]);
 }

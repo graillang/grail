@@ -2,17 +2,17 @@ module borrows;
 struct Numbers { first:num, second:num }
 struct Inner { n:num }
 struct Outer { left:Inner, right:Inner }
-struct Borrowed<a> { views:vec<read<a>> }
+struct Borrowed<a> { views:read<a>[] }
 fn relay<a>(r:ref_mut<a,num>)->ref_mut<a,num> { return r; }
 fn right<a>(r:ref<a,Outer>)->ref<a,Inner> { return borrow(r.right); }
 fn keep_views<a>(r:read<a>)->Borrowed<a> {
-    mut v =vec<read<a>>[]; v.push(r); return Borrowed{views:v};
+    mut v =read<a>[]; v.push(r); return Borrowed{views:v};
 }
-fn count<a>(v:vec<read<a>>)->num {
+fn count<a>(v:read<a>[])->num {
     r :=&v[0]; return (&(load(r))).len();
 }
 pub fn run()->num {
-    mut b =bytes[]; b.push(7);
+    mut b =u8[]; b.push(7);
     parent :=&b; child :=&parent; drop(parent);
     assert(child[0]==7);
     // A unique carrier resumes after its readonly derivation's last use.
@@ -24,7 +24,7 @@ pub fn run()->num {
     a :=borrow_mut(pair.first); b :=borrow_mut(pair.second);
     exchange(a,7); exchange(b,8); assert(pair.first+pair.second==15);
     // A copied scalar ends an element loan before vector reallocation.
-    mut values =vec<num>[]; values.push(1);
+    mut values =num[]; values.push(1);
     slot :=&values[0]; copied :=load(slot);
     values.push(2); assert(copied+values.len()==3);
     // Hidden return targets keep the whole compatible frame, not a guessed projection.
@@ -32,7 +32,7 @@ pub fn run()->num {
     p :=right(borrow(outer)); q :=borrow(p.n); saved :=load(q);
     outer.right=Inner{n:8}; assert(saved==2);
     // Moving a reference-containing field retains its data-source guards.
-    mut bytes =bytes[]; bytes.push(42);
+    mut bytes =u8[]; bytes.push(42);
     box :=keep_views(&bytes); views :=box.views; drop(box);
     assert(count(views)==1);
     return 4242;

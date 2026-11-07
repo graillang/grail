@@ -2,12 +2,13 @@ module fmt;
 
 // Canonical Grail layout (rustfmt-style): 4-space indentation, one statement per line,
 // block braces on the header line, spaces around binary operators, single-line struct
-// literals when they fit, at most one blank line, comments preserved, and lines over
-// 100 columns broken at the outermost bracket with one argument per line.
+// literals when they fit, and at most one blank line. Comments are preserved. A line over
+// 100 columns is broken at a match arm, a postfix chain, a bracket list or a binary
+// operator, in that order, using tokens only so the program is never reparsed or changed.
 // Token kinds: 1 word, 2 number, 3 string, 4 punctuation (byte or lexer multi-byte code), 5 comment.
 struct F {
-    kind:vec<num>, start:vec<num>, end:vec<num>, nl:vec<num>, code:vec<num>, generic:vec<num>,
-    ltoken:vec<num>, lspace:vec<num>, lfirst:vec<num>, lindent:vec<num>, out:bytes
+    kind:num[], start:num[], end:num[], nl:num[], code:num[], generic:num[],
+    ltoken:num[], lspace:num[], lfirst:num[], lindent:num[], out:u8[]
 }
 fn letter(c:num)->num {return ((64<c)&(c<91))+((96<c)&(c<123))+(c==95);}
 fn digit(c:num)->num {return (47<c)&(c<58);}
@@ -80,7 +81,7 @@ fn mark_generics<a,b>(f:ref_mut<a,F>,s:read<b>){
             mut depth=0;mut j=i;mut found=0;
             while j<n{
                 k:=f.kind[j];c:=f.code[j];mut ok=(k==1)+(k==2);
-                if k==4{ok=(c==60)+(c==62)+(c==44)+(c==260)+(c==40)+(c==41)+(c==256)+(c==43)+(c==58);}
+                if k==4{ok=(c==60)+(c==62)+(c==44)+(c==260)+(c==40)+(c==41)+(c==256)+(c==43)+(c==58)+(c==91)+(c==93);}
                 if ok==0{break;}
                 if (k==4)&(c==60){depth+=1;}
                 if (k==4)&(c==62){depth-=1;if depth==0{found=j;break;}}
@@ -148,7 +149,7 @@ fn new_line<a>(f:ref_mut<a,F>,indent:num){f.lfirst.push(f.ltoken.len());f.linden
 fn emit<a>(f:ref_mut<a,F>,i:num,sp:num){f.ltoken.push(i);f.lspace.push(sp);}
 // Context kinds: 1 block, 2 declaration (one item per line), 3 match, 4 inline literal, 5 paren, 6 bracket.
 fn layout<a,b>(f:ref_mut<a,F>,s:read<b>){
-    n:=f.kind.len();mut stack=vec<num>[];mut indent=0;mut pending=1;mut header=0;mut start=1;mut lines=0;
+    n:=f.kind.len();mut stack=num[];mut indent=0;mut pending=1;mut header=0;mut start=1;mut lines=0;
     for i in n{
         k:=f.kind[i];c:=f.code[i];mut top=0;if stack.len(){top=stack[stack.len()-1];}
         closes:=(k==4)&(c==125)&((top==1)+(top==2)+(top==3));
@@ -196,7 +197,7 @@ fn layout<a,b>(f:ref_mut<a,F>,s:read<b>){
         if c==44{if (top==2)+(top==3){pending=1;start=1;}continue;}
     }
 }
-fn put<a,b>(out:ref_mut<a,bytes>,s:read<b>){for i in s.len(){out.push(s[i]);}}
+fn put<a,b>(out:ref_mut<a,u8[]>,s:read<b>){for i in s.len(){out.push(s[i]);}}
 fn token_width<a>(f:ref<a,F>,i:num)->num{return f.end[i]-f.start[i];}
 fn range_width<a>(f:ref<a,F>,lo:num,hi:num)->num{
     mut w=0;mut j=lo;while j<hi{if (j!=lo)&(f.lspace[j]!=0){w+=1;}w+=token_width(borrow(f),f.ltoken[j]);j+=1;}return w;
@@ -208,28 +209,141 @@ fn write_range<a,b>(f:ref_mut<a,F>,s:read<b>,lo:num,hi:num,indent:num){
 }
 fn opener<a>(f:ref<a,F>,j:num)->num{t:=f.ltoken[j];if f.kind[t]!=4{return false;}c:=f.code[t];return (c==40)+(c==91)+(c==123);}
 fn closer<a>(f:ref<a,F>,j:num)->num{t:=f.ltoken[j];if f.kind[t]!=4{return false;}c:=f.code[t];return (c==41)+(c==93)+(c==125);}
-// Lines that do not fit break at the first top-level bracket: head, one item per line, tail.
+// A line over 100 columns is broken in rustfmt order: a match arm after `=>`, then a binary
+// operator chain before each operator, then a postfix chain before each `.`, then a bracket
+// list one item per line. Every rule reads tokens only, so formatting never changes the program.
+fn code_at<a>(f:ref<a,F>,j:num)->num{t:=f.ltoken[j];if f.kind[t]!=4{return 0;}return f.code[t];}
+fn opens(c:num)->num{return (c==40)+(c==91)+(c==123);}
+fn shuts(c:num)->num{return (c==41)+(c==93)+(c==125);}
+// Index of the token closing the opener at j, or hi when it is not closed on this line.
+fn close_of<a>(f:ref<a,F>,j:num,hi:num)->num{
+    mut d=0;mut m=j;
+    while m<hi{if opener(borrow(f),m){d+=1;}if closer(borrow(f),m){d-=1;if d==0{return m;}}m+=1;}
+    return hi;
+}
+// A binary operator that may start a continuation line: not assignment, not a unary sign.
+fn breakable<a,b>(f:ref<a,F>,s:read<b>,j:num)->num{
+    t:=f.ltoken[j];if f.kind[t]!=4{return false;}if binary(borrow(f),t)==0{return false;}
+    c:=f.code[t];if (c==61)+(c==256)+(c==257)+(c==261)+(c==262)+(c==263)+(c==264)+(c==265)+(c==266){return false;}
+    if unary(borrow(f),&s,t){return false;}
+    return true;
+}
+// A `{ ... }` body that accepts a trailing comma: comma-separated items, no statements or arms.
+fn trailing_ok<a>(f:ref<a,F>,lo:num,hi:num)->num{
+    mut d=0;mut j=lo;mut commas=0;
+    while j<hi{
+        c:=code_at(borrow(f),j);if opens(c){d+=1;}if shuts(c){d-=1;}
+        if d==0{if (c==59)+(c==261)+(c==257){return false;}if c==44{commas+=1;}}
+        j+=1;
+    }
+    return 0<commas;
+}
+fn write_range_comma<a,b>(f:ref_mut<a,F>,s:read<b>,lo:num,hi:num,indent:num){
+    for i in indent*4{f.out.push(32);}
+    mut j=lo;while j<hi{if (j!=lo)&(f.lspace[j]!=0){f.out.push(32);}t:=f.ltoken[j];for m in f.end[t]-f.start[t]{f.out.push(s[f.start[t]+m]);}j+=1;}
+    f.out.push(44);f.out.push(10);
+}
+// Long match arm: the pattern and `=>` stay, the body moves to the next line.
+fn arm_break<a,b>(f:ref_mut<a,F>,s:read<b>,lo:num,hi:num,indent:num)->num{
+    mut d=0;mut j=lo;
+    while j<hi{
+        c:=code_at(borrow(f),j);if opens(c){d+=1;}if shuts(c){d-=1;}
+        if (d==0)&(c==257)&(j+2<hi){
+            write_range(borrow_mut(f),&s,lo,j+1,indent);
+            render(borrow_mut(f),&s,j+1,hi,indent+1);return true;
+        }
+        j+=1;
+    }
+    return false;
+}
+// A single `.` used as a postfix separator, never one half of a `..` range.
+fn chain_dot<a>(f:ref<a,F>,j:num,lo:num,hi:num)->num{
+    if code_at(borrow(f),j)!=46{return false;}
+    if lo<j{if code_at(borrow(f),j-1)==46{return false;}}
+    if j+1<hi{if code_at(borrow(f),j+1)==46{return false;}}
+    return true;
+}
+// Long postfix chain: the head stays on the line, then one `.segment` per line.
+fn chain_break<a,b>(f:ref_mut<a,F>,s:read<b>,lo:num,hi:num,indent:num)->num{
+    if chain_dot(borrow(f),lo,lo,hi){return false;}
+    mut d=0;mut j=lo;mut dots=0;
+    while j<hi{c:=code_at(borrow(f),j);if opens(c){d+=1;}if shuts(c){d-=1;}if (d==0)&chain_dot(borrow(f),j,lo,hi){dots+=1;}j+=1;}
+    if dots<2{return false;}
+    mut seg=lo;d=0;j=lo;
+    while j<hi{
+        c:=code_at(borrow(f),j);if opens(c){d+=1;}if shuts(c){d-=1;}
+        if (d==0)&chain_dot(borrow(f),j,lo,hi){
+            mut ind=indent;if seg!=lo{ind=indent+1;}
+            render(borrow_mut(f),&s,seg,j,ind);seg=j;
+        }
+        j+=1;
+    }
+    render(borrow_mut(f),&s,seg,hi,indent+1);
+    return true;
+}
+// Bracket list that does not fit: head, one item per line, tail. A `{` record body also takes a
+// trailing comma, which the language accepts there.
+fn list_break<a,b>(f:ref_mut<a,F>,s:read<b>,lo:num,hi:num,indent:num)->num{
+    mut open=hi;mut close=hi;mut j=lo;
+    while j<hi{
+        if opener(borrow(f),j){m:=close_of(borrow(f),j,hi);if (m<hi)&(j+1<m){open=j;close=m;break;}}
+        j+=1;
+    }
+    if open==hi{return false;}
+    write_range(borrow_mut(f),&s,lo,open+1,indent);
+    mut comma=0;if code_at(borrow(f),open)==123{comma=trailing_ok(borrow(f),open+1,close);}
+    mut item=open+1;mut d=0;mut m=open+1;
+    while m<close{
+        c:=code_at(borrow(f),m);if opens(c){d+=1;}if shuts(c){d-=1;}
+        if (d==0)&(c==44){render(borrow_mut(f),&s,item,m+1,indent+1);item=m+1;}
+        m+=1;
+    }
+    if item<close{
+        w:=(indent+1)*4+range_width(borrow(f),item,close);
+        if comma&(w<101)&(code_at(borrow(f),close-1)!=44){write_range_comma(borrow_mut(f),&s,item,close,indent+1);}
+        else{render(borrow_mut(f),&s,item,close,indent+1);}
+    }
+    render(borrow_mut(f),&s,close,hi,indent);
+    return true;
+}
+// Binary operator chain: each operator starts its continuation line.
+fn op_break<a,b>(f:ref_mut<a,F>,s:read<b>,lo:num,hi:num,indent:num)->num{
+    mut d=0;mut j=lo;mut count=0;
+    while j<hi{
+        c:=code_at(borrow(f),j);if opens(c){d+=1;}if shuts(c){d-=1;}
+        if (d==0)&(lo<j)&breakable(borrow(f),&s,j){count+=1;}
+        j+=1;
+    }
+    if count==0{return false;}
+    mut seg=lo;d=0;j=lo;mut rest=0;
+    while j<hi{
+        c:=code_at(borrow(f),j);if opens(c){d+=1;}if shuts(c){d-=1;}
+        if (d==0)&(lo<j)&breakable(borrow(f),&s,j){
+            mut ind=indent;if rest!=0{ind=indent+1;}
+            render(borrow_mut(f),&s,seg,j,ind);rest=1;seg=j;
+        }
+        j+=1;
+    }
+    render(borrow_mut(f),&s,seg,hi,indent+1);
+    return true;
+}
 fn render<a,b>(f:ref_mut<a,F>,s:read<b>,lo:num,hi:num,indent:num){
     if (indent*4+range_width(borrow(f),lo,hi)<101)+(hi-lo<3){write_range(borrow_mut(f),&s,lo,hi,indent);return ();}
-    mut open=hi;mut close=hi;mut j=lo;
-    while j<hi{if opener(borrow(f),j){mut d=0;mut m=j;while m<hi{if opener(borrow(f),m){d+=1;}if closer(borrow(f),m){d-=1;if d==0{break;}}m+=1;}
-        if (m<hi)&(j+1<m){open=j;close=m;break;}}j+=1;}
-    if open==hi{write_range(borrow_mut(f),&s,lo,hi,indent);return ();}
-    write_range(borrow_mut(f),&s,lo,open+1,indent);
-    mut item=open+1;mut d=0;mut m=open+1;
-    while m<close{if opener(borrow(f),m){d+=1;}if closer(borrow(f),m){d-=1;}
-        t:=f.ltoken[m];if (d==0)&(f.kind[t]==4)&(f.code[t]==44){render(borrow_mut(f),&s,item,m+1,indent+1);item=m+1;}m+=1;}
-    if item<close{render(borrow_mut(f),&s,item,close,indent+1);}
-    render(borrow_mut(f),&s,close,hi,indent);
+    if arm_break(borrow_mut(f),&s,lo,hi,indent){return ();}
+    if op_break(borrow_mut(f),&s,lo,hi,indent){return ();}
+    if chain_break(borrow_mut(f),&s,lo,hi,indent){return ();}
+    if list_break(borrow_mut(f),&s,lo,hi,indent){return ();}
+    write_range(borrow_mut(f),&s,lo,hi,indent);
 }
-pub fn format<a>(source:read<a>)->bytes{
-    mut f=F{kind:vec<num>[],start:vec<num>[],end:vec<num>[],nl:vec<num>[],code:vec<num>[],generic:vec<num>[],
-        ltoken:vec<num>[],lspace:vec<num>[],lfirst:vec<num>[],lindent:vec<num>[],out:bytes[]};
+
+pub fn format<a>(source:read<a>)->u8[]{
+    mut f=F{kind:num[],start:num[],end:num[],nl:num[],code:num[],generic:num[],
+        ltoken:num[],lspace:num[],lfirst:num[],lindent:num[],out:u8[]};
     scan(borrow_mut(f),&source);mark_generics(borrow_mut(f),&source);mark_pipes(borrow_mut(f),&source);layout(borrow_mut(f),&source);
     count:=f.lfirst.len();
     for i in count{
         lo:=f.lfirst[i];mut hi=f.ltoken.len();if i+1<count{hi=f.lfirst[i+1];}indent:=f.lindent[i];
         if lo==hi{f.out.push(10);}else{render(borrow_mut(f),&source,lo,hi,indent);}
     }
-    return exchange(borrow_mut(f.out),bytes[]);
+    return exchange(borrow_mut(f.out),u8[]);
 }

@@ -5,15 +5,15 @@ enum Json {
     Bool(bool),
     Number(f64),
     Text(string),
-    List(vec<Json>),
-    Object(vec<Field>),
+    List(Json[]),
+    Object(Field[]),
 }
 struct Field {
     key: string,
     value: Json,
 }
 struct Reader {
-    text: bytes,
+    text: u8[],
     pos: num,
 }
 impl Reader {
@@ -31,14 +31,14 @@ impl Reader {
     }
     fn expect<a>(self: ref_mut<a, Reader>, b: u8) -> core::Result<unit, string> {
         if self.peek() != b {
-            return core::err<unit, string>(format("expected '{}' at {}", bytes[num(b)], self.pos));
+            return core::err<unit, string>(format("expected '{}' at {}", u8[num(b)], self.pos));
         }
         self.pos += 1;
         return core::ok<unit, string>(());
     }
     fn string<a>(self: ref_mut<a, Reader>) -> core::Result<string, string> {
         self.expect('"')?;
-        mut out = bytes[];
+        mut out = u8[];
         while self.pos < self.text.len() && self.text[self.pos] != '"' {
             out.push(self.text[self.pos]);
             self.pos += 1;
@@ -54,7 +54,7 @@ impl Reader {
         }
         if c == '[' {
             self.pos += 1;
-            mut items = vec<Json>[];
+            mut items = Json[];
             if self.peek() == ']' {
                 self.pos += 1;
                 return core::ok<Json, string>(Json::List(items));
@@ -73,7 +73,7 @@ impl Reader {
         }
         if c == '{' {
             self.pos += 1;
-            mut fields = vec<Field>[];
+            mut fields = Field[];
             loop {
                 key := self.string()?;
                 self.expect(':')?;
@@ -164,7 +164,7 @@ fn parse<a>(text: read<a>) -> core::Result<Json, string> {
     return reader.value();
 }
 fn main() {
-    inputs := vec<string>["{\"name\": \"grail\", \"version\": 1, \"tags\": [\"fast\", \"safe\"], \"stable\": false, \"extra\": null}".text(), "[1, -2, [3, []]]".text(), "{\"a\": tru}".text()];
+    inputs := string["{\"name\": \"grail\", \"version\": 1, \"tags\": [\"fast\", \"safe\"], \"stable\": false, \"extra\": null}".text(), "[1, -2, [3, []]]".text(), "{\"a\": tru}".text()];
     for s in borrow(inputs) {
         match parse(s) {
             Ok(j) => {

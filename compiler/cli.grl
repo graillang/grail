@@ -4,31 +4,31 @@ use fmt;
 
 // The `grail` command-line tool. The same binary is the compiler: subcommands drive it by
 // re-invoking itself (`grail [--target T] OUT.s ENTRY.grl MODULE.grl...`), then assemble and link.
-struct Home { runtime:bytes, std:bytes }
-struct Project { name:bytes, entry:bytes, deps:vec<bytes>, urls:vec<bytes>, revs:vec<bytes> }
+struct Home { runtime:u8[], std:u8[] }
+struct Project { name:u8[], entry:u8[], deps:u8[][], urls:u8[][], revs:u8[][] }
 
 fn eq<a,b>(x:read<a>,y:read<b>)->num{if x.len()!=y.len(){return false;}for i in x.len(){if x[i]!=y[i]{return false;}}return true;}
 fn starts<a,b>(x:read<a>,y:read<b>)->num{if x.len()<y.len(){return false;}for i in y.len(){if x[i]!=y[i]{return false;}}return true;}
 fn ends<a,b>(x:read<a>,y:read<b>)->num{if x.len()<y.len(){return false;}d:=x.len()-y.len();for i in y.len(){if x[d+i]!=y[i]{return false;}}return true;}
-fn cat<a,b>(x:read<a>,y:read<b>)->bytes{mut o=bytes[];for i in x.len(){o.push(x[i]);}for i in y.len(){o.push(y[i]);}return o;}
-fn copy<a>(x:read<a>)->bytes{mut o=bytes[];for i in x.len(){o.push(x[i]);}return o;}
-fn path_join<a,b>(dir:read<a>,name:read<b>)->bytes{
+fn cat<a,b>(x:read<a>,y:read<b>)->u8[]{mut o=u8[];for i in x.len(){o.push(x[i]);}for i in y.len(){o.push(y[i]);}return o;}
+fn copy<a>(x:read<a>)->u8[]{mut o=u8[];for i in x.len(){o.push(x[i]);}return o;}
+fn path_join<a,b>(dir:read<a>,name:read<b>)->u8[]{
     if (dir.len()==0)+eq(&dir,&"."){return copy(&name);}if ends(&dir,&"/"){return cat(&dir,&name);}
     mut o=copy(&dir);o.push(47);for i in name.len(){o.push(name[i]);}return o;
 }
-fn dirname<a>(p:read<a>)->bytes{mut i=p.len();while 0<i{i-=1;if p[i]==47{mut o=bytes[];for j in i{o.push(p[j]);}if i==0{o.push(47);}return o;}}return copy(&".");}
-fn basename<a>(p:read<a>)->bytes{mut start=0;for i in p.len(){if p[i]==47{start=i+1;}}mut o=bytes[];mut end=p.len();if ends(&p,&".grl"){end-=4;}mut i=start;while i<end{o.push(p[i]);i+=1;}return o;}
+fn dirname<a>(p:read<a>)->u8[]{mut i=p.len();while 0<i{i-=1;if p[i]==47{mut o=u8[];for j in i{o.push(p[j]);}if i==0{o.push(47);}return o;}}return copy(&".");}
+fn basename<a>(p:read<a>)->u8[]{mut start=0;for i in p.len(){if p[i]==47{start=i+1;}}mut o=u8[];mut end=p.len();if ends(&p,&".grl"){end-=4;}mut i=start;while i<end{o.push(p[i]);i+=1;}return o;}
 fn say<a>(s:read<a>){host::print(s);host::print(&"\n");}
 fn say2<a,b>(s:read<a>,t:read<b>){host::print(s);host::print(t);host::print(&"\n");}
-fn item<a>(v:ref<a,vec<bytes>>,i:num)->bytes{x:=&v[i];return x.copy();}
-fn words<a>(line:read<a>)->vec<bytes>{
-    mut out=vec<bytes>[];mut cur=bytes[];
-    for i in line.len(){c:=line[i];if (c==32)+(c==9)+(c==13){if cur.len(){out.push(exchange(borrow_mut(cur),bytes[]));}}else{cur.push(c);}}
+fn item<a>(v:ref<a,u8[][]>,i:num)->u8[]{x:=&v[i];return x.copy();}
+fn words<a>(line:read<a>)->u8[][]{
+    mut out=u8[][];mut cur=u8[];
+    for i in line.len(){c:=line[i];if (c==32)+(c==9)+(c==13){if cur.len(){out.push(exchange(borrow_mut(cur),u8[]));}}else{cur.push(c);}}
     if cur.len(){out.push(cur);}return out;
 }
-fn lines<a>(text:read<a>)->vec<bytes>{
-    mut out=vec<bytes>[];mut cur=bytes[];
-    for i in text.len(){c:=text[i];if c==10{out.push(exchange(borrow_mut(cur),bytes[]));}else{cur.push(c);}}
+fn lines<a>(text:read<a>)->u8[][]{
+    mut out=u8[][];mut cur=u8[];
+    for i in text.len(){c:=text[i];if c==10{out.push(exchange(borrow_mut(cur),u8[]));}else{cur.push(c);}}
     if cur.len(){out.push(cur);}return out;
 }
 
@@ -44,9 +44,9 @@ fn home()->Home{
         repo:=path_join(&dir,&"compiler/runtime.grl");if host::exists(&repo){return Home{runtime:repo,std:path_join(&dir,&"lib")};}
         dir=path_join(&dir,&"..");
     }
-    say(&"grail: cannot find the Grail runtime; set GRAIL_HOME");return Home{runtime:bytes[],std:bytes[]};
+    say(&"grail: cannot find the Grail runtime; set GRAIL_HOME");return Home{runtime:u8[],std:u8[]};
 }
-fn collect<a,b>(dir:read<a>,out:ref_mut<b,vec<bytes>>){
+fn collect<a,b>(dir:read<a>,out:ref_mut<b,u8[][]>){
     entries:=host::list_dir(&dir);
     for i in entries.len(){
         name:=item(borrow(entries),i);
@@ -54,15 +54,15 @@ fn collect<a,b>(dir:read<a>,out:ref_mut<b,vec<bytes>>){
         else{if ends(&name,&".grl"){out.push(path_join(&dir,&name));}}
     }
 }
-fn target_name(t:num)->bytes{if t==1{return copy(&"aarch64");}if t==2{return copy(&"riscv64");}return copy(&"x86_64");}
-fn tool<a,b>(variable:read<a>,fallback:read<b>)->bytes{v:=host::env(variable);if v.len(){return v;}return copy(fallback);}
-fn compile<a,b,d,e,g>(h:ref<a,Home>,entry:read<b>,modules:ref<d,vec<bytes>>,output:read<e>,target:read<g>)->num{
+fn target_name(t:num)->u8[]{if t==1{return copy(&"aarch64");}if t==2{return copy(&"riscv64");}return copy(&"x86_64");}
+fn tool<a,b>(variable:read<a>,fallback:read<b>)->u8[]{v:=host::env(variable);if v.len(){return v;}return copy(fallback);}
+fn compile<a,b,d,e,g>(h:ref<a,Home>,entry:read<b>,modules:ref<d,u8[][]>,output:read<e>,target:read<g>)->num{
     return compile_mode(h,entry,modules,output,target,0);
 }
 // check_only: type-check and generate code, but do not assemble or link.
-fn compile_mode<a,b,d,e,g>(h:ref<a,Home>,entry:read<b>,modules:ref<d,vec<bytes>>,output:read<e>,target:read<g>,check_only:num)->num{
+fn compile_mode<a,b,d,e,g>(h:ref<a,Home>,entry:read<b>,modules:ref<d,u8[][]>,output:read<e>,target:read<g>,check_only:num)->num{
     asm:=cat(&output,&".s");object:=cat(&output,&".o");
-    mut command=vec<bytes>[host::exe_path(),copy(&"--target"),copy(&target),copy(&asm),copy(&entry)];
+    mut command=u8[][host::exe_path(),copy(&"--target"),copy(&target),copy(&asm),copy(&entry)];
     for i in modules.len(){command.push(item(borrow(modules),i));}
     std:=host::list_dir(&h.std);for i in std.len(){name:=item(borrow(std),i);if ends(&name,&".grl"){command.push(path_join(&h.std,&name));}}
     command.push(copy(&h.runtime));
@@ -70,16 +70,16 @@ fn compile_mode<a,b,d,e,g>(h:ref<a,Home>,entry:read<b>,modules:ref<d,vec<bytes>>
     if check_only{host::remove(&asm,0);return 0;}
     mut triple=copy(&"--target=x86_64-linux-gnu");mut emulation=copy(&"elf_x86_64");
     if eq(&target,&"aarch64"){triple=copy(&"--target=aarch64-linux-gnu");emulation=copy(&"aarch64elf");}
-    mut assemble=vec<bytes>[tool(&"GRAIL_ASSEMBLER",&"clang")];
+    mut assemble=u8[][tool(&"GRAIL_ASSEMBLER",&"clang")];
     if eq(&target,&"riscv64"){triple=copy(&"--target=riscv64-linux-gnu");emulation=copy(&"elf64lriscv");assemble.push(copy(&"-march=rv64imafd"));assemble.push(copy(&"-mabi=lp64"));}
     assemble.push(triple);assemble.push(copy(&"-c"));assemble.push(copy(&asm));assemble.push(copy(&"-o"));assemble.push(copy(&object));
     if host::command(assemble)!=0{say(&"grail: assembling failed (needs clang)");return 1;}
-    link:=vec<bytes>[tool(&"GRAIL_LINKER",&"ld.lld"),copy(&"-m"),emulation,copy(&object),copy(&"-o"),copy(&output)];
+    link:=u8[][tool(&"GRAIL_LINKER",&"ld.lld"),copy(&"-m"),emulation,copy(&object),copy(&"-o"),copy(&output)];
     if host::command(link)!=0{say(&"grail: linking failed (needs ld.lld)");return 1;}
     return 0;
 }
 fn load_project()->Project{
-    mut p=Project{name:bytes[],entry:copy(&"src/main.grl"),deps:vec<bytes>[],urls:vec<bytes>[],revs:vec<bytes>[]};
+    mut p=Project{name:u8[],entry:copy(&"src/main.grl"),deps:u8[][],urls:u8[][],revs:u8[][]};
     if host::exists(&"grail.pkg")==0{return p;}
     text:=host::read_file(&"grail.pkg");rows:=lines(&text);
     for i in rows.len(){
@@ -88,20 +88,20 @@ fn load_project()->Project{
             key:=item(borrow(w),0);value:=item(borrow(w),1);
             if eq(&key,&"name"){p.name=value;}
             else{if eq(&key,&"entry"){p.entry=value;}
-            else{if eq(&key,&"dep")&(2<w.len()){p.deps.push(value);p.urls.push(item(borrow(w),2));mut rev=bytes[];if 3<w.len(){rev=item(borrow(w),3);}p.revs.push(rev);}}}
+            else{if eq(&key,&"dep")&(2<w.len()){p.deps.push(value);p.urls.push(item(borrow(w),2));mut rev=u8[];if 3<w.len(){rev=item(borrow(w),3);}p.revs.push(rev);}}}
         }
     }
     return p;
 }
 // Project modules: every .grl under src/ except the entry, plus every fetched dependency's src/.
-fn project_modules<a>(p:ref<a,Project>,skip_entry:num)->vec<bytes>{
-    mut all=vec<bytes>[];collect(&"src",borrow_mut(all));
+fn project_modules<a>(p:ref<a,Project>,skip_entry:num)->u8[][]{
+    mut all=u8[][];collect(&"src",borrow_mut(all));
     for i in p.deps.len(){name:=item(borrow(p.deps),i);d:=path_join(&".grail/deps",&name);src:=path_join(&d,&"src");collect(&src,borrow_mut(all));}
-    mut out=vec<bytes>[];for i in all.len(){f:=item(borrow(all),i);if (skip_entry&eq(&f,&p.entry))==0{out.push(f);}}return out;
+    mut out=u8[][];for i in all.len(){f:=item(borrow(all),i);if (skip_entry&eq(&f,&p.entry))==0{out.push(f);}}return out;
 }
-struct Options { file:bytes, output:bytes, target:bytes, rest:vec<bytes>, check:num, paths:vec<bytes> }
-fn options<a>(args:ref<a,vec<bytes>>)->Options{
-    mut o=Options{file:bytes[],output:bytes[],target:target_name(host::target()),rest:vec<bytes>[],check:0,paths:vec<bytes>[]};
+struct Options { file:u8[], output:u8[], target:u8[], rest:u8[][], check:num, paths:u8[][] }
+fn options<a>(args:ref<a,u8[][]>)->Options{
+    mut o=Options{file:u8[],output:u8[],target:target_name(host::target()),rest:u8[][],check:0,paths:u8[][]};
     mut i=0;mut passthrough=0;
     while i<args.len(){
         a:=item(borrow(args),i);
@@ -115,35 +115,35 @@ fn options<a>(args:ref<a,vec<bytes>>)->Options{
     }
     return o;
 }
-fn build<a,b>(args:ref<a,vec<bytes>>,o:ref_mut<b,Options>)->num{
+fn build<a,b>(args:ref<a,u8[][]>,o:ref_mut<b,Options>)->num{
     h:=home();if h.runtime.len()==0{return 1;}host::mkdir(&"target");
     if o.file.len(){
         if o.output.len()==0{stem:=basename(&o.file);o.output=path_join(&"target",&stem);}
-        mut none=vec<bytes>[];return compile(borrow(h),&o.file,borrow(none),&o.output,&o.target);
+        mut none=u8[][];return compile(borrow(h),&o.file,borrow(none),&o.output,&o.target);
     }
     p:=load_project();if p.name.len()==0{say(&"grail: no .grl file given and no grail.pkg here (try `grail new NAME`)");return 1;}
     if o.output.len()==0{o.output=path_join(&"target",&p.name);}
     modules:=project_modules(borrow(p),1);return compile(borrow(h),&p.entry,borrow(modules),&o.output,&o.target);
 }
-fn check_command<a>(args:ref<a,vec<bytes>>)->num{
+fn check_command<a>(args:ref<a,u8[][]>)->num{
     o:=options(borrow(args));h:=home();if h.runtime.len()==0{return 1;}host::mkdir(&"target");
     mut status=0;
-    if o.file.len(){stem:=basename(&o.file);out:=path_join(&"target",&stem);mut none=vec<bytes>[];status=compile_mode(borrow(h),&o.file,borrow(none),&out,&o.target,1);}
+    if o.file.len(){stem:=basename(&o.file);out:=path_join(&"target",&stem);mut none=u8[][];status=compile_mode(borrow(h),&o.file,borrow(none),&out,&o.target,1);}
     else{p:=load_project();if p.name.len()==0{say(&"grail: no .grl file given and no grail.pkg here");return 1;}
         out:=path_join(&"target",&p.name);modules:=project_modules(borrow(p),1);status=compile_mode(borrow(h),&p.entry,borrow(modules),&out,&o.target,1);}
     if status==0{say(&"ok");}return status;
 }
-fn run_command<a>(args:ref<a,vec<bytes>>)->num{
+fn run_command<a>(args:ref<a,u8[][]>)->num{
     mut o=options(borrow(args));host_target:=target_name(host::target());
     if eq(&o.target,&host_target)==0{say(&"grail run: cross-target executables must be run with an emulator; use grail build --target");return 1;}
     if build(borrow(args),borrow_mut(o))!=0{return 1;}
-    mut command=vec<bytes>[];out:=copy(&o.output);if starts(&out,&"/"){command.push(out);}else{command.push(path_join(&".",&out));}
+    mut command=u8[][];out:=copy(&o.output);if starts(&out,&"/"){command.push(out);}else{command.push(path_join(&".",&out));}
     for i in o.rest.len(){command.push(item(borrow(o.rest),i));}
     return host::command(command);
 }
-fn test_command<a>(args:ref<a,vec<bytes>>)->num{
+fn test_command<a>(args:ref<a,u8[][]>)->num{
     o:=options(borrow(args));h:=home();if h.runtime.len()==0{return 1;}
-    mut files=vec<bytes>[];
+    mut files=u8[][];
     if o.paths.len(){for i in o.paths.len(){x:=item(borrow(o.paths),i);if ends(&x,&".grl"){files.push(x);}else{collect(&x,borrow_mut(files));}}}
     else{collect(&"tests",borrow_mut(files));}
     p:=load_project();modules:=project_modules(borrow(p),1);host::mkdir(&"target");host::mkdir(&"target/tests");
@@ -151,15 +151,15 @@ fn test_command<a>(args:ref<a,vec<bytes>>)->num{
     for i in files.len(){
         f:=item(borrow(files),i);stem:=basename(&f);out:=path_join(&"target/tests",&stem);host::print(&"test ");host::print(&f);host::print(&" ... ");
         mut status=compile(borrow(h),&f,borrow(modules),&out,&o.target);
-        if status==0{exe:=path_join(&".",&out);status=host::command(vec<bytes>[exe]);}
+        if status==0{exe:=path_join(&".",&out);status=host::command(u8[][exe]);}
         if status==0{say(&"ok");}else{say(&"FAILED");failed+=1;}
     }
     host::print_num(files.len()-failed);host::print(&" passed, ");host::print_num(failed);say(&" failed");
     if files.len()==0{say(&"grail test: no tests found (put programs in tests/)");}
     return failed!=0;
 }
-fn fmt_command<a>(args:ref<a,vec<bytes>>)->num{
-    o:=options(borrow(args));mut files=vec<bytes>[];
+fn fmt_command<a>(args:ref<a,u8[][]>)->num{
+    o:=options(borrow(args));mut files=u8[][];
     if o.paths.len()==0{collect(&".",borrow_mut(files));}
     for i in o.paths.len(){x:=item(borrow(o.paths),i);if ends(&x,&".grl"){files.push(x);}else{collect(&x,borrow_mut(files));}}
     mut changed=0;
@@ -169,7 +169,7 @@ fn fmt_command<a>(args:ref<a,vec<bytes>>)->num{
     }
     if o.check{return changed!=0;}return 0;
 }
-fn new_command<a>(args:ref<a,vec<bytes>>)->num{
+fn new_command<a>(args:ref<a,u8[][]>)->num{
     if args.len()==0{say(&"usage: grail new NAME");return 1;}
     name:=item(borrow(args),0);if host::exists(&name){say2(&"grail new: already exists: ",&name);return 1;}
     host::mkdir(&name);src:=path_join(&name,&"src");host::mkdir(&src);tests:=path_join(&name,&"tests");host::mkdir(&tests);
@@ -180,30 +180,30 @@ fn new_command<a>(args:ref<a,vec<bytes>>)->num{
     ignore:=path_join(&name,&".gitignore");host::write_file(&ignore,&"target/\n.grail/\n");
     say2(&"created project ",&name);return 0;
 }
-fn lock_lookup<a,b>(lock:read<a>,name:read<b>)->bytes{
-    rows:=lines(&lock);for i in rows.len(){row:=item(borrow(rows),i);w:=words(&row);if 1<w.len(){k:=item(borrow(w),0);if eq(&k,&name){return item(borrow(w),1);}}}return bytes[];
+fn lock_lookup<a,b>(lock:read<a>,name:read<b>)->u8[]{
+    rows:=lines(&lock);for i in rows.len(){row:=item(borrow(rows),i);w:=words(&row);if 1<w.len(){k:=item(borrow(w),0);if eq(&k,&name){return item(borrow(w),1);}}}return u8[];
 }
 fn fetch_command()->num{
     p:=load_project();if p.name.len()==0{say(&"grail: no grail.pkg here");return 1;}
-    mut lock=bytes[];if host::exists(&"grail.lock"){lock=host::read_file(&"grail.lock");}
-    host::mkdir(&".grail");host::mkdir(&".grail/deps");mut newlock=bytes[];
+    mut lock=u8[];if host::exists(&"grail.lock"){lock=host::read_file(&"grail.lock");}
+    host::mkdir(&".grail");host::mkdir(&".grail/deps");mut newlock=u8[];
     for i in p.deps.len(){
         name:=item(borrow(p.deps),i);url:=item(borrow(p.urls),i);rev:=item(borrow(p.revs),i);dir:=path_join(&".grail/deps",&name);
         if host::exists(&dir)==0{
             say2(&"fetching ",&name);
-            if host::command(vec<bytes>[copy(&"git"),copy(&"clone"),copy(&"--quiet"),copy(&url),copy(&dir)])!=0{say2(&"grail: git clone failed for ",&url);return 1;}
+            if host::command(u8[][copy(&"git"),copy(&"clone"),copy(&"--quiet"),copy(&url),copy(&dir)])!=0{say2(&"grail: git clone failed for ",&url);return 1;}
             mut pin=lock_lookup(&lock,&name);if pin.len()==0{pin=copy(&rev);}
-            if pin.len(){if host::command(vec<bytes>[copy(&"git"),copy(&"-C"),copy(&dir),copy(&"checkout"),copy(&"--quiet"),pin])!=0{say2(&"grail: cannot check out revision for ",&name);return 1;}}
+            if pin.len(){if host::command(u8[][copy(&"git"),copy(&"-C"),copy(&dir),copy(&"checkout"),copy(&"--quiet"),pin])!=0{say2(&"grail: cannot check out revision for ",&name);return 1;}}
         }
         record:=path_join(&dir,&".grail-commit");mut script=copy(&"git -C '");for j in dir.len(){script.push(dir[j]);}
         tail:=cat(&"' rev-parse HEAD > '",&record);for j in tail.len(){script.push(tail[j]);}script.push(39);
-        if host::command(vec<bytes>[copy(&"sh"),copy(&"-c"),script])!=0{return 1;}
+        if host::command(u8[][copy(&"sh"),copy(&"-c"),script])!=0{return 1;}
         commit:=host::read_file(&record);
         for j in name.len(){newlock.push(name[j]);}newlock.push(32);for j in commit.len(){if commit[j]!=10{newlock.push(commit[j]);}}newlock.push(10);
     }
     host::write_file(&"grail.lock",&newlock);return 0;
 }
-fn add_command<a>(args:ref<a,vec<bytes>>)->num{
+fn add_command<a>(args:ref<a,u8[][]>)->num{
     if args.len()<2{say(&"usage: grail add NAME GIT-URL [REVISION]");return 1;}
     if host::exists(&"grail.pkg")==0{say(&"grail: no grail.pkg here");return 1;}
     name:=item(borrow(args),0);url:=item(borrow(args),1);p:=load_project();
@@ -231,7 +231,7 @@ pub fn is_command<a>(name:read<a>)->num{
         +eq(&name,&"fetch")+eq(&name,&"install")+eq(&name,&"help")+eq(&name,&"--help")+eq(&name,&"version")+eq(&name,&"--version");
 }
 pub fn run()->num{
-    name:=host::arg(1);mut args=vec<bytes>[];mut i=2;while i<host::argc(){args.push(host::arg(i));i+=1;}
+    name:=host::arg(1);mut args=u8[][];mut i=2;while i<host::argc(){args.push(host::arg(i));i+=1;}
     if eq(&name,&"build"){mut o=options(borrow(args));return build(borrow(args),borrow_mut(o));}
     if eq(&name,&"check"){return check_command(borrow(args));}
     if eq(&name,&"run"){return run_command(borrow(args));}

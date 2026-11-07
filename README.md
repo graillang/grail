@@ -6,7 +6,7 @@ Linux **x86-64, ARM64 and RISC-V 64**.
 
 ```grl
 fn main() {
-    mut data = bytes[10, 20, 30];
+    mut data = u8[10, 20, 30];
     data.push(40);
     println(data[1]);
     println(data.pop());

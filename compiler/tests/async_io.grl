@@ -2,13 +2,13 @@ use host;
 // Each reader suspends on its own empty pipe. There are more readers than the worker pool can
 // ever have threads, so the writer only runs if waiting tasks do not occupy workers.
 fn reader(fd:num,c:num)->num{data:=host::read_fd(fd,64);host::close(fd);return data.len();}
-fn writer(fds:vec<num>,c:num)->num{
+fn writer(fds:num[],c:num)->num{
     host::sleep_ms(20);mut total=0;
     for i in fds.len(){total+=host::write_fd(fds[i],&"ping");host::close(fds[i]);}
     return total;
 }
 fn readers<s>(sc:ref<s,scope<num>>,count:num)->num{
-    mut handles=vec<task<num>>[];mut ends=vec<num>[];
+    mut handles=task<num>[];mut ends=num[];
     for i in count{p:=host::pipe();handles.push(spawn(sc,p[0],reader));ends.push(p[1]);}
     w:=spawn(sc,ends,writer);
     mut got=0;while handles.len()!=0{got+=join(handles.pop());}
@@ -20,10 +20,10 @@ fn cancelling<s>(sc:ref<s,scope<num>>,unused:num)->num{
 }
 fn nap(ms:num,c:num)->num{host::sleep_ms(ms);return 1;}
 fn napping<s>(sc:ref<s,scope<num>>,count:num)->num{
-    mut handles=vec<task<num>>[];for i in count{handles.push(spawn(sc,100,nap));}
+    mut handles=task<num>[];for i in count{handles.push(spawn(sc,100,nap));}
     mut n=0;while handles.len()!=0{n+=join(handles.pop());}return n;
 }
-fn fifo(i:num)->bytes{return bytes[102,48+i/10,48+i%10];}
+fn fifo(i:num)->u8[]{return u8[102,48+i/10,48+i%10];}
 // read_file/write_file block in the kernel (FIFO open waits for the other side). From green
 // tasks they run on offload threads, so 100 blocked readers (more than the maximum worker count)
 // cannot stop the writer task that releases them.
@@ -32,13 +32,13 @@ fn feed(count:num,c:num)->num{
     mut failures=0;for i in count{name:=fifo(i);failures+=host::write_file(&name,&"data");}return failures;
 }
 fn blocking<s>(sc:ref<s,scope<num>>,count:num)->num{
-    mut handles=vec<task<num>>[];for i in count{handles.push(spawn(sc,i,slurp));}
+    mut handles=task<num>[];for i in count{handles.push(spawn(sc,i,slurp));}
     w:=spawn(sc,count,feed);mut total=0;while handles.len()!=0{total+=join(handles.pop());}
     assert(join(w)==0);return total;
 }
-fn run(n:num,c:num)->num{return host::command(vec<bytes>["true".copy()]);}
+fn run(n:num,c:num)->num{return host::command(u8[]["true".copy()]);}
 fn commands<s>(sc:ref<s,scope<num>>,count:num)->num{
-    mut handles=vec<task<num>>[];for i in count{handles.push(spawn(sc,i,run));}
+    mut handles=task<num>[];for i in count{handles.push(spawn(sc,i,run));}
     mut failures=0;while handles.len()!=0{failures+=join(handles.pop());}return failures;
 }
 fn main(){
@@ -46,7 +46,7 @@ fn main(){
     assert(task_scope(0,cancelling)==7);
     start:=host::now_ms();assert(task_scope(300,napping)==300);elapsed:=host::now_ms()-start;
     assert((elapsed<100)==0);
-    mut make=vec<bytes>["mkfifo".copy()];for i in 100{make.push(fifo(i));}assert(host::command(make)==0);
+    mut make=u8[]["mkfifo".copy()];for i in 100{make.push(fifo(i));}assert(host::command(make)==0);
     assert(task_scope(100,blocking)==400);
     assert(task_scope(8,commands)==0);
     println(42);

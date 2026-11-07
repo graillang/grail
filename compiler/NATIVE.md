@@ -144,8 +144,8 @@ motion, vectorization or instruction scheduling.
 
 ## Storage
 
-`bytes`, `string` and byte views store one byte per element (`rt_pushb`, `rt_atb`, `rt_popb`,
-byte-offset views and slices); `vec<T>` stores eight-byte words. Allocations from fresh arena
+`u8[]`, `string` and byte views store one byte per element (`rt_pushb`, `rt_atb`, `rt_popb`,
+byte-offset views and slices); `T[]` stores eight-byte words. Allocations from fresh arena
 memory are not re-zeroed, and blocks of at least 512 KiB grow in place with `mremap`.
 
 Failed assertions and guards abort without unwinding.
@@ -179,7 +179,7 @@ Typed storage references remain `borrow(value)` / `borrow_mut(value)`.
 Byte buffers, strings and views support `value[index]` and readonly `value[start:end]` slices.
 Either slice bound may be omitted. Indexing implicitly borrows its source readonly and retains
 normal lifetime, conflict and bounds checks; a slice is not an owning copy. Bounds run once,
-left to right. String bytes cannot be mutably borrowed. Vectors use the same `v[i]` syntax: numeric elements copy, while non-numeric elements remain
+left to right. String u8[] cannot be mutably borrowed. Vectors use the same `v[i]` syntax: numeric elements copy, while non-numeric elements remain
 borrowed. `&v[i]` and `&mut v[i]` explicitly borrow element slots. Byte writes use `write` through
 a writable view.
 
@@ -189,7 +189,7 @@ syntax, not the type system.
 
 ## Collection expressions and generic parameters
 
-Collection literals are `bytes[10, 20, 30]` and `vec<T>[...]` (empty forms use `[]`). Use postfix
+Collection literals are `u8[10, 20, 30]` and `T[...]` (empty forms use `[]`). Use postfix
 `.push(value)`, `.pop()`, `.len()`, `.copy()` and `.text()`; strings append with `.append(source)`.
 Free collection helper spellings and constructor parentheses are removed. `.pop()` aborts on an
 empty collection, unlike Rust's Option-returning pop. Generic user functions and types are checked and specialized by the Grail-written compiler.

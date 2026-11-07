@@ -6,7 +6,7 @@ The manifest supplies `grail` when verifying this example.
 {{example:arguments}}
 
 The native entry shim rejects the wrong argument count with OS status 2. More general host
-access is explicit through `host`. File bytes remain owned values:
+access is explicit through `host`. File byte buffers remain owned values:
 
 {{example:files}}
 
