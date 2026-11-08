@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Added a hosted Linux reference backend for the OS ABI (an ABI oracle, not a Grail build
+  path): startup/environment seeding and iteration, monotonic/realtime/CPU clocks and sleep,
+  file open/read/write/seek/stat/sync/close, directory iteration, pipes, mkdir/remove/rename,
+  current directory and executable paths, pthread threads (spawn/join/detach), mutexes,
+  condition variables and `dlopen`/`dlsym`. Processes and sockets remain explicitly
+  unsupported with clear capability bits. The end-to-end test verifies 165 checks and zero
+  tracked allocation bytes at shutdown.
 - Added the resource-domain headers for files/directories/pipes, environment iterators,
   native threads/mutexes/condition variables and dynamic libraries, plus a generation-checked
   handle table that rejects stale, double-closed and cross-domain handles. Contract tests

@@ -2,8 +2,9 @@
 
 2026-11-08. Status: **proposal plus scaffolded implementation**. The C headers under
 `include/grail/` are the normative contract. Portable pieces (versioning, error mapping,
-Unicode, lexical paths) are implemented and tested; the Linux reference shim implements a
-subset; Windows and macOS shims are skeletons with documented mappings. Nothing here is
+Unicode, lexical paths) are implemented and tested; the Linux reference shim implements files, directories,
+environment, time, threads and dynamic libraries; processes, sockets and the Windows/macOS
+shims remain skeletons with documented mappings. Nothing here is
 linked into Grail programs yet, and no C source is part of the compiler or runtime build.
 
 The runtime today is Linux-only: `compiler/runtime.grl` maps portable operation IDs to Linux
@@ -152,9 +153,15 @@ is clear. It never means a silent success or a sequential fallback under a concu
 - `tests/abi/test_core.c`: version negotiation, every portable error text, transient
   classification, POSIX/Win32/Mach mappings, strict UTF-8 rejection cases and UTF-16
   round-trips.
+- `tests/abi/test_handle_table.c`: 1000 allocations, stale/double/cross-domain handle
+  rejection, slot reuse and destruction.
+- `tests/abi/test_paths.c`: POSIX and Windows lexical rules, compiled twice.
+- `tests/abi/test_linux_backend.c`: initialized Linux reference backend covering environment
+  seeding/mutation/iteration, clocks and sleep, file and directory I/O, pipes, thread
+  spawn/join/detach, mutex/condvar behaviour, dlopen/dlsym and zero tracked allocation bytes
+  after shutdown.
 - `tests/abi/test_headers.c`: compiled with `clang -ffreestanding` for Linux x86_64, AArch64
   and RISC-V 64, Windows x64 and Apple ARM64, plus explicit structure-size assertions.
-- additional domain tests as they land.
 
 The test suite needs a C compiler and is deliberately separate from the Grail build; no
 Grail program links these C files. The Linux reference shim is a behavioural oracle for the
