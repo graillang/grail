@@ -36,6 +36,15 @@ const fixtures = [
     symbols: ['c_point_sum', 'c_point_swap', 'c_mixed_sum', 'c_mixed_fill', 'c_mixed_size', 'c_mixed_off_d'],
   },
   {
+    // Floats, narrow integers and stack arguments: 1.5+2.25; 2^24+1 rounded in binary32;
+    // -3+0.5+4e9+0.25+100; 1234.75 with Win64 stack slots; 385 from ten floats and ten
+    // integers; -5; u32 max; -101; 65535+1 wraps to 0; an unsigned 32-bit compare.
+    name: 'call_abi',
+    stdout: '3.75\n16777216\n4000000097.75\n1234.75\n385\n385\n-5\n4294967295\n-101\n0\n1\n',
+    symbols: ['c_fadd', 'c_fadd32', 'c_mix', 'c_mix6', 'c_many_f', 'c_many_i', 'c_neg32', 'c_u32max',
+      'c_s8', 'c_u16', 'c_u32_above'],
+  },
+  {
     // Dynamic loader hooks: a shared library is loaded by path, two symbols are
     // resolved through dlsym and called through the resolved addresses, then the
     // library is closed. libc is the link input, so the executable is dynamic.
@@ -58,7 +67,7 @@ function shim(target) {
   const directory = join(work, target);
   mkdirSync(directory, { recursive: true });
   const object = join(directory, 'shim.o');
-  const flags = target === 'riscv64' ? ['-march=rv64imafd', '-mabi=lp64'] : [];
+  const flags = target === 'riscv64' ? ['-march=rv64imafd', '-mabi=lp64d'] : [];
   const result = spawnSync(process.env.GRAIL_ASSEMBLER ?? 'clang', [
     `--target=${triples[target]}`, ...flags, '-c', '-O1', '-ffreestanding',
     '-fno-stack-protector', '-fno-pic', join(root, 'tests/ffi/shim.c'), '-o', object,

@@ -103,3 +103,5 @@ long long c_apply_preserving(grail_callback callback, long long value) {
     return callback(value);
 #endif
 }
+
+#include "abi_shim.c"

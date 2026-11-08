@@ -90,8 +90,8 @@ ld.lld -m aarch64elf hello.o -o hello
 ```
 
 Targets: `x86_64`, `aarch64`, `riscv64`. The default is the architecture the compiler itself was
-built for. RV64 requires the integer multiply/divide and atomic extensions (RV64IMA), uses the LP64 ABI, and
-needs `-march=rv64imafd -mabi=lp64` when assembling. These three target **Linux ELF**.
+built for. RV64 requires the integer multiply/divide and atomic extensions (RV64IMA), uses the LP64D ABI (Grail code itself keeps floats in integer registers), and
+needs `-march=rv64imafd -mabi=lp64d` (the Linux hard-float ABI, which C libraries use) when assembling. These three target **Linux ELF**.
 
 `--target windows-x86_64` selects the PE/COFF backend on the same x86-64 instruction stream, and
 `--target windows-aarch64` selects the ARM64 PE/COFF backend through the shared AArch64 selector:
