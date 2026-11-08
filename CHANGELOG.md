@@ -13,6 +13,12 @@
   runtime ABI contract suite (`tools/abi-test.mjs`) and the graphics C/shader
   suites, and the Windows x86-64 cross job is a required release gate for
   build/static checks. Windows AArch64 and macOS remain planned.
+- Abundance CPU port, hashing increment: `abundance/src/hash.grl` carries `fnv1a64` (with the
+  seeded continuation form), the frozen world/checkpoint starting constant from
+  `World::content_hash`, and its little-endian `absorb_byte`/`absorb_u64` accumulator. The reference
+  is Abundance's own `tx/codec.hpp` plus a verbatim replay of `world.cpp`'s absorb loop, and all 16
+  values match; the suite now compares 79 values across math and hashing. Standard-library SipHash
+  is asserted to disagree so it cannot be substituted for an id or checkpoint hash.
 - Abundance CPU port, first increment: `abundance/src/math.grl` carries the engine's CPU math
   contract (Vec3/Vec4/DVec3/Mat4, row-major multiply and transform, cofactor inverse, `look_dir`,
   reverse-Z infinite projection, camera-relative origin split). `just abundance-test` compiles the
