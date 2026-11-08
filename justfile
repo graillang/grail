@@ -55,3 +55,7 @@ test-cli:
 # Cross-platform OS ABI headers and C contract tests (needs a host C compiler).
 abi-test:
     bun tools/abi-test.mjs
+
+# Native Linux FFI wrapper test; needs GRAIL_FFI_COMPILER (feature/ffi).
+ffi-runtime-test:
+    bun tools/test-ffi-runtime.mjs
