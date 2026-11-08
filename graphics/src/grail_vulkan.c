@@ -130,6 +130,21 @@ typedef struct gr_vk_dev {
     uint32_t validation_messages;
     char validation_text[GR_VK_VALIDATION_MESSAGES][GR_VK_VALIDATION_MESSAGE_LEN];
     uint32_t validation_text_len[GR_VK_VALIDATION_MESSAGES];
+    PFN_vkCreateSwapchainKHR create_swapchain;
+    PFN_vkDestroySwapchainKHR destroy_swapchain;
+    PFN_vkGetSwapchainImagesKHR get_swapchain_images;
+    PFN_vkAcquireNextImageKHR acquire_next_image;
+    PFN_vkQueuePresentKHR queue_present;
+    PFN_vkDestroySurfaceKHR destroy_surface;
+    PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR surface_capabilities;
+    PFN_vkGetPhysicalDeviceSurfaceFormatsKHR surface_formats;
+    PFN_vkGetPhysicalDeviceSurfacePresentModesKHR surface_present_modes;
+    PFN_vkGetPhysicalDeviceSurfaceSupportKHR surface_support;
+    uint32_t present_family;
+    /* Swapchains are owned by the device for teardown: each holds a VkSurfaceKHR created with the
+     * instance, and a surface outliving its instance is a validation error (00629). */
+    gr_handle swapchains[8];
+    uint32_t swapchain_count;
     PFN_vkGetBufferDeviceAddress get_buffer_address;
     PFN_vkCreateComputePipelines create_compute_pipelines;
     PFN_vkCmdDispatch cmd_dispatch;
@@ -158,6 +173,7 @@ typedef struct gr_vk_tex {
 typedef struct gr_vk_viewobj {
     gr_vk_dev *device;
     VkImageView view;
+    VkImage image;      /* the image behind the view: a barrier names a view, Vulkan needs the image */
     gr_vk_tex *texture;
     uint32_t sampled_index;
 } gr_vk_viewobj;
@@ -174,6 +190,21 @@ typedef struct gr_vk_cmdbuf {
     uint32_t ended;
     uint32_t frame_slot;
 } gr_vk_cmdbuf;
+
+typedef struct gr_vk_swap {
+    gr_vk_dev *device;
+    VkSurfaceKHR surface;      /* owned by the swapchain: created from the window */
+    VkSwapchainKHR swapchain;
+    VkFormat format;
+    VkColorSpaceKHR colorspace;
+    uint32_t width, height, image_count;
+    VkFence acquire_fence;
+    VkImage images[8];
+    VkImageView views[8];
+    gr_handle view_handles[8];   /* ABI view objects, so a pass can name an acquired image */
+    uint32_t last_index;
+    gr_handle window;
+} gr_vk_swap;
 
 typedef struct gr_vk_fence_obj {
     gr_vk_dev *device;
@@ -635,6 +666,11 @@ gr_result gr_vk_abi_device_create(const gr_device_desc *desc, gr_handle *out_dev
     VkSemaphoreCreateInfo semaphore_info;
     VkPipelineCacheCreateInfo cache_info;
     uint32_t loader_version = VK_API_VERSION_1_0;
+    /* Function scope, not block scope: device_info points into this and is used after any inner
+     * block would have ended. A dangling name here makes vkCreateDevice fail with
+     * EXTENSION_NOT_PRESENT, which reads like a missing extension rather than a lifetime bug. */
+    const char *device_extensions[1];
+    uint32_t device_extension_count = 0;
 
     if (!out_device || !desc)
         return GR_ERROR_INVALID_ARGUMENT;
@@ -857,8 +893,14 @@ gr_result gr_vk_abi_device_create(const gr_device_desc *desc, gr_handle *out_dev
     device_info.pNext = &enable_features;
     device_info.queueCreateInfoCount = queue_info_count;
     device_info.pQueueCreateInfos = queue_infos;
-    device_info.enabledExtensionCount = 0;
     device_info.pEnabledFeatures = NULL; /* the Feature2 chain carries them */
+    /* A swapchain needs VK_KHR_swapchain enabled on the device, or vkCreateSwapchainKHR does not
+     * even resolve — which is how this was found: every surface function returned NULL and the
+     * swapchain reported UNSUPPORTED with no further explanation. */
+    if (!gr_handle_is_null(desc->window))
+        device_extensions[device_extension_count++] = "VK_KHR_swapchain";
+    device_info.enabledExtensionCount = device_extension_count;
+    device_info.ppEnabledExtensionNames = device_extension_count ? device_extensions : NULL;
     if (create_device(dev->physical, &device_info, NULL, &dev->device) != VK_SUCCESS) {
         vk_log(desc, "vkCreateDevice failed (a requested feature was not enableable)");
         dev->destroy_instance(dev->instance, NULL);
@@ -921,6 +963,16 @@ gr_result gr_vk_abi_device_create(const gr_device_desc *desc, gr_handle *out_dev
     dev->create_sampler = GR_VK_DEVICE_LOAD(dev, vkCreateSampler);
     dev->destroy_sampler = GR_VK_DEVICE_LOAD(dev, vkDestroySampler);
     dev->cmd_copy_buffer_to_image = GR_VK_DEVICE_LOAD(dev, vkCmdCopyBufferToImage);
+    dev->create_swapchain = GR_VK_DEVICE_LOAD(dev, vkCreateSwapchainKHR);
+    dev->destroy_swapchain = GR_VK_DEVICE_LOAD(dev, vkDestroySwapchainKHR);
+    dev->get_swapchain_images = GR_VK_DEVICE_LOAD(dev, vkGetSwapchainImagesKHR);
+    dev->acquire_next_image = GR_VK_DEVICE_LOAD(dev, vkAcquireNextImageKHR);
+    dev->queue_present = GR_VK_DEVICE_LOAD(dev, vkQueuePresentKHR);
+    dev->destroy_surface = (PFN_vkDestroySurfaceKHR)dev->loader.gipa(dev->instance, "vkDestroySurfaceKHR");
+    dev->surface_capabilities = (PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR)dev->loader.gipa(dev->instance, "vkGetPhysicalDeviceSurfaceCapabilitiesKHR");
+    dev->surface_formats = (PFN_vkGetPhysicalDeviceSurfaceFormatsKHR)dev->loader.gipa(dev->instance, "vkGetPhysicalDeviceSurfaceFormatsKHR");
+    dev->surface_present_modes = (PFN_vkGetPhysicalDeviceSurfacePresentModesKHR)dev->loader.gipa(dev->instance, "vkGetPhysicalDeviceSurfacePresentModesKHR");
+    dev->surface_support = (PFN_vkGetPhysicalDeviceSurfaceSupportKHR)dev->loader.gipa(dev->instance, "vkGetPhysicalDeviceSurfaceSupportKHR");
     dev->get_buffer_address = GR_VK_DEVICE_LOAD(dev, vkGetBufferDeviceAddress);
     dev->create_compute_pipelines = GR_VK_DEVICE_LOAD(dev, vkCreateComputePipelines);
     dev->cmd_dispatch = GR_VK_DEVICE_LOAD(dev, vkCmdDispatch);
@@ -1122,6 +1174,31 @@ void gr_vk_abi_device_destroy_impl(gr_vk_dev *dev)
             dev->destroy_set_layout(dev->device, dev->set1, NULL);
         if (dev->destroy_device)
             dev->destroy_device(dev->device, NULL);
+    }
+    {
+        uint32_t s;
+        for (s = 0; s < dev->swapchain_count; ++s) {
+            gr_vk_swap *swap = (gr_vk_swap *)gr_object_remove(gr_objects(), dev->swapchains[s],
+                                                              GR_HANDLE_SWAPCHAIN);
+            uint32_t i;
+            if (!swap)
+                continue;
+            for (i = 0; i < swap->image_count; ++i) {
+                if (!gr_handle_is_null(swap->view_handles[i])) {
+                    gr_vk_viewobj *object = (gr_vk_viewobj *)gr_object_remove(
+                        gr_objects(), swap->view_handles[i], GR_HANDLE_TEXTURE_VIEW);
+                    free(object);
+                }
+                if (swap->views[i] && dev->destroy_image_view)
+                    dev->destroy_image_view(dev->device, swap->views[i], NULL);
+            }
+            if (dev->destroy_swapchain && swap->swapchain)
+                dev->destroy_swapchain(dev->device, swap->swapchain, NULL);
+            if (dev->destroy_surface && swap->surface)
+                dev->destroy_surface(dev->instance, swap->surface, NULL);
+            free(swap);
+        }
+        dev->swapchain_count = 0;
     }
     if (dev->messenger && dev->destroy_messenger)
         dev->destroy_messenger(dev->instance, dev->messenger, NULL);
@@ -1771,6 +1848,7 @@ gr_result gr_vk_abi_texture_view_create(gr_handle device_handle, const gr_textur
         return GR_ERROR_OUT_OF_MEMORY;
     view->device = dev;
     view->texture = texture;
+    view->image = texture->image;
 
     memset(&info, 0, sizeof(info));
     info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
@@ -2127,6 +2205,7 @@ static VkImageLayout vk_layout(uint32_t state)
     case GR_STATE_TRANSFER_SRC: return VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
     case GR_STATE_TRANSFER_DST: return VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     case GR_STATE_COPY_SOURCE_HOST: return VK_IMAGE_LAYOUT_GENERAL;
+    case GR_STATE_PRESENT: return VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
     default: return VK_IMAGE_LAYOUT_UNDEFINED;
     }
 }
@@ -2143,8 +2222,21 @@ gr_result gr_vk_abi_cmd_barrier(gr_handle cmd_handle, const gr_barrier *barriers
     for (i = 0; i < count; ++i) {
         gr_vk_tex *texture = (gr_vk_tex *)gr_object_lookup(gr_objects(), barriers[i].resource,
                                                            GR_HANDLE_TEXTURE, NULL);
+        gr_vk_viewobj *view = NULL;
+        VkImage barrier_image = VK_NULL_HANDLE;
         VkImageMemoryBarrier barrier;
         if (!texture) {
+            /* A barrier may name a view — a swapchain image is only ever a view. Resolving just
+             * textures made every swapchain transition a silent no-op, which validation reported as
+             * the render expecting COLOR_ATTACHMENT while the image was still UNDEFINED. */
+            view = (gr_vk_viewobj *)gr_object_lookup(gr_objects(), barriers[i].resource,
+                                                     GR_HANDLE_TEXTURE_VIEW, NULL);
+            if (view)
+                barrier_image = view->image;
+        } else {
+            barrier_image = texture->image;
+        }
+        if (barrier_image == VK_NULL_HANDLE) {
             /* A buffer has no layout, but it still needs the execution and access dependency:
              * without it a compute write and the host read that follows are unordered. */
             gr_vk_buffer *buffer = vk_buffer_of(barriers[i].resource);
@@ -2173,7 +2265,7 @@ gr_result gr_vk_abi_cmd_barrier(gr_handle cmd_handle, const gr_barrier *barriers
          * than a hot one. The stage masks follow the contract's pipeline-stage bits. */
         barrier.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT;
         barrier.dstAccessMask = VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT;
-        barrier.image = texture->image;
+        barrier.image = barrier_image;
         barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         barrier.subresourceRange.levelCount = 1;
         barrier.subresourceRange.layerCount = 1;
@@ -2349,6 +2441,346 @@ gr_result gr_vk_abi_cmd_draw(gr_handle cmd_handle, const gr_draw *draw)
         return GR_ERROR_NOT_READY;
     cmd->device->cmd_draw(cmd->cb, draw->vertex_count, draw->instance_count, draw->first_vertex,
                           draw->first_instance);
+    return GR_OK;
+}
+
+
+/* ---------------------------------------------------------------------------------------
+ * Swapchain
+ *
+ * Format, present mode and extent are chosen from what the surface reports, never assumed: a
+ * surface may refuse a format, and currentExtent is 0xFFFFFFFF when the window decides the size.
+ * --------------------------------------------------------------------------------------- */
+static gr_result vk_swapchain_build(gr_vk_swap *swap, uint32_t want_width, uint32_t want_height,
+                                    gr_format want_format, uint32_t present_mode, uint32_t images)
+{
+    gr_vk_dev *dev = swap->device;
+    VkSurfaceCapabilitiesKHR caps;
+    VkSurfaceFormatKHR formats[32];
+    uint32_t format_count = 32, i, chosen_format = 0, chosen_mode = 0;
+    VkPresentModeKHR modes[8];
+    uint32_t mode_count = 8;
+    VkExtent2D extent;
+    VkSwapchainCreateInfoKHR info;
+    VkImage image_handles[8];
+    uint32_t image_total = 8;
+    VkFormat vk_format_wanted = vk_format(want_format);
+
+    if (!dev->surface_capabilities || !dev->surface_formats || !dev->create_swapchain)
+        return GR_ERROR_UNSUPPORTED;
+    if (dev->surface_capabilities(dev->physical, swap->surface, &caps) != VK_SUCCESS)
+        return GR_ERROR_BACKEND;
+
+    /* Extent: the surface decides, unless it says "whatever the window is". */
+    if (caps.currentExtent.width != 0xFFFFFFFFu) {
+        extent = caps.currentExtent;
+    } else {
+        extent.width = want_width ? want_width : 320u;
+        extent.height = want_height ? want_height : 240u;
+        if (extent.width < caps.minImageExtent.width) extent.width = caps.minImageExtent.width;
+        if (extent.width > caps.maxImageExtent.width) extent.width = caps.maxImageExtent.width;
+        if (extent.height < caps.minImageExtent.height) extent.height = caps.minImageExtent.height;
+        if (extent.height > caps.maxImageExtent.height) extent.height = caps.maxImageExtent.height;
+    }
+
+    /* Format: the requested one when the surface offers it, else the first UNORM 8-bit one, else
+     * whatever is first. */
+    if (dev->surface_formats(dev->physical, swap->surface, &format_count, formats) != VK_SUCCESS ||
+        format_count == 0)
+        return GR_ERROR_BACKEND;
+    if (format_count > 32u) format_count = 32u;
+    for (i = 0; i < format_count; ++i) {
+        if (formats[i].format == vk_format_wanted) { chosen_format = i; break; }
+    }
+    if (formats[chosen_format].format != vk_format_wanted) {
+        for (i = 0; i < format_count; ++i)
+            if (formats[i].format == VK_FORMAT_B8G8R8A8_UNORM ||
+                formats[i].format == VK_FORMAT_R8G8B8A8_UNORM) { chosen_format = i; break; }
+    }
+
+    /* Present mode: FIFO is always available, so it is the default and the fallback. */
+    if (dev->surface_present_modes &&
+        dev->surface_present_modes(dev->physical, swap->surface, &mode_count, modes) == VK_SUCCESS) {
+        VkPresentModeKHR wanted = present_mode == GR_PRESENT_MAILBOX ? VK_PRESENT_MODE_MAILBOX_KHR
+                               : present_mode == GR_PRESENT_IMMEDIATE ? VK_PRESENT_MODE_IMMEDIATE_KHR
+                               : VK_PRESENT_MODE_FIFO_KHR;
+        chosen_mode = VK_PRESENT_MODE_FIFO_KHR;
+        for (i = 0; i < mode_count; ++i)
+            if (modes[i] == wanted) { chosen_mode = wanted; break; }
+    } else {
+        chosen_mode = VK_PRESENT_MODE_FIFO_KHR;
+    }
+
+    {
+        uint32_t want = images ? images : (caps.minImageCount + 1u);
+        if (want < caps.minImageCount) want = caps.minImageCount;
+        if (caps.maxImageCount && want > caps.maxImageCount) want = caps.maxImageCount;
+        swap->image_count = want;
+    }
+
+    memset(&info, 0, sizeof(info));
+    info.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
+    info.surface = swap->surface;
+    info.minImageCount = swap->image_count;
+    info.imageFormat = formats[chosen_format].format;
+    info.imageColorSpace = formats[chosen_format].colorSpace;
+    info.imageExtent = extent;
+    info.imageArrayLayers = 1;
+    /* COLOR_ATTACHMENT because the graph renders into it; TRANSFER_SRC so a test can read it. */
+    info.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    info.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    info.preTransform = caps.currentTransform;
+    info.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+    info.presentMode = chosen_mode;
+    info.clipped = VK_TRUE;
+    info.oldSwapchain = swap->swapchain;
+    if (dev->create_swapchain(dev->device, &info, NULL, &swap->swapchain) != VK_SUCCESS)
+        return GR_ERROR_BACKEND;
+    if (!swap->acquire_fence) {
+        VkFenceCreateInfo fence_info;
+        PFN_vkCreateFence create_fence = GR_VK_DEVICE_LOAD(dev, vkCreateFence);
+        memset(&fence_info, 0, sizeof(fence_info));
+        fence_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        if (create_fence)
+            create_fence(dev->device, &fence_info, NULL, &swap->acquire_fence);
+    }
+
+    swap->format = info.imageFormat;
+    swap->colorspace = info.imageColorSpace;
+    swap->width = extent.width;
+    swap->height = extent.height;
+
+    if (dev->get_swapchain_images(dev->device, swap->swapchain, &image_total, image_handles) != VK_SUCCESS)
+        return GR_ERROR_BACKEND;
+    if (image_total > 8u) image_total = 8u;
+    swap->image_count = image_total;
+    for (i = 0; i < image_total; ++i) {
+        VkImageViewCreateInfo view_info;
+        swap->images[i] = image_handles[i];
+        memset(&view_info, 0, sizeof(view_info));
+        view_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        view_info.image = image_handles[i];
+        view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        view_info.format = swap->format;
+        view_info.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        view_info.subresourceRange.levelCount = 1;
+        view_info.subresourceRange.layerCount = 1;
+        if (dev->create_image_view(dev->device, &view_info, NULL, &swap->views[i]) != VK_SUCCESS)
+            return GR_ERROR_BACKEND;
+        {
+            /* A view handle per image, created once with the swapchain: a pass names it and the
+             * graph derives its transitions like any other attachment. */
+            gr_vk_viewobj *object = (gr_vk_viewobj *)calloc(1, sizeof(*object));
+            if (!object)
+                return GR_ERROR_OUT_OF_MEMORY;
+            object->device = dev;
+            object->view = swap->views[i];
+            object->image = swap->images[i];
+            object->texture = NULL; /* owned by the swapchain, not by a texture object */
+            object->sampled_index = GR_BINDLESS_INDEX_NONE;
+            swap->view_handles[i] = gr_object_insert(gr_objects(), GR_HANDLE_TEXTURE_VIEW, object);
+            if (gr_handle_is_null(swap->view_handles[i])) {
+                free(object);
+                return GR_ERROR_OUT_OF_MEMORY;
+            }
+        }
+    }
+    return GR_OK;
+}
+
+gr_result gr_vk_abi_swapchain_create(gr_handle device_handle, const gr_swapchain_desc *desc,
+                                     gr_handle *out_swapchain)
+{
+    gr_vk_dev *dev = vk_device_of(device_handle);
+    gr_vk_swap *swap;
+    gr_window_native native;
+    gr_result status;
+    gr_handle handle;
+
+    if (!dev || !desc || !out_swapchain)
+        return GR_ERROR_INVALID_ARGUMENT;
+    *out_swapchain = GR_NULL_HANDLE;
+    if (desc->head.size != sizeof(gr_swapchain_desc))
+        return GR_ERROR_VERSION_MISMATCH;
+    if (gr_handle_is_null(desc->window))
+        return GR_ERROR_INVALID_ARGUMENT; /* a swapchain presents to a window */
+
+    swap = (gr_vk_swap *)calloc(1, sizeof(*swap));
+    if (!swap)
+        return GR_ERROR_OUT_OF_MEMORY;
+    swap->device = dev;
+    swap->window = desc->window;
+
+    if (gr_window_get_native(desc->window, &native) != GR_OK || !native.handle_a) {
+        free(swap);
+        return GR_ERROR_UNSUPPORTED;
+    }
+    if (gr_sdl_vulkan_create_surface((uint64_t)(uintptr_t)dev->instance,
+                                     (uint64_t)(uintptr_t)native.handle_a,
+                                     (uint64_t *)(void *)&swap->surface) != GR_OK) {
+        free(swap);
+        return GR_ERROR_BACKEND;
+    }
+    status = vk_swapchain_build(swap, desc->width, desc->height, desc->format, desc->present_mode,
+                                desc->image_count);
+    if (status != GR_OK) {
+        gr_sdl_vulkan_destroy_surface((uint64_t)(uintptr_t)dev->instance,
+                                      (uint64_t)(uintptr_t)swap->surface);
+        free(swap);
+        return status;
+    }
+
+    handle = gr_object_insert(gr_objects(), GR_HANDLE_SWAPCHAIN, swap);
+    if (gr_handle_is_null(handle)) {
+        dev->destroy_swapchain(dev->device, swap->swapchain, NULL);
+        free(swap);
+        return GR_ERROR_OUT_OF_MEMORY;
+    }
+    if (dev->swapchain_count < 8u)
+        dev->swapchains[dev->swapchain_count++] = handle;
+    *out_swapchain = handle;
+    return GR_OK;
+}
+
+gr_result gr_vk_abi_swapchain_info(gr_handle swapchain, gr_format *out_format, uint32_t *out_width,
+                                   uint32_t *out_height, uint32_t *out_image_count)
+{
+    gr_vk_swap *swap = (gr_vk_swap *)gr_object_lookup(gr_objects(), swapchain,
+                                                      GR_HANDLE_SWAPCHAIN, NULL);
+    if (!swap)
+        return GR_ERROR_INVALID_HANDLE;
+    if (out_format) {
+        *out_format = swap->format == VK_FORMAT_B8G8R8A8_UNORM ? GR_FORMAT_B8G8R8A8_UNORM
+                    : swap->format == VK_FORMAT_R8G8B8A8_UNORM ? GR_FORMAT_R8G8B8A8_UNORM
+                    : swap->format == VK_FORMAT_B8G8R8A8_SRGB ? GR_FORMAT_B8G8R8A8_SRGB
+                    : swap->format == VK_FORMAT_R8G8B8A8_SRGB ? GR_FORMAT_R8G8B8A8_SRGB
+                    : GR_FORMAT_UNDEFINED;
+    }
+    if (out_width) *out_width = swap->width;
+    if (out_height) *out_height = swap->height;
+    if (out_image_count) *out_image_count = swap->image_count;
+    return GR_OK;
+}
+
+gr_result gr_vk_abi_swapchain_acquire(gr_handle swapchain, uint64_t timeout_ns,
+                                      uint32_t *out_image_index, gr_handle *out_view,
+                                      int32_t *out_needs_recreate)
+{
+    gr_vk_swap *swap = (gr_vk_swap *)gr_object_lookup(gr_objects(), swapchain,
+                                                      GR_HANDLE_SWAPCHAIN, NULL);
+    uint32_t index = 0;
+    VkResult result;
+
+    if (!swap)
+        return GR_ERROR_INVALID_HANDLE;
+    if (out_needs_recreate) *out_needs_recreate = 0;
+    if (out_view) *out_view = GR_NULL_HANDLE;
+    /* No semaphore: the caller waits on the submission that renders into this image, and the
+     * acquire completes before that submission is recorded. A production path would use a binary
+     * acquire semaphore; this increment's contract has the caller wait on the queue timeline. */
+    /* Vulkan requires a semaphore or a fence; a fence that is waited immediately is the simplest
+     * correct choice when the caller waits on the queue timeline anyway. */
+    result = swap->device->acquire_next_image(swap->device->device, swap->swapchain, timeout_ns,
+                                              VK_NULL_HANDLE, swap->acquire_fence, &index);
+    if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR) {
+        if (result == VK_ERROR_OUT_OF_DATE_KHR) {
+            if (out_needs_recreate) *out_needs_recreate = 1;
+            return GR_ERROR_NOT_READY;
+        }
+    } else if (result == VK_TIMEOUT) {
+        return GR_TIMEOUT;
+    } else if (result != VK_SUCCESS) {
+        return GR_ERROR_BACKEND;
+    }
+    if (index >= swap->image_count)
+        return GR_ERROR_BACKEND;
+    {
+        PFN_vkWaitForFences wait_fences = GR_VK_DEVICE_LOAD(swap->device, vkWaitForFences);
+        PFN_vkResetFences reset_fences = GR_VK_DEVICE_LOAD(swap->device, vkResetFences);
+        if (wait_fences && swap->acquire_fence)
+            wait_fences(swap->device->device, 1, &swap->acquire_fence, VK_TRUE,
+                        5ull * 1000ull * 1000ull * 1000ull);
+        if (reset_fences && swap->acquire_fence)
+            reset_fences(swap->device->device, 1, &swap->acquire_fence);
+    }
+    swap->last_index = index;
+    if (out_image_index) *out_image_index = index;
+    if (out_view) *out_view = swap->view_handles[index];
+    return GR_OK;
+}
+
+gr_result gr_vk_abi_swapchain_recreate(gr_handle swapchain, uint32_t width, uint32_t height,
+                                       uint64_t after_value)
+{
+    gr_vk_swap *swap = (gr_vk_swap *)gr_object_lookup(gr_objects(), swapchain,
+                                                      GR_HANDLE_SWAPCHAIN, NULL);
+    gr_vk_dev *dev;
+    uint32_t i;
+    VkSwapchainKHR old;
+
+    (void)after_value; /* the test waits idle before recreating */
+    if (!swap)
+        return GR_ERROR_INVALID_HANDLE;
+    dev = swap->device;
+    if (dev->device_wait_idle)
+        dev->device_wait_idle(dev->device);
+    old = swap->swapchain;
+    for (i = 0; i < swap->image_count; ++i) {
+        if (!gr_handle_is_null(swap->view_handles[i])) {
+            gr_vk_viewobj *object = (gr_vk_viewobj *)gr_object_remove(gr_objects(),
+                                                                     swap->view_handles[i],
+                                                                     GR_HANDLE_TEXTURE_VIEW);
+            free(object);
+            swap->view_handles[i] = GR_NULL_HANDLE;
+        }
+        if (swap->views[i]) {
+            dev->destroy_image_view(dev->device, swap->views[i], NULL);
+            swap->views[i] = VK_NULL_HANDLE;
+        }
+    }
+    swap->swapchain = VK_NULL_HANDLE; /* build() carries `old` through oldSwapchain */
+    {
+        gr_result status = vk_swapchain_build(swap, width, height, GR_FORMAT_UNDEFINED,
+                                              GR_PRESENT_FIFO, 0);
+        if (old)
+            dev->destroy_swapchain(dev->device, old, NULL);
+        return status;
+    }
+}
+
+gr_result gr_vk_abi_present(gr_handle queue_handle, gr_handle swapchain, uint32_t image_index,
+                            uint64_t wait_value, uint64_t *out_value)
+{
+    gr_vk_queue *queue = (gr_vk_queue *)gr_object_lookup(gr_objects(), queue_handle,
+                                                         GR_HANDLE_QUEUE, NULL);
+    gr_vk_swap *swap = (gr_vk_swap *)gr_object_lookup(gr_objects(), swapchain,
+                                                      GR_HANDLE_SWAPCHAIN, NULL);
+    VkPresentInfoKHR info;
+    VkResult result;
+
+    if (!queue || !swap)
+        return GR_ERROR_INVALID_HANDLE;
+    if (image_index >= swap->image_count)
+        return GR_ERROR_INVALID_ARGUMENT;
+    /* The submission that rendered into this image must complete first. A production path would
+     * wait on a binary render-finished semaphore; this one waits the queue idle, which is correct
+     * and visible rather than subtly wrong. */
+    if (queue->device->queue_wait_idle)
+        queue->device->queue_wait_idle(queue->queue);
+    (void)wait_value;
+
+    memset(&info, 0, sizeof(info));
+    info.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+    info.swapchainCount = 1;
+    info.pSwapchains = &swap->swapchain;
+    info.pImageIndices = &image_index;
+    result = queue->device->queue_present(queue->queue, &info);
+    if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR)
+        return GR_ERROR_NOT_READY;
+    if (result != VK_SUCCESS)
+        return GR_ERROR_BACKEND;
+    if (out_value)
+        *out_value = ++queue->submitted;
     return GR_OK;
 }
 
@@ -2944,6 +3376,11 @@ gr_result gr_vk_abi_cmd_draw(gr_handle c, const gr_draw *d) { (void)c; (void)d; 
 gr_result gr_vk_abi_cmd_dispatch(gr_handle c, uint32_t x, uint32_t y, uint32_t z) { (void)c; (void)x; (void)y; (void)z; return GR_ERROR_UNSUPPORTED; }
 gr_result gr_vk_abi_submit(const gr_submit *s, uint64_t *v) { (void)s; (void)v; return GR_ERROR_UNSUPPORTED; }
 gr_result gr_vk_abi_fence_create(gr_handle d, uint64_t i, gr_handle *o) { (void)d; (void)i; (void)o; return GR_ERROR_UNSUPPORTED; }
+gr_result gr_vk_abi_swapchain_create(gr_handle d, const gr_swapchain_desc *s, gr_handle *o) { (void)d; (void)s; (void)o; return GR_ERROR_UNSUPPORTED; }
+gr_result gr_vk_abi_swapchain_info(gr_handle s, gr_format *f, uint32_t *w, uint32_t *h, uint32_t *c) { (void)s; (void)f; (void)w; (void)h; (void)c; return GR_ERROR_UNSUPPORTED; }
+gr_result gr_vk_abi_swapchain_acquire(gr_handle s, uint64_t t, uint32_t *i, gr_handle *v, int32_t *r) { (void)s; (void)t; (void)i; (void)v; (void)r; return GR_ERROR_UNSUPPORTED; }
+gr_result gr_vk_abi_swapchain_recreate(gr_handle s, uint32_t w, uint32_t h, uint64_t a) { (void)s; (void)w; (void)h; (void)a; return GR_ERROR_UNSUPPORTED; }
+gr_result gr_vk_abi_present(gr_handle q, gr_handle s, uint32_t i, uint64_t w, uint64_t *o) { (void)q; (void)s; (void)i; (void)w; (void)o; return GR_ERROR_UNSUPPORTED; }
 gr_result gr_vk_abi_fence_wait(gr_handle f, uint64_t v, uint64_t t, gr_result *s) { (void)f; (void)v; (void)t; (void)s; return GR_ERROR_UNSUPPORTED; }
 uint64_t gr_vk_abi_fence_value(gr_handle f) { (void)f; return 0; }
 gr_result gr_vk_abi_cmd_push_frame_offset(gr_handle c, uint32_t s) { (void)c; (void)s; return GR_ERROR_UNSUPPORTED; }
