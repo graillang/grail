@@ -2,8 +2,8 @@
 //
 // Uses GRAIL_FFI_COMPILER, or GRAIL_COMPILER, pointing at a compiler built
 // from current main with the merged v3 FFI.
-// The hosted Linux C backend is linked with the host C library and normal
-// dynamic TLS; a test-only runtime copy keeps libc's thread pointer intact.
+// The hosted Linux C backend is linked with the host C library and runs on
+// libc's TLS through the compiler's foreign-call bridge.
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -58,24 +58,8 @@ for (const source of sources) {
 const backend = join(root, 'lib/sys/grail_ffi_linux.o');
 run(cc, ['-r', ...objects, '-o', backend]);
 
-const runtimeSource = readFileSync(join(root, 'compiler/runtime.grl'), 'utf8');
-const threadStart = runtimeSource.indexOf('fn rt_thread_init() -> u64 {');
-if (threadStart < 0) {
-  throw new Error('ffi-runtime: compiler/runtime.grl has no rt_thread_init');
-}
-const threadEnd = runtimeSource.indexOf('\n}', threadStart);
-if (threadEnd < 0) {
-  throw new Error('ffi-runtime: cannot delimit rt_thread_init');
-}
-const threadBlock = runtimeSource.slice(threadStart, threadEnd + 2);
-if (!threadBlock.includes('    raw_tp_set(w);')) {
-  throw new Error('ffi-runtime: rt_thread_init no longer sets the thread pointer');
-}
-const patchedThread = threadBlock.replace(
-  '    raw_tp_set(w);', '    // FFI runtime test only: preserve libc\'s thread pointer/TLS.');
-const runtime = join(work, 'runtime_nofs.grl');
-writeFileSync(runtime, runtimeSource.slice(0, threadStart) + patchedThread +
-  runtimeSource.slice(threadEnd + 2));
+// The compiler's host-TLS bridge (docs/ffi.md) lets the real runtime own the thread pointer.
+const runtime = join(root, 'compiler/runtime.grl');
 const osRuntime = join(root, 'compiler/os-linux.grl');
 
 const wrapper = 'lib/sys/grail_ffi.grl';
@@ -106,6 +90,18 @@ const cases = [
       'grail_os_socket_connect', 'grail_os_socket_send', 'grail_os_socket_recv',
       'grail_os_socket_shutdown', 'grail_os_socket_close', 'grail_os_socket_local_address',
       'grail_os_socket_peer_address'],
+    check_file: false,
+  },
+  {
+    name: 'proc_thread',
+    entry: 'tests/ffi-runtime/proc_thread.grl',
+    output: 'ffi-proc-thread: ok',
+    host_symbols: ['grail_ffi_process_spawn', 'grail_ffi_process_handle',
+      'grail_os_process_wait', 'grail_os_process_id', 'grail_os_process_close',
+      'grail_ffi_thread_spawn', 'grail_ffi_thread_handle', 'grail_os_thread_join'],
+    cross_symbols: ['grail_ffi_process_spawn', 'grail_ffi_process_handle',
+      'grail_os_process_wait', 'grail_os_process_id', 'grail_os_process_close',
+      'grail_ffi_thread_spawn', 'grail_ffi_thread_handle', 'grail_os_thread_join'],
     check_file: false,
   },
 ];
@@ -164,4 +160,4 @@ for (const testCase of cases) {
 if (!existsSync(join(root, 'lib/sys/grail_ffi_linux.o'))) {
   throw new Error('ffi-runtime: backend object was not produced');
 }
-console.log('ffi-runtime: file and socket tests built, linked and executed on x86_64; aarch64/riscv64 assembly checked');
+console.log('ffi-runtime: file, socket and process/thread tests built, linked and executed on x86_64; aarch64/riscv64 assembly checked');

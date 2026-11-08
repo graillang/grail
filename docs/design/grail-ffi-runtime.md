@@ -37,10 +37,15 @@ pub const SOCKET_STREAM: u64 = 1;
 pub const SHUTDOWN_READ: u64 = 1;
 pub const SHUTDOWN_WRITE: u64 = 2;
 pub const SHUTDOWN_BOTH: u64 = 3;
-pub const ERROR_INVALID_ARGUMENT: i64 = -2;
+pub const ERROR_INVALID_ARGUMENT: i64 = -1;
+pub const PROCESS_EXITED: u64 = 0;
+pub const PROCESS_SIGNALED: u64 = 1;
+pub const PROCESS_STILL_ACTIVE: u64 = 2;
 
 handle File;
 handle Socket;
+handle Process;
+handle Thread;
 
 pub enum Error { Status(i64) }
 
@@ -75,6 +80,14 @@ pub fn local_address(socket: Socket) -> Address |? Error;
 pub fn peer_address(socket: Socket) -> Address |? Error;
 pub fn local_port(socket: Socket) -> u64 |? Error;
 pub fn peer_port(socket: Socket) -> u64 |? Error;
+
+pub fn spawn(program: &[u8], arguments: &[u8]) -> Process |? Error;
+pub fn wait(process: Process) -> ProcessStatus |? Error;
+pub fn process_id(process: Process) -> u64 |? Error;
+pub fn process_close(process: Process) -> unit |? Error;
+pub fn thread_spawn(entry: cfn(u64) -> u64, user: u64) -> Thread |? Error;
+pub fn thread_join(thread: Thread) -> u64 |? Error;
+pub fn thread_detach(thread: Thread) -> unit |? Error;
 ```
 
 `Address` mirrors the C record: five 64-bit fields (`struct_size`, `abi_version`, `family`,
@@ -82,6 +95,11 @@ pub fn peer_port(socket: Socket) -> u64 |? Error;
 constructor; `bind` and `connect` reject any address that is not IPv4 127.0.0.1 with
 `ERROR_INVALID_ARGUMENT` before calling C. The record is public because `local_address` and
 `peer_address` return it, but no non-loopback TCP path is exposed.
+
+`ProcessStatus` mirrors the C record: `struct_size`, `abi_version`, `kind`, `exit_code`,
+`term_signal` (five 64-bit fields, 40 bytes). `kind` is `PROCESS_EXITED`,
+`PROCESS_SIGNALED` or `PROCESS_STILL_ACTIVE`; `exit_code`/`term_signal` are valid for the
+matching kind.
 
 `FileStat` mirrors the C record exactly: `struct_size`, `abi_version`, `kind`, `flags`,
 `size`, `mode`, `link_count`, `device`, `inode`, `modified_ns`, `accessed_ns`,
@@ -102,11 +120,14 @@ regression fails at runtime as well as at C compile time.
 - **Short I/O is legal.** `write`/`send` return the number of bytes written (0 or less than
   the input is valid); callers that need a full write must loop. `read`/`recv` returning 0 is
   clean EOF. `recv_bytes` allocates a Grail-owned vector and copies the actual prefix.
-- **`File` and `Socket` are C-owned opaque handles.** Grail never constructs, inspects,
-  sizes, borrows or frees them. Treat them as affine by convention: call `close`/
-  `socket_close` exactly once, never use a handle after close or double-close. The compiler's
-  handles are not linear in this increment, so the convention is not machine-checked. `tcp`
-  and `accept` each return a new handle; `socket_shutdown` does not close.
+- **`File`, `Socket`, `Process` and `Thread` are C-owned opaque handles.** Grail never
+  constructs, inspects, sizes, borrows or frees them. Treat them as affine by convention:
+  call `close`/`socket_close`/`process_close`, or `thread_join`/`thread_detach`, exactly once;
+  never use a handle after close/join/detach or consume it twice. The compiler's handles are
+  not linear in this increment, so the convention is not machine-checked. `tcp`/`accept` return
+  new socket handles; `spawn`/`thread_spawn` return new process/thread handles.
+  `socket_shutdown` does not close. `wait` does not consume a process handle; `process_close`
+  does. Closing a still-running child leaves it unreachable and unreaped.
 - **No C-owned pointer is returned.** `open` returns a handle; `stat`/`time` fill
   Grail-owned out-records; byte results are copied into Grail-owned vectors. C never hands
   back a `u8[]`/view or a pointer Grail would drop.
@@ -124,9 +145,19 @@ regression fails at runtime as well as at C compile time.
   runtime allocator and UTF-8 argv/environment blocks when this surface is integrated.
 - **The handle-return adapter is thread-local and immediate.** The C ABI writes a handle
   through an out-pointer, which the current scalar/handle FFI cannot express. The test shim
-  stores it in a thread-local slot; `open`, `tcp` and `accept` read that slot immediately. No
-  other handle-producing call may intervene on the same thread, and the adapter is not part
-  of the stable ABI.
+  stores it in a thread-local slot; `open`, `tcp`, `accept`, `spawn` and `thread_spawn` read
+  that slot immediately. No other handle-producing call may intervene on the same thread, and
+  the adapter is not part of the stable ABI.
+- **Process arguments are a NUL-separated blob.** `spawn(program, arguments)` treats
+  `arguments` as argv[1..] and the shim builds the full offset-addressed argv with `program`
+  as argv[0]; an empty blob relies on the ABI's argv[0] insertion. The child inherits stdio
+  and the runtime environment and uses the inherited working directory. No shell, custom
+  environment, cwd, `terminate` or `kill` wrapper is exposed.
+- **Thread entries are C-ABI function pointers.** `thread_spawn(entry, user)` passes a
+  `cfn(u64) -> u64` and a user word. `thread_join` blocks, consumes the handle and returns the
+  callback result; `thread_detach` consumes it without a result. The callback runs on a native
+  thread without Grail task/TLS bootstrap, so it must remain self-contained: no allocation,
+  printing, panic or runtime service until the runtime thread bootstrap is integrated.
 - **Sockets are blocking.** `accept`, `connect`, `send` and `recv` have no timeout or
   non-blocking flag in this surface. `socket_shutdown` is explicit and separate from
   `socket_close`. Only TCP/IPv4 loopback is exposed; UDP, `send_to`/`recv_from`, DNS and
@@ -138,8 +169,8 @@ regression fails at runtime as well as at C compile time.
 
 1. compiles the Linux reference backend and the FFI shim into
    `lib/sys/grail_ffi_linux.o`;
-2. compiles the file and socket tests plus `lib/sys/grail_ffi.grl` for x86-64 with the FFI
-   compiler;
+2. compiles the file, socket and process/thread tests plus `lib/sys/grail_ffi.grl` for x86-64
+   with the FFI compiler;
 3. verifies the single `// grail-link: grail_ffi_linux.o` note and unmangled C calls;
 4. assembles with clang, links with `-nostartfiles -no-pie ... -lc -lpthread -ldl
    -Wl,-e,_start`, and runs in a scratch directory;
@@ -150,10 +181,9 @@ The runner uses `GRAIL_FFI_COMPILER` or `GRAIL_COMPILER`; both should point at a
 built from current `main`, which includes the v3 FFI. It compiles with `runtime.grl` and
 `os-linux.grl` from this tree.
 
-The test-only runtime copy removes `raw_tp_set` from `rt_thread_init` so the host C
-library's thread pointer/TLS remains valid; it keeps `rt_os_init` (a no-op on Linux) and the
-Grail worker record. This is a **harness patch**, not a runtime change: installing this layer
-needs a proper libc/entry integration or a freestanding C backend.
+The tests run on the unmodified runtime: `rt_thread_init` installs Grail's worker record as
+the thread pointer, and the compiler's host-TLS bridge (see `docs/ffi.md`) switches to the C
+library's TLS for every foreign call and back to Grail's for exported callbacks.
 
 ## Verification and limits
 
@@ -169,9 +199,10 @@ Not claimed:
 
 - no Windows or macOS execution of these wrappers (the separate C ABI Wine harness executes
   the Windows metadata/reparse/DNS paths);
-- no cross C backend link/execution for AArch64/RISC-V 64, only Grail assembly checks for both
-  the file and socket tests;
-- no dynamic library, process or thread wrappers in this module yet;
+- no cross C backend link/execution for AArch64/RISC-V 64, only Grail assembly checks for the
+  file, socket and process/thread tests;
+- no dynamic library wrappers, process environment/cwd/terminate/kill, thread naming/stack
+  options, mutexes or condition variables;
 - no automatic handle destruction, no `CStr` paths, no error-detail accessor;
 - no installed stdlib integration;
 - the current `grail build`/`grail run` CLI link path does not yet consume
