@@ -2,38 +2,14 @@
 
 ## Unreleased
 
-- Windows COM interop: two new unsafe-runtime intrinsics, `raw_win_local(Symbol, args...)` for a
-  direct Windows-ABI call to a symbol linked into the image (x86-64 `%rcx/%rdx/%r8/%r9`; ARM64
-  `x0..x3`) and `raw_win_call(slot, args...)` for an indirect call through a loaded function
-  pointer such as a COM vtable slot (x86-64 `call *%r11`, ARM64 `wininvoke` ->
-  `ldr x16,[x9]; blr x16`). `CoInitializeEx`/`CoUninitialize` join the import table from
-  `combase.dll`. Minimal C-ABI shims (`tests/com-shim-x64.s`, `tests/com-shim-arm64.s`) provide
-  an `IUnknown` object; the executed x86-64 case proves AddRef/Release counts 2, 3, 2, 1 and 1, 0
-  and the exact `E_POINTER` (2147500035) and `E_NOINTERFACE` (2147500034) HRESULTs, plus a
-  successful `QueryInterface` returning the object pointer. The same program is checked
-  statically for windows-aarch64. Single static object and one IID; no `CoCreateInstance`,
-  marshalling or apartment tests.
-
-- Added typed loopback TCP socket wrappers over the C ABI: `handle Socket`, a 56-byte `Address`
-  record constructed only by `loopback(port)`, `tcp`, `bind`, `listen`, `accept`, `connect`,
-  `send`, `recv`, `recv_bytes`, `socket_shutdown`, `socket_close`, `local_address`,
-  `peer_address`, `local_port` and `peer_port`. `bind`/`connect` reject non-127.0.0.1
-  addresses before the C call. The x86-64 test runs a listener/client/server ping-pong on an
-  ephemeral loopback port and checks the non-loopback rejection; AArch64/RISC-V 64 assembly
-  and unmangled socket calls are checked without execution.
-
-- Added `lib/sys/grail_ffi.grl`, the first Grail-facing wrappers over the Linux OS ABI:
-  explicit init/shutdown, file open/read/write/close/stat/size, monotonic and wall clocks,
-  and environment get/set. The module uses FFI byte views, an opaque `File` handle and
-  Grail-owned out-records, returns `T |? Error` with negative ABI statuses, and keeps file
-  handles affine by convention (explicit single close, no auto-free). Added a hosted C
-  adapter for the allocator and handle-return out-parameter, a repeatable
-  `tools/test-ffi-runtime.mjs` runner, and `docs/design/grail-ffi-runtime.md` with the exact
-  pointer/length/ownership rules. The x86-64 test links the Linux reference backend with
-  libc and executes file/time/environment checks; AArch64 and RISC-V 64 are assembly/static
-  checked only. It uses the merged v3 FFI compiler and `runtime.grl`/`os-linux.grl`, is not
-  auto-loaded by the current stdlib, and changes no compiler sources (the runner generates a
-  test-only runtime copy to preserve libc TLS).
+- Abundance CPU port, RHI host: `abundance/tools/rhi_host.c` serves `gr_wire` packets and drives
+  the foundation's Vulkan backend — device, R8G8B8A8_UNORM target, a CLEAR render pass, submit with
+  a fence wait and `gr_texture_read`. Its self-test reads back clear (0.25, 0.5, 0.75, 1.0) as
+  exactly 64 128 191 255 through `vkCmdCopyImageToBuffer`, and the packet path covers HELLO,
+  RESOURCE_CREATE, CMD_BATCH, FRAME_SUBMIT, RESOURCE_READ and SHUTDOWN with malformed, version,
+  unknown-op, short-packet and read-before-target refusals. Transport is a request/response file
+  pair, a documented deviation from the AF_UNIX SEQPACKET topology because Grail exposes no socket
+  binding; the framing is unchanged. The Grail-side client for this exchange is the next step.
 
 - Abundance CPU port, RHI bridge framing: `abundance/src/rhi_bridge.grl` packs and unpacks the
   graphics foundation's `gr_wire_packet` exactly as `graphics/src/grail_wire.c` does — 40-byte
