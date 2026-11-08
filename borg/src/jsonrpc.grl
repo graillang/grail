@@ -1,0 +1,740 @@
+module borg_jsonrpc;
+use borg_json;
+use core;
+
+// JSON-RPC 2.0 frames, the two framings Borg uses, and the dispatch state around them.
+//
+// The envelope is the one the Agent Client Protocol puts on the wire; `agent-client-protocol-schema`
+// 1.5.0 is the reference for it (`rpc::JsonRpcMessage`, `RequestId`, `Request`, `Notification`,
+// `Response`), and the parity suite compares this module's encoding with what that crate serialises
+// — including the details a hand-written encoder gets wrong: `"params": null` when there are no
+// parameters, `"result": null` for a null result, and ids that may be a number, a string or null.
+//
+// Borg reads and writes those frames two ways, and both are pure functions of a byte buffer:
+//
+//   stdio, newline-delimited   native_mcp.rs: one compact JSON object per line, 8 MiB cap
+//   Content-Length headers     lsp.rs: `Content-Length: N\r\n\r\n` + body, 8 KiB header cap,
+//                              8 MiB body cap, accepting `\r\n\r\n` or `\n\n`
+//
+// Dispatch follows `native_mcp.rs::read_response`: a message whose id is not the awaited one is
+// skipped, except that a `ping` request from the peer is answered with an empty result; and a
+// response whose request is no longer pending is obsolete rather than delivered.
+
+pub enum Id {
+    Null,
+    Num(u64),
+    Text(string)
+}
+
+pub struct RequestFrame {
+    id: Id,
+    method: string,
+    params: borg_json::Json
+}
+
+pub struct NotificationFrame {
+    method: string,
+    params: borg_json::Json
+}
+
+pub struct ResultFrame {
+    id: Id,
+    result: borg_json::Json
+}
+
+pub struct FailureFrame {
+    id: Id,
+    code: i64,
+    message: string
+}
+
+pub enum Frame {
+    Request(RequestFrame),
+    Notification(NotificationFrame),
+    Result(ResultFrame),
+    Failure(FailureFrame)
+}
+
+pub fn number_id(value: u64) -> Id {
+    return Id::Num(value);
+}
+
+pub fn text_id(value: string) -> Id {
+    return Id::Text(value);
+}
+
+pub fn null_id() -> Id {
+    return Id::Null;
+}
+
+pub fn request_frame(id: Id, method: string, params: borg_json::Json) -> Frame {
+    return Frame::Request(RequestFrame { id: id, method: method, params: params });
+}
+
+pub fn notification_frame(method: string, params: borg_json::Json) -> Frame {
+    return Frame::Notification(NotificationFrame { method: method, params: params });
+}
+
+pub fn result_frame(id: Id, result: borg_json::Json) -> Frame {
+    return Frame::Result(ResultFrame { id: id, result: result });
+}
+
+pub fn failure_frame(id: Id, code: i64, message: string) -> Frame {
+    return Frame::Failure(FailureFrame { id: id, code: code, message: message });
+}
+
+pub enum FrameError {
+    NotObject,
+    BadVersion,
+    NoKind,
+    BadId,
+    BadMethod,
+    BadError
+}
+
+// 8 MiB, matching MAX_MCP_MESSAGE_BYTES (native_mcp.rs:15) and MAX_LSP_MESSAGE_BYTES (lsp.rs:64).
+pub fn max_message_bytes() -> u64 {
+    return 8388608;
+}
+
+// 8192, matching MAX_HEADER_BYTES (lsp.rs:1514).
+pub fn max_header_bytes() -> u64 {
+    return 8192;
+}
+
+fn copy_text<a>(text: (&a [u8])) -> string {
+    mut out = u8[];
+    for byte in text {
+        out.push(byte);
+    }
+    return out.text();
+}
+
+fn text_equals<a, b>(left: (&a [u8]), right: (&b [u8])) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    for i in left.len() {
+        if left[i] != right[i] {
+            return false;
+        }
+    }
+    return true;
+}
+
+fn parse_id<a>(node: (&a borg_json::Json)) -> Id | FrameError {
+    match borg_json::kind_of(&node) {
+        Null => { return Id::Null; },
+        Num => {
+            match borg_json::as_number(&node) {
+                Some(text) => {
+                    match borg_json::whole_number(&text) {
+                        Some(value) => { return Id::Num(value); },
+                        None => { return FrameError::BadId; }
+                    }
+                },
+                None => { return FrameError::BadId; }
+            }
+        },
+        Str => {
+            match borg_json::as_string(&node) {
+                Some(text) => {
+                    copied := text;
+                    return Id::Text(copied);
+                },
+                None => { return FrameError::BadId; }
+            }
+        },
+        _ => { return FrameError::BadId; }
+    }
+}
+
+fn optional_id<a>(root: (&a borg_json::Json)) -> Id | FrameError {
+    if !borg_json::has(&root, "id") {
+        return Id::Null;
+    }
+    match borg_json::member(&root, "id") {
+        Some(node) => { return parse_id(&node); },
+        None => { return Id::Null; }
+    }
+}
+
+fn method_of_document<a>(root: (&a borg_json::Json)) -> string | FrameError {
+    match borg_json::member(&root, "method") {
+        Some(node) => {
+            match borg_json::as_string(&node) {
+                Some(text) => { found := text; return found; },
+                None => { return FrameError::BadMethod; }
+            }
+        },
+        None => { return FrameError::NoKind; }
+    }
+}
+
+fn result_of_document<a>(root: (&a borg_json::Json)) -> borg_json::Json {
+    match borg_json::member(&root, "result") {
+        Some(node) => { return node; },
+        None => { return borg_json::null_value(); }
+    }
+}
+
+fn params_of<a>(root: (&a borg_json::Json)) -> borg_json::Json {
+    match borg_json::member(&root, "params") {
+        Some(node) => { return node; },
+        None => { return borg_json::Json::Null; }
+    }
+}
+
+pub fn parse<a>(text: (&a [u8])) -> Frame | FrameError {
+    mut document = borg_json::null_value();
+    match borg_json::parse(&text) {
+        value: borg_json::Json => { document = value; },
+        failure: borg_json::ParseError => { return FrameError::NotObject; }
+    }
+    if borg_json::kind_of(&document) != borg_json::JsonKind::Obj {
+        return FrameError::NotObject;
+    }
+    match borg_json::member(&document, "jsonrpc") {
+        Some(version) => {
+            match borg_json::as_string(&version) {
+                Some(text) => {
+                    if !text_equals(&text, "2.0") {
+                        return FrameError::BadVersion;
+                    }
+                },
+                None => { return FrameError::BadVersion; }
+            }
+        },
+        None => { return FrameError::BadVersion; }
+    }
+    if borg_json::has(&document, "method") {
+        method := method_of_document(&document)?;
+        params := params_of(&document);
+        if borg_json::has(&document, "id") {
+            id := optional_id(&document)?;
+            return request_frame(id, method, params);
+        }
+        return notification_frame(method, params);
+    }
+    if borg_json::has(&document, "result") {
+        id := optional_id(&document)?;
+        result := result_of_document(&document);
+        return result_frame(id, result);
+    }
+    if borg_json::has(&document, "error") {
+        id := optional_id(&document)?;
+        return error_frame(&document, id);
+    }
+    return FrameError::NoKind;
+}
+
+fn error_body<a>(root: (&a borg_json::Json)) -> borg_json::Json | FrameError {
+    match borg_json::member(&root, "error") {
+        Some(node) => { return node; },
+        None => { return FrameError::NoKind; }
+    }
+}
+
+fn error_code<a>(inner: (&a borg_json::Json)) -> i64 | FrameError {
+    match borg_json::member(&inner, "code") {
+        Some(node) => {
+            match borg_json::as_number(&node) {
+                Some(text) => {
+                    match borg_json::signed_number(&text) {
+                        Some(value) => { return value; },
+                        None => { return FrameError::BadError; }
+                    }
+                },
+                None => { return FrameError::BadError; }
+            }
+        },
+        None => { return FrameError::BadError; }
+    }
+}
+
+fn error_message<a>(inner: (&a borg_json::Json)) -> string | FrameError {
+    match borg_json::member(&inner, "message") {
+        Some(node) => {
+            match borg_json::as_string(&node) {
+                Some(text) => { found := text; return found; },
+                None => { return FrameError::BadError; }
+            }
+        },
+        None => { return FrameError::BadError; }
+    }
+}
+
+fn error_frame<a>(root: (&a borg_json::Json), id: Id) -> Frame | FrameError {
+    inner := error_body(&root)?;
+    if borg_json::kind_of(&inner) != borg_json::JsonKind::Obj {
+        return FrameError::BadError;
+    }
+    code := error_code(&inner)?;
+    message := error_message(&inner)?;
+    return failure_frame(id, code, message);
+}
+
+fn id_json(id: (&Id)) -> borg_json::Json {
+    match id {
+        Null => { return borg_json::Json::Null; },
+        Num(value) => { return borg_json::Json::Num(borg_json::number_text(value)); },
+        Text(text) => {
+            copied := copy_text(&text);
+            return borg_json::Json::Str(copied);
+        }
+    }
+}
+
+fn member(key: (&[u8]), value: borg_json::Json) -> borg_json::Member {
+    return borg_json::new_member(&key, value);
+}
+
+fn object(members: (&mut borg_json::Member[])) -> borg_json::Json {
+    mut out = borg_json::empty_members();
+    for i in members.len() {
+        entry := &members[i];
+        out.push(borg_json::new_member(&entry.key, borg_json::copy_of(&entry.value)));
+    }
+    return borg_json::Json::Obj(out);
+}
+
+// ACP writes `"params": null` when a request or notification has none, and `"result": null` for a
+// null result; both are reproduced here.
+pub fn encode(frame: (&Frame)) -> string {
+    mut members = borg_json::empty_members();
+    members.push(member("jsonrpc", borg_json::Json::Str("2.0".text())));
+    match frame {
+        Request(inner) => {
+            members.push(member("id", id_json(&inner.id)));
+            members.push(member("method", borg_json::Json::Str(copy_text(&inner.method))));
+            members.push(member("params", borg_json::copy_of(&inner.params)));
+        },
+        Notification(inner) => {
+            members.push(member("method", borg_json::Json::Str(copy_text(&inner.method))));
+            members.push(member("params", borg_json::copy_of(&inner.params)));
+        },
+        Result(inner) => {
+            members.push(member("id", id_json(&inner.id)));
+            members.push(member("result", borg_json::copy_of(&inner.result)));
+        },
+        Failure(inner) => {
+            members.push(member("id", id_json(&inner.id)));
+            mut error_members = borg_json::empty_members();
+            error_members.push(member("code", borg_json::Json::Num(borg_json::signed_text(inner.code))));
+            error_members.push(member("message", borg_json::Json::Str(copy_text(&inner.message))));
+            members.push(member("error", object(&mut error_members)));
+        }
+    }
+    return borg_json::write(&object(&mut members));
+}
+
+pub fn kind_of(frame: (&Frame)) -> string {
+    match frame {
+        Request(inner) => { return "request".text(); },
+        Notification(inner) => { return "notification".text(); },
+        Result(inner) => { return "result".text(); },
+        Failure(inner) => { return "error".text(); }
+    }
+}
+
+pub fn id_text(frame: (&Frame)) -> string {
+    match frame {
+        Request(inner) => { return render_id(&inner.id); },
+        Notification(inner) => { return "-".text(); },
+        Result(inner) => { return render_id(&inner.id); },
+        Failure(inner) => { return render_id(&inner.id); }
+    }
+}
+
+fn render_id(id: (&Id)) -> string {
+    match id {
+        Null => { return "null".text(); },
+        Num(value) => { return borg_json::number_text(value); },
+        Text(text) => { return copy_text(&text); }
+    }
+}
+
+pub fn method_of(frame: (&Frame)) -> string {
+    match frame {
+        Request(inner) => { return copy_text(&inner.method); },
+        Notification(inner) => { return copy_text(&inner.method); },
+        _ => { return "-".text(); }
+    }
+}
+
+pub fn code_of(frame: (&Frame)) -> string {
+    match frame {
+        Failure(inner) => { return borg_json::signed_text(inner.code); },
+        _ => { return "-".text(); }
+    }
+}
+
+// ---- framings ----
+
+// stdio framing (native_mcp.rs): one compact object per line.
+pub fn line(frame: (&Frame)) -> string {
+    text := encode(frame);
+    mut out = u8[];
+    for byte in text {
+        out.push(byte);
+    }
+    out.push(10);
+    return out.text();
+}
+
+// Header framing (lsp.rs): `Content-Length: N\r\n\r\n` followed by exactly N bytes.
+pub fn content_length(frame: (&Frame)) -> string {
+    body := encode(frame);
+    mut out = u8[];
+    for byte in "Content-Length: ".text() {
+        out.push(byte);
+    }
+    digits := borg_json::number_text(body.len());
+    for byte in digits {
+        out.push(byte);
+    }
+    out.push(13);
+    out.push(10);
+    out.push(13);
+    out.push(10);
+    for byte in body {
+        out.push(byte);
+    }
+    return out.text();
+}
+
+pub enum TakeStatus {
+    Complete,
+    NeedMore,
+    BadHeader,
+    TooLarge,
+    BadJson
+}
+
+pub struct Taken {
+    status: TakeStatus,
+    consumed: u64,
+    // The message body, present when the frame completed. Framing only requires valid JSON — Borg
+    // reads the body into a value and classifies it afterwards, so a body that is not a frame is a
+    // framing success and a classification failure, not the other way round.
+    body: string?
+}
+
+// Matching an enum field of a borrow moves it; matching a borrow of the enum reads it.
+fn status_name<a>(status: (&a TakeStatus)) -> string {
+    match status {
+        Complete => { return "complete".text(); },
+        NeedMore => { return "need-more".text(); },
+        BadHeader => { return "bad-header".text(); },
+        TooLarge => { return "too-large".text(); },
+        BadJson => { return "bad-json".text(); }
+    }
+}
+
+pub fn status_text(taken: (&Taken)) -> string {
+    return status_name(&taken.status);
+}
+
+pub fn taken_consumed(taken: (&Taken)) -> string {
+    return borg_json::number_text(taken.consumed);
+}
+
+fn copy_optional_text<a>(value: (&a string?)) -> string? {
+    match value {
+        Some(text) => { copied := copy_text(&text); return core::some(copied); },
+        None => { return core::none<string>(); }
+    }
+}
+
+pub fn taken_body(taken: (&Taken)) -> string? {
+    return copy_optional_text(&taken.body);
+}
+
+// How a message body looks, independent of whether it is a well-formed frame: the classification
+// Borg performs on a value it has already read.
+pub fn shape_of<a>(text: (&a [u8])) -> string {
+    mut document = borg_json::null_value();
+    match borg_json::parse(&text) {
+        value: borg_json::Json => { document = value; },
+        failure: borg_json::ParseError => { return "none".text(); }
+    }
+    if borg_json::kind_of(&document) != borg_json::JsonKind::Obj {
+        return "none".text();
+    }
+    if borg_json::has(&document, "method") {
+        if borg_json::has(&document, "id") {
+            return "request".text();
+        }
+        return "notification".text();
+    }
+    if borg_json::has(&document, "result") {
+        return "result".text();
+    }
+    return "error".text();
+}
+
+pub fn copy_frame(frame: (&Frame)) -> Frame {
+    match frame {
+        Request(inner) => {
+            return request_frame(copy_id(&inner.id), copy_text(&inner.method), borg_json::copy_of(&inner.params));
+        },
+        Notification(inner) => {
+            return notification_frame(copy_text(&inner.method), borg_json::copy_of(&inner.params));
+        },
+        Result(inner) => {
+            return result_frame(copy_id(&inner.id), borg_json::copy_of(&inner.result));
+        },
+        Failure(inner) => {
+            return failure_frame(copy_id(&inner.id), inner.code, copy_text(&inner.message));
+        }
+    }
+}
+
+fn copy_id(id: (&Id)) -> Id {
+    match id {
+        Null => { return Id::Null; },
+        Num(value) => { return Id::Num(value); },
+        Text(text) => { return Id::Text(copy_text(&text)); }
+    }
+}
+
+fn taken(status: TakeStatus, consumed: u64, body: string?) -> Taken {
+    return Taken { status: status, consumed: consumed, body: body };
+}
+
+// Reads one header-framed message out of a buffer. The header terminator is the first `\r\n\r\n` or
+// `\n\n` inside the bounded prefix, matching lsp.rs::read_message.
+pub fn take_frame<a>(buffer: (&a [u8])) -> Taken {
+    mut limit = buffer.len();
+    if limit > max_header_bytes() {
+        limit = max_header_bytes();
+    }
+    mut terminator = 0;
+    mut terminator_len = 0;
+    mut i = 0;
+    while i + 3 < limit {
+        if (buffer[i] == 13) && (buffer[i + 1] == 10) && (buffer[i + 2] == 13) && (buffer[i + 3] == 10) {
+            terminator = i;
+            terminator_len = 4;
+            break;
+        }
+        i += 1;
+    }
+    if terminator_len == 0 {
+        mut j = 0;
+        while j + 1 < limit {
+            if (buffer[j] == 10) && (buffer[j + 1] == 10) {
+                terminator = j;
+                terminator_len = 2;
+                break;
+            }
+            j += 1;
+        }
+    }
+    if terminator_len == 0 {
+        if buffer.len() >= max_header_bytes() {
+            return taken(TakeStatus::BadHeader, 0, core::none<string>());
+        }
+        return taken(TakeStatus::NeedMore, 0, core::none<string>());
+    }
+    header_end := terminator + terminator_len;
+    length := header_length(&buffer, terminator);
+    match length {
+        Some(body_len) => {
+            if body_len > max_message_bytes() {
+                return taken(TakeStatus::TooLarge, 0, core::none<string>());
+            }
+            if buffer.len() < header_end + body_len {
+                return taken(TakeStatus::NeedMore, 0, core::none<string>());
+            }
+            mut body = u8[];
+            for k in header_end..header_end + body_len {
+                body.push(buffer[k]);
+            }
+            match borg_json::parse(&body) {
+                document: borg_json::Json => {
+                    return taken(TakeStatus::Complete, header_end + body_len, core::some(body.text()));
+                },
+                failure: borg_json::ParseError => { return taken(TakeStatus::BadJson, 0, core::none<string>()); }
+            }
+        },
+        None => { return taken(TakeStatus::BadHeader, 0, core::none<string>()); }
+    }
+}
+
+// `Content-Length:` is matched as a line prefix, trimmed, and parsed as a decimal count.
+fn header_length<a>(buffer: (&a [u8]), end: u64) -> u64? {
+    mut at = 0;
+    while at < end {
+        mut line_start = at;
+        while (at < end) && (buffer[at] != 10) {
+            at += 1;
+        }
+        mut line_end = at;
+        if (line_end > line_start) && (buffer[line_end - 1] == 13) {
+            line_end -= 1;
+        }
+        if prefix_is(&buffer, line_start, line_end, "Content-Length:") {
+            mut value = 0;
+            mut seen_digit = false;
+            mut k = line_start + 15;
+            while (k < line_end) && ((buffer[k] == 32) || (buffer[k] == 9)) {
+                k += 1;
+            }
+            while (k < line_end) && ((buffer[k] == 32) || (buffer[k] == 9)) {
+                k += 1;
+            }
+            while (k < line_end) && (buffer[k] >= 48) && (buffer[k] <= 57) {
+                value = value * 10 + (buffer[k] - 48);
+                seen_digit = true;
+                k += 1;
+            }
+            while (k < line_end) && ((buffer[k] == 32) || (buffer[k] == 9)) {
+                k += 1;
+            }
+            if !seen_digit || (k != line_end) {
+                return core::none<u64>();
+            }
+            return core::some(value);
+        }
+        at += 1;
+        line_start = at;
+    }
+    return core::none<u64>();
+}
+
+fn prefix_is<a, b>(buffer: (&a [u8]), start: u64, end: u64, prefix: (&b [u8])) -> bool {
+    if end < start + prefix.len() {
+        return false;
+    }
+    for i in prefix.len() {
+        if buffer[start + i] != prefix[i] {
+            return false;
+        }
+    }
+    return true;
+}
+
+// ---- dispatch ----
+//
+// `lsp.rs::request_with_timeout` (and `cancel_pending_request`): ids start at 1 and increase; at
+// most one request is in flight; starting a request first cancels the outstanding one with a
+// `$/cancelRequest` notification; while awaiting, a message carrying both a method and an id is a
+// *server* request and is answered with a null result, and any other message whose id is not the
+// awaited one is ignored rather than treated as an error.
+
+pub struct Begin {
+    id: u64,
+    cancelled: u64?
+}
+
+pub struct Dispatcher {
+    next_id: u64,
+    pending: u64?
+}
+
+impl Dispatcher {
+    fn new() -> Dispatcher {
+        return Dispatcher { next_id: 1, pending: core::none<u64>() };
+    }
+
+    // Takes the outstanding request (if any) as the one to cancel, then allocates the next id.
+    fn begin(self: (&a mut Dispatcher)) -> Begin {
+        cancelled := copy_optional(&self.pending);
+        self.pending = core::none<u64>();
+        id := self.next_id;
+        self.next_id = self.next_id + 1;
+        self.pending = core::some(id);
+        return Begin { id: id, cancelled: cancelled };
+    }
+
+    // Classifies one incoming frame against the awaited request.
+    //   "server-request"  the peer is asking us something; answer with a null result and continue
+    //   "resolved"        the awaited response arrived successfully
+    //   "failed"          the awaited response carried an error
+    //   "ignored"         anything else, including a late response to a cancelled request
+    fn incoming(self: (&a mut Dispatcher), frame: (&Frame)) -> string {
+        match frame {
+            Request(inner) => { return "server-request".text(); },
+            Failure(inner) => {
+                if self.matches(copy_id(&inner.id)) {
+                    self.pending = core::none<u64>();
+                    return "failed".text();
+                }
+                return "ignored".text();
+            },
+            Result(inner) => {
+                if self.matches(copy_id(&inner.id)) {
+                    self.pending = core::none<u64>();
+                    return "resolved".text();
+                }
+                return "ignored".text();
+            },
+            Notification(inner) => { return "ignored".text(); }
+        }
+    }
+
+    // Only a numeric id equal to the awaited one resolves the request; a string id is not a u64 and
+    // is ignored, exactly as `as_u64()` treats it upstream.
+    fn matches(self: (&a mut Dispatcher), id: Id) -> bool {
+        match id {
+            Num(value) => {
+                match copy_optional(&self.pending) {
+                    Some(waited) => { return waited == value; },
+                    None => { return false; }
+                }
+            },
+            _ => { return false; }
+        }
+    }
+}
+
+pub fn dispatcher() -> Dispatcher {
+    return Dispatcher { next_id: 1, pending: core::none<u64>() };
+}
+
+fn copy_optional<a>(value: (&a u64?)) -> u64? {
+    match value {
+        Some(number) => { return core::some(number); },
+        None => { return core::none<u64>(); }
+    }
+}
+
+pub fn begin_id(begin: (&Begin)) -> u64 {
+    return begin.id;
+}
+
+pub fn begin_cancelled(begin: (&Begin)) -> u64? {
+    return copy_optional(&begin.cancelled);
+}
+
+pub fn pending_id<a>(state: (&a Dispatcher)) -> u64? {
+    return copy_optional(&state.pending);
+}
+
+pub fn next_id<a>(state: (&a Dispatcher)) -> u64 {
+    return state.next_id;
+}
+
+// The reply to a server request while awaiting our own: `{"jsonrpc":"2.0","id":<id>,"result":null}`.
+pub fn server_request_reply(frame: (&Frame)) -> Frame? {
+    match frame {
+        Request(inner) => {
+            return core::some(result_frame(copy_id(&inner.id), borg_json::null_value()));
+        },
+        _ => { return core::none<Frame>(); }
+    }
+}
+
+// `native_mcp.rs::read_response`: a `ping` request from the peer is answered with an empty result.
+pub fn ping_reply(frame: (&Frame)) -> Frame? {
+    match frame {
+        Request(inner) => {
+            if text_equals(&inner.method, "ping") {
+                return core::some(result_frame(copy_id(&inner.id), borg_json::empty_object()));
+            }
+            return core::none<Frame>();
+        },
+        _ => { return core::none<Frame>(); }
+    }
+}

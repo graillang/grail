@@ -17,21 +17,26 @@ import { buildCompiler, command, compileProgram, execute, root } from './native.
 if (process.argv.includes('--anchors')) {
   const agentRoot = process.env.BORG_AGENT_ROOT ?? '/home/shulgin/agent';
   const manifest = JSON.parse(readFileSync(join(root, 'borg/tests/parity/anchors.json'), 'utf8'));
-  const source = readFileSync(join(agentRoot, manifest.source), 'utf8');
+  const sources = new Map();
+  const read = (file) => {
+    if (!sources.has(file)) sources.set(file, readFileSync(join(agentRoot, file), 'utf8'));
+    return sources.get(file);
+  };
   let missing = 0;
   for (const anchor of manifest.anchors) {
-    if (source.includes(anchor.snippet)) {
+    if (read(anchor.source).includes(anchor.snippet)) {
       console.log(`anchor ok      ${anchor.what}`);
     } else {
       missing += 1;
-      console.error(`anchor MISSING ${anchor.what}: ${manifest.source} no longer contains ${JSON.stringify(anchor.snippet)}`);
+      console.error(`anchor MISSING ${anchor.what}: ${anchor.source} no longer contains ${JSON.stringify(anchor.snippet)}`);
     }
   }
   if (missing > 0) {
     console.error(`\n${missing} anchor(s) missing: the ported rule has drifted from ${manifest.source}`);
     process.exit(1);
   }
-  console.log(`\n${manifest.anchors.length} anchors match ${manifest.source}`);
+  const files = [...sources.keys()].join(', ');
+  console.log(`\n${manifest.anchors.length} anchors match ${files}`);
   process.exit(0);
 }
 
@@ -54,6 +59,7 @@ const fixtures = {
   toml: ['borg/tests/fixtures/toml/configs', 'borg/tests/fixtures/toml/cases', 'borg/tests/fixtures/toml/cases/invalid'],
   config: ['borg/tests/fixtures/config'],
   session: ['borg/tests/fixtures/session'],
+  jsonrpc: ['borg/tests/fixtures/jsonrpc'],
 };
 
 function fixturePaths(name) {
@@ -68,11 +74,14 @@ function fixturePaths(name) {
   return paths;
 }
 
+// Crates that must not share a feature graph with the shared reference (see ref-acp/Cargo.toml).
+const referenceManifests = { jsonrpc: join(root, 'borg/tests/parity/ref-acp/Cargo.toml') };
+
 function referenceBinary(name) {
-  const manifest = join(referenceDirectory, 'Cargo.toml');
+  const manifest = referenceManifests[name] ?? join(referenceDirectory, 'Cargo.toml');
   if (!existsSync(manifest)) throw new Error(`missing reference crate: ${manifest}`);
   command(['cargo', 'build', '--offline', '--quiet', '--manifest-path', manifest, '--bin', name]);
-  const binary = join(referenceDirectory, 'target', 'debug', name);
+  const binary = join(manifest, '..', 'target', 'debug', name);
   if (!existsSync(binary)) throw new Error(`reference binary not built: ${binary}`);
   return binary;
 }

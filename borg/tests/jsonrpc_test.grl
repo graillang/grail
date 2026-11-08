@@ -1,0 +1,342 @@
+// JSON-RPC / ACP framing and dispatch parity test.
+//
+// Each input is a scenario. Lines are:
+//   frame <name> wire|kind|roundtrip|line|header …   an envelope built from a spec, encoded, and read back
+//   parse <name> <kind>|error …                      a document classified by the envelope rule
+//   take  <name> <status> <consumed>                 one Content-Length frame read from a buffer
+//   dispatch <name> begin|response|incoming …        the single-in-flight dispatcher
+
+use borg_json;
+use borg_jsonrpc;
+use core;
+use env;
+use fs;
+
+fn append<a, b>(out: (&a mut u8[]), text: (&b [u8])) {
+    for byte in text {
+        out.push(byte);
+    }
+}
+
+fn line_of<a, b, c, d>(label: (&a [u8]), what: (&b [u8]), one: (&c [u8]), two: (&d [u8])) {
+    mut line = u8[];
+    append(&mut line, label);
+    line.push(32);
+    append(&mut line, what);
+    line.push(32);
+    append(&mut line, one);
+    if two.len() > 0 {
+        line.push(32);
+        append(&mut line, two);
+    }
+    println(line.text());
+}
+
+fn text_is<a, b>(text: (&a [u8]), wanted: (&b [u8])) -> bool {
+    if text.len() != wanted.len() {
+        return false;
+    }
+    for i in text.len() {
+        if text[i] != wanted[i] {
+            return false;
+        }
+    }
+    return true;
+}
+
+fn text_field<a, b>(spec: (&a borg_json::Json), key: (&b [u8])) -> string? {
+    match borg_json::member(&spec, &key) {
+        Some(node) => { return borg_json::as_string(&node); },
+        None => { return core::none<string>(); }
+    }
+}
+
+fn number_field<a, b>(spec: (&a borg_json::Json), key: (&b [u8])) -> i64? {
+    match borg_json::member(&spec, &key) {
+        Some(node) => {
+            match borg_json::as_number(&node) {
+                Some(text) => { return borg_json::signed_number(&text); },
+                None => { return core::none<i64>(); }
+            }
+        },
+        None => { return core::none<i64>(); }
+    }
+}
+
+fn json_field<a, b>(spec: (&a borg_json::Json), key: (&b [u8])) -> borg_json::Json {
+    match borg_json::member(&spec, &key) {
+        Some(node) => { return node; },
+        None => { return borg_json::null_value(); }
+    }
+}
+
+fn frame_id<a>(spec: (&a borg_json::Json)) -> borg_jsonrpc::Id {
+    match borg_json::member(&spec, "id") {
+        Some(node) => {
+            mut tag = "num".text();
+            match text_field(&node, "t") {
+                Some(text) => { tag = text; },
+                None => { }
+            }
+            if text_is(&tag, "null") {
+                return borg_jsonrpc::null_id();
+            }
+            if text_is(&tag, "str") {
+                mut label = "".text();
+                match text_field(&node, "v") {
+                    Some(text) => { label = text; },
+                    None => { }
+                }
+                return borg_jsonrpc::text_id(label);
+            }
+            mut value = u64(0);
+            match number_field(&node, "v") {
+                Some(number) => { value = u64(number); },
+                None => { }
+            }
+            return borg_jsonrpc::number_id(value);
+        },
+        None => { return borg_jsonrpc::null_id(); }
+    }
+}
+
+// A spec `{"kind": …, "id": …, "method": …, "params"|"result" …, "code", "message"}` becomes a frame.
+fn build_frame<a>(spec: (&a borg_json::Json)) -> borg_jsonrpc::Frame {
+    id := frame_id(&spec);
+    mut kind = "request".text();
+    match text_field(&spec, "kind") {
+        Some(text) => { kind = text; },
+        None => { }
+    }
+    if text_is(&kind, "result") {
+        return borg_jsonrpc::result_frame(id, json_field(&spec, "result"));
+    }
+    if text_is(&kind, "error") {
+        mut code = i64(0);
+        match number_field(&spec, "code") {
+            Some(value) => { code = value; },
+            None => { }
+        }
+        mut message = "".text();
+        match text_field(&spec, "message") {
+            Some(text) => { message = text; },
+            None => { }
+        }
+        return borg_jsonrpc::failure_frame(id, code, message);
+    }
+    if text_is(&kind, "notification") {
+        mut method = "".text();
+        match text_field(&spec, "method") {
+            Some(text) => { method = text; },
+            None => { }
+        }
+        return borg_jsonrpc::notification_frame(method, json_field(&spec, "params"));
+    }
+    mut method = "".text();
+    match text_field(&spec, "method") {
+        Some(text) => { method = text; },
+        None => { }
+    }
+    return borg_jsonrpc::request_frame(id, method, json_field(&spec, "params"));
+}
+
+fn main() -> u64 {
+    args := env::args();
+    mut index = 1;
+    while index < args.len() {
+        path := args[index];
+        data := fs::read(&path)!;
+        match borg_json::parse(&data) {
+            scenario: borg_json::Json => { run(&scenario); },
+            failure: borg_json::ParseError => { }
+        }
+        index += 1;
+    }
+    return 0;
+}
+
+fn run<a>(scenario: (&a borg_json::Json)) {
+    mut name = "unnamed".text();
+    match text_field(&scenario, "name") {
+        Some(text) => { name = text; },
+        None => { }
+    }
+    if borg_json::has(&scenario, "frame") {
+        frame_case(&scenario, &name);
+        return ();
+    }
+    if borg_json::has(&scenario, "text") {
+        parse_case(&scenario, &name);
+        return ();
+    }
+    if borg_json::has(&scenario, "buffer") {
+        buffer_case(&scenario, &name);
+        return ();
+    }
+    if borg_json::has(&scenario, "ops") {
+        dispatch_case(&scenario, &name);
+    }
+}
+
+fn frame_case<a>(scenario: (&a borg_json::Json), name: (&[u8])) {
+    mut spec = borg_json::null_value();
+    match borg_json::member(&scenario, "frame") {
+        Some(node) => { spec = node; },
+        None => { }
+    }
+    frame := build_frame(&spec);
+    wire := borg_jsonrpc::encode(&frame);
+    line_of(&name, "wire", &wire, "");
+    mut kind = borg_jsonrpc::kind_of(&frame);
+    shown_id := borg_jsonrpc::id_text(&frame);
+    line_of(&name, "kind", &kind, &shown_id);
+    mut method = borg_jsonrpc::method_of(&frame);
+    code := borg_jsonrpc::code_of(&frame);
+    line_of(&name, "method", &method, &code);
+    // The writer is checked against the reader.
+    match borg_json::parse(&wire) {
+        document: borg_json::Json => {
+            match borg_jsonrpc::parse(&borg_json::write(&document)) {
+                again: borg_jsonrpc::Frame => {
+                    mut same = borg_jsonrpc::kind_of(&again).len() == kind.len();
+                    if same {
+                        same = borg_jsonrpc::id_text(&again).len() == borg_jsonrpc::id_text(&frame).len();
+                    }
+                    if same {
+                        line_of(&name, "roundtrip", "ok", "");
+                    } else {
+                        line_of(&name, "roundtrip", "fail", "");
+                    }
+                },
+                failure: borg_jsonrpc::FrameError => { line_of(&name, "roundtrip", "fail", ""); }
+            }
+        },
+        failure: borg_json::ParseError => { line_of(&name, "roundtrip", "fail", ""); }
+    }
+    line_frame := borg_jsonrpc::line(&frame);
+    line_size := borg_json::number_text(line_frame.len());
+    line_of(&name, "line", &line_size, "");
+    framed := borg_jsonrpc::content_length(&frame);
+    header_size := borg_json::number_text(framed.len());
+    line_of(&name, "header", &header_size, "");
+}
+
+fn parse_case<a>(scenario: (&a borg_json::Json), name: (&[u8])) {
+    mut text = "".text();
+    match text_field(&scenario, "text") {
+        Some(value) => { text = value; },
+        None => { }
+    }
+    match borg_jsonrpc::parse(&text) {
+        frame: borg_jsonrpc::Frame => {
+            kind := borg_jsonrpc::kind_of(&frame);
+            seen_id := borg_jsonrpc::id_text(&frame);
+            line_of(&name, "frame", &kind, &seen_id);
+            method := borg_jsonrpc::method_of(&frame);
+            code := borg_jsonrpc::code_of(&frame);
+            line_of(&name, "method", &method, &code);
+        },
+        failure: borg_jsonrpc::FrameError => {
+            mut reason = "not-object".text();
+            match failure {
+                NotObject => { reason = "not-object".text(); },
+                BadVersion => { reason = "bad-version".text(); },
+                NoKind => { reason = "no-kind".text(); },
+                BadId => { reason = "bad-id".text(); },
+                BadMethod => { reason = "bad-method".text(); },
+                BadError => { reason = "bad-error".text(); }
+            }
+            line_of(&name, "error", &reason, "");
+        }
+    }
+}
+
+fn buffer_case<a>(scenario: (&a borg_json::Json), name: (&[u8])) {
+    mut buffer = "".text();
+    match text_field(&scenario, "buffer") {
+        Some(value) => { buffer = value; },
+        None => { }
+    }
+    taken := borg_jsonrpc::take_frame(&buffer);
+    status := borg_jsonrpc::status_text(&taken);
+    consumed := borg_jsonrpc::taken_consumed(&taken);
+    line_of(&name, "status", &status, &consumed);
+    match borg_jsonrpc::taken_body(&taken) {
+        Some(body) => {
+            kind := borg_jsonrpc::shape_of(&body);
+            line_of(&name, "frame", &kind, "");
+        },
+        None => { }
+    }
+}
+
+fn dispatch_case<a>(scenario: (&a borg_json::Json), name: (&[u8])) {
+    // The dispatcher is only ever touched through method receivers inside this loop: a `&mut`
+    // argument to a free function cannot cross a loop back edge.
+    mut state = borg_jsonrpc::dispatcher();
+    mut ops = borg_json::null_value();
+    match borg_json::member(&scenario, "ops") {
+        Some(node) => { ops = node; },
+        None => { }
+    }
+    mut index = 0;
+    while index < borg_json::array_len(&ops) {
+        mut op = borg_json::null_value();
+        match borg_json::array_item(&ops, index) {
+            Some(node) => { op = node; },
+            None => { }
+        }
+        mut kind = "".text();
+        match text_field(&op, "op") {
+            Some(text) => { kind = text; },
+            None => { }
+        }
+        mut which = 0;
+        if text_is(&kind, "begin") {
+            which = 1;
+        }
+        if text_is(&kind, "response") {
+            which = 2;
+        }
+        if text_is(&kind, "server-request") {
+            which = 3;
+        }
+        if which == 1 {
+            begun := state.begin();
+            mut cancelled = "-".text();
+            match borg_jsonrpc::begin_cancelled(&begun) {
+                Some(value) => { cancelled = borg_json::number_text(value); },
+                None => { }
+            }
+            begun_id := borg_json::number_text(borg_jsonrpc::begin_id(&begun));
+            line_of(&name, "begin", &begun_id, &cancelled);
+        }
+        if which == 2 {
+            id := response_id(&op);
+            answer := borg_jsonrpc::result_frame(borg_jsonrpc::number_id(id), borg_json::null_value());
+            outcome := state.incoming(&answer);
+            line_of(&name, "response", &outcome, "");
+        }
+        if which == 3 {
+            id := response_id(&op);
+            request := borg_jsonrpc::request_frame(borg_jsonrpc::number_id(id), "window/workDoneProgress/create".text(), borg_json::null_value());
+            outcome := state.incoming(&request);
+            line_of(&name, "incoming", &outcome, "");
+        }
+        if which == 0 {
+            notification := borg_jsonrpc::notification_frame("textDocument/publishDiagnostics".text(), borg_json::null_value());
+            seen := state.incoming(&notification);
+            line_of(&name, "incoming", &seen, "");
+        }
+        index += 1;
+    }
+}
+
+fn response_id<a>(op: (&a borg_json::Json)) -> u64 {
+    mut value = u64(0);
+    match number_field(op, "id") {
+        Some(number) => { value = u64(number); },
+        None => { }
+    }
+    return value;
+}

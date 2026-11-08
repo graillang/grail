@@ -1,9 +1,10 @@
 # Borg Agent CPU port
 
-The first three bounded increments of the Borg Agent → Grail port: the JSON substrate its wire
-documents are made of, the TOML its configuration files are written in, the protocol-v1 envelope
-header that classifies a document, the `agent.toml` loader that applies Borg's compiled-in
-defaults, and the local-session ownership state that decides whether a session still has an owner.
+Four bounded increments of the Borg Agent → Grail port: the JSON substrate its wire documents are
+made of, the TOML its configuration files are written in, the protocol-v1 envelope header that
+classifies a document, the `agent.toml` loader that applies Borg's compiled-in defaults, the
+local-session ownership state that decides whether a session still has an owner, and the JSON-RPC
+frames plus single-in-flight dispatch that ACP, LSP and MCP conversations are built from.
 Borg Agent is read-only here; the reference is its own JSON semantics — `serde_json` 1.0.151 with
 `arbitrary_precision`, the crate version and feature set `crates/borg-*` build with. The plan and
 staging live in [docs/design/borg-agent-port.md](../docs/design/borg-agent-port.md).
@@ -14,11 +15,13 @@ src/wire.grl                 protocol-v1 envelope header: discriminant, protocol
 src/toml.grl                 TOML subset parser, table assembly, shape walk, accessors
 src/config.grl               `agent.toml` → effective settings with Borg's compiled-in defaults
 src/session_state.grl        owner record codec, executable identity, `/proc` start time, liveness
+src/jsonrpc.grl              JSON-RPC frames, stdio and Content-Length framing, dispatcher state
 tests/json_test.grl          JSON: `json.compact`, `json.scalar`, `json.error` per document
 tests/wire_test.grl          protocol: `wire.header <file> <field> <value>`, `wire.error <file> <path> <reason>`
 tests/toml_test.grl          TOML: `toml.value <file> <path> <kind> <text>`, `toml.error <file>`
 tests/config_test.grl        config: `config.value <file> <key> <value>`, `config.error <file> <path>`
 tests/session_test.grl       ownership: `case <name> record|field|active|state|obsolete|start|identity …`
+tests/jsonrpc_test.grl       frames: `frame|parse|take|dispatch <name> …`
 tests/fixtures/v1/           Borg's protocol-v1 conformance corpus, copied verbatim
 tests/fixtures/edge/         number, escape, structure, nesting-limit and malformed documents
 tests/fixtures/wire/         envelope mutations: missing, mistyped, wrong protocol, wrong version
@@ -26,17 +29,20 @@ tests/fixtures/toml/configs/ Borg's shipped example configurations, copied verba
 tests/fixtures/toml/cases/   TOML constructs and invalid documents
 tests/fixtures/config/       `agent.toml` documents: full, partial, empty, wrong-typed, negative
 tests/fixtures/session/      ownership scenarios: records, process observations, stat lines
+tests/fixtures/jsonrpc/      frame specs, parse cases, framed buffers, dispatch scripts
 tests/parity/json.rs         the reference: serde_json compact re-serialisation and scalar walk
 tests/parity/wire.rs         the reference: the same header rule over serde_json values
 tests/parity/toml.rs         the reference: the toml crate's value model, walked in the same order
 tests/parity/config.rs       the reference: Borg's defaults applied to a toml value
 tests/parity/session.rs      the reference: Borg's ownership rules, copied verbatim, with citations
+tests/parity/ref-acp/        separate crate: the envelope built with agent-client-protocol-schema
 tests/parity/anchors.json    the source snippets those rules depend on (checked by `--anchors`)
 tests/parity/json.txt        committed reference output (141 lines, 20 documents)
 tests/parity/wire.txt        committed reference output (46 lines, 11 documents)
 tests/parity/toml.txt        committed reference output (230 lines, 13 documents)
 tests/parity/config.txt      committed reference output (66 lines, 6 documents)
 tests/parity/session.txt     committed reference output (120 lines, 23 documents)
+tests/parity/jsonrpc.txt     committed reference output (71 lines, 22 documents)
 tools/borg-test.mjs          build + compile + run + diff
 ```
 
@@ -44,12 +50,13 @@ tools/borg-test.mjs          build + compile + run + diff
 
 ```sh
 just borg-test                          # hermetic: diff against the committed reference
-bun tools/borg-test.mjs --regenerate    # rebuild all five references offline (serde_json, toml)
+bun tools/borg-test.mjs --regenerate    # rebuild all six references offline
 bun tools/borg-test.mjs --anchors       # re-check the copied rules against the Borg checkout
 ```
 
-`--regenerate` builds `borg/tests/parity/ref`, a five-binary Rust crate, with `cargo build --offline`
-against the cached `serde_json` 1.0.151 and `toml` 1.1.4. It needs no network and no Borg checkout: the fixtures are
+`--regenerate` builds `borg/tests/parity/ref` (five binaries) and `ref-acp` (one) with
+`cargo build --offline` against the cached `serde_json` 1.0.151, `toml` 1.1.4 and
+`agent-client-protocol-schema` 1.5.0. It needs no network and no Borg checkout: the fixtures are
 committed, and both sides read the same bytes in the same order (the runner passes the sorted file
 list on argv).
 
@@ -75,8 +82,11 @@ and field:
 - `case <name> …`: one scenario per file — the decoded owner record and its fields, the `roundtrip`
   of encoding it back, the `/proc` start-time parse, the identity format, and the derived `active`,
   `state` and `obsolete` decisions.
+- `frame|parse|take|dispatch <name> …`: an envelope built from a spec and its canonical bytes; a
+  document classified by the envelope rule; one framed message read out of a buffer; and the
+  outcome of a dispatch script.
 
-The suite compares **603 lines over 73 documents**, and every value in them comes from
+The suite compares **674 lines over 95 documents**, and every value in them comes from
 `serde_json` rather than from a restatement: the reference parses with Borg's own crate and prints
 what it parsed. `wire.rs` and `config.rs` pin the v1 header *rule* and the default table (no Rust program classifies
 these fixtures, or loads this config without building the whole 363k-line Borg workspace), and use
@@ -174,6 +184,30 @@ therefore carries the six functions verbatim, each with its line citation, and
 `bun tools/borg-test.mjs --anchors` fails if any of them disappears from the Borg checkout, so an
 upstream rule change breaks this suite loudly instead of drifting — deliberately verified by
 breaking an anchor.
+
+## JSON-RPC: frames, framing and dispatch
+
+The envelope is the Agent Client Protocol's: `agent-client-protocol-schema` 1.5.0 is the reference,
+and the port matches its bytes exactly — `"params": null` when there are no parameters,
+`"result": null` for a null result, an id that may be a number, a string or null, and the crate's
+own field order. Three Borg behaviours are copied with citations and anchors:
+
+| Rule | Source | Ported as |
+| --- | --- | --- |
+| stdio framing: one compact object per line, 8 MiB cap | `native_mcp.rs:15`, `write` | `line` |
+| header framing: `Content-Length: N\r\n\r\n`, 8 KiB header cap, 8 MiB body cap, `\r\n\r\n` or `\n\n` | `lsp.rs:1487`, `read_message` | `content_length`, `take_frame` |
+| dispatch: ids from 1, one in flight, server requests answered with null, unrelated ids ignored, superseded request cancelled | `lsp.rs:1355-1408` | `Dispatcher` |
+
+A completed frame only requires **valid JSON**: Borg reads the body into a value and classifies it
+afterwards, so `shape_of` reports how a body would classify without making it a framing error. The
+first version of this increment got that backwards and the suite caught it.
+
+**A reference-crate hazard worth recording.** `agent-client-protocol-schema` enables
+`serde_json`'s `preserve_order`, which turns every JSON map into an insertion-ordered one. Cargo
+unifies features per build graph, so adding that crate to the shared reference silently changed the
+*JSON and TOML reference outputs* — caught because the suite diffs them. The ACP reference now lives
+in its own crate (`tests/parity/ref-acp`), with its own manifest, so one reference's dependencies
+cannot redefine another's output.
 
 ## Limits and findings
 

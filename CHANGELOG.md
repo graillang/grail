@@ -4,6 +4,19 @@
 
 - Reserve `VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC` in the Vulkan descriptor pool, matching
   set 1; the new SDL3 surface test’s validation layer had exposed the missing pool size.
+- Port Borg Agent's JSON-RPC framing and dispatch (`borg/`). `src/jsonrpc.grl` models the ACP
+  envelope — request, notification, result and error frames with numeric, string or null ids — and
+  matches `agent-client-protocol-schema` 1.5.0 byte for byte, including `"params": null`,
+  `"result": null` and the crate's field order. It carries both framings Borg uses: newline-delimited
+  stdio messages with the 8 MiB cap (`native_mcp.rs`), and `Content-Length` headers with the 8 KiB
+  header and 8 MiB body caps, accepting `\r\n\r\n` or `\n\n` (`lsp.rs`). Dispatch follows
+  `lsp.rs::request_with_timeout`: ids from 1, a single request in flight, the superseded one
+  cancelled, server requests answered with a null result, and unrelated ids ignored. Framing
+  accepts any valid JSON body and classification is separate, as it is upstream. The ACP reference
+  lives in its own crate because that crate enables serde_json's `preserve_order`, which would
+  otherwise have silently changed every other reference's output. The port now checks 674 reference
+  lines over 95 documents, and `--anchors` verifies 20 copied snippets across three source files.
+  Sockets, transports and UI remain out of scope.
 - Port Borg Agent's local-session ownership state (`borg/`). `src/session_state.grl` carries the
   owner record (`schema_version`, `pid`, `executable_identity`, optional `package_version` and
   `process_start_time`) through the JSON codec, the `dev:ino:len:mtime:mtime_nsec` executable

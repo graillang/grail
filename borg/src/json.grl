@@ -778,6 +778,116 @@ pub fn empty_members() -> Member[] {
     return Member[];
 }
 
+pub fn null_value() -> Json {
+    return Json::Null;
+}
+
+pub fn empty_object() -> Json {
+    return Json::Obj(empty_members());
+}
+
+pub fn new_member<a, b>(key: (&a [u8]), value: Json) -> Member {
+    mut out = u8[];
+    for byte in key {
+        out.push(byte);
+    }
+    return Member { key: out.text(), value: value };
+}
+
+// Whole-number JSON text to u64: a fractional or exponent form is not a count.
+pub fn whole_number<a>(text: (&a [u8])) -> u64? {
+    if text.len() == 0 {
+        return core::none<u64>();
+    }
+    mut value = 0;
+    mut index = 0;
+    while index < text.len() {
+        byte := text[index];
+        if (byte < 48) || (byte > 57) {
+            return core::none<u64>();
+        }
+        if value > 1844674407370955161 {
+            return core::none<u64>();
+        }
+        next := value * 10;
+        if next > 18446744073709551615 - (byte - 48) {
+            return core::none<u64>();
+        }
+        value = next + (byte - 48);
+        index += 1;
+    }
+    return core::some(value);
+}
+
+// Signed integer text, for values such as JSON-RPC error codes.
+pub fn signed_number<a>(text: (&a [u8])) -> i64? {
+    if text.len() == 0 {
+        return core::none<i64>();
+    }
+    mut at = 0;
+    mut negative = false;
+    if text[0] == 45 {
+        negative = true;
+        at = 1;
+    }
+    if at >= text.len() {
+        return core::none<i64>();
+    }
+    mut value = u64(0);
+    while at < text.len() {
+        byte := text[at];
+        if (byte < 48) || (byte > 57) {
+            return core::none<i64>();
+        }
+        if value > 922337203685477580 {
+            return core::none<i64>();
+        }
+        value = value * 10 + (byte - 48);
+        at += 1;
+    }
+    if negative {
+        return core::some(0 - i64(value));
+    }
+    return core::some(i64(value));
+}
+
+pub fn number_text(value: u64) -> string {
+    mut digits = u8[];
+    append_digits(&mut digits, value);
+    return digits.text();
+}
+
+pub fn signed_text(value: i64) -> string {
+    mut digits = u8[];
+    append_signed(&mut digits, value);
+    return digits.text();
+}
+
+pub fn append_digits<a>(out: (&a mut u8[]), value: u64) {
+    if value == 0 {
+        out.push(48);
+        return ();
+    }
+    mut reversed_digits = u8[];
+    mut left = value;
+    while left > 0 {
+        reversed_digits.push(48 + left % 10);
+        left = left / 10;
+    }
+    while reversed_digits.len() > 0 {
+        out.push(reversed_digits.pop());
+    }
+}
+
+pub fn append_signed<a>(out: (&a mut u8[]), value: i64) {
+    mut magnitude = value;
+    if value < 0 {
+        out.push(45);
+        magnitude = 0 - value;
+    }
+    append_digits(out, u64(magnitude));
+}
+
 pub fn kind_of<a>(value: (&a Json)) -> JsonKind {
     match value {
         Null => { return JsonKind::Null; },

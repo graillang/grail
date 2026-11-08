@@ -43,62 +43,14 @@ pub enum OwnerState {
     Active
 }
 
-// Whole-number JSON text to u64; a fractional or exponent form is not a pid or a timestamp.
 pub fn parse_whole<a>(text: (&a [u8])) -> u64? {
-    if text.len() == 0 {
-        return core::none<u64>();
-    }
-    mut value = 0;
-    mut index = 0;
-    while index < text.len() {
-        byte := text[index];
-        if (byte < 48) || (byte > 57) {
-            return core::none<u64>();
-        }
-        if value > 1844674407370955161 {
-            return core::none<u64>();
-        }
-        next := value * 10;
-        if next > 18446744073709551615 - (byte - 48) {
-            return core::none<u64>();
-        }
-        value = next + (byte - 48);
-        index += 1;
-    }
-    return core::some(value);
+    return borg_json::whole_number(&text);
 }
 
 // Timestamps arrive as i64 (a device `mtime` can be negative on some filesystems), pids and start
 // times as u64.
 pub fn parse_signed<a>(text: (&a [u8])) -> i64? {
-    if text.len() == 0 {
-        return core::none<i64>();
-    }
-    mut at = 0;
-    mut negative = false;
-    if text[0] == 45 {
-        negative = true;
-        at = 1;
-    }
-    if at >= text.len() {
-        return core::none<i64>();
-    }
-    mut value = u64(0);
-    while at < text.len() {
-        byte := text[at];
-        if (byte < 48) || (byte > 57) {
-            return core::none<i64>();
-        }
-        if value > 922337203685477580 {
-            return core::none<i64>();
-        }
-        value = value * 10 + (byte - 48);
-        at += 1;
-    }
-    if negative {
-        return core::some(0 - i64(value));
-    }
-    return core::some(i64(value));
+    return borg_json::signed_number(&text);
 }
 
 fn required_int<a, b>(value: (&a borg_json::Json), key: (&b [u8])) -> u64 | RecordError {
