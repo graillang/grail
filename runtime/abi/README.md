@@ -60,7 +60,7 @@ tools/abi-test.mjs        test runner (also `just abi-test`)
 | Time | header | n/a | monotonic/realtime/CPU, sleep, local offset | monotonic/realtime/CPU, sleep | monotonic/realtime/CPU, sleep |
 | Threads/sync | header | handle table | complete subset | thread/mutex/condvar | thread/mutex/condvar |
 | Dynamic libraries | header | handle table | complete subset | LoadLibraryExW/GetProcAddress | dlopen/dlsym |
-| Processes | header | options/status layout | fork/execve/wait4 subset | not implemented | not implemented |
+| Processes | header | options/status layout | fork/execve/wait4 subset | CreateProcessW subset | posix_spawn subset |
 | Sockets/DNS | header | address layout | TCP/UDP IPv4+IPv6, options, DNS | not implemented | not implemented |
 
 "Complete subset" means the documented functions are implemented and tested for that platform;
@@ -111,13 +111,17 @@ open/read/write/seek/truncate/sync/stat/close; pipes; path stat, mkdir (includin
 remove and rename; `FindFirstFileW`/`FindNextFileW` directory iteration; `CreateThread`/
 `WaitForSingleObject` threads; `SRWLOCK` mutexes and `CONDITION_VARIABLE` condition variables;
 `LoadLibraryExW`/`GetProcAddress`/`FreeLibrary` with `FormatMessageW` loader errors.
-`windows/grail_os_windows_stubs.c` returns `GRAIL_E_UNSUPPORTED` for non-blocking files,
-readlink/realpath, local-time offsets, processes and sockets. Capabilities are
+Child processes use `CreateProcessW` with a validated argv/environment, UTF-16 environment
+block, working directory, inheritable standard handles (explicit, inherited or NUL), Win32
+search path, wait/timeout, terminate/kill and process ids. `windows/grail_os_windows_stubs.c`
+returns `GRAIL_E_UNSUPPORTED` for non-blocking files, readlink/realpath, local-time offsets and
+sockets. Capabilities are
 `GRAIL_CAP_FILES | GRAIL_CAP_FILE_METADATA | GRAIL_CAP_PATHS | GRAIL_CAP_UNICODE |
 GRAIL_CAP_ENVIRONMENT | GRAIL_CAP_ENV_MUTATION | GRAIL_CAP_TIME | GRAIL_CAP_CPU_TIME |
 GRAIL_CAP_DIRECTORIES | GRAIL_CAP_THREADS | GRAIL_CAP_SYNC_PRIMITIVES |
-GRAIL_CAP_DYNAMIC_LIBRARIES`. Thread names are not applied, and `GRAIL_DL_LAZY`/`GLOBAL`
-are accepted as no-ops because Win32 has no direct equivalents.
+GRAIL_CAP_DYNAMIC_LIBRARIES | GRAIL_CAP_PROCESSES`. Thread names are not applied,
+`GRAIL_DL_LAZY`/`GLOBAL` are accepted as no-ops because Win32 has no direct equivalents, and
+`terminate` falls back to `TerminateProcess` when no console control event can be delivered.
 
 All paths cross the boundary as UTF-8 and are converted to UTF-16 with
 `MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS)`; output paths use
@@ -191,13 +195,15 @@ open/read/write/seek/truncate/sync/set-non-blocking/close with `O_CLOEXEC`; pipe
 `opendir`/`readdir` directory iteration with a pinned 64-bit `struct dirent`;
 `pthread_create`/`pthread_join`/`pthread_detach` threads; pthread mutexes and relative-time
 condition variables; `dlopen`/`dlsym`/`dlclose` with loader error text.
-`macos/grail_os_macos_stubs.c` returns `GRAIL_E_UNSUPPORTED` for metadata, local-time
-offsets, processes and sockets. Capabilities are
+Child processes use `posix_spawn` with argv/environment blocks, file actions for stdio and
+working directory, `NEW_GROUP` via `POSIX_SPAWN_SETPGROUP`, and `waitpid` wait/timeout plus
+`kill` terminate/kill. `macos/grail_os_macos_stubs.c` returns `GRAIL_E_UNSUPPORTED` for
+metadata, local-time offsets and sockets. Capabilities are
 `GRAIL_CAP_FILES | GRAIL_CAP_FILE_NONBLOCKING | GRAIL_CAP_PATHS | GRAIL_CAP_UNICODE |
 GRAIL_CAP_ENVIRONMENT | GRAIL_CAP_ENV_MUTATION | GRAIL_CAP_TIME | GRAIL_CAP_CPU_TIME |
 GRAIL_CAP_SYMLINKS | GRAIL_CAP_DIRECTORIES | GRAIL_CAP_THREADS |
-GRAIL_CAP_SYNC_PRIMITIVES | GRAIL_CAP_DYNAMIC_LIBRARIES`; `GRAIL_CAP_FILE_METADATA` is
-clear because no `struct stat` layout is pinned yet.
+GRAIL_CAP_SYNC_PRIMITIVES | GRAIL_CAP_DYNAMIC_LIBRARIES | GRAIL_CAP_PROCESSES`;
+`GRAIL_CAP_FILE_METADATA` is clear because no `struct stat` layout is pinned yet.
 
 ## macOS implementation and remaining mapping
 
@@ -261,7 +267,10 @@ Limits of this evidence:
   is clear. `mode` is not represented by Win32 file creation, and `file_truncate` moves the
   file pointer. Directory patterns use the normal Win32 path rules, not `\\?\` long paths.
   Thread names are ignored and `GRAIL_DL_LAZY`/`GLOBAL` are no-ops on Windows; parent
-  creation for UNC paths is not supported. macOS `rename` without `GRAIL_RENAME_REPLACE`
+  creation for UNC paths is not supported. Windows `SEARCH_PATH` uses the native Win32 search
+  order and parent environment, and the environment block is emitted in runtime order. macOS
+  `posix_spawn_file_actions_addchdir_np` requires macOS 10.15 or later, and `NO_WINDOW` is a
+  no-op. Process-close never waits or kills on either platform. macOS `rename` without `GRAIL_RENAME_REPLACE`
   checks existence with `access`; the check is best-effort and races with a concurrent
   creator. The pinned Darwin `struct dirent` layout is used without the SDK, and `DT_UNKNOWN`
   entries report `GRAIL_FILE_KIND_UNKNOWN` because metadata is unavailable. Thread names are

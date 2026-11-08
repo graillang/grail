@@ -3,12 +3,14 @@
  *
  * Implemented: initialization, capabilities, thread-local raw error detail,
  * monotonic/realtime/CPU clocks and sleep, environment reads/mutation/iteration,
- * current directory, executable path, and file basics (open/read/write/seek/
- * truncate/sync/stat/close, pipe, attributes, mkdir/remove/rename).
+ * current directory, executable path, file basics (open/read/write/seek/
+ * truncate/sync/stat/close, pipe, attributes, mkdir/remove/rename), directory
+ * iteration, threads/mutex/condition variables, dynamic libraries and child
+ * processes.
  *
- * Sockets, processes, threads, synchronization, dynamic libraries, directory
- * iteration, symlink reads and realpath remain explicit UNSUPPORTED in
- * grail_os_windows_stubs.c.  The Win32 declarations live in grail_win32.h so
+ * Sockets, local-time offsets, non-blocking files and symlink read/realpath
+ * remain explicit UNSUPPORTED in grail_os_windows_stubs.c.  The Win32
+ * declarations live in grail_win32.h so
  * the backend can be compiled for Win64 on a host without the Windows SDK.
  * This is static evidence only; it has not been executed on Windows.
  */
@@ -20,6 +22,7 @@
 #include "../../../include/grail/grail_error.h"
 #include "../../../include/grail/grail_fs.h"
 #include "../../../include/grail/grail_path.h"
+#include "../../../include/grail/grail_proc.h"
 #include "../../../include/grail/grail_thread.h"
 #include "../../../include/grail/grail_time.h"
 #include "../grail_env_store.h"
@@ -59,6 +62,14 @@ typedef struct grail_win32_condvar {
     CONDITION_VARIABLE condition;
 } grail_win32_condvar;
 
+typedef struct grail_win32_process {
+    HANDLE handle;
+    DWORD pid;
+    DWORD exit_code;
+    int reaped;
+    int new_group;
+} grail_win32_process;
+
 typedef struct grail_win32_library {
     HANDLE module;
 } grail_win32_library;
@@ -77,6 +88,7 @@ typedef struct grail_win32_state {
     grail_handle_table mutexes;
     grail_handle_table condvars;
     grail_handle_table libraries;
+    grail_handle_table processes;
     grail_env_store env;
     SRWLOCK lock;
     uint64_t capabilities;
@@ -84,6 +96,7 @@ typedef struct grail_win32_state {
 } grail_win32_state;
 
 static grail_win32_state grail_windows = {{0, NULL, NULL, NULL, NULL},
+                                          {NULL, NULL, 0, 0, 0},
                                           {NULL, NULL, 0, 0, 0},
                                           {NULL, NULL, 0, 0, 0},
                                           {NULL, NULL, 0, 0, 0},
@@ -373,6 +386,10 @@ grail_status grail_os_init(const grail_allocator *allocator, const grail_startup
                                          GRAIL_HANDLE_KIND_LIBRARY);
     }
     if (status == GRAIL_OK) {
+        status = grail_handle_table_init(&grail_windows.processes, &grail_windows.allocator,
+                                         GRAIL_HANDLE_KIND_PROCESS);
+    }
+    if (status == GRAIL_OK) {
         status = grail_env_store_init(&grail_windows.env, &grail_windows.allocator);
     }
     if (status == GRAIL_OK) {
@@ -386,6 +403,7 @@ grail_status grail_os_init(const grail_allocator *allocator, const grail_startup
         grail_handle_table_destroy(&grail_windows.mutexes);
         grail_handle_table_destroy(&grail_windows.condvars);
         grail_handle_table_destroy(&grail_windows.libraries);
+        grail_handle_table_destroy(&grail_windows.processes);
         grail_env_store_free(&grail_windows.env);
         return status;
     }
@@ -393,7 +411,8 @@ grail_status grail_os_init(const grail_allocator *allocator, const grail_startup
                                  GRAIL_CAP_UNICODE | GRAIL_CAP_ENVIRONMENT |
                                  GRAIL_CAP_ENV_MUTATION | GRAIL_CAP_TIME | GRAIL_CAP_CPU_TIME |
                                  GRAIL_CAP_DIRECTORIES | GRAIL_CAP_THREADS |
-                                 GRAIL_CAP_SYNC_PRIMITIVES | GRAIL_CAP_DYNAMIC_LIBRARIES;
+                                 GRAIL_CAP_SYNC_PRIMITIVES | GRAIL_CAP_DYNAMIC_LIBRARIES |
+                                 GRAIL_CAP_PROCESSES;
     grail_windows.initialized = 1;
     return GRAIL_OK;
 }
@@ -409,6 +428,7 @@ grail_status grail_os_shutdown(void) {
     grail_handle_table_destroy(&grail_windows.mutexes);
     grail_handle_table_destroy(&grail_windows.condvars);
     grail_handle_table_destroy(&grail_windows.libraries);
+    grail_handle_table_destroy(&grail_windows.processes);
     grail_env_store_free(&grail_windows.env);
     grail_windows.capabilities = 0;
     grail_windows.initialized = 0;
@@ -1557,6 +1577,592 @@ grail_result grail_os_dl_error(uint8_t *out, uint64_t capacity) {
     return grail_abi_copy_out((const uint8_t *)grail_windows_loader_error,
                               grail_windows_text_length(grail_windows_loader_error), out,
                               capacity);
+}
+
+
+static int grail_windows_block_valid(const uint8_t *block, uint64_t length,
+                                     const uint64_t *offsets, uint64_t count) {
+    if (count == 0) {
+        return 1;
+    }
+    if (block == NULL || offsets == NULL || length == 0) {
+        return 0;
+    }
+    for (uint64_t i = 0; i < count; i++) {
+        const uint64_t begin = offsets[i];
+        const uint64_t end = i + 1 < count ? offsets[i + 1] : length;
+        if (begin >= end || end > length) {
+            return 0;
+        }
+        if (block[end - 1] != 0 || grail_windows_has_zero(block + begin, end - begin - 1)) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static grail_status grail_windows_build_child_env(const grail_process_options *options,
+                                                  grail_env_store *child) {
+    grail_status status = grail_env_store_init(child, &grail_windows.allocator);
+    if (status != GRAIL_OK) {
+        return status;
+    }
+    if ((options->flags & GRAIL_PROC_REPLACE_ENVIRONMENT) == 0) {
+        grail_windows_lock();
+        const uint64_t count = grail_env_store_count(&grail_windows.env);
+        for (uint64_t i = 0; i < count; i++) {
+            const char *name = NULL;
+            const char *value = NULL;
+            uint64_t name_length = 0;
+            uint64_t value_length = 0;
+            status = grail_env_store_at(&grail_windows.env, i, &name, &name_length, &value,
+                                        &value_length);
+            if (status == GRAIL_OK) {
+                status = grail_env_store_set(child, (const uint8_t *)name, name_length,
+                                             (const uint8_t *)value, value_length);
+            }
+            if (status != GRAIL_OK) {
+                grail_windows_unlock();
+                return status;
+            }
+        }
+        grail_windows_unlock();
+    }
+    grail_startup overlay;
+    for (uint64_t i = 0; i < sizeof(overlay); i++) {
+        ((uint8_t *)&overlay)[i] = 0;
+    }
+    overlay.struct_size = sizeof(overlay);
+    overlay.abi_version = GRAIL_ABI_VERSION;
+    overlay.environment = options->environment;
+    overlay.environment_length = options->environment_length;
+    overlay.environment_offsets = options->environment_offsets;
+    overlay.environment_count = options->environment_count;
+    return grail_env_store_seed(child, &overlay);
+}
+
+static grail_status grail_windows_environment_block(const grail_env_store *environment,
+                                                     WCHAR **out, uint64_t *out_units) {
+    uint64_t bytes = 0;
+    const uint64_t count = grail_env_store_count(environment);
+    for (uint64_t i = 0; i < count; i++) {
+        const char *name = NULL;
+        const char *value = NULL;
+        uint64_t name_length = 0;
+        uint64_t value_length = 0;
+        const grail_status status =
+            grail_env_store_at(environment, i, &name, &name_length, &value, &value_length);
+        if (status != GRAIL_OK) {
+            return status;
+        }
+        bytes += name_length + value_length + 2;
+        if (bytes > (uint64_t)INT32_MAX) {
+            return GRAIL_E_OVERFLOW;
+        }
+    }
+    bytes += 1;
+    if (bytes > (uint64_t)INT32_MAX) {
+        return GRAIL_E_OVERFLOW;
+    }
+    uint8_t *block = (uint8_t *)grail_windows_allocate(bytes == 0 ? 1 : bytes);
+    if (block == NULL) {
+        return GRAIL_E_OUT_OF_MEMORY;
+    }
+    uint64_t at = 0;
+    for (uint64_t i = 0; i < count; i++) {
+        const char *name = NULL;
+        const char *value = NULL;
+        uint64_t name_length = 0;
+        uint64_t value_length = 0;
+        (void)grail_env_store_at(environment, i, &name, &name_length, &value, &value_length);
+        for (uint64_t j = 0; j < name_length; j++) block[at++] = (uint8_t)name[j];
+        block[at++] = '=';
+        for (uint64_t j = 0; j < value_length; j++) block[at++] = (uint8_t)value[j];
+        block[at++] = 0;
+    }
+    block[at++] = 0;
+    const int32_t needed = MultiByteToWideChar(GRAIL_CP_UTF8, GRAIL_MB_ERR_INVALID_CHARS,
+                                               (const char *)block, (int32_t)at, NULL, 0);
+    if (needed <= 0) {
+        const DWORD error = GetLastError();
+        grail_windows_release(block, bytes == 0 ? 1 : bytes);
+        return error == GRAIL_ERROR_NO_UNICODE_TRANSLATION ? grail_windows_invalid_utf8()
+                                                           : grail_windows_fail(error);
+    }
+    WCHAR *wide = (WCHAR *)grail_windows_allocate(((uint64_t)needed + 1) * sizeof(WCHAR));
+    if (wide == NULL) {
+        grail_windows_release(block, bytes == 0 ? 1 : bytes);
+        return GRAIL_E_OUT_OF_MEMORY;
+    }
+    const int32_t written = MultiByteToWideChar(GRAIL_CP_UTF8, GRAIL_MB_ERR_INVALID_CHARS,
+                                                (const char *)block, (int32_t)at, wide, needed);
+    grail_windows_release(block, bytes == 0 ? 1 : bytes);
+    if (written != needed) {
+        const DWORD error = GetLastError();
+        grail_windows_release(wide, ((uint64_t)needed + 1) * sizeof(WCHAR));
+        return grail_windows_fail(error);
+    }
+    wide[needed] = 0;
+    *out = wide;
+    *out_units = (uint64_t)needed;
+    return GRAIL_OK;
+}
+
+static int grail_windows_arg_needs_quotes(const WCHAR *argument, uint64_t units) {
+    if (units == 0) {
+        return 1;
+    }
+    for (uint64_t i = 0; i < units; i++) {
+        if (argument[i] == ' ' || argument[i] == '\t' || argument[i] == '"') {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void grail_windows_append_argument(WCHAR *line, uint64_t *at, const WCHAR *argument,
+                                          uint64_t units) {
+    if (!grail_windows_arg_needs_quotes(argument, units)) {
+        for (uint64_t i = 0; i < units; i++) line[(*at)++] = argument[i];
+        return;
+    }
+    line[(*at)++] = '"';
+    uint64_t backslashes = 0;
+    for (uint64_t i = 0; i < units; i++) {
+        const WCHAR character = argument[i];
+        if (character == '\\') {
+            backslashes++;
+            continue;
+        }
+        if (character == '"') {
+            for (uint64_t j = 0; j < backslashes * 2 + 1; j++) line[(*at)++] = '\\';
+            line[(*at)++] = '"';
+            backslashes = 0;
+            continue;
+        }
+        for (uint64_t j = 0; j < backslashes; j++) line[(*at)++] = '\\';
+        backslashes = 0;
+        line[(*at)++] = character;
+    }
+    for (uint64_t j = 0; j < backslashes * 2; j++) line[(*at)++] = '\\';
+    line[(*at)++] = '"';
+}
+
+static grail_status grail_windows_command_line(const grail_process_options *options,
+                                                WCHAR **out, uint64_t *out_bytes) {
+    const uint64_t count = options->argument_count == 0 ? 1 : options->argument_count;
+    uint64_t capacity = 2;
+    for (uint64_t i = 0; i < count; i++) {
+        uint64_t units = 0;
+        if (options->argument_count == 0) {
+            units = options->program_length;
+        } else {
+            const uint64_t begin = options->argument_offsets[i];
+            const uint64_t end = i + 1 < options->argument_count
+                                     ? options->argument_offsets[i + 1]
+                                     : options->arguments_length;
+            units = end - begin - 1;
+        }
+        capacity += units * 2 + 4;
+        if (capacity > (uint64_t)INT32_MAX) {
+            return GRAIL_E_OVERFLOW;
+        }
+    }
+    WCHAR *line = (WCHAR *)grail_windows_allocate(capacity * sizeof(WCHAR));
+    if (line == NULL) {
+        return GRAIL_E_OUT_OF_MEMORY;
+    }
+    uint64_t at = 0;
+    for (uint64_t i = 0; i < count; i++) {
+        WCHAR *argument = NULL;
+        uint64_t units = 0;
+        grail_status status;
+        if (options->argument_count == 0) {
+            status = grail_windows_to_wide(options->program, options->program_length, &argument,
+                                           &units);
+        } else {
+            const uint64_t begin = options->argument_offsets[i];
+            const uint64_t end = i + 1 < options->argument_count
+                                     ? options->argument_offsets[i + 1]
+                                     : options->arguments_length;
+            status = grail_windows_to_wide(options->arguments + begin, end - begin - 1,
+                                           &argument, &units);
+        }
+        if (status != GRAIL_OK) {
+            grail_windows_release(line, capacity * sizeof(WCHAR));
+            return status;
+        }
+        if (i != 0) line[at++] = ' ';
+        grail_windows_append_argument(line, &at, argument, units);
+        grail_windows_free_wide(argument, units);
+    }
+    line[at] = 0;
+    *out = line;
+    *out_bytes = capacity * sizeof(WCHAR);
+    return GRAIL_OK;
+}
+
+static grail_status grail_windows_resolve_program(const grail_process_options *options,
+                                                   WCHAR **out, uint64_t *out_bytes) {
+    WCHAR *program = NULL;
+    uint64_t units = 0;
+    grail_status status = grail_windows_to_wide(options->program, options->program_length,
+                                                &program, &units);
+    if (status != GRAIL_OK) {
+        return status;
+    }
+    int has_separator = 0;
+    for (uint64_t i = 0; i < units; i++) {
+        if (program[i] == '/' || program[i] == '\\') {
+            has_separator = 1;
+            break;
+        }
+    }
+    if ((options->flags & GRAIL_PROC_SEARCH_PATH) == 0 || has_separator) {
+        *out = program;
+        *out_bytes = (units + 1) * sizeof(WCHAR);
+        return GRAIL_OK;
+    }
+    static const WCHAR extension[] = {'.', 'e', 'x', 'e', 0};
+    WCHAR *resolved = (WCHAR *)grail_windows_allocate(4096 * sizeof(WCHAR));
+    if (resolved == NULL) {
+        grail_windows_free_wide(program, units);
+        return GRAIL_E_OUT_OF_MEMORY;
+    }
+    const DWORD length = SearchPathW(NULL, program, extension, 4096, resolved, NULL);
+    grail_windows_free_wide(program, units);
+    if (length == 0) {
+        const DWORD error = GetLastError();
+        grail_windows_release(resolved, 4096 * sizeof(WCHAR));
+        return error == GRAIL_ERROR_FILE_NOT_FOUND || error == GRAIL_ERROR_PATH_NOT_FOUND ||
+                       error == GRAIL_ERROR_SUCCESS
+                   ? GRAIL_E_NOT_FOUND
+                   : grail_windows_fail(error);
+    }
+    if (length >= 4096) {
+        grail_windows_release(resolved, 4096 * sizeof(WCHAR));
+        return GRAIL_E_NAME_TOO_LONG;
+    }
+    *out = resolved;
+    *out_bytes = 4096 * sizeof(WCHAR);
+    return GRAIL_OK;
+}
+
+static grail_status grail_windows_open_null(DWORD access, HANDLE *out) {
+    static const WCHAR name[] = {'N', 'U', 'L', 0};
+    SECURITY_ATTRIBUTES attributes;
+    attributes.nLength = sizeof(attributes);
+    attributes.lpSecurityDescriptor = NULL;
+    attributes.bInheritHandle = 1;
+    const HANDLE handle = CreateFileW(name, access,
+                                      GRAIL_FILE_SHARE_READ | GRAIL_FILE_SHARE_WRITE,
+                                      &attributes, GRAIL_OPEN_EXISTING,
+                                      GRAIL_FILE_ATTRIBUTE_NORMAL, NULL);
+    if (handle == GRAIL_INVALID_HANDLE_VALUE) {
+        return grail_windows_fail(GetLastError());
+    }
+    *out = handle;
+    return GRAIL_OK;
+}
+
+static grail_status grail_windows_duplicate_inheritable(HANDLE source, HANDLE *out) {
+    HANDLE duplicate = NULL;
+    if (!DuplicateHandle(GetCurrentProcess(), source, GetCurrentProcess(), &duplicate, 0, 1,
+                         GRAIL_DUPLICATE_SAME_ACCESS)) {
+        return grail_windows_fail(GetLastError());
+    }
+    *out = duplicate;
+    return GRAIL_OK;
+}
+
+static grail_status grail_windows_stdio_handle(grail_file file, DWORD standard,
+                                                DWORD access, uint64_t flags, HANDLE *out) {
+    if (file != GRAIL_HANDLE_NONE) {
+        grail_win32_file *handle = NULL;
+        grail_status status = grail_windows_file_lookup(file, &handle);
+        if (status != GRAIL_OK) {
+            return status;
+        }
+        return grail_windows_duplicate_inheritable(handle->handle, out);
+    }
+    if ((flags & GRAIL_PROC_INHERIT_STDIO) != 0) {
+        const HANDLE inherited = GetStdHandle(standard);
+        if (inherited == NULL || inherited == GRAIL_INVALID_HANDLE_VALUE) {
+            return grail_windows_open_null(access, out);
+        }
+        return grail_windows_duplicate_inheritable(inherited, out);
+    }
+    return grail_windows_open_null(access, out);
+}
+
+static grail_status grail_windows_process_lookup(grail_process handle,
+                                                  grail_win32_process **out) {
+    if (!grail_windows.initialized) {
+        return GRAIL_E_NOT_INITIALIZED;
+    }
+    grail_windows_lock();
+    const grail_status status =
+        grail_handle_table_lookup(&grail_windows.processes, handle, (void **)out);
+    grail_windows_unlock();
+    return status;
+}
+
+static void grail_windows_fill_process_status(const grail_win32_process *process,
+                                              grail_process_status *out) {
+    for (uint64_t i = 0; i < sizeof(*out); i++) ((uint8_t *)out)[i] = 0;
+    out->struct_size = sizeof(*out);
+    out->abi_version = GRAIL_ABI_VERSION;
+    if (!process->reaped) {
+        out->kind = GRAIL_PROCESS_STILL_ACTIVE;
+        return;
+    }
+    out->kind = GRAIL_PROCESS_EXITED;
+    out->exit_code = (int64_t)(uint64_t)process->exit_code;
+    out->term_signal = 0;
+}
+
+static grail_status grail_windows_process_exit(grail_win32_process *process,
+                                                grail_process_status *out) {
+    DWORD code = 0;
+    if (!GetExitCodeProcess(process->handle, &code)) {
+        return grail_windows_fail(GetLastError());
+    }
+    process->exit_code = code;
+    process->reaped = 1;
+    if (out != NULL) {
+        grail_windows_fill_process_status(process, out);
+    }
+    return GRAIL_OK;
+}
+
+grail_status grail_os_process_spawn(const grail_process_options *options, grail_process *out) {
+    if (!grail_windows.initialized) {
+        return GRAIL_E_NOT_INITIALIZED;
+    }
+    if (options == NULL || out == NULL) {
+        return GRAIL_E_INVALID_ARGUMENT;
+    }
+    if (options->struct_size < sizeof(*options) || options->abi_version != GRAIL_ABI_VERSION ||
+        (options->flags & ~(GRAIL_PROC_SEARCH_PATH | GRAIL_PROC_NEW_GROUP |
+                            GRAIL_PROC_NO_WINDOW | GRAIL_PROC_INHERIT_STDIO |
+                            GRAIL_PROC_REPLACE_ENVIRONMENT)) != 0) {
+        return GRAIL_E_INVALID_ARGUMENT;
+    }
+    if (options->program == NULL || options->program_length == 0 ||
+        grail_windows_has_zero(options->program, options->program_length) ||
+        !grail_windows_block_valid(options->arguments, options->arguments_length,
+                                   options->argument_offsets, options->argument_count) ||
+        !grail_windows_block_valid(options->environment, options->environment_length,
+                                   options->environment_offsets, options->environment_count) ||
+        (options->working_directory == NULL && options->working_directory_length != 0) ||
+        (options->working_directory != NULL &&
+         (options->working_directory_length == 0 ||
+          grail_windows_has_zero(options->working_directory,
+                                 options->working_directory_length)))) {
+        return GRAIL_E_INVALID_ARGUMENT;
+    }
+    grail_env_store environment;
+    for (uint64_t i = 0; i < sizeof(environment); i++) ((uint8_t *)&environment)[i] = 0;
+    WCHAR *application = NULL;
+    WCHAR *command_line = NULL;
+    WCHAR *location = NULL;
+    WCHAR *environment_block = NULL;
+    uint64_t application_bytes = 0;
+    uint64_t command_line_bytes = 0;
+    uint64_t location_bytes = 0;
+    uint64_t environment_block_units = 0;
+    HANDLE standard_input = NULL;
+    HANDLE standard_output = NULL;
+    HANDLE standard_error = NULL;
+    grail_status status = grail_windows_build_child_env(options, &environment);
+    if (status != GRAIL_OK) {
+        goto cleanup;
+    }
+    status = grail_windows_resolve_program(options, &application, &application_bytes);
+    if (status != GRAIL_OK) {
+        goto cleanup;
+    }
+    status = grail_windows_command_line(options, &command_line, &command_line_bytes);
+    if (status != GRAIL_OK) {
+        goto cleanup;
+    }
+    if (options->working_directory != NULL) {
+        uint64_t location_units = 0;
+        status = grail_windows_to_wide(options->working_directory,
+                                       options->working_directory_length, &location,
+                                       &location_units);
+        if (status != GRAIL_OK) {
+            goto cleanup;
+        }
+        location_bytes = (location_units + 1) * sizeof(WCHAR);
+    }
+    status = grail_windows_environment_block(&environment, &environment_block,
+                                              &environment_block_units);
+    if (status != GRAIL_OK) {
+        goto cleanup;
+    }
+    status = grail_windows_stdio_handle(options->standard_input, GRAIL_STD_INPUT_HANDLE,
+                                        GRAIL_GENERIC_READ, options->flags, &standard_input);
+    if (status != GRAIL_OK) {
+        goto cleanup;
+    }
+    status = grail_windows_stdio_handle(options->standard_output, GRAIL_STD_OUTPUT_HANDLE,
+                                        GRAIL_GENERIC_WRITE, options->flags, &standard_output);
+    if (status != GRAIL_OK) {
+        goto cleanup;
+    }
+    status = grail_windows_stdio_handle(options->standard_error, GRAIL_STD_ERROR_HANDLE,
+                                        GRAIL_GENERIC_WRITE, options->flags, &standard_error);
+    if (status != GRAIL_OK) {
+        goto cleanup;
+    }
+    STARTUPINFOW startup;
+    for (uint64_t i = 0; i < sizeof(startup); i++) ((uint8_t *)&startup)[i] = 0;
+    startup.cb = sizeof(startup);
+    startup.dwFlags = GRAIL_STARTF_USESTDHANDLES;
+    startup.hStdInput = standard_input;
+    startup.hStdOutput = standard_output;
+    startup.hStdError = standard_error;
+    PROCESS_INFORMATION information;
+    for (uint64_t i = 0; i < sizeof(information); i++) ((uint8_t *)&information)[i] = 0;
+    DWORD flags = GRAIL_CREATE_UNICODE_ENVIRONMENT;
+    if ((options->flags & GRAIL_PROC_NEW_GROUP) != 0) flags |= GRAIL_CREATE_NEW_PROCESS_GROUP;
+    if ((options->flags & GRAIL_PROC_NO_WINDOW) != 0) flags |= GRAIL_CREATE_NO_WINDOW;
+    if (!CreateProcessW(application, command_line, NULL, NULL, 1, flags, environment_block,
+                        location, &startup, &information)) {
+        status = grail_windows_fail(GetLastError());
+        goto cleanup;
+    }
+    (void)CloseHandle(information.hThread);
+    grail_win32_process *process =
+        (grail_win32_process *)grail_windows_allocate(sizeof(*process));
+    if (process == NULL) {
+        (void)TerminateProcess(information.hProcess, 1);
+        (void)WaitForSingleObject(information.hProcess, GRAIL_WIN32_INFINITE);
+        (void)CloseHandle(information.hProcess);
+        status = GRAIL_E_OUT_OF_MEMORY;
+        goto cleanup;
+    }
+    process->handle = information.hProcess;
+    process->pid = information.dwProcessId;
+    process->exit_code = 0;
+    process->reaped = 0;
+    process->new_group = (options->flags & GRAIL_PROC_NEW_GROUP) != 0;
+    grail_handle handle = GRAIL_HANDLE_NONE;
+    grail_windows_lock();
+    status = grail_handle_table_allocate(&grail_windows.processes, process, &handle);
+    grail_windows_unlock();
+    if (status != GRAIL_OK) {
+        (void)TerminateProcess(information.hProcess, 1);
+        (void)WaitForSingleObject(information.hProcess, GRAIL_WIN32_INFINITE);
+        (void)CloseHandle(information.hProcess);
+        grail_windows_release(process, sizeof(*process));
+        goto cleanup;
+    }
+    *out = handle;
+    status = GRAIL_OK;
+
+cleanup:
+    if (standard_input != NULL) (void)CloseHandle(standard_input);
+    if (standard_output != NULL) (void)CloseHandle(standard_output);
+    if (standard_error != NULL) (void)CloseHandle(standard_error);
+    grail_windows_release(environment_block, (environment_block_units + 1) * sizeof(WCHAR));
+    grail_windows_release(application, application_bytes);
+    grail_windows_release(command_line, command_line_bytes);
+    grail_windows_release(location, location_bytes);
+    grail_env_store_free(&environment);
+    return status;
+}
+
+grail_status grail_os_process_wait(grail_process handle, grail_process_status *out) {
+    grail_win32_process *process = NULL;
+    grail_status status = grail_windows_process_lookup(handle, &process);
+    if (status != GRAIL_OK) return status;
+    if (process->reaped) {
+        if (out != NULL) grail_windows_fill_process_status(process, out);
+        return GRAIL_OK;
+    }
+    if (WaitForSingleObject(process->handle, GRAIL_WIN32_INFINITE) != GRAIL_WAIT_OBJECT_0) {
+        return grail_windows_fail(GetLastError());
+    }
+    return grail_windows_process_exit(process, out);
+}
+
+grail_status grail_os_process_wait_timeout(grail_process handle, int64_t timeout_ns,
+                                           grail_process_status *out) {
+    grail_win32_process *process = NULL;
+    grail_status status = grail_windows_process_lookup(handle, &process);
+    if (status != GRAIL_OK) return status;
+    if (process->reaped) {
+        if (out != NULL) grail_windows_fill_process_status(process, out);
+        return GRAIL_OK;
+    }
+    DWORD milliseconds;
+    if (timeout_ns < 0) {
+        milliseconds = GRAIL_WIN32_INFINITE;
+    } else {
+        uint64_t value = ((uint64_t)timeout_ns + 999999u) / 1000000u;
+        if (value > 0xFFFFFFFEu) value = 0xFFFFFFFEu;
+        milliseconds = (DWORD)value;
+    }
+    const DWORD result = WaitForSingleObject(process->handle, milliseconds);
+    if (result == GRAIL_WAIT_OBJECT_0) {
+        return grail_windows_process_exit(process, out);
+    }
+    if (result == GRAIL_WAIT_TIMEOUT) {
+        if (out != NULL) grail_windows_fill_process_status(process, out);
+        return GRAIL_E_TIMED_OUT;
+    }
+    return grail_windows_fail(GetLastError());
+}
+
+grail_status grail_os_process_terminate(grail_process handle) {
+    grail_win32_process *process = NULL;
+    grail_status status = grail_windows_process_lookup(handle, &process);
+    if (status != GRAIL_OK) return status;
+    if (process->reaped) return GRAIL_OK;
+    if (process->new_group) {
+        if (GenerateConsoleCtrlEvent(GRAIL_CTRL_BREAK_EVENT, process->pid)) {
+            return GRAIL_OK;
+        }
+    }
+    if (!TerminateProcess(process->handle, 1)) {
+        return grail_windows_fail(GetLastError());
+    }
+    return GRAIL_OK;
+}
+
+grail_status grail_os_process_kill(grail_process handle) {
+    grail_win32_process *process = NULL;
+    grail_status status = grail_windows_process_lookup(handle, &process);
+    if (status != GRAIL_OK) return status;
+    if (process->reaped) return GRAIL_OK;
+    if (!TerminateProcess(process->handle, 1)) {
+        return grail_windows_fail(GetLastError());
+    }
+    return GRAIL_OK;
+}
+
+grail_status grail_os_process_id(grail_process handle, uint64_t *out) {
+    grail_win32_process *process = NULL;
+    if (out == NULL) return GRAIL_E_INVALID_ARGUMENT;
+    const grail_status status = grail_windows_process_lookup(handle, &process);
+    if (status != GRAIL_OK) return status;
+    *out = (uint64_t)process->pid;
+    return GRAIL_OK;
+}
+
+grail_status grail_os_process_close(grail_process handle) {
+    if (!grail_windows.initialized) return GRAIL_E_NOT_INITIALIZED;
+    grail_win32_process *process = NULL;
+    grail_windows_lock();
+    const grail_status status =
+        grail_handle_table_release(&grail_windows.processes, handle, (void **)&process);
+    grail_windows_unlock();
+    if (status != GRAIL_OK) return status;
+    (void)CloseHandle(process->handle);
+    grail_windows_release(process, sizeof(*process));
+    return GRAIL_OK;
 }
 
 grail_status grail_os_fs_stat(const uint8_t *path, uint64_t path_length, uint64_t flags,
