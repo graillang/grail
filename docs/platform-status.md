@@ -21,7 +21,10 @@ Windows x86-64 now has `.pdata`/`.xdata`, a Win32 console/files/argv/time layer,
 programs under Wine; ARM64 has PE/COFF objects and images but no packed-unwind metadata yet.
 Worker threads and COM remain unimplemented. Grail-internal calls still use
 the private register convention; Win64 is used at import boundaries. This is Wine verification,
-not Windows hardware verification.
+not Windows hardware verification. macOS has a libSystem layer for files, console, clock,
+processes, directory records, threads, sync and dynamic libraries, but no sockets or framework
+or SDK-backed link, and no execution. Grail-internal calls still use the private register
+convention; the C ABI is used at imports. The macOS images must not be run on Linux.
 
 Linux AArch64 and RISC-V64 are cross-build verified, not runtime verified. Linux x86-64 is the
 only target with full compiler and runtime execution evidence.

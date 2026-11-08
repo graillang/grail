@@ -8,6 +8,7 @@ struct Out {
     text: u8[],
     target: u64,
     win: u64,
+    plat: u64,
     next: u64
 }
 fn eq<a, b>(a: &a [u8], b: &b [u8]) -> u64 {
@@ -318,9 +319,16 @@ fn address<a, b>(o: (&a mut Out), operand: &b [u8]) -> unit {
         if target == 1 {
             put(&mut o, view("adrp x13,"));
             put(&mut o, view((disp)));
-            put(&mut o, view("\nadd x13,x13,:lo12:"));
-            put(&mut o, view((disp)));
-            put(&mut o, view("\n"));
+            if o.plat == 1 {
+                // Mach-O names page relocations instead of ELF's :lo12: modifier.
+                put(&mut o, view("@PAGE\nadd x13,x13,"));
+                put(&mut o, view((disp)));
+                put(&mut o, view("@PAGEOFF\n"));
+            } else {
+                put(&mut o, view("\nadd x13,x13,:lo12:"));
+                put(&mut o, view((disp)));
+                put(&mut o, view("\n"));
+            }
         } else {
             put(&mut o, view("lla t3,"));
             put(&mut o, view((disp)));
@@ -1136,7 +1144,7 @@ fn instruction<a, b>(o: (&a mut Out), line: &b [u8]) -> unit {
     arithmetic(&mut o, view((op)), view(src), view(dst));
     return ();
 }
-pub fn lower<a>(input: &a [u8], target: u64) -> u8[] {
+pub fn lower<a>(input: &a [u8], target: u64, plat: u64) -> u8[] {
     assert((target == 1) + (target == 2) + (target == 4));
     mut isa = target;
     mut win = 0;
@@ -1144,7 +1152,7 @@ pub fn lower<a>(input: &a [u8], target: u64) -> u8[] {
         isa = 1;
         win = 1;
     }
-    mut out = Out { text: u8[], target: isa, win: win, next: 1 };
+    mut out = Out { text: u8[], target: isa, win: win, plat: plat, next: 1 };
     // Frame constants are known before instruction selection (no unresolved immediate expressions).
     mut start = 0;
     for i in input.len() {
