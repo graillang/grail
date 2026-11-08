@@ -118,9 +118,15 @@ extern "C" fn c_mixed_fill(m: Mixed, d: i64) -> i64;
 - fields are laid out with C rules — natural alignment, padding between fields, and tail
   padding up to the record alignment — so `offsetof` agrees with the C compiler
   (`a: i32, b: i16, c: i8, d: i64` is `0, 4, 6, 8`, size 16, alignment 8);
-- a field may be an 8/16/32/64-bit integer, a `handle` or a `CStr`; anything else
-  (including a nested record, a `string`, a view or a float) is rejected, because a Grail
-  record value is a pointer and embedding one would store the pointer, not the bytes;
+- a field may be an 8/16/32/64-bit integer, an `f32`/`f64`, a `handle`, a `CStr` or another
+  `extern "C" record`, which is embedded by value: its bytes sit at the field's C offset with
+  its own alignment and size, exactly like a C struct member. Anything else (an ordinary Grail
+  record, a `string`, a view) is rejected, because those values are pointers and embedding one
+  would store the pointer, not the bytes;
+- an embedded record is plain data inside its container: `o.inner.x` reads and `o.inner.x = v`
+  writes in place, `o.inner = r` copies `r`'s bytes over the embedded ones (and releases `r`),
+  and `v := o.inner` copies the bytes out into an independent record. Drop glue frees only the
+  outer buffer (`tests/ffi/nested_records.grl`);
 - field reads and writes use the field's own width, so `i8`/`i16`/`i32` values are
   truncated on store and sign- or zero-extended on load. Sub-word access is implemented
   with portable byte-wise runtime helpers, so all three targets share one implementation
@@ -229,10 +235,11 @@ Not implemented yet, and each rejected rather than approximated:
 
 - callbacks with more than six parameters (the Grail function limit); macOS callbacks use the
   same SysV/AAPCS64 lowering but are compiled and linked only (no macOS runner);
-- nested C records (a nested Grail record value is a pointer, so embedding it by value
-  needs a copy/alias representation that does not exist yet), records *passed* by value as
-  arguments (an extern record parameter is the C `R *`); record results are returned by value on
-  every ABI, float fields included (`tests/ffi/call_records.grl`, `float_record_results.grl`);
+- records *passed* by value as arguments (an extern record parameter is the C `R *`); record
+  results are returned by value on every ABI, float fields included
+  (`tests/ffi/call_records.grl`, `float_record_results.grl`), and nested records included,
+  except a result whose embedded records contain floats (its register classification needs the
+  flattened field list; refused with a diagnostic);
 - variadic callbacks, callback results that are themselves function pointers, and
   taking the address of a foreign *declaration* (`f := c_add;` is rejected: a C
   declaration is not a Grail function value);
