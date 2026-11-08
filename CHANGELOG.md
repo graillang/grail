@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Abundance CPU port, RHI host: `abundance/tools/rhi_host.c` serves `gr_wire` packets and drives
+  the foundation's Vulkan backend — device, R8G8B8A8_UNORM target, a CLEAR render pass, submit with
+  a fence wait and `gr_texture_read`. Its self-test reads back clear (0.25, 0.5, 0.75, 1.0) as
+  exactly 64 128 191 255 through `vkCmdCopyImageToBuffer`, and the packet path covers HELLO,
+  RESOURCE_CREATE, CMD_BATCH, FRAME_SUBMIT, RESOURCE_READ and SHUTDOWN with malformed, version,
+  unknown-op, short-packet and read-before-target refusals. Transport is a request/response file
+  pair, a documented deviation from the AF_UNIX SEQPACKET topology because Grail exposes no socket
+  binding; the framing is unchanged. The Grail-side client for this exchange is the next step.
+
 - Abundance CPU port, RHI bridge framing: `abundance/src/rhi_bridge.grl` packs and unpacks the
   graphics foundation's `gr_wire_packet` exactly as `graphics/src/grail_wire.c` does — 40-byte
   header, magic/version/op/request/status/sequence/aux, payload, with the 1 MiB packet bound — so a
