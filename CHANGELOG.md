@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- v3 C FFI increment 4: C callbacks and function pointers. `extern "C" fn name(...) { ... }`
+  defines a Grail function that C can call: it is emitted with the stated (unmangled) C
+  symbol, `as "name"` renames it, and its signature must sit inside the C ABI slice.
+  `cfn(P...) -> R` is the type of a C function pointer (one word, no environment, C
+  calling convention); only `extern "C"` definitions produce such a value, so a closure or
+  an ordinary Grail function is a type mismatch where C expects a callback, and a foreign
+  declaration still cannot be used as a value. The generated code preserves the
+  callee-saved registers it allocates, verified by a shim that clobbers `rbx`/`r12`-`r15`
+  around the callback. `tests/ffi/callbacks.grl` covers a direct callback, a renamed one
+  and the register-preservation case; two rejection fixtures cover a mismatched callback
+  and `cfn` arity. Variadic callbacks and callback results are still rejected. See
+  `docs/ffi.md`.
+
 - v3 C FFI increment 3: `extern "C" record` with C layout and alignment. Fields use C's
   natural alignment, inter-field padding and tail padding, so `offsetof`/`sizeof` agree
   with the C compiler; field reads and writes use the exact field width (`i8`/`i16`/`i32`

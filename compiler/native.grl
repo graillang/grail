@@ -208,6 +208,10 @@ struct C {
     unsafe_depth: u64,
     // Linker inputs declared by `extern "C" lib "..."`, deduplicated in order.
     libs: u8[][],
+    // Set while an `extern "C" fn` definition is handed to the function parser:
+    // 2 means C-callable with the given unmangled symbol.
+    pending_ext: u64,
+    pending_symbol: u8[],
     rnames: u8[][],
     tnames: u8[][],
     closures: Closure[],
@@ -2765,7 +2769,7 @@ fn same_type<a>(c: (&a mut C), x: u64, y: u64) -> u64 {
     if a != b {
         return 0;
     }
-    if (a == 12) + (a == 20) {
+    if (a == 12) + (a == 20) + (a == 25) {
         mut map = u64[];
         return callable_contract(&mut c, x, y, &mut map, 0);
     }
@@ -3390,6 +3394,28 @@ fn base_named<a>(c: (&a mut C), first: u8[]) -> u64 {
         result := parse_type(&mut c);
         return intern_args(&mut c, 20, result, 0, u64[], params);
     }
+    if same(view(first), view("cfn")) {
+        // C function pointer: one word, no environment, called with the C ABI. Only
+        // `extern "C"` definitions have such an address, so a closure cannot sneak in.
+        expect(&mut c, view("("));
+        mut params = u64[];
+        if eat(&mut c, view(")")) == 0 {
+            while 1 {
+                ty := parse_type(&mut c);
+                params.push(ty);
+                if eat(&mut c, view(")")) {
+                    break;
+                }
+                expect(&mut c, view(","));
+            }
+        }
+        if 6 < params.len() {
+            fail(&mut c, view("cfn type exceeds six word arguments"));
+        }
+        expect(&mut c, view("->"));
+        result := parse_type(&mut c);
+        return intern_args(&mut c, 25, result, 0, u64[], params);
+    }
     if same(view(first), view("fn")) {
         expect(&mut c, view("("));
         mut params = u64[];
@@ -3752,7 +3778,7 @@ fn ffi_param<a, b>(c: (&a mut C), ty: u64, what: &b [u8]) -> unit {
     if (k == 18) & (ty_arg(&mut c, ty) == 64) {
         return ();
     }
-    if (k == 23) + (k == 24) + (k == 5) {
+    if (k == 23) + (k == 24) + (k == 5) + (k == 25) {
         return ();
     }
     if k == 8 {
@@ -3971,6 +3997,41 @@ fn ffi_record<a>(c: (&a mut C), pass: u64) -> unit {
     );
     return ();
 }
+fn export_name<a, b, d, e>(c: (&a mut C), m: &b [u8], n: &d [u8], symbol: &e [u8], export: u64) -> unit {
+    if export == 2 {
+        // The C symbol may differ from the Grail name (`as "name"`).
+        o(&mut c, symbol);
+        return ();
+    }
+    mangle(&mut c, view(m), view(n));
+    return ();
+}
+// Does the declaration at `start` (the `fn` keyword) have a body? Scans to the first
+// `{` or `;` at bracket depth zero, so a body can be handed to the normal function
+// parser and a plain declaration stays a declaration.
+fn extern_has_body<a>(c: (&a mut C), start: u64) -> u64 {
+    mut i = start;
+    mut depth = 0;
+    while i < c.toks.len() {
+        k := kind_at(&mut c, i);
+        if (k == 40) + (k == 60) + (k == 91) {
+            depth += 1;
+        }
+        if (k == 41) + (k == 62) + (k == 93) {
+            depth -= 1;
+        }
+        if depth == 0 {
+            if k == 123 {
+                return 1;
+            }
+            if (k == 59) + (k == 125) {
+                return 0;
+            }
+        }
+        i += 1;
+    }
+    return 0;
+}
 fn ffi_string<a, b>(c: (&a mut C), what: &b [u8]) -> u8[] {
     if kind(&mut c) != 3 {
         fail(&mut c, what);
@@ -4015,8 +4076,26 @@ fn extern_declaration<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         ffi_record(&mut c, pass);
         return ();
     }
+    fn_position := c.pos;
+    body := extern_has_body(&mut c, fn_position);
     expect(&mut c, view("fn"));
     name := ident(&mut c);
+    if body {
+        // `extern "C" fn name(...) -> R { ... }` defines a Grail function that C can
+        // call: it is emitted with the stated (unmangled) symbol and its signature
+        // must sit inside the C ABI slice. The normal function parser emits the body.
+        mut exported = symbol;
+        if exported.len() == 0 {
+            exported = name.copy();
+        }
+        exchange(&mut c.pending_ext, 2);
+        exchange(&mut c.pending_symbol, exported);
+        exchange(&mut c.pos, fn_position);
+        func(&mut c, pass, public);
+        exchange(&mut c.pending_ext, 0);
+        exchange(&mut c.pending_symbol, u8[]);
+        return ();
+    }
     if pass != 2 {
         while is(&mut c, view(";")) == 0 {
             advance(&mut c);
@@ -4131,6 +4210,8 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         return ();
     }
     mut m = module_copy(&mut c);
+    export := c.pending_ext;
+    export_symbol := c.pending_symbol.copy();
     if c.current_impl {
         m = private_module(view(".impl_"), c.current_impl);
     }
@@ -4193,6 +4274,24 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         if find_func(&mut c, view(m), view(name)) != 0 {
             fail(&mut c, view("duplicate function"));
         }
+        if export != 0 {
+            // The body is Grail, but C will call it: every parameter and the result
+            // must live in the C ABI slice, and the symbol is the stated C name.
+            for i in count {
+                formal := c.params[first + i];
+                ffi_param(
+                    &mut c,
+                    formal,
+                    view("extern C callback parameters must be a 64-bit integer, CStr, handle, byte view or cfn")
+                );
+            }
+            if ret != 1 {
+                ffi_result(&mut c, ret, view("extern C callback results must be i64, u64, unit, CStr or handle"));
+            }
+            if export_symbol.len() == 0 {
+                fail(&mut c, view("extern C definition needs a symbol"));
+            }
+        }
         main := (c.file == 2) & (c.current_impl == 0) & (c.inherent == 0) & same(view(name), view("main"));
         if main {
             if (1 < count) + (typecount != 0) {
@@ -4234,8 +4333,8 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
                     constraints: constraints,
                     contract: 0,
                     owner: c.inherent,
-                    ext: 0,
-                    symbol: u8[],
+                    ext: export,
+                    symbol: export_symbol,
                 }
             );
         index := c.funcs.len();
@@ -4260,9 +4359,9 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         exchange(&mut l.last, last);
     }
     o(&mut c, view(".type "));
-    mangle(&mut c, view(m), view(name));
+    export_name(&mut c, view(m), view(name), view(export_symbol), export);
     o(&mut c, view(",@function\n"));
-    mangle(&mut c, view(m), view(name));
+    export_name(&mut c, view(m), view(name), view(export_symbol), export);
     o(&mut c, view(":\npushq %rbp\nmovq %rsp,%rbp\nsubq $.F"));
     frame := label(&mut c);
     on(&mut c, frame);
@@ -6466,10 +6565,11 @@ fn specialized_function_value<a>(c: (&a mut C), index: u64, map: u64[]) -> Val {
     return val(save(&mut c), ty);
 }
 fn function_value<a>(c: (&a mut C), index: u64) -> Val {
-    // Same rule as specialized_function_value: a foreign declaration is a C
-    // symbol, not a Grail callable value, so it cannot become a mangled address.
+    // A foreign *declaration* is a C symbol, not a Grail callable, so it cannot
+    // become a mangled address. An `extern "C" fn` *definition* is C-callable and
+    // yields a `cfn` value: its symbol is already the C name.
     foreign := c.funcs[index].ext;
-    if foreign {
+    if foreign == 1 {
         fail(&mut c, view("extern C declarations are not Grail function values"));
     }
     f := &c.funcs[index];
@@ -6480,6 +6580,7 @@ fn function_value<a>(c: (&a mut C), index: u64) -> Val {
     result := f.ret;
     m := f.module.copy();
     name := f.name.copy();
+    symbol := f.symbol.copy();
     if types != 0 {
         fail(
             &mut c,
@@ -6493,9 +6594,17 @@ fn function_value<a>(c: (&a mut C), index: u64) -> Val {
     for i in count {
         params.push(c.params[first + i]);
     }
-    ty := intern_args(&mut c, 12, result, 0, u64[], params);
+    mut value_kind = 12;
+    if foreign == 2 {
+        value_kind = 25;
+    }
+    ty := intern_args(&mut c, value_kind, result, 0, u64[], params);
     o(&mut c, view("leaq "));
-    mangle(&mut c, view(m), view(name));
+    if foreign == 2 {
+        o(&mut c, view(symbol));
+    } else {
+        mangle(&mut c, view(m), view(name));
+    }
     o(&mut c, view("(%rip),%rax\n"));
     return val(save(&mut c), ty);
 }
@@ -6506,7 +6615,7 @@ fn indirect_call<a>(c: (&a mut C), value: Val, opened: u64) -> Val {
     pointer := callee.t;
     ty := callee.ty;
     kind := ty_kind(&mut c, ty);
-    if (kind != 12) & (kind != 20) {
+    if (kind != 12) & (kind != 20) & (kind != 25) {
         fail(&mut c, view("expression is not callable"));
     }
     observe(&mut c, pointer);
@@ -14850,6 +14959,8 @@ pub fn main() -> u64 {
         raw: 0,
         unsafe_depth: 0,
         libs: u8[][],
+        pending_ext: 0,
+        pending_symbol: u8[],
         rnames: u8[][],
         tnames: u8[][],
         closures: Closure[],

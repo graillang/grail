@@ -41,6 +41,7 @@ extern "C" fn c_identity(v: u64) -> u64;
 | `&mut [u8]` (parameter) | `uint8_t *, size_t` | two: pointer then length |
 | `CStr` | `const char *` (NUL-terminated) | one 64-bit pointer |
 | `handle H` | an opaque C token (`uint64_t` by convention) | one 64-bit word |
+| `cfn(P...) -> R` | `R (*)(P...)` | one 64-bit code address |
 | `extern "C" record R` (parameter) | `R *`, the address of the struct's fields | one 64-bit pointer |
 | `unit` (result only) | `void` | result register ignored |
 
@@ -70,6 +71,39 @@ is a byte sequence or view whose last byte is NUL: the cast is zero-copy and che
 terminator at runtime (a non-terminated sequence aborts). It is `unsafe` because the
 pointer has no lifetime tracking across the call: C may keep it, and the bytes stay owned
 by Grail.
+
+### Callbacks and function pointers
+
+A Grail function can be handed to C and called back:
+
+```grl
+extern "C" fn c_double(v: i64) -> i64 {
+    return v * 2;
+}
+extern "C" as "c_triple" fn triple(v: i64) -> i64 {
+    return v * 3;
+}
+extern "C" fn c_apply(callback: cfn(i64) -> i64, value: i64) -> i64;
+```
+
+- `extern "C" fn name(params) -> result { ... }` is a *definition*, not a declaration:
+  the body is ordinary Grail, but the function is emitted with the stated C symbol
+  (`as "name"` renames it, otherwise the Grail name is the symbol) and every parameter
+  and the result must sit inside the C ABI slice. That is what makes it C-callable.
+- `cfn(P...) -> R` is the type of a C function pointer: one word, no environment, called
+  with the C ABI. Only `extern "C"` definitions have such a value, so a closure or an
+  ordinary Grail function is a type mismatch where a `cfn` is expected — there is no way
+  to hand C an address it cannot call.
+- Taking the address of an `extern "C"` *declaration* (no body) is still rejected: that
+  is a symbol C owns, not a Grail value.
+- Generated code preserves the callee-saved registers it allocates and keeps the frame
+  16-byte aligned at every call, which is what lets C call back into it.
+  `tests/ffi/callbacks.grl` calls two callbacks through C, and the shim clobbers
+  `rbx`/`r12`-`r15` around one of them to prove the C ABI contract holds.
+- The callback's parameter types are a promise the compiler cannot verify against the
+  actual C function-pointer type (a function pointer carries no signature at run time),
+  so the declaration and the C prototype must agree; a mismatch is an ABI bug the
+  compiler cannot catch.
 
 ### C-layout records
 
@@ -179,8 +213,9 @@ Not implemented yet, and each rejected rather than approximated:
   needs a copy/alias representation that does not exist yet), C records in results, C
   records containing floats or pointers, and by-value struct passing (SysV eightbyte
   classification and `sret`);
-- callbacks, function pointers, and taking the address of a foreign declaration
-  (`f := c_add;` is rejected: a C declaration is not a Grail function value);
+- variadic callbacks, callback results that are themselves function pointers, and
+  taking the address of a foreign *declaration* (`f := c_add;` is rejected: a C
+  declaration is not a Grail function value);
 - stack-passed arguments beyond six;
 - dynamic library loading (`dlopen`/`dlsym` hooks);
 - variadic C functions.
@@ -198,8 +233,9 @@ compiles `tests/ffi/call_scalars.grl` with the FFI build, links the two through 
 - the linked executables run and return the expected values — `call_scalars` checks the
   six-argument call, the `as` rename and `u64` results (`83`, `7`), `views_handles` checks
   a NUL-terminated `CStr`, a read-only view, a mutable view written by C, and a handle
-  round trip (`259`, `1`), and `extern_records` checks C layout in both directions
-  (`1606`, `23`, `16`, `-2`, `7`) — executed on the host, and on a cross target when
+  round trip (`259`, `1`), `extern_records` checks C layout in both directions (`1606`,
+  `23`, `16`, `-2`, `7`), and `callbacks` checks C calling back into Grail, including
+  callee-saved register preservation (`42`, `42`, `10`) — executed on the host, and on a cross target when
   `qemu-<target>-static` is installed; otherwise the cross targets are linked and the
   ABI-level check is reported as link-only.
 
