@@ -36,6 +36,10 @@ const common = [
 ];
 
 buildAndRun('core', ['tests/abi/test_core.c', ...common]);
+buildAndRun('paths-posix', ['tests/abi/test_paths.c', 'runtime/abi/grail_abi.c',
+  'runtime/abi/grail_error.c', 'runtime/abi/grail_path.c']);
+buildAndRun('paths-windows', ['tests/abi/test_paths.c', 'runtime/abi/grail_abi.c',
+  'runtime/abi/grail_error.c', 'runtime/abi/grail_path.c'], ['-DGRAIL_ABI_PATH_WINDOWS=1']);
 
 if (spawnSync(clang, ['--version']).status === 0) {
   const targets = [

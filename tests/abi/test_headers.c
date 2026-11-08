@@ -1,6 +1,7 @@
 /* Header self-containment and layout probe; compiled for every ABI target. */
 #include "../../include/grail/grail_abi.h"
 #include "../../include/grail/grail_error.h"
+#include "../../include/grail/grail_path.h"
 #include "../../include/grail/grail_time.h"
 #include "../../include/grail/grail_unicode.h"
 
