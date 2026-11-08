@@ -153,6 +153,10 @@ typedef struct gr_vk_tex {
     gr_format gr_format;
     uint32_t width, height;
     uint32_t usage;
+    /* The layout the image is last known to be in. The graph derives transitions, but the backend
+     * still has to know where an image *is* to issue a correct one — assuming TRANSFER_SRC here
+     * was the last validation error: a second readback found GENERAL. */
+    VkImageLayout layout;
 } gr_vk_tex;
 
 typedef struct gr_vk_viewobj {
@@ -1702,6 +1706,7 @@ gr_result gr_vk_abi_texture_create(gr_handle device_handle, const gr_texture_des
     texture->width = desc->width;
     texture->height = desc->height;
     texture->usage = desc->usage;
+    texture->layout = VK_IMAGE_LAYOUT_UNDEFINED;
     if (texture->format == VK_FORMAT_UNDEFINED) {
         free(texture);
         return GR_ERROR_UNSUPPORTED;
@@ -1867,8 +1872,24 @@ static void vk_record_readback(VkCommandBuffer cb, void *user)
     VkImageMemoryBarrier barrier;
     gr_vk_dev *dev = state->texture->device;
 
-    /* The caller has already moved the image to TRANSFER_SRC through gr_cmd_barrier; this only
-     * has to make the copy visible to the host afterwards. */
+    /* Bring the image to TRANSFER_SRC from wherever it actually is, rather than assuming the
+     * caller left it there: the copy requires that layout and a second readback of the same image
+     * found it in GENERAL. */
+    if (state->texture->layout != VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL) {
+        memset(&barrier, 0, sizeof(barrier));
+        barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        barrier.oldLayout = state->texture->layout;
+        barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        barrier.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        barrier.image = state->texture->image;
+        barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        barrier.subresourceRange.levelCount = 1;
+        barrier.subresourceRange.layerCount = 1;
+        dev->cmd_pipeline_barrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                                  VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1,
+                                  &barrier);
+    }
     memset(&region, 0, sizeof(region));
     region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     region.imageSubresource.layerCount = 1;
@@ -1890,6 +1911,7 @@ static void vk_record_readback(VkCommandBuffer cb, void *user)
     barrier.subresourceRange.layerCount = 1;
     dev->cmd_pipeline_barrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT,
                               VK_PIPELINE_STAGE_HOST_BIT, 0, 0, NULL, 0, NULL, 1, &barrier);
+    state->texture->layout = VK_IMAGE_LAYOUT_GENERAL;
 }
 
 gr_result gr_vk_abi_texture_read(gr_handle texture_handle, uint32_t mip, uint32_t layer,
@@ -2166,6 +2188,7 @@ gr_result gr_vk_abi_cmd_barrier(gr_handle cmd_handle, const gr_barrier *barriers
         barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         barrier.subresourceRange.levelCount = 1;
         barrier.subresourceRange.layerCount = 1;
+        texture->layout = barrier.newLayout;
         cmd->device->cmd_pipeline_barrier(cmd->cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
                                           VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, NULL, 0, NULL,
                                           1, &barrier);
@@ -2193,6 +2216,8 @@ gr_result gr_vk_abi_cmd_begin_render(gr_handle cmd_handle, const gr_render_begin
                                                                 GR_HANDLE_TEXTURE_VIEW, NULL);
         if (!view)
             return GR_ERROR_INVALID_HANDLE;
+        if (view->texture)
+            view->texture->layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
         attachments[i].sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
         attachments[i].imageView = view->view;
         attachments[i].imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
@@ -2302,11 +2327,13 @@ gr_result gr_vk_abi_cmd_push_constants(gr_handle cmd_handle, uint32_t stage_mask
         return GR_ERROR_NOT_READY;
     if (offset + data.len > GR_PUSH_CONSTANT_BYTES)
         return GR_ERROR_INVALID_ARGUMENT;
-    if (stage_mask & 1u) stages |= VK_SHADER_STAGE_VERTEX_BIT;   /* bit 0: vertex */
-    if (stage_mask & 2u) stages |= VK_SHADER_STAGE_FRAGMENT_BIT; /* bit 1: fragment */
-    if (stage_mask & 4u) stages |= VK_SHADER_STAGE_COMPUTE_BIT;
-    if (stages == 0)
-        stages = VK_SHADER_STAGE_ALL;
+    /* The bindless layout declares one push-constant range covering every stage, and the spec
+     * requires the call's stageFlags to include every stage the overlapping range declares. So the
+     * call must name the layout's stages, not a subset of the caller's: a narrower mask is a
+     * validation error (offset-01795), which is how this was found. The ABI's stage_mask cannot
+     * narrow it without per-pipeline layouts, which the one-layout contract forbids. */
+    (void)stage_mask;
+    stages = VK_SHADER_STAGE_ALL;
     cmd->device->cmd_push_constants(cmd->cb, cmd->device->layout, stages, offset,
                                     (uint32_t)data.len, data.data);
     return GR_OK;
@@ -2540,12 +2567,23 @@ gr_result gr_vk_abi_buffer_create(gr_handle device_handle, const gr_buffer_desc 
     allocate.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
     allocate.allocationSize = requirements.size;
     allocate.memoryTypeIndex = vk_find_memory_type(dev, requirements.memoryTypeBits, properties);
-    if (dev->allocate_memory(dev->device, &allocate, NULL, &buffer->memory) != VK_SUCCESS ||
-        dev->bind_buffer_memory(dev->device, buffer->buffer, buffer->memory, 0) != VK_SUCCESS) {
-        if (buffer->memory) dev->free_memory(dev->device, buffer->memory, NULL);
-        dev->destroy_buffer(dev->device, buffer->buffer, NULL);
-        free(buffer);
-        return GR_ERROR_BACKEND;
+    /* A buffer created with SHADER_DEVICE_ADDRESS must have its memory allocated with
+     * MEMORY_ALLOCATE_DEVICE_ADDRESS, or the allocation is invalid (validation said so). */
+    {
+        VkMemoryAllocateFlagsInfo flags_info;
+        if (desc->usage & GR_BUFFER_USAGE_SHADER_DEVICE_ADDRESS) {
+            memset(&flags_info, 0, sizeof(flags_info));
+            flags_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO;
+            flags_info.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
+            allocate.pNext = &flags_info;
+        }
+        if (dev->allocate_memory(dev->device, &allocate, NULL, &buffer->memory) != VK_SUCCESS ||
+            dev->bind_buffer_memory(dev->device, buffer->buffer, buffer->memory, 0) != VK_SUCCESS) {
+            if (buffer->memory) dev->free_memory(dev->device, buffer->memory, NULL);
+            dev->destroy_buffer(dev->device, buffer->buffer, NULL);
+            free(buffer);
+            return GR_ERROR_BACKEND;
+        }
     }
     if (desc->memory != GR_MEMORY_DEVICE)
         dev->map_memory(dev->device, buffer->memory, 0, VK_WHOLE_SIZE, 0, &buffer->mapped);
@@ -2810,6 +2848,7 @@ gr_result gr_vk_abi_texture_write(gr_handle texture_handle, uint32_t mip, uint32
     state.width = width;
     state.height = height;
     vk_oneshot(dev, vk_record_upload, &state);
+    texture->layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
     dev->free_memory(dev->device, memory, NULL);
     dev->destroy_buffer(dev->device, staging, NULL);

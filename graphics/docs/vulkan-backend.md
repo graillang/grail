@@ -148,18 +148,26 @@ Fixed by reserving it.
 
 ### Open: the frame path under validation
 
-Turning the layer on in `vk-smoke` reports **12 errors**, which is why that target does not yet
-enable it. They are real and grouped into three causes:
+Turning the layer on in `vk-smoke` originally reported **12 errors**; that target still does not
+enable the assertion, because one remains.
 
-1. `vkCmdPushConstants()` reports a stage-flag mismatch on most draws and dispatches — the ABI's
-   abstract `stage_mask` bits are mapped to Vulkan stages at the call site, and the mapping is not
-   matching what each pipeline actually contains.
-2. `vkQueueSubmit()` reports an image in the wrong layout at submit — a transition the graph did
-   not derive, or the readback pair issued by hand outside it.
-3. `vkBindBufferMemory()`: the storage buffer was created with `VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT`
-   but its memory was not allocated with `VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT`.
+Two causes are fixed:
 
-Each is a genuine spec violation that every functional check passed straight through.
+1. **`vkCmdPushConstants` stage flags (6 of the 12).** The bindless layout declares one push-constant
+   range covering every stage, and the spec requires the call's `stageFlags` to include every stage
+   the overlapping range declares — so a call naming only `FRAGMENT` is illegal. The ABI's abstract
+   `stage_mask` therefore cannot narrow the call without per-pipeline layouts, which the one-layout
+   contract forbids; the backend now names the layout's stages.
+2. **`vkBindBufferMemory` device address (1 of the 12).** A buffer created with
+   `SHADER_DEVICE_ADDRESS` needs `VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT` on its memory; the
+   allocation now chains `VkMemoryAllocateFlagsInfo`.
+3. **Image layout (5 of the 12, one left).** `gr_texture_read` assumed the image was already in
+   `TRANSFER_SRC`; a second readback of the same image found `GENERAL`, which the previous readback
+   had left it in. The backend now tracks each texture's layout and transitions from it. **One error
+   remains**, reported at `vkQueueSubmit` as an image expected in `TRANSFER_SRC` but found in
+   `GENERAL`, and is not yet diagnosed.
+
+Each was a genuine spec violation that every functional check passed straight through.
 
 **Validation paid for itself on its first run**: it reported
 `VUID-VkSamplerCreateInfo-anisotropyEnable-01070` — the thirteen fixed samplers include four
