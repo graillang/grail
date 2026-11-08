@@ -224,6 +224,18 @@ static void null_fill_caps(gr_null_device *device)
 
 gr_result gr_device_create(const gr_device_desc *desc, gr_handle *out_device)
 {
+    /* The one place a backend is chosen. A second device of a different backend is refused,
+     * because the object table is process-wide. */
+    if (desc && desc->backend != GR_BACKEND_NULL) {
+        gr_result status;
+        if (gr_active_backend() != GR_BACKEND_NULL && gr_active_backend() != desc->backend)
+            return GR_ERROR_UNSUPPORTED;
+        status = gr_vk_abi_device_create(desc, out_device);
+        if (status == GR_OK)
+            gr_set_active_backend(desc->backend);
+        return status;
+    }
+    gr_set_active_backend(GR_BACKEND_NULL);
     gr_null_device *device;
     gr_null_queue *queue;
     gr_null_bindless *bindless;
@@ -360,6 +372,11 @@ out_of_memory:
 
 void gr_device_destroy(gr_handle device_handle)
 {
+    if (gr_active_backend() == GR_BACKEND_VULKAN) {
+        (void)gr_vk_abi_device_destroy(device_handle);
+        gr_set_active_backend(GR_BACKEND_NULL);
+        return;
+    }
     gr_null_device *device = (gr_null_device *)null_get(NULL, device_handle, GR_HANDLE_DEVICE, NULL);
     void *raw;
     if (!device)
@@ -381,6 +398,8 @@ void gr_device_destroy(gr_handle device_handle)
 
 gr_result gr_device_get_caps(gr_handle device_handle, gr_device_caps *out)
 {
+    if (gr_active_backend() == GR_BACKEND_VULKAN)
+        return gr_vk_abi_device_get_caps(device_handle, out);
     gr_null_device *device = (gr_null_device *)null_get(NULL, device_handle, GR_HANDLE_DEVICE, NULL);
     if (!device || !out)
         return GR_ERROR_INVALID_ARGUMENT;
@@ -400,6 +419,8 @@ gr_result gr_device_get_caps(gr_handle device_handle, gr_device_caps *out)
 
 gr_result gr_device_wait_idle(gr_handle device_handle)
 {
+    if (gr_active_backend() == GR_BACKEND_VULKAN)
+        return gr_vk_abi_device_wait_idle(device_handle);
     gr_null_device *device = (gr_null_device *)null_get(NULL, device_handle, GR_HANDLE_DEVICE, NULL);
     if (!device)
         return GR_ERROR_INVALID_HANDLE;
@@ -414,6 +435,8 @@ gr_result gr_device_wait_idle(gr_handle device_handle)
  * ======================================================================================= */
 gr_result gr_device_queue(gr_handle device_handle, gr_queue_kind kind, gr_handle *out_queue)
 {
+    if (gr_active_backend() == GR_BACKEND_VULKAN)
+        return gr_vk_abi_device_queue(device_handle, kind, out_queue);
     gr_null_device *device = (gr_null_device *)null_get(NULL, device_handle, GR_HANDLE_DEVICE, NULL);
     if (!device || !out_queue)
         return GR_ERROR_INVALID_ARGUMENT;
@@ -428,6 +451,8 @@ gr_result gr_device_queue(gr_handle device_handle, gr_queue_kind kind, gr_handle
 
 gr_result gr_queue_timeline(gr_handle queue_handle, gr_handle *out_semaphore)
 {
+    if (gr_active_backend() == GR_BACKEND_VULKAN)
+        return gr_vk_abi_queue_timeline(queue_handle, out_semaphore);
     gr_null_queue *queue = (gr_null_queue *)null_get(NULL, queue_handle, GR_HANDLE_QUEUE, NULL);
     if (!queue || !out_semaphore)
         return GR_ERROR_INVALID_ARGUMENT;
@@ -440,12 +465,16 @@ gr_result gr_queue_timeline(gr_handle queue_handle, gr_handle *out_semaphore)
 
 uint64_t gr_queue_submitted(gr_handle queue_handle)
 {
+    if (gr_active_backend() == GR_BACKEND_VULKAN)
+        return gr_vk_abi_queue_submitted(queue_handle);
     gr_null_queue *queue = (gr_null_queue *)null_get(NULL, queue_handle, GR_HANDLE_QUEUE, NULL);
     return queue ? queue->submitted : 0;
 }
 
 uint64_t gr_queue_completed(gr_handle queue_handle)
 {
+    if (gr_active_backend() == GR_BACKEND_VULKAN)
+        return gr_vk_abi_queue_completed(queue_handle);
     gr_null_queue *queue = (gr_null_queue *)null_get(NULL, queue_handle, GR_HANDLE_QUEUE, NULL);
     if (!queue)
         return 0;
@@ -456,6 +485,8 @@ uint64_t gr_queue_completed(gr_handle queue_handle)
 
 gr_result gr_queue_wait_idle(gr_handle queue_handle)
 {
+    if (gr_active_backend() == GR_BACKEND_VULKAN)
+        return gr_vk_abi_queue_wait_idle(queue_handle);
     gr_null_queue *queue = (gr_null_queue *)null_get(NULL, queue_handle, GR_HANDLE_QUEUE, NULL);
     if (!queue)
         return GR_ERROR_INVALID_HANDLE;
@@ -529,6 +560,8 @@ static void null_free_object(gr_handle object, uint32_t type)
 
 gr_result gr_device_retire(gr_handle device_handle, gr_handle object, uint64_t after_value)
 {
+    if (gr_active_backend() == GR_BACKEND_VULKAN)
+        return gr_vk_abi_device_retire(device_handle, object, after_value);
     gr_null_device *device = (gr_null_device *)null_get(NULL, device_handle, GR_HANDLE_DEVICE, NULL);
     gr_null_queue *queue;
     if (!device)
@@ -557,6 +590,8 @@ gr_result gr_device_retire(gr_handle device_handle, gr_handle object, uint64_t a
 
 gr_result gr_device_collect(gr_handle device_handle)
 {
+    if (gr_active_backend() == GR_BACKEND_VULKAN)
+        return gr_vk_abi_device_collect(device_handle);
     gr_null_device *device = (gr_null_device *)null_get(NULL, device_handle, GR_HANDLE_DEVICE, NULL);
     gr_null_queue *queue;
     uint32_t i = 0;
@@ -594,12 +629,16 @@ static uint32_t null_alloc_slot(gr_null_bindless *bindless, gr_bindless_table ta
 
 gr_handle gr_device_bindless(gr_handle device_handle)
 {
+    if (gr_active_backend() == GR_BACKEND_VULKAN)
+        return gr_vk_abi_device_bindless(device_handle);
     gr_null_device *device = (gr_null_device *)null_get(NULL, device_handle, GR_HANDLE_DEVICE, NULL);
     return device ? device->bindless : GR_NULL_HANDLE;
 }
 
 gr_result gr_bindless_get_info(gr_handle bindless_handle, gr_bindless_info *out)
 {
+    if (gr_active_backend() == GR_BACKEND_VULKAN)
+        return gr_vk_abi_bindless_get_info(bindless_handle, out);
     gr_null_bindless *bindless = (gr_null_bindless *)null_get(NULL, bindless_handle, GR_HANDLE_BINDLESS, NULL);
     uint32_t i;
     if (!bindless || !out)
@@ -2013,6 +2052,8 @@ gr_result gr_query_pool_results(gr_handle pool_handle, uint32_t first, uint32_t 
 gr_result gr_shader_create(gr_handle device_handle, const gr_shader_desc *desc,
                            gr_handle *out_shader)
 {
+    if (gr_active_backend() == GR_BACKEND_VULKAN)
+        return gr_vk_abi_shader_create(device_handle, desc, out_shader);
     gr_null_device *device = (gr_null_device *)null_get(NULL, device_handle, GR_HANDLE_DEVICE, NULL);
     const gr_span_u8 *chosen = NULL;
     gr_null_shader *shader;
@@ -2097,6 +2138,8 @@ gr_result gr_shader_reflection_span(gr_handle shader_handle, gr_span_u8 *out_spa
 gr_result gr_pipeline_create(gr_handle device_handle, const gr_pipeline_desc *desc,
                              gr_handle *out_pipeline)
 {
+    if (gr_active_backend() == GR_BACKEND_VULKAN)
+        return gr_vk_abi_pipeline_create(device_handle, desc, out_pipeline);
     gr_null_device *device = (gr_null_device *)null_get(NULL, device_handle, GR_HANDLE_DEVICE, NULL);
     gr_null_pipeline *pipeline;
     gr_handle handle;
@@ -2207,6 +2250,8 @@ gr_result gr_pipeline_create(gr_handle device_handle, const gr_pipeline_desc *de
 
 gr_result gr_pipeline_commit(gr_handle device_handle, double *out_seconds)
 {
+    if (gr_active_backend() == GR_BACKEND_VULKAN)
+        return gr_vk_abi_pipeline_commit(device_handle, out_seconds);
     gr_null_device *device = (gr_null_device *)null_get(NULL, device_handle, GR_HANDLE_DEVICE, NULL);
     if (!device)
         return GR_ERROR_INVALID_HANDLE;
@@ -2222,6 +2267,8 @@ gr_result gr_pipeline_commit(gr_handle device_handle, double *out_seconds)
 gr_result gr_pipeline_stats(gr_handle device_handle, uint32_t *out_declared,
                             uint32_t *out_committed)
 {
+    if (gr_active_backend() == GR_BACKEND_VULKAN)
+        return gr_vk_abi_pipeline_stats(device_handle, out_declared, out_committed);
     gr_null_device *device = (gr_null_device *)null_get(NULL, device_handle, GR_HANDLE_DEVICE, NULL);
     if (!device)
         return GR_ERROR_INVALID_HANDLE;

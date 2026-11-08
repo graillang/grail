@@ -297,6 +297,11 @@ static gr_object_table g_objects;
 
 gr_object_table *gr_objects(void) { return &g_objects; }
 
+static gr_backend g_active_backend = GR_BACKEND_NULL;
+
+void gr_set_active_backend(gr_backend backend) { g_active_backend = backend; }
+gr_backend gr_active_backend(void) { return g_active_backend; }
+
 void gr_objects_init_once(void)
 {
     static int initialised = 0;

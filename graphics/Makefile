@@ -7,6 +7,7 @@
 #   make shader-check  compile, then verify every blob (base and per-permutation) in C
 #   make perm-test     prove each permutation really compiles to its own bytecode (needs bun)
 #   make vk-probe      ask the driver what it is, under the exclusive GPU lock (talks to a GPU)
+#   make vk-smoke      create a real device and pipeline headless, under the same lock
 #   make clean
 #
 # DXC is looked up by the tool: $DXC, then Abundance's pinned tools cache, then PATH.
@@ -17,18 +18,22 @@ INCLUDES = -Iinclude
 BUILD   := ../.work/graphics
 
 SRC := src/grail_core.c src/grail_reflect.c src/grail_wire.c src/grail_shader_library.c \
-       src/grail_vk_probe.c src/grail_null.c src/grail_null_window.c
+       src/grail_vk_common.c src/grail_vk_probe.c src/grail_vulkan.c \
+       src/grail_null.c src/grail_null_window.c
+# dlopen is how the Vulkan backend resolves its loader, so every binary that links the
+# implementation needs it.
+LDLIBS ?= -ldl
 OBJ := $(patsubst src/%.c,$(BUILD)/%.o,$(SRC))
 # Every header is a dependency of every object. Without this an ABI change to a header leaves
 # stale objects linked against the new declarations — which is exactly how a version bump goes
 # unnoticed until something reads the wrong field.
-HEADERS := $(wildcard include/grail/*.h) src/grail_internal.h
+HEADERS := $(wildcard include/grail/*.h) src/grail_internal.h src/grail_vk_common.h
 TESTS := abi device wire library
-GPU_TESTS := vk_probe
+GPU_TESTS := vk_probe vk_backend
 TEST_BINS := $(patsubst %,$(BUILD)/test_%,$(TESTS))
 BLOBS := $(shell find ../.work/shaders -name '*.refl.bin' 2>/dev/null)
 
-.PHONY: all test shaders shader-check perm-test vk-probe tool clean
+.PHONY: all test shaders shader-check perm-test vk-probe vk-smoke tool clean
 
 all: test
 
@@ -41,7 +46,7 @@ $(BUILD)/%.o: src/%.c $(HEADERS) | $(BUILD)
 # Each test links the whole implementation: the ABI is small enough that partial linking would
 # only hide a missing entry point until it was called.
 $(BUILD)/test_%: tests/test_%.c $(OBJ) $(HEADERS) | $(BUILD)
-	$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(OBJ)
+	$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(OBJ) $(LDLIBS)
 
 test: $(TEST_BINS)
 	@for t in $(TEST_BINS); do ./$$t || exit 1; done
@@ -50,7 +55,7 @@ test: $(TEST_BINS)
 # blob, validates it, recomputes the layout digest with an independent implementation and
 # compares every frame-constant member offset against offsetof().
 $(BUILD)/grail-reflect: src/grail_reflect_tool.c $(OBJ) $(HEADERS) | $(BUILD)
-	$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(OBJ)
+	$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(OBJ) $(LDLIBS)
 
 tool: $(BUILD)/grail-reflect
 
@@ -88,6 +93,14 @@ perm-test: shaders
 GPU_LOCK = /run/user/$(shell id -u)/ab-engine-gpu.lock
 $(BUILD)/grail-vk-probe: src/grail_vk_probe_main.c $(OBJ) $(HEADERS) | $(BUILD)
 	$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(OBJ) -ldl
+
+$(BUILD)/test_vk_backend: tests/test_vk_backend.c $(OBJ) $(HEADERS) | $(BUILD)
+	$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(OBJ) $(LDLIBS)
+
+# The backend smoke test: a real device, real shader modules, a real pipeline, destroyed cleanly.
+vk-smoke: shaders $(BUILD)/test_vk_backend
+	@if pgrep -x Abundance >/dev/null; then echo "refusing: the game is running"; exit 1; fi
+	flock -w 600 $(GPU_LOCK) $(BUILD)/test_vk_backend ../.work/shaders
 
 vk-probe: $(BUILD)/grail-vk-probe $(BUILD)/test_vk_probe
 	@if pgrep -x Abundance >/dev/null; then \

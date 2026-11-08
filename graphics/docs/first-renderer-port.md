@@ -62,7 +62,10 @@ byte views, but they are not pointers and cannot cross an FFI boundary as one.
 `GR_ERROR_UNSUPPORTED` for Vulkan, D3D12 and Metal, so a caller cannot accidentally believe
 it has a GPU.
 
-**Vulkan is the first real backend to write**, and the order after it is D3D12, then Metal.
+**Vulkan's device core is written** (`vulkan-backend.md`): device, queues, bindless layout, shader
+modules and dynamic-rendering pipelines, verified headless on this host. What remains for a frame is
+resources, command buffers, submission and a swapchain. After Vulkan comes D3D12, then Metal, in the
+order below.
 The Vulkan backend must satisfy `grail_backend_vulkan.h`: Vulkan 1.3, descriptor indexing with
 update-after-bind and partially-bound, buffer device address, dynamic rendering,
 `synchronization2`, timeline semaphores, scalar layout, 16- and 64-bit integer types. The
