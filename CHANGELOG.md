@@ -3,6 +3,27 @@
 ## Unreleased
 
 - New design document `docs/design/abundance-port.md`: inventory of the Abundance portable core, own engine, Unreal host and shaders, their CPU/RHI boundary, the FFI/ABI requirements a Grail host would have to meet, and a staged port plan. Documentation only; no compiler or library behaviour changed.
+- Graphics foundation (`graphics/`): a versioned C ABI for the render hardware interface and
+  the shader pipeline, aligned with the Vulkan engine in Abundance. `grail_abi.h` defines
+  64-bit tagged handles whose stale use is detected rather than dereferenced, status codes,
+  capability bits and `{size, next}` descriptors. `grail_window.h` covers the SDL3 window,
+  event drain and input; `grail_rhi.h` the device, queue timelines, resources, dynamic-rendering
+  command buffers, deferred destruction and swapchain; `grail_bindless.h` the single set-0
+  table and set-1 frame constants together with the Vulkan/D3D12/Metal mapping; `grail_shader.h`
+  an offline reflection blob format, pipeline descriptors and permutation keys; per-backend
+  headers state the Vulkan 1.3 feature floor, the D3D12 root signature and the Metal argument
+  buffer requirements. `grail_wire.h` carries the same POD structures over a socket for a
+  process that cannot link the RHI.
+
+  The null backend implements every entry point and validates arguments, recording order and
+  handle liveness without a GPU; `make -C graphics test` runs 219 checks with only a C
+  compiler. Three HLSL stages compile offline with DXC 1.9.2609 and pass
+  `spirv-val --target-env vulkan1.3`. Two binding facts are pinned by compilation rather than
+  assumed: `register(xN, spaceM)` maps to Vulkan `DescriptorSet M`/`Binding N`, and push
+  constants must use `[[vk::push_constant]]` because a plain `cbuffer` at `b0` would become a
+  descriptor colliding with the sampled-image table. The offline shader tool and the real
+  backends are not yet written; a Grail program cannot call any of this until the language has
+  an FFI and non-`libc`-free linkage (`graphics/docs/first-renderer-port.md`).
 
 - Native fixtures, inline regression programs and book examples now use typed references and
   explicit byte views under `--default-u64 --typed-refs`; user-mode cases retain `i64` defaults.
