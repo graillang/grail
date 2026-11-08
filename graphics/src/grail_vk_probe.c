@@ -117,7 +117,8 @@ gr_result gr_vk_probe_run(gr_vk_probe_report *out)
 
         {
             uint32_t obtained = 0;
-            if (gr_vk_instance_create(&loader, VK_API_VERSION_1_3, &instance, &obtained) != GR_OK) {
+            if (gr_vk_instance_create(&loader, VK_API_VERSION_1_3, NULL, 0, NULL, 0, &instance,
+                                      &obtained) != GR_OK) {
                 gr_vk_loader_close(&loader);
                 return GR_ERROR_UNSUPPORTED;
             }

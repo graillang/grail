@@ -35,7 +35,11 @@ void gr_vk_loader_close(gr_vk_loader *loader);
 /* Creates an instance at the highest of {requested, 1.3, 1.0} the loader accepts, with no
  * extensions: the backend is headless and there is no surface yet. `out_api` receives the
  * version actually obtained. */
+/* `layers` and `extensions` are the caller's; a window needs the platform surface extensions and
+ * validation needs its layer. Passing none gives the same minimal instance as before. */
 gr_result gr_vk_instance_create(gr_vk_loader *loader, uint32_t requested_api,
+                                const char *const *layers, uint32_t layer_count,
+                                const char *const *extensions, uint32_t extension_count,
                                 VkInstance *out_instance, uint32_t *out_api);
 
 /* The bits of GR_VK_REQ_ALL a device does not provide. Zero means the backend can run.

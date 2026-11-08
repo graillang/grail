@@ -49,6 +49,22 @@ typedef struct gr_window_desc {
 
 #define GR_DISPLAY_AUTO 0xFFFFFFFFu
 
+/* Which implementation serves the window functions.
+ *
+ * GR_WINDOW_BACKEND_NULL is the default: it validates every call and allocates handles without
+ * touching a display, which is what lets the whole ABI be exercised on a machine with no window
+ * system. SDL3 is selected explicitly, because a test that only needs a handle should not
+ * require a compositor.
+ */
+typedef enum gr_window_backend {
+    GR_WINDOW_BACKEND_NULL = 0,
+    GR_WINDOW_BACKEND_SDL3 = 1
+} gr_window_backend;
+
+/* Selects the implementation. GR_ERROR_UNSUPPORTED when SDL3 cannot be loaded. Must be called
+ * before any window is created; a window already created keeps the backend it was made with. */
+gr_result gr_window_set_backend(gr_window_backend backend);
+
 /* Creates a window. On success writes a GR_HANDLE_WINDOW and returns GR_OK. */
 gr_result gr_window_create(const gr_window_desc *desc, gr_handle *out_window);
 void gr_window_destroy(gr_handle window);

@@ -19,7 +19,7 @@ BUILD   := ../.work/graphics
 
 SRC := src/grail_core.c src/grail_reflect.c src/grail_wire.c src/grail_shader_library.c \
        src/grail_vk_common.c src/grail_vk_probe.c src/grail_vulkan.c \
-       src/grail_graph.c src/grail_null.c src/grail_null_window.c
+       src/grail_graph.c src/grail_sdl.c src/grail_null.c src/grail_null_window.c
 # dlopen is how the Vulkan backend resolves its loader, so every binary that links the
 # implementation needs it.
 LDLIBS ?= -ldl
@@ -27,13 +27,13 @@ OBJ := $(patsubst src/%.c,$(BUILD)/%.o,$(SRC))
 # Every header is a dependency of every object. Without this an ABI change to a header leaves
 # stale objects linked against the new declarations — which is exactly how a version bump goes
 # unnoticed until something reads the wrong field.
-HEADERS := $(wildcard include/grail/*.h) src/grail_internal.h src/grail_vk_common.h
+HEADERS := $(wildcard include/grail/*.h) src/grail_internal.h src/grail_vk_common.h src/grail_sdl.h
 TESTS := abi device wire library graph
 GPU_TESTS := vk_probe vk_backend
 TEST_BINS := $(patsubst %,$(BUILD)/test_%,$(TESTS))
 BLOBS := $(shell find ../.work/shaders -name '*.refl.bin' 2>/dev/null)
 
-.PHONY: all test shaders shader-check perm-test vk-probe vk-smoke tool clean
+.PHONY: all test shaders shader-check perm-test vk-probe vk-smoke vk-surface tool clean
 
 all: test
 
@@ -94,8 +94,26 @@ GPU_LOCK = /run/user/$(shell id -u)/ab-engine-gpu.lock
 $(BUILD)/grail-vk-probe: src/grail_vk_probe_main.c $(OBJ) $(HEADERS) | $(BUILD)
 	$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(OBJ) -ldl
 
+$(BUILD)/test_vk_surface: tests/test_vk_surface.c $(OBJ) $(HEADERS) | $(BUILD)
+	$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(OBJ) $(LDLIBS)
+
 $(BUILD)/test_vk_backend: tests/test_vk_backend.c $(OBJ) $(HEADERS) | $(BUILD)
 	$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(OBJ) $(LDLIBS)
+
+# The window and surface path. The validation layer is not installed system-wide on this host, so
+# it is pointed at the pinned Vulkan SDK instead of requiring a system install.
+VK_SDK ?= $(HOME)/.cache/abundance/engine-tools/vulkan_sdk-1.4.363.0/1.4.363.0/x86_64
+vk-surface: $(BUILD)/test_vk_surface
+	@if pgrep -x Abundance >/dev/null; then echo "refusing: the game is running"; exit 1; fi
+	@if [ -d "$(VK_SDK)" ]; then \
+		echo "validation layer: $(VK_SDK)"; \
+		VK_LAYER_PATH=$(VK_SDK)/share/vulkan/explicit_layer.d \
+		LD_LIBRARY_PATH=$(VK_SDK)/lib:$$LD_LIBRARY_PATH \
+		flock -w 600 $(GPU_LOCK) $(BUILD)/test_vk_surface; \
+	else \
+		echo "pinned Vulkan SDK not found; running without the validation layer"; \
+		flock -w 600 $(GPU_LOCK) $(BUILD)/test_vk_surface; \
+	fi
 
 # The backend smoke test: a real device, real shader modules, a real pipeline, destroyed cleanly.
 vk-smoke: shaders $(BUILD)/test_vk_backend
