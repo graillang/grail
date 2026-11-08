@@ -44,7 +44,7 @@ docs/                     the contract, the shader flow, dependencies, blockers
 | Shaders (3 stages) | compile and pass `spirv-val` |
 | Offline shader tool | written; compiles 3 stages, reflection and permutation ids verified by an independent C reader |
 | Vulkan / D3D12 / Metal backends | **not implemented** (`GR_ERROR_UNSUPPORTED`) |
-| Permutation enumeration | implemented: directives, blob records, keys, id cross-check |
+| Permutations | each combination compiled to its own SPIR-V/DXIL/blob; digests and keys tested |
 | Calling this from a Grail program | **blocked** — see `docs/first-renderer-port.md` |
 
 ## Build and test
@@ -53,6 +53,7 @@ docs/                     the contract, the shader flow, dependencies, blockers
 make -C graphics test          # needs only a C compiler: 219 checks
 make -C graphics shaders       # needs DXC 1.9.2609 (see docs/dependencies.md)
 make -C graphics shader-check  # compile, then verify every reflection blob in C
+make -C graphics perm-test     # prove each permutation compiles to its own bytecode (bun)
 ```
 
 ## Documents

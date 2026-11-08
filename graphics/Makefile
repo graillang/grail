@@ -4,7 +4,8 @@
 #
 #   make test          build and run every test
 #   make shaders       compile graphics/shaders to SPIR-V + DXIL + reflection (needs dxc)
-#   make shader-check  compile, then verify every blob with the independent C reader
+#   make shader-check  compile, then verify every blob (base and per-permutation) in C
+#   make perm-test     prove each permutation really compiles to its own bytecode (needs bun)
 #   make clean
 #
 # DXC is looked up by the tool: $DXC, then Abundance's pinned tools cache, then PATH.
@@ -20,7 +21,7 @@ TESTS := abi device wire
 TEST_BINS := $(patsubst %,$(BUILD)/test_%,$(TESTS))
 BLOBS := $(shell find ../.work/shaders -name '*.refl.bin' 2>/dev/null)
 
-.PHONY: all test shaders shader-check tool clean
+.PHONY: all test shaders shader-check perm-test tool clean
 
 all: test
 
@@ -65,6 +66,11 @@ shader-check: shaders tool
 		echo "permutation name ids differ between tools/shader.mjs and src/grail_core.c"; \
 		exit 1; fi; \
 	echo "permutation ids agree ($$(wc -l < $(BUILD)/ids.c) define(s))"
+
+# The per-permutation build is only meaningful if the variants differ, so this runs the test
+# that proves it rather than asserting it in prose.
+perm-test: shaders
+	bun test tests/shader_permutations.test.mjs
 
 clean:
 	rm -rf $(BUILD)
