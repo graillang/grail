@@ -7,9 +7,21 @@
 #undef private
 #include <cstdio>
 
+// A Grail f64 literal: %.17g round-trips binary64, plus ".0" when it would read as an integer.
+static void lit(double v) {
+    char buf[64];
+    std::snprintf(buf, sizeof buf, "%.17g", v);
+    bool plain = true;
+    for (const char *c = buf; *c; ++c)
+        if (*c == '.' || *c == 'e' || *c == 'n' || *c == 'i') plain = false;
+    std::printf("%s%s", buf, plain ? ".0" : "");
+}
 static void table(const char *name, const float *v, int n) {
     std::printf("pub fn %s() -> f32[] {\n    values := f64[", name);
-    for (int i = 0; i < n; ++i) std::printf("%s%.17g", i ? ", " : "", (double)v[i]);
+    for (int i = 0; i < n; ++i) {
+        std::printf("%s", i ? ", " : "");
+        lit((double)v[i]);
+    }
     std::printf("];\n    mut out = f32[];\n    for i in values.len() {\n        out.push(f32(values[i]));\n    }\n    return out;\n}\n");
 }
 static void constant(const char *name, float v) {
@@ -20,6 +32,7 @@ int main() {
     std::printf("// (MIT, Copyright (c) 2023 Jordan Peck, Copyright (c) 2023 Contributors); do not edit.\n\n");
     table("gradients_2d", FastNoiseLite::Lookup<float>::Gradients2D, 256);
     table("rand_vecs_2d", FastNoiseLite::Lookup<float>::RandVecs2D, 512);
+    table("gradients_3d", FastNoiseLite::Lookup<float>::Gradients3D, 256);
     // OpenSimplex2 (float SQRT3/G2) folded constants, as the compiler evaluates them in float.
     const float SQRT3 = 1.7320508075688772935274463415059f;
     const float G2 = (3 - SQRT3) / 6;
@@ -42,6 +55,7 @@ int main() {
     constant("two_thirds", 2.0f / 3.0f);
     constant("os2_scale", 99.83685446303647f);
     constant("os2s_scale", 18.24196194486065f);
+    constant("os2s3_scale", 9.046026385208288f);
     constant("perlin_scale", 1.4247691104677813f);
     constant("cell_jitter", 0.43701595f);
     constant("cell_far", 1e10f);
