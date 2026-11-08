@@ -1302,6 +1302,7 @@ grail_status grail_os_dl_close(grail_library handle) {
         grail_handle_table_release(&grail_macos.libraries, handle, (void **)&library);
     grail_macos_unlock();
     if (status != GRAIL_OK) return status;
+    (void)dlerror();
     const int result = dlclose(library->handle);
     grail_macos_capture_loader_error();
     grail_macos_release(library, sizeof(*library));
