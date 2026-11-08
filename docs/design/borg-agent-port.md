@@ -66,6 +66,11 @@ Totals: 363,291 lines of Rust in `src/` across 13 crates (371,992 including crat
 `cfg(unix)`/`cfg(windows)`/`cfg(target_os = …)`; 109 distinct `libc` symbols are called; 175
 distinct `BORG_*` environment variables are read.
 
+Only four source files are factored by platform at all, and all of them are desktop adapters:
+`computer_use/linux.rs`, `computer_use/linux/windows.rs`, `computer_use/macos.swift` and
+`computer_use/windows.ps1`. Every other platform difference is an inline `cfg` branch inside
+shared modules — so there is no per-OS backend layer to lift, in Borg or for a port.
+
 ## 2. Dependencies
 
 Load-bearing third-party crates and what each one actually buys:
