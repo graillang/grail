@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Vulkan's thirteen fixed samplers did not match Abundance's definitions: the `*_WRAP` slots
+  clamped, the `*_CLAMP_U_WRAP_V` slots never wrapped V, W was always clamped, and the MIN/MAX
+  reduction slots filtered as ordinary samplers; `gr_sampler_create` also ignored MIN/MAX
+  reduction. Both now use one table, `gr_fixed_sampler` (taken from `engine/core/bindless.cpp`),
+  which D3D12 shares, and `samplerFilterMinmax` is enabled for the reduction slots.
+
 - Vulkan pipelines now honour `gr_pipeline_desc.depth_compare`; it was ignored and every
   pipeline used GREATER_EQUAL. Zero still means the reverse-Z default, as on D3D12.
 

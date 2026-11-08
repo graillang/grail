@@ -136,6 +136,11 @@ gr_result gr_vk_abi_cmd_push_frame_offset(gr_handle cmd, uint32_t frame_slot);
 void gr_vk_abi_buffer_unmap(gr_handle buffer);
 uint64_t gr_vk_abi_fence_value(gr_handle fence);
 
+/* The thirteen fixed samplers every backend creates in bindless sampler slots 0..12, as
+ * Abundance's abe::Bindless defines them (engine/core/bindless.cpp): filter, mip filter, U/V
+ * addressing (W follows U), anisotropy, comparison and reduction. Fills `out` for slot `i`. */
+void gr_fixed_sampler(uint32_t i, gr_sampler_desc *out);
+
 /* Implemented by grail_d3d12.c with the same signatures as the Vulkan entry points. A build
  * without the Windows SDK (every non-Windows host) compiles them as GR_ERROR_UNSUPPORTED stubs,
  * so the dispatcher can route to them unconditionally. */

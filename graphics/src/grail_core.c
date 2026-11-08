@@ -417,3 +417,38 @@ void *gr_object_remove(gr_object_table *table, gr_handle handle, uint32_t type)
     table->live_count--;
     return object;
 }
+
+void gr_fixed_sampler(uint32_t i, gr_sampler_desc *out)
+{
+    static const struct {
+        uint8_t filter, mip, u, v, compare, reduction;
+        float aniso;
+    } table[GR_SAMPLER_SLOT_COUNT] = {
+        /* LINEAR_CLAMP */ { GR_FILTER_LINEAR, GR_FILTER_LINEAR, GR_ADDRESS_CLAMP, GR_ADDRESS_CLAMP, 0, GR_REDUCTION_WEIGHTED, 1.0f },
+        /* LINEAR_WRAP */ { GR_FILTER_LINEAR, GR_FILTER_LINEAR, GR_ADDRESS_WRAP, GR_ADDRESS_WRAP, 0, GR_REDUCTION_WEIGHTED, 1.0f },
+        /* POINT_CLAMP */ { GR_FILTER_NEAREST, GR_FILTER_NEAREST, GR_ADDRESS_CLAMP, GR_ADDRESS_CLAMP, 0, GR_REDUCTION_WEIGHTED, 1.0f },
+        /* POINT_WRAP */ { GR_FILTER_NEAREST, GR_FILTER_NEAREST, GR_ADDRESS_WRAP, GR_ADDRESS_WRAP, 0, GR_REDUCTION_WEIGHTED, 1.0f },
+        /* ANISO_WRAP */ { GR_FILTER_LINEAR, GR_FILTER_LINEAR, GR_ADDRESS_WRAP, GR_ADDRESS_WRAP, 0, GR_REDUCTION_WEIGHTED, 16.0f },
+        /* ANISO_CLAMP */ { GR_FILTER_LINEAR, GR_FILTER_LINEAR, GR_ADDRESS_CLAMP, GR_ADDRESS_CLAMP, 0, GR_REDUCTION_WEIGHTED, 16.0f },
+        /* SHADOW_COMPARE */ { GR_FILTER_LINEAR, GR_FILTER_NEAREST, GR_ADDRESS_CLAMP, GR_ADDRESS_CLAMP, 1, GR_REDUCTION_COMPARE, 1.0f },
+        /* MIN_REDUCE */ { GR_FILTER_LINEAR, GR_FILTER_NEAREST, GR_ADDRESS_CLAMP, GR_ADDRESS_CLAMP, 0, GR_REDUCTION_MIN, 1.0f },
+        /* MAX_REDUCE */ { GR_FILTER_LINEAR, GR_FILTER_NEAREST, GR_ADDRESS_CLAMP, GR_ADDRESS_CLAMP, 0, GR_REDUCTION_MAX, 1.0f },
+        /* LINEAR_CLAMP_U_WRAP_V */ { GR_FILTER_LINEAR, GR_FILTER_LINEAR, GR_ADDRESS_CLAMP, GR_ADDRESS_WRAP, 0, GR_REDUCTION_WEIGHTED, 1.0f },
+        /* LINEAR_WRAP_U_CLAMP_V */ { GR_FILTER_LINEAR, GR_FILTER_LINEAR, GR_ADDRESS_WRAP, GR_ADDRESS_CLAMP, 0, GR_REDUCTION_WEIGHTED, 1.0f },
+        /* ANISO_CLAMP_U_WRAP_V */ { GR_FILTER_LINEAR, GR_FILTER_LINEAR, GR_ADDRESS_CLAMP, GR_ADDRESS_WRAP, 0, GR_REDUCTION_WEIGHTED, 16.0f },
+        /* ANISO_WRAP_U_CLAMP_V */ { GR_FILTER_LINEAR, GR_FILTER_LINEAR, GR_ADDRESS_WRAP, GR_ADDRESS_CLAMP, 0, GR_REDUCTION_WEIGHTED, 16.0f },
+    };
+    memset(out, 0, sizeof(*out));
+    out->head.size = (uint32_t)sizeof(*out);
+    if (i >= GR_SAMPLER_SLOT_COUNT)
+        i = GR_SAMPLER_LINEAR_CLAMP;
+    out->min_filter = out->mag_filter = (gr_filter)table[i].filter;
+    out->mip_filter = (gr_filter)table[i].mip;
+    out->address_u = (gr_address_mode)table[i].u;
+    out->address_v = (gr_address_mode)table[i].v;
+    out->address_w = (gr_address_mode)table[i].u;
+    out->max_anisotropy = table[i].aniso;
+    out->min_lod = 0.0f;
+    out->max_lod = 1000.0f;
+    out->reduction = (gr_reduction)table[i].reduction;
+}

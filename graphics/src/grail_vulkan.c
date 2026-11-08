@@ -51,6 +51,7 @@ typedef struct gr_vk_dev {
 
     uint32_t pipelines_declared, pipelines_committed;
     int commit_done;
+    int filter_minmax;           /* samplerFilterMinmax is on: MIN/MAX reduction samplers work */
 
     /* Entry points. */
     PFN_vkDestroyInstance destroy_instance;
@@ -529,6 +530,45 @@ static VkSamplerAddressMode vk_address(gr_address_mode mode)
     }
 }
 
+/* gr_sampler_desc -> VkSamplerCreateInfo, shared by the fixed slots and gr_sampler_create.
+ * `reduce` must outlive `info`; it is chained for MIN/MAX reduction. Returns 0 when the device
+ * cannot express the request (min/max reduction without samplerFilterMinmax). */
+static int vk_sampler_info(const gr_vk_dev *dev, const gr_sampler_desc *desc, VkSamplerCreateInfo *info,
+                           VkSamplerReductionModeCreateInfo *reduce)
+{
+    memset(info, 0, sizeof(*info));
+    memset(reduce, 0, sizeof(*reduce));
+    info->sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    info->magFilter = desc->mag_filter == GR_FILTER_NEAREST ? VK_FILTER_NEAREST : VK_FILTER_LINEAR;
+    info->minFilter = desc->min_filter == GR_FILTER_NEAREST ? VK_FILTER_NEAREST : VK_FILTER_LINEAR;
+    info->mipmapMode = desc->mip_filter == GR_FILTER_NEAREST ? VK_SAMPLER_MIPMAP_MODE_NEAREST
+                                                           : VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    info->addressModeU = vk_address(desc->address_u);
+    info->addressModeV = vk_address(desc->address_v);
+    info->addressModeW = vk_address(desc->address_w);
+    info->mipLodBias = desc->mip_lod_bias;
+    info->minLod = desc->min_lod;
+    info->maxLod = desc->max_lod > 0.0f ? desc->max_lod : 1000.0f;
+    if (desc->max_anisotropy > 1.0f) {
+        info->anisotropyEnable = VK_TRUE;
+        info->maxAnisotropy = desc->max_anisotropy;
+    }
+    if (desc->reduction == GR_REDUCTION_COMPARE) {
+        info->compareEnable = VK_TRUE;
+        info->compareOp = VK_COMPARE_OP_GREATER_OR_EQUAL;
+    }
+    if (desc->reduction == GR_REDUCTION_MIN || desc->reduction == GR_REDUCTION_MAX) {
+        if (!dev->filter_minmax)
+            return 0;
+        reduce->sType = VK_STRUCTURE_TYPE_SAMPLER_REDUCTION_MODE_CREATE_INFO;
+        reduce->reductionMode = desc->reduction == GR_REDUCTION_MIN ? VK_SAMPLER_REDUCTION_MODE_MIN
+                                                                     : VK_SAMPLER_REDUCTION_MODE_MAX;
+        info->pNext = reduce;
+    }
+    return 1;
+}
+
+
 static gr_result vk_create_table(gr_vk_dev *dev)
 {
     VkDescriptorPoolSize sizes[5];
@@ -588,33 +628,11 @@ static gr_result vk_create_table(gr_vk_dev *dev)
     /* The thirteen fixed samplers, written into slots 0..12 so a shader's constant index is
      * always valid (grail_rhi.h "gr_sampler_slot"). */
     for (i = 0; i < (uint32_t)GR_SAMPLER_SLOT_COUNT; ++i) {
-        const int compare = i == (uint32_t)GR_SAMPLER_SHADOW_COMPARE;
-        const int reduce = i == (uint32_t)GR_SAMPLER_MIN_REDUCE || i == (uint32_t)GR_SAMPLER_MAX_REDUCE;
-        const int point = i == (uint32_t)GR_SAMPLER_POINT_CLAMP || i == (uint32_t)GR_SAMPLER_POINT_WRAP;
-        const int aniso = i == (uint32_t)GR_SAMPLER_ANISO_WRAP || i == (uint32_t)GR_SAMPLER_ANISO_CLAMP ||
-                          i == (uint32_t)GR_SAMPLER_ANISO_CLAMP_U_WRAP_V ||
-                          i == (uint32_t)GR_SAMPLER_ANISO_WRAP_U_CLAMP_V;
-        const int clamp_v = i == (uint32_t)GR_SAMPLER_LINEAR_CLAMP_U_WRAP_V ||
-                            i == (uint32_t)GR_SAMPLER_ANISO_CLAMP_U_WRAP_V;
-        const int wrap_u = i == (uint32_t)GR_SAMPLER_LINEAR_WRAP_U_CLAMP_V ||
-                           i == (uint32_t)GR_SAMPLER_ANISO_WRAP_U_CLAMP_V;
-        memset(&sampler_info, 0, sizeof(sampler_info));
-        sampler_info.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-        sampler_info.magFilter = point ? VK_FILTER_NEAREST : VK_FILTER_LINEAR;
-        sampler_info.minFilter = point ? VK_FILTER_NEAREST : VK_FILTER_LINEAR;
-        sampler_info.mipmapMode = reduce ? VK_SAMPLER_MIPMAP_MODE_NEAREST : VK_SAMPLER_MIPMAP_MODE_LINEAR;
-        sampler_info.addressModeU = wrap_u ? VK_SAMPLER_ADDRESS_MODE_REPEAT : VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-        sampler_info.addressModeV = clamp_v ? VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE : VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-        sampler_info.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-        sampler_info.maxLod = 1000.0f;
-        if (compare) {
-            sampler_info.compareEnable = VK_TRUE;
-            sampler_info.compareOp = VK_COMPARE_OP_GREATER_OR_EQUAL; /* reverse-Z */
-        }
-        if (aniso) {
-            sampler_info.anisotropyEnable = VK_TRUE;
-            sampler_info.maxAnisotropy = 16.0f;
-        }
+        gr_sampler_desc fixed;
+        VkSamplerReductionModeCreateInfo reduce;
+        gr_fixed_sampler(i, &fixed);
+        if (!vk_sampler_info(dev, &fixed, &sampler_info, &reduce))
+            return GR_ERROR_UNSUPPORTED; /* the MIN/MAX_REDUCE slots need samplerFilterMinmax */
         if (dev->create_sampler(dev->device, &sampler_info, NULL, &dev->samplers[i]) != VK_SUCCESS)
             return GR_ERROR_BACKEND;
     }
@@ -943,6 +961,9 @@ gr_result gr_vk_abi_device_create(const gr_device_desc *desc, gr_handle *out_dev
     enable12.bufferDeviceAddress = VK_TRUE;
     enable12.timelineSemaphore = VK_TRUE;
     enable12.scalarBlockLayout = VK_TRUE;
+    /* The MIN/MAX_REDUCE fixed samplers (HZB builds) need min/max filtering. */
+    enable12.samplerFilterMinmax = f12.samplerFilterMinmax;
+    dev->filter_minmax = f12.samplerFilterMinmax;
     enable13.dynamicRendering = VK_TRUE;
     enable13.synchronization2 = VK_TRUE;
 
@@ -3735,6 +3756,7 @@ void gr_vk_abi_buffer_unmap(gr_handle buffer_handle)
 gr_result gr_vk_abi_sampler_create(gr_handle device_handle, const gr_sampler_desc *desc,
                                    gr_handle *out_sampler, uint32_t *out_slot)
 {
+    VkSamplerReductionModeCreateInfo reduce;
     gr_vk_dev *dev = vk_device_of(device_handle);
     VkSamplerCreateInfo info;
     VkSampler sampler = VK_NULL_HANDLE;
@@ -3751,23 +3773,9 @@ gr_result gr_vk_abi_sampler_create(gr_handle device_handle, const gr_sampler_des
         return GR_ERROR_EXHAUSTED;
     slot = dev->sampler_next++;
 
-    memset(&info, 0, sizeof(info));
-    info.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-    info.magFilter = desc->mag_filter == GR_FILTER_NEAREST ? VK_FILTER_NEAREST : VK_FILTER_LINEAR;
-    info.minFilter = desc->min_filter == GR_FILTER_NEAREST ? VK_FILTER_NEAREST : VK_FILTER_LINEAR;
-    info.mipmapMode = desc->mip_filter == GR_FILTER_NEAREST ? VK_SAMPLER_MIPMAP_MODE_NEAREST
-                                                          : VK_SAMPLER_MIPMAP_MODE_LINEAR;
-    info.addressModeU = vk_address(desc->address_u);
-    info.addressModeV = vk_address(desc->address_v);
-    info.addressModeW = vk_address(desc->address_w);
-    info.maxLod = desc->max_lod > 0.0f ? desc->max_lod : 1000.0f;
-    if (desc->max_anisotropy > 1.0f) {
-        info.anisotropyEnable = VK_TRUE;
-        info.maxAnisotropy = desc->max_anisotropy;
-    }
-    if (desc->reduction == GR_REDUCTION_COMPARE) {
-        info.compareEnable = VK_TRUE;
-        info.compareOp = VK_COMPARE_OP_GREATER_OR_EQUAL;
+    if (!vk_sampler_info(dev, desc, &info, &reduce)) {
+        dev->sampler_next--;
+        return GR_ERROR_UNSUPPORTED;
     }
     if (dev->create_sampler(dev->device, &info, NULL, &sampler) != VK_SUCCESS)
         return GR_ERROR_BACKEND;
