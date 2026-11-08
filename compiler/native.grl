@@ -799,8 +799,11 @@ fn stack_slot<a>(c: (&a mut C), id: u64) -> unit {
 // (`arch_prctl(ARCH_SET_FS)`), which is where the dynamic loader keeps its TCB
 // (errno, tcache, stack guard). Foreign calls therefore run on the loader's TLS
 // base and exported callbacks run on Grail's, restoring the other on the way out.
+// Linux keeps libc's TCB in the thread pointer the Grail runtime also uses (x86-64 FS base,
+// AArch64 tpidr_el0, RISC-V tp), so foreign calls and callbacks swap it. x86-64 needs the
+// arch_prctl system call; AArch64 and RISC-V write the register directly (tpget/tpset).
 fn tls_bridge<a>(c: (&a mut C)) -> u64 {
-    return (c.target == 0) & (c.plat == 0);
+    return (c.plat == 0) & ((c.target == 0) + (c.target == 1) + (c.target == 2));
 }
 fn tls_bss<a>(c: (&a mut C)) -> unit {
     if tls_bridge(&mut c) {
@@ -812,10 +815,20 @@ fn tls_bss<a>(c: (&a mut C)) -> unit {
     return ();
 }
 fn tls_capture<a>(c: (&a mut C)) -> unit {
+    if c.target != 0 {
+        o(&mut c, view("tpget\nmovq %rax,rt_host_tls(%rip)\n"));
+        return ();
+    }
     o(&mut c, view("movl $4099,%edi\nleaq rt_host_tls(%rip),%rsi\nmovl $158,%eax\nsyscall\n"));
     return ();
 }
 fn tls_get<a>(c: (&a mut C), slot: u64) -> unit {
+    if c.target != 0 {
+        o(&mut c, view("tpget\nmovq %rax,"));
+        stack_slot(&mut c, slot);
+        c.out.push(10);
+        return ();
+    }
     o(&mut c, view("movl $4099,%edi\nleaq "));
     stack_slot(&mut c, slot);
     o(&mut c, view(",%rsi\nmovl $158,%eax\nsyscall\n"));
@@ -824,12 +837,20 @@ fn tls_get<a>(c: (&a mut C), slot: u64) -> unit {
 fn tls_set_global<a, b>(c: (&a mut C), name: &b [u8]) -> unit {
     o(&mut c, view("movq "));
     o(&mut c, name);
+    if c.target != 0 {
+        o(&mut c, view("(%rip),%rdi\ntpset\n"));
+        return ();
+    }
     o(&mut c, view("(%rip),%rsi\nmovl $4098,%edi\nmovl $158,%eax\nsyscall\n"));
     return ();
 }
 fn tls_set_slot<a>(c: (&a mut C), slot: u64) -> unit {
     o(&mut c, view("movq "));
     stack_slot(&mut c, slot);
+    if c.target != 0 {
+        o(&mut c, view(",%rdi\ntpset\n"));
+        return ();
+    }
     o(&mut c, view(",%rsi\nmovl $4098,%edi\nmovl $158,%eax\nsyscall\n"));
     return ();
 }
@@ -9292,7 +9313,7 @@ fn raw_builtin<a>(c: (&a mut C), id: u64) -> Val {
                 o(&mut c, view("movl $4098,%edi\nmovl $158,%eax\nsyscall\nmovq %rsi,rt_grail_tls(%rip)\n"));
             } else {
                 get(&mut c, args[0], view("%rdi"));
-                o(&mut c, view("tpset\n"));
+                o(&mut c, view("tpset\nmovq %rdi,rt_grail_tls(%rip)\n"));
             }
             }
         }

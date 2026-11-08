@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Dynamic loading on AArch64 and RISC-V 64 Linux: the host-TLS bridge (switching the thread
+  pointer between Grail's worker record and glibc's TCB around foreign calls and callbacks) now
+  covers `tpidr_el0` and `tp`, written directly instead of through `arch_prctl`. With a glibc
+  sysroot (`GRAIL_SYSROOT_AARCH64`, `GRAIL_SYSROOT_RISCV64`) dynamically linked cross programs
+  link against the target loader and run under qemu `-L`; `tests/ffi/dlopen.grl` executes on
+  all three Linux targets. Foreign calls on AArch64/RISC-V previously ran with Grail's worker
+  record installed where glibc expects its TCB.
+
 - Callbacks with float and narrow-integer parameters and float results: an exported
   `extern "C" fn` reads each parameter from where the platform C convention put it (SysV,
   AAPCS64 and RV64 pack integers and floats into separate register files; Win64 is positional,

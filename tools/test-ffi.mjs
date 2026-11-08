@@ -5,7 +5,7 @@ import { spawnSync } from 'node:child_process';
 import { readFileSync, writeFileSync, mkdirSync, rmSync, copyFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import assert from 'node:assert/strict';
-import { root, hostTarget, targets, targetName, buildCompiler, compileProgram, execute, runner, compilerSources } from './native.mjs';
+import { root, hostTarget, targets, targetName, buildCompiler, compileProgram, execute, runner, compilerSources, crossSysroot } from './native.mjs';
 
 const triples = { x86_64: 'x86_64-linux-gnu', aarch64: 'aarch64-linux-gnu', riscv64: 'riscv64-linux-gnu' };
 // name, expected stdout, and the C symbols the assembly must call unmangled.
@@ -84,7 +84,8 @@ const fixtures = [
     name: 'dlopen',
     stdout: '42\n42\n42\n0\n',
     symbols: ['dlopen', 'dlsym', 'dlclose'],
-    linkNote: '// grail-link: c',
+    // dlopen/dlsym/dlclose live in libdl before glibc 2.34 (a stub after); strlen in libc.
+    linkNote: ['// grail-link: dl', '// grail-link: c'],
     sharedLibrary: 'libdlshim.so',
     hostOnly: true,
   },
@@ -120,16 +121,20 @@ for (const target of selected) {
   rmSync(directory, { recursive: true, force: true });
   mkdirSync(directory, { recursive: true });
   shim(target);
-  // Host-only fixtures need a real shared object built for the host.
-  if (target === hostTarget) {
+  // Loader fixtures need a real shared object for the target: the host, or a cross target with
+  // a glibc sysroot (GRAIL_SYSROOT_<TARGET>), whose loader then runs it under qemu.
+  const sysroot = crossSysroot(target);
+  if ((target === hostTarget) || sysroot) {
+    const cross = sysroot ? [`--target=${triples[target]}`, `--sysroot=${sysroot}`, '-fuse-ld=lld', '-nostdlib',
+      ...(target === 'riscv64' ? ['-march=rv64imafd', '-mabi=lp64d'] : [])] : [];
     const library = spawnSync(process.env.GRAIL_ASSEMBLER ?? 'clang', [
-      '-shared', '-fPIC', '-O1', join(root, 'tests/ffi/dl_shim.c'),
+      ...cross, '-shared', '-fPIC', '-O1', join(root, 'tests/ffi/dl_shim.c'),
       '-o', join(directory, 'libdlshim.so'),
     ], { cwd: root, maxBuffer: 8 * 1024 * 1024, timeout: 300_000 });
-    if (library.status !== 0) throw new Error(`dl_shim.c failed: ${library.stderr}`);
+    if (library.status !== 0) throw new Error(`dl_shim.c for ${target} failed: ${library.stderr}`);
   }
   for (const { name, stdout, symbols, defines = [], linkNote = '// grail-link: shim.o', hostOnly = false } of fixtures) {
-    if (hostOnly && target !== hostTarget) {
+    if (hostOnly && target !== hostTarget && !sysroot) {
       // A host-loader fixture still has to compile for every target; it cannot be
       // linked there because the host's libc and loader are not target libraries.
       const assembly = join(directory, `${name}.s`);
@@ -150,8 +155,8 @@ for (const target of selected) {
     const executable = compileProgram(compiler, [source], directory, { target, name, defaultU64: true, typedRefs: true });
     const assembly = readFileSync(join(directory, `${name}.s`), 'utf8');
     const notes = assembly.split('\n').filter(line => line.startsWith('// grail-link: '));
-    assert.equal(notes.length, 1, `${target}/${name}: the six declarations must request exactly one link input: ${notes}`);
-    assert.equal(notes[0], linkNote, `${target}/${name}: unexpected link note ${notes[0]}`);
+    const expectedNotes = Array.isArray(linkNote) ? linkNote : [linkNote];
+    assert.deepEqual(notes, expectedNotes, `${target}/${name}: unexpected link notes ${notes}`);
     for (const symbol of symbols) {
       // x86-64 and RISC-V spell the call `call SYM`; AArch64 lowers it to `bl SYM`.
       assert.ok(new RegExp(`(^|\\n)(call|bl) ${symbol}\\n`).test(assembly), `${target}/${name}: missing unmangled call to ${symbol}`);

@@ -137,8 +137,24 @@ const dynamicLoaders = {
   aarch64: ['/lib/ld-linux-aarch64.so.1'],
   riscv64: ['/lib/ld-linux-riscv64-lp64d.so.1', '/lib/ld-linux-riscv64-lp64.so.1'],
 };
+// A cross target's glibc sysroot (GRAIL_SYSROOT_AARCH64, GRAIL_SYSROOT_RISCV64): dynamically
+// linked cross executables link against its libraries and run under qemu with `-L sysroot`.
+export function crossSysroot(target) {
+  if (target === hostTarget) return null;
+  const value = process.env[`GRAIL_SYSROOT_${target.toUpperCase()}`];
+  return value && existsSync(value) ? value : null;
+}
 export function dynamicLinkFlags(target, linkArgs) {
   if (!linkArgs.some(input => input.startsWith('-l'))) return [];
+  const sysroot = crossSysroot(target);
+  if (sysroot) {
+    const loader = (dynamicLoaders[target] ?? []).find(candidate => existsSync(join(sysroot, candidate)));
+    // Fedora-style lib64 trees and Debian-style multiarch trees.
+    const multiarch = `usr/lib/${target}-linux-gnu`;
+    const dirs = ['lib64', 'usr/lib64', multiarch, 'lib', 'usr/lib'].map(d => join(sysroot, d)).filter(existsSync);
+    // --sysroot resolves the absolute paths inside glibc's libc.so linker script.
+    return [`--sysroot=${sysroot}`, ...(loader ? ['--dynamic-linker', loader] : []), ...dirs.map(d => `-L${d}`)];
+  }
   if (target !== hostTarget) return [];
   const loader = (dynamicLoaders[target] ?? []).find(candidate => existsSync(candidate));
   return [...(loader ? ['--dynamic-linker', loader] : []), '-L/usr/lib', '-L/usr/lib64'];
@@ -218,9 +234,11 @@ export function runner(target = hostTarget) {
   if (machoTargets.includes(target)) throw new Error(`${target} executables cannot be executed on ${process.platform}; they need macOS hardware (or a Darwin emulator)`);
   if (target === hostTarget) return [];
   const variable = `GRAIL_QEMU_${target.toUpperCase()}`;
-  if (process.env[variable]) return [process.env[variable]];
+  const sysroot = crossSysroot(target);
+  const loaderPath = sysroot ? ['-L', sysroot] : [];
+  if (process.env[variable]) return [process.env[variable], ...loaderPath];
   const local = join(root, '.work/architectures/toolchain/usr/bin', `qemu-${target}-static`);
-  return [existsSync(local) ? local : `qemu-${target}-static`];
+  return [existsSync(local) ? local : `qemu-${target}-static`, ...loaderPath];
 }
 export function execute(executable, args = [], target = hostTarget, options = {}) {
   // Prevent negative tests from producing host core files; argv is never interpolated.
