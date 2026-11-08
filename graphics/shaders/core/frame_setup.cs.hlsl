@@ -20,7 +20,9 @@ struct GrailFrameSetupPush
 // [[vk::push_constant]]: a real push-constant block on Vulkan, b0 root constants on D3D12.
 [[vk::push_constant]] ConstantBuffer<GrailFrameSetupPush> g_push : register(b0);
 
-RWByteAddressBuffer g_counters : register(u3, space0);
+// The buffer comes from the bindless storage-buffer table by slot, not from a fixed binding: the
+// layout declares binding 3 as an unbounded array, so a non-array declaration here would describe a
+// different descriptor than the one bound.
 
 [numthreads(64, 1, 1)]
 void main(uint3 id : SV_DispatchThreadID)
@@ -29,11 +31,15 @@ void main(uint3 id : SV_DispatchThreadID)
         return;
     if (!grail_frame_matches())
         return;
+    // The buffer comes from the bindless storage-buffer table by slot. The layout declares
+    // binding 3 as an unbounded array, so a non-array declaration would describe a different
+    // descriptor than the one bound.
+    RWByteAddressBuffer counters = g_buffers[NonUniformResourceIndex(g_push.counters_slot)];
     // Each element is a uint32 counter; seed it from the frame so a stochastic pass differs
     // per frame without the host writing the buffer.
     uint value = g_push.seed ^ (id.x * 0x9E3779B9u);
     value ^= value >> 16u;
     value *= 0x7FEB352Du;
     value ^= value >> 15u;
-    g_counters.Store(id.x * 4u, value);
+    counters.Store(id.x * 4u, value);
 }

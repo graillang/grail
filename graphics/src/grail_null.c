@@ -1650,6 +1650,8 @@ gr_result gr_cmd_draw_indirect(gr_handle cmd_handle, gr_handle buffer, uint64_t 
 
 gr_result gr_cmd_dispatch(gr_handle cmd_handle, uint32_t x, uint32_t y, uint32_t z)
 {
+    if (gr_active_backend() == GR_BACKEND_VULKAN)
+        return gr_vk_abi_cmd_dispatch(cmd_handle, x, y, z);
     gr_result status;
     gr_null_cmd *cmd = null_cmd(cmd_handle, &status);
     if (!cmd)

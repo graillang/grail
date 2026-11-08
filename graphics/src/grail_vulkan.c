@@ -123,6 +123,9 @@ typedef struct gr_vk_dev {
     PFN_vkCreateSampler create_sampler;
     PFN_vkDestroySampler destroy_sampler;
     PFN_vkCmdCopyBufferToImage cmd_copy_buffer_to_image;
+    PFN_vkGetBufferDeviceAddress get_buffer_address;
+    PFN_vkCreateComputePipelines create_compute_pipelines;
+    PFN_vkCmdDispatch cmd_dispatch;
 } gr_vk_dev;
 
 typedef struct gr_vk_buffer {
@@ -197,6 +200,7 @@ typedef struct gr_vk_shader {
 typedef struct gr_vk_pipeline {
     gr_vk_dev *device;
     VkPipeline pipeline;
+    VkPipelineBindPoint bind_point;
     char *name;
     uint64_t permutation_key;
 } gr_vk_pipeline;
@@ -315,6 +319,9 @@ static gr_result vk_create_layout(gr_vk_dev *dev)
         return GR_ERROR_BACKEND;
     return GR_OK;
 }
+
+/* Defined with the buffer path below; the barrier code needs it before then. */
+static gr_vk_buffer *vk_buffer_of(gr_handle handle);
 
 /* Defined below; device creation uses it to unwind a half-built device. */
 void gr_vk_abi_device_destroy_impl(gr_vk_dev *dev);
@@ -797,6 +804,9 @@ gr_result gr_vk_abi_device_create(const gr_device_desc *desc, gr_handle *out_dev
     dev->create_sampler = GR_VK_DEVICE_LOAD(dev, vkCreateSampler);
     dev->destroy_sampler = GR_VK_DEVICE_LOAD(dev, vkDestroySampler);
     dev->cmd_copy_buffer_to_image = GR_VK_DEVICE_LOAD(dev, vkCmdCopyBufferToImage);
+    dev->get_buffer_address = GR_VK_DEVICE_LOAD(dev, vkGetBufferDeviceAddress);
+    dev->create_compute_pipelines = GR_VK_DEVICE_LOAD(dev, vkCreateComputePipelines);
+    dev->cmd_dispatch = GR_VK_DEVICE_LOAD(dev, vkCmdDispatch);
     dev->create_set_layout = (PFN_vkCreateDescriptorSetLayout)dev->get_device_proc(dev->device, "vkCreateDescriptorSetLayout");
     dev->create_layout = (PFN_vkCreatePipelineLayout)dev->get_device_proc(dev->device, "vkCreatePipelineLayout");
 
@@ -1232,8 +1242,61 @@ gr_result gr_vk_abi_pipeline_create(gr_handle device_handle, const gr_pipeline_d
     if (!desc->name.data || desc->name.len == 0)
         return GR_ERROR_INVALID_ARGUMENT;
 
-    /* Only the classic path is implemented; mesh and compute pipelines arrive with the passes
-     * that need them. */
+    /* Compute first: a compute pipeline has no vertex stage, no attachments and no raster state. */
+    if (desc->shaders[GR_SHADER_STAGE_COMPUTE] != GR_NULL_HANDLE) {
+        gr_vk_shader *compute = (gr_vk_shader *)gr_object_lookup(gr_objects(),
+                                                                 desc->shaders[GR_SHADER_STAGE_COMPUTE],
+                                                                 GR_HANDLE_SHADER, NULL);
+        VkComputePipelineCreateInfo compute_info;
+        VkPipelineShaderStageCreateInfo stage;
+        VkPipeline compute_pipeline = VK_NULL_HANDLE;
+        gr_vk_pipeline *object;
+        gr_handle handle;
+
+        if (!compute || compute->stage != GR_SHADER_STAGE_COMPUTE)
+            return GR_ERROR_INVALID_HANDLE;
+        if (desc->shaders[GR_SHADER_STAGE_VERTEX] != GR_NULL_HANDLE)
+            return GR_ERROR_INVALID_ARGUMENT; /* a pipeline is compute or graphics, not both */
+        if (desc->permutation_key != 0 && compute->permutation_key != desc->permutation_key)
+            return GR_ERROR_INVALID_ARGUMENT;
+
+        memset(&stage, 0, sizeof(stage));
+        stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+        stage.module = compute->module;
+        stage.pName = "main";
+        memset(&compute_info, 0, sizeof(compute_info));
+        compute_info.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+        compute_info.stage = stage;
+        compute_info.layout = dev->layout;
+        if (!dev->create_compute_pipelines)
+            return GR_ERROR_UNSUPPORTED;
+        if (dev->create_compute_pipelines(dev->device, dev->pipeline_cache, 1, &compute_info, NULL,
+                                          &compute_pipeline) != VK_SUCCESS)
+            return GR_ERROR_BACKEND;
+
+        object = (gr_vk_pipeline *)calloc(1, sizeof(*object));
+        if (!object) {
+            dev->destroy_pipeline(dev->device, compute_pipeline, NULL);
+            return GR_ERROR_OUT_OF_MEMORY;
+        }
+        object->device = dev;
+        object->pipeline = compute_pipeline;
+        object->bind_point = VK_PIPELINE_BIND_POINT_COMPUTE;
+        object->name = gr_str_dup(desc->name);
+        object->permutation_key = desc->permutation_key;
+        handle = gr_object_insert(gr_objects(), GR_HANDLE_PIPELINE, object);
+        if (handle == GR_NULL_HANDLE) {
+            dev->destroy_pipeline(dev->device, compute_pipeline, NULL);
+            free(object->name);
+            free(object);
+            return GR_ERROR_OUT_OF_MEMORY;
+        }
+        dev->pipelines_declared++;
+        *out_pipeline = handle;
+        return GR_OK;
+    }
+
     vertex = (gr_vk_shader *)gr_object_lookup(gr_objects(), desc->shaders[GR_SHADER_STAGE_VERTEX],
                                               GR_HANDLE_SHADER, NULL);
     if (!vertex)
@@ -1380,6 +1443,7 @@ gr_result gr_vk_abi_pipeline_create(gr_handle device_handle, const gr_pipeline_d
     }
     pipeline->device = dev;
     pipeline->pipeline = pipeline_handle;
+    pipeline->bind_point = VK_PIPELINE_BIND_POINT_GRAPHICS;
     pipeline->name = gr_str_dup(desc->name);
     pipeline->permutation_key = desc->permutation_key;
     handle = gr_object_insert(gr_objects(), GR_HANDLE_PIPELINE, pipeline);
@@ -1898,8 +1962,27 @@ gr_result gr_vk_abi_cmd_barrier(gr_handle cmd_handle, const gr_barrier *barriers
         gr_vk_tex *texture = (gr_vk_tex *)gr_object_lookup(gr_objects(), barriers[i].resource,
                                                            GR_HANDLE_TEXTURE, NULL);
         VkImageMemoryBarrier barrier;
-        if (!texture)
-            continue; /* a buffer barrier: no layout, nothing to do yet */
+        if (!texture) {
+            /* A buffer has no layout, but it still needs the execution and access dependency:
+             * without it a compute write and the host read that follows are unordered. */
+            gr_vk_buffer *buffer = vk_buffer_of(barriers[i].resource);
+            if (buffer) {
+                VkBufferMemoryBarrier buffer_barrier;
+                memset(&buffer_barrier, 0, sizeof(buffer_barrier));
+                buffer_barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+                buffer_barrier.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
+                buffer_barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+                buffer_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                buffer_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                buffer_barrier.buffer = buffer->buffer;
+                buffer_barrier.offset = 0;
+                buffer_barrier.size = VK_WHOLE_SIZE;
+                cmd->device->cmd_pipeline_barrier(cmd->cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                                                  VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, NULL, 1,
+                                                  &buffer_barrier, 0, NULL);
+            }
+            continue;
+        }
         memset(&barrier, 0, sizeof(barrier));
         barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
         barrier.oldLayout = vk_layout(barriers[i].src_state);
@@ -2022,7 +2105,7 @@ gr_result gr_vk_abi_cmd_bind_pipeline(gr_handle cmd_handle, gr_handle pipeline_h
         return GR_ERROR_INVALID_HANDLE;
     if (!cmd->recording)
         return GR_ERROR_NOT_READY;
-    cmd->device->cmd_bind_pipeline(cmd->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->pipeline);
+    cmd->device->cmd_bind_pipeline(cmd->cb, pipeline->bind_point, pipeline->pipeline);
     /* Both sets are bound with the pipeline, never per draw: that is the contract's "binding
      * never changes between passes". Set 1's dynamic offset selects the frame slot. */
     {
@@ -2030,7 +2113,7 @@ gr_result gr_vk_abi_cmd_bind_pipeline(gr_handle cmd_handle, gr_handle pipeline_h
         uint32_t offset = cmd->frame_slot * (uint32_t)sizeof(gr_frame_constants);
         sets[0] = cmd->device->desc_set0;
         sets[1] = cmd->device->desc_set1;
-        cmd->device->cmd_bind_descriptor_sets(cmd->cb, VK_PIPELINE_BIND_POINT_GRAPHICS,
+        cmd->device->cmd_bind_descriptor_sets(cmd->cb, pipeline->bind_point,
                                               cmd->device->layout, 0, 2, sets, 1, &offset);
     }
     return GR_OK;
@@ -2055,6 +2138,20 @@ gr_result gr_vk_abi_cmd_push_constants(gr_handle cmd_handle, uint32_t stage_mask
         stages = VK_SHADER_STAGE_ALL;
     cmd->device->cmd_push_constants(cmd->cb, cmd->device->layout, stages, offset,
                                     (uint32_t)data.len, data.data);
+    return GR_OK;
+}
+
+gr_result gr_vk_abi_cmd_dispatch(gr_handle cmd_handle, uint32_t x, uint32_t y, uint32_t z)
+{
+    gr_vk_cmdbuf *cmd = (gr_vk_cmdbuf *)gr_object_lookup(gr_objects(), cmd_handle,
+                                                         GR_HANDLE_CMD_BUFFER, NULL);
+    if (!cmd)
+        return GR_ERROR_INVALID_HANDLE;
+    if (!cmd->recording)
+        return GR_ERROR_NOT_READY;
+    if (x == 0 || y == 0 || z == 0)
+        return GR_ERROR_INVALID_ARGUMENT;
+    cmd->device->cmd_dispatch(cmd->cb, x, y, z);
     return GR_OK;
 }
 
@@ -2256,6 +2353,8 @@ gr_result gr_vk_abi_buffer_create(gr_handle device_handle, const gr_buffer_desc 
     if (desc->usage & GR_BUFFER_USAGE_INDIRECT) info.usage |= VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
     if (desc->usage & GR_BUFFER_USAGE_TRANSFER_SRC) info.usage |= VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
     if (desc->usage & GR_BUFFER_USAGE_TRANSFER_DST) info.usage |= VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    if (desc->usage & GR_BUFFER_USAGE_SHADER_DEVICE_ADDRESS)
+        info.usage |= VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
     if (info.usage == 0)
         info.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
     if (dev->create_buffer(dev->device, &info, NULL, &buffer->buffer) != VK_SUCCESS) {
@@ -2287,6 +2386,27 @@ gr_result gr_vk_abi_buffer_create(gr_handle device_handle, const gr_buffer_desc 
         free(buffer);
         return GR_ERROR_OUT_OF_MEMORY;
     }
+    /* A buffer that can be written by a shader claims its storage-buffer slot now, exactly as a
+     * sampled view claims its sampled-image slot. */
+    if ((desc->usage & GR_BUFFER_USAGE_STORAGE) && dev->storage_next < GR_BINDLESS_CAP_STORAGE_BUFFERS) {
+        VkDescriptorBufferInfo buffer_info;
+        VkWriteDescriptorSet write;
+        buffer->bindless_index = dev->storage_next++;
+        memset(&buffer_info, 0, sizeof(buffer_info));
+        buffer_info.buffer = buffer->buffer;
+        buffer_info.offset = 0;
+        buffer_info.range = desc->size;
+        memset(&write, 0, sizeof(write));
+        write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        write.dstSet = dev->desc_set0;
+        write.dstBinding = GR_BINDING_STORAGE_BUFFERS;
+        write.dstArrayElement = buffer->bindless_index;
+        write.descriptorCount = 1;
+        write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        write.pBufferInfo = &buffer_info;
+        dev->update_descriptor_sets(dev->device, 1, &write, 0, NULL);
+    }
+
     *out_buffer = handle;
     return GR_OK;
 }
@@ -2335,8 +2455,16 @@ gr_result gr_vk_abi_buffer_map(gr_handle buffer_handle, void **out_ptr)
 
 uint64_t gr_vk_abi_buffer_device_address(gr_handle buffer_handle)
 {
-    (void)buffer_handle;
-    return 0; /* buffer device address is not enabled on the created device yet */
+    gr_vk_buffer *buffer = vk_buffer_of(buffer_handle);
+    VkBufferDeviceAddressInfo info;
+    if (!buffer || !(buffer->usage & GR_BUFFER_USAGE_SHADER_DEVICE_ADDRESS))
+        return 0;
+    if (!buffer->device->get_buffer_address)
+        return 0;
+    memset(&info, 0, sizeof(info));
+    info.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
+    info.buffer = buffer->buffer;
+    return (uint64_t)buffer->device->get_buffer_address(buffer->device->device, &info);
 }
 
 uint32_t gr_vk_abi_buffer_bindless_index(gr_handle buffer_handle)
@@ -2588,6 +2716,7 @@ gr_result gr_vk_abi_cmd_set_scissor(gr_handle c, int32_t x, int32_t y, uint32_t 
 gr_result gr_vk_abi_cmd_bind_pipeline(gr_handle c, gr_handle p) { (void)c; (void)p; return GR_ERROR_UNSUPPORTED; }
 gr_result gr_vk_abi_cmd_push_constants(gr_handle c, uint32_t s, uint32_t o, gr_span_u8 d) { (void)c; (void)s; (void)o; (void)d; return GR_ERROR_UNSUPPORTED; }
 gr_result gr_vk_abi_cmd_draw(gr_handle c, const gr_draw *d) { (void)c; (void)d; return GR_ERROR_UNSUPPORTED; }
+gr_result gr_vk_abi_cmd_dispatch(gr_handle c, uint32_t x, uint32_t y, uint32_t z) { (void)c; (void)x; (void)y; (void)z; return GR_ERROR_UNSUPPORTED; }
 gr_result gr_vk_abi_submit(const gr_submit *s, uint64_t *v) { (void)s; (void)v; return GR_ERROR_UNSUPPORTED; }
 gr_result gr_vk_abi_fence_create(gr_handle d, uint64_t i, gr_handle *o) { (void)d; (void)i; (void)o; return GR_ERROR_UNSUPPORTED; }
 gr_result gr_vk_abi_fence_wait(gr_handle f, uint64_t v, uint64_t t, gr_result *s) { (void)f; (void)v; (void)t; (void)s; return GR_ERROR_UNSUPPORTED; }

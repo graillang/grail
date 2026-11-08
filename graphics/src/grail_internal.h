@@ -99,6 +99,7 @@ gr_result gr_vk_abi_cmd_set_scissor(gr_handle cmd, int32_t x, int32_t y, uint32_
 gr_result gr_vk_abi_cmd_bind_pipeline(gr_handle cmd, gr_handle pipeline);
 gr_result gr_vk_abi_cmd_push_constants(gr_handle cmd, uint32_t stage_mask, uint32_t offset, gr_span_u8 data);
 gr_result gr_vk_abi_cmd_draw(gr_handle cmd, const gr_draw *draw);
+gr_result gr_vk_abi_cmd_dispatch(gr_handle cmd, uint32_t x, uint32_t y, uint32_t z);
 gr_result gr_vk_abi_submit(const gr_submit *submit, uint64_t *out_value);
 gr_result gr_vk_abi_fence_create(gr_handle device, uint64_t initial_value, gr_handle *out_fence);
 gr_result gr_vk_abi_fence_wait(gr_handle fence, uint64_t value, uint64_t timeout_ns, gr_result *out_status);

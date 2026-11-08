@@ -48,7 +48,7 @@ docs/                     the contract, the shader flow, dependencies, blockers
 | Shaders (3 stages) | compile and pass `spirv-val` |
 | Offline shader tool | written; compiles 3 stages, reflection and permutation ids verified by an independent C reader |
 | Vulkan device probe | implemented; this host satisfies every required feature (docs/vulkan-probe.md) |
-| Vulkan backend | device, queues, live bindless table, shader modules, pipelines, offscreen frames with sampled textures and verified readbacks |
+| Vulkan backend | device, queues, live bindless table (images, samplers, storage buffers), graphics + compute pipelines, offscreen frames and dispatches with verified readbacks |
 | D3D12 / Metal backends | **not implemented** (`GR_ERROR_UNSUPPORTED`) |
 | Permutations | each combination compiled to its own SPIR-V/DXIL/blob; digests and keys tested |
 | Key → bytecode resolution | implemented: library index, lazy cache, miss/mismatch/exhaustion statuses |
