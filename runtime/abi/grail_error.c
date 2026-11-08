@@ -99,9 +99,12 @@ grail_status grail_os_status_from_win32(int64_t error_number) {
         return GRAIL_E_READ_ONLY;
     case 121: /* ERROR_SEM_TIMEOUT */
     case 258: /* WAIT_TIMEOUT */
+    case 10060: /* WSAETIMEDOUT */
         return GRAIL_E_TIMED_OUT;
     case 997: /* ERROR_IO_PENDING */
     case 10035: /* WSAEWOULDBLOCK */
+    case 10036: /* WSAEINPROGRESS */
+    case 10037: /* WSAEALREADY */
         return GRAIL_E_WOULD_BLOCK;
     case 995: /* ERROR_OPERATION_ABORTED */
         return GRAIL_E_CANCELED;
@@ -118,6 +121,7 @@ grail_status grail_os_status_from_win32(int64_t error_number) {
     case 10048: /* WSAEADDRINUSE */
         return GRAIL_E_ADDRESS_IN_USE;
     case 10049: /* WSAEADDRNOTAVAIL */
+    case 10038: /* WSAENOTSOCK */
         return GRAIL_E_ADDRESS_INVALID;
     case 10040: /* WSAEMSGSIZE */
         return GRAIL_E_MESSAGE_TOO_LARGE;
@@ -127,10 +131,21 @@ grail_status grail_os_status_from_win32(int64_t error_number) {
     case 109: /* ERROR_BROKEN_PIPE */
     case 232: /* ERROR_NO_DATA */
     case 233: /* ERROR_PIPE_NOT_CONNECTED */
+    case 10058: /* WSAESHUTDOWN */
         return GRAIL_E_BROKEN_PIPE;
+    case 10057: /* WSAENOTCONN */
+        return GRAIL_E_CONNECTION_ABORTED;
     case 8:   /* ERROR_NOT_ENOUGH_MEMORY */
     case 14:  /* ERROR_OUTOFMEMORY */
+    case 10055: /* WSAENOBUFS */
         return GRAIL_E_OUT_OF_MEMORY;
+    case 10024: /* WSAEMFILE */
+        return GRAIL_E_TOO_MANY_HANDLES;
+    case 10013: /* WSAEACCES */
+        return GRAIL_E_ACCESS_DENIED;
+    case 10014: /* WSAEFAULT */
+    case 10022: /* WSAEINVAL */
+        return GRAIL_E_INVALID_ARGUMENT;
     case 6:   /* ERROR_INVALID_HANDLE */
         return GRAIL_E_INVALID_HANDLE;
     case 87:  /* ERROR_INVALID_PARAMETER */

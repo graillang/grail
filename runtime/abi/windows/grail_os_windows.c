@@ -5,12 +5,12 @@
  * monotonic/realtime/CPU clocks and sleep, environment reads/mutation/iteration,
  * current directory, executable path, file basics (open/read/write/seek/
  * truncate/sync/stat/close, pipe, attributes, mkdir/remove/rename), directory
- * iteration, threads/mutex/condition variables, dynamic libraries and child
- * processes.
+ * iteration, threads/mutex/condition variables, dynamic libraries, child
+ * processes, local-time offsets and TCP/UDP sockets.
  *
- * Sockets, local-time offsets, non-blocking files and symlink read/realpath
- * remain explicit UNSUPPORTED in grail_os_windows_stubs.c.  The Win32
- * declarations live in grail_win32.h so
+ * DNS, non-blocking files and symlink read/realpath remain explicit
+ * UNSUPPORTED in grail_os_windows_stubs.c.  The Win32 declarations live in
+ * grail_win32.h so
  * the backend can be compiled for Win64 on a host without the Windows SDK.
  * This is static evidence only; it has not been executed on Windows.
  */
@@ -23,6 +23,7 @@
 #include "../../../include/grail/grail_fs.h"
 #include "../../../include/grail/grail_path.h"
 #include "../../../include/grail/grail_proc.h"
+#include "../../../include/grail/grail_socket.h"
 #include "../../../include/grail/grail_thread.h"
 #include "../../../include/grail/grail_time.h"
 #include "../grail_env_store.h"
@@ -62,6 +63,12 @@ typedef struct grail_win32_condvar {
     CONDITION_VARIABLE condition;
 } grail_win32_condvar;
 
+typedef struct grail_win32_socket {
+    SOCKET handle;
+    uint64_t family;
+    uint64_t type;
+} grail_win32_socket;
+
 typedef struct grail_win32_process {
     HANDLE handle;
     DWORD pid;
@@ -89,10 +96,12 @@ typedef struct grail_win32_state {
     grail_handle_table condvars;
     grail_handle_table libraries;
     grail_handle_table processes;
+    grail_handle_table sockets;
     grail_env_store env;
     SRWLOCK lock;
     uint64_t capabilities;
     int initialized;
+    int winsock_ready;
 } grail_win32_state;
 
 static grail_win32_state grail_windows = {{0, NULL, NULL, NULL, NULL},
@@ -104,8 +113,10 @@ static grail_win32_state grail_windows = {{0, NULL, NULL, NULL, NULL},
                                           {NULL, NULL, 0, 0, 0},
                                           {NULL, NULL, 0, 0, 0},
                                           {NULL, NULL, 0, 0, 0},
+                                          {NULL, NULL, 0, 0, 0},
                                           {NULL, NULL, NULL, 0, 0},
                                           {NULL},
+                                          0,
                                           0,
                                           0};
 static _Thread_local grail_os_error grail_windows_error = {GRAIL_OS_DOMAIN_NONE, 0};
@@ -390,6 +401,10 @@ grail_status grail_os_init(const grail_allocator *allocator, const grail_startup
                                          GRAIL_HANDLE_KIND_PROCESS);
     }
     if (status == GRAIL_OK) {
+        status = grail_handle_table_init(&grail_windows.sockets, &grail_windows.allocator,
+                                         GRAIL_HANDLE_KIND_SOCKET);
+    }
+    if (status == GRAIL_OK) {
         status = grail_env_store_init(&grail_windows.env, &grail_windows.allocator);
     }
     if (status == GRAIL_OK) {
@@ -404,6 +419,7 @@ grail_status grail_os_init(const grail_allocator *allocator, const grail_startup
         grail_handle_table_destroy(&grail_windows.condvars);
         grail_handle_table_destroy(&grail_windows.libraries);
         grail_handle_table_destroy(&grail_windows.processes);
+        grail_handle_table_destroy(&grail_windows.sockets);
         grail_env_store_free(&grail_windows.env);
         return status;
     }
@@ -412,7 +428,17 @@ grail_status grail_os_init(const grail_allocator *allocator, const grail_startup
                                  GRAIL_CAP_ENV_MUTATION | GRAIL_CAP_TIME | GRAIL_CAP_CPU_TIME |
                                  GRAIL_CAP_DIRECTORIES | GRAIL_CAP_THREADS |
                                  GRAIL_CAP_SYNC_PRIMITIVES | GRAIL_CAP_DYNAMIC_LIBRARIES |
-                                 GRAIL_CAP_PROCESSES;
+                                 GRAIL_CAP_PROCESSES | GRAIL_CAP_LOCAL_TIME_OFFSET;
+    WSADATA winsock;
+    if (WSAStartup(0x0202u, &winsock) == 0) {
+        grail_windows.winsock_ready = 1;
+        grail_windows.capabilities |= GRAIL_CAP_SOCKETS | GRAIL_CAP_SOCKET_UDP;
+        const SOCKET probe = socket(GRAIL_AF_INET6, GRAIL_SOCK_STREAM, 0);
+        if (probe != GRAIL_INVALID_SOCKET) {
+            grail_windows.capabilities |= GRAIL_CAP_SOCKET_IPV6;
+            (void)closesocket(probe);
+        }
+    }
     grail_windows.initialized = 1;
     return GRAIL_OK;
 }
@@ -429,6 +455,11 @@ grail_status grail_os_shutdown(void) {
     grail_handle_table_destroy(&grail_windows.condvars);
     grail_handle_table_destroy(&grail_windows.libraries);
     grail_handle_table_destroy(&grail_windows.processes);
+    grail_handle_table_destroy(&grail_windows.sockets);
+    if (grail_windows.winsock_ready) {
+        (void)WSACleanup();
+        grail_windows.winsock_ready = 0;
+    }
     grail_env_store_free(&grail_windows.env);
     grail_windows.capabilities = 0;
     grail_windows.initialized = 0;
@@ -540,6 +571,38 @@ grail_status grail_os_time_sleep(int64_t nanoseconds, int64_t *remaining_nanosec
     if (remaining_nanoseconds != NULL) {
         *remaining_nanoseconds = 0;
     }
+    return GRAIL_OK;
+}
+
+
+grail_status grail_os_time_local_offset(int64_t utc_nanoseconds, int64_t *offset_nanoseconds) {
+    if (!grail_windows.initialized) return GRAIL_E_NOT_INITIALIZED;
+    if (offset_nanoseconds == NULL) return GRAIL_E_INVALID_ARGUMENT;
+    const int64_t ticks = utc_nanoseconds / 100 + 116444736000000000ll;
+    if (ticks < 0) return GRAIL_E_INVALID_ARGUMENT;
+    FILETIME universal;
+    universal.dwLowDateTime = (DWORD)(uint64_t)ticks;
+    universal.dwHighDateTime = (DWORD)((uint64_t)ticks >> 32);
+    SYSTEMTIME universal_time;
+    if (!FileTimeToSystemTime(&universal, &universal_time)) {
+        return grail_windows_fail(GetLastError());
+    }
+    TIME_ZONE_INFORMATION zone;
+    for (uint64_t i = 0; i < sizeof(zone); i++) ((uint8_t *)&zone)[i] = 0;
+    if (GetTimeZoneInformation(&zone) == 0xFFFFFFFFu) {
+        return grail_windows_fail(GetLastError());
+    }
+    SYSTEMTIME local_time;
+    if (!SystemTimeToTzSpecificLocalTime(&zone, &universal_time, &local_time)) {
+        return grail_windows_fail(GetLastError());
+    }
+    FILETIME local;
+    if (!SystemTimeToFileTime(&local_time, &local)) {
+        return grail_windows_fail(GetLastError());
+    }
+    const int64_t local_ticks = (int64_t)(((uint64_t)local.dwHighDateTime << 32) |
+                                          (uint64_t)local.dwLowDateTime);
+    *offset_nanoseconds = (local_ticks - ticks) * 100;
     return GRAIL_OK;
 }
 
@@ -2161,6 +2224,435 @@ grail_status grail_os_process_close(grail_process handle) {
     if (status != GRAIL_OK) return status;
     (void)CloseHandle(process->handle);
     grail_windows_release(process, sizeof(*process));
+    return GRAIL_OK;
+}
+
+
+typedef union grail_win32_socket_storage {
+    sockaddr generic;
+    sockaddr_in ipv4;
+    sockaddr_in6 ipv6;
+} grail_win32_socket_storage;
+
+static grail_status grail_windows_socket_fail(void) {
+    const int32_t code = WSAGetLastError();
+    grail_windows_error.domain = GRAIL_OS_DOMAIN_WIN32;
+    grail_windows_error.code = (uint64_t)(int64_t)code;
+    return grail_os_status_from_win32((int64_t)code);
+}
+
+static uint16_t grail_windows_swap16(uint16_t value) {
+    return (uint16_t)((value >> 8) | (value << 8));
+}
+
+static int grail_windows_address_valid(const grail_socket_address *address) {
+    if (address == NULL || address->struct_size < sizeof(*address) ||
+        address->abi_version != GRAIL_ABI_VERSION) {
+        return 0;
+    }
+    if (address->family != GRAIL_ADDRESS_INET && address->family != GRAIL_ADDRESS_INET6) {
+        return 0;
+    }
+    return address->port <= 65535 && address->scope_id <= 0xFFFFFFFFull;
+}
+
+static int32_t grail_windows_fill_sockaddr(const grail_socket_address *address,
+                                            grail_win32_socket_storage *storage) {
+    for (uint64_t i = 0; i < sizeof(*storage); i++) ((uint8_t *)storage)[i] = 0;
+    if (address->family == GRAIL_ADDRESS_INET) {
+        storage->ipv4.sin_family = GRAIL_AF_INET;
+        storage->ipv4.sin_port = grail_windows_swap16((uint16_t)address->port);
+        for (uint64_t i = 0; i < 4; i++) ((uint8_t *)&storage->ipv4.sin_addr)[i] = address->address[i];
+        return (int32_t)sizeof(sockaddr_in);
+    }
+    if (address->family == GRAIL_ADDRESS_INET6) {
+        storage->ipv6.sin6_family = GRAIL_AF_INET6;
+        storage->ipv6.sin6_port = grail_windows_swap16((uint16_t)address->port);
+        for (uint64_t i = 0; i < 16; i++) storage->ipv6.sin6_addr[i] = address->address[i];
+        storage->ipv6.sin6_scope_id = (uint32_t)address->scope_id;
+        return (int32_t)sizeof(sockaddr_in6);
+    }
+    return 0;
+}
+
+static grail_status grail_windows_from_sockaddr(const sockaddr *source, int32_t length,
+                                                 grail_socket_address *out) {
+    if (source == NULL || out == NULL) return GRAIL_E_INVALID_ARGUMENT;
+    for (uint64_t i = 0; i < sizeof(*out); i++) ((uint8_t *)out)[i] = 0;
+    out->struct_size = sizeof(*out);
+    out->abi_version = GRAIL_ABI_VERSION;
+    if (source->sa_family == GRAIL_AF_INET && length >= (int32_t)sizeof(sockaddr_in)) {
+        const sockaddr_in *value = (const sockaddr_in *)source;
+        out->family = GRAIL_ADDRESS_INET;
+        out->port = grail_windows_swap16(value->sin_port);
+        for (uint64_t i = 0; i < 4; i++) out->address[i] = ((const uint8_t *)&value->sin_addr)[i];
+        return GRAIL_OK;
+    }
+    if (source->sa_family == GRAIL_AF_INET6 && length >= (int32_t)sizeof(sockaddr_in6)) {
+        const sockaddr_in6 *value = (const sockaddr_in6 *)source;
+        out->family = GRAIL_ADDRESS_INET6;
+        out->port = grail_windows_swap16(value->sin6_port);
+        for (uint64_t i = 0; i < 16; i++) out->address[i] = value->sin6_addr[i];
+        out->scope_id = value->sin6_scope_id;
+        return GRAIL_OK;
+    }
+    return GRAIL_E_ADDRESS_INVALID;
+}
+
+static grail_status grail_windows_socket_lookup(grail_socket handle,
+                                                 grail_win32_socket **out) {
+    if (!grail_windows.initialized) return GRAIL_E_NOT_INITIALIZED;
+    grail_windows_lock();
+    const grail_status status =
+        grail_handle_table_lookup(&grail_windows.sockets, handle, (void **)out);
+    grail_windows_unlock();
+    return status;
+}
+
+static grail_status grail_windows_socket_wrap(SOCKET handle, uint64_t family, uint64_t type,
+                                               grail_socket *out) {
+    grail_win32_socket *object =
+        (grail_win32_socket *)grail_windows_allocate(sizeof(*object));
+    if (object == NULL) {
+        (void)closesocket(handle);
+        return GRAIL_E_OUT_OF_MEMORY;
+    }
+    object->handle = handle;
+    object->family = family;
+    object->type = type;
+    grail_handle result = GRAIL_HANDLE_NONE;
+    grail_windows_lock();
+    const grail_status status =
+        grail_handle_table_allocate(&grail_windows.sockets, object, &result);
+    grail_windows_unlock();
+    if (status != GRAIL_OK) {
+        (void)closesocket(handle);
+        grail_windows_release(object, sizeof(*object));
+        return status;
+    }
+    *out = result;
+    return GRAIL_OK;
+}
+
+grail_status grail_os_socket_create(uint64_t family, uint64_t type, grail_socket *out) {
+    if (!grail_windows.initialized) return GRAIL_E_NOT_INITIALIZED;
+    if (!grail_windows.winsock_ready) return GRAIL_E_UNSUPPORTED;
+    if (out == NULL) return GRAIL_E_INVALID_ARGUMENT;
+    int32_t af;
+    int32_t socket_type;
+    if (family == GRAIL_ADDRESS_INET) af = GRAIL_AF_INET;
+    else if (family == GRAIL_ADDRESS_INET6) af = GRAIL_AF_INET6;
+    else return GRAIL_E_INVALID_ARGUMENT;
+    if (type == GRAIL_SOCKET_STREAM) socket_type = GRAIL_SOCK_STREAM;
+    else if (type == GRAIL_SOCKET_DATAGRAM) socket_type = GRAIL_SOCK_DGRAM;
+    else return GRAIL_E_INVALID_ARGUMENT;
+    const SOCKET handle = socket(af, socket_type, 0);
+    if (handle == GRAIL_INVALID_SOCKET) return grail_windows_socket_fail();
+    return grail_windows_socket_wrap(handle, family, type, out);
+}
+
+grail_status grail_os_socket_bind(grail_socket handle, const grail_socket_address *address) {
+    grail_win32_socket *object = NULL;
+    grail_status status = grail_windows_socket_lookup(handle, &object);
+    if (status != GRAIL_OK) return status;
+    if (!grail_windows_address_valid(address)) return GRAIL_E_INVALID_ARGUMENT;
+    grail_win32_socket_storage storage;
+    const int32_t length = grail_windows_fill_sockaddr(address, &storage);
+    if (length == 0) return GRAIL_E_ADDRESS_INVALID;
+    if (bind(object->handle, &storage.generic, length) == GRAIL_SOCKET_ERROR) {
+        return grail_windows_socket_fail();
+    }
+    return GRAIL_OK;
+}
+
+grail_status grail_os_socket_listen(grail_socket handle, uint64_t backlog) {
+    grail_win32_socket *object = NULL;
+    const grail_status status = grail_windows_socket_lookup(handle, &object);
+    if (status != GRAIL_OK) return status;
+    const int32_t depth = backlog == 0 ? 0x7FFFFFFF : (backlog > 0x7FFFFFFFull ? 0x7FFFFFFF : (int32_t)backlog);
+    if (listen(object->handle, depth) == GRAIL_SOCKET_ERROR) return grail_windows_socket_fail();
+    return GRAIL_OK;
+}
+
+grail_status grail_os_socket_accept(grail_socket handle, grail_socket *out,
+                                    grail_socket_address *peer) {
+    grail_win32_socket *object = NULL;
+    grail_status status = grail_windows_socket_lookup(handle, &object);
+    if (status != GRAIL_OK) return status;
+    if (out == NULL) return GRAIL_E_INVALID_ARGUMENT;
+    grail_win32_socket_storage storage;
+    int32_t length = (int32_t)sizeof(storage);
+    const SOCKET accepted = accept(object->handle, &storage.generic, &length);
+    if (accepted == GRAIL_INVALID_SOCKET) return grail_windows_socket_fail();
+    if (peer != NULL) {
+        status = grail_windows_from_sockaddr(&storage.generic, length, peer);
+        if (status != GRAIL_OK) {
+            (void)closesocket(accepted);
+            return status;
+        }
+    }
+    return grail_windows_socket_wrap(accepted, object->family, object->type, out);
+}
+
+grail_status grail_os_socket_connect(grail_socket handle, const grail_socket_address *address) {
+    grail_win32_socket *object = NULL;
+    const grail_status status = grail_windows_socket_lookup(handle, &object);
+    if (status != GRAIL_OK) return status;
+    if (!grail_windows_address_valid(address)) return GRAIL_E_INVALID_ARGUMENT;
+    grail_win32_socket_storage storage;
+    const int32_t length = grail_windows_fill_sockaddr(address, &storage);
+    if (length == 0) return GRAIL_E_ADDRESS_INVALID;
+    if (connect(object->handle, &storage.generic, length) == GRAIL_SOCKET_ERROR) {
+        return grail_windows_socket_fail();
+    }
+    return GRAIL_OK;
+}
+
+grail_status grail_os_socket_send(grail_socket handle, const uint8_t *buffer, uint64_t length,
+                                  uint64_t *sent) {
+    grail_win32_socket *object = NULL;
+    const grail_status status = grail_windows_socket_lookup(handle, &object);
+    if (status != GRAIL_OK) return status;
+    if (sent == NULL || (buffer == NULL && length != 0) || length > (uint64_t)0x7FFFFFFF) {
+        return GRAIL_E_INVALID_ARGUMENT;
+    }
+    if (length == 0) { *sent = 0; return GRAIL_OK; }
+    const int32_t result = send(object->handle, (const char *)buffer, (int32_t)length, 0);
+    if (result == GRAIL_SOCKET_ERROR) return grail_windows_socket_fail();
+    *sent = (uint64_t)result;
+    return GRAIL_OK;
+}
+
+grail_status grail_os_socket_recv(grail_socket handle, uint8_t *buffer, uint64_t capacity,
+                                  uint64_t *received) {
+    grail_win32_socket *object = NULL;
+    const grail_status status = grail_windows_socket_lookup(handle, &object);
+    if (status != GRAIL_OK) return status;
+    if (received == NULL || (buffer == NULL && capacity != 0) ||
+        capacity > (uint64_t)0x7FFFFFFF) {
+        return GRAIL_E_INVALID_ARGUMENT;
+    }
+    if (capacity == 0) { *received = 0; return GRAIL_OK; }
+    const int32_t result = recv(object->handle, (char *)buffer, (int32_t)capacity, 0);
+    if (result == GRAIL_SOCKET_ERROR) return grail_windows_socket_fail();
+    *received = (uint64_t)result;
+    return GRAIL_OK;
+}
+
+grail_status grail_os_socket_send_to(grail_socket handle, const uint8_t *buffer, uint64_t length,
+                                     const grail_socket_address *address, uint64_t *sent) {
+    grail_win32_socket *object = NULL;
+    grail_status status = grail_windows_socket_lookup(handle, &object);
+    if (status != GRAIL_OK) return status;
+    if (sent == NULL || (buffer == NULL && length != 0) || length > (uint64_t)0x7FFFFFFF ||
+        !grail_windows_address_valid(address)) {
+        return GRAIL_E_INVALID_ARGUMENT;
+    }
+    grail_win32_socket_storage storage;
+    const int32_t address_length = grail_windows_fill_sockaddr(address, &storage);
+    if (address_length == 0) return GRAIL_E_ADDRESS_INVALID;
+    const int32_t result = sendto(object->handle, (const char *)buffer, (int32_t)length, 0,
+                                  &storage.generic, address_length);
+    if (result == GRAIL_SOCKET_ERROR) return grail_windows_socket_fail();
+    *sent = (uint64_t)result;
+    return GRAIL_OK;
+}
+
+grail_status grail_os_socket_recv_from(grail_socket handle, uint8_t *buffer, uint64_t capacity,
+                                       grail_socket_address *address, uint64_t *received) {
+    grail_win32_socket *object = NULL;
+    grail_status status = grail_windows_socket_lookup(handle, &object);
+    if (status != GRAIL_OK) return status;
+    if (received == NULL || address == NULL || (buffer == NULL && capacity != 0) ||
+        capacity > (uint64_t)0x7FFFFFFF) {
+        return GRAIL_E_INVALID_ARGUMENT;
+    }
+    grail_win32_socket_storage storage;
+    int32_t address_length = (int32_t)sizeof(storage);
+    const int32_t result = recvfrom(object->handle, (char *)buffer, (int32_t)capacity, 0,
+                                    &storage.generic, &address_length);
+    if (result == GRAIL_SOCKET_ERROR) return grail_windows_socket_fail();
+    status = grail_windows_from_sockaddr(&storage.generic, address_length, address);
+    if (status != GRAIL_OK) return status;
+    *received = (uint64_t)result;
+    return GRAIL_OK;
+}
+
+grail_status grail_os_socket_shutdown(grail_socket handle, uint64_t how) {
+    grail_win32_socket *object = NULL;
+    const grail_status status = grail_windows_socket_lookup(handle, &object);
+    if (status != GRAIL_OK) return status;
+    int32_t direction;
+    if (how == GRAIL_SHUTDOWN_READ) direction = GRAIL_SHUT_RD;
+    else if (how == GRAIL_SHUTDOWN_WRITE) direction = GRAIL_SHUT_WR;
+    else if (how == GRAIL_SHUTDOWN_BOTH) direction = GRAIL_SHUT_RDWR;
+    else return GRAIL_E_INVALID_ARGUMENT;
+    if (shutdown(object->handle, direction) == GRAIL_SOCKET_ERROR) {
+        return grail_windows_socket_fail();
+    }
+    return GRAIL_OK;
+}
+
+grail_status grail_os_socket_close(grail_socket handle) {
+    if (!grail_windows.initialized) return GRAIL_E_NOT_INITIALIZED;
+    grail_win32_socket *object = NULL;
+    grail_windows_lock();
+    const grail_status status =
+        grail_handle_table_release(&grail_windows.sockets, handle, (void **)&object);
+    grail_windows_unlock();
+    if (status != GRAIL_OK) return status;
+    const int32_t result = closesocket(object->handle);
+    grail_windows_release(object, sizeof(*object));
+    if (result == GRAIL_SOCKET_ERROR) return grail_windows_socket_fail();
+    return GRAIL_OK;
+}
+
+static grail_status grail_windows_socket_name(grail_socket handle, int peer,
+                                              grail_socket_address *out) {
+    grail_win32_socket *object = NULL;
+    const grail_status status = grail_windows_socket_lookup(handle, &object);
+    if (status != GRAIL_OK) return status;
+    if (out == NULL) return GRAIL_E_INVALID_ARGUMENT;
+    grail_win32_socket_storage storage;
+    int32_t length = (int32_t)sizeof(storage);
+    const int32_t result = peer ? getpeername(object->handle, &storage.generic, &length)
+                                : getsockname(object->handle, &storage.generic, &length);
+    if (result == GRAIL_SOCKET_ERROR) return grail_windows_socket_fail();
+    return grail_windows_from_sockaddr(&storage.generic, length, out);
+}
+
+grail_status grail_os_socket_local_address(grail_socket handle, grail_socket_address *out) {
+    return grail_windows_socket_name(handle, 0, out);
+}
+
+grail_status grail_os_socket_peer_address(grail_socket handle, grail_socket_address *out) {
+    return grail_windows_socket_name(handle, 1, out);
+}
+
+grail_status grail_os_socket_set_nonblocking(grail_socket handle, uint64_t enabled) {
+    grail_win32_socket *object = NULL;
+    const grail_status status = grail_windows_socket_lookup(handle, &object);
+    if (status != GRAIL_OK) return status;
+    uint32_t mode = enabled != 0 ? 1u : 0u;
+    if (ioctlsocket(object->handle, (long)GRAIL_FIONBIO, &mode) == GRAIL_SOCKET_ERROR) {
+        return grail_windows_socket_fail();
+    }
+    return GRAIL_OK;
+}
+
+grail_status grail_os_socket_set_option(grail_socket handle, uint64_t option, uint64_t value) {
+    grail_win32_socket *object = NULL;
+    grail_status status = grail_windows_socket_lookup(handle, &object);
+    if (status != GRAIL_OK) return status;
+    int32_t level = GRAIL_SOL_SOCKET;
+    int32_t name = 0;
+    int32_t number = 0;
+    uint32_t milliseconds = 0;
+    grail_win32_linger linger;
+    const char *data = (const char *)&number;
+    int32_t length = (int32_t)sizeof(number);
+    switch (option) {
+    case GRAIL_SOCKOPT_REUSE_ADDRESS:
+        name = GRAIL_SO_REUSEADDR;
+        if (value > 0x7FFFFFFFull) return GRAIL_E_INVALID_ARGUMENT;
+        number = (int32_t)value;
+        break;
+    case GRAIL_SOCKOPT_REUSE_PORT:
+        return GRAIL_E_UNSUPPORTED;
+    case GRAIL_SOCKOPT_NO_DELAY:
+        level = GRAIL_IPPROTO_TCP;
+        name = GRAIL_TCP_NODELAY;
+        if (value > 0x7FFFFFFFull) return GRAIL_E_INVALID_ARGUMENT;
+        number = (int32_t)value;
+        break;
+    case GRAIL_SOCKOPT_KEEPALIVE:
+        name = GRAIL_SO_KEEPALIVE;
+        if (value > 0x7FFFFFFFull) return GRAIL_E_INVALID_ARGUMENT;
+        number = (int32_t)value;
+        break;
+    case GRAIL_SOCKOPT_BROADCAST:
+        name = GRAIL_SO_BROADCAST;
+        if (value > 0x7FFFFFFFull) return GRAIL_E_INVALID_ARGUMENT;
+        number = (int32_t)value;
+        break;
+    case GRAIL_SOCKOPT_RECEIVE_TIMEOUT_MS:
+        name = GRAIL_SO_RCVTIMEO;
+        if (value > 0xFFFFFFFFull) return GRAIL_E_INVALID_ARGUMENT;
+        milliseconds = (uint32_t)value;
+        data = (const char *)&milliseconds;
+        length = (int32_t)sizeof(milliseconds);
+        break;
+    case GRAIL_SOCKOPT_SEND_TIMEOUT_MS:
+        name = GRAIL_SO_SNDTIMEO;
+        if (value > 0xFFFFFFFFull) return GRAIL_E_INVALID_ARGUMENT;
+        milliseconds = (uint32_t)value;
+        data = (const char *)&milliseconds;
+        length = (int32_t)sizeof(milliseconds);
+        break;
+    case GRAIL_SOCKOPT_LINGER_MS:
+        name = GRAIL_SO_LINGER;
+        linger.l_onoff = value == 0 ? 0 : 1;
+        linger.l_linger = value == 0 ? 0 : (uint16_t)((value + 999) / 1000);
+        data = (const char *)&linger;
+        length = (int32_t)sizeof(linger);
+        break;
+    default:
+        return GRAIL_E_UNSUPPORTED;
+    }
+    if (setsockopt(object->handle, level, name, data, length) == GRAIL_SOCKET_ERROR) {
+        return grail_windows_socket_fail();
+    }
+    return GRAIL_OK;
+}
+
+grail_status grail_os_socket_get_option(grail_socket handle, uint64_t option, uint64_t *value) {
+    grail_win32_socket *object = NULL;
+    grail_status status = grail_windows_socket_lookup(handle, &object);
+    if (status != GRAIL_OK) return status;
+    if (value == NULL) return GRAIL_E_INVALID_ARGUMENT;
+    int32_t level = GRAIL_SOL_SOCKET;
+    int32_t name = 0;
+    int32_t number = 0;
+    uint32_t milliseconds = 0;
+    grail_win32_linger linger;
+    char *data = (char *)&number;
+    int32_t length = (int32_t)sizeof(number);
+    switch (option) {
+    case GRAIL_SOCKOPT_REUSE_ADDRESS: name = GRAIL_SO_REUSEADDR; break;
+    case GRAIL_SOCKOPT_REUSE_PORT: return GRAIL_E_UNSUPPORTED;
+    case GRAIL_SOCKOPT_NO_DELAY:
+        level = GRAIL_IPPROTO_TCP;
+        name = GRAIL_TCP_NODELAY;
+        break;
+    case GRAIL_SOCKOPT_KEEPALIVE: name = GRAIL_SO_KEEPALIVE; break;
+    case GRAIL_SOCKOPT_BROADCAST: name = GRAIL_SO_BROADCAST; break;
+    case GRAIL_SOCKOPT_RECEIVE_TIMEOUT_MS:
+        name = GRAIL_SO_RCVTIMEO;
+        data = (char *)&milliseconds;
+        length = (int32_t)sizeof(milliseconds);
+        break;
+    case GRAIL_SOCKOPT_SEND_TIMEOUT_MS:
+        name = GRAIL_SO_SNDTIMEO;
+        data = (char *)&milliseconds;
+        length = (int32_t)sizeof(milliseconds);
+        break;
+    case GRAIL_SOCKOPT_LINGER_MS:
+        name = GRAIL_SO_LINGER;
+        data = (char *)&linger;
+        length = (int32_t)sizeof(linger);
+        break;
+    default: return GRAIL_E_UNSUPPORTED;
+    }
+    if (getsockopt(object->handle, level, name, data, &length) == GRAIL_SOCKET_ERROR) {
+        return grail_windows_socket_fail();
+    }
+    if (option == GRAIL_SOCKOPT_RECEIVE_TIMEOUT_MS || option == GRAIL_SOCKOPT_SEND_TIMEOUT_MS) {
+        *value = (uint64_t)milliseconds;
+    } else if (option == GRAIL_SOCKOPT_LINGER_MS) {
+        *value = linger.l_onoff == 0 ? 0 : (uint64_t)linger.l_linger * 1000;
+    } else {
+        *value = (uint64_t)(uint32_t)number;
+    }
     return GRAIL_OK;
 }
 

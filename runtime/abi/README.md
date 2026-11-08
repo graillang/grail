@@ -57,11 +57,11 @@ tools/abi-test.mjs        test runner (also `just abi-test`)
 | File metadata | header | format | stat | stat | not implemented |
 | Directories | header | handle table | open/next/close, mkdir/remove/rename | open/next/close, mkdir/remove/rename | open/next/close, mkdir/remove/rename |
 | Environment | header | env store | get/set/unset/iterate | get/set/unset/iterate | get/set/unset/iterate |
-| Time | header | n/a | monotonic/realtime/CPU, sleep, local offset | monotonic/realtime/CPU, sleep | monotonic/realtime/CPU, sleep |
+| Time | header | n/a | monotonic/realtime/CPU, sleep, local offset | monotonic/realtime/CPU, sleep, local offset | monotonic/realtime/CPU, sleep, local offset |
 | Threads/sync | header | handle table | complete subset | thread/mutex/condvar | thread/mutex/condvar |
 | Dynamic libraries | header | handle table | complete subset | LoadLibraryExW/GetProcAddress | dlopen/dlsym |
 | Processes | header | options/status layout | fork/execve/wait4 subset | CreateProcessW subset | posix_spawn subset |
-| Sockets/DNS | header | address layout | TCP/UDP IPv4+IPv6, options, DNS | not implemented | not implemented |
+| Sockets/DNS | header | address layout | TCP/UDP IPv4+IPv6, options, DNS | TCP/UDP IPv4+IPv6, options; DNS fail-closed | TCP/UDP IPv4+IPv6, options; DNS fail-closed |
 
 "Complete subset" means the documented functions are implemented and tested for that platform;
 the shipping Grail implementation must reproduce the Linux semantics without the C layer. The
@@ -113,13 +113,17 @@ remove and rename; `FindFirstFileW`/`FindNextFileW` directory iteration; `Create
 `LoadLibraryExW`/`GetProcAddress`/`FreeLibrary` with `FormatMessageW` loader errors.
 Child processes use `CreateProcessW` with a validated argv/environment, UTF-16 environment
 block, working directory, inheritable standard handles (explicit, inherited or NUL), Win32
-search path, wait/timeout, terminate/kill and process ids. `windows/grail_os_windows_stubs.c`
-returns `GRAIL_E_UNSUPPORTED` for non-blocking files, readlink/realpath, local-time offsets and
-sockets. Capabilities are
+search path, wait/timeout, terminate/kill and process ids. Local time offsets use
+`GetTimeZoneInformation` + `SystemTimeToTzSpecificLocalTime`. Sockets use Winsock with
+`WSAStartup`, TCP/UDP IPv4 and probed IPv6, bind/listen/accept/connect/send/recv,
+sendto/recvfrom, shutdown, local/peer address, non-blocking mode and the documented options.
+`windows/grail_os_windows_stubs.c` returns `GRAIL_E_UNSUPPORTED` for non-blocking files,
+readlink/realpath and DNS. Capabilities are
 `GRAIL_CAP_FILES | GRAIL_CAP_FILE_METADATA | GRAIL_CAP_PATHS | GRAIL_CAP_UNICODE |
 GRAIL_CAP_ENVIRONMENT | GRAIL_CAP_ENV_MUTATION | GRAIL_CAP_TIME | GRAIL_CAP_CPU_TIME |
 GRAIL_CAP_DIRECTORIES | GRAIL_CAP_THREADS | GRAIL_CAP_SYNC_PRIMITIVES |
-GRAIL_CAP_DYNAMIC_LIBRARIES | GRAIL_CAP_PROCESSES`. Thread names are not applied,
+GRAIL_CAP_DYNAMIC_LIBRARIES | GRAIL_CAP_PROCESSES | GRAIL_CAP_LOCAL_TIME_OFFSET |
+GRAIL_CAP_SOCKETS | GRAIL_CAP_SOCKET_UDP | GRAIL_CAP_SOCKET_IPV6`. Thread names are not applied,
 `GRAIL_DL_LAZY`/`GLOBAL` are accepted as no-ops because Win32 has no direct equivalents, and
 `terminate` falls back to `TerminateProcess` when no console control event can be delivered.
 
@@ -157,10 +161,10 @@ the implemented layer and the advanced options still to add.
 - **Environment:** `GetEnvironmentVariableW`/`SetEnvironmentVariableW` for propagation,
   but reads/iteration use the runtime copy so enumeration is deterministic. Names and values
   are UTF-16 at the OS boundary; reject a NUL in the UTF-8 input.
-- **Time:** `QueryPerformanceCounter`/`QueryPerformanceFrequency` for monotonic, and
-  `GetSystemTimePreciseAsFileTime` for realtime; `GetProcessTimes`/`GetThreadTimes` for CPU
-  clocks; `Sleep`/`SleepConditionVariableSRW` for blocking waits; `GetTimeZoneInformationForYear`
-  (not a single global bias) for `local_offset`.
+- **Time:** `QueryPerformanceCounter`/`QueryPerformanceFrequency` for monotonic,
+  `GetSystemTimePreciseAsFileTime` for realtime, `GetProcessTimes`/`GetThreadTimes` for CPU
+  clocks, `Sleep` for blocking waits, and `GetTimeZoneInformation` +
+  `SystemTimeToTzSpecificLocalTime` for `local_offset`.
 - **Threads/sync:** `CreateThread` (or `_beginthreadex` if a CRT is present), deferred close via
   a reference-counted record, `SetThreadDescription` for names, `WaitForSingleObject` +
   `GetExitCodeThread` for join, `CloseHandle` for detach/consume, `SRWLOCK` for mutex,
@@ -169,12 +173,11 @@ the implemented layer and the advanced options still to add.
 - **Dynamic libraries:** `LoadLibraryExW` with `LOAD_LIBRARY_SEARCH_DEFAULT_DIRS` or
   `LOAD_WITH_ALTERED_SEARCH_PATH` chosen explicitly, `GetProcAddress`, `FreeLibrary`,
   `FormatMessageW` for `grail_os_dl_error`. An empty name means `GetModuleHandleW(NULL)`.
-- **Sockets/DNS:** `WSASocketW`, `bind`, `listen`, `accept` (or `AcceptEx` only through the
-  private reactor), `connect`, `WSASend`/`WSARecv`, `sendto`/`recvfrom`, `shutdown`,
-  `closesocket`, `setsockopt`/`getsockopt`, `ioctlsocket(FIONBIO)`, `getaddrinfoW` with
-  `AI_ADDRCONFIG` semantics documented. Sockets are `SOCKET` values, not file handles, so the
-  handle table must keep them in a distinct domain. `WSAStartup` failure must fail
-  `grail_os_init`, not each call.
+- **Sockets/DNS:** `WSAStartup`, `socket`, `bind`, `listen`, `accept`, `connect`,
+  `send`/`recv`, `sendto`/`recvfrom`, `shutdown`, `closesocket`, `setsockopt`/`getsockopt` and
+  `ioctlsocket(FIONBIO)` are implemented for TCP/UDP IPv4 and probed IPv6. DNS
+  (`getaddrinfoW`) remains fail-closed and `GRAIL_CAP_RESOLVE` is clear. Sockets are `SOCKET`
+  values, not file handles, so the handle table keeps them in a distinct domain.
 
 C-to-Graal callback invocation is a later FFI increment. Until it lands, allocator hooks and
 thread entry points remain on the C/backend side and are not claimed as Grail-callable.
@@ -197,13 +200,18 @@ open/read/write/seek/truncate/sync/set-non-blocking/close with `O_CLOEXEC`; pipe
 condition variables; `dlopen`/`dlsym`/`dlclose` with loader error text.
 Child processes use `posix_spawn` with argv/environment blocks, file actions for stdio and
 working directory, `NEW_GROUP` via `POSIX_SPAWN_SETPGROUP`, and `waitpid` wait/timeout plus
-`kill` terminate/kill. `macos/grail_os_macos_stubs.c` returns `GRAIL_E_UNSUPPORTED` for
-metadata, local-time offsets and sockets. Capabilities are
+`kill` terminate/kill. Local time offsets use `localtime_r` and `tm_gmtoff`. Sockets use BSD
+`socket`/`bind`/`listen`/`accept`/`connect`/`send`/`recv`, sendto/recvfrom, shutdown,
+local/peer address, non-blocking mode and the documented options, with `SO_NOSIGPIPE` and
+probed IPv6. `macos/grail_os_macos_stubs.c` returns `GRAIL_E_UNSUPPORTED` for metadata and
+DNS. Capabilities are
 `GRAIL_CAP_FILES | GRAIL_CAP_FILE_NONBLOCKING | GRAIL_CAP_PATHS | GRAIL_CAP_UNICODE |
 GRAIL_CAP_ENVIRONMENT | GRAIL_CAP_ENV_MUTATION | GRAIL_CAP_TIME | GRAIL_CAP_CPU_TIME |
 GRAIL_CAP_SYMLINKS | GRAIL_CAP_DIRECTORIES | GRAIL_CAP_THREADS |
-GRAIL_CAP_SYNC_PRIMITIVES | GRAIL_CAP_DYNAMIC_LIBRARIES | GRAIL_CAP_PROCESSES`;
-`GRAIL_CAP_FILE_METADATA` is clear because no `struct stat` layout is pinned yet.
+GRAIL_CAP_SYNC_PRIMITIVES | GRAIL_CAP_DYNAMIC_LIBRARIES | GRAIL_CAP_PROCESSES |
+GRAIL_CAP_LOCAL_TIME_OFFSET | GRAIL_CAP_SOCKETS | GRAIL_CAP_SOCKET_UDP |
+GRAIL_CAP_SOCKET_IPV6`; `GRAIL_CAP_FILE_METADATA` is clear because no `struct stat` layout is
+pinned yet.
 
 ## macOS remaining mapping
 
@@ -222,18 +230,19 @@ GRAIL_CAP_SYNC_PRIMITIVES | GRAIL_CAP_DYNAMIC_LIBRARIES | GRAIL_CAP_PROCESSES`;
   search rules when requested.
 - **Environment:** `getenv` only while single-threaded; after init, reads use the runtime copy.
   Mutations call `setenv`/`unsetenv` for child inheritance.
-- **Time:** `clock_gettime(CLOCK_MONOTONIC/CLOCK_REALTIME)` or `mach_absolute_time` for
-  monotonic; `gettimeofday` for realtime; `getrusage`/`thread_info` for CPU clocks;
-  `nanosleep`; `localtime_r` + `tm_gmtoff` (with the 32/64-bit `time_t` caveat documented).
+- **Time:** `clock_gettime`/`clock_getres`/`nanosleep` for realtime, monotonic and CPU
+  clocks; `localtime_r` + `tm_gmtoff` (pinned 64-bit `struct tm`) for `local_offset`.
 - **Threads/sync:** `pthread_create` with a stack-size attribute, `pthread_setname_np` (may
   reject names; truncate), `pthread_join`, `pthread_detach`, `pthread_mutex_t`,
   `pthread_cond_t` with `pthread_cond_timedwait_relative_np` (no `pthread_condattr_setclock`
   on older SDKs), `sched_yield`.
 - **Dynamic libraries:** `dlopen` with `RTLD_LAZY`/`RTLD_NOW` and `RTLD_GLOBAL`/`RTLD_LOCAL`,
   `dlsym`, `dlclose`, `dlerror`; empty name means the main executable.
-- **Sockets/DNS:** BSD sockets; there is no `accept4`, so `accept` + `fcntl(FD_CLOEXEC)` +
-  `FIONBIO`; `getaddrinfo`/`freeaddrinfo`, `send`/`recv`/`sendto`/`recvfrom`, `shutdown`,
-  `setsockopt`/`getsockopt`. Readiness uses kqueue in the private runtime, not this ABI.
+- **Sockets/DNS:** BSD `socket`/`bind`/`listen`/`accept`/`connect`/`send`/`recv`,
+  `sendto`/`recvfrom`, `shutdown`, `getsockname`/`getpeername`, `setsockopt`/`getsockopt`,
+  `fcntl` non-blocking and `SO_NOSIGPIPE`; no `accept4`, so `accept` + `fcntl(FD_CLOEXEC)`.
+  DNS (`getaddrinfo`) remains fail-closed and `GRAIL_CAP_RESOLVE` is clear. Readiness uses
+  kqueue in the private runtime, not this ABI.
 
 Prerequisite outside this directory: Mach-O emission, Apple ARM64 symbol naming and the
 SDK/linker inputs are the macOS lane's work. The ABI only defines the runtime service calls.
@@ -252,7 +261,10 @@ clang -target x86_64-apple-macos11 -ffreestanding -c ... <same sources>
 ```
 
 It then unions `llvm-nm -g --defined-only` over the objects and checks that all 95 public
-functions from `include/grail/*.h` are defined for all four targets. The runner requires
+functions from `include/grail/*.h` are defined for all four targets. The pinned Win32 and
+Darwin headers also carry compile-time size assertions for `FILETIME`, `SYSTEMTIME`,
+`TIME_ZONE_INFORMATION`, `WSADATA`, sockaddr records, `STARTUPINFOW`, file/find records,
+Darwin `struct tm`/`dirent`, pthread records, timeval and linger. The runner requires
 `clang` and `llvm-nm`.
 
 Limits of this evidence:
@@ -263,8 +275,9 @@ Limits of this evidence:
   later).
 - `_Thread_local` error detail assumes static/direct TLS; a DLL build needs an explicit TLS
   strategy before it can claim thread-local detail.
-- Windows `NO_FOLLOW`/symlink metadata is limited by `GetFileAttributesExW`; `GRAIL_CAP_SYMLINKS`
-  is clear. `mode` is not represented by Win32 file creation, and `file_truncate` moves the
+- DNS (`grail_os_net_resolve`) remains fail-closed on both platforms; `GRAIL_CAP_RESOLVE` is
+  clear. Windows `NO_FOLLOW`/symlink metadata is limited by `GetFileAttributesExW`;
+  `GRAIL_CAP_SYMLINKS` is clear. `mode` is not represented by Win32 file creation, and `file_truncate` moves the
   file pointer. Directory patterns use the normal Win32 path rules, not `\\?\` long paths.
   Thread names are ignored and `GRAIL_DL_LAZY`/`GLOBAL` are no-ops on Windows; parent
   creation for UNC paths is not supported. Windows `SEARCH_PATH` uses the native Win32 search

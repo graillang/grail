@@ -63,6 +63,67 @@ typedef struct grail_by_handle_file_information {
     DWORD nFileIndexLow;
 } BY_HANDLE_FILE_INFORMATION;
 
+typedef struct grail_system_time {
+    uint16_t wYear;
+    uint16_t wMonth;
+    uint16_t wDayOfWeek;
+    uint16_t wDay;
+    uint16_t wHour;
+    uint16_t wMinute;
+    uint16_t wSecond;
+    uint16_t wMilliseconds;
+} SYSTEMTIME;
+
+typedef struct grail_time_zone_information {
+    int32_t Bias;
+    uint16_t StandardName[32];
+    SYSTEMTIME StandardDate;
+    int32_t StandardBias;
+    uint16_t DaylightName[32];
+    SYSTEMTIME DaylightDate;
+    int32_t DaylightBias;
+} TIME_ZONE_INFORMATION;
+
+typedef uintptr_t SOCKET;
+#define GRAIL_INVALID_SOCKET ((SOCKET)(~(uintptr_t)0))
+#define GRAIL_SOCKET_ERROR (-1)
+
+typedef struct grail_sockaddr {
+    uint16_t sa_family;
+    char sa_data[14];
+} sockaddr;
+
+typedef struct grail_sockaddr_in {
+    uint16_t sin_family;
+    uint16_t sin_port;
+    uint32_t sin_addr;
+    uint8_t sin_zero[8];
+} sockaddr_in;
+
+typedef struct grail_sockaddr_in6 {
+    uint16_t sin6_family;
+    uint16_t sin6_port;
+    uint32_t sin6_flowinfo;
+    uint8_t sin6_addr[16];
+    uint32_t sin6_scope_id;
+} sockaddr_in6;
+
+typedef struct grail_wsadata {
+    uint16_t wVersion;
+    uint16_t wHighVersion;
+    char szDescription[257];
+    char szSystemStatus[129];
+    uint16_t iMaxSockets;
+    uint16_t iMaxUdpDg;
+    uint8_t padding[4];
+    char *lpVendorInfo;
+} WSADATA;
+
+typedef struct grail_win32_linger {
+    uint16_t l_onoff;
+    uint16_t l_linger;
+} grail_win32_linger;
+
 typedef struct grail_win32_find_data {
     DWORD dwFileAttributes;
     FILETIME ftCreationTime;
@@ -177,6 +238,24 @@ typedef struct grail_condition_variable {
 #define GRAIL_STD_INPUT_HANDLE ((DWORD)-10)
 #define GRAIL_STD_OUTPUT_HANDLE ((DWORD)-11)
 #define GRAIL_STD_ERROR_HANDLE ((DWORD)-12)
+#define GRAIL_AF_INET 2
+#define GRAIL_AF_INET6 23
+#define GRAIL_SOCK_STREAM 1
+#define GRAIL_SOCK_DGRAM 2
+#define GRAIL_IPPROTO_TCP 6
+#define GRAIL_SOL_SOCKET 0xFFFF
+#define GRAIL_SO_REUSEADDR 0x0004
+#define GRAIL_SO_KEEPALIVE 0x0008
+#define GRAIL_SO_BROADCAST 0x0020
+#define GRAIL_SO_LINGER 0x0080
+#define GRAIL_SO_SNDTIMEO 0x1005
+#define GRAIL_SO_RCVTIMEO 0x1006
+#define GRAIL_TCP_NODELAY 0x0001
+#define GRAIL_SHUT_RD 0
+#define GRAIL_SHUT_WR 1
+#define GRAIL_SHUT_RDWR 2
+#define GRAIL_FIONBIO 0x8004667Eu
+#define GRAIL_CTRL_BREAK_EVENT 1u
 #define GRAIL_FORMAT_MESSAGE_FROM_SYSTEM 0x00001000u
 #define GRAIL_FORMAT_MESSAGE_IGNORE_INSERTS 0x00000200u
 
@@ -259,6 +338,48 @@ GRAIL_WINIMPORT HANDLE GRAIL_WINAPI GetStdHandle(DWORD which);
 GRAIL_WINIMPORT DWORD GRAIL_WINAPI SearchPathW(LPCWSTR path, LPCWSTR file, LPCWSTR extension,
                                                DWORD buffer_length, LPWSTR buffer,
                                                LPWSTR *file_part);
+GRAIL_WINIMPORT DWORD GRAIL_WINAPI GetTimeZoneInformation(TIME_ZONE_INFORMATION *information);
+GRAIL_WINIMPORT BOOL GRAIL_WINAPI SystemTimeToTzSpecificLocalTime(
+    const TIME_ZONE_INFORMATION *information, const SYSTEMTIME *universal,
+    SYSTEMTIME *local);
+GRAIL_WINIMPORT BOOL GRAIL_WINAPI FileTimeToSystemTime(const FILETIME *file_time,
+                                                       SYSTEMTIME *system_time);
+GRAIL_WINIMPORT BOOL GRAIL_WINAPI SystemTimeToFileTime(const SYSTEMTIME *system_time,
+                                                       FILETIME *file_time);
+GRAIL_WINIMPORT int32_t GRAIL_WINAPI WSAStartup(uint16_t version, WSADATA *data);
+GRAIL_WINIMPORT int32_t GRAIL_WINAPI WSACleanup(void);
+GRAIL_WINIMPORT SOCKET GRAIL_WINAPI socket(int32_t family, int32_t type, int32_t protocol);
+GRAIL_WINIMPORT int32_t GRAIL_WINAPI bind(SOCKET socket_handle, const sockaddr *address,
+                                          int32_t length);
+GRAIL_WINIMPORT int32_t GRAIL_WINAPI listen(SOCKET socket_handle, int32_t backlog);
+GRAIL_WINIMPORT SOCKET GRAIL_WINAPI accept(SOCKET socket_handle, sockaddr *address,
+                                           int32_t *length);
+GRAIL_WINIMPORT int32_t GRAIL_WINAPI connect(SOCKET socket_handle, const sockaddr *address,
+                                             int32_t length);
+GRAIL_WINIMPORT int32_t GRAIL_WINAPI send(SOCKET socket_handle, const char *buffer,
+                                          int32_t length, int32_t flags);
+GRAIL_WINIMPORT int32_t GRAIL_WINAPI recv(SOCKET socket_handle, char *buffer, int32_t length,
+                                          int32_t flags);
+GRAIL_WINIMPORT int32_t GRAIL_WINAPI sendto(SOCKET socket_handle, const char *buffer,
+                                            int32_t length, int32_t flags,
+                                            const sockaddr *address, int32_t address_length);
+GRAIL_WINIMPORT int32_t GRAIL_WINAPI recvfrom(SOCKET socket_handle, char *buffer,
+                                              int32_t length, int32_t flags,
+                                              sockaddr *address, int32_t *address_length);
+GRAIL_WINIMPORT int32_t GRAIL_WINAPI shutdown(SOCKET socket_handle, int32_t how);
+GRAIL_WINIMPORT int32_t GRAIL_WINAPI closesocket(SOCKET socket_handle);
+GRAIL_WINIMPORT int32_t GRAIL_WINAPI getsockname(SOCKET socket_handle, sockaddr *address,
+                                                 int32_t *length);
+GRAIL_WINIMPORT int32_t GRAIL_WINAPI getpeername(SOCKET socket_handle, sockaddr *address,
+                                                 int32_t *length);
+GRAIL_WINIMPORT int32_t GRAIL_WINAPI ioctlsocket(SOCKET socket_handle, long command,
+                                                 uint32_t *argument);
+GRAIL_WINIMPORT int32_t GRAIL_WINAPI setsockopt(SOCKET socket_handle, int32_t level,
+                                                int32_t option, const char *value,
+                                                int32_t length);
+GRAIL_WINIMPORT int32_t GRAIL_WINAPI getsockopt(SOCKET socket_handle, int32_t level,
+                                                int32_t option, char *value, int32_t *length);
+GRAIL_WINIMPORT int32_t GRAIL_WINAPI WSAGetLastError(void);
 GRAIL_WINIMPORT DWORD GRAIL_WINAPI GetLastError(void);
 GRAIL_WINIMPORT void GRAIL_WINAPI Sleep(DWORD milliseconds);
 GRAIL_WINIMPORT BOOL GRAIL_WINAPI QueryPerformanceCounter(LARGE_INTEGER *value);
@@ -279,6 +400,20 @@ GRAIL_WINIMPORT void GRAIL_WINAPI ReleaseSRWLockExclusive(SRWLOCK *lock);
 
 #ifdef __cplusplus
 }
+#endif
+
+#if defined(_WIN64) && defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
+_Static_assert(sizeof(FILETIME) == 8, "FILETIME layout");
+_Static_assert(sizeof(SYSTEMTIME) == 16, "SYSTEMTIME layout");
+_Static_assert(sizeof(TIME_ZONE_INFORMATION) == 172, "TIME_ZONE_INFORMATION layout");
+_Static_assert(sizeof(WSADATA) == 408, "WSADATA layout");
+_Static_assert(sizeof(sockaddr_in) == 16, "sockaddr_in layout");
+_Static_assert(sizeof(sockaddr_in6) == 28, "sockaddr_in6 layout");
+_Static_assert(sizeof(SECURITY_ATTRIBUTES) == 24, "SECURITY_ATTRIBUTES layout");
+_Static_assert(sizeof(STARTUPINFOW) == 104, "STARTUPINFOW layout");
+_Static_assert(sizeof(PROCESS_INFORMATION) == 24, "PROCESS_INFORMATION layout");
+_Static_assert(sizeof(BY_HANDLE_FILE_INFORMATION) == 52, "BY_HANDLE_FILE_INFORMATION layout");
+_Static_assert(sizeof(WIN32_FIND_DATAW) == 592, "WIN32_FIND_DATAW layout");
 #endif
 
 #endif /* GRAIL_WIN32_H */
