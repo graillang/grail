@@ -86,6 +86,17 @@
   recovery, worker threads and `.pdata`/unwind data are not implemented, so PE programs compile
   and link but must not be executed yet. Command-line option errors now print a diagnostic and
   exit 1 instead of aborting without output.
+- macOS targets `macos-x86_64` and `macos-aarch64` emit Mach-O objects and executables: underscored
+  C symbols, `.build_version`, `__TEXT,__const` literals, `__DATA,__bss` state, AArch64
+  `@PAGE`/`@PAGEOFF` addressing and a `_main` entry that takes `argc`/`argv`/`envp` in the Apple C
+  argument registers and exits through libSystem `_exit`. `compiler/darwin.grl` is the libSystem
+  boundary (file/console I/O, mmap and a `mremap` emulation, poll, pipe, mkdir/unlink, directory
+  records, clock, sleep, yield, process control) and converts Darwin flag bits, `struct dirent`
+  layout and `errno`; it is compiled only for Mach-O targets, so ELF output is unchanged. Link with
+  `ld64.lld -platform_version macos 11.0 11.0 -lSystem -e _main`; `bun tools/test-macos.mjs` checks
+  the objects and executables statically. Threads, the async reactor and sockets report `ENOSYS` on
+  Darwin, and no macOS runtime behaviour is verified without Apple hardware. Invalid `--target`
+  values are now reported instead of aborting silently before any source is loaded.
 
 - Native fixtures, inline regression programs and book examples now use typed references and
   explicit byte views under `--default-u64 --typed-refs`; user-mode cases retain `i64` defaults.

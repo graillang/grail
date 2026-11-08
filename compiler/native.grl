@@ -169,6 +169,7 @@ struct C {
     out: u8[],
     module: u8[],
     target: u64,
+    plat: u64,
     arg_offset: u64,
     overflow: u64,
     default_u64: u64,
@@ -300,6 +301,89 @@ fn on<a>(c: (&a mut C), n: u64) -> unit {
     c.out.push(48 + n % 10);
     return ();
 }
+// 0 is ELF/Linux syscalls, 1 is Mach-O/macOS libSystem. CPU selection stays in `target`.
+fn darwin<a>(c: (&a mut C)) -> u64 {
+    return c.plat;
+}
+// Mach-O names every C symbol with a leading underscore; ELF does not.
+fn sym<a, b>(c: (&a mut C), name: &b [u8]) -> unit {
+    if c.plat == 1 {
+        c.out.push(95);
+    }
+    o(&mut c, name);
+    return ();
+}
+fn rodata<a>(c: (&a mut C)) -> unit {
+    if c.plat == 1 {
+        o(&mut c, view(".pushsection __TEXT,__const\n"));
+        return ();
+    }
+    o(&mut c, view(".pushsection .rodata\n"));
+    return ();
+}
+fn copy_to<a, b>(out: (&a mut u8[]), s: &b [u8]) -> unit {
+    for i in s.len() {
+        out.push(s[i]);
+    }
+    return ();
+}
+// Mach-O gives every C symbol a leading underscore. Direct calls and address materialisation
+// emitted from compiler literals use the bare Grail name, so they are prefixed in one place;
+// imported libSystem symbols already carry the underscore and are left alone.
+fn darwin_line<a, b>(out: (&a mut u8[]), line: &b [u8]) -> unit {
+    mut space = line.len();
+    for i in line.len() {
+        if line[i] == 32 {
+            space = i;
+            break;
+        }
+    }
+    if space == line.len() {
+        copy_to(&mut out, line);
+        return ();
+    }
+    op := line[: space];
+    rest := line[space + 1:];
+    mut bare = 0;
+    if rest.len() != 0 {
+        if ((65 <= rest[0]) & (rest[0] <= 90)) + ((97 <= rest[0]) & (rest[0] <= 122)) {
+            bare = 1;
+        }
+    }
+    if (same(view(op), view("call")) + same(view(op), view("leaq"))) & bare {
+        copy_to(&mut out, line[: space + 1]);
+        out.push(95);
+        copy_to(&mut out, rest);
+        return ();
+    }
+    copy_to(&mut out, line);
+    return ();
+}
+fn darwinify<a>(input: &a [u8]) -> u8[] {
+    mut out = u8[];
+    mut start = 0;
+    for i in input.len() {
+        if input[i] == 10 {
+            darwin_line(&mut out, view(input[start: i]));
+            out.push(10);
+            start = i + 1;
+        }
+    }
+    return out;
+}
+// The token text already holds the quotes; symbol names never need escapes.
+fn symbol_literal<a>(c: (&a mut C)) -> u8[] {
+    if kind(&mut c) != 3 {
+        fail(&mut c, view("expected an imported symbol name string"));
+    }
+    p := c.pos;
+    t := tok_text(&mut c, p);
+    advance(&mut c);
+    if t.len() < 3 {
+        fail(&mut c, view("empty imported symbol name"));
+    }
+    return (t[1: t.len() - 1]).copy();
+}
 
 fn fresh<a>(c: (&a mut C)) -> u64 {
     id := c.next;
@@ -358,6 +442,10 @@ fn jump<a, b>(c: (&a mut C), op: &b [u8], n: u64) -> unit {
 
 // PE/COFF objects carry no ELF symbol type; MSVC-style .def records the function class.
 fn func_directive<a, b>(c: (&a mut C), m: &b [u8], name: &b [u8]) -> unit {
+    // Mach-O defines a symbol by its label and carries neither .type nor .def records.
+    if c.plat == 1 {
+        return ();
+    }
     if c.target == 3 {
         o(&mut c, view(".def "));
         mangle(&mut c, view(m), view(name));
@@ -3501,6 +3589,9 @@ fn base_named<a>(c: (&a mut C), first: u8[]) -> u64 {
 }
 // ---- top level: pass 1 names, pass 2 fields/signatures/prototypes, pass 3 bodies ----
 fn mangle<a, b, d>(c: (&a mut C), m: &b [u8], n: &d [u8]) -> unit {
+    if c.plat == 1 {
+        c.out.push(95);
+    }
     if same(view(m), view("runtime")) {
         o(&mut c, n);
         return ();
@@ -4402,7 +4493,7 @@ fn constant_value<a, b, d>(c: (&a mut C), module: &b [u8], name: &d [u8]) -> Val
             text := k.text.copy();
             if ty == 3 {
                 l := label(&mut c);
-                o(&mut c, view(".pushsection .rodata\n"));
+                rodata(&mut c);
                 mark(&mut c, l);
                 for j in text.len() {
                     o(&mut c, view(".byte "));
@@ -4467,8 +4558,13 @@ fn toplevel<a>(c: (&a mut C), pass: u64) -> unit {
         }
     }
     if raw {
-        if same(view(m), view("runtime")) == 0 {
-            fail(&mut c, view("unsafe module reserved for runtime"));
+        // Two trusted modules: the portable runtime, and darwin for the macOS libSystem boundary,
+        // which only exists in Mach-O builds.
+        if (same(view(m), view("runtime")) + same(view(m), view("darwin"))) == 0 {
+            fail(&mut c, view("unsafe module reserved for runtime and darwin"));
+        }
+        if (same(view(m), view("darwin")) != 0) & (c.plat == 0) {
+            fail(&mut c, view("the darwin module requires a macos-x86_64 or macos-aarch64 target"));
         }
     }
     exchange(&mut c.module, m);
@@ -4795,7 +4891,7 @@ fn string_lit<a>(c: (&a mut C)) -> Val {
     en := t.end;
     advance(&mut c);
     mut l = label(&mut c);
-    o(&mut c, view(".pushsection .rodata\n"));
+    rodata(&mut c);
     mark(&mut c, l);
     mut i = st + 1;
     mut count = 0;
@@ -6175,6 +6271,9 @@ fn builtin_id<a>(n: &a [u8]) -> u64 {
     if same(view(n), view("raw_i64_from_f64")) {
         return 131;
     }
+    if same(view(n), view("raw_import")) {
+        return 133;
+    }
     return 0;
 }
 // Calls use the target word ABI (up to six words; machine.grl selects physical registers).
@@ -6206,12 +6305,17 @@ fn raw_builtin<a>(c: (&a mut C), id: u64) -> Val {
     }
     expect(&mut c, view("("));
     mut args = u64[];
+    mut name = u8[];
     if eat(&mut c, view(")")) == 0 {
         while 1 {
-            mut v = expr(&mut c, 0);
-            get(&mut c, v.t, view("%rax"));
-            n := save(&mut c);
-            args.push(n);
+            if (id == 133) & (name.len() == 0) {
+                name = symbol_literal(&mut c);
+            } else {
+                mut v = expr(&mut c, 0);
+                get(&mut c, v.t, view("%rax"));
+                n := save(&mut c);
+                args.push(n);
+            }
             if eat(&mut c, view(")")) {
                 break;
             }
@@ -6222,8 +6326,51 @@ fn raw_builtin<a>(c: (&a mut C), id: u64) -> Val {
     if (id == 102) + (id == 104) {
         arity = 2;
     }
+    if id == 105 {
+        if c.target == 3 {
+            // Win64 anonymous mapping: VirtualAlloc(0, size, MEM_COMMIT|MEM_RESERVE, PAGE_READWRITE).
+            get(&mut c, args[0], view("%rdx"));
+            o(
+                &mut c,
+                view("subq $48,%rsp\nxorl %ecx,%ecx\nmovl $12288,%r8d\nmovl $4,%r9d\ncall __imp_VirtualAlloc\naddq $48,%rsp\n")
+            );
+        } else {
+            if c.plat == 1 {
+                get(&mut c, args[0], view("%rsi"));
+                o(
+                    &mut c,
+                    view("xorl %edi,%edi\nmovl $3,%edx\nmovl $4098,%ecx\nmovq $-1,%r8\nxorl %r9d,%r9d\ncall _mmap\n")
+                );
+            } else {
+                get(&mut c, args[0], view("%rsi"));
+                mut number = 9;
+                if c.target != 0 {
+                    number = 222;
+                }
+                o(&mut c, view("movl $"));
+                on(&mut c, number);
+                o(
+                    &mut c,
+                    view(",%eax\nxorl %edi,%edi\nmovl $3,%edx\nmovl $34,%r10d\nmovq $-1,%r8\nxorl %r9d,%r9d\nsyscall\n")
+                );
+            }
+        }
+    }
     if (id == 106) + (id == 108) {
         arity = 0;
+    }
+    if id == 133 {
+        arity = args.len();
+        if 6 < arity {
+            fail(&mut c, view("imported call exceeds six arguments"));
+        }
+    }
+    if id == 108 {
+        target := c.target;
+        return val(imm(&mut c, target), 0);
+    }
+    if id == 106 {
+        o(&mut c, view("leaq rt_state(%rip),%rax\n"));
     }
     if id == 107 {
         arity = 4;
@@ -6244,140 +6391,18 @@ fn raw_builtin<a>(c: (&a mut C), id: u64) -> Val {
         arity = 4;
     }
     if id == 120 {
-        arity = 0;
-    }
-    if id == 122 {
-        arity = 2;
-    }
-    if (122 < id) & (id < 129) {
-        arity = 2;
-    }
-    if (128 < id) & (id < 132) {
-        arity = 1;
-    }
-    if args.len() != arity {
-        fail(&mut c, view("raw intrinsic arity"));
-    }
-    if id == 108 {
-        target := c.target;
-        return val(imm(&mut c, target), 0);
-    }
-    if id == 106 {
-        o(&mut c, view("leaq rt_state(%rip),%rax\n"));
-    }
-    if (id == 101) + (id == 103) {
-        get(&mut c, args[0], view("%rax"));
-        if id == 101 {
-            o(&mut c, view("movq (%rax),%rax\n"));
-        } else {
-            o(&mut c, view("movzbq (%rax),%rax\n"));
-        }
-    }
-    if (id == 102) + (id == 104) {
-        get(&mut c, args[0], view("%rcx"));
-        get(&mut c, args[1], view("%rax"));
-        if id == 102 {
-            o(&mut c, view("movq %rax,(%rcx)\n"));
-        } else {
-            o(&mut c, view("movb %al,(%rcx)\n"));
-        }
-        o(&mut c, view("xorq %rax,%rax\n"));
-    }
-    if id == 105 {
-        if c.target == 3 {
-            // Win64 anonymous mapping: VirtualAlloc(0, size, MEM_COMMIT|MEM_RESERVE, PAGE_READWRITE).
-            get(&mut c, args[0], view("%rdx"));
-            o(
-                &mut c,
-                view("subq $48,%rsp\nxorl %ecx,%ecx\nmovl $12288,%r8d\nmovl $4,%r9d\ncall __imp_VirtualAlloc\naddq $48,%rsp\n")
-            );
-        } else {
-            get(&mut c, args[0], view("%rsi"));
-            mut number = 9;
-            if c.target != 0 {
-                number = 222;
-            }
-            o(&mut c, view("movl $"));
-            on(&mut c, number);
-            o(
-                &mut c,
-                view(",%eax\nxorl %edi,%edi\nmovl $3,%edx\nmovl $34,%r10d\nmovq $-1,%r8\nxorl %r9d,%r9d\nsyscall\n")
-            );
-        }
-    }
-    if id == 107 {
-        get(&mut c, args[0], view("%rax"));
-        get(&mut c, args[1], view("%rdi"));
-        get(&mut c, args[2], view("%rsi"));
-        get(&mut c, args[3], view("%rdx"));
-        o(&mut c, view("xorl %r10d,%r10d\nxorl %r8d,%r8d\nxorl %r9d,%r9d\nsyscall\n"));
-    }
-    if id == 109 {
-        get(&mut c, args[0], view("%rax"));
-        get(&mut c, args[1], view("%rdi"));
-        get(&mut c, args[2], view("%rsi"));
-        get(&mut c, args[3], view("%rdx"));
-        get(&mut c, args[4], view("%r10"));
-        o(&mut c, view("xorl %r8d,%r8d\nxorl %r9d,%r9d\nsyscall\n"));
-    }
-    if (id == 110) + (id == 113) + (id == 114) {
-        get(&mut c, args[0], view("%rdi"));
-        o(&mut c, view("movq (%rdi),%rax\n"));
-        if id == 110 {
-            o(&mut c, view("mfence\n"));
-        }
-        if id == 114 {
-            o(&mut c, view("lfence\n"));
-        }
-    }
-    if (id == 111) + (id == 115) + (id == 116) {
-        get(&mut c, args[0], view("%rdi"));
-        get(&mut c, args[1], view("%rax"));
-        if id == 111 {
-            o(&mut c, view("xchgq %rax,(%rdi)\n"));
-        } else {
-            if id == 116 {
-                o(&mut c, view("sfence\n"));
-            }
-            o(&mut c, view("movq %rax,(%rdi)\n"));
-        }
-        o(&mut c, view("xorq %rax,%rax\n"));
-    }
-    // Thread start: the child takes its entry/argument from the new stack and exits only itself.
-    if id == 117 {
-        get(&mut c, args[0], view("%rdi"));
-        get(&mut c, args[1], view("%rsi"));
-        get(&mut c, args[2], view("%rdx"));
-        if c.target == 3 {
-            // Worker threads are not implemented for the PE target yet; trap instead of
-            // reaching a Linux clone syscall.
-            o(&mut c, view("xorl %eax,%eax\nud2\n"));
-        } else {
-            if c.target == 0 {
-                parent := label(&mut c);
-                o(&mut c, view("movq %rdx,%r10\nmovl $56,%eax\nsyscall\ntestq %rax,%rax\n"));
-                jump(&mut c, view("jnz"), parent);
-                o(
-                    &mut c,
-                    view("xorl %ebp,%ebp\npopq %rax\npopq %rdi\ncall *%rax\nmovl $60,%eax\nxorl %edi,%edi\nsyscall\nud2\n")
-                );
-                mark(&mut c, parent);
-            } else {
-                o(&mut c, view("clonethread\n"));
-            }
-        }
-    }
-    // Per-OS-thread worker pointer: x86 FS base (word 0 of the record points to itself),
-    // AArch64 tpidr_el0, RISC-V tp.
-    if id == 120 {
         if c.target == 3 {
             // TEB+0x28 is the Win32 per-thread user pointer (Linux uses %fs:0).
             o(&mut c, view("movq %fs:40,%rax\n"));
         } else {
-            if c.target == 0 {
-                o(&mut c, view("movq %fs:0,%rax\n"));
+            if c.plat == 1 {
+                o(&mut c, view("xorq %rax,%rax\n"));
             } else {
-                o(&mut c, view("tpget\n"));
+                if c.target == 0 {
+                    o(&mut c, view("movq %fs:0,%rax\n"));
+                } else {
+                    o(&mut c, view("tpget\n"));
+                }
             }
         }
     }
@@ -6386,12 +6411,16 @@ fn raw_builtin<a>(c: (&a mut C), id: u64) -> Val {
             get(&mut c, args[0], view("%rsi"));
             o(&mut c, view("movq %rsi,%fs:40\n"));
         } else {
-            if c.target == 0 {
-                get(&mut c, args[0], view("%rsi"));
-                o(&mut c, view("movl $4098,%edi\nmovl $158,%eax\nsyscall\n"));
+            if c.plat == 1 {
+                o(&mut c, view("xorq %rax,%rax\n"));
             } else {
-                get(&mut c, args[0], view("%rdi"));
-                o(&mut c, view("tpset\n"));
+                if c.target == 0 {
+                    get(&mut c, args[0], view("%rsi"));
+                    o(&mut c, view("movl $4098,%edi\nmovl $158,%eax\nsyscall\n"));
+                } else {
+                    get(&mut c, args[0], view("%rdi"));
+                    o(&mut c, view("tpset\n"));
+                }
             }
         }
     }
@@ -6656,7 +6685,7 @@ fn format_raw<a, b>(c: (&a mut C), acc: u64, piece: &b [u8]) -> unit {
         return ();
     }
     l := label(&mut c);
-    o(&mut c, view(".pushsection .rodata\n"));
+    rodata(&mut c);
     mark(&mut c, l);
     for i in piece.len() {
         o(&mut c, view(".byte "));
@@ -6985,7 +7014,7 @@ fn print_raw<a, b>(c: (&a mut C), piece: &b [u8]) -> unit {
         return ();
     }
     l := label(&mut c);
-    o(&mut c, view(".pushsection .rodata\n"));
+    rodata(&mut c);
     mark(&mut c, l);
     for i in piece.len() {
         o(&mut c, view(".byte "));
@@ -10305,7 +10334,8 @@ fn primary<a>(c: (&a mut C)) -> Val {
             exchange(&mut c.flit_tok, p);
             exchange(&mut c.flit_neg, 0);
         }
-        o(&mut c, view(".pushsection .rodata\n.balign 8\n"));
+        rodata(&mut c);
+        o(&mut c, view(".balign 8\n"));
         mark(&mut c, l);
         o(&mut c, view(".quad "));
         on(&mut c, bits);
@@ -14195,6 +14225,12 @@ fn emit_exit<a, b>(c: (&a mut C), argument: &b [u8]) -> unit {
         o(&mut c, view("movl %edi,%ecx\ncall __imp_ExitProcess\nud2\n"));
         return ();
     }
+    if c.plat == 1 {
+        // Mach-O exits through libSystem; there are no atexit handlers to run.
+        o(&mut c, argument);
+        o(&mut c, view("call _exit\n"));
+        return ();
+    }
     mut number = 231;
     if c.target != 0 {
         number = 94;
@@ -14214,6 +14250,7 @@ pub fn main() -> u64 {
         out: u8[],
         module: u8[],
         target: 0,
+        plat: 0,
         arg_offset: 0,
         overflow: 1,
         default_u64: 0,
@@ -14344,10 +14381,13 @@ pub fn main() -> u64 {
             if argc < offset + 3 {
                 fail_option(
                     &mut c,
-                    view("--target needs x86_64, aarch64, riscv64 or windows-x86_64")
+                    view(
+                        "--target needs x86_64, aarch64, riscv64, windows-x86_64, macos-x86_64 or macos-aarch64"
+                    )
                 );
             }
             target := host::arg(offset + 2);
+            exchange(&mut c.plat, 0);
             if same(view(target), view("x86_64")) {
                 exchange(&mut c.target, 0);
             } else {
@@ -14360,12 +14400,22 @@ pub fn main() -> u64 {
                         if same(view(target), view("windows-x86_64")) {
                             exchange(&mut c.target, 3);
                         } else {
-                            fail_option(
-                                &mut c,
-                                view(
-                                    "unsupported target (expected x86_64, aarch64, riscv64 or windows-x86_64)"
-                                )
-                            );
+                            if same(view(target), view("macos-x86_64")) {
+                                exchange(&mut c.target, 0);
+                                exchange(&mut c.plat, 1);
+                            } else {
+                                if same(view(target), view("macos-aarch64")) {
+                                    exchange(&mut c.target, 1);
+                                    exchange(&mut c.plat, 1);
+                                } else {
+                                    fail_option(
+                                        &mut c,
+                                        view(
+                                            "unsupported target (expected x86_64, aarch64, riscv64, windows-x86_64, macos-x86_64 or macos-aarch64)"
+                                        )
+                                    );
+                                }
+                            }
                         }
                     }
                 }
@@ -14406,6 +14456,9 @@ pub fn main() -> u64 {
     }
     for pass in 3 {
         if pass == 1 {
+            if c.plat == 1 {
+                o(&mut c, view(".build_version macos, 11, 0\n"));
+            }
             o(&mut c, view(".text\n"));
         }
         mut i = 2;
@@ -14462,10 +14515,19 @@ pub fn main() -> u64 {
             )
         );
     } else {
-        o(
-            &mut c,
-            view(".globl _start\n_start:\nmovq (%rsp),%rdi\nleaq 8(%rsp),%rsi\nleaq 16(%rsp,%rdi,8),%rdx\nmovq %rdi,rt_state(%rip)\nmovq %rsi,rt_state+8(%rip)\nmovq %rdx,rt_state+16(%rip)\nandq $-16,%rsp\ncall rt_thread_init\nmovq rt_state(%rip),%rdi\n")
-        );
+        if c.plat == 1 {
+            // libSystem's start calls _main(argc, argv, envp) with a 16-byte-aligned frame and an
+            // installed stack guard; envp is the third argument here, not a stack slot.
+            o(
+                &mut c,
+                view(".globl _main\n.p2align 4\n_main:\npushq %rbp\nmovq %rsp,%rbp\nmovq %rdi,_rt_state(%rip)\nmovq %rsi,_rt_state+8(%rip)\nmovq %rdx,_rt_state+16(%rip)\ncall _rt_thread_init\nmovq _rt_state(%rip),%rdi\n")
+            );
+        } else {
+            o(
+                &mut c,
+                view(".globl _start\n_start:\nmovq (%rsp),%rdi\nleaq 8(%rsp),%rsi\nleaq 16(%rsp,%rdi,8),%rdx\nmovq %rdi,rt_state(%rip)\nmovq %rsi,rt_state+8(%rip)\nmovq %rdx,rt_state+16(%rip)\nandq $-16,%rsp\ncall rt_thread_init\nmovq rt_state(%rip),%rdi\n")
+            );
+        }
     }
     if count == 1 {
         ok := label(&mut c);
@@ -14502,17 +14564,29 @@ pub fn main() -> u64 {
     if c.target == 3 {
         o(&mut c, view("ud2\n.bss\n.p2align 3\nrt_state: .zero 4096\n"));
     } else {
-        o(
-            &mut c,
-            view("ud2\n.bss\n.p2align 3\nrt_state: .zero 4096\n.section .note.GNU-stack,\"\",@progbits\n")
-        );
+        if c.plat == 1 {
+            o(
+                &mut c,
+                view("ud2\n.section __DATA,__bss\n.p2align 3\n_rt_state:\n.space 4096\n")
+            );
+        } else {
+            o(
+                &mut c,
+                view("ud2\n.bss\n.p2align 3\nrt_state: .zero 4096\n.section .note.GNU-stack,\"\",@progbits\n")
+            );
+        }
     }
-    out := optimize::optimize(view(c.out));
+    optimized := optimize::optimize(view(c.out));
+    mut out = optimized;
+    if c.plat == 1 {
+        prefixed := darwinify(view(out));
+        out = prefixed;
+    }
     path := host::arg(1 + offset);
     target := c.target;
     if (target == 0) + (target == 3) {
         return host::write_file(view(path), view(out));
     }
-    native := machine::lower(view(out), target);
+    native := machine::lower(view(out), target, c.plat);
     return host::write_file(view(path), view(native));
 }
