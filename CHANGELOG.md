@@ -8,7 +8,9 @@
   `SHA256SUMS` and provenance, POSIX/PowerShell installers, and secret-safe
   signing/notarization hooks. Linux lanes build and test; Windows/macOS lanes are
   explicit distribution scaffolding because the compiler still emits Linux ELF
-  only. Tooling is documented in `docs/tooling/cross-platform-ci.md`.
+  only. Tooling is documented in `docs/tooling/cross-platform-ci.md`; the
+  LSP/debugger/profiler integration plan is in
+  `docs/tooling/lsp-debugger-profiler.md`.
 
 - Native fixtures, inline regression programs and book examples now use typed references and
   explicit byte views under `--default-u64 --typed-refs`; user-mode cases retain `i64` defaults.
