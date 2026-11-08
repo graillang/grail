@@ -207,6 +207,21 @@ static void test_files(const char *scratch) {
     CHECK(grail_os_file_open((const uint8_t *)"note.txt", 8, 0, 0, &duplicate) ==
           GRAIL_E_INVALID_ARGUMENT);
 
+    char long_target[320];
+    memset(long_target, 't', sizeof(long_target) - 1);
+    long_target[sizeof(long_target) - 1] = '\0';
+    CHECK(symlink(long_target, "long-link") == 0);
+    uint8_t link_buffer[512];
+    const grail_result link_length =
+        grail_os_fs_readlink((const uint8_t *)"long-link", 9, link_buffer, sizeof(link_buffer));
+    CHECK(link_length == (grail_result)(sizeof(long_target) - 1));
+    CHECK(memcmp(link_buffer, long_target, sizeof(long_target) - 1) == 0);
+    CHECK(grail_os_fs_stat((const uint8_t *)"long-link", 9, GRAIL_STAT_NO_FOLLOW, &metadata) ==
+          GRAIL_OK);
+    CHECK(metadata.kind == GRAIL_FILE_KIND_SYMLINK);
+    CHECK((metadata.flags & GRAIL_STAT_SYMLINK) != 0);
+    CHECK(grail_os_fs_remove_file((const uint8_t *)"long-link", 9) == GRAIL_OK);
+
     CHECK(grail_os_fs_mkdir((const uint8_t *)"sub", 3, 0700, 0) == GRAIL_OK);
     CHECK(grail_os_fs_mkdir((const uint8_t *)"sub", 3, 0700, 0) == GRAIL_E_ALREADY_EXISTS);
     CHECK(grail_os_fs_stat((const uint8_t *)"sub", 3, GRAIL_STAT_FOLLOW_SYMLINKS, &metadata) ==
