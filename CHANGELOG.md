@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Added typed loopback TCP socket wrappers over the C ABI: `handle Socket`, a 56-byte `Address`
+  record constructed only by `loopback(port)`, `tcp`, `bind`, `listen`, `accept`, `connect`,
+  `send`, `recv`, `recv_bytes`, `socket_shutdown`, `socket_close`, `local_address`,
+  `peer_address`, `local_port` and `peer_port`. `bind`/`connect` reject non-127.0.0.1
+  addresses before the C call. The x86-64 test runs a listener/client/server ping-pong on an
+  ephemeral loopback port and checks the non-loopback rejection; AArch64/RISC-V 64 assembly
+  and unmangled socket calls are checked without execution.
+
 - Added `lib/sys/grail_ffi.grl`, the first Grail-facing wrappers over the Linux OS ABI:
   explicit init/shutdown, file open/read/write/close/stat/size, monotonic and wall clocks,
   and environment get/set. The module uses FFI byte views, an opaque `File` handle and

@@ -1,0 +1,96 @@
+module ffi_runtime_socket;
+
+use sys_grail;
+use sys_grail::Error;
+
+fn run() -> u64 |? Error {
+    sys_grail::init()?;
+
+    probe := sys_grail::tcp()?;
+    mut non_loopback = sys_grail::loopback(0);
+    non_loopback.a0 = 10;
+    match sys_grail::bind(probe, non_loopback) {
+        value: unit => {
+            return 12;
+        },
+        error: Error => {
+            if error.code() != sys_grail::ERROR_INVALID_ARGUMENT {
+                return 13;
+            }
+        }
+    }
+    sys_grail::socket_close(probe)?;
+
+    listener := sys_grail::tcp()?;
+    sys_grail::bind(listener, sys_grail::loopback(0))?;
+    sys_grail::listen(listener, 8)?;
+    local := sys_grail::local_address(listener)?;
+    if local.struct_size != 56 {
+        return 2;
+    }
+    if local.abi_version != sys_grail::ABI_VERSION {
+        return 14;
+    }
+    if local.family != sys_grail::ADDRESS_INET {
+        return 3;
+    }
+    if local.a0 != 127 || local.a1 != 0 || local.a2 != 0 || local.a3 != 1 {
+        return 15;
+    }
+    port := local.port;
+    if port == 0 {
+        return 4;
+    }
+
+    client := sys_grail::tcp()?;
+    sys_grail::connect(client, sys_grail::loopback(port))?;
+    server := sys_grail::accept(listener)?;
+
+    sent := sys_grail::send(client, &"ping")?;
+    if sent != 4 {
+        return 5;
+    }
+    request := sys_grail::recv_bytes(server, 16)?;
+    if request.len() != 4 {
+        return 6;
+    }
+    if request[0] != 112 || request[1] != 105 || request[2] != 110 || request[3] != 103 {
+        return 7;
+    }
+
+    sent2 := sys_grail::send(server, &"pong")?;
+    if sent2 != 4 {
+        return 8;
+    }
+    reply := sys_grail::recv_bytes(client, 16)?;
+    if reply.len() != 4 {
+        return 9;
+    }
+    if reply[0] != 112 || reply[1] != 111 || reply[2] != 110 || reply[3] != 103 {
+        return 10;
+    }
+
+    peer_address := sys_grail::peer_address(server)?;
+    if peer_address.family != sys_grail::ADDRESS_INET ||
+        peer_address.a0 != 127 || peer_address.a1 != 0 ||
+        peer_address.a2 != 0 || peer_address.a3 != 1 {
+        return 16;
+    }
+    peer := sys_grail::peer_port(server)?;
+    client_local := sys_grail::local_port(client)?;
+    if peer == 0 || peer != client_local {
+        return 11;
+    }
+
+    sys_grail::socket_shutdown(client, sys_grail::SHUTDOWN_BOTH)?;
+    sys_grail::socket_close(client)?;
+    sys_grail::socket_close(server)?;
+    sys_grail::socket_close(listener)?;
+    println("ffi-socket: ok");
+    sys_grail::shutdown()?;
+    return 0;
+}
+
+fn main() -> u64 {
+    return run()!;
+}
