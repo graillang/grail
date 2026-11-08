@@ -152,6 +152,8 @@ typedef struct gr_vk_dev {
     uint32_t present_family;
     /* Swapchains are owned by the device for teardown: each holds a VkSurfaceKHR created with the
      * instance, and a surface outliving its instance is a validation error (00629). */
+    char cache_path[512];
+    uint32_t cache_loaded, cache_saved, cache_size;
     gr_handle swapchains[8];
     uint32_t swapchain_count;
     /* The acquire -> submit -> present handoff. Acquire records which swapchain it took an image
@@ -1056,7 +1058,71 @@ gr_result gr_vk_abi_device_create(const gr_device_desc *desc, gr_handle *out_dev
 
     memset(&cache_info, 0, sizeof(cache_info));
     cache_info.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
-    if (dev->create_pipeline_cache(dev->device, &cache_info, NULL, &dev->pipeline_cache) != VK_SUCCESS) {
+
+    /* Load the cache before anything is created, so the first pipeline can already hit it. The
+     * header is validated against this device: a cache from another GPU is not usable, and a file
+     * that is not a cache at all is refused loudly rather than starting empty. */
+    if (desc->pipeline_cache_path.data && desc->pipeline_cache_path.len > 0) {
+        size_t path_len = desc->pipeline_cache_path.len < sizeof(dev->cache_path) - 1u
+                              ? desc->pipeline_cache_path.len
+                              : sizeof(dev->cache_path) - 1u;
+        uint8_t *blob = NULL;
+        size_t blob_len = 0;
+        memcpy(dev->cache_path, desc->pipeline_cache_path.data, path_len);
+        dev->cache_path[path_len] = '\0';
+
+        {
+            FILE *file = fopen(dev->cache_path, "rb");
+            if (file) {
+                if (fseek(file, 0, SEEK_END) == 0) {
+                    long size = ftell(file);
+                    if (size > 0 && fseek(file, 0, SEEK_SET) == 0) {
+                        blob = (uint8_t *)malloc((size_t)size);
+                        if (blob && fread(blob, 1, (size_t)size, file) == (size_t)size)
+                            blob_len = (size_t)size;
+                    }
+                }
+                fclose(file);
+                if (!blob || blob_len == 0) {
+                    free(blob);
+                    vk_log(desc, "pipeline cache file is unreadable");
+                    gr_vk_abi_device_destroy_impl(dev);
+                    return GR_ERROR_CACHE_INVALID;
+                }
+            }
+        }
+
+        if (blob) {
+            /* VkPipelineCacheHeaderVersionOne: size, version, vendor, device, uuid. A blob whose
+             * header does not describe THIS device cannot be used, and silently ignoring it would
+             * look exactly like a cache that works. */
+            const uint32_t *header = (const uint32_t *)(const void *)blob;
+            int valid = blob_len >= 32u && header[0] >= 32u && header[1] == 1u;
+            if (valid) {
+                const uint8_t *uuid = blob + 16;
+                uint32_t i;
+                for (i = 0; i < VK_UUID_SIZE; ++i)
+                    if (uuid[i] != properties.pipelineCacheUUID[i]) { valid = 0; break; }
+            }
+            if (!valid) {
+                free(blob);
+                vk_log(desc, "pipeline cache header does not match this device");
+                gr_vk_abi_device_destroy_impl(dev);
+                return GR_ERROR_CACHE_INVALID;
+            }
+            cache_info.initialDataSize = (size_t)blob_len;
+            cache_info.pInitialData = blob;
+        }
+
+        if (dev->create_pipeline_cache(dev->device, &cache_info, NULL, &dev->pipeline_cache) != VK_SUCCESS) {
+            free(blob);
+            vk_log(desc, "vkCreatePipelineCache refused the cached data");
+            gr_vk_abi_device_destroy_impl(dev);
+            return GR_ERROR_CACHE_INVALID;
+        }
+        dev->cache_loaded = blob ? 1u : 0u;
+        free(blob);
+    } else if (dev->create_pipeline_cache(dev->device, &cache_info, NULL, &dev->pipeline_cache) != VK_SUCCESS) {
         gr_vk_abi_device_destroy_impl(dev);
         return GR_ERROR_BACKEND;
     }
@@ -1316,6 +1382,42 @@ void gr_vk_abi_device_destroy_impl(gr_vk_dev *dev)
                     table->slots[slot].object = NULL;
                     table->slots[slot].type = GR_HANDLE_NONE;
                     free(pool);
+                    break;
+                }
+                case GR_HANDLE_BUFFER: {
+                    gr_vk_buffer *buffer = (gr_vk_buffer *)object;
+                    if (buffer->mapped && dev->unmap_memory)
+                        dev->unmap_memory(dev->device, buffer->memory);
+                    if (buffer->buffer && dev->destroy_buffer)
+                        dev->destroy_buffer(dev->device, buffer->buffer, NULL);
+                    if (buffer->memory && dev->free_memory)
+                        dev->free_memory(dev->device, buffer->memory, NULL);
+                    table->slots[slot].live = 0;
+                    table->slots[slot].object = NULL;
+                    table->slots[slot].type = GR_HANDLE_NONE;
+                    free(buffer);
+                    break;
+                }
+                case GR_HANDLE_TEXTURE: {
+                    gr_vk_tex *texture = (gr_vk_tex *)object;
+                    if (texture->image && dev->destroy_image)
+                        dev->destroy_image(dev->device, texture->image, NULL);
+                    if (texture->memory && dev->free_memory)
+                        dev->free_memory(dev->device, texture->memory, NULL);
+                    table->slots[slot].live = 0;
+                    table->slots[slot].object = NULL;
+                    table->slots[slot].type = GR_HANDLE_NONE;
+                    free(texture);
+                    break;
+                }
+                case GR_HANDLE_TEXTURE_VIEW: {
+                    gr_vk_viewobj *view = (gr_vk_viewobj *)object;
+                    if (view->view && dev->destroy_image_view)
+                        dev->destroy_image_view(dev->device, view->view, NULL);
+                    table->slots[slot].live = 0;
+                    table->slots[slot].object = NULL;
+                    table->slots[slot].type = GR_HANDLE_NONE;
+                    free(view);
                     break;
                 }
                 case GR_HANDLE_FENCE: {
@@ -1855,6 +1957,70 @@ gr_result gr_vk_abi_pipeline_create(gr_handle device_handle, const gr_pipeline_d
     return GR_OK;
 }
 
+static gr_result vk_cache_save(gr_vk_dev *dev)
+{
+    size_t size = 0;
+    uint8_t *blob;
+    FILE *file;
+
+    if (dev->cache_path[0] == '\0')
+        return GR_ERROR_NOT_READY;
+    if (!dev->get_pipeline_cache_size ||
+        dev->get_pipeline_cache_size(dev->device, dev->pipeline_cache, &size, NULL) != VK_SUCCESS)
+        return GR_ERROR_BACKEND;
+    if (size == 0)
+        return GR_ERROR_BACKEND;
+    blob = (uint8_t *)malloc(size);
+    if (!blob)
+        return GR_ERROR_OUT_OF_MEMORY;
+    if (dev->get_pipeline_cache_size(dev->device, dev->pipeline_cache, &size, blob) != VK_SUCCESS) {
+        free(blob);
+        return GR_ERROR_BACKEND;
+    }
+    file = fopen(dev->cache_path, "wb");
+    if (!file) {
+        free(blob);
+        return GR_ERROR_BACKEND;
+    }
+    if (fwrite(blob, 1, size, file) != size) {
+        fclose(file);
+        free(blob);
+        return GR_ERROR_BACKEND;
+    }
+    fclose(file);
+    free(blob);
+    dev->cache_size = (uint32_t)size;
+    dev->cache_saved = 1;
+    return GR_OK;
+}
+
+gr_result gr_pipeline_cache_save(gr_handle device_handle)
+{
+    gr_vk_dev *dev = vk_device_of(device_handle);
+    if (!dev)
+        return GR_ERROR_INVALID_HANDLE;
+    return vk_cache_save(dev);
+}
+
+gr_result gr_pipeline_cache_report_query(gr_handle device_handle, gr_pipeline_cache_report *out)
+{
+    gr_vk_dev *dev = vk_device_of(device_handle);
+    size_t size = 0;
+    if (!dev || !out)
+        return GR_ERROR_INVALID_ARGUMENT;
+    if (out->head.size != 0 && out->head.size < sizeof(gr_pipeline_cache_report))
+        return GR_ERROR_VERSION_MISMATCH;
+    if (dev->get_pipeline_cache_size)
+        dev->get_pipeline_cache_size(dev->device, dev->pipeline_cache, &size, NULL);
+    memset(out, 0, sizeof(*out));
+    out->head.size = (uint32_t)sizeof(*out);
+    out->loaded = dev->cache_loaded;
+    out->saved = dev->cache_saved;
+    out->size_bytes = (uint32_t)size;
+    out->path_set = dev->cache_path[0] != '\0' ? 1u : 0u;
+    return GR_OK;
+}
+
 gr_result gr_vk_abi_pipeline_commit(gr_handle device_handle, double *out_seconds)
 {
     gr_vk_dev *dev = vk_device_of(device_handle);
@@ -1868,6 +2034,9 @@ gr_result gr_vk_abi_pipeline_commit(gr_handle device_handle, double *out_seconds
     if (dev->get_pipeline_cache_size)
         dev->get_pipeline_cache_size(dev->device, dev->pipeline_cache, &cache_size, NULL);
     dev->caps.pipeline_cache_uuid[1] = cache_size; /* the cache's byte size, for the report */
+    /* Persist at commit: the pipelines exist now, and the next run should find them. */
+    if (dev->cache_path[0] != '\0')
+        (void)vk_cache_save(dev);
     if (out_seconds)
         *out_seconds = 0.0;
     return GR_OK;
