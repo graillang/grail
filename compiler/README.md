@@ -108,6 +108,24 @@ directory streams and `mremap` are not implemented. See
 macOS and other operating systems are not implemented; sharing a CPU does not imply sharing an
 executable format or syscall ABI.
 
+## Debug line tables
+
+`grail build --debug` (and the raw `grail --debug ...` compiler form) emit
+`.file`/`.loc` directives for Linux x86-64. clang's assembler turns these into
+`.debug_line`; the linked binary reports source rows without a separate debug
+build pipeline:
+
+```sh
+grail build --debug
+grail debug lines target/hello        # llvm-dwarfdump --debug-line (readelf fallback)
+```
+
+`grail debug lines` requires `llvm-dwarfdump` or `readelf` on `PATH`
+(`GRAIL_DWARFDUMP`/`GRAIL_READELF` override them). The line table is
+line/column accurate at statement granularity. `.debug_info` variable DIEs,
+inlining data and breakpoint integration are not implemented, and `--debug`
+is rejected for every target except Linux x86-64.
+
 ## Checks and profiles
 
 Ordinary `+`, `-`, `*`, `**` and their compound assignments check overflow by default, independently

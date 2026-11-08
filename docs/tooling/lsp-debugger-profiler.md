@@ -1,7 +1,9 @@
 # LSP, debugger and profiler integration plan
 
 Status: **LSP MVP implemented** (JSON-RPC lifecycle, didOpen/didChange and
-compiler-sourced diagnostics). The debugger and profiler remain design only.
+compiler-sourced diagnostics) and **DWARF `.debug_line` implemented for Linux
+x86-64**. Debugger attach, breakpoints, variable DIEs and the profiler remain
+design only.
 The build, test and distribution foundation in
 [cross-platform-ci.md](cross-platform-ci.md) defines the artifact and lane
 contract these tools ship through.
@@ -125,6 +127,32 @@ Remaining implementation rules:
 - CI: the tooling job runs the protocol tests; the preflight-gated `lsp` job
   builds the compiler and runs the compiler-backed stdio session.
 
+## Implemented DWARF line tables (Linux x86-64)
+
+`grail build --debug` and the raw `grail --debug ...` compiler form emit
+`.file`/`.loc` directives for Linux x86-64 only; clang's assembler turns them
+into `.debug_line`. Statement granularity is line/column accurate, including
+statements that begin by pushing a string literal (the compiler re-asserts the
+last `.loc` after each `.popsection`).
+
+```sh
+grail build --debug
+grail debug lines target/hello
+# llvm-dwarfdump --debug-line target/hello, or readelf --debug-dump=decodedline
+llvm-dwarfdump --debug-line target/hello
+```
+
+`grail debug lines` uses `llvm-dwarfdump` and falls back to `readelf`
+(`GRAIL_DWARFDUMP`/`GRAIL_READELF` override the tools). `tools/test-debug-lines.mjs`
+builds a fixture with `--debug`, verifies the file/line rows with
+`llvm-dwarfdump`, exercises the inspection command, checks that a normal build
+has no line table, and checks that `--debug` is rejected for AArch64.
+
+Not implemented yet: `.debug_info` compile units/variable DIEs, inlining or
+column-accurate expression mapping, gdb/lldb/DAP attach, breakpoints and
+profiling annotations. `--debug` deliberately fails on Windows and macOS
+instead of emitting a half-supported table.
+
 ## Phase 2: debugger (DAP)
 
 Target: `grail debug` speaks Debug Adapter Protocol over stdio and drives
@@ -133,9 +161,8 @@ Target: `grail debug` speaks Debug Adapter Protocol over stdio and drives
 
 Required compiler work, in order:
 
-1. **Line tables.** Emit `.file`/`.loc` directives alongside instructions so
-   clang's assembler produces `.debug_line`. The emitter already tracks source
-   offsets for diagnostics; carry the token span into every emitted instruction.
+1. **Line tables (done for Linux x86-64).** `.file`/`.loc` directives now feed
+   clang's assembler; Windows/macOS and expression-level spans remain.
 2. **Function symbols.** Emit `.type name,@function`/`.size` and a stable
    unmangled alias (`.globl grail$module$fn`) so breakpoints can resolve.
    Mangled internal names remain for linking.
@@ -163,7 +190,8 @@ Testing: fixture programs with known line/variable expectations, automated
 breakpoint/step transcripts per OS in CI. Distribution adds `grail-debug` to the
 package only on platforms with an implemented backend.
 
-Blockers: no source spans in assembly, no DWARF emission, no debug build mode.
+Remaining blockers: no `.debug_info` variable DIEs, no debugger adapter/attach,
+and no Windows/macOS line tables.
 
 ## Phase 3: profiler
 
@@ -202,7 +230,7 @@ harness. Windows/macOS samplers are untestable until those backends exist.
 1. Phase 0 JSON diagnostics/symbols (text diagnostics already back L1).
 2. LSP L2: hover, definition, references and document symbols.
 3. Sampling profiler (symbols + frame pointers).
-4. Debugger line tables and D1.
+4. Debugger D1 attach/breakpoints on the now-emitted Linux x86-64 line table.
 5. LSP L3/L4, DWARF variable info, instrumentation profiler.
 
 Each phase adds a `grail-<tool>` entry to `share/grail/package.json`, a CI

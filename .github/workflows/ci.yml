@@ -262,6 +262,30 @@ jobs:
           compiler="$PWD/$(ls dist/grail-*-linux-x86_64-compiler)"
           bun tools/ci.mjs test --platform macos-aarch64 --compiler "$compiler"
 
+  # DWARF line tables: build one program with --debug and verify .debug_line rows against
+  # source lines with llvm-dwarfdump and `grail debug lines`. Linux x86-64 only.
+  debug-lines:
+    name: DWARF line table
+    needs: preflight
+    if: needs.preflight.outputs.ready == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Install clang, LLD and llvm-dwarfdump
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld llvm
+          llvm-dwarfdump --version
+      - name: Build the host compiler
+        run: bun tools/ci.mjs build --platform linux-x86_64
+      - name: Verify line rows and the debug inspection command
+        run: |
+          compiler="$PWD/$(ls dist/grail-*-linux-x86_64-compiler)"
+          GRAIL_COMPILER="$compiler" bun tools/test-debug-lines.mjs
+
   # LSP MVP: a real stdio session against the compiler's diagnostics interface.
   lsp:
     name: LSP stdio session

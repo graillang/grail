@@ -104,6 +104,9 @@ The macOS lanes compile with `--target macos-x86_64|macos-aarch64`, the
 9. **LSP**: the tooling job runs the protocol tests; a preflight-gated `lsp`
    job builds the compiler and runs the compiler-backed stdio session
    (`tools/lsp.test.mjs`).
+10. **DWARF line tables**: the preflight-gated `debug-lines` job builds the
+    compiler and runs `tools/test-debug-lines.mjs`, verifying `.debug_line`
+    rows and `grail debug lines` for Linux x86-64.
 
 `release-sign` is tag-only and environment-gated (`RELEASE_SIGNING=true`).
 

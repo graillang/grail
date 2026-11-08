@@ -114,3 +114,25 @@ ffi-runtime-test:
 # Executed Windows ABI evidence under Wine (needs zig, wine, clang).
 abi-wine-test:
     bun tools/test-abi-wine.mjs
+
+
+
+# Build a non-executable COFF/Mach-O object bundle (windows-x86_64 or macos-*).
+objects platform:
+    bun tools/ci.mjs objects --platform {{platform}}
+
+# macOS Mach-O object and executable static checks (nothing is executed).
+macos-check:
+    bun tools/test-macos.mjs
+
+# Verify DWARF .debug_line rows and `grail debug lines` (requires a built compiler).
+debug-lines-test:
+    bun tools/test-debug-lines.mjs
+
+# Run the Grail LSP MVP on stdio (requires GRAIL_LSP_COMPILER or GRAIL_COMPILER).
+lsp:
+    bun tools/lsp.mjs
+
+# LSP protocol and compiler-diagnostic tests over a real stdio session.
+lsp-test:
+    bun test tools/lsp.test.mjs

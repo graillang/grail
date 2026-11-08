@@ -178,6 +178,8 @@ struct C {
     module: u8[],
     target: u64,
     plat: u64,
+    // Emit .file/.loc DWARF line info (Linux x86-64 native output only).
+    debug: u64,
     arg_offset: u64,
     overflow: u64,
     default_u64: u64,
@@ -317,6 +319,105 @@ fn on<a>(c: (&a mut C), n: u64) -> unit {
         on(&mut c, div(n, 10));
     }
     c.out.push(48 + n % 10);
+    return ();
+}
+// Escape a path for an assembler .file directive (quotes and backslashes).
+fn emit_path<a, b>(c: (&a mut C), path: &b [u8]) -> unit {
+    for i in path.len() {
+        b := path[i];
+        if (b == 92) + (b == 34) {
+            c.out.push(92);
+        }
+        c.out.push(b);
+    }
+    return ();
+}
+fn contains_text<a, b>(text: &a [u8], needle: &b [u8]) -> u64 {
+    if needle.len() > text.len() {
+        return 0;
+    }
+    mut i = 0;
+    while i + needle.len() <= text.len() {
+        mut j = 0;
+        mut ok = 1;
+        while j < needle.len() {
+            if text[i + j] != needle[j] {
+                ok = 0;
+            }
+            j += 1;
+        }
+        if ok {
+            return 1;
+        }
+        i += 1;
+    }
+    return 0;
+}
+// `.loc` before a literal section switch is dropped by the assembler, so re-assert the last
+// source location after every `.popsection`. This keeps the first statement of a function on the
+// line table even when it starts by pushing a string literal.
+fn debug_locs<a>(text: &a [u8]) -> u8[] {
+    mut out = u8[];
+    mut loc = u8[];
+    mut line = u8[];
+    for i in text.len() {
+        b := text[i];
+        line.push(b);
+        if b == 10 {
+            if starts_with(view(line), view(".loc ")) != 0 {
+                mut fresh = u8[];
+                for k in line.len() {
+                    fresh.push(line[k]);
+                }
+                exchange(&mut loc, fresh);
+            }
+            for k in line.len() {
+                out.push(line[k]);
+            }
+            if contains_text(view(line), view(".popsection")) != 0 {
+                for k in loc.len() {
+                    out.push(loc[k]);
+                }
+            }
+            exchange(&mut line, u8[]);
+        }
+    }
+    if line.len() != 0 {
+        for k in line.len() {
+            out.push(line[k]);
+        }
+    }
+    return out;
+}
+// Source line/column of the current token. The assembler turns .loc into .debug_line.
+fn emit_loc<a>(c: (&a mut C)) -> unit {
+    if c.debug == 0 {
+        return ();
+    }
+    p := c.pos;
+    if c.toks.len() <= p {
+        return ();
+    }
+    t := &c.toks[p];
+    st := t.start;
+    mut line = 1;
+    mut column = 1;
+    for i in st {
+        if c.src[i] == 10 {
+            line += 1;
+            column = 1;
+        } else {
+            column += 1;
+        }
+    }
+    file := c.file - 1;
+    o(&mut c, view(".loc "));
+    on(&mut c, file);
+    c.out.push(32);
+    on(&mut c, line);
+    c.out.push(32);
+    on(&mut c, column);
+    c.out.push(10);
     return ();
 }
 // 0 is ELF/Linux syscalls, 1 is Mach-O/macOS libSystem. CPU selection stays in `target`.
@@ -14298,6 +14399,7 @@ fn scalar_match<a>(c: (&a mut C), s: Val) -> unit {
     return ();
 }
 fn statement<a>(c: (&a mut C)) -> unit {
+    emit_loc(&mut c);
     // An `unsafe { ... }` block is the explicit boundary for foreign calls. It is
     // lexical and checked: move/drop/borrow rules still apply inside the body.
     if is(&mut c, view("unsafe")) {
@@ -15840,6 +15942,7 @@ pub fn main() -> u64 {
         module: u8[],
         target: 0,
         plat: 0,
+        debug: 0,
         arg_offset: 0,
         overflow: 1,
         default_u64: 0,
@@ -16046,7 +16149,12 @@ pub fn main() -> u64 {
                             exchange(&mut c.default_u64_flag, 1);
                             offset += 1;
                         } else {
-                            break;
+                            if same(view(option), view("--debug")) {
+                                exchange(&mut c.debug, 1);
+                                offset += 1;
+                            } else {
+                                break;
+                            }
                         }
                     }
                     }
@@ -16059,13 +16167,31 @@ pub fn main() -> u64 {
     if (2 < n) == 0 {
         fail_option(
             &mut c,
-            view("usage: grail [--target ARCH] [--overflow=checked|wrap] OUT.s ENTRY.grl MODULE.grl...")
+            view(
+                "usage: grail [--target ARCH] [--overflow=checked|wrap] [--debug] OUT.s ENTRY.grl MODULE.grl..."
+            )
         );
+    }
+    if (c.debug != 0) & (((c.target != 0) + (c.plat != 0)) != 0) {
+        fail_option(&mut c, view("--debug line info is only implemented for Linux x86_64"));
     }
     for pass in 3 {
         if pass == 1 {
             if c.plat == 1 {
                 o(&mut c, view(".build_version macos, 11, 0\n"));
+            }
+            if c.debug != 0 {
+                mut f = 2;
+                while f < n {
+                    path := host::arg(f + offset);
+                    number := f - 1;
+                    o(&mut c, view(".file "));
+                    on(&mut c, number);
+                    o(&mut c, view(" \""));
+                    emit_path(&mut c, view(path));
+                    o(&mut c, view("\"\n"));
+                    f += 1;
+                }
             }
             o(&mut c, view(".text\n"));
         }
@@ -16228,6 +16354,9 @@ pub fn main() -> u64 {
             // PE/COFF unwind data must be emitted from the final frame sizes.
             image := win_unwind(view(out));
             return host::write_file(view(path), view(with_link_notes(&c.libs, view(image))));
+        }
+        if c.debug != 0 {
+            out = debug_locs(view(out));
         }
         return host::write_file(view(path), view(with_link_notes(&c.libs, view(out))));
     }

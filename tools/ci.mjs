@@ -477,6 +477,7 @@ function lint() {
   check('CI runs the FFI shim test', readFileSync(join(root, '.github/workflows/ci.yml'), 'utf8').includes('tools/test-ffi.mjs'));
   check('LSP server exists', existsSync(join(root, 'tools/lsp.mjs')));
   check('LSP stdio test exists', existsSync(join(root, 'tools/lsp.test.mjs')));
+  check('DWARF line-table test exists', existsSync(join(root, 'tools/test-debug-lines.mjs')));
   check('VERSION file matches compiler --version', readFileSync(join(root, 'compiler/cli.grl'), 'utf8').includes(`grail ${version ?? '0.0.0'}`), version ?? '');
   const failed = checks.filter(entry => !entry.ok);
   return { ok: failed.length === 0, checks, failed };

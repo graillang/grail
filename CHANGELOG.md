@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+- Added Linux x86-64 DWARF line tables. `grail build --debug` and the raw
+  `grail --debug ...` compiler form emit `.file`/`.loc` directives that clang
+  assembles into `.debug_line`; statement rows are line/column accurate, with a
+  post-pass that re-asserts the location after literal `.popsection` switches.
+  `grail debug lines BINARY` prints the table through `llvm-dwarfdump` (with a
+  `readelf` fallback). `--debug` is rejected for non-Linux-x86-64 targets, and
+  `.debug_info` variable DIEs / debugger attach remain follow-ups.
+  `tools/test-debug-lines.mjs` verifies rows against source lines and the plain
+  build's lack of a line table; CI adds a preflight-gated `debug-lines` job.
+- Added non-executable target object release bundles for the implemented cross
+  backends: `windows-x86_64` (COFF), `macos-aarch64` and `macos-x86_64`
+  (Mach-O). `bun tools/ci.mjs objects --platform ...` compiles the compiler and
+  a conformance program to relocatable objects, verifies COFF/Mach-O headers
+  and symbols, and packages `objects/`, gzipped assembly,
+  `share/grail/objects.json` provenance and `OBJECTS-BUILD-ONLY.txt` with a
+  top-level `SHA256SUMS`. Manifests record `executable: false` and
+  `runnable: false`, and verification rejects any bundle containing an
+  executable. macOS gained required `cross-macos-aarch64`/`cross-macos-x86_64`
+  static lanes; CI adds an object-bundle matrix and a macOS static-check job.
+  Nothing is executed on macOS, and Windows release artifacts remain
+  non-executable objects even though Windows test programs run under Wine.
+- Reserve `VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC` in the Vulkan descriptor pool, matching
+  set 1; the new SDL3 surface test’s validation layer had exposed the missing pool size.
+
 - Windows x86-64 threads and waits: `raw_thread_clone` now calls a new
   `rt_win_thread_clone`/`rt_win_thread_main` pair in `compiler/os-windows.grl` that creates the
   thread with `CreateThread` through a compiler-emitted Win64 bridge (`rt_win_thread_start` keeps
@@ -136,7 +160,6 @@
   exact values (math 63, hashing 16, world 25, cache 46, checkpoint 39, entity 18). The in-memory
   page machine (256-row pages, split at 129, merge under 64, bulk fill 192) is documented rather
   than ported because it decides only page_count.
-
 - Port Borg Agent's local-session ownership state (`borg/`). `src/session_state.grl` carries the
   owner record (`schema_version`, `pid`, `executable_identity`, optional `package_version` and
   `process_start_time`) through the JSON codec, the `dev:ino:len:mtime:mtime_nsec` executable
