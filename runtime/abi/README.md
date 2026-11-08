@@ -184,7 +184,7 @@ convention. Win64 uses `rcx, rdx, r8, r9`, 32 bytes of shadow space, different c
 registers and a 128-byte red zone is absent. Calling these symbols from generated code needs a
 Win64 codegen path; the ABI's six-argument ceiling keeps that path free of stack arguments.
 
-## macOS implementation
+## macOS status
 
 Implemented in `macos/grail_os_macos.c` with declarations pinned in `grail_macos.h`:
 init/shutdown/capabilities/error detail; `clock_gettime`/`clock_getres`/`nanosleep` for
@@ -205,7 +205,7 @@ GRAIL_CAP_SYMLINKS | GRAIL_CAP_DIRECTORIES | GRAIL_CAP_THREADS |
 GRAIL_CAP_SYNC_PRIMITIVES | GRAIL_CAP_DYNAMIC_LIBRARIES | GRAIL_CAP_PROCESSES`;
 `GRAIL_CAP_FILE_METADATA` is clear because no `struct stat` layout is pinned yet.
 
-## macOS implementation and remaining mapping
+## macOS remaining mapping
 
 - **Init:** environment snapshot from `environ` (copy and validate UTF-8), thread-local error
   slot; no libc `setenv` dependency required for reads.
@@ -268,9 +268,11 @@ Limits of this evidence:
   file pointer. Directory patterns use the normal Win32 path rules, not `\\?\` long paths.
   Thread names are ignored and `GRAIL_DL_LAZY`/`GLOBAL` are no-ops on Windows; parent
   creation for UNC paths is not supported. Windows `SEARCH_PATH` uses the native Win32 search
-  order and parent environment, and the environment block is emitted in runtime order. macOS
-  `posix_spawn_file_actions_addchdir_np` requires macOS 10.15 or later, and `NO_WINDOW` is a
-  no-op. Process-close never waits or kills on either platform. macOS `rename` without `GRAIL_RENAME_REPLACE`
+  order and parent environment, resolves through `SearchPathW` with `.exe` (not `.bat`/`.cmd`),
+  and the environment block is emitted in runtime order. macOS
+  `posix_spawn_file_actions_addchdir_np` requires macOS 10.15 or later, `NO_WINDOW` is a no-op,
+  and a relative program path combined with a different working directory is platform-defined;
+  use an absolute program path. Process-close never waits or kills on either platform. macOS `rename` without `GRAIL_RENAME_REPLACE`
   checks existence with `access`; the check is best-effort and races with a concurrent
   creator. The pinned Darwin `struct dirent` layout is used without the SDK, and `DT_UNKNOWN`
   entries report `GRAIL_FILE_KIND_UNKNOWN` because metadata is unavailable. Thread names are
