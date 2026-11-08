@@ -98,6 +98,28 @@ SDL3 for the extension names. `gr_vk_create_surface(device, window, &surface)` m
 `VkSurfaceKHR` and `gr_vk_destroy_surface` frees it. There is no swapchain yet; the surface is the
 last piece before one.
 
+## Swapchain and teardown
+
+`gr_swapchain_create` builds a `VkSwapchainKHR` from the window's surface, choosing format, present
+mode and extent from what the surface reports. Each image gets an ABI view handle, so a graph pass
+names an acquired image and the graph derives its transition like any other attachment; only the
+final step to `PRESENT_SRC` is issued by the caller, because nothing reads a presented image.
+
+Teardown order is load-bearing and was wrong twice:
+
+1. swapchains and their **surfaces were destroyed after `vkDestroyDevice`** — a surface outliving
+   its device, which the validation layer reported at exit as a missing device dispatch and which
+   aborted the process after every check had passed.
+2. the backend never freed device-owned objects at all, so `vkDestroyDevice` reported **5 leaked
+   children** (command pool, command buffer, two shader modules, a pipeline). That error appeared
+   *after* the in-process counters were read, so the "zero errors" assertion did not see it — a
+   reminder that a counter read is only as good as where it is read.
+
+The order is now swapchain views → swapchain → surface → messenger → remaining device objects →
+device → instance, with a sweep that destroys anything the caller left in the object table. The
+loader is never `dlclose`d, because it and the layers register atexit handlers over their own static
+data.
+
 ## Evidence
 
 `make -C graphics vk-smoke`, under the exclusive GPU lock:
