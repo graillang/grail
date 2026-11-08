@@ -98,10 +98,52 @@ The Windows OS layer implements the operation IDs the portable runtime already u
 | time | `GetTickCount64` (monotonic ms), `Sleep` |
 | files/directories | `GetFileAttributesA`, `CreateDirectoryA`, `DeleteFileA`, `RemoveDirectoryA` |
 | startup | `GetCommandLineA` + `GetEnvironmentStringsA`, `SwitchToThread` |
+| threads | `CreateThread`, `WaitForSingleObject`, `CloseHandle` |
+| address waits | `WaitOnAddress`, `WakeByAddressSingle`, `WakeByAddressAll` (kernelbase.dll) |
 
-Threads, sockets, epoll, futex and directory streams return `-ENOSYS`; the portable runtime
-reports or aborts on those paths, and no thread creation is emitted. `mremap` is unimplemented, so
-growing an allocation of 512 KiB or more aborts instead of moving the arena.
+### Threads and address waits (x86-64)
+
+The portable runtime is unchanged: `rt_thread_spawn` still maps a stack, writes its record at the
+top and calls `raw_thread_clone`. On `windows-x86_64` that intrinsic now calls
+`rt_win_thread_clone`, which uses `CreateThread` with a compiler-emitted bridge:
+
+```
+rt_win_thread_start:            # Win64 start routine -> Grail convention
+subq $56,%rsp                   # 32B shadow + saved %rdi/%rsi, keeps 16B alignment
+movq %rdi,32(%rsp)
+movq %rsi,40(%rsp)
+movq %rcx,%rdi                  # thread parameter -> first Grail argument
+call rt_win_thread_main
+movq 32(%rsp),%rdi
+movq 40(%rsp),%rsi
+addq $56,%rsp
+ret
+```
+
+`grail_entry` publishes the bridge address at `rt_state+3392`, so the OS layer can pass it as the
+start routine without an FFI declaration. The thread record carries the portable entry/argument;
+`rt_win_thread_main` runs `rt_thread_main`, then clears the portable "running" word and calls
+`WakeByAddressAll`.
+
+Joining needs a real termination wait, not just the running word: the clone stores `1` in the
+handle's running word before `CreateThread`, stores the thread handle in the stack slack, and
+registers `{running word, thread handle}` in a 15-slot table at `rt_state+3856`. The portable
+join's wait (`rt_syscall(202, handle, 0, tid)`) finds that entry and uses
+`WaitForSingleObject` + `CloseHandle`, so the stack is only unmapped after the thread has fully
+exited. The unmap path also reaps any still-registered thread for that stack, closing the window
+where a join observes the running word already cleared. Detached spawns pass a word inside their
+own stack, are not registered (their stacks are never freed, as on Linux).
+
+Futex operations map to the address-wait API: `FUTEX_WAIT|PRIVATE` (128) becomes
+`WaitOnAddress(address, &expected, 8, INFINITE)` with the expected value copied into the process
+scratch word, and `FUTEX_WAKE` (129) becomes `WakeByAddressSingle` for a count of 1 and
+`WakeByAddressAll` otherwise. Mutexes, the task scheduler and the producer/consumer test all use
+these paths. `WaitOnAddress`/`WakeByAddress*` are imported from `kernelbase.dll`: Wine 11 exports
+them there and aborts if they are imported from `kernel32.dll`, which the Wine runs caught.
+
+ARM64 thread creation is still unimplemented (the intrinsic traps); sockets, epoll and directory
+streams remain `-ENOSYS`, and `mremap` is unimplemented, so growing an allocation of 512 KiB or
+more aborts instead of moving the arena.
 
 ## windows-aarch64
 
@@ -198,9 +240,10 @@ ARM64 acceptance requires an ARM64 Windows host, ARM64 Wine, or a Windows-on-ARM
 ## Verification
 
 `bun tools/windows.mjs check` (with `GRAIL_COMPILER` pointing at a tree-built compiler) checks
-eight x86-64 programs: hello, u64 exit code, integer printing, float printing, file write/read,
-single-argument entry, struct fields and a full argv list, plus four windows-aarch64 programs
-validated statically. For every x86-64 case it asserts:
+ten x86-64 programs: hello, u64 exit code, integer printing, float printing, file write/read,
+single-argument entry, struct fields, a full argv list, a thread join and a producer/consumer
+wake, plus four windows-aarch64 programs validated statically. The two thread programs also run
+as Linux ELF (clone/futex), so the portable test itself is cross-checked. For every x86-64 case it asserts:
 
 - the `.s` uses COFF directives only (no `@function`, no `.note.GNU-stack`, no `_start`) and exits
   through `call *__imp_ExitProcess(%rip)`;
@@ -237,9 +280,10 @@ validated statically. For every x86-64 case it asserts:
   handlers) need hand-written thunks that save `%rdi/%rsi/%rbx/%r12-%r15`.
 - **Integer-only import arguments.** `raw_win32` passes pointer/integer words; floating-point
   and aggregate parameters or returns are not implemented, and there is no variadic support.
-- **Missing runtime services**: threads, sockets, directory listing, `exe_path`
-  (`GetModuleFileNameA` is not wired) and `mremap`. Environment lookups walk the pointer table
-  built from `GetEnvironmentStringsA`; `GetEnvironmentVariableA` is declared but unused.
+- **Runtime services**: x86-64 threads, joins and address waits work; ARM64 thread creation,
+  the epoll-based `Scope`/`Task` scheduler, sockets, directory listing, `exe_path`
+  (`GetModuleFileNameA` is not wired) and `mremap` are missing. Environment lookups walk the
+  pointer table built from `GetEnvironmentStringsA`; `GetEnvironmentVariableA` is unused.
 - **ANSI paths only.** `CreateFileA`/`GetFileAttributesA` truncate non-ANSI names to the active
   code page; the `*W` APIs and UTF-16 conversion are future work.
 - **Command-line quoting** implements the documented backslash/quote rules; `CommandLineToArgvW`
@@ -250,8 +294,8 @@ validated statically. For every x86-64 case it asserts:
 1. Exception personality and panics: `RaiseException` plus a handler, then unwinding through
    drop thunks (their conditional prologue needs reshaping before any description is valid).
 2. Optimizer support for the `.def` function form, including describing promoted registers.
-3. Threads: `CreateThread` with a Win64-compatible thunk, `WaitForSingleObject`, and
-   `WaitOnAddress`/SRW locks to replace futex and the scheduler's epoll boundary.
+3. Threads: an ARM64 bridge, and the epoll-based `Scope`/`Task` scheduler replacement (the
+   x86-64 `CreateThread` path and address waits are done).
 4. Allocation: `mremap` emulation by allocate-copy-release and a Windows-aware arena policy.
 5. Files and processes: directory streams (`FindFirstFileA`), `GetModuleFileNameA`,
    `MoveFileA`/remove semantics, and the `*W` APIs with UTF-16 conversion.

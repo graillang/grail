@@ -512,6 +512,21 @@ fn win32_arity<a>(name: (&a [u8])) -> u64 {
     if same(view(name), view("VirtualAlloc")) {
         return 4;
     }
+    if same(view(name), view("CreateThread")) {
+        return 6;
+    }
+    if same(view(name), view("WaitForSingleObject")) {
+        return 2;
+    }
+    if same(view(name), view("WaitOnAddress")) {
+        return 4;
+    }
+    if same(view(name), view("WakeByAddressSingle")) {
+        return 1;
+    }
+    if same(view(name), view("WakeByAddressAll")) {
+        return 1;
+    }
     if same(view(name), view("VirtualFree")) {
         return 3;
     }
@@ -7845,6 +7860,13 @@ fn raw_builtin<a>(c: (&a mut C), id: u64) -> Val {
     }
     // Thread start: the child takes its entry/argument from the new stack and exits only itself.
     if id == 117 {
+        if c.target == 3 {
+            // start slot and tid word; flags are a Linux clone detail.
+            get(&mut c, args[1], view("%rdi"));
+            get(&mut c, args[2], view("%rsi"));
+            o(&mut c, view("call rt_win_thread_clone\n"));
+            return val(save(&mut c), 0);
+        }
         get(&mut c, args[0], view("%rdi"));
         get(&mut c, args[1], view("%rsi"));
         get(&mut c, args[2], view("%rdx"));
@@ -16100,10 +16122,19 @@ pub fn main() -> u64 {
             fail(&mut c, view("executable entry requires readonly argv view"));
         }
     }
-    if (c.target == 3) + (c.target == 4) {
+    if (c.target == 3) {
         // A PE image starts without arguments: the loader leaves argv to the runtime, which reads
         // the Win32 command line. The process state words start empty and are filled by
-        // rt_thread_init before the entry function runs.
+        // rt_thread_init before the entry function runs. The thread bridge address is published
+        // for CreateThread.
+        o(
+            &mut c,
+            view(
+                ".globl grail_entry\ngrail_entry:\nxorl %eax,%eax\nmovq %rax,rt_state(%rip)\nmovq %rax,rt_state+8(%rip)\nmovq %rax,rt_state+16(%rip)\nleaq rt_win_thread_start(%rip),%rax\nmovq %rax,rt_state+3392(%rip)\nandq $-16,%rsp\ncall rt_thread_init\nmovq rt_state(%rip),%rdi\n"
+            )
+        );
+    } else {
+    if c.target == 4 {
         o(
             &mut c,
             view(
@@ -16125,6 +16156,7 @@ pub fn main() -> u64 {
                 view(".globl _start\n_start:\nmovq (%rsp),%rdi\nleaq 8(%rsp),%rsi\nleaq 16(%rsp,%rdi,8),%rdx\nmovq %rdi,rt_state(%rip)\nmovq %rsi,rt_state+8(%rip)\nmovq %rdx,rt_state+16(%rip)\nandq $-16,%rsp\ncall rt_thread_init\nmovq rt_state(%rip),%rdi\n")
             );
         }
+    }
     }
     if count == 1 {
         ok := label(&mut c);
@@ -16158,6 +16190,14 @@ pub fn main() -> u64 {
     mark(&mut c, balanced);
     o(&mut c, view("call rt_shutdown\n"));
     emit_exit(&mut c, view("movq %r14,%rdi\n"));
+    if c.target == 3 {
+        o(
+            &mut c,
+            view(
+                "ud2\nrt_win_thread_start:\nsubq $56,%rsp\nmovq %rdi,32(%rsp)\nmovq %rsi,40(%rsp)\nmovq %rcx,%rdi\ncall rt_win_thread_main\nmovq 32(%rsp),%rdi\nmovq 40(%rsp),%rsi\naddq $56,%rsp\nret\n.bss\n.p2align 3\nrt_state: .zero 4096\n"
+            )
+        );
+    } else {
     if (c.target == 3) + (c.target == 4) {
         o(&mut c, view("ud2\n.bss\n.p2align 3\nrt_state: .zero 4096\n"));
     
@@ -16173,6 +16213,7 @@ pub fn main() -> u64 {
                 view("ud2\n.bss\n.p2align 3\nrt_state: .zero 4096\n.section .note.GNU-stack,\"\",@progbits\n")
             );
         }
+    }
     }
     optimized := optimize::optimize(view(c.out));
     mut out = optimized;
