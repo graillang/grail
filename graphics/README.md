@@ -15,6 +15,7 @@ include/grail/
   grail_rhi.h             device, queues+timelines, resources, command buffers, swapchain, queries
   grail_bindless.h        set 0 table + set 1 frame constants + the cross-backend mapping table
   grail_shader.h          containers, reflection blob format, shader library, pipelines, permutations
+  grail_graph.h           render graph: passes, resources, derived order/barriers, culling
   grail_backend_vulkan.h  required features and extensions, SDL3 surface bridge
   grail_backend_d3d12.h   feature levels, root signature layout, DXIL requirements
   grail_backend_metal.h   argument-buffer tier 2, MSL version
@@ -26,13 +27,14 @@ src/
   grail_vk_common.c/.h    loader, instance, required-feature evaluation, caps mapping
   grail_vk_probe.c        Vulkan device/feature/limit probe, dlopen-based, no link-time Vulkan
   grail_vulkan.c          the Vulkan backend: device, queues, bindless layout, shaders, pipelines
+  grail_graph.c           the render graph: validation, topological order, culling, barrier derivation
   grail_wire.c            framing
   grail_null.c            the null backend: every entry point, validated, no GPU
   grail_null_window.c     the window/input half of the null backend
 shaders/
   include/                HLSL mirrors of the C contract (bindless, frame constants, GPU structs)
   core/                   fullscreen.vs, tonemap.ps, frame_setup.cs
-tests/                    abi, device, wire, library, vk_probe, vk_backend (+ permutation tests)
+tests/                    abi, device, wire, library, graph, vk_probe, vk_backend
 tools/                    the offline shader flow (see docs/shader-flow.md)
 docs/                     the contract, the shader flow, dependencies, blockers
 ```
@@ -52,12 +54,13 @@ docs/                     the contract, the shader flow, dependencies, blockers
 | D3D12 / Metal backends | **not implemented** (`GR_ERROR_UNSUPPORTED`) |
 | Permutations | each combination compiled to its own SPIR-V/DXIL/blob; digests and keys tested |
 | Key → bytecode resolution | implemented: library index, lazy cache, miss/mismatch/exhaustion statuses |
+| Render graph | passes/resources, derived order and barriers, culling, cycle/duplicate/use-before-write validation |
 | Calling this from a Grail program | **blocked** — see `docs/first-renderer-port.md` |
 
 ## Build and test
 
 ```
-make -C graphics test          # needs only a C compiler: 319 checks
+make -C graphics test          # needs only a C compiler: 558 checks
 make -C graphics shaders       # needs DXC 1.9.2609 (see docs/dependencies.md)
 make -C graphics shader-check  # compile, then verify every reflection blob in C
 make -C graphics perm-test     # prove each permutation compiles to its own bytecode (bun)
@@ -72,4 +75,5 @@ make -C graphics vk-smoke      # real headless device + pipelines, under the sam
 - [`docs/dependencies.md`](docs/dependencies.md) — exact versions and where they come from.
 - [`docs/vulkan-probe.md`](docs/vulkan-probe.md) — what the driver reports, and what each required feature gates.
 - [`docs/vulkan-backend.md`](docs/vulkan-backend.md) — the device core: what is implemented, the layout, and the evidence.
+- [`docs/render-graph.md`](docs/render-graph.md) — described-not-ordered frames, derived barriers, culling.
 - [`docs/first-renderer-port.md`](docs/first-renderer-port.md) — the seven blockers, with evidence.
