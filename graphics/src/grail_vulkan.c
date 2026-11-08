@@ -1126,55 +1126,11 @@ void gr_vk_abi_device_destroy_impl(gr_vk_dev *dev)
 {
     if (!dev)
         return;
-    if (dev->graphics_handle != GR_NULL_HANDLE) {
-        gr_vk_queue *q = (gr_vk_queue *)gr_object_remove(gr_objects(), dev->graphics_handle, GR_HANDLE_QUEUE);
-        free(q);
-    }
-    if (dev->compute_handle != GR_NULL_HANDLE) {
-        gr_vk_queue *q = (gr_vk_queue *)gr_object_remove(gr_objects(), dev->compute_handle, GR_HANDLE_QUEUE);
-        free(q);
-    }
-    if (dev->transfer_handle != GR_NULL_HANDLE) {
-        gr_vk_queue *q = (gr_vk_queue *)gr_object_remove(gr_objects(), dev->transfer_handle, GR_HANDLE_QUEUE);
-        free(q);
-    }
-    if (dev->bindless != GR_NULL_HANDLE) {
-        void *b = gr_object_remove(gr_objects(), dev->bindless, GR_HANDLE_BINDLESS);
-        free(b);
-    }
-    if (dev->device) {
-        if (dev->device_wait_idle)
-            dev->device_wait_idle(dev->device);
-        if (dev->graphics_timeline && dev->destroy_semaphore)
-            dev->destroy_semaphore(dev->device, dev->graphics_timeline, NULL);
-        if (dev->pipeline_cache && dev->destroy_pipeline_cache)
-            dev->destroy_pipeline_cache(dev->device, dev->pipeline_cache, NULL);
-        if (dev->frame_mapped && dev->unmap_memory)
-            dev->unmap_memory(dev->device, dev->frame_memory);
-        if (dev->frame_buffer && dev->destroy_buffer)
-            dev->destroy_buffer(dev->device, dev->frame_buffer, NULL);
-        if (dev->frame_memory && dev->free_memory)
-            dev->free_memory(dev->device, dev->frame_memory, NULL);
-        {
-            uint32_t i;
-            for (i = 0; i < (uint32_t)GR_SAMPLER_SLOT_COUNT; ++i)
-                if (dev->samplers[i] && dev->destroy_sampler)
-                    dev->destroy_sampler(dev->device, dev->samplers[i], NULL);
-        }
-        if (dev->descriptor_pool) {
-            PFN_vkDestroyDescriptorPool destroy_pool = GR_VK_DEVICE_LOAD(dev, vkDestroyDescriptorPool);
-            if (destroy_pool)
-                destroy_pool(dev->device, dev->descriptor_pool, NULL);
-        }
-        if (dev->layout && dev->destroy_pipeline_layout)
-            dev->destroy_pipeline_layout(dev->device, dev->layout, NULL);
-        if (dev->set0 && dev->destroy_set_layout)
-            dev->destroy_set_layout(dev->device, dev->set0, NULL);
-        if (dev->set1 && dev->destroy_set_layout)
-            dev->destroy_set_layout(dev->device, dev->set1, NULL);
-        if (dev->destroy_device)
-            dev->destroy_device(dev->device, NULL);
-    }
+
+    /* Teardown order is load-bearing: children before parents, and every object destroyed while
+     * the device that created it is still alive. Swapchains come first because each owns a
+     * VkSurfaceKHR and a surface destroyed after its device is a spec violation; the messenger is
+     * instance-scoped so it goes before the instance; the device goes before the instance. */
     {
         uint32_t s;
         for (s = 0; s < dev->swapchain_count; ++s) {
@@ -1188,25 +1144,168 @@ void gr_vk_abi_device_destroy_impl(gr_vk_dev *dev)
                     gr_vk_viewobj *object = (gr_vk_viewobj *)gr_object_remove(
                         gr_objects(), swap->view_handles[i], GR_HANDLE_TEXTURE_VIEW);
                     free(object);
+                    swap->view_handles[i] = GR_NULL_HANDLE;
                 }
                 if (swap->views[i] && dev->destroy_image_view)
                     dev->destroy_image_view(dev->device, swap->views[i], NULL);
+                swap->views[i] = VK_NULL_HANDLE;
+            }
+            if (swap->acquire_fence) {
+                PFN_vkDestroyFence destroy_fence = GR_VK_DEVICE_LOAD(dev, vkDestroyFence);
+                if (destroy_fence)
+                    destroy_fence(dev->device, swap->acquire_fence, NULL);
             }
             if (dev->destroy_swapchain && swap->swapchain)
                 dev->destroy_swapchain(dev->device, swap->swapchain, NULL);
-            if (dev->destroy_surface && swap->surface)
-                dev->destroy_surface(dev->instance, swap->surface, NULL);
+            if (swap->surface) {
+                if (dev->destroy_surface)
+                    dev->destroy_surface(dev->instance, swap->surface, NULL);
+                else
+                    gr_sdl_vulkan_destroy_surface((uint64_t)(uintptr_t)dev->instance,
+                                                  (uint64_t)(uintptr_t)swap->surface);
+            }
             free(swap);
         }
         dev->swapchain_count = 0;
     }
-    if (dev->messenger && dev->destroy_messenger)
+
+    if (dev->messenger && dev->destroy_messenger) {
         dev->destroy_messenger(dev->instance, dev->messenger, NULL);
-    if (dev->instance && dev->destroy_instance)
+        dev->messenger = VK_NULL_HANDLE;
+    }
+
+    if (dev->graphics_handle != GR_NULL_HANDLE) {
+        gr_vk_queue *q = (gr_vk_queue *)gr_object_remove(gr_objects(), dev->graphics_handle,
+                                                         GR_HANDLE_QUEUE);
+        free(q);
+    }
+    if (dev->compute_handle != GR_NULL_HANDLE) {
+        gr_vk_queue *q = (gr_vk_queue *)gr_object_remove(gr_objects(), dev->compute_handle,
+                                                         GR_HANDLE_QUEUE);
+        free(q);
+    }
+    if (dev->transfer_handle != GR_NULL_HANDLE) {
+        gr_vk_queue *q = (gr_vk_queue *)gr_object_remove(gr_objects(), dev->transfer_handle,
+                                                         GR_HANDLE_QUEUE);
+        free(q);
+    }
+    if (dev->bindless != GR_NULL_HANDLE) {
+        void *b = gr_object_remove(gr_objects(), dev->bindless, GR_HANDLE_BINDLESS);
+        free(b);
+    }
+
+    if (dev->device) {
+        uint32_t i;
+        /* Sweep what the caller left behind: shaders, pipelines, command buffers and pools,
+         * fences. Every one of these structs has `device` as its first member, so the owning
+         * backend is identifiable from the table alone. Without this the driver reports leaked
+         * child objects at vkDestroyDevice — which validation caught as device-05137, after the
+         * in-process counters had already been read. */
+        {
+            gr_object_table *table = gr_objects();
+            uint32_t slot;
+            for (slot = 0; slot < GR_OBJECT_MAX; ++slot) {
+                void *object = table->slots[slot].object;
+                uint32_t type = table->slots[slot].type;
+                if (!table->slots[slot].live || !object)
+                    continue;
+                if (*(gr_vk_dev **)object != dev)
+                    continue;
+                switch ((gr_handle_type)type) {
+                case GR_HANDLE_SHADER: {
+                    gr_vk_shader *shader = (gr_vk_shader *)object;
+                    if (shader->module && dev->destroy_shader_module)
+                        dev->destroy_shader_module(dev->device, shader->module, NULL);
+                    free(shader->name);
+                    table->slots[slot].live = 0;
+                    table->slots[slot].object = NULL;
+                    table->slots[slot].type = GR_HANDLE_NONE;
+                    free(shader);
+                    break;
+                }
+                case GR_HANDLE_PIPELINE: {
+                    gr_vk_pipeline *pipeline = (gr_vk_pipeline *)object;
+                    if (pipeline->pipeline && dev->destroy_pipeline)
+                        dev->destroy_pipeline(dev->device, pipeline->pipeline, NULL);
+                    free(pipeline->name);
+                    table->slots[slot].live = 0;
+                    table->slots[slot].object = NULL;
+                    table->slots[slot].type = GR_HANDLE_NONE;
+                    free(pipeline);
+                    break;
+                }
+                case GR_HANDLE_CMD_BUFFER: {
+                    gr_vk_cmdbuf *cmd = (gr_vk_cmdbuf *)object;
+                    table->slots[slot].live = 0;
+                    table->slots[slot].object = NULL;
+                    table->slots[slot].type = GR_HANDLE_NONE;
+                    free(cmd);
+                    break;
+                }
+                case GR_HANDLE_CMD_POOL: {
+                    gr_vk_cmdpool *pool = (gr_vk_cmdpool *)object;
+                    if (pool->pool && dev->destroy_command_pool)
+                        dev->destroy_command_pool(dev->device, pool->pool, NULL);
+                    table->slots[slot].live = 0;
+                    table->slots[slot].object = NULL;
+                    table->slots[slot].type = GR_HANDLE_NONE;
+                    free(pool);
+                    break;
+                }
+                case GR_HANDLE_FENCE: {
+                    gr_vk_fence_obj *fence = (gr_vk_fence_obj *)object;
+                    table->slots[slot].live = 0;
+                    table->slots[slot].object = NULL;
+                    table->slots[slot].type = GR_HANDLE_NONE;
+                    free(fence);
+                    break;
+                }
+                default:
+                    break;
+                }
+            }
+        }
+        if (dev->device_wait_idle)
+            dev->device_wait_idle(dev->device);
+        if (dev->frame_mapped && dev->unmap_memory)
+            dev->unmap_memory(dev->device, dev->frame_memory);
+        if (dev->frame_buffer && dev->destroy_buffer)
+            dev->destroy_buffer(dev->device, dev->frame_buffer, NULL);
+        if (dev->frame_memory && dev->free_memory)
+            dev->free_memory(dev->device, dev->frame_memory, NULL);
+        for (i = 0; i < (uint32_t)GR_SAMPLER_SLOT_COUNT; ++i)
+            if (dev->samplers[i] && dev->destroy_sampler)
+                dev->destroy_sampler(dev->device, dev->samplers[i], NULL);
+        if (dev->descriptor_pool) {
+            PFN_vkDestroyDescriptorPool destroy_pool = GR_VK_DEVICE_LOAD(dev, vkDestroyDescriptorPool);
+            if (destroy_pool)
+                destroy_pool(dev->device, dev->descriptor_pool, NULL);
+        }
+        if (dev->graphics_timeline && dev->destroy_semaphore)
+            dev->destroy_semaphore(dev->device, dev->graphics_timeline, NULL);
+        if (dev->pipeline_cache && dev->destroy_pipeline_cache)
+            dev->destroy_pipeline_cache(dev->device, dev->pipeline_cache, NULL);
+        if (dev->layout && dev->destroy_pipeline_layout)
+            dev->destroy_pipeline_layout(dev->device, dev->layout, NULL);
+        if (dev->set0 && dev->destroy_set_layout)
+            dev->destroy_set_layout(dev->device, dev->set0, NULL);
+        if (dev->set1 && dev->destroy_set_layout)
+            dev->destroy_set_layout(dev->device, dev->set1, NULL);
+        if (dev->destroy_device)
+            dev->destroy_device(dev->device, NULL);
+        dev->device = VK_NULL_HANDLE;
+    }
+
+    if (dev->instance && dev->destroy_instance) {
         dev->destroy_instance(dev->instance, NULL);
+        dev->instance = VK_NULL_HANDLE;
+    }
+    /* The loader stays mapped for the life of the process: it and the layers register atexit
+     * handlers that reference their own static data, and unmapping before those run aborts. */
     gr_vk_loader_close(&dev->loader);
     free(dev);
 }
+
 
 /* ---------------------------------------------------------------------------------------
  * Dispatched ABI entry points
