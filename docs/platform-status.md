@@ -29,8 +29,9 @@ and the 12 executed FFI fixture instances. They still lack a full native-runtime
 Win32 console/files/argv/time layer, Win32 threads and address waits (`CreateThread`, joins through
 `WaitForSingleObject`, futex operations mapped to `WaitOnAddress`/`WakeByAddress*`), and 10 executed
 programs under Wine. Windows AArch64 has PE/COFF images and `.pdata`/`.xdata` frame records,
-statically verified. ARM64 thread creation, sockets, epoll and COM remain unimplemented.
-Grail-internal calls still use the private register convention;
+statically verified. ARM64 thread creation, sockets and epoll remain unimplemented. COM has a
+22-check/11-Wine branch implementation that is not yet integrated on `main`; its remaining limits
+stay open. Grail-internal calls still use the private register convention;
 Win64 is used at import boundaries. This is Wine verification, not Windows hardware verification,
 and the Windows release artifacts are non-executable object bundles, not a hosted Windows
 toolchain.
@@ -103,6 +104,12 @@ job executor, asset dependency ordering and the RHI wire framing are ported with
 wire, TOML/config, local-session ownership, JSON-RPC dispatch and local-IPC
 addressing/lifecycle rules and journal persistence/cursor rules: **921 reference lines across eleven suites**; the socket syscalls themselves are still open. RHI/renderer/editor and remaining Borg OS services are still open.
 
+## Bootstrap seed set
+
+The compiler/bootstrap seed set `42efb7f` is published and verify-green. The increments after it
+on `main` are non-compiler work (ports, graphics, tooling and docs), so the hosted surface below
+can be re-checked without regenerating the seed set.
+
 ## Verification commands
 
 ```sh
@@ -120,6 +127,6 @@ make -C graphics vk-smoke       # Vulkan device core, shader modules, pipeline c
 make -C graphics vk-probe       # Vulkan device/capability probe (GPU)
 make -C graphics shader-check   # real DXC/SPIR-V artifacts and reflection
 make -C graphics perm-test      # shader permutations
-just abundance-test             # Abundance bit-exact parity (283 values, 8 programs)
+just abundance-test             # Abundance bit-exact parity (313 values, 9 programs)
 just borg-test                  # Borg reference-line parity (921 lines, 11 suites)
 ```

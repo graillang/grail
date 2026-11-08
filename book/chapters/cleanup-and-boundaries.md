@@ -19,14 +19,16 @@ small slabs for reuse, while large single-object arenas are released immediately
   word parameters. A cross-built object is not platform support; only the evidence in that matrix
   counts.
 - Not executable yet: Windows AArch64 and both macOS targets. Not implemented: D3D12 and Metal
-  backends, debugger attach, a profiler, and COM. The Vulkan backend has a verified
+  backends, debugger attach, and a profiler; COM remains open on `main` (a branch implementation
+  with 22 checks and 11 Wine executions is pending integration). The Vulkan backend has a verified
   swapchain/present/draw path, including depth and MSAA; D3D12 and Metal return `UNSUPPORTED`.
   `docs/platform-status.md` records the evidence for each row.
 - Linux x86-64 emits DWARF `.debug_line` tables with `grail build --debug` (inspect them with
   `grail debug lines`); `.debug_info` variable data and debugger attach are not implemented. The
   v3 C FFI slice — `extern "C"` scalars, byte views/`CStr`, opaque handles, C-layout records and
-  callbacks — links and executes; dynamic library loading, variadic C functions and record results
-  remain open.
+  callbacks — links and executes 12 fixtures across x86-64, AArch64 and RISC-V, and the `sys_grail`
+  wrappers over the Linux ABI (files, clocks, environment, loopback TCP) are on `main`; dynamic
+  library loading, variadic C functions and record results remain open.
 - The optimizer is a per-function pass (slot forwarding, dead-code removal, callee-saved register
   promotion, branch fusion); there is no general inlining or loop optimization yet. Implicit module
   loading, general async/await syntax and a general trait system are not covered here; structured tasks, cancellation and suspending green-task I/O are described in the concurrency chapter.

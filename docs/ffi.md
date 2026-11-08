@@ -235,9 +235,10 @@ compiles `tests/ffi/call_scalars.grl` with the FFI build, links the two through 
   a NUL-terminated `CStr`, a read-only view, a mutable view written by C, and a handle
   round trip (`259`, `1`), `extern_records` checks C layout in both directions (`1606`,
   `23`, `16`, `-2`, `7`), and `callbacks` checks C calling back into Grail, including
-  callee-saved register preservation (`42`, `42`, `10`) — executed on the host, and on a cross target when
-  `qemu-<target>-static` is installed; otherwise the cross targets are linked and the
-  ABI-level check is reported as link-only.
+  callee-saved register preservation (`42`, `42`, `10`). All four fixtures execute on x86-64 and,
+  through `qemu-<target>-static`, on AArch64 and RISC-V 64: 12 executed fixture instances and no
+  link-only cases. Without a qemu runner the cross targets are linked and the ABI-level check is
+  reported as link-only.
 
 Rejections are part of the normal native corpus (`tests/native-cases.json`):
 `ffi-reject-safe-call`, `ffi-reject-abi`, `ffi-reject-parameter-width`,

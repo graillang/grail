@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Documentation/status sync: the compiler/bootstrap seed set `42efb7f` is published and
+  verify-green, and the later `main` increments are non-compiler work. The v3 FFI suite executes
+  12 fixture instances across x86-64, AArch64 and RISC-V; `lib/sys/grail_ffi.grl` (`sys_grail`)
+  wrappers over the Linux ABI are on `main`; Borg checks 921 reference lines over eleven suites and
+  Abundance 313 exact values over nine programs; graphics reports 613/162/47 on hardware (Vulkan
+  smoke/surface/cache). Windows COM has a 22-check/11-Wine branch implementation pending
+  integration. Dynamic loading, D3D12/Metal, debugger attach, the profiler and the remaining COM
+  limits stay open.
+
 - Added typed loopback TCP socket wrappers over the C ABI: `handle Socket`, a 56-byte `Address`
   record constructed only by `loopback(port)`, `tcp`, `bind`, `listen`, `accept`, `connect`,
   `send`, `recv`, `recv_bytes`, `socket_shutdown`, `socket_close`, `local_address`,
