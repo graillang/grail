@@ -100,6 +100,42 @@ The Windows OS layer implements the operation IDs the portable runtime already u
 | startup | `GetCommandLineA` + `GetEnvironmentStringsA`, `SwitchToThread` |
 | threads | `CreateThread`, `WaitForSingleObject`, `CloseHandle` |
 | address waits | `WaitOnAddress`, `WakeByAddressSingle`, `WakeByAddressAll` (kernelbase.dll) |
+| COM startup | `CoInitializeEx`, `CoUninitialize` (combase.dll) |
+
+### COM interop
+
+COM needs two calls the import path cannot express: a *direct* call to a symbol linked into the
+image (no IAT), and an *indirect* call through a function pointer loaded from a vtable slot. Both
+use the Windows ABI and are compiler intrinsics for unsafe runtime modules:
+
+| Intrinsic | x86-64 | windows-aarch64 |
+| --- | --- | --- |
+| `raw_win_local(Symbol, a..d)` | `%rcx/%rdx/%r8/%r9` then `call Symbol` | `%rdi/%rsi/%rdx/%rcx` (lowers to `x0..x3`) then `call Symbol` |
+| `raw_win_call(slot, a..d)` | args in `%rcx/%rdx/%r8/%r9`, `movq slot,%r11`, `call *%r11` | args lower to `x0..x3`, `%rax`→`x9` holds the slot, `wininvoke` lowers to `ldr x16,[x9]; blr x16; mov x9,x0` |
+
+`tests/com-shim-x64.s` and `tests/com-shim-arm64.s` are minimal C-ABI shims compiled and linked by
+`tools/windows.mjs`: a static `IUnknown` object `{vtable, refcount, payload}` with a
+`grail_com_make_object(void **out)` factory, a `grail_com_iid_address()` accessor and
+`QueryInterface`/`AddRef`/`Release` entries. `QueryInterface` compares the 16-byte IID, nulls
+`*ppv` on failure and returns `S_OK`, `E_NOINTERFACE` (`0x80004002`) or `E_POINTER`
+(`0x80004003`); `AddRef`/`Release` use `lock xaddl` on x86-64 and plain load/add/store on ARM64,
+returning the new count.
+
+The executed x86-64 case prints, in order: `CoInitializeEx` result `0`; factory `0`; AddRef `2`,
+`3`; Release `2`, `1`; `QueryInterface` with a null `ppv` `2147500035` (`E_POINTER`); with a null
+`riid` `2147500035`; with a null GUID `2147500034` (`E_NOINTERFACE`); with the shim's IID `0`
+(`S_OK`) and `*ppv == object` (`0` from the pointer difference); the final Release `1`, `0`;
+then `CoUninitialize`.
+
+The same program compiles for `windows-aarch64` against the ARM64 shim and is checked statically:
+the assembly contains `bl grail_com_make_object`, `ldr x16,[x9]` and `blr x16`, the object is
+COFF-ARM64 and the image is PE32+ ARM64 importing `CoInitializeEx` from `combase.dll`.
+
+COM limits: one static in-process object, a single IID match, no `CoCreateInstance`,
+`IDispatch`/`IUnknown` beyond the three methods, no aggregation, no `VARIANT`/`BSTR` marshalling,
+no apartment-model or cross-apartment tests (only `CoInitializeEx`/`CoUninitialize` balance).
+`raw_win_call`/`raw_win_local` pass at most four word arguments and no floating-point or
+aggregate parameters. The ARM64 side is static-only because no ARM64 Windows runner exists.
 
 ### Threads and address waits (x86-64)
 
@@ -240,9 +276,9 @@ ARM64 acceptance requires an ARM64 Windows host, ARM64 Wine, or a Windows-on-ARM
 ## Verification
 
 `bun tools/windows.mjs check` (with `GRAIL_COMPILER` pointing at a tree-built compiler) checks
-ten x86-64 programs: hello, u64 exit code, integer printing, float printing, file write/read,
-single-argument entry, struct fields, a full argv list, a thread join and a producer/consumer
-wake, plus four windows-aarch64 programs validated statically. The two thread programs also run
+eleven x86-64 programs: hello, u64 exit code, integer printing, float printing, file write/read,
+single-argument entry, struct fields, a full argv list, a thread join, a producer/consumer wake
+and COM interop, plus five windows-aarch64 programs validated statically. The two thread programs also run
 as Linux ELF (clone/futex), so the portable test itself is cross-checked. For every x86-64 case it asserts:
 
 - the `.s` uses COFF directives only (no `@function`, no `.note.GNU-stack`, no `_start`) and exits

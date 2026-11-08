@@ -62,7 +62,10 @@ export async function check(compiler) {
       writeFileSync(input, test.source);
       inputs = [input];
     }
-    const built = compileProgram(compiler, inputs, directory, { name: test.name });
+    const built = compileProgram(compiler, inputs, directory, {
+      name: test.name,
+      shims: test.shim ? [test.shim[windowsTarget]] : [],
+    });
     const assembly = readFileSync(built.assembly, 'utf8');
 
     // Source-level evidence: COFF directives only, no ELF-only directives or Linux entry.
@@ -131,7 +134,7 @@ export async function check(compiler) {
 
   // windows-aarch64: PE/COFF for ARM64. There is no ARM64 Windows runner on this host, so these
   // cases are validated statically: assembly shape, COFF machine, relocations and the image.
-  const armCases = ['hello', 'integer-print', 'file-write-read', 'argument-list'];
+  const armCases = ['hello', 'integer-print', 'file-write-read', 'argument-list', 'com-interop'];
   for (const name of armCases) {
     const test = cases.find(c => c.name === name);
     const directory = join(work, `arm64-${name}`);
@@ -144,12 +147,17 @@ export async function check(compiler) {
       writeFileSync(input, test.source);
       inputs = [input];
     }
-    const built = compileProgram(compiler, inputs, directory, { name, target: windowsAarch64 });
+    const built = compileProgram(compiler, inputs, directory, {
+      name,
+      target: windowsAarch64,
+      shims: test.shim ? [test.shim[windowsAarch64]] : [],
+    });
     const assembly = readFileSync(built.assembly, 'utf8');
 
     // ARM64 instructions and PE import sequences, with no x86 or ELF spelling left behind.
     assert.ok(assembly.includes('.globl grail_entry\ngrail_entry:'), `${name}/${windowsAarch64}: missing PE entry`);
-    assert.match(assembly, /^\.def f_main_main$/m, `${name}/${windowsAarch64}: missing COFF function record`);
+    const armEntry = test.entry ?? 'f_main_main';
+    assert.match(assembly, new RegExp(`^\\.def ${armEntry}$`, 'm'), `${name}/${windowsAarch64}: missing COFF function record`);
     assert.ok(assembly.includes('adrp x16,__imp_ExitProcess'), `${name}/${windowsAarch64}: exit is not an IAT load`);
     assert.ok(assembly.includes('ldr x16,[x16,:lo12:__imp_ExitProcess]'), `${name}/${windowsAarch64}: IAT load is not page-relative`);
     assert.ok(assembly.includes('blr x16'), `${name}/${windowsAarch64}: import is not an indirect call`);
@@ -158,6 +166,11 @@ export async function check(compiler) {
     assert.ok(!assembly.includes('.note.GNU-stack'), `${name}/${windowsAarch64}: ELF note section leaked`);
     assert.ok(!assembly.includes('\n_start:'), `${name}/${windowsAarch64}: Linux entry point emitted`);
 
+    if (test.com) {
+      assert.ok(assembly.includes('bl grail_com_make_object'), `${name}/${windowsAarch64}: shim is not called directly`);
+      assert.ok(assembly.includes('ldr x16,[x9]'), `${name}/${windowsAarch64}: vtable call does not load the slot`);
+      assert.ok(assembly.includes('blr x16'), `${name}/${windowsAarch64}: vtable call is not indirect`);
+    }
     const object = inspectObject(built.object);
     assert.match(object, /Format: COFF-ARM64/, `${name}/${windowsAarch64}: object is not COFF ARM64`);
     assert.match(object, /Machine: IMAGE_FILE_MACHINE_ARM64 \(0xAA64\)/, `${name}/${windowsAarch64}: wrong COFF machine`);

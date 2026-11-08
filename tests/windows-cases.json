@@ -79,5 +79,18 @@
     "stdout": "7\n",
     "status": 0,
     "note": "futex-equivalent wait/wake: FUTEX_WAIT -> WaitOnAddress, FUTEX_WAKE -> WakeByAddressSingle"
+  },
+  {
+    "name": "com-interop",
+    "entry": "main",
+    "com": true,
+    "shim": {
+      "windows-x86_64": "tests/com-shim-x64.s",
+      "windows-aarch64": "tests/com-shim-arm64.s"
+    },
+    "source": "unsafe module runtime;\nfn main() -> u64 {\n    hr := raw_win32(CoInitializeEx, 0, 2);\n    println(hr);\n    out := rt_alloc(8);\n    raw_store(out, 0);\n    println(raw_win_local(grail_com_make_object, out));\n    obj := raw_load(out);\n    vt := raw_load(obj);\n    qi := raw_load(vt);\n    add := raw_load(vt + 8);\n    rel := raw_load(vt + 16);\n    println(raw_win_call(add, obj));\n    println(raw_win_call(add, obj));\n    println(raw_win_call(rel, obj));\n    println(raw_win_call(rel, obj));\n    println(raw_win_call(qi, obj, 0, out));\n    println(raw_win_call(qi, obj, 0, out));\n    zero := rt_alloc(16);\n    raw_store(zero, 0);\n    raw_store(zero + 8, 0);\n    println(raw_win_call(qi, obj, zero, out));\n    iid := raw_win_local(grail_com_iid_address);\n    raw_store(out, 0);\n    println(raw_win_call(qi, obj, iid, out));\n    println(raw_load(out) - obj);\n    println(raw_win_call(rel, obj));\n    println(raw_win_call(rel, obj));\n    raw_win32(CoUninitialize);\n    rt_free(out);\n    rt_free(zero);\n    return 0;\n}\n",
+    "stdout": "0\n0\n2\n3\n2\n1\n2147500035\n2147500035\n2147500034\n0\n0\n1\n0\n",
+    "status": 0,
+    "note": "CoInitializeEx/CoUninitialize plus IUnknown through a C-ABI vtable shim; E_POINTER and E_NOINTERFACE are exact"
   }
 ]
