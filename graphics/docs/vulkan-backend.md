@@ -174,6 +174,27 @@ would not tell you whether the argument block was read as the command it holds.
 against the buffer's size and require `GR_BUFFER_USAGE_INDIRECT`: 20 bytes per indexed draw command
 with a stride that is a multiple of 4, and 12 bytes for a dispatch (`groupCountX/Y/Z`).
 
+## Presentation without stalling the queue
+
+Present no longer waits the queue idle. The handoff is the standard one:
+
+- `vkAcquireNextImageKHR` signals a per-swapchain `image_available` and waits nothing;
+- the next submission waits `image_available` at `COLOR_ATTACHMENT_OUTPUT` and signals
+  `render_finished[image]`;
+- `vkQueuePresentKHR` waits `render_finished[image]`.
+
+`render_finished` is indexed **by swapchain image**, not one per swapchain: present waits it
+asynchronously, so re-signalling the same semaphore on the next frame is illegal until the
+presentation engine has consumed it. One per swapchain produced exactly that error
+(`pSignalSemaphores[1] ... but it may still be in use`); one per image gives each frame a semaphore
+whose previous use is a full cycle behind.
+
+Removing the idle also exposed a caller-side requirement that the idle had been hiding: a single
+command buffer cannot be re-recorded while its previous submission is in flight
+(`vkResetCommandBuffer: is in use (pending state)`). The test now paces itself with a bounded ring
+of one frame in flight — it waits the previous frame's timeline value before re-recording — which is
+the caller's choice, and what allows present to stop draining the queue.
+
 ## Evidence
 
 `make -C graphics vk-smoke`, under the exclusive GPU lock:

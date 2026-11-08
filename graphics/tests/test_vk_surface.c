@@ -210,7 +210,12 @@ int main(void)
                 CHECK_EQ(gr_cmd_alloc(&cai, &cmd), GR_OK);
             }
 
-            for (pass_index = 0; pass_index < 2u && pipeline != GR_NULL_HANDLE; ++pass_index) {
+            /* A bounded ring of one frame in flight: the previous frame's timeline value is waited
+             * before its command buffer is reused. This is the caller's pacing choice, and it is
+             * what allows present to stop idling the queue. */
+            {
+                uint64_t previous_value = 0;
+            for (pass_index = 0; pass_index < 4u && pipeline != GR_NULL_HANDLE; ++pass_index) {
                 uint32_t image_index = 0xFFFFFFFFu;
                 gr_handle image_view = GR_NULL_HANDLE;
                 int32_t needs_recreate = 0;
@@ -223,6 +228,14 @@ int main(void)
                 uint32_t barrier_count = 0;
                 gr_result status;
 
+                if (previous_value != 0u) {
+                    gr_handle wait_fence = GR_NULL_HANDLE;
+                    gr_result wait_status = GR_ERROR_BACKEND;
+                    CHECK_EQ(gr_fence_create(device, 0, &wait_fence), GR_OK);
+                    CHECK_EQ(gr_fence_wait(wait_fence, previous_value,
+                                           5ull * 1000ull * 1000ull * 1000ull, &wait_status), GR_OK);
+                    CHECK_EQ(wait_status, GR_OK);
+                }
                 status = gr_swapchain_acquire(swapchain, 1000ull * 1000ull * 1000ull, &image_index,
                                               &image_view, &needs_recreate);
                 CHECK_EQ(status, GR_OK);
@@ -315,8 +328,10 @@ int main(void)
                     submit.cmd_count = 1;
                     CHECK_EQ(gr_submit_commands(&submit, &value), GR_OK);
                     CHECK_EQ(gr_queue_present(queue, swapchain, image_index, value, NULL), GR_OK);
+                    previous_value = value;
                 }
                 gr_graph_destroy(graph);
+            }
             }
 
             /* Recreate at a different size: the surface decides the extent, so the check is that
