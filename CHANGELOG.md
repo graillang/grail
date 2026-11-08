@@ -2,30 +2,23 @@
 
 ## Unreleased
 
-- Added executed Windows evidence for the C ABI without a Windows SDK:
-  `tests/abi/wine_harness.c` is cross-built with Zig's MinGW-w64 target and run under Wine,
-  covering file metadata follow/no-follow, hidden attributes, non-reparse readlink rejection,
-  symlink readlink/realpath, regular-file non-blocking rejection and `localhost` DNS (47
-  checks). Fixed Windows `fs_stat` to follow symlinks unless `GRAIL_STAT_NO_FOLLOW` is set by
-  opening the path with `CreateFileW` and using `GetFileInformationByHandle`.
-  `tests/abi/macos_metadata_dns_check.c` compiles the same metadata/reparse/DNS call sites for
-  Apple ARM64 without execution. Added `tools/test-abi-wine.mjs` and `just abi-wine-test`.
+- Abundance CPU port, asset-package increment: `abundance/src/asset_package.grl` carries the ABPKG1
+  package header (id, payload hash, payload bytes, ascending dependency ids), package ids and
+  payload hashes from the engine's `fnv1a64`, and the dependency DAG with duplicate, missing,
+  self-dependency and cycle refusals plus a deterministic topological order that does not depend on
+  input order. The reference gates ids and hashes against the engine and the DAG rules against a
+  model, because Abundance has no C++ asset DAG (its dependency work is Python staging). 29 exact
+  values; suite total 283 across eight programs. No payload bodies, GPU upload or renderer work.
 
-- Completed the Windows and macOS function surface. macOS now implements `file_stat`/`fs_stat`
-  with a pinned 144-byte Darwin `struct stat` and the `$INODE64` `fstat`/`stat`/`lstat` symbols,
-  including birth time and hidden/symlink/read-only flags. Windows now implements
-  reparse-point `readlink` (`FSCTL_GET_REPARSE_POINT`/`DeviceIoControl`) and `realpath`
-  (`GetFinalPathNameByHandleW`, `\\?\` stripping, `/` separators), plus non-blocking mode for
-  named pipes (`SetNamedPipeHandleState(PIPE_NOWAIT)`); regular files still return
-  `GRAIL_E_UNSUPPORTED`. DNS is implemented on both with `GetAddrInfoW` (Windows) and
-  `getaddrinfo` (macOS), filling socket address records with port 0 and setting
-  `GRAIL_CAP_RESOLVE`. All 95 public functions are now defined on both backends; the stub
-  translation units are deleted. Cross-target builds now compile seven objects per target with
-  strict warnings and layout assertions for `struct stat`, `REPARSE_DATA_BUFFER`, `ADDRINFOW`
-  and Darwin `addrinfo`. The backends remain statically checked only, not executed on Windows
-  or macOS.
-
-- Port Borg Agent's local IPC transport boundary (`borg/`). `src/transport.grl` carries the rules a Unix-socket binding must obey: a directory path too long for `sun_path` is addressed through `/proc/self/fd/<dirfd>/name` (so a deep root never hits the 108-byte limit), direct addresses stop at 107 usable bytes, session directories are `0700` and sockets `0600`, a command is at most 1 MiB and a reply read is bounded to 4096 bytes, `SO_PEERCRED` must fill exactly `sizeof(ucred)` or the answer is refused, and shutdown stops new commands without cutting a reply already in flight. The port now checks 749 reference lines over 128 documents, with `--anchors` verifying 47 copied snippets across eight source files. The syscalls themselves are out of scope: `AF_UNIX`, `bind`, `listen`, `accept` and `getsockopt` need a runtime operation Grail does not have, and adding one is a compiler change.
+- Abundance CPU port, executor increment: `abundance/src/job_executor.grl` runs the policy order
+  through Grail's structured parallelism (`task_scope`/`spawn`/`join` over clone-created OS
+  threads) in batches as wide as the worker count, with cancellation filtered before batching, a
+  refusal for worker counts outside 1..4, and completion/checksum accounting. The job test now
+  covers 47 exact values: 100 repetitions at 1, 2 and 4 workers each reproduce the same dispatch
+  digest, completion count and checksum, and the dispatched order equals the policy oracle's.
+  Suite total 254 exact values. Two port bugs fixed on the way: a four-id batch packed by
+  multiplication overflowed u64 (bit packing now) and cancelled ids were only checked at the batch
+  head (filtered up front now).
 
 - Abundance CPU port, job-priority increment plus a container-ergonomics note: `abundance/src/job_policy.grl`
   carries `JobPriority::key()`/`from_key()` (class << 32 | f32 rank bits, with the engine's
