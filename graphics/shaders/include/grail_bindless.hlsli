@@ -1,13 +1,16 @@
 // grail_bindless.hlsli - the shader side of grail_bindless.h.
 //
-// One declaration per table, using register(tN, spaceM). DXC maps space M to Vulkan
-// descriptor set M and register N to Vulkan binding N, and D3D12 reads the same registers
-// natively, so this single spelling is correct for both without an -fvk-bind-register table.
-// Abundance's engine writes [[vk::binding(n, 0)]] because it only ships Vulkan; that
-// attribute has no meaning for D3D12 and is ignored when a register() is also present.
+// One declaration per table. On Vulkan every table is set 0, binding N (0 sampled images,
+// 1 storage images, 2 samplers, 3 storage buffers); on D3D12 each unbounded table needs a
+// register range nothing else overlaps. The sampled images (t0) and samplers (s2) are alone in
+// their register classes in space 0, so register() alone gives both APIs the right binding. The
+// two UAV tables would overlap in space 0 (an unbounded u1 range covers u3), so they take their
+// own D3D12 spaces - storage images u0 space2, storage buffers u0 space3 - and [[vk::binding]]
+// keeps them at set 0, bindings 1 and 3, for SPIR-V (DXC ignores the attribute for DXIL).
 //
 // Verified against DXC 1.9.2609: register(t0, space0) -> DescriptorSet 0, Binding 0;
-// register(b0, space1) -> DescriptorSet 1, Binding 0.
+// register(b0, space1) -> DescriptorSet 1, Binding 0; [[vk::binding(3, 0)]] with
+// register(u0, space3) -> DescriptorSet 0, Binding 3 in SPIR-V and u0 space3 in DXIL.
 //
 // Indices that vary within a wave must be wrapped in NonUniformResourceIndex().
 #ifndef GRAIL_BINDLESS_HLSLI
@@ -24,13 +27,13 @@ TextureCube          g_texcube[]      : register(t0, space0);
 TextureCubeArray     g_texcube_array[]: register(t0, space0);
 
 // Set 0, binding 1: storage images.
-RWTexture2D<float4>  g_rw2d[]        : register(u1, space0);
-RWTexture2D<float>   g_rw2d_float[]  : register(u1, space0);
-RWTexture2D<uint>    g_rw2d_uint[]   : register(u1, space0);
-RWTexture2D<uint2>   g_rw2d_uint2[]  : register(u1, space0);
-RWTexture2DArray<float4> g_rw2d_array[] : register(u1, space0);
-RWTexture3D<float4>  g_rw3d[]        : register(u1, space0);
-RWTexture3D<float>   g_rw3d_float[]  : register(u1, space0);
+[[vk::binding(1, 0)]] RWTexture2D<float4>  g_rw2d[]        : register(u0, space2);
+[[vk::binding(1, 0)]] RWTexture2D<float>   g_rw2d_float[]  : register(u0, space2);
+[[vk::binding(1, 0)]] RWTexture2D<uint>    g_rw2d_uint[]   : register(u0, space2);
+[[vk::binding(1, 0)]] RWTexture2D<uint2>   g_rw2d_uint2[]  : register(u0, space2);
+[[vk::binding(1, 0)]] RWTexture2DArray<float4> g_rw2d_array[] : register(u0, space2);
+[[vk::binding(1, 0)]] RWTexture3D<float4>  g_rw3d[]        : register(u0, space2);
+[[vk::binding(1, 0)]] RWTexture3D<float>   g_rw3d_float[]  : register(u0, space2);
 
 // Set 0, binding 2: samplers. The fixed slots below are the only ones a shader should name
 // by constant; a material sampler index comes from gr_sampler_create().
@@ -43,7 +46,7 @@ SamplerComparisonState  g_compare_samplers[] : register(s2, space0);
 // which access a shader would use. One read-write table, with a read-only buffer simply
 // never stored to, keeps one slot per buffer on every backend. Most buffers a pass touches
 // arrive as a buffer device address in push constants instead.
-RWByteAddressBuffer  g_buffers[]   : register(u3, space0);
+[[vk::binding(3, 0)]] RWByteAddressBuffer g_buffers[] : register(u0, space3);
 
 // Set 0, binding 4: acceleration structures (ray tracing backends only).
 // RaytracingAccelerationStructure g_tlas[] : register(t4, space0);

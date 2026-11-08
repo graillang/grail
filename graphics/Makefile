@@ -172,6 +172,9 @@ $(WIN_BUILD)/test_d3d12_backend.exe: tests/test_d3d12_backend.c $(WIN_OBJ) $(HEA
 # selected with a DLL override; nothing in a user's Wine or Steam prefix is changed.
 VKD3D_PROTON ?= $(HOME)/.local/share/Steam/steamapps/common/Proton - Experimental/files/lib/wine/vkd3d-proton
 
+$(WIN_BUILD)/test_d3d12_present.exe: tests/test_d3d12_present.c $(WIN_OBJ) $(HEADERS) | $(WIN_BUILD)
+	$(WIN_CC) $(CFLAGS) $(INCLUDES) $< $(WIN_OBJ) -ld3d12 -ldxgi -o $@
+
 d3d12-smoke: shaders $(WIN_BUILD)/test_d3d12_backend.exe
 	@if pgrep -x Abundance >/dev/null; then echo "refusing: the game is running"; exit 1; fi
 	@test -f "$(VKD3D_PROTON)/x86_64-windows/d3d12.dll" || { echo "vkd3d-proton not found at $(VKD3D_PROTON); set VKD3D_PROTON"; exit 1; }

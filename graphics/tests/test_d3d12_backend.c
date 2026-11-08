@@ -11,6 +11,7 @@
 #include "../include/grail/grail_bindless.h"
 #include <stdio.h>
 #include <string.h>
+#include <math.h>
 
 static int g_checks, g_failures;
 #define CHECK(c) do { ++g_checks; if (!(c)) { ++g_failures; printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #c); } } while (0)
@@ -102,8 +103,8 @@ int main(int argc, char **argv)
     td.format = GR_FORMAT_R8G8B8A8_UNORM;
     td.width = kSize;
     td.height = kSize;
-    td.usage = GR_TEXTURE_USAGE_COLOR_ATTACHMENT | GR_TEXTURE_USAGE_SAMPLED;
-    CHECK_EQ(gr_texture_create(device, &td, &bad), GR_ERROR_UNSUPPORTED); /* no SRVs yet */
+    td.usage = GR_TEXTURE_USAGE_COLOR_ATTACHMENT | GR_TEXTURE_USAGE_STORAGE;
+    CHECK_EQ(gr_texture_create(device, &td, &bad), GR_ERROR_UNSUPPORTED); /* no storage images yet */
     td.usage = GR_TEXTURE_USAGE_COLOR_ATTACHMENT | GR_TEXTURE_USAGE_TRANSFER_SRC;
     CHECK_EQ(gr_texture_create(device, &td, &texture), GR_OK);
     memset(&vd, 0, sizeof(vd));
@@ -388,7 +389,9 @@ int main(int argc, char **argv)
         CHECK_EQ(gr_buffer_create(device, &bd, &dev_buf), GR_OK);
         CHECK_EQ(gr_buffer_write(dev_buf, 0, (gr_span_u8){ (const uint8_t *)indices, sizeof(indices) }),
                  GR_ERROR_UNSUPPORTED); /* device memory needs a staging copy */
-        bd.usage = GR_BUFFER_USAGE_STORAGE;
+        bd.usage = GR_BUFFER_USAGE_STORAGE; /* 6 bytes: a byte-address buffer is whole words */
+        CHECK_EQ(gr_buffer_create(device, &bd, &refused), GR_ERROR_INVALID_ARGUMENT);
+        bd.usage = GR_BUFFER_USAGE_INDIRECT;
         CHECK_EQ(gr_buffer_create(device, &bd, &refused), GR_ERROR_UNSUPPORTED);
 
         memset(attrs, 0, sizeof(attrs));
@@ -425,16 +428,6 @@ int main(int argc, char **argv)
         pd.depth_write = 1;
         pd.depth_compare = GR_COMPARE_GREATER_EQUAL;
         CHECK_EQ(gr_pipeline_create(device, &pd, &with_depth), GR_OK);
-        {
-            /* Every pipeline is declared; the commit seals the set. */
-            uint32_t declared = 0, committed = 0;
-            CHECK_EQ(gr_pipeline_commit(device, NULL), GR_OK);
-            CHECK_EQ(gr_pipeline_stats(device, &declared, &committed), GR_OK);
-            CHECK_EQ(declared, 3);
-            CHECK_EQ(committed, 3);
-            CHECK_EQ(gr_pipeline_create(device, &pd, &refused), GR_ERROR_NOT_READY);
-            CHECK_EQ(gr_pipeline_commit(device, NULL), GR_ERROR_NOT_READY);
-        }
 
         memset(&td, 0, sizeof(td));
         td.head.size = (uint32_t)sizeof(td);
@@ -545,6 +538,245 @@ int main(int argc, char **argv)
                    variant ? "colour-only" : "depth-tested", probe[0], probe[1], probe[2], probe[3],
                    depth_values[(kTri / 2) * kTri + kTri / 2], rgba[0], rgba[1], rgba[2], depth_values[0]);
         }
+        gr_shader_library_close(library);
+    }
+
+
+    /* The bindless table: fixed samplers in slots 0..12, a user sampler after them, a storage
+     * buffer that core/frame_setup writes through g_buffers[], and a sampled texture core/tonemap
+     * reads through g_tex2d_f4[] with GRAIL_SAMPLER_LINEAR_CLAMP. */
+    {
+        enum { kCount = 256, kTone = 16 };
+        gr_handle bindless = gr_device_bindless(device);
+        gr_bindless_info info;
+        gr_sampler_desc sd;
+        gr_handle sampler = GR_NULL_HANDLE, storage = GR_NULL_HANDLE, cs = GR_NULL_HANDLE;
+        gr_handle compute = GR_NULL_HANDLE, tone_vs = GR_NULL_HANDLE, tone_fs = GR_NULL_HANDLE, tone = GR_NULL_HANDLE;
+        gr_handle hdr = GR_NULL_HANDLE, hdr_view = GR_NULL_HANDLE, out = GR_NULL_HANDLE, out_view = GR_NULL_HANDLE;
+        gr_handle library = GR_NULL_HANDLE, ccmd = GR_NULL_HANDLE;
+        gr_shader_library_desc ld;
+        gr_buffer_desc bd;
+        gr_pipeline_desc pd;
+        gr_frame_constants constants;
+        gr_format color = GR_FORMAT_R8G8B8A8_UNORM;
+        uint32_t slot = GR_BINDLESS_INDEX_NONE, storage_slot, hdr_slot, i, wrong = 0;
+        uint32_t values[kCount];
+        static float texels[kTone * kTone * 4];
+        static uint8_t toned[kTone * kTone * 4];
+        uint64_t value = 0;
+        gr_result ws = GR_ERROR_BACKEND;
+
+        CHECK(bindless != GR_NULL_HANDLE);
+        memset(&info, 0, sizeof(info));
+        info.head.size = (uint32_t)sizeof(info);
+        CHECK_EQ(gr_bindless_get_info(bindless, &info), GR_OK);
+        CHECK_EQ(info.capacity[GR_TABLE_SAMPLED_IMAGES], GR_BINDLESS_CAP_SAMPLED_IMAGES);
+        CHECK_EQ(info.capacity[GR_TABLE_STORAGE_BUFFERS], GR_BINDLESS_CAP_STORAGE_BUFFERS);
+        CHECK_EQ(info.high_water[GR_TABLE_SAMPLERS], GR_SAMPLER_SLOT_COUNT);
+        memset(&sd, 0, sizeof(sd));
+        sd.head.size = (uint32_t)sizeof(sd);
+        sd.min_filter = sd.mag_filter = GR_FILTER_NEAREST;
+        CHECK_EQ(gr_sampler_create(device, &sd, &sampler, &slot), GR_OK);
+        CHECK_EQ(slot, GR_SAMPLER_SLOT_COUNT); /* the first slot after the fixed thirteen */
+
+        memset(&ld, 0, sizeof(ld));
+        ld.head.size = (uint32_t)sizeof(ld);
+        ld.root.data = artifacts;
+        ld.root.len = (uint32_t)strlen(artifacts);
+        CHECK_EQ(gr_shader_library_open(&ld, &library), GR_OK);
+        CHECK_EQ(gr_shader_create_resolved(device, library, (gr_str){ "core/frame_setup", 16, 0 },
+                                           GR_SHADER_STAGE_COMPUTE, 0, &cs), GR_OK);
+        CHECK_EQ(gr_shader_create_resolved(device, library, (gr_str){ "core/fullscreen", 15, 0 },
+                                           GR_SHADER_STAGE_VERTEX, 0, &tone_vs), GR_OK);
+        /* tonemap's default permutation: exposure on, linear output. */
+        CHECK_EQ(gr_shader_create_resolved(device, library, (gr_str){ "core/tonemap", 12, 0 },
+                                           GR_SHADER_STAGE_FRAGMENT, 0, &tone_fs), GR_OK);
+        memset(&pd, 0, sizeof(pd));
+        pd.head.size = (uint32_t)sizeof(pd);
+        pd.shaders[GR_SHADER_STAGE_COMPUTE] = cs;
+        pd.shaders[GR_SHADER_STAGE_VERTEX] = tone_vs;
+        CHECK_EQ(gr_pipeline_create(device, &pd, &compute), GR_ERROR_INVALID_ARGUMENT); /* two stages */
+        pd.shaders[GR_SHADER_STAGE_VERTEX] = GR_NULL_HANDLE;
+        CHECK_EQ(gr_pipeline_create(device, &pd, &compute), GR_OK);
+        memset(&pd, 0, sizeof(pd));
+        pd.head.size = (uint32_t)sizeof(pd);
+        pd.shaders[GR_SHADER_STAGE_VERTEX] = tone_vs;
+        pd.shaders[GR_SHADER_STAGE_FRAGMENT] = tone_fs;
+        pd.color_formats = &color;
+        pd.color_count = 1;
+        pd.topology = GR_TOPOLOGY_TRIANGLE_LIST;
+        pd.front_face_ccw = 1;
+        pd.samples = 1;
+        CHECK_EQ(gr_pipeline_create(device, &pd, &tone), GR_OK);
+        {
+            /* Every pipeline is declared; the commit seals the set. */
+            uint32_t declared = 0, committed = 0;
+            CHECK_EQ(gr_pipeline_commit(device, NULL), GR_OK);
+            CHECK_EQ(gr_pipeline_stats(device, &declared, &committed), GR_OK);
+            CHECK_EQ(declared, 5);
+            CHECK_EQ(committed, 5);
+            gr_handle late = GR_NULL_HANDLE;
+            CHECK_EQ(gr_pipeline_create(device, &pd, &late), GR_ERROR_NOT_READY);
+            CHECK_EQ(gr_pipeline_commit(device, NULL), GR_ERROR_NOT_READY);
+        }
+
+        memset(&bd, 0, sizeof(bd));
+        bd.head.size = (uint32_t)sizeof(bd);
+        bd.size = kCount * 4u;
+        bd.usage = GR_BUFFER_USAGE_STORAGE;
+        bd.memory = GR_MEMORY_UPLOAD; /* host-visible: a custom heap the GPU may write */
+        CHECK_EQ(gr_buffer_create(device, &bd, &storage), GR_OK);
+        storage_slot = gr_buffer_bindless_index(storage);
+        CHECK(storage_slot != GR_BINDLESS_INDEX_NONE);
+        memset(values, 0, sizeof(values));
+        CHECK_EQ(gr_buffer_write(storage, 0, (gr_span_u8){ (const uint8_t *)values, sizeof(values) }), GR_OK);
+
+        /* The frame block must carry the layout version, or both shaders refuse to run. */
+        memset(&constants, 0, sizeof(constants));
+        constants.version = GR_FRAME_CONSTANTS_VERSION;
+        constants.exposure[2] = 2.0f;
+        CHECK_EQ(gr_frame_constants_write(device, 0, &constants), GR_OK);
+
+        /* A 16x16 HDR ramp for the tonemapper: r = x/4, g = y/4, b = 0.5, a = 1. */
+        for (i = 0; i < kTone * kTone; ++i) {
+            texels[i * 4 + 0] = (float)(i % kTone) / 4.0f;
+            texels[i * 4 + 1] = (float)(i / kTone) / 4.0f;
+            texels[i * 4 + 2] = 0.5f;
+            texels[i * 4 + 3] = 1.0f;
+        }
+        memset(&td, 0, sizeof(td));
+        td.head.size = (uint32_t)sizeof(td);
+        td.type = GR_TEXTURE_2D;
+        td.width = kTone;
+        td.height = kTone;
+        td.format = GR_FORMAT_R32G32B32A32_FLOAT;
+        td.usage = GR_TEXTURE_USAGE_SAMPLED | GR_TEXTURE_USAGE_TRANSFER_DST;
+        CHECK_EQ(gr_texture_create(device, &td, &hdr), GR_OK);
+        CHECK_EQ(gr_texture_write(hdr, 0, 0, 0, 0, kTone, kTone,
+                                  (gr_span_u8){ (const uint8_t *)texels, sizeof(texels) }), GR_OK);
+        memset(&vd, 0, sizeof(vd));
+        vd.head.size = (uint32_t)sizeof(vd);
+        vd.type = GR_VIEW_2D;
+        vd.texture = hdr;
+        CHECK_EQ(gr_texture_view_create(device, &vd, &hdr_view), GR_OK);
+        hdr_slot = gr_texture_view_bindless_sampled(hdr_view);
+        CHECK(hdr_slot != GR_BINDLESS_INDEX_NONE);
+        td.format = GR_FORMAT_R8G8B8A8_UNORM;
+        td.usage = GR_TEXTURE_USAGE_COLOR_ATTACHMENT | GR_TEXTURE_USAGE_TRANSFER_SRC;
+        CHECK_EQ(gr_texture_create(device, &td, &out), GR_OK);
+        vd.texture = out;
+        CHECK_EQ(gr_texture_view_create(device, &vd, &out_view), GR_OK);
+        CHECK_EQ(gr_texture_view_bindless_sampled(out_view), GR_BINDLESS_INDEX_NONE); /* not SAMPLED */
+
+        CHECK_EQ(gr_cmd_alloc(&cai, &ccmd), GR_OK);
+        {
+            gr_barrier barriers[2];
+            uint32_t push[4] = { storage_slot, kCount, 12345u, 0 };
+            uint32_t tone_push[4] = { hdr_slot, 1, 0, 0 };
+            gr_color_attachment ca;
+            gr_render_begin rb3;
+            gr_draw d3;
+            gr_submit sub;
+            CHECK_EQ(gr_cmd_begin(ccmd), GR_OK);
+            CHECK_EQ(gr_cmd_dispatch(ccmd, 4, 1, 1), GR_ERROR_NOT_READY); /* no pipeline */
+            memset(barriers, 0, sizeof(barriers));
+            barriers[0].resource = storage;
+            barriers[0].src_state = GR_STATE_GENERAL;
+            barriers[0].dst_state = GR_STATE_GENERAL;
+            barriers[1].resource = hdr;
+            barriers[1].src_state = GR_STATE_UNDEFINED;
+            barriers[1].dst_state = GR_STATE_SHADER_READ;
+            CHECK_EQ(gr_cmd_barrier(ccmd, barriers, 2), GR_OK);
+            CHECK_EQ(gr_cmd_bind_pipeline(ccmd, compute), GR_OK);
+            CHECK_EQ(gr_cmd_push_constants(ccmd, 0, (gr_span_u8){ (const uint8_t *)push, sizeof(push) }), GR_OK);
+            memset(&d3, 0, sizeof(d3));
+            d3.head.size = (uint32_t)sizeof(d3);
+            d3.vertex_count = 3;
+            d3.instance_count = 1;
+            CHECK_EQ(gr_cmd_draw(ccmd, &d3), GR_ERROR_NOT_READY); /* a compute pipeline cannot draw */
+            CHECK_EQ(gr_cmd_dispatch(ccmd, 0, 1, 1), GR_ERROR_INVALID_ARGUMENT);
+            CHECK_EQ(gr_cmd_dispatch(ccmd, (kCount + 63) / 64, 1, 1), GR_OK);
+            CHECK_EQ(gr_cmd_barrier(ccmd, barriers, 1), GR_OK); /* write visibility (UAV barrier) */
+
+            barriers[0].resource = out;
+            barriers[0].src_state = GR_STATE_UNDEFINED;
+            barriers[0].dst_state = GR_STATE_COLOR_ATTACHMENT;
+            CHECK_EQ(gr_cmd_barrier(ccmd, barriers, 1), GR_OK);
+            memset(&ca, 0, sizeof(ca));
+            ca.view = out_view;
+            ca.load_op = GR_LOAD_CLEAR;
+            ca.store_op = GR_STORE_STORE;
+            memset(&rb3, 0, sizeof(rb3));
+            rb3.head.size = (uint32_t)sizeof(rb3);
+            rb3.colors = &ca;
+            rb3.color_count = 1;
+            CHECK_EQ(gr_cmd_begin_render(ccmd, &rb3), GR_OK);
+            CHECK_EQ(gr_cmd_bind_pipeline(ccmd, tone), GR_OK);
+            CHECK_EQ(gr_cmd_push_constants(ccmd, 0, (gr_span_u8){ (const uint8_t *)tone_push, sizeof(tone_push) }), GR_OK);
+            memset(&d3, 0, sizeof(d3));
+            d3.head.size = (uint32_t)sizeof(d3);
+            d3.vertex_count = 3;
+            d3.instance_count = 1;
+            CHECK_EQ(gr_cmd_draw(ccmd, &d3), GR_OK);
+            CHECK_EQ(gr_cmd_end_render(ccmd), GR_OK);
+            barriers[0].src_state = GR_STATE_COLOR_ATTACHMENT;
+            barriers[0].dst_state = GR_STATE_TRANSFER_SRC;
+            CHECK_EQ(gr_cmd_barrier(ccmd, barriers, 1), GR_OK);
+            CHECK_EQ(gr_cmd_end(ccmd), GR_OK);
+            memset(&sub, 0, sizeof(sub));
+            sub.head.size = (uint32_t)sizeof(sub);
+            sub.queue = queue;
+            sub.cmds = &ccmd;
+            sub.cmd_count = 1;
+            CHECK_EQ(gr_submit_commands(&sub, &value), GR_OK);
+            CHECK_EQ(gr_fence_wait(fence, value, 5000000000ull, &ws), GR_OK);
+        }
+
+        /* Every word is the shader's hash of its index, computed here the same way. */
+        CHECK_EQ(gr_buffer_read(storage, 0, (gr_mut_span_u8){ (uint8_t *)values, sizeof(values) }), GR_OK);
+        for (i = 0; i < kCount; ++i) {
+            uint32_t v = 12345u ^ (i * 0x9E3779B9u);
+            v ^= v >> 16u;
+            v *= 0x7FEB352Du;
+            v ^= v >> 15u;
+            if (values[i] != v)
+                ++wrong;
+        }
+        CHECK_EQ(wrong, 0);
+        printf("d3d12-backend: compute frame_setup wrote %u/%u words exactly (storage slot %u), word 1 = 0x%08x\n",
+               (unsigned)(kCount - wrong), (unsigned)kCount, storage_slot, values[1]);
+
+        /* The tonemapper samples texel centres: exposure 2, ACES, linear output. */
+        CHECK_EQ(gr_texture_read(out, 0, 0, 0, 0, kTone, kTone, GR_STATE_TRANSFER_SRC,
+                                 (gr_mut_span_u8){ toned, sizeof(toned) }), GR_OK);
+        wrong = 0;
+        for (i = 0; i < kTone * kTone; ++i) {
+            uint32_t c;
+            for (c = 0; c < 3; ++c) {
+                double x = texels[i * 4 + c] * 2.0;
+                double m = (x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14);
+                int expect = (int)floor((m < 0 ? 0 : m > 1 ? 1 : m) * 255.0 + 0.5);
+                if (abs((int)toned[i * 4 + c] - expect) > 1)
+                    ++wrong;
+            }
+            if (toned[i * 4 + 3] != 255)
+                ++wrong;
+        }
+        CHECK_EQ(wrong, 0);
+        printf("d3d12-backend: tonemap of the sampled HDR ramp matches ACES within 1/255 on %u texels "
+               "(texel 5,3 = %u %u %u)\n", (unsigned)(kTone * kTone), toned[(3 * kTone + 5) * 4],
+               toned[(3 * kTone + 5) * 4 + 1], toned[(3 * kTone + 5) * 4 + 2]);
+
+        /* Deferred release: the sampler's slot comes back only once its value has completed. */
+        CHECK_EQ(gr_device_retire(device, sampler, value + 1000), GR_OK);
+        CHECK_EQ(gr_device_collect(device), GR_OK);
+        CHECK_EQ(gr_bindless_get_info(bindless, &info), GR_OK);
+        CHECK_EQ(info.releases_pending, 1);
+        CHECK_EQ(gr_device_retire(device, storage, value), GR_OK);
+        CHECK_EQ(gr_device_collect(device), GR_OK);
+        CHECK_EQ(gr_bindless_get_info(bindless, &info), GR_OK);
+        CHECK_EQ(info.releases_pending, 1); /* the storage buffer went; the sampler still waits */
+        CHECK_EQ(gr_buffer_bindless_index(storage), GR_BINDLESS_INDEX_NONE);
         gr_shader_library_close(library);
     }
 

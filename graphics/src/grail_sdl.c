@@ -13,10 +13,21 @@
 #include <stdio.h>
 #include <string.h>
 
-#if !defined(_WIN32) && defined(__has_include)
+#if defined(_WIN32)
+/* Windows: SDL3.dll through LoadLibrary, beside the executable or on the DLL search path. */
+#  include <windows.h>
+#  undef CreateWindow /* a windows.h macro; the field below is SDL_CreateWindow */
+#  define GRAIL_HAVE_DLOPEN 1
+#  define sdl_open(name) ((void *)LoadLibraryA(name))
+#  define sdl_sym(lib, name) ((void *)GetProcAddress((HMODULE)(lib), name))
+#  define sdl_close(lib) FreeLibrary((HMODULE)(lib))
+#elif defined(__has_include)
 #  if __has_include(<dlfcn.h>)
 #    include <dlfcn.h>
 #    define GRAIL_HAVE_DLOPEN 1
+#    define sdl_open(name) dlopen(name, RTLD_NOW | RTLD_LOCAL)
+#    define sdl_sym(lib, name) dlsym(lib, name)
+#    define sdl_close(lib) dlclose(lib)
 #  endif
 #endif
 #if !defined(GRAIL_HAVE_DLOPEN)
@@ -35,6 +46,10 @@ typedef struct sdl_api {
     const char *const *(*Vulkan_GetInstanceExtensions)(uint32_t *count);
     int (*Vulkan_CreateSurface)(void *window, void *instance, void *allocator, uint64_t *surface);
     void (*Vulkan_DestroySurface)(void *instance, uint64_t surface, void *allocator);
+    /* The window's platform handles (HWND/HINSTANCE on Windows), for backends that are not
+     * Vulkan. Optional: resolved when present, required only where a D3D12 swapchain asks. */
+    uint32_t (*GetWindowProperties)(void *window);
+    void *(*GetPointerProperty)(uint32_t props, const char *name, void *default_value);
 } sdl_api;
 
 static sdl_api g_sdl;
@@ -47,14 +62,18 @@ static gr_window_backend g_backend = GR_WINDOW_BACKEND_NULL;
 
 int gr_sdl_available(void)
 {
+#if defined(_WIN32)
+    static const char *kCandidates[] = { "SDL3.dll", NULL };
+#else
     static const char *kCandidates[] = { "libSDL3.so.0", "libSDL3.so", NULL };
+#endif
     const char *missing = NULL;
     int i;
 
     if (g_sdl_state != 0)
         return g_sdl_state > 0;
     for (i = 0; kCandidates[i]; ++i) {
-        g_sdl.library = dlopen(kCandidates[i], RTLD_NOW | RTLD_LOCAL);
+        g_sdl.library = sdl_open(kCandidates[i]);
         if (g_sdl.library)
             break;
     }
@@ -64,7 +83,7 @@ int gr_sdl_available(void)
     }
 #define SDL_RESOLVE(field, name)                                                     \
     do {                                                                             \
-        *(void **)(&g_sdl.field) = dlsym(g_sdl.library, name);                        \
+        *(void **)(&g_sdl.field) = sdl_sym(g_sdl.library, name);                      \
         if (!g_sdl.field && !missing)                                                 \
             missing = name;                                                          \
     } while (0)
@@ -76,10 +95,12 @@ int gr_sdl_available(void)
     SDL_RESOLVE(Vulkan_CreateSurface, "SDL_Vulkan_CreateSurface");
     SDL_RESOLVE(Vulkan_DestroySurface, "SDL_Vulkan_DestroySurface");
 #undef SDL_RESOLVE
+    *(void **)(&g_sdl.GetWindowProperties) = sdl_sym(g_sdl.library, "SDL_GetWindowProperties");
+    *(void **)(&g_sdl.GetPointerProperty) = sdl_sym(g_sdl.library, "SDL_GetPointerProperty");
     if (missing) {
         /* A partial resolution is a loader version this file was not written for: refuse rather
          * than call a NULL entry point. */
-        dlclose(g_sdl.library);
+        sdl_close(g_sdl.library);
         memset(&g_sdl, 0, sizeof(g_sdl));
         g_sdl_state = -1;
         return 0;
@@ -107,7 +128,8 @@ int gr_sdl_backend_is_sdl3(void) { return g_backend == GR_WINDOW_BACKEND_SDL3; }
 gr_result gr_sdl_window_create(const gr_window_desc *desc, gr_handle *out_window)
 {
     char title[GR_SDL_WINDOW_NAME_MAX];
-    uint64_t flags = SDL_WINDOW_VULKAN;
+    /* Only a Vulkan surface needs SDL's Vulkan loader; a D3D12 window must not require it. */
+    uint64_t flags = (desc->flags & GR_WINDOW_VULKAN) ? SDL_WINDOW_VULKAN : 0;
     gr_sdl_window *object;
     void *window;
     gr_handle handle;
@@ -200,6 +222,17 @@ gr_result gr_sdl_window_get_native(gr_handle window_handle, gr_window_native *ou
     if (!object || !out)
         return GR_ERROR_INVALID_ARGUMENT;
     memset(out, 0, sizeof(*out));
+    /* The handles are typed by the backend that will consume them (grail_window.h). */
+    if (gr_active_backend() == GR_BACKEND_D3D12) {
+        uint32_t props;
+        if (!g_sdl.GetWindowProperties || !g_sdl.GetPointerProperty)
+            return GR_ERROR_UNSUPPORTED;
+        props = g_sdl.GetWindowProperties(object->window);
+        out->backend = GR_BACKEND_D3D12;
+        out->handle_a = g_sdl.GetPointerProperty(props, "SDL.window.win32.hwnd", NULL);
+        out->handle_b = g_sdl.GetPointerProperty(props, "SDL.window.win32.instance", NULL);
+        return out->handle_a ? GR_OK : GR_ERROR_UNSUPPORTED; /* not a Win32 window */
+    }
     out->backend = GR_BACKEND_VULKAN;
     out->handle_a = object->window;
     return GR_OK;

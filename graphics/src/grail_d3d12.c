@@ -11,10 +11,13 @@
  * that set targets and clear, viewport/scissor, submit, a synchronous texture readback, DXIL
  * shaders, graphics pipelines on the contract root signature (push constants and frame
  * constants), push constants, frame-constant slots, depth attachments and depth state, vertex
- * input matched to reflection, upload/readback/device buffers, vertex and index buffers, and draws
- * (plain and indexed). Everything else - MSAA, storage buffers, indirect draws, compute and mesh
- * pipelines, bindless tables, swapchains, semaphores and non-graphics queues - returns
- * GR_ERROR_UNSUPPORTED rather than an approximation.
+ * input matched to reflection, upload/readback/device buffers, vertex and index buffers, draws
+ * (plain and indexed), the bindless tables (sampled images, samplers including the thirteen fixed
+ * ones, storage buffers), texture upload, compute pipelines and dispatch, deferred release,
+ * and flip-model swapchains on an SDL3 window's HWND with acquire, present and resize.
+ * Everything else - MSAA, storage images, indirect draws and dispatches, mesh pipelines,
+ * semaphores and non-graphics queues - returns GR_ERROR_UNSUPPORTED rather than an
+ * approximation.
  *
  * Ownership: the device owns every object it creates and releases them, newest first, in
  * gr_device_destroy. State: the ABI's explicit barriers are the only state changes; a barrier
@@ -29,13 +32,17 @@
 #include <d3d12.h>
 #include <dxgi1_4.h>
 #include "../include/grail/grail_bindless.h"
+#include "../include/grail/grail_window.h"
 #include <stdint.h>
+#include <limits.h>
 
 #define D3D_RTV_MAX 256u
 #define D3D_FRAME_SLOTS 2u
 #define D3D_DSV_MAX 64u
 #define D3D_VERTEX_SLOTS 8u
 #define D3D_VERTEX_ATTRIBUTES 16u
+#define D3D_DECAY_MAX 64u
+#define D3D_SWAP_MAX 16u
 
 /* ---- the implemented slice --------------------------------------------------------------- */
 
@@ -71,6 +78,17 @@ struct d3d_device {
     d3d_node *objects;           /* owned objects, newest first */
     D3D_FEATURE_LEVEL max_level; /* the highest level the driver supports, reported in caps */
     ID3D12RootSignature *root;   /* the contract's signature, built with the first pipeline */
+    /* The bindless namespace: one shader-visible CBV/SRV/UAV heap split into the sampled-image,
+     * storage-image and storage-buffer tables, and one sampler heap. Slots are handed out by
+     * the resource calls and recycled after gr_device_retire's value completes. */
+    ID3D12DescriptorHeap *resource_heap, *sampler_heap;
+    uint32_t resource_stride, sampler_stride;
+    uint8_t *slot_used[GR_BINDING_COUNT];
+    uint32_t high_water[GR_BINDING_COUNT];
+    struct d3d_retired *retired; /* objects whose release waits for a queue value */
+    uint64_t retired_pending;
+    gr_handle bindless_handle;
+    d3d_node bindless_node;
     ID3D12Resource *frame;       /* frame constants, one 256-byte-aligned slot per frame */
     uint8_t *frame_mapped;
     uint32_t frame_stride;
@@ -86,6 +104,7 @@ typedef struct d3d_texture {
     gr_format format;
     DXGI_FORMAT dxgi;
     uint32_t width, height, bytes_per_pixel;
+    uint32_t usage;
     D3D12_RESOURCE_STATES state; /* the state the last recorded barrier leaves it in */
 } d3d_texture;
 
@@ -94,6 +113,7 @@ typedef struct d3d_view {
     d3d_texture *texture;
     uint32_t rtv_index;          /* D3D_RTV_MAX: not a render-target view */
     uint32_t dsv_index;          /* D3D_DSV_MAX: not a depth-stencil view */
+    uint32_t sampled_slot;       /* GR_BINDLESS_INDEX_NONE unless the texture is SAMPLED */
 } d3d_view;
 
 typedef struct d3d_buffer {
@@ -104,7 +124,35 @@ typedef struct d3d_buffer {
     uint32_t usage;
     uint32_t memory;             /* gr_memory */
     uint8_t *mapped;             /* persistently mapped for UPLOAD and READBACK */
+    uint32_t storage_slot;       /* GR_BINDLESS_INDEX_NONE unless STORAGE */
+    D3D12_RESOURCE_STATES state; /* tracked for storage buffers; decays to COMMON at submit */
+    int transitions;             /* 0: an UPLOAD/READBACK heap buffer, which never transitions */
 } d3d_buffer;
+
+typedef struct d3d_swapchain {
+    d3d_node node;
+    d3d_device *device;
+    IDXGISwapChain3 *swapchain;
+    gr_format format;
+    uint32_t width, height, image_count;
+    UINT sync_interval, present_flags;
+    struct d3d_texture *images[D3D_SWAP_MAX];
+    struct d3d_view *views[D3D_SWAP_MAX];
+    gr_handle image_handles[D3D_SWAP_MAX], view_handles[D3D_SWAP_MAX];
+    uint64_t image_done[D3D_SWAP_MAX]; /* queue value after which the image may be rendered again */
+    uint32_t acquired;                 /* D3D_SWAP_MAX: nothing acquired */
+} d3d_swapchain;
+
+typedef struct d3d_sampler {
+    d3d_node node;
+    uint32_t slot;
+} d3d_sampler;
+
+typedef struct d3d_retired {
+    struct d3d_retired *next;
+    gr_handle object;
+    uint64_t after_value;
+} d3d_retired;
 
 typedef struct d3d_pool {
     d3d_node node;
@@ -121,6 +169,8 @@ typedef struct d3d_cmd {
     uint64_t last_submit;        /* queue value that must complete before the allocator resets */
     struct d3d_pipeline *pipeline; /* bound in this recording, or NULL */
     uint32_t frame_slot;
+    d3d_buffer *decay[D3D_DECAY_MAX]; /* storage buffers transitioned in this recording */
+    uint32_t decay_count;
 } d3d_cmd;
 
 typedef struct d3d_shader {
@@ -138,6 +188,7 @@ typedef struct d3d_pipeline {
     d3d_node node;
     d3d_device *device;
     ID3D12PipelineState *pso;
+    int compute;
     D3D_PRIMITIVE_TOPOLOGY topology;
     uint32_t strides[D3D_VERTEX_SLOTS]; /* per vertex-buffer slot, from the pipeline's bindings */
     uint32_t slot_mask;
@@ -247,6 +298,120 @@ static gr_result d3d_signal(d3d_queue *queue, uint64_t *out_value)
     return GR_OK;
 }
 
+static const uint32_t d3d_table_capacity[GR_BINDING_COUNT] = {
+    GR_BINDLESS_CAP_SAMPLED_IMAGES, GR_BINDLESS_CAP_STORAGE_IMAGES, GR_BINDLESS_CAP_SAMPLERS,
+    GR_BINDLESS_CAP_STORAGE_BUFFERS, 0 /* acceleration structures: not on this backend yet */
+};
+
+/* Where each resource table starts in the shader-visible resource heap. */
+static uint32_t d3d_table_base(uint32_t table)
+{
+    switch (table) {
+    case GR_BINDING_SAMPLED_IMAGES: return 0;
+    case GR_BINDING_STORAGE_IMAGES: return GR_BINDLESS_CAP_SAMPLED_IMAGES;
+    case GR_BINDING_STORAGE_BUFFERS: return GR_BINDLESS_CAP_SAMPLED_IMAGES + GR_BINDLESS_CAP_STORAGE_IMAGES;
+    default: return 0;
+    }
+}
+
+static uint32_t d3d_slot_alloc(d3d_device *dev, uint32_t table, uint32_t first)
+{
+    uint32_t i;
+    for (i = first; i < d3d_table_capacity[table]; ++i)
+        if (!dev->slot_used[table][i]) {
+            dev->slot_used[table][i] = 1;
+            if (i + 1 > dev->high_water[table])
+                dev->high_water[table] = i + 1;
+            return i;
+        }
+    return GR_BINDLESS_INDEX_NONE;
+}
+
+static D3D12_CPU_DESCRIPTOR_HANDLE d3d_resource_cpu(d3d_device *dev, uint32_t table, uint32_t slot)
+{
+    D3D12_CPU_DESCRIPTOR_HANDLE cpu;
+    dev->resource_heap->lpVtbl->GetCPUDescriptorHandleForHeapStart(dev->resource_heap, &cpu);
+    cpu.ptr += (SIZE_T)(d3d_table_base(table) + slot) * dev->resource_stride;
+    return cpu;
+}
+
+static D3D12_FILTER d3d_filter(const gr_sampler_desc *desc)
+{
+    D3D12_FILTER_TYPE min = desc->min_filter == GR_FILTER_NEAREST ? D3D12_FILTER_TYPE_POINT : D3D12_FILTER_TYPE_LINEAR;
+    D3D12_FILTER_TYPE mag = desc->mag_filter == GR_FILTER_NEAREST ? D3D12_FILTER_TYPE_POINT : D3D12_FILTER_TYPE_LINEAR;
+    D3D12_FILTER_TYPE mip = desc->mip_filter == GR_FILTER_NEAREST ? D3D12_FILTER_TYPE_POINT : D3D12_FILTER_TYPE_LINEAR;
+    D3D12_FILTER_REDUCTION_TYPE reduction = desc->reduction == GR_REDUCTION_COMPARE ? D3D12_FILTER_REDUCTION_TYPE_COMPARISON
+                                            : desc->reduction == GR_REDUCTION_MIN   ? D3D12_FILTER_REDUCTION_TYPE_MINIMUM
+                                            : desc->reduction == GR_REDUCTION_MAX   ? D3D12_FILTER_REDUCTION_TYPE_MAXIMUM
+                                                                                    : D3D12_FILTER_REDUCTION_TYPE_STANDARD;
+    if (desc->max_anisotropy > 1.0f)
+        return D3D12_ENCODE_ANISOTROPIC_FILTER(reduction);
+    return D3D12_ENCODE_BASIC_FILTER(min, mag, mip, reduction);
+}
+
+static D3D12_TEXTURE_ADDRESS_MODE d3d_address(gr_address_mode mode)
+{
+    switch (mode) {
+    case GR_ADDRESS_CLAMP: return D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    case GR_ADDRESS_MIRROR: return D3D12_TEXTURE_ADDRESS_MODE_MIRROR;
+    case GR_ADDRESS_BORDER: return D3D12_TEXTURE_ADDRESS_MODE_BORDER;
+    default: return D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+    }
+}
+
+static void d3d_write_sampler(d3d_device *dev, uint32_t slot, const gr_sampler_desc *desc)
+{
+    D3D12_SAMPLER_DESC sd;
+    D3D12_CPU_DESCRIPTOR_HANDLE cpu;
+    memset(&sd, 0, sizeof(sd));
+    sd.Filter = d3d_filter(desc);
+    sd.AddressU = d3d_address(desc->address_u);
+    sd.AddressV = d3d_address(desc->address_v);
+    sd.AddressW = d3d_address(desc->address_w);
+    sd.MipLODBias = desc->mip_lod_bias;
+    sd.MaxAnisotropy = desc->max_anisotropy > 1.0f ? (UINT)desc->max_anisotropy : 1u;
+    sd.ComparisonFunc = desc->reduction == GR_REDUCTION_COMPARE ? D3D12_COMPARISON_FUNC_GREATER_EQUAL
+                                                                : D3D12_COMPARISON_FUNC_NEVER;
+    sd.MinLOD = desc->min_lod;
+    sd.MaxLOD = desc->max_lod > 0.0f ? desc->max_lod : D3D12_FLOAT32_MAX;
+    dev->sampler_heap->lpVtbl->GetCPUDescriptorHandleForHeapStart(dev->sampler_heap, &cpu);
+    cpu.ptr += (SIZE_T)slot * dev->sampler_stride;
+    ID3D12Device_CreateSampler(dev->device, &sd, cpu);
+}
+
+static gr_result d3d_bindless_init(d3d_device *dev)
+{
+    D3D12_DESCRIPTOR_HEAP_DESC hd;
+    uint32_t t, i;
+    for (t = 0; t < GR_BINDING_COUNT; ++t) {
+        dev->slot_used[t] = (uint8_t *)calloc(d3d_table_capacity[t] ? d3d_table_capacity[t] : 1, 1);
+        if (!dev->slot_used[t])
+            return GR_ERROR_OUT_OF_MEMORY;
+    }
+    memset(&hd, 0, sizeof(hd));
+    hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    hd.NumDescriptors = GR_BINDLESS_CAP_SAMPLED_IMAGES + GR_BINDLESS_CAP_STORAGE_IMAGES + GR_BINDLESS_CAP_STORAGE_BUFFERS;
+    hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    if (FAILED(ID3D12Device_CreateDescriptorHeap(dev->device, &hd, &IID_ID3D12DescriptorHeap,
+                                                 (void **)&dev->resource_heap)))
+        return GR_ERROR_UNSUPPORTED; /* the full-capacity table is the contract; it is not shrunk */
+    hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER;
+    hd.NumDescriptors = GR_BINDLESS_CAP_SAMPLERS;
+    if (FAILED(ID3D12Device_CreateDescriptorHeap(dev->device, &hd, &IID_ID3D12DescriptorHeap,
+                                                 (void **)&dev->sampler_heap)))
+        return GR_ERROR_UNSUPPORTED;
+    dev->resource_stride = ID3D12Device_GetDescriptorHandleIncrementSize(dev->device, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    dev->sampler_stride = ID3D12Device_GetDescriptorHandleIncrementSize(dev->device, D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
+    for (i = 0; i < GR_SAMPLER_SLOT_COUNT; ++i) {
+        gr_sampler_desc fixed;
+        gr_fixed_sampler(i, &fixed);
+        d3d_write_sampler(dev, i, &fixed);
+        dev->slot_used[GR_BINDING_SAMPLERS][i] = 1;
+    }
+    dev->high_water[GR_BINDING_SAMPLERS] = GR_SAMPLER_SLOT_COUNT;
+    return GR_OK;
+}
+
 gr_result gr_d3d12_abi_device_create(const gr_device_desc *desc, gr_handle *out_device)
 {
     d3d_device *dev;
@@ -344,12 +509,16 @@ gr_result gr_d3d12_abi_device_create(const gr_device_desc *desc, gr_handle *out_
                                                                     D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
     dev->dsv_stride = ID3D12Device_GetDescriptorHandleIncrementSize(dev->device,
                                                                     D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
+    status = d3d_bindless_init(dev);
+    if (status != GR_OK)
+        goto fail;
     *out_device = gr_object_insert(gr_objects(), GR_HANDLE_DEVICE, dev);
     if (*out_device == GR_NULL_HANDLE) {
         status = GR_ERROR_OUT_OF_MEMORY;
         goto fail;
     }
     dev->node.handle = *out_device;
+    dev->bindless_handle = gr_object_insert(gr_objects(), GR_HANDLE_BINDLESS, dev);
     status = d3d_own(dev, &dev->graphics->node, GR_HANDLE_QUEUE, dev->graphics, &dev->queue_handle);
     if (status != GR_OK) {
         gr_object_remove(gr_objects(), *out_device, GR_HANDLE_DEVICE);
@@ -358,6 +527,13 @@ gr_result gr_d3d12_abi_device_create(const gr_device_desc *desc, gr_handle *out_
     }
     return GR_OK;
 fail:
+    {
+        uint32_t t;
+        for (t = 0; t < GR_BINDING_COUNT; ++t)
+            free(dev->slot_used[t]);
+    }
+    if (dev->resource_heap) ID3D12DescriptorHeap_Release(dev->resource_heap);
+    if (dev->sampler_heap) ID3D12DescriptorHeap_Release(dev->sampler_heap);
     if (dev->frame) ID3D12Resource_Release(dev->frame);
     if (dev->dsv_heap) ID3D12DescriptorHeap_Release(dev->dsv_heap);
     if (dev->rtv_heap) ID3D12DescriptorHeap_Release(dev->rtv_heap);
@@ -378,6 +554,9 @@ static d3d_device *d3d_device_of(gr_handle handle)
     return (d3d_device *)d3d_get(handle, GR_HANDLE_DEVICE);
 }
 
+typedef struct d3d_swapchain d3d_swapchain_fwd;
+static void d3d_swap_release_images(struct d3d_swapchain *sc);
+
 static void d3d_release(d3d_node *node)
 {
     switch (node->type) {
@@ -392,10 +571,22 @@ static void d3d_release(d3d_node *node)
             v->texture->device->rtv_used[v->rtv_index] = 0;
         if (v->dsv_index < D3D_DSV_MAX)
             v->texture->device->dsv_used[v->dsv_index] = 0;
+        if (v->sampled_slot != GR_BINDLESS_INDEX_NONE)
+            v->texture->device->slot_used[GR_BINDING_SAMPLED_IMAGES][v->sampled_slot] = 0;
+        break;
+    }
+    case GR_HANDLE_SAMPLER:
+        break; /* the slot is released by the caller, which knows the device */
+    case GR_HANDLE_SWAPCHAIN: {
+        d3d_swapchain *sc = (d3d_swapchain *)node;
+        d3d_swap_release_images(sc);
+        IDXGISwapChain3_Release(sc->swapchain);
         break;
     }
     case GR_HANDLE_BUFFER: {
         d3d_buffer *b = (d3d_buffer *)node;
+        if (b->storage_slot != GR_BINDLESS_INDEX_NONE)
+            b->device->slot_used[GR_BINDING_STORAGE_BUFFERS][b->storage_slot] = 0;
         if (b->mapped)
             ID3D12Resource_Unmap(b->resource, 0, NULL);
         ID3D12Resource_Release(b->resource);
@@ -456,6 +647,20 @@ gr_result gr_d3d12_abi_device_destroy(gr_handle device_handle)
     }
     ID3D12DescriptorHeap_Release(dev->rtv_heap);
     ID3D12DescriptorHeap_Release(dev->dsv_heap);
+    ID3D12DescriptorHeap_Release(dev->resource_heap);
+    ID3D12DescriptorHeap_Release(dev->sampler_heap);
+    {
+        uint32_t t;
+        for (t = 0; t < GR_BINDING_COUNT; ++t)
+            free(dev->slot_used[t]);
+    }
+    while (dev->retired) {
+        d3d_retired *r = dev->retired;
+        dev->retired = r->next;
+        free(r);
+    }
+    if (dev->bindless_handle != GR_NULL_HANDLE)
+        gr_object_remove(gr_objects(), dev->bindless_handle, GR_HANDLE_BINDLESS);
     if (dev->root) ID3D12RootSignature_Release(dev->root);
     if (dev->frame) ID3D12Resource_Release(dev->frame);
     if (dev->adapter) IDXGIAdapter1_Release(dev->adapter);
@@ -548,7 +753,8 @@ gr_result gr_d3d12_abi_texture_create(gr_handle device_handle, const gr_texture_
     if (dxgi == DXGI_FORMAT_UNKNOWN || desc->type != GR_TEXTURE_2D || desc->mip_levels > 1 ||
         desc->array_layers > 1 || desc->samples > 1 ||
         (desc->usage & ~(uint32_t)(GR_TEXTURE_USAGE_COLOR_ATTACHMENT | GR_TEXTURE_USAGE_TRANSFER_SRC |
-                                   GR_TEXTURE_USAGE_TRANSFER_DST | GR_TEXTURE_USAGE_DEPTH_ATTACHMENT)))
+                                   GR_TEXTURE_USAGE_TRANSFER_DST | GR_TEXTURE_USAGE_DEPTH_ATTACHMENT |
+                                   GR_TEXTURE_USAGE_SAMPLED)))
         return GR_ERROR_UNSUPPORTED;
     if (((desc->usage & GR_TEXTURE_USAGE_DEPTH_ATTACHMENT) != 0) != d3d_is_depth(desc->format) ||
         ((desc->usage & GR_TEXTURE_USAGE_COLOR_ATTACHMENT) && d3d_is_depth(desc->format)))
@@ -585,6 +791,7 @@ gr_result gr_d3d12_abi_texture_create(gr_handle device_handle, const gr_texture_
     texture->width = desc->width;
     texture->height = desc->height;
     texture->bytes_per_pixel = bpp;
+    texture->usage = desc->usage;
     texture->state = D3D12_RESOURCE_STATE_COMMON;
     status = d3d_own(dev, &texture->node, GR_HANDLE_TEXTURE, texture, out_texture);
     if (status != GR_OK) {
@@ -621,6 +828,22 @@ gr_result gr_d3d12_abi_texture_view_create(gr_handle device_handle, const gr_tex
     view->texture = texture;
     view->rtv_index = D3D_RTV_MAX;
     view->dsv_index = D3D_DSV_MAX;
+    view->sampled_slot = GR_BINDLESS_INDEX_NONE;
+    if ((texture->usage & GR_TEXTURE_USAGE_SAMPLED) && !d3d_is_depth(texture->format)) {
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv;
+        view->sampled_slot = d3d_slot_alloc(dev, GR_BINDING_SAMPLED_IMAGES, 0);
+        if (view->sampled_slot == GR_BINDLESS_INDEX_NONE) {
+            free(view);
+            return GR_ERROR_EXHAUSTED;
+        }
+        memset(&srv, 0, sizeof(srv));
+        srv.Format = texture->dxgi;
+        srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srv.Texture2D.MipLevels = 1;
+        ID3D12Device_CreateShaderResourceView(dev->device, texture->resource, &srv,
+                                              d3d_resource_cpu(dev, GR_BINDING_SAMPLED_IMAGES, view->sampled_slot));
+    }
     if (d3d_is_depth(texture->format)) {
         D3D12_DEPTH_STENCIL_VIEW_DESC dsv;
         for (slot = 0; slot < D3D_DSV_MAX && dev->dsv_used[slot]; ++slot) {}
@@ -666,6 +889,8 @@ gr_result gr_d3d12_abi_texture_view_create(gr_handle device_handle, const gr_tex
             dev->rtv_used[view->rtv_index] = 0;
         if (view->dsv_index < D3D_DSV_MAX)
             dev->dsv_used[view->dsv_index] = 0;
+        if (view->sampled_slot != GR_BINDLESS_INDEX_NONE)
+            dev->slot_used[GR_BINDING_SAMPLED_IMAGES][view->sampled_slot] = 0;
         free(view);
     }
     return status;
@@ -767,6 +992,7 @@ gr_result gr_d3d12_abi_cmd_begin(gr_handle cmd_handle)
     cmd->recording = 1;
     cmd->pipeline = NULL;
     cmd->frame_slot = 0;
+    cmd->decay_count = 0;
     return GR_OK;
 }
 
@@ -795,8 +1021,37 @@ gr_result gr_d3d12_abi_cmd_barrier(gr_handle cmd_handle, const gr_barrier *barri
     for (i = 0; i < count; ++i) {
         d3d_texture *texture = d3d_texture_of(barriers[i].resource);
         D3D12_RESOURCE_STATES before = 0, after = 0;
-        if (!texture)
-            return GR_ERROR_UNSUPPORTED; /* buffer barriers are not in this slice */
+        if (!texture) {
+            d3d_buffer *buffer = (d3d_buffer *)d3d_get(barriers[i].resource, GR_HANDLE_BUFFER);
+            if (!buffer || buffer->device != cmd->device)
+                return GR_ERROR_INVALID_HANDLE;
+            if (!d3d_state(barriers[i].dst_state, &after))
+                return GR_ERROR_INVALID_ARGUMENT;
+            memset(&out[n], 0, sizeof(out[n]));
+            if (!buffer->transitions) {
+                continue; /* upload/readback heaps keep their one state */
+            } else if (buffer->state == after) {
+                /* Same state: a write-after-write or write-after-read on a storage buffer is a
+                 * UAV barrier, not a transition. */
+                if (after != D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
+                    continue;
+                out[n].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+                out[n].UAV.pResource = buffer->resource;
+            } else {
+                out[n].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+                out[n].Transition.pResource = buffer->resource;
+                out[n].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+                out[n].Transition.StateBefore = buffer->state;
+                out[n].Transition.StateAfter = after;
+                buffer->state = after;
+                if (cmd->decay_count < D3D_DECAY_MAX)
+                    cmd->decay[cmd->decay_count++] = buffer;
+                else
+                    return GR_ERROR_EXHAUSTED;
+            }
+            ++n;
+            continue;
+        }
         if (barriers[i].src_state != GR_STATE_UNDEFINED) {
             if (!d3d_state(barriers[i].src_state, &before))
                 return GR_ERROR_INVALID_ARGUMENT;
@@ -956,8 +1211,14 @@ gr_result gr_d3d12_abi_submit(const gr_submit *submit, uint64_t *out_value)
     status = d3d_signal(queue, &value);
     if (status != GR_OK)
         return status;
-    for (i = 0; i < submit->cmd_count; ++i)
-        d3d_cmd_of(submit->cmds[i])->last_submit = value;
+    for (i = 0; i < submit->cmd_count; ++i) {
+        d3d_cmd *cmd = d3d_cmd_of(submit->cmds[i]);
+        uint32_t k;
+        cmd->last_submit = value;
+        /* Buffers decay to COMMON when ExecuteCommandLists finishes; the tracked state follows. */
+        for (k = 0; k < cmd->decay_count; ++k)
+            cmd->decay[k]->state = D3D12_RESOURCE_STATE_COMMON;
+    }
     if (out_value)
         *out_value = value;
     return GR_OK;
@@ -1013,7 +1274,7 @@ gr_result gr_d3d12_abi_texture_read(gr_handle texture_handle, uint32_t mip, uint
                                     uint32_t x, uint32_t y, uint32_t width, uint32_t height,
                                     uint32_t src_state, gr_mut_span_u8 out)
 {
-    d3d_texture *texture = (d3d_texture *)d3d_get(texture_handle, GR_HANDLE_TEXTURE);
+    d3d_texture *texture = d3d_texture_of(texture_handle); /* a texture or one of its views */
     d3d_device *dev;
     D3D12_RESOURCE_STATES state;
     D3D12_HEAP_PROPERTIES heap;
@@ -1127,7 +1388,8 @@ done:
  * pipeline creation with GR_ERROR_UNSUPPORTED rather than binding something else. */
 static gr_result d3d_root_signature(d3d_device *dev)
 {
-    D3D12_ROOT_PARAMETER params[2];
+    D3D12_ROOT_PARAMETER params[6];
+    D3D12_DESCRIPTOR_RANGE ranges[4];
     D3D12_ROOT_SIGNATURE_DESC desc;
     ID3DBlob *blob = NULL, *error = NULL;
     HRESULT hr;
@@ -1143,8 +1405,30 @@ static gr_result d3d_root_signature(d3d_device *dev)
     params[1].Descriptor.ShaderRegister = 0;
     params[1].Descriptor.RegisterSpace = 1;
     params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    /* The bindless tables at the registers grail_bindless.hlsli declares, each unbounded and
+     * alone in its register class and space: t0 space0 sampled images, u0 space2 storage
+     * images, s2 space0 samplers, u0 space3 storage buffers. */
+    {
+        static const D3D12_DESCRIPTOR_RANGE_TYPE types[4] = {
+            D3D12_DESCRIPTOR_RANGE_TYPE_SRV, D3D12_DESCRIPTOR_RANGE_TYPE_UAV,
+            D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER, D3D12_DESCRIPTOR_RANGE_TYPE_UAV
+        };
+        uint32_t r;
+        memset(ranges, 0, sizeof(ranges));
+        for (r = 0; r < 4; ++r) {
+            ranges[r].RangeType = types[r];
+            ranges[r].NumDescriptors = UINT_MAX;
+            ranges[r].BaseShaderRegister = r == 2 ? 2u : 0u;
+            ranges[r].RegisterSpace = r == 1 ? 2u : r == 3 ? 3u : 0u;
+            ranges[r].OffsetInDescriptorsFromTableStart = 0;
+            params[2 + r].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+            params[2 + r].DescriptorTable.NumDescriptorRanges = 1;
+            params[2 + r].DescriptorTable.pDescriptorRanges = &ranges[r];
+            params[2 + r].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+        }
+    }
     memset(&desc, 0, sizeof(desc));
-    desc.NumParameters = 2;
+    desc.NumParameters = 6;
     desc.pParameters = params;
     /* One signature serves every pipeline, so it admits an input layout; a pipeline without
      * vertex input pays nothing for the flag. */
@@ -1272,10 +1556,46 @@ gr_result gr_d3d12_abi_pipeline_create(gr_handle device_handle, const gr_pipelin
         return GR_ERROR_VERSION_MISMATCH;
     if (dev->commit_done)
         return GR_ERROR_NOT_READY; /* every pipeline is declared before the commit */
-    if (desc->shaders[GR_SHADER_STAGE_COMPUTE] != GR_NULL_HANDLE ||
-        desc->shaders[GR_SHADER_STAGE_MESH] != GR_NULL_HANDLE ||
+    if (desc->shaders[GR_SHADER_STAGE_MESH] != GR_NULL_HANDLE ||
         desc->shaders[GR_SHADER_STAGE_TASK] != GR_NULL_HANDLE)
-        return GR_ERROR_UNSUPPORTED; /* compute and mesh pipelines are not in this slice */
+        return GR_ERROR_UNSUPPORTED; /* mesh pipelines are not in this slice */
+    if (desc->shaders[GR_SHADER_STAGE_COMPUTE] != GR_NULL_HANDLE) {
+        d3d_shader *compute = (d3d_shader *)d3d_get(desc->shaders[GR_SHADER_STAGE_COMPUTE], GR_HANDLE_SHADER);
+        D3D12_COMPUTE_PIPELINE_STATE_DESC cd;
+        uint32_t stage;
+        for (stage = 0; stage < GR_SHADER_STAGE_COUNT; ++stage)
+            if (stage != GR_SHADER_STAGE_COMPUTE && desc->shaders[stage] != GR_NULL_HANDLE)
+                return GR_ERROR_INVALID_ARGUMENT; /* a compute pipeline has exactly one stage */
+        if (!compute || compute->device != dev || compute->stage != GR_SHADER_STAGE_COMPUTE ||
+            (desc->permutation_key != 0 && compute->permutation_key != desc->permutation_key))
+            return GR_ERROR_INVALID_ARGUMENT;
+        status = d3d_root_signature(dev);
+        if (status != GR_OK)
+            return status;
+        memset(&cd, 0, sizeof(cd));
+        cd.pRootSignature = dev->root;
+        cd.CS.pShaderBytecode = compute->dxil;
+        cd.CS.BytecodeLength = compute->dxil_len;
+        pipeline = (d3d_pipeline *)calloc(1, sizeof(*pipeline));
+        if (!pipeline)
+            return GR_ERROR_OUT_OF_MEMORY;
+        hr = ID3D12Device_CreateComputePipelineState(dev->device, &cd, &IID_ID3D12PipelineState,
+                                                     (void **)&pipeline->pso);
+        if (FAILED(hr)) {
+            free(pipeline);
+            return hr == E_INVALIDARG ? GR_ERROR_INVALID_ARGUMENT : GR_ERROR_SHADER_INVALID;
+        }
+        pipeline->device = dev;
+        pipeline->compute = 1;
+        status = d3d_own(dev, &pipeline->node, GR_HANDLE_PIPELINE, pipeline, out_pipeline);
+        if (status != GR_OK) {
+            ID3D12PipelineState_Release(pipeline->pso);
+            free(pipeline);
+            return status;
+        }
+        dev->pipelines_declared++;
+        return GR_OK;
+    }
     vertex = (d3d_shader *)d3d_get(desc->shaders[GR_SHADER_STAGE_VERTEX], GR_HANDLE_SHADER);
     if (!vertex || vertex->device != dev || vertex->stage != GR_SHADER_STAGE_VERTEX)
         return GR_ERROR_INVALID_ARGUMENT;
@@ -1467,10 +1787,12 @@ gr_result gr_d3d12_abi_pipeline_stats(gr_handle device_handle, uint32_t *out_dec
 
 static void d3d_bind_frame(d3d_cmd *cmd)
 {
-    ID3D12GraphicsCommandList_SetGraphicsRootConstantBufferView(
-        cmd->list, 1,
-        ID3D12Resource_GetGPUVirtualAddress(cmd->device->frame) +
-            (UINT64)cmd->frame_slot * cmd->device->frame_stride);
+    D3D12_GPU_VIRTUAL_ADDRESS address = ID3D12Resource_GetGPUVirtualAddress(cmd->device->frame) +
+                                        (UINT64)cmd->frame_slot * cmd->device->frame_stride;
+    if (cmd->pipeline && cmd->pipeline->compute)
+        ID3D12GraphicsCommandList_SetComputeRootConstantBufferView(cmd->list, 1, address);
+    else
+        ID3D12GraphicsCommandList_SetGraphicsRootConstantBufferView(cmd->list, 1, address);
 }
 
 gr_result gr_d3d12_abi_cmd_bind_pipeline(gr_handle cmd_handle, gr_handle pipeline_handle)
@@ -1481,9 +1803,34 @@ gr_result gr_d3d12_abi_cmd_bind_pipeline(gr_handle cmd_handle, gr_handle pipelin
         return GR_ERROR_INVALID_HANDLE;
     if (!cmd->recording)
         return GR_ERROR_NOT_READY;
-    ID3D12GraphicsCommandList_SetPipelineState(cmd->list, pipeline->pso);
-    ID3D12GraphicsCommandList_SetGraphicsRootSignature(cmd->list, cmd->device->root);
-    ID3D12GraphicsCommandList_IASetPrimitiveTopology(cmd->list, pipeline->topology);
+    {
+        d3d_device *dev = cmd->device;
+        ID3D12DescriptorHeap *heaps[2] = { dev->resource_heap, dev->sampler_heap };
+        D3D12_GPU_DESCRIPTOR_HANDLE resource, sampler, table;
+        uint32_t t;
+        static const uint32_t tables[4] = { GR_BINDING_SAMPLED_IMAGES, GR_BINDING_STORAGE_IMAGES,
+                                            GR_BINDING_SAMPLERS, GR_BINDING_STORAGE_BUFFERS };
+        ID3D12GraphicsCommandList_SetDescriptorHeaps(cmd->list, 2, heaps);
+        ID3D12GraphicsCommandList_SetPipelineState(cmd->list, pipeline->pso);
+        dev->resource_heap->lpVtbl->GetGPUDescriptorHandleForHeapStart(dev->resource_heap, &resource);
+        dev->sampler_heap->lpVtbl->GetGPUDescriptorHandleForHeapStart(dev->sampler_heap, &sampler);
+        if (pipeline->compute)
+            ID3D12GraphicsCommandList_SetComputeRootSignature(cmd->list, dev->root);
+        else {
+            ID3D12GraphicsCommandList_SetGraphicsRootSignature(cmd->list, dev->root);
+            ID3D12GraphicsCommandList_IASetPrimitiveTopology(cmd->list, pipeline->topology);
+        }
+        /* The tables never change: binding is fixed at pipeline bind, as on Vulkan. */
+        for (t = 0; t < 4; ++t) {
+            table = tables[t] == GR_BINDING_SAMPLERS ? sampler : resource;
+            if (tables[t] != GR_BINDING_SAMPLERS)
+                table.ptr += (UINT64)d3d_table_base(tables[t]) * dev->resource_stride;
+            if (pipeline->compute)
+                ID3D12GraphicsCommandList_SetComputeRootDescriptorTable(cmd->list, 2 + t, table);
+            else
+                ID3D12GraphicsCommandList_SetGraphicsRootDescriptorTable(cmd->list, 2 + t, table);
+        }
+    }
     cmd->pipeline = pipeline;
     d3d_bind_frame(cmd);
     return GR_OK;
@@ -1499,8 +1846,12 @@ gr_result gr_d3d12_abi_cmd_push_constants(gr_handle cmd_handle, uint32_t offset,
         return GR_ERROR_INVALID_ARGUMENT;
     if (!cmd->recording || !cmd->pipeline)
         return GR_ERROR_NOT_READY; /* root constants need the bound root signature */
-    ID3D12GraphicsCommandList_SetGraphicsRoot32BitConstants(cmd->list, 0, (UINT)(data.len / 4u),
-                                                           data.data, offset / 4u);
+    if (cmd->pipeline->compute)
+        ID3D12GraphicsCommandList_SetComputeRoot32BitConstants(cmd->list, 0, (UINT)(data.len / 4u),
+                                                              data.data, offset / 4u);
+    else
+        ID3D12GraphicsCommandList_SetGraphicsRoot32BitConstants(cmd->list, 0, (UINT)(data.len / 4u),
+                                                               data.data, offset / 4u);
     return GR_OK;
 }
 
@@ -1511,7 +1862,7 @@ gr_result gr_d3d12_abi_cmd_draw(gr_handle cmd_handle, const gr_draw *draw)
         return GR_ERROR_INVALID_HANDLE;
     if (!draw)
         return GR_ERROR_INVALID_ARGUMENT;
-    if (!cmd->recording || !cmd->pipeline)
+    if (!cmd->recording || !cmd->pipeline || cmd->pipeline->compute)
         return GR_ERROR_NOT_READY;
     ID3D12GraphicsCommandList_DrawInstanced(cmd->list, draw->vertex_count, draw->instance_count,
                                             draw->first_vertex, draw->first_instance);
@@ -1568,6 +1919,7 @@ gr_result gr_d3d12_abi_buffer_create(gr_handle device_handle, const gr_buffer_de
     D3D12_RESOURCE_STATES initial;
     D3D12_RANGE none = { 0, 0 };
     gr_result status;
+    int storage;
     if (!dev)
         return GR_ERROR_INVALID_HANDLE;
     if (!desc || !out_buffer)
@@ -1577,16 +1929,26 @@ gr_result gr_d3d12_abi_buffer_create(gr_handle device_handle, const gr_buffer_de
         return GR_ERROR_VERSION_MISMATCH;
     if (desc->size == 0 || desc->memory > GR_MEMORY_READBACK)
         return GR_ERROR_INVALID_ARGUMENT;
-    if (desc->usage & (GR_BUFFER_USAGE_STORAGE | GR_BUFFER_USAGE_SHADER_DEVICE_ADDRESS |
-                       GR_BUFFER_USAGE_ACCELERATION_STRUCTURE | GR_BUFFER_USAGE_INDIRECT))
-        return GR_ERROR_UNSUPPORTED; /* bindless storage, addresses, ray tracing, indirect */
+    if (desc->usage & (GR_BUFFER_USAGE_SHADER_DEVICE_ADDRESS | GR_BUFFER_USAGE_ACCELERATION_STRUCTURE |
+                       GR_BUFFER_USAGE_INDIRECT))
+        return GR_ERROR_UNSUPPORTED; /* device addresses, ray tracing, indirect */
     memset(&heap, 0, sizeof(heap));
-    heap.Type = desc->memory == GR_MEMORY_UPLOAD     ? D3D12_HEAP_TYPE_UPLOAD
-                : desc->memory == GR_MEMORY_READBACK ? D3D12_HEAP_TYPE_READBACK
-                                                     : D3D12_HEAP_TYPE_DEFAULT;
-    initial = desc->memory == GR_MEMORY_UPLOAD     ? D3D12_RESOURCE_STATE_GENERIC_READ
-              : desc->memory == GR_MEMORY_READBACK ? D3D12_RESOURCE_STATE_COPY_DEST
-                                                   : D3D12_RESOURCE_STATE_COMMON;
+    storage = (desc->usage & GR_BUFFER_USAGE_STORAGE) != 0;
+    if (storage && desc->memory != GR_MEMORY_DEVICE) {
+        /* UPLOAD and READBACK heaps cannot hold a UAV. A host-visible storage buffer lives in a
+         * custom heap: write-back CPU pages in system memory (L0), which the GPU can write. */
+        heap.Type = D3D12_HEAP_TYPE_CUSTOM;
+        heap.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_WRITE_BACK;
+        heap.MemoryPoolPreference = D3D12_MEMORY_POOL_L0;
+        initial = D3D12_RESOURCE_STATE_COMMON;
+    } else {
+        heap.Type = desc->memory == GR_MEMORY_UPLOAD     ? D3D12_HEAP_TYPE_UPLOAD
+                    : desc->memory == GR_MEMORY_READBACK ? D3D12_HEAP_TYPE_READBACK
+                                                         : D3D12_HEAP_TYPE_DEFAULT;
+        initial = desc->memory == GR_MEMORY_UPLOAD     ? D3D12_RESOURCE_STATE_GENERIC_READ
+                  : desc->memory == GR_MEMORY_READBACK ? D3D12_RESOURCE_STATE_COPY_DEST
+                                                       : D3D12_RESOURCE_STATE_COMMON;
+    }
     memset(&bd, 0, sizeof(bd));
     bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
     bd.Width = (desc->usage & GR_BUFFER_USAGE_UNIFORM) ? (desc->size + 255u) & ~(uint64_t)255u : desc->size;
@@ -1595,6 +1957,11 @@ gr_result gr_d3d12_abi_buffer_create(gr_handle device_handle, const gr_buffer_de
     bd.MipLevels = 1;
     bd.SampleDesc.Count = 1;
     bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    if (storage) {
+        if (desc->size % 4u)
+            return GR_ERROR_INVALID_ARGUMENT; /* a byte-address buffer is addressed in words */
+        bd.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    }
     buffer = (d3d_buffer *)calloc(1, sizeof(*buffer));
     if (!buffer)
         return GR_ERROR_OUT_OF_MEMORY;
@@ -1614,6 +1981,26 @@ gr_result gr_d3d12_abi_buffer_create(gr_handle device_handle, const gr_buffer_de
     buffer->size = desc->size;
     buffer->usage = desc->usage;
     buffer->memory = desc->memory;
+    buffer->state = initial;
+    buffer->transitions = heap.Type == D3D12_HEAP_TYPE_DEFAULT || heap.Type == D3D12_HEAP_TYPE_CUSTOM;
+    buffer->storage_slot = GR_BINDLESS_INDEX_NONE;
+    if (storage) {
+        D3D12_UNORDERED_ACCESS_VIEW_DESC uav;
+        buffer->storage_slot = d3d_slot_alloc(dev, GR_BINDING_STORAGE_BUFFERS, 0);
+        if (buffer->storage_slot == GR_BINDLESS_INDEX_NONE) {
+            if (buffer->mapped) ID3D12Resource_Unmap(buffer->resource, 0, NULL);
+            ID3D12Resource_Release(buffer->resource);
+            free(buffer);
+            return GR_ERROR_EXHAUSTED;
+        }
+        memset(&uav, 0, sizeof(uav));
+        uav.Format = DXGI_FORMAT_R32_TYPELESS;
+        uav.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+        uav.Buffer.NumElements = (UINT)(desc->size / 4u);
+        uav.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
+        ID3D12Device_CreateUnorderedAccessView(dev->device, buffer->resource, NULL, &uav,
+                                               d3d_resource_cpu(dev, GR_BINDING_STORAGE_BUFFERS, buffer->storage_slot));
+    }
     status = d3d_own(dev, &buffer->node, GR_HANDLE_BUFFER, buffer, out_buffer);
     if (status != GR_OK) {
         if (buffer->mapped) ID3D12Resource_Unmap(buffer->resource, 0, NULL);
@@ -1681,8 +2068,8 @@ uint64_t gr_d3d12_abi_buffer_device_address(gr_handle buffer_handle)
 
 uint32_t gr_d3d12_abi_buffer_bindless_index(gr_handle buffer_handle)
 {
-    (void)buffer_handle;
-    return ~0u; /* storage buffers are refused at creation */
+    d3d_buffer *buffer = d3d_buffer_of(buffer_handle);
+    return buffer ? buffer->storage_slot : GR_BINDLESS_INDEX_NONE;
 }
 
 gr_result gr_d3d12_abi_cmd_bind_vertex_buffer(gr_handle cmd_handle, uint32_t slot, gr_handle buffer_handle,
@@ -1732,11 +2119,502 @@ gr_result gr_d3d12_abi_cmd_draw_indexed(gr_handle cmd_handle, const gr_draw_inde
         return GR_ERROR_INVALID_HANDLE;
     if (!draw)
         return GR_ERROR_INVALID_ARGUMENT;
-    if (!cmd->recording || !cmd->pipeline)
+    if (!cmd->recording || !cmd->pipeline || cmd->pipeline->compute)
         return GR_ERROR_NOT_READY;
     ID3D12GraphicsCommandList_DrawIndexedInstanced(cmd->list, draw->index_count, draw->instance_count,
                                                    draw->first_index, draw->vertex_offset, draw->first_instance);
     return GR_OK;
+}
+
+/* ---- the bindless table, samplers, texture upload, dispatch, deferred release ----------- */
+
+gr_handle gr_d3d12_abi_device_bindless(gr_handle device_handle)
+{
+    d3d_device *dev = d3d_device_of(device_handle);
+    return dev ? dev->bindless_handle : GR_NULL_HANDLE;
+}
+
+gr_result gr_d3d12_abi_bindless_get_info(gr_handle bindless_handle, gr_bindless_info *out)
+{
+    d3d_device *dev = (d3d_device *)d3d_get(bindless_handle, GR_HANDLE_BINDLESS);
+    uint32_t t;
+    if (!dev)
+        return GR_ERROR_INVALID_HANDLE;
+    if (!out || out->head.size < sizeof(*out))
+        return GR_ERROR_INVALID_ARGUMENT;
+    memset((char *)out + sizeof(out->head), 0, sizeof(*out) - sizeof(out->head));
+    for (t = 0; t < GR_BINDING_COUNT; ++t) {
+        out->capacity[t] = d3d_table_capacity[t];
+        out->high_water[t] = dev->high_water[t];
+    }
+    out->releases_pending = dev->retired_pending;
+    return GR_OK;
+}
+
+gr_result gr_d3d12_abi_sampler_create(gr_handle device_handle, const gr_sampler_desc *desc,
+                                      gr_handle *out_sampler, uint32_t *out_slot)
+{
+    d3d_device *dev = d3d_device_of(device_handle);
+    d3d_sampler *sampler;
+    gr_result status;
+    uint32_t slot;
+    if (!dev)
+        return GR_ERROR_INVALID_HANDLE;
+    if (!desc || !out_sampler)
+        return GR_ERROR_INVALID_ARGUMENT;
+    *out_sampler = GR_NULL_HANDLE;
+    if (out_slot)
+        *out_slot = GR_BINDLESS_INDEX_NONE;
+    slot = d3d_slot_alloc(dev, GR_BINDING_SAMPLERS, GR_SAMPLER_SLOT_COUNT);
+    if (slot == GR_BINDLESS_INDEX_NONE)
+        return GR_ERROR_EXHAUSTED;
+    sampler = (d3d_sampler *)calloc(1, sizeof(*sampler));
+    if (!sampler) {
+        dev->slot_used[GR_BINDING_SAMPLERS][slot] = 0;
+        return GR_ERROR_OUT_OF_MEMORY;
+    }
+    sampler->slot = slot;
+    d3d_write_sampler(dev, slot, desc);
+    status = d3d_own(dev, &sampler->node, GR_HANDLE_SAMPLER, sampler, out_sampler);
+    if (status != GR_OK) {
+        dev->slot_used[GR_BINDING_SAMPLERS][slot] = 0;
+        free(sampler);
+        return status;
+    }
+    if (out_slot)
+        *out_slot = slot;
+    return GR_OK;
+}
+
+uint32_t gr_d3d12_abi_texture_view_bindless_sampled(gr_handle view_handle)
+{
+    d3d_view *view = (d3d_view *)d3d_get(view_handle, GR_HANDLE_TEXTURE_VIEW);
+    return view ? view->sampled_slot : GR_BINDLESS_INDEX_NONE;
+}
+
+/* A synchronous upload through an upload heap on its own allocator, mirroring the readback: the
+ * texture goes from its tracked state to COPY_DEST and back. `rows` is tightly packed. */
+gr_result gr_d3d12_abi_texture_write(gr_handle texture_handle, uint32_t mip, uint32_t layer, uint32_t x,
+                                     uint32_t y, uint32_t width, uint32_t height, gr_span_u8 rows)
+{
+    d3d_texture *texture = (d3d_texture *)d3d_get(texture_handle, GR_HANDLE_TEXTURE);
+    d3d_device *dev;
+    D3D12_HEAP_PROPERTIES heap;
+    D3D12_RESOURCE_DESC bd;
+    D3D12_TEXTURE_COPY_LOCATION dst, src;
+    D3D12_RESOURCE_BARRIER barrier;
+    D3D12_RANGE none = { 0, 0 };
+    ID3D12Resource *upload = NULL;
+    ID3D12CommandAllocator *allocator = NULL;
+    ID3D12GraphicsCommandList *list = NULL;
+    uint32_t pitch, row_bytes, row;
+    uint64_t value;
+    uint8_t *mapped;
+    gr_result status = GR_ERROR_BACKEND;
+    if (!texture)
+        return GR_ERROR_INVALID_HANDLE;
+    dev = texture->device;
+    row_bytes = width * texture->bytes_per_pixel;
+    if (mip != 0 || layer != 0 || width == 0 || height == 0 || x + width > texture->width ||
+        y + height > texture->height || !rows.data || rows.len < (size_t)row_bytes * height ||
+        d3d_is_depth(texture->format))
+        return GR_ERROR_INVALID_ARGUMENT;
+    pitch = (row_bytes + D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1) &
+            ~(uint32_t)(D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1);
+    memset(&heap, 0, sizeof(heap));
+    heap.Type = D3D12_HEAP_TYPE_UPLOAD;
+    memset(&bd, 0, sizeof(bd));
+    bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    bd.Width = (UINT64)pitch * height;
+    bd.Height = 1;
+    bd.DepthOrArraySize = 1;
+    bd.MipLevels = 1;
+    bd.SampleDesc.Count = 1;
+    bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    if (FAILED(ID3D12Device_CreateCommittedResource(dev->device, &heap, D3D12_HEAP_FLAG_NONE, &bd,
+                                                    D3D12_RESOURCE_STATE_GENERIC_READ, NULL, &IID_ID3D12Resource,
+                                                    (void **)&upload)) ||
+        FAILED(ID3D12Resource_Map(upload, 0, &none, (void **)&mapped)))
+        goto done;
+    for (row = 0; row < height; ++row)
+        memcpy(mapped + (size_t)row * pitch, rows.data + (size_t)row * row_bytes, row_bytes);
+    ID3D12Resource_Unmap(upload, 0, NULL);
+    if (FAILED(ID3D12Device_CreateCommandAllocator(dev->device, D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                                   &IID_ID3D12CommandAllocator, (void **)&allocator)) ||
+        FAILED(ID3D12Device_CreateCommandList(dev->device, 0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator, NULL,
+                                              &IID_ID3D12GraphicsCommandList, (void **)&list)))
+        goto done;
+    memset(&barrier, 0, sizeof(barrier));
+    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barrier.Transition.pResource = texture->resource;
+    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    if (texture->state != D3D12_RESOURCE_STATE_COPY_DEST) {
+        barrier.Transition.StateBefore = texture->state;
+        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+        ID3D12GraphicsCommandList_ResourceBarrier(list, 1, &barrier);
+    }
+    memset(&src, 0, sizeof(src));
+    src.pResource = upload;
+    src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    src.PlacedFootprint.Footprint.Format = texture->dxgi;
+    src.PlacedFootprint.Footprint.Width = width;
+    src.PlacedFootprint.Footprint.Height = height;
+    src.PlacedFootprint.Footprint.Depth = 1;
+    src.PlacedFootprint.Footprint.RowPitch = pitch;
+    memset(&dst, 0, sizeof(dst));
+    dst.pResource = texture->resource;
+    dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    ID3D12GraphicsCommandList_CopyTextureRegion(list, &dst, x, y, 0, &src, NULL);
+    if (texture->state != D3D12_RESOURCE_STATE_COPY_DEST) {
+        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+        barrier.Transition.StateAfter = texture->state;
+        ID3D12GraphicsCommandList_ResourceBarrier(list, 1, &barrier);
+    }
+    if (FAILED(ID3D12GraphicsCommandList_Close(list)))
+        goto done;
+    ID3D12CommandQueue_ExecuteCommandLists(dev->graphics->queue, 1, (ID3D12CommandList **)&list);
+    status = d3d_signal(dev->graphics, &value);
+    if (status == GR_OK)
+        status = d3d_wait_value(dev->graphics, value, UINT64_MAX);
+done:
+    if (list) ID3D12GraphicsCommandList_Release(list);
+    if (allocator) ID3D12CommandAllocator_Release(allocator);
+    if (upload) ID3D12Resource_Release(upload);
+    return status;
+}
+
+gr_result gr_d3d12_abi_cmd_dispatch(gr_handle cmd_handle, uint32_t x, uint32_t y, uint32_t z)
+{
+    d3d_cmd *cmd = d3d_cmd_of(cmd_handle);
+    if (!cmd)
+        return GR_ERROR_INVALID_HANDLE;
+    if (!cmd->recording || !cmd->pipeline || !cmd->pipeline->compute)
+        return GR_ERROR_NOT_READY;
+    if (x == 0 || y == 0 || z == 0 || x > D3D12_CS_DISPATCH_MAX_THREAD_GROUPS_PER_DIMENSION ||
+        y > D3D12_CS_DISPATCH_MAX_THREAD_GROUPS_PER_DIMENSION ||
+        z > D3D12_CS_DISPATCH_MAX_THREAD_GROUPS_PER_DIMENSION)
+        return GR_ERROR_INVALID_ARGUMENT;
+    ID3D12GraphicsCommandList_Dispatch(cmd->list, x, y, z);
+    return GR_OK;
+}
+
+/* Releases an object once the graphics timeline reaches `after_value`; gr_device_collect frees
+ * whatever has become safe. The handle stays valid until then. */
+gr_result gr_d3d12_abi_device_retire(gr_handle device_handle, gr_handle object, uint64_t after_value)
+{
+    d3d_device *dev = d3d_device_of(device_handle);
+    d3d_node *node;
+    d3d_retired *entry;
+    if (!dev)
+        return GR_ERROR_INVALID_HANDLE;
+    for (node = dev->objects; node && node->handle != object; node = node->next) {}
+    if (!node || node->type == GR_HANDLE_QUEUE)
+        return GR_ERROR_INVALID_HANDLE; /* not one of this device's objects, or not retirable */
+    entry = (d3d_retired *)calloc(1, sizeof(*entry));
+    if (!entry)
+        return GR_ERROR_OUT_OF_MEMORY;
+    entry->object = object;
+    entry->after_value = after_value;
+    entry->next = dev->retired;
+    dev->retired = entry;
+    dev->retired_pending++;
+    return GR_OK;
+}
+
+gr_result gr_d3d12_abi_device_collect(gr_handle device_handle)
+{
+    d3d_device *dev = d3d_device_of(device_handle);
+    d3d_retired **link;
+    uint64_t done;
+    if (!dev)
+        return GR_ERROR_INVALID_HANDLE;
+    done = ID3D12Fence_GetCompletedValue(dev->graphics->timeline);
+    link = &dev->retired;
+    while (*link) {
+        d3d_retired *entry = *link;
+        if (entry->after_value <= done) {
+            d3d_node **owner = &dev->objects;
+            while (*owner && (*owner)->handle != entry->object)
+                owner = &(*owner)->next;
+            if (*owner) {
+                d3d_node *node = *owner;
+                *owner = node->next;
+                if (node->type == GR_HANDLE_SAMPLER)
+                    dev->slot_used[GR_BINDING_SAMPLERS][((d3d_sampler *)node)->slot] = 0;
+                d3d_release(node);
+            }
+            *link = entry->next;
+            free(entry);
+            dev->retired_pending--;
+        } else {
+            link = &entry->next;
+        }
+    }
+    return GR_OK;
+}
+
+/* ---- swapchains and presentation -------------------------------------------------------- */
+
+/* A swapchain's images are textures and views in the object table, owned by the swapchain (not
+ * the device list) so that a recreate replaces them without the device freeing them twice. */
+static void d3d_swap_release_images(d3d_swapchain *sc)
+{
+    uint32_t i;
+    for (i = 0; i < sc->image_count; ++i) {
+        if (sc->views[i]) {
+            if (sc->views[i]->rtv_index < D3D_RTV_MAX)
+                sc->device->rtv_used[sc->views[i]->rtv_index] = 0;
+            gr_object_remove(gr_objects(), sc->view_handles[i], GR_HANDLE_TEXTURE_VIEW);
+            free(sc->views[i]);
+            sc->views[i] = NULL;
+        }
+        if (sc->images[i]) {
+            ID3D12Resource_Release(sc->images[i]->resource);
+            gr_object_remove(gr_objects(), sc->image_handles[i], GR_HANDLE_TEXTURE);
+            free(sc->images[i]);
+            sc->images[i] = NULL;
+        }
+    }
+}
+
+static gr_result d3d_swap_wrap_images(d3d_swapchain *sc)
+{
+    d3d_device *dev = sc->device;
+    D3D12_CPU_DESCRIPTOR_HANDLE cpu;
+    uint32_t i, slot, bpp;
+    for (i = 0; i < sc->image_count; ++i) {
+        d3d_texture *tex = (d3d_texture *)calloc(1, sizeof(*tex));
+        d3d_view *view = (d3d_view *)calloc(1, sizeof(*view));
+        if (!tex || !view) {
+            free(tex);
+            free(view);
+            return GR_ERROR_OUT_OF_MEMORY;
+        }
+        if (FAILED(IDXGISwapChain3_GetBuffer(sc->swapchain, i, &IID_ID3D12Resource, (void **)&tex->resource))) {
+            free(tex);
+            free(view);
+            return GR_ERROR_BACKEND;
+        }
+        tex->device = dev;
+        tex->format = sc->format;
+        tex->dxgi = d3d_format(sc->format, &bpp);
+        tex->bytes_per_pixel = bpp;
+        tex->width = sc->width;
+        tex->height = sc->height;
+        tex->usage = GR_TEXTURE_USAGE_COLOR_ATTACHMENT | GR_TEXTURE_USAGE_TRANSFER_SRC | GR_TEXTURE_USAGE_PRESENT;
+        tex->state = D3D12_RESOURCE_STATE_PRESENT; /* == COMMON: what a flip-model buffer starts in */
+        sc->images[i] = tex;
+        sc->image_handles[i] = gr_object_insert(gr_objects(), GR_HANDLE_TEXTURE, tex);
+        for (slot = 0; slot < D3D_RTV_MAX && dev->rtv_used[slot]; ++slot) {}
+        if (slot == D3D_RTV_MAX || sc->image_handles[i] == GR_NULL_HANDLE) {
+            free(view);
+            return GR_ERROR_OUT_OF_MEMORY;
+        }
+        dev->rtv_heap->lpVtbl->GetCPUDescriptorHandleForHeapStart(dev->rtv_heap, &cpu);
+        cpu.ptr += (SIZE_T)slot * dev->rtv_stride;
+        ID3D12Device_CreateRenderTargetView(dev->device, tex->resource, NULL, cpu);
+        dev->rtv_used[slot] = 1;
+        view->texture = tex;
+        view->rtv_index = slot;
+        view->dsv_index = D3D_DSV_MAX;
+        view->sampled_slot = GR_BINDLESS_INDEX_NONE;
+        sc->views[i] = view;
+        sc->view_handles[i] = gr_object_insert(gr_objects(), GR_HANDLE_TEXTURE_VIEW, view);
+        if (sc->view_handles[i] == GR_NULL_HANDLE)
+            return GR_ERROR_OUT_OF_MEMORY;
+        sc->image_done[i] = 0;
+    }
+    return GR_OK;
+}
+
+gr_result gr_d3d12_abi_swapchain_create(gr_handle device_handle, const gr_swapchain_desc *desc,
+                                        gr_handle *out_swapchain)
+{
+    d3d_device *dev = d3d_device_of(device_handle);
+    gr_window_native native;
+    gr_window_size size;
+    DXGI_SWAP_CHAIN_DESC1 sd;
+    IDXGIFactory4 *factory = NULL;
+    IDXGISwapChain1 *one = NULL;
+    d3d_swapchain *sc;
+    uint32_t bpp;
+    gr_result status;
+    HRESULT hr;
+    if (!dev)
+        return GR_ERROR_INVALID_HANDLE;
+    if (!desc || !out_swapchain)
+        return GR_ERROR_INVALID_ARGUMENT;
+    *out_swapchain = GR_NULL_HANDLE;
+    if (desc->head.size != sizeof(gr_swapchain_desc))
+        return GR_ERROR_VERSION_MISMATCH;
+    status = gr_window_get_native(desc->window, &native);
+    if (status != GR_OK)
+        return status;
+    if (native.backend != GR_BACKEND_D3D12 || !native.handle_a)
+        return GR_ERROR_UNSUPPORTED; /* the window cannot give this backend an HWND */
+    memset(&size, 0, sizeof(size));
+    if (gr_window_get_size(desc->window, &size) != GR_OK)
+        return GR_ERROR_BACKEND;
+    sc = (d3d_swapchain *)calloc(1, sizeof(*sc));
+    if (!sc)
+        return GR_ERROR_OUT_OF_MEMORY;
+    sc->device = dev;
+    sc->format = desc->format == GR_FORMAT_UNDEFINED ? GR_FORMAT_B8G8R8A8_UNORM : desc->format;
+    sc->width = desc->width ? desc->width : size.pixel_width;
+    sc->height = desc->height ? desc->height : size.pixel_height;
+    sc->image_count = desc->image_count ? desc->image_count : 3;
+    sc->acquired = D3D_SWAP_MAX;
+    if (sc->image_count < 2 || sc->image_count > D3D_SWAP_MAX || sc->width == 0 || sc->height == 0 ||
+        (sc->format != GR_FORMAT_B8G8R8A8_UNORM && sc->format != GR_FORMAT_R8G8B8A8_UNORM) ||
+        desc->present_mode > GR_PRESENT_FIFO_RELAXED) {
+        free(sc);
+        return GR_ERROR_INVALID_ARGUMENT; /* flip-model swapchains take 2..16 UNORM buffers */
+    }
+    /* FIFO and FIFO_RELAXED: sync interval 1; MAILBOX and IMMEDIATE: interval 0 (IMMEDIATE may
+     * tear only where the factory allows tearing; without it, interval 0 does not tear). */
+    sc->sync_interval = (desc->present_mode == GR_PRESENT_FIFO || desc->present_mode == GR_PRESENT_FIFO_RELAXED) ? 1u : 0u;
+    memset(&sd, 0, sizeof(sd));
+    sd.Width = sc->width;
+    sd.Height = sc->height;
+    sd.Format = d3d_format(sc->format, &bpp);
+    sd.SampleDesc.Count = 1;
+    sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    sd.BufferCount = sc->image_count;
+    sd.Scaling = DXGI_SCALING_STRETCH;
+    sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+    sd.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
+    if (FAILED(CreateDXGIFactory1(&IID_IDXGIFactory4, (void **)&factory))) {
+        free(sc);
+        return GR_ERROR_BACKEND;
+    }
+    hr = IDXGIFactory4_CreateSwapChainForHwnd(factory, (IUnknown *)dev->graphics->queue, (HWND)native.handle_a,
+                                              &sd, NULL, NULL, &one);
+    if (SUCCEEDED(hr))
+        IDXGIFactory4_MakeWindowAssociation(factory, (HWND)native.handle_a, DXGI_MWA_NO_ALT_ENTER);
+    IDXGIFactory4_Release(factory);
+    if (FAILED(hr)) {
+        free(sc);
+        return GR_ERROR_BACKEND;
+    }
+    hr = IDXGISwapChain1_QueryInterface(one, &IID_IDXGISwapChain3, (void **)&sc->swapchain);
+    IDXGISwapChain1_Release(one);
+    if (FAILED(hr)) {
+        free(sc);
+        return GR_ERROR_UNSUPPORTED;
+    }
+    status = d3d_swap_wrap_images(sc);
+    if (status == GR_OK)
+        status = d3d_own(dev, &sc->node, GR_HANDLE_SWAPCHAIN, sc, out_swapchain);
+    if (status != GR_OK) {
+        d3d_swap_release_images(sc);
+        IDXGISwapChain3_Release(sc->swapchain);
+        free(sc);
+    }
+    return status;
+}
+
+static d3d_swapchain *d3d_swap_of(gr_handle handle)
+{
+    return (d3d_swapchain *)d3d_get(handle, GR_HANDLE_SWAPCHAIN);
+}
+
+gr_result gr_d3d12_abi_swapchain_info(gr_handle swapchain, gr_format *out_format, uint32_t *out_width,
+                                      uint32_t *out_height, uint32_t *out_image_count)
+{
+    d3d_swapchain *sc = d3d_swap_of(swapchain);
+    if (!sc)
+        return GR_ERROR_INVALID_HANDLE;
+    if (out_format) *out_format = sc->format;
+    if (out_width) *out_width = sc->width;
+    if (out_height) *out_height = sc->height;
+    if (out_image_count) *out_image_count = sc->image_count;
+    return GR_OK;
+}
+
+/* DXGI hands out back buffers in order; acquiring waits only for the submission that last
+ * presented this image (frame pacing), never for the queue to drain. */
+gr_result gr_d3d12_abi_swapchain_acquire(gr_handle swapchain, uint64_t timeout_ns, uint32_t *out_image_index,
+                                         gr_handle *out_view, int32_t *out_needs_recreate)
+{
+    d3d_swapchain *sc = d3d_swap_of(swapchain);
+    uint32_t index;
+    gr_result status;
+    if (!sc)
+        return GR_ERROR_INVALID_HANDLE;
+    if (out_needs_recreate) *out_needs_recreate = 0;
+    if (out_view) *out_view = GR_NULL_HANDLE;
+    if (sc->acquired != D3D_SWAP_MAX)
+        return GR_ERROR_NOT_READY; /* the previous image has not been presented */
+    index = IDXGISwapChain3_GetCurrentBackBufferIndex(sc->swapchain);
+    if (index >= sc->image_count)
+        return GR_ERROR_BACKEND;
+    status = d3d_wait_value(sc->device->graphics, sc->image_done[index], timeout_ns);
+    if (status != GR_OK)
+        return status;
+    sc->acquired = index;
+    if (out_image_index) *out_image_index = index;
+    if (out_view) *out_view = sc->view_handles[index];
+    return GR_OK;
+}
+
+gr_result gr_d3d12_abi_present(gr_handle queue_handle, gr_handle swapchain, uint32_t image_index,
+                               uint64_t wait_value, uint64_t *out_value)
+{
+    d3d_queue *queue = (d3d_queue *)d3d_get(queue_handle, GR_HANDLE_QUEUE);
+    d3d_swapchain *sc = d3d_swap_of(swapchain);
+    uint64_t value;
+    gr_result status;
+    HRESULT hr;
+    if (!queue || !sc || sc->device != queue->device)
+        return GR_ERROR_INVALID_HANDLE;
+    if (image_index != sc->acquired || wait_value > queue->submitted)
+        return GR_ERROR_INVALID_ARGUMENT; /* not the acquired image, or a value never submitted */
+    if (sc->images[image_index]->state != D3D12_RESOURCE_STATE_PRESENT)
+        return GR_ERROR_NOT_READY; /* the ABI requires the barrier to PRESENT first */
+    /* Present is ordered after every earlier submission on the same queue, so `wait_value` is
+     * satisfied by queue order; it is validated, not waited on the CPU. */
+    hr = IDXGISwapChain3_Present(sc->swapchain, sc->sync_interval, 0);
+    if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET)
+        return GR_ERROR_DEVICE_LOST;
+    if (FAILED(hr))
+        return GR_ERROR_BACKEND;
+    status = d3d_signal(queue, &value);
+    if (status != GR_OK)
+        return status;
+    sc->image_done[image_index] = value;
+    sc->acquired = D3D_SWAP_MAX;
+    if (out_value)
+        *out_value = value;
+    return GR_OK;
+}
+
+gr_result gr_d3d12_abi_swapchain_recreate(gr_handle swapchain, uint32_t width, uint32_t height,
+                                          uint64_t after_value)
+{
+    d3d_swapchain *sc = d3d_swap_of(swapchain);
+    uint32_t bpp;
+    gr_result status;
+    if (!sc)
+        return GR_ERROR_INVALID_HANDLE;
+    if (width == 0 || height == 0)
+        return GR_ERROR_INVALID_ARGUMENT;
+    if (sc->acquired != D3D_SWAP_MAX)
+        return GR_ERROR_NOT_READY;
+    /* ResizeBuffers needs every reference to the old buffers gone and the GPU done with them. */
+    status = d3d_wait_value(sc->device->graphics, after_value > sc->device->graphics->submitted
+                                                      ? sc->device->graphics->submitted : after_value,
+                            UINT64_MAX);
+    if (status == GR_OK)
+        status = d3d_wait_value(sc->device->graphics, sc->device->graphics->submitted, UINT64_MAX);
+    if (status != GR_OK)
+        return status;
+    d3d_swap_release_images(sc);
+    if (FAILED(IDXGISwapChain3_ResizeBuffers(sc->swapchain, sc->image_count, width, height,
+                                             d3d_format(sc->format, &bpp), 0)))
+        return GR_ERROR_BACKEND;
+    sc->width = width;
+    sc->height = height;
+    return d3d_swap_wrap_images(sc);
 }
 
 /* ---- not in this slice ------------------------------------------------------------------ */
@@ -1745,33 +2623,6 @@ gr_result gr_d3d12_abi_queue_timeline(gr_handle queue, gr_handle *out_semaphore)
 {
     (void)queue;
     (void)out_semaphore;
-    return GR_ERROR_UNSUPPORTED;
-}
-
-gr_handle gr_d3d12_abi_device_bindless(gr_handle device)
-{
-    (void)device;
-    return GR_NULL_HANDLE;
-}
-
-gr_result gr_d3d12_abi_bindless_get_info(gr_handle bindless, gr_bindless_info *out)
-{
-    (void)bindless;
-    (void)out;
-    return GR_ERROR_UNSUPPORTED;
-}
-
-gr_result gr_d3d12_abi_device_retire(gr_handle device, gr_handle object, uint64_t after_value)
-{
-    (void)device;
-    (void)object;
-    (void)after_value;
-    return GR_ERROR_UNSUPPORTED;
-}
-
-gr_result gr_d3d12_abi_device_collect(gr_handle device)
-{
-    (void)device;
     return GR_ERROR_UNSUPPORTED;
 }
 
@@ -1785,96 +2636,12 @@ gr_result gr_d3d12_abi_cmd_draw_indexed_indirect(gr_handle cmd, gr_handle buffer
     return GR_ERROR_UNSUPPORTED;
 }
 
-gr_result gr_d3d12_abi_cmd_dispatch(gr_handle cmd, uint32_t x, uint32_t y, uint32_t z)
-{
-    (void)cmd;
-    (void)x;
-    (void)y;
-    (void)z;
-    return GR_ERROR_UNSUPPORTED;
-}
-
 gr_result gr_d3d12_abi_cmd_dispatch_indirect(gr_handle cmd, gr_handle buffer, uint64_t offset)
 {
     (void)cmd;
     (void)buffer;
     (void)offset;
     return GR_ERROR_UNSUPPORTED;
-}
-
-gr_result gr_d3d12_abi_swapchain_create(gr_handle device, const gr_swapchain_desc *desc, gr_handle *out_swapchain)
-{
-    (void)device;
-    (void)desc;
-    (void)out_swapchain;
-    return GR_ERROR_UNSUPPORTED;
-}
-
-gr_result gr_d3d12_abi_swapchain_info(gr_handle swapchain, gr_format *out_format, uint32_t *out_width, uint32_t *out_height, uint32_t *out_image_count)
-{
-    (void)swapchain;
-    (void)out_format;
-    (void)out_width;
-    (void)out_height;
-    (void)out_image_count;
-    return GR_ERROR_UNSUPPORTED;
-}
-
-gr_result gr_d3d12_abi_swapchain_acquire(gr_handle swapchain, uint64_t timeout_ns, uint32_t *out_image_index, gr_handle *out_view, int32_t *out_needs_recreate)
-{
-    (void)swapchain;
-    (void)timeout_ns;
-    (void)out_image_index;
-    (void)out_view;
-    (void)out_needs_recreate;
-    return GR_ERROR_UNSUPPORTED;
-}
-
-gr_result gr_d3d12_abi_swapchain_recreate(gr_handle swapchain, uint32_t width, uint32_t height, uint64_t after_value)
-{
-    (void)swapchain;
-    (void)width;
-    (void)height;
-    (void)after_value;
-    return GR_ERROR_UNSUPPORTED;
-}
-
-gr_result gr_d3d12_abi_present(gr_handle queue, gr_handle swapchain, uint32_t image_index, uint64_t wait_value, uint64_t *out_value)
-{
-    (void)queue;
-    (void)swapchain;
-    (void)image_index;
-    (void)wait_value;
-    (void)out_value;
-    return GR_ERROR_UNSUPPORTED;
-}
-
-gr_result gr_d3d12_abi_sampler_create(gr_handle device, const gr_sampler_desc *desc, gr_handle *out_sampler, uint32_t *out_slot)
-{
-    (void)device;
-    (void)desc;
-    (void)out_sampler;
-    (void)out_slot;
-    return GR_ERROR_UNSUPPORTED;
-}
-
-gr_result gr_d3d12_abi_texture_write(gr_handle texture, uint32_t mip, uint32_t layer, uint32_t x, uint32_t y, uint32_t w, uint32_t h, gr_span_u8 rows)
-{
-    (void)texture;
-    (void)mip;
-    (void)layer;
-    (void)x;
-    (void)y;
-    (void)w;
-    (void)h;
-    (void)rows;
-    return GR_ERROR_UNSUPPORTED;
-}
-
-uint32_t gr_d3d12_abi_texture_view_bindless_sampled(gr_handle view)
-{
-    (void)view;
-    return ~0u;
 }
 
 #else /* !_WIN32 */
