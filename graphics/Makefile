@@ -19,7 +19,7 @@ BUILD   := ../.work/graphics
 
 SRC := src/grail_core.c src/grail_reflect.c src/grail_wire.c src/grail_shader_library.c \
        src/grail_vk_common.c src/grail_vk_probe.c src/grail_vulkan.c \
-       src/grail_null.c src/grail_null_window.c
+       src/grail_graph.c src/grail_null.c src/grail_null_window.c
 # dlopen is how the Vulkan backend resolves its loader, so every binary that links the
 # implementation needs it.
 LDLIBS ?= -ldl
@@ -28,7 +28,7 @@ OBJ := $(patsubst src/%.c,$(BUILD)/%.o,$(SRC))
 # stale objects linked against the new declarations — which is exactly how a version bump goes
 # unnoticed until something reads the wrong field.
 HEADERS := $(wildcard include/grail/*.h) src/grail_internal.h src/grail_vk_common.h
-TESTS := abi device wire library
+TESTS := abi device wire library graph
 GPU_TESTS := vk_probe vk_backend
 TEST_BINS := $(patsubst %,$(BUILD)/test_%,$(TESTS))
 BLOBS := $(shell find ../.work/shaders -name '*.refl.bin' 2>/dev/null)

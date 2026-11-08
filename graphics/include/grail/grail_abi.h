@@ -103,6 +103,7 @@ typedef enum gr_handle_type {
     GR_HANDLE_WIRE = 16,
     GR_HANDLE_CMD_POOL = 17,
     GR_HANDLE_SHADER_LIBRARY = 18,
+    GR_HANDLE_GRAPH = 19,
     GR_HANDLE_TYPE_MAX = 0xFFFE
 } gr_handle_type;
 
