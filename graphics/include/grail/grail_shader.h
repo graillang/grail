@@ -241,8 +241,14 @@ const gr_reflect_member *gr_reflect_find_member(const gr_reflection *refl, gr_st
 /* The declared size of set 1 binding 0, or 0 when the shader declares none. A host compares
  * this with sizeof(gr_frame_constants). */
 uint32_t gr_reflect_frame_constants_size(const gr_reflection *refl);
-/* The digest a host computes for its own structs must equal this to run. */
+/* The digest the blob carries. A host that builds its own structs must reproduce this value
+ * from its own declarations to run; a mismatch is GR_ERROR_LAYOUT_MISMATCH. */
 void gr_reflect_layout_hash(const gr_reflection *refl, uint64_t out_hash[2]);
+
+/* Recomputes the digest from the reflection tables themselves, independent of the value the
+ * blob stores. This is the function the offline tool's output is checked against: if the tool
+ * and this disagree, the build fails rather than the renderer reading the wrong memory. */
+gr_result gr_reflect_compute_layout_hash(const gr_reflection *refl, uint64_t out_hash[2]);
 
 /* =======================================================================================
  * Shader objects

@@ -18,7 +18,7 @@ OBJ := $(patsubst src/%.c,$(BUILD)/%.o,$(SRC))
 TESTS := abi device wire
 TEST_BINS := $(patsubst %,$(BUILD)/test_%,$(TESTS))
 
-.PHONY: all test shaders clean
+.PHONY: all test shaders shader-check tool clean
 
 all: test
 
@@ -36,9 +36,25 @@ $(BUILD)/test_%: tests/test_%.c $(OBJ) | $(BUILD)
 test: $(TEST_BINS)
 	@for t in $(TEST_BINS); do ./$$t || exit 1; done
 
+# The C reflection inspector/verifier. It is what makes the tool's output trustworthy: it
+# opens every blob the tool wrote, validates it, recomputes the layout digest with an
+# independent implementation and compares every frame-constant member offset to offsetof().
+$(BUILD)/grail-reflect: src/grail_reflect_tool.c $(OBJ) | $(BUILD)
+	$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(OBJ)
+
+tool: $(BUILD)/grail-reflect
+
 # The offline shader flow. The tool owns the flags; this target only asserts it ran.
 shaders:
 	node tools/shader.mjs --all
+
+# Compile the shaders and then verify every artifact with the C implementation. This is the
+# target to run before trusting a shader change. Needs DXC (see docs/dependencies.md).
+shader-check: shaders tool
+	@set -e; for blob in $$(find ../.work/shaders -name '*.refl.bin'); do \
+		$(BUILD)/grail-reflect $$blob >/dev/null || { echo "FAILED: $$blob"; \
+		$(BUILD)/grail-reflect $$blob; exit 1; }; done; \
+	echo "all reflection blobs verified"
 
 clean:
 	rm -rf $(BUILD)

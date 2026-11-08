@@ -39,18 +39,20 @@ docs/                     the contract, the shader flow, dependencies, blockers
 | --- | --- |
 | C ABI headers | complete for the documented scope |
 | Null backend (all entry points) | implemented, 219 checks passing |
-| Reflection blob reader + validation | implemented and tested |
+| Reflection blob reader + validation | implemented, tested, and used to verify tool output |
 | Wire framing | implemented and tested |
 | Shaders (3 stages) | compile and pass `spirv-val` |
-| Offline shader tool | **not yet written** |
+| Offline shader tool | written; compiles 3 stages, reflection verified by an independent C reader |
 | Vulkan / D3D12 / Metal backends | **not implemented** (`GR_ERROR_UNSUPPORTED`) |
+| Permutation enumeration in the tool | not yet implemented |
 | Calling this from a Grail program | **blocked** — see `docs/first-renderer-port.md` |
 
 ## Build and test
 
 ```
-make -C graphics test      # needs only a C compiler
-make -C graphics shaders   # needs DXC 1.9.2609 (see docs/dependencies.md)
+make -C graphics test          # needs only a C compiler: 219 checks
+make -C graphics shaders       # needs DXC 1.9.2609 (see docs/dependencies.md)
+make -C graphics shader-check  # compile, then verify every reflection blob in C
 ```
 
 ## Documents

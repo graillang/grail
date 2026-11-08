@@ -173,6 +173,11 @@ D3D12 has no specialization constants, so the offline flow emits one DXIL per pe
 where the bytecode actually reads the define; Vulkan may use `VkSpecializationInfo` for the
 same pipeline. `gr_specialization` carries the values either way.
 
+The blob format and the key are in place (`gr_reflect_define`, `gr_permutation_key`), and the
+key's stability under reordering is tested. The tool does **not** yet enumerate a shader's
+permutation cross product: that needs the defines to be declared in the HLSL in a form the
+extractor can read, which is the next piece of work after the first backend.
+
 ## Backend requirements
 
 **Vulkan (Linux, Windows)** — Vulkan 1.3 floor. Required: descriptor indexing with
@@ -192,13 +197,47 @@ release has to be beside `dxc` or the compiler refuses the DXIL target.
 
 **Metal (macOS)** — macOS 13, Metal 3, argument buffer tier 2, MSL 3.0 via SPIRV-Cross.
 
-## Status
+## The tool
 
-Working today: all three shaders in `graphics/shaders/core/` compile with the flags above,
-pass `spirv-val --target-env vulkan1.3`, and produce the binding numbers in the table
-(`fullscreen.vs`, `tonemap.ps`, `frame_setup.cs`).
+`graphics/tools/shader.mjs` runs the whole flow:
 
-Not yet written: `graphics/tools/shader.mjs`, which is the tool that runs DXC, extracts
-reflection into the blob format above (by parsing the compiled SPIR-V's decorations), writes
-the `.refl.json` form, computes the layout hash, enumerates permutations and drives the Metal
-leg. The format and the reader for it exist and are tested; the extractor is the next piece.
+```
+node graphics/tools/shader.mjs --all              # every shaders/**/<name>.<stage>.hlsl
+node graphics/tools/shader.mjs <file.hlsl>...     # named files
+node graphics/tools/shader.mjs --all --no-dxil    # SPIR-V only
+node graphics/tools/shader.mjs --all --metal      # also emit MSL when SPIRV-Cross is present
+make -C graphics shader-check                     # compile, then verify with the C reader
+```
+
+For each shader it emits `<name>.<stage>.spv`, `<name>.<stage>.dxil` (when DXC can sign it),
+`<name>.<stage>.refl.json` and `<name>.<stage>.refl.bin`. It resolves DXC from `$DXC`, then
+Abundance's pinned tools cache, then `PATH`, and prints the version it used. Options are held
+in one table in the file, so the flag set above has a single definition.
+
+Reflection is extracted by parsing the compiled SPIR-V's decorations — `OpDecorate`
+`DescriptorSet`/`Binding`, `OpMemberDecorate` `Offset`, `OpType*`, `OpVariable` and
+`OpEntryPoint`. Every read is bounded by the instruction's own word count. Push constants are
+excluded from the binding table (they occupy no set and binding, and listing them at an
+invented `(0,0)` would collide with the sampled-image table); their size is recorded on the
+stage record instead. Vertex inputs are extracted only for the vertex stage, and a built-in
+such as `SV_VertexID` is not an attribute even when it arrives as an `Input` variable.
+
+## Verification
+
+`make -C graphics shader-check` compiles the shaders and then opens every blob with
+`graphics/src/grail_reflect_tool.c`, which is a *second, independent* implementation of the
+format. It fails the build on any of:
+
+- a blob the reader rejects (magic, version, exact length, alignment, table ranges, string
+  termination);
+- `gr_reflect_frame_constants_size()` disagreeing with `sizeof(gr_frame_constants)`;
+- any frame-constant member offset or size differing from `offsetof(gr_frame_constants, …)`;
+- the stored layout digest differing from the one the C implementation recomputes.
+
+That last check is what keeps the tool and the host honest: the digest is computed twice, in
+different languages, and a divergence fails here rather than in the renderer.
+
+Verified on this host: `frame_setup.cs`, `fullscreen.vs` and `tonemap.ps` all compile, pass
+`spirv-val --target-env vulkan1.3`, produce the binding numbers in the table above, report
+416-byte frame constants whose 18 members match `offsetof` exactly, and carry a matching
+digest. The Metal leg reports that SPIRV-Cross is absent and continues rather than failing.

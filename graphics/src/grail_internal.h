@@ -62,6 +62,9 @@ char *gr_str_dup(gr_str s);
 /* A stable hash of `data` (FNV-1a 64). Used for layout digests and permutation keys, where
  * the requirement is determinism across processes and machines, not cryptography. */
 uint64_t gr_hash_bytes(const void *data, size_t len);
+/* Folds `len` bytes into an existing hash. gr_hash_bytes() starts a fresh one; a digest over
+ * a sequence of fields must chain, or every named field overwrites what came before it. */
+uint64_t gr_hash_bytes_into(uint64_t hash, const void *data, size_t len);
 uint64_t gr_hash_u64(uint64_t hash, uint64_t value);
 
 #endif /* GRAIL_INTERNAL_H */

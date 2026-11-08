@@ -218,6 +218,17 @@ uint64_t gr_hash_bytes(const void *data, size_t len)
     return hash;
 }
 
+uint64_t gr_hash_bytes_into(uint64_t hash, const void *data, size_t len)
+{
+    const uint8_t *p = (const uint8_t *)data;
+    size_t i;
+    for (i = 0; i < len; ++i) {
+        hash ^= (uint64_t)p[i];
+        hash *= 0x100000001b3ull;
+    }
+    return hash;
+}
+
 uint64_t gr_hash_u64(uint64_t hash, uint64_t value)
 {
     /* FNV-1a over the eight bytes of a value, so field order matters and padding never does. */

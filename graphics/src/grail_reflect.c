@@ -77,15 +77,16 @@ gr_result gr_reflect_open(gr_span_u8 blob, gr_reflection *out)
     if (h->stage >= GR_SHADER_STAGE_COUNT)
         return GR_ERROR_SHADER_INVALID;
 
-    /* Bytecode: inside the blob, and 8-byte aligned so a SPIR-V or DXIL consumer may take a
-     * pointer to it directly. */
-    if (h->bytecode_offset % 8u != 0)
+    /* Bytecode: inside the blob and word-aligned. SPIR-V is a sequence of 4-byte words, so a
+     * 4-byte start is the real requirement; DXIL needs no alignment at all. Demanding 8 would
+     * reject valid SPIR-V whose length is a multiple of 4 but not of 8. */
+    if (h->bytecode_offset % 4u != 0)
         return GR_ERROR_SHADER_INVALID;
     if (!range_ok(h->bytecode_offset, h->bytecode_length, total))
         return GR_ERROR_SHADER_INVALID;
     if (h->bytecode_length == 0)
         return GR_ERROR_SHADER_INVALID;
-    if ((h->bytecode_offset + h->bytecode_length) % 8u != 0)
+    if ((h->bytecode_offset + h->bytecode_length) % 4u != 0)
         return GR_ERROR_SHADER_INVALID;
 
     if (h->string_length == 0)
@@ -248,11 +249,13 @@ void gr_reflect_layout_hash(const gr_reflection *refl, uint64_t out_hash[2])
     out_hash[1] = refl->header->layout_hash[1];
 }
 
-/* The host-side digest. The offline tool computes the same value over the HLSL it compiled,
+/* The canonical digest. The offline tool computes the same value over the HLSL it compiled,
  * so a host that builds its own structs can prove it agrees with the shaders it loads. The
  * canonical form is the reflection itself: bindings in order, then members in order, then
- * vertices in order, each field folded in with its own width so padding cannot matter. */
-gr_result grail_host_layout_hash(const gr_reflection *refl, uint64_t out_hash[2])
+ * vertices in order, each field folded in with its own width so padding cannot matter.
+ * graphics/tools/shader.mjs reimplements this; graphics/src/grail_reflect_tool.c checks the
+ * two agree on every built shader. */
+gr_result gr_reflect_compute_layout_hash(const gr_reflection *refl, uint64_t out_hash[2])
 {
     uint64_t h1 = 0xcbf29ce484222325ull;
     uint64_t h2 = 0x84222325cbf29ce4ull;
@@ -266,8 +269,10 @@ gr_result grail_host_layout_hash(const gr_reflection *refl, uint64_t out_hash[2]
         h1 = gr_hash_u64(h1, ((uint64_t)b->set << 24) | ((uint64_t)b->binding << 8) | b->kind);
         h1 = gr_hash_u64(h1, (uint64_t)b->array_size);
         h2 = gr_hash_u64(h2, (uint64_t)b->member_count);
-        h2 = gr_hash_u64(h2, gr_hash_bytes(gr_reflect_string(refl, b->name),
-                                           strlen(gr_reflect_string(refl, b->name))));
+        {
+            const char *name = gr_reflect_string(refl, b->name);
+            h2 = gr_hash_bytes_into(h2, name, strlen(name));
+        }
     }
     for (i = 0; i < refl->header->member_count; ++i) {
         const gr_reflect_member *m = &refl->members[i];
