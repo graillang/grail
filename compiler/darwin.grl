@@ -1,0 +1,244 @@
+unsafe module darwin;
+
+// macOS system boundary: this module is compiled only for Mach-O targets and is where every
+// libSystem call lives. Linux builds never include it, so ELF objects carry no Apple imports.
+// The runtime's semantic operation numbers are decoded here into libSystem entry points. A name is
+// a C name (Mach-O adds the leading underscore); a name that already starts with '_' is used as the
+// final symbol, which is how libc internals such as __error are reached. Every call uses the C word
+// ABI, and libSystem's (-1, errno) result is converted back to the negative-errno convention the
+// rest of the runtime expects.
+// libSystem signals failure with -1; the runtime's negative-errno test is the same predicate.
+fn negative(n: u64) -> u64 {
+    return 18446744073709547520 < n;
+}
+fn rt_os_error() -> u64 {
+    p := raw_import("___error");
+    return raw_load(p);
+}
+fn rt_os_result(r: u64) -> u64 {
+    if r == wrapping_sub(0, 1) {
+        return wrapping_sub(0, rt_os_error());
+    }
+    return r;
+}
+fn rt_os_copy(dst: u64, src: u64, n: u64) -> u64 {
+    mut i = 0;
+    while i + 8 <= n {
+        raw_store(dst + i, raw_load(src + i));
+        i += 8;
+    }
+    while i < n {
+        raw_putbyte(dst + i, raw_byte(src + i));
+        i += 1;
+    }
+    return 0;
+}
+fn rt_os_mask(bits: u64) -> u64 {
+    mut m = 1;
+    mut i = 0;
+    while i < bits {
+        m = m * 2;
+        i += 1;
+    }
+    return m - 1;
+}
+// O_* bits carry different values in the Linux and Darwin ABIs; access modes agree.
+fn rt_os_open_flags(flags: u64) -> u64 {
+    mut out = flags & 3;
+    if (flags & 64) != 0 {
+        out = out | 512;
+    }
+    if (flags & 128) != 0 {
+        out = out | 2048;
+    }
+    if (flags & 512) != 0 {
+        out = out | 1024;
+    }
+    if (flags & 1024) != 0 {
+        out = out | 8;
+    }
+    if (flags & 2048) != 0 {
+        out = out | 4;
+    }
+    if (flags & 65536) != 0 {
+        out = out | 1048576;
+    }
+    if (flags & 524288) != 0 {
+        out = out | 16777216;
+    }
+    return out;
+}
+fn rt_os_clock(id: u64) -> u64 {
+    if id == 1 {
+        return 6;
+    }
+    if id == 3 {
+        return 12;
+    }
+    return id;
+}
+// Darwin reports a processor count, while the caller counts bits in a cpu_set buffer.
+fn rt_os_cpus(n: u64, buf: u64) -> u64 {
+    count := rt_os_result(raw_import("sysconf", 58, 0, 0));
+    if negative(count) {
+        return count;
+    }
+    mut left = count;
+    mut i = 0;
+    while i < n {
+        mut byte = 0;
+        if 7 < left {
+            byte = 255;
+            left = left - 8;
+        } else {
+            byte = rt_os_mask(left);
+            left = 0;
+        }
+        raw_putbyte(buf + i, byte);
+        i += 1;
+    }
+    return 0;
+}
+// Darwin dirents are {ino, seekoff, reclen, namlen, type, name}; rewrite them in place as the
+// Linux dirent64 records the directory walker parses. Both ABIs order the same fields.
+fn rt_os_dirent_fix(src: u64, total: u64, dst: u64) -> u64 {
+    mut at = 0;
+    mut out = 0;
+    while at < total {
+        record := src + at;
+        length := raw_byte(record + 16) + raw_byte(record + 17) * 256;
+        if length == 0 {
+            break;
+        }
+        ino := raw_load(record);
+        namlen := raw_byte(record + 18) + raw_byte(record + 19) * 256;
+        kind := raw_byte(record + 20);
+        mut size = 20 + namlen;
+        size = ((size + 8) / 8) * 8;
+        slot := dst + out;
+        raw_store(slot, ino);
+        raw_store(slot + 8, 0);
+        raw_putbyte(slot + 16, size & 255);
+        raw_putbyte(slot + 17, size / 256);
+        raw_putbyte(slot + 18, kind);
+        mut i = 0;
+        while i < namlen {
+            raw_putbyte(slot + 19 + i, raw_byte(record + 21 + i));
+            i += 1;
+        }
+        raw_putbyte(slot + 19 + namlen, 0);
+        out = out + size;
+        at = at + length;
+    }
+    return out;
+}
+fn rt_os_dirents(fd: u64, buf: u64, n: u64) -> u64 {
+    // Records are read into a private mapping and rewritten in the caller's buffer, because the
+    // Darwin and Linux layouts differ and translation must not overwrite unread names.
+    src := raw_map(n + 16);
+    if negative(src) {
+        return src;
+    }
+    base := src + n;
+    raw_store(base, 0);
+    got := rt_os_result(raw_import("getdirentries64", fd, src, n, base));
+    if negative(got) {
+        rt_os_result(raw_import("munmap", src, n + 16, 0));
+        return got;
+    }
+    out := rt_os_dirent_fix(src, got, buf);
+    rt_os_result(raw_import("munmap", src, n + 16, 0));
+    return out;
+}
+// Darwin has no mremap(2): move the payload to a fresh mapping and release the old one.
+fn rt_os_mremap(old: u64, oldsize: u64, newsize: u64) -> u64 {
+    fresh := raw_map(newsize);
+    if negative(fresh) {
+        return fresh;
+    }
+    rt_os_copy(fresh, old, oldsize);
+    rt_os_result(raw_import("munmap", old, oldsize, 0));
+    return fresh;
+}
+pub fn rt_call(n: u64, a: u64, b: u64, c: u64) -> u64 {
+    if n == 0 {
+        return rt_os_result(raw_import("read", a, b, c));
+    }
+    if n == 1 {
+        return rt_os_result(raw_import("write", a, b, c));
+    }
+    if n == 2 {
+        return rt_os_result(raw_import("open", a, rt_os_open_flags(b), c));
+    }
+    if n == 3 {
+        return rt_os_result(raw_import("close", a, 0, 0));
+    }
+    if n == 10 {
+        return rt_os_result(raw_import("mprotect", a, b, c));
+    }
+    if n == 11 {
+        return rt_os_result(raw_import("munmap", a, b, 0));
+    }
+    if n == 24 {
+        return rt_os_result(raw_import("sched_yield", 0, 0, 0));
+    }
+    if n == 35 {
+        return rt_os_result(raw_import("nanosleep", a, b, 0));
+    }
+    if n == 39 {
+        return raw_import("getpid", 0, 0, 0);
+    }
+    if n == 57 {
+        return rt_os_result(raw_import("fork", 0, 0, 0));
+    }
+    if n == 59 {
+        return rt_os_result(raw_import("execve", a, b, c));
+    }
+    if (n == 60) + (n == 231) {
+        raw_import("_exit", a, 0, 0);
+        return 0;
+    }
+    if n == 61 {
+        return rt_os_result(raw_import("wait4", a, b, c, 0));
+    }
+    if n == 62 {
+        return rt_os_result(raw_import("kill", a, b, 0));
+    }
+    if n == 204 {
+        return rt_os_cpus(b, c);
+    }
+    if n == 217 {
+        return rt_os_dirents(a, b, c);
+    }
+    if n == 228 {
+        return rt_os_result(raw_import("clock_gettime", rt_os_clock(a), b, 0));
+    }
+    if n == 258 {
+        return rt_os_result(raw_import("mkdir", b, c, 0));
+    }
+    if n == 263 {
+        if (c & 512) != 0 {
+            return rt_os_result(raw_import("rmdir", b, 0, 0));
+        }
+        return rt_os_result(raw_import("unlink", b, 0, 0));
+    }
+    if n == 271 {
+        return rt_os_result(raw_import("poll", a, b, wrapping_sub(0, 1)));
+    }
+    if n == 293 {
+        return rt_os_result(raw_import("pipe", a, 0, 0));
+    }
+    return wrapping_sub(0, 38);
+}
+// Four-argument operations: only the arena growth path and the unsupported readiness family.
+pub fn rt_call4(n: u64, a: u64, b: u64, c: u64, d: u64) -> u64 {
+    if n == 25 {
+        return rt_os_mremap(a, b, c);
+    }
+    return wrapping_sub(0, 38);
+}
+// Mach-O has no clone(2) with a caller-provided stack: creating threads needs pthread_create plus a
+// per-thread self pointer, which macOS does not expose for user code. Reported, not ignored.
+pub fn rt_thread(flags: u64, slot: u64, handle: u64) -> u64 {
+    return wrapping_sub(0, 38);
+}
