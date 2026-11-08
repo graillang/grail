@@ -4,9 +4,9 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import assert from 'node:assert/strict';
-import { copyFileSync, rmSync } from 'node:fs';
-import { root, buildCompiler, compileProgram, machoTargets, frameworkInstallName } from './native.mjs';
-import { dylibs, verifyCodeSignature, LC_CODE_SIGNATURE, loadCommands } from './macos.mjs';
+import { copyFileSync, existsSync, rmSync } from 'node:fs';
+import { root, buildCompiler, compileProgram, compileOnly, assembleDylib, command, machoTargets, frameworkInstallName, machoArchitectures } from './native.mjs';
+import { dylibs, verifyCodeSignature, LC_CODE_SIGNATURE, loadCommands, dylibId, exportedSymbols, undefinedSymbols } from './macos.mjs';
 
 const compiler = buildCompiler();
 const work = join(root, '.work/macos-tests');
@@ -215,4 +215,66 @@ for (const target of machoTargets) {
   has(broken.problems.join('; '), /page 1 hash mismatch/, `${target}: tampering was not reported as a page hash mismatch`);
 }
 
-console.log(`macos: ${objects} Mach-O objects and ${executables} executables verified on ${machoTargets.join(', ')}; ${frameworkLinks} framework links, ${frameworkLinks * 2} unknown-framework rejections and ${frameworkLinks * 3} signature checks`);
+// Shared Mach-O libraries: the dylib must advertise its install name, export exactly the requested
+// symbols (the program entry stub stays local), and an executable must pick it up as LC_LOAD_DYLIB.
+let dylibsBuilt = 0;
+for (const target of machoTargets) {
+  const directory = join(work, target, 'dylib');
+  rmSync(directory, { recursive: true, force: true });
+  mkdirSync(directory, { recursive: true });
+  const source = join(directory, 'greet.grl');
+  writeFileSync(source, 'module greet;\n\npub fn add(a: u64, b: u64) -> u64 {\n    return a + b;\n}\n\nfn main() {\n    println("lib");\n}\n');
+  const assembly = compileOnly(compiler, [source], directory, { target, name: 'greet' });
+  const installName = '/usr/local/lib/libgreet.dylib';
+  const library = assembleDylib(assembly, join(directory, 'libgreet.dylib'), target, { installName, exports: ['_f_greet_add'] });
+
+  check(exportedSymbols(library).sort().join(' ') === '_f_greet_add',
+    `${target}: dylib exports ${JSON.stringify(exportedSymbols(library))} instead of just _f_greet_add`);
+  check(dylibId(library) === installName, `${target}: LC_ID_DYLIB is ${JSON.stringify(dylibId(library))}`);
+  has(tool('file', [library]), /Mach-O 64-bit (x86_64|arm64) dynamically linked shared library/, `${target}: not a shared library`);
+  has(tool('llvm-objdump', ['--macho', '--private-headers', library]), /MH_MAGIC_64\s+\w+\s+\w+\s+\w+\s+DYLIB/, `${target}: object file type is not DYLIB`);
+  // dyld_stub_binder is the lazy-binding helper the stub pages call; it is not a libSystem API.
+  const imports = undefinedSymbols(library).filter(symbol => symbol !== 'dyld_stub_binder');
+  for (const symbol of imports) check(libSystem.has(symbol), `${target}: dylib imports unexpected ${symbol}`);
+
+  // Positive: an executable that needs the exported symbol records the dylib's install name.
+  const consumerObject = join(work, target, 'hello', 'hello.o');
+  check(existsSync(consumerObject), `${target}: missing consumer object ${consumerObject}`);
+  const executable = join(directory, 'consumer');
+  command([process.env.GRAIL_LINKER ?? 'ld64.lld',
+    '-arch', machoArchitectures[target], '-platform_version', 'macos', '11.0', '11.0',
+    '-L', directory, '-lSystem',
+    '-u', '_f_greet_add', library, consumerObject, '-e', '_main', '-o', executable]);
+  check(dylibs(executable).includes(installName), `${target}: consumer does not load the dylib by install name (${dylibs(executable).join(', ')})`);
+  has(tool('llvm-nm', ['-u', executable]), /_f_greet_add/, `${target}: consumer did not resolve the dylib symbol`);
+  dylibsBuilt += 1;
+
+  // Negative: a symbol the dylib does not export must fail the link, not resolve to something else.
+  const missing = spawnSync(process.env.GRAIL_LINKER ?? 'ld64.lld', [
+    '-arch', machoArchitectures[target], '-platform_version', 'macos', '11.0', '11.0',
+    '-L', directory, '-lSystem',
+    '-u', '_f_greet_absent', library, consumerObject, '-e', '_main', '-o', join(directory, 'missing'),
+  ], { cwd: root, encoding: 'utf8' });
+  check(missing.status !== 0, `${target}: an unexported symbol linked successfully`);
+  has(`${missing.stdout ?? ''}${missing.stderr ?? ''}`, /undefined symbol: _f_greet_absent/,
+    `${target}: missing export produced the wrong diagnostic`);
+
+  // Negative: the driver refuses a dylib without an install name or without exports.
+  for (const [options, pattern, what] of [
+    [{ exports: ['_f_greet_add'] }, /needs an install name/, 'install name'],
+    [{ installName }, /needs at least one exported symbol/, 'export list'],
+  ]) {
+    let refused = null;
+    try { assembleDylib(assembly, join(directory, 'bad.dylib'), target, options); } catch (error) { refused = error; }
+    check(refused !== null, `${target}: dylib without ${what} was accepted`);
+    has(String(refused && refused.message), pattern, `${target}: dylib without ${what} gave the wrong error`);
+  }
+  // Negative: an export that names no label in the module is refused before linking, so a typo
+  // cannot become a global undefined reference the linker happily accepts.
+  let bogus = null;
+  try { assembleDylib(assembly, join(directory, 'bogus.dylib'), target, { installName, exports: ['_f_greet_nope'] }); } catch (error) { bogus = error; }
+  check(bogus !== null, `${target}: an undefined exported symbol was accepted`);
+  has(String(bogus && bogus.message), /export _f_greet_nope is not defined by this module/, `${target}: undefined export gave the wrong error`);
+}
+
+console.log(`macos: ${objects} Mach-O objects and ${executables} executables verified on ${machoTargets.join(', ')}; ${frameworkLinks} framework links, ${frameworkLinks * 2} unknown-framework rejections, ${frameworkLinks * 3} signature checks and ${dylibsBuilt} shared dylibs`);

@@ -2,32 +2,20 @@
 
 ## Unreleased
 
-- Port Borg Agent's service supervision and filesystem layout (`borg/`). `src/supervisor.grl` carries
-  the nine `ServiceState` values and the restart rules from `borg-lanes/src/services.rs`: an exit is
-  transient only when the child exited with a listed code, so a signalled child always counts as a
-  failure; a transient exit relaunches after the plain `backoff_ms` without counting; anything else
-  increments `failures` and waits `max(backoff_ms, 50) * 2^min(failures, 6)`, reaching `Failed` past
-  `max_restarts`; a launch that never happened is a failure; and `restarts` counts every relaunch. It
-  also resolves the documented layout with Borg's precedence — `BORG_HOME`/`HOME`/platform for host
-  state, `XDG_CONFIG_HOME`/`HOME/.config`/platform for configuration, and
-  `BORG_LANE_DIR`/`BORG_LANES_ROOT`/`XDG_RUNTIME_DIR`/temp for lane storage — plus the resume budget.
-  The port now checks 719 reference lines over 115 documents, and `--anchors`
-  verifies 37 copied snippets across seven source files. Spawning, reaping and sockets remain out of
-  scope.
-
-- Port Borg Agent's JSON-RPC framing and dispatch (`borg/`). `src/jsonrpc.grl` models the ACP
-  envelope — request, notification, result and error frames with numeric, string or null ids — and
-  matches `agent-client-protocol-schema` 1.5.0 byte for byte, including `"params": null`,
-  `"result": null` and the crate's field order. It carries both framings Borg uses: newline-delimited
-  stdio messages with the 8 MiB cap (`native_mcp.rs`), and `Content-Length` headers with the 8 KiB
-  header and 8 MiB body caps, accepting `\r\n\r\n` or `\n\n` (`lsp.rs`). Dispatch follows
-  `lsp.rs::request_with_timeout`: ids from 1, a single request in flight, the superseded one
-  cancelled, server requests answered with a null result, and unrelated ids ignored. Framing
-  accepts any valid JSON body and classification is separate, as it is upstream. The ACP reference
-  lives in its own crate because that crate enables serde_json's `preserve_order`, which would
-  otherwise have silently changed every other reference's output. The port now checks 674 reference
-  lines over 95 documents, and `--anchors` verifies 20 copied snippets across three source files.
-  Sockets, transports and UI remain out of scope.
+- macOS platform linkage beyond libSystem: `compileProgram` accepts `frameworks` and, with
+  `$GRAIL_SDK`, links the SDK's real `-framework` stubs, otherwise writes `<Name>.framework` `.tbd`
+  stubs from a caller-supplied export list (a framework name without either is rejected instead of
+  being invented). `tools/macos.mjs` parses the linked image and verifies its `LC_LOAD_DYLIB`
+  entries. `sign: true` requests an ad-hoc signature — `codesign --force --sign -` on macOS,
+  `ld64.lld -adhoc_codesign` elsewhere — and `bun tools/macos.mjs inspect|verify BINARY` validates
+  the SuperBlob, CodeDirectory, page hashes and cdhash statically; a tampered page fails
+  verification. Tests add Foundation framework loading, unknown-framework rejection (driver and
+  linker), and signature validation/tamper detection. Shared Mach-O libraries are also emitted:
+  `assembleDylib` links `-dylib -install_name <name>` with an explicit `-exported_symbols_list`
+  (a dylib without an install name or without exports is refused), and `tools/macos.mjs` reports
+  `LC_ID_DYLIB` plus the export/import sets by parsing `LC_SYMTAB` directly. Tests link an
+  executable against the dylib and require its install name in `LC_LOAD_DYLIB`, and reject a
+  symbol outside the export list. Nothing here is execution evidence on Apple hardware.
 
 - Port Borg Agent's local-session ownership state (`borg/`). `src/session_state.grl` carries the
   owner record (`schema_version`, `pid`, `executable_identity`, optional `package_version` and
