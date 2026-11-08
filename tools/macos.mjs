@@ -50,6 +50,74 @@ export function loadCommands(binary) {
   return { size: bytes.length, cpu: cpuNames[header.cputype] ?? `0x${header.cputype.toString(16)}`, commands: found };
 }
 
+export const LC_ID_DYLIB = 0x0d;
+export const LC_SYMTAB = 0x02;
+const N_STAB = 0xe0;
+const N_TYPE = 0x0e;
+const N_EXT = 0x01;
+const N_UNDF = 0x0;
+const N_SECT = 0x0e;
+
+// LC_ID_DYLIB: the install name a dylib advertises to everything that links against it.
+export function dylibId(binary) {
+  const bytes = readFileSync(binary);
+  const header = readHeader(bytes);
+  let offset = header.offset;
+  for (let i = 0; i < header.ncmds; i++) {
+    const cmd = bytes.readUInt32LE(offset);
+    const size = bytes.readUInt32LE(offset + 4);
+    if (cmd === LC_ID_DYLIB) {
+      const nameOffset = bytes.readUInt32LE(offset + 8);
+      const end = bytes.indexOf(0, offset + nameOffset);
+      return bytes.toString('latin1', offset + nameOffset, end);
+    }
+    offset += size;
+  }
+  return null;
+}
+
+// The symbol table, split the way the linker sees it: external definitions (exports) and external
+// undefineds (imports). Parsed from LC_SYMTAB/nlist_64, so it does not depend on llvm-nm.
+function symbolTable(binary) {
+  const bytes = readFileSync(binary);
+  const header = readHeader(bytes);
+  let offset = header.offset;
+  let symtab = null;
+  for (let i = 0; i < header.ncmds; i++) {
+    const cmd = bytes.readUInt32LE(offset);
+    const size = bytes.readUInt32LE(offset + 4);
+    if (cmd === LC_SYMTAB) {
+      symtab = { symoff: bytes.readUInt32LE(offset + 8), nsyms: bytes.readUInt32LE(offset + 12), stroff: bytes.readUInt32LE(offset + 16) };
+    }
+    offset += size;
+  }
+  if (!symtab) return { exports: [], undefineds: [], exportsAll: [] };
+  const exports = [];
+  const undefineds = [];
+  const exportsAll = [];
+  for (let i = 0; i < symtab.nsyms; i++) {
+    const entry = symtab.symoff + i * 16;
+    const strx = bytes.readUInt32LE(entry);
+    const type = bytes[entry + 4];
+    if (type & N_STAB) continue;
+    const name = bytes.toString('latin1', symtab.stroff + strx, bytes.indexOf(0, symtab.stroff + strx));
+    if (name === '' || name.startsWith('.L')) continue;
+    exportsAll.push({ name, type });
+    if ((type & N_EXT) === 0) continue;
+    if ((type & N_TYPE) === N_UNDF) undefineds.push(name);
+    else if ((type & N_TYPE) === N_SECT) exports.push(name);
+  }
+  return { exports, undefineds, exportsAll };
+}
+
+export function exportedSymbols(binary) {
+  return symbolTable(binary).exports;
+}
+
+export function undefinedSymbols(binary) {
+  return symbolTable(binary).undefineds;
+}
+
 export function dylibs(binary) {
   return loadCommands(binary).commands.filter(c => c.name !== undefined).map(c => c.name);
 }
@@ -140,6 +208,12 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   console.log(`${binary}: Mach-O ${cpu}`);
   console.log(`dylibs (${deps.length}):`);
   console.log(deps.length ? deps.join('\n') : '  none');
+  const id = dylibId(binary);
+  if (id) {
+    console.log(`dylib id: ${id}`);
+    const exports = exportedSymbols(binary);
+    console.log(`exports (${exports.length}): ${exports.join(' ') || 'none'}`);
+  }
   console.log(`signature: ${signature.present ? (signature.valid ? 'valid ad-hoc' : 'invalid') : 'absent'}`);
   if (signature.present) {
     console.log(`  cdhash ${signature.cdhash}, ${signature.pages} pages of ${signature.pageSize} bytes, code limit ${signature.codeLimit}`);

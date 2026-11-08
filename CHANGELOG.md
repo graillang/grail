@@ -10,8 +10,12 @@
   `ld64.lld -adhoc_codesign` elsewhere — and `bun tools/macos.mjs inspect|verify BINARY` validates
   the SuperBlob, CodeDirectory, page hashes and cdhash statically; a tampered page fails
   verification. Tests add Foundation framework loading, unknown-framework rejection (driver and
-  linker), and signature validation/tamper detection. Nothing here is execution evidence on Apple
-  hardware.
+  linker), and signature validation/tamper detection. Shared Mach-O libraries are also emitted:
+  `assembleDylib` links `-dylib -install_name <name>` with an explicit `-exported_symbols_list`
+  (a dylib without an install name or without exports is refused), and `tools/macos.mjs` reports
+  `LC_ID_DYLIB` plus the export/import sets by parsing `LC_SYMTAB` directly. Tests link an
+  executable against the dylib and require its install name in `LC_LOAD_DYLIB`, and reject a
+  symbol outside the export list. Nothing here is execution evidence on Apple hardware.
 
 - Reserve `VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC` in the Vulkan descriptor pool, matching
   set 1; the new SDL3 surface test’s validation layer had exposed the missing pool size.

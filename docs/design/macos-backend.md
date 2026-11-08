@@ -128,6 +128,20 @@ only accepted when the expected `LC_LOAD_DYLIB` entry is really present. The tes
 framework load (Foundation), the driver's refusal of an unlisted framework, and `ld64.lld`'s own
 `framework not found` error when the stub path is bypassed.
 
+### Shared libraries
+
+`assembleDylib(assembly, output, target, { installName, exports })` links a Mach-O dylib with
+`-dylib -install_name <name>` and restricts its export set with `-exported_symbols_list`. A Grail
+program always needs an entry function, so the image still contains the local `_main` stub; the
+export list is what makes the library's surface explicit, and a dylib without an install name or
+without exports is rejected by the driver rather than linked with defaults.
+
+`tools/macos.mjs` reads the result back: `dylibId` reports `LC_ID_DYLIB`, and `exportedSymbols` /
+`undefinedSymbols` parse `LC_SYMTAB` and its `nlist_64` entries directly (no `llvm-nm` dependency).
+An executable linked against the dylib must record the install name as `LC_LOAD_DYLIB` and resolve
+the symbol; a symbol outside the export list is an `undefined symbol` at link time, and exporting a
+symbol the object does not define fails the same way.
+
 ### Ad-hoc signatures
 
 `compileProgram(..., { sign: true })` asks for an ad-hoc signature. On a macOS host with `codesign`

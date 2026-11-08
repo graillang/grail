@@ -159,6 +159,51 @@ export function assemble(source, executable, target = hostTarget, linkArgs = [],
   command([process.env.GRAIL_LINKER ?? 'ld.lld', '-m', emulations[target], object, ...linkArgs, '-o', executable]);
   return executable;
 }
+// Shared Mach-O libraries. A Grail program still needs an entry function, so the image keeps its
+// (local) `_main` stub; `-exported_symbols_list` decides what the dylib actually exports.
+export function assembleDylib(source, output, target = hostTarget, { installName, exports = [], linkArgs = [] } = {}) {
+  targetName(target);
+  if (!machoTargets.includes(target)) throw new Error(`shared dylibs are Mach-O only, not ${target}`);
+  if (!installName) throw new Error('a Mach-O dylib needs an install name (-install_name)');
+  if (exports.length === 0) throw new Error('a Mach-O dylib needs at least one exported symbol');
+  const symbols = exports.map(symbol => (symbol.startsWith('_') ? symbol : `_${symbol}`));
+  // The compiler emits module functions as local labels (only the process entry is global), so the
+  // requested exports are promoted here before assembling. A first-class `--export` compiler flag
+  // would move this into the compiler; the driver step keeps the dylib surface explicit meanwhile.
+  const marked = `${output}.exports.s`;
+  const assembly = readFileSync(source, 'utf8');
+  // An export must name a label this module actually defines; otherwise the driver would turn a
+  // typo into a global undefined reference and the linker would accept it.
+  for (const symbol of symbols) {
+    if (!new RegExp(`^${symbol}:`, 'm').test(assembly)) {
+      throw new Error(`export ${symbol} is not defined by this module`);
+    }
+  }
+  const declarations = symbols
+    .filter(symbol => !new RegExp(`^\\.globl\\s+${symbol}\\s*$`, 'm').test(assembly))
+    .map(symbol => `.globl ${symbol}\n`)
+    .join('');
+  writeFileSync(marked, declarations + assembly);
+  const object = `${output}.o`;
+  command([process.env.GRAIL_ASSEMBLER ?? 'clang', `--target=${triples[target]}`, '-c', marked, '-o', object]);
+  const list = `${output}.exports`;
+  writeFileSync(list, `${symbols.join('\n')}\n`);
+  const { stub } = libSystemStub(dirname(object), object, machoArchitectures[target]);
+  command([
+    process.env.GRAIL_LINKER ?? 'ld64.lld',
+    '-arch', machoArchitectures[target],
+    '-platform_version', 'macos', '11.0', '11.0',
+    '-dylib',
+    '-install_name', installName,
+    '-current_version', '1', '-compatibility_version', '1',
+    '-exported_symbols_list', list,
+    '-L', dirname(stub), '-lSystem',
+    ...linkArgs,
+    object, '-o', output,
+  ]);
+  return output;
+}
+
 export function runner(target = hostTarget) {
   targetName(target);
   if (machoTargets.includes(target)) throw new Error(`${target} executables cannot be executed on ${process.platform}; they need macOS hardware (or a Darwin emulator)`);
@@ -203,6 +248,17 @@ export function buildCompiler() {
   const pending = assemble(output, join(directory, 'grail.pending'));
   renameSync(pending, executable);
   return executable;
+}
+// Emit assembly only: shared libraries and link-only tests need the object without a program link.
+export function compileOnly(compiler, inputs, directory, { target = hostTarget, name = 'module', defaultU64 = true, typedRefs = false, runtime = join(root, 'compiler/runtime.grl'), osRuntime = join(root, 'compiler/os-linux.grl'), darwin = join(root, 'compiler/darwin.grl') } = {}) {
+  targetName(target);
+  mkdirSync(directory, { recursive: true });
+  const assembly = join(directory, `${name}.s`);
+  const platform = machoTargets.includes(target) ? [resolve(root, darwin)] : [resolve(root, osRuntime)];
+  const files = [...inputs.map(p => resolve(root, p)), resolve(root, runtime), ...platform];
+  const numeric = [...(defaultU64 ? ['--default-u64'] : []), ...(typedRefs ? ['--typed-refs'] : [])];
+  command([compiler, ...numeric, '--target', target, assembly, ...files]);
+  return assembly;
 }
 export function compileProgram(compiler, inputs, directory, { target = hostTarget, overflow = 'checked', name = 'program', defaultU64 = true, typedRefs = false, runtime = join(root, 'compiler/runtime.grl'), osRuntime = join(root, 'compiler/os-linux.grl'), darwin = join(root, 'compiler/darwin.grl'), frameworks = [], sdk = process.env.GRAIL_SDK, sign = false } = {}) {
   targetName(target);
