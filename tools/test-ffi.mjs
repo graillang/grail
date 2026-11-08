@@ -20,6 +20,13 @@ const fixtures = [
     stdout: '259\n1\n', // strlen 5 + "ABC" 198 + fill 7 + 7*7 49 => 259; handle round trip => 1
     symbols: ['c_strlen', 'c_sum_bytes', 'c_fill', 'c_open', 'c_close'],
   },
+  {
+    name: 'extern_records',
+    // point sum 42, C-swapped x 23, mixed fields -7+300-5+9 = 297 and after C
+    // rewrites them 1234-2+7+5 = 1244; then sizeof, s16/short -2/char 7 checks.
+    stdout: '1606\n23\n16\n-2\n7\n',
+    symbols: ['c_point_sum', 'c_point_swap', 'c_mixed_sum', 'c_mixed_fill', 'c_mixed_size', 'c_mixed_off_d'],
+  },
 ];
 const selected = process.argv[2] ? [targetName(process.argv[2])] : [hostTarget, ...targets.filter(t => t !== hostTarget)];
 const compiler = buildCompiler();

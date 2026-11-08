@@ -1,0 +1,75 @@
+module ffi_extern_records;
+
+// `extern record` uses C layout: natural alignment, padding between fields, tail
+// padding to the record alignment. Field access reads and writes the field width.
+extern "C" record Point { x: i64, y: i64 }
+extern "C" record Mixed { a: i32, b: i16, c: i8, d: i64 }
+
+// A record parameter is passed as the C pointer to its fields (C `Point *`). Grail
+// keeps ownership of the allocation, so C must not free it.
+extern "C" lib "shim.o" fn c_point_sum(p: Point) -> i64;
+extern "C" lib "shim.o" fn c_point_swap(p: Point) -> i64;
+extern "C" lib "shim.o" fn c_mixed_sum(m: Mixed) -> i64;
+extern "C" lib "shim.o" fn c_mixed_fill(m: Mixed, d: i64) -> i64;
+extern "C" lib "shim.o" fn c_mixed_size() -> i64;
+extern "C" lib "shim.o" fn c_mixed_off_a() -> i64;
+extern "C" lib "shim.o" fn c_mixed_off_b() -> i64;
+extern "C" lib "shim.o" fn c_mixed_off_c() -> i64;
+extern "C" lib "shim.o" fn c_mixed_off_d() -> i64;
+
+fn main() -> u64 {
+    mut total: i64 = 0;
+    mut swapped: i64 = 0;
+    mut size: i64 = 0;
+    mut low: i16 = 0;
+    mut byte: i8 = 0;
+    unsafe {
+        p := Point { x: 19, y: 23 };
+        total = c_point_sum(p);
+        swapped = c_point_swap(p);
+        // Grail sees the field C wrote through the same pointer.
+        total = total + p.x;
+        // Grail writes narrow fields at their C offsets and C reads them.
+        m := Mixed { a: -7, b: 300, c: -5, d: 9 };
+        total = total + c_mixed_sum(m);
+        // C writes narrow fields and Grail reads them back, sign-extended.
+        c_mixed_fill(m, 5);
+        low = m.b;
+        byte = m.c;
+        total = total + c_mixed_sum(m);
+        size = c_mixed_size();
+        if c_mixed_off_a() != 0 {
+            return 1;
+        }
+        if c_mixed_off_b() != 4 {
+            return 1;
+        }
+        if c_mixed_off_c() != 6 {
+            return 1;
+        }
+        if c_mixed_off_d() != 8 {
+            return 1;
+        }
+    }
+    println(total);
+    println(swapped);
+    println(size);
+    println(low);
+    println(byte);
+    if total != 1606 {
+        return 1;
+    }
+    if swapped != 23 {
+        return 1;
+    }
+    if size != 16 {
+        return 1;
+    }
+    if low != -2 {
+        return 1;
+    }
+    if byte != 7 {
+        return 1;
+    }
+    return 0;
+}
