@@ -24,6 +24,14 @@
   runtime ABI contract suite (`tools/abi-test.mjs`) and the graphics C/shader
   suites, and the Windows x86-64 cross job is a required release gate for
   build/static checks. Windows AArch64 and macOS remain planned.
+- Abundance CPU port, landscape-digest increment: `abundance/src/landscape_digest.grl` carries
+  `terrain::landscape_world_content_digest` — FNV-1a from the standard offset basis over every byte
+  the engine's landscape writer emits, plus the byte count — and the world envelope's `ABWLA001`
+  branch is now exercised end to end. The reference builds a real landscape authority the way
+  Abundance's own `tests/world_landscape_tests.cpp` does, writes its 721 840-byte serialisation and
+  prints both the digest and `World::content_hash()`; the Grail side recomputes the digest from
+  those bytes and reproduces the world hash that binds it. The suite now compares 104 exact values
+  (math 63, hashing 16, world envelope and landscape digest 25).
 - Abundance CPU port, world-hash increment: `abundance/src/world_hash.grl` carries the
   `World::content_hash` envelope — generator identity, configuration, twenty raster layers, drainage
   DAG, geology/province/biomes, material masks, provinces, caves, sites, regions, corridors and
