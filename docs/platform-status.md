@@ -1,6 +1,6 @@
 # Cross-platform status
 
-Last verified: 2026-11-08 on `main` at `c149c06`.
+Last verified: 2026-11-08 on `main` at `35490c1`.
 
 This page distinguishes what has actually been built and executed from scaffolding and
 static inspection. A cross-built object is not platform support. A header parsing is not a
@@ -46,12 +46,14 @@ not proof that Grail programs can call arbitrary C yet.
 
 Implemented and tested: versioned C RHI ABI, null backend, wire structures, offline
 HLSL→SPIR-V/DXIL reflection, shader permutation enumeration and real per-combination
-compilation, and key→bytecode library resolution. `make -C graphics test` has 319 checks;
+compilation, key→bytecode library resolution, and a headless Vulkan device/capabilities probe
+verified on AMD RADV (RX 7900 GRE). `make -C graphics test` has 319 checks;
+`make -C graphics vk-probe` has 21 hardware checks;
 `make -C graphics shader-check` verifies real artifacts and adds 122 checks; `perm-test` has
 8 tests.
 
-Not implemented: Vulkan device/backend, D3D12, Metal, SDL3 window backend, swapchain execution
-and a renderer. The null backend validates contracts only.
+Not implemented: Vulkan rendering backend (the probe only queries the device), D3D12, Metal, SDL3
+window backend, swapchain execution and a renderer. The null backend validates contracts only.
 
 ## Tooling
 
@@ -74,5 +76,6 @@ bun tools/windows.mjs check     # Windows COFF/PE static checks, no execution
 make -C graphics test           # RHI C ABI, null backend, shader library
 make -C graphics shader-check   # real DXC/SPIR-V artifacts and reflection
 make -C graphics perm-test      # shader permutations
+make -C graphics vk-probe       # Vulkan device/capability probe (GPU, skipped without loader)
 bun test tools/platforms.test.mjs tools/archive.test.mjs tools/sign.test.mjs
 ```
