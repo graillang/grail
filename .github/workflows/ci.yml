@@ -23,7 +23,7 @@ jobs:
         with:
           bun-version: latest
       - name: Unit tests for the cross-platform matrix, packaging and signing
-        run: bun test tools/platforms.test.mjs tools/archive.test.mjs tools/sign.test.mjs
+        run: bun test tools/platforms.test.mjs tools/archive.test.mjs tools/sign.test.mjs tools/lsp.test.mjs
       - name: Static checks (matrix, docs, workflow, scripts)
         run: bun tools/ci.mjs lint
       - name: Matrix and lane report
@@ -199,6 +199,29 @@ jobs:
           name: dist-windows-x86_64
           path: dist/
           if-no-files-found: error
+
+  # LSP MVP: a real stdio session against the compiler's diagnostics interface.
+  lsp:
+    name: LSP stdio session
+    needs: preflight
+    if: needs.preflight.outputs.ready == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Install clang and LLD
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld
+      - name: Build the host compiler
+        run: bun tools/ci.mjs build --platform linux-x86_64
+      - name: Initialize, didOpen/didChange and publishDiagnostics over stdio
+        run: |
+          GRAIL_LSP_COMPILER="$PWD/$(ls dist/grail-*-linux-x86_64-compiler)" \
+          GRAIL_HOME="$PWD" \
+          bun test tools/lsp.test.mjs
 
   # Planned lanes run detection and scaffolding only. `--allow-blocked` turns
   # the expected "compiler backend not implemented" result into a green job, so

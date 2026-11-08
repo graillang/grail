@@ -94,3 +94,15 @@ graphics-test:
     make -C graphics test
     bun test graphics/tests/shader_permutations.test.mjs
 
+
+# Windows x86-64 COFF/PE static checks (build-only; images are never executed).
+windows-check:
+    bun tools/windows.mjs check
+
+# Run the Grail LSP MVP on stdio (requires GRAIL_LSP_COMPILER or GRAIL_COMPILER).
+lsp:
+    bun tools/lsp.mjs
+
+# LSP protocol and compiler-diagnostic tests over a real stdio session.
+lsp-test:
+    bun test tools/lsp.test.mjs

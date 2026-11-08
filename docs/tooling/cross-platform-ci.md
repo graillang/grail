@@ -84,6 +84,9 @@ with `llvm-ar`, and links with `lld-link`. It never executes the image.
    signing dry-run plan. `--allow-blocked` exits 0 for known backend blockers
    and for not-applicable hosts, so the matrix is exercised without a false
    green binary.
+8. **LSP**: the tooling job runs the protocol tests; a preflight-gated `lsp`
+   job builds the compiler and runs the compiler-backed stdio session
+   (`tools/lsp.test.mjs`).
 
 `release-sign` is tag-only and environment-gated (`RELEASE_SIGNING=true`).
 

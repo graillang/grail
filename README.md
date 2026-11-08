@@ -22,6 +22,7 @@ fn main() {
 - **Verified cross-platform status:** [docs/platform-status.md](docs/platform-status.md) distinguishes executed targets from scaffolding and cross-builds.
 - **Cross-platform OS ABI (proposal/scaffold):** [docs/design/runtime-abi.md](docs/design/runtime-abi.md)
   and [runtime/abi/README.md](runtime/abi/README.md); `just abi-test` runs the C contract tests.
+- **LSP:** `GRAIL_LSP_COMPILER=<grail> bun tools/lsp.mjs` (MVP: diagnostics over stdio); debugger/profiler plan in [docs/tooling/lsp-debugger-profiler.md](docs/tooling/lsp-debugger-profiler.md).
 - **Proposed numeric types:** [docs/design/numeric-types.md](docs/design/numeric-types.md) (partly implemented: sized integers, `f64`, `f32`, `char`).
 
 Build the compiler with `bun tools/native.mjs build` (Bun, Clang assembler and LLD required).
