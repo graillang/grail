@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- D3D12 buffers, vertex input and depth: upload, readback and device buffers (host access to
+  device memory is refused, as on Vulkan), vertex and index buffer binding, input layouts built
+  from the vertex shader's reflected semantics and checked against the pipeline's attributes,
+  depth textures, depth-stencil views, reverse-Z depth state and depth clears, and indexed draws.
+  The smoke test now has 162 checks, including a depth-tested indexed triangle whose depth reads
+  back exactly. The shader tool stored DXC's SPIR-V variable name (`in.var.COLOR0`) as the vertex
+  semantic; it now stores the HLSL semantic and index (`COLOR`, 0), as the reflection contract
+  says, which D3D12 input layouts need.
+
 - D3D12 draws: DXIL shaders, graphics pipelines on the contract root signature (32 root
   constants at b0, frame constants as a root CBV at b0 space1), blend modes, topology, cull,
   wireframe, pipeline commit/stats, push constants, frame-constant slots and non-indexed draws.

@@ -88,11 +88,14 @@ vkd3d stops at shader model 6.2; the offline DXIL is 6.6). It covers a headless 
 feature level, one direct queue and its fence timeline, 2D render-target textures and views,
 command lists, tracked-state barriers, clears, viewport/scissor, submit, texture readback, DXIL
 shaders, graphics pipelines on the contract root signature (push constants as root constants,
-frame constants as a root CBV), frame-constant slots and draws: 83 checks, including exact
-clear readbacks and a 64x64 draw of the offline `core/fullscreen` + `core/solid` DXIL that
-matches the shader on every pixel. Vertex input, depth, MSAA, buffers, compute and mesh
-pipelines, bindless descriptor tables, swapchains, semaphores and compute/copy queues return
-`GR_ERROR_UNSUPPORTED`. No real Windows host has run it.
+frame constants as a root CBV), frame-constant slots, upload/readback/device buffers, vertex
+and index buffers with input layouts matched to the shader's reflected semantics, reverse-Z
+depth attachments and depth state, and plain and indexed draws: 162 checks, including exact
+clear readbacks, a 64x64 draw of the offline `core/fullscreen` + `core/solid` DXIL that matches
+the shader on every pixel, and an indexed `core/triangle` drawn near then far where the depth
+test keeps the near colour and the depth buffer reads back exactly 0.75. MSAA, storage and
+indirect buffers, compute and mesh pipelines, bindless descriptor tables, swapchains,
+semaphores and compute/copy queues return `GR_ERROR_UNSUPPORTED`. No real Windows host has run it.
 
 Not implemented: Metal (returns `GR_ERROR_UNSUPPORTED`), mesh and ray-tracing pipelines, and a
 complete renderer. The null backend validates contracts only.
