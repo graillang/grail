@@ -159,8 +159,9 @@ at call sites, and generated Grail functions preserve the callee-saved registers
 allocate (the internal prologue saves and restores them), which is what lets C call back into
 an `extern "C"` definition.
 
-More than six arguments is rejected: Grail has no stack-argument passing yet, and the
-compiler will not silently drop the seventh argument.
+Direct and `cfn` calls pass arguments beyond the registers on the stack (see the calling
+conventions below); an exported callback still takes at most six integer words, and a seventh
+is rejected rather than dropped.
 
 ## The unsafe boundary
 

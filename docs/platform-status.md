@@ -67,8 +67,8 @@ C callbacks and `cfn` function pointers. `bun tools/test-ffi.mjs` links and exec
 (13 executed, 0 linked-only), including `dlopen`/`dlsym`/`dlclose` on Linux x86-64 through a
 host-TLS bridge (main thread only). Still open:
 dynamic loading on other targets, variadic C functions and variadic callbacks,
-callback results, record results and by-value struct passing, nested records, float and narrow
-integer parameters, and stack arguments beyond six words. The C headers under `include/grail`
+callback results, record results and by-value struct passing, nested records, and float and
+narrow-integer callback parameters (direct and `cfn` calls take them). The C headers under `include/grail`
 are the runtime ABI contract.
 
 ## Graphics and shaders
