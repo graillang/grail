@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+- macOS platform linkage beyond libSystem: `compileProgram` accepts `frameworks` and, with
+  `$GRAIL_SDK`, links the SDK's real `-framework` stubs, otherwise writes `<Name>.framework` `.tbd`
+  stubs from a caller-supplied export list (a framework name without either is rejected instead of
+  being invented). `tools/macos.mjs` parses the linked image and verifies its `LC_LOAD_DYLIB`
+  entries. `sign: true` requests an ad-hoc signature — `codesign --force --sign -` on macOS,
+  `ld64.lld -adhoc_codesign` elsewhere — and `bun tools/macos.mjs inspect|verify BINARY` validates
+  the SuperBlob, CodeDirectory, page hashes and cdhash statically; a tampered page fails
+  verification. Tests add Foundation framework loading, unknown-framework rejection (driver and
+  linker), and signature validation/tamper detection. Shared Mach-O libraries are also emitted:
+  `assembleDylib` links `-dylib -install_name <name>` with an explicit `-exported_symbols_list`
+  (a dylib without an install name or without exports is refused), and `tools/macos.mjs` reports
+  `LC_ID_DYLIB` plus the export/import sets by parsing `LC_SYMTAB` directly. Tests link an
+  executable against the dylib and require its install name in `LC_LOAD_DYLIB`, and reject a
+  symbol outside the export list. `--export NAME` is a compiler flag: it marks exactly the
+  definition with that declared name `.globl` at its own label and refuses a name that no function
+  defines, so the driver no longer rewrites `.globl` into the assembly. Dylibs can advertise
+  `@rpath/...` install names and consumers carry `LC_RPATH` (`rpaths` in `tools/macos.mjs`), with
+  tests for both. Nothing here is execution evidence on Apple hardware.
+
 - v3 C FFI increment 1: `extern "C"` foreign declarations and calls.
   `extern "C" [lib "INPUT"] [as "SYMBOL"] fn name(i64, u64) -> i64|u64|unit;` declares a
   linker-resolved C symbol; calls emit the C argument/result registers of the selected

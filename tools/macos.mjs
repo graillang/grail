@@ -51,6 +51,7 @@ export function loadCommands(binary) {
 }
 
 export const LC_ID_DYLIB = 0x0d;
+export const LC_RPATH = 0x8000001c;
 export const LC_SYMTAB = 0x02;
 const N_STAB = 0xe0;
 const N_TYPE = 0x0e;
@@ -74,6 +75,24 @@ export function dylibId(binary) {
     offset += size;
   }
   return null;
+}
+
+// LC_RPATH entries, in load-command order: the search paths dyld uses for @rpath install names.
+export function rpaths(binary) {
+  const bytes = readFileSync(binary);
+  const header = readHeader(bytes);
+  const found = [];
+  let offset = header.offset;
+  for (let i = 0; i < header.ncmds; i++) {
+    const cmd = bytes.readUInt32LE(offset);
+    const size = bytes.readUInt32LE(offset + 4);
+    if (cmd === LC_RPATH) {
+      const nameOffset = bytes.readUInt32LE(offset + 8);
+      found.push(bytes.toString('latin1', offset + nameOffset, bytes.indexOf(0, offset + nameOffset)));
+    }
+    offset += size;
+  }
+  return found;
 }
 
 // The symbol table, split the way the linker sees it: external definitions (exports) and external

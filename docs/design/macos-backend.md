@@ -130,11 +130,18 @@ framework load (Foundation), the driver's refusal of an unlisted framework, and 
 
 ### Shared libraries
 
-`assembleDylib(assembly, output, target, { installName, exports })` links a Mach-O dylib with
-`-dylib -install_name <name>` and restricts its export set with `-exported_symbols_list`. A Grail
-program always needs an entry function, so the image still contains the local `_main` stub; the
-export list is what makes the library's surface explicit, and a dylib without an install name or
-without exports is rejected by the driver rather than linked with defaults.
+`assembleDylib(assembly, output, target, { installName, exports, rpath })` links a Mach-O dylib
+with `-dylib -install_name <name>` (including `@rpath/...` names) and restricts its export set with
+`-exported_symbols_list`; `rpath` adds `LC_RPATH` entries. A Grail program always needs an entry
+function, so the image still contains the local `_main` stub; the export list is what makes the
+library's surface explicit, and a dylib without an install name or without exports is rejected by
+the driver rather than linked with defaults.
+
+The compiler owns the symbol promotion: `--export NAME` marks the definition with that declared
+name `.globl` at its own label and errors with `export 'NAME' is not defined by any function` when
+no definition matches, so a misspelled export can never become a global undefined reference. The
+driver passes `--export` through `compileOnly`; it no longer rewrites `.globl` into the assembly.
+Without the flag, no module function becomes global, which is what the ELF check asserts.
 
 `tools/macos.mjs` reads the result back: `dylibId` reports `LC_ID_DYLIB`, and `exportedSymbols` /
 `undefinedSymbols` parse `LC_SYMTAB` and its `nlist_64` entries directly (no `llvm-nm` dependency).
