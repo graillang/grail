@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- Win64 callbacks: an exported `extern "C" fn` on Windows x86-64 is now a thunk under the C
+  symbol that saves `rdi`, `rsi` and `xmm6`-`xmm15`, moves `rcx`/`rdx`/`r8`/`r9` (and stack
+  arguments five and six) into the body's registers and calls the body. Callbacks previously read
+  SysV registers, so a C caller's arguments were lost and its callee-saved registers clobbered.
+  The f32 narrowing in extern calls no longer uses `xmm15` as scratch, which Win64 preserves.
+- Stdlib wrappers on Windows: `lib/sys/grail_ffi.grl` binds `lib "grail_ffi"` (the Linux object or
+  `grail_ffi.dll`); `tools/test-ffi-runtime-windows.mjs` builds the C OS ABI and shim into
+  `grail_ffi.dll` with Zig's MinGW toolchain and runs the file, socket and process/thread tests
+  under Wine (the process test spawns `cmd.exe`).
+- Windows `io::Error` codes: the Windows host layer maps `GetLastError` to the errno values
+  `io::Error` understands (ENOENT, EACCES, EEXIST, ENOTDIR, ENOTEMPTY, EINVAL, ENOMEM); unmapped
+  codes surface as `Other(0x10000 + code)`. Opening any missing or unreadable file used to report
+  ENOENT, and removing a non-empty directory or a file as a directory reported EISDIR.
+- `vecs::fold` (consuming, any element type) and `any_num`/`all_num`/`count_num`/`position_num`.
+  Generic predicates over borrowed elements wait for closure parameters that hold borrows.
+
 - Windows dynamic loading: an `extern "C" lib "X"` declaration on a PE target now records
   `X SYMBOL`, and the Windows link step imports each symbol from `X.dll`, so `LoadLibraryA`,
   `GetProcAddress` and `FreeLibrary` link like any import. Calls through `cfn` values (on every

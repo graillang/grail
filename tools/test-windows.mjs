@@ -62,6 +62,7 @@ export async function check(compiler) {
       writeFileSync(input, test.source);
       inputs = [input];
     }
+    for (const library of test.libs ?? []) inputs.push(join(root, library));
     const built = compileProgram(compiler, inputs, directory, {
       name: test.name,
       shims: test.shim ? [test.shim[windowsTarget]] : [],
@@ -147,6 +148,7 @@ export async function check(compiler) {
       writeFileSync(input, test.source);
       inputs = [input];
     }
+    for (const library of test.libs ?? []) inputs.push(join(root, library));
     const built = compileProgram(compiler, inputs, directory, {
       name,
       target: windowsAarch64,
