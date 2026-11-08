@@ -12,11 +12,11 @@ fn barrier<a>(id: u64, shared: (&a Shared)) -> u64 {
     while shared.arrived.load() < 4 {}
     return id * 10;
 }
-fn add<a>(total: (&mut a u64), amount: u64) -> u64 {
+fn add<a>(total: (&a mut u64), amount: u64) -> u64 {
     exchange(total, load(total) + amount);
     return 0;
 }
-fn record<a>(log: (&mut a u64[]), value: u64) -> u64 {
+fn record<a>(log: (&a mut u64[]), value: u64) -> u64 {
     log.push(value);
     return 0;
 }
@@ -30,14 +30,14 @@ fn contend<a>(id: u64, shared: (&a Shared)) -> u64 {
 }
 fn insert_many<a>(base: u64, map: (&a concurrent_map::Map<u64, u8[]>)) -> u64 {
     for i in 250 {
-        concurrent_map::insert(borrow(map), base * 250 + i, u8[i % 256]);
+        concurrent_map::insert(&map, base * 250 + i, u8[i % 256]);
     }
     return 250;
 }
 fn length(data: u8[], unused: u64) -> u64 {
     return data.len();
 }
-fn get<a>(total: (&mut a u64), unused: u64) -> u64 {
+fn get<a>(total: (&a mut u64), unused: u64) -> u64 {
     return load(total);
 }
 fn borrowed_lengths<a>(x: (&a u8[]), y: (&a u8[])) -> u64[] {
@@ -56,7 +56,7 @@ fn main() {
         total: Mutex::new(0),
         log: Mutex::new(u64[]),
     };
-    ids := parallel_map(u64[0, 1, 2, 3], borrow(shared), barrier);
+    ids := parallel_map(u64[0, 1, 2, 3], &shared, barrier);
     assert(ids.len() == 4);
     for i in 4 {
         assert(ids[i] == i * 10);
@@ -65,7 +65,7 @@ fn main() {
     for i in 16 {
         work.push(i);
     }
-    done := parallel_map(work, borrow(shared), contend);
+    done := parallel_map(work, &shared, contend);
     for i in 16 {
         assert(done[i] == i);
     }
@@ -76,16 +76,16 @@ fn main() {
     for i in 8 {
         bases.push(i);
     }
-    inserted := parallel_map(bases, borrow(map), insert_many);
+    inserted := parallel_map(bases, &map, insert_many);
     for i in 8 {
         assert(inserted[i] == 250);
     }
-    assert(concurrent_map::len(borrow(map)) == 2000);
+    assert(concurrent_map::len(&map) == 2000);
     owned := parallel_map(u8[][u8[1], u8[1, 2], u8[1, 2, 3]], 0, length);
     assert(owned[2] == 3);
     a := u8[1, 2];
     b := u8[1, 2, 3, 4];
-    lengths := borrowed_lengths(borrow(a), borrow(b));
+    lengths := borrowed_lengths(&a, &b);
     assert(lengths[0] + lengths[1] == 6);
     mut extended = a;
     extended.push(3);

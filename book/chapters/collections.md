@@ -21,8 +21,7 @@ Lookups that can miss use `contains` for presence and the optional forms `get`, 
 inserts, and there is no `or_insert`. Insert with `map[key] = value`, update an existing entry through
 its `value` or `get_mut`, and move a non-copyable value out with `remove`, which returns `V?`.
 
-The preview spells key borrows `borrow(key)` and map arguments `borrow_mut(map)` because a
-value-level `&` is still a byte view in this mode; the approved model writes `&key` and `&mut map`.
+Key borrows use `&key`; explicit mutable map arguments use `&mut map`.
 Iterating a map with `for key, value in map` is approved loop-header sugar, but this preview
 compiler does not accept it yet.
 

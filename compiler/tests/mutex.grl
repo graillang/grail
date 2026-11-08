@@ -2,15 +2,15 @@ struct Counter {
     hits: u64,
     log: u8[]
 }
-fn bump<a>(counter: (&mut a Counter), amount: u64) -> u64 {
+fn bump<a>(counter: (&a mut Counter), amount: u64) -> u64 {
     counter.hits += amount;
     counter.log.push(amount);
     return counter.hits;
 }
-fn take<a>(data: (&mut a u8[]), replacement: u8[]) -> u8[] {
+fn take<a>(data: (&a mut u8[]), replacement: u8[]) -> u8[] {
     return exchange(data, replacement);
 }
-fn read_len<a, b>(data: (&mut a u8[]), extra: read<b>) -> u64 {
+fn read_len<a, b>(data: (&a mut u8[]), extra: &b [u8]) -> u64 {
     return data.len() + extra.len();
 }
 fn shared_bump<a, b>(m: (&a Mutex<Counter>), amount: u64) -> u64 {
@@ -25,16 +25,16 @@ fn send<T: Send>(value: T) -> T {
 fn main() {
     m := Mutex::new(Counter { hits: 0, log: u8[] });
     assert(m.lock_with(40, bump) == 40);
-    assert(shared_bump(borrow(m), 2) == 42);
-    r := share(borrow(m));
+    assert(shared_bump(&m, 2) == 42);
+    r := share(&m);
     assert(r.lock_with(0, bump) == 42);
     bytes_lock := send(Mutex::new(u8[1, 2, 3]));
     old := bytes_lock.lock_with(u8[9], take);
     assert(old.len() == 3);
     extra := u8[1, 1];
-    assert(bytes_lock.lock_with(&extra, read_len) == 3);
+    assert(bytes_lock.lock_with(view(extra), read_len) == 3);
     vecs := Mutex<u8[]>[Mutex::new(u8[1]), Mutex::new(u8[2])];
     first := &vecs[0];
-    assert(first.lock_with(&extra, read_len) == 3);
+    assert(first.lock_with(view(extra), read_len) == 3);
     println(42);
 }

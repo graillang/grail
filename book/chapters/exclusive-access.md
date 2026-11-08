@@ -22,8 +22,8 @@ fn fill(data: &mut [u8], value: u8) {
 fill(&mut data, 9);
 ```
 
-`&mut data` is a byte view, not deep mutable access to everything reachable from `data`. Vectors,
-records, maps and scalars still pass `borrow_mut(owner)` in this preview; the approved model spells
-those `&mut owner` as well.
+`&mut data` is a typed exclusive reference. Use `view_mut(data)` for an explicit mutable byte
+view. Mutable access is checked through either form; it does not grant access through unrelated
+shared references.
 
 **Try it:** move the assertion using `reader` below the `write`. The compiler should reject it.

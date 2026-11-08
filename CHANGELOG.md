@@ -2,11 +2,19 @@
 
 ## Unreleased
 
+- Native fixtures, inline regression programs and book examples now use typed references and
+  explicit byte views under `--default-u64 --typed-refs`; user-mode cases retain `i64` defaults.
+  Ownership/lifetime rejection fixtures use the modern dialect so they still test their intended
+  safety checks; intentionally removed-syntax tests retain their invalid inputs. Closure capture
+  discovery recognizes `&mut` expressions correctly, and typed borrows of captures retain their
+  checked read-only storage frame.
+
 - Compiler and standard-library source now uses typed `&value` / `&mut value` references,
   explicit `view` / `view_mut` byte views, and `&a [u8]` / `&a mut [u8]` signatures.
   `--typed-refs` separates the internal reference dialect from numeric defaults, which remain
-  `u64` internally and `i64` for user modules. Historical regressions retain legacy syntax only
-  under `--default-u64` without `--typed-refs`; bootstrap artifacts are unchanged. Deferred
+  `u64` internally and `i64` for user modules. The normal regression corpus uses typed-reference
+  mode; removed syntax is retained only as intentional rejection input. Bootstrap artifacts are
+  unchanged. Deferred
   generic and closure bodies restore their defining module's numeric and reference modes.
 
 - Concise type syntax: `T[]` vectors, `u8[]` byte buffers, `T?` optional values and

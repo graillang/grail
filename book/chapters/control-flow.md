@@ -15,8 +15,8 @@ Owned loop-local values are cleaned up even on `break` or `continue`. An ownersh
 would consume the same outer value on repeated iterations is rejected.
 
 In the approved model a loop consumes its iterable, `for value in values`, while
-`for value in borrow(values)` reads its elements. This preview copies scalar elements, still requires
-`borrow(...)` for a vector of non-scalar elements, and does not accept direct temporary iteration
+`for value in &values` reads its elements. This preview copies scalar elements, still requires
+an explicit shared reference for a vector of non-scalar elements, and does not accept direct temporary iteration
 such as `for part in name.split(' ')`.
 
 **Try it:** remove the `continue` and predict the new total.

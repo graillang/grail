@@ -12,7 +12,7 @@ Methods that change text return a new value and leave the original alone. `split
 vector of borrowed byte views, so `fields[1]` is the text after the `=`. `part[:1]` is a view of the
 first byte.
 
-In the approved model a loop consumes its iterable; `for part in borrow(parts)` reads each part
+In the approved model a loop consumes its iterable; `for part in &parts` reads each part
 instead. Direct temporary iteration (`for part in name.split(' ')`) is the approved consume form, but
 this preview compiler does not accept it yet, so the example keeps the explicit `parts` binding.
 

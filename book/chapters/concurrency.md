@@ -2,8 +2,7 @@
 
 `parallel_map(items, context, f)` runs `f(item, context)` on real worker threads and returns the
 results in order. It is structured: every worker is joined before the call returns, so a worker
-can safely use shared data, here `borrow(shared)` (the approved model writes `&shared`; the preview
-compiler still requires `borrow` for a record owner). The compiler checks that items and results
+can safely use shared data, here `&shared`. The compiler checks that items and results
 may move between threads (`Send`), that the context may be shared (`Share`), and that results
 hold no borrows.
 

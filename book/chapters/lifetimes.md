@@ -3,8 +3,8 @@
 A lifetime is an inferred relationship between references, not a list you declare on a function.
 Every elided input reference gets its own fresh lifetime. `&a T` and `&a mut T` name those
 relationships when one shared name is not the contract you want; `a` is bound by the signature, so
-there is no `<a>` parameter list. `read<a>` is not part of this surface: a read-only byte view is
-`&[u8]`.
+there is no `<a>` parameter list. A read-only byte view is `&[u8]`; its mutable counterpart is
+`&mut [u8]`.
 
 An elided output reference uses the receiver's lifetime for a method, and otherwise the lifetime of
 the sole input reference. When more than one input could flow to the result, write the relationship

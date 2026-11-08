@@ -46,13 +46,10 @@ all member types or propagate failures to a caller.
 
 ## Matching through a borrow
 
-`match borrow(value)` inspects the enum in place: payloads are bound as references instead of being
+`match &value` inspects the enum in place: payloads are bound as references instead of being
 moved out. The borrow ends at the last use of those payload references, so an arm may then assign
 `value` itself. Using a payload after that assignment is rejected.
 
 {{example:match-update}}
-
-The approved model spells this `match &value`; the preview compiler still requires `borrow` for
-non-byte owners.
 
 **Try it:** swap which flag reaches `forward`, and use `match` to inspect both paths.
