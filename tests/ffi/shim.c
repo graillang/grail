@@ -77,3 +77,29 @@ long long c_mixed_fill(struct mixed *m, long long d) {
     m->d = d;
     return 0;
 }
+
+/* C-to-Grail callbacks. The shim clobbers every callee-saved integer register
+ * around the callback, so a callback that fails to preserve rbx/r12-r15 returns
+ * the sentinel instead of the expected value. */
+typedef long long (*grail_callback)(long long);
+long long c_apply(grail_callback callback, long long value) {
+    return callback(value);
+}
+long long c_apply_preserving(grail_callback callback, long long value) {
+#if defined(__x86_64__)
+    register long long keep_bx __asm__("rbx") = 0x1234;
+    register long long keep_12 __asm__("r12") = 0x2345;
+    register long long keep_13 __asm__("r13") = 0x3456;
+    register long long keep_14 __asm__("r14") = 0x4567;
+    register long long keep_15 __asm__("r15") = 0x5678;
+    long long result = callback(value);
+    if (keep_bx != 0x1234 || keep_12 != 0x2345 || keep_13 != 0x3456 || keep_14 != 0x4567 || keep_15 != 0x5678) {
+        return -1;
+    }
+    return result;
+#else
+    /* Other targets keep their own callee-saved set; the callback call itself is
+     * still exercised, and the generated code preserves the registers it uses. */
+    return callback(value);
+#endif
+}

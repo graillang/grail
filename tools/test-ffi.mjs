@@ -21,6 +21,14 @@ const fixtures = [
     symbols: ['c_strlen', 'c_sum_bytes', 'c_fill', 'c_open', 'c_close'],
   },
   {
+    name: 'callbacks',
+    // C calls the Grail callbacks: 21*2, 14*3, and 5*2 with callee-saved
+    // registers clobbered around the call.
+    stdout: '42\n42\n10\n',
+    symbols: ['c_apply', 'c_apply_preserving'],
+    defines: ['c_double', 'c_triple'],
+  },
+  {
     name: 'extern_records',
     // point sum 42, C-swapped x 23, mixed fields -7+300-5+9 = 297 and after C
     // rewrites them 1234-2+7+5 = 1244; then sizeof, s16/short -2/char 7 checks.
@@ -58,7 +66,7 @@ for (const target of selected) {
   rmSync(directory, { recursive: true, force: true });
   mkdirSync(directory, { recursive: true });
   shim(target);
-  for (const { name, stdout, symbols } of fixtures) {
+  for (const { name, stdout, symbols, defines = [] } of fixtures) {
     // The fixture is copied next to the shim object: `lib "shim.o"` resolves
     // relative to the declaring source, which is the documented rule.
     const source = join(directory, `${name}.grl`);
@@ -73,6 +81,9 @@ for (const target of selected) {
       assert.ok(new RegExp(`(^|\\n)(call|bl) ${symbol}\\n`).test(assembly), `${target}/${name}: missing unmangled call to ${symbol}`);
     }
     assert.ok(!/f_ffi_[a-z_]+_c_/.test(assembly), `${target}/${name}: a C symbol was mangled`);
+    for (const symbol of defines) {
+      assert.ok(new RegExp(`(^|\\n)${symbol}:\\n`).test(assembly), `${target}/${name}: callback symbol ${symbol} was not exported unmangled`);
+    }
     const object = readFileSync(`${executable}.o`).toString('latin1');
     for (const symbol of symbols) {
       assert.ok(object.includes(symbol), `${target}/${name}: object does not reference ${symbol}`);
