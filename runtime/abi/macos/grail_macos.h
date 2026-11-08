@@ -56,6 +56,28 @@ typedef struct grail_macos_pthread_attr {
     uint64_t opaque[8];
 } grail_macos_pthread_attr_t;
 
+typedef struct grail_macos_stat {
+    int32_t st_dev;
+    uint16_t st_mode;
+    uint16_t st_nlink;
+    uint64_t st_ino;
+    uint32_t st_uid;
+    uint32_t st_gid;
+    int32_t st_rdev;
+    int32_t padding0;
+    grail_macos_timespec st_atimespec;
+    grail_macos_timespec st_mtimespec;
+    grail_macos_timespec st_ctimespec;
+    grail_macos_timespec st_birthtimespec;
+    int64_t st_size;
+    int64_t st_blocks;
+    int32_t st_blksize;
+    uint32_t st_flags;
+    uint32_t st_gen;
+    int32_t st_lspare;
+    int64_t st_qspare[2];
+} grail_macos_stat;
+
 typedef struct grail_macos_tm {
     int32_t tm_sec;
     int32_t tm_min;
@@ -95,6 +117,17 @@ typedef struct grail_macos_sockaddr_in6 {
     uint8_t sin6_addr[16];
     uint32_t sin6_scope_id;
 } grail_macos_sockaddr_in6;
+
+typedef struct grail_macos_addrinfo {
+    int32_t ai_flags;
+    int32_t ai_family;
+    int32_t ai_socktype;
+    int32_t ai_protocol;
+    uint32_t ai_addrlen;
+    char *ai_canonname;
+    grail_macos_sockaddr *ai_addr;
+    struct grail_macos_addrinfo *ai_next;
+} grail_macos_addrinfo;
 
 typedef struct grail_macos_linger {
     int32_t l_onoff;
@@ -213,6 +246,18 @@ typedef void *grail_macos_spawnattr_t;
 #define GRAIL_MACOS_SHUT_WR 1
 #define GRAIL_MACOS_SHUT_RDWR 2
 #define GRAIL_MACOS_INVALID_SOCKET (-1)
+#define GRAIL_MACOS_EAI_ADDRFAMILY 1
+#define GRAIL_MACOS_EAI_AGAIN 2
+#define GRAIL_MACOS_EAI_BADFLAGS 3
+#define GRAIL_MACOS_EAI_FAIL 4
+#define GRAIL_MACOS_EAI_FAMILY 5
+#define GRAIL_MACOS_EAI_MEMORY 6
+#define GRAIL_MACOS_EAI_NODATA 7
+#define GRAIL_MACOS_EAI_NONAME 8
+#define GRAIL_MACOS_EAI_SERVICE 9
+#define GRAIL_MACOS_EAI_SOCKTYPE 10
+#define GRAIL_MACOS_EAI_SYSTEM 11
+#define GRAIL_MACOS_EAI_OVERFLOW 14
 
 int open(const char *path, int flags, ...);
 int close(int descriptor);
@@ -292,6 +337,12 @@ int posix_spawn(int *pid, const char *path,
 int waitpid(int pid, int *status, int options);
 int kill(int pid, int signal);
 grail_macos_tm *localtime_r(const int64_t *time, grail_macos_tm *result);
+int grail_macos_fstat64(int descriptor, grail_macos_stat *metadata)
+    __asm__("_fstat$INODE64");
+int grail_macos_stat64(const char *path, grail_macos_stat *metadata)
+    __asm__("_stat$INODE64");
+int grail_macos_lstat64(const char *path, grail_macos_stat *metadata)
+    __asm__("_lstat$INODE64");
 int socket(int family, int type, int protocol);
 int bind(int descriptor, const grail_macos_sockaddr *address, grail_macos_socklen_t length);
 int listen(int descriptor, int backlog);
@@ -309,6 +360,9 @@ int getpeername(int descriptor, grail_macos_sockaddr *address, grail_macos_sockl
 int setsockopt(int descriptor, int level, int option, const void *value,
                grail_macos_socklen_t length);
 int getsockopt(int descriptor, int level, int option, void *value, grail_macos_socklen_t *length);
+int getaddrinfo(const char *host, const char *service, const grail_macos_addrinfo *hints,
+                 grail_macos_addrinfo **results);
+void freeaddrinfo(grail_macos_addrinfo *results);
 
 #ifdef __cplusplus
 }
@@ -316,6 +370,7 @@ int getsockopt(int descriptor, int level, int option, void *value, grail_macos_s
 
 #if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
 _Static_assert(sizeof(grail_macos_tm) == 56, "Darwin struct tm layout");
+_Static_assert(sizeof(grail_macos_stat) == 144, "Darwin struct stat layout");
 _Static_assert(sizeof(grail_macos_dirent) == 280, "Darwin struct dirent layout");
 _Static_assert(sizeof(grail_macos_sockaddr) == 16, "Darwin sockaddr layout");
 _Static_assert(sizeof(grail_macos_sockaddr_in) == 16, "Darwin sockaddr_in layout");
@@ -323,6 +378,7 @@ _Static_assert(sizeof(grail_macos_sockaddr_in6) == 28, "Darwin sockaddr_in6 layo
 _Static_assert(sizeof(grail_macos_pthread_mutex_t) == 64, "Darwin pthread_mutex_t size");
 _Static_assert(sizeof(grail_macos_pthread_attr_t) == 64, "Darwin pthread_attr_t size");
 _Static_assert(sizeof(grail_macos_timeval) == 16, "Darwin timeval layout");
+_Static_assert(sizeof(grail_macos_addrinfo) == 48, "Darwin addrinfo layout");
 _Static_assert(sizeof(grail_macos_linger) == 8, "Darwin linger layout");
 #endif
 

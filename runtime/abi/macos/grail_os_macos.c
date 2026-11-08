@@ -6,10 +6,8 @@
  * executable path, file basics (open/read/write/seek/truncate/sync/close,
  * non-blocking mode, pipe, mkdir/remove/rename, readlink, realpath), directory
  * iteration, threads/mutex/condition variables, dynamic libraries, child
- * processes, local-time offsets and TCP/UDP sockets.
- *
- * File metadata and DNS remain explicit UNSUPPORTED in
- * grail_os_macos_stubs.c.  Darwin declarations live in grail_macos.h so the
+ * processes, local-time offsets, TCP/UDP sockets, DNS and file metadata with a
+ * pinned Darwin struct stat.  Darwin declarations live in grail_macos.h so the
  * backend can be compiled for Apple ARM64 on a host without the macOS SDK.
  * This is static evidence only; it has not been executed on macOS.
  */
@@ -348,7 +346,8 @@ grail_status grail_os_init(const grail_allocator *allocator, const grail_startup
                                GRAIL_CAP_SYMLINKS | GRAIL_CAP_DIRECTORIES |
                                GRAIL_CAP_THREADS | GRAIL_CAP_SYNC_PRIMITIVES |
                                GRAIL_CAP_DYNAMIC_LIBRARIES | GRAIL_CAP_PROCESSES |
-                               GRAIL_CAP_LOCAL_TIME_OFFSET;
+                               GRAIL_CAP_LOCAL_TIME_OFFSET | GRAIL_CAP_FILE_METADATA |
+                               GRAIL_CAP_RESOLVE;
     const int ipv4_probe = socket(GRAIL_MACOS_AF_INET, GRAIL_MACOS_SOCK_STREAM, 0);
     if (ipv4_probe >= 0) {
         (void)close(ipv4_probe);
@@ -2247,6 +2246,81 @@ grail_status grail_os_socket_get_option(grail_socket handle, uint64_t option, ui
     return GRAIL_OK;
 }
 
+
+static grail_result grail_macos_resolve_fail(int code) {
+    grail_macos_error.domain = GRAIL_OS_DOMAIN_NONE;
+    grail_macos_error.code = (uint64_t)(int64_t)code;
+    if (code == GRAIL_MACOS_EAI_NONAME || code == GRAIL_MACOS_EAI_NODATA) {
+        return GRAIL_E_NOT_FOUND;
+    }
+    if (code == GRAIL_MACOS_EAI_AGAIN) return GRAIL_E_TIMED_OUT;
+    if (code == GRAIL_MACOS_EAI_MEMORY || code == GRAIL_MACOS_EAI_OVERFLOW) {
+        return GRAIL_E_OUT_OF_MEMORY;
+    }
+    if (code == GRAIL_MACOS_EAI_FAMILY || code == GRAIL_MACOS_EAI_ADDRFAMILY) {
+        return GRAIL_E_ADDRESS_INVALID;
+    }
+    if (code == GRAIL_MACOS_EAI_SYSTEM) return grail_macos_fail(*__error());
+    return GRAIL_E_SYSTEM;
+}
+
+grail_result grail_os_net_resolve(const uint8_t *host, uint64_t host_length, uint64_t family,
+                                  grail_socket_address *addresses, uint64_t capacity) {
+    if (!grail_macos.initialized) return GRAIL_E_NOT_INITIALIZED;
+    if (host == NULL || host_length == 0 || grail_macos_has_zero(host, host_length) ||
+        (addresses == NULL && capacity != 0)) {
+        return GRAIL_E_INVALID_ARGUMENT;
+    }
+    char *text = grail_macos_copy_text(host, host_length);
+    if (text == NULL) return GRAIL_E_INVALID_ARGUMENT;
+    grail_macos_addrinfo hints;
+    for (uint64_t i = 0; i < sizeof(hints); i++) ((uint8_t *)&hints)[i] = 0;
+    if (family == 0) hints.ai_family = 0;
+    else if (family == GRAIL_ADDRESS_INET) hints.ai_family = GRAIL_MACOS_AF_INET;
+    else if (family == GRAIL_ADDRESS_INET6) hints.ai_family = GRAIL_MACOS_AF_INET6;
+    else {
+        grail_macos_free_text(text);
+        return GRAIL_E_INVALID_ARGUMENT;
+    }
+    grail_macos_addrinfo *results = NULL;
+    const int result = getaddrinfo(text, NULL, &hints, &results);
+    grail_macos_free_text(text);
+    if (result != 0) return grail_macos_resolve_fail(result);
+    uint64_t count = 0;
+    for (const grail_macos_addrinfo *item = results; item != NULL; item = item->ai_next) {
+        if (item->ai_family == GRAIL_MACOS_AF_INET ||
+            item->ai_family == GRAIL_MACOS_AF_INET6) {
+            count++;
+        }
+    }
+    if (count > capacity) {
+        freeaddrinfo(results);
+        return (grail_result)count;
+    }
+    uint64_t at = 0;
+    for (const grail_macos_addrinfo *item = results; item != NULL && at < count;
+         item = item->ai_next) {
+        if (item->ai_family != GRAIL_MACOS_AF_INET &&
+            item->ai_family != GRAIL_MACOS_AF_INET6) {
+            continue;
+        }
+        if (item->ai_addr == NULL) {
+            freeaddrinfo(results);
+            return GRAIL_E_ADDRESS_INVALID;
+        }
+        const grail_status status =
+            grail_macos_from_sockaddr(item->ai_addr, item->ai_addrlen, &addresses[at]);
+        if (status != GRAIL_OK) {
+            freeaddrinfo(results);
+            return status;
+        }
+        addresses[at].port = 0;
+        at++;
+    }
+    freeaddrinfo(results);
+    return (grail_result)at;
+}
+
 grail_status grail_os_fs_mkdir(const uint8_t *path, uint64_t path_length, uint64_t mode,
                                uint64_t flags) {
     if (!grail_macos.initialized) return GRAIL_E_NOT_INITIALIZED;
@@ -2334,6 +2408,88 @@ grail_status grail_os_fs_rename(const uint8_t *from, uint64_t from_length, const
     grail_macos_free_text(from_text);
     grail_macos_free_text(to_text);
     return result == 0 ? GRAIL_OK : grail_macos_fail(error_number);
+}
+
+
+static uint64_t grail_macos_kind_from_mode(uint16_t mode) {
+    switch (mode & 0xF000u) {
+    case 0x8000u: return GRAIL_FILE_KIND_FILE;
+    case 0x4000u: return GRAIL_FILE_KIND_DIRECTORY;
+    case 0xA000u: return GRAIL_FILE_KIND_SYMLINK;
+    case 0x6000u: return GRAIL_FILE_KIND_BLOCK;
+    case 0x2000u: return GRAIL_FILE_KIND_CHARACTER;
+    case 0x1000u: return GRAIL_FILE_KIND_FIFO;
+    case 0xC000u: return GRAIL_FILE_KIND_SOCKET;
+    default: return GRAIL_FILE_KIND_UNKNOWN;
+    }
+}
+
+static int64_t grail_macos_timespec_ns(grail_macos_timespec value) {
+    if (value.tv_sec > INT64_MAX / 1000000000 ||
+        value.tv_sec < INT64_MIN / 1000000000) {
+        return 0;
+    }
+    return value.tv_sec * 1000000000 + value.tv_nsec;
+}
+
+static void grail_macos_fill_stat(const grail_macos_stat *source, grail_file_stat *out) {
+    for (uint64_t i = 0; i < sizeof(*out); i++) ((uint8_t *)out)[i] = 0;
+    out->struct_size = sizeof(*out);
+    out->abi_version = GRAIL_ABI_VERSION;
+    out->kind = grail_macos_kind_from_mode(source->st_mode);
+    out->size = (uint64_t)source->st_size;
+    out->mode = (uint64_t)(source->st_mode & 07777u);
+    out->link_count = source->st_nlink;
+    out->device = (uint64_t)(int64_t)source->st_dev;
+    out->inode = source->st_ino;
+    out->modified_ns = grail_macos_timespec_ns(source->st_mtimespec);
+    out->accessed_ns = grail_macos_timespec_ns(source->st_atimespec);
+    out->created_ns = grail_macos_timespec_ns(source->st_birthtimespec);
+    if ((source->st_mode & 0200u) == 0) out->flags |= GRAIL_STAT_READ_ONLY;
+    if ((source->st_mode & 0100u) != 0) out->flags |= GRAIL_STAT_EXECUTABLE;
+    if (out->kind == GRAIL_FILE_KIND_SYMLINK) out->flags |= GRAIL_STAT_SYMLINK;
+}
+
+static int grail_macos_name_is_hidden(const char *path) {
+    const char *base = path;
+    for (const char *cursor = path; *cursor != '\0'; cursor++) {
+        if (*cursor == '/') base = cursor + 1;
+    }
+    return base[0] == '.' && base[1] != '\0' &&
+           !(base[1] == '.' && base[2] == '\0');
+}
+
+grail_status grail_os_file_stat(grail_file handle, grail_file_stat *out) {
+    grail_macos_file *file = NULL;
+    const grail_status status = grail_macos_file_lookup(handle, &file);
+    if (status != GRAIL_OK) return status;
+    if (out == NULL) return GRAIL_E_INVALID_ARGUMENT;
+    grail_macos_stat metadata;
+    if (grail_macos_fstat64(file->descriptor, &metadata) != 0) {
+        return grail_macos_fail(*__error());
+    }
+    grail_macos_fill_stat(&metadata, out);
+    return GRAIL_OK;
+}
+
+grail_status grail_os_fs_stat(const uint8_t *path, uint64_t path_length, uint64_t flags,
+                              grail_file_stat *out) {
+    if (!grail_macos.initialized) return GRAIL_E_NOT_INITIALIZED;
+    if (out == NULL) return GRAIL_E_INVALID_ARGUMENT;
+    char *text = grail_macos_copy_text(path, path_length);
+    if (text == NULL) return GRAIL_E_INVALID_ARGUMENT;
+    grail_macos_stat metadata;
+    const int result = flags == GRAIL_STAT_NO_FOLLOW ? grail_macos_lstat64(text, &metadata)
+                                                     : grail_macos_stat64(text, &metadata);
+    const int error_number = *__error();
+    if (result != 0) {
+        grail_macos_free_text(text);
+        return grail_macos_fail(error_number);
+    }
+    grail_macos_fill_stat(&metadata, out);
+    if (grail_macos_name_is_hidden(text)) out->flags |= GRAIL_STAT_HIDDEN;
+    grail_macos_free_text(text);
+    return GRAIL_OK;
 }
 
 grail_result grail_os_fs_readlink(const uint8_t *path, uint64_t path_length, uint8_t *out,

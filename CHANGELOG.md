@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- Completed the Windows and macOS function surface. macOS now implements `file_stat`/`fs_stat`
+  with a pinned 144-byte Darwin `struct stat` and the `$INODE64` `fstat`/`stat`/`lstat` symbols,
+  including birth time and hidden/symlink/read-only flags. Windows now implements
+  reparse-point `readlink` (`FSCTL_GET_REPARSE_POINT`/`DeviceIoControl`) and `realpath`
+  (`GetFinalPathNameByHandleW`, `\\?\` stripping, `/` separators), plus non-blocking mode for
+  named pipes (`SetNamedPipeHandleState(PIPE_NOWAIT)`); regular files still return
+  `GRAIL_E_UNSUPPORTED`. DNS is implemented on both with `GetAddrInfoW` (Windows) and
+  `getaddrinfo` (macOS), filling socket address records with port 0 and setting
+  `GRAIL_CAP_RESOLVE`. All 95 public functions are now defined on both backends; the stub
+  translation units are deleted. Cross-target builds now compile seven objects per target with
+  strict warnings and layout assertions for `struct stat`, `REPARSE_DATA_BUFFER`, `ADDRINFOW`
+  and Darwin `addrinfo`. The backends remain statically checked only, not executed on Windows
+  or macOS.
+
 - Added `lib/sys/grail_ffi.grl`, the first Grail-facing wrappers over the Linux OS ABI:
   explicit init/shutdown, file open/read/write/close/stat/size, monotonic and wall clocks,
   and environment get/set. The module uses FFI byte views, an opaque `File` handle and

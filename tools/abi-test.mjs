@@ -120,16 +120,12 @@ if (spawnSync(clang, ['--version']).status === 0) {
     'runtime/abi/grail_env_store.c',
   ];
   crossAudit('x86_64-pc-windows-msvc', [...portable,
-    'runtime/abi/windows/grail_os_windows.c',
-    'runtime/abi/windows/grail_os_windows_stubs.c']);
+    'runtime/abi/windows/grail_os_windows.c']);
   crossAudit('aarch64-pc-windows-msvc', [...portable,
-    'runtime/abi/windows/grail_os_windows.c',
-    'runtime/abi/windows/grail_os_windows_stubs.c']);
+    'runtime/abi/windows/grail_os_windows.c']);
   crossAudit('arm64-apple-macos11', [...portable,
-    'runtime/abi/macos/grail_os_macos.c',
-    'runtime/abi/macos/grail_os_macos_stubs.c']);
+    'runtime/abi/macos/grail_os_macos.c']);
   crossAudit('x86_64-apple-macos11', [...portable,
-    'runtime/abi/macos/grail_os_macos.c',
-    'runtime/abi/macos/grail_os_macos_stubs.c']);
+    'runtime/abi/macos/grail_os_macos.c']);
 }
 console.log('abi: all checks passed');
