@@ -15,6 +15,9 @@
   such as `type LoadError = IoError | ParseError` are supported.
 - `use module::Name;` imports a type or interface member. `use order::Ord;` resolves bounds
   and impls through the canonical `order::Ord` path instead of creating a local phantom.
+- Maps expose method-first operations: `len`, `contains`, `insert`, `get`, `get_mut`, `remove`
+  and `entry`, with `entry` returning a named `Entry<K,V>` whose key is shared and value is mutable.
+  The free `hashmap::map_*` helpers are internal implementation details.
 - Nominal concurrency types are capitalized: `Atomic<T>`, `Mutex<T>`, `Scope<C>`, `Task<R>`
   and `CancelToken`, with `Atomic::new` / `Mutex::new` constructors.
 - Type syntax is now postfix and concise: `T[]` is a vector (`vec<T>` is gone), `u8[]` is the
