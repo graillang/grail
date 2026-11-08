@@ -53,6 +53,14 @@
   runtime ABI contract suite (`tools/abi-test.mjs`) and the graphics C/shader
   suites, and the Windows x86-64 cross job is a required release gate for
   build/static checks. Windows AArch64 and macOS remain planned.
+- Abundance CPU port, landscape-cache increment: ABWCACH9 caches now load end to end. The loader
+  requires the legacy drainage receiver raster to be empty, reads the embedded landscape authority
+  snapshot as a length-prefixed byte range, hashes it in place and binds it through the envelope's
+  ABWLA001 branch. The 1.2 MB fixture cache reproduces the world hash
+  `2326846152216773467` (digest `1339588465908555843`), the same value the fingerprint fixture
+  produced, and three authority-length rejections are gated against the engine's wording. The suite
+  now compares 150 exact values (math 63, hashing 16, world 25, cache 46). The lake-topology
+  sidecar and ABCP2 remain out of scope.
 - Abundance CPU port, cache-body increment: `world_cache::load` decodes the ABWCACH8 body — the 30
   alignment-padded rasters, drainage nodes, provinces, caves, sites, regions, corridors, the
   validation report and the landform block — rebuilds the world fingerprint and re-derives the
