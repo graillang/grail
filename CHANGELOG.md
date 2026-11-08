@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Borrow checker: a reference obtained from an unwrapped optional reference (`items := get(&v)!`)
+  and used only inside one branch of an `if` no longer reports "cleanup conflicts with live loan"
+  when its owner is cleaned up. The anonymous origin behind the returned reference was left
+  "maybe live" by the branch join and never ended; it now ends once no live loan reaches it, so
+  a reference still in use after the join keeps the owner borrowed exactly as before.
+
 - DWARF debug info on Linux AArch64 and RISC-V 64: `--debug` emits the same line table and
   typed variables as on x86-64 (frame base `x29` / `s0`). Under qemu with gdb's remote stub,
   `info locals` shows `count = -3`, `ratio = 2.5`, `flag = true` on both; `test-debug-lines`
