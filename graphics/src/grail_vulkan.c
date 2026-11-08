@@ -153,10 +153,6 @@ typedef struct gr_vk_tex {
     gr_format gr_format;
     uint32_t width, height;
     uint32_t usage;
-    /* The layout the image is last known to be in. The graph derives transitions, but the backend
-     * still has to know where an image *is* to issue a correct one — assuming TRANSFER_SRC here
-     * was the last validation error: a second readback found GENERAL. */
-    VkImageLayout layout;
 } gr_vk_tex;
 
 typedef struct gr_vk_viewobj {
@@ -331,8 +327,9 @@ static gr_result vk_create_layout(gr_vk_dev *dev)
     return GR_OK;
 }
 
-/* Defined with the buffer path below; the barrier code needs it before then. */
+/* Defined with the buffer path below; the barrier and readback code need them before then. */
 static gr_vk_buffer *vk_buffer_of(gr_handle handle);
+static VkImageLayout vk_layout(uint32_t state);
 
 /* The layer's callback. It runs on whichever thread made the offending call, so it only touches
  * the device's own counters; a test reads them after a wait_idle. */
@@ -1706,7 +1703,6 @@ gr_result gr_vk_abi_texture_create(gr_handle device_handle, const gr_texture_des
     texture->width = desc->width;
     texture->height = desc->height;
     texture->usage = desc->usage;
-    texture->layout = VK_IMAGE_LAYOUT_UNDEFINED;
     if (texture->format == VK_FORMAT_UNDEFINED) {
         free(texture);
         return GR_ERROR_UNSUPPORTED;
@@ -1863,6 +1859,7 @@ static void vk_oneshot(gr_vk_dev *dev, void (*record)(VkCommandBuffer, void *), 
 typedef struct readback_state {
     gr_vk_tex *texture;
     VkBuffer buffer;
+    VkImageLayout src_layout; /* what the caller says the image is in */
 } readback_state;
 
 static void vk_record_readback(VkCommandBuffer cb, void *user)
@@ -1872,13 +1869,13 @@ static void vk_record_readback(VkCommandBuffer cb, void *user)
     VkImageMemoryBarrier barrier;
     gr_vk_dev *dev = state->texture->device;
 
-    /* Bring the image to TRANSFER_SRC from wherever it actually is, rather than assuming the
-     * caller left it there: the copy requires that layout and a second readback of the same image
-     * found it in GENERAL. */
-    if (state->texture->layout != VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL) {
+    /* Bring the image to TRANSFER_SRC from the state the caller reported. This barrier and the
+     * copy are recorded into the same command buffer, so recording order is submission order — the
+     * flaw that left one error when the transition lived in a different submission. */
+    if (state->src_layout != VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL) {
         memset(&barrier, 0, sizeof(barrier));
         barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-        barrier.oldLayout = state->texture->layout;
+        barrier.oldLayout = state->src_layout;
         barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
         barrier.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
         barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
@@ -1899,24 +1896,15 @@ static void vk_record_readback(VkCommandBuffer cb, void *user)
     dev->cmd_copy_image_to_buffer(cb, state->texture->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                                   state->buffer, 1, &region);
 
-    memset(&barrier, 0, sizeof(barrier));
-    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-    barrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
-    barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-    barrier.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
-    barrier.image = state->texture->image;
-    barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    barrier.subresourceRange.levelCount = 1;
-    barrier.subresourceRange.layerCount = 1;
-    dev->cmd_pipeline_barrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                              VK_PIPELINE_STAGE_HOST_BIT, 0, 0, NULL, 0, NULL, 1, &barrier);
-    state->texture->layout = VK_IMAGE_LAYOUT_GENERAL;
+    /* The image is left in TRANSFER_SRC. It used to be transitioned to GENERAL "for the host",
+     * but the host reads the buffer the copy wrote, not the image — and that stray GENERAL was
+     * exactly what the next caller's TRANSFER_SRC assumption tripped over. */
+    (void)barrier;
 }
 
 gr_result gr_vk_abi_texture_read(gr_handle texture_handle, uint32_t mip, uint32_t layer,
                                  uint32_t x, uint32_t y, uint32_t width, uint32_t height,
-                                 gr_mut_span_u8 out)
+                                 uint32_t src_state, gr_mut_span_u8 out)
 {
     gr_vk_tex *texture = (gr_vk_tex *)gr_object_lookup(gr_objects(), texture_handle,
                                                        GR_HANDLE_TEXTURE, NULL);
@@ -1981,6 +1969,7 @@ gr_result gr_vk_abi_texture_read(gr_handle texture_handle, uint32_t mip, uint32_
 
     state.texture = texture;
     state.buffer = buffer;
+    state.src_layout = vk_layout(src_state);
     vk_oneshot(dev, vk_record_readback, &state);
 
     if (dev->map_memory(dev->device, memory, 0, VK_WHOLE_SIZE, 0, &mapped) == VK_SUCCESS) {
@@ -2188,7 +2177,6 @@ gr_result gr_vk_abi_cmd_barrier(gr_handle cmd_handle, const gr_barrier *barriers
         barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         barrier.subresourceRange.levelCount = 1;
         barrier.subresourceRange.layerCount = 1;
-        texture->layout = barrier.newLayout;
         cmd->device->cmd_pipeline_barrier(cmd->cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
                                           VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, NULL, 0, NULL,
                                           1, &barrier);
@@ -2216,8 +2204,6 @@ gr_result gr_vk_abi_cmd_begin_render(gr_handle cmd_handle, const gr_render_begin
                                                                 GR_HANDLE_TEXTURE_VIEW, NULL);
         if (!view)
             return GR_ERROR_INVALID_HANDLE;
-        if (view->texture)
-            view->texture->layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
         attachments[i].sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
         attachments[i].imageView = view->view;
         attachments[i].imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
@@ -2848,7 +2834,6 @@ gr_result gr_vk_abi_texture_write(gr_handle texture_handle, uint32_t mip, uint32
     state.width = width;
     state.height = height;
     vk_oneshot(dev, vk_record_upload, &state);
-    texture->layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
     dev->free_memory(dev->device, memory, NULL);
     dev->destroy_buffer(dev->device, staging, NULL);
@@ -2942,7 +2927,7 @@ gr_result gr_vk_abi_pipeline_commit(gr_handle d, double *s) { (void)d; (void)s; 
 gr_result gr_vk_abi_pipeline_stats(gr_handle d, uint32_t *a, uint32_t *b) { (void)d; (void)a; (void)b; return GR_ERROR_UNSUPPORTED; }
 gr_result gr_vk_abi_texture_create(gr_handle d, const gr_texture_desc *x, gr_handle *o) { (void)d; (void)x; (void)o; return GR_ERROR_UNSUPPORTED; }
 gr_result gr_vk_abi_texture_view_create(gr_handle d, const gr_texture_view_desc *x, gr_handle *o) { (void)d; (void)x; (void)o; return GR_ERROR_UNSUPPORTED; }
-gr_result gr_vk_abi_texture_read(gr_handle t, uint32_t a, uint32_t b, uint32_t c, uint32_t e, uint32_t f, uint32_t g, gr_mut_span_u8 o) { (void)t; (void)a; (void)b; (void)c; (void)e; (void)f; (void)g; (void)o; return GR_ERROR_UNSUPPORTED; }
+gr_result gr_vk_abi_texture_read(gr_handle t, uint32_t a, uint32_t b, uint32_t c, uint32_t e, uint32_t f, uint32_t g, uint32_t s, gr_mut_span_u8 o) { (void)t; (void)a; (void)b; (void)c; (void)e; (void)f; (void)g; (void)s; (void)o; return GR_ERROR_UNSUPPORTED; }
 gr_result gr_vk_abi_cmd_pool_create(gr_handle d, const gr_cmd_pool_desc *x, gr_handle *o) { (void)d; (void)x; (void)o; return GR_ERROR_UNSUPPORTED; }
 gr_result gr_vk_abi_cmd_alloc(const gr_cmd_alloc_info *i, gr_handle *o) { (void)i; (void)o; return GR_ERROR_UNSUPPORTED; }
 gr_result gr_vk_abi_cmd_begin(gr_handle c) { (void)c; return GR_ERROR_UNSUPPORTED; }

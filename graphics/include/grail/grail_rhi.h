@@ -268,8 +268,15 @@ typedef struct gr_texture_desc {
 gr_result gr_texture_create(gr_handle device, const gr_texture_desc *desc, gr_handle *out_texture);
 gr_result gr_texture_write(gr_handle texture, uint32_t mip, uint32_t layer, uint32_t x, uint32_t y,
                            uint32_t width, uint32_t height, gr_span_u8 row_major);
+/* Reads pixels back to host memory.
+ *
+ * `src_state` is the state the caller knows the texture is in — the graph tracks it, so the backend
+ * does not try to. It is required rather than optional because a readback has to transition the
+ * image to TRANSFER_SRC before the copy, and guessing the starting layout is how a second readback
+ * of the same image failed validation. The transition and the copy are recorded into one command
+ * buffer, so recording order equals submission order. */
 gr_result gr_texture_read(gr_handle texture, uint32_t mip, uint32_t layer, uint32_t x, uint32_t y,
-                          uint32_t width, uint32_t height, gr_mut_span_u8 out);
+                          uint32_t width, uint32_t height, uint32_t src_state, gr_mut_span_u8 out);
 /* A view reinterprets an existing texture (slice, mip range, format family). Creating a
  * second view of the same texture is how a render target is also sampled. */
 typedef enum gr_texture_view_type {

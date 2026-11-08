@@ -148,10 +148,30 @@ Fixed by reserving it.
 
 ### Open: the frame path under validation
 
-Turning the layer on in `vk-smoke` originally reported **12 errors**; that target still does not
-enable the assertion, because one remains.
+Turning the layer on in `vk-smoke` originally reported **12 errors**. It now reports **zero errors
+and zero warnings**, and the target asserts both.
 
-Two causes are fixed:
+The causes, and what each taught:
+
+1. **`vkCmdPushConstants` stage flags (6).** The bindless layout declares one push-constant range
+   covering every stage, and the spec requires the call's `stageFlags` to include every stage the
+   overlapping range declares — so a call naming only `FRAGMENT` is illegal. The ABI's abstract
+   `stage_mask` therefore cannot narrow the call without per-pipeline layouts, which the one-layout
+   contract forbids; the backend now names the layout's stages and treats the mask as advisory.
+2. **`vkBindBufferMemory` device address (1).** A buffer created with `SHADER_DEVICE_ADDRESS` needs
+   `VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT` on its memory; the allocation now chains
+   `VkMemoryAllocateFlagsInfo`.
+3. **Image layout (5).** Two separate mistakes, both from the backend guessing state:
+   - `gr_texture_read` assumed `TRANSFER_SRC`. It now **takes the source state from the caller** —
+     the graph is already the authority on transitions, so per-image tracking in the backend was
+     duplicated state, and it was wrong. The transition and the copy are recorded into **one**
+     command buffer, so recording order equals submission order; the earlier attempt put the
+     transition in a different submission and could never be correct.
+   - the readback then transitioned the image to `GENERAL` "for the host read", but the host reads
+     the *buffer* the copy wrote, not the image. That stray `GENERAL` was what the next caller's
+     `TRANSFER_SRC` assumption tripped over. Removed.
+
+Historical note on the old causes:
 
 1. **`vkCmdPushConstants` stage flags (6 of the 12).** The bindless layout declares one push-constant
    range covering every stage, and the spec requires the call's `stageFlags` to include every stage

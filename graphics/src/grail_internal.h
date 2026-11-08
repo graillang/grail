@@ -85,7 +85,7 @@ gr_result gr_vk_abi_pipeline_commit(gr_handle device, double *out_seconds);
 gr_result gr_vk_abi_pipeline_stats(gr_handle device, uint32_t *out_declared, uint32_t *out_committed);
 gr_result gr_vk_abi_texture_create(gr_handle device, const gr_texture_desc *desc, gr_handle *out_texture);
 gr_result gr_vk_abi_texture_view_create(gr_handle device, const gr_texture_view_desc *desc, gr_handle *out_view);
-gr_result gr_vk_abi_texture_read(gr_handle texture, uint32_t mip, uint32_t layer, uint32_t x, uint32_t y, uint32_t width, uint32_t height, gr_mut_span_u8 out);
+gr_result gr_vk_abi_texture_read(gr_handle texture, uint32_t mip, uint32_t layer, uint32_t x, uint32_t y, uint32_t width, uint32_t height, uint32_t src_state, gr_mut_span_u8 out);
 gr_result gr_vk_abi_cmd_pool_create(gr_handle device, const gr_cmd_pool_desc *desc, gr_handle *out_pool);
 gr_result gr_vk_abi_cmd_alloc(const gr_cmd_alloc_info *info, gr_handle *out_cmd);
 gr_result gr_vk_abi_cmd_begin(gr_handle cmd);

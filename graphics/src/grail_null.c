@@ -1022,10 +1022,13 @@ gr_result gr_texture_write(gr_handle texture_handle, uint32_t mip, uint32_t laye
 }
 
 gr_result gr_texture_read(gr_handle texture_handle, uint32_t mip, uint32_t layer, uint32_t x,
-                          uint32_t y, uint32_t width, uint32_t height, gr_mut_span_u8 out)
+                          uint32_t y, uint32_t width, uint32_t height, uint32_t src_state,
+                          gr_mut_span_u8 out)
 {
+    (void)src_state; /* a CPU mirror has no layout */
     if (gr_active_backend() == GR_BACKEND_VULKAN)
-        return gr_vk_abi_texture_read(texture_handle, mip, layer, x, y, width, height, out);
+        return gr_vk_abi_texture_read(texture_handle, mip, layer, x, y, width, height, src_state,
+                                      out);
     gr_result status;
     gr_null_texture *texture = null_texture(texture_handle, &status);
     uint32_t bpb, bw = 1, bh = 1, row_bytes, r;
