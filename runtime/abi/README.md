@@ -72,7 +72,8 @@ socket options and `getaddrinfo`). Readiness registration remains private to the
 runtime, and the C layer must not become a second scheduler.
 
 The Windows and macOS backends are **statically verified implementations**: they compile for
-Win64 and Apple ARM64 but have not been executed on those systems. All 95 public functions are
+Win64 and Apple ARM64. The Windows metadata/reparse/DNS subset is also executed under Wine;
+no real-Windows or macOS execution is claimed. All 95 public functions are
 now defined on both; `GRAIL_CAP_FILE_METADATA`, `GRAIL_CAP_FILE_NONBLOCKING`,
 `GRAIL_CAP_SYMLINKS` and `GRAIL_CAP_RESOLVE` are set. Platform subfeatures that Win32 or
 Darwin cannot provide still fail closed at runtime: Windows non-blocking mode is available for
@@ -145,8 +146,9 @@ the implemented layer and the advanced options still to add.
   runtime's private async paths; `ReadFile`, `WriteFile`, `SetFilePointerEx`,
   `SetEndOfFile`, `FlushFileBuffers`, `GetFileInformationByHandle`,
   `GetFileInformationByHandleEx(FileBasicInfo/FileStandardInfo)`,
-  `GetFileAttributesExW` for path stat, `FindFirstFileW`/`FindNextFileW`/`FindClose` for
-  directories. Map `FILETIME` 100 ns ticks to Unix epoch nanoseconds. Synthesise permission
+  `CreateFileW(FILE_READ_ATTRIBUTES, FILE_FLAG_BACKUP_SEMANTICS[, OPEN_REPARSE_POINT])` +
+  `GetFileInformationByHandle` for path stat (following symlinks unless `NO_FOLLOW`), and
+  `FindFirstFileW`/`FindNextFileW`/`FindClose` for directories. Map `FILETIME` 100 ns ticks to Unix epoch nanoseconds. Synthesise permission
   bits from the read-only attribute; report `GRAIL_STAT_READONLY`/`HIDDEN`/`SYMLINK`.
 - **Processes:** `CreateProcessW` with `CREATE_UNICODE_ENVIRONMENT`,
   `CREATE_NEW_PROCESS_GROUP` for `NEW_GROUP`, `CREATE_NO_WINDOW` for `NO_WINDOW`, and
@@ -255,8 +257,11 @@ clang -target arm64-apple-macos11 -ffreestanding -c ... <same sources>
 clang -target x86_64-apple-macos11 -ffreestanding -c ... <same sources>
 ```
 
-It then unions `llvm-nm -g --defined-only` over the objects and checks that all 95 public
-functions from `include/grail/*.h` are defined for all four targets. There are no stub
+`tools/test-abi-wine.mjs` cross-builds `tests/abi/wine_harness.c` with Zig's MinGW-w64 target,
+runs it under Wine, and requires the executed metadata/reparse/DNS checks to pass; the same
+runner compiles `tests/abi/macos_metadata_dns_check.c` for Apple ARM64 with strict warnings.
+The C ABI runner uses `llvm-nm` over the objects and checks that all 95 public functions from
+`include/grail/*.h` are defined for all four targets. There are no stub
 translation units left. The pinned Win32 and Darwin headers also carry compile-time size
 assertions for `FILETIME`, `SYSTEMTIME`, `TIME_ZONE_INFORMATION`, `WSADATA`, sockaddr and
 `ADDRINFOW`/addrinfo records, `STARTUPINFOW`, file/find records, `REPARSE_DATA_BUFFER`,
@@ -265,7 +270,8 @@ Darwin `struct stat`/`tm`/`dirent`, pthread records, timeval and linger. The run
 
 Limits of this evidence:
 
-- The backends have **not been executed** on Windows or macOS; no runtime behaviour is claimed.
+- The backends have **not been executed** on real Windows or macOS; the Windows
+  metadata/reparse/DNS subset runs under Wine, and no native-platform behaviour is claimed.
 - The Windows time layer requires `GetSystemTimePreciseAsFileTime` (Windows 8/Server 2012 or
   later). The macOS time layer requires `clock_gettime` and `os_unfair_lock` (macOS 10.12 or
   later).
@@ -274,8 +280,8 @@ Limits of this evidence:
 - DNS is blocking on both platforms and must be offloaded by a green-task runtime. Windows
   non-blocking mode applies to named pipes only; regular files return `GRAIL_E_UNSUPPORTED`.
   `readlink` handles symlink and mount-point reparse records; `realpath` returns the final DOS
-  path with `\\?\` stripped and `/` separators. Windows `NO_FOLLOW`/symlink metadata is
-  limited by `GetFileAttributesExW`. `mode` is not represented by Win32 file creation, and
+  path with `\\?\` stripped and `/` separators; `fs_stat` follows symlinks unless
+  `GRAIL_STAT_NO_FOLLOW` is requested. `mode` is not represented by Win32 file creation, and
   `file_truncate` moves the file pointer. Directory patterns use the normal Win32 path rules,
   not `\\?\` long paths.
   Thread names are ignored and `GRAIL_DL_LAZY`/`GLOBAL` are no-ops on Windows; parent

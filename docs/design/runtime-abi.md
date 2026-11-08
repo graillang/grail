@@ -4,7 +4,7 @@
 `include/grail/` are the normative contract. Portable pieces (versioning, error mapping,
 Unicode, lexical paths) are implemented and tested; the Linux reference shim implements files,
 directories, environment, time, threads, dynamic libraries, child processes and TCP/UDP
-sockets. Windows and macOS have statically verified full-function backends covering
+sockets. Windows and macOS have full-function backends covering
 init/time/environment, paths, files and metadata, directory iteration, threads/synchronization,
 dynamic libraries, child processes, local-time offsets, sockets and DNS. Platform subfeatures
 that cannot be provided fail closed at runtime and are documented per backend. Nothing here is
@@ -153,8 +153,9 @@ pair, structs crossing by reference, opaque `handle`, linear ownership) maps dir
 | Dynamic libraries | `grail_dl.h` | handle table | dlopen/dlsym/dlclose | LoadLibraryExW/GetProcAddress | dlopen/dlsym/dlclose |
 
 The Windows and macOS backends use pinned Win32 and Darwin declarations rather than platform
-SDK headers, so they can be compiled for Win64 and Apple ARM64 on this host. They have not
-been executed on those systems. All 95 public functions are defined on both. The capability
+SDK headers, so they can be compiled for Win64 and Apple ARM64 on this host. The Windows
+metadata/reparse/DNS subset is executed under Wine; macOS and the rest of the Windows surface
+are compile-checked only. All 95 public functions are defined on both. The capability
 word includes `FILE_METADATA`, `FILE_NONBLOCKING`, `SYMLINKS` and `RESOLVE`; platform
 subfeatures that cannot be provided still fail closed at runtime (Windows non-blocking mode is
 pipe-only, `REUSE_PORT` is unsupported, and `readlink` handles symlink/mount-point reparse
@@ -188,6 +189,11 @@ concurrent name. The public function surface itself is complete on both backends
   `arm64-apple-macos11` and `x86_64-apple-macos11` with strict warnings and
   `-DGRAIL_ABI_BUILD`; `llvm-nm` confirms all 95 public functions are defined in each backend,
   with no remaining stub translation units.
+- `tests/abi/wine_harness.c` is cross-built as a Windows PE with Zig/MinGW-w64 and executed
+  under Wine: 47 checks cover metadata follow/no-follow, hidden attributes, non-reparse
+  readlink rejection, symlink readlink/realpath, regular-file non-blocking rejection and
+  `localhost` DNS. `tests/abi/macos_metadata_dns_check.c` is compiled for Apple ARM64 as a
+  call-site check (not executed).
 
 The test suite needs a C compiler and is deliberately separate from the Grail build; no
 Grail program links these C files. The Linux reference shim is a behavioural oracle for the
@@ -203,11 +209,11 @@ implemented TCP/UDP/`accept4`/`getaddrinfo` subset behind the readiness reactor;
 for birth time; and keep raw descriptors and syscalls out of safe code. The C reference is the
 behavioural oracle, not a replacement runtime.
 
-Windows implementation is static-only until it runs on a real Windows host. Remaining: compare
-the pinned declarations with the current SDK; add `\\?\` long paths and reserved-name policy;
-extend non-blocking mode beyond named pipes; improve reparse-point metadata; apply thread names;
-define the loader search-flag semantics and environment-block ordering; add Windows behaviour
-tests.
+Windows implementation is executed under Wine for the metadata/reparse/DNS paths, but not yet
+on a real Windows host. Remaining: compare the pinned declarations with the current SDK; add
+`\\?\` long paths and reserved-name policy; extend non-blocking mode beyond named pipes;
+apply thread names; define the loader search-flag semantics and environment-block ordering;
+run the rest of the surface on real Windows.
 
 macOS implementation is static-only until it runs on macOS. Remaining: verify the pinned
 libSystem declarations and the `$INODE64` stat symbols against the SDK; framework/`.tbd` link

@@ -2,7 +2,28 @@
 
 ## Unreleased
 
-- Port Borg Agent's journal rules (`borg/`). `src/journal.grl` carries the persistence table from `session_store.rs`: provider events are durable only for the listed audit kinds (an unlisted kind is ephemeral, not durable), `action/generation_status` coalesces, streaming deltas are live-only, a user or system message that is still streaming is journaled while an assistant one coalesces, and a mirrored child event is only as durable as the child's record while a durable child provider event or child metadata stays live. It also carries the cursor arithmetic: a cursor only moves forward, replay is strictly after it so nothing is delivered twice, and a resume reads bounded pages that report whether more remain. Session status is the last journaled `StatusChanged`, so the port names the seven values instead of inventing a transition table. The port now checks 783 reference lines over 162 documents, with `--anchors` verifying 59 copied snippets across eleven source files. No file descriptor is opened.
+- Added executed Windows evidence for the C ABI without a Windows SDK:
+  `tests/abi/wine_harness.c` is cross-built with Zig's MinGW-w64 target and run under Wine,
+  covering file metadata follow/no-follow, hidden attributes, non-reparse readlink rejection,
+  symlink readlink/realpath, regular-file non-blocking rejection and `localhost` DNS (47
+  checks). Fixed Windows `fs_stat` to follow symlinks unless `GRAIL_STAT_NO_FOLLOW` is set by
+  opening the path with `CreateFileW` and using `GetFileInformationByHandle`.
+  `tests/abi/macos_metadata_dns_check.c` compiles the same metadata/reparse/DNS call sites for
+  Apple ARM64 without execution. Added `tools/test-abi-wine.mjs` and `just abi-wine-test`.
+
+- Completed the Windows and macOS function surface. macOS now implements `file_stat`/`fs_stat`
+  with a pinned 144-byte Darwin `struct stat` and the `$INODE64` `fstat`/`stat`/`lstat` symbols,
+  including birth time and hidden/symlink/read-only flags. Windows now implements
+  reparse-point `readlink` (`FSCTL_GET_REPARSE_POINT`/`DeviceIoControl`) and `realpath`
+  (`GetFinalPathNameByHandleW`, `\\?\` stripping, `/` separators), plus non-blocking mode for
+  named pipes (`SetNamedPipeHandleState(PIPE_NOWAIT)`); regular files still return
+  `GRAIL_E_UNSUPPORTED`. DNS is implemented on both with `GetAddrInfoW` (Windows) and
+  `getaddrinfo` (macOS), filling socket address records with port 0 and setting
+  `GRAIL_CAP_RESOLVE`. All 95 public functions are now defined on both backends; the stub
+  translation units are deleted. Cross-target builds now compile seven objects per target with
+  strict warnings and layout assertions for `struct stat`, `REPARSE_DATA_BUFFER`, `ADDRINFOW`
+  and Darwin `addrinfo`. The backends remain statically checked only, not executed on Windows
+  or macOS.
 
 - Port Borg Agent's local IPC transport boundary (`borg/`). `src/transport.grl` carries the rules a Unix-socket binding must obey: a directory path too long for `sun_path` is addressed through `/proc/self/fd/<dirfd>/name` (so a deep root never hits the 108-byte limit), direct addresses stop at 107 usable bytes, session directories are `0700` and sockets `0600`, a command is at most 1 MiB and a reply read is bounded to 4096 bytes, `SO_PEERCRED` must fill exactly `sizeof(ucred)` or the answer is refused, and shutdown stops new commands without cutting a reply already in flight. The port now checks 749 reference lines over 128 documents, with `--anchors` verifying 47 copied snippets across eight source files. The syscalls themselves are out of scope: `AF_UNIX`, `bind`, `listen`, `accept` and `getsockopt` need a runtime operation Grail does not have, and adding one is a compiler change.
 
