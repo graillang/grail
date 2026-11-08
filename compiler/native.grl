@@ -356,6 +356,106 @@ fn jump<a, b>(c: (&a mut C), op: &b [u8], n: u64) -> unit {
     return ();
 }
 
+// Win32 imports the compiler may name. The value is the fixed argument count; the runtime layer
+// passes exactly that many words. Unknown names are rejected at compile time.
+fn win32_arity<a>(name: (&a [u8])) -> u64 {
+    if same(view(name), view("ExitProcess")) {
+        return 1;
+    }
+    if same(view(name), view("ExitThread")) {
+        return 1;
+    }
+    if same(view(name), view("GetStdHandle")) {
+        return 1;
+    }
+    if same(view(name), view("GetCommandLineA")) {
+        return 0;
+    }
+    if same(view(name), view("GetEnvironmentStringsA")) {
+        return 0;
+    }
+    if same(view(name), view("GetEnvironmentVariableA")) {
+        return 3;
+    }
+    if same(view(name), view("GetCurrentProcessId")) {
+        return 0;
+    }
+    if same(view(name), view("GetLastError")) {
+        return 0;
+    }
+    if same(view(name), view("GetFileAttributesA")) {
+        return 1;
+    }
+    if same(view(name), view("GetSystemTimeAsFileTime")) {
+        return 1;
+    }
+    if same(view(name), view("GetTickCount64")) {
+        return 0;
+    }
+    if same(view(name), view("WriteFile")) {
+        return 5;
+    }
+    if same(view(name), view("ReadFile")) {
+        return 5;
+    }
+    if same(view(name), view("CreateFileA")) {
+        return 7;
+    }
+    if same(view(name), view("CloseHandle")) {
+        return 1;
+    }
+    if same(view(name), view("FlushFileBuffers")) {
+        return 1;
+    }
+    if same(view(name), view("VirtualAlloc")) {
+        return 4;
+    }
+    if same(view(name), view("VirtualFree")) {
+        return 3;
+    }
+    if same(view(name), view("Sleep")) {
+        return 1;
+    }
+    if same(view(name), view("SwitchToThread")) {
+        return 0;
+    }
+    if same(view(name), view("DeleteFileA")) {
+        return 1;
+    }
+    if same(view(name), view("RemoveDirectoryA")) {
+        return 1;
+    }
+    if same(view(name), view("CreateDirectoryA")) {
+        return 2;
+    }
+    if same(view(name), view("MoveFileA")) {
+        return 2;
+    }
+    if same(view(name), view("TerminateProcess")) {
+        return 2;
+    }
+    if same(view(name), view("SetFilePointerEx")) {
+        return 4;
+    }
+    return 18446744073709551615;
+}
+fn raw_arguments<a>(c: (&a mut C)) -> u64[] {
+    mut args = u64[];
+    if eat(&mut c, view(")")) {
+        return args;
+    }
+    while 1 {
+        mut v = expr(&mut c, 0);
+        get(&mut c, v.t, view("%rax"));
+        n := save(&mut c);
+        args.push(n);
+        if eat(&mut c, view(")")) {
+            break;
+        }
+        expect(&mut c, view(","));
+    }
+    return args;
+}
 // PE/COFF objects carry no ELF symbol type; MSVC-style .def records the function class.
 fn func_directive<a, b>(c: (&a mut C), m: &b [u8], name: &b [u8]) -> unit {
     if c.target == 3 {
@@ -6106,6 +6206,9 @@ fn builtin_id<a>(n: &a [u8]) -> u64 {
     if same(view(n), view("raw_target")) {
         return 108;
     }
+    if same(view(n), view("raw_win32")) {
+        return 133;
+    }
     if same(view(n), view("raw_syscall4")) {
         return 109;
     }
@@ -6205,20 +6308,32 @@ fn raw_builtin<a>(c: (&a mut C), id: u64) -> Val {
         fail(&mut c, view("raw intrinsic requires unsafe runtime module"));
     }
     expect(&mut c, view("("));
+    mut api = u8[];
     mut args = u64[];
-    if eat(&mut c, view(")")) == 0 {
-        while 1 {
-            mut v = expr(&mut c, 0);
-            get(&mut c, v.t, view("%rax"));
-            n := save(&mut c);
-            args.push(n);
-            if eat(&mut c, view(")")) {
-                break;
-            }
+    if id == 133 {
+        // raw_win32(Symbol, args...): the import name is compile-time text, not a value.
+        api = ident(&mut c);
+        if eat(&mut c, view(")")) == 0 {
             expect(&mut c, view(","));
+            args = raw_arguments(&mut c);
+        }
+    } else {
+        args = raw_arguments(&mut c);
+    }
+    if id == 133 {
+        wanted := win32_arity(view(api));
+        if wanted == 18446744073709551615 {
+            fail(&mut c, view("unknown Win32 import"));
+        }
+        if args.len() != wanted {
+            fail(&mut c, view("Win32 import arity"));
         }
     }
     mut arity = 1;
+    if id == 133 {
+        // Already validated against the import table; pass the generic check unchanged.
+        arity = args.len();
+    }
     if (id == 102) + (id == 104) {
         arity = 2;
     }
@@ -6258,6 +6373,48 @@ fn raw_builtin<a>(c: (&a mut C), id: u64) -> Val {
     if args.len() != arity {
         fail(&mut c, view("raw intrinsic arity"));
     }
+    if id == 133 {
+        // Win64 ABI: RCX/RDX/R8/R9 plus stack arguments above 32 bytes of caller shadow space.
+        count := args.len();
+        mut stackargs = 0;
+        if 4 < count {
+            stackargs = count - 4;
+        }
+        mut size = 32 + stackargs * 8;
+        if size % 16 != 0 {
+            size = size + 8;
+        }
+        o(&mut c, view("subq $"));
+        on(&mut c, size);
+        o(&mut c, view(",%rsp\n"));
+        mut i = 4;
+        while i < count {
+            get(&mut c, args[i], view("%rax"));
+            o(&mut c, view("movq %rax,"));
+            on(&mut c, 32 + (i - 4) * 8);
+            o(&mut c, view("(%rsp)\n"));
+            i = i + 1;
+        }
+        if 0 < count {
+            get(&mut c, args[0], view("%rcx"));
+        }
+        if 1 < count {
+            get(&mut c, args[1], view("%rdx"));
+        }
+        if 2 < count {
+            get(&mut c, args[2], view("%r8"));
+        }
+        if 3 < count {
+            get(&mut c, args[3], view("%r9"));
+        }
+        o(&mut c, view("call *__imp_"));
+        o(&mut c, view(api));
+        o(&mut c, view("(%rip)\n"));
+        o(&mut c, view("addq $"));
+        on(&mut c, size);
+        o(&mut c, view(",%rsp\n"));
+        return val(save(&mut c), 0);
+    }
     if id == 108 {
         target := c.target;
         return val(imm(&mut c, target), 0);
@@ -6289,7 +6446,7 @@ fn raw_builtin<a>(c: (&a mut C), id: u64) -> Val {
             get(&mut c, args[0], view("%rdx"));
             o(
                 &mut c,
-                view("subq $48,%rsp\nxorl %ecx,%ecx\nmovl $12288,%r8d\nmovl $4,%r9d\ncall __imp_VirtualAlloc\naddq $48,%rsp\n")
+                view("subq $48,%rsp\nxorl %ecx,%ecx\nmovl $12288,%r8d\nmovl $4,%r9d\ncall *__imp_VirtualAlloc(%rip)\naddq $48,%rsp\n")
             );
         } else {
             get(&mut c, args[0], view("%rsi"));
@@ -14192,7 +14349,7 @@ fn emit_exit<a, b>(c: (&a mut C), argument: &b [u8]) -> unit {
     if c.target == 3 {
         // Win64 passes the exit code in ECX; the import slot is a real indirect IAT call.
         o(&mut c, argument);
-        o(&mut c, view("movl %edi,%ecx\ncall __imp_ExitProcess\nud2\n"));
+        o(&mut c, view("movl %edi,%ecx\ncall *__imp_ExitProcess(%rip)\nud2\n"));
         return ();
     }
     mut number = 231;

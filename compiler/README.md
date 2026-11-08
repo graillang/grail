@@ -7,7 +7,8 @@ The compiler, ownership checker, machine lowering, and Linux runtime are written
 - `lexer.grl`: tokenization.
 - `optimize.grl`: per-function slot forwarding, dead-code removal, register promotion and peepholes.
 - `machine.grl`: direct ARM64 / RISC-V instruction selection from the internal word stream.
-- `runtime.grl`: allocation, UTF-8, collections, process I/O and the Linux syscall boundary.
+- `runtime.grl`: allocation, UTF-8, collections and process I/O; `os-linux.grl` / `os-windows.grl`
+  provide the target's syscall or Win32 boundary.
 
 There is no Rust seed or unchecked C compiler. Generated assembly bootstraps are the only
 bootstrap inputs; the hash manifest records their source provenance and uncompressed contents.
@@ -93,11 +94,13 @@ built for. RV64 requires the integer multiply/divide and atomic extensions (RV64
 needs `-march=rv64imafd -mabi=lp64` when assembling. These three target **Linux ELF**.
 
 `--target windows-x86_64` selects the PE/COFF backend on the same x86-64 instruction stream:
-MSVC `.def` function records, a `grail_entry` PE entry point, `ExitProcess`/`VirtualAlloc` imports
-and COFF short-import libraries written by `tools/windows.mjs`, linked with `lld-link`
-(`bun tools/windows.mjs check`). It emits objects and console PE32+ images today but has no
-Windows runtime, argv recovery, worker threads or unwind data yet, so its images are for static
-inspection, not execution. See [docs/design/windows-backend.md](../docs/design/windows-backend.md).
+MSVC `.def` function records, a `grail_entry` PE entry point, Win64 import calls through
+`raw_win32`, and COFF short-import libraries written by `tools/windows.mjs`, linked with
+`lld-link`. Console, file, time, exit-code and argv programs run under Wine
+(`bun tools/windows.mjs check`). The portable runtime is shared and the OS boundary selects
+`compiler/os-linux.grl` or `compiler/os-windows.grl`; threads, sockets, directory streams,
+`mremap` and `.pdata` unwinding are not implemented. See
+[docs/design/windows-backend.md](../docs/design/windows-backend.md).
 macOS and other operating systems are not implemented; sharing a CPU does not imply sharing an
 executable format or syscall ABI.
 

@@ -37,6 +37,8 @@ const snapshot = join(work, 'inputs');
 mkdirSync(snapshot, { recursive: true });
 const runtime = join(snapshot, 'runtime.grl');
 writeFileSync(runtime, readFileSync(join(root, 'compiler/runtime.grl')));
+const osRuntime = join(snapshot, 'os-linux.grl');
+writeFileSync(osRuntime, readFileSync(join(root, 'compiler/os-linux.grl')));
 for (let i = 0; i < cases.length; i++) {
   for (const field of ['files', 'modules']) if (cases[i][field]) cases[i][field] = cases[i][field].map((file, j) => {
     const path = join(snapshot, `${i}-${field}-${j}-${basename(file)}`);
@@ -57,12 +59,12 @@ for (const test of cases) {
     const assembly = join(directory, 'prior.s');
     writeFileSync(assembly, 'prior valid artifact');
     const numeric = [...(test.defaultU64 === false ? [] : ['--default-u64']), ...(typedRefs ? ['--typed-refs'] : [])];
-    const result = execute(compiler, [...numeric, '--target', target, assembly, ...files, runtime]);
+    const result = execute(compiler, [...numeric, '--target', target, assembly, ...files, runtime, osRuntime]);
     assert.notEqual(result.status, 0, `${test.name}: unsafe/invalid program was accepted`);
     if (test.diagnostic) assert.ok(`${result.stdout}${result.stderr}`.includes(test.diagnostic), `${test.name}: expected diagnostic ${test.diagnostic}: ${result.stdout}${result.stderr}`);
     assert.equal(readFileSync(assembly, 'utf8'), 'prior valid artifact', `${test.name}: invalid program overwrote prior output`);
   } else {
-    const executable = compileProgram(compiler, files, directory, { target, overflow: test.overflow ?? 'checked', defaultU64: test.defaultU64 !== false, typedRefs, runtime });
+    const executable = compileProgram(compiler, files, directory, { target, overflow: test.overflow ?? 'checked', defaultU64: test.defaultU64 !== false, typedRefs, runtime, osRuntime });
     if (test.compileOnly) { passed++; continue; }
     const result = execute(executable, test.args ?? [], target, { cwd: directory });
     if (result.error) throw result.error;

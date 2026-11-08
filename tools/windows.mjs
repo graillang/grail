@@ -17,15 +17,24 @@ export const kernel32 = [
   'CreateFileA',
   'DeleteFileA',
   'ExitProcess',
+  'ExitThread',
+  'FlushFileBuffers',
   'GetCommandLineA',
   'GetCurrentProcessId',
+  'GetEnvironmentStringsA',
   'GetEnvironmentVariableA',
   'GetFileAttributesA',
+  'GetLastError',
   'GetStdHandle',
   'GetSystemTimeAsFileTime',
+  'GetTickCount64',
+  'MoveFileA',
   'ReadFile',
+  'RemoveDirectoryA',
+  'SetFilePointerEx',
   'Sleep',
   'SwitchToThread',
+  'TerminateProcess',
   'VirtualAlloc',
   'VirtualFree',
   'WriteFile',
@@ -82,12 +91,16 @@ export function link(objects, executable, { entry = 'grail_entry', subsystem = '
 }
 
 // Compile a Grail program for Windows x86-64 and return its assembly, COFF object and PE image.
-export function compileProgram(compiler, inputs, directory, { name = 'program', runtime = join(root, 'compiler/runtime.grl') } = {}) {
+export function compileProgram(compiler, inputs, directory, {
+  name = 'program',
+  runtime = join(root, 'compiler/runtime.grl'),
+  osRuntime = join(root, 'compiler/os-windows.grl'),
+} = {}) {
   mkdirSync(directory, { recursive: true });
   const assembly = join(directory, `${name}.s`);
   const object = join(directory, `${name}.obj`);
   const executable = join(directory, `${name}.exe`);
-  const files = [...inputs.map(p => resolve(root, p)), resolve(root, runtime)];
+  const files = [...inputs.map(p => resolve(root, p)), resolve(root, runtime), resolve(root, osRuntime)];
   command([compiler, '--default-u64', '--typed-refs', '--target', windowsTarget, assembly, ...files]);
   assemble(assembly, object);
   const library = writeImportLibrary(join(directory, 'lib'));
