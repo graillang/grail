@@ -34,10 +34,10 @@ for (const target of selected) {
   const work = join(root, '.work/bootstrap', target);
   mkdirSync(work, { recursive: true });
   const first = join(work, 'compiler.s'), second = join(work, 'self.s');
-  command([compiler, '--default-u64', '--target', target, first, ...compilerSources]);
+  command([compiler, '--default-u64', '--typed-refs', '--target', target, first, ...compilerSources]);
   const executable = assemble(first, join(work, 'compiler'), target);
   // Emulated self-compilation of the whole compiler can take close to an hour (notably RV64 under qemu).
-  const result = execute(executable, ['--default-u64', '--target', target, second, ...compilerSources], target, { timeout: Number(process.env.GRAIL_BOOTSTRAP_TIMEOUT_MS ?? 7_200_000) });
+  const result = execute(executable, ['--default-u64', '--typed-refs', '--target', target, second, ...compilerSources], target, { timeout: Number(process.env.GRAIL_BOOTSTRAP_TIMEOUT_MS ?? 7_200_000) });
   if (result.error) throw result.error;
   assert.equal(result.status, 0, `${target}: compiler execution failed (${result.signal})\n${result.stdout}${result.stderr}`);
   const expected = readFileSync(first);
