@@ -44,6 +44,10 @@ abundance-test:
 test-ffi:
     bun tools/test-ffi.mjs
 
+# Run the Borg Agent CPU-port suites: JSON and runtime-protocol headers against serde_json.
+borg-test:
+    bun tools/borg-test.mjs
+
 # Verify direct compiler self-hosting on all supported CPUs (QEMU needed for cross execution).
 bootstrap-check:
     bun tools/bootstrap.mjs verify all

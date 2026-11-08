@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Port Borg Agent's JSON substrate and runtime-protocol v1 envelope headers (`borg/`). `src/json.grl`
+  parses and writes JSON with the exact semantics `crates/borg-*` rely on, measured against
+  `serde_json` 1.0.151 with `arbitrary_precision`: numbers keep their decimal text (`1e+5`,
+  `-0` -> `0`, 30-digit integers unrounded), objects canonicalise into `BTreeMap` key order with
+  last-wins duplicates, strings use the minimal escape set, encoding is strict, and nesting stops at
+  serde_json's 127-container limit. `src/wire.grl` validates the v1 header rule and reports the
+  failing path and layer. `tools/borg-test.mjs` diffs both suites against committed references that
+  `--regenerate` rebuilds from serde_json itself, so the port is checked against Borg's JSON rather
+  than a restatement of it (187 reference lines over 31 documents). Command, event and snapshot
+  bodies, and every network, IPC and UI concern, remain out of scope.
+
 - Add `docs/platform-status.md`, an explicit matrix of executed, cross-built and scaffolded targets, so Windows PE output and macOS ABI headers are not mistaken for runtime support.
 - Added an LSP MVP (`tools/lsp.mjs`): JSON-RPC over stdio with
   initialize/shutdown, didOpen/didChange/didClose and

@@ -1,0 +1,292 @@
+module borg_wire;
+use borg_json;
+use strings;
+
+// Borg Agent runtime protocol v1 headers.
+//
+// This is the read side of the versioned envelope every control command and every session event
+// carries (`crates/borg-agent-runtime/protocol-fixtures/v1`). It validates the envelope
+// discriminant, the protocol/version pair, and the fields each document kind must carry, and it
+// reports the path and the layer that rejected a document — `missing`, `type`, `protocol`,
+// `version`, `envelope`.
+//
+// Command, event and snapshot *bodies* are deliberately not modelled: this increment covers the
+// header, which is what a client needs in order to classify and route a document. Adding a command
+// variant extends `command_header`; it does not change the rule.
+
+pub enum WireError {
+    Missing(string),
+    WrongType(string),
+    WrongProtocol(string),
+    WrongVersion(string),
+    UnknownEnvelope
+}
+
+pub struct HeaderField {
+    name: string,
+    value: string
+}
+
+pub struct Header {
+    kind: string,
+    fields: HeaderField[]
+}
+
+fn text_equals<a, b>(left: (&a [u8]), right: (&b [u8])) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    for i in left.len() {
+        if left[i] != right[i] {
+            return false;
+        }
+    }
+    return true;
+}
+
+fn child_path<a, b>(path: (&a [u8]), key: (&b [u8])) -> string {
+    mut out = u8[];
+    for byte in path {
+        out.push(byte);
+    }
+    out.push(46);
+    for byte in key {
+        out.push(byte);
+    }
+    return out.text();
+}
+
+fn required_object<a, b, c>(value: (&a borg_json::Json), key: (&b [u8]), path: (&c [u8])) -> borg_json::Json | WireError {
+    at := child_path(&path, &key);
+    match borg_json::member(&value, &key) {
+        Some(node) => {
+            kind := borg_json::kind_of(&node);
+            if kind == borg_json::JsonKind::Obj {
+                return node;
+            }
+            text := at;
+            return WireError::WrongType(text);
+        },
+        None => {
+            text := at;
+            return WireError::Missing(text);
+        }
+    }
+}
+
+fn required_array<a, b, c>(value: (&a borg_json::Json), key: (&b [u8]), path: (&c [u8])) -> borg_json::Json | WireError {
+    at := child_path(&path, &key);
+    match borg_json::member(&value, &key) {
+        Some(node) => {
+            kind := borg_json::kind_of(&node);
+            if kind == borg_json::JsonKind::Arr {
+                return node;
+            }
+            text := at;
+            return WireError::WrongType(text);
+        },
+        None => {
+            text := at;
+            return WireError::Missing(text);
+        }
+    }
+}
+
+fn required_string<a, b, c>(value: (&a borg_json::Json), key: (&b [u8]), path: (&c [u8])) -> string | WireError {
+    at := child_path(&path, &key);
+    match borg_json::member(&value, &key) {
+        Some(node) => {
+            match borg_json::as_string(&node) {
+                Some(text) => { found := text; return found; },
+                None => {
+                    text := at;
+                    return WireError::WrongType(text);
+                }
+            }
+        },
+        None => {
+            text := at;
+            return WireError::Missing(text);
+        }
+    }
+}
+
+// A JSON number whose text is an integer that fits u64; the text is returned unchanged so the
+// header line shows what the document said, exactly as the reference does.
+fn required_number<a, b, c>(value: (&a borg_json::Json), key: (&b [u8]), path: (&c [u8])) -> string | WireError {
+    at := child_path(&path, &key);
+    match borg_json::member(&value, &key) {
+        Some(node) => {
+            match borg_json::as_number(&node) {
+                Some(text) => {
+                    match strings::parse_num(text) {
+                        Some(digits) => { found := text; return found; },
+                        None => {
+                            reason := at;
+                            return WireError::WrongType(reason);
+                        }
+                    }
+                },
+                None => {
+                    reason := at;
+                    return WireError::WrongType(reason);
+                }
+            }
+        },
+        None => {
+            reason := at;
+            return WireError::Missing(reason);
+        }
+    }
+}
+
+fn push_field<a, b>(fields: (&a mut HeaderField[]), name: (&b [u8]), value: string) {
+    fields.push(HeaderField { name: name.text(), value: value });
+}
+
+fn command_header<a>(root: (&a borg_json::Json), protocol: string, version: string) -> Header | WireError {
+    mut fields = HeaderField[];
+    push_field(&mut fields, "protocol", protocol);
+    push_field(&mut fields, "version", version);
+    push_field(&mut fields, "kind", "command".text());
+    request_id := required_string(&root, "request_id", "$")?;
+    push_field(&mut fields, "request_id", request_id);
+    correlation_id := required_string(&root, "correlation_id", "$")?;
+    push_field(&mut fields, "correlation_id", correlation_id);
+    idempotency_key := required_string(&root, "idempotency_key", "$")?;
+    push_field(&mut fields, "idempotency_key", idempotency_key);
+    sequence := required_number(&root, "sequence", "$")?;
+    push_field(&mut fields, "sequence", sequence);
+    created_at := required_string(&root, "created_at", "$")?;
+    push_field(&mut fields, "created_at", created_at);
+    command := required_object(&root, "command", "$")?;
+    command_type := required_string(&command, "type", "$.command")?;
+    push_field(&mut fields, "command_type", command_type);
+    session_id := required_string(&command, "session_id", "$.command")?;
+    push_field(&mut fields, "session_id", session_id);
+    return Header { kind: "command".text(), fields: fields };
+}
+
+fn event_header<a>(root: (&a borg_json::Json), protocol: string, version: string) -> Header | WireError {
+    mut fields = HeaderField[];
+    push_field(&mut fields, "protocol", protocol);
+    push_field(&mut fields, "version", version);
+    push_field(&mut fields, "kind", "event".text());
+    session_id := required_string(&root, "session_id", "$")?;
+    push_field(&mut fields, "session_id", session_id);
+    cursor := required_number(&root, "cursor", "$")?;
+    push_field(&mut fields, "cursor", cursor);
+    event := required_object(&root, "event", "$")?;
+    kind := required_object(&event, "kind", "$.event")?;
+    event_type := required_string(&kind, "type", "$.event.kind")?;
+    push_field(&mut fields, "event_type", event_type);
+    return Header { kind: "event".text(), fields: fields };
+}
+
+fn snapshot_header<a>(root: (&a borg_json::Json), protocol: string, version: string) -> Header | WireError {
+    mut fields = HeaderField[];
+    push_field(&mut fields, "protocol", protocol);
+    push_field(&mut fields, "version", version);
+    push_field(&mut fields, "kind", "snapshot".text());
+    session_id := required_string(&root, "session_id", "$")?;
+    push_field(&mut fields, "session_id", session_id);
+    cursor := required_number(&root, "cursor", "$")?;
+    push_field(&mut fields, "cursor", cursor);
+    state := required_object(&root, "state", "$")?;
+    status := required_string(&state, "status", "$.state")?;
+    push_field(&mut fields, "state_status", status);
+    return Header { kind: "snapshot".text(), fields: fields };
+}
+
+// `fixtures` must be an array of names; they are joined with commas, as the reference prints them.
+fn joined_names<a>(listing: (&a borg_json::Json)) -> u8[] | WireError {
+    if borg_json::kind_of(&listing) != borg_json::JsonKind::Arr {
+        return WireError::WrongType("$.fixtures".text());
+    }
+    mut out = u8[];
+    mut index = 0;
+    while index < borg_json::array_len(&listing) {
+        item := index;
+        match borg_json::array_item(&listing, item) {
+            Some(name) => {
+                match borg_json::as_string(&name) {
+                    Some(text) => {
+                        if index > 0 {
+                            out.push(44);
+                        }
+                        for byte in &text {
+                            out.push(byte);
+                        }
+                    },
+                    None => { return WireError::WrongType("$.fixtures".text()); }
+                }
+            },
+            None => { return WireError::WrongType("$.fixtures".text()); }
+        }
+        index += 1;
+    }
+    return out;
+}
+
+fn manifest_header<a>(root: (&a borg_json::Json), protocol: string, version: string) -> Header | WireError {
+    mut fields = HeaderField[];
+    push_field(&mut fields, "protocol", protocol);
+    push_field(&mut fields, "version", version);
+    push_field(&mut fields, "kind", "manifest".text());
+    fixture_schema := required_number(&root, "fixture_schema", "$")?;
+    push_field(&mut fields, "fixture_schema", fixture_schema);
+    listing := required_array(&root, "fixtures", "$")?;
+    names := joined_names(&listing)?;
+    push_field(&mut fields, "fixtures", names.text());
+    compatibility := required_object(&root, "compatibility", "$")?;
+    legacy := required_string(&compatibility, "legacy_host_protocol", "$.compatibility")?;
+    push_field(&mut fields, "legacy_protocol", legacy);
+    legacy_version := required_number(&compatibility, "legacy_host_protocol_version", "$.compatibility")?;
+    push_field(&mut fields, "legacy_version", legacy_version);
+    adapter := required_string(&compatibility, "adapter", "$.compatibility")?;
+    push_field(&mut fields, "adapter", adapter);
+    return Header { kind: "manifest".text(), fields: fields };
+}
+
+pub fn decode<a>(root: (&a borg_json::Json)) -> Header | WireError {
+    if borg_json::kind_of(&root) != borg_json::JsonKind::Obj {
+        return WireError::WrongType("$".text());
+    }
+    protocol := required_string(&root, "protocol", "$")?;
+    if !text_equals(&protocol, "borg.agent_runtime") {
+        return WireError::WrongProtocol("$.protocol".text());
+    }
+    version := required_number(&root, "version", "$")?;
+    if !text_equals(&version, "1") {
+        return WireError::WrongVersion("$.version".text());
+    }
+    if borg_json::has(&root, "command") {
+        return command_header(&root, protocol, version);
+    }
+    if borg_json::has(&root, "event") {
+        return event_header(&root, protocol, version);
+    }
+    if borg_json::has(&root, "state") {
+        return snapshot_header(&root, protocol, version);
+    }
+    if borg_json::has(&root, "fixtures") {
+        return manifest_header(&root, protocol, version);
+    }
+    return WireError::UnknownEnvelope;
+}
+
+pub fn kind_of<a>(header: (&a Header)) -> string {
+    return header.kind.text();
+}
+
+pub fn field_count<a>(header: (&a Header)) -> u64 {
+    return header.fields.len();
+}
+
+pub fn field_name<a>(header: (&a Header), index: u64) -> string {
+    return header.fields[index].name.text();
+}
+
+pub fn field_value<a>(header: (&a Header), index: u64) -> string {
+    return header.fields[index].value.text();
+}

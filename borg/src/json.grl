@@ -1,0 +1,916 @@
+module borg_json;
+use core;
+use strings;
+use vecs;
+
+// JSON for Borg's wire and configuration documents.
+//
+// Two properties are not free choices; they are what Borg already does, measured against
+// serde_json 1.0.151 with `arbitrary_precision` (see borg/README.md):
+//
+//   * A number keeps its decimal text. `1e5` is not `5` and `123456789012345678901234567890` is
+//     not rounded. serde_json normalises only the exponent marker and sign (`1E5` -> `1e+5`) and
+//     collapses a negative integer zero (`-0` -> `0`); `Reader::number` reproduces exactly that.
+//   * An object is a BTreeMap on Borg's side, so it serialises in key order. Parsing canonicalises
+//     members into byte order, and duplicate keys resolve last-wins, as a map insert does.
+//
+// Nesting deeper than serde_json's recursion limit (127 containers) is rejected, escapes must be
+// well formed, and string bytes must be valid UTF-8, so a document this module accepts is one Borg
+// accepts.
+
+pub struct Member {
+    key: string,
+    value: Json
+}
+
+pub enum Json {
+    Null,
+    Bool(bool),
+    Num(string),
+    Str(string),
+    Arr(Json[]),
+    Obj(Member[])
+}
+
+pub enum JsonKind {
+    Null,
+    Bool,
+    Num,
+    Str,
+    Arr,
+    Obj
+}
+
+pub enum ParseError {
+    UnexpectedEnd(u64),
+    UnexpectedByte(u64),
+    InvalidNumber(u64),
+    InvalidString(u64),
+    InvalidUtf8(u64),
+    DepthExceeded(u64),
+    TrailingInput(u64)
+}
+
+pub struct Field {
+    path: string,
+    text: string
+}
+
+// serde_json's default recursion limit: 127 nested containers parse, the 128th is an error.
+fn max_depth() -> u64 {
+    return 127;
+}
+
+fn is_space(byte: u64) -> bool {
+    return (byte == 32) || (byte == 9) || (byte == 10) || (byte == 13);
+}
+
+fn hex_digit(value: u64) -> u64 {
+    if value < 10 {
+        return 48 + value;
+    }
+    return 87 + value;
+}
+
+fn hex_value(byte: u64) -> u64 {
+    if (byte >= 48) && (byte <= 57) {
+        return byte - 48;
+    }
+    if (byte >= 97) && (byte <= 102) {
+        return byte - 87;
+    }
+    if (byte >= 65) && (byte <= 70) {
+        return byte - 55;
+    }
+    return 16;
+}
+
+// ---- reading ----
+
+struct Reader {
+    text: u8[],
+    pos: u64
+}
+
+impl Reader {
+    fn new(text: u8[]) -> Reader {
+        return Reader { text: text, pos: 0 };
+    }
+
+    fn at_end<a>(self: (&a Reader)) -> bool {
+        return self.pos >= self.text.len();
+    }
+
+    fn here<a>(self: (&a Reader)) -> u64 {
+        return u64(self.text[self.pos]);
+    }
+
+    fn skip_space<a>(self: (&a mut Reader)) {
+        while self.pos < self.text.len() {
+            if !is_space(u64(self.text[self.pos])) {
+                break;
+            }
+            self.pos += 1;
+        }
+    }
+
+    fn expect_literal<a>(self: (&a mut Reader), word: (&[u8])) -> bool {
+        if self.pos + word.len() > self.text.len() {
+            return false;
+        }
+        for i in word.len() {
+            if u64(self.text[self.pos + i]) != word[i] {
+                return false;
+            }
+        }
+        self.pos += word.len();
+        return true;
+    }
+
+    fn hex4<a>(self: (&a mut Reader)) -> u64 | ParseError {
+        if self.pos + 4 > self.text.len() {
+            return ParseError::UnexpectedEnd(self.pos);
+        }
+        mut value = 0;
+        for i in 4 {
+            digit := hex_value(u64(self.text[self.pos + i]));
+            if digit == 16 {
+                return ParseError::InvalidString(self.pos);
+            }
+            value = value * 16 + digit;
+        }
+        self.pos += 4;
+        return value;
+    }
+
+    // `-0` becomes `0`, `1E5` becomes `1e+5`, `0e-0` keeps its sign, and every other digit is
+    // copied. Fractions and integer parts are never rewritten (serde_json keeps `0.10` and
+    // 30-digit integers).
+    fn number<a>(self: (&a mut Reader)) -> Json | ParseError {
+        start := self.pos;
+        n := self.text.len();
+        mut at = start;
+        negative := (at < n) && (u64(self.text[at]) == 45);
+        if negative {
+            at += 1;
+        }
+        digits_start := at;
+        while (at < n) && (u64(self.text[at]) >= 48) && (u64(self.text[at]) <= 57) {
+            at += 1;
+        }
+        if at == digits_start {
+            return ParseError::InvalidNumber(start);
+        }
+        if ((at - digits_start) > 1) && (u64(self.text[digits_start]) == 48) {
+            return ParseError::InvalidNumber(start);
+        }
+        int_end := at;
+        mut frac_start = at;
+        mut frac_end = at;
+        mut has_frac = false;
+        if (at < n) && (u64(self.text[at]) == 46) {
+            has_frac = true;
+            at += 1;
+            frac_start = at;
+            while (at < n) && (u64(self.text[at]) >= 48) && (u64(self.text[at]) <= 57) {
+                at += 1;
+            }
+            if at == frac_start {
+                return ParseError::InvalidNumber(start);
+            }
+            frac_end = at;
+        }
+        mut exp_digits = at;
+        mut exp_end = at;
+        mut exp_sign = n;
+        mut has_exp = false;
+        if (at < n) && ((u64(self.text[at]) == 101) || (u64(self.text[at]) == 69)) {
+            has_exp = true;
+            at += 1;
+            if (at < n) && ((u64(self.text[at]) == 43) || (u64(self.text[at]) == 45)) {
+                exp_sign = at;
+                at += 1;
+            }
+            exp_digits = at;
+            while (at < n) && (u64(self.text[at]) >= 48) && (u64(self.text[at]) <= 57) {
+                at += 1;
+            }
+            if at == exp_digits {
+                return ParseError::InvalidNumber(start);
+            }
+            exp_end = at;
+        }
+        mut out = u8[];
+        mut sign = negative;
+        if negative && !has_frac && !has_exp {
+            mut all_zero = true;
+            for i in digits_start..int_end {
+                if u64(self.text[i]) != 48 {
+                    all_zero = false;
+                }
+            }
+            if all_zero {
+                sign = false;
+            }
+        }
+        if sign {
+            out.push(45);
+        }
+        for i in digits_start..int_end {
+            out.push(self.text[i]);
+        }
+        if has_frac {
+            out.push(46);
+            for i in frac_start..frac_end {
+                out.push(self.text[i]);
+            }
+        }
+        if has_exp {
+            // serde_json lowercases the marker and guarantees an explicit exponent sign.
+            out.push(101);
+            if exp_sign < n {
+                out.push(self.text[exp_sign]);
+            } else {
+                out.push(43);
+            }
+            for i in exp_digits..exp_end {
+                out.push(self.text[i]);
+            }
+        }
+        self.pos = at;
+        return Json::Num(out.text());
+    }
+
+    fn utf8_width<a>(self: (&a Reader), at: u64) -> u64 {
+        b := u64(self.text[at]);
+        n := self.text.len();
+        if b < 128 {
+            return 1;
+        }
+        if (b >= 194) && (b <= 223) {
+            if at + 1 >= n {
+                return 0;
+            }
+            if (u64(self.text[at + 1]) & 192) != 128 {
+                return 0;
+            }
+            return 2;
+        }
+        if (b >= 224) && (b <= 239) {
+            if at + 2 >= n {
+                return 0;
+            }
+            if ((u64(self.text[at + 1]) & 192) != 128) || ((u64(self.text[at + 2]) & 192) != 128) {
+                return 0;
+            }
+            value := (b & 15) * 4096 + (u64(self.text[at + 1]) & 63) * 64 + (u64(self.text[at + 2]) & 63);
+            if value < 2048 {
+                return 0;
+            }
+            if (value >= 55296) && (value <= 57343) {
+                return 0;
+            }
+            return 3;
+        }
+        if (b >= 240) && (b <= 244) {
+            if at + 3 >= n {
+                return 0;
+            }
+            if ((u64(self.text[at + 1]) & 192) != 128) || ((u64(self.text[at + 2]) & 192) != 128) || ((u64(self.text[at + 3]) & 192) != 128) {
+                return 0;
+            }
+            value := (b & 7) * 262144 + (u64(self.text[at + 1]) & 63) * 4096 + (u64(self.text[at + 2]) & 63) * 64 + (u64(self.text[at + 3]) & 63);
+            if (value < 65536) || (value > 1114111) {
+                return 0;
+            }
+            return 4;
+        }
+        return 0;
+    }
+
+    fn string<a>(self: (&a mut Reader)) -> string | ParseError {
+        start := self.pos;
+        self.pos += 1;
+        mut out = u8[];
+        loop {
+            if self.pos >= self.text.len() {
+                return ParseError::UnexpectedEnd(start);
+            }
+            b := u64(self.text[self.pos]);
+            if b == 34 {
+                self.pos += 1;
+                return out.text();
+            }
+            if b < 32 {
+                return ParseError::InvalidString(self.pos);
+            }
+            if b == 92 {
+                self.pos += 1;
+                if self.pos >= self.text.len() {
+                    return ParseError::UnexpectedEnd(start);
+                }
+                e := u64(self.text[self.pos]);
+                if e == 34 {
+                    out.push(34);
+                    self.pos += 1;
+                    continue;
+                }
+                if e == 92 {
+                    out.push(92);
+                    self.pos += 1;
+                    continue;
+                }
+                if e == 47 {
+                    out.push(47);
+                    self.pos += 1;
+                    continue;
+                }
+                if e == 98 {
+                    out.push(8);
+                    self.pos += 1;
+                    continue;
+                }
+                if e == 102 {
+                    out.push(12);
+                    self.pos += 1;
+                    continue;
+                }
+                if e == 110 {
+                    out.push(10);
+                    self.pos += 1;
+                    continue;
+                }
+                if e == 114 {
+                    out.push(13);
+                    self.pos += 1;
+                    continue;
+                }
+                if e == 116 {
+                    out.push(9);
+                    self.pos += 1;
+                    continue;
+                }
+                if e != 117 {
+                    return ParseError::InvalidString(self.pos);
+                }
+                self.pos += 1;
+                code := self.hex4()?;
+                if (code >= 55296) && (code <= 56319) {
+                    if (self.pos + 1 >= self.text.len()) || (u64(self.text[self.pos]) != 92) || (u64(self.text[self.pos + 1]) != 117) {
+                        return ParseError::InvalidString(self.pos);
+                    }
+                    self.pos += 2;
+                    low := self.hex4()?;
+                    if (low < 56320) || (low > 57343) {
+                        return ParseError::InvalidString(self.pos);
+                    }
+                    combined := (code - 55296) * 1024 + (low - 56320) + 65536;
+                    strings::push_char(&mut out, u32(combined));
+                    continue;
+                }
+                if (code >= 56320) && (code <= 57343) {
+                    return ParseError::InvalidString(self.pos);
+                }
+                strings::push_char(&mut out, u32(code));
+                continue;
+            }
+            width := self.utf8_width(self.pos);
+            if width == 0 {
+                return ParseError::InvalidUtf8(self.pos);
+            }
+            for i in width {
+                out.push(self.text[self.pos + i]);
+            }
+            self.pos += width;
+        }
+    }
+
+    fn array<a>(self: (&a mut Reader), depth: u64) -> Json | ParseError {
+        start := self.pos;
+        if depth >= max_depth() {
+            return ParseError::DepthExceeded(start);
+        }
+        self.pos += 1;
+        mut items = Json[];
+        self.skip_space();
+        if !self.at_end() && (self.here() == 93) {
+            self.pos += 1;
+            return Json::Arr(items);
+        }
+        loop {
+            item := self.value(depth + 1)?;
+            items.push(item);
+            self.skip_space();
+            if self.at_end() {
+                return ParseError::UnexpectedEnd(start);
+            }
+            next := self.here();
+            if next == 44 {
+                self.pos += 1;
+                continue;
+            }
+            if next == 93 {
+                self.pos += 1;
+                return Json::Arr(items);
+            }
+            return ParseError::UnexpectedByte(self.pos);
+        }
+    }
+
+    fn object<a>(self: (&a mut Reader), depth: u64) -> Json | ParseError {
+        start := self.pos;
+        if depth >= max_depth() {
+            return ParseError::DepthExceeded(start);
+        }
+        self.pos += 1;
+        mut members = Member[];
+        self.skip_space();
+        if !self.at_end() && (self.here() == 125) {
+            self.pos += 1;
+            return Json::Obj(members);
+        }
+        loop {
+            self.skip_space();
+            if self.at_end() {
+                return ParseError::UnexpectedEnd(start);
+            }
+            if self.here() != 34 {
+                return ParseError::UnexpectedByte(self.pos);
+            }
+            key := self.string()?;
+            self.skip_space();
+            if self.at_end() {
+                return ParseError::UnexpectedEnd(start);
+            }
+            if self.here() != 58 {
+                return ParseError::UnexpectedByte(self.pos);
+            }
+            self.pos += 1;
+            value := self.value(depth + 1)?;
+            put_member(&mut members, key, value);
+            self.skip_space();
+            if self.at_end() {
+                return ParseError::UnexpectedEnd(start);
+            }
+            next := self.here();
+            if next == 44 {
+                self.pos += 1;
+                continue;
+            }
+            if next == 125 {
+                self.pos += 1;
+                sorted := sort_members(&members);
+                return Json::Obj(sorted);
+            }
+            return ParseError::UnexpectedByte(self.pos);
+        }
+    }
+
+    fn value<a>(self: (&a mut Reader), depth: u64) -> Json | ParseError {
+        self.skip_space();
+        if self.at_end() {
+            return ParseError::UnexpectedEnd(self.pos);
+        }
+        b := self.here();
+        if b == 123 {
+            return self.object(depth);
+        }
+        if b == 91 {
+            return self.array(depth);
+        }
+        if b == 34 {
+            text := self.string()?;
+            return Json::Str(text);
+        }
+        if b == 116 {
+            if self.expect_literal(&u8[116, 114, 117, 101]) {
+                return Json::Bool(true);
+            }
+            return ParseError::UnexpectedByte(self.pos);
+        }
+        if b == 102 {
+            if self.expect_literal(&u8[102, 97, 108, 115, 101]) {
+                return Json::Bool(false);
+            }
+            return ParseError::UnexpectedByte(self.pos);
+        }
+        if b == 110 {
+            if self.expect_literal(&u8[110, 117, 108, 108]) {
+                return Json::Null;
+            }
+            return ParseError::UnexpectedByte(self.pos);
+        }
+        if (b == 45) || ((b >= 48) && (b <= 57)) {
+            return self.number();
+        }
+        return ParseError::UnexpectedByte(self.pos);
+    }
+}
+
+// Duplicate keys resolve last-wins, as a BTreeMap insert does.
+fn put_member<a>(members: (&a mut Member[]), key: string, value: Json) {
+    mut index = 0;
+    while index < members.len() {
+        if key_matches(&members[index], view(key)) {
+            entry := &mut members[index];
+            exchange(&mut entry.value, value);
+            return ();
+        }
+        index += 1;
+    }
+    members.push(Member { key: key, value: value });
+}
+
+// Copying through a helper keeps the has-and-return branches from holding a borrow across a loop
+// back edge, which the checker rejects.
+fn copied_value<a>(member: (&a Member)) -> Json {
+    return copy_of(&member.value);
+}
+
+fn copied_key<a>(member: (&a Member)) -> string {
+    return view(member.key).text();
+}
+
+fn copied_item<a>(item: (&a Json)) -> Json {
+    return copy_of(item);
+}
+
+fn key_matches<a>(member: (&a Member), key: (&[u8])) -> bool {
+    if member.key.len() != key.len() {
+        return false;
+    }
+    for i in key.len() {
+        if member.key[i] != key[i] {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Canonical member order: byte order on keys, which is what a BTreeMap iterates in.
+fn sort_members<a>(members: (&a Member[])) -> Member[] {
+    mut keys = string[];
+    for member in members {
+        copied_key := view(member.key).text();
+        keys.push(copied_key);
+    }
+    vecs::sort(&mut keys);
+    mut out = Member[];
+    mut taken = u64[];
+    for i in members.len() {
+        taken.push(0);
+    }
+    mut slot = 0;
+    while slot < keys.len() {
+        mut index = 0;
+        while index < members.len() {
+            if taken[index] == 0 {
+                if key_matches(&members[index], view(keys[slot])) {
+                    taken[index] = 1;
+                    key_copy := copied_key(&members[index]);
+                    value_copy := copied_value(&members[index]);
+                    out.push(Member { key: key_copy, value: value_copy });
+                    break;
+                }
+            }
+            index += 1;
+        }
+        slot += 1;
+    }
+    return out;
+}
+
+pub fn parse<a>(text: (&a [u8])) -> Json | ParseError {
+    mut copy = u8[];
+    for b in text {
+        copy.push(b);
+    }
+    mut reader = Reader::new(copy);
+    return reader_document(&mut reader);
+}
+
+fn reader_document<a>(reader: (&a mut Reader)) -> Json | ParseError {
+    value := reader.value(0)?;
+    reader.skip_space();
+    if !reader.at_end() {
+        return ParseError::TrailingInput(reader.pos);
+    }
+    return value;
+}
+
+pub fn copy_of<a>(value: (&a Json)) -> Json {
+    match value {
+        Null => { return Json::Null; },
+        Bool(flag) => { return Json::Bool(flag); },
+        Num(text) => { copied := view(text).text(); return Json::Num(copied); },
+        Str(text) => { copied := view(text).text(); return Json::Str(copied); },
+        Arr(items) => {
+            mut out = Json[];
+            for item in items {
+                out.push(copy_of(item));
+            }
+            return Json::Arr(out);
+        },
+        Obj(members) => {
+            mut out = Member[];
+            for member in members {
+                key := view(member.key).text();
+                copied := copy_of(&member.value);
+                out.push(Member { key: key, value: copied });
+            }
+            return Json::Obj(out);
+        }
+    }
+}
+
+// ---- writing ----
+
+struct Builder {
+    out: u8[]
+}
+
+impl Builder {
+    fn new() -> Builder {
+        return Builder { out: u8[] };
+    }
+
+    fn put<a>(self: (&a mut Builder), value: u64) {
+        self.out.push(value);
+    }
+
+    fn bytes<a, b>(self: (&a mut Builder), text: (&b [u8])) {
+        for byte in text {
+            self.out.push(byte);
+        }
+    }
+
+    fn digits<a>(self: (&a mut Builder), value: u64) {
+        if value == 0 {
+            self.out.push(48);
+            return ();
+        }
+        mut reversed_digits = u8[];
+        mut left = value;
+        while left > 0 {
+            reversed_digits.push(48 + left % 10);
+            left = left / 10;
+        }
+        while reversed_digits.len() > 0 {
+            self.out.push(reversed_digits.pop());
+        }
+    }
+
+    // serde_json writes `"` and `\`, the short escapes for \b \f \n \r \t, `\u00xx` (lowercase) for
+    // the remaining C0 controls, and every other byte — DEL and all non-ASCII — raw as UTF-8.
+    fn quoted<a, b>(self: (&a mut Builder), text: (&b [u8])) {
+        self.out.push(34);
+        for byte in text {
+            if byte == 34 {
+                self.out.push(92);
+                self.out.push(34);
+                continue;
+            }
+            if byte == 92 {
+                self.out.push(92);
+                self.out.push(92);
+                continue;
+            }
+            if byte == 8 {
+                self.out.push(92);
+                self.out.push(98);
+                continue;
+            }
+            if byte == 12 {
+                self.out.push(92);
+                self.out.push(102);
+                continue;
+            }
+            if byte == 10 {
+                self.out.push(92);
+                self.out.push(110);
+                continue;
+            }
+            if byte == 13 {
+                self.out.push(92);
+                self.out.push(114);
+                continue;
+            }
+            if byte == 9 {
+                self.out.push(92);
+                self.out.push(116);
+                continue;
+            }
+            if byte < 32 {
+                self.out.push(92);
+                self.out.push(117);
+                self.out.push(48);
+                self.out.push(48);
+                self.out.push(hex_digit(byte / 16));
+                self.out.push(hex_digit(byte % 16));
+                continue;
+            }
+            self.out.push(byte);
+        }
+        self.out.push(34);
+    }
+
+    fn node<a, b>(self: (&a mut Builder), value: (&b Json)) {
+        match value {
+            Null => { self.bytes(&u8[110, 117, 108, 108]); },
+            Bool(flag) => {
+                if flag {
+                    self.bytes(&u8[116, 114, 117, 101]);
+                } else {
+                    self.bytes(&u8[102, 97, 108, 115, 101]);
+                }
+            },
+            Num(text) => { self.bytes(view(text)); },
+            Str(text) => { self.quoted(view(text)); },
+            Arr(items) => {
+                self.put(91);
+                mut index = 0;
+                for item in items {
+                    if index > 0 {
+                        self.put(44);
+                    }
+                    self.node(item);
+                    index += 1;
+                }
+                self.put(93);
+            },
+            Obj(members) => {
+                self.put(123);
+                mut index = 0;
+                for member in members {
+                    if index > 0 {
+                        self.put(44);
+                    }
+                    self.quoted(view(member.key));
+                    self.put(58);
+                    self.node(&member.value);
+                    index += 1;
+                }
+                self.put(125);
+            }
+        }
+    }
+}
+
+pub fn write<a>(value: (&a Json)) -> string {
+    mut builder = Builder::new();
+    builder.node(value);
+    return builder.out.text();
+}
+
+pub fn quote<a>(text: (&a [u8])) -> string {
+    mut builder = Builder::new();
+    builder.quoted(text);
+    return builder.out.text();
+}
+
+// ---- accessors ----
+//
+// Accessors copy: projecting a field out of an element borrow is not available here, and documents
+// at this layer (control frames, fixtures) are small.
+
+pub fn kind_of<a>(value: (&a Json)) -> JsonKind {
+    match value {
+        Null => { return JsonKind::Null; },
+        Bool(flag) => { return JsonKind::Bool; },
+        Num(text) => { return JsonKind::Num; },
+        Str(text) => { return JsonKind::Str; },
+        Arr(items) => { return JsonKind::Arr; },
+        Obj(members) => { return JsonKind::Obj; }
+    }
+}
+
+pub fn member<a>(value: (&a Json), wanted: (&[u8])) -> Json? {
+    match value {
+        Obj(members) => {
+            mut index = 0;
+            while index < members.len() {
+                if key_matches(&members[index], &wanted) {
+                    return core::some(copied_value(&members[index]));
+                }
+                index += 1;
+            }
+            return core::none<Json>();
+        },
+        _ => { return core::none<Json>(); }
+    }
+}
+
+pub fn has<a>(value: (&a Json), wanted: (&[u8])) -> bool {
+    match value {
+        Obj(members) => {
+            mut index = 0;
+            while index < members.len() {
+                if key_matches(&members[index], &wanted) {
+                    return true;
+                }
+                index += 1;
+            }
+            return false;
+        },
+        _ => { return false; }
+    }
+}
+
+pub fn array_len<a>(value: (&a Json)) -> u64 {
+    match value {
+        Arr(items) => { return items.len(); },
+        _ => { return 0; }
+    }
+}
+
+pub fn array_item<a>(value: (&a Json), index: u64) -> Json? {
+    match value {
+        Arr(items) => { return core::some(copied_item(&items[index])); },
+        _ => { return core::none<Json>(); }
+    }
+}
+
+pub fn as_string<a>(value: (&a Json)) -> string? {
+    match value {
+        Str(text) => { copied := view(text).text(); return core::some(copied); },
+        _ => { return core::none<string>(); }
+    }
+}
+
+pub fn as_number<a>(value: (&a Json)) -> string? {
+    match value {
+        Num(text) => { copied := view(text).text(); return core::some(copied); },
+        _ => { return core::none<string>(); }
+    }
+}
+
+pub fn path_of<a>(field: (&a Field)) -> string {
+    return view(field.path).text();
+}
+
+pub fn text_of<a>(field: (&a Field)) -> string {
+    return view(field.text).text();
+}
+
+// ---- flattening ----
+
+struct Flattener {
+    out: Field[]
+}
+
+impl Flattener {
+    fn emit<a, b>(self: (&a mut Flattener), path: (&b [u8]), text: (&b [u8])) {
+        self.out.push(Field { path: path.text(), text: text.text() });
+    }
+
+    fn walk<a, b>(self: (&a mut Flattener), node: (&b Json), path: (&b [u8])) {
+        match node {
+            Null => { self.emit(&path, &u8[110, 117, 108, 108]); },
+            Bool(flag) => {
+                if flag {
+                    self.emit(&path, &u8[116, 114, 117, 101]);
+                } else {
+                    self.emit(&path, &u8[102, 97, 108, 115, 101]);
+                }
+            },
+            Num(text) => { self.emit(&path, view(text)); },
+            Str(text) => {
+                mut builder = Builder::new();
+                builder.quoted(view(text));
+                quoted := builder.out.text();
+                self.emit(&path, view(quoted));
+            },
+            Arr(items) => {
+                mut index = 0;
+                for item in items {
+                    mut builder = Builder::new();
+                    builder.bytes(&path);
+                    builder.put(91);
+                    builder.digits(index);
+                    builder.put(93);
+                    child := builder.out.text();
+                    self.walk(item, view(child));
+                    index += 1;
+                }
+            },
+            Obj(members) => {
+                for member in members {
+                    mut builder = Builder::new();
+                    builder.bytes(&path);
+                    builder.put(46);
+                    builder.bytes(view(member.key));
+                    child := builder.out.text();
+                    self.walk(&member.value, view(child));
+                }
+            }
+        }
+    }
+}
+
+// Every scalar in document order with its path; object keys are canonical, so the order matches
+// the reference walk.
+pub fn flatten<a>(root: (&a Json)) -> Field[] {
+    mut flattener = Flattener { out: Field[] };
+    flattener.walk(root, &u8[36]);
+    return flattener.out;
+}
