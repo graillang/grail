@@ -98,8 +98,9 @@ MSVC `.def` function records, a `grail_entry` PE entry point, Win64 import calls
 `raw_win32`, and COFF short-import libraries written by `tools/windows.mjs`, linked with
 `lld-link`. Console, file, time, exit-code and argv programs run under Wine
 (`bun tools/windows.mjs check`). The portable runtime is shared and the OS boundary selects
-`compiler/os-linux.grl` or `compiler/os-windows.grl`; threads, sockets, directory streams,
-`mremap` and `.pdata` unwinding are not implemented. See
+`compiler/os-linux.grl` or `compiler/os-windows.grl`. Frames get `.pdata`/`.xdata` unwind records
+but no exception personality; threads, sockets, directory streams and `mremap` are not
+implemented. See
 [docs/design/windows-backend.md](../docs/design/windows-backend.md).
 macOS and other operating systems are not implemented; sharing a CPU does not imply sharing an
 executable format or syscall ABI.

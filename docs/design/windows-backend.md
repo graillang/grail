@@ -30,6 +30,10 @@ instead of forking the backend. PE/COFF-specific work therefore lives in four pl
    its operation IDs, and the OS file provides `rt_syscall`, `rt_syscall4`, `rt_readlinkat`,
    `rt_faccessat`, `rt_accept4` plus `rt_os_init`. Only one OS file is compiled per target, so
    the runtime above it is unchanged and the Linux build never sees Win32 code.
+5. **Unwind data** (`native.grl`): a post-pass over the final assembly wraps every `.def` function
+   in `.seh_proc/.seh_pushreg %rbp/.seh_setframe %rbp, 0/.seh_stackalloc <n>/.seh_endprologue/
+   .seh_endproc`. The assembler encodes that into `.xdata` and a `.pdata` RUNTIME_FUNCTION table,
+   which `lld-link` publishes as the PE exception directory.
 
 ## Calling convention
 
@@ -62,6 +66,21 @@ SDK is required. Link line:
 lld-link /nologo /entry:grail_entry /subsystem:console /nodefaultlib /dynamicbase /nxcompat \
          /out:program.exe program.obj kernel32.lib
 ```
+
+## Unwind data
+
+`.seh_*` directives require absolute values, and frame sizes are only final after code
+generation (`.set .F<n>, <bytes>`). The Windows target bypasses the ELF optimizer, so every
+function still has the fixed prologue `pushq %rbp / movq %rsp,%rbp / subq $.F<n>,%rsp`. The
+compiler therefore collects the `.set .F` values in emission order (one per function, in the same
+order as the `.def` records) and inserts a frame-pointer unwind description per function. The
+encoder reports `PrologSize 8, FrameRegister RBP, FrameOffset 0`, one `PUSH_NONVOL rbp`,
+`SET_FPREG rbp`, and `ALLOC_SMALL <frame>`; 240 functions in the hello image produce 240
+RUNTIME_FUNCTION records (`Entry 3 ... Exception Directory [.pdata]`, 0xb40 bytes).
+
+A function whose prologue does not match the standard shape is left without unwind records rather
+than given an inaccurate description. Today that is only the `.D<ty>` drop thunks (which push
+`%r12/%r13` after the frame pointer) and the `grail_entry` stub, which has no frame.
 
 ## Runtime surface
 
@@ -100,11 +119,15 @@ single-argument entry, struct fields and a full argv list. For every case it ass
 
 ## ABI limits of the current backend
 
-- **No unwind data.** `IMAGE_DIRECTORY_ENTRY_EXCEPTION` is empty: the assembler's `.seh_*`
-  directives need absolute values, while frame sizes are only known after `optimize.grl` rewrites
-  the prologue (`.set .F<label>` plus a register-promotion prelude). A usable `.pdata`/`.xdata`
-  description must therefore come from the optimizer. Exceptions, panics that unwind, and stack
-  walking are unsupported.
+- **Unwind data without an exception personality.** Frames are described, so a debugger or
+  `RtlVirtualUnwind` can walk them, but there is no `.pdata`-driven `__C_specific_handler`
+  personality, no `RaiseException` panic path and no handler registration. Hardware faults and
+  `ud2` traps terminate the process instead of unwinding. Drop thunks and the entry stub have no
+  records.
+- **The optimizer is bypassed.** `optimize.grl` recognizes functions by `.type NAME,@function`,
+  which COFF output does not emit, so PE programs get no slot forwarding, dead-code removal,
+  register promotion or leaf inlining. This is why the prologues are uniform (and unwindable);
+  teaching the optimizer the `.def` form is a separate change.
 - **Private convention, not a public ABI.** Grail functions do not follow Win64 argument order,
   so they are not callable from C, and callbacks from Win32 (thread start, window procedures,
   handlers) need hand-written thunks that save `%rdi/%rsi/%rbx/%r12-%r15`.
@@ -120,14 +143,15 @@ single-argument entry, struct fields and a full argv list. For every case it ass
 
 ## Remaining work
 
-1. `.pdata`/`.xdata` from the optimizer, then `RaiseException`-based panics and usable stack
-   traces.
-2. Threads: `CreateThread` with a Win64-compatible thunk, `WaitForSingleObject`, and
+1. Exception personality and panics: `RaiseException` plus a handler, then unwinding through
+   drop thunks (they need unwind records of their own or a reshaped prologue).
+2. Optimizer support for the `.def` function form, including describing promoted registers.
+3. Threads: `CreateThread` with a Win64-compatible thunk, `WaitForSingleObject`, and
    `WaitOnAddress`/SRW locks to replace futex and the scheduler's epoll boundary.
-3. Allocation: `mremap` emulation by allocate-copy-release and a Windows-aware arena policy.
-4. Files and processes: directory streams (`FindFirstFileA`), `GetModuleFileNameA`,
+4. Allocation: `mremap` emulation by allocate-copy-release and a Windows-aware arena policy.
+5. Files and processes: directory streams (`FindFirstFileA`), `GetModuleFileNameA`,
    `MoveFileA`/remove semantics, and the `*W` APIs with UTF-16 conversion.
-5. CLI integration: `grail build --target windows-x86_64` currently points at
+6. CLI integration: `grail build --target windows-x86_64` currently points at
    `tools/windows.mjs`; the import library writer and PE link could move into the Grail tool.
-6. Runtime acceptance: run the native corpus under Wine, including ownership aborts and UTF-8
+7. Runtime acceptance: run the native corpus under Wine, including ownership aborts and UTF-8
    rejection, once unwinding and the error paths exist.
