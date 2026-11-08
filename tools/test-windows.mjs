@@ -6,7 +6,7 @@ import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import assert from 'node:assert/strict';
 import { command, compileProgram as compileElf, execute, root } from './native.mjs';
-import { compileProgram, headers, inspectImage, inspectObject, inspectUnwind, kernel32, windowsTarget } from './windows.mjs';
+import { compileProgram, headers, inspectImage, inspectObject, inspectRelocations, inspectUnwind, kernel32, windowsAarch64, windowsTarget } from './windows.mjs';
 
 const elfTarget = 'x86_64';
 
@@ -119,14 +119,68 @@ export async function check(compiler) {
     console.log(`windows-x86_64 ${test.name}: COFF object + PE image verified (entry RVA 0x${entry})${wine ? ', executed' : ''}`);
   }
 
-  // The PE target must reject unknown targets without clobbering an existing artifact.
+  // windows-aarch64: PE/COFF for ARM64. There is no ARM64 Windows runner on this host, so these
+  // cases are validated statically: assembly shape, COFF machine, relocations and the image.
+  const armCases = ['hello', 'integer-print', 'file-write-read', 'argument-list'];
+  for (const name of armCases) {
+    const test = cases.find(c => c.name === name);
+    const directory = join(work, `arm64-${name}`);
+    rmSync(directory, { recursive: true, force: true });
+    mkdirSync(directory, { recursive: true });
+    let inputs;
+    if (test.file) inputs = [test.file];
+    else {
+      const input = join(directory, 'input.grl');
+      writeFileSync(input, test.source);
+      inputs = [input];
+    }
+    const built = compileProgram(compiler, inputs, directory, { name, target: windowsAarch64 });
+    const assembly = readFileSync(built.assembly, 'utf8');
+
+    // ARM64 instructions and PE import sequences, with no x86 or ELF spelling left behind.
+    assert.ok(assembly.includes('.globl grail_entry\ngrail_entry:'), `${name}/${windowsAarch64}: missing PE entry`);
+    assert.match(assembly, /^\.def f_main_main$/m, `${name}/${windowsAarch64}: missing COFF function record`);
+    assert.ok(assembly.includes('adrp x16,__imp_ExitProcess'), `${name}/${windowsAarch64}: exit is not an IAT load`);
+    assert.ok(assembly.includes('ldr x16,[x16,:lo12:__imp_ExitProcess]'), `${name}/${windowsAarch64}: IAT load is not page-relative`);
+    assert.ok(assembly.includes('blr x16'), `${name}/${windowsAarch64}: import is not an indirect call`);
+    assert.ok(!assembly.includes('pushq '), `${name}/${windowsAarch64}: x86 instruction leaked into ARM64 output`);
+    assert.ok(!assembly.includes(',@function'), `${name}/${windowsAarch64}: ELF symbol type leaked`);
+    assert.ok(!assembly.includes('.note.GNU-stack'), `${name}/${windowsAarch64}: ELF note section leaked`);
+    assert.ok(!assembly.includes('\n_start:'), `${name}/${windowsAarch64}: Linux entry point emitted`);
+
+    const object = inspectObject(built.object);
+    assert.match(object, /Format: COFF-ARM64/, `${name}/${windowsAarch64}: object is not COFF ARM64`);
+    assert.match(object, /Machine: IMAGE_FILE_MACHINE_ARM64 \(0xAA64\)/, `${name}/${windowsAarch64}: wrong COFF machine`);
+    assert.match(object, /Name: grail_entry\n\s+Value: \d+\n\s+Section: \.text/, `${name}/${windowsAarch64}: grail_entry is not in .text`);
+    for (const symbol of importSlots(built.object)) {
+      assert.ok(kernel32.includes(symbol.replace('__imp_', '')), `${name}/${windowsAarch64}: no short import for ${symbol}`);
+    }
+    const relocations = inspectRelocations(built.object);
+    for (const kind of ['IMAGE_REL_ARM64_PAGEBASE_REL21', 'IMAGE_REL_ARM64_PAGEOFFSET_12L', 'IMAGE_REL_ARM64_BRANCH26']) {
+      assert.ok(relocations.includes(kind), `${name}/${windowsAarch64}: missing ${kind}`);
+    }
+
+    const imageHeaders = inspectImage(built.executable);
+    assert.match(imageHeaders, /Format: COFF-ARM64/, `${name}/${windowsAarch64}: image is not ARM64`);
+    assert.match(imageHeaders, /Machine: IMAGE_FILE_MACHINE_ARM64 \(0xAA64\)/, `${name}/${windowsAarch64}: wrong image machine`);
+    const image = headers(built.executable);
+    assert.match(image, /Magic\s+020b\t\(PE32\+\)/, `${name}/${windowsAarch64}: not a PE32+ image`);
+    assert.match(image, /Subsystem\s+00000003\t\(Windows CUI\)/, `${name}/${windowsAarch64}: not a console image`);
+    assert.notEqual(Number.parseInt(image.match(/AddressOfEntryPoint\s+([0-9a-f]+)/)[1], 16), 0, `${name}/${windowsAarch64}: no entry point`);
+    const imported = [...imageHeaders.matchAll(/^\s+Symbol: (\S+)/gm)].map(m => m[1]);
+    assert.ok(imported.includes('ExitProcess') && imported.includes('WriteFile'), `${name}/${windowsAarch64}: kernel32 imports missing`);
+    passed++;
+    console.log(`windows-aarch64 ${name}: COFF-ARM64 object + ARM64 PE image verified (static, no ARM64 runner)`);
+  }
+
+  // The PE targets must reject unknown targets without clobbering an existing artifact.
   const directory = join(work, 'reject-unknown-target');
   rmSync(directory, { recursive: true, force: true });
   mkdirSync(directory, { recursive: true });
   const assembly = join(directory, 'prior.s');
   writeFileSync(assembly, 'prior valid artifact');
-  const rejected = execute(compiler, ['--target', 'windows-arm64', assembly, join(root, 'book/examples/hello.grl'), join(root, 'compiler/runtime.grl'), join(root, 'compiler/os-linux.grl')]);
-  assert.notEqual(rejected.status, 0, 'windows-arm64 was accepted');
+  const rejected = execute(compiler, ['--target', 'windows-riscv64', assembly, join(root, 'book/examples/hello.grl'), join(root, 'compiler/runtime.grl'), join(root, 'compiler/os-linux.grl')]);
+  assert.notEqual(rejected.status, 0, 'windows-riscv64 was accepted');
   assert.match(`${rejected.stdout}${rejected.stderr}`, /unsupported target/, 'missing target diagnostic');
   assert.equal(readFileSync(assembly, 'utf8'), 'prior valid artifact', 'rejected target overwrote the output');
   passed++;
@@ -147,7 +201,17 @@ export async function check(compiler) {
   assert.equal(argsRun.status, 0, `linux argv regression failed: ${argsRun.stderr}`);
   assert.equal(argsRun.stdout.toString(), argvCase.stdout, 'linux and PE argv handling disagree');
   passed++;
-  console.log(`windows-x86_64: target rejection and linux ${elfTarget} regression verified`);
+  // The shared lowerer also serves the Linux cross targets; a machine change must not break them.
+  for (const [crossTarget, marker] of [['aarch64', /ELF 64-bit LSB executable, ARM aarch64/], ['riscv64', /ELF 64-bit LSB executable, UCB RISC-V/]]) {
+    const directory = join(work, `linux-${crossTarget}`);
+    rmSync(directory, { recursive: true, force: true });
+    const image = compileElf(compiler, ['book/examples/hello.grl'], directory, { target: crossTarget, name: 'hello' });
+    const kind = spawnSync('file', [image], { timeout: 60_000 });
+    assert.equal(kind.status, 0, `${crossTarget}: file failed`);
+    assert.match(kind.stdout.toString(), marker, `${crossTarget}: not the expected ELF image`);
+    passed++;
+  }
+  console.log(`windows-x86_64: target rejection and linux x86_64/aarch64/riscv64 builds verified`);
   console.log(`windows-x86_64: ${passed} cross-build checks passed (${executed} executed under wine${wine ? '' : '; wine unavailable'})`);
   return 0;
 }
