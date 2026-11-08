@@ -399,9 +399,15 @@ gr_result gr_pipeline_stats(gr_handle device, uint32_t *out_declared, uint32_t *
  * GR_ERROR_INVALID_ARGUMENT instead of a silently ignored #ifdef.
  * ======================================================================================= */
 typedef struct gr_permutation_entry {
-    uint32_t name;    /* a stable id: the offline flow assigns one per define name */
+    uint32_t name;    /* gr_permutation_name_id() of the define's name */
     uint32_t value;
 } gr_permutation_entry;
+
+/* The stable id of a permutation define name: the low 32 bits of its FNV-1a 64 hash. Fixed
+ * here so the offline tool and the host cannot derive different ids for the same define, which
+ * would make every cache key a miss. graphics/tools/shader.mjs implements the same function
+ * and graphics/src/grail_reflect_tool.c checks the two agree for every declared define. */
+uint32_t gr_permutation_name_id(gr_str name);
 
 #define GR_PERMUTATION_MAX_ENTRIES 32u
 

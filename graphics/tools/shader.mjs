@@ -422,6 +422,66 @@ function stageIndex(stage) {
 }
 
 // ---------------------------------------------------------------------------------------
+// Permutation domains
+//
+// A shader declares the defines it reacts to with a directive DXC ignores:
+//
+//     // grail:permutation GRAIL_QUALITY default=2 values=0,1,2
+//
+// The tool is the only place a permutation can come from, so a host cannot ask for a define
+// the shader does not declare (gr_shader.h). The directive is a comment, so it cannot change
+// what the shader compiles to.
+// ---------------------------------------------------------------------------------------
+const DIRECTIVE = /\/\/\s*grail:permutation\s+([A-Za-z_][A-Za-z0-9_]*)\s+default\s*=\s*(-?\d+)\s+values\s*=\s*(-?\d+(?:\s*,\s*-?\d+)*)/g;
+
+function parsePermutationDomains(sourceText) {
+  const domains = [];
+  for (const match of sourceText.matchAll(DIRECTIVE)) {
+    const values = match[3].split(',').map(v => Number(v.trim()));
+    domains.push({ name: match[1], defaultValue: Number(match[2]), values });
+  }
+  return domains;
+}
+
+// The id must equal gr_permutation_name_id(): the low 32 bits of FNV-1a 64 over the name.
+function permutationNameId(name) {
+  let hash = FNV_OFFSET;
+  hash = fnvBytes(hash, Buffer.from(name, 'utf8'));
+  return Number(hash & 0xffffffffn);
+}
+
+// The key must equal gr_permutation_key(): entries sorted by name id, then each name and value
+// folded in that order. Sorting is what makes enumeration order irrelevant.
+function permutationKey(entries) {
+  const sorted = [...entries].sort((a, b) => a.name - b.name);
+  let hash = FNV_OFFSET;
+  for (const entry of sorted) {
+    hash = fnvU64(hash, entry.name);
+    hash = fnvU64(hash, entry.value);
+  }
+  return hash;
+}
+
+// The cross product, bounded. A build that silently produced 100k shaders would be worse than
+// one that refused, so exceeding the cap is an error with the count in it.
+const PERMUTATION_LIMIT = 256;
+function enumeratePermutations(domains) {
+  if (domains.length === 0) return [ [] ];
+  const total = domains.reduce((n, d) => n * Math.max(1, d.values.length), 1);
+  if (total > PERMUTATION_LIMIT)
+    throw new Error(`${total} permutations exceeds the limit of ${PERMUTATION_LIMIT}`);
+  let combinations = [ [] ];
+  for (const domain of domains) {
+    const next = [];
+    for (const combination of combinations)
+      for (const value of domain.values)
+        next.push([...combination, { name: permutationNameId(domain.name), define: domain.name, value }]);
+    combinations = next;
+  }
+  return combinations;
+}
+
+// ---------------------------------------------------------------------------------------
 // The digest. Must match gr_reflect_compute_layout_hash() in src/grail_reflect.c exactly;
 // graphics/src/grail_reflect_tool.c fails the build when the two disagree.
 // ---------------------------------------------------------------------------------------
@@ -464,7 +524,7 @@ function computeLayoutHash(refl) {
 // sizeof(gr_reflect_blob_header): 136. The C tool checks header_size against its own
 // sizeof and refuses the blob, so a drift here fails the build instead of the renderer.
 const HEADER_SIZE = 136;
-function writeBlob({ container, stage, bytecode, refl, entryPoint, source, compiler, flags, layoutHash }) {
+function writeBlob({ container, stage, bytecode, refl, entryPoint, source, compiler, flags, layoutHash, domains = [] }) {
   const encoder = new TextEncoder();
   const names = buffer => Buffer.from(buffer, 'utf8');
   const parts = [];
@@ -498,6 +558,13 @@ function writeBlob({ container, stage, bytecode, refl, entryPoint, source, compi
   const memberNameOffsets = refl.members.map(m => addString(m.name));
   const memberTypeOffsets = refl.members.map(m => addString(m.typeName));
   const vertexSemanticOffsets = refl.vertices.map(v => addString(v.semantic));
+  // gr_reflect_define: name, default_value, value_count, values (a comma-separated string).
+  const defineRecords = domains.slice(0, 16).map(d => ({
+    nameOffset: addString(d.name),
+    defaultValue: d.defaultValue,
+    valuesOffset: addString(d.values.join(',')),
+    valueCount: d.values.length,
+  }));
   const stringBuffer = Buffer.concat(stringSection);
 
   // Tables, each 4-byte aligned.
@@ -563,6 +630,15 @@ function writeBlob({ container, stage, bytecode, refl, entryPoint, source, compi
   const memberOffset = place(memberBuffer);
   const vertexOffset = place(vertexBuffer);
   const stageOffset = place(stageBuffer);
+  const defineBuffer = Buffer.alloc(defineRecords.length * 16);
+  defineRecords.forEach((d, i) => {
+    const o = i * 16;
+    defineBuffer.writeUInt32LE(d.nameOffset, o);
+    defineBuffer.writeUInt32LE(d.defaultValue, o + 4);
+    defineBuffer.writeUInt32LE(d.valueCount, o + 8);
+    defineBuffer.writeUInt32LE(d.valuesOffset, o + 12);
+  });
+  const defineOffset = place(defineBuffer);
 
   header.writeUInt32LE(0x46455247, 0);      // 'GREF'
   header.writeUInt16LE(1, 4);               // version
@@ -587,8 +663,8 @@ function writeBlob({ container, stage, bytecode, refl, entryPoint, source, compi
   header.writeUInt32LE(refl.vertices.length, 92);
   header.writeUInt32LE(stageOffset, 96);
   header.writeUInt32LE(1, 100);
-  header.writeUInt32LE(offset, 104);        // define_offset (no defines emitted yet)
-  header.writeUInt32LE(0, 108);             // define_count
+  header.writeUInt32LE(defineOffset, 104);
+  header.writeUInt32LE(defineRecords.length, 108);
   writeU64(layoutHash[0], 112);
   writeU64(layoutHash[1], 120);
 
@@ -681,6 +757,7 @@ function compile(file, options) {
   const mod = parseSpirv(spirv);
   const refl = extractReflection(mod, stage);
   const layoutHash = computeLayoutHash(refl);
+  const domains = parsePermutationDomains(readFileSync(file, 'utf8'));
 
   const inputs = refl.vertices.length;
   const json = {
@@ -709,6 +786,10 @@ function compile(file, options) {
       return last.offset + last.size;
     })(),
     push_constants_bytes: refl.pushConstantSize ?? 0,
+    permutations: enumeratePermutations(domains).map(combo => ({
+      key: `0x${permutationKey(combo).toString(16).padStart(16, '0')}`,
+      defines: Object.fromEntries(combo.map(e => [e.define, e.value])),
+    })),
     members: refl.members.map(m => ({ name: m.name, type: m.typeName, offset: m.offset, size: m.size })),
   };
 
@@ -726,22 +807,24 @@ function compile(file, options) {
       compiler: `dxc ${dxcVersion}`,
       flags: [...spvFlags].join(' '),
       layoutHash,
+      domains,
     });
     writeFileSync(`${base}.refl.bin`, blob);
     blobBytes = blob.length;
   }
 
-  return { shader: relative(root, file), stage, spvPath, json, blobBytes, inputs, metal };
+  return { shader: relative(root, file), stage, spvPath, json, blobBytes, inputs, metal, domains };
 }
 
 function main(argv) {
   const files = [];
-  const options = { noDxil: false, jsonOnly: false, all: false, metal: false };
+  const options = { noDxil: false, jsonOnly: false, all: false, metal: false, permutations: false };
   for (const arg of argv) {
     if (arg === '--all') options.all = true;
     else if (arg === '--no-dxil') options.noDxil = true;
     else if (arg === '--json-only') options.jsonOnly = true;
     else if (arg === '--metal') options.metal = true;
+    else if (arg === '--permutations') options.permutations = true;
     else if (arg.startsWith('-')) { process.stderr.write(`unknown option ${arg}\n`); return 2; }
     else files.push(resolve(arg));
   }
@@ -761,7 +844,16 @@ function main(argv) {
         `${result.json.bindings.length} bindings, ${result.inputs} vertex inputs` +
         `${block !== null ? `, frame constants ${block} B` : ''}` +
         `${result.json.push_constants_bytes ? `, push constants ${result.json.push_constants_bytes} B` : ''}` +
-        `${result.blobBytes !== null ? `, blob ${result.blobBytes} B` : ''}\n`);
+        `${result.blobBytes !== null ? `, blob ${result.blobBytes} B` : ''}` +
+        `${result.domains.length ? `, ${result.json.permutations.length} permutations` : ''}\n`);
+      if (options.permutations) {
+        for (const domain of result.domains)
+          process.stdout.write(
+            `    domain ${domain.name} id=0x${permutationNameId(domain.name).toString(16).padStart(8, '0')}` +
+            ` default=${domain.defaultValue} values=[${domain.values.join(',')}]\n`);
+      }
+      for (const d of result.json.permutations.slice(0, options.permutations ? undefined : 0))
+        process.stdout.write(`    perm ${d.key}  ${JSON.stringify(d.defines)}\n`);
       for (const b of result.json.bindings)
         process.stdout.write(`    set ${b.set} binding ${b.binding}  ${b.name}  ${b.kind}${b.array_size === 'unbounded' ? '[]' : `[${b.array_size}]`}\n`);
     } catch (error) {

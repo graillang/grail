@@ -96,6 +96,20 @@ static int check_file(const char *path, int verbose)
     }
 
     {
+        uint32_t d;
+        for (d = 0; d < refl.header->define_count; ++d) {
+            const gr_reflect_define *define = &refl.defines[d];
+            const char *name = gr_reflect_string(&refl, define->name);
+            /* The id the tool must have derived for the same name. Comparing these two lines
+             * of output is how make shader-check proves the id function has one definition. */
+            printf("  define %-26s id=0x%08x default=%u values=[%s] (count %u)\n", name,
+                   gr_permutation_name_id((gr_str){ name, (uint32_t)strlen(name), 0 }),
+                   define->default_value,
+                   gr_reflect_string(&refl, define->values), define->value_count);
+        }
+    }
+
+    {
         uint32_t frame = gr_reflect_frame_constants_size(&refl);
         if (frame)
             printf("  frame constants: %u B\n", frame);

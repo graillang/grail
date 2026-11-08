@@ -252,6 +252,13 @@ static int permutation_compare(const void *lhs, const void *rhs)
     return 0;
 }
 
+uint32_t gr_permutation_name_id(gr_str name)
+{
+    if (!name.data || name.len == 0)
+        return 0;
+    return (uint32_t)(gr_hash_bytes(name.data, name.len) & 0xFFFFFFFFull);
+}
+
 uint64_t gr_permutation_key(const gr_permutation *perm)
 {
     gr_permutation_entry sorted[GR_PERMUTATION_MAX_ENTRIES];
