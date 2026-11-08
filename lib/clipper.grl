@@ -2911,9 +2911,16 @@ pub fn add_open_subject<a>(c: (&a mut Clip), paths: Path[]) {
 }
 
 fn execute_internal<a>(c: (&a mut Clip), ct: u64, fill: u64) -> bool {
+    c.using_polytree = false;
+    return execute_internal_with(&mut c, ct, fill);
+}
+fn execute_internal_tree<a>(c: (&a mut Clip), ct: u64, fill: u64) -> bool {
+    c.using_polytree = true;
+    return execute_internal_with(&mut c, ct, fill);
+}
+fn execute_internal_with<a>(c: (&a mut Clip), ct: u64, fill: u64) -> bool {
     c.cliptype = ct;
     c.fillrule = fill;
-    c.using_polytree = false;
     reset(&mut c);
     first := pop_scanline(&mut c);
     if (ct == CLIP_NONE) || (first.ok == false) {
@@ -2959,18 +2966,17 @@ pub fn execute<a>(c: (&a mut Clip), ct: u64, fill: u64) -> Path[] {
     if execute_internal(&mut c, ct, fill) == false {
         return out;
     }
-    for i in c.r_pts.len() {
-        if c.r_pts[i] == NIL {
-            continue;
+    // outrec_list_.size() is re-read each iteration: cleaning can split off new outrecs.
+    mut i: u64 = 0;
+    while i < c.r_pts.len() {
+        if (c.r_pts[i] != NIL) && (c.r_open[i] == false) {
+            clean_collinear(&mut c, i);
+            p := build_path(&c, c.r_pts[i], c.reverse_solution, false);
+            if p.x.len() > 0 {
+                out.push(Path { x: p.x, y: p.y });
+            }
         }
-        if c.r_open[i] {
-            continue;
-        }
-        clean_collinear(&mut c, i);
-        p := build_path(&c, c.r_pts[i], c.reverse_solution, false);
-        if p.x.len() > 0 {
-            out.push(Path { x: p.x, y: p.y });
-        }
+        i += 1;
     }
     return out;
 }
@@ -3266,4 +3272,283 @@ fn adjust_heap<a, b>(c: (&a Clip), v: (&b mut u64[]), first: u64, t: Tri4) {
         }
     }
     v[first + hole] = value;
+}
+
+// ---- polytree (PolyTree64 / PolyTreeD) ----
+// Node 0 is the root (no polygon). Children of a node are the nodes whose parent it is, in
+// creation (AddChild) order. Level and IsHole follow the reference: a node is a hole when its
+// depth below the root is even and non-zero.
+pub struct Tree {
+    parent: u64[],
+    x: f64[][],
+    y: f64[][]
+}
+fn tree_new() -> Tree {
+    return Tree { parent: u64[NIL], x: f64[][f64[]], y: f64[][f64[]] };
+}
+pub fn tree_count<a>(t: (&a Tree)) -> u64 {
+    return t.parent.len();
+}
+pub fn tree_level<a>(t: (&a Tree), node: u64) -> u64 {
+    mut lvl: u64 = 0;
+    mut p = t.parent[node];
+    while p != NIL {
+        lvl += 1;
+        p = t.parent[p];
+    }
+    return lvl;
+}
+pub fn tree_is_hole<a>(t: (&a Tree), node: u64) -> bool {
+    lvl := tree_level(&t, node);
+    return (lvl != 0) && ((lvl & 1) == 0);
+}
+fn tree_add<a>(t: (&a mut Tree), parent: u64, x: f64[], y: f64[]) -> u64 {
+    n := t.parent.len();
+    t.parent.push(parent);
+    t.x.push(x);
+    t.y.push(y);
+    return n;
+}
+
+fn rect_empty<a>(c: (&a Clip), r: u64) -> bool {
+    return (c.r_bottom[r] <= c.r_top[r]) || (c.r_right[r] <= c.r_left[r]);
+}
+fn rect_contains<a>(c: (&a Clip), outer: u64, inner: u64) -> bool {
+    return (c.r_left[inner] >= c.r_left[outer]) && (c.r_right[inner] <= c.r_right[outer])
+        && (c.r_top[inner] >= c.r_top[outer]) && (c.r_bottom[inner] <= c.r_bottom[outer]);
+}
+fn check_bounds<a>(c: (&a mut Clip), rec: u64) -> bool {
+    if c.r_pts[rec] == NIL {
+        return false;
+    }
+    if rect_empty(&c, rec) == false {
+        return true;
+    }
+    clean_collinear(&mut c, rec);
+    if c.r_pts[rec] == NIL {
+        return false;
+    }
+    p := build_path(&c, c.r_pts[rec], c.reverse_solution, false);
+    if p.x.len() == 0 {
+        return false;
+    }
+    // GetBounds
+    mut l: i64 = 9223372036854775807;
+    mut t: i64 = 9223372036854775807;
+    mut r: i64 = -9223372036854775807 - 1;
+    mut b: i64 = -9223372036854775807 - 1;
+    for i in p.x.len() {
+        if p.x[i] < l {
+            l = p.x[i];
+        }
+        if p.x[i] > r {
+            r = p.x[i];
+        }
+        if p.y[i] < t {
+            t = p.y[i];
+        }
+        if p.y[i] > b {
+            b = p.y[i];
+        }
+    }
+    c.r_left[rec] = l;
+    c.r_top[rec] = t;
+    c.r_right[rec] = r;
+    c.r_bottom[rec] = b;
+    c.r_px[rec] = p.x;
+    c.r_py[rec] = p.y;
+    return true;
+}
+fn check_split_owner<a>(c: (&a mut Clip), rec: u64, splits_of: u64) -> bool {
+    splits := copy_u64s(&c.r_splits[splits_of]);
+    for idx in splits.len() {
+        mut sp = splits[idx];
+        if (c.r_pts[sp] == NIL) && (c.r_splits[sp].len() != 0) && check_split_owner(&mut c, rec, sp) {
+            return true;
+        }
+        sp = real_outrec(&c, sp);
+        if (sp == NIL) || (sp == rec) || (c.r_rsplit[sp] == rec) {
+            continue;
+        }
+        c.r_rsplit[sp] = rec;
+        if (c.r_splits[sp].len() != 0) && check_split_owner(&mut c, rec, sp) {
+            return true;
+        }
+        if (check_bounds(&mut c, sp) == false) || (rect_contains(&c, sp, rec) == false)
+            || (path2_contains_path1(&c, c.r_pts[rec], c.r_pts[sp]) == false) {
+            continue;
+        }
+        if is_valid_owner(&c, rec, sp) == false {
+            o := c.r_owner[rec];
+            c.r_owner[sp] = o;
+        }
+        c.r_owner[rec] = sp;
+        return true;
+    }
+    return false;
+}
+fn copy_u64s<a>(v: (&a u64[])) -> u64[] {
+    mut out = u64[];
+    for i in v.len() {
+        out.push(v[i]);
+    }
+    return out;
+}
+fn recursive_check_owners<a, b>(c: (&a mut Clip), rec: u64, tree: (&b mut Tree), inv: f64) {
+    if (c.r_polypath[rec] != NIL) || rect_empty(&c, rec) {
+        return ();
+    }
+    while c.r_owner[rec] != NIL {
+        o := c.r_owner[rec];
+        if (c.r_splits[o].len() != 0) && check_split_owner(&mut c, rec, o) {
+            break;
+        }
+        if (c.r_pts[o] != NIL) && check_bounds(&mut c, o) && rect_contains(&c, o, rec)
+            && path2_contains_path1(&c, c.r_pts[rec], c.r_pts[o]) {
+            break;
+        }
+        oo := c.r_owner[o];
+        c.r_owner[rec] = oo;
+    }
+    mut parent: u64 = 0;
+    if c.r_owner[rec] != NIL {
+        o := c.r_owner[rec];
+        if c.r_polypath[o] == NIL {
+            recursive_check_owners(&mut c, o, &mut tree, inv);
+        }
+        parent = c.r_polypath[o];
+    }
+    mut xs = f64[];
+    mut ys = f64[];
+    for i in c.r_px[rec].len() {
+        xs.push(f64(c.r_px[rec][i]) * inv);
+        ys.push(f64(c.r_py[rec][i]) * inv);
+    }
+    node := tree_add(&mut tree, parent, xs, ys);
+    c.r_polypath[rec] = node;
+}
+
+// ---- ClipperD: double coordinates scaled by a power of two ----
+pub struct PathD {
+    x: f64[],
+    y: f64[]
+}
+pub fn paths_d() -> PathD[] {
+    return PathD[];
+}
+pub fn push_path_d<a>(list: (&a mut PathD[]), x: f64[], y: f64[]) {
+    list.push(PathD { x: x, y: y });
+}
+pub struct ClipD {
+    clip: Clip,
+    scale: f64,
+    inv: f64
+}
+// scale = 2^(ilogb(10^precision) + 1), as ClipperD's constructor.
+pub fn new_d(precision: u64) -> ClipD {
+    mut p10 = 1.0;
+    for i in precision {
+        p10 = p10 * 10.0;
+    }
+    mut lg: i64 = 0;
+    mut v = p10;
+    while v >= 2.0 {
+        v = v / 2.0;
+        lg += 1;
+    }
+    mut scale = 1.0;
+    mut k: i64 = 0;
+    while k < lg + 1 {
+        scale = scale * 2.0;
+        k += 1;
+    }
+    return ClipD { clip: new(), scale: scale, inv: 1.0 / scale };
+}
+fn scale_in(paths: PathD[], scale: f64) -> XY[] {
+    mut out = XY[];
+    for i in paths.len() {
+        mut xs = i64[];
+        mut ys = i64[];
+        for j in paths[i].x.len() {
+            xs.push(round_away(paths[i].x[j] * scale));
+            ys.push(round_away(paths[i].y[j] * scale));
+        }
+        out.push(XY { x: xs, y: ys });
+    }
+    return out;
+}
+pub fn add_subject_d<a>(d: (&a mut ClipD), paths: PathD[]) {
+    xy := scale_in(paths, d.scale);
+    add_paths_(&mut d.clip, &xy, SUBJECT, false);
+}
+pub fn add_clip_d<a>(d: (&a mut ClipD), paths: PathD[]) {
+    xy := scale_in(paths, d.scale);
+    add_paths_(&mut d.clip, &xy, CLIP, false);
+}
+pub fn execute_d<a>(d: (&a mut ClipD), ct: u64, fill: u64) -> PathD[] {
+    inv := d.inv;
+    raw := execute(&mut d.clip, ct, fill);
+    mut out = PathD[];
+    for i in raw.len() {
+        mut xs = f64[];
+        mut ys = f64[];
+        for j in raw[i].x.len() {
+            xs.push(f64(raw[i].x[j]) * inv);
+            ys.push(f64(raw[i].y[j]) * inv);
+        }
+        out.push(PathD { x: xs, y: ys });
+    }
+    return out;
+}
+// Execute into a polytree (ClipperD::Execute with PolyTreeD; open paths are dropped).
+pub fn execute_tree_d<a>(d: (&a mut ClipD), ct: u64, fill: u64) -> Tree {
+    inv := d.inv;
+    mut tree = tree_new();
+    if execute_internal_tree(&mut d.clip, ct, fill) == false {
+        return tree;
+    }
+    mut i: u64 = 0;
+    while i < d.clip.r_pts.len() {
+        if (d.clip.r_pts[i] != NIL) && (d.clip.r_open[i] == false) {
+            if check_bounds(&mut d.clip, i) {
+                recursive_check_owners(&mut d.clip, i, &mut tree, inv);
+            }
+        }
+        i += 1;
+    }
+    return tree;
+}
+pub fn execute_tree<a>(c: (&a mut Clip), ct: u64, fill: u64) -> Tree {
+    mut tree = tree_new();
+    if execute_internal_tree(&mut c, ct, fill) == false {
+        return tree;
+    }
+    mut i: u64 = 0;
+    while i < c.r_pts.len() {
+        if (c.r_pts[i] != NIL) && (c.r_open[i] == false) {
+            if check_bounds(&mut c, i) {
+                recursive_check_owners(&mut c, i, &mut tree, 1.0);
+            }
+        }
+        i += 1;
+    }
+    return tree;
+}
+// Clipper2 Union(PathsD, FillRule, precision) and BooleanOp(PathsD, PathsD, precision).
+pub fn union_d(subjects: PathD[], fill: u64, precision: u64) -> PathD[] {
+    mut d = new_d(precision);
+    add_subject_d(&mut d, subjects);
+    return execute_d(&mut d, CLIP_UNION, fill);
+}
+pub fn boolean_op_d(ct: u64, fill: u64, subjects: PathD[], clips: PathD[], precision: u64) -> PathD[] {
+    mut d = new_d(precision);
+    add_subject_d(&mut d, subjects);
+    add_clip_d(&mut d, clips);
+    return execute_d(&mut d, ct, fill);
+}
+pub fn boolean_op_tree_d(ct: u64, fill: u64, subjects: PathD[], clips: PathD[], precision: u64) -> Tree {
+    mut d = new_d(precision);
+    add_subject_d(&mut d, subjects);
+    add_clip_d(&mut d, clips);
+    return execute_tree_d(&mut d, ct, fill);
 }
