@@ -811,6 +811,70 @@ fn c_abi<a, b, c>(o: (&a mut Out), op: &b [u8], rest: &c [u8]) -> u64 {
         }
         return 1;
     }
+    // A callback's float parameter k (d_k / fa_k, widened from s_k when `k s`) into x9/t0.
+    if eq(view((op)), view("cbfarg")) {
+        mut k = 0;
+        mut single = 0;
+        for j in rest.len() {
+            d := rest[j];
+            if (47 < d) & (d < 58) {
+                k = k * 10 + d - 48;
+            }
+            if d == 115 {
+                single = 1;
+            }
+        }
+        if arm {
+            if single {
+                put(&mut o, view("fcvt d"));
+                u64(&mut o, k);
+                put(&mut o, view(",s"));
+                u64(&mut o, k);
+                put(&mut o, view("\n"));
+            }
+            put(&mut o, view("fmov x9,d"));
+            u64(&mut o, k);
+            put(&mut o, view("\n"));
+        } else {
+            if single {
+                put(&mut o, view("fcvt.d.s fa"));
+                u64(&mut o, k);
+                put(&mut o, view(",fa"));
+                u64(&mut o, k);
+                put(&mut o, view("\n"));
+            }
+            put(&mut o, view("fmv.x.d t0,fa"));
+            u64(&mut o, k);
+            put(&mut o, view("\n"));
+        }
+        return 1;
+    }
+    // A callback's float result: x9/t0 into d0/fa0 (narrowed to s0 for f32).
+    if eq(view((op)), view("cbfret64")) {
+        if arm {
+            put(&mut o, view("fmov d0,x9\n"));
+        } else {
+            put(&mut o, view("fmv.d.x fa0,t0\n"));
+        }
+        return 1;
+    }
+    if eq(view((op)), view("cbfret32")) {
+        if arm {
+            put(&mut o, view("fmov d0,x9\nfcvt s0,d0\n"));
+        } else {
+            put(&mut o, view("fmv.d.x fa0,t0\nfcvt.s.d fa0,fa0\n"));
+        }
+        return 1;
+    }
+    // The inverse: binary32 bits in x9/t0 widened to the binary64 word Grail holds.
+    if eq(view((op)), view("cf32widen")) {
+        if arm {
+            put(&mut o, view("fmov s16,w9\nfcvt d16,s16\nfmov x9,d16\n"));
+        } else {
+            put(&mut o, view("fmv.w.x ft0,t0\nfcvt.d.s ft0,ft0\nfmv.x.d t0,ft0\n"));
+        }
+        return 1;
+    }
     // The binary32 bits of an f32 value, for a stack slot or an integer register.
     if eq(view((op)), view("cf32bits")) {
         if arm {

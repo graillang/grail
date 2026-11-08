@@ -218,6 +218,13 @@ struct C {
     bindings: u64[],
     current_spec: u64,
     validating: u64,
+    // Named-parameter count of the variadic extern call being lowered; 0 otherwise.
+    ffi_fixed: u64,
+    // Slots holding the address of a narrow (non-8-byte or f32) C-layout record field, paired
+    // with the field type: stores and compound loads through them use the field's width.
+    caddr: u64[],
+    // An exported callback's float result: 0 none, 1 f64, 2 f32 (returned in xmm0/d0/fa0).
+    export_fret: u64,
     alias_next: u64,
     types: Ty[],
     decls: Decl[],
@@ -4998,7 +5005,13 @@ fn ffi_direct_result<a, b>(c: (&a mut C), ty: u64, what: &b [u8]) -> unit {
         // A C-layout record result is returned by value (registers or a hidden result pointer,
         // per ABI) into a fresh Grail record of the same layout.
         if ty_kind(&mut c, ty) == 8 {
-            if c.decls[ty_arg(&mut c, ty)].c_layout {
+            rd := ty_arg(&mut c, ty);
+            if c.decls[rd].c_layout {
+                // SSE/HFA classification of float fields in returned records is not implemented;
+                // refuse rather than read the wrong registers.
+                if ffi_record_has_float(&mut c, rd) {
+                    fail(&mut c, view("extern C record results with float fields are not supported yet"));
+                }
                 return ();
             }
         }
@@ -5044,7 +5057,17 @@ fn ffi_emit_call<a, b, d, e>(
     symbol: &e [u8],
     target: u64
 ) -> Val {
+    // c.ffi_fixed is the number of named parameters of a variadic callee (set by the caller for
+    // that one call), or 0 for an ordinary one.
+    mut fixed = args.len();
+    if c.ffi_fixed != 0 {
+        fixed = c.ffi_fixed;
+    }
+    exchange(&mut c.ffi_fixed, 0);
     abi := ffi_abi(&mut c);
+    if (fixed < args.len()) & (abi == 2) & (c.plat == 1) {
+        fail(&mut c, view("variadic C calls on macOS arm64 (arguments on the stack) are not supported yet"));
+    }
     x86 := abi < 2;
     nint := ffi_int_regs(abi);
     apple_arm := (abi == 2) & (c.plat == 1);
@@ -5084,7 +5107,9 @@ fn ffi_emit_call<a, b, d, e>(
     mut stack = 0;
     for i in args.len() {
         ty := argtypes[i];
-        if is_float(&mut c, ty) {
+        // RV64 passes variadic floating-point arguments in integer registers.
+        rv_var := (abi == 3) & (fixed < i + 1);
+        if is_float(&mut c, ty) & (rv_var == 0) {
             if abi == 1 {
                 if ints < 4 {
                     ints = ints + 1;
@@ -5146,8 +5171,25 @@ fn ffi_emit_call<a, b, d, e>(
     }
     for i in args.len() {
         ty := argtypes[i];
+        variadic_arg := fixed < i + 1;
+        rv_var := (abi == 3) & variadic_arg;
+        if is_float(&mut c, ty) & rv_var {
+            // Promoted to double and moved as its bits through the integer path.
+            get(&mut c, args[i], view("%rax"));
+            if ints < 8 {
+                o(&mut c, view("movq %rax,"));
+                o(&mut c, view(ffi_int_reg(abi, ints)));
+                c.out.push(10);
+                ints = ints + 1;
+            } else {
+                ffi_store_stack(&mut c, x86, base + next * 8);
+                next = next + 1;
+            }
+            continue;
+        }
         if is_float(&mut c, ty) {
-            single := is_f32(&mut c, ty);
+            // A variadic float is promoted to double (Grail already holds the double's value).
+            single := is_f32(&mut c, ty) & (variadic_arg == 0);
             mut freg = 99;
             mut ireg = 99;
             if abi == 1 {
@@ -5168,6 +5210,12 @@ fn ffi_emit_call<a, b, d, e>(
             }
             get(&mut c, args[i], view("%rax"));
             if freg != 99 {
+                if (abi == 1) & variadic_arg {
+                    // Win64 variadics: the callee reads the integer register, so pass both.
+                    o(&mut c, view("movq %rax,"));
+                    o(&mut c, view(ffi_int_reg(abi, freg)));
+                    c.out.push(10);
+                }
                 if x86 {
                     if single {
                         // Narrowed in its own register: no scratch, so nothing callee-saved is touched.
@@ -5251,6 +5299,12 @@ fn ffi_emit_call<a, b, d, e>(
     if (rmode == 2) & (abi == 2) {
         get(&mut c, rslot, view("%rax"));
         o(&mut c, view("csret\n"));
+    }
+    if (abi == 0) & (fixed < args.len()) {
+        // SysV variadic callees read the number of vector registers used from %al.
+        o(&mut c, view("movl $"));
+        on(&mut c, floats);
+        o(&mut c, view(",%eax\n"));
     }
     if symbol.len() == 0 {
         get(&mut c, target, view("%rax"));
@@ -5387,7 +5441,7 @@ fn ffi_align_up(n: u64, a: u64) -> u64 {
 fn ffi_layout_fail<a>(c: (&a mut C)) -> unit {
     // Nested extern records are deliberately absent: a Grail record value is a heap
     // pointer, so embedding one would store the pointer where C expects the bytes.
-    fail(&mut c, view("extern record fields must be 8/16/32/64-bit integers, handles or CStr"));
+    fail(&mut c, view("extern record fields must be 8/16/32/64-bit integers, f32, f64, handles or CStr"));
     return ();
 }
 fn ffi_field_align<a>(c: (&a mut C), ty: u64) -> u64 {
@@ -5395,6 +5449,13 @@ fn ffi_field_align<a>(c: (&a mut C), ty: u64) -> u64 {
         return 8;
     }
     k := ty_kind(&mut c, ty);
+    // f32 is C float (4 bytes), f64 is C double (8 bytes).
+    if k == 21 {
+        if is_f32(&mut c, ty) {
+            return 4;
+        }
+        return 8;
+    }
     if (k == 23) + (k == 24) {
         return 8;
     }
@@ -5412,6 +5473,13 @@ fn ffi_field_size<a>(c: (&a mut C), ty: u64) -> u64 {
         return 8;
     }
     k := ty_kind(&mut c, ty);
+    // f32 is C float (4 bytes), f64 is C double (8 bytes).
+    if k == 21 {
+        if is_f32(&mut c, ty) {
+            return 4;
+        }
+        return 8;
+    }
     if (k == 23) + (k == 24) {
         return 8;
     }
@@ -5677,9 +5745,21 @@ fn extern_declaration<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     first := c.params.len();
     mut count = 0;
     mut words = 0;
+    mut variadic = 0;
     expect(&mut c, view("("));
     if eat(&mut c, view(")")) == 0 {
         while 1 {
+            // `...` ends the fixed parameters of a variadic C function (printf-style).
+            if eat(&mut c, view(".")) {
+                expect(&mut c, view("."));
+                expect(&mut c, view("."));
+                if count == 0 {
+                    fail(&mut c, view("a variadic extern C function needs at least one fixed parameter"));
+                }
+                variadic = 1;
+                expect(&mut c, view(")"));
+                break;
+            }
             p := ident(&mut c);
             expect(&mut c, view(":"));
             ty := parse_type(&mut c);
@@ -5744,7 +5824,7 @@ fn extern_declaration<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
                 constraints: u64[][],
                 contract: 0,
                 owner: 0,
-                ext: 1,
+                ext: 1 + variadic,
                 symbol: symbol,
             }
         );
@@ -5863,14 +5943,18 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
             // must live in the C ABI slice, and the symbol is the stated C name.
             for i in count {
                 formal := c.params[first + i];
-                ffi_param(
-                    &mut c,
-                    formal,
-                    view("extern C callback parameters must be i64, u64, CStr, handle, byte view or cfn (floats and narrow integers are direct-call only so far)")
-                );
+                if (is_float(&mut c, formal) + (ffi_narrow(&mut c, formal).len() != 0)) == 0 {
+                    ffi_param(
+                        &mut c,
+                        formal,
+                        view("extern C callback parameters must be an integer, f32, f64, CStr, handle, byte view or cfn")
+                    );
+                }
             }
             if ret != 1 {
-                ffi_result(&mut c, ret, view("extern C callback results must be i64, u64, unit, CStr or handle"));
+                if (is_float(&mut c, ret) + (ffi_narrow(&mut c, ret).len() != 0)) == 0 {
+                    ffi_result(&mut c, ret, view("extern C callback results must be an integer, f32, f64, unit, CStr or handle"));
+                }
             }
             if export_symbol.len() == 0 {
                 fail(&mut c, view("extern C definition needs a symbol"));
@@ -5983,6 +6067,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
             c.out.push(10);
         }
     }
+    exchange(&mut c.caddr, u64[]);
     func_directive(&mut c, view(m), view(name), view(body_symbol), export);
     if (c.debug != 0) & (c.validating == 0) {
         dstart = label(&mut c);
@@ -6007,13 +6092,25 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         on(&mut c, frame);
         o(&mut c, view(",%rsp\n"));
     }
-    for i in count {
-        reg := argreg(i);
-        o(&mut c, view("movq "));
-        o(&mut c, view(reg));
-        c.out.push(44);
-        stack_slot(&mut c, i);
-        c.out.push(10);
+    if export == 2 {
+        callback_params(&mut c, count);
+        mut fret = 0;
+        if ret != 1 {
+            if is_float(&mut c, ret) {
+                fret = 1 + is_f32(&mut c, ret);
+            }
+        }
+        exchange(&mut c.export_fret, fret);
+    } else {
+        exchange(&mut c.export_fret, 0);
+        for i in count {
+            reg := argreg(i);
+            o(&mut c, view("movq "));
+            o(&mut c, view(reg));
+            c.out.push(44);
+            stack_slot(&mut c, i);
+            c.out.push(10);
+        }
     }
     o(&mut c, view("leaq -.F"));
     on(&mut c, frame);
@@ -6806,7 +6903,12 @@ fn cfield_load<a>(c: (&a mut C), base: u64, d: u64, k: u64, address: u64) -> u64
         o(&mut c, view("leaq "));
         on(&mut c, off);
         o(&mut c, view("(%rax),%rax\n"));
-        return save(&mut c);
+        at := save(&mut c);
+        if (size != 8) + is_f32(&mut c, ty) {
+            c.caddr.push(at);
+            c.caddr.push(ty);
+        }
+        return at;
     }
     if size == 8 {
         o(&mut c, view("movq "));
@@ -6824,7 +6926,22 @@ fn cfield_load<a>(c: (&a mut C), base: u64, d: u64, k: u64, address: u64) -> u64
     }
     w := imm(&mut c, size);
     sign := imm(&mut c, signed);
-    return invoke(&mut c, view("rt_load_sized"), three(addr, w, sign));
+    loaded := invoke(&mut c, view("rt_load_sized"), three(addr, w, sign));
+    if is_f32(&mut c, ty) {
+        // binary32 bits in memory; Grail holds f32 values as binary64 words.
+        get(&mut c, loaded, view("%rax"));
+        ffi_f32_widen(&mut c);
+        return save(&mut c);
+    }
+    return loaded;
+}
+fn ffi_f32_widen<a>(c: (&a mut C)) -> unit {
+    if (c.target == 0) + (c.target == 3) {
+        o(&mut c, view("movd %eax,%xmm0\ncvtss2sd %xmm0,%xmm0\nmovq %xmm0,%rax\n"));
+    } else {
+        o(&mut c, view("cf32widen\n"));
+    }
+    return ();
 }
 fn cfield_store<a>(c: (&a mut C), base: u64, d: u64, k: u64, value: u64) -> unit {
     ty := field_ty(&mut c, d, k);
@@ -6838,14 +6955,155 @@ fn cfield_store<a>(c: (&a mut C), base: u64, d: u64, k: u64, value: u64) -> unit
         o(&mut c, view("(%rcx)\n"));
         return ();
     }
+    mut stored = value;
+    if is_f32(&mut c, ty) {
+        get(&mut c, value, view("%rax"));
+        if (c.target == 0) + (c.target == 3) {
+            o(&mut c, view("movq %rax,%xmm0\ncvtsd2ss %xmm0,%xmm0\nmovd %xmm0,%eax\n"));
+        } else {
+            o(&mut c, view("cf32bits\n"));
+        }
+        stored = save(&mut c);
+    }
     get(&mut c, base, view("%rax"));
     o(&mut c, view("addq $"));
     on(&mut c, off);
     o(&mut c, view(",%rax\n"));
     addr := save(&mut c);
     w := imm(&mut c, size);
-    invoke(&mut c, view("rt_store_sized"), three(addr, value, w));
+    invoke(&mut c, view("rt_store_sized"), three(addr, stored, w));
     return ();
+}
+// The C field type behind an address slot made by cfield_load, or 0 for an ordinary word.
+fn caddr_ty<a>(c: (&a mut C), slot: u64) -> u64 {
+    mut i = c.caddr.len();
+    while 1 < i {
+        i = i - 2;
+        if c.caddr[i] == slot {
+            return c.caddr[i + 1];
+        }
+    }
+    return 0;
+}
+// Loads a narrow C field through its address slot as a Grail word (sign- or zero-extended,
+// f32 widened to the binary64 word Grail holds).
+fn caddr_load<a>(c: (&a mut C), slot: u64, ty: u64) -> u64 {
+    mut signed = 0;
+    if ty_kind(&mut c, ty) == 18 {
+        signed = ty_mode(&mut c, ty);
+    }
+    size := ffi_field_size(&mut c, ty);
+    w := imm(&mut c, size);
+    sign := imm(&mut c, signed);
+    loaded := invoke(&mut c, view("rt_load_sized"), three(slot, w, sign));
+    if is_f32(&mut c, ty) {
+        get(&mut c, loaded, view("%rax"));
+        ffi_f32_widen(&mut c);
+        return save(&mut c);
+    }
+    return loaded;
+}
+// Stores a Grail word into a narrow C field through its address slot.
+fn caddr_store<a>(c: (&a mut C), slot: u64, ty: u64, value: u64) -> unit {
+    mut stored = value;
+    if is_f32(&mut c, ty) {
+        get(&mut c, value, view("%rax"));
+        if (c.target == 0) + (c.target == 3) {
+            o(&mut c, view("movq %rax,%xmm0\ncvtsd2ss %xmm0,%xmm0\nmovd %xmm0,%eax\n"));
+        } else {
+            o(&mut c, view("cf32bits\n"));
+        }
+        stored = save(&mut c);
+    }
+    size := ffi_field_size(&mut c, ty);
+    w := imm(&mut c, size);
+    invoke(&mut c, view("rt_store_sized"), three(slot, stored, w));
+    return ();
+}
+// An exported callback's prologue: each parameter is read from where a C caller put it (Win64:
+// positionally, the thunk having moved rcx/rdx/r8/r9 and stack words five and six into Grail's
+// registers; SysV/AAPCS64/RV64: integer-class parameters packed into the integer registers and
+// floats into the vector registers), f32 widened, narrow integers extended, then spilled.
+fn callback_params<a>(c: (&a mut C), count: u64) -> unit {
+    win := c.target == 3;
+    x86 := (c.target == 0) + win;
+    mut ints = 0;
+    mut floats = 0;
+    for i in count {
+        // The parameter locals are the function's first bindings, in declaration order.
+        ty := c.locals[i].ty;
+        if is_float(&mut c, ty) {
+            single := is_f32(&mut c, ty);
+            mut fpos = floats;
+            if win {
+                fpos = i;
+            }
+            if win & (3 < i) {
+                // Stack-passed on Win64: the thunk moved the raw word into Grail's register.
+                o(&mut c, view("movq "));
+                o(&mut c, view(argreg(i)));
+                o(&mut c, view(",%rax\n"));
+                if single {
+                    o(&mut c, view("movd %eax,%xmm0\ncvtss2sd %xmm0,%xmm0\nmovq %xmm0,%rax\n"));
+                }
+            } else {
+                if x86 {
+                    if single {
+                        o(&mut c, view("cvtss2sd %xmm"));
+                        on(&mut c, fpos);
+                        o(&mut c, view(",%xmm"));
+                        on(&mut c, fpos);
+                        c.out.push(10);
+                    }
+                    o(&mut c, view("movq %xmm"));
+                    on(&mut c, fpos);
+                    o(&mut c, view(",%rax\n"));
+                } else {
+                    o(&mut c, view("cbfarg "));
+                    on(&mut c, fpos);
+                    if single {
+                        o(&mut c, view(" s"));
+                    }
+                    c.out.push(10);
+                }
+            }
+            floats = floats + 1;
+        } else {
+            mut ipos = ints;
+            if win {
+                ipos = i;
+            }
+            o(&mut c, view("movq "));
+            o(&mut c, view(argreg(ipos)));
+            o(&mut c, view(",%rax\n"));
+            suffix := ffi_narrow(&mut c, ty);
+            if suffix.len() != 0 {
+                if x86 {
+                    ffi_x86_extend(&mut c, view(suffix));
+                } else {
+                    o(&mut c, view("cext "));
+                    o(&mut c, view(suffix));
+                    c.out.push(10);
+                }
+            }
+            ints = ints + 1;
+        }
+        o(&mut c, view("movq %rax,"));
+        stack_slot(&mut c, i);
+        c.out.push(10);
+    }
+    return ();
+}
+// 1 when a C-layout record has a floating-point field (its by-value classification differs).
+fn ffi_record_has_float<a>(c: (&a mut C), d: u64) -> u64 {
+    count := c.decls[d].count;
+    for i in count {
+        ty := field_ty(&mut c, d, i);
+        if is_float(&mut c, ty) {
+            return 1;
+        }
+    }
+    return 0;
 }
 fn field_path<a>(c: (&a mut C), id: u64, lty: u64, address: u64) -> Val {
     mut t = id;
@@ -7923,8 +8181,23 @@ fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
                 }
             }
             index := args.len();
-            if count < index + 1 {
+            variadic := c.funcs[f - 1].ext == 2;
+            if (count < index + 1) & (variadic == 0) {
                 fail(&mut c, view("function argument count"));
+            }
+            if (count < index + 1) & variadic {
+                // A variadic argument: C default promotions; integers widen to 64 bits, floats to
+                // double, and the remaining parameter kinds pass as pointers or handles.
+                ffi_direct_param(&mut c, v.ty, view("variadic C arguments must be an integer, f32, f64, CStr, handle or byte view"));
+                argtypes.push(v.ty);
+                held := move_value(&mut c, v);
+                sources.push(held.t);
+                args.push(held.t);
+                if eat(&mut c, view(")")) {
+                    break;
+                }
+                expect(&mut c, view(","));
+                continue;
             }
             if c.raw == 0 {
                 formal := c.params[template_first + index];
@@ -8004,7 +8277,10 @@ fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
             expect(&mut c, view(","));
         }
     }
-    if args.len() != count {
+    if (args.len() != count) & ((c.funcs[f - 1].ext == 2) == 0) {
+        fail(&mut c, view("function argument count"));
+    }
+    if (args.len() < count) & (c.funcs[f - 1].ext == 2) {
         fail(&mut c, view("function argument count"));
     }
     for i in map.len() {
@@ -8114,6 +8390,9 @@ fn emit_resolved_call<a>(
     if ext {
         if (c.raw == 0) & (c.unsafe_depth == 0) {
             fail(&mut c, view("extern C call requires an unsafe block"));
+        }
+        if ext == 2 {
+            exchange(&mut c.ffi_fixed, count);
         }
         return ffi_emit_call(&mut c, &args, &argtypes, ret, view(ffi_symbol), 0);
     }
@@ -15440,6 +15719,22 @@ fn statement<a>(c: (&a mut C)) -> unit {
             tls_set_slot(&mut c, restore);
         }
         get(&mut c, v.t, view("%rax"));
+        fret := c.export_fret;
+        if fret != 0 {
+            // A C caller reads a float result from the vector register.
+            if (c.target == 0) + (c.target == 3) {
+                o(&mut c, view("movq %rax,%xmm0\n"));
+                if fret == 2 {
+                    o(&mut c, view("cvtsd2ss %xmm0,%xmm0\n"));
+                }
+            } else {
+                if fret == 2 {
+                    o(&mut c, view("cbfret32\n"));
+                } else {
+                    o(&mut c, view("cbfret64\n"));
+                }
+            }
+        }
         o(&mut c, view("leave\nret\n"));
         exchange(&mut c.terminated, 1);
         return ();
@@ -16322,9 +16617,14 @@ fn statement<a>(c: (&a mut C)) -> unit {
                 }
             }
             if through {
-                get(&mut c, target, view("%rax"));
-                o(&mut c, view("movq (%rax),%rax\n"));
-                oldvalue = save(&mut c);
+                narrow := caddr_ty(&mut c, target);
+                if narrow != 0 {
+                    oldvalue = caddr_load(&mut c, target, narrow);
+                } else {
+                    get(&mut c, target, view("%rax"));
+                    o(&mut c, view("movq (%rax),%rax\n"));
+                    oldvalue = save(&mut c);
+                }
                 if c.raw == 0 {
                     idx := resource(&mut c, target);
                     r := &c.resources[idx - 1];
@@ -16466,6 +16766,11 @@ fn statement<a>(c: (&a mut C)) -> unit {
                 o(&mut c, view("movq (%rax),%rdi\n"));
                 drop_call(&mut c, fieldty);
             }
+        }
+        narrow_store := caddr_ty(&mut c, target) * through;
+        if narrow_store != 0 {
+            caddr_store(&mut c, target, narrow_store, v.t);
+            return ();
         }
         get(&mut c, v.t, view("%rax"));
         if through {
@@ -16936,6 +17241,9 @@ pub fn main() -> u64 {
         bindings: u64[],
         current_spec: 0,
         validating: 0,
+        ffi_fixed: 0,
+        caddr: u64[],
+        export_fret: 0,
         alias_next: 1,
         types: Ty[],
         decls: Decl[],
