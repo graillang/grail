@@ -107,7 +107,7 @@ sign platform artifact:
 abi-test:
     bun tools/abi-test.mjs
 
-# Native Linux FFI wrapper test; needs GRAIL_FFI_COMPILER (feature/ffi).
+# Native Linux FFI wrapper test; needs a compiler built from this tree.
 ffi-runtime-test:
     bun tools/test-ffi-runtime.mjs
 

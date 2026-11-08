@@ -11,10 +11,9 @@
   `tools/test-ffi-runtime.mjs` runner, and `docs/design/grail-ffi-runtime.md` with the exact
   pointer/length/ownership rules. The x86-64 test links the Linux reference backend with
   libc and executes file/time/environment checks; AArch64 and RISC-V 64 are assembly/static
-  checked only. This requires the `feature/ffi` compiler (`GRAIL_FFI_COMPILER`), is not
-  auto-loaded by the current stdlib, and changes neither `compiler/native.grl` nor
-  `compiler/runtime.grl` in the repository (the runner generates a test-only runtime copy
-  to preserve libc TLS).
+  checked only. It uses the merged v3 FFI compiler and `runtime.grl`/`os-linux.grl`, is not
+  auto-loaded by the current stdlib, and changes no compiler sources (the runner generates a
+  test-only runtime copy to preserve libc TLS).
 
 - Abundance CPU port, asset-package increment: `abundance/src/asset_package.grl` carries the ABPKG1
   package header (id, payload hash, payload bytes, ascending dependency ids), package ids and
