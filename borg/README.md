@@ -1,13 +1,12 @@
 # Borg Agent CPU port
 
-Seven bounded increments of the Borg Agent → Grail port: the JSON substrate its wire documents are
+Eight bounded increments of the Borg Agent → Grail port: the JSON substrate its wire documents are
 made of, the TOML its configuration files are written in, the protocol-v1 envelope header that
 classifies a document, the `agent.toml` loader that applies Borg's compiled-in defaults, the
 local-session ownership state that decides whether a session still has an owner, the JSON-RPC frames
 and single-in-flight dispatch that ACP, LSP and MCP conversations are built from, and the service
 supervision rules — restart policy, backoff, exit semantics — with the layout they write into,
-the local IPC transport boundary in front of those frames, and the journal rules those
-frames carry.
+the local IPC transport boundary in front of those frames, the journal rules those frames carry, and the typed transcript events they are made of.
 Borg Agent is read-only here; the reference is its own JSON semantics — `serde_json` 1.0.151 with
 `arbitrary_precision`, the crate version and feature set `crates/borg-*` build with. The plan and
 staging live in [docs/design/borg-agent-port.md](../docs/design/borg-agent-port.md).
@@ -22,6 +21,7 @@ src/jsonrpc.grl              JSON-RPC frames, stdio and Content-Length framing, 
 src/supervisor.grl           restart policy, backoff, service states, layout resolvers
 src/transport.grl            socket addressing, peer credentials, connection lifecycle
 src/journal.grl              event persistence, cursor arithmetic, resume paging, status
+src/events.grl               typed session-event payloads for the transcript kinds
 tests/json_test.grl          JSON: `json.compact`, `json.scalar`, `json.error` per document
 tests/wire_test.grl          protocol: `wire.header <file> <field> <value>`, `wire.error <file> <path> <reason>`
 tests/toml_test.grl          TOML: `toml.value <file> <path> <kind> <text>`, `toml.error <file>`
@@ -31,6 +31,7 @@ tests/jsonrpc_test.grl       frames: `frame|parse|take|dispatch <name> …`
 tests/supervisor_test.grl    supervision: `supervise|home|config|lanes|session|budget <name> …`
 tests/transport_test.grl     transport: `address|fits|limits|ucred|peer|conn <name> …`
 tests/journal_test.grl       journal: `persistence|cursor|replay|page|status <name> …`
+tests/events_test.grl        events: `tag|field|wire|roundtrip|error <name> …`
 tests/fixtures/v1/           Borg's protocol-v1 conformance corpus, copied verbatim
 tests/fixtures/edge/         number, escape, structure, nesting-limit and malformed documents
 tests/fixtures/wire/         envelope mutations: missing, mistyped, wrong protocol, wrong version
@@ -42,6 +43,7 @@ tests/fixtures/jsonrpc/      frame specs, parse cases, framed buffers, dispatch 
 tests/fixtures/supervisor/   policies with op scripts, and layout inputs
 tests/fixtures/transport/    addressing, limit, peer and connection scenarios
 tests/fixtures/journal/      persistence kinds, cursor steps, pages and status scripts
+tests/fixtures/events/       one event document per transcript kind, plus malformed ones
 tests/parity/json.rs         the reference: serde_json compact re-serialisation and scalar walk
 tests/parity/wire.rs         the reference: the same header rule over serde_json values
 tests/parity/toml.rs         the reference: the toml crate's value model, walked in the same order
@@ -58,6 +60,7 @@ tests/parity/jsonrpc.txt     committed reference output (71 lines, 22 documents)
 tests/parity/supervisor.txt  committed reference output (45 lines, 20 documents)
 tests/parity/transport.txt   committed reference output (30 lines, 13 documents)
 tests/parity/journal.txt     committed reference output (34 lines, 34 documents)
+tests/parity/events.txt      committed reference output (107 lines, 11 documents)
 tools/borg-test.mjs          build + compile + run + diff
 ```
 
@@ -106,8 +109,10 @@ and field:
   limits, a peer-credential verdict, and a connection replayed event by event.
 - `persistence|cursor|replay|page|status`: an event kind's persistence, a cursor advanced over a
   sequence of observations, a resume page, and the status a sequence of journaled changes leaves.
+- `tag|field|wire|roundtrip|error`: a decoded transcript event, its fields, the exact wire text it
+  re-encodes to, and the reason class for a document the shapes reject.
 
-The suite compares **783 lines over 162 documents**, and every value in them comes from
+The suite compares **890 lines over 173 documents**, and every value in them comes from
 `serde_json` rather than from a restatement: the reference parses with Borg's own crate and prints
 what it parsed. `wire.rs` and `config.rs` pin the v1 header *rule* and the default table (no Rust program classifies
 these fixtures, or loads this config without building the whole 363k-line Borg workspace), and use
@@ -297,6 +302,24 @@ Status is not recomputed from the shape of the events: `StatusChanged` is itself
 seven values rather than inventing a transition table. Two details matter and are covered: a
 *durable* provider event is the default's opposite (an unlisted provider kind is ephemeral, not
 durable), and an assistant message still streaming coalesces while a user or system one is journaled.
+
+## Typed transcript events
+
+`SessionEventKind` is a serde-tagged union (`contract.rs:2624`), and the five transcript kinds are
+ported with the serialization details a hand-written encoder gets wrong:
+
+| Kind | Payload | Detail that matters |
+| --- | --- | --- |
+| `SessionStarted` | none | — |
+| `SessionTitled` | `title`, `generated`, `usage_tokens`, `model` | `generated` is always written; `usage_tokens` is a **number**, not a quoted string |
+| `StatusChanged` | `status`, `detail` | `detail` is always written, `null` when absent |
+| `Message` | `message_id`, `actor`, `text`, `attachments`, `status`, `delivery` | `attachments` is omitted when empty; `delivery` is always written |
+| `MessageDelta` | `message_id`, `delta` | — |
+
+An unknown kind is refused by name rather than half-decoded: a reader that ignored it would drop
+transcript rows. Each event is compared on three surfaces — decoded fields, the exact wire text the
+port re-encodes, and a round-trip back through its own decoder. The wire comparison is what caught
+`usage_tokens` being emitted as a string in the first version of this increment.
 
 ## Limits and findings
 

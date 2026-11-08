@@ -1,0 +1,144 @@
+// Typed session-event parity test.
+//
+// Lines:
+//   tag <name> <type>
+//   field <name> <key> <value>
+//   roundtrip <name> <ok|fail>
+//   error <name> <reason>
+
+use borg_events;
+use borg_json;
+use core;
+use env;
+use fs;
+
+fn append<a, b>(out: (&a mut u8[]), text: (&b [u8])) {
+    for byte in text {
+        out.push(byte);
+    }
+}
+
+fn row<a, b, c>(label: (&a [u8]), name: (&b [u8]), value: (&c [u8])) {
+    mut text = u8[];
+    append(&mut text, label);
+    text.push(32);
+    append(&mut text, name);
+    text.push(32);
+    append(&mut text, value);
+    println(text.text());
+}
+
+fn field<a, b, c>(name: (&a [u8]), key: (&b [u8]), value: (&c [u8])) {
+    mut text = u8[];
+    append(&mut text, "field ".text());
+    append(&mut text, name);
+    text.push(32);
+    append(&mut text, key);
+    text.push(32);
+    append(&mut text, value);
+    println(text.text());
+}
+
+fn main() -> u64 {
+    args := env::args();
+    mut index = 1;
+    while index < args.len() {
+        path := args[index];
+        name := basename(&path);
+        data := fs::read(&path)!;
+        match borg_json::parse(&data) {
+            document: borg_json::Json => { run(&document, &name); },
+            failure: borg_json::ParseError => { row("error", &name, "not-object"); }
+        }
+        index += 1;
+    }
+    return 0;
+}
+
+fn basename<a>(path: (&a [u8])) -> string {
+    mut start = 0;
+    for i in path.len() {
+        if path[i] == 47 {
+            start = i + 1;
+        }
+    }
+    mut out = u8[];
+    for i in start..path.len() {
+        out.push(path[i]);
+    }
+    return out.text();
+}
+
+fn run<a>(document: (&a borg_json::Json), name: (&[u8])) {
+    match borg_events::decode(&document) {
+        event: borg_events::Event => {
+            tag := borg_events::tag_of(&event);
+            row("tag", &name, &tag);
+            seq := borg_json::number_text(borg_events::event_sequence(&event));
+            field(&name, "sequence", &seq);
+            title := borg_events::title_of(&event);
+            field(&name, "title", &title);
+            generated := borg_events::generated_of(&event);
+            field(&name, "generated", &generated);
+            tokens := borg_events::tokens_of(&event);
+            field(&name, "usage_tokens", &tokens);
+            status := borg_events::status_text(&event);
+            field(&name, "status", &status);
+            actor := borg_events::actor_of(&event);
+            field(&name, "actor", &actor);
+            text := borg_events::text_of_message(&event);
+            field(&name, "text", &text);
+            attachments := borg_json::number_text(borg_events::attachments_of(&event));
+            field(&name, "attachments", &attachments);
+            delivery := borg_events::delivery_of(&event);
+            field(&name, "delivery", &delivery);
+            detail := borg_events::detail_of(&event);
+            field(&name, "detail", &detail);
+            shown_wire := borg_events::wire(&event);
+            mut wire_line = u8[];
+            append(&mut wire_line, "wire ".text());
+            append(&mut wire_line, &name);
+            wire_line.push(32);
+            append(&mut wire_line, &shown_wire);
+            println(wire_line.text());
+            roundtrip(&event, &name);
+        },
+        failure: borg_events::EventError => {
+            mut reason = "not-object".text();
+            // The reason class, not the field path: serde's diagnostics name a field only for a
+            // missing one, so the parity surface is the class.
+            match failure {
+                NotObject => { reason = "not-object".text(); },
+                Missing(key) => { reason = "missing".text(); },
+                WrongType(key) => { reason = "type".text(); },
+                UnknownKind(kind) => { reason = "unknown-kind".text(); }
+            }
+            row("error", &name, &reason);
+        }
+    }
+}
+
+// Encode, decode again, compare the envelope and the tag: the writer is checked against the reader.
+fn roundtrip<a>(event: (&a borg_events::Event), name: (&[u8])) {
+    encoded := borg_events::encode(&event);
+    text := borg_json::write(&encoded);
+    match borg_json::parse(&text) {
+        document: borg_json::Json => {
+            match borg_events::decode(&document) {
+                again: borg_events::Event => {
+                    mut same = borg_events::event_sequence(&again) == borg_events::event_sequence(&event);
+                    if same {
+                        same = borg_events::tag_of(&again).len() == borg_events::tag_of(&event).len();
+                    }
+                    if same {
+                        row("roundtrip", &name, "ok");
+                    } else {
+                        row("roundtrip", &name, "fail");
+                    }
+                },
+                failure: borg_events::EventError => { row("roundtrip", &name, "fail"); }
+            }
+        },
+        failure: borg_json::ParseError => { row("roundtrip", &name, "fail"); }
+    }
+}

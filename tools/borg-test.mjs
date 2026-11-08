@@ -63,6 +63,7 @@ const fixtures = {
   supervisor: ['borg/tests/fixtures/supervisor'],
   transport: ['borg/tests/fixtures/transport'],
   journal: ['borg/tests/fixtures/journal'],
+  events: ['borg/tests/fixtures/events'],
 };
 
 function fixturePaths(name) {

@@ -2,36 +2,9 @@
 
 ## Unreleased
 
-- Abundance CPU port, asset-package increment: `abundance/src/asset_package.grl` carries the ABPKG1
-  package header (id, payload hash, payload bytes, ascending dependency ids), package ids and
-  payload hashes from the engine's `fnv1a64`, and the dependency DAG with duplicate, missing,
-  self-dependency and cycle refusals plus a deterministic topological order that does not depend on
-  input order. The reference gates ids and hashes against the engine and the DAG rules against a
-  model, because Abundance has no C++ asset DAG (its dependency work is Python staging). 29 exact
-  values; suite total 283 across eight programs. No payload bodies, GPU upload or renderer work.
-- Added Linux x86-64 DWARF line tables. `grail build --debug` and the raw
-  `grail --debug ...` compiler form emit `.file`/`.loc` directives that clang
-  assembles into `.debug_line`; statement rows are line/column accurate, with a
-  post-pass that re-asserts the location after literal `.popsection` switches.
-  `grail debug lines BINARY` prints the table through `llvm-dwarfdump` (with a
-  `readelf` fallback). `--debug` is rejected for non-Linux-x86-64 targets, and
-  `.debug_info` variable DIEs / debugger attach remain follow-ups.
-  `tools/test-debug-lines.mjs` verifies rows against source lines and the plain
-  build's lack of a line table; CI adds a preflight-gated `debug-lines` job.
-- Added non-executable target object release bundles for the implemented cross
-  backends: `windows-x86_64` (COFF), `macos-aarch64` and `macos-x86_64`
-  (Mach-O). `bun tools/ci.mjs objects --platform ...` compiles the compiler and
-  a conformance program to relocatable objects, verifies COFF/Mach-O headers
-  and symbols, and packages `objects/`, gzipped assembly,
-  `share/grail/objects.json` provenance and `OBJECTS-BUILD-ONLY.txt` with a
-  top-level `SHA256SUMS`. Manifests record `executable: false` and
-  `runnable: false`, and verification rejects any bundle containing an
-  executable. macOS gained required `cross-macos-aarch64`/`cross-macos-x86_64`
-  static lanes; CI adds an object-bundle matrix and a macOS static-check job.
-  Nothing is executed on macOS, and Windows release artifacts remain
-  non-executable objects even though Windows test programs run under Wine.
-- Reserve `VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC` in the Vulkan descriptor pool, matching
-  set 1; the new SDL3 surface test’s validation layer had exposed the missing pool size.
+- Port Borg Agent's typed transcript events (`borg/`). `src/events.grl` carries the `SessionEvent` envelope and five `SessionEventKind` payloads — `session_started`, `session_titled`, `status_changed`, `message`, `message_delta` — with the serialization rules the Rust derive applies: an always-written `generated` flag, `usage_tokens` as a number, an always-written nullable `detail` and `delivery`, and `attachments` omitted when empty. An unknown kind is refused by name rather than half-decoded. Each event is compared on decoded fields, the exact wire text and a round-trip; the wire comparison caught `usage_tokens` being encoded as a string. The port now checks 890 reference lines over 173 documents, with `--anchors` verifying 66 copied snippets across twelve source files.
+
+- Port Borg Agent's journal rules (`borg/`). `src/journal.grl` carries the persistence table from `session_store.rs`: provider events are durable only for the listed audit kinds (an unlisted kind is ephemeral, not durable), `action/generation_status` coalesces, streaming deltas are live-only, a user or system message that is still streaming is journaled while an assistant one coalesces, and a mirrored child event is only as durable as the child's record while a durable child provider event or child metadata stays live. It also carries the cursor arithmetic: a cursor only moves forward, replay is strictly after it so nothing is delivered twice, and a resume reads bounded pages that report whether more remain. Session status is the last journaled `StatusChanged`, so the port names the seven values instead of inventing a transition table. The port now checks 783 reference lines over 162 documents, with `--anchors` verifying 59 copied snippets across eleven source files. No file descriptor is opened.
 
 - Windows x86-64 threads and waits: `raw_thread_clone` now calls a new
   `rt_win_thread_clone`/`rt_win_thread_main` pair in `compiler/os-windows.grl` that creates the
