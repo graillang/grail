@@ -448,7 +448,7 @@ grail_status grail_os_time_sleep(int64_t nanoseconds, int64_t *remaining_nanosec
     return GRAIL_OK;
 }
 
-grail_status grail_os_env_get(const uint8_t *name, uint64_t name_length, uint8_t *out,
+grail_result grail_os_env_get(const uint8_t *name, uint64_t name_length, uint8_t *out,
                               uint64_t capacity) {
     if (!grail_windows.initialized) {
         return GRAIL_E_NOT_INITIALIZED;
