@@ -62,6 +62,23 @@ constants, rasterisation, readback — while producing values that can be checke
 The frame is rendered **twice**, and the two readbacks must be byte-identical: a digest that
 merely happened to repeat within one run would be an observation, not evidence.
 
+## The live bindless table
+
+Set 0 is allocated once, at the layout's full capacities, from a pool flagged
+`UPDATE_AFTER_BIND`, and never reallocated. Resources write their slot as they are created:
+
+- the thirteen fixed samplers are built at device creation and written into sampler slots 0..12,
+  so a shader's constant sampler index is always valid;
+- `gr_texture_view_create` claims the next sampled-image slot and writes the descriptor
+  immediately, so a view and its slot cannot disagree;
+- `gr_sampler_create` does the same for a caller's own sampler;
+- `gr_cmd_bind_pipeline` binds **both** sets — resources in set 0, frame constants in set 1 with
+  the dynamic offset of the selected frame slot. Nothing rebinds per draw.
+
+The frame-constant ring is one host-visible buffer with a slot per frame in flight;
+`gr_frame_constants_write` fills a slot and `gr_cmd_push_frame_offset` selects which one a
+recording reads.
+
 ## Evidence
 
 `make -C graphics vk-smoke`, under the exclusive GPU lock:
@@ -72,8 +89,18 @@ vk-backend: 5 tonemap shader modules created by the driver
 vk-backend: pipeline cache 3500 bytes
 vk-backend: frame 64x64, digest 0xcf939f3accc07d25
 vk-backend: 256 distinct colours, corner rgba 2,253,128,255 / 253,2,128,255
-vk-backend: 105 checks passed
+vk-backend: source texture at sampled slot 0
+vk-backend: bindless frame digest 0xf1d66d442c5f1c86 (same source twice), 0xcf359a052ee62325 (other source)
+vk-backend: 184 checks passed
 ```
+
+The bindless half of that output is the increment: an 8x8 texture of four flat quadrants is
+uploaded through a staging buffer and copied into a sampled image, its view claims slot 0, and
+`tonemap.ps` samples it through `g_tex2d_f4[slot]` with `grail_sampler(0)`, reading the frame
+constants from set 1. Three passes: the same source twice (digests must match — determinism), then
+a source overwritten with one flat colour (the digest must move — proof the sample is live and not
+a cached or unbound descriptor). Both hold. The four quadrant colours also appear at the values
+`aces_tonemap(texel)` predicts, within ±3/255.
 
 The corners are the shader's formula, not the clear colour: `r = uv.x`, `g = uv.y`, `b = tint.b`
 (0.5 → 128), `a = 1`. Top-left reads `2,253` and bottom-right `253,2` because each axis is

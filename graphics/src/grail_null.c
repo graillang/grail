@@ -176,7 +176,16 @@ static void *null_get(gr_null_device *device, gr_handle handle, gr_handle_type t
                       gr_result *out_status)
 {
     gr_result status = GR_OK;
-    void *object = gr_object_lookup(gr_objects(), handle, type, &status);
+    void *object;
+    /* This backend's objects and another backend's share one table. If a function without a
+     * dispatcher is ever called on a Vulkan object, this refuses instead of reinterpreting the
+     * struct — which is how a missing dispatcher turned into a silent wrong answer once. */
+    if (gr_active_backend() != GR_BACKEND_NULL) {
+        if (out_status)
+            *out_status = GR_ERROR_UNSUPPORTED;
+        return NULL;
+    }
+    object = gr_object_lookup(gr_objects(), handle, type, &status);
     (void)device;
     if (out_status)
         *out_status = object ? GR_OK : status;
@@ -679,6 +688,8 @@ gr_result gr_bindless_free(gr_handle bindless_handle, gr_bindless_table table,
  * ======================================================================================= */
 gr_result gr_buffer_create(gr_handle device_handle, const gr_buffer_desc *desc, gr_handle *out_buffer)
 {
+    if (gr_active_backend() == GR_BACKEND_VULKAN)
+        return gr_vk_abi_buffer_create(device_handle, desc, out_buffer);
     gr_null_device *device = (gr_null_device *)null_get(NULL, device_handle, GR_HANDLE_DEVICE, NULL);
     gr_null_bindless *bindless;
     gr_null_buffer *buffer;
@@ -759,6 +770,8 @@ static gr_null_buffer *null_buffer(gr_handle handle, gr_result *out_status)
 
 gr_result gr_buffer_write(gr_handle buffer_handle, uint64_t offset, gr_span_u8 data)
 {
+    if (gr_active_backend() == GR_BACKEND_VULKAN)
+        return gr_vk_abi_buffer_write(buffer_handle, offset, data);
     gr_result status;
     gr_null_buffer *buffer = null_buffer(buffer_handle, &status);
     if (!buffer)
@@ -775,6 +788,8 @@ gr_result gr_buffer_write(gr_handle buffer_handle, uint64_t offset, gr_span_u8 d
 
 gr_result gr_buffer_read(gr_handle buffer_handle, uint64_t offset, gr_mut_span_u8 out)
 {
+    if (gr_active_backend() == GR_BACKEND_VULKAN)
+        return gr_vk_abi_buffer_read(buffer_handle, offset, out);
     gr_result status;
     gr_null_buffer *buffer = null_buffer(buffer_handle, &status);
     if (!buffer)
@@ -791,6 +806,8 @@ gr_result gr_buffer_read(gr_handle buffer_handle, uint64_t offset, gr_mut_span_u
 
 gr_result gr_buffer_map(gr_handle buffer_handle, void **out_ptr)
 {
+    if (gr_active_backend() == GR_BACKEND_VULKAN)
+        return gr_vk_abi_buffer_map(buffer_handle, out_ptr);
     gr_result status;
     gr_null_buffer *buffer = null_buffer(buffer_handle, &status);
     if (!buffer || !out_ptr)
@@ -810,6 +827,8 @@ void gr_buffer_unmap(gr_handle buffer_handle)
 
 uint64_t gr_buffer_device_address(gr_handle buffer_handle)
 {
+    if (gr_active_backend() == GR_BACKEND_VULKAN)
+        return gr_vk_abi_buffer_device_address(buffer_handle);
     gr_result status;
     gr_null_buffer *buffer = null_buffer(buffer_handle, &status);
     if (!buffer || !(buffer->usage & GR_BUFFER_USAGE_SHADER_DEVICE_ADDRESS))
@@ -821,6 +840,8 @@ uint64_t gr_buffer_device_address(gr_handle buffer_handle)
 
 uint32_t gr_buffer_bindless_index(gr_handle buffer_handle)
 {
+    if (gr_active_backend() == GR_BACKEND_VULKAN)
+        return gr_vk_abi_buffer_bindless_index(buffer_handle);
     gr_result status;
     gr_null_buffer *buffer = null_buffer(buffer_handle, &status);
     return buffer ? buffer->bindless_index : GR_BINDLESS_INDEX_NONE;
@@ -964,6 +985,8 @@ static uint64_t null_level_offset(const gr_null_texture *texture, uint32_t mip, 
 gr_result gr_texture_write(gr_handle texture_handle, uint32_t mip, uint32_t layer, uint32_t x,
                            uint32_t y, uint32_t width, uint32_t height, gr_span_u8 row_major)
 {
+    if (gr_active_backend() == GR_BACKEND_VULKAN)
+        return gr_vk_abi_texture_write(texture_handle, mip, layer, x, y, width, height, row_major);
     gr_result status;
     gr_null_texture *texture = null_texture(texture_handle, &status);
     uint32_t bpb, bw = 1, bh = 1, row_bytes, r;
@@ -1108,6 +1131,8 @@ gr_result gr_texture_view_create(gr_handle device_handle, const gr_texture_view_
 
 uint32_t gr_texture_view_bindless_sampled(gr_handle view_handle)
 {
+    if (gr_active_backend() == GR_BACKEND_VULKAN)
+        return gr_vk_abi_texture_view_bindless_sampled(view_handle);
     gr_result status;
     gr_null_view *view = (gr_null_view *)gr_object_lookup(gr_objects(), view_handle,
                                                          GR_HANDLE_TEXTURE_VIEW, &status);
@@ -1128,6 +1153,8 @@ uint32_t gr_texture_view_bindless_storage(gr_handle view_handle)
 gr_result gr_sampler_create(gr_handle device_handle, const gr_sampler_desc *desc,
                             gr_handle *out_sampler, uint32_t *out_slot)
 {
+    if (gr_active_backend() == GR_BACKEND_VULKAN)
+        return gr_vk_abi_sampler_create(device_handle, desc, out_sampler, out_slot);
     gr_null_device *device = (gr_null_device *)null_get(NULL, device_handle, GR_HANDLE_DEVICE, NULL);
     gr_null_bindless *bindless;
     gr_null_sampler *sampler;
@@ -1181,6 +1208,8 @@ gr_result gr_sampler_create(gr_handle device_handle, const gr_sampler_desc *desc
  * ======================================================================================= */
 gr_result gr_cmd_push_frame_offset(gr_handle cmd_handle, uint32_t frame_slot)
 {
+    if (gr_active_backend() == GR_BACKEND_VULKAN)
+        return gr_vk_abi_cmd_push_frame_offset(cmd_handle, frame_slot);
     gr_result status;
     gr_null_cmd *cmd = (gr_null_cmd *)gr_object_lookup(gr_objects(), cmd_handle,
                                                        GR_HANDLE_CMD_BUFFER, &status);
@@ -1192,6 +1221,34 @@ gr_result gr_cmd_push_frame_offset(gr_handle cmd_handle, uint32_t frame_slot)
         return GR_ERROR_INVALID_ARGUMENT;
     cmd->frame_slot = frame_slot;
     cmd->frame_slot_set = 1;
+    return GR_OK;
+}
+
+gr_result gr_frame_constants_write(gr_handle device_handle, uint32_t frame_slot,
+                                   const gr_frame_constants *constants)
+{
+    gr_null_device *device;
+    if (gr_active_backend() == GR_BACKEND_VULKAN)
+        return gr_vk_abi_frame_constants_write(device_handle, frame_slot, constants);
+    device = (gr_null_device *)null_get(NULL, device_handle, GR_HANDLE_DEVICE, NULL);
+    if (!device || !constants)
+        return GR_ERROR_INVALID_ARGUMENT;
+    if (frame_slot >= device->frame_slots)
+        return GR_ERROR_INVALID_ARGUMENT;
+    /* Nothing to write: the null backend has no GPU to read it. The call is accepted so a caller
+     * can run its frame loop unchanged on a machine with no device. */
+    return GR_OK;
+}
+
+gr_result gr_frame_slot_count(gr_handle device_handle, uint32_t *out_count)
+{
+    gr_null_device *device;
+    if (gr_active_backend() == GR_BACKEND_VULKAN)
+        return gr_vk_abi_frame_slot_count(device_handle, out_count);
+    device = (gr_null_device *)null_get(NULL, device_handle, GR_HANDLE_DEVICE, NULL);
+    if (!device || !out_count)
+        return GR_ERROR_INVALID_ARGUMENT;
+    *out_count = device->frame_slots;
     return GR_OK;
 }
 

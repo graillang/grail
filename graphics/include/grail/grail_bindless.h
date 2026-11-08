@@ -173,6 +173,12 @@ typedef enum gr_frame_flags {
 
 /* Selected by gr_cmd_push_frame_offset at the start of a frame's recording. */
 gr_result gr_cmd_push_frame_offset(gr_handle cmd, uint32_t frame_slot);
+/* Fills one frame's slot with the constants a shader reads. Paired with the push above: this
+ * writes the data, that selects which slot the recording reads. */
+gr_result gr_frame_constants_write(gr_handle device, uint32_t frame_slot,
+                                   const gr_frame_constants *constants);
+/* The number of slots the device keeps in flight. */
+gr_result gr_frame_slot_count(gr_handle device, uint32_t *out_count);
 /* The host-side slot for this frame; the caller writes constants into it. */
 uint32_t gr_frame_current_slot(gr_handle device);
 
