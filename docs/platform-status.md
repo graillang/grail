@@ -98,8 +98,7 @@ job executor and asset package dependency ordering are ported with bit-exact C++
 **283 exact values across eight programs**
 (the older 237 figure covered the increments before the job executor). Borg Agent has JSON,
 wire, TOML/config, local-session ownership, JSON-RPC dispatch and local-IPC
-addressing/lifecycle rules and journal persistence/cursor rules: **783 reference lines across
-nine suites**; the socket syscalls themselves are still open. RHI/renderer/editor and remaining Borg OS services are still open.
+addressing/lifecycle rules and journal persistence/cursor rules: **890 reference lines across ten suites**; the socket syscalls themselves are still open. RHI/renderer/editor and remaining Borg OS services are still open.
 
 ## Verification commands
 
@@ -118,5 +117,5 @@ make -C graphics vk-probe       # Vulkan device/capability probe (GPU)
 make -C graphics shader-check   # real DXC/SPIR-V artifacts and reflection
 make -C graphics perm-test      # shader permutations
 just abundance-test             # Abundance bit-exact parity (283 values, 8 programs)
-just borg-test                  # Borg reference-line parity (783 lines, 162 documents, 9 suites)
+just borg-test                  # Borg reference-line parity (890 lines, 10 suites)
 ```
