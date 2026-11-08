@@ -161,31 +161,22 @@ export function assemble(source, executable, target = hostTarget, linkArgs = [],
 }
 // Shared Mach-O libraries. A Grail program still needs an entry function, so the image keeps its
 // (local) `_main` stub; `-exported_symbols_list` decides what the dylib actually exports.
-export function assembleDylib(source, output, target = hostTarget, { installName, exports = [], linkArgs = [] } = {}) {
+export function assembleDylib(source, output, target = hostTarget, { installName, exports = [], linkArgs = [], rpath = [] } = {}) {
   targetName(target);
   if (!machoTargets.includes(target)) throw new Error(`shared dylibs are Mach-O only, not ${target}`);
   if (!installName) throw new Error('a Mach-O dylib needs an install name (-install_name)');
   if (exports.length === 0) throw new Error('a Mach-O dylib needs at least one exported symbol');
   const symbols = exports.map(symbol => (symbol.startsWith('_') ? symbol : `_${symbol}`));
-  // The compiler emits module functions as local labels (only the process entry is global), so the
-  // requested exports are promoted here before assembling. A first-class `--export` compiler flag
-  // would move this into the compiler; the driver step keeps the dylib surface explicit meanwhile.
-  const marked = `${output}.exports.s`;
+  // `--export NAME` makes the compiler emit `.globl` at the definition, so this only checks the
+  // assembly really carries the requested globals (catches a caller that compiled without it).
   const assembly = readFileSync(source, 'utf8');
-  // An export must name a label this module actually defines; otherwise the driver would turn a
-  // typo into a global undefined reference and the linker would accept it.
   for (const symbol of symbols) {
-    if (!new RegExp(`^${symbol}:`, 'm').test(assembly)) {
-      throw new Error(`export ${symbol} is not defined by this module`);
+    if (!new RegExp(`^\\.globl\\s+${symbol}\\s*$`, 'm').test(assembly)) {
+      throw new Error(`${symbol} is not global in ${source}; compile it with --export`);
     }
   }
-  const declarations = symbols
-    .filter(symbol => !new RegExp(`^\\.globl\\s+${symbol}\\s*$`, 'm').test(assembly))
-    .map(symbol => `.globl ${symbol}\n`)
-    .join('');
-  writeFileSync(marked, declarations + assembly);
   const object = `${output}.o`;
-  command([process.env.GRAIL_ASSEMBLER ?? 'clang', `--target=${triples[target]}`, '-c', marked, '-o', object]);
+  command([process.env.GRAIL_ASSEMBLER ?? 'clang', `--target=${triples[target]}`, '-c', source, '-o', object]);
   const list = `${output}.exports`;
   writeFileSync(list, `${symbols.join('\n')}\n`);
   const { stub } = libSystemStub(dirname(object), object, machoArchitectures[target]);
@@ -197,6 +188,7 @@ export function assembleDylib(source, output, target = hostTarget, { installName
     '-install_name', installName,
     '-current_version', '1', '-compatibility_version', '1',
     '-exported_symbols_list', list,
+    ...rpath.flatMap(path => ['-rpath', path]),
     '-L', dirname(stub), '-lSystem',
     ...linkArgs,
     object, '-o', output,
@@ -250,13 +242,13 @@ export function buildCompiler() {
   return executable;
 }
 // Emit assembly only: shared libraries and link-only tests need the object without a program link.
-export function compileOnly(compiler, inputs, directory, { target = hostTarget, name = 'module', defaultU64 = true, typedRefs = false, runtime = join(root, 'compiler/runtime.grl'), osRuntime = join(root, 'compiler/os-linux.grl'), darwin = join(root, 'compiler/darwin.grl') } = {}) {
+export function compileOnly(compiler, inputs, directory, { target = hostTarget, name = 'module', defaultU64 = true, typedRefs = false, exports = [], runtime = join(root, 'compiler/runtime.grl'), osRuntime = join(root, 'compiler/os-linux.grl'), darwin = join(root, 'compiler/darwin.grl') } = {}) {
   targetName(target);
   mkdirSync(directory, { recursive: true });
   const assembly = join(directory, `${name}.s`);
   const platform = machoTargets.includes(target) ? [resolve(root, darwin)] : [resolve(root, osRuntime)];
   const files = [...inputs.map(p => resolve(root, p)), resolve(root, runtime), ...platform];
-  const numeric = [...(defaultU64 ? ['--default-u64'] : []), ...(typedRefs ? ['--typed-refs'] : [])];
+  const numeric = [...(defaultU64 ? ['--default-u64'] : []), ...(typedRefs ? ['--typed-refs'] : []), ...exports.flatMap(name => ['--export', name])];
   command([compiler, ...numeric, '--target', target, assembly, ...files]);
   return assembly;
 }

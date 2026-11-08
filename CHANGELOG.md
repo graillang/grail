@@ -15,7 +15,11 @@
   (a dylib without an install name or without exports is refused), and `tools/macos.mjs` reports
   `LC_ID_DYLIB` plus the export/import sets by parsing `LC_SYMTAB` directly. Tests link an
   executable against the dylib and require its install name in `LC_LOAD_DYLIB`, and reject a
-  symbol outside the export list. Nothing here is execution evidence on Apple hardware.
+  symbol outside the export list. `--export NAME` is a compiler flag: it marks exactly the
+  definition with that declared name `.globl` at its own label and refuses a name that no function
+  defines, so the driver no longer rewrites `.globl` into the assembly. Dylibs can advertise
+  `@rpath/...` install names and consumers carry `LC_RPATH` (`rpaths` in `tools/macos.mjs`), with
+  tests for both. Nothing here is execution evidence on Apple hardware.
 
 - Reserve `VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC` in the Vulkan descriptor pool, matching
   set 1; the new SDL3 surface test’s validation layer had exposed the missing pool size.

@@ -6,7 +6,7 @@ import { spawnSync } from 'node:child_process';
 import assert from 'node:assert/strict';
 import { copyFileSync, existsSync, rmSync } from 'node:fs';
 import { root, buildCompiler, compileProgram, compileOnly, assembleDylib, command, machoTargets, frameworkInstallName, machoArchitectures } from './native.mjs';
-import { dylibs, verifyCodeSignature, LC_CODE_SIGNATURE, loadCommands, dylibId, exportedSymbols, undefinedSymbols } from './macos.mjs';
+import { dylibs, verifyCodeSignature, LC_CODE_SIGNATURE, loadCommands, dylibId, exportedSymbols, undefinedSymbols, rpaths } from './macos.mjs';
 
 const compiler = buildCompiler();
 const work = join(root, '.work/macos-tests');
@@ -122,6 +122,7 @@ const elf = readFileSync(join(elfDirectory, 'hello.s'), 'utf8');
 has(elf, /^_start:$/m, 'ELF entry point changed');
 has(elf, /\.note\.GNU-stack/, 'ELF lost its GNU-stack note');
 has(elf, /^\.type f_/m, 'ELF lost its .type directives');
+lacks(elf, /^\.globl f_/m, 'an ELF build exported a module function without --export');
 lacks(elf, /\.build_version|rt_state@|\.pushsection __TEXT/, 'Mach-O output leaked into ELF');
 
 // A target has exactly one platform module: darwin.grl and os-linux.grl define the same
@@ -224,7 +225,8 @@ for (const target of machoTargets) {
   mkdirSync(directory, { recursive: true });
   const source = join(directory, 'greet.grl');
   writeFileSync(source, 'module greet;\n\npub fn add(a: u64, b: u64) -> u64 {\n    return a + b;\n}\n\nfn main() {\n    println("lib");\n}\n');
-  const assembly = compileOnly(compiler, [source], directory, { target, name: 'greet' });
+  // --export promotes exactly the named definition to a global symbol in the compiler itself.
+  const assembly = compileOnly(compiler, [source], directory, { target, name: 'greet', exports: ['add'] });
   const installName = '/usr/local/lib/libgreet.dylib';
   const library = assembleDylib(assembly, join(directory, 'libgreet.dylib'), target, { installName, exports: ['_f_greet_add'] });
 
@@ -269,12 +271,37 @@ for (const target of machoTargets) {
     check(refused !== null, `${target}: dylib without ${what} was accepted`);
     has(String(refused && refused.message), pattern, `${target}: dylib without ${what} gave the wrong error`);
   }
-  // Negative: an export that names no label in the module is refused before linking, so a typo
-  // cannot become a global undefined reference the linker happily accepts.
+  // Negative: --export naming something the module does not define is refused by the compiler, so a
+  // typo can never become a global undefined reference the linker would accept.
   let bogus = null;
-  try { assembleDylib(assembly, join(directory, 'bogus.dylib'), target, { installName, exports: ['_f_greet_nope'] }); } catch (error) { bogus = error; }
-  check(bogus !== null, `${target}: an undefined exported symbol was accepted`);
-  has(String(bogus && bogus.message), /export _f_greet_nope is not defined by this module/, `${target}: undefined export gave the wrong error`);
+  try { compileOnly(compiler, [source], directory, { target, name: 'bogus', exports: ['nope'] }); } catch (error) { bogus = error; }
+  check(bogus !== null, `${target}: an undefined --export name was accepted`);
+  has(String(bogus && bogus.message), /export 'nope' is not defined by any function/, `${target}: undefined export gave the wrong error`);
+
+  has(readFileSync(assembly, 'utf8'), /^\.globl _f_greet_add$/m, `${target}: --export did not make _f_greet_add global`);
 }
 
-console.log(`macos: ${objects} Mach-O objects and ${executables} executables verified on ${machoTargets.join(', ')}; ${frameworkLinks} framework links, ${frameworkLinks * 2} unknown-framework rejections, ${frameworkLinks * 3} signature checks and ${dylibsBuilt} shared dylibs`);
+// @rpath: a dylib can advertise an @rpath install name and the consumer carries LC_RPATH entries.
+let rpathLinks = 0;
+for (const target of machoTargets) {
+  const directory = join(work, target, 'dylib');
+  const source = join(directory, 'greet.s');
+  if (!existsSync(source)) continue;
+  const library = assembleDylib(source, join(directory, 'librpath.dylib'), target, {
+    installName: '@rpath/libgreet.dylib',
+    exports: ['_f_greet_add'],
+  });
+  check(dylibId(library) === '@rpath/libgreet.dylib', `${target}: @rpath install name not recorded (${dylibId(library)})`);
+  const consumer = join(directory, 'rpath_consumer');
+  const loaderPath = '@loader_path/../lib';
+  command([process.env.GRAIL_LINKER ?? 'ld64.lld',
+    '-arch', machoArchitectures[target], '-platform_version', 'macos', '11.0', '11.0',
+    '-L', directory, '-lSystem',
+    '-rpath', loaderPath,
+    '-u', '_f_greet_add', library, join(work, target, 'hello', 'hello.o'), '-e', '_main', '-o', consumer]);
+  check(dylibs(consumer).includes('@rpath/libgreet.dylib'), `${target}: consumer did not record the @rpath dependency (${dylibs(consumer).join(', ')})`);
+  check(rpaths(consumer).includes(loaderPath), `${target}: consumer lost LC_RPATH (${rpaths(consumer).join(', ')})`);
+  rpathLinks += 1;
+}
+
+console.log(`macos: ${objects} Mach-O objects and ${executables} executables verified on ${machoTargets.join(', ')}; ${frameworkLinks} framework links, ${frameworkLinks * 2} unknown-framework rejections, ${frameworkLinks * 3} signature checks, ${dylibsBuilt} shared dylibs and ${rpathLinks} @rpath links`);

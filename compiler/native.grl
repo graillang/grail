@@ -181,6 +181,8 @@ struct C {
     // Reference dialect is independent of the internal numeric default.
     typed_refs: u64,
     typed_refs_flag: u64,
+    exports: u8[][],
+    export_hits: u64[],
     specs: Spec[],
     bindings: u64[],
     current_spec: u64,
@@ -3867,6 +3869,21 @@ fn base_named<a>(c: (&a mut C), first: u8[]) -> u64 {
     return nominal_type(&mut c, d - 1);
 }
 // ---- top level: pass 1 names, pass 2 fields/signatures/prototypes, pass 3 bodies ----
+// --export NAME promotes the definition with that declared name to a global symbol. Matching is by
+// declared name in any module, so the flag does not depend on mangling or on the object format.
+fn exported<a, b>(c: (&a mut C), n: &b [u8]) -> u64 {
+    mut hit = 0;
+    for i in c.exports.len() {
+        e := c.exports[i].copy();
+        if same(view(e), view(n)) {
+            cur := c.export_hits[i];
+            mut h = &mut c.export_hits[i];
+            exchange(&mut h, cur + 1);
+            hit = 1;
+        }
+    }
+    return hit;
+}
 fn mangle<a, b, d>(c: (&a mut C), m: &b [u8], n: &d [u8]) -> unit {
     if c.plat == 1 {
         c.out.push(95);
@@ -4343,6 +4360,11 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         last := last_name(&mut c, view(name), start, end);
         mut l = &mut c.locals[i];
         exchange(&mut l.last, last);
+    }
+    if exported(&mut c, view(name)) {
+        o(&mut c, view(".globl "));
+        mangle(&mut c, view(m), view(name));
+        c.out.push(10);
     }
     func_directive(&mut c, view(m), view(name));
     mangle(&mut c, view(m), view(name));
@@ -14985,6 +15007,8 @@ pub fn main() -> u64 {
         default_u64_flag: 0,
         typed_refs: 0,
         typed_refs_flag: 0,
+        exports: u8[][],
+        export_hits: u64[],
         specs: Spec[],
         bindings: u64[],
         current_spec: 0,
@@ -15164,6 +15188,14 @@ pub fn main() -> u64 {
                     exchange(&mut c.overflow, 1);
                     offset += 1;
                 } else {
+                    if same(view(option), view("--export")) {
+                        if argc < offset + 3 {
+                            fail_option(&mut c, view("--export needs a function name"));
+                        }
+                        c.exports.push(host::arg(offset + 2));
+                        c.export_hits.push(0);
+                        offset += 2;
+                    } else {
                     if same(view(option), view("--typed-refs")) {
                         exchange(&mut c.typed_refs_flag, 1);
                         offset += 1;
@@ -15175,6 +15207,7 @@ pub fn main() -> u64 {
                         } else {
                             break;
                         }
+                    }
                     }
                 }
             }
@@ -15206,6 +15239,16 @@ pub fn main() -> u64 {
             exchange(&mut c.headers_complete, 1);
             check_interfaces(&mut c);
             validate_type_constraints(&mut c);
+        }
+    }
+    // Every definition has been emitted by now, so an --export name that never matched is a typo.
+    for i in c.exports.len() {
+        if c.export_hits[i] == 0 {
+            host::print(view("grail: export '"));
+            missing := &c.exports[i];
+            host::print(view(missing));
+            host::print(view("' is not defined by any function\n"));
+            host::exit(1);
         }
     }
     emit_specializations(&mut c);
