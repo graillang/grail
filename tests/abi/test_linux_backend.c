@@ -756,6 +756,8 @@ int main(void) {
     CHECK(grail_os_init(&test_allocator, &startup) == GRAIL_E_UNSUPPORTED);
     const uint64_t capabilities = grail_os_capabilities();
     CHECK((capabilities & GRAIL_CAP_FILES) != 0);
+    CHECK((capabilities & GRAIL_CAP_FILE_METADATA) != 0);
+    CHECK((capabilities & GRAIL_CAP_FILE_NONBLOCKING) != 0);
     CHECK((capabilities & GRAIL_CAP_DIRECTORIES) != 0);
     CHECK((capabilities & GRAIL_CAP_ENVIRONMENT) != 0);
     CHECK((capabilities & GRAIL_CAP_TIME) != 0);

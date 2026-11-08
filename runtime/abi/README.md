@@ -8,15 +8,17 @@ libc/POSIX and is not a replacement for the freestanding Grail runtime.
 
 ```
 include/grail/            public C ABI (stable contract)
-runtime/abi/              portable implementation + backend skeletons
+runtime/abi/              portable implementation + native backends
   grail_abi.c             version negotiation and output-copy helper
-  grail_error.c           portable statuses, errno/Win32/Mach mapping
+  grail_error.c           portable statuses, Win32/Mach mapping
   grail_unicode.c         strict UTF-8 / UTF-16
   grail_path.c            POSIX and Windows lexical rules (one file, two modes)
   grail_handle_table.[ch] generation-checked linear handles
+  grail_error_posix.c     Linux/macOS errno mapping (hosted POSIX only)
+  grail_env_store.[ch]    shared UTF-8 environment store and snapshots
   linux/                  hosted reference backend
-  windows/                skeleton; every entry point returns UNSUPPORTED
-  macos/                  skeleton; every entry point returns UNSUPPORTED
+  windows/                first-layer Win32 backend + fail-closed stubs
+  macos/                  first-layer libSystem backend + fail-closed stubs
 tests/abi/                C contract and behaviour tests
 tools/abi-test.mjs        test runner (also `just abi-test`)
 ```
@@ -49,29 +51,40 @@ tools/abi-test.mjs        test runner (also `just abi-test`)
 | Area | Contract | Portable implementation | Linux reference | Windows | macOS |
 | --- | --- | --- | --- | --- | --- |
 | Version/errors/Unicode | header | yes | n/a | n/a | n/a |
-| Paths | header | POSIX + Windows rules, both tested | cwd, set-cwd, executable | skeleton | skeleton |
-| Files/dirs/pipes | header | handle table | complete subset | skeleton | skeleton |
-| Environment | header | iterator rules | complete subset | skeleton | skeleton |
-| Time | header | n/a | complete subset | skeleton | skeleton |
-| Threads/sync | header | handle table | complete subset | skeleton | skeleton |
-| Dynamic libraries | header | handle table | complete subset | skeleton | skeleton |
-| Processes | header | options/status layout | fork/execve/wait4 subset | skeleton | skeleton |
-| Sockets/DNS | header | address layout | TCP/UDP IPv4+IPv6, options, DNS | skeleton | skeleton |
+| Paths | header | POSIX + Windows rules, both tested | cwd, set-cwd, executable | cwd, set-cwd, executable | cwd, set-cwd, executable |
+| Files/pipes | header | handle table | open/read/write/seek/truncate/sync/stat/close, pipe | open/read/write/seek/truncate/sync/stat/close, pipe | open/read/write/seek/truncate/sync/non-blocking/close, pipe |
+| File metadata | header | format | stat | stat | not implemented |
+| Directories | header | handle table | open/next/close, mkdir/remove/rename | mkdir/remove/rename only | mkdir/remove/rename only |
+| Environment | header | env store | get/set/unset/iterate | get/set/unset/iterate | get/set/unset/iterate |
+| Time | header | n/a | monotonic/realtime/CPU, sleep, local offset | monotonic/realtime/CPU, sleep | monotonic/realtime/CPU, sleep |
+| Threads/sync | header | handle table | complete subset | not implemented | not implemented |
+| Dynamic libraries | header | handle table | complete subset | not implemented | not implemented |
+| Processes | header | options/status layout | fork/execve/wait4 subset | not implemented | not implemented |
+| Sockets/DNS | header | address layout | TCP/UDP IPv4+IPv6, options, DNS | not implemented | not implemented |
 
-"Complete subset" means the documented functions are implemented for the host POSIX surface;
-the shipping Grail implementation must reproduce the semantics without the C layer. The Linux
-reference now includes child processes (fork/execve/wait4, argv/environment/cwd/stdio, PATH
+"Complete subset" means the documented functions are implemented and tested for that platform;
+the shipping Grail implementation must reproduce the Linux semantics without the C layer. The
+Linux reference includes child processes (fork/execve/wait4, argv/environment/cwd/stdio, PATH
 search, wait-with-timeout, terminate/kill) and TCP/UDP sockets (IPv4 and IPv6 when the probe
 succeeds, `accept4`, send/receive, shutdown, address queries, non-blocking mode, the documented
 socket options and `getaddrinfo`). Readiness registration remains private to the shipping
 runtime, and the C layer must not become a second scheduler.
 
+The Windows and macOS backends are **first-layer, statically verified implementations**: they
+compile for Win64 and Apple ARM64 but have not been executed on those systems. Their
+unimplemented functions are present as explicit `GRAIL_E_UNSUPPORTED` stubs, and their
+capability words advertise only what is implemented. `GRAIL_CAP_FILE_METADATA` distinguishes
+byte I/O from `file_stat`/`fs_stat`; Linux and Windows set it, macOS clears it.
+`GRAIL_CAP_FILE_NONBLOCKING` covers `file_set_nonblocking` and
+`GRAIL_OPEN_NONBLOCKING`; Linux and macOS set it, Windows clears it. `GRAIL_CAP_SYMLINKS`
+covers `readlink`/`realpath` (not metadata); Linux and macOS set it, Windows clears it.
+
 ## Linux reference backend
 
-Files: `linux/grail_os_linux.c` (init, environment, time, paths), `linux/grail_os_linux_fs.c`
-(files, directories, pipes, stat), `linux/grail_os_linux_thread.c` (pthreads, mutex, condvar,
-dlopen), `linux/grail_os_linux_proc.c` and `linux/grail_os_linux_net.c` (explicit
-`UNSUPPORTED`).
+Files: `linux/grail_os_linux.c` (init, environment, time, paths),
+`linux/grail_os_linux_fs.c` (files, directories, pipes, stat),
+`linux/grail_os_linux_thread.c` (pthreads, mutex, condvar, dlopen),
+`linux/grail_os_linux_proc.c` (processes) and `linux/grail_os_linux_net.c` (sockets/DNS).
 
 Deliberate limits, all visible in the API or capability word:
 
@@ -90,9 +103,20 @@ Deliberate limits, all visible in the API or capability word:
 
 ## Windows mapping (for the Windows backend lane)
 
-Every function in the public headers has a Win32/Winsock counterpart. The skeleton implements
-none of them; this table is the implementation checklist. All paths cross the boundary as UTF-8
-and must be converted to UTF-16 with `MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS)`.
+Implemented first layer in `windows/grail_os_windows.c`: init/shutdown/capabilities/error
+detail; monotonic, realtime and process/thread CPU clocks with `Sleep`; environment
+get/set/unset/snapshot iteration; current directory, executable path; file
+open/read/write/seek/truncate/sync/stat/close; pipes; path stat, mkdir, remove and rename.
+`windows/grail_os_windows_stubs.c` returns `GRAIL_E_UNSUPPORTED` for non-blocking files,
+readlink/realpath, directory iteration, local-time offsets, processes, sockets, threads/sync
+and dynamic libraries. `GRAIL_CAP_FILES | GRAIL_CAP_FILE_METADATA | GRAIL_CAP_PATHS |
+GRAIL_CAP_ENVIRONMENT | GRAIL_CAP_ENV_MUTATION | GRAIL_CAP_TIME | GRAIL_CAP_CPU_TIME` are set.
+
+All paths cross the boundary as UTF-8 and are converted to UTF-16 with
+`MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS)`; output paths use
+`WideCharToMultiByte`. The declarations are pinned in `grail_win32.h` so a host without the
+Windows SDK can compile-check the backend. The table below remains the checklist for the
+unimplemented parts.
 
 - **Init:** `WSAStartup(MAKEWORD(2,2))`, initial environment snapshot from
   `GetEnvironmentStringsW`, console setup (`SetConsoleOutputCP(CP_UTF8)` and
@@ -149,7 +173,22 @@ convention. Win64 uses `rcx, rdx, r8, r9`, 32 bytes of shadow space, different c
 registers and a 128-byte red zone is absent. Calling these symbols from generated code needs a
 Win64 codegen path; the ABI's six-argument ceiling keeps that path free of stack arguments.
 
-## macOS mapping (for the macOS backend lane)
+## macOS first layer
+
+Implemented in `macos/grail_os_macos.c` with declarations pinned in `grail_macos.h`:
+init/shutdown/capabilities/error detail; `clock_gettime`/`clock_getres`/`nanosleep` for
+realtime, monotonic, process and thread CPU clocks; environment get/set/unset/snapshot
+iteration; `getcwd`/`chdir` and `_NSGetExecutablePath`+`realpath`; file
+open/read/write/seek/truncate/sync/set-non-blocking/close with `O_CLOEXEC`; pipes with
+`FD_CLOEXEC`; mkdir/remove/rename, readlink and realpath. `macos/grail_os_macos_stubs.c`
+returns `GRAIL_E_UNSUPPORTED` for metadata, directory iteration, local-time offsets,
+processes, sockets, threads/sync and dynamic libraries. Capabilities are
+`GRAIL_CAP_FILES | GRAIL_CAP_FILE_NONBLOCKING | GRAIL_CAP_PATHS | GRAIL_CAP_UNICODE |
+GRAIL_CAP_ENVIRONMENT | GRAIL_CAP_ENV_MUTATION | GRAIL_CAP_TIME | GRAIL_CAP_CPU_TIME |
+GRAIL_CAP_SYMLINKS`; `GRAIL_CAP_FILE_METADATA` is clear because no `struct stat` layout is
+pinned yet.
+
+## macOS mapping (remaining first-layer work)
 
 - **Init:** environment snapshot from `environ` (copy and validate UTF-8), thread-local error
   slot; no libc `setenv` dependency required for reads.
@@ -181,6 +220,41 @@ Win64 codegen path; the ABI's six-argument ceiling keeps that path free of stack
 
 Prerequisite outside this directory: Mach-O emission, Apple ARM64 symbol naming and the
 SDK/linker inputs are the macOS lane's work. The ABI only defines the runtime service calls.
+
+## Static cross-target evidence and limits
+
+`bun tools/abi-test.mjs` compiles the portable sources plus each backend (including the stub
+translation unit) with:
+
+```sh
+clang -target x86_64-pc-windows-msvc -ffreestanding -c -std=c11 -Wall -Wextra \
+      -Wshadow -Wconversion -Wsign-conversion -Werror -DGRAIL_ABI_BUILD -Iinclude <sources>
+clang -target aarch64-pc-windows-msvc -ffreestanding -c ... <same sources>
+clang -target arm64-apple-macos11 -ffreestanding -c ... <same sources>
+clang -target x86_64-apple-macos11 -ffreestanding -c ... <same sources>
+```
+
+It then unions `llvm-nm -g --defined-only` over the objects and checks that all 95 public
+functions from `include/grail/*.h` are defined for all four targets.
+
+Limits of this evidence:
+
+- The backends have **not been executed** on Windows or macOS; no runtime behaviour is claimed.
+- The Windows time layer requires `GetSystemTimePreciseAsFileTime` (Windows 8/Server 2012 or
+  later). The macOS time layer requires `clock_gettime` and `os_unfair_lock` (macOS 10.12 or
+  later).
+- `_Thread_local` error detail assumes static/direct TLS; a DLL build needs an explicit TLS
+  strategy before it can claim thread-local detail.
+- Windows `NO_FOLLOW`/symlink metadata is limited by `GetFileAttributesExW`; `GRAIL_CAP_SYMLINKS`
+  is clear. macOS `rename` without `GRAIL_RENAME_REPLACE` checks existence with `access`; the
+  check is best-effort and races with a concurrent creator.
+- The Win32 and Darwin declarations are pinned, not taken from the SDK. They match the 64-bit
+  ABI used here, but a real platform build should compare them with the current SDK headers.
+- macOS metadata is deliberately absent; `struct stat` was not declared without an SDK.
+- Windows long-path (`\\?\`), reserved-name policy, reparse-point metadata and directory
+  enumeration are not implemented in the first layer.
+- The Win64 codegen path in the compiler is still a prerequisite for calling these symbols from
+  generated Grail code; the C backend compiles independently of that.
 
 ## Porting checklist
 

@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- Added statically verified first-layer Windows and macOS backends for the OS ABI, using
+  pinned Win32 and Darwin declarations so both compile for their targets without platform SDK
+  headers. Implemented init/capabilities/error detail, clocks and sleep, environment
+  get/set/unset/snapshot iteration, current directory and executable path, and file basics
+  (open/read/write/seek/truncate/sync/close, pipes, mkdir/remove/rename; Windows also stat,
+  macOS also non-blocking mode, readlink and realpath). Every unimplemented function is still
+  an explicit `GRAIL_E_UNSUPPORTED` stub and the capability word advertises only the first
+  layer. Added a shared environment store with host tests and separate `GRAIL_CAP_FILE_METADATA`,
+  `GRAIL_CAP_FILE_NONBLOCKING` and `GRAIL_CAP_SYMLINKS` signals.
+  `bun tools/abi-test.mjs` compiles each backend for `x86_64`/`aarch64` Windows and
+  `arm64`/`x86_64` macOS and verifies all 95 public symbols with `llvm-nm`. These backends have
+  not been executed on Windows or macOS; metadata, directory iteration, local time offsets,
+  processes, sockets, threads and dynamic libraries remain fail-closed there.
+
 - The Linux reference backend now implements the child-process contract with
   fork/execve/wait4: explicit argv/environment blocks, working directory, stdin/stdout/stderr
   wiring, PATH search, exec-error reporting through an error pipe, blocking and timed waits,

@@ -282,7 +282,8 @@ grail_status grail_os_init(const grail_allocator *allocator, const grail_startup
                                GRAIL_CAP_ENV_MUTATION | GRAIL_CAP_TIME |
                                GRAIL_CAP_LOCAL_TIME_OFFSET | GRAIL_CAP_CPU_TIME | GRAIL_CAP_THREADS |
                                GRAIL_CAP_SYNC_PRIMITIVES | GRAIL_CAP_DYNAMIC_LIBRARIES |
-                               GRAIL_CAP_SYMLINKS | GRAIL_CAP_PROCESSES | GRAIL_CAP_SOCKETS |
+                               GRAIL_CAP_SYMLINKS | GRAIL_CAP_FILE_METADATA | GRAIL_CAP_FILE_NONBLOCKING |
+                               GRAIL_CAP_PROCESSES | GRAIL_CAP_SOCKETS |
                                GRAIL_CAP_SOCKET_UDP | GRAIL_CAP_RESOLVE;
     {
         const int probe = socket(AF_INET6, SOCK_STREAM | SOCK_CLOEXEC, 0);

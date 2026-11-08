@@ -2,10 +2,12 @@
 
 2026-11-08. Status: **proposal plus scaffolded implementation**. The C headers under
 `include/grail/` are the normative contract. Portable pieces (versioning, error mapping,
-Unicode, lexical paths) are implemented and tested; the Linux reference shim implements files, directories,
-environment, time, threads, dynamic libraries, child processes and TCP/UDP sockets; the
-Windows/macOS shims remain skeletons with documented mappings. Nothing here is
-linked into Grail programs yet, and no C source is part of the compiler or runtime build.
+Unicode, lexical paths) are implemented and tested; the Linux reference shim implements files,
+directories, environment, time, threads, dynamic libraries, child processes and TCP/UDP
+sockets. Windows and macOS have statically verified first-layer backends for init/time/
+environment/cwd/executable and file basics, with every unimplemented function explicitly
+fail-closed. Nothing here is linked into Grail programs yet, and no C source is part of the
+compiler or runtime build.
 
 The runtime today is Linux-only: `compiler/runtime.grl` maps portable operation IDs to Linux
 syscalls behind `rt_syscall`, emits freestanding ELF, and exposes a small `host::*` builtin
@@ -134,17 +136,26 @@ pair, structs crossing by reference, opaque `handle`, linear ownership) maps dir
 
 ## Domain status
 
-| Domain | Header | Portable implementation | Linux shim | Windows/macOS |
-| --- | --- | --- | --- | --- |
-| Core, error, Unicode | `grail_abi.h`, `grail_error.h`, `grail_unicode.h` | yes, tested | n/a | n/a |
-| Time | `grail_time.h` | n/a | monotonic/realtime/CPU, sleep, local offset | skeleton |
-| Environment | `grail_env.h` | iterator rules | startup snapshot, get/set/unset/enumerate | skeleton |
-| Files/directories | `grail_fs.h` | handle table | open/read/write/seek/stat/close, dirs, pipes, mkdir/remove/rename/realpath | skeleton |
-| Paths | `grail_path.h` | POSIX + Windows rules, both tested | cwd, executable | skeleton |
-| Processes | `grail_proc.h` | options/status layout | fork/execve/wait4 subset | skeleton |
-| Sockets | `grail_socket.h` | address layout | TCP/UDP IPv4+IPv6, options, DNS | skeleton |
-| Threads/sync | `grail_thread.h` | handle table | pthread thread, mutex, condvar | skeleton |
-| Dynamic libraries | `grail_dl.h` | handle table | dlopen/dlsym/dlclose | skeleton |
+| Domain | Header | Portable implementation | Linux reference | Windows first layer | macOS first layer |
+| --- | --- | --- | --- | --- | --- |
+| Core, error, Unicode | `grail_abi.h`, `grail_error.h`, `grail_unicode.h` | yes, tested | n/a | n/a | n/a |
+| Time | `grail_time.h` | n/a | monotonic/realtime/CPU, sleep, local offset | monotonic/realtime/CPU, sleep | monotonic/realtime/CPU, sleep |
+| Environment | `grail_env.h` | shared store | get/set/unset/enumerate | get/set/unset/enumerate | get/set/unset/enumerate |
+| Files/pipes | `grail_fs.h` | handle table | open/read/write/seek/truncate/sync/stat/close, pipe | open/read/write/seek/truncate/sync/stat/close, pipe | open/read/write/seek/truncate/sync/non-blocking/close, pipe |
+| File metadata | `grail_fs.h` | format | `file_stat`/`fs_stat` | `file_stat`/`fs_stat` | not implemented |
+| Directories | `grail_fs.h` | handle table | open/next/close, mkdir/remove/rename | mkdir/remove/rename only | mkdir/remove/rename only |
+| Paths | `grail_path.h` | POSIX + Windows rules, both tested | cwd, executable | cwd, executable | cwd, executable |
+| Processes | `grail_proc.h` | options/status layout | fork/execve/wait4 subset | not implemented | not implemented |
+| Sockets | `grail_socket.h` | address layout | TCP/UDP IPv4+IPv6, options, DNS | not implemented | not implemented |
+| Threads/sync | `grail_thread.h` | handle table | pthread thread, mutex, condvar | not implemented | not implemented |
+| Dynamic libraries | `grail_dl.h` | handle table | dlopen/dlsym/dlclose | not implemented | not implemented |
+
+The first-layer backends use pinned Win32 and Darwin declarations rather than platform SDK
+headers, so they can be compiled for Win64 and Apple ARM64 on this host. They have not been
+executed on those systems. `GRAIL_CAP_FILE_METADATA` separates byte I/O from metadata;
+Linux and Windows set it, macOS clears it. `GRAIL_CAP_FILE_NONBLOCKING` separately covers
+`file_set_nonblocking`; Linux and macOS set it, Windows clears it. `GRAIL_CAP_SYMLINKS`
+covers `readlink`/`realpath`; Linux and macOS set it, Windows clears it.
 
 "Not implemented" always means the shim returns `GRAIL_E_UNSUPPORTED` and the capability bit
 is clear. It never means a silent success or a sequential fallback under a concurrent name.
@@ -164,11 +175,14 @@ is clear. It never means a silent success or a sequential fallback under a concu
   spawn/join/detach, mutex/condvar behaviour, dlopen/dlsym, child process argv/environment/
   cwd/stdio/PATH/exit-status/timeout/terminate/kill, loopback TCP and UDP, socket options,
   IPv4 name resolution, negative-errno mapping and zero tracked allocation bytes after shutdown.
-- `tests/abi/test_skeleton.c`: links each non-Linux skeleton and verifies that initialization
-  fails closed, capabilities stay zero, raw error detail is clear and every representative
-  entry point returns `GRAIL_E_UNSUPPORTED`.
+- `tests/abi/test_env_store.c`: the shared environment store used by both non-Linux backends
+  (seed validation, get/set/unset, snapshots, growth and zero live allocation).
 - `tests/abi/test_headers.c`: compiled with `clang -ffreestanding` for Linux x86_64, AArch64
   and RISC-V 64, Windows x64 and Apple ARM64, plus explicit structure-size assertions.
+- Cross-target object builds for `x86_64-pc-windows-msvc`, `aarch64-pc-windows-msvc`,
+  `arm64-apple-macos11` and `x86_64-apple-macos11` with strict warnings and
+  `-DGRAIL_ABI_BUILD`; `llvm-nm` confirms all 95 public functions are defined in each backend,
+  including the fail-closed stub translation units.
 
 The test suite needs a C compiler and is deliberately separate from the Grail build; no
 Grail program links these C files. The Linux reference shim is a behavioural oracle for the
@@ -184,16 +198,16 @@ implemented TCP/UDP/`accept4`/`getaddrinfo` subset behind the readiness reactor;
 for birth time; and keep raw descriptors and syscalls out of safe code. The C reference is the
 behavioural oracle, not a replacement runtime.
 
-Windows: UTF-16 conversion and `\\?\` path handling; `CreateFileW`, `ReadFile`/`WriteFile`,
-`GetFileInformationByHandleEx`, directory enumeration; `CreateProcessW` with normative MSVCRT
-command-line quoting and `PATHEXT` search; Winsock with `WSAStartup` and IOCP reserved for
-the runtime; `CreateThread`/`WaitForSingleObject`; `SRWLOCK`/`CONDITION_VARIABLE`;
-`LoadLibraryExW`/`GetProcAddress`; `GetTimeZoneInformationForYear`; console UTF-8 setup.
+Windows first layer is implemented but not runtime-tested. Remaining: run the backend on a real
+Windows host; compare the pinned declarations with the current SDK; add `\\?\` long paths and
+reserved-name policy, directory enumeration, reparse-point metadata, local-time offsets,
+processes, sockets, threads/synchronization and dynamic libraries; add Windows behaviour tests
+and set the corresponding capability bits only after they pass.
 
-macOS: `open`/`read`/`write`/`fstat`/`getdirentries`; `posix_spawn` or `fork`/`execve`;
-`getaddrinfo` and BSD sockets without `accept4`; pthreads and `pthread_cond_timedwait_relative_np`;
-`dlopen`/`dlsym`; `gettimeofday`/`mach_absolute_time` and `tm_gmtoff`; libSystem/Mach error
-mapping; framework and `.tbd` link inputs belong to the macOS backend lane.
+macOS first layer is implemented but not runtime-tested. Remaining: run the backend on macOS;
+verify the pinned libSystem declarations and add a pinned `struct stat` for metadata; directory
+enumeration, local-time offsets, processes, sockets, threads/synchronization and dynamic
+libraries; framework/`.tbd` link inputs belong to the macOS backend lane.
 
 Both non-Linux backends also need ABI bridge work outside this directory: Win64 argument
 registers/shadow space and Apple ARM64 symbol conventions are compiler/codegen responsibilities.
