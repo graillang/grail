@@ -65,6 +65,11 @@ typedef struct gr_device_desc {
     /* Debug callback: called from any thread, must not call back into the device. */
     void (*log)(void *user, int32_t severity, gr_str message);
     void *log_user;
+    /* A pipeline cache file to load at creation and rewrite at gr_pipeline_commit. Empty means no
+     * persistence. A file that exists but cannot be used is GR_ERROR_CACHE_INVALID from device
+     * creation rather than a silent fresh start: a cache silently ignored is indistinguishable from
+     * a cache that is working, so every "why is startup slow again" question becomes guesswork. */
+    gr_str pipeline_cache_path;
 } gr_device_desc;
 
 typedef struct gr_device_caps {

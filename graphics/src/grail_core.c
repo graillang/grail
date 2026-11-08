@@ -47,6 +47,7 @@ const char *gr_result_name(gr_result result)
     case GR_ERROR_SHADER_INVALID: return "shader_invalid";
     case GR_ERROR_LAYOUT_MISMATCH: return "layout_mismatch";
     case GR_ERROR_PERMUTATION_MISSING: return "permutation_missing";
+    case GR_ERROR_CACHE_INVALID: return "cache_invalid";
     default: return "unknown";
     }
 }

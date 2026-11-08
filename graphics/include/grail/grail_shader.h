@@ -479,6 +479,19 @@ gr_result gr_pipeline_create(gr_handle device, const gr_pipeline_desc *desc,
  * cache. After this, gr_pipeline_create returns GR_ERROR_NOT_READY. Returns the build time
  * in *out_seconds so a regression is visible. */
 gr_result gr_pipeline_commit(gr_handle device, double *out_seconds);
+/* What the device's pipeline cache is doing, for a startup log or a test. */
+typedef struct gr_pipeline_cache_report {
+    gr_desc_head head;
+    uint32_t loaded;      /* 1 when an existing file was accepted at creation */
+    uint32_t saved;       /* 1 when the file was written by the last commit, or by save */
+    uint32_t size_bytes;  /* the cache's current size */
+    uint32_t path_set;    /* 1 when a path was configured */
+} gr_pipeline_cache_report;
+
+gr_result gr_pipeline_cache_report_query(gr_handle device, gr_pipeline_cache_report *out);
+/* Writes the cache now rather than waiting for a commit. GR_ERROR_NOT_READY when no path is set. */
+gr_result gr_pipeline_cache_save(gr_handle device);
+
 /* Number of pipelines declared and committed, for a startup log. */
 gr_result gr_pipeline_stats(gr_handle device, uint32_t *out_declared, uint32_t *out_committed);
 

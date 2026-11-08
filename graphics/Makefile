@@ -33,7 +33,7 @@ GPU_TESTS := vk_probe vk_backend
 TEST_BINS := $(patsubst %,$(BUILD)/test_%,$(TESTS))
 BLOBS := $(shell find ../.work/shaders -name '*.refl.bin' 2>/dev/null)
 
-.PHONY: all test shaders shader-check perm-test vk-probe vk-smoke vk-surface tool clean
+.PHONY: all test shaders shader-check perm-test vk-probe vk-smoke vk-surface vk-cache tool clean
 
 all: test
 
@@ -94,6 +94,9 @@ GPU_LOCK = /run/user/$(shell id -u)/ab-engine-gpu.lock
 $(BUILD)/grail-vk-probe: src/grail_vk_probe_main.c $(OBJ) $(HEADERS) | $(BUILD)
 	$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(OBJ) -ldl
 
+$(BUILD)/test_vk_cache: tests/test_vk_cache.c $(OBJ) $(HEADERS) | $(BUILD)
+	$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(OBJ) $(LDLIBS)
+
 $(BUILD)/test_vk_surface: tests/test_vk_surface.c $(OBJ) $(HEADERS) | $(BUILD)
 	$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(OBJ) $(LDLIBS)
 
@@ -126,6 +129,16 @@ vk-smoke: shaders $(BUILD)/test_vk_backend
 		echo "pinned Vulkan SDK not found; running without the validation layer"; \
 		flock -w 600 $(GPU_LOCK) $(BUILD)/test_vk_backend ../.work/shaders; \
 	fi
+
+# Pipeline-cache persistence, across three separate processes so "the next run accepts the blob"
+# means what it says: build and save, load and use, then refuse a corrupt file.
+vk-cache: shaders $(BUILD)/test_vk_cache
+	@if pgrep -x Abundance >/dev/null; then echo "refusing: the game is running"; exit 1; fi
+	@rm -f /tmp/grail-pso-cache.bin
+	@$(VK_LAYER_ENV) flock -w 600 $(GPU_LOCK) $(BUILD)/test_vk_cache run /tmp/grail-pso-cache.bin || exit $$?
+	@test -s /tmp/grail-pso-cache.bin || { echo "no cache file written"; exit 1; }
+	@$(VK_LAYER_ENV) flock -w 600 $(GPU_LOCK) $(BUILD)/test_vk_cache verify /tmp/grail-pso-cache.bin || exit $$?
+	@$(VK_LAYER_ENV) flock -w 600 $(GPU_LOCK) $(BUILD)/test_vk_cache corrupt /tmp/grail-pso-cache.bin || exit $$?
 
 vk-probe: $(BUILD)/grail-vk-probe $(BUILD)/test_vk_probe
 	@if pgrep -x Abundance >/dev/null; then \

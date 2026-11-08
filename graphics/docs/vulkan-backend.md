@@ -174,6 +174,32 @@ would not tell you whether the argument block was read as the command it holds.
 against the buffer's size and require `GR_BUFFER_USAGE_INDIRECT`: 20 bytes per indexed draw command
 with a stride that is a multiple of 4, and 12 bytes for a dispatch (`groupCountX/Y/Z`).
 
+## Pipeline-cache persistence
+
+`gr_device_desc.pipeline_cache_path` names a file the device loads at creation and rewrites at
+`gr_pipeline_commit`. Loading happens before any pipeline exists, so the first one already hits the
+cache.
+
+The header is validated against the device — `VkPipelineCacheHeaderVersionOne`'s size, version and
+`pipelineCacheUUID` — and a file that fails is **refused with `GR_ERROR_CACHE_INVALID`** rather than
+ignored. A cache silently discarded is indistinguishable from a cache that works, so every "why is
+startup slow again" question becomes guesswork; refusing makes the failure state visible at the
+point it happens.
+
+`make -C graphics vk-cache` runs three **separate processes**, because "the next run accepts the
+blob" has to mean that:
+
+```
+vk-cache: wrote 2176 bytes                     (run 1: build and save)
+vk-cache: loaded an existing cache (2176 bytes) (run 2: separate process)
+vk-cache: drew with the loaded pipeline, digest 0xc5188e3b829270b3
+vk-cache: corrupt header refused (cache_invalid) (run 3: 64 bytes of text)
+```
+
+The second run does not merely parse the blob: it creates the same indexed pipeline and draws with
+it, checking that the corner is the clear colour and the centre is not. A cache that loaded but
+produced a broken pipeline would pass a parse check and fail that one.
+
 ## Depth and MSAA
 
 `gr_cmd_begin_render` now takes an optional depth attachment and an optional resolve target. Both go
