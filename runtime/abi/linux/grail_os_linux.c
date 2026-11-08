@@ -700,11 +700,16 @@ grail_result grail_os_path_executable(uint8_t *out, uint64_t capacity) {
         }
         const ssize_t length = readlink("/proc/self/exe", buffer, (size_t)size - 1);
         if (length >= 0) {
-            buffer[length] = '\0';
-            const grail_result result =
-                grail_abi_copy_out((const uint8_t *)buffer, (uint64_t)length, out, capacity);
+            if ((uint64_t)length < size - 1) {
+                buffer[length] = '\0';
+                const grail_result result =
+                    grail_abi_copy_out((const uint8_t *)buffer, (uint64_t)length, out, capacity);
+                grail_linux_release(buffer, size);
+                return result;
+            }
             grail_linux_release(buffer, size);
-            return result;
+            size *= 2;
+            continue;
         }
         const int error_number = errno;
         grail_linux_release(buffer, size);
