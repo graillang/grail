@@ -1,6 +1,6 @@
 # Cross-platform status
 
-Last verified: 2026-11-08 on `main` at `1a5ddef`.
+Last verified: 2026-11-08 on `main` at `32fb2d5`.
 
 This page distinguishes what has actually been built and executed from scaffolding and
 static inspection. A cross-built object is not platform support. A header parsing is not a
@@ -15,7 +15,7 @@ backend. A project that has a port plan is not a port.
 | Linux RISC-V64 | ELF cross-image, refreshed bootstrap | Cross-build and ELF architecture checks only; no qemu runner here | Cross-build only |
 | Windows x86-64 | PE32+ console images, COFF objects, kernel32 imports, Win32 OS layer, C runtime shims | `bun tools/windows.mjs check` 10/10; **8 programs executed under Wine**, including files/argv/stdio/float | **Wine runtime verified** |
 | Windows AArch64 | ARM64 PE/COFF, Win64 ARM64 imports, import libs | `bun tools/windows.mjs check` 16/16; 4 ARM64 images statically verified; no ARM64 runner | Cross-build only |
-| macOS AArch64 / x86-64 | Mach-O objects/exes verified on `feature/macos` | 4 objects + 4 executables statically checked; not executable here; branch blocked on stale bootstrap refresh | In review |
+| macOS x86-64 / AArch64 | Mach-O objects/exes, libSystem layer, platform-module runtime | `bun tools/test-macos.mjs` 4 objects + 4 images; **not executable here** | Cross-build only |
 
 Windows x86-64 now has `.pdata`/`.xdata`, a Win32 console/files/argv/time layer, and 8 executed
 programs under Wine; ARM64 has PE/COFF objects and images but no packed-unwind metadata yet.
@@ -70,10 +70,10 @@ Not implemented: debugger, profiler, and hosted macOS release artifacts.
 
 ## Applications
 
-Abundance and Borg Agent have landed port inventories and staged boundaries. Abundance CPU math, FNV-1a, world envelope, landscape digest, ABWCACH8/9 containers and full
-cache-body decode are ported with bit-exact C++ parity (150 exact values). Borg Agent has JSON,
-wire, TOML/config and local-session ownership parity (603 reference lines). Containers,
-RHI/renderer/editor and remaining Borg OS services are still open.
+Abundance and Borg Agent have landed port inventories and staged boundaries. Abundance CPU math, FNV-1a, world envelope, landscape digest, ABWCACH8/9 containers, full
+cache-body decode and the ABCP2 checkpoint container are ported with bit-exact C++ parity
+(189 exact values). Borg Agent has JSON, wire, TOML/config and local-session ownership parity
+(603 reference lines). RHI/renderer/editor and remaining Borg OS services are still open.
 
 ## Verification commands
 
