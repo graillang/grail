@@ -154,6 +154,11 @@ typedef struct gr_vk_dev {
      * instance, and a surface outliving its instance is a validation error (00629). */
     gr_handle swapchains[8];
     uint32_t swapchain_count;
+    /* The acquire -> submit -> present handoff. Acquire records which swapchain it took an image
+     * from; the next submit waits that swapchain's image_available and signals render_finished;
+     * present waits render_finished. Nothing waits the queue idle. */
+    gr_handle acquired_swap;
+    gr_handle submit_swap;
     PFN_vkGetBufferDeviceAddress get_buffer_address;
     PFN_vkCreateComputePipelines create_compute_pipelines;
     PFN_vkCmdDispatch cmd_dispatch;
@@ -207,7 +212,13 @@ typedef struct gr_vk_swap {
     VkFormat format;
     VkColorSpaceKHR colorspace;
     uint32_t width, height, image_count;
-    VkFence acquire_fence;
+    VkFence acquire_fence;              /* unused now that acquire signals a semaphore */
+    VkSemaphore image_available;        /* acquire signals, the next submit waits */
+    /* One render-finished semaphore per swapchain image, not one per swapchain: present waits it
+     * asynchronously, so re-signalling the same semaphore on the next frame is illegal until the
+     * presentation engine has consumed it. Indexing by image gives each frame a semaphore whose
+     * previous use is a full cycle behind. */
+    VkSemaphore render_finished[8];
     VkImage images[8];
     VkImageView views[8];
     gr_handle view_handles[8];   /* ABI view objects, so a pass can name an acquired image */
@@ -1199,6 +1210,11 @@ void gr_vk_abi_device_destroy_impl(gr_vk_dev *dev)
                     dev->destroy_image_view(dev->device, swap->views[i], NULL);
                 swap->views[i] = VK_NULL_HANDLE;
             }
+            if (swap->image_available && dev->destroy_semaphore)
+                dev->destroy_semaphore(dev->device, swap->image_available, NULL);
+            for (i = 0; i < 8u; ++i)
+                if (swap->render_finished[i] && dev->destroy_semaphore)
+                    dev->destroy_semaphore(dev->device, swap->render_finished[i], NULL);
             if (swap->acquire_fence) {
                 PFN_vkDestroyFence destroy_fence = GR_VK_DEVICE_LOAD(dev, vkDestroyFence);
                 if (destroy_fence)
@@ -2815,13 +2831,19 @@ static gr_result vk_swapchain_build(gr_vk_swap *swap, uint32_t want_width, uint3
     info.oldSwapchain = swap->swapchain;
     if (dev->create_swapchain(dev->device, &info, NULL, &swap->swapchain) != VK_SUCCESS)
         return GR_ERROR_BACKEND;
-    if (!swap->acquire_fence) {
-        VkFenceCreateInfo fence_info;
-        PFN_vkCreateFence create_fence = GR_VK_DEVICE_LOAD(dev, vkCreateFence);
-        memset(&fence_info, 0, sizeof(fence_info));
-        fence_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-        if (create_fence)
-            create_fence(dev->device, &fence_info, NULL, &swap->acquire_fence);
+    {
+        VkSemaphoreCreateInfo semaphore_info;
+        memset(&semaphore_info, 0, sizeof(semaphore_info));
+        semaphore_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+        if (!swap->image_available &&
+            dev->create_semaphore(dev->device, &semaphore_info, NULL, &swap->image_available) != VK_SUCCESS)
+            return GR_ERROR_BACKEND;
+        for (i = 0; i < swap->image_count; ++i) {
+            if (!swap->render_finished[i] &&
+                dev->create_semaphore(dev->device, &semaphore_info, NULL,
+                                      &swap->render_finished[i]) != VK_SUCCESS)
+                return GR_ERROR_BACKEND;
+        }
     }
 
     swap->format = info.imageFormat;
@@ -2833,6 +2855,9 @@ static gr_result vk_swapchain_build(gr_vk_swap *swap, uint32_t want_width, uint3
         return GR_ERROR_BACKEND;
     if (image_total > 8u) image_total = 8u;
     swap->image_count = image_total;
+    if (swap->render_finished[0] == VK_NULL_HANDLE) {
+        /* image_count is known by now; the semaphores are created below, after the views. */
+    }
     for (i = 0; i < image_total; ++i) {
         VkImageViewCreateInfo view_info;
         swap->images[i] = image_handles[i];
@@ -2957,10 +2982,10 @@ gr_result gr_vk_abi_swapchain_acquire(gr_handle swapchain, uint64_t timeout_ns,
     /* No semaphore: the caller waits on the submission that renders into this image, and the
      * acquire completes before that submission is recorded. A production path would use a binary
      * acquire semaphore; this increment's contract has the caller wait on the queue timeline. */
-    /* Vulkan requires a semaphore or a fence; a fence that is waited immediately is the simplest
-     * correct choice when the caller waits on the queue timeline anyway. */
+    /* Acquire signals image_available; the next submit waits it. Nothing is waited here, which is
+     * what makes the frame pipeline possible at all. */
     result = swap->device->acquire_next_image(swap->device->device, swap->swapchain, timeout_ns,
-                                              VK_NULL_HANDLE, swap->acquire_fence, &index);
+                                              swap->image_available, VK_NULL_HANDLE, &index);
     if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR) {
         if (result == VK_ERROR_OUT_OF_DATE_KHR) {
             if (out_needs_recreate) *out_needs_recreate = 1;
@@ -2973,15 +2998,7 @@ gr_result gr_vk_abi_swapchain_acquire(gr_handle swapchain, uint64_t timeout_ns,
     }
     if (index >= swap->image_count)
         return GR_ERROR_BACKEND;
-    {
-        PFN_vkWaitForFences wait_fences = GR_VK_DEVICE_LOAD(swap->device, vkWaitForFences);
-        PFN_vkResetFences reset_fences = GR_VK_DEVICE_LOAD(swap->device, vkResetFences);
-        if (wait_fences && swap->acquire_fence)
-            wait_fences(swap->device->device, 1, &swap->acquire_fence, VK_TRUE,
-                        5ull * 1000ull * 1000ull * 1000ull);
-        if (reset_fences && swap->acquire_fence)
-            reset_fences(swap->device->device, 1, &swap->acquire_fence);
-    }
+    swap->device->acquired_swap = swapchain;
     swap->last_index = index;
     if (out_image_index) *out_image_index = index;
     if (out_view) *out_view = swap->view_handles[index];
@@ -3041,18 +3058,18 @@ gr_result gr_vk_abi_present(gr_handle queue_handle, gr_handle swapchain, uint32_
         return GR_ERROR_INVALID_HANDLE;
     if (image_index >= swap->image_count)
         return GR_ERROR_INVALID_ARGUMENT;
-    /* The submission that rendered into this image must complete first. A production path would
-     * wait on a binary render-finished semaphore; this one waits the queue idle, which is correct
-     * and visible rather than subtly wrong. */
-    if (queue->device->queue_wait_idle)
-        queue->device->queue_wait_idle(queue->queue);
-    (void)wait_value;
-
     memset(&info, 0, sizeof(info));
     info.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+    /* Wait for the submission that rendered into this image, not for the queue to drain: the whole
+     * point is that other work may still be in flight. */
+    if (image_index < swap->image_count && swap->render_finished[image_index]) {
+        info.waitSemaphoreCount = 1;
+        info.pWaitSemaphores = &swap->render_finished[image_index];
+    }
     info.swapchainCount = 1;
     info.pSwapchains = &swap->swapchain;
     info.pImageIndices = &image_index;
+    (void)wait_value;
     result = queue->device->queue_present(queue->queue, &info);
     if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR)
         return GR_ERROR_NOT_READY;
@@ -3072,8 +3089,13 @@ gr_result gr_vk_abi_submit(const gr_submit *submit, uint64_t *out_value)
     VkSubmitInfo info;
     VkTimelineSemaphoreSubmitInfo timeline;
     VkSemaphore wait_semaphores[4];
+    VkSemaphore signal_semaphores[2];
     uint64_t wait_values[4];
+    uint64_t signal_values[1];
     VkPipelineStageFlags wait_stages[4];
+    gr_vk_swap *acquired = NULL;
+    uint32_t wait_total;
+    uint32_t signal_total = 1;
     VkCommandBuffer buffers[8];
     uint32_t i;
     uint64_t value;
@@ -3103,29 +3125,58 @@ gr_result gr_vk_abi_submit(const gr_submit *submit, uint64_t *out_value)
         wait_stages[i] = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
     }
 
+    /* If an image was acquired since the last submission, this submit waits for it and signals that
+     * rendering finished, which is what present then waits on. The ABI's own timeline waits come
+     * first so a caller's ordering is preserved. */
+    if (!gr_handle_is_null(dev->acquired_swap))
+        acquired = (gr_vk_swap *)gr_object_lookup(gr_objects(), dev->acquired_swap,
+                                                  GR_HANDLE_SWAPCHAIN, NULL);
+    wait_total = submit->wait_count;
+    if (acquired && acquired->image_available) {
+        wait_semaphores[wait_total] = acquired->image_available;
+        wait_values[wait_total] = 0;
+        wait_stages[wait_total] = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        wait_total++;
+    }
+
     value = dev->submitted + 1u;
     memset(&timeline, 0, sizeof(timeline));
     timeline.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
-    timeline.waitSemaphoreValueCount = submit->wait_count;
-    timeline.pWaitSemaphoreValues = submit->wait_count ? wait_values : NULL;
-    timeline.signalSemaphoreValueCount = 1;
-    timeline.pSignalSemaphoreValues = &value;
+    timeline.waitSemaphoreValueCount = wait_total;
+    timeline.pWaitSemaphoreValues = wait_total ? wait_values : NULL;
+    /* The timeline carries a value; a binary semaphore's entry in this array is ignored, so the
+     * count covers both. */
+    signal_values[0] = value;
+    timeline.signalSemaphoreValueCount = acquired && acquired->render_finished[acquired->last_index]
+                                             ? (uint32_t)signal_total : 1u;
+    timeline.pSignalSemaphoreValues = signal_values;
 
     memset(&info, 0, sizeof(info));
     info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     info.pNext = &timeline;
-    info.waitSemaphoreCount = submit->wait_count;
-    info.pWaitSemaphores = submit->wait_count ? wait_semaphores : NULL;
-    info.pWaitDstStageMask = submit->wait_count ? wait_stages : NULL;
+    info.waitSemaphoreCount = wait_total;
+    info.pWaitSemaphores = wait_total ? wait_semaphores : NULL;
+    info.pWaitDstStageMask = wait_total ? wait_stages : NULL;
     info.commandBufferCount = submit->cmd_count;
     info.pCommandBuffers = submit->cmd_count ? buffers : NULL;
-    info.signalSemaphoreCount = 1;
-    info.pSignalSemaphores = &dev->graphics_timeline;
+    signal_semaphores[0] = dev->graphics_timeline;
+    info.pSignalSemaphores = signal_semaphores;
+    if (acquired && acquired->render_finished[acquired->last_index]) {
+        signal_semaphores[1] = acquired->render_finished[acquired->last_index];
+        info.signalSemaphoreCount = 2;
+        signal_total = 2;
+    } else {
+        info.signalSemaphoreCount = 1;
+        signal_total = 1;
+    }
+    timeline.signalSemaphoreValueCount = signal_total;
 
     if (dev->queue_submit(queue->queue, 1, &info, VK_NULL_HANDLE) != VK_SUCCESS)
         return GR_ERROR_BACKEND;
     dev->submitted = value;
     queue->submitted = value;
+    dev->submit_swap = dev->acquired_swap;
+    dev->acquired_swap = GR_NULL_HANDLE;
     if (out_value)
         *out_value = value;
     return GR_OK;
