@@ -256,9 +256,10 @@ fn compile<a, b, d, e, g>(
     entry: &b [u8],
     modules: (&d u8[][]),
     output: &e [u8],
-    target: &g [u8]
+    target: &g [u8],
+    debug: u64
 ) -> u64 {
-    return compile_mode(h, entry, modules, output, target, 0);
+    return compile_mode(h, entry, modules, output, target, debug * 2);
 }
 // check_only: type-check and generate code, but do not assemble or link.
 fn compile_mode<a, b, d, e, g>(
@@ -267,17 +268,22 @@ fn compile_mode<a, b, d, e, g>(
     modules: (&d u8[][]),
     output: &e [u8],
     target: &g [u8],
-    check_only: u64
+    flags: u64
 ) -> u64 {
+    check_only := flags % 2;
+    debug := (flags / 2) % 2;
     asm := cat(view(output), view(".s"));
     object := cat(view(output), view(".o"));
     mut command = u8[][
         host::exe_path(),
         copy(view("--target")),
-        copy(view(target)),
-        copy(view(asm)),
-        copy(view(entry))
+        copy(view(target))
     ];
+    if debug != 0 {
+        command.push(copy(view("--debug")));
+    }
+    command.push(copy(view(asm)));
+    command.push(copy(view(entry)));
     for i in modules.len() {
         command.push(item(&modules, i));
     }
@@ -452,6 +458,7 @@ struct Options {
     target: u8[],
     rest: u8[][],
     check: u64,
+    debug: u64,
     paths: u8[][]
 }
 fn options<a>(args: (&a u8[][])) -> Options {
@@ -461,6 +468,7 @@ fn options<a>(args: (&a u8[][])) -> Options {
         target: target_name(host::target()),
         rest: u8[][],
         check: 0,
+        debug: 0,
         paths: u8[][],
     };
     mut i = 0;
@@ -484,11 +492,15 @@ fn options<a>(args: (&a u8[][])) -> Options {
                         if eq(view(a), view("--check")) {
                             o.check = 1;
                         } else {
+                            if eq(view(a), view("--debug")) {
+                                o.debug = 1;
+                            } else {
                             if ends(view(a), view(".grl")) & (o.file.len() == 0) {
                                 o.file = copy(view(a));
                                 o.paths.push(a);
                             } else {
                                 o.paths.push(a);
+                            }
                             }
                         }
                     }
@@ -511,7 +523,7 @@ fn build<a, b>(args: (&a u8[][]), o: (&b mut Options)) -> u64 {
             o.output = path_join(view("target"), view(stem));
         }
         mut none = u8[][];
-        return compile(&h, view(o.file), &none, view(o.output), view(o.target));
+        return compile(&h, view(o.file), &none, view(o.output), view(o.target), o.debug);
     }
     p := load_project();
     if p.name.len() == 0 {
@@ -522,7 +534,7 @@ fn build<a, b>(args: (&a u8[][]), o: (&b mut Options)) -> u64 {
         o.output = path_join(view("target"), view(p.name));
     }
     modules := project_modules(&p, 1);
-    return compile(&h, view(p.entry), &modules, view(o.output), view(o.target));
+    return compile(&h, view(p.entry), &modules, view(o.output), view(o.target), o.debug);
 }
 fn check_command<a>(args: (&a u8[][])) -> u64 {
     o := options(&args);
@@ -536,7 +548,7 @@ fn check_command<a>(args: (&a u8[][])) -> u64 {
         stem := basename(view(o.file));
         out := path_join(view("target"), view(stem));
         mut none = u8[][];
-        status = compile_mode(&h, view(o.file), &none, view(out), view(o.target), 1);
+        status = compile_mode(&h, view(o.file), &none, view(out), view(o.target), 1 + o.debug * 2);
     } else {
         p := load_project();
         if p.name.len() == 0 {
@@ -545,7 +557,7 @@ fn check_command<a>(args: (&a u8[][])) -> u64 {
         }
         out := path_join(view("target"), view(p.name));
         modules := project_modules(&p, 1);
-        status = compile_mode(&h, view(p.entry), &modules, view(out), view(o.target), 1);
+        status = compile_mode(&h, view(p.entry), &modules, view(out), view(o.target), 1 + o.debug * 2);
     }
     if status == 0 {
         say(view("ok"));
@@ -607,7 +619,7 @@ fn test_command<a>(args: (&a u8[][])) -> u64 {
         host::print(view("test "));
         host::print(view(f));
         host::print(view(" ... "));
-        mut status = compile(&h, view(f), &modules, view(out), view(o.target));
+        mut status = compile(&h, view(f), &modules, view(out), view(o.target), o.debug);
         if status == 0 {
             exe := path_join(view("."), view(out));
             status = host::command(u8[][exe]);
@@ -827,11 +839,44 @@ fn add_command<a>(args: (&a u8[][])) -> u64 {
     host::write_file(view("grail.pkg"), view(text));
     return fetch_command();
 }
+fn debug_command<a>(args: (&a u8[][])) -> u64 {
+    if args.len() < 2 {
+        say(view("usage: grail debug lines BINARY"));
+        return 1;
+    }
+    sub := item(&args, 0);
+    if eq(view(sub), view("lines")) == 0 {
+        say(view("usage: grail debug lines BINARY"));
+        return 1;
+    }
+    binary := item(&args, 1);
+    if host::exists(view(binary)) == 0 {
+        say(view("grail: no such file: "));
+        say(view(binary));
+        return 1;
+    }
+    mut dump = u8[][
+        tool(view("GRAIL_DWARFDUMP"), view("llvm-dwarfdump")),
+        copy(view("--debug-line")),
+        copy(view(binary))
+    ];
+    if host::command(dump) == 0 {
+        return 0;
+    }
+    say(view("grail: llvm-dwarfdump unavailable; trying readelf"));
+    mut decoded = u8[][
+        tool(view("GRAIL_READELF"), view("readelf")),
+        copy(view("--debug-dump=decodedline")),
+        copy(view(binary))
+    ];
+    return host::command(decoded);
+}
 fn help() {
     say(view("grail - the Grail compiler and project tool\n"));
     say(view("usage:"));
     say(view("  grail build [FILE.grl] [-o OUT] [--target x86_64|aarch64|riscv64|macos-x86_64|macos-aarch64]"));
     say(view("  grail check [FILE.grl]            type-check without building"));
+    say(view("  grail debug lines BINARY          print DWARF .debug_line source rows"));
     say(view("  grail run [FILE.grl] [-- ARGS...]"));
     say(view("  grail test [FILES or DIRS]        compile and run tests/ (exit status 0 = pass)"));
     say(view("  grail fmt [--check] [FILES or DIRS]"));
@@ -851,6 +896,7 @@ pub fn is_command<a>(name: &a [u8]) -> u64 {
         + eq(view(name), view("new"))
         + eq(view(name), view("add"))
         + eq(view(name), view("fetch"))
+        + eq(view(name), view("debug"))
         + eq(view(name), view("install"))
         + eq(view(name), view("help"))
         + eq(view(name), view("--help"))
@@ -889,6 +935,9 @@ pub fn run() -> u64 {
     }
     if eq(view(name), view("fetch")) + eq(view(name), view("install")) {
         return fetch_command();
+    }
+    if eq(view(name), view("debug")) {
+        return debug_command(&args);
     }
     if eq(view(name), view("version")) + eq(view(name), view("--version")) {
         say(view("grail 0.1.0"));

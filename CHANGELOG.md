@@ -9,6 +9,125 @@
   input order. The reference gates ids and hashes against the engine and the DAG rules against a
   model, because Abundance has no C++ asset DAG (its dependency work is Python staging). 29 exact
   values; suite total 283 across eight programs. No payload bodies, GPU upload or renderer work.
+- Added Linux x86-64 DWARF line tables. `grail build --debug` and the raw
+  `grail --debug ...` compiler form emit `.file`/`.loc` directives that clang
+  assembles into `.debug_line`; statement rows are line/column accurate, with a
+  post-pass that re-asserts the location after literal `.popsection` switches.
+  `grail debug lines BINARY` prints the table through `llvm-dwarfdump` (with a
+  `readelf` fallback). `--debug` is rejected for non-Linux-x86-64 targets, and
+  `.debug_info` variable DIEs / debugger attach remain follow-ups.
+  `tools/test-debug-lines.mjs` verifies rows against source lines and the plain
+  build's lack of a line table; CI adds a preflight-gated `debug-lines` job.
+- Added non-executable target object release bundles for the implemented cross
+  backends: `windows-x86_64` (COFF), `macos-aarch64` and `macos-x86_64`
+  (Mach-O). `bun tools/ci.mjs objects --platform ...` compiles the compiler and
+  a conformance program to relocatable objects, verifies COFF/Mach-O headers
+  and symbols, and packages `objects/`, gzipped assembly,
+  `share/grail/objects.json` provenance and `OBJECTS-BUILD-ONLY.txt` with a
+  top-level `SHA256SUMS`. Manifests record `executable: false` and
+  `runnable: false`, and verification rejects any bundle containing an
+  executable. macOS gained required `cross-macos-aarch64`/`cross-macos-x86_64`
+  static lanes; CI adds an object-bundle matrix and a macOS static-check job.
+  Nothing is executed on macOS, and Windows release artifacts remain
+  non-executable objects even though Windows test programs run under Wine.
+- Reserve `VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC` in the Vulkan descriptor pool, matching
+  set 1; the new SDL3 surface test’s validation layer had exposed the missing pool size.
+
+- Windows x86-64 threads and waits: `raw_thread_clone` now calls a new
+  `rt_win_thread_clone`/`rt_win_thread_main` pair in `compiler/os-windows.grl` that creates the
+  thread with `CreateThread` through a compiler-emitted Win64 bridge (`rt_win_thread_start` keeps
+  the private Grail convention by saving `%rdi/%rsi`, moving the thread parameter from `%rcx` and
+  restoring them). A 15-slot registry maps the portable running word to the Win32 thread handle,
+  so joins wait with `WaitForSingleObject` and only then release the stack; the unmap path reaps
+  still-registered threads. Futex operations map to `WaitOnAddress` and
+  `WakeByAddressSingle`/`WakeByAddressAll`, imported from `kernelbase.dll` (Wine exports them
+  there, not from `kernel32.dll`). Two new cases run under Wine and as Linux ELF: a thread join
+  and a producer/consumer wake. ARM64 thread creation remains unimplemented.
+
+- Windows ARM64 frames now carry unwind data: the compiler describes each canonical prologue
+  with armasm-style `.seh_proc`/`.seh_save_regp x29, 0`/`.seh_nop`/`.seh_set_fp`/`.seh_stackalloc`/
+  `.seh_endprologue`/`.seh_endproc` directives, so the object has `.pdata` and `.xdata` and the
+  image has an exception directory (240 records, 0x780 bytes for the hello image). Frame
+  allocation uses a `framesub` pseudo-op (plain `sub sp,sp,x10` instead of checked arithmetic) so
+  the recorded frame size is exactly the `.set` value. The records are the unpacked `.xdata` form
+  on purpose: the packed encoding counts consecutive `x19..`/`d8..` saves and cannot express the
+  lone `x29/x30` frame-pointer save Grail emits. Leaf functions need no record; drop thunks keep
+  their conditional prologue and stay undescribed. The suite now checks records per function,
+  frame sizes against the compiler's frame values, function lengths and the unpacked flag.
+
+- macOS platform linkage beyond libSystem: `compileProgram` accepts `frameworks` and, with
+  `$GRAIL_SDK`, links the SDK's real `-framework` stubs, otherwise writes `<Name>.framework` `.tbd`
+  stubs from a caller-supplied export list (a framework name without either is rejected instead of
+  being invented). `tools/macos.mjs` parses the linked image and verifies its `LC_LOAD_DYLIB`
+  entries. `sign: true` requests an ad-hoc signature — `codesign --force --sign -` on macOS,
+  `ld64.lld -adhoc_codesign` elsewhere — and `bun tools/macos.mjs inspect|verify BINARY` validates
+  the SuperBlob, CodeDirectory, page hashes and cdhash statically; a tampered page fails
+  verification. Tests add Foundation framework loading, unknown-framework rejection (driver and
+  linker), and signature validation/tamper detection. Shared Mach-O libraries are also emitted:
+  `assembleDylib` links `-dylib -install_name <name>` with an explicit `-exported_symbols_list`
+  (a dylib without an install name or without exports is refused), and `tools/macos.mjs` reports
+  `LC_ID_DYLIB` plus the export/import sets by parsing `LC_SYMTAB` directly. Tests link an
+  executable against the dylib and require its install name in `LC_LOAD_DYLIB`, and reject a
+  symbol outside the export list. `--export NAME` is a compiler flag: it marks exactly the
+  definition with that declared name `.globl` at its own label and refuses a name that no function
+  defines, so the driver no longer rewrites `.globl` into the assembly. Dylibs can advertise
+  `@rpath/...` install names and consumers carry `LC_RPATH` (`rpaths` in `tools/macos.mjs`), with
+  tests for both. Nothing here is execution evidence on Apple hardware.
+
+- v3 C FFI increment 1: `extern "C"` foreign declarations and calls.
+  `extern "C" [lib "INPUT"] [as "SYMBOL"] fn name(i64, u64) -> i64|u64|unit;` declares a
+  linker-resolved C symbol; calls emit the C argument/result registers of the selected
+  target (x86-64 SysV, AArch64 AAPCS64, RISC-V 64 LP64) and call the unmangled symbol.
+  Foreign calls are rejected outside an explicit `unsafe { ... }` block, which remains a
+  fully checked lexical region. Declarations carry their link inputs, deduplicated and
+  emitted as `// grail-link: INPUT` lines that `tools/native.mjs` obeys. Narrower
+  integers, floats, views, handles, records and callbacks are rejected with diagnostics
+  rather than truncated or approximated. New `bun tools/test-ffi.mjs` (or `just
+  test-ffi`) links a freestanding C shim and checks calls, the rename and `u64` results;
+  rejection fixtures joined `tests/native-cases.json`. See `docs/ffi.md`.
+
+- v3 C FFI increment 2: C byte/string views and opaque handles at `extern "C"` boundaries.
+  A `&[u8]`/`&mut [u8]` parameter crosses as the C pair `(pointer, length)` with no copy and
+  no allocation; `CStr` is a one-word NUL-terminated `const char *` produced by the checked,
+  zero-copy `unsafe cstr(value)` cast; `handle Name;` declares a one-word opaque C token that
+  safe code cannot construct, inspect, size or drop. Results may be `i64`/`u64`/`unit`/`CStr`/
+  handle; a view is never a result. Arities are counted in C argument words (a view counts
+  twice), and everything outside this slice is still rejected with a diagnostic. `tests/ffi/`
+  gained a views/handles fixture and the shim gained string, byte, mutable-fill and handle
+  functions; three more rejection fixtures joined `tests/native-cases.json`. See `docs/ffi.md`.
+
+- v3 C FFI increment 3: `extern "C" record` with C layout and alignment. Fields use C's
+  natural alignment, inter-field padding and tail padding, so `offsetof`/`sizeof` agree
+  with the C compiler; field reads and writes use the exact field width (`i8`/`i16`/`i32`
+  truncate on store and sign- or zero-extend on load, via portable byte-wise runtime
+  helpers shared by all targets). A record parameter crosses as the address of its fields
+  (`R *`); Grail keeps ownership of the allocation and frees it at scope end, while C must
+  not free or retain it. Nested records, record results, pointer/float fields and by-value
+  struct passing are rejected with diagnostics rather than approximated. Adds
+  `tests/ffi/extern_records.grl` (C reads and writes Grail fields; `offsetof`/`sizeof`
+  verified from C) and three rejection fixtures. See `docs/ffi.md`.
+
+- v3 C FFI increment 4: C callbacks and function pointers. `extern "C" fn name(...) { ... }`
+  defines a Grail function that C can call: it is emitted with the stated (unmangled) C
+  symbol, `as "name"` renames it, and its signature must sit inside the C ABI slice.
+  `cfn(P...) -> R` is the type of a C function pointer (one word, no environment, C
+  calling convention); only `extern "C"` definitions produce such a value, so a closure or
+  an ordinary Grail function is a type mismatch where C expects a callback, and a foreign
+  declaration still cannot be used as a value. The generated code preserves the
+  callee-saved registers it allocates, verified by a shim that clobbers `rbx`/`r12`-`r15`
+  around the callback. `tests/ffi/callbacks.grl` covers a direct callback, a renamed one
+  and the register-preservation case; two rejection fixtures cover a mismatched callback
+  and `cfn` arity. Variadic callbacks and callback results are still rejected. See
+  `docs/ffi.md`.
+
+- Added executed Windows evidence for the C ABI without a Windows SDK:
+  `tests/abi/wine_harness.c` is cross-built with Zig's MinGW-w64 target and run under Wine,
+  covering file metadata follow/no-follow, hidden attributes, non-reparse readlink rejection,
+  symlink readlink/realpath, regular-file non-blocking rejection and `localhost` DNS (47
+  checks). Fixed Windows `fs_stat` to follow symlinks unless `GRAIL_STAT_NO_FOLLOW` is set by
+  opening the path with `CreateFileW` and using `GetFileInformationByHandle`.
+  `tests/abi/macos_metadata_dns_check.c` compiles the same metadata/reparse/DNS call sites for
+  Apple ARM64 without execution. Added `tools/test-abi-wine.mjs` and `just abi-wine-test`.
 
 - Abundance CPU port, executor increment: `abundance/src/job_executor.grl` runs the policy order
   through Grail's structured parallelism (`task_scope`/`spawn`/`join` over clone-created OS
@@ -42,7 +161,6 @@
   exact values (math 63, hashing 16, world 25, cache 46, checkpoint 39, entity 18). The in-memory
   page machine (256-row pages, split at 129, merge under 64, bulk fill 192) is documented rather
   than ported because it decides only page_count.
-
 - Port Borg Agent's local-session ownership state (`borg/`). `src/session_state.grl` carries the
   owner record (`schema_version`, `pid`, `executable_identity`, optional `package_version` and
   `process_start_time`) through the JSON codec, the `dev:ino:len:mtime:mtime_nsec` executable

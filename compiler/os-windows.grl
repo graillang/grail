@@ -130,6 +130,7 @@ fn rt_syscall(n: u64, a: u64, b: u64, c: u64) -> u64 {
         return 0;
     }
     if n == 11 {
+        rt_win_reap(a);
         return rt_win_unmap(a);
     }
     if n == 24 {
@@ -152,7 +153,14 @@ fn rt_syscall(n: u64, a: u64, b: u64, c: u64) -> u64 {
         return 0;
     }
     if n == 202 {
-        return 0;
+        // Linux futex encoding: FUTEX_WAKE is op bit 0, FUTEX_PRIVATE_FLAG is bit 7.
+        if (b & 128) == 0 {
+            return rt_win_join_wait(a);
+        }
+        if (b & 1) != 0 {
+            return rt_win_wake(a, c);
+        }
+        return rt_win_wait(a, c);
     }
     if n == 228 {
         return rt_win_clock(b);
@@ -255,6 +263,146 @@ fn rt_win_split(buf: u64, table: u64) -> u64 {
     raw_store(table + count * 8, 0);
     return count;
 }
+// ---- threads and address waits --------------------------------------------------------------
+// Joinable threads are tracked so a join can wait for real thread termination (not just the
+// portable "running" word) before its stack is released. Slots live above the process scratch
+// word: 15 entries of {tid word pointer, thread handle}.
+fn rt_win_slot(i: u64) -> u64 {
+    return raw_state() + 3856 + i * 16;
+}
+fn rt_win_register(tid_word: u64, handle: u64) -> u64 {
+    rt_allocator_lock();
+    mut i = 0;
+    mut done = 0;
+    while i < 15 {
+        slot := rt_win_slot(i);
+        if raw_load(slot) == 0 {
+            raw_store(slot, tid_word);
+            raw_store(slot + 8, handle);
+            done = 1;
+            i = 15;
+        } else {
+            i = i + 1;
+        }
+    }
+    rt_allocator_unlock();
+    return done;
+}
+// Removes and returns the thread handle registered for this tid word, or 0.
+fn rt_win_take(addr: u64) -> u64 {
+    rt_allocator_lock();
+    mut i = 0;
+    mut handle = 0;
+    while i < 15 {
+        slot := rt_win_slot(i);
+        if raw_load(slot) == addr {
+            handle = raw_load(slot + 8);
+            raw_store(slot, 0);
+            raw_store(slot + 8, 0);
+            i = 15;
+        } else {
+            i = i + 1;
+        }
+    }
+    rt_allocator_unlock();
+    return handle;
+}
+// Waits for a joined thread that is still registered for this stack, then its stack is safe to
+// release. Detached threads are never registered, so this is a no-op for them.
+fn rt_win_reap(stack: u64) -> u64 {
+    rt_allocator_lock();
+    mut i = 0;
+    mut handle = 0;
+    while i < 15 {
+        slot := rt_win_slot(i);
+        tid := raw_load(slot);
+        if tid != 0 {
+            if raw_load(tid + 8) == stack {
+                handle = raw_load(slot + 8);
+                raw_store(slot, 0);
+                raw_store(slot + 8, 0);
+            }
+        }
+        i = i + 1;
+    }
+    rt_allocator_unlock();
+    if handle != 0 {
+        raw_win32(WaitForSingleObject, handle, 4294967295);
+        raw_win32(CloseHandle, handle);
+    }
+    return 0;
+}
+// CreateThread start routine, reached through the compiler's Win64 bridge. The bridge passes the
+// thread record and keeps %rdi/%rsi for the caller; this clears the portable "running" word so a
+// join's loop finishes, then wakes any waiter.
+fn rt_win_thread_main(record: u64) -> u64 {
+    rt_thread_main(record);
+    tid := raw_load(record - 32);
+    if tid != 0 {
+        raw_store(tid, 0);
+        raw_win32(WakeByAddressAll, tid);
+    }
+    return 0;
+}
+// start_slot is the portable record at the top of the thread stack: [entry][record]. The joinable
+// handle array is stored out of band in the stack slack, so portable code stays unchanged.
+fn rt_win_thread_clone(start_slot: u64, tid_word: u64) -> u64 {
+    record := raw_load(start_slot + 8);
+    top := record + 64;
+    raw_store(top - 96, tid_word);
+    raw_store(tid_word, 1);
+    scratch := rt_win_scratch();
+    raw_store(scratch + 8, 0);
+    bridge := raw_load(raw_state() + 3392);
+    handle := raw_win32(CreateThread, 0, 0, bridge, record, 0, scratch + 8);
+    if handle == 0 {
+        return wrapping_sub(0, 11);
+    }
+    raw_store(top - 88, handle);
+    // Detached spawns pass a word inside the thread's own stack; joinable ones pass the handle
+    // array from rt_alloc. Only the latter needs tracking for a join.
+    if (tid_word < record) + (record + 64 < tid_word) {
+        rt_win_register(tid_word, handle);
+    }
+    return handle;
+}
+fn rt_win_wake(addr: u64, count: u64) -> u64 {
+    if count == 1 {
+        raw_win32(WakeByAddressSingle, addr);
+    } else {
+        raw_win32(WakeByAddressAll, addr);
+    }
+    return 0;
+}
+// FUTEX_WAIT: block while the word still holds `expected`. A registered thread's word waits for
+// thread termination; everything else uses WaitOnAddress on the 8-byte word.
+fn rt_win_wait(addr: u64, expected: u64) -> u64 {
+    handle := rt_win_take(addr);
+    if handle != 0 {
+        raw_win32(WaitForSingleObject, handle, 4294967295);
+        raw_win32(CloseHandle, handle);
+        return 0;
+    }
+    scratch := rt_win_scratch();
+    raw_store(scratch + 16, expected);
+    if raw_win32(WaitOnAddress, addr, scratch + 16, 8, 4294967295) == 0 {
+        return wrapping_sub(0, 110);
+    }
+    return 0;
+}
+// Join waits only ever target registered threads; if one was already reaped, yield instead of
+// blocking on a word nobody will wake.
+fn rt_win_join_wait(addr: u64) -> u64 {
+    handle := rt_win_take(addr);
+    if handle != 0 {
+        raw_win32(WaitForSingleObject, handle, 4294967295);
+        raw_win32(CloseHandle, handle);
+        return 0;
+    }
+    raw_win32(Sleep, 0);
+    return 0;
+}
+
 // Process setup for the PE entry: argv from GetCommandLineA, envp from GetEnvironmentStringsA.
 // Both live in untracked mappings so they do not count as user allocations at shutdown.
 fn rt_os_init() -> u64 {

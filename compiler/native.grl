@@ -33,6 +33,10 @@ struct Decl {
     module: u8[],
     name: u8[],
     is_enum: u64,
+    // 1 for `handle Name;`: a one-word opaque foreign handle, not a layout.
+    opaque: u64,
+    // 1 for `extern record`: fields use C layout (natural alignment, padding).
+    c_layout: u64,
     first: u64,
     count: u64,
     regions: u64,
@@ -174,6 +178,8 @@ struct C {
     module: u8[],
     target: u64,
     plat: u64,
+    // Emit .file/.loc DWARF line info (Linux x86-64 native output only).
+    debug: u64,
     arg_offset: u64,
     overflow: u64,
     default_u64: u64,
@@ -181,6 +187,8 @@ struct C {
     // Reference dialect is independent of the internal numeric default.
     typed_refs: u64,
     typed_refs_flag: u64,
+    exports: u8[][],
+    export_hits: u64[],
     specs: Spec[],
     bindings: u64[],
     current_spec: u64,
@@ -205,6 +213,10 @@ struct C {
     unsafe_depth: u64,
     // Linker inputs declared by `extern "C" lib "..."`, deduplicated in order.
     libs: u8[][],
+    // Set while an `extern "C" fn` definition is handed to the function parser:
+    // 2 means C-callable with the given unmangled symbol.
+    pending_ext: u64,
+    pending_symbol: u8[],
     rnames: u8[][],
     tnames: u8[][],
     closures: Closure[],
@@ -307,6 +319,105 @@ fn on<a>(c: (&a mut C), n: u64) -> unit {
         on(&mut c, div(n, 10));
     }
     c.out.push(48 + n % 10);
+    return ();
+}
+// Escape a path for an assembler .file directive (quotes and backslashes).
+fn emit_path<a, b>(c: (&a mut C), path: &b [u8]) -> unit {
+    for i in path.len() {
+        b := path[i];
+        if (b == 92) + (b == 34) {
+            c.out.push(92);
+        }
+        c.out.push(b);
+    }
+    return ();
+}
+fn contains_text<a, b>(text: &a [u8], needle: &b [u8]) -> u64 {
+    if needle.len() > text.len() {
+        return 0;
+    }
+    mut i = 0;
+    while i + needle.len() <= text.len() {
+        mut j = 0;
+        mut ok = 1;
+        while j < needle.len() {
+            if text[i + j] != needle[j] {
+                ok = 0;
+            }
+            j += 1;
+        }
+        if ok {
+            return 1;
+        }
+        i += 1;
+    }
+    return 0;
+}
+// `.loc` before a literal section switch is dropped by the assembler, so re-assert the last
+// source location after every `.popsection`. This keeps the first statement of a function on the
+// line table even when it starts by pushing a string literal.
+fn debug_locs<a>(text: &a [u8]) -> u8[] {
+    mut out = u8[];
+    mut loc = u8[];
+    mut line = u8[];
+    for i in text.len() {
+        b := text[i];
+        line.push(b);
+        if b == 10 {
+            if starts_with(view(line), view(".loc ")) != 0 {
+                mut fresh = u8[];
+                for k in line.len() {
+                    fresh.push(line[k]);
+                }
+                exchange(&mut loc, fresh);
+            }
+            for k in line.len() {
+                out.push(line[k]);
+            }
+            if contains_text(view(line), view(".popsection")) != 0 {
+                for k in loc.len() {
+                    out.push(loc[k]);
+                }
+            }
+            exchange(&mut line, u8[]);
+        }
+    }
+    if line.len() != 0 {
+        for k in line.len() {
+            out.push(line[k]);
+        }
+    }
+    return out;
+}
+// Source line/column of the current token. The assembler turns .loc into .debug_line.
+fn emit_loc<a>(c: (&a mut C)) -> unit {
+    if c.debug == 0 {
+        return ();
+    }
+    p := c.pos;
+    if c.toks.len() <= p {
+        return ();
+    }
+    t := &c.toks[p];
+    st := t.start;
+    mut line = 1;
+    mut column = 1;
+    for i in st {
+        if c.src[i] == 10 {
+            line += 1;
+            column = 1;
+        } else {
+            column += 1;
+        }
+    }
+    file := c.file - 1;
+    o(&mut c, view(".loc "));
+    on(&mut c, file);
+    c.out.push(32);
+    on(&mut c, line);
+    c.out.push(32);
+    on(&mut c, column);
+    c.out.push(10);
     return ();
 }
 // 0 is ELF/Linux syscalls, 1 is Mach-O/macOS libSystem. CPU selection stays in `target`.
@@ -501,6 +612,21 @@ fn win32_arity<a>(name: (&a [u8])) -> u64 {
     }
     if same(view(name), view("VirtualAlloc")) {
         return 4;
+    }
+    if same(view(name), view("CreateThread")) {
+        return 6;
+    }
+    if same(view(name), view("WaitForSingleObject")) {
+        return 2;
+    }
+    if same(view(name), view("WaitOnAddress")) {
+        return 4;
+    }
+    if same(view(name), view("WakeByAddressSingle")) {
+        return 1;
+    }
+    if same(view(name), view("WakeByAddressAll")) {
+        return 1;
     }
     if same(view(name), view("VirtualFree")) {
         return 3;
@@ -963,19 +1089,19 @@ fn win_unwind<a>(text: &a [u8]) -> u8[] {
 }
 
 // PE/COFF objects carry no ELF symbol type; MSVC-style .def records the function class.
-fn func_directive<a, b>(c: (&a mut C), m: &b [u8], name: &b [u8]) -> unit {
+fn func_directive<a, b, d>(c: (&a mut C), m: &b [u8], name: &b [u8], symbol: &d [u8], export: u64) -> unit {
     // Mach-O defines a symbol by its label and carries neither .type nor .def records.
     if c.plat == 1 {
         return ();
     }
     if (c.target == 3) + (c.target == 4) {
         o(&mut c, view(".def "));
-        mangle(&mut c, view(m), view(name));
+        export_name(&mut c, view(m), view(name), view(symbol), export);
         o(&mut c, view("\n.scl 2\n.type 32\n.endef\n"));
         return ();
     }
     o(&mut c, view(".type "));
-    mangle(&mut c, view(m), view(name));
+    export_name(&mut c, view(m), view(name), view(symbol), export);
     o(&mut c, view(",@function\n"));
     return ();
 }
@@ -3157,6 +3283,11 @@ fn lifetime_arguments<a>(c: (&a mut C)) -> u64[] {
     return rs;
 }
 fn nominal_type<a>(c: (&a mut C), d: u64) -> u64 {
+    // An opaque handle is one word with no layout: it cannot be constructed,
+    // inspected or dropped, only produced by C and handed back to C.
+    if c.decls[d].opaque {
+        return intern(&mut c, 23, d);
+    }
     decl := &c.decls[d];
     count := decl.regions;
     types := decl.types;
@@ -3380,7 +3511,7 @@ fn same_type<a>(c: (&a mut C), x: u64, y: u64) -> u64 {
     if a != b {
         return 0;
     }
-    if (a == 12) + (a == 20) {
+    if (a == 12) + (a == 20) + (a == 25) {
         mut map = u64[];
         return callable_contract(&mut c, x, y, &mut map, 0);
     }
@@ -3644,6 +3775,8 @@ fn make_union<a>(c: (&a mut C), args: u64[], success: u64, module: u8[], prefix:
                     module: module,
                     name: name,
                     is_enum: 1,
+                    opaque: 0,
+                    c_layout: 0,
                     first: first,
                     count: args.len(),
                     regions: 0,
@@ -4003,6 +4136,28 @@ fn base_named<a>(c: (&a mut C), first: u8[]) -> u64 {
         result := parse_type(&mut c);
         return intern_args(&mut c, 20, result, 0, u64[], params);
     }
+    if same(view(first), view("cfn")) {
+        // C function pointer: one word, no environment, called with the C ABI. Only
+        // `extern "C"` definitions have such an address, so a closure cannot sneak in.
+        expect(&mut c, view("("));
+        mut params = u64[];
+        if eat(&mut c, view(")")) == 0 {
+            while 1 {
+                ty := parse_type(&mut c);
+                params.push(ty);
+                if eat(&mut c, view(")")) {
+                    break;
+                }
+                expect(&mut c, view(","));
+            }
+        }
+        if 6 < params.len() {
+            fail(&mut c, view("cfn type exceeds six word arguments"));
+        }
+        expect(&mut c, view("->"));
+        result := parse_type(&mut c);
+        return intern_args(&mut c, 25, result, 0, u64[], params);
+    }
     if same(view(first), view("fn")) {
         expect(&mut c, view("("));
         mut params = u64[];
@@ -4047,6 +4202,11 @@ fn base_named<a>(c: (&a mut C), first: u8[]) -> u64 {
     }
     if same(view(first), view("string")) {
         return 3;
+    }
+    if same(view(first), view("CStr")) {
+        // One word: a NUL-terminated byte pointer owned by the C side. Building one
+        // is `unsafe cstr(view)` because it asserts termination and lifetime.
+        return intern(&mut c, 24, 0);
     }
     if same(view(first), view("read")) + same(view(first), view("mut")) {
         if c.typed_refs {
@@ -4110,6 +4270,21 @@ fn base_named<a>(c: (&a mut C), first: u8[]) -> u64 {
     return nominal_type(&mut c, d - 1);
 }
 // ---- top level: pass 1 names, pass 2 fields/signatures/prototypes, pass 3 bodies ----
+// --export NAME promotes the definition with that declared name to a global symbol. Matching is by
+// declared name in any module, so the flag does not depend on mangling or on the object format.
+fn exported<a, b>(c: (&a mut C), n: &b [u8]) -> u64 {
+    mut hit = 0;
+    for i in c.exports.len() {
+        e := c.exports[i].copy();
+        if same(view(e), view(n)) {
+            cur := c.export_hits[i];
+            mut h = &mut c.export_hits[i];
+            exchange(&mut h, cur + 1);
+            hit = 1;
+        }
+    }
+    return hit;
+}
 fn mangle<a, b, d>(c: (&a mut C), m: &b [u8], n: &d [u8]) -> unit {
     if c.plat == 1 {
         c.out.push(95);
@@ -4157,6 +4332,41 @@ fn alias_declaration<a>(c: (&a mut C), pass: u64) -> unit {
     exchange(&mut entry.ty, ty);
     return ();
 }
+// `handle Name;` declares an opaque C handle type. Safe code can bind, compare and
+// pass it, but cannot construct, size, inspect or drop one: it is a foreign token.
+fn handle_declaration<a>(c: (&a mut C), pass: u64) -> unit {
+    expect(&mut c, view("handle"));
+    name := ident(&mut c);
+    exchange(&mut c.parsing_input, 0);
+    exchange(&mut c.output_region, 0);
+    expect(&mut c, view(";"));
+    if pass != 1 {
+        return ();
+    }
+    m := module_copy(&mut c);
+    if (find_decl(&mut c, view(m), view(name)) != 0) + (find_alias(&mut c, view(m), view(name)) != 0) {
+        fail(&mut c, view("duplicate type"));
+    }
+    c
+        .decls
+        .push(
+            Decl {
+                module: m,
+                name: name,
+                is_enum: 0,
+                opaque: 1,
+                c_layout: 0,
+                first: 0,
+                count: 0,
+                regions: 0,
+                types: 0,
+                success: 0,
+                bounds: u64[],
+                constraints: u64[][],
+            }
+        );
+    return ();
+}
 fn decl<a>(c: (&a mut C), pass: u64) -> unit {
     is_enum := is(&mut c, view("enum"));
     advance(&mut c);
@@ -4178,6 +4388,8 @@ fn decl<a>(c: (&a mut C), pass: u64) -> unit {
                         module: m,
                         name: name,
                         is_enum: is_enum,
+                        opaque: 0,
+                        c_layout: 0,
                         first: 0,
                         count: 0,
                         regions: regions,
@@ -4236,6 +4448,8 @@ fn decl<a>(c: (&a mut C), pass: u64) -> unit {
             module: m,
             name: name,
             is_enum: is_enum,
+            opaque: 0,
+            c_layout: 0,
             first: first,
             count: count,
             regions: c.rnames.len(),
@@ -4305,17 +4519,278 @@ fn bind<a>(c: (&a mut C), name: u8[], ty: u64, id: u64, mutable: u64) -> unit {
 // symbol the host linker resolves. The declaration has no body and the call sites
 // must sit inside an `unsafe { ... }` block. Only the C ABI is accepted; there is
 // no implicit fallback to another convention.
-fn ffi_scalar<a, b>(c: (&a mut C), ty: u64, what: &b [u8]) -> unit {
-    // u64 is the portable one-word type at index 0; i64/isize is the 64-bit
-    // signed integer. Both cross the boundary in a single C integer register.
+// Number of C argument words a Grail parameter occupies. A byte view is the C
+// pair (pointer, length); everything else in the accepted slice is one word.
+fn ffi_words<a>(c: (&a mut C), ty: u64) -> u64 {
+    if ty_kind(&mut c, ty) == 5 {
+        return 2;
+    }
+    return 1;
+}
+fn ffi_param<a, b>(c: (&a mut C), ty: u64, what: &b [u8]) -> unit {
+    // u64 is the portable one-word type at index 0; i64/isize is the 64-bit signed
+    // integer. Handles (kind 23) and CStr (kind 24) are one-word C pointers, and a
+    // byte view (kind 5) is passed as pointer plus length.
     if ty == 0 {
         return ();
     }
-    if (ty_kind(&mut c, ty) == 18) & (ty_arg(&mut c, ty) == 64) {
+    k := ty_kind(&mut c, ty);
+    if (k == 18) & (ty_arg(&mut c, ty) == 64) {
+        return ();
+    }
+    if (k == 23) + (k == 24) + (k == 5) + (k == 25) {
+        return ();
+    }
+    if k == 8 {
+        // A record parameter is the C pointer to the struct's fields; Grail keeps
+        // ownership of the allocation, so C must not free it.
+        if c.decls[ty_arg(&mut c, ty)].c_layout {
+            return ();
+        }
+    }
+    fail(&mut c, what);
+    return ();
+}
+fn ffi_result<a, b>(c: (&a mut C), ty: u64, what: &b [u8]) -> unit {
+    // A result is one word: scalars, a C handle or a C string pointer. A byte view
+    // result is rejected because C cannot produce a Grail view record.
+    if (ty == 0) + (ty == 1) {
+        return ();
+    }
+    k := ty_kind(&mut c, ty);
+    if (k == 18) & (ty_arg(&mut c, ty) == 64) {
+        return ();
+    }
+    if (k == 23) + (k == 24) {
         return ();
     }
     fail(&mut c, what);
     return ();
+}
+// ---- C-layout records ----
+// `extern record R { a: i64, b: i32 }` uses the C rules: natural alignment,
+// padding between fields, tail padding to the record alignment, offsets equal to
+// C's offsetof. Field access reads and writes exactly the field's width.
+fn ffi_align_up(n: u64, a: u64) -> u64 {
+    if a < 2 {
+        return n;
+    }
+    r := n % a;
+    if r == 0 {
+        return n;
+    }
+    return n + a - r;
+}
+fn ffi_layout_fail<a>(c: (&a mut C)) -> unit {
+    // Nested extern records are deliberately absent: a Grail record value is a heap
+    // pointer, so embedding one would store the pointer where C expects the bytes.
+    fail(&mut c, view("extern record fields must be 8/16/32/64-bit integers, handles or CStr"));
+    return ();
+}
+fn ffi_field_align<a>(c: (&a mut C), ty: u64) -> u64 {
+    if ty == 0 {
+        return 8;
+    }
+    k := ty_kind(&mut c, ty);
+    if (k == 23) + (k == 24) {
+        return 8;
+    }
+    if k == 18 {
+        bits := ty_arg(&mut c, ty);
+        if (bits == 8) + (bits == 16) + (bits == 32) + (bits == 64) {
+            return bits / 8;
+        }
+    }
+    ffi_layout_fail(&mut c);
+    return 0;
+}
+fn ffi_field_size<a>(c: (&a mut C), ty: u64) -> u64 {
+    if ty == 0 {
+        return 8;
+    }
+    k := ty_kind(&mut c, ty);
+    if (k == 23) + (k == 24) {
+        return 8;
+    }
+    if k == 18 {
+        bits := ty_arg(&mut c, ty);
+        if (bits == 8) + (bits == 16) + (bits == 32) + (bits == 64) {
+            return bits / 8;
+        }
+    }
+    ffi_layout_fail(&mut c);
+    return 0;
+}
+fn ffi_record_align<a>(c: (&a mut C), d: u64) -> u64 {
+    count := c.decls[d].count;
+    mut a = 1;
+    mut i = 0;
+    while i < count {
+        ty := field_ty(&mut c, d, i);
+        x := ffi_field_align(&mut c, ty);
+        if a < x {
+            a = x;
+        }
+        i = i + 1;
+    }
+    return a;
+}
+fn ffi_record_size<a>(c: (&a mut C), d: u64) -> u64 {
+    count := c.decls[d].count;
+    mut off = 0;
+    mut i = 0;
+    while i < count {
+        ty := field_ty(&mut c, d, i);
+        al := ffi_field_align(&mut c, ty);
+        off = ffi_align_up(off, al) + ffi_field_size(&mut c, ty);
+        i = i + 1;
+    }
+    return ffi_align_up(off, ffi_record_align(&mut c, d));
+}
+// Allocation granule: the record size rounded up to whole eight-byte words.
+fn ffi_record_words<a>(c: (&a mut C), d: u64) -> u64 {
+    return ffi_align_up(ffi_record_size(&mut c, d), 8) / 8;
+}
+fn ffi_offset<a>(c: (&a mut C), d: u64, k: u64) -> u64 {
+    mut off = 0;
+    mut i = 0;
+    while i < k {
+        ty := field_ty(&mut c, d, i);
+        al := ffi_field_align(&mut c, ty);
+        off = ffi_align_up(off, al) + ffi_field_size(&mut c, ty);
+        i = i + 1;
+    }
+    ty := field_ty(&mut c, d, k);
+    return ffi_align_up(off, ffi_field_align(&mut c, ty));
+}
+fn ffi_field<a>(c: (&a mut C), ty: u64) -> unit {
+    ffi_field_size(&mut c, ty);
+    return ();
+}
+fn ffi_record<a>(c: (&a mut C), pass: u64) -> unit {
+    expect(&mut c, view("record"));
+    name := ident(&mut c);
+    exchange(&mut c.parsing_input, 0);
+    exchange(&mut c.output_region, 0);
+    if pass != 2 {
+        if pass == 1 {
+            m := module_copy(&mut c);
+            c
+                .decls
+                .push(
+                    Decl {
+                        module: m,
+                        name: name,
+                        is_enum: 0,
+                        opaque: 0,
+                        c_layout: 1,
+                        first: 0,
+                        count: 0,
+                        regions: 0,
+                        types: 0,
+                        success: 0,
+                        bounds: u64[],
+                        constraints: u64[][],
+                    }
+                );
+        }
+        while is(&mut c, view("}")) == 0 {
+            if kind(&mut c) == 0 {
+                fail(&mut c, view("unterminated extern record"));
+            }
+            advance(&mut c);
+        }
+        advance(&mut c);
+        eat(&mut c, view(";"));
+        return ();
+    }
+    m := module_copy(&mut c);
+    d := find_decl(&mut c, view(m), view(name));
+    if d == 0 {
+        fail(&mut c, view("unknown extern record"));
+    }
+    mut pending = Field[];
+    mut count = 0;
+    expect(&mut c, view("{"));
+    if eat(&mut c, view("}")) == 0 {
+        while 1 {
+            f := ident(&mut c);
+            expect(&mut c, view(":"));
+            ty := parse_type(&mut c);
+            ffi_field(&mut c, ty);
+            pending.push(Field { name: f, ty: ty });
+            count = count + 1;
+            if eat(&mut c, view("}")) {
+                break;
+            }
+            expect(&mut c, view(","));
+            if eat(&mut c, view("}")) {
+                break;
+            }
+        }
+    }
+    eat(&mut c, view(";"));
+    mut reverse = Field[];
+    while pending.len() {
+        reverse.push(pending.pop());
+    }
+    first := c.fields.len();
+    while reverse.len() {
+        c.fields.push(reverse.pop());
+    }
+    exchange(
+        &mut c.decls[d - 1],
+        Decl {
+            module: m,
+            name: name,
+            is_enum: 0,
+            opaque: 0,
+            c_layout: 1,
+            first: first,
+            count: count,
+            regions: 0,
+            types: 0,
+            success: 0,
+            bounds: u64[],
+            constraints: u64[][],
+        }
+    );
+    return ();
+}
+fn export_name<a, b, d, e>(c: (&a mut C), m: &b [u8], n: &d [u8], symbol: &e [u8], export: u64) -> unit {
+    if export == 2 {
+        // The C symbol may differ from the Grail name (`as "name"`).
+        o(&mut c, symbol);
+        return ();
+    }
+    mangle(&mut c, view(m), view(n));
+    return ();
+}
+// Does the declaration at `start` (the `fn` keyword) have a body? Scans to the first
+// `{` or `;` at bracket depth zero, so a body can be handed to the normal function
+// parser and a plain declaration stays a declaration.
+fn extern_has_body<a>(c: (&a mut C), start: u64) -> u64 {
+    mut i = start;
+    mut depth = 0;
+    while i < c.toks.len() {
+        k := kind_at(&mut c, i);
+        if (k == 40) + (k == 60) + (k == 91) {
+            depth += 1;
+        }
+        if (k == 41) + (k == 62) + (k == 93) {
+            depth -= 1;
+        }
+        if depth == 0 {
+            if k == 123 {
+                return 1;
+            }
+            if (k == 59) + (k == 125) {
+                return 0;
+            }
+        }
+        i += 1;
+    }
+    return 0;
 }
 fn ffi_string<a, b>(c: (&a mut C), what: &b [u8]) -> u8[] {
     if kind(&mut c) != 3 {
@@ -4354,8 +4829,33 @@ fn extern_declaration<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
             }
         }
     }
+    if is(&mut c, view("record")) {
+        if 0 < input.len() + symbol.len() {
+            fail(&mut c, view("extern record takes no lib or as clause"));
+        }
+        ffi_record(&mut c, pass);
+        return ();
+    }
+    fn_position := c.pos;
+    body := extern_has_body(&mut c, fn_position);
     expect(&mut c, view("fn"));
     name := ident(&mut c);
+    if body {
+        // `extern "C" fn name(...) -> R { ... }` defines a Grail function that C can
+        // call: it is emitted with the stated (unmangled) symbol and its signature
+        // must sit inside the C ABI slice. The normal function parser emits the body.
+        mut exported = symbol;
+        if exported.len() == 0 {
+            exported = name.copy();
+        }
+        exchange(&mut c.pending_ext, 2);
+        exchange(&mut c.pending_symbol, exported);
+        exchange(&mut c.pos, fn_position);
+        func(&mut c, pass, public);
+        exchange(&mut c.pending_ext, 0);
+        exchange(&mut c.pending_symbol, u8[]);
+        return ();
+    }
     if pass != 2 {
         while is(&mut c, view(";")) == 0 {
             advance(&mut c);
@@ -4366,15 +4866,26 @@ fn extern_declaration<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     if symbol.len() == 0 {
         symbol = name.copy();
     }
+    // Byte-view parameters need an input lifetime context, exactly like a Grail
+    // function signature; the region is irrelevant to the C ABI.
+    exchange(&mut c.input_regions, u64[]);
+    exchange(&mut c.receiver_region, 0);
+    exchange(&mut c.parsing_input, 1);
     first := c.params.len();
     mut count = 0;
+    mut words = 0;
     expect(&mut c, view("("));
     if eat(&mut c, view(")")) == 0 {
         while 1 {
             p := ident(&mut c);
             expect(&mut c, view(":"));
             ty := parse_type(&mut c);
-            ffi_scalar(&mut c, ty, view("extern C parameters must be i64 or u64"));
+            ffi_param(
+                &mut c,
+                ty,
+                view("extern C parameters must be a 64-bit integer, CStr, handle or byte view")
+            );
+            words = words + ffi_words(&mut c, ty);
             c.params.push(ty);
             count = count + 1;
             if eat(&mut c, view(")")) {
@@ -4383,15 +4894,15 @@ fn extern_declaration<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
             expect(&mut c, view(","));
         }
     }
-    if 6 < count {
-        fail(&mut c, view("extern C declaration exceeds six parameters"));
+    exchange(&mut c.parsing_input, 0);
+    exchange(&mut c.output_region, 0);
+    if 6 < words {
+        fail(&mut c, view("extern C declaration exceeds six argument words"));
     }
     mut ret = 1;
     if eat(&mut c, view("->")) {
         ret = parse_type(&mut c);
-        if ret != 1 {
-            ffi_scalar(&mut c, ret, view("extern C results must be i64, u64 or unit"));
-        }
+        ffi_result(&mut c, ret, view("extern C results must be i64, u64, unit, CStr or handle"));
     }
     expect(&mut c, view(";"));
     m := module_copy(&mut c);
@@ -4459,6 +4970,8 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         return ();
     }
     mut m = module_copy(&mut c);
+    export := c.pending_ext;
+    export_symbol := c.pending_symbol.copy();
     if c.current_impl {
         m = private_module(view(".impl_"), c.current_impl);
     }
@@ -4521,6 +5034,24 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         if find_func(&mut c, view(m), view(name)) != 0 {
             fail(&mut c, view("duplicate function"));
         }
+        if export != 0 {
+            // The body is Grail, but C will call it: every parameter and the result
+            // must live in the C ABI slice, and the symbol is the stated C name.
+            for i in count {
+                formal := c.params[first + i];
+                ffi_param(
+                    &mut c,
+                    formal,
+                    view("extern C callback parameters must be a 64-bit integer, CStr, handle, byte view or cfn")
+                );
+            }
+            if ret != 1 {
+                ffi_result(&mut c, ret, view("extern C callback results must be i64, u64, unit, CStr or handle"));
+            }
+            if export_symbol.len() == 0 {
+                fail(&mut c, view("extern C definition needs a symbol"));
+            }
+        }
         main := (c.file == 2) & (c.current_impl == 0) & (c.inherent == 0) & same(view(name), view("main"));
         if main {
             if (1 < count) + (typecount != 0) {
@@ -4562,8 +5093,8 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
                     constraints: constraints,
                     contract: 0,
                     owner: c.inherent,
-                    ext: 0,
-                    symbol: u8[],
+                    ext: export,
+                    symbol: export_symbol,
                 }
             );
         index := c.funcs.len();
@@ -4587,8 +5118,13 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         mut l = &mut c.locals[i];
         exchange(&mut l.last, last);
     }
-    func_directive(&mut c, view(m), view(name));
-    mangle(&mut c, view(m), view(name));
+    if exported(&mut c, view(name)) {
+        o(&mut c, view(".globl "));
+        export_name(&mut c, view(m), view(name), view(export_symbol), export);
+        c.out.push(10);
+    }
+    func_directive(&mut c, view(m), view(name), view(export_symbol), export);
+    export_name(&mut c, view(m), view(name), view(export_symbol), export);
     o(&mut c, view(":\npushq %rbp\nmovq %rsp,%rbp\n"));
     frame := label(&mut c);
     if c.target == 4 {
@@ -5242,6 +5778,10 @@ fn toplevel<a>(c: (&a mut C), pass: u64) -> unit {
             extern_declaration(&mut c, pass, public);
             continue;
         }
+        if is(&mut c, view("handle")) {
+            handle_declaration(&mut c, pass);
+            continue;
+        }
         if is(&mut c, view("type")) {
             alias_declaration(&mut c, pass);
         } else {
@@ -5358,6 +5898,59 @@ fn rec_store<a>(c: (&a mut C), base: u64, k: u64, value: u64) -> unit {
     o(&mut c, view("(%rcx)\n"));
     return ();
 }
+// C-layout field access: exact byte offset, exact field width. Fields narrower than
+// eight bytes use portable byte-wise helpers so every target stays correct without
+// new instruction selection.
+fn cfield_load<a>(c: (&a mut C), base: u64, d: u64, k: u64, address: u64) -> u64 {
+    ty := field_ty(&mut c, d, k);
+    off := ffi_offset(&mut c, d, k);
+    size := ffi_field_size(&mut c, ty);
+    get(&mut c, base, view("%rax"));
+    if address {
+        o(&mut c, view("leaq "));
+        on(&mut c, off);
+        o(&mut c, view("(%rax),%rax\n"));
+        return save(&mut c);
+    }
+    if size == 8 {
+        o(&mut c, view("movq "));
+        on(&mut c, off);
+        o(&mut c, view("(%rax),%rax\n"));
+        return save(&mut c);
+    }
+    o(&mut c, view("addq $"));
+    on(&mut c, off);
+    o(&mut c, view(",%rax\n"));
+    addr := save(&mut c);
+    mut signed = 0;
+    if ty_kind(&mut c, ty) == 18 {
+        signed = ty_mode(&mut c, ty);
+    }
+    w := imm(&mut c, size);
+    sign := imm(&mut c, signed);
+    return invoke(&mut c, view("rt_load_sized"), three(addr, w, sign));
+}
+fn cfield_store<a>(c: (&a mut C), base: u64, d: u64, k: u64, value: u64) -> unit {
+    ty := field_ty(&mut c, d, k);
+    off := ffi_offset(&mut c, d, k);
+    size := ffi_field_size(&mut c, ty);
+    if size == 8 {
+        get(&mut c, base, view("%rcx"));
+        get(&mut c, value, view("%rax"));
+        o(&mut c, view("movq %rax,"));
+        on(&mut c, off);
+        o(&mut c, view("(%rcx)\n"));
+        return ();
+    }
+    get(&mut c, base, view("%rax"));
+    o(&mut c, view("addq $"));
+    on(&mut c, off);
+    o(&mut c, view(",%rax\n"));
+    addr := save(&mut c);
+    w := imm(&mut c, size);
+    invoke(&mut c, view("rt_store_sized"), three(addr, value, w));
+    return ();
+}
 fn field_path<a>(c: (&a mut C), id: u64, lty: u64, address: u64) -> Val {
     mut t = id;
     mut ty = lty;
@@ -5387,7 +5980,12 @@ fn field_path<a>(c: (&a mut C), id: u64, lty: u64, address: u64) -> Val {
         k := find_field(&mut c, d, view(f));
         fty := field_type(&mut c, base.ty, k);
         last := (kind(&mut c) != 46) & (address != 0);
-        n := rec_load(&mut c, b, k, last);
+        mut n = 0;
+        if c.decls[d].c_layout {
+            n = cfield_load(&mut c, b, d, k, last);
+        } else {
+            n = rec_load(&mut c, b, k, last);
+        }
         if last {
             ty := reference_type(&mut c, fty, address == 2);
             root := place_of(&mut c, b);
@@ -5824,10 +6422,19 @@ fn structural_eq<a>(c: (&a mut C), x: u64, y: u64, ty: u64, depth: u64) -> u64 {
             mut acc = imm(&mut c, 1);
             for i in count {
                 fty := field_type(&mut c, ty, i);
-                a := rec_load(&mut c, x, i, 0);
-                alias_field(&mut c, a, fty, x, i, 1);
-                observe(&mut c, a);
-                b := rec_load(&mut c, y, i, 0);
+                mut a = 0;
+                mut b = 0;
+                if c.decls[d].c_layout {
+                    a = cfield_load(&mut c, x, d, i, 0);
+                    alias_field(&mut c, a, fty, x, i, 1);
+                    observe(&mut c, a);
+                    b = cfield_load(&mut c, y, d, i, 0);
+                } else {
+                    a = rec_load(&mut c, x, i, 0);
+                    alias_field(&mut c, a, fty, x, i, 1);
+                    observe(&mut c, a);
+                    b = rec_load(&mut c, y, i, 0);
+                }
                 alias_field(&mut c, b, fty, y, i, 1);
                 observe(&mut c, b);
                 sub := structural_eq(&mut c, a, b, fty, depth + 1);
@@ -5929,9 +6536,11 @@ fn coerce_view<a>(c: (&a mut C), v: Val, formal: u64) -> Val {
 }
 fn record<a>(c: (&a mut C), d: u64, explicit: u64) -> Val {
     expect(&mut c, view("{"));
-    x := &c.decls[d];
-    count := x.count;
-    if x.is_enum {
+    count := c.decls[d].count;
+    if c.decls[d].opaque {
+        fail(&mut c, view("opaque handles cannot be constructed"));
+    }
+    if c.decls[d].is_enum {
         fail(&mut c, view("enum requires variant constructor"));
     }
     hint := constructor_hint(&mut c, d, explicit);
@@ -5939,7 +6548,11 @@ fn record<a>(c: (&a mut C), d: u64, explicit: u64) -> Val {
     mut seen = u64[];
     mut sources = u64[];
     mut deferred = u64[];
-    sz := imm(&mut c, count);
+    mut size = count;
+    if c.decls[d].c_layout {
+        size = ffi_record_words(&mut c, d);
+    }
+    sz := imm(&mut c, size);
     n := invoke(&mut c, view("rt_rec"), one(sz));
     if eat(&mut c, view("}")) == 0 {
         while 1 {
@@ -6024,7 +6637,11 @@ fn record<a>(c: (&a mut C), d: u64, explicit: u64) -> Val {
             }
             held := move_value(&mut c, v);
             sources.push(held.t);
-            rec_store(&mut c, n, k, held.t);
+            if c.decls[d].c_layout {
+                cfield_store(&mut c, n, d, k, held.t);
+            } else {
+                rec_store(&mut c, n, k, held.t);
+            }
             if eat(&mut c, view("}")) {
                 break;
             }
@@ -6058,7 +6675,11 @@ fn record<a>(c: (&a mut C), d: u64, explicit: u64) -> Val {
         v := adopt_value(&mut c, val(slot, actual), start, end, expected);
         newslot := v.t;
         require_type(&mut c, v.ty, expected);
-        rec_store(&mut c, n, k, newslot);
+        if c.decls[d].c_layout {
+            cfield_store(&mut c, n, d, k, newslot);
+        } else {
+            rec_store(&mut c, n, k, newslot);
+        }
         exchange(&mut sources[index], newslot);
     }
     own(&mut c, n, ty);
@@ -6459,9 +7080,28 @@ fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
                 }
             }
             argtypes.push(v.ty);
-            held := move_value(&mut c, v);
-            sources.push(held.t);
-            args.push(held.t);
+            // A C-layout record parameter is a pointer to the record's fields for
+            // the duration of the call: Grail keeps ownership, so nothing is moved.
+            foreign := c.funcs[f - 1].ext;
+            mut shared = 0;
+            if foreign {
+                k := ty_kind(&mut c, v.ty);
+                if k == 8 {
+                    d := ty_arg(&mut c, v.ty);
+                    if c.decls[d].c_layout {
+                        shared = 1;
+                    }
+                }
+            }
+            if shared {
+                observe(&mut c, v.t);
+                sources.push(v.t);
+                args.push(v.t);
+            } else {
+                held := move_value(&mut c, v);
+                sources.push(held.t);
+                args.push(held.t);
+            }
             if eat(&mut c, view(")")) {
                 break;
             }
@@ -6579,9 +7219,34 @@ fn emit_resolved_call<a>(
         if (c.raw == 0) & (c.unsafe_depth == 0) {
             fail(&mut c, view("extern C call requires an unsafe block"));
         }
+        mut words = 0;
         for i in args.len() {
-            reg := argreg(i);
-            get(&mut c, args[i], view(reg));
+            ty := argtypes[i];
+            words = words + ffi_words(&mut c, ty);
+        }
+        if 6 < words {
+            fail(&mut c, view("extern C call exceeds six argument words"));
+        }
+        mut reg = 0;
+        for i in args.len() {
+            ty := argtypes[i];
+            if ty_kind(&mut c, ty) == 5 {
+                // A byte view crosses as the C pair (pointer, length). The view
+                // record is {pointer at word 0, length at word 1}.
+                get(&mut c, args[i], view("%rax"));
+                first := argreg(reg);
+                second := argreg(reg + 1);
+                o(&mut c, view("movq (%rax),"));
+                o(&mut c, view(first));
+                o(&mut c, view("\nmovq 8(%rax),"));
+                o(&mut c, view(second));
+                c.out.push(10);
+                reg = reg + 2;
+            } else {
+                one := argreg(reg);
+                get(&mut c, args[i], view(one));
+                reg = reg + 1;
+            }
         }
         o(&mut c, view("call "));
         o(&mut c, view(ffi_symbol));
@@ -6675,10 +7340,11 @@ fn specialized_function_value<a>(c: (&a mut C), index: u64, map: u64[]) -> Val {
     return val(save(&mut c), ty);
 }
 fn function_value<a>(c: (&a mut C), index: u64) -> Val {
-    // Same rule as specialized_function_value: a foreign declaration is a C
-    // symbol, not a Grail callable value, so it cannot become a mangled address.
+    // A foreign *declaration* is a C symbol, not a Grail callable, so it cannot
+    // become a mangled address. An `extern "C" fn` *definition* is C-callable and
+    // yields a `cfn` value: its symbol is already the C name.
     foreign := c.funcs[index].ext;
-    if foreign {
+    if foreign == 1 {
         fail(&mut c, view("extern C declarations are not Grail function values"));
     }
     f := &c.funcs[index];
@@ -6689,6 +7355,7 @@ fn function_value<a>(c: (&a mut C), index: u64) -> Val {
     result := f.ret;
     m := f.module.copy();
     name := f.name.copy();
+    symbol := f.symbol.copy();
     if types != 0 {
         fail(
             &mut c,
@@ -6702,9 +7369,17 @@ fn function_value<a>(c: (&a mut C), index: u64) -> Val {
     for i in count {
         params.push(c.params[first + i]);
     }
-    ty := intern_args(&mut c, 12, result, 0, u64[], params);
+    mut value_kind = 12;
+    if foreign == 2 {
+        value_kind = 25;
+    }
+    ty := intern_args(&mut c, value_kind, result, 0, u64[], params);
     o(&mut c, view("leaq "));
-    mangle(&mut c, view(m), view(name));
+    if foreign == 2 {
+        o(&mut c, view(symbol));
+    } else {
+        mangle(&mut c, view(m), view(name));
+    }
     o(&mut c, view("(%rip),%rax\n"));
     return val(save(&mut c), ty);
 }
@@ -6715,7 +7390,7 @@ fn indirect_call<a>(c: (&a mut C), value: Val, opened: u64) -> Val {
     pointer := callee.t;
     ty := callee.ty;
     kind := ty_kind(&mut c, ty);
-    if (kind != 12) & (kind != 20) {
+    if (kind != 12) & (kind != 20) & (kind != 25) {
         fail(&mut c, view("expression is not callable"));
     }
     observe(&mut c, pointer);
@@ -6841,6 +7516,9 @@ fn builtin_id<a>(n: &a [u8]) -> u64 {
     }
     if same(view(n), view("view")) {
         return 37;
+    }
+    if same(view(n), view("cstr")) {
+        return 39;
     }
     if same(view(n), view("view_mut")) {
         return 38;
@@ -7283,6 +7961,13 @@ fn raw_builtin<a>(c: (&a mut C), id: u64) -> Val {
     }
     // Thread start: the child takes its entry/argument from the new stack and exits only itself.
     if id == 117 {
+        if c.target == 3 {
+            // start slot and tid word; flags are a Linux clone detail.
+            get(&mut c, args[1], view("%rdi"));
+            get(&mut c, args[2], view("%rsi"));
+            o(&mut c, view("call rt_win_thread_clone\n"));
+            return val(save(&mut c), 0);
+        }
         get(&mut c, args[0], view("%rdi"));
         get(&mut c, args[1], view("%rsi"));
         get(&mut c, args[2], view("%rdx"));
@@ -8095,6 +8780,24 @@ fn builtin<a>(c: (&a mut C), id: u64) -> Val {
         return v;
     }
     a := expr(&mut c, 0);
+    if id == 39 {
+        // `cstr(sequence)` is the checked, zero-copy C string view: the bytes must
+        // end in NUL (verified at runtime) and the cast is unsafe because C may keep
+        // the pointer beyond the call.
+        expect(&mut c, view(")"));
+        if (c.raw == 0) & (c.unsafe_depth == 0) {
+            fail(&mut c, view("cstr requires an unsafe block"));
+        }
+        x := deref(&mut c, a);
+        k := ty_kind(&mut c, x.ty);
+        if (k != 2) & (k != 3) & (k != 4) & (k != 5) {
+            fail(&mut c, view("cstr requires byte sequence or view"));
+        }
+        // The owned sequence stays alive until the end of the statement, so the
+        // pointer handed to C is valid for the whole call.
+        slot := apply(&mut c, view("rt_cstr_view"), one(x.t));
+        return val(slot, intern(&mut c, 24, 0));
+    }
     if (id == 37) + (id == 38) {
         expect(&mut c, view(")"));
         input := a.t;
@@ -9752,6 +10455,8 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
                 module: copy_bytes(view(".closure")),
                 name: decl_name,
                 is_enum: 0,
+                opaque: 0,
+                c_layout: 0,
                 first: first,
                 count: count,
                 regions: 0,
@@ -9931,7 +10636,7 @@ fn emit_closures<a>(c: (&a mut C)) -> unit {
             bind(&mut c, pn.copy(), params[j], pid, 0);
         }
         count := 1 + params.len();
-        func_directive(&mut c, view(".closure"), view(symbol));
+        func_directive(&mut c, view(".closure"), view(symbol), view(symbol), 0);
         mangle(&mut c, view(".closure"), view(symbol));
         o(&mut c, view(":\npushq %rbp\nmovq %rsp,%rbp\n"));
         frame := label(&mut c);
@@ -13694,6 +14399,7 @@ fn scalar_match<a>(c: (&a mut C), s: Val) -> unit {
     return ();
 }
 fn statement<a>(c: (&a mut C)) -> unit {
+    emit_loc(&mut c);
     // An `unsafe { ... }` block is the explicit boundary for foreign calls. It is
     // lexical and checked: move/drop/borrow rules still apply inside the body.
     if is(&mut c, view("unsafe")) {
@@ -15236,12 +15942,15 @@ pub fn main() -> u64 {
         module: u8[],
         target: 0,
         plat: 0,
+        debug: 0,
         arg_offset: 0,
         overflow: 1,
         default_u64: 0,
         default_u64_flag: 0,
         typed_refs: 0,
         typed_refs_flag: 0,
+        exports: u8[][],
+        export_hits: u64[],
         specs: Spec[],
         bindings: u64[],
         current_spec: 0,
@@ -15264,6 +15973,8 @@ pub fn main() -> u64 {
         raw: 0,
         unsafe_depth: 0,
         libs: u8[][],
+        pending_ext: 0,
+        pending_symbol: u8[],
         rnames: u8[][],
         tnames: u8[][],
         closures: Closure[],
@@ -15421,6 +16132,14 @@ pub fn main() -> u64 {
                     exchange(&mut c.overflow, 1);
                     offset += 1;
                 } else {
+                    if same(view(option), view("--export")) {
+                        if argc < offset + 3 {
+                            fail_option(&mut c, view("--export needs a function name"));
+                        }
+                        c.exports.push(host::arg(offset + 2));
+                        c.export_hits.push(0);
+                        offset += 2;
+                    } else {
                     if same(view(option), view("--typed-refs")) {
                         exchange(&mut c.typed_refs_flag, 1);
                         offset += 1;
@@ -15430,8 +16149,14 @@ pub fn main() -> u64 {
                             exchange(&mut c.default_u64_flag, 1);
                             offset += 1;
                         } else {
-                            break;
+                            if same(view(option), view("--debug")) {
+                                exchange(&mut c.debug, 1);
+                                offset += 1;
+                            } else {
+                                break;
+                            }
                         }
+                    }
                     }
                 }
             }
@@ -15442,13 +16167,31 @@ pub fn main() -> u64 {
     if (2 < n) == 0 {
         fail_option(
             &mut c,
-            view("usage: grail [--target ARCH] [--overflow=checked|wrap] OUT.s ENTRY.grl MODULE.grl...")
+            view(
+                "usage: grail [--target ARCH] [--overflow=checked|wrap] [--debug] OUT.s ENTRY.grl MODULE.grl..."
+            )
         );
+    }
+    if (c.debug != 0) & (((c.target != 0) + (c.plat != 0)) != 0) {
+        fail_option(&mut c, view("--debug line info is only implemented for Linux x86_64"));
     }
     for pass in 3 {
         if pass == 1 {
             if c.plat == 1 {
                 o(&mut c, view(".build_version macos, 11, 0\n"));
+            }
+            if c.debug != 0 {
+                mut f = 2;
+                while f < n {
+                    path := host::arg(f + offset);
+                    number := f - 1;
+                    o(&mut c, view(".file "));
+                    on(&mut c, number);
+                    o(&mut c, view(" \""));
+                    emit_path(&mut c, view(path));
+                    o(&mut c, view("\"\n"));
+                    f += 1;
+                }
             }
             o(&mut c, view(".text\n"));
         }
@@ -15463,6 +16206,16 @@ pub fn main() -> u64 {
             exchange(&mut c.headers_complete, 1);
             check_interfaces(&mut c);
             validate_type_constraints(&mut c);
+        }
+    }
+    // Every definition has been emitted by now, so an --export name that never matched is a typo.
+    for i in c.exports.len() {
+        if c.export_hits[i] == 0 {
+            host::print(view("grail: export '"));
+            missing := &c.exports[i];
+            host::print(view(missing));
+            host::print(view("' is not defined by any function\n"));
+            host::exit(1);
         }
     }
     emit_specializations(&mut c);
@@ -15495,10 +16248,19 @@ pub fn main() -> u64 {
             fail(&mut c, view("executable entry requires readonly argv view"));
         }
     }
-    if (c.target == 3) + (c.target == 4) {
+    if (c.target == 3) {
         // A PE image starts without arguments: the loader leaves argv to the runtime, which reads
         // the Win32 command line. The process state words start empty and are filled by
-        // rt_thread_init before the entry function runs.
+        // rt_thread_init before the entry function runs. The thread bridge address is published
+        // for CreateThread.
+        o(
+            &mut c,
+            view(
+                ".globl grail_entry\ngrail_entry:\nxorl %eax,%eax\nmovq %rax,rt_state(%rip)\nmovq %rax,rt_state+8(%rip)\nmovq %rax,rt_state+16(%rip)\nleaq rt_win_thread_start(%rip),%rax\nmovq %rax,rt_state+3392(%rip)\nandq $-16,%rsp\ncall rt_thread_init\nmovq rt_state(%rip),%rdi\n"
+            )
+        );
+    } else {
+    if c.target == 4 {
         o(
             &mut c,
             view(
@@ -15520,6 +16282,7 @@ pub fn main() -> u64 {
                 view(".globl _start\n_start:\nmovq (%rsp),%rdi\nleaq 8(%rsp),%rsi\nleaq 16(%rsp,%rdi,8),%rdx\nmovq %rdi,rt_state(%rip)\nmovq %rsi,rt_state+8(%rip)\nmovq %rdx,rt_state+16(%rip)\nandq $-16,%rsp\ncall rt_thread_init\nmovq rt_state(%rip),%rdi\n")
             );
         }
+    }
     }
     if count == 1 {
         ok := label(&mut c);
@@ -15553,6 +16316,14 @@ pub fn main() -> u64 {
     mark(&mut c, balanced);
     o(&mut c, view("call rt_shutdown\n"));
     emit_exit(&mut c, view("movq %r14,%rdi\n"));
+    if c.target == 3 {
+        o(
+            &mut c,
+            view(
+                "ud2\nrt_win_thread_start:\nsubq $56,%rsp\nmovq %rdi,32(%rsp)\nmovq %rsi,40(%rsp)\nmovq %rcx,%rdi\ncall rt_win_thread_main\nmovq 32(%rsp),%rdi\nmovq 40(%rsp),%rsi\naddq $56,%rsp\nret\n.bss\n.p2align 3\nrt_state: .zero 4096\n"
+            )
+        );
+    } else {
     if (c.target == 3) + (c.target == 4) {
         o(&mut c, view("ud2\n.bss\n.p2align 3\nrt_state: .zero 4096\n"));
     
@@ -15569,6 +16340,7 @@ pub fn main() -> u64 {
             );
         }
     }
+    }
     optimized := optimize::optimize(view(c.out));
     mut out = optimized;
     if c.plat == 1 {
@@ -15582,6 +16354,9 @@ pub fn main() -> u64 {
             // PE/COFF unwind data must be emitted from the final frame sizes.
             image := win_unwind(view(out));
             return host::write_file(view(path), view(with_link_notes(&c.libs, view(image))));
+        }
+        if c.debug != 0 {
+            out = debug_locs(view(out));
         }
         return host::write_file(view(path), view(with_link_notes(&c.libs, view(out))));
     }

@@ -67,11 +67,16 @@ export async function check(compiler) {
 
     // Source-level evidence: COFF directives only, no ELF-only directives or Linux entry.
     assert.ok(assembly.includes('.globl grail_entry\ngrail_entry:'), `${test.name}: missing PE entry`);
-    assert.match(assembly, /^\.def f_main_main\n\.scl 2\n\.type 32\n\.endef\n/m, `${test.name}: missing COFF function directive`);
+    const entrySymbol = test.entry ?? 'f_main_main';
+    assert.match(assembly, new RegExp(`^\\.def ${entrySymbol}\\n\\.scl 2\\n\\.type 32\\n\\.endef$`, 'm'), `${test.name}: missing COFF function directive`);
     assert.ok(!assembly.includes(',@function'), `${test.name}: ELF symbol type leaked into COFF output`);
     assert.ok(!assembly.includes('.note.GNU-stack'), `${test.name}: ELF note section leaked into COFF output`);
     assert.ok(!assembly.includes('\n_start:'), `${test.name}: Linux entry point emitted for PE target`);
     assert.ok(assembly.includes('call *__imp_ExitProcess(%rip)'), `${test.name}: process exit is not an IAT call`);
+    if (test.entry) {
+      assert.ok(assembly.includes('rt_win_thread_start:'), `${test.name}: missing Win64 thread bridge`);
+      assert.ok(assembly.includes('call rt_win_thread_clone'), `${test.name}: thread spawn does not use the OS layer`);
+    }
 
     // Object-level evidence: a real x86-64 COFF object with the entry symbol and import slots.
     const object = inspectObject(built.object);
@@ -105,6 +110,11 @@ export async function check(compiler) {
     const imported = [...inspectImage(built.executable).matchAll(/^\s+Symbol: (\S+)/gm)].map(m => m[1]);
     for (const name of ['ExitProcess', 'WriteFile', 'GetCommandLineA', 'CreateFileA']) {
       if (test.name === 'hello' || test.name === 'file-write-read') {
+        assert.ok(imported.includes(name), `${test.name}: expected ${name} in the import table`);
+      }
+    }
+    if (test.entry) {
+      for (const name of ['CreateThread', 'WaitForSingleObject', 'WaitOnAddress', 'WakeByAddressSingle']) {
         assert.ok(imported.includes(name), `${test.name}: expected ${name} in the import table`);
       }
     }
@@ -235,6 +245,20 @@ export async function check(compiler) {
     const kind = spawnSync('file', [image], { timeout: 60_000 });
     assert.equal(kind.status, 0, `${crossTarget}: file failed`);
     assert.match(kind.stdout.toString(), marker, `${crossTarget}: not the expected ELF image`);
+    passed++;
+  }
+  // Thread programs are also exercised as Linux ELF, where clone/futex already work. That
+  // validates the portable side of the test and keeps the Windows result comparable.
+  for (const test of cases.filter(c => c.linux)) {
+    const directory = join(work, `linux-${test.name}`);
+    rmSync(directory, { recursive: true, force: true });
+    mkdirSync(directory, { recursive: true });
+    const source = join(directory, 'input.grl');
+    writeFileSync(source, test.source);
+    const elf = compileElf(compiler, [source], directory, { target: elfTarget, name: test.name });
+    const run = execute(elf, test.args ?? [], elfTarget, { cwd: directory });
+    assert.equal(run.status, test.status ?? 0, `${test.name}: linux exit ${run.status}: ${run.stderr}`);
+    assert.equal(run.stdout.toString(), test.stdout, `${test.name}: linux stdout`);
     passed++;
   }
   console.log(`windows-x86_64: target rejection and linux x86_64/aarch64/riscv64 builds verified`);

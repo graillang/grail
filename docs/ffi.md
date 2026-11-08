@@ -33,15 +33,117 @@ extern "C" fn c_identity(v: u64) -> u64;
 
 ## Supported types (increment 1)
 
-| Grail type | C type | Register behaviour |
+| Grail type | C type | Argument words |
 | --- | --- | --- |
 | `i64` | `int64_t` / `long long` / `ssize_t` | one 64-bit integer register |
 | `u64` | `uint64_t` / `size_t` / `unsigned long long` | one 64-bit integer register |
+| `&[u8]` (parameter) | `const uint8_t *, size_t` | two: pointer then length |
+| `&mut [u8]` (parameter) | `uint8_t *, size_t` | two: pointer then length |
+| `CStr` | `const char *` (NUL-terminated) | one 64-bit pointer |
+| `handle H` | an opaque C token (`uint64_t` by convention) | one 64-bit word |
+| `cfn(P...) -> R` | `R (*)(P...)` | one 64-bit code address |
+| `extern "C" record R` (parameter) | `R *`, the address of the struct's fields | one 64-bit pointer |
 | `unit` (result only) | `void` | result register ignored |
 
-Anything else — narrower integers, floats, `string`, views, references, records,
-closures — is rejected with a diagnostic. Later increments widen this table; until they
-land, writing `v: u32` is an error, not a silent 32-bit truncation.
+Results may be `i64`, `u64`, `unit`, `CStr` or a `handle`: one word each. A view is never
+a result, because C cannot produce a Grail view record; a C function that fills a buffer
+returns a length or status instead, and the Grail side re-slices. A C-layout record is
+never a result either: a returned pointer would be C-owned memory that Grail's drop would
+free, so callers pass an out-parameter record instead.
+
+Anything else — narrower integers, floats, `string`, references, records, closures — is
+rejected with a diagnostic. Later increments widen this table; until they land, writing
+`v: u32` is an error, not a silent 32-bit truncation.
+
+### Byte views
+
+A `&[u8]` parameter crosses as the C pair `(const uint8_t *, size_t)`, and `&mut [u8]`
+as `(uint8_t *, size_t)`. The pointer and the length come from the view's own record, so
+no copy and no temporary buffer are created, and an owned `u8[]`/`string` argument
+auto-borrows to the view exactly as it does for a Grail call. A view argument is a borrow
+for the duration of the call: C must not retain the pointer, and the same value cannot be
+mutably borrowed elsewhere in the same expression.
+
+### C strings
+
+`CStr` is a one-word `const char *`. It is produced by `unsafe cstr(value)` where `value`
+is a byte sequence or view whose last byte is NUL: the cast is zero-copy and checks the
+terminator at runtime (a non-terminated sequence aborts). It is `unsafe` because the
+pointer has no lifetime tracking across the call: C may keep it, and the bytes stay owned
+by Grail.
+
+### Callbacks and function pointers
+
+A Grail function can be handed to C and called back:
+
+```grl
+extern "C" fn c_double(v: i64) -> i64 {
+    return v * 2;
+}
+extern "C" as "c_triple" fn triple(v: i64) -> i64 {
+    return v * 3;
+}
+extern "C" fn c_apply(callback: cfn(i64) -> i64, value: i64) -> i64;
+```
+
+- `extern "C" fn name(params) -> result { ... }` is a *definition*, not a declaration:
+  the body is ordinary Grail, but the function is emitted with the stated C symbol
+  (`as "name"` renames it, otherwise the Grail name is the symbol) and every parameter
+  and the result must sit inside the C ABI slice. That is what makes it C-callable.
+- `cfn(P...) -> R` is the type of a C function pointer: one word, no environment, called
+  with the C ABI. Only `extern "C"` definitions have such a value, so a closure or an
+  ordinary Grail function is a type mismatch where a `cfn` is expected — there is no way
+  to hand C an address it cannot call.
+- Taking the address of an `extern "C"` *declaration* (no body) is still rejected: that
+  is a symbol C owns, not a Grail value.
+- Generated code preserves the callee-saved registers it allocates and keeps the frame
+  16-byte aligned at every call, which is what lets C call back into it.
+  `tests/ffi/callbacks.grl` calls two callbacks through C, and the shim clobbers
+  `rbx`/`r12`-`r15` around one of them to prove the C ABI contract holds.
+- The callback's parameter types are a promise the compiler cannot verify against the
+  actual C function-pointer type (a function pointer carries no signature at run time),
+  so the declaration and the C prototype must agree; a mismatch is an ABI bug the
+  compiler cannot catch.
+
+### C-layout records
+
+```grl
+extern "C" record Mixed { a: i32, b: i16, c: i8, d: i64 }
+
+extern "C" fn c_mixed_fill(m: Mixed, d: i64) -> i64;
+```
+
+`extern "C" record` matches a C `struct` exactly:
+
+- fields are laid out with C rules — natural alignment, padding between fields, and tail
+  padding up to the record alignment — so `offsetof` agrees with the C compiler
+  (`a: i32, b: i16, c: i8, d: i64` is `0, 4, 6, 8`, size 16, alignment 8);
+- a field may be an 8/16/32/64-bit integer, a `handle` or a `CStr`; anything else
+  (including a nested record, a `string`, a view or a float) is rejected, because a Grail
+  record value is a pointer and embedding one would store the pointer, not the bytes;
+- field reads and writes use the field's own width, so `i8`/`i16`/`i32` values are
+  truncated on store and sign- or zero-extended on load. Sub-word access is implemented
+  with portable byte-wise runtime helpers, so all three targets share one implementation
+  (`rt_load_sized`/`rt_store_sized`);
+- a record *parameter* is passed as the address of the struct's fields, i.e. the C
+  `R *`. The call borrows the record for its duration: Grail keeps ownership of the
+  allocation and frees it at the end of the Grail scope, so C must not free or retain it;
+- record construction allocates the C size rounded up to whole eight-byte words, and the
+  drop path frees exactly that allocation.
+
+Verified by `tests/ffi/extern_records.grl`: the C shim reads fields Grail wrote, writes
+fields Grail reads back, and checks its own `offsetof`/`sizeof` values.
+
+### Opaque handles
+
+`handle File;` declares a one-word opaque type for a C-owned resource. A handle can be
+bound, passed to declarations, returned from them and compared by identity; it cannot be
+constructed (`File {}` is an error), inspected, sized, borrowed as bytes or dropped. Zero
+validity is the C library's convention, not the compiler's: ask the library for a validity
+or status accessor rather than assuming a sentinel. Handles are not linear in this
+increment: the compiler never frees one, so a program that opens a handle must call the
+matching close/free declaration itself, and leaking one is an explicit leak rather than an
+implicit close.
 
 Argument and result registers are the C ABI's own, per target:
 
@@ -84,8 +186,10 @@ marker; it is the call that crosses the boundary.
 
 ## Ownership across the boundary
 
-- Values crossing into C by value are passed as scalars; no Grail storage is moved,
-  bonded or cleaned up by the call, and no hidden allocation is performed.
+- Values crossing into C by value are passed as scalars or pointer/length pairs; no
+  Grail storage is moved or cleaned up by the call, and no hidden allocation or copy is
+  performed. Byte views are call-scoped borrows; `CStr` and `handle` are opaque one-word
+  tokens that the compiler never frees.
 - A foreign call never implicitly frees, copies or retains a Grail argument, and Grail
   never implicitly frees a value produced by C. Ownership transfers only where an
   increment says so explicitly (handles and views, later increments).
@@ -105,12 +209,14 @@ Not implemented yet, and each rejected rather than approximated:
   the boundary;
 - floating-point arguments and results (`xmm0-7` / `v0-7` / `fa0-7` and the SysV SSE
   classification);
-- byte and string views (`&[u8]` -> `(const uint8_t*, size_t)`, `CStr`), opaque `handle`
-  types, and `extern record` C layout;
-- callbacks, function pointers, and taking the address of a foreign declaration
-  (`f := c_add;` is rejected: a C declaration is not a Grail function value);
-- by-value struct arguments/results (including SysV eightbyte classification and
-  `sret`), and stack-passed arguments beyond six;
+- nested C records (a nested Grail record value is a pointer, so embedding it by value
+  needs a copy/alias representation that does not exist yet), C records in results, C
+  records containing floats or pointers, and by-value struct passing (SysV eightbyte
+  classification and `sret`);
+- variadic callbacks, callback results that are themselves function pointers, and
+  taking the address of a foreign *declaration* (`f := c_add;` is rejected: a C
+  declaration is not a Grail function value);
+- stack-passed arguments beyond six;
 - dynamic library loading (`dlopen`/`dlsym` hooks);
 - variadic C functions.
 
@@ -124,10 +230,14 @@ compiles `tests/ffi/call_scalars.grl` with the FFI build, links the two through 
 - unmangled calls to `c_add`, `c_mul` (renamed with `as`), `c_identity`, `c_sum4` and
   `c_choose` in the generated assembly;
 - the object references the C symbol but does not define it;
-- the linked executable runs and the six-argument call, the rename and the `u64` result
-  return the expected values (`83` and `7`) — executed on the host, and on a cross target
-  when `qemu-<target>-static` is installed; otherwise the cross targets are linked and
-  the ABI-level check is reported as link-only.
+- the linked executables run and return the expected values — `call_scalars` checks the
+  six-argument call, the `as` rename and `u64` results (`83`, `7`), `views_handles` checks
+  a NUL-terminated `CStr`, a read-only view, a mutable view written by C, and a handle
+  round trip (`259`, `1`), `extern_records` checks C layout in both directions (`1606`,
+  `23`, `16`, `-2`, `7`), and `callbacks` checks C calling back into Grail, including
+  callee-saved register preservation (`42`, `42`, `10`) — executed on the host, and on a cross target when
+  `qemu-<target>-static` is installed; otherwise the cross targets are linked and the
+  ABI-level check is reported as link-only.
 
 Rejections are part of the normal native corpus (`tests/native-cases.json`):
 `ffi-reject-safe-call`, `ffi-reject-abi`, `ffi-reject-parameter-width`,

@@ -61,5 +61,23 @@
     "stdout": "2\nalpha\nbeta\n",
     "status": 0,
     "note": "full argv list: count plus every argument after the program path"
+  },
+  {
+    "name": "thread-join",
+    "entry": "main",
+    "linux": true,
+    "source": "unsafe module runtime;\nfn worker(arg: u64, unused: u64) -> u64 {\n    raw_store(arg, 42);\n    return 0;\n}\nfn main() -> u64 {\n    p := rt_alloc(8);\n    raw_store(p, 0);\n    h := rt_thread_spawn(worker, p);\n    rt_thread_join(h);\n    println(raw_load(p));\n    rt_free(p);\n    return 0;\n}",
+    "stdout": "42\n",
+    "status": 0,
+    "note": "CreateThread through the Win64 bridge, then a join that waits for thread termination"
+  },
+  {
+    "name": "thread-wake",
+    "entry": "main",
+    "linux": true,
+    "source": "unsafe module runtime;\nfn producer(arg: u64, unused: u64) -> u64 {\n    raw_store(arg, 7);\n    rt_syscall(202, arg, 129, 1);\n    return 0;\n}\nfn main() -> u64 {\n    p := rt_alloc(8);\n    raw_store(p, 0);\n    h := rt_thread_spawn(producer, p);\n    mut seen = 0;\n    while seen == 0 {\n        value := raw_atomic_load(p);\n        if value == 7 {\n            seen = 1;\n        } else {\n            rt_syscall(202, p, 128, value);\n        }\n    }\n    rt_thread_join(h);\n    println(raw_load(p));\n    rt_free(p);\n    return 0;\n}",
+    "stdout": "7\n",
+    "status": 0,
+    "note": "futex-equivalent wait/wake: FUTEX_WAIT -> WaitOnAddress, FUTEX_WAKE -> WakeByAddressSingle"
   }
 ]

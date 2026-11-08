@@ -362,6 +362,51 @@ fn rt_slice(s: u64, a: u64, b: u64) -> u64 {
 fn rt_view(s: u64) -> u64 {
     return rt_slice(s, 0, raw_load(s + 8));
 }
+// Checked, zero-copy C string view: the sequence must be NUL-terminated. No
+// allocation and no copy, so the bytes stay owned by the caller. (rt_cstr copies
+// into a freshly packed NUL-terminated buffer and is used for process arguments.)
+// C-layout field access for widths below one word. Portable byte-wise load/store so
+// no target needs new instruction selection: `width` is 1, 2 or 4.
+fn rt_load_sized(a: u64, width: u64, signed: u64) -> u64 {
+    mut v = 0;
+    mut scale = 1;
+    mut i = 0;
+    while i < width {
+        v = v + raw_byte(a + i) * scale;
+        scale = scale * 256;
+        i = i + 1;
+    }
+    if signed & (width < 8) {
+        // Two's-complement sign extension in one word; wrapping avoids an
+        // unsigned-underflow abort on the negative values this is meant to build.
+        half := scale / 2;
+        if half <= v {
+            v = wrapping_sub(v, scale);
+        }
+    }
+    return v;
+}
+fn rt_store_sized(a: u64, v: u64, width: u64) -> u64 {
+    mut x = v;
+    mut i = 0;
+    while i < width {
+        raw_putbyte(a + i, x % 256);
+        x = x / 256;
+        i = i + 1;
+    }
+    return 0;
+}
+fn rt_cstr_view(s: u64) -> u64 {
+    n := raw_load(s + 8);
+    if n == 0 {
+        rt_abort();
+    }
+    p := raw_load(s);
+    if raw_byte(p + n - 1) != 0 {
+        rt_abort();
+    }
+    return p;
+}
 fn rt_append(dst: u64, src: u64) -> u64 {
     n := raw_load(src + 8);
     have := raw_load(dst + 8);
