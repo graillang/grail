@@ -68,7 +68,11 @@ struct Func {
     bounds: u64[],
     constraints: u64[][],
     contract: u64,
-    owner: u64
+    owner: u64,
+    // 1 when this is an `extern "C"` declaration: no body, and `symbol` is the
+    // linker-visible C name (unmangled).
+    ext: u64,
+    symbol: u8[]
 }
 struct Interface {
     module: u8[],
@@ -196,6 +200,10 @@ struct C {
     brk: u64,
     cont: u64,
     raw: u64,
+    // Lexical `unsafe { ... }` depth. Foreign calls are rejected at depth 0.
+    unsafe_depth: u64,
+    // Linker inputs declared by `extern "C" lib "..."`, deduplicated in order.
+    libs: u8[][],
     rnames: u8[][],
     tnames: u8[][],
     closures: Closure[],
@@ -3665,6 +3673,131 @@ fn bind<a>(c: (&a mut C), name: u8[], ty: u64, id: u64, mutable: u64) -> unit {
         );
     return ();
 }
+// ---- v3 C FFI: foreign declarations ----
+// `extern "C" [lib "INPUT"] [as "SYMBOL"] fn NAME(params) -> RESULT;` declares a
+// symbol the host linker resolves. The declaration has no body and the call sites
+// must sit inside an `unsafe { ... }` block. Only the C ABI is accepted; there is
+// no implicit fallback to another convention.
+fn ffi_scalar<a, b>(c: (&a mut C), ty: u64, what: &b [u8]) -> unit {
+    // u64 is the portable one-word type at index 0; i64/isize is the 64-bit
+    // signed integer. Both cross the boundary in a single C integer register.
+    if ty == 0 {
+        return ();
+    }
+    if (ty_kind(&mut c, ty) == 18) & (ty_arg(&mut c, ty) == 64) {
+        return ();
+    }
+    fail(&mut c, what);
+    return ();
+}
+fn ffi_string<a, b>(c: (&a mut C), what: &b [u8]) -> u8[] {
+    if kind(&mut c) != 3 {
+        fail(&mut c, what);
+    }
+    p := c.pos;
+    advance(&mut c);
+    return decode_literal(&mut c, p);
+}
+fn ffi_link<a, b>(c: (&a mut C), input: &b [u8]) -> unit {
+    for i in c.libs.len() {
+        if same(view(c.libs[i]), view(input)) {
+            return ();
+        }
+    }
+    c.libs.push(input.copy());
+    return ();
+}
+fn extern_declaration<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
+    position := c.pos;
+    expect(&mut c, view("extern"));
+    abi := ffi_string(&mut c, view("extern requires a quoted ABI name"));
+    if same(view(abi), view("C")) == 0 {
+        fail(&mut c, view("only extern \"C\" declarations are supported"));
+    }
+    mut input = u8[];
+    mut symbol = u8[];
+    while 1 {
+        if eat(&mut c, view("lib")) {
+            input = ffi_string(&mut c, view("lib requires a quoted link input"));
+        } else {
+            if eat(&mut c, view("as")) {
+                symbol = ffi_string(&mut c, view("as requires a quoted C symbol name"));
+            } else {
+                break;
+            }
+        }
+    }
+    expect(&mut c, view("fn"));
+    name := ident(&mut c);
+    if pass != 2 {
+        while is(&mut c, view(";")) == 0 {
+            advance(&mut c);
+        }
+        expect(&mut c, view(";"));
+        return ();
+    }
+    if symbol.len() == 0 {
+        symbol = name.copy();
+    }
+    first := c.params.len();
+    mut count = 0;
+    expect(&mut c, view("("));
+    if eat(&mut c, view(")")) == 0 {
+        while 1 {
+            p := ident(&mut c);
+            expect(&mut c, view(":"));
+            ty := parse_type(&mut c);
+            ffi_scalar(&mut c, ty, view("extern C parameters must be i64 or u64"));
+            c.params.push(ty);
+            count = count + 1;
+            if eat(&mut c, view(")")) {
+                break;
+            }
+            expect(&mut c, view(","));
+        }
+    }
+    if 6 < count {
+        fail(&mut c, view("extern C declaration exceeds six parameters"));
+    }
+    mut ret = 1;
+    if eat(&mut c, view("->")) {
+        ret = parse_type(&mut c);
+        if ret != 1 {
+            ffi_scalar(&mut c, ret, view("extern C results must be i64, u64 or unit"));
+        }
+    }
+    expect(&mut c, view(";"));
+    m := module_copy(&mut c);
+    if find_func(&mut c, view(m), view(name)) != 0 {
+        fail(&mut c, view("duplicate function"));
+    }
+    if 0 < input.len() {
+        ffi_link(&mut c, view(input));
+    }
+    c
+        .funcs
+        .push(
+            Func {
+                module: m,
+                name: name,
+                first: first,
+                count: count,
+                ret: ret,
+                types: 0,
+                regions: 0,
+                file: c.file,
+                pos: position,
+                raw: c.raw,
+                bounds: u64[],
+                constraints: u64[][],
+                contract: 0,
+                owner: 0,
+                ext: 1,
+                symbol: symbol,
+            }
+        );
+    return ();
+}
 fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     position := c.pos;
     out_mark := c.out.len();
@@ -3802,6 +3935,8 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
                     constraints: constraints,
                     contract: 0,
                     owner: c.inherent,
+                    ext: 0,
+                    symbol: u8[],
                 }
             );
         index := c.funcs.len();
@@ -3980,6 +4115,8 @@ fn interface_declaration<a>(c: (&a mut C), pass: u64) -> unit {
                     constraints: requirements,
                     contract: id,
                     owner: 0,
+                    ext: 0,
+                    symbol: u8[],
                 }
             );
         index := c.funcs.len() - 1;
@@ -4464,6 +4601,10 @@ fn toplevel<a>(c: (&a mut C), pass: u64) -> unit {
     }
     while kind(&mut c) != 0 {
         public := eat(&mut c, view("pub"));
+        if is(&mut c, view("extern")) {
+            extern_declaration(&mut c, pass, public);
+            continue;
+        }
         if is(&mut c, view("type")) {
             alias_declaration(&mut c, pass);
         } else {
@@ -5744,6 +5885,8 @@ fn emit_resolved_call<a>(
     contract := info.contract;
     m := info.module.copy();
     name := info.name.copy();
+    ext := info.ext;
+    ffi_symbol := info.symbol.copy();
     bounds := function_bounds(&c, f - 1);
     require_constraints(&mut c, &map, &bounds);
     requirements := function_constraints(&c, f - 1);
@@ -5792,6 +5935,26 @@ fn emit_resolved_call<a>(
             symbol = f.name.copy();
         }
     }
+    // A foreign call is the unsafe boundary: it is rejected outside `unsafe`.
+    // Scalars cross by value in the C argument registers, so no Grail storage is
+    // moved, bonded or cleaned up by the call itself.
+    if ext {
+        if (c.raw == 0) & (c.unsafe_depth == 0) {
+            fail(&mut c, view("extern C call requires an unsafe block"));
+        }
+        for i in args.len() {
+            reg := argreg(i);
+            get(&mut c, args[i], view(reg));
+        }
+        o(&mut c, view("call "));
+        o(&mut c, view(ffi_symbol));
+        c.out.push(10);
+        slot := save(&mut c);
+        if ret != 1 {
+            own(&mut c, slot, ret);
+        }
+        return val(slot, ret);
+    }
     if 6 < args.len() {
         fail(&mut c, view("native call exceeds six arguments"));
     }
@@ -5814,6 +5977,13 @@ fn emit_resolved_call<a>(
     return val(slot, ret);
 }
 fn specialized_function_value<a>(c: (&a mut C), index: u64, map: u64[]) -> Val {
+    // A foreign declaration names a C symbol, not a Grail callable: its address
+    // type is a C function pointer, which is a separate (later) increment. Refuse
+    // rather than manufacture a Grail function value with a mangled name.
+    foreign := c.funcs[index].ext;
+    if foreign {
+        fail(&mut c, view("extern C declarations are not Grail function values"));
+    }
     f := &c.funcs[index];
     types := f.types;
     raw := f.raw;
@@ -5868,6 +6038,12 @@ fn specialized_function_value<a>(c: (&a mut C), index: u64, map: u64[]) -> Val {
     return val(save(&mut c), ty);
 }
 fn function_value<a>(c: (&a mut C), index: u64) -> Val {
+    // Same rule as specialized_function_value: a foreign declaration is a C
+    // symbol, not a Grail callable value, so it cannot become a mangled address.
+    foreign := c.funcs[index].ext;
+    if foreign {
+        fail(&mut c, view("extern C declarations are not Grail function values"));
+    }
     f := &c.funcs[index];
     types := f.types;
     raw := f.raw;
@@ -12672,6 +12848,19 @@ fn scalar_match<a>(c: (&a mut C), s: Val) -> unit {
     return ();
 }
 fn statement<a>(c: (&a mut C)) -> unit {
+    // An `unsafe { ... }` block is the explicit boundary for foreign calls. It is
+    // lexical and checked: move/drop/borrow rules still apply inside the body.
+    if is(&mut c, view("unsafe")) {
+        after := c.pos + 1;
+        if is_at(&mut c, after, view("{")) {
+            advance(&mut c);
+            depth := c.unsafe_depth;
+            exchange(&mut c.unsafe_depth, depth + 1);
+            block(&mut c);
+            exchange(&mut c.unsafe_depth, depth);
+            return ();
+        }
+    }
     if is(&mut c, view("break")) + is(&mut c, view("continue")) {
         mut b = eat(&mut c, view("break"));
         if b == 0 {
@@ -14043,6 +14232,8 @@ fn host_fn<a, b>(c: (&a mut C), name: &b [u8], ret: u64) -> unit {
                 constraints: u64[][],
                 contract: 0,
                 owner: 0,
+                ext: 0,
+                symbol: u8[],
             }
         );
     return ();
@@ -14054,6 +14245,25 @@ fn drop_call<a>(c: (&a mut C), ty: u64) -> unit {
         c.out.push(10);
     }
     return ();
+}
+// `// grail-link: INPUT` is the compiler's complete linker request; build tooling
+// resolves relative object/archive/shared inputs against the declaring sources and
+// passes bare names as -lNAME. Nothing else has to guess link inputs.
+fn push_bytes<a, b>(out: (&a mut u8[]), s: &b [u8]) -> unit {
+    for i in s.len() {
+        out.push(s[i]);
+    }
+    return ();
+}
+fn with_link_notes<a, b>(libs: (&a u8[][]), body: &b [u8]) -> u8[] {
+    mut out = u8[];
+    for i in libs.len() {
+        push_bytes(&mut out, view("// grail-link: "));
+        push_bytes(&mut out, view(libs[i]));
+        out.push(10);
+    }
+    push_bytes(&mut out, view(body));
+    return out;
 }
 fn emit_drops<a>(c: (&a mut C)) -> unit {
     mut ty = 0;
@@ -14187,6 +14397,8 @@ pub fn main() -> u64 {
         brk: 0,
         cont: 0,
         raw: 0,
+        unsafe_depth: 0,
+        libs: u8[][],
         rnames: u8[][],
         tnames: u8[][],
         closures: Closure[],
@@ -14433,8 +14645,8 @@ pub fn main() -> u64 {
     path := host::arg(1 + offset);
     target := c.target;
     if target == 0 {
-        return host::write_file(view(path), view(out));
+        return host::write_file(view(path), view(with_link_notes(&c.libs, view(out))));
     }
     native := machine::lower(view(out), target);
-    return host::write_file(view(path), view(native));
+    return host::write_file(view(path), view(with_link_notes(&c.libs, view(native))));
 }

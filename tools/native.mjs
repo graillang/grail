@@ -21,12 +21,27 @@ export function command(argv, options = {}) {
   if (result.status !== 0) throw new Error(`${argv.join(' ')} failed (${result.signal ?? result.status})\n${result.stdout ?? ''}${result.stderr ?? ''}`);
   return result;
 }
-export function assemble(source, executable, target = hostTarget) {
+// The compiler is the authority on link inputs: foreign declarations emit
+// `// grail-link: INPUT` comments. Relative object/archive/shared inputs resolve
+// against the declaring sources; bare names become -lNAME; flags pass through.
+export function linkInputs(assembly, base) {
+  const found = assembly
+    .split('\n')
+    .filter(line => line.startsWith('// grail-link: '))
+    .map(line => line.slice('// grail-link: '.length).trim())
+    .map(input => {
+      if (input.startsWith('/') || input.startsWith('-')) return input;
+      if (/[\\/]/.test(input) || /\.(o|a|so)$/.test(input)) return resolve(base, input);
+      return `-l${input}`;
+    });
+  return [...new Set(found)];
+}
+export function assemble(source, executable, target = hostTarget, linkArgs = []) {
   targetName(target);
   const object = `${executable}.o`;
   const flags = target === 'riscv64' ? ['-march=rv64imafd', '-mabi=lp64'] : [];
   command([process.env.GRAIL_ASSEMBLER ?? 'clang', `--target=${triples[target]}`, ...flags, '-c', source, '-o', object]);
-  command([process.env.GRAIL_LINKER ?? 'ld.lld', '-m', emulations[target], object, '-o', executable]);
+  command([process.env.GRAIL_LINKER ?? 'ld.lld', '-m', emulations[target], object, ...linkArgs, '-o', executable]);
   return executable;
 }
 export function runner(target = hostTarget) {
@@ -81,7 +96,8 @@ export function compileProgram(compiler, inputs, directory, { target = hostTarge
   const files = [...inputs.map(p => resolve(root, p)), resolve(root, runtime)];
   const numeric = [...(defaultU64 ? ['--default-u64'] : []), ...(typedRefs ? ['--typed-refs'] : [])];
   command([compiler, ...numeric, '--target', target, `--overflow=${overflow}`, assembly, ...files]);
-  return assemble(assembly, join(directory, name), target);
+  const linkArgs = linkInputs(readFileSync(assembly, 'utf8'), dirname(resolve(root, inputs[0])));
+  return assemble(assembly, join(directory, name), target, linkArgs);
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const mode = process.argv[2] ?? 'build';
