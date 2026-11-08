@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Windows ARM64 frames now carry unwind data: the compiler describes each canonical prologue
+  with armasm-style `.seh_proc`/`.seh_save_regp x29, 0`/`.seh_nop`/`.seh_set_fp`/`.seh_stackalloc`/
+  `.seh_endprologue`/`.seh_endproc` directives, so the object has `.pdata` and `.xdata` and the
+  image has an exception directory (240 records, 0x780 bytes for the hello image). Frame
+  allocation uses a `framesub` pseudo-op (plain `sub sp,sp,x10` instead of checked arithmetic) so
+  the recorded frame size is exactly the `.set` value. The records are the unpacked `.xdata` form
+  on purpose: the packed encoding counts consecutive `x19..`/`d8..` saves and cannot express the
+  lone `x29/x30` frame-pointer save Grail emits. Leaf functions need no record; drop thunks keep
+  their conditional prologue and stay undescribed. The suite now checks records per function,
+  frame sizes against the compiler's frame values, function lengths and the unpacked flag.
+
 - New `windows-aarch64` target emits ARM64 PE/COFF: the AArch64 selector gains Windows pseudo-ops
   (`winimport`, `winexit`, `wintp`, `wintpset`, `winunsupported`) that expand into an indirect IAT
   call with the 64-byte Win64 ARM64 home space, the TEB-through-`x18` user pointer and traps for

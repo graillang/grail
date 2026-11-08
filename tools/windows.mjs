@@ -125,6 +125,10 @@ export function inspectImage(executable) {
   return command(['llvm-readobj', '--file-headers', '--sections', '--coff-imports', executable]).stdout.toString();
 }
 
+export function rawSection(object, section) {
+  return command(['llvm-objdump', '-s', '-j', section, object]).stdout.toString();
+}
+
 export function inspectRelocations(object) {
   return command(['llvm-readobj', '--relocations', object]).stdout.toString();
 }

@@ -124,24 +124,76 @@ argument uses `%r10`→`x6`. `raw_win32` therefore emits only the argument moves
 alignment) and moves the `x0` result back to the internal `x9`. `raw_map` (`VirtualAlloc`) sets
 `x0=0`, `x1=size`, `x2=MEM_COMMIT|MEM_RESERVE`, `x3=PAGE_READWRITE` before `winimport`.
 
+Frame allocation uses a dedicated `framesub` pseudo-op, which lowers to
+`movz x10,#((.F<n>)&65535); movk x10,#(((.F<n>)>>16)&65535),lsl #16; sub sp,sp,x10` instead of the
+checked-arithmetic subtraction used for ordinary user code. That keeps the prologue a plain SP
+adjustment whose delta is exactly the `.set` frame value, which is what the unwind description
+must record.
+
 The entry stub is the same `grail_entry` shape: zero the three process-state words, align SP
 (`andq $-16,%rsp` lowers to `and sp,sp,#...`), call `rt_thread_init` (which parses the Win32
 command line) and call the Grail entry. Import libraries are the same short-import objects with
 `Machine = 0xAA64`, assembled with `clang --target=aarch64-pc-windows-msvc` and linked with
 `lld-link /machine:arm64`.
 
+### ARM64 unwind data
+
+Windows ARM64 has two unwind encodings: a packed 32-bit form inside the `.pdata` entry, and the
+unpacked form whose `.pdata` word is an RVA to an `.xdata` structure. LLVM's ARM64 assembler
+builds both from armasm-style directives, so the compiler describes the prologue it emitted:
+
+```
+f_main_main:
+.seh_proc f_main_main
+stp x29,x30,[sp,#-16]!
+.seh_save_regp x29, 0
+mov x10,sp
+.seh_nop
+mov x29,x10
+.seh_set_fp
+movz x10,#((.F1)&65535)
+.seh_nop
+movk x10,#(((.F1)>>16)&65535),lsl #16
+.seh_nop
+sub sp,sp,x10
+.seh_stackalloc 80
+.seh_endprologue
+...
+.seh_endproc
+```
+
+The assembler validates that the directives account for every prologue byte and then encodes a
+**full `.xdata` record** (`ExceptionRecord: .xdata`, packed flag clear). That is not an omission:
+the packed form cannot express this prologue. In the packed word, `RegI` counts consecutive
+integer saves starting at `x19` and `RegF` counts floating-point pairs starting at `d8`; a lone
+`x29/x30` frame-pointer save (which is exactly what Grail emits) has no packed encoding, and
+`llvm-readobj` confirms that `RegI=12` means `x19..x30`, not "just the pair".
+
+Coverage and limits:
+
+- Every canonical frame-pointer function gets a record: the `hello` image has 240
+  RUNTIME_FUNCTION records for 240 `.def` functions, a 0x780-byte exception directory
+  (8 bytes each) and 2880 bytes of `.xdata`.
+- Leaf functions (no prologue instructions) correctly get no record; the assembler emits nothing
+  for an empty `.seh_proc` scope, which is the platform's leaf representation.
+- A frame that the pass does not recognise keeps no record rather than an inaccurate one, and a
+  `.seh_endproc` is kept inside `.text` (the trailing `rt_state` `.bss` block ends the last
+  function).
+- `.D<ty>` drop thunks still have a conditional prologue (the function tests its argument before
+  saving `%r12/%r13`), so no single unwind description is valid for them; that stays remaining
+  work together with the x86-64 exception personality.
+
 Static evidence for the hello image: object `Format: COFF-ARM64`, `IMAGE_FILE_MACHINE_ARM64
 (0xAA64)`, `grail_entry` in `.text`, relocations `IMAGE_REL_ARM64_PAGEBASE_REL21`,
-`PAGEOFFSET_12A/12L` and `BRANCH26`; image PE32+ console with a nonzero entry RVA and a
-`kernel32.dll` import descriptor. Four programs (hello, integer printing, file write/read, full
-argv list) are compiled and inspected by `tools/windows.mjs check`.
+`PAGEOFFSET_12A/12L` and `BRANCH26`; `.pdata`/`.xdata` sections; image PE32+ console with a
+nonzero entry RVA, a `kernel32.dll` import descriptor and a non-empty exception directory. Four
+programs (hello, integer printing, file write/read, full argv list) are compiled and inspected by
+`tools/windows.mjs check`.
 
-ARM64 limits: no `.pdata`/`.xdata` yet (Windows ARM64 wants packed unwind entries, which the
-x86-only `.seh_*` pass does not produce), so frames are not described; the runtime gaps
-(threads, sockets, directory streams, `mremap`, ANSI-only paths, integer-only import arguments)
-are the same as x86-64. Execution is not testable on this host: Wine on x86-64 cannot run an
-ARM64 PE image and `qemu-aarch64-static` is a Linux-ELF emulator, so ARM64 acceptance requires an
-ARM64 Windows host, ARM64 Wine, or a Windows-on-ARM machine.
+ARM64 limits: the runtime gaps (threads, sockets, directory streams, `mremap`, ANSI-only paths,
+integer-only import arguments) are the same as x86-64. Execution is not testable on this host:
+Wine on x86-64 cannot run an ARM64 PE image and `qemu-aarch64-static` is a Linux-ELF emulator, so
+ARM64 acceptance requires an ARM64 Windows host, ARM64 Wine, or a Windows-on-ARM machine.
 
 ## Verification
 
@@ -161,14 +213,16 @@ validated statically. For every x86-64 case it asserts:
 - the ARM64 cases produce a `COFF-ARM64` / `IMAGE_FILE_MACHINE_ARM64` object with the page/offset/
   branch relocations, an ARM64 PE32+ console image and the expected kernel32 imports, and contain
   no x86 instruction spelling;
+- every ARM64 function has an `.xdata` record whose `FunctionLength` is a positive multiple of 4,
+  whose prologue contains `stp x29, x30` and `mov fp, sp`, and whose recorded frame size equals
+  the `.set .F<n>` value the compiler chose; `.pdata` words carry the RVA form (packed bit clear)
+  and the image exception directory is exactly 8 bytes per function;
 - `windows-riscv64` is rejected with a diagnostic without clobbering an existing artifact;
 - the same programs still build and *run* as Linux ELF (x86-64), including identical argv
   behaviour, and still build as Linux AArch64 and RISC-V ELF.
 
 ## ABI limits of the current backend
 
-- **x86-64 only `.pdata`.** Windows ARM64 images have no exception directory (packed unwind
-  entries are not emitted); the x86-64 description still lacks an exception personality.
 - **Unwind data without an exception personality.** Frames are described, so a debugger or
   `RtlVirtualUnwind` can walk them, but there is no `.pdata`-driven `__C_specific_handler`
   personality, no `RaiseException` panic path and no handler registration. Hardware faults and
@@ -194,7 +248,7 @@ validated statically. For every x86-64 case it asserts:
 ## Remaining work
 
 1. Exception personality and panics: `RaiseException` plus a handler, then unwinding through
-   drop thunks (they need unwind records of their own or a reshaped prologue).
+   drop thunks (their conditional prologue needs reshaping before any description is valid).
 2. Optimizer support for the `.def` function form, including describing promoted registers.
 3. Threads: `CreateThread` with a Win64-compatible thunk, `WaitForSingleObject`, and
    `WaitOnAddress`/SRW locks to replace futex and the scheduler's epoll boundary.

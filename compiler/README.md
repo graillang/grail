@@ -99,9 +99,10 @@ MSVC `.def` function records, a `grail_entry` PE entry point, Win64 import calls
 `raw_win32`, and COFF short-import libraries written by `tools/windows.mjs`, linked with
 `lld-link`. Console, file, time, exit-code and argv programs run under Wine
 (`bun tools/windows.mjs check`). The portable runtime is shared and the OS boundary selects
-`compiler/os-linux.grl` or `compiler/os-windows.grl`. Frames get `.pdata`/`.xdata` unwind records
-on x86-64 only, and without an exception personality; ARM64 emits no `.pdata` yet. Threads,
-sockets, directory streams and `mremap` are not implemented. See
+`compiler/os-linux.grl` or `compiler/os-windows.grl`. x86-64 frames get `.pdata`/`.xdata`
+descriptions from `.seh_*` directives and ARM64 frames get full `.xdata` records from the ARM64
+assembler (the packed form cannot encode a lone `x29/x30` save); neither has an exception
+personality. Threads, sockets, directory streams and `mremap` are not implemented. See
 [docs/design/windows-backend.md](../docs/design/windows-backend.md).
 macOS and other operating systems are not implemented; sharing a CPU does not imply sharing an
 executable format or syscall ABI.

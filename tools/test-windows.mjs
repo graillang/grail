@@ -6,7 +6,7 @@ import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import assert from 'node:assert/strict';
 import { command, compileProgram as compileElf, execute, root } from './native.mjs';
-import { compileProgram, headers, inspectImage, inspectObject, inspectRelocations, inspectUnwind, kernel32, windowsAarch64, windowsTarget } from './windows.mjs';
+import { compileProgram, headers, inspectImage, inspectObject, inspectRelocations, inspectUnwind, kernel32, rawSection, windowsAarch64, windowsTarget } from './windows.mjs';
 
 const elfTarget = 'x86_64';
 
@@ -155,6 +155,29 @@ export async function check(compiler) {
     for (const symbol of importSlots(built.object)) {
       assert.ok(kernel32.includes(symbol.replace('__imp_', '')), `${name}/${windowsAarch64}: no short import for ${symbol}`);
     }
+    // Unwind evidence: one .xdata record per function, with the frame size the compiler set.
+    const defs = (assembly.match(/^\.def /gm) ?? []).length;
+    const frames = [...assembly.matchAll(/^\.set \.F\d+,(\d+)$/gm)].map(m => Number(m[1]));
+    const records = inspectUnwind(built.object).split('RuntimeFunction {').slice(1);
+    assert.equal(records.length, defs, `${name}/${windowsAarch64}: ${records.length} records for ${defs} functions`);
+    assert.equal(frames.length, defs, `${name}/${windowsAarch64}: frame table does not match functions`);
+    for (let i = 0; i < records.length; i++) {
+      const record = records[i];
+      assert.match(record, /ExceptionRecord: \.xdata/, `${name}/${windowsAarch64}: record ${i} is not an .xdata record`);
+      const length = Number(record.match(/FunctionLength: (\d+)/)[1]);
+      assert.ok(length > 0 && length % 4 === 0, `${name}/${windowsAarch64}: record ${i} has length ${length}`);
+      const frame = Number(record.match(/sub sp, #(\d+)/)[1]);
+      assert.equal(frame, frames[i], `${name}/${windowsAarch64}: record ${i} frame ${frame} != .set frame ${frames[i]}`);
+      assert.match(record, /stp x29, x30/, `${name}/${windowsAarch64}: record ${i} misses the frame-pointer pair`);
+      assert.match(record, /mov fp, sp/, `${name}/${windowsAarch64}: record ${i} misses the frame-pointer setup`);
+    }
+    // The .pdata words are RVA pairs (packed form would set bit 0); the assembler emits .xdata.
+    const pdataWords = [...rawSection(built.object, '.pdata').matchAll(/([0-9a-f]{8}) ([0-9a-f]{8})/g)];
+    assert.equal(pdataWords.length, defs, `${name}/${windowsAarch64}: .pdata size`);
+    for (const [, , unwind] of pdataWords) {
+      assert.equal(Number.parseInt(unwind, 16) & 3, 0, `${name}/${windowsAarch64}: packed flag set with an .xdata pointer`);
+    }
+
     const relocations = inspectRelocations(built.object);
     for (const kind of ['IMAGE_REL_ARM64_PAGEBASE_REL21', 'IMAGE_REL_ARM64_PAGEOFFSET_12L', 'IMAGE_REL_ARM64_BRANCH26']) {
       assert.ok(relocations.includes(kind), `${name}/${windowsAarch64}: missing ${kind}`);
@@ -169,6 +192,9 @@ export async function check(compiler) {
     assert.notEqual(Number.parseInt(image.match(/AddressOfEntryPoint\s+([0-9a-f]+)/)[1], 16), 0, `${name}/${windowsAarch64}: no entry point`);
     const imported = [...imageHeaders.matchAll(/^\s+Symbol: (\S+)/gm)].map(m => m[1]);
     assert.ok(imported.includes('ExitProcess') && imported.includes('WriteFile'), `${name}/${windowsAarch64}: kernel32 imports missing`);
+    const pdataDir = image.match(/Entry 3 ([0-9a-f]+) ([0-9a-f]+)\s+Exception Directory \[\.pdata\]/);
+    assert.ok(pdataDir, `${name}/${windowsAarch64}: image has no .pdata directory`);
+    assert.equal(Number.parseInt(pdataDir[2], 16), defs * 8, `${name}/${windowsAarch64}: exception directory size`);
     passed++;
     console.log(`windows-aarch64 ${name}: COFF-ARM64 object + ARM64 PE image verified (static, no ARM64 runner)`);
   }
