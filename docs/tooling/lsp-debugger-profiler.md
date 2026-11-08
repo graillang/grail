@@ -1,9 +1,9 @@
 # LSP, debugger and profiler integration plan
 
 Status: **LSP MVP implemented** (JSON-RPC lifecycle, didOpen/didChange and
-compiler-sourced diagnostics) and **DWARF `.debug_line` implemented for Linux
-x86-64**. Debugger attach, breakpoints, variable DIEs and the profiler remain
-design only.
+compiler-sourced diagnostics) and **DWARF `.debug_line` + `.debug_info`
+implemented for Linux x86-64**. Debugger attach, breakpoints and the profiler
+remain design only.
 The build, test and distribution foundation in
 [cross-platform-ci.md](cross-platform-ci.md) defines the artifact and lane
 contract these tools ship through.
@@ -130,28 +130,36 @@ Remaining implementation rules:
 ## Implemented DWARF line tables (Linux x86-64)
 
 `grail build --debug` and the raw `grail --debug ...` compiler form emit
-`.file`/`.loc` directives for Linux x86-64 only; clang's assembler turns them
-into `.debug_line`. Statement granularity is line/column accurate, including
-statements that begin by pushing a string literal (the compiler re-asserts the
-last `.loc` after each `.popsection`).
+`.file`/`.loc` directives plus a `.debug_info` compile unit for Linux x86-64
+only; clang's assembler turns the locations into `.debug_line`. Statement
+granularity is line/column accurate, including statements that begin by
+pushing a string literal (the compiler re-asserts the last `.loc` after each
+`.popsection`).
 
 ```sh
 grail build --debug
 grail debug lines target/hello
-# llvm-dwarfdump --debug-line target/hello, or readelf --debug-dump=decodedline
+grail debug info target/hello
 llvm-dwarfdump --debug-line target/hello
+llvm-dwarfdump --debug-info target/hello
 ```
 
-`grail debug lines` uses `llvm-dwarfdump` and falls back to `readelf`
-(`GRAIL_DWARFDUMP`/`GRAIL_READELF` override the tools). `tools/test-debug-lines.mjs`
-builds a fixture with `--debug`, verifies the file/line rows with
-`llvm-dwarfdump`, exercises the inspection command, checks that a normal build
-has no line table, and checks that `--debug` is rejected for AArch64.
+`grail debug lines|info` use `llvm-dwarfdump` and fall back to `readelf`
+(`GRAIL_DWARFDUMP`/`GRAIL_READELF` override the tools). `.debug_info` contains
+a DWARF v4 compile unit naming the entry source, and one `DW_TAG_subprogram`
+per emitted function with `DW_AT_name`, `DW_AT_linkage_name`, `DW_AT_low_pc`,
+`DW_AT_high_pc`, `DW_AT_decl_file`, `DW_AT_decl_line` and
+`DW_AT_frame_base` (`DW_OP_reg6`/rbp). Parameters and locals are
+`DW_TAG_formal_parameter`/`DW_TAG_variable` DIEs with declaration lines and
+`DW_OP_fbreg` stack locations. Optimisation is skipped in debug builds so slots
+stay live. `tools/test-debug-lines.mjs` verifies line rows, subprogram ranges,
+parameter/local names and locations, the `grail debug info` output, the plain
+build's lack of debug sections, and the AArch64 rejection.
 
-Not implemented yet: `.debug_info` compile units/variable DIEs, inlining or
-column-accurate expression mapping, gdb/lldb/DAP attach, breakpoints and
-profiling annotations. `--debug` deliberately fails on Windows and macOS
-instead of emitting a half-supported table.
+Not implemented yet: type DIEs, inlining/column-accurate expression mapping,
+variable lifetime ranges, gdb/lldb/DAP attach, breakpoints and profiling
+annotations. `--debug` deliberately fails on Windows and macOS instead of
+emitting a half-supported table.
 
 ## Phase 2: debugger (DAP)
 
@@ -166,10 +174,9 @@ Required compiler work, in order:
 2. **Function symbols.** Emit `.type name,@function`/`.size` and a stable
    unmangled alias (`.globl grail$module$fn`) so breakpoints can resolve.
    Mangled internal names remain for linking.
-3. **Variable information.** Emit DWARF `.debug_info` DIEs for parameters and
-   locals with location lists; generate location expressions from the existing
-   slot assignment in `optimize.grl`. Without this, "step" and "break" work but
-   "print variable" does not.
+3. **Variable information (basic DIEs done).** Parameters and locals now have
+   `DW_OP_fbreg` stack locations from their slots; location lists for values
+   that move between registers and type DIEs remain.
 4. **Debug build mode.** `grail build --debug` disables inlining/slot
    forwarding where it would hide user frames, and writes an unstripped
    executable plus a `.grail.json` source map.
@@ -190,8 +197,8 @@ Testing: fixture programs with known line/variable expectations, automated
 breakpoint/step transcripts per OS in CI. Distribution adds `grail-debug` to the
 package only on platforms with an implemented backend.
 
-Remaining blockers: no `.debug_info` variable DIEs, no debugger adapter/attach,
-and no Windows/macOS line tables.
+Remaining blockers: no type DIEs or location lists, no debugger adapter/attach,
+and no Windows/macOS debug sections.
 
 ## Phase 3: profiler
 

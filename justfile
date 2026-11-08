@@ -126,7 +126,7 @@ objects platform:
 macos-check:
     bun tools/test-macos.mjs
 
-# Verify DWARF .debug_line rows and `grail debug lines` (requires a built compiler).
+# Verify DWARF .debug_line/.debug_info and `grail debug lines|info` (requires a compiler).
 debug-lines-test:
     bun tools/test-debug-lines.mjs
 

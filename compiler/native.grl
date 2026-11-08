@@ -170,6 +170,29 @@ struct Member {
     field: u64,
     place: u64
 }
+struct DebugVar {
+    name: u8[],
+    slot: u64,
+    line: u64,
+    param: u64
+}
+struct DebugSite {
+    file: u64,
+    line: u64,
+    start: u64,
+    end: u64,
+    params: u64
+}
+struct DebugFunc {
+    name: u8[],
+    module: u8[],
+    file: u64,
+    line: u64,
+    start: u64,
+    end: u64,
+    params: u64,
+    vars: DebugVar[]
+}
 struct C {
     src: u8[],
     toks: Tok[],
@@ -180,6 +203,8 @@ struct C {
     plat: u64,
     // Emit .file/.loc DWARF line info (Linux x86-64 native output only).
     debug: u64,
+    debug_funcs: DebugFunc[],
+    debug_vars: DebugVar[],
     arg_offset: u64,
     overflow: u64,
     default_u64: u64,
@@ -387,6 +412,235 @@ fn debug_locs<a>(text: &a [u8]) -> u8[] {
             out.push(line[k]);
         }
     }
+    return out;
+}
+fn source_line<a>(c: &a C, pos: u64) -> u64 {
+    mut line = 1;
+    if c.toks.len() <= pos {
+        return line;
+    }
+    st := c.toks[pos].start;
+    for i in st {
+        if c.src[i] == 10 {
+            line += 1;
+        }
+    }
+    return line;
+}
+// ---- DWARF .debug_info emission (Linux x86-64) ----
+fn dput<a, b>(out: (&a mut u8[]), text: &b [u8]) -> unit {
+    for i in text.len() {
+        out.push(text[i]);
+    }
+    return ();
+}
+fn dnum<a>(out: (&a mut u8[]), n: u64) -> unit {
+    if 9 < n {
+        dnum(&mut out, div(n, 10));
+    }
+    out.push(48 + n % 10);
+    return ();
+}
+fn duleb<a>(out: (&a mut u8[]), n: u64) -> unit {
+    dput(&mut out, view(".uleb128 "));
+    dnum(&mut out, n);
+    dput(&mut out, view("\n"));
+    return ();
+}
+fn dpath<a, b>(out: (&a mut u8[]), text: &b [u8]) -> unit {
+    for i in text.len() {
+        b := text[i];
+        if (b == 92) + (b == 34) {
+            out.push(92);
+        }
+        out.push(b);
+    }
+    return ();
+}
+fn dstring<a, b>(out: (&a mut u8[]), text: &b [u8]) -> unit {
+    dput(&mut out, view(".asciz \""));
+    dpath(&mut out, text);
+    dput(&mut out, view("\"\n"));
+    return ();
+}
+fn dattr<a>(out: (&a mut u8[]), code: u64, form: u64) -> unit {
+    dput(&mut out, view(".uleb128 "));
+    dnum(&mut out, code);
+    dput(&mut out, view("\n.uleb128 "));
+    dnum(&mut out, form);
+    dput(&mut out, view("\n"));
+    return ();
+}
+// Raw SLEB128 bytes for a negative value -n (n > 0), using exact floor division.
+fn sleb_neg<a>(out: (&a mut u8[]), n: u64) -> unit {
+    mut v: i64 = 0 - i64(n);
+    while 1 {
+        mut b: i64 = v % 128;
+        if b < 0 {
+            b = b + 128;
+        }
+        v = (v - b) / 128;
+        if ((v == 0) & (b < 64)) + ((v == i64(0) - i64(1)) & (64 <= b)) {
+            out.push(u64(b));
+            return ();
+        }
+        out.push(u64(b + 128));
+    }
+}
+// DW_OP_fbreg with a SLEB128 -offset, where offset is the rbp slot distance.
+fn dlocation<a>(out: (&a mut u8[]), slot: u64) -> unit {
+    mut expr = u8[];
+    expr.push(145);
+    sleb_neg(&mut expr, (slot + 1) * 8);
+    duleb(&mut out, expr.len());
+    for i in expr.len() {
+        dput(&mut out, view(".byte "));
+        dnum(&mut out, expr[i]);
+        dput(&mut out, view("\n"));
+    }
+    return ();
+}
+fn record_debug_func<a, b, d>(c: (&a mut C), name: &b [u8], module: &d [u8], site: &DebugSite) -> unit {
+    mut vars = DebugVar[];
+    for i in c.debug_vars.len() {
+        l := &c.debug_vars[i];
+        vars.push(
+            DebugVar {
+                name: copy_bytes(view(l.name)),
+                slot: l.slot,
+                line: l.line,
+                param: l.param
+            }
+        );
+    }
+    c
+        .debug_funcs
+        .push(
+            DebugFunc {
+                name: copy_bytes(view(name)),
+                module: copy_bytes(view(module)),
+                file: site.file,
+                line: site.line,
+                start: site.start,
+                end: site.end,
+                params: site.params,
+                vars: vars
+            }
+        );
+    return ();
+}
+fn debug_sections<a, b>(c: &a C, entry: &b [u8]) -> u8[] {
+    mut out = u8[];
+    if c.debug == 0 {
+        return out;
+    }
+    dput(&mut out, view(".section .debug_abbrev,\"\",@progbits\n"));
+    dput(&mut out, view(".Ldebug_abbrev:\n"));
+    // 1: compile unit, children.
+    duleb(&mut out, 1);
+    dput(&mut out, view(".uleb128 17\n.byte 1\n"));
+    dattr(&mut out, 0x25, 0x08);
+    dattr(&mut out, 0x13, 0x0b);
+    dattr(&mut out, 0x03, 0x08);
+    dattr(&mut out, 0x1b, 0x08);
+    dattr(&mut out, 0x11, 0x01);
+    dattr(&mut out, 0x12, 0x07);
+    dattr(&mut out, 0x10, 0x17);
+    dput(&mut out, view(".byte 0\n.byte 0\n"));
+    // 2: subprogram, children.
+    duleb(&mut out, 2);
+    dput(&mut out, view(".uleb128 46\n.byte 1\n"));
+    dattr(&mut out, 0x03, 0x08);
+    dattr(&mut out, 0x6e, 0x08);
+    dattr(&mut out, 0x11, 0x01);
+    dattr(&mut out, 0x12, 0x07);
+    dattr(&mut out, 0x3a, 0x0b);
+    dattr(&mut out, 0x3b, 0x0f);
+    dattr(&mut out, 0x40, 0x18);
+    dput(&mut out, view(".byte 0\n.byte 0\n"));
+    // 3: formal parameter, no children.
+    duleb(&mut out, 3);
+    dput(&mut out, view(".uleb128 5\n.byte 0\n"));
+    dattr(&mut out, 0x03, 0x08);
+    dattr(&mut out, 0x02, 0x18);
+    dattr(&mut out, 0x3b, 0x0f);
+    dput(&mut out, view(".byte 0\n.byte 0\n"));
+    // 4: local variable, no children.
+    duleb(&mut out, 4);
+    dput(&mut out, view(".uleb128 52\n.byte 0\n"));
+    dattr(&mut out, 0x03, 0x08);
+    dattr(&mut out, 0x02, 0x18);
+    dattr(&mut out, 0x3b, 0x0f);
+    dput(&mut out, view(".byte 0\n.byte 0\n"));
+    dput(&mut out, view(".byte 0\n"));
+
+    dput(&mut out, view(".section .debug_info,\"\",@progbits\n"));
+    dput(&mut out, view(".long .Ldebug_cu_end-.Ldebug_cu_start\n"));
+    dput(&mut out, view(".Ldebug_cu_start:\n.short 4\n.long .Ldebug_abbrev\n.byte 8\n"));
+    duleb(&mut out, 1);
+    dstring(&mut out, view("grail"));
+    dput(&mut out, view(".byte 12\n"));
+    dstring(&mut out, entry);
+    dstring(&mut out, view("."));
+    mut first_start = 0;
+    mut last_end = 0;
+    if c.debug_funcs.len() != 0 {
+        first_start = c.debug_funcs[0].start;
+        last_end = c.debug_funcs[c.debug_funcs.len() - 1].end;
+    }
+    if c.debug_funcs.len() == 0 {
+        dput(&mut out, view(".quad 0\n.quad 0\n.long 0\n"));
+    } else {
+        dput(&mut out, view(".quad .L"));
+        dnum(&mut out, first_start);
+        dput(&mut out, view("\n.quad .L"));
+        dnum(&mut out, last_end);
+        dput(&mut out, view("-.L"));
+        dnum(&mut out, first_start);
+        dput(&mut out, view("\n.long 0\n"));
+    }
+
+    for i in c.debug_funcs.len() {
+        f := &c.debug_funcs[i];
+        duleb(&mut out, 2);
+        dstring(&mut out, view(f.name));
+        mut link = u8[];
+        dput(&mut link, view("f_"));
+        for k in f.module.len() {
+            link.push(f.module[k]);
+        }
+        link.push(95);
+        for k in f.name.len() {
+            link.push(f.name[k]);
+        }
+        dstring(&mut out, view(link));
+        dput(&mut out, view(".quad .L"));
+        dnum(&mut out, f.start);
+        dput(&mut out, view("\n.quad .L"));
+        dnum(&mut out, f.end);
+        dput(&mut out, view("-.L"));
+        dnum(&mut out, f.start);
+        dput(&mut out, view("\n.byte "));
+        dnum(&mut out, f.file);
+        dput(&mut out, view("\n.uleb128 "));
+        dnum(&mut out, f.line);
+        dput(&mut out, view("\n.byte 1\n.byte 86\n"));
+        for j in f.vars.len() {
+            v := &f.vars[j];
+            mut code = 4;
+            if v.param != 0 {
+                code = 3;
+            }
+            duleb(&mut out, code);
+            dstring(&mut out, view(v.name));
+            dlocation(&mut out, v.slot);
+            dput(&mut out, view(".uleb128 "));
+            dnum(&mut out, v.line);
+            dput(&mut out, view("\n"));
+        }
+        dput(&mut out, view(".byte 0\n"));
+    }
+    dput(&mut out, view(".byte 0\n.Ldebug_cu_end:\n"));
     return out;
 }
 // Source line/column of the current token. The assembler turns .loc into .debug_line.
@@ -4495,6 +4749,10 @@ fn bind<a>(c: (&a mut C), name: u8[], ty: u64, id: u64, mutable: u64) -> unit {
     from := c.pos;
     to := c.scope_end;
     last := last_name(&mut c, view(name), from, to);
+    mut debug_name = u8[];
+    if c.debug != 0 {
+        debug_name = copy_bytes(view(name));
+    }
     c
         .locals
         .push(
@@ -4512,6 +4770,19 @@ fn bind<a>(c: (&a mut C), name: u8[], ty: u64, id: u64, mutable: u64) -> unit {
                 at: 0,
             }
         );
+    if c.debug != 0 {
+        line := source_line(&c, from);
+        c
+            .debug_vars
+            .push(
+                DebugVar {
+                    name: debug_name,
+                    slot: id,
+                    line: line,
+                    param: 0
+                }
+            );
+    }
     return ();
 }
 // ---- v3 C FFI: foreign declarations ----
@@ -4940,6 +5211,8 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     position := c.pos;
     out_mark := c.out.len();
     closure_mark := c.closures.len();
+    mut dstart = 0;
+    mut dend = 0;
     expect(&mut c, view("fn"));
     mut name = ident(&mut c);
     lifetime_parameters(&mut c);
@@ -4979,6 +5252,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         m = private_module(view(".inherent_"), c.inherent - 1);
     }
     exchange(&mut c.locals, Local[]);
+    exchange(&mut c.debug_vars, DebugVar[]);
     exchange(&mut c.resources, Resource[]);
     exchange(&mut c.next, 0);
     exchange(&mut c.scope_end, 0);
@@ -5006,6 +5280,13 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
             }
             id := fresh(&mut c);
             bind(&mut c, p, ty, id, 0);
+            if c.debug != 0 {
+                n := c.debug_vars.len();
+                if n != 0 {
+                    mut v = &mut c.debug_vars[n - 1];
+                    exchange(&mut v.param, 1);
+                }
+            }
             count = count + 1;
             if eat(&mut c, view(")")) {
                 break;
@@ -5124,6 +5405,10 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         c.out.push(10);
     }
     func_directive(&mut c, view(m), view(name), view(export_symbol), export);
+    if (c.debug != 0) & (c.validating == 0) {
+        dstart = label(&mut c);
+        mark(&mut c, dstart);
+    }
     export_name(&mut c, view(m), view(name), view(export_symbol), export);
     o(&mut c, view(":\npushq %rbp\nmovq %rsp,%rbp\n"));
     frame := label(&mut c);
@@ -5171,6 +5456,10 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     n := c.next;
     on(&mut c, div(n + 1, 2) * 16);
     c.out.push(10);
+    if (c.debug != 0) & (c.validating == 0) {
+        dend = label(&mut c);
+        mark(&mut c, dend);
+    }
     // A literal binding learned its type from a later use: discard this attempt and recompile.
     if c.retry {
         while out_mark < c.out.len() {
@@ -5187,6 +5476,16 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         func(&mut c, pass, public);
         exchange(&mut c.attempts, 0);
         return ();
+    }
+    if (c.debug != 0) & (c.validating == 0) {
+        site := DebugSite {
+            file: c.file - 1,
+            line: source_line(&c, position),
+            start: dstart,
+            end: dend,
+            params: count
+        };
+        record_debug_func(&mut c, view(name), view(m), &site);
     }
     exchange(&mut c.hints, u64[]);
     return ();
@@ -15943,6 +16242,8 @@ pub fn main() -> u64 {
         target: 0,
         plat: 0,
         debug: 0,
+        debug_funcs: DebugFunc[],
+        debug_vars: DebugVar[],
         arg_offset: 0,
         overflow: 1,
         default_u64: 0,
@@ -16341,8 +16642,12 @@ pub fn main() -> u64 {
         }
     }
     }
-    optimized := optimize::optimize(view(c.out));
-    mut out = optimized;
+    mut out = u8[];
+    if c.debug != 0 {
+        out = copy_bytes(view(c.out));
+    } else {
+        out = optimize::optimize(view(c.out));
+    }
     if c.plat == 1 {
         prefixed := darwinify(view(out));
         out = prefixed;
@@ -16357,6 +16662,10 @@ pub fn main() -> u64 {
         }
         if c.debug != 0 {
             out = debug_locs(view(out));
+            sections := debug_sections(&c, view(host::arg(2 + offset)));
+            for i in sections.len() {
+                out.push(sections[i]);
+            }
         }
         return host::write_file(view(path), view(with_link_notes(&c.libs, view(out))));
     }

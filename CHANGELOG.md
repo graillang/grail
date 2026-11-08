@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Added Linux x86-64 DWARF `.debug_info` compile units and DIEs on top of the
+  line table. `--debug` now emits a DWARF v4 compile unit naming the entry
+  source and one subprogram DIE per function with name, linkage name,
+  low/high pc, declaration file/line and an rbp frame base. Parameters and
+  locals get formal-parameter/variable DIEs with declaration lines and
+  `DW_OP_fbreg` stack locations; optimisation is skipped in debug builds so
+  slots stay live, and validation replays do not leak discarded DIEs.
+  `grail debug info BINARY` prints the unit through `llvm-dwarfdump` (readelf
+  fallback). Type DIEs, location lists, breakpoints/attach/DAP and non-Linux
+  debug sections remain follow-ups. The debug integration test now also checks
+  subprogram ranges, parameter/local names and locations.
 - Port Borg Agent's permission gates (`borg/`). `src/permission.grl` carries the three permission modes, the three approval decisions, and the rules a gate applies: the requested workspace root must sit under a canonical enrolled root, a path must be relative and free of traversal components, a symlink on the way is refused outright, and containment is component-wise so a `/w` root does not cover `/work`. The denial reasons are Borg's own strings, and an `allow_session` grant covers later calls of the same tool and scope while `allow_once` does not. The port now checks 921 reference lines over 200 documents, with `--anchors` verifying 74 copied snippets across thirteen source files.
 
 - Port Borg Agent's typed transcript events (`borg/`). `src/events.grl` carries the `SessionEvent` envelope and five `SessionEventKind` payloads — `session_started`, `session_titled`, `status_changed`, `message`, `message_delta` — with the serialization rules the Rust derive applies: an always-written `generated` flag, `usage_tokens` as a number, an always-written nullable `detail` and `delivery`, and `attachments` omitted when empty. An unknown kind is refused by name rather than half-decoded. Each event is compared on decoded fields, the exact wire text and a round-trip; the wire comparison caught `usage_tokens` being encoded as a string. The port now checks 890 reference lines over 173 documents, with `--anchors` verifying 66 copied snippets across twelve source files.
