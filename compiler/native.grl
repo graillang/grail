@@ -17251,7 +17251,7 @@ pub fn main() -> u64 {
         o(
             &mut c,
             view(
-                ".globl grail_entry\ngrail_entry:\nxorl %eax,%eax\nmovq %rax,rt_state(%rip)\nmovq %rax,rt_state+8(%rip)\nmovq %rax,rt_state+16(%rip)\nandq $-16,%rsp\ncall rt_thread_init\nmovq rt_state(%rip),%rdi\n"
+                ".globl grail_entry\ngrail_entry:\nxorl %eax,%eax\nmovq %rax,rt_state(%rip)\nmovq %rax,rt_state+8(%rip)\nmovq %rax,rt_state+16(%rip)\nleaq rt_win_thread_start(%rip),%rax\nmovq %rax,rt_state+3392(%rip)\nandq $-16,%rsp\ncall rt_thread_init\nmovq rt_state(%rip),%rdi\n"
             )
         );
     
@@ -17320,6 +17320,17 @@ pub fn main() -> u64 {
             )
         );
     } else {
+    if c.target == 4 {
+        // CreateThread's start routine on ARM64: the thread record arrives in x0, which is the
+        // first argument register of Grail's lowered calls too, and x19-x28/d8-d15 are
+        // callee-saved in both conventions; a framed call is the whole bridge.
+        o(
+            &mut c,
+            view(
+                "ud2\nrt_win_thread_start:\npushq %rbp\nmovq %rsp,%rbp\ncall rt_win_thread_main\npopq %rbp\nret\n.bss\n.p2align 3\nrt_state: .zero 4096\n"
+            )
+        );
+    } else {
     if (c.target == 3) + (c.target == 4) {
         o(&mut c, view("ud2\n.bss\n.p2align 3\nrt_state: .zero 4096\n"));
     } else {
@@ -17331,6 +17342,7 @@ pub fn main() -> u64 {
         } else {
             tls_bss(&mut c);
         }
+    }
     }
     }
     mut out = u8[];

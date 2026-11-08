@@ -4,6 +4,13 @@
 /* MSVC-target code that touches floating point references _fltused, normally from the CRT;
  * the Windows test images link with /nodefaultlib, so the shim defines it. */
 int _fltused = 0;
+/* Aggregate initialisers may lower to memset, which the CRT normally provides. */
+void *memset(void *d, int c, unsigned long long n)
+{
+    unsigned char *p = (unsigned char *)d;
+    while (n--) *p++ = (unsigned char)c;
+    return d;
+}
 #endif
 
 double c_fadd(double a, double b) { return a + b; }

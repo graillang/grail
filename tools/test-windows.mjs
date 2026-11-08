@@ -135,7 +135,7 @@ export async function check(compiler) {
 
   // windows-aarch64: PE/COFF for ARM64. There is no ARM64 Windows runner on this host, so these
   // cases are validated statically: assembly shape, COFF machine, relocations and the image.
-  const armCases = ['hello', 'integer-print', 'file-write-read', 'argument-list', 'com-interop', 'ffi-call-abi'];
+  const armCases = ['hello', 'integer-print', 'file-write-read', 'argument-list', 'com-interop', 'ffi-call-abi', 'thread-join', 'ffi-call-records'];
   for (const name of armCases) {
     const test = cases.find(c => c.name === name);
     const directory = join(work, `arm64-${name}`);
@@ -155,6 +155,12 @@ export async function check(compiler) {
       shims: test.shim ? [test.shim[windowsAarch64]] : [],
     });
     const assembly = readFileSync(built.assembly, 'utf8');
+    if (name === 'thread-join') {
+      // The ARM64 CreateThread bridge exists, is published by the entry, and is a framed call.
+      assert.match(assembly, /^rt_win_thread_start:\n/m, `${name}/${windowsAarch64}: no thread bridge`);
+      assert.match(assembly, /rt_win_thread_start[\s\S]*bl rt_win_thread_main/, `${name}/${windowsAarch64}: bridge does not call the thread main`);
+      assert.match(assembly, /adrp? x9,rt_win_thread_start|rt_win_thread_start@PAGE|:lo12:rt_win_thread_start/, `${name}/${windowsAarch64}: entry does not publish the bridge`);
+    }
     if (name === 'ffi-call-abi') {
       // AAPCS64 for direct extern calls: floats in d/s registers, f32 narrowed, stack arguments.
       for (const needle of ['fmov d1,x9', 'fcvt s1,d16', 'fmov x9,d0', 'sub sp,sp,#', 'str x9,[sp,#', 'sxtw x9,w9'])

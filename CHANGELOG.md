@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Child process output capture: `sys_grail::pipe()`, `spawn_with(program, args, stdin, stdout,
+  stderr)` (with `inherit()` for shared streams) and `read_to_end(file)`, over a new
+  `grail_ffi_process_spawn_stdio`. Executed on Linux (`/bin/sh`) and Windows under Wine
+  (`cmd.exe`). The Windows OS ABI returned an error at the end of an anonymous pipe
+  (`ERROR_BROKEN_PIPE`); it now reports a zero-length read, the portable EOF contract.
+- Windows ARM64 threads: the `CreateThread` start bridge `rt_win_thread_start` now exists on
+  ARM64 too and is published by the entry point; thread creation previously failed there. Static
+  checks only (no ARM64 Windows runner).
+
 - C records returned by value from direct and `cfn` calls: up to 16 bytes in `rax:rdx`, `x0:x1`
   or `a0:a1` (Win64: 1/2/4/8 bytes in `rax`), larger ones through a hidden result pointer in
   `rdi`/`rcx`/`a0` (shifting the arguments) or `x8` on AAPCS64. `tests/ffi/call_records.grl`

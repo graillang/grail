@@ -31,6 +31,7 @@ const cases = [
   { name: 'files', entry: 'tests/ffi-runtime/native.grl', stdout: 'ffi-runtime: ok' },
   { name: 'sockets', entry: 'tests/ffi-runtime/socket.grl', stdout: 'ffi-socket: ok' },
   { name: 'processes-threads', entry: 'tests/ffi-runtime/proc_thread_windows.grl', stdout: 'ffi-proc-thread: ok' },
+  { name: 'stdout-capture', entry: 'tests/ffi-runtime/capture_windows.grl', stdout: 'ffi-capture: ok' },
 ];
 for (const testCase of cases) {
   const directory = join(work, testCase.name);
@@ -43,4 +44,4 @@ for (const testCase of cases) {
     throw new Error(`ffi-runtime-windows ${testCase.name}: exit ${executed.status}\n${executed.stdout}${executed.stderr}`);
   }
 }
-console.log(`ffi-runtime-windows: ${cases.length} wrapper tests (files, sockets, processes/threads) executed under Wine through grail_ffi.dll`);
+console.log(`ffi-runtime-windows: ${cases.length} wrapper tests (files, sockets, processes/threads, stdout capture) executed under Wine through grail_ffi.dll`);

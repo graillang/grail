@@ -129,6 +129,13 @@ extern "C" lib "grail_ffi" fn grail_ffi_process_spawn(
     program: &[u8], arguments: &[u8]
 ) -> i64;
 extern "C" lib "grail_ffi" fn grail_ffi_process_handle() -> Process;
+extern "C" lib "grail_ffi" fn grail_ffi_process_spawn_stdio(
+    program: &[u8], arguments: &[u8], standard_input: File, standard_output: File, standard_error: File
+) -> i64;
+extern "C" lib "grail_ffi" fn grail_ffi_pipe() -> i64;
+extern "C" lib "grail_ffi" fn grail_ffi_inherit() -> File;
+extern "C" lib "grail_ffi" fn grail_ffi_pipe_read_end() -> File;
+extern "C" lib "grail_ffi" fn grail_ffi_pipe_write_end() -> File;
 extern "C" lib "grail_ffi" fn grail_os_process_wait(
     process: Process, out: ProcessStatus
 ) -> i64;
@@ -251,6 +258,27 @@ pub fn read_bytes(file: File, capacity: u64) -> u8[] |? Error {
     mut out = u8[];
     for i in count {
         out.push(buffer[i]);
+    }
+    return out;
+}
+
+// Reads until end of file (for a pipe: until every write end is closed).
+pub fn read_to_end(file: File) -> u8[] |? Error {
+    mut buffer = u8[];
+    mut i = 0;
+    while i < 4096 {
+        buffer.push(0);
+        i = i + 1;
+    }
+    mut out = u8[];
+    loop {
+        count := read(file, &mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        for j in count {
+            out.push(buffer[j]);
+        }
     }
     return out;
 }
@@ -566,6 +594,51 @@ pub fn spawn(program: &[u8], arguments: &[u8]) -> Process |? Error {
     mut status: i64 = 0;
     unsafe {
         status = grail_ffi_process_spawn(program, arguments);
+    }
+    if status < 0 {
+        return Error::Status(status);
+    }
+    unsafe {
+        return grail_ffi_process_handle();
+    }
+}
+
+// A unidirectional pipe: bytes written to `write` are read from `read`. Both ends are owned
+// File handles; close each exactly once.
+pub struct Pipe {
+    read: File,
+    write: File
+}
+
+pub fn pipe() -> Pipe |? Error {
+    mut status: i64 = 0;
+    unsafe {
+        status = grail_ffi_pipe();
+    }
+    if status < 0 {
+        return Error::Status(status);
+    }
+    unsafe {
+        return Pipe { read: grail_ffi_pipe_read_end(), write: grail_ffi_pipe_write_end() };
+    }
+}
+
+// Spawns `program` with explicit standard streams; pass `inherit()` for a stream the child
+// should share with this process. The child gets duplicates, so the caller still owns and must
+// close each File it passed - and must close a pipe's write end before reading it to EOF.
+// The stream value that makes spawn_with's child share this process's stream.
+pub fn inherit() -> File {
+    unsafe {
+        return grail_ffi_inherit();
+    }
+}
+
+pub fn spawn_with(
+    program: &[u8], arguments: &[u8], standard_input: File, standard_output: File, standard_error: File
+) -> Process |? Error {
+    mut status: i64 = 0;
+    unsafe {
+        status = grail_ffi_process_spawn_stdio(program, arguments, standard_input, standard_output, standard_error);
     }
     if status < 0 {
         return Error::Status(status);
