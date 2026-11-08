@@ -55,13 +55,16 @@ tools/abi-test.mjs        test runner (also `just abi-test`)
 | Time | header | n/a | complete subset | skeleton | skeleton |
 | Threads/sync | header | handle table | complete subset | skeleton | skeleton |
 | Dynamic libraries | header | handle table | complete subset | skeleton | skeleton |
-| Processes | header | options/status layout | explicit UNSUPPORTED | skeleton | skeleton |
-| Sockets/DNS | header | address layout | explicit UNSUPPORTED | skeleton | skeleton |
+| Processes | header | options/status layout | fork/execve/wait4 subset | skeleton | skeleton |
+| Sockets/DNS | header | address layout | TCP/UDP IPv4+IPv6, options, DNS | skeleton | skeleton |
 
 "Complete subset" means the documented functions are implemented for the host POSIX surface;
-the shipping Grail implementation must reproduce the semantics without the C layer. Processes
-and sockets stay in the Grail runtime because they are tied to its fork/exec, PATH search and
-readiness reactor.
+the shipping Grail implementation must reproduce the semantics without the C layer. The Linux
+reference now includes child processes (fork/execve/wait4, argv/environment/cwd/stdio, PATH
+search, wait-with-timeout, terminate/kill) and TCP/UDP sockets (IPv4 and IPv6 when the probe
+succeeds, `accept4`, send/receive, shutdown, address queries, non-blocking mode, the documented
+socket options and `getaddrinfo`). Readiness registration remains private to the shipping
+runtime, and the C layer must not become a second scheduler.
 
 ## Linux reference backend
 
@@ -74,7 +77,12 @@ Deliberate limits, all visible in the API or capability word:
 
 - `created_ns` is 0 (Linux `stat` has no birth time without `statx`; the shipping runtime
   should use `statx` and report `STATX_BTIME`).
-- Process spawn, sockets and DNS are not implemented.
+- Process spawn/wait/timeout/terminate/kill are implemented with `fork`/`execve`/`wait4`; only
+  async-signal-safe calls run between fork and exec, and an exec-error pipe reports the child's
+  `errno`. `GRAIL_PROC_NO_WINDOW` is accepted as a no-op on Linux. `close` does not wait or
+  kill, so an unreaped child can remain a zombie until process exit (documented in the header).
+- Sockets are blocking by default and use `accept4(SOCK_CLOEXEC)`. IPv6 capability is probed at
+  init. Unix-domain sockets are not part of this contract version.
 - `realpath` uses the host C library's allocation; this is acceptable only in the oracle.
 - Directory iteration uses `readdir`/`d_type` with an `fstatat` fallback.
 - File descriptors are opened `O_CLOEXEC`; the process backend must duplicate explicit
@@ -132,6 +140,9 @@ and must be converted to UTF-16 with `MultiByteToWideChar(CP_UTF8, MB_ERR_INVALI
   `AI_ADDRCONFIG` semantics documented. Sockets are `SOCKET` values, not file handles, so the
   handle table must keep them in a distinct domain. `WSAStartup` failure must fail
   `grail_os_init`, not each call.
+
+C-to-Graal callback invocation is a later FFI increment. Until it lands, allocator hooks and
+thread entry points remain on the C/backend side and are not claimed as Grail-callable.
 
 Prerequisite outside this directory: Grail codegen currently uses a SysV-like integer
 convention. Win64 uses `rcx, rdx, r8, r9`, 32 bytes of shadow space, different callee-saved

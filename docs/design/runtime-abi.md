@@ -3,8 +3,8 @@
 2026-11-08. Status: **proposal plus scaffolded implementation**. The C headers under
 `include/grail/` are the normative contract. Portable pieces (versioning, error mapping,
 Unicode, lexical paths) are implemented and tested; the Linux reference shim implements files, directories,
-environment, time, threads and dynamic libraries; processes, sockets and the Windows/macOS
-shims remain skeletons with documented mappings. Nothing here is
+environment, time, threads, dynamic libraries, child processes and TCP/UDP sockets; the
+Windows/macOS shims remain skeletons with documented mappings. Nothing here is
 linked into Grail programs yet, and no C source is part of the compiler or runtime build.
 
 The runtime today is Linux-only: `compiler/runtime.grl` maps portable operation IDs to Linux
@@ -125,6 +125,9 @@ pair, structs crossing by reference, opaque `handle`, linear ownership) maps dir
   by-value aggregate support is required.
 - Every extern call is already unsafe, matching the fact that OS handles are linear
   resources and every closer is an explicit declaration.
+- C-to-Graal callbacks are a later FFI increment. Until then the allocator hooks and thread
+  entry points stay on the C/backend side; no Grail wrapper may assume C can call generated
+  Grail code.
 - The ABI does not read or clear `errno`; it returns portable statuses and exposes raw
   detail through `grail_os_error_last`. An FFI-side `errno()` accessor is therefore not
   needed for this boundary.
@@ -138,8 +141,8 @@ pair, structs crossing by reference, opaque `handle`, linear ownership) maps dir
 | Environment | `grail_env.h` | iterator rules | startup snapshot, get/set/unset/enumerate | skeleton |
 | Files/directories | `grail_fs.h` | handle table | open/read/write/seek/stat/close, dirs, pipes, mkdir/remove/rename/realpath | skeleton |
 | Paths | `grail_path.h` | POSIX + Windows rules, both tested | cwd, executable | skeleton |
-| Processes | `grail_proc.h` | options/status layout | explicit UNSUPPORTED | skeleton |
-| Sockets | `grail_socket.h` | address layout | explicit UNSUPPORTED | skeleton |
+| Processes | `grail_proc.h` | options/status layout | fork/execve/wait4 subset | skeleton |
+| Sockets | `grail_socket.h` | address layout | TCP/UDP IPv4+IPv6, options, DNS | skeleton |
 | Threads/sync | `grail_thread.h` | handle table | pthread thread, mutex, condvar | skeleton |
 | Dynamic libraries | `grail_dl.h` | handle table | dlopen/dlsym/dlclose | skeleton |
 
@@ -158,8 +161,9 @@ is clear. It never means a silent success or a sequential fallback under a concu
 - `tests/abi/test_paths.c`: POSIX and Windows lexical rules, compiled twice.
 - `tests/abi/test_linux_backend.c`: initialized Linux reference backend covering environment
   seeding/mutation/iteration, clocks and sleep, file and directory I/O, pipes, thread
-  spawn/join/detach, mutex/condvar behaviour, dlopen/dlsym, explicit UNSUPPORTED for processes
-  and sockets, and zero tracked allocation bytes after shutdown.
+  spawn/join/detach, mutex/condvar behaviour, dlopen/dlsym, child process argv/environment/
+  cwd/stdio/PATH/exit-status/timeout/terminate/kill, loopback TCP and UDP, socket options,
+  IPv4 name resolution, negative-errno mapping and zero tracked allocation bytes after shutdown.
 - `tests/abi/test_skeleton.c`: links each non-Linux skeleton and verifies that initialization
   fails closed, capabilities stay zero, raw error detail is clear and every representative
   entry point returns `GRAIL_E_UNSUPPORTED`.
@@ -174,10 +178,11 @@ The safe Grail surface that will wrap this contract is designed in [runtime-api.
 
 ## Remaining native backend work
 
-Linux (to move from reference shim to the shipping Grail runtime): process spawn/wait/kill
-with `clone`/`execve`/`wait4`, socket create/bind/listen/accept/connect/send/recv/resolve with
-the readiness reactor and `accept4`, `statx` birth time, and migrating the reference C
-semantics into `runtime.grl` without exposing raw syscalls to safe code.
+Linux (to move from the reference shim to the shipping Grail runtime): port the implemented
+fork/execve/wait4 and argv/environment/cwd/stdio/PATH semantics into `runtime.grl`; port the
+implemented TCP/UDP/`accept4`/`getaddrinfo` subset behind the readiness reactor; use `statx`
+for birth time; and keep raw descriptors and syscalls out of safe code. The C reference is the
+behavioural oracle, not a replacement runtime.
 
 Windows: UTF-16 conversion and `\\?\` path handling; `CreateFileW`, `ReadFile`/`WriteFile`,
 `GetFileInformationByHandleEx`, directory enumeration; `CreateProcessW` with normative MSVCRT

@@ -89,8 +89,9 @@ GRAIL_API grail_status GRAIL_CALL grail_os_process_kill(grail_process process);
 GRAIL_API grail_status GRAIL_CALL grail_os_process_id(grail_process process, uint64_t *out);
 /*
  * Consumes the handle.  It does not wait for or kill the child; a still-running
- * child becomes unreachable and continues on both POSIX and Windows.  The
- * runtime must arrange ownership explicitly.
+ * child becomes unreachable and continues on both POSIX and Windows.  On POSIX
+ * an unreaped child can remain a zombie until the process exits.  The runtime
+ * must arrange ownership explicitly.
  */
 GRAIL_API grail_status GRAIL_CALL grail_os_process_close(grail_process process);
 

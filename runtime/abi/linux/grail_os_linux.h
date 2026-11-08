@@ -40,6 +40,8 @@ typedef struct grail_linux_state {
     grail_handle_table mutexes;
     grail_handle_table condvars;
     grail_handle_table libraries;
+    grail_handle_table processes;
+    grail_handle_table sockets;
     char **env_names;
     char **env_values;
     uint64_t env_count;
@@ -55,6 +57,9 @@ char *grail_linux_copy_text(const uint8_t *bytes, uint64_t length);
 void grail_linux_free_text(char *text);
 void grail_linux_set_error(uint64_t domain, uint64_t code);
 grail_status grail_linux_errno(int error_number);
+
+/* Resolves a live file handle to its descriptor without transferring ownership. */
+grail_status grail_linux_file_descriptor(grail_file handle, int *descriptor);
 
 /* Registers the native environment propagation hook for one entry. */
 int grail_linux_native_setenv(const char *name, const char *value);

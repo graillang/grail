@@ -353,30 +353,326 @@ static void test_dynamic_library(void) {
                            &missing) == GRAIL_E_NOT_FOUND);
 }
 
-static void test_unsupported_domains(void) {
+
+static void process_options(grail_process_options *options) {
+    memset(options, 0, sizeof(*options));
+    options->struct_size = sizeof(*options);
+    options->abi_version = GRAIL_ABI_VERSION;
+}
+
+static uint64_t read_pipe(grail_file file, char *buffer, uint64_t capacity) {
+    uint64_t total = 0;
+    while (total < capacity) {
+        uint64_t count = 0;
+        CHECK(grail_os_file_read(file, (uint8_t *)buffer + total, capacity - total, &count) ==
+              GRAIL_OK);
+        if (count == 0) {
+            break;
+        }
+        total += count;
+    }
+    return total;
+}
+
+static void test_processes(const char *scratch) {
+    grail_process process = GRAIL_HANDLE_NONE;
     grail_process_options options;
-    memset(&options, 0, sizeof(options));
-    options.struct_size = sizeof(options);
-    options.abi_version = GRAIL_ABI_VERSION;
+    grail_pipe pipe_pair;
+    char output[256];
+
+    /* argv and stdout wiring. */
+    process_options(&options);
+    static const char echo_arguments[] = "echo\0hello";
+    static const uint64_t echo_offsets[] = {0, 5};
+    options.program = (const uint8_t *)"/bin/echo";
+    options.program_length = 9;
+    options.arguments = (const uint8_t *)echo_arguments;
+    options.arguments_length = sizeof(echo_arguments);
+    options.argument_offsets = echo_offsets;
+    options.argument_count = 2;
+    CHECK(grail_os_pipe(&pipe_pair) == GRAIL_OK);
+    options.standard_output = pipe_pair.write_end;
+    CHECK(grail_os_process_spawn(&options, &process) == GRAIL_OK);
+    CHECK(grail_os_file_close(pipe_pair.write_end) == GRAIL_OK);
+    const uint64_t echo_length = read_pipe(pipe_pair.read_end, output, sizeof(output));
+    CHECK(echo_length == 6);
+    CHECK(memcmp(output, "hello\n", 6) == 0);
+    CHECK(grail_os_file_close(pipe_pair.read_end) == GRAIL_OK);
+    grail_process_status status;
+    CHECK(grail_os_process_wait(process, &status) == GRAIL_OK);
+    CHECK(status.kind == GRAIL_PROCESS_EXITED);
+    CHECK(status.exit_code == 0);
+    CHECK(grail_os_process_wait(process, &status) == GRAIL_OK);
+    CHECK(status.exit_code == 0);
+    uint64_t identifier = 0;
+    CHECK(grail_os_process_id(process, &identifier) == GRAIL_OK);
+    CHECK(identifier > 0);
+    CHECK(grail_os_process_terminate(process) == GRAIL_OK);
+    CHECK(grail_os_process_close(process) == GRAIL_OK);
+    CHECK(grail_os_process_close(process) == GRAIL_E_INVALID_HANDLE);
+
+    /* Replacement environment and argument vector. */
+    process_options(&options);
+    static const char sh_arguments[] = "sh\0-c\0printf %s \"$ABI_CHILD\"";
+    static const uint64_t sh_offsets[] = {0, 3, 6};
+    static const char child_environment[] = "ABI_CHILD=ok";
+    static const uint64_t child_offsets[] = {0};
+    options.program = (const uint8_t *)"/bin/sh";
+    options.program_length = 7;
+    options.arguments = (const uint8_t *)sh_arguments;
+    options.arguments_length = sizeof(sh_arguments);
+    options.argument_offsets = sh_offsets;
+    options.argument_count = 3;
+    options.environment = (const uint8_t *)child_environment;
+    options.environment_length = sizeof(child_environment);
+    options.environment_offsets = child_offsets;
+    options.environment_count = 1;
+    options.flags = GRAIL_PROC_REPLACE_ENVIRONMENT;
+    CHECK(grail_os_pipe(&pipe_pair) == GRAIL_OK);
+    options.standard_output = pipe_pair.write_end;
+    CHECK(grail_os_process_spawn(&options, &process) == GRAIL_OK);
+    CHECK(grail_os_file_close(pipe_pair.write_end) == GRAIL_OK);
+    const uint64_t env_length = read_pipe(pipe_pair.read_end, output, sizeof(output));
+    CHECK(env_length == 2);
+    CHECK(memcmp(output, "ok", 2) == 0);
+    CHECK(grail_os_file_close(pipe_pair.read_end) == GRAIL_OK);
+    CHECK(grail_os_process_wait(process, &status) == GRAIL_OK);
+    CHECK(status.kind == GRAIL_PROCESS_EXITED);
+    CHECK(status.exit_code == 0);
+    CHECK(grail_os_process_close(process) == GRAIL_OK);
+
+    /* Exit status. */
+    process_options(&options);
+    static const char exit_arguments[] = "sh\0-c\0exit 7";
+    static const uint64_t exit_offsets[] = {0, 3, 6};
+    options.program = (const uint8_t *)"/bin/sh";
+    options.program_length = 7;
+    options.arguments = (const uint8_t *)exit_arguments;
+    options.arguments_length = sizeof(exit_arguments);
+    options.argument_offsets = exit_offsets;
+    options.argument_count = 3;
+    CHECK(grail_os_process_spawn(&options, &process) == GRAIL_OK);
+    CHECK(grail_os_process_wait(process, &status) == GRAIL_OK);
+    CHECK(status.kind == GRAIL_PROCESS_EXITED);
+    CHECK(status.exit_code == 7);
+    CHECK(status.term_signal == 0);
+    CHECK(grail_os_process_close(process) == GRAIL_OK);
+
+    /* Working directory. */
+    process_options(&options);
+    static const char pwd_arguments[] = "pwd\0-P";
+    static const uint64_t pwd_offsets[] = {0, 4};
+    options.program = (const uint8_t *)"/bin/pwd";
+    options.program_length = 8;
+    options.arguments = (const uint8_t *)pwd_arguments;
+    options.arguments_length = sizeof(pwd_arguments);
+    options.argument_offsets = pwd_offsets;
+    options.argument_count = 2;
+    options.working_directory = (const uint8_t *)scratch;
+    options.working_directory_length = strlen(scratch);
+    CHECK(grail_os_pipe(&pipe_pair) == GRAIL_OK);
+    options.standard_output = pipe_pair.write_end;
+    CHECK(grail_os_process_spawn(&options, &process) == GRAIL_OK);
+    CHECK(grail_os_file_close(pipe_pair.write_end) == GRAIL_OK);
+    const uint64_t pwd_length = read_pipe(pipe_pair.read_end, output, sizeof(output));
+    CHECK(pwd_length == strlen(scratch) + 1);
+    CHECK(memcmp(output, scratch, strlen(scratch)) == 0);
+    CHECK(output[pwd_length - 1] == '\n');
+    CHECK(grail_os_file_close(pipe_pair.read_end) == GRAIL_OK);
+    CHECK(grail_os_process_wait(process, &status) == GRAIL_OK);
+    CHECK(status.exit_code == 0);
+    CHECK(grail_os_process_close(process) == GRAIL_OK);
+
+    /* stdin wiring. */
+    process_options(&options);
+    grail_pipe input_pipe;
+    grail_pipe output_pipe;
+    CHECK(grail_os_pipe(&input_pipe) == GRAIL_OK);
+    CHECK(grail_os_pipe(&output_pipe) == GRAIL_OK);
+    options.program = (const uint8_t *)"/bin/cat";
+    options.program_length = 8;
+    options.standard_input = input_pipe.read_end;
+    options.standard_output = output_pipe.write_end;
+    CHECK(grail_os_process_spawn(&options, &process) == GRAIL_OK);
+    CHECK(grail_os_file_close(input_pipe.read_end) == GRAIL_OK);
+    CHECK(grail_os_file_close(output_pipe.write_end) == GRAIL_OK);
+    uint64_t written = 0;
+    CHECK(grail_os_file_write(input_pipe.write_end, (const uint8_t *)"data", 4, &written) ==
+          GRAIL_OK);
+    CHECK(written == 4);
+    CHECK(grail_os_file_close(input_pipe.write_end) == GRAIL_OK);
+    const uint64_t cat_length = read_pipe(output_pipe.read_end, output, sizeof(output));
+    CHECK(cat_length == 4);
+    CHECK(memcmp(output, "data", 4) == 0);
+    CHECK(grail_os_file_close(output_pipe.read_end) == GRAIL_OK);
+    CHECK(grail_os_process_wait(process, &status) == GRAIL_OK);
+    CHECK(status.exit_code == 0);
+    CHECK(grail_os_process_close(process) == GRAIL_OK);
+
+    /* Path search. */
+    process_options(&options);
     options.program = (const uint8_t *)"true";
     options.program_length = 4;
-    grail_process process = GRAIL_HANDLE_NONE;
-    CHECK(grail_os_process_spawn(&options, &process) == GRAIL_E_UNSUPPORTED);
-    CHECK(grail_os_process_wait(process, NULL) == GRAIL_E_UNSUPPORTED);
-    CHECK(grail_os_process_close(process) == GRAIL_E_UNSUPPORTED);
+    options.flags = GRAIL_PROC_SEARCH_PATH;
+    CHECK(grail_os_process_spawn(&options, &process) == GRAIL_OK);
+    CHECK(grail_os_process_wait(process, &status) == GRAIL_OK);
+    CHECK(status.exit_code == 0);
+    CHECK(grail_os_process_close(process) == GRAIL_OK);
+    process_options(&options);
+    options.program = (const uint8_t *)"grail-no-such-program-xyz";
+    options.program_length = 25;
+    options.flags = GRAIL_PROC_SEARCH_PATH;
+    CHECK(grail_os_process_spawn(&options, &process) == GRAIL_E_NOT_FOUND);
 
-    grail_socket socket = GRAIL_HANDLE_NONE;
-    CHECK(grail_os_socket_create(GRAIL_ADDRESS_INET, GRAIL_SOCKET_STREAM, &socket) ==
-          GRAIL_E_UNSUPPORTED);
-    grail_socket_address address;
-    memset(&address, 0, sizeof(address));
-    address.struct_size = sizeof(address);
-    address.abi_version = GRAIL_ABI_VERSION;
-    address.family = GRAIL_ADDRESS_INET;
-    address.port = 80;
-    CHECK(grail_os_socket_bind(socket, &address) == GRAIL_E_UNSUPPORTED);
-    CHECK(grail_os_net_resolve((const uint8_t *)"localhost", 9, GRAIL_ADDRESS_INET, &address, 1) ==
-          GRAIL_E_UNSUPPORTED);
+    /* Timeout, terminate and kill. */
+    process_options(&options);
+    static const char sleep_arguments[] = "sleep\0" "5";
+    static const uint64_t sleep_offsets[] = {0, 6};
+    options.program = (const uint8_t *)"/bin/sleep";
+    options.program_length = 10;
+    options.arguments = (const uint8_t *)sleep_arguments;
+    options.arguments_length = sizeof(sleep_arguments);
+    options.argument_offsets = sleep_offsets;
+    options.argument_count = 2;
+    CHECK(grail_os_process_spawn(&options, &process) == GRAIL_OK);
+    CHECK(grail_os_process_wait_timeout(process, 10000000, &status) == GRAIL_E_TIMED_OUT);
+    CHECK(status.kind == GRAIL_PROCESS_STILL_ACTIVE);
+    CHECK(grail_os_process_terminate(process) == GRAIL_OK);
+    CHECK(grail_os_process_wait(process, &status) == GRAIL_OK);
+    CHECK(status.kind == GRAIL_PROCESS_SIGNALED);
+    CHECK(status.term_signal == 15);
+    CHECK(grail_os_process_close(process) == GRAIL_OK);
+
+    process_options(&options);
+    options.program = (const uint8_t *)"/bin/sleep";
+    options.program_length = 10;
+    options.arguments = (const uint8_t *)sleep_arguments;
+    options.arguments_length = sizeof(sleep_arguments);
+    options.argument_offsets = sleep_offsets;
+    options.argument_count = 2;
+    CHECK(grail_os_process_spawn(&options, &process) == GRAIL_OK);
+    CHECK(grail_os_process_kill(process) == GRAIL_OK);
+    CHECK(grail_os_process_wait(process, &status) == GRAIL_OK);
+    CHECK(status.kind == GRAIL_PROCESS_SIGNALED);
+    CHECK(status.term_signal == 9);
+    CHECK(grail_os_process_close(process) == GRAIL_OK);
+
+    /* Invalid option records fail before spawning. */
+    process_options(&options);
+    options.struct_size = 0;
+    CHECK(grail_os_process_spawn(&options, &process) == GRAIL_E_INVALID_ARGUMENT);
+}
+
+static void set_ipv4(grail_socket_address *address, uint16_t port) {
+    memset(address, 0, sizeof(*address));
+    address->struct_size = sizeof(*address);
+    address->abi_version = GRAIL_ABI_VERSION;
+    address->family = GRAIL_ADDRESS_INET;
+    address->port = port;
+    address->address[0] = 127;
+    address->address[3] = 1;
+}
+
+static void test_sockets(void) {
+    grail_socket listener = GRAIL_HANDLE_NONE;
+    grail_socket client = GRAIL_HANDLE_NONE;
+    grail_socket server = GRAIL_HANDLE_NONE;
+    grail_socket_address bind_address;
+    set_ipv4(&bind_address, 0);
+    CHECK(grail_os_socket_create(GRAIL_ADDRESS_INET, GRAIL_SOCKET_STREAM, &listener) == GRAIL_OK);
+    CHECK(grail_os_socket_bind(listener, &bind_address) == GRAIL_OK);
+    CHECK(grail_os_socket_listen(listener, 8) == GRAIL_OK);
+    grail_socket_address local;
+    CHECK(grail_os_socket_local_address(listener, &local) == GRAIL_OK);
+    CHECK(local.family == GRAIL_ADDRESS_INET);
+    CHECK(local.port != 0);
+    CHECK(local.address[0] == 127 && local.address[3] == 1);
+
+    uint64_t option = 0;
+    CHECK(grail_os_socket_set_option(listener, GRAIL_SOCKOPT_REUSE_ADDRESS, 1) == GRAIL_OK);
+    CHECK(grail_os_socket_get_option(listener, GRAIL_SOCKOPT_REUSE_ADDRESS, &option) == GRAIL_OK);
+    CHECK(option != 0);
+
+    CHECK(grail_os_socket_create(GRAIL_ADDRESS_INET, GRAIL_SOCKET_STREAM, &client) == GRAIL_OK);
+    CHECK(grail_os_socket_connect(client, &local) == GRAIL_OK);
+    grail_socket_address peer;
+    CHECK(grail_os_socket_accept(listener, &server, &peer) == GRAIL_OK);
+    CHECK(peer.family == GRAIL_ADDRESS_INET);
+    CHECK(peer.port != 0);
+
+    CHECK(grail_os_socket_set_option(client, GRAIL_SOCKOPT_NO_DELAY, 1) == GRAIL_OK);
+    CHECK(grail_os_socket_get_option(client, GRAIL_SOCKOPT_NO_DELAY, &option) == GRAIL_OK);
+    CHECK(option == 1);
+
+    uint64_t sent = 0;
+    uint64_t received = 0;
+    uint8_t buffer[32];
+    CHECK(grail_os_socket_send(client, (const uint8_t *)"ping", 4, &sent) == GRAIL_OK);
+    CHECK(sent == 4);
+    CHECK(grail_os_socket_recv(server, buffer, sizeof(buffer), &received) == GRAIL_OK);
+    CHECK(received == 4);
+    CHECK(memcmp(buffer, "ping", 4) == 0);
+    CHECK(grail_os_socket_send(server, (const uint8_t *)"pong", 4, &sent) == GRAIL_OK);
+    CHECK(sent == 4);
+    CHECK(grail_os_socket_recv(client, buffer, sizeof(buffer), &received) == GRAIL_OK);
+    CHECK(received == 4);
+    CHECK(memcmp(buffer, "pong", 4) == 0);
+
+    CHECK(grail_os_socket_set_nonblocking(listener, 1) == GRAIL_OK);
+    grail_socket extra = GRAIL_HANDLE_NONE;
+    CHECK(grail_os_socket_accept(listener, &extra, NULL) == GRAIL_E_WOULD_BLOCK);
+    CHECK(grail_os_socket_set_nonblocking(listener, 0) == GRAIL_OK);
+    CHECK(grail_os_socket_shutdown(client, GRAIL_SHUTDOWN_BOTH) == GRAIL_OK);
+    CHECK(grail_os_socket_close(client) == GRAIL_OK);
+    CHECK(grail_os_socket_close(client) == GRAIL_E_INVALID_HANDLE);
+    CHECK(grail_os_socket_close(server) == GRAIL_OK);
+    CHECK(grail_os_socket_close(listener) == GRAIL_OK);
+
+    /* UDP send_to/recv_from over loopback. */
+    grail_socket sender = GRAIL_HANDLE_NONE;
+    grail_socket receiver = GRAIL_HANDLE_NONE;
+    grail_socket_address sender_address;
+    grail_socket_address receiver_address;
+    set_ipv4(&sender_address, 0);
+    set_ipv4(&receiver_address, 0);
+    CHECK(grail_os_socket_create(GRAIL_ADDRESS_INET, GRAIL_SOCKET_DATAGRAM, &sender) == GRAIL_OK);
+    CHECK(grail_os_socket_create(GRAIL_ADDRESS_INET, GRAIL_SOCKET_DATAGRAM, &receiver) ==
+          GRAIL_OK);
+    CHECK(grail_os_socket_bind(sender, &sender_address) == GRAIL_OK);
+    CHECK(grail_os_socket_bind(receiver, &receiver_address) == GRAIL_OK);
+    CHECK(grail_os_socket_local_address(sender, &sender_address) == GRAIL_OK);
+    CHECK(grail_os_socket_local_address(receiver, &receiver_address) == GRAIL_OK);
+    CHECK(sender_address.port != 0);
+    CHECK(receiver_address.port != 0);
+    CHECK(grail_os_socket_send_to(sender, (const uint8_t *)"udp", 3, &receiver_address, &sent) ==
+          GRAIL_OK);
+    CHECK(sent == 3);
+    grail_socket_address from;
+    CHECK(grail_os_socket_recv_from(receiver, buffer, sizeof(buffer), &from, &received) ==
+          GRAIL_OK);
+    CHECK(received == 3);
+    CHECK(memcmp(buffer, "udp", 3) == 0);
+    CHECK(from.port == sender_address.port);
+    CHECK(grail_os_socket_close(sender) == GRAIL_OK);
+    CHECK(grail_os_socket_close(receiver) == GRAIL_OK);
+
+    /* Name resolution. */
+    grail_socket_address resolved[8];
+    const grail_result count =
+        grail_os_net_resolve((const uint8_t *)"localhost", 9, GRAIL_ADDRESS_INET, resolved, 8);
+    CHECK(count >= 1);
+    CHECK(resolved[0].family == GRAIL_ADDRESS_INET);
+    CHECK(resolved[0].struct_size == sizeof(grail_socket_address));
+    CHECK(resolved[0].port == 0);
+    CHECK(grail_os_net_resolve((const uint8_t *)"localhost", 9, GRAIL_ADDRESS_INET, NULL, 0) ==
+          count);
+
+    CHECK(grail_os_socket_create(99, GRAIL_SOCKET_STREAM, &listener) == GRAIL_E_INVALID_ARGUMENT);
+    grail_socket_address malformed;
+    memset(&malformed, 0, sizeof(malformed));
+    CHECK(grail_os_socket_create(GRAIL_ADDRESS_INET, GRAIL_SOCKET_STREAM, &listener) == GRAIL_OK);
+    CHECK(grail_os_socket_bind(listener, &malformed) == GRAIL_E_INVALID_ARGUMENT);
+    CHECK(grail_os_socket_close(listener) == GRAIL_OK);
 }
 
 int main(void) {
@@ -387,8 +683,9 @@ int main(void) {
     static const char environment_block[] =
         "ABI_TEST_ONE=1\0"
         "ABI_TEST_TWO=\0"
-        "ABI_TEST_THREE=three\0";
-    static const uint64_t environment_offsets[] = {0, 15, 29};
+        "ABI_TEST_THREE=three\0"
+        "PATH=/usr/bin:/bin";
+    static const uint64_t environment_offsets[] = {0, 15, 29, 50};
     grail_startup startup;
     memset(&startup, 0, sizeof(startup));
     startup.struct_size = sizeof(startup);
@@ -398,9 +695,9 @@ int main(void) {
     startup.argument_offsets = argument_offsets;
     startup.argument_count = 2;
     startup.environment = (const uint8_t *)environment_block;
-    startup.environment_length = sizeof(environment_block) - 1;
+    startup.environment_length = sizeof(environment_block);
     startup.environment_offsets = environment_offsets;
-    startup.environment_count = 3;
+    startup.environment_count = 4;
 
     static const char malformed_block[] = "A=1\0BROKEN";
     static const uint64_t malformed_offsets[] = {0, 4};
@@ -422,15 +719,18 @@ int main(void) {
     CHECK((capabilities & GRAIL_CAP_CPU_TIME) != 0);
     CHECK((capabilities & GRAIL_CAP_THREADS) != 0);
     CHECK((capabilities & GRAIL_CAP_DYNAMIC_LIBRARIES) != 0);
-    CHECK((capabilities & GRAIL_CAP_PROCESSES) == 0);
-    CHECK((capabilities & GRAIL_CAP_SOCKETS) == 0);
+    CHECK((capabilities & GRAIL_CAP_PROCESSES) != 0);
+    CHECK((capabilities & GRAIL_CAP_SOCKETS) != 0);
+    CHECK((capabilities & GRAIL_CAP_SOCKET_UDP) != 0);
+    CHECK((capabilities & GRAIL_CAP_RESOLVE) != 0);
 
     test_environment();
     test_time();
     test_files(scratch);
     test_threads();
     test_dynamic_library();
-    test_unsupported_domains();
+    test_processes(scratch);
+    test_sockets();
 
     CHECK(grail_os_shutdown() == GRAIL_OK);
     CHECK(grail_os_capabilities() == 0);
