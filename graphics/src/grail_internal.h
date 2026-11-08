@@ -83,6 +83,26 @@ gr_result gr_vk_abi_pipeline_create(gr_handle device, const gr_pipeline_desc *de
                                    gr_handle *out_pipeline);
 gr_result gr_vk_abi_pipeline_commit(gr_handle device, double *out_seconds);
 gr_result gr_vk_abi_pipeline_stats(gr_handle device, uint32_t *out_declared, uint32_t *out_committed);
+gr_result gr_vk_abi_texture_create(gr_handle device, const gr_texture_desc *desc, gr_handle *out_texture);
+gr_result gr_vk_abi_texture_view_create(gr_handle device, const gr_texture_view_desc *desc, gr_handle *out_view);
+gr_result gr_vk_abi_texture_read(gr_handle texture, uint32_t mip, uint32_t layer, uint32_t x, uint32_t y, uint32_t width, uint32_t height, gr_mut_span_u8 out);
+gr_result gr_vk_abi_cmd_pool_create(gr_handle device, const gr_cmd_pool_desc *desc, gr_handle *out_pool);
+gr_result gr_vk_abi_cmd_alloc(const gr_cmd_alloc_info *info, gr_handle *out_cmd);
+gr_result gr_vk_abi_cmd_begin(gr_handle cmd);
+gr_result gr_vk_abi_cmd_end(gr_handle cmd);
+gr_result gr_vk_abi_cmd_reset(gr_handle cmd);
+gr_result gr_vk_abi_cmd_barrier(gr_handle cmd, const gr_barrier *barriers, uint32_t count);
+gr_result gr_vk_abi_cmd_begin_render(gr_handle cmd, const gr_render_begin *info);
+gr_result gr_vk_abi_cmd_end_render(gr_handle cmd);
+gr_result gr_vk_abi_cmd_set_viewport(gr_handle cmd, float x, float y, float width, float height, float min_depth, float max_depth);
+gr_result gr_vk_abi_cmd_set_scissor(gr_handle cmd, int32_t x, int32_t y, uint32_t width, uint32_t height);
+gr_result gr_vk_abi_cmd_bind_pipeline(gr_handle cmd, gr_handle pipeline);
+gr_result gr_vk_abi_cmd_push_constants(gr_handle cmd, uint32_t stage_mask, uint32_t offset, gr_span_u8 data);
+gr_result gr_vk_abi_cmd_draw(gr_handle cmd, const gr_draw *draw);
+gr_result gr_vk_abi_submit(const gr_submit *submit, uint64_t *out_value);
+gr_result gr_vk_abi_fence_create(gr_handle device, uint64_t initial_value, gr_handle *out_fence);
+gr_result gr_vk_abi_fence_wait(gr_handle fence, uint64_t value, uint64_t timeout_ns, gr_result *out_status);
+uint64_t gr_vk_abi_fence_value(gr_handle fence);
 
 /* Duplicates a gr_str into malloc'd, NUL-terminated memory. Returns NULL for an empty or
  * absent string. The caller owns the result. */

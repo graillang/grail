@@ -844,6 +844,8 @@ static uint64_t null_texture_bytes(gr_format format, uint32_t width, uint32_t he
 gr_result gr_texture_create(gr_handle device_handle, const gr_texture_desc *desc,
                             gr_handle *out_texture)
 {
+    if (gr_active_backend() == GR_BACKEND_VULKAN)
+        return gr_vk_abi_texture_create(device_handle, desc, out_texture);
     gr_null_device *device = (gr_null_device *)null_get(NULL, device_handle, GR_HANDLE_DEVICE, NULL);
     gr_null_texture *texture;
     gr_handle handle;
@@ -999,6 +1001,8 @@ gr_result gr_texture_write(gr_handle texture_handle, uint32_t mip, uint32_t laye
 gr_result gr_texture_read(gr_handle texture_handle, uint32_t mip, uint32_t layer, uint32_t x,
                           uint32_t y, uint32_t width, uint32_t height, gr_mut_span_u8 out)
 {
+    if (gr_active_backend() == GR_BACKEND_VULKAN)
+        return gr_vk_abi_texture_read(texture_handle, mip, layer, x, y, width, height, out);
     gr_result status;
     gr_null_texture *texture = null_texture(texture_handle, &status);
     uint32_t bpb, bw = 1, bh = 1, row_bytes, r;
@@ -1032,6 +1036,8 @@ gr_result gr_texture_read(gr_handle texture_handle, uint32_t mip, uint32_t layer
 gr_result gr_texture_view_create(gr_handle device_handle, const gr_texture_view_desc *desc,
                                  gr_handle *out_view)
 {
+    if (gr_active_backend() == GR_BACKEND_VULKAN)
+        return gr_vk_abi_texture_view_create(device_handle, desc, out_view);
     gr_null_device *device = (gr_null_device *)null_get(NULL, device_handle, GR_HANDLE_DEVICE, NULL);
     gr_null_bindless *bindless;
     gr_result status;
@@ -1206,6 +1212,8 @@ typedef struct gr_null_cmd_pool {
 gr_result gr_cmd_pool_create(gr_handle device_handle, const gr_cmd_pool_desc *desc,
                              gr_handle *out_pool)
 {
+    if (gr_active_backend() == GR_BACKEND_VULKAN)
+        return gr_vk_abi_cmd_pool_create(device_handle, desc, out_pool);
     gr_null_device *device = (gr_null_device *)null_get(NULL, device_handle, GR_HANDLE_DEVICE, NULL);
     gr_null_cmd_pool *pool;
     gr_handle handle;
@@ -1244,6 +1252,8 @@ static gr_null_cmd *null_cmd(gr_handle handle, gr_result *out_status)
 
 gr_result gr_cmd_alloc(const gr_cmd_alloc_info *info, gr_handle *out_cmd)
 {
+    if (gr_active_backend() == GR_BACKEND_VULKAN)
+        return gr_vk_abi_cmd_alloc(info, out_cmd);
     gr_null_cmd_pool *pool;
     gr_null_cmd *cmd;
     gr_handle handle;
@@ -1274,6 +1284,8 @@ gr_result gr_cmd_alloc(const gr_cmd_alloc_info *info, gr_handle *out_cmd)
 
 gr_result gr_cmd_begin(gr_handle cmd_handle)
 {
+    if (gr_active_backend() == GR_BACKEND_VULKAN)
+        return gr_vk_abi_cmd_begin(cmd_handle);
     gr_result status;
     gr_null_cmd *cmd = null_cmd(cmd_handle, &status);
     if (!cmd)
@@ -1293,6 +1305,8 @@ gr_result gr_cmd_begin(gr_handle cmd_handle)
 
 gr_result gr_cmd_end(gr_handle cmd_handle)
 {
+    if (gr_active_backend() == GR_BACKEND_VULKAN)
+        return gr_vk_abi_cmd_end(cmd_handle);
     gr_result status;
     gr_null_cmd *cmd = null_cmd(cmd_handle, &status);
     if (!cmd)
@@ -1311,6 +1325,8 @@ gr_result gr_cmd_end(gr_handle cmd_handle)
 
 gr_result gr_cmd_reset(gr_handle cmd_handle)
 {
+    if (gr_active_backend() == GR_BACKEND_VULKAN)
+        return gr_vk_abi_cmd_reset(cmd_handle);
     gr_result status;
     gr_null_cmd *cmd = null_cmd(cmd_handle, &status);
     if (!cmd)
@@ -1323,6 +1339,8 @@ gr_result gr_cmd_reset(gr_handle cmd_handle)
 
 gr_result gr_cmd_barrier(gr_handle cmd_handle, const gr_barrier *barriers, uint32_t count)
 {
+    if (gr_active_backend() == GR_BACKEND_VULKAN)
+        return gr_vk_abi_cmd_barrier(cmd_handle, barriers, count);
     gr_result status;
     gr_null_cmd *cmd = null_cmd(cmd_handle, &status);
     uint32_t i;
@@ -1345,6 +1363,8 @@ gr_result gr_cmd_barrier(gr_handle cmd_handle, const gr_barrier *barriers, uint3
 
 gr_result gr_cmd_begin_render(gr_handle cmd_handle, const gr_render_begin *info)
 {
+    if (gr_active_backend() == GR_BACKEND_VULKAN)
+        return gr_vk_abi_cmd_begin_render(cmd_handle, info);
     gr_result status;
     gr_null_cmd *cmd = null_cmd(cmd_handle, &status);
     if (!cmd)
@@ -1368,6 +1388,8 @@ gr_result gr_cmd_begin_render(gr_handle cmd_handle, const gr_render_begin *info)
 
 gr_result gr_cmd_end_render(gr_handle cmd_handle)
 {
+    if (gr_active_backend() == GR_BACKEND_VULKAN)
+        return gr_vk_abi_cmd_end_render(cmd_handle);
     gr_result status;
     gr_null_cmd *cmd = null_cmd(cmd_handle, &status);
     if (!cmd)
@@ -1381,6 +1403,8 @@ gr_result gr_cmd_end_render(gr_handle cmd_handle)
 gr_result gr_cmd_set_viewport(gr_handle cmd_handle, float x, float y, float width, float height,
                               float min_depth, float max_depth)
 {
+    if (gr_active_backend() == GR_BACKEND_VULKAN)
+        return gr_vk_abi_cmd_set_viewport(cmd_handle, x, y, width, height, min_depth, max_depth);
     gr_result status;
     gr_null_cmd *cmd = null_cmd(cmd_handle, &status);
     if (!cmd)
@@ -1398,6 +1422,8 @@ gr_result gr_cmd_set_viewport(gr_handle cmd_handle, float x, float y, float widt
 gr_result gr_cmd_set_scissor(gr_handle cmd_handle, int32_t x, int32_t y, uint32_t width,
                              uint32_t height)
 {
+    if (gr_active_backend() == GR_BACKEND_VULKAN)
+        return gr_vk_abi_cmd_set_scissor(cmd_handle, x, y, width, height);
     gr_result status;
     gr_null_cmd *cmd = null_cmd(cmd_handle, &status);
     if (!cmd)
@@ -1412,6 +1438,8 @@ gr_result gr_cmd_set_scissor(gr_handle cmd_handle, int32_t x, int32_t y, uint32_
 
 gr_result gr_cmd_bind_pipeline(gr_handle cmd_handle, gr_handle pipeline_handle)
 {
+    if (gr_active_backend() == GR_BACKEND_VULKAN)
+        return gr_vk_abi_cmd_bind_pipeline(cmd_handle, pipeline_handle);
     gr_result status;
     gr_null_cmd *cmd = null_cmd(cmd_handle, &status);
     gr_null_pipeline *pipeline;
@@ -1430,6 +1458,8 @@ gr_result gr_cmd_bind_pipeline(gr_handle cmd_handle, gr_handle pipeline_handle)
 gr_result gr_cmd_push_constants(gr_handle cmd_handle, uint32_t stage_mask, uint32_t offset,
                                 gr_span_u8 data)
 {
+    if (gr_active_backend() == GR_BACKEND_VULKAN)
+        return gr_vk_abi_cmd_push_constants(cmd_handle, stage_mask, offset, data);
     gr_result status;
     gr_null_cmd *cmd = null_cmd(cmd_handle, &status);
     if (!cmd)
@@ -1496,6 +1526,8 @@ gr_result gr_cmd_bind_index_buffer(gr_handle cmd_handle, gr_handle buffer, uint6
 
 gr_result gr_cmd_draw(gr_handle cmd_handle, const gr_draw *draw)
 {
+    if (gr_active_backend() == GR_BACKEND_VULKAN)
+        return gr_vk_abi_cmd_draw(cmd_handle, draw);
     gr_result status;
     gr_null_cmd *cmd = null_cmd(cmd_handle, &status);
     if (!cmd)
@@ -1755,6 +1787,8 @@ gr_result gr_cmd_end_scope(gr_handle cmd_handle)
  * ======================================================================================= */
 gr_result gr_fence_create(gr_handle device_handle, uint64_t initial_value, gr_handle *out_fence)
 {
+    if (gr_active_backend() == GR_BACKEND_VULKAN)
+        return gr_vk_abi_fence_create(device_handle, initial_value, out_fence);
     gr_null_device *device = (gr_null_device *)null_get(NULL, device_handle, GR_HANDLE_DEVICE, NULL);
     gr_null_fence *fence;
     gr_handle handle;
@@ -1777,6 +1811,8 @@ gr_result gr_fence_create(gr_handle device_handle, uint64_t initial_value, gr_ha
 
 uint64_t gr_fence_value(gr_handle fence_handle)
 {
+    if (gr_active_backend() == GR_BACKEND_VULKAN)
+        return gr_vk_abi_fence_value(fence_handle);
     gr_null_fence *fence = (gr_null_fence *)gr_object_lookup(gr_objects(), fence_handle,
                                                              GR_HANDLE_FENCE, NULL);
     return fence ? fence->value : 0;
@@ -1785,6 +1821,8 @@ uint64_t gr_fence_value(gr_handle fence_handle)
 gr_result gr_fence_wait(gr_handle fence_handle, uint64_t value, uint64_t timeout_ns,
                         gr_result *out_status)
 {
+    if (gr_active_backend() == GR_BACKEND_VULKAN)
+        return gr_vk_abi_fence_wait(fence_handle, value, timeout_ns, out_status);
     gr_null_fence *fence = (gr_null_fence *)gr_object_lookup(gr_objects(), fence_handle,
                                                              GR_HANDLE_FENCE, NULL);
     (void)timeout_ns;
@@ -1814,6 +1852,8 @@ gr_result gr_fence_reset(gr_handle fence_handle, uint64_t value)
 
 gr_result gr_submit_commands(const gr_submit *submit, uint64_t *out_value)
 {
+    if (gr_active_backend() == GR_BACKEND_VULKAN)
+        return gr_vk_abi_submit(submit, out_value);
     gr_null_queue *queue;
     uint32_t i;
     uint64_t value;

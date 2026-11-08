@@ -18,9 +18,17 @@ allocation and no submission yet: a headless device that can compile shaders and
 | `gr_shader_create` | `vkCreateShaderModule` from the SPIR-V the offline tool produced |
 | `gr_pipeline_create` | `vkCreateGraphicsPipelines` with `VkPipelineRenderingCreateInfo` (dynamic rendering) into one `VkPipelineCache` |
 | `gr_pipeline_commit` / `gr_pipeline_stats` | closes the registry; reports the cache's byte size |
+| `gr_texture_create` / `gr_texture_view_create` | a 2D colour image with its own memory, and a view of it |
+| `gr_cmd_pool_create` / `gr_cmd_alloc` / `begin` / `end` / `reset` | a primary command buffer |
+| `gr_cmd_barrier` | image layout transitions, mapped from `gr_resource_state` |
+| `gr_cmd_begin_render` / `gr_cmd_end_render` | `vkCmdBeginRendering` with clear and store ops |
+| `gr_cmd_set_viewport` / `set_scissor` / `bind_pipeline` / `push_constants` / `draw` | the draw path |
+| `gr_submit_commands` | one `vkQueueSubmit` that signals the timeline |
+| `gr_fence_create` / `gr_fence_wait` / `gr_fence_value` | a real `vkWaitSemaphores` on that timeline |
+| `gr_texture_read` | a one-shot copy to a host-visible buffer and a map |
 
-Everything else on a Vulkan device returns `GR_ERROR_UNSUPPORTED`: buffers, textures, command
-buffers, submission and the swapchain are the next increments.
+Still `GR_ERROR_UNSUPPORTED` on a Vulkan device: buffers, descriptor set allocation (so the
+bindless table is declared but not yet populated), compute and mesh pipelines, and the swapchain.
 
 ## The pipeline layout, concretely
 
@@ -37,6 +45,23 @@ Acceleration structures are deliberately absent: declaring a binding the device 
 fail layout creation on hardware without the ray-tracing extension, and nothing in this increment
 needs it.
 
+## One real offscreen frame
+
+The first increment whose evidence is pixels. A 64x64 RGBA8 texture is created as a colour
+attachment and transfer source; a command buffer transitions it from `UNDEFINED` to
+`COLOR_ATTACHMENT`, begins dynamic rendering with a clear, sets viewport and scissor, binds the
+`fullscreen.vs` + `solid.ps` pipeline, pushes a 16-byte tint, draws the fullscreen triangle, ends
+rendering, transitions to `TRANSFER_SRC`, and submits. A timeline fence waits for the submitted
+value, and the image is copied back to host memory.
+
+`solid.ps` exists for this: `tonemap.ps` samples the bindless table, and until the backend
+allocates a descriptor set any sample is undefined. `solid.ps` reads only its interpolated
+position and one push constant, so the frame exercises the whole path — rendering, binding, push
+constants, rasterisation, readback — while producing values that can be checked.
+
+The frame is rendered **twice**, and the two readbacks must be byte-identical: a digest that
+merely happened to repeat within one run would be an observation, not evidence.
+
 ## Evidence
 
 `make -C graphics vk-smoke`, under the exclusive GPU lock:
@@ -44,9 +69,17 @@ needs it.
 ```
 vk-backend: device AMD Radeon RX 7900 GRE (RADV NAVI31), API 1.4.354, push constants 256, 16368 MiB
 vk-backend: 5 tonemap shader modules created by the driver
-vk-backend: pipeline cache 2456 bytes
-vk-backend: 51 checks passed
+vk-backend: pipeline cache 3500 bytes
+vk-backend: frame 64x64, digest 0xcf939f3accc07d25
+vk-backend: 256 distinct colours, corner rgba 2,253,128,255 / 253,2,128,255
+vk-backend: 105 checks passed
 ```
+
+The corners are the shader's formula, not the clear colour: `r = uv.x`, `g = uv.y`, `b = tint.b`
+(0.5 → 128), `a = 1`. Top-left reads `2,253` and bottom-right `253,2` because each axis is
+sampled at a pixel centre rather than at the edge, and the two are swapped, which is exactly the
+gradient the fragment stage computes. 256 distinct colours confirms the draw covered the target
+rather than leaving the clear colour behind.
 
 51 assertions: capabilities match the driver (device name, API 1.4.354, 256-byte push constants,
 16368 MiB, and the `BINDLESS` / `DYNAMIC_RENDERING` / `TIMELINE_SEMAPHORE` /
