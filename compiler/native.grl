@@ -12440,6 +12440,7 @@ fn statement<a>(c: (&mut a C)) -> unit {
         name := ident(borrow_mut(c));
         expect(borrow_mut(c), &"in");
         counted := len_bound_ahead(borrow_mut(c), &name);
+        loopbase := c.resources.len();
         mut v = expr(borrow_mut(c), 0);
         // `for x in v` copies scalar elements of a vector or byte sequence; the collection is observed
         // before every iteration, so moving it inside the body is rejected.
@@ -12470,14 +12471,16 @@ fn statement<a>(c: (&mut a C)) -> unit {
                         v = val(0, 0);
                         consume = 1;
                     } else {
-                        if (byref == 0) & (scalar(borrow_mut(c), a) == 0) {
-                            fail(
-                                borrow_mut(c),
-                                &"for x in v over non-scalar elements needs borrow(v) (each element is borrowed)"
-                            );
-                        }
-                        if byref {
+                        if ty_kind(borrow_mut(c), v.ty) == 7 {
+                            byref = 1;
                             refmode = ty_mode(borrow_mut(c), v.ty);
+                        } else {
+                            if scalar(borrow_mut(c), a) == 0 {
+                                fail(
+                                    borrow_mut(c),
+                                    &"for x in v over non-scalar elements needs borrow(v) (each element is borrowed)"
+                                );
+                            }
                         }
                     }
                     if consume == 0 {
@@ -12633,6 +12636,7 @@ fn statement<a>(c: (&mut a C)) -> unit {
         c.out.push(10);
         jump(borrow_mut(c), &"jmp", head);
         mark(borrow_mut(c), end);
+        cleanup(borrow_mut(c), loopbase);
         exchange(borrow_mut(c.brk), oldb);
         exchange(borrow_mut(c.cont), oldc);
         exchange(borrow_mut(c.loopmark), oldmark);
