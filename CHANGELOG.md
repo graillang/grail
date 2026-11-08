@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- Added `lib/sys/grail_ffi.grl`, the first Grail-facing wrappers over the Linux OS ABI:
+  explicit init/shutdown, file open/read/write/close/stat/size, monotonic and wall clocks,
+  and environment get/set. The module uses FFI byte views, an opaque `File` handle and
+  Grail-owned out-records, returns `T |? Error` with negative ABI statuses, and keeps file
+  handles affine by convention (explicit single close, no auto-free). Added a hosted C
+  adapter for the allocator and handle-return out-parameter, a repeatable
+  `tools/test-ffi-runtime.mjs` runner, and `docs/design/grail-ffi-runtime.md` with the exact
+  pointer/length/ownership rules. The x86-64 test links the Linux reference backend with
+  libc and executes file/time/environment checks; AArch64 and RISC-V 64 are assembly/static
+  checked only. This requires the `feature/ffi` compiler (`GRAIL_FFI_COMPILER`), is not
+  auto-loaded by the current stdlib, and changes neither `compiler/native.grl` nor
+  `compiler/runtime.grl` in the repository (the runner generates a test-only runtime copy
+  to preserve libc TLS).
+
 - Abundance CPU port, asset-package increment: `abundance/src/asset_package.grl` carries the ABPKG1
   package header (id, payload hash, payload bytes, ascending dependency ids), package ids and
   payload hashes from the engine's `fnv1a64`, and the dependency DAG with duplicate, missing,
