@@ -1,0 +1,40 @@
+module ffi_callbacks;
+
+// `cfn(...)` is a C function pointer: one word, no environment, C calling
+// convention. Only `extern "C"` definitions have such an address, so a closure or
+// an ordinary Grail function cannot be passed where C expects a callback.
+extern "C" fn c_double(v: i64) -> i64 {
+    return v * 2;
+}
+extern "C" as "c_triple" fn triple(v: i64) -> i64 {
+    return v * 3;
+}
+
+extern "C" lib "shim.o" fn c_apply(callback: cfn(i64) -> i64, value: i64) -> i64;
+extern "C" lib "shim.o" fn c_apply_preserving(callback: cfn(i64) -> i64, value: i64) -> i64;
+
+fn main() -> u64 {
+    mut doubled: i64 = 0;
+    mut tripled: i64 = 0;
+    mut preserved: i64 = 0;
+    unsafe {
+        doubled = c_apply(c_double, 21);
+        tripled = c_apply(triple, 14);
+        // C clobbers the callee-saved registers around the callback: the Grail
+        // callback must restore them, exactly as the C ABI requires.
+        preserved = c_apply_preserving(c_double, 5);
+    }
+    println(doubled);
+    println(tripled);
+    println(preserved);
+    if doubled != 42 {
+        return 1;
+    }
+    if tripled != 42 {
+        return 1;
+    }
+    if preserved != 10 {
+        return 1;
+    }
+    return 0;
+}
