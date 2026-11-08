@@ -100,6 +100,16 @@
   signing/notarization hooks. Linux lanes build and test; Windows/macOS lanes are
   explicit distribution scaffolding because the compiler still emits Linux ELF
   only. Tooling is documented in `docs/tooling/cross-platform-ci.md`.
+- Added child-process support to the Windows and macOS backends. Windows uses `CreateProcessW`
+  with a validated argv/environment, UTF-16 environment block, working directory, inheritable
+  explicit/inherited/NUL standard handles, Win32 search path, wait/wait-timeout,
+  terminate/kill and process ids. macOS uses `posix_spawn` with file actions for stdio and
+  working directory, `NEW_GROUP` via `POSIX_SPAWN_SETPGROUP`, and `waitpid`/`kill` for status
+  and termination. Both set `GRAIL_CAP_PROCESSES`. Remaining fail-closed domains are sockets
+  and local-time offsets; Windows also lacks non-blocking files and readlink/realpath, and
+  macOS still lacks `file_stat`/`fs_stat`. All four cross targets still compile with strict
+  warnings and define all 95 public symbols. Process spawn is statically checked only, not
+  executed on Windows or macOS.
 - Added directory iteration, threads/mutex/condition variables and dynamic-library loading to
   the Windows and macOS C ABI backends. Windows uses
   `FindFirstFileW`/`FindNextFileW`, `CreateThread`/`WaitForSingleObject`, `SRWLOCK`/

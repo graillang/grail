@@ -85,6 +85,40 @@ typedef struct grail_win32_file_attribute_data {
     DWORD dwFileSizeLow;
 } WIN32_FILE_ATTRIBUTE_DATA;
 
+typedef struct grail_security_attributes {
+    DWORD nLength;
+    LPVOID lpSecurityDescriptor;
+    BOOL bInheritHandle;
+} SECURITY_ATTRIBUTES;
+
+typedef struct grail_startup_info {
+    DWORD cb;
+    LPWSTR lpReserved;
+    LPWSTR lpDesktop;
+    LPWSTR lpTitle;
+    DWORD dwX;
+    DWORD dwY;
+    DWORD dwXSize;
+    DWORD dwYSize;
+    DWORD dwXCountChars;
+    DWORD dwYCountChars;
+    DWORD dwFillAttribute;
+    DWORD dwFlags;
+    uint16_t wShowWindow;
+    uint16_t cbReserved2;
+    uint8_t *lpReserved2;
+    HANDLE hStdInput;
+    HANDLE hStdOutput;
+    HANDLE hStdError;
+} STARTUPINFOW;
+
+typedef struct grail_process_information {
+    HANDLE hProcess;
+    HANDLE hThread;
+    DWORD dwProcessId;
+    DWORD dwThreadId;
+} PROCESS_INFORMATION;
+
 typedef struct grail_srwlock {
     void *Ptr;
 } SRWLOCK;
@@ -133,6 +167,16 @@ typedef struct grail_condition_variable {
 #define GRAIL_WIN32_INFINITE 0xFFFFFFFFu
 #define GRAIL_WAIT_OBJECT_0 0u
 #define GRAIL_WAIT_TIMEOUT 258u
+#define GRAIL_WAIT_FAILED 0xFFFFFFFFu
+#define GRAIL_STARTF_USESTDHANDLES 0x00000100u
+#define GRAIL_CREATE_NEW_PROCESS_GROUP 0x00000200u
+#define GRAIL_CREATE_UNICODE_ENVIRONMENT 0x00000400u
+#define GRAIL_CREATE_NO_WINDOW 0x08000000u
+#define GRAIL_DUPLICATE_SAME_ACCESS 0x00000002u
+#define GRAIL_CTRL_BREAK_EVENT 1u
+#define GRAIL_STD_INPUT_HANDLE ((DWORD)-10)
+#define GRAIL_STD_OUTPUT_HANDLE ((DWORD)-11)
+#define GRAIL_STD_ERROR_HANDLE ((DWORD)-12)
 #define GRAIL_FORMAT_MESSAGE_FROM_SYSTEM 0x00001000u
 #define GRAIL_FORMAT_MESSAGE_IGNORE_INSERTS 0x00000200u
 
@@ -198,6 +242,23 @@ GRAIL_WINIMPORT HANDLE GRAIL_WINAPI GetModuleHandleW(LPCWSTR name);
 GRAIL_WINIMPORT DWORD GRAIL_WINAPI FormatMessageW(DWORD flags, LPCVOID source, DWORD message,
                                                   DWORD language, LPWSTR buffer, DWORD size,
                                                   void *arguments);
+GRAIL_WINIMPORT BOOL GRAIL_WINAPI CreateProcessW(LPCWSTR application, LPWSTR command_line,
+                                                 LPSECURITY_ATTRIBUTES process_attributes,
+                                                 LPSECURITY_ATTRIBUTES thread_attributes,
+                                                 BOOL inherit_handles, DWORD flags,
+                                                 LPVOID environment, LPCWSTR directory,
+                                                 STARTUPINFOW *startup,
+                                                 PROCESS_INFORMATION *information);
+GRAIL_WINIMPORT BOOL GRAIL_WINAPI GetExitCodeProcess(HANDLE process, DWORD *exit_code);
+GRAIL_WINIMPORT BOOL GRAIL_WINAPI TerminateProcess(HANDLE process, uint32_t exit_code);
+GRAIL_WINIMPORT BOOL GRAIL_WINAPI GenerateConsoleCtrlEvent(DWORD event, DWORD group);
+GRAIL_WINIMPORT BOOL GRAIL_WINAPI DuplicateHandle(HANDLE source_process, HANDLE source,
+                                                  HANDLE target_process, HANDLE *target,
+                                                  DWORD access, BOOL inherit, DWORD options);
+GRAIL_WINIMPORT HANDLE GRAIL_WINAPI GetStdHandle(DWORD which);
+GRAIL_WINIMPORT DWORD GRAIL_WINAPI SearchPathW(LPCWSTR path, LPCWSTR file, LPCWSTR extension,
+                                               DWORD buffer_length, LPWSTR buffer,
+                                               LPWSTR *file_part);
 GRAIL_WINIMPORT DWORD GRAIL_WINAPI GetLastError(void);
 GRAIL_WINIMPORT void GRAIL_WINAPI Sleep(DWORD milliseconds);
 GRAIL_WINIMPORT BOOL GRAIL_WINAPI QueryPerformanceCounter(LARGE_INTEGER *value);

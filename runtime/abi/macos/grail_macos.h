@@ -56,6 +56,9 @@ typedef struct grail_macos_pthread_attr {
     uint64_t opaque[8];
 } grail_macos_pthread_attr_t;
 
+typedef void *grail_macos_spawn_file_actions_t;
+typedef void *grail_macos_spawnattr_t;
+
 /* Darwin open/fcntl values. */
 #define GRAIL_MACOS_O_RDONLY 0x0000
 #define GRAIL_MACOS_O_WRONLY 0x0001
@@ -139,6 +142,12 @@ typedef struct grail_macos_pthread_attr {
 #define GRAIL_MACOS_RTLD_NOW 0x2
 #define GRAIL_MACOS_RTLD_LOCAL 0x4
 #define GRAIL_MACOS_RTLD_GLOBAL 0x8
+#define GRAIL_MACOS_POSIX_SPAWN_SETPGROUP 0x0002
+#define GRAIL_MACOS_WNOHANG 0x0001
+#define GRAIL_MACOS_SIGTERM 15
+#define GRAIL_MACOS_SIGKILL 9
+#define GRAIL_MACOS_F_OK 0
+#define GRAIL_MACOS_X_OK 1
 
 int open(const char *path, int flags, ...);
 int close(int descriptor);
@@ -198,6 +207,25 @@ void *dlopen(const char *path, int mode);
 void *dlsym(void *library, const char *name);
 int dlclose(void *library);
 char *dlerror(void);
+int posix_spawn_file_actions_init(grail_macos_spawn_file_actions_t *actions);
+int posix_spawn_file_actions_destroy(grail_macos_spawn_file_actions_t *actions);
+int posix_spawn_file_actions_adddup2(grail_macos_spawn_file_actions_t *actions, int descriptor,
+                                     int target);
+int posix_spawn_file_actions_addopen(grail_macos_spawn_file_actions_t *actions, int target,
+                                     const char *path, int flags,
+                                     grail_macos_mode_t mode);
+int posix_spawn_file_actions_addchdir_np(grail_macos_spawn_file_actions_t *actions,
+                                         const char *path);
+int posix_spawnattr_init(grail_macos_spawnattr_t *attributes);
+int posix_spawnattr_destroy(grail_macos_spawnattr_t *attributes);
+int posix_spawnattr_setflags(grail_macos_spawnattr_t *attributes, int16_t flags);
+int posix_spawnattr_setpgroup(grail_macos_spawnattr_t *attributes, int group);
+int posix_spawn(int *pid, const char *path,
+                const grail_macos_spawn_file_actions_t *actions,
+                const grail_macos_spawnattr_t *attributes, char *const argv[],
+                char *const envp[]);
+int waitpid(int pid, int *status, int options);
+int kill(int pid, int signal);
 
 #ifdef __cplusplus
 }

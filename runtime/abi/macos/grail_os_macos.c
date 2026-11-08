@@ -3,11 +3,12 @@
  *
  * Implemented: initialization, capabilities, thread-local raw error detail,
  * clocks and sleep, environment reads/mutation/iteration, current directory,
- * executable path, and file basics (open/read/write/seek/truncate/sync/close,
- * non-blocking mode, pipe, mkdir/remove/rename, readlink, realpath).
+ * executable path, file basics (open/read/write/seek/truncate/sync/close,
+ * non-blocking mode, pipe, mkdir/remove/rename, readlink, realpath), directory
+ * iteration, threads/mutex/condition variables, dynamic libraries and child
+ * processes.
  *
- * Metadata, directory iteration, local-time offsets, processes, sockets,
- * threads, synchronization and dynamic libraries remain explicit UNSUPPORTED in
+ * File metadata, local-time offsets and sockets remain explicit UNSUPPORTED in
  * grail_os_macos_stubs.c.  Darwin declarations live in grail_macos.h so the
  * backend can be compiled for Apple ARM64 on a host without the macOS SDK.
  * This is static evidence only; it has not been executed on macOS.
@@ -20,6 +21,7 @@
 #include "../../../include/grail/grail_error.h"
 #include "../../../include/grail/grail_fs.h"
 #include "../../../include/grail/grail_path.h"
+#include "../../../include/grail/grail_proc.h"
 #include "../../../include/grail/grail_thread.h"
 #include "../../../include/grail/grail_time.h"
 #include "../grail_env_store.h"
@@ -62,6 +64,13 @@ typedef struct grail_macos_condvar_object {
     grail_macos_pthread_cond_t condition;
 } grail_macos_condvar_object;
 
+typedef struct grail_macos_process {
+    int pid;
+    int status;
+    int reaped;
+    int new_group;
+} grail_macos_process;
+
 typedef struct grail_macos_library {
     void *handle;
 } grail_macos_library;
@@ -80,6 +89,7 @@ typedef struct grail_macos_state {
     grail_handle_table mutexes;
     grail_handle_table condvars;
     grail_handle_table libraries;
+    grail_handle_table processes;
     grail_env_store env;
     grail_macos_unfair_lock lock;
     uint64_t capabilities;
@@ -87,6 +97,7 @@ typedef struct grail_macos_state {
 } grail_macos_state;
 
 static grail_macos_state grail_macos = {{0, NULL, NULL, NULL, NULL},
+                                        {NULL, NULL, 0, 0, 0},
                                         {NULL, NULL, 0, 0, 0},
                                         {NULL, NULL, 0, 0, 0},
                                         {NULL, NULL, 0, 0, 0},
@@ -295,6 +306,10 @@ grail_status grail_os_init(const grail_allocator *allocator, const grail_startup
                                          GRAIL_HANDLE_KIND_LIBRARY);
     }
     if (status == GRAIL_OK) {
+        status = grail_handle_table_init(&grail_macos.processes, &grail_macos.allocator,
+                                         GRAIL_HANDLE_KIND_PROCESS);
+    }
+    if (status == GRAIL_OK) {
         status = grail_env_store_init(&grail_macos.env, &grail_macos.allocator);
     }
     if (status == GRAIL_OK) {
@@ -308,6 +323,7 @@ grail_status grail_os_init(const grail_allocator *allocator, const grail_startup
         grail_handle_table_destroy(&grail_macos.mutexes);
         grail_handle_table_destroy(&grail_macos.condvars);
         grail_handle_table_destroy(&grail_macos.libraries);
+        grail_handle_table_destroy(&grail_macos.processes);
         grail_env_store_free(&grail_macos.env);
         return status;
     }
@@ -316,7 +332,7 @@ grail_status grail_os_init(const grail_allocator *allocator, const grail_startup
                                GRAIL_CAP_ENV_MUTATION | GRAIL_CAP_TIME | GRAIL_CAP_CPU_TIME |
                                GRAIL_CAP_SYMLINKS | GRAIL_CAP_DIRECTORIES |
                                GRAIL_CAP_THREADS | GRAIL_CAP_SYNC_PRIMITIVES |
-                               GRAIL_CAP_DYNAMIC_LIBRARIES;
+                               GRAIL_CAP_DYNAMIC_LIBRARIES | GRAIL_CAP_PROCESSES;
     grail_macos.initialized = 1;
     return GRAIL_OK;
 }
@@ -332,6 +348,7 @@ grail_status grail_os_shutdown(void) {
     grail_handle_table_destroy(&grail_macos.mutexes);
     grail_handle_table_destroy(&grail_macos.condvars);
     grail_handle_table_destroy(&grail_macos.libraries);
+    grail_handle_table_destroy(&grail_macos.processes);
     grail_env_store_free(&grail_macos.env);
     grail_macos.capabilities = 0;
     grail_macos.initialized = 0;
@@ -1312,6 +1329,450 @@ grail_result grail_os_dl_error(uint8_t *out, uint64_t capacity) {
     if (!grail_macos.initialized) return GRAIL_E_NOT_INITIALIZED;
     return grail_abi_copy_out((const uint8_t *)grail_macos_loader_error,
                               grail_macos_text_length(grail_macos_loader_error), out, capacity);
+}
+
+
+static int grail_macos_block_valid(const uint8_t *block, uint64_t length,
+                                   const uint64_t *offsets, uint64_t count) {
+    if (count == 0) {
+        return 1;
+    }
+    if (block == NULL || offsets == NULL || length == 0) {
+        return 0;
+    }
+    for (uint64_t i = 0; i < count; i++) {
+        const uint64_t begin = offsets[i];
+        const uint64_t end = i + 1 < count ? offsets[i + 1] : length;
+        if (begin >= end || end > length) {
+            return 0;
+        }
+        if (block[end - 1] != 0 || grail_macos_has_zero(block + begin, end - begin - 1)) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static grail_status grail_macos_build_child_env(const grail_process_options *options,
+                                                grail_env_store *child) {
+    grail_status status = grail_env_store_init(child, &grail_macos.allocator);
+    if (status != GRAIL_OK) {
+        return status;
+    }
+    if ((options->flags & GRAIL_PROC_REPLACE_ENVIRONMENT) == 0) {
+        grail_macos_lock();
+        const uint64_t count = grail_env_store_count(&grail_macos.env);
+        for (uint64_t i = 0; i < count; i++) {
+            const char *name = NULL;
+            const char *value = NULL;
+            uint64_t name_length = 0;
+            uint64_t value_length = 0;
+            status = grail_env_store_at(&grail_macos.env, i, &name, &name_length, &value,
+                                        &value_length);
+            if (status == GRAIL_OK) {
+                status = grail_env_store_set(child, (const uint8_t *)name, name_length,
+                                             (const uint8_t *)value, value_length);
+            }
+            if (status != GRAIL_OK) {
+                grail_macos_unlock();
+                return status;
+            }
+        }
+        grail_macos_unlock();
+    }
+    grail_startup overlay;
+    for (uint64_t i = 0; i < sizeof(overlay); i++) ((uint8_t *)&overlay)[i] = 0;
+    overlay.struct_size = sizeof(overlay);
+    overlay.abi_version = GRAIL_ABI_VERSION;
+    overlay.environment = options->environment;
+    overlay.environment_length = options->environment_length;
+    overlay.environment_offsets = options->environment_offsets;
+    overlay.environment_count = options->environment_count;
+    return grail_env_store_seed(child, &overlay);
+}
+
+static void grail_macos_free_envp(char **values, uint64_t count) {
+    if (values == NULL) return;
+    for (uint64_t i = 0; i < count; i++) grail_macos_free_text(values[i]);
+    grail_macos_release(values, (count + 1) * sizeof(char *));
+}
+
+static grail_status grail_macos_build_envp(const grail_env_store *environment, char ***out,
+                                           uint64_t *count_out) {
+    const uint64_t count = grail_env_store_count(environment);
+    char **values = (char **)grail_macos_allocate((count + 1) * sizeof(char *));
+    if (values == NULL) return GRAIL_E_OUT_OF_MEMORY;
+    for (uint64_t i = 0; i < count; i++) {
+        const char *name = NULL;
+        const char *value = NULL;
+        uint64_t name_length = 0;
+        uint64_t value_length = 0;
+        const grail_status status =
+            grail_env_store_at(environment, i, &name, &name_length, &value, &value_length);
+        if (status != GRAIL_OK) {
+            for (uint64_t j = 0; j < i; j++) grail_macos_free_text(values[j]);
+            grail_macos_release(values, (count + 1) * sizeof(char *));
+            return status;
+        }
+        char *entry = (char *)grail_macos_allocate(name_length + value_length + 2);
+        if (entry == NULL) {
+            for (uint64_t j = 0; j < i; j++) grail_macos_free_text(values[j]);
+            grail_macos_release(values, (count + 1) * sizeof(char *));
+            return GRAIL_E_OUT_OF_MEMORY;
+        }
+        for (uint64_t j = 0; j < name_length; j++) entry[j] = name[j];
+        entry[name_length] = '=';
+        for (uint64_t j = 0; j < value_length; j++) entry[name_length + 1 + j] = value[j];
+        entry[name_length + value_length + 1] = '\0';
+        values[i] = entry;
+    }
+    values[count] = NULL;
+    *out = values;
+    *count_out = count;
+    return GRAIL_OK;
+}
+
+static grail_status grail_macos_resolve_program(const grail_process_options *options,
+                                                const grail_env_store *environment,
+                                                char **out) {
+    char *program = grail_macos_copy_text(options->program, options->program_length);
+    if (program == NULL) return GRAIL_E_INVALID_ARGUMENT;
+    int has_separator = 0;
+    for (uint64_t i = 0; program[i] != '\0'; i++) {
+        if (program[i] == '/') { has_separator = 1; break; }
+    }
+    if ((options->flags & GRAIL_PROC_SEARCH_PATH) == 0 || has_separator) {
+        *out = program;
+        return GRAIL_OK;
+    }
+    const char *path = NULL;
+    uint64_t path_length = 0;
+    if (grail_env_store_get(environment, (const uint8_t *)"PATH", 4, &path, &path_length) !=
+        GRAIL_OK) {
+        path = "/usr/local/bin:/usr/bin:/bin";
+        path_length = grail_macos_text_length(path);
+    }
+    int saw_file = 0;
+    uint64_t cursor = 0;
+    while (cursor <= path_length) {
+        uint64_t end = cursor;
+        while (end < path_length && path[end] != ':') end++;
+        const uint64_t directory_length = end - cursor;
+        const uint64_t program_length = grail_macos_text_length(program);
+        char *candidate = (char *)grail_macos_allocate(directory_length + program_length + 2);
+        if (candidate == NULL) {
+            grail_macos_free_text(program);
+            return GRAIL_E_OUT_OF_MEMORY;
+        }
+        uint64_t at = 0;
+        if (directory_length == 0) {
+            candidate[at++] = '.';
+        } else {
+            for (uint64_t i = 0; i < directory_length; i++) candidate[at++] = path[cursor + i];
+        }
+        candidate[at++] = '/';
+        for (uint64_t i = 0; i < program_length; i++) candidate[at++] = program[i];
+        candidate[at] = '\0';
+        if (access(candidate, GRAIL_MACOS_X_OK) == 0) {
+            grail_macos_free_text(program);
+            *out = candidate;
+            return GRAIL_OK;
+        }
+        if (access(candidate, GRAIL_MACOS_F_OK) == 0) saw_file = 1;
+        grail_macos_free_text(candidate);
+        if (end == path_length) break;
+        cursor = end + 1;
+    }
+    grail_macos_free_text(program);
+    return saw_file ? GRAIL_E_ACCESS_DENIED : GRAIL_E_NOT_FOUND;
+}
+
+static grail_status grail_macos_build_argv(const grail_process_options *options,
+                                           const char *program, char ***out) {
+    if (options->argument_count == 0) {
+        char **values = (char **)grail_macos_allocate(2 * sizeof(char *));
+        if (values == NULL) return GRAIL_E_OUT_OF_MEMORY;
+        values[0] = grail_macos_copy_text((const uint8_t *)program, grail_macos_text_length(program));
+        if (values[0] == NULL) {
+            grail_macos_release(values, 2 * sizeof(char *));
+            return GRAIL_E_OUT_OF_MEMORY;
+        }
+        values[1] = NULL;
+        *out = values;
+        return GRAIL_OK;
+    }
+    char **values = (char **)grail_macos_allocate((options->argument_count + 1) * sizeof(char *));
+    if (values == NULL) return GRAIL_E_OUT_OF_MEMORY;
+    for (uint64_t i = 0; i < options->argument_count; i++) {
+        values[i] = (char *)(options->arguments + options->argument_offsets[i]);
+    }
+    values[options->argument_count] = NULL;
+    *out = values;
+    return GRAIL_OK;
+}
+
+static grail_status grail_macos_process_lookup(grail_process handle, grail_macos_process **out) {
+    if (!grail_macos.initialized) return GRAIL_E_NOT_INITIALIZED;
+    grail_macos_lock();
+    const grail_status status =
+        grail_handle_table_lookup(&grail_macos.processes, handle, (void **)out);
+    grail_macos_unlock();
+    return status;
+}
+
+static int grail_macos_exited(int status) { return (status & 0x7f) == 0; }
+static int grail_macos_exit_code(int status) { return (status >> 8) & 0xff; }
+static int grail_macos_signaled(int status) {
+    const int signal = status & 0x7f;
+    return signal != 0 && signal != 0x7f;
+}
+static int grail_macos_signal(int status) { return status & 0x7f; }
+
+static void grail_macos_fill_process_status(const grail_macos_process *process,
+                                            grail_process_status *out) {
+    for (uint64_t i = 0; i < sizeof(*out); i++) ((uint8_t *)out)[i] = 0;
+    out->struct_size = sizeof(*out);
+    out->abi_version = GRAIL_ABI_VERSION;
+    if (!process->reaped) {
+        out->kind = GRAIL_PROCESS_STILL_ACTIVE;
+        return;
+    }
+    if (grail_macos_exited(process->status)) {
+        out->kind = GRAIL_PROCESS_EXITED;
+        out->exit_code = grail_macos_exit_code(process->status);
+    } else if (grail_macos_signaled(process->status)) {
+        out->kind = GRAIL_PROCESS_SIGNALED;
+        out->term_signal = grail_macos_signal(process->status);
+    } else {
+        out->kind = GRAIL_PROCESS_STILL_ACTIVE;
+    }
+}
+
+grail_status grail_os_process_spawn(const grail_process_options *options, grail_process *out) {
+    if (!grail_macos.initialized) return GRAIL_E_NOT_INITIALIZED;
+    if (options == NULL || out == NULL) return GRAIL_E_INVALID_ARGUMENT;
+    if (options->struct_size < sizeof(*options) || options->abi_version != GRAIL_ABI_VERSION ||
+        (options->flags & ~(GRAIL_PROC_SEARCH_PATH | GRAIL_PROC_NEW_GROUP |
+                            GRAIL_PROC_NO_WINDOW | GRAIL_PROC_INHERIT_STDIO |
+                            GRAIL_PROC_REPLACE_ENVIRONMENT)) != 0) {
+        return GRAIL_E_INVALID_ARGUMENT;
+    }
+    if (options->program == NULL || options->program_length == 0 ||
+        grail_macos_has_zero(options->program, options->program_length) ||
+        !grail_macos_block_valid(options->arguments, options->arguments_length,
+                                 options->argument_offsets, options->argument_count) ||
+        !grail_macos_block_valid(options->environment, options->environment_length,
+                                 options->environment_offsets, options->environment_count) ||
+        (options->working_directory == NULL && options->working_directory_length != 0) ||
+        (options->working_directory != NULL &&
+         (options->working_directory_length == 0 ||
+          grail_macos_has_zero(options->working_directory,
+                               options->working_directory_length)))) {
+        return GRAIL_E_INVALID_ARGUMENT;
+    }
+    grail_env_store environment;
+    for (uint64_t i = 0; i < sizeof(environment); i++) ((uint8_t *)&environment)[i] = 0;
+    char *program = NULL;
+    char *location = NULL;
+    char **argv = NULL;
+    char **envp = NULL;
+    uint64_t envp_count = 0;
+    grail_macos_spawn_file_actions_t actions = NULL;
+    grail_macos_spawnattr_t attributes = NULL;
+    int actions_initialized = 0;
+    int attributes_initialized = 0;
+    grail_status status = grail_macos_build_child_env(options, &environment);
+    if (status != GRAIL_OK) goto cleanup;
+    status = grail_macos_resolve_program(options, &environment, &program);
+    if (status != GRAIL_OK) goto cleanup;
+    status = grail_macos_build_argv(options, program, &argv);
+    if (status != GRAIL_OK) goto cleanup;
+    status = grail_macos_build_envp(&environment, &envp, &envp_count);
+    if (status != GRAIL_OK) goto cleanup;
+    if (options->working_directory != NULL) {
+        location = grail_macos_copy_text(options->working_directory,
+                                         options->working_directory_length);
+        if (location == NULL) { status = GRAIL_E_OUT_OF_MEMORY; goto cleanup; }
+    }
+    int result = posix_spawn_file_actions_init(&actions);
+    if (result != 0) { status = grail_macos_fail(result); goto cleanup; }
+    actions_initialized = 1;
+    result = posix_spawnattr_init(&attributes);
+    if (result != 0) { status = grail_macos_fail(result); goto cleanup; }
+    attributes_initialized = 1;
+    for (int target = 0; target < 3; target++) {
+        grail_file file = target == 0 ? options->standard_input
+                                      : (target == 1 ? options->standard_output
+                                                     : options->standard_error);
+        const int write = target != 0;
+        if (file != GRAIL_HANDLE_NONE) {
+            grail_macos_file *handle = NULL;
+            status = grail_macos_file_lookup(file, &handle);
+            if (status != GRAIL_OK) goto cleanup;
+            result = posix_spawn_file_actions_adddup2(&actions, handle->descriptor, target);
+        } else if ((options->flags & GRAIL_PROC_INHERIT_STDIO) == 0) {
+            result = posix_spawn_file_actions_addopen(
+                &actions, target, "/dev/null",
+                write ? GRAIL_MACOS_O_WRONLY : GRAIL_MACOS_O_RDONLY, 0);
+        } else {
+            result = 0;
+        }
+        if (result != 0) { status = grail_macos_fail(result); goto cleanup; }
+    }
+    if (location != NULL) {
+        result = posix_spawn_file_actions_addchdir_np(&actions, location);
+        if (result != 0) { status = grail_macos_fail(result); goto cleanup; }
+    }
+    if ((options->flags & GRAIL_PROC_NEW_GROUP) != 0) {
+        result = posix_spawnattr_setpgroup(&attributes, 0);
+        if (result == 0) {
+            result = posix_spawnattr_setflags(&attributes, GRAIL_MACOS_POSIX_SPAWN_SETPGROUP);
+        }
+        if (result != 0) { status = grail_macos_fail(result); goto cleanup; }
+    }
+    int pid = -1;
+    result = posix_spawn(&pid, program, &actions, &attributes, argv, envp);
+    if (result != 0) { status = grail_macos_fail(result); goto cleanup; }
+    grail_macos_process *process =
+        (grail_macos_process *)grail_macos_allocate(sizeof(*process));
+    if (process == NULL) {
+        (void)kill(pid, GRAIL_MACOS_SIGKILL);
+        (void)waitpid(pid, NULL, 0);
+        status = GRAIL_E_OUT_OF_MEMORY;
+        goto cleanup;
+    }
+    process->pid = pid;
+    process->status = 0;
+    process->reaped = 0;
+    process->new_group = (options->flags & GRAIL_PROC_NEW_GROUP) != 0;
+    grail_handle handle = GRAIL_HANDLE_NONE;
+    grail_macos_lock();
+    status = grail_handle_table_allocate(&grail_macos.processes, process, &handle);
+    grail_macos_unlock();
+    if (status != GRAIL_OK) {
+        (void)kill(pid, GRAIL_MACOS_SIGKILL);
+        (void)waitpid(pid, NULL, 0);
+        grail_macos_release(process, sizeof(*process));
+        goto cleanup;
+    }
+    *out = handle;
+    status = GRAIL_OK;
+
+cleanup:
+    if (actions_initialized) (void)posix_spawn_file_actions_destroy(&actions);
+    if (attributes_initialized) (void)posix_spawnattr_destroy(&attributes);
+    if (argv != NULL) {
+        if (options->argument_count == 0) grail_macos_free_text(argv[0]);
+        grail_macos_release(argv, (options->argument_count == 0 ? 2 : options->argument_count + 1) *
+                                      sizeof(char *));
+    }
+    grail_macos_free_envp(envp, envp_count);
+    grail_macos_free_text(program);
+    grail_macos_free_text(location);
+    grail_env_store_free(&environment);
+    return status;
+}
+
+grail_status grail_os_process_wait(grail_process handle, grail_process_status *out) {
+    grail_macos_process *process = NULL;
+    grail_status status = grail_macos_process_lookup(handle, &process);
+    if (status != GRAIL_OK) return status;
+    if (process->reaped) {
+        if (out != NULL) grail_macos_fill_process_status(process, out);
+        return GRAIL_OK;
+    }
+    for (;;) {
+        int process_status = 0;
+        const int result = waitpid(process->pid, &process_status, 0);
+        if (result == process->pid) {
+            process->status = process_status;
+            process->reaped = 1;
+            if (out != NULL) grail_macos_fill_process_status(process, out);
+            return GRAIL_OK;
+        }
+        if (result < 0 && *__error() == GRAIL_MACOS_EINTR) continue;
+        return grail_macos_fail(result < 0 ? *__error() : GRAIL_MACOS_EIO);
+    }
+}
+
+grail_status grail_os_process_wait_timeout(grail_process handle, int64_t timeout_ns,
+                                           grail_process_status *out) {
+    grail_macos_process *process = NULL;
+    grail_status status = grail_macos_process_lookup(handle, &process);
+    if (status != GRAIL_OK) return status;
+    if (process->reaped) {
+        if (out != NULL) grail_macos_fill_process_status(process, out);
+        return GRAIL_OK;
+    }
+    if (timeout_ns < 0) return grail_os_process_wait(handle, out);
+    uint64_t remaining = (uint64_t)timeout_ns;
+    for (;;) {
+        int process_status = 0;
+        const int result = waitpid(process->pid, &process_status, GRAIL_MACOS_WNOHANG);
+        if (result == process->pid) {
+            process->status = process_status;
+            process->reaped = 1;
+            if (out != NULL) grail_macos_fill_process_status(process, out);
+            return GRAIL_OK;
+        }
+        if (result < 0 && *__error() != GRAIL_MACOS_EINTR) {
+            return grail_macos_fail(*__error());
+        }
+        if (result < 0) continue;
+        if (remaining == 0) {
+            if (out != NULL) {
+                grail_macos_fill_process_status(process, out);
+                out->kind = GRAIL_PROCESS_STILL_ACTIVE;
+            }
+            return GRAIL_E_TIMED_OUT;
+        }
+        const uint64_t slice = remaining < 1000000 ? remaining : 1000000;
+        grail_macos_timespec delay;
+        delay.tv_sec = (int64_t)(slice / 1000000000);
+        delay.tv_nsec = (int64_t)(slice % 1000000000);
+        while (nanosleep(&delay, &delay) != 0 && *__error() == GRAIL_MACOS_EINTR) {
+        }
+        remaining -= slice;
+    }
+}
+
+static grail_status grail_macos_process_signal(grail_process handle, int signal_number) {
+    grail_macos_process *process = NULL;
+    const grail_status status = grail_macos_process_lookup(handle, &process);
+    if (status != GRAIL_OK) return status;
+    if (process->reaped) return GRAIL_OK;
+    if (kill(process->pid, signal_number) != 0) return grail_macos_fail(*__error());
+    return GRAIL_OK;
+}
+
+grail_status grail_os_process_terminate(grail_process process) {
+    return grail_macos_process_signal(process, GRAIL_MACOS_SIGTERM);
+}
+
+grail_status grail_os_process_kill(grail_process process) {
+    return grail_macos_process_signal(process, GRAIL_MACOS_SIGKILL);
+}
+
+grail_status grail_os_process_id(grail_process handle, uint64_t *out) {
+    if (!grail_macos.initialized) return GRAIL_E_NOT_INITIALIZED;
+    if (out == NULL) return GRAIL_E_INVALID_ARGUMENT;
+    grail_macos_process *process = NULL;
+    const grail_status status = grail_macos_process_lookup(handle, &process);
+    if (status != GRAIL_OK) return status;
+    *out = (uint64_t)process->pid;
+    return GRAIL_OK;
+}
+
+grail_status grail_os_process_close(grail_process handle) {
+    if (!grail_macos.initialized) return GRAIL_E_NOT_INITIALIZED;
+    grail_macos_process *process = NULL;
+    grail_macos_lock();
+    const grail_status status =
+        grail_handle_table_release(&grail_macos.processes, handle, (void **)&process);
+    grail_macos_unlock();
+    if (status != GRAIL_OK) return status;
+    grail_macos_release(process, sizeof(*process));
+    return GRAIL_OK;
 }
 
 grail_status grail_os_fs_mkdir(const uint8_t *path, uint64_t path_length, uint64_t mode,

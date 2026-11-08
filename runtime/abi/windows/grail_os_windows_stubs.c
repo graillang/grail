@@ -1,12 +1,11 @@
 /*
  * Windows backend: explicit fail-closed stubs for the remaining domains.
  *
- * Processes, sockets, local-time offsets, non-blocking files and symlink
- * read/realpath are not implemented.  Every function returns
+ * Sockets, local-time offsets, non-blocking files and symlink read/realpath are
+ * not implemented.  Every function returns
  * GRAIL_E_UNSUPPORTED and the corresponding capability bit is clear.
  */
 #include "../../../include/grail/grail_fs.h"
-#include "../../../include/grail/grail_proc.h"
 #include "../../../include/grail/grail_socket.h"
 #include "../../../include/grail/grail_time.h"
 
@@ -37,41 +36,6 @@ grail_result grail_os_fs_realpath(const uint8_t *path, uint64_t path_length, uin
 grail_status grail_os_time_local_offset(int64_t utc_nanoseconds, int64_t *offset_nanoseconds) {
     (void)utc_nanoseconds;
     (void)offset_nanoseconds;
-    return GRAIL_E_UNSUPPORTED;
-}
-
-grail_status grail_os_process_spawn(const grail_process_options *options, grail_process *out) {
-    (void)options;
-    (void)out;
-    return GRAIL_E_UNSUPPORTED;
-}
-grail_status grail_os_process_wait(grail_process process, grail_process_status *out) {
-    (void)process;
-    (void)out;
-    return GRAIL_E_UNSUPPORTED;
-}
-grail_status grail_os_process_wait_timeout(grail_process process, int64_t timeout_ns,
-                                           grail_process_status *out) {
-    (void)process;
-    (void)timeout_ns;
-    (void)out;
-    return GRAIL_E_UNSUPPORTED;
-}
-grail_status grail_os_process_terminate(grail_process process) {
-    (void)process;
-    return GRAIL_E_UNSUPPORTED;
-}
-grail_status grail_os_process_kill(grail_process process) {
-    (void)process;
-    return GRAIL_E_UNSUPPORTED;
-}
-grail_status grail_os_process_id(grail_process process, uint64_t *out) {
-    (void)process;
-    (void)out;
-    return GRAIL_E_UNSUPPORTED;
-}
-grail_status grail_os_process_close(grail_process process) {
-    (void)process;
     return GRAIL_E_UNSUPPORTED;
 }
 
