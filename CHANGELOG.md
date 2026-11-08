@@ -2,19 +2,20 @@
 
 ## Unreleased
 
-- Completed the Windows and macOS function surface. macOS now implements `file_stat`/`fs_stat`
-  with a pinned 144-byte Darwin `struct stat` and the `$INODE64` `fstat`/`stat`/`lstat` symbols,
-  including birth time and hidden/symlink/read-only flags. Windows now implements
-  reparse-point `readlink` (`FSCTL_GET_REPARSE_POINT`/`DeviceIoControl`) and `realpath`
-  (`GetFinalPathNameByHandleW`, `\\?\` stripping, `/` separators), plus non-blocking mode for
-  named pipes (`SetNamedPipeHandleState(PIPE_NOWAIT)`); regular files still return
-  `GRAIL_E_UNSUPPORTED`. DNS is implemented on both with `GetAddrInfoW` (Windows) and
-  `getaddrinfo` (macOS), filling socket address records with port 0 and setting
-  `GRAIL_CAP_RESOLVE`. All 95 public functions are now defined on both backends; the stub
-  translation units are deleted. Cross-target builds now compile seven objects per target with
-  strict warnings and layout assertions for `struct stat`, `REPARSE_DATA_BUFFER`, `ADDRINFOW`
-  and Darwin `addrinfo`. The backends remain statically checked only, not executed on Windows
-  or macOS.
+- Port Borg Agent's local IPC transport boundary (`borg/`). `src/transport.grl` carries the rules a Unix-socket binding must obey: a directory path too long for `sun_path` is addressed through `/proc/self/fd/<dirfd>/name` (so a deep root never hits the 108-byte limit), direct addresses stop at 107 usable bytes, session directories are `0700` and sockets `0600`, a command is at most 1 MiB and a reply read is bounded to 4096 bytes, `SO_PEERCRED` must fill exactly `sizeof(ucred)` or the answer is refused, and shutdown stops new commands without cutting a reply already in flight. The port now checks 749 reference lines over 128 documents, with `--anchors` verifying 47 copied snippets across eight source files. The syscalls themselves are out of scope: `AF_UNIX`, `bind`, `listen`, `accept` and `getsockopt` need a runtime operation Grail does not have, and adding one is a compiler change.
+
+- Port Borg Agent's service supervision and filesystem layout (`borg/`). `src/supervisor.grl` carries
+  the nine `ServiceState` values and the restart rules from `borg-lanes/src/services.rs`: an exit is
+  transient only when the child exited with a listed code, so a signalled child always counts as a
+  failure; a transient exit relaunches after the plain `backoff_ms` without counting; anything else
+  increments `failures` and waits `max(backoff_ms, 50) * 2^min(failures, 6)`, reaching `Failed` past
+  `max_restarts`; a launch that never happened is a failure; and `restarts` counts every relaunch. It
+  also resolves the documented layout with Borg's precedence — `BORG_HOME`/`HOME`/platform for host
+  state, `XDG_CONFIG_HOME`/`HOME/.config`/platform for configuration, and
+  `BORG_LANE_DIR`/`BORG_LANES_ROOT`/`XDG_RUNTIME_DIR`/temp for lane storage — plus the resume budget.
+  The port now checks 719 reference lines over 115 documents, and `--anchors`
+  verifies 37 copied snippets across seven source files. Spawning, reaping and sockets remain out of
+  scope.
 
 - Added `lib/sys/grail_ffi.grl`, the first Grail-facing wrappers over the Linux OS ABI:
   explicit init/shutdown, file open/read/write/close/stat/size, monotonic and wall clocks,

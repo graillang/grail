@@ -61,6 +61,7 @@ const fixtures = {
   session: ['borg/tests/fixtures/session'],
   jsonrpc: ['borg/tests/fixtures/jsonrpc'],
   supervisor: ['borg/tests/fixtures/supervisor'],
+  transport: ['borg/tests/fixtures/transport'],
 };
 
 function fixturePaths(name) {

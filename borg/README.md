@@ -1,11 +1,12 @@
 # Borg Agent CPU port
 
-Five bounded increments of the Borg Agent → Grail port: the JSON substrate its wire documents are
+Six bounded increments of the Borg Agent → Grail port: the JSON substrate its wire documents are
 made of, the TOML its configuration files are written in, the protocol-v1 envelope header that
 classifies a document, the `agent.toml` loader that applies Borg's compiled-in defaults, the
 local-session ownership state that decides whether a session still has an owner, the JSON-RPC frames
 and single-in-flight dispatch that ACP, LSP and MCP conversations are built from, and the service
-supervision rules — restart policy, backoff, exit semantics — with the layout they write into.
+supervision rules — restart policy, backoff, exit semantics — with the layout they write into,
+and the local IPC transport boundary in front of those frames.
 Borg Agent is read-only here; the reference is its own JSON semantics — `serde_json` 1.0.151 with
 `arbitrary_precision`, the crate version and feature set `crates/borg-*` build with. The plan and
 staging live in [docs/design/borg-agent-port.md](../docs/design/borg-agent-port.md).
@@ -18,6 +19,7 @@ src/config.grl               `agent.toml` → effective settings with Borg's com
 src/session_state.grl        owner record codec, executable identity, `/proc` start time, liveness
 src/jsonrpc.grl              JSON-RPC frames, stdio and Content-Length framing, dispatcher state
 src/supervisor.grl           restart policy, backoff, service states, layout resolvers
+src/transport.grl            socket addressing, peer credentials, connection lifecycle
 tests/json_test.grl          JSON: `json.compact`, `json.scalar`, `json.error` per document
 tests/wire_test.grl          protocol: `wire.header <file> <field> <value>`, `wire.error <file> <path> <reason>`
 tests/toml_test.grl          TOML: `toml.value <file> <path> <kind> <text>`, `toml.error <file>`
@@ -25,6 +27,7 @@ tests/config_test.grl        config: `config.value <file> <key> <value>`, `confi
 tests/session_test.grl       ownership: `case <name> record|field|active|state|obsolete|start|identity …`
 tests/jsonrpc_test.grl       frames: `frame|parse|take|dispatch <name> …`
 tests/supervisor_test.grl    supervision: `supervise|home|config|lanes|session|budget <name> …`
+tests/transport_test.grl     transport: `address|fits|limits|ucred|peer|conn <name> …`
 tests/fixtures/v1/           Borg's protocol-v1 conformance corpus, copied verbatim
 tests/fixtures/edge/         number, escape, structure, nesting-limit and malformed documents
 tests/fixtures/wire/         envelope mutations: missing, mistyped, wrong protocol, wrong version
@@ -34,6 +37,7 @@ tests/fixtures/config/       `agent.toml` documents: full, partial, empty, wrong
 tests/fixtures/session/      ownership scenarios: records, process observations, stat lines
 tests/fixtures/jsonrpc/      frame specs, parse cases, framed buffers, dispatch scripts
 tests/fixtures/supervisor/   policies with op scripts, and layout inputs
+tests/fixtures/transport/    addressing, limit, peer and connection scenarios
 tests/parity/json.rs         the reference: serde_json compact re-serialisation and scalar walk
 tests/parity/wire.rs         the reference: the same header rule over serde_json values
 tests/parity/toml.rs         the reference: the toml crate's value model, walked in the same order
@@ -48,6 +52,7 @@ tests/parity/config.txt      committed reference output (66 lines, 6 documents)
 tests/parity/session.txt     committed reference output (120 lines, 23 documents)
 tests/parity/jsonrpc.txt     committed reference output (71 lines, 22 documents)
 tests/parity/supervisor.txt  committed reference output (45 lines, 20 documents)
+tests/parity/transport.txt   committed reference output (30 lines, 13 documents)
 tools/borg-test.mjs          build + compile + run + diff
 ```
 
@@ -92,8 +97,10 @@ and field:
   outcome of a dispatch script.
 - `supervise <name> <i> <event> <state> delay=… failures=… restarts=…`: one supervision script
   replayed, plus `home|config|lanes|session|budget` for the layout resolvers.
+- `address|fits|limits|ucred|peer|conn`: the socket address chosen for a directory, the transport
+  limits, a peer-credential verdict, and a connection replayed event by event.
 
-The suite compares **719 lines over 115 documents**, and every value in them comes from
+The suite compares **749 lines over 128 documents**, and every value in them comes from
 `serde_json` rather than from a restatement: the reference parses with Borg's own crate and prints
 what it parsed. `wire.rs` and `config.rs` pin the v1 header *rule* and the default table (no Rust program classifies
 these fixtures, or loads this config without building the whole 363k-line Borg workspace), and use
@@ -239,6 +246,31 @@ The layout half is the path half only: it resolves where `agent.toml`, `editor.t
 `logs/postgres.log`, `remote/host.json` and `remote/sessions/<id>.control.*` live. Nothing here starts
 a process, reaps one, or touches the filesystem.
 
+## Local IPC transport
+
+The boundary in front of the JSON-RPC frames. Everything here is pure: no socket is opened, because
+`socket(AF_UNIX)`, `bind`, `listen`, `accept`, `connect` and `getsockopt` need a runtime operation
+Grail does not have yet, and adding one is a compiler/runtime change. What the port does carry is the
+rule set a binding has to obey.
+
+| Rule | Source | Ported as |
+| --- | --- | --- |
+| A long directory path is never passed as `sun_path`: the socket is addressed through `/proc/self/fd/<dirfd>/name` | `services.rs:485` | `socket_address` |
+| Direct addresses are capped at 107 usable bytes of the 108-byte `sun_path` | kernel ABI | `usable_sockaddr_bytes` |
+| Session directory `0700`, socket `0600` | `local_control.rs:1157, 1166` | `session_dir_mode`, `socket_mode` |
+| One command per connection, at most 1 MiB | `local_control.rs:23` | `max_command_bytes` |
+| The reply read is bounded to 4096 bytes | `local_control.rs:905` | `max_reply_bytes` |
+| `SO_PEERCRED` must fill exactly `sizeof(ucred)` | `computer_use/linux/windows.rs:114` | `credentials_valid` |
+| Shutdown stops new commands without cutting a reply in flight | `local_control.rs:1297` | `Connection::shutdown` |
+
+The credential verdict is deliberately thin: the socket is `0600` inside a `0700` directory, so the
+owner is the only expected peer, and a different uid is *reported* rather than granted anything.
+`peer_verdict` names the peer; the permission bits remain the gate.
+
+Addressing stays consistent with the layout section: `host_home`/`config_root` decide the
+directory, `session_file` names `<id>.control.sock` inside it, and `socket_address` decides whether
+that path can be a `sun_path` or has to go through the descriptor.
+
 ## Limits and findings
 
 - **Not modelled: command, event and snapshot bodies.** The header is what classifies and routes a
@@ -268,6 +300,9 @@ a process, reaps one, or touches the filesystem.
   second call, or returning it, is rejected. Reading `entries[index].value` needs a named local
   borrow (`entry := &entries[index]`), and a loop that both borrows an element and returns must go
   through a one-line helper (`copied_entry_value`).
+- **The IPC increment stops at the syscall boundary.** `AF_UNIX` sockets, `SO_PEERCRED` and the
+  accept loop need new runtime operations; that is a compiler change and out of scope, so this port
+  carries the addressing, limits, credential validation and lifecycle rules only.
 - **A function may take at most six parameters** when it is lowered to native code ("native function
   exceeds six parameters"); the supervision test hit this building a log line.
 - **Matching an `Option`/enum *field* of a borrow moves it**, so the supervisor's policy and state are

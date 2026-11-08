@@ -1,0 +1,249 @@
+module borg_transport;
+use borg_json;
+use core;
+
+// Local IPC transport: socket addressing, peer credentials, connection lifecycle and shutdown.
+//
+// This is the boundary in front of the JSON-RPC frames: a Unix-domain socket carrying them, one
+// command per connection, with a bounded command, a bounded reply, owner-only permissions and a
+// shutdown that stops new work without cutting off a reply already in flight. The syscalls
+// themselves (`socket`, `bind`, `listen`, `accept`, `connect`, `getsockopt`) need an `AF_UNIX`
+// runtime operation that Grail does not have yet, so nothing here opens a file descriptor: the
+// rules below are the ones a binding has to obey, and they are all pure.
+//
+//   socket addressing   services.rs:485   a long directory path is not passed as `sun_path`; the
+//                                         socket is addressed through `/proc/self/fd/<dirfd>/name`,
+//                                         which is why a deep root cannot hit the 108-byte limit
+//   permissions         local_control.rs:1157, 1166   directory 0700, socket 0600
+//   command bound       local_control.rs:23           MAX_CONTROL_COMMAND_BYTES = 1 MiB
+//   reply bound         local_control.rs:905          the reply is read with a 4096-byte take
+//   peer credentials    computer_use/linux/windows.rs:114   SO_PEERCRED, and the returned length
+//                                                          must be exactly sizeof(ucred)
+//   shutdown            local_control.rs:1297         no new commands once shutdown is set
+
+pub fn sockaddr_limit() -> u64 {
+    // Linux `sun_path` is 108 bytes including the terminating NUL, so at most 107 are usable.
+    return 108;
+}
+
+pub fn usable_sockaddr_bytes() -> u64 {
+    return 107;
+}
+
+pub fn session_dir_mode() -> u64 {
+    return 448;
+}
+
+pub fn socket_mode() -> u64 {
+    return 384;
+}
+
+pub fn max_command_bytes() -> u64 {
+    return 1048576;
+}
+
+pub fn max_reply_bytes() -> u64 {
+    return 4096;
+}
+
+pub fn ucred_size() -> u64 {
+    return 12;
+}
+
+fn copy_text<a>(text: (&a [u8])) -> string {
+    mut out = u8[];
+    for byte in text {
+        out.push(byte);
+    }
+    return out.text();
+}
+
+fn path_under<a, b>(root: (&a [u8]), leaf: (&b [u8])) -> string {
+    mut out = u8[];
+    for byte in root {
+        out.push(byte);
+    }
+    if out.len() > 0 && out[out.len() - 1] != 47 {
+        out.push(47);
+    }
+    for byte in leaf {
+        out.push(byte);
+    }
+    return out.text();
+}
+
+// Length of the direct `dir/name` address, so a caller can report whether it fits.
+pub fn direct_length<a, b>(dir: (&a [u8]), name: (&b [u8])) -> u64 {
+    joined := path_under(&dir, &name);
+    return joined.len();
+}
+
+pub fn address_fits<a>(path: (&a [u8])) -> bool {
+    return path.len() <= usable_sockaddr_bytes();
+}
+
+// The direct path when it fits `sun_path`; otherwise the descriptor path, which is short by
+// construction and resolves to the same socket.
+pub fn socket_address<a, b, c>(dir: (&a [u8]), name: (&b [u8]), dir_fd: (&c [u8])) -> string {
+    direct := path_under(&dir, &name);
+    if address_fits(&direct) {
+        return direct;
+    }
+    mut out = u8[];
+    for byte in "/proc/self/fd/".text() {
+        out.push(byte);
+    }
+    for byte in dir_fd {
+        out.push(byte);
+    }
+    for byte in "/".text() {
+        out.push(byte);
+    }
+    for byte in name {
+        out.push(byte);
+    }
+    return out.text();
+}
+
+// ---- peer credentials ----
+
+pub struct PeerCred {
+    pid: u64,
+    uid: u64,
+    gid: u64
+}
+
+pub fn peer(pid: u64, uid: u64, gid: u64) -> PeerCred {
+    return PeerCred { pid: pid, uid: uid, gid: gid };
+}
+
+pub fn peer_pid(value: (&PeerCred)) -> u64 {
+    return value.pid;
+}
+
+// `getsockopt(SO_PEERCRED)` must fill exactly `sizeof(ucred)`; anything else is a malformed answer
+// and Borg refuses it rather than reading a partial struct.
+pub fn credentials_valid(size: u64) -> bool {
+    return size == ucred_size();
+}
+
+// The socket is 0600 inside a 0700 directory, so the same user is the only expected peer. A
+// different uid is reported rather than treated as authority: the permission bits are the gate.
+pub fn peer_verdict(peer_uid: u64, server_uid: u64) -> string {
+    if peer_uid == server_uid {
+        return "same-user".text();
+    }
+    return "other-user".text();
+}
+
+// ---- connection lifecycle ----
+
+pub enum ConnState {
+    Idle,
+    Reading,
+    Replied,
+    Streaming,
+    Closed
+}
+
+pub struct Connection {
+    state: ConnState,
+    replies: u64,
+    streaming: bool
+}
+
+pub fn connection() -> Connection {
+    return Connection { state: ConnState::Idle, replies: 0, streaming: false };
+}
+
+fn label(state: (&ConnState)) -> string {
+    match state {
+        Idle => { return "idle".text(); },
+        Reading => { return "reading".text(); },
+        Replied => { return "replied".text(); },
+        Streaming => { return "streaming".text(); },
+        Closed => { return "closed".text(); }
+    }
+}
+
+pub fn state_text<a>(state: (&a Connection)) -> string {
+    return label(&state.state);
+}
+
+pub fn replies<a>(state: (&a Connection)) -> u64 {
+    return state.replies;
+}
+
+impl Connection {
+    pub fn accept(self: (&a mut Connection)) {
+        self.state = ConnState::Reading;
+    }
+
+    // One JSON command per connection, bounded; a larger command is a protocol error and the
+    // connection is closed rather than truncated.
+    pub fn command(self: (&a mut Connection), bytes: u64) -> string {
+        if self.state == ConnState::Closed {
+            return "closed".text();
+        }
+        if self.state != ConnState::Reading {
+            return "unexpected".text();
+        }
+        if bytes > max_command_bytes() {
+            self.state = ConnState::Closed;
+            return "too-large".text();
+        }
+        self.replies = self.replies + 1;
+        if self.streaming {
+            self.state = ConnState::Streaming;
+            return "streaming".text();
+        }
+        self.state = ConnState::Replied;
+        return "replied".text();
+    }
+
+    // A viewer may keep the connection open for the live stream after its command.
+    pub fn stream(self: (&a mut Connection)) -> string {
+        if self.state == ConnState::Replied || self.state == ConnState::Reading {
+            self.streaming = true;
+            self.state = ConnState::Streaming;
+            return "streaming".text();
+        }
+        return "unexpected".text();
+    }
+
+    pub fn eof(self: (&a mut Connection)) {
+        self.state = ConnState::Closed;
+    }
+
+    // Shutdown stops new commands; a reply already being written still completes.
+    pub fn shutdown(self: (&a mut Connection)) -> string {
+        if self.state == ConnState::Closed {
+            return "closed".text();
+        }
+        if self.state == ConnState::Reading {
+            self.state = ConnState::Closed;
+            return "closed".text();
+        }
+        return "draining".text();
+    }
+}
+
+pub fn accept<a>(state: (&a mut Connection)) {
+    state.accept();
+}
+
+pub fn command<a>(state: (&a mut Connection), bytes: u64) -> string {
+    return state.command(bytes);
+}
+
+pub fn stream<a>(state: (&a mut Connection)) -> string {
+    return state.stream();
+}
+
+pub fn eof<a>(state: (&a mut Connection)) {
+    state.eof();
+}
+
+pub fn shutdown<a>(state: (&a mut Connection)) -> string {
+    return state.shutdown();
+}

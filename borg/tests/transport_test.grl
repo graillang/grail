@@ -1,0 +1,238 @@
+// Local IPC transport parity test.
+//
+// Lines:
+//   address <name> <path>            the socket address chosen for a directory and name
+//   fits <name> <true|false>         whether the direct path fits sun_path
+//   limits <name> <dir> <sock> <command> <reply> <ucred> <sockaddr>
+//   ucred <name> <true|false>        whether a getsockopt answer had the right size
+//   peer <name> <same-user|other-user>
+//   conn <name> <i> <op> <state> replies=<n>
+
+use borg_json;
+use borg_transport;
+use core;
+use env;
+use fs;
+
+fn append<a, b>(out: (&a mut u8[]), text: (&b [u8])) {
+    for byte in text {
+        out.push(byte);
+    }
+}
+
+fn text_is<a, b>(text: (&a [u8]), wanted: (&b [u8])) -> bool {
+    if text.len() != wanted.len() {
+        return false;
+    }
+    for i in text.len() {
+        if text[i] != wanted[i] {
+            return false;
+        }
+    }
+    return true;
+}
+
+fn row<a, b, c, d>(label: (&a [u8]), name: (&b [u8]), one: (&c [u8]), two: (&d [u8])) {
+    mut text = u8[];
+    append(&mut text, label);
+    text.push(32);
+    append(&mut text, name);
+    if one.len() > 0 {
+        text.push(32);
+        append(&mut text, one);
+    }
+    if two.len() > 0 {
+        text.push(32);
+        append(&mut text, two);
+    }
+    println(text.text());
+}
+
+fn text_field<a, b>(spec: (&a borg_json::Json), key: (&b [u8])) -> string? {
+    match borg_json::member(&spec, &key) {
+        Some(node) => {
+            if borg_json::kind_of(&node) == borg_json::JsonKind::Null {
+                return core::none<string>();
+            }
+            return borg_json::as_string(&node);
+        },
+        None => { return core::none<string>(); }
+    }
+}
+
+fn number_field<a, b>(spec: (&a borg_json::Json), key: (&b [u8])) -> u64? {
+    match borg_json::member(&spec, &key) {
+        Some(node) => {
+            match borg_json::as_number(&node) {
+                Some(text) => { return borg_json::whole_number(&text); },
+                None => { return core::none<u64>(); }
+            }
+        },
+        None => { return core::none<u64>(); }
+    }
+}
+
+fn number_or<a, b>(spec: (&a borg_json::Json), key: (&b [u8]), fallback: u64) -> u64 {
+    match number_field(&spec, &key) {
+        Some(value) => { return value; },
+        None => { return fallback; }
+    }
+}
+
+fn text_or<a, b>(spec: (&a borg_json::Json), key: (&b [u8])) -> string {
+    mut value = "".text();
+    match text_field(&spec, &key) {
+        Some(text) => { value = text; },
+        None => { }
+    }
+    return value;
+}
+
+fn main() -> u64 {
+    args := env::args();
+    mut index = 1;
+    while index < args.len() {
+        path := args[index];
+        data := fs::read(&path)!;
+        match borg_json::parse(&data) {
+            scenario: borg_json::Json => { run(&scenario); },
+            failure: borg_json::ParseError => { }
+        }
+        index += 1;
+    }
+    return 0;
+}
+
+fn run<a>(scenario: (&a borg_json::Json)) {
+    mut name = "unnamed".text();
+    match text_field(&scenario, "name") {
+        Some(text) => { name = text; },
+        None => { }
+    }
+    kind := text_or(&scenario, "kind");
+    if text_is(&kind, "address") {
+        address_case(&scenario, &name);
+    }
+    if text_is(&kind, "limits") {
+        limits_case(&name);
+    }
+    if text_is(&kind, "peer") {
+        peer_case(&scenario, &name);
+    }
+    if text_is(&kind, "conn") {
+        conn_case(&scenario, &name);
+    }
+}
+
+fn address_case<a>(scenario: (&a borg_json::Json), name: (&[u8])) {
+    dir := text_or(&scenario, "dir");
+    leaf := text_or(&scenario, "socket");
+    mut fd = "7".text();
+    match text_field(&scenario, "fd") {
+        Some(text) => { fd = text; },
+        None => { }
+    }
+    path := borg_transport::socket_address(&dir, &leaf, &fd);
+    mut fits = false;
+    length := borg_transport::direct_length(&dir, &leaf);
+    if length <= borg_transport::usable_sockaddr_bytes() {
+        fits = true;
+    }
+    row("address", &name, &path, "");
+    if fits {
+        row("fits", &name, "true", "");
+    } else {
+        row("fits", &name, "false", "");
+    }
+}
+
+fn limits_case(name: (&[u8])) {
+    mut text = u8[];
+    append(&mut text, "limits ".text());
+    append(&mut text, name);
+    parts := 6;
+    mut index = 0;
+    while index < parts {
+        text.push(32);
+        if index == 0 {
+            append(&mut text, &borg_json::number_text(borg_transport::session_dir_mode()));
+        }
+        if index == 1 {
+            append(&mut text, &borg_json::number_text(borg_transport::socket_mode()));
+        }
+        if index == 2 {
+            append(&mut text, &borg_json::number_text(borg_transport::max_command_bytes()));
+        }
+        if index == 3 {
+            append(&mut text, &borg_json::number_text(borg_transport::max_reply_bytes()));
+        }
+        if index == 4 {
+            append(&mut text, &borg_json::number_text(borg_transport::ucred_size()));
+        }
+        if index == 5 {
+            append(&mut text, &borg_json::number_text(borg_transport::sockaddr_limit()));
+        }
+        index += 1;
+    }
+    println(text.text());
+}
+
+fn peer_case<a>(scenario: (&a borg_json::Json), name: (&[u8])) {
+    size := number_or(&scenario, "size", 0);
+    peer_uid := number_or(&scenario, "uid", 0);
+    server_uid := number_or(&scenario, "server", 0);
+    if borg_transport::credentials_valid(size) {
+        row("ucred", &name, "true", "");
+    } else {
+        row("ucred", &name, "false", "");
+    }
+    verdict := borg_transport::peer_verdict(peer_uid, server_uid);
+    row("peer", &name, &verdict, "");
+}
+
+fn conn_case<a>(scenario: (&a borg_json::Json), name: (&[u8])) {
+    mut state = borg_transport::connection();
+    mut ops = borg_json::null_value();
+    match borg_json::member(&scenario, "ops") {
+        Some(node) => { ops = node; },
+        None => { }
+    }
+    mut index = 0;
+    while index < borg_json::array_len(&ops) {
+        mut op = borg_json::null_value();
+        match borg_json::array_item(&ops, index) {
+            Some(node) => { op = node; },
+            None => { }
+        }
+        kind := text_or(&op, "op");
+        mut result = "ok".text();
+        mut which = 0;
+        if text_is(&kind, "accept") { which = 1; }
+        if text_is(&kind, "command") { which = 2; }
+        if text_is(&kind, "stream") { which = 3; }
+        if text_is(&kind, "eof") { which = 4; }
+        if text_is(&kind, "shutdown") { which = 5; }
+        if which == 1 { state.accept(); }
+        if which == 2 { result = state.command(number_or(&op, "bytes", 0)); }
+        if which == 3 { result = state.stream(); }
+        if which == 4 { state.eof(); }
+        if which == 5 { result = state.shutdown(); }
+        mut text = u8[];
+        append(&mut text, "conn ".text());
+        append(&mut text, &name);
+        text.push(32);
+        append(&mut text, &borg_json::number_text(index));
+        text.push(32);
+        append(&mut text, &kind);
+        text.push(32);
+        current := borg_transport::state_text(&state);
+        append(&mut text, &current);
+        text.push(32);
+        append(&mut text, &result);
+        append(&mut text, " replies=".text());
+        shown := borg_json::number_text(borg_transport::replies(&state));
+        append(&mut text, &shown);
+        println(text.text());
+        index += 1;
+    }
+}
