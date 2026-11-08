@@ -1,4 +1,4 @@
-# Direct native compiler — Linux x86-64, ARM64 and RISC-V 64
+# Direct native compiler — Linux x86-64, ARM64 and RISC-V 64; macOS x86-64 and ARM64; Windows x86-64
 
 `native.grl` checks Grail source and emits a closed word-machine stream. `machine.grl` performs
 static target instruction selection for ARM64 and RISC-V; x86-64 retains the stream's original
@@ -12,7 +12,7 @@ The Rust seed and unchecked C compiler have been removed, not retained as altern
 
 ## Invocation and entry
 
-Invocation: `native [--target x86_64|aarch64|riscv64] [--overflow=checked|wrap] OUT.s ENTRY.grl [MODULE.grl...]`. All modules are supplied as source files, including `compiler/runtime.grl` last.
+Invocation: `native [--target x86_64|aarch64|riscv64|macos-x86_64|macos-aarch64|windows-x86_64] [--overflow=checked|wrap] OUT.s ENTRY.grl [MODULE.grl...]`. All modules are supplied as source files, including `compiler/runtime.grl` last; Mach-O targets also require `compiler/darwin.grl` before the runtime.
 A named `main` in the entry file takes priority and needs no `pub`. Its result defaults to
 `unit`, with an implicit return at the end. The entry file may omit its `module` declaration;
 dependency files still declare their modules explicitly.
@@ -40,11 +40,14 @@ numeric harness. This is not the recommended application entry convention.
 
 ## Implementation boundary
 
-| Target | Argument registers (up to six word values) | Result | Runtime |
-| --- | --- | --- | --- |
-| x86-64 | rdi, rsi, rdx, rcx, r8, r9 | rax | Linux syscall ABI |
-| ARM64 | x0–x5 | x0 | Linux AArch64 syscall ABI |
-| RISC-V 64 | a0–a5 | a0 | Linux RV64 syscall ABI, RV64IMA / LP64 |
+| Target | Object format | Argument registers (up to six word values) | Result | Runtime |
+| --- | --- | --- | --- | --- |
+| x86_64 | ELF | rdi, rsi, rdx, rcx, r8, r9 | rax | Linux syscall ABI |
+| aarch64 | ELF | x0–x5 | x0 | Linux AArch64 syscall ABI |
+| riscv64 | ELF | a0–a5 | a0 | Linux RV64 syscall ABI, RV64IMA / LP64 |
+| macos-x86_64 | Mach-O | rdi, rsi, rdx, rcx, r8, r9 | rax | libSystem via `_main` / `_exit` |
+| macos-aarch64 | Mach-O | x0–x5 | x0 | libSystem via `_main` / `_exit` |
+| windows-x86_64 | COFF / PE32+ | rdi, rsi, rdx, rcx, r8, r9 | rax | kernel32 imports at the boundary |
 
 - Uniform one-word value representation and eight-byte local slots; calls have 16-byte-aligned
   frames and architecture-specific return-address/callee-save handling. Recursion works.
@@ -66,8 +69,21 @@ numeric harness. This is not the recommended application entry convention.
   portable runtime code calls `rt_syscall` instead. This trusted boundary is not a memory-safety proof.
 - Runtime allocation guards, checked size arithmetic, bounds checks and UTF-8 validation remain
   enabled under user `--overflow=wrap` mode. Large allocation unmapping is verified with mincore.
-- These are **Linux ports**, not macOS/Windows ports. Other executable formats and OS APIs need
-  separate implementations, regardless of CPU architecture.
+- `macos-x86_64` and `macos-aarch64` emit Mach-O objects and executables: underscored C symbols,
+  `.build_version macos, 11, 0`, `__TEXT,__const` literals, `__DATA,__bss` state, `@PAGE`/`@PAGEOFF`
+  addressing and a `_main` entry that takes `argc`/`argv`/`envp` in the Apple C argument registers
+  and exits through `_exit`. Frames already satisfy the 16-byte stack alignment both ABIs require.
+  `compiler/darwin.grl` owns the libSystem boundary (read/write/open/close, mmap/munmap/mprotect,
+  mremap emulation, poll, pipe, mkdir/unlink, directory entries, clock, sleep, yield, process
+  identity and control) and translates Darwin flag bits, `struct dirent` layout and `errno`.
+  Link with `ld64.lld -platform_version macos 11.0 11.0 -lSystem -e _main`. See
+  [macOS backend](../docs/design/macos-backend.md).
+- Everything above the object format is shared. Neither Mach-O nor PE images are **executed** by
+  this repository's tests, so macOS and Windows runtime behaviour is unverified until it runs on
+  their hardware. Darwin reports `ENOSYS` for threads, `mutex<T>`, the readiness reactor and
+  sockets; Windows x86-64 emits COFF objects and PE32+ images but has no Win32 OS layer yet, and
+  Grail-internal calls there still use the private register convention. See
+  [platform status](../docs/platform-status.md).
 
 ## Ownership and cleanup checkpoint
 
@@ -162,9 +178,15 @@ checked runtime arithmetic, bounds, UTF-8 and ownership checks remain enabled.
 bun tools/test-native.mjs x86_64
 bun tools/test-native.mjs aarch64
 bun tools/test-native.mjs riscv64
+bun tools/test-macos.mjs            # static Mach-O objects, executables and ELF non-regression
 bun tools/bootstrap.mjs verify all
 bun tools/book.mjs check
 ```
+
+`test-macos.mjs` builds each sample for both Mach-O targets, then checks the objects with
+`llvm-objdump`/`llvm-nm` (cputype, sections, sections' segments, underscored symbols, the exact
+libSystem import set) and the linked executables (`LC_BUILD_VERSION`, `LC_MAIN`,
+`LC_LOAD_DYLIB /usr/lib/libSystem.B.dylib`, `NOUNDEFS`). Nothing is executed.
 
 Cross execution uses QEMU user emulation when the target differs from the host. Tests preserve
 existing output on rejection, execute runtime/ownership/generic audits, check guarded failure and

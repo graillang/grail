@@ -240,6 +240,10 @@ fn target_name(t: u64) -> u8[] {
     }
     return copy(view("x86_64"));
 }
+// Mach-O targets compile the darwin module, which owns every libSystem call.
+fn is_macho<a>(target: &a [u8]) -> u64 {
+    return eq(view(target), view("macos-x86_64")) + eq(view(target), view("macos-aarch64"));
+}
 fn tool<a, b>(variable: &a [u8], fallback: &b [u8]) -> u8[] {
     v := host::env(variable);
     if v.len() {
@@ -284,6 +288,9 @@ fn compile_mode<a, b, d, e, g>(
             command.push(path_join(view(h.std), view(name)));
         }
     }
+    if is_macho(view(target)) {
+        command.push(path_join(view(dirname(view(h.runtime))), view("darwin.grl")));
+    }
     command.push(copy(view(h.runtime)));
     command.push(copy(view(h.os)));
     if host::command(command) != 0 {
@@ -299,6 +306,18 @@ fn compile_mode<a, b, d, e, g>(
     }
     mut triple = copy(view("--target=x86_64-linux-gnu"));
     mut emulation = copy(view("elf_x86_64"));
+    // Mach-O targets reuse the CPU backends but have their own object format and linker.
+    mut macho = 0;
+    mut arch = copy(view("x86_64"));
+    if eq(view(target), view("macos-x86_64")) {
+        triple = copy(view("--target=x86_64-apple-macos11"));
+        macho = 1;
+    }
+    if eq(view(target), view("macos-aarch64")) {
+        triple = copy(view("--target=arm64-apple-macos11"));
+        arch = copy(view("arm64"));
+        macho = 1;
+    }
     if eq(view(target), view("aarch64")) {
         triple = copy(view("--target=aarch64-linux-gnu"));
         emulation = copy(view("aarch64elf"));
@@ -318,6 +337,38 @@ fn compile_mode<a, b, d, e, g>(
     if host::command(assemble) != 0 {
         say(view("grail: assembling failed (needs clang)"));
         return 1;
+    }
+    if macho {
+        // Without an SDK there is no libSystem stub to link against, so the object is the result.
+        root := host::env(view("GRAIL_SDK"));
+        if root.len() == 0 {
+            say(view("grail: wrote a Mach-O object; set GRAIL_SDK to a macOS SDK to link it"));
+            return 1;
+        }
+        libs := path_join(view(root), view("usr/lib"));
+        link := u8[][
+            tool(view("GRAIL_LINKER"), view("ld64.lld")),
+            copy(view("-arch")),
+            arch,
+            copy(view("-platform_version")),
+            copy(view("macos")),
+            copy(view("11.0")),
+            copy(view("11.0")),
+            copy(view("-syslibroot")),
+            copy(view(root)),
+            cat(view("-L"), view(libs)),
+            copy(view("-lSystem")),
+            copy(view("-e")),
+            copy(view("_main")),
+            copy(view(object)),
+            copy(view("-o")),
+            copy(view(output))
+        ];
+        if host::command(link) != 0 {
+            say(view("grail: linking failed (needs ld64.lld and a macOS SDK)"));
+            return 1;
+        }
+        return 0;
     }
     link := u8[][
         tool(view("GRAIL_LINKER"), view("ld.lld")),
@@ -776,7 +827,7 @@ fn add_command<a>(args: (&a u8[][])) -> u64 {
 fn help() {
     say(view("grail - the Grail compiler and project tool\n"));
     say(view("usage:"));
-    say(view("  grail build [FILE.grl] [-o OUT] [--target x86_64|aarch64|riscv64]"));
+    say(view("  grail build [FILE.grl] [-o OUT] [--target x86_64|aarch64|riscv64|macos-x86_64|macos-aarch64]"));
     say(view("  grail check [FILE.grl]            type-check without building"));
     say(view("  grail run [FILE.grl] [-- ARGS...]"));
     say(view("  grail test [FILES or DIRS]        compile and run tests/ (exit status 0 = pass)"));
