@@ -2,20 +2,26 @@
 
 ## Unreleased
 
-- macOS platform linkage beyond libSystem: `compileProgram` accepts `frameworks` and, with
-  `$GRAIL_SDK`, links the SDK's real `-framework` stubs, otherwise writes `<Name>.framework` `.tbd`
-  stubs from a caller-supplied export list (a framework name without either is rejected instead of
-  being invented). `tools/macos.mjs` parses the linked image and verifies its `LC_LOAD_DYLIB`
-  entries. `sign: true` requests an ad-hoc signature — `codesign --force --sign -` on macOS,
-  `ld64.lld -adhoc_codesign` elsewhere — and `bun tools/macos.mjs inspect|verify BINARY` validates
-  the SuperBlob, CodeDirectory, page hashes and cdhash statically; a tampered page fails
-  verification. Tests add Foundation framework loading, unknown-framework rejection (driver and
-  linker), and signature validation/tamper detection. Shared Mach-O libraries are also emitted:
-  `assembleDylib` links `-dylib -install_name <name>` with an explicit `-exported_symbols_list`
-  (a dylib without an install name or without exports is refused), and `tools/macos.mjs` reports
-  `LC_ID_DYLIB` plus the export/import sets by parsing `LC_SYMTAB` directly. Tests link an
-  executable against the dylib and require its install name in `LC_LOAD_DYLIB`, and reject a
-  symbol outside the export list. Nothing here is execution evidence on Apple hardware.
+- Abundance CPU port, job-priority increment plus a container-ergonomics note: `abundance/src/job_policy.grl`
+  carries `JobPriority::key()`/`from_key()` (class << 32 | f32 rank bits, with the engine's
+  non-finite and negative clamps) and the documented admission policy model; the reference compiles
+  the engine's own symbols. `docs/design/grail-container-ergonomics.md` records what the entity and
+  checkpoint work cost: affine loops over owned aggregates, no reference to nested-vector elements,
+  no in-place field writes through an index, reference rebinding at every call, and the syntax
+  facts that each cost a compile iteration. The committed job test covers the key functions (14
+  exact values); `terrain_rank()` and the policy script abort at runtime in Grail and are recorded
+  as the open blocker. Suite total 221 exact values.
+
+- Abundance CPU port, entity-registry increment: `abundance/src/entity_table.grl` carries the
+  entity registry's persisted state — dense id-ordered rows of id, type, owner, position, spawned
+  clock and opaque payload, encoded as `ab::tx::PagedRows` writes it (u32 count then every row) —
+  with the decode refusals for non-ascending keys, the codec's sequence and string caps and exact
+  consumption. The reference builds a 290-row table through the real registry operations (out-of-
+  order inserts, a rejected duplicate, ten erases, a mutate) and both sides reproduce 20 599 bytes
+  with FNV 15354762378023838882 plus seven malformed-encoding verdicts. The suite now compares 207
+  exact values (math 63, hashing 16, world 25, cache 46, checkpoint 39, entity 18). The in-memory
+  page machine (256-row pages, split at 129, merge under 64, bulk fill 192) is documented rather
+  than ported because it decides only page_count.
 
 - Port Borg Agent's local-session ownership state (`borg/`). `src/session_state.grl` carries the
   owner record (`schema_version`, `pid`, `executable_identity`, optional `package_version` and
