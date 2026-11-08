@@ -4989,6 +4989,12 @@ fn ffi_store_stack<a>(c: (&a mut C), x86: u64, offset: u64) -> unit {
 // The binary32 bits of the f32 value in %rax, left in %rax.
 fn ffi_f32_bits<a>(c: (&a mut C), x86: u64) -> unit {
     if x86 {
+        // xmm5 is volatile on Win64 and free here: a stack-bound f32 on Win64 comes after the four
+        // register slots, and on SysV after xmm0-xmm7, where xmm8+ are free and volatile too.
+        if c.target == 3 {
+            o(&mut c, view("movq %rax,%xmm5\ncvtsd2ss %xmm5,%xmm5\nmovd %xmm5,%eax\n"));
+            return ();
+        }
         o(&mut c, view("movq %rax,%xmm15\ncvtsd2ss %xmm15,%xmm15\nmovd %xmm15,%eax\n"));
     } else {
         o(&mut c, view("cf32bits\n"));
@@ -5099,7 +5105,12 @@ fn ffi_emit_call<a, b, d, e>(
             if freg != 99 {
                 if x86 {
                     if single {
-                        o(&mut c, view("movq %rax,%xmm15\ncvtsd2ss %xmm15,%xmm"));
+                        // Narrowed in its own register: no scratch, so nothing callee-saved is touched.
+                        o(&mut c, view("movq %rax,%xmm"));
+                        on(&mut c, freg);
+                        o(&mut c, view("\ncvtsd2ss %xmm"));
+                        on(&mut c, freg);
+                        o(&mut c, view(",%xmm"));
                     } else {
                         o(&mut c, view("movq %rax,%xmm"));
                     }
@@ -5842,17 +5853,53 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         mut l = &mut c.locals[i];
         exchange(&mut l.last, last);
     }
-    if exported(&mut c, view(name)) {
-        o(&mut c, view(".globl "));
-        export_name(&mut c, view(m), view(name), view(export_symbol), export);
+    // On Win64 a C caller passes rcx/rdx/r8/r9 (then the stack after a 32-byte home area) and
+    // expects rdi, rsi and xmm6-xmm15 preserved; the body uses Grail's SysV-shaped convention. A
+    // callback is therefore a Win64 thunk under the C symbol that saves those registers, moves
+    // the arguments and calls the body, which is emitted under `<symbol>_grail_body`.
+    mut body_symbol = u8[];
+    push_bytes(&mut body_symbol, view(export_symbol));
+    if (c.target == 3) & (export == 2) {
+        push_bytes(&mut body_symbol, view("_grail_body"));
+        if exported(&mut c, view(name)) {
+            o(&mut c, view(".globl "));
+            o(&mut c, view(export_symbol));
+            c.out.push(10);
+        }
+        o(&mut c, view(export_symbol));
+        o(&mut c, view(":\npushq %rdi\npushq %rsi\nsubq $168,%rsp\n"));
+        for x in 10 {
+            o(&mut c, view("movdqu %xmm"));
+            on(&mut c, x + 6);
+            c.out.push(44);
+            on(&mut c, x * 16);
+            o(&mut c, view("(%rsp)\n"));
+        }
+        // Entry rsp + 40 holds argument five; after two pushes and 168 bytes it is rsp + 224.
+        o(&mut c, view("movq %rcx,%rdi\nmovq %rdx,%rsi\nmovq %r8,%rdx\nmovq %r9,%rcx\nmovq 224(%rsp),%r8\nmovq 232(%rsp),%r9\ncall "));
+        o(&mut c, view(body_symbol));
         c.out.push(10);
+        for x in 10 {
+            o(&mut c, view("movdqu "));
+            on(&mut c, x * 16);
+            o(&mut c, view("(%rsp),%xmm"));
+            on(&mut c, x + 6);
+            c.out.push(10);
+        }
+        o(&mut c, view("addq $168,%rsp\npopq %rsi\npopq %rdi\nret\n"));
+    } else {
+        if exported(&mut c, view(name)) {
+            o(&mut c, view(".globl "));
+            export_name(&mut c, view(m), view(name), view(export_symbol), export);
+            c.out.push(10);
+        }
     }
-    func_directive(&mut c, view(m), view(name), view(export_symbol), export);
+    func_directive(&mut c, view(m), view(name), view(body_symbol), export);
     if (c.debug != 0) & (c.validating == 0) {
         dstart = label(&mut c);
         mark(&mut c, dstart);
     }
-    export_name(&mut c, view(m), view(name), view(export_symbol), export);
+    export_name(&mut c, view(m), view(name), view(body_symbol), export);
     o(&mut c, view(":\npushq %rbp\nmovq %rsp,%rbp\n"));
     frame := label(&mut c);
     if c.target == 4 {

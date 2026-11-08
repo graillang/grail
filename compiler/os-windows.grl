@@ -48,6 +48,35 @@ fn rt_win_write(handle: u64, buf: u64, len: u64) -> u64 {
     return raw_load(scratch);
 }
 // Linux open(2) flags map onto CreateFileA access and disposition bits.
+// The last Win32 error as the negated Linux errno the portable layers (lib/io.grl) understand.
+// Unmapped codes keep their Win32 value above 0x10000, so io::Error::Other never confuses a
+// Win32 code with an errno.
+fn rt_win_errno() -> u64 {
+    code := raw_win32(GetLastError);
+    mut errno = 65536 + code;
+    if (code == 2) + (code == 3) + (code == 15) + (code == 161) {
+        errno = 2; // FILE/PATH_NOT_FOUND, INVALID_DRIVE, BAD_PATHNAME -> ENOENT
+    }
+    if (code == 5) + (code == 19) + (code == 32) + (code == 33) {
+        errno = 13; // ACCESS_DENIED, WRITE_PROTECT, SHARING/LOCK_VIOLATION -> EACCES
+    }
+    if (code == 80) + (code == 183) {
+        errno = 17; // FILE_EXISTS, ALREADY_EXISTS -> EEXIST
+    }
+    if code == 267 {
+        errno = 20; // DIRECTORY (not a directory) -> ENOTDIR
+    }
+    if code == 145 {
+        errno = 39; // DIR_NOT_EMPTY -> ENOTEMPTY
+    }
+    if (code == 87) + (code == 123) {
+        errno = 22; // INVALID_PARAMETER, INVALID_NAME -> EINVAL
+    }
+    if code == 8 {
+        errno = 12; // NOT_ENOUGH_MEMORY -> ENOMEM
+    }
+    return wrapping_sub(0, errno);
+}
 fn rt_win_open(path: u64, flags: u64, mode: u64) -> u64 {
     mut access = 2147483648; // GENERIC_READ
     if (flags & 3) == 1 {
@@ -62,7 +91,7 @@ fn rt_win_open(path: u64, flags: u64, mode: u64) -> u64 {
     }
     handle := raw_win32(CreateFileA, path, access, 3, 0, disposition, 128, 0);
     if handle == wrapping_sub(0, 1) {
-        return wrapping_sub(0, 2);
+        return rt_win_errno();
     }
     return handle;
 }
@@ -82,22 +111,19 @@ fn rt_win_mkdir(name: u64, mode: u64) -> u64 {
     if raw_win32(CreateDirectoryA, name, 0) != 0 {
         return 0;
     }
-    if raw_win32(GetLastError) == 183 {
-        return wrapping_sub(0, 17); // EEXXIST: the portable caller treats it as success
-    }
-    return wrapping_sub(0, 1);
+    return rt_win_errno(); // EEXIST for an existing directory, which the portable caller accepts
 }
 fn rt_win_remove(name: u64, flags: u64) -> u64 {
     if (flags & 512) != 0 {
         if raw_win32(RemoveDirectoryA, name) != 0 {
             return 0;
         }
-        return wrapping_sub(0, 21);
+        return rt_win_errno();
     }
     if raw_win32(DeleteFileA, name) != 0 {
         return 0;
     }
-    return wrapping_sub(0, 2);
+    return rt_win_errno();
 }
 // Sleep takes milliseconds; the portable caller passes a Linux timespec {sec, nsec}.
 fn rt_win_sleep(spec: u64) -> u64 {
