@@ -1,0 +1,288 @@
+// Service supervision and layout parity test.
+//
+// Lines:
+//   supervise <name> <i> <event> <state> delay=<ms|-> failures=<n> restarts=<n>
+//   home|config|lanes|session <name> <path>
+//   budget <name> <ms>
+//
+// The reference applies the same rules, copied from borg-lanes and borg-ui with citations, to the
+// same scenarios.
+
+use borg_json;
+use borg_supervisor;
+use core;
+use env;
+use fs;
+
+fn append<a, b>(out: (&a mut u8[]), text: (&b [u8])) {
+    for byte in text {
+        out.push(byte);
+    }
+}
+
+fn text_is<a, b>(text: (&a [u8]), wanted: (&b [u8])) -> bool {
+    if text.len() != wanted.len() {
+        return false;
+    }
+    for i in text.len() {
+        if text[i] != wanted[i] {
+            return false;
+        }
+    }
+    return true;
+}
+
+fn line<a, b, c, d>(label: (&a [u8]), name: (&b [u8]), one: (&c [u8]), two: (&d [u8])) {
+    mut text = u8[];
+    append(&mut text, label);
+    text.push(32);
+    append(&mut text, name);
+    if one.len() > 0 {
+        text.push(32);
+        append(&mut text, one);
+    }
+    if two.len() > 0 {
+        text.push(32);
+        append(&mut text, two);
+    }
+    println(text.text());
+}
+
+fn text_field<a, b>(spec: (&a borg_json::Json), key: (&b [u8])) -> string? {
+    match borg_json::member(&spec, &key) {
+        Some(node) => {
+            if borg_json::kind_of(&node) == borg_json::JsonKind::Null {
+                return core::none<string>();
+            }
+            return borg_json::as_string(&node);
+        },
+        None => { return core::none<string>(); }
+    }
+}
+
+fn number_field<a, b>(spec: (&a borg_json::Json), key: (&b [u8])) -> u64? {
+    match borg_json::member(&spec, &key) {
+        Some(node) => {
+            match borg_json::as_number(&node) {
+                Some(text) => { return borg_json::whole_number(&text); },
+                None => { return core::none<u64>(); }
+            }
+        },
+        None => { return core::none<u64>(); }
+    }
+}
+
+fn number_or<a, b>(spec: (&a borg_json::Json), key: (&b [u8]), fallback: u64) -> u64 {
+    match number_field(&spec, &key) {
+        Some(value) => { return value; },
+        None => { return fallback; }
+    }
+}
+
+fn text_or<a, b>(spec: (&a borg_json::Json), key: (&b [u8])) -> string {
+    mut value = "".text();
+    match text_field(&spec, &key) {
+        Some(text) => { value = text; },
+        None => { }
+    }
+    return value;
+}
+
+fn main() -> u64 {
+    args := env::args();
+    mut index = 1;
+    while index < args.len() {
+        path := args[index];
+        data := fs::read(&path)!;
+        match borg_json::parse(&data) {
+            scenario: borg_json::Json => { run(&scenario); },
+            failure: borg_json::ParseError => { }
+        }
+        index += 1;
+    }
+    return 0;
+}
+
+fn run<a>(scenario: (&a borg_json::Json)) {
+    mut name = "unnamed".text();
+    match text_field(&scenario, "name") {
+        Some(text) => { name = text; },
+        None => { }
+    }
+    if borg_json::has(&scenario, "policy") {
+        supervise(&scenario, &name);
+        return ();
+    }
+    if borg_json::has(&scenario, "ops") {
+        // A policy-less op list is a layout scenario only if it has no ops; nothing to do.
+        return ();
+    }
+    layout(&scenario, &name);
+}
+
+fn supervise<a>(scenario: (&a borg_json::Json), name: (&[u8])) {
+    mut spec = borg_json::null_value();
+    match borg_json::member(&scenario, "policy") {
+        Some(node) => { spec = node; },
+        None => { }
+    }
+    mut transient = i64[];
+    match borg_json::member(&spec, "transient") {
+        Some(node) => {
+            mut at = 0;
+            while at < borg_json::array_len(&node) {
+                match borg_json::array_item(&node, at) {
+                    Some(item) => {
+                        match borg_json::as_number(&item) {
+                            Some(text) => {
+                                match borg_json::signed_number(&text) {
+                                    Some(code) => { transient.push(code); },
+                                    None => { }
+                                }
+                            },
+                            None => { }
+                        }
+                    },
+                    None => { }
+                }
+                at += 1;
+            }
+        },
+        None => { }
+    }
+    built := borg_supervisor::policy(number_or(&spec, "max_restarts", 0), number_or(&spec, "backoff_ms", 0),
+        number_or(&spec, "debounce_ms", 0), transient);
+    mut state = borg_supervisor::supervisor(built);
+    mut ops = borg_json::null_value();
+    match borg_json::member(&scenario, "ops") {
+        Some(node) => { ops = node; },
+        None => { }
+    }
+    mut index = 0;
+    while index < borg_json::array_len(&ops) {
+        mut op = borg_json::null_value();
+        match borg_json::array_item(&ops, index) {
+            Some(node) => { op = node; },
+            None => { }
+        }
+        mut kind = text_or(&op, "op");
+        mut delay = "-".text();
+        mut which = 0;
+        if text_is(&kind, "start") { which = 1; }
+        if text_is(&kind, "healthy") { which = 2; }
+        if text_is(&kind, "stop") { which = 3; }
+        if text_is(&kind, "restart-requested") { which = 4; }
+        if text_is(&kind, "restarting") { which = 5; }
+        if text_is(&kind, "yield") { which = 6; }
+        if text_is(&kind, "yielded") { which = 7; }
+        if text_is(&kind, "degraded") { which = 8; }
+        if text_is(&kind, "exited") { which = 9; }
+        if text_is(&kind, "launch-failed") { which = 10; }
+        if which == 1 { state.starting(); }
+        if which == 2 { state.healthy(); }
+        if which == 3 { state.stopped(); }
+        if which == 4 { state.restart_requested(); }
+        if which == 5 { state.restarting(); }
+        if which == 6 { state.yielding(); }
+        if which == 7 { state.yielded(); }
+        if which == 8 {
+            reason := "reason".text();
+            state.degraded_by(&reason);
+        }
+        if which == 9 {
+            mut code = core::none<i64>();
+            if borg_json::has(&op, "exit") {
+                match borg_json::member(&op, "exit") {
+                    Some(node) => {
+                        if borg_json::kind_of(&node) != borg_json::JsonKind::Null {
+                            match borg_json::as_number(&node) {
+                                Some(text) => { code = borg_json::signed_number(&text); },
+                                None => { }
+                            }
+                        }
+                    },
+                    None => { }
+                }
+            }
+            decided := state.exited(code);
+            delay = borg_json::number_text(borg_supervisor::outcome_delay(&decided));
+        }
+        if which == 10 {
+            decided := state.launch_failed();
+            delay = borg_json::number_text(borg_supervisor::outcome_delay(&decided));
+        }
+        mut row = u8[];
+        append(&mut row, "supervise ".text());
+        append(&mut row, &name);
+        row.push(32);
+        shown_index := borg_json::number_text(index);
+        append(&mut row, &shown_index);
+        row.push(32);
+        append(&mut row, &kind);
+        row.push(32);
+        current := borg_supervisor::current(&state);
+        append(&mut row, &current);
+        append(&mut row, " delay=".text());
+        append(&mut row, &delay);
+        append(&mut row, " failures=".text());
+        shown_failures := borg_json::number_text(borg_supervisor::failures_of(&state));
+        append(&mut row, &shown_failures);
+        append(&mut row, " restarts=".text());
+        shown_restarts := borg_json::number_text(borg_supervisor::restarts_of(&state));
+        append(&mut row, &shown_restarts);
+        println(row.text());
+        index += 1;
+    }
+}
+
+fn layout<a>(scenario: (&a borg_json::Json), name: (&[u8])) {
+    kind := text_or(&scenario, "kind");
+    if text_is(&kind, "home") {
+        borg_home := text_field(&scenario, "borg_home");
+        home := text_field(&scenario, "home");
+        platform := text_field(&scenario, "platform_home");
+        path := borg_supervisor::host_home(borg_home, home, platform);
+        line("home", &name, &path, "");
+    }
+    if text_is(&kind, "config") {
+        xdg := text_field(&scenario, "xdg_config");
+        home := text_field(&scenario, "home");
+        platform := text_field(&scenario, "platform_config");
+        path := borg_supervisor::config_root(xdg, home, platform);
+        line("config", &name, &path, "");
+    }
+    if text_is(&kind, "lanes") {
+        lane_dir := text_field(&scenario, "lane_dir");
+        lanes_root := text_field(&scenario, "lanes_root");
+        xdg := text_field(&scenario, "xdg_runtime");
+        temp := text_or(&scenario, "temp");
+        euid := number_or(&scenario, "euid", 0);
+        path := borg_supervisor::lane_root(lane_dir, lanes_root, xdg, temp, euid);
+        line("lanes", &name, &path, "");
+    }
+    if text_is(&kind, "session") {
+        sessions := text_or(&scenario, "sessions");
+        session := text_or(&scenario, "session");
+        suffix := text_or(&scenario, "suffix");
+        path := borg_supervisor::session_file(&sessions, &session, &suffix);
+        line("session", &name, &path, "");
+    }
+    if text_is(&kind, "budget") {
+        readable := flag_or(&scenario, "readable", false);
+        budget := borg_supervisor::resume_budget_ms(number_or(&scenario, "readiness_ms", 0),
+            number_or(&scenario, "interval_ms", 0), number_or(&scenario, "timeout_ms", 0), readable);
+        line("budget", &name, &borg_json::number_text(budget), "");
+    }
+}
+
+fn flag_or<a, b>(spec: (&a borg_json::Json), key: (&b [u8]), fallback: bool) -> bool {
+    match borg_json::member(&spec, &key) {
+        Some(node) => {
+            match borg_json::as_bool(&node) {
+                Some(flag) => { return flag; },
+                None => { return fallback; }
+            }
+        },
+        None => { return fallback; }
+    }
+}

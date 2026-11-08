@@ -2,32 +2,207 @@
 
 ## Unreleased
 
-- Windows ARM64 frames now carry unwind data: the compiler describes each canonical prologue
-  with armasm-style `.seh_proc`/`.seh_save_regp x29, 0`/`.seh_nop`/`.seh_set_fp`/`.seh_stackalloc`/
-  `.seh_endprologue`/`.seh_endproc` directives, so the object has `.pdata` and `.xdata` and the
-  image has an exception directory (240 records, 0x780 bytes for the hello image). Frame
-  allocation uses a `framesub` pseudo-op (plain `sub sp,sp,x10` instead of checked arithmetic) so
-  the recorded frame size is exactly the `.set` value. The records are the unpacked `.xdata` form
-  on purpose: the packed encoding counts consecutive `x19..`/`d8..` saves and cannot express the
-  lone `x29/x30` frame-pointer save Grail emits. Leaf functions need no record; drop thunks keep
-  their conditional prologue and stay undescribed. The suite now checks records per function,
-  frame sizes against the compiler's frame values, function lengths and the unpacked flag.
-- New `windows-aarch64` target emits ARM64 PE/COFF: the AArch64 selector gains Windows pseudo-ops
-  (`winimport`, `winexit`, `wintp`, `wintpset`, `winunsupported`) that expand into an indirect IAT
-  call with the 64-byte Win64 ARM64 home space, the TEB-through-`x18` user pointer and traps for
-  Linux-only intrinsics. Internal argument registers already map to `x0..x5`, so Win32 calls need
-  no shuffling; import libraries are written with `Machine = 0xAA64`. Objects assemble as
-  `COFF-ARM64` (`IMAGE_FILE_MACHINE_ARM64`) with `BRANCH26`/`PAGEBASE_REL21`/`PAGEOFFSET_12A/12L`
-  relocations and link to PE32+ console images with `lld-link /machine:arm64`. Four programs are
-  checked statically (no ARM64 Windows runner is available here); ARM64 has no `.pdata` unwind
-  records yet, and the Linux x86-64/AArch64/RISC-V builds are checked alongside.
-- PE/COFF frames now carry unwind data: a post-pass over the final Windows assembly reads the
-  `.set .F<n>` frame sizes and emits `.seh_proc`/`.seh_pushreg`/`.seh_setframe`/`.seh_stackalloc`/
-  `.seh_endprologue` for every function, so the object has `.xdata` and a `.pdata`
-  RUNTIME_FUNCTION table that `lld-link` publishes as the exception directory (240 records for
-  the hello image). There is no exception personality or `RaiseException` panic path yet, the
-  `.D<ty>` drop thunks and the entry stub stay undescribed, and the ELF optimizer still does not
-  recognize `.def` functions, so PE output is unoptimized.
+- Port Borg Agent's service supervision and filesystem layout (`borg/`). `src/supervisor.grl` carries
+  the nine `ServiceState` values and the restart rules from `borg-lanes/src/services.rs`: an exit is
+  transient only when the child exited with a listed code, so a signalled child always counts as a
+  failure; a transient exit relaunches after the plain `backoff_ms` without counting; anything else
+  increments `failures` and waits `max(backoff_ms, 50) * 2^min(failures, 6)`, reaching `Failed` past
+  `max_restarts`; a launch that never happened is a failure; and `restarts` counts every relaunch. It
+  also resolves the documented layout with Borg's precedence — `BORG_HOME`/`HOME`/platform for host
+  state, `XDG_CONFIG_HOME`/`HOME/.config`/platform for configuration, and
+  `BORG_LANE_DIR`/`BORG_LANES_ROOT`/`XDG_RUNTIME_DIR`/temp for lane storage — plus the resume budget.
+  The port now checks 719 reference lines over 115 documents, and `--anchors`
+  verifies 37 copied snippets across seven source files. Spawning, reaping and sockets remain out of
+  scope.
+
+- Port Borg Agent's JSON-RPC framing and dispatch (`borg/`). `src/jsonrpc.grl` models the ACP
+  envelope — request, notification, result and error frames with numeric, string or null ids — and
+  matches `agent-client-protocol-schema` 1.5.0 byte for byte, including `"params": null`,
+  `"result": null` and the crate's field order. It carries both framings Borg uses: newline-delimited
+  stdio messages with the 8 MiB cap (`native_mcp.rs`), and `Content-Length` headers with the 8 KiB
+  header and 8 MiB body caps, accepting `\r\n\r\n` or `\n\n` (`lsp.rs`). Dispatch follows
+  `lsp.rs::request_with_timeout`: ids from 1, a single request in flight, the superseded one
+  cancelled, server requests answered with a null result, and unrelated ids ignored. Framing
+  accepts any valid JSON body and classification is separate, as it is upstream. The ACP reference
+  lives in its own crate because that crate enables serde_json's `preserve_order`, which would
+  otherwise have silently changed every other reference's output. The port now checks 674 reference
+  lines over 95 documents, and `--anchors` verifies 20 copied snippets across three source files.
+  Sockets, transports and UI remain out of scope.
+
+- Port Borg Agent's local-session ownership state (`borg/`). `src/session_state.grl` carries the
+  owner record (`schema_version`, `pid`, `executable_identity`, optional `package_version` and
+  `process_start_time`) through the JSON codec, the `dev:ino:len:mtime:mtime_nsec` executable
+  identity, the `/proc/<pid>/stat` start-time parse, and the two decisions built on them: whether a
+  recorded owner is still the same live process, and whether a stale owner may be retired. The
+  rules are cited from `crates/borg-agent-runtime/src/local_control.rs:405-671` and reproduced
+  exactly, including that a record which does not parse or carries an unknown schema counts as
+  absent. Because `borg-agent-runtime` cannot be linked as a reference, `tests/parity/session.rs`
+  carries those functions verbatim with citations, and `bun tools/borg-test.mjs --anchors` fails if
+  the cited snippets disappear from the Borg checkout. The port now checks 603 reference lines over
+  73 documents. Sockets, presence counting and process termination remain out of scope.
+
+- Port Borg Agent's configuration loading (`borg/`). `src/toml.grl` parses and assembles the TOML
+  subset Borg's configuration corpus actually uses — strings with escapes, integers in four bases,
+  booleans, arrays, inline tables, `[table]` / `[a.b]` headers and comments — canonicalising keys
+  into map order, materialising empty headers as empty tables, and rejecting a redefined header.
+  Floats, dates, multi-line strings, arrays of tables and dotted inline keys are refused by name
+  rather than approximated. `src/config.grl` loads `agent.toml` into effective settings with the
+  defaults `crates/borg-cli` compiles in (`impl Default for CapabilityConfig`, `UsageCountConfig`,
+  `PromptConfig`, `UpdateConfig`), and reports a wrong-typed key or negative count as an error at
+  its path instead of falling back, and capability values are the effective ones: the dependent
+  features are intersected the way `apply_dependency_intersection` does (`contract.rs:1403`). Two
+  new reference suites compare against the `toml` 1.1.4 crate — the version Borg builds with —
+  walking the same value model in the same order; the port now checks 483 reference lines over 50
+  documents across JSON, protocol headers, TOML and configuration. Network, IPC and UI remain out of
+  scope.
+
+- Port Borg Agent's JSON substrate and runtime-protocol v1 envelope headers (`borg/`). `src/json.grl`
+  parses and writes JSON with the exact semantics `crates/borg-*` rely on, measured against
+  `serde_json` 1.0.151 with `arbitrary_precision`: numbers keep their decimal text (`1e+5`,
+  `-0` -> `0`, 30-digit integers unrounded), objects canonicalise into `BTreeMap` key order with
+  last-wins duplicates, strings use the minimal escape set, encoding is strict, and nesting stops at
+  serde_json's 127-container limit. `src/wire.grl` validates the v1 header rule and reports the
+  failing path and layer. `tools/borg-test.mjs` diffs both suites against committed references that
+  `--regenerate` rebuilds from serde_json itself, so the port is checked against Borg's JSON rather
+  than a restatement of it (187 reference lines over 31 documents). Command, event and snapshot
+  bodies, and every network, IPC and UI concern, remain out of scope.
+
+- Add `docs/platform-status.md`, an explicit matrix of executed, cross-built and scaffolded targets, so Windows PE output and macOS ABI headers are not mistaken for runtime support.
+- Added an LSP MVP (`tools/lsp.mjs`): JSON-RPC over stdio with
+  initialize/shutdown, didOpen/didChange/didClose and
+  `textDocument/publishDiagnostics`. Diagnostics come from the compiler's
+  existing `grail check FILE` output (`file:line:column: message`), mapped to
+  UTF-16 LSP ranges with version and generation guards; the server never
+  fabricates a language diagnostic and reports a missing compiler with
+  `window/showMessage`. A real stdio test covers initialize/shutdown, an
+  unknown request, a valid document, an invalid document and a didChange
+  repair. CI runs the protocol tests in `tooling` and the compiler-backed
+  session in a preflight-gated `lsp` job. Workspace checks, hover, definition,
+  formatting, completion and pull diagnostics remain future work.
+- Cross-platform tooling now treats `windows-x86_64` as a real **build-only**
+  lane: `tools/ci.mjs build/test/package` cross-compiles the compiler to a
+  PE32+ console image, verifies COFF objects, imports and image headers, and
+  packages a zip whose manifest and `WINDOWS-BUILD-ONLY.txt` state that the
+  Windows runtime is not implemented and the image must not be executed. The
+  support matrix now distinguishes `supported`, `build-only` and `planned`,
+  and every platform/lane reports `runnable` explicitly. CI also runs the
+  runtime ABI contract suite (`tools/abi-test.mjs`) and the graphics C/shader
+  suites, and the Windows x86-64 cross job is a required release gate for
+  build/static checks. Windows AArch64 and macOS remain planned.
+- Abundance CPU port, landscape-digest increment: `abundance/src/landscape_digest.grl` carries
+  `terrain::landscape_world_content_digest` — FNV-1a from the standard offset basis over every byte
+  the engine's landscape writer emits, plus the byte count — and the world envelope's `ABWLA001`
+  branch is now exercised end to end. The reference builds a real landscape authority the way
+  Abundance's own `tests/world_landscape_tests.cpp` does, writes its 721 840-byte serialisation and
+  prints both the digest and `World::content_hash()`; the Grail side recomputes the digest from
+  those bytes and reproduces the world hash that binds it. The suite now compares 104 exact values
+  (math 63, hashing 16, world envelope and landscape digest 25).
+- Abundance CPU port, world-hash increment: `abundance/src/world_hash.grl` carries the
+  `World::content_hash` envelope — generator identity, configuration, twenty raster layers, drainage
+  DAG, geology/province/biomes, material masks, provinces, caves, sites, regions, corridors and
+  landform records — with the C++'s uneven count prefixes and eight-byte float widening preserved.
+  `abundance/tests/parity/world.cpp` generates a real world with Abundance's own generator, dumps
+  its inputs and prints `world.content_hash()`, so the Grail side reproduces a value `ABWCACH5`
+  caches and `ABCP2` checkpoints bind, not a transcription of it. The suite now compares 99 exact
+  values (math 63, hashing 16, world envelope 20); the terrain landscape-digest branch is recorded
+  as the one unported branch.
+- Abundance CPU port, hashing increment: `abundance/src/hash.grl` carries `fnv1a64` (with the
+  seeded continuation form), the frozen world/checkpoint starting constant from
+  `World::content_hash`, and its little-endian `absorb_byte`/`absorb_u64` accumulator. The reference
+  is Abundance's own `tx/codec.hpp` plus a verbatim replay of `world.cpp`'s absorb loop, and all 16
+  values match; the suite now compares 79 values across math and hashing. Standard-library SipHash
+  is asserted to disagree so it cannot be substituted for an id or checkpoint hash.
+- Abundance CPU port, first increment: `abundance/src/math.grl` carries the engine's CPU math
+  contract (Vec3/Vec4/DVec3/Mat4, row-major multiply and transform, cofactor inverse, `look_dir`,
+  reverse-Z infinite projection, camera-relative origin split). `just abundance-test` compiles the
+  Grail module and diffs 63 bit patterns against a reference generated by compiling Abundance's own
+  `engine/core/math.hpp`/`math.cpp`; every value matches. Documentation is in `abundance/README.md`.
+- New design document `docs/design/abundance-port.md`: inventory of the Abundance portable core, own engine, Unreal host and shaders, their CPU/RHI boundary, the FFI/ABI requirements a Grail host would have to meet, and a staged port plan. Documentation only; no compiler or library behaviour changed.
+- Graphics foundation (`graphics/`): a versioned C ABI for the render hardware interface and
+  the shader pipeline, aligned with the Vulkan engine in Abundance. `grail_abi.h` defines
+  64-bit tagged handles whose stale use is detected rather than dereferenced, status codes,
+  capability bits and `{size, next}` descriptors. `grail_window.h` covers the SDL3 window,
+  event drain and input; `grail_rhi.h` the device, queue timelines, resources, dynamic-rendering
+  command buffers, deferred destruction and swapchain; `grail_bindless.h` the single set-0
+  table and set-1 frame constants together with the Vulkan/D3D12/Metal mapping; `grail_shader.h`
+  an offline reflection blob format, pipeline descriptors and permutation keys; per-backend
+  headers state the Vulkan 1.3 feature floor, the D3D12 root signature and the Metal argument
+  buffer requirements. `grail_wire.h` carries the same POD structures over a socket for a
+  process that cannot link the RHI.
+
+  The null backend implements every entry point and validates arguments, recording order and
+  handle liveness without a GPU; `make -C graphics test` runs 219 checks with only a C
+  compiler. Three HLSL stages compile offline with DXC 1.9.2609 and pass
+  `spirv-val --target-env vulkan1.3`. Two binding facts are pinned by compilation rather than
+  assumed: `register(xN, spaceM)` maps to Vulkan `DescriptorSet M`/`Binding N`, and push
+  constants must use `[[vk::push_constant]]` because a plain `cbuffer` at `b0` would become a
+  descriptor colliding with the sampled-image table. The offline shader tool and the real
+  backends are not yet written; a Grail program cannot call any of this until the language has
+  an FFI and non-`libc`-free linkage (`graphics/docs/first-renderer-port.md`).
+- Cross-platform build/test/distribution foundation: a seven-platform CI matrix
+  (Linux x86-64/AArch64/RISC-V64, Windows x86-64/AArch64, macOS AArch64/x86-64),
+  host/SDK/QEMU detection, deterministic `tar.gz`/`zip` packaging with
+  `SHA256SUMS` and provenance, POSIX/PowerShell installers, and secret-safe
+  signing/notarization hooks. Linux lanes build and test; Windows/macOS lanes are
+  explicit distribution scaffolding because the compiler still emits Linux ELF
+  only. Tooling is documented in `docs/tooling/cross-platform-ci.md`.
+- Added statically verified first-layer Windows and macOS backends for the OS ABI, using
+  pinned Win32 and Darwin declarations so both compile for their targets without platform SDK
+  headers. Implemented init/capabilities/error detail, clocks and sleep, environment
+  get/set/unset/snapshot iteration, current directory and executable path, and file basics
+  (open/read/write/seek/truncate/sync/close, pipes, mkdir/remove/rename; Windows also stat,
+  macOS also non-blocking mode, readlink and realpath). Every unimplemented function is still
+  an explicit `GRAIL_E_UNSUPPORTED` stub and the capability word advertises only the first
+  layer. Added a shared environment store with host tests and separate `GRAIL_CAP_FILE_METADATA`,
+  `GRAIL_CAP_FILE_NONBLOCKING` and `GRAIL_CAP_SYMLINKS` signals.
+  `bun tools/abi-test.mjs` compiles each backend for `x86_64`/`aarch64` Windows and
+  `arm64`/`x86_64` macOS and verifies all 95 public symbols with `llvm-nm`. These backends have
+  not been executed on Windows or macOS; metadata, directory iteration, local time offsets,
+  processes, sockets, threads and dynamic libraries remain fail-closed there.
+- The Linux reference backend now implements the child-process contract with
+  fork/execve/wait4: explicit argv/environment blocks, working directory, stdin/stdout/stderr
+  wiring, PATH search, exec-error reporting through an error pipe, blocking and timed waits,
+  SIGTERM/SIGKILL termination, process id and single-close handles. It also implements the
+  first TCP/UDP socket subset: IPv4/IPv6 create/bind/listen/accept4/connect/send/recv,
+  send_to/recv_from, shutdown, address queries, non-blocking mode, the documented socket
+  options and blocking `getaddrinfo`, with negative-errno mapping and capability bits. Tests
+  cover argv/environment/cwd/stdio, exit status, PATH search, timeout/terminate/kill, loopback
+  TCP and UDP, options and DNS; the full Linux behaviour test is now 344 checks with zero
+  tracked allocation bytes. Windows/macOS remain fail-closed. C-to-Graal callbacks remain a
+  later FFI increment and allocator/thread callbacks stay backend-side.
+- Added the child-process and socket/DNS contracts with explicit ownership, error and
+  platform-search rules, plus fail-closed Windows and macOS backend skeletons. The Linux
+  reference backend reports both domains as unsupported and clears their capability bits;
+  a skeleton conformance test verifies that init fails closed, capabilities stay zero and
+  representative entry points return `GRAIL_E_UNSUPPORTED`. Documented the full Win32/Winsock
+  and libSystem/Mach mapping in `runtime/abi/README.md` and the safe Grail surface in
+  `docs/design/runtime-api.md`.
+- Added a hosted Linux reference backend for the OS ABI (an ABI oracle, not a Grail build
+  path): startup/environment seeding and iteration, monotonic/realtime/CPU clocks and sleep,
+  file open/read/write/seek/stat/sync/close, directory iteration, pipes, mkdir/remove/rename,
+  current directory and executable paths, pthread threads (spawn/join/detach), mutexes,
+  condition variables and `dlopen`/`dlsym`. Processes and sockets remain explicitly
+  unsupported with clear capability bits. The end-to-end test verifies 165 checks and zero
+  tracked allocation bytes at shutdown.
+- Added the resource-domain headers for files/directories/pipes, environment iterators,
+  native threads/mutexes/condition variables and dynamic libraries, plus a generation-checked
+  handle table that rejects stale, double-closed and cross-domain handles. Contract tests
+  cover 1000 handle allocations, reuse, foreign-table rejection and destruction; all headers
+  parse for the five ABI targets.
+- Added the lexical path contract (`include/grail/grail_path.h`) with one implementation
+  for POSIX and Windows rules: absolute/relative detection, join, parent, file name,
+  extension and normalization. Both rule sets are exercised on Linux, including drive-relative
+  `C:` paths, UNC anchors and canonical `/` output.
+- Added the cross-platform OS ABI contract under `include/grail/`: 64-bit scalar and pointer
+  calling rules, opaque linear handles, version negotiation, allocator/startup records,
+  portable error codes with raw OS detail, and strict UTF-8/UTF-16 helpers. Portable
+  implementation and C tests cover version checks, every error mapping (errno, Win32, Mach),
+  and Unicode rejection/round-trip cases. Linux, AArch64, RISC-V 64, Win64 and Apple ARM64
+  header parsing is checked. Nothing is linked into Grail builds; `compiler/native.grl` and
+  `runtime.grl` are unchanged.
+  only. Tooling is documented in `docs/tooling/cross-platform-ci.md`; the
+  LSP/debugger/profiler integration plan is in
+  `docs/tooling/lsp-debugger-profiler.md`.
 - Windows x86-64 programs now run: the runtime gained an OS layer
   (`compiler/os-windows.grl`) behind the existing operation IDs, and a new `raw_win32(Symbol, ...)`
   intrinsic emits Win64 calls with shadow space, register arguments and stack arguments. Console

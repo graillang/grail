@@ -1,0 +1,369 @@
+module borg_supervisor;
+use borg_json;
+use core;
+
+// Service supervision and the documented filesystem layout.
+//
+// Rules copied from crates/borg-lanes and crates/borg-ui, cited and anchored:
+//
+//   RestartPolicy / transient(exit)   services.rs:77-105   an exit code is "transient" only when
+//                                                          the child exited with it — a signalled
+//                                                          child has code() == None and never is
+//   backoff(spec, failures)           services.rs:2029     max(backoff_ms, 50) * 2^min(failures, 6),
+//                                                          saturating
+//   restart after an exit             services.rs:1723     transient → plain backoff_ms and no
+//                                                          failure counted; otherwise failures += 1
+//                                                          and the exponential backoff; either way
+//                                                          `restarts` is incremented
+//   launch failure                    services.rs:1701     failures += 1, exponential backoff,
+//                                                          Degraded with the error
+//   ServiceState                      services.rs:247      the nine states below
+//   host_home()                       host_paths.rs:6      BORG_HOME, then HOME/.borg, then the
+//                                                          platform home
+//   config_root(...)                  preferences.rs:542   XDG_CONFIG_HOME, then HOME/.config, then
+//                                                          the platform config dir; "borg" beneath
+//   lane root                         lanes.rs:379         BORG_LANE_DIR, BORG_LANES_ROOT,
+//                                                          XDG_RUNTIME_DIR/borg/lanes, temp dir
+//   resume_budget(...)                services.rs:172     readiness + health interval + probe
+//                                                          timeout, plus 2 s for the supervisor
+
+pub struct RestartPolicy {
+    max_restarts: u64,
+    backoff_ms: u64,
+    debounce_ms: u64,
+    transient_exit_codes: i64[]
+}
+
+pub enum ServiceState {
+    Stopped,
+    Starting,
+    Healthy,
+    Degraded,
+    Yielding,
+    Yielded,
+    RestartPending,
+    Restarting,
+    Failed
+}
+
+// What one event decided: the new state, how long until the next launch (0 when the event does not
+// schedule one), and whether it counted against max_restarts.
+pub struct Outcome {
+    state: ServiceState,
+    delay_ms: u64,
+    counted: bool
+}
+
+pub fn policy(max_restarts: u64, backoff_ms: u64, debounce_ms: u64, transient_exit_codes: i64[]) -> RestartPolicy {
+    return RestartPolicy {
+        max_restarts: max_restarts,
+        backoff_ms: backoff_ms,
+        debounce_ms: debounce_ms,
+        transient_exit_codes: transient_exit_codes
+    };
+}
+
+fn copy_codes<a>(codes: (&a i64[])) -> i64[] {
+    mut out = i64[];
+    for i in codes.len() {
+        out.push(codes[i]);
+    }
+    return out;
+}
+
+pub fn max_restarts_of<a>(policy: (&a RestartPolicy)) -> u64 {
+    return policy.max_restarts;
+}
+
+// `RestartPolicy::transient` (services.rs:102): only a real exit code can be transient, so a
+// signalled child — `None` here — is never relaunched without counting as a failure.
+pub fn is_transient<a>(policy: (&a RestartPolicy), exit_code: i64?) -> bool {
+    match exit_code {
+        Some(code) => {
+            mut index = 0;
+            while index < policy.transient_exit_codes.len() {
+                if policy.transient_exit_codes[index] == code {
+                    return true;
+                }
+                index += 1;
+            }
+            return false;
+        },
+        None => { return false; }
+    }
+}
+
+// `backoff` (services.rs:2029): the base is at least 50 ms, doubled per failure up to six doublings.
+pub fn backoff<a>(policy: (&a RestartPolicy), failures: u64) -> u64 {
+    mut base = policy.backoff_ms;
+    if base < 50 {
+        base = 50;
+    }
+    mut doublings = failures;
+    if doublings > 6 {
+        doublings = 6;
+    }
+    mut multiplier = u64(1);
+    mut step = 0;
+    while step < doublings {
+        multiplier = multiplier * 2;
+        step += 1;
+    }
+    if base > 18446744073709551615 / multiplier {
+        return 18446744073709551615;
+    }
+    return base * multiplier;
+}
+
+pub struct Supervisor {
+    policy: RestartPolicy,
+    state: ServiceState,
+    failures: u64,
+    restarts: u64
+}
+
+pub fn supervisor(policy: RestartPolicy) -> Supervisor {
+    return Supervisor { policy: policy, state: ServiceState::Stopped, failures: 0, restarts: 0 };
+}
+
+fn outcome(state: ServiceState, delay_ms: u64, counted: bool) -> Outcome {
+    return Outcome { state: state, delay_ms: delay_ms, counted: counted };
+}
+
+impl Supervisor {
+    pub fn starting(self: (&a mut Supervisor)) {
+        self.state = ServiceState::Starting;
+    }
+
+    pub fn healthy(self: (&a mut Supervisor)) {
+        self.state = ServiceState::Healthy;
+    }
+
+    pub fn stopped(self: (&a mut Supervisor)) {
+        self.state = ServiceState::Stopped;
+    }
+
+    pub fn restart_requested(self: (&a mut Supervisor)) {
+        self.state = ServiceState::RestartPending;
+    }
+
+    pub fn restarting(self: (&a mut Supervisor)) {
+        self.state = ServiceState::Restarting;
+    }
+
+    pub fn degraded_by(self: (&a mut Supervisor), reason: (&[u8])) {
+        self.state = ServiceState::Degraded;
+    }
+
+    pub fn yielding(self: (&a mut Supervisor)) {
+        self.state = ServiceState::Yielding;
+    }
+
+    pub fn yielded(self: (&a mut Supervisor)) {
+        self.state = ServiceState::Yielded;
+    }
+
+    // A backend that exited: `exit_code` is `None` when it was signalled or the supervisor never
+    // saw a code, which is exactly the case `status.code()` reports as non-transient.
+    pub fn exited(self: (&a mut Supervisor), exit_code: i64?) -> Outcome {
+        self.restarts = self.restarts + 1;
+        if is_transient(&self.policy, copy_optional(&exit_code)) {
+            self.state = ServiceState::RestartPending;
+            return outcome(ServiceState::RestartPending, self.policy.backoff_ms, false);
+        }
+        self.failures = self.failures + 1;
+        delay := backoff(&self.policy, self.failures);
+        if self.failures > self.policy.max_restarts {
+            self.state = ServiceState::Failed;
+            return outcome(ServiceState::Failed, delay, true);
+        }
+        self.state = ServiceState::RestartPending;
+        return outcome(ServiceState::RestartPending, delay, true);
+    }
+
+    // A backend that could not be launched at all (services.rs:1701): a failure like any other.
+    pub fn launch_failed(self: (&a mut Supervisor)) -> Outcome {
+        self.failures = self.failures + 1;
+        delay := backoff(&self.policy, self.failures);
+        if self.failures > self.policy.max_restarts {
+            self.state = ServiceState::Failed;
+            return outcome(ServiceState::Failed, delay, true);
+        }
+        self.state = ServiceState::Degraded;
+        return outcome(ServiceState::Degraded, delay, true);
+    }
+}
+
+fn copy_optional<a>(value: (&a i64?)) -> i64? {
+    match value {
+        Some(number) => { return core::some(number); },
+        None => { return core::none<i64>(); }
+    }
+}
+
+fn copy_optional_text<a>(value: (&a string?)) -> string? {
+    match value {
+        Some(text) => { copied := copy_text(&text); return core::some(copied); },
+        None => { return core::none<string>(); }
+    }
+}
+
+fn copy_text<a>(text: (&a [u8])) -> string {
+    mut out = u8[];
+    for byte in text {
+        out.push(byte);
+    }
+    return out.text();
+}
+
+pub fn outcome_state<a>(value: (&a Outcome)) -> string {
+    return state_name(&value.state);
+}
+
+pub fn outcome_delay<a>(value: (&a Outcome)) -> u64 {
+    return value.delay_ms;
+}
+
+pub fn outcome_counted<a>(value: (&a Outcome)) -> bool {
+    return value.counted;
+}
+
+pub fn state_name<a>(state: (&a ServiceState)) -> string {
+    match state {
+        Stopped => { return "stopped".text(); },
+        Starting => { return "starting".text(); },
+        Healthy => { return "healthy".text(); },
+        Degraded => { return "degraded".text(); },
+        Yielding => { return "yielding".text(); },
+        Yielded => { return "yielded".text(); },
+        RestartPending => { return "restart-pending".text(); },
+        Restarting => { return "restarting".text(); },
+        Failed => { return "failed".text(); }
+    }
+}
+
+pub fn current<a>(state: (&a Supervisor)) -> string {
+    return state_name(&state.state);
+}
+
+pub fn failures_of<a>(state: (&a Supervisor)) -> u64 {
+    return state.failures;
+}
+
+pub fn restarts_of<a>(state: (&a Supervisor)) -> u64 {
+    return state.restarts;
+}
+
+// ---- layout ----
+
+fn path_under<a, b>(root: (&a [u8]), leaf: (&b [u8])) -> string {
+    mut out = u8[];
+    for byte in root {
+        out.push(byte);
+    }
+    if out.len() > 0 && out[out.len() - 1] != 47 {
+        out.push(47);
+    }
+    for byte in leaf {
+        out.push(byte);
+    }
+    return out.text();
+}
+
+// `host_home` (host_paths.rs:6): BORG_HOME, then HOME/.borg, then the platform home, then a
+// relative fallback.
+pub fn host_home(borg_home: string?, home: string?, platform_home: string?) -> string {
+    mut choice = core::none<string>();
+    choice = copy_optional_text(&borg_home);
+    match choice {
+        Some(path) => { return path; },
+        None => { }
+    }
+    choice = copy_optional_text(&home);
+    match choice {
+        Some(path) => { return path_under(&path, ".borg"); },
+        None => { }
+    }
+    choice = copy_optional_text(&platform_home);
+    match choice {
+        Some(path) => { return path_under(&path, ".borg"); },
+        None => { }
+    }
+    return ".borg".text();
+}
+
+// `config_root` (preferences.rs:542): XDG_CONFIG_HOME, then HOME/.config, then the platform config
+// directory, with "borg" beneath it.
+pub fn config_root(xdg_config: string?, home: string?, platform_config: string?) -> string {
+    mut choice = core::none<string>();
+    choice = copy_optional_text(&xdg_config);
+    match choice {
+        Some(path) => { return path_under(&path, "borg"); },
+        None => { }
+    }
+    choice = copy_optional_text(&home);
+    match choice {
+        Some(path) => { return path_under(&path_under(&path, ".config"), "borg"); },
+        None => { }
+    }
+    choice = copy_optional_text(&platform_config);
+    match choice {
+        Some(path) => { return path_under(&path, "borg"); },
+        None => { }
+    }
+    return "borg".text();
+}
+
+// Lane storage (lanes.rs:379): BORG_LANE_DIR, BORG_LANES_ROOT, XDG_RUNTIME_DIR/borg/lanes, then a
+// per-user temp directory.
+pub fn lane_root(lane_dir: string?, lanes_root: string?, xdg_runtime: string?, temp: string, euid: u64) -> string {
+    mut choice = core::none<string>();
+    choice = copy_optional_text(&lane_dir);
+    match choice {
+        Some(path) => { return path; },
+        None => { }
+    }
+    choice = copy_optional_text(&lanes_root);
+    match choice {
+        Some(path) => { return path; },
+        None => { }
+    }
+    choice = copy_optional_text(&xdg_runtime);
+    match choice {
+        Some(path) => { return path_under(&path_under(&path, "borg"), "lanes"); },
+        None => { }
+    }
+    name := borg_json::number_text(euid);
+    fallback := path_under(&copy_text(&temp), "borg-lanes-");
+    mut out = u8[];
+    for byte in fallback {
+        out.push(byte);
+    }
+    for byte in name {
+        out.push(byte);
+    }
+    return out.text();
+}
+
+// `resume_budget` (services.rs:172): readiness window plus one health interval and probe timeout,
+// and 2 s for the supervisor to launch; the default window when the spec is unreadable.
+pub fn resume_budget_ms(readiness_timeout_ms: u64, interval_ms: u64, timeout_ms: u64, readable: bool) -> u64 {
+    mut window = readiness_timeout_ms;
+    if !readable {
+        window = 120000;
+    }
+    return window + interval_ms + timeout_ms + 2000;
+}
+
+// The files Borg documents under the host home (section 6 of the port plan).
+pub fn host_state_paths_a(home: (&[u8])) -> string {
+    return path_under(&path_under(home, ""), "");
+}
+
+pub fn host_file<a, b>(home: (&a [u8]), leaf: (&b [u8])) -> string {
+    return path_under(&home, &leaf);
+}
+
+pub fn session_file<a, b, c>(sessions_dir: (&a [u8]), session_id: (&b [u8]), suffix: (&c [u8])) -> string {
+    return path_under(&sessions_dir, &path_under(&session_id, &suffix));
+}

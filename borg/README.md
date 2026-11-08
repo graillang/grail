@@ -1,10 +1,11 @@
 # Borg Agent CPU port
 
-Four bounded increments of the Borg Agent → Grail port: the JSON substrate its wire documents are
+Five bounded increments of the Borg Agent → Grail port: the JSON substrate its wire documents are
 made of, the TOML its configuration files are written in, the protocol-v1 envelope header that
 classifies a document, the `agent.toml` loader that applies Borg's compiled-in defaults, the
-local-session ownership state that decides whether a session still has an owner, and the JSON-RPC
-frames plus single-in-flight dispatch that ACP, LSP and MCP conversations are built from.
+local-session ownership state that decides whether a session still has an owner, the JSON-RPC frames
+and single-in-flight dispatch that ACP, LSP and MCP conversations are built from, and the service
+supervision rules — restart policy, backoff, exit semantics — with the layout they write into.
 Borg Agent is read-only here; the reference is its own JSON semantics — `serde_json` 1.0.151 with
 `arbitrary_precision`, the crate version and feature set `crates/borg-*` build with. The plan and
 staging live in [docs/design/borg-agent-port.md](../docs/design/borg-agent-port.md).
@@ -16,12 +17,14 @@ src/toml.grl                 TOML subset parser, table assembly, shape walk, acc
 src/config.grl               `agent.toml` → effective settings with Borg's compiled-in defaults
 src/session_state.grl        owner record codec, executable identity, `/proc` start time, liveness
 src/jsonrpc.grl              JSON-RPC frames, stdio and Content-Length framing, dispatcher state
+src/supervisor.grl           restart policy, backoff, service states, layout resolvers
 tests/json_test.grl          JSON: `json.compact`, `json.scalar`, `json.error` per document
 tests/wire_test.grl          protocol: `wire.header <file> <field> <value>`, `wire.error <file> <path> <reason>`
 tests/toml_test.grl          TOML: `toml.value <file> <path> <kind> <text>`, `toml.error <file>`
 tests/config_test.grl        config: `config.value <file> <key> <value>`, `config.error <file> <path>`
 tests/session_test.grl       ownership: `case <name> record|field|active|state|obsolete|start|identity …`
 tests/jsonrpc_test.grl       frames: `frame|parse|take|dispatch <name> …`
+tests/supervisor_test.grl    supervision: `supervise|home|config|lanes|session|budget <name> …`
 tests/fixtures/v1/           Borg's protocol-v1 conformance corpus, copied verbatim
 tests/fixtures/edge/         number, escape, structure, nesting-limit and malformed documents
 tests/fixtures/wire/         envelope mutations: missing, mistyped, wrong protocol, wrong version
@@ -30,6 +33,7 @@ tests/fixtures/toml/cases/   TOML constructs and invalid documents
 tests/fixtures/config/       `agent.toml` documents: full, partial, empty, wrong-typed, negative
 tests/fixtures/session/      ownership scenarios: records, process observations, stat lines
 tests/fixtures/jsonrpc/      frame specs, parse cases, framed buffers, dispatch scripts
+tests/fixtures/supervisor/   policies with op scripts, and layout inputs
 tests/parity/json.rs         the reference: serde_json compact re-serialisation and scalar walk
 tests/parity/wire.rs         the reference: the same header rule over serde_json values
 tests/parity/toml.rs         the reference: the toml crate's value model, walked in the same order
@@ -43,6 +47,7 @@ tests/parity/toml.txt        committed reference output (230 lines, 13 documents
 tests/parity/config.txt      committed reference output (66 lines, 6 documents)
 tests/parity/session.txt     committed reference output (120 lines, 23 documents)
 tests/parity/jsonrpc.txt     committed reference output (71 lines, 22 documents)
+tests/parity/supervisor.txt  committed reference output (45 lines, 20 documents)
 tools/borg-test.mjs          build + compile + run + diff
 ```
 
@@ -85,8 +90,10 @@ and field:
 - `frame|parse|take|dispatch <name> …`: an envelope built from a spec and its canonical bytes; a
   document classified by the envelope rule; one framed message read out of a buffer; and the
   outcome of a dispatch script.
+- `supervise <name> <i> <event> <state> delay=… failures=… restarts=…`: one supervision script
+  replayed, plus `home|config|lanes|session|budget` for the layout resolvers.
 
-The suite compares **674 lines over 95 documents**, and every value in them comes from
+The suite compares **719 lines over 115 documents**, and every value in them comes from
 `serde_json` rather than from a restatement: the reference parses with Borg's own crate and prints
 what it parsed. `wire.rs` and `config.rs` pin the v1 header *rule* and the default table (no Rust program classifies
 these fixtures, or loads this config without building the whole 363k-line Borg workspace), and use
@@ -209,6 +216,29 @@ unifies features per build graph, so adding that crate to the shared reference s
 in its own crate (`tests/parity/ref-acp`), with its own manifest, so one reference's dependencies
 cannot redefine another's output.
 
+## Supervision and layout
+
+A supervised service is a small state machine plus a backoff rule, and the documented file layout is
+a set of resolvers. Every rule is copied from `borg-lanes` or `borg-ui` with an anchor:
+
+| Rule | Source | Ported as |
+| --- | --- | --- |
+| Nine service states | `services.rs:247` | `ServiceState` |
+| An exit is transient only when the child exited with a listed code; a signalled child has no code and never is | `services.rs:102` | `is_transient` |
+| Backoff is `max(backoff_ms, 50) * 2^min(failures, 6)`, saturating | `services.rs:2029` | `backoff` |
+| A transient exit relaunches after the plain `backoff_ms` and counts no failure | `services.rs:1723` | `Supervisor::exited` |
+| Any other exit adds a failure, uses the exponential backoff, and fails past `max_restarts` | `services.rs:1723` | `Supervisor::exited` |
+| A launch that never happened is a failure too | `services.rs:1701` | `Supervisor::launch_failed` |
+| `restarts` counts every relaunch, transient or not | `services.rs:1723` | `Supervisor::exited` |
+| Resume budget is readiness + health interval + probe + 2 s, with a 120 s default window | `services.rs:172` | `resume_budget_ms` |
+| `BORG_HOME`, then `HOME/.borg`, then the platform home | `host_paths.rs:6` | `host_home` |
+| `XDG_CONFIG_HOME`, then `HOME/.config`, then the platform config dir, with `borg` beneath | `preferences.rs:542` | `config_root` |
+| `BORG_LANE_DIR`, `BORG_LANES_ROOT`, `XDG_RUNTIME_DIR/borg/lanes`, then a per-euid temp dir | `lanes.rs:379` | `lane_root` |
+
+The layout half is the path half only: it resolves where `agent.toml`, `editor.toml`, `pgdata`,
+`logs/postgres.log`, `remote/host.json` and `remote/sessions/<id>.control.*` live. Nothing here starts
+a process, reaps one, or touches the filesystem.
+
 ## Limits and findings
 
 - **Not modelled: command, event and snapshot bodies.** The header is what classifies and routes a
@@ -238,6 +268,10 @@ cannot redefine another's output.
   second call, or returning it, is rejected. Reading `entries[index].value` needs a named local
   borrow (`entry := &entries[index]`), and a loop that both borrows an element and returns must go
   through a one-line helper (`copied_entry_value`).
+- **A function may take at most six parameters** when it is lowered to native code ("native function
+  exceeds six parameters"); the supervision test hit this building a log line.
+- **Matching an `Option`/enum *field* of a borrow moves it**, so the supervisor's policy and state are
+  read through one-line copy helpers.
 - **Smaller findings**: `const` is not accepted (use a function); `mut x := v` is invalid (`mut x = v`);
   match patterns use bare variant names (`Num(t)`, not `Json::Num(t)`); a statement after a diverging
   `loop` is rejected as unreachable; the four `cfg`-free test programs need no compiler flags beyond
