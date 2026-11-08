@@ -391,7 +391,7 @@ fn debug_locs<a>(text: &a [u8]) -> u8[] {
         b := text[i];
         line.push(b);
         if b == 10 {
-            if starts_with(view(line), view(".loc ")) != 0 {
+            if (starts_with(view(line), view(".loc ")) + starts_with(view(line), view(".cv_loc "))) != 0 {
                 mut fresh = u8[];
                 for k in line.len() {
                     fresh.push(line[k]);
@@ -667,7 +667,17 @@ fn emit_loc<a>(c: (&a mut C)) -> unit {
         }
     }
     file := c.file - 1;
-    o(&mut c, view(".loc "));
+    if c.target == 3 {
+        if c.validating {
+            return (); // no function id is open while validating
+        }
+        fid := c.debug_funcs.len();
+        o(&mut c, view(".cv_loc "));
+        on(&mut c, fid);
+        c.out.push(32);
+    } else {
+        o(&mut c, view(".loc "));
+    }
     on(&mut c, file);
     c.out.push(32);
     on(&mut c, line);
@@ -1078,6 +1088,22 @@ fn win_unwind_line<a, b>(u: (&a mut WinUnwind), text: &b [u8], a: u64, e: u64) -
         u.state = 1;
         push_line(&mut u.out, view(text), a, e);
         return ();
+    }
+    // Debug builds put a .L range label before the function label and CodeView directives
+    // (.cv_func_id, .cv_loc) inside the prologue; neither changes the unwind description.
+    if (u.state == 1) + (u.state == 2) {
+        if span_has(view(text), a, e, view(".cv_")) {
+            push_line(&mut u.out, view(text), a, e);
+            return ();
+        }
+    }
+    if u.state == 1 {
+        if 2 < e - a {
+            if (text[a] == 46) & (text[a + 1] == 76) & (text[e - 1] == 58) {
+                push_line(&mut u.out, view(text), a, e);
+                return ();
+            }
+        }
     }
     if u.state == 1 {
         if 0 < e - a {
@@ -4969,6 +4995,13 @@ fn ffi_direct_result<a, b>(c: (&a mut C), ty: u64, what: &b [u8]) -> unit {
         if ffi_direct_type(&mut c, ty) {
             return ();
         }
+        // A C-layout record result is returned by value (registers or a hidden result pointer,
+        // per ABI) into a fresh Grail record of the same layout.
+        if ty_kind(&mut c, ty) == 8 {
+            if c.decls[ty_arg(&mut c, ty)].c_layout {
+                return ();
+            }
+        }
     }
     ffi_result(&mut c, ty, what);
     return ();
@@ -5015,9 +5048,38 @@ fn ffi_emit_call<a, b, d, e>(
     x86 := abi < 2;
     nint := ffi_int_regs(abi);
     apple_arm := (abi == 2) & (c.plat == 1);
+    // A C record result: 1 = returned in up to two integer registers, 2 = written through a
+    // hidden pointer (rdi on SysV, rcx on Win64 and a0 on RV64, shifting the arguments; x8 on
+    // AAPCS64, which does not). Records hold integer fields only, so every eightbyte is INTEGER.
+    mut rmode = 0;
+    mut rsize = 0;
+    mut rslot = 0;
+    if ret != 1 {
+        if ty_kind(&mut c, ret) == 8 {
+            rd := ty_arg(&mut c, ret);
+            rsize = ffi_record_size(&mut c, rd);
+            nwords := ffi_record_words(&mut c, rd);
+            words := imm(&mut c, nwords);
+            rslot = invoke(&mut c, view("rt_rec"), one(words));
+            rmode = 1;
+            if abi == 1 {
+                if (rsize != 1) & (rsize != 2) & (rsize != 4) & (rsize != 8) {
+                    rmode = 2;
+                }
+            } else {
+                if 16 < rsize {
+                    rmode = 2;
+                }
+            }
+        }
+    }
+    mut shift = 0;
+    if (rmode == 2) & (abi != 2) {
+        shift = 1;
+    }
     // First pass: how many argument words go to the stack. Win64 slots are positional: the
     // n-th argument uses the n-th register of its class or the n-th stack slot.
-    mut ints = 0;
+    mut ints = shift;
     mut floats = 0;
     mut stack = 0;
     for i in args.len() {
@@ -5076,9 +5138,12 @@ fn ffi_emit_call<a, b, d, e>(
             c.out.push(10);
         }
     }
-    ints = 0;
+    ints = shift;
     floats = 0;
     mut next = 0;
+    if shift {
+        get(&mut c, rslot, view(ffi_int_reg(abi, 0)));
+    }
     for i in args.len() {
         ty := argtypes[i];
         if is_float(&mut c, ty) {
@@ -5183,6 +5248,10 @@ fn ffi_emit_call<a, b, d, e>(
             }
         }
     }
+    if (rmode == 2) & (abi == 2) {
+        get(&mut c, rslot, view("%rax"));
+        o(&mut c, view("csret\n"));
+    }
     if symbol.len() == 0 {
         get(&mut c, target, view("%rax"));
         o(&mut c, view("call *%rax\n"));
@@ -5191,7 +5260,7 @@ fn ffi_emit_call<a, b, d, e>(
         o(&mut c, view(symbol));
         c.out.push(10);
     }
-    if ret != 1 {
+    if (ret != 1) & (rmode == 0) {
         if is_float(&mut c, ret) {
             single := is_f32(&mut c, ret);
             if x86 {
@@ -5229,6 +5298,26 @@ fn ffi_emit_call<a, b, d, e>(
             on(&mut c, area);
             c.out.push(10);
         }
+    }
+    if rmode != 0 {
+        if rmode == 1 {
+            // Word 0 is in %rax on every target; word 1 in %rdx on x86-64 and in x1/a1 (spelled
+            // %rsi here) on AArch64 and RV64, which the call lowering leaves in place.
+            get(&mut c, rslot, view("%r10"));
+            o(&mut c, view("movq %rax,(%r10)\n"));
+            if 8 < rsize {
+                if x86 {
+                    o(&mut c, view("movq %rdx,8(%r10)\n"));
+                } else {
+                    o(&mut c, view("movq %rsi,8(%r10)\n"));
+                }
+            }
+        }
+        if tls != 0 {
+            tls_set_slot(&mut c, tls);
+        }
+        own(&mut c, rslot, ret);
+        return val(rslot, ret);
     }
     slot := save(&mut c);
     if tls != 0 {
@@ -5898,6 +5987,13 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     if (c.debug != 0) & (c.validating == 0) {
         dstart = label(&mut c);
         mark(&mut c, dstart);
+        if c.target == 3 {
+            // CodeView numbers functions densely in record order; this one will be recorded next.
+            fid := c.debug_funcs.len();
+            o(&mut c, view(".cv_func_id "));
+            on(&mut c, fid);
+            c.out.push(10);
+        }
     }
     export_name(&mut c, view(m), view(name), view(body_symbol), export);
     o(&mut c, view(":\npushq %rbp\nmovq %rsp,%rbp\n"));
@@ -17058,8 +17154,9 @@ pub fn main() -> u64 {
             )
         );
     }
-    if (c.debug != 0) & (((c.target != 0) + (c.plat != 0)) != 0) {
-        fail_option(&mut c, view("--debug line info is only implemented for Linux x86_64"));
+    // DWARF on Linux x86-64; CodeView line tables (a PDB through lld-link /DEBUG) on Windows x86-64.
+    if (c.debug != 0) & ((((c.target != 0) & (c.target != 3)) + (c.plat != 0)) != 0) {
+        fail_option(&mut c, view("--debug line info is only implemented for Linux x86_64 and Windows x86_64"));
     }
     for pass in 3 {
         if pass == 1 {
@@ -17071,7 +17168,11 @@ pub fn main() -> u64 {
                 while f < n {
                     path := host::arg(f + offset);
                     number := f - 1;
-                    o(&mut c, view(".file "));
+                    if c.target == 3 {
+                        o(&mut c, view(".cv_file "));
+                    } else {
+                        o(&mut c, view(".file "));
+                    }
                     on(&mut c, number);
                     o(&mut c, view(" \""));
                     emit_path(&mut c, view(path));
@@ -17150,7 +17251,7 @@ pub fn main() -> u64 {
         o(
             &mut c,
             view(
-                ".globl grail_entry\ngrail_entry:\nxorl %eax,%eax\nmovq %rax,rt_state(%rip)\nmovq %rax,rt_state+8(%rip)\nmovq %rax,rt_state+16(%rip)\nandq $-16,%rsp\ncall rt_thread_init\nmovq rt_state(%rip),%rdi\n"
+                ".globl grail_entry\ngrail_entry:\nxorl %eax,%eax\nmovq %rax,rt_state(%rip)\nmovq %rax,rt_state+8(%rip)\nmovq %rax,rt_state+16(%rip)\nleaq rt_win_thread_start(%rip),%rax\nmovq %rax,rt_state+3392(%rip)\nandq $-16,%rsp\ncall rt_thread_init\nmovq rt_state(%rip),%rdi\n"
             )
         );
     
@@ -17219,6 +17320,17 @@ pub fn main() -> u64 {
             )
         );
     } else {
+    if c.target == 4 {
+        // CreateThread's start routine on ARM64: the thread record arrives in x0, which is the
+        // first argument register of Grail's lowered calls too, and x19-x28/d8-d15 are
+        // callee-saved in both conventions; a framed call is the whole bridge.
+        o(
+            &mut c,
+            view(
+                "ud2\nrt_win_thread_start:\npushq %rbp\nmovq %rsp,%rbp\ncall rt_win_thread_main\npopq %rbp\nret\n.bss\n.p2align 3\nrt_state: .zero 4096\n"
+            )
+        );
+    } else {
     if (c.target == 3) + (c.target == 4) {
         o(&mut c, view("ud2\n.bss\n.p2align 3\nrt_state: .zero 4096\n"));
     } else {
@@ -17230,6 +17342,7 @@ pub fn main() -> u64 {
         } else {
             tls_bss(&mut c);
         }
+    }
     }
     }
     mut out = u8[];
@@ -17247,7 +17360,25 @@ pub fn main() -> u64 {
     if (target == 0) + (target == 3) {
         if target == 3 {
             // PE/COFF unwind data must be emitted from the final frame sizes.
-            image := win_unwind(view(out));
+            mut image = win_unwind(view(out));
+            if c.debug != 0 {
+                image = debug_locs(view(image));
+                // CodeView: one line table per recorded function, then the file checksums and the
+                // string table they index; lld-link /DEBUG builds the PDB from this section.
+                push_bytes(&mut image, view(".section .debug$S,\"dr\"\n.p2align 2\n.long 4\n"));
+                for i in c.debug_funcs.len() {
+                    push_bytes(&mut image, view(".cv_linetable "));
+                    decimal(&mut image, i);
+                    push_bytes(&mut image, view(", .L"));
+                    fstart := c.debug_funcs[i].start;
+                    fend := c.debug_funcs[i].end;
+                    decimal(&mut image, fstart);
+                    push_bytes(&mut image, view(", .L"));
+                    decimal(&mut image, fend);
+                    image.push(10);
+                }
+                push_bytes(&mut image, view(".cv_filechecksums\n.cv_stringtable\n"));
+            }
             return host::write_file(view(path), view(with_link_notes(&c.libs, view(image))));
         }
         if c.debug != 0 {

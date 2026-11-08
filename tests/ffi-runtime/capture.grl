@@ -1,0 +1,43 @@
+module ffi_runtime_capture;
+
+use sys_grail;
+use sys_grail::Error;
+
+// A child's stdout captured through a pipe: the child gets the write end, this process closes
+// its copy (or the read never sees EOF), reads to EOF and waits for the exit status.
+fn run() -> u64 |? Error {
+    sys_grail::init()?;
+    p := sys_grail::pipe()?;
+    child := sys_grail::spawn_with(&"/bin/sh", &"-c\0printf captured-%s 42", sys_grail::inherit(), p.write, sys_grail::inherit())?;
+    sys_grail::close(p.write)?;
+    output := sys_grail::read_to_end(p.read)?;
+    sys_grail::close(p.read)?;
+    status := sys_grail::wait(child)?;
+    sys_grail::process_close(child)?;
+    if status.exit_code != 0 {
+        return 2;
+    }
+    // cmd.exe's echo ends the line with CRLF; the shell's printf has no newline.
+    mut text = u8[];
+    for i in output.len() {
+        if (output[i] != 13) & (output[i] != 10) {
+            text.push(output[i]);
+        }
+    }
+    if text.len() != 11 {
+        return 3;
+    }
+    expected := "captured-42";
+    for i in 11 {
+        if text[i] != expected[i] {
+            return 4;
+        }
+    }
+    println("ffi-capture: ok");
+    sys_grail::shutdown()?;
+    return 0;
+}
+
+fn main() -> u64 {
+    return run()!;
+}

@@ -104,6 +104,16 @@ const cases = [
       'grail_ffi_thread_spawn', 'grail_ffi_thread_handle', 'grail_os_thread_join'],
     check_file: false,
   },
+  {
+    name: 'capture',
+    entry: 'tests/ffi-runtime/capture.grl',
+    output: 'ffi-capture: ok',
+    host_symbols: ['grail_ffi_pipe', 'grail_ffi_pipe_read_end', 'grail_ffi_pipe_write_end',
+      'grail_ffi_inherit', 'grail_ffi_process_spawn_stdio'],
+    cross_symbols: ['grail_ffi_pipe', 'grail_ffi_pipe_read_end', 'grail_ffi_pipe_write_end',
+      'grail_ffi_inherit', 'grail_ffi_process_spawn_stdio'],
+    check_file: false,
+  },
 ];
 
 function compileAssembly(testCase, target, name) {

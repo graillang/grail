@@ -116,10 +116,12 @@ export function assemble(source, object, target = windowsTarget) {
   return object;
 }
 
-export function link(objects, executable, { entry = 'grail_entry', subsystem = 'console', machine = 'x64' } = {}) {
+export function link(objects, executable, { entry = 'grail_entry', subsystem = 'console', machine = 'x64', pdb = null } = {}) {
   command([
     process.env.GRAIL_WIN_LINKER ?? 'lld-link',
     '/nologo',
+    // A CodeView object (grail --debug) links with /DEBUG into a PDB next to the image.
+    ...(pdb ? ['/debug', `/pdb:${pdb}`] : []),
     `/machine:${machine}`,
     `/entry:${entry}`,
     `/subsystem:${subsystem}`,
@@ -139,6 +141,7 @@ export function compileProgram(compiler, inputs, directory, {
   runtime = join(root, 'compiler/runtime.grl'),
   osRuntime = join(root, 'compiler/os-windows.grl'),
   shims = [],
+  debug = false,
 } = {}) {
   const spec = targets[target];
   if (!spec) throw new Error(`unsupported Windows target ${target}`);
@@ -147,7 +150,7 @@ export function compileProgram(compiler, inputs, directory, {
   const object = join(directory, `${name}.obj`);
   const executable = join(directory, `${name}.exe`);
   const files = [...inputs.map(p => resolve(root, p)), resolve(root, runtime), resolve(root, osRuntime)];
-  command([compiler, '--default-u64', '--typed-refs', '--target', target, assembly, ...files]);
+  command([compiler, '--default-u64', '--typed-refs', ...(debug ? ['--debug'] : []), '--target', target, assembly, ...files]);
   assemble(assembly, object, target);
   // A C-ABI shim (for example the in-process COM object) is assembled for the same target.
   const shimObjects = shims.map((shim, i) => {
@@ -157,8 +160,9 @@ export function compileProgram(compiler, inputs, directory, {
   });
   const library = writeImportLibrary(join(directory, 'lib'), spec.machine,
     programImports(readFileSync(assembly, 'utf8')));
-  link([object, ...shimObjects, library], executable, { machine: spec.linkMachine });
-  return { assembly, object, executable, library, shimObjects };
+  const pdb = debug ? join(directory, `${name}.pdb`) : null;
+  link([object, ...shimObjects, library], executable, { machine: spec.linkMachine, pdb });
+  return { assembly, object, executable, library, shimObjects, pdb };
 }
 
 export function inspectObject(object) {

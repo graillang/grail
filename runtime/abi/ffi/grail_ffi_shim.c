@@ -102,8 +102,24 @@ static int grail_ffi_text_has_zero(const uint8_t *text, uint64_t length) {
     return 0;
 }
 
+int64_t grail_ffi_process_spawn_stdio(const uint8_t *program, uint64_t program_length,
+                                      const uint8_t *arguments, uint64_t arguments_length,
+                                      grail_file standard_input, grail_file standard_output,
+                                      grail_file standard_error);
+
 int64_t grail_ffi_process_spawn(const uint8_t *program, uint64_t program_length,
                                 const uint8_t *arguments, uint64_t arguments_length) {
+    return grail_ffi_process_spawn_stdio(program, program_length, arguments, arguments_length,
+                                         GRAIL_HANDLE_NONE, GRAIL_HANDLE_NONE, GRAIL_HANDLE_NONE);
+}
+
+/* Spawns with explicit standard streams. A GRAIL_HANDLE_NONE stream is inherited; any other is a
+ * grail_file (a pipe end, a file) the backend duplicates for the child, so the caller keeps
+ * ownership and closes its copy - for a pipe, the write end must be closed before reading to EOF. */
+int64_t grail_ffi_process_spawn_stdio(const uint8_t *program, uint64_t program_length,
+                                      const uint8_t *arguments, uint64_t arguments_length,
+                                      grail_file standard_input, grail_file standard_output,
+                                      grail_file standard_error) {
     if (program == NULL || program_length == 0 ||
         (arguments == NULL && arguments_length != 0) ||
         grail_ffi_text_has_zero(program, program_length)) {
@@ -116,9 +132,9 @@ int64_t grail_ffi_process_spawn(const uint8_t *program, uint64_t program_length,
     options.flags = GRAIL_PROC_INHERIT_STDIO;
     options.program = program;
     options.program_length = program_length;
-    options.standard_input = GRAIL_HANDLE_NONE;
-    options.standard_output = GRAIL_HANDLE_NONE;
-    options.standard_error = GRAIL_HANDLE_NONE;
+    options.standard_input = standard_input;
+    options.standard_output = standard_output;
+    options.standard_error = standard_error;
 
     uint8_t *block = NULL;
     uint64_t *offsets = NULL;
@@ -197,4 +213,29 @@ int64_t grail_ffi_thread_spawn(grail_thread_entry entry, uint64_t user) {
 
 grail_thread grail_ffi_thread_handle(void) {
     return grail_ffi_last_thread;
+}
+
+/* A pipe's two ends as owned grail_file handles; the write end is read back separately. */
+static _Thread_local grail_file grail_ffi_last_pipe_read;
+static _Thread_local grail_file grail_ffi_last_pipe_write;
+
+int64_t grail_ffi_pipe(void) {
+    grail_pipe pipe;
+    const int64_t status = grail_os_pipe(&pipe);
+    grail_ffi_last_pipe_read = status == 0 ? pipe.read_end : GRAIL_HANDLE_NONE;
+    grail_ffi_last_pipe_write = status == 0 ? pipe.write_end : GRAIL_HANDLE_NONE;
+    return status;
+}
+
+grail_file grail_ffi_pipe_read_end(void) {
+    return grail_ffi_last_pipe_read;
+}
+
+grail_file grail_ffi_pipe_write_end(void) {
+    return grail_ffi_last_pipe_write;
+}
+
+/* The "inherit this stream" value for grail_ffi_process_spawn_stdio. */
+grail_file grail_ffi_inherit(void) {
+    return GRAIL_HANDLE_NONE;
 }

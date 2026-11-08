@@ -4,6 +4,13 @@
 /* MSVC-target code that touches floating point references _fltused, normally from the CRT;
  * the Windows test images link with /nodefaultlib, so the shim defines it. */
 int _fltused = 0;
+/* Aggregate initialisers may lower to memset, which the CRT normally provides. */
+void *memset(void *d, int c, unsigned long long n)
+{
+    unsigned char *p = (unsigned char *)d;
+    while (n--) *p++ = (unsigned char)c;
+    return d;
+}
 #endif
 
 double c_fadd(double a, double b) { return a + b; }
@@ -32,3 +39,15 @@ signed char c_s8(signed char x) { return (signed char)(x - 1); }
 unsigned short c_u16(unsigned short x) { return (unsigned short)(x + 1); }
 /* RV64 callees may compare 32-bit arguments as sign-extended 64-bit words. */
 int c_u32_above(unsigned x) { return x > 2147483648u; }
+
+/* ---- record results: two registers, one register and a hidden result pointer ---- */
+struct pair32 { int a; int b; };                  /* 8 bytes: rax / x0 / a0 everywhere */
+struct span16 { long long start; long long len; }; /* 16 bytes: rax:rdx, x0:x1, a0:a1; Win64 sret */
+struct triple { long long x; long long y; int z; }; /* 24 bytes: hidden result pointer */
+struct pair32 c_make_pair(int a, int b) { struct pair32 r = { a, b }; return r; }
+struct span16 c_make_span(long long start, long long len) { struct span16 r = { start, len }; return r; }
+struct triple c_make_triple(long long x, long long y, int z, double scale)
+{
+    struct triple r = { (long long)(x * scale), y, z };
+    return r;
+}

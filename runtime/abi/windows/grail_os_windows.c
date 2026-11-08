@@ -960,7 +960,14 @@ grail_status grail_os_file_read(grail_file handle, uint8_t *buffer, uint64_t cap
     }
     DWORD count = 0;
     if (!ReadFile(file->handle, buffer, (DWORD)capacity, &count, NULL)) {
-        return grail_windows_fail(GetLastError());
+        const DWORD error = GetLastError();
+        /* An anonymous pipe reports its end - every write end closed - as ERROR_BROKEN_PIPE
+         * rather than a zero-byte read; the portable contract is a zero-length read at EOF. */
+        if (error == 109u) {
+            *read_length = 0;
+            return GRAIL_OK;
+        }
+        return grail_windows_fail(error);
     }
     *read_length = (uint64_t)count;
     return GRAIL_OK;

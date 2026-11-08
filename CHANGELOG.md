@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+- Child process output capture: `sys_grail::pipe()`, `spawn_with(program, args, stdin, stdout,
+  stderr)` (with `inherit()` for shared streams) and `read_to_end(file)`, over a new
+  `grail_ffi_process_spawn_stdio`. Executed on Linux (`/bin/sh`) and Windows under Wine
+  (`cmd.exe`). The Windows OS ABI returned an error at the end of an anonymous pipe
+  (`ERROR_BROKEN_PIPE`); it now reports a zero-length read, the portable EOF contract.
+- Windows ARM64 threads: the `CreateThread` start bridge `rt_win_thread_start` now exists on
+  ARM64 too and is published by the entry point; thread creation previously failed there. Static
+  checks only (no ARM64 Windows runner).
+
+- C records returned by value from direct and `cfn` calls: up to 16 bytes in `rax:rdx`, `x0:x1`
+  or `a0:a1` (Win64: 1/2/4/8 bytes in `rax`), larger ones through a hidden result pointer in
+  `rdi`/`rcx`/`a0` (shifting the arguments) or `x8` on AAPCS64. `tests/ffi/call_records.grl`
+  returns 8-, 16- and 24-byte records on x86-64, AArch64 and RISC-V Linux and Windows x86-64.
+- Windows debug info: `--debug` on windows-x86_64 emits CodeView line tables (`.cv_file`,
+  `.cv_func_id`, `.cv_loc`, `.cv_linetable`), and the Windows link adds `/DEBUG /PDB:`.
+  `test-debug-lines` checks the PDB maps the source lines and that every function keeps its
+  unwind entry (the SEH prologue matcher now skips debug labels and `.cv_` directives).
+
 - Win64 callbacks: an exported `extern "C" fn` on Windows x86-64 is now a thunk under the C
   symbol that saves `rdi`, `rsi` and `xmm6`-`xmm15`, moves `rcx`/`rdx`/`r8`/`r9` (and stack
   arguments five and six) into the body's registers and calls the body. Callbacks previously read
