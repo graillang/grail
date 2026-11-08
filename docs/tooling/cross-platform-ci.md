@@ -2,12 +2,15 @@
 
 This document is the design and operating manual for Grail's cross-platform
 foundation. The implementation is compiler-free: it describes targets, detects
-host tools, builds/packages/signs artifacts and gates CI. The only supported
+host tools, builds/packages/signs artifacts and gates CI. The only **runnable**
 compiler backends today are Linux ELF on **linux-x86_64**, **linux-aarch64** and
-**linux-riscv64**; Windows and macOS lanes are distribution scaffolding and
-report that blocker instead of producing a binary.
+**linux-riscv64**. **windows-x86_64** emits and links PE32+ console images and is
+verified statically, but its runtime is not implemented, so it is **build-only**
+and must not be executed. **windows-aarch64** and both macOS targets remain
+planned distribution scaffolding.
 
-`compiler/native.grl` is intentionally untouched by this work.
+The tooling lanes do not implement code generation; the Windows target itself
+lives in `compiler/native.grl`.
 
 ## Support matrix
 
@@ -16,14 +19,19 @@ report that blocker instead of producing a binary.
 | `linux-x86_64` | Linux / x86-64 | implemented (ELF) | `ubuntu-24.04` | `grail-VERSION-linux-x86_64.tar.gz` |
 | `linux-aarch64` | Linux / AArch64 | implemented (ELF) | `ubuntu-24.04-arm` | `grail-VERSION-linux-aarch64.tar.gz` |
 | `linux-riscv64` | Linux / RISC-V 64 | implemented (ELF) | self-hosted or cross lane | `grail-VERSION-linux-riscv64.tar.gz` |
-| `windows-x86_64` | Windows / x86-64 | planned (PE) | `windows-2022` | `grail-VERSION-windows-x86_64.zip` |
-| `windows-aarch64` | Windows / AArch64 | planned (PE) | `windows-11-arm` | `grail-VERSION-windows-aarch64.zip` |
+| `windows-x86_64` | Windows / x86-64 | **build-only** (PE/COFF) | `ubuntu-24.04` (cross) | `grail-VERSION-windows-x86_64.zip` |
+| `windows-aarch64` | Windows / AArch64 | planned (ARM64 PE) | `windows-11-arm` | `grail-VERSION-windows-aarch64.zip` |
 | `macos-aarch64` | macOS / AArch64 | planned (Mach-O) | `macos-14` | `grail-VERSION-macos-aarch64.tar.gz` |
 | `macos-x86_64` | macOS / x86-64 | planned (Mach-O) | `macos-13` | `grail-VERSION-macos-x86_64.tar.gz` |
 
-`supported` means the compiler emits a runnable program for that OS/CPU.
-`planned` means the lane, naming, packaging and signing hooks exist but the
-compiler/runtime backend does not. Planned lanes never claim a runnable binary.
+- **supported** — the compiler emits a runnable program for that OS/CPU.
+- **build-only** — objects and images are built and verified statically, but
+  execution is explicitly unsupported because the runtime is missing.
+- **planned** — the lane, naming, packaging and signing hooks exist but the
+  compiler backend does not. Planned lanes never claim a runnable binary.
+
+`runnable` is an explicit field on every platform and on every lane result.
+`windows-x86_64` is `build-only`/`runnable: false` even when Wine is installed.
 
 ## Build lanes
 
@@ -34,35 +42,98 @@ compiler/runtime backend does not. Planned lanes never claim a runnable binary.
 | `cross-linux-aarch64` | `linux-x86_64` | `linux-aarch64` | qemu-user | yes |
 | `cross-linux-riscv64` | `linux-x86_64` | `linux-riscv64` | qemu-user | yes |
 | `native-linux-riscv64` | `linux-riscv64` | `linux-riscv64` | native | optional (self-hosted) |
-| `native-windows-x86_64` | `windows-x86_64` | `windows-x86_64` | native | optional |
+| `cross-windows-x86_64` | `linux-x86_64` | `windows-x86_64` | static | yes (build/static) |
+| `native-windows-x86_64` | `windows-x86_64` | `windows-x86_64` | static | optional |
 | `cross-windows-aarch64` | `windows-x86_64` | `windows-aarch64` | native | optional |
 | `native-windows-aarch64` | `windows-aarch64` | `windows-aarch64` | native | optional |
 | `native-macos-aarch64` | `macos-aarch64` | `macos-aarch64` | native | optional |
 | `native-macos-x86_64` | `macos-x86_64` | `macos-x86_64` | native | optional |
 | `cross-macos-x86_64` | `macos-aarch64` | `macos-x86_64` | native | optional |
 
-Cross lanes build the target compiler with the host compiler
+Linux cross lanes build the target compiler with the host compiler
 (`grail --target ... compiler/*.grl`), assemble with `clang --target=...` and
 link with `ld.lld -m ...`. Execution needs `qemu-ARCH-static`; when it is
 missing, `bun tools/ci.mjs test --compile-only` still compiles, assembles,
 links and verifies the ELF machine type, and the missing runner is reported.
 
+The Windows lane uses `tools/windows.mjs`: it compiles the same compiler
+sources with `--target windows-x86_64`, assembles COFF with `clang
+--target=x86_64-pc-windows-msvc`, generates the short-import `kernel32.lib`
+with `llvm-ar`, and links with `lld-link`. It never executes the image.
+
 ## CI workflow and gating
 
-`.github/workflows/ci.yml` has four layers:
+`.github/workflows/ci.yml` has these layers:
 
 1. **tooling** (always green): unit tests for the matrix, archives, packaging
    and signing, `bun tools/ci.mjs lint`, and the matrix/plan report.
 2. **preflight**: `bun tools/ci.mjs preflight --json` compares the checked-in
    bootstrap manifest with the compiler sources and exposes `ready`.
-3. **Linux build lanes**: native x86-64/AArch64 and cross AArch64/RISC-V64.
-   They run only when `preflight.ready == true`. Once the published bootstraps
-   are refreshed, these are the release gates.
-4. **Windows/macOS coverage**: detection, `build --allow-blocked` and the
-   signing dry-run plan. `--allow-blocked` exits 0 on the known backend
-   blocker, so the matrix is exercised without a false green binary.
+3. **runtime ABI**: `bun tools/abi-test.mjs` runs the C contract tests, the
+   hosted Linux ABI oracle and header parsing for all five ABI targets.
+4. **graphics**: `make -C graphics test` runs the RHI/null-backend/device/wire
+   C suites; `bun test graphics/tests/shader_permutations.test.mjs` proves each
+   shader permutation compiles to distinct bytecode (it skips when DXC is not
+   installed, and says why).
+5. **Linux build lanes**: native x86-64/AArch64 and cross AArch64/RISC-V64.
+   They run only when `preflight.ready == true`.
+6. **Windows x86-64 cross**: builds the host compiler, builds the PE compiler
+   image, runs the static COFF/PE checks and packages the build-only zip. No
+   execution occurs; the job name says `build-only, static`.
+7. **Windows/macOS coverage**: detection, `build --allow-blocked` and the
+   signing dry-run plan. `--allow-blocked` exits 0 for known backend blockers
+   and for not-applicable hosts, so the matrix is exercised without a false
+   green binary.
 
 `release-sign` is tag-only and environment-gated (`RELEASE_SIGNING=true`).
+
+## Windows x86-64 build-only lane
+
+`tools/ci.mjs` supports `--platform windows-x86_64` from a Linux x86-64 host:
+
+```sh
+GRAIL_COMPILER=/path/to/host/grail bun tools/ci.mjs build --platform windows-x86_64
+bun tools/ci.mjs test --platform windows-x86_64
+bun tools/ci.mjs package --platform windows-x86_64
+```
+
+The build compiles the compiler sources to `windows-x86_64`, assembles a COFF
+object, generates the in-tree `kernel32.lib` short-import objects and links the
+PE32+ console image. Static checks require:
+
+- object: `Format: COFF-x86-64`, `IMAGE_FILE_MACHINE_AMD64`, `grail_entry` in
+  `.text`, and every `__imp_*` slot backed by a short-import object;
+- image: PE32+, console subsystem, a non-zero entry RVA, a `kernel32.dll`
+  import descriptor, and only the expected imports;
+- process exit is the `ExitProcess` import, not a Linux syscall;
+- a Linux ELF regression still compiles and runs;
+- `--target windows-arm64` is rejected without clobbering an existing artifact.
+
+The package contains `share/doc/grail/WINDOWS-BUILD-ONLY.txt` and its manifest
+records `tier: build-only`, `runnable: false`, `runtime: unverified`. The image
+is **never executed**, even on hosts with Wine: argv recovery, worker threads,
+file/directory host services and `.pdata`/unwind data are not implemented.
+
+## Runtime ABI and graphics lanes
+
+Two independent suites run on every push and do not need a Grail stage0:
+
+```sh
+bun tools/abi-test.mjs
+make -C graphics test
+bun test graphics/tests/shader_permutations.test.mjs
+```
+
+- `tools/abi-test.mjs` compiles and runs the OS ABI contract tests with the
+  host C compiler: core/error/Unicode, the hosted Linux reference backend,
+  generation-checked handles, POSIX and Windows path rules, and
+  `-fsyntax-only` parsing for Linux x86-64/AArch64/RISC-V64, Win64 and Apple
+  ARM64 headers. It reports the Linux oracle's check count and zero tracked
+  allocations at shutdown.
+- `make -C graphics test` builds the C RHI/null backend and runs the ABI,
+  device and wire suites (219 checks). `shader_permutations.test.mjs` invokes
+  `graphics/tools/shader.mjs` per permutation; without the pinned DXC it skips
+  with an explicit reason instead of failing.
 
 ## Artifact naming
 
@@ -97,6 +168,7 @@ grail-VERSION-PLATFORM/
   share/grail/package.json          # version, commit, target, file SHA-256s
   install.sh                        # POSIX (Linux/macOS)
   install.ps1                       # PowerShell (Windows)
+  share/doc/grail/WINDOWS-BUILD-ONLY.txt   # build-only Windows packages
 ```
 
 Linux/macOS produce `tar.gz`; Windows produces `zip`. Both writers are internal
@@ -175,7 +247,13 @@ GRAIL_COMPILER=/path/to/grail bun tools/ci.mjs build --platform linux-aarch64
 GRAIL_COMPILER=/path/to/grail bun tools/ci.mjs test --platform linux-x86_64
 GRAIL_COMPILER=/path/to/grail bun tools/ci.mjs test --platform linux-riscv64 --compile-only
 GRAIL_COMPILER=/path/to/grail bun tools/ci.mjs package --platform linux-x86_64
+GRAIL_COMPILER=/path/to/grail bun tools/ci.mjs build --platform windows-x86_64
+bun tools/ci.mjs test --platform windows-x86_64
+bun tools/ci.mjs package --platform windows-x86_64
 bun tools/ci.mjs sign --platform linux-x86_64 --artifact dist/grail-0.1.0-linux-x86_64.tar.gz
+bun tools/abi-test.mjs
+make -C graphics test
+bun test graphics/tests/shader_permutations.test.mjs
 ```
 
 Exit codes: `0` ok, `1` usage/internal, `2` not applicable to this host,
@@ -193,8 +271,11 @@ Exit codes: `0` ok, `1` usage/internal, `2` not applicable to this host,
 2. **No qemu-user on the development host.** Linux x86-64 native tests pass;
    AArch64/RISC-V64 are cross-assembled and architecture-checked, but execution
    waits for `qemu-aarch64-static` / `qemu-riscv64-static`.
-3. **Windows/macOS backends absent.** The compiler emits Linux ELF only, so PE
-   and Mach-O packaging/signing are exercised with synthetic binaries in tests
-   and stay `blocked` in CI.
+3. **Windows runtime unverified.** `windows-x86_64` builds and statically
+   verifies PE32+ images, but argv recovery, worker threads, file/directory
+   host services and `.pdata`/unwind data are missing. The lane is `build-only`,
+   packages carry a notice, and no image is executed. ARM64 PE and macOS
+   Mach-O backends remain planned, so those packages are still exercised with
+   synthetic binaries in unit tests and stay `blocked` in CI.
 4. **No hosted RISC-V64 runner.** RISC-V64 is covered by the x86-64 cross lane;
    native RISC-V64 remains an optional self-hosted lane.

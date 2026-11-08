@@ -84,3 +84,12 @@ sign platform artifact:
 # Cross-platform OS ABI headers and C contract tests (needs a host C compiler).
 abi-test:
     bun tools/abi-test.mjs
+
+# Graphics C ABI, device, wire and shader permutation tests.
+graphics-test:
+    make -C graphics test
+    bun test graphics/tests/shader_permutations.test.mjs
+
+# Windows x86-64 COFF/PE static checks (build-only; images are never executed).
+windows-check:
+    bun tools/windows.mjs check

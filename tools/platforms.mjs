@@ -11,11 +11,12 @@ import { fileURLToPath } from 'node:url';
 export const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 export const SUPPORTED = 'supported';
+export const BUILD_ONLY = 'build-only';
 export const PLANNED = 'planned';
 
 const linuxBlocker = null;
-const windowsBlocker = 'the compiler and runtime emit Linux ELF only; Windows PE code generation, ' +
-  'Windows syscalls and the Windows runtime are not implemented, so this lane is distribution scaffolding';
+const windowsBlocker = 'PE/COFF output exists only for windows-x86_64; ARM64 PE code generation, ' +
+  'the Windows runtime and .pdata/unwind data are not implemented, so this lane is distribution scaffolding';
 const macosBlocker = 'the compiler and runtime emit Linux ELF only; Mach-O code generation, ' +
   'macOS syscalls and the macOS runtime are not implemented, so this lane is distribution scaffolding';
 
@@ -29,6 +30,7 @@ export const PLATFORMS = [
     arch: 'x86_64',
     archLabel: 'x86-64',
     tier: SUPPORTED,
+    runnable: true,
     compilerTarget: 'x86_64',
     triple: 'x86_64-linux-gnu',
     emulation: 'elf_x86_64',
@@ -50,6 +52,7 @@ export const PLATFORMS = [
     arch: 'aarch64',
     archLabel: 'AArch64',
     tier: SUPPORTED,
+    runnable: true,
     compilerTarget: 'aarch64',
     triple: 'aarch64-linux-gnu',
     emulation: 'aarch64elf',
@@ -71,6 +74,7 @@ export const PLATFORMS = [
     arch: 'riscv64',
     archLabel: 'RISC-V 64',
     tier: SUPPORTED,
+    runnable: true,
     compilerTarget: 'riscv64',
     triple: 'riscv64-linux-gnu',
     emulation: 'elf64lriscv',
@@ -91,9 +95,10 @@ export const PLATFORMS = [
     osLabel: 'Windows',
     arch: 'x86_64',
     archLabel: 'x86-64',
-    tier: PLANNED,
-    compilerTarget: null,
-    triple: 'x86_64-w64-windows-gnu',
+    tier: BUILD_ONLY,
+    runnable: false,
+    compilerTarget: 'windows-x86_64',
+    triple: 'x86_64-pc-windows-msvc',
     emulation: null,
     elfMachine: null,
     assemblerFlags: [],
@@ -101,10 +106,13 @@ export const PLATFORMS = [
     archiveFormat: 'zip',
     installer: 'install.ps1',
     qemu: null,
-    requiredTools: ['clang', 'ld.lld'],
-    sysroot: 'mingw-w64',
-    hostedRunner: 'windows-2022',
-    blocker: windowsBlocker,
+    requiredTools: ['clang', 'lld-link', 'llvm-ar', 'llvm-readobj', 'llvm-objdump'],
+    hostedRunner: 'ubuntu-24.04',
+    crossHost: 'linux-x86_64',
+    blocker:
+      'PE/COFF objects and console images build and pass static checks, but the Windows runtime ' +
+      '(argv recovery, worker threads, .pdata/unwind data) is not implemented; images are ' +
+      'build-only and must not be executed',
     signing: {
       kind: 'authenticode',
       optional: false,
@@ -120,8 +128,9 @@ export const PLATFORMS = [
     arch: 'aarch64',
     archLabel: 'AArch64',
     tier: PLANNED,
+    runnable: false,
     compilerTarget: null,
-    triple: 'aarch64-w64-windows-gnu',
+    triple: 'aarch64-pc-windows-msvc',
     emulation: null,
     elfMachine: null,
     assemblerFlags: [],
@@ -148,6 +157,7 @@ export const PLATFORMS = [
     arch: 'aarch64',
     archLabel: 'AArch64',
     tier: PLANNED,
+    runnable: false,
     compilerTarget: null,
     triple: 'aarch64-apple-darwin',
     emulation: null,
@@ -176,6 +186,7 @@ export const PLATFORMS = [
     arch: 'x86_64',
     archLabel: 'x86-64',
     tier: PLANNED,
+    runnable: false,
     compilerTarget: null,
     triple: 'x86_64-apple-darwin',
     emulation: null,
@@ -207,7 +218,8 @@ export const LANES = [
   { id: 'cross-linux-aarch64', host: 'linux-x86_64', target: 'linux-aarch64', kind: 'cross', execution: 'qemu', required: true },
   { id: 'cross-linux-riscv64', host: 'linux-x86_64', target: 'linux-riscv64', kind: 'cross', execution: 'qemu', required: true },
   { id: 'native-linux-riscv64', host: 'linux-riscv64', target: 'linux-riscv64', kind: 'native', execution: 'native', required: false },
-  { id: 'native-windows-x86_64', host: 'windows-x86_64', target: 'windows-x86_64', kind: 'native', execution: 'native', required: false },
+  { id: 'cross-windows-x86_64', host: 'linux-x86_64', target: 'windows-x86_64', kind: 'cross', execution: 'static', required: true },
+  { id: 'native-windows-x86_64', host: 'windows-x86_64', target: 'windows-x86_64', kind: 'native', execution: 'static', required: false },
   { id: 'cross-windows-aarch64', host: 'windows-x86_64', target: 'windows-aarch64', kind: 'cross', execution: 'native', required: false },
   { id: 'native-windows-aarch64', host: 'windows-aarch64', target: 'windows-aarch64', kind: 'native', execution: 'native', required: false },
   { id: 'native-macos-aarch64', host: 'macos-aarch64', target: 'macos-aarch64', kind: 'native', execution: 'native', required: false },
@@ -378,6 +390,14 @@ function detectSdk(platform, probe, env = process.env) {
       detail: path ? 'xcrun resolved the macOS SDK' : 'requires macOS with Xcode command-line tools',
     };
   }
+  if (platform.os === 'windows' && platform.tier === BUILD_ONLY) {
+    return {
+      name: 'COFF toolchain (in-tree import library)',
+      available: true,
+      path: null,
+      detail: 'clang, lld-link and llvm-ar assemble/link PE images; the kernel32 short-import library is generated in-tree',
+    };
+  }
   if (platform.os === 'windows') {
     const sysroot = probe.which('clang') ? probe.exec('clang', [`--target=${platform.triple}`, '-print-sysroot']) : null;
     const msvc = env.VCToolsInstallDir ?? env.WindowsSdkDir ?? null;
@@ -422,16 +442,18 @@ export function detectToolchain(platform, options = {}) {
   const missing = tools.filter(tool => !tool.found).map(tool => tool.name);
   const sdk = detectSdk(target, probe, env);
   const signing = describeSigning(target, probe, env);
-  const backend = target.tier === SUPPORTED ? 'implemented' : 'blocked';
+  const backend = target.tier === PLANNED ? 'blocked' : 'implemented';
+  const runnable = target.tier === SUPPORTED && target.runnable === true;
   const ready = missing.length === 0 && sdk.available;
   return {
     platform: target.id,
     host: host === target.id,
     tier: target.tier,
     backend,
+    runnable,
     ready,
     buildable: backend === 'implemented' && ready,
-    status: backend === 'blocked' ? 'blocked-backend' : !ready ? 'missing-tools' : 'ready',
+    status: backend === 'blocked' ? 'blocked-backend' : !ready ? 'missing-tools' : runnable ? 'ready' : 'build-only',
     tools,
     missing,
     sdk,
@@ -448,11 +470,13 @@ export function laneStatus(lane, options = {}) {
   const probe = options.probe ?? { ...createProbe(options.env ?? process.env), env: options.env ?? process.env };
   const runner = lane.execution === 'qemu' ? findRunner(target.id, probe) : null;
   const applicable = host === lane.host;
-  const backend = target.tier === SUPPORTED ? 'implemented' : 'blocked';
+  const backend = target.tier === PLANNED ? 'blocked' : 'implemented';
+  const staticOnly = lane.execution === 'static';
   let status;
   if (backend === 'blocked') status = 'blocked-backend';
   else if (!applicable) status = 'not-applicable';
   else if (lane.execution === 'qemu' && !runner) status = 'missing-runner';
+  else if (staticOnly) status = 'static-only';
   else status = 'runnable';
   return {
     id: lane.id,
@@ -463,6 +487,8 @@ export function laneStatus(lane, options = {}) {
     required: lane.required,
     applicable,
     backend,
+    runnable: status === 'runnable',
+    staticOnly,
     status,
     runner,
     blocker: target.blocker,
@@ -482,6 +508,7 @@ export function buildPlan(options = {}) {
     platforms: PLATFORMS.map(platform => ({
       id: platform.id,
       tier: platform.tier,
+      runnable: platform.runnable === true,
       os: platform.os,
       arch: platform.arch,
       triple: platform.triple,

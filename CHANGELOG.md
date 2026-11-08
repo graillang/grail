@@ -3,6 +3,16 @@
 ## Unreleased
 
 - Add `docs/platform-status.md`, an explicit matrix of executed, cross-built and scaffolded targets, so Windows PE output and macOS ABI headers are not mistaken for runtime support.
+- Cross-platform tooling now treats `windows-x86_64` as a real **build-only**
+  lane: `tools/ci.mjs build/test/package` cross-compiles the compiler to a
+  PE32+ console image, verifies COFF objects, imports and image headers, and
+  packages a zip whose manifest and `WINDOWS-BUILD-ONLY.txt` state that the
+  Windows runtime is not implemented and the image must not be executed. The
+  support matrix now distinguishes `supported`, `build-only` and `planned`,
+  and every platform/lane reports `runnable` explicitly. CI also runs the
+  runtime ABI contract suite (`tools/abi-test.mjs`) and the graphics C/shader
+  suites, and the Windows x86-64 cross job is a required release gate for
+  build/static checks. Windows AArch64 and macOS remain planned.
 - New design document `docs/design/abundance-port.md`: inventory of the Abundance portable core, own engine, Unreal host and shaders, their CPU/RHI boundary, the FFI/ABI requirements a Grail host would have to meet, and a staged port plan. Documentation only; no compiler or library behaviour changed.
 - Graphics foundation (`graphics/`): a versioned C ABI for the render hardware interface and
   the shader pipeline, aligned with the Vulkan engine in Abundance. `grail_abi.h` defines

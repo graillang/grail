@@ -43,8 +43,8 @@ describe('signing plan safety', () => {
       env: WIN_ENV,
       probe: probe(['signtool']),
     });
-    expect(plan).toMatchObject({ kind: 'authenticode', status: 'ready', backend: 'blocked' });
-    expect(plan.blocker).toMatch(/Windows PE/);
+    expect(plan).toMatchObject({ kind: 'authenticode', status: 'ready', backend: 'implemented' });
+    expect(plan.blocker).toMatch(/must not be executed/);
     const text = formatPlan(plan);
     expect(text).toContain('$WINDOWS_CERT_PASSWORD');
     expect(text).not.toContain('hunter2-secret');
@@ -120,8 +120,8 @@ describe('signing execution', () => {
   });
 
   test('blocked backends and incomplete plans refuse execution', () => {
-    const blocked = signingPlan('windows-x86_64', { binary: 'grail.exe', env: WIN_ENV, probe: probe(['signtool']) });
-    expect(() => executeSigning(blocked, { execute: true, env: WIN_ENV, run: () => ({ status: 0 }) })).toThrow(/Windows PE/);
+    const blocked = signingPlan('windows-aarch64', { binary: 'grail.exe', env: WIN_ENV, probe: probe(['signtool']) });
+    expect(() => executeSigning(blocked, { execute: true, env: WIN_ENV, run: () => ({ status: 0 }) })).toThrow(/ARM64 PE code generation/);
     const incomplete = signingPlan('linux-x86_64', { artifact: 'x.tar.gz', env: {}, probe: probe(['gpg']) });
     expect(() => executeSigning(incomplete, { execute: true, env: {}, run: () => ({ status: 0 }) })).toThrow(/unsigned/);
   });

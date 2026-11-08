@@ -58,6 +58,41 @@ jobs:
           path: preflight.json
           if-no-files-found: error
 
+  # Runtime ABI: C contract tests, the hosted Linux oracle and cross-header parsing.
+  abi:
+    name: runtime ABI contract tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Install a C compiler and clang
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang
+      - name: ABI, path, handle and header checks
+        run: bun tools/abi-test.mjs
+
+  # Graphics foundation: the C RHI/null-backend suites and the shader permutation
+  # test. DXC-dependent cases skip (and say so) when the pinned compiler is absent.
+  graphics:
+    name: graphics C ABI and shader tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Install a C compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential
+      - name: RHI, device and wire suites
+        run: make -C graphics test
+      - name: Shader permutation bytecode tests
+        run: bun test graphics/tests/shader_permutations.test.mjs
+
   # Native Linux lanes. These run only when the checked-in bootstrap matches
   # the compiler sources (or CI provides GRAIL_COMPILER); otherwise preflight
   # reports the blocker and keeps the workflow green.
@@ -129,6 +164,39 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: dist-${{ matrix.platform }}
+          path: dist/
+          if-no-files-found: error
+
+  # Windows x86-64: a real PE/COFF cross lane. It builds the compiler as a PE image
+  # and runs static object/image checks. The Windows runtime is not implemented, so
+  # this job never executes the image and publishes a build-only artifact.
+  windows-cross:
+    name: windows x86-64 cross (build-only, static)
+    needs: preflight
+    if: needs.preflight.outputs.ready == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Install clang, LLD and LLVM inspection tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld llvm
+          lld-link --version
+          llvm-readobj --version
+      - name: Build the host compiler and the Windows PE image
+        run: |
+          bun tools/ci.mjs build --platform linux-x86_64
+          bun tools/ci.mjs build --platform windows-x86_64
+      - name: Static COFF/PE checks (no execution)
+        run: bun tools/ci.mjs test --platform windows-x86_64
+      - name: Package the build-only zip
+        run: bun tools/ci.mjs package --platform windows-x86_64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-windows-x86_64
           path: dist/
           if-no-files-found: error
 
