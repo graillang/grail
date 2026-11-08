@@ -23,7 +23,8 @@ fn main() {
 - **Cross-platform OS ABI (proposal/scaffold):** [docs/design/runtime-abi.md](docs/design/runtime-abi.md)
   and [runtime/abi/README.md](runtime/abi/README.md); `just abi-test` runs the C contract tests.
 - **First Grail wrappers over the C ABI:** [docs/design/grail-ffi-runtime.md](docs/design/grail-ffi-runtime.md);
-  `just ffi-runtime-test` (with a built `GRAIL_COMPILER`) builds, links and executes the Linux test.
+  `just ffi-runtime-test` (with a built `GRAIL_COMPILER`) builds, links and executes the Linux
+  file/time/env and loopback TCP socket tests.
 - **Windows ABI evidence under Wine:** `just abi-wine-test` cross-builds the C harness with Zig,
   runs the metadata/reparse/DNS paths under Wine, and statically checks the macOS ARM64 call sites.
 - **Proposed numeric types:** [docs/design/numeric-types.md](docs/design/numeric-types.md) (partly implemented: sized integers, `f64`, `f32`, `char`).

@@ -31,8 +31,16 @@ pub const OPEN_APPEND: u64 = 16;
 pub const OPEN_EXCLUSIVE: u64 = 32;
 pub const CLOCK_MONOTONIC: u64 = 0;
 pub const CLOCK_REALTIME: u64 = 1;
+pub const ABI_VERSION: u64 = 4294967296;
+pub const ADDRESS_INET: u64 = 1;
+pub const SOCKET_STREAM: u64 = 1;
+pub const SHUTDOWN_READ: u64 = 1;
+pub const SHUTDOWN_WRITE: u64 = 2;
+pub const SHUTDOWN_BOTH: u64 = 3;
+pub const ERROR_INVALID_ARGUMENT: i64 = -2;
 
 handle File;
+handle Socket;
 
 pub enum Error { Status(i64) }
 
@@ -51,7 +59,29 @@ pub fn wall() -> i64 |? Error;
 pub fn env_get(name: &[u8], out: &mut [u8]) -> u64 |? Error;
 pub fn env_get_bytes(name: &[u8], capacity: u64) -> u8[] |? Error;
 pub fn env_set(name: &[u8], value: &[u8]) -> unit |? Error;
+
+pub fn loopback(port: u64) -> Address;
+pub fn tcp() -> Socket |? Error;
+pub fn bind(socket: Socket, address: Address) -> unit |? Error;
+pub fn listen(socket: Socket, backlog: u64) -> unit |? Error;
+pub fn accept(listener: Socket) -> Socket |? Error;
+pub fn connect(socket: Socket, address: Address) -> unit |? Error;
+pub fn send(socket: Socket, data: &[u8]) -> u64 |? Error;
+pub fn recv(socket: Socket, buffer: &mut [u8]) -> u64 |? Error;
+pub fn recv_bytes(socket: Socket, capacity: u64) -> u8[] |? Error;
+pub fn socket_shutdown(socket: Socket, how: u64) -> unit |? Error;
+pub fn socket_close(socket: Socket) -> unit |? Error;
+pub fn local_address(socket: Socket) -> Address |? Error;
+pub fn peer_address(socket: Socket) -> Address |? Error;
+pub fn local_port(socket: Socket) -> u64 |? Error;
+pub fn peer_port(socket: Socket) -> u64 |? Error;
 ```
+
+`Address` mirrors the C record: five 64-bit fields (`struct_size`, `abi_version`, `family`,
+`port`, `scope_id`) followed by sixteen `u8` bytes, 56 bytes total. `loopback` is the only
+constructor; `bind` and `connect` reject any address that is not IPv4 127.0.0.1 with
+`ERROR_INVALID_ARGUMENT` before calling C. The record is public because `local_address` and
+`peer_address` return it, but no non-loopback TCP path is exposed.
 
 `FileStat` mirrors the C record exactly: `struct_size`, `abi_version`, `kind`, `flags`,
 `size`, `mode`, `link_count`, `device`, `inode`, `modified_ns`, `accessed_ns`,
@@ -69,13 +99,14 @@ regression fails at runtime as well as at C compile time.
   return the actual/required length. A returned length greater than the buffer capacity is
   a short read/query, not an error; `read_bytes`/`env_get_bytes` allocate a Grail-owned
   vector and copy exactly the returned prefix.
-- **Short I/O is legal.** `write` returns the number of bytes written (0 or less than the
-  input is valid); callers that need a full write must loop. `read` returning 0 is clean
-  EOF.
-- **`File` is a C-owned opaque handle.** Grail never constructs, inspects, sizes, borrows or
-  frees it. Treat it as affine by convention: call `close` exactly once, never use it after
-  close or double-close. The compiler's handles are not linear in this increment, so the
-  convention is not machine-checked.
+- **Short I/O is legal.** `write`/`send` return the number of bytes written (0 or less than
+  the input is valid); callers that need a full write must loop. `read`/`recv` returning 0 is
+  clean EOF. `recv_bytes` allocates a Grail-owned vector and copies the actual prefix.
+- **`File` and `Socket` are C-owned opaque handles.** Grail never constructs, inspects,
+  sizes, borrows or frees them. Treat them as affine by convention: call `close`/
+  `socket_close` exactly once, never use a handle after close or double-close. The compiler's
+  handles are not linear in this increment, so the convention is not machine-checked. `tcp`
+  and `accept` each return a new handle; `socket_shutdown` does not close.
 - **No C-owned pointer is returned.** `open` returns a handle; `stat`/`time` fill
   Grail-owned out-records; byte results are copied into Grail-owned vectors. C never hands
   back a `u8[]`/view or a pointer Grail would drop.
@@ -84,16 +115,22 @@ regression fails at runtime as well as at C compile time.
   normal record drop. C must not retain or free them.
 - **Errors are negative statuses.** `grail_status`/`grail_result` values cross as `i64`;
   the wrapper maps negative values to `Error::Status(code)`. No `errno` is read, cleared or
-  synthesized at the boundary. A caller that needs the raw OS detail can later call the
+  synthesized at the boundary. `Error::is_transient` recognizes `WOULD_BLOCK`,
+  `INTERRUPTED`, `TIMED_OUT` and `BUSY`; a caller that needs raw OS detail can later call the
   ABI's `grail_os_error_last` through another declaration.
-- **Initialization is explicit.** `init()` must run before any file/time/env call and
+- **Initialization is explicit.** `init()` must run before any file/time/env/socket call and
   `shutdown()` after all handles are closed. `grail_ffi_init` supplies a malloc/free
   allocator and an empty startup environment; the real Grail entry shim must supply the
   runtime allocator and UTF-8 argv/environment blocks when this surface is integrated.
 - **The handle-return adapter is thread-local and immediate.** The C ABI writes a handle
   through an out-pointer, which the current scalar/handle FFI cannot express. The test shim
-  stores it in a thread-local slot; `open` reads that slot immediately. No other open may
-  intervene on the same thread, and the adapter is not part of the stable ABI.
+  stores it in a thread-local slot; `open`, `tcp` and `accept` read that slot immediately. No
+  other handle-producing call may intervene on the same thread, and the adapter is not part
+  of the stable ABI.
+- **Sockets are blocking.** `accept`, `connect`, `send` and `recv` have no timeout or
+  non-blocking flag in this surface. `socket_shutdown` is explicit and separate from
+  `socket_close`. Only TCP/IPv4 loopback is exposed; UDP, `send_to`/`recv_from`, DNS and
+  non-loopback addresses are deferred.
 
 ## Build and execution
 
@@ -101,7 +138,8 @@ regression fails at runtime as well as at C compile time.
 
 1. compiles the Linux reference backend and the FFI shim into
    `lib/sys/grail_ffi_linux.o`;
-2. compiles the test and `lib/sys/grail_ffi.grl` for x86-64 with the FFI compiler;
+2. compiles the file and socket tests plus `lib/sys/grail_ffi.grl` for x86-64 with the FFI
+   compiler;
 3. verifies the single `// grail-link: grail_ffi_linux.o` note and unmangled C calls;
 4. assembles with clang, links with `-nostartfiles -no-pie ... -lc -lpthread -ldl
    -Wl,-e,_start`, and runs in a scratch directory;
@@ -119,16 +157,21 @@ needs a proper libc/entry integration or a freestanding C backend.
 
 ## Verification and limits
 
-Executed: x86-64 Linux. The test creates `ffi_note.txt`, writes `hello ffi`, reads it back,
-checks `file_stat` size/layout, checks monotonic and wall clocks, and sets/gets
-`GRAIL_FFI_TEST=ok`.
+Executed: x86-64 Linux. The file test creates `ffi_note.txt`, writes `hello ffi`, reads it
+back, checks `file_stat` size/layout, checks monotonic and wall clocks, and sets/gets
+`GRAIL_FFI_TEST=ok`. The socket test creates a listener on `127.0.0.1:0`, binds and listens,
+reads the ephemeral port back, checks `struct_size == 56`/`abi_version`, connects a second
+socket, accepts, sends/receives `ping` and `pong`, checks the peer address and port, shuts
+down and closes all three sockets, and verifies that a non-loopback bind is rejected with
+`ERROR_INVALID_ARGUMENT` (`-1`).
 
 Not claimed:
 
 - no Windows or macOS execution of these wrappers (the separate C ABI Wine harness executes
   the Windows metadata/reparse/DNS paths);
-- no cross C backend link/execution for AArch64/RISC-V 64, only Grail assembly checks;
-- no dynamic library, socket, process or thread wrappers in this module yet;
+- no cross C backend link/execution for AArch64/RISC-V 64, only Grail assembly checks for both
+  the file and socket tests;
+- no dynamic library, process or thread wrappers in this module yet;
 - no automatic handle destruction, no `CStr` paths, no error-detail accessor;
 - no installed stdlib integration;
 - the current `grail build`/`grail run` CLI link path does not yet consume
