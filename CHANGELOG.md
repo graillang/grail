@@ -10,7 +10,7 @@
   send_to/recv_from, shutdown, address queries, non-blocking mode, the documented socket
   options and blocking `getaddrinfo`, with negative-errno mapping and capability bits. Tests
   cover argv/environment/cwd/stdio, exit status, PATH search, timeout/terminate/kill, loopback
-  TCP and UDP, options and DNS; the full Linux behaviour test is now 327 checks with zero
+  TCP and UDP, options and DNS; the full Linux behaviour test is now 343 checks with zero
   tracked allocation bytes. Windows/macOS remain fail-closed. C-to-Graal callbacks remain a
   later FFI increment and allocator/thread callbacks stay backend-side.
 

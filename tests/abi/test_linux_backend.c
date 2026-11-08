@@ -509,6 +509,25 @@ static void test_processes(const char *scratch) {
     CHECK(status.exit_code == 0);
     CHECK(grail_os_process_close(process) == GRAIL_OK);
 
+    /* Exec failure and bad working directory report the child errno. */
+    grail_file noexec = GRAIL_HANDLE_NONE;
+    CHECK(grail_os_file_open((const uint8_t *)"noexec", 6,
+                             GRAIL_OPEN_WRITE | GRAIL_OPEN_CREATE | GRAIL_OPEN_TRUNCATE, 0600,
+                             &noexec) == GRAIL_OK);
+    CHECK(grail_os_file_write(noexec, (const uint8_t *)"#!/bin/sh\n", 10, &written) == GRAIL_OK);
+    CHECK(grail_os_file_close(noexec) == GRAIL_OK);
+    process_options(&options);
+    options.program = (const uint8_t *)"noexec";
+    options.program_length = 6;
+    CHECK(grail_os_process_spawn(&options, &process) == GRAIL_E_ACCESS_DENIED);
+    CHECK(grail_os_fs_remove_file((const uint8_t *)"noexec", 6) == GRAIL_OK);
+    process_options(&options);
+    options.program = (const uint8_t *)"/bin/true";
+    options.program_length = 9;
+    options.working_directory = (const uint8_t *)"/no/such/grail-directory";
+    options.working_directory_length = 24;
+    CHECK(grail_os_process_spawn(&options, &process) == GRAIL_E_NOT_FOUND);
+
     /* Path search. */
     process_options(&options);
     options.program = (const uint8_t *)"true";
@@ -622,6 +641,11 @@ static void test_sockets(void) {
     grail_socket extra = GRAIL_HANDLE_NONE;
     CHECK(grail_os_socket_accept(listener, &extra, NULL) == GRAIL_E_WOULD_BLOCK);
     CHECK(grail_os_socket_set_nonblocking(listener, 0) == GRAIL_OK);
+    CHECK(grail_os_socket_shutdown(client, GRAIL_SHUTDOWN_WRITE) == GRAIL_OK);
+    CHECK(grail_os_socket_recv(server, buffer, sizeof(buffer), &received) == GRAIL_OK);
+    CHECK(received == 0);
+    CHECK(grail_os_socket_shutdown(client, 99) == GRAIL_E_INVALID_ARGUMENT);
+    CHECK(grail_os_socket_set_option(client, 999, 1) == GRAIL_E_UNSUPPORTED);
     CHECK(grail_os_socket_shutdown(client, GRAIL_SHUTDOWN_BOTH) == GRAIL_OK);
     CHECK(grail_os_socket_close(client) == GRAIL_OK);
     CHECK(grail_os_socket_close(client) == GRAIL_E_INVALID_HANDLE);
@@ -666,6 +690,8 @@ static void test_sockets(void) {
     CHECK(resolved[0].port == 0);
     CHECK(grail_os_net_resolve((const uint8_t *)"localhost", 9, GRAIL_ADDRESS_INET, NULL, 0) ==
           count);
+    CHECK(grail_os_net_resolve((const uint8_t *)"localhost", 9, 99, NULL, 0) ==
+          GRAIL_E_INVALID_ARGUMENT);
 
     CHECK(grail_os_socket_create(99, GRAIL_SOCKET_STREAM, &listener) == GRAIL_E_INVALID_ARGUMENT);
     grail_socket_address malformed;
@@ -673,6 +699,21 @@ static void test_sockets(void) {
     CHECK(grail_os_socket_create(GRAIL_ADDRESS_INET, GRAIL_SOCKET_STREAM, &listener) == GRAIL_OK);
     CHECK(grail_os_socket_bind(listener, &malformed) == GRAIL_E_INVALID_ARGUMENT);
     CHECK(grail_os_socket_close(listener) == GRAIL_OK);
+
+    if ((grail_os_capabilities() & GRAIL_CAP_SOCKET_IPV6) != 0) {
+        grail_socket ipv6 = GRAIL_HANDLE_NONE;
+        grail_socket_address v6;
+        memset(&v6, 0, sizeof(v6));
+        v6.struct_size = sizeof(v6);
+        v6.abi_version = GRAIL_ABI_VERSION;
+        v6.family = GRAIL_ADDRESS_INET6;
+        v6.port = 0;
+        v6.address[15] = 1; /* ::1 */
+        CHECK(grail_os_socket_create(GRAIL_ADDRESS_INET6, GRAIL_SOCKET_STREAM, &ipv6) == GRAIL_OK);
+        CHECK(grail_os_socket_bind(ipv6, &v6) == GRAIL_OK);
+        CHECK(grail_os_socket_listen(ipv6, 1) == GRAIL_OK);
+        CHECK(grail_os_socket_close(ipv6) == GRAIL_OK);
+    }
 }
 
 int main(void) {
