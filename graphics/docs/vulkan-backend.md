@@ -131,6 +131,36 @@ creation), the instance and physical device are published, two extensions are re
 names, the surface is created, destroyed, created again and destroyed, and a null window is refused
 rather than built on a fabricated pointer.
 
+### Validation as an assertion
+
+`gr_vk_validation(device, &report)` returns the layer's counters and `gr_vk_validation_message`
+returns the retained messages, so a test asserts on validation instead of a human reading stderr.
+`vk-surface` now asserts `errors == 0` **and** `warnings == 0`.
+
+Two design points learned by getting them wrong: only errors and warnings are retained, because the
+loader emits dozens of INFO messages about physical-device sorting that filled every slot and hid
+the one warning that mattered; and the messenger is created immediately after the instance, since
+one created later cannot report what happened in between.
+
+Enabling it turned up the descriptor-pool bug behind the earlier warning: set 1's frame constants
+are `UNIFORM_BUFFER_DYNAMIC` and the pool never reserved that type, so the allocation was refused.
+Fixed by reserving it.
+
+### Open: the frame path under validation
+
+Turning the layer on in `vk-smoke` reports **12 errors**, which is why that target does not yet
+enable it. They are real and grouped into three causes:
+
+1. `vkCmdPushConstants()` reports a stage-flag mismatch on most draws and dispatches — the ABI's
+   abstract `stage_mask` bits are mapped to Vulkan stages at the call site, and the mapping is not
+   matching what each pipeline actually contains.
+2. `vkQueueSubmit()` reports an image in the wrong layout at submit — a transition the graph did
+   not derive, or the readback pair issued by hand outside it.
+3. `vkBindBufferMemory()`: the storage buffer was created with `VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT`
+   but its memory was not allocated with `VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT`.
+
+Each is a genuine spec violation that every functional check passed straight through.
+
 **Validation paid for itself on its first run**: it reported
 `VUID-VkSamplerCreateInfo-anisotropyEnable-01070` — the thirteen fixed samplers include four
 anisotropic ones, but `samplerAnisotropy` had never been enabled on the device. That was a latent

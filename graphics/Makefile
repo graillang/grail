@@ -102,23 +102,30 @@ $(BUILD)/test_vk_backend: tests/test_vk_backend.c $(OBJ) $(HEADERS) | $(BUILD)
 
 # The window and surface path. The validation layer is not installed system-wide on this host, so
 # it is pointed at the pinned Vulkan SDK instead of requiring a system install.
-VK_SDK ?= $(HOME)/.cache/abundance/engine-tools/vulkan_sdk-1.4.363.0/1.4.363.0/x86_64
 vk-surface: $(BUILD)/test_vk_surface
 	@if pgrep -x Abundance >/dev/null; then echo "refusing: the game is running"; exit 1; fi
 	@if [ -d "$(VK_SDK)" ]; then \
 		echo "validation layer: $(VK_SDK)"; \
-		VK_LAYER_PATH=$(VK_SDK)/share/vulkan/explicit_layer.d \
-		LD_LIBRARY_PATH=$(VK_SDK)/lib:$$LD_LIBRARY_PATH \
-		flock -w 600 $(GPU_LOCK) $(BUILD)/test_vk_surface; \
+		$(VK_LAYER_ENV) flock -w 600 $(GPU_LOCK) $(BUILD)/test_vk_surface; \
 	else \
 		echo "pinned Vulkan SDK not found; running without the validation layer"; \
 		flock -w 600 $(GPU_LOCK) $(BUILD)/test_vk_surface; \
 	fi
 
 # The backend smoke test: a real device, real shader modules, a real pipeline, destroyed cleanly.
+# The validation layer lives only in the pinned SDK on this host, so every GPU test points the
+# loader at it rather than requiring a system install.
+VK_SDK ?= $(HOME)/.cache/abundance/engine-tools/vulkan_sdk-1.4.363.0/1.4.363.0/x86_64
+VK_LAYER_ENV = VK_LAYER_PATH=$(VK_SDK)/share/vulkan/explicit_layer.d LD_LIBRARY_PATH=$(VK_SDK)/lib:$$LD_LIBRARY_PATH
+
 vk-smoke: shaders $(BUILD)/test_vk_backend
 	@if pgrep -x Abundance >/dev/null; then echo "refusing: the game is running"; exit 1; fi
-	flock -w 600 $(GPU_LOCK) $(BUILD)/test_vk_backend ../.work/shaders
+	@if [ -d "$(VK_SDK)" ]; then \
+		$(VK_LAYER_ENV) flock -w 600 $(GPU_LOCK) $(BUILD)/test_vk_backend ../.work/shaders; \
+	else \
+		echo "pinned Vulkan SDK not found; running without the validation layer"; \
+		flock -w 600 $(GPU_LOCK) $(BUILD)/test_vk_backend ../.work/shaders; \
+	fi
 
 vk-probe: $(BUILD)/grail-vk-probe $(BUILD)/test_vk_probe
 	@if pgrep -x Abundance >/dev/null; then \
