@@ -18,7 +18,9 @@ export const hostTarget = ({ x64: 'x86_64', arm64: 'aarch64', riscv64: 'riscv64'
 export const compilerSources = ['native', 'lexer', 'ownership', 'machine', 'optimize', 'fmt', 'cli', 'runtime', 'os-linux'].map(n => join(root, 'compiler', `${n}.grl`));
 const triples = { x86_64: 'x86_64-linux-gnu', aarch64: 'aarch64-linux-gnu', riscv64: 'riscv64-linux-gnu', 'macos-x86_64': 'x86_64-apple-macos11', 'macos-aarch64': 'arm64-apple-macos11' };
 const emulations = { x86_64: 'elf_x86_64', aarch64: 'aarch64elf', riscv64: 'elf64lriscv' };
-const machoArchitectures = { 'macos-x86_64': 'x86_64', 'macos-aarch64': 'arm64' };
+export const machoArchitectures = { 'macos-x86_64': 'x86_64', 'macos-aarch64': 'arm64' };
+// Targets string used inside .tbd stubs (tapi names the platform, not the Grail target).
+const platformTargets = ['x86_64-macos', 'arm64-macos'];
 // lld's Mach-O port needs a libSystem to link against. Without an SDK on hand, a stub tbd exported
 // from the object's own undefined symbols is enough to produce and inspect a real executable.
 function libSystemStub(directory, object, architecture) {
@@ -31,6 +33,77 @@ function libSystemStub(directory, object, architecture) {
   writeFileSync(stub, `--- !tapi-tbd\ntbd-version: 4\ntargets: [ ${bare.join(', ')} ]\ninstall-name: '/usr/lib/libSystem.B.dylib'\ncurrent-version: 1311\nexports:\n  - targets: [ ${bare.join(', ')} ]\n    symbols: [ ${[...symbols, 'dyld_stub_binder'].join(', ')} ]\n...\n`);
   return { stub, architecture };
 }
+// A framework's install location is fixed by Apple's layout; the stub only carries the exports a
+// cross-link needs, so this is linkage scaffolding, not a copy of the framework.
+export function frameworkInstallName(name) {
+  return `/System/Library/Frameworks/${name}.framework/Versions/C/${name}`;
+}
+
+// Writes <dir>/<Name>.framework/<Name>.tbd. `symbols` are C names and are prefixed like ld64 does.
+export function frameworkStub(dir, name, symbols = []) {
+  if (!/^[A-Za-z][A-Za-z0-9_]*$/.test(name)) throw new Error(`invalid framework name ${JSON.stringify(name)}`);
+  const bundle = join(dir, `${name}.framework`);
+  mkdirSync(bundle, { recursive: true });
+  const exports = symbols.map(symbol => (symbol.startsWith('_') ? symbol : `_${symbol}`));
+  const path = join(bundle, `${name}.tbd`);
+  writeFileSync(path, [
+    '--- !tapi-tbd',
+    'tbd-version: 4',
+    `targets: [ ${platformTargets.join(', ')} ]`,
+    `install-name: '${frameworkInstallName(name)}'`,
+    'current-version: 1',
+    'exports:',
+    `  - targets: [ ${platformTargets.join(', ')} ]`,
+    `    symbols: [ ${exports.join(', ')} ]`,
+    '...',
+    '',
+  ].join('\n'));
+  return { name, path, directory: bundle };
+}
+
+// Extra ld64 arguments for the requested frameworks: an SDK resolves the real .tbd files, while a
+// cross-build without one gets generated stubs from the caller's export lists.
+export function frameworkArguments(frameworks = [], { directory, sdk } = {}) {
+  if (frameworks.length === 0) return { args: [], stubs: [] };
+  const args = [];
+  let search = directory;
+  if (sdk) {
+    search = join(sdk, 'System/Library/Frameworks');
+    args.push('-syslibroot', sdk);
+  } else {
+    if (!directory) throw new Error('frameworks need an SDK (GRAIL_SDK) or a stub directory');
+    mkdirSync(directory, { recursive: true });
+  }
+  const stubs = [];
+  for (const framework of frameworks) {
+    const request = typeof framework === 'string' ? { name: framework } : framework;
+    if (!sdk) {
+      // A stub has to state what the framework exports. Without that list the name is
+      // unverifiable, so an unknown framework fails here instead of being invented.
+      if (!Array.isArray(request.symbols) || request.symbols.length === 0) {
+        throw new Error(`framework ${request.name} needs a macOS SDK (GRAIL_SDK) or an explicit export list`);
+      }
+      stubs.push(frameworkStub(search, request.name, request.symbols));
+    }
+    args.push('-framework', request.name);
+  }
+  if (search) args.push('-F', search);
+  return { args, stubs };
+}
+
+// Ad-hoc signing: `codesign --sign -` is the macOS tool, otherwise lld writes the signature itself
+// with -adhoc_codesign (the default for arm64, optional for x86_64).
+export function adhocSigner() {
+  const probe = spawnSync(process.env.GRAIL_CODESIGN ?? 'codesign', ['--version'], { encoding: 'utf8' });
+  return process.platform === 'darwin' && !probe.error && probe.status === 0 ? 'codesign' : 'ld64.lld';
+}
+
+export function signAdhoc(binary, signer = adhocSigner()) {
+  if (signer !== 'codesign') return { signed: false, signer, reason: 'no codesign on this host; lld writes the ad-hoc signature at link time' };
+  command([process.env.GRAIL_CODESIGN ?? 'codesign', '--force', '--sign', '-', binary]);
+  return { signed: true, signer };
+}
+
 export function targetName(target) {
   if (!allTargets.includes(target)) throw new Error(`Unsupported target ${target}; expected ${allTargets.join(', ')}`);
   return target;
@@ -56,21 +129,31 @@ export function linkInputs(assembly, base) {
     });
   return [...new Set(found)];
 }
-export function assemble(source, executable, target = hostTarget, linkArgs = []) {
+export function assemble(source, executable, target = hostTarget, linkArgs = [], { frameworkArgs = [], sign = false, sdk = undefined } = {}) {
   targetName(target);
   const object = `${executable}.o`;
   const flags = target === 'riscv64' ? ['-march=rv64imafd', '-mabi=lp64'] : [];
   command([process.env.GRAIL_ASSEMBLER ?? 'clang', `--target=${triples[target]}`, ...flags, '-c', source, '-o', object]);
   if (machoTargets.includes(target)) {
-    const { stub } = libSystemStub(dirname(object), object, machoArchitectures[target]);
-    command([
+    // An SDK supplies the real libSystem.tbd; a cross-build without one links against a stub
+    // exported from this object's own imports.
+    const system = sdk
+      ? ['-syslibroot', sdk, '-L', join(sdk, 'usr/lib')]
+      : ['-L', dirname(libSystemStub(dirname(object), object, machoArchitectures[target]).stub)];
+    const link = [
       process.env.GRAIL_LINKER ?? 'ld64.lld',
       '-arch', machoArchitectures[target],
       '-platform_version', 'macos', '11.0', '11.0',
-      '-L', dirname(stub), '-lSystem',
+      ...(sign ? ['-adhoc_codesign'] : []),
+      ...system, '-lSystem',
+      ...frameworkArgs,
+      ...linkArgs,
       '-e', '_main',
       object, '-o', executable,
-    ]);
+    ];
+    command(link);
+    // On macOS the platform tool owns ad-hoc signing; elsewhere lld already wrote the signature.
+    if (sign) signAdhoc(executable);
     return executable;
   }
   command([process.env.GRAIL_LINKER ?? 'ld.lld', '-m', emulations[target], object, ...linkArgs, '-o', executable]);
@@ -121,7 +204,7 @@ export function buildCompiler() {
   renameSync(pending, executable);
   return executable;
 }
-export function compileProgram(compiler, inputs, directory, { target = hostTarget, overflow = 'checked', name = 'program', defaultU64 = true, typedRefs = false, runtime = join(root, 'compiler/runtime.grl'), osRuntime = join(root, 'compiler/os-linux.grl'), darwin = join(root, 'compiler/darwin.grl') } = {}) {
+export function compileProgram(compiler, inputs, directory, { target = hostTarget, overflow = 'checked', name = 'program', defaultU64 = true, typedRefs = false, runtime = join(root, 'compiler/runtime.grl'), osRuntime = join(root, 'compiler/os-linux.grl'), darwin = join(root, 'compiler/darwin.grl'), frameworks = [], sdk = process.env.GRAIL_SDK, sign = false } = {}) {
   targetName(target);
   if (!['checked', 'wrap'].includes(overflow)) throw new Error('overflow must be checked or wrap');
   mkdirSync(directory, { recursive: true });
@@ -131,7 +214,8 @@ export function compileProgram(compiler, inputs, directory, { target = hostTarge
   const numeric = [...(defaultU64 ? ['--default-u64'] : []), ...(typedRefs ? ['--typed-refs'] : [])];
   command([compiler, ...numeric, '--target', target, `--overflow=${overflow}`, assembly, ...files]);
   const linkArgs = linkInputs(readFileSync(assembly, 'utf8'), dirname(resolve(root, inputs[0])));
-  return assemble(assembly, join(directory, name), target, linkArgs);
+  const framework = machoTargets.includes(target) ? frameworkArguments(frameworks, { directory, sdk }) : { args: [] };
+  return assemble(assembly, join(directory, name), target, linkArgs, { frameworkArgs: framework.args, sign, sdk });
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const mode = process.argv[2] ?? 'build';
