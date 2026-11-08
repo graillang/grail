@@ -36,6 +36,10 @@ windows-check:
 test *args:
     bun tools/test-native.mjs "$@"
 
+# Check Mach-O objects and executables for macos-x86_64 and macos-aarch64 without executing them.
+test-macos:
+    bun tools/test-macos.mjs
+
 # Verify direct compiler self-hosting on all supported CPUs (QEMU needed for cross execution).
 bootstrap-check:
     bun tools/bootstrap.mjs verify all
@@ -49,6 +53,7 @@ install prefix="~/.local":
     mkdir -p "$prefix/bin" "$prefix/lib/grail/std"
     cp "$grail" "$prefix/bin/grail.new" && mv "$prefix/bin/grail.new" "$prefix/bin/grail"
     cp compiler/runtime.grl "$prefix/lib/grail/runtime.grl"
+    cp compiler/darwin.grl "$prefix/lib/grail/darwin.grl"
     cp lib/*.grl "$prefix/lib/grail/std/"
     echo "installed $prefix/bin/grail (needs clang and ld.lld for building programs)"
 

@@ -6,13 +6,31 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { gunzipSync } from 'node:zlib';
 export const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+// Executable/bootstrap targets: these are assembled, linked and run on this host (or under QEMU).
 export const targets = ['x86_64', 'aarch64', 'riscv64'];
+// Mach-O targets are cross-built and inspected only; they are never executed here, so they stay out
+// of `targets` and are never selected by `bootstrap.mjs update all` or the code generators.
+export const machoTargets = ['macos-x86_64', 'macos-aarch64'];
+export const allTargets = [...targets, ...machoTargets];
 export const hostTarget = ({ x64: 'x86_64', arm64: 'aarch64', riscv64: 'riscv64' })[process.arch];
 export const compilerSources = ['native', 'lexer', 'ownership', 'machine', 'optimize', 'fmt', 'cli', 'runtime'].map(n => join(root, 'compiler', `${n}.grl`));
-const triples = { x86_64: 'x86_64-linux-gnu', aarch64: 'aarch64-linux-gnu', riscv64: 'riscv64-linux-gnu' };
+const triples = { x86_64: 'x86_64-linux-gnu', aarch64: 'aarch64-linux-gnu', riscv64: 'riscv64-linux-gnu', 'macos-x86_64': 'x86_64-apple-macos11', 'macos-aarch64': 'arm64-apple-macos11' };
 const emulations = { x86_64: 'elf_x86_64', aarch64: 'aarch64elf', riscv64: 'elf64lriscv' };
+const machoArchitectures = { 'macos-x86_64': 'x86_64', 'macos-aarch64': 'arm64' };
+// lld's Mach-O port needs a libSystem to link against. Without an SDK on hand, a stub tbd exported
+// from the object's own undefined symbols is enough to produce and inspect a real executable.
+function libSystemStub(directory, object, architecture) {
+  const bare = ['x86_64-macos', 'arm64-macos'];
+  const nm = spawnSync(process.env.GRAIL_NM ?? 'llvm-nm', ['-u', object], { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
+  if (nm.error) throw new Error('linking a Mach-O executable needs llvm-nm (or GRAIL_NM) to build a libSystem stub');
+  if (nm.status !== 0) throw new Error(`llvm-nm failed on ${object}\n${nm.stderr ?? ''}`);
+  const symbols = nm.stdout.split('\n').map(line => line.trim()).filter(line => line.startsWith('_'));
+  const stub = `${directory}/libSystem.tbd`;
+  writeFileSync(stub, `--- !tapi-tbd\ntbd-version: 4\ntargets: [ ${bare.join(', ')} ]\ninstall-name: '/usr/lib/libSystem.B.dylib'\ncurrent-version: 1311\nexports:\n  - targets: [ ${bare.join(', ')} ]\n    symbols: [ ${[...symbols, 'dyld_stub_binder'].join(', ')} ]\n...\n`);
+  return { stub, architecture };
+}
 export function targetName(target) {
-  if (!targets.includes(target)) throw new Error(`Unsupported target ${target}; expected ${targets.join(', ')}`);
+  if (!allTargets.includes(target)) throw new Error(`Unsupported target ${target}; expected ${allTargets.join(', ')}`);
   return target;
 }
 export function command(argv, options = {}) {
@@ -26,11 +44,24 @@ export function assemble(source, executable, target = hostTarget) {
   const object = `${executable}.o`;
   const flags = target === 'riscv64' ? ['-march=rv64imafd', '-mabi=lp64'] : [];
   command([process.env.GRAIL_ASSEMBLER ?? 'clang', `--target=${triples[target]}`, ...flags, '-c', source, '-o', object]);
+  if (machoTargets.includes(target)) {
+    const { stub } = libSystemStub(dirname(object), object, machoArchitectures[target]);
+    command([
+      process.env.GRAIL_LINKER ?? 'ld64.lld',
+      '-arch', machoArchitectures[target],
+      '-platform_version', 'macos', '11.0', '11.0',
+      '-L', dirname(stub), '-lSystem',
+      '-e', '_main',
+      object, '-o', executable,
+    ]);
+    return executable;
+  }
   command([process.env.GRAIL_LINKER ?? 'ld.lld', '-m', emulations[target], object, '-o', executable]);
   return executable;
 }
 export function runner(target = hostTarget) {
   targetName(target);
+  if (machoTargets.includes(target)) throw new Error(`${target} executables cannot be executed on ${process.platform}; they need macOS hardware (or a Darwin emulator)`);
   if (target === hostTarget) return [];
   const variable = `GRAIL_QEMU_${target.toUpperCase()}`;
   if (process.env[variable]) return [process.env[variable]];
@@ -73,12 +104,13 @@ export function buildCompiler() {
   renameSync(pending, executable);
   return executable;
 }
-export function compileProgram(compiler, inputs, directory, { target = hostTarget, overflow = 'checked', name = 'program', defaultU64 = true, typedRefs = false, runtime = join(root, 'compiler/runtime.grl') } = {}) {
+export function compileProgram(compiler, inputs, directory, { target = hostTarget, overflow = 'checked', name = 'program', defaultU64 = true, typedRefs = false, runtime = join(root, 'compiler/runtime.grl'), darwin = join(root, 'compiler/darwin.grl') } = {}) {
   targetName(target);
   if (!['checked', 'wrap'].includes(overflow)) throw new Error('overflow must be checked or wrap');
   mkdirSync(directory, { recursive: true });
   const assembly = join(directory, `${name}.s`);
-  const files = [...inputs.map(p => resolve(root, p)), resolve(root, runtime)];
+  const platform = machoTargets.includes(target) ? [resolve(root, darwin)] : [];
+  const files = [...inputs.map(p => resolve(root, p)), ...platform, resolve(root, runtime)];
   const numeric = [...(defaultU64 ? ['--default-u64'] : []), ...(typedRefs ? ['--typed-refs'] : [])];
   command([compiler, ...numeric, '--target', target, `--overflow=${overflow}`, assembly, ...files]);
   return assemble(assembly, join(directory, name), target);

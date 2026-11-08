@@ -15,10 +15,12 @@ backend. A project that has a port plan is not a port.
 | Linux RISC-V64 | ELF cross-image, refreshed bootstrap | Cross-build and ELF architecture checks only; no qemu runner here | Cross-build only |
 | Windows x86-64 | PE32+ console image, COFF objects, kernel32 short-import objects | `bun tools/windows.mjs check` 7/7 statically verifies object and image; **not executed** | Compiler output only |
 | Windows AArch64 | None | None | Not started |
-| macOS AArch64 / x86-64 | None | C ABI headers parse for `arm64-apple-macos11`; no Mach-O target | Not started |
+| macOS x86-64 / AArch64 | Mach-O objects and executables, `LC_BUILD_VERSION`/`LC_MAIN`/libSystem imports | `bun tools/test-macos.mjs` statically verifies 4 objects and 4 images; **not executed** | Compiler output only |
 
 Windows x86-64 currently has no `.pdata`/SEH, no Win32 OS layer (console, files, arguments,
-threads), and no Windows execution. Grail-internal calls still use the private register
+threads), and no Windows execution. macOS has a libSystem layer for files, console, clock,
+processes and directory records, but no threads, readiness reactor or sockets (they return
+`ENOSYS`), no framework or SDK-backed link, and no execution. Grail-internal calls still use the private register
 convention; Win64 is used only at import boundaries. The images must not be run.
 
 Linux AArch64 and RISC-V64 are cross-build verified, not runtime verified. Linux x86-64 is the
