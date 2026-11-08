@@ -38,12 +38,13 @@ devices and FFI remain v3 semantic work. They are deferred, not rejected.
 - Iteration: consume the iterable; `&v` and `&mut v` borrow. Map iteration uses named `Entry`
   records, with `for key, value in map` as loop-header sugar, not a tuple protocol. Keys are never
   mutable through iteration.
-- Maps: `[K: V]`, `["a": 1]`, `[:]`, `[K: V]::with_seed(seed)`, and method-first `len`, `contains`,
-  `get`, `get_mut`, `insert`, `remove`, `entry`. Dotted lookup methods borrow the key and return
-  optionals; `insert` takes ownership. `m[key]` is a required-key read that aborts when the key is
-  absent, `m[key] = value` updates an existing key, and indexing never inserts. `entry` returns
-  `Entry?` rather than requiring an Entry-shaped call site, and `entry.or_insert(value)` is the
-  explicit insert-when-absent form; there is no hidden Entry requirement.
+- Maps: `[K: V]`; literals `[k: v, ...]`, with `[:]` when the context fixes the type; `[K: V]()`
+  creates a randomly seeded map and `[K: V]::with_seed(s0, s1)` fixes the seeds. Method-first `len`,
+  `contains`, `get`, `get_mut`, `insert`, `remove`, `entry`: lookups borrow the key and return
+  optionals, while `insert` takes ownership. `m[key]` is a required place: a missing key aborts,
+  `m[key] = v` upserts, and `m[key] += v` updates an existing key. `entry` returns an optional
+  `Entry<a, K, V>` view with a shared key and a mutable value and has no `or_insert`; moving a
+  non-copyable value out uses `remove`. Indexed assignment updates a named map or a field path.
 - Syntax: `:=`, `mut`, `fn`, explicit `<T>`; record literals and patterns use field punning
   (`Point { x, y }`); no tail-expression returns, so a non-unit function returns with `return`; no
   tuples. Uppercase nominal/library types and

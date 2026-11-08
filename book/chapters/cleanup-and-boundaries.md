@@ -26,15 +26,17 @@ small slabs for reuse, while large single-object arenas are released immediately
 
 ## Approved model status in this preview
 
-The book follows the approved syntax-v2 surface. These parts are documented but not yet accepted by
-the preview compiler, so they appear only in prose:
+The book follows the approved syntax-v2 surface. These parts are not accepted by the preview
+compiler yet, so they appear only in prose:
 
-- Map literals `["a": 1]` and `[:]`, `[K: V]::with_seed(seed)`, required-key indexing `map[key]`, and
-  `entry.or_insert(value)`. Use `hashmap::with_seed`, `get`/`get_mut`/`entry` and `insert`.
 - `&` and `&mut` for records, vectors, maps and scalars. Those still use `borrow`/`borrow_mut`;
   byte buffers already use `&[u8]` and `&mut [u8]`.
 - Direct temporary iteration (`for part in text.split(' ')`) in the book's `--default-u64` mode;
   keep the explicit `parts` binding and `for part in borrow(parts)`.
+- Map iteration with `for key, value in map`; use indexing, `get` and `entry` instead.
+
+Indexed map assignment currently updates a named map or a field path only; a temporary receiver or a
+nested target such as `nested["a"]["b"] = 1` is rejected.
 
 Tail-expression returns and tuples are deliberately absent, not pending.
 
