@@ -29,6 +29,15 @@ typedef struct grail_linux_socket {
     uint64_t type;
 } grail_linux_socket;
 
+static int grail_socket_text_has_zero(const uint8_t *bytes, uint64_t length) {
+    for (uint64_t i = 0; i < length; i++) {
+        if (bytes[i] == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static int grail_socket_family(uint64_t family, int *out) {
     if (family == GRAIL_ADDRESS_INET) {
         *out = AF_INET;
@@ -603,7 +612,8 @@ grail_result grail_os_net_resolve(const uint8_t *host, uint64_t host_length, uin
     if (!grail_linux.initialized) {
         return GRAIL_E_NOT_INITIALIZED;
     }
-    if (host == NULL || host_length == 0 || (addresses == NULL && capacity != 0)) {
+    if (host == NULL || host_length == 0 || grail_socket_text_has_zero(host, host_length) ||
+        (addresses == NULL && capacity != 0)) {
         return GRAIL_E_INVALID_ARGUMENT;
     }
     char *text = grail_linux_copy_text(host, host_length);
