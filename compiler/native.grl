@@ -33,6 +33,8 @@ struct Decl {
     module: u8[],
     name: u8[],
     is_enum: u64,
+    // 1 for `handle Name;`: a one-word opaque foreign handle, not a layout.
+    opaque: u64,
     first: u64,
     count: u64,
     regions: u64,
@@ -3157,6 +3159,11 @@ fn lifetime_arguments<a>(c: (&a mut C)) -> u64[] {
     return rs;
 }
 fn nominal_type<a>(c: (&a mut C), d: u64) -> u64 {
+    // An opaque handle is one word with no layout: it cannot be constructed,
+    // inspected or dropped, only produced by C and handed back to C.
+    if c.decls[d].opaque {
+        return intern(&mut c, 23, d);
+    }
     decl := &c.decls[d];
     count := decl.regions;
     types := decl.types;
@@ -3644,6 +3651,7 @@ fn make_union<a>(c: (&a mut C), args: u64[], success: u64, module: u8[], prefix:
                     module: module,
                     name: name,
                     is_enum: 1,
+                    opaque: 0,
                     first: first,
                     count: args.len(),
                     regions: 0,
@@ -4048,6 +4056,11 @@ fn base_named<a>(c: (&a mut C), first: u8[]) -> u64 {
     if same(view(first), view("string")) {
         return 3;
     }
+    if same(view(first), view("CStr")) {
+        // One word: a NUL-terminated byte pointer owned by the C side. Building one
+        // is `unsafe cstr(view)` because it asserts termination and lifetime.
+        return intern(&mut c, 24, 0);
+    }
     if same(view(first), view("read")) + same(view(first), view("mut")) {
         if c.typed_refs {
             fail(&mut c, view("legacy byte-view types were removed; write &[u8] or &mut [u8]"));
@@ -4157,6 +4170,40 @@ fn alias_declaration<a>(c: (&a mut C), pass: u64) -> unit {
     exchange(&mut entry.ty, ty);
     return ();
 }
+// `handle Name;` declares an opaque C handle type. Safe code can bind, compare and
+// pass it, but cannot construct, size, inspect or drop one: it is a foreign token.
+fn handle_declaration<a>(c: (&a mut C), pass: u64) -> unit {
+    expect(&mut c, view("handle"));
+    name := ident(&mut c);
+    exchange(&mut c.parsing_input, 0);
+    exchange(&mut c.output_region, 0);
+    expect(&mut c, view(";"));
+    if pass != 1 {
+        return ();
+    }
+    m := module_copy(&mut c);
+    if (find_decl(&mut c, view(m), view(name)) != 0) + (find_alias(&mut c, view(m), view(name)) != 0) {
+        fail(&mut c, view("duplicate type"));
+    }
+    c
+        .decls
+        .push(
+            Decl {
+                module: m,
+                name: name,
+                is_enum: 0,
+                opaque: 1,
+                first: 0,
+                count: 0,
+                regions: 0,
+                types: 0,
+                success: 0,
+                bounds: u64[],
+                constraints: u64[][],
+            }
+        );
+    return ();
+}
 fn decl<a>(c: (&a mut C), pass: u64) -> unit {
     is_enum := is(&mut c, view("enum"));
     advance(&mut c);
@@ -4178,6 +4225,7 @@ fn decl<a>(c: (&a mut C), pass: u64) -> unit {
                         module: m,
                         name: name,
                         is_enum: is_enum,
+                        opaque: 0,
                         first: 0,
                         count: 0,
                         regions: regions,
@@ -4236,6 +4284,7 @@ fn decl<a>(c: (&a mut C), pass: u64) -> unit {
             module: m,
             name: name,
             is_enum: is_enum,
+            opaque: 0,
             first: first,
             count: count,
             regions: c.rnames.len(),
@@ -4305,13 +4354,42 @@ fn bind<a>(c: (&a mut C), name: u8[], ty: u64, id: u64, mutable: u64) -> unit {
 // symbol the host linker resolves. The declaration has no body and the call sites
 // must sit inside an `unsafe { ... }` block. Only the C ABI is accepted; there is
 // no implicit fallback to another convention.
-fn ffi_scalar<a, b>(c: (&a mut C), ty: u64, what: &b [u8]) -> unit {
-    // u64 is the portable one-word type at index 0; i64/isize is the 64-bit
-    // signed integer. Both cross the boundary in a single C integer register.
+// Number of C argument words a Grail parameter occupies. A byte view is the C
+// pair (pointer, length); everything else in the accepted slice is one word.
+fn ffi_words<a>(c: (&a mut C), ty: u64) -> u64 {
+    if ty_kind(&mut c, ty) == 5 {
+        return 2;
+    }
+    return 1;
+}
+fn ffi_param<a, b>(c: (&a mut C), ty: u64, what: &b [u8]) -> unit {
+    // u64 is the portable one-word type at index 0; i64/isize is the 64-bit signed
+    // integer. Handles (kind 23) and CStr (kind 24) are one-word C pointers, and a
+    // byte view (kind 5) is passed as pointer plus length.
     if ty == 0 {
         return ();
     }
-    if (ty_kind(&mut c, ty) == 18) & (ty_arg(&mut c, ty) == 64) {
+    k := ty_kind(&mut c, ty);
+    if (k == 18) & (ty_arg(&mut c, ty) == 64) {
+        return ();
+    }
+    if (k == 23) + (k == 24) + (k == 5) {
+        return ();
+    }
+    fail(&mut c, what);
+    return ();
+}
+fn ffi_result<a, b>(c: (&a mut C), ty: u64, what: &b [u8]) -> unit {
+    // A result is one word: scalars, a C handle or a C string pointer. A byte view
+    // result is rejected because C cannot produce a Grail view record.
+    if (ty == 0) + (ty == 1) {
+        return ();
+    }
+    k := ty_kind(&mut c, ty);
+    if (k == 18) & (ty_arg(&mut c, ty) == 64) {
+        return ();
+    }
+    if (k == 23) + (k == 24) {
         return ();
     }
     fail(&mut c, what);
@@ -4366,15 +4444,26 @@ fn extern_declaration<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     if symbol.len() == 0 {
         symbol = name.copy();
     }
+    // Byte-view parameters need an input lifetime context, exactly like a Grail
+    // function signature; the region is irrelevant to the C ABI.
+    exchange(&mut c.input_regions, u64[]);
+    exchange(&mut c.receiver_region, 0);
+    exchange(&mut c.parsing_input, 1);
     first := c.params.len();
     mut count = 0;
+    mut words = 0;
     expect(&mut c, view("("));
     if eat(&mut c, view(")")) == 0 {
         while 1 {
             p := ident(&mut c);
             expect(&mut c, view(":"));
             ty := parse_type(&mut c);
-            ffi_scalar(&mut c, ty, view("extern C parameters must be i64 or u64"));
+            ffi_param(
+                &mut c,
+                ty,
+                view("extern C parameters must be a 64-bit integer, CStr, handle or byte view")
+            );
+            words = words + ffi_words(&mut c, ty);
             c.params.push(ty);
             count = count + 1;
             if eat(&mut c, view(")")) {
@@ -4383,15 +4472,15 @@ fn extern_declaration<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
             expect(&mut c, view(","));
         }
     }
-    if 6 < count {
-        fail(&mut c, view("extern C declaration exceeds six parameters"));
+    exchange(&mut c.parsing_input, 0);
+    exchange(&mut c.output_region, 0);
+    if 6 < words {
+        fail(&mut c, view("extern C declaration exceeds six argument words"));
     }
     mut ret = 1;
     if eat(&mut c, view("->")) {
         ret = parse_type(&mut c);
-        if ret != 1 {
-            ffi_scalar(&mut c, ret, view("extern C results must be i64, u64 or unit"));
-        }
+        ffi_result(&mut c, ret, view("extern C results must be i64, u64, unit, CStr or handle"));
     }
     expect(&mut c, view(";"));
     m := module_copy(&mut c);
@@ -5242,6 +5331,10 @@ fn toplevel<a>(c: (&a mut C), pass: u64) -> unit {
             extern_declaration(&mut c, pass, public);
             continue;
         }
+        if is(&mut c, view("handle")) {
+            handle_declaration(&mut c, pass);
+            continue;
+        }
         if is(&mut c, view("type")) {
             alias_declaration(&mut c, pass);
         } else {
@@ -5929,9 +6022,11 @@ fn coerce_view<a>(c: (&a mut C), v: Val, formal: u64) -> Val {
 }
 fn record<a>(c: (&a mut C), d: u64, explicit: u64) -> Val {
     expect(&mut c, view("{"));
-    x := &c.decls[d];
-    count := x.count;
-    if x.is_enum {
+    count := c.decls[d].count;
+    if c.decls[d].opaque {
+        fail(&mut c, view("opaque handles cannot be constructed"));
+    }
+    if c.decls[d].is_enum {
         fail(&mut c, view("enum requires variant constructor"));
     }
     hint := constructor_hint(&mut c, d, explicit);
@@ -6579,9 +6674,34 @@ fn emit_resolved_call<a>(
         if (c.raw == 0) & (c.unsafe_depth == 0) {
             fail(&mut c, view("extern C call requires an unsafe block"));
         }
+        mut words = 0;
         for i in args.len() {
-            reg := argreg(i);
-            get(&mut c, args[i], view(reg));
+            ty := argtypes[i];
+            words = words + ffi_words(&mut c, ty);
+        }
+        if 6 < words {
+            fail(&mut c, view("extern C call exceeds six argument words"));
+        }
+        mut reg = 0;
+        for i in args.len() {
+            ty := argtypes[i];
+            if ty_kind(&mut c, ty) == 5 {
+                // A byte view crosses as the C pair (pointer, length). The view
+                // record is {pointer at word 0, length at word 1}.
+                get(&mut c, args[i], view("%rax"));
+                first := argreg(reg);
+                second := argreg(reg + 1);
+                o(&mut c, view("movq (%rax),"));
+                o(&mut c, view(first));
+                o(&mut c, view("\nmovq 8(%rax),"));
+                o(&mut c, view(second));
+                c.out.push(10);
+                reg = reg + 2;
+            } else {
+                one := argreg(reg);
+                get(&mut c, args[i], view(one));
+                reg = reg + 1;
+            }
         }
         o(&mut c, view("call "));
         o(&mut c, view(ffi_symbol));
@@ -6841,6 +6961,9 @@ fn builtin_id<a>(n: &a [u8]) -> u64 {
     }
     if same(view(n), view("view")) {
         return 37;
+    }
+    if same(view(n), view("cstr")) {
+        return 39;
     }
     if same(view(n), view("view_mut")) {
         return 38;
@@ -8095,6 +8218,24 @@ fn builtin<a>(c: (&a mut C), id: u64) -> Val {
         return v;
     }
     a := expr(&mut c, 0);
+    if id == 39 {
+        // `cstr(sequence)` is the checked, zero-copy C string view: the bytes must
+        // end in NUL (verified at runtime) and the cast is unsafe because C may keep
+        // the pointer beyond the call.
+        expect(&mut c, view(")"));
+        if (c.raw == 0) & (c.unsafe_depth == 0) {
+            fail(&mut c, view("cstr requires an unsafe block"));
+        }
+        x := deref(&mut c, a);
+        k := ty_kind(&mut c, x.ty);
+        if (k != 2) & (k != 3) & (k != 4) & (k != 5) {
+            fail(&mut c, view("cstr requires byte sequence or view"));
+        }
+        // The owned sequence stays alive until the end of the statement, so the
+        // pointer handed to C is valid for the whole call.
+        slot := apply(&mut c, view("rt_cstr_view"), one(x.t));
+        return val(slot, intern(&mut c, 24, 0));
+    }
     if (id == 37) + (id == 38) {
         expect(&mut c, view(")"));
         input := a.t;
@@ -9752,6 +9893,7 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
                 module: copy_bytes(view(".closure")),
                 name: decl_name,
                 is_enum: 0,
+                opaque: 0,
                 first: first,
                 count: count,
                 regions: 0,

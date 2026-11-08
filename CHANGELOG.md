@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+- v3 C FFI increment 1: `extern "C"` foreign declarations and calls.
+  `extern "C" [lib "INPUT"] [as "SYMBOL"] fn name(i64, u64) -> i64|u64|unit;` declares a
+  linker-resolved C symbol; calls emit the C argument/result registers of the selected
+  target (x86-64 SysV, AArch64 AAPCS64, RISC-V 64 LP64) and call the unmangled symbol.
+  Foreign calls are rejected outside an explicit `unsafe { ... }` block, which remains a
+  fully checked lexical region. Declarations carry their link inputs, deduplicated and
+  emitted as `// grail-link: INPUT` lines that `tools/native.mjs` obeys. Narrower
+  integers, floats, views, handles, records and callbacks are rejected with diagnostics
+  rather than truncated or approximated. New `bun tools/test-ffi.mjs` (or `just
+  test-ffi`) links a freestanding C shim and checks calls, the rename and `u64` results;
+  rejection fixtures joined `tests/native-cases.json`. See `docs/ffi.md`.
+
+- v3 C FFI increment 2: C byte/string views and opaque handles at `extern "C"` boundaries.
+  A `&[u8]`/`&mut [u8]` parameter crosses as the C pair `(pointer, length)` with no copy and
+  no allocation; `CStr` is a one-word NUL-terminated `const char *` produced by the checked,
+  zero-copy `unsafe cstr(value)` cast; `handle Name;` declares a one-word opaque C token that
+  safe code cannot construct, inspect, size or drop. Results may be `i64`/`u64`/`unit`/`CStr`/
+  handle; a view is never a result. Arities are counted in C argument words (a view counts
+  twice), and everything outside this slice is still rejected with a diagnostic. `tests/ffi/`
+  gained a views/handles fixture and the shim gained string, byte, mutable-fill and handle
+  functions; three more rejection fixtures joined `tests/native-cases.json`. See `docs/ffi.md`.
+
 - Added executed Windows evidence for the C ABI without a Windows SDK:
   `tests/abi/wine_harness.c` is cross-built with Zig's MinGW-w64 target and run under Wine,
   covering file metadata follow/no-follow, hidden attributes, non-reparse readlink rejection,
