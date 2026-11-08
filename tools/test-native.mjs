@@ -3,9 +3,11 @@ import { join, basename, resolve } from 'node:path';
 import assert from 'node:assert/strict';
 import { root, compilerSources, hostTarget, targetName, buildCompiler, compileProgram, execute } from './native.mjs';
 
+const legacyReferenceSyntax = /\b(?:borrow|borrow_mut)\s*\(|\b(?:read|mut)\s*</;
+
 // Keep internal source on the modern dialect, including comments and diagnostics.
 for (const file of [...compilerSources, ...readdirSync(join(root, 'lib')).filter(f => f.endsWith('.grl')).map(f => join(root, 'lib', f))]) {
-  assert.doesNotMatch(readFileSync(file, 'utf8'), /\b(?:borrow|borrow_mut)\s*\(|\b(?:read|mut)\s*</, `${file}: legacy internal reference syntax`);
+  assert.doesNotMatch(readFileSync(file, 'utf8'), legacyReferenceSyntax, `${file}: legacy internal reference syntax`);
 }
 
 const target = targetName(process.argv[2] ?? hostTarget);
@@ -13,6 +15,23 @@ const compiler = buildCompiler();
 const work = join(root, '.work/native-tests', target);
 mkdirSync(work, { recursive: true });
 const cases = JSON.parse(readFileSync(join(root, 'tests/native-cases.json'), 'utf8'));
+const legacyFiles = new Set();
+for (const test of cases) {
+  if (test.removedSyntax !== undefined) assert.ok(test.removedSyntax === true && test.reject, `${test.name}: removedSyntax requires an intentional rejection`);
+  if (test.legacyRefs !== undefined) {
+    assert.ok(typeof test.legacyRefs === 'string' && test.legacyRefs.trim(), `${test.name}: legacyRefs requires an explanation`);
+    for (const file of [...(test.files ?? []), ...(test.modules ?? [])]) legacyFiles.add(resolve(root, file));
+  } else if (test.source && legacyReferenceSyntax.test(test.source)) {
+    assert.ok(test.reject && test.removedSyntax === true, `${test.name}: legacy syntax is only allowed as intentional removed-syntax rejection input`);
+  }
+}
+for (const directory of ['compiler/tests', 'book/examples']) {
+  for (const file of readdirSync(join(root, directory)).filter(f => f.endsWith('.grl'))) {
+    const path = join(root, directory, file);
+    if (!legacyFiles.has(path)) assert.doesNotMatch(readFileSync(path, 'utf8'), legacyReferenceSyntax, `${path}: legacy fixture reference syntax`);
+  }
+}
+
 // A long cross run must not combine source revisions while development continues.
 const snapshot = join(work, 'inputs');
 mkdirSync(snapshot, { recursive: true });
@@ -27,6 +46,8 @@ for (let i = 0; i < cases.length; i++) {
 }
 let passed = 0;
 for (const test of cases) {
+  // Only a documented, explicit legacyRefs reason may opt a fixture out of typed mode.
+  const typedRefs = test.legacyRefs === undefined;
   const directory = join(work, test.name);
   rmSync(directory, { recursive: true, force: true });
   mkdirSync(directory, { recursive: true });
@@ -35,13 +56,13 @@ for (const test of cases) {
   if (test.reject) {
     const assembly = join(directory, 'prior.s');
     writeFileSync(assembly, 'prior valid artifact');
-    const numeric = [...(test.defaultU64 === false ? [] : ['--default-u64']), ...(test.typedRefs ? ['--typed-refs'] : [])];
+    const numeric = [...(test.defaultU64 === false ? [] : ['--default-u64']), ...(typedRefs ? ['--typed-refs'] : [])];
     const result = execute(compiler, [...numeric, '--target', target, assembly, ...files, runtime]);
     assert.notEqual(result.status, 0, `${test.name}: unsafe/invalid program was accepted`);
     if (test.diagnostic) assert.ok(`${result.stdout}${result.stderr}`.includes(test.diagnostic), `${test.name}: expected diagnostic ${test.diagnostic}: ${result.stdout}${result.stderr}`);
     assert.equal(readFileSync(assembly, 'utf8'), 'prior valid artifact', `${test.name}: invalid program overwrote prior output`);
   } else {
-    const executable = compileProgram(compiler, files, directory, { target, overflow: test.overflow ?? 'checked', defaultU64: test.defaultU64 !== false, typedRefs: test.typedRefs === true, runtime });
+    const executable = compileProgram(compiler, files, directory, { target, overflow: test.overflow ?? 'checked', defaultU64: test.defaultU64 !== false, typedRefs, runtime });
     if (test.compileOnly) { passed++; continue; }
     const result = execute(executable, test.args ?? [], target, { cwd: directory });
     if (result.error) throw result.error;

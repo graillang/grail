@@ -1,32 +1,32 @@
 module writeback;
 struct Cell<a> {
-    value: read<a>
+    value: &a [u8]
 }
-fn access<a, b>(r: (&mut a Cell<b>)) -> (&mut a read<b>) {
-    return borrow_mut(r.value);
+fn access<a, b>(r: (&a mut Cell<b>)) -> (&a mut &b [u8]) {
+    return &mut r.value;
 }
-fn replace<a, T>(r: (&mut a T), value: T) -> T {
+fn replace<a, T>(r: (&a mut T), value: T) -> T {
     return exchange(r, value);
 }
-fn set<a, b>(r: (&mut a read<b>), value: read<b>) -> u64 {
+fn set<a, b>(r: (&a mut &b [u8]), value: &b [u8]) -> u64 {
     old := exchange(r, value);
     return 0;
 }
-fn add<a, b>(r: (&mut a read<b>[]), v: read<b>) -> u64 {
+fn add<a, b>(r: (&a mut (&b [u8])[]), v: &b [u8]) -> u64 {
     r.push(v);
     return 0;
 }
-fn pop<a, b>(r: (&mut a read<b>[])) -> read<b> {
+fn pop<a, b>(r: (&a mut (&b [u8])[])) -> &b [u8] {
     return r.pop();
 }
-fn field<a, b>(r: (&mut a Cell<b>), v: read<b>) -> u64 {
-    old := exchange(borrow_mut(r.value), v);
+fn field<a, b>(r: (&a mut Cell<b>), v: &b [u8]) -> u64 {
+    old := exchange(&mut r.value, v);
     return 0;
 }
-fn vector_test<x>(v: read<x>) -> u64 {
-    mut views = read<x>[];
-    add(borrow_mut(views), v);
-    out := pop(borrow_mut(views));
+fn vector_test<x>(v: &x [u8]) -> u64 {
+    mut views = (&x [u8])[];
+    add(&mut views, v);
+    out := pop(&mut views);
     return out[0];
 }
 pub fn run() -> u64 {
@@ -34,39 +34,39 @@ pub fn run() -> u64 {
     a.push(1);
     mut b = u8[];
     b.push(2);
-    mut view = &a;
-    old := replace(borrow_mut(view), &b);
+    mut view = view(a);
+    old := replace(&mut view, view(b));
     assert(old[0] == 1);
     assert(view[0] == 2);
     drop(old);
     drop(view);
     a.push(3);
     b.push(4);
-    mut next = &a;
-    set(borrow_mut(next), &b);
+    mut next = view(a);
+    set(&mut next, view(b));
     assert(next[0] == 2);
     drop(next);
-    mut left = &a;
-    right := &b;
+    mut left = view(a);
+    right := view(b);
     left = right;
     assert(left[0] == 2);
     drop(left);
-    mut cell = Cell { value: &a };
-    cell.value = &b;
+    mut cell = Cell { value: view(a) };
+    cell.value = view(b);
     assert(cell.value[0] == 2);
-    field(borrow_mut(cell), &a);
+    field(&mut cell, view(a));
     assert(cell.value[0] == 1);
     drop(cell);
-    mut opaque = Cell { value: &a };
-    mut r = access(borrow_mut(opaque));
-    old := exchange(r, &b);
+    mut opaque = Cell { value: view(a) };
+    mut r = access(&mut opaque);
+    old := exchange(r, view(b));
     drop(old);
     assert(opaque.value[0] == 2);
     drop(opaque);
-    mut through = Cell { value: &a };
-    set(access(borrow_mut(through)), &b);
+    mut through = Cell { value: view(a) };
+    set(access(&mut through), view(b));
     assert(through.value[0] == 2);
     drop(through);
-    assert(vector_test(&a) == 1);
+    assert(vector_test(view(a)) == 1);
     return 626;
 }

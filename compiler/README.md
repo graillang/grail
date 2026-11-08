@@ -52,8 +52,10 @@ remain `u64`; user modules still default to `i64`.
 For staged self-hosting, pass **both** `--default-u64 --typed-refs` when compiling the compiler
 sources with a migration-capable compiler. The narrow `--typed-refs` switch changes reference
 syntax independently of numeric defaults. Standard-library modules always use typed references.
-`--default-u64` without the new switch retains the old reference dialect only for historical
-regressions; ordinary user modules reject it.
+The normal native and book regression corpus also enables `--typed-refs`, including safety
+rejections; only deliberate removed-syntax rejection inputs retain the old spellings. Ordinary
+user modules reject the removed dialect and still default to `i64`. A fixture requiring legacy
+semantics must opt out with an explicit, explained `legacyRefs` marker.
 
 Bootstrap artifacts are intentionally not refreshed by this migration. Until their scheduled
 refresh, use a tree-built migration-capable compiler for development suites:

@@ -11,44 +11,44 @@ struct Outer {
     right: Inner
 }
 struct Borrowed<a> {
-    views: read<a>[]
+    views: (&a [u8])[]
 }
-fn relay<a>(r: (&mut a u64)) -> (&mut a u64) {
+fn relay<a>(r: (&a mut u64)) -> (&a mut u64) {
     return r;
 }
 fn right<a>(r: (&a Outer)) -> (&a Inner) {
-    return borrow(r.right);
+    return &r.right;
 }
-fn keep_views<a>(r: read<a>) -> Borrowed<a> {
-    mut v = read<a>[];
+fn keep_views<a>(r: &a [u8]) -> Borrowed<a> {
+    mut v = (&a [u8])[];
     v.push(r);
     return Borrowed { views: v };
 }
-fn count<a>(v: read<a>[]) -> u64 {
+fn count<a>(v: (&a [u8])[]) -> u64 {
     r := &v[0];
-    return (&(load(r))).len();
+    return (view((load(r)))).len();
 }
 pub fn run() -> u64 {
     mut b = u8[];
     b.push(7);
-    parent := &b;
-    child := &parent;
+    parent := view(b);
+    child := view(parent);
     drop(parent);
     assert(child[0] == 7);
     // A unique carrier resumes after its readonly derivation's last use.
-    m := &mut b;
-    r := &m;
+    m := view_mut(b);
+    r := view(m);
     assert(r[0] == 7);
     write(m, 0, 9);
     assert(b[0] == 9);
     // Numeric storage and references do not need heap allocations.
     mut n = 1;
-    r := relay(borrow_mut(n));
+    r := relay(&mut n);
     exchange(r, 8);
     assert(n == 8);
     mut pair = Numbers { first: 1, second: 2 };
-    a := borrow_mut(pair.first);
-    b := borrow_mut(pair.second);
+    a := &mut pair.first;
+    b := &mut pair.second;
     exchange(a, 7);
     exchange(b, 8);
     assert(pair.first + pair.second == 15);
@@ -61,15 +61,15 @@ pub fn run() -> u64 {
     assert(copied + values.len() == 3);
     // Hidden return targets keep the whole compatible frame, not a guessed projection.
     mut outer = Outer { left: Inner { n: 1 }, right: Inner { n: 2 } };
-    p := right(borrow(outer));
-    q := borrow(p.n);
+    p := right(&outer);
+    q := &p.n;
     saved := load(q);
     outer.right = Inner { n: 8 };
     assert(saved == 2);
     // Moving a reference-containing field retains its data-source guards.
     mut bytes = u8[];
     bytes.push(42);
-    box := keep_views(&bytes);
+    box := keep_views(view(bytes));
     views := box.views;
     drop(box);
     assert(count(views) == 1);

@@ -27,6 +27,6 @@ Popping an empty collection or indexing out of bounds aborts. Vectors of owners 
 their remaining elements; callers own popped elements. Byte buffers use the same `.push`, `.pop`,
 `.len` and indexing syntax. Generic vector slicing is not implemented yet; byte slicing is.
 In the approved model a loop consumes its iterable, `for value in values`; this preview copies
-scalar elements and still needs `for value in borrow(values)` for a vector of owners.
+scalar elements and still needs `for value in &values` for a vector of owners.
 
 **Try it:** use `u8[][]`, push `u8[]`, and inspect the popped buffer's length.

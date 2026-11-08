@@ -29,10 +29,8 @@ small slabs for reuse, while large single-object arenas are released immediately
 The book follows the approved syntax-v2 surface. These parts are not accepted by the preview
 compiler yet, so they appear only in prose:
 
-- `&` and `&mut` for records, vectors, maps and scalars. Those still use `borrow`/`borrow_mut`;
-  byte buffers already use `&[u8]` and `&mut [u8]`.
 - Direct temporary iteration (`for part in text.split(' ')`) in the book's `--default-u64` mode;
-  keep the explicit `parts` binding and `for part in borrow(parts)`.
+  keep the explicit `parts` binding and `for part in &parts`.
 - Map iteration with `for key, value in map`; use indexing, `get` and `entry` instead.
 
 Indexed map assignment currently updates a named map or a field path only; a temporary receiver or a

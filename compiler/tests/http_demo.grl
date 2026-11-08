@@ -20,15 +20,15 @@ fn serve(listener: u64, count: u64) -> u64 {
         if words.len() >= 2 && words[0] == "GET" {
             reply = respond(words[1].copy().text());
         }
-        host::write_fd(client, &reply);
+        host::write_fd(client, view(reply));
         host::close(client);
     }
     return count;
 }
 fn fetch(path: string, port: u64) -> string {
-    fd := host::tcp_connect(&"127.0.0.1", port);
+    fd := host::tcp_connect(view("127.0.0.1"), port);
     request := format("GET {} HTTP/1.0\n\n", path);
-    host::write_fd(fd, &request);
+    host::write_fd(fd, view(request));
     mut reply = u8[];
     while true {
         chunk := host::read_fd(fd, 1024);
@@ -45,7 +45,7 @@ fn body<s>(sc: (&s Scope<u64>), count: u64) -> u64 {
     port := host::tcp_port(listener);
     server := spawn(sc, listener, serve);
     paths := string["/".text(), "/hello/grail".text(), "/missing".text()];
-    for path in borrow(paths) {
+    for path in &paths {
         reply := fetch(path.copy().text(), port);
         status := reply.split('\n');
         println("{:<14} -> {}", path, status[0]);

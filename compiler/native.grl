@@ -4728,8 +4728,19 @@ fn borrow_place_ahead<a>(c: (&a mut C)) -> u64 {
     }
     // A named place remains a place before commas, semicolons and operators too.
     // Only a following call consumes an expression here (e.g. &make_value()).
-    if (find_local(&mut c, view(name)) != 0) & (k != 40) {
-        return true;
+    if k != 40 {
+        if find_local(&mut c, view(name)) != 0 {
+            return true;
+        }
+        if c.closure_env != 0 {
+            closure := &c.closures[c.closure_env - 1];
+            for i in closure.captures.len() {
+                captured := &closure.captures[i];
+                if same(view(captured), view(name)) {
+                    return true;
+                }
+            }
+        }
     }
     return (k == 41) + (k == 91);
 }
@@ -8636,7 +8647,8 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
             if i > 0 {
                 if (kind_at(&mut c, i - 1) == 1) {
                     prev := tok_text(&mut c, i - 1);
-                    if same(view(prev), view("mut")) {
+                    if same(view(prev), view("mut")) & ((nk == 61) + (nk == 58)) {
+                        // Only a binding declaration introduces a local; &mut capture does not.
                         t := tok_text(&mut c, i);
                         inner.push(t);
                     }

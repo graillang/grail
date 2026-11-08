@@ -14,7 +14,7 @@ can retain old guards longer than strictly necessary, and opaque local-frame wri
 retained owner witness. Opaque external writes without a recoverable invariant contract are
 rejected rather than accepted on the strength of an erased lifetime label.
 
-The approved model spells the mutable argument `&mut current`; the preview compiler still needs
-`borrow_mut(current)` for a stored view.
+The mutable argument is `&mut current`: a typed reference to the stored byte view. `view(first)`
+and `view(second)` create the views that can be exchanged through that reference.
 
 **Try it:** add `second.push(3)` before reading `current`. The live stored view should prevent it.
