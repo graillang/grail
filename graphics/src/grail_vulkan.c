@@ -368,7 +368,7 @@ static VkSamplerAddressMode vk_address(gr_address_mode mode)
 
 static gr_result vk_create_table(gr_vk_dev *dev)
 {
-    VkDescriptorPoolSize sizes[4];
+    VkDescriptorPoolSize sizes[5];
     VkDescriptorPoolCreateInfo pool_info;
     VkDescriptorSetAllocateInfo allocate;
     VkDescriptorSetLayout layouts[2];
@@ -386,12 +386,14 @@ static gr_result vk_create_table(gr_vk_dev *dev)
     sizes[2].descriptorCount = GR_BINDLESS_CAP_SAMPLERS;
     sizes[3].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     sizes[3].descriptorCount = GR_BINDLESS_CAP_STORAGE_BUFFERS;
+    sizes[4].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+    sizes[4].descriptorCount = 8;
 
     memset(&pool_info, 0, sizeof(pool_info));
     pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
     pool_info.flags = VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT;
     pool_info.maxSets = 3;
-    pool_info.poolSizeCount = 4;
+    pool_info.poolSizeCount = 5;
     pool_info.pPoolSizes = sizes;
 
     /* Full-capacity allocation needs a pool that can hold every slot. A driver may refuse the
