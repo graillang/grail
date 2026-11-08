@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Reserve `VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC` in the Vulkan descriptor pool, matching
+  set 1; the new SDL3 surface test’s validation layer had exposed the missing pool size.
+
 - Port Borg Agent's configuration loading (`borg/`). `src/toml.grl` parses and assembles the TOML
   subset Borg's configuration corpus actually uses — strings with escapes, integers in four bases,
   booleans, arrays, inline tables, `[table]` / `[a.b]` headers and comments — canonicalising keys
