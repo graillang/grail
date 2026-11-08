@@ -590,8 +590,10 @@ typedef struct gr_submit {
  * value is written to out_value, so every submission is observable without extra work. */
 gr_result gr_submit_commands(const gr_submit *submit, uint64_t *out_value);
 
-/* Maps a submission's timeline value to a monotonically comparable number usable as the
- * `after_value` of gr_device_retire. */
+/* Presents an acquired image. Acquire -> submit -> present is a per-image handoff: the
+ * backend holds image-available and per-image render-finished semaphores internally, so the
+ * caller must not re-record or resubmit a command buffer whose timeline value it has not
+ * waited for. A bounded frame ring (one frame in flight is sufficient) makes that explicit. */
 gr_result gr_queue_present(gr_handle queue, gr_handle swapchain, uint32_t image_index,
                            uint64_t wait_value, uint64_t *out_value);
 
@@ -627,8 +629,9 @@ gr_result gr_swapchain_create(gr_handle device, const gr_swapchain_desc *desc,
 /* The swapchain's actual format and extent, after any backend correction. */
 gr_result gr_swapchain_info(gr_handle swapchain, gr_format *out_format, uint32_t *out_width,
                             uint32_t *out_height, uint32_t *out_image_count);
-/* Acquires the next image. GR_TIMEOUT means nothing was ready. out_needs_recreate is 1 when
- * the swapchain is out of date (resize, format change) and must be rebuilt. */
+/* Acquires the next image and its view. GR_TIMEOUT means nothing was ready. out_needs_recreate
+ * is 1 when the swapchain is out of date (resize, format change) and must be rebuilt. The
+ * returned image is owned by the swapchain until the matching gr_queue_present. */
 gr_result gr_swapchain_acquire(gr_handle swapchain, uint64_t timeout_ns,
                                uint32_t *out_image_index, gr_handle *out_view,
                                int32_t *out_needs_recreate);
