@@ -2,9 +2,13 @@
 
 ## Unreleased
 
-- Port Borg Agent's permission gates (`borg/`). `src/permission.grl` carries the three permission modes, the three approval decisions, and the rules a gate applies: the requested workspace root must sit under a canonical enrolled root, a path must be relative and free of traversal components, a symlink on the way is refused outright, and containment is component-wise so a `/w` root does not cover `/work`. The denial reasons are Borg's own strings, and an `allow_session` grant covers later calls of the same tool and scope while `allow_once` does not. The port now checks 921 reference lines over 200 documents, with `--anchors` verifying 74 copied snippets across thirteen source files.
-
-- Port Borg Agent's typed transcript events (`borg/`). `src/events.grl` carries the `SessionEvent` envelope and five `SessionEventKind` payloads — `session_started`, `session_titled`, `status_changed`, `message`, `message_delta` — with the serialization rules the Rust derive applies: an always-written `generated` flag, `usage_tokens` as a number, an always-written nullable `detail` and `delivery`, and `attachments` omitted when empty. An unknown kind is refused by name rather than half-decoded. Each event is compared on decoded fields, the exact wire text and a round-trip; the wire comparison caught `usage_tokens` being encoded as a string. The port now checks 890 reference lines over 173 documents, with `--anchors` verifying 66 copied snippets across twelve source files.
+- Abundance CPU port, RHI bridge framing: `abundance/src/rhi_bridge.grl` packs and unpacks the
+  graphics foundation's `gr_wire_packet` exactly as `graphics/src/grail_wire.c` does — 40-byte
+  header, magic/version/op/request/status/sequence/aux, payload, with the 1 MiB packet bound — so a
+  host driving `grail_null.c` reads what a Grail program writes. Three packets and three refusals
+  are gated byte-for-byte against the C framing: 30 exact values, suite total 313 across nine
+  programs. Bounded and stated: the host half (null backend init, render target, one pass,
+  readback) is the next increment; no device is created here.
 
 - Abundance CPU port, asset-package increment: `abundance/src/asset_package.grl` carries the ABPKG1
   package header (id, payload hash, payload bytes, ascending dependency ids), package ids and
