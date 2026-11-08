@@ -1515,19 +1515,16 @@ gr_result gr_cmd_bind_pipeline(gr_handle cmd_handle, gr_handle pipeline_handle)
     return GR_OK;
 }
 
-gr_result gr_cmd_push_constants(gr_handle cmd_handle, uint32_t stage_mask, uint32_t offset,
-                                gr_span_u8 data)
+gr_result gr_cmd_push_constants(gr_handle cmd_handle, uint32_t offset, gr_span_u8 data)
 {
     if (gr_active_backend() == GR_BACKEND_VULKAN)
-        return gr_vk_abi_cmd_push_constants(cmd_handle, stage_mask, offset, data);
+        return gr_vk_abi_cmd_push_constants(cmd_handle, offset, data);
     gr_result status;
     gr_null_cmd *cmd = null_cmd(cmd_handle, &status);
     if (!cmd)
         return status;
     if (cmd->state != GR_CMD_RECORDING)
         return GR_ERROR_NOT_READY;
-    if (stage_mask == 0)
-        return GR_ERROR_INVALID_ARGUMENT;
     if (!data.data && data.len)
         return GR_ERROR_INVALID_ARGUMENT;
     /* The 128-byte limit is a device property; exceeding it must fail here rather than on a
@@ -1699,6 +1696,8 @@ gr_result gr_cmd_dispatch(gr_handle cmd_handle, uint32_t x, uint32_t y, uint32_t
 
 gr_result gr_cmd_dispatch_indirect(gr_handle cmd_handle, gr_handle buffer, uint64_t offset)
 {
+    if (gr_active_backend() == GR_BACKEND_VULKAN)
+        return gr_vk_abi_cmd_dispatch_indirect(cmd_handle, buffer, offset);
     gr_result status;
     gr_null_cmd *cmd = null_cmd(cmd_handle, &status);
     gr_null_buffer *b;

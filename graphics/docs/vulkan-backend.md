@@ -139,6 +139,22 @@ That also needed several formats the map lacked (`R32G32_FLOAT`, `R16G16B16A16_U
 a missing entry reported `UNSUPPORTED` at pipeline creation rather than silently producing a broken
 pipeline, which is why it surfaced immediately.
 
+## Push constants: no stage mask
+
+`gr_cmd_push_constants` takes an offset and bytes, not a stage mask. The pipeline layout declares
+which stages may read which byte range, and Vulkan requires the call to name exactly those stages
+for the bytes it writes — narrower is a validation error, wider is meaningless. The backend derives
+the mask by intersecting the layout's declared ranges with `[offset, offset + size)`, so the two
+cannot disagree. A caller that wants per-stage constants changes the layout, which is the only place
+the decision can live without a second source of truth.
+
+`gr_push_constant_stage_mask` is pure C over plain integers, so the derivation is tested without a
+GPU against three layouts: the real one (a single range covering every stage), a two-range layout
+with disjoint vertex/compute stages where each half names exactly its own stage and a spanning write
+names both, and a three-range layout where the result is the union over all overlapping ranges. A
+write falling outside every range names nothing, and the backend refuses it as a programming error
+rather than writing bytes no stage can read. `GR_ABI_VERSION_MINOR` is 3 for the signature change.
+
 ## Indirect draws
 
 `gr_cmd_draw_indexed_indirect` takes an argument buffer, an offset, a count and a stride. The stride
@@ -151,6 +167,12 @@ The test issues the same triangle three times: twice directly and once indirectl
 readback digest is **identical** to the first. That is the check that matters — an indirect path can
 easily draw nothing and still "succeed", and a digest that merely differs from the clear colour
 would not tell you whether the argument block was read as the command it holds.
+
+## Indirect draws and dispatches
+
+`gr_cmd_draw_indexed_indirect` and `gr_cmd_dispatch_indirect` both validate their argument block
+against the buffer's size and require `GR_BUFFER_USAGE_INDIRECT`: 20 bytes per indexed draw command
+with a stride that is a multiple of 4, and 12 bytes for a dispatch (`groupCountX/Y/Z`).
 
 ## Evidence
 

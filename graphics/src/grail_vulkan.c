@@ -97,6 +97,7 @@ typedef struct gr_vk_dev {
     PFN_vkCmdDraw cmd_draw;
     PFN_vkCmdDrawIndexed cmd_draw_indexed;
     PFN_vkCmdDrawIndexedIndirect cmd_draw_indexed_indirect;
+    PFN_vkCmdDispatchIndirect cmd_dispatch_indirect;
     PFN_vkCmdBindVertexBuffers cmd_bind_vertex_buffers;
     PFN_vkCmdBindIndexBuffer cmd_bind_index_buffer;
     PFN_vkCmdCopyImageToBuffer cmd_copy_image_to_buffer;
@@ -144,6 +145,10 @@ typedef struct gr_vk_dev {
     PFN_vkGetPhysicalDeviceSurfaceFormatsKHR surface_formats;
     PFN_vkGetPhysicalDeviceSurfacePresentModesKHR surface_present_modes;
     PFN_vkGetPhysicalDeviceSurfaceSupportKHR surface_support;
+    /* The pipeline layout's push-constant ranges, as declared. The push path derives its stage mask
+     * from these rather than repeating a constant. */
+    struct { uint32_t offset, size, stages; } push_ranges[4];
+    uint32_t push_range_count;
     uint32_t present_family;
     /* Swapchains are owned by the device for teardown: each holds a VkSurfaceKHR created with the
      * instance, and a surface outliving its instance is a validation error (00629). */
@@ -348,6 +353,10 @@ static gr_result vk_create_layout(gr_vk_dev *dev)
     push.stageFlags = VK_SHADER_STAGE_ALL;
     push.offset = 0;
     push.size = GR_PUSH_CONSTANT_BYTES;
+    dev->push_ranges[0].offset = 0;
+    dev->push_ranges[0].size = GR_PUSH_CONSTANT_BYTES;
+    dev->push_ranges[0].stages = VK_SHADER_STAGE_ALL;
+    dev->push_range_count = 1;
 
     layouts[0] = dev->set0;
     layouts[1] = dev->set1;
@@ -365,6 +374,26 @@ static gr_result vk_create_layout(gr_vk_dev *dev)
 /* Defined with the buffer path below; the barrier and readback code need them before then. */
 static gr_vk_buffer *vk_buffer_of(gr_handle handle);
 static VkImageLayout vk_layout(uint32_t state);
+
+/* The derivation the ABI describes: which stages a push-constant write must name. Kept pure and
+ * free of Vulkan types so it can be tested for multi-stage layouts without a device. */
+uint32_t gr_push_constant_stage_mask(const uint32_t *range_offsets, const uint32_t *range_sizes,
+                                     const uint32_t *range_stages, uint32_t range_count,
+                                     uint32_t offset, uint32_t size)
+{
+    uint32_t stages = 0, i;
+    if (!range_offsets || !range_sizes || !range_stages || size == 0)
+        return 0;
+    for (i = 0; i < range_count; ++i) {
+        uint32_t range_start = range_offsets[i];
+        uint32_t range_end = range_start + range_sizes[i];
+        uint32_t write_end = offset + size;
+        if (write_end <= range_start || offset >= range_end)
+            continue; /* no overlap */
+        stages |= range_stages[i];
+    }
+    return stages;
+}
 
 /* The layer's callback. It runs on whichever thread made the offending call, so it only touches
  * the device's own counters; a test reads them after a wait_idle. */
@@ -965,6 +994,7 @@ gr_result gr_vk_abi_device_create(const gr_device_desc *desc, gr_handle *out_dev
     dev->cmd_draw = GR_VK_DEVICE_LOAD(dev, vkCmdDraw);
     dev->cmd_draw_indexed = GR_VK_DEVICE_LOAD(dev, vkCmdDrawIndexed);
     dev->cmd_draw_indexed_indirect = GR_VK_DEVICE_LOAD(dev, vkCmdDrawIndexedIndirect);
+    dev->cmd_dispatch_indirect = GR_VK_DEVICE_LOAD(dev, vkCmdDispatchIndirect);
     dev->cmd_bind_vertex_buffers = GR_VK_DEVICE_LOAD(dev, vkCmdBindVertexBuffers);
     dev->cmd_bind_index_buffer = GR_VK_DEVICE_LOAD(dev, vkCmdBindIndexBuffer);
     dev->cmd_copy_image_to_buffer = GR_VK_DEVICE_LOAD(dev, vkCmdCopyImageToBuffer);
@@ -2542,8 +2572,7 @@ gr_result gr_vk_abi_cmd_bind_pipeline(gr_handle cmd_handle, gr_handle pipeline_h
     return GR_OK;
 }
 
-gr_result gr_vk_abi_cmd_push_constants(gr_handle cmd_handle, uint32_t stage_mask, uint32_t offset,
-                                       gr_span_u8 data)
+gr_result gr_vk_abi_cmd_push_constants(gr_handle cmd_handle, uint32_t offset, gr_span_u8 data)
 {
     gr_vk_cmdbuf *cmd = (gr_vk_cmdbuf *)gr_object_lookup(gr_objects(), cmd_handle,
                                                          GR_HANDLE_CMD_BUFFER, NULL);
@@ -2554,13 +2583,21 @@ gr_result gr_vk_abi_cmd_push_constants(gr_handle cmd_handle, uint32_t stage_mask
         return GR_ERROR_NOT_READY;
     if (offset + data.len > GR_PUSH_CONSTANT_BYTES)
         return GR_ERROR_INVALID_ARGUMENT;
-    /* The bindless layout declares one push-constant range covering every stage, and the spec
-     * requires the call's stageFlags to include every stage the overlapping range declares. So the
-     * call must name the layout's stages, not a subset of the caller's: a narrower mask is a
-     * validation error (offset-01795), which is how this was found. The ABI's stage_mask cannot
-     * narrow it without per-pipeline layouts, which the one-layout contract forbids. */
-    (void)stage_mask;
-    stages = VK_SHADER_STAGE_ALL;
+    /* Derived from the layout's declared ranges, not assumed: the spec requires the call to name
+     * exactly the stages whose declared ranges the write touches. */
+    {
+        uint32_t offsets[4], sizes[4], masks[4], i;
+        for (i = 0; i < cmd->device->push_range_count && i < 4u; ++i) {
+            offsets[i] = cmd->device->push_ranges[i].offset;
+            sizes[i] = cmd->device->push_ranges[i].size;
+            masks[i] = cmd->device->push_ranges[i].stages;
+        }
+        stages = (VkShaderStageFlags)gr_push_constant_stage_mask(offsets, sizes, masks,
+                                                                 cmd->device->push_range_count,
+                                                                 offset, (uint32_t)data.len);
+    }
+    if (stages == 0)
+        return GR_ERROR_INVALID_ARGUMENT; /* the write falls in no declared range */
     cmd->device->cmd_push_constants(cmd->cb, cmd->device->layout, stages, offset,
                                     (uint32_t)data.len, data.data);
     return GR_OK;
@@ -2623,6 +2660,26 @@ gr_result gr_vk_abi_cmd_draw_indexed(gr_handle cmd_handle, const gr_draw_indexed
     cmd->device->cmd_draw_indexed(cmd->cb, draw->index_count, draw->instance_count,
                                   draw->first_index, (int32_t)draw->vertex_offset,
                                   draw->first_instance);
+    return GR_OK;
+}
+
+gr_result gr_vk_abi_cmd_dispatch_indirect(gr_handle cmd_handle, gr_handle buffer_handle,
+                                         uint64_t offset)
+{
+    gr_vk_cmdbuf *cmd = (gr_vk_cmdbuf *)gr_object_lookup(gr_objects(), cmd_handle,
+                                                         GR_HANDLE_CMD_BUFFER, NULL);
+    gr_vk_buffer *buffer = vk_buffer_of(buffer_handle);
+
+    if (!cmd || !buffer)
+        return GR_ERROR_INVALID_HANDLE;
+    if (!cmd->recording)
+        return GR_ERROR_NOT_READY;
+    /* A dispatch argument block is three uint32s: groupCountX, Y, Z. */
+    if (offset + 12ull > buffer->size)
+        return GR_ERROR_INVALID_ARGUMENT;
+    if (!(buffer->usage & GR_BUFFER_USAGE_INDIRECT))
+        return GR_ERROR_INVALID_ARGUMENT;
+    cmd->device->cmd_dispatch_indirect(cmd->cb, buffer->buffer, offset);
     return GR_OK;
 }
 
@@ -3593,9 +3650,10 @@ gr_result gr_vk_abi_cmd_end_render(gr_handle c) { (void)c; return GR_ERROR_UNSUP
 gr_result gr_vk_abi_cmd_set_viewport(gr_handle c, float x, float y, float w, float h, float n, float f) { (void)c; (void)x; (void)y; (void)w; (void)h; (void)n; (void)f; return GR_ERROR_UNSUPPORTED; }
 gr_result gr_vk_abi_cmd_set_scissor(gr_handle c, int32_t x, int32_t y, uint32_t w, uint32_t h) { (void)c; (void)x; (void)y; (void)w; (void)h; return GR_ERROR_UNSUPPORTED; }
 gr_result gr_vk_abi_cmd_bind_pipeline(gr_handle c, gr_handle p) { (void)c; (void)p; return GR_ERROR_UNSUPPORTED; }
-gr_result gr_vk_abi_cmd_push_constants(gr_handle c, uint32_t s, uint32_t o, gr_span_u8 d) { (void)c; (void)s; (void)o; (void)d; return GR_ERROR_UNSUPPORTED; }
+gr_result gr_vk_abi_cmd_push_constants(gr_handle c, uint32_t o, gr_span_u8 d) { (void)c; (void)o; (void)d; return GR_ERROR_UNSUPPORTED; }
 gr_result gr_vk_abi_cmd_draw(gr_handle c, const gr_draw *d) { (void)c; (void)d; return GR_ERROR_UNSUPPORTED; }
 gr_result gr_vk_abi_cmd_dispatch(gr_handle c, uint32_t x, uint32_t y, uint32_t z) { (void)c; (void)x; (void)y; (void)z; return GR_ERROR_UNSUPPORTED; }
+gr_result gr_vk_abi_cmd_dispatch_indirect(gr_handle c, gr_handle b, uint64_t o) { (void)c; (void)b; (void)o; return GR_ERROR_UNSUPPORTED; }
 gr_result gr_vk_abi_cmd_draw_indexed(gr_handle c, const gr_draw_indexed *d) { (void)c; (void)d; return GR_ERROR_UNSUPPORTED; }
 gr_result gr_vk_abi_cmd_draw_indexed_indirect(gr_handle c, gr_handle b, uint64_t o, uint32_t n, uint32_t s) { (void)c; (void)b; (void)o; (void)n; (void)s; return GR_ERROR_UNSUPPORTED; }
 gr_result gr_vk_abi_cmd_bind_vertex_buffer(gr_handle c, uint32_t s, gr_handle b, uint64_t o) { (void)c; (void)s; (void)b; (void)o; return GR_ERROR_UNSUPPORTED; }

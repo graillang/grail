@@ -489,7 +489,7 @@ int main(int argc, char **argv)
                      GR_OK);
             CHECK_EQ(gr_cmd_set_scissor(cmd, 0, 0, kSize, kSize), GR_OK);
             CHECK_EQ(gr_cmd_bind_pipeline(cmd, pipeline_solid), GR_OK);
-            CHECK_EQ(gr_cmd_push_constants(cmd, 2u, 0,
+            CHECK_EQ(gr_cmd_push_constants(cmd, 0,
                                            (gr_span_u8){ (const uint8_t *)tint, sizeof(tint) }),
                      GR_OK);
             memset(&draw, 0, sizeof(draw));
@@ -715,7 +715,7 @@ int main(int argc, char **argv)
             push[1] = 1; /* exposure_enabled */
             push[2] = 0;
             push[3] = 0;
-            CHECK_EQ(gr_cmd_push_constants(cmd, 2u, 0,
+            CHECK_EQ(gr_cmd_push_constants(cmd, 0,
                                            (gr_span_u8){ (const uint8_t *)push, sizeof(push) }),
                      GR_OK);
             memset(&draw, 0, sizeof(draw));
@@ -854,7 +854,7 @@ int main(int argc, char **argv)
             /* Seed 1 second time so the first two runs are the same seed and the last differs. */
             push[0] = slot;
             push[1] = kCount;
-            push[2] = seed < 2u ? 12345u : 999u; /* two runs at one seed, then a different one */
+            push[2] = seed < 2u ? 12345u : 999u; /* seed 0/1 identical, seed 2 different */
             push[3] = 0;
 
             CHECK_EQ(gr_cmd_reset(cmd), GR_OK);
@@ -868,10 +868,29 @@ int main(int argc, char **argv)
             CHECK_EQ(gr_cmd_barrier(cmd, &barrier, 1), GR_OK);
 
             CHECK_EQ(gr_cmd_bind_pipeline(cmd, pipeline_compute), GR_OK);
-            CHECK_EQ(gr_cmd_push_constants(cmd, 4u, 0,
+            CHECK_EQ(gr_cmd_push_constants(cmd, 0,
                                            (gr_span_u8){ (const uint8_t *)push, sizeof(push) }),
                      GR_OK);
-            CHECK_EQ(gr_cmd_dispatch(cmd, 1, 1, 1), GR_OK); /* 64 threads, one per counter */
+            /* The same dispatch issued indirectly on the third run, so the readback proves the
+             * argument block, not the call. */
+            if (seed == 2u) {
+                uint32_t groups[3];
+                gr_buffer_desc gd2;
+                gr_handle groups_buffer = GR_NULL_HANDLE;
+                groups[0] = 1; groups[1] = 1; groups[2] = 1;
+                memset(&gd2, 0, sizeof(gd2));
+                gd2.head.size = (uint32_t)sizeof(gd2);
+                gd2.size = sizeof(groups);
+                gd2.usage = GR_BUFFER_USAGE_INDIRECT | GR_BUFFER_USAGE_TRANSFER_DST;
+                gd2.memory = GR_MEMORY_UPLOAD;
+                CHECK_EQ(gr_buffer_create(device, &gd2, &groups_buffer), GR_OK);
+                CHECK_EQ(gr_buffer_write(groups_buffer, 0,
+                                         (gr_span_u8){ (const uint8_t *)groups, sizeof(groups) }),
+                         GR_OK);
+                CHECK_EQ(gr_cmd_dispatch_indirect(cmd, groups_buffer, 0), GR_OK);
+            } else {
+                CHECK_EQ(gr_cmd_dispatch(cmd, 1, 1, 1), GR_OK); /* 64 threads, one per counter */
+            }
 
             memset(&barrier, 0, sizeof(barrier));
             barrier.resource = buffer;
@@ -914,7 +933,8 @@ int main(int argc, char **argv)
                 CHECK(all_match);
             }
         }
-        printf("vk-backend: compute digest seed 12345 = 0x%016llx (twice), seed 999 = 0x%016llx\n",
+        printf("vk-backend: compute digest seed 12345 = 0x%016llx (direct, twice), "
+               "seed 999 indirect = 0x%016llx\n",
                (unsigned long long)digests[0], (unsigned long long)digests[2]);
         /* Deterministic for a fixed seed, and genuinely driven by it. */
         CHECK_EQ(digests[0], digests[1]);
@@ -1066,7 +1086,7 @@ int main(int argc, char **argv)
                     push[2] = 0;
                     push[3] = 0;
                 }
-                CHECK_EQ(gr_cmd_push_constants(cmd, 2u, 0,
+                CHECK_EQ(gr_cmd_push_constants(cmd, 0,
                                                (gr_span_u8){ (const uint8_t *)push, sizeof(push) }),
                          GR_OK);
                 memset(&draw, 0, sizeof(draw));
