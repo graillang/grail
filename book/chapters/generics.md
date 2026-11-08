@@ -1,9 +1,9 @@
 # Generic types and functions
 
 Declare a type parameter directly: `fn identity<T>(value:T)->T`. Uppercase generic names are
-types. Lowercase lifetime names appear directly in reference and view types and are inferred;
-they are never listed in `<...>`. Concrete arguments are ordinary types, such as `u64`,
-`u8[]`, or `u8[][]`. If a declaration also has lifetimes, put them before type parameters.
+types. Lifetime names are lowercase, appear inside reference types such as `&a [u8]`, and are
+inferred from the signature; they are never listed in `<...>`. Concrete arguments are ordinary
+types, such as `u64`, `u8[]`, or `u8[][]`.
 
 Interface bounds can use an imported name:
 

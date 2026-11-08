@@ -8,9 +8,12 @@ reproduces itself through assembly. Owned values are released deterministically;
 tracing garbage collector or C runtime in the native path. The checker rejects conflicting
 borrows and escaping locals, and generic code treats unknown values as affine.
 
-**This book teaches the current Linux x86-64, ARM64 and RISC-V 64 native compiler, not a promised final language.**
-The syntax and tooling are still evolving. See *Current boundaries* before depending on an
-unsupported feature. Tests are evidence of behavior, not a language soundness proof.
+**This book teaches the current Linux x86-64, ARM64 and RISC-V 64 native compiler, and the
+approved syntax-v2 surface it is converging on.** Where the compiler has not caught up—map literals
+and indexing, `entry.or_insert`, `&` for non-byte owners, direct temporary iteration—the text names
+the approved form and says so, and compiled examples stay on forms the preview accepts. The syntax
+and tooling are still evolving. See *Current boundaries* before depending on an unsupported feature.
+Tests are evidence of behavior, not a language soundness proof.
 
 ## How to use the examples
 

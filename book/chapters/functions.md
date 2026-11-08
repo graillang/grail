@@ -15,6 +15,7 @@ as a scalar; moving that result transfers responsibility for cleanup to its call
 Functions have fixed arity; general variadics are not implemented. The current native ABI
 supports at most six one-word parameters. `unit` is the no-value type,
 written `()` as a value; a function with no result annotation returns unit. Its closing brace supplies the normal
-return; `return ();` can still be used for an explicit early exit.
+return. There are no tail-expression returns: a function that produces a value uses `return`, and
+`return ();` is still available for an explicit early exit.
 
 **Try it:** replace the recursive implementation with a loop using two numeric `mut` bindings.

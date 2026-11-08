@@ -1,7 +1,8 @@
 # Grail by Example
 
-An offline, example-first introduction to the **implemented native language**: 20 chapters,
-32 checked Grail programs, each with a checked Rust comparison (including paired helper modules). Rust comparisons are on by default,
+An offline, example-first introduction to the **implemented native language and the approved
+syntax-v2 surface**: 28 chapters, 45 checked Grail programs, each with a checked Rust comparison
+(including paired helper modules). Rust comparisons are on by default,
 with aligned code and output beside Grail on wide screens and a note below. The global toggle
 remembers an explicit choice across chapters. Light mode is the default; a chosen theme is saved.
 Narrow screens stack the two versions. Search, copy buttons, theme switching and keyboard

@@ -1,7 +1,8 @@
 # Borrowing and last use
 
-A shared view allows reads while excluding conflicting mutation, growth and movement of its
-source. The frontend can end a borrow at its last use, not only at the closing brace.
+A shared borrow allows reads while excluding conflicting mutation, growth and movement of its
+source. Borrow a byte buffer with `&data`; other owners still use `borrow(owner)` in this preview.
+The compiler can end a borrow at its last use, not only at the closing brace.
 
 {{example:borrows}}
 
@@ -18,10 +19,12 @@ one exact field.
 
 ## Borrowing a temporary
 
-`borrow(...)` and `borrow_mut(...)` also accept any expression, not just a variable or field. The
-value is kept alive until the end of the enclosing block, like a hidden binding, so the reference
-can outlive its statement but never its block:
+`borrow(expression)` keeps a temporary alive until the end of the enclosing block, like a hidden
+binding, so the reference can outlive its statement but never its block:
 
 {{example:borrow-temporary}}
+
+The approved model spells this `&expression`. For records, vectors and scalars the preview compiler
+still requires `borrow`; the byte-buffer form `&data` is already accepted.
 
 **Try it:** reorder the last two operations in the rejected example without changing the owner.

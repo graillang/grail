@@ -1,7 +1,7 @@
 # Arguments, files and commands
 
-A `main` entry may take one readonly byte view for exactly one command-line argument.
-The manifest supplies `grail` when verifying this example.
+A `main` entry may take one readonly byte view, spelled `&[u8]`, for exactly one command-line
+argument. The manifest supplies `grail` when verifying this example.
 
 {{example:arguments}}
 
@@ -12,8 +12,9 @@ access is explicit through `host`. File byte buffers remain owned values:
 
 The runner creates `note.txt` containing `Grail` and a newline in this example's scratch directory.
 It verifies that `copy.txt` contains the same bytes. It never writes those names into your project
-root. The low-level host interface is not a rich error-handling library; for example, file-read failures
-abort in the current native runtime rather than returning a typed error union.
+root. `&"note.txt"` is a readonly view of the literal. The low-level host interface is not a rich
+error-handling library; for example, file-read failures abort in the current native runtime rather
+than returning a typed error union.
 
 {{example:commands}}
 

@@ -11,7 +11,8 @@ be used after its move, even though the underlying object still exists under a n
 
 {{example:moved-value}}
 
-This is an intentional compile error. To keep data usable in two places, borrow it, or request an
-explicit copy such as `data.copy()` when a separate buffer is really wanted.
+This is an intentional compile error. To keep data usable in two places, take a shared borrow
+(`&data` for a byte buffer, or `borrow(owner)` for the owners this preview does not borrow with `&`),
+or request an explicit copy such as `data.copy()` when a separate buffer is really wanted.
 
 **Try it:** repair the rejected example by printing `moved.len()` instead.

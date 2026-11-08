@@ -7,15 +7,18 @@ enum and hands the active payload to its arm. Cover every variant.
 
 `T?` represents an optional value, with `Some` and `None` variants. A structural union such as
 `T | U` holds a value of either member type: return a member directly and match it by type.
-Matches must cover every member, or use a final `_` arm. In a union used for propagation, the
-first member is success; postfix `?` returns any other member to a compatible return union, while
-postfix `!` extracts success and aborts on failure.
+Matches must cover every member, or use a final `_` arm. An ordinary union is unordered and carries
+no success/failure meaning, so `?` does not apply to it.
+
+A result `S |? F` separates success alternatives from failure alternatives. Postfix `?` returns a
+failure member to a compatible result return, while postfix `!` extracts success and aborts on
+failure. `?` yields `S`; every `F` must map to a distinct failure alternative in the caller's result,
+and a failure cannot silently become the caller's success.
 
 A union may contain records, vectors, maps and optional values. Type arguments compose:
 `u8[] |? io::Error`, `[K: V]?`, and `(u64 | string)[]` are all ordinary types. Parentheses are
 needed when a union is an element type or the referent of a reference: `&T`, `&a T`, or
-`&a mut T`. An enum payload may itself be
-a union.
+`&a mut T`. An enum payload may itself be a union.
 
 ```grl
 struct ParseError { message: string }
@@ -29,9 +32,8 @@ fn forward(flag: u64) -> bool | u64 |? ParseError {
 }
 ```
 
-Matching selects members by their types, not by declaration names. A result union `S |? F` separates success alternatives from failure alternatives.
-`?` yields `S`; every `F` must map to a distinct failure alternative in the caller's return
-result. Ordinary `T | U` unions carry no success/failure meaning. A failure cannot silently become the caller's success.
+Matching selects members by their types, not by declaration names. Name the payload in a member
+pattern (`data: u8[]`) or match the bare type. There are no tuple patterns.
 Generic calls and constructors infer a type parameter when exactly one unbound union member fits;
 they reject the call if the choice is ambiguous or the inferred union would contain the same
 member twice.
@@ -49,5 +51,8 @@ moved out. The borrow ends at the last use of those payload references, so an ar
 `value` itself. Using a payload after that assignment is rejected.
 
 {{example:match-update}}
+
+The approved model spells this `match &value`; the preview compiler still requires `borrow` for
+non-byte owners.
 
 **Try it:** swap which flag reaches `forward`, and use `match` to inspect both paths.

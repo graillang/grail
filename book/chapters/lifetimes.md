@@ -1,30 +1,34 @@
 # Lifetimes describe relationships
 
-Lifetimes are inferred relationships, not a list you declare on a function. `&T` and `&mut T`
-elide the lifetime; all elided references in one function signature share one inferred lifetime.
-`read<a>` names a view lifetime derived from the inputs. `&a T` and `&a mut T` explicitly name
-separate lifetime groups when one shared lifetime is not the contract you want:
+A lifetime is an inferred relationship between references, not a list you declare on a function.
+Every elided input reference gets its own fresh lifetime. `&a T` and `&a mut T` name those
+relationships when one shared name is not the contract you want; `a` is bound by the signature, so
+there is no `<a>` parameter list. `read<a>` is not part of this surface: a read-only byte view is
+`&[u8]`.
+
+An elided output reference uses the receiver's lifetime for a method, and otherwise the lifetime of
+the sole input reference. When more than one input could flow to the result, write the relationship
+out:
 
 ```grl
-fn choose(left: &a u64, right: &b u64) -> &a u64
+fn relay(value: &[u8]) -> &[u8] { return value; }             // sole input supplies the output
+fn choose(left: &a [u8], right: &b [u8]) -> &a [u8] { return left; } // two groups, one output
 ```
-
-`a` and `b` are implicitly bound by the signature; no `<a, b>` declaration is needed. A lifetime
-name is not a heap allocation, a target identity, or a request to extend a value's life.
-
-Stored references are part of a nominal type, so struct and enum declarations still name the
-lifetimes they store: `struct Cursor<a> { source: &a T }`. Function and method signatures do not.
 
 {{example:lifetimes}}
 
-The relay can return its input view. Its caller still has to retain the concrete owner. This
-cannot be used to smuggle a view of a local allocation out of a function:
+The relay can return its input view, and its caller still owns `data`. A signature cannot smuggle a
+view of a local allocation out of a function:
 
 {{example:escaping-local}}
 
-Changing a lifetime name does not repair this error. Return the owned buffer instead, or borrow
+Changing the lifetime name does not repair this error. Return the owned buffer instead, or borrow
 storage supplied by the caller.
 
+Stored references are part of a nominal type, so struct and enum declarations still name the
+lifetimes they store: `struct Cursor<a> { source: &a [u8] }`. Function and method signatures do not.
+
+A lifetime name is not a heap allocation, a target identity, or a request to extend a value's life.
 Distinct mutable inputs remain distinct abstract targets even if they use one lifetime label.
 Returned borrows conservatively retain compatible input origins; this is deliberately more
 restrictive than guessing which projection an opaque function returned.

@@ -38,9 +38,15 @@ devices and FFI remain v3 semantic work. They are deferred, not rejected.
 - Iteration: consume the iterable; `&v` and `&mut v` borrow. Map iteration uses named `Entry`
   records, with `for key, value in map` as loop-header sugar, not a tuple protocol. Keys are never
   mutable through iteration.
-- Maps: `[K: V]`, `["a": 1]`, `[:]`, `[K: V]::with_seed(seed)`, methods `len`, `contains`, `get`,
-  `get_mut`, `insert`, `remove`, `entry`; no insertion through indexing.
-- Syntax: `:=`, `mut`, `fn`, explicit `<T>`; no tuples. Uppercase nominal/library types and
+- Maps: `[K: V]`, `["a": 1]`, `[:]`, `[K: V]::with_seed(seed)`, and method-first `len`, `contains`,
+  `get`, `get_mut`, `insert`, `remove`, `entry`. Dotted lookup methods borrow the key and return
+  optionals; `insert` takes ownership. `m[key]` is a required-key read that aborts when the key is
+  absent, `m[key] = value` updates an existing key, and indexing never inserts. `entry` returns
+  `Entry?` rather than requiring an Entry-shaped call site, and `entry.or_insert(value)` is the
+  explicit insert-when-absent form; there is no hidden Entry requirement.
+- Syntax: `:=`, `mut`, `fn`, explicit `<T>`; record literals and patterns use field punning
+  (`Point { x, y }`); no tail-expression returns, so a non-unit function returns with `return`; no
+  tuples. Uppercase nominal/library types and
   interfaces (`Atomic<T>`, `Mutex<T>`, `Scope<C>`, `Task<R>`, `CancelToken`, `Fn`, `Self`);
   lowercase primitives, functions, fields and lifetimes; uppercase type parameters. `use
   module::Name` imports members; `::` paths; `.` fields and methods.

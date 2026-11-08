@@ -28,8 +28,9 @@ On small screens the comparison stacks vertically; you can collapse it at any ti
 
 For raw compiler commands and self-compilation instructions, see `compiler/NATIVE.md`.
 A `main` may explicitly return `u64` to set the process exit status; it does not print that number.
-Ordinary functions use explicit result types when returning values. A source file may also declare
-an explicit `module`, as later examples do to make their names clear.
+Ordinary functions use explicit result types when returning values, and there are no tail-expression
+returns: a function that produces a value ends that path with `return`. A source file may also
+declare an explicit `module`, as later examples do to make their names clear.
 
 **Try it:** add a second `println` call, or use `print("Hello, "); println("world!");` to control
 where the newline appears.

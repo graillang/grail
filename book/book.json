@@ -319,7 +319,7 @@
       "output": "42\n",
       "rust": {
         "source": "rust/lifetimes.rs",
-        "note": "Grail names lifetime parameters without apostrophes. Rust could elide this single input/output lifetime; it is written explicitly here to show the relationship. Rust shared references are Copy; Grail view handles passed by value are affine and may require explicit derivation.",
+        "note": "Both return their only input view. Grail elides the lifetime on both sides: every elided input gets a fresh lifetime, and a sole input lifetime flows to an elided output. Rust could elide it too; it is written explicitly here to show the relationship. Rust shared references are Copy; Grail view handles passed by value are affine and may require explicit derivation.",
         "output": "42\n"
       }
     },
@@ -329,7 +329,7 @@
       "diagnostic": "escapes",
       "rust": {
         "source": "rust/escaping-local.rs",
-        "note": "Both reject returning a view into a local owner. A lifetime annotation cannot keep that allocation alive.",
+        "note": "Both reject returning a view into a local owner, even though the signature declares an input lifetime. A lifetime annotation cannot keep that allocation alive.",
         "diagnostic": "E0515"
       }
     },
@@ -339,7 +339,7 @@
       "output": "4\n",
       "rust": {
         "source": "rust/records.rs",
-        "note": "Both support partial moves and drop the remaining owned fields. Rust’s String construction makes the owned-text comparison explicit.",
+        "note": "Both support partial moves and drop the remaining owned fields. Both use field punning: Message { body, label } names each field once. Rust’s String construction makes the owned-text comparison explicit.",
         "output": "4\n"
       }
     },
@@ -369,7 +369,7 @@
       "output": "7\n",
       "rust": {
         "source": "rust/errors.rs",
-        "note": "Rust uses Result; Grail uses a structural u8[] |? string result. A member value is returned directly and ? propagates the non-success member. Grail ! aborts on failure; Rust unwrap panics and this verifier uses panic=abort.",
+        "note": "Rust uses Result; Grail uses a structural u8[] |? string result. A member value is returned directly, ? propagates a failure member to a matching failure alternative, and member patterns name the payload (data: u8[]). Grail ! aborts on failure; Rust unwrap panics and this verifier uses panic=abort.",
         "output": "7\n"
       }
     },
@@ -452,7 +452,7 @@
       "rust": {
         "source": "rust/arguments.rs",
         "output": "5\n",
-        "note": "Both require exactly one user argument, exit with status 2 otherwise, and count its raw Unix bytes rather than Unicode characters. Grail passes the borrowed argument to main; Rust reads args_os and uses the Unix OsStrExt byte view. This is a Linux/Unix comparison, not a portable Windows argv claim.",
+        "note": "Both require exactly one user argument, exit with status 2 otherwise, and count its raw Unix bytes rather than Unicode characters. Grail passes the one argument to main as a read-only byte view, spelled &[u8]; Rust reads args_os and uses the Unix OsStrExt byte view. This is a Linux/Unix comparison, not a portable Windows argv claim.",
         "args": [
           "café"
         ]
@@ -557,7 +557,7 @@
       "rust": {
         "source": "rust/methods.rs",
         "output": "visits = 6\nbusy week\n",
-        "note": "Grail writes the receiver as an ordinary first parameter (self: &mut a Counter) where Rust uses &mut self; both borrow the receiver automatically at the call site."
+        "note": "Grail writes the receiver as an ordinary first parameter (self: &mut Counter) where Rust uses &mut self; both borrow the receiver automatically at the call site, and both can reuse a field name in a struct literal."
       }
     },
     {
@@ -600,11 +600,11 @@
         "hash",
         "core"
       ],
-      "output": "the: 2\ncat: 1\nand: 1\nhat: 1\nbo 12\ncy 9\nada 7\n[2, 3, 5, 7]\n",
+      "output": "3\ntrue\n2\n2\nhat 1\n1\n2\nbo 12\ncy 9\nada 7\n[2, 3, 5, 7]\n",
       "rust": {
         "source": "rust/collections.rs",
-        "output": "the: 2\ncat: 1\nand: 1\nhat: 1\nbo 12\ncy 9\nada 7\n[2, 3, 5, 7]\n",
-        "note": "Grail's [K: V] map keeps insertion order, so iteration is predictable; Rust's HashMap has no order, so the Rust version records it separately. Grail sorts through the imported order::Ord interface where Rust passes a comparison closure to sort_by."
+        "output": "3\ntrue\n2\n2\nhat 1\n1\n2\nbo 12\ncy 9\nada 7\n[2, 3, 5, 7]\n",
+        "note": "Grail's [K: V] map is method-first: len, contains, get, get_mut, insert, remove and entry. Lookups borrow the key, insert takes ownership of it, and entry returns an optional Entry with a shared key and a mutable value, so absence is explicit instead of a hidden insert. Rust's HashMap returns Option from get and needs contains_key for presence. Grail sorts through the imported order::Ord interface; Rust passes a comparison closure to sort_by."
       }
     },
     {
@@ -624,7 +624,7 @@
       "rust": {
         "source": "rust/text_methods.rs",
         "output": "[name = Ada Lovelace]\nvalue: Ada Lovelace\nupper: ADA LOVELACE\nreplaced: Augusta Ada Lovelace\ntrue\ntrue\nAL\n",
-        "note": "Grail's text methods return new values; split gives a vector of borrowed byte views, and a for loop borrows those elements, so no collect() is needed; Grail's to_upper maps Latin, Greek and Cyrillic letters; Rust's to_uppercase covers all of Unicode."
+        "note": "Grail's text methods return new values; split gives a vector of borrowed byte views, and the loop reads those elements with borrow(parts) until the compiler accepts direct temporary iteration, so no collect() is needed; Grail's to_upper maps Latin, Greek and Cyrillic letters; Rust's to_uppercase covers all of Unicode."
       }
     }
   ]
