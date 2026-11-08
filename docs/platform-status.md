@@ -80,9 +80,7 @@ and a Vulkan backend with device/queues, bindless layouts, buffers, textures, co
 submission, graphics and compute pipelines, indexed and indirect draws, depth and MSAA resolves,
 offscreen readbacks, and a swapchain with acquire/present and a draw path. `make -C graphics
 test` runs 450 host checks; `vk-surface` runs 162 checks on a real 320×240 swapchain, and
-`vk-smoke` 613 and `vk-cache` 47 on hardware, each asserting zero validation errors while the
-counters are live. Open defect: teardown still logs `VUID-vkDestroySemaphore-semaphore-parameter`
-after the counters close (present before the D3D12 work; reproduced on a clean checkout).
+`vk-smoke` 613 and `vk-cache` 47 on hardware, with zero validation messages through teardown.
 
 D3D12: a first slice, built for x86_64-windows with `zig cc` (MinGW-w64 headers) and executed by
 `make -C graphics d3d12-smoke` under Wine, whose `d3d12.dll` is vkd3d on the host GPU. It

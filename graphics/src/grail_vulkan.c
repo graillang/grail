@@ -1262,7 +1262,7 @@ gr_result gr_vk_abi_device_create(const gr_device_desc *desc, gr_handle *out_dev
         queue->device = dev;
         queue->kind = GR_QUEUE_TRANSFER;
         queue->family = dev->transfer_family;
-        queue->timeline = dev->compute_handle != GR_NULL_HANDLE ? VK_NULL_HANDLE : VK_NULL_HANDLE;
+        queue->timeline = VK_NULL_HANDLE; /* transfer submissions do not signal a timeline yet */
         dev->get_device_queue(dev->device, dev->transfer_family, 0, &queue->queue);
         dev->transfer_queue = queue->queue;
         dev->transfer_handle = gr_object_insert(gr_objects(), GR_HANDLE_QUEUE, queue);
@@ -1341,10 +1341,10 @@ void gr_vk_abi_device_destroy_impl(gr_vk_dev *dev)
         free(q);
     }
     if (dev->compute_handle != GR_NULL_HANDLE) {
+        /* The compute queue borrows the device's graphics timeline; the device destroys it once,
+         * below. Destroying it here as well was a double vkDestroySemaphore at teardown. */
         gr_vk_queue *q = (gr_vk_queue *)gr_object_remove(gr_objects(), dev->compute_handle,
                                                          GR_HANDLE_QUEUE);
-        if (q && q->timeline && dev->destroy_semaphore)
-            dev->destroy_semaphore(dev->device, q->timeline, NULL);
         free(q);
     }
     if (dev->transfer_handle != GR_NULL_HANDLE) {

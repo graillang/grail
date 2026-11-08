@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Fixed a double `vkDestroySemaphore` at Vulkan device teardown: the compute queue borrows the
+  device's graphics timeline but its teardown destroyed it too. The validation layer had reported
+  `VUID-vkDestroySemaphore-semaphore-parameter` and two threading messages after the tests'
+  error counters closed, so `vk-smoke`, `vk-surface` and `vk-cache` reported zero while teardown
+  did not. All three are now silent through teardown.
+
 - D3D12 backend, first slice (`graphics/src/grail_d3d12.c`): headless device with its reported
   feature level, one direct queue whose fence is the timeline gr fences observe, 2D render-target
   textures and views, command pools and lists (one allocator per list), barriers that refuse a
