@@ -32,7 +32,7 @@ extern "C" {
  * bump GR_ABI_VERSION_MAJOR for anything that changes an existing layout or meaning.
  * --------------------------------------------------------------------------------------- */
 #define GR_ABI_VERSION_MAJOR 1
-#define GR_ABI_VERSION_MINOR 3
+#define GR_ABI_VERSION_MINOR 4
 #define GR_ABI_VERSION ((GR_ABI_VERSION_MAJOR << 16) | GR_ABI_VERSION_MINOR)
 
 typedef struct gr_version {

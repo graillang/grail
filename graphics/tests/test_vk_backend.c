@@ -64,6 +64,8 @@ int main(int argc, char **argv)
     gr_handle pipeline_bindless = GR_NULL_HANDLE;
     gr_handle pipeline_compute = GR_NULL_HANDLE;
     gr_handle pipeline_triangle = GR_NULL_HANDLE;
+    gr_handle pipeline_depth = GR_NULL_HANDLE;
+    gr_handle pipeline_msaa = GR_NULL_HANDLE;
     uint32_t slot_a = GR_BINDLESS_INDEX_NONE;
     uint32_t slot_b = GR_BINDLESS_INDEX_NONE;
     gr_handle texture_a = GR_NULL_HANDLE, texture_b = GR_NULL_HANDLE;
@@ -373,6 +375,27 @@ int main(int argc, char **argv)
         CHECK_EQ(gr_pipeline_create(device, &pd, &pipeline), GR_OK);
         CHECK(pipeline != GR_NULL_HANDLE);
         pipeline_triangle = pipeline;
+
+        /* The same shaders with depth testing on: reverse-Z, so a cleared 0.0 is the far plane and
+         * GREATER_OR_EQUAL lets a nearer fragment win and rejects a farther one. */
+        pd.name = (gr_str){ "vk/depth", 8, 0 };
+        pd.depth_format = GR_FORMAT_D32_FLOAT;
+        pd.depth_test = 1;
+        pd.depth_write = 1;
+        pd.depth_compare = GR_COMPARE_GREATER_EQUAL;
+        CHECK_EQ(gr_pipeline_create(device, &pd, &pipeline), GR_OK);
+        CHECK(pipeline != GR_NULL_HANDLE);
+        pipeline_depth = pipeline;
+
+        /* And once at 4 samples, which is what an MSAA pass resolves from. */
+        pd.name = (gr_str){ "vk/msaa", 7, 0 };
+        pd.depth_format = GR_FORMAT_UNDEFINED;
+        pd.depth_test = 0;
+        pd.depth_write = 0;
+        pd.samples = 4;
+        CHECK_EQ(gr_pipeline_create(device, &pd, &pipeline), GR_OK);
+        CHECK(pipeline != GR_NULL_HANDLE);
+        pipeline_msaa = pipeline;
     }
 
     /* Commit closes the registry, and the driver's pipeline cache has content. */
@@ -382,8 +405,8 @@ int main(int argc, char **argv)
         CHECK_EQ(gr_pipeline_commit(device, &seconds), GR_OK);
         CHECK(seconds >= 0.0);
         CHECK_EQ(gr_pipeline_stats(device, &declared, &committed), GR_OK);
-        CHECK_EQ(declared, 5u);
-        CHECK_EQ(committed, 5u);
+        CHECK_EQ(declared, 7u);
+        CHECK_EQ(committed, 7u);
         {
             gr_device_caps after;
             memset(&after, 0, sizeof(after));
@@ -1319,6 +1342,13 @@ int main(int argc, char **argv)
             }
             CHECK_EQ(gr_cmd_bind_vertex_buffer(cmd, 0, vb, 0), GR_OK);
             CHECK_EQ(gr_cmd_bind_index_buffer(cmd, ib, 0, 0), GR_OK);
+            {
+                /* triangle.vs reads its clip-space z from a push constant, so a draw without one
+                 * is a validation error rather than a silent default. */
+                float z = 0.5f;
+                CHECK_EQ(gr_cmd_push_constants(cmd, 0, (gr_span_u8){ (const uint8_t *)&z, 4 }),
+                         GR_OK);
+            }
             if (use_indirect) {
                 CHECK_EQ(gr_cmd_draw_indexed_indirect(cmd, indirect, 0, 1, 20), GR_OK);
             } else {
@@ -1390,6 +1420,448 @@ int main(int argc, char **argv)
         CHECK_EQ(digests[0], digests[1]);
         /* The indirect draw produced exactly the direct draw's pixels. */
         CHECK_EQ(digests[0], digests[2]);
+    }
+
+    /* -----------------------------------------------------------------------------------
+     * Depth ordering: the same geometry drawn twice, the farther triangle second, so only the
+     * depth test can keep the nearer one's colour.
+     * --------------------------------------------------------------------------------- */
+    if (pipeline_depth != GR_NULL_HANDLE) {
+        const uint32_t kSize = 64;
+        struct vertex { float pos[2]; float colour[4]; };
+        const struct vertex colour_vertices[3] = {
+            { { -0.6f, -0.6f }, { 1.0f, 0.0f, 0.0f, 1.0f } },
+            { {  0.6f, -0.6f }, { 0.0f, 1.0f, 0.0f, 1.0f } },
+            { {  0.0f,  0.6f }, { 0.0f, 0.0f, 1.0f, 1.0f } }
+        };
+        const struct vertex white_vertices[3] = {
+            { { -0.6f, -0.6f }, { 1.0f, 1.0f, 1.0f, 1.0f } },
+            { {  0.6f, -0.6f }, { 1.0f, 1.0f, 1.0f, 1.0f } },
+            { {  0.0f,  0.6f }, { 1.0f, 1.0f, 1.0f, 1.0f } }
+        };
+        const uint16_t indices[3] = { 0, 1, 2 };
+        gr_buffer_desc bd;
+        gr_handle vb_colour = GR_NULL_HANDLE, vb_white = GR_NULL_HANDLE, ib = GR_NULL_HANDLE;
+        gr_texture_desc td;
+        gr_handle colour = GR_NULL_HANDLE, colour_view = GR_NULL_HANDLE;
+        gr_handle depth = GR_NULL_HANDLE, depth_view = GR_NULL_HANDLE;
+        gr_texture_view_desc vd;
+        gr_cmd_pool_desc cpd;
+        gr_handle pool = GR_NULL_HANDLE, cmd = GR_NULL_HANDLE;
+        gr_cmd_alloc_info cai;
+        uint32_t order_pass;
+
+        memset(&bd, 0, sizeof(bd));
+        bd.head.size = (uint32_t)sizeof(bd);
+        bd.size = sizeof(colour_vertices);
+        bd.usage = GR_BUFFER_USAGE_VERTEX | GR_BUFFER_USAGE_TRANSFER_DST;
+        bd.memory = GR_MEMORY_UPLOAD;
+        CHECK_EQ(gr_buffer_create(device, &bd, &vb_colour), GR_OK);
+        CHECK_EQ(gr_buffer_write(vb_colour, 0,
+                                 (gr_span_u8){ (const uint8_t *)colour_vertices,
+                                               sizeof(colour_vertices) }), GR_OK);
+        bd.size = sizeof(white_vertices);
+        CHECK_EQ(gr_buffer_create(device, &bd, &vb_white), GR_OK);
+        CHECK_EQ(gr_buffer_write(vb_white, 0,
+                                 (gr_span_u8){ (const uint8_t *)white_vertices, sizeof(white_vertices) }),
+                 GR_OK);
+        bd.size = sizeof(indices);
+        bd.usage = GR_BUFFER_USAGE_INDEX | GR_BUFFER_USAGE_TRANSFER_DST;
+        CHECK_EQ(gr_buffer_create(device, &bd, &ib), GR_OK);
+        CHECK_EQ(gr_buffer_write(ib, 0, (gr_span_u8){ (const uint8_t *)indices, sizeof(indices) }),
+                 GR_OK);
+
+        memset(&td, 0, sizeof(td));
+        td.head.size = (uint32_t)sizeof(td);
+        td.type = GR_TEXTURE_2D;
+        td.format = GR_FORMAT_R8G8B8A8_UNORM;
+        td.width = kSize;
+        td.height = kSize;
+        td.usage = GR_TEXTURE_USAGE_COLOR_ATTACHMENT | GR_TEXTURE_USAGE_TRANSFER_SRC;
+        CHECK_EQ(gr_texture_create(device, &td, &colour), GR_OK);
+        memset(&vd, 0, sizeof(vd));
+        vd.head.size = (uint32_t)sizeof(vd);
+        vd.texture = colour;
+        vd.type = GR_VIEW_2D;
+        vd.format = GR_FORMAT_UNDEFINED;
+        CHECK_EQ(gr_texture_view_create(device, &vd, &colour_view), GR_OK);
+
+        td.format = GR_FORMAT_D32_FLOAT;
+        td.usage = GR_TEXTURE_USAGE_DEPTH_ATTACHMENT;
+        CHECK_EQ(gr_texture_create(device, &td, &depth), GR_OK);
+        memset(&vd, 0, sizeof(vd));
+        vd.head.size = (uint32_t)sizeof(vd);
+        vd.texture = depth;
+        vd.type = GR_VIEW_2D;
+        vd.format = GR_FORMAT_UNDEFINED;
+        CHECK_EQ(gr_texture_view_create(device, &vd, &depth_view), GR_OK);
+
+        memset(&cpd, 0, sizeof(cpd));
+        cpd.head.size = (uint32_t)sizeof(cpd);
+        cpd.queue = GR_QUEUE_GRAPHICS;
+        CHECK_EQ(gr_cmd_pool_create(device, &cpd, &pool), GR_OK);
+        memset(&cai, 0, sizeof(cai));
+        cai.head.size = (uint32_t)sizeof(cai);
+        cai.pool = pool;
+        CHECK_EQ(gr_cmd_alloc(&cai, &cmd), GR_OK);
+
+        for (order_pass = 0; order_pass < 2u; ++order_pass) {
+            gr_graph_desc gd;
+            gr_handle graph = GR_NULL_HANDLE;
+            gr_graph_resource res_colour, res_depth;
+            gr_graph_pass render_pass;
+            gr_graph_compile_report report;
+            gr_barrier barriers[4];
+            uint32_t barrier_count = 0;
+            gr_render_begin rb;
+            gr_color_attachment color;
+            gr_depth_attachment depth_att;
+            gr_draw_indexed draw;
+            gr_submit submit;
+            gr_handle queue = GR_NULL_HANDLE, fence = GR_NULL_HANDLE;
+            uint64_t value = 0;
+            gr_result wait_status = GR_ERROR_BACKEND;
+            uint8_t pixels[64 * 64 * 4];
+            size_t centre = (size_t)((kSize / 2) * kSize + kSize / 2) * 4u;
+
+            memset(&gd, 0, sizeof(gd));
+            gd.head.size = (uint32_t)sizeof(gd);
+            CHECK(gr_graph_create(&gd, &graph) != GR_NULL_HANDLE);
+            CHECK_EQ(gr_graph_add_resource(graph, (gr_str){ "colour", 6, 0 },
+                                           GR_GRAPH_RESOURCE_TEXTURE, colour_view, &res_colour),
+                     GR_OK);
+            CHECK_EQ(gr_graph_add_resource(graph, (gr_str){ "depth", 5, 0 },
+                                           GR_GRAPH_RESOURCE_TEXTURE, depth_view, &res_depth),
+                     GR_OK);
+            CHECK_EQ(gr_graph_add_pass(graph, (gr_str){ "occlude", 7, 0 }, &render_pass), GR_OK);
+            CHECK_EQ(gr_graph_pass_write(graph, render_pass, res_colour, GR_STATE_COLOR_ATTACHMENT),
+                     GR_OK);
+            CHECK_EQ(gr_graph_pass_write(graph, render_pass, res_depth,
+                                         GR_STATE_DEPTH_ATTACHMENT_WRITE), GR_OK);
+            CHECK_EQ(gr_graph_pass_set_side_effect(graph, render_pass, 1), GR_OK);
+            memset(&report, 0, sizeof(report));
+            report.head.size = (uint32_t)sizeof(report);
+            CHECK_EQ(gr_graph_compile(graph, &report), GR_OK);
+            /* Two transitions the graph derives on its own: colour and depth to their attachment
+             * layouts. The depth one is a different aspect and a different layout. */
+            CHECK_EQ(report.barrier_count, 2u);
+
+            CHECK_EQ(gr_cmd_reset(cmd), GR_OK);
+            CHECK_EQ(gr_cmd_begin(cmd), GR_OK);
+            CHECK_EQ(gr_cmd_push_frame_offset(cmd, 0), GR_OK);
+            CHECK_EQ(gr_graph_pass_barriers(graph, 0, barriers, 4, &barrier_count), GR_OK);
+            CHECK_EQ(gr_cmd_barrier(cmd, barriers, barrier_count), GR_OK);
+
+            memset(&color, 0, sizeof(color));
+            color.view = colour_view;
+            color.load_op = GR_LOAD_CLEAR;
+            color.store_op = GR_STORE_STORE;
+            color.clear[3] = 1.0f;
+            memset(&depth_att, 0, sizeof(depth_att));
+            depth_att.view = depth_view;
+            depth_att.load_op = GR_LOAD_CLEAR;
+            depth_att.store_op = GR_STORE_STORE;
+            depth_att.clear_depth = 0.0f; /* reverse-Z: 0 is the far plane */
+            memset(&rb, 0, sizeof(rb));
+            rb.head.size = (uint32_t)sizeof(rb);
+            rb.colors = &color;
+            rb.color_count = 1;
+            rb.depth = &depth_att;
+            rb.render_w = kSize;
+            rb.render_h = kSize;
+            CHECK_EQ(gr_cmd_begin_render(cmd, &rb), GR_OK);
+            CHECK_EQ(gr_cmd_set_viewport(cmd, 0.0f, 0.0f, (float)kSize, (float)kSize, 0.0f, 1.0f),
+                     GR_OK);
+            CHECK_EQ(gr_cmd_set_scissor(cmd, 0, 0, kSize, kSize), GR_OK);
+            CHECK_EQ(gr_cmd_bind_pipeline(cmd, pipeline_depth), GR_OK);
+
+            /* Pass 0 has the coloured triangle near and the white one far, with the far one drawn
+             * second. Pass 1 swaps the depths, so a broken depth test shows the opposite result. */
+            {
+                float near_z = 0.9f, far_z = 0.3f;
+                memset(&draw, 0, sizeof(draw));
+                draw.head.size = (uint32_t)sizeof(draw);
+                draw.index_count = 3;
+                draw.instance_count = 1;
+
+                CHECK_EQ(gr_cmd_push_constants(cmd, 0,
+                                               (gr_span_u8){ (const uint8_t *)&near_z, 4 }), GR_OK);
+                CHECK_EQ(gr_cmd_bind_vertex_buffer(cmd, 0, order_pass == 0 ? vb_colour : vb_white, 0),
+                         GR_OK);
+                CHECK_EQ(gr_cmd_bind_index_buffer(cmd, ib, 0, 0), GR_OK);
+                CHECK_EQ(gr_cmd_draw_indexed(cmd, &draw), GR_OK);
+
+                CHECK_EQ(gr_cmd_push_constants(cmd, 0,
+                                               (gr_span_u8){ (const uint8_t *)&far_z, 4 }), GR_OK);
+                CHECK_EQ(gr_cmd_bind_vertex_buffer(cmd, 0, order_pass == 0 ? vb_white : vb_colour, 0),
+                         GR_OK);
+                CHECK_EQ(gr_cmd_draw_indexed(cmd, &draw), GR_OK);
+            }
+            CHECK_EQ(gr_cmd_end_render(cmd), GR_OK);
+            {
+                gr_barrier to_copy;
+                memset(&to_copy, 0, sizeof(to_copy));
+                to_copy.resource = colour_view;
+                to_copy.src_state = GR_STATE_COLOR_ATTACHMENT;
+                to_copy.dst_state = GR_STATE_TRANSFER_SRC;
+                CHECK_EQ(gr_cmd_barrier(cmd, &to_copy, 1), GR_OK);
+            }
+            CHECK_EQ(gr_cmd_end(cmd), GR_OK);
+
+            CHECK_EQ(gr_device_queue(device, GR_QUEUE_GRAPHICS, &queue), GR_OK);
+            memset(&submit, 0, sizeof(submit));
+            submit.head.size = (uint32_t)sizeof(submit);
+            submit.queue = queue;
+            submit.cmds = &cmd;
+            submit.cmd_count = 1;
+            CHECK_EQ(gr_submit_commands(&submit, &value), GR_OK);
+            CHECK_EQ(gr_fence_create(device, 0, &fence), GR_OK);
+            CHECK_EQ(gr_fence_wait(fence, value, 5ull * 1000ull * 1000ull * 1000ull, &wait_status),
+                     GR_OK);
+
+            memset(pixels, 0, sizeof(pixels));
+            CHECK_EQ(gr_texture_read(colour, 0, 0, 0, 0, kSize, kSize, GR_STATE_TRANSFER_SRC,
+                                     (gr_mut_span_u8){ pixels, sizeof(pixels) }), GR_OK);
+            {
+                int white = pixels[centre] > 200u && pixels[centre + 1] > 200u &&
+                            pixels[centre + 2] > 200u;
+                if (order_pass == 0) {
+                    /* The near triangle was the coloured one, and the farther white triangle was
+                     * drawn after it: only the depth test can have rejected that second draw. */
+                    CHECK(!white);
+                    printf("vk-backend: depth pass 0 centre rgba %u,%u,%u (near colour kept)\n",
+                           pixels[centre], pixels[centre + 1], pixels[centre + 2]);
+                } else {
+                    /* Depths swapped: the white triangle is nearest and does win, so the check
+                     * above is exercising the test rather than a disabled one. */
+                    CHECK(white);
+                    printf("vk-backend: depth pass 1 centre rgba %u,%u,%u (nearest wins)\n",
+                           pixels[centre], pixels[centre + 1], pixels[centre + 2]);
+                }
+            }
+            gr_graph_destroy(graph);
+        }
+    }
+
+    /* -----------------------------------------------------------------------------------
+     * 4x MSAA with a colour resolve. The same triangle is rendered at 4 samples and resolved into
+     * a single-sampled image, then at 1 sample into another; the resolved coverage differs from the
+     * aliased one, which is the whole point of the resolve.
+     * --------------------------------------------------------------------------------- */
+    if (pipeline_msaa != GR_NULL_HANDLE) {
+        const uint32_t kSize = 64;
+        struct vertex { float pos[2]; float colour[4]; };
+        const struct vertex vertices[3] = {
+            { { -0.55f, -0.55f }, { 1.0f, 0.0f, 0.0f, 1.0f } },
+            { {  0.55f, -0.55f }, { 0.0f, 1.0f, 0.0f, 1.0f } },
+            { {  0.00f,  0.55f }, { 0.0f, 0.0f, 1.0f, 1.0f } }
+        };
+        const uint16_t indices[3] = { 0, 1, 2 };
+        gr_buffer_desc bd;
+        gr_handle vb = GR_NULL_HANDLE, ib = GR_NULL_HANDLE;
+        gr_texture_desc td;
+        gr_texture_view_desc vd;
+        gr_handle msaa_colour = GR_NULL_HANDLE, msaa_view = GR_NULL_HANDLE;
+        gr_handle alias_colour = GR_NULL_HANDLE, alias_view = GR_NULL_HANDLE;
+        gr_handle resolved = GR_NULL_HANDLE, resolved_view = GR_NULL_HANDLE;
+        gr_handle downstream = GR_NULL_HANDLE, downstream_view = GR_NULL_HANDLE;
+        gr_cmd_pool_desc cpd;
+        gr_handle pool = GR_NULL_HANDLE, cmd = GR_NULL_HANDLE;
+        gr_cmd_alloc_info cai;
+        uint64_t msaa_digests[2], alias_digest = 0;
+        uint32_t msaa_pass;
+
+        memset(&bd, 0, sizeof(bd));
+        bd.head.size = (uint32_t)sizeof(bd);
+        bd.size = sizeof(vertices);
+        bd.usage = GR_BUFFER_USAGE_VERTEX | GR_BUFFER_USAGE_TRANSFER_DST;
+        bd.memory = GR_MEMORY_UPLOAD;
+        CHECK_EQ(gr_buffer_create(device, &bd, &vb), GR_OK);
+        CHECK_EQ(gr_buffer_write(vb, 0, (gr_span_u8){ (const uint8_t *)vertices, sizeof(vertices) }),
+                 GR_OK);
+        bd.size = sizeof(indices);
+        bd.usage = GR_BUFFER_USAGE_INDEX | GR_BUFFER_USAGE_TRANSFER_DST;
+        CHECK_EQ(gr_buffer_create(device, &bd, &ib), GR_OK);
+        CHECK_EQ(gr_buffer_write(ib, 0, (gr_span_u8){ (const uint8_t *)indices, sizeof(indices) }),
+                 GR_OK);
+
+        memset(&td, 0, sizeof(td));
+        td.head.size = (uint32_t)sizeof(td);
+        td.type = GR_TEXTURE_2D;
+        td.format = GR_FORMAT_R8G8B8A8_UNORM;
+        td.width = kSize;
+        td.height = kSize;
+        /* The multisampled attachment. */
+        td.samples = 4;
+        td.usage = GR_TEXTURE_USAGE_COLOR_ATTACHMENT;
+        CHECK_EQ(gr_texture_create(device, &td, &msaa_colour), GR_OK);
+        memset(&vd, 0, sizeof(vd));
+        vd.head.size = (uint32_t)sizeof(vd);
+        vd.texture = msaa_colour;
+        vd.type = GR_VIEW_2D;
+        vd.format = GR_FORMAT_UNDEFINED;
+        CHECK_EQ(gr_texture_view_create(device, &vd, &msaa_view), GR_OK);
+        /* Two single-sampled targets: where the resolve lands, and the aliased comparison. */
+        td.samples = 1;
+        td.usage = GR_TEXTURE_USAGE_COLOR_ATTACHMENT | GR_TEXTURE_USAGE_TRANSFER_SRC;
+        CHECK_EQ(gr_texture_create(device, &td, &resolved), GR_OK);
+        CHECK_EQ(gr_texture_create(device, &td, &downstream), GR_OK);
+        memset(&vd, 0, sizeof(vd));
+        vd.head.size = (uint32_t)sizeof(vd);
+        vd.texture = resolved;
+        vd.type = GR_VIEW_2D;
+        vd.format = GR_FORMAT_UNDEFINED;
+        CHECK_EQ(gr_texture_view_create(device, &vd, &resolved_view), GR_OK);
+        memset(&vd, 0, sizeof(vd));
+        vd.head.size = (uint32_t)sizeof(vd);
+        vd.texture = downstream;
+        vd.type = GR_VIEW_2D;
+        vd.format = GR_FORMAT_UNDEFINED;
+        CHECK_EQ(gr_texture_view_create(device, &vd, &downstream_view), GR_OK);
+        (void)alias_colour;
+        (void)alias_view;
+
+        memset(&cpd, 0, sizeof(cpd));
+        cpd.head.size = (uint32_t)sizeof(cpd);
+        cpd.queue = GR_QUEUE_GRAPHICS;
+        CHECK_EQ(gr_cmd_pool_create(device, &cpd, &pool), GR_OK);
+        memset(&cai, 0, sizeof(cai));
+        cai.head.size = (uint32_t)sizeof(cai);
+        cai.pool = pool;
+        CHECK_EQ(gr_cmd_alloc(&cai, &cmd), GR_OK);
+
+        for (msaa_pass = 0; msaa_pass < 3u; ++msaa_pass) {
+            int use_msaa = msaa_pass < 2u;
+            gr_handle target_view = use_msaa ? msaa_view : downstream_view;
+            gr_handle read_texture = use_msaa ? resolved : downstream;
+            gr_handle pipeline_used = use_msaa ? pipeline_msaa : pipeline_triangle;
+            gr_graph_desc gd;
+            gr_handle graph = GR_NULL_HANDLE;
+            gr_graph_resource res_target, res_resolve;
+            gr_graph_pass render_pass;
+            gr_barrier barriers[4];
+            uint32_t barrier_count = 0;
+            gr_render_begin rb;
+            gr_color_attachment color;
+            gr_draw_indexed draw;
+            gr_submit submit;
+            gr_handle queue = GR_NULL_HANDLE, fence = GR_NULL_HANDLE;
+            uint64_t value = 0;
+            gr_result wait_status = GR_ERROR_BACKEND;
+            uint8_t pixels[64 * 64 * 4];
+            uint64_t digest = 0xcbf29ce484222325ull;
+            size_t i;
+            float z = 0.5f;
+
+            memset(&gd, 0, sizeof(gd));
+            gd.head.size = (uint32_t)sizeof(gd);
+            CHECK(gr_graph_create(&gd, &graph) != GR_NULL_HANDLE);
+            CHECK_EQ(gr_graph_add_resource(graph, (gr_str){ "target", 6, 0 },
+                                           GR_GRAPH_RESOURCE_TEXTURE, target_view, &res_target),
+                     GR_OK);
+            CHECK_EQ(gr_graph_add_pass(graph, (gr_str){ "draw", 4, 0 }, &render_pass), GR_OK);
+            CHECK_EQ(gr_graph_pass_write(graph, render_pass, res_target,
+                                         GR_STATE_COLOR_ATTACHMENT), GR_OK);
+            if (use_msaa) {
+                /* The resolve target is written by the same pass, as a resolve, so the graph
+                 * transitions it to a colour attachment too. */
+                CHECK_EQ(gr_graph_add_resource(graph, (gr_str){ "resolve", 7, 0 },
+                                               GR_GRAPH_RESOURCE_TEXTURE, resolved_view, &res_resolve),
+                         GR_OK);
+                CHECK_EQ(gr_graph_pass_write(graph, render_pass, res_resolve,
+                                             GR_STATE_COLOR_ATTACHMENT), GR_OK);
+            }
+            CHECK_EQ(gr_graph_pass_set_side_effect(graph, render_pass, 1), GR_OK);
+            {
+                gr_graph_compile_report report;
+                memset(&report, 0, sizeof(report));
+                report.head.size = (uint32_t)sizeof(report);
+                CHECK_EQ(gr_graph_compile(graph, &report), GR_OK);
+            }
+
+            CHECK_EQ(gr_cmd_reset(cmd), GR_OK);
+            CHECK_EQ(gr_cmd_begin(cmd), GR_OK);
+            CHECK_EQ(gr_cmd_push_frame_offset(cmd, 0), GR_OK);
+            CHECK_EQ(gr_graph_pass_barriers(graph, 0, barriers, 4, &barrier_count), GR_OK);
+            CHECK_EQ(gr_cmd_barrier(cmd, barriers, barrier_count), GR_OK);
+
+            memset(&color, 0, sizeof(color));
+            color.view = target_view;
+            color.load_op = GR_LOAD_CLEAR;
+            color.store_op = GR_STORE_STORE;
+            color.clear[3] = 1.0f;
+            if (use_msaa)
+                color.resolve_view = resolved_view;
+            memset(&rb, 0, sizeof(rb));
+            rb.head.size = (uint32_t)sizeof(rb);
+            rb.colors = &color;
+            rb.color_count = 1;
+            rb.render_w = kSize;
+            rb.render_h = kSize;
+            {
+                gr_result br = gr_cmd_begin_render(cmd, &rb);
+                if (br != GR_OK)
+                    printf("  pass %u begin_render failed: %s (target view %llx, resolve %llx)\n",
+                           msaa_pass, gr_result_name(br), (unsigned long long)target_view,
+                           (unsigned long long)color.resolve_view);
+                CHECK_EQ(br, GR_OK);
+            }
+            CHECK_EQ(gr_cmd_set_viewport(cmd, 0.0f, 0.0f, (float)kSize, (float)kSize, 0.0f, 1.0f),
+                     GR_OK);
+            CHECK_EQ(gr_cmd_set_scissor(cmd, 0, 0, kSize, kSize), GR_OK);
+            CHECK_EQ(gr_cmd_bind_pipeline(cmd, pipeline_used), GR_OK);
+            CHECK_EQ(gr_cmd_push_constants(cmd, 0, (gr_span_u8){ (const uint8_t *)&z, 4 }), GR_OK);
+            CHECK_EQ(gr_cmd_bind_vertex_buffer(cmd, 0, vb, 0), GR_OK);
+            CHECK_EQ(gr_cmd_bind_index_buffer(cmd, ib, 0, 0), GR_OK);
+            memset(&draw, 0, sizeof(draw));
+            draw.head.size = (uint32_t)sizeof(draw);
+            draw.index_count = 3;
+            draw.instance_count = 1;
+            CHECK_EQ(gr_cmd_draw_indexed(cmd, &draw), GR_OK);
+            CHECK_EQ(gr_cmd_end_render(cmd), GR_OK);
+            {
+                gr_barrier to_copy;
+                memset(&to_copy, 0, sizeof(to_copy));
+                to_copy.resource = use_msaa ? resolved_view : downstream_view;
+                to_copy.src_state = GR_STATE_COLOR_ATTACHMENT;
+                to_copy.dst_state = GR_STATE_TRANSFER_SRC;
+                CHECK_EQ(gr_cmd_barrier(cmd, &to_copy, 1), GR_OK);
+            }
+            CHECK_EQ(gr_cmd_end(cmd), GR_OK);
+
+            CHECK_EQ(gr_device_queue(device, GR_QUEUE_GRAPHICS, &queue), GR_OK);
+            memset(&submit, 0, sizeof(submit));
+            submit.head.size = (uint32_t)sizeof(submit);
+            submit.queue = queue;
+            submit.cmds = &cmd;
+            submit.cmd_count = 1;
+            CHECK_EQ(gr_submit_commands(&submit, &value), GR_OK);
+            CHECK_EQ(gr_fence_create(device, 0, &fence), GR_OK);
+            CHECK_EQ(gr_fence_wait(fence, value, 5ull * 1000ull * 1000ull * 1000ull, &wait_status),
+                     GR_OK);
+
+            memset(pixels, 0, sizeof(pixels));
+            CHECK_EQ(gr_texture_read(read_texture, 0, 0, 0, 0, kSize, kSize,
+                                     GR_STATE_TRANSFER_SRC,
+                                     (gr_mut_span_u8){ pixels, sizeof(pixels) }), GR_OK);
+            for (i = 0; i < sizeof(pixels); ++i) {
+                digest ^= pixels[i];
+                digest *= 0x100000001b3ull;
+            }
+            if (use_msaa)
+                msaa_digests[msaa_pass] = digest;
+            else
+                alias_digest = digest;
+            gr_graph_destroy(graph);
+        }
+
+        printf("vk-backend: msaa resolve 0x%016llx (4x, twice); aliased 0x%016llx\n",
+               (unsigned long long)msaa_digests[0], (unsigned long long)alias_digest);
+        /* The resolve is deterministic... */
+        CHECK_EQ(msaa_digests[0], msaa_digests[1]);
+        /* ...and it is not the aliased image: 4x coverage on the triangle's edges cannot equal a
+         * single-sample rasterisation of the same geometry. */
+        CHECK(msaa_digests[0] != alias_digest);
     }
 
     CHECK_EQ(gr_device_wait_idle(device), GR_OK);
