@@ -28,7 +28,10 @@ that path to your browser, or set `GRAIL_BOOK_OPENER` to an opener executable (o
 arguments). An opener failure is reported rather than silently claiming a browser opened.
 
 Building/reading needs no Grail toolchain. Running Grail examples supports **Linux x86-64,
-ARM64 and RISC-V 64**, with Clang used only as an assembler and LLD as linker. The runner builds
+ARM64 and RISC-V 64**, with Clang used only as an assembler and LLD as linker. This is the
+book-check matrix, not the whole compiler matrix: Windows x86-64 emits PE32+ images and runs eight
+test programs under Wine, while Windows AArch64 and macOS are static-only; see
+`docs/platform-status.md`. The runner builds
 the Grail-written compiler from generated assembly bootstraps; it uses no Rust seed or C backend.
 Cross execution uses QEMU; pass `--target=aarch64` or `--target=riscv64` to the book check command. Checking Rust comparisons additionally needs **rustc with edition 2024**. The verification
 profile explicitly enables overflow checks and abort-on-panic; Rust release defaults differ.

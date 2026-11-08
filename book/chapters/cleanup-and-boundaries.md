@@ -12,10 +12,19 @@ small slabs for reuse, while large single-object arenas are released immediately
 
 ## What this book does not promise
 
-- The native targets are Linux x86-64, ARM64 and RISC-V 64, with at most six word parameters per call.
+- The execution matrix is: Linux x86-64 (native, full compiler and runtime evidence); Linux AArch64
+  and RISC-V 64 (cross-built; qemu execution only when a runner is installed); Windows x86-64 (PE32+
+  images, eight test programs under Wine, not native Windows); Windows AArch64 and macOS
+  x86-64/AArch64 (static-only objects and images, not executable here). Calls support at most six
+  word parameters. A cross-built object is not platform support; only the evidence in that matrix
+  counts.
+- Not executable yet: Windows AArch64 and both macOS targets. Not implemented: D3D12 and Metal
+  backends, and any debugger or profiler. The Vulkan backend has a verified
+  swapchain/present/draw path, including depth and MSAA; D3D12 and Metal return `UNSUPPORTED`.
+  `docs/platform-status.md` records the evidence for each row.
 - The optimizer is a per-function pass (slot forwarding, dead-code removal, callee-saved register
   promotion, branch fusion); there is no general inlining or loop optimization yet. Implicit module
-  loading, general async/await syntax and a general trait system are not covered here; structured tasks, cancellation and suspending green-task I/O are described in the concurrency chapter. CPU support does not imply support for macOS or Windows.
+  loading, general async/await syntax and a general trait system are not covered here; structured tasks, cancellation and suspending green-task I/O are described in the concurrency chapter.
 - Abort paths, including failed assertions and `!` on an error, do not unwind or run normal cleanup.
 - Borrow checking intentionally rejects some valid programs. Whole-frame guards, weak updates
   and opaque external invariant boundaries are conservative.

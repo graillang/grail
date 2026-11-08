@@ -8,10 +8,13 @@ reproduces itself through assembly. Owned values are released deterministically;
 tracing garbage collector or C runtime in the native path. The checker rejects conflicting
 borrows and escaping locals, and generic code treats unknown values as affine.
 
-**This book teaches the current Linux x86-64, ARM64 and RISC-V 64 native compiler, and the
-approved syntax-v2 surface it is converging on.** Where the compiler has not caught up—`&` for
-non-byte owners, direct temporary iteration, map iteration sugar—the text names the approved form and
-says so, and compiled examples stay on forms the preview accepts. The syntax
+**This book teaches the current Grail compiler and the approved syntax-v2 surface it is
+converging on.** Linux x86-64 executes natively; Linux AArch64 and RISC-V 64 cross-build and run
+under qemu when a runner is installed; Windows x86-64 builds PE32+ images, with eight test programs
+executed under Wine; Windows AArch64 and macOS x86-64/AArch64 build static objects but are not
+executable here. `docs/platform-status.md` is the authoritative matrix. Where the compiler has not
+caught up—`&` for non-byte owners, direct temporary iteration, map iteration sugar—the text names
+the approved form and says so, and compiled examples stay on forms the preview accepts. The syntax
 and tooling are still evolving. See *Current boundaries* before depending on an unsupported feature.
 Tests are evidence of behavior, not a language soundness proof.
 

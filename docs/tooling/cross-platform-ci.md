@@ -2,13 +2,16 @@
 
 This document is the design and operating manual for Grail's cross-platform
 foundation. The implementation is compiler-free: it describes targets, detects
-host tools, builds/packages/signs artifacts and gates CI. The only **runnable**
-compiler backends today are Linux ELF on **linux-x86_64**, **linux-aarch64** and
-**linux-riscv64**. **windows-x86_64** emits PE/COFF objects and PE32+ images;
-Windows execution is verified separately under Wine, but this release lane ships
-**non-executable object bundles**. **macos-aarch64** and **macos-x86_64** emit
-Mach-O objects that are statically verified; they are **build-only** object
-targets with no macOS execution claim. **windows-aarch64** remains planned.
+host tools, builds/packages/signs artifacts and gates CI. The only **natively
+runnable** compiler backends today are Linux ELF on **linux-x86_64**,
+**linux-aarch64** and **linux-riscv64**; the latter two execute under qemu-user
+when a runner is installed. **windows-x86_64** emits PE/COFF objects and PE32+
+images, and eight test programs execute under Wine, but this release lane ships
+**non-executable object bundles** and claims no hosted Windows toolchain.
+**windows-aarch64** emits ARM64 PE/COFF objects and images that pass static
+checks; there is no ARM64 runner, and its release lane remains planned.
+**macos-aarch64** and **macos-x86_64** emit Mach-O objects that are statically
+verified; they are **build-only** targets with no macOS execution claim.
 
 The tooling lanes do not implement code generation; the Windows and macOS
 backends live in `compiler/native.grl`, `compiler/darwin.grl` and the `os-*`
@@ -22,7 +25,7 @@ platform modules.
 | `linux-aarch64` | Linux / AArch64 | implemented (ELF) | `ubuntu-24.04-arm` | `grail-VERSION-linux-aarch64.tar.gz` |
 | `linux-riscv64` | Linux / RISC-V 64 | implemented (ELF) | self-hosted or cross lane | `grail-VERSION-linux-riscv64.tar.gz` |
 | `windows-x86_64` | Windows / x86-64 | **build-only** (PE/COFF objects) | `ubuntu-24.04` (cross) | `grail-VERSION-windows-x86_64-objects.zip` |
-| `windows-aarch64` | Windows / AArch64 | planned (ARM64 PE) | `windows-11-arm` | `grail-VERSION-windows-aarch64.zip` |
+| `windows-aarch64` | Windows / AArch64 | static-only (ARM64 PE/COFF); release lane planned | `windows-11-arm` | `grail-VERSION-windows-aarch64.zip` |
 | `macos-aarch64` | macOS / AArch64 | **build-only** (Mach-O objects) | `ubuntu-24.04` (cross) | `grail-VERSION-macos-aarch64-objects.tar.gz` |
 | `macos-x86_64` | macOS / x86-64 | **build-only** (Mach-O objects) | `ubuntu-24.04` (cross) | `grail-VERSION-macos-x86_64-objects.tar.gz` |
 
@@ -91,8 +94,9 @@ The macOS lanes compile with `--target macos-x86_64|macos-aarch64`, the
 5. **Linux build lanes**: native x86-64/AArch64 and cross AArch64/RISC-V64.
    They run only when `preflight.ready == true`.
 6. **Windows x86-64 cross**: builds the host compiler, builds the PE compiler
-   image, runs the static COFF/PE checks and packages the build-only zip. No
-   execution occurs; the job name says `build-only, static`.
+   image, runs the static COFF/PE checks and packages the build-only zip. CI does
+   not execute the images; `bun tools/windows.mjs check` runs eight of the test
+   programs under Wine locally, and the job name says `build-only, static`.
 7. **Target object bundles**: a matrix job packages non-executable COFF/Mach-O
    object bundles for `windows-x86_64`, `macos-aarch64` and `macos-x86_64` with
    `SHA256SUMS` and `objects.json` provenance. `macos-static` runs the Mach-O

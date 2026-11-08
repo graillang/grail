@@ -1,9 +1,10 @@
 # The Vulkan backend: device core
 
-`graphics/src/grail_vulkan.c` implements the RHI ABI on Vulkan 1.3+. This increment is the device
-core — instance, physical and logical device, queues, the bindless pipeline layout, shader modules
-and graphics pipelines for dynamic rendering. There is no swapchain, no window, no resource
-allocation and no submission yet: a headless device that can compile shaders and build pipelines.
+`graphics/src/grail_vulkan.c` implements the RHI ABI on Vulkan 1.3+. The backend now covers the
+device core (instance, physical and logical device, queues, bindless pipeline layout, shader
+modules, graphics and compute pipelines), buffers and textures, command buffers and submission,
+offscreen readbacks, depth/MSAA rendering, and an SDL3 window surface with a swapchain, acquire,
+present and a draw path.
 
 ## What is implemented
 
@@ -27,8 +28,8 @@ allocation and no submission yet: a headless device that can compile shaders and
 | `gr_fence_create` / `gr_fence_wait` / `gr_fence_value` | a real `vkWaitSemaphores` on that timeline |
 | `gr_texture_read` | a one-shot copy to a host-visible buffer and a map |
 
-Still `GR_ERROR_UNSUPPORTED` on a Vulkan device: buffers, descriptor set allocation (so the
-bindless table is declared but not yet populated), compute and mesh pipelines, and the swapchain.
+Unsupported paths return `GR_ERROR_UNSUPPORTED` rather than silently degrading; the remaining
+limits are recorded at the end of this document.
 
 ## The pipeline layout, concretely
 
@@ -399,4 +400,4 @@ Vulkan.
   `vkCreateGraphicsPipelines` at `gr_pipeline_create`. Building all pipelines in parallel at commit
   — Abundance's `PipelineRegistry::build_all()` — is a follow-up; until then the registry closes
   after the first commit without having batched anything.
-- Mesh, compute and ray-tracing pipelines are not implemented.
+- Mesh and ray-tracing pipelines are not implemented; compute pipelines and dispatch are.

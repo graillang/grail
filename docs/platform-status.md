@@ -1,6 +1,6 @@
 # Cross-platform status
 
-Last verified: 2026-11-08 on `main` at `763825d`.
+Last verified: 2026-11-08 on `main` at `565dee6`.
 
 This page distinguishes what has actually been built and executed from scaffolding and
 static inspection. A cross-built object is not platform support. A header parsing is not a
@@ -8,10 +8,11 @@ backend. A project that has a port plan is not a port.
 
 ## Target matrix
 
-There are six compiler target backends: Linux x86-64, Linux AArch64, Linux RISC-V 64,
-Windows x86-64, macOS x86-64 and macOS AArch64. `windows-aarch64` is a seventh platform
-entry: it produces ARM64 PE/COFF images for static verification, has no runner, and its
-release lane remains planned.
+The compiler emits for the six target rows below: the three Linux ELF targets, Windows x86-64,
+Windows AArch64, and macOS x86-64/AArch64. Only Linux x86-64 executes natively here; Windows
+x86-64 executes under Wine. Linux AArch64 and RISC-V 64 are runnable targets whose qemu lanes need
+a runner, Windows AArch64 has no ARM64 runner and its release lane is planned, and both macOS
+targets are static-only.
 
 | Target | Compiler output | Execution evidence | Status |
 | --- | --- | --- | --- |
@@ -106,6 +107,6 @@ make -C graphics vk-smoke       # Vulkan device core, shader modules, pipeline c
 make -C graphics vk-probe       # Vulkan device/capability probe (GPU)
 make -C graphics shader-check   # real DXC/SPIR-V artifacts and reflection
 make -C graphics perm-test      # shader permutations
-just abundance-test             # Abundance bit-exact parity (254 values, 7 programs)
-just borg-test                  # Borg reference-line parity (749 lines, 8 suites)
+just abundance-test             # Abundance bit-exact parity (283 values, 8 programs)
+just borg-test                  # Borg reference-line parity (783 lines, 162 documents, 9 suites)
 ```
