@@ -24,6 +24,13 @@
   descriptor colliding with the sampled-image table. The offline shader tool and the real
   backends are not yet written; a Grail program cannot call any of this until the language has
   an FFI and non-`libc`-free linkage (`graphics/docs/first-renderer-port.md`).
+- Cross-platform build/test/distribution foundation: a seven-platform CI matrix
+  (Linux x86-64/AArch64/RISC-V64, Windows x86-64/AArch64, macOS AArch64/x86-64),
+  host/SDK/QEMU detection, deterministic `tar.gz`/`zip` packaging with
+  `SHA256SUMS` and provenance, POSIX/PowerShell installers, and secret-safe
+  signing/notarization hooks. Linux lanes build and test; Windows/macOS lanes are
+  explicit distribution scaffolding because the compiler still emits Linux ELF
+  only. Tooling is documented in `docs/tooling/cross-platform-ci.md`.
 
 - Native fixtures, inline regression programs and book examples now use typed references and
   explicit byte views under `--default-u64 --typed-refs`; user-mode cases retain `i64` defaults.

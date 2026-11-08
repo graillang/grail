@@ -51,3 +51,28 @@ install prefix="~/.local":
 # Formatter and grail tool regressions (also checks ARM64/RV64 under qemu).
 test-cli:
     bun tools/test-cli.mjs
+
+# Print the cross-platform support matrix and lane status.
+platforms:
+    bun tools/ci.mjs matrix
+
+# Print the full CI lane/artifact plan as JSON.
+ci-plan:
+    bun tools/ci.mjs plan
+
+# Run tooling unit/static checks; no compiler or QEMU needed.
+test-tooling:
+    bun test tools/platforms.test.mjs tools/archive.test.mjs tools/sign.test.mjs
+    bun tools/ci.mjs lint
+
+# Build the compiler for a platform (e.g. just build-platform linux-x86_64).
+build-platform platform:
+    bun tools/ci.mjs build --platform {{platform}}
+
+# Build, test and package a platform into dist/.
+package platform:
+    bun tools/ci.mjs package --platform {{platform}}
+
+# Print signing/notarization commands; add --execute after setting credentials.
+sign platform artifact:
+    bun tools/ci.mjs sign --platform {{platform}} --artifact {{artifact}}
