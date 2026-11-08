@@ -1637,6 +1637,7 @@ grail_status grail_os_dl_close(grail_library handle) {
         grail_windows_set_loader_error(error);
         return grail_windows_fail(error);
     }
+    grail_windows_loader_error[0] = '\0';
     return GRAIL_OK;
 }
 
