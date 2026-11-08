@@ -501,6 +501,11 @@ gr_result gr_cmd_draw_indexed(gr_handle cmd, const gr_draw_indexed *draw);
 /* Indirect argument buffer; offset must satisfy gr_device_caps.buffer_address_min_align. */
 gr_result gr_cmd_draw_indirect(gr_handle cmd, gr_handle buffer, uint64_t offset,
                                uint32_t draw_count, uint32_t stride);
+/* The same, for index buffers. `stride` must be at least the size of an indexed draw command
+ * (20 bytes) and a multiple of 4, because the argument block is read as an array of those. A
+ * smaller or unaligned stride is refused rather than read off the end of the block. */
+gr_result gr_cmd_draw_indexed_indirect(gr_handle cmd, gr_handle buffer, uint64_t offset,
+                                       uint32_t draw_count, uint32_t stride);
 gr_result gr_cmd_dispatch(gr_handle cmd, uint32_t x, uint32_t y, uint32_t z);
 gr_result gr_cmd_dispatch_indirect(gr_handle cmd, gr_handle buffer, uint64_t offset);
 

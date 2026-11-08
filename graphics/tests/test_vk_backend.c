@@ -1169,14 +1169,14 @@ int main(int argc, char **argv)
         };
         const uint16_t indices[3] = { 0, 1, 2 };
         gr_buffer_desc bd;
-        gr_handle vb = GR_NULL_HANDLE, ib = GR_NULL_HANDLE;
+        gr_handle vb = GR_NULL_HANDLE, ib = GR_NULL_HANDLE, indirect = GR_NULL_HANDLE;
         gr_texture_desc td;
         gr_handle target = GR_NULL_HANDLE, target_view = GR_NULL_HANDLE;
         gr_texture_view_desc vd;
         gr_cmd_pool_desc cpd;
         gr_handle pool = GR_NULL_HANDLE, cmd = GR_NULL_HANDLE;
         gr_cmd_alloc_info cai;
-        uint64_t digests[2];
+        uint64_t digests[3]; /* direct, direct again, indirect */
         uint32_t pass;
 
         memset(&bd, 0, sizeof(bd));
@@ -1192,6 +1192,23 @@ int main(int argc, char **argv)
         CHECK_EQ(gr_buffer_create(device, &bd, &ib), GR_OK);
         CHECK_EQ(gr_buffer_write(ib, 0, (gr_span_u8){ (const uint8_t *)indices, sizeof(indices) }),
                  GR_OK);
+
+        /* One VkDrawIndexedIndirectCommand: indexCount, instanceCount, firstIndex, vertexOffset,
+         * firstInstance - 20 bytes, which is the stride the backend validates against. */
+        {
+            uint32_t command[5];
+            command[0] = 3; /* index count */
+            command[1] = 1; /* instance count */
+            command[2] = 0; /* first index */
+            command[3] = 0; /* vertex offset */
+            command[4] = 0; /* first instance */
+            bd.size = sizeof(command);
+            bd.usage = GR_BUFFER_USAGE_INDIRECT | GR_BUFFER_USAGE_TRANSFER_DST;
+            CHECK_EQ(gr_buffer_create(device, &bd, &indirect), GR_OK);
+            CHECK_EQ(gr_buffer_write(indirect, 0,
+                                     (gr_span_u8){ (const uint8_t *)command, sizeof(command) }),
+                     GR_OK);
+        }
 
         memset(&td, 0, sizeof(td));
         td.head.size = (uint32_t)sizeof(td);
@@ -1217,7 +1234,10 @@ int main(int argc, char **argv)
         cai.pool = pool;
         CHECK_EQ(gr_cmd_alloc(&cai, &cmd), GR_OK);
 
-        for (pass = 0; pass < 2u; ++pass) {
+        for (pass = 0; pass < 3u; ++pass) {
+            /* The third pass is the same draw issued indirectly: it must produce the same pixels,
+             * or the argument block is being read as something other than the command it holds. */
+            int use_indirect = pass == 2;
             gr_graph_desc gd;
             gr_handle graph = GR_NULL_HANDLE;
             gr_graph_resource res;
@@ -1269,13 +1289,25 @@ int main(int argc, char **argv)
                      GR_OK);
             CHECK_EQ(gr_cmd_set_scissor(cmd, 0, 0, kSize, kSize), GR_OK);
             CHECK_EQ(gr_cmd_bind_pipeline(cmd, pipeline_triangle), GR_OK);
+            if (use_indirect) {
+                /* Refused inside the same recording: a stride that would read into the next
+                 * command, and a buffer that never asked to be an indirect source. */
+                CHECK_EQ(gr_cmd_draw_indexed_indirect(cmd, indirect, 0, 1, 16),
+                         GR_ERROR_INVALID_ARGUMENT);
+                CHECK_EQ(gr_cmd_draw_indexed_indirect(cmd, vb, 0, 1, 20),
+                         GR_ERROR_INVALID_ARGUMENT);
+            }
             CHECK_EQ(gr_cmd_bind_vertex_buffer(cmd, 0, vb, 0), GR_OK);
             CHECK_EQ(gr_cmd_bind_index_buffer(cmd, ib, 0, 0), GR_OK);
-            memset(&draw, 0, sizeof(draw));
-            draw.head.size = (uint32_t)sizeof(draw);
-            draw.index_count = 3;
-            draw.instance_count = 1;
-            CHECK_EQ(gr_cmd_draw_indexed(cmd, &draw), GR_OK);
+            if (use_indirect) {
+                CHECK_EQ(gr_cmd_draw_indexed_indirect(cmd, indirect, 0, 1, 20), GR_OK);
+            } else {
+                memset(&draw, 0, sizeof(draw));
+                draw.head.size = (uint32_t)sizeof(draw);
+                draw.index_count = 3;
+                draw.instance_count = 1;
+                CHECK_EQ(gr_cmd_draw_indexed(cmd, &draw), GR_OK);
+            }
             CHECK_EQ(gr_cmd_end_render(cmd), GR_OK);
             {
                 gr_barrier to_copy;
@@ -1333,9 +1365,11 @@ int main(int argc, char **argv)
             }
             gr_graph_destroy(graph);
         }
-        printf("vk-backend: indexed triangle digest 0x%016llx (twice)\n",
-               (unsigned long long)digests[0]);
+        printf("vk-backend: indexed triangle digest 0x%016llx (direct, twice); indirect 0x%016llx\n",
+               (unsigned long long)digests[0], (unsigned long long)digests[2]);
         CHECK_EQ(digests[0], digests[1]);
+        /* The indirect draw produced exactly the direct draw's pixels. */
+        CHECK_EQ(digests[0], digests[2]);
     }
 
     CHECK_EQ(gr_device_wait_idle(device), GR_OK);

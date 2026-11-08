@@ -1657,6 +1657,28 @@ gr_result gr_cmd_draw_indirect(gr_handle cmd_handle, gr_handle buffer, uint64_t 
     return GR_OK;
 }
 
+gr_result gr_cmd_draw_indexed_indirect(gr_handle cmd_handle, gr_handle buffer, uint64_t offset,
+                                       uint32_t draw_count, uint32_t stride)
+{
+    if (gr_active_backend() == GR_BACKEND_VULKAN)
+        return gr_vk_abi_cmd_draw_indexed_indirect(cmd_handle, buffer, offset, draw_count, stride);
+    {
+        gr_null_cmd *cmd = (gr_null_cmd *)gr_object_lookup(gr_objects(), cmd_handle,
+                                                           GR_HANDLE_CMD_BUFFER, NULL);
+        gr_null_buffer *b = null_buffer(buffer, NULL);
+        if (!cmd || !b)
+            return GR_ERROR_INVALID_HANDLE;
+        if (cmd->state != GR_CMD_RECORDING)
+            return GR_ERROR_NOT_READY;
+        if (draw_count == 0 || stride < 20u || (stride % 4u) != 0u)
+            return GR_ERROR_INVALID_ARGUMENT;
+        if (offset + (uint64_t)draw_count * stride > b->size)
+            return GR_ERROR_INVALID_ARGUMENT;
+        cmd->draws += draw_count;
+        return GR_OK;
+    }
+}
+
 gr_result gr_cmd_dispatch(gr_handle cmd_handle, uint32_t x, uint32_t y, uint32_t z)
 {
     if (gr_active_backend() == GR_BACKEND_VULKAN)
