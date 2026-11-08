@@ -42,8 +42,9 @@ GRAIL_API grail_status GRAIL_CALL grail_os_env_unset(const uint8_t *name, uint64
 GRAIL_API grail_status GRAIL_CALL grail_os_env_iter_open(grail_env_iter *out);
 
 /*
- * Advances to the next entry.  Sets `is_last` to 1 after the final entry; once
- * exhausted, name/value return GRAIL_E_NOT_FOUND.
+ * Advances to the next entry.  Sets `is_last` to 1 when there is no further
+ * entry; the iterator is then exhausted and name/value return
+ * GRAIL_E_NOT_FOUND.  The final entry itself is returned with is_last = 0.
  */
 GRAIL_API grail_status GRAIL_CALL grail_os_env_iter_next(grail_env_iter iterator,
                                                         uint64_t *is_last);
