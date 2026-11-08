@@ -36,6 +36,10 @@ windows-check:
 test *args:
     bun tools/test-native.mjs "$@"
 
+# Run the Abundance CPU-port parity tests (math, compared bit-for-bit with Abundance's own C++).
+abundance-test:
+    bun tools/abundance-test.mjs
+
 # Verify direct compiler self-hosting on all supported CPUs (QEMU needed for cross execution).
 bootstrap-check:
     bun tools/bootstrap.mjs verify all

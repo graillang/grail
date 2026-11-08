@@ -25,7 +25,7 @@ for (const test of cases) {
     assert.ok(test.reject && test.removedSyntax === true, `${test.name}: legacy syntax is only allowed as intentional removed-syntax rejection input`);
   }
 }
-for (const directory of ['compiler/tests', 'book/examples']) {
+for (const directory of ['compiler/tests', 'book/examples', 'abundance/src', 'abundance/tests']) {
   for (const file of readdirSync(join(root, directory)).filter(f => f.endsWith('.grl'))) {
     const path = join(root, directory, file);
     if (!legacyFiles.has(path)) assert.doesNotMatch(readFileSync(path, 'utf8'), legacyReferenceSyntax, `${path}: legacy fixture reference syntax`);
