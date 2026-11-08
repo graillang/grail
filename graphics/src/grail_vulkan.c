@@ -4006,4 +4006,81 @@ uint64_t gr_vk_abi_fence_value(gr_handle f) { (void)f; return 0; }
 gr_result gr_vk_abi_cmd_push_frame_offset(gr_handle c, uint32_t s) { (void)c; (void)s; return GR_ERROR_UNSUPPORTED; }
 void gr_vk_abi_buffer_unmap(gr_handle b) { (void)b; }
 
+/* Entry points added to the dispatcher after the stubs above were written. */
+gr_result gr_vk_abi_buffer_create(gr_handle device, const gr_buffer_desc *desc, gr_handle *out_buffer)
+{
+    (void)device;
+    (void)desc;
+    (void)out_buffer;
+    return GR_ERROR_UNSUPPORTED;
+}
+gr_result gr_vk_abi_buffer_write(gr_handle buffer, uint64_t offset, gr_span_u8 data)
+{
+    (void)buffer;
+    (void)offset;
+    (void)data;
+    return GR_ERROR_UNSUPPORTED;
+}
+gr_result gr_vk_abi_buffer_read(gr_handle buffer, uint64_t offset, gr_mut_span_u8 out)
+{
+    (void)buffer;
+    (void)offset;
+    (void)out;
+    return GR_ERROR_UNSUPPORTED;
+}
+gr_result gr_vk_abi_buffer_map(gr_handle buffer, void **out_ptr)
+{
+    (void)buffer;
+    (void)out_ptr;
+    return GR_ERROR_UNSUPPORTED;
+}
+uint64_t gr_vk_abi_buffer_device_address(gr_handle buffer)
+{
+    (void)buffer;
+    return 0;
+}
+uint32_t gr_vk_abi_buffer_bindless_index(gr_handle buffer)
+{
+    (void)buffer;
+    return 0;
+}
+gr_result gr_vk_abi_sampler_create(gr_handle device, const gr_sampler_desc *desc, gr_handle *out_sampler, uint32_t *out_slot)
+{
+    (void)device;
+    (void)desc;
+    (void)out_sampler;
+    (void)out_slot;
+    return GR_ERROR_UNSUPPORTED;
+}
+gr_result gr_vk_abi_texture_write(gr_handle texture, uint32_t mip, uint32_t layer, uint32_t x, uint32_t y, uint32_t w, uint32_t h, gr_span_u8 rows)
+{
+    (void)texture;
+    (void)mip;
+    (void)layer;
+    (void)x;
+    (void)y;
+    (void)w;
+    (void)h;
+    (void)rows;
+    return GR_ERROR_UNSUPPORTED;
+}
+uint32_t gr_vk_abi_texture_view_bindless_sampled(gr_handle view)
+{
+    (void)view;
+    return 0;
+}
+gr_result gr_vk_abi_frame_constants_write(gr_handle device, uint32_t slot, const gr_frame_constants *constants)
+{
+    (void)device;
+    (void)slot;
+    (void)constants;
+    return GR_ERROR_UNSUPPORTED;
+}
+gr_result gr_vk_abi_frame_slot_count(gr_handle device, uint32_t *out_count)
+{
+    (void)device;
+    (void)out_count;
+    return GR_ERROR_UNSUPPORTED;
+}
+
 #endif

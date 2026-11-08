@@ -21,6 +21,10 @@
 #  endif
 #endif
 
+/* Everything below names Vulkan types; a build without the headers (Windows cross builds,
+ * hosts without the SDK) sees only the ABI stubs in grail_vulkan.c. */
+#if defined(GRAIL_HAVE_VULKAN)
+
 typedef struct gr_vk_loader {
     void *library;
     PFN_vkGetInstanceProcAddr gipa;
@@ -57,5 +61,7 @@ void gr_vk_fill_caps(gr_device_caps *caps, const VkPhysicalDeviceProperties *pro
                      const VkPhysicalDeviceMemoryProperties *memory, uint32_t required_missing,
                      uint32_t api_major, uint32_t api_minor, uint32_t subgroup_size,
                      uint32_t timestamp_valid_bits);
+
+#endif /* GRAIL_HAVE_VULKAN */
 
 #endif /* GRAIL_VK_COMMON_H */

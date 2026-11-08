@@ -26,6 +26,8 @@
 
 #if !defined(_WIN32)
 #include <dirent.h>
+#else
+#include <windows.h>
 #endif
 
 #define GR_LIB_MAX_ENTRIES 256u
@@ -144,7 +146,6 @@ static gr_result parse_name(const char *rel, char *name_out, size_t name_cap,
 /* ---------------------------------------------------------------------------------------
  * Platform primitives. Everything else in this file is portable.
  * --------------------------------------------------------------------------------------- */
-#if !defined(_WIN32)
 static gr_result lib_read_file(const char *path, uint8_t **out_data, size_t *out_len)
 {
     FILE *file = fopen(path, "rb");
@@ -167,7 +168,34 @@ static gr_result lib_read_file(const char *path, uint8_t **out_data, size_t *out
     return GR_OK;
 }
 
+/* Indexes one regular file if it is a *.refl.bin; `rel` is its path under the library root. */
+static void lib_consider(gr_library *library, const char *path, char *rel, const char *name)
+{
+    size_t name_len = strlen(name);
+    gr_lib_entry *entry;
+    gr_shader_stage stage;
+    uint64_t key;
+    if (name_len <= 9u || strcmp(name + name_len - 9u, ".refl.bin") != 0)
+        return;
+    rel[strlen(rel) - 9u] = '\0'; /* strip ".refl.bin" */
+    entry = &library->entries[library->entry_count];
+    if (parse_name(rel, entry->name, sizeof(entry->name), &stage, &key) != GR_OK)
+        return;
+    entry->name_len = (uint32_t)strlen(entry->name);
+    entry->stage = stage;
+    entry->key = key;
+    snprintf(entry->path, sizeof(entry->path), "%s", path);
+    library->entry_count++;
+}
+
+static int lib_join(char *out, size_t cap, const char *a, const char *b)
+{
+    int n = a[0] ? snprintf(out, cap, "%s/%s", a, b) : snprintf(out, cap, "%s", b);
+    return n >= 0 && (size_t)n < cap;
+}
+
 /* Walks `dir` under `rel_prefix`, appending every *.refl.bin. */
+#if !defined(_WIN32)
 static void lib_enumerate(gr_library *library, const char *dir, const char *rel_prefix,
                           unsigned depth)
 {
@@ -179,60 +207,54 @@ static void lib_enumerate(gr_library *library, const char *dir, const char *rel_
     handle = opendir(dir);
     if (!handle)
         return;
-    while ((item = readdir(handle)) != NULL) {
+    while ((item = readdir(handle)) != NULL && library->entry_count < GR_LIB_MAX_ENTRIES) {
         char path[GR_LIB_PATH_MAX];
         char rel[GR_LIB_PATH_MAX];
         struct stat info;
-        size_t name_len = strlen(item->d_name);
 
         if (item->d_name[0] == '.')
             continue;
-        if (snprintf(path, sizeof(path), "%s/%s", dir, item->d_name) >= (int)sizeof(path))
+        if (!lib_join(path, sizeof(path), dir, item->d_name) ||
+            !lib_join(rel, sizeof(rel), rel_prefix, item->d_name))
             continue;
-        if (rel_prefix[0])
-            snprintf(rel, sizeof(rel), "%s/%s", rel_prefix, item->d_name);
-        else
-            snprintf(rel, sizeof(rel), "%s", item->d_name);
-
         if (stat(path, &info) != 0)
             continue;
-        if (S_ISDIR(info.st_mode)) {
+        if (S_ISDIR(info.st_mode))
             lib_enumerate(library, path, rel, depth + 1u);
-            continue;
-        }
-        if (name_len <= 9u || strcmp(item->d_name + name_len - 9u, ".refl.bin") != 0)
-            continue;
-
-        rel[strlen(rel) - 9u] = '\0'; /* strip ".refl.bin" */
-        {
-            gr_lib_entry *entry = &library->entries[library->entry_count];
-            gr_shader_stage stage;
-            uint64_t key;
-            if (parse_name(rel, entry->name, sizeof(entry->name), &stage, &key) != GR_OK)
-                continue;
-            entry->name_len = (uint32_t)strlen(entry->name);
-            entry->stage = stage;
-            entry->key = key;
-            snprintf(entry->path, sizeof(entry->path), "%s", path);
-            library->entry_count++;
-        }
-        if (library->entry_count >= GR_LIB_MAX_ENTRIES)
-            break;
+        else
+            lib_consider(library, path, rel, item->d_name);
     }
     closedir(handle);
 }
 #else
-/* Windows: implement these two and nothing else changes. Until then a Windows host cannot use
- * the library, which is reported rather than silently returning an empty index. */
-static gr_result lib_read_file(const char *path, uint8_t **out_data, size_t *out_len)
-{
-    (void)path; (void)out_data; (void)out_len;
-    return GR_ERROR_UNSUPPORTED;
-}
 static void lib_enumerate(gr_library *library, const char *dir, const char *rel_prefix,
                           unsigned depth)
 {
-    (void)library; (void)dir; (void)rel_prefix; (void)depth;
+    char pattern[GR_LIB_PATH_MAX];
+    WIN32_FIND_DATAA item;
+    HANDLE handle;
+
+    if (depth > GR_LIB_MAX_DEPTH || library->entry_count >= GR_LIB_MAX_ENTRIES)
+        return;
+    if (!lib_join(pattern, sizeof(pattern), dir, "*"))
+        return;
+    handle = FindFirstFileA(pattern, &item);
+    if (handle == INVALID_HANDLE_VALUE)
+        return;
+    do {
+        char path[GR_LIB_PATH_MAX];
+        char rel[GR_LIB_PATH_MAX];
+        if (item.cFileName[0] == '.')
+            continue;
+        if (!lib_join(path, sizeof(path), dir, item.cFileName) ||
+            !lib_join(rel, sizeof(rel), rel_prefix, item.cFileName))
+            continue;
+        if (item.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+            lib_enumerate(library, path, rel, depth + 1u);
+        else
+            lib_consider(library, path, rel, item.cFileName);
+    } while (library->entry_count < GR_LIB_MAX_ENTRIES && FindNextFileA(handle, &item));
+    FindClose(handle);
 }
 #endif
 

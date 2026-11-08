@@ -8,6 +8,7 @@
 #   make perm-test     prove each permutation really compiles to its own bytecode (needs bun)
 #   make vk-probe      ask the driver what it is, under the exclusive GPU lock (talks to a GPU)
 #   make vk-smoke      create a real device and pipeline headless, under the same lock
+#   make d3d12-smoke   build the D3D12 backend for Windows with zig cc and run it under Wine
 #   make clean
 #
 # DXC is looked up by the tool: $DXC, then Abundance's pinned tools cache, then PATH.
@@ -19,7 +20,7 @@ BUILD   := ../.work/graphics
 
 SRC := src/grail_core.c src/grail_reflect.c src/grail_wire.c src/grail_shader_library.c \
        src/grail_vk_common.c src/grail_vk_probe.c src/grail_vulkan.c \
-       src/grail_graph.c src/grail_sdl.c src/grail_null.c src/grail_null_window.c
+       src/grail_d3d12.c src/grail_graph.c src/grail_sdl.c src/grail_null.c src/grail_null_window.c
 # dlopen is how the Vulkan backend resolves its loader, so every binary that links the
 # implementation needs it.
 LDLIBS ?= -ldl
@@ -33,7 +34,7 @@ GPU_TESTS := vk_probe vk_backend
 TEST_BINS := $(patsubst %,$(BUILD)/test_%,$(TESTS))
 BLOBS := $(shell find ../.work/shaders -name '*.refl.bin' 2>/dev/null)
 
-.PHONY: all test shaders shader-check perm-test vk-probe vk-smoke vk-surface vk-cache tool clean
+.PHONY: all test shaders shader-check perm-test vk-probe vk-smoke vk-surface vk-cache d3d12-smoke tool clean
 
 all: test
 
@@ -146,6 +147,29 @@ vk-probe: $(BUILD)/grail-vk-probe $(BUILD)/test_vk_probe
 	flock -w 600 $(GPU_LOCK) $(BUILD)/grail-vk-probe; rc=$$?; \
 	flock -w 600 $(GPU_LOCK) $(BUILD)/test_vk_probe || exit $$?; \
 	exit $$rc
+
+# D3D12 runs on Windows, and under Wine on Linux, whose d3d12.dll is vkd3d over the host Vulkan
+# driver. zig cc supplies the MinGW-w64 d3d12/dxgi headers and import libraries; the probe tool is
+# Vulkan-only and stays out of the Windows build.
+ZIG ?= zig
+WINE ?= wine
+WIN_CC = $(ZIG) cc -target x86_64-windows-gnu
+WIN_BUILD := $(BUILD)/windows-x86_64
+WIN_SRC := $(filter-out src/grail_vk_probe.c,$(SRC))
+WIN_OBJ := $(patsubst src/%.c,$(WIN_BUILD)/%.o,$(WIN_SRC))
+
+$(WIN_BUILD):
+	mkdir -p $@
+
+$(WIN_BUILD)/%.o: src/%.c $(HEADERS) | $(WIN_BUILD)
+	$(WIN_CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
+
+$(WIN_BUILD)/test_d3d12_backend.exe: tests/test_d3d12_backend.c $(WIN_OBJ) $(HEADERS) | $(WIN_BUILD)
+	$(WIN_CC) $(CFLAGS) $(INCLUDES) $< $(WIN_OBJ) -ld3d12 -ldxgi -o $@
+
+d3d12-smoke: $(WIN_BUILD)/test_d3d12_backend.exe
+	@if pgrep -x Abundance >/dev/null; then echo "refusing: the game is running"; exit 1; fi
+	cd $(WIN_BUILD) && flock -w 600 $(GPU_LOCK) $(WINE) test_d3d12_backend.exe
 
 clean:
 	rm -rf $(BUILD)

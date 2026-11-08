@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- D3D12 backend, first slice (`graphics/src/grail_d3d12.c`): headless device with its reported
+  feature level, one direct queue whose fence is the timeline gr fences observe, 2D render-target
+  textures and views, command pools and lists (one allocator per list), barriers that refuse a
+  source state disagreeing with the tracked one, clears, viewport/scissor, submit and texture
+  readback. The device owns and releases all its objects. Every other entry point routes to an
+  explicit `GR_ERROR_UNSUPPORTED`. `make -C graphics d3d12-smoke` builds the library for
+  x86_64-windows with `zig cc` and runs 47 checks under Wine (vkd3d on the host GPU), including
+  exact clear readbacks. Building without SDKs also exposed and fixed two latent gaps: Vulkan
+  declarations in `grail_vk_common.h` outside `GRAIL_HAVE_VULKAN`, and eleven dispatcher entry
+  points missing from the no-headers Vulkan stubs. The shader library can now index on Windows
+  (`FindFirstFileA`) instead of reporting `GR_ERROR_UNSUPPORTED`.
+
 - Added process and thread wrappers over the C ABI: `handle Process`/`handle Thread`,
   `spawn(program, arguments)` with a NUL-separated argv[1..] blob, blocking `wait` returning a
   40-byte `ProcessStatus` (kind/exit code/signal), `process_id`, `process_close`, and

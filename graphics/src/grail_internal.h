@@ -136,6 +136,72 @@ gr_result gr_vk_abi_cmd_push_frame_offset(gr_handle cmd, uint32_t frame_slot);
 void gr_vk_abi_buffer_unmap(gr_handle buffer);
 uint64_t gr_vk_abi_fence_value(gr_handle fence);
 
+/* Implemented by grail_d3d12.c with the same signatures as the Vulkan entry points. A build
+ * without the Windows SDK (every non-Windows host) compiles them as GR_ERROR_UNSUPPORTED stubs,
+ * so the dispatcher can route to them unconditionally. */
+gr_result gr_d3d12_abi_device_create(const gr_device_desc *desc, gr_handle *out_device);
+gr_result gr_d3d12_abi_device_destroy(gr_handle device);
+gr_result gr_d3d12_abi_device_get_caps(gr_handle device, gr_device_caps *out);
+gr_result gr_d3d12_abi_device_wait_idle(gr_handle device);
+gr_result gr_d3d12_abi_device_queue(gr_handle device, gr_queue_kind kind, gr_handle *out_queue);
+gr_result gr_d3d12_abi_queue_timeline(gr_handle queue, gr_handle *out_semaphore);
+uint64_t gr_d3d12_abi_queue_submitted(gr_handle queue);
+uint64_t gr_d3d12_abi_queue_completed(gr_handle queue);
+gr_result gr_d3d12_abi_queue_wait_idle(gr_handle queue);
+gr_handle gr_d3d12_abi_device_bindless(gr_handle device);
+gr_result gr_d3d12_abi_bindless_get_info(gr_handle bindless, gr_bindless_info *out);
+gr_result gr_d3d12_abi_device_retire(gr_handle device, gr_handle object, uint64_t after_value);
+gr_result gr_d3d12_abi_device_collect(gr_handle device);
+gr_result gr_d3d12_abi_shader_create(gr_handle device, const gr_shader_desc *desc, gr_handle *out_shader);
+gr_result gr_d3d12_abi_pipeline_create(gr_handle device, const gr_pipeline_desc *desc,
+                                   gr_handle *out_pipeline);
+gr_result gr_d3d12_abi_pipeline_commit(gr_handle device, double *out_seconds);
+gr_result gr_d3d12_abi_pipeline_stats(gr_handle device, uint32_t *out_declared, uint32_t *out_committed);
+gr_result gr_d3d12_abi_texture_create(gr_handle device, const gr_texture_desc *desc, gr_handle *out_texture);
+gr_result gr_d3d12_abi_texture_view_create(gr_handle device, const gr_texture_view_desc *desc, gr_handle *out_view);
+gr_result gr_d3d12_abi_texture_read(gr_handle texture, uint32_t mip, uint32_t layer, uint32_t x, uint32_t y, uint32_t width, uint32_t height, uint32_t src_state, gr_mut_span_u8 out);
+gr_result gr_d3d12_abi_cmd_pool_create(gr_handle device, const gr_cmd_pool_desc *desc, gr_handle *out_pool);
+gr_result gr_d3d12_abi_cmd_alloc(const gr_cmd_alloc_info *info, gr_handle *out_cmd);
+gr_result gr_d3d12_abi_cmd_begin(gr_handle cmd);
+gr_result gr_d3d12_abi_cmd_end(gr_handle cmd);
+gr_result gr_d3d12_abi_cmd_reset(gr_handle cmd);
+gr_result gr_d3d12_abi_cmd_barrier(gr_handle cmd, const gr_barrier *barriers, uint32_t count);
+gr_result gr_d3d12_abi_cmd_begin_render(gr_handle cmd, const gr_render_begin *info);
+gr_result gr_d3d12_abi_cmd_end_render(gr_handle cmd);
+gr_result gr_d3d12_abi_cmd_set_viewport(gr_handle cmd, float x, float y, float width, float height, float min_depth, float max_depth);
+gr_result gr_d3d12_abi_cmd_set_scissor(gr_handle cmd, int32_t x, int32_t y, uint32_t width, uint32_t height);
+gr_result gr_d3d12_abi_cmd_bind_pipeline(gr_handle cmd, gr_handle pipeline);
+gr_result gr_d3d12_abi_cmd_push_constants(gr_handle cmd, uint32_t offset, gr_span_u8 data);
+gr_result gr_d3d12_abi_cmd_draw(gr_handle cmd, const gr_draw *draw);
+gr_result gr_d3d12_abi_cmd_draw_indexed(gr_handle cmd, const gr_draw_indexed *draw);
+gr_result gr_d3d12_abi_cmd_draw_indexed_indirect(gr_handle cmd, gr_handle buffer, uint64_t offset, uint32_t draw_count, uint32_t stride);
+gr_result gr_d3d12_abi_cmd_bind_vertex_buffer(gr_handle cmd, uint32_t slot, gr_handle buffer, uint64_t offset);
+gr_result gr_d3d12_abi_cmd_bind_index_buffer(gr_handle cmd, gr_handle buffer, uint64_t offset, uint32_t index_type);
+gr_result gr_d3d12_abi_cmd_dispatch(gr_handle cmd, uint32_t x, uint32_t y, uint32_t z);
+gr_result gr_d3d12_abi_cmd_dispatch_indirect(gr_handle cmd, gr_handle buffer, uint64_t offset);
+gr_result gr_d3d12_abi_submit(const gr_submit *submit, uint64_t *out_value);
+gr_result gr_d3d12_abi_swapchain_create(gr_handle device, const gr_swapchain_desc *desc, gr_handle *out_swapchain);
+gr_result gr_d3d12_abi_swapchain_info(gr_handle swapchain, gr_format *out_format, uint32_t *out_width, uint32_t *out_height, uint32_t *out_image_count);
+gr_result gr_d3d12_abi_swapchain_acquire(gr_handle swapchain, uint64_t timeout_ns, uint32_t *out_image_index, gr_handle *out_view, int32_t *out_needs_recreate);
+gr_result gr_d3d12_abi_swapchain_recreate(gr_handle swapchain, uint32_t width, uint32_t height, uint64_t after_value);
+gr_result gr_d3d12_abi_present(gr_handle queue, gr_handle swapchain, uint32_t image_index, uint64_t wait_value, uint64_t *out_value);
+gr_result gr_d3d12_abi_fence_create(gr_handle device, uint64_t initial_value, gr_handle *out_fence);
+gr_result gr_d3d12_abi_fence_wait(gr_handle fence, uint64_t value, uint64_t timeout_ns, gr_result *out_status);
+gr_result gr_d3d12_abi_buffer_create(gr_handle device, const gr_buffer_desc *desc, gr_handle *out_buffer);
+gr_result gr_d3d12_abi_buffer_write(gr_handle buffer, uint64_t offset, gr_span_u8 data);
+gr_result gr_d3d12_abi_buffer_read(gr_handle buffer, uint64_t offset, gr_mut_span_u8 out);
+gr_result gr_d3d12_abi_buffer_map(gr_handle buffer, void **out_ptr);
+uint64_t gr_d3d12_abi_buffer_device_address(gr_handle buffer);
+uint32_t gr_d3d12_abi_buffer_bindless_index(gr_handle buffer);
+gr_result gr_d3d12_abi_sampler_create(gr_handle device, const gr_sampler_desc *desc, gr_handle *out_sampler, uint32_t *out_slot);
+gr_result gr_d3d12_abi_texture_write(gr_handle texture, uint32_t mip, uint32_t layer, uint32_t x, uint32_t y, uint32_t w, uint32_t h, gr_span_u8 rows);
+uint32_t gr_d3d12_abi_texture_view_bindless_sampled(gr_handle view);
+gr_result gr_d3d12_abi_frame_constants_write(gr_handle device, uint32_t slot, const gr_frame_constants *constants);
+gr_result gr_d3d12_abi_frame_slot_count(gr_handle device, uint32_t *out_count);
+gr_result gr_d3d12_abi_cmd_push_frame_offset(gr_handle cmd, uint32_t frame_slot);
+void gr_d3d12_abi_buffer_unmap(gr_handle buffer);
+uint64_t gr_d3d12_abi_fence_value(gr_handle fence);
+
 /* Duplicates a gr_str into malloc'd, NUL-terminated memory. Returns NULL for an empty or
  * absent string. The caller owns the result. */
 char *gr_str_dup(gr_str s);

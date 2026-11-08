@@ -51,7 +51,8 @@ docs/                     the contract, the shader flow, dependencies, blockers
 | Offline shader tool | written; compiles 3 stages, reflection and permutation ids verified by an independent C reader |
 | Vulkan device probe | implemented; this host satisfies every required feature (docs/vulkan-probe.md) |
 | Vulkan backend | device, queues, live bindless table (images, samplers, storage buffers), graphics + compute pipelines, offscreen frames and dispatches with verified readbacks |
-| D3D12 / Metal backends | **not implemented** (`GR_ERROR_UNSUPPORTED`) |
+| D3D12 backend | first slice: device, queue/fence, render targets, barriers, clear, submit, readback; `make d3d12-smoke` (Wine) |
+| Metal backend | **not implemented** (`GR_ERROR_UNSUPPORTED`) |
 | Permutations | each combination compiled to its own SPIR-V/DXIL/blob; digests and keys tested |
 | Key → bytecode resolution | implemented: library index, lazy cache, miss/mismatch/exhaustion statuses |
 | Render graph | passes/resources, derived order and barriers, culling, validation — and driving a real three-pass Vulkan frame |

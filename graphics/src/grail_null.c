@@ -239,7 +239,8 @@ gr_result gr_device_create(const gr_device_desc *desc, gr_handle *out_device)
         gr_result status;
         if (gr_active_backend() != GR_BACKEND_NULL && gr_active_backend() != desc->backend)
             return GR_ERROR_UNSUPPORTED;
-        status = gr_vk_abi_device_create(desc, out_device);
+        status = desc->backend == GR_BACKEND_D3D12 ? gr_d3d12_abi_device_create(desc, out_device)
+                                                    : gr_vk_abi_device_create(desc, out_device);
         if (status == GR_OK)
             gr_set_active_backend(desc->backend);
         return status;
@@ -381,6 +382,11 @@ out_of_memory:
 
 void gr_device_destroy(gr_handle device_handle)
 {
+    if (gr_active_backend() == GR_BACKEND_D3D12) {
+        (void)gr_d3d12_abi_device_destroy(device_handle);
+        gr_set_active_backend(GR_BACKEND_NULL);
+        return;
+    }
     if (gr_active_backend() == GR_BACKEND_VULKAN) {
         (void)gr_vk_abi_device_destroy(device_handle);
         gr_set_active_backend(GR_BACKEND_NULL);
@@ -407,6 +413,8 @@ void gr_device_destroy(gr_handle device_handle)
 
 gr_result gr_device_get_caps(gr_handle device_handle, gr_device_caps *out)
 {
+    if (gr_active_backend() == GR_BACKEND_D3D12)
+        return gr_d3d12_abi_device_get_caps(device_handle, out);
     if (gr_active_backend() == GR_BACKEND_VULKAN)
         return gr_vk_abi_device_get_caps(device_handle, out);
     gr_null_device *device = (gr_null_device *)null_get(NULL, device_handle, GR_HANDLE_DEVICE, NULL);
@@ -428,6 +436,8 @@ gr_result gr_device_get_caps(gr_handle device_handle, gr_device_caps *out)
 
 gr_result gr_device_wait_idle(gr_handle device_handle)
 {
+    if (gr_active_backend() == GR_BACKEND_D3D12)
+        return gr_d3d12_abi_device_wait_idle(device_handle);
     if (gr_active_backend() == GR_BACKEND_VULKAN)
         return gr_vk_abi_device_wait_idle(device_handle);
     gr_null_device *device = (gr_null_device *)null_get(NULL, device_handle, GR_HANDLE_DEVICE, NULL);
@@ -444,6 +454,8 @@ gr_result gr_device_wait_idle(gr_handle device_handle)
  * ======================================================================================= */
 gr_result gr_device_queue(gr_handle device_handle, gr_queue_kind kind, gr_handle *out_queue)
 {
+    if (gr_active_backend() == GR_BACKEND_D3D12)
+        return gr_d3d12_abi_device_queue(device_handle, kind, out_queue);
     if (gr_active_backend() == GR_BACKEND_VULKAN)
         return gr_vk_abi_device_queue(device_handle, kind, out_queue);
     gr_null_device *device = (gr_null_device *)null_get(NULL, device_handle, GR_HANDLE_DEVICE, NULL);
@@ -460,6 +472,8 @@ gr_result gr_device_queue(gr_handle device_handle, gr_queue_kind kind, gr_handle
 
 gr_result gr_queue_timeline(gr_handle queue_handle, gr_handle *out_semaphore)
 {
+    if (gr_active_backend() == GR_BACKEND_D3D12)
+        return gr_d3d12_abi_queue_timeline(queue_handle, out_semaphore);
     if (gr_active_backend() == GR_BACKEND_VULKAN)
         return gr_vk_abi_queue_timeline(queue_handle, out_semaphore);
     gr_null_queue *queue = (gr_null_queue *)null_get(NULL, queue_handle, GR_HANDLE_QUEUE, NULL);
@@ -474,6 +488,8 @@ gr_result gr_queue_timeline(gr_handle queue_handle, gr_handle *out_semaphore)
 
 uint64_t gr_queue_submitted(gr_handle queue_handle)
 {
+    if (gr_active_backend() == GR_BACKEND_D3D12)
+        return gr_d3d12_abi_queue_submitted(queue_handle);
     if (gr_active_backend() == GR_BACKEND_VULKAN)
         return gr_vk_abi_queue_submitted(queue_handle);
     gr_null_queue *queue = (gr_null_queue *)null_get(NULL, queue_handle, GR_HANDLE_QUEUE, NULL);
@@ -482,6 +498,8 @@ uint64_t gr_queue_submitted(gr_handle queue_handle)
 
 uint64_t gr_queue_completed(gr_handle queue_handle)
 {
+    if (gr_active_backend() == GR_BACKEND_D3D12)
+        return gr_d3d12_abi_queue_completed(queue_handle);
     if (gr_active_backend() == GR_BACKEND_VULKAN)
         return gr_vk_abi_queue_completed(queue_handle);
     gr_null_queue *queue = (gr_null_queue *)null_get(NULL, queue_handle, GR_HANDLE_QUEUE, NULL);
@@ -494,6 +512,8 @@ uint64_t gr_queue_completed(gr_handle queue_handle)
 
 gr_result gr_queue_wait_idle(gr_handle queue_handle)
 {
+    if (gr_active_backend() == GR_BACKEND_D3D12)
+        return gr_d3d12_abi_queue_wait_idle(queue_handle);
     if (gr_active_backend() == GR_BACKEND_VULKAN)
         return gr_vk_abi_queue_wait_idle(queue_handle);
     gr_null_queue *queue = (gr_null_queue *)null_get(NULL, queue_handle, GR_HANDLE_QUEUE, NULL);
@@ -569,6 +589,8 @@ static void null_free_object(gr_handle object, uint32_t type)
 
 gr_result gr_device_retire(gr_handle device_handle, gr_handle object, uint64_t after_value)
 {
+    if (gr_active_backend() == GR_BACKEND_D3D12)
+        return gr_d3d12_abi_device_retire(device_handle, object, after_value);
     if (gr_active_backend() == GR_BACKEND_VULKAN)
         return gr_vk_abi_device_retire(device_handle, object, after_value);
     gr_null_device *device = (gr_null_device *)null_get(NULL, device_handle, GR_HANDLE_DEVICE, NULL);
@@ -599,6 +621,8 @@ gr_result gr_device_retire(gr_handle device_handle, gr_handle object, uint64_t a
 
 gr_result gr_device_collect(gr_handle device_handle)
 {
+    if (gr_active_backend() == GR_BACKEND_D3D12)
+        return gr_d3d12_abi_device_collect(device_handle);
     if (gr_active_backend() == GR_BACKEND_VULKAN)
         return gr_vk_abi_device_collect(device_handle);
     gr_null_device *device = (gr_null_device *)null_get(NULL, device_handle, GR_HANDLE_DEVICE, NULL);
@@ -638,6 +662,8 @@ static uint32_t null_alloc_slot(gr_null_bindless *bindless, gr_bindless_table ta
 
 gr_handle gr_device_bindless(gr_handle device_handle)
 {
+    if (gr_active_backend() == GR_BACKEND_D3D12)
+        return gr_d3d12_abi_device_bindless(device_handle);
     if (gr_active_backend() == GR_BACKEND_VULKAN)
         return gr_vk_abi_device_bindless(device_handle);
     gr_null_device *device = (gr_null_device *)null_get(NULL, device_handle, GR_HANDLE_DEVICE, NULL);
@@ -646,6 +672,8 @@ gr_handle gr_device_bindless(gr_handle device_handle)
 
 gr_result gr_bindless_get_info(gr_handle bindless_handle, gr_bindless_info *out)
 {
+    if (gr_active_backend() == GR_BACKEND_D3D12)
+        return gr_d3d12_abi_bindless_get_info(bindless_handle, out);
     if (gr_active_backend() == GR_BACKEND_VULKAN)
         return gr_vk_abi_bindless_get_info(bindless_handle, out);
     gr_null_bindless *bindless = (gr_null_bindless *)null_get(NULL, bindless_handle, GR_HANDLE_BINDLESS, NULL);
@@ -688,6 +716,8 @@ gr_result gr_bindless_free(gr_handle bindless_handle, gr_bindless_table table,
  * ======================================================================================= */
 gr_result gr_buffer_create(gr_handle device_handle, const gr_buffer_desc *desc, gr_handle *out_buffer)
 {
+    if (gr_active_backend() == GR_BACKEND_D3D12)
+        return gr_d3d12_abi_buffer_create(device_handle, desc, out_buffer);
     if (gr_active_backend() == GR_BACKEND_VULKAN)
         return gr_vk_abi_buffer_create(device_handle, desc, out_buffer);
     gr_null_device *device = (gr_null_device *)null_get(NULL, device_handle, GR_HANDLE_DEVICE, NULL);
@@ -770,6 +800,8 @@ static gr_null_buffer *null_buffer(gr_handle handle, gr_result *out_status)
 
 gr_result gr_buffer_write(gr_handle buffer_handle, uint64_t offset, gr_span_u8 data)
 {
+    if (gr_active_backend() == GR_BACKEND_D3D12)
+        return gr_d3d12_abi_buffer_write(buffer_handle, offset, data);
     if (gr_active_backend() == GR_BACKEND_VULKAN)
         return gr_vk_abi_buffer_write(buffer_handle, offset, data);
     gr_result status;
@@ -788,6 +820,8 @@ gr_result gr_buffer_write(gr_handle buffer_handle, uint64_t offset, gr_span_u8 d
 
 gr_result gr_buffer_read(gr_handle buffer_handle, uint64_t offset, gr_mut_span_u8 out)
 {
+    if (gr_active_backend() == GR_BACKEND_D3D12)
+        return gr_d3d12_abi_buffer_read(buffer_handle, offset, out);
     if (gr_active_backend() == GR_BACKEND_VULKAN)
         return gr_vk_abi_buffer_read(buffer_handle, offset, out);
     gr_result status;
@@ -806,6 +840,8 @@ gr_result gr_buffer_read(gr_handle buffer_handle, uint64_t offset, gr_mut_span_u
 
 gr_result gr_buffer_map(gr_handle buffer_handle, void **out_ptr)
 {
+    if (gr_active_backend() == GR_BACKEND_D3D12)
+        return gr_d3d12_abi_buffer_map(buffer_handle, out_ptr);
     if (gr_active_backend() == GR_BACKEND_VULKAN)
         return gr_vk_abi_buffer_map(buffer_handle, out_ptr);
     gr_result status;
@@ -827,6 +863,8 @@ void gr_buffer_unmap(gr_handle buffer_handle)
 
 uint64_t gr_buffer_device_address(gr_handle buffer_handle)
 {
+    if (gr_active_backend() == GR_BACKEND_D3D12)
+        return gr_d3d12_abi_buffer_device_address(buffer_handle);
     if (gr_active_backend() == GR_BACKEND_VULKAN)
         return gr_vk_abi_buffer_device_address(buffer_handle);
     gr_result status;
@@ -840,6 +878,8 @@ uint64_t gr_buffer_device_address(gr_handle buffer_handle)
 
 uint32_t gr_buffer_bindless_index(gr_handle buffer_handle)
 {
+    if (gr_active_backend() == GR_BACKEND_D3D12)
+        return gr_d3d12_abi_buffer_bindless_index(buffer_handle);
     if (gr_active_backend() == GR_BACKEND_VULKAN)
         return gr_vk_abi_buffer_bindless_index(buffer_handle);
     gr_result status;
@@ -865,6 +905,8 @@ static uint64_t null_texture_bytes(gr_format format, uint32_t width, uint32_t he
 gr_result gr_texture_create(gr_handle device_handle, const gr_texture_desc *desc,
                             gr_handle *out_texture)
 {
+    if (gr_active_backend() == GR_BACKEND_D3D12)
+        return gr_d3d12_abi_texture_create(device_handle, desc, out_texture);
     if (gr_active_backend() == GR_BACKEND_VULKAN)
         return gr_vk_abi_texture_create(device_handle, desc, out_texture);
     gr_null_device *device = (gr_null_device *)null_get(NULL, device_handle, GR_HANDLE_DEVICE, NULL);
@@ -985,6 +1027,8 @@ static uint64_t null_level_offset(const gr_null_texture *texture, uint32_t mip, 
 gr_result gr_texture_write(gr_handle texture_handle, uint32_t mip, uint32_t layer, uint32_t x,
                            uint32_t y, uint32_t width, uint32_t height, gr_span_u8 row_major)
 {
+    if (gr_active_backend() == GR_BACKEND_D3D12)
+        return gr_d3d12_abi_texture_write(texture_handle, mip, layer, x, y, width, height, row_major);
     if (gr_active_backend() == GR_BACKEND_VULKAN)
         return gr_vk_abi_texture_write(texture_handle, mip, layer, x, y, width, height, row_major);
     gr_result status;
@@ -1026,6 +1070,9 @@ gr_result gr_texture_read(gr_handle texture_handle, uint32_t mip, uint32_t layer
                           gr_mut_span_u8 out)
 {
     (void)src_state; /* a CPU mirror has no layout */
+    if (gr_active_backend() == GR_BACKEND_D3D12)
+        return gr_d3d12_abi_texture_read(texture_handle, mip, layer, x, y, width, height, src_state,
+                                      out);
     if (gr_active_backend() == GR_BACKEND_VULKAN)
         return gr_vk_abi_texture_read(texture_handle, mip, layer, x, y, width, height, src_state,
                                       out);
@@ -1062,6 +1109,8 @@ gr_result gr_texture_read(gr_handle texture_handle, uint32_t mip, uint32_t layer
 gr_result gr_texture_view_create(gr_handle device_handle, const gr_texture_view_desc *desc,
                                  gr_handle *out_view)
 {
+    if (gr_active_backend() == GR_BACKEND_D3D12)
+        return gr_d3d12_abi_texture_view_create(device_handle, desc, out_view);
     if (gr_active_backend() == GR_BACKEND_VULKAN)
         return gr_vk_abi_texture_view_create(device_handle, desc, out_view);
     gr_null_device *device = (gr_null_device *)null_get(NULL, device_handle, GR_HANDLE_DEVICE, NULL);
@@ -1134,6 +1183,8 @@ gr_result gr_texture_view_create(gr_handle device_handle, const gr_texture_view_
 
 uint32_t gr_texture_view_bindless_sampled(gr_handle view_handle)
 {
+    if (gr_active_backend() == GR_BACKEND_D3D12)
+        return gr_d3d12_abi_texture_view_bindless_sampled(view_handle);
     if (gr_active_backend() == GR_BACKEND_VULKAN)
         return gr_vk_abi_texture_view_bindless_sampled(view_handle);
     gr_result status;
@@ -1156,6 +1207,8 @@ uint32_t gr_texture_view_bindless_storage(gr_handle view_handle)
 gr_result gr_sampler_create(gr_handle device_handle, const gr_sampler_desc *desc,
                             gr_handle *out_sampler, uint32_t *out_slot)
 {
+    if (gr_active_backend() == GR_BACKEND_D3D12)
+        return gr_d3d12_abi_sampler_create(device_handle, desc, out_sampler, out_slot);
     if (gr_active_backend() == GR_BACKEND_VULKAN)
         return gr_vk_abi_sampler_create(device_handle, desc, out_sampler, out_slot);
     gr_null_device *device = (gr_null_device *)null_get(NULL, device_handle, GR_HANDLE_DEVICE, NULL);
@@ -1211,6 +1264,8 @@ gr_result gr_sampler_create(gr_handle device_handle, const gr_sampler_desc *desc
  * ======================================================================================= */
 gr_result gr_cmd_push_frame_offset(gr_handle cmd_handle, uint32_t frame_slot)
 {
+    if (gr_active_backend() == GR_BACKEND_D3D12)
+        return gr_d3d12_abi_cmd_push_frame_offset(cmd_handle, frame_slot);
     if (gr_active_backend() == GR_BACKEND_VULKAN)
         return gr_vk_abi_cmd_push_frame_offset(cmd_handle, frame_slot);
     gr_result status;
@@ -1231,6 +1286,8 @@ gr_result gr_frame_constants_write(gr_handle device_handle, uint32_t frame_slot,
                                    const gr_frame_constants *constants)
 {
     gr_null_device *device;
+    if (gr_active_backend() == GR_BACKEND_D3D12)
+        return gr_d3d12_abi_frame_constants_write(device_handle, frame_slot, constants);
     if (gr_active_backend() == GR_BACKEND_VULKAN)
         return gr_vk_abi_frame_constants_write(device_handle, frame_slot, constants);
     device = (gr_null_device *)null_get(NULL, device_handle, GR_HANDLE_DEVICE, NULL);
@@ -1246,6 +1303,8 @@ gr_result gr_frame_constants_write(gr_handle device_handle, uint32_t frame_slot,
 gr_result gr_frame_slot_count(gr_handle device_handle, uint32_t *out_count)
 {
     gr_null_device *device;
+    if (gr_active_backend() == GR_BACKEND_D3D12)
+        return gr_d3d12_abi_frame_slot_count(device_handle, out_count);
     if (gr_active_backend() == GR_BACKEND_VULKAN)
         return gr_vk_abi_frame_slot_count(device_handle, out_count);
     device = (gr_null_device *)null_get(NULL, device_handle, GR_HANDLE_DEVICE, NULL);
@@ -1272,6 +1331,8 @@ typedef struct gr_null_cmd_pool {
 gr_result gr_cmd_pool_create(gr_handle device_handle, const gr_cmd_pool_desc *desc,
                              gr_handle *out_pool)
 {
+    if (gr_active_backend() == GR_BACKEND_D3D12)
+        return gr_d3d12_abi_cmd_pool_create(device_handle, desc, out_pool);
     if (gr_active_backend() == GR_BACKEND_VULKAN)
         return gr_vk_abi_cmd_pool_create(device_handle, desc, out_pool);
     gr_null_device *device = (gr_null_device *)null_get(NULL, device_handle, GR_HANDLE_DEVICE, NULL);
@@ -1312,6 +1373,8 @@ static gr_null_cmd *null_cmd(gr_handle handle, gr_result *out_status)
 
 gr_result gr_cmd_alloc(const gr_cmd_alloc_info *info, gr_handle *out_cmd)
 {
+    if (gr_active_backend() == GR_BACKEND_D3D12)
+        return gr_d3d12_abi_cmd_alloc(info, out_cmd);
     if (gr_active_backend() == GR_BACKEND_VULKAN)
         return gr_vk_abi_cmd_alloc(info, out_cmd);
     gr_null_cmd_pool *pool;
@@ -1344,6 +1407,8 @@ gr_result gr_cmd_alloc(const gr_cmd_alloc_info *info, gr_handle *out_cmd)
 
 gr_result gr_cmd_begin(gr_handle cmd_handle)
 {
+    if (gr_active_backend() == GR_BACKEND_D3D12)
+        return gr_d3d12_abi_cmd_begin(cmd_handle);
     if (gr_active_backend() == GR_BACKEND_VULKAN)
         return gr_vk_abi_cmd_begin(cmd_handle);
     gr_result status;
@@ -1365,6 +1430,8 @@ gr_result gr_cmd_begin(gr_handle cmd_handle)
 
 gr_result gr_cmd_end(gr_handle cmd_handle)
 {
+    if (gr_active_backend() == GR_BACKEND_D3D12)
+        return gr_d3d12_abi_cmd_end(cmd_handle);
     if (gr_active_backend() == GR_BACKEND_VULKAN)
         return gr_vk_abi_cmd_end(cmd_handle);
     gr_result status;
@@ -1385,6 +1452,8 @@ gr_result gr_cmd_end(gr_handle cmd_handle)
 
 gr_result gr_cmd_reset(gr_handle cmd_handle)
 {
+    if (gr_active_backend() == GR_BACKEND_D3D12)
+        return gr_d3d12_abi_cmd_reset(cmd_handle);
     if (gr_active_backend() == GR_BACKEND_VULKAN)
         return gr_vk_abi_cmd_reset(cmd_handle);
     gr_result status;
@@ -1399,6 +1468,8 @@ gr_result gr_cmd_reset(gr_handle cmd_handle)
 
 gr_result gr_cmd_barrier(gr_handle cmd_handle, const gr_barrier *barriers, uint32_t count)
 {
+    if (gr_active_backend() == GR_BACKEND_D3D12)
+        return gr_d3d12_abi_cmd_barrier(cmd_handle, barriers, count);
     if (gr_active_backend() == GR_BACKEND_VULKAN)
         return gr_vk_abi_cmd_barrier(cmd_handle, barriers, count);
     gr_result status;
@@ -1423,6 +1494,8 @@ gr_result gr_cmd_barrier(gr_handle cmd_handle, const gr_barrier *barriers, uint3
 
 gr_result gr_cmd_begin_render(gr_handle cmd_handle, const gr_render_begin *info)
 {
+    if (gr_active_backend() == GR_BACKEND_D3D12)
+        return gr_d3d12_abi_cmd_begin_render(cmd_handle, info);
     if (gr_active_backend() == GR_BACKEND_VULKAN)
         return gr_vk_abi_cmd_begin_render(cmd_handle, info);
     gr_result status;
@@ -1448,6 +1521,8 @@ gr_result gr_cmd_begin_render(gr_handle cmd_handle, const gr_render_begin *info)
 
 gr_result gr_cmd_end_render(gr_handle cmd_handle)
 {
+    if (gr_active_backend() == GR_BACKEND_D3D12)
+        return gr_d3d12_abi_cmd_end_render(cmd_handle);
     if (gr_active_backend() == GR_BACKEND_VULKAN)
         return gr_vk_abi_cmd_end_render(cmd_handle);
     gr_result status;
@@ -1463,6 +1538,8 @@ gr_result gr_cmd_end_render(gr_handle cmd_handle)
 gr_result gr_cmd_set_viewport(gr_handle cmd_handle, float x, float y, float width, float height,
                               float min_depth, float max_depth)
 {
+    if (gr_active_backend() == GR_BACKEND_D3D12)
+        return gr_d3d12_abi_cmd_set_viewport(cmd_handle, x, y, width, height, min_depth, max_depth);
     if (gr_active_backend() == GR_BACKEND_VULKAN)
         return gr_vk_abi_cmd_set_viewport(cmd_handle, x, y, width, height, min_depth, max_depth);
     gr_result status;
@@ -1482,6 +1559,8 @@ gr_result gr_cmd_set_viewport(gr_handle cmd_handle, float x, float y, float widt
 gr_result gr_cmd_set_scissor(gr_handle cmd_handle, int32_t x, int32_t y, uint32_t width,
                              uint32_t height)
 {
+    if (gr_active_backend() == GR_BACKEND_D3D12)
+        return gr_d3d12_abi_cmd_set_scissor(cmd_handle, x, y, width, height);
     if (gr_active_backend() == GR_BACKEND_VULKAN)
         return gr_vk_abi_cmd_set_scissor(cmd_handle, x, y, width, height);
     gr_result status;
@@ -1498,6 +1577,8 @@ gr_result gr_cmd_set_scissor(gr_handle cmd_handle, int32_t x, int32_t y, uint32_
 
 gr_result gr_cmd_bind_pipeline(gr_handle cmd_handle, gr_handle pipeline_handle)
 {
+    if (gr_active_backend() == GR_BACKEND_D3D12)
+        return gr_d3d12_abi_cmd_bind_pipeline(cmd_handle, pipeline_handle);
     if (gr_active_backend() == GR_BACKEND_VULKAN)
         return gr_vk_abi_cmd_bind_pipeline(cmd_handle, pipeline_handle);
     gr_result status;
@@ -1517,6 +1598,8 @@ gr_result gr_cmd_bind_pipeline(gr_handle cmd_handle, gr_handle pipeline_handle)
 
 gr_result gr_cmd_push_constants(gr_handle cmd_handle, uint32_t offset, gr_span_u8 data)
 {
+    if (gr_active_backend() == GR_BACKEND_D3D12)
+        return gr_d3d12_abi_cmd_push_constants(cmd_handle, offset, data);
     if (gr_active_backend() == GR_BACKEND_VULKAN)
         return gr_vk_abi_cmd_push_constants(cmd_handle, offset, data);
     gr_result status;
@@ -1540,6 +1623,8 @@ gr_result gr_cmd_push_constants(gr_handle cmd_handle, uint32_t offset, gr_span_u
 gr_result gr_cmd_bind_vertex_buffer(gr_handle cmd_handle, uint32_t slot, gr_handle buffer,
                                     uint64_t offset)
 {
+    if (gr_active_backend() == GR_BACKEND_D3D12)
+        return gr_d3d12_abi_cmd_bind_vertex_buffer(cmd_handle, slot, buffer, offset);
     if (gr_active_backend() == GR_BACKEND_VULKAN)
         return gr_vk_abi_cmd_bind_vertex_buffer(cmd_handle, slot, buffer, offset);
     gr_result status;
@@ -1564,6 +1649,8 @@ gr_result gr_cmd_bind_vertex_buffer(gr_handle cmd_handle, uint32_t slot, gr_hand
 gr_result gr_cmd_bind_index_buffer(gr_handle cmd_handle, gr_handle buffer, uint64_t offset,
                                    uint32_t index_type)
 {
+    if (gr_active_backend() == GR_BACKEND_D3D12)
+        return gr_d3d12_abi_cmd_bind_index_buffer(cmd_handle, buffer, offset, index_type);
     if (gr_active_backend() == GR_BACKEND_VULKAN)
         return gr_vk_abi_cmd_bind_index_buffer(cmd_handle, buffer, offset, index_type);
     gr_result status;
@@ -1587,6 +1674,8 @@ gr_result gr_cmd_bind_index_buffer(gr_handle cmd_handle, gr_handle buffer, uint6
 
 gr_result gr_cmd_draw(gr_handle cmd_handle, const gr_draw *draw)
 {
+    if (gr_active_backend() == GR_BACKEND_D3D12)
+        return gr_d3d12_abi_cmd_draw(cmd_handle, draw);
     if (gr_active_backend() == GR_BACKEND_VULKAN)
         return gr_vk_abi_cmd_draw(cmd_handle, draw);
     gr_result status;
@@ -1611,6 +1700,8 @@ gr_result gr_cmd_draw(gr_handle cmd_handle, const gr_draw *draw)
 
 gr_result gr_cmd_draw_indexed(gr_handle cmd_handle, const gr_draw_indexed *draw)
 {
+    if (gr_active_backend() == GR_BACKEND_D3D12)
+        return gr_d3d12_abi_cmd_draw_indexed(cmd_handle, draw);
     if (gr_active_backend() == GR_BACKEND_VULKAN)
         return gr_vk_abi_cmd_draw_indexed(cmd_handle, draw);
     gr_result status;
@@ -1657,6 +1748,8 @@ gr_result gr_cmd_draw_indirect(gr_handle cmd_handle, gr_handle buffer, uint64_t 
 gr_result gr_cmd_draw_indexed_indirect(gr_handle cmd_handle, gr_handle buffer, uint64_t offset,
                                        uint32_t draw_count, uint32_t stride)
 {
+    if (gr_active_backend() == GR_BACKEND_D3D12)
+        return gr_d3d12_abi_cmd_draw_indexed_indirect(cmd_handle, buffer, offset, draw_count, stride);
     if (gr_active_backend() == GR_BACKEND_VULKAN)
         return gr_vk_abi_cmd_draw_indexed_indirect(cmd_handle, buffer, offset, draw_count, stride);
     {
@@ -1678,6 +1771,8 @@ gr_result gr_cmd_draw_indexed_indirect(gr_handle cmd_handle, gr_handle buffer, u
 
 gr_result gr_cmd_dispatch(gr_handle cmd_handle, uint32_t x, uint32_t y, uint32_t z)
 {
+    if (gr_active_backend() == GR_BACKEND_D3D12)
+        return gr_d3d12_abi_cmd_dispatch(cmd_handle, x, y, z);
     if (gr_active_backend() == GR_BACKEND_VULKAN)
         return gr_vk_abi_cmd_dispatch(cmd_handle, x, y, z);
     gr_result status;
@@ -1696,6 +1791,8 @@ gr_result gr_cmd_dispatch(gr_handle cmd_handle, uint32_t x, uint32_t y, uint32_t
 
 gr_result gr_cmd_dispatch_indirect(gr_handle cmd_handle, gr_handle buffer, uint64_t offset)
 {
+    if (gr_active_backend() == GR_BACKEND_D3D12)
+        return gr_d3d12_abi_cmd_dispatch_indirect(cmd_handle, buffer, offset);
     if (gr_active_backend() == GR_BACKEND_VULKAN)
         return gr_vk_abi_cmd_dispatch_indirect(cmd_handle, buffer, offset);
     gr_result status;
@@ -1876,6 +1973,8 @@ gr_result gr_cmd_end_scope(gr_handle cmd_handle)
  * ======================================================================================= */
 gr_result gr_fence_create(gr_handle device_handle, uint64_t initial_value, gr_handle *out_fence)
 {
+    if (gr_active_backend() == GR_BACKEND_D3D12)
+        return gr_d3d12_abi_fence_create(device_handle, initial_value, out_fence);
     if (gr_active_backend() == GR_BACKEND_VULKAN)
         return gr_vk_abi_fence_create(device_handle, initial_value, out_fence);
     gr_null_device *device = (gr_null_device *)null_get(NULL, device_handle, GR_HANDLE_DEVICE, NULL);
@@ -1900,6 +1999,8 @@ gr_result gr_fence_create(gr_handle device_handle, uint64_t initial_value, gr_ha
 
 uint64_t gr_fence_value(gr_handle fence_handle)
 {
+    if (gr_active_backend() == GR_BACKEND_D3D12)
+        return gr_d3d12_abi_fence_value(fence_handle);
     if (gr_active_backend() == GR_BACKEND_VULKAN)
         return gr_vk_abi_fence_value(fence_handle);
     gr_null_fence *fence = (gr_null_fence *)gr_object_lookup(gr_objects(), fence_handle,
@@ -1910,6 +2011,8 @@ uint64_t gr_fence_value(gr_handle fence_handle)
 gr_result gr_fence_wait(gr_handle fence_handle, uint64_t value, uint64_t timeout_ns,
                         gr_result *out_status)
 {
+    if (gr_active_backend() == GR_BACKEND_D3D12)
+        return gr_d3d12_abi_fence_wait(fence_handle, value, timeout_ns, out_status);
     if (gr_active_backend() == GR_BACKEND_VULKAN)
         return gr_vk_abi_fence_wait(fence_handle, value, timeout_ns, out_status);
     gr_null_fence *fence = (gr_null_fence *)gr_object_lookup(gr_objects(), fence_handle,
@@ -1941,6 +2044,8 @@ gr_result gr_fence_reset(gr_handle fence_handle, uint64_t value)
 
 gr_result gr_submit_commands(const gr_submit *submit, uint64_t *out_value)
 {
+    if (gr_active_backend() == GR_BACKEND_D3D12)
+        return gr_d3d12_abi_submit(submit, out_value);
     if (gr_active_backend() == GR_BACKEND_VULKAN)
         return gr_vk_abi_submit(submit, out_value);
     gr_null_queue *queue;
@@ -1988,6 +2093,8 @@ gr_result gr_submit_commands(const gr_submit *submit, uint64_t *out_value)
 gr_result gr_queue_present(gr_handle queue_handle, gr_handle swapchain, uint32_t image_index,
                            uint64_t wait_value, uint64_t *out_value)
 {
+    if (gr_active_backend() == GR_BACKEND_D3D12)
+        return gr_d3d12_abi_present(queue_handle, swapchain, image_index, wait_value, out_value);
     if (gr_active_backend() == GR_BACKEND_VULKAN)
         return gr_vk_abi_present(queue_handle, swapchain, image_index, wait_value, out_value);
     gr_null_queue *queue = (gr_null_queue *)gr_object_lookup(gr_objects(), queue_handle,
@@ -2015,6 +2122,8 @@ gr_result gr_queue_present(gr_handle queue_handle, gr_handle swapchain, uint32_t
 gr_result gr_swapchain_create(gr_handle device_handle, const gr_swapchain_desc *desc,
                               gr_handle *out_swapchain)
 {
+    if (gr_active_backend() == GR_BACKEND_D3D12)
+        return gr_d3d12_abi_swapchain_create(device_handle, desc, out_swapchain);
     if (gr_active_backend() == GR_BACKEND_VULKAN)
         return gr_vk_abi_swapchain_create(device_handle, desc, out_swapchain);
     gr_null_device *device = (gr_null_device *)null_get(NULL, device_handle, GR_HANDLE_DEVICE, NULL);
@@ -2063,6 +2172,8 @@ gr_result gr_swapchain_create(gr_handle device_handle, const gr_swapchain_desc *
 gr_result gr_swapchain_info(gr_handle swapchain, gr_format *out_format, uint32_t *out_width,
                             uint32_t *out_height, uint32_t *out_image_count)
 {
+    if (gr_active_backend() == GR_BACKEND_D3D12)
+        return gr_d3d12_abi_swapchain_info(swapchain, out_format, out_width, out_height, out_image_count);
     if (gr_active_backend() == GR_BACKEND_VULKAN)
         return gr_vk_abi_swapchain_info(swapchain, out_format, out_width, out_height, out_image_count);
     gr_null_swapchain *sc = (gr_null_swapchain *)gr_object_lookup(gr_objects(), swapchain,
@@ -2080,6 +2191,8 @@ gr_result gr_swapchain_acquire(gr_handle swapchain, uint64_t timeout_ns,
                                uint32_t *out_image_index, gr_handle *out_view,
                                int32_t *out_needs_recreate)
 {
+    if (gr_active_backend() == GR_BACKEND_D3D12)
+        return gr_d3d12_abi_swapchain_acquire(swapchain, timeout_ns, out_image_index, out_view, out_needs_recreate);
     if (gr_active_backend() == GR_BACKEND_VULKAN)
         return gr_vk_abi_swapchain_acquire(swapchain, timeout_ns, out_image_index, out_view, out_needs_recreate);
     gr_null_swapchain *sc = (gr_null_swapchain *)gr_object_lookup(gr_objects(), swapchain,
@@ -2096,6 +2209,8 @@ gr_result gr_swapchain_acquire(gr_handle swapchain, uint64_t timeout_ns,
 gr_result gr_swapchain_recreate(gr_handle swapchain, uint32_t width, uint32_t height,
                                 uint64_t after_value)
 {
+    if (gr_active_backend() == GR_BACKEND_D3D12)
+        return gr_d3d12_abi_swapchain_recreate(swapchain, width, height, after_value);
     if (gr_active_backend() == GR_BACKEND_VULKAN)
         return gr_vk_abi_swapchain_recreate(swapchain, width, height, after_value);
     gr_null_swapchain *sc = (gr_null_swapchain *)gr_object_lookup(gr_objects(), swapchain,
@@ -2191,6 +2306,8 @@ gr_result gr_query_pool_results(gr_handle pool_handle, uint32_t first, uint32_t 
 gr_result gr_shader_create(gr_handle device_handle, const gr_shader_desc *desc,
                            gr_handle *out_shader)
 {
+    if (gr_active_backend() == GR_BACKEND_D3D12)
+        return gr_d3d12_abi_shader_create(device_handle, desc, out_shader);
     if (gr_active_backend() == GR_BACKEND_VULKAN)
         return gr_vk_abi_shader_create(device_handle, desc, out_shader);
     gr_null_device *device = (gr_null_device *)null_get(NULL, device_handle, GR_HANDLE_DEVICE, NULL);
@@ -2277,6 +2394,8 @@ gr_result gr_shader_reflection_span(gr_handle shader_handle, gr_span_u8 *out_spa
 gr_result gr_pipeline_create(gr_handle device_handle, const gr_pipeline_desc *desc,
                              gr_handle *out_pipeline)
 {
+    if (gr_active_backend() == GR_BACKEND_D3D12)
+        return gr_d3d12_abi_pipeline_create(device_handle, desc, out_pipeline);
     if (gr_active_backend() == GR_BACKEND_VULKAN)
         return gr_vk_abi_pipeline_create(device_handle, desc, out_pipeline);
     gr_null_device *device = (gr_null_device *)null_get(NULL, device_handle, GR_HANDLE_DEVICE, NULL);
@@ -2389,6 +2508,8 @@ gr_result gr_pipeline_create(gr_handle device_handle, const gr_pipeline_desc *de
 
 gr_result gr_pipeline_commit(gr_handle device_handle, double *out_seconds)
 {
+    if (gr_active_backend() == GR_BACKEND_D3D12)
+        return gr_d3d12_abi_pipeline_commit(device_handle, out_seconds);
     if (gr_active_backend() == GR_BACKEND_VULKAN)
         return gr_vk_abi_pipeline_commit(device_handle, out_seconds);
     gr_null_device *device = (gr_null_device *)null_get(NULL, device_handle, GR_HANDLE_DEVICE, NULL);
@@ -2406,6 +2527,8 @@ gr_result gr_pipeline_commit(gr_handle device_handle, double *out_seconds)
 gr_result gr_pipeline_stats(gr_handle device_handle, uint32_t *out_declared,
                             uint32_t *out_committed)
 {
+    if (gr_active_backend() == GR_BACKEND_D3D12)
+        return gr_d3d12_abi_pipeline_stats(device_handle, out_declared, out_committed);
     if (gr_active_backend() == GR_BACKEND_VULKAN)
         return gr_vk_abi_pipeline_stats(device_handle, out_declared, out_committed);
     gr_null_device *device = (gr_null_device *)null_get(NULL, device_handle, GR_HANDLE_DEVICE, NULL);

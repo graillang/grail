@@ -80,11 +80,22 @@ and a Vulkan backend with device/queues, bindless layouts, buffers, textures, co
 submission, graphics and compute pipelines, indexed and indirect draws, depth and MSAA resolves,
 offscreen readbacks, and a swapchain with acquire/present and a draw path. `make -C graphics
 test` runs 450 host checks; `vk-surface` runs 162 checks on a real 320×240 swapchain, and
-`vk-smoke` 613 and `vk-cache` 47 on hardware, all asserting zero validation errors and leaks
-(when the counters and teardown log agree).
+`vk-smoke` 613 and `vk-cache` 47 on hardware, each asserting zero validation errors while the
+counters are live. Open defect: teardown still logs `VUID-vkDestroySemaphore-semaphore-parameter`
+after the counters close (present before the D3D12 work; reproduced on a clean checkout).
 
-Not implemented: D3D12 and Metal (both return `GR_ERROR_UNSUPPORTED`), mesh and ray-tracing
-pipelines, and a complete renderer. The null backend validates contracts only.
+D3D12: a first slice, built for x86_64-windows with `zig cc` (MinGW-w64 headers) and executed by
+`make -C graphics d3d12-smoke` under Wine, whose `d3d12.dll` is vkd3d on the host GPU. It
+covers a headless device and its reported feature level, one direct queue and its fence
+timeline, 2D render-target textures and views, command lists, tracked-state barriers, clears,
+viewport/scissor, submit and texture readback: 47 checks, including exact clear readbacks
+(64 128 191 255 and 255 0 128 0 on every pixel) and the NOT_READY/UNSUPPORTED refusals.
+Buffers, shaders, pipelines, draws, bindless, swapchains, semaphores and compute/copy queues
+return `GR_ERROR_UNSUPPORTED`; Wine's vkd3d stops at feature level 11_1, so the test asks for
+11_0. No real Windows host has run it.
+
+Not implemented: Metal (returns `GR_ERROR_UNSUPPORTED`), mesh and ray-tracing pipelines, and a
+complete renderer. The null backend validates contracts only.
 
 ## Tooling
 
