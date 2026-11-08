@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- DWARF debug info on Linux AArch64 and RISC-V 64: `--debug` emits the same line table and
+  typed variables as on x86-64 (frame base `x29` / `s0`). Under qemu with gdb's remote stub,
+  `info locals` shows `count = -3`, `ratio = 2.5`, `flag = true` on both; `test-debug-lines`
+  checks the line rows, variable types and `llvm-dwarfdump --verify` for both targets.
+
+- Variadic C calls on macOS arm64: each variadic argument (promoted to 64 bits or `double`) goes
+  on the stack in its own 8-byte slot while named arguments keep their registers, per Apple's
+  arm64 ABI. Checked statically in `test-macos` (no macOS runner); the call was refused before.
+
 - C records with float fields returned by value: SysV classifies each eightbyte (all-float ->
   `xmm0`/`xmm1`, otherwise `rax`/`rdx`), AAPCS64 returns homogeneous float aggregates of 1-4
   fields in `s0`-`s3`/`d0`-`d3` at any size, RV64 returns one or two flattened fields with a float

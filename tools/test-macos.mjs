@@ -304,6 +304,18 @@ for (const target of machoTargets) {
   rpathLinks += 1;
 }
 
+// Apple arm64 variadics: every variadic argument goes on the stack in its own 8-byte slot (the
+// named ones still use registers). c_vmix has one named and eleven variadic arguments, so the
+// last lands at sp+80 right before the call.
+{
+  const asm = join(work, 'variadic-arm64.s');
+  command([compiler, '--default-u64', '--typed-refs', '--target', 'macos-aarch64', asm,
+    join(root, 'tests/ffi/call_variadic.grl'), join(root, 'compiler/runtime.grl'), join(root, 'compiler/darwin.grl')]);
+  const text = readFileSync(asm, 'utf8');
+  has(text, /str x9,\[sp,#80\]\nbl _c_vmix/, 'macos-aarch64: variadic arguments are not stored in 8-byte stack slots');
+  has(text, /str x9,\[sp\]\n|str x9,\[sp,#0\]\n/, 'macos-aarch64: the first variadic argument is not at sp+0');
+}
+
 // Dynamic loading on macOS: the runtime does not own the thread pointer there, so no TLS bridge
 // is involved and the loader functions are ordinary libSystem imports. The Linux fixture is
 // reused with its libraries declared as `lib "System"`; the image must import the loader

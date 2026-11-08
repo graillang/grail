@@ -755,7 +755,18 @@ fn debug_sections<a, b>(c: &a C, entry: &b [u8]) -> u8[] {
         dnum(&mut out, f.file);
         dput(&mut out, view("\n.uleb128 "));
         dnum(&mut out, f.line);
-        dput(&mut out, view("\n.byte 1\n.byte 86\n"));
+        // DW_AT_frame_base: the frame-pointer register (rbp = DWARF 6, x29 = 29, s0 = x8).
+        dput(&mut out, view("\n.byte 1\n.byte "));
+        if c.target == 1 {
+            dnum(&mut out, 80 + 29);
+        } else {
+            if c.target == 2 {
+                dnum(&mut out, 80 + 8);
+            } else {
+                dnum(&mut out, 80 + 6);
+            }
+        }
+        dput(&mut out, view("\n"));
         for j in f.vars.len() {
             v := &f.vars[j];
             mut code = 4;
@@ -5216,9 +5227,6 @@ fn ffi_emit_call<a, b, d, e>(
     }
     exchange(&mut c.ffi_fixed, 0);
     abi := ffi_abi(&mut c);
-    if (fixed < args.len()) & (abi == 2) & (c.plat == 1) {
-        fail(&mut c, view("variadic C calls on macOS arm64 (arguments on the stack) are not supported yet"));
-    }
     x86 := abi < 2;
     nint := ffi_int_regs(abi);
     apple_arm := (abi == 2) & (c.plat == 1);
@@ -5279,8 +5287,16 @@ fn ffi_emit_call<a, b, d, e>(
     mut stack = 0;
     for i in args.len() {
         ty := argtypes[i];
-        // RV64 passes variadic floating-point arguments in integer registers.
+        // RV64 passes variadic floating-point arguments in integer registers; Apple arm64 passes
+        // every variadic argument on the stack in its own 8-byte slot.
         rv_var := (abi == 3) & (fixed < i + 1);
+        apple_var := apple_arm & (fixed < i + 1);
+        if apple_var {
+            for w in ffi_words(&mut c, ty) {
+                stack = stack + 1;
+            }
+            continue;
+        }
         if is_float(&mut c, ty) & (rv_var == 0) {
             if abi == 1 {
                 if ints < 4 {
@@ -5345,6 +5361,20 @@ fn ffi_emit_call<a, b, d, e>(
         ty := argtypes[i];
         variadic_arg := fixed < i + 1;
         rv_var := (abi == 3) & variadic_arg;
+        if apple_arm & variadic_arg {
+            // Promoted value (int to 64 bits as Grail holds it, float to double) in an 8-byte slot.
+            vwords := ffi_words(&mut c, ty);
+            get(&mut c, args[i], view("%rax"));
+            if vwords == 2 {
+                o(&mut c, view("movq %rax,%r10\nmovq (%r10),%rax\n"));
+                ffi_store_stack(&mut c, x86, base + next * 8);
+                next = next + 1;
+                o(&mut c, view("movq 8(%r10),%rax\n"));
+            }
+            ffi_store_stack(&mut c, x86, base + next * 8);
+            next = next + 1;
+            continue;
+        }
         if is_float(&mut c, ty) & rv_var {
             // Promoted to double and moved as its bits through the integer path.
             get(&mut c, args[i], view("%rax"));
@@ -17775,9 +17805,10 @@ pub fn main() -> u64 {
             )
         );
     }
-    // DWARF on Linux x86-64; CodeView line tables (a PDB through lld-link /DEBUG) on Windows x86-64.
-    if (c.debug != 0) & ((((c.target != 0) & (c.target != 3)) + (c.plat != 0)) != 0) {
-        fail_option(&mut c, view("--debug line info is only implemented for Linux x86_64 and Windows x86_64"));
+    // DWARF on Linux x86-64, AArch64 and RISC-V 64; CodeView line tables (a PDB through lld-link
+    // /DEBUG) on Windows x86-64.
+    if (c.debug != 0) & (((c.target == 4) + (c.plat != 0)) != 0) {
+        fail_option(&mut c, view("--debug line info is only implemented for Linux and Windows x86_64"));
     }
     for pass in 3 {
         if pass == 1 {
@@ -18011,7 +18042,18 @@ pub fn main() -> u64 {
         }
         return host::write_file(view(path), view(with_link_notes(&c.libs, view(out))));
     }
-    native := machine::lower(view(out), target, c.plat);
+    if c.debug != 0 {
+        // The .loc/.file directives pass through instruction selection unchanged; the DWARF
+        // sections refer only to labels, so they are appended after lowering.
+        out = debug_locs(view(out));
+    }
+    mut native = machine::lower(view(out), target, c.plat);
+    if c.debug != 0 {
+        sections := debug_sections(&c, view(host::arg(2 + offset)));
+        for i in sections.len() {
+            native.push(sections[i]);
+        }
+    }
     if target == 4 {
         image := arm_unwind(view(native));
         return host::write_file(view(path), view(with_link_notes(&c.libs, view(image))));

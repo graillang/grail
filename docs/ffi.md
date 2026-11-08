@@ -240,7 +240,6 @@ Not implemented yet, and each rejected rather than approximated:
   Windows x86-64 needs none, since `LoadLibraryA`/`GetProcAddress` are ordinary imports and the
   runtime does not own the TEB), and foreign calls or callbacks on threads other than the main
   thread on Linux;
-- variadic calls on macOS arm64, where every variadic argument goes on the stack.
 
 ## Dynamic loading and the host TLS bridge
 
