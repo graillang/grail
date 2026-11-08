@@ -2,14 +2,7 @@
 
 ## Unreleased
 
-- Abundance CPU port, RHI host: `abundance/tools/rhi_host.c` serves `gr_wire` packets and drives
-  the foundation's Vulkan backend — device, R8G8B8A8_UNORM target, a CLEAR render pass, submit with
-  a fence wait and `gr_texture_read`. Its self-test reads back clear (0.25, 0.5, 0.75, 1.0) as
-  exactly 64 128 191 255 through `vkCmdCopyImageToBuffer`, and the packet path covers HELLO,
-  RESOURCE_CREATE, CMD_BATCH, FRAME_SUBMIT, RESOURCE_READ and SHUTDOWN with malformed, version,
-  unknown-op, short-packet and read-before-target refusals. Transport is a request/response file
-  pair, a documented deviation from the AF_UNIX SEQPACKET topology because Grail exposes no socket
-  binding; the framing is unchanged. The Grail-side client for this exchange is the next step.
+- Persist and reload session state through the C OS ABI (`borg/`). `src/ffi/store.grl` is the first increment that performs real I/O: it frames a payload ("BGS1", little-endian length, payload), writes it to a same-directory temporary file, closes it, and renames over the destination so a crash mid-write cannot leave a partial file — the rule Borg documents for credentials. A short file, a foreign magic and a length that disagrees with the payload are refused by name rather than partially accepted. The rename is declared in the port against the same FFI object file because the wrapper does not expose it yet; nothing under `lib/` or `compiler/` changed. `just borg-store-test` builds the Linux backend, links the FFI test and runs it: three round-trips and five refusals, in a separate suite because it needs a C toolchain. `--anchors` now verifies 75 copied snippets across thirteen source files.
 
 - Abundance CPU port, RHI bridge framing: `abundance/src/rhi_bridge.grl` packs and unpacks the
   graphics foundation's `gr_wire_packet` exactly as `graphics/src/grail_wire.c` does — 40-byte

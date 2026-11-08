@@ -1,13 +1,13 @@
 # Borg Agent CPU port
 
-Nine bounded increments of the Borg Agent → Grail port: the JSON substrate its wire documents are
+Ten bounded increments of the Borg Agent → Grail port: the JSON substrate its wire documents are
 made of, the TOML its configuration files are written in, the protocol-v1 envelope header that
 classifies a document, the `agent.toml` loader that applies Borg's compiled-in defaults, the
 local-session ownership state that decides whether a session still has an owner, the JSON-RPC frames
 and single-in-flight dispatch that ACP, LSP and MCP conversations are built from, and the service
 supervision rules — restart policy, backoff, exit semantics — with the layout they write into,
-the local IPC transport boundary in front of those frames, the journal rules those frames carry, the typed transcript events they are made of, and the permission gates that decide whether
-a tool call runs.
+the local IPC transport boundary in front of those frames, the journal rules those frames carry, the typed transcript events they are made of, the permission gates that decide whether a tool
+call runs, and the crash-safe persistence of session state through the new C OS ABI.
 Borg Agent is read-only here; the reference is its own JSON semantics — `serde_json` 1.0.151 with
 `arbitrary_precision`, the crate version and feature set `crates/borg-*` build with. The plan and
 staging live in [docs/design/borg-agent-port.md](../docs/design/borg-agent-port.md).
@@ -24,6 +24,8 @@ src/transport.grl            socket addressing, peer credentials, connection lif
 src/journal.grl              event persistence, cursor arithmetic, resume paging, status
 src/events.grl               typed session-event payloads for the transcript kinds
 src/permission.grl           permission modes, path scoping, approval grants, denial reasons
+src/ffi/store.grl            framed, atomically renamed session-state persistence over sys_grail
+                             (kept out of borg/src/*.grl because it needs the FFI module)
 tests/json_test.grl          JSON: `json.compact`, `json.scalar`, `json.error` per document
 tests/wire_test.grl          protocol: `wire.header <file> <field> <value>`, `wire.error <file> <path> <reason>`
 tests/toml_test.grl          TOML: `toml.value <file> <path> <kind> <text>`, `toml.error <file>`
@@ -35,6 +37,7 @@ tests/transport_test.grl     transport: `address|fits|limits|ucred|peer|conn <na
 tests/journal_test.grl       journal: `persistence|cursor|replay|page|status <name> …`
 tests/events_test.grl        events: `tag|field|wire|roundtrip|error <name> …`
 tests/permission_test.grl    gates: `mode|relative|contains|enrolled|check|grants <name> …`
+tests/store_test.grl         persistence: `roundtrip|refuse <case> <result>` (FFI suite)
 tests/fixtures/v1/           Borg's protocol-v1 conformance corpus, copied verbatim
 tests/fixtures/edge/         number, escape, structure, nesting-limit and malformed documents
 tests/fixtures/wire/         envelope mutations: missing, mistyped, wrong protocol, wrong version
@@ -346,6 +349,29 @@ copied with anchors, including the denial strings, so a refusal reads the same a
 The containment rule is the one a port most easily gets wrong: Rust's `Path::starts_with` compares
 components, so a string-prefix check would grant `/work` under a `/w` root and `/w2` under `/w`. Both
 traps are fixtures, and a prefix mutation fails the suite.
+
+## Persistence through the C OS ABI
+
+`src/ffi/store.grl` writes and reloads session state through the FFI layer that landed with the C OS ABI
+(`lib/sys/grail_ffi.grl`, `include/grail/`). It is the first increment that performs real I/O:
+
+| Rule | Source | Ported as |
+| --- | --- | --- |
+| Write a same-directory temp file, close it, then rename over the destination | `crates/borg-provider/src/credentials.rs:432` | `persist` |
+| A stored file carries `"BGS1"`, a little-endian length, then the payload | this port | `frame`, `unframe` |
+| A short file, a foreign magic and a length disagreement are refused by name | this port | `SHORT_FILE`, `BAD_MAGIC`, `LENGTH_MISMATCH` |
+
+The rename is the one operation the wrapper does not declare, so the module declares
+`grail_os_fs_rename` itself against the same object file; nothing under `lib/` or `compiler/` was
+edited. Handles are opaque and module-scoped, so every call is threaded with `?` exactly as the
+landed FFI test threads it, and no file type is ever named outside `sys_grail`.
+
+`just borg-store-test` builds the Linux backend into `lib/sys/grail_ffi_linux.o`, compiles the test
+with the FFI wrapper, links it against the host C library and runs it in a scratch directory. It is a
+separate suite because it needs a C toolchain and a hosted link; the hermetic `borg-test` count above
+does not include its eight lines. The test round-trips an empty, a small and a JSON payload, and
+refuses a header-only file, a foreign magic, a length that disagrees with the payload, an empty file
+and an absent file, naming each reason.
 
 ## Limits and findings
 

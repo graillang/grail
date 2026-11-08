@@ -1,0 +1,169 @@
+module borg_store;
+use core;
+use sys_grail;
+
+// Persisting session state through the C OS ABI.
+//
+// The write path is the one Borg uses for state that must survive a crash mid-write: write a
+// same-directory temporary file, close it, then rename over the destination, because a rename within
+// a directory is atomic while a partial overwrite is not (crates/borg-provider/src/credentials.rs:
+// "Same-directory temp file keeps the rename atomic and never widens the file's mode"). The rename
+// is the one operation the FFI wrapper does not declare, so it is declared here against the same
+// object file; nothing under lib/ or compiler/ is touched.
+//
+// The file carries a frame so a truncated or foreign file is refused rather than decoded:
+//
+//   offset 0   4 bytes   magic "BGS1"
+//   offset 4   8 bytes   payload length, little endian
+//   offset 12  N bytes   payload
+//
+// A file shorter than the frame, with another magic, or whose length disagrees with its header is
+// refused with its reason, never partially accepted. Handles are never named here: the ABI's file
+// type is opaque and module-scoped, so every call is threaded with `?` the way the landed FFI test
+// threads it.
+
+extern "C" lib "grail_ffi_linux.o" fn grail_os_fs_rename(
+    from: &[u8], to: &[u8], flags: u64
+) -> i64;
+
+const RENAME_REPLACE: u64 = 1;
+const MAGIC_0: u64 = 66;
+const MAGIC_1: u64 = 71;
+const MAGIC_2: u64 = 83;
+const MAGIC_3: u64 = 49;
+const HEADER: u64 = 12;
+const MODE_OWNER: u64 = 384;
+
+// Decoded outcomes, so a caller can say why a file was refused.
+pub const OK: u64 = 0;
+pub const SHORT_FILE: u64 = 2;
+pub const BAD_MAGIC: u64 = 3;
+pub const LENGTH_MISMATCH: u64 = 4;
+
+pub struct Loaded {
+    status: u64,
+    payload: u8[]
+}
+
+pub fn loaded_status<a>(value: (&a Loaded)) -> u64 {
+    return value.status;
+}
+
+pub fn loaded_payload<a>(value: (&a Loaded)) -> u8[] {
+    mut out = u8[];
+    mut index = 0;
+    while index < value.payload.len() {
+        out.push(value.payload[index]);
+        index = index + 1;
+    }
+    return out;
+}
+
+fn copy_text<a>(text: (&a [u8])) -> string {
+    mut out = u8[];
+    for byte in text {
+        out.push(byte);
+    }
+    return out.text();
+}
+
+fn append_text<a, b>(out: (&a mut u8[]), text: (&b [u8])) {
+    for byte in text {
+        out.push(byte);
+    }
+}
+
+fn power(base: u64, exponent: u64) -> u64 {
+    mut value = u64(1);
+    mut index = 0;
+    while index < exponent {
+        value = value * base;
+        index = index + 1;
+    }
+    return value;
+}
+
+fn revealed_length<a>(bytes: (&a [u8])) -> u64 {
+    mut value = u64(0);
+    mut index = 0;
+    while index < 8 {
+        value = value + u64(bytes[4 + index]) * power(256, index);
+        index = index + 1;
+    }
+    return value;
+}
+
+// Frames a payload: magic, little-endian length, payload.
+pub fn frame<a>(payload: (&a [u8])) -> u8[] {
+    mut out = u8[];
+    out.push(MAGIC_0);
+    out.push(MAGIC_1);
+    out.push(MAGIC_2);
+    out.push(MAGIC_3);
+    mut length = payload.len();
+    mut index = 0;
+    while index < 8 {
+        out.push(length % 256);
+        length = length / 256;
+        index = index + 1;
+    }
+    append_text(&mut out, payload);
+    return out;
+}
+
+// Splits a stored file into its payload, or reports the reason it cannot be trusted.
+pub fn unframe<a>(bytes: (&a [u8])) -> Loaded {
+    if bytes.len() < HEADER {
+        return Loaded { status: SHORT_FILE, payload: u8[] };
+    }
+    if (bytes[0] != MAGIC_0) || (bytes[1] != MAGIC_1) || (bytes[2] != MAGIC_2) || (bytes[3] != MAGIC_3) {
+        return Loaded { status: BAD_MAGIC, payload: u8[] };
+    }
+    declared := revealed_length(&bytes);
+    if bytes.len() != HEADER + declared {
+        return Loaded { status: LENGTH_MISMATCH, payload: u8[] };
+    }
+    mut payload = u8[];
+    mut index = HEADER;
+    while index < bytes.len() {
+        payload.push(bytes[index]);
+        index = index + 1;
+    }
+    return Loaded { status: OK, payload: payload };
+}
+
+// Writes `payload` to `path` atomically: same-directory temp, close, rename over the destination.
+// Returns 0 on success, or a small code naming which step failed.
+pub fn persist<a, b>(path: (&a [u8]), payload: (&b [u8])) -> u64 |? sys_grail::Error {
+    mut trailing = u8[];
+    append_text(&mut trailing, &path);
+    append_text(&mut trailing, &u8[46, 116, 109, 112]);
+    bytes := frame(&payload);
+    mut flags = sys_grail::OPEN_WRITE;
+    flags = flags + sys_grail::OPEN_CREATE;
+    flags = flags + sys_grail::OPEN_TRUNCATE;
+    file := sys_grail::open(&trailing, flags, MODE_OWNER)?;
+    written := sys_grail::write(file, &bytes)?;
+    if written != bytes.len() {
+        return 5;
+    }
+    sys_grail::close(file)?;
+    mut status: i64 = 0;
+    unsafe {
+        status = grail_os_fs_rename(&trailing, &path, RENAME_REPLACE);
+    }
+    if status < 0 {
+        return 6;
+    }
+    return 0;
+}
+
+// Reads and validates a stored file. A file that cannot be opened at all surfaces as the ABI's error,
+// which the caller reports as missing rather than as a decode failure.
+pub fn load<a>(path: (&a [u8])) -> Loaded |? sys_grail::Error {
+    file := sys_grail::open(&path, sys_grail::OPEN_READ, 0)?;
+    size := sys_grail::size(file)?;
+    bytes := sys_grail::read_bytes(file, size)?;
+    sys_grail::close(file)?;
+    return unframe(&bytes);
+}
