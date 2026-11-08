@@ -4,23 +4,27 @@ Audit date: 2026-11-08, against `main` (compiler with the host-TLS bridge, `a3ba
 Priority is Windows first, then Linux, then macOS. Evidence is the compiler, the test suites and
 the design notes named below; `implementation-status.md` is current except where noted.
 
-## A. Core work to finish now (implementable, needed by both ports)
+## A. Core work - status (2026-11-08)
 
-| # | Gap | Evidence | Why it blocks |
+| # | Item | Status | Evidence |
 | --- | --- | --- | --- |
-| A1 | **Done for direct calls** (callbacks and `cfn` remain): **FFI floats**: `f32`/`f64` arguments and results are rejected at the C boundary on every ABI (SysV, AAPCS64, RV64, Win64) | `docs/ffi.md` "Not implemented" | every graphics, audio, math and most Win32 APIs pass floats |
-| A2 | **Done for direct calls** (callbacks and `cfn` remain): **FFI narrow integers**: `i8`..`u32` at the boundary, with C sign/zero extension | `docs/ffi.md` | Win32 is built on 32-bit `DWORD`/`BOOL`/`UINT`/`HRESULT` |
-| A3 | **C structs by value**: passing and returning records (SysV eightbytes, `sret`, Win64 rules), nested records, records holding floats or pointers | `docs/ffi.md` | `RECT`, `POINT`, `LARGE_INTEGER`, every descriptor struct |
-| A4 | **Stack arguments done for direct calls; variadic remains**: **More than six argument words** (stack arguments) and variadic C calls | `docs/ffi.md` | `CreateWindowExW` has 12 arguments; `printf`-style logging |
-| A5 | **Done for direct `extern "C"` calls (Wine-executed); COM intrinsics still 4 integer arguments**: **Windows FFI path**: `extern "C"` calls on PE targets with the full Win64 convention, and COM calls beyond 4 integer arguments | `docs/design/windows-backend.md` COM limits | COM methods take floats and long argument lists |
-| A6 | **Done (x86-64, Wine-executed)**: **Windows dynamic loading**: `LoadLibraryW`/`GetProcAddress`/`FreeLibrary` through extern declarations, executed under Wine | dynamic loading is Linux x86-64 only (`docs/ffi.md`) | plugins, optional system DLLs, GPU runtimes |
-| A7 | **Stdlib on Windows**: run the `sys_grail` file/socket/process/thread/time/env wrappers on Windows (the C ABI passes 47 Wine checks; the Grail wrappers have only run on Linux) | `tools/test-ffi-runtime.mjs` is Linux-only | a program that runs on Linux must run on Windows |
-| A8 | **Typed OS errors across platforms**: `io::Error` maps six Linux errno values; Win32 `GetLastError` codes are not mapped | `lib/io.grl` | every fallible OS call on Windows reports `Other(code)` |
-| A9 | **Process stdio capture** (pipes to a child's stdin/stdout/stderr) | `docs/design/grail-ffi-runtime.md` limits | build tools, compilers, any subprocess integration |
-| A10 | **Windows ARM64 thread creation** | `docs/design/windows-backend.md` | threads are part of the core runtime contract |
-| A11 | **Mutable and borrowed closure captures** (`FnMut`) and coercing named functions to `Fn` | `docs/design/closures.md` "Not yet" | callbacks that accumulate, visitors, event handlers |
-| A12 | **Iteration**: `filter`/`fold`/`any`/`all` and an iterator protocol (only eager `map` and `sort` exist) | `lib/vecs.grl` | ordinary data processing in both ports |
-| A13 | **Windows debug info**: CodeView/PDB, so Windows debuggers can show lines and locals (DWARF exists only for Linux x86-64, without type DIEs) | `docs/tooling` | debugging customer crashes on Windows |
+| A1 | FFI floats | **Done** for direct and `cfn` calls on SysV, Win64, AAPCS64, RV64 LP64D; exported callbacks still integer-only | `tests/ffi/call_abi.grl` on 3 Linux targets + Windows x64 (Wine) |
+| A2 | FFI narrow integers | **Done** (same scope), with result re-extension and RV64 `u32` sign-extension | same |
+| A3 | C records by value | **Results done** (registers and hidden result pointer, all ABIs); records as *arguments* by value, nested records and records with float fields remain | `tests/ffi/call_records.grl` on 3 Linux targets + Windows x64 |
+| A4 | Stack arguments / variadic | **Stack arguments done** (64 words, 2 KiB); variadic C calls remain | `call_abi` ten-argument cases |
+| A5 | Windows FFI path | **Done** for `extern "C"` calls and callbacks (Win64 thunk preserving rdi/rsi/xmm6-15); COM intrinsics still 4 integer arguments | Windows suite: 29 checks, 15 under Wine |
+| A6 | Windows dynamic loading | **Done** (x64) | `ffi-dynamic-loading` Wine case |
+| A7 | Stdlib on Windows | **Done** for files, sockets, processes/threads, output capture | `tools/test-ffi-runtime-windows.mjs`, 4 tests under Wine |
+| A8 | Typed OS errors on Windows | **Done** for the host layer (`GetLastError` -> errno) | `io-error-mapping` Wine case |
+| A9 | Process stdio capture | **Done** (`pipe`, `spawn_with`, `read_to_end`) | Linux + Wine |
+| A10 | Windows ARM64 threads | **Done statically** (bridge emitted and published); no ARM64 Windows runner | ARM64 static checks |
+| A11 | Mutable/borrowed captures, borrowed closure params | **Open - needs a design decision** (see B6) | `docs/design/closures.md` |
+| A12 | Iteration | **Partial**: `vecs::fold` (any type), `any/all/count/position_num`; generic predicates need A11 | native case `vecs-fold-and-predicates` |
+| A13 | Windows debug info | **Line tables done** (CodeView + PDB, unwind preserved); types, locals in PDB, debugger attach remain | `tools/test-debug-lines.mjs` |
+
+Remaining implementable core gaps: records as by-value *arguments* and nested/float records,
+variadic C calls, float/narrow callback parameters, COM beyond four integer arguments, DWARF and
+CodeView type information, AArch64/RISC-V/macOS dynamic loading.
 
 ## B. Decisions needed from the project owner before implementation
 
@@ -30,6 +34,7 @@ the design notes named below; `implementation-status.md` is current except where
 | B2 | **Authority / capability model** for OS access (ambient `host::` functions today). | `implementation-status.md` |
 | B3 | **Suspension and blocking contract** for foreign calls inside green tasks (what happens when a task calls a blocking DLL function). | `implementation-status.md`, `concurrency-v1.md` |
 | B4 | **Windows I/O readiness model**: the green-task reactor is epoll-only; Windows needs IOCP (or a documented thread-per-blocking-call policy). | `runtime.grl` |
+| B6 | **Closure capture model**: mutable captures (FnMut) and closure parameters that hold borrows need lifetime rules for the closure object - either region-bounded closures (cannot escape the borrow's scope) or by-reference capture cells with explicit `move`. Generic iterator adapters over borrowed elements depend on it. | `docs/design/closures.md` |
 | B5 | **Abort/unwind policy**: abort paths do not unwind, and nothing may unwind across the C boundary. | `implementation-status.md` |
 
 ## C. Libraries (not language core; needed by the ports, scheduled with them)
