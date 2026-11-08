@@ -57,6 +57,8 @@ void gr_vk_loader_close(gr_vk_loader *loader)
 }
 
 gr_result gr_vk_instance_create(gr_vk_loader *loader, uint32_t requested_api,
+                                const char *const *layers, uint32_t layer_count,
+                                const char *const *extensions, uint32_t extension_count,
                                 VkInstance *out_instance, uint32_t *out_api)
 {
     PFN_vkCreateInstance create_instance;
@@ -82,6 +84,10 @@ gr_result gr_vk_instance_create(gr_vk_loader *loader, uint32_t requested_api,
     memset(&create_info, 0, sizeof(create_info));
     create_info.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
     create_info.pApplicationInfo = &app;
+    create_info.enabledLayerCount = layer_count;
+    create_info.ppEnabledLayerNames = layer_count ? layers : NULL;
+    create_info.enabledExtensionCount = extension_count;
+    create_info.ppEnabledExtensionNames = extension_count ? extensions : NULL;
 
     /* Try what the caller asked for, then the two versions that matter: 1.3 is the contract's
      * floor, 1.0 is what any loader accepts. A 1.2 device then gets a report with its real API

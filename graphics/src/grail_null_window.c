@@ -9,6 +9,7 @@
  */
 #include "grail_internal.h"
 #include "../include/grail/grail_window.h"
+#include "grail_sdl.h"
 
 typedef struct gr_null_window {
     gr_window_desc desc;
@@ -35,6 +36,8 @@ static gr_null_window *null_window(gr_handle handle, gr_result *out_status)
 
 gr_result gr_window_create(const gr_window_desc *desc, gr_handle *out_window)
 {
+    if (gr_sdl_backend_is_sdl3())
+        return gr_sdl_window_create(desc, out_window);
     gr_null_window *w;
     gr_handle handle;
 
@@ -70,12 +73,18 @@ gr_result gr_window_create(const gr_window_desc *desc, gr_handle *out_window)
 
 void gr_window_destroy(gr_handle window)
 {
+    if (gr_sdl_backend_is_sdl3()) {
+        gr_sdl_window_destroy(window);
+        return;
+    }
     gr_null_window *w = gr_object_remove(gr_objects(), window, GR_HANDLE_WINDOW);
     free(w);
 }
 
 gr_result gr_window_get_size(gr_handle window, gr_window_size *out)
 {
+    if (gr_sdl_backend_is_sdl3())
+        return gr_sdl_window_get_size(window, out);
     gr_result status;
     gr_null_window *w = null_window(window, &status);
     if (!w || !out)
@@ -86,6 +95,8 @@ gr_result gr_window_get_size(gr_handle window, gr_window_size *out)
 
 gr_result gr_window_get_native(gr_handle window, gr_window_native *out)
 {
+    if (gr_sdl_backend_is_sdl3())
+        return gr_sdl_window_get_native(window, out);
     gr_result status;
     gr_null_window *w = null_window(window, &status);
     if (!w || !out)

@@ -13,6 +13,7 @@
  * vkGetDeviceProcAddr, so nothing is resolved at link time.
  */
 #include "grail_vk_common.h"
+#include "grail_sdl.h"
 #include "../include/grail/grail_bindless.h"
 
 #include <stdio.h>
@@ -583,11 +584,44 @@ gr_result gr_vk_abi_device_create(const gr_device_desc *desc, gr_handle *out_dev
         free(dev);
         return GR_ERROR_UNSUPPORTED;
     }
-    if (gr_vk_instance_create(&dev->loader, VK_API_VERSION_1_3, &dev->instance, &api) != GR_OK) {
-        vk_log(desc, "no Vulkan instance could be created");
-        gr_vk_loader_close(&dev->loader);
-        free(dev);
-        return GR_ERROR_UNSUPPORTED;
+    /* A window needs the platform's surface extensions, and validation needs its layer. Both are
+     * decided before the instance exists, which is why the window is created first. */
+    {
+        const char *layers[1];
+        const char *extensions[8];
+        const char *const *surface_extensions = NULL;
+        uint32_t layer_count = 0, extension_count = 0, surface_count = 0;
+
+        if (desc->flags & GR_DEVICE_VALIDATION) {
+            layers[layer_count++] = "VK_LAYER_KHRONOS_validation";
+            extensions[extension_count++] = "VK_EXT_debug_utils";
+        }
+        if (!gr_handle_is_null(desc->window)) {
+            if (gr_sdl_vulkan_extensions(&surface_count, &surface_extensions) != GR_OK ||
+                surface_count > 6u) {
+                vk_log(desc, "no platform surface extensions available for the window");
+                gr_vk_loader_close(&dev->loader);
+                free(dev);
+                return GR_ERROR_UNSUPPORTED;
+            }
+            /* Indexed by the surface list, not by extension_count: the validation extensions are
+             * already in front of it, so using the same counter for both would copy the wrong
+             * entry — and incrementing it inside its own subscript is undefined. */
+            {
+                uint32_t surface_index;
+                for (surface_index = 0; surface_index < surface_count && extension_count < 8u;
+                     ++surface_index)
+                    extensions[extension_count++] = surface_extensions[surface_index];
+            }
+        }
+        if (gr_vk_instance_create(&dev->loader, VK_API_VERSION_1_3, layers, layer_count, extensions,
+                                  extension_count, &dev->instance, &api) != GR_OK) {
+            vk_log(desc, "no Vulkan instance could be created (a requested layer or extension is "
+                         "not available)");
+            gr_vk_loader_close(&dev->loader);
+            free(dev);
+            return GR_ERROR_UNSUPPORTED;
+        }
     }
     dev->api_version = api;
 
@@ -704,6 +738,10 @@ gr_result gr_vk_abi_device_create(const gr_device_desc *desc, gr_handle *out_dev
     enable_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
     enable_features.pNext = &enable12;
     enable12.pNext = &enable13;
+    /* The thirteen fixed samplers include four anisotropic ones, so the feature must be on the
+     * device: validation flagged exactly this (VUID-VkSamplerCreateInfo-anisotropyEnable-01070)
+     * the first time the layer was enabled. */
+    enable_features.features.samplerAnisotropy = features.features.samplerAnisotropy;
     enable_features.features.shaderInt16 = features.features.shaderInt16;
     enable_features.features.shaderInt64 = features.features.shaderInt64;
     enable12.descriptorIndexing = VK_TRUE;
@@ -1484,6 +1522,59 @@ gr_result gr_vk_abi_pipeline_stats(gr_handle device_handle, uint32_t *out_declar
         return GR_ERROR_INVALID_HANDLE;
     if (out_declared) *out_declared = dev->pipelines_declared;
     if (out_committed) *out_committed = dev->pipelines_committed;
+    return GR_OK;
+}
+
+/* ---------------------------------------------------------------------------------------
+ * The SDL3 surface bridge
+ *
+ * SDL3 needs the instance to create a VkSurfaceKHR and the backend owns the instance, so these
+ * publish both sides of that handshake. Nothing here keeps the surface: the caller creates and
+ * destroys it, and a swapchain built on it comes later.
+ * --------------------------------------------------------------------------------------- */
+gr_result gr_vk_instance(gr_handle device_handle, void **out_instance, void **out_physical)
+{
+    gr_vk_dev *dev = vk_device_of(device_handle);
+    if (!dev)
+        return GR_ERROR_INVALID_HANDLE;
+    if (out_instance) *out_instance = (void *)dev->instance;
+    if (out_physical) *out_physical = (void *)dev->physical;
+    return GR_OK;
+}
+
+gr_result gr_vk_window_extensions(uint32_t *out_count, const char *const **out_names)
+{
+    return gr_sdl_vulkan_extensions(out_count, out_names);
+}
+
+gr_result gr_vk_create_surface(gr_handle device_handle, gr_handle window, void **out_surface)
+{
+    gr_vk_dev *dev = vk_device_of(device_handle);
+    gr_window_native native;
+    uint64_t surface = 0;
+
+    if (!dev || !out_surface)
+        return GR_ERROR_INVALID_ARGUMENT;
+    *out_surface = NULL;
+    if (gr_window_get_native(window, &native) != GR_OK)
+        return GR_ERROR_INVALID_HANDLE;
+    if (!native.handle_a)
+        return GR_ERROR_UNSUPPORTED; /* a null-backend window has no platform handle */
+    if (gr_sdl_vulkan_create_surface((uint64_t)(uintptr_t)dev->instance,
+                                     (uint64_t)(uintptr_t)native.handle_a, &surface) != GR_OK)
+        return GR_ERROR_BACKEND;
+    *out_surface = (void *)(uintptr_t)surface;
+    return GR_OK;
+}
+
+gr_result gr_vk_destroy_surface(gr_handle device_handle, void *surface)
+{
+    gr_vk_dev *dev = vk_device_of(device_handle);
+    if (!dev)
+        return GR_ERROR_INVALID_HANDLE;
+    if (surface)
+        gr_sdl_vulkan_destroy_surface((uint64_t)(uintptr_t)dev->instance,
+                                      (uint64_t)(uintptr_t)surface);
     return GR_OK;
 }
 

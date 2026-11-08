@@ -85,6 +85,19 @@ The frame-constant ring is one host-visible buffer with a slot per frame in flig
 `gr_frame_constants_write` fills a slot and `gr_cmd_push_frame_offset` selects which one a
 recording reads.
 
+## The window and surface path
+
+`grail_window_set_backend(GR_WINDOW_BACKEND_SDL3)` selects the SDL3 implementation; the default
+stays the null backend so every existing window test keeps working without a display. SDL3 is
+loaded with `dlopen` and its eight entry points resolved by name, so a machine without it still
+builds and a test that needs a window skips.
+
+The instance must carry the platform's surface extensions, and validation needs its layer, so both
+are decided before the instance exists: the window is created first, then `gr_device_create` asks
+SDL3 for the extension names. `gr_vk_create_surface(device, window, &surface)` makes the
+`VkSurfaceKHR` and `gr_vk_destroy_surface` frees it. There is no swapchain yet; the surface is the
+last piece before one.
+
 ## Evidence
 
 `make -C graphics vk-smoke`, under the exclusive GPU lock:
@@ -101,6 +114,30 @@ vk-backend: storage buffer at slot 0, device address 0xffff800100140000
 vk-backend: compute digest seed 12345 = 0x702232ac4eca826f (twice), seed 999 = 0x3a7a79cf4e5149d5
 vk-backend: 241 checks passed
 ```
+
+`make -C graphics vk-surface`, under the exclusive GPU lock, with the validation layer pointed at
+the pinned SDK (`VK_LAYER_PATH`/`LD_LIBRARY_PATH`, since it is not installed system-wide):
+
+```
+vk-surface: platform asks for 2 instance extension(s): VK_KHR_surface ...
+vk-surface: VkSurfaceKHR 0x180000000018 from a hidden SDL3 window
+vk-surface: 19 checks passed
+```
+
+19 assertions: the SDL3 backend loads, a hidden 320x240 window reports that framebuffer size, the
+device is created with `GR_DEVICE_VALIDATION` and a window (so the instance carries the platform
+extensions and the validation layer resolved — a missing layer or extension fails instance
+creation), the instance and physical device are published, two extensions are requested with real
+names, the surface is created, destroyed, created again and destroyed, and a null window is refused
+rather than built on a fabricated pointer.
+
+**Validation paid for itself on its first run**: it reported
+`VUID-VkSamplerCreateInfo-anisotropyEnable-01070` — the thirteen fixed samplers include four
+anisotropic ones, but `samplerAnisotropy` had never been enabled on the device. That was a latent
+spec violation in code that had been passing every check we had, because none of our checks could
+see it. It is fixed. One **warning** remains
+(`WARNING-CoreValidation-AllocateDescriptorSets-WrongType`) and is not yet diagnosed.
+
 
 The compute half: a 256-byte storage buffer is created (claiming storage slot 0 and a device
 address of `0xffff800100140000`), `frame_setup.cs` is dispatched as one 64-thread group, and the
