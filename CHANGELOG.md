@@ -13,6 +13,9 @@
 - Prelude `Some(value)` and context-inferred `None` construct `T?`; typed patterns use
   `data: T` or a bare `T`, and nominal enum variant patterns remain available. Type aliases
   such as `type LoadError = IoError | ParseError` are supported.
+- Function and method references use fresh input lifetimes. An elided output uses the borrowed
+  receiver or the sole distinct input lifetime; distinct groups use free names such as `&a` and
+  `&b` without a lifetime parameter list. Ambiguous outputs are rejected.
 - `use module::Name;` imports a type or interface member. `use order::Ord;` resolves bounds
   and impls through the canonical `order::Ord` path instead of creating a local phantom.
 - Maps expose method-first operations: `len`, `contains`, `insert`, `get`, `get_mut`, `remove`

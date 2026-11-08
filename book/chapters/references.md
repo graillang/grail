@@ -1,9 +1,10 @@
 # Typed references and exchange
 
 `borrow(value)` refers to storage as `&T`; `borrow_mut(value)` grants mutable storage access as
-`&mut T`. Both elide the lifetime; all elided references in one signature share an inferred
-lifetime. When separate relationships matter, name them directly: `&a T` and `&a mut T`. The names
-are implicit, so no `<a>` declaration is required. Local references infer their lifetime. Numeric
+`&mut T`. Each elided input reference gets a fresh inferred lifetime. An elided output uses the
+receiver's outer lifetime, or the sole distinct input lifetime; otherwise write the relationship
+explicitly with free names such as `&a T` and `&a mut T`. Those names are implicit, so no `<a>`
+declaration is required. Local references infer their lifetime. Numeric
 references do not require a heap allocation for the referent.
 
 {{example:references}}
