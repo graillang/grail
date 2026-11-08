@@ -55,6 +55,10 @@ buildAndRun('paths-posix', ['tests/abi/test_paths.c', 'runtime/abi/grail_abi.c',
 buildAndRun('paths-windows', ['tests/abi/test_paths.c', 'runtime/abi/grail_abi.c',
   'runtime/abi/grail_error.c', 'runtime/abi/grail_path.c'], ['-DGRAIL_ABI_PATH_WINDOWS=1']);
 
+run(cc, ['-x', 'c++', '-std=c++17', '-fsyntax-only', '-Wall', '-Wextra', '-Werror',
+  '-Iinclude', 'tests/abi/test_headers.c']);
+console.log('headers: C++17 parses');
+
 if (spawnSync(clang, ['--version']).status === 0) {
   const targets = [
     'x86_64-unknown-linux-gnu',
