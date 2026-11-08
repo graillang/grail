@@ -2,34 +2,27 @@
 
 ## Unreleased
 
-- Port Borg Agent's local IPC transport boundary (`borg/`). `src/transport.grl` carries the rules a Unix-socket binding must obey: a directory path too long for `sun_path` is addressed through `/proc/self/fd/<dirfd>/name` (so a deep root never hits the 108-byte limit), direct addresses stop at 107 usable bytes, session directories are `0700` and sockets `0600`, a command is at most 1 MiB and a reply read is bounded to 4096 bytes, `SO_PEERCRED` must fill exactly `sizeof(ucred)` or the answer is refused, and shutdown stops new commands without cutting a reply already in flight. The port now checks 749 reference lines over 128 documents, with `--anchors` verifying 47 copied snippets across eight source files. The syscalls themselves are out of scope: `AF_UNIX`, `bind`, `listen`, `accept` and `getsockopt` need a runtime operation Grail does not have, and adding one is a compiler change.
+- Abundance CPU port, executor increment: `abundance/src/job_executor.grl` runs the policy order
+  through Grail's structured parallelism (`task_scope`/`spawn`/`join` over clone-created OS
+  threads) in batches as wide as the worker count, with cancellation filtered before batching, a
+  refusal for worker counts outside 1..4, and completion/checksum accounting. The job test now
+  covers 47 exact values: 100 repetitions at 1, 2 and 4 workers each reproduce the same dispatch
+  digest, completion count and checksum, and the dispatched order equals the policy oracle's.
+  Suite total 254 exact values. Two port bugs fixed on the way: a four-id batch packed by
+  multiplication overflowed u64 (bit packing now) and cancelled ids were only checked at the batch
+  head (filtered up front now).
 
-- Port Borg Agent's service supervision and filesystem layout (`borg/`). `src/supervisor.grl` carries
-  the nine `ServiceState` values and the restart rules from `borg-lanes/src/services.rs`: an exit is
-  transient only when the child exited with a listed code, so a signalled child always counts as a
-  failure; a transient exit relaunches after the plain `backoff_ms` without counting; anything else
-  increments `failures` and waits `max(backoff_ms, 50) * 2^min(failures, 6)`, reaching `Failed` past
-  `max_restarts`; a launch that never happened is a failure; and `restarts` counts every relaunch. It
-  also resolves the documented layout with Borg's precedence — `BORG_HOME`/`HOME`/platform for host
-  state, `XDG_CONFIG_HOME`/`HOME/.config`/platform for configuration, and
-  `BORG_LANE_DIR`/`BORG_LANES_ROOT`/`XDG_RUNTIME_DIR`/temp for lane storage — plus the resume budget.
-  The port now checks 719 reference lines over 115 documents, and `--anchors`
-  verifies 37 copied snippets across seven source files. Spawning, reaping and sockets remain out of
-  scope.
-
-- Added `lib/sys/grail_ffi.grl`, the first Grail-facing wrappers over the Linux OS ABI:
-  explicit init/shutdown, file open/read/write/close/stat/size, monotonic and wall clocks,
-  and environment get/set. The module uses FFI byte views, an opaque `File` handle and
-  Grail-owned out-records, returns `T |? Error` with negative ABI statuses, and keeps file
-  handles affine by convention (explicit single close, no auto-free). Added a hosted C
-  adapter for the allocator and handle-return out-parameter, a repeatable
-  `tools/test-ffi-runtime.mjs` runner, and `docs/design/grail-ffi-runtime.md` with the exact
-  pointer/length/ownership rules. The x86-64 test links the Linux reference backend with
-  libc and executes file/time/environment checks; AArch64 and RISC-V 64 are assembly/static
-  checked only. This requires the `feature/ffi` compiler (`GRAIL_FFI_COMPILER`), is not
-  auto-loaded by the current stdlib, and changes neither `compiler/native.grl` nor
-  `compiler/runtime.grl` in the repository (the runner generates a test-only runtime copy
-  to preserve libc TLS).
+- Abundance CPU port, job-priority increment plus a container-ergonomics note: `abundance/src/job_policy.grl`
+  carries `JobPriority::key()`/`from_key()` (class << 32 | f32 rank bits, with the engine's
+  non-finite and negative clamps), `terrain_rank()` and the documented admission policy model; the
+  reference links the engine's own symbols. Two arithmetic bugs found on the way are fixed and
+  recorded: an unsigned exponent subtraction underflowed for every f32 value below 1.0 (the SIGABRT
+  in the first cut) and the rank's level term is max(0, 32 - level). The committed job test now
+  covers 30 exact values, including the model's execution order and counters.
+  `docs/design/grail-container-ergonomics.md` records what the entity and checkpoint work cost:
+  affine loops over owned aggregates, no reference to nested-vector elements, no in-place field
+  writes through an index, reference rebinding at every call, and the syntax facts that each cost a
+  compile iteration. Suite total 237 exact values.
 
 - Abundance CPU port, entity-registry increment: `abundance/src/entity_table.grl` carries the
   entity registry's persisted state — dense id-ordered rows of id, type, owner, position, spawned
