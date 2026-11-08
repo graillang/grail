@@ -169,6 +169,13 @@
   only. Tooling is documented in `docs/tooling/cross-platform-ci.md`; the
   LSP/debugger/profiler integration plan is in
   `docs/tooling/lsp-debugger-profiler.md`.
+- PE/COFF frames now carry unwind data: a post-pass over the final Windows assembly reads the
+  `.set .F<n>` frame sizes and emits `.seh_proc`/`.seh_pushreg`/`.seh_setframe`/`.seh_stackalloc`/
+  `.seh_endprologue` for every function, so the object has `.xdata` and a `.pdata`
+  RUNTIME_FUNCTION table that `lld-link` publishes as the exception directory (240 records for
+  the hello image). There is no exception personality or `RaiseException` panic path yet, the
+  `.D<ty>` drop thunks and the entry stub stay undescribed, and the ELF optimizer still does not
+  recognize `.def` functions, so PE output is unoptimized.
 - Windows x86-64 programs now run: the runtime gained an OS layer
   (`compiler/os-windows.grl`) behind the existing operation IDs, and a new `raw_win32(Symbol, ...)`
   intrinsic emits Win64 calls with shadow space, register arguments and stack arguments. Console

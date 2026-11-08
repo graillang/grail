@@ -6,7 +6,7 @@ import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import assert from 'node:assert/strict';
 import { command, compileProgram as compileElf, execute, root } from './native.mjs';
-import { compileProgram, headers, inspectImage, inspectObject, kernel32, windowsTarget } from './windows.mjs';
+import { compileProgram, headers, inspectImage, inspectObject, inspectUnwind, kernel32, windowsTarget } from './windows.mjs';
 
 const elfTarget = 'x86_64';
 
@@ -82,11 +82,24 @@ export async function check(compiler) {
       assert.ok(kernel32.includes(symbol.replace('__imp_', '')), `${test.name}: no short import for ${symbol}`);
     }
 
+    // Unwind evidence: every .def function carries .seh_* directives and the object has records.
+    assert.equal((assembly.match(/^\.seh_proc /gm) ?? []).length, (assembly.match(/^\.def /gm) ?? []).length,
+      `${test.name}: not every function has an unwind prologue`);
+    for (const match of assembly.matchAll(/^\.seh_stackalloc (\d+)$/gm)) {
+      const size = Number(match[1]);
+      assert.ok(size > 0 && size % 8 === 0, `${test.name}: invalid stack allocation ${size}`);
+    }
+    assert.match(inspectUnwind(built.object), /RuntimeFunction/, `${test.name}: object has no .pdata records`);
+
     // Image-level evidence: PE32+, console subsystem, kernel32 imports, entry point mapping.
     const image = headers(built.executable);
     assert.match(inspectImage(built.executable), /Name: kernel32\.dll/, `${test.name}: kernel32 import descriptor missing`);
     assert.match(image, /Magic\s+020b\t\(PE32\+\)/, `${test.name}: not a PE32+ image`);
     assert.match(image, /Subsystem\s+00000003\t\(Windows CUI\)/, `${test.name}: not a console image`);
+    const pdata = image.match(/Entry 3 ([0-9a-f]+) ([0-9a-f]+)\s+Exception Directory \[\.pdata\]/);
+    assert.ok(pdata, `${test.name}: image has no .pdata directory`);
+    assert.ok(Number.parseInt(pdata[1], 16) !== 0 && Number.parseInt(pdata[2], 16) !== 0,
+      `${test.name}: empty .pdata directory`);
     const entry = image.match(/AddressOfEntryPoint\s+([0-9a-f]+)/)[1];
     assert.notEqual(Number.parseInt(entry, 16), 0, `${test.name}: image has no entry point`);
     const imported = [...inspectImage(built.executable).matchAll(/^\s+Symbol: (\S+)/gm)].map(m => m[1]);

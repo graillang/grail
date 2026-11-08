@@ -464,6 +464,177 @@ fn raw_arguments<a>(c: (&a mut C)) -> u64[] {
     }
     return args;
 }
+// ---- PE/COFF unwind data ------------------------------------------------------------------
+// The COFF assembler needs absolute prologue values, but frame sizes are only known after code
+// generation. The Windows target bypasses the ELF optimizer, so every emitted function has the
+// fixed prologue `pushq %rbp / movq %rsp,%rbp / subq $.F<n>,%rsp`. Frame labels restart per
+// function, so sizes are collected in emission order and consumed by the .def functions in the
+// same order (one `.set .F<n>, <bytes>` line per function).
+struct WinUnwind {
+    out: u8[],
+    symbol: u8[],
+    frames: u64[],
+    frame_at: u64,
+    state: u64
+}
+fn span_is<a, b>(s: &a [u8], a: u64, e: u64, t: &b [u8]) -> u64 {
+    if e - a != t.len() {
+        return 0;
+    }
+    for i in t.len() {
+        if s[a + i] != t[i] {
+            return 0;
+        }
+    }
+    return 1;
+}
+fn span_has<a, b>(s: &a [u8], a: u64, e: u64, t: &b [u8]) -> u64 {
+    if e - a < t.len() {
+        return 0;
+    }
+    for i in t.len() {
+        if s[a + i] != t[i] {
+            return 0;
+        }
+    }
+    return 1;
+}
+fn span_copy<a>(s: &a [u8], a: u64, e: u64) -> u8[] {
+    mut out = u8[];
+    for i in e - a {
+        out.push(s[a + i]);
+    }
+    return out;
+}
+fn put_text(out: (&mut u8[]), t: &[u8]) -> unit {
+    for i in t.len() {
+        out.push(t[i]);
+    }
+    return ();
+}
+fn put_number(out: (&mut u8[]), n: u64) -> unit {
+    if 9 < n {
+        put_number(&mut out, div(n, 10));
+    }
+    out.push(48 + n % 10);
+    return ();
+}
+fn push_line(out: (&mut u8[]), text: &[u8], a: u64, e: u64) -> unit {
+    for i in e - a {
+        out.push(text[a + i]);
+    }
+    out.push(10);
+    return ();
+}
+fn win_number<a>(s: &a [u8], a: u64, e: u64) -> u64 {
+    mut n = 0;
+    mut i = a;
+    while i < e {
+        n = n * 10 + (s[i] - 48);
+        i = i + 1;
+    }
+    return n;
+}
+fn win_frames<a>(text: &a [u8]) -> u64[] {
+    mut frames = u64[];
+    mut start = 0;
+    mut i = 0;
+    while i < text.len() {
+        if text[i] == 10 {
+            e := i;
+            if span_has(view(text), start, e, view(".set .F")) {
+                mut comma = start + 5;
+                while (comma < e) & (text[comma] != 44) {
+                    comma = comma + 1;
+                }
+                if comma < e {
+                    mut digit = comma + 1;
+                    if (digit < e) & (text[digit] == 32) {
+                        digit = digit + 1;
+                    }
+                    frames.push(win_number(view(text), digit, e));
+                }
+            }
+            start = i + 1;
+        }
+        i = i + 1;
+    }
+    return frames;
+}
+fn win_unwind_line<a, b>(u: (&a mut WinUnwind), text: &b [u8], a: u64, e: u64) -> unit {
+    if span_has(view(text), a, e, view(".def ")) {
+        u.symbol = span_copy(view(text), a + 5, e);
+        u.state = 1;
+        push_line(&mut u.out, view(text), a, e);
+        return ();
+    }
+    if u.state == 1 {
+        if 0 < e - a {
+            if text[e - 1] == 58 {
+                push_line(&mut u.out, view(text), a, e);
+                put_text(&mut u.out, view(".seh_proc "));
+                for i in u.symbol.len() {
+                    u.out.push(u.symbol[i]);
+                }
+                u.out.push(10);
+                u.state = 2;
+                return ();
+            }
+        }
+    }
+    if u.state == 2 {
+        if span_is(view(text), a, e, view("pushq %rbp")) {
+            push_line(&mut u.out, view(text), a, e);
+            put_text(&mut u.out, view(".seh_pushreg %rbp\n"));
+            return ();
+        }
+        if span_is(view(text), a, e, view("movq %rsp,%rbp")) {
+            push_line(&mut u.out, view(text), a, e);
+            put_text(&mut u.out, view(".seh_setframe %rbp, 0\n"));
+            return ();
+        }
+        if span_has(view(text), a, e, view("subq $.F")) {
+            mut frame = 0;
+            if u.frame_at < u.frames.len() {
+                frame = u.frames[u.frame_at];
+            }
+            u.frame_at = u.frame_at + 1;
+            push_line(&mut u.out, view(text), a, e);
+            put_text(&mut u.out, view(".seh_stackalloc "));
+            put_number(&mut u.out, frame);
+            put_text(&mut u.out, view("\n.seh_endprologue\n"));
+            u.state = 3;
+            return ();
+        }
+        // A non-standard prologue keeps no unwind description rather than an inaccurate one.
+        u.state = 0;
+    }
+    if u.state == 3 {
+        if span_has(view(text), a, e, view(".set ")) {
+            put_text(&mut u.out, view(".seh_endproc\n"));
+            u.state = 0;
+        }
+    }
+    push_line(&mut u.out, view(text), a, e);
+    return ();
+}
+fn win_unwind<a>(text: &a [u8]) -> u8[] {
+    mut u = WinUnwind { out: u8[], symbol: u8[], frames: win_frames(view(text)), frame_at: 0, state: 0 };
+    mut start = 0;
+    mut i = 0;
+    while i < text.len() {
+        if text[i] == 10 {
+            win_unwind_line(&mut u, view(text), start, i);
+            start = i + 1;
+        }
+        i = i + 1;
+    }
+    if start < text.len() {
+        win_unwind_line(&mut u, view(text), start, text.len());
+    }
+    return u.out;
+}
+
 // PE/COFF objects carry no ELF symbol type; MSVC-style .def records the function class.
 fn func_directive<a, b>(c: (&a mut C), m: &b [u8], name: &b [u8]) -> unit {
     if c.target == 3 {
@@ -14880,6 +15051,11 @@ pub fn main() -> u64 {
     path := host::arg(1 + offset);
     target := c.target;
     if (target == 0) + (target == 3) {
+        if target == 3 {
+            // PE/COFF unwind data must be emitted from the final frame sizes.
+            image := win_unwind(view(out));
+            return host::write_file(view(path), view(with_link_notes(&c.libs, view(image))));
+        }
         return host::write_file(view(path), view(with_link_notes(&c.libs, view(out))));
     }
     native := machine::lower(view(out), target);
