@@ -255,19 +255,113 @@ gr_result gr_reflect_compute_layout_hash(const gr_reflection *refl, uint64_t out
  * ======================================================================================= */
 typedef struct gr_shader_desc {
     gr_desc_head head;
-    /* The blob for the container this device wants. A caller supplies one; the device
-     * prefers the container its backend natively consumes (SPIR-V for Vulkan, DXIL for
-     * D3D12, MSL for Metal) and accepts another only through a translation it can prove
-     * correct, else GR_ERROR_UNSUPPORTED. */
+    /* The reflection blob (gr_reflect_blob_header and its tables). Required: it is the only
+     * description of the shader the device trusts, and it carries the layout digest. It is the
+     * `.refl.bin` the offline tool writes. */
+    gr_span_u8 reflection_blob;
+    /* The container bytes, WITHOUT the reflection blob around them: the `.spv`, `.dxil` or
+     * `.msl` file itself. A device uses the one its backend consumes and ignores the others;
+     * a shader with none of the containers it understands is GR_ERROR_UNSUPPORTED. */
     gr_span_u8 spirv;
     gr_span_u8 dxil;
     gr_span_u8 msl_source;
     gr_span_u8 msl_library;
     const gr_reflect_blob_header *reflection_header;  /* may be NULL when a blob carries it */
     gr_str name;
+    /* The permutation this bytecode was built for. A pipeline that declares a key requires
+     * every one of its shaders to carry the same one, so a pipeline cannot silently mix an
+     * unpermuted vertex shader with a permuted fragment shader. */
+    uint64_t permutation_key;
 } gr_shader_desc;
 
 gr_result gr_shader_create(gr_handle device, const gr_shader_desc *desc, gr_handle *out_shader);
+
+/* =======================================================================================
+ * Shader library: resolving a permutation key to that permutation's bytecode
+ *
+ * The offline tool writes one set of artifacts per shader and stage, and one set per
+ * permutation, named from the key:
+ *
+ *     <name>.<stage>.refl.bin              the no-flags build (the declared default)
+ *     <name>.<stage>.<16 hex key>.refl.bin one per permutation
+ *
+ * A host resolves a key to bytecode through this library rather than composing file names
+ * itself, so the naming convention lives in one place and a missing artifact is a specific
+ * status instead of an open() that failed. Loading is lazy and cached: the first resolve of a
+ * key reads and validates its blob, later resolves of the same key return the same bytes
+ * without touching the filesystem.
+ *
+ * The library is backend-agnostic: it knows nothing about Vulkan, D3D12 or Metal, and
+ * gr_shader_create_resolved() below chooses the container the device wants.
+ * ======================================================================================= */
+typedef struct gr_shader_library_desc {
+    gr_desc_head head;
+    gr_str root;      /* the directory the tool wrote, e.g. build/shaders */
+    uint32_t flags;   /* reserved; 0 */
+} gr_shader_library_desc;
+
+/* One compiled variant, as discovered from the artifact layout. */
+typedef struct gr_shader_entry {
+    gr_str name;            /* borrowed from the library, e.g. "core/tonemap" */
+    gr_shader_stage stage;
+    uint64_t permutation_key; /* 0 for the no-flags build */
+} gr_shader_entry;
+
+typedef struct gr_shader_library_stats {
+    gr_desc_head head;
+    uint32_t shader_count;   /* distinct (name, stage) pairs */
+    uint32_t variant_count;  /* distinct artifacts, including the no-flags build */
+    uint32_t cache_capacity; /* slots before GR_ERROR_EXHAUSTED */
+    uint32_t cache_used;
+    uint64_t cache_hits;     /* resolves served from memory */
+    uint64_t loads;          /* blobs read from disk and validated */
+    uint64_t misses;         /* PERMUTATION_MISSING, and failed loads */
+} gr_shader_library_stats;
+
+gr_result gr_shader_library_open(const gr_shader_library_desc *desc, gr_handle *out_library);
+void gr_shader_library_close(gr_handle library);
+gr_result gr_shader_library_stats_query(gr_handle library, gr_shader_library_stats *out);
+/* Enumerates the discovered variants in a stable order (by name, then stage, then key). */
+gr_result gr_shader_library_entries(gr_handle library, uint32_t first, uint32_t count,
+                                    gr_shader_entry *out, uint32_t *out_written);
+
+/* A resolved variant. The spans and the reflection borrow the library's memory and stay valid
+ * until the library is closed; a caller copies whatever it must outlive that. */
+typedef struct gr_resolved_shader {
+    gr_desc_head head;
+    gr_shader_stage stage;
+    uint64_t permutation_key;
+    /* The reflection blob, which is what gr_shader_desc.reflection_blob wants. */
+    gr_span_u8 blob;
+    /* The container bytes as siblings, absent when this build did not produce them. */
+    gr_span_u8 spirv;
+    gr_span_u8 dxil;
+    gr_span_u8 msl_source;
+    gr_reflection reflection;
+    uint32_t frame_constants_size; /* 0 when the shader declares none */
+    uint32_t from_cache;           /* 1 when this resolve was a cache hit */
+} gr_resolved_shader;
+
+/* Resolves `permutation_key` for a shader.
+ *
+ *   GR_OK                        the variant was found; from_cache says hit or first load
+ *   GR_ERROR_INVALID_ARGUMENT    no shader with that name and stage
+ *   GR_ERROR_PERMUTATION_MISSING that key was not compiled (the shader exists, the variant does
+ *                                not) — a build defect, not a run-time condition to retry
+ *   GR_ERROR_LAYOUT_MISMATCH     the blob's frame-constant block does not match the host's
+ *   GR_ERROR_EXHAUSTED           the cache is full; nothing was evicted
+ *   GR_ERROR_SHADER_INVALID      the blob failed validation
+ */
+gr_result gr_shader_library_resolve(gr_handle library, gr_str name, gr_shader_stage stage,
+                                    uint64_t permutation_key, gr_resolved_shader *out);
+
+/* Resolves by key and creates the device shader from the container that device prefers
+ * (SPIR-V for Vulkan, DXIL for D3D12, MSL for Metal). This is the whole pipeline-side path: a
+ * builder names a shader, a stage and a permutation key, and gets a shader handle or a status
+ * that says precisely why not. */
+gr_result gr_shader_create_resolved(gr_handle device, gr_handle library, gr_str name,
+                                    gr_shader_stage stage, uint64_t permutation_key,
+                                    gr_handle *out_shader);
 
 /* =======================================================================================
  * Pipelines

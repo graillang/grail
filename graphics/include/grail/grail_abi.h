@@ -32,7 +32,7 @@ extern "C" {
  * bump GR_ABI_VERSION_MAJOR for anything that changes an existing layout or meaning.
  * --------------------------------------------------------------------------------------- */
 #define GR_ABI_VERSION_MAJOR 1
-#define GR_ABI_VERSION_MINOR 0
+#define GR_ABI_VERSION_MINOR 1
 #define GR_ABI_VERSION ((GR_ABI_VERSION_MAJOR << 16) | GR_ABI_VERSION_MINOR)
 
 typedef struct gr_version {
@@ -62,7 +62,8 @@ enum {
     GR_ERROR_EXHAUSTED          = -9, /* bindless table or pool full; recoverable refusal */
     GR_ERROR_BACKEND            = -10, /* the backend API itself failed */
     GR_ERROR_SHADER_INVALID     = -11, /* the shader blob or its reflection is rejected */
-    GR_ERROR_LAYOUT_MISMATCH    = -12  /* host and shader GPU layouts disagree */
+    GR_ERROR_LAYOUT_MISMATCH    = -12, /* host and shader GPU layouts disagree */
+    GR_ERROR_PERMUTATION_MISSING = -13 /* the requested permutation exists but was not compiled */
 };
 
 /* A human-readable rendering of a status, for logs. Never NULL. */
@@ -101,6 +102,7 @@ typedef enum gr_handle_type {
     GR_HANDLE_QUERY_POOL = 15,
     GR_HANDLE_WIRE = 16,
     GR_HANDLE_CMD_POOL = 17,
+    GR_HANDLE_SHADER_LIBRARY = 18,
     GR_HANDLE_TYPE_MAX = 0xFFFE
 } gr_handle_type;
 

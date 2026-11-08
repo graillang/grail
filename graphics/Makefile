@@ -15,9 +15,14 @@ CFLAGS  ?= -std=c11 -Wall -Wextra -Wpedantic -Werror -O1 -g
 INCLUDES = -Iinclude
 BUILD   := ../.work/graphics
 
-SRC := src/grail_core.c src/grail_reflect.c src/grail_wire.c src/grail_null.c src/grail_null_window.c
+SRC := src/grail_core.c src/grail_reflect.c src/grail_wire.c src/grail_shader_library.c \
+       src/grail_null.c src/grail_null_window.c
 OBJ := $(patsubst src/%.c,$(BUILD)/%.o,$(SRC))
-TESTS := abi device wire
+# Every header is a dependency of every object. Without this an ABI change to a header leaves
+# stale objects linked against the new declarations — which is exactly how a version bump goes
+# unnoticed until something reads the wrong field.
+HEADERS := $(wildcard include/grail/*.h) src/grail_internal.h
+TESTS := abi device wire library
 TEST_BINS := $(patsubst %,$(BUILD)/test_%,$(TESTS))
 BLOBS := $(shell find ../.work/shaders -name '*.refl.bin' 2>/dev/null)
 
@@ -28,12 +33,12 @@ all: test
 $(BUILD):
 	mkdir -p $(BUILD)
 
-$(BUILD)/%.o: src/%.c | $(BUILD)
+$(BUILD)/%.o: src/%.c $(HEADERS) | $(BUILD)
 	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
 
 # Each test links the whole implementation: the ABI is small enough that partial linking would
 # only hide a missing entry point until it was called.
-$(BUILD)/test_%: tests/test_%.c $(OBJ) | $(BUILD)
+$(BUILD)/test_%: tests/test_%.c $(OBJ) $(HEADERS) | $(BUILD)
 	$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(OBJ)
 
 test: $(TEST_BINS)
@@ -42,7 +47,7 @@ test: $(TEST_BINS)
 # The C reflection inspector. It is what makes the tool's output trustworthy: it opens every
 # blob, validates it, recomputes the layout digest with an independent implementation and
 # compares every frame-constant member offset against offsetof().
-$(BUILD)/grail-reflect: src/grail_reflect_tool.c $(OBJ) | $(BUILD)
+$(BUILD)/grail-reflect: src/grail_reflect_tool.c $(OBJ) $(HEADERS) | $(BUILD)
 	$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(OBJ)
 
 tool: $(BUILD)/grail-reflect
@@ -66,6 +71,9 @@ shader-check: shaders tool
 		echo "permutation name ids differ between tools/shader.mjs and src/grail_core.c"; \
 		exit 1; fi; \
 	echo "permutation ids agree ($$(wc -l < $(BUILD)/ids.c) define(s))"
+	@# And resolve the artifacts the tool just wrote, through the C library, so the naming the
+	@# tool produces and the naming the library parses are proven to be one convention.
+	$(BUILD)/test_library ../.work/shaders
 
 # The per-permutation build is only meaningful if the variants differ, so this runs the test
 # that proves it rather than asserting it in prose.

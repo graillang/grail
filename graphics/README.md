@@ -14,7 +14,7 @@ include/grail/
   grail_window.h          SDL3 window, events, input, displays
   grail_rhi.h             device, queues+timelines, resources, command buffers, swapchain, queries
   grail_bindless.h        set 0 table + set 1 frame constants + the cross-backend mapping table
-  grail_shader.h          containers, reflection blob format, pipelines, permutations
+  grail_shader.h          containers, reflection blob format, shader library, pipelines, permutations
   grail_backend_vulkan.h  required features and extensions, SDL3 surface bridge
   grail_backend_d3d12.h   feature levels, root signature layout, DXIL requirements
   grail_backend_metal.h   argument-buffer tier 2, MSL version
@@ -22,13 +22,14 @@ include/grail/
 src/
   grail_core.c            version, status names, format table, permutation keys, object table
   grail_reflect.c         the reflection blob reader and validator
+  grail_shader_library.c  permutation key -> bytecode: index, lazy load, cache
   grail_wire.c            framing
   grail_null.c            the null backend: every entry point, validated, no GPU
   grail_null_window.c     the window/input half of the null backend
 shaders/
   include/                HLSL mirrors of the C contract (bindless, frame constants, GPU structs)
   core/                   fullscreen.vs, tonemap.ps, frame_setup.cs
-tests/                    abi, device, wire
+tests/                    abi, device, wire, library (+ shader permutation tests)
 tools/                    the offline shader flow (see docs/shader-flow.md)
 docs/                     the contract, the shader flow, dependencies, blockers
 ```
@@ -45,12 +46,13 @@ docs/                     the contract, the shader flow, dependencies, blockers
 | Offline shader tool | written; compiles 3 stages, reflection and permutation ids verified by an independent C reader |
 | Vulkan / D3D12 / Metal backends | **not implemented** (`GR_ERROR_UNSUPPORTED`) |
 | Permutations | each combination compiled to its own SPIR-V/DXIL/blob; digests and keys tested |
+| Key → bytecode resolution | implemented: library index, lazy cache, miss/mismatch/exhaustion statuses |
 | Calling this from a Grail program | **blocked** — see `docs/first-renderer-port.md` |
 
 ## Build and test
 
 ```
-make -C graphics test          # needs only a C compiler: 219 checks
+make -C graphics test          # needs only a C compiler: 319 checks
 make -C graphics shaders       # needs DXC 1.9.2609 (see docs/dependencies.md)
 make -C graphics shader-check  # compile, then verify every reflection blob in C
 make -C graphics perm-test     # prove each permutation compiles to its own bytecode (bun)

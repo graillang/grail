@@ -46,6 +46,7 @@ const char *gr_result_name(gr_result result)
     case GR_ERROR_BACKEND: return "backend";
     case GR_ERROR_SHADER_INVALID: return "shader_invalid";
     case GR_ERROR_LAYOUT_MISMATCH: return "layout_mismatch";
+    case GR_ERROR_PERMUTATION_MISSING: return "permutation_missing";
     default: return "unknown";
     }
 }
