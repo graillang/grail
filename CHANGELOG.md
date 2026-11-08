@@ -13,8 +13,8 @@
   explicit `view` / `view_mut` byte views, and `&a [u8]` / `&a mut [u8]` signatures.
   `--typed-refs` separates the internal reference dialect from numeric defaults, which remain
   `u64` internally and `i64` for user modules. The normal regression corpus uses typed-reference
-  mode; removed syntax is retained only as intentional rejection input. Bootstrap artifacts are
-  unchanged. Deferred
+  mode; removed syntax is retained only as intentional rejection input. All checked-in bootstraps were refreshed
+  and self-host byte-identically. Deferred
   generic and closure bodies restore their defining module's numeric and reference modes.
 
 - Concise type syntax: `T[]` vectors, `u8[]` byte buffers, `T?` optional values and
