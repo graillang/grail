@@ -66,8 +66,8 @@ typedef struct grail_process_status {
 } grail_process_status;
 
 /*
- * Starts a child.  `options` must be complete; argument_count == 0 inserts
- * `program` as argv[0].  A standard-stream handle of GRAIL_HANDLE_NONE means
+ * Starts a child.  Callers set `struct_size` and `abi_version`; a backend rejects
+ * a mismatched record.  `argument_count == 0` inserts `program` as argv[0].  A standard-stream handle of GRAIL_HANDLE_NONE means
  * inherit when GRAIL_PROC_INHERIT_STDIO is set, otherwise the platform null
  * device.  Without GRAIL_PROC_REPLACE_ENVIRONMENT the supplied entries overlay
  * the runtime copy; with it they are the entire environment.
@@ -78,7 +78,7 @@ GRAIL_API grail_status GRAIL_CALL grail_os_process_spawn(const grail_process_opt
 /* Blocks until the child exits.  Repeats return the cached status. */
 GRAIL_API grail_status GRAIL_CALL grail_os_process_wait(grail_process process,
                                                         grail_process_status *out);
-/* Returns GRAIL_E_TIMED_OUT with kind = STILL_ACTIVE when the timeout expires. */
+/* Negative timeout waits forever; expiry returns GRAIL_E_TIMED_OUT with kind = STILL_ACTIVE. */
 GRAIL_API grail_status GRAIL_CALL grail_os_process_wait_timeout(grail_process process,
                                                                 int64_t timeout_ns,
                                                                 grail_process_status *out);

@@ -109,6 +109,11 @@ typedef struct grail_allocator {
  * entry.  `environment` entries have the form NAME=VALUE.  On Windows the shim
  * converts the UTF-16 command line and environment block to this form; on
  * POSIX it validates the incoming bytes.
+ *
+ * The backend uses this record to seed the deterministic environment copy.  The
+ * argument block belongs to the runtime's entry shim; this ABI deliberately has
+ * no argv accessor, because Windows obtains it from the wide command line and
+ * POSIX from main().
  */
 typedef struct grail_startup {
     uint64_t struct_size; /* sizeof(grail_startup) */
@@ -153,6 +158,7 @@ typedef struct grail_os_error {
 #define GRAIL_CAP_SYNC_PRIMITIVES (1ull << 14)
 #define GRAIL_CAP_DYNAMIC_LIBRARIES (1ull << 15)
 #define GRAIL_CAP_SYMLINKS (1ull << 16)
+#define GRAIL_CAP_CPU_TIME (1ull << 17)
 
 /* Returns GRAIL_ABI_VERSION: major in the high 32 bits, minor in the low. */
 GRAIL_API uint64_t GRAIL_CALL grail_abi_version(void);

@@ -395,6 +395,7 @@ int main(void) {
     CHECK((capabilities & GRAIL_CAP_DIRECTORIES) != 0);
     CHECK((capabilities & GRAIL_CAP_ENVIRONMENT) != 0);
     CHECK((capabilities & GRAIL_CAP_TIME) != 0);
+    CHECK((capabilities & GRAIL_CAP_CPU_TIME) != 0);
     CHECK((capabilities & GRAIL_CAP_THREADS) != 0);
     CHECK((capabilities & GRAIL_CAP_DYNAMIC_LIBRARIES) != 0);
     CHECK((capabilities & GRAIL_CAP_PROCESSES) == 0);

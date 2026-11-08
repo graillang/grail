@@ -275,7 +275,7 @@ grail_status grail_os_init(const grail_allocator *allocator, const grail_startup
     grail_linux.capabilities = GRAIL_CAP_FILES | GRAIL_CAP_DIRECTORIES | GRAIL_CAP_PATHS |
                                GRAIL_CAP_UNICODE | GRAIL_CAP_ENVIRONMENT |
                                GRAIL_CAP_ENV_MUTATION | GRAIL_CAP_TIME |
-                               GRAIL_CAP_LOCAL_TIME_OFFSET | GRAIL_CAP_THREADS |
+                               GRAIL_CAP_LOCAL_TIME_OFFSET | GRAIL_CAP_CPU_TIME | GRAIL_CAP_THREADS |
                                GRAIL_CAP_SYNC_PRIMITIVES | GRAIL_CAP_DYNAMIC_LIBRARIES |
                                GRAIL_CAP_SYMLINKS;
     grail_linux.initialized = 1;

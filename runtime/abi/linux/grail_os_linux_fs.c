@@ -295,6 +295,9 @@ grail_status grail_os_file_truncate(grail_file handle, uint64_t length) {
     if (status != GRAIL_OK) {
         return status;
     }
+    if (length > (uint64_t)INT64_MAX) {
+        return GRAIL_E_INVALID_ARGUMENT;
+    }
     if (ftruncate(file->descriptor, (off_t)length) != 0) {
         return grail_linux_errno(errno);
     }
