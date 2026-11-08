@@ -387,6 +387,15 @@ int main(void) {
     startup.environment_offsets = environment_offsets;
     startup.environment_count = 3;
 
+    static const char malformed_block[] = "A=1\0BROKEN";
+    static const uint64_t malformed_offsets[] = {0, 4};
+    grail_startup malformed = startup;
+    malformed.environment = (const uint8_t *)malformed_block;
+    malformed.environment_length = sizeof(malformed_block) - 1;
+    malformed.environment_offsets = malformed_offsets;
+    malformed.environment_count = 2;
+    CHECK(grail_os_init(&test_allocator, &malformed) == GRAIL_E_INVALID_ARGUMENT);
+    CHECK(grail_os_capabilities() == 0);
     CHECK(grail_os_init(NULL, NULL) == GRAIL_E_INVALID_ARGUMENT);
     CHECK(grail_os_init(&test_allocator, &startup) == GRAIL_OK);
     CHECK(grail_os_init(&test_allocator, &startup) == GRAIL_E_UNSUPPORTED);
@@ -411,6 +420,9 @@ int main(void) {
     CHECK(grail_os_shutdown() == GRAIL_OK);
     CHECK(grail_os_capabilities() == 0);
     CHECK(grail_os_shutdown() == GRAIL_E_NOT_INITIALIZED);
+    CHECK(grail_os_init(&test_allocator, NULL) == GRAIL_OK);
+    CHECK(grail_os_capabilities() != 0);
+    CHECK(grail_os_shutdown() == GRAIL_OK);
     CHECK(live_bytes == 0);
     CHECK(rmdir(scratch) == 0);
     if (failures != 0) {
