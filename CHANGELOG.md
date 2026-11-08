@@ -24,6 +24,17 @@
   gained a views/handles fixture and the shim gained string, byte, mutable-fill and handle
   functions; three more rejection fixtures joined `tests/native-cases.json`. See `docs/ffi.md`.
 
+- v3 C FFI increment 3: `extern "C" record` with C layout and alignment. Fields use C's
+  natural alignment, inter-field padding and tail padding, so `offsetof`/`sizeof` agree
+  with the C compiler; field reads and writes use the exact field width (`i8`/`i16`/`i32`
+  truncate on store and sign- or zero-extend on load, via portable byte-wise runtime
+  helpers shared by all targets). A record parameter crosses as the address of its fields
+  (`R *`); Grail keeps ownership of the allocation and frees it at scope end, while C must
+  not free or retain it. Nested records, record results, pointer/float fields and by-value
+  struct passing are rejected with diagnostics rather than approximated. Adds
+  `tests/ffi/extern_records.grl` (C reads and writes Grail fields; `offsetof`/`sizeof`
+  verified from C) and three rejection fixtures. See `docs/ffi.md`.
+
 - Completed the Windows and macOS function surface. macOS now implements `file_stat`/`fs_stat`
   with a pinned 144-byte Darwin `struct stat` and the `$INODE64` `fstat`/`stat`/`lstat` symbols,
   including birth time and hidden/symlink/read-only flags. Windows now implements
