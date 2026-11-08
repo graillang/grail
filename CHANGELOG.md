@@ -226,6 +226,15 @@
   only. Tooling is documented in `docs/tooling/cross-platform-ci.md`; the
   LSP/debugger/profiler integration plan is in
   `docs/tooling/lsp-debugger-profiler.md`.
+- New `windows-aarch64` target emits ARM64 PE/COFF: the AArch64 selector gains Windows pseudo-ops
+  (`winimport`, `winexit`, `wintp`, `wintpset`, `winunsupported`) that expand into an indirect IAT
+  call with the 64-byte Win64 ARM64 home space, the TEB-through-`x18` user pointer and traps for
+  Linux-only intrinsics. Internal argument registers already map to `x0..x5`, so Win32 calls need
+  no shuffling; import libraries are written with `Machine = 0xAA64`. Objects assemble as
+  `COFF-ARM64` (`IMAGE_FILE_MACHINE_ARM64`) with `BRANCH26`/`PAGEBASE_REL21`/`PAGEOFFSET_12A/12L`
+  relocations and link to PE32+ console images with `lld-link /machine:arm64`. Four programs are
+  checked statically (no ARM64 Windows runner is available here); ARM64 has no `.pdata` unwind
+  records yet, and the Linux x86-64/AArch64/RISC-V builds are checked alongside.
 - PE/COFF frames now carry unwind data: a post-pass over the final Windows assembly reads the
   `.set .F<n>` frame sizes and emits `.seh_proc`/`.seh_pushreg`/`.seh_setframe`/`.seh_stackalloc`/
   `.seh_endprologue` for every function, so the object has `.xdata` and a `.pdata`

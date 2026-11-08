@@ -7,6 +7,7 @@ use host;
 struct Out {
     text: u8[],
     target: u64,
+    win: u64,
     next: u64
 }
 fn eq<a, b>(a: &a [u8], b: &b [u8]) -> u64 {
@@ -727,6 +728,24 @@ fn atomic_instruction<a, b, c>(o: (&a mut Out), op: &b [u8], rest: &c [u8]) -> u
     }
     return false;
 }
+// ---- Windows ARM64 imports ----------------------------------------------------------------
+// The internal argument registers map to x0..x7, which is exactly the Win64 ARM64 order, so an
+// import only needs the IAT indirection, 64 bytes of home space and the result move into x9.
+fn win_import<a, b>(o: (&a mut Out), name: &b [u8]) -> unit {
+    put(&mut o, view("sub sp,sp,#64\nadrp x16,__imp_"));
+    put(&mut o, view(name));
+    put(&mut o, view("\nldr x16,[x16,:lo12:__imp_"));
+    put(&mut o, view(name));
+    put(&mut o, view("]\nblr x16\nadd sp,sp,#64\nmov x9,x0\n"));
+    return ();
+}
+fn win_exit<a>(o: (&a mut Out)) -> unit {
+    put(
+        &mut o,
+        view("sub sp,sp,#64\nadrp x16,__imp_ExitProcess\nldr x16,[x16,:lo12:__imp_ExitProcess]\nblr x16\nbrk #0\n")
+    );
+    return ();
+}
 fn instruction<a, b>(o: (&a mut Out), line: &b [u8]) -> unit {
     target := o.target;
     mut space = line.len();
@@ -740,6 +759,28 @@ fn instruction<a, b>(o: (&a mut Out), line: &b [u8]) -> unit {
     mut rest = u8[];
     if space < line.len() {
         rest = (trim(view((line[space + 1:])))).copy();
+    }
+    if o.win != 0 {
+        if eq(view((op)), view("winimport")) {
+            win_import(&mut o, view(rest));
+            return ();
+        }
+        if eq(view((op)), view("winexit")) {
+            win_exit(&mut o);
+            return ();
+        }
+        if eq(view((op)), view("wintp")) {
+            put(&mut o, view("ldr x9,[x18,#40]\n"));
+            return ();
+        }
+        if eq(view((op)), view("wintpset")) {
+            put(&mut o, view("str x1,[x18,#40]\nmov x9,#0\n"));
+            return ();
+        }
+        if eq(view((op)), view("winunsupported")) {
+            put(&mut o, view("brk #0\n"));
+            return ();
+        }
     }
     if atomic_instruction(&mut o, view(op), view(rest)) {
         return ();
@@ -1096,8 +1137,14 @@ fn instruction<a, b>(o: (&a mut Out), line: &b [u8]) -> unit {
     return ();
 }
 pub fn lower<a>(input: &a [u8], target: u64) -> u8[] {
-    assert((target == 1) + (target == 2));
-    mut out = Out { text: u8[], target: target, next: 1 };
+    assert((target == 1) + (target == 2) + (target == 4));
+    mut isa = target;
+    mut win = 0;
+    if target == 4 {
+        isa = 1;
+        win = 1;
+    }
+    mut out = Out { text: u8[], target: isa, win: win, next: 1 };
     // Frame constants are known before instruction selection (no unresolved immediate expressions).
     mut start = 0;
     for i in input.len() {

@@ -93,14 +93,15 @@ Targets: `x86_64`, `aarch64`, `riscv64`. The default is the architecture the com
 built for. RV64 requires the integer multiply/divide and atomic extensions (RV64IMA), uses the LP64 ABI, and
 needs `-march=rv64imafd -mabi=lp64` when assembling. These three target **Linux ELF**.
 
-`--target windows-x86_64` selects the PE/COFF backend on the same x86-64 instruction stream:
+`--target windows-x86_64` selects the PE/COFF backend on the same x86-64 instruction stream, and
+`--target windows-aarch64` selects the ARM64 PE/COFF backend through the shared AArch64 selector:
 MSVC `.def` function records, a `grail_entry` PE entry point, Win64 import calls through
 `raw_win32`, and COFF short-import libraries written by `tools/windows.mjs`, linked with
 `lld-link`. Console, file, time, exit-code and argv programs run under Wine
 (`bun tools/windows.mjs check`). The portable runtime is shared and the OS boundary selects
 `compiler/os-linux.grl` or `compiler/os-windows.grl`. Frames get `.pdata`/`.xdata` unwind records
-but no exception personality; threads, sockets, directory streams and `mremap` are not
-implemented. See
+on x86-64 only, and without an exception personality; ARM64 emits no `.pdata` yet. Threads,
+sockets, directory streams and `mremap` are not implemented. See
 [docs/design/windows-backend.md](../docs/design/windows-backend.md).
 macOS and other operating systems are not implemented; sharing a CPU does not imply sharing an
 executable format or syscall ABI.

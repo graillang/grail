@@ -1,10 +1,13 @@
 # Windows x86-64 backend (PE/COFF)
 
-Status: working console backend. `--target windows-x86_64` emits COFF-compatible x86-64 assembly;
-the Clang integrated assembler turns it into an `IMAGE_FILE_MACHINE_AMD64` object and `lld-link`
-links a console PE32+ image against Grail-generated import libraries. A portable-runtime subset
-that talks to kernel32 runs under Wine: console output, formatted integers/floats, file
-write/read, exit codes and command-line arguments are verified by `tools/windows.mjs check`.
+Status: two working PE targets. `--target windows-x86_64` emits COFF-compatible x86-64 assembly;
+`--target windows-aarch64` emits COFF-compatible ARM64 assembly through the shared AArch64
+selector. The Clang integrated assembler turns them into `IMAGE_FILE_MACHINE_AMD64` /
+`IMAGE_FILE_MACHINE_ARM64` objects and `lld-link` links console PE32+ images against
+Grail-generated import libraries. A portable-runtime subset that talks to kernel32 runs under
+Wine on x86-64 (console output, formatted integers/floats, file write/read, exit codes and
+command-line arguments); the ARM64 image is validated statically because no ARM64 Windows runner
+exists here.
 
 ## Why assembly, not a hand-written object emitter
 
@@ -100,11 +103,52 @@ Threads, sockets, epoll, futex and directory streams return `-ENOSYS`; the porta
 reports or aborts on those paths, and no thread creation is emitted. `mremap` is unimplemented, so
 growing an allocation of 512 KiB or more aborts instead of moving the arena.
 
+## windows-aarch64
+
+The ARM64 target reuses the x86-64 word machine and the existing AArch64 instruction selector.
+Windows-specific codegen is expressed as pseudo-ops that `machine.grl` expands once the target is
+known to be PE:
+
+| Pseudo-op | ARM64 expansion |
+| --- | --- |
+| `winimport Name` | `sub sp,sp,#64`; `adrp x16,__imp_Name`; `ldr x16,[x16,:lo12:__imp_Name]`; `blr x16`; `add sp,sp,#64`; `mov x9,x0` |
+| `winexit` | the same IAT load for `__imp_ExitProcess`, then `blr x16` and `brk #0` |
+| `wintp` | `ldr x9,[x18,#40]` (Windows keeps the TEB in `x18`; +0x28 is the user pointer) |
+| `wintpset` | `str x1,[x18,#40]` |
+| `winunsupported` | `brk #0` (Linux syscall/thread/stack-switch intrinsics) |
+
+The argument registers make this a direct mapping: the internal order `%rdi,%rsi,%rdx,%rcx,%r8,%r9`
+lowers to `x0,x1,x2,x3,x4,x5`, which is exactly the Win64 ARM64 argument order, and a 7th
+argument uses `%r10`→`x6`. `raw_win32` therefore emits only the argument moves plus the pseudo-op;
+`machine.grl` adds the 64-byte home space the Win64 ARM64 ABI requires (it keeps the 16-byte SP
+alignment) and moves the `x0` result back to the internal `x9`. `raw_map` (`VirtualAlloc`) sets
+`x0=0`, `x1=size`, `x2=MEM_COMMIT|MEM_RESERVE`, `x3=PAGE_READWRITE` before `winimport`.
+
+The entry stub is the same `grail_entry` shape: zero the three process-state words, align SP
+(`andq $-16,%rsp` lowers to `and sp,sp,#...`), call `rt_thread_init` (which parses the Win32
+command line) and call the Grail entry. Import libraries are the same short-import objects with
+`Machine = 0xAA64`, assembled with `clang --target=aarch64-pc-windows-msvc` and linked with
+`lld-link /machine:arm64`.
+
+Static evidence for the hello image: object `Format: COFF-ARM64`, `IMAGE_FILE_MACHINE_ARM64
+(0xAA64)`, `grail_entry` in `.text`, relocations `IMAGE_REL_ARM64_PAGEBASE_REL21`,
+`PAGEOFFSET_12A/12L` and `BRANCH26`; image PE32+ console with a nonzero entry RVA and a
+`kernel32.dll` import descriptor. Four programs (hello, integer printing, file write/read, full
+argv list) are compiled and inspected by `tools/windows.mjs check`.
+
+ARM64 limits: no `.pdata`/`.xdata` yet (Windows ARM64 wants packed unwind entries, which the
+x86-only `.seh_*` pass does not produce), so frames are not described; the runtime gaps
+(threads, sockets, directory streams, `mremap`, ANSI-only paths, integer-only import arguments)
+are the same as x86-64. Execution is not testable on this host: Wine on x86-64 cannot run an
+ARM64 PE image and `qemu-aarch64-static` is a Linux-ELF emulator, so ARM64 acceptance requires an
+ARM64 Windows host, ARM64 Wine, or a Windows-on-ARM machine.
+
 ## Verification
 
 `bun tools/windows.mjs check` (with `GRAIL_COMPILER` pointing at a tree-built compiler) checks
-eight programs: hello, u64 exit code, integer printing, float printing, file write/read,
-single-argument entry, struct fields and a full argv list. For every case it asserts:
+eight x86-64 programs: hello, u64 exit code, integer printing, float printing, file write/read,
+single-argument entry, struct fields and a full argv list, plus four windows-aarch64 programs
+validated statically. For every x86-64 case it asserts:
 
 - the `.s` uses COFF directives only (no `@function`, no `.note.GNU-stack`, no `_start`) and exits
   through `call *__imp_ExitProcess(%rip)`;
@@ -114,11 +158,17 @@ single-argument entry, struct fields and a full argv list. For every case it ass
   containing `ExitProcess`, `WriteFile`, `GetCommandLineA` and `CreateFileA` where used;
 - when Wine is installed, the program's stdout and exit code match the expected values (the
   repository-local `.work/wine-prefix` is used unless `WINEPREFIX` is set);
-- `windows-arm64` is rejected with a diagnostic without clobbering an existing artifact;
-- the same programs still build and *run* as Linux ELF, including identical argv behaviour.
+- the ARM64 cases produce a `COFF-ARM64` / `IMAGE_FILE_MACHINE_ARM64` object with the page/offset/
+  branch relocations, an ARM64 PE32+ console image and the expected kernel32 imports, and contain
+  no x86 instruction spelling;
+- `windows-riscv64` is rejected with a diagnostic without clobbering an existing artifact;
+- the same programs still build and *run* as Linux ELF (x86-64), including identical argv
+  behaviour, and still build as Linux AArch64 and RISC-V ELF.
 
 ## ABI limits of the current backend
 
+- **x86-64 only `.pdata`.** Windows ARM64 images have no exception directory (packed unwind
+  entries are not emitted); the x86-64 description still lacks an exception personality.
 - **Unwind data without an exception personality.** Frames are described, so a debugger or
   `RtlVirtualUnwind` can walk them, but there is no `.pdata`-driven `__C_specific_handler`
   personality, no `RaiseException` panic path and no handler registration. Hardware faults and

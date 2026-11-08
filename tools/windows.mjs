@@ -8,8 +8,13 @@ import { fileURLToPath } from 'node:url';
 import { buildCompiler, command, root } from './native.mjs';
 
 export const windowsTarget = 'windows-x86_64';
-export const triple = 'x86_64-pc-windows-msvc';
+export const windowsAarch64 = 'windows-aarch64';
 export const dll = 'kernel32.dll';
+// PE target descriptors: the assembler triple, the short-import Machine value and the linker name.
+export const targets = {
+  [windowsTarget]: { triple: 'x86_64-pc-windows-msvc', machine: 0x8664, linkMachine: 'x64' },
+  [windowsAarch64]: { triple: 'aarch64-pc-windows-msvc', machine: 0xaa64, linkMachine: 'arm64' },
+};
 // Every Win32 entry point the compiler can emit an import for (`raw_map` and process exit today).
 export const kernel32 = [
   'CloseHandle',
@@ -43,13 +48,13 @@ const workDirectory = join(root, '.work/windows');
 
 // A COFF short import object: a 20-byte import header followed by "Symbol\0DLL\0". LLD turns these
 // into IAT slots and an import descriptor, so the compiler only ever names `__imp_<Symbol>`.
-export function shortImport(name, library = dll) {
+export function shortImport(name, library = dll, machine = 0x8664) {
   const data = Buffer.from(`${name}\0${library}\0`, 'latin1');
   const header = Buffer.alloc(20);
   header.writeUInt16LE(0x0000, 0); // Sig1
   header.writeUInt16LE(0xffff, 2); // Sig2
   header.writeUInt16LE(0, 4); // Version
-  header.writeUInt16LE(0x8664, 6); // IMAGE_FILE_MACHINE_AMD64
+  header.writeUInt16LE(machine, 6); // IMAGE_FILE_MACHINE_AMD64 or _ARM64
   header.writeUInt32LE(0, 8); // TimeDateStamp
   header.writeUInt32LE(data.length, 12); // SizeOfData
   header.writeUInt16LE(0, 16); // Ordinal/hint
@@ -57,12 +62,12 @@ export function shortImport(name, library = dll) {
   return Buffer.concat([header, data]);
 }
 
-export function writeImportLibrary(directory = join(workDirectory, 'lib')) {
+export function writeImportLibrary(directory = join(workDirectory, 'lib'), machine = 0x8664) {
   mkdirSync(directory, { recursive: true });
   const objects = [];
   for (const name of kernel32) {
     const path = join(directory, `${name}.obj`);
-    writeFileSync(path, shortImport(name));
+    writeFileSync(path, shortImport(name, dll, machine));
     objects.push(path);
   }
   const library = join(directory, 'kernel32.lib');
@@ -70,15 +75,16 @@ export function writeImportLibrary(directory = join(workDirectory, 'lib')) {
   return library;
 }
 
-export function assemble(source, object) {
-  command([process.env.GRAIL_ASSEMBLER ?? 'clang', `--target=${triple}`, '-c', source, '-o', object]);
+export function assemble(source, object, target = windowsTarget) {
+  command([process.env.GRAIL_ASSEMBLER ?? 'clang', `--target=${targets[target].triple}`, '-c', source, '-o', object]);
   return object;
 }
 
-export function link(objects, executable, { entry = 'grail_entry', subsystem = 'console' } = {}) {
+export function link(objects, executable, { entry = 'grail_entry', subsystem = 'console', machine = 'x64' } = {}) {
   command([
     process.env.GRAIL_WIN_LINKER ?? 'lld-link',
     '/nologo',
+    `/machine:${machine}`,
     `/entry:${entry}`,
     `/subsystem:${subsystem}`,
     '/nodefaultlib',
@@ -93,18 +99,21 @@ export function link(objects, executable, { entry = 'grail_entry', subsystem = '
 // Compile a Grail program for Windows x86-64 and return its assembly, COFF object and PE image.
 export function compileProgram(compiler, inputs, directory, {
   name = 'program',
+  target = windowsTarget,
   runtime = join(root, 'compiler/runtime.grl'),
   osRuntime = join(root, 'compiler/os-windows.grl'),
 } = {}) {
+  const spec = targets[target];
+  if (!spec) throw new Error(`unsupported Windows target ${target}`);
   mkdirSync(directory, { recursive: true });
   const assembly = join(directory, `${name}.s`);
   const object = join(directory, `${name}.obj`);
   const executable = join(directory, `${name}.exe`);
   const files = [...inputs.map(p => resolve(root, p)), resolve(root, runtime), resolve(root, osRuntime)];
-  command([compiler, '--default-u64', '--typed-refs', '--target', windowsTarget, assembly, ...files]);
-  assemble(assembly, object);
-  const library = writeImportLibrary(join(directory, 'lib'));
-  link([object, library], executable);
+  command([compiler, '--default-u64', '--typed-refs', '--target', target, assembly, ...files]);
+  assemble(assembly, object, target);
+  const library = writeImportLibrary(join(directory, 'lib'), spec.machine);
+  link([object, library], executable, { machine: spec.linkMachine });
   return { assembly, object, executable, library };
 }
 
@@ -114,6 +123,10 @@ export function inspectObject(object) {
 
 export function inspectImage(executable) {
   return command(['llvm-readobj', '--file-headers', '--sections', '--coff-imports', executable]).stdout.toString();
+}
+
+export function inspectRelocations(object) {
+  return command(['llvm-readobj', '--relocations', object]).stdout.toString();
 }
 
 export function inspectUnwind(object) {
@@ -133,12 +146,20 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   if (mode === 'implib') {
     console.log(writeImportLibrary(rest[0]));
   } else if (mode === 'build') {
-    const [destination = join(workDirectory, 'program'), ...inputs] = rest;
+    let target = windowsTarget;
+    const positional = [...rest];
+    const flag = positional.indexOf('--target');
+    if (flag !== -1) {
+      target = positional[flag + 1];
+      positional.splice(flag, 2);
+    }
+    const [destination = join(workDirectory, 'program'), ...inputs] = positional;
     if (inputs.length === 0) usage();
     // Bake the input list into the artifact name so repeated builds reuse the directory.
     const directory = dirname(destination);
     const built = compileProgram(buildCompiler(), inputs, directory, {
       name: destination.split('/').pop(),
+      target,
     });
     console.log(built.executable);
   } else if (mode === 'check') {

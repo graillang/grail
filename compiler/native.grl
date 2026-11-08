@@ -637,7 +637,7 @@ fn win_unwind<a>(text: &a [u8]) -> u8[] {
 
 // PE/COFF objects carry no ELF symbol type; MSVC-style .def records the function class.
 fn func_directive<a, b>(c: (&a mut C), m: &b [u8], name: &b [u8]) -> unit {
-    if c.target == 3 {
+    if (c.target == 3) + (c.target == 4) {
         o(&mut c, view(".def "));
         mangle(&mut c, view(m), view(name));
         o(&mut c, view("\n.scl 2\n.type 32\n.endef\n"));
@@ -6721,8 +6721,36 @@ fn raw_builtin<a>(c: (&a mut C), id: u64) -> Val {
         fail(&mut c, view("raw intrinsic arity"));
     }
     if id == 133 {
-        // Win64 ABI: RCX/RDX/R8/R9 plus stack arguments above 32 bytes of caller shadow space.
         count := args.len();
+        if c.target == 4 {
+            // The lowered ARM64 sequence passes x0..x7, which is exactly the Win64 order.
+            if 0 < count {
+                get(&mut c, args[0], view("%rdi"));
+            }
+            if 1 < count {
+                get(&mut c, args[1], view("%rsi"));
+            }
+            if 2 < count {
+                get(&mut c, args[2], view("%rdx"));
+            }
+            if 3 < count {
+                get(&mut c, args[3], view("%rcx"));
+            }
+            if 4 < count {
+                get(&mut c, args[4], view("%r8"));
+            }
+            if 5 < count {
+                get(&mut c, args[5], view("%r9"));
+            }
+            if 6 < count {
+                get(&mut c, args[6], view("%r10"));
+            }
+            o(&mut c, view("winimport "));
+            o(&mut c, view(api));
+            c.out.push(10);
+            return val(save(&mut c), 0);
+        }
+        // x86-64 Win64 ABI: RCX/RDX/R8/R9 plus stack arguments above 32 bytes of caller shadow space.
         mut stackargs = 0;
         if 4 < count {
             stackargs = count - 4;
@@ -6788,6 +6816,11 @@ fn raw_builtin<a>(c: (&a mut C), id: u64) -> Val {
         o(&mut c, view("xorq %rax,%rax\n"));
     }
     if id == 105 {
+        if c.target == 4 {
+            // Win64 ARM64: x0=0, x1=size, x2=MEM_COMMIT|MEM_RESERVE, x3=PAGE_READWRITE.
+            get(&mut c, args[0], view("%rsi"));
+            o(&mut c, view("movq $0,%rdi\nmovq $12288,%rdx\nmovq $4,%rcx\nwinimport VirtualAlloc\n"));
+        } else {
         if c.target == 3 {
             // Win64 anonymous mapping: VirtualAlloc(0, size, MEM_COMMIT|MEM_RESERVE, PAGE_READWRITE).
             get(&mut c, args[0], view("%rdx"));
@@ -6807,6 +6840,13 @@ fn raw_builtin<a>(c: (&a mut C), id: u64) -> Val {
                 &mut c,
                 view(",%eax\nxorl %edi,%edi\nmovl $3,%edx\nmovl $34,%r10d\nmovq $-1,%r8\nxorl %r9d,%r9d\nsyscall\n")
             );
+        }
+        }
+    }
+    if (id == 107) + (id == 109) {
+        if c.target == 4 {
+            o(&mut c, view("winunsupported\n"));
+            return val(save(&mut c), 0);
         }
     }
     if id == 107 {
@@ -6852,8 +6892,8 @@ fn raw_builtin<a>(c: (&a mut C), id: u64) -> Val {
         get(&mut c, args[0], view("%rdi"));
         get(&mut c, args[1], view("%rsi"));
         get(&mut c, args[2], view("%rdx"));
-        if c.target == 3 {
-            // Worker threads are not implemented for the PE target yet; trap instead of
+        if (c.target == 3) + (c.target == 4) {
+            // Worker threads are not implemented for the PE targets yet; trap instead of
             // reaching a Linux clone syscall.
             o(&mut c, view("xorl %eax,%eax\nud2\n"));
         } else {
@@ -6874,6 +6914,10 @@ fn raw_builtin<a>(c: (&a mut C), id: u64) -> Val {
     // Per-OS-thread worker pointer: x86 FS base (word 0 of the record points to itself),
     // AArch64 tpidr_el0, RISC-V tp.
     if id == 120 {
+        if c.target == 4 {
+            // Windows ARM64 keeps the TEB in x18; TEB+0x28 is the user pointer.
+            o(&mut c, view("wintp\n"));
+        } else {
         if c.target == 3 {
             // TEB+0x28 is the Win32 per-thread user pointer (Linux uses %fs:0).
             o(&mut c, view("movq %fs:40,%rax\n"));
@@ -6884,8 +6928,13 @@ fn raw_builtin<a>(c: (&a mut C), id: u64) -> Val {
                 o(&mut c, view("tpget\n"));
             }
         }
+        }
     }
     if id == 121 {
+        if c.target == 4 {
+            get(&mut c, args[0], view("%rsi"));
+            o(&mut c, view("wintpset\n"));
+        } else {
         if c.target == 3 {
             get(&mut c, args[0], view("%rsi"));
             o(&mut c, view("movq %rsi,%fs:40\n"));
@@ -6898,13 +6947,14 @@ fn raw_builtin<a>(c: (&a mut C), id: u64) -> Val {
                 o(&mut c, view("tpset\n"));
             }
         }
+        }
     }
     // Stackful switch: save callee-saved state and a resume address on this stack, store the
     // stack pointer to *args[0], continue on args[1] (whose top words were saved the same way).
     if id == 122 {
         get(&mut c, args[0], view("%rdi"));
         get(&mut c, args[1], view("%rsi"));
-        if c.target == 3 {
+        if (c.target == 3) + (c.target == 4) {
             o(&mut c, view("xorl %eax,%eax\nud2\n"));
         } else {
             if c.target == 0 {
@@ -14727,6 +14777,12 @@ fn emit_drops<a>(c: (&a mut C)) -> unit {
     return ();
 }
 fn emit_exit<a, b>(c: (&a mut C), argument: &b [u8]) -> unit {
+    if c.target == 4 {
+        // The lowering expands `winexit` into an indirect IAT call with ARM64 home space.
+        o(&mut c, argument);
+        o(&mut c, view("winexit\n"));
+        return ();
+    }
     if c.target == 3 {
         // Win64 passes the exit code in ECX; the import slot is a real indirect IAT call.
         o(&mut c, argument);
@@ -14884,7 +14940,7 @@ pub fn main() -> u64 {
             if argc < offset + 3 {
                 fail_option(
                     &mut c,
-                    view("--target needs x86_64, aarch64, riscv64 or windows-x86_64")
+                    view("--target needs x86_64, aarch64, riscv64, windows-x86_64 or windows-aarch64")
                 );
             }
             target := host::arg(offset + 2);
@@ -14900,12 +14956,16 @@ pub fn main() -> u64 {
                         if same(view(target), view("windows-x86_64")) {
                             exchange(&mut c.target, 3);
                         } else {
-                            fail_option(
-                                &mut c,
-                                view(
-                                    "unsupported target (expected x86_64, aarch64, riscv64 or windows-x86_64)"
-                                )
-                            );
+                            if same(view(target), view("windows-aarch64")) {
+                                exchange(&mut c.target, 4);
+                            } else {
+                                fail_option(
+                                    &mut c,
+                                    view(
+                                        "unsupported target (expected x86_64, aarch64, riscv64, windows-x86_64 or windows-aarch64)"
+                                    )
+                                );
+                            }
                         }
                     }
                 }
@@ -14991,7 +15051,7 @@ pub fn main() -> u64 {
             fail(&mut c, view("executable entry requires readonly argv view"));
         }
     }
-    if c.target == 3 {
+    if (c.target == 3) + (c.target == 4) {
         // A PE image starts without arguments: the loader leaves argv to the runtime, which reads
         // the Win32 command line. The process state words start empty and are filled by
         // rt_thread_init before the entry function runs.
@@ -15039,7 +15099,7 @@ pub fn main() -> u64 {
     mark(&mut c, balanced);
     o(&mut c, view("call rt_shutdown\n"));
     emit_exit(&mut c, view("movq %r14,%rdi\n"));
-    if c.target == 3 {
+    if (c.target == 3) + (c.target == 4) {
         o(&mut c, view("ud2\n.bss\n.p2align 3\nrt_state: .zero 4096\n"));
     } else {
         o(
@@ -15058,6 +15118,7 @@ pub fn main() -> u64 {
         }
         return host::write_file(view(path), view(with_link_notes(&c.libs, view(out))));
     }
+    // windows-aarch64 lowers through the AArch64 selector with the Windows import pseudo-ops.
     native := machine::lower(view(out), target);
     return host::write_file(view(path), view(with_link_notes(&c.libs, view(native))));
 }
