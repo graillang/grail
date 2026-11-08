@@ -62,6 +62,7 @@ const fixtures = {
   jsonrpc: ['borg/tests/fixtures/jsonrpc'],
   supervisor: ['borg/tests/fixtures/supervisor'],
   transport: ['borg/tests/fixtures/transport'],
+  journal: ['borg/tests/fixtures/journal'],
 };
 
 function fixturePaths(name) {

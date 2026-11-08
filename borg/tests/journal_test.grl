@@ -1,0 +1,253 @@
+// Journal parity test: event persistence, cursor arithmetic, resume paging and status.
+//
+// Lines:
+//   persistence <name> <durable|coalesced|ephemeral>
+//   cursor <name> <value>
+//   replay <name> <true|false>
+//   page <name> <from> <to> <has_more>
+//   status <name> <value>
+
+use borg_journal;
+use borg_json;
+use core;
+use env;
+use fs;
+
+fn append<a, b>(out: (&a mut u8[]), text: (&b [u8])) {
+    for byte in text {
+        out.push(byte);
+    }
+}
+
+fn text_is<a, b>(text: (&a [u8]), wanted: (&b [u8])) -> bool {
+    if text.len() != wanted.len() {
+        return false;
+    }
+    for i in text.len() {
+        if text[i] != wanted[i] {
+            return false;
+        }
+    }
+    return true;
+}
+
+fn row<a, b, c>(label: (&a [u8]), name: (&b [u8]), value: (&c [u8])) {
+    mut text = u8[];
+    append(&mut text, label);
+    text.push(32);
+    append(&mut text, name);
+    text.push(32);
+    append(&mut text, value);
+    println(text.text());
+}
+
+fn text_field<a, b>(spec: (&a borg_json::Json), key: (&b [u8])) -> string? {
+    match borg_json::member(&spec, &key) {
+        Some(node) => {
+            if borg_json::kind_of(&node) == borg_json::JsonKind::Null {
+                return core::none<string>();
+            }
+            return borg_json::as_string(&node);
+        },
+        None => { return core::none<string>(); }
+    }
+}
+
+fn text_or<a, b>(spec: (&a borg_json::Json), key: (&b [u8])) -> string {
+    mut value = "".text();
+    match text_field(&spec, &key) {
+        Some(text) => { value = text; },
+        None => { }
+    }
+    return value;
+}
+
+fn number_or<a, b>(spec: (&a borg_json::Json), key: (&b [u8]), fallback: u64) -> u64 {
+    match borg_json::member(&spec, &key) {
+        Some(node) => {
+            match borg_json::as_number(&node) {
+                Some(text) => {
+                    match borg_json::whole_number(&text) {
+                        Some(value) => { return value; },
+                        None => { return fallback; }
+                    }
+                },
+                None => { return fallback; }
+            }
+        },
+        None => { return fallback; }
+    }
+}
+
+fn flag_or<a, b>(spec: (&a borg_json::Json), key: (&b [u8])) -> bool {
+    match borg_json::member(&spec, &key) {
+        Some(node) => {
+            match borg_json::as_bool(&node) {
+                Some(flag) => { return flag; },
+                None => { return false; }
+            }
+        },
+        None => { return false; }
+    }
+}
+
+fn main() -> u64 {
+    args := env::args();
+    mut index = 1;
+    while index < args.len() {
+        path := args[index];
+        data := fs::read(&path)!;
+        match borg_json::parse(&data) {
+            scenario: borg_json::Json => { run(&scenario); },
+            failure: borg_json::ParseError => { }
+        }
+        index += 1;
+    }
+    return 0;
+}
+
+fn run<a>(scenario: (&a borg_json::Json)) {
+    mut name = "unnamed".text();
+    match text_field(&scenario, "name") {
+        Some(text) => { name = text; },
+        None => { }
+    }
+    kind := text_or(&scenario, "kind");
+    if text_is(&kind, "provider") {
+        provider_kind := text_or(&scenario, "provider_kind");
+        verdict := borg_journal::provider_persistence(&provider_kind);
+        shown := borg_journal::persistence_name(&verdict);
+        row("persistence", &name, &shown);
+    }
+    if text_is(&kind, "message") {
+        actor := text_or(&scenario, "actor");
+        status := text_or(&scenario, "status");
+        user_or_system := text_is(&actor, "user") || text_is(&actor, "system");
+        in_progress := text_is(&status, "in_progress");
+        verdict := borg_journal::message_persistence(user_or_system, in_progress);
+        shown := borg_journal::persistence_name(&verdict);
+        row("persistence", &name, &shown);
+    }
+    if text_is(&kind, "delta") {
+        shown := borg_journal::persistence_name(&borg_journal::delta_persistence());
+        row("persistence", &name, &shown);
+    }
+    if text_is(&kind, "reasoning") {
+        shown := borg_journal::persistence_name(&borg_journal::reasoning_persistence());
+        row("persistence", &name, &shown);
+    }
+    if text_is(&kind, "context-window") {
+        shown := borg_journal::persistence_name(&borg_journal::context_window_persistence());
+        row("persistence", &name, &shown);
+    }
+    if text_is(&kind, "subagent") {
+        child := text_or(&scenario, "child");
+        mut verdict = borg_journal::Persistence::Ephemeral;
+        if text_is(&child, "durable") {
+            verdict = borg_journal::Persistence::Durable;
+        }
+        if text_is(&child, "coalesced") {
+            verdict = borg_journal::Persistence::Coalesced;
+        }
+        shown := borg_journal::persistence_name(&borg_journal::subagent_persistence(&verdict,
+            flag_or(&scenario, "child_provider"), flag_or(&scenario, "child_metadata")));
+        row("persistence", &name, &shown);
+    }
+    if text_is(&kind, "cursor") {
+        cursor_case(&scenario, &name);
+    }
+    if text_is(&kind, "replay") {
+        replayed := borg_journal::replayed(number_or(&scenario, "cursor", 0), number_or(&scenario, "sequence", 0));
+        if replayed {
+            row("replay", &name, "true");
+        } else {
+            row("replay", &name, "false");
+        }
+    }
+    if text_is(&kind, "page") {
+        page := borg_journal::resume_page(number_or(&scenario, "cursor", 0),
+            number_or(&scenario, "latest", 0), number_or(&scenario, "page", 1));
+        emit_page(&name, &page);
+    }
+    if text_is(&kind, "status") {
+        status_case(&scenario, &name);
+    }
+}
+
+fn cursor_case<a>(scenario: (&a borg_json::Json), name: (&[u8])) {
+    mut current = 0;
+    mut steps = borg_json::null_value();
+    match borg_json::member(&scenario, "steps") {
+        Some(node) => { steps = node; },
+        None => { }
+    }
+    mut index = 0;
+    while index < borg_json::array_len(&steps) {
+        match borg_json::array_item(&steps, index) {
+            Some(item) => {
+                match borg_json::as_number(&item) {
+                    Some(text) => {
+                        match borg_json::whole_number(&text) {
+                            Some(value) => { current = borg_journal::advance_cursor(current, value); },
+                            None => { }
+                        }
+                    },
+                    None => { }
+                }
+            },
+            None => { }
+        }
+        index += 1;
+    }
+    shown := borg_json::number_text(current);
+    row("cursor", &name, &shown);
+}
+
+fn emit_page<a>(name: (&[u8]), page: (&a borg_journal::Page)) {
+    mut text = u8[];
+    append(&mut text, "page ".text());
+    append(&mut text, name);
+    text.push(32);
+    append(&mut text, &borg_json::number_text(borg_journal::page_from(&page)));
+    text.push(32);
+    append(&mut text, &borg_json::number_text(borg_journal::page_to(&page)));
+    text.push(32);
+    if borg_journal::page_has_more(&page) {
+        append(&mut text, "true");
+    } else {
+        append(&mut text, "false");
+    }
+    println(text.text());
+}
+
+// Each step is a journaled StatusChanged, so the last one is the status.
+fn status_case<a>(scenario: (&a borg_json::Json), name: (&[u8])) {
+    mut current = borg_journal::starting();
+    mut steps = borg_json::null_value();
+    match borg_json::member(&scenario, "steps") {
+        Some(node) => { steps = node; },
+        None => { }
+    }
+    mut index = 0;
+    while index < borg_json::array_len(&steps) {
+        mut step = "".text();
+        match borg_json::array_item(&steps, index) {
+            Some(item) => {
+                match borg_json::as_string(&item) {
+                    Some(text) => { step = text; },
+                    None => { }
+                }
+            },
+            None => { }
+        }
+        if text_is(&step, "ready") { current = borg_journal::ready(); }
+        if text_is(&step, "running") { current = borg_journal::running(); }
+        if text_is(&step, "waiting_for_approval") { current = borg_journal::waiting_for_approval(); }
+        if text_is(&step, "completed") { current = borg_journal::completed(); }
+        if text_is(&step, "failed") { current = borg_journal::failed(); }
+        if text_is(&step, "stopped") { current = borg_journal::stopped(); }
+        index += 1;
+    }
+    shown := borg_journal::status_name(&current);
+    row("status", &name, &shown);
+}

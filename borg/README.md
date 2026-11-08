@@ -1,12 +1,13 @@
 # Borg Agent CPU port
 
-Six bounded increments of the Borg Agent → Grail port: the JSON substrate its wire documents are
+Seven bounded increments of the Borg Agent → Grail port: the JSON substrate its wire documents are
 made of, the TOML its configuration files are written in, the protocol-v1 envelope header that
 classifies a document, the `agent.toml` loader that applies Borg's compiled-in defaults, the
 local-session ownership state that decides whether a session still has an owner, the JSON-RPC frames
 and single-in-flight dispatch that ACP, LSP and MCP conversations are built from, and the service
 supervision rules — restart policy, backoff, exit semantics — with the layout they write into,
-and the local IPC transport boundary in front of those frames.
+the local IPC transport boundary in front of those frames, and the journal rules those
+frames carry.
 Borg Agent is read-only here; the reference is its own JSON semantics — `serde_json` 1.0.151 with
 `arbitrary_precision`, the crate version and feature set `crates/borg-*` build with. The plan and
 staging live in [docs/design/borg-agent-port.md](../docs/design/borg-agent-port.md).
@@ -20,6 +21,7 @@ src/session_state.grl        owner record codec, executable identity, `/proc` st
 src/jsonrpc.grl              JSON-RPC frames, stdio and Content-Length framing, dispatcher state
 src/supervisor.grl           restart policy, backoff, service states, layout resolvers
 src/transport.grl            socket addressing, peer credentials, connection lifecycle
+src/journal.grl              event persistence, cursor arithmetic, resume paging, status
 tests/json_test.grl          JSON: `json.compact`, `json.scalar`, `json.error` per document
 tests/wire_test.grl          protocol: `wire.header <file> <field> <value>`, `wire.error <file> <path> <reason>`
 tests/toml_test.grl          TOML: `toml.value <file> <path> <kind> <text>`, `toml.error <file>`
@@ -28,6 +30,7 @@ tests/session_test.grl       ownership: `case <name> record|field|active|state|o
 tests/jsonrpc_test.grl       frames: `frame|parse|take|dispatch <name> …`
 tests/supervisor_test.grl    supervision: `supervise|home|config|lanes|session|budget <name> …`
 tests/transport_test.grl     transport: `address|fits|limits|ucred|peer|conn <name> …`
+tests/journal_test.grl       journal: `persistence|cursor|replay|page|status <name> …`
 tests/fixtures/v1/           Borg's protocol-v1 conformance corpus, copied verbatim
 tests/fixtures/edge/         number, escape, structure, nesting-limit and malformed documents
 tests/fixtures/wire/         envelope mutations: missing, mistyped, wrong protocol, wrong version
@@ -38,6 +41,7 @@ tests/fixtures/session/      ownership scenarios: records, process observations,
 tests/fixtures/jsonrpc/      frame specs, parse cases, framed buffers, dispatch scripts
 tests/fixtures/supervisor/   policies with op scripts, and layout inputs
 tests/fixtures/transport/    addressing, limit, peer and connection scenarios
+tests/fixtures/journal/      persistence kinds, cursor steps, pages and status scripts
 tests/parity/json.rs         the reference: serde_json compact re-serialisation and scalar walk
 tests/parity/wire.rs         the reference: the same header rule over serde_json values
 tests/parity/toml.rs         the reference: the toml crate's value model, walked in the same order
@@ -53,6 +57,7 @@ tests/parity/session.txt     committed reference output (120 lines, 23 documents
 tests/parity/jsonrpc.txt     committed reference output (71 lines, 22 documents)
 tests/parity/supervisor.txt  committed reference output (45 lines, 20 documents)
 tests/parity/transport.txt   committed reference output (30 lines, 13 documents)
+tests/parity/journal.txt     committed reference output (34 lines, 34 documents)
 tools/borg-test.mjs          build + compile + run + diff
 ```
 
@@ -99,8 +104,10 @@ and field:
   replayed, plus `home|config|lanes|session|budget` for the layout resolvers.
 - `address|fits|limits|ucred|peer|conn`: the socket address chosen for a directory, the transport
   limits, a peer-credential verdict, and a connection replayed event by event.
+- `persistence|cursor|replay|page|status`: an event kind's persistence, a cursor advanced over a
+  sequence of observations, a resume page, and the status a sequence of journaled changes leaves.
 
-The suite compares **749 lines over 128 documents**, and every value in them comes from
+The suite compares **783 lines over 162 documents**, and every value in them comes from
 `serde_json` rather than from a restatement: the reference parses with Borg's own crate and prints
 what it parsed. `wire.rs` and `config.rs` pin the v1 header *rule* and the default table (no Rust program classifies
 these fixtures, or loads this config without building the whole 363k-line Borg workspace), and use
@@ -270,6 +277,26 @@ owner is the only expected peer, and a different uid is *reported* rather than g
 Addressing stays consistent with the layout section: `host_home`/`config_root` decide the
 directory, `session_file` names `<id>.control.sock` inside it, and `socket_address` decides whether
 that path can be a `sun_path` or has to go through the descriptor.
+
+## Journal rules
+
+The journal is a per-session sequence with strictly increasing numbers, and a client resumes by
+asking for events after the cursor it last saw. Three rules decide what a reader can rely on, all
+copied with anchors:
+
+| Rule | Source | Ported as |
+| --- | --- | --- |
+| Persistence: audit evidence is durable, progress coalesces, provider chatter is live-only | `session_store.rs:280-400` | `provider_persistence`, `message_persistence`, `reasoning_persistence`, `context_window_persistence`, `delta_persistence` |
+| A mirrored child event is only as durable as the child's record, and even a durable child provider event or child metadata stays live | `session_store.rs:365-400` | `subagent_persistence` |
+| A cursor only moves forward: the furthest sequence seen is the resume point | `session.rs:3184` | `advance_cursor` |
+| Replay is strictly after the cursor, so nothing is delivered twice | `session.rs:14276` | `replayed` |
+| A resume reads bounded pages and reports whether more remain | `session.rs:14539` | `resume_page` |
+
+Status is not recomputed from the shape of the events: `StatusChanged` is itself a journaled event
+(`contract.rs:408`), so a resumed session's status is the last one written, and the port names the
+seven values rather than inventing a transition table. Two details matter and are covered: a
+*durable* provider event is the default's opposite (an unlisted provider kind is ephemeral, not
+durable), and an assistant message still streaming coalesces while a user or system one is journaled.
 
 ## Limits and findings
 

@@ -1,0 +1,225 @@
+module borg_journal;
+use core;
+
+// Journal rules: event persistence, cursor arithmetic and session status.
+//
+// The journal is a per-session sequence of events with strictly increasing `sequence` numbers, and
+// a client resumes by asking for events after the cursor it last saw. Which events are journaled at
+// all is a policy decision in `SessionEventKind::persistence` (session_store.rs:280), and it is the
+// part of the store that a port most easily gets wrong: streaming deltas are live-only, progress
+// markers coalesce into one live-state row, and a mirrored child event is only as durable as the
+// child's own record.
+//
+//   persistence table      session_store.rs:280-400
+//   cursor advance         session.rs:3184            a per-child cursor is the max sequence seen
+//   resume                 session.rs:14276           replay asks for events after the cursor
+//   paged recovery         session.rs:14539-14597     activity_recovery_page returns `next`
+//   status                 contract.rs:408            StatusChanged is itself a journaled event
+
+pub enum Persistence {
+    Durable,
+    Coalesced,
+    Ephemeral
+}
+
+pub enum Status {
+    Starting,
+    Ready,
+    Running,
+    WaitingForApproval,
+    Completed,
+    Failed,
+    Stopped
+}
+
+fn same<a, b>(left: (&a [u8]), right: (&b [u8])) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    for i in left.len() {
+        if left[i] != right[i] {
+            return false;
+        }
+    }
+    return true;
+}
+
+pub fn provider_persistence<a>(kind: (&a [u8])) -> Persistence {
+    // Durable: audit evidence a resumed session must still see.
+    if same(&kind, "reasoning_snapshot")
+        || same(&kind, "native_model_message")
+        || same(&kind, "native_context_edit")
+        || same(&kind, "native_model_request")
+        || same(&kind, "native_model_usage")
+        || same(&kind, "prompt_cache_observed")
+        || same(&kind, "native_prompt_context")
+        || same(&kind, "native_tool_round_completed")
+        || same(&kind, "context_microcompaction")
+        || same(&kind, "native_request_prefix")
+        || same(&kind, "native_context_checkpoint")
+        || same(&kind, "network_retry")
+        || same(&kind, "usage_limit_retry")
+        || same(&kind, "usage_limit_retry_cancelled")
+        || same(&kind, "usage_limit_retry_released")
+        || same(&kind, "context_compaction")
+        || same(&kind, "context_compaction_failed")
+        || same(&kind, "context_replay_projected")
+        || same(&kind, "context_replay_fallback")
+        || same(&kind, "item/started:contextCompaction")
+        || same(&kind, "item/completed:contextCompaction")
+        || same(&kind, "item/started:context_compaction")
+        || same(&kind, "item/completed:context_compaction")
+        || same(&kind, "provider_prompt")
+        || same(&kind, "native_steer_applied")
+        || same(&kind, "action/preparing")
+        || same(&kind, "action/preparing_cancelled")
+        || same(&kind, "turn_effort")
+        || same(&kind, "message_summarized")
+        || same(&kind, "message_redirected") {
+        return Persistence::Durable;
+    }
+    // Coalesced: progress a resuming reader only needs in its latest form.
+    if same(&kind, "action/generation_status") {
+        return Persistence::Coalesced;
+    }
+    // Everything else a provider reports is live-only.
+    return Persistence::Ephemeral;
+}
+
+// A user or system message that is still streaming is journaled; an assistant one coalesces.
+pub fn message_persistence(user_or_system: bool, in_progress: bool) -> Persistence {
+    if !in_progress {
+        return Persistence::Durable;
+    }
+    if user_or_system {
+        return Persistence::Durable;
+    }
+    return Persistence::Coalesced;
+}
+
+pub fn delta_persistence() -> Persistence {
+    return Persistence::Ephemeral;
+}
+
+pub fn reasoning_persistence() -> Persistence {
+    return Persistence::Coalesced;
+}
+
+pub fn context_window_persistence() -> Persistence {
+    return Persistence::Coalesced;
+}
+
+// A mirrored child event is only as durable as the child's own record, and even a durable child
+// provider event or child metadata is delivered live rather than copied into the parent's rows
+// (session_store.rs:365-400).
+pub fn subagent_persistence<a>(child: (&a Persistence), child_is_provider: bool, child_is_metadata: bool) -> Persistence {
+    match child {
+        Durable => {
+            if child_is_provider || child_is_metadata {
+                return Persistence::Ephemeral;
+            }
+            return Persistence::Durable;
+        },
+        _ => { return Persistence::Ephemeral; }
+    }
+}
+
+pub fn persistence_name<a>(value: (&a Persistence)) -> string {
+    match value {
+        Durable => { return "durable".text(); },
+        Coalesced => { return "coalesced".text(); },
+        Ephemeral => { return "ephemeral".text(); }
+    }
+}
+
+// ---- cursors ----
+
+// A cursor only ever moves forward: the furthest sequence seen is the resume point (session.rs:3184).
+pub fn advance_cursor(current: u64, sequence: u64) -> u64 {
+    if sequence > current {
+        return sequence;
+    }
+    return current;
+}
+
+// Replay is strictly after the cursor, so an event already seen is never delivered twice
+// (session.rs:14276 asks for `after = cursor`).
+pub fn replayed(cursor: u64, sequence: u64) -> bool {
+    return sequence > cursor;
+}
+
+pub struct Page {
+    from: u64,
+    to: u64,
+    has_more: bool
+}
+
+pub fn page_from(value: (&Page)) -> u64 {
+    return value.from;
+}
+
+pub fn page_to(value: (&Page)) -> u64 {
+    return value.to;
+}
+
+pub fn page_has_more(value: (&Page)) -> bool {
+    return value.has_more;
+}
+
+// One bounded page of a resume: `page` events after `cursor`, never past `latest`.
+pub fn resume_page(cursor: u64, latest: u64, page: u64) -> Page {
+    from := cursor + 1;
+    if from > latest {
+        return Page { from: from, to: cursor, has_more: false };
+    }
+    mut to = from + page - 1;
+    if to > latest {
+        to = latest;
+    }
+    return Page { from: from, to: to, has_more: to < latest };
+}
+
+// ---- status ----
+//
+// `StatusChanged` is a journaled event, so a resumed session's status is the last one written, not
+// a value recomputed from whatever the events look like.
+
+pub fn status_name<a>(value: (&a Status)) -> string {
+    match value {
+        Starting => { return "starting".text(); },
+        Ready => { return "ready".text(); },
+        Running => { return "running".text(); },
+        WaitingForApproval => { return "waiting_for_approval".text(); },
+        Completed => { return "completed".text(); },
+        Failed => { return "failed".text(); },
+        Stopped => { return "stopped".text(); }
+    }
+}
+
+pub fn starting() -> Status {
+    return Status::Starting;
+}
+
+pub fn ready() -> Status {
+    return Status::Ready;
+}
+
+pub fn running() -> Status {
+    return Status::Running;
+}
+
+pub fn waiting_for_approval() -> Status {
+    return Status::WaitingForApproval;
+}
+
+pub fn completed() -> Status {
+    return Status::Completed;
+}
+
+pub fn failed() -> Status {
+    return Status::Failed;
+}
+
+pub fn stopped() -> Status {
+    return Status::Stopped;
+}

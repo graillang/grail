@@ -2,15 +2,9 @@
 
 ## Unreleased
 
-- Abundance CPU port, executor increment: `abundance/src/job_executor.grl` runs the policy order
-  through Grail's structured parallelism (`task_scope`/`spawn`/`join` over clone-created OS
-  threads) in batches as wide as the worker count, with cancellation filtered before batching, a
-  refusal for worker counts outside 1..4, and completion/checksum accounting. The job test now
-  covers 47 exact values: 100 repetitions at 1, 2 and 4 workers each reproduce the same dispatch
-  digest, completion count and checksum, and the dispatched order equals the policy oracle's.
-  Suite total 254 exact values. Two port bugs fixed on the way: a four-id batch packed by
-  multiplication overflowed u64 (bit packing now) and cancelled ids were only checked at the batch
-  head (filtered up front now).
+- Port Borg Agent's journal rules (`borg/`). `src/journal.grl` carries the persistence table from `session_store.rs`: provider events are durable only for the listed audit kinds (an unlisted kind is ephemeral, not durable), `action/generation_status` coalesces, streaming deltas are live-only, a user or system message that is still streaming is journaled while an assistant one coalesces, and a mirrored child event is only as durable as the child's record while a durable child provider event or child metadata stays live. It also carries the cursor arithmetic: a cursor only moves forward, replay is strictly after it so nothing is delivered twice, and a resume reads bounded pages that report whether more remain. Session status is the last journaled `StatusChanged`, so the port names the seven values instead of inventing a transition table. The port now checks 783 reference lines over 162 documents, with `--anchors` verifying 59 copied snippets across eleven source files. No file descriptor is opened.
+
+- Port Borg Agent's local IPC transport boundary (`borg/`). `src/transport.grl` carries the rules a Unix-socket binding must obey: a directory path too long for `sun_path` is addressed through `/proc/self/fd/<dirfd>/name` (so a deep root never hits the 108-byte limit), direct addresses stop at 107 usable bytes, session directories are `0700` and sockets `0600`, a command is at most 1 MiB and a reply read is bounded to 4096 bytes, `SO_PEERCRED` must fill exactly `sizeof(ucred)` or the answer is refused, and shutdown stops new commands without cutting a reply already in flight. The port now checks 749 reference lines over 128 documents, with `--anchors` verifying 47 copied snippets across eight source files. The syscalls themselves are out of scope: `AF_UNIX`, `bind`, `listen`, `accept` and `getsockopt` need a runtime operation Grail does not have, and adding one is a compiler change.
 
 - Abundance CPU port, job-priority increment plus a container-ergonomics note: `abundance/src/job_policy.grl`
   carries `JobPriority::key()`/`from_key()` (class << 32 | f32 rank bits, with the engine's
