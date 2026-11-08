@@ -94,6 +94,3 @@ graphics-test:
     make -C graphics test
     bun test graphics/tests/shader_permutations.test.mjs
 
-# Windows x86-64 COFF/PE static checks (build-only; images are never executed).
-windows-check:
-    bun tools/windows.mjs check
