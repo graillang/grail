@@ -149,6 +149,12 @@ grail_status grail_os_status_from_errno(int64_t error_number) {
 #ifdef EAGAIN
     case EAGAIN:
 #endif
+#ifdef EINPROGRESS
+    case EINPROGRESS:
+#endif
+#ifdef EALREADY
+    case EALREADY:
+#endif
         return GRAIL_E_WOULD_BLOCK;
 #ifdef EINTR
     case EINTR:
@@ -200,11 +206,28 @@ grail_status grail_os_status_from_errno(int64_t error_number) {
 #ifdef ENOSYS
     case ENOSYS:
 #endif
+#ifdef ENOPROTOOPT
+    case ENOPROTOOPT:
+#endif
+#if defined(EPROTONOSUPPORT) && (!defined(ENOPROTOOPT) || EPROTONOSUPPORT != ENOPROTOOPT)
+    case EPROTONOSUPPORT:
+#endif
         return GRAIL_E_UNSUPPORTED;
+#ifdef EAFNOSUPPORT
+    case EAFNOSUPPORT:
+#endif
+        return GRAIL_E_ADDRESS_INVALID;
 #ifdef EPIPE
     case EPIPE:
 #endif
+#ifdef ESHUTDOWN
+    case ESHUTDOWN:
+#endif
         return GRAIL_E_BROKEN_PIPE;
+#ifdef ENOTCONN
+    case ENOTCONN:
+#endif
+        return GRAIL_E_CONNECTION_ABORTED;
 #ifdef ECANCELED
     case ECANCELED:
 #endif
