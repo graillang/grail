@@ -139,6 +139,19 @@ That also needed several formats the map lacked (`R32G32_FLOAT`, `R16G16B16A16_U
 a missing entry reported `UNSUPPORTED` at pipeline creation rather than silently producing a broken
 pipeline, which is why it surfaced immediately.
 
+## Indirect draws
+
+`gr_cmd_draw_indexed_indirect` takes an argument buffer, an offset, a count and a stride. The stride
+is validated against the 20-byte `VkDrawIndexedIndirectCommand` (index count, instance count, first
+index, vertex offset, first instance) and must be a multiple of 4, and the range must lie inside the
+buffer — a stride that would read into the next command is refused rather than followed. The buffer
+must also carry `GR_BUFFER_USAGE_INDIRECT`.
+
+The test issues the same triangle three times: twice directly and once indirectly, and the third
+readback digest is **identical** to the first. That is the check that matters — an indirect path can
+easily draw nothing and still "succeed", and a digest that merely differs from the clear colour
+would not tell you whether the argument block was read as the command it holds.
+
 ## Evidence
 
 `make -C graphics vk-smoke`, under the exclusive GPU lock:

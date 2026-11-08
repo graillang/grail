@@ -96,6 +96,7 @@ typedef struct gr_vk_dev {
     PFN_vkCmdPushConstants cmd_push_constants;
     PFN_vkCmdDraw cmd_draw;
     PFN_vkCmdDrawIndexed cmd_draw_indexed;
+    PFN_vkCmdDrawIndexedIndirect cmd_draw_indexed_indirect;
     PFN_vkCmdBindVertexBuffers cmd_bind_vertex_buffers;
     PFN_vkCmdBindIndexBuffer cmd_bind_index_buffer;
     PFN_vkCmdCopyImageToBuffer cmd_copy_image_to_buffer;
@@ -963,6 +964,7 @@ gr_result gr_vk_abi_device_create(const gr_device_desc *desc, gr_handle *out_dev
     dev->cmd_push_constants = GR_VK_DEVICE_LOAD(dev, vkCmdPushConstants);
     dev->cmd_draw = GR_VK_DEVICE_LOAD(dev, vkCmdDraw);
     dev->cmd_draw_indexed = GR_VK_DEVICE_LOAD(dev, vkCmdDrawIndexed);
+    dev->cmd_draw_indexed_indirect = GR_VK_DEVICE_LOAD(dev, vkCmdDrawIndexedIndirect);
     dev->cmd_bind_vertex_buffers = GR_VK_DEVICE_LOAD(dev, vkCmdBindVertexBuffers);
     dev->cmd_bind_index_buffer = GR_VK_DEVICE_LOAD(dev, vkCmdBindIndexBuffer);
     dev->cmd_copy_image_to_buffer = GR_VK_DEVICE_LOAD(dev, vkCmdCopyImageToBuffer);
@@ -2624,6 +2626,33 @@ gr_result gr_vk_abi_cmd_draw_indexed(gr_handle cmd_handle, const gr_draw_indexed
     return GR_OK;
 }
 
+gr_result gr_vk_abi_cmd_draw_indexed_indirect(gr_handle cmd_handle, gr_handle buffer_handle,
+                                             uint64_t offset, uint32_t draw_count, uint32_t stride)
+{
+    gr_vk_cmdbuf *cmd = (gr_vk_cmdbuf *)gr_object_lookup(gr_objects(), cmd_handle,
+                                                         GR_HANDLE_CMD_BUFFER, NULL);
+    gr_vk_buffer *buffer = vk_buffer_of(buffer_handle);
+
+    if (!cmd || !buffer)
+        return GR_ERROR_INVALID_HANDLE;
+    if (!cmd->recording)
+        return GR_ERROR_NOT_READY;
+    if (draw_count == 0)
+        return GR_ERROR_INVALID_ARGUMENT;
+    /* An indexed indirect command is 20 bytes: indexCount, instanceCount, firstIndex,
+     * vertexOffset, firstInstance. A stride below that would read into the next command, and a
+     * stride that is not a multiple of 4 is refused by the driver anyway - both are checked here so
+     * the caller gets INVALID_ARGUMENT rather than undefined behaviour. */
+    if (stride < 20u || (stride % 4u) != 0u)
+        return GR_ERROR_INVALID_ARGUMENT;
+    if (offset + (uint64_t)draw_count * stride > buffer->size)
+        return GR_ERROR_INVALID_ARGUMENT;
+    if (!(buffer->usage & GR_BUFFER_USAGE_INDIRECT))
+        return GR_ERROR_INVALID_ARGUMENT;
+    cmd->device->cmd_draw_indexed_indirect(cmd->cb, buffer->buffer, offset, draw_count, stride);
+    return GR_OK;
+}
+
 gr_result gr_vk_abi_cmd_draw(gr_handle cmd_handle, const gr_draw *draw)
 {
     gr_vk_cmdbuf *cmd = (gr_vk_cmdbuf *)gr_object_lookup(gr_objects(), cmd_handle,
@@ -3568,6 +3597,7 @@ gr_result gr_vk_abi_cmd_push_constants(gr_handle c, uint32_t s, uint32_t o, gr_s
 gr_result gr_vk_abi_cmd_draw(gr_handle c, const gr_draw *d) { (void)c; (void)d; return GR_ERROR_UNSUPPORTED; }
 gr_result gr_vk_abi_cmd_dispatch(gr_handle c, uint32_t x, uint32_t y, uint32_t z) { (void)c; (void)x; (void)y; (void)z; return GR_ERROR_UNSUPPORTED; }
 gr_result gr_vk_abi_cmd_draw_indexed(gr_handle c, const gr_draw_indexed *d) { (void)c; (void)d; return GR_ERROR_UNSUPPORTED; }
+gr_result gr_vk_abi_cmd_draw_indexed_indirect(gr_handle c, gr_handle b, uint64_t o, uint32_t n, uint32_t s) { (void)c; (void)b; (void)o; (void)n; (void)s; return GR_ERROR_UNSUPPORTED; }
 gr_result gr_vk_abi_cmd_bind_vertex_buffer(gr_handle c, uint32_t s, gr_handle b, uint64_t o) { (void)c; (void)s; (void)b; (void)o; return GR_ERROR_UNSUPPORTED; }
 gr_result gr_vk_abi_cmd_bind_index_buffer(gr_handle c, gr_handle b, uint64_t o, uint32_t t) { (void)c; (void)b; (void)o; (void)t; return GR_ERROR_UNSUPPORTED; }
 gr_result gr_vk_abi_submit(const gr_submit *s, uint64_t *v) { (void)s; (void)v; return GR_ERROR_UNSUPPORTED; }
