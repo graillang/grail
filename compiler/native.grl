@@ -35,6 +35,8 @@ struct Decl {
     is_enum: u64,
     // 1 for `handle Name;`: a one-word opaque foreign handle, not a layout.
     opaque: u64,
+    // 1 for `extern record`: fields use C layout (natural alignment, padding).
+    c_layout: u64,
     first: u64,
     count: u64,
     regions: u64,
@@ -3409,6 +3411,7 @@ fn make_union<a>(c: (&a mut C), args: u64[], success: u64, module: u8[], prefix:
                     name: name,
                     is_enum: 1,
                     opaque: 0,
+                    c_layout: 0,
                     first: first,
                     count: args.len(),
                     regions: 0,
@@ -3950,6 +3953,7 @@ fn handle_declaration<a>(c: (&a mut C), pass: u64) -> unit {
                 name: name,
                 is_enum: 0,
                 opaque: 1,
+                c_layout: 0,
                 first: 0,
                 count: 0,
                 regions: 0,
@@ -3983,6 +3987,7 @@ fn decl<a>(c: (&a mut C), pass: u64) -> unit {
                         name: name,
                         is_enum: is_enum,
                         opaque: 0,
+                        c_layout: 0,
                         first: 0,
                         count: 0,
                         regions: regions,
@@ -4042,6 +4047,7 @@ fn decl<a>(c: (&a mut C), pass: u64) -> unit {
             name: name,
             is_enum: is_enum,
             opaque: 0,
+            c_layout: 0,
             first: first,
             count: count,
             regions: c.rnames.len(),
@@ -4133,6 +4139,13 @@ fn ffi_param<a, b>(c: (&a mut C), ty: u64, what: &b [u8]) -> unit {
     if (k == 23) + (k == 24) + (k == 5) {
         return ();
     }
+    if k == 8 {
+        // A record parameter is the C pointer to the struct's fields; Grail keeps
+        // ownership of the allocation, so C must not free it.
+        if c.decls[ty_arg(&mut c, ty)].c_layout {
+            return ();
+        }
+    }
     fail(&mut c, what);
     return ();
 }
@@ -4150,6 +4163,196 @@ fn ffi_result<a, b>(c: (&a mut C), ty: u64, what: &b [u8]) -> unit {
         return ();
     }
     fail(&mut c, what);
+    return ();
+}
+// ---- C-layout records ----
+// `extern record R { a: i64, b: i32 }` uses the C rules: natural alignment,
+// padding between fields, tail padding to the record alignment, offsets equal to
+// C's offsetof. Field access reads and writes exactly the field's width.
+fn ffi_align_up(n: u64, a: u64) -> u64 {
+    if a < 2 {
+        return n;
+    }
+    r := n % a;
+    if r == 0 {
+        return n;
+    }
+    return n + a - r;
+}
+fn ffi_layout_fail<a>(c: (&a mut C)) -> unit {
+    // Nested extern records are deliberately absent: a Grail record value is a heap
+    // pointer, so embedding one would store the pointer where C expects the bytes.
+    fail(&mut c, view("extern record fields must be 8/16/32/64-bit integers, handles or CStr"));
+    return ();
+}
+fn ffi_field_align<a>(c: (&a mut C), ty: u64) -> u64 {
+    if ty == 0 {
+        return 8;
+    }
+    k := ty_kind(&mut c, ty);
+    if (k == 23) + (k == 24) {
+        return 8;
+    }
+    if k == 18 {
+        bits := ty_arg(&mut c, ty);
+        if (bits == 8) + (bits == 16) + (bits == 32) + (bits == 64) {
+            return bits / 8;
+        }
+    }
+    ffi_layout_fail(&mut c);
+    return 0;
+}
+fn ffi_field_size<a>(c: (&a mut C), ty: u64) -> u64 {
+    if ty == 0 {
+        return 8;
+    }
+    k := ty_kind(&mut c, ty);
+    if (k == 23) + (k == 24) {
+        return 8;
+    }
+    if k == 18 {
+        bits := ty_arg(&mut c, ty);
+        if (bits == 8) + (bits == 16) + (bits == 32) + (bits == 64) {
+            return bits / 8;
+        }
+    }
+    ffi_layout_fail(&mut c);
+    return 0;
+}
+fn ffi_record_align<a>(c: (&a mut C), d: u64) -> u64 {
+    count := c.decls[d].count;
+    mut a = 1;
+    mut i = 0;
+    while i < count {
+        ty := field_ty(&mut c, d, i);
+        x := ffi_field_align(&mut c, ty);
+        if a < x {
+            a = x;
+        }
+        i = i + 1;
+    }
+    return a;
+}
+fn ffi_record_size<a>(c: (&a mut C), d: u64) -> u64 {
+    count := c.decls[d].count;
+    mut off = 0;
+    mut i = 0;
+    while i < count {
+        ty := field_ty(&mut c, d, i);
+        al := ffi_field_align(&mut c, ty);
+        off = ffi_align_up(off, al) + ffi_field_size(&mut c, ty);
+        i = i + 1;
+    }
+    return ffi_align_up(off, ffi_record_align(&mut c, d));
+}
+// Allocation granule: the record size rounded up to whole eight-byte words.
+fn ffi_record_words<a>(c: (&a mut C), d: u64) -> u64 {
+    return ffi_align_up(ffi_record_size(&mut c, d), 8) / 8;
+}
+fn ffi_offset<a>(c: (&a mut C), d: u64, k: u64) -> u64 {
+    mut off = 0;
+    mut i = 0;
+    while i < k {
+        ty := field_ty(&mut c, d, i);
+        al := ffi_field_align(&mut c, ty);
+        off = ffi_align_up(off, al) + ffi_field_size(&mut c, ty);
+        i = i + 1;
+    }
+    ty := field_ty(&mut c, d, k);
+    return ffi_align_up(off, ffi_field_align(&mut c, ty));
+}
+fn ffi_field<a>(c: (&a mut C), ty: u64) -> unit {
+    ffi_field_size(&mut c, ty);
+    return ();
+}
+fn ffi_record<a>(c: (&a mut C), pass: u64) -> unit {
+    expect(&mut c, view("record"));
+    name := ident(&mut c);
+    exchange(&mut c.parsing_input, 0);
+    exchange(&mut c.output_region, 0);
+    if pass != 2 {
+        if pass == 1 {
+            m := module_copy(&mut c);
+            c
+                .decls
+                .push(
+                    Decl {
+                        module: m,
+                        name: name,
+                        is_enum: 0,
+                        opaque: 0,
+                        c_layout: 1,
+                        first: 0,
+                        count: 0,
+                        regions: 0,
+                        types: 0,
+                        success: 0,
+                        bounds: u64[],
+                        constraints: u64[][],
+                    }
+                );
+        }
+        while is(&mut c, view("}")) == 0 {
+            if kind(&mut c) == 0 {
+                fail(&mut c, view("unterminated extern record"));
+            }
+            advance(&mut c);
+        }
+        advance(&mut c);
+        eat(&mut c, view(";"));
+        return ();
+    }
+    m := module_copy(&mut c);
+    d := find_decl(&mut c, view(m), view(name));
+    if d == 0 {
+        fail(&mut c, view("unknown extern record"));
+    }
+    mut pending = Field[];
+    mut count = 0;
+    expect(&mut c, view("{"));
+    if eat(&mut c, view("}")) == 0 {
+        while 1 {
+            f := ident(&mut c);
+            expect(&mut c, view(":"));
+            ty := parse_type(&mut c);
+            ffi_field(&mut c, ty);
+            pending.push(Field { name: f, ty: ty });
+            count = count + 1;
+            if eat(&mut c, view("}")) {
+                break;
+            }
+            expect(&mut c, view(","));
+            if eat(&mut c, view("}")) {
+                break;
+            }
+        }
+    }
+    eat(&mut c, view(";"));
+    mut reverse = Field[];
+    while pending.len() {
+        reverse.push(pending.pop());
+    }
+    first := c.fields.len();
+    while reverse.len() {
+        c.fields.push(reverse.pop());
+    }
+    exchange(
+        &mut c.decls[d - 1],
+        Decl {
+            module: m,
+            name: name,
+            is_enum: 0,
+            opaque: 0,
+            c_layout: 1,
+            first: first,
+            count: count,
+            regions: 0,
+            types: 0,
+            success: 0,
+            bounds: u64[],
+            constraints: u64[][],
+        }
+    );
     return ();
 }
 fn ffi_string<a, b>(c: (&a mut C), what: &b [u8]) -> u8[] {
@@ -4188,6 +4391,13 @@ fn extern_declaration<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
                 break;
             }
         }
+    }
+    if is(&mut c, view("record")) {
+        if 0 < input.len() + symbol.len() {
+            fail(&mut c, view("extern record takes no lib or as clause"));
+        }
+        ffi_record(&mut c, pass);
+        return ();
     }
     expect(&mut c, view("fn"));
     name := ident(&mut c);
@@ -5201,6 +5411,59 @@ fn rec_store<a>(c: (&a mut C), base: u64, k: u64, value: u64) -> unit {
     o(&mut c, view("(%rcx)\n"));
     return ();
 }
+// C-layout field access: exact byte offset, exact field width. Fields narrower than
+// eight bytes use portable byte-wise helpers so every target stays correct without
+// new instruction selection.
+fn cfield_load<a>(c: (&a mut C), base: u64, d: u64, k: u64, address: u64) -> u64 {
+    ty := field_ty(&mut c, d, k);
+    off := ffi_offset(&mut c, d, k);
+    size := ffi_field_size(&mut c, ty);
+    get(&mut c, base, view("%rax"));
+    if address {
+        o(&mut c, view("leaq "));
+        on(&mut c, off);
+        o(&mut c, view("(%rax),%rax\n"));
+        return save(&mut c);
+    }
+    if size == 8 {
+        o(&mut c, view("movq "));
+        on(&mut c, off);
+        o(&mut c, view("(%rax),%rax\n"));
+        return save(&mut c);
+    }
+    o(&mut c, view("addq $"));
+    on(&mut c, off);
+    o(&mut c, view(",%rax\n"));
+    addr := save(&mut c);
+    mut signed = 0;
+    if ty_kind(&mut c, ty) == 18 {
+        signed = ty_mode(&mut c, ty);
+    }
+    w := imm(&mut c, size);
+    sign := imm(&mut c, signed);
+    return invoke(&mut c, view("rt_load_sized"), three(addr, w, sign));
+}
+fn cfield_store<a>(c: (&a mut C), base: u64, d: u64, k: u64, value: u64) -> unit {
+    ty := field_ty(&mut c, d, k);
+    off := ffi_offset(&mut c, d, k);
+    size := ffi_field_size(&mut c, ty);
+    if size == 8 {
+        get(&mut c, base, view("%rcx"));
+        get(&mut c, value, view("%rax"));
+        o(&mut c, view("movq %rax,"));
+        on(&mut c, off);
+        o(&mut c, view("(%rcx)\n"));
+        return ();
+    }
+    get(&mut c, base, view("%rax"));
+    o(&mut c, view("addq $"));
+    on(&mut c, off);
+    o(&mut c, view(",%rax\n"));
+    addr := save(&mut c);
+    w := imm(&mut c, size);
+    invoke(&mut c, view("rt_store_sized"), three(addr, value, w));
+    return ();
+}
 fn field_path<a>(c: (&a mut C), id: u64, lty: u64, address: u64) -> Val {
     mut t = id;
     mut ty = lty;
@@ -5230,7 +5493,12 @@ fn field_path<a>(c: (&a mut C), id: u64, lty: u64, address: u64) -> Val {
         k := find_field(&mut c, d, view(f));
         fty := field_type(&mut c, base.ty, k);
         last := (kind(&mut c) != 46) & (address != 0);
-        n := rec_load(&mut c, b, k, last);
+        mut n = 0;
+        if c.decls[d].c_layout {
+            n = cfield_load(&mut c, b, d, k, last);
+        } else {
+            n = rec_load(&mut c, b, k, last);
+        }
         if last {
             ty := reference_type(&mut c, fty, address == 2);
             root := place_of(&mut c, b);
@@ -5667,10 +5935,19 @@ fn structural_eq<a>(c: (&a mut C), x: u64, y: u64, ty: u64, depth: u64) -> u64 {
             mut acc = imm(&mut c, 1);
             for i in count {
                 fty := field_type(&mut c, ty, i);
-                a := rec_load(&mut c, x, i, 0);
-                alias_field(&mut c, a, fty, x, i, 1);
-                observe(&mut c, a);
-                b := rec_load(&mut c, y, i, 0);
+                mut a = 0;
+                mut b = 0;
+                if c.decls[d].c_layout {
+                    a = cfield_load(&mut c, x, d, i, 0);
+                    alias_field(&mut c, a, fty, x, i, 1);
+                    observe(&mut c, a);
+                    b = cfield_load(&mut c, y, d, i, 0);
+                } else {
+                    a = rec_load(&mut c, x, i, 0);
+                    alias_field(&mut c, a, fty, x, i, 1);
+                    observe(&mut c, a);
+                    b = rec_load(&mut c, y, i, 0);
+                }
                 alias_field(&mut c, b, fty, y, i, 1);
                 observe(&mut c, b);
                 sub := structural_eq(&mut c, a, b, fty, depth + 1);
@@ -5784,7 +6061,11 @@ fn record<a>(c: (&a mut C), d: u64, explicit: u64) -> Val {
     mut seen = u64[];
     mut sources = u64[];
     mut deferred = u64[];
-    sz := imm(&mut c, count);
+    mut size = count;
+    if c.decls[d].c_layout {
+        size = ffi_record_words(&mut c, d);
+    }
+    sz := imm(&mut c, size);
     n := invoke(&mut c, view("rt_rec"), one(sz));
     if eat(&mut c, view("}")) == 0 {
         while 1 {
@@ -5869,7 +6150,11 @@ fn record<a>(c: (&a mut C), d: u64, explicit: u64) -> Val {
             }
             held := move_value(&mut c, v);
             sources.push(held.t);
-            rec_store(&mut c, n, k, held.t);
+            if c.decls[d].c_layout {
+                cfield_store(&mut c, n, d, k, held.t);
+            } else {
+                rec_store(&mut c, n, k, held.t);
+            }
             if eat(&mut c, view("}")) {
                 break;
             }
@@ -5903,7 +6188,11 @@ fn record<a>(c: (&a mut C), d: u64, explicit: u64) -> Val {
         v := adopt_value(&mut c, val(slot, actual), start, end, expected);
         newslot := v.t;
         require_type(&mut c, v.ty, expected);
-        rec_store(&mut c, n, k, newslot);
+        if c.decls[d].c_layout {
+            cfield_store(&mut c, n, d, k, newslot);
+        } else {
+            rec_store(&mut c, n, k, newslot);
+        }
         exchange(&mut sources[index], newslot);
     }
     own(&mut c, n, ty);
@@ -6304,9 +6593,28 @@ fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
                 }
             }
             argtypes.push(v.ty);
-            held := move_value(&mut c, v);
-            sources.push(held.t);
-            args.push(held.t);
+            // A C-layout record parameter is a pointer to the record's fields for
+            // the duration of the call: Grail keeps ownership, so nothing is moved.
+            foreign := c.funcs[f - 1].ext;
+            mut shared = 0;
+            if foreign {
+                k := ty_kind(&mut c, v.ty);
+                if k == 8 {
+                    d := ty_arg(&mut c, v.ty);
+                    if c.decls[d].c_layout {
+                        shared = 1;
+                    }
+                }
+            }
+            if shared {
+                observe(&mut c, v.t);
+                sources.push(v.t);
+                args.push(v.t);
+            } else {
+                held := move_value(&mut c, v);
+                sources.push(held.t);
+                args.push(held.t);
+            }
             if eat(&mut c, view(")")) {
                 break;
             }
@@ -9644,6 +9952,7 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
                 name: decl_name,
                 is_enum: 0,
                 opaque: 0,
+                c_layout: 0,
                 first: first,
                 count: count,
                 regions: 0,

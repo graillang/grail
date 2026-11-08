@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- v3 C FFI increment 3: `extern "C" record` with C layout and alignment. Fields use C's
+  natural alignment, inter-field padding and tail padding, so `offsetof`/`sizeof` agree
+  with the C compiler; field reads and writes use the exact field width (`i8`/`i16`/`i32`
+  truncate on store and sign- or zero-extend on load, via portable byte-wise runtime
+  helpers shared by all targets). A record parameter crosses as the address of its fields
+  (`R *`); Grail keeps ownership of the allocation and frees it at scope end, while C must
+  not free or retain it. Nested records, record results, pointer/float fields and by-value
+  struct passing are rejected with diagnostics rather than approximated. Adds
+  `tests/ffi/extern_records.grl` (C reads and writes Grail fields; `offsetof`/`sizeof`
+  verified from C) and three rejection fixtures. See `docs/ffi.md`.
+
 - v3 C FFI increment 1: `extern "C"` foreign declarations and calls.
   `extern "C" [lib "INPUT"] [as "SYMBOL"] fn name(i64, u64) -> i64|u64|unit;` declares a
   linker-resolved C symbol; calls emit the C argument/result registers of the selected

@@ -1,3 +1,4 @@
+#include <stddef.h>
 /* Freestanding C shim for the Grail FFI tests.
  *
  * Deliberately links no libc and has no startup code: it proves that a Grail
@@ -41,3 +42,38 @@ long long c_fill(unsigned char *p, unsigned long n, unsigned char v) {
 /* Opaque handle round trip: C owns the meaning, Grail only carries the token. */
 unsigned long long c_open(unsigned long long seed) { return (seed << 4) | 5; }
 unsigned long long c_close(unsigned long long handle) { return handle & 1; }
+
+/* C-layout records: the shim reads the fields Grail writes, and writes fields for
+ * Grail to read, through the same pointer. Any layout disagreement changes the
+ * sums, so this is a real offset/size check rather than a reflection query. */
+struct point {
+    long long x;
+    long long y;
+};
+long long c_point_sum(const struct point *p) { return p->x + p->y; }
+long long c_point_swap(struct point *p) {
+    long long temporary = p->x;
+    p->x = p->y;
+    p->y = temporary;
+    return p->x;
+}
+
+struct mixed {
+    int a;
+    short b;
+    char c;
+    long long d;
+};
+long long c_mixed_size(void) { return (long long)sizeof(struct mixed); }
+long long c_mixed_off_a(void) { return (long long)offsetof(struct mixed, a); }
+long long c_mixed_off_b(void) { return (long long)offsetof(struct mixed, b); }
+long long c_mixed_off_c(void) { return (long long)offsetof(struct mixed, c); }
+long long c_mixed_off_d(void) { return (long long)offsetof(struct mixed, d); }
+long long c_mixed_sum(const struct mixed *m) { return m->a + m->b + m->c + m->d; }
+long long c_mixed_fill(struct mixed *m, long long d) {
+    m->a = 1234;
+    m->b = -2;
+    m->c = 7;
+    m->d = d;
+    return 0;
+}
