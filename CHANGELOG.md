@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- `lib/sha256.grl`: FIPS 180-4 SHA-256 over byte views, incremental (`sha256::new()`,
+  `update`, `finish` -> 32 bytes) with one-shot `digest` and lowercase `hex`/`hex_digest`; the
+  PicoSHA2 replacement for Abundance content identities. Checked against the NIST vectors
+  (including one million `a`), `sha256sum` on generated inputs around the 55/56/63/64/65-byte
+  padding boundaries, and every split of the input between two `update` calls.
+- `lib/json.grl`: strict RFC 8259 JSON for the bounded config adapter (replacing nlohmann/json).
+  `json::parse`/`parse_with` return `json::Value |? json::Error` with an error kind and byte
+  offset, never aborting on malformed input; integers that fit are exact `Int(i64)`, other
+  numbers are correctly rounded `Float(f64)`; `\u` surrogate pairs decode to UTF-8 while lone
+  surrogates, invalid UTF-8 and raw control characters are rejected; objects keep key order and
+  reject duplicate keys unless `allow_duplicate_keys`; nesting is bounded by `max_depth`
+  (default 128). `to_text`/`to_pretty` round-trip exactly (shortest float digits). Tested with
+  311 inline JSONTestSuite-style accept/reject cases and 612 CPython-verified float conversions
+  (`docs/design/language-readiness.md` section C1).
+
 - Callbacks with float and narrow-integer parameters and float results: an exported
   `extern "C" fn` reads each parameter from where the platform C convention put it (SysV,
   AAPCS64 and RV64 pack integers and floats into separate register files; Win64 is positional,

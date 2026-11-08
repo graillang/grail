@@ -1,0 +1,172 @@
+use json;
+use json_cases;
+use collections;
+// json: JSONTestSuite-style accept/reject cases and correctly rounded floats (json_cases, generated
+// by tests/lib/gen_json_cases.py), plus exact output, error offsets, depth, duplicate keys,
+// accessors and float/int round trips.
+fn same<a,b>(input:&a [u8],want:&b [u8])->u64{
+    match json::parse(&input){
+        v: json::Value=>{got:=json::to_text(&v);if got!=want{println("FAIL {} -> {} want {}",input.text(),got,want.text());return 1;}return 0;},
+        e: json::Error=>{println("FAIL {}: {}",input.text(),e.show());return 1;}
+    }
+}
+fn fails_with<a,b>(input:&a [u8],options:json::Options,want:&b [u8])->u64{
+    match json::parse_with(&input,options){
+        v: json::Value=>{println("FAIL accepted {}",json::to_text(&v));return 1;},
+        e: json::Error=>{got:=e.show();if got!=want{println("FAIL error {} want {}",got,want.text());return 1;}return 0;}
+    }
+}
+fn fails<a,b>(input:&a [u8],want:&b [u8])->u64{return fails_with(&input,json::default_options(),&want);}
+fn nested(open:&[u8],close:&[u8],depth:u64)->u8[]{
+    mut out=u8[];for i in depth{for b in open{out.push(b);}}out.push('1');for i in depth{for b in close{out.push(b);}}return out;
+}
+fn big_object(count:u64,duplicate:bool)->u8[]{
+    mut out=u8[];out.push('{');
+    for i in count{if i>0{out.push(',');}t:=format("\"k{}\":{}",i,i);for b in &t{out.push(b);}}
+    if duplicate{t:=",\"k57\":\"dup\"";for b in t{out.push(b);}}
+    out.push('}');return out;
+}
+fn check_order<a>(text:&a [u8])->u64{
+    v:=json::parse(&text)!;members:=v.as_object()!;last:=&members[999];
+    if last.key!="k999"{println("FAIL order {}",last.key);return 1;}
+    if json::to_text(&v)!=text.text(){println("FAIL big object text");return 1;}
+    return 0;
+}
+fn main(){
+    mut f:u64=0;mut checks:u64=0;
+    f+=json_cases::suite_accept();f+=json_cases::suite_reject();f+=json_cases::floats();
+
+    // Exact values and canonical compact text.
+    f+=same("[1,-1,9223372036854775807,-9223372036854775808,9223372036854775808,-9223372036854775809]",
+        "[1,-1,9223372036854775807,-9223372036854775808,9223372036854776000.0,-9223372036854776000.0]");
+    f+=same("[0,-0,0.0,1.0,1e2,1E-2,0.5,100000000000000000000000,1e-7,0.000001,123.456e2,-1.5e-300,2.5E+30]",
+        "[0,-0.0,0.0,1.0,100.0,0.01,0.5,1e23,1e-7,0.000001,12345.6,-1.5e-300,2.5e30]");
+    f+=same("[\"\\u00e9\\ud83d\\ude00\",\"\\u0001\\b\\f\\n\\r\\t\\\"\\\\\\/\\u001F\\u007f\",\"\\u2028\"]",
+        "[\"é😀\",\"\\u0001\\b\\f\\n\\r\\t\\\"\\\\/\\u001f\x7f\",\" \"]");
+    f+=same("{\"z\":1,\"a\":2,\"m\":{\"y\":[],\"b\":{}}}","{\"z\":1,\"a\":2,\"m\":{\"y\":[],\"b\":{}}}");
+    f+=same(" \t\r\n{ \"a\" : [ 1 , 2 ] , \"\" : \"\" }\n","{\"a\":[1,2],\"\":\"\"}");
+    checks+=5;
+    pretty_in:=json::parse("{\"a\":[1,{\"b\":null}],\"c\":{},\"d\":[],\"e\":\"x\"}")!;
+    pretty:=json::to_pretty(&pretty_in);
+    if pretty!="{\n  \"a\": [\n    1,\n    {\n      \"b\": null\n    }\n  ],\n  \"c\": {},\n  \"d\": [],\n  \"e\": \"x\"\n}"{println("FAIL pretty {}",pretty);f+=1;}
+    if pretty_in.show()!="{\"a\":[1,{\"b\":null}],\"c\":{},\"d\":[],\"e\":\"x\"}"{println("FAIL show");f+=1;}
+    checks+=2;
+
+    // Errors carry a kind and the byte offset where parsing stopped.
+    f+=fails("","json: unexpected end of input at byte 0");
+    f+=fails("   ","json: unexpected end of input at byte 3");
+    f+=fails("[1,]","json: unexpected byte at byte 3");
+    f+=fails("[1","json: unexpected end of input at byte 2");
+    f+=fails("[1] x","json: trailing data after value at byte 4");
+    f+=fails("{\"a\" 1}","json: unexpected byte at byte 5");
+    f+=fails("{\"a\":1,}","json: unexpected byte at byte 7");
+    f+=fails("{\"a\":1,\"a\":2}","json: duplicate key at byte 7");
+    f+=fails("[01]","json: invalid number at byte 2");
+    f+=fails("-","json: unexpected end of input at byte 1");
+    f+=fails("-x","json: invalid number at byte 1");
+    f+=fails("1.","json: unexpected end of input at byte 2");
+    f+=fails("1.e5","json: invalid number at byte 2");
+    f+=fails("[1e+]","json: invalid number at byte 4");
+    f+=fails("1e400","json: number out of range at byte 0");
+    f+=fails("[-1e400]","json: number out of range at byte 1");
+    f+=fails("tru","json: unexpected end of input at byte 3");
+    f+=fails("trux","json: unexpected byte at byte 3");
+    f+=fails("[\"\\q\"]","json: invalid escape at byte 2");
+    f+=fails("[\"\\u12\"]","json: invalid escape at byte 2");
+    f+=fails("[\"\\u12","json: unexpected end of input at byte 6");
+    f+=fails("[\"\\ud800\"]","json: lone surrogate escape at byte 2");
+    f+=fails("[\"\\udc00\"]","json: lone surrogate escape at byte 2");
+    f+=fails("[\"\\ud800\\u0041\"]","json: lone surrogate escape at byte 2");
+    f+=fails("[\"\\ud800\\uzzzz\"]","json: invalid escape at byte 8");
+    f+=fails("[\"a\x01\"]","json: control character in string at byte 3");
+    f+=fails(u8[34,97,255,34],"json: invalid UTF-8 at byte 2");
+    f+=fails(u8[34,237,160,128,34],"json: invalid UTF-8 at byte 1");
+    f+=fails(u8[239,187,191,123,125],"json: unexpected byte at byte 0");
+    f+=fails("[\"abc","json: unexpected end of input at byte 5");
+    checks+=30;
+
+    // Nesting depth: arrays and objects both count; the default limit is 128.
+    f+=same(&nested("[","]",128),&nested("[","]",128));
+    f+=fails(&nested("[","]",129),"json: nesting too deep at byte 128");
+    f+=fails(&nested("{\"a\":","}",129),"json: nesting too deep at byte 640");
+    mut hundred_thousand=u8[];for i in 100000{hundred_thousand.push('[');}
+    f+=fails(&hundred_thousand,"json: nesting too deep at byte 128");
+    mut shallow=json::default_options();shallow.max_depth=2;
+    match json::parse_with("[[1],{\"a\":2}]",shallow){v: json::Value=>{},e: json::Error=>{println("FAIL depth 2: {}",e.show());f+=1;}}
+    shallow=json::default_options();shallow.max_depth=2;
+    f+=fails_with("[[[1]]]",shallow,"json: nesting too deep at byte 2");
+    mut flat=json::default_options();flat.max_depth=0;
+    match json::parse_with("\"scalar\"",flat){v: json::Value=>{},e: json::Error=>{println("FAIL depth 0: {}",e.show());f+=1;}}
+    flat=json::default_options();flat.max_depth=0;
+    f+=fails_with("[]",flat,"json: nesting too deep at byte 0");
+    checks+=8;
+
+    // Duplicate keys: rejected by default; allowed, the first position keeps the last value.
+    mut dup=json::default_options();dup.allow_duplicate_keys=true;
+    match json::parse_with("{\"a\":1,\"b\":2,\"a\":3}",dup){
+        v: json::Value=>{t:=json::to_text(&v);if t!="{\"a\":3,\"b\":2}"{println("FAIL dup {}",t);f+=1;}},
+        e: json::Error=>{println("FAIL dup {}",e.show());f+=1;}
+    }
+    large:=big_object(100,true);
+    f+=fails(&large,"json: duplicate key at byte 881");
+    dup=json::default_options();dup.allow_duplicate_keys=true;
+    match json::parse_with(&large,dup){
+        v: json::Value=>{
+            if v.len()!=100{println("FAIL dup large len {}",v.len());f+=1;}
+            if v.get("k57")!.as_str()!!="dup"{println("FAIL dup large value");f+=1;}
+            if v.get("k58")!.as_i64()!!=58i64{println("FAIL dup large neighbour");f+=1;}
+        },
+        e: json::Error=>{println("FAIL dup large {}",e.show());f+=1;}
+    }
+    thousand:=big_object(1000,false);
+    f+=check_order(&thousand);
+    checks+=4;
+
+    // Accessors.
+    doc:=json::parse("{\"name\":\"grail\",\"n\":-7,\"x\":2.5,\"ok\":true,\"none\":null,\"list\":[10,\"b\"]}")!;
+    if doc.get("name")!.as_str()!!="grail"{println("FAIL as_str");f+=1;}
+    if doc.get("n")!.as_i64()!!=-7i64{println("FAIL as_i64");f+=1;}
+    if doc.get("n")!.as_f64()!!=-7.0{println("FAIL int as_f64");f+=1;}
+    if doc.get("x")!.as_f64()!!=2.5{println("FAIL as_f64");f+=1;}
+    if doc.get("x")!.as_i64().is_some(){println("FAIL float as_i64");f+=1;}
+    if !doc.get("ok")!.as_bool()!{println("FAIL as_bool");f+=1;}
+    if !doc.get("none")!.is_null(){println("FAIL is_null");f+=1;}
+    if doc.get("missing").is_some(){println("FAIL missing key");f+=1;}
+    list:=doc.get("list")!;
+    if (list.len()!=2)|(list.at(0)!.as_i64()!!=10i64)|list.at(2).is_some(){println("FAIL array access");f+=1;}
+    if doc.at(0).is_some()|list.get("a").is_some(){println("FAIL kind mismatch");f+=1;}
+    checks+=10;
+
+    // Built values serialize; non-finite floats become null (parse never produces them).
+    mut members=collections::new<json::Member>();
+    members.push(json::Member{key:"quote\"key",value:json::Value::Float(1.0/0.0)});
+    members.push(json::Member{key:"nan",value:json::Value::Float(0.0/0.0)});
+    mut items=collections::new<json::Value>();items.push(json::Value::Int(-9223372036854775807i64-1));items.push(json::Value::Str("tab\there"));
+    members.push(json::Member{key:"items",value:json::Value::Array(items)});
+    built:=json::Value::Object(members);
+    if json::to_text(&built)!="{\"quote\\\"key\":null,\"nan\":null,\"items\":[-9223372036854775808,\"tab\\there\"]}"{println("FAIL built {}",json::to_text(&built));f+=1;}
+    checks+=1;
+
+    // Every finite f64 bit pattern tried round-trips exactly through text, as does every i64.
+    mut x:u64=88172645463325252;mut trips:u64=0;
+    for i in 2000{
+        x=wrapping_add(wrapping_mul(x,6364136223846793005),1442695040888963407);
+        mut pattern=x;if i%4==1{pattern=x>>12;}if i%4==2{pattern=x|9218868437227405312;pattern=pattern^4503599627370496;}
+        value:=f64_from_bits(pattern);
+        if !value.is_nan()&(value-value==0.0){
+            v:=json::Value::Float(value);t:=json::to_text(&v);
+            match json::parse(&t){
+                back: json::Value=>{if !json::equal(&v,&back){println("FAIL float trip {} -> {}",pattern,t);f+=1;}},
+                e: json::Error=>{println("FAIL float trip {}: {}",t,e.show());f+=1;}
+            }
+            trips+=1;
+        }
+        n:=json::Value::Int(i64(x>>1)-i64(x>>2)*2);t:=json::to_text(&n);
+        match json::parse(&t){
+            back: json::Value=>{if !json::equal(&n,&back){println("FAIL int trip {}",t);f+=1;}},
+            e: json::Error=>{println("FAIL int trip {}: {}",t,e.show());f+=1;}
+        }
+    }
+    if f==0{println("json ok: {} accepted, {} rejected, {} floats, {} checks, {} float round trips",
+        json_cases::ACCEPTED,json_cases::REJECTED,json_cases::FLOATS,checks,trips);}
+}
