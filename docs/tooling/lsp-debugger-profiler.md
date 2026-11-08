@@ -1,13 +1,63 @@
 # LSP, debugger and profiler integration plan
 
-Status: **design only**. Nothing in this document is implemented yet. The build,
-test and distribution foundation in [cross-platform-ci.md](cross-platform-ci.md)
-defines the artifact and lane contract these tools will ship through.
+Status: **LSP MVP implemented** (JSON-RPC lifecycle, didOpen/didChange and
+compiler-sourced diagnostics). The debugger and profiler remain design only.
+The build, test and distribution foundation in
+[cross-platform-ci.md](cross-platform-ci.md) defines the artifact and lane
+contract these tools ship through.
+
+## Implemented LSP MVP
+
+`tools/lsp.mjs` is a stdio language server:
+
+```sh
+GRAIL_LSP_COMPILER=/path/to/grail GRAIL_HOME=/path/to/grail-tree bun tools/lsp.mjs
+```
+
+Implemented:
+
+- JSON-RPC 2.0 with `Content-Length` framing, `initialize`/`initialized`,
+  `shutdown`/`exit`, and JSON-RPC errors for unknown requests.
+- `textDocument/didOpen`, `didChange` (full-document sync) and `didClose`.
+- `textDocument/publishDiagnostics` sourced from the compiler's existing
+  `grail check FILE` interface. No client-side or heuristic diagnostics exist:
+  if the compiler is missing or cannot run, the server sends
+  `window/showMessage` and publishes nothing.
+- Versioned diagnostics, a short debounce, and a generation guard so a stale
+  check cannot overwrite a newer document.
+- Compiler byte columns are converted to LSP UTF-16 positions using the
+  document line, not copied as character offsets.
+
+Diagnostics path: the overlay text is written to a temporary `.grl` file, the
+server runs `grail check <file>` in that directory, parses
+`file:line:column: message` from the compiler output, maps the range back to
+the open document and publishes it. A successful check publishes `[]`. If the
+compiler fails without a structured line, its output is surfaced once with
+code `compiler-output`; it is never replaced by a fabricated message.
+
+Limitations of the MVP:
+
+- Each check covers one file plus the runtime and standard library. Project
+  modules and `grail.pkg` dependencies are not included; workspace-wide
+  diagnostics are future work.
+- The compiler reports the first error and exits, so one diagnostic per run.
+- Only push diagnostics are implemented; hover, definition, references,
+  formatting, completion, rename and pull diagnostics are not.
+- `GRAIL_LSP_COMPILER`/`GRAIL_COMPILER`, an installed `grail`, or a host
+  `dist/grail-*-compiler` must be available. The server does not build one.
+
+Tests: `bun test tools/lsp.test.mjs` drives a real stdio session, checks
+initialize/shutdown, an unknown request, one valid document (`[]`), one invalid
+document (the compiler's `unknown function` diagnostic at the expected range),
+a `didChange` to the invalid text and a repair back to `[]`. CI runs the
+protocol tests in the tooling job and the full compiler-backed session in a
+preflight-gated `lsp` job.
 
 ## What exists today
 
 - `grail check`, `grail build`, `grail run`, `grail fmt` and `grail test` in
-  `compiler/cli.grl`; diagnostics already use `file:line:column: message`.
+  `compiler/cli.grl`; diagnostics already use `file:line:column: message` on
+  stdout with a non-zero exit.
 - A token-level formatter (`compiler/fmt.grl`) that is idempotent and
   byte-preserving for compilation.
 - Direct assembly emission (`native.grl` -> `machine.grl`) with no source map,
@@ -15,13 +65,13 @@ defines the artifact and lane contract these tools will ship through.
 - Distribution packages from `tools/ci.mjs` with `bin/grail`,
   `lib/grail/{runtime.grl,std/}` and `share/doc/grail/`.
 
-The common prerequisite is a machine-readable compiler service: diagnostics,
-symbols and source spans must be obtainable without scraping stderr.
+A richer machine-readable compiler service is the prerequisite for hover,
+symbols, debugger variables and profiling annotations. The LSP MVP deliberately
+uses the existing text interface rather than blocking on that work.
 
-## Phase 0: compiler service surface (shared prerequisite)
+## Phase 0: compiler service surface (partially implemented for LSP)
 
-Add to `compiler/cli.grl` (no change to `compiler/native.grl` language
-semantics):
+`grail check` already provides the diagnostics the LSP needs. Future work adds:
 
 ```sh
 grail check --json FILE...        # diagnostics as JSON lines/array
@@ -29,59 +79,51 @@ grail symbols --json FILE...      # module, type, function, field, span
 grail fmt --check --json FILE...  # formatter edits as text edits
 ```
 
-Each JSON record carries `file`, `range {start,end}` with 1-based
+Each JSON record would carry `file`, `range {start,end}` with 1-based
 line/column, `severity`, `code`, `message`, plus a content hash so clients can
 discard stale results. `--json` writes only JSON to stdout; diagnostics keep
 their current text form when the flag is absent.
 
 Exit codes stay compatible: `0` clean, non-zero when diagnostics exist. The CI
-driver's `preflight`/`lint` contract is unchanged.
+driver's `preflight`/`lint` contract is unchanged. Until `--json` exists,
+`tools/lsp.mjs` parses the documented `file:line:column:` text format.
 
 ## Phase 1: language server
 
-Ship `grail lsp --stdio` as a thin supervisor, with the protocol implementation
-in `tools/lsp.mjs` (Bun, already a build dependency) and the compiler invoked as
-`grail check --json` / `grail symbols --json`. A later phase can move the
-protocol server into Grail once the compiler exposes an in-process API.
+The MVP is `tools/lsp.mjs`. A later phase can move the protocol server into
+Grail and add the remaining capabilities. A `grail lsp --stdio` subcommand is
+future work; today the server is invoked directly.
 
-Transport and lifecycle:
+Transport and lifecycle (implemented):
 
 - JSON-RPC 2.0 over stdio with `Content-Length` framing.
-- `initialize`/`initialized`/`shutdown`/`exit`; advertise only implemented
-  capabilities.
-- Workspace roots and `grail.pkg` discovery; standard library modules resolved
-  through `GRAIL_HOME`/`PREFIX/lib/grail` as `grail check` already does.
+- `initialize`/`initialized`/`shutdown`/`exit`; only implemented capabilities
+  are advertised (`textDocumentSync` openClose + full change, UTF-16 positions).
+- Standard library modules resolve through `GRAIL_HOME`/`PREFIX/lib/grail` as
+  `grail check` already does.
 
 Capabilities by milestone:
 
 | Milestone | Capabilities | Data source |
 | --- | --- | --- |
-| L1 | `textDocument/publishDiagnostics`, `didOpen/didChange/didSave/didClose` | `check --json`, debounced |
+| L1 (**done**) | `publishDiagnostics`, `didOpen/didChange/didClose` | `grail check` text diagnostics |
 | L2 | `hover`, `definition`, `references`, `documentSymbol` | `symbols --json` |
 | L3 | `textDocument/formatting`, `rangeFormatting`, `codeAction` | `fmt --check --json` |
 | L4 | `completion`, `rename`, `signatureHelp`, semantic tokens | compiler service API |
 
-Implementation rules:
+Remaining implementation rules:
 
-- Keep an in-memory overlay (`uri -> text`) and materialise a temporary
-  workspace snapshot per request; never write into the user's tree.
-- Debounce `didChange` (150–250 ms), cancel superseded requests, and key caches
-  by `(content hash, compiler source hash)`.
-- Run one compiler process per snapshot; reuse it only after a stable hash.
-- Never block `initialize` on a full workspace check; report diagnostics
-  incrementally per open document and then a background workspace pass.
-
-Testing and distribution:
-
-- Golden JSON fixtures for diagnostics/symbols and transcript tests for the
-  protocol framing and cancellation.
+- Materialise a temporary workspace snapshot per request; never write into the
+  user's tree. The MVP does this for one file.
+- Debounce `didChange` (the MVP defaults to 50 ms, configurable with
+  `GRAIL_LSP_DEBOUNCE_MS`), cancel superseded requests, and key caches by
+  `(content hash, compiler source hash)`.
+- Add project/workspace checking and background diagnostics; the MVP checks
+  only the open file.
 - Package `tools/lsp.mjs` under `lib/grail/lsp/` and add `grail lsp` to the
   binary; `share/grail/package.json` records its digest.
-- CI: Linux x86-64 runs the transcript suite; the matrix's AArch64 and RISC-V64
-  lanes run the same fixtures once QEMU is available.
-
-Blockers: `check --json`/`symbols --json` do not exist; the checker does not
-retain a queryable symbol table across runs.
+- CI: the tooling job runs the protocol tests; the preflight-gated `lsp` job
+  builds the compiler and runs the compiler-backed stdio session.
 
 ## Phase 2: debugger (DAP)
 
@@ -157,8 +199,8 @@ harness. Windows/macOS samplers are untestable until those backends exist.
 
 ## Delivery order and CI impact
 
-1. Phase 0 JSON surfaces (compiler-only, no native.grl semantics changes).
-2. LSP L1/L2, packaged and tested on Linux x86-64/AArch64.
+1. Phase 0 JSON diagnostics/symbols (text diagnostics already back L1).
+2. LSP L2: hover, definition, references and document symbols.
 3. Sampling profiler (symbols + frame pointers).
 4. Debugger line tables and D1.
 5. LSP L3/L4, DWARF variable info, instrumentation profiler.

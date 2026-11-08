@@ -18,7 +18,7 @@ fn main() {
 - **Semantics:** [compiler/NATIVE.md](compiler/NATIVE.md).
 - **Tests:** `bun tools/test-native.mjs` and `bun tools/book.mjs check`.
 - **Cross-platform CI / release tooling:** [docs/tooling/cross-platform-ci.md](docs/tooling/cross-platform-ci.md).
-- **LSP / debugger / profiler plan:** [docs/tooling/lsp-debugger-profiler.md](docs/tooling/lsp-debugger-profiler.md).
+- **LSP:** `GRAIL_LSP_COMPILER=<grail> bun tools/lsp.mjs` (MVP: diagnostics over stdio); debugger/profiler plan in [docs/tooling/lsp-debugger-profiler.md](docs/tooling/lsp-debugger-profiler.md).
 - **Proposed numeric types:** [docs/design/numeric-types.md](docs/design/numeric-types.md) (partly implemented: sized integers, `f64`, `f32`, `char`).
 
 Build the compiler with `bun tools/native.mjs build` (Bun, Clang assembler and LLD required).

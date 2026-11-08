@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Added an LSP MVP (`tools/lsp.mjs`): JSON-RPC over stdio with
+  initialize/shutdown, didOpen/didChange/didClose and
+  `textDocument/publishDiagnostics`. Diagnostics come from the compiler's
+  existing `grail check FILE` output (`file:line:column: message`), mapped to
+  UTF-16 LSP ranges with version and generation guards; the server never
+  fabricates a language diagnostic and reports a missing compiler with
+  `window/showMessage`. A real stdio test covers initialize/shutdown, an
+  unknown request, a valid document, an invalid document and a didChange
+  repair. CI runs the protocol tests in `tooling` and the compiler-backed
+  session in a preflight-gated `lsp` job. Workspace checks, hover, definition,
+  formatting, completion and pull diagnostics remain future work.
 - Cross-platform tooling now treats `windows-x86_64` as a real **build-only**
   lane: `tools/ci.mjs build/test/package` cross-compiles the compiler to a
   PE32+ console image, verifies COFF objects, imports and image headers, and

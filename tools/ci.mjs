@@ -441,6 +441,8 @@ function lint() {
   check('windows-x86_64 has a required cross lane', LANES.some(lane => lane.required && lane.target === 'windows-x86_64'));
   check('windows-x86_64 lane is static-only', LANES.filter(lane => lane.target === 'windows-x86_64').every(lane => lane.execution === 'static'));
   check('LSP/debugger/profiler plan exists', existsSync(join(root, 'docs/tooling/lsp-debugger-profiler.md')));
+  check('LSP server exists', existsSync(join(root, 'tools/lsp.mjs')));
+  check('LSP stdio test exists', existsSync(join(root, 'tools/lsp.test.mjs')));
   check('VERSION file matches compiler --version', readFileSync(join(root, 'compiler/cli.grl'), 'utf8').includes(`grail ${version ?? '0.0.0'}`), version ?? '');
   const failed = checks.filter(entry => !entry.ok);
   return { ok: failed.length === 0, checks, failed };
