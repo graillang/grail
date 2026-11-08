@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- D3D12 bindless and compute: the contract's root signature now carries the four unbounded
+  tables (sampled images, storage images, samplers, storage buffers) over one shader-visible
+  resource heap and one sampler heap; the thirteen fixed samplers fill slots 0..12. Added
+  `gr_sampler_create`, sampled texture views, `gr_texture_write`, storage buffers (host-visible
+  ones in a custom write-back heap the GPU can write), compute pipelines and dispatch, buffer
+  barriers with tracked states, `gr_device_retire`/`gr_device_collect` and real bindless
+  high-water marks. `grail_bindless.hlsli` declared both UAV tables in space 0, where an
+  unbounded `u1` range overlaps `u3`; on D3D12 storage writes landed in the storage-image table.
+  The tables now use `u0 space2` and `u0 space3`, with `[[vk::binding]]` keeping Vulkan's set 0,
+  bindings 1 and 3 unchanged. Flip-model DXGI swapchains on an SDL3 window (acquire, present,
+  resize) and Windows SDL3 loading through `LoadLibrary`, with the window's HWND/HINSTANCE from
+  SDL properties, are added.
+
 - Vulkan's thirteen fixed samplers did not match Abundance's definitions: the `*_WRAP` slots
   clamped, the `*_CLAMP_U_WRAP_V` slots never wrapped V, W was always clamped, and the MIN/MAX
   reduction slots filtered as ordinary samplers; `gr_sampler_create` also ignored MIN/MAX

@@ -93,9 +93,14 @@ and index buffers with input layouts matched to the shader's reflected semantics
 depth attachments and depth state, and plain and indexed draws: 162 checks, including exact
 clear readbacks, a 64x64 draw of the offline `core/fullscreen` + `core/solid` DXIL that matches
 the shader on every pixel, and an indexed `core/triangle` drawn near then far where the depth
-test keeps the near colour and the depth buffer reads back exactly 0.75. MSAA, storage and
-indirect buffers, compute and mesh pipelines, bindless descriptor tables, swapchains,
-semaphores and compute/copy queues return `GR_ERROR_UNSUPPORTED`. No real Windows host has run it.
+test keeps the near colour and the depth buffer reads back exactly 0.75. The bindless tables
+are one shader-visible resource heap (sampled images, storage buffers) and one sampler heap
+holding the thirteen fixed samplers; `core/frame_setup` runs as a compute pipeline and writes
+all 256 storage-buffer words exactly, and `core/tonemap` samples an uploaded HDR texture within
+1/255 of ACES: 221 checks. Flip-model swapchains on an SDL3 window's HWND (acquire, present,
+resize) are implemented with a separate `test_d3d12_present` on a private display. MSAA,
+storage images, indirect draws and dispatches, mesh pipelines, semaphores and compute/copy
+queues return `GR_ERROR_UNSUPPORTED`. No real Windows host has run it.
 
 Not implemented: Metal (returns `GR_ERROR_UNSUPPORTED`), mesh and ray-tracing pipelines, and a
 complete renderer. The null backend validates contracts only.
