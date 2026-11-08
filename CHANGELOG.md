@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Cross-platform build/test/distribution foundation: a seven-platform CI matrix
+  (Linux x86-64/AArch64/RISC-V64, Windows x86-64/AArch64, macOS AArch64/x86-64),
+  host/SDK/QEMU detection, deterministic `tar.gz`/`zip` packaging with
+  `SHA256SUMS` and provenance, POSIX/PowerShell installers, and secret-safe
+  signing/notarization hooks. Linux lanes build and test; Windows/macOS lanes are
+  explicit distribution scaffolding because the compiler still emits Linux ELF
+  only. Tooling is documented in `docs/tooling/cross-platform-ci.md`.
+
 - Native fixtures, inline regression programs and book examples now use typed references and
   explicit byte views under `--default-u64 --typed-refs`; user-mode cases retain `i64` defaults.
   Ownership/lifetime rejection fixtures use the modern dialect so they still test their intended

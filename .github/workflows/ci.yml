@@ -1,0 +1,223 @@
+name: ci
+
+on:
+  push:
+    branches: [main, 'feature/**']
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  tooling:
+    name: tooling checks
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Unit tests for the cross-platform matrix, packaging and signing
+        run: bun test tools/platforms.test.mjs tools/archive.test.mjs tools/sign.test.mjs
+      - name: Static checks (matrix, docs, workflow, scripts)
+        run: bun tools/ci.mjs lint
+      - name: Matrix and lane report
+        run: |
+          bun tools/ci.mjs matrix
+          bun tools/ci.mjs plan > ci-plan.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ci-plan
+          path: ci-plan.json
+          if-no-files-found: error
+
+  preflight:
+    name: stage0 and bootstrap preflight
+    runs-on: ubuntu-24.04
+    outputs:
+      ready: ${{ steps.status.outputs.ready }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Inspect host, stage0 and published bootstrap
+        id: status
+        shell: bash
+        run: |
+          bun tools/ci.mjs preflight --json | tee preflight.json
+          echo "ready=$(bun -e "console.log(String(require('./preflight.json').ready))")" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: preflight
+          path: preflight.json
+          if-no-files-found: error
+
+  # Native Linux lanes. These run only when the checked-in bootstrap matches
+  # the compiler sources (or CI provides GRAIL_COMPILER); otherwise preflight
+  # reports the blocker and keeps the workflow green.
+  linux-native:
+    name: linux native ${{ matrix.platform }}
+    needs: preflight
+    if: needs.preflight.outputs.ready == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x86_64
+            runner: ubuntu-24.04
+          - platform: linux-aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Install clang and LLD
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld
+      - name: Build, test and package
+        run: |
+          bun tools/ci.mjs build --platform ${{ matrix.platform }}
+          bun tools/ci.mjs test --platform ${{ matrix.platform }}
+          bun tools/ci.mjs package --platform ${{ matrix.platform }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.platform }}
+          path: dist/
+          if-no-files-found: error
+
+  # Cross-build lane: one x86-64 host builds and packages AArch64 and RISC-V64,
+  # executes both under qemu-user, and verifies the artifact architecture.
+  linux-cross:
+    name: linux cross ${{ matrix.platform }}
+    needs: preflight
+    if: needs.preflight.outputs.ready == 'true'
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-aarch64
+            qemu: qemu-aarch64-static
+          - platform: linux-riscv64
+            qemu: qemu-riscv64-static
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Install clang, LLD and qemu-user
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld qemu-user-static
+          ${{ matrix.qemu }} --version
+      - name: Build the host compiler once
+        run: bun tools/ci.mjs build --platform linux-x86_64
+      - name: Build, cross-test and package
+        run: |
+          bun tools/ci.mjs build --platform ${{ matrix.platform }}
+          bun tools/ci.mjs test --platform ${{ matrix.platform }}
+          bun tools/ci.mjs package --platform ${{ matrix.platform }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.platform }}
+          path: dist/
+          if-no-files-found: error
+
+  # Planned lanes run detection and scaffolding only. `--allow-blocked` turns
+  # the expected "compiler backend not implemented" result into a green job, so
+  # the matrix stays covered without pretending a Windows/macOS binary exists.
+  windows:
+    name: windows ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-x86_64
+            runner: windows-2022
+          - platform: windows-aarch64
+            runner: windows-11-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Detect toolchain and report the backend blocker
+        shell: bash
+        run: |
+          bun tools/ci.mjs detect --platform ${{ matrix.platform }}
+          bun tools/ci.mjs build --platform ${{ matrix.platform }} --allow-blocked
+      - name: Package/sign scaffolding stays printable
+        shell: bash
+        run: bun tools/ci.mjs plan
+
+  macos:
+    name: macos ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-aarch64
+            runner: macos-14
+          - platform: macos-x86_64
+            runner: macos-13
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Detect SDK/toolchain and report the backend blocker
+        run: |
+          bun tools/ci.mjs detect --platform ${{ matrix.platform }}
+          bun tools/ci.mjs build --platform ${{ matrix.platform }} --allow-blocked
+      - name: Signing/notarization dry-run plan
+        run: bun tools/ci.mjs sign --platform ${{ matrix.platform }} --artifact grail-placeholder.tar.gz --tree unpacked
+
+  release-sign:
+    name: release signature hook (${{ matrix.platform }})
+    needs: [linux-native, linux-cross]
+    if: startsWith(github.ref, 'refs/tags/v') && vars.RELEASE_SIGNING == 'true'
+    runs-on: ubuntu-24.04
+    environment: release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x86_64
+          - platform: linux-aarch64
+          - platform: linux-riscv64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dist-linux-*
+          path: dist
+          merge-multiple: true
+      - name: Import the release key
+        env:
+          GRAIL_GPG_PRIVATE_KEY: ${{ secrets.GRAIL_GPG_PRIVATE_KEY }}
+        run: printf '%s' "$GRAIL_GPG_PRIVATE_KEY" | gpg --batch --import
+      - name: Sign the archive for this lane
+        env:
+          GRAIL_GPG_KEY: ${{ secrets.GRAIL_GPG_KEY }}
+        run: |
+          artifact=$(ls dist/grail-*-${{ matrix.platform }}.tar.gz)
+          bun tools/ci.mjs sign --platform ${{ matrix.platform }} --artifact "$artifact" --execute
+      - uses: actions/upload-artifact@v4
+        with:
+          name: signed-${{ matrix.platform }}
+          path: dist/
+          if-no-files-found: error
