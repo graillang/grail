@@ -7,6 +7,8 @@
  * submit, unsupported descriptors, and stale handles after gr_device_destroy. */
 #include "../include/grail/grail_abi.h"
 #include "../include/grail/grail_rhi.h"
+#include "../include/grail/grail_shader.h"
+#include "../include/grail/grail_bindless.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -50,8 +52,9 @@ static gr_result record_clear(gr_handle cmd, gr_handle texture, gr_handle view, 
     return gr_cmd_end(cmd);
 }
 
-int main(void)
+int main(int argc, char **argv)
 {
+    const char *artifacts = argc > 1 ? argv[1] : "../../shaders";
     enum { kSize = 16 };
     static const float clears[2][4] = { { 0.25f, 0.5f, 0.75f, 1.0f }, { 1.0f, 0.0f, 0.5f, 0.0f } };
     static const uint8_t expect[2][4] = { { 64, 128, 191, 255 }, { 255, 0, 128, 0 } };
@@ -187,6 +190,147 @@ int main(void)
     CHECK(memcmp(pixels + 12, expect[1], 4) == 0);
     CHECK_EQ(gr_texture_read(texture, 0, 0, 15, 0, 2, 1, GR_STATE_TRANSFER_SRC,
                              (gr_mut_span_u8){ pixels, 8 }), GR_ERROR_INVALID_ARGUMENT);
+
+
+    /* A real draw: the offline tool's DXIL for the full-screen triangle and the solid shader,
+     * on the contract root signature, with the tint as push constants. Every pixel must be what
+     * the shader computes: r = u, g = v, b = tint.b = 0.5, a = 1 at the pixel centre. */
+    {
+        enum { kDraw = 64 };
+        static uint8_t frame[kDraw * kDraw * 4];
+        gr_shader_library_desc ld;
+        gr_handle library = GR_NULL_HANDLE, vs = GR_NULL_HANDLE, fs = GR_NULL_HANDLE;
+        gr_handle pipeline = GR_NULL_HANDLE, refused = GR_NULL_HANDLE, target = GR_NULL_HANDLE;
+        gr_handle target_view = GR_NULL_HANDLE, draw_cmd = GR_NULL_HANDLE;
+        gr_pipeline_desc pd;
+        gr_format color = GR_FORMAT_R8G8B8A8_UNORM;
+        gr_str vs_name = { "core/fullscreen", 15, 0 };
+        gr_str fs_name = { "core/solid", 10, 0 };
+        float tint[4] = { 1.0f, 1.0f, 0.5f, 1.0f };
+        gr_draw draw;
+        gr_barrier barrier;
+        gr_color_attachment attachment;
+        gr_render_begin rb;
+        gr_submit submit;
+        gr_frame_constants constants;
+        uint64_t value = 0;
+        uint32_t count = 0, declared = 0, committed = 0, x, y, wrong = 0;
+        gr_result wait_status = GR_ERROR_BACKEND;
+
+        memset(&ld, 0, sizeof(ld));
+        ld.head.size = (uint32_t)sizeof(ld);
+        ld.root.data = artifacts;
+        ld.root.len = (uint32_t)strlen(artifacts);
+        CHECK_EQ(gr_shader_library_open(&ld, &library), GR_OK);
+        CHECK(library != GR_NULL_HANDLE);
+        CHECK_EQ(gr_shader_create_resolved(device, library, vs_name, GR_SHADER_STAGE_VERTEX, 0, &vs), GR_OK);
+        CHECK_EQ(gr_shader_create_resolved(device, library, fs_name, GR_SHADER_STAGE_FRAGMENT, 0, &fs), GR_OK);
+
+        memset(&pd, 0, sizeof(pd));
+        pd.head.size = (uint32_t)sizeof(pd);
+        pd.shaders[GR_SHADER_STAGE_VERTEX] = vs;
+        pd.shaders[GR_SHADER_STAGE_FRAGMENT] = fs;
+        pd.color_formats = &color;
+        pd.color_count = 1;
+        pd.depth_format = GR_FORMAT_D32_FLOAT;
+        pd.topology = GR_TOPOLOGY_TRIANGLE_LIST;
+        pd.cull = GR_CULL_NONE;
+        pd.front_face_ccw = 1;
+        pd.samples = 1;
+        CHECK_EQ(gr_pipeline_create(device, &pd, &refused), GR_ERROR_UNSUPPORTED); /* no depth yet */
+        pd.depth_format = GR_FORMAT_UNDEFINED;
+        pd.shaders[GR_SHADER_STAGE_FRAGMENT] = vs; /* a vertex shader in the fragment slot */
+        CHECK_EQ(gr_pipeline_create(device, &pd, &refused), GR_ERROR_INVALID_ARGUMENT);
+        pd.shaders[GR_SHADER_STAGE_FRAGMENT] = fs;
+        CHECK_EQ(gr_pipeline_create(device, &pd, &pipeline), GR_OK);
+        CHECK_EQ(gr_pipeline_commit(device, NULL), GR_OK);
+        CHECK_EQ(gr_pipeline_stats(device, &declared, &committed), GR_OK);
+        CHECK_EQ(declared, 1);
+        CHECK_EQ(committed, 1);
+        CHECK_EQ(gr_pipeline_create(device, &pd, &refused), GR_ERROR_NOT_READY); /* sealed */
+
+        CHECK_EQ(gr_frame_slot_count(device, &count), GR_OK);
+        CHECK_EQ(count, 2);
+        memset(&constants, 0, sizeof(constants));
+        CHECK_EQ(gr_frame_constants_write(device, 1, &constants), GR_OK);
+        CHECK_EQ(gr_frame_constants_write(device, 2, &constants), GR_ERROR_INVALID_ARGUMENT);
+
+        memset(&td, 0, sizeof(td));
+        td.head.size = (uint32_t)sizeof(td);
+        td.type = GR_TEXTURE_2D;
+        td.format = GR_FORMAT_R8G8B8A8_UNORM;
+        td.width = kDraw;
+        td.height = kDraw;
+        td.usage = GR_TEXTURE_USAGE_COLOR_ATTACHMENT | GR_TEXTURE_USAGE_TRANSFER_SRC;
+        CHECK_EQ(gr_texture_create(device, &td, &target), GR_OK);
+        memset(&vd, 0, sizeof(vd));
+        vd.head.size = (uint32_t)sizeof(vd);
+        vd.texture = target;
+        vd.type = GR_VIEW_2D;
+        CHECK_EQ(gr_texture_view_create(device, &vd, &target_view), GR_OK);
+        CHECK_EQ(gr_cmd_alloc(&cai, &draw_cmd), GR_OK);
+
+        CHECK_EQ(gr_cmd_begin(draw_cmd), GR_OK);
+        CHECK_EQ(gr_cmd_push_constants(draw_cmd, 0, (gr_span_u8){ (const uint8_t *)tint, sizeof(tint) }),
+                 GR_ERROR_NOT_READY); /* no pipeline bound yet */
+        memset(&draw, 0, sizeof(draw));
+        draw.head.size = (uint32_t)sizeof(draw);
+        draw.vertex_count = 3;
+        draw.instance_count = 1;
+        CHECK_EQ(gr_cmd_draw(draw_cmd, &draw), GR_ERROR_NOT_READY);
+        memset(&barrier, 0, sizeof(barrier));
+        barrier.resource = target;
+        barrier.src_state = GR_STATE_UNDEFINED;
+        barrier.dst_state = GR_STATE_COLOR_ATTACHMENT;
+        CHECK_EQ(gr_cmd_barrier(draw_cmd, &barrier, 1), GR_OK);
+        memset(&attachment, 0, sizeof(attachment));
+        attachment.view = target_view;
+        attachment.load_op = GR_LOAD_CLEAR;
+        attachment.store_op = GR_STORE_STORE;
+        attachment.clear[3] = 1.0f;
+        memset(&rb, 0, sizeof(rb));
+        rb.head.size = (uint32_t)sizeof(rb);
+        rb.colors = &attachment;
+        rb.color_count = 1;
+        CHECK_EQ(gr_cmd_begin_render(draw_cmd, &rb), GR_OK);
+        CHECK_EQ(gr_cmd_bind_pipeline(draw_cmd, pipeline), GR_OK);
+        CHECK_EQ(gr_cmd_push_frame_offset(draw_cmd, 1), GR_OK);
+        CHECK_EQ(gr_cmd_push_constants(draw_cmd, 2, (gr_span_u8){ (const uint8_t *)tint, sizeof(tint) }),
+                 GR_ERROR_INVALID_ARGUMENT); /* root constants are 32-bit aligned */
+        CHECK_EQ(gr_cmd_push_constants(draw_cmd, 0, (gr_span_u8){ (const uint8_t *)tint, sizeof(tint) }), GR_OK);
+        CHECK_EQ(gr_cmd_draw(draw_cmd, &draw), GR_OK);
+        CHECK_EQ(gr_cmd_end_render(draw_cmd), GR_OK);
+        barrier.src_state = GR_STATE_COLOR_ATTACHMENT;
+        barrier.dst_state = GR_STATE_TRANSFER_SRC;
+        CHECK_EQ(gr_cmd_barrier(draw_cmd, &barrier, 1), GR_OK);
+        CHECK_EQ(gr_cmd_end(draw_cmd), GR_OK);
+        memset(&submit, 0, sizeof(submit));
+        submit.head.size = (uint32_t)sizeof(submit);
+        submit.queue = queue;
+        submit.cmds = &draw_cmd;
+        submit.cmd_count = 1;
+        CHECK_EQ(gr_submit_commands(&submit, &value), GR_OK);
+        CHECK_EQ(gr_fence_wait(fence, value, 5000000000ull, &wait_status), GR_OK);
+        CHECK_EQ(gr_texture_read(target, 0, 0, 0, 0, kDraw, kDraw, GR_STATE_TRANSFER_SRC,
+                                 (gr_mut_span_u8){ frame, sizeof(frame) }), GR_OK);
+        for (y = 0; y < kDraw; ++y)
+            for (x = 0; x < kDraw; ++x) {
+                const uint8_t *px = frame + ((size_t)y * kDraw + x) * 4;
+                unsigned er = (unsigned)(((x + 0.5) / kDraw) * 255.0 + 0.5);
+                unsigned eg = (unsigned)(((y + 0.5) / kDraw) * 255.0 + 0.5);
+                if (px[0] != er || px[1] != eg || px[2] != 128 || px[3] != 255) {
+                    if (wrong < 3)
+                        printf("d3d12-backend: pixel %u,%u = %u %u %u %u, expected %u %u 128 255\n", x, y,
+                               px[0], px[1], px[2], px[3], er, eg);
+                    ++wrong;
+                }
+            }
+        CHECK_EQ(wrong, 0);
+        printf("d3d12-backend: draw %ux%u matches the shader on %u pixels (corners %u,%u,%u,%u / %u,%u,%u,%u)\n",
+               kDraw, kDraw, (unsigned)(kDraw * kDraw - wrong), frame[0], frame[1], frame[2], frame[3],
+               frame[sizeof(frame) - 4], frame[sizeof(frame) - 3], frame[sizeof(frame) - 2], frame[sizeof(frame) - 1]);
+        gr_shader_library_close(library);
+    }
 
     CHECK_EQ(gr_device_wait_idle(device), GR_OK);
     gr_device_destroy(device);

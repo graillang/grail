@@ -8,9 +8,11 @@
  * ID3D12Fence is the timeline every gr fence observes, 2D single-mip render-target textures
  * in the formats d3d_format() names, render-target views from one CPU descriptor heap, command
  * pools and lists (one allocator per list), texture barriers with tracked states, render passes
- * that set targets and clear, viewport/scissor, submit, and a synchronous texture readback.
- * Everything else - buffers, shaders, pipelines, draws, bindless, swapchains, semaphores and
- * non-graphics queues - returns GR_ERROR_UNSUPPORTED rather than an approximation.
+ * that set targets and clear, viewport/scissor, submit, a synchronous texture readback, DXIL
+ * shaders, graphics pipelines on the contract root signature (push constants and frame
+ * constants), push constants, frame-constant slots and non-indexed draws. Everything else -
+ * buffers, vertex input, depth, MSAA, compute and mesh pipelines, bindless tables, swapchains,
+ * semaphores and non-graphics queues - returns GR_ERROR_UNSUPPORTED rather than an approximation.
  *
  * Ownership: the device owns every object it creates and releases them, newest first, in
  * gr_device_destroy. State: the ABI's explicit barriers are the only state changes; a barrier
@@ -24,9 +26,11 @@
 #include <windows.h>
 #include <d3d12.h>
 #include <dxgi1_4.h>
+#include "../include/grail/grail_bindless.h"
 #include <stdint.h>
 
 #define D3D_RTV_MAX 256u
+#define D3D_FRAME_SLOTS 2u
 
 /* ---- the implemented slice --------------------------------------------------------------- */
 
@@ -58,6 +62,12 @@ struct d3d_device {
     uint8_t rtv_used[D3D_RTV_MAX];
     d3d_node *objects;           /* owned objects, newest first */
     D3D_FEATURE_LEVEL max_level; /* the highest level the driver supports, reported in caps */
+    ID3D12RootSignature *root;   /* the contract's signature, built with the first pipeline */
+    ID3D12Resource *frame;       /* frame constants, one 256-byte-aligned slot per frame */
+    uint8_t *frame_mapped;
+    uint32_t frame_stride;
+    uint32_t pipelines_declared, pipelines_committed;
+    int commit_done;
     DXGI_ADAPTER_DESC1 adapter_desc;
 };
 
@@ -90,7 +100,25 @@ typedef struct d3d_cmd {
     ID3D12GraphicsCommandList *list;
     int recording;
     uint64_t last_submit;        /* queue value that must complete before the allocator resets */
+    struct d3d_pipeline *pipeline; /* bound in this recording, or NULL */
+    uint32_t frame_slot;
 } d3d_cmd;
+
+typedef struct d3d_shader {
+    d3d_node node;
+    d3d_device *device;
+    gr_shader_stage stage;
+    uint64_t permutation_key;
+    uint8_t *dxil;               /* owned copy of the container */
+    size_t dxil_len;
+} d3d_shader;
+
+typedef struct d3d_pipeline {
+    d3d_node node;
+    d3d_device *device;
+    ID3D12PipelineState *pso;
+    D3D_PRIMITIVE_TOPOLOGY topology;
+} d3d_pipeline;
 
 typedef struct d3d_fence {
     d3d_node node;
@@ -250,6 +278,30 @@ gr_result gr_d3d12_abi_device_create(const gr_device_desc *desc, gr_handle *out_
         goto fail;
     }
     dev->graphics->device = dev;
+    {
+        D3D12_HEAP_PROPERTIES upload;
+        D3D12_RESOURCE_DESC bd;
+        D3D12_RANGE none = { 0, 0 };
+        dev->frame_stride = (uint32_t)((sizeof(gr_frame_constants) + 255u) & ~(size_t)255u);
+        memset(&upload, 0, sizeof(upload));
+        upload.Type = D3D12_HEAP_TYPE_UPLOAD;
+        memset(&bd, 0, sizeof(bd));
+        bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        bd.Width = (UINT64)dev->frame_stride * D3D_FRAME_SLOTS;
+        bd.Height = 1;
+        bd.DepthOrArraySize = 1;
+        bd.MipLevels = 1;
+        bd.SampleDesc.Count = 1;
+        bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        if (FAILED(ID3D12Device_CreateCommittedResource(dev->device, &upload, D3D12_HEAP_FLAG_NONE, &bd,
+                                                        D3D12_RESOURCE_STATE_GENERIC_READ, NULL,
+                                                        &IID_ID3D12Resource, (void **)&dev->frame)) ||
+            FAILED(ID3D12Resource_Map(dev->frame, 0, &none, (void **)&dev->frame_mapped))) {
+            status = GR_ERROR_OUT_OF_MEMORY;
+            goto fail;
+        }
+        memset(dev->frame_mapped, 0, (size_t)dev->frame_stride * D3D_FRAME_SLOTS);
+    }
     dev->rtv_stride = ID3D12Device_GetDescriptorHandleIncrementSize(dev->device,
                                                                     D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
     *out_device = gr_object_insert(gr_objects(), GR_HANDLE_DEVICE, dev);
@@ -266,6 +318,7 @@ gr_result gr_d3d12_abi_device_create(const gr_device_desc *desc, gr_handle *out_
     }
     return GR_OK;
 fail:
+    if (dev->frame) ID3D12Resource_Release(dev->frame);
     if (dev->rtv_heap) ID3D12DescriptorHeap_Release(dev->rtv_heap);
     if (dev->graphics) {
         if (dev->graphics->event) CloseHandle(dev->graphics->event);
@@ -302,6 +355,16 @@ static void d3d_release(d3d_node *node)
         d3d_cmd *c = (d3d_cmd *)node;
         ID3D12GraphicsCommandList_Release(c->list);
         ID3D12CommandAllocator_Release(c->allocator);
+        break;
+    }
+    case GR_HANDLE_SHADER: {
+        d3d_shader *sh = (d3d_shader *)node;
+        free(sh->dxil);
+        break;
+    }
+    case GR_HANDLE_PIPELINE: {
+        d3d_pipeline *pl = (d3d_pipeline *)node;
+        ID3D12PipelineState_Release(pl->pso);
         break;
     }
     case GR_HANDLE_QUEUE: {
@@ -341,6 +404,8 @@ gr_result gr_d3d12_abi_device_destroy(gr_handle device_handle)
         d3d_release(node);
     }
     ID3D12DescriptorHeap_Release(dev->rtv_heap);
+    if (dev->root) ID3D12RootSignature_Release(dev->root);
+    if (dev->frame) ID3D12Resource_Release(dev->frame);
     if (dev->adapter) IDXGIAdapter1_Release(dev->adapter);
     ID3D12Device_Release(dev->device);
     gr_object_remove(gr_objects(), device_handle, GR_HANDLE_DEVICE);
@@ -625,6 +690,8 @@ gr_result gr_d3d12_abi_cmd_begin(gr_handle cmd_handle)
     if (FAILED(ID3D12GraphicsCommandList_Reset(cmd->list, cmd->allocator, NULL)))
         return GR_ERROR_BACKEND;
     cmd->recording = 1;
+    cmd->pipeline = NULL;
+    cmd->frame_slot = 0;
     return GR_OK;
 }
 
@@ -962,6 +1029,361 @@ done:
     return status;
 }
 
+/* ---- shaders, the root signature, pipelines and draws ------------------------------------ */
+
+/* The contract's root signature (grail_backend_d3d12.h): 32 root constants at b0 for the push
+ * constants, and the frame constants as a root CBV at b0 space1. The bindless descriptor tables
+ * (t0/u0/s0/t1 in space 0) arrive with descriptor heaps; a shader that declares them fails
+ * pipeline creation with GR_ERROR_UNSUPPORTED rather than binding something else. */
+static gr_result d3d_root_signature(d3d_device *dev)
+{
+    D3D12_ROOT_PARAMETER params[2];
+    D3D12_ROOT_SIGNATURE_DESC desc;
+    ID3DBlob *blob = NULL, *error = NULL;
+    HRESULT hr;
+    if (dev->root)
+        return GR_OK;
+    memset(params, 0, sizeof(params));
+    params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    params[0].Constants.ShaderRegister = 0;
+    params[0].Constants.RegisterSpace = 0;
+    params[0].Constants.Num32BitValues = GR_PUSH_CONSTANT_BYTES / 4u;
+    params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+    params[1].Descriptor.ShaderRegister = 0;
+    params[1].Descriptor.RegisterSpace = 1;
+    params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    memset(&desc, 0, sizeof(desc));
+    desc.NumParameters = 2;
+    desc.pParameters = params;
+    hr = D3D12SerializeRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1, &blob, &error);
+    if (error) ID3D10Blob_Release(error);
+    if (FAILED(hr))
+        return GR_ERROR_BACKEND;
+    hr = ID3D12Device_CreateRootSignature(dev->device, 0, ID3D10Blob_GetBufferPointer(blob),
+                                          ID3D10Blob_GetBufferSize(blob), &IID_ID3D12RootSignature,
+                                          (void **)&dev->root);
+    ID3D10Blob_Release(blob);
+    return FAILED(hr) ? GR_ERROR_BACKEND : GR_OK;
+}
+
+gr_result gr_d3d12_abi_shader_create(gr_handle device_handle, const gr_shader_desc *desc,
+                                     gr_handle *out_shader)
+{
+    d3d_device *dev = d3d_device_of(device_handle);
+    gr_reflection reflection;
+    d3d_shader *shader;
+    gr_result status;
+    if (!dev || !desc || !out_shader)
+        return dev ? GR_ERROR_INVALID_ARGUMENT : GR_ERROR_INVALID_HANDLE;
+    *out_shader = GR_NULL_HANDLE;
+    if (desc->head.size != sizeof(gr_shader_desc))
+        return GR_ERROR_VERSION_MISMATCH;
+    if (!desc->reflection_blob.data || desc->reflection_blob.len == 0)
+        return GR_ERROR_INVALID_ARGUMENT;
+    if (!desc->dxil.data || desc->dxil.len == 0)
+        return GR_ERROR_UNSUPPORTED; /* no container this backend consumes */
+    status = gr_reflect_open(desc->reflection_blob, &reflection);
+    if (status != GR_OK)
+        return status;
+    if (reflection.header->stage >= GR_SHADER_STAGE_COUNT)
+        return GR_ERROR_SHADER_INVALID;
+    /* The blob describes one container. When that container is DXIL it must be these bytes; when
+     * it is SPIR-V, the DXIL beside it was compiled from the same source and key by the same tool. */
+    if (reflection.header->container == GR_CONTAINER_DXIL &&
+        reflection.header->bytecode_length != desc->dxil.len)
+        return GR_ERROR_SHADER_INVALID;
+    shader = (d3d_shader *)calloc(1, sizeof(*shader));
+    if (!shader)
+        return GR_ERROR_OUT_OF_MEMORY;
+    shader->dxil = (uint8_t *)malloc(desc->dxil.len);
+    if (!shader->dxil) {
+        free(shader);
+        return GR_ERROR_OUT_OF_MEMORY;
+    }
+    memcpy(shader->dxil, desc->dxil.data, desc->dxil.len);
+    shader->dxil_len = desc->dxil.len;
+    shader->device = dev;
+    shader->stage = (gr_shader_stage)reflection.header->stage;
+    shader->permutation_key = desc->permutation_key;
+    status = d3d_own(dev, &shader->node, GR_HANDLE_SHADER, shader, out_shader);
+    if (status != GR_OK) {
+        free(shader->dxil);
+        free(shader);
+    }
+    return status;
+}
+
+static int d3d_blend(uint32_t mode, D3D12_RENDER_TARGET_BLEND_DESC *out)
+{
+    memset(out, 0, sizeof(*out));
+    out->RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    out->BlendOp = D3D12_BLEND_OP_ADD;
+    out->BlendOpAlpha = D3D12_BLEND_OP_ADD;
+    out->SrcBlend = D3D12_BLEND_ONE;
+    out->DestBlend = D3D12_BLEND_ZERO;
+    out->SrcBlendAlpha = D3D12_BLEND_ONE;
+    out->DestBlendAlpha = D3D12_BLEND_ZERO;
+    out->LogicOp = D3D12_LOGIC_OP_NOOP;
+    switch (mode) {
+    case GR_BLEND_OPAQUE:
+        return 1;
+    case GR_BLEND_ALPHA:
+        out->BlendEnable = TRUE;
+        out->SrcBlend = D3D12_BLEND_SRC_ALPHA;
+        out->DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+        out->DestBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
+        return 1;
+    case GR_BLEND_PREMULTIPLIED:
+        out->BlendEnable = TRUE;
+        out->DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+        out->DestBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
+        return 1;
+    case GR_BLEND_ADDITIVE:
+        out->BlendEnable = TRUE;
+        out->DestBlend = D3D12_BLEND_ONE;
+        out->DestBlendAlpha = D3D12_BLEND_ONE;
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+gr_result gr_d3d12_abi_pipeline_create(gr_handle device_handle, const gr_pipeline_desc *desc,
+                                       gr_handle *out_pipeline)
+{
+    d3d_device *dev = d3d_device_of(device_handle);
+    d3d_shader *vertex, *fragment = NULL;
+    d3d_pipeline *pipeline;
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC pd;
+    D3D_PRIMITIVE_TOPOLOGY topology;
+    uint32_t i, bpp;
+    gr_result status;
+    HRESULT hr;
+    if (!dev)
+        return GR_ERROR_INVALID_HANDLE;
+    if (!desc || !out_pipeline)
+        return GR_ERROR_INVALID_ARGUMENT;
+    *out_pipeline = GR_NULL_HANDLE;
+    if (desc->head.size != sizeof(gr_pipeline_desc))
+        return GR_ERROR_VERSION_MISMATCH;
+    if (dev->commit_done)
+        return GR_ERROR_NOT_READY; /* every pipeline is declared before the commit */
+    if (desc->shaders[GR_SHADER_STAGE_COMPUTE] != GR_NULL_HANDLE ||
+        desc->shaders[GR_SHADER_STAGE_MESH] != GR_NULL_HANDLE ||
+        desc->shaders[GR_SHADER_STAGE_TASK] != GR_NULL_HANDLE)
+        return GR_ERROR_UNSUPPORTED; /* compute and mesh pipelines are not in this slice */
+    vertex = (d3d_shader *)d3d_get(desc->shaders[GR_SHADER_STAGE_VERTEX], GR_HANDLE_SHADER);
+    if (!vertex || vertex->device != dev || vertex->stage != GR_SHADER_STAGE_VERTEX)
+        return GR_ERROR_INVALID_ARGUMENT;
+    if (desc->shaders[GR_SHADER_STAGE_FRAGMENT] != GR_NULL_HANDLE) {
+        fragment = (d3d_shader *)d3d_get(desc->shaders[GR_SHADER_STAGE_FRAGMENT], GR_HANDLE_SHADER);
+        if (!fragment || fragment->device != dev || fragment->stage != GR_SHADER_STAGE_FRAGMENT)
+            return GR_ERROR_INVALID_ARGUMENT;
+    }
+    if (desc->permutation_key != 0 &&
+        (vertex->permutation_key != desc->permutation_key ||
+         (fragment && fragment->permutation_key != desc->permutation_key)))
+        return GR_ERROR_INVALID_ARGUMENT;
+    if (desc->vertex_binding_count || desc->vertex_attribute_count ||
+        desc->depth_format != GR_FORMAT_UNDEFINED || desc->samples > 1 || desc->conservative ||
+        desc->depth_bias || desc->query_pool != GR_NULL_HANDLE)
+        return GR_ERROR_UNSUPPORTED; /* vertex buffers, depth, MSAA, conservative raster, queries */
+    if (desc->color_count == 0 || desc->color_count > D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT ||
+        !desc->color_formats)
+        return GR_ERROR_INVALID_ARGUMENT;
+    memset(&pd, 0, sizeof(pd));
+    switch (desc->topology) {
+    case GR_TOPOLOGY_TRIANGLE_LIST:
+        pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+        topology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
+        break;
+    case GR_TOPOLOGY_TRIANGLE_STRIP:
+        pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+        topology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP;
+        break;
+    case GR_TOPOLOGY_LINE_LIST:
+        pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE;
+        topology = D3D_PRIMITIVE_TOPOLOGY_LINELIST;
+        break;
+    case GR_TOPOLOGY_POINT_LIST:
+        pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_POINT;
+        topology = D3D_PRIMITIVE_TOPOLOGY_POINTLIST;
+        break;
+    default:
+        return GR_ERROR_UNSUPPORTED; /* patches need hull/domain stages */
+    }
+    for (i = 0; i < desc->color_count; ++i) {
+        pd.RTVFormats[i] = d3d_format(desc->color_formats[i], &bpp);
+        if (pd.RTVFormats[i] == DXGI_FORMAT_UNKNOWN)
+            return GR_ERROR_UNSUPPORTED;
+        if (!d3d_blend(desc->blend ? (uint32_t)desc->blend[i] : GR_BLEND_OPAQUE,
+                       &pd.BlendState.RenderTarget[i]))
+            return GR_ERROR_INVALID_ARGUMENT;
+    }
+    pd.BlendState.IndependentBlendEnable = desc->color_count > 1;
+    pd.BlendState.AlphaToCoverageEnable = desc->alpha_to_coverage ? TRUE : FALSE;
+    pd.NumRenderTargets = desc->color_count;
+    pd.SampleMask = UINT32_MAX;
+    pd.SampleDesc.Count = 1;
+    pd.RasterizerState.FillMode = desc->wireframe ? D3D12_FILL_MODE_WIREFRAME : D3D12_FILL_MODE_SOLID;
+    pd.RasterizerState.CullMode = desc->cull == GR_CULL_FRONT  ? D3D12_CULL_MODE_FRONT
+                                  : desc->cull == GR_CULL_BACK ? D3D12_CULL_MODE_BACK
+                                                               : D3D12_CULL_MODE_NONE;
+    pd.RasterizerState.FrontCounterClockwise = desc->front_face_ccw ? TRUE : FALSE;
+    pd.RasterizerState.DepthClipEnable = desc->depth_clamp ? FALSE : TRUE;
+    /* Specialisation constants do not exist in DXIL: the offline flow has already built this
+     * bytecode for the permutation, so `spec` is part of the key only. */
+    status = d3d_root_signature(dev);
+    if (status != GR_OK)
+        return status;
+    pd.pRootSignature = dev->root;
+    pd.VS.pShaderBytecode = vertex->dxil;
+    pd.VS.BytecodeLength = vertex->dxil_len;
+    if (fragment) {
+        pd.PS.pShaderBytecode = fragment->dxil;
+        pd.PS.BytecodeLength = fragment->dxil_len;
+    }
+    pipeline = (d3d_pipeline *)calloc(1, sizeof(*pipeline));
+    if (!pipeline)
+        return GR_ERROR_OUT_OF_MEMORY;
+    hr = ID3D12Device_CreateGraphicsPipelineState(dev->device, &pd, &IID_ID3D12PipelineState,
+                                                  (void **)&pipeline->pso);
+    if (FAILED(hr)) {
+        free(pipeline);
+        /* E_INVALIDARG is a mismatch the runtime can name (signature vs root signature, outputs
+         * vs formats); anything else is the driver refusing the bytecode. */
+        return hr == E_INVALIDARG ? GR_ERROR_INVALID_ARGUMENT : GR_ERROR_SHADER_INVALID;
+    }
+    pipeline->device = dev;
+    pipeline->topology = topology;
+    status = d3d_own(dev, &pipeline->node, GR_HANDLE_PIPELINE, pipeline, out_pipeline);
+    if (status != GR_OK) {
+        ID3D12PipelineState_Release(pipeline->pso);
+        free(pipeline);
+        return status;
+    }
+    dev->pipelines_declared++;
+    return GR_OK;
+}
+
+/* Pipelines are compiled at creation; the commit seals the set, as on Vulkan. */
+gr_result gr_d3d12_abi_pipeline_commit(gr_handle device_handle, double *out_seconds)
+{
+    d3d_device *dev = d3d_device_of(device_handle);
+    if (!dev)
+        return GR_ERROR_INVALID_HANDLE;
+    if (dev->commit_done)
+        return GR_ERROR_NOT_READY;
+    dev->pipelines_committed = dev->pipelines_declared;
+    dev->commit_done = 1;
+    if (out_seconds)
+        *out_seconds = 0.0;
+    return GR_OK;
+}
+
+gr_result gr_d3d12_abi_pipeline_stats(gr_handle device_handle, uint32_t *out_declared,
+                                      uint32_t *out_committed)
+{
+    d3d_device *dev = d3d_device_of(device_handle);
+    if (!dev)
+        return GR_ERROR_INVALID_HANDLE;
+    if (out_declared) *out_declared = dev->pipelines_declared;
+    if (out_committed) *out_committed = dev->pipelines_committed;
+    return GR_OK;
+}
+
+static void d3d_bind_frame(d3d_cmd *cmd)
+{
+    ID3D12GraphicsCommandList_SetGraphicsRootConstantBufferView(
+        cmd->list, 1,
+        ID3D12Resource_GetGPUVirtualAddress(cmd->device->frame) +
+            (UINT64)cmd->frame_slot * cmd->device->frame_stride);
+}
+
+gr_result gr_d3d12_abi_cmd_bind_pipeline(gr_handle cmd_handle, gr_handle pipeline_handle)
+{
+    d3d_cmd *cmd = d3d_cmd_of(cmd_handle);
+    d3d_pipeline *pipeline = (d3d_pipeline *)d3d_get(pipeline_handle, GR_HANDLE_PIPELINE);
+    if (!cmd || !pipeline || pipeline->device != cmd->device)
+        return GR_ERROR_INVALID_HANDLE;
+    if (!cmd->recording)
+        return GR_ERROR_NOT_READY;
+    ID3D12GraphicsCommandList_SetPipelineState(cmd->list, pipeline->pso);
+    ID3D12GraphicsCommandList_SetGraphicsRootSignature(cmd->list, cmd->device->root);
+    ID3D12GraphicsCommandList_IASetPrimitiveTopology(cmd->list, pipeline->topology);
+    cmd->pipeline = pipeline;
+    d3d_bind_frame(cmd);
+    return GR_OK;
+}
+
+gr_result gr_d3d12_abi_cmd_push_constants(gr_handle cmd_handle, uint32_t offset, gr_span_u8 data)
+{
+    d3d_cmd *cmd = d3d_cmd_of(cmd_handle);
+    if (!cmd)
+        return GR_ERROR_INVALID_HANDLE;
+    if (!data.data || (offset % 4u) != 0 || (data.len % 4u) != 0 || data.len == 0 ||
+        offset + data.len > GR_PUSH_CONSTANT_BYTES)
+        return GR_ERROR_INVALID_ARGUMENT;
+    if (!cmd->recording || !cmd->pipeline)
+        return GR_ERROR_NOT_READY; /* root constants need the bound root signature */
+    ID3D12GraphicsCommandList_SetGraphicsRoot32BitConstants(cmd->list, 0, (UINT)(data.len / 4u),
+                                                           data.data, offset / 4u);
+    return GR_OK;
+}
+
+gr_result gr_d3d12_abi_cmd_draw(gr_handle cmd_handle, const gr_draw *draw)
+{
+    d3d_cmd *cmd = d3d_cmd_of(cmd_handle);
+    if (!cmd)
+        return GR_ERROR_INVALID_HANDLE;
+    if (!draw)
+        return GR_ERROR_INVALID_ARGUMENT;
+    if (!cmd->recording || !cmd->pipeline)
+        return GR_ERROR_NOT_READY;
+    ID3D12GraphicsCommandList_DrawInstanced(cmd->list, draw->vertex_count, draw->instance_count,
+                                            draw->first_vertex, draw->first_instance);
+    return GR_OK;
+}
+
+gr_result gr_d3d12_abi_frame_slot_count(gr_handle device_handle, uint32_t *out_count)
+{
+    d3d_device *dev = d3d_device_of(device_handle);
+    if (!dev)
+        return GR_ERROR_INVALID_HANDLE;
+    if (!out_count)
+        return GR_ERROR_INVALID_ARGUMENT;
+    *out_count = D3D_FRAME_SLOTS;
+    return GR_OK;
+}
+
+gr_result gr_d3d12_abi_frame_constants_write(gr_handle device_handle, uint32_t slot,
+                                             const gr_frame_constants *constants)
+{
+    d3d_device *dev = d3d_device_of(device_handle);
+    if (!dev)
+        return GR_ERROR_INVALID_HANDLE;
+    if (!constants || slot >= D3D_FRAME_SLOTS)
+        return GR_ERROR_INVALID_ARGUMENT;
+    memcpy(dev->frame_mapped + (size_t)slot * dev->frame_stride, constants, sizeof(*constants));
+    return GR_OK;
+}
+
+gr_result gr_d3d12_abi_cmd_push_frame_offset(gr_handle cmd_handle, uint32_t frame_slot)
+{
+    d3d_cmd *cmd = d3d_cmd_of(cmd_handle);
+    if (!cmd)
+        return GR_ERROR_INVALID_HANDLE;
+    if (frame_slot >= D3D_FRAME_SLOTS)
+        return GR_ERROR_INVALID_ARGUMENT;
+    if (!cmd->recording)
+        return GR_ERROR_NOT_READY;
+    cmd->frame_slot = frame_slot;
+    if (cmd->pipeline)
+        d3d_bind_frame(cmd);
+    return GR_OK;
+}
+
 /* ---- not in this slice ------------------------------------------------------------------ */
 
 gr_result gr_d3d12_abi_queue_timeline(gr_handle queue, gr_handle *out_semaphore)
@@ -995,59 +1417,6 @@ gr_result gr_d3d12_abi_device_retire(gr_handle device, gr_handle object, uint64_
 gr_result gr_d3d12_abi_device_collect(gr_handle device)
 {
     (void)device;
-    return GR_ERROR_UNSUPPORTED;
-}
-
-gr_result gr_d3d12_abi_shader_create(gr_handle device, const gr_shader_desc *desc, gr_handle *out_shader)
-{
-    (void)device;
-    (void)desc;
-    (void)out_shader;
-    return GR_ERROR_UNSUPPORTED;
-}
-
-gr_result gr_d3d12_abi_pipeline_create(gr_handle device, const gr_pipeline_desc *desc, gr_handle *out_pipeline)
-{
-    (void)device;
-    (void)desc;
-    (void)out_pipeline;
-    return GR_ERROR_UNSUPPORTED;
-}
-
-gr_result gr_d3d12_abi_pipeline_commit(gr_handle device, double *out_seconds)
-{
-    (void)device;
-    (void)out_seconds;
-    return GR_ERROR_UNSUPPORTED;
-}
-
-gr_result gr_d3d12_abi_pipeline_stats(gr_handle device, uint32_t *out_declared, uint32_t *out_committed)
-{
-    (void)device;
-    (void)out_declared;
-    (void)out_committed;
-    return GR_ERROR_UNSUPPORTED;
-}
-
-gr_result gr_d3d12_abi_cmd_bind_pipeline(gr_handle cmd, gr_handle pipeline)
-{
-    (void)cmd;
-    (void)pipeline;
-    return GR_ERROR_UNSUPPORTED;
-}
-
-gr_result gr_d3d12_abi_cmd_push_constants(gr_handle cmd, uint32_t offset, gr_span_u8 data)
-{
-    (void)cmd;
-    (void)offset;
-    (void)data;
-    return GR_ERROR_UNSUPPORTED;
-}
-
-gr_result gr_d3d12_abi_cmd_draw(gr_handle cmd, const gr_draw *draw)
-{
-    (void)cmd;
-    (void)draw;
     return GR_ERROR_UNSUPPORTED;
 }
 
@@ -1219,28 +1588,6 @@ uint32_t gr_d3d12_abi_texture_view_bindless_sampled(gr_handle view)
 {
     (void)view;
     return 0;
-}
-
-gr_result gr_d3d12_abi_frame_constants_write(gr_handle device, uint32_t slot, const gr_frame_constants *constants)
-{
-    (void)device;
-    (void)slot;
-    (void)constants;
-    return GR_ERROR_UNSUPPORTED;
-}
-
-gr_result gr_d3d12_abi_frame_slot_count(gr_handle device, uint32_t *out_count)
-{
-    (void)device;
-    (void)out_count;
-    return GR_ERROR_UNSUPPORTED;
-}
-
-gr_result gr_d3d12_abi_cmd_push_frame_offset(gr_handle cmd, uint32_t frame_slot)
-{
-    (void)cmd;
-    (void)frame_slot;
-    return GR_ERROR_UNSUPPORTED;
 }
 
 void gr_d3d12_abi_buffer_unmap(gr_handle buffer)

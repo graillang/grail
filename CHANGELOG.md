@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- D3D12 draws: DXIL shaders, graphics pipelines on the contract root signature (32 root
+  constants at b0, frame constants as a root CBV at b0 space1), blend modes, topology, cull,
+  wireframe, pipeline commit/stats, push constants, frame-constant slots and non-indexed draws.
+  `make -C graphics d3d12-smoke` now runs on vkd3d-proton (the offline DXIL is shader model 6.6;
+  Wine's built-in vkd3d supports 6.2) and checks a 64x64 draw of the offline `core/fullscreen` and
+  `core/solid` shaders pixel by pixel against the shader's formula: 83 checks. Vertex input,
+  depth, MSAA, compute/mesh pipelines and bindless tables still return `GR_ERROR_UNSUPPORTED`.
+
 - Direct `extern "C"` calls are lowered per calling convention: SysV x86-64, Win64, AAPCS64
   (Linux, macOS and Windows ARM64) and RV64 LP64D. They now take and return `f32`/`f64` (an `f32`
   crosses as real binary32) and `i8`..`i32`/`u8`..`u32` (results re-extended; RV64 receives

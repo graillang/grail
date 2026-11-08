@@ -82,15 +82,17 @@ offscreen readbacks, and a swapchain with acquire/present and a draw path. `make
 test` runs 450 host checks; `vk-surface` runs 162 checks on a real 320×240 swapchain, and
 `vk-smoke` 613 and `vk-cache` 47 on hardware, with zero validation messages through teardown.
 
-D3D12: a first slice, built for x86_64-windows with `zig cc` (MinGW-w64 headers) and executed by
-`make -C graphics d3d12-smoke` under Wine, whose `d3d12.dll` is vkd3d on the host GPU. It
-covers a headless device and its reported feature level, one direct queue and its fence
-timeline, 2D render-target textures and views, command lists, tracked-state barriers, clears,
-viewport/scissor, submit and texture readback: 47 checks, including exact clear readbacks
-(64 128 191 255 and 255 0 128 0 on every pixel) and the NOT_READY/UNSUPPORTED refusals.
-Buffers, shaders, pipelines, draws, bindless, swapchains, semaphores and compute/copy queues
-return `GR_ERROR_UNSUPPORTED`; Wine's vkd3d stops at feature level 11_1, so the test asks for
-11_0. No real Windows host has run it.
+D3D12: built for x86_64-windows with `zig cc` (MinGW-w64 headers) and executed by
+`make -C graphics d3d12-smoke` under Wine with vkd3d-proton on the host GPU (Wine's built-in
+vkd3d stops at shader model 6.2; the offline DXIL is 6.6). It covers a headless device and its
+feature level, one direct queue and its fence timeline, 2D render-target textures and views,
+command lists, tracked-state barriers, clears, viewport/scissor, submit, texture readback, DXIL
+shaders, graphics pipelines on the contract root signature (push constants as root constants,
+frame constants as a root CBV), frame-constant slots and draws: 83 checks, including exact
+clear readbacks and a 64x64 draw of the offline `core/fullscreen` + `core/solid` DXIL that
+matches the shader on every pixel. Vertex input, depth, MSAA, buffers, compute and mesh
+pipelines, bindless descriptor tables, swapchains, semaphores and compute/copy queues return
+`GR_ERROR_UNSUPPORTED`. No real Windows host has run it.
 
 Not implemented: Metal (returns `GR_ERROR_UNSUPPORTED`), mesh and ray-tracing pipelines, and a
 complete renderer. The null backend validates contracts only.

@@ -167,9 +167,16 @@ $(WIN_BUILD)/%.o: src/%.c $(HEADERS) | $(WIN_BUILD)
 $(WIN_BUILD)/test_d3d12_backend.exe: tests/test_d3d12_backend.c $(WIN_OBJ) $(HEADERS) | $(WIN_BUILD)
 	$(WIN_CC) $(CFLAGS) $(INCLUDES) $< $(WIN_OBJ) -ld3d12 -ldxgi -o $@
 
-d3d12-smoke: $(WIN_BUILD)/test_d3d12_backend.exe
+# The offline shaders are DXIL for shader model 6.6. Wine's built-in vkd3d stops at 6.2, so the
+# smoke test runs on vkd3d-proton (shipped with Proton), copied next to the test executable and
+# selected with a DLL override; nothing in a user's Wine or Steam prefix is changed.
+VKD3D_PROTON ?= $(HOME)/.local/share/Steam/steamapps/common/Proton - Experimental/files/lib/wine/vkd3d-proton
+
+d3d12-smoke: shaders $(WIN_BUILD)/test_d3d12_backend.exe
 	@if pgrep -x Abundance >/dev/null; then echo "refusing: the game is running"; exit 1; fi
-	cd $(WIN_BUILD) && flock -w 600 $(GPU_LOCK) $(WINE) test_d3d12_backend.exe
+	@test -f "$(VKD3D_PROTON)/x86_64-windows/d3d12.dll" || { echo "vkd3d-proton not found at $(VKD3D_PROTON); set VKD3D_PROTON"; exit 1; }
+	cp "$(VKD3D_PROTON)/x86_64-windows/d3d12.dll" "$(VKD3D_PROTON)/x86_64-windows/d3d12core.dll" $(WIN_BUILD)/
+	cd $(WIN_BUILD) && WINEDLLOVERRIDES='d3d12,d3d12core=n,b' flock -w 600 $(GPU_LOCK) $(WINE) test_d3d12_backend.exe ../../shaders
 
 clean:
 	rm -rf $(BUILD)
