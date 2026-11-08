@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Added the lexical path contract (`include/grail/grail_path.h`) with one implementation
+  for POSIX and Windows rules: absolute/relative detection, join, parent, file name,
+  extension and normalization. Both rule sets are exercised on Linux, including drive-relative
+  `C:` paths, UNC anchors and canonical `/` output.
 - Added the cross-platform OS ABI contract under `include/grail/`: 64-bit scalar and pointer
   calling rules, opaque linear handles, version negotiation, allocator/startup records,
   portable error codes with raw OS detail, and strict UTF-8/UTF-16 helpers. Portable
