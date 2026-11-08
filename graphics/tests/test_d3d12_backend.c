@@ -232,22 +232,19 @@ int main(int argc, char **argv)
         pd.shaders[GR_SHADER_STAGE_FRAGMENT] = fs;
         pd.color_formats = &color;
         pd.color_count = 1;
-        pd.depth_format = GR_FORMAT_D32_FLOAT;
         pd.topology = GR_TOPOLOGY_TRIANGLE_LIST;
         pd.cull = GR_CULL_NONE;
         pd.front_face_ccw = 1;
+        pd.samples = 4;
+        CHECK_EQ(gr_pipeline_create(device, &pd, &refused), GR_ERROR_UNSUPPORTED); /* no MSAA yet */
         pd.samples = 1;
-        CHECK_EQ(gr_pipeline_create(device, &pd, &refused), GR_ERROR_UNSUPPORTED); /* no depth yet */
-        pd.depth_format = GR_FORMAT_UNDEFINED;
         pd.shaders[GR_SHADER_STAGE_FRAGMENT] = vs; /* a vertex shader in the fragment slot */
         CHECK_EQ(gr_pipeline_create(device, &pd, &refused), GR_ERROR_INVALID_ARGUMENT);
         pd.shaders[GR_SHADER_STAGE_FRAGMENT] = fs;
         CHECK_EQ(gr_pipeline_create(device, &pd, &pipeline), GR_OK);
-        CHECK_EQ(gr_pipeline_commit(device, NULL), GR_OK);
         CHECK_EQ(gr_pipeline_stats(device, &declared, &committed), GR_OK);
         CHECK_EQ(declared, 1);
-        CHECK_EQ(committed, 1);
-        CHECK_EQ(gr_pipeline_create(device, &pd, &refused), GR_ERROR_NOT_READY); /* sealed */
+        CHECK_EQ(committed, 0);
 
         CHECK_EQ(gr_frame_slot_count(device, &count), GR_OK);
         CHECK_EQ(count, 2);
@@ -329,6 +326,225 @@ int main(int argc, char **argv)
         printf("d3d12-backend: draw %ux%u matches the shader on %u pixels (corners %u,%u,%u,%u / %u,%u,%u,%u)\n",
                kDraw, kDraw, (unsigned)(kDraw * kDraw - wrong), frame[0], frame[1], frame[2], frame[3],
                frame[sizeof(frame) - 4], frame[sizeof(frame) - 3], frame[sizeof(frame) - 2], frame[sizeof(frame) - 1]);
+        gr_shader_library_close(library);
+    }
+
+
+    /* Vertex and index buffers through a reflected input layout, and reverse-Z depth: the same
+     * indexed triangle is drawn near (z 0.75, green) and then far (z 0.25, red). With the depth
+     * pipeline the far draw must be rejected inside the triangle; with the colour-only pipeline
+     * it must win. The depth buffer must read back exactly 0.75 inside and 0.0 outside. */
+    {
+        enum { kTri = 64 };
+        struct vertex { float pos[2]; float colour[4]; };
+        static const struct vertex near_v[3] = { { { -0.6f, -0.6f }, { 0, 1, 0, 1 } },
+                                                 { { 0.6f, -0.6f }, { 0, 1, 0, 1 } },
+                                                 { { 0.0f, 0.6f }, { 0, 1, 0, 1 } } };
+        static const struct vertex far_v[3] = { { { -0.6f, -0.6f }, { 1, 0, 0, 1 } },
+                                                { { 0.6f, -0.6f }, { 1, 0, 0, 1 } },
+                                                { { 0.0f, 0.6f }, { 1, 0, 0, 1 } } };
+        static const uint16_t indices[3] = { 0, 1, 2 };
+        static uint8_t rgba[kTri * kTri * 4];
+        static float depth_values[kTri * kTri];
+        gr_shader_library_desc ld;
+        gr_handle library = GR_NULL_HANDLE, vs = GR_NULL_HANDLE, fs = GR_NULL_HANDLE;
+        gr_handle with_depth = GR_NULL_HANDLE, colour_only = GR_NULL_HANDLE, refused = GR_NULL_HANDLE;
+        gr_handle vb_near = GR_NULL_HANDLE, vb_far = GR_NULL_HANDLE, ib = GR_NULL_HANDLE, dev_buf = GR_NULL_HANDLE;
+        gr_handle colour_tex = GR_NULL_HANDLE, colour_view = GR_NULL_HANDLE;
+        gr_handle depth_tex = GR_NULL_HANDLE, depth_view = GR_NULL_HANDLE, cmd2 = GR_NULL_HANDLE;
+        gr_vertex_binding binding = { 0, (uint32_t)sizeof(struct vertex), 0 };
+        gr_vertex_attribute attrs[2];
+        gr_pipeline_desc pd;
+        gr_buffer_desc bd;
+        gr_format color = GR_FORMAT_R8G8B8A8_UNORM;
+        gr_str name = { "core/triangle", 13, 0 };
+        uint32_t variant;
+        uint8_t probe[4];
+
+        memset(&ld, 0, sizeof(ld));
+        ld.head.size = (uint32_t)sizeof(ld);
+        ld.root.data = artifacts;
+        ld.root.len = (uint32_t)strlen(artifacts);
+        CHECK_EQ(gr_shader_library_open(&ld, &library), GR_OK);
+        CHECK_EQ(gr_shader_create_resolved(device, library, name, GR_SHADER_STAGE_VERTEX, 0, &vs), GR_OK);
+        CHECK_EQ(gr_shader_create_resolved(device, library, name, GR_SHADER_STAGE_FRAGMENT, 0, &fs), GR_OK);
+
+        memset(&bd, 0, sizeof(bd));
+        bd.head.size = (uint32_t)sizeof(bd);
+        bd.size = sizeof(near_v);
+        bd.usage = GR_BUFFER_USAGE_VERTEX;
+        bd.memory = GR_MEMORY_UPLOAD;
+        CHECK_EQ(gr_buffer_create(device, &bd, &vb_near), GR_OK);
+        CHECK_EQ(gr_buffer_create(device, &bd, &vb_far), GR_OK);
+        CHECK_EQ(gr_buffer_write(vb_near, 0, (gr_span_u8){ (const uint8_t *)near_v, sizeof(near_v) }), GR_OK);
+        CHECK_EQ(gr_buffer_write(vb_far, 0, (gr_span_u8){ (const uint8_t *)far_v, sizeof(far_v) }), GR_OK);
+        CHECK_EQ(gr_buffer_write(vb_far, 8, (gr_span_u8){ (const uint8_t *)far_v, sizeof(far_v) }),
+                 GR_ERROR_INVALID_ARGUMENT); /* past the end */
+        bd.size = sizeof(indices);
+        bd.usage = GR_BUFFER_USAGE_INDEX;
+        CHECK_EQ(gr_buffer_create(device, &bd, &ib), GR_OK);
+        CHECK_EQ(gr_buffer_write(ib, 0, (gr_span_u8){ (const uint8_t *)indices, sizeof(indices) }), GR_OK);
+        bd.memory = GR_MEMORY_DEVICE;
+        CHECK_EQ(gr_buffer_create(device, &bd, &dev_buf), GR_OK);
+        CHECK_EQ(gr_buffer_write(dev_buf, 0, (gr_span_u8){ (const uint8_t *)indices, sizeof(indices) }),
+                 GR_ERROR_UNSUPPORTED); /* device memory needs a staging copy */
+        bd.usage = GR_BUFFER_USAGE_STORAGE;
+        CHECK_EQ(gr_buffer_create(device, &bd, &refused), GR_ERROR_UNSUPPORTED);
+
+        memset(attrs, 0, sizeof(attrs));
+        attrs[0].location = 0;
+        attrs[0].binding = 0;
+        attrs[0].format = GR_FORMAT_R32G32_FLOAT;
+        attrs[0].offset = 0;
+        attrs[1].location = 1;
+        attrs[1].binding = 0;
+        attrs[1].format = GR_FORMAT_R32G32B32A32_FLOAT;
+        attrs[1].offset = 8;
+        memset(&pd, 0, sizeof(pd));
+        pd.head.size = (uint32_t)sizeof(pd);
+        pd.shaders[GR_SHADER_STAGE_VERTEX] = vs;
+        pd.shaders[GR_SHADER_STAGE_FRAGMENT] = fs;
+        pd.vertex_bindings = &binding;
+        pd.vertex_binding_count = 1;
+        pd.vertex_attributes = attrs;
+        pd.vertex_attribute_count = 1; /* COLOR0 left unfed */
+        pd.color_formats = &color;
+        pd.color_count = 1;
+        pd.topology = GR_TOPOLOGY_TRIANGLE_LIST;
+        pd.cull = GR_CULL_NONE;
+        pd.front_face_ccw = 1;
+        pd.samples = 1;
+        CHECK_EQ(gr_pipeline_create(device, &pd, &refused), GR_ERROR_INVALID_ARGUMENT);
+        pd.vertex_attribute_count = 2;
+        attrs[1].location = 7; /* a register the shader does not read */
+        CHECK_EQ(gr_pipeline_create(device, &pd, &refused), GR_ERROR_INVALID_ARGUMENT);
+        attrs[1].location = 1;
+        CHECK_EQ(gr_pipeline_create(device, &pd, &colour_only), GR_OK);
+        pd.depth_format = GR_FORMAT_D32_FLOAT;
+        pd.depth_test = 1;
+        pd.depth_write = 1;
+        pd.depth_compare = GR_COMPARE_GREATER_EQUAL;
+        CHECK_EQ(gr_pipeline_create(device, &pd, &with_depth), GR_OK);
+        {
+            /* Every pipeline is declared; the commit seals the set. */
+            uint32_t declared = 0, committed = 0;
+            CHECK_EQ(gr_pipeline_commit(device, NULL), GR_OK);
+            CHECK_EQ(gr_pipeline_stats(device, &declared, &committed), GR_OK);
+            CHECK_EQ(declared, 3);
+            CHECK_EQ(committed, 3);
+            CHECK_EQ(gr_pipeline_create(device, &pd, &refused), GR_ERROR_NOT_READY);
+            CHECK_EQ(gr_pipeline_commit(device, NULL), GR_ERROR_NOT_READY);
+        }
+
+        memset(&td, 0, sizeof(td));
+        td.head.size = (uint32_t)sizeof(td);
+        td.type = GR_TEXTURE_2D;
+        td.width = kTri;
+        td.height = kTri;
+        td.format = GR_FORMAT_R8G8B8A8_UNORM;
+        td.usage = GR_TEXTURE_USAGE_COLOR_ATTACHMENT | GR_TEXTURE_USAGE_TRANSFER_SRC;
+        CHECK_EQ(gr_texture_create(device, &td, &colour_tex), GR_OK);
+        td.format = GR_FORMAT_D32_FLOAT;
+        CHECK_EQ(gr_texture_create(device, &td, &refused), GR_ERROR_INVALID_ARGUMENT); /* depth as colour */
+        td.usage = GR_TEXTURE_USAGE_DEPTH_ATTACHMENT | GR_TEXTURE_USAGE_TRANSFER_SRC;
+        CHECK_EQ(gr_texture_create(device, &td, &depth_tex), GR_OK);
+        memset(&vd, 0, sizeof(vd));
+        vd.head.size = (uint32_t)sizeof(vd);
+        vd.type = GR_VIEW_2D;
+        vd.texture = colour_tex;
+        CHECK_EQ(gr_texture_view_create(device, &vd, &colour_view), GR_OK);
+        vd.texture = depth_tex;
+        CHECK_EQ(gr_texture_view_create(device, &vd, &depth_view), GR_OK);
+        CHECK_EQ(gr_cmd_alloc(&cai, &cmd2), GR_OK);
+
+        for (variant = 0; variant < 2; ++variant) {
+            gr_barrier barriers[2];
+            gr_color_attachment ca;
+            gr_depth_attachment da;
+            gr_render_begin rb2;
+            gr_draw_indexed di;
+            gr_submit sub;
+            uint64_t v = 0;
+            gr_result ws = GR_ERROR_BACKEND;
+            float z;
+            uint32_t pass2;
+            CHECK_EQ(gr_cmd_reset(cmd2), GR_OK);
+            CHECK_EQ(gr_cmd_begin(cmd2), GR_OK);
+            memset(barriers, 0, sizeof(barriers));
+            barriers[0].resource = colour_tex;
+            barriers[0].src_state = variant ? GR_STATE_TRANSFER_SRC : GR_STATE_UNDEFINED;
+            barriers[0].dst_state = GR_STATE_COLOR_ATTACHMENT;
+            barriers[1].resource = depth_tex;
+            barriers[1].src_state = variant ? GR_STATE_TRANSFER_SRC : GR_STATE_UNDEFINED;
+            barriers[1].dst_state = GR_STATE_DEPTH_ATTACHMENT_WRITE;
+            CHECK_EQ(gr_cmd_barrier(cmd2, barriers, 2), GR_OK);
+            memset(&ca, 0, sizeof(ca));
+            ca.view = colour_view;
+            ca.load_op = GR_LOAD_CLEAR;
+            ca.store_op = GR_STORE_STORE;
+            ca.clear[2] = 1.0f; /* blue background */
+            ca.clear[3] = 1.0f;
+            memset(&da, 0, sizeof(da));
+            da.view = depth_view;
+            da.load_op = GR_LOAD_CLEAR;
+            da.store_op = GR_STORE_STORE;
+            da.clear_depth = 0.0f; /* reverse-Z: the far plane */
+            memset(&rb2, 0, sizeof(rb2));
+            rb2.head.size = (uint32_t)sizeof(rb2);
+            rb2.colors = &ca;
+            rb2.color_count = 1;
+            rb2.depth = &da;
+            CHECK_EQ(gr_cmd_begin_render(cmd2, &rb2), GR_OK);
+            CHECK_EQ(gr_cmd_bind_index_buffer(cmd2, ib, 1, 0), GR_ERROR_INVALID_ARGUMENT); /* misaligned */
+            CHECK_EQ(gr_cmd_bind_vertex_buffer(cmd2, 0, vb_near, 0), GR_ERROR_NOT_READY); /* no pipeline */
+            CHECK_EQ(gr_cmd_bind_pipeline(cmd2, variant ? colour_only : with_depth), GR_OK);
+            CHECK_EQ(gr_cmd_bind_vertex_buffer(cmd2, 1, vb_near, 0), GR_ERROR_INVALID_ARGUMENT); /* no slot 1 */
+            CHECK_EQ(gr_cmd_bind_index_buffer(cmd2, ib, 0, 0), GR_OK);
+            memset(&di, 0, sizeof(di));
+            di.head.size = (uint32_t)sizeof(di);
+            di.index_count = 3;
+            di.instance_count = 1;
+            for (pass2 = 0; pass2 < 2; ++pass2) {
+                z = pass2 == 0 ? 0.75f : 0.25f;
+                CHECK_EQ(gr_cmd_bind_vertex_buffer(cmd2, 0, pass2 == 0 ? vb_near : vb_far, 0), GR_OK);
+                CHECK_EQ(gr_cmd_push_constants(cmd2, 0, (gr_span_u8){ (const uint8_t *)&z, 4 }), GR_OK);
+                CHECK_EQ(gr_cmd_draw_indexed(cmd2, &di), GR_OK);
+            }
+            CHECK_EQ(gr_cmd_end_render(cmd2), GR_OK);
+            barriers[0].src_state = GR_STATE_COLOR_ATTACHMENT;
+            barriers[0].dst_state = GR_STATE_TRANSFER_SRC;
+            barriers[1].src_state = GR_STATE_DEPTH_ATTACHMENT_WRITE;
+            barriers[1].dst_state = GR_STATE_TRANSFER_SRC;
+            CHECK_EQ(gr_cmd_barrier(cmd2, barriers, 2), GR_OK);
+            CHECK_EQ(gr_cmd_end(cmd2), GR_OK);
+            memset(&sub, 0, sizeof(sub));
+            sub.head.size = (uint32_t)sizeof(sub);
+            sub.queue = queue;
+            sub.cmds = &cmd2;
+            sub.cmd_count = 1;
+            CHECK_EQ(gr_submit_commands(&sub, &v), GR_OK);
+            CHECK_EQ(gr_fence_wait(fence, v, 5000000000ull, &ws), GR_OK);
+            CHECK_EQ(gr_texture_read(colour_tex, 0, 0, 0, 0, kTri, kTri, GR_STATE_TRANSFER_SRC,
+                                     (gr_mut_span_u8){ rgba, sizeof(rgba) }), GR_OK);
+            CHECK_EQ(gr_texture_read(depth_tex, 0, 0, 0, 0, kTri, kTri, GR_STATE_TRANSFER_SRC,
+                                     (gr_mut_span_u8){ (uint8_t *)depth_values, sizeof(depth_values) }), GR_OK);
+            memcpy(probe, rgba + ((size_t)(kTri / 2) * kTri + kTri / 2) * 4, 4);
+            if (variant == 0) {
+                /* Depth test on: the near green triangle survives the far red one. */
+                CHECK(probe[0] == 0 && probe[1] == 255 && probe[2] == 0 && probe[3] == 255);
+                CHECK(depth_values[(kTri / 2) * kTri + kTri / 2] == 0.75f);
+            } else {
+                /* Colour-only: the later red draw wins; depth keeps what was cleared. */
+                CHECK(probe[0] == 255 && probe[1] == 0 && probe[2] == 0 && probe[3] == 255);
+                CHECK(depth_values[(kTri / 2) * kTri + kTri / 2] == 0.0f);
+            }
+            /* Outside the triangle: the blue clear, the far plane. */
+            CHECK(rgba[0] == 0 && rgba[1] == 0 && rgba[2] == 255 && rgba[3] == 255);
+            CHECK(depth_values[0] == 0.0f);
+            printf("d3d12-backend: indexed %s: centre %u %u %u %u depth %.2f, corner %u %u %u depth %.2f\n",
+                   variant ? "colour-only" : "depth-tested", probe[0], probe[1], probe[2], probe[3],
+                   depth_values[(kTri / 2) * kTri + kTri / 2], rgba[0], rgba[1], rgba[2], depth_values[0]);
+        }
         gr_shader_library_close(library);
     }
 
