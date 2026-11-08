@@ -1,4 +1,5 @@
 module clipper;
+use math;
 
 // Polygon clipping: a port of Clipper2's Vatti engine (https://github.com/AngusJohnson/Clipper2,
 // Boost Software License 1.0, Copyright Angus Johnson 2010-2025), kept function for function so
@@ -3551,4 +3552,653 @@ pub fn boolean_op_tree_d(ct: u64, fill: u64, subjects: PathD[], clips: PathD[], 
     add_subject_d(&mut d, subjects);
     add_clip_d(&mut d, clips);
     return execute_tree_d(&mut d, ct, fill);
+}
+
+// ---- path offsetting (ClipperOffset, InflatePaths) ----
+pub const JOIN_SQUARE: u64 = 0;
+pub const JOIN_BEVEL: u64 = 1;
+pub const JOIN_ROUND: u64 = 2;
+pub const JOIN_MITER: u64 = 3;
+pub const END_POLYGON: u64 = 0;
+pub const END_JOINED: u64 = 1;
+pub const END_BUTT: u64 = 2;
+pub const END_SQUARE: u64 = 3;
+pub const END_ROUND: u64 = 4;
+const PI: f64 = 3.141592653589793;
+const FP_TOL: f64 = 0.000000000001;
+const ARC_CONST: f64 = 0.002;
+
+struct Group {
+    paths: XY[],
+    lowest: u64,
+    reversed: bool,
+    join: u64,
+    end: u64
+}
+pub struct Offset {
+    groups: Group[],
+    delta: f64,
+    group_delta: f64,
+    temp_lim: f64,
+    steps_per_rad: f64,
+    step_sin: f64,
+    step_cos: f64,
+    nx: f64[],
+    ny: f64[],
+    out_x: i64[],
+    out_y: i64[],
+    solution: XY[],
+    join: u64,
+    end: u64,
+    miter_limit: f64,
+    arc_tolerance: f64,
+    preserve_collinear: bool,
+    reverse_solution: bool
+}
+pub fn new_offset(miter_limit: f64, arc_tolerance: f64) -> Offset {
+    return Offset {
+        groups: Group[], delta: 0.0, group_delta: 0.0, temp_lim: 0.0, steps_per_rad: 0.0,
+        step_sin: 0.0, step_cos: 0.0, nx: f64[], ny: f64[], out_x: i64[], out_y: i64[],
+        solution: XY[], join: JOIN_BEVEL, end: END_POLYGON, miter_limit: miter_limit,
+        arc_tolerance: arc_tolerance, preserve_collinear: false, reverse_solution: false
+    };
+}
+// glibc-compatible enough acos via atan2 (the reference calls std::acos once per group).
+fn acos(x: f64) -> f64 {
+    return math::atan2(((1.0 - x) * (1.0 + x)).sqrt(), x);
+}
+// Area<int64_t>(Path64) exactly as clipper.core.h pairs its terms.
+fn path_area<a>(p: (&a XY)) -> f64 {
+    cnt := p.x.len();
+    if cnt < 3 {
+        return 0.0;
+    }
+    mut a = 0.0;
+    mut it2 = cnt - 1;
+    mut stop = it2;
+    if (cnt & 1) == 0 {
+        stop += 1;
+    }
+    mut it1: u64 = 0;
+    while it1 != stop {
+        a += f64(p.y[it2] + p.y[it1]) * f64(p.x[it2] - p.x[it1]);
+        it2 = it1 + 1;
+        a += f64(p.y[it1] + p.y[it2]) * f64(p.x[it1] - p.x[it2]);
+        it1 += 2;
+    }
+    if (cnt & 1) != 0 {
+        a += f64(p.y[it2] + p.y[it1]) * f64(p.x[it2] - p.x[it1]);
+    }
+    return a * 0.5;
+}
+// std::unique, then (closed paths) trailing points equal to the first are dropped.
+fn strip_duplicates(p: XY, closed: bool) -> XY {
+    mut out = XY { x: i64[], y: i64[] };
+    for i in p.x.len() {
+        n := out.x.len();
+        if (n > 0) && (out.x[n - 1] == p.x[i]) && (out.y[n - 1] == p.y[i]) {
+            continue;
+        }
+        out.x.push(p.x[i]);
+        out.y.push(p.y[i]);
+    }
+    if closed {
+        while (out.x.len() > 1) && (out.x[out.x.len() - 1] == out.x[0]) && (out.y[out.y.len() - 1] == out.y[0]) {
+            out.x.pop();
+            out.y.pop();
+        }
+    }
+    return out;
+}
+fn add_group<a>(o: (&a mut Offset), paths: XY[], join: u64, end: u64) {
+    closed := (end == END_POLYGON) || (end == END_JOINED);
+    mut ps = XY[];
+    mut rest = paths;
+    mut tmp = XY[];
+    while rest.len() > 0 {
+        tmp.push(rest.pop());
+    }
+    while tmp.len() > 0 {
+        ps.push(strip_duplicates(tmp.pop(), closed));
+    }
+    mut lowest = NIL;
+    mut reversed = false;
+    if end == END_POLYGON {
+        // GetLowestClosedPathInfo
+        mut bx: i64 = 9223372036854775807;
+        mut by: i64 = -9223372036854775807 - 1;
+        mut neg = false;
+        for i in ps.len() {
+            mut a = dbl_max();
+            for j in ps[i].x.len() {
+                px := ps[i].x[j];
+                py := ps[i].y[j];
+                if (py < by) || ((py == by) && (px >= bx)) {
+                    continue;
+                }
+                if a == dbl_max() {
+                    a = path_area(&ps[i]);
+                    if a == 0.0 {
+                        break;
+                    }
+                    neg = a < 0.0;
+                }
+                lowest = i;
+                bx = px;
+                by = py;
+            }
+        }
+        reversed = (lowest != NIL) && neg;
+    }
+    o.groups.push(Group { paths: ps, lowest: lowest, reversed: reversed, join: join, end: end });
+}
+fn build_normals<a, b>(o: (&a mut Offset), p: (&b XY)) {
+    o.nx = f64[];
+    o.ny = f64[];
+    n := p.x.len();
+    if n == 0 {
+        return ();
+    }
+    for i in n {
+        mut j = i + 1;
+        if j == n {
+            j = 0;
+        }
+        un := unit_normal(Pt { x: p.x[i], y: p.y[i] }, Pt { x: p.x[j], y: p.y[j] });
+        o.nx.push(un.x);
+        o.ny.push(un.y);
+    }
+}
+struct V2 {
+    x: f64,
+    y: f64
+}
+fn hypot(x: f64, y: f64) -> f64 {
+    return (x * x + y * y).sqrt();
+}
+fn unit_normal(p1: Pt, p2: Pt) -> V2 {
+    if (p1.x == p2.x) && (p1.y == p2.y) {
+        return V2 { x: 0.0, y: 0.0 };
+    }
+    mut dx = f64(p2.x - p1.x);
+    mut dy = f64(p2.y - p1.y);
+    inv := 1.0 / hypot(dx, dy);
+    dx = dx * inv;
+    dy = dy * inv;
+    return V2 { x: dy, y: 0.0 - dx };
+}
+fn normalize(v: V2) -> V2 {
+    h := hypot(v.x, v.y);
+    if h.abs() < 0.001 {
+        return V2 { x: 0.0, y: 0.0 };
+    }
+    inv := 1.0 / h;
+    return V2 { x: v.x * inv, y: v.y * inv };
+}
+fn emit_pt<a>(o: (&a mut Offset), x: f64, y: f64) {
+    o.out_x.push(round_away(x));
+    o.out_y.push(round_away(y));
+}
+fn emit_int<a>(o: (&a mut Offset), x: i64, y: i64) {
+    o.out_x.push(x);
+    o.out_y.push(y);
+}
+fn do_bevel<a, b>(o: (&a mut Offset), p: (&b XY), j: u64, k: u64) {
+    px := f64(p.x[j]);
+    py := f64(p.y[j]);
+    if j == k {
+        ad := o.group_delta.abs();
+        x1 := px - ad * o.nx[j];
+        y1 := py - ad * o.ny[j];
+        x2 := px + ad * o.nx[j];
+        y2 := py + ad * o.ny[j];
+        emit_pt(&mut o, x1, y1);
+        emit_pt(&mut o, x2, y2);
+    } else {
+        g := o.group_delta;
+        x1 := px + g * o.nx[k];
+        y1 := py + g * o.ny[k];
+        x2 := px + g * o.nx[j];
+        y2 := py + g * o.ny[j];
+        emit_pt(&mut o, x1, y1);
+        emit_pt(&mut o, x2, y2);
+    }
+}
+// GetLineIntersectPt on PointD (non-hi-precision): clamps t to the first segment.
+struct Seg {
+    ax: f64,
+    ay: f64,
+    bx: f64,
+    by: f64
+}
+fn line_intersect_d(l1: Seg, l2: Seg, fallback: V2) -> V2 {
+    dx1 := l1.bx - l1.ax;
+    dy1 := l1.by - l1.ay;
+    dx2 := l2.bx - l2.ax;
+    dy2 := l2.by - l2.ay;
+    det := dy1 * dx2 - dy2 * dx1;
+    if det == 0.0 {
+        return fallback;
+    }
+    t := ((l1.ax - l2.ax) * dy2 - (l1.ay - l2.ay) * dx2) / det;
+    if t <= 0.0 {
+        return V2 { x: l1.ax, y: l1.ay };
+    }
+    if t >= 1.0 {
+        return V2 { x: l1.bx, y: l1.by };
+    }
+    return V2 { x: l1.ax + t * dx1, y: l1.ay + t * dy1 };
+}
+fn do_square<a, b>(o: (&a mut Offset), p: (&b XY), j: u64, k: u64) {
+    mut vec = V2 { x: 0.0, y: 0.0 };
+    if j == k {
+        vec = V2 { x: o.ny[j], y: 0.0 - o.nx[j] };
+    } else {
+        vec = normalize(V2 { x: (0.0 - o.ny[k]) + o.ny[j], y: o.nx[k] + (0.0 - o.nx[j]) });
+    }
+    ad := o.group_delta.abs();
+    g := o.group_delta;
+    qx := f64(p.x[j]) + ad * vec.x;
+    qy := f64(p.y[j]) + ad * vec.y;
+    p1x := qx + g * vec.y;
+    p1y := qy + g * (0.0 - vec.x);
+    p2x := qx + g * (0.0 - vec.y);
+    p2y := qy + g * vec.x;
+    p3x := f64(p.x[k]) + o.nx[k] * g;
+    p3y := f64(p.y[k]) + o.ny[k] * g;
+    if j == k {
+        p4x := p3x + vec.x * g;
+        p4y := p3y + vec.y * g;
+        pt := line_intersect_d(Seg { ax: p1x, ay: p1y, bx: p2x, by: p2y }, Seg { ax: p3x, ay: p3y, bx: p4x, by: p4y }, V2 { x: qx, y: qy });
+        emit_pt(&mut o, qx + (qx - pt.x), qy + (qy - pt.y));
+        emit_pt(&mut o, pt.x, pt.y);
+    } else {
+        p4x := f64(p.x[j]) + o.nx[k] * g;
+        p4y := f64(p.y[j]) + o.ny[k] * g;
+        pt := line_intersect_d(Seg { ax: p1x, ay: p1y, bx: p2x, by: p2y }, Seg { ax: p3x, ay: p3y, bx: p4x, by: p4y }, V2 { x: qx, y: qy });
+        emit_pt(&mut o, pt.x, pt.y);
+        emit_pt(&mut o, qx + (qx - pt.x), qy + (qy - pt.y));
+    }
+}
+fn do_miter<a, b>(o: (&a mut Offset), p: (&b XY), j: u64, k: u64, cos_a: f64) {
+    q := o.group_delta / (cos_a + 1.0);
+    x := f64(p.x[j]) + (o.nx[k] + o.nx[j]) * q;
+    y := f64(p.y[j]) + (o.ny[k] + o.ny[j]) * q;
+    emit_pt(&mut o, x, y);
+}
+fn do_round<a, b>(o: (&a mut Offset), p: (&b XY), j: u64, k: u64, angle: f64) {
+    px := p.x[j];
+    py := p.y[j];
+    g := o.group_delta;
+    mut vx = o.nx[k] * g;
+    mut vy = o.ny[k] * g;
+    if j == k {
+        vx = 0.0 - vx;
+        vy = 0.0 - vy;
+    }
+    emit_pt(&mut o, f64(px) + vx, f64(py) + vy);
+    steps := i64(math::ceil(o.steps_per_rad * angle.abs()));
+    mut i: i64 = 1;
+    while i < steps {
+        nvx := vx * o.step_cos - o.step_sin * vy;
+        nvy := vx * o.step_sin + vy * o.step_cos;
+        vx = nvx;
+        vy = nvy;
+        emit_pt(&mut o, f64(px) + vx, f64(py) + vy);
+        i += 1;
+    }
+    // GetPerpendic(path[j], norms[j], delta)
+    x := f64(px) + o.nx[j] * g;
+    y := f64(py) + o.ny[j] * g;
+    emit_pt(&mut o, x, y);
+}
+fn offset_point<a, b>(o: (&a mut Offset), p: (&b XY), j: u64, k: u64) {
+    if (p.x[j] == p.x[k]) && (p.y[j] == p.y[k]) {
+        return ();
+    }
+    // CrossProduct(vec1, vec2) = vec1.y*vec2.x - vec2.y*vec1.x; DotProduct = x*x + y*y
+    mut sin_a = o.ny[j] * o.nx[k] - o.ny[k] * o.nx[j];
+    cos_a := o.nx[j] * o.nx[k] + o.ny[j] * o.ny[k];
+    if sin_a > 1.0 {
+        sin_a = 1.0;
+    } else {
+        if sin_a < -1.0 {
+            sin_a = -1.0;
+        }
+    }
+    g := o.group_delta;
+    if g.abs() <= FP_TOL {
+        emit_int(&mut o, p.x[j], p.y[j]);
+        return ();
+    }
+    if (cos_a > -0.999) && (sin_a * g < 0.0) {
+        x1 := f64(p.x[j]) + o.nx[k] * g;
+        y1 := f64(p.y[j]) + o.ny[k] * g;
+        emit_pt(&mut o, x1, y1);
+        emit_int(&mut o, p.x[j], p.y[j]);
+        x2 := f64(p.x[j]) + o.nx[j] * g;
+        y2 := f64(p.y[j]) + o.ny[j] * g;
+        emit_pt(&mut o, x2, y2);
+        return ();
+    }
+    if (cos_a > 0.999) && (o.join != JOIN_ROUND) {
+        do_miter(&mut o, &p, j, k, cos_a);
+        return ();
+    }
+    if o.join == JOIN_MITER {
+        if cos_a > o.temp_lim - 1.0 {
+            do_miter(&mut o, &p, j, k, cos_a);
+        } else {
+            do_square(&mut o, &p, j, k);
+        }
+        return ();
+    }
+    if o.join == JOIN_ROUND {
+        do_round(&mut o, &p, j, k, math::atan2(sin_a, cos_a));
+        return ();
+    }
+    if o.join == JOIN_BEVEL {
+        do_bevel(&mut o, &p, j, k);
+        return ();
+    }
+    do_square(&mut o, &p, j, k);
+}
+fn take_out<a>(o: (&a mut Offset)) {
+    xs := exchange(&mut o.out_x, i64[]);
+    ys := exchange(&mut o.out_y, i64[]);
+    o.solution.push(XY { x: xs, y: ys });
+}
+fn offset_polygon<a, b>(o: (&a mut Offset), p: (&b XY)) {
+    o.out_x = i64[];
+    o.out_y = i64[];
+    n := p.x.len();
+    mut k = n - 1;
+    for j in n {
+        offset_point(&mut o, &p, j, k);
+        k = j;
+    }
+    take_out(&mut o);
+}
+fn offset_open_joined<a, b>(o: (&a mut Offset), p: (&b XY)) {
+    offset_polygon(&mut o, &p);
+    mut rx = i64[];
+    mut ry = i64[];
+    mut i = p.x.len();
+    while i > 0 {
+        i -= 1;
+        rx.push(p.x[i]);
+        ry.push(p.y[i]);
+    }
+    rev := XY { x: rx, y: ry };
+    // reverse norms, rotate left by one, negate
+    mut nx = f64[];
+    mut ny = f64[];
+    mut m = o.nx.len();
+    while m > 0 {
+        m -= 1;
+        nx.push(o.nx[m]);
+        ny.push(o.ny[m]);
+    }
+    mut fx = f64[];
+    mut fy = f64[];
+    for t in nx.len() {
+        mut s = t + 1;
+        if s == nx.len() {
+            s = 0;
+        }
+        fx.push(0.0 - nx[s]);
+        fy.push(0.0 - ny[s]);
+    }
+    o.nx = fx;
+    o.ny = fy;
+    offset_polygon(&mut o, &rev);
+}
+fn offset_cap<a, b>(o: (&a mut Offset), p: (&b XY), i: u64) {
+    if o.group_delta.abs() <= FP_TOL {
+        emit_int(&mut o, p.x[i], p.y[i]);
+        return ();
+    }
+    if o.end == END_BUTT {
+        do_bevel(&mut o, &p, i, i);
+    } else {
+        if o.end == END_ROUND {
+            do_round(&mut o, &p, i, i, PI);
+        } else {
+            do_square(&mut o, &p, i, i);
+        }
+    }
+}
+fn offset_open_path<a, b>(o: (&a mut Offset), p: (&b XY)) {
+    offset_cap(&mut o, &p, 0);
+    high := p.x.len() - 1;
+    mut k: u64 = 0;
+    mut j: u64 = 1;
+    while j < high {
+        offset_point(&mut o, &p, j, k);
+        k = j;
+        j += 1;
+    }
+    mut i = high;
+    while i > 0 {
+        ax := 0.0 - o.nx[i - 1];
+        ay := 0.0 - o.ny[i - 1];
+        o.nx[i] = ax;
+        o.ny[i] = ay;
+        i -= 1;
+    }
+    hx := o.nx[high];
+    hy := o.ny[high];
+    o.nx[0] = hx;
+    o.ny[0] = hy;
+    offset_cap(&mut o, &p, high);
+    mut j2 = high - 1;
+    mut k2 = high;
+    while j2 > 0 {
+        offset_point(&mut o, &p, j2, k2);
+        k2 = j2;
+        j2 -= 1;
+    }
+    take_out(&mut o);
+}
+fn ellipse_int(cx: i64, cy: i64, radius: f64, steps_in: u64) -> XY {
+    mut out = XY { x: i64[], y: i64[] };
+    if radius <= 0.0 {
+        return out;
+    }
+    mut steps = steps_in;
+    if steps <= 2 {
+        steps = u64(PI * ((radius + radius) / 2.0).sqrt());
+    }
+    si := math::sin(2.0 * PI / f64(steps));
+    co := math::cos(2.0 * PI / f64(steps));
+    mut dx = co;
+    mut dy = si;
+    out.x.push(round_away(f64(cx) + radius));
+    out.y.push(round_away(f64(cy)));
+    mut i: u64 = 1;
+    while i < steps {
+        out.x.push(round_away(f64(cx) + radius * dx));
+        out.y.push(round_away(f64(cy) + radius * dy));
+        x := dx * co - dy * si;
+        dy = dy * co + dx * si;
+        dx = x;
+        i += 1;
+    }
+    return out;
+}
+fn do_group_offset<a>(o: (&a mut Offset), gi: u64) {
+    gend := o.groups[gi].end;
+    gjoin := o.groups[gi].join;
+    if gend == END_POLYGON {
+        if o.groups[gi].lowest == NIL {
+            o.delta = o.delta.abs();
+        }
+        if o.groups[gi].reversed {
+            o.group_delta = 0.0 - o.delta;
+        } else {
+            o.group_delta = o.delta;
+        }
+    } else {
+        o.group_delta = o.delta.abs();
+    }
+    abs_delta := o.group_delta.abs();
+    o.join = gjoin;
+    o.end = gend;
+    if (gjoin == JOIN_ROUND) || (gend == END_ROUND) {
+        mut arc_tol = abs_delta * ARC_CONST;
+        if o.arc_tolerance > FP_TOL {
+            arc_tol = o.arc_tolerance;
+            if abs_delta < arc_tol {
+                arc_tol = abs_delta;
+            }
+        }
+        mut steps_per_360 = PI / acos(1.0 - arc_tol / abs_delta);
+        if abs_delta * PI < steps_per_360 {
+            steps_per_360 = abs_delta * PI;
+        }
+        o.step_sin = math::sin(2.0 * PI / steps_per_360);
+        o.step_cos = math::cos(2.0 * PI / steps_per_360);
+        if o.group_delta < 0.0 {
+            o.step_sin = 0.0 - o.step_sin;
+        }
+        o.steps_per_rad = steps_per_360 / (2.0 * PI);
+    }
+    np := o.groups[gi].paths.len();
+    for pi in np {
+        p := copy_xy(&o.groups[gi].paths[pi]);
+        n := p.x.len();
+        o.out_x = i64[];
+        o.out_y = i64[];
+        if n == 1 {
+            if o.group_delta < 1.0 {
+                continue;
+            }
+            if gjoin == JOIN_ROUND {
+                mut steps: u64 = 0;
+                if o.steps_per_rad > 0.0 {
+                    steps = u64(math::ceil(o.steps_per_rad * 2.0 * PI));
+                }
+                o.solution.push(ellipse_int(p.x[0], p.y[0], abs_delta, steps));
+            } else {
+                d := i64(math::ceil(abs_delta));
+                o.solution.push(XY { x: i64[p.x[0] - d, p.x[0] + d, p.x[0] + d, p.x[0] - d], y: i64[p.y[0] - d, p.y[0] - d, p.y[0] + d, p.y[0] + d] });
+            }
+            continue;
+        }
+        if (n == 2) && (gend == END_JOINED) {
+            if gjoin == JOIN_ROUND {
+                o.end = END_ROUND;
+            } else {
+                o.end = END_SQUARE;
+            }
+        }
+        build_normals(&mut o, &p);
+        if o.end == END_POLYGON {
+            offset_polygon(&mut o, &p);
+        } else {
+            if o.end == END_JOINED {
+                offset_open_joined(&mut o, &p);
+            } else {
+                offset_open_path(&mut o, &p);
+            }
+        }
+    }
+}
+fn copy_xy<a>(p: (&a XY)) -> XY {
+    mut out = XY { x: i64[], y: i64[] };
+    for i in p.x.len() {
+        out.x.push(p.x[i]);
+        out.y.push(p.y[i]);
+    }
+    return out;
+}
+fn offset_execute<a>(o: (&a mut Offset), delta: f64) -> XY[] {
+    o.solution = XY[];
+    if o.groups.len() == 0 {
+        return XY[];
+    }
+    if delta.abs() < 0.5 {
+        for g in o.groups.len() {
+            for i in o.groups[g].paths.len() {
+                cp := copy_xy(&o.groups[g].paths[i]);
+                o.solution.push(cp);
+            }
+        }
+    } else {
+        if o.miter_limit <= 1.0 {
+            o.temp_lim = 2.0;
+        } else {
+            o.temp_lim = 2.0 / (o.miter_limit * o.miter_limit);
+        }
+        o.delta = delta;
+        for g in o.groups.len() {
+            do_group_offset(&mut o, g);
+        }
+    }
+    if o.solution.len() == 0 {
+        return XY[];
+    }
+    mut paths_reversed = false;
+    for g in o.groups.len() {
+        if o.groups[g].end == END_POLYGON {
+            paths_reversed = o.groups[g].reversed;
+            break;
+        }
+    }
+    mut c = new();
+    c.preserve_collinear = o.preserve_collinear;
+    c.reverse_solution = o.reverse_solution != paths_reversed;
+    sol := exchange(&mut o.solution, XY[]);
+    add_paths_(&mut c, &sol, SUBJECT, false);
+    mut fill = FILL_POSITIVE;
+    if paths_reversed {
+        fill = FILL_NEGATIVE;
+    }
+    raw := execute(&mut c, CLIP_UNION, fill);
+    mut out = XY[];
+    for i in raw.len() {
+        out.push(XY { x: copy_i64(&raw[i].x), y: copy_i64(&raw[i].y) });
+    }
+    return out;
+}
+fn copy_i64<a>(v: (&a i64[])) -> i64[] {
+    mut out = i64[];
+    for i in v.len() {
+        out.push(v[i]);
+    }
+    return out;
+}
+// Clipper2 InflatePaths(PathsD, delta, jt, et, miter_limit, precision, arc_tolerance).
+pub struct OffsetOptions {
+    miter_limit: f64,
+    precision: u64,
+    arc_tolerance: f64
+}
+pub fn inflate_paths_d(paths: PathD[], delta: f64, join: u64, end: u64, opts: OffsetOptions) -> PathD[] {
+    if delta == 0.0 {
+        return paths;
+    }
+    mut scale = 1.0;
+    for i in opts.precision {
+        scale = scale * 10.0;
+    }
+    mut o = new_offset(opts.miter_limit, opts.arc_tolerance * scale);
+    xy := scale_in(paths, scale);
+    if xy.len() == 0 {
+        return PathD[];
+    }
+    add_group(&mut o, xy, join, end);
+    sol := offset_execute(&mut o, delta * scale);
+    inv := 1.0 / scale;
+    mut out = PathD[];
+    for i in sol.len() {
+        mut xs = f64[];
+        mut ys = f64[];
+        for j in sol[i].x.len() {
+            xs.push(f64(sol[i].x[j]) * inv);
+            ys.push(f64(sol[i].y[j]) * inv);
+        }
+        out.push(PathD { x: xs, y: ys });
+    }
+    return out;
 }
