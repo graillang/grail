@@ -245,9 +245,9 @@ function testTarget(platformId, options = {}) {
     const qemu = qemuFor(target);
     if (!qemu) {
       if (!checkOnly) throw new Blocked(`cross execution for ${target.id} needs ${target.qemu} (or GRAIL_QEMU_${target.arch.toUpperCase()})`, EXIT.missing);
-      return crossCompileCheck(target, compiler);
+      return crossCompileCheck(target);
     }
-    if (checkOnly) return crossCompileCheck(target, compiler);
+    if (checkOnly) return crossCompileCheck(target);
     const result = spawnSync('bun', ['tools/test-native.mjs', target.compilerTarget], {
       cwd: root,
       stdio: 'inherit',
@@ -270,9 +270,12 @@ function testTarget(platformId, options = {}) {
   return { platform: target.id, compiler, mode: 'native', status: 'passed' };
 }
 
-function crossCompileCheck(target, compiler) {
+function crossCompileCheck(target) {
+  // The target compiler is a foreign-architecture binary; smoke codegen must be
+  // driven by the host stage0 with --target, not by executing the target.
+  const stage0 = buildCompiler();
   const directory = join(root, '.work/ci', target.id, 'smoke');
-  const executable = compileProgram(compiler, ['book/examples/hello.grl'], directory, {
+  const executable = compileProgram(stage0, ['book/examples/hello.grl'], directory, {
     target: target.compilerTarget,
     defaultU64: false,
     typedRefs: false,
@@ -280,7 +283,7 @@ function crossCompileCheck(target, compiler) {
   });
   const info = inspectBinary(executable);
   if (info.format !== 'elf' || info.arch !== target.arch) throw new Error(`smoke program is ${info.format}/${info.arch}, expected elf/${target.arch}`);
-  return { platform: target.id, compiler, mode: 'compile-only', binary: info, status: 'passed', note: `execution skipped: ${target.qemu} not installed` };
+  return { platform: target.id, compiler: stage0, mode: 'compile-only', binary: info, status: 'passed', note: `execution skipped: ${target.qemu} not installed` };
 }
 
 function lint() {
@@ -324,6 +327,7 @@ function lint() {
     check(`${script} is executable`, executable);
   }
   check('install.ps1 exists', existsSync(join(root, 'packaging/install.ps1')));
+  check('LSP/debugger/profiler plan exists', existsSync(join(root, 'docs/tooling/lsp-debugger-profiler.md')));
   check('VERSION file matches compiler --version', readFileSync(join(root, 'compiler/cli.grl'), 'utf8').includes(`grail ${version ?? '0.0.0'}`), version ?? '');
   const failed = checks.filter(entry => !entry.ok);
   return { ok: failed.length === 0, checks, failed };

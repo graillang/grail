@@ -38,6 +38,9 @@
   and Unicode rejection/round-trip cases. Linux, AArch64, RISC-V 64, Win64 and Apple ARM64
   header parsing is checked. Nothing is linked into Grail builds; `compiler/native.grl` and
   `runtime.grl` are unchanged.
+  only. Tooling is documented in `docs/tooling/cross-platform-ci.md`; the
+  LSP/debugger/profiler integration plan is in
+  `docs/tooling/lsp-debugger-profiler.md`.
 
 - Native fixtures, inline regression programs and book examples now use typed references and
   explicit byte views under `--default-u64 --typed-refs`; user-mode cases retain `i64` defaults.
