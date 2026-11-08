@@ -51,3 +51,7 @@ install prefix="~/.local":
 # Formatter and grail tool regressions (also checks ARM64/RV64 under qemu).
 test-cli:
     bun tools/test-cli.mjs
+
+# Cross-platform OS ABI headers and C contract tests (needs a host C compiler).
+abi-test:
+    bun tools/abi-test.mjs
