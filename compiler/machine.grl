@@ -849,6 +849,38 @@ fn c_abi<a, b, c>(o: (&a mut Out), op: &b [u8], rest: &c [u8]) -> u64 {
         }
         return 1;
     }
+    // `cfrstore K s|d OFF`: store float return register K at OFF(x6/a6) (%r10 in Grail's
+    // spelling), binary32 for `s`, binary64 for `d`.
+    if eq(view((op)), view("cfrstore")) {
+        parts := split(view(rest), 32);
+        if parts.len() != 3 {
+            bad(view(rest));
+        }
+        single := eq(view(parts[1]), view("s"));
+        if arm {
+            put(&mut o, view("str "));
+            if single {
+                put(&mut o, view("s"));
+            } else {
+                put(&mut o, view("d"));
+            }
+            put(&mut o, view(parts[0]));
+            put(&mut o, view(",[x6,#"));
+            put(&mut o, view(parts[2]));
+            put(&mut o, view("]\n"));
+        } else {
+            if single {
+                put(&mut o, view("fsw fa"));
+            } else {
+                put(&mut o, view("fsd fa"));
+            }
+            put(&mut o, view(parts[0]));
+            put(&mut o, view(","));
+            put(&mut o, view(parts[2]));
+            put(&mut o, view("(a6)\n"));
+        }
+        return 1;
+    }
     // A callback's float result: x9/t0 into d0/fa0 (narrowed to s0 for f32).
     if eq(view((op)), view("cbfret64")) {
         if arm {

@@ -118,9 +118,28 @@ try {
   const plainInfo = ok(['llvm-dwarfdump', '--debug-info', plainBinary]).stdout;
   assert.doesNotMatch(plainInfo, /DW_TAG_subprogram/, 'a normal build unexpectedly contains .debug_info');
 
-  const rejected = run([compiler, '--target', 'aarch64', '--debug', join(work, 'reject.s'), source, runtime, osLinux]);
-  assert.notEqual(rejected.status, 0, '--debug was accepted for aarch64');
-  assert.match(`${rejected.stdout}${rejected.stderr}`, /only implemented for Linux x86_64/, 'missing target diagnostic');
+  const rejected = run([compiler, '--target', 'windows-aarch64', '--debug', join(work, 'reject.s'), source, runtime, osLinux]);
+  assert.notEqual(rejected.status, 0, '--debug was accepted for windows-aarch64');
+  assert.match(`${rejected.stdout}${rejected.stderr}`, /only implemented for Linux and Windows x86_64/, 'missing target diagnostic');
+
+  // AArch64 and RISC-V 64 Linux: the same DWARF (frame base x29 / s0); the line table maps the
+  // source rows, every variable is typed, and the unit verifies.
+  for (const [target, triple, extra] of [['aarch64', 'aarch64-linux-gnu', []], ['riscv64', 'riscv64-linux-gnu', ['-march=rv64imafd', '-mabi=lp64d']]]) {
+    const asm = join(work, `${target}.s`);
+    const obj = join(work, `${target}.o`);
+    const exe = join(work, `${target}-debug`);
+    ok([compiler, '--typed-refs', '--debug', '--target', target, asm, source, runtime, osLinux]);
+    ok(['clang', `--target=${triple}`, ...extra, '-c', asm, '-o', obj]);
+    ok(['ld.lld', obj, '-o', exe]);
+    const lines = ok(['llvm-dwarfdump', '--debug-line', exe]).stdout;
+    for (const line of [2, 5, 6]) {
+      assert.match(lines, new RegExp(`^0x[0-9a-f]+\\s+${line}\\s`, 'm'), `${target}: no line-table row for line ${line}`);
+    }
+    const crossInfo = ok(['llvm-dwarfdump', '--debug-info', exe]).stdout;
+    assert.match(crossInfo, /DW_AT_name\s+\("total"\)[\s\S]*?DW_AT_type\s+\(0x[0-9a-f]+ "i64"\)/, `${target}: total is not typed`);
+    assert.match(ok(['llvm-dwarfdump', '--verify', exe]).stdout, /No errors\./, `${target}: DWARF does not verify`);
+  }
+  console.log('debug-lines: aarch64 and riscv64 DWARF line rows, typed variables, verified');
 
   // Windows x86-64: CodeView line tables in the object, a PDB from lld-link /DEBUG, and the
   // function unwind entries still present (debug labels and .cv_ directives sit in the prologue).
@@ -137,7 +156,7 @@ try {
   console.log(`debug-lines: windows-x86_64 PDB rows for lines ${[...new Set(pdbRows)].sort((a, b) => a - b).join(', ')}; unwind entries kept`);
 
   console.log(`debug-lines: ${mainRows.length} source rows verified (lines ${[...lines].sort((a, b) => a - b).join(', ')})`);
-  console.log('debug-lines: plain build has no line table; aarch64 --debug rejected');
+  console.log('debug-lines: plain build has no line table; windows-aarch64 --debug rejected');
 } finally {
   rmSync(work, { recursive: true, force: true });
 }

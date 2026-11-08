@@ -231,9 +231,8 @@ Not implemented yet, and each rejected rather than approximated:
   same SysV/AAPCS64 lowering but are compiled and linked only (no macOS runner);
 - nested C records (a nested Grail record value is a pointer, so embedding it by value
   needs a copy/alias representation that does not exist yet), records *passed* by value as
-  arguments (an extern record parameter is the C `R *`), and records with float fields as
-  by-value results (their SSE/HFA classification is not implemented; integer-field record
-  results are returned by value on every ABI, see `tests/ffi/call_records.grl`);
+  arguments (an extern record parameter is the C `R *`); record results are returned by value on
+  every ABI, float fields included (`tests/ffi/call_records.grl`, `float_record_results.grl`);
 - variadic callbacks, callback results that are themselves function pointers, and
   taking the address of a foreign *declaration* (`f := c_add;` is rejected: a C
   declaration is not a Grail function value);
@@ -241,7 +240,6 @@ Not implemented yet, and each rejected rather than approximated:
   Windows x86-64 needs none, since `LoadLibraryA`/`GetProcAddress` are ordinary imports and the
   runtime does not own the TEB), and foreign calls or callbacks on threads other than the main
   thread on Linux;
-- variadic calls on macOS arm64, where every variadic argument goes on the stack.
 
 ## Dynamic loading and the host TLS bridge
 
