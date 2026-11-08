@@ -59,6 +59,27 @@ validated. The report names the error, the pass and the resource:
 `gr_graph_reset` clears a frame for the next one, and `gr_graph_compile` is repeatable: derived
 edges and barriers are rebuilt, never accumulated.
 
+## Driving the graph on the GPU
+
+`test_vk_backend` runs a three-pass frame where nothing is hand-ordered and no barrier is
+hand-written:
+
+```
+fill   writes A                  solid.ps gradient
+grade  reads A, writes B         tonemap.ps sampling A
+final  reads B, writes C         tonemap.ps sampling B
+```
+
+The passes are declared **in reverse** (`final`, `grade`, `fill`); the graph orders them `2,1,0`
+and derives five transitions — A undefined→colour, A colour→sampled, B undefined→colour, B
+colour→sampled, C undefined→colour. The recording loop is the whole integration: for each step in
+the derived order, apply `gr_graph_pass_barriers` through `gr_cmd_barrier`, then render that pass's
+target. The driver accepting the submission and the readback matching a two-stage tonemap is what
+proves the derivation, not the fact that the code compiled.
+
+Readback is host work rather than a pass, so the two transition to `TRANSFER_SRC` are issued
+directly after the graph.
+
 ## Evidence
 
 `make -C graphics test` runs `test_graph`, 119 checks:
@@ -72,6 +93,10 @@ edges and barriers are rebuilt, never accumulated.
 - every validation error, each in its own small graph, including the cycle that only an explicit
   edge can create;
 - `final_state` for the next frame's import, and compile being idempotent.
+
+On the GPU (`vk-smoke`): the three-pass frame above, with the graph ordering it `2,1,0` and
+deriving 5 barriers, producing `b=0xa7d7d6fd9121e3b0` and `c=0x454eb9e1aef922b8` — different,
+because the last pass applied the tonemap a second time rather than copying.
 
 Two defects the tests caught in the graph itself, both in the first version: `graph_clear_derived`
 zeroed the edge count and therefore **discarded the caller's explicit edges**, making

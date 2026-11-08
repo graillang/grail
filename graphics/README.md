@@ -54,7 +54,7 @@ docs/                     the contract, the shader flow, dependencies, blockers
 | D3D12 / Metal backends | **not implemented** (`GR_ERROR_UNSUPPORTED`) |
 | Permutations | each combination compiled to its own SPIR-V/DXIL/blob; digests and keys tested |
 | Key → bytecode resolution | implemented: library index, lazy cache, miss/mismatch/exhaustion statuses |
-| Render graph | passes/resources, derived order and barriers, culling, cycle/duplicate/use-before-write validation |
+| Render graph | passes/resources, derived order and barriers, culling, validation — and driving a real three-pass Vulkan frame |
 | Calling this from a Grail program | **blocked** — see `docs/first-renderer-port.md` |
 
 ## Build and test
