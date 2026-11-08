@@ -113,6 +113,20 @@ try {
   assert.notEqual(rejected.status, 0, '--debug was accepted for aarch64');
   assert.match(`${rejected.stdout}${rejected.stderr}`, /only implemented for Linux x86_64/, 'missing target diagnostic');
 
+  // Windows x86-64: CodeView line tables in the object, a PDB from lld-link /DEBUG, and the
+  // function unwind entries still present (debug labels and .cv_ directives sit in the prologue).
+  const { compileProgram } = await import('./windows.mjs');
+  const win = compileProgram(compiler, [source], join(work, 'windows'), { debug: true });
+  const pdbLines = ok(['llvm-pdbutil', 'dump', '-l', win.pdb]).stdout;
+  // Only main.grl's block: the PDB also covers the runtime modules.
+  const mainBlock = pdbLines.slice(pdbLines.indexOf('main.grl')).split(/\n\S/)[0];
+  const pdbRows = [...mainBlock.matchAll(/(\d+) [0-9A-F]{8} !/g)].map(m => Number(m[1]));
+  for (const line of [2, 5, 6]) assert.ok(pdbRows.includes(line), `PDB has no row for line ${line}: ${pdbRows}`);
+  const unwind = ok(['llvm-readobj', '--unwind', win.object]).stdout;
+  assert.match(unwind, /StartAddress: f_main_main/, 'debug build lost the main unwind entry');
+  assert.match(unwind, /StartAddress: f_main_add/, 'debug build lost the add unwind entry');
+  console.log(`debug-lines: windows-x86_64 PDB rows for lines ${[...new Set(pdbRows)].sort((a, b) => a - b).join(', ')}; unwind entries kept`);
+
   console.log(`debug-lines: ${mainRows.length} source rows verified (lines ${[...lines].sort((a, b) => a - b).join(', ')})`);
   console.log('debug-lines: plain build has no line table; aarch64 --debug rejected');
 } finally {

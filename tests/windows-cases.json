@@ -121,5 +121,16 @@
     "stdout": "not found\nok\nok\ndirectory not empty\nok\nnot a directory\nok\nok\n",
     "status": 0,
     "note": "Win32 GetLastError codes map to the errno values io::Error understands (ENOENT, ENOTDIR, ENOTEMPTY, ...)"
+  },
+  {
+    "name": "ffi-call-records",
+    "shim": {
+      "windows-x86_64": "tests/ffi/abi_shim.c",
+      "windows-aarch64": "tests/ffi/abi_shim.c"
+    },
+    "source": "// C records returned by value: an 8-byte record in one register, a 16-byte record in two\n// (by hidden pointer on Win64), and a 24-byte record through a hidden result pointer, which\n// shifts the arguments on SysV, Win64 and RV64 but is x8 on AAPCS64.\nextern \"C\" record Pair32 { a: i32, b: i32 }\nextern \"C\" record Span16 { start: i64, len: i64 }\nextern \"C\" record Triple { x: i64, y: i64, z: i32 }\nextern \"C\" lib \"shim.o\" fn c_make_pair(a: i32, b: i32) -> Pair32;\nextern \"C\" lib \"shim.o\" fn c_make_span(start: i64, len: i64) -> Span16;\nextern \"C\" lib \"shim.o\" fn c_make_triple(x: i64, y: i64, z: i32, scale: f64) -> Triple;\n\nfn main() -> u64 {\n    unsafe {\n        p := c_make_pair(-7, 300000);\n        println(p.a);\n        println(p.b);\n        s := c_make_span(4096, -12);\n        println(s.start);\n        println(s.len);\n        t := c_make_triple(21, -5, 77, 2.0);\n        println(t.x);\n        println(t.y);\n        println(t.z);\n    }\n    return 0;\n}\n",
+    "stdout": "-7\n300000\n4096\n-12\n42\n-5\n77\n",
+    "status": 0,
+    "note": "Win64 record results: 8 bytes in rax, 16 and 24 bytes through a hidden pointer in rcx"
   }
 ]

@@ -36,6 +36,12 @@ const fixtures = [
     symbols: ['c_point_sum', 'c_point_swap', 'c_mixed_sum', 'c_mixed_fill', 'c_mixed_size', 'c_mixed_off_d'],
   },
   {
+    // C records returned by value in registers and through a hidden result pointer.
+    name: 'call_records',
+    stdout: '-7\n300000\n4096\n-12\n42\n-5\n77\n',
+    symbols: ['c_make_pair', 'c_make_span', 'c_make_triple'],
+  },
+  {
     // Floats, narrow integers and stack arguments: 1.5+2.25; 2^24+1 rounded in binary32;
     // -3+0.5+4e9+0.25+100; 1234.75 with Win64 stack slots; 385 from ten floats and ten
     // integers; -5; u32 max; -101; 65535+1 wraps to 0; an unsigned 32-bit compare.
