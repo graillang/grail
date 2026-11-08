@@ -41,11 +41,14 @@ extern "C" fn c_identity(v: u64) -> u64;
 | `&mut [u8]` (parameter) | `uint8_t *, size_t` | two: pointer then length |
 | `CStr` | `const char *` (NUL-terminated) | one 64-bit pointer |
 | `handle H` | an opaque C token (`uint64_t` by convention) | one 64-bit word |
+| `extern "C" record R` (parameter) | `R *`, the address of the struct's fields | one 64-bit pointer |
 | `unit` (result only) | `void` | result register ignored |
 
 Results may be `i64`, `u64`, `unit`, `CStr` or a `handle`: one word each. A view is never
 a result, because C cannot produce a Grail view record; a C function that fills a buffer
-returns a length or status instead, and the Grail side re-slices.
+returns a length or status instead, and the Grail side re-slices. A C-layout record is
+never a result either: a returned pointer would be C-owned memory that Grail's drop would
+free, so callers pass an out-parameter record instead.
 
 Anything else — narrower integers, floats, `string`, references, records, closures — is
 rejected with a diagnostic. Later increments widen this table; until they land, writing
@@ -67,6 +70,35 @@ is a byte sequence or view whose last byte is NUL: the cast is zero-copy and che
 terminator at runtime (a non-terminated sequence aborts). It is `unsafe` because the
 pointer has no lifetime tracking across the call: C may keep it, and the bytes stay owned
 by Grail.
+
+### C-layout records
+
+```grl
+extern "C" record Mixed { a: i32, b: i16, c: i8, d: i64 }
+
+extern "C" fn c_mixed_fill(m: Mixed, d: i64) -> i64;
+```
+
+`extern "C" record` matches a C `struct` exactly:
+
+- fields are laid out with C rules — natural alignment, padding between fields, and tail
+  padding up to the record alignment — so `offsetof` agrees with the C compiler
+  (`a: i32, b: i16, c: i8, d: i64` is `0, 4, 6, 8`, size 16, alignment 8);
+- a field may be an 8/16/32/64-bit integer, a `handle` or a `CStr`; anything else
+  (including a nested record, a `string`, a view or a float) is rejected, because a Grail
+  record value is a pointer and embedding one would store the pointer, not the bytes;
+- field reads and writes use the field's own width, so `i8`/`i16`/`i32` values are
+  truncated on store and sign- or zero-extended on load. Sub-word access is implemented
+  with portable byte-wise runtime helpers, so all three targets share one implementation
+  (`rt_load_sized`/`rt_store_sized`);
+- a record *parameter* is passed as the address of the struct's fields, i.e. the C
+  `R *`. The call borrows the record for its duration: Grail keeps ownership of the
+  allocation and frees it at the end of the Grail scope, so C must not free or retain it;
+- record construction allocates the C size rounded up to whole eight-byte words, and the
+  drop path frees exactly that allocation.
+
+Verified by `tests/ffi/extern_records.grl`: the C shim reads fields Grail wrote, writes
+fields Grail reads back, and checks its own `offsetof`/`sizeof` values.
 
 ### Opaque handles
 
@@ -143,11 +175,13 @@ Not implemented yet, and each rejected rather than approximated:
   the boundary;
 - floating-point arguments and results (`xmm0-7` / `v0-7` / `fa0-7` and the SysV SSE
   classification);
-- `extern record` C layout and records crossing by value or reference;
+- nested C records (a nested Grail record value is a pointer, so embedding it by value
+  needs a copy/alias representation that does not exist yet), C records in results, C
+  records containing floats or pointers, and by-value struct passing (SysV eightbyte
+  classification and `sret`);
 - callbacks, function pointers, and taking the address of a foreign declaration
   (`f := c_add;` is rejected: a C declaration is not a Grail function value);
-- by-value struct arguments/results (including SysV eightbyte classification and
-  `sret`), and stack-passed arguments beyond six;
+- stack-passed arguments beyond six;
 - dynamic library loading (`dlopen`/`dlsym` hooks);
 - variadic C functions.
 
@@ -164,7 +198,8 @@ compiles `tests/ffi/call_scalars.grl` with the FFI build, links the two through 
 - the linked executables run and return the expected values — `call_scalars` checks the
   six-argument call, the `as` rename and `u64` results (`83`, `7`), `views_handles` checks
   a NUL-terminated `CStr`, a read-only view, a mutable view written by C, and a handle
-  round trip (`259`, `1`) — executed on the host, and on a cross target when
+  round trip (`259`, `1`), and `extern_records` checks C layout in both directions
+  (`1606`, `23`, `16`, `-2`, `7`) — executed on the host, and on a cross target when
   `qemu-<target>-static` is installed; otherwise the cross targets are linked and the
   ABI-level check is reported as link-only.
 
