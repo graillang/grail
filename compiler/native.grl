@@ -174,7 +174,11 @@ struct DebugVar {
     name: u8[],
     slot: u64,
     line: u64,
-    param: u64
+    param: u64,
+    // DWARF base type of the value in the 8-byte slot: name, DW_ATE encoding, byte size.
+    tname: u8[],
+    tenc: u64,
+    tsize: u64
 }
 struct DebugSite {
     file: u64,
@@ -509,6 +513,90 @@ fn dlocation<a>(out: (&a mut u8[]), slot: u64) -> unit {
     }
     return ();
 }
+// DWARF base types for a Grail value held in an 8-byte slot. Integers, floats, bool and char
+// are exact (all targets are little-endian, so a narrow value's bytes start the slot; an f32
+// slot holds the binary64 word of its value and is described as an 8-byte float); a
+// string, record or other owned value is shown as its 8-byte handle, named after its type.
+fn debug_type_name<a>(c: (&a mut C), ty: u64) -> u8[] {
+    mut out = u8[];
+    if ty == 0 {
+        push_bytes(&mut out, view("u64"));
+        return out;
+    }
+    k := ty_kind(&mut c, ty);
+    if k == 18 {
+        if ty_mode(&mut c, ty) {
+            out.push(105);
+        } else {
+            out.push(117);
+        }
+        decimal(&mut out, ty_arg(&mut c, ty));
+        return out;
+    }
+    if k == 21 {
+        if is_f32(&mut c, ty) {
+            push_bytes(&mut out, view("f32"));
+        } else {
+            push_bytes(&mut out, view("f64"));
+        }
+        return out;
+    }
+    if k == 19 {
+        push_bytes(&mut out, view("bool"));
+        return out;
+    }
+    if k == 22 {
+        push_bytes(&mut out, view("char"));
+        return out;
+    }
+    if k == 3 {
+        push_bytes(&mut out, view("string"));
+        return out;
+    }
+    if k == 8 {
+        d := ty_arg(&mut c, ty);
+        push_bytes(&mut out, view(c.decls[d].name));
+        return out;
+    }
+    push_bytes(&mut out, view("word"));
+    return out;
+}
+fn debug_type_encoding<a>(c: (&a mut C), ty: u64) -> u64 {
+    if ty == 0 {
+        return 7;
+    }
+    k := ty_kind(&mut c, ty);
+    if k == 18 {
+        if ty_mode(&mut c, ty) {
+            return 5;
+        }
+        return 7;
+    }
+    if k == 21 {
+        return 4;
+    }
+    if k == 19 {
+        return 2;
+    }
+    if k == 22 {
+        return 16;
+    }
+    return 7;
+}
+fn debug_type_size<a>(c: (&a mut C), ty: u64) -> u64 {
+    if ty == 0 {
+        return 8;
+    }
+    k := ty_kind(&mut c, ty);
+    if k == 18 {
+        return ty_arg(&mut c, ty) / 8;
+    }
+    // An f32 value is held as the binary64 word of its value, so its slot reads as a double.
+    if k == 22 {
+        return 4;
+    }
+    return 8;
+}
 fn record_debug_func<a, b, d>(c: (&a mut C), name: &b [u8], module: &d [u8], site: &DebugSite) -> unit {
     mut vars = DebugVar[];
     for i in c.debug_vars.len() {
@@ -518,7 +606,10 @@ fn record_debug_func<a, b, d>(c: (&a mut C), name: &b [u8], module: &d [u8], sit
                 name: copy_bytes(view(l.name)),
                 slot: l.slot,
                 line: l.line,
-                param: l.param
+                param: l.param,
+                tname: copy_bytes(view(l.tname)),
+                tenc: l.tenc,
+                tsize: l.tsize
             }
         );
     }
@@ -573,6 +664,7 @@ fn debug_sections<a, b>(c: &a C, entry: &b [u8]) -> u8[] {
     dattr(&mut out, 0x03, 0x08);
     dattr(&mut out, 0x02, 0x18);
     dattr(&mut out, 0x3b, 0x0f);
+    dattr(&mut out, 0x49, 0x13);
     dput(&mut out, view(".byte 0\n.byte 0\n"));
     // 4: local variable, no children.
     duleb(&mut out, 4);
@@ -580,6 +672,14 @@ fn debug_sections<a, b>(c: &a C, entry: &b [u8]) -> u8[] {
     dattr(&mut out, 0x03, 0x08);
     dattr(&mut out, 0x02, 0x18);
     dattr(&mut out, 0x3b, 0x0f);
+    dattr(&mut out, 0x49, 0x13);
+    dput(&mut out, view(".byte 0\n.byte 0\n"));
+    // 5: base type: name, encoding, byte size.
+    duleb(&mut out, 5);
+    dput(&mut out, view(".uleb128 36\n.byte 0\n"));
+    dattr(&mut out, 0x03, 0x08);
+    dattr(&mut out, 0x3e, 0x0b);
+    dattr(&mut out, 0x0b, 0x0b);
     dput(&mut out, view(".byte 0\n.byte 0\n"));
     dput(&mut out, view(".byte 0\n"));
 
@@ -607,6 +707,28 @@ fn debug_sections<a, b>(c: &a C, entry: &b [u8]) -> u8[] {
         dput(&mut out, view("-.L"));
         dnum(&mut out, first_start);
         dput(&mut out, view("\n.long 0\n"));
+    }
+    // One base-type DIE per distinct type name, labelled .Ldebug_type_N; DW_AT_type is the
+    // CU-relative offset (from the unit length field, four bytes before .Ldebug_cu_start).
+    mut tnames = u8[][];
+    for i in c.debug_funcs.len() {
+        f := &c.debug_funcs[i];
+        for j in f.vars.len() {
+            v := &f.vars[j];
+            if debug_type_index(&tnames, view(v.tname)) == tnames.len() {
+                tnames.push(copy_bytes(view(v.tname)));
+                dput(&mut out, view(".Ldebug_type_"));
+                dnum(&mut out, tnames.len() - 1);
+                dput(&mut out, view(":\n"));
+                duleb(&mut out, 5);
+                dstring(&mut out, view(v.tname));
+                dput(&mut out, view(".byte "));
+                dnum(&mut out, v.tenc);
+                dput(&mut out, view("\n.byte "));
+                dnum(&mut out, v.tsize);
+                dput(&mut out, view("\n"));
+            }
+        }
     }
 
     for i in c.debug_funcs.len() {
@@ -645,12 +767,22 @@ fn debug_sections<a, b>(c: &a C, entry: &b [u8]) -> u8[] {
             dlocation(&mut out, v.slot);
             dput(&mut out, view(".uleb128 "));
             dnum(&mut out, v.line);
-            dput(&mut out, view("\n"));
+            dput(&mut out, view("\n.long .Ldebug_type_"));
+            dnum(&mut out, debug_type_index(&tnames, view(v.tname)));
+            dput(&mut out, view("-.Ldebug_cu_start+4\n"));
         }
         dput(&mut out, view(".byte 0\n"));
     }
     dput(&mut out, view(".byte 0\n.Ldebug_cu_end:\n"));
     return out;
+}
+fn debug_type_index<a, b>(names: &a u8[][], name: &b [u8]) -> u64 {
+    for i in names.len() {
+        if same(view(names[i]), view(name)) {
+            return i;
+        }
+    }
+    return names.len();
 }
 // Source line/column of the current token. The assembler turns .loc into .debug_line.
 fn emit_loc<a>(c: (&a mut C)) -> unit {
@@ -4887,7 +5019,10 @@ fn bind<a>(c: (&a mut C), name: u8[], ty: u64, id: u64, mutable: u64) -> unit {
                     name: debug_name,
                     slot: id,
                     line: line,
-                    param: 0
+                    param: 0,
+                    tname: debug_type_name(&mut c, ty),
+                    tenc: debug_type_encoding(&mut c, ty),
+                    tsize: debug_type_size(&mut c, ty)
                 }
             );
     }

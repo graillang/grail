@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- DWARF variable types: `--debug` on Linux x86-64 now gives every parameter and local a
+  `DW_AT_type` base type (signed/unsigned integers of their width, `f64`/`f32`, `bool`, `char`;
+  strings, records and other owned values as named 8-byte handles), so gdb prints
+  `count = -3`, `ratio = 2.5`, `flag = true`; `llvm-dwarfdump --verify` reports no errors.
+
 - Dynamic loading on AArch64 and RISC-V 64 Linux: the host-TLS bridge (switching the thread
   pointer between Grail's worker record and glibc's TCB around foreign calls and callbacks) now
   covers `tpidr_el0` and `tp`, written directly instead of through `arch_prctl`. With a glibc
