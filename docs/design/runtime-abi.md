@@ -4,9 +4,9 @@
 `include/grail/` are the normative contract. Portable pieces (versioning, error mapping,
 Unicode, lexical paths) are implemented and tested; the Linux reference shim implements files,
 directories, environment, time, threads, dynamic libraries, child processes and TCP/UDP
-sockets. Windows and macOS have statically verified first-layer backends for init/time/
-environment/cwd/executable and file basics, with every unimplemented function explicitly
-fail-closed. Nothing here is linked into Grail programs yet, and no C source is part of the
+sockets. Windows and macOS have statically verified backends for init/time/environment/
+cwd/executable, file basics, directory iteration, threads/synchronization and dynamic
+libraries, with every unimplemented function explicitly fail-closed. Nothing here is linked into Grail programs yet, and no C source is part of the
 compiler or runtime build.
 
 The runtime today is Linux-only: `compiler/runtime.grl` maps portable operation IDs to Linux
@@ -136,23 +136,23 @@ pair, structs crossing by reference, opaque `handle`, linear ownership) maps dir
 
 ## Domain status
 
-| Domain | Header | Portable implementation | Linux reference | Windows first layer | macOS first layer |
+| Domain | Header | Portable implementation | Linux reference | Windows | macOS |
 | --- | --- | --- | --- | --- | --- |
 | Core, error, Unicode | `grail_abi.h`, `grail_error.h`, `grail_unicode.h` | yes, tested | n/a | n/a | n/a |
 | Time | `grail_time.h` | n/a | monotonic/realtime/CPU, sleep, local offset | monotonic/realtime/CPU, sleep | monotonic/realtime/CPU, sleep |
 | Environment | `grail_env.h` | shared store | get/set/unset/enumerate | get/set/unset/enumerate | get/set/unset/enumerate |
 | Files/pipes | `grail_fs.h` | handle table | open/read/write/seek/truncate/sync/stat/close, pipe | open/read/write/seek/truncate/sync/stat/close, pipe | open/read/write/seek/truncate/sync/non-blocking/close, pipe |
 | File metadata | `grail_fs.h` | format | `file_stat`/`fs_stat` | `file_stat`/`fs_stat` | not implemented |
-| Directories | `grail_fs.h` | handle table | open/next/close, mkdir/remove/rename | mkdir/remove/rename only | mkdir/remove/rename only |
+| Directories | `grail_fs.h` | handle table | open/next/close, mkdir/remove/rename | FindFirstFileW/FindNextFileW, mkdir/remove/rename | opendir/readdir, mkdir/remove/rename |
 | Paths | `grail_path.h` | POSIX + Windows rules, both tested | cwd, executable | cwd, executable | cwd, executable |
 | Processes | `grail_proc.h` | options/status layout | fork/execve/wait4 subset | not implemented | not implemented |
 | Sockets | `grail_socket.h` | address layout | TCP/UDP IPv4+IPv6, options, DNS | not implemented | not implemented |
-| Threads/sync | `grail_thread.h` | handle table | pthread thread, mutex, condvar | not implemented | not implemented |
-| Dynamic libraries | `grail_dl.h` | handle table | dlopen/dlsym/dlclose | not implemented | not implemented |
+| Threads/sync | `grail_thread.h` | handle table | pthread thread, mutex, condvar | CreateThread/SRWLOCK/CONDITION_VARIABLE | pthread thread/mutex/condvar |
+| Dynamic libraries | `grail_dl.h` | handle table | dlopen/dlsym/dlclose | LoadLibraryExW/GetProcAddress | dlopen/dlsym/dlclose |
 
-The first-layer backends use pinned Win32 and Darwin declarations rather than platform SDK
-headers, so they can be compiled for Win64 and Apple ARM64 on this host. They have not been
-executed on those systems. `GRAIL_CAP_FILE_METADATA` separates byte I/O from metadata;
+The Windows and macOS backends use pinned Win32 and Darwin declarations rather than platform
+SDK headers, so they can be compiled for Win64 and Apple ARM64 on this host. They have not
+been executed on those systems. `GRAIL_CAP_FILE_METADATA` separates byte I/O from metadata;
 Linux and Windows set it, macOS clears it. `GRAIL_CAP_FILE_NONBLOCKING` separately covers
 `file_set_nonblocking`; Linux and macOS set it, Windows clears it. `GRAIL_CAP_SYMLINKS`
 covers `readlink`/`realpath`; Linux and macOS set it, Windows clears it.
@@ -198,16 +198,15 @@ implemented TCP/UDP/`accept4`/`getaddrinfo` subset behind the readiness reactor;
 for birth time; and keep raw descriptors and syscalls out of safe code. The C reference is the
 behavioural oracle, not a replacement runtime.
 
-Windows first layer is implemented but not runtime-tested. Remaining: run the backend on a real
-Windows host; compare the pinned declarations with the current SDK; add `\\?\` long paths and
-reserved-name policy, directory enumeration, reparse-point metadata, local-time offsets,
-processes, sockets, threads/synchronization and dynamic libraries; add Windows behaviour tests
-and set the corresponding capability bits only after they pass.
+Windows implementation is static-only until it runs on a real Windows host. Remaining: compare
+the pinned declarations with the current SDK; add `\\?\` long paths and reserved-name policy,
+reparse-point metadata, local-time offsets, processes and sockets; apply thread names; define
+the loader search-flag semantics; add Windows behaviour tests and set the corresponding
+capability bits only after they pass.
 
-macOS first layer is implemented but not runtime-tested. Remaining: run the backend on macOS;
-verify the pinned libSystem declarations and add a pinned `struct stat` for metadata; directory
-enumeration, local-time offsets, processes, sockets, threads/synchronization and dynamic
-libraries; framework/`.tbd` link inputs belong to the macOS backend lane.
+macOS implementation is static-only until it runs on macOS. Remaining: verify the pinned
+libSystem declarations and add a pinned `struct stat` for metadata; local-time offsets,
+processes and sockets; framework/`.tbd` link inputs belong to the macOS backend lane.
 
 Both non-Linux backends also need ABI bridge work outside this directory: Win64 argument
 registers/shadow space and Apple ARM64 symbol conventions are compiler/codegen responsibilities.

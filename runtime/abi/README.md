@@ -14,11 +14,11 @@ runtime/abi/              portable implementation + native backends
   grail_unicode.c         strict UTF-8 / UTF-16
   grail_path.c            POSIX and Windows lexical rules (one file, two modes)
   grail_handle_table.[ch] generation-checked linear handles
-  grail_error_posix.c     Linux/macOS errno mapping (hosted POSIX only)
+  grail_error_posix.c     Linux errno mapping (hosted POSIX only)
   grail_env_store.[ch]    shared UTF-8 environment store and snapshots
   linux/                  hosted reference backend
-  windows/                first-layer Win32 backend + fail-closed stubs
-  macos/                  first-layer libSystem backend + fail-closed stubs
+  windows/                Win32 backend + fail-closed stubs
+  macos/                  libSystem backend + fail-closed stubs
 tests/abi/                C contract and behaviour tests
 tools/abi-test.mjs        test runner (also `just abi-test`)
 ```
@@ -55,11 +55,11 @@ tools/abi-test.mjs        test runner (also `just abi-test`)
 | Paths | header | POSIX + Windows rules, both tested | cwd, set-cwd, executable | cwd, set-cwd, executable | cwd, set-cwd, executable |
 | Files/pipes | header | handle table | open/read/write/seek/truncate/sync/stat/close, pipe | open/read/write/seek/truncate/sync/stat/close, pipe | open/read/write/seek/truncate/sync/non-blocking/close, pipe |
 | File metadata | header | format | stat | stat | not implemented |
-| Directories | header | handle table | open/next/close, mkdir/remove/rename | mkdir/remove/rename only | mkdir/remove/rename only |
+| Directories | header | handle table | open/next/close, mkdir/remove/rename | open/next/close, mkdir/remove/rename | open/next/close, mkdir/remove/rename |
 | Environment | header | env store | get/set/unset/iterate | get/set/unset/iterate | get/set/unset/iterate |
 | Time | header | n/a | monotonic/realtime/CPU, sleep, local offset | monotonic/realtime/CPU, sleep | monotonic/realtime/CPU, sleep |
-| Threads/sync | header | handle table | complete subset | not implemented | not implemented |
-| Dynamic libraries | header | handle table | complete subset | not implemented | not implemented |
+| Threads/sync | header | handle table | complete subset | thread/mutex/condvar | thread/mutex/condvar |
+| Dynamic libraries | header | handle table | complete subset | LoadLibraryExW/GetProcAddress | dlopen/dlsym |
 | Processes | header | options/status layout | fork/execve/wait4 subset | not implemented | not implemented |
 | Sockets/DNS | header | address layout | TCP/UDP IPv4+IPv6, options, DNS | not implemented | not implemented |
 
@@ -71,7 +71,7 @@ succeeds, `accept4`, send/receive, shutdown, address queries, non-blocking mode,
 socket options and `getaddrinfo`). Readiness registration remains private to the shipping
 runtime, and the C layer must not become a second scheduler.
 
-The Windows and macOS backends are **first-layer, statically verified implementations**: they
+The Windows and macOS backends are **statically verified implementations**: they
 compile for Win64 and Apple ARM64 but have not been executed on those systems. Their
 unimplemented functions are present as explicit `GRAIL_E_UNSUPPORTED` stubs, and their
 capability words advertise only what is implemented. `GRAIL_CAP_FILE_METADATA` distinguishes
@@ -102,22 +102,28 @@ Deliberate limits, all visible in the API or capability word:
 - File descriptors are opened `O_CLOEXEC`; the process backend must duplicate explicit
   standard-stream handles rather than relying on inheritance.
 
-## Windows mapping (for the Windows backend lane)
+## Windows implementation and remaining mapping
 
-Implemented first layer in `windows/grail_os_windows.c`: init/shutdown/capabilities/error
-detail; monotonic, realtime and process/thread CPU clocks with `Sleep`; environment
+Implemented in `windows/grail_os_windows.c`: init/shutdown/capabilities/error detail;
+monotonic, realtime and process/thread CPU clocks with `Sleep`; environment
 get/set/unset/snapshot iteration; current directory, executable path; file
-open/read/write/seek/truncate/sync/stat/close; pipes; path stat, mkdir, remove and rename.
+open/read/write/seek/truncate/sync/stat/close; pipes; path stat, mkdir (including parents),
+remove and rename; `FindFirstFileW`/`FindNextFileW` directory iteration; `CreateThread`/
+`WaitForSingleObject` threads; `SRWLOCK` mutexes and `CONDITION_VARIABLE` condition variables;
+`LoadLibraryExW`/`GetProcAddress`/`FreeLibrary` with `FormatMessageW` loader errors.
 `windows/grail_os_windows_stubs.c` returns `GRAIL_E_UNSUPPORTED` for non-blocking files,
-readlink/realpath, directory iteration, local-time offsets, processes, sockets, threads/sync
-and dynamic libraries. `GRAIL_CAP_FILES | GRAIL_CAP_FILE_METADATA | GRAIL_CAP_PATHS |
-GRAIL_CAP_ENVIRONMENT | GRAIL_CAP_ENV_MUTATION | GRAIL_CAP_TIME | GRAIL_CAP_CPU_TIME` are set.
+readlink/realpath, local-time offsets, processes and sockets. Capabilities are
+`GRAIL_CAP_FILES | GRAIL_CAP_FILE_METADATA | GRAIL_CAP_PATHS | GRAIL_CAP_UNICODE |
+GRAIL_CAP_ENVIRONMENT | GRAIL_CAP_ENV_MUTATION | GRAIL_CAP_TIME | GRAIL_CAP_CPU_TIME |
+GRAIL_CAP_DIRECTORIES | GRAIL_CAP_THREADS | GRAIL_CAP_SYNC_PRIMITIVES |
+GRAIL_CAP_DYNAMIC_LIBRARIES`. Thread names are not applied, and `GRAIL_DL_LAZY`/`GLOBAL`
+are accepted as no-ops because Win32 has no direct equivalents.
 
 All paths cross the boundary as UTF-8 and are converted to UTF-16 with
 `MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS)`; output paths use
 `WideCharToMultiByte`. The declarations are pinned in `grail_win32.h` so a host without the
-Windows SDK can compile-check the backend. The table below remains the checklist for the
-unimplemented parts.
+Windows SDK can compile-check the backend. The bullets below record the platform APIs used by
+the implemented layer and the advanced options still to add.
 
 - **Init:** `WSAStartup(MAKEWORD(2,2))`, initial environment snapshot from
   `GetEnvironmentStringsW`, console setup (`SetConsoleOutputCP(CP_UTF8)` and
@@ -174,22 +180,26 @@ convention. Win64 uses `rcx, rdx, r8, r9`, 32 bytes of shadow space, different c
 registers and a 128-byte red zone is absent. Calling these symbols from generated code needs a
 Win64 codegen path; the ABI's six-argument ceiling keeps that path free of stack arguments.
 
-## macOS first layer
+## macOS implementation
 
 Implemented in `macos/grail_os_macos.c` with declarations pinned in `grail_macos.h`:
 init/shutdown/capabilities/error detail; `clock_gettime`/`clock_getres`/`nanosleep` for
 realtime, monotonic, process and thread CPU clocks; environment get/set/unset/snapshot
 iteration; `getcwd`/`chdir` and `_NSGetExecutablePath`+`realpath`; file
 open/read/write/seek/truncate/sync/set-non-blocking/close with `O_CLOEXEC`; pipes with
-`FD_CLOEXEC`; mkdir/remove/rename, readlink and realpath. `macos/grail_os_macos_stubs.c`
-returns `GRAIL_E_UNSUPPORTED` for metadata, directory iteration, local-time offsets,
-processes, sockets, threads/sync and dynamic libraries. Capabilities are
+`FD_CLOEXEC`; mkdir (including parents)/remove/rename, readlink and realpath;
+`opendir`/`readdir` directory iteration with a pinned 64-bit `struct dirent`;
+`pthread_create`/`pthread_join`/`pthread_detach` threads; pthread mutexes and relative-time
+condition variables; `dlopen`/`dlsym`/`dlclose` with loader error text.
+`macos/grail_os_macos_stubs.c` returns `GRAIL_E_UNSUPPORTED` for metadata, local-time
+offsets, processes and sockets. Capabilities are
 `GRAIL_CAP_FILES | GRAIL_CAP_FILE_NONBLOCKING | GRAIL_CAP_PATHS | GRAIL_CAP_UNICODE |
 GRAIL_CAP_ENVIRONMENT | GRAIL_CAP_ENV_MUTATION | GRAIL_CAP_TIME | GRAIL_CAP_CPU_TIME |
-GRAIL_CAP_SYMLINKS`; `GRAIL_CAP_FILE_METADATA` is clear because no `struct stat` layout is
-pinned yet.
+GRAIL_CAP_SYMLINKS | GRAIL_CAP_DIRECTORIES | GRAIL_CAP_THREADS |
+GRAIL_CAP_SYNC_PRIMITIVES | GRAIL_CAP_DYNAMIC_LIBRARIES`; `GRAIL_CAP_FILE_METADATA` is
+clear because no `struct stat` layout is pinned yet.
 
-## macOS mapping (remaining first-layer work)
+## macOS implementation and remaining mapping
 
 - **Init:** environment snapshot from `environ` (copy and validate UTF-8), thread-local error
   slot; no libc `setenv` dependency required for reads.
@@ -249,14 +259,19 @@ Limits of this evidence:
   strategy before it can claim thread-local detail.
 - Windows `NO_FOLLOW`/symlink metadata is limited by `GetFileAttributesExW`; `GRAIL_CAP_SYMLINKS`
   is clear. `mode` is not represented by Win32 file creation, and `file_truncate` moves the
-  file pointer. macOS `rename` without `GRAIL_RENAME_REPLACE` checks existence with `access`;
-  the check is best-effort and races with a concurrent creator. `mkdir` with
-  `GRAIL_MKDIR_PARENTS` is unsupported on both first-layer backends.
+  file pointer. Directory patterns use the normal Win32 path rules, not `\\?\` long paths.
+  Thread names are ignored and `GRAIL_DL_LAZY`/`GLOBAL` are no-ops on Windows; parent
+  creation for UNC paths is not supported. macOS `rename` without `GRAIL_RENAME_REPLACE`
+  checks existence with `access`; the check is best-effort and races with a concurrent
+  creator. The pinned Darwin `struct dirent` layout is used without the SDK, and `DT_UNKNOWN`
+  entries report `GRAIL_FILE_KIND_UNKNOWN` because metadata is unavailable. Thread names are
+  applied with `pthread_setname_np`. `GRAIL_THREAD_DETACHED` is rejected on all backends; use
+  `grail_os_thread_detach`.
 - The Win32 and Darwin declarations are pinned, not taken from the SDK. They match the 64-bit
   ABI used here, but a real platform build should compare them with the current SDK headers.
 - macOS metadata is deliberately absent; `struct stat` was not declared without an SDK.
-- Windows long-path (`\\?\`), reserved-name policy, reparse-point metadata and directory
-  enumeration are not implemented in the first layer.
+- Windows long-path (`\\?\`) and reserved-name policy are not implemented; directory
+  enumeration uses the normal Win32 path rules.
 - The Win64 codegen path in the compiler is still a prerequisite for calling these symbols from
   generated Grail code; the C backend compiles independently of that.
 

@@ -34,6 +34,28 @@ typedef struct grail_macos_unfair_lock {
     uint32_t opaque;
 } grail_macos_unfair_lock;
 
+typedef struct grail_macos_dir grail_macos_dir;
+
+typedef struct grail_macos_dirent {
+    uint64_t d_ino;
+    uint64_t d_seekoff;
+    uint16_t d_reclen;
+    uint16_t d_namlen;
+    uint8_t d_type;
+    char d_name[256];
+} grail_macos_dirent;
+
+typedef void *grail_macos_pthread_t;
+typedef struct grail_macos_pthread_mutex {
+    uint64_t opaque[8];
+} grail_macos_pthread_mutex_t;
+typedef struct grail_macos_pthread_cond {
+    uint64_t opaque[8];
+} grail_macos_pthread_cond_t;
+typedef struct grail_macos_pthread_attr {
+    uint64_t opaque[8];
+} grail_macos_pthread_attr_t;
+
 /* Darwin open/fcntl values. */
 #define GRAIL_MACOS_O_RDONLY 0x0000
 #define GRAIL_MACOS_O_WRONLY 0x0001
@@ -105,6 +127,18 @@ typedef struct grail_macos_unfair_lock {
 #define GRAIL_MACOS_ENOSYS 78
 #define GRAIL_MACOS_EOVERFLOW 84
 #define GRAIL_MACOS_ECANCELED 89
+#define GRAIL_MACOS_DT_UNKNOWN 0
+#define GRAIL_MACOS_DT_FIFO 1
+#define GRAIL_MACOS_DT_CHR 2
+#define GRAIL_MACOS_DT_DIR 4
+#define GRAIL_MACOS_DT_BLK 6
+#define GRAIL_MACOS_DT_REG 8
+#define GRAIL_MACOS_DT_LNK 10
+#define GRAIL_MACOS_DT_SOCK 12
+#define GRAIL_MACOS_RTLD_LAZY 0x1
+#define GRAIL_MACOS_RTLD_NOW 0x2
+#define GRAIL_MACOS_RTLD_LOCAL 0x4
+#define GRAIL_MACOS_RTLD_GLOBAL 0x8
 
 int open(const char *path, int flags, ...);
 int close(int descriptor);
@@ -133,6 +167,37 @@ int unsetenv(const char *name);
 int *__error(void);
 void os_unfair_lock_lock(grail_macos_unfair_lock *lock);
 void os_unfair_lock_unlock(grail_macos_unfair_lock *lock);
+grail_macos_dir *opendir(const char *path);
+grail_macos_dirent *readdir(grail_macos_dir *directory);
+int closedir(grail_macos_dir *directory);
+int pthread_create(grail_macos_pthread_t *thread, const grail_macos_pthread_attr_t *attributes,
+                   void *(*start)(void *), void *argument);
+int pthread_join(grail_macos_pthread_t thread, void **result);
+int pthread_detach(grail_macos_pthread_t thread);
+grail_macos_pthread_t pthread_self(void);
+int pthread_attr_init(grail_macos_pthread_attr_t *attributes);
+int pthread_attr_destroy(grail_macos_pthread_attr_t *attributes);
+int pthread_attr_setstacksize(grail_macos_pthread_attr_t *attributes, uint64_t size);
+int pthread_setname_np(const char *name);
+int pthread_mutex_init(grail_macos_pthread_mutex_t *mutex, const void *attributes);
+int pthread_mutex_destroy(grail_macos_pthread_mutex_t *mutex);
+int pthread_mutex_lock(grail_macos_pthread_mutex_t *mutex);
+int pthread_mutex_trylock(grail_macos_pthread_mutex_t *mutex);
+int pthread_mutex_unlock(grail_macos_pthread_mutex_t *mutex);
+int pthread_cond_init(grail_macos_pthread_cond_t *condition, const void *attributes);
+int pthread_cond_destroy(grail_macos_pthread_cond_t *condition);
+int pthread_cond_wait(grail_macos_pthread_cond_t *condition,
+                      grail_macos_pthread_mutex_t *mutex);
+int pthread_cond_timedwait_relative_np(grail_macos_pthread_cond_t *condition,
+                                       grail_macos_pthread_mutex_t *mutex,
+                                       const grail_macos_timespec *timeout);
+int pthread_cond_signal(grail_macos_pthread_cond_t *condition);
+int pthread_cond_broadcast(grail_macos_pthread_cond_t *condition);
+int sched_yield(void);
+void *dlopen(const char *path, int mode);
+void *dlsym(void *library, const char *name);
+int dlclose(void *library);
+char *dlerror(void);
 
 #ifdef __cplusplus
 }
