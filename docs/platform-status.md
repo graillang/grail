@@ -1,6 +1,6 @@
 # Cross-platform status
 
-Last verified: 2026-11-08 on `main` at `e124e43`.
+Last verified: 2026-11-08 on `main` at `6336b9d`.
 
 This page distinguishes what has actually been built and executed from scaffolding and
 static inspection. A cross-built object is not platform support. A header parsing is not a
@@ -13,7 +13,7 @@ backend. A project that has a port plan is not a port.
 | Linux x86-64 | ELF | 604 native/rejection tests, 174 CLI checks, 45 Grail + 45 Rust book checks, byte-identical self-host | **Supported** |
 | Linux AArch64 | ELF cross-image, refreshed bootstrap | Cross-build and ELF architecture checks only; no qemu runner here | Cross-build only |
 | Linux RISC-V64 | ELF cross-image, refreshed bootstrap | Cross-build and ELF architecture checks only; no qemu runner here | Cross-build only |
-| Windows x86-64 | PE32+ console image, COFF objects, kernel32 short-import objects | `bun tools/windows.mjs check` 7/7 statically verifies object and image; **not executed** | Compiler output only |
+| Windows x86-64 | PE32+ console image, COFF objects, kernel32 short-import objects, C runtime shims | `bun tools/windows.mjs check` 7/7; ABI shims cross-compile 8 objects/95 symbols; **not executed** | Compiler/runtime output only |
 | Windows AArch64 | None | None | Not started |
 | macOS AArch64 / x86-64 | Mach-O objects/exes verified on `feature/macos` | 4 objects + 4 executables statically checked; not executable here; branch blocked on stale bootstrap refresh | In review |
 
@@ -37,10 +37,11 @@ This is an ABI and reference-runtime layer, not yet a Grail-language standard li
 
 ## FFI and v3 ABI
 
-The v3 FFI is **not complete**. Extern-C declarations, callbacks, by-value struct passing,
-ownership transfer across the boundary, unsafe scopes and dynamic symbol loading remain in an
-isolated implementation lane. The C headers under `include/grail` are the runtime ABI contract,
-not proof that Grail programs can call arbitrary C yet.
+The first FFI slice is implemented: `extern "C"` declarations with `unsafe` calls, scalar
+parameters/results (up to six), symbol renaming and link notes. The C shim tests execute on
+x86-64 and cross-link on AArch64/RISC-V. Still missing: callbacks, opaque handles, byte/string
+views, records/struct layout, by-value structs, stack args, variadics and dynamic loading. The
+C headers under `include/grail` are the runtime ABI contract.
 
 ## Graphics and shaders
 
@@ -59,8 +60,8 @@ the SDL3 window backend and a renderer. The null backend validates contracts onl
 ## Tooling
 
 Implemented: deterministic native/cross build runner, platform matrix, packaging and checksums,
-signing hooks, install script, and CI plan/lint. Not implemented: LSP server, debugger,
-profiler, and Windows/macOS release artifacts (their compiler backends do not exist yet).
+signing hooks, install scripts, CI plan/lint, and an LSP MVP with compiler-sourced diagnostics.
+Not implemented: debugger, profiler, and hosted Windows/macOS release artifacts.
 
 ## Applications
 
@@ -74,6 +75,8 @@ RHI/renderer/editor and the Borg Agent service port are not yet claimed.
 bun tools/test-native.mjs       # Linux native/rejection corpus
 bun tools/abi-test.mjs          # runtime C ABI and reference backend
 bun tools/windows.mjs check     # Windows COFF/PE static checks, no execution
+bun tools/test-ffi.mjs          # extern "C" scalar ABI through a C shim
+bun test tools/lsp.test.mjs     # LSP stdio and diagnostics
 make -C graphics test           # RHI C ABI, null backend, shader library
 make -C graphics shader-check   # real DXC/SPIR-V artifacts and reflection
 make -C graphics perm-test      # shader permutations
