@@ -6,7 +6,7 @@ host tools, builds/packages/signs artifacts and gates CI. The only **natively
 runnable** compiler backends today are Linux ELF on **linux-x86_64**,
 **linux-aarch64** and **linux-riscv64**; the latter two execute under qemu-user
 when a runner is installed. **windows-x86_64** emits PE/COFF objects and PE32+
-images, and eight test programs execute under Wine, but this release lane ships
+images, and ten test programs execute under Wine, but this release lane ships
 **non-executable object bundles** and claims no hosted Windows toolchain.
 **windows-aarch64** emits ARM64 PE/COFF objects and images that pass static
 checks; there is no ARM64 runner, and its release lane remains planned.

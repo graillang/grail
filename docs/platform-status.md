@@ -1,6 +1,6 @@
 # Cross-platform status
 
-Last verified: 2026-11-08 on `main` at `565dee6`.
+Last verified: 2026-11-08 on `main` at `cd5f617`.
 
 This page distinguishes what has actually been built and executed from scaffolding and
 static inspection. A cross-built object is not platform support. A header parsing is not a
@@ -19,22 +19,26 @@ targets are static-only.
 | Linux x86-64 | ELF | native tests, CLI checks, book checks, byte-identical self-host | **Executed (native)** |
 | Linux AArch64 | ELF cross-image | cross-build and ELF machine checks; qemu lane when a runner is installed (none on this host) | **Cross-build only; runnable target** |
 | Linux RISC-V 64 | ELF cross-image | cross-build and ELF machine checks; qemu lane when a runner is installed (none on this host) | **Cross-build only; runnable target** |
-| Windows x86-64 | PE32+ console images, COFF objects, kernel32 imports, Win32 OS layer, C runtime shims | `bun tools/windows.mjs check` 16/16; **8 programs executed under Wine** | **Executed under Wine; not native Windows** |
+| Windows x86-64 | PE32+ console images, COFF objects, kernel32 imports, Win32 OS layer, C runtime shims | `bun tools/windows.mjs check` 20/20; **10 programs executed under Wine**, including thread join and producer/consumer wake | **Executed under Wine; not native Windows** |
 | Windows AArch64 | ARM64 PE/COFF objects and images, Win64 ARM64 imports | 4 ARM64 images statically verified; no ARM64 runner | **Cross-build only; not executable** |
 | macOS x86-64 / AArch64 | Mach-O objects and executables, libSystem layer, platform-module runtime | 4 objects + 4 images, framework links and ad-hoc signatures checked statically; **not executed** | **Cross-build only; not executable** |
 
 Linux x86-64 is the only target with full compiler and runtime execution evidence on this host.
 Linux AArch64 and RISC-V 64 build and pass ELF checks; CI defines qemu-user lanes, but no qemu
 runner is installed here, so they are not executed here. Windows x86-64 has `.pdata`/`.xdata`, a
-Win32 console/files/argv/time layer, and 8 executed programs under Wine. Windows AArch64 has
-PE/COFF images and `.pdata`/`.xdata` frame records, statically verified. Worker threads and COM
-remain unimplemented on both. Grail-internal calls still use the private register convention;
+Win32 console/files/argv/time layer, Win32 threads and address waits (`CreateThread`, joins through
+`WaitForSingleObject`, futex operations mapped to `WaitOnAddress`/`WakeByAddress*`), and 10 executed
+programs under Wine. Windows AArch64 has PE/COFF images and `.pdata`/`.xdata` frame records,
+statically verified. ARM64 thread creation, sockets, epoll and COM remain unimplemented.
+Grail-internal calls still use the private register convention;
 Win64 is used at import boundaries. This is Wine verification, not Windows hardware verification,
 and the Windows release artifacts are non-executable object bundles, not a hosted Windows
 toolchain.
 
 macOS has a libSystem layer and a platform-module runtime, and links frameworks and ad-hoc
-signatures with static LC_LOAD_DYLIB/CodeDirectory verification. There is still no
+signatures with static LC_LOAD_DYLIB/CodeDirectory verification. It also emits shared Mach-O
+dylibs with explicit `--export` symbol lists, `@rpath/...` install names and `LC_RPATH` entries;
+`tools/macos.mjs` reads back `LC_ID_DYLIB`, the export/import sets and RPATHs. There is still no
 Apple-hardware execution, and signing proves integrity, not trust or notarization. Grail-internal
 calls still use the private register convention; the C ABI is used at imports. The macOS images
 must not be run on Linux.
@@ -52,12 +56,15 @@ This is an ABI and reference-runtime layer, not yet a Grail-language standard li
 
 ## FFI and v3 ABI
 
-The first FFI increment is implemented and executed: `extern "C"` declarations with `unsafe`
-calls, scalar `i64`/`u64` parameters and results (up to six), symbol renaming and link notes.
-`bun tools/test-ffi.mjs` links and executes 3 programs, and the C shim tests cross-link on
-AArch64/RISC-V. The wider v3 C ABI is still in review: callbacks, opaque handles, byte/string
-views, records/struct layout, by-value structs, stack arguments, variadics and dynamic loading
-are not implemented. The C headers under `include/grail` are the runtime ABI contract.
+Four FFI increments are implemented and executed: `extern "C"` declarations with `unsafe` calls,
+scalar `i64`/`u64` parameters and results, symbol renaming and link notes; byte/string views and
+`CStr`; opaque handles; C-layout `extern "C" record` values with C padding and field widths; and
+C callbacks and `cfn` function pointers. `bun tools/test-ffi.mjs` links and executes the scalar,
+views/handles, records and callback programs, and cross-links on AArch64/RISC-V. Still open:
+dynamic library loading (`dlopen`/`dlsym` hooks), variadic C functions and variadic callbacks,
+callback results, record results and by-value struct passing, nested records, float and narrow
+integer parameters, and stack arguments beyond six words. The C headers under `include/grail`
+are the runtime ABI contract.
 
 ## Graphics and shaders
 
@@ -77,8 +84,10 @@ pipelines, and a complete renderer. The null backend validates contracts only.
 ## Tooling
 
 Implemented: deterministic native/cross build runner, platform matrix, packaging and checksums,
-signing hooks, install scripts, CI plan/lint, and an LSP MVP with compiler-sourced diagnostics.
-Not implemented: debugger, profiler, and hosted macOS release artifacts.
+signing hooks, install scripts, CI plan/lint, an LSP MVP with compiler-sourced diagnostics, and
+DWARF `.debug_line` tables for Linux x86-64 (`grail build --debug`, inspected with `grail debug
+lines`). Not implemented: debugger attach (`.debug_info` variable DIEs, breakpoints, DAP),
+profiler, and hosted macOS release artifacts.
 
 ## Applications
 
@@ -97,10 +106,11 @@ nine suites**; the socket syscalls themselves are still open. RHI/renderer/edito
 ```sh
 bun tools/test-native.mjs       # Linux native/rejection corpus
 bun tools/abi-test.mjs          # runtime C ABI and reference backend
-bun tools/windows.mjs check     # Windows COFF/PE static checks + 8 Wine executions
+bun tools/windows.mjs check     # Windows COFF/PE static checks + 10 Wine executions
 bun tools/test-macos.mjs        # Mach-O objects/images, frameworks, signatures (static)
 bun tools/test-ffi.mjs          # extern "C" scalar ABI through a C shim (3 executed)
 bun test tools/platforms.test.mjs tools/archive.test.mjs tools/sign.test.mjs
+bun tools/test-debug-lines.mjs  # Linux x86-64 DWARF line rows and `grail debug lines`
 make -C graphics test           # RHI C ABI, null/SDL window, shader library, graph (450)
 make -C graphics vk-surface     # swapchain, acquire, draw, present (GPU; 162)
 make -C graphics vk-smoke       # Vulkan device core, shader modules, pipeline cache (GPU)

@@ -31,7 +31,7 @@ extern "C" fn c_identity(v: u64) -> u64;
 - A declaration has no body and is not a definition. It is callable from any file in the
   same module.
 
-## Supported types (increment 1)
+## Supported types
 
 | Grail type | C type | Argument words |
 | --- | --- | --- |
@@ -51,9 +51,9 @@ returns a length or status instead, and the Grail side re-slices. A C-layout rec
 never a result either: a returned pointer would be C-owned memory that Grail's drop would
 free, so callers pass an out-parameter record instead.
 
-Anything else — narrower integers, floats, `string`, references, records, closures — is
-rejected with a diagnostic. Later increments widen this table; until they land, writing
-`v: u32` is an error, not a silent 32-bit truncation.
+Anything else — narrower integer widths, floats, `string`, references, plain (non-`extern "C"`)
+records, closures — is rejected with a diagnostic. The remaining gaps are listed under Limits;
+writing `v: u32` is an error, not a silent 32-bit truncation.
 
 ### Byte views
 
@@ -156,8 +156,8 @@ Argument and result registers are the C ABI's own, per target:
 These are the same registers Grail already uses for its own calls, so a foreign call is
 a direct symbol call with the same argument/result plumbing. Frames stay 16-byte aligned
 at call sites, and generated Grail functions preserve the callee-saved registers they
-allocate (the internal prologue saves and restores them), which is what makes callbacks
-implementable in a later increment.
+allocate (the internal prologue saves and restores them), which is what lets C call back into
+an `extern "C"` definition.
 
 More than six arguments is rejected: Grail has no stack-argument passing yet, and the
 compiler will not silently drop the seventh argument.
@@ -191,8 +191,8 @@ marker; it is the call that crosses the boundary.
   performed. Byte views are call-scoped borrows; `CStr` and `handle` are opaque one-word
   tokens that the compiler never frees.
 - A foreign call never implicitly frees, copies or retains a Grail argument, and Grail
-  never implicitly frees a value produced by C. Ownership transfers only where an
-  increment says so explicitly (handles and views, later increments).
+  never implicitly frees a value produced by C. Views are call-scoped borrows and handles are
+  C-owned tokens; no ownership changes hands implicitly.
 - Allocator rule: memory allocated on the C side is released on the C side; memory
   allocated by the Grail runtime is released by the Grail runtime. A program that hands
   a Grail-owned pointer to C must never free it in C, and vice versa.
@@ -201,7 +201,7 @@ marker; it is the call that crosses the boundary.
   (for example an error-code out-parameter), and that accessor's semantics are the
   runtime's, not the compiler's.
 
-## Limits (explicit, increment 1)
+## Limits
 
 Not implemented yet, and each rejected rather than approximated:
 
