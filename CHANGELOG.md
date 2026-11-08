@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Callbacks with float and narrow-integer parameters and float results: an exported
+  `extern "C" fn` reads each parameter from where the platform C convention put it (SysV,
+  AAPCS64 and RV64 pack integers and floats into separate register files; Win64 is positional,
+  with the fifth and sixth words from the stack), widens f32, extends narrow integers itself,
+  and returns floats in `xmm0`/`d0`/`fa0`. `tests/ffi/callback_floats.grl` runs on three Linux
+  targets and Windows x64.
+
 - Variadic C functions: `extern "C" fn f(fixed: T, ...)`. Extra arguments use the C default
   promotions; SysV sets `%al` to the vector-register count, Win64 passes variadic doubles in
   both the xmm and the integer register of their slot, RV64 passes them in integer registers.

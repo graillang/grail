@@ -101,3 +101,17 @@ void c_viewport_fill(struct viewport *v)
     v->x = 1.5f; v->y = -2.25f; v->width = 640; v->height = 480;
     v->min_depth = 0.0f; v->max_depth = 1.0f; v->flags = 7; v->scale = 0.125;
 }
+
+/* ---- C calling Grail callbacks with floats and narrow integers ---- */
+double c_call_fmix(double (*cb)(double, signed char, float, unsigned short, long long, float))
+{
+    /* Mixed classes: on SysV/AAPCS/RV the integers pack into the integer registers and the
+     * floats into the vector registers; on Win64 every argument keeps its position (the sixth,
+     * a float, goes on the stack). Garbage in the upper bits of the narrow integers is legal
+     * C caller behaviour, so the callee must extend them itself. */
+    return cb(1.5, (signed char)-3, 0.25f, (unsigned short)65000, 1000000LL, -2.5f);
+}
+float c_call_f32(float (*cb)(float, float))
+{
+    return cb(1.25f, 2.5f) * 2.0f;
+}

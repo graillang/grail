@@ -165,5 +165,16 @@
     "stdout": "960003.75\n1.5\n-2.25\n640\n1\n7\n0.125\n48\n",
     "status": 0,
     "note": "f32/f64 fields at C offsets in a viewport-shaped record"
+  },
+  {
+    "name": "ffi-callback-floats",
+    "shim": {
+      "windows-x86_64": "tests/ffi/abi_shim.c",
+      "windows-aarch64": "tests/ffi/abi_shim.c"
+    },
+    "source": "// C calls Grail callbacks whose parameters and results are floats and narrow integers: the\n// callback prologue reads each parameter from the register (or stack slot) the platform C\n// convention put it in, widens f32 and extends narrow integers.\nextern \"C\" fn g_fmix(a: f64, b: i8, c: f32, d: u16, e: i64, f: f32) -> f64 {\n    return a + f64(b) * 10.0 + f64(c) + f64(d) + f64(e) + f64(f);\n}\nextern \"C\" fn g_f32(x: f32, y: f32) -> f32 {\n    return x * y;\n}\nextern \"C\" lib \"shim.o\" fn c_call_fmix(cb: cfn(f64, i8, f32, u16, i64, f32) -> f64) -> f64;\nextern \"C\" lib \"shim.o\" fn c_call_f32(cb: cfn(f32, f32) -> f32) -> f32;\n\nfn main() -> u64 {\n    unsafe {\n        println(c_call_fmix(g_fmix));\n        println(c_call_f32(g_f32));\n    }\n    return 0;\n}\n",
+    "stdout": "1064969.25\n6.25\n",
+    "status": 0,
+    "note": "Win64 callbacks: positional xmm parameters, a float on the stack, narrow integers extended by the callee"
   }
 ]

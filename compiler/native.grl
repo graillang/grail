@@ -223,6 +223,8 @@ struct C {
     // Slots holding the address of a narrow (non-8-byte or f32) C-layout record field, paired
     // with the field type: stores and compound loads through them use the field's width.
     caddr: u64[],
+    // An exported callback's float result: 0 none, 1 f64, 2 f32 (returned in xmm0/d0/fa0).
+    export_fret: u64,
     alias_next: u64,
     types: Ty[],
     decls: Decl[],
@@ -5941,14 +5943,18 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
             // must live in the C ABI slice, and the symbol is the stated C name.
             for i in count {
                 formal := c.params[first + i];
-                ffi_param(
-                    &mut c,
-                    formal,
-                    view("extern C callback parameters must be i64, u64, CStr, handle, byte view or cfn (floats and narrow integers are direct-call only so far)")
-                );
+                if (is_float(&mut c, formal) + (ffi_narrow(&mut c, formal).len() != 0)) == 0 {
+                    ffi_param(
+                        &mut c,
+                        formal,
+                        view("extern C callback parameters must be an integer, f32, f64, CStr, handle, byte view or cfn")
+                    );
+                }
             }
             if ret != 1 {
-                ffi_result(&mut c, ret, view("extern C callback results must be i64, u64, unit, CStr or handle"));
+                if (is_float(&mut c, ret) + (ffi_narrow(&mut c, ret).len() != 0)) == 0 {
+                    ffi_result(&mut c, ret, view("extern C callback results must be an integer, f32, f64, unit, CStr or handle"));
+                }
             }
             if export_symbol.len() == 0 {
                 fail(&mut c, view("extern C definition needs a symbol"));
@@ -6086,13 +6092,25 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         on(&mut c, frame);
         o(&mut c, view(",%rsp\n"));
     }
-    for i in count {
-        reg := argreg(i);
-        o(&mut c, view("movq "));
-        o(&mut c, view(reg));
-        c.out.push(44);
-        stack_slot(&mut c, i);
-        c.out.push(10);
+    if export == 2 {
+        callback_params(&mut c, count);
+        mut fret = 0;
+        if ret != 1 {
+            if is_float(&mut c, ret) {
+                fret = 1 + is_f32(&mut c, ret);
+            }
+        }
+        exchange(&mut c.export_fret, fret);
+    } else {
+        exchange(&mut c.export_fret, 0);
+        for i in count {
+            reg := argreg(i);
+            o(&mut c, view("movq "));
+            o(&mut c, view(reg));
+            c.out.push(44);
+            stack_slot(&mut c, i);
+            c.out.push(10);
+        }
     }
     o(&mut c, view("leaq -.F"));
     on(&mut c, frame);
@@ -7000,6 +7018,80 @@ fn caddr_store<a>(c: (&a mut C), slot: u64, ty: u64, value: u64) -> unit {
     size := ffi_field_size(&mut c, ty);
     w := imm(&mut c, size);
     invoke(&mut c, view("rt_store_sized"), three(slot, stored, w));
+    return ();
+}
+// An exported callback's prologue: each parameter is read from where a C caller put it (Win64:
+// positionally, the thunk having moved rcx/rdx/r8/r9 and stack words five and six into Grail's
+// registers; SysV/AAPCS64/RV64: integer-class parameters packed into the integer registers and
+// floats into the vector registers), f32 widened, narrow integers extended, then spilled.
+fn callback_params<a>(c: (&a mut C), count: u64) -> unit {
+    win := c.target == 3;
+    x86 := (c.target == 0) + win;
+    mut ints = 0;
+    mut floats = 0;
+    for i in count {
+        // The parameter locals are the function's first bindings, in declaration order.
+        ty := c.locals[i].ty;
+        if is_float(&mut c, ty) {
+            single := is_f32(&mut c, ty);
+            mut fpos = floats;
+            if win {
+                fpos = i;
+            }
+            if win & (3 < i) {
+                // Stack-passed on Win64: the thunk moved the raw word into Grail's register.
+                o(&mut c, view("movq "));
+                o(&mut c, view(argreg(i)));
+                o(&mut c, view(",%rax\n"));
+                if single {
+                    o(&mut c, view("movd %eax,%xmm0\ncvtss2sd %xmm0,%xmm0\nmovq %xmm0,%rax\n"));
+                }
+            } else {
+                if x86 {
+                    if single {
+                        o(&mut c, view("cvtss2sd %xmm"));
+                        on(&mut c, fpos);
+                        o(&mut c, view(",%xmm"));
+                        on(&mut c, fpos);
+                        c.out.push(10);
+                    }
+                    o(&mut c, view("movq %xmm"));
+                    on(&mut c, fpos);
+                    o(&mut c, view(",%rax\n"));
+                } else {
+                    o(&mut c, view("cbfarg "));
+                    on(&mut c, fpos);
+                    if single {
+                        o(&mut c, view(" s"));
+                    }
+                    c.out.push(10);
+                }
+            }
+            floats = floats + 1;
+        } else {
+            mut ipos = ints;
+            if win {
+                ipos = i;
+            }
+            o(&mut c, view("movq "));
+            o(&mut c, view(argreg(ipos)));
+            o(&mut c, view(",%rax\n"));
+            suffix := ffi_narrow(&mut c, ty);
+            if suffix.len() != 0 {
+                if x86 {
+                    ffi_x86_extend(&mut c, view(suffix));
+                } else {
+                    o(&mut c, view("cext "));
+                    o(&mut c, view(suffix));
+                    c.out.push(10);
+                }
+            }
+            ints = ints + 1;
+        }
+        o(&mut c, view("movq %rax,"));
+        stack_slot(&mut c, i);
+        c.out.push(10);
+    }
     return ();
 }
 // 1 when a C-layout record has a floating-point field (its by-value classification differs).
@@ -15627,6 +15719,22 @@ fn statement<a>(c: (&a mut C)) -> unit {
             tls_set_slot(&mut c, restore);
         }
         get(&mut c, v.t, view("%rax"));
+        fret := c.export_fret;
+        if fret != 0 {
+            // A C caller reads a float result from the vector register.
+            if (c.target == 0) + (c.target == 3) {
+                o(&mut c, view("movq %rax,%xmm0\n"));
+                if fret == 2 {
+                    o(&mut c, view("cvtsd2ss %xmm0,%xmm0\n"));
+                }
+            } else {
+                if fret == 2 {
+                    o(&mut c, view("cbfret32\n"));
+                } else {
+                    o(&mut c, view("cbfret64\n"));
+                }
+            }
+        }
         o(&mut c, view("leave\nret\n"));
         exchange(&mut c.terminated, 1);
         return ();
@@ -17135,6 +17243,7 @@ pub fn main() -> u64 {
         validating: 0,
         ffi_fixed: 0,
         caddr: u64[],
+        export_fret: 0,
         alias_next: 1,
         types: Ty[],
         decls: Decl[],

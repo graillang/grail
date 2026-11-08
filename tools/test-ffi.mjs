@@ -29,6 +29,14 @@ const fixtures = [
     defines: ['c_double', 'c_triple'],
   },
   {
+    // C calls Grail callbacks with f64/f32/i8/u16 parameters and float results:
+    // 1.5 - 30 + 0.25 + 65000 + 1000000 - 2.5 = 1064969.25; (1.25 * 2.5) * 2 = 6.25.
+    name: 'callback_floats',
+    stdout: '1064969.25\n6.25\n',
+    symbols: ['c_call_fmix', 'c_call_f32'],
+    defines: ['g_fmix', 'g_f32'],
+  },
+  {
     name: 'extern_records',
     // point sum 42, C-swapped x 23, mixed fields -7+300-5+9 = 297 and after C
     // rewrites them 1234-2+7+5 = 1244; then sizeof, s16/short -2/char 7 checks.
