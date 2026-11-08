@@ -42,9 +42,9 @@ docs/                     the contract, the shader flow, dependencies, blockers
 | Reflection blob reader + validation | implemented, tested, and used to verify tool output |
 | Wire framing | implemented and tested |
 | Shaders (3 stages) | compile and pass `spirv-val` |
-| Offline shader tool | written; compiles 3 stages, reflection verified by an independent C reader |
+| Offline shader tool | written; compiles 3 stages, reflection and permutation ids verified by an independent C reader |
 | Vulkan / D3D12 / Metal backends | **not implemented** (`GR_ERROR_UNSUPPORTED`) |
-| Permutation enumeration in the tool | not yet implemented |
+| Permutation enumeration | implemented: directives, blob records, keys, id cross-check |
 | Calling this from a Grail program | **blocked** — see `docs/first-renderer-port.md` |
 
 ## Build and test

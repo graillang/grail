@@ -173,10 +173,36 @@ D3D12 has no specialization constants, so the offline flow emits one DXIL per pe
 where the bytecode actually reads the define; Vulkan may use `VkSpecializationInfo` for the
 same pipeline. `gr_specialization` carries the values either way.
 
-The blob format and the key are in place (`gr_reflect_define`, `gr_permutation_key`), and the
-key's stability under reordering is tested. The tool does **not** yet enumerate a shader's
-permutation cross product: that needs the defines to be declared in the HLSL in a form the
-extractor can read, which is the next piece of work after the first backend.
+A shader declares its domains in a comment the compiler ignores:
+
+```hlsl
+// grail:permutation GRAIL_TONEMAP_EXPOSURE default=1 values=0,1
+// grail:permutation GRAIL_TONEMAP_OUTPUT   default=0 values=0,1
+```
+
+The tool reads those, writes them into the blob as `gr_reflect_define` records, and enumerates
+the cross product with a key per combination (`--permutations` prints them). Four properties
+that make this safe:
+
+- **The directive cannot change what the shader compiles to.** It is a comment; the shader also
+  carries `#ifndef … #define` defaults, so a plain DXC invocation compiles the default.
+- **A host cannot invent a define.** The declared set is in the blob, so a request outside it is
+  `GR_ERROR_INVALID_ARGUMENT` rather than a silently ignored `#if`.
+- **The cross product is bounded** (256). Exceeding it is an error naming the count, not a build
+  that quietly produces a hundred thousand shaders.
+- **The name ids have one definition.** `gr_permutation_name_id` is the low 32 bits of the
+  name's FNV-1a 64 hash; the C implementation and the tool's implementation are compared by
+  `make shader-check`, which fails if they disagree.
+
+Comparing the ids matters because the key is folded from ids, not names: two implementations
+deriving different ids for `GRAIL_TONEMAP_OUTPUT` would make every cache key a miss. Observed
+agreement on the two defines above: `GRAIL_TONEMAP_EXPOSURE` → `0xabe4a289`,
+`GRAIL_TONEMAP_OUTPUT` → `0x199f71d9`, four combinations, keys
+`0xf6510c514cdc3fd9` … `0x01b3872a5c56107d`.
+
+Not yet done: compiling each combination (only enumeration and keys are emitted today), and
+using the keys to select a bytecode variant at pipeline creation. The pipeline cache key
+function exists (`gr_pipeline_cache_key`) and is tested.
 
 ## Backend requirements
 
