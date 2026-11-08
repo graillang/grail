@@ -5,10 +5,10 @@
  * clocks and sleep, environment reads/mutation/iteration, current directory,
  * executable path, file basics (open/read/write/seek/truncate/sync/close,
  * non-blocking mode, pipe, mkdir/remove/rename, readlink, realpath), directory
- * iteration, threads/mutex/condition variables, dynamic libraries and child
- * processes.
+ * iteration, threads/mutex/condition variables, dynamic libraries, child
+ * processes, local-time offsets and TCP/UDP sockets.
  *
- * File metadata, local-time offsets and sockets remain explicit UNSUPPORTED in
+ * File metadata and DNS remain explicit UNSUPPORTED in
  * grail_os_macos_stubs.c.  Darwin declarations live in grail_macos.h so the
  * backend can be compiled for Apple ARM64 on a host without the macOS SDK.
  * This is static evidence only; it has not been executed on macOS.
@@ -22,6 +22,7 @@
 #include "../../../include/grail/grail_fs.h"
 #include "../../../include/grail/grail_path.h"
 #include "../../../include/grail/grail_proc.h"
+#include "../../../include/grail/grail_socket.h"
 #include "../../../include/grail/grail_thread.h"
 #include "../../../include/grail/grail_time.h"
 #include "../grail_env_store.h"
@@ -64,6 +65,12 @@ typedef struct grail_macos_condvar_object {
     grail_macos_pthread_cond_t condition;
 } grail_macos_condvar_object;
 
+typedef struct grail_macos_socket {
+    int descriptor;
+    uint64_t family;
+    uint64_t type;
+} grail_macos_socket;
+
 typedef struct grail_macos_process {
     int pid;
     int status;
@@ -90,6 +97,7 @@ typedef struct grail_macos_state {
     grail_handle_table condvars;
     grail_handle_table libraries;
     grail_handle_table processes;
+    grail_handle_table sockets;
     grail_env_store env;
     grail_macos_unfair_lock lock;
     uint64_t capabilities;
@@ -97,6 +105,7 @@ typedef struct grail_macos_state {
 } grail_macos_state;
 
 static grail_macos_state grail_macos = {{0, NULL, NULL, NULL, NULL},
+                                        {NULL, NULL, 0, 0, 0},
                                         {NULL, NULL, 0, 0, 0},
                                         {NULL, NULL, 0, 0, 0},
                                         {NULL, NULL, 0, 0, 0},
@@ -194,7 +203,8 @@ static grail_status grail_macos_status(int error_number) {
     case GRAIL_MACOS_EPIPE:
     case GRAIL_MACOS_ESHUTDOWN: status = GRAIL_E_BROKEN_PIPE; break;
     case GRAIL_MACOS_ENOTCONN: status = GRAIL_E_CONNECTION_ABORTED; break;
-    case GRAIL_MACOS_ENOMEM: status = GRAIL_E_OUT_OF_MEMORY; break;
+    case GRAIL_MACOS_ENOMEM:
+    case GRAIL_MACOS_ENOBUFS: status = GRAIL_E_OUT_OF_MEMORY; break;
     case GRAIL_MACOS_EMFILE: status = GRAIL_E_TOO_MANY_HANDLES; break;
     case GRAIL_MACOS_ELOOP: status = GRAIL_E_SYMLINK_LOOP; break;
     case GRAIL_MACOS_EXDEV: status = GRAIL_E_CROSS_DEVICE; break;
@@ -310,6 +320,10 @@ grail_status grail_os_init(const grail_allocator *allocator, const grail_startup
                                          GRAIL_HANDLE_KIND_PROCESS);
     }
     if (status == GRAIL_OK) {
+        status = grail_handle_table_init(&grail_macos.sockets, &grail_macos.allocator,
+                                         GRAIL_HANDLE_KIND_SOCKET);
+    }
+    if (status == GRAIL_OK) {
         status = grail_env_store_init(&grail_macos.env, &grail_macos.allocator);
     }
     if (status == GRAIL_OK) {
@@ -324,6 +338,7 @@ grail_status grail_os_init(const grail_allocator *allocator, const grail_startup
         grail_handle_table_destroy(&grail_macos.condvars);
         grail_handle_table_destroy(&grail_macos.libraries);
         grail_handle_table_destroy(&grail_macos.processes);
+        grail_handle_table_destroy(&grail_macos.sockets);
         grail_env_store_free(&grail_macos.env);
         return status;
     }
@@ -332,7 +347,18 @@ grail_status grail_os_init(const grail_allocator *allocator, const grail_startup
                                GRAIL_CAP_ENV_MUTATION | GRAIL_CAP_TIME | GRAIL_CAP_CPU_TIME |
                                GRAIL_CAP_SYMLINKS | GRAIL_CAP_DIRECTORIES |
                                GRAIL_CAP_THREADS | GRAIL_CAP_SYNC_PRIMITIVES |
-                               GRAIL_CAP_DYNAMIC_LIBRARIES | GRAIL_CAP_PROCESSES;
+                               GRAIL_CAP_DYNAMIC_LIBRARIES | GRAIL_CAP_PROCESSES |
+                               GRAIL_CAP_LOCAL_TIME_OFFSET;
+    const int ipv4_probe = socket(GRAIL_MACOS_AF_INET, GRAIL_MACOS_SOCK_STREAM, 0);
+    if (ipv4_probe >= 0) {
+        (void)close(ipv4_probe);
+        grail_macos.capabilities |= GRAIL_CAP_SOCKETS | GRAIL_CAP_SOCKET_UDP;
+        const int ipv6_probe = socket(GRAIL_MACOS_AF_INET6, GRAIL_MACOS_SOCK_STREAM, 0);
+        if (ipv6_probe >= 0) {
+            grail_macos.capabilities |= GRAIL_CAP_SOCKET_IPV6;
+            (void)close(ipv6_probe);
+        }
+    }
     grail_macos.initialized = 1;
     return GRAIL_OK;
 }
@@ -349,6 +375,7 @@ grail_status grail_os_shutdown(void) {
     grail_handle_table_destroy(&grail_macos.condvars);
     grail_handle_table_destroy(&grail_macos.libraries);
     grail_handle_table_destroy(&grail_macos.processes);
+    grail_handle_table_destroy(&grail_macos.sockets);
     grail_env_store_free(&grail_macos.env);
     grail_macos.capabilities = 0;
     grail_macos.initialized = 0;
@@ -413,6 +440,19 @@ grail_status grail_os_time_sleep(int64_t nanoseconds, int64_t *remaining_nanosec
         return grail_macos_fail(*__error());
     }
     if (remaining_nanoseconds != NULL) *remaining_nanoseconds = 0;
+    return GRAIL_OK;
+}
+
+
+grail_status grail_os_time_local_offset(int64_t utc_nanoseconds, int64_t *offset_nanoseconds) {
+    if (!grail_macos.initialized) return GRAIL_E_NOT_INITIALIZED;
+    if (offset_nanoseconds == NULL) return GRAIL_E_INVALID_ARGUMENT;
+    int64_t seconds = utc_nanoseconds / 1000000000;
+    if (utc_nanoseconds < 0 && utc_nanoseconds % 1000000000 != 0) seconds--;
+    grail_macos_tm value;
+    for (uint64_t i = 0; i < sizeof(value); i++) ((uint8_t *)&value)[i] = 0;
+    if (localtime_r(&seconds, &value) == NULL) return grail_macos_fail(*__error());
+    *offset_nanoseconds = value.tm_gmtoff * 1000000000;
     return GRAIL_OK;
 }
 
@@ -1773,6 +1813,437 @@ grail_status grail_os_process_close(grail_process handle) {
     grail_macos_unlock();
     if (status != GRAIL_OK) return status;
     grail_macos_release(process, sizeof(*process));
+    return GRAIL_OK;
+}
+
+
+typedef union grail_macos_socket_storage {
+    grail_macos_sockaddr generic;
+    grail_macos_sockaddr_in ipv4;
+    grail_macos_sockaddr_in6 ipv6;
+} grail_macos_socket_storage;
+
+static uint16_t grail_macos_swap16(uint16_t value) {
+    return (uint16_t)((value >> 8) | (value << 8));
+}
+
+static int grail_macos_address_valid(const grail_socket_address *address) {
+    if (address == NULL || address->struct_size < sizeof(*address) ||
+        address->abi_version != GRAIL_ABI_VERSION) {
+        return 0;
+    }
+    if (address->family != GRAIL_ADDRESS_INET && address->family != GRAIL_ADDRESS_INET6) {
+        return 0;
+    }
+    return address->port <= 65535 && address->scope_id <= 0xFFFFFFFFull;
+}
+
+static grail_macos_socklen_t grail_macos_fill_sockaddr(const grail_socket_address *address,
+                                                        grail_macos_socket_storage *storage) {
+    for (uint64_t i = 0; i < sizeof(*storage); i++) ((uint8_t *)storage)[i] = 0;
+    if (address->family == GRAIL_ADDRESS_INET) {
+        storage->ipv4.sin_len = (uint8_t)sizeof(grail_macos_sockaddr_in);
+        storage->ipv4.sin_family = GRAIL_MACOS_AF_INET;
+        storage->ipv4.sin_port = grail_macos_swap16((uint16_t)address->port);
+        for (uint64_t i = 0; i < 4; i++) ((uint8_t *)&storage->ipv4.sin_addr)[i] = address->address[i];
+        return (grail_macos_socklen_t)sizeof(grail_macos_sockaddr_in);
+    }
+    if (address->family == GRAIL_ADDRESS_INET6) {
+        storage->ipv6.sin6_len = (uint8_t)sizeof(grail_macos_sockaddr_in6);
+        storage->ipv6.sin6_family = GRAIL_MACOS_AF_INET6;
+        storage->ipv6.sin6_port = grail_macos_swap16((uint16_t)address->port);
+        for (uint64_t i = 0; i < 16; i++) storage->ipv6.sin6_addr[i] = address->address[i];
+        storage->ipv6.sin6_scope_id = (uint32_t)address->scope_id;
+        return (grail_macos_socklen_t)sizeof(grail_macos_sockaddr_in6);
+    }
+    return 0;
+}
+
+static grail_status grail_macos_from_sockaddr(const grail_macos_sockaddr *source,
+                                               grail_macos_socklen_t length,
+                                               grail_socket_address *out) {
+    if (source == NULL || out == NULL) return GRAIL_E_INVALID_ARGUMENT;
+    for (uint64_t i = 0; i < sizeof(*out); i++) ((uint8_t *)out)[i] = 0;
+    out->struct_size = sizeof(*out);
+    out->abi_version = GRAIL_ABI_VERSION;
+    if (source->sa_family == GRAIL_MACOS_AF_INET &&
+        length >= (grail_macos_socklen_t)sizeof(grail_macos_sockaddr_in)) {
+        const grail_macos_sockaddr_in *value = (const grail_macos_sockaddr_in *)source;
+        out->family = GRAIL_ADDRESS_INET;
+        out->port = grail_macos_swap16(value->sin_port);
+        for (uint64_t i = 0; i < 4; i++) out->address[i] = ((const uint8_t *)&value->sin_addr)[i];
+        return GRAIL_OK;
+    }
+    if (source->sa_family == GRAIL_MACOS_AF_INET6 &&
+        length >= (grail_macos_socklen_t)sizeof(grail_macos_sockaddr_in6)) {
+        const grail_macos_sockaddr_in6 *value = (const grail_macos_sockaddr_in6 *)source;
+        out->family = GRAIL_ADDRESS_INET6;
+        out->port = grail_macos_swap16(value->sin6_port);
+        for (uint64_t i = 0; i < 16; i++) out->address[i] = value->sin6_addr[i];
+        out->scope_id = value->sin6_scope_id;
+        return GRAIL_OK;
+    }
+    return GRAIL_E_ADDRESS_INVALID;
+}
+
+static grail_status grail_macos_socket_lookup(grail_socket handle, grail_macos_socket **out) {
+    if (!grail_macos.initialized) return GRAIL_E_NOT_INITIALIZED;
+    grail_macos_lock();
+    const grail_status status =
+        grail_handle_table_lookup(&grail_macos.sockets, handle, (void **)out);
+    grail_macos_unlock();
+    return status;
+}
+
+static grail_status grail_macos_socket_wrap(int descriptor, uint64_t family, uint64_t type,
+                                             grail_socket *out) {
+    grail_macos_socket *object =
+        (grail_macos_socket *)grail_macos_allocate(sizeof(*object));
+    if (object == NULL) {
+        (void)close(descriptor);
+        return GRAIL_E_OUT_OF_MEMORY;
+    }
+    object->descriptor = descriptor;
+    object->family = family;
+    object->type = type;
+    grail_handle handle = GRAIL_HANDLE_NONE;
+    grail_macos_lock();
+    const grail_status status =
+        grail_handle_table_allocate(&grail_macos.sockets, object, &handle);
+    grail_macos_unlock();
+    if (status != GRAIL_OK) {
+        (void)close(descriptor);
+        grail_macos_release(object, sizeof(*object));
+        return status;
+    }
+    *out = handle;
+    return GRAIL_OK;
+}
+
+grail_status grail_os_socket_create(uint64_t family, uint64_t type, grail_socket *out) {
+    if (!grail_macos.initialized) return GRAIL_E_NOT_INITIALIZED;
+    if (out == NULL) return GRAIL_E_INVALID_ARGUMENT;
+    int af;
+    int socket_type;
+    if (family == GRAIL_ADDRESS_INET) af = GRAIL_MACOS_AF_INET;
+    else if (family == GRAIL_ADDRESS_INET6) af = GRAIL_MACOS_AF_INET6;
+    else return GRAIL_E_INVALID_ARGUMENT;
+    if (type == GRAIL_SOCKET_STREAM) socket_type = GRAIL_MACOS_SOCK_STREAM;
+    else if (type == GRAIL_SOCKET_DATAGRAM) socket_type = GRAIL_MACOS_SOCK_DGRAM;
+    else return GRAIL_E_INVALID_ARGUMENT;
+    const int descriptor = socket(af, socket_type, 0);
+    if (descriptor < 0) return grail_macos_fail(*__error());
+    (void)fcntl(descriptor, GRAIL_MACOS_F_SETFD, GRAIL_MACOS_FD_CLOEXEC);
+    const int no_sigpipe = 1;
+    (void)setsockopt(descriptor, GRAIL_MACOS_SOL_SOCKET, GRAIL_MACOS_SO_NOSIGPIPE,
+                     &no_sigpipe, (grail_macos_socklen_t)sizeof(no_sigpipe));
+    return grail_macos_socket_wrap(descriptor, family, type, out);
+}
+
+grail_status grail_os_socket_bind(grail_socket handle, const grail_socket_address *address) {
+    grail_macos_socket *object = NULL;
+    grail_status status = grail_macos_socket_lookup(handle, &object);
+    if (status != GRAIL_OK) return status;
+    if (!grail_macos_address_valid(address)) return GRAIL_E_INVALID_ARGUMENT;
+    grail_macos_socket_storage storage;
+    const grail_macos_socklen_t length = grail_macos_fill_sockaddr(address, &storage);
+    if (length == 0) return GRAIL_E_ADDRESS_INVALID;
+    if (bind(object->descriptor, &storage.generic, length) != 0) {
+        return grail_macos_fail(*__error());
+    }
+    return GRAIL_OK;
+}
+
+grail_status grail_os_socket_listen(grail_socket handle, uint64_t backlog) {
+    grail_macos_socket *object = NULL;
+    const grail_status status = grail_macos_socket_lookup(handle, &object);
+    if (status != GRAIL_OK) return status;
+    const int depth = backlog > 0x7FFFFFFFull ? 0x7FFFFFFF : (int)backlog;
+    if (listen(object->descriptor, depth) != 0) return grail_macos_fail(*__error());
+    return GRAIL_OK;
+}
+
+grail_status grail_os_socket_accept(grail_socket handle, grail_socket *out,
+                                    grail_socket_address *peer) {
+    grail_macos_socket *object = NULL;
+    grail_status status = grail_macos_socket_lookup(handle, &object);
+    if (status != GRAIL_OK) return status;
+    if (out == NULL) return GRAIL_E_INVALID_ARGUMENT;
+    grail_macos_socket_storage storage;
+    grail_macos_socklen_t length = (grail_macos_socklen_t)sizeof(storage);
+    const int accepted = accept(object->descriptor, &storage.generic, &length);
+    if (accepted < 0) return grail_macos_fail(*__error());
+    (void)fcntl(accepted, GRAIL_MACOS_F_SETFD, GRAIL_MACOS_FD_CLOEXEC);
+    if (peer != NULL) {
+        status = grail_macos_from_sockaddr(&storage.generic, length, peer);
+        if (status != GRAIL_OK) {
+            (void)close(accepted);
+            return status;
+        }
+    }
+    return grail_macos_socket_wrap(accepted, object->family, object->type, out);
+}
+
+grail_status grail_os_socket_connect(grail_socket handle, const grail_socket_address *address) {
+    grail_macos_socket *object = NULL;
+    const grail_status status = grail_macos_socket_lookup(handle, &object);
+    if (status != GRAIL_OK) return status;
+    if (!grail_macos_address_valid(address)) return GRAIL_E_INVALID_ARGUMENT;
+    grail_macos_socket_storage storage;
+    const grail_macos_socklen_t length = grail_macos_fill_sockaddr(address, &storage);
+    if (length == 0) return GRAIL_E_ADDRESS_INVALID;
+    if (connect(object->descriptor, &storage.generic, length) != 0) {
+        return grail_macos_fail(*__error());
+    }
+    return GRAIL_OK;
+}
+
+grail_status grail_os_socket_send(grail_socket handle, const uint8_t *buffer, uint64_t length,
+                                  uint64_t *sent) {
+    grail_macos_socket *object = NULL;
+    const grail_status status = grail_macos_socket_lookup(handle, &object);
+    if (status != GRAIL_OK) return status;
+    if (sent == NULL || (buffer == NULL && length != 0) || length > (uint64_t)INT64_MAX) {
+        return GRAIL_E_INVALID_ARGUMENT;
+    }
+    if (length == 0) { *sent = 0; return GRAIL_OK; }
+    const grail_macos_ssize_t result = send(object->descriptor, buffer, length, 0);
+    if (result < 0) return grail_macos_fail(*__error());
+    *sent = (uint64_t)result;
+    return GRAIL_OK;
+}
+
+grail_status grail_os_socket_recv(grail_socket handle, uint8_t *buffer, uint64_t capacity,
+                                  uint64_t *received) {
+    grail_macos_socket *object = NULL;
+    const grail_status status = grail_macos_socket_lookup(handle, &object);
+    if (status != GRAIL_OK) return status;
+    if (received == NULL || (buffer == NULL && capacity != 0) ||
+        capacity > (uint64_t)INT64_MAX) {
+        return GRAIL_E_INVALID_ARGUMENT;
+    }
+    if (capacity == 0) { *received = 0; return GRAIL_OK; }
+    const grail_macos_ssize_t result = recv(object->descriptor, buffer, capacity, 0);
+    if (result < 0) return grail_macos_fail(*__error());
+    *received = (uint64_t)result;
+    return GRAIL_OK;
+}
+
+grail_status grail_os_socket_send_to(grail_socket handle, const uint8_t *buffer, uint64_t length,
+                                     const grail_socket_address *address, uint64_t *sent) {
+    grail_macos_socket *object = NULL;
+    grail_status status = grail_macos_socket_lookup(handle, &object);
+    if (status != GRAIL_OK) return status;
+    if (sent == NULL || (buffer == NULL && length != 0) || length > (uint64_t)INT64_MAX ||
+        !grail_macos_address_valid(address)) {
+        return GRAIL_E_INVALID_ARGUMENT;
+    }
+    grail_macos_socket_storage storage;
+    const grail_macos_socklen_t address_length = grail_macos_fill_sockaddr(address, &storage);
+    if (address_length == 0) return GRAIL_E_ADDRESS_INVALID;
+    const grail_macos_ssize_t result =
+        sendto(object->descriptor, buffer, length, 0, &storage.generic, address_length);
+    if (result < 0) return grail_macos_fail(*__error());
+    *sent = (uint64_t)result;
+    return GRAIL_OK;
+}
+
+grail_status grail_os_socket_recv_from(grail_socket handle, uint8_t *buffer, uint64_t capacity,
+                                       grail_socket_address *address, uint64_t *received) {
+    grail_macos_socket *object = NULL;
+    grail_status status = grail_macos_socket_lookup(handle, &object);
+    if (status != GRAIL_OK) return status;
+    if (received == NULL || address == NULL || (buffer == NULL && capacity != 0) ||
+        capacity > (uint64_t)INT64_MAX) {
+        return GRAIL_E_INVALID_ARGUMENT;
+    }
+    grail_macos_socket_storage storage;
+    grail_macos_socklen_t address_length = (grail_macos_socklen_t)sizeof(storage);
+    const grail_macos_ssize_t result =
+        recvfrom(object->descriptor, buffer, capacity, 0, &storage.generic, &address_length);
+    if (result < 0) return grail_macos_fail(*__error());
+    status = grail_macos_from_sockaddr(&storage.generic, address_length, address);
+    if (status != GRAIL_OK) return status;
+    *received = (uint64_t)result;
+    return GRAIL_OK;
+}
+
+grail_status grail_os_socket_shutdown(grail_socket handle, uint64_t how) {
+    grail_macos_socket *object = NULL;
+    const grail_status status = grail_macos_socket_lookup(handle, &object);
+    if (status != GRAIL_OK) return status;
+    int direction;
+    if (how == GRAIL_SHUTDOWN_READ) direction = GRAIL_MACOS_SHUT_RD;
+    else if (how == GRAIL_SHUTDOWN_WRITE) direction = GRAIL_MACOS_SHUT_WR;
+    else if (how == GRAIL_SHUTDOWN_BOTH) direction = GRAIL_MACOS_SHUT_RDWR;
+    else return GRAIL_E_INVALID_ARGUMENT;
+    if (shutdown(object->descriptor, direction) != 0) return grail_macos_fail(*__error());
+    return GRAIL_OK;
+}
+
+grail_status grail_os_socket_close(grail_socket handle) {
+    if (!grail_macos.initialized) return GRAIL_E_NOT_INITIALIZED;
+    grail_macos_socket *object = NULL;
+    grail_macos_lock();
+    const grail_status status =
+        grail_handle_table_release(&grail_macos.sockets, handle, (void **)&object);
+    grail_macos_unlock();
+    if (status != GRAIL_OK) return status;
+    const int result = close(object->descriptor);
+    const int error_number = *__error();
+    grail_macos_release(object, sizeof(*object));
+    return result == 0 ? GRAIL_OK : grail_macos_fail(error_number);
+}
+
+static grail_status grail_macos_socket_name(grail_socket handle, int peer,
+                                            grail_socket_address *out) {
+    grail_macos_socket *object = NULL;
+    const grail_status status = grail_macos_socket_lookup(handle, &object);
+    if (status != GRAIL_OK) return status;
+    if (out == NULL) return GRAIL_E_INVALID_ARGUMENT;
+    grail_macos_socket_storage storage;
+    grail_macos_socklen_t length = (grail_macos_socklen_t)sizeof(storage);
+    const int result = peer ? getpeername(object->descriptor, &storage.generic, &length)
+                            : getsockname(object->descriptor, &storage.generic, &length);
+    if (result != 0) return grail_macos_fail(*__error());
+    return grail_macos_from_sockaddr(&storage.generic, length, out);
+}
+
+grail_status grail_os_socket_local_address(grail_socket handle, grail_socket_address *out) {
+    return grail_macos_socket_name(handle, 0, out);
+}
+
+grail_status grail_os_socket_peer_address(grail_socket handle, grail_socket_address *out) {
+    return grail_macos_socket_name(handle, 1, out);
+}
+
+grail_status grail_os_socket_set_nonblocking(grail_socket handle, uint64_t enabled) {
+    grail_macos_socket *object = NULL;
+    const grail_status status = grail_macos_socket_lookup(handle, &object);
+    if (status != GRAIL_OK) return status;
+    const int current = fcntl(object->descriptor, GRAIL_MACOS_F_GETFL, 0);
+    if (current < 0) return grail_macos_fail(*__error());
+    const int next = enabled != 0 ? (current | GRAIL_MACOS_O_NONBLOCK)
+                                  : (current & ~GRAIL_MACOS_O_NONBLOCK);
+    if (fcntl(object->descriptor, GRAIL_MACOS_F_SETFL, next) != 0) return grail_macos_fail(*__error());
+    return GRAIL_OK;
+}
+
+grail_status grail_os_socket_set_option(grail_socket handle, uint64_t option, uint64_t value) {
+    grail_macos_socket *object = NULL;
+    grail_status status = grail_macos_socket_lookup(handle, &object);
+    if (status != GRAIL_OK) return status;
+    int level = GRAIL_MACOS_SOL_SOCKET;
+    int name = 0;
+    int number = 0;
+    grail_macos_timeval timeout;
+    grail_macos_linger linger;
+    const void *data = &number;
+    grail_macos_socklen_t length = (grail_macos_socklen_t)sizeof(number);
+    switch (option) {
+    case GRAIL_SOCKOPT_REUSE_ADDRESS:
+        name = GRAIL_MACOS_SO_REUSEADDR;
+        if (value > 0x7FFFFFFFull) return GRAIL_E_INVALID_ARGUMENT;
+        number = (int)value;
+        break;
+    case GRAIL_SOCKOPT_REUSE_PORT:
+        name = GRAIL_MACOS_SO_REUSEPORT;
+        if (value > 0x7FFFFFFFull) return GRAIL_E_INVALID_ARGUMENT;
+        number = (int)value;
+        break;
+    case GRAIL_SOCKOPT_NO_DELAY:
+        level = GRAIL_MACOS_IPPROTO_TCP;
+        name = GRAIL_MACOS_TCP_NODELAY;
+        if (value > 0x7FFFFFFFull) return GRAIL_E_INVALID_ARGUMENT;
+        number = (int)value;
+        break;
+    case GRAIL_SOCKOPT_KEEPALIVE:
+        name = GRAIL_MACOS_SO_KEEPALIVE;
+        if (value > 0x7FFFFFFFull) return GRAIL_E_INVALID_ARGUMENT;
+        number = (int)value;
+        break;
+    case GRAIL_SOCKOPT_BROADCAST:
+        name = GRAIL_MACOS_SO_BROADCAST;
+        if (value > 0x7FFFFFFFull) return GRAIL_E_INVALID_ARGUMENT;
+        number = (int)value;
+        break;
+    case GRAIL_SOCKOPT_RECEIVE_TIMEOUT_MS:
+        name = GRAIL_MACOS_SO_RCVTIMEO;
+        timeout.tv_sec = (int64_t)(value / 1000);
+        timeout.tv_usec = (int32_t)((value % 1000) * 1000);
+        data = &timeout;
+        length = (grail_macos_socklen_t)sizeof(timeout);
+        break;
+    case GRAIL_SOCKOPT_SEND_TIMEOUT_MS:
+        name = GRAIL_MACOS_SO_SNDTIMEO;
+        timeout.tv_sec = (int64_t)(value / 1000);
+        timeout.tv_usec = (int32_t)((value % 1000) * 1000);
+        data = &timeout;
+        length = (grail_macos_socklen_t)sizeof(timeout);
+        break;
+    case GRAIL_SOCKOPT_LINGER_MS:
+        name = GRAIL_MACOS_SO_LINGER;
+        linger.l_onoff = value == 0 ? 0 : 1;
+        linger.l_linger = value == 0 ? 0 : (int32_t)((value + 999) / 1000);
+        data = &linger;
+        length = (grail_macos_socklen_t)sizeof(linger);
+        break;
+    default: return GRAIL_E_UNSUPPORTED;
+    }
+    if (setsockopt(object->descriptor, level, name, data, length) != 0) {
+        return grail_macos_fail(*__error());
+    }
+    return GRAIL_OK;
+}
+
+grail_status grail_os_socket_get_option(grail_socket handle, uint64_t option, uint64_t *value) {
+    grail_macos_socket *object = NULL;
+    grail_status status = grail_macos_socket_lookup(handle, &object);
+    if (status != GRAIL_OK) return status;
+    if (value == NULL) return GRAIL_E_INVALID_ARGUMENT;
+    int level = GRAIL_MACOS_SOL_SOCKET;
+    int name = 0;
+    int number = 0;
+    grail_macos_timeval timeout;
+    grail_macos_linger linger;
+    void *data = &number;
+    grail_macos_socklen_t length = (grail_macos_socklen_t)sizeof(number);
+    switch (option) {
+    case GRAIL_SOCKOPT_REUSE_ADDRESS: name = GRAIL_MACOS_SO_REUSEADDR; break;
+    case GRAIL_SOCKOPT_REUSE_PORT: name = GRAIL_MACOS_SO_REUSEPORT; break;
+    case GRAIL_SOCKOPT_NO_DELAY:
+        level = GRAIL_MACOS_IPPROTO_TCP;
+        name = GRAIL_MACOS_TCP_NODELAY;
+        break;
+    case GRAIL_SOCKOPT_KEEPALIVE: name = GRAIL_MACOS_SO_KEEPALIVE; break;
+    case GRAIL_SOCKOPT_BROADCAST: name = GRAIL_MACOS_SO_BROADCAST; break;
+    case GRAIL_SOCKOPT_RECEIVE_TIMEOUT_MS:
+        name = GRAIL_MACOS_SO_RCVTIMEO;
+        data = &timeout;
+        length = (grail_macos_socklen_t)sizeof(timeout);
+        break;
+    case GRAIL_SOCKOPT_SEND_TIMEOUT_MS:
+        name = GRAIL_MACOS_SO_SNDTIMEO;
+        data = &timeout;
+        length = (grail_macos_socklen_t)sizeof(timeout);
+        break;
+    case GRAIL_SOCKOPT_LINGER_MS:
+        name = GRAIL_MACOS_SO_LINGER;
+        data = &linger;
+        length = (grail_macos_socklen_t)sizeof(linger);
+        break;
+    default: return GRAIL_E_UNSUPPORTED;
+    }
+    if (getsockopt(object->descriptor, level, name, data, &length) != 0) {
+        return grail_macos_fail(*__error());
+    }
+    if (option == GRAIL_SOCKOPT_RECEIVE_TIMEOUT_MS || option == GRAIL_SOCKOPT_SEND_TIMEOUT_MS) {
+        *value = (uint64_t)timeout.tv_sec * 1000 + (uint64_t)timeout.tv_usec / 1000;
+    } else if (option == GRAIL_SOCKOPT_LINGER_MS) {
+        *value = linger.l_onoff == 0 ? 0 : (uint64_t)linger.l_linger * 1000;
+    } else {
+        *value = (uint64_t)(uint32_t)number;
+    }
     return GRAIL_OK;
 }
 

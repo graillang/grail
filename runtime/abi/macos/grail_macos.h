@@ -56,6 +56,51 @@ typedef struct grail_macos_pthread_attr {
     uint64_t opaque[8];
 } grail_macos_pthread_attr_t;
 
+typedef struct grail_macos_tm {
+    int32_t tm_sec;
+    int32_t tm_min;
+    int32_t tm_hour;
+    int32_t tm_mday;
+    int32_t tm_mon;
+    int32_t tm_year;
+    int32_t tm_wday;
+    int32_t tm_yday;
+    int32_t tm_isdst;
+    int32_t padding;
+    int64_t tm_gmtoff;
+    const char *tm_zone;
+} grail_macos_tm;
+
+typedef uint32_t grail_macos_socklen_t;
+
+typedef struct grail_macos_sockaddr {
+    uint8_t sa_len;
+    uint8_t sa_family;
+    char sa_data[14];
+} grail_macos_sockaddr;
+
+typedef struct grail_macos_sockaddr_in {
+    uint8_t sin_len;
+    uint8_t sin_family;
+    uint16_t sin_port;
+    uint32_t sin_addr;
+    uint8_t sin_zero[8];
+} grail_macos_sockaddr_in;
+
+typedef struct grail_macos_sockaddr_in6 {
+    uint8_t sin6_len;
+    uint8_t sin6_family;
+    uint16_t sin6_port;
+    uint32_t sin6_flowinfo;
+    uint8_t sin6_addr[16];
+    uint32_t sin6_scope_id;
+} grail_macos_sockaddr_in6;
+
+typedef struct grail_macos_linger {
+    int32_t l_onoff;
+    int32_t l_linger;
+} grail_macos_linger;
+
 typedef void *grail_macos_spawn_file_actions_t;
 typedef void *grail_macos_spawnattr_t;
 
@@ -101,6 +146,7 @@ typedef void *grail_macos_spawnattr_t;
 #define GRAIL_MACOS_EISDIR 21
 #define GRAIL_MACOS_EINVAL 22
 #define GRAIL_MACOS_EMFILE 24
+#define GRAIL_MACOS_ENOBUFS 55
 #define GRAIL_MACOS_ENOSPC 28
 #define GRAIL_MACOS_ESPIPE 29
 #define GRAIL_MACOS_EROFS 30
@@ -148,6 +194,25 @@ typedef void *grail_macos_spawnattr_t;
 #define GRAIL_MACOS_SIGKILL 9
 #define GRAIL_MACOS_F_OK 0
 #define GRAIL_MACOS_X_OK 1
+#define GRAIL_MACOS_AF_INET 2
+#define GRAIL_MACOS_AF_INET6 30
+#define GRAIL_MACOS_SOCK_STREAM 1
+#define GRAIL_MACOS_SOCK_DGRAM 2
+#define GRAIL_MACOS_IPPROTO_TCP 6
+#define GRAIL_MACOS_SOL_SOCKET 0xFFFF
+#define GRAIL_MACOS_SO_REUSEADDR 0x0004
+#define GRAIL_MACOS_SO_KEEPALIVE 0x0008
+#define GRAIL_MACOS_SO_BROADCAST 0x0020
+#define GRAIL_MACOS_SO_LINGER 0x0080
+#define GRAIL_MACOS_SO_REUSEPORT 0x0200
+#define GRAIL_MACOS_SO_SNDTIMEO 0x1005
+#define GRAIL_MACOS_SO_RCVTIMEO 0x1006
+#define GRAIL_MACOS_SO_NOSIGPIPE 0x1022
+#define GRAIL_MACOS_TCP_NODELAY 0x01
+#define GRAIL_MACOS_SHUT_RD 0
+#define GRAIL_MACOS_SHUT_WR 1
+#define GRAIL_MACOS_SHUT_RDWR 2
+#define GRAIL_MACOS_INVALID_SOCKET (-1)
 
 int open(const char *path, int flags, ...);
 int close(int descriptor);
@@ -226,9 +291,39 @@ int posix_spawn(int *pid, const char *path,
                 char *const envp[]);
 int waitpid(int pid, int *status, int options);
 int kill(int pid, int signal);
+grail_macos_tm *localtime_r(const int64_t *time, grail_macos_tm *result);
+int socket(int family, int type, int protocol);
+int bind(int descriptor, const grail_macos_sockaddr *address, grail_macos_socklen_t length);
+int listen(int descriptor, int backlog);
+int accept(int descriptor, grail_macos_sockaddr *address, grail_macos_socklen_t *length);
+int connect(int descriptor, const grail_macos_sockaddr *address, grail_macos_socklen_t length);
+grail_macos_ssize_t send(int descriptor, const void *buffer, uint64_t length, int flags);
+grail_macos_ssize_t recv(int descriptor, void *buffer, uint64_t length, int flags);
+grail_macos_ssize_t sendto(int descriptor, const void *buffer, uint64_t length, int flags,
+                           const grail_macos_sockaddr *address, grail_macos_socklen_t address_length);
+grail_macos_ssize_t recvfrom(int descriptor, void *buffer, uint64_t length, int flags,
+                             grail_macos_sockaddr *address, grail_macos_socklen_t *address_length);
+int shutdown(int descriptor, int how);
+int getsockname(int descriptor, grail_macos_sockaddr *address, grail_macos_socklen_t *length);
+int getpeername(int descriptor, grail_macos_sockaddr *address, grail_macos_socklen_t *length);
+int setsockopt(int descriptor, int level, int option, const void *value,
+               grail_macos_socklen_t length);
+int getsockopt(int descriptor, int level, int option, void *value, grail_macos_socklen_t *length);
 
 #ifdef __cplusplus
 }
+#endif
+
+#if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
+_Static_assert(sizeof(grail_macos_tm) == 56, "Darwin struct tm layout");
+_Static_assert(sizeof(grail_macos_dirent) == 280, "Darwin struct dirent layout");
+_Static_assert(sizeof(grail_macos_sockaddr) == 16, "Darwin sockaddr layout");
+_Static_assert(sizeof(grail_macos_sockaddr_in) == 16, "Darwin sockaddr_in layout");
+_Static_assert(sizeof(grail_macos_sockaddr_in6) == 28, "Darwin sockaddr_in6 layout");
+_Static_assert(sizeof(grail_macos_pthread_mutex_t) == 64, "Darwin pthread_mutex_t size");
+_Static_assert(sizeof(grail_macos_pthread_attr_t) == 64, "Darwin pthread_attr_t size");
+_Static_assert(sizeof(grail_macos_timeval) == 16, "Darwin timeval layout");
+_Static_assert(sizeof(grail_macos_linger) == 8, "Darwin linger layout");
 #endif
 
 #endif /* GRAIL_MACOS_H */

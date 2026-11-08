@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- Added local-time offsets and the first TCP/UDP socket layer to the Windows and macOS
+  backends. Windows uses `GetTimeZoneInformation`/`SystemTimeToTzSpecificLocalTime` and Winsock
+  (`WSAStartup`, TCP/UDP IPv4 plus probed IPv6, bind/listen/accept/connect, send/recv,
+  sendto/recvfrom, shutdown, addresses, non-blocking mode and options). macOS uses
+  `localtime_r`/`tm_gmtoff` and BSD sockets with `SO_NOSIGPIPE` and the same operations.
+  `GRAIL_CAP_LOCAL_TIME_OFFSET`, `GRAIL_CAP_SOCKETS`, `GRAIL_CAP_SOCKET_UDP` and
+  `GRAIL_CAP_SOCKET_IPV6` are set where available. DNS remains fail-closed
+  (`grail_os_net_resolve` is still UNSUPPORTED); Windows also still lacks non-blocking files
+  and readlink/realpath, and macOS still lacks `file_stat`/`fs_stat`. All four cross targets
+  compile with strict warnings and define all 95 public symbols. Pinned Win32/Darwin layouts now carry compile-time
+  size assertions. Socket/time code is statically checked only, not executed on Windows or
+  macOS.
+
 - Added child-process support to the Windows and macOS backends. Windows uses `CreateProcessW`
   with a validated argv/environment, UTF-16 environment block, working directory, inheritable
   explicit/inherited/NUL standard handles, Win32 search path, wait/wait-timeout,

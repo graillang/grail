@@ -5,8 +5,9 @@
 Unicode, lexical paths) are implemented and tested; the Linux reference shim implements files,
 directories, environment, time, threads, dynamic libraries, child processes and TCP/UDP
 sockets. Windows and macOS have statically verified backends for init/time/environment/
-cwd/executable, file basics, directory iteration, threads/synchronization, dynamic libraries
-and child processes, with every unimplemented function explicitly fail-closed. Nothing here is linked into Grail programs yet, and no C source is part of the
+cwd/executable, file basics, directory iteration, threads/synchronization, dynamic libraries,
+child processes, local-time offsets and TCP/UDP sockets, with every unimplemented function
+explicitly fail-closed. Nothing here is linked into Grail programs yet, and no C source is part of the
 compiler or runtime build.
 
 The runtime today is Linux-only: `compiler/runtime.grl` maps portable operation IDs to Linux
@@ -139,14 +140,14 @@ pair, structs crossing by reference, opaque `handle`, linear ownership) maps dir
 | Domain | Header | Portable implementation | Linux reference | Windows | macOS |
 | --- | --- | --- | --- | --- | --- |
 | Core, error, Unicode | `grail_abi.h`, `grail_error.h`, `grail_unicode.h` | yes, tested | n/a | n/a | n/a |
-| Time | `grail_time.h` | n/a | monotonic/realtime/CPU, sleep, local offset | monotonic/realtime/CPU, sleep | monotonic/realtime/CPU, sleep |
+| Time | `grail_time.h` | n/a | monotonic/realtime/CPU, sleep, local offset | monotonic/realtime/CPU, sleep, local offset | monotonic/realtime/CPU, sleep, local offset |
 | Environment | `grail_env.h` | shared store | get/set/unset/enumerate | get/set/unset/enumerate | get/set/unset/enumerate |
 | Files/pipes | `grail_fs.h` | handle table | open/read/write/seek/truncate/sync/stat/close, pipe | open/read/write/seek/truncate/sync/stat/close, pipe | open/read/write/seek/truncate/sync/non-blocking/close, pipe |
 | File metadata | `grail_fs.h` | format | `file_stat`/`fs_stat` | `file_stat`/`fs_stat` | not implemented |
 | Directories | `grail_fs.h` | handle table | open/next/close, mkdir/remove/rename | FindFirstFileW/FindNextFileW, mkdir/remove/rename | opendir/readdir, mkdir/remove/rename |
 | Paths | `grail_path.h` | POSIX + Windows rules, both tested | cwd, executable | cwd, executable | cwd, executable |
 | Processes | `grail_proc.h` | options/status layout | fork/execve/wait4 subset | CreateProcessW subset | posix_spawn subset |
-| Sockets | `grail_socket.h` | address layout | TCP/UDP IPv4+IPv6, options, DNS | not implemented | not implemented |
+| Sockets | `grail_socket.h` | address layout | TCP/UDP IPv4+IPv6, options, DNS | TCP/UDP IPv4+IPv6, options; DNS fail-closed | TCP/UDP IPv4+IPv6, options; DNS fail-closed |
 | Threads/sync | `grail_thread.h` | handle table | pthread thread, mutex, condvar | CreateThread/SRWLOCK/CONDITION_VARIABLE | pthread thread/mutex/condvar |
 | Dynamic libraries | `grail_dl.h` | handle table | dlopen/dlsym/dlclose | LoadLibraryExW/GetProcAddress | dlopen/dlsym/dlclose |
 
@@ -200,13 +201,13 @@ behavioural oracle, not a replacement runtime.
 
 Windows implementation is static-only until it runs on a real Windows host. Remaining: compare
 the pinned declarations with the current SDK; add `\\?\` long paths and reserved-name policy,
-reparse-point metadata, non-blocking files, readlink/realpath, local-time offsets and sockets;
-apply thread names; define the loader search-flag semantics and environment-block ordering;
-add Windows behaviour tests and set the corresponding capability bits only after they pass.
+reparse-point metadata, non-blocking files, readlink/realpath and DNS; apply thread names;
+define the loader search-flag semantics and environment-block ordering; add Windows behaviour
+tests and set the corresponding capability bits only after they pass.
 
 macOS implementation is static-only until it runs on macOS. Remaining: verify the pinned
-libSystem declarations and add a pinned `struct stat` for metadata; local-time offsets and
-sockets; framework/`.tbd` link inputs belong to the macOS backend lane.
+libSystem declarations and add a pinned `struct stat` for metadata; DNS; framework/`.tbd` link
+inputs belong to the macOS backend lane.
 
 Both non-Linux backends also need ABI bridge work outside this directory: Win64 argument
 registers/shadow space and Apple ARM64 symbol conventions are compiler/codegen responsibilities.
