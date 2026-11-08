@@ -57,6 +57,7 @@ install prefix="~/.local":
     mkdir -p "$prefix/bin" "$prefix/lib/grail/std"
     cp "$grail" "$prefix/bin/grail.new" && mv "$prefix/bin/grail.new" "$prefix/bin/grail"
     cp compiler/runtime.grl "$prefix/lib/grail/runtime.grl"
+    cp compiler/os-linux.grl "$prefix/lib/grail/os-linux.grl"
     cp lib/*.grl "$prefix/lib/grail/std/"
     echo "installed $prefix/bin/grail (needs clang and ld.lld for building programs)"
 

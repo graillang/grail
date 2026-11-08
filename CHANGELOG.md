@@ -130,6 +130,16 @@
   only. Tooling is documented in `docs/tooling/cross-platform-ci.md`; the
   LSP/debugger/profiler integration plan is in
   `docs/tooling/lsp-debugger-profiler.md`.
+- Windows x86-64 programs now run: the runtime gained an OS layer
+  (`compiler/os-windows.grl`) behind the existing operation IDs, and a new `raw_win32(Symbol, ...)`
+  intrinsic emits Win64 calls with shadow space, register arguments and stack arguments. Console
+  output, integer/float formatting, file write/read, exit codes and command-line arguments
+  (via `GetCommandLineA`) work under Wine; allocation uses `VirtualAlloc` and the thread pointer
+  reads TEB+0x28. The Linux syscall boundary moved to `compiler/os-linux.grl` so exactly one OS
+  layer is compiled per target; `bun tools/windows.mjs check` executes eight PE cases under Wine
+  when available, and the CLI resolves the OS layer next to the runtime (it still refuses to link
+  PE images itself, pointing at the Windows tool). Threads, sockets, directory listing,
+  `mremap` and `.pdata` unwinding remain unimplemented.
 - New `windows-x86_64` target emits COFF-compatible x86-64 assembly for PE32+ console images:
   MSVC `.def` function records replace ELF symbol types, a `grail_entry` PE entry point replaces
   `_start`, process exit is an `ExitProcess` import and the allocation intrinsic maps to

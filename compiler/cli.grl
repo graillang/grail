@@ -6,6 +6,7 @@ use fmt;
 // re-invoking itself (`grail [--target T] OUT.s ENTRY.grl MODULE.grl...`), then assemble and link.
 struct Home {
     runtime: u8[],
+    os: u8[],
     std: u8[]
 }
 struct Project {
@@ -170,11 +171,21 @@ fn home() -> Home {
     if env.len() {
         installed := path_join(view(env), view("runtime.grl"));
         if host::exists(view(installed)) {
-            return Home { runtime: installed, std: path_join(view(env), view("std")) };
+            os := path_join(view(dirname(view(installed))), view("os-linux.grl"));
+            return Home {
+                runtime: installed,
+                os: os,
+                std: path_join(view(env), view("std"))
+            };
         }
         repo := path_join(view(env), view("compiler/runtime.grl"));
         if host::exists(view(repo)) {
-            return Home { runtime: repo, std: path_join(view(env), view("lib")) };
+            os := path_join(view(dirname(view(repo))), view("os-linux.grl"));
+            return Home {
+                runtime: repo,
+                os: os,
+                std: path_join(view(env), view("lib"))
+            };
         }
     }
     exe := host::exe_path();
@@ -183,16 +194,26 @@ fn home() -> Home {
         installed := path_join(view(dir), view("lib/grail/runtime.grl"));
         if host::exists(view(installed)) {
             prefix := path_join(view(dir), view("lib/grail"));
-            return Home { runtime: installed, std: path_join(view(prefix), view("std")) };
+            os := path_join(view(prefix), view("os-linux.grl"));
+            return Home {
+                runtime: installed,
+                os: os,
+                std: path_join(view(prefix), view("std"))
+            };
         }
         repo := path_join(view(dir), view("compiler/runtime.grl"));
         if host::exists(view(repo)) {
-            return Home { runtime: repo, std: path_join(view(dir), view("lib")) };
+            os := path_join(view(dirname(view(repo))), view("os-linux.grl"));
+            return Home {
+                runtime: repo,
+                os: os,
+                std: path_join(view(dir), view("lib"))
+            };
         }
         dir = path_join(view(dir), view(".."));
     }
     say(view("grail: cannot find the Grail runtime; set GRAIL_HOME"));
-    return Home { runtime: u8[], std: u8[] };
+    return Home { runtime: u8[], os: u8[], std: u8[] };
 }
 fn collect<a, b>(dir: &a [u8], out: (&b mut u8[][])) {
     entries := host::list_dir(view(dir));
@@ -264,12 +285,17 @@ fn compile_mode<a, b, d, e, g>(
         }
     }
     command.push(copy(view(h.runtime)));
+    command.push(copy(view(h.os)));
     if host::command(command) != 0 {
         return 1;
     }
     if check_only {
         host::remove(view(asm), 0);
         return 0;
+    }
+    if eq(view(target), view("windows-x86_64")) {
+        say(view("grail: windows-x86_64 images are cross-built with `bun tools/windows.mjs`"));
+        return 1;
     }
     mut triple = copy(view("--target=x86_64-linux-gnu"));
     mut emulation = copy(view("elf_x86_64"));

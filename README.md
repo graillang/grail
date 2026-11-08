@@ -32,4 +32,7 @@ Rust is needed only to verify the book's Rust counterparts.
 This remains a work-in-progress language, not a promise of complete v1 library support.
 The Windows x86-64 backend currently emits and links PE32+ console images but has no Windows
 runtime, unwinding or thread support yet; images are build-only and must not be executed (see [docs/design/windows-backend.md](docs/design/windows-backend.md)).
+The Windows x86-64 backend emits and links PE32+ console images, and its runtime layer covers
+console output, files, exit codes and argv under Wine; threads, sockets and unwinding are still
+missing (see [docs/design/windows-backend.md](docs/design/windows-backend.md)).
 Additional numeric primitives and structured concurrency are not yet implemented. Historical research under `research/` records earlier design experiments.
