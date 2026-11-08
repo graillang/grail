@@ -338,6 +338,32 @@ static void test_dynamic_library(void) {
                            &missing) == GRAIL_E_NOT_FOUND);
 }
 
+static void test_unsupported_domains(void) {
+    grail_process_options options;
+    memset(&options, 0, sizeof(options));
+    options.struct_size = sizeof(options);
+    options.abi_version = GRAIL_ABI_VERSION;
+    options.program = (const uint8_t *)"true";
+    options.program_length = 4;
+    grail_process process = GRAIL_HANDLE_NONE;
+    CHECK(grail_os_process_spawn(&options, &process) == GRAIL_E_UNSUPPORTED);
+    CHECK(grail_os_process_wait(process, NULL) == GRAIL_E_UNSUPPORTED);
+    CHECK(grail_os_process_close(process) == GRAIL_E_UNSUPPORTED);
+
+    grail_socket socket = GRAIL_HANDLE_NONE;
+    CHECK(grail_os_socket_create(GRAIL_ADDRESS_INET, GRAIL_SOCKET_STREAM, &socket) ==
+          GRAIL_E_UNSUPPORTED);
+    grail_socket_address address;
+    memset(&address, 0, sizeof(address));
+    address.struct_size = sizeof(address);
+    address.abi_version = GRAIL_ABI_VERSION;
+    address.family = GRAIL_ADDRESS_INET;
+    address.port = 80;
+    CHECK(grail_os_socket_bind(socket, &address) == GRAIL_E_UNSUPPORTED);
+    CHECK(grail_os_net_resolve((const uint8_t *)"localhost", 9, GRAIL_ADDRESS_INET, &address, 1) ==
+          GRAIL_E_UNSUPPORTED);
+}
+
 int main(void) {
     char scratch[] = "/tmp/grail-abi-XXXXXX";
     CHECK(mkdtemp(scratch) != NULL);
@@ -379,6 +405,7 @@ int main(void) {
     test_files(scratch);
     test_threads();
     test_dynamic_library();
+    test_unsupported_domains();
 
     CHECK(grail_os_shutdown() == GRAIL_OK);
     CHECK(grail_os_capabilities() == 0);

@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Added the child-process and socket/DNS contracts with explicit ownership, error and
+  platform-search rules, plus fail-closed Windows and macOS backend skeletons. The Linux
+  reference backend reports both domains as unsupported and clears their capability bits;
+  a skeleton conformance test verifies that init fails closed, capabilities stay zero and
+  representative entry points return `GRAIL_E_UNSUPPORTED`. Documented the full Win32/Winsock
+  and libSystem/Mach mapping in `runtime/abi/README.md` and the safe Grail surface in
+  `docs/design/runtime-api.md`.
 - Added a hosted Linux reference backend for the OS ABI (an ABI oracle, not a Grail build
   path): startup/environment seeding and iteration, monotonic/realtime/CPU clocks and sleep,
   file open/read/write/seek/stat/sync/close, directory iteration, pipes, mkdir/remove/rename,

@@ -40,7 +40,14 @@ buildAndRun('linux-backend', ['tests/abi/test_linux_backend.c',
   'runtime/abi/grail_abi.c', 'runtime/abi/grail_error.c', 'runtime/abi/grail_unicode.c',
   'runtime/abi/grail_path.c', 'runtime/abi/grail_handle_table.c',
   'runtime/abi/linux/grail_os_linux.c', 'runtime/abi/linux/grail_os_linux_fs.c',
-  'runtime/abi/linux/grail_os_linux_thread.c'], ['-ldl']);
+  'runtime/abi/linux/grail_os_linux_thread.c',
+  'runtime/abi/linux/grail_os_linux_proc.c', 'runtime/abi/linux/grail_os_linux_net.c'], ['-ldl']);
+buildAndRun('skeleton-windows', ['tests/abi/test_skeleton.c',
+  'runtime/abi/grail_abi.c', 'runtime/abi/grail_error.c',
+  'runtime/abi/windows/grail_os_windows.c']);
+buildAndRun('skeleton-macos', ['tests/abi/test_skeleton.c',
+  'runtime/abi/grail_abi.c', 'runtime/abi/grail_error.c',
+  'runtime/abi/macos/grail_os_macos.c']);
 buildAndRun('handles', ['tests/abi/test_handle_table.c',
   'runtime/abi/grail_handle_table.c']);
 buildAndRun('paths-posix', ['tests/abi/test_paths.c', 'runtime/abi/grail_abi.c',

@@ -17,6 +17,8 @@
 #include "../../../include/grail/grail_error.h"
 #include "../../../include/grail/grail_fs.h"
 #include "../../../include/grail/grail_path.h"
+#include "../../../include/grail/grail_proc.h"
+#include "../../../include/grail/grail_socket.h"
 #include "../../../include/grail/grail_thread.h"
 #include "../../../include/grail/grail_time.h"
 #include "../grail_handle_table.h"
