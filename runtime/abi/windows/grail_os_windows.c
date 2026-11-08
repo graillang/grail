@@ -31,6 +31,38 @@ typedef struct grail_win32_file {
     HANDLE handle;
 } grail_win32_file;
 
+typedef struct grail_win32_dir {
+    HANDLE handle;
+    WIN32_FIND_DATAW current;
+    WIN32_FIND_DATAW next;
+    int current_valid;
+    int next_valid;
+    int eof;
+} grail_win32_dir;
+
+typedef struct grail_win32_thread {
+    HANDLE handle;
+    grail_thread_entry entry;
+    void *user;
+    uint64_t result;
+    SRWLOCK gate;
+    int detached;
+    int finished;
+    int freed;
+} grail_win32_thread;
+
+typedef struct grail_win32_mutex {
+    SRWLOCK lock;
+} grail_win32_mutex;
+
+typedef struct grail_win32_condvar {
+    CONDITION_VARIABLE condition;
+} grail_win32_condvar;
+
+typedef struct grail_win32_library {
+    HANDLE module;
+} grail_win32_library;
+
 typedef struct grail_win32_env_iterator {
     grail_env_snapshot snapshot;
     int64_t index;
@@ -39,7 +71,12 @@ typedef struct grail_win32_env_iterator {
 typedef struct grail_win32_state {
     grail_allocator allocator;
     grail_handle_table files;
+    grail_handle_table directories;
     grail_handle_table env_iterators;
+    grail_handle_table threads;
+    grail_handle_table mutexes;
+    grail_handle_table condvars;
+    grail_handle_table libraries;
     grail_env_store env;
     SRWLOCK lock;
     uint64_t capabilities;
@@ -49,11 +86,17 @@ typedef struct grail_win32_state {
 static grail_win32_state grail_windows = {{0, NULL, NULL, NULL, NULL},
                                           {NULL, NULL, 0, 0, 0},
                                           {NULL, NULL, 0, 0, 0},
+                                          {NULL, NULL, 0, 0, 0},
+                                          {NULL, NULL, 0, 0, 0},
+                                          {NULL, NULL, 0, 0, 0},
+                                          {NULL, NULL, 0, 0, 0},
+                                          {NULL, NULL, 0, 0, 0},
                                           {NULL, NULL, NULL, 0, 0},
                                           {NULL},
                                           0,
                                           0};
 static _Thread_local grail_os_error grail_windows_error = {GRAIL_OS_DOMAIN_NONE, 0};
+static _Thread_local char grail_windows_loader_error[512];
 
 static void grail_windows_lock(void) {
     AcquireSRWLockExclusive(&grail_windows.lock);
@@ -306,8 +349,28 @@ grail_status grail_os_init(const grail_allocator *allocator, const grail_startup
         grail_handle_table_init(&grail_windows.files, &grail_windows.allocator,
                                 GRAIL_HANDLE_KIND_FILE);
     if (status == GRAIL_OK) {
+        status = grail_handle_table_init(&grail_windows.directories, &grail_windows.allocator,
+                                         GRAIL_HANDLE_KIND_DIR);
+    }
+    if (status == GRAIL_OK) {
         status = grail_handle_table_init(&grail_windows.env_iterators, &grail_windows.allocator,
                                          GRAIL_HANDLE_KIND_ENV_ITER);
+    }
+    if (status == GRAIL_OK) {
+        status = grail_handle_table_init(&grail_windows.threads, &grail_windows.allocator,
+                                         GRAIL_HANDLE_KIND_THREAD);
+    }
+    if (status == GRAIL_OK) {
+        status = grail_handle_table_init(&grail_windows.mutexes, &grail_windows.allocator,
+                                         GRAIL_HANDLE_KIND_MUTEX);
+    }
+    if (status == GRAIL_OK) {
+        status = grail_handle_table_init(&grail_windows.condvars, &grail_windows.allocator,
+                                         GRAIL_HANDLE_KIND_CONDVAR);
+    }
+    if (status == GRAIL_OK) {
+        status = grail_handle_table_init(&grail_windows.libraries, &grail_windows.allocator,
+                                         GRAIL_HANDLE_KIND_LIBRARY);
     }
     if (status == GRAIL_OK) {
         status = grail_env_store_init(&grail_windows.env, &grail_windows.allocator);
@@ -317,13 +380,20 @@ grail_status grail_os_init(const grail_allocator *allocator, const grail_startup
     }
     if (status != GRAIL_OK) {
         grail_handle_table_destroy(&grail_windows.files);
+        grail_handle_table_destroy(&grail_windows.directories);
         grail_handle_table_destroy(&grail_windows.env_iterators);
+        grail_handle_table_destroy(&grail_windows.threads);
+        grail_handle_table_destroy(&grail_windows.mutexes);
+        grail_handle_table_destroy(&grail_windows.condvars);
+        grail_handle_table_destroy(&grail_windows.libraries);
         grail_env_store_free(&grail_windows.env);
         return status;
     }
     grail_windows.capabilities = GRAIL_CAP_FILES | GRAIL_CAP_FILE_METADATA | GRAIL_CAP_PATHS |
                                  GRAIL_CAP_UNICODE | GRAIL_CAP_ENVIRONMENT |
-                                 GRAIL_CAP_ENV_MUTATION | GRAIL_CAP_TIME | GRAIL_CAP_CPU_TIME;
+                                 GRAIL_CAP_ENV_MUTATION | GRAIL_CAP_TIME | GRAIL_CAP_CPU_TIME |
+                                 GRAIL_CAP_DIRECTORIES | GRAIL_CAP_THREADS |
+                                 GRAIL_CAP_SYNC_PRIMITIVES | GRAIL_CAP_DYNAMIC_LIBRARIES;
     grail_windows.initialized = 1;
     return GRAIL_OK;
 }
@@ -333,7 +403,12 @@ grail_status grail_os_shutdown(void) {
         return GRAIL_E_NOT_INITIALIZED;
     }
     grail_handle_table_destroy(&grail_windows.files);
+    grail_handle_table_destroy(&grail_windows.directories);
     grail_handle_table_destroy(&grail_windows.env_iterators);
+    grail_handle_table_destroy(&grail_windows.threads);
+    grail_handle_table_destroy(&grail_windows.mutexes);
+    grail_handle_table_destroy(&grail_windows.condvars);
+    grail_handle_table_destroy(&grail_windows.libraries);
     grail_env_store_free(&grail_windows.env);
     grail_windows.capabilities = 0;
     grail_windows.initialized = 0;
@@ -965,6 +1040,524 @@ grail_status grail_os_pipe(grail_pipe *out) {
     return GRAIL_OK;
 }
 
+
+static uint32_t grail_windows_thread_main(void *argument) {
+    grail_win32_thread *thread = (grail_win32_thread *)argument;
+    const uint64_t result = thread->entry(thread->user);
+    int release = 0;
+    AcquireSRWLockExclusive(&thread->gate);
+    thread->result = result;
+    thread->finished = 1;
+    if (thread->detached && !thread->freed) {
+        thread->freed = 1;
+        release = 1;
+    }
+    ReleaseSRWLockExclusive(&thread->gate);
+    if (release) {
+        grail_windows_release(thread, sizeof(*thread));
+    }
+    return (uint32_t)result;
+}
+
+grail_status grail_os_thread_spawn(grail_thread_entry entry, void *user,
+                                   const grail_thread_options *options, grail_thread *out) {
+    if (!grail_windows.initialized) {
+        return GRAIL_E_NOT_INITIALIZED;
+    }
+    if (entry == NULL || out == NULL) {
+        return GRAIL_E_INVALID_ARGUMENT;
+    }
+    uint64_t stack_size = 0;
+    if (options != NULL) {
+        if (options->struct_size < sizeof(*options) || options->abi_version != GRAIL_ABI_VERSION) {
+            return GRAIL_E_INVALID_ARGUMENT;
+        }
+        if (options->flags != 0) {
+            return GRAIL_E_UNSUPPORTED;
+        }
+        stack_size = options->stack_size;
+    }
+    grail_win32_thread *thread = (grail_win32_thread *)grail_windows_allocate(sizeof(*thread));
+    if (thread == NULL) {
+        return GRAIL_E_OUT_OF_MEMORY;
+    }
+    for (uint64_t i = 0; i < sizeof(*thread); i++) {
+        ((uint8_t *)thread)[i] = 0;
+    }
+    thread->entry = entry;
+    thread->user = user;
+    InitializeSRWLock(&thread->gate);
+    DWORD identifier = 0;
+    thread->handle = CreateThread(NULL, stack_size, grail_windows_thread_main, thread, 0,
+                                  &identifier);
+    if (thread->handle == NULL) {
+        const DWORD error = GetLastError();
+        grail_windows_release(thread, sizeof(*thread));
+        return grail_windows_fail(error);
+    }
+    grail_handle handle = GRAIL_HANDLE_NONE;
+    grail_windows_lock();
+    const grail_status status =
+        grail_handle_table_allocate(&grail_windows.threads, thread, &handle);
+    grail_windows_unlock();
+    if (status != GRAIL_OK) {
+        const HANDLE thread_handle = thread->handle;
+        int release = 0;
+        AcquireSRWLockExclusive(&thread->gate);
+        if (thread->finished && !thread->freed) {
+            thread->freed = 1;
+            release = 1;
+        } else {
+            thread->detached = 1;
+        }
+        ReleaseSRWLockExclusive(&thread->gate);
+        (void)CloseHandle(thread_handle);
+        if (release) {
+            grail_windows_release(thread, sizeof(*thread));
+        }
+        return status;
+    }
+    *out = handle;
+    return GRAIL_OK;
+}
+
+static grail_status grail_windows_thread_lookup(grail_thread handle, grail_win32_thread **out) {
+    if (!grail_windows.initialized) {
+        return GRAIL_E_NOT_INITIALIZED;
+    }
+    grail_windows_lock();
+    const grail_status status =
+        grail_handle_table_lookup(&grail_windows.threads, handle, (void **)out);
+    grail_windows_unlock();
+    return status;
+}
+
+grail_status grail_os_thread_join(grail_thread handle, uint64_t *exit_code) {
+    grail_win32_thread *thread = NULL;
+    grail_status status = grail_windows_thread_lookup(handle, &thread);
+    if (status != GRAIL_OK) {
+        return status;
+    }
+    if (WaitForSingleObject(thread->handle, GRAIL_WIN32_INFINITE) != GRAIL_WAIT_OBJECT_0) {
+        return grail_windows_fail(GetLastError());
+    }
+    AcquireSRWLockExclusive(&thread->gate);
+    const uint64_t result = thread->result;
+    thread->freed = 1;
+    ReleaseSRWLockExclusive(&thread->gate);
+    grail_windows_lock();
+    status = grail_handle_table_release(&grail_windows.threads, handle, NULL);
+    grail_windows_unlock();
+    if (status != GRAIL_OK) {
+        return status;
+    }
+    (void)CloseHandle(thread->handle);
+    grail_windows_release(thread, sizeof(*thread));
+    if (exit_code != NULL) {
+        *exit_code = result;
+    }
+    return GRAIL_OK;
+}
+
+grail_status grail_os_thread_detach(grail_thread handle) {
+    if (!grail_windows.initialized) {
+        return GRAIL_E_NOT_INITIALIZED;
+    }
+    grail_win32_thread *thread = NULL;
+    grail_windows_lock();
+    grail_status status = grail_handle_table_release(&grail_windows.threads, handle, (void **)&thread);
+    grail_windows_unlock();
+    if (status != GRAIL_OK) {
+        return status;
+    }
+    const HANDLE thread_handle = thread->handle;
+    int release = 0;
+    AcquireSRWLockExclusive(&thread->gate);
+    if (thread->finished && !thread->freed) {
+        thread->freed = 1;
+        release = 1;
+    } else if (!thread->finished) {
+        thread->detached = 1;
+    }
+    ReleaseSRWLockExclusive(&thread->gate);
+    if (release) {
+        grail_windows_release(thread, sizeof(*thread));
+    }
+    if (!CloseHandle(thread_handle)) {
+        return grail_windows_fail(GetLastError());
+    }
+    return GRAIL_OK;
+}
+
+grail_status grail_os_thread_id(uint64_t *out) {
+    if (!grail_windows.initialized) {
+        return GRAIL_E_NOT_INITIALIZED;
+    }
+    if (out == NULL) {
+        return GRAIL_E_INVALID_ARGUMENT;
+    }
+    *out = (uint64_t)GetCurrentThreadId();
+    return GRAIL_OK;
+}
+
+grail_status grail_os_thread_yield(void) {
+    if (!grail_windows.initialized) {
+        return GRAIL_E_NOT_INITIALIZED;
+    }
+    (void)SwitchToThread();
+    return GRAIL_OK;
+}
+
+static grail_status grail_windows_mutex_lookup(grail_mutex handle, grail_win32_mutex **out) {
+    if (!grail_windows.initialized) {
+        return GRAIL_E_NOT_INITIALIZED;
+    }
+    grail_windows_lock();
+    const grail_status status =
+        grail_handle_table_lookup(&grail_windows.mutexes, handle, (void **)out);
+    grail_windows_unlock();
+    return status;
+}
+
+grail_status grail_os_mutex_create(grail_mutex *out) {
+    if (!grail_windows.initialized) {
+        return GRAIL_E_NOT_INITIALIZED;
+    }
+    if (out == NULL) {
+        return GRAIL_E_INVALID_ARGUMENT;
+    }
+    grail_win32_mutex *mutex = (grail_win32_mutex *)grail_windows_allocate(sizeof(*mutex));
+    if (mutex == NULL) {
+        return GRAIL_E_OUT_OF_MEMORY;
+    }
+    InitializeSRWLock(&mutex->lock);
+    grail_handle handle = GRAIL_HANDLE_NONE;
+    grail_windows_lock();
+    const grail_status status =
+        grail_handle_table_allocate(&grail_windows.mutexes, mutex, &handle);
+    grail_windows_unlock();
+    if (status != GRAIL_OK) {
+        grail_windows_release(mutex, sizeof(*mutex));
+        return status;
+    }
+    *out = handle;
+    return GRAIL_OK;
+}
+
+grail_status grail_os_mutex_lock(grail_mutex handle) {
+    grail_win32_mutex *mutex = NULL;
+    const grail_status status = grail_windows_mutex_lookup(handle, &mutex);
+    if (status != GRAIL_OK) {
+        return status;
+    }
+    AcquireSRWLockExclusive(&mutex->lock);
+    return GRAIL_OK;
+}
+
+grail_status grail_os_mutex_try_lock(grail_mutex handle, uint64_t *acquired) {
+    grail_win32_mutex *mutex = NULL;
+    const grail_status status = grail_windows_mutex_lookup(handle, &mutex);
+    if (status != GRAIL_OK) {
+        return status;
+    }
+    if (acquired == NULL) {
+        return GRAIL_E_INVALID_ARGUMENT;
+    }
+    *acquired = TryAcquireSRWLockExclusive(&mutex->lock) ? 1 : 0;
+    return GRAIL_OK;
+}
+
+grail_status grail_os_mutex_unlock(grail_mutex handle) {
+    grail_win32_mutex *mutex = NULL;
+    const grail_status status = grail_windows_mutex_lookup(handle, &mutex);
+    if (status != GRAIL_OK) {
+        return status;
+    }
+    ReleaseSRWLockExclusive(&mutex->lock);
+    return GRAIL_OK;
+}
+
+grail_status grail_os_mutex_destroy(grail_mutex handle) {
+    if (!grail_windows.initialized) {
+        return GRAIL_E_NOT_INITIALIZED;
+    }
+    grail_win32_mutex *mutex = NULL;
+    grail_windows_lock();
+    const grail_status status =
+        grail_handle_table_release(&grail_windows.mutexes, handle, (void **)&mutex);
+    grail_windows_unlock();
+    if (status != GRAIL_OK) {
+        return status;
+    }
+    grail_windows_release(mutex, sizeof(*mutex));
+    return GRAIL_OK;
+}
+
+static grail_status grail_windows_condvar_lookup(grail_condvar handle,
+                                                 grail_win32_condvar **out) {
+    if (!grail_windows.initialized) {
+        return GRAIL_E_NOT_INITIALIZED;
+    }
+    grail_windows_lock();
+    const grail_status status =
+        grail_handle_table_lookup(&grail_windows.condvars, handle, (void **)out);
+    grail_windows_unlock();
+    return status;
+}
+
+grail_status grail_os_condvar_create(grail_condvar *out) {
+    if (!grail_windows.initialized) {
+        return GRAIL_E_NOT_INITIALIZED;
+    }
+    if (out == NULL) {
+        return GRAIL_E_INVALID_ARGUMENT;
+    }
+    grail_win32_condvar *condvar =
+        (grail_win32_condvar *)grail_windows_allocate(sizeof(*condvar));
+    if (condvar == NULL) {
+        return GRAIL_E_OUT_OF_MEMORY;
+    }
+    InitializeConditionVariable(&condvar->condition);
+    grail_handle handle = GRAIL_HANDLE_NONE;
+    grail_windows_lock();
+    const grail_status status =
+        grail_handle_table_allocate(&grail_windows.condvars, condvar, &handle);
+    grail_windows_unlock();
+    if (status != GRAIL_OK) {
+        grail_windows_release(condvar, sizeof(*condvar));
+        return status;
+    }
+    *out = handle;
+    return GRAIL_OK;
+}
+
+grail_status grail_os_condvar_wait(grail_condvar condvar_handle, grail_mutex mutex_handle,
+                                   int64_t timeout_ns, uint64_t *signaled) {
+    grail_win32_condvar *condvar = NULL;
+    grail_status status = grail_windows_condvar_lookup(condvar_handle, &condvar);
+    if (status != GRAIL_OK) {
+        return status;
+    }
+    grail_win32_mutex *mutex = NULL;
+    status = grail_windows_mutex_lookup(mutex_handle, &mutex);
+    if (status != GRAIL_OK) {
+        return status;
+    }
+    if (signaled == NULL) {
+        return GRAIL_E_INVALID_ARGUMENT;
+    }
+    DWORD milliseconds;
+    if (timeout_ns < 0) {
+        milliseconds = GRAIL_WIN32_INFINITE;
+    } else {
+        uint64_t value = ((uint64_t)timeout_ns + 999999u) / 1000000u;
+        if (value == 0 && timeout_ns > 0) {
+            value = 1;
+        }
+        milliseconds = value > 0xFFFFFFFEu ? 0xFFFFFFFEu : (DWORD)value;
+    }
+    if (SleepConditionVariableSRW(&condvar->condition, &mutex->lock, milliseconds, 0)) {
+        *signaled = 1;
+        return GRAIL_OK;
+    }
+    if (GetLastError() == GRAIL_ERROR_TIMEOUT) {
+        *signaled = 0;
+        return GRAIL_OK;
+    }
+    return grail_windows_fail(GetLastError());
+}
+
+grail_status grail_os_condvar_signal(grail_condvar handle) {
+    grail_win32_condvar *condvar = NULL;
+    const grail_status status = grail_windows_condvar_lookup(handle, &condvar);
+    if (status != GRAIL_OK) {
+        return status;
+    }
+    WakeConditionVariable(&condvar->condition);
+    return GRAIL_OK;
+}
+
+grail_status grail_os_condvar_broadcast(grail_condvar handle) {
+    grail_win32_condvar *condvar = NULL;
+    const grail_status status = grail_windows_condvar_lookup(handle, &condvar);
+    if (status != GRAIL_OK) {
+        return status;
+    }
+    WakeAllConditionVariable(&condvar->condition);
+    return GRAIL_OK;
+}
+
+grail_status grail_os_condvar_destroy(grail_condvar handle) {
+    if (!grail_windows.initialized) {
+        return GRAIL_E_NOT_INITIALIZED;
+    }
+    grail_win32_condvar *condvar = NULL;
+    grail_windows_lock();
+    const grail_status status =
+        grail_handle_table_release(&grail_windows.condvars, handle, (void **)&condvar);
+    grail_windows_unlock();
+    if (status != GRAIL_OK) {
+        return status;
+    }
+    grail_windows_release(condvar, sizeof(*condvar));
+    return GRAIL_OK;
+}
+
+static void grail_windows_set_loader_error(DWORD code) {
+    WCHAR message[512];
+    const DWORD length = FormatMessageW(GRAIL_FORMAT_MESSAGE_FROM_SYSTEM |
+                                            GRAIL_FORMAT_MESSAGE_IGNORE_INSERTS,
+                                        NULL, code, 0, message, 512, NULL);
+    if (length == 0) {
+        grail_windows_loader_error[0] = '\0';
+        return;
+    }
+    uint64_t units = length;
+    while (units > 0 && (message[units - 1] == '\r' || message[units - 1] == '\n' ||
+                         message[units - 1] == ' ')) {
+        units--;
+    }
+    uint8_t *text = NULL;
+    uint64_t text_length = 0;
+    if (grail_windows_from_wide(message, units, &text, &text_length) != GRAIL_OK) {
+        grail_windows_loader_error[0] = '\0';
+        return;
+    }
+    const uint64_t limit = text_length < sizeof(grail_windows_loader_error) - 1
+                               ? text_length
+                               : sizeof(grail_windows_loader_error) - 1;
+    for (uint64_t i = 0; i < limit; i++) {
+        grail_windows_loader_error[i] = (char)text[i];
+    }
+    grail_windows_loader_error[limit] = '\0';
+    grail_windows_release(text, text_length);
+}
+
+grail_status grail_os_dl_open(const uint8_t *name, uint64_t name_length, uint64_t flags,
+                              grail_library *out) {
+    (void)flags;
+    if (!grail_windows.initialized) {
+        return GRAIL_E_NOT_INITIALIZED;
+    }
+    if (out == NULL || (name == NULL && name_length != 0)) {
+        return GRAIL_E_INVALID_ARGUMENT;
+    }
+    HANDLE module = NULL;
+    if (name_length == 0) {
+        module = GetModuleHandleW(NULL);
+        if (module == NULL) {
+            const DWORD error = GetLastError();
+            grail_windows_set_loader_error(error);
+            return grail_windows_fail(error);
+        }
+    } else {
+        WCHAR *wide = NULL;
+        uint64_t units = 0;
+        const grail_status status = grail_windows_to_wide(name, name_length, &wide, &units);
+        if (status != GRAIL_OK) {
+            return status;
+        }
+        module = LoadLibraryExW(wide, NULL, 0);
+        const DWORD error = GetLastError();
+        grail_windows_free_wide(wide, units);
+        if (module == NULL) {
+            grail_windows_set_loader_error(error);
+            if (error == 2 || error == 3 || error == 126) {
+                return GRAIL_E_NOT_FOUND;
+            }
+            return grail_windows_fail(error);
+        }
+    }
+    grail_win32_library *library =
+        (grail_win32_library *)grail_windows_allocate(sizeof(*library));
+    if (library == NULL) {
+        (void)FreeLibrary(module);
+        return GRAIL_E_OUT_OF_MEMORY;
+    }
+    library->module = module;
+    grail_handle handle = GRAIL_HANDLE_NONE;
+    grail_windows_lock();
+    const grail_status status =
+        grail_handle_table_allocate(&grail_windows.libraries, library, &handle);
+    grail_windows_unlock();
+    if (status != GRAIL_OK) {
+        (void)FreeLibrary(module);
+        grail_windows_release(library, sizeof(*library));
+        return status;
+    }
+    grail_windows_loader_error[0] = '\0';
+    *out = handle;
+    return GRAIL_OK;
+}
+
+grail_status grail_os_dl_symbol(grail_library handle, const uint8_t *name, uint64_t name_length,
+                                void **symbol) {
+    if (!grail_windows.initialized) {
+        return GRAIL_E_NOT_INITIALIZED;
+    }
+    if (name == NULL || name_length == 0 || symbol == NULL ||
+        grail_windows_has_zero(name, name_length) || name_length > (uint64_t)INT32_MAX) {
+        return GRAIL_E_INVALID_ARGUMENT;
+    }
+    grail_win32_library *library = NULL;
+    grail_windows_lock();
+    grail_status status =
+        grail_handle_table_lookup(&grail_windows.libraries, handle, (void **)&library);
+    grail_windows_unlock();
+    if (status != GRAIL_OK) {
+        return status;
+    }
+    char *text = (char *)grail_windows_allocate(name_length + 1);
+    if (text == NULL) {
+        return GRAIL_E_OUT_OF_MEMORY;
+    }
+    for (uint64_t i = 0; i < name_length; i++) {
+        text[i] = (char)name[i];
+    }
+    text[name_length] = '\0';
+    void *address = GetProcAddress(library->module, text);
+    const DWORD error = GetLastError();
+    grail_windows_release(text, name_length + 1);
+    if (address == NULL) {
+        grail_windows_set_loader_error(error);
+        return GRAIL_E_NOT_FOUND;
+    }
+    grail_windows_loader_error[0] = '\0';
+    *symbol = address;
+    return GRAIL_OK;
+}
+
+grail_status grail_os_dl_close(grail_library handle) {
+    if (!grail_windows.initialized) {
+        return GRAIL_E_NOT_INITIALIZED;
+    }
+    grail_win32_library *library = NULL;
+    grail_windows_lock();
+    const grail_status status =
+        grail_handle_table_release(&grail_windows.libraries, handle, (void **)&library);
+    grail_windows_unlock();
+    if (status != GRAIL_OK) {
+        return status;
+    }
+    const BOOL closed = FreeLibrary(library->module);
+    const DWORD error = GetLastError();
+    grail_windows_release(library, sizeof(*library));
+    if (!closed) {
+        grail_windows_set_loader_error(error);
+        return grail_windows_fail(error);
+    }
+    return GRAIL_OK;
+}
+
+grail_result grail_os_dl_error(uint8_t *out, uint64_t capacity) {
+    if (!grail_windows.initialized) {
+        return GRAIL_E_NOT_INITIALIZED;
+    }
+    return grail_abi_copy_out((const uint8_t *)grail_windows_loader_error,
+                              grail_windows_text_length(grail_windows_loader_error), out,
+                              capacity);
+}
+
 grail_status grail_os_fs_stat(const uint8_t *path, uint64_t path_length, uint64_t flags,
                               grail_file_stat *out) {
     (void)flags;
@@ -993,14 +1586,69 @@ grail_status grail_os_fs_stat(const uint8_t *path, uint64_t path_length, uint64_
     return GRAIL_OK;
 }
 
-grail_status grail_os_fs_mkdir(const uint8_t *path, uint64_t path_length, uint64_t mode,
-                               uint64_t flags) {
-    (void)mode;
+
+static int grail_windows_wide_is_dot(const WCHAR *name) {
+    if (name[0] == 0) {
+        return 1;
+    }
+    if (name[0] == '.' && name[1] == 0) {
+        return 1;
+    }
+    return name[0] == '.' && name[1] == '.' && name[2] == 0;
+}
+
+static uint64_t grail_windows_wide_length(const WCHAR *text, uint64_t limit) {
+    uint64_t length = 0;
+    while (length < limit && text[length] != 0) {
+        length++;
+    }
+    return length;
+}
+
+static uint64_t grail_windows_kind(DWORD attributes) {
+    if ((attributes & GRAIL_FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+        return GRAIL_FILE_KIND_SYMLINK;
+    }
+    if ((attributes & GRAIL_FILE_ATTRIBUTE_DIRECTORY) != 0) {
+        return GRAIL_FILE_KIND_DIRECTORY;
+    }
+    return GRAIL_FILE_KIND_FILE;
+}
+
+static int grail_windows_dir_fetch(HANDLE find, WIN32_FIND_DATAW *data, grail_status *error) {
+    for (;;) {
+        if (FindNextFileW(find, data)) {
+            if (!grail_windows_wide_is_dot(data->cFileName)) {
+                return 1;
+            }
+            continue;
+        }
+        const DWORD code = GetLastError();
+        if (code == GRAIL_ERROR_NO_MORE_FILES) {
+            return 0;
+        }
+        *error = grail_windows_fail(code);
+        return -1;
+    }
+}
+
+static grail_status grail_windows_dir_lookup(grail_dir handle, grail_win32_dir **out) {
     if (!grail_windows.initialized) {
         return GRAIL_E_NOT_INITIALIZED;
     }
-    if ((flags & GRAIL_MKDIR_PARENTS) != 0) {
-        return GRAIL_E_UNSUPPORTED;
+    grail_windows_lock();
+    const grail_status status =
+        grail_handle_table_lookup(&grail_windows.directories, handle, (void **)out);
+    grail_windows_unlock();
+    return status;
+}
+
+grail_status grail_os_dir_open(const uint8_t *path, uint64_t path_length, grail_dir *out) {
+    if (!grail_windows.initialized) {
+        return GRAIL_E_NOT_INITIALIZED;
+    }
+    if (out == NULL) {
+        return GRAIL_E_INVALID_ARGUMENT;
     }
     WCHAR *wide = NULL;
     uint64_t units = 0;
@@ -1008,10 +1656,221 @@ grail_status grail_os_fs_mkdir(const uint8_t *path, uint64_t path_length, uint64
     if (status != GRAIL_OK) {
         return status;
     }
-    const BOOL created = CreateDirectoryW(wide, NULL);
-    const DWORD error = GetLastError();
+    if (units == 0) {
+        grail_windows_free_wide(wide, units);
+        return GRAIL_E_INVALID_ARGUMENT;
+    }
+    const DWORD attributes = GetFileAttributesW(wide);
+    if (attributes == GRAIL_INVALID_FILE_ATTRIBUTES) {
+        const DWORD error = GetLastError();
+        grail_windows_free_wide(wide, units);
+        return grail_windows_fail(error);
+    }
+    if ((attributes & GRAIL_FILE_ATTRIBUTE_DIRECTORY) == 0) {
+        grail_windows_free_wide(wide, units);
+        return GRAIL_E_NOT_A_DIRECTORY;
+    }
+    WCHAR *pattern = (WCHAR *)grail_windows_allocate((units + 4) * sizeof(WCHAR));
+    if (pattern == NULL) {
+        grail_windows_free_wide(wide, units);
+        return GRAIL_E_OUT_OF_MEMORY;
+    }
+    for (uint64_t i = 0; i < units; i++) {
+        pattern[i] = wide[i];
+    }
+    uint64_t at = units;
+    if (wide[units - 1] == '/' || wide[units - 1] == '\\') {
+        pattern[at++] = '*';
+    } else {
+        pattern[at++] = '\\';
+        pattern[at++] = '*';
+    }
+    pattern[at] = 0;
     grail_windows_free_wide(wide, units);
-    return created ? GRAIL_OK : grail_windows_fail(error);
+
+    grail_win32_dir *dir = (grail_win32_dir *)grail_windows_allocate(sizeof(*dir));
+    if (dir == NULL) {
+        grail_windows_release(pattern, (units + 4) * sizeof(WCHAR));
+        return GRAIL_E_OUT_OF_MEMORY;
+    }
+    for (uint64_t i = 0; i < sizeof(*dir); i++) {
+        ((uint8_t *)dir)[i] = 0;
+    }
+    dir->handle = GRAIL_INVALID_HANDLE_VALUE;
+    dir->handle = FindFirstFileW(pattern, &dir->current);
+    const DWORD first_error = GetLastError();
+    grail_windows_release(pattern, (units + 4) * sizeof(WCHAR));
+    if (dir->handle == GRAIL_INVALID_HANDLE_VALUE) {
+        if (first_error == GRAIL_ERROR_FILE_NOT_FOUND || first_error == GRAIL_ERROR_PATH_NOT_FOUND) {
+            dir->eof = 1;
+            dir->current_valid = 0;
+        } else {
+            grail_windows_release(dir, sizeof(*dir));
+            return grail_windows_fail(first_error);
+        }
+    } else {
+        while (grail_windows_wide_is_dot(dir->current.cFileName)) {
+            if (!grail_windows_dir_fetch(dir->handle, &dir->current, &status)) {
+                if (status != GRAIL_OK) {
+                    (void)FindClose(dir->handle);
+                    grail_windows_release(dir, sizeof(*dir));
+                    return status;
+                }
+                dir->eof = 1;
+                dir->current_valid = 0;
+                break;
+            }
+        }
+        dir->current_valid = dir->eof ? 0 : 1;
+    }
+    if (dir->current_valid) {
+        int fetched = grail_windows_dir_fetch(dir->handle, &dir->next, &status);
+        if (fetched < 0) {
+            (void)FindClose(dir->handle);
+            grail_windows_release(dir, sizeof(*dir));
+            return status;
+        }
+        dir->next_valid = fetched;
+        if (fetched == 0) {
+            dir->eof = 1;
+        }
+    }
+    grail_handle handle = GRAIL_HANDLE_NONE;
+    grail_windows_lock();
+    status = grail_handle_table_allocate(&grail_windows.directories, dir, &handle);
+    grail_windows_unlock();
+    if (status != GRAIL_OK) {
+        if (dir->handle != GRAIL_INVALID_HANDLE_VALUE) {
+            (void)FindClose(dir->handle);
+        }
+        grail_windows_release(dir, sizeof(*dir));
+        return status;
+    }
+    *out = handle;
+    return GRAIL_OK;
+}
+
+grail_result grail_os_dir_next(grail_dir handle, uint8_t *name, uint64_t capacity,
+                               grail_dir_entry *out) {
+    grail_win32_dir *dir = NULL;
+    grail_status status = grail_windows_dir_lookup(handle, &dir);
+    if (status != GRAIL_OK) {
+        return status;
+    }
+    if (out == NULL || (name == NULL && capacity != 0)) {
+        return GRAIL_E_INVALID_ARGUMENT;
+    }
+    if (!dir->current_valid) {
+        for (uint64_t i = 0; i < sizeof(*out); i++) {
+            ((uint8_t *)out)[i] = 0;
+        }
+        out->struct_size = sizeof(*out);
+        out->abi_version = GRAIL_ABI_VERSION;
+        out->is_last = 1;
+        return 0;
+    }
+    if (!dir->next_valid && !dir->eof) {
+        int fetched = grail_windows_dir_fetch(dir->handle, &dir->next, &status);
+        if (fetched < 0) {
+            return status;
+        }
+        dir->next_valid = fetched;
+        if (fetched == 0) {
+            dir->eof = 1;
+        }
+    }
+    const uint64_t units =
+        grail_windows_wide_length(dir->current.cFileName, 260);
+    uint8_t *text = NULL;
+    uint64_t text_length = 0;
+    status = grail_windows_from_wide(dir->current.cFileName, units, &text, &text_length);
+    if (status != GRAIL_OK) {
+        return status;
+    }
+    for (uint64_t i = 0; i < sizeof(*out); i++) {
+        ((uint8_t *)out)[i] = 0;
+    }
+    out->struct_size = sizeof(*out);
+    out->abi_version = GRAIL_ABI_VERSION;
+    out->name_length = text_length;
+    out->kind = grail_windows_kind(dir->current.dwFileAttributes);
+    out->is_last = (!dir->next_valid && dir->eof) ? 1 : 0;
+    if (text_length > capacity || name == NULL) {
+        grail_windows_release(text, text_length);
+        return (grail_result)text_length;
+    }
+    for (uint64_t i = 0; i < text_length; i++) {
+        name[i] = text[i];
+    }
+    grail_windows_release(text, text_length);
+    dir->current = dir->next;
+    dir->current_valid = dir->next_valid;
+    dir->next_valid = 0;
+    return (grail_result)text_length;
+}
+
+grail_status grail_os_dir_close(grail_dir handle) {
+    if (!grail_windows.initialized) {
+        return GRAIL_E_NOT_INITIALIZED;
+    }
+    grail_win32_dir *dir = NULL;
+    grail_windows_lock();
+    const grail_status status =
+        grail_handle_table_release(&grail_windows.directories, handle, (void **)&dir);
+    grail_windows_unlock();
+    if (status != GRAIL_OK) {
+        return status;
+    }
+    if (dir->handle != GRAIL_INVALID_HANDLE_VALUE) {
+        (void)FindClose(dir->handle);
+    }
+    grail_windows_release(dir, sizeof(*dir));
+    return GRAIL_OK;
+}
+
+grail_status grail_os_fs_mkdir(const uint8_t *path, uint64_t path_length, uint64_t mode,
+                               uint64_t flags) {
+    (void)mode;
+    if (!grail_windows.initialized) {
+        return GRAIL_E_NOT_INITIALIZED;
+    }
+    WCHAR *wide = NULL;
+    uint64_t units = 0;
+    grail_status status = grail_windows_to_wide(path, path_length, &wide, &units);
+    if (status != GRAIL_OK) {
+        return status;
+    }
+    if (units == 0) {
+        grail_windows_free_wide(wide, units);
+        return GRAIL_E_INVALID_ARGUMENT;
+    }
+    if ((flags & GRAIL_MKDIR_PARENTS) == 0) {
+        const BOOL created = CreateDirectoryW(wide, NULL);
+        const DWORD error = GetLastError();
+        grail_windows_free_wide(wide, units);
+        return created ? GRAIL_OK : grail_windows_fail(error);
+    }
+    for (uint64_t i = 0; i < units; i++) {
+        const int separator = wide[i] == '/' || wide[i] == '\\';
+        if (!separator && i + 1 != units) {
+            continue;
+        }
+        const WCHAR saved = wide[i];
+        wide[i] = 0;
+        if (i > 0 && !(i == 2 && wide[1] == ':')) {
+            if (!CreateDirectoryW(wide, NULL)) {
+                const DWORD error = GetLastError();
+                if (error != GRAIL_ERROR_ALREADY_EXISTS) {
+                    wide[i] = saved;
+                    grail_windows_free_wide(wide, units);
+                    return grail_windows_fail(error);
+                }
+            }
+        }
+        wide[i] = saved;
+    }
+    grail_windows_free_wide(wide, units);
+    return GRAIL_OK;
 }
 
 grail_status grail_os_fs_remove_file(const uint8_t *path, uint64_t path_length) {

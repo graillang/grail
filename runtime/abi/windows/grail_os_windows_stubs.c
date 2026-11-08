@@ -1,15 +1,14 @@
 /*
- * Windows first-layer backend: explicit fail-closed stubs.
+ * Windows backend: explicit fail-closed stubs for the remaining domains.
  *
- * Every function in a domain that is not implemented returns
- * GRAIL_E_UNSUPPORTED.  The corresponding capability bit is clear in
- * grail_os_windows.c, so callers can discover this before calling.
+ * Processes, sockets, local-time offsets, non-blocking files and symlink
+ * read/realpath are not implemented.  Every function returns
+ * GRAIL_E_UNSUPPORTED and the corresponding capability bit is clear.
  */
-#include "../../../include/grail/grail_dl.h"
 #include "../../../include/grail/grail_fs.h"
 #include "../../../include/grail/grail_proc.h"
 #include "../../../include/grail/grail_socket.h"
-#include "../../../include/grail/grail_thread.h"
+#include "../../../include/grail/grail_time.h"
 
 grail_status grail_os_file_set_nonblocking(grail_file file, uint64_t enabled) {
     (void)file;
@@ -35,24 +34,9 @@ grail_result grail_os_fs_realpath(const uint8_t *path, uint64_t path_length, uin
     return GRAIL_E_UNSUPPORTED;
 }
 
-grail_status grail_os_dir_open(const uint8_t *path, uint64_t path_length, grail_dir *out) {
-    (void)path;
-    (void)path_length;
-    (void)out;
-    return GRAIL_E_UNSUPPORTED;
-}
-
-grail_result grail_os_dir_next(grail_dir dir, uint8_t *name, uint64_t capacity,
-                               grail_dir_entry *out) {
-    (void)dir;
-    (void)name;
-    (void)capacity;
-    (void)out;
-    return GRAIL_E_UNSUPPORTED;
-}
-
-grail_status grail_os_dir_close(grail_dir dir) {
-    (void)dir;
+grail_status grail_os_time_local_offset(int64_t utc_nanoseconds, int64_t *offset_nanoseconds) {
+    (void)utc_nanoseconds;
+    (void)offset_nanoseconds;
     return GRAIL_E_UNSUPPORTED;
 }
 
@@ -196,107 +180,5 @@ grail_result grail_os_net_resolve(const uint8_t *host, uint64_t host_length, uin
     (void)family;
     (void)addresses;
     (void)capacity;
-    return GRAIL_E_UNSUPPORTED;
-}
-
-grail_status grail_os_thread_spawn(grail_thread_entry entry, void *user,
-                                   const grail_thread_options *options, grail_thread *out) {
-    (void)entry;
-    (void)user;
-    (void)options;
-    (void)out;
-    return GRAIL_E_UNSUPPORTED;
-}
-grail_status grail_os_thread_join(grail_thread thread, uint64_t *exit_code) {
-    (void)thread;
-    (void)exit_code;
-    return GRAIL_E_UNSUPPORTED;
-}
-grail_status grail_os_thread_detach(grail_thread thread) {
-    (void)thread;
-    return GRAIL_E_UNSUPPORTED;
-}
-grail_status grail_os_thread_id(uint64_t *out) {
-    (void)out;
-    return GRAIL_E_UNSUPPORTED;
-}
-grail_status grail_os_thread_yield(void) {
-    return GRAIL_E_UNSUPPORTED;
-}
-grail_status grail_os_mutex_create(grail_mutex *out) {
-    (void)out;
-    return GRAIL_E_UNSUPPORTED;
-}
-grail_status grail_os_mutex_lock(grail_mutex mutex) {
-    (void)mutex;
-    return GRAIL_E_UNSUPPORTED;
-}
-grail_status grail_os_mutex_try_lock(grail_mutex mutex, uint64_t *acquired) {
-    (void)mutex;
-    (void)acquired;
-    return GRAIL_E_UNSUPPORTED;
-}
-grail_status grail_os_mutex_unlock(grail_mutex mutex) {
-    (void)mutex;
-    return GRAIL_E_UNSUPPORTED;
-}
-grail_status grail_os_mutex_destroy(grail_mutex mutex) {
-    (void)mutex;
-    return GRAIL_E_UNSUPPORTED;
-}
-grail_status grail_os_condvar_create(grail_condvar *out) {
-    (void)out;
-    return GRAIL_E_UNSUPPORTED;
-}
-grail_status grail_os_condvar_wait(grail_condvar condvar, grail_mutex mutex, int64_t timeout_ns,
-                                   uint64_t *signaled) {
-    (void)condvar;
-    (void)mutex;
-    (void)timeout_ns;
-    (void)signaled;
-    return GRAIL_E_UNSUPPORTED;
-}
-grail_status grail_os_condvar_signal(grail_condvar condvar) {
-    (void)condvar;
-    return GRAIL_E_UNSUPPORTED;
-}
-grail_status grail_os_condvar_broadcast(grail_condvar condvar) {
-    (void)condvar;
-    return GRAIL_E_UNSUPPORTED;
-}
-grail_status grail_os_condvar_destroy(grail_condvar condvar) {
-    (void)condvar;
-    return GRAIL_E_UNSUPPORTED;
-}
-
-grail_status grail_os_dl_open(const uint8_t *name, uint64_t name_length, uint64_t flags,
-                              grail_library *out) {
-    (void)name;
-    (void)name_length;
-    (void)flags;
-    (void)out;
-    return GRAIL_E_UNSUPPORTED;
-}
-grail_status grail_os_dl_symbol(grail_library library, const uint8_t *name, uint64_t name_length,
-                                void **symbol) {
-    (void)library;
-    (void)name;
-    (void)name_length;
-    (void)symbol;
-    return GRAIL_E_UNSUPPORTED;
-}
-grail_status grail_os_dl_close(grail_library library) {
-    (void)library;
-    return GRAIL_E_UNSUPPORTED;
-}
-grail_result grail_os_dl_error(uint8_t *out, uint64_t capacity) {
-    (void)out;
-    (void)capacity;
-    return GRAIL_E_UNSUPPORTED;
-}
-
-grail_status grail_os_time_local_offset(int64_t utc_nanoseconds, int64_t *offset_nanoseconds) {
-    (void)utc_nanoseconds;
-    (void)offset_nanoseconds;
     return GRAIL_E_UNSUPPORTED;
 }

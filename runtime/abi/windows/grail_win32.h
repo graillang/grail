@@ -63,6 +63,19 @@ typedef struct grail_by_handle_file_information {
     DWORD nFileIndexLow;
 } BY_HANDLE_FILE_INFORMATION;
 
+typedef struct grail_win32_find_data {
+    DWORD dwFileAttributes;
+    FILETIME ftCreationTime;
+    FILETIME ftLastAccessTime;
+    FILETIME ftLastWriteTime;
+    DWORD nFileSizeHigh;
+    DWORD nFileSizeLow;
+    DWORD dwReserved0;
+    DWORD dwReserved1;
+    WCHAR cFileName[260];
+    WCHAR cAlternateFileName[14];
+} WIN32_FIND_DATAW;
+
 typedef struct grail_win32_file_attribute_data {
     DWORD dwFileAttributes;
     FILETIME ftCreationTime;
@@ -75,6 +88,10 @@ typedef struct grail_win32_file_attribute_data {
 typedef struct grail_srwlock {
     void *Ptr;
 } SRWLOCK;
+
+typedef struct grail_condition_variable {
+    void *Ptr;
+} CONDITION_VARIABLE;
 
 /* Access masks and file creation flags. */
 #define GRAIL_GENERIC_READ 0x80000000u
@@ -111,7 +128,13 @@ typedef struct grail_srwlock {
 #define GRAIL_ERROR_INSUFFICIENT_BUFFER 122u
 #define GRAIL_ERROR_ALREADY_EXISTS 183u
 #define GRAIL_ERROR_NO_UNICODE_TRANSLATION 1113u
+#define GRAIL_ERROR_NO_MORE_FILES 18u
+#define GRAIL_ERROR_TIMEOUT 1460u
 #define GRAIL_WIN32_INFINITE 0xFFFFFFFFu
+#define GRAIL_WAIT_OBJECT_0 0u
+#define GRAIL_WAIT_TIMEOUT 258u
+#define GRAIL_FORMAT_MESSAGE_FROM_SYSTEM 0x00001000u
+#define GRAIL_FORMAT_MESSAGE_IGNORE_INSERTS 0x00000200u
 
 typedef int32_t GRAIL_GET_FILEEX_INFO_LEVELS;
 #define GRAIL_GET_FILE_EX_INFO_STANDARD 0
@@ -152,6 +175,29 @@ GRAIL_WINIMPORT BOOL GRAIL_WINAPI DeleteFileW(LPCWSTR path);
 GRAIL_WINIMPORT BOOL GRAIL_WINAPI MoveFileExW(LPCWSTR from, LPCWSTR to, DWORD flags);
 GRAIL_WINIMPORT BOOL GRAIL_WINAPI CreatePipe(HANDLE *read, HANDLE *write,
                                              LPSECURITY_ATTRIBUTES security, DWORD size);
+GRAIL_WINIMPORT HANDLE GRAIL_WINAPI FindFirstFileW(LPCWSTR pattern, WIN32_FIND_DATAW *data);
+GRAIL_WINIMPORT BOOL GRAIL_WINAPI FindNextFileW(HANDLE find, WIN32_FIND_DATAW *data);
+GRAIL_WINIMPORT BOOL GRAIL_WINAPI FindClose(HANDLE find);
+GRAIL_WINIMPORT HANDLE GRAIL_WINAPI CreateThread(LPSECURITY_ATTRIBUTES security, uint64_t stack_size,
+                                                 uint32_t (*start)(void *), void *argument,
+                                                 DWORD flags, DWORD *identifier);
+GRAIL_WINIMPORT DWORD GRAIL_WINAPI WaitForSingleObject(HANDLE handle, DWORD milliseconds);
+GRAIL_WINIMPORT DWORD GRAIL_WINAPI GetCurrentThreadId(void);
+GRAIL_WINIMPORT BOOL GRAIL_WINAPI SwitchToThread(void);
+GRAIL_WINIMPORT BOOL GRAIL_WINAPI TryAcquireSRWLockExclusive(SRWLOCK *lock);
+GRAIL_WINIMPORT void GRAIL_WINAPI InitializeConditionVariable(CONDITION_VARIABLE *condition);
+GRAIL_WINIMPORT BOOL GRAIL_WINAPI SleepConditionVariableSRW(CONDITION_VARIABLE *condition,
+                                                            SRWLOCK *lock, DWORD milliseconds,
+                                                            DWORD flags);
+GRAIL_WINIMPORT void GRAIL_WINAPI WakeConditionVariable(CONDITION_VARIABLE *condition);
+GRAIL_WINIMPORT void GRAIL_WINAPI WakeAllConditionVariable(CONDITION_VARIABLE *condition);
+GRAIL_WINIMPORT HANDLE GRAIL_WINAPI LoadLibraryExW(LPCWSTR name, HANDLE file, DWORD flags);
+GRAIL_WINIMPORT void *GRAIL_WINAPI GetProcAddress(HANDLE module, const char *name);
+GRAIL_WINIMPORT BOOL GRAIL_WINAPI FreeLibrary(HANDLE module);
+GRAIL_WINIMPORT HANDLE GRAIL_WINAPI GetModuleHandleW(LPCWSTR name);
+GRAIL_WINIMPORT DWORD GRAIL_WINAPI FormatMessageW(DWORD flags, LPCVOID source, DWORD message,
+                                                  DWORD language, LPWSTR buffer, DWORD size,
+                                                  void *arguments);
 GRAIL_WINIMPORT DWORD GRAIL_WINAPI GetLastError(void);
 GRAIL_WINIMPORT void GRAIL_WINAPI Sleep(DWORD milliseconds);
 GRAIL_WINIMPORT BOOL GRAIL_WINAPI QueryPerformanceCounter(LARGE_INTEGER *value);

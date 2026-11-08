@@ -145,10 +145,20 @@ grail_status grail_os_thread_spawn(grail_thread_entry entry, void *user,
         grail_handle_table_allocate(&grail_linux.threads, thread, &handle);
     grail_linux_unlock();
     if (status != GRAIL_OK) {
+        const pthread_t thread_id = thread->id;
+        int release = 0;
         pthread_mutex_lock(&thread->gate);
-        thread->detached = 1;
+        if (thread->finished && !thread->freed) {
+            thread->freed = 1;
+            release = 1;
+        } else {
+            thread->detached = 1;
+        }
         pthread_mutex_unlock(&thread->gate);
-        (void)pthread_detach(thread->id);
+        (void)pthread_detach(thread_id);
+        if (release) {
+            grail_thread_release(thread);
+        }
         return status;
     }
     *out = handle;

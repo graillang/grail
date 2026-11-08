@@ -92,6 +92,18 @@
   signing/notarization hooks. Linux lanes build and test; Windows/macOS lanes are
   explicit distribution scaffolding because the compiler still emits Linux ELF
   only. Tooling is documented in `docs/tooling/cross-platform-ci.md`.
+- Added directory iteration, threads/mutex/condition variables and dynamic-library loading to
+  the Windows and macOS C ABI backends. Windows uses
+  `FindFirstFileW`/`FindNextFileW`, `CreateThread`/`WaitForSingleObject`, `SRWLOCK`/
+  `CONDITION_VARIABLE` and `LoadLibraryExW`/`GetProcAddress` with `FormatMessageW` loader
+  errors; macOS uses `opendir`/`readdir` with a pinned Darwin `struct dirent`, pthread
+  threads/mutex/relative-time condition variables and `dlopen`/`dlsym`/`dlclose`. Both now
+  create parent directories when requested. Capabilities add `DIRECTORIES`, `THREADS`,
+  `SYNC_PRIMITIVES` and `DYNAMIC_LIBRARIES`. Remaining fail-closed domains are processes,
+  sockets and local-time offsets; Windows also lacks non-blocking files and
+  readlink/realpath, and macOS still lacks `file_stat`/`fs_stat`. All four cross targets still
+  compile with strict warnings and define all 95 public symbols. These layers are statically
+  checked only, not executed on Windows or macOS.
 - Added statically verified first-layer Windows and macOS backends for the OS ABI, using
   pinned Win32 and Darwin declarations so both compile for their targets without platform SDK
   headers. Implemented init/capabilities/error detail, clocks and sleep, environment
