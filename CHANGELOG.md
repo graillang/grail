@@ -34,6 +34,8 @@
   upserts; compound assignment updates an existing key; `get`/`entry` remain optional. Indexed
   assignment currently accepts named or field receivers, not call-result receivers.
 - User modules reject `usize`, `core::some` and `core::none`; use `u64`, `Some(value)` and `None`.
+- Checked-in x86-64, AArch64 and RISC-V64 bootstraps were refreshed from the v2 compiler and
+  independently self-host byte-identically; the published-bootstrap suites pass on x86-64.
 - Nominal concurrency types are capitalized: `Atomic<T>`, `Mutex<T>`, `Scope<C>`, `Task<R>`
   and `CancelToken`, with `Atomic::new` / `Mutex::new` constructors.
 - Type syntax is now postfix and concise: `T[]` is a vector (`vec<T>` is gone), `u8[]` is the
