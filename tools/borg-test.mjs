@@ -64,6 +64,7 @@ const fixtures = {
   transport: ['borg/tests/fixtures/transport'],
   journal: ['borg/tests/fixtures/journal'],
   events: ['borg/tests/fixtures/events'],
+  permission: ['borg/tests/fixtures/permission'],
 };
 
 function fixturePaths(name) {

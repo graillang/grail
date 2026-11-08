@@ -1,0 +1,244 @@
+module borg_permission;
+use core;
+
+// Permission gates for tool calls: permission modes, path scoping and approval decisions.
+//
+// Borg's gates are not a sandbox (docs/architecture.md D4): they decide whether a call runs, and the
+// rules below are the ones a port must reproduce. All of them are pure once paths are resolved, so
+// canonicalisation and symlink detection are inputs here, not syscalls.
+//
+//   PermissionMode / ApprovalDecision   contract.rs:374, 2446
+//   enrolled-root check                 filesystem.rs:390   requested root must sit under an
+//                                                          enrolled root, compared canonical
+//   relative-path validation            filesystem.rs:404   relative, no traversal components
+//   containment                         filesystem.rs:437   canonical path under canonical root,
+//                                                          compared *component-wise*
+//   symlinks refused                    filesystem.rs:424
+//
+// The containment comparison is the subtle one: `/w` must not contain `/work`. Rust's
+// `Path::starts_with` compares components, so a prefix string match is wrong.
+
+pub enum Mode {
+    FullAccess,
+    Auto,
+    Manual
+}
+
+pub enum Approval {
+    AllowOnce,
+    AllowSession,
+    Deny
+}
+
+pub enum Verdict {
+    Allowed,
+    NeedsApproval,
+    Denied(string)
+}
+
+// The reasons Borg reports, verbatim, so a denial reads the same after a port.
+pub fn outside_enrolled_roots() -> string { return "workspace root is outside this host's enrolled roots".text(); }
+pub fn must_be_relative() -> string { return "path must be relative to the workspace root".text(); }
+pub fn traversal_components() -> string { return "path contains unsupported traversal components".text(); }
+pub fn must_identify_item() -> string { return "path must identify an item under the workspace root".text(); }
+pub fn no_symlinks() -> string { return "workspace file operations do not follow symlinks".text(); }
+pub fn must_stay_under_root() -> string { return "path must stay under the workspace root".text(); }
+
+fn copy_text<a>(text: (&a [u8])) -> string {
+    mut out = u8[];
+    for byte in text {
+        out.push(byte);
+    }
+    return out.text();
+}
+
+fn same<a, b>(left: (&a [u8]), right: (&b [u8])) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    for i in left.len() {
+        if left[i] != right[i] {
+            return false;
+        }
+    }
+    return true;
+}
+
+pub fn mode_name<a>(value: (&a Mode)) -> string {
+    match value {
+        FullAccess => { return "full_access".text(); },
+        Auto => { return "auto".text(); },
+        Manual => { return "manual".text(); }
+    }
+}
+
+pub fn mode_from<a>(text: (&a [u8])) -> Mode | string {
+    if same(&text, "full_access") || same(&text, "full-access") {
+        return Mode::FullAccess;
+    }
+    if same(&text, "auto") {
+        return Mode::Auto;
+    }
+    if same(&text, "manual") {
+        return Mode::Manual;
+    }
+    return "unknown permission mode".text();
+}
+
+pub fn approval_name<a>(value: (&a Approval)) -> string {
+    match value {
+        AllowOnce => { return "allow_once".text(); },
+        AllowSession => { return "allow_session".text(); },
+        Deny => { return "deny".text(); }
+    }
+}
+
+// ---- paths ----
+
+fn components<a>(path: (&a [u8])) -> string[] {
+    mut out = string[];
+    mut current = u8[];
+    mut index = 0;
+    while index < path.len() {
+        byte := path[index];
+        if byte == 47 {
+            if current.len() > 0 {
+                out.push(current.text());
+                current = u8[];
+            }
+            index += 1;
+            continue;
+        }
+        current.push(byte);
+        index += 1;
+    }
+    if current.len() > 0 {
+        out.push(current.text());
+    }
+    return out;
+}
+
+// Rust `Path::starts_with`: whole components only, so `/w` does not contain `/work`.
+pub fn contains<a, b>(root: (&a [u8]), path: (&b [u8])) -> bool {
+    root_parts := components(&root);
+    path_parts := components(&path);
+    if root_parts.len() > path_parts.len() {
+        return false;
+    }
+    mut index = 0;
+    while index < root_parts.len() {
+        if !same(&root_parts[index], &path_parts[index]) {
+            return false;
+        }
+        index += 1;
+    }
+    return true;
+}
+
+// `validate_relative` (filesystem.rs:404): the path must be relative, and may not walk out with a
+// `..` or restart at `/`. `.` is accepted but does not identify an item.
+pub fn validate_relative<a>(path: (&a [u8]), allow_root: bool) -> string? {
+    if path.len() > 0 && path[0] == 47 {
+        return core::some(must_be_relative());
+    }
+    parts := components(&path);
+    mut normal = false;
+    mut index = 0;
+    while index < parts.len() {
+        if same(&parts[index], "..") {
+            return core::some(traversal_components());
+        }
+        if !same(&parts[index], ".") {
+            normal = true;
+        }
+        index += 1;
+    }
+    if !allow_root && !normal {
+        return core::some(must_identify_item());
+    }
+    return core::none<string>();
+}
+
+// The requested root must sit under one of the host's enrolled roots (both already canonical).
+pub fn root_enrolled<a, b>(requested: (&a [u8]), enrolled: (&b string[])) -> bool {
+    mut index = 0;
+    while index < enrolled.len() {
+        root := copy_text(&enrolled[index]);
+        if contains(&root, &requested) {
+            return true;
+        }
+        index += 1;
+    }
+    return false;
+}
+
+// The gate for reaching an existing path: relative to the root, no symlink on the way, and the
+// resolved path still under the resolved root.
+pub fn check_path<a>(root: (&a [u8]), relative: (&[u8]), symlink_on_path: bool) -> Verdict {
+    match validate_relative(&relative, true) {
+        Some(reason) => { return Verdict::Denied(reason); },
+        None => { }
+    }
+    if symlink_on_path {
+        return Verdict::Denied(no_symlinks());
+    }
+    if !contains(&root, &relative) {
+        // The resolved path escaped the resolved root.
+        return Verdict::Denied(must_stay_under_root());
+    }
+    return Verdict::Allowed;
+}
+
+pub fn verdict_text<a>(value: (&a Verdict)) -> string {
+    match value {
+        Allowed => { return "allowed".text(); },
+        NeedsApproval => { return "needs-approval".text(); },
+        Denied(reason) => { return copy_text(&reason); }
+    }
+}
+
+// ---- approval grants ----
+//
+// `AllowOnce` covers the call it was given for; `AllowSession` covers later calls of the same
+// identity in this session; `Deny` refuses. A grant is keyed by the tool and the scope it was
+// approved for, so an approval cannot be replayed onto a different scope.
+
+pub struct Grants {
+    entries: Grant[]
+}
+
+struct Grant {
+    tool: string,
+    scope: string,
+    session_wide: bool
+}
+
+pub fn grants() -> Grants {
+    return Grants { entries: Grant[] };
+}
+
+impl Grants {
+    pub fn record<a, b, c>(self: (&a mut Grants), tool: (&b [u8]), scope: (&c [u8]), allow: bool, session_wide: bool) {
+        if !allow {
+            return ();
+        }
+        self.entries.push(Grant {
+            tool: copy_text(tool),
+            scope: copy_text(scope),
+            session_wide: session_wide
+        });
+    }
+
+    // A fresh call asks for permission unless a session-wide grant already covers it.
+    pub fn covered<a, b, c>(self: (&a mut Grants), tool: (&b [u8]), scope: (&c [u8])) -> bool {
+        mut index = 0;
+        while index < self.entries.len() {
+            entry := &self.entries[index];
+            if entry.session_wide && same(&entry.tool, &tool) && same(&entry.scope, &scope) {
+                return true;
+            }
+            index += 1;
+        }
+        return false;
+    }
+}

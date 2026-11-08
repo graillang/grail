@@ -1,0 +1,195 @@
+// Permission-gate parity test.
+//
+// Lines:
+//   mode <name> <full_access|auto|manual|error>
+//   relative <name> <ok|<reason text>>
+//   contains <name> <true|false>
+//   enrolled <name> <true|false>
+//   check <name> <allowed|<reason text>>
+//   grants <name> <i> <covered|ask>
+
+use borg_json;
+use borg_permission;
+use core;
+use env;
+use fs;
+
+fn append<a, b>(out: (&a mut u8[]), text: (&b [u8])) {
+    for byte in text {
+        out.push(byte);
+    }
+}
+
+fn text_is<a, b>(text: (&a [u8]), wanted: (&b [u8])) -> bool {
+    if text.len() != wanted.len() {
+        return false;
+    }
+    for i in text.len() {
+        if text[i] != wanted[i] {
+            return false;
+        }
+    }
+    return true;
+}
+
+fn row<a, b, c>(label: (&a [u8]), name: (&b [u8]), value: (&c [u8])) {
+    mut text = u8[];
+    append(&mut text, label);
+    text.push(32);
+    append(&mut text, name);
+    text.push(32);
+    append(&mut text, value);
+    println(text.text());
+}
+
+fn text_field<a, b>(spec: (&a borg_json::Json), key: (&b [u8])) -> string? {
+    match borg_json::member(&spec, &key) {
+        Some(node) => {
+            if borg_json::kind_of(&node) == borg_json::JsonKind::Null {
+                return core::none<string>();
+            }
+            return borg_json::as_string(&node);
+        },
+        None => { return core::none<string>(); }
+    }
+}
+
+fn text_or<a, b>(spec: (&a borg_json::Json), key: (&b [u8])) -> string {
+    mut value = "".text();
+    match text_field(&spec, &key) {
+        Some(text) => { value = text; },
+        None => { }
+    }
+    return value;
+}
+
+fn flag_or<a, b>(spec: (&a borg_json::Json), key: (&b [u8])) -> bool {
+    match borg_json::member(&spec, &key) {
+        Some(node) => {
+            match borg_json::as_bool(&node) {
+                Some(flag) => { return flag; },
+                None => { return false; }
+            }
+        },
+        None => { return false; }
+    }
+}
+
+fn main() -> u64 {
+    args := env::args();
+    mut index = 1;
+    while index < args.len() {
+        path := args[index];
+        data := fs::read(&path)!;
+        match borg_json::parse(&data) {
+            scenario: borg_json::Json => { run(&scenario); },
+            failure: borg_json::ParseError => { }
+        }
+        index += 1;
+    }
+    return 0;
+}
+
+fn run<a>(scenario: (&a borg_json::Json)) {
+    mut name = "unnamed".text();
+    match text_field(&scenario, "name") {
+        Some(text) => { name = text; },
+        None => { }
+    }
+    kind := text_or(&scenario, "kind");
+    if text_is(&kind, "mode") {
+        given := text_or(&scenario, "text");
+        match borg_permission::mode_from(&given) {
+            value: borg_permission::Mode => { shown := borg_permission::mode_name(&value); row("mode", &name, &shown); },
+            failure: string => { row("mode", &name, "error"); }
+        }
+    }
+    if text_is(&kind, "relative") {
+        given := text_or(&scenario, "path");
+        allow_root := flag_or(&scenario, "allow_root");
+        match borg_permission::validate_relative(&given, allow_root) {
+            Some(reason) => { row("relative", &name, &reason); },
+            None => { row("relative", &name, "ok"); }
+        }
+    }
+    if text_is(&kind, "contains") {
+        root := text_or(&scenario, "root");
+        given := text_or(&scenario, "path");
+        if borg_permission::contains(&root, &given) {
+            row("contains", &name, "true");
+        } else {
+            row("contains", &name, "false");
+        }
+    }
+    if text_is(&kind, "enrolled") {
+        requested := text_or(&scenario, "requested");
+        roots_case(&scenario, &name, &requested);
+    }
+    if text_is(&kind, "check") {
+        root := text_or(&scenario, "root");
+        relative := text_or(&scenario, "relative");
+        verdict := borg_permission::check_path(&root, &relative, flag_or(&scenario, "symlink"));
+        shown := borg_permission::verdict_text(&verdict);
+        row("check", &name, &shown);
+    }
+    if text_is(&kind, "grants") {
+        grants_case(&scenario, &name);
+    }
+}
+
+fn roots_case<a>(scenario: (&a borg_json::Json), name: (&[u8]), requested: (&[u8])) {
+    mut roots = string[];
+    mut list = borg_json::null_value();
+    match borg_json::member(&scenario, "roots") {
+        Some(node) => { list = node; },
+        None => { }
+    }
+    mut index = 0;
+    while index < borg_json::array_len(&list) {
+        match borg_json::array_item(&list, index) {
+            Some(item) => {
+                match borg_json::as_string(&item) {
+                    Some(text) => { roots.push(text); },
+                    None => { }
+                }
+            },
+            None => { }
+        }
+        index += 1;
+    }
+    if borg_permission::root_enrolled(&requested, &roots) {
+        row("enrolled", &name, "true");
+    } else {
+        row("enrolled", &name, "false");
+    }
+}
+
+fn grants_case<a>(scenario: (&a borg_json::Json), name: (&[u8])) {
+    mut state = borg_permission::grants();
+    mut steps = borg_json::null_value();
+    match borg_json::member(&scenario, "steps") {
+        Some(node) => { steps = node; },
+        None => { }
+    }
+    mut index = 0;
+    while index < borg_json::array_len(&steps) {
+        mut step = borg_json::null_value();
+        match borg_json::array_item(&steps, index) {
+            Some(node) => { step = node; },
+            None => { }
+        }
+        tool := text_or(&step, "tool");
+        scope := text_or(&step, "scope");
+        if borg_json::has(&step, "allow") {
+            state.record(&tool, &scope, flag_or(&step, "allow"), flag_or(&step, "session"));
+            row("grants", &name, "recorded");
+        } else {
+            if state.covered(&tool, &scope) {
+                row("grants", &name, "covered");
+            } else {
+                row("grants", &name, "ask");
+            }
+        }
+        index += 1;
+    }
+}

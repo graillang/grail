@@ -2,18 +2,9 @@
 
 ## Unreleased
 
-- Added `lib/sys/grail_ffi.grl`, the first Grail-facing wrappers over the Linux OS ABI:
-  explicit init/shutdown, file open/read/write/close/stat/size, monotonic and wall clocks,
-  and environment get/set. The module uses FFI byte views, an opaque `File` handle and
-  Grail-owned out-records, returns `T |? Error` with negative ABI statuses, and keeps file
-  handles affine by convention (explicit single close, no auto-free). Added a hosted C
-  adapter for the allocator and handle-return out-parameter, a repeatable
-  `tools/test-ffi-runtime.mjs` runner, and `docs/design/grail-ffi-runtime.md` with the exact
-  pointer/length/ownership rules. The x86-64 test links the Linux reference backend with
-  libc and executes file/time/environment checks; AArch64 and RISC-V 64 are assembly/static
-  checked only. It uses the merged v3 FFI compiler and `runtime.grl`/`os-linux.grl`, is not
-  auto-loaded by the current stdlib, and changes no compiler sources (the runner generates a
-  test-only runtime copy to preserve libc TLS).
+- Port Borg Agent's permission gates (`borg/`). `src/permission.grl` carries the three permission modes, the three approval decisions, and the rules a gate applies: the requested workspace root must sit under a canonical enrolled root, a path must be relative and free of traversal components, a symlink on the way is refused outright, and containment is component-wise so a `/w` root does not cover `/work`. The denial reasons are Borg's own strings, and an `allow_session` grant covers later calls of the same tool and scope while `allow_once` does not. The port now checks 921 reference lines over 200 documents, with `--anchors` verifying 74 copied snippets across thirteen source files.
+
+- Port Borg Agent's typed transcript events (`borg/`). `src/events.grl` carries the `SessionEvent` envelope and five `SessionEventKind` payloads — `session_started`, `session_titled`, `status_changed`, `message`, `message_delta` — with the serialization rules the Rust derive applies: an always-written `generated` flag, `usage_tokens` as a number, an always-written nullable `detail` and `delivery`, and `attachments` omitted when empty. An unknown kind is refused by name rather than half-decoded. Each event is compared on decoded fields, the exact wire text and a round-trip; the wire comparison caught `usage_tokens` being encoded as a string. The port now checks 890 reference lines over 173 documents, with `--anchors` verifying 66 copied snippets across twelve source files.
 
 - Abundance CPU port, asset-package increment: `abundance/src/asset_package.grl` carries the ABPKG1
   package header (id, payload hash, payload bytes, ascending dependency ids), package ids and

@@ -1,12 +1,13 @@
 # Borg Agent CPU port
 
-Eight bounded increments of the Borg Agent → Grail port: the JSON substrate its wire documents are
+Nine bounded increments of the Borg Agent → Grail port: the JSON substrate its wire documents are
 made of, the TOML its configuration files are written in, the protocol-v1 envelope header that
 classifies a document, the `agent.toml` loader that applies Borg's compiled-in defaults, the
 local-session ownership state that decides whether a session still has an owner, the JSON-RPC frames
 and single-in-flight dispatch that ACP, LSP and MCP conversations are built from, and the service
 supervision rules — restart policy, backoff, exit semantics — with the layout they write into,
-the local IPC transport boundary in front of those frames, the journal rules those frames carry, and the typed transcript events they are made of.
+the local IPC transport boundary in front of those frames, the journal rules those frames carry, the typed transcript events they are made of, and the permission gates that decide whether
+a tool call runs.
 Borg Agent is read-only here; the reference is its own JSON semantics — `serde_json` 1.0.151 with
 `arbitrary_precision`, the crate version and feature set `crates/borg-*` build with. The plan and
 staging live in [docs/design/borg-agent-port.md](../docs/design/borg-agent-port.md).
@@ -22,6 +23,7 @@ src/supervisor.grl           restart policy, backoff, service states, layout res
 src/transport.grl            socket addressing, peer credentials, connection lifecycle
 src/journal.grl              event persistence, cursor arithmetic, resume paging, status
 src/events.grl               typed session-event payloads for the transcript kinds
+src/permission.grl           permission modes, path scoping, approval grants, denial reasons
 tests/json_test.grl          JSON: `json.compact`, `json.scalar`, `json.error` per document
 tests/wire_test.grl          protocol: `wire.header <file> <field> <value>`, `wire.error <file> <path> <reason>`
 tests/toml_test.grl          TOML: `toml.value <file> <path> <kind> <text>`, `toml.error <file>`
@@ -32,6 +34,7 @@ tests/supervisor_test.grl    supervision: `supervise|home|config|lanes|session|b
 tests/transport_test.grl     transport: `address|fits|limits|ucred|peer|conn <name> …`
 tests/journal_test.grl       journal: `persistence|cursor|replay|page|status <name> …`
 tests/events_test.grl        events: `tag|field|wire|roundtrip|error <name> …`
+tests/permission_test.grl    gates: `mode|relative|contains|enrolled|check|grants <name> …`
 tests/fixtures/v1/           Borg's protocol-v1 conformance corpus, copied verbatim
 tests/fixtures/edge/         number, escape, structure, nesting-limit and malformed documents
 tests/fixtures/wire/         envelope mutations: missing, mistyped, wrong protocol, wrong version
@@ -44,6 +47,7 @@ tests/fixtures/supervisor/   policies with op scripts, and layout inputs
 tests/fixtures/transport/    addressing, limit, peer and connection scenarios
 tests/fixtures/journal/      persistence kinds, cursor steps, pages and status scripts
 tests/fixtures/events/       one event document per transcript kind, plus malformed ones
+tests/fixtures/permission/   modes, path cases, enrolled roots and grant sequences
 tests/parity/json.rs         the reference: serde_json compact re-serialisation and scalar walk
 tests/parity/wire.rs         the reference: the same header rule over serde_json values
 tests/parity/toml.rs         the reference: the toml crate's value model, walked in the same order
@@ -61,6 +65,7 @@ tests/parity/supervisor.txt  committed reference output (45 lines, 20 documents)
 tests/parity/transport.txt   committed reference output (30 lines, 13 documents)
 tests/parity/journal.txt     committed reference output (34 lines, 34 documents)
 tests/parity/events.txt      committed reference output (107 lines, 11 documents)
+tests/parity/permission.txt  committed reference output (31 lines, 27 documents)
 tools/borg-test.mjs          build + compile + run + diff
 ```
 
@@ -111,8 +116,10 @@ and field:
   sequence of observations, a resume page, and the status a sequence of journaled changes leaves.
 - `tag|field|wire|roundtrip|error`: a decoded transcript event, its fields, the exact wire text it
   re-encodes to, and the reason class for a document the shapes reject.
+- `mode|relative|contains|enrolled|check|grants`: a permission mode, a relative-path verdict with its
+  reason, component-wise containment, enrolled-root membership, a path gate, and grant coverage.
 
-The suite compares **890 lines over 173 documents**, and every value in them comes from
+The suite compares **921 lines over 200 documents**, and every value in them comes from
 `serde_json` rather than from a restatement: the reference parses with Borg's own crate and prints
 what it parsed. `wire.rs` and `config.rs` pin the v1 header *rule* and the default table (no Rust program classifies
 these fixtures, or loads this config without building the whole 363k-line Borg workspace), and use
@@ -320,6 +327,25 @@ An unknown kind is refused by name rather than half-decoded: a reader that ignor
 transcript rows. Each event is compared on three surfaces — decoded fields, the exact wire text the
 port re-encodes, and a round-trip back through its own decoder. The wire comparison is what caught
 `usage_tokens` being emitted as a string in the first version of this increment.
+
+## Permission gates
+
+Gates decide whether a call runs; they are not a sandbox (`docs/architecture.md` D4). The rules are
+copied with anchors, including the denial strings, so a refusal reads the same after a port:
+
+| Rule | Source | Ported as |
+| --- | --- | --- |
+| Modes are `full_access`, `auto`, `manual` | `contract.rs:374` | `Mode`, `mode_from` |
+| Decisions are `allow_once`, `allow_session`, `deny` | `contract.rs:2446` | `Approval`, `approval_name` |
+| The requested root must sit under a canonical enrolled root | `filesystem.rs:390` | `root_enrolled` |
+| A path must be relative and free of traversal components | `filesystem.rs:404` | `validate_relative` |
+| A symlink on the way is refused outright | `filesystem.rs:424` | `check_path` |
+| Containment is **component-wise**, so `/w` does not contain `/work` | `filesystem.rs:437` | `contains` |
+| An `allow_session` grant covers later calls of the same tool and scope; `allow_once` does not | approval semantics | `Grants` |
+
+The containment rule is the one a port most easily gets wrong: Rust's `Path::starts_with` compares
+components, so a string-prefix check would grant `/work` under a `/w` root and `/w2` under `/w`. Both
+traps are fixtures, and a prefix mutation fails the suite.
 
 ## Limits and findings
 
