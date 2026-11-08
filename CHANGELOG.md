@@ -18,6 +18,9 @@
   `&b` without a lifetime parameter list. Ambiguous outputs are rejected.
 - `use module::Name;` imports a type or interface member. `use order::Ord;` resolves bounds
   and impls through the canonical `order::Ord` path instead of creating a local phantom.
+- The public `borrow`/`borrow_mut` builtins and `read<a>`/`mut<a>` view types are removed in user
+  modules. Use `&value`/`&mut value` and `&[u8]`/`&mut [u8]`; internal bootstrap modules retain the
+  legacy dialect until the final source migration.
 - User-mode loops consume their iterable. Owned vectors move elements into the loop, enabling
   `for part in name.split(' ')` and named non-scalar consumption; loop-owned elements and the
   hidden container are cleaned on normal exit, break and return.

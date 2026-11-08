@@ -59,7 +59,7 @@ rmSync(join(demo, '.grail'), { recursive: true }); run(['fetch'], demo);
 assert.equal(run(['run'], demo).stdout.trim(), '42');
 writeFileSync(join(demo, 'tests/bad.grl'), 'fn main() {\n    assert(1 == 2);\n}\n');
 const failing = run(['test'], demo, false); assert.equal(failing.status, 1); assert.match(failing.stdout, /1 passed, 1 failed/);
-writeFileSync(join(work, 'args.grl'), 'fn main<a>(argument: read<a>) -> u64 {\n    return argument.len();\n}\n');
+writeFileSync(join(work, 'args.grl'), 'fn main(argument: &[u8]) -> u64 {\n    return argument.len();\n}\n');
 assert.equal(run(['run', 'args.grl', '--', 'seven!!'], work, false).status, 7);
 writeFileSync(join(work, 'bad.grl'), 'fn main() {\n    x := 1;\n    x = 2;\n}\n');
 const badCheck = run(['check', 'bad.grl'], work, false);
