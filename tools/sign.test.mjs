@@ -44,7 +44,7 @@ describe('signing plan safety', () => {
       probe: probe(['signtool']),
     });
     expect(plan).toMatchObject({ kind: 'authenticode', status: 'ready', backend: 'implemented' });
-    expect(plan.blocker).toMatch(/must not be executed/);
+    expect(plan.blocker).toMatch(/non-executable object bundles/);
     const text = formatPlan(plan);
     expect(text).toContain('$WINDOWS_CERT_PASSWORD');
     expect(text).not.toContain('hunter2-secret');
@@ -83,8 +83,8 @@ describe('signing plan safety', () => {
       env: MAC_ENV,
       probe: probe(['codesign', 'xcrun', 'ditto']),
     });
-    expect(plan).toMatchObject({ status: 'ready', backend: 'blocked' });
-    expect(plan.blocker).toMatch(/Mach-O/);
+    expect(plan).toMatchObject({ status: 'ready', backend: 'implemented' });
+    expect(plan.blocker).toMatch(/object bundles/);
     const tools = plan.steps.map(step => step.tool);
     expect(tools).toEqual(['codesign', 'ditto', 'xcrun']);
     expect(displayStep(plan.steps[0])).toContain('--options runtime');

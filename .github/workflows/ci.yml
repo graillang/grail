@@ -23,7 +23,7 @@ jobs:
         with:
           bun-version: latest
       - name: Unit tests for the cross-platform matrix, packaging and signing
-        run: bun test tools/platforms.test.mjs tools/archive.test.mjs tools/sign.test.mjs tools/lsp.test.mjs
+        run: bun test tools/platforms.test.mjs tools/archive.test.mjs tools/sign.test.mjs tools/objects.test.mjs tools/lsp.test.mjs
       - name: Static checks (matrix, docs, workflow, scripts)
         run: bun tools/ci.mjs lint
       - name: Matrix and lane report
@@ -201,6 +201,66 @@ jobs:
           name: dist-windows-x86_64
           path: dist/
           if-no-files-found: error
+
+  # Non-executable target object bundles for Windows x86-64 and macOS. These are
+  # relocatable COFF/Mach-O objects with checksums and provenance; the archives
+  # contain no executable and the job never runs a target binary.
+  object-bundles:
+    name: target object bundle ${{ matrix.platform }} (non-executable)
+    needs: preflight
+    if: needs.preflight.outputs.ready == 'true'
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-x86_64
+          - platform: macos-aarch64
+          - platform: macos-x86_64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Install clang, LLD and LLVM inspection tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld llvm
+          llvm-objdump --version
+          llvm-nm --version
+      - name: Build the host compiler
+        run: bun tools/ci.mjs build --platform linux-x86_64
+      - name: Build and package the object bundle
+        run: |
+          compiler="$PWD/$(ls dist/grail-*-linux-x86_64-compiler)"
+          bun tools/ci.mjs objects --platform ${{ matrix.platform }} --compiler "$compiler"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.platform }}-objects
+          path: dist/*-objects.*
+          if-no-files-found: error
+
+  # macOS static checks: Mach-O objects and linked images, no execution.
+  macos-static:
+    name: macOS Mach-O static checks
+    needs: preflight
+    if: needs.preflight.outputs.ready == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Install clang, LLD and LLVM inspection tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld llvm
+      - name: Build the host compiler
+        run: bun tools/ci.mjs build --platform linux-x86_64
+      - name: Mach-O object and executable checks (no execution)
+        run: |
+          compiler="$PWD/$(ls dist/grail-*-linux-x86_64-compiler)"
+          bun tools/ci.mjs test --platform macos-aarch64 --compiler "$compiler"
 
   # LSP MVP: a real stdio session against the compiler's diagnostics interface.
   lsp:

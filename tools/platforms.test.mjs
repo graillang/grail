@@ -24,24 +24,25 @@ describe('platform matrix', () => {
     expect(new Set(PLATFORMS.map(p => p.id)).size).toBe(PLATFORMS.length);
   });
 
-  test('linux is runnable, windows-x86_64 is build-only, other OS targets are planned', () => {
+  test('linux is runnable while Windows x86-64 and macOS are build-only object targets', () => {
     for (const platform of PLATFORMS) {
       if (platform.os === 'linux') {
         expect(platform.tier).toBe(SUPPORTED);
         expect(platform.runnable).toBe(true);
         expect(platform.compilerTarget).toBeTruthy();
         expect(platform.blocker).toBeNull();
-      } else if (platform.id === 'windows-x86_64') {
-        expect(platform.tier).toBe(BUILD_ONLY);
-        expect(platform.runnable).toBe(false);
-        expect(platform.compilerTarget).toBe('windows-x86_64');
-        expect(platform.triple).toBe('x86_64-pc-windows-msvc');
-        expect(platform.blocker).toMatch(/must not be executed/);
-      } else {
+      } else if (platform.id === 'windows-aarch64') {
         expect(platform.tier).toBe(PLANNED);
         expect(platform.runnable).toBe(false);
         expect(platform.compilerTarget).toBeNull();
         expect(platform.blocker).toMatch(/not implemented/);
+      } else {
+        expect(platform.tier).toBe(BUILD_ONLY);
+        expect(platform.runnable).toBe(false);
+        expect(platform.compilerTarget).toBe(platform.id);
+        expect(['coff', 'macho']).toContain(platform.objectFormat);
+        expect(platform.objectExtension).toBe(platform.os === 'windows' ? '.obj' : '.o');
+        expect(platform.blocker).toMatch(/object bundle/);
       }
     }
   });
@@ -93,12 +94,14 @@ describe('versions and artifact naming', () => {
     expect(artifactName('windows-x86_64', '0.1.0', 'compiler')).toBe('grail-0.1.0-windows-x86_64-compiler.exe');
     expect(artifactName('linux-riscv64', '0.1.0', 'assembly')).toBe('grail-0.1.0-linux-riscv64-compiler.s.gz');
     expect(artifactName('macos-aarch64', '0.1.0', 'notarization')).toBe('grail-0.1.0-macos-aarch64-notary.zip');
+    expect(artifactName('windows-x86_64', '0.1.0', 'objects')).toBe('grail-0.1.0-windows-x86_64-objects.zip');
+    expect(artifactName('macos-aarch64', '0.1.0', 'objects')).toBe('grail-0.1.0-macos-aarch64-objects.tar.gz');
   });
 
   test('artifact patterns accept every generated name', () => {
     for (const platform of PLATFORMS) {
       const pattern = new RegExp(artifactPattern(platform.id));
-      for (const kind of ['toolchain', 'compiler', 'assembly', 'notarization']) {
+      for (const kind of ['toolchain', 'compiler', 'assembly', 'notarization', 'objects']) {
         expect(pattern.test(artifactName(platform.id, '0.1.0', kind))).toBe(true);
       }
       expect(pattern.test(`grail-0.1.0-${platform.id}-bad.tar.gz`)).toBe(false);
@@ -164,15 +167,22 @@ describe('toolchain detection', () => {
     const result = detectToolchain('windows-x86_64', { probe: fakeProbe({ tools, outputs: { clang: 'clang 18' }, env: {} }), host: 'linux-x86_64', env: {} });
     expect(result).toMatchObject({ tier: BUILD_ONLY, backend: 'implemented', status: 'build-only', buildable: true, runnable: false });
     expect(result.sdk.available).toBe(true);
-    expect(result.blocker).toMatch(/must not be executed/);
+    expect(result.blocker).toMatch(/non-executable object bundles/);
   });
 
-  test('does not claim planned platforms are buildable', () => {
-    const probe = fakeProbe({ tools: { clang: '/c/clang', 'ld64.lld': '/c/ld64.lld', codesign: '/c/codesign', xcrun: '/c/xcrun' }, outputs: { xcrun: '/SDK/MacOSX.sdk' }, env: {} });
-    const mac = detectToolchain('macos-aarch64', { probe, host: 'macos-aarch64', env: {} });
-    expect(mac).toMatchObject({ status: 'blocked-backend', buildable: false, backend: 'blocked' });
-    expect(mac.blocker).toMatch(/Mach-O/);
-    expect(mac.sdk).toMatchObject({ name: 'macOS SDK', available: true, path: '/SDK/MacOSX.sdk' });
+  test('macOS is buildable as objects but not runnable', () => {
+    const probe = fakeProbe({ tools: { clang: '/c/clang', 'llvm-objdump': '/c/llvm-objdump', 'llvm-nm': '/c/llvm-nm' }, env: {} });
+    const mac = detectToolchain('macos-aarch64', { probe, host: 'linux-x86_64', env: {} });
+    expect(mac).toMatchObject({ status: 'build-only', buildable: true, backend: 'implemented', runnable: false });
+    expect(mac.sdk).toMatchObject({ name: 'Mach-O object toolchain', available: true });
+    expect(mac.blocker).toMatch(/object bundles/);
+  });
+
+  test('Windows AArch64 remains a blocked backend', () => {
+    const probe = fakeProbe({ tools: { clang: '/c/clang', 'ld.lld': '/c/ld.lld' }, env: {} });
+    const arm = detectToolchain('windows-aarch64', { probe, host: 'windows-aarch64', env: {} });
+    expect(arm).toMatchObject({ status: 'blocked-backend', buildable: false, backend: 'blocked', runnable: false });
+    expect(arm.blocker).toMatch(/ARM64 PE/);
   });
 
   test('detects signing credentials by name without exposing values', () => {
@@ -203,17 +213,20 @@ describe('lanes and plan coverage', () => {
     const windows = required.filter(lane => lane.target === 'windows-x86_64');
     expect(windows).toHaveLength(1);
     expect(windows[0]).toMatchObject({ id: 'cross-windows-x86_64', kind: 'cross', execution: 'static' });
+    for (const id of ['macos-aarch64', 'macos-x86_64']) {
+      expect(required.find(entry => entry.target === id)).toMatchObject({ kind: 'cross', execution: 'static', required: true });
+    }
   });
 
   test('planned lanes are non-required and report the backend blocker', () => {
     const planned = LANES.filter(lane => platformById(lane.target).tier === PLANNED);
-    expect(planned.length).toBeGreaterThanOrEqual(4);
-    expect(planned.every(lane => lane.target !== 'windows-x86_64')).toBe(true);
+    expect(planned.length).toBeGreaterThanOrEqual(2);
+    expect(planned.every(lane => lane.target === 'windows-aarch64')).toBe(true);
     for (const lane of planned) expect(lane.required).toBe(false);
-    const probe = fakeProbe({ tools: { clang: '/c', 'ld.lld': '/l', 'ld64.lld': '/l', codesign: '/c', xcrun: '/x' }, outputs: { xcrun: '/SDK' }, env: {} });
-    const mac = laneStatus(planned.find(lane => lane.target === 'macos-aarch64'), { probe, host: 'macos-aarch64', env: {} });
-    expect(mac.status).toBe('blocked-backend');
-    expect(mac.blocker).toMatch(/Mach-O/);
+    const probe = fakeProbe({ tools: { clang: '/c', 'ld.lld': '/l' }, env: {} });
+    const arm = laneStatus(planned.find(lane => lane.target === 'windows-aarch64'), { probe, host: 'windows-aarch64', env: {} });
+    expect(arm.status).toBe('blocked-backend');
+    expect(arm.blocker).toMatch(/ARM64 PE/);
   });
 
   test('cross lane without QEMU is missing-runner, with QEMU is runnable', () => {
@@ -232,7 +245,17 @@ describe('lanes and plan coverage', () => {
     };
     const result = laneStatus(lane, { probe: fakeProbe({ tools }), host: 'linux-x86_64', env: {} });
     expect(result).toMatchObject({ status: 'static-only', staticOnly: true, runnable: false, applicable: true, backend: 'implemented' });
-    expect(result.blocker).toMatch(/must not be executed/);
+    expect(result.blocker).toMatch(/non-executable object bundles/);
+  });
+
+  test('macOS object lanes are static-only and required', () => {
+    const tools = { clang: '/c/clang', 'llvm-objdump': '/c/llvm-objdump', 'llvm-nm': '/c/llvm-nm' };
+    for (const id of ['macos-aarch64', 'macos-x86_64']) {
+      const lane = LANES.find(entry => entry.id === `cross-${id}`);
+      const result = laneStatus(lane, { probe: fakeProbe({ tools }), host: 'linux-x86_64', env: {} });
+      expect(result).toMatchObject({ status: 'static-only', staticOnly: true, runnable: false, applicable: true, required: true });
+      expect(result.blocker).toMatch(/object bundles/);
+    }
   });
 
   test('the generated plan covers all platforms, lanes and artifact names', () => {
@@ -244,5 +267,6 @@ describe('lanes and plan coverage', () => {
     expect(plan.platforms.find(p => p.id === 'linux-x86_64').detection.status).toBe('ready');
     expect(plan.platforms.find(p => p.id === 'windows-x86_64')).toMatchObject({ tier: BUILD_ONLY, runnable: false });
     expect(plan.lanes.find(l => l.id === 'cross-windows-x86_64').runnable).toBe(false);
+    expect(plan.platforms.find(p => p.id === 'macos-aarch64')).toMatchObject({ tier: BUILD_ONLY, runnable: false, objects: 'grail-0.1.0-macos-aarch64-objects.tar.gz' });
   });
 });

@@ -88,7 +88,7 @@ ci-plan:
 
 # Run tooling unit/static checks; no compiler or QEMU needed.
 test-tooling:
-    bun test tools/platforms.test.mjs tools/archive.test.mjs tools/sign.test.mjs
+    bun test tools/platforms.test.mjs tools/archive.test.mjs tools/sign.test.mjs tools/objects.test.mjs
     bun tools/ci.mjs lint
 
 # Build the compiler for a platform (e.g. just build-platform linux-x86_64).
@@ -113,6 +113,14 @@ graphics-test:
     bun test graphics/tests/shader_permutations.test.mjs
 
 
+
+# Build a non-executable COFF/Mach-O object bundle (windows-x86_64 or macos-*).
+objects platform:
+    bun tools/ci.mjs objects --platform {{platform}}
+
+# macOS Mach-O object and executable static checks (nothing is executed).
+macos-check:
+    bun tools/test-macos.mjs
 
 # Run the Grail LSP MVP on stdio (requires GRAIL_LSP_COMPILER or GRAIL_COMPILER).
 lsp:

@@ -4,13 +4,15 @@ This document is the design and operating manual for Grail's cross-platform
 foundation. The implementation is compiler-free: it describes targets, detects
 host tools, builds/packages/signs artifacts and gates CI. The only **runnable**
 compiler backends today are Linux ELF on **linux-x86_64**, **linux-aarch64** and
-**linux-riscv64**. **windows-x86_64** emits and links PE32+ console images and is
-verified statically, but its runtime is not implemented, so it is **build-only**
-and must not be executed. **windows-aarch64** and both macOS targets remain
-planned distribution scaffolding.
+**linux-riscv64**. **windows-x86_64** emits PE/COFF objects and PE32+ images;
+Windows execution is verified separately under Wine, but this release lane ships
+**non-executable object bundles**. **macos-aarch64** and **macos-x86_64** emit
+Mach-O objects that are statically verified; they are **build-only** object
+targets with no macOS execution claim. **windows-aarch64** remains planned.
 
-The tooling lanes do not implement code generation; the Windows target itself
-lives in `compiler/native.grl`.
+The tooling lanes do not implement code generation; the Windows and macOS
+backends live in `compiler/native.grl`, `compiler/darwin.grl` and the `os-*`
+platform modules.
 
 ## Support matrix
 
@@ -19,19 +21,23 @@ lives in `compiler/native.grl`.
 | `linux-x86_64` | Linux / x86-64 | implemented (ELF) | `ubuntu-24.04` | `grail-VERSION-linux-x86_64.tar.gz` |
 | `linux-aarch64` | Linux / AArch64 | implemented (ELF) | `ubuntu-24.04-arm` | `grail-VERSION-linux-aarch64.tar.gz` |
 | `linux-riscv64` | Linux / RISC-V 64 | implemented (ELF) | self-hosted or cross lane | `grail-VERSION-linux-riscv64.tar.gz` |
-| `windows-x86_64` | Windows / x86-64 | **build-only** (PE/COFF) | `ubuntu-24.04` (cross) | `grail-VERSION-windows-x86_64.zip` |
+| `windows-x86_64` | Windows / x86-64 | **build-only** (PE/COFF objects) | `ubuntu-24.04` (cross) | `grail-VERSION-windows-x86_64-objects.zip` |
 | `windows-aarch64` | Windows / AArch64 | planned (ARM64 PE) | `windows-11-arm` | `grail-VERSION-windows-aarch64.zip` |
-| `macos-aarch64` | macOS / AArch64 | planned (Mach-O) | `macos-14` | `grail-VERSION-macos-aarch64.tar.gz` |
-| `macos-x86_64` | macOS / x86-64 | planned (Mach-O) | `macos-13` | `grail-VERSION-macos-x86_64.tar.gz` |
+| `macos-aarch64` | macOS / AArch64 | **build-only** (Mach-O objects) | `ubuntu-24.04` (cross) | `grail-VERSION-macos-aarch64-objects.tar.gz` |
+| `macos-x86_64` | macOS / x86-64 | **build-only** (Mach-O objects) | `ubuntu-24.04` (cross) | `grail-VERSION-macos-x86_64-objects.tar.gz` |
 
 - **supported** — the compiler emits a runnable program for that OS/CPU.
-- **build-only** — objects and images are built and verified statically, but
-  execution is explicitly unsupported because the runtime is missing.
+- **build-only** — objects and images are built and verified statically; release
+  artifacts are non-executable object bundles, not runnable toolchains. Windows
+  execution is verified separately under Wine, but no Windows toolchain is
+  claimed by these artifacts.
 - **planned** — the lane, naming, packaging and signing hooks exist but the
   compiler backend does not. Planned lanes never claim a runnable binary.
 
 `runnable` is an explicit field on every platform and on every lane result.
-`windows-x86_64` is `build-only`/`runnable: false` even when Wine is installed.
+`windows-x86_64` and both macOS targets are `build-only`/`runnable: false`.
+Wine may execute Windows test programs, but that does not make the object bundle
+an executable release.
 
 ## Build lanes
 
@@ -46,9 +52,11 @@ lives in `compiler/native.grl`.
 | `native-windows-x86_64` | `windows-x86_64` | `windows-x86_64` | static | optional |
 | `cross-windows-aarch64` | `windows-x86_64` | `windows-aarch64` | native | optional |
 | `native-windows-aarch64` | `windows-aarch64` | `windows-aarch64` | native | optional |
-| `native-macos-aarch64` | `macos-aarch64` | `macos-aarch64` | native | optional |
-| `native-macos-x86_64` | `macos-x86_64` | `macos-x86_64` | native | optional |
-| `cross-macos-x86_64` | `macos-aarch64` | `macos-x86_64` | native | optional |
+| `cross-macos-aarch64` | `linux-x86_64` | `macos-aarch64` | static | yes (objects) |
+| `cross-macos-x86_64` | `linux-x86_64` | `macos-x86_64` | static | yes (objects) |
+| `native-macos-aarch64` | `macos-aarch64` | `macos-aarch64` | static | optional |
+| `native-macos-x86_64` | `macos-x86_64` | `macos-x86_64` | static | optional |
+| `cross-macos-x86_64-native` | `macos-aarch64` | `macos-x86_64` | static | optional |
 
 Linux cross lanes build the target compiler with the host compiler
 (`grail --target ... compiler/*.grl`), assemble with `clang --target=...` and
@@ -60,6 +68,11 @@ The Windows lane uses `tools/windows.mjs`: it compiles the same compiler
 sources with `--target windows-x86_64`, assembles COFF with `clang
 --target=x86_64-pc-windows-msvc`, generates the short-import `kernel32.lib`
 with `llvm-ar`, and links with `lld-link`. It never executes the image.
+
+The macOS lanes compile with `--target macos-x86_64|macos-aarch64`, the
+`darwin.grl` platform module and Mach-O assembly (`x86_64-apple-macos11` /
+`arm64-apple-macos11`). Objects are inspected with `llvm-objdump --macho` and
+`llvm-nm`; no macOS binary is executed.
 
 ## CI workflow and gating
 
@@ -80,11 +93,15 @@ with `llvm-ar`, and links with `lld-link`. It never executes the image.
 6. **Windows x86-64 cross**: builds the host compiler, builds the PE compiler
    image, runs the static COFF/PE checks and packages the build-only zip. No
    execution occurs; the job name says `build-only, static`.
-7. **Windows/macOS coverage**: detection, `build --allow-blocked` and the
+7. **Target object bundles**: a matrix job packages non-executable COFF/Mach-O
+   object bundles for `windows-x86_64`, `macos-aarch64` and `macos-x86_64` with
+   `SHA256SUMS` and `objects.json` provenance. `macos-static` runs the Mach-O
+   object/executable checks without executing anything.
+8. **Windows/macOS coverage**: detection, `build --allow-blocked` and the
    signing dry-run plan. `--allow-blocked` exits 0 for known backend blockers
    and for not-applicable hosts, so the matrix is exercised without a false
    green binary.
-8. **LSP**: the tooling job runs the protocol tests; a preflight-gated `lsp`
+9. **LSP**: the tooling job runs the protocol tests; a preflight-gated `lsp`
    job builds the compiler and runs the compiler-backed stdio session
    (`tools/lsp.test.mjs`).
 
@@ -116,6 +133,30 @@ The package contains `share/doc/grail/WINDOWS-BUILD-ONLY.txt` and its manifest
 records `tier: build-only`, `runnable: false`, `runtime: unverified`. The image
 is **never executed**, even on hosts with Wine: argv recovery, worker threads,
 file/directory host services and `.pdata`/unwind data are not implemented.
+
+## Target object bundles (non-executable)
+
+```sh
+GRAIL_COMPILER=/path/to/host/grail bun tools/ci.mjs objects --platform macos-aarch64
+# dist/grail-0.1.0-macos-aarch64-objects.tar.gz
+```
+
+Each bundle contains `objects/grail.obj|.o`, `objects/hello.obj|.o`, gzipped
+emitted assembly, `share/grail/objects.json` and
+`share/doc/grail/OBJECTS-BUILD-ONLY.txt`. `objects.json` records
+`kind: relocatable-object`, `executable: false`, `runnable: false`, the target
+triple, object format (`coff`/`macho`), architecture, commit, stage0 digest,
+compiler source digests and per-file SHA-256. The archive contains no
+executable, dylib or `bin/grail`; verification rejects such entries. A
+top-level `SHA256SUMS` sits next to the artifact.
+
+Static checks before packaging:
+
+- COFF: `Format: COFF-x86-64`, `IMAGE_FILE_MACHINE_AMD64`.
+- Mach-O: `MH_MAGIC_64` with the expected `ARM64`/`X86_64` cputype,
+  `LC_BUILD_VERSION` for macOS, and `_main` defined in `.text`.
+
+No target binary is executed by this lane.
 
 ## Runtime ABI and graphics lanes
 
@@ -152,6 +193,8 @@ grail-VERSION-PLATFORM[-compiler][-notary].EXT
 | raw compiler | `grail-0.1.0-linux-aarch64-compiler` |
 | Windows compiler | `grail-0.1.0-windows-x86_64-compiler.exe` |
 | cross-build assembly | `grail-0.1.0-linux-riscv64-compiler.s.gz` |
+| Windows object bundle | `grail-0.1.0-windows-x86_64-objects.zip` |
+| macOS object bundle | `grail-0.1.0-macos-aarch64-objects.tar.gz` |
 | notarization input | `grail-0.1.0-macos-aarch64-notary.zip` |
 
 `VERSION` (repository root) is the single version source; `GRAIL_VERSION`
@@ -274,11 +317,11 @@ Exit codes: `0` ok, `1` usage/internal, `2` not applicable to this host,
 2. **No qemu-user on the development host.** Linux x86-64 native tests pass;
    AArch64/RISC-V64 are cross-assembled and architecture-checked, but execution
    waits for `qemu-aarch64-static` / `qemu-riscv64-static`.
-3. **Windows runtime unverified.** `windows-x86_64` builds and statically
-   verifies PE32+ images, but argv recovery, worker threads, file/directory
-   host services and `.pdata`/unwind data are missing. The lane is `build-only`,
-   packages carry a notice, and no image is executed. ARM64 PE and macOS
-   Mach-O backends remain planned, so those packages are still exercised with
-   synthetic binaries in unit tests and stay `blocked` in CI.
+3. **No hosted Windows/macOS toolchain release.** Windows x86-64 PE/COFF
+   builds are verified statically and executed under Wine by
+   `tools/windows.mjs check`; macOS Mach-O objects/linked images are verified
+   statically. The release artifacts in this lane are non-executable object
+   bundles, and no macOS execution is claimed. Windows AArch64 remains a
+   planned backend.
 4. **No hosted RISC-V64 runner.** RISC-V64 is covered by the x86-64 cross lane;
    native RISC-V64 remains an optional self-hosted lane.

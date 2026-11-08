@@ -15,10 +15,10 @@ export const BUILD_ONLY = 'build-only';
 export const PLANNED = 'planned';
 
 const linuxBlocker = null;
-const windowsBlocker = 'PE/COFF output exists only for windows-x86_64; ARM64 PE code generation, ' +
-  'the Windows runtime and .pdata/unwind data are not implemented, so this lane is distribution scaffolding';
-const macosBlocker = 'the compiler and runtime emit Linux ELF only; Mach-O code generation, ' +
-  'macOS syscalls and the macOS runtime are not implemented, so this lane is distribution scaffolding';
+const windowsBlocker = 'PE/COFF output exists only for windows-x86_64; ARM64 PE code generation ' +
+  'is not implemented, so this lane is distribution scaffolding';
+const macosBlocker = 'Mach-O objects build and pass static checks, but no macOS execution is ' +
+  'verified here; release artifacts are non-executable object bundles, not runnable toolchains';
 
 // `requiredTools` are needed to build and link a compiler for the platform on its
 // own host. Linux cross lanes reuse the x86-64 host tools with a target triple.
@@ -109,10 +109,12 @@ export const PLATFORMS = [
     requiredTools: ['clang', 'lld-link', 'llvm-ar', 'llvm-readobj', 'llvm-objdump'],
     hostedRunner: 'ubuntu-24.04',
     crossHost: 'linux-x86_64',
+    objectFormat: 'coff',
+    objectExtension: '.obj',
     blocker:
-      'PE/COFF objects and console images build and pass static checks, but the Windows runtime ' +
-      '(argv recovery, worker threads, .pdata/unwind data) is not implemented; images are ' +
-      'build-only and must not be executed',
+      'PE/COFF objects and console images build and pass static checks. Release artifacts here ' +
+      'are non-executable object bundles; Windows execution is verified separately under Wine ' +
+      'and this lane does not claim a hosted Windows toolchain',
     signing: {
       kind: 'authenticode',
       optional: false,
@@ -156,10 +158,10 @@ export const PLATFORMS = [
     osLabel: 'macOS',
     arch: 'aarch64',
     archLabel: 'AArch64',
-    tier: PLANNED,
+    tier: BUILD_ONLY,
     runnable: false,
-    compilerTarget: null,
-    triple: 'aarch64-apple-darwin',
+    compilerTarget: 'macos-aarch64',
+    triple: 'arm64-apple-macos11',
     emulation: null,
     elfMachine: null,
     assemblerFlags: [],
@@ -167,9 +169,11 @@ export const PLATFORMS = [
     archiveFormat: 'tar.gz',
     installer: 'install.sh',
     qemu: null,
-    requiredTools: ['clang', 'ld64.lld'],
-    sdk: 'macOS SDK',
-    hostedRunner: 'macos-14',
+    requiredTools: ['clang', 'llvm-objdump', 'llvm-nm'],
+    objectFormat: 'macho',
+    objectExtension: '.o',
+    hostedRunner: 'ubuntu-24.04',
+    crossHost: 'linux-x86_64',
     blocker: macosBlocker,
     signing: {
       kind: 'apple',
@@ -185,10 +189,10 @@ export const PLATFORMS = [
     osLabel: 'macOS',
     arch: 'x86_64',
     archLabel: 'x86-64',
-    tier: PLANNED,
+    tier: BUILD_ONLY,
     runnable: false,
-    compilerTarget: null,
-    triple: 'x86_64-apple-darwin',
+    compilerTarget: 'macos-x86_64',
+    triple: 'x86_64-apple-macos11',
     emulation: null,
     elfMachine: null,
     assemblerFlags: [],
@@ -196,9 +200,11 @@ export const PLATFORMS = [
     archiveFormat: 'tar.gz',
     installer: 'install.sh',
     qemu: null,
-    requiredTools: ['clang', 'ld64.lld'],
-    sdk: 'macOS SDK',
-    hostedRunner: 'macos-13',
+    requiredTools: ['clang', 'llvm-objdump', 'llvm-nm'],
+    objectFormat: 'macho',
+    objectExtension: '.o',
+    hostedRunner: 'ubuntu-24.04',
+    crossHost: 'linux-x86_64',
     blocker: macosBlocker,
     signing: {
       kind: 'apple',
@@ -222,9 +228,11 @@ export const LANES = [
   { id: 'native-windows-x86_64', host: 'windows-x86_64', target: 'windows-x86_64', kind: 'native', execution: 'static', required: false },
   { id: 'cross-windows-aarch64', host: 'windows-x86_64', target: 'windows-aarch64', kind: 'cross', execution: 'native', required: false },
   { id: 'native-windows-aarch64', host: 'windows-aarch64', target: 'windows-aarch64', kind: 'native', execution: 'native', required: false },
-  { id: 'native-macos-aarch64', host: 'macos-aarch64', target: 'macos-aarch64', kind: 'native', execution: 'native', required: false },
-  { id: 'native-macos-x86_64', host: 'macos-x86_64', target: 'macos-x86_64', kind: 'native', execution: 'native', required: false },
-  { id: 'cross-macos-x86_64', host: 'macos-aarch64', target: 'macos-x86_64', kind: 'cross', execution: 'native', required: false },
+  { id: 'cross-macos-aarch64', host: 'linux-x86_64', target: 'macos-aarch64', kind: 'cross', execution: 'static', required: true },
+  { id: 'cross-macos-x86_64', host: 'linux-x86_64', target: 'macos-x86_64', kind: 'cross', execution: 'static', required: true },
+  { id: 'native-macos-aarch64', host: 'macos-aarch64', target: 'macos-aarch64', kind: 'native', execution: 'static', required: false },
+  { id: 'native-macos-x86_64', host: 'macos-x86_64', target: 'macos-x86_64', kind: 'native', execution: 'static', required: false },
+  { id: 'cross-macos-x86_64-native', host: 'macos-aarch64', target: 'macos-x86_64', kind: 'cross', execution: 'static', required: false },
 ];
 
 const HOST_KEYS = {
@@ -277,7 +285,7 @@ export function gitCommit(cwd = root) {
 }
 
 // Artifact names are the release contract: `grail-VERSION-PLATFORM[-KIND].EXT`.
-export const ARTIFACT_KINDS = ['toolchain', 'compiler', 'assembly', 'notarization'];
+export const ARTIFACT_KINDS = ['toolchain', 'compiler', 'assembly', 'notarization', 'objects'];
 
 export function artifactName(platform, version, kind = 'toolchain') {
   const p = platformById(platform);
@@ -286,13 +294,14 @@ export function artifactName(platform, version, kind = 'toolchain') {
   if (kind === 'toolchain') return `${base}.${p.archiveFormat}`;
   if (kind === 'compiler') return `${base}-compiler${p.executableSuffix}`;
   if (kind === 'assembly') return `${base}-compiler.s.gz`;
+  if (kind === 'objects') return `${base}-objects.${p.archiveFormat}`;
   return `${base}-notary.zip`;
 }
 
 export function artifactPattern(platform) {
   const p = platformById(platform);
   const extension = p.executableSuffix ? `|\\${p.executableSuffix}` : '';
-  return `^grail-\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?-${p.id}(?:-compiler(?:\\.s\\.gz)?|-notary)?(?:\\.(?:tar\\.gz|zip)${extension})?$`;
+  return `^grail-\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?-${p.id}(?:-compiler(?:\\.s\\.gz)?|-notary|-objects)?(?:\\.(?:tar\\.gz|zip)${extension})?$`;
 }
 
 // Reads just enough of an executable to prove which OS/architecture it targets.
@@ -379,6 +388,14 @@ export function findRunner(platform, probe) {
 function detectSdk(platform, probe, env = process.env) {
   if (platform.os === 'linux') {
     return { name: 'glibc (assembler/linker only)', available: true, path: null, detail: 'static ELF, no SDK required' };
+  }
+  if (platform.os === 'macos' && platform.tier === BUILD_ONLY) {
+    return {
+      name: 'Mach-O object toolchain',
+      available: true,
+      path: null,
+      detail: 'clang emits Mach-O objects; no SDK or linker is needed for object bundles',
+    };
   }
   if (platform.os === 'macos') {
     const xcrun = probe.which('xcrun');
@@ -516,6 +533,7 @@ export function buildPlan(options = {}) {
       hostedRunner: platform.hostedRunner,
       artifact: artifactName(platform.id, version, 'toolchain'),
       assembly: artifactName(platform.id, version, 'assembly'),
+      objects: artifactName(platform.id, version, 'objects'),
       blocker: platform.blocker,
       detection: detectToolchain(platform.id, { env, probe, host }),
     })),

@@ -15,6 +15,7 @@ import {
 import { buildCompiler, command, compilerSources, assemble, compileProgram } from './native.mjs';
 import { compileProgram as compileWindowsProgram, headers as windowsHeaders, inspectImage as inspectPeImage, inspectObject as inspectPeObject } from './windows.mjs';
 import { createPackage, sha256, verifyPackage, writeChecksums } from './package.mjs';
+import { buildObjectBundle, verifyObjectBundle } from './objects.mjs';
 import { executeSigning, formatPlan, signingPlan } from './sign.mjs';
 
 export const EXIT = { ok: 0, usage: 1, notApplicable: 2, blocked: 3, missing: 4, failed: 5 };
@@ -145,7 +146,7 @@ function matrix(plan, options) {
     triple: platform.triple,
     compilerTarget: platform.compilerTarget,
     runner: platform.hostedRunner ?? 'self-hosted',
-    artifact: platform.artifact,
+    artifact: platform.tier === BUILD_ONLY ? platform.objects : platform.artifact,
   }));
   if (options.json) return rows;
   const width = Math.max(...rows.map(row => row.platform.length));
@@ -314,6 +315,7 @@ function testTarget(platformId, options = {}) {
   const target = platformById(platformId);
   if (target.tier === PLANNED) throw new Blocked(`cannot test ${target.id}: ${target.blocker}`);
   if (target.id === 'windows-x86_64') return windowsStaticCheck(target, options);
+  if (target.os === 'macos') return macosStaticCheck(target, options);
   const host = hostFor();
   const checkOnly = options['compile-only'] ?? false;
   let compiler = options.compiler ? resolve(root, options.compiler) : null;
@@ -354,6 +356,31 @@ function testTarget(platformId, options = {}) {
     if (cli.status !== 0) throw new Error(`linux-x86_64 CLI tests failed (${cli.status})`);
   }
   return { platform: target.id, compiler, mode: 'native', status: 'passed' };
+}
+
+function macosStaticCheck(target, options = {}) {
+  const host = hostFor();
+  if (host !== 'linux-x86_64' && host !== 'macos-aarch64' && host !== 'macos-x86_64') {
+    throw new Blocked(`macOS object checks run from linux-x86_64 or macOS, not ${host}`, EXIT.notApplicable);
+  }
+  const provided = options.compiler ? inspectBinary(resolve(root, options.compiler)) : null;
+  const stage0 = provided && provided.format === 'elf' && provided.arch === 'x86_64'
+    ? resolve(root, options.compiler)
+    : buildCompiler();
+  const result = spawnSync('bun', ['tools/test-macos.mjs'], {
+    cwd: root,
+    stdio: 'inherit',
+    env: { ...process.env, GRAIL_COMPILER: stage0 },
+  });
+  if (result.status !== 0) throw new Error(`macOS static checks failed (${result.status})`);
+  return {
+    platform: target.id,
+    compiler: stage0,
+    mode: 'static',
+    runnable: false,
+    status: 'passed',
+    note: 'Mach-O objects and linked images inspected; no macOS execution is claimed',
+  };
 }
 
 function windowsStaticCheck(target, options = {}) {
@@ -440,6 +467,11 @@ function lint() {
   check('install.ps1 exists', existsSync(join(root, 'packaging/install.ps1')));
   check('windows-x86_64 has a required cross lane', LANES.some(lane => lane.required && lane.target === 'windows-x86_64'));
   check('windows-x86_64 lane is static-only', LANES.filter(lane => lane.target === 'windows-x86_64').every(lane => lane.execution === 'static'));
+  for (const id of ['windows-x86_64', 'macos-aarch64', 'macos-x86_64']) {
+    const name = artifactName(id, version ?? '0.0.0', 'objects');
+    check(`${id} object bundle name`, new RegExp(artifactPattern(id)).test(name), name);
+    check(`${id} required static lane`, LANES.some(lane => lane.required && lane.target === id));
+  }
   check('LSP/debugger/profiler plan exists', existsSync(join(root, 'docs/tooling/lsp-debugger-profiler.md')));
   check('FFI test runner exists', existsSync(join(root, 'tools/test-ffi.mjs')));
   check('CI runs the FFI shim test', readFileSync(join(root, '.github/workflows/ci.yml'), 'utf8').includes('tools/test-ffi.mjs'));
@@ -470,6 +502,9 @@ function run(argv) {
   test --platform ID [--compile-only] run native/qemu tests or a cross compile check
   package --platform ID [--compiler PATH] [--out DIR]
                                       create a .tar.gz/.zip and SHA256SUMS
+  objects --platform ID [--compiler PATH] [--out DIR]
+                                      build a non-executable COFF/Mach-O object bundle
+                                      (windows-x86_64, macos-aarch64, macos-x86_64)
   sign --platform ID --artifact PATH [--binary PATH|--tree DIR] [--execute]
                                       print signing/notarization commands (dry-run by default)
   all [--platform ID]                 preflight + build + test + package + sign dry-run
@@ -552,6 +587,22 @@ exit codes: 0 ok, 1 usage/internal, 2 not applicable, 3 blocked, 4 missing depen
       const result = createPackage({ platform, version, compiler, outDir: resolve(root, options.out ?? 'dist') });
       verifyPackage(result.artifact, platform, version);
       console.log(JSON.stringify({ ...result, manifest: result.manifest }, null, 2));
+      return EXIT.ok;
+    } catch (error) {
+      return fail(error, options);
+    }
+  }
+
+  if (commandName === 'objects') {
+    try {
+      if (!options.platform) throw new Blocked('objects needs --platform windows-x86_64|macos-aarch64|macos-x86_64', EXIT.usage);
+      const target = platformById(options.platform);
+      if (target.tier !== BUILD_ONLY) throw new Blocked(`cannot build object bundles for ${target.id}: tier is ${target.tier}`);
+      const version = options.version ?? readVersion();
+      const stage0 = options.compiler ? resolve(root, options.compiler) : buildCompiler();
+      const result = buildObjectBundle({ platform: target.id, version, outDir: resolve(root, options.out ?? 'dist'), stage0 });
+      verifyObjectBundle(result.artifact, target.id, version);
+      console.log(JSON.stringify(result, null, 2));
       return EXIT.ok;
     } catch (error) {
       return fail(error, options);
