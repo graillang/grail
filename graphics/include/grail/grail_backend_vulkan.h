@@ -48,6 +48,92 @@ gr_result gr_vk_optional_features(gr_mut_span_u8 out_json, size_t *out_used);
 gr_result gr_vk_device_extensions(gr_mut_span_u8 out_list, size_t *out_used);
 
 /* ---------------------------------------------------------------------------------------
+ * Required-feature evaluation and the device probe
+ *
+ * The probe answers one question: can this machine run the Vulkan backend at all, and if not,
+ * exactly which requirement is missing. It creates an instance, enumerates physical devices and
+ * their features and limits, and destroys the instance again. It creates NO device and submits
+ * no work, which is why it is safe to run while the GPU is otherwise busy — but it is still run
+ * under the host's exclusive GPU lock by `make -C graphics vk-probe`, because enumerating a
+ * driver is not free and this host serialises every program that talks to one.
+ *
+ * It loads libvulkan with dlopen at run time rather than linking it, so a build machine with the
+ * headers and no loader still compiles the library and gets GR_ERROR_UNSUPPORTED instead of a
+ * link failure.
+ * --------------------------------------------------------------------------------------- */
+typedef enum gr_vk_required {
+    GR_VK_REQ_DESCRIPTOR_INDEXING = 1u << 0,
+    GR_VK_REQ_RUNTIME_DESCRIPTOR_ARRAY = 1u << 1,   /* unbounded arrays: the bindless table */
+    GR_VK_REQ_UPDATE_AFTER_BIND = 1u << 2,
+    GR_VK_REQ_PARTIALLY_BOUND = 1u << 3,
+    GR_VK_REQ_VARIABLE_DESCRIPTOR_COUNT = 1u << 4,
+    GR_VK_REQ_NON_UNIFORM_INDEXING = 1u << 5,
+    GR_VK_REQ_BUFFER_DEVICE_ADDRESS = 1u << 6,
+    GR_VK_REQ_DYNAMIC_RENDERING = 1u << 7,
+    GR_VK_REQ_SYNCHRONIZATION2 = 1u << 8,
+    GR_VK_REQ_TIMELINE_SEMAPHORE = 1u << 9,
+    GR_VK_REQ_SCALAR_BLOCK_LAYOUT = 1u << 10,
+    GR_VK_REQ_SHADER_INT16 = 1u << 11,
+    GR_VK_REQ_SHADER_INT64 = 1u << 12
+} gr_vk_required;
+
+#define GR_VK_REQ_ALL ((uint32_t)(GR_VK_REQ_DESCRIPTOR_INDEXING | GR_VK_REQ_RUNTIME_DESCRIPTOR_ARRAY | \
+    GR_VK_REQ_UPDATE_AFTER_BIND | GR_VK_REQ_PARTIALLY_BOUND | GR_VK_REQ_VARIABLE_DESCRIPTOR_COUNT | \
+    GR_VK_REQ_NON_UNIFORM_INDEXING | GR_VK_REQ_BUFFER_DEVICE_ADDRESS | GR_VK_REQ_DYNAMIC_RENDERING | \
+    GR_VK_REQ_SYNCHRONIZATION2 | GR_VK_REQ_TIMELINE_SEMAPHORE | GR_VK_REQ_SCALAR_BLOCK_LAYOUT | \
+    GR_VK_REQ_SHADER_INT16 | GR_VK_REQ_SHADER_INT64))
+
+/* The name of one required-feature bit, for a log or a report. Never NULL. */
+const char *gr_vk_required_name(uint32_t bit);
+
+typedef struct gr_vk_probe_report {
+    gr_desc_head head;
+    uint32_t loader_found;          /* libvulkan was loaded */
+    uint32_t has_icd;               /* at least one physical device answered */
+    uint32_t device_count;
+    uint32_t loader_api_major, loader_api_minor, loader_api_patch;
+    uint32_t instance_api_major, instance_api_minor;
+    /* The bits of GR_VK_REQ_ALL this device does NOT provide. Zero means the backend can run. */
+    uint32_t required_missing;
+    char loader_path[128];
+    /* The chosen device: the first one that provides every requirement, else the first device,
+     * so a failure report still names real hardware. */
+    char device_name[256];
+    char driver_name[256];          /* empty when VK_KHR_driver_properties is unavailable */
+    char driver_info[256];
+    uint32_t vendor_id, device_id, device_type;
+    uint32_t api_major, api_minor, api_patch;
+    uint32_t driver_version;
+    uint32_t queue_family_count;
+    uint32_t graphics_family, compute_family, transfer_family; /* ~0u when absent */
+    uint32_t discrete_gpu;
+    uint32_t device_local_heap_bytes;
+    uint32_t max_push_constants;
+    uint32_t max_image_dimension_2d;
+    uint32_t max_compute_workgroup_invocations;
+    uint32_t max_per_stage_sampled_images;
+    uint32_t max_per_stage_samplers;
+    uint32_t max_per_stage_storage_buffers;
+    uint32_t max_descriptor_set_sampled_images;
+    uint32_t subgroup_size;
+    float timestamp_period_ns;
+} gr_vk_probe_report;
+
+/* Runs the probe.
+ *
+ *   GR_OK                  a device was found; read required_missing to see if it can run the
+ *                          backend. GR_OK with required_missing != 0 is a real answer, not a
+ *                          failure of the probe.
+ *   GR_ERROR_UNSUPPORTED   no loader, no ICD, or no Vulkan 1.0 instance could be created. The
+ *                          report's loader_found/has_icd say which.
+ *   GR_ERROR_OUT_OF_MEMORY
+ *
+ * A caller treats GR_ERROR_UNSUPPORTED as "skip": a machine without Vulkan is a supported state
+ * for every test in this repository.
+ */
+gr_result gr_vk_probe_run(gr_vk_probe_report *out);
+
+/* ---------------------------------------------------------------------------------------
  * Surface bridge.
  *
  * SDL3 needs the instance to create a VkSurfaceKHR, and the backend owns the instance. So
@@ -79,7 +165,7 @@ typedef struct gr_vk_queue_families {
     uint32_t present;
 } gr_vk_queue_families;
 
-gr_result gr_vk_queue_families(gr_handle device, gr_vk_queue_families *out);
+gr_result gr_vk_get_queue_families(gr_handle device, gr_vk_queue_families *out);
 
 #ifdef __cplusplus
 } /* extern "C" */
