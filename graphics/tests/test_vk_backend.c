@@ -17,6 +17,7 @@
 #include "../include/grail/grail_rhi.h"
 #include "../include/grail/grail_shader.h"
 #include "../include/grail/grail_graph.h"
+#include "../include/grail/grail_backend_vulkan.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -856,6 +857,8 @@ int main(int argc, char **argv)
 
         memset(&cpd, 0, sizeof(cpd));
         cpd.head.size = (uint32_t)sizeof(cpd);
+        /* A command buffer must be allocated from the family of the queue that submits it; these
+         * buffers go to the compute queue, which is now a different family. */
         cpd.queue = GR_QUEUE_COMPUTE;
         CHECK_EQ(gr_cmd_pool_create(device, &cpd, &pool), GR_OK);
         memset(&cai, 0, sizeof(cai));
@@ -1862,6 +1865,33 @@ int main(int argc, char **argv)
         /* ...and it is not the aliased image: 4x coverage on the triangle's edges cannot equal a
          * single-sample rasterisation of the same geometry. */
         CHECK(msaa_digests[0] != alias_digest);
+    }
+
+    /* -----------------------------------------------------------------------------------
+     * Queue families: what the device actually has, and what that permits.
+     *
+     * Two families cannot be used concurrently by this engine: the bindless table is a single
+     * descriptor set shared by every pipeline, and a descriptor set may not be used from two
+     * queue families without an ownership transfer per submission, which the ABI does not model.
+     * Attempting it lost the device (VK_ERROR_DEVICE_LOST). So the device reports its families
+     * honestly and runs every queue on one of them.
+     * --------------------------------------------------------------------------------- */
+    {
+        gr_vk_queue_families families;
+        gr_handle graphics_queue = GR_NULL_HANDLE, compute_queue = GR_NULL_HANDLE;
+        memset(&families, 0, sizeof(families));
+        CHECK_EQ(gr_vk_get_queue_families(device, &families), GR_OK);
+        CHECK_EQ(gr_device_queue(device, GR_QUEUE_GRAPHICS, &graphics_queue), GR_OK);
+        CHECK_EQ(gr_device_queue(device, GR_QUEUE_COMPUTE, &compute_queue), GR_OK);
+        CHECK(graphics_queue != compute_queue);
+        printf("vk-backend: queue families graphics %u, compute %u, transfer %u -> %s\n",
+               families.graphics, families.compute, families.transfer,
+               families.compute != families.graphics
+                   ? "second family present but unusable while the bindless set is shared"
+                   : "single family, concurrent queues not offered");
+        /* Whatever the answer, both queues submit and complete. */
+        CHECK_EQ(gr_queue_wait_idle(graphics_queue), GR_OK);
+        CHECK_EQ(gr_queue_wait_idle(compute_queue), GR_OK);
     }
 
     CHECK_EQ(gr_device_wait_idle(device), GR_OK);

@@ -174,6 +174,24 @@ would not tell you whether the argument block was read as the command it holds.
 against the buffer's size and require `GR_BUFFER_USAGE_INDIRECT`: 20 bytes per indexed draw command
 with a stride that is a multiple of 4, and 12 bytes for a dispatch (`groupCountX/Y/Z`).
 
+## Queue families: why there is no second queue yet
+
+`gr_vk_get_queue_families` reports what the device actually offers. On this host every queue is
+family 0 — graphics, compute and transfer all land on one family.
+
+That is deliberate, and it was reached the hard way. Preferring an async-compute family (RADV offers
+one) and giving each queue its own timeline **lost the device** (`VK_ERROR_DEVICE_LOST`) as soon as
+graphics and compute were in flight together. The cause is structural, not a bug in the queue code:
+the bindless table is **one descriptor set shared by every pipeline**, and Vulkan does not allow a
+descriptor set to be used from two queue families without an ownership transfer per submission that
+names the family to release it to. This ABI has no such concept, so a second family cannot be used
+correctly.
+
+The engine therefore reports its families honestly and runs every queue on one of them. Real
+multi-queue work needs one of: per-queue bindless sets, `VK_SHARING_MODE_CONCURRENT` descriptor
+sets with matching queue families, or an ownership-transfer step in `gr_submit`. Each is a contract
+change, not a backend detail, which is why it is written down here instead of being improvised.
+
 ## Pipeline-cache persistence
 
 `gr_device_desc.pipeline_cache_path` names a file the device loads at creation and rewrites at
