@@ -476,8 +476,15 @@ gr_result gr_cmd_set_scissor(gr_handle cmd, int32_t x, int32_t y, uint32_t width
 /* Pipelines are fully baked: binding one changes no state beyond the pipeline itself, and
  * the bindless table is already bound. */
 gr_result gr_cmd_bind_pipeline(gr_handle cmd, gr_handle pipeline);
-gr_result gr_cmd_push_constants(gr_handle cmd, uint32_t stage_mask, uint32_t offset,
-                                gr_span_u8 data);
+/* Writes push constants.
+ *
+ * There is deliberately no stage mask. The pipeline layout declares which stages may read which
+ * byte range, and Vulkan requires the call to name exactly those stages for the bytes it writes —
+ * a narrower mask is a validation error, and a wider one is meaningless. So the backend derives the
+ * stages by intersecting the layout's declared ranges with [offset, offset + data.len). A caller
+ * that wants per-stage constants changes the layout, which is the only place the decision can live
+ * without a second source of truth. */
+gr_result gr_cmd_push_constants(gr_handle cmd, uint32_t offset, gr_span_u8 data);
 gr_result gr_cmd_bind_vertex_buffer(gr_handle cmd, uint32_t slot, gr_handle buffer, uint64_t offset);
 gr_result gr_cmd_bind_index_buffer(gr_handle cmd, gr_handle buffer, uint64_t offset,
                                    uint32_t index_type /* 0: u16, 1: u32 */);

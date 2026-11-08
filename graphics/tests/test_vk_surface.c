@@ -281,7 +281,7 @@ int main(void)
                     CHECK_EQ(gr_cmd_bind_pipeline(cmd, pipeline), GR_OK);
                     tint[0] = 0.9f; tint[1] = 0.5f; tint[2] = 0.25f; tint[3] = 1.0f;
                     memcpy(push, tint, sizeof(push));
-                    CHECK_EQ(gr_cmd_push_constants(cmd, 2u, 0,
+                    CHECK_EQ(gr_cmd_push_constants(cmd, 0,
                                                    (gr_span_u8){ (const uint8_t *)push, sizeof(push) }),
                              GR_OK);
                     memset(&draw, 0, sizeof(draw));

@@ -97,13 +97,22 @@ gr_result gr_vk_abi_cmd_end_render(gr_handle cmd);
 gr_result gr_vk_abi_cmd_set_viewport(gr_handle cmd, float x, float y, float width, float height, float min_depth, float max_depth);
 gr_result gr_vk_abi_cmd_set_scissor(gr_handle cmd, int32_t x, int32_t y, uint32_t width, uint32_t height);
 gr_result gr_vk_abi_cmd_bind_pipeline(gr_handle cmd, gr_handle pipeline);
-gr_result gr_vk_abi_cmd_push_constants(gr_handle cmd, uint32_t stage_mask, uint32_t offset, gr_span_u8 data);
+gr_result gr_vk_abi_cmd_push_constants(gr_handle cmd, uint32_t offset, gr_span_u8 data);
+
+/* Derives the stage mask a push-constant write must name: the union of the stageFlags of every
+ * declared range that overlaps [offset, offset+size). Pure, so it is tested without a GPU. A range
+ * with a zero stage mask cannot exist (Vulkan forbids it), and nothing is returned for a write that
+ * falls in no range - the caller treats that as a programming error. */
+uint32_t gr_push_constant_stage_mask(const uint32_t *range_offsets, const uint32_t *range_sizes,
+                                    const uint32_t *range_stages, uint32_t range_count,
+                                    uint32_t offset, uint32_t size);
 gr_result gr_vk_abi_cmd_draw(gr_handle cmd, const gr_draw *draw);
 gr_result gr_vk_abi_cmd_draw_indexed(gr_handle cmd, const gr_draw_indexed *draw);
 gr_result gr_vk_abi_cmd_draw_indexed_indirect(gr_handle cmd, gr_handle buffer, uint64_t offset, uint32_t draw_count, uint32_t stride);
 gr_result gr_vk_abi_cmd_bind_vertex_buffer(gr_handle cmd, uint32_t slot, gr_handle buffer, uint64_t offset);
 gr_result gr_vk_abi_cmd_bind_index_buffer(gr_handle cmd, gr_handle buffer, uint64_t offset, uint32_t index_type);
 gr_result gr_vk_abi_cmd_dispatch(gr_handle cmd, uint32_t x, uint32_t y, uint32_t z);
+gr_result gr_vk_abi_cmd_dispatch_indirect(gr_handle cmd, gr_handle buffer, uint64_t offset);
 gr_result gr_vk_abi_submit(const gr_submit *submit, uint64_t *out_value);
 gr_result gr_vk_abi_swapchain_create(gr_handle device, const gr_swapchain_desc *desc, gr_handle *out_swapchain);
 gr_result gr_vk_abi_swapchain_info(gr_handle swapchain, gr_format *out_format, uint32_t *out_width, uint32_t *out_height, uint32_t *out_image_count);
