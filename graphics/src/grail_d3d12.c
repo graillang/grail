@@ -2603,10 +2603,10 @@ gr_result gr_d3d12_abi_swapchain_acquire(gr_handle swapchain, uint64_t timeout_n
     gr_result status;
     if (!sc)
         return GR_ERROR_INVALID_HANDLE;
+    if (sc->acquired != D3D_SWAP_MAX)
+        return GR_ERROR_NOT_READY; /* the previous image has not been presented; outputs untouched */
     if (out_needs_recreate) *out_needs_recreate = 0;
     if (out_view) *out_view = GR_NULL_HANDLE;
-    if (sc->acquired != D3D_SWAP_MAX)
-        return GR_ERROR_NOT_READY; /* the previous image has not been presented */
     index = IDXGISwapChain3_GetCurrentBackBufferIndex(sc->swapchain);
     if (index >= sc->image_count)
         return GR_ERROR_BACKEND;

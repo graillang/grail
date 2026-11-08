@@ -295,6 +295,6 @@ compiles `tests/ffi/call_scalars.grl` with the FFI build, links the two through 
   reported as link-only.
 
 Rejections are part of the normal native corpus (`tests/native-cases.json`):
-`ffi-reject-safe-call`, `ffi-reject-abi`, `ffi-reject-parameter-width`,
+`ffi-reject-safe-call`, `ffi-reject-abi`, `ffi-reject-parameter-type`,
 `ffi-reject-result-type`, `ffi-reject-arity` and `ffi-reject-duplicate`, so every target
 checks the diagnostics on every run of `bun tools/test-native.mjs`.

@@ -97,9 +97,11 @@ test keeps the near colour and the depth buffer reads back exactly 0.75. The bin
 are one shader-visible resource heap (sampled images, storage buffers) and one sampler heap
 holding the thirteen fixed samplers; `core/frame_setup` runs as a compute pipeline and writes
 all 256 storage-buffer words exactly, and `core/tonemap` samples an uploaded HDR texture within
-1/255 of ACES: 221 checks. Flip-model swapchains on an SDL3 window's HWND (acquire, present,
-resize) are implemented with a separate `test_d3d12_present` on a private display. MSAA,
-storage images, indirect draws and dispatches, mesh pipelines, semaphores and compute/copy
+1/255 of ACES: 221 checks. Flip-model swapchains on an SDL3 window's HWND: `make -C graphics d3d12-present` (on a
+display, with DXVK's DXGI) acquires, clears, reads back exactly, presents and resizes: 319 checks.
+4x MSAA with a resolve at end of pass matches the single-sample draw byte for byte (241 checks
+in the smoke test). Storage
+images, indirect draws and dispatches, mesh pipelines, semaphores and compute/copy
 queues return `GR_ERROR_UNSUPPORTED`. No real Windows host has run it.
 
 Not implemented: Metal (returns `GR_ERROR_UNSUPPORTED`), mesh and ray-tracing pipelines, and a
