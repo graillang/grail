@@ -2,14 +2,17 @@
 
 ## Unreleased
 
-- Documentation/status sync: the compiler/bootstrap seed set `42efb7f` is published and
-  verify-green, and the later `main` increments are non-compiler work. The v3 FFI suite executes
-  12 fixture instances across x86-64, AArch64 and RISC-V; `lib/sys/grail_ffi.grl` (`sys_grail`)
-  wrappers over the Linux ABI are on `main`; Borg checks 921 reference lines over eleven suites and
-  Abundance 313 exact values over nine programs; graphics reports 613/162/47 on hardware (Vulkan
-  smoke/surface/cache). Windows COM has a 22-check/11-Wine branch implementation pending
-  integration. Dynamic loading, D3D12/Metal, debugger attach, the profiler and the remaining COM
-  limits stay open.
+- Windows COM interop: two new unsafe-runtime intrinsics, `raw_win_local(Symbol, args...)` for a
+  direct Windows-ABI call to a symbol linked into the image (x86-64 `%rcx/%rdx/%r8/%r9`; ARM64
+  `x0..x3`) and `raw_win_call(slot, args...)` for an indirect call through a loaded function
+  pointer such as a COM vtable slot (x86-64 `call *%r11`, ARM64 `wininvoke` ->
+  `ldr x16,[x9]; blr x16`). `CoInitializeEx`/`CoUninitialize` join the import table from
+  `combase.dll`. Minimal C-ABI shims (`tests/com-shim-x64.s`, `tests/com-shim-arm64.s`) provide
+  an `IUnknown` object; the executed x86-64 case proves AddRef/Release counts 2, 3, 2, 1 and 1, 0
+  and the exact `E_POINTER` (2147500035) and `E_NOINTERFACE` (2147500034) HRESULTs, plus a
+  successful `QueryInterface` returning the object pointer. The same program is checked
+  statically for windows-aarch64. Single static object and one IID; no `CoCreateInstance`,
+  marshalling or apartment tests.
 
 - Added typed loopback TCP socket wrappers over the C ABI: `handle Socket`, a 56-byte `Address`
   record constructed only by `loopback(port)`, `tcp`, `bind`, `listen`, `accept`, `connect`,

@@ -96,7 +96,8 @@ needs `-march=rv64imafd -mabi=lp64` when assembling. These three target **Linux 
 `--target windows-x86_64` selects the PE/COFF backend on the same x86-64 instruction stream, and
 `--target windows-aarch64` selects the ARM64 PE/COFF backend through the shared AArch64 selector:
 MSVC `.def` function records, a `grail_entry` PE entry point, Win64 import calls through
-`raw_win32`, and COFF short-import libraries written by `tools/windows.mjs`, linked with
+`raw_win32`, direct/indirect Windows-ABI calls (`raw_win_local`/`raw_win_call`) for COM vtables,
+and COFF short-import libraries written by `tools/windows.mjs`, linked with
 `lld-link`. Console, file, time, exit-code and argv programs run under Wine
 (`bun tools/windows.mjs check`). The portable runtime is shared and the OS boundary selects
 `compiler/os-linux.grl` or `compiler/os-windows.grl`. x86-64 frames get `.pdata`/`.xdata`

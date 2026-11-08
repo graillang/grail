@@ -48,6 +48,10 @@ export const imports = {
     'WaitForSingleObject',
     'WriteFile',
   ],
+  'combase.dll': [
+    'CoInitializeEx',
+    'CoUninitialize',
+  ],
   'kernelbase.dll': [
     'WaitOnAddress',
     'WakeByAddressSingle',
@@ -116,6 +120,7 @@ export function compileProgram(compiler, inputs, directory, {
   target = windowsTarget,
   runtime = join(root, 'compiler/runtime.grl'),
   osRuntime = join(root, 'compiler/os-windows.grl'),
+  shims = [],
 } = {}) {
   const spec = targets[target];
   if (!spec) throw new Error(`unsupported Windows target ${target}`);
@@ -126,8 +131,14 @@ export function compileProgram(compiler, inputs, directory, {
   const files = [...inputs.map(p => resolve(root, p)), resolve(root, runtime), resolve(root, osRuntime)];
   command([compiler, '--default-u64', '--typed-refs', '--target', target, assembly, ...files]);
   assemble(assembly, object, target);
+  // A C-ABI shim (for example the in-process COM object) is assembled for the same target.
+  const shimObjects = shims.map((shim, i) => {
+    const shimObject = join(directory, `shim-${i}.obj`);
+    assemble(resolve(root, shim), shimObject, target);
+    return shimObject;
+  });
   const library = writeImportLibrary(join(directory, 'lib'), spec.machine);
-  link([object, library], executable, { machine: spec.linkMachine });
+  link([object, ...shimObjects, library], executable, { machine: spec.linkMachine });
   return { assembly, object, executable, library };
 }
 
