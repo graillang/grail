@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- `lib/earcut.grl`: polygon triangulation with holes, a statement-for-statement port of
+  mapbox/earcut.hpp 2.2.4 (ISC) over an index arena. Ten reference shapes (holes, collinear and
+  duplicate points, zero area, z-order hashing above 80 vertices) produce the same triangle lists
+  as the C++ library; `tests/reference/earcut` regenerates them.
+
 - Callbacks with float and narrow-integer parameters and float results: an exported
   `extern "C" fn` reads each parameter from where the platform C convention put it (SysV,
   AAPCS64 and RV64 pack integers and floats into separate register files; Win64 is positional,
