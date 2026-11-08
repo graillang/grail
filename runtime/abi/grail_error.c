@@ -71,6 +71,8 @@ grail_status grail_os_status_from_win32(int64_t error_number) {
     switch (error_number) {
     case 0:
         return GRAIL_OK;
+    case 1:   /* ERROR_INVALID_FUNCTION, e.g. seeking a pipe */
+        return GRAIL_E_NOT_SEEKABLE;
     case 2:   /* ERROR_FILE_NOT_FOUND */
     case 3:   /* ERROR_PATH_NOT_FOUND */
     case 18:  /* ERROR_NO_MORE_FILES */

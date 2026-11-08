@@ -2,6 +2,7 @@
 
 #include "../include/grail/grail_error.h"
 #include "../include/grail/grail_abi.h"
+#include "grail_internal.h"
 
 /*
  * POSIX mapping shared by Linux and macOS.  Cases are spelled with the
