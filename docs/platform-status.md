@@ -51,7 +51,7 @@ environment, processes, sockets, threads and dynamic loading, plus a tested Linu
 backend. All **95 public ABI functions** are now defined on Windows and macOS; the fail-closed
 stub translation units are gone. `bun tools/abi-test.mjs` cross-compiles seven objects per target
 with 95/95 symbols and pinned layouts. A C harness executes 47 Windows metadata, symlink,
-non-blocking and DNS checks under Wine; macOS calls remain compile-only.
+non-blocking and DNS checks under Wine; 11 COM checks execute separately; macOS calls remain compile-only.
 
 `lib/sys/grail_ffi.grl` is the first Grail-language wrapper over this ABI: explicit `File` handles,
 `FileStat`, byte views, `CStr`, `T|?Error`, and stat/time/env plus loopback TCP socket calls, executed on x86-64 and
