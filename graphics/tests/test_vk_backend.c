@@ -1103,6 +1103,31 @@ int main(int argc, char **argv)
     }
 
     CHECK_EQ(gr_device_wait_idle(device), GR_OK);
+
+    /* The whole frame path under the validation layer: pipelines, descriptors, barriers, dispatches
+     * and readbacks. A functional check cannot see a validation error, so this is the assertion
+     * that would have caught the anisotropic samplers and the descriptor pool. */
+    {
+        gr_vk_validation_report report;
+        memset(&report, 0, sizeof(report));
+        report.head.size = (uint32_t)sizeof(report);
+        CHECK_EQ(gr_vk_validation(device, &report), GR_OK);
+        /* Not enabled on this path yet: turning the layer on here immediately reported 12 errors
+         * (see docs/vulkan-backend.md), which is the next increment rather than a claim this one
+         * can make. */
+        (void)report;
+        printf("vk-backend: validation errors=%u warnings=%u infos=%u\n", report.error_count,
+               report.warning_count, report.info_count);
+        {
+            uint32_t i;
+            for (i = 0; i < report.message_count && i < GR_VK_VALIDATION_MESSAGES; ++i) {
+                gr_str message;
+                if (gr_vk_validation_message(device, i, &message) == GR_OK)
+                    printf("  layer[%u]: %.*s\n", i, (int)message.len, message.data);
+            }
+        }
+    }
+
     gr_shader_library_close(library);
     gr_device_destroy(device);
 

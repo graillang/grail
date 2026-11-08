@@ -134,6 +134,35 @@ typedef struct gr_vk_probe_report {
 gr_result gr_vk_probe_run(gr_vk_probe_report *out);
 
 /* ---------------------------------------------------------------------------------------
+ * Validation
+ *
+ * A device created with GR_DEVICE_VALIDATION instantiates VK_EXT_debug_utils and records what the
+ * layer says, so a test can assert on it instead of on a human reading stderr. The counters are
+ * cumulative for the device's lifetime; the first few messages are retained verbatim.
+ *
+ * This exists because a validation error is invisible to every functional check: the twelve
+ * anisotropic samplers were created without the samplerAnisotropy feature for several increments
+ * and nothing noticed until the layer was enabled.
+ * --------------------------------------------------------------------------------------- */
+#define GR_VK_VALIDATION_MESSAGES 8
+#define GR_VK_VALIDATION_MESSAGE_LEN 192
+
+typedef struct gr_vk_validation_report {
+    gr_desc_head head;
+    uint32_t error_count;
+    uint32_t warning_count;
+    uint32_t info_count;
+    uint32_t message_count;  /* retained, at most GR_VK_VALIDATION_MESSAGES */
+    uint32_t enabled;        /* 1 when the messenger exists (validation was requested) */
+    uint32_t _reserved;
+} gr_vk_validation_report;
+
+gr_result gr_vk_validation(gr_handle device, gr_vk_validation_report *out);
+/* A retained message, borrowed from the device: valid until the device is destroyed. Messages are
+ * in arrival order, errors and warnings alike. */
+gr_result gr_vk_validation_message(gr_handle device, uint32_t index, gr_str *out_message);
+
+/* ---------------------------------------------------------------------------------------
  * Surface bridge.
  *
  * SDL3 needs the instance to create a VkSurfaceKHR, and the backend owns the instance. So

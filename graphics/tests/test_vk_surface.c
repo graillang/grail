@@ -130,6 +130,31 @@ int main(void)
      * built on a fabricated pointer. */
     CHECK_EQ(gr_vk_create_surface(device, GR_NULL_HANDLE, &surface), GR_ERROR_INVALID_HANDLE);
 
+    /* What the layer said, captured in-process rather than left on stderr. A functional check
+     * cannot see a validation error - the anisotropic samplers proved that - so this is the only
+     * assertion that would have caught it. */
+    {
+        gr_vk_validation_report report;
+        memset(&report, 0, sizeof(report));
+        report.head.size = (uint32_t)sizeof(report);
+        CHECK_EQ(gr_vk_validation(device, &report), GR_OK);
+        CHECK_EQ(report.enabled, 1u); /* the messenger exists, so validation really is on */
+        printf("vk-surface: validation errors=%u warnings=%u infos=%u messages=%u\n",
+               report.error_count, report.warning_count, report.info_count, report.message_count);
+        /* The surface path itself must be clean. A warning is recorded and printed rather than
+         * failed on: the layer's warnings are advisory, and this test's subject is the errors. */
+        CHECK_EQ(report.error_count, 0u);
+        CHECK_EQ(report.warning_count, 0u); /* the surface path is clean, not merely non-fatal */
+        {
+            uint32_t i;
+            for (i = 0; i < report.message_count && i < GR_VK_VALIDATION_MESSAGES; ++i) {
+                gr_str message;
+                if (gr_vk_validation_message(device, i, &message) == GR_OK)
+                    printf("  layer[%u]: %.*s\n", i, (int)message.len, message.data);
+            }
+        }
+    }
+
     gr_device_destroy(device);
     gr_window_destroy(window);
 

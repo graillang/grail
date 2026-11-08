@@ -124,6 +124,12 @@ typedef struct gr_vk_dev {
     PFN_vkCreateSampler create_sampler;
     PFN_vkDestroySampler destroy_sampler;
     PFN_vkCmdCopyBufferToImage cmd_copy_buffer_to_image;
+    VkDebugUtilsMessengerEXT messenger;
+    PFN_vkDestroyDebugUtilsMessengerEXT destroy_messenger;
+    uint32_t validation_errors, validation_warnings, validation_infos;
+    uint32_t validation_messages;
+    char validation_text[GR_VK_VALIDATION_MESSAGES][GR_VK_VALIDATION_MESSAGE_LEN];
+    uint32_t validation_text_len[GR_VK_VALIDATION_MESSAGES];
     PFN_vkGetBufferDeviceAddress get_buffer_address;
     PFN_vkCreateComputePipelines create_compute_pipelines;
     PFN_vkCmdDispatch cmd_dispatch;
@@ -324,6 +330,69 @@ static gr_result vk_create_layout(gr_vk_dev *dev)
 /* Defined with the buffer path below; the barrier code needs it before then. */
 static gr_vk_buffer *vk_buffer_of(gr_handle handle);
 
+/* The layer's callback. It runs on whichever thread made the offending call, so it only touches
+ * the device's own counters; a test reads them after a wait_idle. */
+static VKAPI_ATTR VkBool32 VKAPI_CALL grail_debug_callback(
+    VkDebugUtilsMessageSeverityFlagBitsEXT severity, VkDebugUtilsMessageTypeFlagsEXT type,
+    const VkDebugUtilsMessengerCallbackDataEXT *data, void *user)
+{
+    gr_vk_dev *dev = (gr_vk_dev *)user;
+    uint32_t slot;
+    size_t len;
+
+    (void)type;
+    if (!dev || !data)
+        return VK_FALSE;
+    if (severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT)
+        dev->validation_errors++;
+    else if (severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT)
+        dev->validation_warnings++;
+    else
+        dev->validation_infos++;
+
+    /* Retain only errors and warnings. The loader emits dozens of INFO messages about physical
+     * device sorting, which filled every retained slot and hid the one warning this device
+     * actually had - the list is only useful if it holds problems. */
+    if (severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT)
+        return VK_FALSE;
+    if (dev->validation_messages >= GR_VK_VALIDATION_MESSAGES)
+        return VK_FALSE;
+    slot = dev->validation_messages++;
+    len = data->pMessage ? strlen(data->pMessage) : 0;
+    if (len >= GR_VK_VALIDATION_MESSAGE_LEN)
+        len = GR_VK_VALIDATION_MESSAGE_LEN - 1u;
+    if (len)
+        memcpy(dev->validation_text[slot], data->pMessage, len);
+    dev->validation_text[slot][len] = '\0';
+    dev->validation_text_len[slot] = (uint32_t)len;
+    return VK_FALSE;
+}
+
+static void vk_create_messenger(gr_vk_dev *dev)
+{
+    PFN_vkCreateDebugUtilsMessengerEXT create_messenger;
+    VkDebugUtilsMessengerCreateInfoEXT info;
+
+    create_messenger = (PFN_vkCreateDebugUtilsMessengerEXT)dev->loader.gipa(
+        dev->instance, "vkCreateDebugUtilsMessengerEXT");
+    dev->destroy_messenger = (PFN_vkDestroyDebugUtilsMessengerEXT)dev->loader.gipa(
+        dev->instance, "vkDestroyDebugUtilsMessengerEXT");
+    if (!create_messenger || !dev->destroy_messenger)
+        return;
+    memset(&info, 0, sizeof(info));
+    info.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
+    info.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT |
+                           VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
+                           VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT;
+    info.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
+                       VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
+                       VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
+    info.pfnUserCallback = grail_debug_callback;
+    info.pUserData = dev;
+    if (create_messenger(dev->instance, &info, NULL, &dev->messenger) != VK_SUCCESS)
+        dev->messenger = VK_NULL_HANDLE;
+}
+
 /* Defined below; device creation uses it to unwind a half-built device. */
 void gr_vk_abi_device_destroy_impl(gr_vk_dev *dev);
 
@@ -368,7 +437,7 @@ static VkSamplerAddressMode vk_address(gr_address_mode mode)
 
 static gr_result vk_create_table(gr_vk_dev *dev)
 {
-    VkDescriptorPoolSize sizes[4];
+    VkDescriptorPoolSize sizes[5];
     VkDescriptorPoolCreateInfo pool_info;
     VkDescriptorSetAllocateInfo allocate;
     VkDescriptorSetLayout layouts[2];
@@ -386,12 +455,17 @@ static gr_result vk_create_table(gr_vk_dev *dev)
     sizes[2].descriptorCount = GR_BINDLESS_CAP_SAMPLERS;
     sizes[3].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     sizes[3].descriptorCount = GR_BINDLESS_CAP_STORAGE_BUFFERS;
+    /* Set 1's frame constants are UNIFORM_BUFFER_DYNAMIC. A pool that does not reserve the types
+     * its layouts declare refuses the allocation — validation reported exactly that, as
+     * AllocateDescriptorSets-WrongType, once the messenger existed to see it. */
+    sizes[4].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+    sizes[4].descriptorCount = 1;
 
     memset(&pool_info, 0, sizeof(pool_info));
     pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
     pool_info.flags = VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT;
     pool_info.maxSets = 3;
-    pool_info.poolSizeCount = 4;
+    pool_info.poolSizeCount = 5;
     pool_info.pPoolSizes = sizes;
 
     /* Full-capacity allocation needs a pool that can hold every slot. A driver may refuse the
@@ -624,6 +698,10 @@ gr_result gr_vk_abi_device_create(const gr_device_desc *desc, gr_handle *out_dev
         }
     }
     dev->api_version = api;
+    /* Before anything else touches the instance: a messenger created later cannot report the
+     * mistakes made in between. */
+    if (desc->flags & GR_DEVICE_VALIDATION)
+        vk_create_messenger(dev);
 
     enumerate_version = (PFN_vkEnumerateInstanceVersion)dev->loader.gipa(NULL, "vkEnumerateInstanceVersion");
     if (enumerate_version)
@@ -1044,6 +1122,8 @@ void gr_vk_abi_device_destroy_impl(gr_vk_dev *dev)
         if (dev->destroy_device)
             dev->destroy_device(dev->device, NULL);
     }
+    if (dev->messenger && dev->destroy_messenger)
+        dev->destroy_messenger(dev->instance, dev->messenger, NULL);
     if (dev->instance && dev->destroy_instance)
         dev->destroy_instance(dev->instance, NULL);
     gr_vk_loader_close(&dev->loader);
@@ -2753,6 +2833,36 @@ gr_result gr_vk_abi_frame_constants_write(gr_handle device_handle, uint32_t slot
         return GR_ERROR_INVALID_ARGUMENT;
     memcpy((uint8_t *)dev->frame_mapped + (size_t)slot * sizeof(gr_frame_constants), constants,
            sizeof(gr_frame_constants));
+    return GR_OK;
+}
+
+gr_result gr_vk_validation(gr_handle device_handle, gr_vk_validation_report *out)
+{
+    gr_vk_dev *dev = vk_device_of(device_handle);
+    if (!dev || !out)
+        return GR_ERROR_INVALID_ARGUMENT;
+    if (out->head.size != 0 && out->head.size < sizeof(gr_vk_validation_report))
+        return GR_ERROR_VERSION_MISMATCH;
+    memset(out, 0, sizeof(*out));
+    out->head.size = (uint32_t)sizeof(*out);
+    out->error_count = dev->validation_errors;
+    out->warning_count = dev->validation_warnings;
+    out->info_count = dev->validation_infos;
+    out->message_count = dev->validation_messages;
+    out->enabled = dev->messenger != VK_NULL_HANDLE ? 1u : 0u;
+    return GR_OK;
+}
+
+gr_result gr_vk_validation_message(gr_handle device_handle, uint32_t index, gr_str *out_message)
+{
+    gr_vk_dev *dev = vk_device_of(device_handle);
+    if (!dev || !out_message)
+        return GR_ERROR_INVALID_ARGUMENT;
+    if (index >= dev->validation_messages)
+        return GR_ERROR_INVALID_ARGUMENT;
+    out_message->data = dev->validation_text[index];
+    out_message->len = dev->validation_text_len[index];
+    out_message->_pad = 0;
     return GR_OK;
 }
 
