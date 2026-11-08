@@ -692,6 +692,8 @@ static void test_sockets(void) {
           count);
     CHECK(grail_os_net_resolve((const uint8_t *)"localhost", 9, 99, NULL, 0) ==
           GRAIL_E_INVALID_ARGUMENT);
+    CHECK(grail_os_net_resolve((const uint8_t *)"local\0host", 10, GRAIL_ADDRESS_INET, NULL, 0) ==
+          GRAIL_E_INVALID_ARGUMENT);
 
     CHECK(grail_os_socket_create(99, GRAIL_SOCKET_STREAM, &listener) == GRAIL_E_INVALID_ARGUMENT);
     grail_socket_address malformed;
