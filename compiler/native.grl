@@ -12448,6 +12448,8 @@ fn statement<a>(c: (&mut a C)) -> unit {
         mut iterable = 0;
         mut byref = 0;
         mut refmode = 0;
+        mut consume = 0;
+        mut hidden_local = 0;
         mut bytewise = 0;
         if (c.raw == 0) & (v.ty != 0) & (is_bool(borrow_mut(c), v.ty) == 0) {
             x := deref(borrow_mut(c), val(v.t, v.ty));
@@ -12459,20 +12461,26 @@ fn statement<a>(c: (&mut a C)) -> unit {
             } else {
                 if k == 6 {
                     a := ty_arg(borrow_mut(c), x.ty);
-                    // Non-scalar elements are borrowed one at a time from a borrowed vector: for p in borrow(v).
-                    if scalar(borrow_mut(c), a) == 0 {
-                        if ty_kind(borrow_mut(c), v.ty) != 7 {
+                    elemty = a;
+                    if (c.default_u64 == 0) & (ty_kind(borrow_mut(c), v.ty) == 6) {
+                        owned := move_value(borrow_mut(c), v);
+                        bind(borrow_mut(c), copy_bytes(&"__iterated"), owned.ty, owned.t, 0);
+                        hidden_local = c.locals.len();
+                        seq = owned.t;
+                        v = val(0, 0);
+                        consume = 1;
+                    } else {
+                        if (byref == 0) & (scalar(borrow_mut(c), a) == 0) {
                             fail(
                                 borrow_mut(c),
                                 &"for x in v over non-scalar elements needs borrow(v) (each element is borrowed)"
                             );
                         }
-                        byref = 1;
-                        refmode = ty_mode(borrow_mut(c), v.ty);
+                        if byref {
+                            refmode = ty_mode(borrow_mut(c), v.ty);
+                        }
                     }
                     iterable = 1;
-                    seq = x.t;
-                    elemty = a;
                 } else {
                     require_type(borrow_mut(c), v.ty, 0);
                 }
@@ -12539,6 +12547,10 @@ fn statement<a>(c: (&mut a C)) -> unit {
             open = open + 1;
         }
         loopend := block_end(borrow_mut(c), open);
+        if hidden_local != 0 {
+            mut l = &mut c.locals[hidden_local - 1];
+            l.last = loopend;
+        }
         exchange(borrow_mut(c.loop_start), loopstart);
         exchange(borrow_mut(c.loop_end), loopend);
         loopmark := c.resources.len();
@@ -12573,13 +12585,19 @@ fn statement<a>(c: (&mut a C)) -> unit {
                 if bytewise {
                     f = "rt_atb";
                 }
+                if consume {
+                    f = "rt_take";
+                }
                 element := invoke(borrow_mut(c), &f, two(seq, i));
+                if consume {
+                    own(borrow_mut(c), element, elemty);
+                }
                 bind(borrow_mut(c), name, elemty, element, 0);
             }
         } else {
             bind(borrow_mut(c), name, 0, i, 0);
         }
-        if byref == 0 {
+        if (byref == 0) & (consume == 0) {
             entry = ownership::snapshot(borrow(c.check));
         }
         exchange(borrow_mut(c.terminated), 0);
@@ -12588,7 +12606,7 @@ fn statement<a>(c: (&mut a C)) -> unit {
         block(borrow_mut(c));
         exchange(borrow_mut(c.bce_index), oldi);
         exchange(borrow_mut(c.bce_base), oldb2);
-        if byref {
+        if byref + consume {
             if c.terminated == 0 {
                 cleanup(borrow_mut(c), loopmark);
             }

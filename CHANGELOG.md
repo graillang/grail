@@ -18,6 +18,9 @@
   `&b` without a lifetime parameter list. Ambiguous outputs are rejected.
 - `use module::Name;` imports a type or interface member. `use order::Ord;` resolves bounds
   and impls through the canonical `order::Ord` path instead of creating a local phantom.
+- User-mode loops consume their iterable. Owned vectors move elements into the loop, enabling
+  `for part in name.split(' ')` and named non-scalar consumption; loop-owned elements and the
+  hidden container are cleaned on normal exit, break and return.
 - Maps expose method-first operations: `len`, `contains`, `insert`, `get`, `get_mut`, `remove`
   and `entry`, with `entry` returning a named `Entry<K,V>` whose key is shared and value is mutable.
   The free `hashmap::map_*` helpers are internal implementation details.
