@@ -49,8 +49,11 @@ gr_result gr_vk_loader_open(gr_vk_loader *loader)
 
 void gr_vk_loader_close(gr_vk_loader *loader)
 {
-    if (loader && loader->library) {
-        dlclose(loader->library);
+    /* Deliberately does NOT dlclose. The loader and the layers register atexit handlers that
+     * reference their own static state; unmapping the library before those run aborts the process
+     * ("VkDevice dispatch handle was not found and Validation will crash"). Leaving one library
+     * mapped for the life of the process is the documented trade. */
+    if (loader) {
         loader->library = NULL;
         loader->gipa = NULL;
     }

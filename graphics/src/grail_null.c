@@ -1961,6 +1961,8 @@ gr_result gr_submit_commands(const gr_submit *submit, uint64_t *out_value)
 gr_result gr_queue_present(gr_handle queue_handle, gr_handle swapchain, uint32_t image_index,
                            uint64_t wait_value, uint64_t *out_value)
 {
+    if (gr_active_backend() == GR_BACKEND_VULKAN)
+        return gr_vk_abi_present(queue_handle, swapchain, image_index, wait_value, out_value);
     gr_null_queue *queue = (gr_null_queue *)gr_object_lookup(gr_objects(), queue_handle,
                                                              GR_HANDLE_QUEUE, NULL);
     gr_null_swapchain *sc;
@@ -1986,6 +1988,8 @@ gr_result gr_queue_present(gr_handle queue_handle, gr_handle swapchain, uint32_t
 gr_result gr_swapchain_create(gr_handle device_handle, const gr_swapchain_desc *desc,
                               gr_handle *out_swapchain)
 {
+    if (gr_active_backend() == GR_BACKEND_VULKAN)
+        return gr_vk_abi_swapchain_create(device_handle, desc, out_swapchain);
     gr_null_device *device = (gr_null_device *)null_get(NULL, device_handle, GR_HANDLE_DEVICE, NULL);
     gr_null_swapchain *sc;
     gr_handle handle;
@@ -2032,6 +2036,8 @@ gr_result gr_swapchain_create(gr_handle device_handle, const gr_swapchain_desc *
 gr_result gr_swapchain_info(gr_handle swapchain, gr_format *out_format, uint32_t *out_width,
                             uint32_t *out_height, uint32_t *out_image_count)
 {
+    if (gr_active_backend() == GR_BACKEND_VULKAN)
+        return gr_vk_abi_swapchain_info(swapchain, out_format, out_width, out_height, out_image_count);
     gr_null_swapchain *sc = (gr_null_swapchain *)gr_object_lookup(gr_objects(), swapchain,
                                                                  GR_HANDLE_SWAPCHAIN, NULL);
     if (!sc)
@@ -2047,6 +2053,8 @@ gr_result gr_swapchain_acquire(gr_handle swapchain, uint64_t timeout_ns,
                                uint32_t *out_image_index, gr_handle *out_view,
                                int32_t *out_needs_recreate)
 {
+    if (gr_active_backend() == GR_BACKEND_VULKAN)
+        return gr_vk_abi_swapchain_acquire(swapchain, timeout_ns, out_image_index, out_view, out_needs_recreate);
     gr_null_swapchain *sc = (gr_null_swapchain *)gr_object_lookup(gr_objects(), swapchain,
                                                                  GR_HANDLE_SWAPCHAIN, NULL);
     (void)timeout_ns;
@@ -2061,6 +2069,8 @@ gr_result gr_swapchain_acquire(gr_handle swapchain, uint64_t timeout_ns,
 gr_result gr_swapchain_recreate(gr_handle swapchain, uint32_t width, uint32_t height,
                                 uint64_t after_value)
 {
+    if (gr_active_backend() == GR_BACKEND_VULKAN)
+        return gr_vk_abi_swapchain_recreate(swapchain, width, height, after_value);
     gr_null_swapchain *sc = (gr_null_swapchain *)gr_object_lookup(gr_objects(), swapchain,
                                                                  GR_HANDLE_SWAPCHAIN, NULL);
     if (!sc)

@@ -101,6 +101,11 @@ gr_result gr_vk_abi_cmd_push_constants(gr_handle cmd, uint32_t stage_mask, uint3
 gr_result gr_vk_abi_cmd_draw(gr_handle cmd, const gr_draw *draw);
 gr_result gr_vk_abi_cmd_dispatch(gr_handle cmd, uint32_t x, uint32_t y, uint32_t z);
 gr_result gr_vk_abi_submit(const gr_submit *submit, uint64_t *out_value);
+gr_result gr_vk_abi_swapchain_create(gr_handle device, const gr_swapchain_desc *desc, gr_handle *out_swapchain);
+gr_result gr_vk_abi_swapchain_info(gr_handle swapchain, gr_format *out_format, uint32_t *out_width, uint32_t *out_height, uint32_t *out_image_count);
+gr_result gr_vk_abi_swapchain_acquire(gr_handle swapchain, uint64_t timeout_ns, uint32_t *out_image_index, gr_handle *out_view, int32_t *out_needs_recreate);
+gr_result gr_vk_abi_swapchain_recreate(gr_handle swapchain, uint32_t width, uint32_t height, uint64_t after_value);
+gr_result gr_vk_abi_present(gr_handle queue, gr_handle swapchain, uint32_t image_index, uint64_t wait_value, uint64_t *out_value);
 gr_result gr_vk_abi_fence_create(gr_handle device, uint64_t initial_value, gr_handle *out_fence);
 gr_result gr_vk_abi_fence_wait(gr_handle fence, uint64_t value, uint64_t timeout_ns, gr_result *out_status);
 gr_result gr_vk_abi_buffer_create(gr_handle device, const gr_buffer_desc *desc, gr_handle *out_buffer);

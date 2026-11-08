@@ -102,7 +102,7 @@ $(BUILD)/test_vk_backend: tests/test_vk_backend.c $(OBJ) $(HEADERS) | $(BUILD)
 
 # The window and surface path. The validation layer is not installed system-wide on this host, so
 # it is pointed at the pinned Vulkan SDK instead of requiring a system install.
-vk-surface: $(BUILD)/test_vk_surface
+vk-surface: shaders $(BUILD)/test_vk_surface
 	@if pgrep -x Abundance >/dev/null; then echo "refusing: the game is running"; exit 1; fi
 	@if [ -d "$(VK_SDK)" ]; then \
 		echo "validation layer: $(VK_SDK)"; \
