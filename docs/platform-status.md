@@ -77,7 +77,7 @@ per-combination compilation, key→bytecode library resolution, a headless Vulka
 and a Vulkan backend with device/queues, bindless layouts, buffers, textures, command buffers,
 submission, graphics and compute pipelines, indexed and indirect draws, depth and MSAA resolves,
 offscreen readbacks, and a swapchain with acquire/present and a draw path. `make -C graphics
-test` runs 550 host checks; `vk-surface` runs 162 checks on a real 320×240 swapchain, and
+test` runs 450 host checks; `vk-surface` runs 162 checks on a real 320×240 swapchain, and
 `vk-smoke` 613 and `vk-cache` 47 on hardware, all asserting zero validation errors and leaks
 (when the counters and teardown log agree).
 
