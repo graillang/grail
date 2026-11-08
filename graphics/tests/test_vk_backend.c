@@ -61,6 +61,7 @@ int main(int argc, char **argv)
     gr_handle fragments[8];
     gr_handle pipeline_solid = GR_NULL_HANDLE;
     gr_handle pipeline_bindless = GR_NULL_HANDLE;
+    gr_handle pipeline_compute = GR_NULL_HANDLE;
     uint64_t keys[8];
     uint32_t fragment_count = 0, i;
 
@@ -266,6 +267,23 @@ int main(int argc, char **argv)
         pipeline_bindless = pipeline;
     }
 
+    /* A compute pipeline: no attachments, no vertex stage, dispatched over a storage buffer. */
+    {
+        gr_handle compute = GR_NULL_HANDLE;
+        gr_handle pipeline = GR_NULL_HANDLE;
+        gr_pipeline_desc pd;
+        gr_str compute_name = { "core/frame_setup", 16, 0 };
+        CHECK_EQ(gr_shader_create_resolved(device, library, compute_name, GR_SHADER_STAGE_COMPUTE, 0,
+                                           &compute), GR_OK);
+        memset(&pd, 0, sizeof(pd));
+        pd.head.size = (uint32_t)sizeof(pd);
+        pd.name = (gr_str){ "vk/frame_setup", 15, 0 };
+        pd.shaders[GR_SHADER_STAGE_COMPUTE] = compute;
+        CHECK_EQ(gr_pipeline_create(device, &pd, &pipeline), GR_OK);
+        CHECK(pipeline != GR_NULL_HANDLE);
+        pipeline_compute = pipeline;
+    }
+
     /* Commit closes the registry, and the driver's pipeline cache has content. */
     {
         double seconds = -1.0;
@@ -273,8 +291,8 @@ int main(int argc, char **argv)
         CHECK_EQ(gr_pipeline_commit(device, &seconds), GR_OK);
         CHECK(seconds >= 0.0);
         CHECK_EQ(gr_pipeline_stats(device, &declared, &committed), GR_OK);
-        CHECK_EQ(declared, 3u);
-        CHECK_EQ(committed, 3u);
+        CHECK_EQ(declared, 4u);
+        CHECK_EQ(committed, 4u);
         {
             gr_device_caps after;
             memset(&after, 0, sizeof(after));
@@ -687,6 +705,129 @@ int main(int argc, char **argv)
         CHECK(digests[0] != digests[2]);
         /* And distinct from the solid frame's digest, because a different pipeline ran. */
         CHECK(digests[0] != 0u);
+    }
+
+    /* -----------------------------------------------------------------------------------
+     * A compute dispatch over a buffer taken from the storage-buffer table.
+     * --------------------------------------------------------------------------------- */
+    {
+        const uint32_t kCount = 64;
+        gr_buffer_desc bd;
+        gr_handle buffer = GR_NULL_HANDLE;
+        gr_cmd_pool_desc cpd;
+        gr_handle pool = GR_NULL_HANDLE, cmd = GR_NULL_HANDLE;
+        gr_cmd_alloc_info cai;
+        uint32_t slot = GR_BINDLESS_INDEX_NONE;
+        uint64_t address = 0;
+        uint32_t seed;
+        uint64_t digests[3];
+
+        memset(&bd, 0, sizeof(bd));
+        bd.head.size = (uint32_t)sizeof(bd);
+        bd.size = kCount * 4u;
+        bd.usage = GR_BUFFER_USAGE_STORAGE | GR_BUFFER_USAGE_TRANSFER_SRC |
+                   GR_BUFFER_USAGE_TRANSFER_DST | GR_BUFFER_USAGE_SHADER_DEVICE_ADDRESS;
+        bd.memory = GR_MEMORY_UPLOAD;
+        CHECK_EQ(gr_buffer_create(device, &bd, &buffer), GR_OK);
+        CHECK(buffer != GR_NULL_HANDLE);
+
+        /* The buffer claimed a slot in the storage-buffer table as it was created, and it has a
+         * device address because its usage asked for one. */
+        slot = gr_buffer_bindless_index(buffer);
+        CHECK(slot != GR_BINDLESS_INDEX_NONE);
+        address = gr_buffer_device_address(buffer);
+        CHECK(address != 0u);
+        printf("vk-backend: storage buffer at slot %u, device address 0x%llx\n", slot,
+               (unsigned long long)address);
+
+        memset(&cpd, 0, sizeof(cpd));
+        cpd.head.size = (uint32_t)sizeof(cpd);
+        cpd.queue = GR_QUEUE_COMPUTE;
+        CHECK_EQ(gr_cmd_pool_create(device, &cpd, &pool), GR_OK);
+        memset(&cai, 0, sizeof(cai));
+        cai.head.size = (uint32_t)sizeof(cai);
+        cai.pool = pool;
+        CHECK_EQ(gr_cmd_alloc(&cai, &cmd), GR_OK);
+
+        for (seed = 0; seed < 3u; ++seed) {
+            gr_barrier barrier;
+            gr_submit submit;
+            gr_handle queue = GR_NULL_HANDLE, fence = GR_NULL_HANDLE;
+            uint64_t value = 0, digest = 0xcbf29ce484222325ull;
+            gr_result wait_status = GR_ERROR_BACKEND;
+            uint32_t push[4];
+            uint32_t values[kCount];
+            uint32_t i;
+            int all_match = 1;
+
+            /* Seed 1 second time so the first two runs are the same seed and the last differs. */
+            push[0] = slot;
+            push[1] = kCount;
+            push[2] = seed < 2u ? 12345u : 999u; /* two runs at one seed, then a different one */
+            push[3] = 0;
+
+            CHECK_EQ(gr_cmd_reset(cmd), GR_OK);
+            CHECK_EQ(gr_cmd_begin(cmd), GR_OK);
+            CHECK_EQ(gr_cmd_push_frame_offset(cmd, 0), GR_OK);
+
+            memset(&barrier, 0, sizeof(barrier));
+            barrier.resource = buffer;
+            barrier.src_state = GR_STATE_GENERAL;
+            barrier.dst_state = GR_STATE_GENERAL;
+            CHECK_EQ(gr_cmd_barrier(cmd, &barrier, 1), GR_OK);
+
+            CHECK_EQ(gr_cmd_bind_pipeline(cmd, pipeline_compute), GR_OK);
+            CHECK_EQ(gr_cmd_push_constants(cmd, 4u, 0,
+                                           (gr_span_u8){ (const uint8_t *)push, sizeof(push) }),
+                     GR_OK);
+            CHECK_EQ(gr_cmd_dispatch(cmd, 1, 1, 1), GR_OK); /* 64 threads, one per counter */
+
+            memset(&barrier, 0, sizeof(barrier));
+            barrier.resource = buffer;
+            barrier.src_state = GR_STATE_GENERAL;
+            barrier.dst_state = GR_STATE_COPY_SOURCE_HOST;
+            CHECK_EQ(gr_cmd_barrier(cmd, &barrier, 1), GR_OK);
+            CHECK_EQ(gr_cmd_end(cmd), GR_OK);
+
+            CHECK_EQ(gr_device_queue(device, GR_QUEUE_COMPUTE, &queue), GR_OK);
+            memset(&submit, 0, sizeof(submit));
+            submit.head.size = (uint32_t)sizeof(submit);
+            submit.queue = queue;
+            submit.cmds = &cmd;
+            submit.cmd_count = 1;
+            CHECK_EQ(gr_submit_commands(&submit, &value), GR_OK);
+            CHECK_EQ(gr_fence_create(device, 0, &fence), GR_OK);
+            CHECK_EQ(gr_fence_wait(fence, value, 5ull * 1000ull * 1000ull * 1000ull, &wait_status),
+                     GR_OK);
+            CHECK_EQ(wait_status, GR_OK);
+
+            memset(values, 0, sizeof(values));
+            CHECK_EQ(gr_buffer_read(buffer, 0, (gr_mut_span_u8){ (uint8_t *)values, sizeof(values) }),
+                     GR_OK);
+            for (i = 0; i < kCount * 4u; ++i) {
+                digest ^= ((const uint8_t *)values)[i];
+                digest *= 0x100000001b3ull;
+            }
+            digests[seed] = digest;
+
+            if (seed == 0) {
+                /* Every element is the hash the shader computes, evaluated independently here. */
+                for (i = 0; i < kCount; ++i) {
+                    uint32_t expected = 12345u ^ (i * 0x9E3779B9u);
+                    expected ^= expected >> 16;
+                    expected *= 0x7FEB352Du;
+                    expected ^= expected >> 15;
+                    if (values[i] != expected)
+                        all_match = 0;
+                }
+                CHECK(all_match);
+            }
+        }
+        printf("vk-backend: compute digest seed 12345 = 0x%016llx (twice), seed 999 = 0x%016llx\n",
+               (unsigned long long)digests[0], (unsigned long long)digests[2]);
+        /* Deterministic for a fixed seed, and genuinely driven by it. */
+        CHECK_EQ(digests[0], digests[1]);
+        CHECK(digests[0] != digests[2]);
     }
 
     CHECK_EQ(gr_device_wait_idle(device), GR_OK);
