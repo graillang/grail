@@ -11,8 +11,7 @@
  * grail_rhi.h, and a device missing one cannot run the renderer at all — which is why the probe
  * reports the exact missing bits rather than a single "unsupported".
  */
-#include "grail_internal.h"
-#include "../include/grail/grail_backend_vulkan.h"
+#include "grail_vk_common.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -50,88 +49,10 @@ const char *gr_vk_required_name(uint32_t bit)
 
 #if defined(GRAIL_HAVE_VULKAN)
 
-#define GR_VK_LOAD(state, instance, name) ((PFN_##name)(state).gipa((instance), #name))
+#define GR_VK_LOAD(loader, instance, name) ((PFN_##name)(loader).gipa((instance), #name))
 
-typedef struct probe_state {
-    PFN_vkGetInstanceProcAddr gipa;
-    void *library;
-} probe_state;
-
-static const char *load_loader(probe_state *probe, char *path_out, size_t path_cap)
-{
-    static const char *kCandidates[] = { "libvulkan.so.1", "libvulkan.so", NULL };
-    int i;
-    /* GRAIL_VK_FORCE_NONE=1 pretends no loader exists. It exists so the skip path — which is the
-     * state of most machines this repository is built on — is exercised by a test instead of
-     * being asserted in a comment. It affects nothing else. */
-    if (getenv("GRAIL_VK_FORCE_NONE")) {
-        snprintf(path_out, path_cap, "%s", "suppressed by GRAIL_VK_FORCE_NONE");
-        return NULL;
-    }
-    for (i = 0; kCandidates[i]; ++i) {
-        void *handle = dlopen(kCandidates[i], RTLD_NOW | RTLD_LOCAL);
-        if (handle) {
-            /* ISO C does not allow casting an object pointer to a function pointer; copying
-             * the value through a union-equivalent byte copy is the portable spelling. */
-            void *symbol = dlsym(handle, "vkGetInstanceProcAddr");
-            PFN_vkGetInstanceProcAddr gipa;
-            if (sizeof(symbol) == sizeof(gipa))
-                memcpy(&gipa, &symbol, sizeof(gipa));
-            else
-                gipa = NULL;
-            if (!gipa) {
-                dlclose(handle);
-                continue;
-            }
-            probe->library = handle;
-            probe->gipa = gipa;
-            snprintf(path_out, path_cap, "%s", kCandidates[i]);
-            return kCandidates[i];
-        }
-    }
-    return NULL;
-}
-
-/* Fills required_missing for one device. Every bit is a fact about the device, not a guess. */
-static uint32_t evaluate_required(const VkPhysicalDeviceFeatures *features,
-                                  const VkPhysicalDeviceVulkan12Features *f12,
-                                  const VkPhysicalDeviceVulkan13Features *f13,
-                                  uint32_t device_api_major, uint32_t device_api_minor)
-{
-    uint32_t missing = 0;
-
-    if (!features->shaderInt16) missing |= GR_VK_REQ_SHADER_INT16;
-    if (!features->shaderInt64) missing |= GR_VK_REQ_SHADER_INT64;
-
-    /* The 1.2/1.3 feature structs only answer for a device that is at least that version; below
-     * it every bit they carry is absent by definition. */
-    if (device_api_major < 1u || (device_api_major == 1u && device_api_minor < 2u)) {
-        missing |= GR_VK_REQ_DESCRIPTOR_INDEXING | GR_VK_REQ_RUNTIME_DESCRIPTOR_ARRAY |
-                   GR_VK_REQ_UPDATE_AFTER_BIND | GR_VK_REQ_PARTIALLY_BOUND |
-                   GR_VK_REQ_VARIABLE_DESCRIPTOR_COUNT | GR_VK_REQ_NON_UNIFORM_INDEXING |
-                   GR_VK_REQ_BUFFER_DEVICE_ADDRESS | GR_VK_REQ_TIMELINE_SEMAPHORE |
-                   GR_VK_REQ_SCALAR_BLOCK_LAYOUT;
-    } else if (f12) {
-        if (!f12->descriptorIndexing) missing |= GR_VK_REQ_DESCRIPTOR_INDEXING;
-        if (!f12->runtimeDescriptorArray) missing |= GR_VK_REQ_RUNTIME_DESCRIPTOR_ARRAY;
-        if (!f12->descriptorBindingSampledImageUpdateAfterBind) missing |= GR_VK_REQ_UPDATE_AFTER_BIND;
-        if (!f12->descriptorBindingPartiallyBound) missing |= GR_VK_REQ_PARTIALLY_BOUND;
-        if (!f12->descriptorBindingVariableDescriptorCount) missing |= GR_VK_REQ_VARIABLE_DESCRIPTOR_COUNT;
-        if (!f12->shaderSampledImageArrayNonUniformIndexing) missing |= GR_VK_REQ_NON_UNIFORM_INDEXING;
-        if (!f12->bufferDeviceAddress) missing |= GR_VK_REQ_BUFFER_DEVICE_ADDRESS;
-        if (!f12->timelineSemaphore) missing |= GR_VK_REQ_TIMELINE_SEMAPHORE;
-        if (!f12->scalarBlockLayout) missing |= GR_VK_REQ_SCALAR_BLOCK_LAYOUT;
-    }
-
-    if (device_api_major < 1u || (device_api_major == 1u && device_api_minor < 3u)) {
-        missing |= GR_VK_REQ_DYNAMIC_RENDERING | GR_VK_REQ_SYNCHRONIZATION2;
-    } else if (f13) {
-        if (!f13->dynamicRendering) missing |= GR_VK_REQ_DYNAMIC_RENDERING;
-        if (!f13->synchronization2) missing |= GR_VK_REQ_SYNCHRONIZATION2;
-    }
-    return missing;
-}
-
+/* Device-local heap size. Lives here rather than in the shared module because only the probe
+ * reports it; gr_vk_fill_caps() computes the same value for the ABI. */
 static uint64_t device_local_bytes(const VkPhysicalDeviceMemoryProperties *memory)
 {
     uint64_t best = 0;
@@ -163,9 +84,8 @@ gr_result gr_vk_probe_run(gr_vk_probe_report *out)
     return GR_ERROR_UNSUPPORTED;
 #else
     {
-        probe_state probe;
+        gr_vk_loader loader;
         PFN_vkEnumerateInstanceVersion enumerate_version;
-        PFN_vkCreateInstance create_instance;
         PFN_vkDestroyInstance destroy_instance;
         PFN_vkEnumeratePhysicalDevices enumerate_devices;
         PFN_vkGetPhysicalDeviceProperties get_properties;
@@ -173,20 +93,20 @@ gr_result gr_vk_probe_run(gr_vk_probe_report *out)
         PFN_vkGetPhysicalDeviceFeatures2 get_features2;
         PFN_vkGetPhysicalDeviceQueueFamilyProperties get_queues;
         PFN_vkGetPhysicalDeviceMemoryProperties get_memory;
-        VkApplicationInfo app;
-        VkInstanceCreateInfo create_info;
         VkInstance instance = VK_NULL_HANDLE;
         VkResult result;
         uint32_t loader_version = 0;
         uint32_t device_count = 0;
         uint32_t i;
 
-        memset(&probe, 0, sizeof(probe));
-        if (!load_loader(&probe, out->loader_path, sizeof(out->loader_path)))
+        if (gr_vk_loader_open(&loader) != GR_OK) {
+            snprintf(out->loader_path, sizeof(out->loader_path), "%s", loader.path);
             return GR_ERROR_UNSUPPORTED;
+        }
         out->loader_found = 1;
+        snprintf(out->loader_path, sizeof(out->loader_path), "%s", loader.path);
 
-        enumerate_version = (PFN_vkEnumerateInstanceVersion)probe.gipa(NULL, "vkEnumerateInstanceVersion");
+        enumerate_version = (PFN_vkEnumerateInstanceVersion)loader.gipa(NULL, "vkEnumerateInstanceVersion");
         if (enumerate_version)
             enumerate_version(&loader_version);
         else
@@ -195,44 +115,23 @@ gr_result gr_vk_probe_run(gr_vk_probe_report *out)
         out->loader_api_minor = VK_API_VERSION_MINOR(loader_version);
         out->loader_api_patch = VK_API_VERSION_PATCH(loader_version);
 
-        create_instance = (PFN_vkCreateInstance)probe.gipa(NULL, "vkCreateInstance");
-        if (!create_instance) {
-            dlclose(probe.library);
-            return GR_ERROR_UNSUPPORTED;
+        {
+            uint32_t obtained = 0;
+            if (gr_vk_instance_create(&loader, VK_API_VERSION_1_3, &instance, &obtained) != GR_OK) {
+                gr_vk_loader_close(&loader);
+                return GR_ERROR_UNSUPPORTED;
+            }
+            out->instance_api_major = VK_API_VERSION_MAJOR(obtained);
+            out->instance_api_minor = VK_API_VERSION_MINOR(obtained);
         }
 
-        memset(&app, 0, sizeof(app));
-        app.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
-        app.pApplicationName = "grail-vk-probe";
-        app.applicationVersion = VK_MAKE_API_VERSION(0, 1, 0, 0);
-        app.pEngineName = "grail";
-        app.engineVersion = VK_MAKE_API_VERSION(0, 1, 0, 0);
-        /* Ask for 1.3; fall back to 1.0 so a 1.1 device is reported with its real API version
-         * instead of the probe failing outright. */
-        app.apiVersion = VK_API_VERSION_1_3;
-
-        memset(&create_info, 0, sizeof(create_info));
-        create_info.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
-        create_info.pApplicationInfo = &app;
-        result = create_instance(&create_info, NULL, &instance);
-        if (result != VK_SUCCESS) {
-            app.apiVersion = VK_API_VERSION_1_0;
-            result = create_instance(&create_info, NULL, &instance);
-        }
-        if (result != VK_SUCCESS || instance == VK_NULL_HANDLE) {
-            dlclose(probe.library);
-            return GR_ERROR_UNSUPPORTED;
-        }
-        out->instance_api_major = VK_API_VERSION_MAJOR(app.apiVersion);
-        out->instance_api_minor = VK_API_VERSION_MINOR(app.apiVersion);
-
-        enumerate_devices = GR_VK_LOAD(probe, instance, vkEnumeratePhysicalDevices);
-        get_properties = GR_VK_LOAD(probe, instance, vkGetPhysicalDeviceProperties);
-        get_properties2 = GR_VK_LOAD(probe, instance, vkGetPhysicalDeviceProperties2);
-        get_features2 = GR_VK_LOAD(probe, instance, vkGetPhysicalDeviceFeatures2);
-        get_queues = GR_VK_LOAD(probe, instance, vkGetPhysicalDeviceQueueFamilyProperties);
-        get_memory = GR_VK_LOAD(probe, instance, vkGetPhysicalDeviceMemoryProperties);
-        destroy_instance = GR_VK_LOAD(probe, instance, vkDestroyInstance);
+        enumerate_devices = GR_VK_LOAD(loader, instance, vkEnumeratePhysicalDevices);
+        get_properties = GR_VK_LOAD(loader, instance, vkGetPhysicalDeviceProperties);
+        get_properties2 = GR_VK_LOAD(loader, instance, vkGetPhysicalDeviceProperties2);
+        get_features2 = GR_VK_LOAD(loader, instance, vkGetPhysicalDeviceFeatures2);
+        get_queues = GR_VK_LOAD(loader, instance, vkGetPhysicalDeviceQueueFamilyProperties);
+        get_memory = GR_VK_LOAD(loader, instance, vkGetPhysicalDeviceMemoryProperties);
+        destroy_instance = GR_VK_LOAD(loader, instance, vkDestroyInstance);
 
         result = enumerate_devices ? enumerate_devices(instance, &device_count, NULL)
                                    : VK_ERROR_INITIALIZATION_FAILED;
@@ -269,11 +168,11 @@ gr_result gr_vk_probe_run(gr_vk_probe_report *out)
                 f13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
                 features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
                 features.pNext = &f12;
-                if (get_features2)
-                    get_features2(devices[i], &features);
-                missing = evaluate_required(&features.features,
-                                            (maj > 1u || min >= 2u) ? &f12 : NULL,
-                                            (maj > 1u || min >= 3u) ? &f13 : NULL, maj, min);
+                (void)features;
+                (void)f12;
+                (void)f13;
+                (void)get_features2;
+                missing = gr_vk_evaluate_required(&loader, instance, devices[i], &properties);
 
                 if (out->device_name[0] && missing >= out->required_missing)
                     continue; /* a better device was already chosen */
@@ -350,7 +249,7 @@ gr_result gr_vk_probe_run(gr_vk_probe_report *out)
 
         if (destroy_instance)
             destroy_instance(instance, NULL);
-        dlclose(probe.library);
+        gr_vk_loader_close(&loader);
 
         if (out->device_count == 0 || out->device_name[0] == '\0')
             return GR_ERROR_UNSUPPORTED;

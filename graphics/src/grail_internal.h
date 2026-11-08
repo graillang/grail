@@ -55,6 +55,35 @@ void *gr_object_remove(gr_object_table *table, gr_handle handle, uint32_t type);
 /* The table for this process. */
 gr_object_table *gr_objects(void);
 
+/* One backend per process. The object table is global, so two live backends would have to
+ * disambiguate each other's handles on every call; instead the first device creation fixes the
+ * backend and the ABI entry points route through it. A second device of a different backend is
+ * refused with GR_ERROR_UNSUPPORTED. */
+void gr_set_active_backend(gr_backend backend);
+gr_backend gr_active_backend(void);
+
+/* Implemented by grail_vulkan.c, reached only through the dispatcher in grail_null.c. Every one
+ * of these returns GR_ERROR_UNSUPPORTED when the build has no Vulkan headers, which is what makes
+ * the dispatch safe to write unconditionally. */
+gr_result gr_vk_abi_device_create(const gr_device_desc *desc, gr_handle *out_device);
+gr_result gr_vk_abi_device_destroy(gr_handle device);
+gr_result gr_vk_abi_device_get_caps(gr_handle device, gr_device_caps *out);
+gr_result gr_vk_abi_device_wait_idle(gr_handle device);
+gr_result gr_vk_abi_device_queue(gr_handle device, gr_queue_kind kind, gr_handle *out_queue);
+gr_result gr_vk_abi_queue_timeline(gr_handle queue, gr_handle *out_semaphore);
+uint64_t gr_vk_abi_queue_submitted(gr_handle queue);
+uint64_t gr_vk_abi_queue_completed(gr_handle queue);
+gr_result gr_vk_abi_queue_wait_idle(gr_handle queue);
+gr_handle gr_vk_abi_device_bindless(gr_handle device);
+gr_result gr_vk_abi_bindless_get_info(gr_handle bindless, gr_bindless_info *out);
+gr_result gr_vk_abi_device_retire(gr_handle device, gr_handle object, uint64_t after_value);
+gr_result gr_vk_abi_device_collect(gr_handle device);
+gr_result gr_vk_abi_shader_create(gr_handle device, const gr_shader_desc *desc, gr_handle *out_shader);
+gr_result gr_vk_abi_pipeline_create(gr_handle device, const gr_pipeline_desc *desc,
+                                   gr_handle *out_pipeline);
+gr_result gr_vk_abi_pipeline_commit(gr_handle device, double *out_seconds);
+gr_result gr_vk_abi_pipeline_stats(gr_handle device, uint32_t *out_declared, uint32_t *out_committed);
+
 /* Duplicates a gr_str into malloc'd, NUL-terminated memory. Returns NULL for an empty or
  * absent string. The caller owns the result. */
 char *gr_str_dup(gr_str s);
