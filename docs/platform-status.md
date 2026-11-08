@@ -1,6 +1,6 @@
 # Cross-platform status
 
-Last verified: 2026-11-08 on `main` at `6336b9d`.
+Last verified: 2026-11-08 on `main` at `eaa76f4`.
 
 This page distinguishes what has actually been built and executed from scaffolding and
 static inspection. A cross-built object is not platform support. A header parsing is not a
@@ -62,13 +62,13 @@ the SDL3 window backend and a renderer. The null backend validates contracts onl
 
 Implemented: deterministic native/cross build runner, platform matrix, packaging and checksums,
 signing hooks, install scripts, CI plan/lint, and an LSP MVP with compiler-sourced diagnostics.
-Not implemented: debugger, profiler, and hosted Windows/macOS release artifacts.
+Not implemented: debugger, profiler, and hosted macOS release artifacts.
 
 ## Applications
 
-Abundance and Borg Agent have landed port inventories and staged boundaries. Abundance CPU math
-and FNV-1a identity hashing are ported with bit-exact C++ parity (79 exact values); containers,
-RHI/renderer/editor and the Borg Agent service port are not yet claimed.
+Abundance and Borg Agent have landed port inventories and staged boundaries. Abundance CPU math, FNV-1a, world envelope, landscape digest and cache-container summaries are
+ported with bit-exact C++ parity (124 exact values). Borg Agent's JSON and wire substrate has
+187 reference lines. Containers, RHI/renderer/editor and Borg OS services remain.
 
 ## Verification commands
 
