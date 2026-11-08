@@ -217,8 +217,44 @@ Not implemented yet, and each rejected rather than approximated:
   taking the address of a foreign *declaration* (`f := c_add;` is rejected: a C
   declaration is not a Grail function value);
 - stack-passed arguments beyond six;
-- dynamic library loading (`dlopen`/`dlsym` hooks);
+- dynamic loading on AArch64 and RISC-V 64 Linux, Windows and macOS (the TLS bridge below is
+  Linux x86-64 only), and foreign calls or callbacks on threads other than the main thread;
 - variadic C functions.
+
+## Dynamic loading and the host TLS bridge
+
+The platform loader is reached through ordinary C declarations; no builtin is involved.
+A loader handle is an opaque `handle`, and `dlsym` is declared once per signature with
+`as "dlsym"` so the returned address is typed as the `cfn` it will be called through:
+
+```grail
+handle Library;
+extern "C" lib "c" fn dlopen(path: CStr, mode: i64) -> Library;
+extern "C" lib "c" as "dlsym" fn dlsym2(library: Library, symbol: CStr) -> cfn(i64, i64) -> i64;
+extern "C" lib "c" fn dlclose(library: Library) -> i64;
+```
+
+A `cfn` result is accepted from an extern declaration, and a `cfn` local or capture is
+callable with the C ABI. Linking any `lib` input now produces a dynamically linked
+executable with the host loader.
+
+The Grail runtime installs its worker record as the x86-64 thread pointer
+(`arch_prctl(ARCH_SET_FS)`), which is also where glibc keeps its TCB (errno, malloc
+tcache, stack guard). On Linux x86-64 the compiler therefore bridges the two:
+
+- `_start` records the loader's FS base in `rt_host_tls` before `rt_thread_init` installs
+  Grail's record, which is also recorded in `rt_grail_tls`;
+- every `extern "C"` call saves the current FS base, switches to `rt_host_tls`, makes the
+  call and restores the saved base;
+- every exported `extern "C" fn` (a callback entry) saves the caller's FS base, switches to
+  `rt_grail_tls`, and restores the caller's base on every return path.
+
+Both bases are process-wide, so foreign calls and callbacks are only valid on the main
+thread: threads created by the Grail runtime have no libc TCB, and a callback arriving on a
+foreign thread would share the main thread's worker record. Each switch is an
+`arch_prctl` system call. `tests/ffi/dlopen.grl` loads `libdlshim.so`, calls two resolved
+functions, passes a Grail callback that itself calls `strlen`, and closes the library
+(42, 42, 42, 0) with the runtime initialized; AArch64 and RISC-V 64 are cross-compiled only.
 
 ## Tests
 

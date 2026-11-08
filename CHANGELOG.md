@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Dynamic loading on Linux x86-64: `dlopen`/`dlsym`/`dlclose` work through ordinary extern
+  declarations, with `dlsym` declared once per signature and returning a callable `cfn`.
+  Because the runtime's worker record and glibc's TCB share the FS base, the compiler records
+  the loader's TLS base in `_start` before `rt_thread_init`, switches to it around every
+  foreign call, and switches to Grail's base for the body of every exported callback. The new
+  `tests/ffi/dlopen.grl` resolves two functions from a shared library and runs a callback that
+  calls libc. Limits: main thread only, x86-64 Linux only, one `arch_prctl` per switch.
+
 - Added Linux x86-64 DWARF `.debug_info` compile units and DIEs on top of the
   line table. `--debug` now emits a DWARF v4 compile unit naming the entry
   source and one subprogram DIE per function with name, linkage name,

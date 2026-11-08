@@ -64,8 +64,9 @@ Four FFI increments are implemented and executed: `extern "C"` declarations with
 scalar `i64`/`u64` parameters and results, symbol renaming and link notes; byte/string views and
 `CStr`; opaque handles; C-layout `extern "C" record` values with C padding and field widths; and
 C callbacks and `cfn` function pointers. `bun tools/test-ffi.mjs` links and executes all four fixtures on x86-64, AArch64 and RISC-V
-(12 executed, 0 linked-only). Still open:
-dynamic library loading (`dlopen`/`dlsym` hooks), variadic C functions and variadic callbacks,
+(13 executed, 0 linked-only), including `dlopen`/`dlsym`/`dlclose` on Linux x86-64 through a
+host-TLS bridge (main thread only). Still open:
+dynamic loading on other targets, variadic C functions and variadic callbacks,
 callback results, record results and by-value struct passing, nested records, float and narrow
 integer parameters, and stack arguments beyond six words. The C headers under `include/grail`
 are the runtime ABI contract.

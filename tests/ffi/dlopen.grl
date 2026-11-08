@@ -1,0 +1,64 @@
+module ffi_dlopen;
+
+// Dynamic-loader hooks: the platform loader is reachable through ordinary C
+// declarations, so dlopen/dlsym/dlclose need no compiler-specific builtin.
+// A loader handle is an opaque C token, and `dlsym` is declared with the signature
+// of the symbol it resolves, which is what turns the returned address into a `cfn`.
+handle Library;
+
+extern "C" lib "c" fn dlopen(path: CStr, mode: i64) -> Library;
+// A symbol's signature is only known to the program, so each signature gets its
+// own declaration of the same C symbol: `dlsym` returns a code pointer that the
+// declaration types as a `cfn`, and calling it uses the C ABI.
+extern "C" lib "c" as "dlsym" fn dlsym1(library: Library, symbol: CStr) -> cfn(i64) -> i64;
+extern "C" lib "c" as "dlsym" fn dlsym2(library: Library, symbol: CStr) -> cfn(i64, i64) -> i64;
+extern "C" lib "c" as "dlsym" fn dlsym3(
+    library: Library,
+    symbol: CStr
+) -> cfn(cfn(i64) -> i64, i64) -> i64;
+extern "C" lib "c" as "strlen" fn c_strlen(s: CStr) -> i64;
+// Called from the loaded library. It runs on Grail's thread pointer and calls
+// libc itself, so the bridge must switch to host TLS for that call and back.
+extern "C" fn c_dl_probe(value: i64) -> i64 {
+    mut total: i64 = 0;
+    unsafe {
+        total = c_strlen(cstr("seven\0")) + value;
+    }
+    return total;
+}
+extern "C" lib "c" fn dlclose(library: Library) -> i64;
+
+fn main() -> u64 {
+    mut doubled: i64 = 0;
+    mut added: i64 = 0;
+    mut probed: i64 = 0;
+    mut closed: i64 = 0;
+    unsafe {
+        // RTLD_NOW = 2. The path is relative to the working directory.
+        library := dlopen(cstr("./libdlshim.so\0"), 2);
+        double := dlsym1(library, cstr("c_dl_double\0"));
+        add := dlsym2(library, cstr("c_dl_add\0"));
+        apply := dlsym3(library, cstr("c_dl_apply\0"));
+        doubled = double(21);
+        added = add(19, 23);
+        probed = apply(c_dl_probe, 37);
+        closed = dlclose(library);
+    }
+    println(doubled);
+    println(added);
+    println(probed);
+    println(closed);
+    if doubled != 42 {
+        return 1;
+    }
+    if added != 42 {
+        return 1;
+    }
+    if probed != 42 {
+        return 1;
+    }
+    if closed != 0 {
+        return 1;
+    }
+    return 0;
+}
