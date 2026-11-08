@@ -73,7 +73,7 @@ int main(int argc, char **argv)
     memset(&dd, 0, sizeof(dd));
     dd.head.size = (uint32_t)sizeof(dd);
     dd.backend = GR_BACKEND_VULKAN;
-    dd.flags = GR_DEVICE_HEADLESS;
+    dd.flags = GR_DEVICE_HEADLESS | GR_DEVICE_VALIDATION;
     dd.app_name = (gr_str){ "grail-vk-backend-test", 21, 0 };
     dd.log = on_log;
     if (gr_device_create(&dd, &device) == GR_ERROR_UNSUPPORTED) {
@@ -471,7 +471,7 @@ int main(int argc, char **argv)
             CHECK_EQ(wait_status, GR_OK);
 
             memset(pixels, 0, sizeof(pixels));
-            CHECK_EQ(gr_texture_read(texture, 0, 0, 0, 0, kSize, kSize,
+            CHECK_EQ(gr_texture_read(texture, 0, 0, 0, 0, kSize, kSize, GR_STATE_TRANSFER_SRC,
                                      (gr_mut_span_u8){ pixels, sizeof(pixels) }), GR_OK);
             for (i = 0; i < sizeof(pixels); ++i) {
                 digest ^= pixels[i];
@@ -693,7 +693,7 @@ int main(int argc, char **argv)
             CHECK_EQ(wait_status, GR_OK);
 
             memset(pixels, 0, sizeof(pixels));
-            CHECK_EQ(gr_texture_read(dst, 0, 0, 0, 0, kSize, kSize,
+            CHECK_EQ(gr_texture_read(dst, 0, 0, 0, 0, kSize, kSize, GR_STATE_TRANSFER_SRC,
                                      (gr_mut_span_u8){ pixels, sizeof(pixels) }), GR_OK);
             for (i = 0; i < sizeof(pixels); ++i) {
                 digest ^= pixels[i];
@@ -1062,14 +1062,14 @@ int main(int argc, char **argv)
             CHECK_EQ(wait_status, GR_OK);
 
             memset(pixels, 0, sizeof(pixels));
-            CHECK_EQ(gr_texture_read(texture_b, 0, 0, 0, 0, kSize, kSize,
+            CHECK_EQ(gr_texture_read(texture_b, 0, 0, 0, 0, kSize, kSize, GR_STATE_TRANSFER_SRC,
                                      (gr_mut_span_u8){ pixels, sizeof(pixels) }), GR_OK);
             for (i = 0; i < sizeof(pixels); ++i) {
                 digest_b ^= pixels[i];
                 digest_b *= 0x100000001b3ull;
             }
             memset(pixels, 0, sizeof(pixels));
-            CHECK_EQ(gr_texture_read(texture_c, 0, 0, 0, 0, kSize, kSize,
+            CHECK_EQ(gr_texture_read(texture_c, 0, 0, 0, 0, kSize, kSize, GR_STATE_TRANSFER_SRC,
                                      (gr_mut_span_u8){ pixels, sizeof(pixels) }), GR_OK);
             for (i = 0; i < sizeof(pixels); ++i) {
                 digest_c ^= pixels[i];
@@ -1084,14 +1084,16 @@ int main(int argc, char **argv)
             uint8_t probe[64 * 64 * 4];
             size_t i;
             memset(probe, 0, sizeof(probe));
-            gr_texture_read(texture_b, 0, 0, 0, 0, 64, 64, (gr_mut_span_u8){ probe, sizeof(probe) });
+            gr_texture_read(texture_b, 0, 0, 0, 0, 64, 64, GR_STATE_TRANSFER_SRC,
+                            (gr_mut_span_u8){ probe, sizeof(probe) });
             printf("  b pixels:");
             for (i = 0; i < 8; ++i)
                 printf(" %u,%u,%u,%u", probe[i * 4], probe[i * 4 + 1], probe[i * 4 + 2],
                        probe[i * 4 + 3]);
             printf("\n");
             memset(probe, 0, sizeof(probe));
-            gr_texture_read(texture_c, 0, 0, 0, 0, 64, 64, (gr_mut_span_u8){ probe, sizeof(probe) });
+            gr_texture_read(texture_c, 0, 0, 0, 0, 64, 64, GR_STATE_TRANSFER_SRC,
+                            (gr_mut_span_u8){ probe, sizeof(probe) });
             printf("  c pixels:");
             for (i = 0; i < 8; ++i)
                 printf(" %u,%u,%u,%u", probe[i * 4], probe[i * 4 + 1], probe[i * 4 + 2],
@@ -1128,8 +1130,23 @@ int main(int argc, char **argv)
                 }
             }
         }
-        /* Not asserted yet: one error remains (see docs/vulkan-backend.md). Enabling the layer
-         * here with a failing assertion would leave the suite red, which is not a claim I make. */
+        if (report.error_count || report.warning_count) {
+            uint32_t i;
+            for (i = 0; i < report.message_count && i < GR_VK_VALIDATION_MESSAGES; ++i) {
+                gr_str message;
+                if (gr_vk_validation_message(device, i, &message) == GR_OK) {
+                    char flat[GR_VK_VALIDATION_MESSAGE_LEN];
+                    uint32_t k;
+                    for (k = 0; k < message.len && k < sizeof(flat) - 1u; ++k)
+                        flat[k] = (message.data[k] == '\n') ? ' ' : message.data[k];
+                    flat[k] = '\0';
+                    printf("  layer[%u]: %s\n", i, flat);
+                }
+            }
+        }
+        CHECK_EQ(report.enabled, 1u);
+        CHECK_EQ(report.error_count, 0u);
+        CHECK_EQ(report.warning_count, 0u);
     }
 
     gr_shader_library_close(library);

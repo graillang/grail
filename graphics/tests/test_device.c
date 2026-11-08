@@ -216,11 +216,11 @@ static void test_device_and_resources(void)
         CHECK_EQ(gr_texture_write(texture, 0, 0, 0, 0, 4, 4,
                                   (gr_span_u8){ pixels, sizeof(pixels) }), GR_OK);
         memset(readback, 0, sizeof(readback));
-        CHECK_EQ(gr_texture_read(texture, 0, 0, 0, 0, 4, 4,
+        CHECK_EQ(gr_texture_read(texture, 0, 0, 0, 0, 4, 4, GR_STATE_GENERAL,
                                  (gr_mut_span_u8){ readback, sizeof(readback) }), GR_OK);
         CHECK(memcmp(pixels, readback, sizeof(pixels)) == 0);
         /* A wrong-size destination is refused rather than partially filled. */
-        CHECK_EQ(gr_texture_read(texture, 0, 0, 0, 0, 4, 4, (gr_mut_span_u8){ readback, 3 }),
+        CHECK_EQ(gr_texture_read(texture, 0, 0, 0, 0, 4, 4, GR_STATE_GENERAL, (gr_mut_span_u8){ readback, 3 }),
                  GR_ERROR_INVALID_ARGUMENT);
         /* A mip that does not exist is refused. */
         CHECK_EQ(gr_texture_write(texture, 9, 0, 0, 0, 1, 1, (gr_span_u8){ pixels, 4 }),
