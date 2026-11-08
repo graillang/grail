@@ -44,9 +44,14 @@ abundance-test:
 test-ffi:
     bun tools/test-ffi.mjs
 
-# Run the Borg Agent CPU-port suites: JSON and runtime-protocol headers against serde_json.
+# Run the Borg Agent CPU-port suites: JSON, TOML, protocol, ownership, framing, supervision,
+# transport, journal, transcript events and permission gates against their references.
 borg-test:
     bun tools/borg-test.mjs
+
+# Persist/reload session state through the C OS ABI (needs cc + clang; links the FFI backend).
+borg-store-test:
+    bun tools/borg-store-test.mjs
 
 # Check Mach-O objects and executables for macos-x86_64 and macos-aarch64 without executing them.
 test-macos:
