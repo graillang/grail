@@ -6772,12 +6772,6 @@ fn raw_builtin<a>(c: (&a mut C), id: u64) -> Val {
     } else {
         args = raw_arguments(&mut c);
     }
-            expect(&mut c, view(","));
-            args = raw_arguments(&mut c);
-        }
-    } else {
-        args = raw_arguments(&mut c);
-    }
     if (id == 133) & (c.target == 3) {
         wanted := win32_arity(view(api));
         if wanted == 18446744073709551615 {
@@ -6800,7 +6794,9 @@ fn raw_builtin<a>(c: (&a mut C), id: u64) -> Val {
     }
     if id == 133 {
         arity = args.len();
-        if 6 < arity {
+        // Win64 passes arguments beyond the fourth on the stack; the Darwin bridge only ever uses
+        // the six integer argument registers.
+        if (6 < arity) & (c.target != 3) {
             fail(&mut c, view("imported call exceeds six arguments"));
         }
     }
@@ -6957,40 +6953,19 @@ fn raw_builtin<a>(c: (&a mut C), id: u64) -> Val {
         }
     }
     if id == 107 {
-        if c.plat == 1 {
-            get(&mut c, args[0], view("%rdi"));
-            get(&mut c, args[1], view("%rsi"));
-            get(&mut c, args[2], view("%rdx"));
-            get(&mut c, args[3], view("%rcx"));
-            o(&mut c, view("call "));
-            sym(&mut c, view("f_darwin_rt_call"));
-            c.out.push(10);
-        } else {
-            get(&mut c, args[0], view("%rax"));
-            get(&mut c, args[1], view("%rdi"));
-            get(&mut c, args[2], view("%rsi"));
-            get(&mut c, args[3], view("%rdx"));
-            o(&mut c, view("xorl %r10d,%r10d\nxorl %r8d,%r8d\nxorl %r9d,%r9d\nsyscall\n"));
-        }
+        get(&mut c, args[0], view("%rax"));
+        get(&mut c, args[1], view("%rdi"));
+        get(&mut c, args[2], view("%rsi"));
+        get(&mut c, args[3], view("%rdx"));
+        o(&mut c, view("xorl %r10d,%r10d\nxorl %r8d,%r8d\nxorl %r9d,%r9d\nsyscall\n"));
     }
     if id == 109 {
-        if c.plat == 1 {
-            get(&mut c, args[0], view("%rdi"));
-            get(&mut c, args[1], view("%rsi"));
-            get(&mut c, args[2], view("%rdx"));
-            get(&mut c, args[3], view("%rcx"));
-            get(&mut c, args[4], view("%r8"));
-            o(&mut c, view("call "));
-            sym(&mut c, view("f_darwin_rt_call4"));
-            c.out.push(10);
-        } else {
-            get(&mut c, args[0], view("%rax"));
-            get(&mut c, args[1], view("%rdi"));
-            get(&mut c, args[2], view("%rsi"));
-            get(&mut c, args[3], view("%rdx"));
-            get(&mut c, args[4], view("%r10"));
-            o(&mut c, view("xorl %r8d,%r8d\nxorl %r9d,%r9d\nsyscall\n"));
-        }
+        get(&mut c, args[0], view("%rax"));
+        get(&mut c, args[1], view("%rdi"));
+        get(&mut c, args[2], view("%rsi"));
+        get(&mut c, args[3], view("%rdx"));
+        get(&mut c, args[4], view("%r10"));
+        o(&mut c, view("xorl %r8d,%r8d\nxorl %r9d,%r9d\nsyscall\n"));
     }
     if (id == 110) + (id == 113) + (id == 114) {
         get(&mut c, args[0], view("%rdi"));
@@ -7027,8 +7002,9 @@ fn raw_builtin<a>(c: (&a mut C), id: u64) -> Val {
         
         } else {
             if c.plat == 1 {
+                // The darwin platform module owns thread creation; it reports ENOSYS today.
                 o(&mut c, view("call "));
-                sym(&mut c, view("f_darwin_rt_thread"));
+                sym(&mut c, view("rt_thread"));
                 c.out.push(10);
             } else {
             if c.target == 0 {

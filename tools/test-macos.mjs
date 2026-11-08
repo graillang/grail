@@ -29,9 +29,9 @@ function tool(name, argv) {
 
 // The libSystem entry points the runtime and the darwin module are allowed to import.
 const libSystem = new Set([
-  '_clock_gettime', '_close', '___error', '_execve', '_exit', '_fork', '_getdirentries64', '_getpid',
-  '_kill', '_mkdir', '_mmap', '_mprotect', '_munmap', '_nanosleep', '_open', '_pipe', '_poll',
-  '_read', '_rmdir', '_sched_yield', '_sysconf', '_unlink', '_wait4', '_write',
+  '_access', '_clock_gettime', '_close', '___error', '_execve', '_exit', '_fork', '_getdirentries64',
+  '_getpid', '_kill', '_mkdir', '_mmap', '_mprotect', '_munmap', '_nanosleep', '_open', '_pipe',
+  '_poll', '_read', '_readlink', '_rmdir', '_sched_yield', '_sysconf', '_unlink', '_wait4', '_write',
 ]);
 const programs = [
   { name: 'hello', source: 'fn main() {\n    println("Hello, macOS!");\n}\n', literal: true },
@@ -122,15 +122,16 @@ has(elf, /\.note\.GNU-stack/, 'ELF lost its GNU-stack note');
 has(elf, /^\.type f_/m, 'ELF lost its .type directives');
 lacks(elf, /\.build_version|rt_state@|\.pushsection __TEXT/, 'Mach-O output leaked into ELF');
 
-// The darwin module and Mach-O targets stay unavailable where they do not apply.
+// A target has exactly one platform module: darwin.grl and os-linux.grl define the same
+// rt_syscall* set, so compiling both must be rejected rather than silently picking one.
 // The compiler reports diagnostics on stdout; accept either stream.
 function rejection(argv, pattern, message) {
   const result = spawnSync(compiler, argv, { cwd: root, encoding: 'utf8' });
   check(result.status !== 0, message);
   has(`${result.stdout ?? ''}${result.stderr ?? ''}`, pattern, `${message} (wrong diagnostic)`);
 }
-rejection(['--default-u64', '--typed-refs', '--target', 'x86_64', join(work, 'reject.s'), join(elfDirectory, 'hello.grl'), join(root, 'compiler/darwin.grl'), join(root, 'compiler/runtime.grl')],
-  /darwin module requires a macos-x86_64 or macos-aarch64 target/, 'darwin module was accepted for an ELF target');
+rejection(['--default-u64', '--typed-refs', '--target', 'x86_64', join(work, 'reject.s'), join(elfDirectory, 'hello.grl'), join(root, 'compiler/os-linux.grl'), join(root, 'compiler/darwin.grl'), join(root, 'compiler/runtime.grl')],
+  /duplicate function/, 'darwin.grl compiled alongside os-linux.grl for an ELF target');
 rejection(['--default-u64', '--typed-refs', '--target', 'macos-riscv64', join(work, 'reject2.s'), join(elfDirectory, 'hello.grl'), join(root, 'compiler/runtime.grl')],
   /unsupported target/, 'macos-riscv64 was accepted');
 

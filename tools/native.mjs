@@ -13,7 +13,9 @@ export const targets = ['x86_64', 'aarch64', 'riscv64'];
 export const machoTargets = ['macos-x86_64', 'macos-aarch64'];
 export const allTargets = [...targets, ...machoTargets];
 export const hostTarget = ({ x64: 'x86_64', arm64: 'aarch64', riscv64: 'riscv64' })[process.arch];
-export const compilerSources = ['native', 'lexer', 'ownership', 'machine', 'optimize', 'fmt', 'cli', 'runtime', 'os-linux', 'darwin'].map(n => join(root, 'compiler', `${n}.grl`));
+// The compiler itself is a Linux host binary: its platform module is os-linux. darwin.grl (and
+// os-windows.grl) are per-target platform modules selected when building for those targets.
+export const compilerSources = ['native', 'lexer', 'ownership', 'machine', 'optimize', 'fmt', 'cli', 'runtime', 'os-linux'].map(n => join(root, 'compiler', `${n}.grl`));
 const triples = { x86_64: 'x86_64-linux-gnu', aarch64: 'aarch64-linux-gnu', riscv64: 'riscv64-linux-gnu', 'macos-x86_64': 'x86_64-apple-macos11', 'macos-aarch64': 'arm64-apple-macos11' };
 const emulations = { x86_64: 'elf_x86_64', aarch64: 'aarch64elf', riscv64: 'elf64lriscv' };
 const machoArchitectures = { 'macos-x86_64': 'x86_64', 'macos-aarch64': 'arm64' };
@@ -59,7 +61,19 @@ export function assemble(source, executable, target = hostTarget, linkArgs = [])
   const object = `${executable}.o`;
   const flags = target === 'riscv64' ? ['-march=rv64imafd', '-mabi=lp64'] : [];
   command([process.env.GRAIL_ASSEMBLER ?? 'clang', `--target=${triples[target]}`, ...flags, '-c', source, '-o', object]);
-export function compileProgram(compiler, inputs, directory, { target = hostTarget, overflow = 'checked', name = 'program', defaultU64 = true, typedRefs = false, runtime = join(root, 'compiler/runtime.grl'), osRuntime = join(root, 'compiler/os-linux.grl'), darwin = join(root, 'compiler/darwin.grl') } = {}) {
+  if (machoTargets.includes(target)) {
+    const { stub } = libSystemStub(dirname(object), object, machoArchitectures[target]);
+    command([
+      process.env.GRAIL_LINKER ?? 'ld64.lld',
+      '-arch', machoArchitectures[target],
+      '-platform_version', 'macos', '11.0', '11.0',
+      '-L', dirname(stub), '-lSystem',
+      '-e', '_main',
+      object, '-o', executable,
+    ]);
+    return executable;
+  }
+  command([process.env.GRAIL_LINKER ?? 'ld.lld', '-m', emulations[target], object, ...linkArgs, '-o', executable]);
   return executable;
 }
 export function runner(target = hostTarget) {
@@ -107,13 +121,13 @@ export function buildCompiler() {
   renameSync(pending, executable);
   return executable;
 }
-  const platform = machoTargets.includes(target) ? [resolve(root, darwin)] : [resolve(root, osRuntime)];
-  const files = [...inputs.map(p => resolve(root, p)), resolve(root, runtime), ...platform];
+export function compileProgram(compiler, inputs, directory, { target = hostTarget, overflow = 'checked', name = 'program', defaultU64 = true, typedRefs = false, runtime = join(root, 'compiler/runtime.grl'), osRuntime = join(root, 'compiler/os-linux.grl'), darwin = join(root, 'compiler/darwin.grl') } = {}) {
   targetName(target);
   if (!['checked', 'wrap'].includes(overflow)) throw new Error('overflow must be checked or wrap');
   mkdirSync(directory, { recursive: true });
   const assembly = join(directory, `${name}.s`);
-  const files = [...inputs.map(p => resolve(root, p)), resolve(root, runtime), resolve(root, osRuntime)];
+  const platform = machoTargets.includes(target) ? [resolve(root, darwin)] : [resolve(root, osRuntime)];
+  const files = [...inputs.map(p => resolve(root, p)), resolve(root, runtime), ...platform];
   const numeric = [...(defaultU64 ? ['--default-u64'] : []), ...(typedRefs ? ['--typed-refs'] : [])];
   command([compiler, ...numeric, '--target', target, `--overflow=${overflow}`, assembly, ...files]);
   const linkArgs = linkInputs(readFileSync(assembly, 'utf8'), dirname(resolve(root, inputs[0])));

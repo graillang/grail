@@ -1,4 +1,4 @@
-unsafe module darwin;
+unsafe module runtime;
 
 // macOS system boundary: this module is compiled only for Mach-O targets and is where every
 // libSystem call lives. Linux builds never include it, so ELF objects carry no Apple imports.
@@ -8,6 +8,39 @@ unsafe module darwin;
 // ABI, and libSystem's (-1, errno) result is converted back to the negative-errno convention the
 // rest of the runtime expects.
 // libSystem signals failure with -1; the runtime's negative-errno test is the same predicate.
+// Native system-call numbers stay behind this portable runtime boundary.
+// Operation IDs are stable runtime identifiers, not the target's Linux syscall ABI.
+fn rt_syscall(n: u64, a: u64, b: u64, c: u64) -> u64 {
+    // This module is the Mach-O platform layer: the runtime calls the libSystem bridge directly,
+    // so the compiler needs no Darwin branch in raw_syscall.
+    return rt_call(n, a, b, c);
+}
+
+// Trusted native runtime, entirely Grail. Raw intrinsics below are the compiler/OS boundary.
+// All runtime values are words. Sequence = {data,length,capacity}; allocation header = {class,link}.
+// Process state: argc,argv,envp,live allocation count,arena chain; allocator bins start at byte 256.
+// Freed blocks return to segregated free lists; mapped arenas are unmapped by rt_shutdown.
+
+fn rt_syscall4(n: u64, a: u64, b: u64, c: u64, d: u64) -> u64 {
+    // This module is the Mach-O platform layer: the runtime calls the libSystem bridge directly,
+    // so the compiler needs no Darwin branch in raw_syscall.
+    return rt_call4(n, a, b, c, d);
+}
+fn rt_readlinkat(path: u64, buf: u64, size: u64) -> u64 {
+    return rt_os_result(raw_import("readlink", path, buf, size));
+}
+fn rt_faccessat(path: u64) -> u64 {
+    // access(path, F_OK): succeed only when the path exists.
+    return rt_os_result(raw_import("access", path, 0, 0));
+}
+fn rt_accept4(fd: u64) -> u64 {
+    // Sockets are not mapped on Darwin yet; report it instead of issuing a Linux syscall.
+    return wrapping_sub(0, 38);
+}
+
+fn rt_os_init() -> u64 {
+    return 0;
+}
 fn negative(n: u64) -> u64 {
     return 18446744073709547520 < n;
 }

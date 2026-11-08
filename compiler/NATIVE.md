@@ -12,7 +12,9 @@ The Rust seed and unchecked C compiler have been removed, not retained as altern
 
 ## Invocation and entry
 
-Invocation: `native [--target x86_64|aarch64|riscv64|macos-x86_64|macos-aarch64|windows-x86_64] [--overflow=checked|wrap] OUT.s ENTRY.grl [MODULE.grl...]`. All modules are supplied as source files, including `compiler/runtime.grl` last; Mach-O targets also require `compiler/darwin.grl` before the runtime.
+Invocation: `native [--target x86_64|aarch64|riscv64|macos-x86_64|macos-aarch64|windows-x86_64] [--overflow=checked|wrap] OUT.s ENTRY.grl [MODULE.grl...]`. All modules are supplied as source files, including `compiler/runtime.grl` and then the target's platform module (`compiler/os-linux.grl` for Linux, `compiler/os-windows.grl` for PE, `compiler/darwin.grl` for Mach-O).
+One platform module is compiled per target — `compiler/os-linux.grl`, `compiler/os-windows.grl` or
+`compiler/darwin.grl` — each in `unsafe module runtime`, and they define the same ported operations.
 A named `main` in the entry file takes priority and needs no `pub`. Its result defaults to
 `unit`, with an implicit return at the end. The entry file may omit its `module` declaration;
 dependency files still declare their modules explicitly.

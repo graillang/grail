@@ -9,7 +9,7 @@ system boundary differ. Everything below is implemented in this tree and checked
 ## Target selection
 
 ```
-grail [--target macos-x86_64|macos-aarch64] OUT.s ENTRY.grl MODULE.grl... darwin.grl runtime.grl
+grail [--target macos-x86_64|macos-aarch64] OUT.s ENTRY.grl MODULE.grl... runtime.grl darwin.grl
 ```
 
 The CPU remains `target` (0 x86-64, 1 AArch64, 2 RISC-V); the object format is a separate
@@ -73,10 +73,14 @@ parameters the runtime passes as full words.
 
 ## libSystem boundary
 
-`compiler/darwin.grl` (`unsafe module darwin`) is compiled **only** for Mach-O targets, so ELF
-objects contain no Apple imports. It decodes the runtime's stable operation numbers into libSystem
-calls and converts `(-1, errno)` back into the runtime's negative-errno convention
-(`raw_import("___error")`).
+`compiler/darwin.grl` is the Mach-O **platform module**: it declares `unsafe module runtime` and
+provides the same `rt_syscall`, `rt_syscall4`, `rt_readlinkat`, `rt_faccessat`, `rt_accept4` and
+`rt_os_init` set as `compiler/os-linux.grl`, so exactly one platform module is compiled per target
+(`os-linux.grl` on Linux, `os-windows.grl` on Windows, `darwin.grl` on Mach-O). Compiling two of
+them is a duplicate definition. Because the module *is* the runtime, `rt_syscall` calls `rt_call`
+directly: a normal in-module call into the libSystem boundary, with no compiler-emitted bridge
+symbol. It decodes the runtime's stable operation numbers into libSystem calls and converts
+`(-1, errno)` back into the runtime's negative-errno convention (`raw_import("___error")`).
 
 | Operation | libSystem | Notes |
 | --- | --- | --- |
