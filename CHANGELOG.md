@@ -35,6 +35,15 @@
   runtime ABI contract suite (`tools/abi-test.mjs`) and the graphics C/shader
   suites, and the Windows x86-64 cross job is a required release gate for
   build/static checks. Windows AArch64 and macOS remain planned.
+- Abundance CPU port, cache-body increment: `world_cache::load` decodes the ABWCACH8 body — the 30
+  alignment-padded rasters, drainage nodes, provinces, caves, sites, regions, corridors, the
+  validation report and the landform block — rebuilds the world fingerprint and re-derives the
+  content hash from the file. For the 523 KB fixture cache the re-derived hash equals the header's
+  `13360685293024758287`, the value `load_world_cache` verifies. Thirteen malformed, version and
+  body cases plus the alignment rule are gated against the engine's own wording, including the
+  reminder that a corrupted pad byte still loads. The suite now compares 139 exact values
+  (math 63, hashing 16, world 25, cache 35). Landscape caches, ABCP2 and the lake-topology sidecar
+  remain out of scope.
 - Abundance CPU port, cache-container increment: `abundance/src/world_cache.grl` reads the
   ABWCACH8/ABWCACH9 world cache the way `read_world_cache_summary` does (84-byte header, optional
   landscape-settings trailer, generator block, optional 48-byte identity trailer from the end of the
