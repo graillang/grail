@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- Windows COM interop: two new unsafe-runtime intrinsics, `raw_win_local(Symbol, args...)` for a
+  direct Windows-ABI call to a symbol linked into the image (x86-64 `%rcx/%rdx/%r8/%r9`; ARM64
+  `x0..x3`) and `raw_win_call(slot, args...)` for an indirect call through a loaded function
+  pointer such as a COM vtable slot (x86-64 `call *%r11`, ARM64 `wininvoke` ->
+  `ldr x16,[x9]; blr x16`). `CoInitializeEx`/`CoUninitialize` join the import table from
+  `combase.dll`. Minimal C-ABI shims (`tests/com-shim-x64.s`, `tests/com-shim-arm64.s`) provide
+  an `IUnknown` object; the executed x86-64 case proves AddRef/Release counts 2, 3, 2, 1 and 1, 0
+  and the exact `E_POINTER` (2147500035) and `E_NOINTERFACE` (2147500034) HRESULTs, plus a
+  successful `QueryInterface` returning the object pointer. The same program is checked
+  statically for windows-aarch64. Single static object and one IID; no `CoCreateInstance`,
+  marshalling or apartment tests.
+
 - Windows x86-64 threads and waits: `raw_thread_clone` now calls a new
   `rt_win_thread_clone`/`rt_win_thread_main` pair in `compiler/os-windows.grl` that creates the
   thread with `CreateThread` through a compiler-emitted Win64 bridge (`rt_win_thread_start` keeps

@@ -425,6 +425,12 @@ fn win32_arity<a>(name: (&a [u8])) -> u64 {
     if same(view(name), view("WakeByAddressAll")) {
         return 1;
     }
+    if same(view(name), view("CoInitializeEx")) {
+        return 2;
+    }
+    if same(view(name), view("CoUninitialize")) {
+        return 0;
+    }
     if same(view(name), view("VirtualFree")) {
         return 3;
     }
@@ -6645,6 +6651,12 @@ fn builtin_id<a>(n: &a [u8]) -> u64 {
     if same(view(n), view("raw_win32")) {
         return 133;
     }
+    if same(view(n), view("raw_win_local")) {
+        return 134;
+    }
+    if same(view(n), view("raw_win_call")) {
+        return 135;
+    }
     if same(view(n), view("raw_syscall4")) {
         return 109;
     }
@@ -6746,8 +6758,8 @@ fn raw_builtin<a>(c: (&a mut C), id: u64) -> Val {
     expect(&mut c, view("("));
     mut api = u8[];
     mut args = u64[];
-    if id == 133 {
-        // raw_win32(Symbol, args...): the import name is compile-time text, not a value.
+    if (id == 133) + (id == 134) {
+        // raw_win32/raw_win_local(Symbol, args...): the symbol is compile-time text, not a value.
         api = ident(&mut c);
         if eat(&mut c, view(")")) == 0 {
             expect(&mut c, view(","));
@@ -6765,9 +6777,19 @@ fn raw_builtin<a>(c: (&a mut C), id: u64) -> Val {
             fail(&mut c, view("Win32 import arity"));
         }
     }
+    if id == 134 {
+        if 4 < args.len() {
+            fail(&mut c, view("linked Win32 call arity"));
+        }
+    }
+    if id == 135 {
+        if (args.len() == 0) + (5 < args.len()) {
+            fail(&mut c, view("indirect Win32 call arity"));
+        }
+    }
     mut arity = 1;
-    if id == 133 {
-        // Already validated against the import table; pass the generic check unchanged.
+    if (id == 133) + (id == 134) + (id == 135) {
+        // Already validated; pass the generic check unchanged.
         arity = args.len();
     }
     if (id == 102) + (id == 104) {
@@ -6808,6 +6830,84 @@ fn raw_builtin<a>(c: (&a mut C), id: u64) -> Val {
     }
     if args.len() != arity {
         fail(&mut c, view("raw intrinsic arity"));
+    }
+    if id == 134 {
+        // Direct call to a symbol linked into the image (no IAT); Windows ABI at the boundary.
+        if (c.target == 3) + (c.target == 4) == 0 {
+            fail(&mut c, view("raw_win_local requires a PE target"));
+        }
+        count := args.len();
+        if c.target == 3 {
+            if 0 < count {
+                get(&mut c, args[0], view("%rcx"));
+            }
+            if 1 < count {
+                get(&mut c, args[1], view("%rdx"));
+            }
+            if 2 < count {
+                get(&mut c, args[2], view("%r8"));
+            }
+            if 3 < count {
+                get(&mut c, args[3], view("%r9"));
+            }
+        } else {
+            // Internal argument registers already lower to x0..x3, the Win64 ARM64 order.
+            if 0 < count {
+                get(&mut c, args[0], view("%rdi"));
+            }
+            if 1 < count {
+                get(&mut c, args[1], view("%rsi"));
+            }
+            if 2 < count {
+                get(&mut c, args[2], view("%rdx"));
+            }
+            if 3 < count {
+                get(&mut c, args[3], view("%rcx"));
+            }
+        }
+        o(&mut c, view("call "));
+        o(&mut c, view(api));
+        c.out.push(10);
+        return val(save(&mut c), 0);
+    }
+    if id == 135 {
+        // Indirect call through a loaded pointer (a COM vtable slot) with the Windows ABI.
+        if (c.target == 3) + (c.target == 4) == 0 {
+            fail(&mut c, view("raw_win_call requires a PE target"));
+        }
+        count := args.len() - 1;
+        if c.target == 3 {
+            if 0 < count {
+                get(&mut c, args[1], view("%rcx"));
+            }
+            if 1 < count {
+                get(&mut c, args[2], view("%rdx"));
+            }
+            if 2 < count {
+                get(&mut c, args[3], view("%r8"));
+            }
+            if 3 < count {
+                get(&mut c, args[4], view("%r9"));
+            }
+            get(&mut c, args[0], view("%r11"));
+            o(&mut c, view("call *%r11\n"));
+        } else {
+            if 0 < count {
+                get(&mut c, args[1], view("%rdi"));
+            }
+            if 1 < count {
+                get(&mut c, args[2], view("%rsi"));
+            }
+            if 2 < count {
+                get(&mut c, args[3], view("%rdx"));
+            }
+            if 3 < count {
+                get(&mut c, args[4], view("%rcx"));
+            }
+            get(&mut c, args[0], view("%rax"));
+            o(&mut c, view("wininvoke\n"));
+        }
+        return val(save(&mut c), 0);
     }
     if id == 133 {
         count := args.len();
