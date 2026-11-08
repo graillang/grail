@@ -72,7 +72,7 @@ Not implemented: debugger, profiler, and hosted macOS release artifacts.
 
 Abundance and Borg Agent have landed port inventories and staged boundaries. Abundance CPU math, FNV-1a, world envelope, landscape digest, ABWCACH8/9 containers, full
 cache-body decode, the ABCP2 checkpoint container, the entity table and the job-priority policy are ported with bit-exact C++ parity
-(237 exact values across seven programs). Borg Agent has JSON, wire, TOML/config, local-session ownership and JSON-RPC dispatch and local-IPC addressing/lifecycle rules
+(254 exact values across seven programs, including a clone-thread executor). Borg Agent has JSON, wire, TOML/config, local-session ownership and JSON-RPC dispatch and local-IPC addressing/lifecycle rules
 (683 reference lines across eight suites); the socket syscalls themselves are still open. RHI/renderer/editor and remaining Borg OS services are still open.
 
 ## Verification commands
