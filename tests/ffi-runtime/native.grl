@@ -1,0 +1,79 @@
+module ffi_runtime_native;
+
+use sys_grail;
+use sys_grail::Error;
+
+fn run() -> u64 |? Error {
+    sys_grail::init()?;
+
+    path := &"ffi_note.txt";
+    file := sys_grail::open(
+        path,
+        sys_grail::OPEN_WRITE | sys_grail::OPEN_CREATE | sys_grail::OPEN_TRUNCATE,
+        0
+    )?;
+    written := sys_grail::write(file, &"hello ffi")?;
+    if written != 9 {
+        return 2;
+    }
+    metadata := sys_grail::stat(file)?;
+    if metadata.size != 9 {
+        return 3;
+    }
+    if metadata.struct_size != 96 {
+        return 13;
+    }
+    if metadata.abi_version != 4294967296 {
+        return 14;
+    }
+    if metadata.kind != 1 {
+        return 15;
+    }
+    sys_grail::close(file)?;
+
+    reader := sys_grail::open(path, sys_grail::OPEN_READ, 0)?;
+    data := sys_grail::read_bytes(reader, 32)?;
+    if data.len() != 9 {
+        return 4;
+    }
+    if data[0] != 104 {
+        return 5;
+    }
+    if data[8] != 105 {
+        return 6;
+    }
+    size := sys_grail::size(reader)?;
+    if size != 9 {
+        return 7;
+    }
+    sys_grail::close(reader)?;
+
+    monotonic := sys_grail::monotonic()?;
+    wall := sys_grail::wall()?;
+    if monotonic <= 0 {
+        return 8;
+    }
+    if wall <= 0 {
+        return 9;
+    }
+
+    sys_grail::env_set(&"GRAIL_FFI_TEST", &"ok")?;
+    value := sys_grail::env_get_bytes(&"GRAIL_FFI_TEST", 16)?;
+    if value.len() != 2 {
+        return 10;
+    }
+    if value[0] != 111 {
+        return 11;
+    }
+    if value[1] != 107 {
+        return 12;
+    }
+
+    println("ffi-runtime: ok");
+    sys_grail::shutdown()?;
+    return 0;
+}
+
+fn main() -> u64 {
+    return run()!;
+}
