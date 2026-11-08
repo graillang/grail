@@ -18,6 +18,7 @@
   `&b` without a lifetime parameter list. Ambiguous outputs are rejected.
 - `use module::Name;` imports a type or interface member. `use order::Ord;` resolves bounds
   and impls through the canonical `order::Ord` path instead of creating a local phantom.
+- The old `&mut a T` lifetime order is rejected in user modules; write `&a mut T`.
 - The public `borrow`/`borrow_mut` builtins and `read<a>`/`mut<a>` view types are removed in user
   modules. Use `&value`/`&mut value` and `&[u8]`/`&mut [u8]`; internal bootstrap modules retain the
   legacy dialect until the final source migration.
