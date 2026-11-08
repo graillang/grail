@@ -1,7 +1,7 @@
 // Native Linux test for the first Grail-facing wrappers over the C OS ABI.
 //
-// Requires an FFI-capable compiler (feature/ffi): set GRAIL_FFI_COMPILER, or
-// GRAIL_COMPILER when that compiler already includes extern "C" support.
+// Uses GRAIL_FFI_COMPILER, or GRAIL_COMPILER, pointing at a compiler built
+// from current main with the merged v3 FFI.
 // The hosted Linux C backend is linked with the host C library and normal
 // dynamic TLS; a test-only runtime copy keeps libc's thread pointer intact.
 import { spawnSync } from 'node:child_process';
@@ -13,7 +13,7 @@ const work = join(root, '.work/ffi-runtime');
 const scratch = join(work, 'scratch');
 const compiler = process.env.GRAIL_FFI_COMPILER ?? process.env.GRAIL_COMPILER;
 if (!compiler) {
-  throw new Error('ffi-runtime: set GRAIL_FFI_COMPILER to an FFI-capable Grail compiler');
+  throw new Error('ffi-runtime: set GRAIL_COMPILER (or GRAIL_FFI_COMPILER) to a compiler built from this tree');
 }
 const cc = process.env.CC ?? 'cc';
 const clang = process.env.GRAIL_CLANG ?? 'clang';
@@ -59,23 +59,24 @@ const backend = join(root, 'lib/sys/grail_ffi_linux.o');
 run(cc, ['-r', ...objects, '-o', backend]);
 
 const runtimeSource = readFileSync(join(root, 'compiler/runtime.grl'), 'utf8');
-const original = `fn rt_thread_init() -> u64 {
-    w := raw_state() + 128;
-    raw_store(w, w);
-    raw_tp_set(w);
-    return 0;
-}`;
-const patched = `fn rt_thread_init() -> u64 {
-    // FFI runtime test only: preserve libc's thread pointer/TLS.
-    w := raw_state() + 128;
-    raw_store(w, w);
-    return 0;
-}`;
-if (!runtimeSource.includes(original)) {
-  throw new Error('ffi-runtime: compiler/runtime.grl no longer has the expected rt_thread_init');
+const threadStart = runtimeSource.indexOf('fn rt_thread_init() -> u64 {');
+if (threadStart < 0) {
+  throw new Error('ffi-runtime: compiler/runtime.grl has no rt_thread_init');
 }
+const threadEnd = runtimeSource.indexOf('\n}', threadStart);
+if (threadEnd < 0) {
+  throw new Error('ffi-runtime: cannot delimit rt_thread_init');
+}
+const threadBlock = runtimeSource.slice(threadStart, threadEnd + 2);
+if (!threadBlock.includes('    raw_tp_set(w);')) {
+  throw new Error('ffi-runtime: rt_thread_init no longer sets the thread pointer');
+}
+const patchedThread = threadBlock.replace(
+  '    raw_tp_set(w);', '    // FFI runtime test only: preserve libc\'s thread pointer/TLS.');
 const runtime = join(work, 'runtime_nofs.grl');
-writeFileSync(runtime, runtimeSource.replace(original, patched));
+writeFileSync(runtime, runtimeSource.slice(0, threadStart) + patchedThread +
+  runtimeSource.slice(threadEnd + 2));
+const osRuntime = join(root, 'compiler/os-linux.grl');
 
 const entry = 'tests/ffi-runtime/native.grl';
 const wrapper = 'lib/sys/grail_ffi.grl';
@@ -84,7 +85,7 @@ const linkNote = '// grail-link: grail_ffi_linux.o';
 function compileAssembly(target, name) {
   const assembly = join(work, `${name}.s`);
   run(compiler, ['--default-u64', '--typed-refs', '--target', target, '--overflow=checked',
-    assembly, entry, wrapper, runtime]);
+    assembly, entry, wrapper, runtime, osRuntime]);
   const text = readFileSync(assembly, 'utf8');
   const notes = text.split('\n').filter(line => line.startsWith('// grail-link: '));
   if (notes.length !== 1 || notes[0] !== linkNote) {
