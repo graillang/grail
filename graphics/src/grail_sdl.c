@@ -10,6 +10,7 @@
  */
 #include "grail_sdl.h"
 
+#include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -38,13 +39,14 @@
 
 typedef struct sdl_api {
     void *library;
-    int (*InitSubSystem)(uint32_t flags);
+    /* SDL3 returns C `bool` (one byte): declaring these `int` would read undefined upper bits. */
+    bool (*InitSubSystem)(uint32_t flags);
     void *(*CreateWindow)(const char *title, int w, int h, uint64_t flags);
     void (*DestroyWindow)(void *window);
-    int (*GetWindowSizeInPixels)(void *window, int *w, int *h);
+    bool (*GetWindowSizeInPixels)(void *window, int *w, int *h);
     /* SDL 3.4 returns the names directly; only 3.6+ splits this into ...ExtensionNames. */
     const char *const *(*Vulkan_GetInstanceExtensions)(uint32_t *count);
-    int (*Vulkan_CreateSurface)(void *window, void *instance, void *allocator, uint64_t *surface);
+    bool (*Vulkan_CreateSurface)(void *window, void *instance, void *allocator, uint64_t *surface);
     void (*Vulkan_DestroySurface)(void *instance, uint64_t surface, void *allocator);
     /* The window's platform handles (HWND/HINSTANCE on Windows), for backends that are not
      * Vulkan. Optional: resolved when present, required only where a D3D12 swapchain asks. */

@@ -103,5 +103,12 @@
     "stdout": "3.75\n16777216\n4000000097.75\n1234.75\n385\n385\n-5\n4294967295\n-101\n0\n1\n",
     "status": 0,
     "note": "extern C on Win64: rcx/rdx/r8/r9 and positional xmm0-3, 32-byte shadow space, stack slots from the fifth argument, f32 as binary32, narrow results re-extended"
+  },
+  {
+    "name": "ffi-dynamic-loading",
+    "source": "handle Library;\nextern \"C\" lib \"kernel32\" fn LoadLibraryA(name: CStr) -> Library;\nextern \"C\" lib \"kernel32\" as \"GetProcAddress\" fn proc_strlen(library: Library, name: CStr) -> cfn(CStr) -> i32;\nextern \"C\" lib \"kernel32\" as \"GetProcAddress\" fn proc_muldiv(library: Library, name: CStr) -> cfn(i32, i32, i32) -> i32;\nextern \"C\" lib \"kernel32\" fn FreeLibrary(library: Library) -> i32;\nextern \"C\" lib \"kernel32\" fn GetLastError() -> u32;\n\nfn main() -> u64 {\n    mut missing_error: u32 = 0;\n    mut length: i32 = 0;\n    mut scaled: i32 = 0;\n    mut negative: i32 = 0;\n    mut freed: i32 = 0;\n    unsafe {\n        LoadLibraryA(cstr(\"grail-no-such-library.dll\\0\"));\n        missing_error = GetLastError();\n        kernel := LoadLibraryA(cstr(\"kernel32.dll\\0\"));\n        strlen := proc_strlen(kernel, cstr(\"lstrlenA\\0\"));\n        length = strlen(cstr(\"dynamic\\0\"));\n        muldiv := proc_muldiv(kernel, cstr(\"MulDiv\\0\"));\n        scaled = muldiv(1000, 3, 7);\n        negative = muldiv(-1000, 3, 7);\n        freed = FreeLibrary(kernel);\n    }\n    println(missing_error);\n    println(length);\n    println(scaled);\n    println(negative);\n    println(freed != 0);\n    return 0;\n}\n",
+    "stdout": "126\n7\n429\n-429\ntrue\n",
+    "status": 0,
+    "note": "LoadLibraryA/GetProcAddress/FreeLibrary through extern declarations imported per symbol; cfn values called with Win64; ERROR_MOD_NOT_FOUND for a missing DLL"
   }
 ]

@@ -4452,8 +4452,15 @@ fn base_named<a>(c: (&a mut C), first: u8[]) -> u64 {
                 expect(&mut c, view(","));
             }
         }
-        if 6 < params.len() {
-            fail(&mut c, view("cfn type exceeds six word arguments"));
+        if 64 < params.len() {
+            fail(&mut c, view("cfn type exceeds 64 arguments"));
+        }
+        for i in params.len() {
+            ffi_direct_param(
+                &mut c,
+                params[i],
+                view("cfn parameters must be an integer, f32, f64, CStr, handle, byte view, cfn or extern record")
+            );
         }
         expect(&mut c, view("->"));
         result := parse_type(&mut c);
@@ -4988,12 +4995,15 @@ fn ffi_f32_bits<a>(c: (&a mut C), x86: u64) -> unit {
     }
     return ();
 }
+// `symbol` names the callee; when it is empty, `target` is the slot holding a `cfn` address and
+// the call is indirect (through %rax, which no C convention uses for an argument).
 fn ffi_emit_call<a, b, d, e>(
     c: (&a mut C),
     args: &b u64[],
     argtypes: &d u64[],
     ret: u64,
-    symbol: &e [u8]
+    symbol: &e [u8],
+    target: u64
 ) -> Val {
     abi := ffi_abi(&mut c);
     x86 := abi < 2;
@@ -5162,9 +5172,14 @@ fn ffi_emit_call<a, b, d, e>(
             }
         }
     }
-    o(&mut c, view("call "));
-    o(&mut c, view(symbol));
-    c.out.push(10);
+    if symbol.len() == 0 {
+        get(&mut c, target, view("%rax"));
+        o(&mut c, view("call *%rax\n"));
+    } else {
+        o(&mut c, view("call "));
+        o(&mut c, view(symbol));
+        c.out.push(10);
+    }
     if ret != 1 {
         if is_float(&mut c, ret) {
             single := is_f32(&mut c, ret);
@@ -5598,7 +5613,18 @@ fn extern_declaration<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         fail(&mut c, view("duplicate function"));
     }
     if 0 < input.len() {
-        ffi_link(&mut c, view(input));
+        if (c.target == 3) + (c.target == 4) {
+            // A PE image binds each symbol to one DLL through the import table, so Windows tooling
+            // needs the pair, not just the library: `// grail-link: import kernel32 LoadLibraryA`.
+            mut note = u8[];
+            push_bytes(&mut note, view("import "));
+            push_bytes(&mut note, view(input));
+            note.push(32);
+            push_bytes(&mut note, view(symbol));
+            ffi_link(&mut c, view(note));
+        } else {
+            ffi_link(&mut c, view(input));
+        }
     }
     c
         .funcs
@@ -7946,7 +7972,7 @@ fn emit_resolved_call<a>(
         if (c.raw == 0) & (c.unsafe_depth == 0) {
             fail(&mut c, view("extern C call requires an unsafe block"));
         }
-        return ffi_emit_call(&mut c, &args, &argtypes, ret, view(ffi_symbol));
+        return ffi_emit_call(&mut c, &args, &argtypes, ret, view(ffi_symbol), 0);
     }
     if 6 < args.len() {
         fail(&mut c, view("native call exceeds six arguments"));
@@ -8166,6 +8192,16 @@ fn indirect_call<a>(c: (&a mut C), value: Val, opened: u64) -> Val {
         slot := args[i];
         actual := types[i];
         move_out(&mut c, val(slot, actual));
+    }
+    if kind == 25 {
+        // A C function pointer is called with the platform's C convention, exactly like a direct
+        // extern call (floats, narrow integers, stack arguments, Win64, the host-TLS bridge).
+        result := ffi_emit_call(&mut c, &args, &signature, resulttype, view(""), target);
+        rslot := result.t;
+        call_writebacks(&mut c, first, &sources, &types);
+        call_bonds(&mut c, val(rslot, resulttype), first, &sources, resulttype);
+        release_temporary(&mut c, input);
+        return val(rslot, resulttype);
     }
     if shift {
         get(&mut c, envp, view("%rdi"));

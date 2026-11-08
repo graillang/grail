@@ -78,10 +78,28 @@ export function shortImport(name, library = dll, machine = 0x8664) {
   return Buffer.concat([header, data]);
 }
 
-export function writeImportLibrary(directory = join(workDirectory, 'lib'), machine = 0x8664) {
+// `extern "C" lib "X"` declarations on a PE target emit `// grail-link: import X SYMBOL`; each
+// becomes a short import of SYMBOL from X.dll (or X itself when it already names a .dll).
+export function programImports(assembly) {
+  const found = {};
+  for (const line of assembly.split('\n')) {
+    const match = /^\/\/ grail-link: import (\S+) (\S+)$/.exec(line.trim());
+    if (!match) continue;
+    const dllName = /\.dll$/i.test(match[1]) ? match[1] : `${match[1]}.dll`;
+    (found[dllName] ??= new Set()).add(match[2]);
+  }
+  return Object.fromEntries(Object.entries(found).map(([k, v]) => [k, [...v]]));
+}
+
+export function writeImportLibrary(directory = join(workDirectory, 'lib'), machine = 0x8664, extra = {}) {
   mkdirSync(directory, { recursive: true });
   const objects = [];
-  for (const [library, names] of Object.entries(imports)) {
+  const all = { ...imports };
+  for (const [library, names] of Object.entries(extra)) {
+    const known = new Set(Object.values(all).flat());
+    all[library] = [...(all[library] ?? []), ...names.filter(name => !known.has(name))];
+  }
+  for (const [library, names] of Object.entries(all)) {
     for (const name of names) {
       const path = join(directory, `${name}.obj`);
       writeFileSync(path, shortImport(name, library, machine));
@@ -137,9 +155,10 @@ export function compileProgram(compiler, inputs, directory, {
     assemble(resolve(root, shim), shimObject, target);
     return shimObject;
   });
-  const library = writeImportLibrary(join(directory, 'lib'), spec.machine);
+  const library = writeImportLibrary(join(directory, 'lib'), spec.machine,
+    programImports(readFileSync(assembly, 'utf8')));
   link([object, ...shimObjects, library], executable, { machine: spec.linkMachine });
-  return { assembly, object, executable, library };
+  return { assembly, object, executable, library, shimObjects };
 }
 
 export function inspectObject(object) {

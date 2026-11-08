@@ -222,7 +222,13 @@ export async function check(compiler) {
     assert.ok(imported.includes('ExitProcess') && imported.includes('WriteFile'), `${name}/${windowsAarch64}: kernel32 imports missing`);
     const pdataDir = image.match(/Entry 3 ([0-9a-f]+) ([0-9a-f]+)\s+Exception Directory \[\.pdata\]/);
     assert.ok(pdataDir, `${name}/${windowsAarch64}: image has no .pdata directory`);
-    assert.equal(Number.parseInt(pdataDir[2], 16), defs * 8, `${name}/${windowsAarch64}: exception directory size`);
+    // The image's exception directory also holds the C shim's unwind entries, if any.
+    let shimEntries = 0;
+    for (const object of built.shimObjects ?? []) {
+      const size = /\.pdata\s+([0-9a-f]+)/i.exec(command(['llvm-objdump', '-h', object]).stdout.toString());
+      if (size) shimEntries += Number.parseInt(size[1], 16) / 8;
+    }
+    assert.equal(Number.parseInt(pdataDir[2], 16), (defs + shimEntries) * 8, `${name}/${windowsAarch64}: exception directory size`);
     passed++;
     console.log(`windows-aarch64 ${name}: COFF-ARM64 object + ARM64 PE image verified (static, no ARM64 runner)`);
   }

@@ -112,6 +112,8 @@ int main(void)
     uint32_t w = 0, h = 0, count = 0, f;
     uint64_t last = 0;
 
+    setvbuf(stdout, NULL, _IONBF, 0); /* a crash must not lose what was already reported */
+    printf("d3d12-present: start\n");
     if (gr_window_set_backend(GR_WINDOW_BACKEND_SDL3) != GR_OK) {
         printf("d3d12-present: SDL3.dll not found next to the executable\n");
         return 1;
@@ -129,6 +131,7 @@ int main(void)
     wd.width = 320;
     wd.height = 240;
     CHECK_EQ(gr_window_create(&wd, &window), GR_OK);
+    printf("d3d12-present: window created\n");
     CHECK_EQ(gr_window_get_native(window, &native), GR_OK);
     CHECK_EQ(native.backend, GR_BACKEND_D3D12);
     CHECK(native.handle_a != NULL); /* the HWND */
@@ -146,6 +149,7 @@ int main(void)
     sd.format = GR_FORMAT_UNDEFINED; /* the backend's preferred: B8G8R8A8_UNORM */
     sd.present_mode = GR_PRESENT_FIFO;
     CHECK_EQ(gr_swapchain_create(device, &sd, &swap), GR_OK);
+    printf("d3d12-present: swapchain created\n");
     CHECK_EQ(gr_swapchain_info(swap, &format, &w, &h, &count), GR_OK);
     CHECK_EQ(format, GR_FORMAT_B8G8R8A8_UNORM);
     CHECK_EQ(w, 320);

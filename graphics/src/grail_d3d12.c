@@ -104,6 +104,7 @@ typedef struct d3d_texture {
     gr_format format;
     DXGI_FORMAT dxgi;
     uint32_t width, height, bytes_per_pixel;
+    uint32_t samples;
     uint32_t usage;
     D3D12_RESOURCE_STATES state; /* the state the last recorded barrier leaves it in */
 } d3d_texture;
@@ -171,6 +172,9 @@ typedef struct d3d_cmd {
     uint32_t frame_slot;
     d3d_buffer *decay[D3D_DECAY_MAX]; /* storage buffers transitioned in this recording */
     uint32_t decay_count;
+    struct d3d_view *resolve_src[D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT]; /* resolved at end_render */
+    struct d3d_view *resolve_dst[D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT];
+    uint32_t resolve_count;
 } d3d_cmd;
 
 typedef struct d3d_shader {
@@ -751,11 +755,24 @@ gr_result gr_d3d12_abi_texture_create(gr_handle device_handle, const gr_texture_
     *out_texture = GR_NULL_HANDLE;
     dxgi = d3d_format(desc->format, &bpp);
     if (dxgi == DXGI_FORMAT_UNKNOWN || desc->type != GR_TEXTURE_2D || desc->mip_levels > 1 ||
-        desc->array_layers > 1 || desc->samples > 1 ||
+        desc->array_layers > 1 ||
         (desc->usage & ~(uint32_t)(GR_TEXTURE_USAGE_COLOR_ATTACHMENT | GR_TEXTURE_USAGE_TRANSFER_SRC |
                                    GR_TEXTURE_USAGE_TRANSFER_DST | GR_TEXTURE_USAGE_DEPTH_ATTACHMENT |
                                    GR_TEXTURE_USAGE_SAMPLED)))
         return GR_ERROR_UNSUPPORTED;
+    if (desc->samples > 1) {
+        D3D12_FEATURE_DATA_MULTISAMPLE_QUALITY_LEVELS q;
+        if ((desc->samples & (desc->samples - 1)) || desc->samples > 16 ||
+            !(desc->usage & (GR_TEXTURE_USAGE_COLOR_ATTACHMENT | GR_TEXTURE_USAGE_DEPTH_ATTACHMENT)) ||
+            (desc->usage & (GR_TEXTURE_USAGE_SAMPLED | GR_TEXTURE_USAGE_TRANSFER_SRC | GR_TEXTURE_USAGE_TRANSFER_DST)))
+            return GR_ERROR_INVALID_ARGUMENT; /* a multisampled image is an attachment, resolved to read */
+        memset(&q, 0, sizeof(q));
+        q.Format = dxgi;
+        q.SampleCount = desc->samples;
+        if (FAILED(ID3D12Device_CheckFeatureSupport(dev->device, D3D12_FEATURE_MULTISAMPLE_QUALITY_LEVELS, &q,
+                                                    sizeof(q))) || q.NumQualityLevels == 0)
+            return GR_ERROR_UNSUPPORTED;
+    }
     if (((desc->usage & GR_TEXTURE_USAGE_DEPTH_ATTACHMENT) != 0) != d3d_is_depth(desc->format) ||
         ((desc->usage & GR_TEXTURE_USAGE_COLOR_ATTACHMENT) && d3d_is_depth(desc->format)))
         return GR_ERROR_INVALID_ARGUMENT; /* a depth format is a depth attachment and nothing else */
@@ -771,7 +788,7 @@ gr_result gr_d3d12_abi_texture_create(gr_handle device_handle, const gr_texture_
     rd.DepthOrArraySize = 1;
     rd.MipLevels = 1;
     rd.Format = dxgi;
-    rd.SampleDesc.Count = 1;
+    rd.SampleDesc.Count = desc->samples > 1 ? desc->samples : 1;
     if (desc->usage & GR_TEXTURE_USAGE_COLOR_ATTACHMENT)
         rd.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
     if (desc->usage & GR_TEXTURE_USAGE_DEPTH_ATTACHMENT)
@@ -792,6 +809,7 @@ gr_result gr_d3d12_abi_texture_create(gr_handle device_handle, const gr_texture_
     texture->height = desc->height;
     texture->bytes_per_pixel = bpp;
     texture->usage = desc->usage;
+    texture->samples = desc->samples > 1 ? desc->samples : 1;
     texture->state = D3D12_RESOURCE_STATE_COMMON;
     status = d3d_own(dev, &texture->node, GR_HANDLE_TEXTURE, texture, out_texture);
     if (status != GR_OK) {
@@ -853,7 +871,7 @@ gr_result gr_d3d12_abi_texture_view_create(gr_handle device_handle, const gr_tex
         }
         memset(&dsv, 0, sizeof(dsv));
         dsv.Format = texture->dxgi;
-        dsv.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
+        dsv.ViewDimension = texture->samples > 1 ? D3D12_DSV_DIMENSION_TEXTURE2DMS : D3D12_DSV_DIMENSION_TEXTURE2D;
         dev->dsv_heap->lpVtbl->GetCPUDescriptorHandleForHeapStart(dev->dsv_heap, &cpu);
         cpu.ptr += (SIZE_T)slot * dev->dsv_stride;
         ID3D12Device_CreateDepthStencilView(dev->device, texture->resource, &dsv, cpu);
@@ -875,7 +893,7 @@ gr_result gr_d3d12_abi_texture_view_create(gr_handle device_handle, const gr_tex
                 free(view);
                 return GR_ERROR_UNSUPPORTED;
             }
-            rtv.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
+            rtv.ViewDimension = texture->samples > 1 ? D3D12_RTV_DIMENSION_TEXTURE2DMS : D3D12_RTV_DIMENSION_TEXTURE2D;
             dev->rtv_heap->lpVtbl->GetCPUDescriptorHandleForHeapStart(dev->rtv_heap, &cpu);
             cpu.ptr += (SIZE_T)slot * dev->rtv_stride;
             ID3D12Device_CreateRenderTargetView(dev->device, texture->resource, &rtv, cpu);
@@ -1091,12 +1109,25 @@ gr_result gr_d3d12_abi_cmd_begin_render(gr_handle cmd_handle, const gr_render_be
         info->color_count > D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT)
         return GR_ERROR_INVALID_ARGUMENT;
     cmd->device->rtv_heap->lpVtbl->GetCPUDescriptorHandleForHeapStart(cmd->device->rtv_heap, &base);
+    cmd->resolve_count = 0;
     for (i = 0; i < info->color_count; ++i) {
         d3d_view *view = (d3d_view *)d3d_get(info->colors[i].view, GR_HANDLE_TEXTURE_VIEW);
         if (!view)
             return GR_ERROR_INVALID_HANDLE;
-        if (view->rtv_index == D3D_RTV_MAX || info->colors[i].resolve_view != GR_NULL_HANDLE)
-            return GR_ERROR_UNSUPPORTED;
+        if (view->rtv_index == D3D_RTV_MAX)
+            return GR_ERROR_INVALID_ARGUMENT;
+        if (info->colors[i].resolve_view != GR_NULL_HANDLE) {
+            d3d_view *dst = (d3d_view *)d3d_get(info->colors[i].resolve_view, GR_HANDLE_TEXTURE_VIEW);
+            if (!dst)
+                return GR_ERROR_INVALID_HANDLE;
+            if (view->texture->samples < 2 || dst->texture->samples != 1 ||
+                dst->texture->dxgi != view->texture->dxgi || dst->texture->width != view->texture->width ||
+                dst->texture->height != view->texture->height)
+                return GR_ERROR_INVALID_ARGUMENT; /* resolve an MSAA image into a same-size single-sample one */
+            cmd->resolve_src[cmd->resolve_count] = view;
+            cmd->resolve_dst[cmd->resolve_count] = dst;
+            cmd->resolve_count++;
+        }
         if (view->texture->state != D3D12_RESOURCE_STATE_RENDER_TARGET)
             return GR_ERROR_NOT_READY; /* the ABI requires an explicit barrier first */
         targets[i].ptr = base.ptr + (SIZE_T)view->rtv_index * cmd->device->rtv_stride;
@@ -1140,12 +1171,40 @@ gr_result gr_d3d12_abi_cmd_begin_render(gr_handle cmd_handle, const gr_render_be
     return GR_OK;
 }
 
+/* A colour attachment with a resolve view is resolved as the pass ends: the MSAA image goes
+ * RENDER_TARGET -> RESOLVE_SOURCE -> RENDER_TARGET and the target from its tracked state to
+ * RESOLVE_DEST and back, so the pass leaves the caller's states unchanged. */
 gr_result gr_d3d12_abi_cmd_end_render(gr_handle cmd_handle)
 {
     d3d_cmd *cmd = d3d_cmd_of(cmd_handle);
+    uint32_t i;
     if (!cmd)
         return GR_ERROR_INVALID_HANDLE;
-    return cmd->recording ? GR_OK : GR_ERROR_NOT_READY;
+    if (!cmd->recording)
+        return GR_ERROR_NOT_READY;
+    for (i = 0; i < cmd->resolve_count; ++i) {
+        d3d_texture *src = cmd->resolve_src[i]->texture, *dst = cmd->resolve_dst[i]->texture;
+        D3D12_RESOURCE_BARRIER b[2];
+        UINT n = dst->state == D3D12_RESOURCE_STATE_RESOLVE_DEST ? 1u : 2u;
+        memset(b, 0, sizeof(b));
+        b[0].Type = b[1].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        b[0].Transition.Subresource = b[1].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        b[0].Transition.pResource = src->resource;
+        b[0].Transition.StateBefore = src->state;
+        b[0].Transition.StateAfter = D3D12_RESOURCE_STATE_RESOLVE_SOURCE;
+        b[1].Transition.pResource = dst->resource;
+        b[1].Transition.StateBefore = dst->state;
+        b[1].Transition.StateAfter = D3D12_RESOURCE_STATE_RESOLVE_DEST;
+        ID3D12GraphicsCommandList_ResourceBarrier(cmd->list, n, b);
+        ID3D12GraphicsCommandList_ResolveSubresource(cmd->list, dst->resource, 0, src->resource, 0, src->dxgi);
+        b[0].Transition.StateBefore = D3D12_RESOURCE_STATE_RESOLVE_SOURCE;
+        b[0].Transition.StateAfter = src->state;
+        b[1].Transition.StateBefore = D3D12_RESOURCE_STATE_RESOLVE_DEST;
+        b[1].Transition.StateAfter = dst->state;
+        ID3D12GraphicsCommandList_ResourceBarrier(cmd->list, n, b);
+    }
+    cmd->resolve_count = 0;
+    return GR_OK;
 }
 
 gr_result gr_d3d12_abi_cmd_set_viewport(gr_handle cmd_handle, float x, float y, float width,
@@ -1608,8 +1667,10 @@ gr_result gr_d3d12_abi_pipeline_create(gr_handle device_handle, const gr_pipelin
         (vertex->permutation_key != desc->permutation_key ||
          (fragment && fragment->permutation_key != desc->permutation_key)))
         return GR_ERROR_INVALID_ARGUMENT;
-    if (desc->samples > 1 || desc->conservative || desc->depth_bias || desc->query_pool != GR_NULL_HANDLE)
-        return GR_ERROR_UNSUPPORTED; /* MSAA, conservative raster, depth bias, queries */
+    if (desc->conservative || desc->depth_bias || desc->query_pool != GR_NULL_HANDLE)
+        return GR_ERROR_UNSUPPORTED; /* conservative raster, depth bias, queries */
+    if (desc->samples > 16 || (desc->samples & (desc->samples - 1)))
+        return GR_ERROR_INVALID_ARGUMENT;
     if (desc->depth_compare > GR_COMPARE_ALWAYS ||
         (desc->vertex_attribute_count && !desc->vertex_attributes) ||
         (desc->vertex_binding_count && !desc->vertex_bindings) ||
@@ -1651,7 +1712,8 @@ gr_result gr_d3d12_abi_pipeline_create(gr_handle device_handle, const gr_pipelin
     pd.BlendState.AlphaToCoverageEnable = desc->alpha_to_coverage ? TRUE : FALSE;
     pd.NumRenderTargets = desc->color_count;
     pd.SampleMask = UINT32_MAX;
-    pd.SampleDesc.Count = 1;
+    pd.SampleDesc.Count = desc->samples > 1 ? desc->samples : 1;
+    pd.RasterizerState.MultisampleEnable = desc->samples > 1 ? TRUE : FALSE;
     pd.RasterizerState.FillMode = desc->wireframe ? D3D12_FILL_MODE_WIREFRAME : D3D12_FILL_MODE_SOLID;
     pd.RasterizerState.CullMode = desc->cull == GR_CULL_FRONT  ? D3D12_CULL_MODE_FRONT
                                   : desc->cull == GR_CULL_BACK ? D3D12_CULL_MODE_BACK

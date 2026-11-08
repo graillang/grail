@@ -236,8 +236,8 @@ int main(int argc, char **argv)
         pd.topology = GR_TOPOLOGY_TRIANGLE_LIST;
         pd.cull = GR_CULL_NONE;
         pd.front_face_ccw = 1;
-        pd.samples = 4;
-        CHECK_EQ(gr_pipeline_create(device, &pd, &refused), GR_ERROR_UNSUPPORTED); /* no MSAA yet */
+        pd.samples = 3;
+        CHECK_EQ(gr_pipeline_create(device, &pd, &refused), GR_ERROR_INVALID_ARGUMENT); /* not a power of two */
         pd.samples = 1;
         pd.shaders[GR_SHADER_STAGE_FRAGMENT] = vs; /* a vertex shader in the fragment slot */
         CHECK_EQ(gr_pipeline_create(device, &pd, &refused), GR_ERROR_INVALID_ARGUMENT);
@@ -324,6 +324,59 @@ int main(int argc, char **argv)
                 }
             }
         CHECK_EQ(wrong, 0);
+        /* The same draw at 4x MSAA, resolved at end_render into a single-sample target: the shader
+         * runs once per pixel, so the resolve must equal the single-sample image byte for byte. */
+        {
+            static uint8_t resolved[kDraw * kDraw * 4];
+            gr_handle msaa_pipe = GR_NULL_HANDLE, ms = GR_NULL_HANDLE, ms_view = GR_NULL_HANDLE;
+            gr_handle rs = GR_NULL_HANDLE, rs_view = GR_NULL_HANDLE, bad_tex = GR_NULL_HANDLE;
+            gr_barrier mb[2];
+            uint64_t v2 = 0;
+            pd.samples = 4;
+            CHECK_EQ(gr_pipeline_create(device, &pd, &msaa_pipe), GR_OK);
+            pd.samples = 1;
+            td.samples = 4;
+            td.usage = GR_TEXTURE_USAGE_COLOR_ATTACHMENT | GR_TEXTURE_USAGE_TRANSFER_SRC;
+            CHECK_EQ(gr_texture_create(device, &td, &bad_tex), GR_ERROR_INVALID_ARGUMENT); /* read via a resolve */
+            td.usage = GR_TEXTURE_USAGE_COLOR_ATTACHMENT;
+            CHECK_EQ(gr_texture_create(device, &td, &ms), GR_OK);
+            td.samples = 1;
+            td.usage = GR_TEXTURE_USAGE_COLOR_ATTACHMENT | GR_TEXTURE_USAGE_TRANSFER_SRC;
+            CHECK_EQ(gr_texture_create(device, &td, &rs), GR_OK);
+            vd.texture = ms;
+            CHECK_EQ(gr_texture_view_create(device, &vd, &ms_view), GR_OK);
+            vd.texture = rs;
+            CHECK_EQ(gr_texture_view_create(device, &vd, &rs_view), GR_OK);
+            CHECK_EQ(gr_cmd_reset(draw_cmd), GR_OK);
+            CHECK_EQ(gr_cmd_begin(draw_cmd), GR_OK);
+            memset(mb, 0, sizeof(mb));
+            mb[0].resource = ms;
+            mb[0].src_state = GR_STATE_UNDEFINED;
+            mb[0].dst_state = GR_STATE_COLOR_ATTACHMENT;
+            mb[1].resource = rs;
+            mb[1].src_state = GR_STATE_UNDEFINED;
+            mb[1].dst_state = GR_STATE_TRANSFER_SRC;
+            CHECK_EQ(gr_cmd_barrier(draw_cmd, mb, 2), GR_OK);
+            attachment.view = ms_view;
+            attachment.resolve_view = ms_view; /* an MSAA image cannot be a resolve target */
+            CHECK_EQ(gr_cmd_begin_render(draw_cmd, &rb), GR_ERROR_INVALID_ARGUMENT);
+            attachment.resolve_view = rs_view;
+            CHECK_EQ(gr_cmd_begin_render(draw_cmd, &rb), GR_OK);
+            CHECK_EQ(gr_cmd_bind_pipeline(draw_cmd, msaa_pipe), GR_OK);
+            CHECK_EQ(gr_cmd_push_constants(draw_cmd, 0, (gr_span_u8){ (const uint8_t *)tint, sizeof(tint) }), GR_OK);
+            CHECK_EQ(gr_cmd_draw(draw_cmd, &draw), GR_OK);
+            CHECK_EQ(gr_cmd_end_render(draw_cmd), GR_OK);
+            CHECK_EQ(gr_cmd_end(draw_cmd), GR_OK);
+            CHECK_EQ(gr_submit_commands(&submit, &v2), GR_OK);
+            CHECK_EQ(gr_fence_wait(fence, v2, 5000000000ull, &wait_status), GR_OK);
+            CHECK_EQ(gr_texture_read(rs, 0, 0, 0, 0, kDraw, kDraw, GR_STATE_TRANSFER_SRC,
+                                     (gr_mut_span_u8){ resolved, sizeof(resolved) }), GR_OK);
+            CHECK(memcmp(resolved, frame, sizeof(frame)) == 0);
+            printf("d3d12-backend: 4x MSAA draw resolved at end_render matches the single-sample image%s\n",
+                   memcmp(resolved, frame, sizeof(frame)) == 0 ? " byte for byte" : " - MISMATCH");
+            attachment.view = target_view;
+            attachment.resolve_view = GR_NULL_HANDLE;
+        }
         printf("d3d12-backend: draw %ux%u matches the shader on %u pixels (corners %u,%u,%u,%u / %u,%u,%u,%u)\n",
                kDraw, kDraw, (unsigned)(kDraw * kDraw - wrong), frame[0], frame[1], frame[2], frame[3],
                frame[sizeof(frame) - 4], frame[sizeof(frame) - 3], frame[sizeof(frame) - 2], frame[sizeof(frame) - 1]);
@@ -613,8 +666,8 @@ int main(int argc, char **argv)
             uint32_t declared = 0, committed = 0;
             CHECK_EQ(gr_pipeline_commit(device, NULL), GR_OK);
             CHECK_EQ(gr_pipeline_stats(device, &declared, &committed), GR_OK);
-            CHECK_EQ(declared, 5);
-            CHECK_EQ(committed, 5);
+            CHECK_EQ(declared, 6);
+            CHECK_EQ(committed, 6);
             gr_handle late = GR_NULL_HANDLE;
             CHECK_EQ(gr_pipeline_create(device, &pd, &late), GR_ERROR_NOT_READY);
             CHECK_EQ(gr_pipeline_commit(device, NULL), GR_ERROR_NOT_READY);
