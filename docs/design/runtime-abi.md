@@ -4,11 +4,12 @@
 `include/grail/` are the normative contract. Portable pieces (versioning, error mapping,
 Unicode, lexical paths) are implemented and tested; the Linux reference shim implements files,
 directories, environment, time, threads, dynamic libraries, child processes and TCP/UDP
-sockets. Windows and macOS have statically verified backends for init/time/environment/
-cwd/executable, file basics, directory iteration, threads/synchronization, dynamic libraries,
-child processes, local-time offsets and TCP/UDP sockets, with every unimplemented function
-explicitly fail-closed. Nothing here is linked into Grail programs yet, and no C source is part of the
-compiler or runtime build.
+sockets. Windows and macOS have statically verified full-function backends covering
+init/time/environment, paths, files and metadata, directory iteration, threads/synchronization,
+dynamic libraries, child processes, local-time offsets, sockets and DNS. Platform subfeatures
+that cannot be provided fail closed at runtime and are documented per backend. Nothing here is
+linked into the compiler or shipping runtime; the first Grail-facing wrappers are a separate,
+FFI-gated layer.
 
 The runtime today is Linux-only: `compiler/runtime.grl` maps portable operation IDs to Linux
 syscalls behind `rt_syscall`, emits freestanding ELF, and exposes a small `host::*` builtin
@@ -143,23 +144,26 @@ pair, structs crossing by reference, opaque `handle`, linear ownership) maps dir
 | Time | `grail_time.h` | n/a | monotonic/realtime/CPU, sleep, local offset | monotonic/realtime/CPU, sleep, local offset | monotonic/realtime/CPU, sleep, local offset |
 | Environment | `grail_env.h` | shared store | get/set/unset/enumerate | get/set/unset/enumerate | get/set/unset/enumerate |
 | Files/pipes | `grail_fs.h` | handle table | open/read/write/seek/truncate/sync/stat/close, pipe | open/read/write/seek/truncate/sync/stat/close, pipe | open/read/write/seek/truncate/sync/non-blocking/close, pipe |
-| File metadata | `grail_fs.h` | format | `file_stat`/`fs_stat` | `file_stat`/`fs_stat` | not implemented |
+| File metadata | `grail_fs.h` | format | `file_stat`/`fs_stat` | `file_stat`/`fs_stat` | `file_stat`/`fs_stat` ($INODE64) |
 | Directories | `grail_fs.h` | handle table | open/next/close, mkdir/remove/rename | FindFirstFileW/FindNextFileW, mkdir/remove/rename | opendir/readdir, mkdir/remove/rename |
 | Paths | `grail_path.h` | POSIX + Windows rules, both tested | cwd, executable | cwd, executable | cwd, executable |
 | Processes | `grail_proc.h` | options/status layout | fork/execve/wait4 subset | CreateProcessW subset | posix_spawn subset |
-| Sockets | `grail_socket.h` | address layout | TCP/UDP IPv4+IPv6, options, DNS | TCP/UDP IPv4+IPv6, options; DNS fail-closed | TCP/UDP IPv4+IPv6, options; DNS fail-closed |
+| Sockets | `grail_socket.h` | address layout | TCP/UDP IPv4+IPv6, options, DNS | TCP/UDP IPv4+IPv6, options, DNS | TCP/UDP IPv4+IPv6, options, DNS |
 | Threads/sync | `grail_thread.h` | handle table | pthread thread, mutex, condvar | CreateThread/SRWLOCK/CONDITION_VARIABLE | pthread thread/mutex/condvar |
 | Dynamic libraries | `grail_dl.h` | handle table | dlopen/dlsym/dlclose | LoadLibraryExW/GetProcAddress | dlopen/dlsym/dlclose |
 
 The Windows and macOS backends use pinned Win32 and Darwin declarations rather than platform
 SDK headers, so they can be compiled for Win64 and Apple ARM64 on this host. They have not
-been executed on those systems. `GRAIL_CAP_FILE_METADATA` separates byte I/O from metadata;
-Linux and Windows set it, macOS clears it. `GRAIL_CAP_FILE_NONBLOCKING` separately covers
-`file_set_nonblocking`; Linux and macOS set it, Windows clears it. `GRAIL_CAP_SYMLINKS`
-covers `readlink`/`realpath`; Linux and macOS set it, Windows clears it.
+been executed on those systems. All 95 public functions are defined on both. The capability
+word includes `FILE_METADATA`, `FILE_NONBLOCKING`, `SYMLINKS` and `RESOLVE`; platform
+subfeatures that cannot be provided still fail closed at runtime (Windows non-blocking mode is
+pipe-only, `REUSE_PORT` is unsupported, and `readlink` handles symlink/mount-point reparse
+records).
 
-"Not implemented" always means the shim returns `GRAIL_E_UNSUPPORTED` and the capability bit
-is clear. It never means a silent success or a sequential fallback under a concurrent name.
+Where a platform subfeature cannot be provided (Windows non-blocking mode on regular files,
+`REUSE_PORT`, or a non-reparse `readlink`), the call returns `GRAIL_E_UNSUPPORTED` or
+`GRAIL_E_INVALID_ARGUMENT`; it is never a silent success or a sequential fallback under a
+concurrent name. The public function surface itself is complete on both backends.
 
 ## Verification
 
@@ -183,7 +187,7 @@ is clear. It never means a silent success or a sequential fallback under a concu
 - Cross-target object builds for `x86_64-pc-windows-msvc`, `aarch64-pc-windows-msvc`,
   `arm64-apple-macos11` and `x86_64-apple-macos11` with strict warnings and
   `-DGRAIL_ABI_BUILD`; `llvm-nm` confirms all 95 public functions are defined in each backend,
-  including the fail-closed stub translation units.
+  with no remaining stub translation units.
 
 The test suite needs a C compiler and is deliberately separate from the Grail build; no
 Grail program links these C files. The Linux reference shim is a behavioural oracle for the
@@ -200,14 +204,15 @@ for birth time; and keep raw descriptors and syscalls out of safe code. The C re
 behavioural oracle, not a replacement runtime.
 
 Windows implementation is static-only until it runs on a real Windows host. Remaining: compare
-the pinned declarations with the current SDK; add `\\?\` long paths and reserved-name policy,
-reparse-point metadata, non-blocking files, readlink/realpath and DNS; apply thread names;
+the pinned declarations with the current SDK; add `\\?\` long paths and reserved-name policy;
+extend non-blocking mode beyond named pipes; improve reparse-point metadata; apply thread names;
 define the loader search-flag semantics and environment-block ordering; add Windows behaviour
-tests and set the corresponding capability bits only after they pass.
+tests.
 
 macOS implementation is static-only until it runs on macOS. Remaining: verify the pinned
-libSystem declarations and add a pinned `struct stat` for metadata; DNS; framework/`.tbd` link
-inputs belong to the macOS backend lane.
+libSystem declarations and the `$INODE64` stat symbols against the SDK; framework/`.tbd` link
+inputs belong to the macOS backend lane. DNS is blocking and must be offloaded by a green-task
+runtime.
 
 Both non-Linux backends also need ABI bridge work outside this directory: Win64 argument
 registers/shadow space and Apple ARM64 symbol conventions are compiler/codegen responsibilities.

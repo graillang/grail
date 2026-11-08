@@ -2,17 +2,33 @@
 
 ## Unreleased
 
-- Abundance CPU port, job-priority increment plus a container-ergonomics note: `abundance/src/job_policy.grl`
-  carries `JobPriority::key()`/`from_key()` (class << 32 | f32 rank bits, with the engine's
-  non-finite and negative clamps), `terrain_rank()` and the documented admission policy model; the
-  reference links the engine's own symbols. Two arithmetic bugs found on the way are fixed and
-  recorded: an unsigned exponent subtraction underflowed for every f32 value below 1.0 (the SIGABRT
-  in the first cut) and the rank's level term is max(0, 32 - level). The committed job test now
-  covers 30 exact values, including the model's execution order and counters.
-  `docs/design/grail-container-ergonomics.md` records what the entity and checkpoint work cost:
-  affine loops over owned aggregates, no reference to nested-vector elements, no in-place field
-  writes through an index, reference rebinding at every call, and the syntax facts that each cost a
-  compile iteration. Suite total 237 exact values.
+- Completed the Windows and macOS function surface. macOS now implements `file_stat`/`fs_stat`
+  with a pinned 144-byte Darwin `struct stat` and the `$INODE64` `fstat`/`stat`/`lstat` symbols,
+  including birth time and hidden/symlink/read-only flags. Windows now implements
+  reparse-point `readlink` (`FSCTL_GET_REPARSE_POINT`/`DeviceIoControl`) and `realpath`
+  (`GetFinalPathNameByHandleW`, `\\?\` stripping, `/` separators), plus non-blocking mode for
+  named pipes (`SetNamedPipeHandleState(PIPE_NOWAIT)`); regular files still return
+  `GRAIL_E_UNSUPPORTED`. DNS is implemented on both with `GetAddrInfoW` (Windows) and
+  `getaddrinfo` (macOS), filling socket address records with port 0 and setting
+  `GRAIL_CAP_RESOLVE`. All 95 public functions are now defined on both backends; the stub
+  translation units are deleted. Cross-target builds now compile seven objects per target with
+  strict warnings and layout assertions for `struct stat`, `REPARSE_DATA_BUFFER`, `ADDRINFOW`
+  and Darwin `addrinfo`. The backends remain statically checked only, not executed on Windows
+  or macOS.
+
+- Added `lib/sys/grail_ffi.grl`, the first Grail-facing wrappers over the Linux OS ABI:
+  explicit init/shutdown, file open/read/write/close/stat/size, monotonic and wall clocks,
+  and environment get/set. The module uses FFI byte views, an opaque `File` handle and
+  Grail-owned out-records, returns `T |? Error` with negative ABI statuses, and keeps file
+  handles affine by convention (explicit single close, no auto-free). Added a hosted C
+  adapter for the allocator and handle-return out-parameter, a repeatable
+  `tools/test-ffi-runtime.mjs` runner, and `docs/design/grail-ffi-runtime.md` with the exact
+  pointer/length/ownership rules. The x86-64 test links the Linux reference backend with
+  libc and executes file/time/environment checks; AArch64 and RISC-V 64 are assembly/static
+  checked only. This requires the `feature/ffi` compiler (`GRAIL_FFI_COMPILER`), is not
+  auto-loaded by the current stdlib, and changes neither `compiler/native.grl` nor
+  `compiler/runtime.grl` in the repository (the runner generates a test-only runtime copy
+  to preserve libc TLS).
 
 - Abundance CPU port, entity-registry increment: `abundance/src/entity_table.grl` carries the
   entity registry's persisted state — dense id-ordered rows of id, type, owner, position, spawned

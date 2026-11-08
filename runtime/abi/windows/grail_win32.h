@@ -119,6 +119,44 @@ typedef struct grail_wsadata {
     char *lpVendorInfo;
 } WSADATA;
 
+typedef struct grail_win32_symlink_reparse {
+    uint16_t SubstituteNameOffset;
+    uint16_t SubstituteNameLength;
+    uint16_t PrintNameOffset;
+    uint16_t PrintNameLength;
+    uint32_t Flags;
+    uint16_t PathBuffer[1];
+} SYMLINK_REPARSE_BUFFER;
+
+typedef struct grail_win32_mount_reparse {
+    uint16_t SubstituteNameOffset;
+    uint16_t SubstituteNameLength;
+    uint16_t PrintNameOffset;
+    uint16_t PrintNameLength;
+    uint16_t PathBuffer[1];
+} MOUNT_POINT_REPARSE_BUFFER;
+
+typedef struct grail_win32_reparse_data {
+    uint32_t ReparseTag;
+    uint16_t ReparseDataLength;
+    uint16_t Reserved;
+    union {
+        SYMLINK_REPARSE_BUFFER SymbolicLink;
+        MOUNT_POINT_REPARSE_BUFFER MountPoint;
+    } data;
+} REPARSE_DATA_BUFFER;
+
+typedef struct grail_addrinfo_w {
+    int32_t ai_flags;
+    int32_t ai_family;
+    int32_t ai_socktype;
+    int32_t ai_protocol;
+    uint64_t ai_addrlen;
+    uint16_t *ai_canonname;
+    sockaddr *ai_addr;
+    struct grail_addrinfo_w *ai_next;
+} ADDRINFOW;
+
 typedef struct grail_win32_linger {
     uint16_t l_onoff;
     uint16_t l_linger;
@@ -204,6 +242,7 @@ typedef struct grail_condition_variable {
 #define GRAIL_FILE_ATTRIBUTE_HIDDEN 0x00000002u
 #define GRAIL_FILE_ATTRIBUTE_DIRECTORY 0x00000010u
 #define GRAIL_FILE_ATTRIBUTE_NORMAL 0x00000080u
+#define GRAIL_FILE_READ_ATTRIBUTES 0x00000080u
 #define GRAIL_FILE_ATTRIBUTE_REPARSE_POINT 0x00000400u
 #define GRAIL_FILE_FLAG_OPEN_REPARSE_POINT 0x00200000u
 #define GRAIL_FILE_FLAG_BACKUP_SEMANTICS 0x02000000u
@@ -220,6 +259,9 @@ typedef struct grail_condition_variable {
 #define GRAIL_ERROR_PATH_NOT_FOUND 3u
 #define GRAIL_ERROR_ACCESS_DENIED 5u
 #define GRAIL_ERROR_GEN_FAILURE 31u
+#define GRAIL_ERROR_INVALID_FUNCTION 1u
+#define GRAIL_ERROR_INVALID_HANDLE 6u
+#define GRAIL_ERROR_NOT_A_REPARSE_POINT 4390u
 #define GRAIL_ERROR_INSUFFICIENT_BUFFER 122u
 #define GRAIL_ERROR_ALREADY_EXISTS 183u
 #define GRAIL_ERROR_NO_UNICODE_TRANSLATION 1113u
@@ -255,6 +297,11 @@ typedef struct grail_condition_variable {
 #define GRAIL_SHUT_WR 1
 #define GRAIL_SHUT_RDWR 2
 #define GRAIL_FIONBIO 0x8004667Eu
+#define GRAIL_FSCTL_GET_REPARSE_POINT 0x000900A8u
+#define GRAIL_IO_REPARSE_TAG_SYMLINK 0xA000000Cu
+#define GRAIL_IO_REPARSE_TAG_MOUNT_POINT 0xA0000003u
+#define GRAIL_PIPE_WAIT 0u
+#define GRAIL_PIPE_NOWAIT 1u
 #define GRAIL_CTRL_BREAK_EVENT 1u
 #define GRAIL_FORMAT_MESSAGE_FROM_SYSTEM 0x00001000u
 #define GRAIL_FORMAT_MESSAGE_IGNORE_INSERTS 0x00000200u
@@ -380,6 +427,19 @@ GRAIL_WINIMPORT int32_t GRAIL_WINAPI setsockopt(SOCKET socket_handle, int32_t le
 GRAIL_WINIMPORT int32_t GRAIL_WINAPI getsockopt(SOCKET socket_handle, int32_t level,
                                                 int32_t option, char *value, int32_t *length);
 GRAIL_WINIMPORT int32_t GRAIL_WINAPI WSAGetLastError(void);
+GRAIL_WINIMPORT BOOL GRAIL_WINAPI DeviceIoControl(HANDLE device, DWORD code, LPVOID input,
+                                                  DWORD input_size, LPVOID output,
+                                                  DWORD output_size, DWORD *returned,
+                                                  LPVOID overlapped);
+GRAIL_WINIMPORT DWORD GRAIL_WINAPI GetFinalPathNameByHandleW(HANDLE file, LPWSTR path,
+                                                             DWORD length, DWORD flags);
+GRAIL_WINIMPORT BOOL GRAIL_WINAPI SetNamedPipeHandleState(HANDLE pipe, DWORD *mode,
+                                                          DWORD *max_collection_count,
+                                                          DWORD *collect_data_timeout);
+GRAIL_WINIMPORT int32_t GRAIL_WINAPI GetAddrInfoW(const uint16_t *host, const uint16_t *service,
+                                                  const ADDRINFOW *hints,
+                                                  ADDRINFOW **results);
+GRAIL_WINIMPORT void GRAIL_WINAPI FreeAddrInfoW(ADDRINFOW *results);
 GRAIL_WINIMPORT DWORD GRAIL_WINAPI GetLastError(void);
 GRAIL_WINIMPORT void GRAIL_WINAPI Sleep(DWORD milliseconds);
 GRAIL_WINIMPORT BOOL GRAIL_WINAPI QueryPerformanceCounter(LARGE_INTEGER *value);
@@ -414,6 +474,8 @@ _Static_assert(sizeof(STARTUPINFOW) == 104, "STARTUPINFOW layout");
 _Static_assert(sizeof(PROCESS_INFORMATION) == 24, "PROCESS_INFORMATION layout");
 _Static_assert(sizeof(BY_HANDLE_FILE_INFORMATION) == 52, "BY_HANDLE_FILE_INFORMATION layout");
 _Static_assert(sizeof(WIN32_FIND_DATAW) == 592, "WIN32_FIND_DATAW layout");
+_Static_assert(sizeof(REPARSE_DATA_BUFFER) == 24, "REPARSE_DATA_BUFFER layout");
+_Static_assert(sizeof(ADDRINFOW) == 48, "ADDRINFOW layout");
 #endif
 
 #endif /* GRAIL_WIN32_H */

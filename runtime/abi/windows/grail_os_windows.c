@@ -6,13 +6,11 @@
  * current directory, executable path, file basics (open/read/write/seek/
  * truncate/sync/stat/close, pipe, attributes, mkdir/remove/rename), directory
  * iteration, threads/mutex/condition variables, dynamic libraries, child
- * processes, local-time offsets and TCP/UDP sockets.
- *
- * DNS, non-blocking files and symlink read/realpath remain explicit
- * UNSUPPORTED in grail_os_windows_stubs.c.  The Win32 declarations live in
- * grail_win32.h so
- * the backend can be compiled for Win64 on a host without the Windows SDK.
- * This is static evidence only; it has not been executed on Windows.
+ * processes, local-time offsets, TCP/UDP sockets, DNS, file metadata,
+ * reparse-point readlink/realpath and pipe non-blocking mode.  The Win32
+ * declarations live in grail_win32.h so the backend can be compiled for Win64
+ * on a host without the Windows SDK.  This is static evidence only; it has not
+ * been executed on Windows.
  */
 #include <stdint.h>
 
@@ -428,11 +426,13 @@ grail_status grail_os_init(const grail_allocator *allocator, const grail_startup
                                  GRAIL_CAP_ENV_MUTATION | GRAIL_CAP_TIME | GRAIL_CAP_CPU_TIME |
                                  GRAIL_CAP_DIRECTORIES | GRAIL_CAP_THREADS |
                                  GRAIL_CAP_SYNC_PRIMITIVES | GRAIL_CAP_DYNAMIC_LIBRARIES |
-                                 GRAIL_CAP_PROCESSES | GRAIL_CAP_LOCAL_TIME_OFFSET;
+                                 GRAIL_CAP_PROCESSES | GRAIL_CAP_LOCAL_TIME_OFFSET |
+                                 GRAIL_CAP_FILE_NONBLOCKING | GRAIL_CAP_SYMLINKS;
     WSADATA winsock;
     if (WSAStartup(0x0202u, &winsock) == 0) {
         grail_windows.winsock_ready = 1;
-        grail_windows.capabilities |= GRAIL_CAP_SOCKETS | GRAIL_CAP_SOCKET_UDP;
+        grail_windows.capabilities |= GRAIL_CAP_SOCKETS | GRAIL_CAP_SOCKET_UDP |
+                                      GRAIL_CAP_RESOLVE;
         const SOCKET probe = socket(GRAIL_AF_INET6, GRAIL_SOCK_STREAM, 0);
         if (probe != GRAIL_INVALID_SOCKET) {
             grail_windows.capabilities |= GRAIL_CAP_SOCKET_IPV6;
@@ -882,9 +882,6 @@ grail_status grail_os_file_open(const uint8_t *path, uint64_t path_length, uint6
     if (out == NULL || (flags & (GRAIL_OPEN_READ | GRAIL_OPEN_WRITE)) == 0) {
         return GRAIL_E_INVALID_ARGUMENT;
     }
-    if ((flags & GRAIL_OPEN_NONBLOCKING) != 0) {
-        return GRAIL_E_UNSUPPORTED;
-    }
     if ((flags & GRAIL_OPEN_TRUNCATE) != 0 && (flags & GRAIL_OPEN_WRITE) == 0) {
         return GRAIL_E_INVALID_ARGUMENT;
     }
@@ -932,7 +929,18 @@ grail_status grail_os_file_open(const uint8_t *path, uint64_t path_length, uint6
     if (handle == GRAIL_INVALID_HANDLE_VALUE) {
         return grail_windows_fail(error);
     }
-    return grail_windows_wrap_file(handle, out);
+    status = grail_windows_wrap_file(handle, out);
+    if (status != GRAIL_OK) {
+        return status;
+    }
+    if ((flags & GRAIL_OPEN_NONBLOCKING) != 0) {
+        status = grail_os_file_set_nonblocking(*out, 1);
+        if (status != GRAIL_OK) {
+            (void)grail_os_file_close(*out);
+            *out = GRAIL_HANDLE_NONE;
+        }
+    }
+    return status;
 }
 
 grail_status grail_os_file_read(grail_file handle, uint8_t *buffer, uint64_t capacity,
@@ -2654,6 +2662,246 @@ grail_status grail_os_socket_get_option(grail_socket handle, uint64_t option, ui
         *value = (uint64_t)(uint32_t)number;
     }
     return GRAIL_OK;
+}
+
+
+grail_status grail_os_file_set_nonblocking(grail_file handle, uint64_t enabled) {
+    grail_win32_file *file = NULL;
+    const grail_status status = grail_windows_file_lookup(handle, &file);
+    if (status != GRAIL_OK) return status;
+    DWORD mode = enabled != 0 ? GRAIL_PIPE_NOWAIT : GRAIL_PIPE_WAIT;
+    if (!SetNamedPipeHandleState(file->handle, &mode, NULL, NULL)) {
+        const DWORD error = GetLastError();
+        if (error == GRAIL_ERROR_INVALID_FUNCTION || error == GRAIL_ERROR_INVALID_HANDLE) {
+            return GRAIL_E_UNSUPPORTED;
+        }
+        return grail_windows_fail(error);
+    }
+    return GRAIL_OK;
+}
+
+static int grail_windows_reparse_span(uint64_t base, uint16_t offset, uint16_t length,
+                                      uint16_t data_length, uint64_t *absolute,
+                                      uint64_t *units) {
+    if ((offset & 1u) != 0 || (length & 1u) != 0) return 0;
+    const uint64_t available = 8u + (uint64_t)data_length;
+    if (available > 16384u || base > available) return 0;
+    if ((uint64_t)offset + (uint64_t)length > available - base) return 0;
+    *absolute = base + offset;
+    *units = (uint64_t)length / 2u;
+    return 1;
+}
+
+grail_result grail_os_fs_readlink(const uint8_t *path, uint64_t path_length, uint8_t *out,
+                                  uint64_t capacity) {
+    if (!grail_windows.initialized) return GRAIL_E_NOT_INITIALIZED;
+    WCHAR *wide = NULL;
+    uint64_t wide_units = 0;
+    grail_status status = grail_windows_to_wide(path, path_length, &wide, &wide_units);
+    if (status != GRAIL_OK) return status;
+    const HANDLE handle = CreateFileW(wide, GRAIL_FILE_READ_ATTRIBUTES,
+                                      GRAIL_FILE_SHARE_READ | GRAIL_FILE_SHARE_WRITE |
+                                          GRAIL_FILE_SHARE_DELETE,
+                                      NULL, GRAIL_OPEN_EXISTING,
+                                      GRAIL_FILE_FLAG_OPEN_REPARSE_POINT |
+                                          GRAIL_FILE_FLAG_BACKUP_SEMANTICS,
+                                      NULL);
+    const DWORD open_error = GetLastError();
+    grail_windows_free_wide(wide, wide_units);
+    if (handle == GRAIL_INVALID_HANDLE_VALUE) {
+        if (open_error == GRAIL_ERROR_NOT_A_REPARSE_POINT) return GRAIL_E_INVALID_ARGUMENT;
+        return grail_windows_fail(open_error);
+    }
+    uint8_t storage[16384];
+    for (uint64_t i = 0; i < sizeof(storage); i++) storage[i] = 0;
+    REPARSE_DATA_BUFFER *buffer = (REPARSE_DATA_BUFFER *)storage;
+    DWORD returned = 0;
+    if (!DeviceIoControl(handle, GRAIL_FSCTL_GET_REPARSE_POINT, NULL, 0, buffer,
+                         (DWORD)sizeof(storage), &returned, NULL)) {
+        const DWORD error = GetLastError();
+        (void)CloseHandle(handle);
+        if (error == GRAIL_ERROR_NOT_A_REPARSE_POINT) return GRAIL_E_INVALID_ARGUMENT;
+        return grail_windows_fail(error);
+    }
+    (void)CloseHandle(handle);
+    uint64_t base = 0;
+    uint16_t offset = 0;
+    uint16_t length = 0;
+    if (buffer->ReparseTag == GRAIL_IO_REPARSE_TAG_SYMLINK) {
+        base = (uint64_t)((const uint8_t *)&buffer->data.SymbolicLink.PathBuffer[0] -
+                          (const uint8_t *)buffer);
+        if (buffer->data.SymbolicLink.PrintNameLength != 0) {
+            offset = buffer->data.SymbolicLink.PrintNameOffset;
+            length = buffer->data.SymbolicLink.PrintNameLength;
+        } else {
+            offset = buffer->data.SymbolicLink.SubstituteNameOffset;
+            length = buffer->data.SymbolicLink.SubstituteNameLength;
+        }
+    } else if (buffer->ReparseTag == GRAIL_IO_REPARSE_TAG_MOUNT_POINT) {
+        base = (uint64_t)((const uint8_t *)&buffer->data.MountPoint.PathBuffer[0] -
+                          (const uint8_t *)buffer);
+        if (buffer->data.MountPoint.PrintNameLength != 0) {
+            offset = buffer->data.MountPoint.PrintNameOffset;
+            length = buffer->data.MountPoint.PrintNameLength;
+        } else {
+            offset = buffer->data.MountPoint.SubstituteNameOffset;
+            length = buffer->data.MountPoint.SubstituteNameLength;
+        }
+    } else {
+        return GRAIL_E_INVALID_ARGUMENT;
+    }
+    uint64_t absolute = 0;
+    uint64_t units = 0;
+    if (!grail_windows_reparse_span(base, offset, length, buffer->ReparseDataLength,
+                                    &absolute, &units) ||
+        units == 0) {
+        return GRAIL_E_INVALID_ARGUMENT;
+    }
+    const WCHAR *target = (const WCHAR *)((const uint8_t *)buffer + absolute);
+    if (units >= 4 && target[0] == '\\' && target[1] == '?' && target[2] == '?' &&
+        target[3] == '\\') {
+        target += 4;
+        units -= 4;
+    }
+    uint8_t *text = NULL;
+    uint64_t text_length = 0;
+    status = grail_windows_from_wide(target, units, &text, &text_length);
+    if (status != GRAIL_OK) return status;
+    for (uint64_t i = 0; i < text_length; i++) {
+        if (text[i] == '\\') text[i] = '/';
+    }
+    const grail_result result = grail_abi_copy_out(text, text_length, out, capacity);
+    grail_windows_release(text, text_length);
+    return result;
+}
+
+grail_result grail_os_fs_realpath(const uint8_t *path, uint64_t path_length, uint8_t *out,
+                                  uint64_t capacity) {
+    if (!grail_windows.initialized) return GRAIL_E_NOT_INITIALIZED;
+    WCHAR *wide = NULL;
+    uint64_t wide_units = 0;
+    grail_status status = grail_windows_to_wide(path, path_length, &wide, &wide_units);
+    if (status != GRAIL_OK) return status;
+    const HANDLE handle = CreateFileW(wide, GRAIL_FILE_READ_ATTRIBUTES,
+                                      GRAIL_FILE_SHARE_READ | GRAIL_FILE_SHARE_WRITE |
+                                          GRAIL_FILE_SHARE_DELETE,
+                                      NULL, GRAIL_OPEN_EXISTING,
+                                      GRAIL_FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    const DWORD open_error = GetLastError();
+    grail_windows_free_wide(wide, wide_units);
+    if (handle == GRAIL_INVALID_HANDLE_VALUE) return grail_windows_fail(open_error);
+    uint64_t size = 512;
+    uint8_t *text = NULL;
+    uint64_t text_length = 0;
+    for (;;) {
+        WCHAR *buffer = (WCHAR *)grail_windows_allocate(size * sizeof(WCHAR));
+        if (buffer == NULL) {
+            (void)CloseHandle(handle);
+            return GRAIL_E_OUT_OF_MEMORY;
+        }
+        const DWORD length = GetFinalPathNameByHandleW(handle, buffer, (DWORD)size, 0);
+        if (length == 0) {
+            const DWORD error = GetLastError();
+            grail_windows_release(buffer, size * sizeof(WCHAR));
+            (void)CloseHandle(handle);
+            return grail_windows_fail(error);
+        }
+        if (length < size) {
+            status = grail_windows_from_wide(buffer, length, &text, &text_length);
+            grail_windows_release(buffer, size * sizeof(WCHAR));
+            break;
+        }
+        grail_windows_release(buffer, size * sizeof(WCHAR));
+        if (size >= 1048576) {
+            (void)CloseHandle(handle);
+            return GRAIL_E_NAME_TOO_LONG;
+        }
+        size *= 2;
+    }
+    (void)CloseHandle(handle);
+    if (status != GRAIL_OK) return status;
+    uint64_t length = text_length;
+    if (text_length >= 8 && text[0] == '\\' && text[1] == '\\' && text[2] == '?' &&
+        text[3] == '\\' && text[4] == 'U' && text[5] == 'N' && text[6] == 'C' &&
+        text[7] == '\\') {
+        const uint64_t rest = text_length - 8;
+        for (uint64_t i = 0; i < rest; i++) text[2 + i] = text[8 + i];
+        text[0] = '/';
+        text[1] = '/';
+        length = rest + 2;
+    } else if (text_length >= 4 && text[0] == '\\' && text[1] == '\\' &&
+               text[2] == '?' && text[3] == '\\') {
+        for (uint64_t i = 0; i < text_length - 4; i++) text[i] = text[4 + i];
+        length = text_length - 4;
+    }
+    for (uint64_t i = 0; i < length; i++) {
+        if (text[i] == '\\') text[i] = '/';
+    }
+    const grail_result result = grail_abi_copy_out(text, length, out, capacity);
+    grail_windows_release(text, text_length);
+    return result;
+}
+
+
+static grail_result grail_windows_resolve_fail(int32_t code) {
+    grail_windows_error.domain = GRAIL_OS_DOMAIN_WIN32;
+    grail_windows_error.code = (uint64_t)(int64_t)code;
+    if (code == 11001 || code == 11004) return GRAIL_E_NOT_FOUND;
+    if (code == 11002) return GRAIL_E_TIMED_OUT;
+    return GRAIL_E_SYSTEM;
+}
+
+grail_result grail_os_net_resolve(const uint8_t *host, uint64_t host_length, uint64_t family,
+                                  grail_socket_address *addresses, uint64_t capacity) {
+    if (!grail_windows.initialized) return GRAIL_E_NOT_INITIALIZED;
+    if (!grail_windows.winsock_ready) return GRAIL_E_UNSUPPORTED;
+    if (host == NULL || host_length == 0 || grail_windows_has_zero(host, host_length) ||
+        (addresses == NULL && capacity != 0)) {
+        return GRAIL_E_INVALID_ARGUMENT;
+    }
+    WCHAR *wide = NULL;
+    uint64_t wide_units = 0;
+    grail_status status = grail_windows_to_wide(host, host_length, &wide, &wide_units);
+    if (status != GRAIL_OK) return status;
+    ADDRINFOW hints;
+    for (uint64_t i = 0; i < sizeof(hints); i++) ((uint8_t *)&hints)[i] = 0;
+    if (family == 0) hints.ai_family = 0;
+    else if (family == GRAIL_ADDRESS_INET) hints.ai_family = GRAIL_AF_INET;
+    else if (family == GRAIL_ADDRESS_INET6) hints.ai_family = GRAIL_AF_INET6;
+    else {
+        grail_windows_free_wide(wide, wide_units);
+        return GRAIL_E_INVALID_ARGUMENT;
+    }
+    ADDRINFOW *results = NULL;
+    const int32_t result = GetAddrInfoW(wide, NULL, &hints, &results);
+    grail_windows_free_wide(wide, wide_units);
+    if (result != 0) return grail_windows_resolve_fail(result);
+    uint64_t count = 0;
+    for (const ADDRINFOW *item = results; item != NULL; item = item->ai_next) {
+        if (item->ai_family == GRAIL_AF_INET || item->ai_family == GRAIL_AF_INET6) count++;
+    }
+    if (count > capacity) {
+        FreeAddrInfoW(results);
+        return (grail_result)count;
+    }
+    uint64_t at = 0;
+    for (const ADDRINFOW *item = results; item != NULL && at < count; item = item->ai_next) {
+        if (item->ai_family != GRAIL_AF_INET && item->ai_family != GRAIL_AF_INET6) continue;
+        if (item->ai_addr == NULL || item->ai_addrlen > 0x7FFFFFFFull) {
+            FreeAddrInfoW(results);
+            return GRAIL_E_ADDRESS_INVALID;
+        }
+        status = grail_windows_from_sockaddr(item->ai_addr, (int32_t)item->ai_addrlen,
+                                             &addresses[at]);
+        if (status != GRAIL_OK) {
+            FreeAddrInfoW(results);
+            return status;
+        }
+        addresses[at].port = 0;
+        at++;
+    }
+    FreeAddrInfoW(results);
+    return (grail_result)at;
 }
 
 grail_status grail_os_fs_stat(const uint8_t *path, uint64_t path_length, uint64_t flags,
