@@ -45,6 +45,15 @@
   only. Tooling is documented in `docs/tooling/cross-platform-ci.md`; the
   LSP/debugger/profiler integration plan is in
   `docs/tooling/lsp-debugger-profiler.md`.
+- New `windows-x86_64` target emits COFF-compatible x86-64 assembly for PE32+ console images:
+  MSVC `.def` function records replace ELF symbol types, a `grail_entry` PE entry point replaces
+  `_start`, process exit is an `ExitProcess` import and the allocation intrinsic maps to
+  `VirtualAlloc` with TEB-based thread storage. `tools/windows.mjs` writes COFF short-import
+  objects into `kernel32.lib` and links with `lld-link`; `bun tools/windows.mjs check` inspects
+  the assembly, the COFF object and the PE image. The Windows runtime, `GetCommandLineA` argv
+  recovery, worker threads and `.pdata`/unwind data are not implemented, so PE programs compile
+  and link but must not be executed yet. Command-line option errors now print a diagnostic and
+  exit 1 instead of aborting without output.
 
 - Native fixtures, inline regression programs and book examples now use typed references and
   explicit byte views under `--default-u64 --typed-refs`; user-mode cases retain `i64` defaults.
