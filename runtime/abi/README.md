@@ -28,8 +28,9 @@ tools/abi-test.mjs        test runner (also `just abi-test`)
 1. **Fail closed.** While a domain is incomplete, `grail_os_capabilities()` must not report its
    bit and every entry point in that domain must return `GRAIL_E_UNSUPPORTED`. Never return a
    made-up success or silently run a "concurrent" API sequentially.
-2. **Capabilities are all-or-nothing per domain.** Set a bit only after every function in that
-   domain is implemented and covered by a test on that platform.
+2. **Capabilities are all-or-nothing per advertised feature.** A domain may have separate bits
+   (`FILE_METADATA`, `FILE_NONBLOCKING`, `SYMLINKS`); set one only after every function it
+   covers is implemented and covered by a test on that platform.
 3. **Handles are linear.** Use a generation-checked table (or an equivalent scheme). A stale,
    double-closed or cross-domain handle returns `GRAIL_E_INVALID_HANDLE`; it is never
    undefined behaviour and never names a reused resource.
@@ -235,7 +236,8 @@ clang -target x86_64-apple-macos11 -ffreestanding -c ... <same sources>
 ```
 
 It then unions `llvm-nm -g --defined-only` over the objects and checks that all 95 public
-functions from `include/grail/*.h` are defined for all four targets.
+functions from `include/grail/*.h` are defined for all four targets. The runner requires
+`clang` and `llvm-nm`.
 
 Limits of this evidence:
 
@@ -246,8 +248,10 @@ Limits of this evidence:
 - `_Thread_local` error detail assumes static/direct TLS; a DLL build needs an explicit TLS
   strategy before it can claim thread-local detail.
 - Windows `NO_FOLLOW`/symlink metadata is limited by `GetFileAttributesExW`; `GRAIL_CAP_SYMLINKS`
-  is clear. macOS `rename` without `GRAIL_RENAME_REPLACE` checks existence with `access`; the
-  check is best-effort and races with a concurrent creator.
+  is clear. `mode` is not represented by Win32 file creation, and `file_truncate` moves the
+  file pointer. macOS `rename` without `GRAIL_RENAME_REPLACE` checks existence with `access`;
+  the check is best-effort and races with a concurrent creator. `mkdir` with
+  `GRAIL_MKDIR_PARENTS` is unsupported on both first-layer backends.
 - The Win32 and Darwin declarations are pinned, not taken from the SDK. They match the 64-bit
   ABI used here, but a real platform build should compare them with the current SDK headers.
 - macOS metadata is deliberately absent; `struct stat` was not declared without an SDK.
