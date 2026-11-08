@@ -2,16 +2,25 @@
 
 ## Unreleased
 
-- macOS platform linkage beyond libSystem: `compileProgram` accepts `frameworks` and, with
-  `$GRAIL_SDK`, links the SDK's real `-framework` stubs, otherwise writes `<Name>.framework` `.tbd`
-  stubs from a caller-supplied export list (a framework name without either is rejected instead of
-  being invented). `tools/macos.mjs` parses the linked image and verifies its `LC_LOAD_DYLIB`
-  entries. `sign: true` requests an ad-hoc signature — `codesign --force --sign -` on macOS,
-  `ld64.lld -adhoc_codesign` elsewhere — and `bun tools/macos.mjs inspect|verify BINARY` validates
-  the SuperBlob, CodeDirectory, page hashes and cdhash statically; a tampered page fails
-  verification. Tests add Foundation framework loading, unknown-framework rejection (driver and
-  linker), and signature validation/tamper detection. Nothing here is execution evidence on Apple
-  hardware.
+- Abundance CPU port, entity-registry increment: `abundance/src/entity_table.grl` carries the
+  entity registry's persisted state — dense id-ordered rows of id, type, owner, position, spawned
+  clock and opaque payload, encoded as `ab::tx::PagedRows` writes it (u32 count then every row) —
+  with the decode refusals for non-ascending keys, the codec's sequence and string caps and exact
+  consumption. The reference builds a 290-row table through the real registry operations (out-of-
+  order inserts, a rejected duplicate, ten erases, a mutate) and both sides reproduce 20 599 bytes
+  with FNV 15354762378023838882 plus seven malformed-encoding verdicts. The suite now compares 207
+  exact values (math 63, hashing 16, world 25, cache 46, checkpoint 39, entity 18). The in-memory
+  page machine (256-row pages, split at 129, merge under 64, bulk fill 192) is documented rather
+  than ported because it decides only page_count.
+
+- Abundance CPU port, checkpoint increment: `abundance/src/checkpoint.grl` carries the ABCP2
+  container — magic, version, generation, time, five identity hashes, a section table sorted by id
+  with per-section FNV checksums, and an outer checksum from the short world seed. The reference
+  compiles Abundance's own `Private/checkpoint.cpp`; the canonical checkpoint encodes to 163 bytes
+  with outer checksum 10629461004035043974 and the same three section frames, the encoder sorts and
+  refuses the same three invalid inputs, and seventeen malformed variants are rejected by both
+  readers. The suite now compares 189 exact values (math 63, hashing 16, world 25, cache 46,
+  checkpoint 39). Payload codecs stay out of scope.
 
 - Reserve `VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC` in the Vulkan descriptor pool, matching
   set 1; the new SDL3 surface test’s validation layer had exposed the missing pool size.
