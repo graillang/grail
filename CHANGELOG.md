@@ -35,6 +35,14 @@
   runtime ABI contract suite (`tools/abi-test.mjs`) and the graphics C/shader
   suites, and the Windows x86-64 cross job is a required release gate for
   build/static checks. Windows AArch64 and macOS remain planned.
+- Abundance CPU port, cache-container increment: `abundance/src/world_cache.grl` reads the
+  ABWCACH8/ABWCACH9 world cache the way `read_world_cache_summary` does (84-byte header, optional
+  landscape-settings trailer, generator block, optional 48-byte identity trailer from the end of the
+  file), reproduces the engine's rejection wording for nine malformed or version cases, and writes a
+  summary file the engine accepts byte for byte. The fixture is a real 523 KB cache of the generated
+  world; the count lines and the stored content hash match it. The suite now compares 124 exact
+  values (math 63, hashing 16, world 25, cache 20). The cache body, `load_world_cache`'s decode and
+  the ABCP2 save container remain out of scope.
 - Abundance CPU port, landscape-digest increment: `abundance/src/landscape_digest.grl` carries
   `terrain::landscape_world_content_digest` — FNV-1a from the standard offset basis over every byte
   the engine's landscape writer emits, plus the byte count — and the world envelope's `ABWLA001`
