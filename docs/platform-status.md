@@ -1,6 +1,6 @@
 # Cross-platform status
 
-Last verified: 2026-11-08 on `main` at `cd5f617`.
+Last verified: 2026-11-08 on `main` with the `42efb7f` seed set and later non-compiler increments.
 
 This page distinguishes what has actually been built and executed from scaffolding and
 static inspection. A cross-built object is not platform support. A header parsing is not a
@@ -17,15 +17,15 @@ targets are static-only.
 | Target | Compiler output | Execution evidence | Status |
 | --- | --- | --- | --- |
 | Linux x86-64 | ELF | native tests, CLI checks, book checks, byte-identical self-host | **Executed (native)** |
-| Linux AArch64 | ELF cross-image | cross-build and ELF machine checks; qemu lane when a runner is installed (none on this host) | **Cross-build only; runnable target** |
-| Linux RISC-V 64 | ELF cross-image | cross-build and ELF machine checks; qemu lane when a runner is installed (none on this host) | **Cross-build only; runnable target** |
+| Linux AArch64 | ELF cross-image | cross-build and ELF machine checks; qemu-static used for self-host and the 4 FFI fixtures | **Cross-build + qemu checks** |
+| Linux RISC-V 64 | ELF cross-image | cross-build and ELF machine checks; qemu-static used for self-host and the 4 FFI fixtures | **Cross-build + qemu checks** |
 | Windows x86-64 | PE32+ console images, COFF objects, kernel32 imports, Win32 OS layer, C runtime shims | `bun tools/windows.mjs check` 20/20; **10 programs executed under Wine**, including thread join and producer/consumer wake | **Executed under Wine; not native Windows** |
 | Windows AArch64 | ARM64 PE/COFF objects and images, Win64 ARM64 imports | 4 ARM64 images statically verified; no ARM64 runner | **Cross-build only; not executable** |
 | macOS x86-64 / AArch64 | Mach-O objects and executables, libSystem layer, platform-module runtime | 4 objects + 4 images, framework links and ad-hoc signatures checked statically; **not executed** | **Cross-build only; not executable** |
 
 Linux x86-64 is the only target with full compiler and runtime execution evidence on this host.
-Linux AArch64 and RISC-V 64 build and pass ELF checks; CI defines qemu-user lanes, but no qemu
-runner is installed here, so they are not executed here. Windows x86-64 has `.pdata`/`.xdata`, a
+Linux AArch64 and RISC-V 64 build and pass ELF checks; qemu-static was used for both self-hosting
+and the 12 executed FFI fixture instances. They still lack a full native-runtime test lane. Windows x86-64 has `.pdata`/`.xdata`, a
 Win32 console/files/argv/time layer, Win32 threads and address waits (`CreateThread`, joins through
 `WaitForSingleObject`, futex operations mapped to `WaitOnAddress`/`WakeByAddress*`), and 10 executed
 programs under Wine. Windows AArch64 has PE/COFF images and `.pdata`/`.xdata` frame records,
@@ -47,20 +47,23 @@ must not be run on Linux.
 
 `runtime/abi` has a versioned C contract for errors, handles, paths, files, directories, time,
 environment, processes, sockets, threads and dynamic loading, plus a tested Linux reference
-backend. Windows and macOS backends are fail-closed skeletons: they return explicit
-`UNSUPPORTED`/`NOT_IMPLEMENTED` instead of pretending to succeed. `bun tools/abi-test.mjs`
-passes all checks across core, handles, POSIX/Windows path semantics, process/socket skeletons
-and the Linux backend.
+backend. All **95 public ABI functions** are now defined on Windows and macOS; the fail-closed
+stub translation units are gone. `bun tools/abi-test.mjs` cross-compiles seven objects per target
+with 95/95 symbols and pinned layouts. A C harness executes 47 Windows metadata, symlink,
+non-blocking and DNS checks under Wine; macOS calls remain compile-only.
 
-This is an ABI and reference-runtime layer, not yet a Grail-language standard library binding.
+`lib/sys/grail_ffi.grl` is the first Grail-language wrapper over this ABI: explicit `File` handles,
+`FileStat`, byte views, `CStr`, `T|?Error`, and stat/time/env calls, executed on x86-64 and
+assembly-checked on AArch64/RISC-V by `bun tools/test-ffi-runtime.mjs`. It is explicit-import,
+not auto-loaded.
 
 ## FFI and v3 ABI
 
 Four FFI increments are implemented and executed: `extern "C"` declarations with `unsafe` calls,
 scalar `i64`/`u64` parameters and results, symbol renaming and link notes; byte/string views and
 `CStr`; opaque handles; C-layout `extern "C" record` values with C padding and field widths; and
-C callbacks and `cfn` function pointers. `bun tools/test-ffi.mjs` links and executes the scalar,
-views/handles, records and callback programs, and cross-links on AArch64/RISC-V. Still open:
+C callbacks and `cfn` function pointers. `bun tools/test-ffi.mjs` links and executes all four fixtures on x86-64, AArch64 and RISC-V
+(12 executed, 0 linked-only). Still open:
 dynamic library loading (`dlopen`/`dlsym` hooks), variadic C functions and variadic callbacks,
 callback results, record results and by-value struct passing, nested records, float and narrow
 integer parameters, and stack arguments beyond six words. The C headers under `include/grail`
@@ -74,9 +77,9 @@ per-combination compilation, key→bytecode library resolution, a headless Vulka
 and a Vulkan backend with device/queues, bindless layouts, buffers, textures, command buffers,
 submission, graphics and compute pipelines, indexed and indirect draws, depth and MSAA resolves,
 offscreen readbacks, and a swapchain with acquire/present and a draw path. `make -C graphics
-test` runs 450 checks (ABI 72, device 137, wire 22, library 100, graph 119); `make -C graphics
-vk-surface` runs 162 checks on a real 320×240 swapchain with acquire, draw and present and no
-validation errors, and `make -C graphics vk-smoke` and `vk-probe` add hardware checks.
+test` runs 550 host checks; `vk-surface` runs 162 checks on a real 320×240 swapchain, and
+`vk-smoke` 613 and `vk-cache` 47 on hardware, all asserting zero validation errors and leaks
+(when the counters and teardown log agree).
 
 Not implemented: D3D12 and Metal (both return `GR_ERROR_UNSUPPORTED`), mesh and ray-tracing
 pipelines, and a complete renderer. The null backend validates contracts only.
@@ -107,7 +110,8 @@ bun tools/test-native.mjs       # Linux native/rejection corpus
 bun tools/abi-test.mjs          # runtime C ABI and reference backend
 bun tools/windows.mjs check     # Windows COFF/PE static checks + 10 Wine executions
 bun tools/test-macos.mjs        # Mach-O objects/images, frameworks, signatures (static)
-bun tools/test-ffi.mjs          # extern "C" scalar ABI through a C shim (3 executed)
+bun tools/test-ffi.mjs          # extern "C" records/handles/callbacks (12 executed)
+bun tools/test-ffi-runtime.mjs  # Grail File/Error wrapper over the C ABI
 bun test tools/platforms.test.mjs tools/archive.test.mjs tools/sign.test.mjs
 bun tools/test-debug-lines.mjs  # Linux x86-64 DWARF line rows and `grail debug lines`
 make -C graphics test           # RHI C ABI, null/SDL window, shader library, graph (450)
