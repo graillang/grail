@@ -747,6 +747,16 @@ fn win_import<a, b>(o: (&a mut Out), name: &b [u8]) -> unit {
     put(&mut o, view("]\nblr x16\nadd sp,sp,#64\nmov x9,x0\n"));
     return ();
 }
+// Frame allocation for Windows ARM64: a plain subtraction of the `.set` frame value. Larger
+// frames still fit because the value is materialized into x10 first.
+fn budget<a, b>(o: (&a mut Out), symbol: &b [u8]) -> unit {
+    put(&mut o, view("movz x10,#(("));
+    put(&mut o, view(symbol));
+    put(&mut o, view(")&65535)\nmovk x10,#((("));
+    put(&mut o, view(symbol));
+    put(&mut o, view(")>>16)&65535),lsl #16\nsub sp,sp,x10\n"));
+    return ();
+}
 fn win_exit<a>(o: (&a mut Out)) -> unit {
     put(
         &mut o,
@@ -787,6 +797,10 @@ fn instruction<a, b>(o: (&a mut Out), line: &b [u8]) -> unit {
         }
         if eq(view((op)), view("winunsupported")) {
             put(&mut o, view("brk #0\n"));
+            return ();
+        }
+        if eq(view((op)), view("framesub")) {
+            budget(&mut o, view(rest));
             return ();
         }
     }

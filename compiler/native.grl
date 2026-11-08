@@ -702,6 +702,249 @@ fn win_unwind_line<a, b>(u: (&a mut WinUnwind), text: &b [u8], a: u64, e: u64) -
     push_line(&mut u.out, view(text), a, e);
     return ();
 }
+// ---- Windows ARM64 unwind data -------------------------------------------------------------
+// The ARM64 assembler encodes .seh_* directives into a packed record or a full .xdata structure,
+// and validates that the directives cover exactly the prologue bytes. This pass therefore only
+// describes the prologue the lowering produced; a function whose shape does not match is left
+// without a record instead of getting a wrong one (leaf functions need no record at all).
+fn arm_saved_reg<a>(text: &a [u8], a: u64, e: u64) -> u64 {
+    if span_has(view(text), a, e, view("str x")) == 0 {
+        return 0;
+    }
+    if span_has(view(text), a, e, view(",[sp,#-16]!")) == 0 {
+        return 0;
+    }
+    mut i = a + 5;
+    mut n = 0;
+    mut scanning = 1;
+    while scanning {
+        if e <= i {
+            scanning = 0;
+        } else {
+            if text[i] == 44 {
+                scanning = 0;
+            } else {
+                if (48 <= text[i]) & (text[i] <= 57) {
+                    n = n * 10 + (text[i] - 48);
+                }
+                i = i + 1;
+            }
+        }
+    }
+    if (18 < n) & (n < 29) {
+        return n;
+    }
+    return 0;
+}
+fn arm_lines<a>(text: &a [u8]) -> u64[] {
+    // Pairs of (start, end) offsets flattened into one array.
+    mut lines = u64[];
+    mut i = 0;
+    mut start = 0;
+    while i < text.len() {
+        if text[i] == 10 {
+            lines.push(start);
+            lines.push(i);
+            start = i + 1;
+        }
+        i = i + 1;
+    }
+    if start < text.len() {
+        lines.push(start);
+        lines.push(text.len());
+    }
+    return lines;
+}
+fn arm_unwind<a>(text: &a [u8]) -> u8[] {
+    lines := arm_lines(view(text));
+    n := lines.len() / 2;
+    frames := win_frames(view(text));
+    mut syms = u8[][];
+    mut ends = u64[];
+    mut frame_of = u64[];
+    mut kinds = u64[];
+    mut at = 0;
+    mut li = 0;
+    while li < n {
+        a := lines[li * 2];
+        e := lines[li * 2 + 1];
+        if span_has(view(text), a, e, view(".def ")) {
+            sym := span_copy(view(text), a + 5, e);
+            mut body = li + 1;
+            mut found = 0;
+            while (found == 0) & (body < n) {
+                ba := lines[body * 2];
+                be := lines[body * 2 + 1];
+                if 0 < be - ba {
+                    if text[be - 1] == 58 {
+                        found = 1;
+                    }
+                }
+                if found == 0 {
+                    body = body + 1;
+                }
+            }
+            mut stop = li + 1;
+            while stop < n {
+                a2 := lines[stop * 2];
+                e2 := lines[stop * 2 + 1];
+                if span_has(view(text), a2, e2, view(".def ")) {
+                    break;
+                }
+                if span_has(view(text), a2, e2, view(".bss")) {
+                    break;
+                }
+                stop = stop + 1;
+            }
+            mut frame = 0;
+            if at < frames.len() {
+                frame = frames[at];
+            }
+            at = at + 1;
+            mut stp = 0;
+            mut fp = 0;
+            mut sub = 0;
+            mut j = body + 1;
+            while j < stop {
+                x := lines[j * 2];
+                y := lines[j * 2 + 1];
+                if span_is(view(text), x, y, view("stp x29,x30,[sp,#-16]!")) {
+                    stp = 1;
+                }
+                if span_is(view(text), x, y, view("mov x29,x10")) {
+                    fp = 1;
+                }
+                if span_is(view(text), x, y, view("sub sp,sp,x10")) {
+                    sub = 1;
+                }
+                j = j + 1;
+            }
+            mut kind = 0;
+            if stp & fp & sub {
+                kind = 1;
+            }
+            syms.push(sym);
+            ends.push(stop);
+            frame_of.push(frame);
+            kinds.push(kind);
+            li = stop;
+            continue;
+        }
+        li = li + 1;
+    }
+    // Frame values are positional, so a mismatch means the shape is not understood: keep the
+    // assembly unchanged rather than describe the wrong function.
+    if (syms.len() != frames.len()) + (syms.len() == 0) {
+        return text.copy();
+    }
+    mut out = u8[];
+    mut cur = 0;
+    mut prologue = 0;
+    li = 0;
+    while li < n {
+        if cur < syms.len() {
+            if li == ends[cur] {
+                arm_close(&mut out, kinds[cur]);
+                cur = cur + 1;
+                prologue = 0;
+            }
+        }
+        a := lines[li * 2];
+        e := lines[li * 2 + 1];
+        if cur < syms.len() {
+            mut skip = 0;
+            if kinds[cur] != 1 {
+                skip = 1;
+            }
+            if skip != 0 {
+                push_line(&mut out, view(text), a, e);
+                li = li + 1;
+                continue;
+            }
+            mut done = 0;
+            if prologue == 0 {
+                mut is_label = 0;
+                if 0 < e - a {
+                    if text[e - 1] == 58 {
+                        is_label = 1;
+                    }
+                }
+                if is_label != 0 {
+                    mut sym = syms[cur].copy();
+                    if span_is(view(text), a, e - 1, view(sym)) {
+                        push_line(&mut out, view(text), a, e);
+                        put_text(&mut out, view(".seh_proc "));
+                        for k in sym.len() {
+                            out.push(sym[k]);
+                        }
+                        out.push(10);
+                        prologue = 1;
+                        done = 1;
+                    }
+                }
+            } else {
+                if span_is(view(text), a, e, view("stp x29,x30,[sp,#-16]!")) {
+                    push_line(&mut out, view(text), a, e);
+                    put_text(&mut out, view(".seh_save_regp x29, 0\n"));
+                    done = 1;
+                }
+                if span_is(view(text), a, e, view("mov x10,sp")) {
+                    push_line(&mut out, view(text), a, e);
+                    put_text(&mut out, view(".seh_nop\n"));
+                    done = 1;
+                }
+                if span_is(view(text), a, e, view("mov x29,x10")) {
+                    push_line(&mut out, view(text), a, e);
+                    put_text(&mut out, view(".seh_set_fp\n"));
+                    done = 1;
+                }
+                if span_has(view(text), a, e, view("movz x10,#((.F")) {
+                    push_line(&mut out, view(text), a, e);
+                    put_text(&mut out, view(".seh_nop\n"));
+                    done = 1;
+                }
+                if span_has(view(text), a, e, view("movk x10,#(((")) {
+                    push_line(&mut out, view(text), a, e);
+                    put_text(&mut out, view(".seh_nop\n"));
+                    done = 1;
+                }
+                if span_is(view(text), a, e, view("sub sp,sp,x10")) {
+                    push_line(&mut out, view(text), a, e);
+                    put_text(&mut out, view(".seh_stackalloc "));
+                    put_number(&mut out, frame_of[cur]);
+                    put_text(&mut out, view("\n.seh_endprologue\n"));
+                    prologue = 0;
+                    done = 1;
+                }
+                saved := arm_saved_reg(view(text), a, e);
+                if saved != 0 {
+                    push_line(&mut out, view(text), a, e);
+                    put_text(&mut out, view(".seh_save_reg x"));
+                    put_number(&mut out, saved);
+                    put_text(&mut out, view(", 0\n"));
+                    done = 1;
+                }
+            }
+            if done != 0 {
+                li = li + 1;
+                continue;
+            }
+        }
+        push_line(&mut out, view(text), a, e);
+        li = li + 1;
+    }
+    if cur < syms.len() {
+        arm_close(&mut out, kinds[cur]);
+    }
+    return out;
+}
+// The assembler turns the prologue directives into a full .xdata record.
+fn arm_close<a>(out: (&a mut u8[]), kind: u64) -> unit {
+    if kind == 1 {
+        put_text(&mut out, view(".seh_endproc\n"));
+    }
+    return ();
+}
 fn win_unwind<a>(text: &a [u8]) -> u8[] {
     mut u = WinUnwind { out: u8[], symbol: u8[], frames: win_frames(view(text)), frame_at: 0, state: 0 };
     mut start = 0;
@@ -4346,10 +4589,17 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     }
     func_directive(&mut c, view(m), view(name));
     mangle(&mut c, view(m), view(name));
-    o(&mut c, view(":\npushq %rbp\nmovq %rsp,%rbp\nsubq $.F"));
+    o(&mut c, view(":\npushq %rbp\nmovq %rsp,%rbp\n"));
     frame := label(&mut c);
-    on(&mut c, frame);
-    o(&mut c, view(",%rsp\n"));
+    if c.target == 4 {
+        o(&mut c, view("framesub .F"));
+        on(&mut c, frame);
+        c.out.push(10);
+    } else {
+        o(&mut c, view("subq $.F"));
+        on(&mut c, frame);
+        o(&mut c, view(",%rsp\n"));
+    }
     for i in count {
         reg := argreg(i);
         o(&mut c, view("movq "));
@@ -9683,10 +9933,17 @@ fn emit_closures<a>(c: (&a mut C)) -> unit {
         count := 1 + params.len();
         func_directive(&mut c, view(".closure"), view(symbol));
         mangle(&mut c, view(".closure"), view(symbol));
-        o(&mut c, view(":\npushq %rbp\nmovq %rsp,%rbp\nsubq $.F"));
+        o(&mut c, view(":\npushq %rbp\nmovq %rsp,%rbp\n"));
         frame := label(&mut c);
-        on(&mut c, frame);
-        o(&mut c, view(",%rsp\n"));
+        if c.target == 4 {
+            o(&mut c, view("framesub .F"));
+            on(&mut c, frame);
+            c.out.push(10);
+        } else {
+            o(&mut c, view("subq $.F"));
+            on(&mut c, frame);
+            o(&mut c, view(",%rsp\n"));
+        }
         for j in count {
             reg := argreg(j);
             o(&mut c, view("movq "));
@@ -15329,5 +15586,9 @@ pub fn main() -> u64 {
         return host::write_file(view(path), view(with_link_notes(&c.libs, view(out))));
     }
     native := machine::lower(view(out), target, c.plat);
+    if target == 4 {
+        image := arm_unwind(view(native));
+        return host::write_file(view(path), view(with_link_notes(&c.libs, view(image))));
+    }
     return host::write_file(view(path), view(with_link_notes(&c.libs, view(native))));
 }
