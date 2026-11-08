@@ -61,7 +61,7 @@ long long c_point_swap(struct point *p) {
 struct mixed {
     int a;
     short b;
-    char c;
+    signed char c;
     long long d;
 };
 long long c_mixed_size(void) { return (long long)sizeof(struct mixed); }
