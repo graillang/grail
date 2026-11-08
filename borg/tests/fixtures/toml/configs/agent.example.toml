@@ -1,0 +1,218 @@
+# Copy to $XDG_CONFIG_HOME/borg/agent.toml (usually ~/.config/borg/agent.toml)
+# or pass `borg agent --config PATH`.
+#
+# Aliases expand to built-in slash commands. They do not execute shell code,
+# load plugins, or register lifecycle hooks.
+
+# Opt in to at most one content-free active-install heartbeat per day. Its
+# random identifier rotates every 31 days and cannot link activity across
+# periods. Off by default; BORG_DISABLE_USAGE_COUNT=1 always disables it.
+[usage_count]
+enabled = false
+
+# Append personal instructions to Borg's coding system prompt on every local
+# turn (including turns launched on this host). Does not replace Borg's core
+# instructions. Applies to sessions started after the setting is loaded.
+# [prompt]
+# append = "When a Borg harness issue arises, inspect ~/agent and fix it."
+
+# Optional Borg subsystems. Defaults preserve the current full-featured
+# experience. Disabling a parent automatically makes dependent features
+# inactive: autonomous_team depends on subagents; shared_work and presence
+# depend on multiplayer; web_relay depends on cloud_sync.
+[capabilities]
+multiplayer = true
+subagents = true
+autonomous_team = true
+shared_work = true
+presence = true
+cloud_sync = true
+web_relay = true
+telemetry = false
+# Keep in-progress Claude, Codex, and OpenCode work queued when a subscription
+# limit is reached, then retry periodically until the limit clears.
+auto_resume_usage_limits = true
+# Resume a goal that a stop or a block left parked when the human sends another
+# message. Off by default: the message is answered, but the goal waits for an
+# explicit `/goal resume`.
+resume_paused_goal_on_message = false
+# When a Claude model with a refusal fallback (Opus 5/5.5, Sonnet 5.5, Fable)
+# declines a request, for example on a cybersecurity flag, let Claude answer it
+# with claude-opus-4-8 instead of stopping. The reply is labeled as a refusal
+# fallback. Off by default.
+claude_refusal_fallback = false
+# Provider names or model ids whose model gets a message typed while the agent
+# is working framed with an instruction to address it in the next visible
+# response (claude-fable-5-1 otherwise folds it silently into the running task;
+# Codex answers on its own). `true` selects this default set, `false` always
+# delivers the bare text; e.g. ["claude"] frames every Claude model.
+steer_reply_prompt = ["claude-fable-5-1"]
+# `shared_work`, `presence`, `cloud_sync`, `web_relay`, and `telemetry` are
+# reserved provider-neutral declarations in this CLI release. They do not
+# initialize a runtime or register tools yet.
+
+# Project-local extension manifests are untrusted by default because they can
+# declare stdio MCP commands. User-owned manifests remain eligible to start.
+[extensions]
+allow_project_mcp = false
+# User-installed extensions default to trusted. A checkout cannot raise its own
+# authority above this user-owned policy.
+default_access = "trusted"
+project_access = "sandboxed"
+# deny, prompt, or allow. `allow` is prompt-free for users who choose it.
+native_access = "prompt"
+
+# Team concurrency applies to manual and autonomous subagents. Borg defaults
+# to 16; lower it here for smaller machines or tighter provider budgets.
+# [team]
+# worker_concurrency = 16
+#
+# The remaining settings opt into autonomous-team policy. Omit `preset` to
+# preserve ordinary manual launches and inherited model/effort settings.
+# The preset takes effect only while `autonomous_team` is effective. It gives
+# the root xhigh effort when no --effort was supplied, gives spawned workers
+# low effort unless their tool request overrides it, and bounds concurrent
+# workers. Cost is integer micro-USD to avoid floating-point ambiguity.
+# preset = "xhigh_director_low_workers"
+# max_total_assignments = 1000
+# max_total_reports = 2000
+# max_total_escalations = 100
+# max_specialists = 100
+# max_tokens = 200000
+# max_cost_microusd = 500000
+# max_wall_time_ms = 3600000
+
+[commands.aliases]
+quick = "/fast on"
+normal = "/fast off"
+deep = "/effort xhigh"
+
+# Named OpenAI-compatible routes use an OpenCode-style provider/model alias.
+# Select one with:
+#   borg agent --provider open-ai-compatible --model groq/openai/gpt-oss-120b
+# Keep API keys in the environment; api_key_env wins over an inline api_key.
+#
+# [providers.groq]
+# name = "Groq"
+# base_url = "https://api.groq.com/openai/v1"
+# api_key_env = "GROQ_API_KEY"
+# headers = { }
+#
+# [providers.groq.models."openai/gpt-oss-120b"]
+# name = "GPT-OSS 120B"
+# context_window_tokens = 131072
+# max_output_tokens = 32768
+#
+# [providers.groq.models."openai/gpt-oss-120b".variants.high]
+# body = { reasoning_effort = "high" }
+
+# Actions can have one or more key chords. Supported modifiers are ctrl, alt,
+# and shift. Omitted actions keep their defaults.
+[keybindings]
+send = ["enter"]
+queue = ["tab"]
+newline = ["shift+enter", "alt+enter"]
+keybindings = ["?"]
+interrupt = ["esc"]
+clear_or_exit = ["ctrl+c"]
+exit = ["ctrl+d"]
+attach_image = ["cmd+v"] # macOS; use ctrl+v on Linux/Windows
+dictate = ["alt+v"]
+copy = ["cmd+c"] # macOS; use ctrl+shift+c on Linux/Windows
+find = ["cmd+f"] # macOS; use ctrl+f on Linux/Windows
+scroll_up = ["pageup"]
+scroll_down = ["pagedown"]
+select_previous = ["alt+up"]
+select_next = ["alt+down"]
+approve = ["y"]
+deny = ["n", "esc"]
+undo = ["ctrl+z"] # composer edits
+redo = ["ctrl+y", "ctrl+shift+z"]
+
+# Add any local stdio MCP server as a provider-neutral tool extension. Borg
+# starts enabled servers for the active session and exposes them to Codex,
+# Claude, and the native harness. Empty allowed_tools exposes every
+# tool advertised by the server.
+#
+# [mcp.servers.docs]
+# command = "npx"
+# args = ["-y", "@example/docs-mcp"]
+# env = { DOCS_TOKEN = "replace-me" }
+# allowed_tools = ["search", "read"]
+#
+# [mcp.servers.experimental]
+# enabled = false
+# command = "./target/debug/my-borg-tools"
+
+# Auto approval uses the active model by default. Set a dedicated reviewer to
+# trade model quality, latency, and cost independently from the acting agent.
+[approvals]
+# reviewer_model = "openai/gpt-5-mini"
+# reviewer_effort = "low"
+
+# Stable releases are verified and installed in the background for the next
+# launch. Active sessions are never restarted. If this fails, Borg keeps a
+# durable notice and prompts for `borg update`.
+[updates]
+auto_install = true
+check_interval_hours = 24
+
+# Automatic compaction is sized as a share of the context window: a tool round
+# compacts once less than 15% of the window is free, and the most recent 10% is
+# kept verbatim after the summary. That scales from a 32k local model to a 1M
+# hosted one, which is why it is the default.
+#
+# Override either number in absolute tokens for one exact `provider/model` pair
+# when a model's economics are known: 15% of a 1M window holds back 150k tokens
+# from every turn. The two fall back independently, so setting only a reserve
+# leaves the tail on its percentage default. Keys split on the FIRST slash, so
+# a model id that contains its own slash resolves, and a configured route in
+# `[providers]` is keyed by the same `provider/model` alias you gave it there.
+#
+# A budget that cannot work is refused at startup rather than quietly ignored.
+# One that does not fit the window the provider actually reports is scaled back
+# and reported as clamped on the compaction event, so a wrong number is visible
+# instead of silently behaving unlike what you wrote.
+#
+# [compaction.budgets."claude/claude-opus-5"]
+# reserve_tokens = 40000
+# keep_recent_tokens = 250000
+
+# A session left idle is compacted shortly before its prompt cache expires, so
+# the next turn reads a short summary instead of re-reading the whole context
+# uncached. It runs only on routes whose cache lasts an hour (a Claude
+# subscription), after 90% of that hour, for a top-level session whose context
+# is at least `idle_min_context_tokens`. Subagents are never idle-compacted.
+#
+# [compaction]
+# idle_before_cache_expiry = true
+# idle_min_context_tokens = 200000
+
+# Prompt cache warming keeps an expensive prefix alive so a long tool run does
+# not pay to rebuild it. "streaming" refreshes across a run and is the default;
+# "idle" keeps refreshing while you are away, so it is opt-in; "off" disables
+# it. BORG_CACHE_WARMING overrides this for a single process.
+# The interpreter agent shell commands run under, resolved once when a session
+# starts. Unset uses bash when it is installed, else /bin/sh (PowerShell, then
+# ComSpec, on Windows); BORG_AGENT_SHELL overrides that default chain for one
+# process and this setting outranks the variable. SHELL is deliberately ignored:
+# it describes how you talk to your terminal, not which dialect an agent should
+# write. Setting `command` pins a shell you want instead, for example "fish"; a
+# configured shell that is not installed is refused when this file is loaded
+# rather than quietly replaced.
+# [shell]
+# command = "bash"
+
+
+# The identity agent-authored commits are marked with. Left unset, Borg overrides
+# nothing: agent commands keep the environment Borg inherited, so git resolves
+# your own identity from your git configuration exactly as it does in an
+# ordinary shell -- and a commit git cannot attribute fails with git's own error
+# rather than being given a name nobody chose. Set it to mark automation on
+# purpose; author and committer both.
+# [git]
+# identity = "Borg Agent <agent@borg.local>"
+
+
+[warming]
+mode = "streaming"

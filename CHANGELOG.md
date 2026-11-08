@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- Port Borg Agent's configuration loading (`borg/`). `src/toml.grl` parses and assembles the TOML
+  subset Borg's configuration corpus actually uses — strings with escapes, integers in four bases,
+  booleans, arrays, inline tables, `[table]` / `[a.b]` headers and comments — canonicalising keys
+  into map order, materialising empty headers as empty tables, and rejecting a redefined header.
+  Floats, dates, multi-line strings, arrays of tables and dotted inline keys are refused by name
+  rather than approximated. `src/config.grl` loads `agent.toml` into effective settings with the
+  defaults `crates/borg-cli` compiles in (`impl Default for CapabilityConfig`, `UsageCountConfig`,
+  `PromptConfig`, `UpdateConfig`), and reports a wrong-typed key or negative count as an error at
+  its path instead of falling back, and capability values are the effective ones: the dependent
+  features are intersected the way `apply_dependency_intersection` does (`contract.rs:1403`). Two
+  new reference suites compare against the `toml` 1.1.4 crate — the version Borg builds with —
+  walking the same value model in the same order; the port now checks 483 reference lines over 50
+  documents across JSON, protocol headers, TOML and configuration. Network, IPC and UI remain out of
+  scope.
+
 - Port Borg Agent's JSON substrate and runtime-protocol v1 envelope headers (`borg/`). `src/json.grl`
   parses and writes JSON with the exact semantics `crates/borg-*` rely on, measured against
   `serde_json` 1.0.151 with `arbitrary_precision`: numbers keep their decimal text (`1e+5`,

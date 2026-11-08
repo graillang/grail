@@ -28,6 +28,8 @@ const stdModules = ['lib/core.grl', 'lib/strings.grl', 'lib/vecs.grl', 'lib/orde
 const fixtures = {
   json: ['borg/tests/fixtures/v1', 'borg/tests/fixtures/edge'],
   wire: ['borg/tests/fixtures/v1', 'borg/tests/fixtures/wire'],
+  toml: ['borg/tests/fixtures/toml/configs', 'borg/tests/fixtures/toml/cases', 'borg/tests/fixtures/toml/cases/invalid'],
+  config: ['borg/tests/fixtures/config'],
 };
 
 function fixturePaths(name) {
@@ -36,7 +38,7 @@ function fixturePaths(name) {
   const paths = [];
   for (const directory of directories) {
     for (const file of readdirSync(join(root, directory)).sort()) {
-      if (file.endsWith('.json')) paths.push(join(root, directory, file));
+      if (file.endsWith('.json') || file.endsWith('.toml')) paths.push(join(root, directory, file));
     }
   }
   return paths;

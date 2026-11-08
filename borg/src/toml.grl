@@ -1,0 +1,1090 @@
+module borg_toml;
+use core;
+use strings;
+use vecs;
+
+// TOML for Borg's configuration files (`agent.toml`, `editor.toml`, package manifests).
+//
+// The subset is the one Borg's own configuration corpus uses — measured over
+// `configs/*.example.toml` and the two files `borg` writes under `$XDG_CONFIG_HOME/borg`: basic and
+// literal strings, integers, booleans, arrays, inline tables and `[table]` / `[a.b]` headers, with
+// comments. That corpus contains no floats, no dates, no multi-line strings and no arrays of
+// tables, so this module **rejects** them by name (`Unsupported`) instead of approximating them: a
+// config it accepts is one it understands completely.
+//
+// Tables are unordered in TOML, so entries are stored in byte order of their keys, which is the
+// order a BTreeMap-backed TOML value iterates in. This module is the parsing half; `borg_config`
+// applies Borg's typed defaults.
+
+pub struct Entry {
+    key: string,
+    value: Toml
+}
+
+pub enum Toml {
+    Str(string),
+    Int(i64),
+    Bool(bool),
+    Arr(Toml[]),
+    Table(Entry[])
+}
+
+pub enum TomlKind {
+    Str,
+    Int,
+    Bool,
+    Arr,
+    Table
+}
+
+pub enum TomlError {
+    UnexpectedEnd(u64),
+    UnexpectedByte(u64),
+    InvalidString(u64),
+    InvalidNumber(u64),
+    InvalidKey(u64),
+    DuplicateKey(u64),
+    Unsupported(u64),
+    TrailingInput(u64)
+}
+
+fn is_space(byte: u64) -> bool {
+    return (byte == 32) || (byte == 9);
+}
+
+fn is_newline(byte: u64) -> bool {
+    return (byte == 10) || (byte == 13);
+}
+
+fn is_digit(byte: u64) -> bool {
+    return (byte >= 48) && (byte <= 57);
+}
+
+fn is_bare(byte: u64) -> bool {
+    if (byte >= 65) && (byte <= 90) {
+        return true;
+    }
+    if (byte >= 97) && (byte <= 122) {
+        return true;
+    }
+    if is_digit(byte) {
+        return true;
+    }
+    return (byte == 95) || (byte == 45);
+}
+
+fn hex_value(byte: u64) -> u64 {
+    if (byte >= 48) && (byte <= 57) {
+        return byte - 48;
+    }
+    if (byte >= 97) && (byte <= 102) {
+        return byte - 87;
+    }
+    if (byte >= 65) && (byte <= 70) {
+        return byte - 55;
+    }
+    return 16;
+}
+
+fn copy_text<a>(text: (&a [u8])) -> string {
+    mut out = u8[];
+    for byte in text {
+        out.push(byte);
+    }
+    return out.text();
+}
+
+fn key_matches<a>(entry: (&a Entry), key: (&[u8])) -> bool {
+    if entry.key.len() != key.len() {
+        return false;
+    }
+    for i in key.len() {
+        if entry.key[i] != key[i] {
+            return false;
+        }
+    }
+    return true;
+}
+
+fn entry_position<a>(entries: (&a Entry[]), key: (&[u8])) -> u64? {
+    mut index = 0;
+    while index < entries.len() {
+        if key_matches(&entries[index], &key) {
+            return core::some(index);
+        }
+        index += 1;
+    }
+    return core::none<u64>();
+}
+
+// Byte order on keys, matching the map a TOML value iterates.
+fn sorted(entries: Entry[]) -> Entry[] {
+    mut keys = string[];
+    mut source = entries;
+    for entry in &source {
+        keys.push(copy_text(&entry.key));
+    }
+    vecs::sort(&mut keys);
+    mut out = Entry[];
+    mut taken = u64[];
+    for i in source.len() {
+        taken.push(0);
+    }
+    mut slot = 0;
+    while slot < keys.len() {
+        mut index = 0;
+        while index < source.len() {
+            if taken[index] == 0 {
+                if key_matches(&source[index], &keys[slot]) {
+                    taken[index] = 1;
+                    slot := &mut source[index];
+                    moved_key := exchange(&mut slot.key, "".text());
+                    moved_value := exchange(&mut slot.value, Toml::Bool(false));
+                    out.push(Entry { key: moved_key, value: moved_value });
+                    break;
+                }
+            }
+            index += 1;
+        }
+        slot += 1;
+    }
+    return out;
+}
+
+struct Reader {
+    text: u8[],
+    pos: u64
+}
+
+impl Reader {
+    fn new(text: u8[]) -> Reader {
+        return Reader { text: text, pos: 0 };
+    }
+
+    fn at_end<a>(self: (&a Reader)) -> bool {
+        return self.pos >= self.text.len();
+    }
+
+    fn here<a>(self: (&a Reader)) -> u64 {
+        return u64(self.text[self.pos]);
+    }
+
+    fn start_of_line<a>(self: (&a Reader)) -> bool {
+        mut at = self.pos;
+        while at > 0 {
+            at -= 1;
+            b := u64(self.text[at]);
+            if b == 10 {
+                return true;
+            }
+            if !is_space(b) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // Skips spaces, tabs and line breaks. Inside arrays either may separate values.
+    fn skip_blank<a>(self: (&a mut Reader)) {
+        while self.pos < self.text.len() {
+            b := u64(self.text[self.pos]);
+            if !is_space(b) && !is_newline(b) {
+                break;
+            }
+            self.pos += 1;
+        }
+    }
+
+    // Skips to the end of the current line, consuming it.
+    fn skip_to_newline<a>(self: (&a mut Reader)) {
+        while self.pos < self.text.len() {
+            if is_newline(u64(self.text[self.pos])) {
+                self.pos += 1;
+                return ();
+            }
+            self.pos += 1;
+        }
+    }
+
+    // Spaces and tabs only, stopping before a newline.
+    fn skip_spaces<a>(self: (&a mut Reader)) {
+        while self.pos < self.text.len() {
+            if !is_space(u64(self.text[self.pos])) {
+                break;
+            }
+            self.pos += 1;
+        }
+    }
+
+    fn skip_comment<a>(self: (&a mut Reader)) {
+        if self.pos < self.text.len() {
+            if u64(self.text[self.pos]) == 35 {
+                self.skip_to_newline();
+            }
+        }
+    }
+
+    fn end_of_value<a>(self: (&a mut Reader)) -> bool {
+        self.skip_spaces();
+        if self.pos >= self.text.len() {
+            return true;
+        }
+        b := u64(self.text[self.pos]);
+        if is_newline(b) {
+            return true;
+        }
+        if b == 35 {
+            self.skip_to_newline();
+            return true;
+        }
+        return false;
+    }
+
+    fn hex4<a>(self: (&a mut Reader)) -> u64 | TomlError {
+        if self.pos + 4 > self.text.len() {
+            return TomlError::UnexpectedEnd(self.pos);
+        }
+        mut value = 0;
+        for i in 4 {
+            digit := hex_value(u64(self.text[self.pos + i]));
+            if digit == 16 {
+                return TomlError::InvalidString(self.pos);
+            }
+            value = value * 16 + digit;
+        }
+        self.pos += 4;
+        return value;
+    }
+
+    fn hex8<a>(self: (&a mut Reader)) -> u64 | TomlError {
+        if self.pos + 8 > self.text.len() {
+            return TomlError::UnexpectedEnd(self.pos);
+        }
+        mut value = 0;
+        for i in 8 {
+            digit := hex_value(u64(self.text[self.pos + i]));
+            if digit == 16 {
+                return TomlError::InvalidString(self.pos);
+            }
+            value = value * 16 + digit;
+        }
+        self.pos += 8;
+        return value;
+    }
+
+    fn push_code<a>(self: (&a mut Reader), out: (&a mut u8[]), code: u64) -> unit | TomlError {
+        if (code > 1114111) || ((code >= 55296) && (code <= 57343)) {
+            return TomlError::InvalidString(self.pos);
+        }
+        strings::push_char(out, u32(code));
+        return ();
+    }
+
+    fn basic_string<a>(self: (&a mut Reader)) -> string | TomlError {
+        start := self.pos;
+        if self.pos + 2 < self.text.len() {
+            if (u64(self.text[self.pos + 1]) == 34) && (u64(self.text[self.pos + 2]) == 34) {
+                return TomlError::Unsupported(start);
+            }
+        }
+        self.pos += 1;
+        mut out = u8[];
+        loop {
+            if self.pos >= self.text.len() {
+                return TomlError::UnexpectedEnd(start);
+            }
+            b := u64(self.text[self.pos]);
+            if b == 34 {
+                self.pos += 1;
+                return out.text();
+            }
+            if is_newline(b) {
+                return TomlError::InvalidString(self.pos);
+            }
+            if b == 92 {
+                self.pos += 1;
+                if self.pos >= self.text.len() {
+                    return TomlError::UnexpectedEnd(start);
+                }
+                e := u64(self.text[self.pos]);
+                if e == 116 {
+                    out.push(9);
+                    self.pos += 1;
+                    continue;
+                }
+                if e == 110 {
+                    out.push(10);
+                    self.pos += 1;
+                    continue;
+                }
+                if e == 114 {
+                    out.push(13);
+                    self.pos += 1;
+                    continue;
+                }
+                if e == 34 {
+                    out.push(34);
+                    self.pos += 1;
+                    continue;
+                }
+                if e == 92 {
+                    out.push(92);
+                    self.pos += 1;
+                    continue;
+                }
+                if e == 98 {
+                    out.push(8);
+                    self.pos += 1;
+                    continue;
+                }
+                if e == 102 {
+                    out.push(12);
+                    self.pos += 1;
+                    continue;
+                }
+                if e == 117 {
+                    self.pos += 1;
+                    code := self.hex4()?;
+                    self.push_code(&mut out, code)?;
+                    continue;
+                }
+                if e == 85 {
+                    self.pos += 1;
+                    code := self.hex8()?;
+                    if code > 1114111 {
+                        return TomlError::InvalidString(self.pos);
+                    }
+                    self.push_code(&mut out, code)?;
+                    continue;
+                }
+                return TomlError::InvalidString(self.pos);
+            }
+            out.push(self.text[self.pos]);
+            self.pos += 1;
+        }
+    }
+
+    fn literal_string<a>(self: (&a mut Reader)) -> string | TomlError {
+        start := self.pos;
+        if self.pos + 2 < self.text.len() {
+            if (u64(self.text[self.pos + 1]) == 39) && (u64(self.text[self.pos + 2]) == 39) {
+                return TomlError::Unsupported(start);
+            }
+        }
+        self.pos += 1;
+        mut out = u8[];
+        loop {
+            if self.pos >= self.text.len() {
+                return TomlError::UnexpectedEnd(start);
+            }
+            b := u64(self.text[self.pos]);
+            if b == 39 {
+                self.pos += 1;
+                return out.text();
+            }
+            if is_newline(b) {
+                return TomlError::InvalidString(self.pos);
+            }
+            out.push(self.text[self.pos]);
+            self.pos += 1;
+        }
+    }
+
+    fn key<a>(self: (&a mut Reader)) -> string | TomlError {
+        self.skip_spaces();
+        if self.pos >= self.text.len() {
+            return TomlError::UnexpectedEnd(self.pos);
+        }
+        b := u64(self.text[self.pos]);
+        if b == 34 {
+            return self.basic_string();
+        }
+        if b == 39 {
+            return self.literal_string();
+        }
+        start := self.pos;
+        while self.pos < self.text.len() {
+            if !is_bare(u64(self.text[self.pos])) {
+                break;
+            }
+            self.pos += 1;
+        }
+        if self.pos == start {
+            return TomlError::InvalidKey(self.pos);
+        }
+        mut out = u8[];
+        for i in start..self.pos {
+            out.push(self.text[i]);
+        }
+        return out.text();
+    }
+
+    fn integer<a>(self: (&a mut Reader)) -> Toml | TomlError {
+        start := self.pos;
+        mut negative = false;
+        mut b = u64(self.text[self.pos]);
+        if (b == 43) || (b == 45) {
+            negative = b == 45;
+            self.pos += 1;
+        }
+        mut base = 10;
+        if self.pos + 1 < self.text.len() {
+            lead := u64(self.text[self.pos]);
+            if lead == 48 {
+                next := u64(self.text[self.pos + 1]);
+                if next == 120 {
+                    base = 16;
+                    self.pos += 2;
+                } else {
+                    if next == 111 {
+                        base = 8;
+                        self.pos += 2;
+                    } else {
+                        if next == 98 {
+                            base = 2;
+                            self.pos += 2;
+                        }
+                    }
+                }
+            }
+        }
+        digits_start := self.pos;
+        mut value = i64(0);
+        mut any = false;
+        mut previous_underscore = false;
+        while self.pos < self.text.len() {
+            b = u64(self.text[self.pos]);
+            if b == 95 {
+                if !any || previous_underscore {
+                    return TomlError::InvalidNumber(start);
+                }
+                previous_underscore = true;
+                self.pos += 1;
+                continue;
+            }
+            digit := hex_value(b);
+            if (digit == 16) || (digit >= base) {
+                break;
+            }
+            value = value * i64(base) + i64(digit);
+            any = true;
+            previous_underscore = false;
+            self.pos += 1;
+        }
+        if !any {
+            self.pos = start;
+            return TomlError::InvalidNumber(start);
+        }
+        if self.pos < self.text.len() {
+            next := u64(self.text[self.pos]);
+            if (next == 46) || (next == 101) || (next == 69) {
+                // Floats are outside the corpus this port covers; say so instead of rounding.
+                self.pos = start;
+                return TomlError::Unsupported(start);
+            }
+        }
+        if negative {
+            value = -value;
+        }
+        return Toml::Int(value);
+    }
+
+    fn array<a>(self: (&a mut Reader), depth: u64) -> Toml | TomlError {
+        start := self.pos;
+        if depth >= 32 {
+            return TomlError::Unsupported(start);
+        }
+        self.pos += 1;
+        mut items = Toml[];
+        loop {
+            self.skip_blank();
+            self.skip_comment();
+            self.skip_blank();
+            if self.pos >= self.text.len() {
+                return TomlError::UnexpectedEnd(start);
+            }
+            if u64(self.text[self.pos]) == 93 {
+                self.pos += 1;
+                return Toml::Arr(items);
+            }
+            item := self.value(depth + 1)?;
+            items.push(item);
+            self.skip_blank();
+            self.skip_comment();
+            self.skip_blank();
+            if self.pos >= self.text.len() {
+                return TomlError::UnexpectedEnd(start);
+            }
+            b := u64(self.text[self.pos]);
+            if b == 44 {
+                self.pos += 1;
+                continue;
+            }
+            if b == 93 {
+                self.pos += 1;
+                return Toml::Arr(items);
+            }
+            return TomlError::UnexpectedByte(self.pos);
+        }
+    }
+
+    fn inline_table<a>(self: (&a mut Reader), depth: u64) -> Toml | TomlError {
+        start := self.pos;
+        if depth >= 32 {
+            return TomlError::Unsupported(start);
+        }
+        self.pos += 1;
+        mut entries = Entry[];
+        loop {
+            self.skip_spaces();
+            if self.pos >= self.text.len() {
+                return TomlError::UnexpectedEnd(start);
+            }
+            if u64(self.text[self.pos]) == 125 {
+                self.pos += 1;
+                return Toml::Table(sorted(entries));
+            }
+            name := self.key()?;
+            self.skip_spaces();
+            if self.pos >= self.text.len() {
+                return TomlError::UnexpectedEnd(start);
+            }
+            if u64(self.text[self.pos]) == 46 {
+                return TomlError::Unsupported(self.pos);
+            }
+            if u64(self.text[self.pos]) != 61 {
+                return TomlError::UnexpectedByte(self.pos);
+            }
+            self.pos += 1;
+            self.skip_spaces();
+            item := self.value(depth + 1)?;
+            position := entry_position(&entries, &name);
+            match position {
+                Some(index) => {
+                    return TomlError::DuplicateKey(index);
+                },
+                None => { entries.push(Entry { key: name, value: item }); }
+            }
+            self.skip_spaces();
+            if self.pos >= self.text.len() {
+                return TomlError::UnexpectedEnd(start);
+            }
+            b := u64(self.text[self.pos]);
+            if b == 44 {
+                self.pos += 1;
+                continue;
+            }
+            if b == 125 {
+                self.pos += 1;
+                return Toml::Table(sorted(entries));
+            }
+            return TomlError::UnexpectedByte(self.pos);
+        }
+    }
+
+    fn value<a>(self: (&a mut Reader), depth: u64) -> Toml | TomlError {
+        if self.pos >= self.text.len() {
+            return TomlError::UnexpectedEnd(self.pos);
+        }
+        b := u64(self.text[self.pos]);
+        if b == 34 {
+            text := self.basic_string()?;
+            return Toml::Str(text);
+        }
+        if b == 39 {
+            text := self.literal_string()?;
+            return Toml::Str(text);
+        }
+        if b == 91 {
+            return self.array(depth);
+        }
+        if b == 123 {
+            return self.inline_table(depth);
+        }
+        if b == 116 {
+            if self.expect(&u8[116, 114, 117, 101]) {
+                return Toml::Bool(true);
+            }
+            return TomlError::UnexpectedByte(self.pos);
+        }
+        if b == 102 {
+            if self.expect(&u8[102, 97, 108, 115, 101]) {
+                return Toml::Bool(false);
+            }
+            return TomlError::UnexpectedByte(self.pos);
+        }
+        if is_digit(b) || (b == 43) || (b == 45) {
+            return self.integer();
+        }
+        return TomlError::UnexpectedByte(self.pos);
+    }
+
+    fn expect<a>(self: (&a mut Reader), word: (&[u8])) -> bool {
+        if self.pos + word.len() > self.text.len() {
+            return false;
+        }
+        for i in word.len() {
+            if u64(self.text[self.pos + i]) != word[i] {
+                return false;
+            }
+        }
+        self.pos += word.len();
+        return true;
+    }
+}
+
+// ---- documents ----
+
+struct Assignment {
+    segments: string[],
+    value: Toml
+}
+
+// One or more keys separated by dots; a quoted key is a single segment even if it contains a dot.
+fn key_path<a>(reader: (&a mut Reader)) -> string[] | TomlError {
+    mut out = string[];
+    loop {
+        name := reader.key()?;
+        out.push(name);
+        reader.skip_spaces();
+        if reader.at_end() {
+            return out;
+        }
+        if reader.here() == 46 {
+            reader.pos += 1;
+            continue;
+        }
+        return out;
+    }
+}
+
+fn paths_equal<a, b>(left: (&a string[]), right: (&b string[])) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    for i in left.len() {
+        if left[i].len() != right[i].len() {
+            return false;
+        }
+        for j in left[i].len() {
+            if left[i][j] != right[i][j] {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+fn join_paths<a, b>(prefix: (&a string[]), extra: (&b string[])) -> string[] {
+    mut out = string[];
+    for i in prefix.len() {
+        out.push(prefix[i].text());
+    }
+    for i in extra.len() {
+        out.push(extra[i].text());
+    }
+    return out;
+}
+
+// Comparing through a helper keeps the borrow out of the loop body, which the checker rejects when
+// the same loop can return.
+fn assignment_matches<a, b>(item: (&a Assignment), path: (&b string[])) -> bool {
+    return paths_equal(&item.segments, path);
+}
+
+fn find_assignment<a>(items: (&a Assignment[]), path: (&string[])) -> u64? {
+    mut index = 0;
+    while index < items.len() {
+        if assignment_matches(&items[index], &path) {
+            return core::some(index);
+        }
+        index += 1;
+    }
+    return core::none<u64>();
+}
+
+fn copy_paths<a>(segments: (&a string[])) -> string[] {
+    mut out = string[];
+    for i in segments.len() {
+        out.push(copy_text(&segments[i]));
+    }
+    return out;
+}
+
+fn take_assignment<a>(items: (&a mut Assignment[]), index: u64) -> Assignment {
+    slot := &mut items[index];
+    return exchange(slot, Assignment { segments: string[], value: Toml::Bool(false) });
+}
+
+fn take_value<a>(root: (&a mut Entry[]), index: u64) -> Toml {
+    slot := &mut root[index];
+    return exchange(&mut slot.value, Toml::Bool(false));
+}
+
+fn put_value<a>(root: (&a mut Entry[]), index: u64, value: Toml) {
+    slot := &mut root[index];
+    exchange(&mut slot.value, value);
+}
+
+// Builds the tree from dotted assignments, rebuilding the path it descends so no borrow outlives a
+// loop back edge.
+fn insert_at(entries: Entry[], segments: (&string[]), at: u64, value: Toml) -> Entry[] | TomlError {
+    mut root = entries;
+    name := copy_text(&segments[at]);
+    last := at + 1 == segments.len();
+    if last {
+        position := entry_position(&root, &name);
+        match position {
+            Some(index) => {
+                return TomlError::DuplicateKey(index);
+            },
+            None => {
+                entry := Entry { key: name, value: value };
+                root.push(entry);
+                return sorted(root);
+            }
+        }
+    }
+    deeper := entry_position(&root, &name);
+    match deeper {
+        Some(index) => {
+            taken := take_value(&mut root, index);
+            match taken {
+                Table(inner) => {
+                    nested := insert_at(inner, segments, at + 1, value)?;
+                    rebuilt := Toml::Table(nested);
+                    put_value(&mut root, index, rebuilt);
+                    return root;
+                },
+                _ => {
+                    // Not a table: the document is invalid, so the tree is discarded either way.
+                    put_value(&mut root, index, Toml::Bool(false));
+                    return TomlError::UnexpectedByte(index);
+                }
+            }
+        },
+        None => {
+            child := insert_at(Entry[], segments, at + 1, value)?;
+            attached := Toml::Table(child);
+            entry := Entry { key: name, value: attached };
+            root.push(entry);
+            return sorted(root);
+        }
+    }
+}
+
+// Returns the same error `insert_at` reports, so a caller can distinguish a bad document from a good
+// one; `assemble` is the forgiving form used by the tests.
+pub fn parse_fallible<a>(text: (&a [u8])) -> Toml | TomlError {
+    mut copy = u8[];
+    for byte in text {
+        copy.push(byte);
+    }
+    mut reader = Reader::new(copy);
+    mut assignments = Assignment[];
+    mut prefix = string[];
+    loop {
+        reader.skip_blank();
+        if reader.at_end() {
+            break;
+        }
+        b := reader.here();
+        if b == 35 {
+            reader.skip_to_newline();
+            continue;
+        }
+        if b == 91 {
+            reader.pos += 1;
+            if !reader.at_end() {
+                if reader.here() == 91 {
+                    return TomlError::Unsupported(reader.pos);
+                }
+            }
+            header := key_path(&mut reader)?;
+            if reader.at_end() {
+                return TomlError::UnexpectedEnd(reader.pos);
+            }
+            if reader.here() != 93 {
+                return TomlError::UnexpectedByte(reader.pos);
+            }
+            reader.pos += 1;
+            // A header with no keys is still a table in the document (an empty one), so it is added
+            // explicitly; nested headers reach it through `insert_at`.
+            materialised := Assignment { segments: copy_paths(&header), value: Toml::Table(Entry[]) };
+            assignments.push(materialised);
+            if !reader.end_of_value() {
+                return TomlError::UnexpectedByte(reader.pos);
+            }
+            prefix = header;
+            continue;
+        }
+        local := key_path(&mut reader)?;
+        reader.skip_spaces();
+        if reader.at_end() {
+            return TomlError::UnexpectedEnd(reader.pos);
+        }
+        if reader.here() != 61 {
+            return TomlError::UnexpectedByte(reader.pos);
+        }
+        reader.pos += 1;
+        reader.skip_spaces();
+        item := reader.value(0)?;
+        if !reader.end_of_value() {
+            return TomlError::UnexpectedByte(reader.pos);
+        }
+        segments := join_paths(&prefix, &local);
+        existing := find_assignment(&assignments, &segments);
+        match existing {
+            Some(index) => {
+                return TomlError::DuplicateKey(index);
+            },
+            None => { assignments.push(Assignment { segments: segments, value: item }); }
+        }
+    }
+    mut root = Entry[];
+    mut at = 0;
+    while at < assignments.len() {
+        taken := take_assignment(&mut assignments, at);
+        path := copy_paths(&taken.segments);
+        built := insert_at(root, &path, 0, taken.value)?;
+        root = built;
+        at += 1;
+    }
+    return Toml::Table(sorted(root));
+}
+
+// ---- accessors ----
+
+// Copying through a helper keeps an element borrow out of a loop that can return, which the checker
+// rejects even when the borrow would not escape.
+fn copied_entry_value<a>(entry: (&a Entry)) -> Toml {
+    return copy_toml(&entry.value);
+}
+
+// A table with no entries, for callers that need a value where a section is optional.
+pub fn empty_table() -> Toml {
+    return Toml::Table(Entry[]);
+}
+
+pub fn kind_of<a>(value: (&a Toml)) -> TomlKind {
+    match value {
+        Str(text) => { return TomlKind::Str; },
+        Int(number) => { return TomlKind::Int; },
+        Bool(flag) => { return TomlKind::Bool; },
+        Arr(items) => { return TomlKind::Arr; },
+        Table(entries) => { return TomlKind::Table; }
+    }
+}
+
+pub fn get<a, b>(value: (&a Toml), key: (&b [u8])) -> Toml? {
+    match value {
+        Table(entries) => {
+            mut index = 0;
+            while index < entries.len() {
+                if key_matches(&entries[index], &key) {
+                    return core::some(copied_entry_value(&entries[index]));
+                }
+                index += 1;
+            }
+            return core::none<Toml>();
+        },
+        _ => { return core::none<Toml>(); }
+    }
+}
+
+pub fn has<a, b>(value: (&a Toml), key: (&b [u8])) -> bool {
+    match value {
+        Table(entries) => {
+            mut index = 0;
+            while index < entries.len() {
+                if key_matches(&entries[index], &key) {
+                    return true;
+                }
+                index += 1;
+            }
+            return false;
+        },
+        _ => { return false; }
+    }
+}
+
+pub fn as_bool<a>(value: (&a Toml)) -> bool? {
+    match value {
+        Bool(flag) => { return core::some(flag); },
+        _ => { return core::none<bool>(); }
+    }
+}
+
+pub fn as_string<a>(value: (&a Toml)) -> string? {
+    match value {
+        Str(text) => { return core::some(text.text()); },
+        _ => { return core::none<string>(); }
+    }
+}
+
+pub fn as_int<a>(value: (&a Toml)) -> i64? {
+    match value {
+        Int(number) => { return core::some(number); },
+        _ => { return core::none<i64>(); }
+    }
+}
+
+pub fn copy_toml<a>(value: (&a Toml)) -> Toml {
+    match value {
+        Str(text) => { return Toml::Str(text.text()); },
+        Int(number) => { return Toml::Int(number); },
+        Bool(flag) => { return Toml::Bool(flag); },
+        Arr(items) => {
+            mut out = Toml[];
+            for item in items {
+                out.push(copy_toml(item));
+            }
+            return Toml::Arr(out);
+        },
+        Table(entries) => {
+            mut out = Entry[];
+            for entry in entries {
+                key := copy_text(&entry.key);
+                copied := copy_toml(&entry.value);
+                out.push(Entry { key: key, value: copied });
+            }
+            return Toml::Table(out);
+        }
+    }
+}
+
+// ---- shape ----
+//
+// A flat view of the value model: one entry per node, parents before children in canonical order.
+// The port's tests print it and compare with the reference, so the traversal lives here rather than
+// in the test, where a foreign nominal type cannot be named as a reference parameter.
+
+pub struct Shape {
+    path: string,
+    kind: string,
+    text: string
+}
+
+pub fn shape_path<a>(shape: (&a Shape)) -> string {
+    return copy_text(&shape.path);
+}
+
+pub fn shape_kind<a>(shape: (&a Shape)) -> string {
+    return copy_text(&shape.kind);
+}
+
+pub fn shape_text<a>(shape: (&a Shape)) -> string {
+    return copy_text(&shape.text);
+}
+
+struct Shaper {
+    out: Shape[]
+}
+
+impl Shaper {
+    fn emit<a, b, c, d>(self: (&a mut Shaper), path: (&b [u8]), kind: (&c [u8]), text: (&d [u8])) {
+        self.out.push(Shape { path: copy_text(path), kind: copy_text(kind), text: copy_text(text) });
+    }
+
+    fn emit_number<a, b>(self: (&a mut Shaper), path: (&b [u8]), kind: (&b [u8]), value: u64) {
+        mut digits = u8[];
+        if value == 0 {
+            digits.push(48);
+        } else {
+            mut reversed_digits = u8[];
+            mut left = value;
+            while left > 0 {
+                reversed_digits.push(48 + left % 10);
+                left = left / 10;
+            }
+            while reversed_digits.len() > 0 {
+                digits.push(reversed_digits.pop());
+            }
+        }
+        self.out.push(Shape { path: copy_text(path), kind: copy_text(kind), text: digits.text() });
+    }
+
+    fn emit_signed<a, b>(self: (&a mut Shaper), path: (&b [u8]), value: i64) {
+        mut digits = u8[];
+        mut magnitude = value;
+        if value < 0 {
+            digits.push(45);
+            magnitude = 0 - value;
+        }
+        mut body = u64(magnitude);
+        if body == 0 {
+            digits.push(48);
+        } else {
+            mut reversed_digits = u8[];
+            while body > 0 {
+                reversed_digits.push(48 + body % 10);
+                body = body / 10;
+            }
+            while reversed_digits.len() > 0 {
+                digits.push(reversed_digits.pop());
+            }
+        }
+        self.out.push(Shape { path: copy_text(path), kind: "int".text(), text: digits.text() });
+    }
+
+    fn walk<a, b>(self: (&a mut Shaper), node: (&b Toml), path: (&b [u8])) {
+        match node {
+            Str(text) => { self.emit(&path, "str", &text); },
+            Int(number) => { self.emit_signed(&path, number); },
+            Bool(flag) => {
+                if flag {
+                    self.emit(&path, "bool", "true");
+                } else {
+                    self.emit(&path, "bool", "false");
+                }
+            },
+            Arr(items) => {
+                self.emit_number(&path, "array", items.len());
+                mut index = 0;
+                for item in items {
+                    mut child = u8[];
+                    for byte in &path {
+                        child.push(byte);
+                    }
+                    child.push(91);
+                    mut reversed_digits = u8[];
+                    mut value = index;
+                    if value == 0 {
+                        child.push(48);
+                    } else {
+                        while value > 0 {
+                            reversed_digits.push(48 + value % 10);
+                            value = value / 10;
+                        }
+                        while reversed_digits.len() > 0 {
+                            child.push(reversed_digits.pop());
+                        }
+                    }
+                    child.push(93);
+                    self.walk(item, &child);
+                    index += 1;
+                }
+            },
+            Table(entries) => {
+                self.emit_number(&path, "table", entries.len());
+                for entry in entries {
+                    mut child = u8[];
+                    for byte in &path {
+                        child.push(byte);
+                    }
+                    child.push(46);
+                    for byte in &entry.key {
+                        child.push(byte);
+                    }
+                    self.walk(&entry.value, &child);
+                }
+            }
+        }
+    }
+}
+
+pub fn flatten<a>(root: (&a Toml)) -> Shape[] {
+    mut shaper = Shaper { out: Shape[] };
+    shaper.walk(root, &u8[36]);
+    return shaper.out;
+}

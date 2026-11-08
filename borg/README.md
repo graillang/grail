@@ -1,7 +1,9 @@
 # Borg Agent CPU port
 
-The first bounded increment of the Borg Agent → Grail port: the JSON substrate its wire and
-configuration documents are made of, plus the protocol-v1 envelope header that classifies them.
+The first two bounded increments of the Borg Agent → Grail port: the JSON substrate its wire
+documents are made of, the TOML its configuration files are written in, the protocol-v1 envelope
+header that classifies a document, and the `agent.toml` loader that applies Borg's compiled-in
+defaults.
 Borg Agent is read-only here; the reference is its own JSON semantics — `serde_json` 1.0.151 with
 `arbitrary_precision`, the crate version and feature set `crates/borg-*` build with. The plan and
 staging live in [docs/design/borg-agent-port.md](../docs/design/borg-agent-port.md).
@@ -9,15 +11,26 @@ staging live in [docs/design/borg-agent-port.md](../docs/design/borg-agent-port.
 ```
 src/json.grl                 parser, canonical writer, deep copy, member/array accessors, flatten
 src/wire.grl                 protocol-v1 envelope header: discriminant, protocol/version, per-kind fields
-tests/json_test.grl          the Grail side: `json.compact`, `json.scalar`, `json.error` per document
-tests/wire_test.grl          the Grail side: `wire.header <file> <field> <value>`, `wire.error <file> <path> <reason>`
+src/toml.grl                 TOML subset parser, table assembly, shape walk, accessors
+src/config.grl               `agent.toml` → effective settings with Borg's compiled-in defaults
+tests/json_test.grl          JSON: `json.compact`, `json.scalar`, `json.error` per document
+tests/wire_test.grl          protocol: `wire.header <file> <field> <value>`, `wire.error <file> <path> <reason>`
+tests/toml_test.grl          TOML: `toml.value <file> <path> <kind> <text>`, `toml.error <file>`
+tests/config_test.grl        config: `config.value <file> <key> <value>`, `config.error <file> <path>`
 tests/fixtures/v1/           Borg's protocol-v1 conformance corpus, copied verbatim
 tests/fixtures/edge/         number, escape, structure, nesting-limit and malformed documents
 tests/fixtures/wire/         envelope mutations: missing, mistyped, wrong protocol, wrong version
+tests/fixtures/toml/configs/ Borg's shipped example configurations, copied verbatim
+tests/fixtures/toml/cases/   TOML constructs and invalid documents
+tests/fixtures/config/       `agent.toml` documents: full, partial, empty, wrong-typed, negative
 tests/parity/json.rs         the reference: serde_json compact re-serialisation and scalar walk
 tests/parity/wire.rs         the reference: the same header rule over serde_json values
+tests/parity/toml.rs         the reference: the toml crate's value model, walked in the same order
+tests/parity/config.rs       the reference: Borg's defaults applied to a toml value
 tests/parity/json.txt        committed reference output (141 lines, 20 documents)
 tests/parity/wire.txt        committed reference output (46 lines, 11 documents)
+tests/parity/toml.txt        committed reference output (230 lines, 13 documents)
+tests/parity/config.txt      committed reference output (66 lines, 6 documents)
 tools/borg-test.mjs          build + compile + run + diff
 ```
 
@@ -25,11 +38,11 @@ tools/borg-test.mjs          build + compile + run + diff
 
 ```sh
 just borg-test                          # hermetic: diff against the committed reference
-bun tools/borg-test.mjs --regenerate    # rebuild both references from serde_json (offline)
+bun tools/borg-test.mjs --regenerate    # rebuild all four references offline (serde_json, toml)
 ```
 
-`--regenerate` builds `borg/tests/parity/ref`, a two-binary Rust crate, with `cargo build --offline`
-against the cached `serde_json` 1.0.151. It needs no network and no Borg checkout: the fixtures are
+`--regenerate` builds `borg/tests/parity/ref`, a four-binary Rust crate, with `cargo build --offline`
+against the cached `serde_json` 1.0.151 and `toml` 1.1.4. It needs no network and no Borg checkout: the fixtures are
 committed, and both sides read the same bytes in the same order (the runner passes the sorted file
 list on argv).
 
@@ -46,12 +59,19 @@ and field:
 - `wire.header <file> <field> <value>`: header fields in the reference's order.
 - `wire.error <file> <path> <reason>`: the path that failed and the layer that rejected it
   (`missing`, `type`, `protocol`, `version`, `envelope`).
+- `toml.value <file> <path> <kind> <text>`: one line per node; tables and arrays print their length
+  first and then their children in byte key order, so the line sequence *is* the value model.
+  Formatting is deliberately not compared — a loader's contract is what a document means.
+- `config.value <file> <key> <value>` / `config.error <file> <path>`: effective settings in schema
+  order — capabilities after the dependency intersection — with strings quoted so `""` stays
+  distinguishable from an absent key.
 
-The suite compares **187 lines over 31 documents**, and every value in them comes from
+The suite compares **483 lines over 50 documents**, and every value in them comes from
 `serde_json` rather than from a restatement: the reference parses with Borg's own crate and prints
-what it parsed. `wire.rs` pins the v1 header *rule* (no Rust program classifies these fixtures
-without building the whole 363k-line Borg workspace), and uses `serde_json` for every value it
-reads, so a divergence in either the parser or the rule is a line difference.
+what it parsed. `wire.rs` and `config.rs` pin the v1 header *rule* and the default table (no Rust program classifies
+these fixtures, or loads this config without building the whole 363k-line Borg workspace), and use
+the real crates for every value they read, so a divergence in either the parser or the rule is a
+line difference.
 
 ## Ported contract (must not drift)
 
@@ -77,6 +97,44 @@ These were measured against `serde_json` 1.0.151, not assumed; each is covered b
   snapshots require `session_id`, `cursor` and `state.status`; the manifest requires `fixture_schema`,
   a `fixtures` array, and `compatibility.{legacy_host_protocol, legacy_host_protocol_version, adapter}`.
 
+## TOML: the subset, and what is refused by name
+
+The subset is the one Borg's own configuration corpus uses, measured over `configs/*.example.toml`
+and the two files `borg` writes under `$XDG_CONFIG_HOME/borg`: basic and literal strings with
+escapes, integers (decimal, `0x`, `0o`, `0b`, `_` separators, signs), booleans, arrays (multi-line,
+trailing comma, comments inside), inline tables, and `[table]` / `[a.b]` headers — with comments.
+That corpus contains **no floats, no dates, no multi-line strings, no arrays of tables**, so those
+are rejected with `Unsupported` rather than approximated: `1.5` stays an error instead of silently
+becoming a rounded number, and a `"""` string is refused instead of being read as three strings.
+Dotted keys inside an inline table are refused for the same reason (they would have to nest).
+
+A header with no keys is still a table in the document, so `[approvals]` with every setting
+commented out appears as an empty table — that is where a first version diverged from the
+reference, and the fixture keeps it honest. Defined twice, a header is an error, as it is upstream.
+
+## Configuration: defaults are Borg's, not invented
+
+`src/config.grl` loads `agent.toml` into effective settings. Every default is cited to the code that
+compiles it in (`crates/borg-cli/src/agent_config.rs`):
+
+| Section | Defaults |
+| --- | --- |
+| `[capabilities]` | `multiplayer`, `subagents`, `autonomous_team`, `shared_work`, `presence`, `cloud_sync`, `web_relay`, `auto_resume_usage_limits`, `watcher_yield` → `true`; `telemetry`, `resume_paused_goal_on_message`, `claude_refusal_fallback` → `false` (`impl Default for CapabilityConfig`) |
+| `[usage_count]` | `enabled = false` (derived `Default`) |
+| `[prompt]` | `append = ""` (derived `Default`) |
+| `[update]` | `auto_install = true`, `check_interval_hours = 24` (`impl Default for UpdateConfig`) |
+
+A key present with the wrong type is an error naming its path — `multiplayer = "yes"` is a mistake,
+not a reason to fall back to the default — and a negative `check_interval_hours` is an error rather
+than a wrapped `u64`.
+
+Capability values are the *effective* ones. `apply_dependency_intersection`
+(`crates/borg-agent-runtime/src/contract.rs:1403`) clears a dependent when its parent is off —
+`autonomous_team` without `subagents`, `shared_work` and `presence` without `multiplayer`,
+`web_relay` without `cloud_sync` — and the port applies the same intersection, so a configuration
+Borg would not honour is not reported as if it would. `cascade.toml` is the fixture that keeps it
+honest.
+
 ## Limits and findings
 
 - **Not modelled: command, event and snapshot bodies.** The header is what classifies and routes a
@@ -97,6 +155,15 @@ These were measured against `serde_json` 1.0.151, not assumed; each is covered b
   an explicit reborrow (`&wanted`), which is what `lib/hashmap.grl` already does.
 - **Byte helpers take `u64`.** Indexing a `u8[]` yields a word, not a `u8`, so `is_space`, `hex_value`
   and friends are `u64`-valued; `u64(...)` is needed to widen a `u8` payload explicitly.
+- **A foreign nominal type cannot be used as a reference parameter or constructed literally.** The
+  walk that turns a parsed value into shape lines lives in `borg_toml` (`flatten`) rather than in
+  the test, and `empty_table()` exists so `borg_config` can stand in for an absent section. Reading
+  an enum field out of a borrow also does not copy, so `Setting` carries a `bool` rather than a kind
+  enum.
+- **A `match` over a borrow binds references, not copies** — passing one of those bindings to a
+  second call, or returning it, is rejected. Reading `entries[index].value` needs a named local
+  borrow (`entry := &entries[index]`), and a loop that both borrows an element and returns must go
+  through a one-line helper (`copied_entry_value`).
 - **Smaller findings**: `const` is not accepted (use a function); `mut x := v` is invalid (`mut x = v`);
   match patterns use bare variant names (`Num(t)`, not `Json::Num(t)`); a statement after a diverging
   `loop` is rejected as unreachable; the four `cfg`-free test programs need no compiler flags beyond

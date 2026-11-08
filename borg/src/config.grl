@@ -1,0 +1,224 @@
+module borg_config;
+use borg_toml;
+use core;
+
+// Borg's `agent.toml`, loaded into effective values.
+//
+// The defaults are the ones `borg-cli` compiles in, not invented here (source paths are in
+// crates/borg-cli/src/agent_config.rs):
+//
+//   `impl Default for CapabilityConfig`  multiplayer, subagents, autonomous_team, shared_work,
+//                                        presence, cloud_sync, web_relay, auto_resume_usage_limits
+//                                        and watcher_yield default true; telemetry,
+//                                        resume_paused_goal_on_message and claude_refusal_fallback
+//                                        default false.
+//   `UsageCountConfig` (derived Default) enabled = false.
+//   `PromptConfig` (derived Default)     append = "".
+//   `impl Default for UpdateConfig`      auto_install = true, check_interval_hours = 24.
+//
+// A key that is present with the wrong type is a typed error naming the path, never a silent
+// fallback to the default: a config file that says `multiplayer = "yes"` is wrong, and the loader
+// says so.
+
+pub enum ConfigError {
+    NotATable(string),
+    WrongType(string)
+}
+
+pub struct Setting {
+    name: string,
+    text: string,
+    // String settings are quoted when rendered, so an empty value stays distinguishable from an
+    // absent key. A plain `bool` copies out of a borrow; an enum field does not.
+    quoted: bool
+}
+
+fn copy_text<a>(text: (&a [u8])) -> string {
+    mut out = u8[];
+    for byte in text {
+        out.push(byte);
+    }
+    return out.text();
+}
+
+struct Collector {
+    out: Setting[]
+}
+
+impl Collector {
+    fn flag<a, b>(self: (&a mut Collector), name: (&b [u8]), value: bool) {
+        if value {
+            self.out.push(Setting { name: copy_text(name), text: "true".text(), quoted: false });
+        } else {
+            self.out.push(Setting { name: copy_text(name), text: "false".text(), quoted: false });
+        }
+    }
+
+    fn text<a, b, c>(self: (&a mut Collector), name: (&b [u8]), value: (&c [u8])) {
+        self.out.push(Setting { name: copy_text(name), text: copy_text(value), quoted: true });
+    }
+
+    fn number<a, b>(self: (&a mut Collector), name: (&b [u8]), value: u64) {
+        mut digits = u8[];
+        if value == 0 {
+            digits.push(48);
+        } else {
+            mut reversed_digits = u8[];
+            mut left = value;
+            while left > 0 {
+                reversed_digits.push(48 + left % 10);
+                left = left / 10;
+            }
+            while reversed_digits.len() > 0 {
+                digits.push(reversed_digits.pop());
+            }
+        }
+        self.out.push(Setting { name: copy_text(name), text: digits.text(), quoted: false });
+    }
+}
+
+fn section<a, b>(root: (&a borg_toml::Toml), name: (&b [u8])) -> borg_toml::Toml {
+    match borg_toml::get(root, &name) {
+        Some(node) => { return node; },
+        None => { return borg_toml::empty_table(); }
+    }
+}
+
+fn read_flag<a, b, c>(table: (&a borg_toml::Toml), key: (&b [u8]), path: (&c [u8]), fallback: bool) -> bool | ConfigError {
+    if !borg_toml::has(&table, &key) {
+        return fallback;
+    }
+    match borg_toml::get(&table, &key) {
+        Some(node) => {
+            match borg_toml::as_bool(&node) {
+                Some(flag) => { return flag; },
+                None => {
+                    reason := path.text();
+                    return ConfigError::WrongType(reason);
+                }
+            }
+        },
+        None => { return fallback; }
+    }
+}
+
+fn read_text<a, b, c>(table: (&a borg_toml::Toml), key: (&b [u8]), path: (&c [u8])) -> string | ConfigError {
+    if !borg_toml::has(&table, &key) {
+        return "".text();
+    }
+    match borg_toml::get(&table, &key) {
+        Some(node) => {
+            match borg_toml::as_string(&node) {
+                Some(text) => { found := text; return found; },
+                None => {
+                    reason := path.text();
+                    return ConfigError::WrongType(reason);
+                }
+            }
+        },
+        None => { return "".text(); }
+    }
+}
+
+fn read_count<a, b, c>(table: (&a borg_toml::Toml), key: (&b [u8]), path: (&c [u8]), fallback: u64) -> u64 | ConfigError {
+    if !borg_toml::has(&table, &key) {
+        return fallback;
+    }
+    match borg_toml::get(&table, &key) {
+        Some(node) => {
+            match borg_toml::as_int(&node) {
+                Some(number) => {
+                    if number < 0 {
+                        reason := path.text();
+                        return ConfigError::WrongType(reason);
+                    }
+                    return u64(number);
+                },
+                None => {
+                    reason := path.text();
+                    return ConfigError::WrongType(reason);
+                }
+            }
+        },
+        None => { return fallback; }
+    }
+}
+
+// Settings in schema order, so a diff names the key that changed. Capability values are the
+// *effective* ones: `apply_dependency_intersection` in crates/borg-agent-runtime/src/contract.rs
+// clears a dependent feature when its parent is off, and the port reproduces that rule rather than
+// reporting a configuration Borg would not honour.
+pub fn load<a>(root: (&a borg_toml::Toml)) -> Setting[] | ConfigError {
+    if borg_toml::kind_of(&root) != borg_toml::TomlKind::Table {
+        return ConfigError::NotATable("$".text());
+    }
+    // One copy of the document (it is a configuration file, not a stream), so each section read is
+    // an ordinary borrow of an owned value.
+    owned := borg_toml::copy_toml(&root);
+    capabilities := section(&owned, "capabilities");
+    usage := section(&owned, "usage_count");
+    prompt := section(&owned, "prompt");
+    update := section(&owned, "update");
+
+    multiplayer := read_flag(&capabilities, "multiplayer", "capabilities.multiplayer", true)?;
+    subagents := read_flag(&capabilities, "subagents", "capabilities.subagents", true)?;
+    autonomous_team := read_flag(&capabilities, "autonomous_team", "capabilities.autonomous_team", true)?;
+    shared_work := read_flag(&capabilities, "shared_work", "capabilities.shared_work", true)?;
+    presence := read_flag(&capabilities, "presence", "capabilities.presence", true)?;
+    cloud_sync := read_flag(&capabilities, "cloud_sync", "capabilities.cloud_sync", true)?;
+    web_relay := read_flag(&capabilities, "web_relay", "capabilities.web_relay", true)?;
+    telemetry := read_flag(&capabilities, "telemetry", "capabilities.telemetry", false)?;
+    auto_resume := read_flag(&capabilities, "auto_resume_usage_limits", "capabilities.auto_resume_usage_limits", true)?;
+    watcher_yield := read_flag(&capabilities, "watcher_yield", "capabilities.watcher_yield", true)?;
+    resume_goal := read_flag(&capabilities, "resume_paused_goal_on_message", "capabilities.resume_paused_goal_on_message", false)?;
+    claude_fallback := read_flag(&capabilities, "claude_refusal_fallback", "capabilities.claude_refusal_fallback", false)?;
+
+    // A dependent feature is only as available as its parent.
+    mut team = autonomous_team;
+    if !subagents {
+        team = false;
+    }
+    mut shared = shared_work;
+    mut present = presence;
+    if !multiplayer {
+        shared = false;
+        present = false;
+    }
+    mut relay = web_relay;
+    if !cloud_sync {
+        relay = false;
+    }
+
+    mut collector = Collector { out: Setting[] };
+    collector.flag("capabilities.multiplayer", multiplayer);
+    collector.flag("capabilities.subagents", subagents);
+    collector.flag("capabilities.autonomous_team", team);
+    collector.flag("capabilities.shared_work", shared);
+    collector.flag("capabilities.presence", present);
+    collector.flag("capabilities.cloud_sync", cloud_sync);
+    collector.flag("capabilities.web_relay", relay);
+    collector.flag("capabilities.telemetry", telemetry);
+    collector.flag("capabilities.auto_resume_usage_limits", auto_resume);
+    collector.flag("capabilities.watcher_yield", watcher_yield);
+    collector.flag("capabilities.resume_paused_goal_on_message", resume_goal);
+    collector.flag("capabilities.claude_refusal_fallback", claude_fallback);
+    collector.flag("usage_count.enabled", read_flag(&usage, "enabled", "usage_count.enabled", false)?);
+    appended := read_text(&prompt, "append", "prompt.append")?;
+    collector.text("prompt.append", &appended);
+    collector.flag("update.auto_install", read_flag(&update, "auto_install", "update.auto_install", true)?);
+    hours := read_count(&update, "check_interval_hours", "update.check_interval_hours", 24)?;
+    collector.number("update.check_interval_hours", hours);
+    return collector.out;
+}
+
+pub fn setting_quoted<a>(setting: (&a Setting)) -> bool {
+    return setting.quoted;
+}
+
+pub fn setting_name<a>(setting: (&a Setting)) -> string {
+    return copy_text(&setting.name);
+}
+
+pub fn setting_text<a>(setting: (&a Setting)) -> string {
+    return copy_text(&setting.text);
+}

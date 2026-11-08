@@ -1,0 +1,78 @@
+// Borg configuration parity test (TOML value model).
+//
+// Every line is `toml.value <file> <path> <kind> <text>` for a node the port accepts, or
+// `toml.error <file>` when it rejects the document. Tables and arrays print their length and then
+// their children in canonical (byte) key order, so the line sequence *is* the model: the reference
+// walks `toml::Value` from the `toml` 1.1.4 crate — the version Borg builds with — over the same
+// bytes and prints the same labels.
+//
+// Formatting is deliberately not compared: a config loader's contract is what a document means, not
+// how a writer would re-space it.
+
+use borg_toml;
+use env;
+use fs;
+
+fn basename<a>(path: (&a [u8])) -> string {
+    mut start = 0;
+    for i in path.len() {
+        if path[i] == 47 {
+            start = i + 1;
+        }
+    }
+    mut out = u8[];
+    for i in start..path.len() {
+        out.push(path[i]);
+    }
+    return out.text();
+}
+
+fn append<a, b>(out: (&a mut u8[]), text: (&b [u8])) {
+    for byte in text {
+        out.push(byte);
+    }
+}
+
+fn print_line<a, b, c, d>(name: (&a [u8]), path: (&b [u8]), kind: (&c [u8]), text: (&d [u8])) {
+    mut line = u8[];
+    append(&mut line, "toml.value ".text());
+    append(&mut line, name);
+    line.push(32);
+    append(&mut line, path);
+    line.push(32);
+    append(&mut line, kind);
+    line.push(32);
+    append(&mut line, text);
+    println(line.text());
+}
+
+fn main() -> u64 {
+    args := env::args();
+    mut index = 1;
+    while index < args.len() {
+        path := args[index];
+        name := basename(&path);
+        data := fs::read(&path)!;
+        match borg_toml::parse_fallible(&data) {
+            document: borg_toml::Toml => {
+                shapes := borg_toml::flatten(&document);
+                mut at = 0;
+                while at < shapes.len() {
+                    node_path := borg_toml::shape_path(&shapes[at]);
+                    node_kind := borg_toml::shape_kind(&shapes[at]);
+                    node_text := borg_toml::shape_text(&shapes[at]);
+                    print_line(&name, &node_path, &node_kind, &node_text);
+                    at += 1;
+                }
+            },
+            failure: borg_toml::TomlError => {
+                mut line = u8[];
+                append(&mut line, "toml.error ".text());
+                append(&mut line, &name);
+                println(line.text());
+            }
+        }
+        index += 1;
+    }
+    return 0;
+}

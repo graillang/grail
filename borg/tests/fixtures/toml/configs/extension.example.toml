@@ -1,0 +1,135 @@
+# Blu package manifest (`blu.toml`)
+#
+# Install packages under `.borg/extensions/<id>/` (project) or
+# `$XDG_CONFIG_HOME/borg/extensions/<id>/` (user). Legacy flat
+# `extensions/*.toml` manifests remain supported. Project packages are
+# packages declaring MCP servers are cataloged but inactive until the user
+# enables `[extensions].allow_project_mcp = true` in agent.toml.
+#
+# Packages may contribute skill roots, stdio MCP servers, and bounded workflows
+# in Blu/Lua/Luau, Python, IPython, JavaScript, or TypeScript, but never opaque
+# lifecycle hooks. Borg validates
+# paths, dependencies, versions, settings, workflow sources, and server
+# declarations before activation.
+manifest_version = 1
+id = "docs"
+name = "Documentation tools"
+version = "1.0.0"
+description = "Search and read the project's documentation index."
+enabled = true
+# sandboxed, trusted, or native. Authority is capped by the user's agent.toml.
+runtime_access = "trusted"
+borg_version = ">=0.1.34"
+required_capabilities = ["multiplayer"]
+skill_roots = ["skills"]
+
+# Dependencies are extension ids mapped to semantic-version requirements.
+# Borg loads dependencies first and isolates missing, incompatible, or cyclic
+# packages instead of starting a partial graph.
+[dependencies]
+# shared-foundation = "^2.0"
+
+# Typed settings live outside the package in `.borg/blu.toml` or the user
+# `$XDG_CONFIG_HOME/borg/blu.toml`, so packages remain immutable and updateable.
+# Values can be interpolated as `${config.index}`. Secret values are redacted
+# by `borg extensions` and state files are written with mode 0600 on Unix.
+[config.index]
+type = "string"
+description = "Documentation index to open"
+default = "main"
+
+[config.token]
+type = "string"
+description = "Optional private index token"
+secret = true
+required = false
+
+[mcp.search]
+command = "docs-mcp"
+args = ["serve", "--index", "${config.index}"]
+# Environment variables can also be referenced without persisting them:
+# env = { DOCS_TOKEN = "${env.DOCS_TOKEN}" }
+allowed_tools = ["search", "read"]
+
+# Executable workflows are loaded from the package and exposed through the
+# provider-neutral list_workflows/run_workflow tools. Blu compatibility aliases
+# remain available. External runtimes are trusted supervised processes.
+[workflows.review]
+entrypoint = "workflows/review.blu"
+description = "Review the current change"
+
+# Versioned declarative registrations resolve only to the workflow snapshot.
+# Tools, commands, and lifecycle hooks can read their bounded JSON object with
+# borg_workflow_arguments(call_id). Supported hook events include turn start/
+# completion, tool/command before and after execution, and before_compaction.
+[api]
+version = 1
+
+# Active packages can override any validated agent UI preference, keybinding,
+# and slash alias. Later packages in dependency-first load order win.
+[api.editor.transcript]
+assistant_label = "borg"
+assistant_label_color = "#ff8e24"
+
+[api.editor.presentation]
+auto_expand_tools = false
+auto_expand_thinking = false
+
+[api.editor.layout]
+horizontal_margin = 2
+composer_max_height = 8
+show_footer = true
+
+[api.keybindings]
+# send = ["ctrl+enter"]
+
+[api.aliases]
+# ship = "/fast on"
+
+[api.transforms.concise]
+append_system_prompt = "Prefer concise release notes."
+append_context = "Keep the release checklist in view."
+
+[api.hooks.after_turn]
+event = "turn_completed"
+workflow = "review"
+effect = "idempotent"
+
+[api.tools.review]
+workflow = "review"
+description = "Run the durable review workflow"
+input_schema = { type = "object" }
+effect = "at_most_once"
+
+[api.commands.review]
+workflow = "review"
+description = "Run the durable review command"
+
+# Blu also accepts .lua and .luau entrypoints; .luau selects Luau semantics
+# inside the embedded Blu engine.
+# [workflows.lua_review]
+# runtime = "blu"
+# entrypoint = "workflows/lua_review.lua"
+
+# Native packages load a hash-pinned C ABI library in Borg's process only when
+# runtime_access = "native" and the user's native_access policy is "allow".
+# [native]
+# library = "lib/example.so"
+# sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+# abi_version = 2
+#
+# [workflows.luau_review]
+# runtime = "blu"
+# entrypoint = "workflows/luau_review.luau"
+
+# Example full-ecosystem alternatives:
+# [workflows.analysis]
+# runtime = "ipython"
+# entrypoint = "workflows/analysis.py"
+# command = "ipython"
+# args = ["--no-banner"]
+#
+# [workflows.typescript_report]
+# runtime = "typescript"
+# entrypoint = "workflows/report.ts"
+# command = "bun"
