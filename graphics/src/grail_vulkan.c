@@ -188,6 +188,7 @@ typedef struct gr_vk_viewobj {
     gr_vk_dev *device;
     VkImageView view;
     VkImage image;      /* the image behind the view: a barrier names a view, Vulkan needs the image */
+    VkImageAspectFlags aspect;
     gr_vk_tex *texture;
     uint32_t sampled_index;
 } gr_vk_viewobj;
@@ -1750,7 +1751,12 @@ gr_result gr_vk_abi_pipeline_create(gr_handle device_handle, const gr_pipeline_d
     raster.lineWidth = 1.0f;
     memset(&multisample, 0, sizeof(multisample));
     multisample.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
-    multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+    switch (desc->samples) {
+    case 2: multisample.rasterizationSamples = VK_SAMPLE_COUNT_2_BIT; break;
+    case 4: multisample.rasterizationSamples = VK_SAMPLE_COUNT_4_BIT; break;
+    case 8: multisample.rasterizationSamples = VK_SAMPLE_COUNT_8_BIT; break;
+    default: multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT; break;
+    }
     memset(&depth, 0, sizeof(depth));
     depth.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
     depth.depthTestEnable = (desc->depth_test && depth_format != VK_FORMAT_UNDEFINED) ? VK_TRUE : VK_FALSE;
@@ -1961,8 +1967,8 @@ gr_result gr_vk_abi_texture_create(gr_handle device_handle, const gr_texture_des
     *out_texture = GR_NULL_HANDLE;
     if (desc->head.size != sizeof(gr_texture_desc))
         return GR_ERROR_VERSION_MISMATCH;
-    if (desc->type != GR_TEXTURE_2D || desc->samples > 1u)
-        return GR_ERROR_UNSUPPORTED; /* arrays, 3D and MSAA are later increments */
+    if (desc->type != GR_TEXTURE_2D)
+        return GR_ERROR_UNSUPPORTED; /* arrays and 3D are later increments */
     if (desc->width == 0 || desc->height == 0)
         return GR_ERROR_INVALID_ARGUMENT;
 
@@ -1989,7 +1995,12 @@ gr_result gr_vk_abi_texture_create(gr_handle device_handle, const gr_texture_des
     info.extent.depth = 1;
     info.mipLevels = 1;
     info.arrayLayers = 1;
-    info.samples = VK_SAMPLE_COUNT_1_BIT;
+    switch (desc->samples) {
+    case 2: info.samples = VK_SAMPLE_COUNT_2_BIT; break;
+    case 4: info.samples = VK_SAMPLE_COUNT_4_BIT; break;
+    case 8: info.samples = VK_SAMPLE_COUNT_8_BIT; break;
+    default: info.samples = VK_SAMPLE_COUNT_1_BIT; break;
+    }
     info.tiling = VK_IMAGE_TILING_OPTIMAL;
     info.usage = vk_image_usage(desc->usage);
     info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
@@ -2050,9 +2061,17 @@ gr_result gr_vk_abi_texture_view_create(gr_handle device_handle, const gr_textur
     info.image = texture->image;
     info.viewType = VK_IMAGE_VIEW_TYPE_2D;
     info.format = texture->format;
-    info.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    info.subresourceRange.aspectMask =
+        gr_format_class_of(texture->gr_format) == GR_FORMAT_CLASS_COLOR
+            ? VK_IMAGE_ASPECT_COLOR_BIT
+            : (gr_format_class_of(texture->gr_format) == GR_FORMAT_CLASS_DEPTH
+                   ? VK_IMAGE_ASPECT_DEPTH_BIT
+                   : (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT));
     info.subresourceRange.levelCount = 1;
     info.subresourceRange.layerCount = 1;
+    /* Recorded from the view that was actually created: reading it before `info` is filled is how
+     * every barrier ended up with a zero aspect mask. */
+    view->aspect = info.subresourceRange.aspectMask;
     if (dev->create_image_view(dev->device, &info, NULL, &view->view) != VK_SUCCESS) {
         free(view);
         return GR_ERROR_BACKEND;
@@ -2461,7 +2480,7 @@ gr_result gr_vk_abi_cmd_barrier(gr_handle cmd_handle, const gr_barrier *barriers
         barrier.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT;
         barrier.dstAccessMask = VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT;
         barrier.image = barrier_image;
-        barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        barrier.subresourceRange.aspectMask = view ? view->aspect : VK_IMAGE_ASPECT_COLOR_BIT;
         barrier.subresourceRange.levelCount = 1;
         barrier.subresourceRange.layerCount = 1;
         cmd->device->cmd_pipeline_barrier(cmd->cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
@@ -2476,6 +2495,7 @@ gr_result gr_vk_abi_cmd_begin_render(gr_handle cmd_handle, const gr_render_begin
     gr_vk_cmdbuf *cmd = (gr_vk_cmdbuf *)gr_object_lookup(gr_objects(), cmd_handle,
                                                          GR_HANDLE_CMD_BUFFER, NULL);
     VkRenderingAttachmentInfo attachments[4];
+    VkRenderingAttachmentInfo depth_attachment;
     VkRenderingInfo rendering;
     uint32_t i;
     if (!cmd || !info)
@@ -2504,6 +2524,17 @@ gr_result gr_vk_abi_cmd_begin_render(gr_handle cmd_handle, const gr_render_begin
         attachments[i].clearValue.color.float32[1] = info->colors[i].clear[1];
         attachments[i].clearValue.color.float32[2] = info->colors[i].clear[2];
         attachments[i].clearValue.color.float32[3] = info->colors[i].clear[3];
+        /* A resolve target turns a multisampled attachment into the single-sampled image a later
+         * pass (or a readback) can sample. */
+        if (!gr_handle_is_null(info->colors[i].resolve_view) && view->texture) {
+            gr_vk_viewobj *resolve = (gr_vk_viewobj *)gr_object_lookup(
+                gr_objects(), info->colors[i].resolve_view, GR_HANDLE_TEXTURE_VIEW, NULL);
+            if (!resolve)
+                return GR_ERROR_INVALID_HANDLE;
+            attachments[i].resolveImageView = resolve->view;
+            attachments[i].resolveImageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+            attachments[i].resolveMode = VK_RESOLVE_MODE_AVERAGE_BIT;
+        }
     }
     memset(&rendering, 0, sizeof(rendering));
     rendering.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
@@ -2514,6 +2545,27 @@ gr_result gr_vk_abi_cmd_begin_render(gr_handle cmd_handle, const gr_render_begin
     rendering.layerCount = 1;
     rendering.colorAttachmentCount = info->color_count;
     rendering.pColorAttachments = attachments;
+
+    /* Depth is optional and independent of the colour path: a pass may render depth-only. */
+    if (info->depth) {
+        gr_vk_viewobj *view = (gr_vk_viewobj *)gr_object_lookup(gr_objects(), info->depth->view,
+                                                                GR_HANDLE_TEXTURE_VIEW, NULL);
+        if (!view)
+            return GR_ERROR_INVALID_HANDLE;
+        memset(&depth_attachment, 0, sizeof(depth_attachment));
+        depth_attachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+        depth_attachment.imageView = view->view;
+        depth_attachment.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+        depth_attachment.loadOp = info->depth->load_op == GR_LOAD_CLEAR ? VK_ATTACHMENT_LOAD_OP_CLEAR
+                                   : info->depth->load_op == GR_LOAD_LOAD ? VK_ATTACHMENT_LOAD_OP_LOAD
+                                                                         : VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        depth_attachment.storeOp = info->depth->store_op == GR_STORE_DISCARD
+                                       ? VK_ATTACHMENT_STORE_OP_DONT_CARE
+                                       : VK_ATTACHMENT_STORE_OP_STORE;
+        depth_attachment.clearValue.depthStencil.depth = info->depth->clear_depth;
+        depth_attachment.clearValue.depthStencil.stencil = info->depth->clear_stencil;
+        rendering.pDepthAttachment = &depth_attachment;
+    }
     cmd->device->cmd_begin_rendering(cmd->cb, &rendering);
     return GR_OK;
 }
@@ -2880,6 +2932,7 @@ static gr_result vk_swapchain_build(gr_vk_swap *swap, uint32_t want_width, uint3
             object->device = dev;
             object->view = swap->views[i];
             object->image = swap->images[i];
+            object->aspect = VK_IMAGE_ASPECT_COLOR_BIT;
             object->texture = NULL; /* owned by the swapchain, not by a texture object */
             object->sampled_index = GR_BINDLESS_INDEX_NONE;
             swap->view_handles[i] = gr_object_insert(gr_objects(), GR_HANDLE_TEXTURE_VIEW, object);

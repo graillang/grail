@@ -442,8 +442,10 @@ typedef struct gr_color_attachment {
     uint32_t load_op;        /* gr_load_op */
     uint32_t store_op;       /* gr_store_op */
     float clear[4];
-    uint32_t resolve_view;   /* unused, 0; MSAA resolve is a separate explicit pass */
-    uint32_t _reserved;
+    /* The single-sampled image this attachment resolves into, or GR_NULL_HANDLE. It is a gr_handle:
+     * a 32-bit field here silently truncated the handle and made every MSAA resolve an invalid
+     * object. */
+    gr_handle resolve_view;
 } gr_color_attachment;
 
 typedef struct gr_depth_attachment {

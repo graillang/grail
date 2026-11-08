@@ -174,6 +174,29 @@ would not tell you whether the argument block was read as the command it holds.
 against the buffer's size and require `GR_BUFFER_USAGE_INDIRECT`: 20 bytes per indexed draw command
 with a stride that is a multiple of 4, and 12 bytes for a dispatch (`groupCountX/Y/Z`).
 
+## Depth and MSAA
+
+`gr_cmd_begin_render` now takes an optional depth attachment and an optional resolve target. Both go
+straight to Vulkan's `VkRenderingInfo`, so a pass may render colour only, depth only, or colour with
+a resolve. Texture views take their aspect from the format's class — a D32 view is a depth view —
+and barriers use that aspect, which they did not before.
+
+**Depth ordering is proven by pixels, not by configuration.** The same triangle is drawn twice, the
+farther one second, with `GREATER_OR_EQUAL` against a cleared `0.0` (reverse-Z, so 0 is the far
+plane): the near coloured triangle keeps its colour (`59,65,131`) instead of being overwritten by
+the later white draw. Swapping the depths makes white win (`255,255,255`), which is what shows the
+first result comes from the depth test rather than from a test that never ran.
+
+**MSAA is proven the same way.** A 64x64 triangle is rendered at 4 samples, resolved into a
+single-sampled image, and read back: `0x69b27e7199e5f344`, identical on two runs, and different from
+the same geometry rasterised at one sample (`0x0e68d595bbfd9115`). A resolve that silently did
+nothing would match the aliased digest exactly.
+
+That work found a real ABI bug: `gr_color_attachment.resolve_view` was declared `uint32_t`, so a
+64-bit view handle was **truncated** — the resolve received object `55` and every MSAA pass failed
+with `INVALID_HANDLE`. It is a `gr_handle` now (`GR_ABI_VERSION_MINOR` 4), and the structure is the
+same size, because the padding that followed it was what the handle's upper half needed.
+
 ## Presentation without stalling the queue
 
 Present no longer waits the queue idle. The handoff is the standard one:
