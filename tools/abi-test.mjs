@@ -36,6 +36,8 @@ const common = [
 ];
 
 buildAndRun('core', ['tests/abi/test_core.c', ...common]);
+buildAndRun('handles', ['tests/abi/test_handle_table.c',
+  'runtime/abi/grail_handle_table.c']);
 buildAndRun('paths-posix', ['tests/abi/test_paths.c', 'runtime/abi/grail_abi.c',
   'runtime/abi/grail_error.c', 'runtime/abi/grail_path.c']);
 buildAndRun('paths-windows', ['tests/abi/test_paths.c', 'runtime/abi/grail_abi.c',

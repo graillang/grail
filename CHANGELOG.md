@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Added the resource-domain headers for files/directories/pipes, environment iterators,
+  native threads/mutexes/condition variables and dynamic libraries, plus a generation-checked
+  handle table that rejects stale, double-closed and cross-domain handles. Contract tests
+  cover 1000 handle allocations, reuse, foreign-table rejection and destruction; all headers
+  parse for the five ABI targets.
 - Added the lexical path contract (`include/grail/grail_path.h`) with one implementation
   for POSIX and Windows rules: absolute/relative detection, join, parent, file name,
   extension and normalization. Both rule sets are exercised on Linux, including drive-relative
