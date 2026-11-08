@@ -2,37 +2,37 @@ module strings;
 use core;
 
 // Byte-oriented text helpers. Inputs are read-only views (`&text`); results are new values.
-pub fn starts_with<a,b>(text:read<a>,prefix:read<b>)->bool{
+pub fn starts_with<a,b>(text:&a [u8],prefix:&b [u8])->bool{
     if text.len()<prefix.len(){return false;}for i in prefix.len(){if text[i]!=prefix[i]{return false;}}return true;
 }
-pub fn ends_with<a,b>(text:read<a>,suffix:read<b>)->bool{
+pub fn ends_with<a,b>(text:&a [u8],suffix:&b [u8])->bool{
     if text.len()<suffix.len(){return false;}d:=text.len()-suffix.len();for i in suffix.len(){if text[d+i]!=suffix[i]{return false;}}return true;
 }
 // Index of the first occurrence of needle, or None.
-pub fn find<a,b>(text:read<a>,needle:read<b>)->u64?{
+pub fn find<a,b>(text:&a [u8],needle:&b [u8])->u64?{
     if needle.len()==0{return core::some(0);}if text.len()<needle.len(){return core::none<u64>();}
     for i in text.len()-needle.len()+1{mut same=true;for j in needle.len(){if text[i+j]!=needle[j]{same=false;break;}}if same{return core::some(i);}}
     return core::none<u64>();
 }
-pub fn contains<a,b>(text:read<a>,needle:read<b>)->bool{if let Some(i) = find(text,needle) {return true;}return false;}
-pub fn split<a>(text:read<a>,separator:u64)->u8[][]{
+pub fn contains<a,b>(text:&a [u8],needle:&b [u8])->bool{if let Some(i) = find(text,needle) {return true;}return false;}
+pub fn split<a>(text:&a [u8],separator:u64)->u8[][]{
     mut parts=u8[][];mut current=u8[];
     for b in text{if b==separator{parts.push(current);current=u8[];}else{current.push(b);}}
     parts.push(current);return parts;
 }
-pub fn trim<a>(text:read<a>)->u8[]{
+pub fn trim<a>(text:&a [u8])->u8[]{
     mut start=0;mut end=text.len();
     while start<end{b:=text[start];if (b!=32)&(b!=9)&(b!=10)&(b!=13){break;}start+=1;}
     while start<end{b:=text[end-1];if (b!=32)&(b!=9)&(b!=10)&(b!=13){break;}end-=1;}
     mut out=u8[];for i in start..end{out.push(text[i]);}return out;
 }
-pub fn join_with<a,b>(parts:(&a u8[][]),separator:read<b>)->u8[]{
+pub fn join_with<a,b>(parts:(&a u8[][]),separator:&b [u8])->u8[]{
     mut out=u8[];for i in parts.len(){if i>0{for b in separator{out.push(b);}}part:=&parts[i];for b in part{out.push(b);}}return out;
 }
-pub fn to_upper<a>(text:read<a>)->u8[]{mut out=u8[];for b in text{if (b>=97)&(b<=122){out.push(b-32);}else{out.push(b);}}return out;}
-pub fn to_lower<a>(text:read<a>)->u8[]{mut out=u8[];for b in text{if (b>=65)&(b<=90){out.push(b+32);}else{out.push(b);}}return out;}
+pub fn to_upper<a>(text:&a [u8])->u8[]{mut out=u8[];for b in text{if (b>=97)&(b<=122){out.push(b-32);}else{out.push(b);}}return out;}
+pub fn to_lower<a>(text:&a [u8])->u8[]{mut out=u8[];for b in text{if (b>=65)&(b<=90){out.push(b+32);}else{out.push(b);}}return out;}
 // Decimal digits only; None for empty input, other characters or overflow.
-pub fn parse_num<a>(text:read<a>)->u64?{
+pub fn parse_num<a>(text:&a [u8])->u64?{
     if text.len()==0{return core::none<u64>();}mut value=0;
     for b in text{if (b<48)+(b>57){return core::none<u64>();}if value>1844674407370955161{return core::none<u64>();}
         next:=value*10;if next>18446744073709551615-(b-48){return core::none<u64>();}value=next+(b-48);}
@@ -41,7 +41,7 @@ pub fn parse_num<a>(text:read<a>)->u64?{
 
 // Unicode code points of UTF-8 text (`string` values are always valid UTF-8; for raw bytes, invalid
 // sequences decode to U+FFFD per byte).
-pub fn chars<a>(text:read<a>)->u32[]{
+pub fn chars<a>(text:&a [u8])->u32[]{
     mut out=u32[];mut i=0;n:=text.len();
     while i<n{
         b:=text[i];mut cp=65533u32;mut width=1;
@@ -53,16 +53,16 @@ pub fn chars<a>(text:read<a>)->u32[]{
     }
     return out;
 }
-pub fn char_count<a>(text:read<a>)->u64{v:=chars(text);return v.len();}
+pub fn char_count<a>(text:&a [u8])->u64{v:=chars(text);return v.len();}
 // Appends the UTF-8 encoding of a code point (invalid code points become U+FFFD).
-pub fn push_char<a>(out:(&mut a u8[]),code:u32){
+pub fn push_char<a>(out:(&a mut u8[]),code:u32){
     mut v=u64(code);if (v>1114111)+((v>=55296)&(v<=57343)){v=65533;}
     if v<128{out.push(v);return ();}
     if v<2048{out.push(192+v/64);out.push(128+v%64);return ();}
     if v<65536{out.push(224+v/4096);out.push(128+(v/64)%64);out.push(128+v%64);return ();}
     out.push(240+v/262144);out.push(128+(v/4096)%64);out.push(128+(v/64)%64);out.push(128+v%64);
 }
-pub fn replace<a,b,d>(text:read<a>,from:read<b>,to:read<d>)->u8[]{
+pub fn replace<a,b,d>(text:&a [u8],from:&b [u8],to:&d [u8])->u8[]{
     mut out=u8[];if from.len()==0{for b in text{out.push(b);}return out;}mut i=0;
     while i<text.len(){
         mut hit=i+from.len()<=text.len();if hit{for j in from.len(){if text[i+j]!=from[j]{hit=false;break;}}}
@@ -70,4 +70,4 @@ pub fn replace<a,b,d>(text:read<a>,from:read<b>,to:read<d>)->u8[]{
     }
     return out;
 }
-pub fn repeat<a>(text:read<a>,count:u64)->u8[]{mut out=u8[];for i in count{for b in text{out.push(b);}}return out;}
+pub fn repeat<a>(text:&a [u8],count:u64)->u8[]{mut out=u8[];for i in count{for b in text{out.push(b);}}return out;}

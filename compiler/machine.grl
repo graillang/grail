@@ -9,7 +9,7 @@ struct Out {
     target: u64,
     next: u64
 }
-fn eq<a, b>(a: read<a>, b: read<b>) -> u64 {
+fn eq<a, b>(a: &a [u8], b: &b [u8]) -> u64 {
     if a.len() != b.len() {
         return false;
     }
@@ -20,13 +20,13 @@ fn eq<a, b>(a: read<a>, b: read<b>) -> u64 {
     }
     return true;
 }
-fn starts<a, b>(a: read<a>, b: read<b>) -> u64 {
+fn starts<a, b>(a: &a [u8], b: &b [u8]) -> u64 {
     if a.len() < b.len() {
         return false;
     }
     return eq(&(a[: b.len()]), &(b));
 }
-fn trim<a>(s: read<a>) -> read<a> {
+fn trim<a>(s: &a [u8]) -> &a [u8] {
     mut a = 0;
     mut b = s.len();
     while a < b {
@@ -43,42 +43,42 @@ fn trim<a>(s: read<a>) -> read<a> {
     }
     return s[a: b];
 }
-fn bad<a>(s: read<a>) -> unit {
+fn bad<a>(s: &a [u8]) -> unit {
     host::print(&"machine lowering: unsupported instruction/operand: ");
     host::print(s);
     host::print(&"\n");
     assert(false);
     return ();
 }
-fn put<a, b>(o: (&mut a Out), s: read<b>) -> unit {
+fn put<a, b>(o: (&a mut Out), s: &b [u8]) -> unit {
     for i in s.len() {
         o.text.push(s[i]);
     }
     return ();
 }
-fn u64<a>(o: (&mut a Out), n: u64) -> unit {
+fn u64<a>(o: (&a mut Out), n: u64) -> unit {
     if 9 < n {
         u64(borrow_mut(o), n / 10);
     }
     o.text.push(48 + n % 10);
     return ();
 }
-fn fresh<a>(o: (&mut a Out)) -> u64 {
+fn fresh<a>(o: (&a mut Out)) -> u64 {
     n := o.next;
     exchange(borrow_mut(o.next), n + 1);
     return n;
 }
-fn label<a>(o: (&mut a Out), n: u64) -> unit {
+fn label<a>(o: (&a mut Out), n: u64) -> unit {
     put(borrow_mut(o), &".Lmachine");
     u64(borrow_mut(o), n);
     return ();
 }
-fn mark<a>(o: (&mut a Out), n: u64) -> unit {
+fn mark<a>(o: (&a mut Out), n: u64) -> unit {
     label(borrow_mut(o), n);
     put(borrow_mut(o), &":\n");
     return ();
 }
-fn split<a>(s: read<a>, delimiter: u64) -> u8[][] {
+fn split<a>(s: &a [u8], delimiter: u64) -> u8[][] {
     mut out = u8[][];
     mut start = 0;
     mut depth = 0;
@@ -99,7 +99,7 @@ fn split<a>(s: read<a>, delimiter: u64) -> u8[][] {
     out.push((trim(&(s[start:]))).copy());
     return out;
 }
-fn reg<a>(target: u64, s: read<a>) -> string {
+fn reg<a>(target: u64, s: &a [u8]) -> string {
     if eq(&(s), &"%rax") + eq(&(s), &"%eax") + eq(&(s), &"%al") {
         if target == 1 {
             return "x9";
@@ -196,7 +196,7 @@ fn reg<a>(target: u64, s: read<a>) -> string {
     bad(&(s));
     return "";
 }
-fn small_reg<a>(s: read<a>) -> u64 {
+fn small_reg<a>(s: &a [u8]) -> u64 {
     return eq(&(s), &"%eax")
         + eq(&(s), &"%edi")
         + eq(&(s), &"%esi")
@@ -207,7 +207,7 @@ fn small_reg<a>(s: read<a>) -> u64 {
         + eq(&(s), &"%r10d")
         + eq(&(s), &"%r11d");
 }
-fn armword<a>(s: read<a>) -> string {
+fn armword<a>(s: &a [u8]) -> string {
     if eq(&(s), &"sp") {
         return "wsp";
     }
@@ -216,7 +216,7 @@ fn armword<a>(s: read<a>) -> string {
     return out;
 }
 // Recognize only small decimal literals; expressions stay assembler constants.
-fn small_literal<a>(value: read<a>) -> u64 {
+fn small_literal<a>(value: &a [u8]) -> u64 {
     if value.len() == 0 {
         return 0;
     }
@@ -236,7 +236,7 @@ fn small_literal<a>(value: read<a>) -> u64 {
     }
     return n + 1;
 }
-fn constant<a, b, c>(o: (&mut a Out), dst: read<b>, value: read<c>) -> unit {
+fn constant<a, b, c>(o: (&a mut Out), dst: &b [u8], value: &c [u8]) -> unit {
     if o.target == 2 {
         put(borrow_mut(o), &"li ");
         put(borrow_mut(o), &(dst));
@@ -285,7 +285,7 @@ fn constant<a, b, c>(o: (&mut a Out), dst: read<b>, value: read<c>) -> unit {
     }
     return ();
 }
-fn move<a, b, c>(o: (&mut a Out), dst: read<b>, src: read<c>) -> unit {
+fn move<a, b, c>(o: (&a mut Out), dst: &b [u8], src: &c [u8]) -> unit {
     if o.target == 1 {
         put(borrow_mut(o), &"mov ");
     } else {
@@ -298,7 +298,7 @@ fn move<a, b, c>(o: (&mut a Out), dst: read<b>, src: read<c>) -> unit {
     return ();
 }
 // Address scratch is x13/t3; x12/t2 is used only while forming an address.
-fn address<a, b>(o: (&mut a Out), operand: read<b>) -> unit {
+fn address<a, b>(o: (&a mut Out), operand: &b [u8]) -> unit {
     target := o.target;
     mut open = operand.len();
     for i in operand.len() {
@@ -378,7 +378,7 @@ fn address<a, b>(o: (&mut a Out), operand: read<b>) -> unit {
     }
     return ();
 }
-fn read_operand<a, b, c>(o: (&mut a Out), operand: read<b>, dst: read<c>, byte: u64) -> unit {
+fn read_operand<a, b, c>(o: (&a mut Out), operand: &b [u8], dst: &c [u8], byte: u64) -> unit {
     assert(operand.len() != 0);
     target := o.target;
     if operand[0] == 36 {
@@ -427,7 +427,7 @@ fn read_operand<a, b, c>(o: (&mut a Out), operand: read<b>, dst: read<c>, byte: 
     }
     return ();
 }
-fn store<a, b>(o: (&mut a Out), operand: read<b>, byte: u64) -> unit {
+fn store<a, b>(o: (&a mut Out), operand: &b [u8], byte: u64) -> unit {
     target := o.target;
     assert(operand.len() != 0);
     if operand[0] == 37 {
@@ -480,7 +480,7 @@ fn store<a, b>(o: (&mut a Out), operand: read<b>, byte: u64) -> unit {
     }
     return ();
 }
-fn branch<a, b, c>(o: (&mut a Out), op: read<b>, dest: read<c>) -> unit {
+fn branch<a, b, c>(o: (&a mut Out), op: &b [u8], dest: &c [u8]) -> unit {
     if eq(&(op), &"jmp") {
         if o.target == 1 {
             put(borrow_mut(o), &"b ");
@@ -542,7 +542,7 @@ fn branch<a, b, c>(o: (&mut a Out), op: read<b>, dest: read<c>) -> unit {
     mark(borrow_mut(o), n);
     return ();
 }
-fn arithmetic<a, b, c, d>(o: (&mut a Out), op: read<b>, src: read<c>, dst: read<d>) -> unit {
+fn arithmetic<a, b, c, d>(o: (&a mut Out), op: &b [u8], src: &c [u8], dst: &d [u8]) -> unit {
     target := o.target;
     if target == 1 {
         read_operand(borrow_mut(o), &(src), &"x10", 0);
@@ -641,7 +641,7 @@ fn arithmetic<a, b, c, d>(o: (&mut a Out), op: read<b>, src: read<c>, dst: read<
     store(borrow_mut(o), &(dst), 0);
     return ();
 }
-fn atomic_instruction<a, b, c>(o: (&mut a Out), op: read<b>, rest: read<c>) -> u64 {
+fn atomic_instruction<a, b, c>(o: (&a mut Out), op: &b [u8], rest: &c [u8]) -> u64 {
     target := o.target;
     if eq(&op, &"mfence") + eq(&op, &"lfence") + eq(&op, &"sfence") {
         if target == 1 {
@@ -727,7 +727,7 @@ fn atomic_instruction<a, b, c>(o: (&mut a Out), op: read<b>, rest: read<c>) -> u
     }
     return false;
 }
-fn instruction<a, b>(o: (&mut a Out), line: read<b>) -> unit {
+fn instruction<a, b>(o: (&a mut Out), line: &b [u8]) -> unit {
     target := o.target;
     mut space = line.len();
     for i in line.len() {
@@ -1095,7 +1095,7 @@ fn instruction<a, b>(o: (&mut a Out), line: read<b>) -> unit {
     arithmetic(borrow_mut(o), &(op), &src, &dst);
     return ();
 }
-pub fn lower<a>(input: read<a>, target: u64) -> u8[] {
+pub fn lower<a>(input: &a [u8], target: u64) -> u8[] {
     assert((target == 1) + (target == 2));
     mut out = Out { text: u8[], target: target, next: 1 };
     // Frame constants are known before instruction selection (no unresolved immediate expressions).

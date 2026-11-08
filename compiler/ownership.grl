@@ -25,11 +25,11 @@ pub struct State {
 pub fn new() -> State {
     return State { places: Place[], loans: Loan[] };
 }
-pub fn root<a>(s: (&mut a State), copy: u64, initialized: u64) -> u64 {
+pub fn root<a>(s: (&a mut State), copy: u64, initialized: u64) -> u64 {
     s.places.push(Place { parent: 0, status: initialized, copy: copy });
     return s.places.len();
 }
-pub fn field<a>(s: (&mut a State), parent: u64, copy: u64) -> u64 {
+pub fn field<a>(s: (&a mut State), parent: u64, copy: u64) -> u64 {
     if (parent == 0) + (s.places.len() < parent) {
         return 0;
     }
@@ -115,7 +115,7 @@ pub fn read<a>(s: (&a State), id: u64) -> u64 {
     }
     return conflict(borrow(s), id, 0);
 }
-fn set_tree<a>(s: (&mut a State), id: u64, status: u64) -> unit {
+fn set_tree<a>(s: (&a mut State), id: u64, status: u64) -> unit {
     for i in s.places.len() {
         if ancestor(borrow(s), id, i + 1) {
             mut p = &mut s.places[i];
@@ -124,7 +124,7 @@ fn set_tree<a>(s: (&mut a State), id: u64, status: u64) -> unit {
     }
     return ();
 }
-pub fn take<a>(s: (&mut a State), id: u64) -> u64 {
+pub fn take<a>(s: (&a mut State), id: u64) -> u64 {
     e := complete(borrow(s), id);
     if e != 0 {
         return e;
@@ -141,7 +141,7 @@ pub fn take<a>(s: (&mut a State), id: u64) -> u64 {
     return 0;
 }
 // Compiler-generated cleanup may close possibly initialized storage; emitted flags guard frees.
-pub fn cleanup<a>(s: (&mut a State), id: u64) -> u64 {
+pub fn cleanup<a>(s: (&a mut State), id: u64) -> u64 {
     if (id == 0) + (s.places.len() < id) {
         return 1;
     }
@@ -155,14 +155,14 @@ pub fn cleanup<a>(s: (&mut a State), id: u64) -> u64 {
     set_tree(borrow_mut(s), id, 2);
     return 0;
 }
-pub fn drop_value<a>(s: (&mut a State), id: u64) -> u64 {
+pub fn drop_value<a>(s: (&a mut State), id: u64) -> u64 {
     e := present(borrow(s), id);
     if e != 0 {
         return e;
     }
     return cleanup(borrow_mut(s), id);
 }
-pub fn initialize<a>(s: (&mut a State), id: u64) -> u64 {
+pub fn initialize<a>(s: (&a mut State), id: u64) -> u64 {
     if (id == 0) + (s.places.len() < id) {
         return 1;
     }
@@ -181,7 +181,7 @@ pub fn initialize<a>(s: (&mut a State), id: u64) -> u64 {
     return 0;
 }
 // Negative errors are not represented by loan IDs: zero means borrow denied, with no mutation.
-pub fn borrow_place<a>(s: (&mut a State), id: u64, mode: u64) -> u64 {
+pub fn borrow_place<a>(s: (&a mut State), id: u64, mode: u64) -> u64 {
     if 1 < mode {
         return 0;
     }
@@ -234,7 +234,7 @@ pub fn use_loan<a>(s: (&a State), id: u64, write: u64) -> u64 {
     }
     return 0;
 }
-pub fn reborrow<a>(s: (&mut a State), parent: u64, mode: u64) -> u64 {
+pub fn reborrow<a>(s: (&a mut State), parent: u64, mode: u64) -> u64 {
     if 1 < mode {
         return 0;
     }
@@ -267,7 +267,7 @@ pub fn reborrow<a>(s: (&mut a State), parent: u64, mode: u64) -> u64 {
     s.loans.push(Loan { source: source, parent: authority, mode: mode, live: 1 });
     return s.loans.len();
 }
-pub fn end_loan<a>(s: (&mut a State), id: u64) -> u64 {
+pub fn end_loan<a>(s: (&a mut State), id: u64) -> u64 {
     if (id == 0) + (s.loans.len() < id) {
         return 1;
     }
@@ -303,7 +303,7 @@ pub fn snapshot<a>(s: (&a State)) -> State {
 }
 // Conservative join: definitely initialized places intersect, possible live loans union.
 // Different storage/authority shapes are rejected instead of pretending they are interchangeable.
-pub fn join<a, b>(s: (&mut a State), other: (&b State)) -> u64 {
+pub fn join<a, b>(s: (&a mut State), other: (&b State)) -> u64 {
     if (s.places.len() != other.places.len()) + (s.loans.len() != other.loans.len()) {
         return 7;
     }
@@ -345,7 +345,7 @@ pub fn join<a, b>(s: (&mut a State), other: (&b State)) -> u64 {
 }
 // Restore an earlier control-flow point without reusing place IDs allocated in another arm.
 // Newly seen fields of old storage inherit the parent's state; arm-local roots are dead.
-pub fn restore<a, b>(s: (&mut a State), saved: (&b State)) -> unit {
+pub fn restore<a, b>(s: (&a mut State), saved: (&b State)) -> unit {
     for i in s.places.len() {
         mut state = 2;
         if i < saved.places.len() {
@@ -383,7 +383,7 @@ fn inherited_status<a, b>(s: (&a State), saved: (&b State), id: u64) -> u64 {
     }
     return 2;
 }
-pub fn merge<a, b>(s: (&mut a State), saved: (&b State)) -> unit {
+pub fn merge<a, b>(s: (&a mut State), saved: (&b State)) -> unit {
     mut i = s.places.len();
     while i < saved.places.len() {
         mut p = &saved.places[i];
@@ -511,7 +511,7 @@ pub fn access_loan<a>(s: (&a State), parent: u64, target: u64, write: u64) -> u6
     }
     return 0;
 }
-pub fn reborrow_place<a>(s: (&mut a State), parent: u64, target: u64, mode: u64) -> u64 {
+pub fn reborrow_place<a>(s: (&a mut State), parent: u64, target: u64, mode: u64) -> u64 {
     if 1 < mode {
         return 0;
     }

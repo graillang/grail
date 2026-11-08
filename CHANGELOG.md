@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Internal compiler and standard-library signatures now spell byte views as `&a [u8]` /
+  `&a mut [u8]` and mutable reference lifetimes as `&a mut T`. Numeric defaults remain
+  `u64` internally and `i64` for user modules.
+
 - Concise type syntax: `T[]` vectors, `u8[]` byte buffers, `T?` optional values and
   `[K: V]` maps. The `num` spelling is removed; user modules default to `i64`, while lengths,
   indices and byte counts are explicit `u64`. `Option`, `Result`, `Pair`, tuple syntax,

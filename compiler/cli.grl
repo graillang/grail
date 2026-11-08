@@ -16,7 +16,7 @@ struct Project {
     revs: u8[][]
 }
 
-fn eq<a, b>(x: read<a>, y: read<b>) -> u64 {
+fn eq<a, b>(x: &a [u8], y: &b [u8]) -> u64 {
     if x.len() != y.len() {
         return false;
     }
@@ -27,7 +27,7 @@ fn eq<a, b>(x: read<a>, y: read<b>) -> u64 {
     }
     return true;
 }
-fn starts<a, b>(x: read<a>, y: read<b>) -> u64 {
+fn starts<a, b>(x: &a [u8], y: &b [u8]) -> u64 {
     if x.len() < y.len() {
         return false;
     }
@@ -38,7 +38,7 @@ fn starts<a, b>(x: read<a>, y: read<b>) -> u64 {
     }
     return true;
 }
-fn ends<a, b>(x: read<a>, y: read<b>) -> u64 {
+fn ends<a, b>(x: &a [u8], y: &b [u8]) -> u64 {
     if x.len() < y.len() {
         return false;
     }
@@ -50,7 +50,7 @@ fn ends<a, b>(x: read<a>, y: read<b>) -> u64 {
     }
     return true;
 }
-fn cat<a, b>(x: read<a>, y: read<b>) -> u8[] {
+fn cat<a, b>(x: &a [u8], y: &b [u8]) -> u8[] {
     mut o = u8[];
     for i in x.len() {
         o.push(x[i]);
@@ -60,14 +60,14 @@ fn cat<a, b>(x: read<a>, y: read<b>) -> u8[] {
     }
     return o;
 }
-fn copy<a>(x: read<a>) -> u8[] {
+fn copy<a>(x: &a [u8]) -> u8[] {
     mut o = u8[];
     for i in x.len() {
         o.push(x[i]);
     }
     return o;
 }
-fn path_join<a, b>(dir: read<a>, name: read<b>) -> u8[] {
+fn path_join<a, b>(dir: &a [u8], name: &b [u8]) -> u8[] {
     if (dir.len() == 0) + eq(&dir, &".") {
         return copy(&name);
     }
@@ -81,7 +81,7 @@ fn path_join<a, b>(dir: read<a>, name: read<b>) -> u8[] {
     }
     return o;
 }
-fn dirname<a>(p: read<a>) -> u8[] {
+fn dirname<a>(p: &a [u8]) -> u8[] {
     mut i = p.len();
     while 0 < i {
         i -= 1;
@@ -98,7 +98,7 @@ fn dirname<a>(p: read<a>) -> u8[] {
     }
     return copy(&".");
 }
-fn basename<a>(p: read<a>) -> u8[] {
+fn basename<a>(p: &a [u8]) -> u8[] {
     mut start = 0;
     for i in p.len() {
         if p[i] == 47 {
@@ -117,11 +117,11 @@ fn basename<a>(p: read<a>) -> u8[] {
     }
     return o;
 }
-fn say<a>(s: read<a>) {
+fn say<a>(s: &a [u8]) {
     host::print(s);
     host::print(&"\n");
 }
-fn say2<a, b>(s: read<a>, t: read<b>) {
+fn say2<a, b>(s: &a [u8], t: &b [u8]) {
     host::print(s);
     host::print(t);
     host::print(&"\n");
@@ -130,7 +130,7 @@ fn item<a>(v: (&a u8[][]), i: u64) -> u8[] {
     x := &v[i];
     return x.copy();
 }
-fn words<a>(line: read<a>) -> u8[][] {
+fn words<a>(line: &a [u8]) -> u8[][] {
     mut out = u8[][];
     mut cur = u8[];
     for i in line.len() {
@@ -148,7 +148,7 @@ fn words<a>(line: read<a>) -> u8[][] {
     }
     return out;
 }
-fn lines<a>(text: read<a>) -> u8[][] {
+fn lines<a>(text: &a [u8]) -> u8[][] {
     mut out = u8[][];
     mut cur = u8[];
     for i in text.len() {
@@ -194,7 +194,7 @@ fn home() -> Home {
     say(&"grail: cannot find the Grail runtime; set GRAIL_HOME");
     return Home { runtime: u8[], std: u8[] };
 }
-fn collect<a, b>(dir: read<a>, out: (&mut b u8[][])) {
+fn collect<a, b>(dir: &a [u8], out: (&b mut u8[][])) {
     entries := host::list_dir(&dir);
     for i in entries.len() {
         name := item(borrow(entries), i);
@@ -219,7 +219,7 @@ fn target_name(t: u64) -> u8[] {
     }
     return copy(&"x86_64");
 }
-fn tool<a, b>(variable: read<a>, fallback: read<b>) -> u8[] {
+fn tool<a, b>(variable: &a [u8], fallback: &b [u8]) -> u8[] {
     v := host::env(variable);
     if v.len() {
         return v;
@@ -228,20 +228,20 @@ fn tool<a, b>(variable: read<a>, fallback: read<b>) -> u8[] {
 }
 fn compile<a, b, d, e, g>(
     h: (&a Home),
-    entry: read<b>,
+    entry: &b [u8],
     modules: (&d u8[][]),
-    output: read<e>,
-    target: read<g>
+    output: &e [u8],
+    target: &g [u8]
 ) -> u64 {
     return compile_mode(h, entry, modules, output, target, 0);
 }
 // check_only: type-check and generate code, but do not assemble or link.
 fn compile_mode<a, b, d, e, g>(
     h: (&a Home),
-    entry: read<b>,
+    entry: &b [u8],
     modules: (&d u8[][]),
-    output: read<e>,
-    target: read<g>,
+    output: &e [u8],
+    target: &g [u8],
     check_only: u64
 ) -> u64 {
     asm := cat(&output, &".s");
@@ -419,7 +419,7 @@ fn options<a>(args: (&a u8[][])) -> Options {
     }
     return o;
 }
-fn build<a, b>(args: (&a u8[][]), o: (&mut b Options)) -> u64 {
+fn build<a, b>(args: (&a u8[][]), o: (&b mut Options)) -> u64 {
     h := home();
     if h.runtime.len() == 0 {
         return 1;
@@ -613,7 +613,7 @@ fn new_command<a>(args: (&a u8[][])) -> u64 {
     say2(&"created project ", &name);
     return 0;
 }
-fn lock_lookup<a, b>(lock: read<a>, name: read<b>) -> u8[] {
+fn lock_lookup<a, b>(lock: &a [u8], name: &b [u8]) -> u8[] {
     rows := lines(&lock);
     for i in rows.len() {
         row := item(borrow(rows), i);
@@ -762,7 +762,7 @@ fn help() {
         &"  grail [--target T] [--overflow=checked|wrap] OUT.s ENTRY.grl MODULE.grl...  (compiler)"
     );
 }
-pub fn is_command<a>(name: read<a>) -> u64 {
+pub fn is_command<a>(name: &a [u8]) -> u64 {
     return eq(&name, &"build")
         + eq(&name, &"check")
         + eq(&name, &"run")

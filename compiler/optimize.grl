@@ -42,10 +42,10 @@ struct O {
     inl_head: u64[],
     inl_next: u64[]
 }
-fn put<a>(v: (&mut a u64[]), i: u64, x: u64) {
+fn put<a>(v: (&a mut u64[]), i: u64, x: u64) {
     exchange(&mut v[i], x);
 }
-fn same<b, d>(s: read<b>, a: u64, e: u64, w: read<d>) -> u64 {
+fn same<b, d>(s: &b [u8], a: u64, e: u64, w: &d [u8]) -> u64 {
     if e - a != w.len() {
         return false;
     }
@@ -56,7 +56,7 @@ fn same<b, d>(s: read<b>, a: u64, e: u64, w: read<d>) -> u64 {
     }
     return true;
 }
-fn app<a, b>(out: (&mut a u8[]), s: read<b>) {
+fn app<a, b>(out: (&a mut u8[]), s: &b [u8]) {
     for i in s.len() {
         out.push(s[i]);
     }
@@ -179,7 +179,7 @@ fn opcode_key(k: u64) -> u64 {
     }
     return 0;
 }
-fn opname<a>(o: (&mut a O), op: u64) {
+fn opname<a>(o: (&a mut O), op: u64) {
     mut t = "";
     if op == 1 {
         t = "movq";
@@ -404,7 +404,7 @@ fn reg_key(k: u64) -> u64 {
     }
     return 99;
 }
-fn regcode<b>(s: read<b>, a: u64, e: u64) -> u64 {
+fn regcode<b>(s: &b [u8], a: u64, e: u64) -> u64 {
     if (e <= a) + (e - a > 4) {
         return 99;
     }
@@ -418,7 +418,7 @@ fn alnum(c: u64) -> u64 {
     return ((47 < c) & (c < 58)) + ((96 < c) & (c < 123)) + ((64 < c) & (c < 91));
 }
 // Registers mentioned anywhere in s[a:e] (bit 5 marks an rbp use).
-fn mentions<b>(s: read<b>, a: u64, e: u64) -> u64 {
+fn mentions<b>(s: &b [u8], a: u64, e: u64) -> u64 {
     mut m = 0;
     mut i = a;
     while i < e {
@@ -442,7 +442,7 @@ fn mentions<b>(s: read<b>, a: u64, e: u64) -> u64 {
     return m;
 }
 // Classifies one operand: returns kind and fills value/mask through the pair encoding.
-fn classify<a, b>(o: (&mut a O), s: read<b>, a: u64, e: u64, second: u64) {
+fn classify<a, b>(o: (&a mut O), s: &b [u8], a: u64, e: u64, second: u64) {
     mut k = 4;
     mut v = 0;
     mut m = 0;
@@ -528,7 +528,7 @@ fn classify<a, b>(o: (&mut a O), s: read<b>, a: u64, e: u64, second: u64) {
         o.m0.push(m);
     }
 }
-fn parse<a, b>(o: (&mut a O), s: read<b>, a: u64, e: u64) {
+fn parse<a, b>(o: (&a mut O), s: &b [u8], a: u64, e: u64) {
     o.ls.push(a);
     o.le.push(e);
     o.chg.push(0);
@@ -831,7 +831,7 @@ fn slot_written<a>(o: (&a O), i: u64) -> u64 {
     }
     return movelike(op) + arith(op) + (op == 11) + (op == 0);
 }
-fn set_operand<a>(o: (&mut a O), i: u64, j: u64, k: u64, v: u64) {
+fn set_operand<a>(o: (&a mut O), i: u64, j: u64, k: u64, v: u64) {
     if j == 0 {
         put(borrow_mut(o.k0), i, k);
         put(borrow_mut(o.v0), i, v);
@@ -843,7 +843,7 @@ fn set_operand<a>(o: (&mut a O), i: u64, j: u64, k: u64, v: u64) {
     }
     put(borrow_mut(o.chg), i, 1);
 }
-fn set_range<a>(o: (&mut a O), i: u64, j: u64, a: u64, e: u64) {
+fn set_range<a>(o: (&a mut O), i: u64, j: u64, a: u64, e: u64) {
     if j == 0 {
         put(borrow_mut(o.s0), i, a);
         put(borrow_mut(o.e0), i, e);
@@ -852,7 +852,7 @@ fn set_range<a>(o: (&mut a O), i: u64, j: u64, a: u64, e: u64) {
         put(borrow_mut(o.e1), i, e);
     }
 }
-fn kill<a>(o: (&mut a O), i: u64) {
+fn kill<a>(o: (&a mut O), i: u64) {
     put(borrow_mut(o.del), i, 1);
 }
 struct F {
@@ -881,7 +881,7 @@ struct F {
 fn facts_valid<a>(f: (&a F), n: u64) -> u64 {
     return (f.sep[n] == f.epoch) & (f.sfv[n] == f.sver[n]);
 }
-fn fresh_facts<a>(f: (&mut a F), n: u64) {
+fn fresh_facts<a>(f: (&a mut F), n: u64) {
     put(borrow_mut(f.sep), n, f.epoch);
     t1 := f.sver[n];
     put(borrow_mut(f.sfv), n, t1);
@@ -889,7 +889,7 @@ fn fresh_facts<a>(f: (&mut a F), n: u64) {
     put(borrow_mut(f.simm), n, 0);
     put(borrow_mut(f.scopy), n, 0);
 }
-fn reg_written<a>(f: (&mut a F), r: u64) {
+fn reg_written<a>(f: (&a mut F), r: u64) {
     t2 := f.rver[r] + 1;
     put(borrow_mut(f.rver), r, t2);
     put(borrow_mut(f.rimm), r, 0);
@@ -914,7 +914,7 @@ fn copy_source<a>(f: (&a F), q: u64) -> u64 {
     return r;
 }
 // Replace a read of slot n (operand j of i) by a register or constant already holding it.
-fn forward_read<a, c>(o: (&mut a O), f: (&mut c F), i: u64, j: u64, n: u64) {
+fn forward_read<a, c>(o: (&a mut O), f: (&c mut F), i: u64, j: u64, n: u64) {
     if facts_valid(borrow(f), n) == 0 {
         return ();
     }
@@ -998,7 +998,7 @@ fn new_facts(ns: u64) -> F {
     }
     return f;
 }
-fn forward<a, b, c>(o: (&mut a O), f: (&mut c F), s: read<b>, first: u64, last: u64) {
+fn forward<a, b, c>(o: (&a mut O), f: (&c mut F), s: &b [u8], first: u64, last: u64) {
     mut i = first;
     while i < last {
         op := o.op[i];
@@ -1178,7 +1178,7 @@ fn forward<a, b, c>(o: (&mut a O), f: (&mut c F), s: read<b>, first: u64, last: 
         i += 1;
     }
 }
-fn count_reads<a, c>(o: (&a O), f: (&mut c F), first: u64, last: u64) {
+fn count_reads<a, c>(o: (&a O), f: (&c mut F), first: u64, last: u64) {
     for n in f.reads.len() {
         put(borrow_mut(f.reads), n, 0);
     }
@@ -1198,7 +1198,7 @@ fn count_reads<a, c>(o: (&a O), f: (&mut c F), first: u64, last: u64) {
         }
     }
 }
-fn dead_stores<a, c>(o: (&mut a O), f: (&mut c F), first: u64, last: u64) {
+fn dead_stores<a, c>(o: (&a mut O), f: (&c mut F), first: u64, last: u64) {
     count_reads(borrow(o), borrow_mut(f), first, last);
     for i in last - first {
         j := first + i;
@@ -1212,7 +1212,7 @@ fn dead_stores<a, c>(o: (&mut a O), f: (&mut c F), first: u64, last: u64) {
 }
 // Function-wide backward liveness over the label graph (iterated to a fixed point); unknown
 // jump targets and unrecognized instructions make every register live.
-fn live_pass<a, c>(o: (&mut a O), lin: (&mut c u64[]), remove: u64) -> u64 {
+fn live_pass<a, c>(o: (&a mut O), lin: (&c mut u64[]), remove: u64) -> u64 {
     last := o.op.len();
     mut live = 0;
     mut i = last;
@@ -1271,7 +1271,7 @@ fn live_pass<a, c>(o: (&mut a O), lin: (&mut c u64[]), remove: u64) -> u64 {
     }
     return changed;
 }
-fn dead_defs<a, b>(o: (&mut a O), s: read<b>, first: u64, last: u64) {
+fn dead_defs<a, b>(o: (&a mut O), s: &b [u8], first: u64, last: u64) {
     mut lin = u64[];
     for i in last {
         lin.push(0);
@@ -1374,7 +1374,7 @@ fn jump_target<a>(o: (&a O), j: u64) -> u64 {
     }
     return t - 1;
 }
-fn gen_number<a>(o: (&mut a O), n: u64) -> u64 {
+fn gen_number<a>(o: (&a mut O), n: u64) -> u64 {
     start := o.gen.len();
     if 9 < n {
         gen_number(borrow_mut(o), n / 10);
@@ -1382,7 +1382,7 @@ fn gen_number<a>(o: (&mut a O), n: u64) -> u64 {
     o.gen.push(48 + n % 10);
     return start;
 }
-fn gen_imm<a>(o: (&mut a O), n: u64, i: u64, j: u64) {
+fn gen_imm<a>(o: (&a mut O), n: u64, i: u64, j: u64) {
     start := o.gen.len();
     o.gen.push(36);
     gen_number(borrow_mut(o), n);
@@ -1390,7 +1390,7 @@ fn gen_imm<a>(o: (&mut a O), n: u64, i: u64, j: u64) {
     set_operand(borrow_mut(o), i, j, 5, 0);
     set_range(borrow_mut(o), i, j, start, end);
 }
-fn imm_value<a, b>(o: (&a O), s: read<b>, i: u64) -> u64 {
+fn imm_value<a, b>(o: (&a O), s: &b [u8], i: u64) -> u64 {
     // Decimal immediate of operand 0 (+1), or 0.
     if o.k0[i] != 3 {
         return 0;
@@ -1410,7 +1410,7 @@ fn imm_value<a, b>(o: (&a O), s: read<b>, i: u64) -> u64 {
     }
     return n + 1;
 }
-fn peephole<a, b>(o: (&mut a O), s: read<b>, first: u64, last: u64) {
+fn peephole<a, b>(o: (&a mut O), s: &b [u8], first: u64, last: u64) {
     mut i = first;
     while i < last {
         if o.del[i] {
@@ -1593,7 +1593,7 @@ fn promotable_use<a>(o: (&a O), i: u64) -> u64 {
     }
     return (op == 11) + (op == 12) + (op == 13);
 }
-fn emit_operand<a, b>(o: (&mut a O), s: read<b>, i: u64, j: u64) {
+fn emit_operand<a, b>(o: (&a mut O), s: &b [u8], i: u64, j: u64) {
     mut k = o.k0[i];
     mut v = o.v0[i];
     mut a = o.s0[i];
@@ -1626,7 +1626,7 @@ fn emit_operand<a, b>(o: (&mut a O), s: read<b>, i: u64, j: u64) {
         o.out.push(s[a + x]);
     }
 }
-fn reg_name<a>(o: (&mut a O), r: u64) {
+fn reg_name<a>(o: (&a mut O), r: u64) {
     mut t = "";
     if r == 0 {
         t = "rax";
@@ -1678,13 +1678,13 @@ fn reg_name<a>(o: (&mut a O), r: u64) {
     }
     app(borrow_mut(o.out), &t);
 }
-fn out_number<a>(o: (&mut a O), n: u64) {
+fn out_number<a>(o: (&a mut O), n: u64) {
     if 9 < n {
         out_number(borrow_mut(o), n / 10);
     }
     o.out.push(48 + n % 10);
 }
-fn emit_line<a, b>(o: (&mut a O), s: read<b>, i: u64) {
+fn emit_line<a, b>(o: (&a mut O), s: &b [u8], i: u64) {
     op := o.op[i];
     if (op == 40) + (op == 41) + (op == 44) {
         n := o.uniq + 1;
@@ -1769,7 +1769,7 @@ fn emit_line<a, b>(o: (&mut a O), s: read<b>, i: u64) {
     }
     o.out.push(10);
 }
-fn emit_frame_slot<a, b>(o: (&mut a O), s: read<b>, p: u64, k: u64) {
+fn emit_frame_slot<a, b>(o: (&a mut O), s: &b [u8], p: u64, k: u64) {
     // -.FN-8(k+1)(%rbp), where .FN is the frame constant named by the prologue subq.
     app(borrow_mut(o.out), &"-");
     for x in o.e0[p] - o.s0[p] - 1 {
@@ -1779,7 +1779,7 @@ fn emit_frame_slot<a, b>(o: (&mut a O), s: read<b>, p: u64, k: u64) {
     out_number(borrow_mut(o), 8 * (k + 1));
     app(borrow_mut(o.out), &"(%rbp)");
 }
-fn function<a, b>(o: (&mut a O), s: read<b>) {
+fn function<a, b>(o: (&a mut O), s: &b [u8]) {
     first := 0;
     last := o.op.len();
     ns := o.maxslot / 8 + 1;
@@ -2080,7 +2080,7 @@ fn function<a, b>(o: (&mut a O), s: read<b>) {
         inline_candidate(borrow_mut(o), &s, prologue);
     }
 }
-fn name_hash<b>(s: read<b>, a: u64, e: u64) -> u64 {
+fn name_hash<b>(s: &b [u8], a: u64, e: u64) -> u64 {
     mut h = 0;
     for i in e - a {
         h = (h * 31 + s[a + i]) % 4093;
@@ -2090,7 +2090,7 @@ fn name_hash<b>(s: read<b>, a: u64, e: u64) -> u64 {
 // A small leaf (no calls but rt_abort, no callee-saved registers, small cleared frame) gets a
 // frameless copy of its body: slots move to free scratch registers, returns jump to the end.
 // Calls to it are replaced by that body after all functions are optimized.
-fn inline_candidate<a, b>(o: (&mut a O), s: read<b>, prologue: u64) {
+fn inline_candidate<a, b>(o: (&a mut O), s: &b [u8], prologue: u64) {
     last := o.op.len();
     mut count = 0;
     mut used = 0;
@@ -2238,7 +2238,7 @@ fn inline_candidate<a, b>(o: (&mut a O), s: read<b>, prologue: u64) {
     put(borrow_mut(o.inl_head), h, index + 1);
 }
 // Replaces `call NAME` lines for inlinable functions by their bodies with per-site labels.
-fn inline_calls<a>(o: (&mut a O)) {
+fn inline_calls<a>(o: (&a mut O)) {
     text := exchange(borrow_mut(o.out), u8[]);
     mut start = 0;
     mut site = 0;
@@ -2276,7 +2276,7 @@ fn inline_calls<a>(o: (&mut a O)) {
         o.out.push(text[start + x]);
     }
 }
-fn emit_body<a>(o: (&mut a O), k: u64, site: u64) {
+fn emit_body<a>(o: (&a mut O), k: u64, site: u64) {
     body := o.inl_bodies[k].copy();
     mut i = 0;
     n := body.len();
@@ -2314,7 +2314,7 @@ fn emit_body<a>(o: (&mut a O), k: u64, site: u64) {
 }
 // Renumber the slots still referenced into a dense frame (parameters keep the top slots), so
 // the entry zeroing only clears live storage. Returns the new frame size, or 0 if unchanged.
-fn compact<a, b>(o: (&mut a O), s: read<b>, prologue: u64, ns: u64) -> u64 {
+fn compact<a, b>(o: (&a mut O), s: &b [u8], prologue: u64, ns: u64) -> u64 {
     if prologue == 0 {
         return 0;
     }
@@ -2429,7 +2429,7 @@ fn compact<a, b>(o: (&mut a O), s: read<b>, prologue: u64, ns: u64) -> u64 {
     }
     return (used * 8 + 15) / 16 * 16;
 }
-fn reset<a>(o: (&mut a O)) {
+fn reset<a>(o: (&a mut O)) {
     o.ls.clear();
     o.le.clear();
     o.op.clear();
@@ -2452,7 +2452,7 @@ fn reset<a>(o: (&mut a O)) {
     exchange(borrow_mut(o.zline), 0);
     exchange(borrow_mut(o.maxslot), 0);
 }
-pub fn optimize<b>(s: read<b>) -> u8[] {
+pub fn optimize<b>(s: &b [u8]) -> u8[] {
     mut o = O {
         ls: u64[],
         le: u64[],
