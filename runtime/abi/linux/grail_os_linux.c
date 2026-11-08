@@ -11,6 +11,7 @@
 #include <limits.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -21,6 +22,8 @@ grail_linux_state grail_linux = {
     0,
     0,
     PTHREAD_MUTEX_INITIALIZER,
+    {NULL, NULL, 0, 0, 0},
+    {NULL, NULL, 0, 0, 0},
     {NULL, NULL, 0, 0, 0},
     {NULL, NULL, 0, 0, 0},
     {NULL, NULL, 0, 0, 0},
@@ -254,11 +257,13 @@ grail_status grail_os_init(const grail_allocator *allocator, const grail_startup
     const uint64_t kinds[] = {GRAIL_HANDLE_KIND_FILE, GRAIL_HANDLE_KIND_DIR,
                               GRAIL_HANDLE_KIND_ENV_ITER, GRAIL_HANDLE_KIND_THREAD,
                               GRAIL_HANDLE_KIND_MUTEX, GRAIL_HANDLE_KIND_CONDVAR,
-                              GRAIL_HANDLE_KIND_LIBRARY};
+                              GRAIL_HANDLE_KIND_LIBRARY, GRAIL_HANDLE_KIND_PROCESS,
+                              GRAIL_HANDLE_KIND_SOCKET};
     grail_handle_table *tables[] = {&grail_linux.files, &grail_linux.directories,
                                     &grail_linux.env_iterators, &grail_linux.threads,
                                     &grail_linux.mutexes, &grail_linux.condvars,
-                                    &grail_linux.libraries};
+                                    &grail_linux.libraries, &grail_linux.processes,
+                                    &grail_linux.sockets};
     for (uint64_t i = 0; i < sizeof(tables) / sizeof(tables[0]) && status == GRAIL_OK; i++) {
         status = grail_handle_table_init(tables[i], &grail_linux.allocator, kinds[i]);
     }
@@ -277,7 +282,15 @@ grail_status grail_os_init(const grail_allocator *allocator, const grail_startup
                                GRAIL_CAP_ENV_MUTATION | GRAIL_CAP_TIME |
                                GRAIL_CAP_LOCAL_TIME_OFFSET | GRAIL_CAP_CPU_TIME | GRAIL_CAP_THREADS |
                                GRAIL_CAP_SYNC_PRIMITIVES | GRAIL_CAP_DYNAMIC_LIBRARIES |
-                               GRAIL_CAP_SYMLINKS;
+                               GRAIL_CAP_SYMLINKS | GRAIL_CAP_PROCESSES | GRAIL_CAP_SOCKETS |
+                               GRAIL_CAP_SOCKET_UDP | GRAIL_CAP_RESOLVE;
+    {
+        const int probe = socket(AF_INET6, SOCK_STREAM | SOCK_CLOEXEC, 0);
+        if (probe >= 0) {
+            grail_linux.capabilities |= GRAIL_CAP_SOCKET_IPV6;
+            close(probe);
+        }
+    }
     grail_linux.initialized = 1;
     return GRAIL_OK;
 }
@@ -293,6 +306,8 @@ grail_status grail_os_shutdown(void) {
     grail_handle_table_destroy(&grail_linux.mutexes);
     grail_handle_table_destroy(&grail_linux.condvars);
     grail_handle_table_destroy(&grail_linux.libraries);
+    grail_handle_table_destroy(&grail_linux.processes);
+    grail_handle_table_destroy(&grail_linux.sockets);
     grail_env_clear();
     grail_linux.capabilities = 0;
     grail_linux.initialized = 0;

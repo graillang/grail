@@ -52,6 +52,21 @@ static char *grail_fs_path(const uint8_t *path, uint64_t length) {
     return grail_linux_copy_text(path, length);
 }
 
+static grail_status grail_file_lookup(grail_file handle, grail_linux_file **out);
+
+grail_status grail_linux_file_descriptor(grail_file handle, int *descriptor) {
+    if (descriptor == NULL) {
+        return GRAIL_E_INVALID_ARGUMENT;
+    }
+    grail_linux_file *file = NULL;
+    const grail_status status = grail_file_lookup(handle, &file);
+    if (status != GRAIL_OK) {
+        return status;
+    }
+    *descriptor = file->descriptor;
+    return GRAIL_OK;
+}
+
 static grail_status grail_file_lookup(grail_file handle, grail_linux_file **out) {
     if (!grail_linux.initialized) {
         return GRAIL_E_NOT_INITIALIZED;

@@ -47,6 +47,17 @@
   signing/notarization hooks. Linux lanes build and test; Windows/macOS lanes are
   explicit distribution scaffolding because the compiler still emits Linux ELF
   only. Tooling is documented in `docs/tooling/cross-platform-ci.md`.
+- The Linux reference backend now implements the child-process contract with
+  fork/execve/wait4: explicit argv/environment blocks, working directory, stdin/stdout/stderr
+  wiring, PATH search, exec-error reporting through an error pipe, blocking and timed waits,
+  SIGTERM/SIGKILL termination, process id and single-close handles. It also implements the
+  first TCP/UDP socket subset: IPv4/IPv6 create/bind/listen/accept4/connect/send/recv,
+  send_to/recv_from, shutdown, address queries, non-blocking mode, the documented socket
+  options and blocking `getaddrinfo`, with negative-errno mapping and capability bits. Tests
+  cover argv/environment/cwd/stdio, exit status, PATH search, timeout/terminate/kill, loopback
+  TCP and UDP, options and DNS; the full Linux behaviour test is now 327 checks with zero
+  tracked allocation bytes. Windows/macOS remain fail-closed. C-to-Graal callbacks remain a
+  later FFI increment and allocator/thread callbacks stay backend-side.
 - Added the child-process and socket/DNS contracts with explicit ownership, error and
   platform-search rules, plus fail-closed Windows and macOS backend skeletons. The Linux
   reference backend reports both domains as unsupported and clears their capability bits;
