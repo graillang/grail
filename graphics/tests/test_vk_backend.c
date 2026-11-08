@@ -63,6 +63,7 @@ int main(int argc, char **argv)
     gr_handle pipeline_solid = GR_NULL_HANDLE;
     gr_handle pipeline_bindless = GR_NULL_HANDLE;
     gr_handle pipeline_compute = GR_NULL_HANDLE;
+    gr_handle pipeline_triangle = GR_NULL_HANDLE;
     uint32_t slot_a = GR_BINDLESS_INDEX_NONE;
     uint32_t slot_b = GR_BINDLESS_INDEX_NONE;
     gr_handle texture_a = GR_NULL_HANDLE, texture_b = GR_NULL_HANDLE;
@@ -323,6 +324,57 @@ int main(int argc, char **argv)
         pipeline_compute = pipeline;
     }
 
+    /* The real draw path: a pipeline with a vertex input layout, fed by a vertex and an index
+     * buffer. fullscreen.vs generates its vertices and binds nothing; this one reads attributes. */
+    {
+        gr_handle vs = GR_NULL_HANDLE, fs = GR_NULL_HANDLE, pipeline = GR_NULL_HANDLE;
+        gr_pipeline_desc pd;
+        gr_format color = GR_FORMAT_R8G8B8A8_UNORM;
+        gr_vertex_binding vb;
+        gr_vertex_attribute attributes[2];
+        gr_str vs_name = { "core/triangle", 13, 0 };
+        gr_str fs_name = { "core/triangle", 13, 0 };
+
+        CHECK_EQ(gr_shader_create_resolved(device, library, vs_name, GR_SHADER_STAGE_VERTEX, 0, &vs),
+                 GR_OK);
+        CHECK_EQ(gr_shader_create_resolved(device, library, fs_name, GR_SHADER_STAGE_FRAGMENT, 0, &fs),
+                 GR_OK);
+        CHECK(vs != GR_NULL_HANDLE && fs != GR_NULL_HANDLE);
+
+        memset(&vb, 0, sizeof(vb));
+        vb.slot = 0;
+        vb.stride = 24; /* float2 position + float4 colour */
+        memset(attributes, 0, sizeof(attributes));
+        attributes[0].location = 0;
+        attributes[0].binding = 0;
+        attributes[0].format = GR_FORMAT_R32G32_FLOAT;
+        attributes[0].offset = 0;
+        attributes[1].location = 1;
+        attributes[1].binding = 0;
+        attributes[1].format = GR_FORMAT_R32G32B32A32_FLOAT;
+        attributes[1].offset = 8;
+
+        memset(&pd, 0, sizeof(pd));
+        pd.head.size = (uint32_t)sizeof(pd);
+        pd.name = (gr_str){ "vk/triangle", 11, 0 };
+        pd.shaders[GR_SHADER_STAGE_VERTEX] = vs;
+        pd.shaders[GR_SHADER_STAGE_FRAGMENT] = fs;
+        pd.vertex_bindings = &vb;
+        pd.vertex_binding_count = 1;
+        pd.vertex_attributes = attributes;
+        pd.vertex_attribute_count = 2;
+        pd.color_formats = &color;
+        pd.color_count = 1;
+        pd.depth_format = GR_FORMAT_UNDEFINED;
+        pd.topology = GR_TOPOLOGY_TRIANGLE_LIST;
+        pd.cull = GR_CULL_NONE;
+        pd.front_face_ccw = 1;
+        pd.samples = 1;
+        CHECK_EQ(gr_pipeline_create(device, &pd, &pipeline), GR_OK);
+        CHECK(pipeline != GR_NULL_HANDLE);
+        pipeline_triangle = pipeline;
+    }
+
     /* Commit closes the registry, and the driver's pipeline cache has content. */
     {
         double seconds = -1.0;
@@ -330,8 +382,8 @@ int main(int argc, char **argv)
         CHECK_EQ(gr_pipeline_commit(device, &seconds), GR_OK);
         CHECK(seconds >= 0.0);
         CHECK_EQ(gr_pipeline_stats(device, &declared, &committed), GR_OK);
-        CHECK_EQ(declared, 4u);
-        CHECK_EQ(committed, 4u);
+        CHECK_EQ(declared, 5u);
+        CHECK_EQ(committed, 5u);
         {
             gr_device_caps after;
             memset(&after, 0, sizeof(after));
@@ -1102,6 +1154,188 @@ int main(int argc, char **argv)
         }
         CHECK(digest_b != digest_c);
         CHECK(digest_b != 0u && digest_c != 0u);
+    }
+
+    /* -----------------------------------------------------------------------------------
+     * An indexed draw through the graph, with vertex and index buffers.
+     * --------------------------------------------------------------------------------- */
+    if (pipeline_triangle != GR_NULL_HANDLE) {
+        const uint32_t kSize = 64;
+        struct vertex { float pos[2]; float colour[4]; };
+        const struct vertex vertices[3] = {
+            { { -0.6f, -0.6f }, { 1.0f, 0.0f, 0.0f, 1.0f } },
+            { {  0.6f, -0.6f }, { 0.0f, 1.0f, 0.0f, 1.0f } },
+            { {  0.0f,  0.6f }, { 0.0f, 0.0f, 1.0f, 1.0f } }
+        };
+        const uint16_t indices[3] = { 0, 1, 2 };
+        gr_buffer_desc bd;
+        gr_handle vb = GR_NULL_HANDLE, ib = GR_NULL_HANDLE;
+        gr_texture_desc td;
+        gr_handle target = GR_NULL_HANDLE, target_view = GR_NULL_HANDLE;
+        gr_texture_view_desc vd;
+        gr_cmd_pool_desc cpd;
+        gr_handle pool = GR_NULL_HANDLE, cmd = GR_NULL_HANDLE;
+        gr_cmd_alloc_info cai;
+        uint64_t digests[2];
+        uint32_t pass;
+
+        memset(&bd, 0, sizeof(bd));
+        bd.head.size = (uint32_t)sizeof(bd);
+        bd.size = sizeof(vertices);
+        bd.usage = GR_BUFFER_USAGE_VERTEX | GR_BUFFER_USAGE_TRANSFER_DST;
+        bd.memory = GR_MEMORY_UPLOAD;
+        CHECK_EQ(gr_buffer_create(device, &bd, &vb), GR_OK);
+        CHECK_EQ(gr_buffer_write(vb, 0, (gr_span_u8){ (const uint8_t *)vertices, sizeof(vertices) }),
+                 GR_OK);
+        bd.size = sizeof(indices);
+        bd.usage = GR_BUFFER_USAGE_INDEX | GR_BUFFER_USAGE_TRANSFER_DST;
+        CHECK_EQ(gr_buffer_create(device, &bd, &ib), GR_OK);
+        CHECK_EQ(gr_buffer_write(ib, 0, (gr_span_u8){ (const uint8_t *)indices, sizeof(indices) }),
+                 GR_OK);
+
+        memset(&td, 0, sizeof(td));
+        td.head.size = (uint32_t)sizeof(td);
+        td.type = GR_TEXTURE_2D;
+        td.format = GR_FORMAT_R8G8B8A8_UNORM;
+        td.width = kSize;
+        td.height = kSize;
+        td.usage = GR_TEXTURE_USAGE_COLOR_ATTACHMENT | GR_TEXTURE_USAGE_TRANSFER_SRC;
+        CHECK_EQ(gr_texture_create(device, &td, &target), GR_OK);
+        memset(&vd, 0, sizeof(vd));
+        vd.head.size = (uint32_t)sizeof(vd);
+        vd.texture = target;
+        vd.type = GR_VIEW_2D;
+        vd.format = GR_FORMAT_UNDEFINED;
+        CHECK_EQ(gr_texture_view_create(device, &vd, &target_view), GR_OK);
+
+        memset(&cpd, 0, sizeof(cpd));
+        cpd.head.size = (uint32_t)sizeof(cpd);
+        cpd.queue = GR_QUEUE_GRAPHICS;
+        CHECK_EQ(gr_cmd_pool_create(device, &cpd, &pool), GR_OK);
+        memset(&cai, 0, sizeof(cai));
+        cai.head.size = (uint32_t)sizeof(cai);
+        cai.pool = pool;
+        CHECK_EQ(gr_cmd_alloc(&cai, &cmd), GR_OK);
+
+        for (pass = 0; pass < 2u; ++pass) {
+            gr_graph_desc gd;
+            gr_handle graph = GR_NULL_HANDLE;
+            gr_graph_resource res;
+            gr_graph_pass render_pass;
+            gr_graph_compile_report report;
+            gr_barrier barriers[4];
+            uint32_t barrier_count = 0;
+            gr_render_begin rb;
+            gr_color_attachment color;
+            gr_draw_indexed draw;
+            gr_submit submit;
+            gr_handle queue = GR_NULL_HANDLE, fence = GR_NULL_HANDLE;
+            uint64_t value = 0, digest = 0xcbf29ce484222325ull;
+            gr_result wait_status = GR_ERROR_BACKEND;
+            uint8_t pixels[64 * 64 * 4];
+            size_t i;
+
+            memset(&gd, 0, sizeof(gd));
+            gd.head.size = (uint32_t)sizeof(gd);
+            CHECK(gr_graph_create(&gd, &graph) != GR_NULL_HANDLE);
+            CHECK_EQ(gr_graph_add_resource(graph, (gr_str){ "target", 6, 0 },
+                                           GR_GRAPH_RESOURCE_TEXTURE, target_view, &res), GR_OK);
+            CHECK_EQ(gr_graph_add_pass(graph, (gr_str){ "tri", 3, 0 }, &render_pass), GR_OK);
+            CHECK_EQ(gr_graph_pass_write(graph, render_pass, res, GR_STATE_COLOR_ATTACHMENT), GR_OK);
+            CHECK_EQ(gr_graph_pass_set_side_effect(graph, render_pass, 1), GR_OK);
+            memset(&report, 0, sizeof(report));
+            report.head.size = (uint32_t)sizeof(report);
+            CHECK_EQ(gr_graph_compile(graph, &report), GR_OK);
+
+            CHECK_EQ(gr_cmd_reset(cmd), GR_OK);
+            CHECK_EQ(gr_cmd_begin(cmd), GR_OK);
+            CHECK_EQ(gr_cmd_push_frame_offset(cmd, 0), GR_OK);
+            CHECK_EQ(gr_graph_pass_barriers(graph, 0, barriers, 4, &barrier_count), GR_OK);
+            CHECK_EQ(gr_cmd_barrier(cmd, barriers, barrier_count), GR_OK);
+
+            memset(&color, 0, sizeof(color));
+            color.view = target_view;
+            color.load_op = GR_LOAD_CLEAR;
+            color.store_op = GR_STORE_STORE;
+            color.clear[3] = 1.0f; /* opaque black, so the triangle is unmistakable */
+            memset(&rb, 0, sizeof(rb));
+            rb.head.size = (uint32_t)sizeof(rb);
+            rb.colors = &color;
+            rb.color_count = 1;
+            rb.render_w = kSize;
+            rb.render_h = kSize;
+            CHECK_EQ(gr_cmd_begin_render(cmd, &rb), GR_OK);
+            CHECK_EQ(gr_cmd_set_viewport(cmd, 0.0f, 0.0f, (float)kSize, (float)kSize, 0.0f, 1.0f),
+                     GR_OK);
+            CHECK_EQ(gr_cmd_set_scissor(cmd, 0, 0, kSize, kSize), GR_OK);
+            CHECK_EQ(gr_cmd_bind_pipeline(cmd, pipeline_triangle), GR_OK);
+            CHECK_EQ(gr_cmd_bind_vertex_buffer(cmd, 0, vb, 0), GR_OK);
+            CHECK_EQ(gr_cmd_bind_index_buffer(cmd, ib, 0, 0), GR_OK);
+            memset(&draw, 0, sizeof(draw));
+            draw.head.size = (uint32_t)sizeof(draw);
+            draw.index_count = 3;
+            draw.instance_count = 1;
+            CHECK_EQ(gr_cmd_draw_indexed(cmd, &draw), GR_OK);
+            CHECK_EQ(gr_cmd_end_render(cmd), GR_OK);
+            {
+                gr_barrier to_copy;
+                memset(&to_copy, 0, sizeof(to_copy));
+                to_copy.resource = target_view;
+                to_copy.src_state = GR_STATE_COLOR_ATTACHMENT;
+                to_copy.dst_state = GR_STATE_TRANSFER_SRC;
+                CHECK_EQ(gr_cmd_barrier(cmd, &to_copy, 1), GR_OK);
+            }
+            CHECK_EQ(gr_cmd_end(cmd), GR_OK);
+
+            CHECK_EQ(gr_device_queue(device, GR_QUEUE_GRAPHICS, &queue), GR_OK);
+            memset(&submit, 0, sizeof(submit));
+            submit.head.size = (uint32_t)sizeof(submit);
+            submit.queue = queue;
+            submit.cmds = &cmd;
+            submit.cmd_count = 1;
+            CHECK_EQ(gr_submit_commands(&submit, &value), GR_OK);
+            CHECK_EQ(gr_fence_create(device, 0, &fence), GR_OK);
+            CHECK_EQ(gr_fence_wait(fence, value, 5ull * 1000ull * 1000ull * 1000ull, &wait_status),
+                     GR_OK);
+
+            memset(pixels, 0, sizeof(pixels));
+            CHECK_EQ(gr_texture_read(target, 0, 0, 0, 0, kSize, kSize, GR_STATE_TRANSFER_SRC,
+                                     (gr_mut_span_u8){ pixels, sizeof(pixels) }), GR_OK);
+            for (i = 0; i < sizeof(pixels); ++i) {
+                digest ^= pixels[i];
+                digest *= 0x100000001b3ull;
+            }
+            digests[pass] = digest;
+
+            if (pass == 0) {
+                /* The corners are outside the triangle, so they hold the clear colour; the centre
+                 * is inside it, so it holds a blend of the three vertex colours. */
+                size_t corners[2] = { 0, (size_t)(kSize * kSize - 1) * 4u };
+                size_t centre = (size_t)((kSize / 2) * kSize + kSize / 2) * 4u;
+                uint32_t k;
+                for (k = 0; k < 2u; ++k)
+                    CHECK(pixels[corners[k]] == 0u && pixels[corners[k] + 1] == 0u &&
+                          pixels[corners[k] + 2] == 0u);
+                CHECK(!(pixels[centre] == 0u && pixels[centre + 1] == 0u && pixels[centre + 2] == 0u));
+                /* All three vertex colours reach the target, which only happens if the index
+                 * buffer selected the right vertices and the rasteriser interpolated between them. */
+                {
+                    int red = 0, green = 0, blue = 0;
+                    for (i = 0; i < sizeof(pixels); i += 4u) {
+                        if (pixels[i] > 64u && pixels[i + 1] < 32u && pixels[i + 2] < 32u) red = 1;
+                        if (pixels[i + 1] > 64u && pixels[i] < 32u && pixels[i + 2] < 32u) green = 1;
+                        if (pixels[i + 2] > 64u && pixels[i] < 32u && pixels[i + 1] < 32u) blue = 1;
+                    }
+                    CHECK(red && green && blue);
+                }
+                printf("vk-backend: indexed triangle centre rgba %u,%u,%u,%u (corners clear)\n",
+                       pixels[centre], pixels[centre + 1], pixels[centre + 2], pixels[centre + 3]);
+            }
+            gr_graph_destroy(graph);
+        }
+        printf("vk-backend: indexed triangle digest 0x%016llx (twice)\n",
+               (unsigned long long)digests[0]);
+        CHECK_EQ(digests[0], digests[1]);
     }
 
     CHECK_EQ(gr_device_wait_idle(device), GR_OK);
