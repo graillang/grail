@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Windows dynamic loading: an `extern "C" lib "X"` declaration on a PE target now records
+  `X SYMBOL`, and the Windows link step imports each symbol from `X.dll`, so `LoadLibraryA`,
+  `GetProcAddress` and `FreeLibrary` link like any import. Calls through `cfn` values (on every
+  target) now use the platform C convention, including floats, narrow integers, stack arguments
+  and Win64; they previously used Grail's internal register order. A Wine-executed case resolves
+  `lstrlenA` and `MulDiv` from kernel32 and checks `ERROR_MOD_NOT_FOUND` (126) for a missing DLL.
+
 - D3D12 bindless and compute: the contract's root signature now carries the four unbounded
   tables (sampled images, storage images, samplers, storage buffers) over one shader-visible
   resource heap and one sampler heap; the thirteen fixed samplers fill slots 0..12. Added

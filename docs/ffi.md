@@ -226,8 +226,8 @@ use. `tests/ffi/call_abi.grl` executes on x86-64, AArch64 and RISC-V Linux and, 
 
 Not implemented yet, and each rejected rather than approximated:
 
-- floats and narrow integers in callbacks (exported `extern "C" fn`) and in calls through `cfn`
-  values, which keep the six-integer-word slice;
+- floats and narrow integers in callbacks (exported `extern "C" fn`), which keep the
+  six-integer-word slice (calls *through* `cfn` values use the full per-ABI lowering);
 - nested C records (a nested Grail record value is a pointer, so embedding it by value
   needs a copy/alias representation that does not exist yet), C records in results, C
   records containing floats or pointers, and by-value struct passing (SysV eightbyte
@@ -235,8 +235,10 @@ Not implemented yet, and each rejected rather than approximated:
 - variadic callbacks, callback results that are themselves function pointers, and
   taking the address of a foreign *declaration* (`f := c_add;` is rejected: a C
   declaration is not a Grail function value);
-- dynamic loading on AArch64 and RISC-V 64 Linux, Windows and macOS (the TLS bridge below is
-  Linux x86-64 only), and foreign calls or callbacks on threads other than the main thread;
+- dynamic loading on AArch64 and RISC-V 64 Linux and on macOS (Linux x86-64 uses the TLS bridge
+  below; Windows x86-64 needs none, since `LoadLibraryA`/`GetProcAddress` are ordinary imports
+  and the runtime does not own the TEB), and foreign calls or callbacks on threads other than
+  the main thread on Linux;
 - variadic C functions.
 
 ## Dynamic loading and the host TLS bridge
