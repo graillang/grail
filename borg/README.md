@@ -1,9 +1,9 @@
 # Borg Agent CPU port
 
-The first two bounded increments of the Borg Agent → Grail port: the JSON substrate its wire
+The first three bounded increments of the Borg Agent → Grail port: the JSON substrate its wire
 documents are made of, the TOML its configuration files are written in, the protocol-v1 envelope
-header that classifies a document, and the `agent.toml` loader that applies Borg's compiled-in
-defaults.
+header that classifies a document, the `agent.toml` loader that applies Borg's compiled-in
+defaults, and the local-session ownership state that decides whether a session still has an owner.
 Borg Agent is read-only here; the reference is its own JSON semantics — `serde_json` 1.0.151 with
 `arbitrary_precision`, the crate version and feature set `crates/borg-*` build with. The plan and
 staging live in [docs/design/borg-agent-port.md](../docs/design/borg-agent-port.md).
@@ -13,24 +13,30 @@ src/json.grl                 parser, canonical writer, deep copy, member/array a
 src/wire.grl                 protocol-v1 envelope header: discriminant, protocol/version, per-kind fields
 src/toml.grl                 TOML subset parser, table assembly, shape walk, accessors
 src/config.grl               `agent.toml` → effective settings with Borg's compiled-in defaults
+src/session_state.grl        owner record codec, executable identity, `/proc` start time, liveness
 tests/json_test.grl          JSON: `json.compact`, `json.scalar`, `json.error` per document
 tests/wire_test.grl          protocol: `wire.header <file> <field> <value>`, `wire.error <file> <path> <reason>`
 tests/toml_test.grl          TOML: `toml.value <file> <path> <kind> <text>`, `toml.error <file>`
 tests/config_test.grl        config: `config.value <file> <key> <value>`, `config.error <file> <path>`
+tests/session_test.grl       ownership: `case <name> record|field|active|state|obsolete|start|identity …`
 tests/fixtures/v1/           Borg's protocol-v1 conformance corpus, copied verbatim
 tests/fixtures/edge/         number, escape, structure, nesting-limit and malformed documents
 tests/fixtures/wire/         envelope mutations: missing, mistyped, wrong protocol, wrong version
 tests/fixtures/toml/configs/ Borg's shipped example configurations, copied verbatim
 tests/fixtures/toml/cases/   TOML constructs and invalid documents
 tests/fixtures/config/       `agent.toml` documents: full, partial, empty, wrong-typed, negative
+tests/fixtures/session/      ownership scenarios: records, process observations, stat lines
 tests/parity/json.rs         the reference: serde_json compact re-serialisation and scalar walk
 tests/parity/wire.rs         the reference: the same header rule over serde_json values
 tests/parity/toml.rs         the reference: the toml crate's value model, walked in the same order
 tests/parity/config.rs       the reference: Borg's defaults applied to a toml value
+tests/parity/session.rs      the reference: Borg's ownership rules, copied verbatim, with citations
+tests/parity/anchors.json    the source snippets those rules depend on (checked by `--anchors`)
 tests/parity/json.txt        committed reference output (141 lines, 20 documents)
 tests/parity/wire.txt        committed reference output (46 lines, 11 documents)
 tests/parity/toml.txt        committed reference output (230 lines, 13 documents)
 tests/parity/config.txt      committed reference output (66 lines, 6 documents)
+tests/parity/session.txt     committed reference output (120 lines, 23 documents)
 tools/borg-test.mjs          build + compile + run + diff
 ```
 
@@ -38,10 +44,11 @@ tools/borg-test.mjs          build + compile + run + diff
 
 ```sh
 just borg-test                          # hermetic: diff against the committed reference
-bun tools/borg-test.mjs --regenerate    # rebuild all four references offline (serde_json, toml)
+bun tools/borg-test.mjs --regenerate    # rebuild all five references offline (serde_json, toml)
+bun tools/borg-test.mjs --anchors       # re-check the copied rules against the Borg checkout
 ```
 
-`--regenerate` builds `borg/tests/parity/ref`, a four-binary Rust crate, with `cargo build --offline`
+`--regenerate` builds `borg/tests/parity/ref`, a five-binary Rust crate, with `cargo build --offline`
 against the cached `serde_json` 1.0.151 and `toml` 1.1.4. It needs no network and no Borg checkout: the fixtures are
 committed, and both sides read the same bytes in the same order (the runner passes the sorted file
 list on argv).
@@ -65,8 +72,11 @@ and field:
 - `config.value <file> <key> <value>` / `config.error <file> <path>`: effective settings in schema
   order — capabilities after the dependency intersection — with strings quoted so `""` stays
   distinguishable from an absent key.
+- `case <name> …`: one scenario per file — the decoded owner record and its fields, the `roundtrip`
+  of encoding it back, the `/proc` start-time parse, the identity format, and the derived `active`,
+  `state` and `obsolete` decisions.
 
-The suite compares **483 lines over 50 documents**, and every value in them comes from
+The suite compares **603 lines over 73 documents**, and every value in them comes from
 `serde_json` rather than from a restatement: the reference parses with Borg's own crate and prints
 what it parsed. `wire.rs` and `config.rs` pin the v1 header *rule* and the default table (no Rust program classifies
 these fixtures, or loads this config without building the whole 363k-line Borg workspace), and use
@@ -134,6 +144,36 @@ Capability values are the *effective* ones. `apply_dependency_intersection`
 `web_relay` without `cloud_sync` — and the port applies the same intersection, so a configuration
 Borg would not honour is not reported as if it would. `cascade.toml` is the fixture that keeps it
 honest.
+
+## Session ownership: the pure core
+
+A local session's owner is a small JSON record next to its socket
+(`<session-id>.control.owner.json`). Everything Borg decides from that record is pure once the
+process table is reduced to observations, so it ports without a socket, a journal or a `/proc`
+read:
+
+| Rule | Source | Ported as |
+| --- | --- | --- |
+| Record shape, schema version 1 | `local_control.rs:405-414` | `OwnerRecord`, `decode`, `encode` |
+| Unparseable or unknown schema = absent | `:529-542` | `RecordError::{Parse, Schema}` |
+| Executable identity `dev:ino:len:mtime:mtime_nsec` | `:559-572` | `identity` |
+| Start time = stat field 19 after the last `") "` | `:607-624` | `start_time` |
+| Owner matches: alive, identity, then start time | `:631-649` | `matches` |
+| A stale owner may be retired only if it is a different binary, still matching, and holds the lock | `:656-671` | `obsolete` |
+
+`state` names the four outcomes: `Active` is exactly what `local_session_owner_is_active` reports,
+and `Stale`, `Invalid` and `Absent` are the three reasons it reports false (a record whose process
+is gone or rebuilt, a record that will not parse or has an unknown schema, and no record at all).
+Borg collapses those to `false`; a port that reports *why* is more useful and cannot disagree with
+it, which is what the scenarios pin down.
+
+**Why this reference is copied rather than linked.** `borg-agent-runtime` builds the whole
+363k-line workspace (tokio, sqlx, axum), so a reference binary cannot depend on it. `session.rs`
+therefore carries the six functions verbatim, each with its line citation, and
+`borg/tests/parity/anchors.json` lists the snippets those functions depend on.
+`bun tools/borg-test.mjs --anchors` fails if any of them disappears from the Borg checkout, so an
+upstream rule change breaks this suite loudly instead of drifting — deliberately verified by
+breaking an anchor.
 
 ## Limits and findings
 

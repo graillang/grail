@@ -1,0 +1,278 @@
+// Local session ownership parity test.
+//
+// Each input is a scenario: an owner record's bytes and/or an observation of the process table.
+// Every line is `case <name> <what> <value>` — the decoded record, the start-time parse, the
+// identity format, and the three decisions Borg derives from them (`active`, `obsolete`, `state`).
+// The reference applies the same rules, copied from local_control.rs, to the same scenario files,
+// so a changed rule on either side is a line difference.
+
+use borg_json;
+use borg_session;
+use core;
+use env;
+use fs;
+
+fn append<a, b>(out: (&a mut u8[]), text: (&b [u8])) {
+    for byte in text {
+        out.push(byte);
+    }
+}
+
+// `case <name> <what> <value>`
+fn report<a, b, c>(name: (&a [u8]), what: (&b [u8]), value: (&c [u8])) {
+    mut line = u8[];
+    append(&mut line, "case ".text());
+    append(&mut line, name);
+    line.push(32);
+    append(&mut line, what);
+    line.push(32);
+    append(&mut line, value);
+    println(line.text());
+}
+
+// `case <name> field <key> <value>`
+fn field<a, b, c>(name: (&a [u8]), key: (&b [u8]), value: (&c [u8])) {
+    mut line = u8[];
+    append(&mut line, "case ".text());
+    append(&mut line, name);
+    append(&mut line, " field ".text());
+    append(&mut line, key);
+    line.push(32);
+    append(&mut line, value);
+    println(line.text());
+}
+
+fn text_field<a, b>(case: (&a borg_json::Json), key: (&b [u8])) -> string? {
+    match borg_json::member(&case, &key) {
+        Some(node) => {
+            if borg_json::kind_of(&node) == borg_json::JsonKind::Null {
+                return core::none<string>();
+            }
+            return borg_json::as_string(&node);
+        },
+        None => { return core::none<string>(); }
+    }
+}
+
+fn number_field<a, b>(case: (&a borg_json::Json), key: (&b [u8])) -> u64? {
+    match borg_json::member(&case, &key) {
+        Some(node) => {
+            match borg_json::as_number(&node) {
+                Some(text) => { return borg_session::parse_whole(&text); },
+                None => { return core::none<u64>(); }
+            }
+        },
+        None => { return core::none<u64>(); }
+    }
+}
+
+fn flag_field<a, b>(case: (&a borg_json::Json), key: (&b [u8])) -> bool {
+    match borg_json::member(&case, &key) {
+        Some(node) => {
+            match borg_json::as_bool(&node) {
+                Some(flag) => { return flag; },
+                None => { return false; }
+            }
+        },
+        None => { return false; }
+    }
+}
+
+fn item_signed<a>(node: (&a borg_json::Json), index: u64) -> i64 {
+    match borg_json::array_item(&node, index) {
+        Some(item) => {
+            match borg_json::as_number(&item) {
+                Some(text) => {
+                    match borg_session::parse_signed(&text) {
+                        Some(value) => { return value; },
+                        None => { return i64(0); }
+                    }
+                },
+                None => { return i64(0); }
+            }
+        },
+        None => { return i64(0); }
+    }
+}
+
+fn item_number<a>(node: (&a borg_json::Json), index: u64) -> u64 {
+    match borg_json::array_item(&node, index) {
+        Some(item) => {
+            match borg_json::as_number(&item) {
+                Some(text) => {
+                    match borg_session::parse_whole(&text) {
+                        Some(value) => { return value; },
+                        None => { return 0; }
+                    }
+                },
+                None => { return 0; }
+            }
+        },
+        None => { return 0; }
+    }
+}
+
+fn main() -> u64 {
+    args := env::args();
+    mut index = 1;
+    while index < args.len() {
+        path := args[index];
+        data := fs::read(&path)!;
+        match borg_json::parse(&data) {
+            case: borg_json::Json => { run_case(&case); },
+            failure: borg_json::ParseError => { }
+        }
+        index += 1;
+    }
+    return 0;
+}
+
+fn run_case<a>(case: (&a borg_json::Json)) {
+    mut label = "unnamed".text();
+    match text_field(&case, "name") {
+        Some(text) => { label = text; },
+        None => { }
+    }
+
+    match text_field(&case, "stat_line") {
+        Some(line) => {
+            match borg_session::start_time(&line) {
+                Some(value) => { report(&label, "start", &borg_session::number_text(value)); },
+                None => { report(&label, "start", "none"); }
+            }
+        },
+        None => { }
+    }
+
+    match borg_json::member(&case, "identity_parts") {
+        Some(node) => {
+            if borg_json::array_len(&node) == 5 {
+                text := borg_session::identity(item_number(&node, 0), item_number(&node, 1),
+                    item_number(&node, 2), item_signed(&node, 3), item_signed(&node, 4));
+                report(&label, "identity", &text);
+            }
+        },
+        None => { }
+    }
+
+    present := borg_json::has(&case, "record_text");
+    mut has_record = false;
+    mut record = zero_record();
+    match text_field(&case, "record_text") {
+        Some(bytes) => {
+            match borg_json::parse(&bytes) {
+                document: borg_json::Json => {
+                    match borg_session::decode(&document) {
+                        decoded: borg_session::OwnerRecord => {
+                            record = decoded;
+                            has_record = true;
+                        },
+                        failure: borg_session::RecordError => { invalid(&label, failure); }
+                    }
+                },
+                failure: borg_json::ParseError => { invalid(&label, borg_session::RecordError::Parse); }
+            }
+        },
+        None => { }
+    }
+
+    if has_record {
+        report(&label, "record", "ok");
+        field(&label, "schema_version", &borg_session::version_of(&record));
+        field(&label, "pid", &borg_session::pid_of(&record));
+        field(&label, "executable_identity", &borg_session::identity_of(&record));
+        field(&label, "package_version", &borg_session::package_of(&record));
+        field(&label, "process_start_time", &borg_session::start_of(&record));
+        roundtrip(&record, &label);
+    }
+
+    decide(case, &label, present, has_record, &record);
+}
+
+// A record of its own adds two lines (values) after the caller prints; this builds the empty case
+// the checker wants when there is nothing to decode.
+fn zero_record() -> borg_session::OwnerRecord {
+    return borg_session::empty_record();
+}
+
+fn invalid<a>(label: (&a [u8]), reason: borg_session::RecordError) {
+    match reason {
+        Parse => { report(&label, "record", "invalid parse"); },
+        Schema => { report(&label, "record", "invalid schema"); }
+    }
+}
+
+fn decide<a>(case: (&a borg_json::Json), label: (&[u8]), present: bool, has_record: bool, record: (&borg_session::OwnerRecord)) {
+    if !borg_json::has(&case, "alive") && !borg_json::has(&case, "identity") {
+        return ();
+    }
+    alive := flag_field(&case, "alive");
+    seen := text_field(&case, "identity");
+    start := number_field(&case, "start_time");
+    mut active = false;
+    if has_record {
+        active = borg_session::matches(&record, alive, seen, start);
+    }
+    if active {
+        report(&label, "active", "true");
+    } else {
+        report(&label, "active", "false");
+    }
+    mut status = core::some(borg_session::RecordError::Parse);
+    if has_record {
+        status = core::none<borg_session::RecordError>();
+    }
+    kind := borg_session::state(status, present, active);
+    match kind {
+        Active => { report(&label, "state", "active"); },
+        Stale => { report(&label, "state", "stale"); },
+        Invalid => { report(&label, "state", "invalid"); },
+        Absent => { report(&label, "state", "absent"); }
+    }
+    mut current = "".text();
+    match text_field(&case, "current_identity") {
+        Some(text) => { current = text; },
+        None => { }
+    }
+    mut retired = false;
+    if has_record {
+        retired = borg_session::obsolete(&record, &current, active, flag_field(&case, "holds_lock"));
+    }
+    if retired {
+        report(&label, "obsolete", "true");
+    } else {
+        report(&label, "obsolete", "false");
+    }
+}
+
+// Encode the record, decode it again, and compare the fields: the writer is checked against the
+// reader in the same run rather than against a fixed byte string.
+fn roundtrip<a>(record: (&a borg_session::OwnerRecord), label: (&[u8])) {
+    expected_version := borg_session::version_value(&record);
+    expected_pid := borg_session::pid_value(&record);
+    expected_package := borg_session::package_of(&record);
+    encoded := borg_session::encode(&record);
+    text := borg_json::write(&encoded);
+    match borg_json::parse(&text) {
+        document: borg_json::Json => {
+            match borg_session::decode(&document) {
+                again: borg_session::OwnerRecord => {
+                    mut same = borg_session::version_value(&again) == expected_version;
+                    if same {
+                        same = borg_session::pid_value(&again) == expected_pid;
+                    }
+                    if same {
+                        same = borg_session::package_of(&again).len() == expected_package.len();
+                    }
+                    if same {
+                        report(&label, "roundtrip", "ok");
+                    } else {
+                        report(&label, "roundtrip", "fail");
+                    }
+                },
+                failure: borg_session::RecordError => { report(&label, "roundtrip", "fail"); }
+            }
+        },
+        failure: borg_json::ParseError => { report(&label, "roundtrip", "fail"); }
+    }
+}

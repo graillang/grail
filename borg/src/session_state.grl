@@ -1,0 +1,440 @@
+module borg_session;
+use borg_json;
+use core;
+
+// Local session ownership state.
+//
+// A local session's owner is recorded as a small JSON document next to its socket, and every later
+// question about the session — is the owner still there, may a stale owner be cleaned up — is
+// answered from that record plus a few observations of the process table. All of that is pure once
+// the observations are supplied, so it ports without any of the socket or journal machinery.
+//
+// The rules are Borg's, cited from crates/borg-agent-runtime/src/local_control.rs, and the parity
+// suite compares this module against those rules applied to the same scenario documents:
+//
+//   LocalSessionOwnerMetadata         :405-414   record shape, schema version 1
+//   read_local_session_owner_metadata :529-542   unparseable or version != 1 counts as absent
+//   executable_identity               :559-572   "dev:ino:len:mtime:mtime_nsec"
+//   process_start_time                :607-624   field 19 after the last ") " of /proc/<pid>/stat
+//   owner_process_matches_metadata    :631-649   alive, executable identity, then start time
+//   obsolete_local_session_owner_pid  :656-671   different identity, still matching, holds the lock
+
+pub struct OwnerRecord {
+    schema_version: u64,
+    pid: u64,
+    executable_identity: string,
+    package_version: string?,
+    process_start_time: u64?
+}
+
+pub enum RecordError {
+    // The bytes are not the record shape (missing field, wrong type, not an object).
+    Parse,
+    // Well formed, but written by a schema this build does not know.
+    Schema
+}
+
+// What a session looks like from its record plus the process table. `Active` is exactly what
+// `local_session_owner_is_active` reports; the other three are the reasons it reports false.
+pub enum OwnerState {
+    Absent,
+    Invalid,
+    Stale,
+    Active
+}
+
+// Whole-number JSON text to u64; a fractional or exponent form is not a pid or a timestamp.
+pub fn parse_whole<a>(text: (&a [u8])) -> u64? {
+    if text.len() == 0 {
+        return core::none<u64>();
+    }
+    mut value = 0;
+    mut index = 0;
+    while index < text.len() {
+        byte := text[index];
+        if (byte < 48) || (byte > 57) {
+            return core::none<u64>();
+        }
+        if value > 1844674407370955161 {
+            return core::none<u64>();
+        }
+        next := value * 10;
+        if next > 18446744073709551615 - (byte - 48) {
+            return core::none<u64>();
+        }
+        value = next + (byte - 48);
+        index += 1;
+    }
+    return core::some(value);
+}
+
+// Timestamps arrive as i64 (a device `mtime` can be negative on some filesystems), pids and start
+// times as u64.
+pub fn parse_signed<a>(text: (&a [u8])) -> i64? {
+    if text.len() == 0 {
+        return core::none<i64>();
+    }
+    mut at = 0;
+    mut negative = false;
+    if text[0] == 45 {
+        negative = true;
+        at = 1;
+    }
+    if at >= text.len() {
+        return core::none<i64>();
+    }
+    mut value = u64(0);
+    while at < text.len() {
+        byte := text[at];
+        if (byte < 48) || (byte > 57) {
+            return core::none<i64>();
+        }
+        if value > 922337203685477580 {
+            return core::none<i64>();
+        }
+        value = value * 10 + (byte - 48);
+        at += 1;
+    }
+    if negative {
+        return core::some(0 - i64(value));
+    }
+    return core::some(i64(value));
+}
+
+fn required_int<a, b>(value: (&a borg_json::Json), key: (&b [u8])) -> u64 | RecordError {
+    match borg_json::member(&value, &key) {
+        Some(node) => {
+            match borg_json::as_number(&node) {
+                Some(text) => {
+                    match parse_whole(&text) {
+                        Some(number) => { return number; },
+                        None => { return RecordError::Parse; }
+                    }
+                },
+                None => { return RecordError::Parse; }
+            }
+        },
+        None => { return RecordError::Parse; }
+    }
+}
+
+fn required_text<a, b>(value: (&a borg_json::Json), key: (&b [u8])) -> string | RecordError {
+    match borg_json::member(&value, &key) {
+        Some(node) => {
+            match borg_json::as_string(&node) {
+                Some(text) => { found := text; return found; },
+                None => { return RecordError::Parse; }
+            }
+        },
+        None => { return RecordError::Parse; }
+    }
+}
+
+// `#[serde(default)]` on the optional fields: absent and null both mean "not recorded".
+fn optional_text<a, b>(value: (&a borg_json::Json), key: (&b [u8])) -> string? {
+    match borg_json::member(&value, &key) {
+        Some(node) => {
+            if borg_json::kind_of(&node) == borg_json::JsonKind::Null {
+                return core::none<string>();
+            }
+            return borg_json::as_string(&node);
+        },
+        None => { return core::none<string>(); }
+    }
+}
+
+fn optional_int<a, b>(value: (&a borg_json::Json), key: (&b [u8])) -> u64? {
+    match borg_json::member(&value, &key) {
+        Some(node) => {
+            match borg_json::as_number(&node) {
+                Some(text) => { return parse_whole(&text); },
+                None => { return core::none<u64>(); }
+            }
+        },
+        None => { return core::none<u64>(); }
+    }
+}
+
+pub fn decode<a>(root: (&a borg_json::Json)) -> OwnerRecord | RecordError {
+    if borg_json::kind_of(&root) != borg_json::JsonKind::Obj {
+        return RecordError::Parse;
+    }
+    version := required_int(&root, "schema_version")?;
+    if version != 1 {
+        // Borg ignores a record it does not understand rather than guessing at it.
+        return RecordError::Schema;
+    }
+    pid := required_int(&root, "pid")?;
+    identity := required_text(&root, "executable_identity")?;
+    package := optional_text(&root, "package_version");
+    started := optional_int(&root, "process_start_time");
+    return OwnerRecord {
+        schema_version: version,
+        pid: pid,
+        executable_identity: identity,
+        package_version: package,
+        process_start_time: started
+    };
+}
+
+fn copy_text<a>(text: (&a [u8])) -> string {
+    mut out = u8[];
+    for byte in text {
+        out.push(byte);
+    }
+    return out.text();
+}
+
+fn put(members: (&mut borg_json::Member[]), key: (&[u8]), value: borg_json::Json) {
+    members.push(borg_json::Member { key: copy_text(&key), value: value });
+}
+
+// Matching an `Option` *field* of a borrow moves it; matching a borrow of the option copies the
+// payload instead, which is what these two do.
+fn copy_optional_text<a>(value: (&a string?)) -> string? {
+    match value {
+        Some(text) => { copied := copy_text(&text); return core::some(copied); },
+        None => { return core::none<string>(); }
+    }
+}
+
+fn copy_optional_number<a>(value: (&a u64?)) -> u64? {
+    match value {
+        Some(number) => { return core::some(number); },
+        None => { return core::none<u64>(); }
+    }
+}
+
+pub fn encode(record: (&OwnerRecord)) -> borg_json::Json {
+    mut members = borg_json::empty_members();
+    put(&mut members, "schema_version", borg_json::Json::Num(digits(record.schema_version)));
+    put(&mut members, "pid", borg_json::Json::Num(digits(record.pid)));
+    put(&mut members, "executable_identity", borg_json::Json::Str(copy_text(&record.executable_identity)));
+    package := copy_optional_text(&record.package_version);
+    match package {
+        Some(text) => { put(&mut members, "package_version", borg_json::Json::Str(text)); },
+        None => { put(&mut members, "package_version", borg_json::Json::Null); }
+    }
+    started := copy_optional_number(&record.process_start_time);
+    match started {
+        Some(value) => { put(&mut members, "process_start_time", borg_json::Json::Num(digits(value))); },
+        None => { put(&mut members, "process_start_time", borg_json::Json::Null); }
+    }
+    return borg_json::Json::Obj(members);
+}
+
+fn text_equals<a, b>(left: (&a [u8]), right: (&b [u8])) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    for i in left.len() {
+        if left[i] != right[i] {
+            return false;
+        }
+    }
+    return true;
+}
+
+fn append_number<a>(out: (&a mut u8[]), value: u64) {
+    if value == 0 {
+        out.push(48);
+        return ();
+    }
+    mut reversed_digits = u8[];
+    mut left = value;
+    while left > 0 {
+        reversed_digits.push(48 + left % 10);
+        left = left / 10;
+    }
+    while reversed_digits.len() > 0 {
+        out.push(reversed_digits.pop());
+    }
+}
+
+pub fn number_text(value: u64) -> string {
+    return digits(value);
+}
+
+fn digits(value: u64) -> string {
+    mut out = u8[];
+    append_number(&mut out, value);
+    return out.text();
+}
+
+fn append_signed<a>(out: (&a mut u8[]), value: i64) {
+    mut magnitude = value;
+    if value < 0 {
+        out.push(45);
+        magnitude = 0 - value;
+    }
+    append_number(out, u64(magnitude));
+}
+
+// `executable_identity` (local_control.rs:559): five numbers joined by colons.
+pub fn identity(dev: u64, ino: u64, len: u64, mtime: i64, mtime_nsec: i64) -> string {
+    mut out = u8[];
+    append_number(&mut out, dev);
+    out.push(58);
+    append_number(&mut out, ino);
+    out.push(58);
+    append_number(&mut out, len);
+    out.push(58);
+    append_signed(&mut out, mtime);
+    out.push(58);
+    append_signed(&mut out, mtime_nsec);
+    return out.text();
+}
+
+fn is_space(byte: u64) -> bool {
+    return (byte == 32) || (byte == 9) || (byte == 10) || (byte == 13);
+}
+
+// `process_start_time` (local_control.rs:607): everything after the *last* `") "` is the field
+// list, and the state start time is its index 19. Anything else is "not recorded".
+pub fn start_time<a>(stat_line: (&a [u8])) -> u64? {
+    mut split = 0;
+    mut found_separator = false;
+    mut at = stat_line.len();
+    while at >= 2 {
+        if (stat_line[at - 2] == 41) && (stat_line[at - 1] == 32) {
+            split = at;
+            found_separator = true;
+            break;
+        }
+        at -= 1;
+    }
+    if !found_separator {
+        return core::none<u64>();
+    }
+    mut field = 0;
+    mut index = split;
+    while index < stat_line.len() {
+        while (index < stat_line.len()) && is_space(stat_line[index]) {
+            index += 1;
+        }
+        if index >= stat_line.len() {
+            break;
+        }
+        begin := index;
+        while (index < stat_line.len()) && !is_space(stat_line[index]) {
+            index += 1;
+        }
+        if field == 19 {
+            mut token = u8[];
+            for i in begin..index {
+                token.push(stat_line[i]);
+            }
+            return parse_whole(&token);
+        }
+        field += 1;
+    }
+    return core::none<u64>();
+}
+
+// `owner_process_matches_metadata` (local_control.rs:631), the linux branch: the pid must be
+// alive, its executable must be the recorded binary, and — when recorded — its start time must
+// still match, which is what separates a reused pid from the original owner.
+pub fn matches(record: (&OwnerRecord), alive: bool, identity: string?, start: u64?) -> bool {
+    if !alive {
+        return false;
+    }
+    match identity {
+        Some(seen) => {
+            if !text_equals(&seen, &record.executable_identity) {
+                return false;
+            }
+        },
+        None => { return false; }
+    }
+    expected_start := copy_optional_number(&record.process_start_time);
+    match expected_start {
+        Some(expected) => {
+            match start {
+                Some(observed) => {
+                    if observed != expected {
+                        return false;
+                    }
+                },
+                None => { return false; }
+            }
+        },
+        None => { }
+    }
+    return true;
+}
+
+pub fn state(status: RecordError?, present: bool, active: bool) -> OwnerState {
+    match status {
+        None => {
+            if active {
+                return OwnerState::Active;
+            }
+            return OwnerState::Stale;
+        },
+        Some(reason) => {
+            if present {
+                return OwnerState::Invalid;
+            }
+            return OwnerState::Absent;
+        }
+    }
+}
+
+// `obsolete_local_session_owner_pid` (local_control.rs:656): a *different* Borg binary that is
+// still the same live process and still holds the session lock may be retired.
+pub fn obsolete(record: (&OwnerRecord), current_identity: (&[u8]), active: bool, holds_lock: bool) -> bool {
+    if text_equals(&record.executable_identity, current_identity) {
+        return false;
+    }
+    if !active {
+        return false;
+    }
+    return holds_lock;
+}
+
+// A record with no owner yet; the tests use it where there is nothing to decode.
+pub fn empty_record() -> OwnerRecord {
+    return OwnerRecord {
+        schema_version: 1,
+        pid: 0,
+        executable_identity: "".text(),
+        package_version: core::none<string>(),
+        process_start_time: core::none<u64>()
+    };
+}
+
+pub fn identity_of(record: (&OwnerRecord)) -> string {
+    return copy_text(&record.executable_identity);
+}
+
+pub fn pid_of(record: (&OwnerRecord)) -> string {
+    return digits(record.pid);
+}
+
+pub fn version_of(record: (&OwnerRecord)) -> string {
+    return digits(record.schema_version);
+}
+
+pub fn pid_value(record: (&OwnerRecord)) -> u64 {
+    return record.pid;
+}
+
+pub fn version_value(record: (&OwnerRecord)) -> u64 {
+    return record.schema_version;
+}
+
+pub fn package_of(record: (&OwnerRecord)) -> string {
+    package := copy_optional_text(&record.package_version);
+    match package {
+        Some(text) => { return text; },
+        None => { return "-".text(); }
+    }
+}
+
+pub fn start_of(record: (&OwnerRecord)) -> string {
+    started := copy_optional_number(&record.process_start_time);
+    match started {
+        Some(value) => { return digits(value); },
+        None => { return "-".text(); }
+    }
+}

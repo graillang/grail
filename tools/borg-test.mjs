@@ -12,6 +12,29 @@ import { mkdirSync, readFileSync, readdirSync, writeFileSync, existsSync } from 
 import { join, basename } from 'node:path';
 import { buildCompiler, command, compileProgram, execute, root } from './native.mjs';
 
+// `--anchors` re-checks that the rules the session reference carries verbatim still exist in the
+// Borg checkout. It is opt-in because the default suite must run without one.
+if (process.argv.includes('--anchors')) {
+  const agentRoot = process.env.BORG_AGENT_ROOT ?? '/home/shulgin/agent';
+  const manifest = JSON.parse(readFileSync(join(root, 'borg/tests/parity/anchors.json'), 'utf8'));
+  const source = readFileSync(join(agentRoot, manifest.source), 'utf8');
+  let missing = 0;
+  for (const anchor of manifest.anchors) {
+    if (source.includes(anchor.snippet)) {
+      console.log(`anchor ok      ${anchor.what}`);
+    } else {
+      missing += 1;
+      console.error(`anchor MISSING ${anchor.what}: ${manifest.source} no longer contains ${JSON.stringify(anchor.snippet)}`);
+    }
+  }
+  if (missing > 0) {
+    console.error(`\n${missing} anchor(s) missing: the ported rule has drifted from ${manifest.source}`);
+    process.exit(1);
+  }
+  console.log(`\n${manifest.anchors.length} anchors match ${manifest.source}`);
+  process.exit(0);
+}
+
 const regenerate = process.argv.includes('--regenerate');
 const suiteDirectory = join(root, 'borg/tests');
 const parityDirectory = join(suiteDirectory, 'parity');
@@ -30,6 +53,7 @@ const fixtures = {
   wire: ['borg/tests/fixtures/v1', 'borg/tests/fixtures/wire'],
   toml: ['borg/tests/fixtures/toml/configs', 'borg/tests/fixtures/toml/cases', 'borg/tests/fixtures/toml/cases/invalid'],
   config: ['borg/tests/fixtures/config'],
+  session: ['borg/tests/fixtures/session'],
 };
 
 function fixturePaths(name) {

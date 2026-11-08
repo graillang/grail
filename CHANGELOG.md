@@ -4,6 +4,17 @@
 
 - Reserve `VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC` in the Vulkan descriptor pool, matching
   set 1; the new SDL3 surface test’s validation layer had exposed the missing pool size.
+- Port Borg Agent's local-session ownership state (`borg/`). `src/session_state.grl` carries the
+  owner record (`schema_version`, `pid`, `executable_identity`, optional `package_version` and
+  `process_start_time`) through the JSON codec, the `dev:ino:len:mtime:mtime_nsec` executable
+  identity, the `/proc/<pid>/stat` start-time parse, and the two decisions built on them: whether a
+  recorded owner is still the same live process, and whether a stale owner may be retired. The
+  rules are cited from `crates/borg-agent-runtime/src/local_control.rs:405-671` and reproduced
+  exactly, including that a record which does not parse or carries an unknown schema counts as
+  absent. Because `borg-agent-runtime` cannot be linked as a reference, `tests/parity/session.rs`
+  carries those functions verbatim with citations, and `bun tools/borg-test.mjs --anchors` fails if
+  the cited snippets disappear from the Borg checkout. The port now checks 603 reference lines over
+  73 documents. Sockets, presence counting and process termination remain out of scope.
 
 - Port Borg Agent's configuration loading (`borg/`). `src/toml.grl` parses and assembles the TOML
   subset Borg's configuration corpus actually uses — strings with escapes, integers in four bases,
