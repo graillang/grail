@@ -73,4 +73,12 @@ if (spawnSync(clang, ['--version']).status === 0) {
     console.log(`headers: ${target} parses`);
   }
 }
+run(clang, ['-target', 'x86_64-pc-windows-msvc', '-ffreestanding', '-fsyntax-only',
+  '-std=c11', '-Wall', '-Wextra', '-Werror', '-DGRAIL_ABI_BUILD', '-Iinclude',
+  'runtime/abi/windows/grail_os_windows.c']);
+console.log('skeleton: Windows source parses');
+run(clang, ['-target', 'arm64-apple-macos11', '-ffreestanding', '-fsyntax-only',
+  '-std=c11', '-Wall', '-Wextra', '-Werror', '-Iinclude',
+  'runtime/abi/macos/grail_os_macos.c']);
+console.log('skeleton: macOS source parses');
 console.log('abi: all checks passed');

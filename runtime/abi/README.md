@@ -39,6 +39,10 @@ tools/abi-test.mjs        test runner (also `just abi-test`)
    into a portable status and preserve the raw value with `grail_os_error_last`.
 7. **No structure by value.** Add fields only at the end of a structure and gate them with
    `struct_size`; bump `abi_version` for a breaking change.
+8. **Build shared-library backends with `GRAIL_ABI_BUILD`.** On Windows the public header
+   declares the symbols `dllimport` for consumers; the defining translation units must set
+   `GRAIL_ABI_BUILD` (or link statically with `GRAIL_ABI_STATIC`), or the compiler rejects the
+   inconsistent attribute.
 
 ## Status
 
