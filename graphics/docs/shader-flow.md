@@ -243,9 +243,55 @@ Observed for `tonemap.ps`, 4 combinations, all with layout hash unchanged:
 | `0xd756454841ecf5b8` | exposure 1, output 0 | 3592 B | 6068 B |
 | `0x01b3872a5c56107d` | exposure 1, output 1 | 3920 B | 6296 B |
 
-Not yet done: selecting a variant at pipeline creation. `gr_pipeline_cache_key` exists and is
-tested, and a pipeline descriptor carries `permutation_key`, but no backend resolves a key to
-a bytecode file yet — that arrives with the first backend.
+## Resolving a key at run time
+
+A backend never composes a file name. `gr_shader_library_open` walks the artifact directory
+once and parses the names, which is why the naming above is load-bearing rather than cosmetic:
+
+```
+<name>.<stage>.refl.bin                 key 0 (the no-flags build)
+<name>.<stage>.<16 hex key>.refl.bin    that permutation
+```
+
+`gr_shader_library_resolve(library, name, stage, key, &resolved)` then returns the reflection
+blob, the raw container bytes, and the frame-constant size, loading lazily and caching on first
+use. The statuses distinguish failures a caller must act on differently:
+
+| status | meaning |
+| --- | --- |
+| `GR_OK` | found; `from_cache` says whether it was read now or served from memory |
+| `GR_ERROR_INVALID_ARGUMENT` | no shader with that name and stage (a builder typo) |
+| `GR_ERROR_PERMUTATION_MISSING` | the shader exists, that key was never compiled (a build gap) |
+| `GR_ERROR_LAYOUT_MISMATCH` | the block the blob declares is not the host's `sizeof(gr_frame_constants)` |
+| `GR_ERROR_EXHAUSTED` | the cache is full; nothing is evicted, because eviction would invalidate spans a caller holds |
+| `GR_ERROR_SHADER_INVALID` | the artifact failed validation |
+
+`gr_shader_create_resolved` is the whole pipeline-side path: device + library + name + stage +
+key becomes a shader handle, choosing the container the device's backend consumes (SPIR-V for
+Vulkan, DXIL for D3D12, MSL for Metal) and returning `GR_ERROR_UNSUPPORTED` when this build did
+not produce that container.
+
+The pipeline descriptor's `permutation_key` is enforced, not decorative: `gr_pipeline_create`
+refuses a pipeline whose declared key differs from any shader it names, so a permuted fragment
+stage cannot be paired with an unpermuted vertex stage. A pipeline declaring key 0 accepts
+anything, so the check never obstructs a caller that does not use permutations.
+
+### Verified
+
+`graphics/tests/test_library.c` covers resolution against synthetic fixtures and against the
+real artifacts, 122 checks with a real artifact directory:
+
+- index of 3 shaders / 7 variants; enumeration order by name, then stage, then key;
+- first resolve loads (`from_cache` 0), the second is a hit returning the *same* buffer;
+- a different key yields a different program; a miss does not evict or corrupt what is cached;
+- unknown name and known-name-wrong-stage are `INVALID_ARGUMENT`; an unbuilt key is
+  `PERMUTATION_MISSING`;
+- filling the cache returns `GR_EXHAUSTED` once full and still hits earlier entries;
+- a blob declaring 400 bytes of frame constants is `LAYOUT_MISMATCH`, 416 is accepted;
+- an empty root is refused at open rather than reported as a hundred misses;
+- five real tonemap artifacts hold **four** distinct programs, because the no-flags build *is*
+  the declared default combination — the same property the permutation test asserts, here on
+  real compiler output.
 
 ## Backend requirements
 

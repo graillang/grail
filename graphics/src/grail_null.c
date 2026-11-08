@@ -77,6 +77,7 @@ typedef struct gr_null_shader {
     gr_reflection reflection;    /* validated at creation */
     gr_shader_stage stage;
     gr_shader_container container;
+    uint64_t permutation_key;
     char *name;
 } gr_null_shader;
 
@@ -2025,15 +2026,15 @@ gr_result gr_shader_create(gr_handle device_handle, const gr_shader_desc *desc,
     if (desc->head.size != sizeof(gr_shader_desc))
         return GR_ERROR_VERSION_MISMATCH;
 
-    /* The container the backend natively consumes wins; the others are accepted so a
-     * pipeline can be described once and built for any backend. The null backend has no
-     * preference and takes the first present, which keeps the ordering explicit. */
-    if (desc->spirv.len) chosen = &desc->spirv;
-    else if (desc->dxil.len) chosen = &desc->dxil;
-    else if (desc->msl_library.len) chosen = &desc->msl_library;
-    else if (desc->msl_source.len) chosen = &desc->msl_source;
-    if (!chosen)
+    /* The reflection blob is the description of the shader; a container without it cannot be
+     * validated, so a caller must supply one. */
+    chosen = &desc->reflection_blob;
+    if (!chosen->data || chosen->len == 0)
         return GR_ERROR_INVALID_ARGUMENT;
+    /* And at least one container must be present: a blob with no code is not loadable. */
+    if (desc->spirv.len == 0 && desc->dxil.len == 0 && desc->msl_library.len == 0 &&
+        desc->msl_source.len == 0)
+        return GR_ERROR_UNSUPPORTED;
 
     /* The reflection is validated here, not at pipeline creation: a shader whose blob does
      * not parse is refused before it can be named by a pipeline. */
@@ -2063,6 +2064,7 @@ gr_result gr_shader_create(gr_handle device_handle, const gr_shader_desc *desc,
     }
     shader->stage = (gr_shader_stage)reflection.header->stage;
     shader->container = (gr_shader_container)reflection.header->container;
+    shader->permutation_key = desc->permutation_key;
     shader->name = gr_str_dup(desc->name);
 
     handle = gr_object_insert(gr_objects(), GR_HANDLE_SHADER, shader);
@@ -2135,10 +2137,20 @@ gr_result gr_pipeline_create(gr_handle device_handle, const gr_pipeline_desc *de
     }
 
     for (i = 0; i < GR_SHADER_STAGE_COUNT; ++i) {
+        gr_null_shader *shader;
         if (desc->shaders[i] == GR_NULL_HANDLE)
             continue;
-        if (!gr_object_lookup(gr_objects(), desc->shaders[i], GR_HANDLE_SHADER, NULL))
+        shader = (gr_null_shader *)gr_object_lookup(gr_objects(), desc->shaders[i],
+                                                    GR_HANDLE_SHADER, NULL);
+        if (!shader)
             return GR_ERROR_INVALID_HANDLE;
+        /* The descriptor's key is load-bearing: a pipeline that declares a permutation may only
+         * use shaders built for that permutation. Without this check a builder could pair a
+         * permuted fragment shader with an unpermuted vertex shader and the mistake would only
+         * show as wrong output. A pipeline declaring key 0 accepts anything, so the check
+         * cannot get in the way of a caller that does not use permutations. */
+        if (desc->permutation_key != 0 && shader->permutation_key != desc->permutation_key)
+            return GR_ERROR_INVALID_ARGUMENT;
     }
 
     if (desc->color_count && !desc->color_formats)
