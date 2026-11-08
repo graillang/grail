@@ -117,7 +117,3 @@ lsp:
 # LSP protocol and compiler-diagnostic tests over a real stdio session.
 lsp-test:
     bun test tools/lsp.test.mjs
-
-# Native Linux FFI wrapper test; needs GRAIL_FFI_COMPILER (feature/ffi).
-ffi-runtime-test:
-    bun tools/test-ffi-runtime.mjs

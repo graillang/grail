@@ -159,19 +159,6 @@
   signing/notarization hooks. Linux lanes build and test; Windows/macOS lanes are
   explicit distribution scaffolding because the compiler still emits Linux ELF
   only. Tooling is documented in `docs/tooling/cross-platform-ci.md`.
-- Added `lib/sys/grail_ffi.grl`, the first Grail-facing wrappers over the Linux OS ABI:
-  explicit init/shutdown, file open/read/write/close/stat/size, monotonic and wall clocks,
-  and environment get/set. The module uses FFI byte views, an opaque `File` handle and
-  Grail-owned out-records, returns `T |? Error` with negative ABI statuses, and keeps file
-  handles affine by convention (explicit single close, no auto-free). Added a hosted C
-  adapter for the allocator and handle-return out-parameter, a repeatable
-  `tools/test-ffi-runtime.mjs` runner, and `docs/design/grail-ffi-runtime.md` with the exact
-  pointer/length/ownership rules. The x86-64 test links the Linux reference backend with
-  libc and executes file/time/environment checks; AArch64 and RISC-V 64 are assembly/static
-  checked only. This requires the `feature/ffi` compiler (`GRAIL_FFI_COMPILER`), is not
-  auto-loaded by the current stdlib, and changes neither `compiler/native.grl` nor
-  `compiler/runtime.grl` in the repository (the runner generates a test-only runtime copy
-  to preserve libc TLS).
 - Added local-time offsets and the first TCP/UDP socket layer to the Windows and macOS
   backends. Windows uses `GetTimeZoneInformation`/`SystemTimeToTzSpecificLocalTime` and Winsock
   (`WSAStartup`, TCP/UDP IPv4 plus probed IPv6, bind/listen/accept/connect, send/recv,
