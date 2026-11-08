@@ -68,7 +68,7 @@ export function buildCompiler() {
   if (boot.endsWith('.gz')) { assembly = join(directory, 'bootstrap.s'); writeFileSync(assembly, gunzipSync(readFileSync(boot))); }
   const bootstrap = assemble(assembly, join(directory, 'bootstrap'));
   const output = join(directory, 'compiler.s');
-  command([bootstrap, output, ...compilerSources]);
+  command([bootstrap, '--default-u64', output, ...compilerSources]);
   const pending = assemble(output, join(directory, 'grail.pending'));
   renameSync(pending, executable);
   return executable;
