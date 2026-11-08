@@ -159,6 +159,8 @@ typedef struct grail_os_error {
 #define GRAIL_CAP_DYNAMIC_LIBRARIES (1ull << 15)
 #define GRAIL_CAP_SYMLINKS (1ull << 16)
 #define GRAIL_CAP_CPU_TIME (1ull << 17)
+#define GRAIL_CAP_FILE_METADATA (1ull << 18)
+#define GRAIL_CAP_FILE_NONBLOCKING (1ull << 19)
 
 /* Returns GRAIL_ABI_VERSION: major in the high 32 bits, minor in the low. */
 GRAIL_API uint64_t GRAIL_CALL grail_abi_version(void);

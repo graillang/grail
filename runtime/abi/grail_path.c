@@ -1,5 +1,3 @@
-#include <string.h>
-
 #include "../include/grail/grail_path.h"
 #include "grail_internal.h"
 
@@ -21,6 +19,12 @@ typedef struct grail_path_prefix {
     int absolute;
     int drive_relative;
 } grail_path_prefix;
+
+static void grail_path_copy_bytes(uint8_t *destination, const uint8_t *source, uint64_t length) {
+    for (uint64_t i = 0; i < length; i++) {
+        destination[i] = source[i];
+    }
+}
 
 typedef struct grail_path_component {
     uint64_t start;
@@ -257,12 +261,12 @@ grail_result grail_os_path_join(const uint8_t *base, uint64_t base_length, const
         return (grail_result)total;
     }
     uint64_t at = 0;
-    memcpy(out, base, base_length);
+    grail_path_copy_bytes(out, base, base_length);
     at += base_length;
     if (needs_separator) {
         out[at++] = '/';
     }
-    memcpy(out + at, child, child_length);
+    grail_path_copy_bytes(out + at, child, child_length);
     return (grail_result)total;
 }
 
