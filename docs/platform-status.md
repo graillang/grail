@@ -54,11 +54,11 @@ stack arguments and sub-64-bit scalar parameters remain open.
 Implemented and tested: versioned C RHI ABI, null and Vulkan backends, HLSL→SPIR-V/DXIL reflection,
 shader permutations, bindless layouts, render graph, graphics and compute pipelines, vertex/index
 buffers, indexed and indirect draws, indirect dispatch, offscreen frames, SDL3 window/swapchain
-with per-image acquire/render/present semaphores, and swapchain recreate. `vk-smoke` has 421 checks
+with per-image acquire/render/present semaphores, depth-test and 4x MSAA resolve, and swapchain recreate. `vk-smoke` has 607 checks
 and `vk-surface` 162, both asserting zero validation errors, warnings and leaks over repeated runs.
 
-Not implemented: D3D12, Metal, depth/MSAA in the graph, multi-queue overlap beyond the graphics
-timeline, pipeline-cache persistence, and a renderer/editor above the RHI.
+Not implemented: D3D12, Metal, multi-queue overlap beyond the graphics timeline, pipeline-cache
+persistence, and a renderer/editor above the RHI.
 
 ## Tooling
 
