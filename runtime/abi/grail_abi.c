@@ -18,7 +18,7 @@ grail_status grail_abi_check(uint64_t required_major, uint64_t required_minor) {
 
 grail_result grail_abi_copy_out(const uint8_t *bytes, uint64_t length, uint8_t *out,
                                 uint64_t capacity) {
-    if (length > capacity || out == NULL) {
+    if (bytes == NULL || length > capacity || out == NULL) {
         return (grail_result)length;
     }
     for (uint64_t i = 0; i < length; i++) {
