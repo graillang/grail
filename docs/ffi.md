@@ -159,8 +159,9 @@ at call sites, and generated Grail functions preserve the callee-saved registers
 allocate (the internal prologue saves and restores them), which is what lets C call back into
 an `extern "C"` definition.
 
-More than six arguments is rejected: Grail has no stack-argument passing yet, and the
-compiler will not silently drop the seventh argument.
+Direct and `cfn` calls pass arguments beyond the registers on the stack (see the calling
+conventions below); an exported callback still takes at most six integer words, and a seventh
+is rejected rather than dropped.
 
 ## The unsafe boundary
 
@@ -203,22 +204,42 @@ marker; it is the call that crosses the boundary.
 
 ## Limits
 
+## Direct calls: calling conventions
+
+A direct call to an `extern "C"` declaration is lowered per platform convention:
+
+| Target | Integer registers | Float registers | Stack |
+| --- | --- | --- | --- |
+| Linux/macOS x86-64 (SysV) | `rdi rsi rdx rcx r8 r9` | `xmm0`-`xmm7` | 8-byte slots after the registers |
+| Windows x86-64 (Win64) | `rcx rdx r8 r9`, by position | `xmm0`-`xmm3`, by position | 32-byte register home area, then slots from the fifth argument |
+| AArch64 (Linux, macOS, Windows) | `x0`-`x7` | `d0`-`d7` / `s0`-`s7` | 8-byte slots |
+| RISC-V 64 (LP64D) | `a0`-`a7` | `fa0`-`fa7`, then integer registers | 8-byte slots |
+
+Parameters and results of direct calls may be `f64` and `f32` (an `f32` crosses as a real
+binary32: narrowed on the way in, widened on the way out), and `i8`..`i32`/`u8`..`u32` (Grail keeps
+them sign- or zero-extended in a word, so they pass as is; results are re-extended after the
+call because C leaves the upper bits unspecified; RV64 receives `u32` sign-extended as its ABI
+requires). Up to 64 argument words are accepted and the outgoing stack area is limited to 2 KiB.
+On macOS arm64, which packs stack arguments by size, a narrow or `f32` argument that would land
+on the stack is refused. RISC-V objects use the hard-float `lp64d` ABI, which Linux C libraries
+use. `tests/ffi/call_abi.grl` executes on x86-64, AArch64 and RISC-V Linux and, through
+`tests/windows-cases.json`, on Windows x86-64 under Wine; Windows ARM64 is checked statically.
+
 Not implemented yet, and each rejected rather than approximated:
 
-- narrower integer widths (`i8`/`i16`/`i32`/`u8`/`u16`/`u32`) and sign/zero extension at
-  the boundary;
-- floating-point arguments and results (`xmm0-7` / `v0-7` / `fa0-7` and the SysV SSE
-  classification);
+- floats and narrow integers in callbacks (exported `extern "C" fn`), which keep the
+  six-integer-word slice (calls *through* `cfn` values use the full per-ABI lowering);
 - nested C records (a nested Grail record value is a pointer, so embedding it by value
   needs a copy/alias representation that does not exist yet), C records in results, C
   records containing floats or pointers, and by-value struct passing (SysV eightbyte
-  classification and `sret`);
+  classification, `sret`, Win64 by-reference copies);
 - variadic callbacks, callback results that are themselves function pointers, and
   taking the address of a foreign *declaration* (`f := c_add;` is rejected: a C
   declaration is not a Grail function value);
-- stack-passed arguments beyond six;
-- dynamic loading on AArch64 and RISC-V 64 Linux, Windows and macOS (the TLS bridge below is
-  Linux x86-64 only), and foreign calls or callbacks on threads other than the main thread;
+- dynamic loading on AArch64 and RISC-V 64 Linux and on macOS (Linux x86-64 uses the TLS bridge
+  below; Windows x86-64 needs none, since `LoadLibraryA`/`GetProcAddress` are ordinary imports
+  and the runtime does not own the TEB), and foreign calls or callbacks on threads other than
+  the main thread on Linux;
 - variadic C functions.
 
 ## Dynamic loading and the host TLS bridge
@@ -277,6 +298,6 @@ compiles `tests/ffi/call_scalars.grl` with the FFI build, links the two through 
   reported as link-only.
 
 Rejections are part of the normal native corpus (`tests/native-cases.json`):
-`ffi-reject-safe-call`, `ffi-reject-abi`, `ffi-reject-parameter-width`,
+`ffi-reject-safe-call`, `ffi-reject-abi`, `ffi-reject-parameter-type`,
 `ffi-reject-result-type`, `ffi-reject-arity` and `ffi-reject-duplicate`, so every target
 checks the diagnostics on every run of `bun tools/test-native.mjs`.

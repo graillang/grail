@@ -2,6 +2,62 @@
 
 ## Unreleased
 
+- Windows dynamic loading: an `extern "C" lib "X"` declaration on a PE target now records
+  `X SYMBOL`, and the Windows link step imports each symbol from `X.dll`, so `LoadLibraryA`,
+  `GetProcAddress` and `FreeLibrary` link like any import. Calls through `cfn` values (on every
+  target) now use the platform C convention, including floats, narrow integers, stack arguments
+  and Win64; they previously used Grail's internal register order. A Wine-executed case resolves
+  `lstrlenA` and `MulDiv` from kernel32 and checks `ERROR_MOD_NOT_FOUND` (126) for a missing DLL.
+
+- D3D12 bindless and compute: the contract's root signature now carries the four unbounded
+  tables (sampled images, storage images, samplers, storage buffers) over one shader-visible
+  resource heap and one sampler heap; the thirteen fixed samplers fill slots 0..12. Added
+  `gr_sampler_create`, sampled texture views, `gr_texture_write`, storage buffers (host-visible
+  ones in a custom write-back heap the GPU can write), compute pipelines and dispatch, buffer
+  barriers with tracked states, `gr_device_retire`/`gr_device_collect` and real bindless
+  high-water marks. `grail_bindless.hlsli` declared both UAV tables in space 0, where an
+  unbounded `u1` range overlaps `u3`; on D3D12 storage writes landed in the storage-image table.
+  The tables now use `u0 space2` and `u0 space3`, with `[[vk::binding]]` keeping Vulkan's set 0,
+  bindings 1 and 3 unchanged. Flip-model DXGI swapchains on an SDL3 window (acquire, present,
+  resize) and Windows SDL3 loading through `LoadLibrary`, with the window's HWND/HINSTANCE from
+  SDL properties, are added.
+
+- Vulkan's thirteen fixed samplers did not match Abundance's definitions: the `*_WRAP` slots
+  clamped, the `*_CLAMP_U_WRAP_V` slots never wrapped V, W was always clamped, and the MIN/MAX
+  reduction slots filtered as ordinary samplers; `gr_sampler_create` also ignored MIN/MAX
+  reduction. Both now use one table, `gr_fixed_sampler` (taken from `engine/core/bindless.cpp`),
+  which D3D12 shares, and `samplerFilterMinmax` is enabled for the reduction slots.
+
+- Vulkan pipelines now honour `gr_pipeline_desc.depth_compare`; it was ignored and every
+  pipeline used GREATER_EQUAL. Zero still means the reverse-Z default, as on D3D12.
+
+- D3D12 buffers, vertex input and depth: upload, readback and device buffers (host access to
+  device memory is refused, as on Vulkan), vertex and index buffer binding, input layouts built
+  from the vertex shader's reflected semantics and checked against the pipeline's attributes,
+  depth textures, depth-stencil views, reverse-Z depth state and depth clears, and indexed draws.
+  The smoke test now has 162 checks, including a depth-tested indexed triangle whose depth reads
+  back exactly. The shader tool stored DXC's SPIR-V variable name (`in.var.COLOR0`) as the vertex
+  semantic; it now stores the HLSL semantic and index (`COLOR`, 0), as the reflection contract
+  says, which D3D12 input layouts need.
+
+- D3D12 draws: DXIL shaders, graphics pipelines on the contract root signature (32 root
+  constants at b0, frame constants as a root CBV at b0 space1), blend modes, topology, cull,
+  wireframe, pipeline commit/stats, push constants, frame-constant slots and non-indexed draws.
+  `make -C graphics d3d12-smoke` now runs on vkd3d-proton (the offline DXIL is shader model 6.6;
+  Wine's built-in vkd3d supports 6.2) and checks a 64x64 draw of the offline `core/fullscreen` and
+  `core/solid` shaders pixel by pixel against the shader's formula: 83 checks. Vertex input,
+  depth, MSAA, compute/mesh pipelines and bindless tables still return `GR_ERROR_UNSUPPORTED`.
+
+- Direct `extern "C"` calls are lowered per calling convention: SysV x86-64, Win64, AAPCS64
+  (Linux, macOS and Windows ARM64) and RV64 LP64D. They now take and return `f32`/`f64` (an `f32`
+  crosses as real binary32) and `i8`..`i32`/`u8`..`u32` (results re-extended; RV64 receives
+  `u32` sign-extended), and pass arguments beyond the registers on the stack (up to 64 words;
+  Win64 gets its 32-byte home area). Windows `extern "C"` calls previously used SysV registers;
+  they now follow Win64 and run under Wine. RISC-V objects now use the `lp64d` hard-float ABI
+  instead of `lp64`, which is what Linux C libraries use. `tests/ffi/call_abi.grl` runs on
+  x86-64, AArch64 and RISC-V Linux and Windows x86-64. Callbacks and `cfn` calls keep the
+  integer-only slice for now.
+
 - Fixed a double `vkDestroySemaphore` at Vulkan device teardown: the compute queue borrows the
   device's graphics timeline but its teardown destroyed it too. The validation layer had reported
   `VUID-vkDestroySemaphore-semaphore-parameter` and two threading messages after the tests'

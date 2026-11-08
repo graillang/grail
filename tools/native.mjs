@@ -146,7 +146,7 @@ export function dynamicLinkFlags(target, linkArgs) {
 export function assemble(source, executable, target = hostTarget, linkArgs = [], { frameworkArgs = [], sign = false, sdk = undefined } = {}) {
   targetName(target);
   const object = `${executable}.o`;
-  const flags = target === 'riscv64' ? ['-march=rv64imafd', '-mabi=lp64'] : [];
+  const flags = target === 'riscv64' ? ['-march=rv64imafd', '-mabi=lp64d'] : [];
   command([process.env.GRAIL_ASSEMBLER ?? 'clang', `--target=${triples[target]}`, ...flags, '-c', source, '-o', object]);
   if (machoTargets.includes(target)) {
     // An SDK supplies the real libSystem.tbd; a cross-build without one links against a stub

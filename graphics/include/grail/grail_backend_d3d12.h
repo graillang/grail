@@ -29,17 +29,16 @@ extern "C" {
 #define GR_D3D12_SHADER_MODEL_MAJOR 6
 #define GR_D3D12_SHADER_MODEL_MINOR 6
 
-/* The backend's root signature, which the offline shader flow must agree with:
- *   [0] root constants        b0, 128 bytes (GR_PUSH_CONSTANT_BYTES), all stages
- *   [1] descriptor table      space 0: range t0 unbounded  sampled images
- *   [2] descriptor table      space 0: range u0 unbounded  storage images
- *   [3] descriptor table      space 0: range s0 unbounded  samplers
- *   [4] descriptor table      space 0: range t1 unbounded  storage buffers
- *   [5] descriptor table      space 1: range b0 1         frame constants (root CBV
- *                                                          preferred: no heap traffic)
- * Root parameter 1 is a root constant view, so a shader may also declare b0 for constants
- * directly; grail_bindless.h fixes that a caller uses push constants only.
- */
+/* The backend's root signature, which grail_bindless.hlsli and grail_frame.hlsli agree with:
+ *   [0] root constants      b0 space0, 128 bytes (GR_PUSH_CONSTANT_BYTES), all stages
+ *   [1] root CBV            b0 space1, the frame constants (one 256-byte-aligned slot per frame)
+ *   [2] descriptor table    t0 space0, unbounded: sampled images
+ *   [3] descriptor table    u0 space2, unbounded: storage images
+ *   [4] descriptor table    s2 space0, unbounded: samplers (slots 0..12 are the fixed thirteen)
+ *   [5] descriptor table    u0 space3, unbounded: storage buffers (raw)
+ * Each unbounded range is alone in its register class and space; two UAV tables in one space
+ * would overlap. The tables point into one shader-visible resource heap and one sampler heap
+ * and never change between draws. */
 gr_result gr_d3d12_root_signature_layout(gr_mut_span_u8 out_json, size_t *out_used);
 
 /* Device and command queue interop for a capture or debugging tool. Borrowed pointers. */

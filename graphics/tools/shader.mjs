@@ -47,6 +47,13 @@ const DXIL_FLAGS = [
 // ---------------------------------------------------------------------------------------
 // Tool discovery
 // ---------------------------------------------------------------------------------------
+// `in.var.COLOR0` -> { name: 'COLOR', index: 0 }; `POSITION` -> { name: 'POSITION', index: 0 }.
+function splitSemantic(raw) {
+  const bare = raw.startsWith('in.var.') ? raw.slice('in.var.'.length) : raw;
+  const match = /^(.*?)(\d+)$/.exec(bare);
+  return match ? { name: match[1], index: Number(match[2]) } : { name: bare, index: 0 };
+}
+
 function findDxc() {
   if (process.env.DXC) return process.env.DXC;
   const cache = join(process.env.HOME ?? '', '.cache', 'abundance', 'engine-tools');
@@ -392,9 +399,12 @@ function extractReflection(mod, stage) {
     }
     const pointer = mod.types.get(variable.typeId);
     const info = vertexFormat(mod, pointer?.pointee);
+    // DXC names a SPIR-V stage input `in.var.<SEMANTIC><index>`; the contract stores the HLSL
+    // semantic and its index separately ("COLOR", 0), which is what a D3D12 input element needs.
+    const split = splitSemantic(nameOf(variable.id, `TEXCOORD${location}`));
     vertices.push({
-      semantic: nameOf(variable.id, `TEXCOORD${location}`),
-      semanticIndex: 0,
+      semantic: split.name,
+      semanticIndex: split.index,
       location,
       format: FORMAT_IDS[info.name] ?? FORMAT_IDS.R32G32B32A32_FLOAT,
       formatName: info.name,

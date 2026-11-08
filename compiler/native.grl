@@ -4452,8 +4452,15 @@ fn base_named<a>(c: (&a mut C), first: u8[]) -> u64 {
                 expect(&mut c, view(","));
             }
         }
-        if 6 < params.len() {
-            fail(&mut c, view("cfn type exceeds six word arguments"));
+        if 64 < params.len() {
+            fail(&mut c, view("cfn type exceeds 64 arguments"));
+        }
+        for i in params.len() {
+            ffi_direct_param(
+                &mut c,
+                params[i],
+                view("cfn parameters must be an integer, f32, f64, CStr, handle, byte view, cfn or extern record")
+            );
         }
         expect(&mut c, view("->"));
         result := parse_type(&mut c);
@@ -4845,6 +4852,382 @@ fn ffi_words<a>(c: (&a mut C), ty: u64) -> u64 {
     }
     return 1;
 }
+// ---- direct extern calls: one lowering per C calling convention ----
+// abi 0: SysV x86-64 (Linux and macOS); 1: Win64 (x86-64 PE); 2: AAPCS64 (Linux, macOS and
+// Windows ARM64); 3: RV64 LP64D. Callbacks and calls through `cfn` values keep the narrower
+// six-integer-word rule in ffi_param until their entry and indirect paths use the same classes.
+fn ffi_abi<a>(c: (&a mut C)) -> u64 {
+    if c.target == 3 {
+        return 1;
+    }
+    if (c.target == 1) + (c.target == 4) {
+        return 2;
+    }
+    if c.target == 2 {
+        return 3;
+    }
+    return 0;
+}
+fn ffi_int_regs(abi: u64) -> u64 {
+    if abi == 0 {
+        return 6;
+    }
+    if abi == 1 {
+        return 4;
+    }
+    return 8;
+}
+// Integer argument registers in the compiler's x86 spelling; machine.grl maps %r10/%r11 to the
+// seventh and eighth AAPCS64/RV64 argument registers.
+fn ffi_int_reg(abi: u64, i: u64) -> string {
+    if abi == 1 {
+        if i == 0 {
+            return "%rcx";
+        }
+        if i == 1 {
+            return "%rdx";
+        }
+        if i == 2 {
+            return "%r8";
+        }
+        return "%r9";
+    }
+    if i == 6 {
+        return "%r10";
+    }
+    if i == 7 {
+        return "%r11";
+    }
+    return argreg(i);
+}
+// The suffix of a narrow integer: "s8".."u32", or "" for a 64-bit or non-integer type.
+fn ffi_narrow<a>(c: (&a mut C), ty: u64) -> string {
+    if ty_kind(&mut c, ty) != 18 {
+        return "";
+    }
+    bits := ty_arg(&mut c, ty);
+    signed := ty_mode(&mut c, ty);
+    if bits == 8 {
+        if signed {
+            return "s8";
+        }
+        return "u8";
+    }
+    if bits == 16 {
+        if signed {
+            return "s16";
+        }
+        return "u16";
+    }
+    if bits == 32 {
+        if signed {
+            return "s32";
+        }
+        return "u32";
+    }
+    return "";
+}
+fn ffi_x86_extend<a, b>(c: (&a mut C), suffix: &b [u8]) -> unit {
+    if same(view(suffix), view("s8")) {
+        o(&mut c, view("movsbq %al,%rax\n"));
+    }
+    if same(view(suffix), view("s16")) {
+        o(&mut c, view("movswq %ax,%rax\n"));
+    }
+    if same(view(suffix), view("s32")) {
+        o(&mut c, view("movslq %eax,%rax\n"));
+    }
+    if same(view(suffix), view("u8")) {
+        o(&mut c, view("movzbq %al,%rax\n"));
+    }
+    if same(view(suffix), view("u16")) {
+        o(&mut c, view("movzwq %ax,%rax\n"));
+    }
+    if same(view(suffix), view("u32")) {
+        o(&mut c, view("movl %eax,%eax\n"));
+    }
+    return ();
+}
+fn ffi_direct_type<a>(c: (&a mut C), ty: u64) -> u64 {
+    if is_float(&mut c, ty) {
+        return true;
+    }
+    if (ty_kind(&mut c, ty) == 18) & (ffi_narrow(&mut c, ty).len() != 0) {
+        return true;
+    }
+    return false;
+}
+fn ffi_direct_param<a, b>(c: (&a mut C), ty: u64, what: &b [u8]) -> unit {
+    if ffi_direct_type(&mut c, ty) {
+        return ();
+    }
+    ffi_param(&mut c, ty, what);
+    return ();
+}
+fn ffi_direct_result<a, b>(c: (&a mut C), ty: u64, what: &b [u8]) -> unit {
+    if ty != 1 {
+        if ffi_direct_type(&mut c, ty) {
+            return ();
+        }
+    }
+    ffi_result(&mut c, ty, what);
+    return ();
+}
+// %rax -> the outgoing stack argument word at `offset` bytes above the stack pointer.
+fn ffi_store_stack<a>(c: (&a mut C), x86: u64, offset: u64) -> unit {
+    if x86 {
+        o(&mut c, view("movq %rax,"));
+        on(&mut c, offset);
+        o(&mut c, view("(%rsp)\n"));
+    } else {
+        o(&mut c, view("cstarg "));
+        on(&mut c, offset);
+        c.out.push(10);
+    }
+    return ();
+}
+// The binary32 bits of the f32 value in %rax, left in %rax.
+fn ffi_f32_bits<a>(c: (&a mut C), x86: u64) -> unit {
+    if x86 {
+        o(&mut c, view("movq %rax,%xmm15\ncvtsd2ss %xmm15,%xmm15\nmovd %xmm15,%eax\n"));
+    } else {
+        o(&mut c, view("cf32bits\n"));
+    }
+    return ();
+}
+// `symbol` names the callee; when it is empty, `target` is the slot holding a `cfn` address and
+// the call is indirect (through %rax, which no C convention uses for an argument).
+fn ffi_emit_call<a, b, d, e>(
+    c: (&a mut C),
+    args: &b u64[],
+    argtypes: &d u64[],
+    ret: u64,
+    symbol: &e [u8],
+    target: u64
+) -> Val {
+    abi := ffi_abi(&mut c);
+    x86 := abi < 2;
+    nint := ffi_int_regs(abi);
+    apple_arm := (abi == 2) & (c.plat == 1);
+    // First pass: how many argument words go to the stack. Win64 slots are positional: the
+    // n-th argument uses the n-th register of its class or the n-th stack slot.
+    mut ints = 0;
+    mut floats = 0;
+    mut stack = 0;
+    for i in args.len() {
+        ty := argtypes[i];
+        if is_float(&mut c, ty) {
+            if abi == 1 {
+                if ints < 4 {
+                    ints = ints + 1;
+                } else {
+                    stack = stack + 1;
+                }
+            } else {
+                if floats < 8 {
+                    floats = floats + 1;
+                } else {
+                    if (abi == 3) & (ints < 8) {
+                        ints = ints + 1;
+                    } else {
+                        stack = stack + 1;
+                    }
+                }
+            }
+        } else {
+            for w in ffi_words(&mut c, ty) {
+                if ints < nint {
+                    ints = ints + 1;
+                } else {
+                    stack = stack + 1;
+                }
+            }
+        }
+    }
+    mut base = 0;
+    if abi == 1 {
+        base = 32; // the callee's register home area
+    }
+    mut area = base + stack * 8;
+    area = (area + 15) / 16 * 16;
+    if 2048 < area {
+        fail(&mut c, view("extern C call needs more than 2 KiB of stack arguments"));
+    }
+    mut tls = 0;
+    if tls_bridge(&mut c) {
+        tls = fresh(&mut c);
+        tls_get(&mut c, tls);
+        tls_set_global(&mut c, view("rt_host_tls"));
+    }
+    if area != 0 {
+        if x86 {
+            o(&mut c, view("subq $"));
+            on(&mut c, area);
+            o(&mut c, view(",%rsp\n"));
+        } else {
+            o(&mut c, view("cstack "));
+            on(&mut c, area);
+            c.out.push(10);
+        }
+    }
+    ints = 0;
+    floats = 0;
+    mut next = 0;
+    for i in args.len() {
+        ty := argtypes[i];
+        if is_float(&mut c, ty) {
+            single := is_f32(&mut c, ty);
+            mut freg = 99;
+            mut ireg = 99;
+            if abi == 1 {
+                if ints < 4 {
+                    freg = ints;
+                    ints = ints + 1;
+                }
+            } else {
+                if floats < 8 {
+                    freg = floats;
+                    floats = floats + 1;
+                } else {
+                    if (abi == 3) & (ints < 8) {
+                        ireg = ints;
+                        ints = ints + 1;
+                    }
+                }
+            }
+            get(&mut c, args[i], view("%rax"));
+            if freg != 99 {
+                if x86 {
+                    if single {
+                        o(&mut c, view("movq %rax,%xmm15\ncvtsd2ss %xmm15,%xmm"));
+                    } else {
+                        o(&mut c, view("movq %rax,%xmm"));
+                    }
+                    on(&mut c, freg);
+                    c.out.push(10);
+                } else {
+                    if single {
+                        o(&mut c, view("cfarg32 "));
+                    } else {
+                        o(&mut c, view("cfarg64 "));
+                    }
+                    on(&mut c, freg);
+                    c.out.push(10);
+                }
+            } else {
+                if single {
+                    if apple_arm {
+                        fail(&mut c, view("macOS arm64 packs stack arguments; an f32 stack argument is not supported"));
+                    }
+                    ffi_f32_bits(&mut c, x86);
+                }
+                if ireg != 99 {
+                    o(&mut c, view("movq %rax,"));
+                    o(&mut c, view(ffi_int_reg(abi, ireg)));
+                    c.out.push(10);
+                } else {
+                    ffi_store_stack(&mut c, x86, base + next * 8);
+                    next = next + 1;
+                }
+            }
+        } else {
+            words := ffi_words(&mut c, ty);
+            suffix := ffi_narrow(&mut c, ty);
+            for w in words {
+                mut ireg = 99;
+                if ints < nint {
+                    ireg = ints;
+                    ints = ints + 1;
+                }
+                if (ireg == 99) & apple_arm & (suffix.len() != 0) {
+                    fail(&mut c, view("macOS arm64 packs stack arguments; a narrow integer stack argument is not supported"));
+                }
+                // RV64 passes a 32-bit argument sign-extended even when it is unsigned; Grail keeps
+                // u32 zero-extended, so it is converted at the boundary.
+                rv_u32 := (abi == 3) & same(view(suffix), view("u32"));
+                direct := (words == 1) & (ireg != 99) & (rv_u32 == 0);
+                if direct {
+                    get(&mut c, args[i], view(ffi_int_reg(abi, ireg)));
+                } else {
+                    get(&mut c, args[i], view("%rax"));
+                    if words == 2 {
+                        if w == 0 {
+                            o(&mut c, view("movq (%rax),%rax\n"));
+                        } else {
+                            o(&mut c, view("movq 8(%rax),%rax\n"));
+                        }
+                    }
+                    if rv_u32 {
+                        o(&mut c, view("cext s32\n"));
+                    }
+                    if ireg != 99 {
+                        o(&mut c, view("movq %rax,"));
+                        o(&mut c, view(ffi_int_reg(abi, ireg)));
+                        c.out.push(10);
+                    } else {
+                        ffi_store_stack(&mut c, x86, base + next * 8);
+                        next = next + 1;
+                    }
+                }
+            }
+        }
+    }
+    if symbol.len() == 0 {
+        get(&mut c, target, view("%rax"));
+        o(&mut c, view("call *%rax\n"));
+    } else {
+        o(&mut c, view("call "));
+        o(&mut c, view(symbol));
+        c.out.push(10);
+    }
+    if ret != 1 {
+        if is_float(&mut c, ret) {
+            single := is_f32(&mut c, ret);
+            if x86 {
+                if single {
+                    o(&mut c, view("cvtss2sd %xmm0,%xmm0\n"));
+                }
+                o(&mut c, view("movq %xmm0,%rax\n"));
+            } else {
+                if single {
+                    o(&mut c, view("cfret32\n"));
+                } else {
+                    o(&mut c, view("cfret64\n"));
+                }
+            }
+        } else {
+            suffix := ffi_narrow(&mut c, ret);
+            if suffix.len() != 0 {
+                if x86 {
+                    ffi_x86_extend(&mut c, view(suffix));
+                } else {
+                    o(&mut c, view("cext "));
+                    o(&mut c, view(suffix));
+                    c.out.push(10);
+                }
+            }
+        }
+    }
+    if area != 0 {
+        if x86 {
+            o(&mut c, view("addq $"));
+            on(&mut c, area);
+            o(&mut c, view(",%rsp\n"));
+        } else {
+            o(&mut c, view("cunstack "));
+            on(&mut c, area);
+            c.out.push(10);
+        }
+    }
+    slot := save(&mut c);
+    if tls != 0 {
+        tls_set_slot(&mut c, tls);
+    }
+    if ret != 1 {
+        own(&mut c, slot, ret);
+    }
+    return val(slot, ret);
+}
 fn ffi_param<a, b>(c: (&a mut C), ty: u64, what: &b [u8]) -> unit {
     // u64 is the portable one-word type at index 0; i64/isize is the 64-bit signed
     // integer. Handles (kind 23) and CStr (kind 24) are one-word C pointers, and a
@@ -5200,10 +5583,10 @@ fn extern_declaration<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
             p := ident(&mut c);
             expect(&mut c, view(":"));
             ty := parse_type(&mut c);
-            ffi_param(
+            ffi_direct_param(
                 &mut c,
                 ty,
-                view("extern C parameters must be a 64-bit integer, CStr, handle or byte view")
+                view("extern C parameters must be an integer, f32, f64, CStr, handle, byte view, cfn or extern record")
             );
             words = words + ffi_words(&mut c, ty);
             c.params.push(ty);
@@ -5216,13 +5599,13 @@ fn extern_declaration<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     }
     exchange(&mut c.parsing_input, 0);
     exchange(&mut c.output_region, 0);
-    if 6 < words {
-        fail(&mut c, view("extern C declaration exceeds six argument words"));
+    if 64 < words {
+        fail(&mut c, view("extern C declaration exceeds 64 argument words"));
     }
     mut ret = 1;
     if eat(&mut c, view("->")) {
         ret = parse_type(&mut c);
-        ffi_result(&mut c, ret, view("extern C results must be i64, u64, unit, CStr or handle"));
+        ffi_direct_result(&mut c, ret, view("extern C results must be an integer, f32, f64, unit, CStr, handle or cfn"));
     }
     expect(&mut c, view(";"));
     m := module_copy(&mut c);
@@ -5230,7 +5613,18 @@ fn extern_declaration<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         fail(&mut c, view("duplicate function"));
     }
     if 0 < input.len() {
-        ffi_link(&mut c, view(input));
+        if (c.target == 3) + (c.target == 4) {
+            // A PE image binds each symbol to one DLL through the import table, so Windows tooling
+            // needs the pair, not just the library: `// grail-link: import kernel32 LoadLibraryA`.
+            mut note = u8[];
+            push_bytes(&mut note, view("import "));
+            push_bytes(&mut note, view(input));
+            note.push(32);
+            push_bytes(&mut note, view(symbol));
+            ffi_link(&mut c, view(note));
+        } else {
+            ffi_link(&mut c, view(input));
+        }
     }
     c
         .funcs
@@ -5372,7 +5766,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
                 ffi_param(
                     &mut c,
                     formal,
-                    view("extern C callback parameters must be a 64-bit integer, CStr, handle, byte view or cfn")
+                    view("extern C callback parameters must be i64, u64, CStr, handle, byte view or cfn (floats and narrow integers are direct-call only so far)")
                 );
             }
             if ret != 1 {
@@ -7578,52 +7972,7 @@ fn emit_resolved_call<a>(
         if (c.raw == 0) & (c.unsafe_depth == 0) {
             fail(&mut c, view("extern C call requires an unsafe block"));
         }
-        mut words = 0;
-        for i in args.len() {
-            ty := argtypes[i];
-            words = words + ffi_words(&mut c, ty);
-        }
-        if 6 < words {
-            fail(&mut c, view("extern C call exceeds six argument words"));
-        }
-        mut tls = 0;
-        if tls_bridge(&mut c) {
-            tls = fresh(&mut c);
-            tls_get(&mut c, tls);
-            tls_set_global(&mut c, view("rt_host_tls"));
-        }
-        mut reg = 0;
-        for i in args.len() {
-            ty := argtypes[i];
-            if ty_kind(&mut c, ty) == 5 {
-                // A byte view crosses as the C pair (pointer, length). The view
-                // record is {pointer at word 0, length at word 1}.
-                get(&mut c, args[i], view("%rax"));
-                first := argreg(reg);
-                second := argreg(reg + 1);
-                o(&mut c, view("movq (%rax),"));
-                o(&mut c, view(first));
-                o(&mut c, view("\nmovq 8(%rax),"));
-                o(&mut c, view(second));
-                c.out.push(10);
-                reg = reg + 2;
-            } else {
-                one := argreg(reg);
-                get(&mut c, args[i], view(one));
-                reg = reg + 1;
-            }
-        }
-        o(&mut c, view("call "));
-        o(&mut c, view(ffi_symbol));
-        c.out.push(10);
-        slot := save(&mut c);
-        if tls != 0 {
-            tls_set_slot(&mut c, tls);
-        }
-        if ret != 1 {
-            own(&mut c, slot, ret);
-        }
-        return val(slot, ret);
+        return ffi_emit_call(&mut c, &args, &argtypes, ret, view(ffi_symbol), 0);
     }
     if 6 < args.len() {
         fail(&mut c, view("native call exceeds six arguments"));
@@ -7843,6 +8192,16 @@ fn indirect_call<a>(c: (&a mut C), value: Val, opened: u64) -> Val {
         slot := args[i];
         actual := types[i];
         move_out(&mut c, val(slot, actual));
+    }
+    if kind == 25 {
+        // A C function pointer is called with the platform's C convention, exactly like a direct
+        // extern call (floats, narrow integers, stack arguments, Win64, the host-TLS bridge).
+        result := ffi_emit_call(&mut c, &args, &signature, resulttype, view(""), target);
+        rslot := result.t;
+        call_writebacks(&mut c, first, &sources, &types);
+        call_bonds(&mut c, val(rslot, resulttype), first, &sources, resulttype);
+        release_temporary(&mut c, input);
+        return val(rslot, resulttype);
     }
     if shift {
         get(&mut c, envp, view("%rdi"));

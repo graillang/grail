@@ -67,8 +67,8 @@ C callbacks and `cfn` function pointers. `bun tools/test-ffi.mjs` links and exec
 (13 executed, 0 linked-only), including `dlopen`/`dlsym`/`dlclose` on Linux x86-64 through a
 host-TLS bridge (main thread only). Still open:
 dynamic loading on other targets, variadic C functions and variadic callbacks,
-callback results, record results and by-value struct passing, nested records, float and narrow
-integer parameters, and stack arguments beyond six words. The C headers under `include/grail`
+callback results, record results and by-value struct passing, nested records, and float and
+narrow-integer callback parameters (direct and `cfn` calls take them). The C headers under `include/grail`
 are the runtime ABI contract.
 
 ## Graphics and shaders
@@ -82,15 +82,27 @@ offscreen readbacks, and a swapchain with acquire/present and a draw path. `make
 test` runs 450 host checks; `vk-surface` runs 162 checks on a real 320×240 swapchain, and
 `vk-smoke` 613 and `vk-cache` 47 on hardware, with zero validation messages through teardown.
 
-D3D12: a first slice, built for x86_64-windows with `zig cc` (MinGW-w64 headers) and executed by
-`make -C graphics d3d12-smoke` under Wine, whose `d3d12.dll` is vkd3d on the host GPU. It
-covers a headless device and its reported feature level, one direct queue and its fence
-timeline, 2D render-target textures and views, command lists, tracked-state barriers, clears,
-viewport/scissor, submit and texture readback: 47 checks, including exact clear readbacks
-(64 128 191 255 and 255 0 128 0 on every pixel) and the NOT_READY/UNSUPPORTED refusals.
-Buffers, shaders, pipelines, draws, bindless, swapchains, semaphores and compute/copy queues
-return `GR_ERROR_UNSUPPORTED`; Wine's vkd3d stops at feature level 11_1, so the test asks for
-11_0. No real Windows host has run it.
+D3D12: built for x86_64-windows with `zig cc` (MinGW-w64 headers) and executed by
+`make -C graphics d3d12-smoke` under Wine with vkd3d-proton on the host GPU (Wine's built-in
+vkd3d stops at shader model 6.2; the offline DXIL is 6.6). It covers a headless device and its
+feature level, one direct queue and its fence timeline, 2D render-target textures and views,
+command lists, tracked-state barriers, clears, viewport/scissor, submit, texture readback, DXIL
+shaders, graphics pipelines on the contract root signature (push constants as root constants,
+frame constants as a root CBV), frame-constant slots, upload/readback/device buffers, vertex
+and index buffers with input layouts matched to the shader's reflected semantics, reverse-Z
+depth attachments and depth state, and plain and indexed draws: 162 checks, including exact
+clear readbacks, a 64x64 draw of the offline `core/fullscreen` + `core/solid` DXIL that matches
+the shader on every pixel, and an indexed `core/triangle` drawn near then far where the depth
+test keeps the near colour and the depth buffer reads back exactly 0.75. The bindless tables
+are one shader-visible resource heap (sampled images, storage buffers) and one sampler heap
+holding the thirteen fixed samplers; `core/frame_setup` runs as a compute pipeline and writes
+all 256 storage-buffer words exactly, and `core/tonemap` samples an uploaded HDR texture within
+1/255 of ACES: 221 checks. Flip-model swapchains on an SDL3 window's HWND: `make -C graphics d3d12-present` (on a
+display, with DXVK's DXGI) acquires, clears, reads back exactly, presents and resizes: 319 checks.
+4x MSAA with a resolve at end of pass matches the single-sample draw byte for byte (241 checks
+in the smoke test). Storage
+images, indirect draws and dispatches, mesh pipelines, semaphores and compute/copy
+queues return `GR_ERROR_UNSUPPORTED`. No real Windows host has run it.
 
 Not implemented: Metal (returns `GR_ERROR_UNSUPPORTED`), mesh and ray-tracing pipelines, and a
 complete renderer. The null backend validates contracts only.

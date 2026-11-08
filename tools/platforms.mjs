@@ -79,7 +79,7 @@ export const PLATFORMS = [
     triple: 'riscv64-linux-gnu',
     emulation: 'elf64lriscv',
     elfMachine: 243,
-    assemblerFlags: ['-march=rv64imafd', '-mabi=lp64'],
+    assemblerFlags: ['-march=rv64imafd', '-mabi=lp64d'],
     executableSuffix: '',
     archiveFormat: 'tar.gz',
     installer: 'install.sh',

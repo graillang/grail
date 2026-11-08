@@ -134,7 +134,7 @@ export async function check(compiler) {
 
   // windows-aarch64: PE/COFF for ARM64. There is no ARM64 Windows runner on this host, so these
   // cases are validated statically: assembly shape, COFF machine, relocations and the image.
-  const armCases = ['hello', 'integer-print', 'file-write-read', 'argument-list', 'com-interop'];
+  const armCases = ['hello', 'integer-print', 'file-write-read', 'argument-list', 'com-interop', 'ffi-call-abi'];
   for (const name of armCases) {
     const test = cases.find(c => c.name === name);
     const directory = join(work, `arm64-${name}`);
@@ -153,6 +153,11 @@ export async function check(compiler) {
       shims: test.shim ? [test.shim[windowsAarch64]] : [],
     });
     const assembly = readFileSync(built.assembly, 'utf8');
+    if (name === 'ffi-call-abi') {
+      // AAPCS64 for direct extern calls: floats in d/s registers, f32 narrowed, stack arguments.
+      for (const needle of ['fmov d1,x9', 'fcvt s1,d16', 'fmov x9,d0', 'sub sp,sp,#', 'str x9,[sp,#', 'sxtw x9,w9'])
+        assert.ok(assembly.includes(needle), `${name}/${windowsAarch64}: missing ${needle}`);
+    }
 
     // ARM64 instructions and PE import sequences, with no x86 or ELF spelling left behind.
     assert.ok(assembly.includes('.globl grail_entry\ngrail_entry:'), `${name}/${windowsAarch64}: missing PE entry`);
@@ -217,7 +222,13 @@ export async function check(compiler) {
     assert.ok(imported.includes('ExitProcess') && imported.includes('WriteFile'), `${name}/${windowsAarch64}: kernel32 imports missing`);
     const pdataDir = image.match(/Entry 3 ([0-9a-f]+) ([0-9a-f]+)\s+Exception Directory \[\.pdata\]/);
     assert.ok(pdataDir, `${name}/${windowsAarch64}: image has no .pdata directory`);
-    assert.equal(Number.parseInt(pdataDir[2], 16), defs * 8, `${name}/${windowsAarch64}: exception directory size`);
+    // The image's exception directory also holds the C shim's unwind entries, if any.
+    let shimEntries = 0;
+    for (const object of built.shimObjects ?? []) {
+      const size = /\.pdata\s+([0-9a-f]+)/i.exec(command(['llvm-objdump', '-h', object]).stdout.toString());
+      if (size) shimEntries += Number.parseInt(size[1], 16) / 8;
+    }
+    assert.equal(Number.parseInt(pdataDir[2], 16), (defs + shimEntries) * 8, `${name}/${windowsAarch64}: exception directory size`);
     passed++;
     console.log(`windows-aarch64 ${name}: COFF-ARM64 object + ARM64 PE image verified (static, no ARM64 runner)`);
   }

@@ -764,6 +764,114 @@ fn win_exit<a>(o: (&a mut Out)) -> unit {
     );
     return ();
 }
+// ---- C-ABI moves for direct extern calls (emitted by native.grl, AArch64 and RV64 only) ----
+// Grail keeps every value in an integer word: an f64 as its bits, an f32 as the binary64 with the
+// same value, a sized integer sign- or zero-extended. These pseudo-instructions move %rax (x9/t0)
+// across that boundary: into the N-th float argument register, out of the float result register,
+// re-extended after a narrow integer result, and into the outgoing stack argument area.
+fn c_abi<a, b, c>(o: (&a mut Out), op: &b [u8], rest: &c [u8]) -> u64 {
+    arm := o.target == 1;
+    if eq(view((op)), view("cfarg64")) {
+        if arm {
+            put(&mut o, view("fmov d"));
+            put(&mut o, view(rest));
+            put(&mut o, view(",x9\n"));
+        } else {
+            put(&mut o, view("fmv.d.x fa"));
+            put(&mut o, view(rest));
+            put(&mut o, view(",t0\n"));
+        }
+        return 1;
+    }
+    if eq(view((op)), view("cfarg32")) {
+        if arm {
+            put(&mut o, view("fmov d16,x9\nfcvt s"));
+            put(&mut o, view(rest));
+            put(&mut o, view(",d16\n"));
+        } else {
+            put(&mut o, view("fmv.d.x ft0,t0\nfcvt.s.d fa"));
+            put(&mut o, view(rest));
+            put(&mut o, view(",ft0\n"));
+        }
+        return 1;
+    }
+    if eq(view((op)), view("cfret64")) {
+        if arm {
+            put(&mut o, view("fmov x9,d0\n"));
+        } else {
+            put(&mut o, view("fmv.x.d t0,fa0\n"));
+        }
+        return 1;
+    }
+    if eq(view((op)), view("cfret32")) {
+        if arm {
+            put(&mut o, view("fcvt d0,s0\nfmov x9,d0\n"));
+        } else {
+            put(&mut o, view("fcvt.d.s fa0,fa0\nfmv.x.d t0,fa0\n"));
+        }
+        return 1;
+    }
+    // The binary32 bits of an f32 value, for a stack slot or an integer register.
+    if eq(view((op)), view("cf32bits")) {
+        if arm {
+            put(&mut o, view("fmov d16,x9\nfcvt s16,d16\nfmov w9,s16\n"));
+        } else {
+            put(&mut o, view("fmv.d.x ft0,t0\nfcvt.s.d ft0,ft0\nfmv.x.w t0,ft0\n"));
+        }
+        return 1;
+    }
+    if eq(view((op)), view("cext")) {
+        if arm {
+            if eq(view(rest), view("s8")) { put(&mut o, view("sxtb x9,w9\n")); }
+            if eq(view(rest), view("s16")) { put(&mut o, view("sxth x9,w9\n")); }
+            if eq(view(rest), view("s32")) { put(&mut o, view("sxtw x9,w9\n")); }
+            if eq(view(rest), view("u8")) { put(&mut o, view("and x9,x9,#255\n")); }
+            if eq(view(rest), view("u16")) { put(&mut o, view("and x9,x9,#65535\n")); }
+            if eq(view(rest), view("u32")) { put(&mut o, view("mov w9,w9\n")); }
+        } else {
+            if eq(view(rest), view("s8")) { put(&mut o, view("slli t0,t0,56\nsrai t0,t0,56\n")); }
+            if eq(view(rest), view("s16")) { put(&mut o, view("slli t0,t0,48\nsrai t0,t0,48\n")); }
+            if eq(view(rest), view("s32")) { put(&mut o, view("addiw t0,t0,0\n")); }
+            if eq(view(rest), view("u8")) { put(&mut o, view("andi t0,t0,255\n")); }
+            if eq(view(rest), view("u16")) { put(&mut o, view("slli t0,t0,48\nsrli t0,t0,48\n")); }
+            if eq(view(rest), view("u32")) { put(&mut o, view("slli t0,t0,32\nsrli t0,t0,32\n")); }
+        }
+        return 1;
+    }
+    if eq(view((op)), view("cstack")) {
+        if arm {
+            put(&mut o, view("sub sp,sp,#"));
+        } else {
+            put(&mut o, view("addi sp,sp,-"));
+        }
+        put(&mut o, view(rest));
+        put(&mut o, view("\n"));
+        return 1;
+    }
+    if eq(view((op)), view("cunstack")) {
+        if arm {
+            put(&mut o, view("add sp,sp,#"));
+        } else {
+            put(&mut o, view("addi sp,sp,"));
+        }
+        put(&mut o, view(rest));
+        put(&mut o, view("\n"));
+        return 1;
+    }
+    if eq(view((op)), view("cstarg")) {
+        if arm {
+            put(&mut o, view("str x9,[sp,#"));
+            put(&mut o, view(rest));
+            put(&mut o, view("]\n"));
+        } else {
+            put(&mut o, view("sd t0,"));
+            put(&mut o, view(rest));
+            put(&mut o, view("(sp)\n"));
+        }
+        return 1;
+    }
+    return 0;
+}
 fn instruction<a, b>(o: (&a mut Out), line: &b [u8]) -> unit {
     target := o.target;
     mut space = line.len();
@@ -777,6 +885,9 @@ fn instruction<a, b>(o: (&a mut Out), line: &b [u8]) -> unit {
     mut rest = u8[];
     if space < line.len() {
         rest = (trim(view((line[space + 1:])))).copy();
+    }
+    if c_abi(&mut o, view((op)), view(rest)) {
+        return ();
     }
     if o.win != 0 {
         if eq(view((op)), view("winimport")) {
