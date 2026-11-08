@@ -63,7 +63,7 @@ const runtime = join(root, 'compiler/runtime.grl');
 const osRuntime = join(root, 'compiler/os-linux.grl');
 
 const wrapper = 'lib/sys/grail_ffi.grl';
-const linkNote = '// grail-link: grail_ffi_linux.o';
+const linkNote = '// grail-link: grail_ffi';
 const cases = [
   {
     name: 'native',

@@ -1,0 +1,49 @@
+module ffi_runtime_proc_thread;
+
+use sys_grail;
+use sys_grail::Error;
+
+extern "C" fn thread_worker(user: u64) -> u64 {
+    return user + 1;
+}
+
+fn run() -> u64 |? Error {
+    sys_grail::init()?;
+
+    child := sys_grail::spawn(&"C:\\windows\\system32\\cmd.exe", &"/c\0exit 7")?;
+    pid := sys_grail::process_id(child)?;
+    if pid == 0 {
+        return 2;
+    }
+    status := sys_grail::wait(child)?;
+    if status.struct_size != 40 {
+        return 3;
+    }
+    if status.abi_version != sys_grail::ABI_VERSION {
+        return 4;
+    }
+    if status.kind != sys_grail::PROCESS_EXITED {
+        return 5;
+    }
+    if status.exit_code != 7 {
+        return 6;
+    }
+    if status.term_signal != 0 {
+        return 7;
+    }
+    sys_grail::process_close(child)?;
+
+    thread := sys_grail::thread_spawn(thread_worker, 41)?;
+    code := sys_grail::thread_join(thread)?;
+    if code != 42 {
+        return 8;
+    }
+
+    println("ffi-proc-thread: ok");
+    sys_grail::shutdown()?;
+    return 0;
+}
+
+fn main() -> u64 {
+    return run()!;
+}
