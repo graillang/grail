@@ -1112,20 +1112,24 @@ int main(int argc, char **argv)
         memset(&report, 0, sizeof(report));
         report.head.size = (uint32_t)sizeof(report);
         CHECK_EQ(gr_vk_validation(device, &report), GR_OK);
-        /* Not enabled on this path yet: turning the layer on here immediately reported 12 errors
-         * (see docs/vulkan-backend.md), which is the next increment rather than a claim this one
-         * can make. */
-        (void)report;
         printf("vk-backend: validation errors=%u warnings=%u infos=%u\n", report.error_count,
                report.warning_count, report.info_count);
         {
             uint32_t i;
             for (i = 0; i < report.message_count && i < GR_VK_VALIDATION_MESSAGES; ++i) {
                 gr_str message;
-                if (gr_vk_validation_message(device, i, &message) == GR_OK)
-                    printf("  layer[%u]: %.*s\n", i, (int)message.len, message.data);
+                if (gr_vk_validation_message(device, i, &message) == GR_OK) {
+                    char flat[GR_VK_VALIDATION_MESSAGE_LEN];
+                    uint32_t k;
+                    for (k = 0; k < message.len && k < sizeof(flat) - 1u; ++k)
+                        flat[k] = (message.data[k] == '\n') ? ' ' : message.data[k];
+                    flat[k] = '\0';
+                    printf("  layer[%u]: %s\n", i, flat);
+                }
             }
         }
+        /* Not asserted yet: one error remains (see docs/vulkan-backend.md). Enabling the layer
+         * here with a failing assertion would leave the suite red, which is not a claim I make. */
     }
 
     gr_shader_library_close(library);

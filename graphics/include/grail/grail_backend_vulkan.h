@@ -145,7 +145,7 @@ gr_result gr_vk_probe_run(gr_vk_probe_report *out);
  * and nothing noticed until the layer was enabled.
  * --------------------------------------------------------------------------------------- */
 #define GR_VK_VALIDATION_MESSAGES 8
-#define GR_VK_VALIDATION_MESSAGE_LEN 192
+#define GR_VK_VALIDATION_MESSAGE_LEN 384
 
 typedef struct gr_vk_validation_report {
     gr_desc_head head;
