@@ -1543,6 +1543,8 @@ gr_result gr_cmd_push_constants(gr_handle cmd_handle, uint32_t stage_mask, uint3
 gr_result gr_cmd_bind_vertex_buffer(gr_handle cmd_handle, uint32_t slot, gr_handle buffer,
                                     uint64_t offset)
 {
+    if (gr_active_backend() == GR_BACKEND_VULKAN)
+        return gr_vk_abi_cmd_bind_vertex_buffer(cmd_handle, slot, buffer, offset);
     gr_result status;
     gr_null_cmd *cmd = null_cmd(cmd_handle, &status);
     gr_null_buffer *b;
@@ -1565,6 +1567,8 @@ gr_result gr_cmd_bind_vertex_buffer(gr_handle cmd_handle, uint32_t slot, gr_hand
 gr_result gr_cmd_bind_index_buffer(gr_handle cmd_handle, gr_handle buffer, uint64_t offset,
                                    uint32_t index_type)
 {
+    if (gr_active_backend() == GR_BACKEND_VULKAN)
+        return gr_vk_abi_cmd_bind_index_buffer(cmd_handle, buffer, offset, index_type);
     gr_result status;
     gr_null_cmd *cmd = null_cmd(cmd_handle, &status);
     gr_null_buffer *b;
@@ -1610,6 +1614,8 @@ gr_result gr_cmd_draw(gr_handle cmd_handle, const gr_draw *draw)
 
 gr_result gr_cmd_draw_indexed(gr_handle cmd_handle, const gr_draw_indexed *draw)
 {
+    if (gr_active_backend() == GR_BACKEND_VULKAN)
+        return gr_vk_abi_cmd_draw_indexed(cmd_handle, draw);
     gr_result status;
     gr_null_cmd *cmd = null_cmd(cmd_handle, &status);
     if (!cmd)

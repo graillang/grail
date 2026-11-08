@@ -120,6 +120,25 @@ device → instance, with a sweep that destroys anything the caller left in the 
 loader is never `dlclose`d, because it and the layers register atexit handlers over their own static
 data.
 
+## The vertex and index path
+
+`triangle.vs` reads two attributes where `fullscreen.vs` generates its vertices and binds nothing, so
+the pipeline's vertex input state is built from `gr_pipeline_desc.vertex_bindings` /
+`vertex_attributes` rather than left empty — leaving it empty made every attribute unreadable however
+the buffers were bound. `gr_cmd_bind_vertex_buffer`, `gr_cmd_bind_index_buffer` and
+`gr_cmd_draw_indexed` complete the path.
+
+The test draws an indexed triangle through the graph: three vertices (red, green, blue) in one
+vertex buffer, three `uint16` indices in another, and one `gr_cmd_draw_indexed`. Deterministic
+checks rather than a digest alone: the two corners outside the triangle hold the clear colour, the
+centre pixel holds a blend (`59,65,131`), and all three vertex hues appear somewhere in the target —
+which only happens if the index buffer selected the right vertices and the rasteriser interpolated
+between them. Two runs give the same digest.
+
+That also needed several formats the map lacked (`R32G32_FLOAT`, `R16G16B16A16_UNORM` and others):
+a missing entry reported `UNSUPPORTED` at pipeline creation rather than silently producing a broken
+pipeline, which is why it surfaced immediately.
+
 ## Evidence
 
 `make -C graphics vk-smoke`, under the exclusive GPU lock:

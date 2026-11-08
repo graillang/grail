@@ -95,6 +95,9 @@ typedef struct gr_vk_dev {
     PFN_vkCmdBindPipeline cmd_bind_pipeline;
     PFN_vkCmdPushConstants cmd_push_constants;
     PFN_vkCmdDraw cmd_draw;
+    PFN_vkCmdDrawIndexed cmd_draw_indexed;
+    PFN_vkCmdBindVertexBuffers cmd_bind_vertex_buffers;
+    PFN_vkCmdBindIndexBuffer cmd_bind_index_buffer;
     PFN_vkCmdCopyImageToBuffer cmd_copy_image_to_buffer;
     PFN_vkQueueSubmit queue_submit;
     PFN_vkQueueWaitIdle queue_wait_idle;
@@ -438,7 +441,18 @@ static VkFormat vk_format(gr_format format)
     case GR_FORMAT_B8G8R8A8_UNORM: return VK_FORMAT_B8G8R8A8_UNORM;
     case GR_FORMAT_B8G8R8A8_SRGB: return VK_FORMAT_B8G8R8A8_SRGB;
     case GR_FORMAT_R16G16B16A16_FLOAT: return VK_FORMAT_R16G16B16A16_SFLOAT;
+    case GR_FORMAT_R8_UNORM: return VK_FORMAT_R8_UNORM;
+    case GR_FORMAT_R8_UINT: return VK_FORMAT_R8_UINT;
+    case GR_FORMAT_R8G8_UNORM: return VK_FORMAT_R8G8_UNORM;
+    case GR_FORMAT_R16_FLOAT: return VK_FORMAT_R16_SFLOAT;
+    case GR_FORMAT_R16_UINT: return VK_FORMAT_R16_UINT;
+    case GR_FORMAT_R16G16_FLOAT: return VK_FORMAT_R16G16_SFLOAT;
+    case GR_FORMAT_R16G16B16A16_UNORM: return VK_FORMAT_R16G16B16A16_UNORM;
     case GR_FORMAT_R32_FLOAT: return VK_FORMAT_R32_SFLOAT;
+    case GR_FORMAT_R32G32_FLOAT: return VK_FORMAT_R32G32_SFLOAT;
+    case GR_FORMAT_R32G32_UINT: return VK_FORMAT_R32G32_UINT;
+    case GR_FORMAT_R32G32B32A32_UINT: return VK_FORMAT_R32G32B32A32_UINT;
+    case GR_FORMAT_R10G10B10A2_UNORM: return VK_FORMAT_A2B10G10R10_UNORM_PACK32;
     case GR_FORMAT_R32G32B32A32_FLOAT: return VK_FORMAT_R32G32B32A32_SFLOAT;
     case GR_FORMAT_R32_UINT: return VK_FORMAT_R32_UINT;
     case GR_FORMAT_R11G11B10_FLOAT: return VK_FORMAT_B10G11R11_UFLOAT_PACK32;
@@ -948,6 +962,9 @@ gr_result gr_vk_abi_device_create(const gr_device_desc *desc, gr_handle *out_dev
     dev->cmd_bind_pipeline = GR_VK_DEVICE_LOAD(dev, vkCmdBindPipeline);
     dev->cmd_push_constants = GR_VK_DEVICE_LOAD(dev, vkCmdPushConstants);
     dev->cmd_draw = GR_VK_DEVICE_LOAD(dev, vkCmdDraw);
+    dev->cmd_draw_indexed = GR_VK_DEVICE_LOAD(dev, vkCmdDrawIndexed);
+    dev->cmd_bind_vertex_buffers = GR_VK_DEVICE_LOAD(dev, vkCmdBindVertexBuffers);
+    dev->cmd_bind_index_buffer = GR_VK_DEVICE_LOAD(dev, vkCmdBindIndexBuffer);
     dev->cmd_copy_image_to_buffer = GR_VK_DEVICE_LOAD(dev, vkCmdCopyImageToBuffer);
     dev->queue_submit = GR_VK_DEVICE_LOAD(dev, vkQueueSubmit);
     dev->queue_wait_idle = GR_VK_DEVICE_LOAD(dev, vkQueueWaitIdle);
@@ -1511,6 +1528,9 @@ gr_result gr_vk_abi_pipeline_create(gr_handle device_handle, const gr_pipeline_d
     VkGraphicsPipelineCreateInfo info;
     VkPipelineShaderStageCreateInfo stages[2];
     VkPipelineVertexInputStateCreateInfo vertex_input;
+    VkVertexInputBindingDescription vertex_bindings[8];
+    VkVertexInputAttributeDescription vertex_attributes[16];
+    uint32_t binding_count = 0, attribute_count = 0;
     VkPipelineInputAssemblyStateCreateInfo input_assembly;
     VkPipelineViewportStateCreateInfo viewport;
     VkPipelineRasterizationStateCreateInfo raster;
@@ -1526,6 +1546,7 @@ gr_result gr_vk_abi_pipeline_create(gr_handle device_handle, const gr_pipeline_d
     VkResult result;
     gr_handle handle;
     uint32_t stage_count = 0;
+    uint32_t i;
 
     if (!dev || !desc || !out_pipeline)
         return GR_ERROR_INVALID_ARGUMENT;
@@ -1635,8 +1656,35 @@ gr_result gr_vk_abi_pipeline_create(gr_handle device_handle, const gr_pipeline_d
         stage_count++;
     }
 
+    /* The vertex input state comes from the descriptor, not from an assumption: a pipeline with no
+     * bindings is the fullscreen path, and one with bindings is the real draw path. Leaving this
+     * empty made every attribute unreadable however the buffers were bound. */
+    memset(vertex_bindings, 0, sizeof(vertex_bindings));
+    memset(vertex_attributes, 0, sizeof(vertex_attributes));
+    for (i = 0; i < desc->vertex_binding_count && binding_count < 8u; ++i) {
+        vertex_bindings[binding_count].binding = desc->vertex_bindings[i].slot;
+        vertex_bindings[binding_count].stride = desc->vertex_bindings[i].stride;
+        vertex_bindings[binding_count].inputRate = desc->vertex_bindings[i].step_rate
+                                                      ? VK_VERTEX_INPUT_RATE_INSTANCE
+                                                      : VK_VERTEX_INPUT_RATE_VERTEX;
+        binding_count++;
+    }
+    for (i = 0; i < desc->vertex_attribute_count && attribute_count < 16u; ++i) {
+        if (vk_format(desc->vertex_attributes[i].format) == VK_FORMAT_UNDEFINED)
+            return GR_ERROR_UNSUPPORTED;
+        vertex_attributes[attribute_count].location = desc->vertex_attributes[i].location;
+        vertex_attributes[attribute_count].binding = desc->vertex_attributes[i].binding;
+        vertex_attributes[attribute_count].format = vk_format(desc->vertex_attributes[i].format);
+        vertex_attributes[attribute_count].offset = desc->vertex_attributes[i].offset;
+        attribute_count++;
+    }
+
     memset(&vertex_input, 0, sizeof(vertex_input));
     vertex_input.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    vertex_input.vertexBindingDescriptionCount = binding_count;
+    vertex_input.pVertexBindingDescriptions = binding_count ? vertex_bindings : NULL;
+    vertex_input.vertexAttributeDescriptionCount = attribute_count;
+    vertex_input.pVertexAttributeDescriptions = attribute_count ? vertex_attributes : NULL;
     memset(&input_assembly, 0, sizeof(input_assembly));
     input_assembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
     input_assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
@@ -2527,6 +2575,52 @@ gr_result gr_vk_abi_cmd_dispatch(gr_handle cmd_handle, uint32_t x, uint32_t y, u
     if (x == 0 || y == 0 || z == 0)
         return GR_ERROR_INVALID_ARGUMENT;
     cmd->device->cmd_dispatch(cmd->cb, x, y, z);
+    return GR_OK;
+}
+
+gr_result gr_vk_abi_cmd_bind_vertex_buffer(gr_handle cmd_handle, uint32_t slot, gr_handle buffer_handle,
+                                          uint64_t offset)
+{
+    gr_vk_cmdbuf *cmd = (gr_vk_cmdbuf *)gr_object_lookup(gr_objects(), cmd_handle,
+                                                         GR_HANDLE_CMD_BUFFER, NULL);
+    gr_vk_buffer *buffer = vk_buffer_of(buffer_handle);
+    VkBuffer handle;
+    VkDeviceSize vk_offset = offset;
+    if (!cmd || !buffer)
+        return GR_ERROR_INVALID_HANDLE;
+    if (!cmd->recording)
+        return GR_ERROR_NOT_READY;
+    handle = buffer->buffer;
+    cmd->device->cmd_bind_vertex_buffers(cmd->cb, slot, 1, &handle, &vk_offset);
+    return GR_OK;
+}
+
+gr_result gr_vk_abi_cmd_bind_index_buffer(gr_handle cmd_handle, gr_handle buffer_handle,
+                                          uint64_t offset, uint32_t index_type)
+{
+    gr_vk_cmdbuf *cmd = (gr_vk_cmdbuf *)gr_object_lookup(gr_objects(), cmd_handle,
+                                                         GR_HANDLE_CMD_BUFFER, NULL);
+    gr_vk_buffer *buffer = vk_buffer_of(buffer_handle);
+    if (!cmd || !buffer)
+        return GR_ERROR_INVALID_HANDLE;
+    if (!cmd->recording)
+        return GR_ERROR_NOT_READY;
+    cmd->device->cmd_bind_index_buffer(cmd->cb, buffer->buffer, offset,
+                                       index_type == 1 ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16);
+    return GR_OK;
+}
+
+gr_result gr_vk_abi_cmd_draw_indexed(gr_handle cmd_handle, const gr_draw_indexed *draw)
+{
+    gr_vk_cmdbuf *cmd = (gr_vk_cmdbuf *)gr_object_lookup(gr_objects(), cmd_handle,
+                                                         GR_HANDLE_CMD_BUFFER, NULL);
+    if (!cmd || !draw)
+        return GR_ERROR_INVALID_ARGUMENT;
+    if (!cmd->recording)
+        return GR_ERROR_NOT_READY;
+    cmd->device->cmd_draw_indexed(cmd->cb, draw->index_count, draw->instance_count,
+                                  draw->first_index, (int32_t)draw->vertex_offset,
+                                  draw->first_instance);
     return GR_OK;
 }
 
@@ -3473,6 +3567,9 @@ gr_result gr_vk_abi_cmd_bind_pipeline(gr_handle c, gr_handle p) { (void)c; (void
 gr_result gr_vk_abi_cmd_push_constants(gr_handle c, uint32_t s, uint32_t o, gr_span_u8 d) { (void)c; (void)s; (void)o; (void)d; return GR_ERROR_UNSUPPORTED; }
 gr_result gr_vk_abi_cmd_draw(gr_handle c, const gr_draw *d) { (void)c; (void)d; return GR_ERROR_UNSUPPORTED; }
 gr_result gr_vk_abi_cmd_dispatch(gr_handle c, uint32_t x, uint32_t y, uint32_t z) { (void)c; (void)x; (void)y; (void)z; return GR_ERROR_UNSUPPORTED; }
+gr_result gr_vk_abi_cmd_draw_indexed(gr_handle c, const gr_draw_indexed *d) { (void)c; (void)d; return GR_ERROR_UNSUPPORTED; }
+gr_result gr_vk_abi_cmd_bind_vertex_buffer(gr_handle c, uint32_t s, gr_handle b, uint64_t o) { (void)c; (void)s; (void)b; (void)o; return GR_ERROR_UNSUPPORTED; }
+gr_result gr_vk_abi_cmd_bind_index_buffer(gr_handle c, gr_handle b, uint64_t o, uint32_t t) { (void)c; (void)b; (void)o; (void)t; return GR_ERROR_UNSUPPORTED; }
 gr_result gr_vk_abi_submit(const gr_submit *s, uint64_t *v) { (void)s; (void)v; return GR_ERROR_UNSUPPORTED; }
 gr_result gr_vk_abi_fence_create(gr_handle d, uint64_t i, gr_handle *o) { (void)d; (void)i; (void)o; return GR_ERROR_UNSUPPORTED; }
 gr_result gr_vk_abi_swapchain_create(gr_handle d, const gr_swapchain_desc *s, gr_handle *o) { (void)d; (void)s; (void)o; return GR_ERROR_UNSUPPORTED; }

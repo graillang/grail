@@ -99,6 +99,9 @@ gr_result gr_vk_abi_cmd_set_scissor(gr_handle cmd, int32_t x, int32_t y, uint32_
 gr_result gr_vk_abi_cmd_bind_pipeline(gr_handle cmd, gr_handle pipeline);
 gr_result gr_vk_abi_cmd_push_constants(gr_handle cmd, uint32_t stage_mask, uint32_t offset, gr_span_u8 data);
 gr_result gr_vk_abi_cmd_draw(gr_handle cmd, const gr_draw *draw);
+gr_result gr_vk_abi_cmd_draw_indexed(gr_handle cmd, const gr_draw_indexed *draw);
+gr_result gr_vk_abi_cmd_bind_vertex_buffer(gr_handle cmd, uint32_t slot, gr_handle buffer, uint64_t offset);
+gr_result gr_vk_abi_cmd_bind_index_buffer(gr_handle cmd, gr_handle buffer, uint64_t offset, uint32_t index_type);
 gr_result gr_vk_abi_cmd_dispatch(gr_handle cmd, uint32_t x, uint32_t y, uint32_t z);
 gr_result gr_vk_abi_submit(const gr_submit *submit, uint64_t *out_value);
 gr_result gr_vk_abi_swapchain_create(gr_handle device, const gr_swapchain_desc *desc, gr_handle *out_swapchain);
