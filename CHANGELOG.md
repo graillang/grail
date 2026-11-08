@@ -35,6 +35,19 @@
   `tests/ffi/extern_records.grl` (C reads and writes Grail fields; `offsetof`/`sizeof`
   verified from C) and three rejection fixtures. See `docs/ffi.md`.
 
+- v3 C FFI increment 4: C callbacks and function pointers. `extern "C" fn name(...) { ... }`
+  defines a Grail function that C can call: it is emitted with the stated (unmangled) C
+  symbol, `as "name"` renames it, and its signature must sit inside the C ABI slice.
+  `cfn(P...) -> R` is the type of a C function pointer (one word, no environment, C
+  calling convention); only `extern "C"` definitions produce such a value, so a closure or
+  an ordinary Grail function is a type mismatch where C expects a callback, and a foreign
+  declaration still cannot be used as a value. The generated code preserves the
+  callee-saved registers it allocates, verified by a shim that clobbers `rbx`/`r12`-`r15`
+  around the callback. `tests/ffi/callbacks.grl` covers a direct callback, a renamed one
+  and the register-preservation case; two rejection fixtures cover a mismatched callback
+  and `cfn` arity. Variadic callbacks and callback results are still rejected. See
+  `docs/ffi.md`.
+
 - Completed the Windows and macOS function surface. macOS now implements `file_stat`/`fs_stat`
   with a pinned 144-byte Darwin `struct stat` and the `$INODE64` `fstat`/`stat`/`lstat` symbols,
   including birth time and hidden/symlink/read-only flags. Windows now implements
