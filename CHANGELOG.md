@@ -24,6 +24,15 @@
   runtime ABI contract suite (`tools/abi-test.mjs`) and the graphics C/shader
   suites, and the Windows x86-64 cross job is a required release gate for
   build/static checks. Windows AArch64 and macOS remain planned.
+- Abundance CPU port, world-hash increment: `abundance/src/world_hash.grl` carries the
+  `World::content_hash` envelope — generator identity, configuration, twenty raster layers, drainage
+  DAG, geology/province/biomes, material masks, provinces, caves, sites, regions, corridors and
+  landform records — with the C++'s uneven count prefixes and eight-byte float widening preserved.
+  `abundance/tests/parity/world.cpp` generates a real world with Abundance's own generator, dumps
+  its inputs and prints `world.content_hash()`, so the Grail side reproduces a value `ABWCACH5`
+  caches and `ABCP2` checkpoints bind, not a transcription of it. The suite now compares 99 exact
+  values (math 63, hashing 16, world envelope 20); the terrain landscape-digest branch is recorded
+  as the one unported branch.
 - Abundance CPU port, hashing increment: `abundance/src/hash.grl` carries `fnv1a64` (with the
   seeded continuation form), the frozen world/checkpoint starting constant from
   `World::content_hash`, and its little-endian `absorb_byte`/`absorb_u64` accumulator. The reference
