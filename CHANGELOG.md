@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Added executed Windows evidence for the C ABI without a Windows SDK:
+  `tests/abi/wine_harness.c` is cross-built with Zig's MinGW-w64 target and run under Wine,
+  covering file metadata follow/no-follow, hidden attributes, non-reparse readlink rejection,
+  symlink readlink/realpath, regular-file non-blocking rejection and `localhost` DNS (47
+  checks). Fixed Windows `fs_stat` to follow symlinks unless `GRAIL_STAT_NO_FOLLOW` is set by
+  opening the path with `CreateFileW` and using `GetFileInformationByHandle`.
+  `tests/abi/macos_metadata_dns_check.c` compiles the same metadata/reparse/DNS call sites for
+  Apple ARM64 without execution. Added `tools/test-abi-wine.mjs` and `just abi-wine-test`.
+
 - Completed the Windows and macOS function surface. macOS now implements `file_stat`/`fs_stat`
   with a pinned 144-byte Darwin `struct stat` and the `$INODE64` `fstat`/`stat`/`lstat` symbols,
   including birth time and hidden/symlink/read-only flags. Windows now implements

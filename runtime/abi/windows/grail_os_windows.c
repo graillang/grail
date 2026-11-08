@@ -2907,7 +2907,6 @@ grail_result grail_os_net_resolve(const uint8_t *host, uint64_t host_length, uin
 
 grail_status grail_os_fs_stat(const uint8_t *path, uint64_t path_length, uint64_t flags,
                               grail_file_stat *out) {
-    (void)flags;
     if (!grail_windows.initialized) {
         return GRAIL_E_NOT_INITIALIZED;
     }
@@ -2920,19 +2919,34 @@ grail_status grail_os_fs_stat(const uint8_t *path, uint64_t path_length, uint64_
     if (status != GRAIL_OK) {
         return status;
     }
-    WIN32_FILE_ATTRIBUTE_DATA data;
-    const BOOL ok = GetFileAttributesExW(wide, GRAIL_GET_FILE_EX_INFO_STANDARD, &data);
+    DWORD attributes = GRAIL_FILE_FLAG_BACKUP_SEMANTICS;
+    if (flags == GRAIL_STAT_NO_FOLLOW) {
+        attributes |= GRAIL_FILE_FLAG_OPEN_REPARSE_POINT;
+    }
+    const HANDLE handle = CreateFileW(wide, GRAIL_FILE_READ_ATTRIBUTES,
+                                      GRAIL_FILE_SHARE_READ | GRAIL_FILE_SHARE_WRITE |
+                                          GRAIL_FILE_SHARE_DELETE,
+                                      NULL, GRAIL_OPEN_EXISTING, attributes, NULL);
     const DWORD error = GetLastError();
     grail_windows_free_wide(wide, units);
-    if (!ok) {
+    if (handle == GRAIL_INVALID_HANDLE_VALUE) {
         return grail_windows_fail(error);
     }
-    grail_windows_fill_stat(data.dwFileAttributes,
-                            grail_windows_size(data.dwFileSizeHigh, data.dwFileSizeLow),
-                            data.ftCreationTime, data.ftLastAccessTime, data.ftLastWriteTime, out);
+    BY_HANDLE_FILE_INFORMATION info;
+    if (!GetFileInformationByHandle(handle, &info)) {
+        const DWORD stat_error = GetLastError();
+        (void)CloseHandle(handle);
+        return grail_windows_fail(stat_error);
+    }
+    (void)CloseHandle(handle);
+    grail_windows_fill_stat(info.dwFileAttributes,
+                            grail_windows_size(info.nFileSizeHigh, info.nFileSizeLow),
+                            info.ftCreationTime, info.ftLastAccessTime, info.ftLastWriteTime, out);
+    out->link_count = info.nNumberOfLinks;
+    out->device = info.dwVolumeSerialNumber;
+    out->inode = grail_windows_size(info.nFileIndexHigh, info.nFileIndexLow);
     return GRAIL_OK;
 }
-
 
 static int grail_windows_wide_is_dot(const WCHAR *name) {
     if (name[0] == 0) {
