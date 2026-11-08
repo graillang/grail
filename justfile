@@ -40,6 +40,10 @@ test *args:
 abundance-test:
     bun tools/abundance-test.mjs
 
+# FFI: extern "C" declarations/calls against a freestanding C shim, all targets.
+test-ffi:
+    bun tools/test-ffi.mjs
+
 # Verify direct compiler self-hosting on all supported CPUs (QEMU needed for cross execution).
 bootstrap-check:
     bun tools/bootstrap.mjs verify all

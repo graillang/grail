@@ -51,6 +51,10 @@ numeric harness. This is not the recommended application entry convention.
 - Target lowering preserves unsigned comparison, carry/borrow overflow checks, byte accesses,
   division/remainder, long branches, address relocation and frame constants. Unsupported emitted
   operations fail instead of silently dropping instructions.
+- Foreign calls: `extern "C"` declarations resolve to host linker symbols and use the C
+  argument/result registers listed above; the compiler emits its own link inputs as `// grail-link:`
+  notes. Calls require an explicit `unsafe { ... }` block. See [../docs/ffi.md](../docs/ffi.md) for
+  the supported type slice and the remaining limits.
 - Typed references, generic layouts, records, enums, vectors, text and views share the same checked
   language semantics on each target. `optimize.grl` rewrites each function's word stream before
   target lowering (see *Optimization* below); there is no general register allocator.
