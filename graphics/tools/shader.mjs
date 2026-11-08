@@ -695,39 +695,45 @@ function stageOf(file) {
   return STAGES[match[1]] ? match[1] : null;
 }
 
-function compile(file, options) {
-  const stage = stageOf(file);
-  if (!stage) throw new Error(`${relative(root, file)} has no stage suffix (<name>.<vs|ps|cs|ms|as|lib>.hlsl)`);
-  const dxc = findDxc();
-  const version = run([dxc, '--version'], 'dxc --version').stdout;
-  const dxcVersion = (version.match(/\((\d+\.\d+\.\d+\.\d+)\)/) ?? [])[1] ?? DXC_REQUIRED;
-
+// Compiles one variant of a shader. `defines` are the -D flags of a permutation, and `suffix`
+// distinguishes the outputs ("" for the default variant). Everything a variant needs is derived
+// here, so the base build and every permutation go through exactly the same flags.
+function buildVariant(file, stage, options, { suffix = '', defines = [], dxc, dxcVersion }) {
   const rel = relative(shaderRoot, file).replace(/\.hlsl$/, '');
-  const outDir = join(outRoot, dirname(rel));
-  mkdirSync(outDir, { recursive: true });
-  const base = join(outRoot, rel);
-  const profile = `-T ${stage}_${PROFILE}`.split(' ');
+  mkdirSync(join(outRoot, dirname(rel)), { recursive: true });
+  const base = join(outRoot, rel) + suffix;
+  const profile = ['-T', `${stage}_${PROFILE}`];
   const entry = stage === 'lib' ? [] : ['-E', 'main'];
+  const defineFlags = defines.map(d => `-D${d.name}=${d.value}`);
+  const spvFlags = [...SPIRV_FLAGS, ...defineFlags, ...profile, ...entry];
+  const dxilFlags = [...DXIL_FLAGS, ...defineFlags, ...profile, ...entry];
 
   const spvPath = `${base}.spv`;
   const dxilPath = `${base}.dxil`;
-  const spvFlags = [...SPIRV_FLAGS, ...profile, ...entry];
-  const dxilFlags = [...DXIL_FLAGS, ...profile, ...entry];
+  const label = relative(root, file) + (defines.length ? ` [${defines.map(d => `${d.name}=${d.value}`).join(' ')}]` : '');
 
-  run([dxc, ...spvFlags, '-Fo', spvPath, file], `dxc (spirv) ${relative(root, file)}`);
+  run([dxc, ...spvFlags, '-Fo', spvPath, file], `dxc (spirv) ${label}`);
   let dxil = null;
   if (!options.noDxil) {
     try {
-      run([dxc, ...dxilFlags, '-Fo', dxilPath, file], `dxc (dxil) ${relative(root, file)}`);
+      run([dxc, ...dxilFlags, '-Fo', dxilPath, file], `dxc (dxil) ${label}`);
       dxil = readFileSync(dxilPath);
     } catch (error) {
-      // A missing dxil.dll is a normal state on a machine without it: SPIR-V is still valid,
-      // so report and continue rather than failing the whole build.
+      // A missing dxil.dll is a normal state on a machine without it: the SPIR-V is still
+      // valid, so report and continue rather than failing the whole build.
       process.stderr.write(`  dxil failed (continuing with SPIR-V only): ${String(error.message).split('\n')[0]}\n`);
     }
   }
 
   const spirv = readFileSync(spvPath);
+  if (process.env.SPIRV_VAL !== '0') {
+    const val = findTool('spirv-val');
+    if (val) run([val, '--target-env', 'vulkan1.3', spvPath], `spirv-val ${relative(root, spvPath)}`);
+  }
+
+  const mod = parseSpirv(spirv);
+  const refl = extractReflection(mod, stage);
+  const layoutHash = computeLayoutHash(refl);
 
   // The Metal leg. There is no Metal compiler for HLSL, so MSL comes from SPIRV-Cross over the
   // SPIR-V DXC just produced. Argument buffers carry the same set/binding layout; see
@@ -742,24 +748,89 @@ function compile(file, options) {
       const mslPath = `${base}.msl`;
       try {
         run([cross, spvPath, '--msl', '--msl-version', '30000', '--output', mslPath],
-            `spirv-cross (msl) ${relative(root, file)}`);
+            `spirv-cross (msl) ${label}`);
         metal = mslPath;
       } catch (error) {
         process.stderr.write(`  spirv-cross failed: ${String(error.message).split('\n')[0]}\n`);
       }
     }
   }
-  if (process.env.SPIRV_VAL !== '0') {
-    const val = findTool('spirv-val');
-    if (val) run([val, '--target-env', 'vulkan1.3', spvPath], `spirv-val ${relative(root, spvPath)}`);
-  }
 
-  const mod = parseSpirv(spirv);
-  const refl = extractReflection(mod, stage);
-  const layoutHash = computeLayoutHash(refl);
-  const domains = parsePermutationDomains(readFileSync(file, 'utf8'));
+  return {
+    rel, base, spvPath, dxilPath, spirv, dxil, mod, refl, layoutHash, metal, dxcVersion,
+    // The digest of the bytecode, which is what differs between permutations. The layout hash
+    // is a property of the shader's declarations and must NOT differ; the two are deliberately
+    // separate so a test can prove they measure different things.
+    spirvSha256: createHash('sha256').update(spirv).digest('hex'),
+    dxilSha256: dxil ? createHash('sha256').update(dxil).digest('hex') : null,
+  };
+}
+
+function frameConstantsSize(refl) {
+  const block = refl.bindings.find(b => b.set === 1 && b.binding === 0);
+  if (!block || block.memberCount === 0) return null;
+  const last = refl.members[block.memberFirst + block.memberCount - 1];
+  return last.offset + last.size;
+}
+
+function compile(file, options) {
+  const stage = stageOf(file);
+  if (!stage) throw new Error(`${relative(root, file)} has no stage suffix (<name>.<vs|ps|cs|ms|as|lib>.hlsl)`);
+  const dxc = findDxc();
+  const version = run([dxc, '--version'], 'dxc --version').stdout;
+  const dxcVersion = (version.match(/\((\d+\.\d+\.\d+\.\d+)\)/) ?? [])[1] ?? DXC_REQUIRED;
+
+  const sourceText = readFileSync(file, 'utf8');
+  const domains = parsePermutationDomains(sourceText);
+  const v = buildVariant(file, stage, options, { dxc, dxcVersion });
+  const { refl, mod, layoutHash } = v;
 
   const inputs = refl.vertices.length;
+  const quoted = value => `0x${value.toString(16).padStart(16, '0')}`;
+
+  // Every permutation is compiled for real, not just enumerated: one SPIR-V and one DXIL per
+  // combination, each with its own reflection blob, so a pipeline for a combination can be
+  // created without the host ever compiling anything at run time.
+  const combinations = enumeratePermutations(domains);
+  const buildVariants = domains.length > 0 && !options.noPermutationBuild;
+  const variants = [];
+  if (buildVariants) {
+    for (const combo of combinations) {
+      const key = permutationKey(combo);
+      const suffix = `.${key.toString(16).padStart(16, '0')}`;
+      const defines = combo.map(e => ({ name: e.define, value: e.value }));
+      const variant = buildVariant(file, stage, options, { suffix, defines, dxc, dxcVersion });
+
+      // A permutation must not change the layout. If it did, the host's structs would be
+      // wrong for that combination only, which is the hardest kind of layout bug to find.
+      const variantLayout = variant.layoutHash;
+      const layoutStable = variantLayout[0] === layoutHash[0] && variantLayout[1] === layoutHash[1];
+
+      let blobBytes = null;
+      if (!options.jsonOnly) {
+        const blob = writeBlob({
+          container: 0, stage, bytecode: variant.spirv, refl: variant.refl,
+          entryPoint: mod.entryPoint?.name ?? 'main',
+          source: relative(root, file), compiler: `dxc ${dxcVersion}`,
+          flags: [...SPIRV_FLAGS, ...defines.map(d => `-D${d.name}=${d.value}`)].join(' '),
+          layoutHash: variantLayout, domains,
+        });
+        writeFileSync(`${variant.base}.refl.bin`, blob);
+        blobBytes = blob.length;
+      }
+      variants.push({
+        key: quoted(key),
+        defines: Object.fromEntries(combo.map(e => [e.define, e.value])),
+        spirv_sha256: variant.spirvSha256,
+        dxil_sha256: variant.dxilSha256,
+        spirv_bytes: variant.spirv.length,
+        layout_hash: quoted(variantLayout[0]) + quoted(variantLayout[1]).slice(2),
+        layout_hash_stable: layoutStable,
+        blob_bytes: blobBytes,
+      });
+    }
+  }
+
   const json = {
     entry_point: mod.entryPoint?.name ?? 'main',
     stage,
@@ -767,8 +838,10 @@ function compile(file, options) {
     local_size: mod.localSize,
     source: relative(root, file),
     compiler: `dxc ${dxcVersion}`,
-    flags: [...spvFlags, '-Fo', relative(root, spvPath)].join(' '),
-    layout_hash: `0x${layoutHash[0].toString(16).padStart(16, '0')}${layoutHash[1].toString(16).padStart(16, '0')}`,
+    flags: [...SPIRV_FLAGS, '-Fo', relative(root, v.spvPath)].join(' '),
+    layout_hash: quoted(layoutHash[0]) + quoted(layoutHash[1]).slice(2),
+    spirv_sha256: v.spirvSha256,
+    dxil_sha256: v.dxilSha256,
     bindings: refl.bindings.map(b => ({
       set: b.set, binding: b.binding, name: b.name, kind: [
         'sampled_image', 'storage_image', 'sampler', 'storage_buffer', 'uniform_buffer',
@@ -776,55 +849,54 @@ function compile(file, options) {
       array_size: b.arraySize === 0 ? 'unbounded' : b.arraySize,
       members: b.memberCount,
     })),
-    vertex_inputs: refl.vertices.map(v => ({
-      semantic: v.semantic, location: v.location, format: v.formatName, components: v.componentCount,
+    vertex_inputs: refl.vertices.map(x => ({
+      semantic: x.semantic, location: x.location, format: x.formatName, components: x.componentCount,
     })),
-    frame_constants_size: (() => {
-      const block = refl.bindings.find(b => b.set === 1 && b.binding === 0);
-      if (!block || block.memberCount === 0) return null;
-      const last = refl.members[block.memberFirst + block.memberCount - 1];
-      return last.offset + last.size;
-    })(),
+    frame_constants_size: frameConstantsSize(refl),
     push_constants_bytes: refl.pushConstantSize ?? 0,
-    permutations: enumeratePermutations(domains).map(combo => ({
-      key: `0x${permutationKey(combo).toString(16).padStart(16, '0')}`,
+    // The declared domains, so a test can check that the build without flags equals the
+    // combination whose flags are the declared defaults.
+    domains: domains.map(d => ({ name: d.name, default: d.defaultValue, values: d.values })),
+    permutations: combinations.map(combo => ({
+      key: quoted(permutationKey(combo)),
       defines: Object.fromEntries(combo.map(e => [e.define, e.value])),
     })),
+    variants,
     members: refl.members.map(m => ({ name: m.name, type: m.typeName, offset: m.offset, size: m.size })),
   };
 
-  writeFileSync(`${base}.refl.json`, `${JSON.stringify(json, null, 2)}\n`);
+  writeFileSync(`${v.base}.refl.json`, `${JSON.stringify(json, null, 2)}\n`);
   let blobBytes = null;
   if (!options.jsonOnly) {
-    const container = options.noDxil || !dxil ? 0 : 0; // Vulkan container regardless; DXIL is a sibling
     const blob = writeBlob({
-      container,
-      stage,
-      bytecode: spirv,
-      refl,
+      container: 0, stage, bytecode: v.spirv, refl,
       entryPoint: mod.entryPoint?.name ?? 'main',
-      source: relative(root, file),
-      compiler: `dxc ${dxcVersion}`,
-      flags: [...spvFlags].join(' '),
-      layoutHash,
-      domains,
+      source: relative(root, file), compiler: `dxc ${dxcVersion}`,
+      flags: [...SPIRV_FLAGS].join(' '), layoutHash, domains,
     });
-    writeFileSync(`${base}.refl.bin`, blob);
+    writeFileSync(`${v.base}.refl.bin`, blob);
     blobBytes = blob.length;
   }
 
-  return { shader: relative(root, file), stage, spvPath, json, blobBytes, inputs, metal, domains };
+  return {
+    shader: relative(root, file), stage, spvPath: v.spvPath, json, blobBytes, inputs,
+    metal: v.metal, domains, variants,
+  };
 }
 
 function main(argv) {
   const files = [];
-  const options = { noDxil: false, jsonOnly: false, all: false, metal: false, permutations: false };
+  const options = {
+    noDxil: false, jsonOnly: false, all: false, metal: false, permutations: false,
+    noPermutationBuild: false,
+  };
   for (const arg of argv) {
     if (arg === '--all') options.all = true;
     else if (arg === '--no-dxil') options.noDxil = true;
     else if (arg === '--json-only') options.jsonOnly = true;
     else if (arg === '--metal') options.metal = true;
     else if (arg === '--permutations') options.permutations = true;
+    else if (arg === '--no-permutation-build') options.noPermutationBuild = true;
     else if (arg.startsWith('-')) { process.stderr.write(`unknown option ${arg}\n`); return 2; }
     else files.push(resolve(arg));
   }
@@ -845,7 +917,8 @@ function main(argv) {
         `${block !== null ? `, frame constants ${block} B` : ''}` +
         `${result.json.push_constants_bytes ? `, push constants ${result.json.push_constants_bytes} B` : ''}` +
         `${result.blobBytes !== null ? `, blob ${result.blobBytes} B` : ''}` +
-        `${result.domains.length ? `, ${result.json.permutations.length} permutations` : ''}\n`);
+        `${result.domains.length ? `, ${result.json.permutations.length} permutations` : ''}` +
+        `${result.variants.length ? ` (${new Set(result.variants.map(x => x.spirv_sha256)).size} distinct SPIR-V)` : ''}\n`);
       if (options.permutations) {
         for (const domain of result.domains)
           process.stdout.write(

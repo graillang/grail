@@ -200,9 +200,52 @@ agreement on the two defines above: `GRAIL_TONEMAP_EXPOSURE` → `0xabe4a289`,
 `GRAIL_TONEMAP_OUTPUT` → `0x199f71d9`, four combinations, keys
 `0xf6510c514cdc3fd9` … `0x01b3872a5c56107d`.
 
-Not yet done: compiling each combination (only enumeration and keys are emitted today), and
-using the keys to select a bytecode variant at pipeline creation. The pipeline cache key
-function exists (`gr_pipeline_cache_key`) and is tested.
+### Each combination is compiled
+
+Enumeration alone would prove nothing about the shader. Every combination is therefore built
+for real, with its `-D` flags, through exactly the same flag path as the base build:
+
+```
+tonemap.ps.spv                     the no-flags build (equals the declared default combination)
+tonemap.ps.dxil
+tonemap.ps.refl.bin
+tonemap.ps.<key>.spv               one per combination, <key> the 16-hex permutation key
+tonemap.ps.<key>.dxil
+tonemap.ps.<key>.refl.bin
+tonemap.ps.refl.json               every variant's digests, keys and defines
+```
+
+Two digests measure different things, and the difference is the point:
+
+| digest | must | why |
+| --- | --- | --- |
+| `spirv_sha256` / `dxil_sha256` | **differ** per combination | otherwise the `-D` never reached the compiler |
+| `layout_hash` | **not differ** | bindings and constant-block layout are declarations, not code; if a permutation changed the layout, the host's structs would be wrong for that combination only |
+
+`make -C graphics perm-test` asserts both, and `shader-check` verifies every per-permutation
+blob with the C reader, so 7 blobs are validated rather than 3.
+
+The tests were checked against deliberate regressions rather than assumed to work: dropping the
+`-D` flags, building a variant's blob from the base bytecode, changing the directive default,
+and mismatching the `#ifndef` default each fail the specific assertion meant to catch them. The
+last two matter because the shader carries *two* declarations of its defaults — the directive
+and the `#ifndef` — and the test asserts that the no-flags build is byte-identical to the
+variant whose flags equal the declared defaults. The first version of that test passed while a
+directive default was deliberately wrong; it now compares the two builds instead of naming a
+combination.
+
+Observed for `tonemap.ps`, 4 combinations, all with layout hash unchanged:
+
+| key | defines | SPIR-V | DXIL |
+| --- | --- | ---: | ---: |
+| `0xf6510c514cdc3fd9` | exposure 0, output 0 | 3440 B | 5820 B |
+| `0xe2b8c0215166c65c` | exposure 0, output 1 | 3768 B | 6124 B |
+| `0xd756454841ecf5b8` | exposure 1, output 0 | 3592 B | 6068 B |
+| `0x01b3872a5c56107d` | exposure 1, output 1 | 3920 B | 6296 B |
+
+Not yet done: selecting a variant at pipeline creation. `gr_pipeline_cache_key` exists and is
+tested, and a pipeline descriptor carries `permutation_key`, but no backend resolves a key to
+a bytecode file yet — that arrives with the first backend.
 
 ## Backend requirements
 
