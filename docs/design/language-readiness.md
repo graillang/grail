@@ -8,11 +8,11 @@ the design notes named below; `implementation-status.md` is current except where
 
 | # | Gap | Evidence | Why it blocks |
 | --- | --- | --- | --- |
-| A1 | **FFI floats**: `f32`/`f64` arguments and results are rejected at the C boundary on every ABI (SysV, AAPCS64, RV64, Win64) | `docs/ffi.md` "Not implemented" | every graphics, audio, math and most Win32 APIs pass floats |
-| A2 | **FFI narrow integers**: `i8`..`u32` at the boundary, with C sign/zero extension | `docs/ffi.md` | Win32 is built on 32-bit `DWORD`/`BOOL`/`UINT`/`HRESULT` |
+| A1 | **Done for direct calls** (callbacks and `cfn` remain): **FFI floats**: `f32`/`f64` arguments and results are rejected at the C boundary on every ABI (SysV, AAPCS64, RV64, Win64) | `docs/ffi.md` "Not implemented" | every graphics, audio, math and most Win32 APIs pass floats |
+| A2 | **Done for direct calls** (callbacks and `cfn` remain): **FFI narrow integers**: `i8`..`u32` at the boundary, with C sign/zero extension | `docs/ffi.md` | Win32 is built on 32-bit `DWORD`/`BOOL`/`UINT`/`HRESULT` |
 | A3 | **C structs by value**: passing and returning records (SysV eightbytes, `sret`, Win64 rules), nested records, records holding floats or pointers | `docs/ffi.md` | `RECT`, `POINT`, `LARGE_INTEGER`, every descriptor struct |
-| A4 | **More than six argument words** (stack arguments) and variadic C calls | `docs/ffi.md` | `CreateWindowExW` has 12 arguments; `printf`-style logging |
-| A5 | **Windows FFI path**: `extern "C"` calls on PE targets with the full Win64 convention, and COM calls beyond 4 integer arguments | `docs/design/windows-backend.md` COM limits | COM methods take floats and long argument lists |
+| A4 | **Stack arguments done for direct calls; variadic remains**: **More than six argument words** (stack arguments) and variadic C calls | `docs/ffi.md` | `CreateWindowExW` has 12 arguments; `printf`-style logging |
+| A5 | **Done for direct `extern "C"` calls (Wine-executed); COM intrinsics still 4 integer arguments**: **Windows FFI path**: `extern "C"` calls on PE targets with the full Win64 convention, and COM calls beyond 4 integer arguments | `docs/design/windows-backend.md` COM limits | COM methods take floats and long argument lists |
 | A6 | **Windows dynamic loading**: `LoadLibraryW`/`GetProcAddress`/`FreeLibrary` through extern declarations, executed under Wine | dynamic loading is Linux x86-64 only (`docs/ffi.md`) | plugins, optional system DLLs, GPU runtimes |
 | A7 | **Stdlib on Windows**: run the `sys_grail` file/socket/process/thread/time/env wrappers on Windows (the C ABI passes 47 Wine checks; the Grail wrappers have only run on Linux) | `tools/test-ffi-runtime.mjs` is Linux-only | a program that runs on Linux must run on Windows |
 | A8 | **Typed OS errors across platforms**: `io::Error` maps six Linux errno values; Win32 `GetLastError` codes are not mapped | `lib/io.grl` | every fallible OS call on Windows reports `Other(code)` |

@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Direct `extern "C"` calls are lowered per calling convention: SysV x86-64, Win64, AAPCS64
+  (Linux, macOS and Windows ARM64) and RV64 LP64D. They now take and return `f32`/`f64` (an `f32`
+  crosses as real binary32) and `i8`..`i32`/`u8`..`u32` (results re-extended; RV64 receives
+  `u32` sign-extended), and pass arguments beyond the registers on the stack (up to 64 words;
+  Win64 gets its 32-byte home area). Windows `extern "C"` calls previously used SysV registers;
+  they now follow Win64 and run under Wine. RISC-V objects now use the `lp64d` hard-float ABI
+  instead of `lp64`, which is what Linux C libraries use. `tests/ffi/call_abi.grl` runs on
+  x86-64, AArch64 and RISC-V Linux and Windows x86-64. Callbacks and `cfn` calls keep the
+  integer-only slice for now.
+
 - Fixed a double `vkDestroySemaphore` at Vulkan device teardown: the compute queue borrows the
   device's graphics timeline but its teardown destroyed it too. The validation layer had reported
   `VUID-vkDestroySemaphore-semaphore-parameter` and two threading messages after the tests'
