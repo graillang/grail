@@ -138,8 +138,8 @@ pair, structs crossing by reference, opaque `handle`, linear ownership) maps dir
 | Environment | `grail_env.h` | iterator rules | startup snapshot, get/set/unset/enumerate | skeleton |
 | Files/directories | `grail_fs.h` | handle table | open/read/write/seek/stat/close, dirs, pipes, mkdir/remove/rename/realpath | skeleton |
 | Paths | `grail_path.h` | POSIX + Windows rules, both tested | cwd, executable | skeleton |
-| Processes | `grail_proc.h` | options layout | declared, not implemented | skeleton |
-| Sockets | `grail_socket.h` | address layout | declared, not implemented | skeleton |
+| Processes | `grail_proc.h` | options/status layout | explicit UNSUPPORTED | skeleton |
+| Sockets | `grail_socket.h` | address layout | explicit UNSUPPORTED | skeleton |
 | Threads/sync | `grail_thread.h` | handle table | pthread thread, mutex, condvar | skeleton |
 | Dynamic libraries | `grail_dl.h` | handle table | dlopen/dlsym/dlclose | skeleton |
 
@@ -158,14 +158,19 @@ is clear. It never means a silent success or a sequential fallback under a concu
 - `tests/abi/test_paths.c`: POSIX and Windows lexical rules, compiled twice.
 - `tests/abi/test_linux_backend.c`: initialized Linux reference backend covering environment
   seeding/mutation/iteration, clocks and sleep, file and directory I/O, pipes, thread
-  spawn/join/detach, mutex/condvar behaviour, dlopen/dlsym and zero tracked allocation bytes
-  after shutdown.
+  spawn/join/detach, mutex/condvar behaviour, dlopen/dlsym, explicit UNSUPPORTED for processes
+  and sockets, and zero tracked allocation bytes after shutdown.
+- `tests/abi/test_skeleton.c`: links each non-Linux skeleton and verifies that initialization
+  fails closed, capabilities stay zero, raw error detail is clear and every representative
+  entry point returns `GRAIL_E_UNSUPPORTED`.
 - `tests/abi/test_headers.c`: compiled with `clang -ffreestanding` for Linux x86_64, AArch64
   and RISC-V 64, Windows x64 and Apple ARM64, plus explicit structure-size assertions.
 
 The test suite needs a C compiler and is deliberately separate from the Grail build; no
 Grail program links these C files. The Linux reference shim is a behavioural oracle for the
 future Grail implementation, not a replacement build path.
+
+The safe Grail surface that will wrap this contract is designed in [runtime-api.md](runtime-api.md).
 
 ## Remaining native backend work
 

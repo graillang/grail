@@ -8,6 +8,8 @@
 #include "grail_error.h"
 #include "grail_fs.h"
 #include "grail_path.h"
+#include "grail_proc.h"
+#include "grail_socket.h"
 #include "grail_thread.h"
 #include "grail_time.h"
 #include "grail_unicode.h"
