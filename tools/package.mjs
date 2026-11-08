@@ -15,7 +15,7 @@ import { mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createArchive, listArchive } from './archive.mjs';
 import {
-  artifactName, gitCommit, inspectBinary, platformById, root,
+  BUILD_ONLY, SUPPORTED, artifactName, gitCommit, inspectBinary, platformById, root,
 } from './platforms.mjs';
 
 export function sha256(data) {
@@ -72,6 +72,24 @@ export function packageEntries({ platform, version, compiler, commit = gitCommit
   add('install.sh', read(join(root, 'packaging/install.sh')), 0o755);
   add('install.ps1', read(join(root, 'packaging/install.ps1')));
 
+  if (target.tier === BUILD_ONLY) {
+    add(`${layout.docs}/WINDOWS-BUILD-ONLY.txt`, [
+      'Grail for windows-x86_64',
+      '========================',
+      '',
+      'This archive contains a PE/COFF cross-build of the Grail compiler.',
+      '',
+      'Status: build-only. The compiler emits and links PE32+ console images, and',
+      'tools/windows.mjs check statically verifies COFF objects, imports and image',
+      'headers. The Windows runtime is NOT implemented: command-line argv recovery,',
+      'worker threads, file/directory host services and .pdata/unwind data are',
+      'missing. Do not execute this binary or treat it as a supported Windows release.',
+      '',
+      'The supported runnable platforms remain Linux x86-64, AArch64 and RISC-V 64.',
+      '',
+    ].join('\n'));
+  }
+
   const files = Object.fromEntries(entries.map(entry => [entry.path.slice(layout.name.length + 1), sha256(entry.data)]));
   const manifest = {
     schema: 1,
@@ -81,6 +99,9 @@ export function packageEntries({ platform, version, compiler, commit = gitCommit
     os: target.os,
     arch: target.arch,
     target: target.triple,
+    tier: target.tier,
+    runnable: target.tier === SUPPORTED,
+    runtime: target.tier === SUPPORTED ? 'verified' : target.tier === BUILD_ONLY ? 'unverified' : 'not-implemented',
     commit: commit ?? null,
     files,
   };
@@ -145,6 +166,7 @@ export function verifyPackage(artifact, platform, version = '0.1.0') {
     'share/doc/grail/README.md',
     'share/doc/grail/LICENSE',
   ];
+  if (target.tier === BUILD_ONLY) required.push(`${layout.docs}/WINDOWS-BUILD-ONLY.txt`);
   const missing = required.filter(name => !names.includes(name));
   if (!names.some(name => name.startsWith(`${layout.std}/`))) missing.push(`${layout.std}/*.grl`);
   if (!names.some(name => name.startsWith(`${layout.docs}/CHANGELOG.md`))) missing.push(`${layout.docs}/CHANGELOG.md`);

@@ -185,6 +185,20 @@ describe('release packaging', () => {
     rmSync(directory, { recursive: true, force: true });
   });
 
+  test('packages a windows-x86_64 PE compiler as explicitly build-only', () => {
+    const directory = temp();
+    const result = createPackage({ platform: 'windows-x86_64', version: VERSION, compiler: pe('x86_64'), outDir: directory, commit: 'win' });
+    expect(result.name).toBe(`grail-${VERSION}-windows-x86_64.zip`);
+    expect(result.binary).toMatchObject({ format: 'pe', os: 'windows', arch: 'x86_64' });
+    expect(result.manifest).toMatchObject({ tier: 'build-only', runnable: false, runtime: 'unverified', platform: 'windows-x86_64' });
+    const names = verifyPackage(result.artifact, 'windows-x86_64', VERSION).names;
+    expect(names).toContain('bin/grail.exe');
+    expect(names).toContain('share/doc/grail/WINDOWS-BUILD-ONLY.txt');
+    const notice = readFileSync(result.artifact).includes(Buffer.from('Windows runtime is NOT implemented'));
+    expect(notice).toBe(true);
+    rmSync(directory, { recursive: true, force: true });
+  });
+
   test('is byte-reproducible for identical inputs', () => {
     const one = temp();
     const two = temp();

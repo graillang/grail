@@ -8,11 +8,12 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync
 import { join, resolve } from 'node:path';
 import { gzipSync, gunzipSync } from 'node:zlib';
 import {
-  PLATFORMS, LANES, PLANNED, SUPPORTED, artifactName, artifactPattern, buildPlan,
+  PLATFORMS, LANES, BUILD_ONLY, PLANNED, SUPPORTED, artifactName, artifactPattern, buildPlan,
   detectToolchain, findRunner, gitCommit, hostPlatformId, inspectBinary, platformById,
   readVersion, root,
 } from './platforms.mjs';
 import { buildCompiler, command, compilerSources, assemble, compileProgram } from './native.mjs';
+import { compileProgram as compileWindowsProgram, headers as windowsHeaders, inspectImage as inspectPeImage, inspectObject as inspectPeObject } from './windows.mjs';
 import { createPackage, sha256, verifyPackage, writeChecksums } from './package.mjs';
 import { executeSigning, formatPlan, signingPlan } from './sign.mjs';
 
@@ -105,6 +106,7 @@ export function preflight() {
   if (!stage0.exists) blockers.push(`no stage0 compiler: ${stage0.kind === 'env' ? process.env.GRAIL_COMPILER : 'published bootstrap'}`);
   if (stage0.kind === 'bootstrap' && !bootstrap.fresh) blockers.push(`${bootstrap.detail}; set GRAIL_COMPILER to a tree-built compiler or refresh bootstraps`);
   const toolchain = host ? detectToolchain(host) : null;
+  const windows = detectToolchain('windows-x86_64');
   if (toolchain && !toolchain.ready) blockers.push(`host toolchain incomplete: ${[...toolchain.missing, ...(toolchain.sdk.available ? [] : [toolchain.sdk.name])].join(', ')}`);
   return {
     schema: 1,
@@ -115,6 +117,7 @@ export function preflight() {
     bootstrap,
     stage0,
     toolchain,
+    windows,
     ready: blockers.length === 0,
     blockers,
   };
@@ -124,7 +127,7 @@ function detect(platforms, options) {
   const rows = platforms.map(id => ({ platform: id, ...detectToolchain(id) }));
   if (options.json) return rows;
   return rows.map(row => [
-    `${row.platform}  ${row.tier.padEnd(9)}  backend=${row.backend.padEnd(11)}  status=${row.status}`,
+    `${row.platform}  ${row.tier.padEnd(10)}  runnable=${String(row.runnable).padEnd(5)}  backend=${row.backend.padEnd(11)}  status=${row.status}`,
     `  tools: ${row.tools.map(tool => `${tool.name}${tool.found ? '' : ' (missing)'}`).join(', ') || 'none'}`,
     `  sdk: ${row.sdk.name ?? 'none'}${row.sdk.available ? '' : ' (missing)'}${row.sdk.path ? ` at ${row.sdk.path}` : ''}`,
     `  signing: ${row.signing.kind} ${row.signing.available ? 'ready' : row.signing.optional ? 'optional/unsigned' : 'not configured'}`,
@@ -138,6 +141,7 @@ function matrix(plan, options) {
     os: platform.os,
     arch: platform.arch,
     tier: platform.tier,
+    runnable: platform.runnable,
     triple: platform.triple,
     compilerTarget: platform.compilerTarget,
     runner: platform.hostedRunner ?? 'self-hosted',
@@ -145,9 +149,9 @@ function matrix(plan, options) {
   }));
   if (options.json) return rows;
   const width = Math.max(...rows.map(row => row.platform.length));
-  const lines = rows.map(row => `${row.platform.padEnd(width)}  ${row.tier.padEnd(9)}  ${row.os.padEnd(7)}  ${row.arch.padEnd(7)}  ${row.runner.padEnd(14)}  ${row.artifact}`);
+  const lines = rows.map(row => `${row.platform.padEnd(width)}  ${row.tier.padEnd(10)}  ${(row.runnable ? 'runnable' : 'no-exec').padEnd(9)}  ${row.os.padEnd(7)}  ${row.arch.padEnd(7)}  ${row.runner.padEnd(14)}  ${row.artifact}`);
   const lanes = plan.lanes.map(lane => `  ${lane.status.padEnd(15)} ${lane.required ? 'required ' : 'optional '} ${lane.kind.padEnd(6)} ${lane.host} -> ${lane.target} (${lane.execution})`);
-  return [`${'platform'.padEnd(width)}  tier       os       arch     runner          artifact`, ...lines, '', 'lanes:', ...lanes].join('\n');
+  return [`${'platform'.padEnd(width)}  tier        exec       os       arch     runner          artifact`, ...lines, '', 'lanes:', ...lanes].join('\n');
 }
 
 function hostFor(platform) {
@@ -159,6 +163,7 @@ function hostFor(platform) {
 function buildTarget(platformId, options = {}) {
   const target = platformById(platformId);
   if (target.tier === PLANNED) throw new Blocked(`cannot build ${target.id}: ${target.blocker}`);
+  if (target.id === 'windows-x86_64') return buildWindowsCompiler(target, options);
   if (target.os !== 'linux') throw new Blocked(`cannot build ${target.id}: no backend`);
   const host = hostFor();
   if (host !== 'linux-x86_64' && host !== target.id) {
@@ -215,6 +220,86 @@ function buildTarget(platformId, options = {}) {
   return { platform: target.id, artifact, assembly: assemblyArtifact, manifest: manifestPath, binary, version };
 }
 
+function inspectWindowsArtifacts(built) {
+  const object = inspectPeObject(built.object);
+  const image = inspectPeImage(built.executable);
+  const headers = windowsHeaders(built.executable);
+  const imports = image.split('\n')
+    .map(line => line.match(/^\s+Symbol: (\S+)/))
+    .filter(Boolean)
+    .map(match => match[1])
+    .sort();
+  if (!/Format: COFF-x86-64/.test(object)) throw new Error('Windows object is not COFF x86-64');
+  if (!/Machine: IMAGE_FILE_MACHINE_AMD64/.test(object)) throw new Error('Windows object has the wrong COFF machine');
+  if (!/Name: grail_entry/.test(object)) throw new Error('Windows object is missing grail_entry');
+  if (!/Name: kernel32\.dll/.test(image)) throw new Error('PE image is missing the kernel32 import descriptor');
+  if (!/Magic\s+020b\t\(PE32\+\)/.test(headers)) throw new Error('Windows image is not PE32+');
+  if (!/Subsystem\s+00000003\t\(Windows CUI\)/.test(headers)) throw new Error('Windows image is not a console image');
+  const entry = headers.match(/AddressOfEntryPoint\s+([0-9a-f]+)/)?.[1] ?? '0';
+  if (Number.parseInt(entry, 16) === 0) throw new Error('Windows image has no entry point');
+  return { object: 'COFF-x86-64', machine: 'IMAGE_FILE_MACHINE_AMD64', image: 'PE32+', subsystem: 'console', entryRva: `0x${entry}`, imports, executed: false };
+}
+
+function buildWindowsCompiler(target, options = {}) {
+  const host = hostFor();
+  if (host !== 'linux-x86_64') {
+    throw new Blocked(`windows-x86_64 cross-builds run from linux-x86_64, not ${host}`, EXIT.notApplicable);
+  }
+  const bootstrap = bootstrapStatus();
+  if (!process.env.GRAIL_COMPILER && !bootstrap.fresh) {
+    throw new Blocked(`stage0 unavailable: ${bootstrap.detail}\n  set GRAIL_COMPILER=/path/to/tree-built/grail or run: bun tools/bootstrap.mjs update all`);
+  }
+  let stage0;
+  try {
+    stage0 = buildCompiler();
+  } catch (error) {
+    throw new Blocked(`stage0 build failed: ${error.message}`);
+  }
+  const stage0Binary = inspectBinary(stage0);
+  if (stage0Binary.format !== 'elf' || stage0Binary.arch !== 'x86_64') {
+    throw new Blocked(`stage0 ${stage0} is ${stage0Binary.format}/${stage0Binary.arch}, expected ELF x86_64`);
+  }
+  const work = join(root, '.work/ci', target.id);
+  mkdirSync(work, { recursive: true });
+  const sources = compilerSources.filter(path => !path.endsWith('/runtime.grl'));
+  const built = compileWindowsProgram(stage0, sources, work, { name: 'grail' });
+  const staticChecks = inspectWindowsArtifacts(built);
+  const binary = inspectBinary(built.executable);
+  if (binary.format !== 'pe' || binary.arch !== 'x86_64') {
+    throw new Error(`built Windows compiler is ${binary.format}/${binary.arch}, expected pe/x86_64`);
+  }
+  const outDir = resolve(root, options.out ?? 'dist');
+  mkdirSync(outDir, { recursive: true });
+  const version = options.version ?? readVersion();
+  const name = artifactName(target.id, version, 'compiler');
+  const artifact = join(outDir, name);
+  writeFileSync(artifact, readFileSync(built.executable));
+  chmodSync(artifact, 0o755);
+  const assemblyArtifact = join(outDir, artifactName(target.id, version, 'assembly'));
+  writeFileSync(assemblyArtifact, gzipSync(readFileSync(built.assembly), { level: 9 }));
+  const manifest = {
+    schema: 1,
+    name: 'grail',
+    version,
+    platform: target.id,
+    target: target.triple,
+    compilerTarget: target.compilerTarget,
+    tier: target.tier,
+    runnable: false,
+    runtime: 'unverified',
+    commit: gitCommit(),
+    stage0: { kind: process.env.GRAIL_COMPILER ? 'env' : 'bootstrap', path: stage0, sha256: sha256(readFileSync(stage0)), ...stage0Binary },
+    binary,
+    staticChecks,
+    sources: sourceDigests(),
+    assembly: assemblyArtifact,
+  };
+  const manifestPath = join(outDir, `${name}.build.json`);
+  writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+  writeChecksums(outDir);
+  return { platform: target.id, artifact, assembly: assemblyArtifact, manifest: manifestPath, binary, version, tier: target.tier, runnable: false, staticChecks };
+}
+
 function qemuFor(target, env = process.env) {
   return env[`GRAIL_QEMU_${target.arch.toUpperCase()}`] ?? findRunner(target.id, { which: name => {
     for (const directory of (env.PATH ?? '').split(':')) {
@@ -228,6 +313,7 @@ function qemuFor(target, env = process.env) {
 function testTarget(platformId, options = {}) {
   const target = platformById(platformId);
   if (target.tier === PLANNED) throw new Blocked(`cannot test ${target.id}: ${target.blocker}`);
+  if (target.id === 'windows-x86_64') return windowsStaticCheck(target, options);
   const host = hostFor();
   const checkOnly = options['compile-only'] ?? false;
   let compiler = options.compiler ? resolve(root, options.compiler) : null;
@@ -270,6 +356,31 @@ function testTarget(platformId, options = {}) {
   return { platform: target.id, compiler, mode: 'native', status: 'passed' };
 }
 
+function windowsStaticCheck(target, options = {}) {
+  const host = hostFor();
+  if (host !== 'linux-x86_64' && host !== 'windows-x86_64') {
+    throw new Blocked(`windows-x86_64 static checks run from linux-x86_64, not ${host}`, EXIT.notApplicable);
+  }
+  const provided = options.compiler ? inspectBinary(resolve(root, options.compiler)) : null;
+  const stage0 = provided && provided.format === 'elf' && provided.arch === 'x86_64'
+    ? resolve(root, options.compiler)
+    : buildCompiler();
+  const result = spawnSync('bun', ['tools/windows.mjs', 'check'], {
+    cwd: root,
+    stdio: 'inherit',
+    env: { ...process.env, GRAIL_COMPILER: stage0 },
+  });
+  if (result.status !== 0) throw new Error(`windows-x86_64 static checks failed (${result.status})`);
+  return {
+    platform: target.id,
+    compiler: stage0,
+    mode: 'static',
+    runnable: false,
+    status: 'passed',
+    note: 'COFF objects and PE images inspected; no execution because the Windows runtime is not implemented',
+  };
+}
+
 function crossCompileCheck(target) {
   // The target compiler is a foreign-architecture binary; smoke codegen must be
   // driven by the host stage0 with --target, not by executing the target.
@@ -303,7 +414,7 @@ function lint() {
     check(`${platform.id} has a lane`, LANES.some(lane => lane.target === platform.id));
   }
   for (const lane of LANES) {
-    if (lane.required) check(`required lane ${lane.id} targets a supported platform`, platformById(lane.target).tier === SUPPORTED);
+    if (lane.required) check(`required lane ${lane.id} targets an implemented backend`, [SUPPORTED, BUILD_ONLY].includes(platformById(lane.target).tier));
   }
   const workflow = join(root, '.github/workflows/ci.yml');
   if (existsSync(workflow)) {
@@ -327,6 +438,8 @@ function lint() {
     check(`${script} is executable`, executable);
   }
   check('install.ps1 exists', existsSync(join(root, 'packaging/install.ps1')));
+  check('windows-x86_64 has a required cross lane', LANES.some(lane => lane.required && lane.target === 'windows-x86_64'));
+  check('windows-x86_64 lane is static-only', LANES.filter(lane => lane.target === 'windows-x86_64').every(lane => lane.execution === 'static'));
   check('LSP/debugger/profiler plan exists', existsSync(join(root, 'docs/tooling/lsp-debugger-profiler.md')));
   check('VERSION file matches compiler --version', readFileSync(join(root, 'compiler/cli.grl'), 'utf8').includes(`grail ${version ?? '0.0.0'}`), version ?? '');
   const failed = checks.filter(entry => !entry.ok);
@@ -488,7 +601,7 @@ exit codes: 0 ok, 1 usage/internal, 2 not applicable, 3 blocked, 4 missing depen
 function fail(error, options) {
   const code = error.exitCode ?? EXIT.failed;
   console.error(`ci: ${error.message}`);
-  if (options['allow-blocked'] && code === EXIT.blocked) return EXIT.ok;
+  if (options['allow-blocked'] && (code === EXIT.blocked || code === EXIT.notApplicable)) return EXIT.ok;
   return code;
 }
 

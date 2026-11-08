@@ -2,7 +2,7 @@ import { test, expect, describe } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
-  PLATFORMS, LANES, SUPPORTED, PLANNED, root,
+  PLATFORMS, LANES, SUPPORTED, BUILD_ONLY, PLANNED, root,
   platformById, platformId, hostPlatformId, normalizeVersion, readVersion,
   artifactName, artifactPattern, inspectBinary, detectToolchain, laneStatus, buildPlan,
 } from './platforms.mjs';
@@ -24,16 +24,24 @@ describe('platform matrix', () => {
     expect(new Set(PLATFORMS.map(p => p.id)).size).toBe(PLATFORMS.length);
   });
 
-  test('linux is implemented, windows/macos are planned scaffolding', () => {
+  test('linux is runnable, windows-x86_64 is build-only, other OS targets are planned', () => {
     for (const platform of PLATFORMS) {
       if (platform.os === 'linux') {
         expect(platform.tier).toBe(SUPPORTED);
+        expect(platform.runnable).toBe(true);
         expect(platform.compilerTarget).toBeTruthy();
         expect(platform.blocker).toBeNull();
+      } else if (platform.id === 'windows-x86_64') {
+        expect(platform.tier).toBe(BUILD_ONLY);
+        expect(platform.runnable).toBe(false);
+        expect(platform.compilerTarget).toBe('windows-x86_64');
+        expect(platform.triple).toBe('x86_64-pc-windows-msvc');
+        expect(platform.blocker).toMatch(/must not be executed/);
       } else {
         expect(platform.tier).toBe(PLANNED);
+        expect(platform.runnable).toBe(false);
         expect(platform.compilerTarget).toBeNull();
-        expect(platform.blocker).toMatch(/Linux ELF only/);
+        expect(platform.blocker).toMatch(/not implemented/);
       }
     }
   });
@@ -148,6 +156,17 @@ describe('toolchain detection', () => {
     expect(result.host).toBe(false);
   });
 
+  test('windows-x86_64 is buildable but explicitly non-runnable', () => {
+    const tools = {
+      clang: '/c/clang', 'lld-link': '/c/lld-link', 'llvm-ar': '/c/llvm-ar',
+      'llvm-readobj': '/c/llvm-readobj', 'llvm-objdump': '/c/llvm-objdump',
+    };
+    const result = detectToolchain('windows-x86_64', { probe: fakeProbe({ tools, outputs: { clang: 'clang 18' }, env: {} }), host: 'linux-x86_64', env: {} });
+    expect(result).toMatchObject({ tier: BUILD_ONLY, backend: 'implemented', status: 'build-only', buildable: true, runnable: false });
+    expect(result.sdk.available).toBe(true);
+    expect(result.blocker).toMatch(/must not be executed/);
+  });
+
   test('does not claim planned platforms are buildable', () => {
     const probe = fakeProbe({ tools: { clang: '/c/clang', 'ld64.lld': '/c/ld64.lld', codesign: '/c/codesign', xcrun: '/c/xcrun' }, outputs: { xcrun: '/SDK/MacOSX.sdk' }, env: {} });
     const mac = detectToolchain('macos-aarch64', { probe, host: 'macos-aarch64', env: {} });
@@ -173,19 +192,23 @@ describe('lanes and plan coverage', () => {
     for (const id of ALL_IDS) expect(LANES.some(lane => lane.target === id)).toBe(true);
   });
 
-  test('required lanes are Linux and supported', () => {
+  test('required lanes have implemented backends and include Windows static checks', () => {
     const required = LANES.filter(lane => lane.required);
-    expect(required.length).toBeGreaterThanOrEqual(4);
+    expect(required.length).toBeGreaterThanOrEqual(5);
     for (const lane of required) {
-      expect(platformById(lane.target).tier).toBe(SUPPORTED);
+      expect([SUPPORTED, BUILD_ONLY]).toContain(platformById(lane.target).tier);
       expect(platformById(lane.host).tier).toBe(SUPPORTED);
     }
     expect(required.some(lane => lane.target === 'linux-riscv64')).toBe(true);
+    const windows = required.filter(lane => lane.target === 'windows-x86_64');
+    expect(windows).toHaveLength(1);
+    expect(windows[0]).toMatchObject({ id: 'cross-windows-x86_64', kind: 'cross', execution: 'static' });
   });
 
   test('planned lanes are non-required and report the backend blocker', () => {
     const planned = LANES.filter(lane => platformById(lane.target).tier === PLANNED);
     expect(planned.length).toBeGreaterThanOrEqual(4);
+    expect(planned.every(lane => lane.target !== 'windows-x86_64')).toBe(true);
     for (const lane of planned) expect(lane.required).toBe(false);
     const probe = fakeProbe({ tools: { clang: '/c', 'ld.lld': '/l', 'ld64.lld': '/l', codesign: '/c', xcrun: '/x' }, outputs: { xcrun: '/SDK' }, env: {} });
     const mac = laneStatus(planned.find(lane => lane.target === 'macos-aarch64'), { probe, host: 'macos-aarch64', env: {} });
@@ -201,6 +224,17 @@ describe('lanes and plan coverage', () => {
     expect(present).toMatchObject({ status: 'runnable', applicable: true, runner: '/q' });
   });
 
+  test('windows-x86_64 cross lane is static-only even when wine is present', () => {
+    const lane = LANES.find(l => l.id === 'cross-windows-x86_64');
+    const tools = {
+      clang: '/c/clang', 'lld-link': '/c/lld-link', 'llvm-ar': '/c/llvm-ar',
+      'llvm-readobj': '/c/llvm-readobj', 'llvm-objdump': '/c/llvm-objdump', wine: '/usr/bin/wine',
+    };
+    const result = laneStatus(lane, { probe: fakeProbe({ tools }), host: 'linux-x86_64', env: {} });
+    expect(result).toMatchObject({ status: 'static-only', staticOnly: true, runnable: false, applicable: true, backend: 'implemented' });
+    expect(result.blocker).toMatch(/must not be executed/);
+  });
+
   test('the generated plan covers all platforms, lanes and artifact names', () => {
     const probe = fakeProbe({ tools: { clang: '/usr/bin/clang', 'ld.lld': '/usr/bin/ld.lld' }, outputs: { clang: 'clang 18', 'ld.lld': 'LLD 18' }, env: {} });
     const plan = buildPlan({ probe, host: 'linux-x86_64', env: {}, version: '0.1.0' });
@@ -208,5 +242,7 @@ describe('lanes and plan coverage', () => {
     expect(plan.lanes.map(l => l.id)).toEqual(LANES.map(l => l.id));
     expect(plan.platforms.every(p => p.artifact.startsWith('grail-0.1.0-'))).toBe(true);
     expect(plan.platforms.find(p => p.id === 'linux-x86_64').detection.status).toBe('ready');
+    expect(plan.platforms.find(p => p.id === 'windows-x86_64')).toMatchObject({ tier: BUILD_ONLY, runnable: false });
+    expect(plan.lanes.find(l => l.id === 'cross-windows-x86_64').runnable).toBe(false);
   });
 });
