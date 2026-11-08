@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+- Fixed: the `i64` -> `u64` widening check emitted `jns`, which the AArch64 and RISC-V lowering
+  does not implement (it emulates the zero and carry flags only), so programs relying on default
+  `i64` semantics failed to compile for those targets. The sign is now tested with a shift and a
+  zero test.
+
+- Fixed: on macOS an exported `extern "C" fn` was defined without the Mach-O leading
+  underscore while references to it had one, so taking a callback's address failed to link.
+  `test-macos` now links the `dlopen` fixture (libSystem loader imports, a Grail callback) for
+  both macOS targets.
+
+- DWARF variable types: `--debug` on Linux x86-64 now gives every parameter and local a
+  `DW_AT_type` base type (signed/unsigned integers of their width, `f64`/`f32`, `bool`, `char`;
+  strings, records and other owned values as named 8-byte handles), so gdb prints
+  `count = -3`, `ratio = 2.5`, `flag = true`; `llvm-dwarfdump --verify` reports no errors.
+
+- Dynamic loading on AArch64 and RISC-V 64 Linux: the host-TLS bridge (switching the thread
+  pointer between Grail's worker record and glibc's TCB around foreign calls and callbacks) now
+  covers `tpidr_el0` and `tp`, written directly instead of through `arch_prctl`. With a glibc
+  sysroot (`GRAIL_SYSROOT_AARCH64`, `GRAIL_SYSROOT_RISCV64`) dynamically linked cross programs
+  link against the target loader and run under qemu `-L`; `tests/ffi/dlopen.grl` executes on
+  all three Linux targets. Foreign calls on AArch64/RISC-V previously ran with Grail's worker
+  record installed where glibc expects its TCB.
+
 - Callbacks with float and narrow-integer parameters and float results: an exported
   `extern "C" fn` reads each parameter from where the platform C convention put it (SysV,
   AAPCS64 and RV64 pack integers and floats into separate register files; Win64 is positional,

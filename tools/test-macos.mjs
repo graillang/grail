@@ -304,4 +304,28 @@ for (const target of machoTargets) {
   rpathLinks += 1;
 }
 
-console.log(`macos: ${objects} Mach-O objects and ${executables} executables verified on ${machoTargets.join(', ')}; ${frameworkLinks} framework links, ${frameworkLinks * 2} unknown-framework rejections, ${frameworkLinks * 3} signature checks, ${dylibsBuilt} shared dylibs and ${rpathLinks} @rpath links`);
+// Dynamic loading on macOS: the runtime does not own the thread pointer there, so no TLS bridge
+// is involved and the loader functions are ordinary libSystem imports. The Linux fixture is
+// reused with its libraries declared as `lib "System"`; the image must import the loader
+// functions and strlen, and export the Grail callback under its C name (Mach-O `_` prefix).
+let loaderLinks = 0;
+for (const target of machoTargets) {
+  const directory = join(work, target, 'dlopen');
+  rmSync(directory, { recursive: true, force: true });
+  mkdirSync(directory, { recursive: true });
+  const source = join(directory, 'dlopen.grl');
+  writeFileSync(source, readFileSync(join(root, 'tests/ffi/dlopen.grl'), 'utf8').replace(/lib "(dl|c)"/g, 'lib "System"'));
+  const executable = compileProgram(compiler, [source], directory, { target, name: 'dlopen' });
+  const undefinedSymbols = command(['llvm-nm', '-u', executable]).stdout;
+  for (const symbol of ['_dlopen', '_dlsym', '_dlclose', '_strlen']) {
+    has(undefinedSymbols, new RegExp(`(^|\\s)${symbol}$`, 'm'), `${target}: dlopen image does not import ${symbol}`);
+  }
+  // The callback is defined under its Mach-O C name (local unless --export makes it global, as on
+  // Linux); before the fix its definition lacked the underscore and the link failed.
+  const definedSymbols = command(['llvm-nm', '--defined-only', executable]).stdout;
+  has(definedSymbols, /\s[tT] _c_dl_probe$/m, `${target}: callback c_dl_probe is not defined as _c_dl_probe`);
+  check(dylibs(executable).some(name => name === '/usr/lib/libSystem.B.dylib'), `${target}: dlopen image lost libSystem`);
+  loaderLinks += 1;
+}
+
+console.log(`macos: ${objects} Mach-O objects and ${executables} executables verified on ${machoTargets.join(', ')}; ${frameworkLinks} framework links, ${frameworkLinks * 2} unknown-framework rejections, ${frameworkLinks * 3} signature checks, ${dylibsBuilt} shared dylibs, ${rpathLinks} @rpath links and ${loaderLinks} dlopen images`);

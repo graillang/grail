@@ -99,6 +99,15 @@ try {
   assert.match(info, /DW_AT_location\s+\(DW_OP_fbreg -?\d+\)/, 'missing stack location');
   assert.match(info, /DW_AT_frame_base\s+\(DW_OP_reg6 RBP\)/, 'missing frame base');
 
+  // Every parameter and local carries a DW_AT_type naming its base type, and the unit verifies.
+  for (const [name, type] of [['left', 'i64'], ['right', 'i64'], ['total', 'i64']]) {
+    assert.match(info, new RegExp(`DW_AT_name\\s+\\("${name}"\\)\\s+[\\s\\S]*?DW_AT_type\\s+\\(0x[0-9a-f]+ "${type}"\\)`),
+      `${name} has no DW_AT_type "${type}"`);
+  }
+  assert.match(info, /DW_TAG_base_type[\s\S]*?DW_AT_encoding\s+\(DW_ATE_signed\)[\s\S]*?DW_AT_byte_size\s+\(0x08\)/, 'i64 base type');
+  const verified = ok(['llvm-dwarfdump', '--verify', debugBinary]).stdout;
+  assert.match(verified, /No errors\./, `DWARF does not verify:\n${verified}`);
+
   const infoCommand = ok([compiler, 'debug', 'info', debugBinary]).stdout;
   assert.match(infoCommand, /DW_TAG_subprogram/, 'grail debug info did not print subprograms');
   assert.match(infoCommand, /DW_AT_name\s+\("total"\)/, 'grail debug info did not print the local');

@@ -160,7 +160,7 @@ allocate (the internal prologue saves and restores them), which is what lets C c
 an `extern "C"` definition.
 
 Direct and `cfn` calls pass arguments beyond the registers on the stack (see the calling
-conventions below); an exported callback still takes at most six integer words, and a seventh
+conventions below); an exported callback takes at most six parameters (any of them floats), and a seventh
 is rejected rather than dropped.
 
 ## The unsafe boundary
@@ -227,20 +227,21 @@ use. `tests/ffi/call_abi.grl` executes on x86-64, AArch64 and RISC-V Linux and, 
 
 Not implemented yet, and each rejected rather than approximated:
 
-- floats and narrow integers in callbacks (exported `extern "C" fn`), which keep the
-  six-integer-word slice (calls *through* `cfn` values use the full per-ABI lowering);
+- callbacks with more than six parameters (the Grail function limit); macOS callbacks use the
+  same SysV/AAPCS64 lowering but are compiled and linked only (no macOS runner);
 - nested C records (a nested Grail record value is a pointer, so embedding it by value
-  needs a copy/alias representation that does not exist yet), C records in results, C
-  records containing floats or pointers, and by-value struct passing (SysV eightbyte
-  classification, `sret`, Win64 by-reference copies);
+  needs a copy/alias representation that does not exist yet), records *passed* by value as
+  arguments (an extern record parameter is the C `R *`), and records with float fields as
+  by-value results (their SSE/HFA classification is not implemented; integer-field record
+  results are returned by value on every ABI, see `tests/ffi/call_records.grl`);
 - variadic callbacks, callback results that are themselves function pointers, and
   taking the address of a foreign *declaration* (`f := c_add;` is rejected: a C
   declaration is not a Grail function value);
-- dynamic loading on AArch64 and RISC-V 64 Linux and on macOS (Linux x86-64 uses the TLS bridge
-  below; Windows x86-64 needs none, since `LoadLibraryA`/`GetProcAddress` are ordinary imports
-  and the runtime does not own the TEB), and foreign calls or callbacks on threads other than
-  the main thread on Linux;
-- variadic C functions.
+- dynamic loading on macOS (Linux uses the TLS bridge below on all three architectures;
+  Windows x86-64 needs none, since `LoadLibraryA`/`GetProcAddress` are ordinary imports and the
+  runtime does not own the TEB), and foreign calls or callbacks on threads other than the main
+  thread on Linux;
+- variadic calls on macOS arm64, where every variadic argument goes on the stack.
 
 ## Dynamic loading and the host TLS bridge
 
@@ -259,9 +260,10 @@ A `cfn` result is accepted from an extern declaration, and a `cfn` local or capt
 callable with the C ABI. Linking any `lib` input now produces a dynamically linked
 executable with the host loader.
 
-The Grail runtime installs its worker record as the x86-64 thread pointer
-(`arch_prctl(ARCH_SET_FS)`), which is also where glibc keeps its TCB (errno, malloc
-tcache, stack guard). On Linux x86-64 the compiler therefore bridges the two:
+The Grail runtime installs its worker record as the thread pointer (x86-64 FS base through
+`arch_prctl(ARCH_SET_FS)`, AArch64 `tpidr_el0`, RISC-V `tp`), which is also where glibc keeps
+its TCB (errno, malloc tcache, stack guard). On Linux the compiler therefore bridges the two
+(x86-64 switches with `arch_prctl`; AArch64 and RISC-V write the register directly):
 
 - `_start` records the loader's FS base in `rt_host_tls` before `rt_thread_init` installs
   Grail's record, which is also recorded in `rt_grail_tls`;
@@ -272,10 +274,16 @@ tcache, stack guard). On Linux x86-64 the compiler therefore bridges the two:
 
 Both bases are process-wide, so foreign calls and callbacks are only valid on the main
 thread: threads created by the Grail runtime have no libc TCB, and a callback arriving on a
-foreign thread would share the main thread's worker record. Each switch is an
-`arch_prctl` system call. `tests/ffi/dlopen.grl` loads `libdlshim.so`, calls two resolved
+foreign thread would share the main thread's worker record. On x86-64 each switch is an
+`arch_prctl` system call; on AArch64 and RISC-V it is a register write. `tests/ffi/dlopen.grl` loads `libdlshim.so`, calls two resolved
 functions, passes a Grail callback that itself calls `strlen`, and closes the library
-(42, 42, 42, 0) with the runtime initialized; AArch64 and RISC-V 64 are cross-compiled only.
+(42, 42, 42, 0) with the runtime initialized. On AArch64 and RISC-V 64 it runs under qemu when
+a glibc sysroot is supplied: `GRAIL_SYSROOT_AARCH64` / `GRAIL_SYSROOT_RISCV64` point at a tree
+with the target's `ld-linux-*.so.1`, `libc.so` and `libdl` (a Fedora-style `lib64` tree or a
+Debian multiarch tree, e.g. the extracted `libc6` and `libc6-dev` packages); the cross link
+then uses `--sysroot` and the target loader, and qemu runs with `-L sysroot`. Without one the
+fixture is cross-compiled only. The loader functions are declared from `lib "dl"`: glibc before
+2.34 keeps them in libdl, later versions in libc with libdl a stub.
 
 ## Tests
 
