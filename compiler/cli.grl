@@ -841,13 +841,23 @@ fn add_command<a>(args: (&a u8[][])) -> u64 {
 }
 fn debug_command<a>(args: (&a u8[][])) -> u64 {
     if args.len() < 2 {
-        say(view("usage: grail debug lines BINARY"));
+        say(view("usage: grail debug lines|info BINARY"));
         return 1;
     }
     sub := item(&args, 0);
-    if eq(view(sub), view("lines")) == 0 {
-        say(view("usage: grail debug lines BINARY"));
-        return 1;
+    mut dump_flag = u8[];
+    mut readelf_flag = u8[];
+    if eq(view(sub), view("lines")) {
+        dump_flag = copy(view("--debug-line"));
+        readelf_flag = copy(view("--debug-dump=decodedline"));
+    } else {
+        if eq(view(sub), view("info")) {
+            dump_flag = copy(view("--debug-info"));
+            readelf_flag = copy(view("--debug-dump=info"));
+        } else {
+            say(view("usage: grail debug lines|info BINARY"));
+            return 1;
+        }
     }
     binary := item(&args, 1);
     if host::exists(view(binary)) == 0 {
@@ -857,7 +867,7 @@ fn debug_command<a>(args: (&a u8[][])) -> u64 {
     }
     mut dump = u8[][
         tool(view("GRAIL_DWARFDUMP"), view("llvm-dwarfdump")),
-        copy(view("--debug-line")),
+        dump_flag,
         copy(view(binary))
     ];
     if host::command(dump) == 0 {
@@ -866,7 +876,7 @@ fn debug_command<a>(args: (&a u8[][])) -> u64 {
     say(view("grail: llvm-dwarfdump unavailable; trying readelf"));
     mut decoded = u8[][
         tool(view("GRAIL_READELF"), view("readelf")),
-        copy(view("--debug-dump=decodedline")),
+        readelf_flag,
         copy(view(binary))
     ];
     return host::command(decoded);
@@ -876,7 +886,7 @@ fn help() {
     say(view("usage:"));
     say(view("  grail build [FILE.grl] [-o OUT] [--target x86_64|aarch64|riscv64|macos-x86_64|macos-aarch64]"));
     say(view("  grail check [FILE.grl]            type-check without building"));
-    say(view("  grail debug lines BINARY          print DWARF .debug_line source rows"));
+    say(view("  grail debug lines|info BINARY     print DWARF line rows or .debug_info"));
     say(view("  grail run [FILE.grl] [-- ARGS...]"));
     say(view("  grail test [FILES or DIRS]        compile and run tests/ (exit status 0 = pass)"));
     say(view("  grail fmt [--check] [FILES or DIRS]"));

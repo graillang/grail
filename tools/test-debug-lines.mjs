@@ -53,7 +53,10 @@ if (!compiler) {
 const work = mkdtempSync(join(tmpdir(), 'grail-debug-lines-'));
 try {
   const source = join(work, 'main.grl');
-  writeFileSync(source, 'fn main() {\n    println("first");\n    println("second");\n}\n');
+  writeFileSync(
+    source,
+    'fn add(left: i64, right: i64) -> i64 {\n    return left + right;\n}\nfn main() {\n    mut total = add(2, 3);\n    println(total);\n}\n',
+  );
   const runtime = join(root, 'compiler/runtime.grl');
   const osLinux = join(root, 'compiler/os-linux.grl');
 
@@ -74,16 +77,37 @@ try {
   const mainRows = rows(dump).filter(row => row.file === 1);
   const lines = new Set(mainRows.map(row => row.line));
   assert.ok(lines.has(2), `missing line 2 in ${JSON.stringify(mainRows)}`);
-  assert.ok(lines.has(3), `missing line 3 in ${JSON.stringify(mainRows)}`);
+  assert.ok(lines.has(5), `missing line 5 in ${JSON.stringify(mainRows)}`);
+  assert.ok(lines.has(6), `missing line 6 in ${JSON.stringify(mainRows)}`);
 
   const inspected = ok([compiler, 'debug', 'lines', debugBinary]).stdout;
   assert.match(inspected, /main\.grl/, 'grail debug lines did not print the source file');
   assert.match(inspected, /^0x[0-9a-f]+\s+2\s/m, 'grail debug lines did not print line 2');
-  assert.match(inspected, /^0x[0-9a-f]+\s+3\s/m, 'grail debug lines did not print line 3');
+
+  // .debug_info: compile unit, subprograms with pc ranges, parameters and a local.
+  const info = ok(['llvm-dwarfdump', '--debug-info', debugBinary]).stdout;
+  assert.match(info, /DW_TAG_compile_unit/, 'missing compile unit');
+  assert.match(info, /DW_AT_name\s+\(".*main\.grl"\)/, 'compile unit does not name the source');
+  assert.match(info, /DW_TAG_subprogram/, 'missing subprogram DIE');
+  assert.match(info, /DW_AT_name\s+\("add"\)/, 'missing subprogram add');
+  assert.match(info, /DW_AT_name\s+\("main"\)/, 'missing subprogram main');
+  assert.match(info, /DW_AT_low_pc\s+\(0x[0-9a-f]+\)/, 'subprogram has no low_pc');
+  assert.match(info, /DW_AT_high_pc\s+\(0x[0-9a-f]+\)/, 'subprogram has no high_pc');
+  assert.match(info, /DW_TAG_formal_parameter[\s\S]*DW_AT_name\s+\("left"\)/, 'missing parameter left');
+  assert.match(info, /DW_TAG_formal_parameter[\s\S]*DW_AT_name\s+\("right"\)/, 'missing parameter right');
+  assert.match(info, /DW_TAG_variable[\s\S]*DW_AT_name\s+\("total"\)/, 'missing local total');
+  assert.match(info, /DW_AT_location\s+\(DW_OP_fbreg -?\d+\)/, 'missing stack location');
+  assert.match(info, /DW_AT_frame_base\s+\(DW_OP_reg6 RBP\)/, 'missing frame base');
+
+  const infoCommand = ok([compiler, 'debug', 'info', debugBinary]).stdout;
+  assert.match(infoCommand, /DW_TAG_subprogram/, 'grail debug info did not print subprograms');
+  assert.match(infoCommand, /DW_AT_name\s+\("total"\)/, 'grail debug info did not print the local');
 
   const plainBinary = build(join(work, 'plain.s'), join(work, 'plain'), false);
   const plainDump = ok(['llvm-dwarfdump', '--debug-line', plainBinary]).stdout;
   assert.equal(rows(plainDump).length, 0, 'a normal build unexpectedly contains .debug_line rows');
+  const plainInfo = ok(['llvm-dwarfdump', '--debug-info', plainBinary]).stdout;
+  assert.doesNotMatch(plainInfo, /DW_TAG_subprogram/, 'a normal build unexpectedly contains .debug_info');
 
   const rejected = run([compiler, '--target', 'aarch64', '--debug', join(work, 'reject.s'), source, runtime, osLinux]);
   assert.notEqual(rejected.status, 0, '--debug was accepted for aarch64');
