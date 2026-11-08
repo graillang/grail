@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Windows x86-64 threads and waits: `raw_thread_clone` now calls a new
+  `rt_win_thread_clone`/`rt_win_thread_main` pair in `compiler/os-windows.grl` that creates the
+  thread with `CreateThread` through a compiler-emitted Win64 bridge (`rt_win_thread_start` keeps
+  the private Grail convention by saving `%rdi/%rsi`, moving the thread parameter from `%rcx` and
+  restoring them). A 15-slot registry maps the portable running word to the Win32 thread handle,
+  so joins wait with `WaitForSingleObject` and only then release the stack; the unmap path reaps
+  still-registered threads. Futex operations map to `WaitOnAddress` and
+  `WakeByAddressSingle`/`WakeByAddressAll`, imported from `kernelbase.dll` (Wine exports them
+  there, not from `kernel32.dll`). Two new cases run under Wine and as Linux ELF: a thread join
+  and a producer/consumer wake. ARM64 thread creation remains unimplemented.
+
 - Windows ARM64 frames now carry unwind data: the compiler describes each canonical prologue
   with armasm-style `.seh_proc`/`.seh_save_regp x29, 0`/`.seh_nop`/`.seh_set_fp`/`.seh_stackalloc`/
   `.seh_endprologue`/`.seh_endproc` directives, so the object has `.pdata` and `.xdata` and the

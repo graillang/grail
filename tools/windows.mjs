@@ -16,34 +16,46 @@ export const targets = {
   [windowsAarch64]: { triple: 'aarch64-pc-windows-msvc', machine: 0xaa64, linkMachine: 'arm64' },
 };
 // Every Win32 entry point the compiler can emit an import for (`raw_map` and process exit today).
-export const kernel32 = [
-  'CloseHandle',
-  'CreateDirectoryA',
-  'CreateFileA',
-  'DeleteFileA',
-  'ExitProcess',
-  'ExitThread',
-  'FlushFileBuffers',
-  'GetCommandLineA',
-  'GetCurrentProcessId',
-  'GetEnvironmentStringsA',
-  'GetEnvironmentVariableA',
-  'GetFileAttributesA',
-  'GetLastError',
-  'GetStdHandle',
-  'GetSystemTimeAsFileTime',
-  'GetTickCount64',
-  'MoveFileA',
-  'ReadFile',
-  'RemoveDirectoryA',
-  'SetFilePointerEx',
-  'Sleep',
-  'SwitchToThread',
-  'TerminateProcess',
-  'VirtualAlloc',
-  'VirtualFree',
-  'WriteFile',
-];
+// Win32 entry points the compiler can emit, grouped by the DLL that exports them.
+export const imports = {
+  'kernel32.dll': [
+    'CloseHandle',
+    'CreateDirectoryA',
+    'CreateFileA',
+    'CreateThread',
+    'DeleteFileA',
+    'ExitProcess',
+    'ExitThread',
+    'FlushFileBuffers',
+    'GetCommandLineA',
+    'GetCurrentProcessId',
+    'GetEnvironmentStringsA',
+    'GetEnvironmentVariableA',
+    'GetFileAttributesA',
+    'GetLastError',
+    'GetStdHandle',
+    'GetSystemTimeAsFileTime',
+    'GetTickCount64',
+    'MoveFileA',
+    'ReadFile',
+    'RemoveDirectoryA',
+    'SetFilePointerEx',
+    'Sleep',
+    'SwitchToThread',
+    'TerminateProcess',
+    'VirtualAlloc',
+    'VirtualFree',
+    'WaitForSingleObject',
+    'WriteFile',
+  ],
+  'kernelbase.dll': [
+    'WaitOnAddress',
+    'WakeByAddressSingle',
+    'WakeByAddressAll',
+  ],
+};
+// Flat list used to cross-check the compiler's import table.
+export const kernel32 = Object.values(imports).flat();
 const workDirectory = join(root, '.work/windows');
 
 // A COFF short import object: a 20-byte import header followed by "Symbol\0DLL\0". LLD turns these
@@ -65,10 +77,12 @@ export function shortImport(name, library = dll, machine = 0x8664) {
 export function writeImportLibrary(directory = join(workDirectory, 'lib'), machine = 0x8664) {
   mkdirSync(directory, { recursive: true });
   const objects = [];
-  for (const name of kernel32) {
-    const path = join(directory, `${name}.obj`);
-    writeFileSync(path, shortImport(name, dll, machine));
-    objects.push(path);
+  for (const [library, names] of Object.entries(imports)) {
+    for (const name of names) {
+      const path = join(directory, `${name}.obj`);
+      writeFileSync(path, shortImport(name, library, machine));
+      objects.push(path);
+    }
   }
   const library = join(directory, 'kernel32.lib');
   command(['llvm-ar', 'rcs', library, ...objects]);

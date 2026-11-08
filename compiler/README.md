@@ -102,7 +102,8 @@ MSVC `.def` function records, a `grail_entry` PE entry point, Win64 import calls
 `compiler/os-linux.grl` or `compiler/os-windows.grl`. x86-64 frames get `.pdata`/`.xdata`
 descriptions from `.seh_*` directives and ARM64 frames get full `.xdata` records from the ARM64
 assembler (the packed form cannot encode a lone `x29/x30` save); neither has an exception
-personality. Threads, sockets, directory streams and `mremap` are not implemented. See
+personality. Windows x86-64 has `CreateThread`/join and address waits; ARM64 threads, sockets,
+directory streams and `mremap` are not implemented. See
 [docs/design/windows-backend.md](../docs/design/windows-backend.md).
 macOS and other operating systems are not implemented; sharing a CPU does not imply sharing an
 executable format or syscall ABI.
