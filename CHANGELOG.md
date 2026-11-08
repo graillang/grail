@@ -22,8 +22,9 @@
   `for part in name.split(' ')` and named non-scalar consumption; loop-owned elements and the
   hidden container are cleaned on normal exit, break and return.
 - Maps expose method-first operations: `len`, `contains`, `insert`, `get`, `get_mut`, `remove`
-  and `entry`, with `entry` returning a named `Entry<K,V>` whose key is shared and value is mutable.
-  The free `hashmap::map_*` helpers are internal implementation details.
+  and `entry`. Lookup methods borrow the key; `insert` consumes it and returns the previous value.
+  `entry` returns a named `Entry<a, K, V>` view with a shared key and exclusive value. The free
+  `hashmap::map_*` helpers are internal implementation details.
 - Nominal concurrency types are capitalized: `Atomic<T>`, `Mutex<T>`, `Scope<C>`, `Task<R>`
   and `CancelToken`, with `Atomic::new` / `Mutex::new` constructors.
 - Type syntax is now postfix and concise: `T[]` is a vector (`vec<T>` is gone), `u8[]` is the

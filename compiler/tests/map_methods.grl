@@ -1,11 +1,35 @@
+use hashmap;
 fn main() {
-    mut m = hashmap::with_seed<string, i64>(1, 2);
-    m.insert("a", 5);
-    println(m.contains("a"));
-    println(m.get("a")!);
-    e := m.entry("a")!;
-    println(e.key);
-    println(e.value);
-    m.remove("a");
+    mut m = hashmap::with_seed<u8[], i64>(1, 2);
+    key := "a".copy();
     println(m.len());
+    println(m.contains(borrow(key)));
+    // insert consumes the key it stores.
+    println(m.insert(key, 5).is_none());
+    probe := "a".copy();
+    // The lookup, mutation and removal methods only borrow the key.
+    println(m.contains(borrow(probe)));
+    println(load(m.get(borrow(probe))!));
+    mut value = m.get_mut(borrow(probe))!;
+    exchange(value, load(value) + 1);
+    println(load(m.get(borrow(probe))!));
+    // An entry view shares the key and exclusively owns the value; no operation yields a mutable key.
+    entry := m.entry(borrow(probe))!;
+    println(entry.key);
+    exchange(entry.value, load(entry.value) + 10);
+    println(load(m.get(borrow(probe))!));
+    old := m.remove(borrow(probe));
+    println(old!);
+    println(m.contains(borrow(probe)));
+    println(m.len());
+    // Replacing an existing key yields the previous value.
+    m.insert("b".copy(), 7);
+    println(m.insert("b".copy(), 8)!);
+    println(load(m.get(borrow("b".copy()))!));
+    // Every lookup reports a missing key instead of fabricating one.
+    absent := "missing".copy();
+    println(m.get(borrow(absent)).is_none());
+    println(m.get_mut(borrow(absent)).is_none());
+    println(m.remove(borrow(absent)).is_none());
+    println(m.entry(borrow(absent)).is_none());
 }
