@@ -449,7 +449,7 @@ typedef struct gr_pipeline_desc {
     gr_format depth_format;          /* GR_FORMAT_UNDEFINED: no depth attachment */
     int32_t depth_test;
     int32_t depth_write;
-    gr_compare_op depth_compare;     /* GR_COMPARE_GREATER_EQUAL by default */
+    gr_compare_op depth_compare;     /* 0 (NEVER) means the default, GREATER_EQUAL */
     int32_t depth_clamp;
     int32_t depth_bias;
     float depth_bias_constant, depth_bias_slope;

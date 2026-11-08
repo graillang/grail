@@ -1896,7 +1896,17 @@ gr_result gr_vk_abi_pipeline_create(gr_handle device_handle, const gr_pipeline_d
     depth.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
     depth.depthTestEnable = (desc->depth_test && depth_format != VK_FORMAT_UNDEFINED) ? VK_TRUE : VK_FALSE;
     depth.depthWriteEnable = (desc->depth_write && depth_format != VK_FORMAT_UNDEFINED) ? VK_TRUE : VK_FALSE;
-    depth.depthCompareOp = VK_COMPARE_OP_GREATER_OR_EQUAL; /* reverse-Z, the contract's default */
+    {
+        /* GR_COMPARE_NEVER is the zero of a cleared descriptor, which the contract reads as its
+         * default GREATER_EQUAL (reverse-Z). Other values were ignored before; D3D12 honours them. */
+        static const VkCompareOp compare[] = {
+            VK_COMPARE_OP_GREATER_OR_EQUAL, VK_COMPARE_OP_LESS, VK_COMPARE_OP_EQUAL,
+            VK_COMPARE_OP_LESS_OR_EQUAL, VK_COMPARE_OP_GREATER, VK_COMPARE_OP_NOT_EQUAL,
+            VK_COMPARE_OP_GREATER_OR_EQUAL, VK_COMPARE_OP_ALWAYS
+        };
+        depth.depthCompareOp = desc->depth_compare <= GR_COMPARE_ALWAYS ? compare[desc->depth_compare]
+                                                                        : VK_COMPARE_OP_GREATER_OR_EQUAL;
+    }
     depth.depthBoundsTestEnable = VK_FALSE;
     depth.stencilTestEnable = VK_FALSE;
 

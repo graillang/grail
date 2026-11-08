@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Vulkan pipelines now honour `gr_pipeline_desc.depth_compare`; it was ignored and every
+  pipeline used GREATER_EQUAL. Zero still means the reverse-Z default, as on D3D12.
+
 - D3D12 buffers, vertex input and depth: upload, readback and device buffers (host access to
   device memory is refused, as on Vulkan), vertex and index buffer binding, input layouts built
   from the vertex shader's reflected semantics and checked against the pipeline's attributes,
