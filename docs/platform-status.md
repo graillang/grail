@@ -53,7 +53,7 @@ with 95/95 symbols and pinned layouts. A C harness executes 47 Windows metadata,
 non-blocking and DNS checks under Wine; macOS calls remain compile-only.
 
 `lib/sys/grail_ffi.grl` is the first Grail-language wrapper over this ABI: explicit `File` handles,
-`FileStat`, byte views, `CStr`, `T|?Error`, and stat/time/env calls, executed on x86-64 and
+`FileStat`, byte views, `CStr`, `T|?Error`, and stat/time/env plus loopback TCP socket calls, executed on x86-64 and
 assembly-checked on AArch64/RISC-V by `bun tools/test-ffi-runtime.mjs`. It is explicit-import,
 not auto-loaded.
 
