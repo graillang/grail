@@ -50,6 +50,12 @@ const fixtures = [
     symbols: ['c_viewport_area', 'c_viewport_fill'],
   },
   {
+    // Float-field records returned by value on every classification path.
+    name: 'float_record_results',
+    stdout: '1.5\n-2.25\n3\n0.75\n-9\n3.125\n1234567890123\n46\n',
+    symbols: ['c_vec2', 'c_vec3d', 'c_fi', 'c_di', 'c_quad'],
+  },
+  {
     // A COM-shaped vtable call with seven arguments and two floats through a typed cfn slot.
     name: 'call_com_slot',
     stdout: '1007\n1045\n',

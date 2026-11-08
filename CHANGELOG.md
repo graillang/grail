@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- C records with float fields returned by value: SysV classifies each eightbyte (all-float ->
+  `xmm0`/`xmm1`, otherwise `rax`/`rdx`), AAPCS64 returns homogeneous float aggregates of 1-4
+  fields in `s0`-`s3`/`d0`-`d3` at any size, RV64 returns one or two flattened fields with a float
+  in `fa0`/`fa1` (and an integer in `a0`); everything else keeps the integer-register or hidden
+  pointer rules (Win64 by size). `tests/ffi/float_record_results.grl` covers five shapes on three
+  Linux targets and Windows x64.
 - Fixed: the `i64` -> `u64` widening check emitted `jns`, which the AArch64 and RISC-V lowering
   does not implement (it emulates the zero and carry flags only), so programs relying on default
   `i64` semantics failed to compile for those targets. The sign is now tested with a shift and a
