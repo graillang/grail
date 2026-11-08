@@ -68,6 +68,11 @@ update-after-bind and partially-bound, buffer device address, dynamic rendering,
 `synchronization2`, timeline semaphores, scalar layout, 16- and 64-bit integer types. The
 surface comes from SDL3 through `gr_vk_create_surface`.
 
+This requirement is now **verified on this host** rather than assumed: `make -C graphics
+vk-probe` reports an AMD Radeon RX 7900 GRE (RADV NAVI31, Mesa 26.2.6) at Vulkan 1.4.354 with
+every required feature present and 256-byte push constants. See
+[`vulkan-probe.md`](vulkan-probe.md). What is missing is the backend code, not the hardware.
+
 ## 6. The reflection extractor does not exist
 
 The blob format, its reader and its validation are written and tested

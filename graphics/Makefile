@@ -6,6 +6,7 @@
 #   make shaders       compile graphics/shaders to SPIR-V + DXIL + reflection (needs dxc)
 #   make shader-check  compile, then verify every blob (base and per-permutation) in C
 #   make perm-test     prove each permutation really compiles to its own bytecode (needs bun)
+#   make vk-probe      ask the driver what it is, under the exclusive GPU lock (talks to a GPU)
 #   make clean
 #
 # DXC is looked up by the tool: $DXC, then Abundance's pinned tools cache, then PATH.
@@ -16,17 +17,18 @@ INCLUDES = -Iinclude
 BUILD   := ../.work/graphics
 
 SRC := src/grail_core.c src/grail_reflect.c src/grail_wire.c src/grail_shader_library.c \
-       src/grail_null.c src/grail_null_window.c
+       src/grail_vk_probe.c src/grail_null.c src/grail_null_window.c
 OBJ := $(patsubst src/%.c,$(BUILD)/%.o,$(SRC))
 # Every header is a dependency of every object. Without this an ABI change to a header leaves
 # stale objects linked against the new declarations — which is exactly how a version bump goes
 # unnoticed until something reads the wrong field.
 HEADERS := $(wildcard include/grail/*.h) src/grail_internal.h
 TESTS := abi device wire library
+GPU_TESTS := vk_probe
 TEST_BINS := $(patsubst %,$(BUILD)/test_%,$(TESTS))
 BLOBS := $(shell find ../.work/shaders -name '*.refl.bin' 2>/dev/null)
 
-.PHONY: all test shaders shader-check perm-test tool clean
+.PHONY: all test shaders shader-check perm-test vk-probe tool clean
 
 all: test
 
@@ -79,6 +81,20 @@ shader-check: shaders tool
 # that proves it rather than asserting it in prose.
 perm-test: shaders
 	bun test tests/shader_permutations.test.mjs
+
+# The Vulkan probe. It creates an instance and queries only — no device, no memory, no work — but
+# it still talks to a driver, so it takes this host's exclusive GPU lock and refuses while the
+# game is running, exactly as every other program that touches the GPU here does.
+GPU_LOCK = /run/user/$(shell id -u)/ab-engine-gpu.lock
+$(BUILD)/grail-vk-probe: src/grail_vk_probe_main.c $(OBJ) $(HEADERS) | $(BUILD)
+	$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(OBJ) -ldl
+
+vk-probe: $(BUILD)/grail-vk-probe $(BUILD)/test_vk_probe
+	@if pgrep -x Abundance >/dev/null; then \
+		echo "refusing: the game is running"; exit 1; fi
+	flock -w 600 $(GPU_LOCK) $(BUILD)/grail-vk-probe; rc=$$?; \
+	flock -w 600 $(GPU_LOCK) $(BUILD)/test_vk_probe || exit $$?; \
+	exit $$rc
 
 clean:
 	rm -rf $(BUILD)

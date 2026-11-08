@@ -23,13 +23,14 @@ src/
   grail_core.c            version, status names, format table, permutation keys, object table
   grail_reflect.c         the reflection blob reader and validator
   grail_shader_library.c  permutation key -> bytecode: index, lazy load, cache
+  grail_vk_probe.c        Vulkan device/feature/limit probe, dlopen-based, no link-time Vulkan
   grail_wire.c            framing
   grail_null.c            the null backend: every entry point, validated, no GPU
   grail_null_window.c     the window/input half of the null backend
 shaders/
   include/                HLSL mirrors of the C contract (bindless, frame constants, GPU structs)
   core/                   fullscreen.vs, tonemap.ps, frame_setup.cs
-tests/                    abi, device, wire, library (+ shader permutation tests)
+tests/                    abi, device, wire, library, vk_probe (+ shader permutation tests)
 tools/                    the offline shader flow (see docs/shader-flow.md)
 docs/                     the contract, the shader flow, dependencies, blockers
 ```
@@ -44,6 +45,7 @@ docs/                     the contract, the shader flow, dependencies, blockers
 | Wire framing | implemented and tested |
 | Shaders (3 stages) | compile and pass `spirv-val` |
 | Offline shader tool | written; compiles 3 stages, reflection and permutation ids verified by an independent C reader |
+| Vulkan device probe | implemented; this host satisfies every required feature (docs/vulkan-probe.md) |
 | Vulkan / D3D12 / Metal backends | **not implemented** (`GR_ERROR_UNSUPPORTED`) |
 | Permutations | each combination compiled to its own SPIR-V/DXIL/blob; digests and keys tested |
 | Key → bytecode resolution | implemented: library index, lazy cache, miss/mismatch/exhaustion statuses |
@@ -56,6 +58,7 @@ make -C graphics test          # needs only a C compiler: 319 checks
 make -C graphics shaders       # needs DXC 1.9.2609 (see docs/dependencies.md)
 make -C graphics shader-check  # compile, then verify every reflection blob in C
 make -C graphics perm-test     # prove each permutation compiles to its own bytecode (bun)
+make -C graphics vk-probe      # ask the driver what it is, under the exclusive GPU lock
 ```
 
 ## Documents
@@ -63,4 +66,5 @@ make -C graphics perm-test     # prove each permutation compiles to its own byte
 - [`docs/rhi-contract.md`](docs/rhi-contract.md) — the contract and why each decision is fixed.
 - [`docs/shader-flow.md`](docs/shader-flow.md) — HLSL → DXC → DXIL/SPIR-V → MSL, bindings, permutations.
 - [`docs/dependencies.md`](docs/dependencies.md) — exact versions and where they come from.
+- [`docs/vulkan-probe.md`](docs/vulkan-probe.md) — what the driver reports, and what each required feature gates.
 - [`docs/first-renderer-port.md`](docs/first-renderer-port.md) — the seven blockers, with evidence.

@@ -6,6 +6,12 @@
 #include "../include/grail/grail_shader.h"
 #include "../include/grail/grail_window.h"
 #include "../include/grail/grail_wire.h"
+/* Included for the compiler, not for the tests: a header no translation unit includes is a
+ * header whose declarations are never checked. Two were in that state until a collision between
+ * a typedef and a function name in grail_backend_vulkan.h surfaced during the Vulkan probe. */
+#include "../include/grail/grail_backend_vulkan.h"
+#include "../include/grail/grail_backend_d3d12.h"
+#include "../include/grail/grail_backend_metal.h"
 
 #include <stdio.h>
 #include <string.h>
