@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Add `docs/platform-status.md`, an explicit matrix of executed, cross-built and scaffolded targets, so Windows PE output and macOS ABI headers are not mistaken for runtime support.
 - New design document `docs/design/abundance-port.md`: inventory of the Abundance portable core, own engine, Unreal host and shaders, their CPU/RHI boundary, the FFI/ABI requirements a Grail host would have to meet, and a staged port plan. Documentation only; no compiler or library behaviour changed.
 - Graphics foundation (`graphics/`): a versioned C ABI for the render hardware interface and
   the shader pipeline, aligned with the Vulkan engine in Abundance. `grail_abi.h` defines
