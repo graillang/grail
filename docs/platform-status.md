@@ -1,6 +1,6 @@
 # Cross-platform status
 
-Last verified: 2026-11-08 on `main` at `32fb2d5`.
+Last verified: 2026-11-08 on `main` at `HEAD`.
 
 This page distinguishes what has actually been built and executed from scaffolding and
 static inspection. A cross-built object is not platform support. A header parsing is not a
@@ -17,13 +17,13 @@ backend. A project that has a port plan is not a port.
 | Windows AArch64 | ARM64 PE/COFF, Win64 ARM64 imports, import libs | `bun tools/windows.mjs check` 16/16; 4 ARM64 images statically verified; no ARM64 runner | Cross-build only |
 | macOS x86-64 / AArch64 | Mach-O objects/exes, libSystem layer, platform-module runtime | `bun tools/test-macos.mjs` 4 objects + 4 images; **not executable here** | Cross-build only |
 
-Windows x86-64 now has `.pdata`/`.xdata`, a Win32 console/files/argv/time layer, and 8 executed
-programs under Wine; ARM64 has PE/COFF objects and images but no packed-unwind metadata yet.
+Windows x86-64 has `.pdata`/`.xdata`, a Win32 console/files/argv/time layer, and 8 executed programs
+under Wine. ARM64 has PE/COFF images and `.pdata`/`.xdata` frame records, statically verified.
 Worker threads and COM remain unimplemented. Grail-internal calls still use
 the private register convention; Win64 is used at import boundaries. This is Wine verification,
-not Windows hardware verification. macOS has a libSystem layer for files, console, clock,
-processes, directory records, threads, sync and dynamic libraries, but no sockets or framework
-or SDK-backed link, and no execution. Grail-internal calls still use the private register
+not Windows hardware verification. macOS has a libSystem layer and a platform-module runtime, and now links frameworks and ad-hoc
+signatures with static LC_LOAD_DYLIB/CodeDirectory verification. There is still no Apple-hardware
+execution, and signing proves integrity, not trust or notarization. Grail-internal calls still use the private register
 convention; the C ABI is used at imports. The macOS images must not be run on Linux.
 
 Linux AArch64 and RISC-V64 are cross-build verified, not runtime verified. Linux x86-64 is the
