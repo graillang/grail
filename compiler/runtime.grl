@@ -425,6 +425,26 @@ fn rt_popb(s: u64) -> u64 {
     raw_store(s + 8, n - 1);
     return v;
 }
+// Compiler-owned map construction requests fresh Linux entropy, never clock-derived seeds.
+fn rt_random_seed() -> u64 {
+    ptr := rt_alloc(8);
+    mut used = 0;
+    while used < 8 {
+        mut number = 318;
+        if raw_target() != 0 { number = 278; }
+        n := raw_syscall(number, ptr + used, 8 - used, 0);
+        if n == 18446744073709551612 {
+            // EINTR: retry without weakening the entropy source.
+        } else {
+            if (n == 0) + (8 - used < n) { rt_abort(); }
+            used += n;
+        }
+    }
+    seed := raw_load(ptr);
+    rt_free(ptr);
+    return seed;
+}
+
 // Unchecked accessors, used only where the compiler proved the index is in bounds.
 fn rt_slotu(s: u64, i: u64) -> u64 {
     return raw_load(s) + i * 8;

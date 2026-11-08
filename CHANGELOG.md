@@ -29,6 +29,11 @@
   and `entry`. Lookup methods borrow the key; `insert` consumes it and returns the previous value.
   `entry` returns a named `Entry<a, K, V>` view with a shared key and exclusive value. The free
   `hashmap::map_*` helpers are internal implementation details.
+- Map expressions are concise: `[K: V]()`, `[K: V]::with_seed(s0, s1)`, `[k: v]`, and
+  context-only `[:]`. `map[key]` is a required place that aborts on a missing key; assignment
+  upserts; compound assignment updates an existing key; `get`/`entry` remain optional. Indexed
+  assignment currently accepts named or field receivers, not call-result receivers.
+- User modules reject `usize`, `core::some` and `core::none`; use `u64`, `Some(value)` and `None`.
 - Nominal concurrency types are capitalized: `Atomic<T>`, `Mutex<T>`, `Scope<C>`, `Task<R>`
   and `CancelToken`, with `Atomic::new` / `Mutex::new` constructors.
 - Type syntax is now postfix and concise: `T[]` is a vector (`vec<T>` is gone), `u8[]` is the
