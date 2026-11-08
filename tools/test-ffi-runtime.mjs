@@ -78,14 +78,42 @@ writeFileSync(runtime, runtimeSource.slice(0, threadStart) + patchedThread +
   runtimeSource.slice(threadEnd + 2));
 const osRuntime = join(root, 'compiler/os-linux.grl');
 
-const entry = 'tests/ffi-runtime/native.grl';
 const wrapper = 'lib/sys/grail_ffi.grl';
 const linkNote = '// grail-link: grail_ffi_linux.o';
+const cases = [
+  {
+    name: 'native',
+    entry: 'tests/ffi-runtime/native.grl',
+    output: 'ffi-runtime: ok',
+    host_symbols: ['grail_ffi_init', 'grail_ffi_file_open', 'grail_ffi_file_handle',
+      'grail_os_file_read', 'grail_os_file_write', 'grail_os_file_stat', 'grail_os_time_now',
+      'grail_os_env_get', 'grail_os_env_set', 'grail_os_file_close'],
+    cross_symbols: ['grail_ffi_init', 'grail_os_file_read', 'grail_os_file_stat',
+      'grail_os_time_now', 'grail_os_env_get'],
+    check_file: true,
+  },
+  {
+    name: 'socket',
+    entry: 'tests/ffi-runtime/socket.grl',
+    output: 'ffi-socket: ok',
+    host_symbols: ['grail_ffi_socket_create', 'grail_ffi_socket_handle',
+      'grail_ffi_socket_accept', 'grail_os_socket_bind', 'grail_os_socket_listen',
+      'grail_os_socket_connect', 'grail_os_socket_send', 'grail_os_socket_recv',
+      'grail_os_socket_shutdown', 'grail_os_socket_close', 'grail_os_socket_local_address',
+      'grail_os_socket_peer_address'],
+    cross_symbols: ['grail_ffi_socket_create', 'grail_ffi_socket_handle',
+      'grail_ffi_socket_accept', 'grail_os_socket_bind', 'grail_os_socket_listen',
+      'grail_os_socket_connect', 'grail_os_socket_send', 'grail_os_socket_recv',
+      'grail_os_socket_shutdown', 'grail_os_socket_close', 'grail_os_socket_local_address',
+      'grail_os_socket_peer_address'],
+    check_file: false,
+  },
+];
 
-function compileAssembly(target, name) {
+function compileAssembly(testCase, target, name) {
   const assembly = join(work, `${name}.s`);
   run(compiler, ['--default-u64', '--typed-refs', '--target', target, '--overflow=checked',
-    assembly, entry, wrapper, runtime, osRuntime]);
+    assembly, testCase.entry, wrapper, runtime, osRuntime]);
   const text = readFileSync(assembly, 'utf8');
   const notes = text.split('\n').filter(line => line.startsWith('// grail-link: '));
   if (notes.length !== 1 || notes[0] !== linkNote) {
@@ -94,38 +122,41 @@ function compileAssembly(target, name) {
   return { assembly, text };
 }
 
-const host = compileAssembly('x86_64', 'native-x86_64');
-for (const symbol of ['grail_ffi_init', 'grail_ffi_file_open', 'grail_ffi_file_handle',
-  'grail_os_file_read', 'grail_os_file_write', 'grail_os_file_stat', 'grail_os_time_now',
-  'grail_os_env_get', 'grail_os_env_set', 'grail_os_file_close']) {
-  if (!new RegExp(`(^|\\n)call ${symbol}\\n`).test(host.text)) {
-    throw new Error(`native-x86_64: missing unmangled call to ${symbol}`);
+for (const testCase of cases) {
+  const host = compileAssembly(testCase, 'x86_64', `${testCase.name}-x86_64`);
+  for (const symbol of testCase.host_symbols) {
+    if (!new RegExp(`(^|\\n)call ${symbol}\\n`).test(host.text)) {
+      throw new Error(`${testCase.name}-x86_64: missing unmangled call to ${symbol}`);
+    }
   }
-}
-run(clang, ['-c', host.assembly, '-o', join(work, 'native-x86_64.o')]);
-const executable = join(work, 'native-x86_64');
-run(clang, ['-nostartfiles', '-no-pie', join(work, 'native-x86_64.o'), backend,
-  '-o', executable, '-lc', '-lpthread', '-ldl', '-Wl,-e,_start']);
-const executed = spawnSync(executable, [], { cwd: scratch, encoding: 'utf8' });
-if (executed.status !== 0) {
-  throw new Error(`native-x86_64: exit ${executed.status}\n${executed.stdout}${executed.stderr}`);
-}
-if (executed.stdout.trim() !== 'ffi-runtime: ok') {
-  throw new Error(`native-x86_64: unexpected output ${JSON.stringify(executed.stdout)}`);
-}
-const note = readFileSync(join(scratch, 'ffi_note.txt'), 'utf8');
-if (note !== 'hello ffi') {
-  throw new Error(`native-x86_64: file content ${JSON.stringify(note)}`);
-}
-rmSync(join(scratch, 'ffi_note.txt'));
+  const hostObject = join(work, `${testCase.name}-x86_64.o`);
+  run(clang, ['-c', host.assembly, '-o', hostObject]);
+  const executable = join(work, `${testCase.name}-x86_64`);
+  run(clang, ['-nostartfiles', '-no-pie', hostObject, backend,
+    '-o', executable, '-lc', '-lpthread', '-ldl', '-Wl,-e,_start']);
+  const executed = spawnSync(executable, [], { cwd: scratch, encoding: 'utf8' });
+  if (executed.status !== 0) {
+    throw new Error(`${testCase.name}-x86_64: exit ${executed.status}\n${executed.stdout}${executed.stderr}`);
+  }
+  if (executed.stdout.trim() !== testCase.output) {
+    throw new Error(`${testCase.name}-x86_64: unexpected output ${JSON.stringify(executed.stdout)}`);
+  }
+  if (testCase.check_file) {
+    const notePath = join(scratch, 'ffi_note.txt');
+    const note = readFileSync(notePath, 'utf8');
+    if (note !== 'hello ffi') {
+      throw new Error(`${testCase.name}-x86_64: file content ${JSON.stringify(note)}`);
+    }
+    rmSync(notePath);
+  }
 
-for (const target of ['aarch64', 'riscv64']) {
-  const cross = compileAssembly(target, `native-${target}`);
-  const branch = target === 'aarch64' ? 'bl' : 'call';
-  for (const symbol of ['grail_ffi_init', 'grail_os_file_read', 'grail_os_file_stat',
-    'grail_os_time_now', 'grail_os_env_get']) {
-    if (!new RegExp(`(^|\\n)${branch} ${symbol}\\n`).test(cross.text)) {
-      throw new Error(`native-${target}: missing ${branch} ${symbol}`);
+  for (const target of ['aarch64', 'riscv64']) {
+    const cross = compileAssembly(testCase, target, `${testCase.name}-${target}`);
+    const branch = target === 'aarch64' ? 'bl' : 'call';
+    for (const symbol of testCase.cross_symbols) {
+      if (!new RegExp(`(^|\\n)${branch} ${symbol}\\n`).test(cross.text)) {
+        throw new Error(`${testCase.name}-${target}: missing ${branch} ${symbol}`);
+      }
     }
   }
 }
@@ -133,4 +164,4 @@ for (const target of ['aarch64', 'riscv64']) {
 if (!existsSync(join(root, 'lib/sys/grail_ffi_linux.o'))) {
   throw new Error('ffi-runtime: backend object was not produced');
 }
-console.log('ffi-runtime: x86_64 built, linked and executed; aarch64/riscv64 assembly checked');
+console.log('ffi-runtime: file and socket tests built, linked and executed on x86_64; aarch64/riscv64 assembly checked');

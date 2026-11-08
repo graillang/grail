@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+- Added typed loopback TCP socket wrappers over the C ABI: `handle Socket`, a 56-byte `Address`
+  record constructed only by `loopback(port)`, `tcp`, `bind`, `listen`, `accept`, `connect`,
+  `send`, `recv`, `recv_bytes`, `socket_shutdown`, `socket_close`, `local_address`,
+  `peer_address`, `local_port` and `peer_port`. `bind`/`connect` reject non-127.0.0.1
+  addresses before the C call. The x86-64 test runs a listener/client/server ping-pong on an
+  ephemeral loopback port and checks the non-loopback rejection; AArch64/RISC-V 64 assembly
+  and unmangled socket calls are checked without execution.
+
+- Added `lib/sys/grail_ffi.grl`, the first Grail-facing wrappers over the Linux OS ABI:
+  explicit init/shutdown, file open/read/write/close/stat/size, monotonic and wall clocks,
+  and environment get/set. The module uses FFI byte views, an opaque `File` handle and
+  Grail-owned out-records, returns `T |? Error` with negative ABI statuses, and keeps file
+  handles affine by convention (explicit single close, no auto-free). Added a hosted C
+  adapter for the allocator and handle-return out-parameter, a repeatable
+  `tools/test-ffi-runtime.mjs` runner, and `docs/design/grail-ffi-runtime.md` with the exact
+  pointer/length/ownership rules. The x86-64 test links the Linux reference backend with
+  libc and executes file/time/environment checks; AArch64 and RISC-V 64 are assembly/static
+  checked only. It uses the merged v3 FFI compiler and `runtime.grl`/`os-linux.grl`, is not
+  auto-loaded by the current stdlib, and changes no compiler sources (the runner generates a
+  test-only runtime copy to preserve libc TLS).
+
 - Abundance CPU port, RHI bridge framing: `abundance/src/rhi_bridge.grl` packs and unpacks the
   graphics foundation's `gr_wire_packet` exactly as `graphics/src/grail_wire.c` does — 40-byte
   header, magic/version/op/request/status/sequence/aux, payload, with the 1 MiB packet bound — so a
