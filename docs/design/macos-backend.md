@@ -104,13 +104,43 @@ symbol. It decodes the runtime's stable operation numbers into libSystem calls a
 ld64.lld -arch x86_64|arm64 -platform_version macos 11.0 11.0 -L <dir> -lSystem -e _main obj -o out
 ```
 
-Without an SDK there is no `libSystem.tbd`, so the test driver exports a stub `tbd` from the
-object's own undefined symbols (plus `dyld_stub_binder`). That produces a structurally complete
-executable — `LC_BUILD_VERSION`, `LC_MAIN`, `LC_LOAD_DYLIB /usr/lib/libSystem.B.dylib`,
-`NOUNDEFS` — but it is a link-time artifact only and cannot run on Linux. With a real SDK,
-`grail build --target macos-*` links against `$GRAIL_SDK/usr/lib/libSystem.tbd` with
-`-syslibroot`; without one it stops after writing the object and says so. Framework linking is
-not wired up yet; it needs `-framework NAME` plumbing and an SDK.
+Without an SDK there is no `libSystem.tbd`, so the driver exports a stub `tbd` from the object's
+own undefined symbols (plus `dyld_stub_binder`). That produces a structurally complete executable —
+`LC_BUILD_VERSION`, `LC_MAIN`, `LC_LOAD_DYLIB /usr/lib/libSystem.B.dylib`, `NOUNDEFS` — but it is a
+link-time artifact only and cannot run on Linux. With a real SDK the driver passes
+`-syslibroot $GRAIL_SDK` and links the SDK's own `libSystem.tbd`; `grail build --target macos-*`
+uses the same SDK path and otherwise stops after writing the object and says so.
+
+### Frameworks
+
+`compileProgram(..., { frameworks })` accepts framework requests as `{ name, symbols }`:
+
+- with `$GRAIL_SDK` set, the SDK's real `-F <sdk>/System/Library/Frameworks` and
+  `-framework <name>` are used;
+- without an SDK, the driver writes `<name>.framework/<name>.tbd` under the build directory with
+  Apple's install location (`/System/Library/Frameworks/<name>.framework/Versions/C/<name>`) and
+  the caller's export list. A framework named without an export list and without an SDK is
+  rejected, because the driver has no way to know what it exports: silently inventing a stub would
+  hide a misspelled or unavailable framework.
+
+`tools/macos.mjs` then parses the linked image and reports its dependencies, so a framework link is
+only accepted when the expected `LC_LOAD_DYLIB` entry is really present. The tests cover a real
+framework load (Foundation), the driver's refusal of an unlisted framework, and `ld64.lld`'s own
+`framework not found` error when the stub path is bypassed.
+
+### Ad-hoc signatures
+
+`compileProgram(..., { sign: true })` asks for an ad-hoc signature. On a macOS host with `codesign`
+available the driver runs `codesign --force --sign - <binary>`; elsewhere `ld64.lld` writes the
+signature itself via `-adhoc_codesign` (already the default for arm64, opt-in for x86_64).
+
+The signature is validated statically by `tools/macos.mjs`: it walks the load commands to
+`LC_CODE_SIGNATURE`, parses the embedded SuperBlob and its CodeDirectory, checks the SHA-256 hash
+type, the `CS_ADHOC` flag and the code limit, recomputes every page hash, and derives the cdhash
+from the CodeDirectory. `bun tools/macos.mjs inspect|verify BINARY` prints or gates on that verdict;
+`verify` exits non-zero when a page hash no longer matches, which the tests exercise by flipping a
+byte in a signed image. A valid ad-hoc signature here means the CodeDirectory covers the image —
+not that the binary is trusted, notarized, or runnable on this host.
 
 ## What still needs macOS hardware or an SDK
 

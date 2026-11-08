@@ -4,7 +4,9 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import assert from 'node:assert/strict';
-import { root, buildCompiler, compileProgram, machoTargets } from './native.mjs';
+import { copyFileSync, rmSync } from 'node:fs';
+import { root, buildCompiler, compileProgram, machoTargets, frameworkInstallName } from './native.mjs';
+import { dylibs, verifyCodeSignature, LC_CODE_SIGNATURE, loadCommands } from './macos.mjs';
 
 const compiler = buildCompiler();
 const work = join(root, '.work/macos-tests');
@@ -135,4 +137,82 @@ rejection(['--default-u64', '--typed-refs', '--target', 'x86_64', join(work, 're
 rejection(['--default-u64', '--typed-refs', '--target', 'macos-riscv64', join(work, 'reject2.s'), join(elfDirectory, 'hello.grl'), join(root, 'compiler/runtime.grl')],
   /unsupported target/, 'macos-riscv64 was accepted');
 
-console.log(`macos: ${objects} Mach-O objects and ${executables} executables verified on ${machoTargets.join(', ')}`);
+// Platform linkage beyond libSystem: a framework stub must reach the linked image as a real
+// LC_LOAD_DYLIB entry, and an unknown framework must fail the link instead of being ignored.
+let frameworkLinks = 0;
+for (const target of machoTargets) {
+  const directory = join(work, target, 'frameworks');
+  // Start clean: a stub left by an earlier run would make an "unknown" framework resolvable.
+  rmSync(directory, { recursive: true, force: true });
+  mkdirSync(directory, { recursive: true });
+  const source = join(directory, 'hello.grl');
+  writeFileSync(source, programs[0].source);
+  const executable = compileProgram(compiler, [source], directory, {
+    target,
+    name: 'hello_framework',
+    frameworks: [{ name: 'Foundation', symbols: ['_NSLog', '_grail_framework_probe'] }],
+  });
+  const dependency = frameworkInstallName('Foundation');
+  const loaded = dylibs(executable);
+  check(loaded.includes(dependency), `${target}: factory stub did not become an LC_LOAD_DYLIB (${loaded.join(', ')})`);
+  check(loaded.some(name => name === '/usr/lib/libSystem.B.dylib'), `${target}: libSystem dependency lost`);
+  has(readFileSync(join(directory, 'Foundation.framework', 'Foundation.tbd'), 'utf8'),
+    new RegExp(`install-name: '${dependency.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}'`),
+    `${target}: framework stub has the wrong install name`);
+  frameworkLinks += 1;
+
+  // A framework name without an SDK and without an export list is unverifiable: the driver must
+  // refuse it rather than invent a stub that satisfies the linker.
+  let failed = null;
+  try {
+    compileProgram(compiler, [source], directory, { target, name: 'unknown_framework', frameworks: ['NoSuchFramework'] });
+  } catch (error) {
+    failed = error;
+  }
+  check(failed !== null, `${target}: unknown framework was accepted without an SDK or export list`);
+  has(String(failed && failed.message), /framework NoSuchFramework needs a macOS SDK \(GRAIL_SDK\) or an explicit export list/,
+    `${target}: unknown framework produced the wrong error`);
+
+  // And the linker itself must reject a framework it cannot find, so the stub path is not a way to
+  // silence arbitrary -framework names.
+  const linkError = spawnSync(process.env.GRAIL_LINKER ?? 'ld64.lld', [
+    '-arch', target === 'macos-x86_64' ? 'x86_64' : 'arm64',
+    '-platform_version', 'macos', '11.0', '11.0',
+    '-L', directory, '-lSystem',
+    '-F', directory, '-framework', 'NoSuchFramework',
+    '-e', '_main', `${executable}.o`, '-o', join(directory, 'unknown_framework.out'),
+  ], { cwd: root, encoding: 'utf8' });
+  check(linkError.status !== 0, `${target}: ld64.lld linked an unknown framework`);
+  has(`${linkError.stdout ?? ''}${linkError.stderr ?? ''}`, /framework not found for -framework NoSuchFramework/,
+    `${target}: ld64.lld did not report the missing framework`);
+
+  // Ad-hoc signature: lld writes it on x86-64 only when asked, and the CodeDirectory must hash
+  // every page of the image.
+  const signed = compileProgram(compiler, [source], directory, { target, name: 'signed', sign: true });
+  const signature = verifyCodeSignature(signed);
+  check(signature.present, `${target}: no LC_CODE_SIGNATURE after requesting an ad-hoc signature`);
+  check(signature.valid, `${target}: ad-hoc signature invalid: ${signature.problems.join('; ')}`);
+  check(signature.adhoc, `${target}: CS_ADHOC flag missing`);
+  check(signature.pages > 0 && signature.pageSize > 0, `${target}: signature covers no pages`);
+  has(signature.cdhash, /^[0-9a-f]{64}$/, `${target}: cdhash is not a SHA-256 digest`);
+  check(loadCommands(signed).commands.some(c => c.cmd === LC_CODE_SIGNATURE), `${target}: load command list lost LC_CODE_SIGNATURE`);
+
+  // Control: without the request (and without the arm64 default) there is no signature at all, so
+  // a present-but-empty verdict can never be mistaken for a valid one.
+  const unsigned = compileProgram(compiler, [source], directory, { target, name: 'unsigned' });
+  const expectedPresent = target === 'macos-aarch64';
+  check(verifyCodeSignature(unsigned).present === expectedPresent,
+    `${target}: signature presence ${verifyCodeSignature(unsigned).present} does not match the link defaults`);
+
+  // Tampering must be detected: flip a byte inside the signed region and re-validate.
+  const tampered = join(directory, 'signed_tampered');
+  copyFileSync(signed, tampered);
+  const bytes = readFileSync(tampered);
+  bytes[0x100] ^= 0xff;
+  writeFileSync(tampered, bytes);
+  const broken = verifyCodeSignature(tampered);
+  check(!broken.valid, `${target}: a modified page still validated`);
+  has(broken.problems.join('; '), /page 1 hash mismatch/, `${target}: tampering was not reported as a page hash mismatch`);
+}
+
+console.log(`macos: ${objects} Mach-O objects and ${executables} executables verified on ${machoTargets.join(', ')}; ${frameworkLinks} framework links, ${frameworkLinks * 2} unknown-framework rejections and ${frameworkLinks * 3} signature checks`);

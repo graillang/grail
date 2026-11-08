@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- macOS platform linkage beyond libSystem: `compileProgram` accepts `frameworks` and, with
+  `$GRAIL_SDK`, links the SDK's real `-framework` stubs, otherwise writes `<Name>.framework` `.tbd`
+  stubs from a caller-supplied export list (a framework name without either is rejected instead of
+  being invented). `tools/macos.mjs` parses the linked image and verifies its `LC_LOAD_DYLIB`
+  entries. `sign: true` requests an ad-hoc signature — `codesign --force --sign -` on macOS,
+  `ld64.lld -adhoc_codesign` elsewhere — and `bun tools/macos.mjs inspect|verify BINARY` validates
+  the SuperBlob, CodeDirectory, page hashes and cdhash statically; a tampered page fails
+  verification. Tests add Foundation framework loading, unknown-framework rejection (driver and
+  linker), and signature validation/tamper detection. Nothing here is execution evidence on Apple
+  hardware.
+
 - Reserve `VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC` in the Vulkan descriptor pool, matching
   set 1; the new SDL3 surface test’s validation layer had exposed the missing pool size.
 - Port Borg Agent's local-session ownership state (`borg/`). `src/session_state.grl` carries the

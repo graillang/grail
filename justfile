@@ -52,6 +52,10 @@ borg-test:
 test-macos:
     bun tools/test-macos.mjs
 
+# Print a Mach-O image's dylib dependencies and validate its ad-hoc signature.
+macos-inspect bin:
+    bun tools/macos.mjs inspect "{{bin}}"
+
 # Verify direct compiler self-hosting on all supported CPUs (QEMU needed for cross execution).
 bootstrap-check:
     bun tools/bootstrap.mjs verify all
