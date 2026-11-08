@@ -160,7 +160,7 @@ allocate (the internal prologue saves and restores them), which is what lets C c
 an `extern "C"` definition.
 
 Direct and `cfn` calls pass arguments beyond the registers on the stack (see the calling
-conventions below); an exported callback still takes at most six integer words, and a seventh
+conventions below); an exported callback takes at most six parameters (any of them floats), and a seventh
 is rejected rather than dropped.
 
 ## The unsafe boundary

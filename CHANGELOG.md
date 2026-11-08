@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Fixed: on macOS an exported `extern "C" fn` was defined without the Mach-O leading
+  underscore while references to it had one, so taking a callback's address failed to link.
+  `test-macos` now links the `dlopen` fixture (libSystem loader imports, a Grail callback) for
+  both macOS targets.
+
 - DWARF variable types: `--debug` on Linux x86-64 now gives every parameter and local a
   `DW_AT_type` base type (signed/unsigned integers of their width, `f64`/`f32`, `bool`, `char`;
   strings, records and other owned values as named 8-byte handles), so gdb prints
