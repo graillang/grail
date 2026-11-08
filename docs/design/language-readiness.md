@@ -8,23 +8,23 @@ the design notes named below; `implementation-status.md` is current except where
 
 | # | Item | Status | Evidence |
 | --- | --- | --- | --- |
-| A1 | FFI floats | **Done** for direct and `cfn` calls on SysV, Win64, AAPCS64, RV64 LP64D; exported callbacks still integer-only | `tests/ffi/call_abi.grl` on 3 Linux targets + Windows x64 (Wine) |
-| A2 | FFI narrow integers | **Done** (same scope), with result re-extension and RV64 `u32` sign-extension | same |
-| A3 | C records by value | **Results done** (registers and hidden result pointer, all ABIs); records as *arguments* by value, nested records and records with float fields remain | `tests/ffi/call_records.grl` on 3 Linux targets + Windows x64 |
-| A4 | Stack arguments / variadic | **Stack arguments done** (64 words, 2 KiB); variadic C calls remain | `call_abi` ten-argument cases |
-| A5 | Windows FFI path | **Done** for `extern "C"` calls and callbacks (Win64 thunk preserving rdi/rsi/xmm6-15); COM intrinsics still 4 integer arguments | Windows suite: 29 checks, 15 under Wine |
-| A6 | Windows dynamic loading | **Done** (x64) | `ffi-dynamic-loading` Wine case |
+| A1 | FFI floats | **Done** for direct and `cfn` calls and for callbacks (parameters and results) on SysV, Win64, AAPCS64, RV64 LP64D | `tests/ffi/call_abi.grl`, `callback_floats.grl` on 3 Linux targets + Windows x64 (Wine) |
+| A2 | FFI narrow integers | **Done** for calls and callbacks (callee-side extension), and narrow C-record field stores write only their width | same; native case `ffi-c-record-narrow-assign` |
+| A3 | C records by value | **Results done** (registers and hidden result pointer, all ABIs); `f32`/`f64` fields done (by pointer). Remaining: records passed *by value* as arguments (needs syntax, see B7), nested records, float-field records as by-value results | `call_records.grl`, `float_records.grl` |
+| A4 | Stack arguments / variadic | **Done**: 64 argument words; variadic C calls on SysV, Win64, AAPCS64 (Linux), RV64. macOS arm64 variadics refused | `call_variadic.grl` on 3 Linux targets + Windows x64 |
+| A5 | Windows FFI / COM | **Done**: `extern "C"` calls and callbacks (Win64 thunk); COM methods of any arity and with floats through a typed `cfn` vtable slot | Windows suite: 33 checks, 19 under Wine; `call_com_slot.grl` |
+| A6 | Dynamic loading | **Done**: Windows x64 (Wine), Linux x86-64/AArch64/RISC-V (host-TLS bridge; executed under qemu with glibc sysroots), macOS linked for both targets | `dlopen.grl`, `ffi-dynamic-loading`, `test-macos` |
 | A7 | Stdlib on Windows | **Done** for files, sockets, processes/threads, output capture | `tools/test-ffi-runtime-windows.mjs`, 4 tests under Wine |
 | A8 | Typed OS errors on Windows | **Done** for the host layer (`GetLastError` -> errno) | `io-error-mapping` Wine case |
 | A9 | Process stdio capture | **Done** (`pipe`, `spawn_with`, `read_to_end`) | Linux + Wine |
 | A10 | Windows ARM64 threads | **Done statically** (bridge emitted and published); no ARM64 Windows runner | ARM64 static checks |
 | A11 | Mutable/borrowed captures, borrowed closure params | **Open - needs a design decision** (see B6) | `docs/design/closures.md` |
 | A12 | Iteration | **Partial**: `vecs::fold` (any type), `any/all/count/position_num`; generic predicates need A11 | native case `vecs-fold-and-predicates` |
-| A13 | Windows debug info | **Line tables done** (CodeView + PDB, unwind preserved); types, locals in PDB, debugger attach remain | `tools/test-debug-lines.mjs` |
+| A13 | Debug info | **Done for line tables and variable types**: DWARF lines + base types on Linux x86-64 (gdb prints typed locals; `--verify` clean), CodeView lines + PDB on Windows x64. Remaining: CodeView locals/types, DWARF on AArch64/RISC-V, record/string member layout | `tools/test-debug-lines.mjs` |
 
-Remaining implementable core gaps: records as by-value *arguments* and nested/float records,
-variadic C calls, float/narrow callback parameters, COM beyond four integer arguments, DWARF and
-CodeView type information, AArch64/RISC-V/macOS dynamic loading.
+Remaining implementable core gaps: nested C records and float-field records as by-value results
+(SSE/HFA classification); CodeView locals and types; DWARF on AArch64/RISC-V; variadic calls on
+macOS arm64. Everything else in A1-A13 is either done or waits on a decision in section B.
 
 ## B. Decisions needed from the project owner before implementation
 
@@ -35,6 +35,7 @@ CodeView type information, AArch64/RISC-V/macOS dynamic loading.
 | B3 | **Suspension and blocking contract** for foreign calls inside green tasks (what happens when a task calls a blocking DLL function). | `implementation-status.md`, `concurrency-v1.md` |
 | B4 | **Windows I/O readiness model**: the green-task reactor is epoll-only; Windows needs IOCP (or a documented thread-per-blocking-call policy). | `runtime.grl` |
 | B6 | **Closure capture model**: mutable captures (FnMut) and closure parameters that hold borrows need lifetime rules for the closure object - either region-bounded closures (cannot escape the borrow's scope) or by-reference capture cells with explicit `move`. Generic iterator adapters over borrowed elements depend on it. | `docs/design/closures.md` |
+| B7 | **Records passed by value to C**: an `extern "C" record` parameter is the C `R *` today (what Win32, Vulkan and D3D12 use). By-value struct arguments (ImGui `ImVec2`, some SDL calls) need a spelling, e.g. `v: byval R`, and per-ABI classification. | `docs/ffi.md` |
 | B5 | **Abort/unwind policy**: abort paths do not unwind, and nothing may unwind across the C boundary. | `implementation-status.md` |
 
 ## C. Libraries (not language core; needed by the ports, scheduled with them)
