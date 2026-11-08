@@ -8,7 +8,19 @@ import assert from 'node:assert/strict';
 import { root, hostTarget, targets, targetName, buildCompiler, compileProgram, execute, runner } from './native.mjs';
 
 const triples = { x86_64: 'x86_64-linux-gnu', aarch64: 'aarch64-linux-gnu', riscv64: 'riscv64-linux-gnu' };
-const fixtures = ['call_scalars'];
+// name, expected stdout, and the C symbols the assembly must call unmangled.
+const fixtures = [
+  {
+    name: 'call_scalars',
+    stdout: '83\n7\n', // 19+23, 2*3, -(-1), 1+2+3+4, 9-1+9-1+9-1 => 83; identity => 7
+    symbols: ['c_add', 'c_mul', 'c_negate', 'c_sum4', 'c_choose', 'c_identity'],
+  },
+  {
+    name: 'views_handles',
+    stdout: '259\n1\n', // strlen 5 + "ABC" 198 + fill 7 + 7*7 49 => 259; handle round trip => 1
+    symbols: ['c_strlen', 'c_sum_bytes', 'c_fill', 'c_open', 'c_close'],
+  },
+];
 const selected = process.argv[2] ? [targetName(process.argv[2])] : [hostTarget, ...targets.filter(t => t !== hostTarget)];
 const compiler = buildCompiler();
 const work = join(root, '.work/ffi');
@@ -39,7 +51,7 @@ for (const target of selected) {
   rmSync(directory, { recursive: true, force: true });
   mkdirSync(directory, { recursive: true });
   shim(target);
-  for (const name of fixtures) {
+  for (const { name, stdout, symbols } of fixtures) {
     // The fixture is copied next to the shim object: `lib "shim.o"` resolves
     // relative to the declaring source, which is the documented rule.
     const source = join(directory, `${name}.grl`);
@@ -49,22 +61,22 @@ for (const target of selected) {
     const notes = assembly.split('\n').filter(line => line.startsWith('// grail-link: '));
     assert.equal(notes.length, 1, `${target}/${name}: the six declarations must request exactly one link input: ${notes}`);
     assert.equal(notes[0], '// grail-link: shim.o', `${target}/${name}: unexpected link note ${notes[0]}`);
-    for (const symbol of ['c_add', 'c_mul', 'c_identity', 'c_sum4', 'c_choose']) {
+    for (const symbol of symbols) {
       // x86-64 and RISC-V spell the call `call SYM`; AArch64 lowers it to `bl SYM`.
       assert.ok(new RegExp(`(^|\\n)(call|bl) ${symbol}\\n`).test(assembly), `${target}/${name}: missing unmangled call to ${symbol}`);
     }
-    assert.ok(!assembly.includes('f_ffi_call_scalars_c_add'), `${target}/${name}: C symbol was mangled`);
+    assert.ok(!/f_ffi_[a-z_]+_c_/.test(assembly), `${target}/${name}: a C symbol was mangled`);
     const object = readFileSync(`${executable}.o`).toString('latin1');
-    assert.ok(object.includes('c_add'), `${target}/${name}: object does not reference c_add`);
+    for (const symbol of symbols) {
+      assert.ok(object.includes(symbol), `${target}/${name}: object does not reference ${symbol}`);
+    }
     if (!canRun(target)) {
       linkedOnly++;
       continue;
     }
     const result = execute(executable, [], target, { cwd: directory });
     assert.equal(result.status, 0, `${target}/${name}: exit ${result.status}: ${result.stderr}`);
-    // 19+23 = 42, 2*3 = 6, -(-1) = 1, 1+2+3+4 = 10, 9-1+9-1+9-1 = 24 => 83;
-    // the u64 identity call returns 7 in the same result register path.
-    assert.equal(result.stdout.toString(), '83\n7\n', `${target}/${name}: calls returned wrong values`);
+    assert.equal(result.stdout.toString(), stdout, `${target}/${name}: calls returned wrong values`);
     executed++;
   }
 }

@@ -1,0 +1,44 @@
+module ffi_views_handles;
+
+// `handle` is an opaque one-word C token: bindable, comparable and passable, but
+// not constructible, inspectable, sizeable or droppable in Grail code.
+handle File;
+
+extern "C" lib "shim.o" fn c_strlen(s: CStr) -> i64;
+extern "C" lib "shim.o" fn c_sum_bytes(bytes: &[u8]) -> i64;
+extern "C" lib "shim.o" fn c_fill(bytes: &mut [u8], v: u64) -> i64;
+extern "C" lib "shim.o" fn c_open(seed: u64) -> File;
+extern "C" lib "shim.o" fn c_close(h: File) -> u64;
+
+fn main() -> u64 {
+    mut buf = u8[];
+    mut i = 0;
+    while i < 7 {
+        buf.push(0);
+        i = i + 1;
+    }
+    mut total: i64 = 0;
+    mut closed: u64 = 0;
+    unsafe {
+        // CStr is a checked zero-copy view: the bytes must end in NUL.
+        total = c_strlen(cstr("grail\0"));
+        // An owned string auto-borrows to the (pointer, length) pair.
+        total = total + c_sum_bytes("ABC");
+        // A mutable byte view is writable by C and visible to Grail afterwards.
+        filled := c_fill(&mut buf, 7);
+        total = total + filled + c_sum_bytes(buf);
+        // A handle is an opaque token: Grail carries it back to C unchanged and
+        // never inspects or frees it. C decides what the bits mean.
+        h := c_open(3);
+        closed = c_close(h);
+    }
+    println(total);
+    println(closed);
+    if total != 259 {
+        return 1;
+    }
+    if closed != 1 {
+        return 1;
+    }
+    return 0;
+}
