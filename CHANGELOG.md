@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+- New design document `docs/design/abundance-port.md`: inventory of the Abundance portable core, own engine, Unreal host and shaders, their CPU/RHI boundary, the FFI/ABI requirements a Grail host would have to meet, and a staged port plan. Documentation only; no compiler or library behaviour changed.
+- Graphics foundation (`graphics/`): a versioned C ABI for the render hardware interface and
+  the shader pipeline, aligned with the Vulkan engine in Abundance. `grail_abi.h` defines
+  64-bit tagged handles whose stale use is detected rather than dereferenced, status codes,
+  capability bits and `{size, next}` descriptors. `grail_window.h` covers the SDL3 window,
+  event drain and input; `grail_rhi.h` the device, queue timelines, resources, dynamic-rendering
+  command buffers, deferred destruction and swapchain; `grail_bindless.h` the single set-0
+  table and set-1 frame constants together with the Vulkan/D3D12/Metal mapping; `grail_shader.h`
+  an offline reflection blob format, pipeline descriptors and permutation keys; per-backend
+  headers state the Vulkan 1.3 feature floor, the D3D12 root signature and the Metal argument
+  buffer requirements. `grail_wire.h` carries the same POD structures over a socket for a
+  process that cannot link the RHI.
+
+  The null backend implements every entry point and validates arguments, recording order and
+  handle liveness without a GPU; `make -C graphics test` runs 219 checks with only a C
+  compiler. Three HLSL stages compile offline with DXC 1.9.2609 and pass
+  `spirv-val --target-env vulkan1.3`. Two binding facts are pinned by compilation rather than
+  assumed: `register(xN, spaceM)` maps to Vulkan `DescriptorSet M`/`Binding N`, and push
+  constants must use `[[vk::push_constant]]` because a plain `cbuffer` at `b0` would become a
+  descriptor colliding with the sampled-image table. The offline shader tool and the real
+  backends are not yet written; a Grail program cannot call any of this until the language has
+  an FFI and non-`libc`-free linkage (`graphics/docs/first-renderer-port.md`).
 - Cross-platform build/test/distribution foundation: a seven-platform CI matrix
   (Linux x86-64/AArch64/RISC-V64, Windows x86-64/AArch64, macOS AArch64/x86-64),
   host/SDK/QEMU detection, deterministic `tar.gz`/`zip` packaging with
@@ -11,6 +33,38 @@
   only. Tooling is documented in `docs/tooling/cross-platform-ci.md`; the
   LSP/debugger/profiler integration plan is in
   `docs/tooling/lsp-debugger-profiler.md`.
+- Added a hosted Linux reference backend for the OS ABI (an ABI oracle, not a Grail build
+  path): startup/environment seeding and iteration, monotonic/realtime/CPU clocks and sleep,
+  file open/read/write/seek/stat/sync/close, directory iteration, pipes, mkdir/remove/rename,
+  current directory and executable paths, pthread threads (spawn/join/detach), mutexes,
+  condition variables and `dlopen`/`dlsym`. Processes and sockets remain explicitly
+  unsupported with clear capability bits. The end-to-end test verifies 165 checks and zero
+  tracked allocation bytes at shutdown.
+- Added the resource-domain headers for files/directories/pipes, environment iterators,
+  native threads/mutexes/condition variables and dynamic libraries, plus a generation-checked
+  handle table that rejects stale, double-closed and cross-domain handles. Contract tests
+  cover 1000 handle allocations, reuse, foreign-table rejection and destruction; all headers
+  parse for the five ABI targets.
+- Added the lexical path contract (`include/grail/grail_path.h`) with one implementation
+  for POSIX and Windows rules: absolute/relative detection, join, parent, file name,
+  extension and normalization. Both rule sets are exercised on Linux, including drive-relative
+  `C:` paths, UNC anchors and canonical `/` output.
+- Added the cross-platform OS ABI contract under `include/grail/`: 64-bit scalar and pointer
+  calling rules, opaque linear handles, version negotiation, allocator/startup records,
+  portable error codes with raw OS detail, and strict UTF-8/UTF-16 helpers. Portable
+  implementation and C tests cover version checks, every error mapping (errno, Win32, Mach),
+  and Unicode rejection/round-trip cases. Linux, AArch64, RISC-V 64, Win64 and Apple ARM64
+  header parsing is checked. Nothing is linked into Grail builds; `compiler/native.grl` and
+  `runtime.grl` are unchanged.
+- New `windows-x86_64` target emits COFF-compatible x86-64 assembly for PE32+ console images:
+  MSVC `.def` function records replace ELF symbol types, a `grail_entry` PE entry point replaces
+  `_start`, process exit is an `ExitProcess` import and the allocation intrinsic maps to
+  `VirtualAlloc` with TEB-based thread storage. `tools/windows.mjs` writes COFF short-import
+  objects into `kernel32.lib` and links with `lld-link`; `bun tools/windows.mjs check` inspects
+  the assembly, the COFF object and the PE image. The Windows runtime, `GetCommandLineA` argv
+  recovery, worker threads and `.pdata`/unwind data are not implemented, so PE programs compile
+  and link but must not be executed yet. Command-line option errors now print a diagnostic and
+  exit 1 instead of aborting without output.
 
 - Native fixtures, inline regression programs and book examples now use typed references and
   explicit byte views under `--default-u64 --typed-refs`; user-mode cases retain `i64` defaults.
@@ -23,8 +77,8 @@
   explicit `view` / `view_mut` byte views, and `&a [u8]` / `&a mut [u8]` signatures.
   `--typed-refs` separates the internal reference dialect from numeric defaults, which remain
   `u64` internally and `i64` for user modules. The normal regression corpus uses typed-reference
-  mode; removed syntax is retained only as intentional rejection input. Bootstrap artifacts are
-  unchanged. Deferred
+  mode; removed syntax is retained only as intentional rejection input. All checked-in bootstraps were refreshed
+  and self-host byte-identically. Deferred
   generic and closure bodies restore their defining module's numeric and reference modes.
 
 - Concise type syntax: `T[]` vectors, `u8[]` byte buffers, `T?` optional values and
