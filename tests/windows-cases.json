@@ -132,5 +132,38 @@
     "stdout": "-7\n300000\n4096\n-12\n42\n-5\n77\n",
     "status": 0,
     "note": "Win64 record results: 8 bytes in rax, 16 and 24 bytes through a hidden pointer in rcx"
+  },
+  {
+    "name": "ffi-call-variadic",
+    "shim": {
+      "windows-x86_64": "tests/ffi/abi_shim.c",
+      "windows-aarch64": "tests/ffi/abi_shim.c"
+    },
+    "source": "// Variadic C calls: a fixed parameter, then promoted extra arguments, including more than fit\n// in registers and doubles (an f32 extra argument is promoted to double, as C requires).\nextern \"C\" lib \"shim.o\" fn c_vsum(count: i32, ...) -> i64;\nextern \"C\" lib \"shim.o\" fn c_vmix(kinds: CStr, ...) -> f64;\n\nfn main() -> u64 {\n    unsafe {\n        println(c_vsum(3, 10, 20, 30));\n        println(c_vsum(10, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10));\n        println(c_vmix(cstr(\"idid\\0\"), 1, 0.5, 2, 0.25));\n        f: f32 := 1.5;\n        println(c_vmix(cstr(\"ddddddddddi\\0\"), 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, f, 100));\n    }\n    return 0;\n}\n",
+    "stdout": "60\n55\n3.75\n146.5\n",
+    "status": 0,
+    "note": "Win64 variadics: doubles passed in both the xmm and the integer register of their slot"
+  },
+  {
+    "name": "ffi-com-slot",
+    "shim": {
+      "windows-x86_64": "tests/ffi/abi_shim.c",
+      "windows-aarch64": "tests/ffi/abi_shim.c"
+    },
+    "source": "// A COM method with more than four arguments and floats: the vtable slot is read as a typed\n// `cfn`, so the call uses the full platform convention (Win64: four registers, the rest on the\n// stack, floats in xmm slots), the same lowering as any other C call.\nextern \"C\" lib \"shim.o\" fn c_com_object() -> u64;\nextern \"C\" lib \"shim.o\" as \"c_com_slot\" fn add_slot(object: u64, index: u64) -> cfn(u64, i64) -> i64;\nextern \"C\" lib \"shim.o\" as \"c_com_slot\" fn many_slot(object: u64, index: u64) -> cfn(u64, i64, i64, i64, f64, i64, f32, i64) -> i64;\n\nfn main() -> u64 {\n    unsafe {\n        object := c_com_object();\n        add := add_slot(object, 0);\n        println(add(object, 7));\n        many := many_slot(object, 1);\n        quarter: f32 := 0.25;\n        println(many(object, 1, 2, 3, 0.5, 4, quarter, 5));\n    }\n    return 0;\n}\n",
+    "stdout": "1007\n1045\n",
+    "status": 0,
+    "note": "COM-shaped vtable method with seven arguments (three on the stack) and float slots, called through a cfn"
+  },
+  {
+    "name": "ffi-float-records",
+    "shim": {
+      "windows-x86_64": "tests/ffi/abi_shim.c",
+      "windows-aarch64": "tests/ffi/abi_shim.c"
+    },
+    "source": "// C records with float and double fields, passed by pointer: Grail writes f32/f64 fields the C\n// side reads at C's offsets, and reads back fields C wrote. f32 fields are 4-byte binary32.\nextern \"C\" record Viewport { x: f32, y: f32, width: f32, height: f32, min_depth: f32, max_depth: f32, flags: i32, scale: f64 }\nextern \"C\" lib \"shim.o\" fn c_viewport_area(v: Viewport) -> f64;\nextern \"C\" lib \"shim.o\" fn c_viewport_fill(v: Viewport) -> unit;\n\nfn main() -> u64 {\n    mut v = Viewport { x: 0.0, y: 0.0, width: 800.0, height: 600.0, min_depth: 0.25, max_depth: 0.5, flags: 3, scale: 2.0 };\n    unsafe {\n        println(c_viewport_area(v));\n        c_viewport_fill(v);\n    }\n    println(v.x);\n    println(v.y);\n    println(v.width);\n    println(v.max_depth);\n    println(v.flags);\n    println(v.scale);\n    v.height = 0.5;\n    unsafe {\n        println(c_viewport_area(v));\n    }\n    return 0;\n}\n",
+    "stdout": "960003.75\n1.5\n-2.25\n640\n1\n7\n0.125\n48\n",
+    "status": 0,
+    "note": "f32/f64 fields at C offsets in a viewport-shaped record"
   }
 ]

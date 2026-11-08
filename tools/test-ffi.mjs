@@ -36,6 +36,25 @@ const fixtures = [
     symbols: ['c_point_sum', 'c_point_swap', 'c_mixed_sum', 'c_mixed_fill', 'c_mixed_size', 'c_mixed_off_d'],
   },
   {
+    // C records with f32/f64 fields at C offsets, written by Grail and by C.
+    name: 'float_records',
+    stdout: '960003.75\n1.5\n-2.25\n640\n1\n7\n0.125\n48\n',
+    symbols: ['c_viewport_area', 'c_viewport_fill'],
+  },
+  {
+    // A COM-shaped vtable call with seven arguments and two floats through a typed cfn slot.
+    name: 'call_com_slot',
+    stdout: '1007\n1045\n',
+    symbols: ['c_com_object', 'c_com_slot'],
+  },
+  {
+    // Variadic C calls: 60; 55 (ten extra integers, past the registers); 3.75; 146.5 with nine
+    // doubles past the eight vector registers and an f32 promoted to double.
+    name: 'call_variadic',
+    stdout: '60\n55\n3.75\n146.5\n',
+    symbols: ['c_vsum', 'c_vmix'],
+  },
+  {
     // C records returned by value in registers and through a hidden result pointer.
     name: 'call_records',
     stdout: '-7\n300000\n4096\n-12\n42\n-5\n77\n',

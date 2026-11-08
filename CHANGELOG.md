@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- Variadic C functions: `extern "C" fn f(fixed: T, ...)`. Extra arguments use the C default
+  promotions; SysV sets `%al` to the vector-register count, Win64 passes variadic doubles in
+  both the xmm and the integer register of their slot, RV64 passes them in integer registers.
+  macOS arm64 (variadics on the stack) is refused for now. `tests/ffi/call_variadic.grl` runs on
+  three Linux targets and Windows x64.
+- COM methods with more than four arguments or floats: read the vtable slot as a typed `cfn`
+  and call it with the full platform convention (`tests/ffi/call_com_slot.grl`, seven arguments
+  with three on the stack, Linux and Windows).
+- C records with `f32`/`f64` fields (by pointer), at C offsets and sizes (`D3D12_VIEWPORT`,
+  `VkViewport` shapes). Records with float fields as by-value *results* are refused until the
+  SSE/HFA classification exists.
+- Fixed: assigning a narrow C-layout field (`p.a = 5` on an `i32`) stored eight bytes and
+  clobbered the neighbouring fields; assignment and compound assignment now write only the
+  field's width. Fixed: the optimizer could fold a constant into `movq $imm,%xmm0`, which does
+  not assemble.
+
 - Child process output capture: `sys_grail::pipe()`, `spawn_with(program, args, stdin, stdout,
   stderr)` (with `inherit()` for shared streams) and `read_to_end(file)`, over a new
   `grail_ffi_process_spawn_stdio`. Executed on Linux (`/bin/sh`) and Windows under Wine

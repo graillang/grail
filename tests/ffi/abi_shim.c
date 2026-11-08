@@ -51,3 +51,53 @@ struct triple c_make_triple(long long x, long long y, int z, double scale)
     struct triple r = { (long long)(x * scale), y, z };
     return r;
 }
+
+/* ---- variadic: a C function that reads its arguments with va_arg ---- */
+#include <stdarg.h>
+long long c_vsum(int count, ...)
+{
+    va_list ap;
+    long long total = 0;
+    va_start(ap, count);
+    for (int i = 0; i < count; ++i)
+        total += va_arg(ap, long long);
+    va_end(ap);
+    return total;
+}
+/* Mixed: a format of 'i' (long long) and 'd' (double) codes. Doubles cross variadically in
+ * vector registers (SysV, AAPCS64), integer registers (RV64), or both (Win64). */
+double c_vmix(const char *kinds, ...)
+{
+    va_list ap;
+    double total = 0;
+    va_start(ap, kinds);
+    for (const char *k = kinds; *k; ++k)
+        total += *k == 'd' ? va_arg(ap, double) : (double)va_arg(ap, long long);
+    va_end(ap);
+    return total;
+}
+
+/* ---- a COM-shaped object: the first word is a vtable of method pointers taking `self` ---- */
+struct fake_com { void **vtbl; long long base; };
+static long long fake_add(struct fake_com *self, long long a) { return self->base + a; }
+static long long fake_many(struct fake_com *self, long long a, long long b, long long c, double d,
+                           long long e, float f, long long g)
+{
+    return self->base + a + b + c + (long long)(d * 10) + e + (long long)(f * 100) + g;
+}
+static void *fake_vtbl[] = { (void *)fake_add, (void *)fake_many };
+static struct fake_com fake_obj = { fake_vtbl, 1000 };
+void *c_com_object(void) { return &fake_obj; }
+void *c_com_slot(void *obj, long long index) { return (*(void ***)obj)[index]; }
+
+/* ---- records with float fields, by pointer: a viewport-shaped struct (cf. D3D12_VIEWPORT) ---- */
+struct viewport { float x, y, width, height; float min_depth, max_depth; int flags; double scale; };
+double c_viewport_area(const struct viewport *v)
+{
+    return (double)v->width * v->height * v->scale + v->flags + v->min_depth + v->max_depth;
+}
+void c_viewport_fill(struct viewport *v)
+{
+    v->x = 1.5f; v->y = -2.25f; v->width = 640; v->height = 480;
+    v->min_depth = 0.0f; v->max_depth = 1.0f; v->flags = 7; v->scale = 0.125;
+}
