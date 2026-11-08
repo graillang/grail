@@ -2,9 +2,12 @@
 
 ## Unreleased
 
-- Internal compiler and standard-library signatures now spell byte views as `&a [u8]` /
-  `&a mut [u8]` and mutable reference lifetimes as `&a mut T`. Numeric defaults remain
-  `u64` internally and `i64` for user modules.
+- Compiler and standard-library source now uses typed `&value` / `&mut value` references,
+  explicit `view` / `view_mut` byte views, and `&a [u8]` / `&a mut [u8]` signatures.
+  `--typed-refs` separates the internal reference dialect from numeric defaults, which remain
+  `u64` internally and `i64` for user modules. Historical regressions retain legacy syntax only
+  under `--default-u64` without `--typed-refs`; bootstrap artifacts are unchanged. Deferred
+  generic and closure bodies restore their defining module's numeric and reference modes.
 
 - Concise type syntax: `T[]` vectors, `u8[]` byte buffers, `T?` optional values and
   `[K: V]` maps. The `num` spelling is removed; user modules default to `i64`, while lengths,
@@ -26,8 +29,8 @@
   including literals and owned views. `&mut` arguments remain explicit.
 - The old `&mut a T` lifetime order is rejected in user modules; write `&a mut T`.
 - The public `borrow`/`borrow_mut` builtins and `read<a>`/`mut<a>` view types are removed in user
-  modules. Use `&value`/`&mut value` and `&[u8]`/`&mut [u8]`; internal bootstrap modules retain the
-  legacy dialect until the final source migration.
+  modules. Use `&value`/`&mut value` and `&[u8]`/`&mut [u8]`; compiler and standard-library
+  source now use the same reference syntax.
 - User-mode loops consume their iterable. Owned vectors move elements into the loop, enabling
   `for part in name.split(' ')` and named non-scalar consumption; loop-owned elements and the
   hidden container are cleaned on normal exit, break and return.

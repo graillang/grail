@@ -284,7 +284,7 @@ fn opname<a>(o: (&a mut O), op: u64) {
         t = "shrq";
     }
     assert(t.len() != 0);
-    app(borrow_mut(o.out), &t);
+    app(&mut o.out, view(t));
 }
 // 0..15 for 64-bit names, 16+n for a narrower spelling of register n, 99 otherwise.
 fn reg_key(k: u64) -> u64 {
@@ -430,7 +430,7 @@ fn mentions<b>(s: &b [u8], a: u64, e: u64) -> u64 {
                 }
                 j += 1;
             }
-            r := regcode(&s, i + 1, j);
+            r := regcode(view(s), i + 1, j);
             if r < 32 {
                 m = m | bit(r % 16);
             }
@@ -449,7 +449,7 @@ fn classify<a, b>(o: (&a mut O), s: &b [u8], a: u64, e: u64, second: u64) {
     if a < e {
         c := s[a];
         if c == 37 {
-            r := regcode(&s, a + 1, e);
+            r := regcode(view(s), a + 1, e);
             if r < 16 {
                 k = 1;
                 v = r;
@@ -463,7 +463,7 @@ fn classify<a, b>(o: (&a mut O), s: &b [u8], a: u64, e: u64, second: u64) {
             if c == 36 {
                 k = 3;
             } else {
-                m = mentions(&s, a, e);
+                m = mentions(view(s), a, e);
                 if (c == 46) & (e - a > 2) {
                     if s[a + 1] == 76 {
                         mut n = 0;
@@ -485,7 +485,7 @@ fn classify<a, b>(o: (&a mut O), s: &b [u8], a: u64, e: u64, second: u64) {
                 }
                 // -N(%rbp) with decimal N is a frame slot.
                 if (c == 45) & (e - a > 7) {
-                    if same(&s, e - 6, e, &"(%rbp)") {
+                    if same(view(s), e - 6, e, view("(%rbp)")) {
                         mut n = 0;
                         mut ok = 1;
                         for i in e - 7 - a {
@@ -501,10 +501,10 @@ fn classify<a, b>(o: (&a mut O), s: &b [u8], a: u64, e: u64, second: u64) {
                             v = n;
                             m = 0;
                             if n % 8 != 0 {
-                                exchange(borrow_mut(o.weird), 1);
+                                exchange(&mut o.weird, 1);
                             }
                             if o.maxslot < n {
-                                exchange(borrow_mut(o.maxslot), n);
+                                exchange(&mut o.maxslot, n);
                             }
                         }
                     }
@@ -541,10 +541,10 @@ fn parse<a, b>(o: (&a mut O), s: &b [u8], a: u64, e: u64) {
     if (e - a > 10) & (s[a] == 46) {
         if s[a + 1] == 112 {
             if s[a + 2] == 117 {
-                exchange(borrow_mut(o.data), 1);
+                exchange(&mut o.data, 1);
             }
             if s[a + 2] == 111 {
-                exchange(borrow_mut(o.data), 0);
+                exchange(&mut o.data, 0);
                 op = 101;
             }
         }
@@ -556,7 +556,7 @@ fn parse<a, b>(o: (&a mut O), s: &b [u8], a: u64, e: u64) {
         if a < e {
             if s[e - 1] == 58 {
                 op = 100;
-                if same(&s, a, a + 2, &".L") & (e - a > 3) {
+                if same(view(s), a, a + 2, view(".L")) & (e - a > 3) {
                     mut n = 0;
                     mut ok = 1;
                     for i in e - a - 3 {
@@ -597,8 +597,8 @@ fn parse<a, b>(o: (&a mut O), s: &b [u8], a: u64, e: u64) {
     o.op.push(op);
     o.lab.push(lab);
     if (op == 100) + (op == 101) {
-        classify(borrow_mut(o), &s, e, e, 0);
-        classify(borrow_mut(o), &s, e, e, 1);
+        classify(&mut o, view(s), e, e, 0);
+        classify(&mut o, view(s), e, e, 1);
         return ();
     }
     // Split operands at the top-level comma.
@@ -641,13 +641,14 @@ fn parse<a, b>(o: (&a mut O), s: &b [u8], a: u64, e: u64) {
         }
     }
     if extra {
-        exchange(&mut o.op[o.op.len() - 1], 0);
+        last := o.op.len() - 1;
+        exchange(&mut o.op[last], 0);
     }
-    classify(borrow_mut(o), &s, first, comma, 0);
+    classify(&mut o, view(s), first, comma, 0);
     if comma < e {
-        classify(borrow_mut(o), &s, comma + 1, e, 1);
+        classify(&mut o, view(s), comma + 1, e, 1);
     } else {
-        classify(borrow_mut(o), &s, e, e, 1);
+        classify(&mut o, view(s), e, e, 1);
     }
     // Calls to the leaf runtime accessors become pseudo-instructions expanded inline at emission:
     // 40 rt_slot, 41 rt_at (bounds-checked element address / load), 42 rt_len, 43 rt_xchg, 44 rt_atb (byte load),
@@ -656,35 +657,36 @@ fn parse<a, b>(o: (&a mut O), s: &b [u8], a: u64, e: u64) {
     if (op == 15) & (comma == e) & (e - first > 5) & (e - first < 9) {
         if (s[first] == 114) & (s[first + 1] == 116) & (s[first + 2] == 95) {
             mut fast = 0;
-            if same(&s, first, e, &"rt_slot") {
+            if same(view(s), first, e, view("rt_slot")) {
                 fast = 40;
             }
-            if same(&s, first, e, &"rt_at") {
+            if same(view(s), first, e, view("rt_at")) {
                 fast = 41;
             }
-            if same(&s, first, e, &"rt_len") {
+            if same(view(s), first, e, view("rt_len")) {
                 fast = 42;
             }
-            if same(&s, first, e, &"rt_xchg") {
+            if same(view(s), first, e, view("rt_xchg")) {
                 fast = 43;
             }
-            if same(&s, first, e, &"rt_atb") {
+            if same(view(s), first, e, view("rt_atb")) {
                 fast = 44;
             }
-            if same(&s, first, e, &"rt_push") {
+            if same(view(s), first, e, view("rt_push")) {
                 fast = 45;
             }
-            if same(&s, first, e, &"rt_pushb") {
+            if same(view(s), first, e, view("rt_pushb")) {
                 fast = 46;
             }
-            if same(&s, first, e, &"rt_slotu") {
+            if same(view(s), first, e, view("rt_slotu")) {
                 fast = 47;
             }
-            if same(&s, first, e, &"rt_atbu") {
+            if same(view(s), first, e, view("rt_atbu")) {
                 fast = 48;
             }
             if fast != 0 {
-                exchange(&mut o.op[o.op.len() - 1], fast);
+                last := o.op.len() - 1;
+                exchange(&mut o.op[last], fast);
             }
         }
     }
@@ -739,7 +741,7 @@ fn reads<a>(o: (&a O), i: u64) -> u64 {
         return 0;
     }
     if movelike(op) {
-        return src | dst_address(borrow(o), i);
+        return src | dst_address(&o, i);
     }
     if op == 10 {
         if (o.k0[i] == 1) & (o.k1[i] == 1) & (o.v0[i] == o.v1[i]) {
@@ -791,7 +793,7 @@ fn writes<a>(o: (&a O), i: u64) -> u64 {
         return 0;
     }
     if movelike(op) + arith(op) + (op == 11) + (op == 32) {
-        return dst_writes(borrow(o), i);
+        return dst_writes(&o, i);
     }
     if (op == 12) + (op == 13) {
         return 5;
@@ -833,27 +835,27 @@ fn slot_written<a>(o: (&a O), i: u64) -> u64 {
 }
 fn set_operand<a>(o: (&a mut O), i: u64, j: u64, k: u64, v: u64) {
     if j == 0 {
-        put(borrow_mut(o.k0), i, k);
-        put(borrow_mut(o.v0), i, v);
-        put(borrow_mut(o.m0), i, 0);
+        put(&mut o.k0, i, k);
+        put(&mut o.v0, i, v);
+        put(&mut o.m0, i, 0);
     } else {
-        put(borrow_mut(o.k1), i, k);
-        put(borrow_mut(o.v1), i, v);
-        put(borrow_mut(o.m1), i, 0);
+        put(&mut o.k1, i, k);
+        put(&mut o.v1, i, v);
+        put(&mut o.m1, i, 0);
     }
-    put(borrow_mut(o.chg), i, 1);
+    put(&mut o.chg, i, 1);
 }
 fn set_range<a>(o: (&a mut O), i: u64, j: u64, a: u64, e: u64) {
     if j == 0 {
-        put(borrow_mut(o.s0), i, a);
-        put(borrow_mut(o.e0), i, e);
+        put(&mut o.s0, i, a);
+        put(&mut o.e0, i, e);
     } else {
-        put(borrow_mut(o.s1), i, a);
-        put(borrow_mut(o.e1), i, e);
+        put(&mut o.s1, i, a);
+        put(&mut o.e1, i, e);
     }
 }
 fn kill<a>(o: (&a mut O), i: u64) {
-    put(borrow_mut(o.del), i, 1);
+    put(&mut o.del, i, 1);
 }
 struct F {
     // Slot facts (index N/8): register holding the value (+1) and its version, known
@@ -882,25 +884,25 @@ fn facts_valid<a>(f: (&a F), n: u64) -> u64 {
     return (f.sep[n] == f.epoch) & (f.sfv[n] == f.sver[n]);
 }
 fn fresh_facts<a>(f: (&a mut F), n: u64) {
-    put(borrow_mut(f.sep), n, f.epoch);
+    put(&mut f.sep, n, f.epoch);
     t1 := f.sver[n];
-    put(borrow_mut(f.sfv), n, t1);
-    put(borrow_mut(f.sreg), n, 0);
-    put(borrow_mut(f.simm), n, 0);
-    put(borrow_mut(f.scopy), n, 0);
+    put(&mut f.sfv, n, t1);
+    put(&mut f.sreg, n, 0);
+    put(&mut f.simm, n, 0);
+    put(&mut f.scopy, n, 0);
 }
 fn reg_written<a>(f: (&a mut F), r: u64) {
     t2 := f.rver[r] + 1;
-    put(borrow_mut(f.rver), r, t2);
-    put(borrow_mut(f.rimm), r, 0);
-    put(borrow_mut(f.rslot), r, 0);
-    put(borrow_mut(f.rcopy), r, 0);
+    put(&mut f.rver, r, t2);
+    put(&mut f.rimm, r, 0);
+    put(&mut f.rslot, r, 0);
+    put(&mut f.rcopy, r, 0);
 }
 fn reg_fact_valid<a>(f: (&a F), r: u64) -> u64 {
     return f.rep[r] == f.epoch;
 }
 fn copy_source<a>(f: (&a F), q: u64) -> u64 {
-    if reg_fact_valid(borrow(f), q) == 0 {
+    if reg_fact_valid(&f, q) == 0 {
         return q;
     }
     c := f.rcopy[q];
@@ -915,7 +917,7 @@ fn copy_source<a>(f: (&a F), q: u64) -> u64 {
 }
 // Replace a read of slot n (operand j of i) by a register or constant already holding it.
 fn forward_read<a, c>(o: (&a mut O), f: (&c mut F), i: u64, j: u64, n: u64) {
-    if facts_valid(borrow(f), n) == 0 {
+    if facts_valid(&f, n) == 0 {
         return ();
     }
     op := o.op[i];
@@ -925,27 +927,27 @@ fn forward_read<a, c>(o: (&a mut O), f: (&c mut F), i: u64, j: u64, n: u64) {
         lv := o.v0[l];
         la := o.s0[l];
         le := o.e0[l];
-        set_operand(borrow_mut(o), i, 0, lk, lv);
-        set_range(borrow_mut(o), i, 0, la, le);
-        put(borrow_mut(o.op), i, 2);
+        set_operand(&mut o, i, 0, lk, lv);
+        set_range(&mut o, i, 0, la, le);
+        put(&mut o.op, i, 2);
         return ();
     }
     if f.sreg[n] != 0 {
         r := f.sreg[n] - 1;
         if f.sregv[n] == f.rver[r] {
-            set_operand(borrow_mut(o), i, j, 1, r);
+            set_operand(&mut o, i, j, 1, r);
             return ();
         }
     }
     if f.scopy[n] != 0 {
         m := f.scopy[n] - 1;
         if f.scopyv[n] == f.sver[m] {
-            set_operand(borrow_mut(o), i, j, 2, m * 8);
-            if facts_valid(borrow(f), m) {
+            set_operand(&mut o, i, j, 2, m * 8);
+            if facts_valid(&f, m) {
                 if f.sreg[m] != 0 {
                     r := f.sreg[m] - 1;
                     if f.sregv[m] == f.rver[r] {
-                        set_operand(borrow_mut(o), i, j, 1, r);
+                        set_operand(&mut o, i, j, 1, r);
                     }
                 }
             }
@@ -1008,29 +1010,29 @@ fn forward<a, b, c>(o: (&a mut O), f: (&c mut F), s: &b [u8], first: u64, last: 
         }
         if (op == 100) + (op == 0) {
             ep := f.epoch + 1;
-            exchange(borrow_mut(f.epoch), ep);
+            exchange(&mut f.epoch, ep);
             if op == 0 {
                 for r in 16 {
-                    reg_written(borrow_mut(f), r);
+                    reg_written(&mut f, r);
                 }
             }
             i += 1;
             continue;
         }
         mut loaded = 0;
-        if (o.k0[i] == 2) & promotable_use(borrow(o), i) {
+        if (o.k0[i] == 2) & promotable_use(&o, i) {
             n := o.v0[i] / 8;
             if f.bad[n] == 0 {
                 if movelike(op) & (o.k1[i] == 1) {
                     loaded = n + 1;
                 }
-                forward_read(borrow_mut(o), borrow_mut(f), i, 0, n);
+                forward_read(&mut o, &mut f, i, 0, n);
             }
         }
-        if slot_read(borrow(o), i, 1) & promotable_use(borrow(o), i) {
+        if slot_read(&o, i, 1) & promotable_use(&o, i) {
             n := o.v1[i] / 8;
             if f.bad[n] == 0 {
-                forward_read(borrow_mut(o), borrow_mut(f), i, 1, n);
+                forward_read(&mut o, &mut f, i, 1, n);
             }
         }
         // Copy propagation: read-only register operands use the original of a register copy.
@@ -1045,50 +1047,50 @@ fn forward<a, b, c>(o: (&a mut O), f: (&c mut F), s: &b [u8], first: u64, last: 
                     + (op == 9)
                     + (op == 10)
             ) {
-            r := copy_source(borrow(f), o.v0[i]);
+            r := copy_source(&f, o.v0[i]);
             if r != o.v0[i] {
-                set_operand(borrow_mut(o), i, 0, 1, r);
+                set_operand(&mut o, i, 0, 1, r);
             }
         }
         if (o.k1[i] == 1) & ((op == 6) + (op == 7)) {
-            r := copy_source(borrow(f), o.v1[i]);
+            r := copy_source(&f, o.v1[i]);
             if r != o.v1[i] {
-                set_operand(borrow_mut(o), i, 1, 1, r);
+                set_operand(&mut o, i, 1, 1, r);
             }
         }
         // A register operand known to hold a small constant becomes an immediate.
         if (o.k0[i] == 1)
             & ((op == 1) + (op == 4) + (op == 5) + (op == 6) + (op == 8) + (op == 9) + (op == 10)) {
             r := o.v0[i];
-            if reg_fact_valid(borrow(f), r) & (f.rimm[r] != 0) {
+            if reg_fact_valid(&f, r) & (f.rimm[r] != 0) {
                 l := f.rimm[r] - 1;
-                value := imm_value(borrow(o), &s, l);
+                value := imm_value(&o, view(s), l);
                 wide := (op == 1) & (o.k1[i] == 1);
                 if (value != 0) & (wide + (value < 2147483649)) {
                     la := o.s0[l];
                     le := o.e0[l];
-                    set_operand(borrow_mut(o), i, 0, 3, 0);
-                    set_range(borrow_mut(o), i, 0, la, le);
+                    set_operand(&mut o, i, 0, 3, 0);
+                    set_range(&mut o, i, 0, la, le);
                     if wide {
-                        put(borrow_mut(o.op), i, 2);
+                        put(&mut o.op, i, 2);
                     }
                 }
             }
         }
         op2 := o.op[i];
         if (op2 == 1) & (o.k0[i] == 1) & (o.k1[i] == 1) & (o.v0[i] == o.v1[i]) {
-            kill(borrow_mut(o), i);
+            kill(&mut o, i);
             i += 1;
             continue;
         }
-        w := writes(borrow(o), i);
+        w := writes(&o, i);
         // Facts of the source register, captured before the destination is invalidated.
         mut src_imm = 0;
         mut src_slot = 0;
         mut src_slotv = 0;
         if (o.k0[i] == 1) & (op2 == 1) {
             r := o.v0[i];
-            if reg_fact_valid(borrow(f), r) {
+            if reg_fact_valid(&f, r) {
                 src_imm = f.rimm[r];
                 src_slot = f.rslot[r];
                 src_slotv = f.rslotv[r];
@@ -1096,116 +1098,116 @@ fn forward<a, b, c>(o: (&a mut O), f: (&c mut F), s: &b [u8], first: u64, last: 
         }
         for r in 16 {
             if (w >> r) & 1 {
-                reg_written(borrow_mut(f), r);
+                reg_written(&mut f, r);
             }
         }
-        if slot_written(borrow(o), i) {
+        if slot_written(&o, i) {
             n := o.v1[i] / 8;
             t3 := f.sver[n] + 1;
-            put(borrow_mut(f.sver), n, t3);
+            put(&mut f.sver, n, t3);
             if (op2 == 1) & (f.bad[n] == 0) {
-                fresh_facts(borrow_mut(f), n);
+                fresh_facts(&mut f, n);
                 if o.k0[i] == 1 {
                     r := o.v0[i];
-                    put(borrow_mut(f.sreg), n, r + 1);
+                    put(&mut f.sreg, n, r + 1);
                     t4 := f.rver[r];
-                    put(borrow_mut(f.sregv), n, t4);
+                    put(&mut f.sregv, n, t4);
                     if src_imm != 0 {
-                        put(borrow_mut(f.simm), n, src_imm);
+                        put(&mut f.simm, n, src_imm);
                     }
                     if src_slot != 0 {
                         m := src_slot - 1;
                         if (m != n) & (src_slotv == f.sver[m]) {
-                            put(borrow_mut(f.scopy), n, m + 1);
+                            put(&mut f.scopy, n, m + 1);
                             t5 := f.sver[m];
-                            put(borrow_mut(f.scopyv), n, t5);
+                            put(&mut f.scopyv, n, t5);
                         }
                     }
                 }
                 if o.k0[i] == 3 {
-                    put(borrow_mut(f.simm), n, i + 1);
+                    put(&mut f.simm, n, i + 1);
                 }
             }
         }
         if ((op2 == 1) + (op2 == 2)) & (o.k1[i] == 1) {
             q := o.v1[i];
-            put(borrow_mut(f.rep), q, f.epoch);
+            put(&mut f.rep, q, f.epoch);
             if o.k0[i] == 3 {
-                put(borrow_mut(f.rimm), q, i + 1);
+                put(&mut f.rimm, q, i + 1);
             }
             if o.k0[i] == 1 {
-                put(borrow_mut(f.rimm), q, src_imm);
-                put(borrow_mut(f.rslot), q, src_slot);
-                put(borrow_mut(f.rslotv), q, src_slotv);
+                put(&mut f.rimm, q, src_imm);
+                put(&mut f.rslot, q, src_slot);
+                put(&mut f.rslotv, q, src_slotv);
                 r := o.v0[i];
                 if r != q {
-                    put(borrow_mut(f.rcopy), q, r + 1);
+                    put(&mut f.rcopy, q, r + 1);
                     cv := f.rver[r];
-                    put(borrow_mut(f.rcopyv), q, cv);
+                    put(&mut f.rcopyv, q, cv);
                 }
             }
             if o.k0[i] == 2 {
                 n := o.v0[i] / 8;
                 if f.bad[n] == 0 {
-                    put(borrow_mut(f.rslot), q, n + 1);
+                    put(&mut f.rslot, q, n + 1);
                     t6 := f.sver[n];
-                    put(borrow_mut(f.rslotv), q, t6);
-                    if facts_valid(borrow(f), n) == 0 {
-                        fresh_facts(borrow_mut(f), n);
+                    put(&mut f.rslotv, q, t6);
+                    if facts_valid(&f, n) == 0 {
+                        fresh_facts(&mut f, n);
                     }
-                    put(borrow_mut(f.sreg), n, q + 1);
+                    put(&mut f.sreg, n, q + 1);
                     t7 := f.rver[q];
-                    put(borrow_mut(f.sregv), n, t7);
+                    put(&mut f.sregv, n, t7);
                 }
             }
             if loaded != 0 {
                 n := loaded - 1;
                 if o.k0[i] != 2 {
-                    put(borrow_mut(f.rslot), q, n + 1);
+                    put(&mut f.rslot, q, n + 1);
                     t8 := f.sver[n];
-                    put(borrow_mut(f.rslotv), q, t8);
+                    put(&mut f.rslotv, q, t8);
                 }
             }
         }
         if is_jump(op2) & (op2 != 15) {
             ep := f.epoch + 1;
-            exchange(borrow_mut(f.epoch), ep);
+            exchange(&mut f.epoch, ep);
         }
         if (op2 == 29) + (op2 == 30) {
             ep := f.epoch + 1;
-            exchange(borrow_mut(f.epoch), ep);
+            exchange(&mut f.epoch, ep);
         }
         i += 1;
     }
 }
 fn count_reads<a, c>(o: (&a O), f: (&c mut F), first: u64, last: u64) {
     for n in f.reads.len() {
-        put(borrow_mut(f.reads), n, 0);
+        put(&mut f.reads, n, 0);
     }
     for i in last - first {
         j := first + i;
         if o.del[j] == 0 {
-            if slot_read(borrow(o), j, 0) {
+            if slot_read(&o, j, 0) {
                 n := o.v0[j] / 8;
                 t9 := f.reads[n] + 1;
-                put(borrow_mut(f.reads), n, t9);
+                put(&mut f.reads, n, t9);
             }
-            if slot_read(borrow(o), j, 1) {
+            if slot_read(&o, j, 1) {
                 n := o.v1[j] / 8;
                 t10 := f.reads[n] + 1;
-                put(borrow_mut(f.reads), n, t10);
+                put(&mut f.reads, n, t10);
             }
         }
     }
 }
 fn dead_stores<a, c>(o: (&a mut O), f: (&c mut F), first: u64, last: u64) {
-    count_reads(borrow(o), borrow_mut(f), first, last);
+    count_reads(&o, &mut f, first, last);
     for i in last - first {
         j := first + i;
         if (o.del[j] == 0) & (o.op[j] == 1) & (o.k1[j] == 2) {
             n := o.v1[j] / 8;
             if (f.bad[n] == 0) & (f.reads[n] == 0) {
-                kill(borrow_mut(o), j);
+                kill(&mut o, j);
             }
         }
     }
@@ -1223,13 +1225,13 @@ fn live_pass<a, c>(o: (&a mut O), lin: (&c mut u64[]), remove: u64) -> u64 {
             op := o.op[i];
             if op == 100 {
                 if lin[i] != live {
-                    put(borrow_mut(lin), i, live);
+                    put(&mut lin, i, live);
                     changed = 1;
                 }
             } else {
                 if op != 101 {
                     if (op == 16) + ((16 < op) & (op < 25)) {
-                        t := jump_target(borrow(o), i);
+                        t := jump_target(&o, i);
                         mut there = all_regs();
                         if t < last {
                             there = lin[t];
@@ -1257,10 +1259,10 @@ fn live_pass<a, c>(o: (&a mut O), lin: (&c mut u64[]), remove: u64) -> u64 {
                                     }
                                 }
                                 if removable {
-                                    kill(borrow_mut(o), i);
+                                    kill(&mut o, i);
                                 } else {
-                                    live = (live & (all_regs() - writes(borrow(o), i)))
-                                        | reads(borrow(o), i);
+                                    live = (live & (all_regs() - writes(&o, i)))
+                                        | reads(&o, i);
                                 }
                             }
                         }
@@ -1279,12 +1281,12 @@ fn dead_defs<a, b>(o: (&a mut O), s: &b [u8], first: u64, last: u64) {
     mut rounds = 0;
     while rounds < 50 {
         rounds += 1;
-        if live_pass(borrow_mut(o), borrow_mut(lin), 0) == 0 {
+        if live_pass(&mut o, &mut lin, 0) == 0 {
             break;
         }
     }
     if rounds < 50 {
-        live_pass(borrow_mut(o), borrow_mut(lin), 1);
+        live_pass(&mut o, &mut lin, 1);
     }
 }
 fn next_live<a>(o: (&a O), i: u64, last: u64) -> u64 {
@@ -1298,12 +1300,12 @@ fn next_live<a>(o: (&a O), i: u64, last: u64) -> u64 {
     return last;
 }
 fn next_insn<a>(o: (&a O), i: u64, last: u64) -> u64 {
-    mut j = next_live(borrow(o), i, last);
+    mut j = next_live(&o, i, last);
     while j < last {
         if o.op[j] != 100 {
             return j;
         }
-        j = next_live(borrow(o), j, last);
+        j = next_live(&o, j, last);
     }
     return last;
 }
@@ -1317,31 +1319,31 @@ fn dead_after<a>(o: (&a O), i: u64, r: u64, budget: u64) -> u64 {
     mut steps = 0;
     while steps < 40 {
         steps += 1;
-        j = next_insn(borrow(o), j, last);
+        j = next_insn(&o, j, last);
         if j >= last {
             return false;
         }
         op := o.op[j];
-        rd := reads(borrow(o), j);
+        rd := reads(&o, j);
         if (rd >> r) & 1 {
             return false;
         }
         if op == 0 {
             return false;
         }
-        wr := writes(borrow(o), j);
+        wr := writes(&o, j);
         if (wr >> r) & 1 {
             return true;
         }
         if is_jump(op) & (op != 15) {
-            t := jump_target(borrow(o), j);
+            t := jump_target(&o, j);
             if t >= last {
                 return false;
             }
             if op == 16 {
                 j = t;
             } else {
-                if dead_after(borrow(o), t, r, budget - 1) == 0 {
+                if dead_after(&o, t, r, budget - 1) == 0 {
                     return false;
                 }
             }
@@ -1377,7 +1379,7 @@ fn jump_target<a>(o: (&a O), j: u64) -> u64 {
 fn gen_number<a>(o: (&a mut O), n: u64) -> u64 {
     start := o.gen.len();
     if 9 < n {
-        gen_number(borrow_mut(o), n / 10);
+        gen_number(&mut o, n / 10);
     }
     o.gen.push(48 + n % 10);
     return start;
@@ -1385,10 +1387,10 @@ fn gen_number<a>(o: (&a mut O), n: u64) -> u64 {
 fn gen_imm<a>(o: (&a mut O), n: u64, i: u64, j: u64) {
     start := o.gen.len();
     o.gen.push(36);
-    gen_number(borrow_mut(o), n);
+    gen_number(&mut o, n);
     end := o.gen.len();
-    set_operand(borrow_mut(o), i, j, 5, 0);
-    set_range(borrow_mut(o), i, j, start, end);
+    set_operand(&mut o, i, j, 5, 0);
+    set_range(&mut o, i, j, start, end);
 }
 fn imm_value<a, b>(o: (&a O), s: &b [u8], i: u64) -> u64 {
     // Decimal immediate of operand 0 (+1), or 0.
@@ -1420,18 +1422,18 @@ fn peephole<a, b>(o: (&a mut O), s: &b [u8], first: u64, last: u64) {
         op := o.op[i];
         // setCC %al; movzbq %al,%rax; [xorq $1,%rax]; testq %rax,%rax; jz/jnz L  ->  jCC L
         if (op == 25) + (op == 26) + (op == 27) {
-            a := next_live(borrow(o), i, last);
+            a := next_live(&o, i, last);
             if a < last {
                 if (o.op[a] == 28) & (o.k1[a] == 1) & (o.v1[a] == 0) {
-                    mut b = next_live(borrow(o), a, last);
+                    mut b = next_live(&o, a, last);
                     mut invert = 0;
                     if b < last {
                         if (o.op[b] == 10)
                             & (o.k1[b] == 1)
                             & (o.v1[b] == 0)
-                            & (imm_value(borrow(o), &s, b) == 2) {
+                            & (imm_value(&o, view(s), b) == 2) {
                             invert = 1;
-                            b = next_live(borrow(o), b, last);
+                            b = next_live(&o, b, last);
                         }
                     }
                     if b < last {
@@ -1440,14 +1442,14 @@ fn peephole<a, b>(o: (&a mut O), s: &b [u8], first: u64, last: u64) {
                             & (o.v0[b] == 0)
                             & (o.k1[b] == 1)
                             & (o.v1[b] == 0) {
-                            c := next_live(borrow(o), b, last);
+                            c := next_live(&o, b, last);
                             if c < last {
                                 jop := o.op[c];
                                 if (jop == 17) + (jop == 18) + (jop == 19) + (jop == 20) {
-                                    t := jump_target(borrow(o), c);
+                                    t := jump_target(&o, c);
                                     if t < last {
-                                        if dead_after(borrow(o), c, 0, 3)
-                                            & dead_after(borrow(o), t, 0, 3) {
+                                        if dead_after(&o, c, 0, 3)
+                                            & dead_after(&o, t, 0, 3) {
                                             // jump when the value is non-zero (jnz/jne) or zero (jz/je)
                                             mut when = (jop == 19) + (jop == 20);
                                             if invert {
@@ -1475,16 +1477,16 @@ fn peephole<a, b>(o: (&a mut O), s: &b [u8], first: u64, last: u64) {
                                                     nj = 22;
                                                 }
                                             }
-                                            put(borrow_mut(o.op), c, nj);
-                                            put(borrow_mut(o.chg), c, 1);
-                                            kill(borrow_mut(o), i);
-                                            kill(borrow_mut(o), a);
-                                            kill(borrow_mut(o), b);
+                                            put(&mut o.op, c, nj);
+                                            put(&mut o.chg, c, 1);
+                                            kill(&mut o, i);
+                                            kill(&mut o, a);
+                                            kill(&mut o, b);
                                             if invert {
-                                                mut x = next_live(borrow(o), a, last);
+                                                mut x = next_live(&o, a, last);
                                                 if x < c {
                                                     if o.op[x] == 10 {
-                                                        kill(borrow_mut(o), x);
+                                                        kill(&mut o, x);
                                                     }
                                                 }
                                             }
@@ -1499,22 +1501,22 @@ fn peephole<a, b>(o: (&a mut O), s: &b [u8], first: u64, last: u64) {
         }
         // testq %rcx,%rcx; jnz L; call rt_abort; L: xorq %rdx,%rdx; divq %rcx with rcx = 2^k
         if (op == 7) & (o.k0[i] == 1) & (o.v0[i] == 1) & (o.k1[i] == 1) & (o.v1[i] == 1) {
-            j := next_live(borrow(o), i, last);
+            j := next_live(&o, i, last);
             if j < last {
                 if o.op[j] == 20 {
-                    c := next_live(borrow(o), j, last);
+                    c := next_live(&o, j, last);
                     if c < last {
                         if (o.op[c] == 15)
                             & (o.k0[c] == 4)
-                            & same(&s, o.s0[c], o.e0[c], &"rt_abort") {
-                            x := next_insn(borrow(o), c, last);
+                            & same(view(s), o.s0[c], o.e0[c], view("rt_abort")) {
+                            x := next_insn(&o, c, last);
                             if x < last {
                                 if (o.op[x] == 10)
                                     & (o.k0[x] == 1)
                                     & (o.v0[x] == 2)
                                     & (o.k1[x] == 1)
                                     & (o.v1[x] == 2) {
-                                    d := next_live(borrow(o), x, last);
+                                    d := next_live(&o, x, last);
                                     if d < last {
                                         if (o.op[d] == 13) & (o.k0[d] == 1) & (o.v0[d] == 1) {
                                             // Find the constant in rcx: last definition before the test.
@@ -1529,10 +1531,10 @@ fn peephole<a, b>(o: (&a mut O), s: &b [u8], first: u64, last: u64) {
                                                     if (kop == 100) + (kop == 0) + is_jump(kop) {
                                                         break;
                                                     }
-                                                    if (writes(borrow(o), k) >> 1) & 1 {
+                                                    if (writes(&o, k) >> 1) & 1 {
                                                         if ((kop == 1) + (kop == 2))
                                                             & (o.k1[k] == 1) {
-                                                            value = imm_value(borrow(o), &s, k);
+                                                            value = imm_value(&o, view(s), k);
                                                         }
                                                         break;
                                                     }
@@ -1545,20 +1547,20 @@ fn peephole<a, b>(o: (&a mut O), s: &b [u8], first: u64, last: u64) {
                                                     while (1 << shift) < v {
                                                         shift += 1;
                                                     }
-                                                    put(borrow_mut(o.op), i, 1);
-                                                    set_operand(borrow_mut(o), i, 0, 1, 0);
-                                                    set_operand(borrow_mut(o), i, 1, 1, 2);
-                                                    put(borrow_mut(o.op), j, 8);
-                                                    gen_imm(borrow_mut(o), v - 1, j, 0);
-                                                    set_operand(borrow_mut(o), j, 1, 1, 2);
-                                                    put(borrow_mut(o.op), c, 34);
-                                                    gen_imm(borrow_mut(o), shift, c, 0);
-                                                    set_operand(borrow_mut(o), c, 1, 1, 0);
-                                                    kill(borrow_mut(o), x);
-                                                    kill(borrow_mut(o), d);
-                                                    put(borrow_mut(o.tr), i, 0);
-                                                    put(borrow_mut(o.tr), j, 0);
-                                                    put(borrow_mut(o.tr), c, 0);
+                                                    put(&mut o.op, i, 1);
+                                                    set_operand(&mut o, i, 0, 1, 0);
+                                                    set_operand(&mut o, i, 1, 1, 2);
+                                                    put(&mut o.op, j, 8);
+                                                    gen_imm(&mut o, v - 1, j, 0);
+                                                    set_operand(&mut o, j, 1, 1, 2);
+                                                    put(&mut o.op, c, 34);
+                                                    gen_imm(&mut o, shift, c, 0);
+                                                    set_operand(&mut o, c, 1, 1, 0);
+                                                    kill(&mut o, x);
+                                                    kill(&mut o, d);
+                                                    put(&mut o.tr, i, 0);
+                                                    put(&mut o.tr, j, 0);
+                                                    put(&mut o.tr, c, 0);
                                                 }
                                             }
                                         }
@@ -1606,13 +1608,13 @@ fn emit_operand<a, b>(o: (&a mut O), s: &b [u8], i: u64, j: u64) {
     }
     if k == 1 {
         o.out.push(37);
-        reg_name(borrow_mut(o), v);
+        reg_name(&mut o, v);
         return ();
     }
     if k == 2 {
         o.out.push(45);
-        out_number(borrow_mut(o), v);
-        app(borrow_mut(o.out), &"(%rbp)");
+        out_number(&mut o, v);
+        app(&mut o.out, view("(%rbp)"));
         return ();
     }
     if k == 5 {
@@ -1676,11 +1678,11 @@ fn reg_name<a>(o: (&a mut O), r: u64) {
     if r == 15 {
         t = "r15";
     }
-    app(borrow_mut(o.out), &t);
+    app(&mut o.out, view(t));
 }
 fn out_number<a>(o: (&a mut O), n: u64) {
     if 9 < n {
-        out_number(borrow_mut(o), n / 10);
+        out_number(&mut o, n / 10);
     }
     o.out.push(48 + n % 10);
 }
@@ -1688,66 +1690,66 @@ fn emit_line<a, b>(o: (&a mut O), s: &b [u8], i: u64) {
     op := o.op[i];
     if (op == 40) + (op == 41) + (op == 44) {
         n := o.uniq + 1;
-        exchange(borrow_mut(o.uniq), n);
-        app(borrow_mut(o.out), &"cmpq 8(%rdi),%rsi\njb .Lopt");
-        out_number(borrow_mut(o), n);
-        app(borrow_mut(o.out), &"\ncall rt_abort\n.Lopt");
-        out_number(borrow_mut(o), n);
+        exchange(&mut o.uniq, n);
+        app(&mut o.out, view("cmpq 8(%rdi),%rsi\njb .Lopt"));
+        out_number(&mut o, n);
+        app(&mut o.out, view("\ncall rt_abort\n.Lopt"));
+        out_number(&mut o, n);
         if op == 40 {
-            app(borrow_mut(o.out), &":\nmovq (%rdi),%rax\nleaq (%rax,%rsi,8),%rax\n");
+            app(&mut o.out, view(":\nmovq (%rdi),%rax\nleaq (%rax,%rsi,8),%rax\n"));
         } else {
             if op == 41 {
-                app(borrow_mut(o.out), &":\nmovq (%rdi),%rax\nmovq (%rax,%rsi,8),%rax\n");
+                app(&mut o.out, view(":\nmovq (%rdi),%rax\nmovq (%rax,%rsi,8),%rax\n"));
             } else {
-                app(borrow_mut(o.out), &":\nmovq (%rdi),%rax\nmovzbq (%rax,%rsi,1),%rax\n");
+                app(&mut o.out, view(":\nmovq (%rdi),%rax\nmovzbq (%rax,%rsi,1),%rax\n"));
             }
         }
         return ();
     }
     if op == 42 {
-        app(borrow_mut(o.out), &"movq 8(%rdi),%rax\n");
+        app(&mut o.out, view("movq 8(%rdi),%rax\n"));
         return ();
     }
     if op == 47 {
-        app(borrow_mut(o.out), &"movq (%rdi),%rax\nleaq (%rax,%rsi,8),%rax\n");
+        app(&mut o.out, view("movq (%rdi),%rax\nleaq (%rax,%rsi,8),%rax\n"));
         return ();
     }
     if op == 48 {
-        app(borrow_mut(o.out), &"movq (%rdi),%rax\nmovzbq (%rax,%rsi,1),%rax\n");
+        app(&mut o.out, view("movq (%rdi),%rax\nmovzbq (%rax,%rsi,1),%rax\n"));
         return ();
     }
     if (op == 45) + (op == 46) {
         fast := o.uniq + 1;
         done := o.uniq + 2;
-        exchange(borrow_mut(o.uniq), done);
-        app(borrow_mut(o.out), &"movq 8(%rdi),%rcx\ncmpq 16(%rdi),%rcx\njb .Lopt");
-        out_number(borrow_mut(o), fast);
+        exchange(&mut o.uniq, done);
+        app(&mut o.out, view("movq 8(%rdi),%rcx\ncmpq 16(%rdi),%rcx\njb .Lopt"));
+        out_number(&mut o, fast);
         if op == 45 {
-            app(borrow_mut(o.out), &"\ncall rt_push\njmp .Lopt");
+            app(&mut o.out, view("\ncall rt_push\njmp .Lopt"));
         } else {
-            app(borrow_mut(o.out), &"\ncall rt_pushb\njmp .Lopt");
+            app(&mut o.out, view("\ncall rt_pushb\njmp .Lopt"));
         }
-        out_number(borrow_mut(o), done);
-        app(borrow_mut(o.out), &"\n.Lopt");
-        out_number(borrow_mut(o), fast);
+        out_number(&mut o, done);
+        app(&mut o.out, view("\n.Lopt"));
+        out_number(&mut o, fast);
         if op == 45 {
             app(
-                borrow_mut(o.out),
-                &":\nmovq (%rdi),%rdx\nmovq %rsi,(%rdx,%rcx,8)\nincq %rcx\nmovq %rcx,8(%rdi)\n"
+                &mut o.out,
+                view(":\nmovq (%rdi),%rdx\nmovq %rsi,(%rdx,%rcx,8)\nincq %rcx\nmovq %rcx,8(%rdi)\n")
             );
         } else {
             app(
-                borrow_mut(o.out),
-                &":\nleaq 1(%rcx),%rdx\nmovq %rdx,8(%rdi)\naddq (%rdi),%rcx\nmovq %rsi,%rax\nmovb %al,(%rcx)\n"
+                &mut o.out,
+                view(":\nleaq 1(%rcx),%rdx\nmovq %rdx,8(%rdi)\naddq (%rdi),%rcx\nmovq %rsi,%rax\nmovb %al,(%rcx)\n")
             );
         }
-        app(borrow_mut(o.out), &"movq $0,%rax\n.Lopt");
-        out_number(borrow_mut(o), done);
-        app(borrow_mut(o.out), &":\n");
+        app(&mut o.out, view("movq $0,%rax\n.Lopt"));
+        out_number(&mut o, done);
+        app(&mut o.out, view(":\n"));
         return ();
     }
     if op == 43 {
-        app(borrow_mut(o.out), &"movq (%rdi),%rax\nmovq %rsi,(%rdi)\n");
+        app(&mut o.out, view("movq (%rdi),%rax\nmovq %rsi,(%rdi)\n"));
         return ();
     }
     if o.chg[i] == 0 {
@@ -1758,26 +1760,26 @@ fn emit_line<a, b>(o: (&a mut O), s: &b [u8], i: u64) {
         return ();
     }
     code := o.op[i];
-    opname(borrow_mut(o), code);
+    opname(&mut o, code);
     if o.k0[i] != 0 {
         o.out.push(32);
-        emit_operand(borrow_mut(o), &s, i, 0);
+        emit_operand(&mut o, view(s), i, 0);
         if o.k1[i] != 0 {
             o.out.push(44);
-            emit_operand(borrow_mut(o), &s, i, 1);
+            emit_operand(&mut o, view(s), i, 1);
         }
     }
     o.out.push(10);
 }
 fn emit_frame_slot<a, b>(o: (&a mut O), s: &b [u8], p: u64, k: u64) {
     // -.FN-8(k+1)(%rbp), where .FN is the frame constant named by the prologue subq.
-    app(borrow_mut(o.out), &"-");
+    app(&mut o.out, view("-"));
     for x in o.e0[p] - o.s0[p] - 1 {
         o.out.push(s[o.s0[p] + 1 + x]);
     }
-    app(borrow_mut(o.out), &"-");
-    out_number(borrow_mut(o), 8 * (k + 1));
-    app(borrow_mut(o.out), &"(%rbp)");
+    app(&mut o.out, view("-"));
+    out_number(&mut o, 8 * (k + 1));
+    app(&mut o.out, view("(%rbp)"));
 }
 fn function<a, b>(o: (&a mut O), s: &b [u8]) {
     first := 0;
@@ -1797,22 +1799,22 @@ fn function<a, b>(o: (&a mut O), s: &b [u8]) {
         if (op == 0) + (op == 3) {
             if o.k0[i] == 2 {
                 n := o.v0[i];
-                put(borrow_mut(f.bad), n / 8, 1);
+                put(&mut f.bad, n / 8, 1);
             }
             if o.k1[i] == 2 {
-                put(borrow_mut(f.bad), o.v1[i] / 8, 1);
+                put(&mut f.bad, o.v1[i] / 8, 1);
             }
         }
         if (o.m0[i] >> 5) & 1 {
-            if (op == 3) & (o.k0[i] == 4) & same(&s, o.s0[i], o.s0[i] + 3, &"-.F") {} else {
-                exchange(borrow_mut(o.weird), 1);
+            if (op == 3) & (o.k0[i] == 4) & same(view(s), o.s0[i], o.s0[i] + 3, view("-.F")) {} else {
+                exchange(&mut o.weird, 1);
             }
         }
         if (o.m1[i] >> 5) & 1 {
-            exchange(borrow_mut(o.weird), 1);
+            exchange(&mut o.weird, 1);
         }
         if (op == 5) & (prologue == 0) & (o.k1[i] == 1) & (o.v1[i] == 4) & (i == 4) {
-            if same(&s, o.s0[i], o.s0[i] + 3, &"$.F") {
+            if same(view(s), o.s0[i], o.s0[i] + 3, view("$.F")) {
                 prologue = i;
             }
         }
@@ -1840,13 +1842,13 @@ fn function<a, b>(o: (&a mut O), s: &b [u8]) {
                 }
             }
             if prev != 29 {
-                exchange(borrow_mut(o.weird), 1);
+                exchange(&mut o.weird, 1);
             }
         }
     }
     if o.weird {
         for i in last {
-            emit_line(borrow_mut(o), &s, i);
+            emit_line(&mut o, view(s), i);
         }
         return ();
     }
@@ -1855,7 +1857,7 @@ fn function<a, b>(o: (&a mut O), s: &b [u8]) {
     if minlab != 0 {
         base = minlab - 1;
     }
-    exchange(borrow_mut(o.base), base);
+    exchange(&mut o.base, base);
     mut refs = u64[];
     if minlab != 0 {
         for x in maxlab - base + 1 {
@@ -1865,7 +1867,7 @@ fn function<a, b>(o: (&a mut O), s: &b [u8]) {
         for i in last {
             if o.lab[i] != 0 {
                 li := o.lab[i] - 1 - base;
-                put(borrow_mut(o.table), li, i + 1);
+                put(&mut o.table, li, i + 1);
             }
         }
         for i in last {
@@ -1883,7 +1885,7 @@ fn function<a, b>(o: (&a mut O), s: &b [u8]) {
                     if n >= base {
                         if n - base < refs.len() {
                             x := refs[n - base] + 1;
-                            put(borrow_mut(refs), n - base, x);
+                            put(&mut refs, n - base, x);
                         }
                     }
                 }
@@ -1895,17 +1897,17 @@ fn function<a, b>(o: (&a mut O), s: &b [u8]) {
     for i in last {
         op := o.op[i];
         if (16 < op) & (op < 25) {
-            t := jump_target(borrow(o), i);
+            t := jump_target(&o, i);
             if t < last {
-                j := next_live(borrow(o), i, last);
+                j := next_live(&o, i, last);
                 if j < last {
                     if (o.op[j] == 15) & (o.k0[j] == 4) {
-                        if same(&s, o.s0[j], o.e0[j], &"rt_abort") {
-                            if (next_live(borrow(o), j, last) == t)
+                        if same(view(s), o.s0[j], o.e0[j], view("rt_abort")) {
+                            if (next_live(&o, j, last) == t)
                                 & (refs[o.lab[t] - 1 - base] == 1) {
-                                put(borrow_mut(o.tr), i, 1);
-                                put(borrow_mut(o.tr), j, 1);
-                                put(borrow_mut(o.tr), t, 1);
+                                put(&mut o.tr, i, 1);
+                                put(&mut o.tr, j, 1);
+                                put(&mut o.tr, t, 1);
                             }
                         }
                     }
@@ -1913,9 +1915,9 @@ fn function<a, b>(o: (&a mut O), s: &b [u8]) {
             }
         }
     }
-    forward(borrow_mut(o), borrow_mut(f), &s, first, last);
-    dead_stores(borrow_mut(o), borrow_mut(f), first, last);
-    dead_defs(borrow_mut(o), &s, first, last);
+    forward(&mut o, &mut f, view(s), first, last);
+    dead_stores(&mut o, &mut f, first, last);
+    dead_defs(&mut o, view(s), first, last);
     // Promotion: weights grow 4x per loop nesting level (backward jumps).
     mut chosen = u64[];
     mut slots = u64[];
@@ -1929,12 +1931,12 @@ fn function<a, b>(o: (&a mut O), s: &b [u8]) {
         for i in last {
             op := o.op[i];
             if is_jump(op) & (op != 15) & (o.del[i] == 0) {
-                t := jump_target(borrow(o), i);
+                t := jump_target(&o, i);
                 if t < i {
                     x := opens[t] + 1;
-                    put(borrow_mut(opens), t, x);
+                    put(&mut opens, t, x);
                     y := closes[i + 1] + 1;
-                    put(borrow_mut(closes), i + 1, y);
+                    put(&mut closes, i + 1, y);
                 }
             }
         }
@@ -1962,11 +1964,11 @@ fn function<a, b>(o: (&a mut O), s: &b [u8]) {
                     if k == 2 {
                         n := v / 8;
                         if f.bad[n] == 0 {
-                            if promotable_use(borrow(o), i) {
+                            if promotable_use(&o, i) {
                                 t11 := f.weight[n] + w;
-                                put(borrow_mut(f.weight), n, t11);
+                                put(&mut f.weight, n, t11);
                             } else {
-                                put(borrow_mut(f.bad), n, 1);
+                                put(&mut f.bad, n, 1);
                             }
                         }
                     }
@@ -1988,7 +1990,7 @@ fn function<a, b>(o: (&a mut O), s: &b [u8]) {
                 if best != 0 {
                     chosen.push(reg);
                     slots.push(best);
-                    put(borrow_mut(f.bad), best, 1);
+                    put(&mut f.bad, best, 1);
                 }
             }
         }
@@ -2005,7 +2007,7 @@ fn function<a, b>(o: (&a mut O), s: &b [u8]) {
                         if k == 2 {
                             for c in slots.len() {
                                 if slots[c] * 8 == v {
-                                    set_operand(borrow_mut(o), i, j, 1, chosen[c]);
+                                    set_operand(&mut o, i, j, 1, chosen[c]);
                                 }
                             }
                         }
@@ -2015,69 +2017,69 @@ fn function<a, b>(o: (&a mut O), s: &b [u8]) {
             mut g = new_facts(ns);
             for n in ns {
                 b := f.bad[n];
-                put(borrow_mut(g.bad), n, b);
+                put(&mut g.bad, n, b);
             }
-            forward(borrow_mut(o), borrow_mut(g), &s, first, last);
-            dead_defs(borrow_mut(o), &s, first, last);
+            forward(&mut o, &mut g, view(s), first, last);
+            dead_defs(&mut o, view(s), first, last);
         }
     }
-    peephole(borrow_mut(o), &s, first, last);
-    dead_defs(borrow_mut(o), &s, first, last);
-    newframe := compact(borrow_mut(o), &s, prologue, ns);
+    peephole(&mut o, view(s), first, last);
+    dead_defs(&mut o, view(s), first, last);
+    newframe := compact(&mut o, view(s), prologue, ns);
     for i in last {
         if (newframe != 0) & (i + 1 == last) {
-            app(borrow_mut(o.out), &".set ");
+            app(&mut o.out, view(".set "));
             pa := o.s0[prologue] + 1;
             pe := o.e0[prologue];
             for x in pe - pa {
                 o.out.push(s[pa + x]);
             }
             o.out.push(44);
-            out_number(borrow_mut(o), newframe);
+            out_number(&mut o, newframe);
             o.out.push(10);
             continue;
         }
         if (chosen.len() != 0) & (o.op[i] == 29) & (o.del[i] == 0) {
             for c in chosen.len() {
-                app(borrow_mut(o.out), &"movq ");
-                emit_frame_slot(borrow_mut(o), &s, prologue, c);
-                app(borrow_mut(o.out), &",%");
-                reg_name(borrow_mut(o), chosen[c]);
+                app(&mut o.out, view("movq "));
+                emit_frame_slot(&mut o, view(s), prologue, c);
+                app(&mut o.out, view(",%"));
+                reg_name(&mut o, chosen[c]);
                 o.out.push(10);
             }
         }
         if o.del[i] == 0 {
-            emit_line(borrow_mut(o), &s, i);
+            emit_line(&mut o, view(s), i);
         }
         if (o.zline != 0) & (i + 1 == o.zline) {
             mut k = o.zfrom;
             while k < o.zto + 1 {
-                app(borrow_mut(o.out), &"movq $0,-");
-                out_number(borrow_mut(o), k * 8);
-                app(borrow_mut(o.out), &"(%rbp)\n");
+                app(&mut o.out, view("movq $0,-"));
+                out_number(&mut o, k * 8);
+                app(&mut o.out, view("(%rbp)\n"));
                 k += 1;
             }
         }
         if (chosen.len() != 0) & (i == prologue) {
-            app(borrow_mut(o.out), &"subq $");
-            out_number(borrow_mut(o), 16 * ((chosen.len() + 1) / 2));
-            app(borrow_mut(o.out), &",%rsp\n");
+            app(&mut o.out, view("subq $"));
+            out_number(&mut o, 16 * ((chosen.len() + 1) / 2));
+            app(&mut o.out, view(",%rsp\n"));
             for c in chosen.len() {
-                app(borrow_mut(o.out), &"movq %");
-                reg_name(borrow_mut(o), chosen[c]);
+                app(&mut o.out, view("movq %"));
+                reg_name(&mut o, chosen[c]);
                 o.out.push(44);
-                emit_frame_slot(borrow_mut(o), &s, prologue, c);
+                emit_frame_slot(&mut o, view(s), prologue, c);
                 o.out.push(10);
             }
             for c in chosen.len() {
-                app(borrow_mut(o.out), &"movq $0,%");
-                reg_name(borrow_mut(o), chosen[c]);
+                app(&mut o.out, view("movq $0,%"));
+                reg_name(&mut o, chosen[c]);
                 o.out.push(10);
             }
         }
     }
     if (prologue != 0) & (chosen.len() == 0) & (o.zline != 0) {
-        inline_candidate(borrow_mut(o), &s, prologue);
+        inline_candidate(&mut o, view(s), prologue);
     }
 }
 fn name_hash<b>(s: &b [u8], a: u64, e: u64) -> u64 {
@@ -2116,7 +2118,7 @@ fn inline_candidate<a, b>(o: (&a mut O), s: &b [u8], prologue: u64) {
                         if o.k0[i] != 4 {
                             return ();
                         }
-                        if same(&s, o.s0[i], o.e0[i], &"rt_abort") == 0 {
+                        if same(view(s), o.s0[i], o.e0[i], view("rt_abort")) == 0 {
                             return ();
                         }
                     }
@@ -2186,7 +2188,7 @@ fn inline_candidate<a, b>(o: (&a mut O), s: &b [u8], prologue: u64) {
                     for x in slots.len() {
                         if slots[x] == v {
                             r := regs[x];
-                            set_operand(borrow_mut(o), i, j, 1, r);
+                            set_operand(&mut o, i, j, 1, r);
                         }
                     }
                 }
@@ -2197,8 +2199,8 @@ fn inline_candidate<a, b>(o: (&a mut O), s: &b [u8], prologue: u64) {
     // Cleared (non-parameter) slots start at zero, as the frame zeroing guaranteed.
     for x in slots.len() {
         if o.zfrom * 8 < slots[x] + 1 {
-            app(borrow_mut(o.out), &"movq $0,%");
-            reg_name(borrow_mut(o), regs[x]);
+            app(&mut o.out, view("movq $0,%"));
+            reg_name(&mut o, regs[x]);
             o.out.push(10);
         }
     }
@@ -2206,15 +2208,15 @@ fn inline_candidate<a, b>(o: (&a mut O), s: &b [u8], prologue: u64) {
         if (prologue < i) & (o.del[i] == 0) & (i + 1 != last) {
             op := o.op[i];
             if op == 30 {
-                app(borrow_mut(o.out), &"jmp .Lret\n");
+                app(&mut o.out, view("jmp .Lret\n"));
             } else {
                 if op != 29 {
-                    emit_line(borrow_mut(o), &s, i);
+                    emit_line(&mut o, view(s), i);
                 }
             }
         }
     }
-    app(borrow_mut(o.out), &".Lret:\n");
+    app(&mut o.out, view(".Lret:\n"));
     mut body = u8[];
     for x in o.out.len() - mark {
         c := o.out[mark + x];
@@ -2229,17 +2231,17 @@ fn inline_candidate<a, b>(o: (&a mut O), s: &b [u8], prologue: u64) {
     for x in ne - na {
         name.push(s[na + x]);
     }
-    h := name_hash(&s, na, ne);
+    h := name_hash(view(s), na, ne);
     index := o.inl_names.len();
     o.inl_names.push(name);
     o.inl_bodies.push(body);
     old := o.inl_head[h];
     o.inl_next.push(old);
-    put(borrow_mut(o.inl_head), h, index + 1);
+    put(&mut o.inl_head, h, index + 1);
 }
 // Replaces `call NAME` lines for inlinable functions by their bodies with per-site labels.
 fn inline_calls<a>(o: (&a mut O)) {
-    text := exchange(borrow_mut(o.out), u8[]);
+    text := exchange(&mut o.out, u8[]);
     mut start = 0;
     mut site = 0;
     for i in text.len() {
@@ -2249,14 +2251,14 @@ fn inline_calls<a>(o: (&a mut O)) {
             start = i + 1;
             mut done = 0;
             if (e - a > 5) & (text[a] == 99) {
-                if same(&text, a, a + 5, &"call ") {
-                    h := name_hash(&text, a + 5, e);
+                if same(view(text), a, a + 5, view("call ")) {
+                    h := name_hash(view(text), a + 5, e);
                     mut k = o.inl_head[h];
                     while k != 0 {
                         n := &o.inl_names[k - 1];
-                        if same(&text, a + 5, e, &n) {
+                        if same(view(text), a + 5, e, view(n)) {
                             site += 1;
-                            emit_body(borrow_mut(o), k - 1, site);
+                            emit_body(&mut o, k - 1, site);
                             done = 1;
                             break;
                         }
@@ -2304,8 +2306,8 @@ fn emit_body<a>(o: (&a mut O), k: u64, site: u64) {
                 o.out.push(d);
                 i += 1;
             }
-            app(borrow_mut(o.out), &"_i");
-            out_number(borrow_mut(o), site);
+            app(&mut o.out, view("_i"));
+            out_number(&mut o, site);
         } else {
             o.out.push(c);
             i += 1;
@@ -2359,15 +2361,15 @@ fn compact<a, b>(o: (&a mut O), s: &b [u8], prologue: u64, ns: u64) -> u64 {
         map.push(0);
     }
     for n in params + 1 {
-        put(borrow_mut(map), n, 1);
+        put(&mut map, n, 1);
     }
     for i in last {
         if o.del[i] == 0 {
             if o.k0[i] == 2 {
-                put(borrow_mut(map), o.v0[i] / 8, 1);
+                put(&mut map, o.v0[i] / 8, 1);
             }
             if o.k1[i] == 2 {
-                put(borrow_mut(map), o.v1[i] / 8, 1);
+                put(&mut map, o.v1[i] / 8, 1);
             }
         }
     }
@@ -2376,37 +2378,37 @@ fn compact<a, b>(o: (&a mut O), s: &b [u8], prologue: u64, ns: u64) -> u64 {
         if n != 0 {
             if map[n] != 0 {
                 used += 1;
-                put(borrow_mut(map), n, used);
+                put(&mut map, n, used);
             }
         }
     }
     // A small frame is cleared with direct stores instead of `rep stosq` (leaq/movq/xorl/rep).
     words := (used * 8 + 15) / 16 * 16 / 8;
-    exchange(borrow_mut(o.zline), 0);
+    exchange(&mut o.zline, 0);
     if words < params + 17 {
         for i in last {
             if (o.op[i] == 3) & (o.k1[i] == 1) & (o.v1[i] == 7) & (o.k0[i] == 4) {
-                if same(&s, o.s0[i], o.s0[i] + 3, &"-.F") {
-                    a := next_live(borrow(o), i, last);
+                if same(view(s), o.s0[i], o.s0[i] + 3, view("-.F")) {
+                    a := next_live(&o, i, last);
                     if a < last {
-                        b := next_live(borrow(o), a, last);
+                        b := next_live(&o, a, last);
                         if b < last {
-                            d := next_live(borrow(o), b, last);
+                            d := next_live(&o, b, last);
                             if d < last {
                                 if (o.op[a] == 1)
                                     & (o.k1[a] == 1)
                                     & (o.v1[a] == 1)
                                     & (o.op[b] == 0)
                                     & (o.op[d] == 0)
-                                    & same(&s, o.ls[d], o.le[d], &"rep stosq")
-                                    & same(&s, o.ls[b], o.le[b], &"xorl %eax,%eax") {
-                                    kill(borrow_mut(o), i);
-                                    kill(borrow_mut(o), a);
-                                    kill(borrow_mut(o), b);
-                                    kill(borrow_mut(o), d);
-                                    exchange(borrow_mut(o.zline), d + 1);
-                                    exchange(borrow_mut(o.zfrom), params + 1);
-                                    exchange(borrow_mut(o.zto), words);
+                                    & same(view(s), o.ls[d], o.le[d], view("rep stosq"))
+                                    & same(view(s), o.ls[b], o.le[b], view("xorl %eax,%eax")) {
+                                    kill(&mut o, i);
+                                    kill(&mut o, a);
+                                    kill(&mut o, b);
+                                    kill(&mut o, d);
+                                    exchange(&mut o.zline, d + 1);
+                                    exchange(&mut o.zfrom, params + 1);
+                                    exchange(&mut o.zto, words);
                                 }
                             }
                         }
@@ -2419,11 +2421,11 @@ fn compact<a, b>(o: (&a mut O), s: &b [u8], prologue: u64, ns: u64) -> u64 {
         if o.del[i] == 0 {
             if o.k0[i] == 2 {
                 v := map[o.v0[i] / 8] * 8;
-                set_operand(borrow_mut(o), i, 0, 2, v);
+                set_operand(&mut o, i, 0, 2, v);
             }
             if o.k1[i] == 2 {
                 v := map[o.v1[i] / 8] * 8;
-                set_operand(borrow_mut(o), i, 1, 2, v);
+                set_operand(&mut o, i, 1, 2, v);
             }
         }
     }
@@ -2447,10 +2449,10 @@ fn reset<a>(o: (&a mut O)) {
     o.s1.clear();
     o.e1.clear();
     o.m1.clear();
-    exchange(borrow_mut(o.gen), u8[]);
-    exchange(borrow_mut(o.weird), 0);
-    exchange(borrow_mut(o.zline), 0);
-    exchange(borrow_mut(o.maxslot), 0);
+    exchange(&mut o.gen, u8[]);
+    exchange(&mut o.weird, 0);
+    exchange(&mut o.zline, 0);
+    exchange(&mut o.maxslot, 0);
 }
 pub fn optimize<b>(s: &b [u8]) -> u8[] {
     mut o = O {
@@ -2499,8 +2501,8 @@ pub fn optimize<b>(s: &b [u8]) -> u8[] {
             start = i + 1;
             if inside == 0 {
                 if (e - a > 15) & (s[a] == 46) & (s[a + 1] == 116) {
-                    if same(&s, a, a + 6, &".type ") == 0 {} else {
-                        if same(&s, e - 9, e, &"@function") {
+                    if same(view(s), a, a + 6, view(".type ")) == 0 {} else {
+                        if same(view(s), e - 9, e, view("@function")) {
                             inside = 1;
                         }
                     }
@@ -2513,24 +2515,24 @@ pub fn optimize<b>(s: &b [u8]) -> u8[] {
                     continue;
                 }
             }
-            parse(borrow_mut(o), &s, a, e);
+            parse(&mut o, view(s), a, e);
             if (e - a > 6) & (inside != 0) {
                 if (s[a] == 46) & (s[a + 1] == 115) & (s[a + 5] == 46) {
-                    function(borrow_mut(o), &s);
-                    reset(borrow_mut(o));
+                    function(&mut o, view(s));
+                    reset(&mut o);
                     inside = 0;
                 }
             }
         }
     }
     if inside {
-        function(borrow_mut(o), &s);
+        function(&mut o, view(s));
     }
     for x in s.len() - start {
         o.out.push(s[start + x]);
     }
     if o.inl_names.len() != 0 {
-        inline_calls(borrow_mut(o));
+        inline_calls(&mut o);
     }
-    return exchange(borrow_mut(o.out), u8[]);
+    return exchange(&mut o.out, u8[]);
 }

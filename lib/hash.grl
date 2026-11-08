@@ -23,32 +23,32 @@ fn round<a>(state:(&a mut Hasher)){
     state.v2=wrapping_add(state.v2,state.v1);state.v1=rotate17(state.v1)^state.v2;state.v2=rotate32(state.v2);
 }
 fn compress<a>(state:(&a mut Hasher),word:u64){
-    state.v3=state.v3^word;round(borrow_mut(state));round(borrow_mut(state));state.v0=state.v0^word;
+    state.v3=state.v3^word;round(&mut state);round(&mut state);state.v0=state.v0^word;
 }
 pub fn write_byte<a>(state:(&a mut Hasher),value:u64){
     assert(value<256);state.tail=state.tail^(value*state.factor);state.used+=1;state.total=wrapping_add(state.total,1);
-    if state.used==8{word:=state.tail;compress(borrow_mut(state),word);state.tail=0;state.used=0;state.factor=1;}
+    if state.used==8{word:=state.tail;compress(&mut state,word);state.tail=0;state.used=0;state.factor=1;}
     else{state.factor=state.factor*256;}
 }
 pub fn write_num<a>(state:(&a mut Hasher),value:u64){
-    mut remaining=value;for i in 8{write_byte(borrow_mut(state),remaining&255);remaining=remaining/256;}
+    mut remaining=value;for i in 8{write_byte(&mut state,remaining&255);remaining=remaining/256;}
 }
 pub fn finish(state:Hasher)->u64{
     mut current=state;word:=current.tail^((current.total&255)*72057594037927936);
-    compress(borrow_mut(current),word);current.v2=current.v2^255;
-    round(borrow_mut(current));round(borrow_mut(current));round(borrow_mut(current));round(borrow_mut(current));
+    compress(&mut current,word);current.v2=current.v2^255;
+    round(&mut current);round(&mut current);round(&mut current);round(&mut current);
     return current.v0^current.v1^current.v2^current.v3;
 }
 impl Hash for u64{fn hash<a,b>(value:(&a Self),state:(&b mut Hasher)){write_num(state,load(value));}}
 impl Equal for u64{fn equal<a,b>(left:(&a Self),right:(&b Self))->u64{return load(left)==load(right);}}
 impl Hash for u8[]{fn hash<a,b>(value:(&a Self),state:(&b mut Hasher)){
-    length:=value.len();write_num(borrow_mut(state),length);for i in length{write_byte(borrow_mut(state),value[i]);}
+    length:=value.len();write_num(&mut state,length);for i in length{write_byte(&mut state,value[i]);}
 }}
 impl Equal for u8[]{fn equal<a,b>(left:(&a Self),right:(&b Self))->u64{
     if left.len()!=right.len(){return false;}for i in left.len(){if left[i]!=right[i]{return false;}}return true;
 }}
 impl Hash for string{fn hash<a,b>(value:(&a Self),state:(&b mut Hasher)){
-    length:=value.len();write_num(borrow_mut(state),length);for i in length{write_byte(borrow_mut(state),value[i]);}
+    length:=value.len();write_num(&mut state,length);for i in length{write_byte(&mut state,value[i]);}
 }}
 impl Equal for string{fn equal<a,b>(left:(&a Self),right:(&b Self))->u64{
     if left.len()!=right.len(){return false;}for i in left.len(){if left[i]!=right[i]{return false;}}return true;
@@ -69,6 +69,6 @@ impl Equal for i32{fn equal<a,b>(left:(&a Self),right:(&b Self))->u64{return loa
 impl Hash for i64{fn hash<a,b>(value:(&a Self),state:(&b mut Hasher)){write_num(state,bits(load(value)));}}
 impl Equal for i64{fn equal<a,b>(left:(&a Self),right:(&b Self))->u64{return load(left)==load(right);}}
 pub fn hash<a,T:Hash>(value:(&a T),seed0:u64,seed1:u64)->u64{
-    mut state=hasher(seed0,seed1);Hash::hash(value,borrow_mut(state));return finish(state);
+    mut state=hasher(seed0,seed1);Hash::hash(value,&mut state);return finish(state);
 }
 pub fn equal<a,b,T:Equal>(left:(&a T),right:(&b T))->u64{return Equal::equal(left,right);}

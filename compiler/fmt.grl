@@ -116,7 +116,7 @@ fn scan<a, b>(f: (&a mut F), s: &b [u8]) {
                     }
                     end -= 1;
                 }
-                token(borrow_mut(f), 5, start, end, nl, 0);
+                token(&mut f, 5, start, end, nl, 0);
                 nl = 0;
                 continue;
             }
@@ -137,7 +137,7 @@ fn scan<a, b>(f: (&a mut F), s: &b [u8]) {
             if n < i {
                 i = n;
             }
-            token(borrow_mut(f), 3, start, i, nl, 0);
+            token(&mut f, 3, start, i, nl, 0);
             nl = 0;
             continue;
         }
@@ -154,7 +154,7 @@ fn scan<a, b>(f: (&a mut F), s: &b [u8]) {
                     break;
                 }
             }
-            token(borrow_mut(f), 3, start, i, nl, 0);
+            token(&mut f, 3, start, i, nl, 0);
             nl = 0;
             continue;
         }
@@ -166,7 +166,7 @@ fn scan<a, b>(f: (&a mut F), s: &b [u8]) {
                 }
                 i += 1;
             }
-            token(borrow_mut(f), 1, start, i, nl, 0);
+            token(&mut f, 1, start, i, nl, 0);
             nl = 0;
             continue;
         }
@@ -194,7 +194,7 @@ fn scan<a, b>(f: (&a mut F), s: &b [u8]) {
                 }
                 i += 1;
             }
-            token(borrow_mut(f), 2, start, i, nl, 0);
+            token(&mut f, 2, start, i, nl, 0);
             nl = 0;
             continue;
         }
@@ -219,7 +219,7 @@ fn scan<a, b>(f: (&a mut F), s: &b [u8]) {
             }
         }
         i += width;
-        token(borrow_mut(f), 4, start, i, nl, code);
+        token(&mut f, 4, start, i, nl, code);
         nl = 0;
     }
 }
@@ -242,13 +242,13 @@ fn punct<a>(f: (&a F), i: u64, code: u64) -> u64 {
     return (f.kind[i] == 4) & (f.code[i] == code);
 }
 fn keyword<a, b>(f: (&a F), s: &b [u8], i: u64) -> u64 {
-    return is(borrow(f), &s, i, &"return")
-        + is(borrow(f), &s, i, &"in")
-        + is(borrow(f), &s, i, &"if")
-        + is(borrow(f), &s, i, &"while")
-        + is(borrow(f), &s, i, &"match")
-        + is(borrow(f), &s, i, &"else")
-        + is(borrow(f), &s, i, &"for");
+    return is(&f, view(s), i, view("return"))
+        + is(&f, view(s), i, view("in"))
+        + is(&f, view(s), i, view("if"))
+        + is(&f, view(s), i, view("while"))
+        + is(&f, view(s), i, view("match"))
+        + is(&f, view(s), i, view("else"))
+        + is(&f, view(s), i, view("for"));
 }
 // Binary operators (spaced). '<' / '>' count only when not generic brackets.
 fn binary<a>(f: (&a F), i: u64) -> u64 {
@@ -278,7 +278,7 @@ fn binary<a>(f: (&a F), i: u64) -> u64 {
 fn mark_generics<a, b>(f: (&a mut F), s: &b [u8]) {
     n := f.kind.len();
     for i in n {
-        if punct(borrow(f), i, 60) & (0 < i) {
+        if punct(&f, i, 60) & (0 < i) {
             if f.kind[i - 1] == 1 {
                 mut depth = 0;
                 mut j = i;
@@ -319,12 +319,12 @@ fn mark_generics<a, b>(f: (&a mut F), s: &b [u8]) {
                     mut d = 0;
                     for m in found - i + 1 {
                         at := i + m;
-                        if punct(borrow(f), at, 60) {
+                        if punct(&f, at, 60) {
                             d += 1;
                             mut g = &mut f.generic[at];
                             exchange(g, 1);
                         }
-                        if punct(borrow(f), at, 62) {
+                        if punct(&f, at, 62) {
                             d -= 1;
                             mut g = &mut f.generic[at];
                             exchange(g, 1);
@@ -339,7 +339,7 @@ fn mark_pipes<a, b>(f: (&a mut F), s: &b [u8]) {
     n := f.kind.len();
     mut i = 0;
     while i < n {
-        if punct(borrow(f), i, 124) & prefix_position(borrow(f), &s, i) {
+        if punct(&f, i, 124) & prefix_position(&f, view(s), i) {
             mut j = i + 1;
             mut depth = 0;
             while j < n {
@@ -362,7 +362,7 @@ fn mark_pipes<a, b>(f: (&a mut F), s: &b [u8]) {
                 j += 1;
             }
             if j < n {
-                if punct(borrow(f), j, 124) {
+                if punct(&f, j, 124) {
                     mut g = &mut f.generic[i];
                     exchange(g, 2);
                     mut h = &mut f.generic[j];
@@ -384,7 +384,7 @@ fn prefix_position<a, b>(f: (&a F), s: &b [u8], i: u64) -> u64 {
         return false;
     }
     if k == 1 {
-        return keyword(borrow(f), &s, p);
+        return keyword(&f, view(s), p);
     }
     if k == 4 {
         c := f.code[p];
@@ -405,7 +405,7 @@ fn unary<a, b>(f: (&a F), s: &b [u8], i: u64) -> u64 {
     if (c != 38) & (c != 45) {
         return false;
     }
-    return prefix_position(borrow(f), &s, i);
+    return prefix_position(&f, view(s), i);
 }
 // Space between two tokens on the same line (0/1). inline: the brace context is a literal.
 fn space<a, b>(f: (&a F), s: &b [u8], p: u64, i: u64, inline: u64) -> u64 {
@@ -434,11 +434,11 @@ fn space<a, b>(f: (&a F), s: &b [u8], p: u64, i: u64, inline: u64) -> u64 {
             if (pk == 4) & ((pc == 40) + (pc == 91) + (pc == 123)) {
                 return false;
             }
-            return prefix_position(borrow(f), &s, i);
+            return prefix_position(&f, view(s), i);
         }
     }
     if (pk == 4) & (pc == 33) {
-        if prefix_position(borrow(f), &s, p) {
+        if prefix_position(&f, view(s), p) {
             return false;
         }
     }
@@ -451,7 +451,7 @@ fn space<a, b>(f: (&a F), s: &b [u8], p: u64, i: u64, inline: u64) -> u64 {
         return true;
     }
     if (k == 4) & (c == 125) {
-        return punct(borrow(f), p, 123) == 0;
+        return punct(&f, p, 123) == 0;
     }
     if (pk == 4) & (pc == 123) {
         return true;
@@ -496,12 +496,12 @@ fn space<a, b>(f: (&a F), s: &b [u8], p: u64, i: u64, inline: u64) -> u64 {
         }
         return true;
     }
-    if (pk == 4) & (unary(borrow(f), &s, p)) {
+    if (pk == 4) & (unary(&f, view(s), p)) {
         return false;
     }
     if (k == 4) & (c == 40) {
         if pk == 1 {
-            if keyword(borrow(f), &s, p) {
+            if keyword(&f, view(s), p) {
                 return true;
             }
             return false;
@@ -515,7 +515,7 @@ fn space<a, b>(f: (&a F), s: &b [u8], p: u64, i: u64, inline: u64) -> u64 {
     }
     if (k == 4) & (c == 91) {
         if pk == 1 {
-            return keyword(borrow(f), &s, p);
+            return keyword(&f, view(s), p);
         }
         if pk == 4 {
             if (pc == 41) + (pc == 93) {
@@ -527,10 +527,10 @@ fn space<a, b>(f: (&a F), s: &b [u8], p: u64, i: u64, inline: u64) -> u64 {
     if (k == 4) & (c == 123) {
         return true;
     }
-    if binary(borrow(f), i) {
+    if binary(&f, i) {
         return true;
     }
-    if binary(borrow(f), p) {
+    if binary(&f, p) {
         return true;
     }
     if (pk == 4) & (pc == 44) {
@@ -575,19 +575,19 @@ fn layout<a, b>(f: (&a mut F), s: &b [u8]) {
         if closes {
             stack.pop();
             indent -= 1;
-            empty := punct(borrow(f), i - 1, 123);
+            empty := punct(&f, i - 1, 123);
             if empty & (pending != 0) {
                 pending = 0;
-                emit(borrow_mut(f), i, 0);
+                emit(&mut f, i, 0);
                 start = 1;
                 header = 0;
                 if i + 1 < n {
                     if (
-                        punct(borrow(f), i + 1, 44)
-                            + punct(borrow(f), i + 1, 41)
-                            + punct(borrow(f), i + 1, 59)
-                            + punct(borrow(f), i + 1, 93)
-                            + is(borrow(f), &s, i + 1, &"else")
+                        punct(&f, i + 1, 44)
+                            + punct(&f, i + 1, 41)
+                            + punct(&f, i + 1, 59)
+                            + punct(&f, i + 1, 93)
+                            + is(&f, view(s), i + 1, view("else"))
                     )
                         == 0 {
                         pending = 1;
@@ -601,52 +601,52 @@ fn layout<a, b>(f: (&a mut F), s: &b [u8]) {
         }
         if (k == 5) & (f.nl[i] == 0) & (pending != 0) & (0 < i) {
             pending = 0;
-            emit(borrow_mut(f), i, 1);
+            emit(&mut f, i, 1);
             pending = 1;
             continue;
         }
         if pending {
             if (1 < f.nl[i]) & (lines != 0) & (closes == 0) {
-                if punct(borrow(f), i - 1, 123) == 0 {
-                    new_line(borrow_mut(f), 0);
+                if punct(&f, i - 1, 123) == 0 {
+                    new_line(&mut f, 0);
                 }
             }
-            new_line(borrow_mut(f), indent);
+            new_line(&mut f, indent);
             lines += 1;
-            emit(borrow_mut(f), i, 0);
+            emit(&mut f, i, 0);
             pending = 0;
         } else {
             mut inline = 0;
             if top == 4 {
                 inline = 1;
             }
-            sp := space(borrow(f), &s, i - 1, i, inline);
-            emit(borrow_mut(f), i, sp);
+            sp := space(&f, view(s), i - 1, i, inline);
+            emit(&mut f, i, sp);
         }
         if start & (k == 1) {
             mut word = i;
-            if is(borrow(f), &s, i, &"pub") + is(borrow(f), &s, i, &"unsafe") {
+            if is(&f, view(s), i, view("pub")) + is(&f, view(s), i, view("unsafe")) {
                 word = i;
             }
-            if is(borrow(f), &s, word, &"struct") + is(borrow(f), &s, word, &"enum") {
+            if is(&f, view(s), word, view("struct")) + is(&f, view(s), word, view("enum")) {
                 header = 1;
             } else {
-                if is(borrow(f), &s, word, &"match") {
+                if is(&f, view(s), word, view("match")) {
                     header = 3;
                 } else {
-                    if is(borrow(f), &s, word, &"fn")
-                        + is(borrow(f), &s, word, &"if")
-                        + is(borrow(f), &s, word, &"while")
-                        + is(borrow(f), &s, word, &"for")
-                        + is(borrow(f), &s, word, &"else")
-                        + is(borrow(f), &s, word, &"loop")
-                        + is(borrow(f), &s, word, &"impl")
-                        + is(borrow(f), &s, word, &"interface") {
+                    if is(&f, view(s), word, view("fn"))
+                        + is(&f, view(s), word, view("if"))
+                        + is(&f, view(s), word, view("while"))
+                        + is(&f, view(s), word, view("for"))
+                        + is(&f, view(s), word, view("else"))
+                        + is(&f, view(s), word, view("loop"))
+                        + is(&f, view(s), word, view("impl"))
+                        + is(&f, view(s), word, view("interface")) {
                         header = 2;
                     }
                 }
             }
-            if (is(borrow(f), &s, i, &"pub") + is(borrow(f), &s, i, &"unsafe")) == 0 {
+            if (is(&f, view(s), i, view("pub")) + is(&f, view(s), i, view("unsafe"))) == 0 {
                 start = 0;
             }
         }
@@ -663,7 +663,7 @@ fn layout<a, b>(f: (&a mut F), s: &b [u8]) {
         if c == 123 {
             mut kind = 4;
             nested := (top == 4) + (top == 5) + (top == 6);
-            if punct(borrow(f), i - 1, 257) {
+            if punct(&f, i - 1, 257) {
                 kind = 1;
             } else {
                 if (header == 1) & (nested == 0) {
@@ -699,11 +699,11 @@ fn layout<a, b>(f: (&a mut F), s: &b [u8]) {
             pending = 1;
             if i + 1 < n {
                 if (
-                    punct(borrow(f), i + 1, 44)
-                        + punct(borrow(f), i + 1, 41)
-                        + punct(borrow(f), i + 1, 59)
-                        + punct(borrow(f), i + 1, 93)
-                        + is(borrow(f), &s, i + 1, &"else")
+                    punct(&f, i + 1, 44)
+                        + punct(&f, i + 1, 41)
+                        + punct(&f, i + 1, 59)
+                        + punct(&f, i + 1, 93)
+                        + is(&f, view(s), i + 1, view("else"))
                 )
                     != 0 {
                     pending = 0;
@@ -757,7 +757,7 @@ fn range_width<a>(f: (&a F), lo: u64, hi: u64) -> u64 {
         if (j != lo) & (f.lspace[j] != 0) {
             w += 1;
         }
-        w += token_width(borrow(f), f.ltoken[j]);
+        w += token_width(&f, f.ltoken[j]);
         j += 1;
     }
     return w;
@@ -816,10 +816,10 @@ fn close_of<a>(f: (&a F), j: u64, hi: u64) -> u64 {
     mut d = 0;
     mut m = j;
     while m < hi {
-        if opener(borrow(f), m) {
+        if opener(&f, m) {
             d += 1;
         }
-        if closer(borrow(f), m) {
+        if closer(&f, m) {
             d -= 1;
             if d == 0 {
                 return m;
@@ -835,7 +835,7 @@ fn breakable<a, b>(f: (&a F), s: &b [u8], j: u64) -> u64 {
     if f.kind[t] != 4 {
         return false;
     }
-    if binary(borrow(f), t) == 0 {
+    if binary(&f, t) == 0 {
         return false;
     }
     c := f.code[t];
@@ -850,7 +850,7 @@ fn breakable<a, b>(f: (&a F), s: &b [u8], j: u64) -> u64 {
         + (c == 266) {
         return false;
     }
-    if unary(borrow(f), &s, t) {
+    if unary(&f, view(s), t) {
         return false;
     }
     return true;
@@ -861,7 +861,7 @@ fn trailing_ok<a>(f: (&a F), lo: u64, hi: u64) -> u64 {
     mut j = lo;
     mut commas = 0;
     while j < hi {
-        c := code_at(borrow(f), j);
+        c := code_at(&f, j);
         if opens(c) {
             d += 1;
         }
@@ -903,7 +903,7 @@ fn arm_break<a, b>(f: (&a mut F), s: &b [u8], lo: u64, hi: u64, indent: u64) -> 
     mut d = 0;
     mut j = lo;
     while j < hi {
-        c := code_at(borrow(f), j);
+        c := code_at(&f, j);
         if opens(c) {
             d += 1;
         }
@@ -911,8 +911,8 @@ fn arm_break<a, b>(f: (&a mut F), s: &b [u8], lo: u64, hi: u64, indent: u64) -> 
             d -= 1;
         }
         if (d == 0) & (c == 257) & (j + 2 < hi) {
-            write_range(borrow_mut(f), &s, lo, j + 1, indent);
-            render(borrow_mut(f), &s, j + 1, hi, indent + 1);
+            write_range(&mut f, view(s), lo, j + 1, indent);
+            render(&mut f, view(s), j + 1, hi, indent + 1);
             return true;
         }
         j += 1;
@@ -921,16 +921,16 @@ fn arm_break<a, b>(f: (&a mut F), s: &b [u8], lo: u64, hi: u64, indent: u64) -> 
 }
 // A single `.` used as a postfix separator, never one half of a `..` range.
 fn chain_dot<a>(f: (&a F), j: u64, lo: u64, hi: u64) -> u64 {
-    if code_at(borrow(f), j) != 46 {
+    if code_at(&f, j) != 46 {
         return false;
     }
     if lo < j {
-        if code_at(borrow(f), j - 1) == 46 {
+        if code_at(&f, j - 1) == 46 {
             return false;
         }
     }
     if j + 1 < hi {
-        if code_at(borrow(f), j + 1) == 46 {
+        if code_at(&f, j + 1) == 46 {
             return false;
         }
     }
@@ -938,21 +938,21 @@ fn chain_dot<a>(f: (&a F), j: u64, lo: u64, hi: u64) -> u64 {
 }
 // Long postfix chain: the head stays on the line, then one `.segment` per line.
 fn chain_break<a, b>(f: (&a mut F), s: &b [u8], lo: u64, hi: u64, indent: u64) -> u64 {
-    if chain_dot(borrow(f), lo, lo, hi) {
+    if chain_dot(&f, lo, lo, hi) {
         return false;
     }
     mut d = 0;
     mut j = lo;
     mut dots = 0;
     while j < hi {
-        c := code_at(borrow(f), j);
+        c := code_at(&f, j);
         if opens(c) {
             d += 1;
         }
         if shuts(c) {
             d -= 1;
         }
-        if (d == 0) & chain_dot(borrow(f), j, lo, hi) {
+        if (d == 0) & chain_dot(&f, j, lo, hi) {
             dots += 1;
         }
         j += 1;
@@ -964,24 +964,24 @@ fn chain_break<a, b>(f: (&a mut F), s: &b [u8], lo: u64, hi: u64, indent: u64) -
     d = 0;
     j = lo;
     while j < hi {
-        c := code_at(borrow(f), j);
+        c := code_at(&f, j);
         if opens(c) {
             d += 1;
         }
         if shuts(c) {
             d -= 1;
         }
-        if (d == 0) & chain_dot(borrow(f), j, lo, hi) {
+        if (d == 0) & chain_dot(&f, j, lo, hi) {
             mut ind = indent;
             if seg != lo {
                 ind = indent + 1;
             }
-            render(borrow_mut(f), &s, seg, j, ind);
+            render(&mut f, view(s), seg, j, ind);
             seg = j;
         }
         j += 1;
     }
-    render(borrow_mut(f), &s, seg, hi, indent + 1);
+    render(&mut f, view(s), seg, hi, indent + 1);
     return true;
 }
 // Bracket list that does not fit: head, one item per line, tail. A `{` record body also takes a
@@ -991,8 +991,8 @@ fn list_break<a, b>(f: (&a mut F), s: &b [u8], lo: u64, hi: u64, indent: u64) ->
     mut close = hi;
     mut j = lo;
     while j < hi {
-        if opener(borrow(f), j) {
-            m := close_of(borrow(f), j, hi);
+        if opener(&f, j) {
+            m := close_of(&f, j, hi);
             if (m < hi) & (j + 1 < m) {
                 open = j;
                 close = m;
@@ -1004,16 +1004,16 @@ fn list_break<a, b>(f: (&a mut F), s: &b [u8], lo: u64, hi: u64, indent: u64) ->
     if open == hi {
         return false;
     }
-    write_range(borrow_mut(f), &s, lo, open + 1, indent);
+    write_range(&mut f, view(s), lo, open + 1, indent);
     mut comma = 0;
-    if code_at(borrow(f), open) == 123 {
-        comma = trailing_ok(borrow(f), open + 1, close);
+    if code_at(&f, open) == 123 {
+        comma = trailing_ok(&f, open + 1, close);
     }
     mut item = open + 1;
     mut d = 0;
     mut m = open + 1;
     while m < close {
-        c := code_at(borrow(f), m);
+        c := code_at(&f, m);
         if opens(c) {
             d += 1;
         }
@@ -1021,20 +1021,20 @@ fn list_break<a, b>(f: (&a mut F), s: &b [u8], lo: u64, hi: u64, indent: u64) ->
             d -= 1;
         }
         if (d == 0) & (c == 44) {
-            render(borrow_mut(f), &s, item, m + 1, indent + 1);
+            render(&mut f, view(s), item, m + 1, indent + 1);
             item = m + 1;
         }
         m += 1;
     }
     if item < close {
-        w := (indent + 1) * 4 + range_width(borrow(f), item, close);
-        if comma & (w < 101) & (code_at(borrow(f), close - 1) != 44) {
-            write_range_comma(borrow_mut(f), &s, item, close, indent + 1);
+        w := (indent + 1) * 4 + range_width(&f, item, close);
+        if comma & (w < 101) & (code_at(&f, close - 1) != 44) {
+            write_range_comma(&mut f, view(s), item, close, indent + 1);
         } else {
-            render(borrow_mut(f), &s, item, close, indent + 1);
+            render(&mut f, view(s), item, close, indent + 1);
         }
     }
-    render(borrow_mut(f), &s, close, hi, indent);
+    render(&mut f, view(s), close, hi, indent);
     return true;
 }
 // Binary operator chain: each operator starts its continuation line.
@@ -1043,14 +1043,14 @@ fn op_break<a, b>(f: (&a mut F), s: &b [u8], lo: u64, hi: u64, indent: u64) -> u
     mut j = lo;
     mut count = 0;
     while j < hi {
-        c := code_at(borrow(f), j);
+        c := code_at(&f, j);
         if opens(c) {
             d += 1;
         }
         if shuts(c) {
             d -= 1;
         }
-        if (d == 0) & (lo < j) & breakable(borrow(f), &s, j) {
+        if (d == 0) & (lo < j) & breakable(&f, view(s), j) {
             count += 1;
         }
         j += 1;
@@ -1063,45 +1063,45 @@ fn op_break<a, b>(f: (&a mut F), s: &b [u8], lo: u64, hi: u64, indent: u64) -> u
     j = lo;
     mut rest = 0;
     while j < hi {
-        c := code_at(borrow(f), j);
+        c := code_at(&f, j);
         if opens(c) {
             d += 1;
         }
         if shuts(c) {
             d -= 1;
         }
-        if (d == 0) & (lo < j) & breakable(borrow(f), &s, j) {
+        if (d == 0) & (lo < j) & breakable(&f, view(s), j) {
             mut ind = indent;
             if rest != 0 {
                 ind = indent + 1;
             }
-            render(borrow_mut(f), &s, seg, j, ind);
+            render(&mut f, view(s), seg, j, ind);
             rest = 1;
             seg = j;
         }
         j += 1;
     }
-    render(borrow_mut(f), &s, seg, hi, indent + 1);
+    render(&mut f, view(s), seg, hi, indent + 1);
     return true;
 }
 fn render<a, b>(f: (&a mut F), s: &b [u8], lo: u64, hi: u64, indent: u64) {
-    if (indent * 4 + range_width(borrow(f), lo, hi) < 101) + (hi - lo < 3) {
-        write_range(borrow_mut(f), &s, lo, hi, indent);
+    if (indent * 4 + range_width(&f, lo, hi) < 101) + (hi - lo < 3) {
+        write_range(&mut f, view(s), lo, hi, indent);
         return ();
     }
-    if arm_break(borrow_mut(f), &s, lo, hi, indent) {
+    if arm_break(&mut f, view(s), lo, hi, indent) {
         return ();
     }
-    if op_break(borrow_mut(f), &s, lo, hi, indent) {
+    if op_break(&mut f, view(s), lo, hi, indent) {
         return ();
     }
-    if chain_break(borrow_mut(f), &s, lo, hi, indent) {
+    if chain_break(&mut f, view(s), lo, hi, indent) {
         return ();
     }
-    if list_break(borrow_mut(f), &s, lo, hi, indent) {
+    if list_break(&mut f, view(s), lo, hi, indent) {
         return ();
     }
-    write_range(borrow_mut(f), &s, lo, hi, indent);
+    write_range(&mut f, view(s), lo, hi, indent);
 }
 
 pub fn format<a>(source: &a [u8]) -> u8[] {
@@ -1118,10 +1118,10 @@ pub fn format<a>(source: &a [u8]) -> u8[] {
         lindent: u64[],
         out: u8[],
     };
-    scan(borrow_mut(f), &source);
-    mark_generics(borrow_mut(f), &source);
-    mark_pipes(borrow_mut(f), &source);
-    layout(borrow_mut(f), &source);
+    scan(&mut f, view(source));
+    mark_generics(&mut f, view(source));
+    mark_pipes(&mut f, view(source));
+    layout(&mut f, view(source));
     count := f.lfirst.len();
     for i in count {
         lo := f.lfirst[i];
@@ -1133,8 +1133,8 @@ pub fn format<a>(source: &a [u8]) -> u8[] {
         if lo == hi {
             f.out.push(10);
         } else {
-            render(borrow_mut(f), &source, lo, hi, indent);
+            render(&mut f, view(source), lo, hi, indent);
         }
     }
-    return exchange(borrow_mut(f.out), u8[]);
+    return exchange(&mut f.out, u8[]);
 }

@@ -25,21 +25,21 @@ fn remove_locked<a,b,K:hash::Hash+hash::Equal+Send,V:Send>(m:(&a mut [K: V]),key
     return hashmap::map_remove(m,key);
 }
 fn contains_locked<a,b,K:hash::Hash+hash::Equal+Send,V:Send>(m:(&a mut [K: V]),key:(&b K))->bool{
-    return hashmap::map_contains(borrow(m),key);
+    return hashmap::map_contains(&m,key);
 }
 fn len_locked<a,K:hash::Hash+hash::Equal+Send,V:Send>(m:(&a mut [K: V]),unused:u64)->u64{
-    return hashmap::map_len(borrow(m));
+    return hashmap::map_len(&m);
 }
 pub fn insert<a,K:hash::Hash+hash::Equal+Send,V:Send>(map:(&a Map<K,V>),key:K,value:V)->V?{
-    index:=shard(borrow(map),borrow(key));target:=&map.shards[index];
+    index:=shard(&map,&key);target:=&map.shards[index];
     return target.lock_with(Insert{key:key,value:value},insert_locked<K,V>);
 }
 pub fn remove<a,b,K:hash::Hash+hash::Equal+Send,V:Send>(map:(&a Map<K,V>),key:(&b K))->V?{
-    index:=shard(borrow(map),borrow(key));target:=&map.shards[index];
+    index:=shard(&map,&key);target:=&map.shards[index];
     return target.lock_with(key,remove_locked<K,V>);
 }
 pub fn contains<a,b,K:hash::Hash+hash::Equal+Send,V:Send>(map:(&a Map<K,V>),key:(&b K))->bool{
-    index:=shard(borrow(map),borrow(key));target:=&map.shards[index];
+    index:=shard(&map,&key);target:=&map.shards[index];
     return target.lock_with(key,contains_locked<K,V>);
 }
 // Not a linearizable snapshot while other threads mutate: shards are counted one at a time.

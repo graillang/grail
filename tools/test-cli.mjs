@@ -36,8 +36,8 @@ for (const [i, file] of sources.entries()) {
 }
 checks += sources.length;
 const original = join(work, 'original.s'), reformatted = join(work, 'reformatted.s');
-command([grail, '--default-u64', original, ...compilerSources]);
-command([grail, '--default-u64', reformatted, ...compilerSources.map(f => formatted.get(f))]);
+command([grail, '--default-u64', '--typed-refs', original, ...compilerSources]);
+command([grail, '--default-u64', '--typed-refs', reformatted, ...compilerSources.map(f => formatted.get(f))]);
 assert.ok(readFileSync(original).equals(readFileSync(reformatted)), 'formatted compiler compiles to different assembly'); checks++;
 
 // 3. Project workflow: new / run / test / fmt / add / fetch / build.
@@ -75,7 +75,7 @@ for (const target of ['x86_64', 'aarch64', 'riscv64']) {
   run(['build', 'hello.grl', '--target', target, '-o', out]);
   const r = execute(out, [], target); assert.equal(String(r.stdout), '42\n', `${target} program`);
   const asm = join(work, `grail-${target}.s`);
-  command([grail, '--default-u64', '--target', target, asm, ...compilerSources]);
+  command([grail, '--default-u64', '--typed-refs', '--target', target, asm, ...compilerSources]);
   const tool = assemble(asm, join(work, `grail-${target}`), target);
   const sample = join(work, `messy-${target}.grl`); copyFileSync(join(root, 'tests/fmt/messy.grl'), sample);
   const f = execute(tool, ['fmt', sample], target); assert.equal(f.status, 0, `${target} grail fmt: ${f.stderr}`);

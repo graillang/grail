@@ -469,7 +469,8 @@
       "compiler/tests/ownership_core.grl",
       "compiler/ownership.grl"
     ],
-    "stdout": "1\n"
+    "stdout": "1\n",
+    "typedRefs": true
   },
   {
     "name": "generic_types",
@@ -1657,7 +1658,7 @@
     "name": "for-in-non-scalar-rejected",
     "source": "fn main(){v:=u8[][u8[1]];for x in v{}}",
     "reject": true,
-    "diagnostic": "needs borrow(v)"
+    "diagnostic": "needs &v"
   },
   {
     "name": "for-in-move-collection-rejected",
@@ -2410,7 +2411,7 @@
     "name": "for-owned-non-scalar-rejected",
     "source": "fn main(){v:=u8[][u8[1]];for w in v{}}",
     "reject": true,
-    "diagnostic": "needs borrow(v)"
+    "diagnostic": "needs &v"
   },
   {
     "name": "for-shared-element-mutation-rejected",
@@ -3432,28 +3433,28 @@
     "name": "reject-public-borrow",
     "source": "fn main(){a:=u8[1];b:=borrow(a);println(b.len());}\n",
     "reject": true,
-    "diagnostic": "borrow(...) was removed; write &value",
+    "diagnostic": "borrow was removed; write &value",
     "defaultU64": false
   },
   {
     "name": "reject-public-borrow-mut",
     "source": "fn main(){mut a=u8[1];b:=borrow_mut(a);println(b.len());}\n",
     "reject": true,
-    "diagnostic": "borrow_mut(...) was removed; write &mut value",
+    "diagnostic": "borrow_mut was removed; write &mut value",
     "defaultU64": false
   },
   {
     "name": "reject-public-read-type",
     "source": "fn f<a>(x:read<a>)->u64{return x.len();} fn main(){a:=u8[1];println(f(a));}\n",
     "reject": true,
-    "diagnostic": "read<a>/mut<a> were removed; write &[u8] or &mut [u8]",
+    "diagnostic": "legacy byte-view types were removed; write &[u8] or &mut [u8]",
     "defaultU64": false
   },
   {
     "name": "reject-public-mut-view",
     "source": "fn f<a>(x:mut<a>)->u64{return x.len();} fn main(){mut a=u8[1];println(f(a));}\n",
     "reject": true,
-    "diagnostic": "read<a>/mut<a> were removed; write &[u8] or &mut [u8]",
+    "diagnostic": "legacy byte-view types were removed; write &[u8] or &mut [u8]",
     "defaultU64": false
   },
   {
@@ -3668,5 +3669,70 @@
     "source": "fn get(x: &i64) -> i64 { return load(x); }\nfn main() { value := 7; println(get(value)); }\n",
     "stdout": "7\n",
     "defaultU64": false
+  },
+  {
+    "name": "internal-typed-reference-u64-default",
+    "typedRefs": true,
+    "source": "fn get(value: &u64) -> u64 { return load(value); } fn main() { mut n = 9223372036854775808; println(get(&n)); next := n + 1; exchange(&mut n, next); println(get(&n)); }",
+    "stdout": "9223372036854775808\n9223372036854775809\n"
+  },
+  {
+    "name": "internal-typed-byte-views",
+    "typedRefs": true,
+    "source": "fn typed(data: &u8[]) -> u64 { return data.len(); } fn slice(data: &a [u8]) -> &a [u8] { return data[1:]; } fn main() { mut data = u8[65,66,67]; println(typed(&data)); { part := slice(view(data)); println(part.len()); } { edit := view_mut(data); edit[0] = 90; } println(data[0]); }",
+    "stdout": "3\n2\n90\n"
+  },
+  {
+    "name": "internal-typed-mut-lifetime",
+    "typedRefs": true,
+    "source": "fn set(value: &a mut u64) { exchange(value, 42); } fn main() { mut n = 1; set(&mut n); println(n); }",
+    "stdout": "42\n"
+  },
+  {
+    "name": "reject-internal-typed-borrow",
+    "typedRefs": true,
+    "source": "fn main() { n := 1; x := borrow(n); }",
+    "reject": true,
+    "diagnostic": "borrow was removed"
+  },
+  {
+    "name": "reject-internal-typed-borrow-mut",
+    "typedRefs": true,
+    "source": "fn main() { mut n = 1; x := borrow_mut(n); }",
+    "reject": true,
+    "diagnostic": "borrow_mut was removed"
+  },
+  {
+    "name": "reject-internal-typed-read",
+    "typedRefs": true,
+    "source": "fn f<a>(x: read<a>) {} fn main() {}",
+    "reject": true,
+    "diagnostic": "legacy byte-view types were removed"
+  },
+  {
+    "name": "reject-internal-typed-mut",
+    "typedRefs": true,
+    "source": "fn f<a>(x: mut<a>) {} fn main() {}",
+    "reject": true,
+    "diagnostic": "legacy byte-view types were removed"
+  },
+  {
+    "name": "reject-internal-typed-old-lifetime",
+    "typedRefs": true,
+    "source": "fn f<a>(x: &mut a u64) {} fn main() {}",
+    "reject": true,
+    "diagnostic": "write &a mut T, not &mut a T"
+  },
+  {
+    "name": "user-generic-defining-module-modes",
+    "defaultU64": false,
+    "source": "fn negative<T>(value:T) -> i64 { n := 1; return -n; } fn main() { println(negative(7)); }",
+    "stdout": "-1\n"
+  },
+  {
+    "name": "user-closure-defining-module-modes",
+    "defaultU64": false,
+    "source": "fn main() { f := |x: i64| -> i64 { n := 1; return x - n; }; println(f(-2)); }",
+    "stdout": "-3\n"
   }
 ]

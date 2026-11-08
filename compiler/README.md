@@ -43,6 +43,30 @@ Formatting is idempotent and does not change meaning: formatted compiler sources
 byte-identical assembly. It is a token-level pretty-printer, not yet an expression reflow engine
 (e.g. it does not split long operator chains).
 
+### Internal reference migration
+
+Compiler and standard-library source use typed `&value` / `&mut value` references and
+`&[u8]` / `&mut [u8]` byte views (named lifetimes precede `mut`). Internal numeric defaults
+remain `u64`; user modules still default to `i64`.
+
+For staged self-hosting, pass **both** `--default-u64 --typed-refs` when compiling the compiler
+sources with a migration-capable compiler. The narrow `--typed-refs` switch changes reference
+syntax independently of numeric defaults. Standard-library modules always use typed references.
+`--default-u64` without the new switch retains the old reference dialect only for historical
+regressions; ordinary user modules reject it.
+
+Bootstrap artifacts are intentionally not refreshed by this migration. Until their scheduled
+refresh, use a tree-built migration-capable compiler for development suites:
+
+```sh
+GRAIL_COMPILER=/path/to/tree-built/grail bun tools/test-native.mjs
+GRAIL_COMPILER=/path/to/tree-built/grail bun tools/test-cli.mjs
+GRAIL_COMPILER=/path/to/tree-built/grail bun tools/book.mjs check
+```
+
+The native runner also checks that `compiler/*.grl` and `lib/*.grl` contain no legacy
+borrow calls or byte-view type spellings.
+
 ## Build
 
 On Linux x86-64, ARM64 or RISC-V 64, install Bun, Clang (used **only as an assembler**) and LLD:
