@@ -13,13 +13,14 @@ backend. A project that has a port plan is not a port.
 | Linux x86-64 | ELF | 604 native/rejection tests, 174 CLI checks, 45 Grail + 45 Rust book checks, byte-identical self-host | **Supported** |
 | Linux AArch64 | ELF cross-image, refreshed bootstrap | Cross-build and ELF architecture checks only; no qemu runner here | Cross-build only |
 | Linux RISC-V64 | ELF cross-image, refreshed bootstrap | Cross-build and ELF architecture checks only; no qemu runner here | Cross-build only |
-| Windows x86-64 | PE32+ console image, COFF objects, kernel32 short-import objects, C runtime shims | `bun tools/windows.mjs check` 7/7; ABI shims cross-compile 8 objects/95 symbols; **not executed** | Compiler/runtime output only |
+| Windows x86-64 | PE32+ console images, COFF objects, kernel32 imports, Win32 OS layer, C runtime shims | `bun tools/windows.mjs check` 10/10; **8 programs executed under Wine**, including files/argv/stdio/float | **Wine runtime verified** |
 | Windows AArch64 | None | None | Not started |
 | macOS AArch64 / x86-64 | Mach-O objects/exes verified on `feature/macos` | 4 objects + 4 executables statically checked; not executable here; branch blocked on stale bootstrap refresh | In review |
 
-Windows x86-64 currently has no `.pdata`/SEH, no Win32 OS layer (console, files, arguments,
-threads), and no Windows execution. Grail-internal calls still use the private register
-convention; Win64 is used only at import boundaries. The images must not be run.
+Windows x86-64 now has `.pdata`/`.xdata`, a Win32 console/files/argv/time layer, and 8 executed
+programs under Wine. Worker threads and COM remain unimplemented. Grail-internal calls still use
+the private register convention; Win64 is used at import boundaries. This is Wine verification,
+not Windows hardware verification.
 
 Linux AArch64 and RISC-V64 are cross-build verified, not runtime verified. Linux x86-64 is the
 only target with full compiler and runtime execution evidence.
