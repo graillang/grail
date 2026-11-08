@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Fixed: the `i64` -> `u64` widening check emitted `jns`, which the AArch64 and RISC-V lowering
+  does not implement (it emulates the zero and carry flags only), so programs relying on default
+  `i64` semantics failed to compile for those targets. The sign is now tested with a shift and a
+  zero test.
+
 - Fixed: on macOS an exported `extern "C" fn` was defined without the Mach-O leading
   underscore while references to it had one, so taking a callback's address failed to link.
   `test-macos` now links the `dlopen` fixture (libSystem loader imports, a Grail callback) for
