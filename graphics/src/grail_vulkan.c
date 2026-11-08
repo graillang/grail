@@ -71,7 +71,74 @@ typedef struct gr_vk_dev {
     PFN_vkCreatePipelineCache create_pipeline_cache;
     PFN_vkCreateDescriptorSetLayout create_set_layout;
     PFN_vkCreatePipelineLayout create_layout;
+    PFN_vkCreateImage create_image;
+    PFN_vkDestroyImage destroy_image;
+    PFN_vkGetImageMemoryRequirements get_image_requirements;
+    PFN_vkAllocateMemory allocate_memory;
+    PFN_vkFreeMemory free_memory;
+    PFN_vkBindImageMemory bind_image_memory;
+    PFN_vkCreateImageView create_image_view;
+    PFN_vkDestroyImageView destroy_image_view;
+    PFN_vkCreateCommandPool create_command_pool;
+    PFN_vkDestroyCommandPool destroy_command_pool;
+    PFN_vkAllocateCommandBuffers allocate_command_buffers;
+    PFN_vkFreeCommandBuffers free_command_buffers;
+    PFN_vkBeginCommandBuffer begin_command_buffer;
+    PFN_vkEndCommandBuffer end_command_buffer;
+    PFN_vkResetCommandBuffer reset_command_buffer;
+    PFN_vkCmdPipelineBarrier cmd_pipeline_barrier;
+    PFN_vkCmdBeginRendering cmd_begin_rendering;
+    PFN_vkCmdEndRendering cmd_end_rendering;
+    PFN_vkCmdSetViewport cmd_set_viewport;
+    PFN_vkCmdSetScissor cmd_set_scissor;
+    PFN_vkCmdBindPipeline cmd_bind_pipeline;
+    PFN_vkCmdPushConstants cmd_push_constants;
+    PFN_vkCmdDraw cmd_draw;
+    PFN_vkCmdCopyImageToBuffer cmd_copy_image_to_buffer;
+    PFN_vkQueueSubmit queue_submit;
+    PFN_vkQueueWaitIdle queue_wait_idle;
+    PFN_vkWaitSemaphores wait_semaphores;
+    PFN_vkCreateBuffer create_buffer;
+    PFN_vkDestroyBuffer destroy_buffer;
+    PFN_vkGetBufferMemoryRequirements get_buffer_requirements;
+    PFN_vkBindBufferMemory bind_buffer_memory;
+    PFN_vkMapMemory map_memory;
+    PFN_vkUnmapMemory unmap_memory;
+    uint32_t memory_type_bits;
 } gr_vk_dev;
+
+typedef struct gr_vk_tex {
+    gr_vk_dev *device;
+    VkImage image;
+    VkDeviceMemory memory;
+    VkFormat format;
+    gr_format gr_format;
+    uint32_t width, height;
+    uint32_t usage;
+} gr_vk_tex;
+
+typedef struct gr_vk_viewobj {
+    gr_vk_dev *device;
+    VkImageView view;
+    gr_vk_tex *texture;
+} gr_vk_viewobj;
+
+typedef struct gr_vk_cmdpool {
+    gr_vk_dev *device;
+    VkCommandPool pool;
+} gr_vk_cmdpool;
+
+typedef struct gr_vk_cmdbuf {
+    gr_vk_dev *device;
+    VkCommandBuffer cb;
+    uint32_t recording;
+    uint32_t ended;
+} gr_vk_cmdbuf;
+
+typedef struct gr_vk_fence_obj {
+    gr_vk_dev *device;
+    uint64_t value;
+} gr_vk_fence_obj;
 
 typedef struct gr_vk_queue {
     gr_vk_dev *device;
@@ -485,6 +552,39 @@ gr_result gr_vk_abi_device_create(const gr_device_desc *desc, gr_handle *out_dev
     dev->destroy_semaphore = GR_VK_DEVICE_LOAD(dev, vkDestroySemaphore);
     dev->get_semaphore_value = GR_VK_DEVICE_LOAD(dev, vkGetSemaphoreCounterValue);
     dev->create_pipeline_cache = GR_VK_DEVICE_LOAD(dev, vkCreatePipelineCache);
+    dev->create_image = GR_VK_DEVICE_LOAD(dev, vkCreateImage);
+    dev->destroy_image = GR_VK_DEVICE_LOAD(dev, vkDestroyImage);
+    dev->get_image_requirements = GR_VK_DEVICE_LOAD(dev, vkGetImageMemoryRequirements);
+    dev->allocate_memory = GR_VK_DEVICE_LOAD(dev, vkAllocateMemory);
+    dev->free_memory = GR_VK_DEVICE_LOAD(dev, vkFreeMemory);
+    dev->bind_image_memory = GR_VK_DEVICE_LOAD(dev, vkBindImageMemory);
+    dev->create_image_view = GR_VK_DEVICE_LOAD(dev, vkCreateImageView);
+    dev->destroy_image_view = GR_VK_DEVICE_LOAD(dev, vkDestroyImageView);
+    dev->create_command_pool = GR_VK_DEVICE_LOAD(dev, vkCreateCommandPool);
+    dev->destroy_command_pool = GR_VK_DEVICE_LOAD(dev, vkDestroyCommandPool);
+    dev->allocate_command_buffers = GR_VK_DEVICE_LOAD(dev, vkAllocateCommandBuffers);
+    dev->free_command_buffers = GR_VK_DEVICE_LOAD(dev, vkFreeCommandBuffers);
+    dev->begin_command_buffer = GR_VK_DEVICE_LOAD(dev, vkBeginCommandBuffer);
+    dev->end_command_buffer = GR_VK_DEVICE_LOAD(dev, vkEndCommandBuffer);
+    dev->reset_command_buffer = GR_VK_DEVICE_LOAD(dev, vkResetCommandBuffer);
+    dev->cmd_pipeline_barrier = GR_VK_DEVICE_LOAD(dev, vkCmdPipelineBarrier);
+    dev->cmd_begin_rendering = GR_VK_DEVICE_LOAD(dev, vkCmdBeginRendering);
+    dev->cmd_end_rendering = GR_VK_DEVICE_LOAD(dev, vkCmdEndRendering);
+    dev->cmd_set_viewport = GR_VK_DEVICE_LOAD(dev, vkCmdSetViewport);
+    dev->cmd_set_scissor = GR_VK_DEVICE_LOAD(dev, vkCmdSetScissor);
+    dev->cmd_bind_pipeline = GR_VK_DEVICE_LOAD(dev, vkCmdBindPipeline);
+    dev->cmd_push_constants = GR_VK_DEVICE_LOAD(dev, vkCmdPushConstants);
+    dev->cmd_draw = GR_VK_DEVICE_LOAD(dev, vkCmdDraw);
+    dev->cmd_copy_image_to_buffer = GR_VK_DEVICE_LOAD(dev, vkCmdCopyImageToBuffer);
+    dev->queue_submit = GR_VK_DEVICE_LOAD(dev, vkQueueSubmit);
+    dev->queue_wait_idle = GR_VK_DEVICE_LOAD(dev, vkQueueWaitIdle);
+    dev->wait_semaphores = GR_VK_DEVICE_LOAD(dev, vkWaitSemaphores);
+    dev->create_buffer = GR_VK_DEVICE_LOAD(dev, vkCreateBuffer);
+    dev->destroy_buffer = GR_VK_DEVICE_LOAD(dev, vkDestroyBuffer);
+    dev->get_buffer_requirements = GR_VK_DEVICE_LOAD(dev, vkGetBufferMemoryRequirements);
+    dev->bind_buffer_memory = GR_VK_DEVICE_LOAD(dev, vkBindBufferMemory);
+    dev->map_memory = GR_VK_DEVICE_LOAD(dev, vkMapMemory);
+    dev->unmap_memory = GR_VK_DEVICE_LOAD(dev, vkUnmapMemory);
     dev->create_set_layout = (PFN_vkCreateDescriptorSetLayout)dev->get_device_proc(dev->device, "vkCreateDescriptorSetLayout");
     dev->create_layout = (PFN_vkCreatePipelineLayout)dev->get_device_proc(dev->device, "vkCreatePipelineLayout");
 
@@ -537,6 +637,22 @@ gr_result gr_vk_abi_device_create(const gr_device_desc *desc, gr_handle *out_dev
     /* The loader's version, so a caller can tell a 1.4 driver behind a 1.3 instance. */
     dev->caps.pipeline_cache_uuid[0] = loader_version;
 
+    /* Device-local memory type for images and buffers. Selected once; a device with no
+     * device-local heap would be unusual enough to be worth a log rather than a guess. */
+    {
+        uint32_t t;
+        dev->memory_type_bits = ~0u;
+        for (t = 0; t < memory.memoryTypeCount; ++t) {
+            if ((memory.memoryTypes[t].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) &&
+                (memory.memoryTypes[t].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) == 0) {
+                dev->memory_type_bits = t;
+                break;
+            }
+        }
+        if (dev->memory_type_bits == ~0u)
+            dev->memory_type_bits = 0;
+    }
+
     if (!dev->create_set_layout || !dev->create_layout || vk_create_layout(dev) != GR_OK) {
         gr_vk_abi_device_destroy_impl(dev);
         return GR_ERROR_BACKEND;
@@ -573,6 +689,9 @@ gr_result gr_vk_abi_device_create(const gr_device_desc *desc, gr_handle *out_dev
         queue->kind = GR_QUEUE_GRAPHICS;
         queue->timeline = dev->graphics_timeline;
         dev->get_device_queue(dev->device, dev->graphics_family, 0, &queue->queue);
+        /* The device keeps its own copy: submissions use it without going through the object
+         * table, and an unset field here is a NULL VkQueue handed to the driver. */
+        dev->graphics_queue = queue->queue;
         dev->graphics_handle = gr_object_insert(gr_objects(), GR_HANDLE_QUEUE, queue);
         if (dev->graphics_handle == GR_NULL_HANDLE) { free(queue); gr_vk_abi_device_destroy_impl(dev); return GR_ERROR_OUT_OF_MEMORY; }
     }
@@ -582,6 +701,7 @@ gr_result gr_vk_abi_device_create(const gr_device_desc *desc, gr_handle *out_dev
         queue->device = dev;
         queue->kind = GR_QUEUE_COMPUTE;
         dev->get_device_queue(dev->device, dev->compute_family, 0, &queue->queue);
+        dev->compute_queue = queue->queue;
         dev->compute_handle = gr_object_insert(gr_objects(), GR_HANDLE_QUEUE, queue);
         if (dev->compute_handle == GR_NULL_HANDLE) { free(queue); gr_vk_abi_device_destroy_impl(dev); return GR_ERROR_OUT_OF_MEMORY; }
     }
@@ -591,6 +711,7 @@ gr_result gr_vk_abi_device_create(const gr_device_desc *desc, gr_handle *out_dev
         queue->device = dev;
         queue->kind = GR_QUEUE_TRANSFER;
         dev->get_device_queue(dev->device, dev->transfer_family, 0, &queue->queue);
+        dev->transfer_queue = queue->queue;
         dev->transfer_handle = gr_object_insert(gr_objects(), GR_HANDLE_QUEUE, queue);
         if (dev->transfer_handle == GR_NULL_HANDLE) { free(queue); gr_vk_abi_device_destroy_impl(dev); return GR_ERROR_OUT_OF_MEMORY; }
     }
@@ -1067,6 +1188,736 @@ gr_result gr_vk_abi_pipeline_stats(gr_handle device_handle, uint32_t *out_declar
     return GR_OK;
 }
 
+/* ---------------------------------------------------------------------------------------
+ * Resources
+ * --------------------------------------------------------------------------------------- */
+static VkImageUsageFlags vk_image_usage(uint32_t usage)
+{
+    VkImageUsageFlags flags = 0;
+    if (usage & GR_TEXTURE_USAGE_SAMPLED) flags |= VK_IMAGE_USAGE_SAMPLED_BIT;
+    if (usage & GR_TEXTURE_USAGE_STORAGE) flags |= VK_IMAGE_USAGE_STORAGE_BIT;
+    if (usage & GR_TEXTURE_USAGE_COLOR_ATTACHMENT) flags |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    if (usage & GR_TEXTURE_USAGE_DEPTH_ATTACHMENT) flags |= VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+    if (usage & GR_TEXTURE_USAGE_TRANSFER_SRC) flags |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    if (usage & GR_TEXTURE_USAGE_TRANSFER_DST) flags |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    return flags;
+}
+
+gr_result gr_vk_abi_texture_create(gr_handle device_handle, const gr_texture_desc *desc,
+                                   gr_handle *out_texture)
+{
+    gr_vk_dev *dev = vk_device_of(device_handle);
+    gr_vk_tex *texture;
+    VkImageCreateInfo info;
+    VkMemoryRequirements requirements;
+    VkMemoryAllocateInfo allocate;
+    gr_handle handle;
+
+    if (!dev || !desc || !out_texture)
+        return GR_ERROR_INVALID_ARGUMENT;
+    *out_texture = GR_NULL_HANDLE;
+    if (desc->head.size != sizeof(gr_texture_desc))
+        return GR_ERROR_VERSION_MISMATCH;
+    if (desc->type != GR_TEXTURE_2D || desc->samples > 1u)
+        return GR_ERROR_UNSUPPORTED; /* arrays, 3D and MSAA are later increments */
+    if (desc->width == 0 || desc->height == 0)
+        return GR_ERROR_INVALID_ARGUMENT;
+
+    texture = (gr_vk_tex *)calloc(1, sizeof(*texture));
+    if (!texture)
+        return GR_ERROR_OUT_OF_MEMORY;
+    texture->device = dev;
+    texture->format = vk_format(desc->format);
+    texture->gr_format = desc->format;
+    texture->width = desc->width;
+    texture->height = desc->height;
+    texture->usage = desc->usage;
+    if (texture->format == VK_FORMAT_UNDEFINED) {
+        free(texture);
+        return GR_ERROR_UNSUPPORTED;
+    }
+
+    memset(&info, 0, sizeof(info));
+    info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    info.imageType = VK_IMAGE_TYPE_2D;
+    info.format = texture->format;
+    info.extent.width = desc->width;
+    info.extent.height = desc->height;
+    info.extent.depth = 1;
+    info.mipLevels = 1;
+    info.arrayLayers = 1;
+    info.samples = VK_SAMPLE_COUNT_1_BIT;
+    info.tiling = VK_IMAGE_TILING_OPTIMAL;
+    info.usage = vk_image_usage(desc->usage);
+    info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    if (dev->create_image(dev->device, &info, NULL, &texture->image) != VK_SUCCESS) {
+        free(texture);
+        return GR_ERROR_BACKEND;
+    }
+    dev->get_image_requirements(dev->device, texture->image, &requirements);
+    memset(&allocate, 0, sizeof(allocate));
+    allocate.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocate.allocationSize = requirements.size;
+    allocate.memoryTypeIndex = dev->memory_type_bits;
+    if (dev->allocate_memory(dev->device, &allocate, NULL, &texture->memory) != VK_SUCCESS ||
+        dev->bind_image_memory(dev->device, texture->image, texture->memory, 0) != VK_SUCCESS) {
+        if (texture->memory) dev->free_memory(dev->device, texture->memory, NULL);
+        dev->destroy_image(dev->device, texture->image, NULL);
+        free(texture);
+        return GR_ERROR_BACKEND;
+    }
+
+    handle = gr_object_insert(gr_objects(), GR_HANDLE_TEXTURE, texture);
+    if (handle == GR_NULL_HANDLE) {
+        dev->free_memory(dev->device, texture->memory, NULL);
+        dev->destroy_image(dev->device, texture->image, NULL);
+        free(texture);
+        return GR_ERROR_OUT_OF_MEMORY;
+    }
+    *out_texture = handle;
+    return GR_OK;
+}
+
+gr_result gr_vk_abi_texture_view_create(gr_handle device_handle, const gr_texture_view_desc *desc,
+                                        gr_handle *out_view)
+{
+    gr_vk_dev *dev = vk_device_of(device_handle);
+    gr_vk_tex *texture;
+    gr_vk_viewobj *view;
+    VkImageViewCreateInfo info;
+    gr_handle handle;
+
+    if (!dev || !desc || !out_view)
+        return GR_ERROR_INVALID_ARGUMENT;
+    *out_view = GR_NULL_HANDLE;
+    texture = (gr_vk_tex *)gr_object_lookup(gr_objects(), desc->texture, GR_HANDLE_TEXTURE, NULL);
+    if (!texture)
+        return GR_ERROR_INVALID_HANDLE;
+
+    view = (gr_vk_viewobj *)calloc(1, sizeof(*view));
+    if (!view)
+        return GR_ERROR_OUT_OF_MEMORY;
+    view->device = dev;
+    view->texture = texture;
+
+    memset(&info, 0, sizeof(info));
+    info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    info.image = texture->image;
+    info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    info.format = texture->format;
+    info.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    info.subresourceRange.levelCount = 1;
+    info.subresourceRange.layerCount = 1;
+    if (dev->create_image_view(dev->device, &info, NULL, &view->view) != VK_SUCCESS) {
+        free(view);
+        return GR_ERROR_BACKEND;
+    }
+    handle = gr_object_insert(gr_objects(), GR_HANDLE_TEXTURE_VIEW, view);
+    if (handle == GR_NULL_HANDLE) {
+        dev->destroy_image_view(dev->device, view->view, NULL);
+        free(view);
+        return GR_ERROR_OUT_OF_MEMORY;
+    }
+    *out_view = handle;
+    return GR_OK;
+}
+
+/* A one-shot submission, waited before returning: the readback path, which is what gr_texture_read
+ * means and why it is allowed to block. */
+static void vk_oneshot(gr_vk_dev *dev, void (*record)(VkCommandBuffer, void *), void *user)
+{
+    VkCommandPoolCreateInfo pool_info;
+    VkCommandPool pool = VK_NULL_HANDLE;
+    VkCommandBufferAllocateInfo alloc;
+    VkCommandBuffer cb = VK_NULL_HANDLE;
+    VkCommandBufferBeginInfo begin;
+    VkSubmitInfo submit;
+
+    memset(&pool_info, 0, sizeof(pool_info));
+    pool_info.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    pool_info.queueFamilyIndex = dev->graphics_family;
+    if (dev->create_command_pool(dev->device, &pool_info, NULL, &pool) != VK_SUCCESS)
+        return;
+    memset(&alloc, 0, sizeof(alloc));
+    alloc.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    alloc.commandPool = pool;
+    alloc.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    alloc.commandBufferCount = 1;
+    if (dev->allocate_command_buffers(dev->device, &alloc, &cb) != VK_SUCCESS) {
+        dev->destroy_command_pool(dev->device, pool, NULL);
+        return;
+    }
+    memset(&begin, 0, sizeof(begin));
+    begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    dev->begin_command_buffer(cb, &begin);
+    record(cb, user);
+    dev->end_command_buffer(cb);
+    memset(&submit, 0, sizeof(submit));
+    submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submit.commandBufferCount = 1;
+    submit.pCommandBuffers = &cb;
+    dev->queue_submit(dev->graphics_queue, 1, &submit, VK_NULL_HANDLE);
+    dev->queue_wait_idle(dev->graphics_queue);
+    dev->destroy_command_pool(dev->device, pool, NULL);
+}
+
+typedef struct readback_state {
+    gr_vk_tex *texture;
+    VkBuffer buffer;
+} readback_state;
+
+static void vk_record_readback(VkCommandBuffer cb, void *user)
+{
+    readback_state *state = (readback_state *)user;
+    VkBufferImageCopy region;
+    VkImageMemoryBarrier barrier;
+    gr_vk_dev *dev = state->texture->device;
+
+    /* The caller has already moved the image to TRANSFER_SRC through gr_cmd_barrier; this only
+     * has to make the copy visible to the host afterwards. */
+    memset(&region, 0, sizeof(region));
+    region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    region.imageSubresource.layerCount = 1;
+    region.imageExtent.width = state->texture->width;
+    region.imageExtent.height = state->texture->height;
+    region.imageExtent.depth = 1;
+    dev->cmd_copy_image_to_buffer(cb, state->texture->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                  state->buffer, 1, &region);
+
+    memset(&barrier, 0, sizeof(barrier));
+    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    barrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+    barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    barrier.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+    barrier.image = state->texture->image;
+    barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    barrier.subresourceRange.levelCount = 1;
+    barrier.subresourceRange.layerCount = 1;
+    dev->cmd_pipeline_barrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                              VK_PIPELINE_STAGE_HOST_BIT, 0, 0, NULL, 0, NULL, 1, &barrier);
+}
+
+gr_result gr_vk_abi_texture_read(gr_handle texture_handle, uint32_t mip, uint32_t layer,
+                                 uint32_t x, uint32_t y, uint32_t width, uint32_t height,
+                                 gr_mut_span_u8 out)
+{
+    gr_vk_tex *texture = (gr_vk_tex *)gr_object_lookup(gr_objects(), texture_handle,
+                                                       GR_HANDLE_TEXTURE, NULL);
+    gr_vk_dev *dev;
+    VkBufferCreateInfo buffer_info;
+    VkMemoryRequirements requirements;
+    VkMemoryAllocateInfo allocate;
+    VkBuffer buffer = VK_NULL_HANDLE;
+    VkDeviceMemory memory = VK_NULL_HANDLE;
+    readback_state state;
+    void *mapped = NULL;
+    uint64_t size;
+    uint32_t type_index;
+
+    if (!texture || !out.data)
+        return GR_ERROR_INVALID_ARGUMENT;
+    if (mip != 0 || layer != 0 || x != 0 || y != 0 || width != texture->width ||
+        height != texture->height)
+        return GR_ERROR_UNSUPPORTED; /* whole-image readback only, for now */
+    dev = texture->device;
+    size = (uint64_t)width * (uint64_t)height * 4ull;
+    if (out.len < (size_t)size)
+        return GR_ERROR_INVALID_ARGUMENT;
+
+    memset(&buffer_info, 0, sizeof(buffer_info));
+    buffer_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    buffer_info.size = size;
+    buffer_info.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    if (dev->create_buffer(dev->device, &buffer_info, NULL, &buffer) != VK_SUCCESS)
+        return GR_ERROR_BACKEND;
+    dev->get_buffer_requirements(dev->device, buffer, &requirements);
+    /* This one must be host-visible, which is the whole point of a readback buffer. */
+    type_index = dev->memory_type_bits;
+    {
+        VkPhysicalDeviceMemoryProperties memory_properties;
+        PFN_vkGetPhysicalDeviceMemoryProperties get_memory =
+            (PFN_vkGetPhysicalDeviceMemoryProperties)dev->loader.gipa(dev->instance,
+                                                                     "vkGetPhysicalDeviceMemoryProperties");
+        uint32_t t;
+        if (get_memory) {
+            get_memory(dev->physical, &memory_properties);
+            for (t = 0; t < memory_properties.memoryTypeCount; ++t) {
+                if ((requirements.memoryTypeBits & (1u << t)) &&
+                    (memory_properties.memoryTypes[t].propertyFlags &
+                     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)) {
+                    type_index = t;
+                    break;
+                }
+            }
+        }
+    }
+    memset(&allocate, 0, sizeof(allocate));
+    allocate.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocate.allocationSize = requirements.size;
+    allocate.memoryTypeIndex = type_index;
+    if (dev->allocate_memory(dev->device, &allocate, NULL, &memory) != VK_SUCCESS ||
+        dev->bind_buffer_memory(dev->device, buffer, memory, 0) != VK_SUCCESS) {
+        if (memory) dev->free_memory(dev->device, memory, NULL);
+        dev->destroy_buffer(dev->device, buffer, NULL);
+        return GR_ERROR_BACKEND;
+    }
+
+    state.texture = texture;
+    state.buffer = buffer;
+    vk_oneshot(dev, vk_record_readback, &state);
+
+    if (dev->map_memory(dev->device, memory, 0, VK_WHOLE_SIZE, 0, &mapped) == VK_SUCCESS) {
+        memcpy(out.data, mapped, (size_t)size);
+        dev->unmap_memory(dev->device, memory);
+    }
+    dev->free_memory(dev->device, memory, NULL);
+    dev->destroy_buffer(dev->device, buffer, NULL);
+    return mapped ? GR_OK : GR_ERROR_BACKEND;
+}
+
+/* ---------------------------------------------------------------------------------------
+ * Command buffers
+ * --------------------------------------------------------------------------------------- */
+
+
+gr_result gr_vk_abi_cmd_pool_create(gr_handle device_handle, const gr_cmd_pool_desc *desc,
+                                    gr_handle *out_pool)
+{
+    gr_vk_dev *dev = vk_device_of(device_handle);
+    gr_vk_cmdpool *pool;
+    VkCommandPoolCreateInfo info;
+    gr_handle handle;
+
+    if (!dev || !desc || !out_pool)
+        return GR_ERROR_INVALID_ARGUMENT;
+    *out_pool = GR_NULL_HANDLE;
+    pool = (gr_vk_cmdpool *)calloc(1, sizeof(*pool));
+    if (!pool)
+        return GR_ERROR_OUT_OF_MEMORY;
+    pool->device = dev;
+    memset(&info, 0, sizeof(info));
+    info.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    info.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+    info.queueFamilyIndex = dev->graphics_family;
+    if (dev->create_command_pool(dev->device, &info, NULL, &pool->pool) != VK_SUCCESS) {
+        free(pool);
+        return GR_ERROR_BACKEND;
+    }
+    handle = gr_object_insert(gr_objects(), GR_HANDLE_CMD_POOL, pool);
+    if (handle == GR_NULL_HANDLE) {
+        dev->destroy_command_pool(dev->device, pool->pool, NULL);
+        free(pool);
+        return GR_ERROR_OUT_OF_MEMORY;
+    }
+    *out_pool = handle;
+    return GR_OK;
+}
+
+gr_result gr_vk_abi_cmd_alloc(const gr_cmd_alloc_info *info, gr_handle *out_cmd)
+{
+    gr_vk_cmdpool *pool;
+    gr_vk_cmdbuf *cmd;
+    VkCommandBufferAllocateInfo alloc;
+    gr_handle handle;
+
+    if (!info || !out_cmd)
+        return GR_ERROR_INVALID_ARGUMENT;
+    *out_cmd = GR_NULL_HANDLE;
+    pool = (gr_vk_cmdpool *)gr_object_lookup(gr_objects(), info->pool, GR_HANDLE_CMD_POOL, NULL);
+    if (!pool)
+        return GR_ERROR_INVALID_HANDLE;
+    cmd = (gr_vk_cmdbuf *)calloc(1, sizeof(*cmd));
+    if (!cmd)
+        return GR_ERROR_OUT_OF_MEMORY;
+    cmd->device = pool->device;
+    memset(&alloc, 0, sizeof(alloc));
+    alloc.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    alloc.commandPool = pool->pool;
+    alloc.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    alloc.commandBufferCount = 1;
+    if (pool->device->allocate_command_buffers(pool->device->device, &alloc, &cmd->cb) != VK_SUCCESS) {
+        free(cmd);
+        return GR_ERROR_BACKEND;
+    }
+    handle = gr_object_insert(gr_objects(), GR_HANDLE_CMD_BUFFER, cmd);
+    if (handle == GR_NULL_HANDLE) {
+        free(cmd);
+        return GR_ERROR_OUT_OF_MEMORY;
+    }
+    *out_cmd = handle;
+    return GR_OK;
+}
+
+gr_result gr_vk_abi_cmd_begin(gr_handle cmd_handle)
+{
+    gr_vk_cmdbuf *cmd = (gr_vk_cmdbuf *)gr_object_lookup(gr_objects(), cmd_handle,
+                                                         GR_HANDLE_CMD_BUFFER, NULL);
+    VkCommandBufferBeginInfo info;
+    if (!cmd)
+        return GR_ERROR_INVALID_HANDLE;
+    if (cmd->recording)
+        return GR_ERROR_NOT_READY;
+    memset(&info, 0, sizeof(info));
+    info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    if (cmd->device->begin_command_buffer(cmd->cb, &info) != VK_SUCCESS)
+        return GR_ERROR_BACKEND;
+    cmd->recording = 1;
+    cmd->ended = 0;
+    return GR_OK;
+}
+
+gr_result gr_vk_abi_cmd_end(gr_handle cmd_handle)
+{
+    gr_vk_cmdbuf *cmd = (gr_vk_cmdbuf *)gr_object_lookup(gr_objects(), cmd_handle,
+                                                         GR_HANDLE_CMD_BUFFER, NULL);
+    if (!cmd)
+        return GR_ERROR_INVALID_HANDLE;
+    if (!cmd->recording)
+        return GR_ERROR_NOT_READY;
+    if (cmd->device->end_command_buffer(cmd->cb) != VK_SUCCESS)
+        return GR_ERROR_BACKEND;
+    cmd->recording = 0;
+    cmd->ended = 1;
+    return GR_OK;
+}
+
+gr_result gr_vk_abi_cmd_reset(gr_handle cmd_handle)
+{
+    gr_vk_cmdbuf *cmd = (gr_vk_cmdbuf *)gr_object_lookup(gr_objects(), cmd_handle,
+                                                         GR_HANDLE_CMD_BUFFER, NULL);
+    if (!cmd)
+        return GR_ERROR_INVALID_HANDLE;
+    if (cmd->recording)
+        return GR_ERROR_NOT_READY;
+    if (cmd->device->reset_command_buffer(cmd->cb, 0) != VK_SUCCESS)
+        return GR_ERROR_BACKEND;
+    cmd->ended = 0;
+    return GR_OK;
+}
+
+static VkImageLayout vk_layout(uint32_t state)
+{
+    switch ((gr_resource_state)state) {
+    case GR_STATE_GENERAL: return VK_IMAGE_LAYOUT_GENERAL;
+    case GR_STATE_SHADER_READ: return VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    case GR_STATE_COLOR_ATTACHMENT: return VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    case GR_STATE_DEPTH_ATTACHMENT_WRITE:
+    case GR_STATE_DEPTH_ATTACHMENT_READ: return VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+    case GR_STATE_TRANSFER_SRC: return VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    case GR_STATE_TRANSFER_DST: return VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    case GR_STATE_COPY_SOURCE_HOST: return VK_IMAGE_LAYOUT_GENERAL;
+    default: return VK_IMAGE_LAYOUT_UNDEFINED;
+    }
+}
+
+gr_result gr_vk_abi_cmd_barrier(gr_handle cmd_handle, const gr_barrier *barriers, uint32_t count)
+{
+    gr_vk_cmdbuf *cmd = (gr_vk_cmdbuf *)gr_object_lookup(gr_objects(), cmd_handle,
+                                                         GR_HANDLE_CMD_BUFFER, NULL);
+    uint32_t i;
+    if (!cmd || !barriers || count == 0)
+        return GR_ERROR_INVALID_ARGUMENT;
+    if (!cmd->recording)
+        return GR_ERROR_NOT_READY;
+    for (i = 0; i < count; ++i) {
+        gr_vk_tex *texture = (gr_vk_tex *)gr_object_lookup(gr_objects(), barriers[i].resource,
+                                                           GR_HANDLE_TEXTURE, NULL);
+        VkImageMemoryBarrier barrier;
+        if (!texture)
+            continue; /* a buffer barrier: no layout, nothing to do yet */
+        memset(&barrier, 0, sizeof(barrier));
+        barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        barrier.oldLayout = vk_layout(barriers[i].src_state);
+        barrier.newLayout = vk_layout(barriers[i].dst_state);
+        /* Conservative access masks: correctness first, and this is a headless test path rather
+         * than a hot one. The stage masks follow the contract's pipeline-stage bits. */
+        barrier.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT;
+        barrier.dstAccessMask = VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT;
+        barrier.image = texture->image;
+        barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        barrier.subresourceRange.levelCount = 1;
+        barrier.subresourceRange.layerCount = 1;
+        cmd->device->cmd_pipeline_barrier(cmd->cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                                          VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, NULL, 0, NULL,
+                                          1, &barrier);
+    }
+    return GR_OK;
+}
+
+gr_result gr_vk_abi_cmd_begin_render(gr_handle cmd_handle, const gr_render_begin *info)
+{
+    gr_vk_cmdbuf *cmd = (gr_vk_cmdbuf *)gr_object_lookup(gr_objects(), cmd_handle,
+                                                         GR_HANDLE_CMD_BUFFER, NULL);
+    VkRenderingAttachmentInfo attachments[4];
+    VkRenderingInfo rendering;
+    uint32_t i;
+    if (!cmd || !info)
+        return GR_ERROR_INVALID_ARGUMENT;
+    if (!cmd->recording)
+        return GR_ERROR_NOT_READY;
+    if (info->color_count == 0 || info->color_count > 4u)
+        return GR_ERROR_INVALID_ARGUMENT;
+
+    memset(attachments, 0, sizeof(attachments));
+    for (i = 0; i < info->color_count; ++i) {
+        gr_vk_viewobj *view = (gr_vk_viewobj *)gr_object_lookup(gr_objects(), info->colors[i].view,
+                                                                GR_HANDLE_TEXTURE_VIEW, NULL);
+        if (!view)
+            return GR_ERROR_INVALID_HANDLE;
+        attachments[i].sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+        attachments[i].imageView = view->view;
+        attachments[i].imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        attachments[i].loadOp = info->colors[i].load_op == GR_LOAD_CLEAR ? VK_ATTACHMENT_LOAD_OP_CLEAR
+                                : info->colors[i].load_op == GR_LOAD_LOAD ? VK_ATTACHMENT_LOAD_OP_LOAD
+                                                                          : VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        attachments[i].storeOp = info->colors[i].store_op == GR_STORE_DISCARD
+                                     ? VK_ATTACHMENT_STORE_OP_DONT_CARE
+                                     : VK_ATTACHMENT_STORE_OP_STORE;
+        attachments[i].clearValue.color.float32[0] = info->colors[i].clear[0];
+        attachments[i].clearValue.color.float32[1] = info->colors[i].clear[1];
+        attachments[i].clearValue.color.float32[2] = info->colors[i].clear[2];
+        attachments[i].clearValue.color.float32[3] = info->colors[i].clear[3];
+    }
+    memset(&rendering, 0, sizeof(rendering));
+    rendering.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+    rendering.renderArea.offset.x = info->render_x;
+    rendering.renderArea.offset.y = info->render_y;
+    rendering.renderArea.extent.width = info->render_w;
+    rendering.renderArea.extent.height = info->render_h;
+    rendering.layerCount = 1;
+    rendering.colorAttachmentCount = info->color_count;
+    rendering.pColorAttachments = attachments;
+    cmd->device->cmd_begin_rendering(cmd->cb, &rendering);
+    return GR_OK;
+}
+
+gr_result gr_vk_abi_cmd_end_render(gr_handle cmd_handle)
+{
+    gr_vk_cmdbuf *cmd = (gr_vk_cmdbuf *)gr_object_lookup(gr_objects(), cmd_handle,
+                                                         GR_HANDLE_CMD_BUFFER, NULL);
+    if (!cmd)
+        return GR_ERROR_INVALID_HANDLE;
+    if (!cmd->recording)
+        return GR_ERROR_NOT_READY;
+    cmd->device->cmd_end_rendering(cmd->cb);
+    return GR_OK;
+}
+
+gr_result gr_vk_abi_cmd_set_viewport(gr_handle cmd_handle, float x, float y, float width,
+                                     float height, float min_depth, float max_depth)
+{
+    gr_vk_cmdbuf *cmd = (gr_vk_cmdbuf *)gr_object_lookup(gr_objects(), cmd_handle,
+                                                         GR_HANDLE_CMD_BUFFER, NULL);
+    VkViewport viewport;
+    if (!cmd || !cmd->recording)
+        return GR_ERROR_NOT_READY;
+    viewport.x = x;
+    viewport.y = y;
+    viewport.width = width;
+    viewport.height = height;
+    viewport.minDepth = min_depth;
+    viewport.maxDepth = max_depth;
+    cmd->device->cmd_set_viewport(cmd->cb, 0, 1, &viewport);
+    return GR_OK;
+}
+
+gr_result gr_vk_abi_cmd_set_scissor(gr_handle cmd_handle, int32_t x, int32_t y, uint32_t width,
+                                    uint32_t height)
+{
+    gr_vk_cmdbuf *cmd = (gr_vk_cmdbuf *)gr_object_lookup(gr_objects(), cmd_handle,
+                                                         GR_HANDLE_CMD_BUFFER, NULL);
+    VkRect2D scissor;
+    if (!cmd || !cmd->recording)
+        return GR_ERROR_NOT_READY;
+    scissor.offset.x = x;
+    scissor.offset.y = y;
+    scissor.extent.width = width;
+    scissor.extent.height = height;
+    cmd->device->cmd_set_scissor(cmd->cb, 0, 1, &scissor);
+    return GR_OK;
+}
+
+gr_result gr_vk_abi_cmd_bind_pipeline(gr_handle cmd_handle, gr_handle pipeline_handle)
+{
+    gr_vk_cmdbuf *cmd = (gr_vk_cmdbuf *)gr_object_lookup(gr_objects(), cmd_handle,
+                                                         GR_HANDLE_CMD_BUFFER, NULL);
+    gr_vk_pipeline *pipeline = (gr_vk_pipeline *)gr_object_lookup(gr_objects(), pipeline_handle,
+                                                                 GR_HANDLE_PIPELINE, NULL);
+    if (!cmd || !pipeline)
+        return GR_ERROR_INVALID_HANDLE;
+    if (!cmd->recording)
+        return GR_ERROR_NOT_READY;
+    cmd->device->cmd_bind_pipeline(cmd->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->pipeline);
+    return GR_OK;
+}
+
+gr_result gr_vk_abi_cmd_push_constants(gr_handle cmd_handle, uint32_t stage_mask, uint32_t offset,
+                                       gr_span_u8 data)
+{
+    gr_vk_cmdbuf *cmd = (gr_vk_cmdbuf *)gr_object_lookup(gr_objects(), cmd_handle,
+                                                         GR_HANDLE_CMD_BUFFER, NULL);
+    VkShaderStageFlags stages = 0;
+    if (!cmd || !data.data)
+        return GR_ERROR_INVALID_ARGUMENT;
+    if (!cmd->recording)
+        return GR_ERROR_NOT_READY;
+    if (offset + data.len > GR_PUSH_CONSTANT_BYTES)
+        return GR_ERROR_INVALID_ARGUMENT;
+    if (stage_mask & 1u) stages |= VK_SHADER_STAGE_VERTEX_BIT;   /* bit 0: vertex */
+    if (stage_mask & 2u) stages |= VK_SHADER_STAGE_FRAGMENT_BIT; /* bit 1: fragment */
+    if (stage_mask & 4u) stages |= VK_SHADER_STAGE_COMPUTE_BIT;
+    if (stages == 0)
+        stages = VK_SHADER_STAGE_ALL;
+    cmd->device->cmd_push_constants(cmd->cb, cmd->device->layout, stages, offset,
+                                    (uint32_t)data.len, data.data);
+    return GR_OK;
+}
+
+gr_result gr_vk_abi_cmd_draw(gr_handle cmd_handle, const gr_draw *draw)
+{
+    gr_vk_cmdbuf *cmd = (gr_vk_cmdbuf *)gr_object_lookup(gr_objects(), cmd_handle,
+                                                         GR_HANDLE_CMD_BUFFER, NULL);
+    if (!cmd || !draw)
+        return GR_ERROR_INVALID_ARGUMENT;
+    if (!cmd->recording)
+        return GR_ERROR_NOT_READY;
+    cmd->device->cmd_draw(cmd->cb, draw->vertex_count, draw->instance_count, draw->first_vertex,
+                          draw->first_instance);
+    return GR_OK;
+}
+
+/* ---------------------------------------------------------------------------------------
+ * Submission and fences
+ * --------------------------------------------------------------------------------------- */
+gr_result gr_vk_abi_submit(const gr_submit *submit, uint64_t *out_value)
+{
+    gr_vk_dev *dev;
+    VkSubmitInfo info;
+    VkTimelineSemaphoreSubmitInfo timeline;
+    VkSemaphore wait_semaphores[4];
+    uint64_t wait_values[4];
+    VkPipelineStageFlags wait_stages[4];
+    VkCommandBuffer buffers[8];
+    uint32_t i;
+    uint64_t value;
+    gr_vk_queue *queue;
+
+    if (!submit)
+        return GR_ERROR_INVALID_ARGUMENT;
+    queue = (gr_vk_queue *)gr_object_lookup(gr_objects(), submit->queue, GR_HANDLE_QUEUE, NULL);
+    if (!queue)
+        return GR_ERROR_INVALID_HANDLE;
+    dev = queue->device;
+    if (submit->cmd_count > 8u || submit->wait_count > 4u)
+        return GR_ERROR_INVALID_ARGUMENT;
+
+    for (i = 0; i < submit->cmd_count; ++i) {
+        gr_vk_cmdbuf *cmd = (gr_vk_cmdbuf *)gr_object_lookup(gr_objects(), submit->cmds[i],
+                                                             GR_HANDLE_CMD_BUFFER, NULL);
+        if (!cmd)
+            return GR_ERROR_INVALID_HANDLE;
+        if (!cmd->ended)
+            return GR_ERROR_NOT_READY;
+        buffers[i] = cmd->cb;
+    }
+    for (i = 0; i < submit->wait_count; ++i) {
+        wait_semaphores[i] = dev->graphics_timeline;
+        wait_values[i] = submit->waits[i].value;
+        wait_stages[i] = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+    }
+
+    value = dev->submitted + 1u;
+    memset(&timeline, 0, sizeof(timeline));
+    timeline.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+    timeline.waitSemaphoreValueCount = submit->wait_count;
+    timeline.pWaitSemaphoreValues = submit->wait_count ? wait_values : NULL;
+    timeline.signalSemaphoreValueCount = 1;
+    timeline.pSignalSemaphoreValues = &value;
+
+    memset(&info, 0, sizeof(info));
+    info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    info.pNext = &timeline;
+    info.waitSemaphoreCount = submit->wait_count;
+    info.pWaitSemaphores = submit->wait_count ? wait_semaphores : NULL;
+    info.pWaitDstStageMask = submit->wait_count ? wait_stages : NULL;
+    info.commandBufferCount = submit->cmd_count;
+    info.pCommandBuffers = submit->cmd_count ? buffers : NULL;
+    info.signalSemaphoreCount = 1;
+    info.pSignalSemaphores = &dev->graphics_timeline;
+
+    if (dev->queue_submit(queue->queue, 1, &info, VK_NULL_HANDLE) != VK_SUCCESS)
+        return GR_ERROR_BACKEND;
+    dev->submitted = value;
+    queue->submitted = value;
+    if (out_value)
+        *out_value = value;
+    return GR_OK;
+}
+
+gr_result gr_vk_abi_fence_create(gr_handle device_handle, uint64_t initial_value,
+                                 gr_handle *out_fence)
+{
+    gr_vk_dev *dev = vk_device_of(device_handle);
+    gr_vk_fence_obj *fence;
+    gr_handle handle;
+    if (!dev || !out_fence)
+        return GR_ERROR_INVALID_ARGUMENT;
+    *out_fence = GR_NULL_HANDLE;
+    fence = (gr_vk_fence_obj *)calloc(1, sizeof(*fence));
+    if (!fence)
+        return GR_ERROR_OUT_OF_MEMORY;
+    fence->device = dev;
+    fence->value = initial_value;
+    handle = gr_object_insert(gr_objects(), GR_HANDLE_FENCE, fence);
+    if (handle == GR_NULL_HANDLE) {
+        free(fence);
+        return GR_ERROR_OUT_OF_MEMORY;
+    }
+    *out_fence = handle;
+    return GR_OK;
+}
+
+gr_result gr_vk_abi_fence_wait(gr_handle fence_handle, uint64_t value, uint64_t timeout_ns,
+                               gr_result *out_status)
+{
+    gr_vk_fence_obj *fence = (gr_vk_fence_obj *)gr_object_lookup(gr_objects(), fence_handle,
+                                                                 GR_HANDLE_FENCE, NULL);
+    VkSemaphoreWaitInfo info;
+    VkResult result;
+    if (!fence)
+        return GR_ERROR_INVALID_HANDLE;
+    /* A real timeline wait: vkWaitSemaphores on the queue's timeline, which is the mechanism the
+     * ABI exposes instead of binary semaphores. */
+    memset(&info, 0, sizeof(info));
+    info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
+    info.semaphoreCount = 1;
+    info.pSemaphores = &fence->device->graphics_timeline;
+    info.pValues = &value;
+    result = fence->device->wait_semaphores(fence->device->device, &info, timeout_ns);
+    if (result == VK_TIMEOUT) {
+        if (out_status) *out_status = GR_TIMEOUT;
+        return GR_TIMEOUT;
+    }
+    if (result != VK_SUCCESS) {
+        if (out_status) *out_status = GR_ERROR_BACKEND;
+        return GR_ERROR_BACKEND;
+    }
+    fence->value = value;
+    if (out_status) *out_status = GR_OK;
+    return GR_OK;
+}
+
+uint64_t gr_vk_abi_fence_value(gr_handle fence_handle)
+{
+    gr_vk_fence_obj *fence = (gr_vk_fence_obj *)gr_object_lookup(gr_objects(), fence_handle,
+                                                                 GR_HANDLE_FENCE, NULL);
+    return fence ? fence->value : 0;
+}
+
 #else /* !GRAIL_HAVE_VULKAN */
 
 /* Built without the Vulkan headers. The device cannot be created, so the dispatcher never routes
@@ -1093,5 +1944,25 @@ gr_result gr_vk_abi_shader_create(gr_handle d, const gr_shader_desc *s, gr_handl
 gr_result gr_vk_abi_pipeline_create(gr_handle d, const gr_pipeline_desc *p, gr_handle *o) { (void)d; (void)p; (void)o; return GR_ERROR_UNSUPPORTED; }
 gr_result gr_vk_abi_pipeline_commit(gr_handle d, double *s) { (void)d; (void)s; return GR_ERROR_UNSUPPORTED; }
 gr_result gr_vk_abi_pipeline_stats(gr_handle d, uint32_t *a, uint32_t *b) { (void)d; (void)a; (void)b; return GR_ERROR_UNSUPPORTED; }
+gr_result gr_vk_abi_texture_create(gr_handle d, const gr_texture_desc *x, gr_handle *o) { (void)d; (void)x; (void)o; return GR_ERROR_UNSUPPORTED; }
+gr_result gr_vk_abi_texture_view_create(gr_handle d, const gr_texture_view_desc *x, gr_handle *o) { (void)d; (void)x; (void)o; return GR_ERROR_UNSUPPORTED; }
+gr_result gr_vk_abi_texture_read(gr_handle t, uint32_t a, uint32_t b, uint32_t c, uint32_t e, uint32_t f, uint32_t g, gr_mut_span_u8 o) { (void)t; (void)a; (void)b; (void)c; (void)e; (void)f; (void)g; (void)o; return GR_ERROR_UNSUPPORTED; }
+gr_result gr_vk_abi_cmd_pool_create(gr_handle d, const gr_cmd_pool_desc *x, gr_handle *o) { (void)d; (void)x; (void)o; return GR_ERROR_UNSUPPORTED; }
+gr_result gr_vk_abi_cmd_alloc(const gr_cmd_alloc_info *i, gr_handle *o) { (void)i; (void)o; return GR_ERROR_UNSUPPORTED; }
+gr_result gr_vk_abi_cmd_begin(gr_handle c) { (void)c; return GR_ERROR_UNSUPPORTED; }
+gr_result gr_vk_abi_cmd_end(gr_handle c) { (void)c; return GR_ERROR_UNSUPPORTED; }
+gr_result gr_vk_abi_cmd_reset(gr_handle c) { (void)c; return GR_ERROR_UNSUPPORTED; }
+gr_result gr_vk_abi_cmd_barrier(gr_handle c, const gr_barrier *b, uint32_t n) { (void)c; (void)b; (void)n; return GR_ERROR_UNSUPPORTED; }
+gr_result gr_vk_abi_cmd_begin_render(gr_handle c, const gr_render_begin *i) { (void)c; (void)i; return GR_ERROR_UNSUPPORTED; }
+gr_result gr_vk_abi_cmd_end_render(gr_handle c) { (void)c; return GR_ERROR_UNSUPPORTED; }
+gr_result gr_vk_abi_cmd_set_viewport(gr_handle c, float x, float y, float w, float h, float n, float f) { (void)c; (void)x; (void)y; (void)w; (void)h; (void)n; (void)f; return GR_ERROR_UNSUPPORTED; }
+gr_result gr_vk_abi_cmd_set_scissor(gr_handle c, int32_t x, int32_t y, uint32_t w, uint32_t h) { (void)c; (void)x; (void)y; (void)w; (void)h; return GR_ERROR_UNSUPPORTED; }
+gr_result gr_vk_abi_cmd_bind_pipeline(gr_handle c, gr_handle p) { (void)c; (void)p; return GR_ERROR_UNSUPPORTED; }
+gr_result gr_vk_abi_cmd_push_constants(gr_handle c, uint32_t s, uint32_t o, gr_span_u8 d) { (void)c; (void)s; (void)o; (void)d; return GR_ERROR_UNSUPPORTED; }
+gr_result gr_vk_abi_cmd_draw(gr_handle c, const gr_draw *d) { (void)c; (void)d; return GR_ERROR_UNSUPPORTED; }
+gr_result gr_vk_abi_submit(const gr_submit *s, uint64_t *v) { (void)s; (void)v; return GR_ERROR_UNSUPPORTED; }
+gr_result gr_vk_abi_fence_create(gr_handle d, uint64_t i, gr_handle *o) { (void)d; (void)i; (void)o; return GR_ERROR_UNSUPPORTED; }
+gr_result gr_vk_abi_fence_wait(gr_handle f, uint64_t v, uint64_t t, gr_result *s) { (void)f; (void)v; (void)t; (void)s; return GR_ERROR_UNSUPPORTED; }
+uint64_t gr_vk_abi_fence_value(gr_handle f) { (void)f; return 0; }
 
 #endif
