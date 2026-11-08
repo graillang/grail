@@ -4,13 +4,15 @@
 
 - Abundance CPU port, job-priority increment plus a container-ergonomics note: `abundance/src/job_policy.grl`
   carries `JobPriority::key()`/`from_key()` (class << 32 | f32 rank bits, with the engine's
-  non-finite and negative clamps) and the documented admission policy model; the reference compiles
-  the engine's own symbols. `docs/design/grail-container-ergonomics.md` records what the entity and
-  checkpoint work cost: affine loops over owned aggregates, no reference to nested-vector elements,
-  no in-place field writes through an index, reference rebinding at every call, and the syntax
-  facts that each cost a compile iteration. The committed job test covers the key functions (14
-  exact values); `terrain_rank()` and the policy script abort at runtime in Grail and are recorded
-  as the open blocker. Suite total 221 exact values.
+  non-finite and negative clamps), `terrain_rank()` and the documented admission policy model; the
+  reference links the engine's own symbols. Two arithmetic bugs found on the way are fixed and
+  recorded: an unsigned exponent subtraction underflowed for every f32 value below 1.0 (the SIGABRT
+  in the first cut) and the rank's level term is max(0, 32 - level). The committed job test now
+  covers 30 exact values, including the model's execution order and counters.
+  `docs/design/grail-container-ergonomics.md` records what the entity and checkpoint work cost:
+  affine loops over owned aggregates, no reference to nested-vector elements, no in-place field
+  writes through an index, reference rebinding at every call, and the syntax facts that each cost a
+  compile iteration. Suite total 237 exact values.
 
 - Abundance CPU port, entity-registry increment: `abundance/src/entity_table.grl` carries the
   entity registry's persisted state — dense id-ordered rows of id, type, owner, position, spawned
