@@ -31,6 +31,13 @@
   signing/notarization hooks. Linux lanes build and test; Windows/macOS lanes are
   explicit distribution scaffolding because the compiler still emits Linux ELF
   only. Tooling is documented in `docs/tooling/cross-platform-ci.md`.
+- Added the cross-platform OS ABI contract under `include/grail/`: 64-bit scalar and pointer
+  calling rules, opaque linear handles, version negotiation, allocator/startup records,
+  portable error codes with raw OS detail, and strict UTF-8/UTF-16 helpers. Portable
+  implementation and C tests cover version checks, every error mapping (errno, Win32, Mach),
+  and Unicode rejection/round-trip cases. Linux, AArch64, RISC-V 64, Win64 and Apple ARM64
+  header parsing is checked. Nothing is linked into Grail builds; `compiler/native.grl` and
+  `runtime.grl` are unchanged.
 
 - Native fixtures, inline regression programs and book examples now use typed references and
   explicit byte views under `--default-u64 --typed-refs`; user-mode cases retain `i64` defaults.

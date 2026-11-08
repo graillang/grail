@@ -76,3 +76,7 @@ package platform:
 # Print signing/notarization commands; add --execute after setting credentials.
 sign platform artifact:
     bun tools/ci.mjs sign --platform {{platform}} --artifact {{artifact}}
+
+# Cross-platform OS ABI headers and C contract tests (needs a host C compiler).
+abi-test:
+    bun tools/abi-test.mjs
