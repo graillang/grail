@@ -98,7 +98,7 @@ profiler, and hosted macOS release artifacts.
 Abundance and Borg Agent have landed port inventories and staged boundaries. Abundance CPU
 math, FNV-1a, world envelope, landscape digest, ABWCACH8/9 containers, full cache-body decode,
 the ABCP2 checkpoint container, the entity table, the job-priority policy and the deterministic
-job executor, asset dependency ordering and the RHI wire framing are ported with bit-exact C++ parity:
+job executor, asset dependency ordering and the RHI wire framing and a Vulkan host that returns an exact 64/128/191/255 clear readback are ported with bit-exact C++ parity:
 **313 exact values across nine programs**
 (the older 237 figure covered the increments before the job executor). Borg Agent has JSON,
 wire, TOML/config, local-session ownership, JSON-RPC dispatch and local-IPC
