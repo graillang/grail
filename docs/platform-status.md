@@ -87,9 +87,8 @@ the ABCP2 checkpoint container, the entity table, the job-priority policy and th
 job executor are ported with bit-exact C++ parity: **254 exact values across seven programs**
 (the older 237 figure covered the increments before the job executor). Borg Agent has JSON,
 wire, TOML/config, local-session ownership, JSON-RPC dispatch and local-IPC
-addressing/lifecycle rules: **749 reference lines across 128 documents and eight suites** (the
-older 653/683 figures predate the transport and dispatch increments); the socket syscalls
-themselves are still open. RHI/renderer/editor and remaining Borg OS services are still open.
+addressing/lifecycle rules and journal persistence/cursor rules: **783 reference lines across
+nine suites**; the socket syscalls themselves are still open. RHI/renderer/editor and remaining Borg OS services are still open.
 
 ## Verification commands
 
