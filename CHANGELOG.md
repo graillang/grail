@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- `lib/noise.grl`: coherent noise ported from FastNoiseLite 1.1.1 (MIT) for the configurations
+  Abundance uses - 2D OpenSimplex2, OpenSimplex2S, Cellular (all distance functions and return
+  types), Perlin and Value noise; None, FBm and Ridged fractals; 2D OpenSimplex2 domain warp,
+  single and progressive. f64 coordinates with f32 math, as the reference with double coordinates:
+  15 configurations x 50 coordinates match the C++ bit for bit (`tests/reference/noise`). 3D noise
+  (used by Abundance's rock kit) is not ported yet.
+
 - Callbacks with float and narrow-integer parameters and float results: an exported
   `extern "C" fn` reads each parameter from where the platform C convention put it (SysV,
   AAPCS64 and RV64 pack integers and floats into separate register files; Win64 is positional,
