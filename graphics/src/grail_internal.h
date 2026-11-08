@@ -102,6 +102,19 @@ gr_result gr_vk_abi_cmd_draw(gr_handle cmd, const gr_draw *draw);
 gr_result gr_vk_abi_submit(const gr_submit *submit, uint64_t *out_value);
 gr_result gr_vk_abi_fence_create(gr_handle device, uint64_t initial_value, gr_handle *out_fence);
 gr_result gr_vk_abi_fence_wait(gr_handle fence, uint64_t value, uint64_t timeout_ns, gr_result *out_status);
+gr_result gr_vk_abi_buffer_create(gr_handle device, const gr_buffer_desc *desc, gr_handle *out_buffer);
+gr_result gr_vk_abi_buffer_write(gr_handle buffer, uint64_t offset, gr_span_u8 data);
+gr_result gr_vk_abi_buffer_read(gr_handle buffer, uint64_t offset, gr_mut_span_u8 out);
+gr_result gr_vk_abi_buffer_map(gr_handle buffer, void **out_ptr);
+uint64_t gr_vk_abi_buffer_device_address(gr_handle buffer);
+uint32_t gr_vk_abi_buffer_bindless_index(gr_handle buffer);
+gr_result gr_vk_abi_sampler_create(gr_handle device, const gr_sampler_desc *desc, gr_handle *out_sampler, uint32_t *out_slot);
+gr_result gr_vk_abi_texture_write(gr_handle texture, uint32_t mip, uint32_t layer, uint32_t x, uint32_t y, uint32_t w, uint32_t h, gr_span_u8 rows);
+uint32_t gr_vk_abi_texture_view_bindless_sampled(gr_handle view);
+gr_result gr_vk_abi_frame_constants_write(gr_handle device, uint32_t slot, const gr_frame_constants *constants);
+gr_result gr_vk_abi_frame_slot_count(gr_handle device, uint32_t *out_count);
+gr_result gr_vk_abi_cmd_push_frame_offset(gr_handle cmd, uint32_t frame_slot);
+void gr_vk_abi_buffer_unmap(gr_handle buffer);
 uint64_t gr_vk_abi_fence_value(gr_handle fence);
 
 /* Duplicates a gr_str into malloc'd, NUL-terminated memory. Returns NULL for an empty or

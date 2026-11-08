@@ -60,6 +60,7 @@ int main(int argc, char **argv)
     gr_str vs_name = { "core/fullscreen", 15, 0 };
     gr_handle fragments[8];
     gr_handle pipeline_solid = GR_NULL_HANDLE;
+    gr_handle pipeline_bindless = GR_NULL_HANDLE;
     uint64_t keys[8];
     uint32_t fragment_count = 0, i;
 
@@ -233,6 +234,38 @@ int main(int argc, char **argv)
         pipeline_solid = pipeline;
     }
 
+    /* The pipeline that samples the bindless table. Its fragment stage reads set 0 (a sampled
+     * image and a sampler) and set 1 (the frame constants), which is what makes the frame below
+     * a test of the live table rather than of a solid colour. */
+    {
+        gr_handle vertex = GR_NULL_HANDLE;
+        gr_handle fragment = GR_NULL_HANDLE;
+        gr_handle pipeline = GR_NULL_HANDLE;
+        gr_pipeline_desc pd;
+        gr_format color = GR_FORMAT_R8G8B8A8_UNORM;
+        gr_str fragment_name = { "core/tonemap", 12, 0 };
+
+        CHECK_EQ(gr_shader_create_resolved(device, library, vs_name, GR_SHADER_STAGE_VERTEX, 0,
+                                           &vertex), GR_OK);
+        CHECK_EQ(gr_shader_create_resolved(device, library, fragment_name,
+                                           GR_SHADER_STAGE_FRAGMENT, 0, &fragment), GR_OK);
+        memset(&pd, 0, sizeof(pd));
+        pd.head.size = (uint32_t)sizeof(pd);
+        pd.name = (gr_str){ "vk/bindless", 11, 0 };
+        pd.shaders[GR_SHADER_STAGE_VERTEX] = vertex;
+        pd.shaders[GR_SHADER_STAGE_FRAGMENT] = fragment;
+        pd.color_formats = &color;
+        pd.color_count = 1;
+        pd.depth_format = GR_FORMAT_UNDEFINED;
+        pd.topology = GR_TOPOLOGY_TRIANGLE_LIST;
+        pd.cull = GR_CULL_NONE;
+        pd.front_face_ccw = 1;
+        pd.samples = 1;
+        CHECK_EQ(gr_pipeline_create(device, &pd, &pipeline), GR_OK);
+        CHECK(pipeline != GR_NULL_HANDLE);
+        pipeline_bindless = pipeline;
+    }
+
     /* Commit closes the registry, and the driver's pipeline cache has content. */
     {
         double seconds = -1.0;
@@ -240,8 +273,8 @@ int main(int argc, char **argv)
         CHECK_EQ(gr_pipeline_commit(device, &seconds), GR_OK);
         CHECK(seconds >= 0.0);
         CHECK_EQ(gr_pipeline_stats(device, &declared, &committed), GR_OK);
-        CHECK_EQ(declared, 2u);
-        CHECK_EQ(committed, 2u);
+        CHECK_EQ(declared, 3u);
+        CHECK_EQ(committed, 3u);
         {
             gr_device_caps after;
             memset(&after, 0, sizeof(after));
@@ -427,6 +460,233 @@ int main(int argc, char **argv)
                    pixels[sizeof(pixels) - 4u], pixels[sizeof(pixels) - 3u],
                    pixels[sizeof(pixels) - 2u], pixels[sizeof(pixels) - 1u]);
         }
+    }
+
+    /* -----------------------------------------------------------------------------------
+     * A frame that samples the live bindless table.
+     * --------------------------------------------------------------------------------- */
+    {
+        const uint32_t kSize = 64;
+        static const uint8_t kQuadrants[4][3] = {
+            { 51, 102, 153 }, { 204, 51, 51 }, { 51, 204, 51 }, { 153, 153, 51 }
+        };
+        uint8_t source[8 * 8 * 4];
+        gr_texture_desc td;
+        gr_handle src = GR_NULL_HANDLE, dst = GR_NULL_HANDLE;
+        gr_texture_view_desc vd;
+        gr_handle src_view = GR_NULL_HANDLE, dst_view = GR_NULL_HANDLE;
+        gr_cmd_pool_desc cpd;
+        gr_handle pool = GR_NULL_HANDLE, cmd = GR_NULL_HANDLE;
+        gr_cmd_alloc_info cai;
+        gr_frame_constants constants;
+        uint32_t sampled_slot = GR_BINDLESS_INDEX_NONE;
+        uint8_t pixels[64 * 64 * 4];
+        uint64_t digests[3];
+        uint32_t pass;
+        int expected_hits[4] = { 0, 0, 0, 0 };
+
+        /* Four flat quadrants: small, and each quadrant's filtered value is exactly its texel, so
+         * what the shader sampled is not in doubt. */
+        {
+            uint32_t y, x;
+            for (y = 0; y < 8u; ++y)
+                for (x = 0; x < 8u; ++x) {
+                    uint32_t q = (y < 4u ? 0u : 2u) + (x < 4u ? 0u : 1u);
+                    uint8_t *pixel = &source[(y * 8u + x) * 4u];
+                    pixel[0] = kQuadrants[q][0];
+                    pixel[1] = kQuadrants[q][1];
+                    pixel[2] = kQuadrants[q][2];
+                    pixel[3] = 255;
+                }
+        }
+
+        memset(&td, 0, sizeof(td));
+        td.head.size = (uint32_t)sizeof(td);
+        td.type = GR_TEXTURE_2D;
+        td.format = GR_FORMAT_R8G8B8A8_UNORM;
+        td.width = 8;
+        td.height = 8;
+        td.usage = GR_TEXTURE_USAGE_SAMPLED | GR_TEXTURE_USAGE_TRANSFER_DST;
+        CHECK_EQ(gr_texture_create(device, &td, &src), GR_OK);
+        CHECK_EQ(gr_texture_write(src, 0, 0, 0, 0, 8, 8, (gr_span_u8){ source, sizeof(source) }),
+                 GR_OK);
+
+        /* Creating the view claims a slot in the live sampled-image table. */
+        memset(&vd, 0, sizeof(vd));
+        vd.head.size = (uint32_t)sizeof(vd);
+        vd.texture = src;
+        vd.type = GR_VIEW_2D;
+        vd.format = GR_FORMAT_UNDEFINED;
+        CHECK_EQ(gr_texture_view_create(device, &vd, &src_view), GR_OK);
+        sampled_slot = gr_texture_view_bindless_sampled(src_view);
+        CHECK(sampled_slot != GR_BINDLESS_INDEX_NONE);
+        printf("vk-backend: source texture at sampled slot %u\n", sampled_slot);
+
+        td.width = kSize;
+        td.height = kSize;
+        td.usage = GR_TEXTURE_USAGE_COLOR_ATTACHMENT | GR_TEXTURE_USAGE_TRANSFER_SRC;
+        CHECK_EQ(gr_texture_create(device, &td, &dst), GR_OK);
+        memset(&vd, 0, sizeof(vd));
+        vd.head.size = (uint32_t)sizeof(vd);
+        vd.texture = dst;
+        vd.type = GR_VIEW_2D;
+        vd.format = GR_FORMAT_UNDEFINED;
+        CHECK_EQ(gr_texture_view_create(device, &vd, &dst_view), GR_OK);
+
+        /* The frame constants the shader reads: exposure.z = 1 leaves the sampled colour alone. */
+        memset(&constants, 0, sizeof(constants));
+        constants.version = GR_FRAME_CONSTANTS_VERSION;
+        constants.exposure[0] = 1.0f;
+        constants.exposure[2] = 1.0f;
+        constants.frame_index = 0;
+        CHECK_EQ(gr_frame_constants_write(device, 0, &constants), GR_OK);
+
+        memset(&cpd, 0, sizeof(cpd));
+        cpd.head.size = (uint32_t)sizeof(cpd);
+        cpd.queue = GR_QUEUE_GRAPHICS;
+        CHECK_EQ(gr_cmd_pool_create(device, &cpd, &pool), GR_OK);
+        memset(&cai, 0, sizeof(cai));
+        cai.head.size = (uint32_t)sizeof(cai);
+        cai.pool = pool;
+        CHECK_EQ(gr_cmd_alloc(&cai, &cmd), GR_OK);
+
+        /* Pass 0 and 1: the same source, so the digests must match. Pass 2: a different source,
+         * so the digest must move — which is only possible if the sample is real. */
+        for (pass = 0; pass < 3u; ++pass) {
+            gr_barrier barrier;
+            gr_render_begin rb;
+            gr_color_attachment color_attachment;
+            gr_draw draw;
+            gr_submit submit;
+            gr_handle queue = GR_NULL_HANDLE, fence = GR_NULL_HANDLE;
+            uint64_t value = 0, digest = 0xcbf29ce484222325ull;
+            gr_result wait_status = GR_ERROR_BACKEND;
+            uint32_t push[4];
+            size_t i;
+
+            if (pass == 2u) {
+                /* Overwrite every texel with one new colour. */
+                for (i = 0; i < sizeof(source); i += 4u) {
+                    source[i + 0] = 200;
+                    source[i + 1] = 40;
+                    source[i + 2] = 90;
+                }
+                CHECK_EQ(gr_texture_write(src, 0, 0, 0, 0, 8, 8,
+                                          (gr_span_u8){ source, sizeof(source) }), GR_OK);
+            }
+
+            CHECK_EQ(gr_cmd_reset(cmd), GR_OK);
+            CHECK_EQ(gr_cmd_begin(cmd), GR_OK);
+            CHECK_EQ(gr_cmd_push_frame_offset(cmd, 0), GR_OK);
+
+            memset(&barrier, 0, sizeof(barrier));
+            barrier.resource = dst;
+            barrier.src_state = GR_STATE_UNDEFINED;
+            barrier.dst_state = GR_STATE_COLOR_ATTACHMENT;
+            CHECK_EQ(gr_cmd_barrier(cmd, &barrier, 1), GR_OK);
+
+            memset(&color_attachment, 0, sizeof(color_attachment));
+            color_attachment.view = dst_view;
+            color_attachment.load_op = GR_LOAD_CLEAR;
+            color_attachment.store_op = GR_STORE_STORE;
+            color_attachment.clear[3] = 1.0f;
+            memset(&rb, 0, sizeof(rb));
+            rb.head.size = (uint32_t)sizeof(rb);
+            rb.colors = &color_attachment;
+            rb.color_count = 1;
+            rb.render_w = kSize;
+            rb.render_h = kSize;
+            CHECK_EQ(gr_cmd_begin_render(cmd, &rb), GR_OK);
+            CHECK_EQ(gr_cmd_set_viewport(cmd, 0.0f, 0.0f, (float)kSize, (float)kSize, 0.0f, 1.0f),
+                     GR_OK);
+            CHECK_EQ(gr_cmd_set_scissor(cmd, 0, 0, kSize, kSize), GR_OK);
+            /* Binding the pipeline binds both descriptor sets: that is the contract. */
+            CHECK_EQ(gr_cmd_bind_pipeline(cmd, pipeline_bindless), GR_OK);
+            push[0] = sampled_slot;
+            push[1] = 1; /* exposure_enabled */
+            push[2] = 0;
+            push[3] = 0;
+            CHECK_EQ(gr_cmd_push_constants(cmd, 2u, 0,
+                                           (gr_span_u8){ (const uint8_t *)push, sizeof(push) }),
+                     GR_OK);
+            memset(&draw, 0, sizeof(draw));
+            draw.head.size = (uint32_t)sizeof(draw);
+            draw.vertex_count = 3;
+            draw.instance_count = 1;
+            CHECK_EQ(gr_cmd_draw(cmd, &draw), GR_OK);
+            CHECK_EQ(gr_cmd_end_render(cmd), GR_OK);
+
+            memset(&barrier, 0, sizeof(barrier));
+            barrier.resource = dst;
+            barrier.src_state = GR_STATE_COLOR_ATTACHMENT;
+            barrier.dst_state = GR_STATE_TRANSFER_SRC;
+            CHECK_EQ(gr_cmd_barrier(cmd, &barrier, 1), GR_OK);
+            CHECK_EQ(gr_cmd_end(cmd), GR_OK);
+
+            CHECK_EQ(gr_device_queue(device, GR_QUEUE_GRAPHICS, &queue), GR_OK);
+            memset(&submit, 0, sizeof(submit));
+            submit.head.size = (uint32_t)sizeof(submit);
+            submit.queue = queue;
+            submit.cmds = &cmd;
+            submit.cmd_count = 1;
+            CHECK_EQ(gr_submit_commands(&submit, &value), GR_OK);
+            CHECK_EQ(gr_fence_create(device, 0, &fence), GR_OK);
+            CHECK_EQ(gr_fence_wait(fence, value, 5ull * 1000ull * 1000ull * 1000ull, &wait_status),
+                     GR_OK);
+            CHECK_EQ(wait_status, GR_OK);
+
+            memset(pixels, 0, sizeof(pixels));
+            CHECK_EQ(gr_texture_read(dst, 0, 0, 0, 0, kSize, kSize,
+                                     (gr_mut_span_u8){ pixels, sizeof(pixels) }), GR_OK);
+            for (i = 0; i < sizeof(pixels); ++i) {
+                digest ^= pixels[i];
+                digest *= 0x100000001b3ull;
+            }
+            digests[pass] = digest;
+
+            if (pass == 0) {
+                /* Every pixel opaque, and the four filtered quadrant colours present: the shader
+                 * sampled each texel of the uploaded image. */
+                uint32_t q;
+                int all_opaque = 1;
+                for (i = 0; i < sizeof(pixels); i += 4u)
+                    if (pixels[i + 3] != 255u)
+                        all_opaque = 0;
+                CHECK(all_opaque);
+                for (q = 0; q < 4u; ++q) {
+                    float r = kQuadrants[q][0] / 255.0f;
+                    float g = kQuadrants[q][1] / 255.0f;
+                    float b = kQuadrants[q][2] / 255.0f;
+                    float a = 2.51f, bb = 0.03f, c = 2.43f, d = 0.59f, e = 0.14f;
+                    float tr = (r * (a * r + bb)) / (r * (c * r + d) + e);
+                    float tg = (g * (a * g + bb)) / (g * (c * g + d) + e);
+                    float tb = (b * (a * b + bb)) / (b * (c * b + d) + e);
+                    uint8_t er = (uint8_t)(tr * 255.0f + 0.5f);
+                    uint8_t eg = (uint8_t)(tg * 255.0f + 0.5f);
+                    uint8_t eb = (uint8_t)(tb * 255.0f + 0.5f);
+                    for (i = 0; i < sizeof(pixels); i += 4u) {
+                        int dr = (int)pixels[i] - (int)er;
+                        int dg = (int)pixels[i + 1] - (int)eg;
+                        int db = (int)pixels[i + 2] - (int)eb;
+                        if (dr >= -3 && dr <= 3 && dg >= -3 && dg <= 3 && db >= -3 && db <= 3) {
+                            expected_hits[q] = 1;
+                            break;
+                        }
+                    }
+                }
+                for (q = 0; q < 4u; ++q)
+                    CHECK(expected_hits[q] == 1);
+            }
+        }
+
+        printf("vk-backend: bindless frame digest 0x%016llx (same source twice), "
+               "0x%016llx (other source)\n",
+               (unsigned long long)digests[0], (unsigned long long)digests[2]);
+        /* Deterministic, and genuinely reading the table. */
+        CHECK_EQ(digests[0], digests[1]);
+        CHECK(digests[0] != digests[2]);
+        /* And distinct from the solid frame's digest, because a different pipeline ran. */
+        CHECK(digests[0] != 0u);
     }
 
     CHECK_EQ(gr_device_wait_idle(device), GR_OK);

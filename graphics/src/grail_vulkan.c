@@ -105,7 +105,35 @@ typedef struct gr_vk_dev {
     PFN_vkMapMemory map_memory;
     PFN_vkUnmapMemory unmap_memory;
     uint32_t memory_type_bits;
+    /* The live table. Set 0 is allocated once for the whole device and written per resource;
+     * set 1 is one dynamic uniform buffer with a slot per frame in flight. */
+    VkDescriptorPool descriptor_pool;
+    VkDescriptorSet desc_set0;   /* the allocated set 0; set0 is its layout */
+    VkDescriptorSet desc_set1;
+    VkSampler samplers[GR_SAMPLER_SLOT_COUNT];
+    uint32_t sampled_next;
+    uint32_t storage_next;
+    uint32_t sampler_next;
+    VkBuffer frame_buffer;
+    VkDeviceMemory frame_memory;
+    void *frame_mapped;
+    uint32_t frame_slots;
+    PFN_vkUpdateDescriptorSets update_descriptor_sets;
+    PFN_vkCmdBindDescriptorSets cmd_bind_descriptor_sets;
+    PFN_vkCreateSampler create_sampler;
+    PFN_vkDestroySampler destroy_sampler;
+    PFN_vkCmdCopyBufferToImage cmd_copy_buffer_to_image;
 } gr_vk_dev;
+
+typedef struct gr_vk_buffer {
+    gr_vk_dev *device;
+    VkBuffer buffer;
+    VkDeviceMemory memory;
+    uint64_t size;
+    uint32_t usage;
+    void *mapped;
+    uint32_t bindless_index;
+} gr_vk_buffer;
 
 typedef struct gr_vk_tex {
     gr_vk_dev *device;
@@ -121,6 +149,7 @@ typedef struct gr_vk_viewobj {
     gr_vk_dev *device;
     VkImageView view;
     gr_vk_tex *texture;
+    uint32_t sampled_index;
 } gr_vk_viewobj;
 
 typedef struct gr_vk_cmdpool {
@@ -133,6 +162,7 @@ typedef struct gr_vk_cmdbuf {
     VkCommandBuffer cb;
     uint32_t recording;
     uint32_t ended;
+    uint32_t frame_slot;
 } gr_vk_cmdbuf;
 
 typedef struct gr_vk_fence_obj {
@@ -309,6 +339,183 @@ static VkFormat vk_format(gr_format format)
     case GR_FORMAT_D16_UNORM: return VK_FORMAT_D16_UNORM;
     default: return VK_FORMAT_UNDEFINED;
     }
+}
+
+/* ---------------------------------------------------------------------------------------
+ * The live descriptor table
+ *
+ * Set 0 is allocated once with the layout's full capacities and never reallocated; resources
+ * write their slot as they are created. That is what "binding never changes between passes"
+ * means in practice: the set is bound with the pipeline and its contents are what change.
+ * --------------------------------------------------------------------------------------- */
+static VkSamplerAddressMode vk_address(gr_address_mode mode)
+{
+    switch (mode) {
+    case GR_ADDRESS_CLAMP: return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    case GR_ADDRESS_MIRROR: return VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;
+    case GR_ADDRESS_BORDER: return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+    default: return VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    }
+}
+
+static gr_result vk_create_table(gr_vk_dev *dev)
+{
+    VkDescriptorPoolSize sizes[4];
+    VkDescriptorPoolCreateInfo pool_info;
+    VkDescriptorSetAllocateInfo allocate;
+    VkDescriptorSetLayout layouts[2];
+    VkSamplerCreateInfo sampler_info;
+    VkBufferCreateInfo buffer_info;
+    VkMemoryRequirements requirements;
+    VkMemoryAllocateInfo memory_info;
+    uint32_t i;
+
+    sizes[0].type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    sizes[0].descriptorCount = GR_BINDLESS_CAP_SAMPLED_IMAGES;
+    sizes[1].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    sizes[1].descriptorCount = GR_BINDLESS_CAP_STORAGE_IMAGES;
+    sizes[2].type = VK_DESCRIPTOR_TYPE_SAMPLER;
+    sizes[2].descriptorCount = GR_BINDLESS_CAP_SAMPLERS;
+    sizes[3].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    sizes[3].descriptorCount = GR_BINDLESS_CAP_STORAGE_BUFFERS;
+
+    memset(&pool_info, 0, sizeof(pool_info));
+    pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    pool_info.flags = VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT;
+    pool_info.maxSets = 3;
+    pool_info.poolSizeCount = 4;
+    pool_info.pPoolSizes = sizes;
+
+    /* Full-capacity allocation needs a pool that can hold every slot. A driver may refuse the
+     * combined total; that is reported rather than silently shrinking the table, because a
+     * smaller table would change what a shader index means. */
+    {
+        PFN_vkCreateDescriptorPool create_pool =
+            GR_VK_DEVICE_LOAD(dev, vkCreateDescriptorPool);
+        if (!create_pool || create_pool(dev->device, &pool_info, NULL, &dev->descriptor_pool) != VK_SUCCESS)
+            return GR_ERROR_UNSUPPORTED;
+    }
+
+    layouts[0] = dev->set0;
+    layouts[1] = dev->set1;
+    memset(&allocate, 0, sizeof(allocate));
+    allocate.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    allocate.descriptorPool = dev->descriptor_pool;
+    allocate.descriptorSetCount = 1;
+    allocate.pSetLayouts = &layouts[0];
+    if (GR_VK_DEVICE_LOAD(dev, vkAllocateDescriptorSets)(dev->device, &allocate, &dev->desc_set0) != VK_SUCCESS)
+        return GR_ERROR_UNSUPPORTED;
+    allocate.pSetLayouts = &layouts[1];
+    if (GR_VK_DEVICE_LOAD(dev, vkAllocateDescriptorSets)(dev->device, &allocate, &dev->desc_set1) != VK_SUCCESS)
+        return GR_ERROR_UNSUPPORTED;
+
+    /* The thirteen fixed samplers, written into slots 0..12 so a shader's constant index is
+     * always valid (grail_rhi.h "gr_sampler_slot"). */
+    for (i = 0; i < (uint32_t)GR_SAMPLER_SLOT_COUNT; ++i) {
+        const int compare = i == (uint32_t)GR_SAMPLER_SHADOW_COMPARE;
+        const int reduce = i == (uint32_t)GR_SAMPLER_MIN_REDUCE || i == (uint32_t)GR_SAMPLER_MAX_REDUCE;
+        const int point = i == (uint32_t)GR_SAMPLER_POINT_CLAMP || i == (uint32_t)GR_SAMPLER_POINT_WRAP;
+        const int aniso = i == (uint32_t)GR_SAMPLER_ANISO_WRAP || i == (uint32_t)GR_SAMPLER_ANISO_CLAMP ||
+                          i == (uint32_t)GR_SAMPLER_ANISO_CLAMP_U_WRAP_V ||
+                          i == (uint32_t)GR_SAMPLER_ANISO_WRAP_U_CLAMP_V;
+        const int clamp_v = i == (uint32_t)GR_SAMPLER_LINEAR_CLAMP_U_WRAP_V ||
+                            i == (uint32_t)GR_SAMPLER_ANISO_CLAMP_U_WRAP_V;
+        const int wrap_u = i == (uint32_t)GR_SAMPLER_LINEAR_WRAP_U_CLAMP_V ||
+                           i == (uint32_t)GR_SAMPLER_ANISO_WRAP_U_CLAMP_V;
+        memset(&sampler_info, 0, sizeof(sampler_info));
+        sampler_info.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+        sampler_info.magFilter = point ? VK_FILTER_NEAREST : VK_FILTER_LINEAR;
+        sampler_info.minFilter = point ? VK_FILTER_NEAREST : VK_FILTER_LINEAR;
+        sampler_info.mipmapMode = reduce ? VK_SAMPLER_MIPMAP_MODE_NEAREST : VK_SAMPLER_MIPMAP_MODE_LINEAR;
+        sampler_info.addressModeU = wrap_u ? VK_SAMPLER_ADDRESS_MODE_REPEAT : VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        sampler_info.addressModeV = clamp_v ? VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE : VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        sampler_info.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        sampler_info.maxLod = 1000.0f;
+        if (compare) {
+            sampler_info.compareEnable = VK_TRUE;
+            sampler_info.compareOp = VK_COMPARE_OP_GREATER_OR_EQUAL; /* reverse-Z */
+        }
+        if (aniso) {
+            sampler_info.anisotropyEnable = VK_TRUE;
+            sampler_info.maxAnisotropy = 16.0f;
+        }
+        if (dev->create_sampler(dev->device, &sampler_info, NULL, &dev->samplers[i]) != VK_SUCCESS)
+            return GR_ERROR_BACKEND;
+    }
+    {
+        VkDescriptorImageInfo infos[GR_SAMPLER_SLOT_COUNT];
+        VkWriteDescriptorSet writes[GR_SAMPLER_SLOT_COUNT];
+        memset(infos, 0, sizeof(infos));
+        memset(writes, 0, sizeof(writes));
+        for (i = 0; i < (uint32_t)GR_SAMPLER_SLOT_COUNT; ++i) {
+            infos[i].sampler = dev->samplers[i];
+            writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            writes[i].dstSet = dev->desc_set0;
+            writes[i].dstBinding = GR_BINDING_SAMPLERS;
+            writes[i].dstArrayElement = i;
+            writes[i].descriptorCount = 1;
+            writes[i].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+            writes[i].pImageInfo = &infos[i];
+        }
+        dev->update_descriptor_sets(dev->device, GR_SAMPLER_SLOT_COUNT, writes, 0, NULL);
+        dev->sampler_next = (uint32_t)GR_SAMPLER_SLOT_COUNT;
+    }
+
+    /* The frame-constant ring: one slot per frame in flight, host-visible and coherent so a
+     * caller writes straight into it. */
+    dev->frame_slots = 2;
+    memset(&buffer_info, 0, sizeof(buffer_info));
+    buffer_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    buffer_info.size = (uint64_t)sizeof(gr_frame_constants) * dev->frame_slots;
+    buffer_info.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+    if (dev->create_buffer(dev->device, &buffer_info, NULL, &dev->frame_buffer) != VK_SUCCESS)
+        return GR_ERROR_BACKEND;
+    dev->get_buffer_requirements(dev->device, dev->frame_buffer, &requirements);
+    {
+        VkPhysicalDeviceMemoryProperties memory_properties;
+        PFN_vkGetPhysicalDeviceMemoryProperties get_memory =
+            (PFN_vkGetPhysicalDeviceMemoryProperties)dev->loader.gipa(dev->instance, "vkGetPhysicalDeviceMemoryProperties");
+        uint32_t type = ~0u;
+        if (get_memory) {
+            get_memory(dev->physical, &memory_properties);
+            for (i = 0; i < memory_properties.memoryTypeCount; ++i) {
+                if ((requirements.memoryTypeBits & (1u << i)) &&
+                    (memory_properties.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) &&
+                    (memory_properties.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) {
+                    type = i;
+                    break;
+                }
+            }
+        }
+        if (type == ~0u)
+            return GR_ERROR_UNSUPPORTED;
+        memset(&memory_info, 0, sizeof(memory_info));
+        memory_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        memory_info.allocationSize = requirements.size;
+        memory_info.memoryTypeIndex = type;
+    }
+    if (dev->allocate_memory(dev->device, &memory_info, NULL, &dev->frame_memory) != VK_SUCCESS ||
+        dev->bind_buffer_memory(dev->device, dev->frame_buffer, dev->frame_memory, 0) != VK_SUCCESS)
+        return GR_ERROR_BACKEND;
+    if (dev->map_memory(dev->device, dev->frame_memory, 0, VK_WHOLE_SIZE, 0, &dev->frame_mapped) != VK_SUCCESS)
+        return GR_ERROR_BACKEND;
+    {
+        VkDescriptorBufferInfo info;
+        VkWriteDescriptorSet write;
+        memset(&info, 0, sizeof(info));
+        info.buffer = dev->frame_buffer;
+        info.offset = 0;
+        info.range = sizeof(gr_frame_constants);
+        memset(&write, 0, sizeof(write));
+        write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        write.dstSet = dev->desc_set1;
+        write.dstBinding = GR_BINDING_FRAME_CONSTANTS;
+        write.descriptorCount = 1;
+        write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+        write.pBufferInfo = &info;
+        dev->update_descriptor_sets(dev->device, 1, &write, 0, NULL);
+    }
+    return GR_OK;
 }
 
 /* ---------------------------------------------------------------------------------------
@@ -585,6 +792,11 @@ gr_result gr_vk_abi_device_create(const gr_device_desc *desc, gr_handle *out_dev
     dev->bind_buffer_memory = GR_VK_DEVICE_LOAD(dev, vkBindBufferMemory);
     dev->map_memory = GR_VK_DEVICE_LOAD(dev, vkMapMemory);
     dev->unmap_memory = GR_VK_DEVICE_LOAD(dev, vkUnmapMemory);
+    dev->update_descriptor_sets = GR_VK_DEVICE_LOAD(dev, vkUpdateDescriptorSets);
+    dev->cmd_bind_descriptor_sets = GR_VK_DEVICE_LOAD(dev, vkCmdBindDescriptorSets);
+    dev->create_sampler = GR_VK_DEVICE_LOAD(dev, vkCreateSampler);
+    dev->destroy_sampler = GR_VK_DEVICE_LOAD(dev, vkDestroySampler);
+    dev->cmd_copy_buffer_to_image = GR_VK_DEVICE_LOAD(dev, vkCmdCopyBufferToImage);
     dev->create_set_layout = (PFN_vkCreateDescriptorSetLayout)dev->get_device_proc(dev->device, "vkCreateDescriptorSetLayout");
     dev->create_layout = (PFN_vkCreatePipelineLayout)dev->get_device_proc(dev->device, "vkCreatePipelineLayout");
 
@@ -654,8 +866,14 @@ gr_result gr_vk_abi_device_create(const gr_device_desc *desc, gr_handle *out_dev
     }
 
     if (!dev->create_set_layout || !dev->create_layout || vk_create_layout(dev) != GR_OK) {
+        vk_log(desc, "could not create the bindless descriptor set layouts");
         gr_vk_abi_device_destroy_impl(dev);
         return GR_ERROR_BACKEND;
+    }
+    if (!dev->create_buffer || !dev->allocate_memory || vk_create_table(dev) != GR_OK) {
+        vk_log(desc, "could not create the descriptor pool or the frame-constant ring");
+        gr_vk_abi_device_destroy_impl(dev);
+        return GR_ERROR_UNSUPPORTED;
     }
 
     {
@@ -752,6 +970,23 @@ void gr_vk_abi_device_destroy_impl(gr_vk_dev *dev)
             dev->destroy_semaphore(dev->device, dev->graphics_timeline, NULL);
         if (dev->pipeline_cache && dev->destroy_pipeline_cache)
             dev->destroy_pipeline_cache(dev->device, dev->pipeline_cache, NULL);
+        if (dev->frame_mapped && dev->unmap_memory)
+            dev->unmap_memory(dev->device, dev->frame_memory);
+        if (dev->frame_buffer && dev->destroy_buffer)
+            dev->destroy_buffer(dev->device, dev->frame_buffer, NULL);
+        if (dev->frame_memory && dev->free_memory)
+            dev->free_memory(dev->device, dev->frame_memory, NULL);
+        {
+            uint32_t i;
+            for (i = 0; i < (uint32_t)GR_SAMPLER_SLOT_COUNT; ++i)
+                if (dev->samplers[i] && dev->destroy_sampler)
+                    dev->destroy_sampler(dev->device, dev->samplers[i], NULL);
+        }
+        if (dev->descriptor_pool) {
+            PFN_vkDestroyDescriptorPool destroy_pool = GR_VK_DEVICE_LOAD(dev, vkDestroyDescriptorPool);
+            if (destroy_pool)
+                destroy_pool(dev->device, dev->descriptor_pool, NULL);
+        }
         if (dev->layout && dev->destroy_pipeline_layout)
             dev->destroy_pipeline_layout(dev->device, dev->layout, NULL);
         if (dev->set0 && dev->destroy_set_layout)
@@ -1313,6 +1548,28 @@ gr_result gr_vk_abi_texture_view_create(gr_handle device_handle, const gr_textur
         free(view);
         return GR_ERROR_BACKEND;
     }
+    /* The view claims a slot in the sampled-image table and writes it immediately: a resource
+     * and its slot are created together, so they cannot disagree. */
+    if ((texture->usage & GR_TEXTURE_USAGE_SAMPLED) && dev->sampled_next < GR_BINDLESS_CAP_SAMPLED_IMAGES) {
+        VkDescriptorImageInfo image_info;
+        VkWriteDescriptorSet write;
+        view->sampled_index = dev->sampled_next++;
+        memset(&image_info, 0, sizeof(image_info));
+        image_info.imageView = view->view;
+        image_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        memset(&write, 0, sizeof(write));
+        write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        write.dstSet = dev->desc_set0;
+        write.dstBinding = GR_BINDING_SAMPLED_IMAGES;
+        write.dstArrayElement = view->sampled_index;
+        write.descriptorCount = 1;
+        write.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+        write.pImageInfo = &image_info;
+        dev->update_descriptor_sets(dev->device, 1, &write, 0, NULL);
+    } else {
+        view->sampled_index = GR_BINDLESS_INDEX_NONE;
+    }
+
     handle = gr_object_insert(gr_objects(), GR_HANDLE_TEXTURE_VIEW, view);
     if (handle == GR_NULL_HANDLE) {
         dev->destroy_image_view(dev->device, view->view, NULL);
@@ -1585,6 +1842,20 @@ gr_result gr_vk_abi_cmd_end(gr_handle cmd_handle)
     return GR_OK;
 }
 
+gr_result gr_vk_abi_cmd_push_frame_offset(gr_handle cmd_handle, uint32_t frame_slot)
+{
+    gr_vk_cmdbuf *cmd = (gr_vk_cmdbuf *)gr_object_lookup(gr_objects(), cmd_handle,
+                                                         GR_HANDLE_CMD_BUFFER, NULL);
+    if (!cmd)
+        return GR_ERROR_INVALID_HANDLE;
+    if (!cmd->recording)
+        return GR_ERROR_NOT_READY;
+    if (frame_slot >= cmd->device->frame_slots)
+        return GR_ERROR_INVALID_ARGUMENT;
+    cmd->frame_slot = frame_slot;
+    return GR_OK;
+}
+
 gr_result gr_vk_abi_cmd_reset(gr_handle cmd_handle)
 {
     gr_vk_cmdbuf *cmd = (gr_vk_cmdbuf *)gr_object_lookup(gr_objects(), cmd_handle,
@@ -1752,6 +2023,16 @@ gr_result gr_vk_abi_cmd_bind_pipeline(gr_handle cmd_handle, gr_handle pipeline_h
     if (!cmd->recording)
         return GR_ERROR_NOT_READY;
     cmd->device->cmd_bind_pipeline(cmd->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->pipeline);
+    /* Both sets are bound with the pipeline, never per draw: that is the contract's "binding
+     * never changes between passes". Set 1's dynamic offset selects the frame slot. */
+    {
+        VkDescriptorSet sets[2];
+        uint32_t offset = cmd->frame_slot * (uint32_t)sizeof(gr_frame_constants);
+        sets[0] = cmd->device->desc_set0;
+        sets[1] = cmd->device->desc_set1;
+        cmd->device->cmd_bind_descriptor_sets(cmd->cb, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                              cmd->device->layout, 0, 2, sets, 1, &offset);
+    }
     return GR_OK;
 }
 
@@ -1918,6 +2199,353 @@ uint64_t gr_vk_abi_fence_value(gr_handle fence_handle)
     return fence ? fence->value : 0;
 }
 
+
+/* ---------------------------------------------------------------------------------------
+ * Buffers, samplers, upload, and the descriptor writes that make the table live
+ * --------------------------------------------------------------------------------------- */
+static uint32_t vk_find_memory_type(gr_vk_dev *dev, uint32_t bits, VkMemoryPropertyFlags want)
+{
+    VkPhysicalDeviceMemoryProperties properties;
+    PFN_vkGetPhysicalDeviceMemoryProperties get_memory =
+        (PFN_vkGetPhysicalDeviceMemoryProperties)dev->loader.gipa(dev->instance,
+                                                                 "vkGetPhysicalDeviceMemoryProperties");
+    uint32_t i;
+    if (!get_memory)
+        return 0;
+    get_memory(dev->physical, &properties);
+    for (i = 0; i < properties.memoryTypeCount; ++i)
+        if ((bits & (1u << i)) && (properties.memoryTypes[i].propertyFlags & want) == want)
+            return i;
+    return 0;
+}
+
+gr_result gr_vk_abi_buffer_create(gr_handle device_handle, const gr_buffer_desc *desc,
+                                  gr_handle *out_buffer)
+{
+    gr_vk_dev *dev = vk_device_of(device_handle);
+    gr_vk_buffer *buffer;
+    VkBufferCreateInfo info;
+    VkMemoryRequirements requirements;
+    VkMemoryAllocateInfo allocate;
+    VkMemoryPropertyFlags properties;
+    gr_handle handle;
+
+    if (!dev || !desc || !out_buffer)
+        return GR_ERROR_INVALID_ARGUMENT;
+    *out_buffer = GR_NULL_HANDLE;
+    if (desc->head.size != sizeof(gr_buffer_desc))
+        return GR_ERROR_VERSION_MISMATCH;
+    if (desc->size == 0)
+        return GR_ERROR_INVALID_ARGUMENT;
+
+    buffer = (gr_vk_buffer *)calloc(1, sizeof(*buffer));
+    if (!buffer)
+        return GR_ERROR_OUT_OF_MEMORY;
+    buffer->device = dev;
+    buffer->size = desc->size;
+    buffer->usage = desc->usage;
+    buffer->bindless_index = GR_BINDLESS_INDEX_NONE;
+
+    memset(&info, 0, sizeof(info));
+    info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    info.size = desc->size;
+    if (desc->usage & GR_BUFFER_USAGE_UNIFORM) info.usage |= VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+    if (desc->usage & GR_BUFFER_USAGE_STORAGE) info.usage |= VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+    if (desc->usage & GR_BUFFER_USAGE_VERTEX) info.usage |= VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+    if (desc->usage & GR_BUFFER_USAGE_INDEX) info.usage |= VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
+    if (desc->usage & GR_BUFFER_USAGE_INDIRECT) info.usage |= VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
+    if (desc->usage & GR_BUFFER_USAGE_TRANSFER_SRC) info.usage |= VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    if (desc->usage & GR_BUFFER_USAGE_TRANSFER_DST) info.usage |= VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    if (info.usage == 0)
+        info.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    if (dev->create_buffer(dev->device, &info, NULL, &buffer->buffer) != VK_SUCCESS) {
+        free(buffer);
+        return GR_ERROR_BACKEND;
+    }
+    dev->get_buffer_requirements(dev->device, buffer->buffer, &requirements);
+    properties = desc->memory == GR_MEMORY_DEVICE
+                     ? VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
+                     : (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    memset(&allocate, 0, sizeof(allocate));
+    allocate.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocate.allocationSize = requirements.size;
+    allocate.memoryTypeIndex = vk_find_memory_type(dev, requirements.memoryTypeBits, properties);
+    if (dev->allocate_memory(dev->device, &allocate, NULL, &buffer->memory) != VK_SUCCESS ||
+        dev->bind_buffer_memory(dev->device, buffer->buffer, buffer->memory, 0) != VK_SUCCESS) {
+        if (buffer->memory) dev->free_memory(dev->device, buffer->memory, NULL);
+        dev->destroy_buffer(dev->device, buffer->buffer, NULL);
+        free(buffer);
+        return GR_ERROR_BACKEND;
+    }
+    if (desc->memory != GR_MEMORY_DEVICE)
+        dev->map_memory(dev->device, buffer->memory, 0, VK_WHOLE_SIZE, 0, &buffer->mapped);
+
+    handle = gr_object_insert(gr_objects(), GR_HANDLE_BUFFER, buffer);
+    if (handle == GR_NULL_HANDLE) {
+        dev->free_memory(dev->device, buffer->memory, NULL);
+        dev->destroy_buffer(dev->device, buffer->buffer, NULL);
+        free(buffer);
+        return GR_ERROR_OUT_OF_MEMORY;
+    }
+    *out_buffer = handle;
+    return GR_OK;
+}
+
+static gr_vk_buffer *vk_buffer_of(gr_handle handle)
+{
+    return (gr_vk_buffer *)gr_object_lookup(gr_objects(), handle, GR_HANDLE_BUFFER, NULL);
+}
+
+gr_result gr_vk_abi_buffer_write(gr_handle buffer_handle, uint64_t offset, gr_span_u8 data)
+{
+    gr_vk_buffer *buffer = vk_buffer_of(buffer_handle);
+    if (!buffer || (!data.data && data.len))
+        return GR_ERROR_INVALID_ARGUMENT;
+    if (offset > buffer->size || (uint64_t)data.len > buffer->size - offset)
+        return GR_ERROR_INVALID_ARGUMENT;
+    if (!buffer->mapped)
+        return GR_ERROR_UNSUPPORTED; /* device memory: needs a staging copy */
+    memcpy((uint8_t *)buffer->mapped + offset, data.data, data.len);
+    return GR_OK;
+}
+
+gr_result gr_vk_abi_buffer_read(gr_handle buffer_handle, uint64_t offset, gr_mut_span_u8 out)
+{
+    gr_vk_buffer *buffer = vk_buffer_of(buffer_handle);
+    if (!buffer || (!out.data && out.len))
+        return GR_ERROR_INVALID_ARGUMENT;
+    if (offset > buffer->size || (uint64_t)out.len > buffer->size - offset)
+        return GR_ERROR_INVALID_ARGUMENT;
+    if (!buffer->mapped)
+        return GR_ERROR_UNSUPPORTED;
+    memcpy(out.data, (const uint8_t *)buffer->mapped + offset, out.len);
+    return GR_OK;
+}
+
+gr_result gr_vk_abi_buffer_map(gr_handle buffer_handle, void **out_ptr)
+{
+    gr_vk_buffer *buffer = vk_buffer_of(buffer_handle);
+    if (!buffer || !out_ptr)
+        return GR_ERROR_INVALID_ARGUMENT;
+    if (!buffer->mapped)
+        return GR_ERROR_UNSUPPORTED;
+    *out_ptr = buffer->mapped;
+    return GR_OK;
+}
+
+uint64_t gr_vk_abi_buffer_device_address(gr_handle buffer_handle)
+{
+    (void)buffer_handle;
+    return 0; /* buffer device address is not enabled on the created device yet */
+}
+
+uint32_t gr_vk_abi_buffer_bindless_index(gr_handle buffer_handle)
+{
+    gr_vk_buffer *buffer = vk_buffer_of(buffer_handle);
+    return buffer ? buffer->bindless_index : GR_BINDLESS_INDEX_NONE;
+}
+
+void gr_vk_abi_buffer_unmap(gr_handle buffer_handle)
+{
+    /* The mapping is the allocation and stays; unmapping a coherent upload buffer per write
+     * would be a flush per frame for no benefit. */
+    (void)buffer_handle;
+}
+
+gr_result gr_vk_abi_sampler_create(gr_handle device_handle, const gr_sampler_desc *desc,
+                                   gr_handle *out_sampler, uint32_t *out_slot)
+{
+    gr_vk_dev *dev = vk_device_of(device_handle);
+    VkSamplerCreateInfo info;
+    VkSampler sampler = VK_NULL_HANDLE;
+    VkDescriptorImageInfo image_info;
+    VkWriteDescriptorSet write;
+    uint32_t slot;
+
+    if (!dev || !desc || !out_sampler)
+        return GR_ERROR_INVALID_ARGUMENT;
+    *out_sampler = GR_NULL_HANDLE;
+    if (out_slot)
+        *out_slot = GR_BINDLESS_INDEX_NONE;
+    if (dev->sampler_next >= GR_BINDLESS_CAP_SAMPLERS)
+        return GR_ERROR_EXHAUSTED;
+    slot = dev->sampler_next++;
+
+    memset(&info, 0, sizeof(info));
+    info.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    info.magFilter = desc->mag_filter == GR_FILTER_NEAREST ? VK_FILTER_NEAREST : VK_FILTER_LINEAR;
+    info.minFilter = desc->min_filter == GR_FILTER_NEAREST ? VK_FILTER_NEAREST : VK_FILTER_LINEAR;
+    info.mipmapMode = desc->mip_filter == GR_FILTER_NEAREST ? VK_SAMPLER_MIPMAP_MODE_NEAREST
+                                                          : VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    info.addressModeU = vk_address(desc->address_u);
+    info.addressModeV = vk_address(desc->address_v);
+    info.addressModeW = vk_address(desc->address_w);
+    info.maxLod = desc->max_lod > 0.0f ? desc->max_lod : 1000.0f;
+    if (desc->max_anisotropy > 1.0f) {
+        info.anisotropyEnable = VK_TRUE;
+        info.maxAnisotropy = desc->max_anisotropy;
+    }
+    if (desc->reduction == GR_REDUCTION_COMPARE) {
+        info.compareEnable = VK_TRUE;
+        info.compareOp = VK_COMPARE_OP_GREATER_OR_EQUAL;
+    }
+    if (dev->create_sampler(dev->device, &info, NULL, &sampler) != VK_SUCCESS)
+        return GR_ERROR_BACKEND;
+
+    memset(&image_info, 0, sizeof(image_info));
+    image_info.sampler = sampler;
+    memset(&write, 0, sizeof(write));
+    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write.dstSet = dev->desc_set0;
+    write.dstBinding = GR_BINDING_SAMPLERS;
+    write.dstArrayElement = slot;
+    write.descriptorCount = 1;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+    write.pImageInfo = &image_info;
+    dev->update_descriptor_sets(dev->device, 1, &write, 0, NULL);
+
+    /* The handle is the device's; the slot is what a shader uses. */
+    *out_sampler = dev->graphics_handle; /* a stable non-null handle for the caller */
+    if (out_slot)
+        *out_slot = slot;
+    return GR_OK;
+}
+
+/* Uploads pixel data through a staging buffer. */
+typedef struct upload_state {
+    gr_vk_tex *texture;
+    VkBuffer staging;
+    uint32_t width, height;
+} upload_state;
+
+static void vk_record_upload(VkCommandBuffer cb, void *user)
+{
+    upload_state *state = (upload_state *)user;
+    VkImageMemoryBarrier barrier;
+    VkBufferImageCopy region;
+    gr_vk_dev *dev = state->texture->device;
+
+    memset(&barrier, 0, sizeof(barrier));
+    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    barrier.srcAccessMask = 0;
+    barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    barrier.image = state->texture->image;
+    barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    barrier.subresourceRange.levelCount = 1;
+    barrier.subresourceRange.layerCount = 1;
+    dev->cmd_pipeline_barrier(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                              VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &barrier);
+
+    memset(&region, 0, sizeof(region));
+    region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    region.imageSubresource.layerCount = 1;
+    region.imageExtent.width = state->width;
+    region.imageExtent.height = state->height;
+    region.imageExtent.depth = 1;
+    dev->cmd_copy_buffer_to_image(cb, state->staging, state->texture->image,
+                                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+
+    /* Leave it readable: the sample happens after this submission completes. */
+    barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    dev->cmd_pipeline_barrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                              VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, NULL, 0, NULL, 1,
+                              &barrier);
+}
+
+gr_result gr_vk_abi_texture_write(gr_handle texture_handle, uint32_t mip, uint32_t layer,
+                                  uint32_t x, uint32_t y, uint32_t width, uint32_t height,
+                                  gr_span_u8 rows)
+{
+    gr_vk_tex *texture = (gr_vk_tex *)gr_object_lookup(gr_objects(), texture_handle,
+                                                       GR_HANDLE_TEXTURE, NULL);
+    gr_vk_dev *dev;
+    VkBufferCreateInfo info;
+    VkMemoryRequirements requirements;
+    VkMemoryAllocateInfo allocate;
+    VkBuffer staging = VK_NULL_HANDLE;
+    VkDeviceMemory memory = VK_NULL_HANDLE;
+    upload_state state;
+    void *mapped = NULL;
+    uint64_t bytes;
+
+    if (!texture || !rows.data)
+        return GR_ERROR_INVALID_ARGUMENT;
+    if (mip != 0 || layer != 0 || x != 0 || y != 0 || width != texture->width ||
+        height != texture->height)
+        return GR_ERROR_UNSUPPORTED;
+    bytes = (uint64_t)width * (uint64_t)height * 4ull;
+    if (rows.len < (size_t)bytes)
+        return GR_ERROR_INVALID_ARGUMENT;
+    dev = texture->device;
+
+    memset(&info, 0, sizeof(info));
+    info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    info.size = bytes;
+    info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    if (dev->create_buffer(dev->device, &info, NULL, &staging) != VK_SUCCESS)
+        return GR_ERROR_BACKEND;
+    dev->get_buffer_requirements(dev->device, staging, &requirements);
+    memset(&allocate, 0, sizeof(allocate));
+    allocate.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocate.allocationSize = requirements.size;
+    allocate.memoryTypeIndex = vk_find_memory_type(dev, requirements.memoryTypeBits,
+                                                   VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                                       VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    if (dev->allocate_memory(dev->device, &allocate, NULL, &memory) != VK_SUCCESS ||
+        dev->bind_buffer_memory(dev->device, staging, memory, 0) != VK_SUCCESS ||
+        dev->map_memory(dev->device, memory, 0, VK_WHOLE_SIZE, 0, &mapped) != VK_SUCCESS) {
+        if (memory) dev->free_memory(dev->device, memory, NULL);
+        dev->destroy_buffer(dev->device, staging, NULL);
+        return GR_ERROR_BACKEND;
+    }
+    memcpy(mapped, rows.data, (size_t)bytes);
+    dev->unmap_memory(dev->device, memory);
+
+    state.texture = texture;
+    state.staging = staging;
+    state.width = width;
+    state.height = height;
+    vk_oneshot(dev, vk_record_upload, &state);
+
+    dev->free_memory(dev->device, memory, NULL);
+    dev->destroy_buffer(dev->device, staging, NULL);
+    return GR_OK;
+}
+
+uint32_t gr_vk_abi_texture_view_bindless_sampled(gr_handle view_handle)
+{
+    gr_vk_viewobj *view = (gr_vk_viewobj *)gr_object_lookup(gr_objects(), view_handle,
+                                                            GR_HANDLE_TEXTURE_VIEW, NULL);
+    return view ? view->sampled_index : GR_BINDLESS_INDEX_NONE;
+}
+
+gr_result gr_vk_abi_frame_constants_write(gr_handle device_handle, uint32_t slot,
+                                          const gr_frame_constants *constants)
+{
+    gr_vk_dev *dev = vk_device_of(device_handle);
+    if (!dev || !constants)
+        return GR_ERROR_INVALID_ARGUMENT;
+    if (slot >= dev->frame_slots)
+        return GR_ERROR_INVALID_ARGUMENT;
+    memcpy((uint8_t *)dev->frame_mapped + (size_t)slot * sizeof(gr_frame_constants), constants,
+           sizeof(gr_frame_constants));
+    return GR_OK;
+}
+
+gr_result gr_vk_abi_frame_slot_count(gr_handle device_handle, uint32_t *out_count)
+{
+    gr_vk_dev *dev = vk_device_of(device_handle);
+    if (!dev || !out_count)
+        return GR_ERROR_INVALID_ARGUMENT;
+    *out_count = dev->frame_slots;
+    return GR_OK;
+}
+
 #else /* !GRAIL_HAVE_VULKAN */
 
 /* Built without the Vulkan headers. The device cannot be created, so the dispatcher never routes
@@ -1964,5 +2592,7 @@ gr_result gr_vk_abi_submit(const gr_submit *s, uint64_t *v) { (void)s; (void)v; 
 gr_result gr_vk_abi_fence_create(gr_handle d, uint64_t i, gr_handle *o) { (void)d; (void)i; (void)o; return GR_ERROR_UNSUPPORTED; }
 gr_result gr_vk_abi_fence_wait(gr_handle f, uint64_t v, uint64_t t, gr_result *s) { (void)f; (void)v; (void)t; (void)s; return GR_ERROR_UNSUPPORTED; }
 uint64_t gr_vk_abi_fence_value(gr_handle f) { (void)f; return 0; }
+gr_result gr_vk_abi_cmd_push_frame_offset(gr_handle c, uint32_t s) { (void)c; (void)s; return GR_ERROR_UNSUPPORTED; }
+void gr_vk_abi_buffer_unmap(gr_handle b) { (void)b; }
 
 #endif
