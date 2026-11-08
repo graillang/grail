@@ -90,9 +90,16 @@ ld.lld -m aarch64elf hello.o -o hello
 
 Targets: `x86_64`, `aarch64`, `riscv64`. The default is the architecture the compiler itself was
 built for. RV64 requires the integer multiply/divide and atomic extensions (RV64IMA), uses the LP64 ABI, and
-needs `-march=rv64imafd -mabi=lp64` when assembling. All three currently target **Linux ELF**.
-macOS, Windows and other operating systems are not implemented; sharing a CPU does not imply
-sharing an executable format or syscall ABI.
+needs `-march=rv64imafd -mabi=lp64` when assembling. These three target **Linux ELF**.
+
+`--target windows-x86_64` selects the PE/COFF backend on the same x86-64 instruction stream:
+MSVC `.def` function records, a `grail_entry` PE entry point, `ExitProcess`/`VirtualAlloc` imports
+and COFF short-import libraries written by `tools/windows.mjs`, linked with `lld-link`
+(`bun tools/windows.mjs check`). It emits objects and console PE32+ images today but has no
+Windows runtime, argv recovery, worker threads or unwind data yet, so its images are for static
+inspection, not execution. See [docs/design/windows-backend.md](../docs/design/windows-backend.md).
+macOS and other operating systems are not implemented; sharing a CPU does not imply sharing an
+executable format or syscall ABI.
 
 ## Checks and profiles
 

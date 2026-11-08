@@ -28,6 +28,10 @@ book-check-grail:
 build:
     bun tools/native.mjs build
 
+# Cross-build the Windows x86-64 PE/COFF target and inspect objects and images.
+windows-check:
+    bun tools/windows.mjs check
+
 # Run preserved language safety/execution regressions on a selected CPU.
 test *args:
     bun tools/test-native.mjs "$@"

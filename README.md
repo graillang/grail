@@ -24,5 +24,6 @@ There is no Rust seed or C-backend dependency. `just book` builds and opens the 
 Rust is needed only to verify the book's Rust counterparts.
 
 This remains a work-in-progress language, not a promise of complete v1 library support.
-Operating systems other than Linux, additional numeric primitives, and structured concurrency
-are not yet implemented. Historical research under `research/` records earlier design experiments.
+The Windows x86-64 backend currently emits and links PE32+ console images but has no Windows
+runtime, unwinding or thread support yet (see [docs/design/windows-backend.md](docs/design/windows-backend.md)).
+Additional numeric primitives and structured concurrency are not yet implemented. Historical research under `research/` records earlier design experiments.
