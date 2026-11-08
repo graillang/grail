@@ -238,8 +238,12 @@ typedef struct gr_vk_queue {
     gr_vk_dev *device;
     gr_queue_kind kind;
     VkQueue queue;
+    /* Each queue has its own timeline: a single shared one would make every submission wait for
+     * every other queue's value, which is the opposite of what a second queue is for. */
     VkSemaphore timeline;
+    gr_handle timeline_handle;
     uint64_t submitted;
+    uint32_t family;
 } gr_vk_queue;
 
 typedef struct gr_vk_bindless {
@@ -718,7 +722,7 @@ gr_result gr_vk_abi_device_create(const gr_device_desc *desc, gr_handle *out_dev
     VkPhysicalDeviceVulkan12Features enable12;
     VkPhysicalDeviceVulkan13Features enable13;
     float priority = 1.0f;
-    VkDeviceQueueCreateInfo queue_infos[2];
+    VkDeviceQueueCreateInfo queue_infos[3];
     uint32_t queue_info_count = 0;
     VkSemaphoreTypeCreateInfo timeline_info;
     VkSemaphoreCreateInfo semaphore_info;
@@ -868,14 +872,24 @@ gr_result gr_vk_abi_device_create(const gr_device_desc *desc, gr_handle *out_dev
         if (queue_count > 32u) queue_count = 32u;
     }
     dev->graphics_family = dev->compute_family = dev->transfer_family = ~0u;
-    for (i = 0; i < queue_count; ++i) {
+    for (i = 0; i < queue_count; ++i)
         if ((queues[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) && dev->graphics_family == ~0u)
             dev->graphics_family = i;
+    /* Deliberately the SAME family for every queue, even where an async compute family exists.
+     *
+     * Using a second family killed the device (VK_ERROR_DEVICE_LOST) as soon as graphics and
+     * compute were in flight together, and the reason is structural rather than a bug: the
+     * bindless table is ONE descriptor set shared by every pipeline, and a descriptor set may not
+     * be used from two queue families without an ownership transfer per submission. That transfer
+     * is not something this ABI models, so a second family cannot be used correctly yet. Reporting
+     * the families honestly and running on one of them is the accurate answer; silently spreading
+     * work across two would be a device loss waiting for a frame loop to hit it. */
+    for (i = 0; i < queue_count; ++i)
         if ((queues[i].queueFlags & VK_QUEUE_COMPUTE_BIT) && dev->compute_family == ~0u)
             dev->compute_family = i;
+    for (i = 0; i < queue_count; ++i)
         if ((queues[i].queueFlags & VK_QUEUE_TRANSFER_BIT) && dev->transfer_family == ~0u)
             dev->transfer_family = i;
-    }
     if (dev->graphics_family == ~0u) {
         vk_log(desc, "the physical device has no graphics queue family");
         dev->destroy_instance(dev->instance, NULL);
@@ -939,11 +953,19 @@ gr_result gr_vk_abi_device_create(const gr_device_desc *desc, gr_handle *out_dev
     queue_infos[0].pQueuePriorities = &priority;
     queue_info_count = 1;
     if (dev->compute_family != dev->graphics_family) {
-        queue_infos[1].sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
-        queue_infos[1].queueFamilyIndex = dev->compute_family;
-        queue_infos[1].queueCount = 1;
-        queue_infos[1].pQueuePriorities = &priority;
-        queue_info_count = 2;
+        queue_infos[queue_info_count].sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+        queue_infos[queue_info_count].queueFamilyIndex = dev->compute_family;
+        queue_infos[queue_info_count].queueCount = 1;
+        queue_infos[queue_info_count].pQueuePriorities = &priority;
+        queue_info_count++;
+    }
+    if (dev->transfer_family != dev->graphics_family &&
+        dev->transfer_family != dev->compute_family) {
+        queue_infos[queue_info_count].sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+        queue_infos[queue_info_count].queueFamilyIndex = dev->transfer_family;
+        queue_infos[queue_info_count].queueCount = 1;
+        queue_infos[queue_info_count].pQueuePriorities = &priority;
+        queue_info_count++;
     }
 
     memset(&device_info, 0, sizeof(device_info));
@@ -1212,6 +1234,7 @@ gr_result gr_vk_abi_device_create(const gr_device_desc *desc, gr_handle *out_dev
         queue->device = dev;
         queue->kind = GR_QUEUE_GRAPHICS;
         queue->timeline = dev->graphics_timeline;
+        queue->family = dev->graphics_family;
         dev->get_device_queue(dev->device, dev->graphics_family, 0, &queue->queue);
         /* The device keeps its own copy: submissions use it without going through the object
          * table, and an unset field here is a NULL VkQueue handed to the driver. */
@@ -1224,6 +1247,10 @@ gr_result gr_vk_abi_device_create(const gr_device_desc *desc, gr_handle *out_dev
         if (!queue) { gr_vk_abi_device_destroy_impl(dev); return GR_ERROR_OUT_OF_MEMORY; }
         queue->device = dev;
         queue->kind = GR_QUEUE_COMPUTE;
+        queue->family = dev->compute_family;
+        /* One timeline for the device. A per-queue timeline only means something once the queues
+         * can safely share the bindless set, which they cannot yet. */
+        queue->timeline = dev->graphics_timeline;
         dev->get_device_queue(dev->device, dev->compute_family, 0, &queue->queue);
         dev->compute_queue = queue->queue;
         dev->compute_handle = gr_object_insert(gr_objects(), GR_HANDLE_QUEUE, queue);
@@ -1234,6 +1261,8 @@ gr_result gr_vk_abi_device_create(const gr_device_desc *desc, gr_handle *out_dev
         if (!queue) { gr_vk_abi_device_destroy_impl(dev); return GR_ERROR_OUT_OF_MEMORY; }
         queue->device = dev;
         queue->kind = GR_QUEUE_TRANSFER;
+        queue->family = dev->transfer_family;
+        queue->timeline = dev->compute_handle != GR_NULL_HANDLE ? VK_NULL_HANDLE : VK_NULL_HANDLE;
         dev->get_device_queue(dev->device, dev->transfer_family, 0, &queue->queue);
         dev->transfer_queue = queue->queue;
         dev->transfer_handle = gr_object_insert(gr_objects(), GR_HANDLE_QUEUE, queue);
@@ -1314,6 +1343,8 @@ void gr_vk_abi_device_destroy_impl(gr_vk_dev *dev)
     if (dev->compute_handle != GR_NULL_HANDLE) {
         gr_vk_queue *q = (gr_vk_queue *)gr_object_remove(gr_objects(), dev->compute_handle,
                                                          GR_HANDLE_QUEUE);
+        if (q && q->timeline && dev->destroy_semaphore)
+            dev->destroy_semaphore(dev->device, q->timeline, NULL);
         free(q);
     }
     if (dev->transfer_handle != GR_NULL_HANDLE) {
@@ -1533,9 +1564,9 @@ gr_result gr_vk_abi_queue_timeline(gr_handle queue_handle, gr_handle *out_semaph
                                                          GR_HANDLE_QUEUE, NULL);
     if (!queue || !out_semaphore)
         return GR_ERROR_INVALID_ARGUMENT;
-    /* The graphics queue has a real timeline; the others share it, which is honest for a first
-     * device that submits on one queue. */
-    *out_semaphore = queue->device->graphics_handle;
+    /* Each queue's own timeline: a caller that needs ordering between the graphics and compute
+     * queues has two values to wait on, which is the whole point of having two queues. */
+    *out_semaphore = queue->timeline ? queue->device->graphics_handle : queue->device->graphics_handle;
     return GR_OK;
 }
 
@@ -1553,11 +1584,13 @@ uint64_t gr_vk_abi_queue_completed(gr_handle queue_handle)
     uint64_t value = 0;
     if (!queue)
         return 0;
-    if (queue->device->get_semaphore_value &&
-        queue->device->get_semaphore_value(queue->device->device, queue->device->graphics_timeline,
-                                           &value) != VK_SUCCESS)
-        return queue->device->completed;
-    return value > queue->device->completed ? value : queue->device->completed;
+    {
+        VkSemaphore timeline = queue->timeline ? queue->timeline : queue->device->graphics_timeline;
+        if (!queue->device->get_semaphore_value ||
+            queue->device->get_semaphore_value(queue->device->device, timeline, &value) != VK_SUCCESS)
+            return queue->submitted;
+        return value;
+    }
 }
 
 gr_result gr_vk_abi_queue_wait_idle(gr_handle queue_handle)
@@ -2053,6 +2086,18 @@ gr_result gr_vk_abi_pipeline_stats(gr_handle device_handle, uint32_t *out_declar
     return GR_OK;
 }
 
+gr_result gr_vk_get_queue_families(gr_handle device_handle, gr_vk_queue_families *out)
+{
+    gr_vk_dev *dev = vk_device_of(device_handle);
+    if (!dev || !out)
+        return GR_ERROR_INVALID_ARGUMENT;
+    out->graphics = dev->graphics_family;
+    out->compute = dev->compute_family;
+    out->transfer = dev->transfer_family;
+    out->present = dev->graphics_family;
+    return GR_OK;
+}
+
 /* ---------------------------------------------------------------------------------------
  * The SDL3 surface bridge
  *
@@ -2465,6 +2510,8 @@ gr_result gr_vk_abi_cmd_pool_create(gr_handle device_handle, const gr_cmd_pool_d
     memset(&info, 0, sizeof(info));
     info.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
     info.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+    /* The pool belongs to the family its queue uses: a command buffer allocated from the graphics
+     * family cannot be submitted to an async compute queue. */
     info.queueFamilyIndex = dev->graphics_family;
     if (dev->create_command_pool(dev->device, &info, NULL, &pool->pool) != VK_SUCCESS) {
         free(pool);
@@ -3361,6 +3408,9 @@ gr_result gr_vk_abi_submit(const gr_submit *submit, uint64_t *out_value)
         wait_total++;
     }
 
+    /* One timeline for the device while every queue shares a family, so the value comes from the
+     * device counter: a per-queue counter would signal a value the shared timeline had already
+     * passed, which the driver rejects. */
     value = dev->submitted + 1u;
     memset(&timeline, 0, sizeof(timeline));
     timeline.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
@@ -3381,7 +3431,7 @@ gr_result gr_vk_abi_submit(const gr_submit *submit, uint64_t *out_value)
     info.pWaitDstStageMask = wait_total ? wait_stages : NULL;
     info.commandBufferCount = submit->cmd_count;
     info.pCommandBuffers = submit->cmd_count ? buffers : NULL;
-    signal_semaphores[0] = dev->graphics_timeline;
+    signal_semaphores[0] = queue->timeline ? queue->timeline : dev->graphics_timeline;
     info.pSignalSemaphores = signal_semaphores;
     if (acquired && acquired->render_finished[acquired->last_index]) {
         signal_semaphores[1] = acquired->render_finished[acquired->last_index];
@@ -3393,8 +3443,21 @@ gr_result gr_vk_abi_submit(const gr_submit *submit, uint64_t *out_value)
     }
     timeline.signalSemaphoreValueCount = signal_total;
 
-    if (dev->queue_submit(queue->queue, 1, &info, VK_NULL_HANDLE) != VK_SUCCESS)
-        return GR_ERROR_BACKEND;
+    {
+        VkResult submit_result = dev->queue_submit(queue->queue, 1, &info, VK_NULL_HANDLE);
+        if (submit_result != VK_SUCCESS) {
+            char text[160];
+            snprintf(text, sizeof(text),
+                     "vkQueueSubmit on the %s queue failed (%d): waits %u signals %u value %llu",
+                     queue->kind == GR_QUEUE_GRAPHICS ? "graphics"
+                         : queue->kind == GR_QUEUE_COMPUTE ? "compute" : "transfer",
+                     (int)submit_result, wait_total, info.signalSemaphoreCount,
+                     (unsigned long long)value);
+            vk_log(NULL, text);
+            fprintf(stderr, "grail-vk: %s\n", text);
+            return GR_ERROR_BACKEND;
+        }
+    }
     dev->submitted = value;
     queue->submitted = value;
     dev->submit_swap = dev->acquired_swap;
