@@ -200,9 +200,9 @@ behavioural oracle, not a replacement runtime.
 
 Windows implementation is static-only until it runs on a real Windows host. Remaining: compare
 the pinned declarations with the current SDK; add `\\?\` long paths and reserved-name policy,
-reparse-point metadata, local-time offsets, processes and sockets; apply thread names; define
-the loader search-flag semantics; add Windows behaviour tests and set the corresponding
-capability bits only after they pass.
+reparse-point metadata, non-blocking files, readlink/realpath, local-time offsets, processes
+and sockets; apply thread names; define the loader search-flag semantics; add Windows
+behaviour tests and set the corresponding capability bits only after they pass.
 
 macOS implementation is static-only until it runs on macOS. Remaining: verify the pinned
 libSystem declarations and add a pinned `struct stat` for metadata; local-time offsets,
