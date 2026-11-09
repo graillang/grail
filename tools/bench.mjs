@@ -2,12 +2,13 @@
 // Both programs must print the same numbers (floats compared to 12 significant digits, as Grail
 // prints the shortest round-trip form and C %.17g). Reports the best of three runs and the ratio.
 //   bun tools/bench.mjs [NAME...]        GRAIL_COMPILER selects the compiler (default: build it)
-//   GRAIL_BENCH_FLAGS="--backend=llvm"   extra compiler flags for the Grail side
+//   GRAIL_BACKEND=llvm                    builds the Grail side through the LLVM backend
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { root } from './platforms.mjs';
+import { compileProgram } from './native.mjs';
 
 function run(argv, options = {}) {
   const result = spawnSync(argv[0], argv.slice(1), { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, ...options });
@@ -40,19 +41,14 @@ function numbers(text) {
 }
 
 const grail = compiler();
-const extra = (process.env.GRAIL_BENCH_FLAGS ?? '').split(/\s+/).filter(Boolean);
 const names = process.argv.length > 2 ? process.argv.slice(2)
   : readdirSync(join(root, 'bench')).filter(f => f.endsWith('.grl')).map(f => f.slice(0, -4)).sort();
 const work = mkdtempSync(join(tmpdir(), 'grail-bench-'));
-const runtime = [join(root, 'lib/core.grl'), join(root, 'compiler/runtime.grl'), join(root, 'compiler/os-linux.grl')];
 let failed = 0;
 try {
-  console.log('benchmark      C -O2      Grail      ratio');
+  console.log(`benchmark      C -O2      Grail (${process.env.GRAIL_BACKEND ?? 'native'})      ratio`);
   for (const name of names) {
-    const asm = join(work, `${name}.s`), obj = join(work, `${name}.o`), exe = join(work, name), cexe = join(work, `${name}-c`);
-    run([grail, ...extra, '--typed-refs', asm, join(root, 'bench', `${name}.grl`), ...runtime]);
-    run(['clang', '-c', asm, '-o', obj]);
-    run(['ld.lld', obj, '-o', exe]);
+    const exe = compileProgram(grail, [join(root, 'bench', `${name}.grl`), join(root, 'lib/core.grl')], join(work, name), { typedRefs: true }), cexe = join(work, `${name}-c`);
     run(['clang', '-O2', '-ffp-contract=off', join(root, 'bench', `${name}.c`), '-o', cexe, '-lm']);
     const g = best(exe), c = best(cexe);
     const same = JSON.stringify(numbers(g.out)) === JSON.stringify(numbers(c.out));
