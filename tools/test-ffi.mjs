@@ -5,7 +5,7 @@ import { spawnSync } from 'node:child_process';
 import { readFileSync, writeFileSync, mkdirSync, rmSync, copyFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import assert from 'node:assert/strict';
-import { root, hostTarget, targets, targetName, buildCompiler, compileProgram, execute, runner } from './native.mjs';
+import { root, hostTarget, targets, targetName, buildCompiler, compileProgram, execute, runner, compilerSources } from './native.mjs';
 
 const triples = { x86_64: 'x86_64-linux-gnu', aarch64: 'aarch64-linux-gnu', riscv64: 'riscv64-linux-gnu' };
 // name, expected stdout, and the C symbols the assembly must call unmangled.
@@ -35,12 +35,24 @@ const fixtures = [
     stdout: '1606\n23\n16\n-2\n7\n',
     symbols: ['c_point_sum', 'c_point_swap', 'c_mixed_sum', 'c_mixed_fill', 'c_mixed_size', 'c_mixed_off_d'],
   },
+  {
+    // Dynamic loader hooks: a shared library is loaded by path, two symbols are
+    // resolved through dlsym and called through the resolved addresses, then the
+    // library is closed. libc is the link input, so the executable is dynamic.
+    name: 'dlopen',
+    stdout: '42\n42\n42\n0\n',
+    symbols: ['dlopen', 'dlsym', 'dlclose'],
+    linkNote: '// grail-link: c',
+    sharedLibrary: 'libdlshim.so',
+    hostOnly: true,
+  },
 ];
 const selected = process.argv[2] ? [targetName(process.argv[2])] : [hostTarget, ...targets.filter(t => t !== hostTarget)];
 const compiler = buildCompiler();
 const work = join(root, '.work/ffi');
 let executed = 0;
 let linkedOnly = 0;
+let crossCompiled = 0;
 
 function shim(target) {
   const directory = join(work, target);
@@ -66,7 +78,29 @@ for (const target of selected) {
   rmSync(directory, { recursive: true, force: true });
   mkdirSync(directory, { recursive: true });
   shim(target);
-  for (const { name, stdout, symbols, defines = [] } of fixtures) {
+  // Host-only fixtures need a real shared object built for the host.
+  if (target === hostTarget) {
+    const library = spawnSync(process.env.GRAIL_ASSEMBLER ?? 'clang', [
+      '-shared', '-fPIC', '-O1', join(root, 'tests/ffi/dl_shim.c'),
+      '-o', join(directory, 'libdlshim.so'),
+    ], { cwd: root, maxBuffer: 8 * 1024 * 1024, timeout: 300_000 });
+    if (library.status !== 0) throw new Error(`dl_shim.c failed: ${library.stderr}`);
+  }
+  for (const { name, stdout, symbols, defines = [], linkNote = '// grail-link: shim.o', hostOnly = false } of fixtures) {
+    if (hostOnly && target !== hostTarget) {
+      // A host-loader fixture still has to compile for every target; it cannot be
+      // linked there because the host's libc and loader are not target libraries.
+      const assembly = join(directory, `${name}.s`);
+      const built = spawnSync(compiler, [
+        '--default-u64', '--typed-refs', '--target', target, assembly,
+        join(root, `tests/ffi/${name}.grl`), ...compilerSources,
+      ], { cwd: root, maxBuffer: 16 * 1024 * 1024, timeout: 900_000 });
+      assert.equal(built.status, 0, `${target}/${name}: cross compilation failed: ${built.stderr}`);
+      const text = readFileSync(assembly, 'utf8');
+      assert.ok(/(^|\n)(call|bl) dlsym\n/.test(text), `${target}/${name}: missing loader call after cross compilation`);
+      crossCompiled++;
+      continue;
+    }
     // The fixture is copied next to the shim object: `lib "shim.o"` resolves
     // relative to the declaring source, which is the documented rule.
     const source = join(directory, `${name}.grl`);
@@ -75,7 +109,7 @@ for (const target of selected) {
     const assembly = readFileSync(join(directory, `${name}.s`), 'utf8');
     const notes = assembly.split('\n').filter(line => line.startsWith('// grail-link: '));
     assert.equal(notes.length, 1, `${target}/${name}: the six declarations must request exactly one link input: ${notes}`);
-    assert.equal(notes[0], '// grail-link: shim.o', `${target}/${name}: unexpected link note ${notes[0]}`);
+    assert.equal(notes[0], linkNote, `${target}/${name}: unexpected link note ${notes[0]}`);
     for (const symbol of symbols) {
       // x86-64 and RISC-V spell the call `call SYM`; AArch64 lowers it to `bl SYM`.
       assert.ok(new RegExp(`(^|\\n)(call|bl) ${symbol}\\n`).test(assembly), `${target}/${name}: missing unmangled call to ${symbol}`);
@@ -99,4 +133,4 @@ for (const target of selected) {
   }
 }
 const skipped = linkedOnly ? ` (${linkedOnly} linked but not executed: no cross emulator installed)` : '';
-console.log(`ffi: ${executed} linked and executed, ${linkedOnly} linked only${skipped}`);
+console.log(`ffi: ${executed} linked and executed, ${linkedOnly} linked only, ${crossCompiled} cross-compiled only${skipped}`);

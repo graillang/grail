@@ -129,6 +129,20 @@ export function linkInputs(assembly, base) {
     });
   return [...new Set(found)];
 }
+// A `-lNAME` link input resolves symbols against a shared library, so a host ELF
+// executable needs the platform loader and the system library directories: ld.lld
+// has neither by default.
+const dynamicLoaders = {
+  x86_64: ['/lib64/ld-linux-x86-64.so.2', '/lib/ld-linux-x86-64.so.2'],
+  aarch64: ['/lib/ld-linux-aarch64.so.1'],
+  riscv64: ['/lib/ld-linux-riscv64-lp64d.so.1', '/lib/ld-linux-riscv64-lp64.so.1'],
+};
+export function dynamicLinkFlags(target, linkArgs) {
+  if (!linkArgs.some(input => input.startsWith('-l'))) return [];
+  if (target !== hostTarget) return [];
+  const loader = (dynamicLoaders[target] ?? []).find(candidate => existsSync(candidate));
+  return [...(loader ? ['--dynamic-linker', loader] : []), '-L/usr/lib', '-L/usr/lib64'];
+}
 export function assemble(source, executable, target = hostTarget, linkArgs = [], { frameworkArgs = [], sign = false, sdk = undefined } = {}) {
   targetName(target);
   const object = `${executable}.o`;
@@ -156,7 +170,10 @@ export function assemble(source, executable, target = hostTarget, linkArgs = [],
     if (sign) signAdhoc(executable);
     return executable;
   }
-  command([process.env.GRAIL_LINKER ?? 'ld.lld', '-m', emulations[target], object, ...linkArgs, '-o', executable]);
+  command([
+    process.env.GRAIL_LINKER ?? 'ld.lld', '-m', emulations[target], object,
+    ...linkArgs, ...dynamicLinkFlags(target, linkArgs), '-o', executable,
+  ]);
   return executable;
 }
 // Shared Mach-O libraries. A Grail program still needs an entry function, so the image keeps its

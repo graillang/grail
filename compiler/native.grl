@@ -213,6 +213,8 @@ struct C {
     // 2 means C-callable with the given unmangled symbol.
     pending_ext: u64,
     pending_symbol: u8[],
+    // Slot holding the host TLS base inside an exported function's body, or 0.
+    export_tls: u64,
     rnames: u8[][],
     tnames: u8[][],
     closures: Closure[],
@@ -416,6 +418,45 @@ fn stack_slot<a>(c: (&a mut C), id: u64) -> unit {
     c.out.push(45);
     on(&mut c, (id + 1) * 8);
     o(&mut c, view("(%rbp)"));
+    return ();
+}
+// ---- host TLS bridge (Linux x86-64) ----
+// The runtime installs its worker record as the hardware thread pointer
+// (`arch_prctl(ARCH_SET_FS)`), which is where the dynamic loader keeps its TCB
+// (errno, tcache, stack guard). Foreign calls therefore run on the loader's TLS
+// base and exported callbacks run on Grail's, restoring the other on the way out.
+fn tls_bridge<a>(c: (&a mut C)) -> u64 {
+    return (c.target == 0) & (c.plat == 0);
+}
+fn tls_bss<a>(c: (&a mut C)) -> unit {
+    if tls_bridge(&mut c) {
+        o(&mut c, view("ud2\n.bss\n.p2align 3\nrt_state: .zero 4096\nrt_host_tls: .zero 8\nrt_grail_tls: .zero 8\n"));
+    } else {
+        o(&mut c, view("ud2\n.bss\n.p2align 3\nrt_state: .zero 4096\n"));
+    }
+    o(&mut c, view(".section .note.GNU-stack,\"\",@progbits\n"));
+    return ();
+}
+fn tls_capture<a>(c: (&a mut C)) -> unit {
+    o(&mut c, view("movl $4099,%edi\nleaq rt_host_tls(%rip),%rsi\nmovl $158,%eax\nsyscall\n"));
+    return ();
+}
+fn tls_get<a>(c: (&a mut C), slot: u64) -> unit {
+    o(&mut c, view("movl $4099,%edi\nleaq "));
+    stack_slot(&mut c, slot);
+    o(&mut c, view(",%rsi\nmovl $158,%eax\nsyscall\n"));
+    return ();
+}
+fn tls_set_global<a, b>(c: (&a mut C), name: &b [u8]) -> unit {
+    o(&mut c, view("movq "));
+    o(&mut c, name);
+    o(&mut c, view("(%rip),%rsi\nmovl $4098,%edi\nmovl $158,%eax\nsyscall\n"));
+    return ();
+}
+fn tls_set_slot<a>(c: (&a mut C), slot: u64) -> unit {
+    o(&mut c, view("movq "));
+    stack_slot(&mut c, slot);
+    o(&mut c, view(",%rsi\nmovl $4098,%edi\nmovl $158,%eax\nsyscall\n"));
     return ();
 }
 fn save<a>(c: (&a mut C)) -> u64 {
@@ -4428,7 +4469,9 @@ fn ffi_result<a, b>(c: (&a mut C), ty: u64, what: &b [u8]) -> unit {
     if (k == 18) & (ty_arg(&mut c, ty) == 64) {
         return ();
     }
-    if (k == 23) + (k == 24) {
+    if (k == 23) + (k == 24) + (k == 25) {
+        // A function-pointer result is how a dynamic loader hands back a resolved
+        // symbol; the declaration states the signature the address is called with.
         return ();
     }
     fail(&mut c, what);
@@ -5020,13 +5063,24 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         own(&mut c, slot, ty);
         init_parameter(&mut c, slot, ty);
     }
+    mut tls_slot = 0;
+    if (export == 2) & tls_bridge(&mut c) {
+        tls_slot = fresh(&mut c);
+        tls_get(&mut c, tls_slot);
+        tls_set_global(&mut c, view("rt_grail_tls"));
+        exchange(&mut c.export_tls, tls_slot);
+    }
     block(&mut c);
+    exchange(&mut c.export_tls, 0);
     if c.raw == 0 {
         if (c.terminated == 0) & (ret != 1) {
             fail(&mut c, view("function may fall through without return"));
         }
     }
     cleanup(&mut c, 0);
+    if tls_slot != 0 {
+        tls_set_slot(&mut c, tls_slot);
+    }
     o(&mut c, view("xorq %rax,%rax\nleave\nret\n.set .F"));
     on(&mut c, frame);
     c.out.push(44);
@@ -7089,6 +7143,12 @@ fn emit_resolved_call<a>(
         if 6 < words {
             fail(&mut c, view("extern C call exceeds six argument words"));
         }
+        mut tls = 0;
+        if tls_bridge(&mut c) {
+            tls = fresh(&mut c);
+            tls_get(&mut c, tls);
+            tls_set_global(&mut c, view("rt_host_tls"));
+        }
         mut reg = 0;
         for i in args.len() {
             ty := argtypes[i];
@@ -7114,6 +7174,9 @@ fn emit_resolved_call<a>(
         o(&mut c, view(ffi_symbol));
         c.out.push(10);
         slot := save(&mut c);
+        if tls != 0 {
+            tls_set_slot(&mut c, tls);
+        }
         if ret != 1 {
             own(&mut c, slot, ret);
         }
@@ -7892,7 +7955,7 @@ fn raw_builtin<a>(c: (&a mut C), id: u64) -> Val {
             } else {
             if c.target == 0 {
                 get(&mut c, args[0], view("%rsi"));
-                o(&mut c, view("movl $4098,%edi\nmovl $158,%eax\nsyscall\n"));
+                o(&mut c, view("movl $4098,%edi\nmovl $158,%eax\nsyscall\nmovq %rsi,rt_grail_tls(%rip)\n"));
             } else {
                 get(&mut c, args[0], view("%rdi"));
                 o(&mut c, view("tpset\n"));
@@ -12282,7 +12345,9 @@ fn primary<a>(c: (&a mut C)) -> Val {
             while ty_kind(&mut c, callable) == 7 {
                 callable = ty_arg(&mut c, callable);
             }
-            if (ty_kind(&mut c, callable) == 12) + (ty_kind(&mut c, callable) == 20) {
+            if (ty_kind(&mut c, callable) == 12)
+                + (ty_kind(&mut c, callable) == 20)
+                + (ty_kind(&mut c, callable) == 25) {
                 return indirect_call(&mut c, val(slot, ty), 0);
             }
         }
@@ -12290,7 +12355,7 @@ fn primary<a>(c: (&a mut C)) -> Val {
             captured := capture_field(&mut c, view(first), 0);
             if captured.ty != 18446744073709551615 {
                 ck := ty_kind(&mut c, captured.ty);
-                if (ck == 12) + (ck == 20) {
+                if (ck == 12) + (ck == 20) + (ck == 25) {
                     return indirect_call(&mut c, captured, 0);
                 }
             }
@@ -14314,6 +14379,10 @@ fn statement<a>(c: (&a mut C)) -> unit {
         validate_return(&mut c, val(v.t, v.ty));
         move_out(&mut c, val(v.t, v.ty));
         cleanup(&mut c, 0);
+        restore := c.export_tls;
+        if restore != 0 {
+            tls_set_slot(&mut c, restore);
+        }
         get(&mut c, v.t, view("%rax"));
         o(&mut c, view("leave\nret\n"));
         exchange(&mut c.terminated, 1);
@@ -15826,6 +15895,7 @@ pub fn main() -> u64 {
         libs: u8[][],
         pending_ext: 0,
         pending_symbol: u8[],
+        export_tls: 0,
         rnames: u8[][],
         tnames: u8[][],
         closures: Closure[],
@@ -16064,7 +16134,7 @@ pub fn main() -> u64 {
         o(
             &mut c,
             view(
-                ".globl grail_entry\ngrail_entry:\nxorl %eax,%eax\nmovq %rax,rt_state(%rip)\nmovq %rax,rt_state+8(%rip)\nmovq %rax,rt_state+16(%rip)\nandq $-16,%rsp\ncall rt_thread_init\nmovq rt_state(%rip),%rdi\n"
+                ".globl grail_entry\ngrail_entry:\nxorl %eax,%eax\nmovq %rax,rt_state(%rip)\nmovq %rax,rt_state+8(%rip)\nmovq %rax,rt_state+16(%rip)\nandq $-16,%rsp\n"
             )
         );
     
@@ -16079,9 +16149,13 @@ pub fn main() -> u64 {
         } else {
             o(
                 &mut c,
-                view(".globl _start\n_start:\nmovq (%rsp),%rdi\nleaq 8(%rsp),%rsi\nleaq 16(%rsp,%rdi,8),%rdx\nmovq %rdi,rt_state(%rip)\nmovq %rsi,rt_state+8(%rip)\nmovq %rdx,rt_state+16(%rip)\nandq $-16,%rsp\ncall rt_thread_init\nmovq rt_state(%rip),%rdi\n")
+                view(".globl _start\n_start:\nmovq (%rsp),%rdi\nleaq 8(%rsp),%rsi\nleaq 16(%rsp,%rdi,8),%rdx\nmovq %rdi,rt_state(%rip)\nmovq %rsi,rt_state+8(%rip)\nmovq %rdx,rt_state+16(%rip)\nandq $-16,%rsp\n")
             );
         }
+    }
+    if tls_bridge(&mut c) {
+        // Record the loader's TLS base before the runtime installs its own.
+        tls_capture(&mut c);
     }
     if count == 1 {
         ok := label(&mut c);
@@ -16117,7 +16191,6 @@ pub fn main() -> u64 {
     emit_exit(&mut c, view("movq %r14,%rdi\n"));
     if (c.target == 3) + (c.target == 4) {
         o(&mut c, view("ud2\n.bss\n.p2align 3\nrt_state: .zero 4096\n"));
-    
     } else {
         if c.plat == 1 {
             o(
@@ -16125,10 +16198,7 @@ pub fn main() -> u64 {
                 view("ud2\n.section __DATA,__bss\n.p2align 3\n_rt_state:\n.space 4096\n")
             );
         } else {
-            o(
-                &mut c,
-                view("ud2\n.bss\n.p2align 3\nrt_state: .zero 4096\n.section .note.GNU-stack,\"\",@progbits\n")
-            );
+            tls_bss(&mut c);
         }
     }
     optimized := optimize::optimize(view(c.out));
