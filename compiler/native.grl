@@ -7862,6 +7862,59 @@ fn hex(b: u64) -> u64 {
     }
     return b - 87;
 }
+// view("literal") without building anything at run time: the literal's bytes, a `u8[]` object
+// for them and the view descriptor all live in read-only data, each behind a block header whose
+// state 2 marks it static (rt_free leaves those alone). The string object is the view's tracked
+// source, exactly as the owned temporary would be, so borrow checking is unchanged. Mach-O keeps
+// it in __DATA,__const because the objects hold absolute pointers.
+fn static_literal_view<a>(c: (&a mut C)) -> Val {
+    p := c.pos;
+    bytes := decode_literal(&mut c, p);
+    advance(&mut c);
+    data := label(&mut c);
+    text := label(&mut c);
+    desc := label(&mut c);
+    if c.plat == 1 {
+        o(&mut c, view(".pushsection __DATA,__const\n"));
+    } else {
+        o(&mut c, view(".pushsection .rodata\n"));
+    }
+    o(&mut c, view(".p2align 3\n.quad 0\n.quad 2\n"));
+    mark(&mut c, data);
+    for i in bytes.len() {
+        o(&mut c, view(".byte "));
+        on(&mut c, bytes[i]);
+        c.out.push(10);
+    }
+    o(&mut c, view(".byte 0\n.p2align 3\n.quad 0\n.quad 2\n"));
+    mark(&mut c, text);
+    o(&mut c, view(".quad "));
+    lname(&mut c, data);
+    o(&mut c, view("\n.quad "));
+    on(&mut c, bytes.len());
+    o(&mut c, view("\n.quad "));
+    on(&mut c, bytes.len());
+    o(&mut c, view("\n.quad 0\n.quad 2\n"));
+    mark(&mut c, desc);
+    o(&mut c, view(".quad "));
+    lname(&mut c, data);
+    o(&mut c, view("\n.quad "));
+    on(&mut c, bytes.len());
+    o(&mut c, view("\n.popsection\nleaq "));
+    lname(&mut c, text);
+    o(&mut c, view("(%rip),%rax\n"));
+    source := save(&mut c);
+    own(&mut c, source, 3);
+    o(&mut c, view("leaq "));
+    lname(&mut c, desc);
+    o(&mut c, view("(%rip),%rax\n"));
+    slot := save(&mut c);
+    ty := intern_full(&mut c, 5, 0, 0, u64[]);
+    own(&mut c, slot, ty);
+    view_bonds(&mut c, slot, source, 0);
+    release_temporary(&mut c, source);
+    return val(slot, ty);
+}
 fn string_lit<a>(c: (&a mut C)) -> Val {
     p := c.pos;
     bytes := decode_literal(&mut c, p);
@@ -10651,6 +10704,14 @@ fn builtin<a>(c: (&a mut C), id: u64) -> Val {
             }
             v = index_view(&mut c, v, access);
         }
+        expect(&mut c, view(")"));
+        return v;
+    }
+    here := c.pos;
+    if (id == 37) & (kind(&mut c) == 3) & (kind_at(&mut c, here + 1) == 41) {
+        // view("literal"): a static descriptor beside the bytes, so no string is built,
+        // copied or freed (rt_free leaves blocks marked static alone).
+        v := static_literal_view(&mut c);
         expect(&mut c, view(")"));
         return v;
     }
