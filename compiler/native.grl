@@ -224,6 +224,7 @@ struct C {
     default_u64_flag: u64,
     // Reference dialect is independent of the internal numeric default.
     typed_refs: u64,
+    strict_bool: u64,
     typed_refs_flag: u64,
     exports: u8[][],
     export_hits: u64[],
@@ -8386,7 +8387,7 @@ fn record<a>(c: (&a mut C), d: u64, explicit: u64) -> Val {
                 field_mark := c.resources.len();
                 v = expr_expected(&mut c, 0, context);
                 if (c.raw == 0) & (contains_borrow(&mut c, v.ty, 0) == 0) {
-                    end_temporaries(&mut c, field_mark, v.t);
+                    release_temporaries(&mut c, field_mark, v.t);
                 }
             } else {
                 local := find_local(&mut c, view(f));
@@ -13941,6 +13942,14 @@ fn collection_literal<a>(c: (&a mut C), ty: u64, bytes: u64) -> Val {
 // its right side (`b.words[i] = f(&b)`), a record field after an earlier field (`M { n: f(&x), x }`),
 // a loop body after its count. They own nothing, so no code is emitted.
 fn end_temporaries<a>(c: (&a mut C), mark: u64, keep: u64) -> unit {
+    release_temporaries(&mut c, mark, keep);
+    close_loans(&mut c);
+    expire_locals(&mut c);
+    return ();
+}
+// The release half alone, for use inside a larger expression (a record field), where closing loans
+// and expiring locals could end a borrow the enclosing expression still holds.
+fn release_temporaries<a>(c: (&a mut C), mark: u64, keep: u64) -> unit {
     mut r = c.resources.len();
     while mark < r {
         r = r - 1;
@@ -13951,8 +13960,6 @@ fn end_temporaries<a>(c: (&a mut C), mark: u64, keep: u64) -> unit {
             release(&mut c, r);
         }
     }
-    close_loans(&mut c);
-    expire_locals(&mut c);
     return ();
 }
 fn reference_borrow<a>(c: (&a mut C), write: u64) -> Val {
@@ -16457,6 +16464,7 @@ fn expr_expected<a>(c: (&a mut C), min: u64, expected: u64) -> Val {
                                                 if c.raw == 0 {
                                                     require_type(&mut c, ty, 0);
                                                     require_type(&mut c, rty, 0);
+                                                    strict_bool_check(&mut c, k, ty, rty);
                                                 }
                                                 both := is_bool(&mut c, ty)
                                                     & is_bool(&mut c, rty);
@@ -16482,6 +16490,57 @@ fn expr_expected<a>(c: (&a mut C), min: u64, expected: u64) -> Val {
     return val(t, ty);
 }
 
+// Bools and integers do not mix (Go, Zig and Rust reject all of these): `&`, `|`, `^` between a bool and
+// an integer (`code & (a == 0)` is 2 & 1 == 0), arithmetic on bools (`true + true`), and an integer
+// condition (`if n`). Logic is `&&`, `||` and `!`; integers compare explicitly (`n != 0`).
+fn strict_bool_check<a>(c: (&a mut C), k: u64, left: u64, right: u64) -> unit {
+    if c.strict_bool == 0 {
+        return ();
+    }
+    lb := is_bool(&mut c, left);
+    rb := is_bool(&mut c, right);
+    if (lb == 0) & (rb == 0) {
+        return ();
+    }
+    if lb & rb & (is_comparison(k) + (k == 38) + (k == 124) + (k == 94)) {
+        return ();
+    }
+    if lb & rb {
+        strict_bool_fail(&mut c, view("arithmetic on bools; use && and || for logic"));
+        return ();
+    }
+    strict_bool_fail(&mut c, view("bool and integer do not mix; use && / || / ! for logic and compare integers explicitly"));
+    return ();
+}
+fn strict_condition<a>(c: (&a mut C), ty: u64) -> unit {
+    if (c.strict_bool != 0) & (is_bool(&mut c, ty) == 0) {
+        strict_bool_fail(&mut c, view("a condition must be a bool; compare explicitly (n != 0)"));
+    }
+    return ();
+}
+// Mode 1 stops at the violation; mode 2 (survey) prints file:line:column and continues.
+fn strict_bool_fail<a, b>(c: (&a mut C), msg: &b [u8]) -> unit {
+    if c.strict_bool == 1 {
+        fail(&mut c, msg);
+        return ();
+    }
+    p := c.pos;
+    t := &c.toks[p];
+    st := t.start;
+    mut line = 1;
+    mut column = 1;
+    for i in st {
+        if c.src[i] == 10 {
+            line += 1;
+            column = 1;
+        } else {
+            column += 1;
+        }
+    }
+    path := host::arg(c.file + c.arg_offset);
+    println("{}:{}:{}: {}", view(path), line, column, msg);
+    return ();
+}
 // ---- statements ----
 fn block<a>(c: (&a mut C)) -> unit {
     start := c.pos;
@@ -17881,6 +17940,7 @@ fn statement<a>(c: (&a mut C)) -> unit {
             mut v = expr(&mut c, 0);
             if c.raw == 0 {
                 require_type(&mut c, v.ty, 0);
+                strict_condition(&mut c, v.ty);
             }
             cleanup(&mut c, tests);
             expire_locals(&mut c);
@@ -18446,6 +18506,7 @@ fn statement<a>(c: (&a mut C)) -> unit {
         mut v = expr(&mut c, 0);
         if c.raw == 0 {
             require_type(&mut c, v.ty, 0);
+            strict_condition(&mut c, v.ty);
         }
         cleanup(&mut c, tests);
         expire_locals(&mut c);
@@ -19247,6 +19308,7 @@ pub fn main() -> u64 {
         default_u64: 0,
         default_u64_flag: 0,
         typed_refs: 0,
+        strict_bool: 0,
         typed_refs_flag: 0,
         exports: u8[][],
         export_hits: u64[],
@@ -19447,10 +19509,20 @@ pub fn main() -> u64 {
                         c.export_hits.push(0);
                         offset += 2;
                     } else {
-                    if same(view(option), view("--typed-refs")) {
-                        exchange(&mut c.typed_refs_flag, 1);
+                    if same(view(option), view("--typed-refs")) + same(view(option), view("--strict-bool")) + same(view(option), view("--strict-bool-report")) {
+                        if same(view(option), view("--strict-bool")) {
+                            // Survey: bools and integers do not mix (see strict_bool_check).
+                            exchange(&mut c.strict_bool, 1);
+                        }
+                        if same(view(option), view("--strict-bool-report")) {
+                            exchange(&mut c.strict_bool, 2);
+                        }
+                        if same(view(option), view("--typed-refs")) {
+                            exchange(&mut c.typed_refs_flag, 1);
+                        }
                         offset += 1;
                     } else {
+
                         if same(view(option), view("--default-u64")) {
                             exchange(&mut c.default_u64, 1);
                             exchange(&mut c.default_u64_flag, 1);
