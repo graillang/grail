@@ -827,6 +827,39 @@ fn frame<a, b>(data: &a [u8], at: u64, d: (&b mut Dec)) -> u64 {
     return p;
 }
 
+// ZSTD_getFrameContentSize: the content size a frame at the start of `data` declares, or None when
+// the frame header is malformed, uses a dictionary-less reserved bit, or does not record the size.
+pub fn frame_content_size<a>(data: &a [u8]) -> u64? {
+    if (data.len() < 6) || (read_le(data, 0, 4) != 4247762216) {
+        return None;
+    }
+    fhd := u64(data[4]);
+    if (fhd & 8) != 0 {
+        return None;
+    }
+    fcs_flag := fhd >> 6;
+    single := (fhd >> 5) & 1;
+    dict_sizes := u64[0, 1, 2, 4];
+    mut p: u64 = 5 + dict_sizes[fhd & 3];
+    if single == 0 {
+        p += 1;
+    }
+    mut size: u64 = 0;
+    if fcs_flag == 0 {
+        size = single;
+    } else {
+        size = 1 << fcs_flag;
+    }
+    if (size == 0) || (p + size > data.len()) {
+        return None;
+    }
+    mut value = read_le(data, p, size);
+    if size == 2 {
+        value += 256;
+    }
+    return Some(value);
+}
+
 // Decompresses every frame in `data` (skippable frames are skipped); None when the input is
 // malformed or uses a dictionary.
 pub fn decompress<a>(data: &a [u8]) -> u8[]? {
