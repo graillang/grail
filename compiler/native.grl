@@ -282,6 +282,9 @@ struct C {
     bce_index: u8[],
     bce_base: u8[],
     lit_negative: u64,
+    // Span of the most recent byte read (`bytes[i]`): an untyped word known to be 0..255.
+    byte_start: u64,
+    byte_end: u64,
     flit_start: u64,
     flit_end: u64,
     flit_tok: u64,
@@ -1620,9 +1623,66 @@ fn imm<a>(c: (&a mut C), n: u64) -> u64 {
     o(&mut c, view(",%rax\n"));
     return save(&mut c);
 }
+// Grail's own calling convention passes six words in registers. A call with more arguments keeps
+// the first five in registers and passes the rest in a heap record whose address is the sixth
+// register; the callee copies them into its frame and frees the record. ABI-neutral: only
+// register moves and loads/stores through a pointer, which every target lowers.
+fn load_call_args<a, b>(c: (&a mut C), args: (&b u64[]), shift: u64) -> unit {
+    total := args.len() + shift;
+    if total <= 6 {
+        for i in args.len() {
+            r := argreg(i + shift);
+            get(&mut c, args[i], view(r));
+        }
+        return ();
+    }
+    extra := total - 5;
+    n := imm(&mut c, extra);
+    record := invoke(&mut c, view("rt_rec"), one(n));
+    for k in extra {
+        get(&mut c, record, view("%rcx"));
+        get(&mut c, args[5 - shift + k], view("%rax"));
+        o(&mut c, view("movq %rax,"));
+        on(&mut c, k * 8);
+        o(&mut c, view("(%rcx)\n"));
+    }
+    for i in 5 - shift {
+        r := argreg(i + shift);
+        get(&mut c, args[i], view(r));
+    }
+    get(&mut c, record, view("%r9"));
+    return ();
+}
+// Prologue: parameter i of `count` into frame slot i (see load_call_args for more than six).
+fn store_params<a>(c: (&a mut C), count: u64) -> unit {
+    mut regs = count;
+    if 6 < count {
+        regs = 5;
+    }
+    for i in regs {
+        reg := argreg(i);
+        o(&mut c, view("movq "));
+        o(&mut c, view(reg));
+        c.out.push(44);
+        stack_slot(&mut c, i);
+        c.out.push(10);
+    }
+    if 6 < count {
+        for k in count - 5 {
+            o(&mut c, view("movq "));
+            on(&mut c, k * 8);
+            o(&mut c, view("(%r9),%rax\nmovq %rax,"));
+            stack_slot(&mut c, 5 + k);
+            c.out.push(10);
+        }
+        o(&mut c, view("movq %r9,%rdi\ncall rt_free\n"));
+    }
+    return ();
+}
 fn invoke<a, b>(c: (&a mut C), name: &b [u8], args: u64[]) -> u64 {
     if 6 < args.len() {
-        fail(&mut c, view("native call exceeds six arguments"));
+        // Runtime helpers take at most six words; more would need the spill record.
+        fail(&mut c, view("runtime call exceeds six arguments"));
     }
     for i in args.len() {
         mut r = argreg(i);
@@ -2812,6 +2872,12 @@ fn bind_loan<a>(c: (&a mut C), value: u64, source: u64, target: u64, mode: u64) 
         }
     } else {
         loan = ownership::borrow_place(&mut c.check, target, mode);
+        if loan == 0 {
+            // Loans whose holders are all dead (a moved match scrutinee's payload loans) end
+            // here, then the borrow is retried; a real conflict still fails.
+            close_loans(&mut c);
+            loan = ownership::borrow_place(&mut c.check, target, mode);
+        }
     }
     if loan == 0 {
         fail(&mut c, view("borrow conflicts with active access"));
@@ -4670,9 +4736,6 @@ fn base_named<a>(c: (&a mut C), first: u8[]) -> u64 {
                 expect(&mut c, view(","));
             }
         }
-        if 6 < params.len() {
-            fail(&mut c, view("function type exceeds six word arguments"));
-        }
         expect(&mut c, view("->"));
         result := parse_type(&mut c);
         return intern_args(&mut c, 12, result, 0, u64[], params);
@@ -6082,9 +6145,6 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
             expect(&mut c, view(","));
         }
     }
-    if 6 < count {
-        fail(&mut c, view("native function exceeds six parameters"));
-    }
     exchange(&mut c.parsing_input, 0);
     if c.receiver_region != 0 {
         exchange(&mut c.output_region, c.receiver_region);
@@ -6268,14 +6328,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         exchange(&mut c.export_fret, fret);
     } else {
         exchange(&mut c.export_fret, 0);
-        for i in count {
-            reg := argreg(i);
-            o(&mut c, view("movq "));
-            o(&mut c, view(reg));
-            c.out.push(44);
-            stack_slot(&mut c, i);
-            c.out.push(10);
-        }
+        store_params(&mut c, count);
     }
     o(&mut c, view("leaq -.F"));
     on(&mut c, frame);
@@ -6410,9 +6463,6 @@ fn interface_declaration<a>(c: (&a mut C), pass: u64) -> unit {
                 }
                 expect(&mut c, view(","));
             }
-        }
-        if 6 < count {
-            fail(&mut c, view("interface method exceeds six arguments"));
         }
         mut ret = 1;
         if eat(&mut c, view("->")) {
@@ -8303,7 +8353,16 @@ fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
                     context = bind_types(&mut c, formal, &map);
                 }
             }
-            mut v = expr_expected(&mut c, 0, context);
+            // A reference or view binding passed by name is reborrowed, not moved: `f(r); g(r);`
+            // works as Rust's shared-reference copy / implicit `&mut` reborrow, and the borrow
+            // checker still sees each call's loan.
+            mut v = val(0, 0);
+            reborrow := reborrow_argument(&mut c);
+            if reborrow != 0 {
+                v = place(&mut c, reborrow - 1);
+            } else {
+                v = expr_expected(&mut c, 0, context);
+            }
             aend := c.pos;
             if c.raw == 0 {
                 if (
@@ -8554,18 +8613,12 @@ fn emit_resolved_call<a>(
         }
         return ffi_emit_call(&mut c, &args, &argtypes, ret, view(ffi_symbol), 0);
     }
-    if 6 < args.len() {
-        fail(&mut c, view("native call exceeds six arguments"));
-    }
     for i in args.len() {
         slot := args[i];
         ty := argtypes[i];
         move_out(&mut c, val(slot, ty));
     }
-    for i in args.len() {
-        reg := argreg(i);
-        get(&mut c, args[i], view(reg));
-    }
+    load_call_args(&mut c, &args, 0);
     o(&mut c, view("call "));
     mangle(&mut c, view(destination), view(symbol));
     c.out.push(10);
@@ -8783,12 +8836,9 @@ fn indirect_call<a>(c: (&a mut C), value: Val, opened: u64) -> Val {
         release_temporary(&mut c, input);
         return val(rslot, resulttype);
     }
+    load_call_args(&mut c, &args, shift);
     if shift {
         get(&mut c, envp, view("%rdi"));
-    }
-    for i in args.len() {
-        r := argreg(i + shift);
-        get(&mut c, args[i], view(r));
     }
     get(&mut c, target, view("%rax"));
     o(&mut c, view("call *%rax\n"));
@@ -11539,6 +11589,13 @@ fn adopt_value<a>(c: (&a mut C), v: Val, start: u64, end: u64, expected: u64) ->
     if literal_target(&mut c, expected) == 0 {
         return v;
     }
+    // A byte read (`bytes[i]`) is an untyped word in 0..255: it adopts any integer type that
+    // holds 0..255 without a check, like a literal that fits.
+    if (v.ty == 0) & (c.byte_start == start) & (c.byte_end == end) & (c.raw == 0) {
+        if literal_fits(&mut c, expected, 255, 0) {
+            return val(v.t, expected);
+        }
+    }
     if (c.lit_start != start) + (c.lit_end != end) {
         return v;
     }
@@ -11805,9 +11862,6 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
         }
     }
     exchange(&mut c.no_union, 0);
-    if 5 < params.len() {
-        fail(&mut c, view("closure exceeds five parameters"));
-    }
     mut ret = 1;
     if eat(&mut c, view("->")) {
         ret = parse_type(&mut c);
@@ -12135,14 +12189,7 @@ fn emit_closures<a>(c: (&a mut C)) -> unit {
             on(&mut c, frame);
             o(&mut c, view(",%rsp\n"));
         }
-        for j in count {
-            reg := argreg(j);
-            o(&mut c, view("movq "));
-            o(&mut c, view(reg));
-            c.out.push(44);
-            stack_slot(&mut c, j);
-            c.out.push(10);
-        }
+        store_params(&mut c, count);
         o(&mut c, view("leaq -.F"));
         on(&mut c, frame);
         o(&mut c, view("(%rbp),%rdi\nmovq $.F"));
@@ -12780,10 +12827,16 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
             f = "rt_text";
             ty = 3;
         }
-        if c.raw == 0 {
-            if k == 6 {
-                fail(&mut c, view("copy/text requires byte collection"));
+        if (c.raw == 0) & (k == 6) {
+            // `.copy()` of a vector of plain values (no element needs a drop) is an independent
+            // vector of the same type; copying owners would duplicate ownership.
+            elem := ty_arg(&mut c, xty);
+            if same(view(name), view("text")) + needs_drop(&mut c, elem) {
+                fail(&mut c, view("copy requires a byte collection or a vector of plain values"));
             }
+            slot := apply(&mut c, view("rt_vec_copy"), one(xt));
+            release_temporary(&mut c, input);
+            return own(&mut c, slot, xty);
         }
         slot := apply(&mut c, view(f), one(xt));
         release_temporary(&mut c, input);
@@ -12826,6 +12879,21 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
         release_temporary(&mut c, input);
         bt := bool_type(&mut c);
         return val(r, bt);
+    }
+    // Every remaining method mutates its receiver; an unknown name is reported as such before the
+    // receiver's mutability is checked.
+    known := same(view(name), view("pop"))
+        + same(view(name), view("clear"))
+        + same(view(name), view("truncate"))
+        + same(view(name), view("reverse"))
+        + same(view(name), view("swap"))
+        + same(view(name), view("remove"))
+        + same(view(name), view("insert"))
+        + same(view(name), view("push"))
+        + same(view(name), view("push_char"))
+        + same(view(name), view("append"));
+    if known == 0 {
+        fail(&mut c, view("unknown collection method"));
     }
     require_mutable_binding(&mut c, xt, 0);
     if same(view(name), view("pop")) {
@@ -12990,15 +13058,18 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
         invoke(&mut c, view("rt_append_text"), two(xt, bt));
         return val(imm(&mut c, 0), 1);
     }
-    if same(view(name), view("push")) == 0 {
-        fail(&mut c, view("unknown collection method"));
-    }
     if c.raw == 0 {
         if (k != 3) & (k != 6) {
             fail(&mut c, view("push requires bytes/vector"));
         }
         if k == 3 {
-            require_type(&mut c, b.ty, 0);
+            // A byte buffer takes a u8 (always fits) or any other integer, which stops the
+            // program at run time if it does not fit a byte, like `buf[i] = b`.
+            if (b.ty != int_type(&mut c, 8, 0)) & (b.ty != 0) {
+                if integer(&mut c, b.ty) == 0 {
+                    require_type(&mut c, b.ty, 0);
+                }
+            }
         } else {
             expected := ty_arg(&mut c, xty);
             require_type(&mut c, b.ty, expected);
@@ -13010,7 +13081,11 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
     require_write(&mut c, xt);
     mut f = "rt_push";
     if k == 3 {
-        f = "rt_pushb";
+        // A u8 always fits; an untyped word is range-checked like a byte store.
+        f = "rt_pushb_checked";
+        if b.ty == int_type(&mut c, 8, 0) {
+            f = "rt_pushb";
+        }
     }
     source := place_of(&mut c, bt);
     move_out(&mut c, val(bt, b.ty));
@@ -13034,7 +13109,9 @@ fn collection_literal<a>(c: (&a mut C), ty: u64, bytes: u64) -> Val {
                     expected = ty_arg(&mut c, ty);
                 }
                 v = adopt_value(&mut c, v, estart, eend, expected);
-                require_type(&mut c, v.ty, expected);
+                if (bytes == 0) + (v.ty != int_type(&mut c, 8, 0)) {
+                    require_type(&mut c, v.ty, expected);
+                }
                 if bytes != 0 {
                     lit := (c.lit_start == estart) & (c.lit_end == eend);
                     if lit & (c.lit_value > 255) {
@@ -13047,7 +13124,11 @@ fn collection_literal<a>(c: (&a mut C), ty: u64, bytes: u64) -> Val {
             move_out(&mut c, val(value, v.ty));
             mut f = "rt_push";
             if bytes {
-                f = "rt_pushb";
+                // A u8 element always fits; an untyped word is range-checked at run time.
+                f = "rt_pushb_checked";
+                if v.ty == int_type(&mut c, 8, 0) {
+                    f = "rt_pushb";
+                }
             }
             invoke(&mut c, view(f), two(slot, value));
             target := place_of(&mut c, slot);
@@ -13934,7 +14015,24 @@ fn primary<a>(c: (&a mut C)) -> Val {
                 fail(&mut c, view("borrow_mut was removed; write &mut value"));
             }
         }
+        // A function of this module, or a callable local (closure, function pointer), named like a
+        // builtin shadows it, as predeclared identifiers are in Go.
         mut b = builtin_id(view(first));
+        here := module_copy(&mut c);
+        if (b != 0) & (find_func(&mut c, view(here), view(first)) != 0) {
+            b = 0;
+        }
+        shadow := find_local(&mut c, view(first));
+        if (b != 0) & (shadow != 0) {
+            mut callable = local_ty(&mut c, shadow - 1);
+            while ty_kind(&mut c, callable) == 7 {
+                callable = ty_arg(&mut c, callable);
+            }
+            ck := ty_kind(&mut c, callable);
+            if (ck == 12) + (ck == 20) + (ck == 25) {
+                b = 0;
+            }
+        }
         if b != 0 {
             return builtin(&mut c, b);
         }
@@ -14736,6 +14834,7 @@ fn index_view<a>(c: (&a mut C), value: Val, access: u64) -> Val {
     expect(&mut c, view("]"));
     result := apply(&mut c, view(f), two(slot, start));
     release_temporary(&mut c, slot);
+    exchange(&mut c.byte_end, c.pos);
     return val(result, 0);
 }
 fn expr<a>(c: (&a mut C), min: u64) -> Val {
@@ -14756,9 +14855,9 @@ fn expr_expected<a>(c: (&a mut C), min: u64, expected: u64) -> Val {
             first = primary(&mut c);
         }
     }
-    lend := c.pos;
+    mut lend = c.pos;
     mut left_lit = (c.lit_start == lstart) & (c.lit_end == lend);
-    lvalue := c.lit_value;
+    mut lvalue = c.lit_value;
     lneg := c.lit_negative;
     mut left_flit = (c.flit_start == lstart) & (c.flit_end == lend);
     lftok := c.flit_tok;
@@ -14803,6 +14902,10 @@ fn expr_expected<a>(c: (&a mut C), min: u64, expected: u64) -> Val {
                 result := index_view(&mut c, val(t, ty), access);
                 t = result.t;
                 ty = result.ty;
+                // A byte read spans from the start of the indexed operand.
+                if c.byte_end == c.pos {
+                    exchange(&mut c.byte_start, lstart);
+                }
             } else {
                 if (k == 46) & (next_kind(&mut c) == 46) {
                     break;
@@ -14888,6 +14991,30 @@ fn expr_expected<a>(c: (&a mut C), min: u64, expected: u64) -> Val {
                                 rlit := (c.lit_start == rstart) & (c.lit_end == rend);
                                 llit := left_lit;
                                 left_lit = false;
+                                // Untyped constant arithmetic (Go-style): `65536 + 16777216` or
+                                // `1 << 20` between two untyped integer literals is itself an
+                                // untyped literal, folded here and adopted by its context.
+                                rvalue := c.lit_value;
+                                rneg := c.lit_negative;
+                                if llit & rlit & (ty == 0) & (rty == 0) & (lneg == 0) & (rneg == 0) {
+                                    folded := fold_constant(k, lvalue, rvalue);
+                                    if folded[0] != 0 {
+                                        value := folded[1];
+                                        o(&mut c, view("movabsq $"));
+                                        on(&mut c, value);
+                                        o(&mut c, view(",%rax\n"));
+                                        t = save(&mut c);
+                                        ty = 0;
+                                        exchange(&mut c.lit_start, lstart);
+                                        exchange(&mut c.lit_end, rend);
+                                        exchange(&mut c.lit_value, value);
+                                        exchange(&mut c.lit_negative, 0);
+                                        left_lit = true;
+                                        lvalue = value;
+                                        lend = rend;
+                                        continue;
+                                    }
+                                }
                                 if (ty != rty) & literal_target(&mut c, ty) & rlit {
                                     if adopt_literal(&mut c, rstart, rend, ty) {
                                         rty = ty;
@@ -15524,6 +15651,69 @@ fn mutating_call_after_index<a>(c: (&a mut C)) -> u64 {
         q = q + 2;
     }
     return 0;
+}
+// 1 + write mode when the next argument is exactly a reference/view binding (`name` followed by
+// `,` or `)`), else 0.
+fn reborrow_argument<a>(c: (&a mut C)) -> u64 {
+    if (c.raw != 0) + (kind(&mut c) != 1) {
+        return 0;
+    }
+    here := c.pos;
+    after := kind_at(&mut c, here + 1);
+    if (after != 44) & (after != 41) {
+        return 0;
+    }
+    name := tok_text(&mut c, here);
+    l := find_local(&mut c, view(name));
+    if l == 0 {
+        return 0;
+    }
+    ty := local_ty(&mut c, l - 1);
+    k := ty_kind(&mut c, ty);
+    if (k != 5) & (k != 7) {
+        return 0;
+    }
+    return 1 + (ty_mode(&mut c, ty) != 0);
+}
+// [1, value] when `a OP b` folds to a non-negative constant that fits 64 bits, else [0, 0].
+fn fold_constant(k: u64, a: u64, b: u64) -> u64[] {
+    if k == 43 {
+        if a <= 18446744073709551615 - b {
+            return u64[1, a + b];
+        }
+    }
+    if (k == 45) & (b <= a) {
+        return u64[1, a - b];
+    }
+    if k == 42 {
+        if (a == 0) + (b <= 18446744073709551615 / a) {
+            return u64[1, a * b];
+        }
+    }
+    if (k == 47) & (b != 0) {
+        return u64[1, a / b];
+    }
+    if (k == 37) & (b != 0) {
+        return u64[1, a % b];
+    }
+    if (k == 271) & (b < 64) {
+        if a <= (18446744073709551615 >> b) {
+            return u64[1, a << b];
+        }
+    }
+    if (k == 272) & (b < 64) {
+        return u64[1, a >> b];
+    }
+    if k == 38 {
+        return u64[1, a & b];
+    }
+    if k == 124 {
+        return u64[1, a | b];
+    }
+    if k == 94 {
+        return u64[1, a ^ b];
+    }
+    return u64[0, 0];
 }
 // Walks the accessors of an assignment target from c.pos up to (not including) `stop`: each
 // `[i]` and `.f` run yields a mutable reference to the element or field, so `v[i][j] = x` and
@@ -16515,6 +16705,20 @@ fn statement<a>(c: (&a mut C)) -> unit {
         if iterable {
             observe(&mut c, seq);
         } else {
+            // A count bound is read once (Go semantics): the temporary views it borrowed through
+            // (`z.comps[n].v`) end now, so the body may borrow `z` mutably. Only non-owning
+            // temporaries are released; they emit no code.
+            mut r = c.resources.len();
+            while loopbase < r {
+                r = r - 1;
+                info := &c.resources[r];
+                flag := info.flag;
+                slot := info.slot;
+                if (flag == 0) & (slot != v.t) & (is_local_slot(&mut c, slot) == 0) {
+                    release(&mut c, r);
+                }
+            }
+            close_loans(&mut c);
             expire_locals(&mut c);
         }
         // `for i in a..b` counts from a up to (not including) b.
@@ -16701,6 +16905,10 @@ fn statement<a>(c: (&a mut C)) -> unit {
         if byref == 0 {
             move_out(&mut c, val(xt, x.ty));
         }
+        // A by-value scrutinee that holds a loan, such as the optional reference of `match m.get(&k)`, ends
+        // its loan in each arm once no payload reference is live, like a `match &s` scrutinee: the
+        // `None` arm may then modify `m`.
+        borrowed := (byref == 0) & (c.raw == 0) & (contains_borrow(&mut c, x.ty, 0) != 0);
         before := ownership::snapshot(&c.check);
         mut exits = ownership::new();
         mut have = 0;
@@ -16744,7 +16952,7 @@ fn statement<a>(c: (&a mut C)) -> unit {
                     drop_call(&mut c, x.ty);
                 }
                 expect(&mut c, view("=>"));
-                if byref {
+                if byref + borrowed {
                     arm_scrutinee(&mut c, sslot, sty);
                 }
                 block(&mut c);
@@ -16862,7 +17070,7 @@ fn statement<a>(c: (&a mut C)) -> unit {
                 }
             }
             expect(&mut c, view("=>"));
-            if byref {
+            if byref + borrowed {
                 arm_scrutinee(&mut c, sslot, sty);
             }
             block(&mut c);
@@ -17728,6 +17936,8 @@ pub fn main() -> u64 {
         bce_index: u8[],
         bce_base: u8[],
         lit_negative: 0,
+        byte_start: 0,
+        byte_end: 0,
         flit_start: 0,
         flit_end: 0,
         flit_tok: 0,

@@ -227,7 +227,8 @@ use. `tests/ffi/call_abi.grl` executes on x86-64, AArch64 and RISC-V Linux and, 
 
 Not implemented yet, and each rejected rather than approximated:
 
-- callbacks with more than six parameters (the Grail function limit); macOS callbacks use the
+- C-callable callbacks with more than six parameters (C enters them through its register ABI and the
+  callback thunk does not read stack arguments yet); macOS callbacks use the
   same SysV/AAPCS64 lowering but are compiled and linked only (no macOS runner);
 - nested C records (a nested Grail record value is a pointer, so embedding it by value
   needs a copy/alias representation that does not exist yet), records *passed* by value as

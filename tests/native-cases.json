@@ -3917,6 +3917,7 @@
     "name": "nested-mutating-calls",
     "source": "struct P {\n    tags: u64[]\n}\nfn main() {\n    mut v = u64[][];\n    v.push(u64[1]);\n    v[0].push(4);\n    mut ps = P[];\n    ps.push(P { tags: u64[] });\n    ps[0].tags.push(7);\n    ps[0].tags.push(8);\n    mut m = [u64: u64[]]();\n    m.insert(3, u64[]);\n    m[3].push(9);\n    println(v[0].len() + ps[0].tags.len() + m[3].len());\n    println(v[0][1] + ps[0].tags[1] + m[3][0]);\n}\n",
     "modules": [
+      "lib/core.grl",
       "lib/hash.grl",
       "lib/hashmap.grl"
     ],
@@ -3936,5 +3937,129 @@
     "reject": true,
     "diagnostic": "conflicts with active access",
     "note": "a nested store conflicts with a live shared borrow of the element"
+  },
+  {
+    "name": "user-function-shadows-builtin",
+    "source": "fn load(x: u64) -> u64 {\n    return x + 1;\n}\nfn join(a: u64, b: u64) -> u64 {\n    return a * 10 + b;\n}\nfn main() {\n    println(load(4));\n    println(join(4, 2));\n}\n",
+    "stdout": "5\n42\n",
+    "note": "a module's own function named like a builtin (load, join) shadows the builtin"
+  },
+  {
+    "name": "reborrow-reference-arguments",
+    "source": "fn total<a>(v: &a [u8]) -> u64 {\n    return v.len();\n}\nfn bump<a>(v: (&a mut u64[])) {\n    v.push(1);\n}\nfn twice<a>(v: &a [u8]) -> u64 {\n    return total(v) + total(v);\n}\nfn grow<a>(v: (&a mut u64[])) {\n    bump(v);\n    bump(v);\n}\nfn main() {\n    b := \"abc\";\n    r := &b;\n    s := r;\n    println(total(r) + total(s) + twice(r));\n    mut w = u64[];\n    grow(&mut w);\n    println(w.len());\n}\n",
+    "stdout": "12\n2\n",
+    "note": "a reference or view binding passed by name is reborrowed: twice(v) calls total(v) twice; grow(v) calls bump(v) twice"
+  },
+  {
+    "name": "reject-reborrow-conflicting-mut",
+    "source": "fn bump<a>(v: (&a mut u64[])) {\n    v.push(1);\n}\nfn main() {\n    mut w = u64[];\n    m := &mut w;\n    r := &w;\n    bump(m);\n    println(r.len());\n}\n",
+    "reject": true,
+    "diagnostic": "conflicts",
+    "note": "reborrowing a &mut binding still conflicts with a live shared borrow"
+  },
+  {
+    "name": "vector-copy-plain",
+    "source": "fn main() {\n    a := u64[3, 1, 2];\n    mut b = a.copy();\n    b.push(9);\n    b[0] = 7;\n    println(a.len() + b.len());\n    println(a[0] + b[0]);\n    f := f32[1.5, 2.5];\n    g := f.copy();\n    println(g[1]);\n}\n",
+    "stdout": "7\n10\n2.5\n",
+    "note": "copy() of a vector of numbers or floats is an independent vector"
+  },
+  {
+    "name": "reject-vector-copy-owners",
+    "source": "fn main() {\n    v := u8[][];\n    w := v.copy();\n}\n",
+    "reject": true,
+    "diagnostic": "vector of plain values",
+    "note": "copying a vector of owners would duplicate ownership"
+  },
+  {
+    "name": "untyped-constant-arithmetic",
+    "source": "fn main() {\n    bias: i64 := 65536 + 16777216;\n    mask: u64 := (1 << 20) - 1;\n    small: u8 := 200 + 55;\n    x := 3 * 4 + 1;\n    y := 2;\n    println(bias);\n    println(mask);\n    println(small);\n    println(x + y * 10);\n}\n",
+    "defaultU64": false,
+    "stdout": "16842752\n1048575\n255\n33\n",
+    "note": "arithmetic between untyped integer literals folds to an untyped constant that adopts its context (i64, u64, u8)"
+  },
+  {
+    "name": "reject-folded-constant-out-of-range",
+    "source": "fn main() {\n    b: u8 := 200 + 56;\n}\n",
+    "reject": true,
+    "diagnostic": "out of range",
+    "note": "a folded constant is range-checked against its context like a literal"
+  },
+  {
+    "name": "more-than-six-parameters",
+    "source": "fn nine(a: u64, b: u64, c: u64, d: u64, e: u64, f: u64, g: u64, h: u64, i: u64) -> u64 {\n    return a + b * 2 + c * 3 + d * 4 + e * 5 + f * 6 + g * 7 + h * 8 + i * 9;\n}\nfn seven<x>(name: &x [u8], b: u64, c: u64, d: u64, e: u64, f: u64, g: u64) -> u64 {\n    return name.len() * 1000 + b + c + d + e + f + g;\n}\nfn main() {\n    println(nine(1, 1, 1, 1, 1, 1, 1, 1, 1));\n    println(nine(9, 8, 7, 6, 5, 4, 3, 2, 1));\n    println(seven(\"abc\", 1, 2, 3, 4, 5, 6));\n    k: u64 := 100;\n    add := |a: u64, b: u64, c: u64, d: u64, e: u64, f: u64, g: u64| -> u64 { return a + b + c + d + e + f + g + k; };\n    println(add(1, 2, 3, 4, 5, 6, 7));\n    fp := nine;\n    println(fp(0, 0, 0, 0, 0, 0, 0, 0, 10));\n}\n",
+    "defaultU64": false,
+    "stdout": "45\n165\n3021\n128\n90\n",
+    "note": "functions, generic functions, closures and function values take any number of parameters (words past the fifth travel in a spilled record)"
+  },
+  {
+    "name": "reject-unknown-collection-method",
+    "source": "fn main() {\n    s := \"abc\";\n    b := s.bytes();\n}\n",
+    "reject": true,
+    "diagnostic": "unknown collection method",
+    "note": "an unknown method on text or a vector is reported as such, not as a mutation of an immutable binding"
+  },
+  {
+    "name": "match-get-insert-in-none",
+    "source": "fn main() {\n    mut m = [u64: u64]();\n    k: u64 := 3;\n    match m.get(&k) {\n        Some(v) => { println(load(v)); },\n        None => { m.insert(k, 1); }\n    }\n    println(m.len());\n}\n",
+    "modules": [
+      "lib/core.grl",
+      "lib/hash.grl",
+      "lib/hashmap.grl"
+    ],
+    "stdout": "1\n",
+    "note": "match m.get(&k) { None => m.insert(k, v) }: the scrutinee's loan on m ends once no payload reference is live"
+  },
+  {
+    "name": "reject-match-get-insert-while-payload-live",
+    "source": "fn main() {\n    mut m = [u64: u64]();\n    m.insert(3, 5);\n    k: u64 := 3;\n    match m.get(&k) {\n        Some(v) => { m.insert(4, 1); println(load(v)); },\n        None => { }\n    }\n}\n",
+    "modules": [
+      "lib/core.grl",
+      "lib/hash.grl",
+      "lib/hashmap.grl"
+    ],
+    "reject": true,
+    "diagnostic": "borrow conflicts with active access",
+    "note": "inserting while the Some payload reference is still used is a real conflict"
+  },
+  {
+    "name": "count-bound-releases-borrow",
+    "source": "struct Comp {\n    v: u64,\n    h: u64\n}\nstruct Z {\n    comps: Comp[],\n    out: u64[]\n}\nfn put<a>(z: (&a mut Z), x: u64) {\n    z.out.push(x);\n}\nfn main() {\n    mut z = Z { comps: Comp[], out: u64[] };\n    z.comps.push(Comp { v: 2, h: 3 });\n    n: u64 := 0;\n    for y in z.comps[n].v {\n        for x in z.comps[n].h {\n            put(&mut z, y * 10 + x);\n        }\n    }\n    println(z.out.len());\n}\n",
+    "stdout": "6\n",
+    "note": "for y in z.comps[n].v reads its bound once, so the body may borrow z mutably"
+  },
+  {
+    "name": "borrow-of-temporary-argument",
+    "source": "fn make(n: u64) -> u64[] {\n    mut v = u64[];\n    for i in n {\n        v.push(i);\n    }\n    return v;\n}\nfn total<a>(v: (&a u64[])) -> u64 {\n    mut s: u64 = 0;\n    for i in v.len() {\n        s += v[i];\n    }\n    return s;\n}\nfn name(n: u64) -> string {\n    return \"abc\".text();\n}\nfn size<a>(s: &a [u8]) -> u64 {\n    return s.len();\n}\nfn main() {\n    println(total(&make(5)));\n    println(size(&name(1)));\n}\n",
+    "stdout": "10\n3\n",
+    "note": "&call(...) borrows a temporary that lives to the end of the statement"
+  },
+  {
+    "name": "byte-read-adopts-u8",
+    "source": "fn hexval(ch: u8) -> u8 {\n    if ch < 58 {\n        return ch - 48;\n    }\n    return ch - 87;\n}\nfn unhex<a>(text: &a [u8]) -> u8[] {\n    mut out = u8[];\n    mut i: u64 = 0;\n    while i + 1 < text.len() {\n        out.push(hexval(text[i]) * 16 + hexval(text[i + 1]));\n        i += 2;\n    }\n    return out;\n}\nfn main() {\n    b := unhex(\"4a2f\");\n    println(b[0] + b[1]);\n}\n",
+    "defaultU64": false,
+    "stdout": "121\n",
+    "note": "a byte read is a 0..255 word: it adopts a u8 parameter (hexval(text[i])) and u8 arithmetic pushes into a byte buffer"
+  },
+  {
+    "name": "byte-buffer-u8-values",
+    "source": "fn f(x: u8) -> u8 {\n    return x;\n}\nfn hexval(ch: u8) -> u8 {\n    if ch < 58 {\n        return ch - 48;\n    }\n    return ch - 87;\n}\nfn main() {\n    mut out = u8[];\n    out.push(f(3));\n    out.push(f(3) * 16 + f(4));\n    text := \"4a\";\n    out.push(hexval(text[0]) * 16 + hexval(text[1]));\n    lit := u8[f(9), 200];\n    println(out[0] + out[1] + out[2] + lit[0] + lit[1]);\n}\n",
+    "defaultU64": false,
+    "stdout": "338\n",
+    "note": "u8 values push into byte buffers and byte literals; arithmetic between u8 values stays u8"
+  },
+  {
+    "name": "reject-byte-read-into-i8",
+    "source": "fn main() {\n    b := u8[200];\n    x: i8 := b[0];\n}\n",
+    "defaultU64": false,
+    "reject": true,
+    "diagnostic": "type mismatch",
+    "note": "a byte read does not fit i8 (0..255 vs -128..127)"
+  },
+  {
+    "name": "byte-push-out-of-range-stops",
+    "source": "fn main() {\n    mut out = u8[];\n    w: u64 := 300;\n    out.push(w);\n}\n",
+    "defaultU64": false,
+    "note": "pushing a value above 255 into a byte buffer stops the program, like a byte store",
+    "signal": "SIGABRT"
   }
 ]

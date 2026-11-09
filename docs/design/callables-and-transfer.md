@@ -18,7 +18,8 @@ fn main(){
 ```
 
 Functions may take/return function values, and records/vectors may contain them. Function types
-have at most six parameters, using the same target ABI as direct calls. Generic function items
+take any number of parameters, using the same convention as direct calls (five words in
+registers, the rest in a record addressed by the sixth). Generic function items
 require explicit type arguments when used as values; expected-type inference for bare generic
 items is not implemented. Unsafe runtime function addresses cannot become safe callable values.
 The callee and each argument are snapshotted left-to-right. Existing builtins keep their reserved

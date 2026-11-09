@@ -2,6 +2,35 @@
 
 ## Unreleased
 
+- Byte reads (`bytes[i]`) are 0..255 words that adopt any integer type holding that range, so
+  `hexval(text[i])` with `hexval(c: u8)` works without a conversion, while `bytes[i] << 24` still
+  computes in a full word. Byte buffers and byte literals accept `u8` values.
+- Storing or pushing a value above 255 into a byte buffer now stops the program, as documented;
+  `buf[i] = v` and `buf.push(v)` used to keep only the low byte silently.
+
+- `match m.get(&k) { Some(v) => ..., None => m.insert(k, x) }` works: a borrow whose holders are
+  all dead (here the moved scrutinee's) ends before a conflicting borrow is refused, so the `None`
+  arm may modify the map; modifying it while the `Some` payload is still used is still rejected.
+- A `for` count bound is read once (Go semantics): `for y in z.comps[n].v { f(&mut z) }` no longer
+  holds a borrow of `z` for the whole loop.
+- An unknown method on text or a vector reports "unknown collection method" instead of the
+  misleading "owned storage mutation requires mut".
+
+- Functions, closures, interface methods and function types take any number of parameters; the
+  six-parameter (five for closures) limit is gone. Grail's own convention keeps five words in
+  registers and passes the rest in a record addressed by the sixth, which the callee copies into
+  its frame; C calls and callbacks keep following the platform C ABI.
+
+- A reference or view binding passed to a function by name is reborrowed instead of moved, so
+  `total(v) + total(v)` and two `bump(v)` calls through a `&mut` parameter work, as in Rust. The
+  borrow checker still rejects real conflicts (a `&mut` reborrow while a shared borrow is live).
+- A module's own function, or a callable local, named like a builtin (`load`, `join`, `view`, ...)
+  now shadows the builtin instead of failing with an unrelated error; non-callable locals do not.
+- `.copy()` works on vectors of plain values (numbers, floats, bools, handles), not only byte
+  collections; copying a vector of owners is rejected.
+- Arithmetic between untyped integer literals is an untyped constant (Go-style): `65536 + 16777216`
+  or `(1 << 20) - 1` adopts its context's type like a single literal, with the same range check.
+
 - Assignment to nested places: `v[i][j] = x`, `world.items[i].hp -= 1`, `rows[i].cells[j] += 1`
   and any mix of indexes and fields, each step borrowed mutably for the statement. Mutating
   method calls through an index (`rows[i].push(x)`, `m[k].push(x)`, user methods taking
