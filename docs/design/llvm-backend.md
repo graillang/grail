@@ -142,6 +142,30 @@ Stage 2 carries type information into the stream so both backends benefit: inlin
 arithmetic (no `rt_f64_op`), real `f32` values instead of rounded binary64 words, 4-byte
 elements for `f32[]`/`u32[]`/`i32[]`, and pointer-typed loads so LLVM's alias analysis works.
 
+### Stage 2a: 4-byte elements
+
+`f32[]`, `u32[]` and `i32[]` become narrow vectors: the same `{data, len, cap}` header, with `len` and
+`cap` counted in elements and a 4-byte stride. Values in registers do not change (an `f32` is still
+held as its binary64 value, integers as words), so only the element boundary moves:
+
+- load: a 32-bit load, then `cvtss2sd` for `f32`, sign extension for `i32`, zero extension for `u32`;
+- store: `cvtsd2ss` for `f32` (exact, because every held `f32` is already representable), the low
+  32 bits for the integers; then a 32-bit store.
+
+The element width is a property of the static type, so the compiler picks the narrow runtime routines
+(`rt_push4`, `rt_fill4`, `rt_at4`, `rt_set4`, `rt_vec_copy4`, ...) the way it already picks `rt_pushb`
+for bytes; the header carries no width. Generic word routines that only move elements (`insert`,
+`remove`, `swap`, `reverse`, `truncate`) get width-parameterised forms; comparisons and `contains`
+compare decoded values, so `-0.0 == 0.0` and NaN behave as they do on words today. Nested vectors
+(`f32[][]`) are word vectors of narrow vectors, and record fields are unchanged.
+
+In the LLVM lowering a narrow load is `load float` + `fpext`, and a store is `fptrunc` + `store float`.
+LLVM then narrows `fptrunc(fmul(fpext a, fpext b))` to `fmul float` and vectorises 4-byte lanes.
+
+Verification: the native suite on all three Linux targets and Windows, the package suites (meshopt and
+clod are `f32[]`-heavy and bit-exact against C), the Abundance suite, and the benchmarks; output is
+byte-identical before and after, because only storage changes.
+
 Stage 3, only if measurements still demand it: a typed SSA IR emitted directly by the front end.
 
 ## Verification
