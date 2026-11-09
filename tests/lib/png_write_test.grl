@@ -1,0 +1,101 @@
+use png;
+use fs;
+use io;
+
+// Re-encodes every accepted tests/lib/png/*.png at 1..4 channels and compares the encoded file's
+// length and FNV-1a 64 hash with stbi_write_png_to_mem (tests/lib/reference/png_write_reference.c
+// -> png/written.txt). argv: the corpus directory.
+
+fn read_corpus<a>(path: &a [u8]) -> u8[] {
+    match fs::read(path) {
+        d: u8[] => { return d; },
+        e: io::Error => { println("cannot read a corpus file"); return u8[]; }
+    }
+}
+fn same<a, b>(x: &a [u8], y: &b [u8]) -> bool {
+    if x.len() != y.len() {
+        return false;
+    }
+    for i in x.len() {
+        if x[i] != y[i] {
+            return false;
+        }
+    }
+    return true;
+}
+fn child_path<a, b>(dir: &a [u8], name: &b [u8]) -> u8[] {
+    mut out = dir.copy();
+    out.push(47);
+    for i in name.len() {
+        out.push(name[i]);
+    }
+    return out;
+}
+fn number<a>(text: &a [u8]) -> u64 {
+    mut v: u64 = 0;
+    for i in text.len() {
+        v = wrapping_add(wrapping_mul(v, 10), text[i] - 48);
+    }
+    return v;
+}
+fn fnv<a>(data: &a [u8]) -> u64 {
+    mut h: u64 = 14695981039346656037;
+    for i in data.len() {
+        h = wrapping_mul(h ^ data[i], 1099511628211);
+    }
+    return h;
+}
+
+fn main(dir: &[u8]) -> u64 {
+    base := dir.copy();
+    list_path := child_path(&base, "written.txt");
+    list := read_corpus(&list_path);
+    mut failures: u64 = 0;
+    mut checks: u64 = 0;
+    mut start: u64 = 0;
+    for i in list.len() {
+        if list[i] != 10 {
+            continue;
+        }
+        mut fields = u8[][];
+        mut f = start;
+        while f < i {
+            mut e = f;
+            while (e < i) && (list[e] != 32) {
+                e += 1;
+            }
+            fields.push(list[f: e].copy());
+            f = e + 1;
+        }
+        start = i + 1;
+        name := fields[0].copy();
+        n := number(&fields[1]);
+        want_len := number(&fields[2]);
+        want_hash := number(&fields[3]);
+        path := child_path(&base, &name);
+        data := read_corpus(&path);
+        checks += 1;
+        match png::decode(&data, n) {
+            Some(img) => {
+                match png::encode(&img.pixels, img.width, img.height, n, 0) {
+                    Some(encoded) => {
+                        if (encoded.len() != want_len) || (fnv(&encoded) != want_hash) {
+                            println("FAIL {} n={}: {} bytes (stb {}), hash ok={}", name.text(), n, encoded.len(), want_len, fnv(&encoded) == want_hash);
+                            failures += 1;
+                        }
+                    },
+                    None => {
+                        println("FAIL {} n={}: encode refused", name.text(), n);
+                        failures += 1;
+                    }
+                }
+            },
+            None => {
+                println("FAIL {} n={}: decode failed", name.text(), n);
+                failures += 1;
+            }
+        }
+    }
+    println("{} checks, {} failures", checks, failures);
+    return failures;
+}

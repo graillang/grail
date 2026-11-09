@@ -568,3 +568,161 @@ fn finish<a, b, c>(p: (&a mut Png), idata: &b [u8], ch: (&c Chunks), desired: u6
     }
     return Some(Image { width: width, height: height, channels: channels, components: components, pixels: img });
 }
+
+// ---- encoding: stbi_write_png_to_mem, byte for byte ----
+
+fn write_paeth(a: u64, b: u64, c: u64) -> u64 {
+    p := i64(a) + i64(b) - i64(c);
+    mut pa = p - i64(a);
+    if pa < 0 {
+        pa = 0 - pa;
+    }
+    mut pb = p - i64(b);
+    if pb < 0 {
+        pb = 0 - pb;
+    }
+    mut pc = p - i64(c);
+    if pc < 0 {
+        pc = 0 - pc;
+    }
+    if (pa <= pb) && (pa <= pc) {
+        return a;
+    }
+    if pb <= pc {
+        return b;
+    }
+    return c;
+}
+
+// One filtered row (stbiw__encode_png_line); row 0 uses none/avg-first/paeth-first for 2/3/4.
+fn encode_line<a>(pixels: &a [u8], stride: u64, width: u64, y: u64, n: u64, filter: u64) -> u8[] {
+    mut kind = filter;
+    if y == 0 {
+        firstmap := u64[0, 1, 0, 5, 6];
+        kind = firstmap[filter];
+    }
+    row := stride * y;
+    mut out = u8[];
+    for i in width * n {
+        z := pixels[row + i];
+        mut left: u64 = 0;
+        if n <= i {
+            left = pixels[row + i - n];
+        }
+        mut up: u64 = 0;
+        mut ul: u64 = 0;
+        if 0 < y {
+            up = pixels[row - stride + i];
+            if n <= i {
+                ul = pixels[row - stride + i - n];
+            }
+        }
+        mut v = z;
+        if i < n {
+            if (kind == 2) || (kind == 4) {
+                v = wrapping_sub(z, up);
+            }
+            if kind == 3 {
+                v = wrapping_sub(z, up >> 1);
+            }
+        } else {
+            if kind == 1 {
+                v = wrapping_sub(z, left);
+            }
+            if kind == 2 {
+                v = wrapping_sub(z, up);
+            }
+            if kind == 3 {
+                v = wrapping_sub(z, (left + up) >> 1);
+            }
+            if kind == 4 {
+                v = wrapping_sub(z, write_paeth(left, up, ul));
+            }
+            if kind == 5 {
+                v = wrapping_sub(z, left >> 1);
+            }
+            if kind == 6 {
+                v = wrapping_sub(z, write_paeth(left, 0, 0));
+            }
+        }
+        out.push(v & 255);
+    }
+    return out;
+}
+
+fn put32<a>(out: (&a mut u8[]), v: u64) -> unit {
+    out.push((v >> 24) & 255);
+    out.push((v >> 16) & 255);
+    out.push((v >> 8) & 255);
+    out.push(v & 255);
+    return ();
+}
+
+fn chunk<a, b, c>(out: (&a mut u8[]), tag: &b [u8], body: &c [u8]) -> unit {
+    put32(&mut out, body.len());
+    mut crcd = tag.copy();
+    for i in body.len() {
+        crcd.push(body[i]);
+    }
+    for i in crcd.len() {
+        out.push(crcd[i]);
+    }
+    put32(&mut out, zlib::crc32(&crcd));
+    return ();
+}
+
+// Encodes `n`-channel (1-4) 8-bit pixels, rows `stride` bytes apart (0 = width * n), exactly as
+// stbi_write_png_to_mem does with its defaults (compression level 8, adaptive filters).
+pub fn encode<a>(pixels: &a [u8], width: u64, height: u64, n: u64, stride: u64) -> u8[]? {
+    if (n == 0) || (4 < n) || (width == 0) || (height == 0) {
+        return None;
+    }
+    mut s = stride;
+    if s == 0 {
+        s = width * n;
+    }
+    if pixels.len() < s * (height - 1) + width * n {
+        return None;
+    }
+    mut filtered = u8[];
+    for y in height {
+        mut best_filter: u64 = 0;
+        mut best_value: u64 = 2147483647;
+        for f in 5 {
+            line := encode_line(&pixels, s, width, y, n, f);
+            mut est: u64 = 0;
+            for i in line.len() {
+                b := line[i];
+                if b < 128 {
+                    est += b;
+                } else {
+                    est += 256 - b;
+                }
+            }
+            if est < best_value {
+                best_value = est;
+                best_filter = f;
+            }
+        }
+        filtered.push(best_filter);
+        line := encode_line(&pixels, s, width, y, n, best_filter);
+        for i in line.len() {
+            filtered.push(line[i]);
+        }
+    }
+    z := zlib::compress(&filtered, 8);
+    ctype := u64[0, 0, 4, 2, 6];
+    mut out = u8[137, 80, 78, 71, 13, 10, 26, 10];
+    mut ihdr = u8[];
+    put32(&mut ihdr, width);
+    put32(&mut ihdr, height);
+    ihdr.push(8);
+    ihdr.push(ctype[n]);
+    ihdr.push(0);
+    ihdr.push(0);
+    ihdr.push(0);
+    chunk(&mut out, "IHDR", &ihdr);
+    chunk(&mut out, "IDAT", &z);
+    chunk(&mut out, "IEND", u8[]);
+    return Some(out);
+}

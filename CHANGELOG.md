@@ -8,8 +8,10 @@
   and stb's 16-to-8-bit and channel conversions; JPEG baseline and progressive with stb's integer
   IDCT, upsampling filters, fixed-point YCbCr and Adobe CMYK/YCCK handling. Tests compare against
   CPython's zlib and against stb itself for every requested channel count (53 streams, 570 PNG
-  and 290 JPEG checks); all 95 PNG and 185 JPEG assets in the Abundance tree also decode
-  bit-identically. Decoding is currently about 160x slower than stb.
+  and 290 JPEG checks); all 95 PNG assets in the Abundance tree also decode bit-identically.
+  `png::encode` and `zlib::compress` reproduce `stbi_write_png` byte for byte (its hash-chain
+  compressor, adaptive filter choice and CRC; 444 encodings checked). Decoding is currently about
+  160x slower than stb.
 
 - DWARF debug info on Linux AArch64 and RISC-V 64: `--debug` emits the same line table and
   typed variables as on x86-64 (frame base `x29` / `s0`). Under qemu with gdb's remote stub,
