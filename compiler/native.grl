@@ -13603,9 +13603,9 @@ fn primary<a>(c: (&a mut C)) -> Val {
     }
     if eat(&mut c, view("::")) {
         second := ident(&mut c);
-        if (c.default_u64 == 0)
-            & same(view(first), view("core"))
-            & (same(view(second), view("some")) + same(view(second), view("none"))) {
+        // `Some(value)` and `None` are the only spellings; the core constructors they lower to
+        // cannot be named directly.
+        if same(view(first), view("core")) & (same(view(second), view("some")) + same(view(second), view("none"))) {
             fail(&mut c, view("use Some(value)/None, not core::some/core::none"));
         }
         if is(&mut c, view("<")) {
@@ -14771,6 +14771,11 @@ fn expr_expected<a>(c: (&a mut C), min: u64, expected: u64) -> Val {
                             rstart := c.pos;
                             mut right = expr(&mut c, p + (k != 267));
                             rend := c.pos;
+                            // `x == None` / `x != None`: a bare None on the right takes the left
+                            // operand's optional type.
+                            if (c.none_start == rstart) & (c.none_end == rend) & (ty != 0) & is_option_storage(&mut c, ty) {
+                                right = adopt_value(&mut c, right, rstart, rend, ty);
+                            }
                             mut rty = right.ty;
                             if c.raw == 0 {
                                 rlit := (c.lit_start == rstart) & (c.lit_end == rend);

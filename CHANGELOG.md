@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- `Some(value)` and `None` are the only option spellings: `core::some` / `core::none` are now
+  rejected in every build mode (the legacy `--default-u64` mode used by the test suites still
+  accepted them), and the remaining uses in `lib/`, `borg/`, the examples, the compiler tests and
+  the book were rewritten. `grail build` now compiles only the standard-library modules a program
+  reaches through `use` (plus `core`, which `Some`/`None` lower to) instead of every `lib/*.grl`.
+  A bare `None` needs a type from context; `x == None` and `x != None` now take it from `x`.
+
 - Fixed: the `i64` -> `u64` widening check emitted `jns`, which the AArch64 and RISC-V lowering
   does not implement (it emulates the zero and carry flags only), so programs relying on default
   `i64` semantics failed to compile for those targets. The sign is now tested with a shift and a
