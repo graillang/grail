@@ -231,6 +231,84 @@ fn collect<a, b>(dir: &a [u8], out: (&b mut u8[][])) {
         }
     }
 }
+// The names in `use NAME;` / `use NAME::...;` lines of a source file.
+fn use_names<a>(text: &a [u8]) -> u8[][] {
+    mut out = u8[][];
+    mut start: u64 = 0;
+    mut i: u64 = 0;
+    while i <= text.len() {
+        if (i == text.len()) || (text[i] == 10) {
+            mut a = start;
+            while (a < i) && ((text[a] == 32) || (text[a] == 9)) {
+                a += 1;
+            }
+            if (i - a > 4) && (text[a] == 117) && (text[a + 1] == 115) && (text[a + 2] == 101) && (text[a + 3] == 32) {
+                mut b = a + 4;
+                while (b < i) && (text[b] == 32) {
+                    b += 1;
+                }
+                mut name = u8[];
+                while b < i {
+                    ch := text[b];
+                    ok := ((ch >= 97) && (ch <= 122)) || ((ch >= 65) && (ch <= 90)) || ((ch >= 48) && (ch <= 57)) || (ch == 95);
+                    if ok == false {
+                        break;
+                    }
+                    name.push(ch);
+                    b += 1;
+                }
+                if name.len() > 0 {
+                    out.push(name);
+                }
+            }
+            start = i + 1;
+        }
+        i += 1;
+    }
+    return out;
+}
+fn contains_name<a, b>(list: (&a u8[][]), name: &b [u8]) -> u64 {
+    for i in list.len() {
+        if eq(view(list[i]), view(name)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+// Standard-library files reachable from `sources` through `use`, in discovery order.
+fn used_std<a, b>(std: &a [u8], sources: (&b u8[][])) -> u8[][] {
+    mut queue = u8[][];
+    for i in sources.len() {
+        queue.push(item(&sources, i));
+    }
+    mut seen = u8[][];
+    mut out = u8[][];
+    // core is always compiled: `Some(x)` and `None` lower to its constructors.
+    prelude := path_join(view(std), view("core.grl"));
+    if host::exists(view(prelude)) {
+        seen.push(copy(view("core")));
+        out.push(copy(view(prelude)));
+    }
+    mut k: u64 = 0;
+    while k < queue.len() {
+        file := item(&queue, k);
+        k += 1;
+        text := host::read_file(view(file));
+        names := use_names(view(text));
+        for n in names.len() {
+            name := item(&names, n);
+            if contains_name(&seen, view(name)) == 0 {
+                seen.push(copy(view(name)));
+                candidate := path_join(view(std), view(cat(view(name), view(".grl"))));
+                if host::exists(view(candidate)) {
+                    out.push(copy(view(candidate)));
+                    queue.push(candidate);
+                }
+            }
+        }
+    }
+    return out;
+}
 fn target_name(t: u64) -> u8[] {
     if t == 1 {
         return copy(view("aarch64"));
@@ -287,12 +365,16 @@ fn compile_mode<a, b, d, e, g>(
     for i in modules.len() {
         command.push(item(&modules, i));
     }
-    std := host::list_dir(view(h.std));
-    for i in std.len() {
-        name := item(&std, i);
-        if ends(view(name), view(".grl")) {
-            command.push(path_join(view(h.std), view(name)));
-        }
+    // Only the standard-library modules the program reaches through `use` (transitively) are
+    // compiled; lib/NAME.grl is module NAME.
+    mut sources = u8[][];
+    sources.push(copy(view(entry)));
+    for i in modules.len() {
+        sources.push(item(&modules, i));
+    }
+    used := used_std(view(h.std), &sources);
+    for i in used.len() {
+        command.push(item(&used, i));
     }
     command.push(copy(view(h.runtime)));
     // One platform module per target: darwin.grl owns the libSystem boundary, os-linux.grl the

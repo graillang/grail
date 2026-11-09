@@ -18,7 +18,7 @@ fn second<T,U>(first:T,second:U)->U{return identity(second);}
 
 Lifetime parameters precede `type` parameters. Calls infer type arguments from their actual inputs,
 or write them explicitly: `core::ok<Token<a>,string>(token)`. Output-only arguments must be explicit,
-e.g. `core::none<string>()`. Constructor inference remains the narrower same-nominal written-result
+e.g. `None`. Constructor inference remains the narrower same-nominal written-result
 rule; otherwise constructors still need explicit type arguments. Left-to-right eager argument
 snapshots apply to generic calls too. There is no implicit clone, specialization overload, trait
 search, higher-ranked bound or full G1 post-state inference.

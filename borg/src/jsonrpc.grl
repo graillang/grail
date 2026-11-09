@@ -441,8 +441,8 @@ pub fn taken_consumed(taken: (&Taken)) -> string {
 
 fn copy_optional_text<a>(value: (&a string?)) -> string? {
     match value {
-        Some(text) => { copied := copy_text(&text); return core::some(copied); },
-        None => { return core::none<string>(); }
+        Some(text) => { copied := copy_text(&text); return Some(copied); },
+        None => { return None; }
     }
 }
 
@@ -533,19 +533,19 @@ pub fn take_frame<a>(buffer: (&a [u8])) -> Taken {
     }
     if terminator_len == 0 {
         if buffer.len() >= max_header_bytes() {
-            return taken(TakeStatus::BadHeader, 0, core::none<string>());
+            return taken(TakeStatus::BadHeader, 0, None);
         }
-        return taken(TakeStatus::NeedMore, 0, core::none<string>());
+        return taken(TakeStatus::NeedMore, 0, None);
     }
     header_end := terminator + terminator_len;
     length := header_length(&buffer, terminator);
     match length {
         Some(body_len) => {
             if body_len > max_message_bytes() {
-                return taken(TakeStatus::TooLarge, 0, core::none<string>());
+                return taken(TakeStatus::TooLarge, 0, None);
             }
             if buffer.len() < header_end + body_len {
-                return taken(TakeStatus::NeedMore, 0, core::none<string>());
+                return taken(TakeStatus::NeedMore, 0, None);
             }
             mut body = u8[];
             for k in header_end..header_end + body_len {
@@ -553,12 +553,12 @@ pub fn take_frame<a>(buffer: (&a [u8])) -> Taken {
             }
             match borg_json::parse(&body) {
                 document: borg_json::Json => {
-                    return taken(TakeStatus::Complete, header_end + body_len, core::some(body.text()));
+                    return taken(TakeStatus::Complete, header_end + body_len, Some(body.text()));
                 },
-                failure: borg_json::ParseError => { return taken(TakeStatus::BadJson, 0, core::none<string>()); }
+                failure: borg_json::ParseError => { return taken(TakeStatus::BadJson, 0, None); }
             }
         },
-        None => { return taken(TakeStatus::BadHeader, 0, core::none<string>()); }
+        None => { return taken(TakeStatus::BadHeader, 0, None); }
     }
 }
 
@@ -593,14 +593,14 @@ fn header_length<a>(buffer: (&a [u8]), end: u64) -> u64? {
                 k += 1;
             }
             if !seen_digit || (k != line_end) {
-                return core::none<u64>();
+                return None;
             }
-            return core::some(value);
+            return Some(value);
         }
         at += 1;
         line_start = at;
     }
-    return core::none<u64>();
+    return None;
 }
 
 fn prefix_is<a, b>(buffer: (&a [u8]), start: u64, end: u64, prefix: (&b [u8])) -> bool {
@@ -635,16 +635,16 @@ pub struct Dispatcher {
 
 impl Dispatcher {
     fn new() -> Dispatcher {
-        return Dispatcher { next_id: 1, pending: core::none<u64>() };
+        return Dispatcher { next_id: 1, pending: None };
     }
 
     // Takes the outstanding request (if any) as the one to cancel, then allocates the next id.
     fn begin(self: (&a mut Dispatcher)) -> Begin {
         cancelled := copy_optional(&self.pending);
-        self.pending = core::none<u64>();
+        self.pending = None;
         id := self.next_id;
         self.next_id = self.next_id + 1;
-        self.pending = core::some(id);
+        self.pending = Some(id);
         return Begin { id: id, cancelled: cancelled };
     }
 
@@ -658,14 +658,14 @@ impl Dispatcher {
             Request(inner) => { return "server-request".text(); },
             Failure(inner) => {
                 if self.matches(copy_id(&inner.id)) {
-                    self.pending = core::none<u64>();
+                    self.pending = None;
                     return "failed".text();
                 }
                 return "ignored".text();
             },
             Result(inner) => {
                 if self.matches(copy_id(&inner.id)) {
-                    self.pending = core::none<u64>();
+                    self.pending = None;
                     return "resolved".text();
                 }
                 return "ignored".text();
@@ -690,13 +690,13 @@ impl Dispatcher {
 }
 
 pub fn dispatcher() -> Dispatcher {
-    return Dispatcher { next_id: 1, pending: core::none<u64>() };
+    return Dispatcher { next_id: 1, pending: None };
 }
 
 fn copy_optional<a>(value: (&a u64?)) -> u64? {
     match value {
-        Some(number) => { return core::some(number); },
-        None => { return core::none<u64>(); }
+        Some(number) => { return Some(number); },
+        None => { return None; }
     }
 }
 
@@ -720,9 +720,9 @@ pub fn next_id<a>(state: (&a Dispatcher)) -> u64 {
 pub fn server_request_reply(frame: (&Frame)) -> Frame? {
     match frame {
         Request(inner) => {
-            return core::some(result_frame(copy_id(&inner.id), borg_json::null_value()));
+            return Some(result_frame(copy_id(&inner.id), borg_json::null_value()));
         },
-        _ => { return core::none<Frame>(); }
+        _ => { return None; }
     }
 }
 
@@ -731,10 +731,10 @@ pub fn ping_reply(frame: (&Frame)) -> Frame? {
     match frame {
         Request(inner) => {
             if text_equals(&inner.method, "ping") {
-                return core::some(result_frame(copy_id(&inner.id), borg_json::empty_object()));
+                return Some(result_frame(copy_id(&inner.id), borg_json::empty_object()));
             }
-            return core::none<Frame>();
+            return None;
         },
-        _ => { return core::none<Frame>(); }
+        _ => { return None; }
     }
 }
