@@ -1,0 +1,64 @@
+# LLVM backend
+
+Status: design, 2026-11-09. Approved direction: LLVM is the optimizing backend; the native
+backend stays for fast debug builds and bootstrap. The LLVM version is pinned (system 21.x).
+
+## Why
+
+Measured on the cluster LOD builder (`grail-meshopt` `clod::build`, four builds of a 4 600-triangle
+mesh, identical output): C++ `-O2` 0.027 s, Grail 6.3 s, about 230x. The optimised Grail code for
+`clod::edge_sq` (three subtractions and a sum of squares) is about 220 instructions:
+
+- every value lives in an 8-byte frame slot and is reloaded around each operation; `optimize.grl`
+  promotes only a few hot slots to callee-saved registers and has no register allocator;
+- every floating-point operation is a call: `rt_f64_op(op, a, b)` dispatches on an operation code
+  to `raw_fadd`/`raw_fmul`/..., and every `f32` result is rounded by a further `rt_f32_round` call
+  (998 and 772 call sites in that program; only ten float instructions are inline);
+- every element of a non-byte vector is an 8-byte word, so `f32[]` and `u32[]` use twice the
+  memory and bandwidth of C;
+- index arithmetic is overflow-checked and every access is bounds-checked, with nothing hoisted
+  out of loops.
+
+## Where LLVM plugs in
+
+The front end emits a closed word-machine instruction stream spelled as x86-64 (NATIVE.md,
+*Implementation boundary*). `optimize.grl` rewrites it and `machine.grl` lowers it to AArch64 and
+RV64. The LLVM backend is a third lowering of the same stream, in `compiler/llvm.grl`, emitting
+textual LLVM IR that `clang -O2 -c` turns into an object for any target LLVM supports.
+
+Stage 1 lowers the stream as it is:
+
+- each Grail function becomes an LLVM function; machine registers and the frame become allocas
+  that `mem2reg`/SROA promote, so LLVM's register allocator, inliner, GVN and loop passes apply;
+- flags are modelled explicitly: a compare records its operands and the following `jcc`/`setcc`
+  becomes an `icmp`; checked `+ - *` sequences become `llvm.*.with.overflow` plus a branch to the
+  abort path, so the checks stay but become cheap and hoistable;
+- memory accesses are `load`/`store` of the stream's widths through `inttoptr`; no `nsw`/`nuw`,
+  no fast-math flags, `-ffp-contract=off` semantics (no FMA formation), so results stay
+  bit-identical with the native backend;
+- the private calling convention (up to six words in, one or two out) becomes LLVM's C
+  convention for Grail-to-Grail calls; extern C calls keep the ABI lowering the front end already
+  performs;
+- atomics map to LLVM atomics; `raw_syscall`, `raw_win32` and the thread pointer become
+  target-specific inline asm; functions that switch stacks (`raw_switch`, `raw_thread_clone`)
+  stay native assembly linked alongside.
+
+Stage 2 carries type information into the stream so both backends benefit: inline float
+arithmetic (no `rt_f64_op`), real `f32` values instead of rounded binary64 words, 4-byte
+elements for `f32[]`/`u32[]`/`i32[]`, and pointer-typed loads so LLVM's alias analysis works.
+
+Stage 3, only if measurements still demand it: a typed SSA IR emitted directly by the front end.
+
+## Verification
+
+- A benchmark suite (`tools/bench.mjs`) times Grail against C `-O2` on meshopt simplify, clod,
+  JPEG/PNG decode, zlib inflate and the Borg wire codec, and records the ratio per backend.
+- The LLVM backend must pass the full native suite (660 cases) and every package suite, and
+  produce byte-identical program output to the native backend.
+- Self-compilation through LLVM must produce a compiler whose output matches the native-built
+  compiler's output byte for byte.
+
+## Not in scope here
+
+LLVM does not change Grail's semantics: overflow and bounds checks, ownership checks and the
+deterministic float rules all stay.
