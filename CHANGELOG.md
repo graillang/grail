@@ -5,8 +5,10 @@
 - Abundance port: `abundance/src/abgeo.grl` reads `.abgeo` cluster-geometry files with every check
   the C++ `MeshView::open` makes, decodes zstd-compressed pages (`zstd::frame_content_size` is new),
   and decodes clusters (bit-packed positions and uv0, octahedral normal + tangent frames, indices,
-  alpha bits, colour). `abundance/tests/abgeo_test.grl` matches the C++ reader on fixtures built by
-  Abundance's own cluster builder, plain and zstd-paged (306 lines, floats as bits).
+  alpha bits, colour), and selects LOD cuts (`select_cut` for a view with partial residency,
+  `select_cut_error` at an object-space error). `abundance/tests/abgeo_test.grl` matches the C++
+  reader on fixtures built by Abundance's own cluster builder, plain and zstd-paged: 486 lines,
+  floats as bits, including 180 cuts.
 
 - `lib/zstd.grl`: Zstandard decompression (RFC 8878), `zstd::decompress(bytes) -> u8[]?`: raw,
   RLE and compressed blocks, Huffman literals (one or four streams, FSE or direct weights,
