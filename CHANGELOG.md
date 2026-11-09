@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Standard library: `zlib` (DEFLATE/zlib inflate, Adler-32, and a lenient variant for image
+  decoders), `png` and `jpeg`. The image decoders reproduce `stb_image` exactly (the library
+  Abundance uses): PNG in every colour type and bit depth with Adam7, palettes, colour-key tRNS
+  and stb's 16-to-8-bit and channel conversions; JPEG baseline and progressive with stb's integer
+  IDCT, upsampling filters, fixed-point YCbCr and Adobe CMYK/YCCK handling. Tests compare against
+  CPython's zlib and against stb itself for every requested channel count (53 streams, 570 PNG
+  and 290 JPEG checks); all 95 PNG and 185 JPEG assets in the Abundance tree also decode
+  bit-identically. Decoding is currently about 160x slower than stb.
+
 - DWARF debug info on Linux AArch64 and RISC-V 64: `--debug` emits the same line table and
   typed variables as on x86-64 (frame base `x29` / `s0`). Under qemu with gdb's remote stub,
   `info locals` shows `count = -3`, `ratio = 2.5`, `flag = true` on both; `test-debug-lines`

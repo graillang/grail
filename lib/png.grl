@@ -1,0 +1,570 @@
+module png;
+use zlib;
+
+// PNG decoding with stb_image's exact results (stbi_load / stbi_load_from_memory): every colour
+// type and bit depth, Adam7 interlacing, palettes with tRNS alpha, colour-key tRNS, and stb's
+// channel conversions, including 16-bit samples converted at 16 bits and then reduced with >> 8.
+// Ancillary chunks, gamma and CRCs are ignored as stb ignores them.
+
+pub struct Image {
+    width: u64,
+    height: u64,
+    // Channels in the file (after palette expansion; +1 for a colour-key tRNS), as stb's *comp.
+    channels: u64,
+    // Channels per pixel in `pixels` (the requested count, or `channels`-ish when 0 was asked).
+    components: u64,
+    pixels: u8[]
+}
+
+// Chunk state gathered before IEND.
+struct Chunks {
+    header: bool,
+    interlace: u64,
+    pal_n: u64,
+    palette: u8[],
+    has_trans: bool,
+    tc: u64[]
+}
+
+struct Png {
+    width: u64,
+    height: u64,
+    depth: u64,
+    color: u64,
+    img_n: u64,
+    out_n: u64
+}
+
+fn be32<a>(d: &a [u8], at: u64) -> u64 {
+    return (d[at] << 24) | (d[at + 1] << 16) | (d[at + 2] << 8) | d[at + 3];
+}
+
+fn paeth(a: u64, b: u64, c: u64) -> u64 {
+    // stb's formulation of the PNG predictor with thresh = 3c - (a + b), compared without
+    // going negative: hi <= thresh is hi + a + b <= 3c, thresh <= lo is 3c <= lo + a + b.
+    mut lo = a;
+    mut hi = b;
+    if b < a {
+        lo = b;
+        hi = a;
+    }
+    mut t0 = c;
+    if hi + a + b <= c * 3 {
+        t0 = lo;
+    }
+    if c * 3 <= lo + a + b {
+        return hi;
+    }
+    return t0;
+}
+
+fn depth_scale(depth: u64) -> u64 {
+    if depth == 1 {
+        return 255;
+    }
+    if depth == 2 {
+        return 85;
+    }
+    if depth == 4 {
+        return 17;
+    }
+    return 1;
+}
+
+// One (sub)image: unfilter `y` rows of `x` pixels starting at raw[start], and expand to out_n
+// channels (8-bit samples as bytes, 16-bit as big-endian byte pairs). None on a bad filter.
+fn unfilter<a, b>(p: (&a Png), raw: &b [u8], start: u64, x: u64, y: u64) -> u8[]? {
+    depth := p.depth;
+    img_n := p.img_n;
+    out_n := p.out_n;
+    mut bytes: u64 = 1;
+    if depth == 16 {
+        bytes = 2;
+    }
+    width_bytes := (img_n * x * depth + 7) >> 3;
+    mut filter_bytes = img_n * bytes;
+    mut nk = x * filter_bytes;
+    if depth < 8 {
+        filter_bytes = 1;
+        nk = width_bytes;
+    }
+    if raw.len() < start + (width_bytes + 1) * y {
+        return None;
+    }
+    mut out = u8[];
+    mut prior = u8[];
+    for i in width_bytes {
+        prior.push(0);
+    }
+    mut at = start;
+    for j in y {
+        mut filter = raw[at];
+        at += 1;
+        if 4 < filter {
+            return None;
+        }
+        mut cur = u8[];
+        if j == 0 {
+            // First row: up -> none, avg -> avg without the prior row, paeth -> sub.
+            if filter == 2 {
+                filter = 0;
+            }
+            if filter == 4 {
+                filter = 1;
+            }
+            if filter == 3 {
+                filter = 5;
+            }
+        }
+        for k in nk {
+            r := raw[at + k];
+            mut left: u64 = 0;
+            if filter_bytes <= k {
+                left = cur[k - filter_bytes];
+            }
+            up := prior[k];
+            mut v = r;
+            if filter == 1 {
+                v = r + left;
+            }
+            if filter == 2 {
+                v = r + up;
+            }
+            if filter == 3 {
+                v = r + ((up + left) >> 1);
+            }
+            if filter == 4 {
+                mut ul: u64 = 0;
+                if filter_bytes <= k {
+                    ul = prior[k - filter_bytes];
+                }
+                v = r + paeth(left, up, ul);
+            }
+            if filter == 5 {
+                v = r + (left >> 1);
+            }
+            cur.push(v & 255);
+        }
+        at += nk;
+        // Expand into output samples.
+        if depth < 8 {
+            mut scale: u64 = 1;
+            if p.color == 0 {
+                scale = depth_scale(depth);
+            }
+            nsmp := x * img_n;
+            mask := (1 << depth) - 1;
+            for i in nsmp {
+                bit := i * depth;
+                byte := cur[bit >> 3];
+                shift := 8 - depth - (bit & 7);
+                out.push((((byte >> shift) & mask) * scale) & 255);
+                if (img_n != out_n) && ((i + 1) % img_n == 0) {
+                    out.push(255);
+                }
+            }
+        } else {
+            for i in x {
+                for c in img_n * bytes {
+                    out.push(cur[i * img_n * bytes + c]);
+                }
+                if img_n != out_n {
+                    out.push(255);
+                    if bytes == 2 {
+                        out.push(255);
+                    }
+                }
+            }
+        }
+        // Keep this row (padded to width_bytes) as the prior row.
+        while cur.len() < width_bytes {
+            cur.push(0);
+        }
+        prior = cur;
+    }
+    return Some(out);
+}
+
+fn adam7<a, b>(p: (&a Png), raw: &b [u8]) -> u8[]? {
+    xorig := u64[0, 4, 0, 2, 0, 1, 0];
+    yorig := u64[0, 0, 4, 0, 2, 0, 1];
+    xspc := u64[8, 8, 4, 4, 2, 2, 1];
+    yspc := u64[8, 8, 8, 4, 4, 2, 2];
+    width := p.width;
+    height := p.height;
+    img_n := p.img_n;
+    depth := p.depth;
+    mut bytes: u64 = 1;
+    if depth == 16 {
+        bytes = 2;
+    }
+    pixel := p.out_n * bytes;
+    mut final = u8[];
+    for i in width * height * pixel {
+        final.push(0);
+    }
+    mut at: u64 = 0;
+    for pass in 7 {
+        mut x: u64 = 0;
+        mut y: u64 = 0;
+        if xorig[pass] < width {
+            x = (width - xorig[pass] + xspc[pass] - 1) / xspc[pass];
+        }
+        if yorig[pass] < height {
+            y = (height - yorig[pass] + yspc[pass] - 1) / yspc[pass];
+        }
+        if (x != 0) && (y != 0) {
+            sub := unfilter(&p, &raw, at, x, y);
+            if sub.is_none() {
+                return None;
+            }
+            part := sub!;
+            for j in y {
+                for i in x {
+                    oy := j * yspc[pass] + yorig[pass];
+                    ox := i * xspc[pass] + xorig[pass];
+                    for b in pixel {
+                        final[(oy * width + ox) * pixel + b] = part[(j * x + i) * pixel + b];
+                    }
+                }
+            }
+            at += ((((img_n * x * depth) + 7) >> 3) + 1) * y;
+        }
+    }
+    return Some(final);
+}
+
+fn luma(r: u64, g: u64, b: u64) -> u64 {
+    return (r * 77 + g * 150 + 29 * b) >> 8;
+}
+
+// stbi__convert_format / stbi__convert_format16 on samples of `bytes` bytes each.
+fn convert<a>(data: &a [u8], img_n: u64, req: u64, count: u64, bytes: u64) -> u8[] {
+    mut out = u8[];
+    mut full: u64 = 255;
+    if bytes == 2 {
+        full = 65535;
+    }
+    for i in count {
+        base := i * img_n * bytes;
+        mut s = u64[];
+        for c in img_n {
+            if bytes == 2 {
+                s.push((data[base + c * 2] << 8) | data[base + c * 2 + 1]);
+            } else {
+                s.push(data[base + c]);
+            }
+        }
+        mut d = u64[];
+        if img_n == 1 {
+            d.push(s[0]);
+            if req == 2 {
+                d.push(full);
+            }
+            if 2 < req {
+                d.push(s[0]);
+                d.push(s[0]);
+            }
+            if req == 4 {
+                d.push(full);
+            }
+        }
+        if img_n == 2 {
+            d.push(s[0]);
+            if 2 < req {
+                d.push(s[0]);
+                d.push(s[0]);
+            }
+            if req == 4 {
+                d.push(s[1]);
+            }
+        }
+        if (img_n == 3) || (img_n == 4) {
+            if req < 3 {
+                d.push(luma(s[0], s[1], s[2]));
+                if req == 2 {
+                    if img_n == 4 {
+                        d.push(s[3]);
+                    } else {
+                        d.push(full);
+                    }
+                }
+            } else {
+                d.push(s[0]);
+                d.push(s[1]);
+                d.push(s[2]);
+                if req == 4 {
+                    d.push(full);
+                }
+            }
+        }
+        for c in d.len() {
+            if bytes == 2 {
+                out.push((d[c] >> 8) & 255);
+                out.push(d[c] & 255);
+            } else {
+                out.push(d[c] & 255);
+            }
+        }
+    }
+    return out;
+}
+
+// Decodes a PNG file. `desired` is stb's req_comp: 0 keeps the decoded channel count, 1-4
+// converts to grey, grey+alpha, RGB or RGBA. None for anything stb would reject.
+pub fn decode<a>(data: &a [u8], desired: u64) -> Image? {
+    if (4 < desired) || (data.len() < 8) {
+        return None;
+    }
+    signature := u64[137, 80, 78, 71, 13, 10, 26, 10];
+    for i in 8 {
+        if data[i] != signature[i] {
+            return None;
+        }
+    }
+    mut p = Png { width: 0, height: 0, depth: 0, color: 0, img_n: 0, out_n: 0 };
+    mut first = true;
+    mut ch = Chunks { header: true, interlace: 0, pal_n: 0, palette: u8[], has_trans: false, tc: u64[0, 0, 0] };
+    mut idata = u8[];
+    mut at: u64 = 8;
+    while true {
+        if data.len() < at + 8 {
+            return None;
+        }
+        length := be32(&data, at);
+        kind := be32(&data, at + 4);
+        at += 8;
+        if data.len() < at + length {
+            return None;
+        }
+        if kind == 1130840649 {
+            // CgBI (Apple's variant): raw DEFLATE data.
+            ch.header = false;
+        } else {
+            if kind == 1229472850 {
+                // IHDR
+                if (first == false) || (length != 13) {
+                    return None;
+                }
+                first = false;
+                p.width = be32(&data, at);
+                p.height = be32(&data, at + 4);
+                p.depth = data[at + 8];
+                p.color = data[at + 9];
+                d := p.depth;
+                if (d != 1) && (d != 2) && (d != 4) && (d != 8) && (d != 16) {
+                    return None;
+                }
+                if (6 < p.color) || ((p.color == 3) && (d == 16)) {
+                    return None;
+                }
+                if p.color == 3 {
+                    ch.pal_n = 3;
+                } else {
+                    if (p.color & 1) != 0 {
+                        return None;
+                    }
+                }
+                if (data[at + 10] != 0) || (data[at + 11] != 0) || (1 < data[at + 12]) {
+                    return None;
+                }
+                ch.interlace = data[at + 12];
+                if (p.width == 0) || (p.height == 0) || (16777216 < p.width) || (16777216 < p.height) {
+                    return None;
+                }
+                if ch.pal_n == 0 {
+                    mut n: u64 = 1;
+                    if (p.color & 2) != 0 {
+                        n = 3;
+                    }
+                    if (p.color & 4) != 0 {
+                        n += 1;
+                    }
+                    p.img_n = n;
+                    if (1073741824 / p.width / n) < p.height {
+                        return None;
+                    }
+                } else {
+                    p.img_n = 1;
+                    if (1073741824 / p.width / 4) < p.height {
+                        return None;
+                    }
+                }
+            } else {
+                if kind == 1347179589 {
+                    // PLTE: entries as RGBA with alpha 255.
+                    if first || (768 < length) || (length % 3 != 0) {
+                        return None;
+                    }
+                    mut entries = u8[];
+                    for i in length / 3 {
+                        entries.push(data[at + i * 3]);
+                        entries.push(data[at + i * 3 + 1]);
+                        entries.push(data[at + i * 3 + 2]);
+                        entries.push(255);
+                    }
+                    ch.palette = entries;
+                } else {
+                    if kind == 1951551059 {
+                        // tRNS
+                        if first || (idata.len() != 0) {
+                            return None;
+                        }
+                        if ch.pal_n != 0 {
+                            if (ch.palette.len() == 0) || (ch.palette.len() / 4 < length) {
+                                return None;
+                            }
+                            ch.pal_n = 4;
+                            for i in length {
+                                ch.palette[i * 4 + 3] = data[at + i];
+                            }
+                        } else {
+                            if ((p.img_n & 1) == 0) || (length != p.img_n * 2) {
+                                return None;
+                            }
+                            ch.has_trans = true;
+                            for k in p.img_n {
+                                v := (data[at + k * 2] << 8) | data[at + k * 2 + 1];
+                                if p.depth == 16 {
+                                    ch.tc[k] = v;
+                                } else {
+                                    ch.tc[k] = ((v & 255) * depth_scale(p.depth)) & 255;
+                                }
+                            }
+                        }
+                    } else {
+                        if kind == 1229209940 {
+                            // IDAT
+                            if first || ((ch.pal_n != 0) && (ch.palette.len() == 0)) {
+                                return None;
+                            }
+                            for i in length {
+                                idata.push(data[at + i]);
+                            }
+                        } else {
+                            if kind == 1229278788 {
+                                // IEND
+                                if first || (idata.len() == 0) {
+                                    return None;
+                                }
+                                return finish(&mut p, &idata, &ch, desired);
+                            }
+                            // Unknown: fail on critical chunks (lowercase-ancillary bit clear).
+                            if first || ((kind & 536870912) == 0) {
+                                return None;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Skip the data and the (unchecked) CRC.
+        at += length + 4;
+    }
+    return None;
+}
+
+fn finish<a, b, c>(p: (&a mut Png), idata: &b [u8], ch: (&c Chunks), desired: u64) -> Image? {
+    inflated := zlib::inflate_lenient(idata, ch.header);
+    if inflated.is_none() {
+        return None;
+    }
+    raw := inflated!;
+    if ((desired == p.img_n + 1) && (desired != 3) && (ch.pal_n == 0)) || ch.has_trans {
+        p.out_n = p.img_n + 1;
+    } else {
+        p.out_n = p.img_n;
+    }
+    width := p.width;
+    height := p.height;
+    depth := p.depth;
+    img_n := p.img_n;
+    mut out_n = p.out_n;
+    mut decoded: u8[]? = None;
+    if ch.interlace == 1 {
+        decoded = adam7(&p, &raw);
+    } else {
+        decoded = unfilter(&p, &raw, 0, width, height);
+    }
+    if decoded.is_none() {
+        return None;
+    }
+    mut img = decoded!;
+    count := width * height;
+    mut bytes: u64 = 1;
+    if depth == 16 {
+        bytes = 2;
+    }
+    if ch.has_trans {
+        // Colour-key transparency on samples already given full alpha.
+        n := out_n;
+        for i in count {
+            base := i * n * bytes;
+            mut hit = true;
+            for k in n - 1 {
+                mut v = img[base + k * bytes];
+                if bytes == 2 {
+                    v = (v << 8) | img[base + k * bytes + 1];
+                }
+                if v != ch.tc[k] {
+                    hit = false;
+                }
+            }
+            if n == 2 {
+                // Grey + alpha: alpha is 0 on a match and full otherwise.
+                for b in bytes {
+                    if hit {
+                        img[base + bytes + b] = 0;
+                    } else {
+                        img[base + bytes + b] = 255;
+                    }
+                }
+            } else {
+                if hit {
+                    for b in bytes {
+                        img[base + 3 * bytes + b] = 0;
+                    }
+                }
+            }
+        }
+    }
+    mut channels = img_n;
+    if ch.pal_n != 0 {
+        channels = ch.pal_n;
+        out_n = ch.pal_n;
+        if 3 <= desired {
+            out_n = desired;
+        }
+        mut pal = ch.palette.copy();
+        while pal.len() < 1024 {
+            pal.push(0);
+        }
+        mut expanded = u8[];
+        for i in count {
+            entry := img[i] * 4;
+            for k in out_n {
+                expanded.push(pal[entry + k]);
+            }
+        }
+        img = expanded;
+    } else {
+        if ch.has_trans {
+            channels += 1;
+        }
+    }
+    mut components = out_n;
+    if (desired != 0) && (desired != out_n) {
+        converted := convert(&img, out_n, desired, count, bytes);
+        img = converted;
+        components = desired;
+    }
+    if bytes == 2 {
+        // stbi__convert_16_to_8: the high byte of each sample.
+        mut reduced = u8[];
+        for i in img.len() / 2 {
+            reduced.push(img[i * 2]);
+        }
+        img = reduced;
+    }
+    return Some(Image { width: width, height: height, channels: channels, components: components, pixels: img });
+}

@@ -1,0 +1,108 @@
+use png;
+use fs;
+use io;
+
+// Decodes every tests/lib/png/*.png for req_comp 0..4 and compares width, height, channel count
+// and an FNV-1a 64 hash of the pixels with stb_image (tests/lib/reference/png_reference.c ->
+// png/expected.txt); files stb rejects must be rejected. argv: the corpus directory.
+
+fn read_corpus<a>(path: &a [u8]) -> u8[] {
+    match fs::read(path) {
+        d: u8[] => { return d; },
+        e: io::Error => { println("cannot read a corpus file"); return u8[]; }
+    }
+}
+fn same<a, b>(x: &a [u8], y: &b [u8]) -> bool {
+    if x.len() != y.len() {
+        return false;
+    }
+    for i in x.len() {
+        if x[i] != y[i] {
+            return false;
+        }
+    }
+    return true;
+}
+fn child_path<a, b>(dir: &a [u8], name: &b [u8]) -> u8[] {
+    mut out = dir.copy();
+    out.push(47);
+    for i in name.len() {
+        out.push(name[i]);
+    }
+    return out;
+}
+fn number<a>(text: &a [u8]) -> u64 {
+    mut v: u64 = 0;
+    for i in text.len() {
+        v = wrapping_add(wrapping_mul(v, 10), text[i] - 48);
+    }
+    return v;
+}
+fn fnv<a>(data: &a [u8]) -> u64 {
+    mut h: u64 = 14695981039346656037;
+    for i in data.len() {
+        h = wrapping_mul(h ^ data[i], 1099511628211);
+    }
+    return h;
+}
+
+fn main(dir: &[u8]) -> u64 {
+    base := dir.copy();
+    expected_path := child_path(&base, "expected.txt");
+    expected := read_corpus(&expected_path);
+    mut failures: u64 = 0;
+    mut checks: u64 = 0;
+    mut start: u64 = 0;
+    for i in expected.len() {
+        if expected[i] != 10 {
+            continue;
+        }
+        // Split the line on spaces.
+        mut fields = u8[][];
+        mut f = start;
+        while f < i {
+            mut e = f;
+            while (e < i) && (expected[e] != 32) {
+                e += 1;
+            }
+            fields.push(expected[f: e].copy());
+            f = e + 1;
+        }
+        start = i + 1;
+        name := fields[0].copy();
+        req := number(&fields[1]);
+        path := child_path(&base, &name);
+        data := read_corpus(&path);
+        got := png::decode(&data, req);
+        checks += 1;
+        if same(&fields[2], "reject") {
+            if got.is_some() {
+                println("FAIL {} req {}: stb rejects it", name.text(), req);
+                failures += 1;
+            }
+            continue;
+        }
+        match got {
+            Some(img) => {
+                w := number(&fields[2]);
+                h := number(&fields[3]);
+                n := number(&fields[4]);
+                hash := number(&fields[5]);
+                mut out = req;
+                if req == 0 {
+                    out = n;
+                }
+                if (img.width != w) || (img.height != h) || (img.channels != n) || (img.components != out) || (img.pixels.len() != w * h * out) || (fnv(&img.pixels) != hash) {
+                    println("FAIL {} req {}: {}x{} n={} comps={} len={} hash ok={}", name.text(), req, img.width, img.height, img.channels, img.components, img.pixels.len(), fnv(&img.pixels) == hash);
+                    failures += 1;
+                }
+            },
+            None => {
+                println("FAIL {} req {}: rejected", name.text(), req);
+                failures += 1;
+            }
+        }
+    }
+    println("{} checks, {} failures", checks, failures);
+    return failures;
+}

@@ -1,0 +1,1461 @@
+module jpeg;
+
+// Baseline and progressive JPEG decoding with stb_image's exact results (stbi_load): its Huffman
+// fast paths, 16-bit coefficient arithmetic, integer IDCT (jidctint), chroma upsampling filters,
+// fixed-point YCbCr conversion, Adobe CMYK/YCCK handling and output channel rules. stb's SIMD
+// kernels are bit-identical to the scalar code this follows.
+
+pub struct Image {
+    width: u64,
+    height: u64,
+    // Channels in the file as stb reports them (1 or 3).
+    channels: u64,
+    components: u64,
+    pixels: u8[]
+}
+
+// A Huffman table: `fast` maps 9 code bits to a symbol index (255 = slow path).
+struct Huff {
+    fast: u64[],
+    code: u64[],
+    values: u64[],
+    size: u64[],
+    maxcode: u64[],
+    delta: i64[]
+}
+
+// A component's fixed geometry; its mutable state lives in Jpeg's parallel vectors.
+struct Comp {
+    id: u64,
+    h: u64,
+    v: u64,
+    tq: u64,
+    x: u64,
+    y: u64,
+    w2: u64,
+    h2: u64,
+    coeff_w: u64
+}
+
+// The entropy-coded bit reader (stb's code_buffer is 32 bits, filled from the top).
+struct Reader {
+    src: u8[],
+    pos: u64,
+    buffer: u64,
+    bits: i64,
+    marker: u64,
+    nomore: bool
+}
+
+struct Jpeg {
+    dc: Huff[],
+    ac: Huff[],
+    fast_ac: i64[],
+    dequant: u64[],
+    comps: Comp[],
+    // Per component: Huffman selectors, DC predictor, decoded plane, progressive coefficients.
+    hd: u64[],
+    ha: u64[],
+    dc_pred: i64[],
+    planes: u8[][],
+    coeffs: i64[][],
+    width: u64,
+    height: u64,
+    n: u64,
+    h_max: u64,
+    v_max: u64,
+    mcu_x: u64,
+    mcu_y: u64,
+    progressive: bool,
+    spec_start: u64,
+    spec_end: u64,
+    succ_high: u64,
+    succ_low: u64,
+    eob_run: i64,
+    jfif: bool,
+    app14: i64,
+    rgb: u64,
+    scan_n: u64,
+    order: u64[],
+    restart_interval: u64,
+    todo: i64
+}
+
+const NONE: u64 = 255;
+const MASK32: u64 = 4294967295;
+
+fn zeros_u(n: u64) -> u64[] {
+    mut v = u64[];
+    for i in n {
+        v.push(0);
+    }
+    return v;
+}
+fn zeros_i(n: u64) -> i64[] {
+    mut v = i64[];
+    for i in n {
+        v.push(0);
+    }
+    return v;
+}
+fn empty_huff() -> Huff {
+    return Huff { fast: zeros_u(512), code: zeros_u(256), values: zeros_u(256), size: zeros_u(257), maxcode: zeros_u(18), delta: zeros_i(17) };
+}
+
+fn dezigzag(k: u64) -> u64 {
+    table := u64[0, 1, 8, 16, 9, 2, 3, 10, 17, 24, 32, 25, 18, 11, 4, 5, 12, 19, 26, 33, 40, 48, 41, 34, 27, 20, 13, 6, 7, 14, 21, 28, 35, 42, 49, 56, 57, 50, 43, 36, 29, 22, 15, 23, 30, 37, 44, 51, 58, 59, 52, 45, 38, 31, 39, 46, 53, 60, 61, 54, 47, 55, 62, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63];
+    return table[k];
+}
+fn bmask(n: u64) -> u64 {
+    return (1 << n) - 1;
+}
+fn jbias(n: u64) -> i64 {
+    if n == 0 {
+        return 0;
+    }
+    return 1 - i64(1 << n);
+}
+// The C `short` cast: wrap to 16-bit two's complement.
+fn short(x: i64) -> i64 {
+    mut m = x % 65536;
+    if m < 0 {
+        m = m + 65536;
+    }
+    if 32767 < m {
+        return m - 65536;
+    }
+    return m;
+}
+
+// ---- Huffman tables ----
+
+fn build_huffman<a, b>(h: (&a mut Huff), count: (&b u64[])) -> bool {
+    mut k: u64 = 0;
+    for i in 16 {
+        for j in count[i] {
+            h.size[k] = i + 1;
+            k += 1;
+            if 257 <= k {
+                return false;
+            }
+        }
+    }
+    h.size[k] = 0;
+    mut code: u64 = 0;
+    k = 0;
+    mut j: u64 = 1;
+    while j <= 16 {
+        h.delta[j] = i64(k) - i64(code);
+        if h.size[k] == j {
+            while h.size[k] == j {
+                h.code[k] = code;
+                k += 1;
+                code += 1;
+            }
+            if (1 << j) <= code - 1 {
+                return false;
+            }
+        }
+        h.maxcode[j] = code << (16 - j);
+        code = code << 1;
+        j += 1;
+    }
+    h.maxcode[17] = MASK32;
+    for i in 512 {
+        h.fast[i] = NONE;
+    }
+    for i in k {
+        s := h.size[i];
+        if s <= 9 {
+            c := h.code[i] << (9 - s);
+            m := 1 << (9 - s);
+            for jj in m {
+                h.fast[c + jj] = i;
+            }
+        }
+    }
+    return true;
+}
+
+fn build_fast_ac<a, b>(fast_ac: (&a mut i64[]), base: u64, h: (&b Huff)) -> unit {
+    for i in 512 {
+        f := h.fast[i];
+        fast_ac[base + i] = 0;
+        if f < NONE {
+            rs := h.values[f];
+            run := (rs >> 4) & 15;
+            magbits := rs & 15;
+            len := h.size[f];
+            if (magbits != 0) && (len + magbits <= 9) {
+                mut k = i64(((i << len) & 511) >> (9 - magbits));
+                m := i64(1 << (magbits - 1));
+                if k < m {
+                    k = k - i64(1 << magbits) + 1;
+                }
+                if (-128 <= k) && (k <= 127) {
+                    fast_ac[base + i] = k * 256 + i64(run * 16 + len + magbits);
+                }
+            }
+        }
+    }
+    return ();
+}
+
+// ---- bit reader ----
+
+fn get8<a>(r: (&a mut Reader)) -> u64 {
+    if r.pos >= r.src.len() {
+        return 0;
+    }
+    b := r.src[r.pos];
+    r.pos += 1;
+    return b;
+}
+
+fn grow<a>(r: (&a mut Reader)) -> unit {
+    while true {
+        mut b: u64 = 0;
+        if r.nomore == false {
+            b = get8(&mut r);
+        }
+        if b == 255 {
+            mut c = get8(&mut r);
+            while c == 255 {
+                c = get8(&mut r);
+            }
+            if c != 0 {
+                r.marker = c;
+                r.nomore = true;
+                return ();
+            }
+        }
+        r.buffer = (r.buffer | (b << u64(24 - r.bits))) & MASK32;
+        r.bits += 8;
+        if 24 < r.bits {
+            return ();
+        }
+    }
+    return ();
+}
+
+fn huff_decode<a, b>(r: (&a mut Reader), h: (&b Huff)) -> i64 {
+    if r.bits < 16 {
+        grow(&mut r);
+    }
+    c := (r.buffer >> 23) & 511;
+    k := h.fast[c];
+    if k < NONE {
+        s := h.size[k];
+        if r.bits < i64(s) {
+            return -1;
+        }
+        r.buffer = (r.buffer << s) & MASK32;
+        r.bits -= i64(s);
+        return i64(h.values[k]);
+    }
+    temp := r.buffer >> 16;
+    mut kk: u64 = 10;
+    while temp >= h.maxcode[kk] {
+        kk += 1;
+    }
+    if kk == 17 {
+        r.bits -= 16;
+        return -1;
+    }
+    if r.bits < i64(kk) {
+        return -1;
+    }
+    cc := i64((r.buffer >> (32 - kk)) & bmask(kk)) + h.delta[kk];
+    if (cc < 0) || (256 <= cc) {
+        return -1;
+    }
+    r.bits -= i64(kk);
+    r.buffer = (r.buffer << kk) & MASK32;
+    return i64(h.values[u64(cc)]);
+}
+
+fn rotl(x: u64, n: u64) -> u64 {
+    return ((x << n) | (x >> (32 - n))) & MASK32;
+}
+
+fn extend_receive<a>(r: (&a mut Reader), n: u64) -> i64 {
+    if r.bits < i64(n) {
+        grow(&mut r);
+    }
+    if r.bits < i64(n) {
+        return 0;
+    }
+    sgn := r.buffer >> 31;
+    k := rotl(r.buffer, n);
+    r.buffer = k & (MASK32 ^ bmask(n));
+    v := k & bmask(n);
+    r.bits -= i64(n);
+    if sgn == 0 {
+        return i64(v) + jbias(n);
+    }
+    return i64(v);
+}
+
+fn get_bits<a>(r: (&a mut Reader), n: u64) -> u64 {
+    if r.bits < i64(n) {
+        grow(&mut r);
+    }
+    if r.bits < i64(n) {
+        return 0;
+    }
+    k := rotl(r.buffer, n);
+    r.buffer = k & (MASK32 ^ bmask(n));
+    r.bits -= i64(n);
+    return k & bmask(n);
+}
+
+fn get_bit<a>(r: (&a mut Reader)) -> bool {
+    if r.bits < 1 {
+        grow(&mut r);
+    }
+    if r.bits < 1 {
+        return false;
+    }
+    k := r.buffer;
+    r.buffer = (r.buffer << 1) & MASK32;
+    r.bits -= 1;
+    return (k & 2147483648) != 0;
+}
+
+fn add_valid(a: i64, b: i64) -> bool {
+    s := a + b;
+    return (-2147483648 <= s) && (s <= 2147483647);
+}
+fn mul_short_valid(a: i64, b: i64) -> bool {
+    if (b == 0) || (b == -1) {
+        return true;
+    }
+    if (0 <= a) == (0 <= b) {
+        return a <= 32767 / b;
+    }
+    if b < 0 {
+        return a <= -32768 / b;
+    }
+    return a >= -32768 / b;
+}
+
+// ---- block decoding ----
+
+fn decode_block<a, b, c>(r: (&a mut Reader), z: (&b mut Jpeg), data: (&c mut i64[]), n: u64) -> bool {
+    hd := z.hd[n];
+    ha := z.ha[n];
+    tq := z.comps[n].tq;
+    if r.bits < 16 {
+        grow(&mut r);
+    }
+    t := huff_decode(&mut r, &z.dc[hd]);
+    if (t < 0) || (15 < t) {
+        return false;
+    }
+    for i in 64 {
+        data[i] = 0;
+    }
+    mut diff: i64 = 0;
+    if t != 0 {
+        diff = extend_receive(&mut r, u64(t));
+    }
+    pred := z.dc_pred[n];
+    if add_valid(pred, diff) == false {
+        return false;
+    }
+    dc := pred + diff;
+    z.dc_pred[n] = dc;
+    q0 := i64(z.dequant[tq * 64]);
+    if mul_short_valid(dc, q0) == false {
+        return false;
+    }
+    data[0] = short(dc * q0);
+    mut k: u64 = 1;
+    while k < 64 {
+        if r.bits < 16 {
+            grow(&mut r);
+        }
+        c := (r.buffer >> 23) & 511;
+        rr := z.fast_ac[ha * 512 + c];
+        if rr != 0 {
+            k += u64((rr >> 4) & 15);
+            s := u64(rr & 15);
+            if r.bits < i64(s) {
+                return false;
+            }
+            r.buffer = (r.buffer << s) & MASK32;
+            r.bits -= i64(s);
+            zig := dezigzag(k);
+            k += 1;
+            data[zig] = short((rr >> 8) * i64(z.dequant[tq * 64 + zig]));
+        } else {
+            rs := huff_decode(&mut r, &z.ac[ha]);
+            if rs < 0 {
+                return false;
+            }
+            s := u64(rs & 15);
+            run := u64(rs >> 4);
+            if s == 0 {
+                if rs != 240 {
+                    return true;
+                }
+                k += 16;
+            } else {
+                k += run;
+                zig := dezigzag(k);
+                k += 1;
+                data[zig] = short(extend_receive(&mut r, s) * i64(z.dequant[tq * 64 + zig]));
+            }
+        }
+    }
+    return true;
+}
+
+fn decode_prog_dc<a, b, c>(r: (&a mut Reader), z: (&b mut Jpeg), data: (&c mut i64[]), base: u64, n: u64) -> bool {
+    if z.spec_end != 0 {
+        return false;
+    }
+    if r.bits < 16 {
+        grow(&mut r);
+    }
+    hd := z.hd[n];
+    if z.succ_high == 0 {
+        for i in 64 {
+            data[base + i] = 0;
+        }
+        t := huff_decode(&mut r, &z.dc[hd]);
+        if (t < 0) || (15 < t) {
+            return false;
+        }
+        mut diff: i64 = 0;
+        if t != 0 {
+            diff = extend_receive(&mut r, u64(t));
+        }
+        pred := z.dc_pred[n];
+        if add_valid(pred, diff) == false {
+            return false;
+        }
+        dc := pred + diff;
+        z.dc_pred[n] = dc;
+        scale := i64(1 << z.succ_low);
+        if mul_short_valid(dc, scale) == false {
+            return false;
+        }
+        data[base] = short(dc * scale);
+    } else {
+        if get_bit(&mut r) {
+            data[base] = short(data[base] + i64(1 << z.succ_low));
+        }
+    }
+    return true;
+}
+
+fn refine<a, b>(r: (&a mut Reader), data: (&b mut i64[]), at: u64, bit: i64) -> unit {
+    p := data[at];
+    if get_bit(&mut r) {
+        // (*p & bit) == 0 on the 16-bit value: bit is a power of two below 2^14.
+        mut ub = p;
+        if ub < 0 {
+            ub = ub + 65536;
+        }
+        if (u64(ub) & u64(bit)) == 0 {
+            if 0 < p {
+                data[at] = short(p + bit);
+            } else {
+                data[at] = short(p - bit);
+            }
+        }
+    }
+    return ();
+}
+
+fn decode_prog_ac<a, b, c>(r: (&a mut Reader), z: (&b mut Jpeg), data: (&c mut i64[]), base: u64, ha: u64) -> bool {
+    if z.spec_start == 0 {
+        return false;
+    }
+    if z.succ_high == 0 {
+        shift := z.succ_low;
+        if z.eob_run != 0 {
+            z.eob_run -= 1;
+            return true;
+        }
+        mut k = z.spec_start;
+        while k <= z.spec_end {
+            if r.bits < 16 {
+                grow(&mut r);
+            }
+            c := (r.buffer >> 23) & 511;
+            rr := z.fast_ac[ha * 512 + c];
+            if rr != 0 {
+                k += u64((rr >> 4) & 15);
+                s := u64(rr & 15);
+                if r.bits < i64(s) {
+                    return false;
+                }
+                r.buffer = (r.buffer << s) & MASK32;
+                r.bits -= i64(s);
+                zig := dezigzag(k);
+                k += 1;
+                data[base + zig] = short((rr >> 8) * i64(1 << shift));
+            } else {
+                rs := huff_decode(&mut r, &z.ac[ha]);
+                if rs < 0 {
+                    return false;
+                }
+                s := u64(rs & 15);
+                run := u64(rs >> 4);
+                if s == 0 {
+                    if run < 15 {
+                        mut eob = i64(1 << run);
+                        if run != 0 {
+                            eob += i64(get_bits(&mut r, run));
+                        }
+                        z.eob_run = eob - 1;
+                        return true;
+                    }
+                    k += 16;
+                } else {
+                    k += run;
+                    zig := dezigzag(k);
+                    k += 1;
+                    data[base + zig] = short(extend_receive(&mut r, s) * i64(1 << shift));
+                }
+            }
+        }
+        return true;
+    }
+    bit := i64(1 << z.succ_low);
+    if z.eob_run != 0 {
+        z.eob_run -= 1;
+        mut k = z.spec_start;
+        while k <= z.spec_end {
+            at := base + dezigzag(k);
+            if data[at] != 0 {
+                refine(&mut r, &mut data, at, bit);
+            }
+            k += 1;
+        }
+        return true;
+    }
+    mut k = z.spec_start;
+    while k <= z.spec_end {
+        rs := huff_decode(&mut r, &z.ac[ha]);
+        if rs < 0 {
+            return false;
+        }
+        s := rs & 15;
+        mut run = rs >> 4;
+        mut value: i64 = 0;
+        if s == 0 {
+            if run < 15 {
+                mut eob = i64(1 << u64(run)) - 1;
+                if run != 0 {
+                    eob += i64(get_bits(&mut r, u64(run)));
+                }
+                z.eob_run = eob;
+                run = 64;
+            }
+        } else {
+            if s != 1 {
+                return false;
+            }
+            if get_bit(&mut r) {
+                value = bit;
+            } else {
+                value = 0 - bit;
+            }
+        }
+        while k <= z.spec_end {
+            at := base + dezigzag(k);
+            k += 1;
+            if data[at] != 0 {
+                refine(&mut r, &mut data, at, bit);
+            } else {
+                if run == 0 {
+                    data[at] = short(value);
+                    break;
+                }
+                run -= 1;
+            }
+        }
+    }
+    return true;
+}
+
+// ---- IDCT (stb's jidctint port) ----
+
+fn clamp(x: i64) -> u64 {
+    if x < 0 {
+        return 0;
+    }
+    if 255 < x {
+        return 255;
+    }
+    return u64(x);
+}
+
+// One 1D pass: returns t0..t3 and x0..x3 as stb's STBI__IDCT_1D macro leaves them.
+fn idct_1d<a>(s: (&a i64[]), base: u64, step: u64) -> i64[] {
+    s0 := s[base];
+    s1 := s[base + step];
+    s2 := s[base + step * 2];
+    s3 := s[base + step * 3];
+    s4 := s[base + step * 4];
+    s5 := s[base + step * 5];
+    s6 := s[base + step * 6];
+    s7 := s[base + step * 7];
+    mut p2 = s2;
+    mut p3 = s6;
+    mut p1 = (p2 + p3) * 2217;
+    mut t2 = p1 + p3 * -7567;
+    mut t3 = p1 + p2 * 3135;
+    p2 = s0;
+    p3 = s4;
+    mut t0 = (p2 + p3) * 4096;
+    mut t1 = (p2 - p3) * 4096;
+    x0 := t0 + t3;
+    x3 := t0 - t3;
+    x1 := t1 + t2;
+    x2 := t1 - t2;
+    t0 = s7;
+    t1 = s5;
+    t2 = s3;
+    t3 = s1;
+    p3 = t0 + t2;
+    mut p4 = t1 + t3;
+    p1 = t0 + t3;
+    p2 = t1 + t2;
+    p5 := (p3 + p4) * 4816;
+    t0 = t0 * 1223;
+    t1 = t1 * 8410;
+    t2 = t2 * 12586;
+    t3 = t3 * 6149;
+    p1 = p5 + p1 * -3685;
+    p2 = p5 + p2 * -10497;
+    p3 = p3 * -8034;
+    p4 = p4 * -1597;
+    t3 += p1 + p4;
+    t2 += p2 + p3;
+    t1 += p2 + p4;
+    t0 += p1 + p3;
+    return i64[t0, t1, t2, t3, x0, x1, x2, x3];
+}
+
+fn idct_block<a, b>(out: (&a mut u8[]), at: u64, stride: u64, d: (&b i64[]), base: u64) -> unit {
+    mut v = zeros_i(64);
+    for i in 8 {
+        c := base + i;
+        if (d[c + 8] == 0) && (d[c + 16] == 0) && (d[c + 24] == 0) && (d[c + 32] == 0) && (d[c + 40] == 0) && (d[c + 48] == 0) && (d[c + 56] == 0) {
+            dc := d[c] * 4;
+            for r in 8 {
+                v[i + r * 8] = dc;
+            }
+        } else {
+            e := idct_1d(&d, c, 8);
+            t0 := e[0];
+            t1 := e[1];
+            t2 := e[2];
+            t3 := e[3];
+            x0 := e[4] + 512;
+            x1 := e[5] + 512;
+            x2 := e[6] + 512;
+            x3 := e[7] + 512;
+            v[i] = (x0 + t3) >> 10;
+            v[i + 56] = (x0 - t3) >> 10;
+            v[i + 8] = (x1 + t2) >> 10;
+            v[i + 48] = (x1 - t2) >> 10;
+            v[i + 16] = (x2 + t1) >> 10;
+            v[i + 40] = (x2 - t1) >> 10;
+            v[i + 24] = (x3 + t0) >> 10;
+            v[i + 32] = (x3 - t0) >> 10;
+        }
+    }
+    bias := i64(16842752);
+    for i in 8 {
+        e := idct_1d(&v, i * 8, 1);
+        t0 := e[0];
+        t1 := e[1];
+        t2 := e[2];
+        t3 := e[3];
+        x0 := e[4] + bias;
+        x1 := e[5] + bias;
+        x2 := e[6] + bias;
+        x3 := e[7] + bias;
+        o := at + i * stride;
+        out[o] = clamp((x0 + t3) >> 17);
+        out[o + 7] = clamp((x0 - t3) >> 17);
+        out[o + 1] = clamp((x1 + t2) >> 17);
+        out[o + 6] = clamp((x1 - t2) >> 17);
+        out[o + 2] = clamp((x2 + t1) >> 17);
+        out[o + 5] = clamp((x2 - t1) >> 17);
+        out[o + 3] = clamp((x3 + t0) >> 17);
+        out[o + 4] = clamp((x3 - t0) >> 17);
+    }
+    return ();
+}
+
+// IDCT a decoded block into component n's plane.
+fn store_block<a, b>(z: (&a mut Jpeg), n: u64, data: (&b i64[]), base: u64, at: u64) -> unit {
+    mut plane = exchange(&mut z.planes[n], u8[]);
+    stride := z.comps[n].w2;
+    idct_block(&mut plane, at, stride, &data, base);
+    exchange(&mut z.planes[n], plane);
+    return ();
+}
+
+// ---- markers and segments ----
+
+fn reset<a, b>(r: (&a mut Reader), z: (&b mut Jpeg)) -> unit {
+    r.bits = 0;
+    r.buffer = 0;
+    r.nomore = false;
+    for i in z.dc_pred.len() {
+        z.dc_pred[i] = 0;
+    }
+    r.marker = NONE;
+    if z.restart_interval != 0 {
+        z.todo = i64(z.restart_interval);
+    } else {
+        z.todo = 2147483647;
+    }
+    z.eob_run = 0;
+    return ();
+}
+
+fn get_marker<a>(r: (&a mut Reader)) -> u64 {
+    if r.marker != NONE {
+        x := r.marker;
+        r.marker = NONE;
+        return x;
+    }
+    mut x = get8(&mut r);
+    if x != 255 {
+        return NONE;
+    }
+    while x == 255 {
+        x = get8(&mut r);
+    }
+    return x;
+}
+
+fn get16<a>(r: (&a mut Reader)) -> u64 {
+    hi := get8(&mut r);
+    lo := get8(&mut r);
+    return (hi << 8) | lo;
+}
+
+fn is_restart(m: u64) -> bool {
+    return (208 <= m) && (m <= 215);
+}
+
+// After a restart interval: true to continue scanning, false when the scan ended.
+fn restart<a, b>(r: (&a mut Reader), z: (&b mut Jpeg)) -> bool {
+    z.todo -= 1;
+    if z.todo <= 0 {
+        if r.bits < 24 {
+            grow(&mut r);
+        }
+        if is_restart(r.marker) == false {
+            return false;
+        }
+        reset(&mut r, &mut z);
+    }
+    return true;
+}
+
+fn entropy<a, b>(r: (&a mut Reader), z: (&b mut Jpeg)) -> bool {
+    reset(&mut r, &mut z);
+    mut data = zeros_i(64);
+    if z.scan_n == 1 {
+        n := z.order[0];
+        w := (z.comps[n].x + 7) >> 3;
+        h := (z.comps[n].y + 7) >> 3;
+        for j in h {
+            for i in w {
+                if z.progressive {
+                    mut coeff = exchange(&mut z.coeffs[n], i64[]);
+                    base := 64 * (i + j * z.comps[n].coeff_w);
+                    mut ok = true;
+                    if z.spec_start == 0 {
+                        ok = decode_prog_dc(&mut r, &mut z, &mut coeff, base, n);
+                    } else {
+                        ha := z.ha[n];
+                        ok = decode_prog_ac(&mut r, &mut z, &mut coeff, base, ha);
+                    }
+                    exchange(&mut z.coeffs[n], coeff);
+                    if ok == false {
+                        return false;
+                    }
+                } else {
+                    if decode_block(&mut r, &mut z, &mut data, n) == false {
+                        return false;
+                    }
+                    at := z.comps[n].w2 * j * 8 + i * 8;
+                    store_block(&mut z, n, &data, 0, at);
+                }
+                if restart(&mut r, &mut z) == false {
+                    return true;
+                }
+            }
+        }
+        return true;
+    }
+    mcu_y := z.mcu_y;
+    mcu_x := z.mcu_x;
+    scan_n := z.scan_n;
+    for j in mcu_y {
+        for i in mcu_x {
+            for k in scan_n {
+                n := z.order[k];
+                cv := z.comps[n].v;
+                ch := z.comps[n].h;
+                cw := z.comps[n].coeff_w;
+                w2 := z.comps[n].w2;
+                for y in cv {
+                    for x in ch {
+                        if z.progressive {
+                            x2 := i * ch + x;
+                            y2 := j * cv + y;
+                            base := 64 * (x2 + y2 * cw);
+                            mut coeff = exchange(&mut z.coeffs[n], i64[]);
+                            ok := decode_prog_dc(&mut r, &mut z, &mut coeff, base, n);
+                            exchange(&mut z.coeffs[n], coeff);
+                            if ok == false {
+                                return false;
+                            }
+                        } else {
+                            x2 := (i * ch + x) * 8;
+                            y2 := (j * cv + y) * 8;
+                            if decode_block(&mut r, &mut z, &mut data, n) == false {
+                                return false;
+                            }
+                            at := w2 * y2 + x2;
+                            store_block(&mut z, n, &data, 0, at);
+                        }
+                    }
+                }
+            }
+            if restart(&mut r, &mut z) == false {
+                return true;
+            }
+        }
+    }
+    return true;
+}
+
+fn skip<a>(r: (&a mut Reader), n: u64) -> unit {
+    r.pos = r.pos + n;
+    if r.src.len() < r.pos {
+        r.pos = r.src.len();
+    }
+    return ();
+}
+
+fn process_marker<a, b>(r: (&a mut Reader), z: (&b mut Jpeg), m: u64) -> bool {
+    if m == NONE {
+        return false;
+    }
+    if m == 221 {
+        // DRI
+        if get16(&mut r) != 4 {
+            return false;
+        }
+        z.restart_interval = get16(&mut r);
+        return true;
+    }
+    if m == 219 {
+        // DQT
+        mut left = i64(get16(&mut r)) - 2;
+        while 0 < left {
+            q := get8(&mut r);
+            p := q >> 4;
+            t := q & 15;
+            if (1 < p) || (3 < t) {
+                return false;
+            }
+            for i in 64 {
+                mut value: u64 = 0;
+                if p != 0 {
+                    value = get16(&mut r);
+                } else {
+                    value = get8(&mut r);
+                }
+                z.dequant[t * 64 + dezigzag(i)] = value;
+            }
+            if p != 0 {
+                left -= 129;
+            } else {
+                left -= 65;
+            }
+        }
+        return left == 0;
+    }
+    if m == 196 {
+        // DHT
+        mut left = i64(get16(&mut r)) - 2;
+        while 0 < left {
+            q := get8(&mut r);
+            tc := q >> 4;
+            th := q & 15;
+            if (1 < tc) || (3 < th) {
+                return false;
+            }
+            mut sizes = u64[];
+            mut total: u64 = 0;
+            for i in 16 {
+                s := get8(&mut r);
+                sizes.push(s);
+                total += s;
+            }
+            if 256 < total {
+                return false;
+            }
+            left -= 17;
+            mut h = empty_huff();
+            if build_huffman(&mut h, &sizes) == false {
+                return false;
+            }
+            for i in total {
+                h.values[i] = get8(&mut r);
+            }
+            if tc == 0 {
+                z.dc[th] = h;
+            } else {
+                build_fast_ac(&mut z.fast_ac, th * 512, &h);
+                z.ac[th] = h;
+            }
+            left -= i64(total);
+        }
+        return left == 0;
+    }
+    if ((224 <= m) && (m <= 239)) || (m == 254) {
+        mut len = get16(&mut r);
+        if len < 2 {
+            return false;
+        }
+        len -= 2;
+        if (m == 224) && (5 <= len) {
+            tag := u64[74, 70, 73, 70, 0];
+            mut ok = true;
+            for i in 5 {
+                if get8(&mut r) != tag[i] {
+                    ok = false;
+                }
+            }
+            len -= 5;
+            if ok {
+                z.jfif = true;
+            }
+        } else {
+            if (m == 238) && (12 <= len) {
+                tag := u64[65, 100, 111, 98, 101, 0];
+                mut ok = true;
+                for i in 6 {
+                    if get8(&mut r) != tag[i] {
+                        ok = false;
+                    }
+                }
+                len -= 6;
+                if ok {
+                    get8(&mut r);
+                    get16(&mut r);
+                    get16(&mut r);
+                    z.app14 = i64(get8(&mut r));
+                    len -= 6;
+                }
+            }
+        }
+        skip(&mut r, len);
+        return true;
+    }
+    return false;
+}
+
+fn scan_header<a, b>(r: (&a mut Reader), z: (&b mut Jpeg)) -> bool {
+    ls := get16(&mut r);
+    z.scan_n = get8(&mut r);
+    if (z.scan_n < 1) || (4 < z.scan_n) || (z.n < z.scan_n) {
+        return false;
+    }
+    if ls != 6 + 2 * z.scan_n {
+        return false;
+    }
+    for i in z.scan_n {
+        id := get8(&mut r);
+        q := get8(&mut r);
+        mut which: u64 = 0;
+        while (which < z.n) && (z.comps[which].id != id) {
+            which += 1;
+        }
+        if which == z.n {
+            return false;
+        }
+        z.hd[which] = q >> 4;
+        z.ha[which] = q & 15;
+        if (3 < z.hd[which]) || (3 < z.ha[which]) {
+            return false;
+        }
+        z.order[i] = which;
+    }
+    z.spec_start = get8(&mut r);
+    z.spec_end = get8(&mut r);
+    aa := get8(&mut r);
+    z.succ_high = aa >> 4;
+    z.succ_low = aa & 15;
+    if z.progressive {
+        if (63 < z.spec_start) || (63 < z.spec_end) || (z.spec_end < z.spec_start) || (13 < z.succ_high) || (13 < z.succ_low) {
+            return false;
+        }
+    } else {
+        if (z.spec_start != 0) || (z.succ_high != 0) || (z.succ_low != 0) {
+            return false;
+        }
+        z.spec_end = 63;
+    }
+    return true;
+}
+
+fn frame_header<a, b>(r: (&a mut Reader), z: (&b mut Jpeg)) -> bool {
+    lf := get16(&mut r);
+    if lf < 11 {
+        return false;
+    }
+    if get8(&mut r) != 8 {
+        return false;
+    }
+    z.height = get16(&mut r);
+    if z.height == 0 {
+        return false;
+    }
+    z.width = get16(&mut r);
+    if z.width == 0 {
+        return false;
+    }
+    c := get8(&mut r);
+    if (c != 3) && (c != 1) && (c != 4) {
+        return false;
+    }
+    z.n = c;
+    if lf != 8 + 3 * c {
+        return false;
+    }
+    z.rgb = 0;
+    rgb := u64[82, 71, 66];
+    mut ids = u64[];
+    mut hs = u64[];
+    mut vs = u64[];
+    mut tqs = u64[];
+    for i in c {
+        id := get8(&mut r);
+        if (c == 3) && (id == rgb[i]) {
+            z.rgb += 1;
+        }
+        q := get8(&mut r);
+        h := q >> 4;
+        v := q & 15;
+        tq := get8(&mut r);
+        if (h == 0) || (4 < h) || (v == 0) || (4 < v) || (3 < tq) {
+            return false;
+        }
+        ids.push(id);
+        hs.push(h);
+        vs.push(v);
+        tqs.push(tq);
+    }
+    if 1073741824 < z.width * z.height * c {
+        return false;
+    }
+    mut h_max: u64 = 1;
+    mut v_max: u64 = 1;
+    for i in c {
+        if h_max < hs[i] {
+            h_max = hs[i];
+        }
+        if v_max < vs[i] {
+            v_max = vs[i];
+        }
+    }
+    for i in c {
+        if ((h_max % hs[i]) != 0) || ((v_max % vs[i]) != 0) {
+            return false;
+        }
+    }
+    z.h_max = h_max;
+    z.v_max = v_max;
+    z.mcu_x = (z.width + h_max * 8 - 1) / (h_max * 8);
+    z.mcu_y = (z.height + v_max * 8 - 1) / (v_max * 8);
+    for i in c {
+        ch := hs[i];
+        cv := vs[i];
+        w2 := z.mcu_x * ch * 8;
+        h2 := z.mcu_y * cv * 8;
+        z.comps.push(Comp { id: ids[i], h: ch, v: cv, tq: tqs[i], x: (z.width * ch + h_max - 1) / h_max, y: (z.height * cv + v_max - 1) / v_max, w2: w2, h2: h2, coeff_w: w2 / 8 });
+        z.hd.push(0);
+        z.ha.push(0);
+        z.dc_pred.push(0);
+        mut plane = u8[];
+        for p in w2 * h2 {
+            plane.push(0);
+        }
+        z.planes.push(plane);
+        if z.progressive {
+            z.coeffs.push(zeros_i(w2 * h2));
+        } else {
+            z.coeffs.push(i64[]);
+        }
+    }
+    return true;
+}
+
+fn skip_junk<a>(r: (&a mut Reader)) -> u64 {
+    while r.pos < r.src.len() {
+        mut x = get8(&mut r);
+        while x == 255 {
+            if r.src.len() <= r.pos {
+                return NONE;
+            }
+            x = get8(&mut r);
+            if (x != 0) && (x != 255) {
+                return x;
+            }
+        }
+    }
+    return NONE;
+}
+
+fn finish_progressive<a>(z: (&a mut Jpeg)) -> unit {
+    count := z.n;
+    for n in count {
+        w := (z.comps[n].x + 7) >> 3;
+        h := (z.comps[n].y + 7) >> 3;
+        tq := z.comps[n].tq;
+        mut coeff = exchange(&mut z.coeffs[n], i64[]);
+        for j in h {
+            for i in w {
+                base := 64 * (i + j * z.comps[n].coeff_w);
+                for k in 64 {
+                    coeff[base + k] = short(coeff[base + k] * i64(z.dequant[tq * 64 + k]));
+                }
+                at := z.comps[n].w2 * j * 8 + i * 8;
+                store_block(&mut z, n, &coeff, base, at);
+            }
+        }
+        exchange(&mut z.coeffs[n], coeff);
+    }
+    return ();
+}
+
+fn decode_image<a, b>(r: (&a mut Reader), z: (&b mut Jpeg)) -> bool {
+    r.marker = NONE;
+    if get_marker(&mut r) != 216 {
+        return false;
+    }
+    mut m = get_marker(&mut r);
+    while ((m == 192) || (m == 193) || (m == 194)) == false {
+        if process_marker(&mut r, &mut z, m) == false {
+            return false;
+        }
+        m = get_marker(&mut r);
+        while m == NONE {
+            if r.src.len() <= r.pos {
+                return false;
+            }
+            m = get_marker(&mut r);
+        }
+    }
+    z.progressive = m == 194;
+    if frame_header(&mut r, &mut z) == false {
+        return false;
+    }
+    m = get_marker(&mut r);
+    while m != 217 {
+        if m == 218 {
+            if scan_header(&mut r, &mut z) == false {
+                return false;
+            }
+            if entropy(&mut r, &mut z) == false {
+                return false;
+            }
+            if r.marker == NONE {
+                r.marker = skip_junk(&mut r);
+            }
+            m = get_marker(&mut r);
+            if is_restart(m) {
+                m = get_marker(&mut r);
+            }
+        } else {
+            if m == 220 {
+                ld := get16(&mut r);
+                nl := get16(&mut r);
+                if (ld != 4) || (nl != z.height) {
+                    return false;
+                }
+                m = get_marker(&mut r);
+            } else {
+                // stb ends decoding (successfully) at a marker it cannot process.
+                if process_marker(&mut r, &mut z, m) == false {
+                    if z.progressive {
+                        finish_progressive(&mut z);
+                    }
+                    return true;
+                }
+                m = get_marker(&mut r);
+            }
+        }
+    }
+    if z.progressive {
+        finish_progressive(&mut z);
+    }
+    return true;
+}
+
+// ---- upsampling and colour conversion ----
+
+fn div4(x: u64) -> u64 {
+    return (x >> 2) & 255;
+}
+fn div16(x: u64) -> u64 {
+    return (x >> 4) & 255;
+}
+
+// One output row of component plane `p` (row stride w2): rows `near` and `far` start at those
+// offsets; `w` is the low-resolution width and hs/vs the subsampling factors.
+fn resample<a>(p: &a [u8], near: u64, far: u64, w: u64, hs: u64, vs: u64) -> u8[] {
+    mut out = u8[];
+    if (hs == 1) && (vs == 1) {
+        for i in w {
+            out.push(p[near + i]);
+        }
+        return out;
+    }
+    if (hs == 1) && (vs == 2) {
+        for i in w {
+            out.push(div4(3 * p[near + i] + p[far + i] + 2));
+        }
+        return out;
+    }
+    if (hs == 2) && (vs == 1) {
+        if w == 1 {
+            out.push(p[near]);
+            out.push(p[near]);
+            return out;
+        }
+        out.push(p[near]);
+        out.push(div4(p[near] * 3 + p[near + 1] + 2));
+        mut i: u64 = 1;
+        while i < w - 1 {
+            n := 3 * p[near + i] + 2;
+            out.push(div4(n + p[near + i - 1]));
+            out.push(div4(n + p[near + i + 1]));
+            i += 1;
+        }
+        out.push(div4(p[near + w - 2] * 3 + p[near + w - 1] + 2));
+        out.push(p[near + w - 1]);
+        return out;
+    }
+    if (hs == 2) && (vs == 2) {
+        if w == 1 {
+            v := div4(3 * p[near] + p[far] + 2);
+            out.push(v);
+            out.push(v);
+            return out;
+        }
+        mut t1 = 3 * p[near] + p[far];
+        out.push(div4(t1 + 2));
+        for i in w - 1 {
+            t0 := t1;
+            t1 = 3 * p[near + i + 1] + p[far + i + 1];
+            out.push(div16(3 * t0 + t1 + 8));
+            out.push(div16(3 * t1 + t0 + 8));
+        }
+        out.push(div4(t1 + 2));
+        return out;
+    }
+    for i in w {
+        for j in hs {
+            out.push(p[near + i]);
+        }
+    }
+    return out;
+}
+
+fn clamp_rgb(x: i64) -> u64 {
+    v := x >> 20;
+    if v < 0 {
+        return 0;
+    }
+    if 255 < v {
+        return 255;
+    }
+    return u64(v);
+}
+
+// stb's reduced-precision YCbCr -> RGB (identical in its scalar and SIMD kernels).
+fn ycbcr<a>(out: (&a mut u8[]), y: u64, cb: u64, cr: u64) -> unit {
+    yf := i64(y << 20) + 524288;
+    crs := i64(cr) - 128;
+    cbs := i64(cb) - 128;
+    r := yf + crs * 1470208;
+    g := yf + crs * -748800 + (((cbs * -360960) >> 16) << 16);
+    b := yf + cbs * 1858048;
+    out.push(clamp_rgb(r));
+    out.push(clamp_rgb(g));
+    out.push(clamp_rgb(b));
+    return ();
+}
+
+fn blinn(x: u64, y: u64) -> u64 {
+    t := x * y + 128;
+    return ((t + (t >> 8)) >> 8) & 255;
+}
+
+fn luma(r: u64, g: u64, b: u64) -> u64 {
+    return ((r * 77 + g * 150 + 29 * b) >> 8) & 255;
+}
+
+fn assemble<a>(z: (&a Jpeg), req: u64) -> Image {
+    mut n = req;
+    if req == 0 {
+        if 3 <= z.n {
+            n = 3;
+        } else {
+            n = 1;
+        }
+    }
+    is_rgb := (z.n == 3) && ((z.rgb == 3) || ((z.app14 == 0) && (z.jfif == false)));
+    mut decode_n = z.n;
+    if (z.n == 3) && (n < 3) && (is_rgb == false) {
+        decode_n = 1;
+    }
+    // Per-component resampling state.
+    mut hs = u64[];
+    mut vs = u64[];
+    mut ystep = u64[];
+    mut wl = u64[];
+    mut ypos = u64[];
+    mut line0 = u64[];
+    mut line1 = u64[];
+    for k in decode_n {
+        h := z.h_max / z.comps[k].h;
+        v := z.v_max / z.comps[k].v;
+        hs.push(h);
+        vs.push(v);
+        ystep.push(v >> 1);
+        wl.push((z.width + h - 1) / h);
+        ypos.push(0);
+        line0.push(0);
+        line1.push(0);
+    }
+    mut pixels = u8[];
+    for j in z.height {
+        mut rows = u8[][];
+        for k in decode_n {
+            y_bot := (vs[k] >> 1) <= ystep[k];
+            mut near = line0[k];
+            mut far = line1[k];
+            if y_bot {
+                near = line1[k];
+                far = line0[k];
+            }
+            row := resample(&z.planes[k], near, far, wl[k], hs[k], vs[k]);
+            rows.push(row);
+            ystep[k] = ystep[k] + 1;
+            if vs[k] <= ystep[k] {
+                ystep[k] = 0;
+                line0[k] = line1[k];
+                ypos[k] = ypos[k] + 1;
+                if ypos[k] < z.comps[k].y {
+                    line1[k] = line1[k] + z.comps[k].w2;
+                }
+            }
+        }
+        for i in z.width {
+            mut px = u8[];
+            if 3 <= n {
+                if z.n == 3 {
+                    if is_rgb {
+                        px.push(rows[0][i]);
+                        px.push(rows[1][i]);
+                        px.push(rows[2][i]);
+                    } else {
+                        ycbcr(&mut px, rows[0][i], rows[1][i], rows[2][i]);
+                    }
+                } else {
+                    if z.n == 4 {
+                        m := rows[3][i];
+                        if z.app14 == 0 {
+                            px.push(blinn(rows[0][i], m));
+                            px.push(blinn(rows[1][i], m));
+                            px.push(blinn(rows[2][i], m));
+                        } else {
+                            if z.app14 == 2 {
+                                mut tmp = u8[];
+                                ycbcr(&mut tmp, rows[0][i], rows[1][i], rows[2][i]);
+                                px.push(blinn(255 - tmp[0], m));
+                                px.push(blinn(255 - tmp[1], m));
+                                px.push(blinn(255 - tmp[2], m));
+                            } else {
+                                ycbcr(&mut px, rows[0][i], rows[1][i], rows[2][i]);
+                            }
+                        }
+                    } else {
+                        y := rows[0][i];
+                        px.push(y);
+                        px.push(y);
+                        px.push(y);
+                    }
+                }
+                if n == 4 {
+                    px.push(255);
+                }
+            } else {
+                mut g: u64 = 0;
+                if is_rgb {
+                    g = luma(rows[0][i], rows[1][i], rows[2][i]);
+                } else {
+                    if (z.n == 4) && (z.app14 == 0) {
+                        m := rows[3][i];
+                        g = luma(blinn(rows[0][i], m), blinn(rows[1][i], m), blinn(rows[2][i], m));
+                    } else {
+                        if (z.n == 4) && (z.app14 == 2) {
+                            g = blinn(255 - rows[0][i], rows[3][i]);
+                        } else {
+                            g = rows[0][i];
+                        }
+                    }
+                }
+                px.push(g);
+                if n == 2 {
+                    px.push(255);
+                }
+            }
+            for c in px.len() {
+                pixels.push(px[c]);
+            }
+        }
+    }
+    mut channels: u64 = 1;
+    if 3 <= z.n {
+        channels = 3;
+    }
+    return Image { width: z.width, height: z.height, channels: channels, components: n, pixels: pixels };
+}
+
+// Decodes a JPEG file. `desired` is stb's req_comp (0 = 1 or 3 channels as in the file).
+pub fn decode<a>(data: &a [u8], desired: u64) -> Image? {
+    if 4 < desired {
+        return None;
+    }
+    mut r = Reader { src: data.copy(), pos: 0, buffer: 0, bits: 0, marker: NONE, nomore: false };
+    mut dcs = Huff[];
+    mut acs = Huff[];
+    for i in 4 {
+        dcs.push(empty_huff());
+        acs.push(empty_huff());
+    }
+    mut z = Jpeg { dc: dcs, ac: acs, fast_ac: zeros_i(2048), dequant: zeros_u(256), comps: Comp[], hd: u64[], ha: u64[], dc_pred: i64[], planes: u8[][], coeffs: i64[][], width: 0, height: 0, n: 0, h_max: 1, v_max: 1, mcu_x: 0, mcu_y: 0, progressive: false, spec_start: 0, spec_end: 0, succ_high: 0, succ_low: 0, eob_run: 0, jfif: false, app14: -1, rgb: 0, scan_n: 0, order: zeros_u(4), restart_interval: 0, todo: 0 };
+    if decode_image(&mut r, &mut z) == false {
+        return None;
+    }
+    return Some(assemble(&z, desired));
+}
