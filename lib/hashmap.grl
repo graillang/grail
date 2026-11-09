@@ -148,7 +148,7 @@ pub fn map_entry<a, b, K: hash::Hash
     view := Entry { key: &entry.key, value: &mut entry.value };
     return Some(view);
 }
-// Iteration by position: for i in hashmap::map_len(&m) { k := hashmap::key_at(&m, i); ... }
+// Iteration by position: `for k, v in &m` lowers to these (`for i in map_len(&m) { k := key_at(&m, i); ... }`).
 pub fn key_at<a, K: hash::Hash + hash::Equal, V>(map: (&a [K: V]), index: u64) -> (&a K) {
     entry := &map.entries[index];
     return &entry.key;
@@ -161,6 +161,13 @@ pub fn value_at_mut<a, K: hash::Hash
     + hash::Equal, V>(map: (&a mut [K: V]), index: u64) -> (&a mut V) {
     entry := &mut map.entries[index];
     return &mut entry.value;
+}
+// Both halves of one stored pair: the shared key and the exclusive value, like `entry`, so an
+// exclusive iteration can update values without losing the key it is walking.
+pub fn entry_at<a, K: hash::Hash
+    + hash::Equal, V>(map: (&a mut [K: V]), index: u64) -> Entry<a, K, V> {
+    entry := &mut map.entries[index];
+    return Entry { key: &entry.key, value: &mut entry.value };
 }
 impl<K: hash::Hash + hash::Equal, V> Map<K, V> {
     pub fn len<a>(self: (&a Map<K, V>)) -> u64 {
@@ -183,5 +190,17 @@ impl<K: hash::Hash + hash::Equal, V> Map<K, V> {
     }
     pub fn entry<a, b>(self: (&a mut Map<K, V>), key: (&b K)) -> Entry<a, K, V>? {
         return hashmap::map_entry(self, key);
+    }
+    pub fn key_at<a>(self: (&a Map<K, V>), index: u64) -> (&a K) {
+        return hashmap::key_at(self, index);
+    }
+    pub fn value_at<a>(self: (&a Map<K, V>), index: u64) -> (&a V) {
+        return hashmap::value_at(self, index);
+    }
+    pub fn value_at_mut<a>(self: (&a mut Map<K, V>), index: u64) -> (&a mut V) {
+        return hashmap::value_at_mut(self, index);
+    }
+    pub fn entry_at<a>(self: (&a mut Map<K, V>), index: u64) -> Entry<a, K, V> {
+        return hashmap::entry_at(self, index);
     }
 }

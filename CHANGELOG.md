@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Maps iterate with `for key, value in &map`, in insertion order, and `for key, value in &mut map` binds the
+  same shared key with an exclusive value (`value := map.value_at_mut(i)`), so values update in place. The loop
+  holds one reference to the map throughout: inserting into it inside the body is rejected, a shared loop cannot
+  write to a value, and `for key, value in map` is refused with a pointer to `&map`. The compiler cannot see a
+  map's private layout, so the sugar lowers to `len`/`key_at`/`value_at`/`entry_at` over positions.
+- `Map::key_at`, `Map::value_at`, `Map::value_at_mut` and `Map::entry_at`, and `hashmap::entry_at`, which returns
+  the `Entry` view of a position: the positional accessors had free functions only, so the written-out loop had
+  no method form.
+- Book: the collections chapter documents map iteration, with a side-by-side Rust comparison (a `BTreeMap`,
+  because insert order is Grail's order and std's `HashMap` has none).
 - `&mut r` on a `mut` binding holding a shared reference borrows the binding's own slot
   (`&mut &T`), so a callee can replace which referent the binding names:
   `previous := replace(&mut current, &second)` with `current = &first` compiles (it was rejected with

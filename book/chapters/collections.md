@@ -22,7 +22,18 @@ inserts, and there is no `or_insert`. Insert with `map[key] = value`, update an 
 its `value` or `get_mut`, and move a non-copyable value out with `remove`, which returns `V?`.
 
 Key borrows use `&key`; explicit mutable map arguments use `&mut map`.
-Maps cannot be iterated with `for key, value in map` yet; use indexing, `get` and `entry`.
+
+`for key, value in &map` visits every stored pair in insertion order, and `for key, value in
+&mut map` visits the same pairs with writable values. Both hold one reference to the map for the
+length of the loop: the body cannot insert or remove (that needs the map exclusively), and only the
+`&mut` form can write, so a shared loop cannot change a value. `key` is a `&K` either way; `value` is
+a `&V` or a `&mut V`. Iterating an owned map (`for key, value in map`) is refused, because the loop
+only ever borrows the map: write `&map`. The loop counts positions, which is what `len`, `key_at`,
+`value_at` and `entry_at` expose, so
+`for i in map.len() { key := map.key_at(i); value := map.value_at(i); ... }` is the same loop written
+out.
+
+{{example:map-iteration}}
 
 `vecs::sort` sorts any vector whose element type implements the `Ord` interface, imported here with
 `use order::Ord;`; numbers and text already do, and here `Score` sorts by points, highest first.
