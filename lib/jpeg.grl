@@ -24,16 +24,22 @@ struct Huff {
     delta: i64[]
 }
 
-// A component's fixed geometry; its mutable state lives in Jpeg's parallel vectors.
+// One colour component: geometry, Huffman selectors, DC predictor, its decoded plane and (for
+// progressive images) its coefficients.
 struct Comp {
     id: u64,
     h: u64,
     v: u64,
     tq: u64,
+    hd: u64,
+    ha: u64,
+    dc_pred: i64,
     x: u64,
     y: u64,
     w2: u64,
     h2: u64,
+    data: u8[],
+    coeff: i64[],
     coeff_w: u64
 }
 
@@ -53,12 +59,6 @@ struct Jpeg {
     fast_ac: i64[],
     dequant: u64[],
     comps: Comp[],
-    // Per component: Huffman selectors, DC predictor, decoded plane, progressive coefficients.
-    hd: u64[],
-    ha: u64[],
-    dc_pred: i64[],
-    planes: u8[][],
-    coeffs: i64[][],
     width: u64,
     height: u64,
     n: u64,
@@ -342,8 +342,8 @@ fn mul_short_valid(a: i64, b: i64) -> bool {
 // ---- block decoding ----
 
 fn decode_block<a, b, c>(r: (&a mut Reader), z: (&b mut Jpeg), data: (&c mut i64[]), n: u64) -> bool {
-    hd := z.hd[n];
-    ha := z.ha[n];
+    hd := z.comps[n].hd;
+    ha := z.comps[n].ha;
     tq := z.comps[n].tq;
     if r.bits < 16 {
         grow(&mut r);
@@ -359,12 +359,12 @@ fn decode_block<a, b, c>(r: (&a mut Reader), z: (&b mut Jpeg), data: (&c mut i64
     if t != 0 {
         diff = extend_receive(&mut r, u64(t));
     }
-    pred := z.dc_pred[n];
+    pred := z.comps[n].dc_pred;
     if add_valid(pred, diff) == false {
         return false;
     }
     dc := pred + diff;
-    z.dc_pred[n] = dc;
+    z.comps[n].dc_pred = dc;
     q0 := i64(z.dequant[tq * 64]);
     if mul_short_valid(dc, q0) == false {
         return false;
@@ -418,7 +418,7 @@ fn decode_prog_dc<a, b, c>(r: (&a mut Reader), z: (&b mut Jpeg), data: (&c mut i
     if r.bits < 16 {
         grow(&mut r);
     }
-    hd := z.hd[n];
+    hd := z.comps[n].hd;
     if z.succ_high == 0 {
         for i in 64 {
             data[base + i] = 0;
@@ -431,12 +431,12 @@ fn decode_prog_dc<a, b, c>(r: (&a mut Reader), z: (&b mut Jpeg), data: (&c mut i
         if t != 0 {
             diff = extend_receive(&mut r, u64(t));
         }
-        pred := z.dc_pred[n];
+        pred := z.comps[n].dc_pred;
         if add_valid(pred, diff) == false {
             return false;
         }
         dc := pred + diff;
-        z.dc_pred[n] = dc;
+        z.comps[n].dc_pred = dc;
         scale := i64(1 << z.succ_low);
         if mul_short_valid(dc, scale) == false {
             return false;
@@ -696,10 +696,8 @@ fn idct_block<a, b>(out: (&a mut u8[]), at: u64, stride: u64, d: (&b i64[]), bas
 
 // IDCT a decoded block into component n's plane.
 fn store_block<a, b>(z: (&a mut Jpeg), n: u64, data: (&b i64[]), base: u64, at: u64) -> unit {
-    mut plane = exchange(&mut z.planes[n], u8[]);
     stride := z.comps[n].w2;
-    idct_block(&mut plane, at, stride, &data, base);
-    exchange(&mut z.planes[n], plane);
+    idct_block(&mut z.comps[n].data, at, stride, &data, base);
     return ();
 }
 
@@ -709,8 +707,8 @@ fn reset<a, b>(r: (&a mut Reader), z: (&b mut Jpeg)) -> unit {
     r.bits = 0;
     r.buffer = 0;
     r.nomore = false;
-    for i in z.dc_pred.len() {
-        z.dc_pred[i] = 0;
+    for i in z.comps.len() {
+        z.comps[i].dc_pred = 0;
     }
     r.marker = NONE;
     if z.restart_interval != 0 {
@@ -773,16 +771,16 @@ fn entropy<a, b>(r: (&a mut Reader), z: (&b mut Jpeg)) -> bool {
         for j in h {
             for i in w {
                 if z.progressive {
-                    mut coeff = exchange(&mut z.coeffs[n], i64[]);
+                    mut coeff = exchange(&mut z.comps[n].coeff, i64[]);
                     base := 64 * (i + j * z.comps[n].coeff_w);
                     mut ok = true;
                     if z.spec_start == 0 {
                         ok = decode_prog_dc(&mut r, &mut z, &mut coeff, base, n);
                     } else {
-                        ha := z.ha[n];
+                        ha := z.comps[n].ha;
                         ok = decode_prog_ac(&mut r, &mut z, &mut coeff, base, ha);
                     }
-                    exchange(&mut z.coeffs[n], coeff);
+                    exchange(&mut z.comps[n].coeff, coeff);
                     if ok == false {
                         return false;
                     }
@@ -817,9 +815,9 @@ fn entropy<a, b>(r: (&a mut Reader), z: (&b mut Jpeg)) -> bool {
                             x2 := i * ch + x;
                             y2 := j * cv + y;
                             base := 64 * (x2 + y2 * cw);
-                            mut coeff = exchange(&mut z.coeffs[n], i64[]);
+                            mut coeff = exchange(&mut z.comps[n].coeff, i64[]);
                             ok := decode_prog_dc(&mut r, &mut z, &mut coeff, base, n);
-                            exchange(&mut z.coeffs[n], coeff);
+                            exchange(&mut z.comps[n].coeff, coeff);
                             if ok == false {
                                 return false;
                             }
@@ -990,9 +988,9 @@ fn scan_header<a, b>(r: (&a mut Reader), z: (&b mut Jpeg)) -> bool {
         if which == z.n {
             return false;
         }
-        z.hd[which] = q >> 4;
-        z.ha[which] = q & 15;
-        if (3 < z.hd[which]) || (3 < z.ha[which]) {
+        z.comps[which].hd = q >> 4;
+        z.comps[which].ha = q & 15;
+        if (3 < z.comps[which].hd) || (3 < z.comps[which].ha) {
             return false;
         }
         z.order[i] = which;
@@ -1089,20 +1087,15 @@ fn frame_header<a, b>(r: (&a mut Reader), z: (&b mut Jpeg)) -> bool {
         cv := vs[i];
         w2 := z.mcu_x * ch * 8;
         h2 := z.mcu_y * cv * 8;
-        z.comps.push(Comp { id: ids[i], h: ch, v: cv, tq: tqs[i], x: (z.width * ch + h_max - 1) / h_max, y: (z.height * cv + v_max - 1) / v_max, w2: w2, h2: h2, coeff_w: w2 / 8 });
-        z.hd.push(0);
-        z.ha.push(0);
-        z.dc_pred.push(0);
         mut plane = u8[];
         for p in w2 * h2 {
             plane.push(0);
         }
-        z.planes.push(plane);
+        mut coeff = i64[];
         if z.progressive {
-            z.coeffs.push(zeros_i(w2 * h2));
-        } else {
-            z.coeffs.push(i64[]);
+            coeff = zeros_i(w2 * h2);
         }
+        z.comps.push(Comp { id: ids[i], h: ch, v: cv, tq: tqs[i], hd: 0, ha: 0, dc_pred: 0, x: (z.width * ch + h_max - 1) / h_max, y: (z.height * cv + v_max - 1) / v_max, w2: w2, h2: h2, data: plane, coeff: coeff, coeff_w: w2 / 8 });
     }
     return true;
 }
@@ -1129,7 +1122,7 @@ fn finish_progressive<a>(z: (&a mut Jpeg)) -> unit {
         w := (z.comps[n].x + 7) >> 3;
         h := (z.comps[n].y + 7) >> 3;
         tq := z.comps[n].tq;
-        mut coeff = exchange(&mut z.coeffs[n], i64[]);
+        mut coeff = exchange(&mut z.comps[n].coeff, i64[]);
         for j in h {
             for i in w {
                 base := 64 * (i + j * z.comps[n].coeff_w);
@@ -1140,7 +1133,7 @@ fn finish_progressive<a>(z: (&a mut Jpeg)) -> unit {
                 store_block(&mut z, n, &coeff, base, at);
             }
         }
-        exchange(&mut z.coeffs[n], coeff);
+        exchange(&mut z.comps[n].coeff, coeff);
     }
     return ();
 }
@@ -1357,7 +1350,7 @@ fn assemble<a>(z: (&a Jpeg), req: u64) -> Image {
                 near = line1[k];
                 far = line0[k];
             }
-            row := resample(&z.planes[k], near, far, wl[k], hs[k], vs[k]);
+            row := resample(&z.comps[k].data, near, far, wl[k], hs[k], vs[k]);
             rows.push(row);
             ystep[k] = ystep[k] + 1;
             if vs[k] <= ystep[k] {
@@ -1453,7 +1446,7 @@ pub fn decode<a>(data: &a [u8], desired: u64) -> Image? {
         dcs.push(empty_huff());
         acs.push(empty_huff());
     }
-    mut z = Jpeg { dc: dcs, ac: acs, fast_ac: zeros_i(2048), dequant: zeros_u(256), comps: Comp[], hd: u64[], ha: u64[], dc_pred: i64[], planes: u8[][], coeffs: i64[][], width: 0, height: 0, n: 0, h_max: 1, v_max: 1, mcu_x: 0, mcu_y: 0, progressive: false, spec_start: 0, spec_end: 0, succ_high: 0, succ_low: 0, eob_run: 0, jfif: false, app14: -1, rgb: 0, scan_n: 0, order: zeros_u(4), restart_interval: 0, todo: 0 };
+    mut z = Jpeg { dc: dcs, ac: acs, fast_ac: zeros_i(2048), dequant: zeros_u(256), comps: Comp[], width: 0, height: 0, n: 0, h_max: 1, v_max: 1, mcu_x: 0, mcu_y: 0, progressive: false, spec_start: 0, spec_end: 0, succ_high: 0, succ_low: 0, eob_run: 0, jfif: false, app14: -1, rgb: 0, scan_n: 0, order: zeros_u(4), restart_interval: 0, todo: 0 };
     if decode_image(&mut r, &mut z) == false {
         return None;
     }
