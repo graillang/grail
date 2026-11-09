@@ -8,9 +8,12 @@ module llvm;
 // Grail-internal calls pass the six argument words and return the rax:rdx pair; check failures
 // call a noreturn cold stub so LLVM keeps them off the hot path.
 
+// `native` is still the word-machine spelling (machine.grl lowers it for AArch64 and RISC-V);
+// `thunks` is target assembly joining the two calling conventions on those targets.
 pub struct Lowered {
     ir: u8[],
-    native: u8[]
+    native: u8[],
+    thunks: u8[]
 }
 
 struct Func {
@@ -22,6 +25,8 @@ struct Func {
 }
 
 struct L {
+    // 0 x86-64, 1 AArch64, 2 RISC-V 64 (the native backend's numbering).
+    target: u64,
     ir: u8[],
     body: u8[],
     fail: u64,
@@ -30,6 +35,8 @@ struct L {
     term: u64,
     labels: Set,
     calls: u8[][],
+    // Symbols whose address is taken (`sym(%rip)` operands).
+    addrs: u8[][],
     refs: u8[][],
     lifted: u8[][],
     flags: u64,
@@ -544,6 +551,7 @@ fn address<a, b>(l: (&a mut L), op: &b [u8]) -> u8[] {
             return copy(view("null"));
         }
         l.refs.push(copy(view(disp)));
+        l.addrs.push(copy(view(disp)));
         mut sym = u8[];
         put(&mut sym, view("@\""));
         put(&mut sym, view(disp));
@@ -1125,7 +1133,16 @@ fn instruction<a, b>(l: (&a mut L), line: &b [u8]) -> unit {
             put(&mut args, view("i64 "));
             put(&mut args, view(get_reg(&mut l, view(names[i]))));
         }
-        v := def(&mut l, view("call i64 asm sideeffect \"syscall\", \"={rax},{rax},{rdi},{rsi},{rdx},{r10},{r8},{r9},~{rcx},~{r11},~{memory}\"({})"), &u8[][args]);
+        // The stream's number/argument registers become each target's Linux syscall registers
+        // (os-linux.grl already chose the target's syscall number).
+        mut asm = copy(view("call i64 asm sideeffect \"syscall\", \"={rax},{rax},{rdi},{rsi},{rdx},{r10},{r8},{r9},~{rcx},~{r11},~{memory}\"({})"));
+        if l.target == 1 {
+            asm = copy(view("call i64 asm sideeffect \"svc #0\", \"={x0},{x8},{x0},{x1},{x2},{x3},{x4},{x5},~{memory}\"({})"));
+        }
+        if l.target == 2 {
+            asm = copy(view("call i64 asm sideeffect \"ecall\", \"={x10},{x17},{x10},{x11},{x12},{x13},{x14},{x15},~{memory}\"({})"));
+        }
+        v := def(&mut l, view(asm), &u8[][args]);
         set_reg(&mut l, view("rax"), view(v));
         return ();
     }
@@ -1475,9 +1492,101 @@ fn pool_name<a>(label: &a [u8]) -> u8[] {
     return out;
 }
 // Lowers a raw x86-64-spelled stream (target triple `triple`).
+fn target_triple(target: u64) -> u8[] {
+    if target == 1 {
+        return copy(view("aarch64-unknown-linux-gnu"));
+    }
+    if target == 2 {
+        return copy(view("riscv64-unknown-linux-gnu"));
+    }
+    return copy(view("x86_64-unknown-linux-gnu"));
+}
+// On AArch64 and RISC-V the word machine returns rax:rdx in x9:x2 (t0:a2), while LLVM's C
+// convention returns in x0:x1 (a0:a1); arguments already agree (x0..x5 / a0..a5). IR functions
+// are therefore defined as NAME.ll, native code reaches them through a thunk named NAME, and IR
+// reaches native functions through NAME.c.
+fn thunk_into_ir<a>(out: (&a mut u8[]), name: &a [u8], target: u64) -> unit {
+    put(&mut out, view(".text\n.globl "));
+    put(&mut out, name);
+    put(&mut out, view("\n.hidden "));
+    put(&mut out, name);
+    out.push(10);
+    put(&mut out, name);
+    put(&mut out, view(":\n"));
+    if target == 1 {
+        put(&mut out, view("stp x29,x30,[sp,#-16]!\nmov x29,sp\nbl "));
+        put(&mut out, name);
+        put(&mut out, view(".ll\nmov x9,x0\nmov x2,x1\nldp x29,x30,[sp],#16\nret\n"));
+    } else {
+        put(&mut out, view("addi sp,sp,-16\nsd ra,8(sp)\nsd s0,0(sp)\naddi s0,sp,16\ncall "));
+        put(&mut out, name);
+        put(&mut out, view(".ll\nmv t0,a0\nmv a2,a1\nld ra,8(sp)\nld s0,0(sp)\naddi sp,sp,16\nret\n"));
+    }
+    return ();
+}
+fn thunk_from_ir<a>(out: (&a mut u8[]), name: &a [u8], target: u64) -> unit {
+    put(&mut out, view(".text\n.globl "));
+    put(&mut out, name);
+    put(&mut out, view(".c\n.hidden "));
+    put(&mut out, name);
+    put(&mut out, view(".c\n"));
+    put(&mut out, name);
+    put(&mut out, view(".c:\n"));
+    if target == 1 {
+        put(&mut out, view("stp x29,x30,[sp,#-16]!\nmov x29,sp\nbl "));
+        put(&mut out, name);
+        put(&mut out, view("\nmov x0,x9\nmov x1,x2\nldp x29,x30,[sp],#16\nret\n"));
+    } else {
+        put(&mut out, view("addi sp,sp,-16\nsd ra,8(sp)\nsd s0,0(sp)\naddi s0,sp,16\ncall "));
+        put(&mut out, name);
+        put(&mut out, view("\nmv a0,t0\nmv a1,a2\nld ra,8(sp)\nld s0,0(sp)\naddi sp,sp,16\nret\n"));
+    }
+    return ();
+}
+// `line` with each `@"NAME"(` call or definition renamed to NAME.ll (lifted) or NAME.c (native).
+fn rename_calls<a, b>(line: &a [u8], lifted: (&b Set)) -> u8[] {
+    if has(line, view("@\"")) == 0 {
+        return copy(line);
+    }
+    mut out = u8[];
+    mut i: u64 = 0;
+    while i < line.len() {
+        if (line[i] == 64) && (i + 1 < line.len()) && (line[i + 1] == 34) {
+            mut e = i + 2;
+            while (e < line.len()) && (line[e] != 34) {
+                e += 1;
+            }
+            if (e + 1 < line.len()) && (line[e + 1] == 40) {
+                name := sub(line, i + 2, e);
+                put(&mut out, view("@\""));
+                put(&mut out, view(name));
+                if (eq(view(name), view("rt_abort.cold")) == 0) && (starts(view(name), view("llvm.")) == 0) {
+                    if set_has(&lifted, view(name)) {
+                        put(&mut out, view(".ll"));
+                    } else {
+                        put(&mut out, view(".c"));
+                    }
+                }
+                out.push(34);
+                i = e + 1;
+                continue;
+            }
+        }
+        out.push(line[i]);
+        i += 1;
+    }
+    return out;
+}
+pub fn lower_for<a>(stream: &a [u8], target: u64) -> Lowered {
+    triple := target_triple(target);
+    return lower_target(stream, view(triple), target);
+}
 pub fn lower<a, b>(stream: &a [u8], triple: &b [u8]) -> Lowered {
+    return lower_target(stream, triple, 0);
+}
+fn lower_target<a, b>(stream: &a [u8], triple: &b [u8], target: u64) -> Lowered {
     lines := split_lines(stream);
-    mut l = L { ir: u8[], body: u8[], fail: 0, t: 0, dead: 0, term: 0, labels: set_new(16), calls: u8[][], refs: u8[][], lifted: u8[][], flags: 0, frame: 0 };
+    mut l = L { target: target, ir: u8[], body: u8[], fail: 0, t: 0, dead: 0, term: 0, labels: set_new(16), calls: u8[][], addrs: u8[][], refs: u8[][], lifted: u8[][], flags: 0, frame: 0 };
     mut funcs = Func[];
     mut data = u8[][];
     split(&lines, &mut funcs, &mut data);
@@ -1502,6 +1611,7 @@ pub fn lower<a, b>(stream: &a [u8], triple: &b [u8]) -> Lowered {
         }
         saved_calls := l.calls.len();
         saved_refs := l.refs.len();
+        saved_addrs := l.addrs.len();
         if pinned == 0 {
             lower_function(&mut l, &lines, &f);
         }
@@ -1520,6 +1630,9 @@ pub fn lower<a, b>(stream: &a [u8], triple: &b [u8]) -> Lowered {
         }
         while l.refs.len() > saved_refs {
             l.refs.pop();
+        }
+        while l.addrs.len() > saved_addrs {
+            l.addrs.pop();
         }
         mut g = copy(view(".globl "));
         put(&mut g, view(f.name));
@@ -1568,12 +1681,39 @@ pub fn lower<a, b>(stream: &a [u8], triple: &b [u8]) -> Lowered {
     put(&mut ir, view("target triple = \""));
     put(&mut ir, triple);
     put(&mut ir, view("\"\n"));
-    header(&mut ir);
+    mut head = u8[];
+    header(&mut head);
+    if target != 0 {
+        // The cold abort stub calls rt_abort through the same NAME.ll / NAME.c naming.
+        hl := split_lines(view(head));
+        head = u8[];
+        for i in hl.len() {
+            put(&mut head, view(rename_calls(view(hl[i]), &lifted)));
+            head.push(10);
+        }
+    }
+    put(&mut ir, view(head));
     mut callset = set_new(l.calls.len() + 16);
     for i in l.calls.len() {
         set_add(&mut callset, view(l.calls[i]));
     }
     mut exported = set_new(l.refs.len() + 16);
+    if target != 0 {
+        mut declared = set_new(l.addrs.len() + 16);
+        for i in l.addrs.len() {
+            a := view(l.addrs[i]);
+            // Lifted functions and called native functions are declared under NAME.ll / NAME.c,
+            // so their plain names (the native-convention entry) need their own declaration.
+            renamed := set_has(&lifted, a) + set_has(&callset, a);
+            if (renamed != 0) && (set_has(&declared, a) == 0) {
+                set_add(&mut declared, a);
+                set_add(&mut native_tokens, a);
+                put(&mut ir, view("@\""));
+                put(&mut ir, a);
+                put(&mut ir, view("\" = external hidden global i8\n"));
+            }
+        }
+    }
     for i in l.refs.len() {
         r := view(l.refs[i]);
         if set_has(&lifted, r) + set_has(&exported, r) != 0 {
@@ -1587,6 +1727,9 @@ pub fn lower<a, b>(stream: &a [u8], triple: &b [u8]) -> Lowered {
         if set_has(&callset, r) {
             put(&mut ir, view("declare {i64, i64} @\""));
             put(&mut ir, view(name));
+            if target != 0 {
+                put(&mut ir, view(".c"));
+            }
             put(&mut ir, view("\"(i64, i64, i64, i64, i64, i64)\n"));
         } else {
             put(&mut ir, view("@\""));
@@ -1596,20 +1739,36 @@ pub fn lower<a, b>(stream: &a [u8], triple: &b [u8]) -> Lowered {
     }
     // Lifted functions native code does not name are internal (inlinable and removable).
     fl := split_lines(view(functions));
+    mut thunks = u8[];
     for i in fl.len() {
-        line := view(fl[i]);
+        mut renamed = copy(view(fl[i]));
+        if target != 0 {
+            renamed = rename_calls(view(fl[i]), &lifted);
+        }
+        line := view(renamed);
         if starts(line, view("define {i64, i64} @\"")) {
             mut e = 20;
             while (e < line.len()) && (line[e] != 34) {
                 e += 1;
             }
-            fname := sub(line, 20, e);
+            mut fname = sub(line, 20, e);
+            if (target != 0) && ends(view(fname), view(".ll")) {
+                fname = sub(view(fname), 0, fname.len() - 3);
+            }
             if (set_has(&native_tokens, view(fname)) == 0) & (eq(view(fname), view("_start")) == 0) {
                 put(&mut ir, view("define internal {i64, i64} @\""));
                 put(&mut ir, view(sub(line, 20, line.len())));
                 ir.push(10);
                 continue;
             }
+        }
+        if (target != 0) && starts(line, view("define {i64, i64} @\"")) {
+            mut e = 20;
+            while (e < line.len()) && (line[e] != 34) {
+                e += 1;
+            }
+            fname := sub(line, 20, e - 3);
+            thunk_into_ir(&mut thunks, view(fname), target);
         }
         put(&mut ir, view(rename_line(line, &exported)));
         ir.push(10);
@@ -1638,5 +1797,18 @@ pub fn lower<a, b>(stream: &a [u8], triple: &b [u8]) -> Lowered {
         put(&mut native, view(rename_line(line, &exported)));
         native.push(10);
     }
-    return Lowered { ir: ir, native: native };
+    if target != 0 {
+        for i in l.calls.len() {
+            name := view(l.calls[i]);
+            if set_has(&lifted, name) == 0 {
+                mut marker = copy(name);
+                marker.push(1);
+                if set_has(&lifted, view(marker)) == 0 {
+                    set_add(&mut lifted, view(marker));
+                    thunk_from_ir(&mut thunks, name, target);
+                }
+            }
+        }
+    }
+    return Lowered { ir: ir, native: native, thunks: thunks };
 }

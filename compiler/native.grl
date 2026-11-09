@@ -18760,8 +18760,8 @@ pub fn main() -> u64 {
     if (c.debug != 0) & (((c.target == 4) + (c.plat != 0)) != 0) {
         fail_option(&mut c, view("--debug line info is only implemented for Linux and Windows x86_64"));
     }
-    if (c.backend != 0) & (((c.target != 0) + (c.plat != 0) + (c.debug != 0)) != 0) {
-        fail_option(&mut c, view("--backend=llvm is implemented for Linux x86_64 without --debug"));
+    if (c.backend != 0) & (((c.target > 2) + (c.plat != 0) + (c.debug != 0)) != 0) {
+        fail_option(&mut c, view("--backend=llvm is implemented for Linux x86_64, aarch64 and riscv64 without --debug"));
     }
     for pass in 3 {
         if pass == 1 {
@@ -19010,6 +19010,20 @@ pub fn main() -> u64 {
         // The .loc/.file directives pass through instruction selection unchanged; the DWARF
         // sections refer only to labels, so they are appended after lowering.
         out = debug_locs(view(out));
+    }
+    if c.backend != 0 {
+        // LLVM IR (PATH.ll) for the lifted functions; the remainder goes through the usual
+        // instruction selection, followed by the calling-convention thunks.
+        lowered := llvm::lower_for(view(out), target);
+        mut ir_path = copy_bytes(view(path));
+        push_bytes(&mut ir_path, view(".ll"));
+        written := host::write_file(view(ir_path), view(lowered.ir));
+        if written != 0 {
+            return written;
+        }
+        mut image = machine::lower(view(lowered.native), target, c.plat);
+        push_bytes(&mut image, view(lowered.thunks));
+        return host::write_file(view(path), view(with_link_notes(&c.libs, view(image))));
     }
     mut native = machine::lower(view(out), target, c.plat);
     if c.debug != 0 {
