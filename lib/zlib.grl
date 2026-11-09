@@ -1,0 +1,644 @@
+module zlib;
+
+// DEFLATE (RFC 1951) and zlib (RFC 1950) decompression. Any correct inflater produces the same
+// bytes, so this is checked against CPython's zlib on streams of every level and strategy.
+// Decoding uses a 9-bit fast table (as stb_image does) with the canonical slow path beyond it.
+
+const FAST_BITS: u64 = 9;
+
+// A canonical Huffman code: `fast[bits]` is (length << 9) | symbol for codes up to 9 bits (0 when
+// the code is longer); `count[len]` and `symbols` (sorted by code) drive the slow path.
+struct Huffman {
+    fast: u64[],
+    count: u64[],
+    symbols: u64[]
+}
+
+struct Inflater {
+    data: u8[],
+    at: u64,
+    bits: u64,
+    nbits: u64,
+    out: u8[],
+    failed: bool
+}
+
+fn reverse_bits(code: u64, len: u64) -> u64 {
+    mut r: u64 = 0;
+    mut c = code;
+    for i in len {
+        r = (r << 1) | (c & 1);
+        c = c >> 1;
+    }
+    return r;
+}
+
+// None when the lengths over-subscribe the code space (incomplete codes are allowed, as zlib
+// permits a single distance code).
+fn build<a>(lengths: (&a u64[])) -> Huffman? {
+    mut count = u64[];
+    for i in 16 {
+        count.push(0);
+    }
+    for i in lengths.len() {
+        l := lengths[i];
+        count[l] = count[l] + 1;
+    }
+    count[0] = 0;
+    mut left: u64 = 1;
+    for len in 15 {
+        left = left << 1;
+        c := count[len + 1];
+        if left < c {
+            return None;
+        }
+        left = left - c;
+    }
+    // First code of each length, then symbols in code order.
+    mut offsets = u64[];
+    for i in 17 {
+        offsets.push(0);
+    }
+    for len in 15 {
+        offsets[len + 2] = offsets[len + 1] + count[len + 1];
+    }
+    mut symbols = u64[];
+    for i in lengths.len() {
+        symbols.push(0);
+    }
+    for sym in lengths.len() {
+        l := lengths[sym];
+        if l != 0 {
+            symbols[offsets[l]] = sym;
+            offsets[l] = offsets[l] + 1;
+        }
+    }
+    mut fast = u64[];
+    for i in 512 {
+        fast.push(0);
+    }
+    mut next = u64[];
+    for i in 16 {
+        next.push(0);
+    }
+    mut code: u64 = 0;
+    for len in 15 {
+        code = (code + count[len]) << 1;
+        next[len + 1] = code;
+    }
+    for sym in lengths.len() {
+        l := lengths[sym];
+        if (l != 0) && (l <= FAST_BITS) {
+            r := reverse_bits(next[l], l);
+            mut j = r;
+            while j < 512 {
+                fast[j] = (l << 9) | sym;
+                j = j + (1 << l);
+            }
+        }
+        if l != 0 {
+            next[l] = next[l] + 1;
+        }
+    }
+    return Some(Huffman { fast: fast, count: count, symbols: symbols });
+}
+
+fn need<a>(z: (&a mut Inflater), n: u64) -> bool {
+    while z.nbits < n {
+        if z.at >= z.data.len() {
+            return false;
+        }
+        z.bits = z.bits | (z.data[z.at] << z.nbits);
+        z.at = z.at + 1;
+        z.nbits = z.nbits + 8;
+    }
+    return true;
+}
+
+fn take<a>(z: (&a mut Inflater), n: u64) -> u64 {
+    if need(&mut z, n) == false {
+        z.failed = true;
+        return 0;
+    }
+    v := z.bits & ((1 << n) - 1);
+    z.bits = z.bits >> n;
+    z.nbits = z.nbits - n;
+    return v;
+}
+
+// The next symbol, or 9999 on a bad code or end of input.
+fn decode<a, b>(z: (&a mut Inflater), h: (&b Huffman)) -> u64 {
+    // Top up to 16 bits when the input allows; a short tail still decodes bit by bit.
+    need(&mut z, 16);
+    // Bits above nbits are zero, so a fast entry is valid whenever its length fits in what is held.
+    e := h.fast[z.bits & 511];
+    if (e != 0) && ((e >> 9) <= z.nbits) {
+        l := e >> 9;
+        z.bits = z.bits >> l;
+        z.nbits = z.nbits - l;
+        return e & 511;
+    }
+    // Canonical decode, one bit at a time (puff's algorithm).
+    mut code: u64 = 0;
+    mut first: u64 = 0;
+    mut index: u64 = 0;
+    mut len: u64 = 1;
+    while len < 16 {
+        if z.nbits == 0 {
+            if need(&mut z, 1) == false {
+                return 9999;
+            }
+        }
+        code = code | (z.bits & 1);
+        z.bits = z.bits >> 1;
+        z.nbits = z.nbits - 1;
+        c := h.count[len];
+        if code < first + c {
+            return h.symbols[index + (code - first)];
+        }
+        index = index + c;
+        first = (first + c) << 1;
+        code = code << 1;
+        len = len + 1;
+    }
+    return 9999;
+}
+
+fn length_base(i: u64) -> u64 {
+    table := u64[3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258];
+    return table[i];
+}
+fn length_extra(i: u64) -> u64 {
+    table := u64[0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0];
+    return table[i];
+}
+fn dist_base(i: u64) -> u64 {
+    table := u64[1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577];
+    return table[i];
+}
+fn dist_extra(i: u64) -> u64 {
+    table := u64[0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13];
+    return table[i];
+}
+
+fn codes<a, b, c>(z: (&a mut Inflater), lit: (&b Huffman), dist: (&c Huffman)) -> bool {
+    while true {
+        sym := decode(&mut z, &lit);
+        if sym < 256 {
+            z.out.push(sym);
+            continue;
+        }
+        if sym == 256 {
+            return true;
+        }
+        if 285 < sym {
+            return false;
+        }
+        li := sym - 257;
+        len := length_base(li) + take(&mut z, length_extra(li));
+        ds := decode(&mut z, &dist);
+        if 29 < ds {
+            return false;
+        }
+        d := dist_base(ds) + take(&mut z, dist_extra(ds));
+        if z.failed || (z.out.len() < d) {
+            return false;
+        }
+        start := z.out.len() - d;
+        for i in len {
+            b := z.out[start + i];
+            z.out.push(b);
+        }
+    }
+    return false;
+}
+
+fn fixed_tables() -> Huffman[] {
+    mut lengths = u64[];
+    for i in 288 {
+        mut l: u64 = 8;
+        if (143 < i) && (i < 256) {
+            l = 9;
+        }
+        if (255 < i) && (i < 280) {
+            l = 7;
+        }
+        lengths.push(l);
+    }
+    mut dists = u64[];
+    for i in 30 {
+        dists.push(5);
+    }
+    mut out = Huffman[];
+    out.push(build(&lengths)!);
+    out.push(build(&dists)!);
+    return out;
+}
+
+fn dynamic_tables<a>(z: (&a mut Inflater)) -> Huffman[]? {
+    nlen := take(&mut z, 5) + 257;
+    ndist := take(&mut z, 5) + 1;
+    ncode := take(&mut z, 4) + 4;
+    if z.failed || (286 < nlen) || (30 < ndist) {
+        return None;
+    }
+    order := u64[16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15];
+    mut cl = u64[];
+    for i in 19 {
+        cl.push(0);
+    }
+    for i in ncode {
+        cl[order[i]] = take(&mut z, 3);
+    }
+    lencode := build(&cl);
+    if lencode.is_none() {
+        return None;
+    }
+    lc := lencode!;
+    mut lengths = u64[];
+    while lengths.len() < nlen + ndist {
+        sym := decode(&mut z, &lc);
+        if sym < 16 {
+            lengths.push(sym);
+            continue;
+        }
+        mut repeat: u64 = 0;
+        mut value: u64 = 0;
+        if sym == 16 {
+            if lengths.len() == 0 {
+                return None;
+            }
+            value = lengths[lengths.len() - 1];
+            repeat = 3 + take(&mut z, 2);
+        } else {
+            if sym == 17 {
+                repeat = 3 + take(&mut z, 3);
+            } else {
+                if sym == 18 {
+                    repeat = 11 + take(&mut z, 7);
+                } else {
+                    return None;
+                }
+            }
+        }
+        if nlen + ndist < lengths.len() + repeat {
+            return None;
+        }
+        for i in repeat {
+            lengths.push(value);
+        }
+    }
+    if z.failed || (lengths[256] == 0) {
+        return None;
+    }
+    mut litl = u64[];
+    for i in nlen {
+        litl.push(lengths[i]);
+    }
+    mut distl = u64[];
+    for i in ndist {
+        distl.push(lengths[nlen + i]);
+    }
+    lit := build(&litl);
+    dist := build(&distl);
+    if lit.is_none() || dist.is_none() {
+        return None;
+    }
+    mut out = Huffman[];
+    out.push(lit!);
+    out.push(dist!);
+    return Some(out);
+}
+
+fn stored<a>(z: (&a mut Inflater)) -> bool {
+    // Discard to a byte boundary, then LEN and NLEN.
+    z.bits = 0;
+    z.nbits = 0;
+    if z.data.len() < z.at + 4 {
+        return false;
+    }
+    len := z.data[z.at] | (z.data[z.at + 1] << 8);
+    nlen := z.data[z.at + 2] | (z.data[z.at + 3] << 8);
+    z.at = z.at + 4;
+    if (len ^ 65535) != nlen {
+        return false;
+    }
+    if z.data.len() < z.at + len {
+        return false;
+    }
+    for i in len {
+        z.out.push(z.data[z.at + i]);
+    }
+    z.at = z.at + len;
+    return true;
+}
+
+fn blocks<a>(z: (&a mut Inflater)) -> bool {
+    mut last: u64 = 0;
+    while last == 0 {
+        last = take(&mut z, 1);
+        kind := take(&mut z, 2);
+        if z.failed {
+            return false;
+        }
+        if kind == 0 {
+            // Return whole input bytes still buffered as bits before reading LEN.
+            back := z.nbits / 8;
+            z.at = z.at - back;
+            if stored(&mut z) == false {
+                return false;
+            }
+            continue;
+        }
+        mut tables = Huffman[];
+        if kind == 1 {
+            tables = fixed_tables();
+        } else {
+            if kind == 2 {
+                t := dynamic_tables(&mut z);
+                if t.is_none() {
+                    return false;
+                }
+                tables = t!;
+            } else {
+                return false;
+            }
+        }
+        if codes(&mut z, &tables[0], &tables[1]) == false {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Raw DEFLATE data (no zlib header): the decompressed bytes, or None for a malformed stream.
+pub fn inflate_raw<a>(data: &a [u8]) -> u8[]? {
+    mut z = Inflater { data: data.copy(), at: 0, bits: 0, nbits: 0, out: u8[], failed: false };
+    if blocks(&mut z) == false {
+        return None;
+    }
+    return Some(exchange(&mut z.out, u8[]));
+}
+
+pub fn adler32<a>(data: &a [u8]) -> u64 {
+    mut a: u64 = 1;
+    mut b: u64 = 0;
+    for i in data.len() {
+        a = (a + data[i]) % 65521;
+        b = (b + a) % 65521;
+    }
+    return (b << 16) | a;
+}
+
+// A zlib stream: header (CM 8, no preset dictionary), DEFLATE data and the Adler-32 trailer,
+// which is checked. None for any malformed or mismatching stream.
+pub fn inflate<a>(data: &a [u8]) -> u8[]? {
+    if data.len() < 6 {
+        return None;
+    }
+    cmf := data[0];
+    flg := data[1];
+    if ((cmf & 15) != 8) || (((cmf << 8) | flg) % 31 != 0) || ((flg & 32) != 0) {
+        return None;
+    }
+    mut z = Inflater { data: data.copy(), at: 2, bits: 0, nbits: 0, out: u8[], failed: false };
+    if blocks(&mut z) == false {
+        return None;
+    }
+    // The trailer starts at the next byte boundary after the final block.
+    back := z.nbits / 8;
+    end := z.at - back;
+    if data.len() < end + 4 {
+        return None;
+    }
+    want := (data[end] << 24) | (data[end + 1] << 16) | (data[end + 2] << 8) | data[end + 3];
+    if adler32(&z.out) != want {
+        return None;
+    }
+    return Some(exchange(&mut z.out, u8[]));
+}
+
+// A zlib stream without verifying the Adler-32 trailer (which may be absent), as image decoders
+// such as stb_image do; `header` = false reads raw DEFLATE data.
+pub fn inflate_lenient<a>(data: &a [u8], header: bool) -> u8[]? {
+    mut start: u64 = 0;
+    if header {
+        if data.len() < 2 {
+            return None;
+        }
+        cmf := data[0];
+        flg := data[1];
+        if ((cmf & 15) != 8) || (((cmf << 8) | flg) % 31 != 0) || ((flg & 32) != 0) {
+            return None;
+        }
+        start = 2;
+    }
+    mut z = Inflater { data: data.copy(), at: start, bits: 0, nbits: 0, out: u8[], failed: false };
+    if blocks(&mut z) == false {
+        return None;
+    }
+    return Some(exchange(&mut z.out, u8[]));
+}
+
+// ---- compression: stb_image_write's zlib compressor, byte for byte ----
+// A single fixed-Huffman block with stb's hash chains (16384 buckets of at most 2*quality
+// positions, oldest half dropped when full) and one-step lazy matching; it falls back to stored
+// blocks when that would be smaller, and appends the Adler-32 trailer.
+
+struct BitWriter {
+    out: u8[],
+    buffer: u64,
+    count: u64
+}
+
+fn put<a>(w: (&a mut BitWriter), code: u64, bits: u64) -> unit {
+    w.buffer = w.buffer | (code << w.count);
+    w.count = w.count + bits;
+    while 8 <= w.count {
+        w.out.push(w.buffer & 255);
+        w.buffer = w.buffer >> 8;
+        w.count = w.count - 8;
+    }
+    return ();
+}
+
+fn put_huff<a>(w: (&a mut BitWriter), n: u64) -> unit {
+    if n <= 143 {
+        put(&mut w, reverse_bits(48 + n, 8), 8);
+        return ();
+    }
+    if n <= 255 {
+        put(&mut w, reverse_bits(400 + n - 144, 9), 9);
+        return ();
+    }
+    if n <= 279 {
+        put(&mut w, reverse_bits(n - 256, 7), 7);
+        return ();
+    }
+    put(&mut w, reverse_bits(192 + n - 280, 8), 8);
+    return ();
+}
+
+fn zhash<a>(data: &a [u8], i: u64) -> u64 {
+    mask := 4294967295;
+    mut h = (data[i] + (data[i + 1] << 8) + (data[i + 2] << 16)) & mask;
+    h = (h ^ (h << 3)) & mask;
+    h = (h + (h >> 5)) & mask;
+    h = (h ^ (h << 4)) & mask;
+    h = (h + (h >> 17)) & mask;
+    h = (h ^ (h << 25)) & mask;
+    h = (h + (h >> 6)) & mask;
+    return h;
+}
+
+fn count_match<a>(data: &a [u8], a: u64, b: u64, limit: u64) -> u64 {
+    mut i: u64 = 0;
+    while (i < limit) && (i < 258) {
+        if data[a + i] != data[b + i] {
+            return i;
+        }
+        i += 1;
+    }
+    return i;
+}
+
+pub fn compress<a>(data: &a [u8], level: u64) -> u8[] {
+    lengthc := u64[3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258, 259];
+    lengtheb := u64[0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0];
+    distc := u64[1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577, 32768];
+    disteb := u64[0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13];
+    mut quality = level;
+    if quality < 5 {
+        quality = 5;
+    }
+    n := data.len();
+    mut w = BitWriter { out: u8[120, 94], buffer: 0, count: 0 };
+    put(&mut w, 1, 1);
+    put(&mut w, 1, 2);
+    mut table = u64[][];
+    for i in 16384 {
+        table.push(u64[]);
+    }
+    mut i: u64 = 0;
+    while i + 3 < n {
+        mut h = zhash(&data, i) & 16383;
+        mut best: u64 = 3;
+        mut bestloc: u64 = 0;
+        mut found = false;
+        mut list = exchange(&mut table[h], u64[]);
+        for j in list.len() {
+            p := list[j];
+            // Within the window: p - data > i - 32768.
+            if i < p + 32768 {
+                d := count_match(&data, p, i, n - i);
+                if best <= d {
+                    best = d;
+                    bestloc = p;
+                    found = true;
+                }
+            }
+        }
+        if list.len() == 2 * quality {
+            mut kept = u64[];
+            for j in quality {
+                kept.push(list[quality + j]);
+            }
+            list = kept;
+        }
+        list.push(i);
+        exchange(&mut table[h], list);
+        if found {
+            h = zhash(&data, i + 1) & 16383;
+            next := &table[h];
+            for j in next.len() {
+                p := next[j];
+                if i < p + 32767 {
+                    e := count_match(&data, p, i + 1, n - i - 1);
+                    if best < e {
+                        found = false;
+                        break;
+                    }
+                }
+            }
+        }
+        if found {
+            d := i - bestloc;
+            mut j: u64 = 0;
+            while lengthc[j + 1] - 1 < best {
+                j += 1;
+            }
+            put_huff(&mut w, j + 257);
+            if lengtheb[j] != 0 {
+                put(&mut w, best - lengthc[j], lengtheb[j]);
+            }
+            j = 0;
+            while distc[j + 1] - 1 < d {
+                j += 1;
+            }
+            put(&mut w, reverse_bits(j, 5), 5);
+            if disteb[j] != 0 {
+                put(&mut w, d - distc[j], disteb[j]);
+            }
+            i += best;
+        } else {
+            put_huff(&mut w, data[i]);
+            i += 1;
+        }
+    }
+    while i < n {
+        put_huff(&mut w, data[i]);
+        i += 1;
+    }
+    put_huff(&mut w, 256);
+    while w.count != 0 {
+        put(&mut w, 0, 1);
+    }
+    mut out = exchange(&mut w.out, u8[]);
+    if n + 2 + ((n + 32766) / 32767) * 5 < out.len() {
+        // Stored blocks are smaller: keep the 2-byte header and copy the data in 32767-byte blocks.
+        out = u8[120, 94];
+        mut j: u64 = 0;
+        while j < n {
+            mut len = n - j;
+            if 32767 < len {
+                len = 32767;
+            }
+            if n - j == len {
+                out.push(1);
+            } else {
+                out.push(0);
+            }
+            out.push(len & 255);
+            out.push((len >> 8) & 255);
+            out.push((len ^ 65535) & 255);
+            out.push(((len ^ 65535) >> 8) & 255);
+            for k in len {
+                out.push(data[j + k]);
+            }
+            j += len;
+        }
+    }
+    a := adler32(data);
+    out.push((a >> 24) & 255);
+    out.push((a >> 16) & 255);
+    out.push((a >> 8) & 255);
+    out.push(a & 255);
+    return out;
+}
+
+// The CRC-32 used by PNG chunks (reflected, polynomial 0xEDB88320).
+pub fn crc32<a>(data: &a [u8]) -> u64 {
+    mut crc: u64 = 4294967295;
+    for i in data.len() {
+        mut c = (crc ^ data[i]) & 255;
+        for k in 8 {
+            if (c & 1) != 0 {
+                c = 3988292384 ^ (c >> 1);
+            } else {
+                c = c >> 1;
+            }
+        }
+        crc = (crc >> 8) ^ c;
+    }
+    return crc ^ 4294967295;
+}

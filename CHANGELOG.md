@@ -112,6 +112,16 @@
   and nested records come back from C by value. Results with floats inside an embedded record
   are refused for now. `tests/ffi/nested_records.grl` checks `sizeof`/`offsetof` against clang
   and runs on x86-64, AArch64 and RISC-V 64 Linux and on Windows x86-64 (Wine).
+- Standard library: `zlib` (DEFLATE/zlib inflate, Adler-32, and a lenient variant for image
+  decoders), `png` and `jpeg`. The image decoders reproduce `stb_image` exactly (the library
+  Abundance uses): PNG in every colour type and bit depth with Adam7, palettes, colour-key tRNS
+  and stb's 16-to-8-bit and channel conversions; JPEG baseline and progressive with stb's integer
+  IDCT, upsampling filters, fixed-point YCbCr and Adobe CMYK/YCCK handling. Tests compare against
+  CPython's zlib and against stb itself for every requested channel count (53 streams, 570 PNG
+  and 290 JPEG checks); all 95 PNG assets in the Abundance tree also decode bit-identically.
+  `png::encode` and `zlib::compress` reproduce `stbi_write_png` byte for byte (its hash-chain
+  compressor, adaptive filter choice and CRC; 444 encodings checked). Decoding is currently about
+  160x slower than stb.
 
 - DWARF debug info on Linux AArch64 and RISC-V 64: `--debug` emits the same line table and
   typed variables as on x86-64 (frame base `x29` / `s0`). Under qemu with gdb's remote stub,
