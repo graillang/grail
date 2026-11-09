@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Record patterns in `match`: `match p { Point { x, y: other, .. } => { ... } }` takes a record apart
+  by field. A record arm matches every value, so it is the only pattern (an explicit `_` may follow
+  and is never taken); `..` ignores the rest. Fields bind by copy for plain scalars, by move when the
+  whole record is moved, and as shared or exclusive references through `match &p` and `match &mut p`.
+  An unknown field and a field left out without `..` are reported by name, and a record arm may not
+  be followed by any pattern but `_`. The book's records chapter documents the form with a
+  `record-patterns` example.
 - A program's own `Task`, `Mutex`, `Atomic`, `Scope` or `CancelToken` type shadows the built-in generic of that name
   (`Task[...]` was a parse error). A slice compares with `==` against a vector of the same element type.
 - Book: duplicate chapters merged (numbers, bytes and text, records and vectors, views and slices); every example uses

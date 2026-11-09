@@ -17801,6 +17801,221 @@ fn scalar_match<a>(c: (&a mut C), s: Val) -> unit {
     }
     return ();
 }
+// A record pattern names a field the record does not have, or forgets one: report which.
+fn field_index<a, b>(c: (&a mut C), decl: u64, name: &b [u8]) -> u64 {
+    d := &c.decls[decl];
+    for i in d.count {
+        f := &c.fields[d.first + i];
+        if same(view(f.name), view(name)) {
+            return i + 1;
+        }
+    }
+    return 0;
+}
+fn fail_unknown_field<a, b>(c: (&a mut C), name: &b [u8]) -> unit {
+    mut msg = u8[];
+    push_bytes(&mut msg, view("unknown field in record pattern: "));
+    push_bytes(&mut msg, name);
+    fail(&mut c, view(msg));
+    return ();
+}
+fn fail_missing_field<a>(c: (&a mut C), decl: u64, index: u64) -> unit {
+    mut msg = u8[];
+    push_bytes(&mut msg, view("record pattern is missing field: "));
+    d := &c.decls[decl];
+    f := &c.fields[d.first + index];
+    push_bytes(&mut msg, view(f.name));
+    fail(&mut c, view(msg));
+    return ();
+}
+// `match p { Point { x, y: other, .. } => ... }` on a record value. A record pattern matches
+// every value, so it is the only pattern arm (an explicit `_` may follow and is never taken).
+// Fields bind by copy for plain scalars, by move when the scrutinee is moved, and as references
+// through `match &p`/`match &mut p`, exactly as enum payload patterns do.
+fn record_match<a>(c: (&a mut C), sslot: u64, sty: u64, x: Val, byref: u64, refmode: u64) -> unit {
+    xt := x.t;
+    xty := x.ty;
+    d := ty_arg(&mut c, xty);
+    count := c.decls[d].count;
+    expect(&mut c, view("{"));
+    if is(&mut c, view("_")) {
+        fail(&mut c, view("match on a record takes a record pattern"));
+    }
+    name := ident(&mut c);
+    if same(view(name), view(c.decls[d].name)) == 0 {
+        fail(&mut c, view("pattern type is not the scrutinee's record type"));
+    }
+    if c.decls[d].c_layout {
+        fail(&mut c, view("a record pattern needs a Grail record, not an extern record"));
+    }
+    if byref == 0 {
+        move_out(&mut c, val(xt, xty));
+    }
+    before := ownership::snapshot(&c.check);
+    root := place_of(&mut c, xt);
+    mark := c.locals.len();
+    payloads := c.resources.len();
+    expect(&mut c, view("{"));
+    mut seen = u64[];
+    mut rest = 0;
+    while 1 {
+        if eat(&mut c, view("}")) {
+            break;
+        }
+        if (kind(&mut c) == 46) & (next_kind(&mut c) == 46) {
+            advance(&mut c);
+            advance(&mut c);
+            rest = 1;
+            if eat(&mut c, view(",")) {
+                fail(&mut c, view(".. must be the last item in a record pattern"));
+            }
+            expect(&mut c, view("}"));
+            break;
+        }
+        field := ident(&mut c);
+        found := field_index(&mut c, d, view(field));
+        if found == 0 {
+            fail_unknown_field(&mut c, view(field));
+        }
+        k := found - 1;
+        for i in seen.len() {
+            if seen[i] == k {
+                fail(&mut c, view("duplicate field in a record pattern"));
+            }
+        }
+        seen.push(k);
+        mut binder = field;
+        if eat(&mut c, view(":")) {
+            binder = ident(&mut c);
+            if same(view(binder), view("_")) {
+                fail(&mut c, view("a record pattern field binds a name; use .. to ignore fields"));
+            }
+        }
+        fty := field_type(&mut c, xty, k);
+        if byref {
+            if scalar(&mut c, fty) {
+                value := rec_load(&mut c, xt, k, 0);
+                bind(&mut c, binder, fty, value, 0);
+            } else {
+                n := rec_load(&mut c, xt, k, 1);
+                refty := reference_type(&mut c, fty, refmode);
+                target := member_place(&mut c, root, k, fty);
+                authority := authority_of(&mut c, xt);
+                c
+                    .resources
+                    .push(
+                        Resource {
+                            slot: n,
+                            ty: refty,
+                            flag: 0,
+                            base: xt + 1,
+                            field: k,
+                            via: 1,
+                            place: 0,
+                            target: target,
+                            authority: authority
+                        }
+                    );
+                r := borrow_reference(&mut c, n, refty, xt, target, refmode);
+                bind(&mut c, binder, r.ty, r.t, 0);
+            }
+        } else {
+            payload := rec_load(&mut c, xt, k, 0);
+            if scalar(&mut c, fty) {
+                bind(&mut c, binder, fty, payload, 0);
+            } else {
+                own(&mut c, payload, fty);
+                if contains_borrow(&mut c, fty, 0) {
+                    // The scrutinee's loans follow a moved field: the record storage holds them at
+                    // its own place, so they move from there to the extracted value.
+                    dest := place_of(&mut c, payload);
+                    transfer_bonds(&mut c, root, dest);
+                }
+                stored_source(&mut c, payload, fty);
+                bind(&mut c, binder, fty, payload, 0);
+            }
+        }
+        if eat(&mut c, view(",")) == 0 {
+            expect(&mut c, view("}"));
+            break;
+        }
+    }
+    if (rest == 0) & (seen.len() != count) {
+        for i in count {
+            mut used = 0;
+            for j in seen.len() {
+                if seen[j] == i {
+                    used = 1;
+                }
+            }
+            if used == 0 {
+                fail_missing_field(&mut c, d, i);
+            }
+        }
+    }
+    if byref == 0 {
+        // Fields the pattern leaves out (`..`) are dropped with the record's storage.
+        for k in count {
+            mut used = 0;
+            for i in seen.len() {
+                if seen[i] == k {
+                    used = 1;
+                }
+            }
+            if used == 0 {
+                fty := field_type(&mut c, xty, k);
+                if needs_drop(&mut c, fty) {
+                    value := rec_load(&mut c, xt, k, 0);
+                    get(&mut c, value, view("%rdi"));
+                    drop_call(&mut c, fty);
+                }
+            }
+        }
+        invoke(&mut c, view("rt_free"), one(xt));
+    }
+    expect(&mut c, view("=>"));
+    if byref {
+        arm_scrutinee(&mut c, sslot, sty);
+    }
+    block(&mut c);
+    cleanup(&mut c, payloads);
+    pop_locals(&mut c, mark);
+    eaten := eat(&mut c, view(","));
+    if eaten & (is(&mut c, view("_")) == 0) & (is(&mut c, view("}")) == 0) {
+        fail(&mut c, view("a record pattern must be the only pattern arm"));
+    }
+    if is(&mut c, view("_")) {
+        // The `_` arm is unreachable, but it is still checked: it starts where the record arm did
+        // and drops the scrutinee itself.
+        after := ownership::snapshot(&c.check);
+        term := c.terminated;
+        end := label(&mut c);
+        advance(&mut c);
+        if term == 0 {
+            jump(&mut c, view("jmp"), end);
+        }
+        expect(&mut c, view("=>"));
+        ownership::restore(&mut c.check, &before);
+        exchange(&mut c.terminated, 0);
+        if byref {
+            arm_scrutinee(&mut c, sslot, sty);
+        } else {
+            get(&mut c, xt, view("%rdi"));
+            drop_call(&mut c, x.ty);
+        }
+        block(&mut c);
+        eat(&mut c, view(","));
+        expect(&mut c, view("}"));
+        mark(&mut c, end);
+        if term == 0 {
+            ownership::restore(&mut c.check, &after);
+        }
+        exchange(&mut c.terminated, term);
+        return ();
+    }
+    expect(&mut c, view("}"));
+    return ();
+}
 fn statement<a>(c: (&a mut C)) -> unit {
     emit_loc(&mut c);
     // An `unsafe { ... }` block is the explicit boundary for foreign calls. It is
@@ -18483,10 +18698,10 @@ fn statement<a>(c: (&a mut C)) -> unit {
             fail(&mut c, view("match requires an enum, integer or bool"));
         }
         d := ty_arg(&mut c, x.ty);
-        decl := &c.decls[d];
-        count := decl.count;
-        if decl.is_enum == 0 {
-            fail(&mut c, view("match requires an enum, integer or bool"));
+        count := c.decls[d].count;
+        if c.decls[d].is_enum == 0 {
+            record_match(&mut c, sslot, sty, x, byref, refmode);
+            return ();
         }
         tag := rec_load(&mut c, xt, 0, 0);
         if byref == 0 {
@@ -18524,6 +18739,9 @@ fn statement<a>(c: (&a mut C)) -> unit {
                     pattern = parse_type(&mut c);
                 } else {
                     name = ident(&mut c);
+                    if is(&mut c, view("{")) {
+                        fail(&mut c, view("a record pattern needs a record value"));
+                    }
                 }
             }
             // `_ =>` covers the remaining variants; an owned value is dropped there.

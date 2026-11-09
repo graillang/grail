@@ -42,7 +42,6 @@ small slabs for reuse, while large single-object arenas are released immediately
 ## Not implemented yet
 
 - Map iteration with `for key, value in map`; use indexing, `get` and `entry` instead.
-- Record patterns in `match`; read the fields instead.
 - Closures that capture a borrowed value; capture an owned copy instead.
 - Consuming loops over owned elements (`for item in items` where items own data); use `&items`.
 
