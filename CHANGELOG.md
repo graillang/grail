@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- LLVM backend: when every frame access in a function is a constant offset below rbp, each 8-byte
+  slot becomes its own alloca, so borrowing one local no longer makes the whole frame escape and
+  LLVM keeps the rest in registers. With `--backend=llvm` the benchmarks are now 1.2x (fnv, sieve),
+  1.5x (sort), 2.3x (nbody) and 3.2x (matmul) of C `-O2`.
+
 - Repeat literals: `u8[0; n]`, `u64[7; n]`, `f32[0.0; n]` make `n` copies of a plain value in a
   single allocation (Go's `make([]byte, n)`, Rust's `vec![0; n]`). A byte value above 255 stops the
   program; an owned element type is rejected. The sieve benchmark uses it in place of a push loop.

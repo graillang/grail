@@ -40,7 +40,10 @@ struct L {
     refs: u8[][],
     lifted: u8[][],
     flags: u64,
-    frame: u64
+    frame: u64,
+    // 1 when every frame access is a constant negative offset from rbp: each 8-byte slot is then
+    // its own alloca, so borrowing one local does not make the whole frame escape.
+    split: u64
 }
 
 fn eq<a, b>(a: &a [u8], b: &b [u8]) -> u64 {
@@ -570,6 +573,16 @@ fn address<a, b>(l: (&a mut L), op: &b [u8]) -> u8[] {
     mut dt = u8[];
     inum(&mut dt, d);
     if eq(view(base), view("rbp")) & (inner.len() == 1) {
+        if l.split {
+            // Slot k covers [-8(k+1), -8k) below rbp.
+            k := u64(0 - (d + 1)) / 8;
+            within := d + i64(8 * (k + 1));
+            mut slot = copy(view("%s."));
+            num(&mut slot, k);
+            mut wt = u8[];
+            inum(&mut wt, within);
+            return def(&mut l, view("getelementptr i8, ptr {}, i64 {}"), &u8[][slot, wt]);
+        }
         return def(&mut l, view("getelementptr i8, ptr %fbase, i64 {}"), &u8[][dt]);
     }
     mut acc = u8[];
@@ -1334,6 +1347,44 @@ fn body_lines<a, b>(lines: (&a u8[][]), f: (&b Func)) -> u8[][] {
     }
     return out;
 }
+// Whether every `%rbp` in the instructions is a constant negative offset `-N(%rbp)`; the deepest
+// slot index is written to `deepest`.
+fn frame_split<a>(instrs: (&a u8[][]), deepest: (&a mut u64)) -> u64 {
+    exchange(deepest, 0);
+    mut most: u64 = 0;
+    for m in instrs.len() {
+        line := view(instrs[m]);
+        if has(line, view("%rbp")) == 0 {
+            continue;
+        }
+        mut i: u64 = 0;
+        while i + 4 <= line.len() {
+            if occurs_at(line, i, view("%rbp")) {
+                if (i == 0) || (line[i - 1] != 40) || (i + 4 >= line.len()) || (line[i + 4] != 41) {
+                    return 0;
+                }
+                // The displacement runs back from `(` to a space or comma.
+                mut b = i - 1;
+                while (b > 0) && (line[b - 1] != 32) && (line[b - 1] != 44) {
+                    b -= 1;
+                }
+                d := parse_int(view(sub(line, b, i - 1)));
+                if (d.ok == 0) || (d.v >= 0) {
+                    return 0;
+                }
+                k := u64(0 - (d.v + 1)) / 8;
+                if k > most {
+                    most = k;
+                }
+                i += 4;
+                continue;
+            }
+            i += 1;
+        }
+    }
+    exchange(deepest, most);
+    return 1;
+}
 // Lowers one function into l.body; l.fail is set when any line is not understood.
 fn lower_function<a, b>(l: (&a mut L), lines: (&b u8[][]), f: (&b Func)) -> unit {
     l.body = u8[];
@@ -1419,13 +1470,32 @@ fn lower_function<a, b>(l: (&a mut L), lines: (&b u8[][]), f: (&b Func)) -> unit
     for q in flags.len() {
         emit(&mut l, view("{} = alloca i1"), &u8[][slot_of(view("%f."), view(flags[q]))]);
     }
-    mut fs = u8[];
-    num(&mut fs, size + 16);
-    emit(&mut l, view("%frame = alloca [{} x i8], align 16"), &u8[][fs]);
-    if zero >= 0 {
-        mut zs = u8[];
-        num(&mut zs, size - 8 * u64(zero));
-        emit(&mut l, view("call void @llvm.memset.p0.i64(ptr %frame, i8 0, i64 {}, i1 false)"), &u8[][zs]);
+    mut deepest: u64 = 0;
+    l.split = frame_split(&instrs, &mut deepest);
+    if l.split {
+        // One alloca per slot; the prologue's zeroing covers the slots below the parameters.
+        slots := size / 8;
+        mut count = slots;
+        if deepest + 1 > count {
+            count = deepest + 1;
+        }
+        for k in count {
+            mut sn = copy(view("%s."));
+            num(&mut sn, k);
+            emit(&mut l, view("{} = alloca i64, align 8"), &u8[][copy(view(sn))]);
+            if (zero >= 0) && (k >= u64(zero)) && (k < slots) {
+                emit(&mut l, view("store i64 0, ptr {}"), &u8[][sn]);
+            }
+        }
+    } else {
+        mut fs = u8[];
+        num(&mut fs, size + 16);
+        emit(&mut l, view("%frame = alloca [{} x i8], align 16"), &u8[][fs]);
+        if zero >= 0 {
+            mut zs = u8[];
+            num(&mut zs, size - 8 * u64(zero));
+            emit(&mut l, view("call void @llvm.memset.p0.i64(ptr %frame, i8 0, i64 {}, i1 false)"), &u8[][zs]);
+        }
     }
     args := u8[][copy(view("rdi")), copy(view("rsi")), copy(view("rdx")), copy(view("rcx")), copy(view("r8")), copy(view("r9"))];
     for a in 6 {
@@ -1433,10 +1503,12 @@ fn lower_function<a, b>(l: (&a mut L), lines: (&b u8[][]), f: (&b Func)) -> unit
         num(&mut an, a);
         emit(&mut l, view("store i64 {}, ptr {}"), &u8[][an, slot_of(view("%r."), view(args[a]))]);
     }
-    mut ss = u8[];
-    num(&mut ss, size);
-    emit(&mut l, view("%fbase = getelementptr i8, ptr %frame, i64 {}"), &u8[][ss]);
-    emit(&mut l, view("%rbpv = ptrtoint ptr %fbase to i64"), &u8[][]);
+    if l.split == 0 {
+        mut ss = u8[];
+        num(&mut ss, size);
+        emit(&mut l, view("%fbase = getelementptr i8, ptr %frame, i64 {}"), &u8[][ss]);
+        emit(&mut l, view("%rbpv = ptrtoint ptr %fbase to i64"), &u8[][]);
+    }
     emit(&mut l, view("br label %body"), &u8[][]);
     begin_block(&mut l, view("body"));
     for m in instrs.len() {
@@ -1586,7 +1658,7 @@ pub fn lower<a, b>(stream: &a [u8], triple: &b [u8]) -> Lowered {
 }
 fn lower_target<a, b>(stream: &a [u8], triple: &b [u8], target: u64) -> Lowered {
     lines := split_lines(stream);
-    mut l = L { target: target, ir: u8[], body: u8[], fail: 0, t: 0, dead: 0, term: 0, labels: set_new(16), calls: u8[][], addrs: u8[][], refs: u8[][], lifted: u8[][], flags: 0, frame: 0 };
+    mut l = L { target: target, ir: u8[], body: u8[], fail: 0, t: 0, dead: 0, term: 0, labels: set_new(16), calls: u8[][], addrs: u8[][], split: 0, refs: u8[][], lifted: u8[][], flags: 0, frame: 0 };
     mut funcs = Func[];
     mut data = u8[][];
     split(&lines, &mut funcs, &mut data);
