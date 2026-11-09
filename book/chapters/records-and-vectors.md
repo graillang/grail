@@ -8,7 +8,9 @@ are still released when the record ends.
 
 {{example:records}}
 
-`T[]` creates an empty vector; `u64[10, 20, 30]` initializes one directly.
+`T[]` creates an empty vector; `u64[10, 20, 30]` initializes one directly, and `f32[0.0; n]`
+makes `n` copies of a plain value in one allocation. Owned elements (strings, vectors, records
+that own data) cannot be repeated, since each copy would share one owner; build those with `push`.
 `values.push(value)` consumes an element, and `values.pop()` removes and returns the last element.
 
 {{example:vectors}}

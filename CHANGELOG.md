@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Repeat literals: `u8[0; n]`, `u64[7; n]`, `f32[0.0; n]` make `n` copies of a plain value in a
+  single allocation (Go's `make([]byte, n)`, Rust's `vec![0; n]`). A byte value above 255 stops the
+  program; an owned element type is rejected. The sieve benchmark uses it in place of a push loop.
+
 - `bytes[i]` reads the element straight from the sequence when the index is simple (names, integer
   literals, arithmetic, grouping): no temporary view is allocated, borrow-tracked and freed per
   access. Other index expressions keep the borrowed-view path, so moving or mutating the sequence

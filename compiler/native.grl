@@ -13531,6 +13531,7 @@ fn collection_literal<a>(c: (&a mut C), ty: u64, bytes: u64) -> Val {
     slot := apply(&mut c, view("rt_new"), u64[]);
     own(&mut c, slot, ty);
     if eat(&mut c, view("]")) == 0 {
+        mut first = 1;
         while 1 {
             estart := c.pos;
             mut v = expr(&mut c, 0);
@@ -13551,6 +13552,32 @@ fn collection_literal<a>(c: (&a mut C), ty: u64, bytes: u64) -> Val {
                     }
                 }
             }
+            if first & is(&mut c, view(";")) {
+                // `T[v; n]`: n copies of a plain value, built in one reservation.
+                advance(&mut c);
+                if (c.raw == 0) & (bytes == 0) {
+                    element := ty_arg(&mut c, ty);
+                    if needs_drop(&mut c, element) {
+                        fail(&mut c, view("a repeated element must be a plain value; build owned elements with push"));
+                    }
+                }
+                nstart := c.pos;
+                mut count = expr(&mut c, 0);
+                nend := c.pos;
+                if c.raw == 0 {
+                    count = adopt_value(&mut c, count, nstart, nend, 0);
+                    require_type(&mut c, count.ty, 0);
+                }
+                expect(&mut c, view("]"));
+                mut fill = "rt_fill";
+                if bytes {
+                    fill = "rt_fillb";
+                }
+                mut args = two(slot, v.t);
+                args.push(count.t);
+                invoke(&mut c, view(fill), args);
+                return val(slot, ty);
+            }
             value := v.t;
             source := place_of(&mut c, value);
             move_out(&mut c, val(value, v.ty));
@@ -13565,6 +13592,7 @@ fn collection_literal<a>(c: (&a mut C), ty: u64, bytes: u64) -> Val {
             invoke(&mut c, view(f), two(slot, value));
             target := place_of(&mut c, slot);
             transfer_bonds(&mut c, source, target);
+            first = 0;
             if eat(&mut c, view("]")) {
                 break;
             }
