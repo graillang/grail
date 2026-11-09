@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Abundance port cleanup: the cluster builder and `.abgeo` reader use the float methods, `wrapping_u32`/`wrapping_u8`,
+  `vecs::insert_sorted` and `vecs::sort_by_key` instead of hand-written helpers, and `!x` instead of `x == false`; the
+  `.abgeo` test builds its lines with `format` and parses with `strings::split`/`parse_num`. Output unchanged.
 - `hash::Equal::equal` and `hash::equal` return `bool` (they returned `u64`). The standard library no longer
   mixes bools and integers (`||`/`&&` instead of `+`/`&` on comparisons, `>=` instead of `(a < b) == 0`).
 - `tools/test-selfhost.mjs` (`just test-selfhost`, a CI job): the compiler compiles itself twice and the outputs must
