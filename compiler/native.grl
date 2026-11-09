@@ -4944,7 +4944,10 @@ fn base_named<a>(c: (&a mut C), first: u8[]) -> u64 {
         mode := same(view(first), view("mut"));
         return intern_full(&mut c, 5, 0, mode, rs);
     }
-    if same(view(first), view("Atomic")) {
+    // User declarations shadow the built-in generic types (a program may declare its own `Task`).
+    here_module := module_copy(&mut c);
+    shadowed := find_decl(&mut c, view(here_module), view(first)) != 0;
+    if (shadowed == false) & same(view(first), view("Atomic")) {
         expect(&mut c, view("<"));
         e := parse_type(&mut c);
         expect(&mut c, view(">"));
@@ -4953,22 +4956,22 @@ fn base_named<a>(c: (&a mut C), first: u8[]) -> u64 {
         }
         return intern(&mut c, 11, 0);
     }
-    if same(view(first), view("Scope")) {
+    if (shadowed == false) & same(view(first), view("Scope")) {
         expect(&mut c, view("<"));
         e := parse_type(&mut c);
         expect(&mut c, view(">"));
         return intern(&mut c, 14, e);
     }
-    if same(view(first), view("Task")) {
+    if (shadowed == false) & same(view(first), view("Task")) {
         expect(&mut c, view("<"));
         e := parse_type(&mut c);
         expect(&mut c, view(">"));
         return intern(&mut c, 16, e);
     }
-    if same(view(first), view("CancelToken")) {
+    if (shadowed == false) & same(view(first), view("CancelToken")) {
         return intern(&mut c, 17, 0);
     }
-    if same(view(first), view("Mutex")) {
+    if (shadowed == false) & same(view(first), view("Mutex")) {
         expect(&mut c, view("<"));
         e := parse_type(&mut c);
         expect(&mut c, view(">"));
@@ -16475,7 +16478,7 @@ fn expr_expected<a>(c: (&a mut C), min: u64, expected: u64) -> Val {
                             if (c.raw == 0)
                                 & ((k == 258) + (k == 259))
                                 & ((ty_kind(&mut c, ty) == 8) + (ty_kind(&mut c, ty) == 6) + (ty_kind(&mut c, ty) == 27))
-                                & same_type(&mut c, ty, rty) {
+                                & comparable_sequences(&mut c, ty, rty) {
                                 // Structural equality of records (field by field) and of vectors and
                                 // slices (length, then element by element).
                                 eqv := structural_eq(&mut c, snap, right.t, ty, 0);
@@ -16675,6 +16678,21 @@ fn strict_fix_record<a, b>(c: (&a mut C), kind: &b [u8], lstart: u64, op: u64, r
     re := last.end;
     println("FIX {} {} {} {} {} {} {} {} {}", kind, view(path), ls, os, oe, rs, re, lb, rb);
     return ();
+}
+// `==` operands of one record type, or vectors/slices with the same element type in any mix
+// (a slice compares with the vector it was cut from, as in Rust).
+fn comparable_sequences<a>(c: (&a mut C), left: u64, right: u64) -> u64 {
+    if same_type(&mut c, left, right) {
+        return 1;
+    }
+    lk := ty_kind(&mut c, left);
+    rk := ty_kind(&mut c, right);
+    if ((lk == 6) + (lk == 27)) & ((rk == 6) + (rk == 27)) {
+        le := ty_arg(&mut c, left);
+        re := ty_arg(&mut c, right);
+        return same_type(&mut c, le, re);
+    }
+    return 0;
 }
 // Mode 1 stops at the violation; mode 2 (survey) prints file:line:column and continues.
 fn strict_bool_fail<a, b>(c: (&a mut C), msg: &b [u8]) -> unit {

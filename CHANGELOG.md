@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- A program's own `Task`, `Mutex`, `Atomic`, `Scope` or `CancelToken` type shadows the built-in generic of that name
+  (`Task[...]` was a parse error). A slice compares with `==` against a vector of the same element type.
+- Book: duplicate chapters merged (numbers, bytes and text, records and vectors, views and slices); every example uses
+  current syntax (`data[:]`/`&data` instead of `view(data)`, direct writes through references, `bool` instead of
+  `u64` flags); new side-by-side examples for typed slices and stable sorting with a closure; stale "preview" notes
+  replaced by an accurate list of what is not implemented yet.
 - Abundance port cleanup: the cluster builder and `.abgeo` reader use the float methods, `wrapping_u32`/`wrapping_u8`,
   `vecs::insert_sorted` and `vecs::sort_by_key` instead of hand-written helpers, and `!x` instead of `x == false`; the
   `.abgeo` test builds its lines with `format` and parses with `strings::split`/`parse_num`. Output unchanged.

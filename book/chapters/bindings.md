@@ -49,8 +49,7 @@ the borrow checker: an outstanding reader can still prevent a write or growth.
 `writer := &mut data` keeps the capability binding fixed: the binding is not reassigned, but the
 bytes it reaches can still change. Declaring the capability needs no `mut`; replacing the capability
 itself would. Mutable access is always explicit, so a read-only borrow never quietly becomes
-writable. Use `&mut owner` uniformly for records, vectors, maps and scalars, and `view_mut(data)`
-when the stored capability should be a mutable byte view.
+writable. Use `&mut owner` uniformly for records, vectors, maps, scalars and byte buffers.
 
 Bindings are lexically scoped. A new `:=` declaration may shadow a name; `=` always means
 reassignment. Function parameters are fixed bindings too: to mutate a by-value owner, move it

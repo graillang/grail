@@ -39,14 +39,12 @@ small slabs for reuse, while large single-object arenas are released immediately
 - The Grail-written compiler is authoritative. Only generated assembly bootstraps are retained;
   the duplicate Rust seed and unchecked C compiler have been removed.
 
-## Approved model status in this preview
+## Not implemented yet
 
-The book follows the approved syntax-v2 surface. These parts are not accepted by the preview
-compiler yet, so they appear only in prose:
-
-- Direct temporary iteration (`for part in text.split(' ')`) in the book's `--default-u64` mode;
-  keep the explicit `parts` binding and `for part in &parts`.
 - Map iteration with `for key, value in map`; use indexing, `get` and `entry` instead.
+- Record patterns in `match`; read the fields instead.
+- Closures that capture a borrowed value; capture an owned copy instead.
+- Consuming loops over owned elements (`for item in items` where items own data); use `&items`.
 
 Indexed map assignment currently updates a named map or a field path only; a temporary receiver or a
 nested target such as `nested["a"]["b"] = 1` is rejected.

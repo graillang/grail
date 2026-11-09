@@ -24,8 +24,7 @@ local, a record field or packed vector storage.
 Use a reference when the caller should keep the storage while a function reads or changes it. Use a
 by-value parameter when ownership should move to the callee.
 
-The examples use typed `&value` and `&mut value` references for scalars, records and collections.
-Use `view(data)` or `view_mut(data)` when an explicit byte view is needed instead of a reference
-to the owner itself.
+`&value` and `&mut value` work the same way for scalars, records, collections and individual
+elements, including a single byte of a `u8[]` or one `f32` inside an `f32[]`.
 
 **Try it:** print `before` and observe that exchange returns the old value, not the replacement.

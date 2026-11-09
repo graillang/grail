@@ -12,7 +12,7 @@ be used after its move, even though the underlying object still exists under a n
 {{example:moved-value}}
 
 This is an intentional compile error. To keep data usable in two places, take a shared borrow
-with `&owner` (or `view(data)` for a byte view),
+with `&owner` (or `owner[a: b]` for part of it),
 or request an explicit copy such as `data.copy()` when a separate buffer is really wanted.
 
 **Try it:** repair the rejected example by printing `moved.len()` instead.

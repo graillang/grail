@@ -11,6 +11,17 @@ text in `words` are moved into it, and the original name can no longer be used. 
 captured values are read-only. A closure is called like a function and can be called many times;
 when it goes out of scope, the values it captured are cleaned up with it.
 
-Grail closures always own their captures, like Rust's `move` closures. Capturing a borrowed reference and mutating captured state are rejected. Closures work inside generic functions; the checker keeps their captures affine like other values. A closure's parameters may be references (`|a: &Group, b: &Group| -> bool a.depth > b.depth`), borrowed afresh on each call, so a closure can be a comparator for `vecs::sort_by`. Any function with a matching signature can also be passed where an `Fn` is expected.
+Grail closures always own their captures, like Rust's `move` closures. Capturing a borrowed reference and mutating captured state are rejected. Closures work inside generic functions; the checker keeps their captures affine like other values.
+
+## Sorting with a closure
+
+A closure's parameters may be references, borrowed afresh on each call, so a closure works as a
+comparator. `vecs::sort_by` sorts stably: elements that compare equal keep their order.
+
+{{example:sorting}}
+
+Any function with a matching signature can be passed where an `Fn` is expected, so
+`vecs::sort_by(&mut tasks, by_priority)` works too. `vecs::sort_by_key` sorts by a computed `u64`
+key, and `vecs::insert_sorted` / `vecs::binary_search` keep a vector as a sorted set.
 
 **Try it:** use `words` again after creating `length` and read the compiler's message.

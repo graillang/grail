@@ -1,7 +1,7 @@
-# Readonly views and slices
+# Views and slices
 
 `&owner` creates a readonly view over a byte sequence, and `&[u8]` is the parameter type for such a
-view. The view has a descriptor but does not own the underlying byte buffer; it retains a checked
+view; `&[T]` is the same for any element type. The view has a descriptor but does not own the underlying byte buffer; it retains a checked
 relationship to its owner. `view[start:end]` uses a half-open range: start is included and end is
 excluded.
 
@@ -21,3 +21,40 @@ from copying an owning buffer, and different from duplicating an exclusive view.
 other position writes `&` explicitly.
 
 **Try it:** slice `[0:3]` instead, then return the first byte. Do not read index 3 from that view.
+
+## Slices of any vector
+
+`v[a: b]` works on every vector, not just bytes. A function that takes `&[f32]` reads part of a vector
+without copying it, and one that takes `&mut [f32]` changes exactly the elements it was given:
+
+{{example:slices}}
+
+A slice cannot change length, cannot outlive its vector, and while it lives the vector cannot grow or
+be written elsewhere; an exclusive slice excludes every other access. These checks happen at compile
+time, so passing `&mut samples[2:]` cannot alias a live reader the way a raw pointer and length could.
+A slice compares with `==` against any vector or slice of the same element type.
+
+## Exclusive views and reborrowing
+
+`&mut data` grants exclusive access. `writer[index] = byte` writes through it. A readonly child can temporarily suspend its exclusive parent; the parent's
+access resumes after the child's last use.
+
+{{example:mutable-views}}
+
+This is a reborrow, not an independent second exclusive permission. You cannot write through
+`writer` while its readonly child is still used later. Nor can you create unrelated mutable views of
+the same live storage and treat them as disjoint.
+
+Mutable access is never implicit. A function that changes bytes takes `&mut [u8]`, and every caller
+writes `&mut`:
+
+```grl
+fn fill(data: &mut [u8], value: u8) {
+    for i in data.len() {
+        data[i] = value;
+    }
+}
+fill(&mut data, 9);
+```
+
+**Try it:** move the assertion using `reader` below the write. The compiler should reject it.

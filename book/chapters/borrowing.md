@@ -1,7 +1,7 @@
 # Borrowing and last use
 
 A shared borrow allows reads while excluding conflicting mutation, growth and movement of its
-source. Use `&owner` for a typed shared reference, or `view(data)` for a byte view.
+source. Use `&owner` for a shared reference, or `owner[a: b]` for a view of part of it.
 The compiler can end a borrow at its last use, not only at the closing brace.
 
 {{example:borrows}}
@@ -24,7 +24,6 @@ binding, so the reference can outlive its statement but never its block:
 
 {{example:borrow-temporary}}
 
-Typed references work uniformly for records, vectors, scalars and byte buffers. An explicit
-`view(data)` borrows the bytes rather than the owner's storage frame.
+References work uniformly for records, vectors, scalars and byte buffers.
 
 **Try it:** reorder the last two operations in the rejected example without changing the owner.

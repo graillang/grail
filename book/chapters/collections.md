@@ -22,8 +22,7 @@ inserts, and there is no `or_insert`. Insert with `map[key] = value`, update an 
 its `value` or `get_mut`, and move a non-copyable value out with `remove`, which returns `V?`.
 
 Key borrows use `&key`; explicit mutable map arguments use `&mut map`.
-Iterating a map with `for key, value in map` is approved loop-header sugar, but this preview
-compiler does not accept it yet.
+Maps cannot be iterated with `for key, value in map` yet; use indexing, `get` and `entry`.
 
 `vecs::sort` sorts any vector whose element type implements the `Ord` interface, imported here with
 `use order::Ord;`; numbers and text already do, and here `Score` sorts by points, highest first.
