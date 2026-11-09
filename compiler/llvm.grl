@@ -1171,6 +1171,33 @@ fn instruction<a, b>(l: (&a mut L), line: &b [u8]) -> unit {
         store(&mut l, view(o[1]), view(w), 64);
         return ();
     }
+    // binary32 conversions (narrow f32 storage and C f32 fields): only the low 32 bits of the
+    // source are meaningful, and the destination is written zero-extended.
+    if eq(view(op), view("movd")) {
+        xv := value(&mut l, view(o[0]), 64);
+        t := def(&mut l, view("trunc i64 {} to i32"), &u8[][xv]);
+        z := def(&mut l, view("zext i32 {} to i64"), &u8[][t]);
+        store(&mut l, view(o[1]), view(z), 64);
+        return ();
+    }
+    if eq(view(op), view("cvtss2sd")) {
+        xv := value(&mut l, view(o[0]), 64);
+        t := def(&mut l, view("trunc i64 {} to i32"), &u8[][xv]);
+        f := def(&mut l, view("bitcast i32 {} to float"), &u8[][t]);
+        d := def(&mut l, view("fpext float {} to double"), &u8[][f]);
+        w := as_word(&mut l, view(d));
+        store(&mut l, view(o[1]), view(w), 64);
+        return ();
+    }
+    if eq(view(op), view("cvtsd2ss")) {
+        xv := value(&mut l, view(o[0]), 64);
+        x := as_double(&mut l, view(xv));
+        f := def(&mut l, view("fptrunc double {} to float"), &u8[][x]);
+        t := def(&mut l, view("bitcast float {} to i32"), &u8[][f]);
+        z := def(&mut l, view("zext i32 {} to i64"), &u8[][t]);
+        store(&mut l, view(o[1]), view(z), 64);
+        return ();
+    }
     if eq(view(op), view("sqrtsd")) {
         xv := value(&mut l, view(o[0]), 64);
         x := as_double(&mut l, view(xv));

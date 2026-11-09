@@ -16,6 +16,12 @@ view descriptor copying retains checked provenance. `*r = v` drops the old value
 `exchange(reference, new_value)` replaces the stored value and returns the old one instead of
 dropping it: use it to move an owned value out of a reference.
 
+A reference always points at a whole word. The elements of `f32[]`, `u32[]` and `i32[]` are stored in
+4 bytes each, as are the `f32`/`i32`/`u32` fields of an `extern "C" record`, so they cannot be
+borrowed: `&mut v[i]`, `&mut rec.x` and `for x in &mut v` are rejected. Read and assign them in
+place instead (`v[i] += 1.0`, `rec.x = 2.0`) or iterate by value or by index. Bytes (`u8[]`) follow
+the same rule.
+
 Use a reference when the caller should keep the storage while a function reads or changes it. Use a
 by-value parameter when ownership should move to the callee.
 

@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- `f32[]`, `u32[]` and `i32[]` store their elements in 4 bytes (they were 8-byte words), halving
+  their memory and letting the LLVM backend use 32-bit loads, single-precision arithmetic and
+  vector lanes. Programs print the same output. Such elements, like the narrow fields of an
+  `extern "C" record` and `u8[]` bytes, can no longer be borrowed (`&mut v[i]`, `for x in &mut v`);
+  read and assign them in place. Borrowing a narrow C-record field (`&mut rec.x`) used to compile
+  and silently lose writes made through the reference; it is now an error.
+- New compiler intrinsics `raw_load32`/`raw_store32` (32-bit `movl` on every target, an `i32`
+  load/store in LLVM); the LLVM lifter now handles `movd`, `cvtss2sd` and `cvtsd2ss`.
+
 - Ownership: after a `while` or `for` whose body always returns or continues, locals are usable again.
   The dead end state of such a body (where `return` had dropped every local) was merged into the
   loop exit, so any use after the loop was rejected as a use of a moved value.

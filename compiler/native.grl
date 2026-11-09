@@ -7149,9 +7149,14 @@ fn deref<a>(c: (&a mut C), v: Val) -> Val {
     while ty_kind(&mut c, ty) == 7 {
         old := t;
         target := target_of(&mut c, old);
-        get(&mut c, t, view("%rax"));
-        o(&mut c, view("movq (%rax),%rax\n"));
-        t = save(&mut c);
+        narrow := caddr_ty(&mut c, old);
+        if (narrow != 0) & (is_c_record(&mut c, narrow) == 0) {
+            t = caddr_load(&mut c, old, narrow);
+        } else {
+            get(&mut c, t, view("%rax"));
+            o(&mut c, view("movq (%rax),%rax\n"));
+            t = save(&mut c);
+        }
         ty = ty_arg(&mut c, ty);
         if c.raw == 0 {
             if target == 0 {
@@ -7410,6 +7415,59 @@ fn caddr_store<a>(c: (&a mut C), slot: u64, ty: u64, value: u64) -> unit {
     w := imm(&mut c, size);
     invoke(&mut c, view("rt_store_sized"), three(slot, stored, w));
     return ();
+}
+// Narrow vectors (`f32[]`, `u32[]`, `i32[]`) store 4-byte elements: 1 for f32, 2 for u32, 3 for
+// i32, 0 for any other element type.
+fn narrow_code<a>(c: (&a mut C), elem: u64) -> u64 {
+    if c.raw {
+        return 0;
+    }
+    if is_f32(&mut c, elem) {
+        return 1;
+    }
+    if (elem != 0) & (ty_kind(&mut c, elem) == 18) {
+        if ty_arg(&mut c, elem) == 32 {
+            return 2 + (ty_mode(&mut c, elem) & 1);
+        }
+    }
+    return 0;
+}
+fn narrow_vector<a>(c: (&a mut C), ty: u64) -> u64 {
+    if c.raw {
+        return 0;
+    }
+    if ty_kind(&mut c, ty) != 6 {
+        return 0;
+    }
+    elem := ty_arg(&mut c, ty);
+    return narrow_code(&mut c, elem);
+}
+// A value as the 32-bit unit a narrow vector stores: an f32's binary32 bits; an integer as is (the
+// store keeps its low 32 bits).
+fn narrow_encode<a>(c: (&a mut C), code: u64, value: u64) -> u64 {
+    if code != 1 {
+        return value;
+    }
+    get(&mut c, value, view("%rax"));
+    if (c.target == 0) + (c.target == 3) {
+        o(&mut c, view("movq %rax,%xmm0\ncvtsd2ss %xmm0,%xmm0\nmovd %xmm0,%eax\n"));
+    } else {
+        o(&mut c, view("cf32bits\n"));
+    }
+    return save(&mut c);
+}
+// A loaded 32-bit unit (zero-extended) as the word Grail holds: f32 widened, i32 sign-extended.
+fn narrow_decode<a>(c: (&a mut C), code: u64, unit: u64) -> u64 {
+    if code == 2 {
+        return unit;
+    }
+    get(&mut c, unit, view("%rax"));
+    if code == 1 {
+        ffi_f32_widen(&mut c);
+    } else {
+        o(&mut c, view("shlq $32,%rax\nsarq $32,%rax\n"));
+    }
+    return save(&mut c);
 }
 // An exported callback's prologue: each parameter is read from where a C caller put it (Win64:
 // positionally, the thunk having moved rcx/rdx/r8/r9 and stack words five and six into Grail's
@@ -8151,6 +8209,9 @@ fn structural_eq<a>(c: (&a mut C), x: u64, y: u64, ty: u64, depth: u64) -> u64 {
         e := ty_arg(&mut c, ty);
         ek := ty_kind(&mut c, e);
         if (e == 0) + (ek == 18) + (ek == 19) + (ek == 22) {
+            if narrow_code(&mut c, e) {
+                return invoke(&mut c, view("rt_vec_cmp4"), three(op, x, y));
+            }
             return invoke(&mut c, view("rt_vec_cmp"), three(op, x, y));
         }
     }
@@ -9310,6 +9371,12 @@ fn builtin_id<a>(n: &a [u8]) -> u64 {
     if same(view(n), view("raw_putbyte")) {
         return 104;
     }
+    if same(view(n), view("raw_load32")) {
+        return 136;
+    }
+    if same(view(n), view("raw_store32")) {
+        return 137;
+    }
     if same(view(n), view("raw_map")) {
         return 105;
     }
@@ -9484,7 +9551,7 @@ fn raw_builtin<a>(c: (&a mut C), id: u64) -> Val {
         // Already validated; pass the generic check unchanged.
         arity = args.len();
     }
-    if (id == 102) + (id == 104) {
+    if (id == 102) + (id == 104) + (id == 137) {
         arity = 2;
     }
     if (id == 106) + (id == 108) {
@@ -9708,21 +9775,30 @@ fn raw_builtin<a>(c: (&a mut C), id: u64) -> Val {
         sym(&mut c, view("rt_state"));
         o(&mut c, view("(%rip),%rax\n"));
     }
-    if (id == 101) + (id == 103) {
+    if (id == 101) + (id == 103) + (id == 136) {
         get(&mut c, args[0], view("%rax"));
         if id == 101 {
             o(&mut c, view("movq (%rax),%rax\n"));
-        } else {
+        }
+        if id == 103 {
             o(&mut c, view("movzbq (%rax),%rax\n"));
         }
+        if id == 136 {
+            // Zero-extending 32-bit load.
+            o(&mut c, view("movl (%rax),%eax\n"));
+        }
     }
-    if (id == 102) + (id == 104) {
+    if (id == 102) + (id == 104) + (id == 137) {
         get(&mut c, args[0], view("%rcx"));
         get(&mut c, args[1], view("%rax"));
         if id == 102 {
             o(&mut c, view("movq %rax,(%rcx)\n"));
-        } else {
+        }
+        if id == 104 {
             o(&mut c, view("movb %al,(%rcx)\n"));
+        }
+        if id == 137 {
+            o(&mut c, view("movl %eax,(%rcx)\n"));
         }
         o(&mut c, view("xorq %rax,%rax\n"));
     }
@@ -10201,6 +10277,10 @@ fn element_code<a>(c: (&a mut C), ty: u64) -> u64 {
         sub := element_code(&mut c, inner);
         if sub == 0 {
             return 0;
+        }
+        if narrow_code(&mut c, inner) {
+            // 4-byte elements (f32[], u32[], i32[]).
+            return 4096 * sub + 8;
         }
         return 4096 * sub + 5;
     }
@@ -10704,6 +10784,7 @@ fn builtin<a>(c: (&a mut C), id: u64) -> Val {
             }
             v = index_view(&mut c, v, access);
         }
+        reject_narrow_borrow(&mut c, v.t);
         expect(&mut c, view(")"));
         return v;
     }
@@ -10890,9 +10971,15 @@ fn deref_value<a>(c: (&a mut C), a: Val) -> Val {
         }
     }
     ty := ty_arg(&mut c, a.ty);
-    get(&mut c, a.t, view("%rax"));
-    o(&mut c, view("movq (%rax),%rax\n"));
-    n := save(&mut c);
+    narrow := caddr_ty(&mut c, a.t);
+    mut n = 0;
+    if (narrow != 0) & (is_c_record(&mut c, narrow) == 0) {
+        n = caddr_load(&mut c, a.t, narrow);
+    } else {
+        get(&mut c, a.t, view("%rax"));
+        o(&mut c, view("movq (%rax),%rax\n"));
+        n = save(&mut c);
+    }
     if c.raw == 0 {
         k := ty_kind(&mut c, ty);
         if k == 7 {
@@ -13266,7 +13353,11 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
             if same(view(name), view("text")) + needs_drop(&mut c, elem) {
                 fail(&mut c, view("copy requires a byte collection or a vector of plain values"));
             }
-            slot := apply(&mut c, view("rt_vec_copy"), one(xt));
+            mut f = "rt_vec_copy";
+            if narrow_code(&mut c, elem) {
+                f = "rt_vec_copy4";
+            }
+            slot := apply(&mut c, view(f), one(xt));
             release_temporary(&mut c, input);
             return own(&mut c, slot, xty);
         }
@@ -13307,7 +13398,11 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
         expect(&mut c, view(")"));
         v = adopt_value(&mut c, v, vstart, vend, elem);
         require_type(&mut c, v.ty, elem);
-        r := invoke(&mut c, view("rt_vec_contains"), two(xt, v.t));
+        mut f = "rt_vec_contains";
+        if narrow_code(&mut c, elem) {
+            f = "rt_vec_contains4";
+        }
+        r := invoke(&mut c, view(f), two(xt, v.t));
         release_temporary(&mut c, input);
         bt := bool_type(&mut c);
         return val(r, bt);
@@ -13349,6 +13444,12 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
         }
         capture_authority(&mut c, root);
         require_write(&mut c, xt);
+        code := narrow_code(&mut c, ty);
+        if code {
+            unit := apply(&mut c, view("rt_pop4"), one(xt));
+            element := narrow_decode(&mut c, code, unit);
+            return val(element, ty);
+        }
         slot := apply(&mut c, view("rt_pop"), one(xt));
         own(&mut c, slot, ty);
         result := place_of(&mut c, slot);
@@ -13380,10 +13481,15 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
                 + same(view(name), view("insert"))
         ) {
         elem := ty_arg(&mut c, xty);
+        code := narrow_code(&mut c, elem);
         if same(view(name), view("reverse")) {
             expect(&mut c, view(")"));
             require_write(&mut c, xt);
-            invoke(&mut c, view("rt_vec_reverse"), one(xt));
+            mut f = "rt_vec_reverse";
+            if code {
+                f = "rt_vec_reverse4";
+            }
+            invoke(&mut c, view(f), one(xt));
             return val(imm(&mut c, 0), 1);
         }
         if same(view(name), view("swap")) {
@@ -13394,7 +13500,11 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
             require_type(&mut c, j.ty, 0);
             expect(&mut c, view(")"));
             require_write(&mut c, xt);
-            invoke(&mut c, view("rt_vec_swap"), three(xt, i.t, j.t));
+            mut f = "rt_vec_swap";
+            if code {
+                f = "rt_vec_swap4";
+            }
+            invoke(&mut c, view(f), three(xt, i.t, j.t));
             return val(imm(&mut c, 0), 1);
         }
         if same(view(name), view("clear")) + same(view(name), view("truncate")) {
@@ -13415,6 +13525,10 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
                 dropper = save(&mut c);
             }
             require_write(&mut c, xt);
+            if code {
+                invoke(&mut c, view("rt_vec_truncate4"), two(xt, keep));
+                return val(imm(&mut c, 0), 1);
+            }
             invoke(&mut c, view("rt_vec_truncate"), three(xt, keep, dropper));
             return val(imm(&mut c, 0), 1);
         }
@@ -13426,6 +13540,11 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
             seed_storage(&mut c, root, xty);
             capture_authority(&mut c, root);
             require_write(&mut c, xt);
+            if code {
+                unit := apply(&mut c, view("rt_vec_remove4"), two(xt, i.t));
+                element := narrow_decode(&mut c, code, unit);
+                return val(element, elem);
+            }
             slot := apply(&mut c, view("rt_vec_remove"), two(xt, i.t));
             own(&mut c, slot, elem);
             result := place_of(&mut c, slot);
@@ -13449,6 +13568,11 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
         check_writeback(&mut c, target, elem, source);
         require_write(&mut c, xt);
         move_out(&mut c, val(bt, b.ty));
+        if code {
+            unit := narrow_encode(&mut c, code, bt);
+            invoke(&mut c, view("rt_vec_insert4"), three(xt, i.t, unit));
+            return val(imm(&mut c, 0), 1);
+        }
         invoke(&mut c, view("rt_vec_insert"), three(xt, i.t, bt));
         transfer_bonds(&mut c, source, target);
         return val(imm(&mut c, 0), 1);
@@ -13519,9 +13643,14 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
             f = "rt_pushb";
         }
     }
+    code := narrow_vector(&mut c, xty);
+    if code {
+        f = "rt_push4";
+    }
     source := place_of(&mut c, bt);
     move_out(&mut c, val(bt, b.ty));
-    invoke(&mut c, view(f), two(xt, bt));
+    unit := narrow_encode(&mut c, code, bt);
+    invoke(&mut c, view(f), two(xt, unit));
     root := place_of(&mut c, xt);
     transfer_bonds(&mut c, source, root);
     return val(imm(&mut c, 0), 1);
@@ -13573,7 +13702,12 @@ fn collection_literal<a>(c: (&a mut C), ty: u64, bytes: u64) -> Val {
                 if bytes {
                     fill = "rt_fillb";
                 }
-                mut args = two(slot, v.t);
+                code := narrow_vector(&mut c, ty);
+                if code {
+                    fill = "rt_fill4";
+                }
+                unit := narrow_encode(&mut c, code, v.t);
+                mut args = two(slot, unit);
                 args.push(count.t);
                 invoke(&mut c, view(fill), args);
                 return val(slot, ty);
@@ -13589,7 +13723,12 @@ fn collection_literal<a>(c: (&a mut C), ty: u64, bytes: u64) -> Val {
                     f = "rt_pushb";
                 }
             }
-            invoke(&mut c, view(f), two(slot, value));
+            code := narrow_vector(&mut c, ty);
+            if code {
+                f = "rt_push4";
+            }
+            unit := narrow_encode(&mut c, code, value);
+            invoke(&mut c, view(f), two(slot, unit));
             target := place_of(&mut c, slot);
             transfer_bonds(&mut c, source, target);
             first = 0;
@@ -13615,7 +13754,19 @@ fn reference_borrow<a>(c: (&a mut C), write: u64) -> Val {
     if stop != c.pos {
         v = chain_walk_mode(&mut c, v, stop, write);
     }
+    reject_narrow_borrow(&mut c, v.t);
     return v;
+}
+// A reference is a word pointer: 4-byte storage (an element of f32[]/u32[]/i32[], or a narrow
+// field of a C record) is read and assigned in place but cannot be borrowed.
+fn reject_narrow_borrow<a>(c: (&a mut C), slot: u64) -> unit {
+    narrow := caddr_ty(&mut c, slot);
+    if (c.raw == 0) & (narrow != 0) {
+        if is_c_record(&mut c, narrow) == 0 {
+            fail(&mut c, view("a 4-byte element or narrow C field is not addressable; read or assign it by index or field"));
+        }
+    }
+    return ();
 }
 // From c.pos: the end of a run of `[...]` groups and `.field` accessors (stopping before a
 // method call `.m(`).
@@ -15318,12 +15469,35 @@ fn index_view<a>(c: (&a mut C), value: Val, access: u64) -> Val {
         if access == 2 {
             require_mutable_binding(&mut c, xt, 0);
         }
+        code := narrow_code(&mut c, elem);
         mut f = "rt_slot";
         if unchecked {
             f = "rt_slotu";
         }
+        if code {
+            f = "rt_slot4";
+            if unchecked {
+                f = "rt_slot4u";
+            }
+        }
+        if code & (access == 0) {
+            // A narrow element read: a 32-bit load, decoded to the word Grail holds.
+            at := apply(&mut c, view(f), two(xt, index));
+            get(&mut c, at, view("%rax"));
+            o(&mut c, view("movl (%rax),%eax\n"));
+            unit := save(&mut c);
+            release_temporary(&mut c, input);
+            element := narrow_decode(&mut c, code, unit);
+            return val(element, elem);
+        }
         ty := reference_type(&mut c, elem, access == 2);
         slot := apply(&mut c, view(f), two(xt, index));
+        if code {
+            // The element's address is 4-byte storage: reads and writes through it are sized, and
+            // it cannot become a user reference (reference_borrow rejects it).
+            c.caddr.push(slot);
+            c.caddr.push(elem);
+        }
         root := place_of(&mut c, xt);
         target := member_place(&mut c, root, 0, elem);
         own(&mut c, slot, ty);
@@ -16460,6 +16634,7 @@ fn index_assignment<a>(c: (&a mut C)) -> unit {
         if c.raw == 0 {
             v = adopt_value(&mut c, v, vstart, vend, elem);
         }
+        code := narrow_code(&mut c, elem);
         if operator != 61 {
             if c.raw == 0 {
                 if (integer(&mut c, elem) + is_float(&mut c, elem)) == 0 {
@@ -16467,11 +16642,29 @@ fn index_assignment<a>(c: (&a mut C)) -> unit {
                 }
             }
             get(&mut c, r.t, view("%rax"));
-            o(&mut c, view("movq (%rax),%rax\n"));
-            old := save(&mut c);
-            v = compound_value(&mut c, op, old, v, elem);
+            if code {
+                o(&mut c, view("movl (%rax),%eax\n"));
+                unit := save(&mut c);
+                old := narrow_decode(&mut c, code, unit);
+                v = compound_value(&mut c, op, old, v, elem);
+            } else {
+                o(&mut c, view("movq (%rax),%rax\n"));
+                old := save(&mut c);
+                v = compound_value(&mut c, op, old, v, elem);
+            }
         }
-        exchange_into(&mut c, r, v);
+        if code {
+            if c.raw == 0 {
+                require_type(&mut c, v.ty, elem);
+            }
+            require_write(&mut c, r.t);
+            unit := narrow_encode(&mut c, code, v.t);
+            get(&mut c, r.t, view("%rcx"));
+            get(&mut c, unit, view("%rax"));
+            o(&mut c, view("movl %eax,(%rcx)\n"));
+        } else {
+            exchange_into(&mut c, r, v);
+        }
     } else {
         // Bytes: buf[i] = b stores the low byte of a u8/u64 value.
         if c.raw == 0 {
@@ -17426,28 +17619,38 @@ fn statement<a>(c: (&a mut C)) -> unit {
         mut entry = ownership::snapshot(&c.check);
         if iterable {
             observe(&mut c, seq);
-            if byref {
-                index := apply(&mut c, view("rt_slot"), two(seq, i));
-                rty := reference_type(&mut c, elemty, refmode);
-                root := place_of(&mut c, seq);
-                target := member_place(&mut c, root, 0, elemty);
-                own(&mut c, index, rty);
-                bind_loan(&mut c, index, seq, root, refmode);
-                set_target(&mut c, index, target, index + 1);
-                bind(&mut c, name, rty, index, 0);
-            } else {
-                mut f = "rt_at";
-                if bytewise {
-                    f = "rt_atb";
-                }
-                if consume {
-                    f = "rt_take";
-                }
-                element := invoke(&mut c, view(f), two(seq, i));
-                if consume {
-                    own(&mut c, element, elemty);
-                }
+            code := narrow_code(&mut c, elemty);
+            if byref & (code != 0) {
+                fail(&mut c, view("elements of a 4-byte vector are not addressable; iterate by value or by index"));
+            }
+            if code {
+                unit := invoke(&mut c, view("rt_at4"), two(seq, i));
+                element := narrow_decode(&mut c, code, unit);
                 bind(&mut c, name, elemty, element, 0);
+            } else {
+                if byref {
+                    index := apply(&mut c, view("rt_slot"), two(seq, i));
+                    rty := reference_type(&mut c, elemty, refmode);
+                    root := place_of(&mut c, seq);
+                    target := member_place(&mut c, root, 0, elemty);
+                    own(&mut c, index, rty);
+                    bind_loan(&mut c, index, seq, root, refmode);
+                    set_target(&mut c, index, target, index + 1);
+                    bind(&mut c, name, rty, index, 0);
+                } else {
+                    mut f = "rt_at";
+                    if bytewise {
+                        f = "rt_atb";
+                    }
+                    if consume {
+                        f = "rt_take";
+                    }
+                    element := invoke(&mut c, view(f), two(seq, i));
+                    if consume {
+                        own(&mut c, element, elemty);
+                    }
+                    bind(&mut c, name, elemty, element, 0);
+                }
             }
         } else {
             bind(&mut c, name, 0, i, 0);
