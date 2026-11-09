@@ -5,7 +5,7 @@ The current compiler supports explicit user-defined interfaces and concrete impl
 ```grl
 interface Value{fn value<a>(self:(&a Self))->num;}
 impl Value for num{
-    fn value<a>(self:(&a Self))->num{return load(self);}
+    fn value<a>(self:(&a Self))->num{return *self;}
 }
 fn read<a,T:Value>(value:(&a T))->num{return Value::value(value);}
 fn main(){n:=42;assert(read(borrow(n))==42);}

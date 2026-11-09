@@ -5040,7 +5040,22 @@ fn decl<a>(c: (&a mut C), pass: u64) -> unit {
     );
     return ();
 }
+// Words that start a statement or expression inside a body; they cannot name a binding or
+// parameter. Declaration heads (`fn`, `struct`, `module`, `use`, ...) are recognised only at the
+// top level and may name bindings.
+fn is_keyword<a>(name: &a [u8]) -> u64 {
+    words := u8[][copy_bytes(view("mut")), copy_bytes(view("if")), copy_bytes(view("else")), copy_bytes(view("while")), copy_bytes(view("for")), copy_bytes(view("in")), copy_bytes(view("loop")), copy_bytes(view("match")), copy_bytes(view("return")), copy_bytes(view("break")), copy_bytes(view("continue")), copy_bytes(view("unsafe")), copy_bytes(view("true")), copy_bytes(view("false"))];
+    for i in words.len() {
+        if same(view(words[i]), view(name)) {
+            return 1;
+        }
+    }
+    return 0;
+}
 fn bind<a>(c: (&a mut C), name: u8[], ty: u64, id: u64, mutable: u64) -> unit {
+    if is_keyword(view(name)) {
+        fail(&mut c, view("a keyword cannot name a binding"));
+    }
     if c.raw == 0 {
         if place_of(&mut c, id) == 0 {
             kind := ty_kind(&mut c, ty);
@@ -10675,69 +10690,74 @@ fn builtin<a>(c: (&a mut C), id: u64) -> Val {
         return exchange_into(&mut c, a, b);
     }
     if id == 15 {
-        observe(&mut c, a.t);
-        if c.raw == 0 {
-            if ty_kind(&mut c, a.ty) != 7 {
-                fail(&mut c, view("load requires typed reference"));
-            }
-        }
         expect(&mut c, view(")"));
-        ty := ty_arg(&mut c, a.ty);
-        get(&mut c, a.t, view("%rax"));
-        o(&mut c, view("movq (%rax),%rax\n"));
-        n := save(&mut c);
-        if c.raw == 0 {
-            k := ty_kind(&mut c, ty);
-            if k == 7 {
-                fail(&mut c, view("indirect reference copies require explicit reborrow"));
-            }
-            if k == 5 {
-                if ty_mode(&mut c, ty) {
-                    fail(&mut c, view("load cannot copy exclusive view; reborrow explicitly"));
-                }
-                slot := invoke(&mut c, view("rt_view"), one(n));
-                own(&mut c, slot, ty);
-                target := target_of(&mut c, a.t);
-                c
-                    .resources
-                    .push(
-                        Resource {
-                            slot: n,
-                            ty: ty,
-                            flag: 0,
-                            base: a.t + 1,
-                            field: 0,
-                            via: 1,
-                            place: target,
-                            target: 0,
-                            authority: a.t + 1,
-                        }
-                    );
-                frame := place_of(&mut c, a.t);
-                count := c.bonds.len();
-                for i in count {
-                    mut b = &c.bonds[i];
-                    holder := b.holder;
-                    loan := b.loan;
-                    guard := b.guard;
-                    if (holder == frame) & guard {
-                        bond_kind(&mut c, target, loan, guard);
-                    }
-                }
-                stored_source(&mut c, n, ty);
-                view_bonds(&mut c, slot, n, 0);
-                release_temporary(&mut c, a.t);
-                return val(slot, ty);
-            }
-            if needs_drop(&mut c, ty) {
-                fail(&mut c, view("load cannot copy owned referent"));
-            }
-        }
-        release_temporary(&mut c, a.t);
-        return val(n, ty);
+        return deref_value(&mut c, a);
     }
     fail(&mut c, view("unknown builtin"));
     return val(0, 0);
+}
+// `*r` (and the `load` builtin): copies the referent of a typed reference. Only values that need no
+// drop can be copied; a shared view referent is reborrowed.
+fn deref_value<a>(c: (&a mut C), a: Val) -> Val {
+    observe(&mut c, a.t);
+    if c.raw == 0 {
+        if ty_kind(&mut c, a.ty) != 7 {
+            fail(&mut c, view("* requires a typed reference"));
+        }
+    }
+    ty := ty_arg(&mut c, a.ty);
+    get(&mut c, a.t, view("%rax"));
+    o(&mut c, view("movq (%rax),%rax\n"));
+    n := save(&mut c);
+    if c.raw == 0 {
+        k := ty_kind(&mut c, ty);
+        if k == 7 {
+            fail(&mut c, view("indirect reference copies require explicit reborrow"));
+        }
+        if k == 5 {
+            if ty_mode(&mut c, ty) {
+                fail(&mut c, view("cannot copy an exclusive view out of a reference; reborrow explicitly"));
+            }
+            slot := invoke(&mut c, view("rt_view"), one(n));
+            own(&mut c, slot, ty);
+            target := target_of(&mut c, a.t);
+            c
+                .resources
+                .push(
+                    Resource {
+                        slot: n,
+                        ty: ty,
+                        flag: 0,
+                        base: a.t + 1,
+                        field: 0,
+                        via: 1,
+                        place: target,
+                        target: 0,
+                        authority: a.t + 1,
+                    }
+                );
+            frame := place_of(&mut c, a.t);
+            count := c.bonds.len();
+            for i in count {
+                mut b = &c.bonds[i];
+                holder := b.holder;
+                loan := b.loan;
+                guard := b.guard;
+                if (holder == frame) & guard {
+                    bond_kind(&mut c, target, loan, guard);
+                }
+            }
+            stored_source(&mut c, n, ty);
+            view_bonds(&mut c, slot, n, 0);
+            release_temporary(&mut c, a.t);
+            return val(slot, ty);
+        }
+        if needs_drop(&mut c, ty) {
+            fail(&mut c, view("cannot copy an owned value out of a reference; use exchange"));
+        }
+    }
+    release_temporary(&mut c, a.t);
+    return val(n, ty);
 }
 fn require_capability<a, b>(c: (&a mut C), ty: u64, shared: u64, message: &b [u8]) -> unit {
     mut trail = u64[];
@@ -13714,6 +13734,12 @@ fn map_expression<a>(c: (&a mut C), expected: u64) -> Val {
 
 fn primary<a>(c: (&a mut C)) -> Val {
     k := kind(&mut c);
+    if (k == 42) & (c.typed_refs != 0) {
+        // `*r`: dereference; postfix accessors bind tighter (`*r.f` is `*(r.f)`).
+        advance(&mut c);
+        r := expr(&mut c, 10);
+        return deref_value(&mut c, r);
+    }
     if k == 38 {
         if c.typed_refs == 0 {
             return view_borrow(&mut c);
@@ -15145,7 +15171,18 @@ fn expr_expected<a>(c: (&a mut C), min: u64, expected: u64) -> Val {
                 // `v[i].push(x)` / `v[i].f.set(x)`: borrow the element mutably when the call that
                 // follows mutates its receiver; a plain read stays a shared access.
                 mut access = 0;
-                if mutating_call_after_index(&mut c) {
+                mut elem = 0;
+                k6 := ty_kind(&mut c, ty);
+                if k6 == 7 {
+                    inner := ty_arg(&mut c, ty);
+                    if ty_kind(&mut c, inner) == 6 {
+                        elem = ty_arg(&mut c, inner);
+                    }
+                }
+                if k6 == 6 {
+                    elem = ty_arg(&mut c, ty);
+                }
+                if mutating_call_after_index(&mut c, elem) {
                     access = 2;
                 }
                 result := index_view(&mut c, val(t, ty), access);
@@ -15851,28 +15888,31 @@ fn index_assignment_operator<a>(c: (&a mut C)) -> u64 {
     return 0;
 }
 
-fn mutating_method_name<a>(c: (&a mut C), name: &a [u8]) -> u64 {
+fn mutating_method_name<a>(c: (&a mut C), name: &a [u8], elem: u64) -> u64 {
     builtin := u8[][copy_bytes(view("push")), copy_bytes(view("pop")), copy_bytes(view("insert")), copy_bytes(view("remove")), copy_bytes(view("clear")), copy_bytes(view("truncate")), copy_bytes(view("append")), copy_bytes(view("sort")), copy_bytes(view("reverse")), copy_bytes(view("swap")), copy_bytes(view("extend")), copy_bytes(view("get_mut")), copy_bytes(view("entry")), copy_bytes(view("retain"))];
     for i in builtin.len() {
         if same(view(builtin[i]), view(name)) {
             return 1;
         }
     }
-    // A user method whose receiver is `self: &mut ...`.
+    // A user method of the element's own type whose receiver is `self: &mut ...`.
     for i in c.funcs.len() {
         f := &c.funcs[i];
         if (f.owner != 0) & (f.count != 0) & same(view(f.name), view(name)) {
             first := f.first;
+            owner := f.owner;
             pty := c.params[first];
-            if (ty_kind(&mut c, pty) == 7) & (ty_mode(&mut c, pty) != 0) {
-                return 1;
+            if (ty_kind(&mut c, pty) == 7) & (ty_mode(&mut c, pty) != 0) & (elem != 0) {
+                if (ty_kind(&mut c, elem) == 8) & (ty_arg(&mut c, elem) == owner - 1) {
+                    return 1;
+                }
             }
         }
     }
     return 0;
 }
 // At `[`: whether the matching `]` is followed by `(.field)*.method(` with a mutating method.
-fn mutating_call_after_index<a>(c: (&a mut C)) -> u64 {
+fn mutating_call_after_index<a>(c: (&a mut C), elem: u64) -> u64 {
     mut q = c.pos;
     mut depth = 0;
     while true {
@@ -15895,7 +15935,7 @@ fn mutating_call_after_index<a>(c: (&a mut C)) -> u64 {
     while (kind_at(&mut c, q) == 46) & (kind_at(&mut c, q + 1) == 1) {
         if kind_at(&mut c, q + 2) == 40 {
             name := tok_text(&mut c, q + 1);
-            return mutating_method_name(&mut c, view(name));
+            return mutating_method_name(&mut c, view(name), elem);
         }
         q = q + 2;
     }
@@ -16766,9 +16806,7 @@ fn statement<a>(c: (&a mut C)) -> unit {
         return ();
     }
     // `loop { }` is `while` without a condition; without a break, code after it is unreachable.
-    // `loop` is a keyword only before `{`; otherwise it is an ordinary name (`loop[i] = x`).
-    here := c.pos;
-    endless := is(&mut c, view("loop")) & (kind_at(&mut c, here + 1) == 123);
+    endless := is(&mut c, view("loop"));
     if endless + is(&mut c, view("while")) {
         advance(&mut c);
         // while let Variant(b) = value { }: loops while the value matches; a non-matching value is dropped.
@@ -17475,6 +17513,42 @@ fn statement<a>(c: (&a mut C)) -> unit {
     }
     if chained_field_assignment_ahead(&mut c) {
         chained_field_assignment(&mut c);
+        return ();
+    }
+    if (kind(&mut c) == 42) & (c.typed_refs != 0) {
+        // `*r = v`: store through a mutable reference; the old value is dropped. `*r op= v`
+        // combines with the current (copyable) value first.
+        advance(&mut c);
+        r := expr(&mut c, 10);
+        rt := r.t;
+        rty := r.ty;
+        op := kind(&mut c);
+        if ty_kind(&mut c, rty) != 7 {
+            fail(&mut c, view("* requires a typed reference"));
+        }
+        mut v = val(0, 0);
+        vstart := c.pos + 1;
+        if op == 61 {
+            advance(&mut c);
+            v = expr(&mut c, 0);
+        } else {
+            if (261 < op) & (op < 267) {
+                advance(&mut c);
+                current := deref_value(&mut c, val(rt, rty));
+                rstart := c.pos;
+                mut rhs = expr(&mut c, 0);
+                rend := c.pos;
+                rhs = adopt_value(&mut c, rhs, rstart, rend, current.ty);
+                v = compound_value(&mut c, compound_operator(op), current.t, rhs, current.ty);
+            } else {
+                fail(&mut c, view("expected = after *reference"));
+            }
+        }
+        vend := c.pos;
+        expect(&mut c, view(";"));
+        expected := ty_arg(&mut c, rty);
+        v = adopt_value(&mut c, v, vstart, vend, expected);
+        exchange_into(&mut c, val(rt, rty), v);
         return ();
     }
     if assignment_ahead(&mut c) {

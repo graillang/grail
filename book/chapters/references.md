@@ -8,10 +8,13 @@ Numeric references do not require a heap allocation for the referent.
 
 {{example:references}}
 
-`exchange(reference,new_value)` replaces the stored value and returns the old one. It does not
-silently drop an old owned result: that result becomes another value with its own cleanup path.
-`load` can copy a scalar through a reference. It cannot generally copy an arbitrary owner or an
-exclusive view. Read-only view descriptor copying retains checked provenance.
+`*r` reads through a reference and `*r = v` (or `*r += v`) writes through a `&mut` one. Reading
+copies, so it works for numbers, bools, floats and other plain values; copying an owner out of a
+reference is rejected ("use exchange"), and an exclusive view cannot be copied either. Read-only
+view descriptor copying retains checked provenance. `*r = v` drops the old value.
+
+`exchange(reference, new_value)` replaces the stored value and returns the old one instead of
+dropping it: use it to move an owned value out of a reference.
 
 Use a reference when the caller should keep the storage while a function reads or changes it. Use a
 by-value parameter when ownership should move to the callee.

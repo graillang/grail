@@ -11,7 +11,7 @@ self-hosting remain required work, not successful unsupported-type rejection pro
 - `borrow(place)` / `borrow_mut(place)` take or reborrow a typed reference. Places include record
   fields. Reborrowing a mutable reference freezes its parent until the child ends. Existing
   byte-data borrow syntax and the UTF-8 prohibition on mutable string bytes are unchanged.
-- `load(reference)` copies a number/unit, not an arbitrary affine value. `exchange(reference,value)`
+- `*reference` copies a number/unit, not an arbitrary affine value. `exchange(reference,value)`
   replaces a whole initialized referent and returns its previous value by move. `core::replace`
   is a real universally checked Grail wrapper around that operation.
 - Numbers/unit, owned text and byte vectors and lifetime-free records/enums can be referents. Numeric fields

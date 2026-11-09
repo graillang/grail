@@ -15,7 +15,7 @@ are still released when the record ends.
 
 `values[i]` copies a numeric element. `&values[i]` borrows an element slot readonly;
 `&mut values[i]` borrows it exclusively when mutable access is available. Non-numeric indexed
-values remain borrowed rather than moving owned elements out of the vector. `load(slot)` copies
+values remain borrowed rather than moving owned elements out of the vector. `*slot` copies
 a numeric referent. After the reference's last use, growth may reallocate the vector.
 
 `values[i] = value` replaces an element (the old one is dropped) and `values[i] += 1` updates a

@@ -53,7 +53,7 @@ Recursive structural checks are cycle-aware and have a finite analysis-depth lim
 `a:=atomic(0)` creates one opaque, affine, aligned `atomic<num>`. Safe code cannot access its
 payload through ordinary loads/stores or copy the owner. Aggregate/vector cleanup frees it once.
 
-- `load()`, `store(value)`, `swap(value)`, `fetch_add(value)`, `fetch_sub(value)` and
+- `*()`, `store(value)`, `swap(value)`, `fetch_add(value)`, `fetch_sub(value)` and
   `compare_exchange(expected,desired)` are sequentially consistent.
 - `load_relaxed()`, `load_acquire()`, `store_relaxed(value)` and `store_release(value)` select
   valid weaker orderings. Stronger-than-requested barriers are allowed; this is not a claim of

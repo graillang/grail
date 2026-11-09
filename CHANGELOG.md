@@ -2,10 +2,16 @@
 
 ## Unreleased
 
+- Dereference is `*r` and store-through is `*r = v` / `*r += v`, as in C, Rust, Go and Zig. Reading
+  copies plain values and refuses owners ("use exchange"); `*r = v` drops the old value, and
+  `exchange(r, v)` remains the way to move an owned value out. The `load(r)` builtin is replaced
+  by `*r`; `lib/`, Borg, Abundance, the examples, the book and the tests were rewritten.
+
 - The statement builtins `write`, `drop` and `assert` apply only before `(` and when no local
   shadows them, so a binding named `write` can be assigned (`write += 3`).
-- `loop` is a keyword only before `{`: a binding named `loop` can be indexed and assigned
-  (`loop[i] = x` used to send the compiler into an infinite loop).
+- Statement and expression keywords (`loop`, `while`, `for`, `if`, `match`, `return`, `mut`, ...) are
+  reserved: naming a binding or parameter after one is rejected with "a keyword cannot name a binding". A binding named `loop` used to be
+  accepted, and `loop[i] = x` then sent the compiler into an infinite loop.
 
 - Byte reads (`bytes[i]`) are 0..255 words that adopt any integer type holding that range, so
   `hexval(text[i])` with `hexval(c: u8)` works without a conversion, while `bytes[i] << 24` still
