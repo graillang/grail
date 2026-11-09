@@ -53,6 +53,40 @@ Stage 1 lowers the stream as it is:
   target-specific inline asm; functions that switch stacks (`raw_switch`, `raw_thread_clone`)
   stay native assembly linked alongside.
 
+### Prototype results (2026-11-09)
+
+A throwaway Python lowering of the raw stream (no `optimize.grl`) to LLVM IR, compiled with
+`clang -O2` and linked with the functions it could not lift (stack switching, `%rsp` users,
+indirect calls, jump-table targets) as native assembly, produced identical output on all five
+benchmarks:
+
+| benchmark | C `-O2` | native | LLVM | LLVM vs native | LLVM vs C |
+| --- | --- | --- | --- | --- | --- |
+| nbody | 0.147 s | 3.960 s | 1.339 s | 3.0x faster | 9x |
+| matmul | 0.268 s | 84.363 s | 1.393 s | 61x faster | 5x |
+| sort | 1.207 s | 3.491 s | 2.590 s | 1.3x faster | 2.1x |
+| sieve | 0.805 s | 14.019 s | 3.567 s | 3.9x faster | 4.4x |
+| fnv | 0.682 s | 50.155 s | 4.903 s | 10x faster | 7x |
+
+What mattered, in order:
+
+1. Lifting the runtime too (drop helpers, allocator, atomics as LLVM atomics, `syscall` as inline
+   asm) so LLVM can inline element access and push; until then hot loops called native code and
+   LLVM was slower than the native backend.
+2. Check failures as a `noreturn cold` call: with six-argument `rt_abort` calls, the element
+   accessor `rt_slot` cost 260 against an inline threshold of 225.
+3. `internal` linkage for functions native code does not name.
+4. `rt_f32_round` (a 199-line software rounding routine called after every `f32` operation) as
+   `fptrunc` + `fpext`, which rounds identically: matmul 9.76 s -> 1.39 s.
+
+Requirements found on the way: LLVM may emit `memset`/`memcpy` calls, so the backend supplies
+them (Grail programs have no libc); `.L` data labels and inline constant pools must be renamed or
+hoisted before two objects can link; debug sections that name function-local labels keep those
+functions native.
+
+The remaining gap to C is front-end output: a view allocated and freed per byte access in some
+loops (fnv), 8-byte elements for `f32[]`, and bounds checks without loop versioning.
+
 Stage 2 carries type information into the stream so both backends benefit: inline float
 arithmetic (no `rt_f64_op`), real `f32` values instead of rounded binary64 words, 4-byte
 elements for `f32[]`/`u32[]`/`i32[]`, and pointer-typed loads so LLVM's alias analysis works.
