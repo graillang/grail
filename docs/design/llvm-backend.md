@@ -187,6 +187,112 @@ byte-identical before and after, because only storage changes.
 
 Stage 3, only if measurements still demand it: a typed SSA IR emitted directly by the front end.
 
+### Stage 2b: where the remaining gap is (measured)
+
+After stage 2a the benchmarks stand at 1.0--1.2x of C except the two that mutate sequences in their
+hot loop (`tools/bench.mjs`, x86-64, best of three). The gap there is not arithmetic, not loads and
+not conversions: it is the per-element validation the front end emits for every checked access.
+
+Two of the three checks are not bounds checks at all: they are the front end's *overflow* checks on
+the address arithmetic (`s + 8` for the length field, `data + idx * 8` for the element), folded to a
+constant compare where the addend is known. Addresses cannot wrap for an allocation the runtime
+handed out -- user-space addresses have bit 63 clear on every supported target, the same axiom the
+tagged references of stage 2a rest on -- so a front end that keeps pointer arithmetic apart from
+integer arithmetic would emit both unchecked, leaving one compare and one branch per access. That
+is a language and front-end decision, not something a lowering of the untyped stream can take: from the stream the
+compare against `-8` and the `jb` after `addq` are indistinguishable from arithmetic on integers the
+program is allowed to overflow-check, so eliding them here would silently weaken the checks the
+front end asked for.
+
+An element access is a fixed instruction sequence in the stream, and the lowering emits it as it
+stands:
+
+| stream | IR | purpose |
+| --- | --- | --- |
+| `movq <slot>,%rax; cmpq $-8,%rax; jae abort` | `load desc` / `icmp ult %desc, -8` / `br` | the descriptor is a real object pointer |
+| `cmpq 8(%rax),%idx; jae abort` | `load len` / `icmp ult %idx, %len` / `br` | index in bounds |
+| `movq (%rax),%rsi; addq %rsi,%off; jb abort` | `load data` / `add` / `icmp ult %addr, %data` / `br` | the element address does not wrap |
+
+That is eight to nine machine operations per access, each with a dependent load (`slot -> header ->
+element`) and three compare/branch pairs, against C's one addressing mode. `nbody` performs eight
+such accesses per inner iteration and `sort` three to four per element moved.
+
+To size the cost, the emitted IR was compiled with every branch to a check-failure block removed (a
+measurement only: the outputs stay identical because no check fires on these programs):
+
+| benchmark | `--backend=llvm` | checks removed | share of run time | floor vs C |
+| --- | --- | --- | --- | --- |
+| nbody | 0.256 s | 0.142 s | 44% | 1.34x |
+| sort | 1.477 s | 1.172 s | 21% | 1.16x |
+| fnv | 0.623 s | 0.601 s | 4% | ~1.0x |
+| sieve | 0.660 s | 0.663 s | 0% | memory bound |
+| matmul | 0.264 s | 0.425 s | none -- removal is *slower* | latency bound on the `addss` chain |
+
+So `fnv`, `sieve` and `matmul` are already at their floor. `fnv`'s hash chain is a serial
+`xor`/`imul` dependent chain, `sieve` stores with stride `i` and is memory bound, and `matmul`'s
+inner loop is the serial single-precision `s += a * b` chain; deleting the check branches changes
+nothing for the first two and actively mis-schedules the third (0.425 s), which is what a loop that
+is latency bound and not issue bound looks like. Everything left is `nbody`
+and `sort`, and it is all validation.
+
+#### Why the lowering cannot remove the checks
+
+The checks become cheap only if LLVM hoists them out of the loop, which needs the `len` and `data`
+loads loop-invariant. Two things stand in the way, and both are properties of the stream, not of the
+IR the lowering writes:
+
+1. *Aliasing*: a store to an element could, as far as LLVM knows, write the descriptor it came from,
+   so the header loads cannot be merged across a store. Element and descriptor storage are separate
+   allocations by construction, but the word stream carries no type, so the lowering cannot say so.
+   Tagging the accesses to model it was tried and does not work (below).
+2. *Speculation*: even with perfect alias information LICM will not hoist a `load` from an
+   `inttoptr` pointer, because it cannot prove the pointer dereferenceable, and without a hoisted
+   `len` the bounds test is not loop-invariant, so no loop unswitching happens either.
+
+Both are exactly the "type information carried into the stream" item that stage 2 introduced and
+that stage 3 (a typed SSA IR emitted by the front end) is meant to supply. Loop versioning --
+`if len >= 15` in front of the loop, the form a typed backend would use -- needs the same
+information: with `i*3+k` derived from `for i in 5 { for k in 3 }`, the front end knows the largest
+index, but it does not know the length at that point.
+
+#### Measured and rejected
+
+Each of these was applied to the emitted IR (or the driver) and measured on the five benchmarks;
+none moved the numbers, so none is in the tree:
+
+- `!tbaa` nodes separating element from descriptor accesses, and `!alias.scope`/`!noalias` on the
+  same pair: no effect, for reason 2 above -- the loads are never hoisted even when they provably do
+  not alias, and a `mem2reg` failure is not involved (`sort`'s descriptors already live in
+  registers).
+- `align 8`/`align 4` on word and narrow accesses instead of `align 1`: no effect anywhere
+  (`-O2` already folds the address arithmetic into the operand; nothing vectorises differently).
+- `nounwind` on every lifted function definition: no effect.
+- `!prof` branch weights marking the check branches as cold: no effect.
+- `llvm.loop.unroll.full` and `llvm.loop.unroll.count(N)` on the loop latches: ignored. The lowering
+  emits a stream loop as a header with the exit test and an unconditional branch back, and this
+  LLVM (23.x) drops the pragma from an unconditional latch.
+- `-O3` instead of `-O2` for the `.ll`: 2--5% slower on `nbody` and `sort` (more inlining and
+  unrolling of check-heavy code), so the level stays `-O2`.
+
+What does move them is the unroller, which is both a cost and a size question and therefore a
+policy decision rather than a lowering fix: `-mllvm -unroll-threshold=200000` fully unrolls the
+`for i in 5 { while j < 5 { for k in 3 } }` nest of `nbody` (ten copies of the pair body, three of
+the inner one), which lets LLVM CSE the `p[i*3+k] - p[j*3+k]` the source computes twice, merge the
+redundant header loads and checks, and schedule the remaining dependent loads together: nbody
+0.263 s -> 0.209 s (21% faster) and sort 1.549 s -> 1.448 s (6%), with `fnv` and `sieve` unchanged.
+It is not adopted: `nbody`'s main function grows fivefold (513 -> 2493 instructions) and `clang`
+takes several times longer on the module (the `matmul` module did not finish inside a ten-minute
+budget), for a 21% win on one benchmark.
+
+The lowering's own share of the loop is small. With the checks removed the only overhead left
+against C is the representation: a sequence value is a pointer to a `{data, len, cap}` header, so an
+access costs a slot load, a header load and the element access where C has one addressing mode
+(that is the 1.34x floor of `nbody`); `sort`'s floor is 1.16x. A one-guard-per-straight-line-region
+form (all the conditions of a run of accesses ANDed into one branch, the element loads after it)
+would cut the block count per iteration without removing the compares, but it needs the same
+"an element store cannot write the descriptor" fact to move a later access's check in front of an
+earlier store, so it is blocked by the same missing type information.
+
 ## Verification
 
 - A benchmark suite (`tools/bench.mjs`) times Grail against C `-O2` on meshopt simplify, clod,
