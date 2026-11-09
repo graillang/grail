@@ -3906,5 +3906,35 @@
     "reject": true,
     "diagnostic": "out of range for i64, the default integer type",
     "note": "an unsuffixed literal that defaults to i64 must fit; it used to wrap silently"
+  },
+  {
+    "name": "nested-place-assignment",
+    "source": "struct P {\n    x: u64,\n    tags: u64[]\n}\nstruct W {\n    items: P[],\n    grid: u64[][]\n}\nfn main() {\n    mut v = u64[][];\n    v.push(u64[1, 2]);\n    v.push(u64[3, 4, 5]);\n    v[0][1] = 9;\n    v[1][2] += 10;\n    println(v[0][1] + v[1][2]);\n    mut w = W { items: P[], grid: u64[][] };\n    w.items.push(P { x: 1, tags: u64[7] });\n    w.grid.push(u64[0, 0]);\n    w.items[0].x = 41;\n    w.items[0].x += 1;\n    w.items[0].tags[0] = 8;\n    w.grid[0][1] = 6;\n    println(w.items[0].x);\n    println(w.items[0].tags[0] + w.grid[0][1]);\n    mut ps = P[];\n    ps.push(P { x: 0, tags: u64[] });\n    ps[0].x = 5;\n    println(ps[0].x);\n}\n",
+    "stdout": "24\n42\n14\n5\n",
+    "note": "v[i][j] = x, v[i][j] += x, s.items[i].f = x, s.items[i].f += x, s.items[i].v[j] = x"
+  },
+  {
+    "name": "nested-mutating-calls",
+    "source": "struct P {\n    tags: u64[]\n}\nfn main() {\n    mut v = u64[][];\n    v.push(u64[1]);\n    v[0].push(4);\n    mut ps = P[];\n    ps.push(P { tags: u64[] });\n    ps[0].tags.push(7);\n    ps[0].tags.push(8);\n    mut m = [u64: u64[]]();\n    m.insert(3, u64[]);\n    m[3].push(9);\n    println(v[0].len() + ps[0].tags.len() + m[3].len());\n    println(v[0][1] + ps[0].tags[1] + m[3][0]);\n}\n",
+    "modules": [
+      "lib/hash.grl",
+      "lib/hashmap.grl"
+    ],
+    "stdout": "5\n21\n",
+    "note": "v[i].push(x), ps[i].tags.push(x) and m[k].push(x) borrow the element mutably"
+  },
+  {
+    "name": "reject-nested-assign-immutable",
+    "source": "fn main() {\n    v := u64[][];\n    v[0][0] = 1;\n}\n",
+    "reject": true,
+    "diagnostic": "requires mut",
+    "note": "a nested store still needs a mutable root"
+  },
+  {
+    "name": "reject-nested-assign-while-borrowed",
+    "source": "fn main() {\n    mut v = u64[][];\n    v.push(u64[1]);\n    r := &v[0];\n    v[0][0] = 2;\n    println(r[0]);\n}\n",
+    "reject": true,
+    "diagnostic": "conflicts with active access",
+    "note": "a nested store conflicts with a live shared borrow of the element"
   }
 ]

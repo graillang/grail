@@ -20,7 +20,10 @@ a numeric referent. After the reference's last use, growth may reallocate the ve
 
 `values[i] = value` replaces an element (the old one is dropped) and `values[i] += 1` updates a
 numeric one; both work through field paths such as `grid.cells[i] = 0`. The right-hand side is
-evaluated first, so `values[i] = values[i - 1] * 2` is fine. On byte buffers, `buf[i] = b` stores a
+evaluated first, so `values[i] = values[i - 1] * 2` is fine. Assignment works on any place built from
+indexes and fields: `grid[y][x] = 0`, `world.items[i].hp -= 1` and `rows[i].cells[j] += 1` borrow
+each step mutably for the statement, and a mutating method call such as `rows[i].push(x)` or
+`world.items[i].tags.clear()` does the same. On byte buffers, `buf[i] = b` stores a
 byte and stops the program if the value does not fit.
 
 Popping an empty collection or indexing out of bounds aborts. Vectors of owners recursively drop

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Assignment to nested places: `v[i][j] = x`, `world.items[i].hp -= 1`, `rows[i].cells[j] += 1`
+  and any mix of indexes and fields, each step borrowed mutably for the statement. Mutating
+  method calls through an index (`rows[i].push(x)`, `m[k].push(x)`, user methods taking
+  `self: &mut`) borrow the element mutably instead of failing as a read-only access, which
+  removes the old need to `exchange` an inner vector out to push to it.
+
 - String literals decode escapes strictly: `\u{...}` (a Unicode scalar value, encoded as UTF-8)
   now works in strings as it already did in character literals, `\xHH` is limited to `\x7F` so
   a literal can never be invalid UTF-8, and an unknown escape such as `\q` is a compile error
