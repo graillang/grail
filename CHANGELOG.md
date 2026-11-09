@@ -29,6 +29,18 @@
   in `fa0`/`fa1` (and an integer in `a0`); everything else keeps the integer-register or hidden
   pointer rules (Win64 by size). `tests/ffi/float_record_results.grl` covers five shapes on three
   Linux targets and Windows x64.
+- String literals decode escapes strictly: `\u{...}` (a Unicode scalar value, encoded as UTF-8)
+  now works in strings as it already did in character literals, `\xHH` is limited to `\x7F` so
+  a literal can never be invalid UTF-8, and an unknown escape such as `\q` is a compile error
+  instead of being kept as literal text.
+- `u8[]` has `.clear()` and `.truncate(n)` like other vectors (`clear` used to be a parse error).
+- `module::Type[]` and `module::Type[...]` collection literals work for another module's types.
+- In i64 mode an unsuffixed literal that does not fit `i64` (e.g. `9223372036854775808`) is a
+  compile error; it used to wrap silently to a negative value.
+- Standard-library modules are recognised by location (a file in the directory holding
+  `core.grl`) rather than a hard-coded name list, so every `lib/` module, including new ones,
+  compiles in the stdlib's own literal mode regardless of the program's mode.
+
 - Fixed: the `i64` -> `u64` widening check emitted `jns`, which the AArch64 and RISC-V lowering
   does not implement (it emulates the zero and carry flags only), so programs relying on default
   `i64` semantics failed to compile for those targets. The sign is now tested with a shift and a

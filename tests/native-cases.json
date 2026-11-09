@@ -3884,5 +3884,55 @@
     "reject": true,
     "diagnostic": "mutation conflicts with live borrow",
     "note": "a derived reference still used after the join keeps its owner borrowed"
+  },
+  {
+    "name": "bytes-clear-truncate",
+    "source": "fn main() {\n    mut b = u8[1, 2, 3, 4];\n    b.truncate(9);\n    println(b.len());\n    b.truncate(2);\n    println(b.len());\n    println(b[1]);\n    b.clear();\n    println(b.len());\n    b.push(7);\n    println(b[0]);\n}\n",
+    "stdout": "4\n2\n2\n0\n7\n",
+    "note": "u8[] supports clear() and truncate(n); truncating past the length is a no-op, as for T[]"
+  },
+  {
+    "name": "string-escapes",
+    "source": "fn main() {\n    s := \"caf\\u{e9}|\\u{1F600}|\\u{10_FFFF}|\\x41\\t\\\\\\\"\\'\\0.\";\n    println(s.len());\n    println(s[3]);\n    println(s[4]);\n    println(s[6]);\n}\n",
+    "stdout": "23\n195\n169\n240\n",
+    "note": "\\u{...} encodes UTF-8 (2 and 4 bytes, _ separators allowed); \\xHH up to 7F; the simple escapes"
+  },
+  {
+    "name": "reject-unknown-escape",
+    "source": "fn main() { println(\"a\\qb\"); }",
+    "reject": true,
+    "diagnostic": "unknown escape in string literal",
+    "note": "an unknown escape is an error, not literal text"
+  },
+  {
+    "name": "reject-x-escape-above-7f",
+    "source": "fn main() { println(\"\\x80\"); }",
+    "reject": true,
+    "diagnostic": "above \\x7F would make invalid UTF-8",
+    "note": "strings stay valid UTF-8"
+  },
+  {
+    "name": "reject-surrogate-escape",
+    "source": "fn main() { println(\"\\u{D800}\"); }",
+    "reject": true,
+    "diagnostic": "surrogate",
+    "note": "\\u{...} must be a Unicode scalar value"
+  },
+  {
+    "name": "qualified-vec-literal",
+    "source": "use qvec;\nfn main() {\n    mut v = qvec::P[];\n    v.push(qvec::P { x: 4 });\n    w := qvec::P[qvec::P { x: 5 }, qvec::P { x: 6 }];\n    println(v.len() + w.len());\n    println(w[1].x);\n}\n",
+    "modules": [
+      "compiler/tests/qualified_vec_mod.grl"
+    ],
+    "stdout": "3\n6\n",
+    "note": "module::Type[] and module::Type[...] collection literals"
+  },
+  {
+    "name": "reject-i64-default-literal-overflow",
+    "source": "fn main() { x := 9223372036854775808; println(1); }",
+    "defaultU64": false,
+    "reject": true,
+    "diagnostic": "out of range for i64, the default integer type",
+    "note": "an unsuffixed literal that defaults to i64 must fit; it used to wrap silently"
   }
 ]
