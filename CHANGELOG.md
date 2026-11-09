@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- `&mut r` on a `mut` binding holding a shared reference borrows the binding's own slot
+  (`&mut &T`), so a callee can replace which referent the binding names:
+  `previous := replace(&mut current, &second)` with `current = &first` compiles (it was rejected with
+  "mutable reborrow of shared reference"). The new reference grants no write access to the old
+  referent, the old referent stays frozen for as long as a value still names it, and `&mut r.f` /
+  `&mut r[i]` still borrow through the referent and stay rejected. A mutable-reference binding keeps
+  reborrowing its referent. Book example `writeback` and its Rust comparison use the natural form
+  again.
 - A program's own `Task`, `Mutex`, `Atomic`, `Scope` or `CancelToken` type shadows the built-in generic of that name
   (`Task[...]` was a parse error). A slice compares with `==` against a vector of the same element type.
 - Book: duplicate chapters merged (numbers, bytes and text, records and vectors, views and slices); every example uses

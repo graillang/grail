@@ -7944,7 +7944,7 @@ fn field_path<a>(c: (&a mut C), id: u64, lty: u64, address: u64) -> Val {
     observe(&mut c, t);
     return val(t, ty);
 }
-fn place<a>(c: (&a mut C), write: u64) -> Val {
+fn place<a>(c: (&a mut C), write: u64, slot: u64) -> Val {
     name := ident(&mut c);
     mut l = find_local(&mut c, view(name));
     if l == 0 {
@@ -7967,6 +7967,17 @@ fn place<a>(c: (&a mut C), write: u64) -> Val {
     id := local_id(&mut c, l - 1);
     ty := local_ty(&mut c, l - 1);
     commit_flex(&mut c, l - 1);
+    next := kind(&mut c);
+    // `&mut r` on a shared reference binds the slot (never the referent): a whole-binding borrow
+    // of a reference is its own storage. Field and index borrows still go through the referent.
+    if (slot != 0)
+        & write
+        & (ty_kind(&mut c, ty) == 7)
+        & (ty_mode(&mut c, ty) == 0)
+        & (next != 46)
+        & (next != 91) {
+        return reference_slot(&mut c, id, ty);
+    }
     if write {
         require_mutable_binding(&mut c, id, 1);
     }
@@ -8004,6 +8015,30 @@ fn place_slot<a>(c: (&a mut C), id: u64, ty: u64, write: u64) -> Val {
     slot := save(&mut c);
     mut out = reference_type(&mut c, referent, write);
     return borrow_reference(&mut c, slot, out, id, source, write);
+}
+// `&mut r` where `r` holds a reference borrows the binding's own slot, not its referent: the
+// result is `&mut &T`, which lets a callee replace which referent `r` holds without gaining write
+// access to the old referent. The old referent stays reachable read-only through the reference
+// that `exchange` hands back.
+fn reference_slot<a>(c: (&a mut C), id: u64, ty: u64) -> Val {
+    if binding_mode(&c, id) != 2 {
+        fail(&mut c, view("owned storage mutation requires mut"));
+    }
+    target := place_of(&mut c, id);
+    o(&mut c, view("leaq "));
+    stack_slot(&mut c, id);
+    o(&mut c, view(",%rax\n"));
+    slot := save(&mut c);
+    out := reference_type(&mut c, ty, 1);
+    own(&mut c, slot, out);
+    loan := ownership::borrow_place(&mut c.check, target, 1);
+    if loan == 0 {
+        fail(&mut c, view("borrow conflicts with active access"));
+    }
+    holder := place_of(&mut c, slot);
+    bond(&mut c, holder, loan);
+    set_target(&mut c, slot, target, slot + 1);
+    return val(slot, out);
 }
 // `&x`, `&x.f.g` and `&xs[i]` name places; anything else is a temporary.
 fn borrow_place_ahead<a>(c: (&a mut C)) -> u64 {
@@ -8960,7 +8995,7 @@ fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
             mut v = val(0, 0);
             reborrow := reborrow_argument(&mut c);
             if reborrow != 0 {
-                v = place(&mut c, reborrow - 1);
+                v = place(&mut c, reborrow - 1, 0);
             } else {
                 v = expr_expected(&mut c, 0, context);
             }
@@ -11015,7 +11050,7 @@ fn builtin<a>(c: (&a mut C), id: u64) -> Val {
             expect(&mut c, view(")"));
             return v;
         }
-        mut v = place(&mut c, id == 14);
+        mut v = place(&mut c, id == 14, 1);
         // &v.items[i] / &mut xs[i]: an element of a borrowed vector.
         if is(&mut c, view("[")) {
             mut access = 1;
@@ -14165,7 +14200,7 @@ fn reference_borrow<a>(c: (&a mut C), write: u64) -> Val {
     if through_view {
         v = primary(&mut c);
     } else {
-        v = place(&mut c, write);
+        v = place(&mut c, write, 1);
     }
     // `&mut cs[i].data`, `&grid[y][x]`: the rest of the accessor chain is borrowed too.
     stop := borrow_chain_end(&mut c);
@@ -17281,7 +17316,7 @@ fn chained_field_assignment<a>(c: (&a mut C)) -> unit {
         }
         q = q + 2;
     }
-    head := place(&mut c, 1);
+    head := place(&mut c, 1, 0);
     base := chain_walk(&mut c, head, final_run);
     a := field_path(&mut c, base.t, base.ty, 2);
     target := a.t;
@@ -17335,7 +17370,7 @@ fn index_assignment<a>(c: (&a mut C)) -> unit {
     if (capability != 0) & (chain[2] == 1) {
         base = primary(&mut c);
     } else {
-        base = place(&mut c, 1);
+        base = place(&mut c, 1, 0);
         base = chain_walk(&mut c, base, chain[1]);
     }
     x := deref(&mut c, val(base.t, base.ty));

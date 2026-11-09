@@ -5,8 +5,10 @@ storage's retained origins, not just exchange a machine word.
 
 {{example:writeback}}
 
-The generic function replaces a stored readonly view and returns the previous descriptor. The
-caller retains both underlying byte owners for as long as the corresponding values require them.
+The generic function replaces a stored shared reference and returns the previous one. `&mut current`
+borrows the binding's own slot, so the callee may change which vector `current` names but never writes
+through the old reference. The caller retains both underlying byte owners for as long as the
+corresponding values require them.
 Incoming borrows cannot be shorter-lived than the contract of external storage.
 
 Assignments, exchange, and captured vector updates propagate guards across calls. Weak updates

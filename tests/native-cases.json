@@ -4586,5 +4586,84 @@
     "name": "for-owned-empty-and-nested",
     "source": "fn count<T>(values:T[])->u64{mut n=0;for value in values{drop(value);n+=1;}return n;} fn main(){empty:=u64[][];println(count(empty));mut n=0;for group in u64[][][u64[][u64[1],u64[2]],u64[][u64[3]]]{for values in group{n+=values.len();}}println(n);println(count(string[\"a\".text(),\"b\".text()]));}",
     "stdout": "0\n3\n2\n"
+  },
+  {
+    "name": "reference-slot-replace",
+    "source": "fn replace<T>(slot: &mut T, value: T) -> T {\n    return exchange(slot, value);\n}\nfn main() {\n    first := u8[1];\n    second := u8[2];\n    mut current = &first;\n    previous := replace(&mut current, &second);\n    println(previous[0]);\n    println(current[0]);\n}\n",
+    "stdout": "1\n2\n"
+  },
+  {
+    "name": "reference-slot-twice",
+    "source": "fn replace<T>(slot: &mut T, value: T) -> T {\n    return exchange(slot, value);\n}\nfn main() {\n    first := u8[1];\n    second := u8[2];\n    mut current = &first;\n    one := replace(&mut current, &second);\n    two := replace(&mut current, &first);\n    println(one[0]);\n    println(two[0]);\n    println(current[0]);\n}\n",
+    "stdout": "1\n2\n1\n"
+  },
+  {
+    "name": "reference-slot-returned-value",
+    "source": "fn replace<T>(slot: &mut T, value: T) -> T {\n    return exchange(slot, value);\n}\nfn main() {\n    first := u8[1];\n    second := u8[2];\n    mut current = &first;\n    one := replace(&mut current, &second);\n    two := replace(&mut current, one);\n    println(two[0]);\n}\n",
+    "stdout": "2\n"
+  },
+  {
+    "name": "reference-slot-assign-through",
+    "source": "fn main() {\n    first := u8[1];\n    second := u8[2];\n    mut current = &first;\n    p := &mut current;\n    *p = &second;\n    println(current[0]);\n}\n",
+    "stdout": "2\n"
+  },
+  {
+    "name": "reference-slot-element-type",
+    "source": "fn replace<T>(slot: &mut T, value: T) -> T {\n    return exchange(slot, value);\n}\nfn main() {\n    first := u64[7, 8];\n    second := u64[9];\n    mut current = &first;\n    previous := replace(&mut current, &second);\n    println(previous.len());\n    println(current[0]);\n    println(current.len());\n}\n",
+    "stdout": "2\n9\n1\n"
+  },
+  {
+    "name": "reference-slot-requires-mut",
+    "source": "fn replace<T>(slot: &mut T, value: T) -> T {\n    return exchange(slot, value);\n}\nfn main() {\n    first := u8[1];\n    second := u8[2];\n    current := &first;\n    previous := replace(&mut current, &second);\n    println(previous[0]);\n}\n",
+    "reject": true,
+    "diagnostic": "owned storage mutation requires mut"
+  },
+  {
+    "name": "reference-slot-read-while-borrowed",
+    "source": "fn replace<T>(slot: &mut T, value: T) -> T {\n    return exchange(slot, value);\n}\nfn main() {\n    first := u8[1];\n    second := u8[2];\n    mut current = &first;\n    p := &mut current;\n    println(current[0]);\n    println(p.len());\n}\n",
+    "reject": true,
+    "diagnostic": "use of moved, borrowed or partially initialized value"
+  },
+  {
+    "name": "reference-slot-write-while-borrowed",
+    "source": "fn replace<T>(slot: &mut T, value: T) -> T {\n    return exchange(slot, value);\n}\nfn main() {\n    first := u8[1];\n    second := u8[2];\n    mut current = &first;\n    p := &mut current;\n    current = &second;\n    println(p.len());\n}\n",
+    "reject": true,
+    "diagnostic": "assignment conflicts with live borrow"
+  },
+  {
+    "name": "reference-slot-no-referent-write",
+    "source": "fn evil(slot: &mut &u8[], x: u8) {\n    slot[0][0] = x;\n}\nfn main() {\n    mut first = u8[1];\n    mut current = &first;\n    evil(&mut current, 9);\n    println(first[0]);\n}\n",
+    "reject": true,
+    "diagnostic": "mutation through readonly frame"
+  },
+  {
+    "name": "reference-slot-old-referent-frozen",
+    "source": "fn replace<T>(slot: &mut T, value: T) -> T {\n    return exchange(slot, value);\n}\nfn main() {\n    mut first = u8[1];\n    second := u8[2];\n    mut current = &first;\n    previous := replace(&mut current, &second);\n    first.push(3);\n    println(previous[0]);\n}\n",
+    "reject": true,
+    "diagnostic": "mutation conflicts with live borrow"
+  },
+  {
+    "name": "reference-slot-old-referent-drop",
+    "source": "fn replace<T>(slot: &mut T, value: T) -> T {\n    return exchange(slot, value);\n}\nfn main() {\n    first := u8[1];\n    second := u8[2];\n    mut current = &first;\n    previous := replace(&mut current, &second);\n    drop(first);\n    println(previous[0]);\n}\n",
+    "reject": true,
+    "diagnostic": "drop of moved or unavailable value"
+  },
+  {
+    "name": "reference-slot-local-referent",
+    "source": "fn bad(slot: &mut &u8[]) {\n    local := u8[5];\n    *slot = &local;\n}\nfn main() {\n    first := u8[1];\n    mut current = &first;\n    bad(&mut current);\n    println(current[0]);\n}\n",
+    "reject": true,
+    "diagnostic": "captured writeback violates invariant lifetime"
+  },
+  {
+    "name": "reference-slot-field-referent",
+    "source": "struct S {\n    v: u64\n}\nfn main() {\n    s := S { v: 1 };\n    r := &s;\n    p := &mut r.v;\n    println(*p);\n}\n",
+    "reject": true,
+    "diagnostic": "mutation through readonly reference"
+  },
+  {
+    "name": "reference-slot-index-referent",
+    "source": "fn main() {\n    data := u8[1, 2];\n    r := &data;\n    p := &mut r[0];\n    println(*p);\n}\n",
+    "reject": true,
+    "diagnostic": "mutation through readonly reference"
   }
 ]
