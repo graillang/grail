@@ -108,6 +108,18 @@ const cases = [
       'grail_os_socket_peer_address'],
     check_file: false,
   },
+  {
+    name: 'proc_thread',
+    entry: 'tests/ffi-runtime/proc_thread.grl',
+    output: 'ffi-proc-thread: ok',
+    host_symbols: ['grail_ffi_process_spawn', 'grail_ffi_process_handle',
+      'grail_os_process_wait', 'grail_os_process_id', 'grail_os_process_close',
+      'grail_ffi_thread_spawn', 'grail_ffi_thread_handle', 'grail_os_thread_join'],
+    cross_symbols: ['grail_ffi_process_spawn', 'grail_ffi_process_handle',
+      'grail_os_process_wait', 'grail_os_process_id', 'grail_os_process_close',
+      'grail_ffi_thread_spawn', 'grail_ffi_thread_handle', 'grail_os_thread_join'],
+    check_file: false,
+  },
 ];
 
 function compileAssembly(testCase, target, name) {
@@ -164,4 +176,4 @@ for (const testCase of cases) {
 if (!existsSync(join(root, 'lib/sys/grail_ffi_linux.o'))) {
   throw new Error('ffi-runtime: backend object was not produced');
 }
-console.log('ffi-runtime: file and socket tests built, linked and executed on x86_64; aarch64/riscv64 assembly checked');
+console.log('ffi-runtime: file, socket and process/thread tests built, linked and executed on x86_64; aarch64/riscv64 assembly checked');

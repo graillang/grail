@@ -7,8 +7,8 @@
 //
 // Ownership rules are documented in docs/design/grail-ffi-runtime.md:
 //   - path/data arguments are call-scoped byte-view borrows;
-//   - File and Socket are opaque C-owned handles, never freed by Grail;
-//     call close/socket_close once;
+//   - File, Socket, Process and Thread are opaque C-owned handles; call
+//     close/socket_close/process_close or join/detach exactly once;
 //   - out-records are Grail-owned storage written by C for this call;
 //   - C never returns a Grail-owned pointer or a view.
 
@@ -16,6 +16,8 @@ module sys_grail;
 
 handle File;
 handle Socket;
+handle Process;
+handle Thread;
 
 extern "C" record LengthOut { value: u64 }
 extern "C" record TimeOut { value: i64 }
@@ -41,6 +43,14 @@ extern "C" record Address {
     a13: u8,
     a14: u8,
     a15: u8
+}
+
+extern "C" record ProcessStatus {
+    struct_size: u64,
+    abi_version: u64,
+    kind: u64,
+    exit_code: i64,
+    term_signal: i64
 }
 
 extern "C" record FileStat {
@@ -115,6 +125,25 @@ extern "C" lib "grail_ffi_linux.o" fn grail_os_socket_local_address(
 extern "C" lib "grail_ffi_linux.o" fn grail_os_socket_peer_address(
     socket: Socket, out: Address
 ) -> i64;
+extern "C" lib "grail_ffi_linux.o" fn grail_ffi_process_spawn(
+    program: &[u8], arguments: &[u8]
+) -> i64;
+extern "C" lib "grail_ffi_linux.o" fn grail_ffi_process_handle() -> Process;
+extern "C" lib "grail_ffi_linux.o" fn grail_os_process_wait(
+    process: Process, out: ProcessStatus
+) -> i64;
+extern "C" lib "grail_ffi_linux.o" fn grail_os_process_id(
+    process: Process, out: LengthOut
+) -> i64;
+extern "C" lib "grail_ffi_linux.o" fn grail_os_process_close(process: Process) -> i64;
+extern "C" lib "grail_ffi_linux.o" fn grail_ffi_thread_spawn(
+    entry: cfn(u64) -> u64, user: u64
+) -> i64;
+extern "C" lib "grail_ffi_linux.o" fn grail_ffi_thread_handle() -> Thread;
+extern "C" lib "grail_ffi_linux.o" fn grail_os_thread_join(
+    thread: Thread, out: LengthOut
+) -> i64;
+extern "C" lib "grail_ffi_linux.o" fn grail_os_thread_detach(thread: Thread) -> i64;
 
 pub enum Error { Status(i64) }
 
@@ -148,6 +177,9 @@ pub const SHUTDOWN_READ: u64 = 1;
 pub const SHUTDOWN_WRITE: u64 = 2;
 pub const SHUTDOWN_BOTH: u64 = 3;
 pub const ERROR_INVALID_ARGUMENT: i64 = -1;
+pub const PROCESS_EXITED: u64 = 0;
+pub const PROCESS_SIGNALED: u64 = 1;
+pub const PROCESS_STILL_ACTIVE: u64 = 2;
 
 pub fn init() -> unit |? Error {
     mut status: i64 = 0;
@@ -524,4 +556,98 @@ pub fn local_port(socket: Socket) -> u64 |? Error {
 pub fn peer_port(socket: Socket) -> u64 |? Error {
     address := peer_address(socket)?;
     return address.port;
+}
+
+
+// `arguments` is NUL-separated and excludes argv[0]; the shim prepends
+// `program` and builds the full offset-addressed vector.  Child stdio is
+// inherited and the environment is the runtime's.
+pub fn spawn(program: &[u8], arguments: &[u8]) -> Process |? Error {
+    mut status: i64 = 0;
+    unsafe {
+        status = grail_ffi_process_spawn(program, arguments);
+    }
+    if status < 0 {
+        return Error::Status(status);
+    }
+    unsafe {
+        return grail_ffi_process_handle();
+    }
+}
+
+pub fn wait(process: Process) -> ProcessStatus |? Error {
+    mut out = ProcessStatus {
+        struct_size: 40,
+        abi_version: ABI_VERSION,
+        kind: PROCESS_STILL_ACTIVE,
+        exit_code: 0,
+        term_signal: 0
+    };
+    mut status: i64 = 0;
+    unsafe {
+        status = grail_os_process_wait(process, out);
+    }
+    if status < 0 {
+        return Error::Status(status);
+    }
+    return out;
+}
+
+pub fn process_id(process: Process) -> u64 |? Error {
+    mut out = LengthOut { value: 0 };
+    mut status: i64 = 0;
+    unsafe {
+        status = grail_os_process_id(process, out);
+    }
+    if status < 0 {
+        return Error::Status(status);
+    }
+    return out.value;
+}
+
+pub fn process_close(process: Process) -> unit |? Error {
+    mut status: i64 = 0;
+    unsafe {
+        status = grail_os_process_close(process);
+    }
+    if status < 0 {
+        return Error::Status(status);
+    }
+    return ();
+}
+
+pub fn thread_spawn(entry: cfn(u64) -> u64, user: u64) -> Thread |? Error {
+    mut status: i64 = 0;
+    unsafe {
+        status = grail_ffi_thread_spawn(entry, user);
+    }
+    if status < 0 {
+        return Error::Status(status);
+    }
+    unsafe {
+        return grail_ffi_thread_handle();
+    }
+}
+
+pub fn thread_join(thread: Thread) -> u64 |? Error {
+    mut out = LengthOut { value: 0 };
+    mut status: i64 = 0;
+    unsafe {
+        status = grail_os_thread_join(thread, out);
+    }
+    if status < 0 {
+        return Error::Status(status);
+    }
+    return out.value;
+}
+
+pub fn thread_detach(thread: Thread) -> unit |? Error {
+    mut status: i64 = 0;
+    unsafe {
+        status = grail_os_thread_detach(thread);
+    }
+    if status < 0 {
+        return Error::Status(status);
+    }
+    return ();
 }

@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Added process and thread wrappers over the C ABI: `handle Process`/`handle Thread`,
+  `spawn(program, arguments)` with a NUL-separated argv[1..] blob, blocking `wait` returning a
+  40-byte `ProcessStatus` (kind/exit code/signal), `process_id`, `process_close`, and
+  `thread_spawn(cfn(u64)->u64, user)`, consuming `thread_join`/`thread_detach`. Process stdio
+  and environment are inherited; handles are affine by convention. The x86-64 test spawns
+  `/bin/sh -c 'exit 7'`, checks the exit status and closes the process, then spawns a Grail
+  C-ABI callback thread with user word 41 and joins the result 42; AArch64/RISC-V 64 assembly
+  and unmangled calls are checked without execution.
+
 - Added typed loopback TCP socket wrappers over the C ABI: `handle Socket`, a 56-byte `Address`
   record constructed only by `loopback(port)`, `tcp`, `bind`, `listen`, `accept`, `connect`,
   `send`, `recv`, `recv_bytes`, `socket_shutdown`, `socket_close`, `local_address`,
