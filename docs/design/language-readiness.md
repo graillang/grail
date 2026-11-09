@@ -43,6 +43,57 @@ B7's syntax; closures need B6).
 JSON with exact numbers, TOML, regex/glob, base64/uuid, hashes and crypto, TLS (system stack via
 FFI recommended), HTTP, compression and image codecs, arenas and channels.
 
+### C1. SHA-256 and JSON (done)
+
+`lib/sha256.grl` is FIPS 180-4 SHA-256 over byte views: `sha256::new()`, `s.update(&bytes)` (any
+split gives the same digest), `s.finish()` (32 bytes), the one-shot `sha256::digest(&bytes)`, and
+`sha256::hex(&bytes)`/`sha256::hex_digest(&bytes)` for lowercase hex. It replaces Abundance's
+PicoSHA2 content identities. The native case `sha256-nist-sha256sum-and-split-updates` checks the
+NIST vectors (empty, `abc`, the 448- and 896-bit messages, one million `a`), 17 generated inputs
+against `sha256sum` (1-65537 bytes, around the 55/56/63/64/65-byte padding boundaries) and every
+two-part split and byte-at-a-time update of lengths 0-200.
+
+`lib/json.grl` is a strict RFC 8259 parser and serializer for the bounded config adapter that
+replaces nlohmann/json. `json::parse(&text)` (or `parse_with(&text, options)`) returns
+`json::Value |? json::Error`; a `Value` is `Null`, `Bool`, `Int(i64)`, `Float(f64)`,
+`Str(string)`, `Array(Value[])` or `Object(Member[])` with members in document order.
+
+- Numbers: integer syntax (no fraction or exponent) that fits i64 is `Int`, exactly; everything
+  else is the correctly rounded `Float` (round half to even, any number of digits). `-0` is
+  `Float(-0.0)`. A magnitude that rounds past the f64 range is `NumberOutOfRange`; tiny values
+  underflow to zero or a subnormal.
+- Strings must be valid UTF-8 and may not contain raw control characters; escapes, including
+  `\uXXXX` surrogate pairs, decode to UTF-8, and a lone surrogate is `LoneSurrogate`.
+- Duplicate keys are `DuplicateKey` by default; `options.allow_duplicate_keys = true` keeps the
+  first position with the last value. Objects of more than 32 members switch to a hash index.
+- `options.max_depth` (default 128) bounds array/object nesting, so recursion depth is bounded.
+- No extensions: comments, trailing commas, a BOM, `NaN`/`Infinity`, single quotes and
+  whitespace other than space/tab/LF/CR are errors. Each error has a kind and a byte offset
+  (`e.show()` is `json: <reason> at byte N`), and malformed input never aborts.
+- `json::to_text(&v)` is compact and `json::to_pretty(&v)` indents by two spaces. Floats are
+  written with the shortest digits that read back exactly and always have a `.` or exponent,
+  so `parse(to_text(v))` equals `v` (`json::equal` compares floats by bits). Non-finite floats,
+  which `parse` never produces, are written as `null`. Accessors: `get(key)`, `at(i)`, `len()`,
+  `is_null()`, `as_bool/as_i64/as_f64/as_str/as_array/as_object` (optional results).
+
+The native case `json-suite-floats-errors-and-round-trips` runs 99 must-accept and 212
+must-reject JSONTestSuite-style inputs (written inline by `tests/lib/gen_json_cases.py`, which
+also emits 612 decimal strings with CPython-computed f64 bit patterns: exact halfway points, long
+mantissas, subnormals and range edges), exact outputs, error offsets, depth and duplicate-key
+options, accessors and 2000 float plus i64 text round trips. Implementation-defined
+JSONTestSuite cases are decided strictly: lone surrogates, invalid UTF-8, a BOM and numbers
+beyond f64 are rejected; very long or huge-exponent numbers that are in range are accepted.
+
+Both modules are outside the compiler's built-in stdlib list (`stdlib_module` in
+`compiler/native.grl`), so they compile in the program's literal mode; every integer binding is
+annotated, and the native cases run both test programs with `--default-u64` and with default i64
+literals (the `grail build`/`grail test` mode).
+
+Costs to know: the CLI compiles every top-level `lib/*.grl` into every program and there is no
+dead-code elimination yet, so `json.grl` adds about 0.7 s and 0.7 MB of assembly to each
+`grail build`. Writing a float goes through the runtime's positional `{}` formatting (tens of
+microseconds for ordinary magnitudes, more for very large or small exponents).
+
 ## Order
 
 A1-A5 (one compiler batch), A6, A7-A9, A10, A11-A12, A13; one bootstrap refresh per compiler
