@@ -762,7 +762,18 @@ fn debug_sections<a, b>(c: &a C, entry: &b [u8]) -> u8[] {
         dnum(&mut out, f.file);
         dput(&mut out, view("\n.uleb128 "));
         dnum(&mut out, f.line);
-        dput(&mut out, view("\n.byte 1\n.byte 86\n"));
+        // DW_AT_frame_base: the frame-pointer register (rbp = DWARF 6, x29 = 29, s0 = x8).
+        dput(&mut out, view("\n.byte 1\n.byte "));
+        if c.target == 1 {
+            dnum(&mut out, 80 + 29);
+        } else {
+            if c.target == 2 {
+                dnum(&mut out, 80 + 8);
+            } else {
+                dnum(&mut out, 80 + 6);
+            }
+        }
+        dput(&mut out, view("\n"));
         for j in f.vars.len() {
             v := &f.vars[j];
             mut code = 4;
@@ -4765,6 +4776,12 @@ fn base_named<a>(c: (&a mut C), first: u8[]) -> u64 {
     if same(view(first), view("string")) {
         return 3;
     }
+    if same(view(first), view("CPtr")) + same(view(first), view("CMutPtr")) {
+        // One word: a bare C data pointer (`const void *` / `void *`) into Grail-owned bytes,
+        // made by `unsafe cptr(view)` / `unsafe cptr_mut(&mut bytes)`. Mode 1 is writable.
+        mode := same(view(first), view("CMutPtr"));
+        return intern_full(&mut c, 26, 0, mode, u64[]);
+    }
     if same(view(first), view("CStr")) {
         // One word: a NUL-terminated byte pointer owned by the C side. Building one
         // is `unsafe cstr(view)` because it asserts termination and lifetime.
@@ -5231,11 +5248,6 @@ fn ffi_direct_result<a, b>(c: (&a mut C), ty: u64, what: &b [u8]) -> unit {
         if ty_kind(&mut c, ty) == 8 {
             rd := ty_arg(&mut c, ty);
             if c.decls[rd].c_layout {
-                // SSE/HFA classification of float fields in returned records is not implemented;
-                // refuse rather than read the wrong registers.
-                if ffi_record_has_float(&mut c, rd) {
-                    fail(&mut c, view("extern C record results with float fields are not supported yet"));
-                }
                 return ();
             }
         }
@@ -5289,9 +5301,6 @@ fn ffi_emit_call<a, b, d, e>(
     }
     exchange(&mut c.ffi_fixed, 0);
     abi := ffi_abi(&mut c);
-    if (fixed < args.len()) & (abi == 2) & (c.plat == 1) {
-        fail(&mut c, view("variadic C calls on macOS arm64 (arguments on the stack) are not supported yet"));
-    }
     x86 := abi < 2;
     nint := ffi_int_regs(abi);
     apple_arm := (abi == 2) & (c.plat == 1);
@@ -5301,6 +5310,10 @@ fn ffi_emit_call<a, b, d, e>(
     mut rmode = 0;
     mut rsize = 0;
     mut rslot = 0;
+    // rmode 3: a record with float fields returned in registers per its classification (fplan
+    // 1 SysV eightbytes, 2 AAPCS64 HFA, 3 RV64 flattened fields).
+    mut rdecl = 0;
+    mut fplan = 0;
     if ret != 1 {
         if ty_kind(&mut c, ret) == 8 {
             rd := ty_arg(&mut c, ret);
@@ -5309,6 +5322,22 @@ fn ffi_emit_call<a, b, d, e>(
             words := imm(&mut c, nwords);
             rslot = invoke(&mut c, view("rt_rec"), one(words));
             rmode = 1;
+            rdecl = rd;
+            if ffi_record_has_float(&mut c, rd) {
+                fplan = ffi_float_plan(&mut c, rd, abi);
+            }
+            if fplan == 2 {
+                // An AAPCS64 homogeneous float aggregate comes back in s0-s3/d0-d3 at any size.
+                rmode = 3;
+            }
+            if (fplan == 3) & (rsize < 17) {
+                rmode = 3;
+            }
+            if (fplan == 1) & (rsize < 17) {
+                rmode = 3;
+            }
+            if rmode == 3 {
+            } else {
             if abi == 1 {
                 if (rsize != 1) & (rsize != 2) & (rsize != 4) & (rsize != 8) {
                     rmode = 2;
@@ -5317,6 +5346,7 @@ fn ffi_emit_call<a, b, d, e>(
                 if 16 < rsize {
                     rmode = 2;
                 }
+            }
             }
         }
     }
@@ -5331,8 +5361,16 @@ fn ffi_emit_call<a, b, d, e>(
     mut stack = 0;
     for i in args.len() {
         ty := argtypes[i];
-        // RV64 passes variadic floating-point arguments in integer registers.
+        // RV64 passes variadic floating-point arguments in integer registers; Apple arm64 passes
+        // every variadic argument on the stack in its own 8-byte slot.
         rv_var := (abi == 3) & (fixed < i + 1);
+        apple_var := apple_arm & (fixed < i + 1);
+        if apple_var {
+            for w in ffi_words(&mut c, ty) {
+                stack = stack + 1;
+            }
+            continue;
+        }
         if is_float(&mut c, ty) & (rv_var == 0) {
             if abi == 1 {
                 if ints < 4 {
@@ -5397,6 +5435,20 @@ fn ffi_emit_call<a, b, d, e>(
         ty := argtypes[i];
         variadic_arg := fixed < i + 1;
         rv_var := (abi == 3) & variadic_arg;
+        if apple_arm & variadic_arg {
+            // Promoted value (int to 64 bits as Grail holds it, float to double) in an 8-byte slot.
+            vwords := ffi_words(&mut c, ty);
+            get(&mut c, args[i], view("%rax"));
+            if vwords == 2 {
+                o(&mut c, view("movq %rax,%r10\nmovq (%r10),%rax\n"));
+                ffi_store_stack(&mut c, x86, base + next * 8);
+                next = next + 1;
+                o(&mut c, view("movq 8(%r10),%rax\n"));
+            }
+            ffi_store_stack(&mut c, x86, base + next * 8);
+            next = next + 1;
+            continue;
+        }
         if is_float(&mut c, ty) & rv_var {
             // Promoted to double and moved as its bits through the integer path.
             get(&mut c, args[i], view("%rax"));
@@ -5577,6 +5629,9 @@ fn ffi_emit_call<a, b, d, e>(
             c.out.push(10);
         }
     }
+    if rmode == 3 {
+        ffi_float_result(&mut c, rslot, rdecl, fplan);
+    }
     if rmode != 0 {
         if rmode == 1 {
             // Word 0 is in %rax on every target; word 1 in %rdx on x86-64 and in x1/a1 (spelled
@@ -5617,7 +5672,7 @@ fn ffi_param<a, b>(c: (&a mut C), ty: u64, what: &b [u8]) -> unit {
     if (k == 18) & (ty_arg(&mut c, ty) == 64) {
         return ();
     }
-    if (k == 23) + (k == 24) + (k == 5) + (k == 25) {
+    if (k == 23) + (k == 24) + (k == 5) + (k == 25) + (k == 26) {
         return ();
     }
     if k == 8 {
@@ -5640,7 +5695,7 @@ fn ffi_result<a, b>(c: (&a mut C), ty: u64, what: &b [u8]) -> unit {
     if (k == 18) & (ty_arg(&mut c, ty) == 64) {
         return ();
     }
-    if (k == 23) + (k == 24) + (k == 25) {
+    if (k == 23) + (k == 24) + (k == 25) + (k == 26) {
         // A function-pointer result is how a dynamic loader hands back a resolved
         // symbol; the declaration states the signature the address is called with.
         return ();
@@ -5680,7 +5735,7 @@ fn ffi_field_align<a>(c: (&a mut C), ty: u64) -> u64 {
         }
         return 8;
     }
-    if (k == 23) + (k == 24) {
+    if (k == 23) + (k == 24) + (k == 26) {
         return 8;
     }
     if k == 18 {
@@ -5704,7 +5759,7 @@ fn ffi_field_size<a>(c: (&a mut C), ty: u64) -> u64 {
         }
         return 8;
     }
-    if (k == 23) + (k == 24) {
+    if (k == 23) + (k == 24) + (k == 26) {
         return 8;
     }
     if k == 18 {
@@ -7332,6 +7387,139 @@ fn callback_params<a>(c: (&a mut C), count: u64) -> unit {
     }
     return ();
 }
+// How a record with float fields is returned on this ABI: 1 SysV (per-eightbyte INTEGER/SSE),
+// 2 AAPCS64 homogeneous float aggregate (1-4 fields of one float type), 3 RV64 flattened (one
+// or two fields, at least one float), 0 the integer-register/memory rules (Win64 by size, AAPCS64
+// non-HFA composites, RV64 records the flattening rule does not cover).
+fn ffi_float_plan<a>(c: (&a mut C), d: u64, abi: u64) -> u64 {
+    count := c.decls[d].count;
+    if abi == 0 {
+        return 1;
+    }
+    if abi == 2 {
+        if (count == 0) + (4 < count) {
+            return 0;
+        }
+        first := field_ty(&mut c, d, 0);
+        if is_float(&mut c, first) == 0 {
+            return 0;
+        }
+        single := is_f32(&mut c, first);
+        for i in count {
+            ty := field_ty(&mut c, d, i);
+            if (is_float(&mut c, ty) == 0) + (is_f32(&mut c, ty) != single) {
+                return 0;
+            }
+        }
+        return 2;
+    }
+    if abi == 3 {
+        if (count == 0) + (2 < count) {
+            return 0;
+        }
+        mut floats = 0;
+        for i in count {
+            ty := field_ty(&mut c, d, i);
+            if is_float(&mut c, ty) {
+                floats = floats + 1;
+            } else {
+                // Only scalar integers pair with a float (handles and CStr are pointer words).
+                if 8 < ffi_field_size(&mut c, ty) {
+                    return 0;
+                }
+            }
+        }
+        if floats == 0 {
+            return 0;
+        }
+        return 3;
+    }
+    return 0;
+}
+// Stores a float-classified record result from the return registers into its allocation.
+fn ffi_float_result<a>(c: (&a mut C), slot: u64, d: u64, plan: u64) -> unit {
+    count := c.decls[d].count;
+    size := ffi_record_size(&mut c, d);
+    if plan == 1 {
+        // SysV: each eightbyte is SSE when all its fields are floats, else INTEGER; INTEGER
+        // eightbytes come from rax then rdx, SSE ones from xmm0 then xmm1.
+        mut eights = (size + 7) / 8;
+        mut ints = 0;
+        mut sses = 0;
+        // Save rax/rdx first: the stores below go through r10/r11 only.
+        get(&mut c, slot, view("%r10"));
+        for e in eights {
+            mut sse = 1;
+            for i in count {
+                ty := field_ty(&mut c, d, i);
+                off := ffi_offset(&mut c, d, i);
+                if (off / 8 == e) & (is_float(&mut c, ty) == 0) {
+                    sse = 0;
+                }
+            }
+            if sse {
+                o(&mut c, view("movq %xmm"));
+                on(&mut c, sses);
+                o(&mut c, view(",%r11\n"));
+                sses = sses + 1;
+            } else {
+                if ints == 0 {
+                    o(&mut c, view("movq %rax,%r11\n"));
+                } else {
+                    o(&mut c, view("movq %rdx,%r11\n"));
+                }
+                ints = ints + 1;
+            }
+            o(&mut c, view("movq %r11,"));
+            on(&mut c, e * 8);
+            o(&mut c, view("(%r10)\n"));
+        }
+        return ();
+    }
+    if plan == 2 {
+        get(&mut c, slot, view("%r10"));
+        for i in count {
+            ty := field_ty(&mut c, d, i);
+            single := is_f32(&mut c, ty);
+            off := ffi_offset(&mut c, d, i);
+            ffi_float_store(&mut c, i, single, off);
+        }
+        return ();
+    }
+    // RV64 flattened: floats in fa0, fa1 in field order; the integer field (if any) in a0, which
+    // the call lowering leaves in %rax.
+    held := save(&mut c);
+    get(&mut c, slot, view("%r10"));
+    mut fk = 0;
+    for i in count {
+        ty := field_ty(&mut c, d, i);
+        if is_float(&mut c, ty) {
+            single := is_f32(&mut c, ty);
+            off := ffi_offset(&mut c, d, i);
+            ffi_float_store(&mut c, fk, single, off);
+            fk = fk + 1;
+        }
+    }
+    for i in count {
+        ty := field_ty(&mut c, d, i);
+        if is_float(&mut c, ty) == 0 {
+            cfield_store(&mut c, slot, d, i, held);
+        }
+    }
+    return ();
+}
+fn ffi_float_store<a>(c: (&a mut C), k: u64, single: u64, off: u64) -> unit {
+    o(&mut c, view("cfrstore "));
+    on(&mut c, k);
+    if single {
+        o(&mut c, view(" s "));
+    } else {
+        o(&mut c, view(" d "));
+    }
+    on(&mut c, off);
+    c.out.push(10);
+    return ();
+}
 // 1 when a C-layout record has a floating-point field (its by-value classification differs).
 fn ffi_record_has_float<a>(c: (&a mut C), d: u64) -> u64 {
     count := c.decls[d].count;
@@ -8877,6 +9065,15 @@ fn builtin_id<a>(n: &a [u8]) -> u64 {
     if same(view(n), view("cstr")) {
         return 39;
     }
+    if same(view(n), view("cptr")) {
+        return 40;
+    }
+    if same(view(n), view("cptr_mut")) {
+        return 41;
+    }
+    if same(view(n), view("cnull")) {
+        return 42;
+    }
     if same(view(n), view("view_mut")) {
         return 38;
     }
@@ -10296,6 +10493,11 @@ fn builtin<a>(c: (&a mut C), id: u64) -> Val {
         return raw_builtin(&mut c, id);
     }
     expect(&mut c, view("("));
+    if id == 42 {
+        // `cnull()`: the null data pointer, for optional C pointer parameters.
+        expect(&mut c, view(")"));
+        return val(imm(&mut c, 0), intern_full(&mut c, 26, 0, 0, u64[]));
+    }
     if (id == 13) + (id == 14) {
         if borrow_place_ahead(&mut c) == 0 {
             v := borrow_temporary(&mut c, id == 14);
@@ -10315,6 +10517,32 @@ fn builtin<a>(c: (&a mut C), id: u64) -> Val {
         return v;
     }
     a := expr(&mut c, 0);
+    if (id == 40) + (id == 41) {
+        // `cptr(bytes)` / `cptr_mut(&mut bytes)`: the bare data pointer of a byte sequence or
+        // view, for C parameters and record fields typed `const void *` / `void *`. Unsafe:
+        // C may keep or (for cptr_mut) write through the pointer, which Grail cannot track.
+        expect(&mut c, view(")"));
+        if (c.raw == 0) & (c.unsafe_depth == 0) {
+            fail(&mut c, view("cptr and cptr_mut require an unsafe block"));
+        }
+        writable := id == 41;
+        x := deref(&mut c, a);
+        k := ty_kind(&mut c, x.ty);
+        if (k != 2) & (k != 3) & (k != 4) & (k != 5) {
+            fail(&mut c, view("cptr requires a byte sequence or view"));
+        }
+        if writable {
+            // Only a mutable byte view or a mutable sequence may be written through.
+            if (k == 5) & (ty_mode(&mut c, x.ty) == 0) {
+                fail(&mut c, view("cptr_mut requires a mutable byte view (&mut [u8])"));
+            }
+            if k != 5 {
+                require_write(&mut c, x.t);
+            }
+        }
+        slot := apply(&mut c, view("rt_view_ptr"), one(x.t));
+        return val(slot, intern_full(&mut c, 26, 0, writable, u64[]));
+    }
     if id == 39 {
         // `cstr(sequence)` is the checked, zero-copy C string view: the bytes must
         // end in NUL (verified at runtime) and the cast is unsafe because C may keep
@@ -13937,6 +14165,27 @@ fn primary<a>(c: (&a mut C)) -> Val {
                 }
                 slot := invoke(&mut c, view("rt_char_from"), one(value.t));
                 return val(slot, ty);
+            }
+        }
+        if same(view(first), view("f32_from_bits")) + same(view(first), view("f32_bits")) {
+            if (find_local(&mut c, view(first)) == 0)
+                & (find_func(&mut c, view(m), view(first)) == 0) {
+                from := same(view(first), view("f32_from_bits"));
+                advance(&mut c);
+                value := expr(&mut c, 0);
+                expect(&mut c, view(")"));
+                if from {
+                    // binary32 bits (u64) -> f32
+                    require_type(&mut c, value.ty, 0);
+                    t := invoke(&mut c, view("rt_f32_from_bits"), one(value.t));
+                    return val(t, f32_type(&mut c));
+                }
+                // f32 -> its binary32 bits
+                if is_f32(&mut c, value.ty) == 0 {
+                    fail(&mut c, view("f32_bits needs an f32"));
+                }
+                t := invoke(&mut c, view("rt_f32_bits"), one(value.t));
+                return val(t, 0);
             }
         }
         if same(view(first), view("f64_from_bits")) {
@@ -18112,9 +18361,10 @@ pub fn main() -> u64 {
             )
         );
     }
-    // DWARF on Linux x86-64; CodeView line tables (a PDB through lld-link /DEBUG) on Windows x86-64.
-    if (c.debug != 0) & ((((c.target != 0) & (c.target != 3)) + (c.plat != 0)) != 0) {
-        fail_option(&mut c, view("--debug line info is only implemented for Linux x86_64 and Windows x86_64"));
+    // DWARF on Linux x86-64, AArch64 and RISC-V 64; CodeView line tables (a PDB through lld-link
+    // /DEBUG) on Windows x86-64.
+    if (c.debug != 0) & (((c.target == 4) + (c.plat != 0)) != 0) {
+        fail_option(&mut c, view("--debug line info is only implemented for Linux and Windows x86_64"));
     }
     for pass in 3 {
         if pass == 1 {
@@ -18348,7 +18598,18 @@ pub fn main() -> u64 {
         }
         return host::write_file(view(path), view(with_link_notes(&c.libs, view(out))));
     }
-    native := machine::lower(view(out), target, c.plat);
+    if c.debug != 0 {
+        // The .loc/.file directives pass through instruction selection unchanged; the DWARF
+        // sections refer only to labels, so they are appended after lowering.
+        out = debug_locs(view(out));
+    }
+    mut native = machine::lower(view(out), target, c.plat);
+    if c.debug != 0 {
+        sections := debug_sections(&c, view(host::arg(2 + offset)));
+        for i in sections.len() {
+            native.push(sections[i]);
+        }
+    }
     if target == 4 {
         image := arm_unwind(view(native));
         return host::write_file(view(path), view(with_link_notes(&c.libs, view(image))));

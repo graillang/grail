@@ -49,6 +49,38 @@
   `core.grl`) rather than a hard-coded name list, so every `lib/` module, including new ones,
   compiles in the stdlib's own literal mode regardless of the program's mode.
 
+- `f32_bits(x)` returns the IEEE binary32 bit pattern of an `f32`, and `f32_from_bits(u)` builds an
+  `f32` from one (subnormals, infinities and NaN included). `bits(x)` on an `f32` still returns
+  the 64-bit pattern of the internally widened value, so these are the way to read and write
+  32-bit floats in binary formats.
+
+- FFI bare data pointers: `CPtr` (`const void *`) and `CMutPtr` (`void *`) parameters, results and
+  extern-record fields, made with `unsafe cptr(bytes)`, `unsafe cptr_mut(&mut bytes)` and
+  `cnull()`. C APIs that take lone buffer pointers (libsodium keys and outputs, Vulkan `pData`)
+  are now callable without a C shim. `tests/ffi/pointers.grl` runs on all three Linux targets.
+- `grail build` / `grail test` honour the compiler's `// grail-link:` requests: bare library
+  names become `-lNAME`, relative objects resolve against the entry file, and an executable that
+  links a shared library gets the platform dynamic loader and system library directories
+  (Linux), or the library inputs on the Mach-O link line. Previously the CLI linked every program
+  statically and ignored foreign libraries, so only the test harness could link C code.
+- `docs/ffi.md`: the supported-types table now lists narrow integers, floats, record results
+  and the bare pointer types, which were already supported but documented as rejected.
+
+- DWARF debug info on Linux AArch64 and RISC-V 64: `--debug` emits the same line table and
+  typed variables as on x86-64 (frame base `x29` / `s0`). Under qemu with gdb's remote stub,
+  `info locals` shows `count = -3`, `ratio = 2.5`, `flag = true` on both; `test-debug-lines`
+  checks the line rows, variable types and `llvm-dwarfdump --verify` for both targets.
+
+- Variadic C calls on macOS arm64: each variadic argument (promoted to 64 bits or `double`) goes
+  on the stack in its own 8-byte slot while named arguments keep their registers, per Apple's
+  arm64 ABI. Checked statically in `test-macos` (no macOS runner); the call was refused before.
+
+- C records with float fields returned by value: SysV classifies each eightbyte (all-float ->
+  `xmm0`/`xmm1`, otherwise `rax`/`rdx`), AAPCS64 returns homogeneous float aggregates of 1-4
+  fields in `s0`-`s3`/`d0`-`d3` at any size, RV64 returns one or two flattened fields with a float
+  in `fa0`/`fa1` (and an integer in `a0`); everything else keeps the integer-register or hidden
+  pointer rules (Win64 by size). `tests/ffi/float_record_results.grl` covers five shapes on three
+  Linux targets and Windows x64.
 - Fixed: the `i64` -> `u64` widening check emitted `jns`, which the AArch64 and RISC-V lowering
   does not implement (it emulates the zero and carry flags only), so programs relying on default
   `i64` semantics failed to compile for those targets. The sign is now tested with a shift and a

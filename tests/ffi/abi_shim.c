@@ -115,3 +115,20 @@ float c_call_f32(float (*cb)(float, float))
 {
     return cb(1.25f, 2.5f) * 2.0f;
 }
+
+/* ---- records with float fields returned by value: each shape takes a different path ----
+ * vec2  {f32,f32}       SysV xmm0 | AAPCS HFA s0,s1 | RV fa0,fa1 | Win64 rax
+ * vec3d {f64,f64,f64}   SysV sret | AAPCS HFA d0-d2 | RV sret    | Win64 sret
+ * fi    {f32,i32}       SysV rax  | AAPCS x0        | RV fa0+a0  | Win64 rax
+ * di    {f64,i64}       SysV xmm0,rax | AAPCS x0,x1 | RV fa0+a0  | Win64 sret
+ * quad  {f32 x4}        SysV xmm0,xmm1 | AAPCS HFA s0-s3 | RV a0,a1 | Win64 sret */
+struct vec2 { float x, y; };
+struct vec3d { double x, y, z; };
+struct fi { float f; int i; };
+struct di { double d; long long i; };
+struct quad { float a, b, c, d; };
+struct vec2 c_vec2(float x, float y) { struct vec2 r = { x, y }; return r; }
+struct vec3d c_vec3d(double s) { struct vec3d r = { s, s * 2, s * 3 }; return r; }
+struct fi c_fi(float f, int i) { struct fi r = { f, i }; return r; }
+struct di c_di(double d, long long i) { struct di r = { d, i }; return r; }
+struct quad c_quad(float s) { struct quad r = { s, s + 1, s + 2, s + 3 }; return r; }

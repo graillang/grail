@@ -231,6 +231,95 @@ fn collect<a, b>(dir: &a [u8], out: (&b mut u8[][])) {
         }
     }
 }
+// The compiler's link requests: each `// grail-link: INPUT` line of the assembly. Absolute paths
+// and flags pass through, relative object/archive/shared inputs resolve against `base` (the entry
+// file's directory) and bare names become -lNAME. Duplicates are dropped.
+fn link_inputs<a, b>(asm: &a [u8], base: &b [u8]) -> u8[][] {
+    text := host::read_file(view(asm));
+    prefix := "// grail-link: ";
+    mut out = u8[][];
+    mut start: u64 = 0;
+    mut i: u64 = 0;
+    while i <= text.len() {
+        if (i == text.len()) || (text[i] == 10) {
+            mut line = u8[];
+            for j in i - start {
+                line.push(text[start + j]);
+            }
+            if starts(view(line), view(prefix)) {
+                mut input = u8[];
+                mut k = prefix.len();
+                while k < line.len() {
+                    input.push(line[k]);
+                    k += 1;
+                }
+                while (input.len() > 0) && ((input[input.len() - 1] == 32) || (input[input.len() - 1] == 13)) {
+                    input.pop();
+                }
+                mut arg = u8[];
+                if (input.len() > 0) && ((input[0] == 47) || (input[0] == 45)) {
+                    arg = input.copy();
+                } else {
+                    mut has_slash = 0;
+                    for j in input.len() {
+                        if input[j] == 47 {
+                            has_slash = 1;
+                        }
+                    }
+                    if has_slash + ends(view(input), view(".o")) + ends(view(input), view(".a")) + ends(view(input), view(".so")) + ends(view(input), view(".dylib")) {
+                        arg = path_join(view(base), view(input));
+                    } else {
+                        arg = cat(view("-l"), view(input));
+                    }
+                }
+                mut seen = 0;
+                for j in out.len() {
+                    if eq(view(item(&out, j)), view(arg)) {
+                        seen = 1;
+                    }
+                }
+                if (seen == 0) && (arg.len() > 0) {
+                    out.push(arg);
+                }
+            }
+            start = i + 1;
+        }
+        i += 1;
+    }
+    return out;
+}
+// A shared-library input (-lNAME) makes the ELF executable dynamically linked: ld.lld then needs
+// the platform loader and the system library directories, which it has no defaults for.
+fn dynamic_link_flags<a, b>(target: &a [u8], inputs: (&b u8[][])) -> u8[][] {
+    mut out = u8[][];
+    mut shared = 0;
+    for i in inputs.len() {
+        if starts(view(item(&inputs, i)), view("-l")) {
+            shared = 1;
+        }
+    }
+    if shared == 0 {
+        return out;
+    }
+    mut loaders = u8[][copy(view("/lib64/ld-linux-x86-64.so.2")), copy(view("/lib/ld-linux-x86-64.so.2"))];
+    if eq(view(target), view("aarch64")) {
+        loaders = u8[][copy(view("/lib/ld-linux-aarch64.so.1"))];
+    }
+    if eq(view(target), view("riscv64")) {
+        loaders = u8[][copy(view("/lib/ld-linux-riscv64-lp64d.so.1")), copy(view("/lib/ld-linux-riscv64-lp64.so.1"))];
+    }
+    for i in loaders.len() {
+        candidate := item(&loaders, i);
+        if host::exists(view(candidate)) {
+            out.push(copy(view("--dynamic-linker")));
+            out.push(candidate);
+            break;
+        }
+    }
+    out.push(copy(view("-L/usr/lib")));
+    out.push(copy(view("-L/usr/lib64")));
+    return out;
+}
 fn target_name(t: u64) -> u8[] {
     if t == 1 {
         return copy(view("aarch64"));
@@ -355,7 +444,7 @@ fn compile_mode<a, b, d, e, g>(
             return 1;
         }
         libs := path_join(view(root), view("usr/lib"));
-        link := u8[][
+        mut link = u8[][
             tool(view("GRAIL_LINKER"), view("ld64.lld")),
             copy(view("-arch")),
             arch,
@@ -373,20 +462,32 @@ fn compile_mode<a, b, d, e, g>(
             copy(view("-o")),
             copy(view(output))
         ];
+        inputs := link_inputs(view(asm), view(dirname(view(entry))));
+        for i in inputs.len() {
+            link.push(item(&inputs, i));
+        }
         if host::command(link) != 0 {
             say(view("grail: linking failed (needs ld64.lld and a macOS SDK)"));
             return 1;
         }
         return 0;
     }
-    link := u8[][
+    mut link = u8[][
         tool(view("GRAIL_LINKER"), view("ld.lld")),
         copy(view("-m")),
         emulation,
-        copy(view(object)),
-        copy(view("-o")),
-        copy(view(output))
+        copy(view(object))
     ];
+    inputs := link_inputs(view(asm), view(dirname(view(entry))));
+    for i in inputs.len() {
+        link.push(item(&inputs, i));
+    }
+    dynamic := dynamic_link_flags(view(target), &inputs);
+    for i in dynamic.len() {
+        link.push(item(&dynamic, i));
+    }
+    link.push(copy(view("-o")));
+    link.push(copy(view(output)));
     if host::command(link) != 0 {
         say(view("grail: linking failed (needs ld.lld)"));
         return 1;

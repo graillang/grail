@@ -176,5 +176,16 @@
     "stdout": "1064969.25\n6.25\n",
     "status": 0,
     "note": "Win64 callbacks: positional xmm parameters, a float on the stack, narrow integers extended by the callee"
+  },
+  {
+    "name": "ffi-float-record-results",
+    "shim": {
+      "windows-x86_64": "tests/ffi/abi_shim.c",
+      "windows-aarch64": "tests/ffi/abi_shim.c"
+    },
+    "source": "// C records with float fields returned by value: SysV per-eightbyte SSE/INTEGER classes,\n// AAPCS64 homogeneous float aggregates, RV64 flattened float+int fields, and the integer and\n// hidden-pointer paths, as the shim's comment lays out per ABI.\nextern \"C\" record Vec2 { x: f32, y: f32 }\nextern \"C\" record Vec3d { x: f64, y: f64, z: f64 }\nextern \"C\" record Fi { f: f32, i: i32 }\nextern \"C\" record Di { d: f64, i: i64 }\nextern \"C\" record Quad { a: f32, b: f32, c: f32, d: f32 }\nextern \"C\" lib \"shim.o\" fn c_vec2(x: f32, y: f32) -> Vec2;\nextern \"C\" lib \"shim.o\" fn c_vec3d(s: f64) -> Vec3d;\nextern \"C\" lib \"shim.o\" fn c_fi(f: f32, i: i32) -> Fi;\nextern \"C\" lib \"shim.o\" fn c_di(d: f64, i: i64) -> Di;\nextern \"C\" lib \"shim.o\" fn c_quad(s: f32) -> Quad;\n\nfn main() -> u64 {\n    unsafe {\n        v := c_vec2(1.5, -2.25);\n        println(v.x);\n        println(v.y);\n        w := c_vec3d(0.5);\n        println(w.x + w.y + w.z);\n        f := c_fi(0.75, -9);\n        println(f.f);\n        println(f.i);\n        d := c_di(3.125, 1234567890123);\n        println(d.d);\n        println(d.i);\n        q := c_quad(10.0);\n        println(q.a + q.b + q.c + q.d);\n    }\n    return 0;\n}\n",
+    "stdout": "1.5\n-2.25\n3\n0.75\n-9\n3.125\n1234567890123\n46\n",
+    "status": 0,
+    "note": "Win64 classifies record results by size only: 8-byte records in rax, others through a hidden pointer"
   }
 ]
