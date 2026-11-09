@@ -8212,6 +8212,12 @@ fn structural_eq<a>(c: (&a mut C), x: u64, y: u64, ty: u64, depth: u64) -> u64 {
             }
             return invoke(&mut c, view("rt_vec_cmp"), three(op, x, y));
         }
+        if ek == 21 {
+            // Floats compare by value (IEEE: -0.0 == 0.0, NaN is unequal to everything).
+            code := narrow_code(&mut c, e);
+            narrow := imm(&mut c, code != 0);
+            return invoke(&mut c, view("rt_vec_feq"), three(x, y, narrow));
+        }
     }
     if k == 8 {
         d := ty_arg(&mut c, ty);
@@ -8291,7 +8297,7 @@ fn structural_eq<a>(c: (&a mut C), x: u64, y: u64, ty: u64, depth: u64) -> u64 {
     }
     fail(
         &mut c,
-        view("== on records needs fields of numbers, bool, f64, text, scalar vectors, records")
+        view("== needs numbers, bool, char, floats, text, records or vectors and slices of scalars")
     );
     return 0;
 }
@@ -16126,9 +16132,10 @@ fn expr_expected<a>(c: (&a mut C), min: u64, expected: u64) -> Val {
                             }
                             if (c.raw == 0)
                                 & ((k == 258) + (k == 259))
-                                & (ty_kind(&mut c, ty) == 8)
+                                & ((ty_kind(&mut c, ty) == 8) + (ty_kind(&mut c, ty) == 6) + (ty_kind(&mut c, ty) == 27))
                                 & same_type(&mut c, ty, rty) {
-                                // Structural equality of records, field by field.
+                                // Structural equality of records (field by field) and of vectors and
+                                // slices (length, then element by element).
                                 eqv := structural_eq(&mut c, snap, right.t, ty, 0);
                                 t = eqv;
                                 if k == 259 {

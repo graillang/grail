@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `==`/`!=` compare vectors and slices of numbers, bool and char by length and elements (floats by value:
+  `-0.0 == 0.0`, NaN unequal); before, only record fields of vector type could be compared.
 - Typed slices: `&[T]` and `&mut [T]` for every element type (`v[a: b]`, `&mut v[a: b]`, open bounds,
   sub-slicing, indexing, element borrows, loops by value or reference, `len`, `copy`, `contains`,
   formatting), with the vector's ownership rules: a slice cannot outlive its vector, the vector
