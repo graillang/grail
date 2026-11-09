@@ -1,6 +1,6 @@
 # LLVM backend
 
-Status: stage 1 integrated (`compiler/llvm.grl`, `--backend=llvm`, Linux x86-64), 2026-11-09. Approved direction: LLVM is the optimizing backend; the native
+Status: stage 1 integrated (`compiler/llvm.grl`, `--backend=llvm`) on Linux x86-64, AArch64 and RISC-V 64, 2026-11-09. Approved direction: LLVM is the optimizing backend; the native
 backend stays for fast debug builds and bootstrap. The LLVM version is pinned (system 23.x).
 
 ## Why
@@ -110,6 +110,33 @@ later frees a heap descriptor (`rt_view`/`rt_slice`/`.D4`), and `view("...")` re
 UTF-8-checks its literal each time (`rt_string_lit`). Passing views as a pointer/length pair
 without allocation is the first stage-2 item: it speeds every Grail program on both backends,
 the compiler included, and is the same cost that dominates the fnv benchmark.
+
+### After the first front-end and lowering fixes (2026-11-09)
+
+Three changes after stage 1 closed most of the gap to C:
+
+- `bytes[i]` with a simple index reads the sequence directly instead of building, borrow-tracking
+  and freeing a temporary view per access (front end; both backends benefit);
+- repeat literals `T[v; n]` replace push loops for zero-filled buffers (language);
+- one `alloca` per frame slot when every frame access is a constant offset below rbp, so taking
+  one local's address no longer pins the whole frame in memory (LLVM lowering).
+
+| benchmark | C `-O2` | `--backend=llvm` | ratio |
+| --- | --- | --- | --- |
+| fnv | 0.581 s | 0.679 s | 1.2x |
+| sieve | 0.616 s | 0.747 s | 1.2x |
+| sort | 0.985 s | 1.458 s | 1.5x |
+| nbody | 0.109 s | 0.248 s | 2.3x |
+| matmul | 0.204 s | 0.657 s | 3.2x |
+
+What remains is mostly `f32`: elements are 8-byte words holding binary64 values, so LLVM cannot
+narrow `fptrunc(fmul double)` to a float multiply or vectorize 4-byte lanes. Storing `f32[]`
+elements in 4 bytes (stage 2) fixes both.
+
+On AArch64 and RISC-V the word machine returns rax:rdx in x9:x2 (t0:a2) while C returns in x0:x1
+(a0:a1), so IR functions are defined as `NAME.ll`, native code reaches them through a thunk named
+`NAME`, and IR reaches native functions through `NAME.c`; function addresses always name the
+native-convention entry.
 
 Stage 2 carries type information into the stream so both backends benefit: inline float
 arithmetic (no `rt_f64_op`), real `f32` values instead of rounded binary64 words, 4-byte
