@@ -3856,5 +3856,33 @@
     "source": "extern \"C\" record P { a: i32, b: i32, c: u8, d: i16, f: f32, g: f32, w: i64 }\nfn main() {\n    mut p = P { a: 1, b: 2, c: 3, d: -4, f: 1.0, g: 2.0, w: 9 };\n    p.a = 5;\n    p.c = 250;\n    p.d -= 10;\n    p.f = 0.5;\n    p.g += 0.25;\n    p.b *= 3;\n    println(p.a);\n    println(p.b);\n    println(p.c);\n    println(p.d);\n    println(p.f);\n    println(p.g);\n    println(p.w);\n}\n",
     "stdout": "5\n6\n250\n-14\n0.5\n2.25\n9\n",
     "note": "assignment and compound assignment to narrow and f32 C-layout fields write only the field's bytes"
+  },
+  {
+    "name": "loan-origin-branch-join",
+    "source": "struct M{key:string,n:u64}\nenum V{List(M[]),Nothing}\nimpl V{pub fn list<a>(self:(&a V))->(&a M[])?{match self{List(items)=>{return Some(items);},_=>{return None;}}}}\nfn make()->V | string{mut ms=M[];ms.push(M{key:\"k\",n:1});return V::List(ms);}\nfn main(){\n    mut f:u64=0;\n    match make(){\n        v: V=>{items:=v.list()!;last:=&items[0];if last.key!=\"k\"{println(\"bad {}\",last.key);f+=1;}},\n        s: string=>{println(s);}\n    }\n    println(f);\n}\n",
+    "modules": [
+      "lib/core.grl"
+    ],
+    "stdout": "0\n",
+    "note": "a reference from an unwrapped optional reference, used only inside an if within a union match arm, no longer keeps its owner borrowed at cleanup"
+  },
+  {
+    "name": "loan-origin-branch-join-mutate-after",
+    "source": "struct M{key:string,n:u64}\nfn get<a>(v:(&a M[]))->(&a M[])?{return Some(v);}\nfn main(){\n    {mut ms=M[];ms.push(M{key:\"k\",n:1});items:=get(&ms)!;last:=&items[0];if last.n==0{println(last.n);}ms.push(M{key:\"j\",n:2});println(ms.len());}\n    println(1);\n}\n",
+    "modules": [
+      "lib/core.grl"
+    ],
+    "stdout": "2\n1\n",
+    "note": "once the derived reference is dead after the join, its owner may be mutated"
+  },
+  {
+    "name": "reject-loan-origin-branch-join-live",
+    "source": "struct M{key:string,n:u64}\nfn get<a>(v:(&a M[]))->(&a M[])?{return Some(v);}\nfn main(){\n    {mut ms=M[];ms.push(M{key:\"k\",n:1});items:=get(&ms)!;last:=&items[0];if last.n==0{println(last.n);}ms.push(M{key:\"j\",n:2});println(last.n);}\n    println(1);\n}\n",
+    "modules": [
+      "lib/core.grl"
+    ],
+    "reject": true,
+    "diagnostic": "mutation conflicts with live borrow",
+    "note": "a derived reference still used after the join keeps its owner borrowed"
   }
 ]
