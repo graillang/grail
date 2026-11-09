@@ -18,6 +18,11 @@
   `GRAIL_BACKEND=llvm`.
 - `tools/bench.mjs` and `bench/`: Grail against C `-O2` on five kernels, with matching output
   required.
+- CodeView symbols on Windows x86-64: `--debug` now emits an S_GPROC32 per function (named
+  `module::name`) with an S_FRAMEPROC and an S_REGREL32 for every parameter and local at its rbp
+  slot, typed with CodeView's predefined base types (`__int64`, `double`, `bool`, `unsigned char`,
+  ...). lld-link links the scopes into the PDB; `tools/test-debug-lines.mjs` checks the records
+  with `llvm-pdbutil`.
 
 - `&mut z.comps[i].data` and `&grid[y][x]` borrow the whole accessor chain; the borrow used to
   stop after the first index, so the following field was read as a value (a type mismatch).
