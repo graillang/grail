@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- LLVM backend (`--backend=llvm`, Linux x86-64): `compiler/llvm.grl` lowers the raw word stream to
+  LLVM IR for every function it fully understands and keeps the rest (data, the entry, stack
+  switching, indirect calls) as native assembly; the compiler writes `PATH.ll` beside `PATH`, and
+  `clang -O2` compiles it. Registers, flags and frames become allocas that LLVM promotes, checked
+  arithmetic becomes overflow intrinsics, check failures a cold noreturn path, atomics LLVM
+  atomics, `syscall` inline asm, and `rt_f32_round` hardware rounding. Every executable native
+  case gives identical output; the benchmarks in `bench/` run 1.3x to 39x faster than the native
+  backend (`GRAIL_BACKEND=llvm bun tools/bench.mjs`). `compileProgram` and the test runners honour
+  `GRAIL_BACKEND=llvm`.
+- `tools/bench.mjs` and `bench/`: Grail against C `-O2` on five kernels, with matching output
+  required.
+
 - `&mut z.comps[i].data` and `&grid[y][x]` borrow the whole accessor chain; the borrow used to
   stop after the first index, so the following field was read as a value (a type mismatch).
 

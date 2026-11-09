@@ -15,7 +15,7 @@ export const allTargets = [...targets, ...machoTargets];
 export const hostTarget = ({ x64: 'x86_64', arm64: 'aarch64', riscv64: 'riscv64' })[process.arch];
 // The compiler itself is a Linux host binary: its platform module is os-linux. darwin.grl (and
 // os-windows.grl) are per-target platform modules selected when building for those targets.
-export const compilerSources = ['native', 'lexer', 'ownership', 'machine', 'optimize', 'fmt', 'cli', 'runtime', 'os-linux'].map(n => join(root, 'compiler', `${n}.grl`));
+export const compilerSources = ['native', 'lexer', 'ownership', 'machine', 'optimize', 'llvm', 'fmt', 'cli', 'runtime', 'os-linux'].map(n => join(root, 'compiler', `${n}.grl`));
 const triples = { x86_64: 'x86_64-linux-gnu', aarch64: 'aarch64-linux-gnu', riscv64: 'riscv64-linux-gnu', 'macos-x86_64': 'x86_64-apple-macos11', 'macos-aarch64': 'arm64-apple-macos11' };
 const emulations = { x86_64: 'elf_x86_64', aarch64: 'aarch64elf', riscv64: 'elf64lriscv' };
 export const machoArchitectures = { 'macos-x86_64': 'x86_64', 'macos-aarch64': 'arm64' };
@@ -287,7 +287,9 @@ export function compileOnly(compiler, inputs, directory, { target = hostTarget, 
   command([compiler, ...numeric, '--target', target, assembly, ...files]);
   return assembly;
 }
-export function compileProgram(compiler, inputs, directory, { target = hostTarget, overflow = 'checked', name = 'program', defaultU64 = true, typedRefs = false, runtime = join(root, 'compiler/runtime.grl'), osRuntime = join(root, 'compiler/os-linux.grl'), darwin = join(root, 'compiler/darwin.grl'), frameworks = [], sdk = process.env.GRAIL_SDK, sign = false } = {}) {
+// backend 'llvm' (or GRAIL_BACKEND=llvm) lowers through compiler/llvm.grl: the compiler writes
+// NAME.s.ll beside NAME.s, clang -O2 compiles it, and the object joins the link.
+export function compileProgram(compiler, inputs, directory, { target = hostTarget, overflow = 'checked', name = 'program', defaultU64 = true, typedRefs = false, runtime = join(root, 'compiler/runtime.grl'), osRuntime = join(root, 'compiler/os-linux.grl'), darwin = join(root, 'compiler/darwin.grl'), frameworks = [], sdk = process.env.GRAIL_SDK, sign = false, backend = process.env.GRAIL_BACKEND ?? 'native' } = {}) {
   targetName(target);
   if (!['checked', 'wrap'].includes(overflow)) throw new Error('overflow must be checked or wrap');
   mkdirSync(directory, { recursive: true });
@@ -295,8 +297,15 @@ export function compileProgram(compiler, inputs, directory, { target = hostTarge
   const platform = machoTargets.includes(target) ? [resolve(root, darwin)] : [resolve(root, osRuntime)];
   const files = [...inputs.map(p => resolve(root, p)), resolve(root, runtime), ...platform];
   const numeric = [...(defaultU64 ? ['--default-u64'] : []), ...(typedRefs ? ['--typed-refs'] : [])];
-  command([compiler, ...numeric, '--target', target, `--overflow=${overflow}`, assembly, ...files]);
+  const llvm = backend === 'llvm';
+  if (llvm && target !== 'x86_64') throw new Error('the LLVM backend is implemented for x86_64');
+  command([compiler, ...numeric, ...(llvm ? ['--backend=llvm'] : []), '--target', target, `--overflow=${overflow}`, assembly, ...files]);
   const linkArgs = linkInputs(readFileSync(assembly, 'utf8'), dirname(resolve(root, inputs[0])));
+  if (llvm) {
+    const object = join(directory, `${name}.ll.o`);
+    command([process.env.GRAIL_ASSEMBLER ?? 'clang', `--target=${triples[target]}`, '-O2', '-c', `${assembly}.ll`, '-o', object]);
+    linkArgs.unshift(object);
+  }
   const framework = machoTargets.includes(target) ? frameworkArguments(frameworks, { directory, sdk }) : { args: [] };
   return assemble(assembly, join(directory, name), target, linkArgs, { frameworkArgs: framework.args, sign, sdk });
 }
