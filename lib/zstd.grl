@@ -1,0 +1,894 @@
+module zstd;
+
+use xxhash;
+
+// Zstandard decompression (RFC 8878): frames with raw, RLE and compressed blocks; Huffman
+// literals (one or four streams, FSE-compressed or direct weights, treeless reuse); FSE
+// sequences (predefined, RLE, compressed and repeated tables) with repeat offsets; the optional
+// XXH64 content checksum; skippable frames. Dictionaries are not supported (such frames give
+// None), and malformed input gives None rather than aborting.
+
+struct Fse {
+    symbol: u64[],
+    bits: u64[],
+    base: u64[],
+    log: u64
+}
+
+struct Huf {
+    symbol: u64[],
+    bits: u64[],
+    max: u64
+}
+
+struct Dec {
+    out: u8[],
+    frame_start: u64,
+    rep: u64[],
+    huf: Huf,
+    ll: Fse,
+    of: Fse,
+    ml: Fse,
+    bad: bool
+}
+
+fn empty_fse() -> Fse {
+    return Fse { symbol: u64[], bits: u64[], base: u64[], log: 0 };
+}
+
+fn highbit(v: u64) -> u64 {
+    mut n: u64 = 0;
+    mut x = v;
+    while x > 1 {
+        x = x >> 1;
+        n += 1;
+    }
+    return n;
+}
+
+// ---- bit readers ----
+
+// Forward (LSB-first) bits [pos, pos + n) of data, zero past the end.
+fn fbits<a>(data: &a [u8], pos: u64, n: u64) -> u64 {
+    mut v: u64 = 0;
+    for k in n {
+        bit := pos + k;
+        byte := bit / 8;
+        if byte < data.len() {
+            v = v | (((u64(data[byte]) >> (bit % 8)) & 1) << k);
+        }
+    }
+    return v;
+}
+
+// A backward bitstream over data[start, start + len): reads take the highest unread bits first.
+struct Rev {
+    start: u64,
+    pos: i64
+}
+
+// Positions the reader below the end marker (the highest set bit of the last byte).
+fn rev_open<a, b>(data: &a [u8], start: u64, len: u64, d: (&b mut Dec)) -> Rev {
+    if (len == 0) || (start + len > data.len()) {
+        d.bad = true;
+        return Rev { start: start, pos: 0 };
+    }
+    last := u64(data[start + len - 1]);
+    if last == 0 {
+        d.bad = true;
+        return Rev { start: start, pos: 0 };
+    }
+    return Rev { start: start, pos: i64((len - 1) * 8 + highbit(last)) };
+}
+
+// The next n bits (MSB-first order of the stream); bits below the stream start read as zero.
+fn rev_peek<a, b>(data: &a [u8], r: (&b Rev), n: u64) -> u64 {
+    if n == 0 {
+        return 0;
+    }
+    lo := r.pos - i64(n);
+    mut v: u64 = 0;
+    for k in n {
+        bit := lo + i64(k);
+        if bit >= 0 {
+            ub := u64(bit);
+            v = v | (((u64(data[r.start + ub / 8]) >> (ub % 8)) & 1) << k);
+        }
+    }
+    return v;
+}
+
+fn rev_read<a, b>(data: &a [u8], r: (&b mut Rev), n: u64) -> u64 {
+    v := rev_peek(data, &r, n);
+    r.pos = r.pos - i64(n);
+    return v;
+}
+
+// ---- FSE ----
+
+// Reads a normalized-count table description at data[at..]; returns the probabilities (-1 for
+// "less than one") and advances `at` past it.
+fn read_counts<a, b, c>(data: &a [u8], at: (&b mut u64), max_log: u64, max_symbol: u64, d: (&c mut Dec)) -> i64[] {
+    mut counts = i64[];
+    mut bit = *at * 8;
+    log := fbits(data, bit, 4) + 5;
+    bit += 4;
+    if log > max_log {
+        d.bad = true;
+        return counts;
+    }
+    mut remaining: i64 = i64(1 << log) + 1;
+    mut threshold: u64 = 1 << log;
+    mut nbits = log + 1;
+    mut symbol: u64 = 0;
+    mut previous0 = false;
+    while (remaining > 1) && (symbol <= max_symbol) {
+        if previous0 {
+            mut n0 = symbol;
+            while fbits(data, bit, 2) == 3 {
+                n0 += 3;
+                bit += 2;
+            }
+            n0 += fbits(data, bit, 2);
+            bit += 2;
+            while symbol < n0 {
+                counts.push(0);
+                symbol += 1;
+            }
+            if symbol > max_symbol {
+                break;
+            }
+        }
+        max := i64(2 * threshold - 1) - remaining;
+        low := fbits(data, bit, nbits - 1);
+        mut count: i64 = 0;
+        if i64(low) < max {
+            count = i64(low);
+            bit += nbits - 1;
+        } else {
+            mut c = fbits(data, bit, nbits);
+            if c >= threshold {
+                c = u64(i64(c) - max);
+            }
+            count = i64(c);
+            bit += nbits;
+        }
+        count -= 1;
+        if count < 0 {
+            remaining += count;
+        } else {
+            remaining -= count;
+        }
+        counts.push(count);
+        symbol += 1;
+        previous0 = count == 0;
+        while (remaining < i64(threshold)) && (threshold > 1) {
+            nbits -= 1;
+            threshold = threshold >> 1;
+        }
+    }
+    if (remaining != 1) || (symbol > max_symbol + 1) {
+        d.bad = true;
+    }
+    *at = (bit + 7) / 8;
+    // The log travels as an extra trailing entry.
+    counts.push(i64(log));
+    return counts;
+}
+
+// FSE decoding table from normalized counts (the last entry is the accuracy log).
+fn build_fse<b, c>(norm: (&b i64[]), d: (&c mut Dec)) -> Fse {
+    log := u64(norm[norm.len() - 1]);
+    nsym := norm.len() - 1;
+    size: u64 := 1 << log;
+    mut symbol = u64[0; size];
+    mut next = u64[0; nsym];
+    mut high = size - 1;
+    for s in nsym {
+        if norm[s] == -1 {
+            symbol[high] = s;
+            if high == 0 {
+                d.bad = true;
+                return empty_fse();
+            }
+            high -= 1;
+            next[s] = 1;
+        } else {
+            next[s] = u64(norm[s]);
+        }
+    }
+    step := (size >> 1) + (size >> 3) + 3;
+    mask := size - 1;
+    mut position: u64 = 0;
+    for s in nsym {
+        if norm[s] > 0 {
+            for i in u64(norm[s]) {
+                symbol[position] = s;
+                position = (position + step) & mask;
+                while position > high {
+                    position = (position + step) & mask;
+                }
+            }
+        }
+    }
+    if position != 0 {
+        d.bad = true;
+    }
+    mut bits = u64[0; size];
+    mut base = u64[0; size];
+    for u in size {
+        s := symbol[u];
+        state := next[s];
+        next[s] = state + 1;
+        nb := log - highbit(state);
+        bits[u] = nb;
+        base[u] = (state << nb) - size;
+    }
+    return Fse { symbol: symbol, bits: bits, base: base, log: log };
+}
+
+fn predefined(kind: u64) -> i64[] {
+    if kind == 0 {
+        return i64[4, 3, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 3, 2, 1, 1, 1, 1, 1, -1, -1, -1, -1, 6];
+    }
+    if kind == 1 {
+        return i64[1, 1, 1, 1, 1, 1, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, -1, -1, -1, -1, -1, 5];
+    }
+    return i64[1, 4, 3, 2, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, -1, -1, -1, -1, -1, -1, -1, 6];
+}
+
+// ---- Huffman literals ----
+
+// Huffman table from the tree description at data[at..]; advances `at`.
+fn read_huffman<a, b, c>(data: &a [u8], at: (&b mut u64), end: u64, d: (&c mut Dec)) -> Huf {
+    none := Huf { symbol: u64[], bits: u64[], max: 0 };
+    if *at >= end {
+        d.bad = true;
+        return none;
+    }
+    header := u64(data[*at]);
+    *at = *at + 1;
+    mut weights = u64[];
+    if header >= 128 {
+        n := header - 127;
+        bytes := (n + 1) / 2;
+        if *at + bytes > end {
+            d.bad = true;
+            return none;
+        }
+        for i in n {
+            b := u64(data[*at + i / 2]);
+            if i % 2 == 0 {
+                weights.push(b >> 4);
+            } else {
+                weights.push(b & 15);
+            }
+        }
+        *at = *at + bytes;
+    } else {
+        stop := *at + header;
+        if stop > end {
+            d.bad = true;
+            return none;
+        }
+        mut p = *at;
+        norm := read_counts(data, &mut p, 6, 255, &mut d);
+        if d.bad {
+            return none;
+        }
+        table := build_fse(&norm, &mut d);
+        if d.bad || (p >= stop) {
+            d.bad = true;
+            return none;
+        }
+        mut r = rev_open(data, p, stop - p, &mut d);
+        if d.bad {
+            return none;
+        }
+        mut s1 = rev_read(data, &mut r, table.log);
+        mut s2 = rev_read(data, &mut r, table.log);
+        while weights.len() < 255 {
+            weights.push(table.symbol[s1]);
+            s1 = table.base[s1] + rev_read(data, &mut r, table.bits[s1]);
+            if r.pos < 0 {
+                weights.push(table.symbol[s2]);
+                break;
+            }
+            weights.push(table.symbol[s2]);
+            s2 = table.base[s2] + rev_read(data, &mut r, table.bits[s2]);
+            if r.pos < 0 {
+                weights.push(table.symbol[s1]);
+                break;
+            }
+        }
+        *at = stop;
+    }
+    // The last weight is implied: it completes the total to a power of two.
+    mut total: u64 = 0;
+    for i in weights.len() {
+        if weights[i] > 11 {
+            d.bad = true;
+            return none;
+        }
+        if weights[i] > 0 {
+            total += 1 << (weights[i] - 1);
+        }
+    }
+    if total == 0 {
+        d.bad = true;
+        return none;
+    }
+    max := highbit(total) + 1;
+    rest := (1 << max) - total;
+    if (rest & (rest - 1)) != 0 {
+        d.bad = true;
+        return none;
+    }
+    weights.push(highbit(rest) + 1);
+    if max > 11 {
+        d.bad = true;
+        return none;
+    }
+    // Symbols take 2^(w-1) consecutive entries, by increasing weight, then symbol.
+    size: u64 := 1 << max;
+    mut symbol = u64[0; size];
+    mut bits = u64[0; size];
+    mut position: u64 = 0;
+    for w in 12 {
+        if w == 0 {
+            continue;
+        }
+        for s in weights.len() {
+            if weights[s] == w {
+                span: u64 := 1 << (w - 1);
+                for k in span {
+                    symbol[position + k] = s;
+                    bits[position + k] = max + 1 - w;
+                }
+                position += span;
+            }
+        }
+    }
+    return Huf { symbol: symbol, bits: bits, max: max };
+}
+
+fn huffman_stream<a, b, c>(data: &a [u8], start: u64, len: u64, count: u64, d: (&b mut Dec), out: (&c mut u8[])) {
+    mut r = rev_open(data, start, len, &mut d);
+    if d.bad {
+        return ();
+    }
+    for i in count {
+        index := rev_peek(data, &r, d.huf.max);
+        out.push(d.huf.symbol[index]);
+        r.pos = r.pos - i64(d.huf.bits[index]);
+    }
+    if r.pos != 0 {
+        d.bad = true;
+    }
+}
+
+// The literals section at data[at..end]; returns the literals and advances `at`.
+fn literals<a, b, c>(data: &a [u8], at: (&b mut u64), end: u64, d: (&c mut Dec)) -> u8[] {
+    mut lit = u8[];
+    if *at >= end {
+        d.bad = true;
+        return lit;
+    }
+    b0 := u64(data[*at]);
+    kind := b0 & 3;
+    format := (b0 >> 2) & 3;
+    if kind < 2 {
+        mut size: u64 = 0;
+        mut header: u64 = 1;
+        if (format == 0) || (format == 2) {
+            size = b0 >> 3;
+        } else {
+            if format == 1 {
+                header = 2;
+                size = (b0 >> 4) + (fbits(data, *at * 8 + 8, 8) << 4);
+            } else {
+                header = 3;
+                size = (b0 >> 4) + (fbits(data, *at * 8 + 8, 16) << 4);
+            }
+        }
+        *at = *at + header;
+        if kind == 0 {
+            if *at + size > end {
+                d.bad = true;
+                return lit;
+            }
+            for i in size {
+                lit.push(data[*at + i]);
+            }
+            *at = *at + size;
+        } else {
+            if *at >= end {
+                d.bad = true;
+                return lit;
+            }
+            lit = u8[data[*at]; size];
+            *at = *at + 1;
+        }
+        return lit;
+    }
+    mut header: u64 = 3;
+    mut regen: u64 = 0;
+    mut comp: u64 = 0;
+    mut streams: u64 = 4;
+    if format < 2 {
+        h := fbits(data, *at * 8, 24);
+        regen = (h >> 4) & 1023;
+        comp = (h >> 14) & 1023;
+        if format == 0 {
+            streams = 1;
+        }
+    } else {
+        if format == 2 {
+            header = 4;
+            h := fbits(data, *at * 8, 32);
+            regen = (h >> 4) & 16383;
+            comp = (h >> 18) & 16383;
+        } else {
+            header = 5;
+            h := fbits(data, *at * 8, 40);
+            regen = (h >> 4) & 262143;
+            comp = (h >> 22) & 262143;
+        }
+    }
+    *at = *at + header;
+    stop := *at + comp;
+    if stop > end {
+        d.bad = true;
+        return lit;
+    }
+    mut p = *at;
+    if kind == 2 {
+        d.huf = read_huffman(data, &mut p, stop, &mut d);
+        if d.bad {
+            return lit;
+        }
+    } else {
+        if d.huf.max == 0 {
+            d.bad = true;
+            return lit;
+        }
+    }
+    if streams == 1 {
+        huffman_stream(data, p, stop - p, regen, &mut d, &mut lit);
+    } else {
+        if p + 6 > stop {
+            d.bad = true;
+            return lit;
+        }
+        s1 := fbits(data, p * 8, 16);
+        s2 := fbits(data, p * 8 + 16, 16);
+        s3 := fbits(data, p * 8 + 32, 16);
+        q := p + 6;
+        if q + s1 + s2 + s3 > stop {
+            d.bad = true;
+            return lit;
+        }
+        s4 := stop - q - s1 - s2 - s3;
+        part := (regen + 3) / 4;
+        if 3 * part > regen {
+            d.bad = true;
+            return lit;
+        }
+        huffman_stream(data, q, s1, part, &mut d, &mut lit);
+        huffman_stream(data, q + s1, s2, part, &mut d, &mut lit);
+        huffman_stream(data, q + s1 + s2, s3, part, &mut d, &mut lit);
+        huffman_stream(data, q + s1 + s2 + s3, s4, regen - 3 * part, &mut d, &mut lit);
+    }
+    *at = stop;
+    return lit;
+}
+
+// ---- sequences ----
+
+fn ll_base(code: u64) -> u64 {
+    table := u64[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 18, 20, 22, 24, 28, 32, 40, 48, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536];
+    return table[code];
+}
+fn ll_bits(code: u64) -> u64 {
+    table := u64[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 3, 3, 4, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+    return table[code];
+}
+fn ml_base(code: u64) -> u64 {
+    if code < 32 {
+        return code + 3;
+    }
+    table := u64[35, 37, 39, 41, 43, 47, 51, 59, 67, 83, 99, 131, 259, 515, 1027, 2051, 4099, 8195, 16387, 32771, 65539];
+    return table[code - 32];
+}
+fn ml_bits(code: u64) -> u64 {
+    if code < 32 {
+        return 0;
+    }
+    table := u64[1, 1, 1, 1, 2, 2, 3, 3, 4, 4, 5, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+    return table[code - 32];
+}
+
+// One of the three sequence tables per its compression mode; `kind` 0 literal lengths,
+// 1 offsets, 2 match lengths.
+fn sequence_table<a, b, c>(data: &a [u8], at: (&b mut u64), end: u64, mode: u64, kind: u64, d: (&c mut Dec)) -> Fse {
+    mut max_symbol: u64 = 35;
+    mut max_log: u64 = 9;
+    if kind == 1 {
+        max_symbol = 31;
+        max_log = 8;
+    }
+    if kind == 2 {
+        max_symbol = 52;
+    }
+    if mode == 0 {
+        norm := predefined(kind);
+        return build_fse(&norm, &mut d);
+    }
+    if mode == 1 {
+        if *at >= end {
+            d.bad = true;
+            return empty_fse();
+        }
+        s := u64(data[*at]);
+        *at = *at + 1;
+        if s > max_symbol {
+            d.bad = true;
+            return empty_fse();
+        }
+        return Fse { symbol: u64[s], bits: u64[0], base: u64[0], log: 0 };
+    }
+    if mode == 2 {
+        norm := read_counts(data, &mut at, max_log, max_symbol, &mut d);
+        if d.bad || (*at > end) {
+            d.bad = true;
+            return empty_fse();
+        }
+        return build_fse(&norm, &mut d);
+    }
+    // Repeat: the previous block's table.
+    mut previous = empty_fse();
+    if kind == 0 {
+        previous = Fse { symbol: d.ll.symbol.copy(), bits: d.ll.bits.copy(), base: d.ll.base.copy(), log: d.ll.log };
+    }
+    if kind == 1 {
+        previous = Fse { symbol: d.of.symbol.copy(), bits: d.of.bits.copy(), base: d.of.base.copy(), log: d.of.log };
+    }
+    if kind == 2 {
+        previous = Fse { symbol: d.ml.symbol.copy(), bits: d.ml.bits.copy(), base: d.ml.base.copy(), log: d.ml.log };
+    }
+    if previous.symbol.len() == 0 {
+        d.bad = true;
+    }
+    return previous;
+}
+
+fn copy_match<b>(d: (&b mut Dec), offset: u64, length: u64) {
+    have := d.out.len() - d.frame_start;
+    if (offset == 0) || (offset > have) {
+        d.bad = true;
+        return ();
+    }
+    from := d.out.len() - offset;
+    for i in length {
+        d.out.push(d.out[from + i]);
+    }
+}
+
+fn compressed_block<a, b>(data: &a [u8], start: u64, end: u64, d: (&b mut Dec)) {
+    mut at = start;
+    lit := literals(data, &mut at, end, &mut d);
+    if d.bad {
+        return ();
+    }
+    if at >= end {
+        d.bad = true;
+        return ();
+    }
+    b0 := u64(data[at]);
+    mut nseq: u64 = 0;
+    if b0 < 128 {
+        nseq = b0;
+        at += 1;
+    } else {
+        if b0 < 255 {
+            nseq = ((b0 - 128) << 8) + fbits(data, at * 8 + 8, 8);
+            at += 2;
+        } else {
+            nseq = fbits(data, at * 8 + 8, 16) + 32512;
+            at += 3;
+        }
+    }
+    if nseq == 0 {
+        for i in lit.len() {
+            d.out.push(lit[i]);
+        }
+        if at != end {
+            d.bad = true;
+        }
+        return ();
+    }
+    if at >= end {
+        d.bad = true;
+        return ();
+    }
+    modes := u64(data[at]);
+    at += 1;
+    if (modes & 3) != 0 {
+        d.bad = true;
+        return ();
+    }
+    d.ll = sequence_table(data, &mut at, end, modes >> 6, 0, &mut d);
+    d.of = sequence_table(data, &mut at, end, (modes >> 4) & 3, 1, &mut d);
+    d.ml = sequence_table(data, &mut at, end, (modes >> 2) & 3, 2, &mut d);
+    if d.bad || (at >= end) {
+        d.bad = true;
+        return ();
+    }
+    mut r = rev_open(data, at, end - at, &mut d);
+    if d.bad {
+        return ();
+    }
+    mut sll = rev_read(data, &mut r, d.ll.log);
+    mut sof = rev_read(data, &mut r, d.of.log);
+    mut sml = rev_read(data, &mut r, d.ml.log);
+    mut used: u64 = 0;
+    for n in nseq {
+        llc := d.ll.symbol[sll];
+        ofc := d.of.symbol[sof];
+        mlc := d.ml.symbol[sml];
+        if ofc > 31 {
+            d.bad = true;
+            return ();
+        }
+        offset_value := (1 << ofc) + rev_read(data, &mut r, ofc);
+        ml := ml_base(mlc) + rev_read(data, &mut r, ml_bits(mlc));
+        ll := ll_base(llc) + rev_read(data, &mut r, ll_bits(llc));
+        mut offset: u64 = 0;
+        if offset_value > 3 {
+            offset = offset_value - 3;
+            d.rep[2] = d.rep[1];
+            d.rep[1] = d.rep[0];
+            d.rep[0] = offset;
+        } else {
+            mut index = offset_value;
+            if ll == 0 {
+                index += 1;
+            }
+            if index == 1 {
+                offset = d.rep[0];
+            } else {
+                if index == 2 {
+                    offset = d.rep[1];
+                    d.rep[1] = d.rep[0];
+                    d.rep[0] = offset;
+                } else {
+                    if index == 3 {
+                        offset = d.rep[2];
+                    } else {
+                        if d.rep[0] < 2 {
+                            d.bad = true;
+                            return ();
+                        }
+                        offset = d.rep[0] - 1;
+                    }
+                    d.rep[2] = d.rep[1];
+                    d.rep[1] = d.rep[0];
+                    d.rep[0] = offset;
+                }
+            }
+        }
+        if used + ll > lit.len() {
+            d.bad = true;
+            return ();
+        }
+        for i in ll {
+            d.out.push(lit[used + i]);
+        }
+        used += ll;
+        copy_match(&mut d, offset, ml);
+        if d.bad {
+            return ();
+        }
+        if n + 1 < nseq {
+            sll = d.ll.base[sll] + rev_read(data, &mut r, d.ll.bits[sll]);
+            sml = d.ml.base[sml] + rev_read(data, &mut r, d.ml.bits[sml]);
+            sof = d.of.base[sof] + rev_read(data, &mut r, d.of.bits[sof]);
+        }
+    }
+    if r.pos != 0 {
+        d.bad = true;
+        return ();
+    }
+    while used < lit.len() {
+        d.out.push(lit[used]);
+        used += 1;
+    }
+}
+
+// ---- frames ----
+
+fn read_le<a>(data: &a [u8], at: u64, n: u64) -> u64 {
+    return fbits(data, at * 8, n * 8);
+}
+
+// One zstd frame at data[at..]; returns the position after it.
+fn frame<a, b>(data: &a [u8], at: u64, d: (&b mut Dec)) -> u64 {
+    mut p = at + 4;
+    if p >= data.len() {
+        d.bad = true;
+        return p;
+    }
+    fhd := u64(data[p]);
+    p += 1;
+    fcs_flag := fhd >> 6;
+    single := (fhd >> 5) & 1;
+    checksum := (fhd >> 2) & 1;
+    dict_flag := fhd & 3;
+    if (fhd & 8) != 0 {
+        d.bad = true;
+        return p;
+    }
+    if single == 0 {
+        p += 1;
+    }
+    dict_sizes := u64[0, 1, 2, 4];
+    dict_size := dict_sizes[dict_flag];
+    if (dict_size != 0) && (read_le(data, p, dict_size) != 0) {
+        // Dictionaries are not supported.
+        d.bad = true;
+        return p;
+    }
+    p += dict_size;
+    mut fcs_size: u64 = 0;
+    if fcs_flag == 0 {
+        fcs_size = single;
+    } else {
+        fcs_size = 1 << fcs_flag;
+    }
+    mut content = 18446744073709551615;
+    if fcs_size != 0 {
+        if p + fcs_size > data.len() {
+            d.bad = true;
+            return p;
+        }
+        content = read_le(data, p, fcs_size);
+        if fcs_size == 2 {
+            content += 256;
+        }
+    }
+    p += fcs_size;
+    d.frame_start = d.out.len();
+    d.rep = u64[1, 4, 8];
+    d.huf = Huf { symbol: u64[], bits: u64[], max: 0 };
+    d.ll = empty_fse();
+    d.of = empty_fse();
+    d.ml = empty_fse();
+    while true {
+        if p + 3 > data.len() {
+            d.bad = true;
+            return p;
+        }
+        header := read_le(data, p, 3);
+        p += 3;
+        last := header & 1;
+        kind := (header >> 1) & 3;
+        size := header >> 3;
+        if kind == 3 {
+            d.bad = true;
+            return p;
+        }
+        if kind == 1 {
+            if p >= data.len() {
+                d.bad = true;
+                return p;
+            }
+            b := data[p];
+            for i in size {
+                d.out.push(b);
+            }
+            p += 1;
+        } else {
+            if p + size > data.len() {
+                d.bad = true;
+                return p;
+            }
+            if kind == 0 {
+                for i in size {
+                    d.out.push(data[p + i]);
+                }
+            } else {
+                compressed_block(data, p, p + size, &mut d);
+                if d.bad {
+                    return p;
+                }
+            }
+            p += size;
+        }
+        if last == 1 {
+            break;
+        }
+    }
+    if (content != 18446744073709551615) && (d.out.len() - d.frame_start != content) {
+        d.bad = true;
+        return p;
+    }
+    if checksum == 1 {
+        if p + 4 > data.len() {
+            d.bad = true;
+            return p;
+        }
+        produced := d.out[d.frame_start: d.out.len()];
+        if (xxhash::hash64(produced, 0) & 4294967295) != read_le(data, p, 4) {
+            d.bad = true;
+            return p;
+        }
+        p += 4;
+    }
+    return p;
+}
+
+// ZSTD_getFrameContentSize: the content size a frame at the start of `data` declares, or None when
+// the frame header is malformed, uses a dictionary-less reserved bit, or does not record the size.
+pub fn frame_content_size<a>(data: &a [u8]) -> u64? {
+    if (data.len() < 6) || (read_le(data, 0, 4) != 4247762216) {
+        return None;
+    }
+    fhd := u64(data[4]);
+    if (fhd & 8) != 0 {
+        return None;
+    }
+    fcs_flag := fhd >> 6;
+    single := (fhd >> 5) & 1;
+    dict_sizes := u64[0, 1, 2, 4];
+    mut p: u64 = 5 + dict_sizes[fhd & 3];
+    if single == 0 {
+        p += 1;
+    }
+    mut size: u64 = 0;
+    if fcs_flag == 0 {
+        size = single;
+    } else {
+        size = 1 << fcs_flag;
+    }
+    if (size == 0) || (p + size > data.len()) {
+        return None;
+    }
+    mut value = read_le(data, p, size);
+    if size == 2 {
+        value += 256;
+    }
+    return Some(value);
+}
+
+// Decompresses every frame in `data` (skippable frames are skipped); None when the input is
+// malformed or uses a dictionary.
+pub fn decompress<a>(data: &a [u8]) -> u8[]? {
+    mut d = Dec { out: u8[], frame_start: 0, rep: u64[1, 4, 8], huf: Huf { symbol: u64[], bits: u64[], max: 0 }, ll: empty_fse(), of: empty_fse(), ml: empty_fse(), bad: false };
+    mut p: u64 = 0;
+    while p < data.len() {
+        if p + 4 > data.len() {
+            return None;
+        }
+        magic := read_le(data, p, 4);
+        if magic == 4247762216 {
+            p = frame(data, p, &mut d);
+            if d.bad {
+                return None;
+            }
+            continue;
+        }
+        if (magic & 4294967280) == 407710288 {
+            if p + 8 > data.len() {
+                return None;
+            }
+            p += 8 + read_le(data, p + 4, 4);
+            if p > data.len() {
+                return None;
+            }
+            continue;
+        }
+        return None;
+    }
+    out := exchange(&mut d.out, u8[]);
+    return Some(out);
+}

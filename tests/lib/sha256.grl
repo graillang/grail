@@ -1,0 +1,60 @@
+use sha256;
+// FIPS 180-4 / NIST CAVP vectors, generated inputs checked against `sha256sum`, and incremental
+// updates split at every point around the 55/56/63/64/65-byte padding boundaries.
+fn check<b>(name:&b [u8],got:string,want:string)->u64{
+    if got!=want{println("FAIL {}: {} != {}",name.text(),got,want);return 1;}return 0;
+}
+// Deterministic bytes (64-bit LCG, top byte); the same generator wrote the sha256sum inputs.
+fn bytes_of(n:u64,seed:u64)->u8[]{
+    mut x=seed;mut out=u8[];
+    for i in n{x=wrapping_add(wrapping_mul(x,6364136223846793005),1442695040888963407);out.push(x>>56);}
+    return out;
+}
+fn generated<b>(n:u64,want:&b [u8])->u64{
+    data:=bytes_of(n,n);return check("generated",sha256::hex_digest(&data),want.text());
+}
+fn main(){
+    mut failures:u64=0;
+    failures+=check("empty",sha256::hex_digest(""),"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+    failures+=check("abc",sha256::hex_digest("abc"),"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    failures+=check("448",sha256::hex_digest("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"),
+        "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1");
+    failures+=check("896",sha256::hex_digest("abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmnhijklmnoijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu"),
+        "cf5b16a778af8380036ce59e7b0492370b249b11e8f07a51afac45037afee9d1");
+    mut chunk=u8[];for i in 1000{chunk.push('a');}
+    mut million=sha256::new();for i in 1000{million.update(&chunk);}
+    m:=million.finish();
+    failures+=check("million",sha256::hex(&m),"cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0");
+    d:=sha256::digest("abc");
+    if d.len()!=32{println("FAIL digest length");failures+=1;}
+    failures+=generated(1,"acac86c0e609ca906f632b0e2dacccb2b77d22b0621f20ebece1a4835b93f6f0");
+    failures+=generated(55,"2c2bc644d674041ad458ca4b8e798e82580b789b60275c66edd5dd97b006de3d");
+    failures+=generated(56,"176ff635dcfe59cab1aa43b138f7fd6881ef2582706d44ceac2d11eab733192e");
+    failures+=generated(57,"b88deb4568619ec14f2a65da1226088e2ab2d481801dc5651a9cc7c588887700");
+    failures+=generated(63,"b83e3aae5c5ab2f4e94fd7ff2cd0c6411f93136f4bb150d40f63e0016a8c7c76");
+    failures+=generated(64,"4c108cb98eb7aa3b35c6befdbb9c4255e965e12b485042b81abf95f043914740");
+    failures+=generated(65,"49cd3d141f2aa86b2b078ac6b6276f0c76c4606d0caa504ae6a5c36919bedf6f");
+    failures+=generated(111,"f7665b62aef5c760acab0dffb5de548649c18a610bf30201ddcf07193b5aa6f4");
+    failures+=generated(112,"c4be7168a239775560a757d43e5987db40559fffb1776a4596ff50b5087ad529");
+    failures+=generated(119,"1cb1151f5be63cefc898408d7bc0fde3b09f0d33311c35fe8ca7a4b6eb4ffb68");
+    failures+=generated(120,"02498029296489fee53770a3e6e2961256d8101a083d7342ff3bddad280b307c");
+    failures+=generated(127,"b5e024815e2715b8962632f0dfbfc5f95048ed5d5c3e18d8e7172db4cf19b8cb");
+    failures+=generated(128,"7ca3bb28656a5bb964fe717ffb63f8f852ff1efaedb452b36ebbdd2c4dddc38f");
+    failures+=generated(129,"046c77530471b20049dabfd99abd142ae1eef74d54c13d158797bead497fe215");
+    failures+=generated(1000,"216dd78be67c926c41d8f51a963c9abbd8e618b3b6a7342b87fd572458eb4e7e");
+    failures+=generated(4096,"b38a2951bb5f6de6a4f9c6d3c7c14ef936cc9215df955e04659cde5fe65a2138");
+    failures+=generated(65537,"4043ec12c379893f10e1a3c36350845f88b9e474ae10ccee4b3bf444b02ea31c");
+    // Every split of every length 0..200 (and byte-at-a-time) equals the one-shot digest.
+    mut splits:u64=0;
+    for n in 201{
+        data:=bytes_of(n,7+n);whole:=sha256::hex_digest(&data);
+        for cut in n+1{
+            mut s=sha256::new();s.update(&data[:cut]);s.update(&data[cut:]);r:=s.finish();
+            if sha256::hex(&r)!=whole{println("FAIL split {} at {}",n,cut);failures+=1;}
+            splits+=1;
+        }
+        mut s=sha256::new();for i in n{s.update(&data[i:i+1]);}r:=s.finish();
+        if sha256::hex(&r)!=whole{println("FAIL bytewise {}",n);failures+=1;}
+    }
+    if failures==0{println("sha256 ok {} splits",splits);}
+}

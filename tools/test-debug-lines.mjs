@@ -150,10 +150,33 @@ try {
   const mainBlock = pdbLines.slice(pdbLines.indexOf('main.grl')).split(/\n\S/)[0];
   const pdbRows = [...mainBlock.matchAll(/(\d+) [0-9A-F]{8} !/g)].map(m => Number(m[1]));
   for (const line of [2, 5, 6]) assert.ok(pdbRows.includes(line), `PDB has no row for line ${line}: ${pdbRows}`);
+  // CodeView symbols: each function an S_GPROC32 with an S_FRAMEPROC and its typed locals as
+  // S_REGREL32 records at negative rbp offsets (llvm-pdbutil prints the int32 offset unsigned).
+  const typed = join(work, 'typed.grl');
+  writeFileSync(typed, 'fn add(left: i64, right: i64) -> i64 {\n    return left + right;\n}\nfn main() {\n    mut total = add(2, 3);\n    mut ratio: f64 = 1.5;\n    mut done = true;\n    mut small: u8 = 7;\n    println(total);\n}\n');
+  const typedWin = compileProgram(compiler, [typed], join(work, 'windows-typed'), { debug: true });
+  const symbols = ok(['llvm-pdbutil', 'dump', '--symbols', typedWin.pdb]).stdout;
+  const procedure = name => {
+    const at = symbols.search(new RegExp(`S_GPROC32 \\[size = \\d+\\] \`${name}\``));
+    assert.ok(at >= 0, `PDB has no S_GPROC32 for ${name}`);
+    return symbols.slice(at, symbols.indexOf('S_END', at));
+  };
+  const expected = [['main::add', [['left', '0x0013 (__int64)'], ['right', '0x0013 (__int64)']]],
+    ['main::main', [['total', '0x0013 (__int64)'], ['ratio', '0x0041 (double)'], ['done', '0x0030 (bool)'], ['small', '0x0020 (unsigned char)']]]];
+  for (const [name, locals] of expected) {
+    const scope = procedure(name);
+    assert.match(scope, /S_FRAMEPROC/, `${name}: no S_FRAMEPROC`);
+    for (const [local, type] of locals) {
+      const record = new RegExp(`S_REGREL32 \\[size = \\d+\\] \`${local}\`\\s+type = ${type.replace(/[()]/g, '\\$&')}, register = RBP, offset = (\\d+)`).exec(scope);
+      assert.ok(record, `${name}: ${local} is not an RBP-relative ${type}`);
+      const offset = Number(record[1]) - 2 ** 32;
+      assert.ok(offset < 0 && offset % 8 === 0, `${name}: ${local} offset ${offset} is not a negative slot`);
+    }
+  }
   const unwind = ok(['llvm-readobj', '--unwind', win.object]).stdout;
   assert.match(unwind, /StartAddress: f_main_main/, 'debug build lost the main unwind entry');
   assert.match(unwind, /StartAddress: f_main_add/, 'debug build lost the add unwind entry');
-  console.log(`debug-lines: windows-x86_64 PDB rows for lines ${[...new Set(pdbRows)].sort((a, b) => a - b).join(', ')}; unwind entries kept`);
+  console.log(`debug-lines: windows-x86_64 PDB rows for lines ${[...new Set(pdbRows)].sort((a, b) => a - b).join(', ')}; typed rbp-relative locals; unwind entries kept`);
 
   console.log(`debug-lines: ${mainRows.length} source rows verified (lines ${[...lines].sort((a, b) => a - b).join(', ')})`);
   console.log('debug-lines: plain build has no line table; windows-aarch64 --debug rejected');

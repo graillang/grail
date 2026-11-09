@@ -1,17 +1,17 @@
 # Language readiness before graphics and porting
 
-Audit date: 2026-11-08, against `main` (compiler with the host-TLS bridge, `a3babb1` and later).
+Audit date: 2026-11-09, against `main` with the nested-record, float-record and CodeView-locals work.
 Priority is Windows first, then Linux, then macOS. Evidence is the compiler, the test suites and
 the design notes named below; `implementation-status.md` is current except where noted.
 
-## A. Core work - status (2026-11-08)
+## A. Core work - status (2026-11-09)
 
 | # | Item | Status | Evidence |
 | --- | --- | --- | --- |
 | A1 | FFI floats | **Done** for direct and `cfn` calls and for callbacks (parameters and results) on SysV, Win64, AAPCS64, RV64 LP64D | `tests/ffi/call_abi.grl`, `callback_floats.grl` on 3 Linux targets + Windows x64 (Wine) |
 | A2 | FFI narrow integers | **Done** for calls and callbacks (callee-side extension), and narrow C-record field stores write only their width | same; native case `ffi-c-record-narrow-assign` |
-| A3 | C records by value | **Results done** (registers and hidden result pointer, all ABIs); `f32`/`f64` fields done (by pointer). Remaining: records passed *by value* as arguments (needs syntax, see B7), nested records, float-field records as by-value results | `call_records.grl`, `float_records.grl` |
-| A4 | Stack arguments / variadic | **Done**: 64 argument words; variadic C calls on SysV, Win64, AAPCS64 (Linux), RV64. macOS arm64 variadics refused | `call_variadic.grl` on 3 Linux targets + Windows x64 |
+| A3 | C records by value | **Done except by-value arguments**: results in registers or a hidden pointer on every ABI, including float-field results (SysV eightbyte classes, AAPCS64 HFAs, RV64 flattening); `f32`/`f64` fields; nested records embedded by value. Remaining: records passed *by value* as arguments (needs syntax, see B7) | `call_records.grl`, `float_records.grl`, `float_record_results.grl`, `nested_records.grl` |
+| A4 | Stack arguments / variadic | **Done**: any number of arguments; variadic C calls on SysV, Win64, AAPCS64 (Linux and Apple's stack convention), RV64 | `call_variadic.grl` on 3 Linux targets + Windows x64; `test-macos` (static) |
 | A5 | Windows FFI / COM | **Done**: `extern "C"` calls and callbacks (Win64 thunk); COM methods of any arity and with floats through a typed `cfn` vtable slot | Windows suite: 33 checks, 19 under Wine; `call_com_slot.grl` |
 | A6 | Dynamic loading | **Done**: Windows x64 (Wine), Linux x86-64/AArch64/RISC-V (host-TLS bridge; executed under qemu with glibc sysroots), macOS linked for both targets | `dlopen.grl`, `ffi-dynamic-loading`, `test-macos` |
 | A7 | Stdlib on Windows | **Done** for files, sockets, processes/threads, output capture | `tools/test-ffi-runtime-windows.mjs`, 4 tests under Wine |
@@ -20,11 +20,11 @@ the design notes named below; `implementation-status.md` is current except where
 | A10 | Windows ARM64 threads | **Done statically** (bridge emitted and published); no ARM64 Windows runner | ARM64 static checks |
 | A11 | Mutable/borrowed captures, borrowed closure params | **Open - needs a design decision** (see B6) | `docs/design/closures.md` |
 | A12 | Iteration | **Partial**: `vecs::fold` (any type), `any/all/count/position_num`; generic predicates need A11 | native case `vecs-fold-and-predicates` |
-| A13 | Debug info | **Done for line tables and variable types**: DWARF lines + base types on Linux x86-64 (gdb prints typed locals; `--verify` clean), CodeView lines + PDB on Windows x64. Remaining: CodeView locals/types, DWARF on AArch64/RISC-V, record/string member layout | `tools/test-debug-lines.mjs` |
+| A13 | Debug info | **Done for line tables and typed locals**: DWARF lines + base types on Linux x86-64, AArch64 and RISC-V 64 (`--verify` clean; gdb prints typed locals); CodeView on Windows x64 with line tables and S_GPROC32/S_REGREL32 symbols (typed, rbp-relative parameters and locals) in the PDB. Remaining: record/string member layout (owned values show as their 8-byte handle) | `tools/test-debug-lines.mjs` |
 
-Remaining implementable core gaps: nested C records and float-field records as by-value results
-(SSE/HFA classification); CodeView locals and types; DWARF on AArch64/RISC-V; variadic calls on
-macOS arm64. Everything else in A1-A13 is either done or waits on a decision in section B.
+Remaining implementable core gap: record and string member layout in the debug info. Everything
+else in A1-A13 is either done or waits on a decision in section B (by-value record arguments need
+B7's syntax; closures need B6).
 
 ## B. Decisions needed from the project owner before implementation
 
@@ -42,6 +42,57 @@ macOS arm64. Everything else in A1-A13 is either done or waits on a decision in 
 
 JSON with exact numbers, TOML, regex/glob, base64/uuid, hashes and crypto, TLS (system stack via
 FFI recommended), HTTP, compression and image codecs, arenas and channels.
+
+### C1. SHA-256 and JSON (done)
+
+`lib/sha256.grl` is FIPS 180-4 SHA-256 over byte views: `sha256::new()`, `s.update(&bytes)` (any
+split gives the same digest), `s.finish()` (32 bytes), the one-shot `sha256::digest(&bytes)`, and
+`sha256::hex(&bytes)`/`sha256::hex_digest(&bytes)` for lowercase hex. It replaces Abundance's
+PicoSHA2 content identities. The native case `sha256-nist-sha256sum-and-split-updates` checks the
+NIST vectors (empty, `abc`, the 448- and 896-bit messages, one million `a`), 17 generated inputs
+against `sha256sum` (1-65537 bytes, around the 55/56/63/64/65-byte padding boundaries) and every
+two-part split and byte-at-a-time update of lengths 0-200.
+
+`lib/json.grl` is a strict RFC 8259 parser and serializer for the bounded config adapter that
+replaces nlohmann/json. `json::parse(&text)` (or `parse_with(&text, options)`) returns
+`json::Value |? json::Error`; a `Value` is `Null`, `Bool`, `Int(i64)`, `Float(f64)`,
+`Str(string)`, `Array(Value[])` or `Object(Member[])` with members in document order.
+
+- Numbers: integer syntax (no fraction or exponent) that fits i64 is `Int`, exactly; everything
+  else is the correctly rounded `Float` (round half to even, any number of digits). `-0` is
+  `Float(-0.0)`. A magnitude that rounds past the f64 range is `NumberOutOfRange`; tiny values
+  underflow to zero or a subnormal.
+- Strings must be valid UTF-8 and may not contain raw control characters; escapes, including
+  `\uXXXX` surrogate pairs, decode to UTF-8, and a lone surrogate is `LoneSurrogate`.
+- Duplicate keys are `DuplicateKey` by default; `options.allow_duplicate_keys = true` keeps the
+  first position with the last value. Objects of more than 32 members switch to a hash index.
+- `options.max_depth` (default 128) bounds array/object nesting, so recursion depth is bounded.
+- No extensions: comments, trailing commas, a BOM, `NaN`/`Infinity`, single quotes and
+  whitespace other than space/tab/LF/CR are errors. Each error has a kind and a byte offset
+  (`e.show()` is `json: <reason> at byte N`), and malformed input never aborts.
+- `json::to_text(&v)` is compact and `json::to_pretty(&v)` indents by two spaces. Floats are
+  written with the shortest digits that read back exactly and always have a `.` or exponent,
+  so `parse(to_text(v))` equals `v` (`json::equal` compares floats by bits). Non-finite floats,
+  which `parse` never produces, are written as `null`. Accessors: `get(key)`, `at(i)`, `len()`,
+  `is_null()`, `as_bool/as_i64/as_f64/as_str/as_array/as_object` (optional results).
+
+The native case `json-suite-floats-errors-and-round-trips` runs 99 must-accept and 212
+must-reject JSONTestSuite-style inputs (written inline by `tests/lib/gen_json_cases.py`, which
+also emits 612 decimal strings with CPython-computed f64 bit patterns: exact halfway points, long
+mantissas, subnormals and range edges), exact outputs, error offsets, depth and duplicate-key
+options, accessors and 2000 float plus i64 text round trips. Implementation-defined
+JSONTestSuite cases are decided strictly: lone surrogates, invalid UTF-8, a BOM and numbers
+beyond f64 are rejected; very long or huge-exponent numbers that are in range are accepted.
+
+Both modules are outside the compiler's built-in stdlib list (`stdlib_module` in
+`compiler/native.grl`), so they compile in the program's literal mode; every integer binding is
+annotated, and the native cases run both test programs with `--default-u64` and with default i64
+literals (the `grail build`/`grail test` mode).
+
+Costs to know: the CLI compiles every top-level `lib/*.grl` into every program and there is no
+dead-code elimination yet, so `json.grl` adds about 0.7 s and 0.7 MB of assembly to each
+`grail build`. Writing a float goes through the runtime's positional `{}` formatting (tens of
+microseconds for ordinary magnitudes, more for very large or small exponents).
 
 ## Order
 

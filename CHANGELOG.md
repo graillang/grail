@@ -36,7 +36,29 @@
   compile and silently lose writes made through the reference; it now reads and writes the field.
 - New compiler intrinsics `raw_load32`/`raw_store32` (32-bit `movl` on every target, an `i32`
   load/store in LLVM); the LLVM lifter now handles `movd`, `cvtss2sd` and `cvtsd2ss`.
+- Abundance port: `abundance/src/abgeo.grl` reads `.abgeo` cluster-geometry files with every check
+  the C++ `MeshView::open` makes, decodes zstd-compressed pages (`zstd::frame_content_size` is new),
+  and decodes clusters (bit-packed positions and uv0, octahedral normal + tangent frames, indices,
+  alpha bits, colour), and selects LOD cuts (`select_cut` for a view with partial residency,
+  `select_cut_error` at an object-space error). `abundance/tests/abgeo_test.grl` matches the C++
+  reader on fixtures built by Abundance's own cluster builder, plain and zstd-paged: 486 lines,
+  floats as bits, including 180 cuts.
+- Abundance port: `abundance/src/cluster_builder.grl` builds `.abgeo` files from a source mesh
+  (clusters, the per-material cluster-LOD DAG via grail-meshopt's clod, per-level BVHs, page packing
+  and dependencies, attribute codec). Its output is byte-identical to Abundance's C++ builder on the
+  three procedural test meshes (single material, three materials, two-sided foliage with wind).
+  Canonical voxel meshes, alpha-contour trimming and voxel LOD levels are not ported yet and are
+  refused. `tools/abundance-test.mjs` fetches grail-meshopt at a pinned commit into `.work/deps`
+  (`GRAIL_MESHOPT` selects a local checkout).
 
+- `lib/zstd.grl`: Zstandard decompression (RFC 8878), `zstd::decompress(bytes) -> u8[]?`: raw,
+  RLE and compressed blocks, Huffman literals (one or four streams, FSE or direct weights,
+  treeless), FSE sequence tables (predefined, RLE, compressed, repeat) with repeat offsets, the
+  XXH64 content checksum and skippable frames; dictionaries are not supported. Checked against 101
+  streams from the reference library (`tests/lib/reference/zstd_corpus.py`).
+
+- `lib/xxhash.grl`: XXH64 (`xxhash::hash64(bytes, seed)`), identical to the reference `xxhash.h`; zstd
+  frame checksums and Abundance fixture identities use it.
 - Ownership: after a `while` or `for` whose body always returns or continues, locals are usable again.
   The dead end state of such a body (where `return` had dropped every local) was merged into the
   loop exit, so any use after the loop was rejected as a use of a moved value.
@@ -49,6 +71,9 @@
 - Repeat literals: `u8[0; n]`, `u64[7; n]`, `f32[0.0; n]` make `n` copies of a plain value in a
   single allocation (Go's `make([]byte, n)`, Rust's `vec![0; n]`). A byte value above 255 stops the
   program; an owned element type is rejected. The sieve benchmark uses it in place of a push loop.
+- Green-task stack switches on AArch64 and RISC-V save every register the C ABI preserves
+  (x19-x28 and d8-d15; s0-s11 and fs0-fs11), not only those the native backend uses, so
+  LLVM-compiled code survives a task switch. A new task's initial frame grows to match.
 
 - `bytes[i]` reads the element straight from the sequence when the index is simple (names, integer
   literals, arithmetic, grouping): no temporary view is allocated, borrow-tracked and freed per
@@ -72,6 +97,11 @@
   `GRAIL_BACKEND=llvm`.
 - `tools/bench.mjs` and `bench/`: Grail against C `-O2` on five kernels, with matching output
   required.
+- CodeView symbols on Windows x86-64: `--debug` now emits an S_GPROC32 per function (named
+  `module::name`) with an S_FRAMEPROC and an S_REGREL32 for every parameter and local at its rbp
+  slot, typed with CodeView's predefined base types (`__int64`, `double`, `bool`, `unsigned char`,
+  ...). lld-link links the scopes into the PDB; `tools/test-debug-lines.mjs` checks the records
+  with `llvm-pdbutil`.
 
 - `&mut z.comps[i].data` and `&grid[y][x]` borrow the whole accessor chain; the borrow used to
   stop after the first index, so the following field was read as a value (a type mismatch).
@@ -161,6 +191,16 @@
   and nested records come back from C by value. Results with floats inside an embedded record
   are refused for now. `tests/ffi/nested_records.grl` checks `sizeof`/`offsetof` against clang
   and runs on x86-64, AArch64 and RISC-V 64 Linux and on Windows x86-64 (Wine).
+- Standard library: `zlib` (DEFLATE/zlib inflate, Adler-32, and a lenient variant for image
+  decoders), `png` and `jpeg`. The image decoders reproduce `stb_image` exactly (the library
+  Abundance uses): PNG in every colour type and bit depth with Adam7, palettes, colour-key tRNS
+  and stb's 16-to-8-bit and channel conversions; JPEG baseline and progressive with stb's integer
+  IDCT, upsampling filters, fixed-point YCbCr and Adobe CMYK/YCCK handling. Tests compare against
+  CPython's zlib and against stb itself for every requested channel count (53 streams, 570 PNG
+  and 290 JPEG checks); all 95 PNG assets in the Abundance tree also decode bit-identically.
+  `png::encode` and `zlib::compress` reproduce `stbi_write_png` byte for byte (its hash-chain
+  compressor, adaptive filter choice and CRC; 444 encodings checked). Decoding is currently about
+  160x slower than stb.
 
 - DWARF debug info on Linux AArch64 and RISC-V 64: `--debug` emits the same line table and
   typed variables as on x86-64 (frame base `x29` / `s0`). Under qemu with gdb's remote stub,
@@ -217,6 +257,20 @@
   link against the target loader and run under qemu `-L`; `tests/ffi/dlopen.grl` executes on
   all three Linux targets. Foreign calls on AArch64/RISC-V previously ran with Grail's worker
   record installed where glibc expects its TCB.
+- `lib/sha256.grl`: FIPS 180-4 SHA-256 over byte views, incremental (`sha256::new()`,
+  `update`, `finish` -> 32 bytes) with one-shot `digest` and lowercase `hex`/`hex_digest`; the
+  PicoSHA2 replacement for Abundance content identities. Checked against the NIST vectors
+  (including one million `a`), `sha256sum` on generated inputs around the 55/56/63/64/65-byte
+  padding boundaries, and every split of the input between two `update` calls.
+- `lib/json.grl`: strict RFC 8259 JSON for the bounded config adapter (replacing nlohmann/json).
+  `json::parse`/`parse_with` return `json::Value |? json::Error` with an error kind and byte
+  offset, never aborting on malformed input; integers that fit are exact `Int(i64)`, other
+  numbers are correctly rounded `Float(f64)`; `\u` surrogate pairs decode to UTF-8 while lone
+  surrogates, invalid UTF-8 and raw control characters are rejected; objects keep key order and
+  reject duplicate keys unless `allow_duplicate_keys`; nesting is bounded by `max_depth`
+  (default 128). `to_text`/`to_pretty` round-trip exactly (shortest float digits). Tested with
+  311 inline JSONTestSuite-style accept/reject cases and 612 CPython-verified float conversions
+  (`docs/design/language-readiness.md` section C1).
 
 - Callbacks with float and narrow-integer parameters and float results: an exported
   `extern "C" fn` reads each parameter from where the platform C convention put it (SysV,
