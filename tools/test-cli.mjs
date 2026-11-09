@@ -82,4 +82,22 @@ for (const target of ['x86_64', 'aarch64', 'riscv64']) {
   assert.equal(readFileSync(sample, 'utf8'), readFileSync(join(root, 'tests/fmt/messy.expected.grl'), 'utf8'), `${target} formatter output`);
   checks += 2;
 }
+// 5. Foreign link inputs: `grail run` links a shared library (libc's strlen, so the executable
+// needs the dynamic loader) and a C object named relative to the entry file.
+const clink = join(work, 'clink'); mkdirSync(join(clink, 'src'), { recursive: true });
+writeFileSync(join(clink, 'grail.pkg'), 'name clink\n');
+writeFileSync(join(clink, 'src/add.c'), 'long long c_add3(long long a, long long b, long long c) { return a + b + c; }\n');
+command(['clang', '-c', join(clink, 'src/add.c'), '-o', join(clink, 'src/add.o')]);
+writeFileSync(join(clink, 'src/main.grl'), [
+  'extern "C" lib "c" fn strlen(s: CStr) -> i64;',
+  'extern "C" lib "add.o" fn c_add3(a: i64, b: i64, c: i64) -> i64;',
+  'fn main() {',
+  '    unsafe {',
+  '        println(strlen(cstr("seven!!\\0")) + c_add3(1, 2, 3));',
+  '    }',
+  '}',
+  '',
+].join('\n'));
+assert.equal(run(['run'], clink).stdout.trim(), '13', 'grail run links a shared library and a relative C object');
+checks++;
 console.log(`cli: ${checks} formatter/tool checks passed`);

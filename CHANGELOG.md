@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- FFI bare data pointers: `CPtr` (`const void *`) and `CMutPtr` (`void *`) parameters, results and
+  extern-record fields, made with `unsafe cptr(bytes)`, `unsafe cptr_mut(&mut bytes)` and
+  `cnull()`. C APIs that take lone buffer pointers (libsodium keys and outputs, Vulkan `pData`)
+  are now callable without a C shim. `tests/ffi/pointers.grl` runs on all three Linux targets.
+- `grail build` / `grail test` honour the compiler's `// grail-link:` requests: bare library
+  names become `-lNAME`, relative objects resolve against the entry file, and an executable that
+  links a shared library gets the platform dynamic loader and system library directories
+  (Linux), or the library inputs on the Mach-O link line. Previously the CLI linked every program
+  statically and ignored foreign libraries, so only the test harness could link C code.
+- `docs/ffi.md`: the supported-types table now lists narrow integers, floats, record results
+  and the bare pointer types, which were already supported but documented as rejected.
+
 - DWARF debug info on Linux AArch64 and RISC-V 64: `--debug` emits the same line table and
   typed variables as on x86-64 (frame base `x29` / `s0`). Under qemu with gdb's remote stub,
   `info locals` shows `count = -3`, `ratio = 2.5`, `flag = true` on both; `test-debug-lines`

@@ -1,0 +1,26 @@
+module ffi_pointers;
+
+// Bare C data pointers: `unsafe cptr(bytes)` is `const void *`, `unsafe cptr_mut(&mut bytes)` is
+// `void *` (C writes are visible to Grail afterwards), `cnull()` is NULL, and a CPtr may be a
+// field of an extern record.
+extern "C" record CBuf { data: CPtr, len: i64 }
+extern "C" lib "shim.o" fn c_ptr_sum(p: CPtr, n: i64) -> i64;
+extern "C" lib "shim.o" fn c_ptr_fill(p: CMutPtr, n: i64, v: i64) -> unit;
+extern "C" lib "shim.o" fn c_is_null(p: CPtr) -> i64;
+extern "C" lib "shim.o" fn c_buf_sum(b: CBuf) -> i64;
+
+fn main() -> u64 {
+    data := u8[1, 2, 3, 4];
+    mut out = u8[0, 0, 0, 0, 0];
+    unsafe {
+        println(c_ptr_sum(cptr(&data), 4));
+        println(c_ptr_sum(cptr("ABC"), 3));
+        c_ptr_fill(cptr_mut(&mut out), 5, 10);
+        println(c_is_null(cnull()));
+        println(c_is_null(cptr(&data)));
+        b := CBuf { data: cptr(&out), len: 5 };
+        println(c_buf_sum(b));
+    }
+    println(out[0] + out[4]);
+    return 0;
+}

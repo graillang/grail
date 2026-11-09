@@ -56,6 +56,12 @@ const fixtures = [
     symbols: ['c_vec2', 'c_vec3d', 'c_fi', 'c_di', 'c_quad'],
   },
   {
+    // Bare data pointers: cptr / cptr_mut / cnull, and a pointer field in an extern record.
+    name: 'pointers',
+    stdout: '10\n198\n1\n0\n60\n24\n',
+    symbols: ['c_ptr_sum', 'c_ptr_fill', 'c_is_null', 'c_buf_sum'],
+  },
+  {
     // A COM-shaped vtable call with seven arguments and two floats through a typed cfn slot.
     name: 'call_com_slot',
     stdout: '1007\n1045\n',

@@ -105,3 +105,10 @@ long long c_apply_preserving(grail_callback callback, long long value) {
 }
 
 #include "abi_shim.c"
+
+/* ---- bare data pointers (CPtr / CMutPtr) ---- */
+long long c_ptr_sum(const unsigned char *p, long long n) { long long s = 0; for (long long i = 0; i < n; i++) s += p[i]; return s; }
+void c_ptr_fill(unsigned char *p, long long n, long long v) { for (long long i = 0; i < n; i++) p[i] = (unsigned char)(v + i); }
+long long c_is_null(const void *p) { return p == 0; }
+struct cbuf { const unsigned char *data; long long len; };
+long long c_buf_sum(const struct cbuf *b) { return c_ptr_sum(b->data, b->len); }

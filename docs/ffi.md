@@ -37,23 +37,54 @@ extern "C" fn c_identity(v: u64) -> u64;
 | --- | --- | --- |
 | `i64` | `int64_t` / `long long` / `ssize_t` | one 64-bit integer register |
 | `u64` | `uint64_t` / `size_t` / `unsigned long long` | one 64-bit integer register |
+| `i8`..`i32`, `u8`..`u32` | the C integer of that width | one integer register (narrowed/extended per ABI) |
+| `f64` / `f32` | `double` / `float` | one float register (see the calling conventions) |
 | `&[u8]` (parameter) | `const uint8_t *, size_t` | two: pointer then length |
 | `&mut [u8]` (parameter) | `uint8_t *, size_t` | two: pointer then length |
 | `CStr` | `const char *` (NUL-terminated) | one 64-bit pointer |
+| `CPtr` / `CMutPtr` | `const void *` / `void *` | one 64-bit pointer |
 | `handle H` | an opaque C token (`uint64_t` by convention) | one 64-bit word |
 | `cfn(P...) -> R` | `R (*)(P...)` | one 64-bit code address |
 | `extern "C" record R` (parameter) | `R *`, the address of the struct's fields | one 64-bit pointer |
+| `extern "C" record R` (result) | `R`, returned by value per the target ABI | registers or a hidden result pointer |
 | `unit` (result only) | `void` | result register ignored |
 
-Results may be `i64`, `u64`, `unit`, `CStr` or a `handle`: one word each. A view is never
-a result, because C cannot produce a Grail view record; a C function that fills a buffer
-returns a length or status instead, and the Grail side re-slices. A C-layout record is
-never a result either: a returned pointer would be C-owned memory that Grail's drop would
-free, so callers pass an out-parameter record instead.
+Results may be any of the scalar types above, `CStr`, `CPtr`/`CMutPtr`, a `handle`, a `cfn`, or an
+extern record by value. A view is never a result, because C cannot produce a Grail view record; a
+C function that fills a buffer returns a length or status instead, and the Grail side re-slices.
 
-Anything else — narrower integer widths, floats, `string`, references, plain (non-`extern "C"`)
-records, closures — is rejected with a diagnostic. The remaining gaps are listed under Limits;
-writing `v: u32` is an error, not a silent 32-bit truncation.
+Anything else — `string`, references, plain (non-`extern "C"`) records, closures — is rejected
+with a diagnostic. The remaining gaps are listed under Limits.
+
+### Bare data pointers
+
+Many C APIs take a buffer as a lone pointer, with its size implied or passed elsewhere (keys,
+nonces and output buffers in libsodium, `pData` in Vulkan create-info structs). `CPtr` is a
+`const void *` and `CMutPtr` a `void *`; both are one word and may be parameters, results and
+extern-record fields:
+
+```grail
+extern "C" lib "sodium" fn crypto_hash_sha256(out: CMutPtr, input: &[u8]) -> i32;
+
+fn digest<a>(input: &a [u8]) -> u8[] {
+    mut out = u8[];
+    for i in 32 {
+        out.push(0);
+    }
+    unsafe {
+        crypto_hash_sha256(cptr_mut(&mut out), input);
+    }
+    return out;
+}
+```
+
+- `unsafe cptr(bytes)` takes the data pointer of a byte sequence or view; `unsafe cptr_mut(&mut
+  bytes)` requires write access (a mutable sequence or `&mut [u8]`), and C's writes are visible
+  in the Grail bytes afterwards. `cnull()` is the null pointer, for optional parameters.
+- Both are `unsafe` for the same reason as `cstr`: the pointer carries no length or lifetime,
+  so C may read or write past the bytes, or keep the pointer after Grail frees them. The Grail
+  side stays responsible for passing a buffer of the size C expects.
+- The bytes stay owned by Grail and alive until the end of the statement that made the pointer.
 
 ### Byte views
 

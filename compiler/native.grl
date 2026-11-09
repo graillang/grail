@@ -4708,6 +4708,12 @@ fn base_named<a>(c: (&a mut C), first: u8[]) -> u64 {
     if same(view(first), view("string")) {
         return 3;
     }
+    if same(view(first), view("CPtr")) + same(view(first), view("CMutPtr")) {
+        // One word: a bare C data pointer (`const void *` / `void *`) into Grail-owned bytes,
+        // made by `unsafe cptr(view)` / `unsafe cptr_mut(&mut bytes)`. Mode 1 is writable.
+        mode := same(view(first), view("CMutPtr"));
+        return intern_full(&mut c, 26, 0, mode, u64[]);
+    }
     if same(view(first), view("CStr")) {
         // One word: a NUL-terminated byte pointer owned by the C side. Building one
         // is `unsafe cstr(view)` because it asserts termination and lifetime.
@@ -5598,7 +5604,7 @@ fn ffi_param<a, b>(c: (&a mut C), ty: u64, what: &b [u8]) -> unit {
     if (k == 18) & (ty_arg(&mut c, ty) == 64) {
         return ();
     }
-    if (k == 23) + (k == 24) + (k == 5) + (k == 25) {
+    if (k == 23) + (k == 24) + (k == 5) + (k == 25) + (k == 26) {
         return ();
     }
     if k == 8 {
@@ -5621,7 +5627,7 @@ fn ffi_result<a, b>(c: (&a mut C), ty: u64, what: &b [u8]) -> unit {
     if (k == 18) & (ty_arg(&mut c, ty) == 64) {
         return ();
     }
-    if (k == 23) + (k == 24) + (k == 25) {
+    if (k == 23) + (k == 24) + (k == 25) + (k == 26) {
         // A function-pointer result is how a dynamic loader hands back a resolved
         // symbol; the declaration states the signature the address is called with.
         return ();
@@ -5661,7 +5667,7 @@ fn ffi_field_align<a>(c: (&a mut C), ty: u64) -> u64 {
         }
         return 8;
     }
-    if (k == 23) + (k == 24) {
+    if (k == 23) + (k == 24) + (k == 26) {
         return 8;
     }
     if k == 18 {
@@ -5685,7 +5691,7 @@ fn ffi_field_size<a>(c: (&a mut C), ty: u64) -> u64 {
         }
         return 8;
     }
-    if (k == 23) + (k == 24) {
+    if (k == 23) + (k == 24) + (k == 26) {
         return 8;
     }
     if k == 18 {
@@ -9011,6 +9017,15 @@ fn builtin_id<a>(n: &a [u8]) -> u64 {
     if same(view(n), view("cstr")) {
         return 39;
     }
+    if same(view(n), view("cptr")) {
+        return 40;
+    }
+    if same(view(n), view("cptr_mut")) {
+        return 41;
+    }
+    if same(view(n), view("cnull")) {
+        return 42;
+    }
     if same(view(n), view("view_mut")) {
         return 38;
     }
@@ -10355,6 +10370,11 @@ fn builtin<a>(c: (&a mut C), id: u64) -> Val {
         return raw_builtin(&mut c, id);
     }
     expect(&mut c, view("("));
+    if id == 42 {
+        // `cnull()`: the null data pointer, for optional C pointer parameters.
+        expect(&mut c, view(")"));
+        return val(imm(&mut c, 0), intern_full(&mut c, 26, 0, 0, u64[]));
+    }
     if (id == 13) + (id == 14) {
         if borrow_place_ahead(&mut c) == 0 {
             v := borrow_temporary(&mut c, id == 14);
@@ -10374,6 +10394,32 @@ fn builtin<a>(c: (&a mut C), id: u64) -> Val {
         return v;
     }
     a := expr(&mut c, 0);
+    if (id == 40) + (id == 41) {
+        // `cptr(bytes)` / `cptr_mut(&mut bytes)`: the bare data pointer of a byte sequence or
+        // view, for C parameters and record fields typed `const void *` / `void *`. Unsafe:
+        // C may keep or (for cptr_mut) write through the pointer, which Grail cannot track.
+        expect(&mut c, view(")"));
+        if (c.raw == 0) & (c.unsafe_depth == 0) {
+            fail(&mut c, view("cptr and cptr_mut require an unsafe block"));
+        }
+        writable := id == 41;
+        x := deref(&mut c, a);
+        k := ty_kind(&mut c, x.ty);
+        if (k != 2) & (k != 3) & (k != 4) & (k != 5) {
+            fail(&mut c, view("cptr requires a byte sequence or view"));
+        }
+        if writable {
+            // Only a mutable byte view or a mutable sequence may be written through.
+            if (k == 5) & (ty_mode(&mut c, x.ty) == 0) {
+                fail(&mut c, view("cptr_mut requires a mutable byte view (&mut [u8])"));
+            }
+            if k != 5 {
+                require_write(&mut c, x.t);
+            }
+        }
+        slot := apply(&mut c, view("rt_view_ptr"), one(x.t));
+        return val(slot, intern_full(&mut c, 26, 0, writable, u64[]));
+    }
     if id == 39 {
         // `cstr(sequence)` is the checked, zero-copy C string view: the bytes must
         // end in NUL (verified at runtime) and the cast is unsafe because C may keep
