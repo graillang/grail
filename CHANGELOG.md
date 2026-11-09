@@ -9,6 +9,13 @@
   `select_cut_error` at an object-space error). `abundance/tests/abgeo_test.grl` matches the C++
   reader on fixtures built by Abundance's own cluster builder, plain and zstd-paged: 486 lines,
   floats as bits, including 180 cuts.
+- Abundance port: `abundance/src/cluster_builder.grl` builds `.abgeo` files from a source mesh
+  (clusters, the per-material cluster-LOD DAG via grail-meshopt's clod, per-level BVHs, page packing
+  and dependencies, attribute codec). Its output is byte-identical to Abundance's C++ builder on the
+  three procedural test meshes (single material, three materials, two-sided foliage with wind).
+  Canonical voxel meshes, alpha-contour trimming and voxel LOD levels are not ported yet and are
+  refused. `tools/abundance-test.mjs` fetches grail-meshopt at a pinned commit into `.work/deps`
+  (`GRAIL_MESHOPT` selects a local checkout).
 
 - `lib/zstd.grl`: Zstandard decompression (RFC 8878), `zstd::decompress(bytes) -> u8[]?`: raw,
   RLE and compressed blocks, Huffman literals (one or four streams, FSE or direct weights,
