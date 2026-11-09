@@ -15227,6 +15227,42 @@ fn map_index<a>(c: (&a mut C), value: Val, mapty: u64, access: u64) -> Val {
     return map_read_place(&mut c, result);
 }
 
+// From c.pos: whether the tokens up to the closing `]` form a side-effect-free index (names, integer
+// literals, arithmetic, comparisons and grouping parentheses), so evaluating it cannot move,
+// mutate or drop the sequence being indexed. Calls, field access, indexing, slices and blocks
+// are not simple.
+fn simple_index_ahead<a>(c: (&a mut C)) -> u64 {
+    mut i = c.pos;
+    mut depth: u64 = 0;
+    mut prev: u64 = 0;
+    while true {
+        k := kind_at(&mut c, i);
+        if (k == 93) & (depth == 0) {
+            return 1;
+        }
+        if k == 40 {
+            if (prev == 1) + (prev == 41) != 0 {
+                return 0;
+            }
+            depth += 1;
+        } else {
+            if k == 41 {
+                if depth == 0 {
+                    return 0;
+                }
+                depth -= 1;
+            } else {
+                operator := (k == 43) + (k == 45) + (k == 42) + (k == 47) + (k == 37) + (k == 38) + (k == 124) + (k == 94) + (k == 60) + (k == 62) + (k == 126);
+                if (k != 1) & (k != 2) & (operator == 0) {
+                    return 0;
+                }
+            }
+        }
+        prev = k;
+        i += 1;
+    }
+    return 0;
+}
 fn index_view<a>(c: (&a mut C), value: Val, access: u64) -> Val {
     unchecked := (c.raw == 0) & proven_index(&mut c, val(value.t, value.ty));
     advance(&mut c);
@@ -15280,6 +15316,27 @@ fn index_view<a>(c: (&a mut C), value: Val, access: u64) -> Val {
         if (k != 3) & (k != 4) & (k != 5) {
             fail(&mut c, view("index/slice requires byte sequence/view"));
         }
+    }
+    if simple_index_ahead(&mut c) {
+        // `bytes[i]` with an index that cannot move or mutate anything: read the element
+        // straight from the sequence (its first two words are {ptr, len}, as in a view
+        // descriptor), with no temporary view to allocate, borrow-track and free.
+        bstart := c.pos;
+        mut bound = expr(&mut c, 0);
+        bend := c.pos;
+        if c.raw == 0 {
+            bound = adopt_value(&mut c, bound, bstart, bend, 0);
+            require_type(&mut c, bound.ty, 0);
+        }
+        expect(&mut c, view("]"));
+        mut f = "rt_atb";
+        if unchecked {
+            f = "rt_atbu";
+        }
+        result := apply(&mut c, view(f), two(x.t, bound.t));
+        release_temporary(&mut c, input);
+        exchange(&mut c.byte_end, c.pos);
+        return val(result, 0);
     }
     vty := intern_full(&mut c, 5, 0, 0, u64[]);
     slot := apply(&mut c, view("rt_view"), one(x.t));

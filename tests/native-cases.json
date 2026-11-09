@@ -4190,5 +4190,18 @@
     "source": "fn count<a>(s: &a [u8]) -> u64 {\n    return s.len();\n}\nfn first<a>(s: &a [u8]) -> u8 {\n    return s[0];\n}\nfn main() {\n    mut t: u64 = 0;\n    for i in 100000 {\n        t += count(view(\"hello world\"));\n    }\n    v := view(\"abc\");\n    println(\"{} {} {} {}\", t, v.len(), v[1], first(view(\"z\")));\n    e := view(\"\");\n    println(e.len());\n}\n",
     "stdout": "1100000 3 98 122\n0\n",
     "note": "view(\"literal\") uses read-only static string/descriptor blocks (state 2, never freed); repeated in a loop to exercise the no-op drops"
+  },
+  {
+    "name": "byte-index-direct",
+    "source": "fn main() {\n    data := u8[10, 20, 30, 40];\n    s := \"wxyz\".text();\n    mut t: u64 = 0;\n    for i in data.len() {\n        t += data[i] + s[i];\n    }\n    k: u64 := 1;\n    println(\"{} {} {} {}\", t, data[(k + 1) * 1], s[k << 1], data[data.len() - 1]);\n}\n",
+    "stdout": "582 30 121 40\n",
+    "note": "bytes[i] with a simple index reads the sequence directly (no temporary view); values must match the checked view path"
+  },
+  {
+    "name": "reject-move-inside-byte-index",
+    "source": "fn take(v: u8[]) -> u64 {\n    return v.len();\n}\nfn main() {\n    data := u8[1, 2, 3];\n    x := data[take(data) - 1];\n    println(x);\n}\n",
+    "reject": true,
+    "note": "an index expression that is not simple (here a call that moves the base) keeps the borrowed-view path, so the move is rejected",
+    "diagnostic": "move of unavailable or borrowed value"
   }
 ]

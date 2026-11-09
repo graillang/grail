@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- `bytes[i]` reads the element straight from the sequence when the index is simple (names, integer
+  literals, arithmetic, grouping): no temporary view is allocated, borrow-tracked and freed per
+  access. Other index expressions keep the borrowed-view path, so moving or mutating the sequence
+  inside them is still rejected. The fnv benchmark goes from 36.1 s to 3.0 s on the native backend
+  and from 5.1 s to 0.63 s (1.1x C `-O2`) on `--backend=llvm`.
+
 - `view("literal")` builds nothing at run time: the bytes, a `u8[]` object for them and the view
   descriptor are read-only data behind block headers marked static, which `rt_free` leaves alone.
   The literal used to be copied into a fresh string, UTF-8 checked and wrapped in a heap view on
