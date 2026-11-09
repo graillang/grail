@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Closures can take reference parameters (`|a: &T, b: &T| -> bool ...`), each borrowed afresh per call;
+  they were rejected ("closure parameters cannot hold borrows yet").
 - Functions are values of closure type: any function whose signature matches (up to lifetime names)
   can be passed where an `Fn(...)` is expected, including ones taking references
   (`fn less<a, b>(x: (&a T), y: (&b T)) -> bool` as `Fn(&T, &T) -> bool`). Before, only closures could.

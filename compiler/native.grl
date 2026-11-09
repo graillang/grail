@@ -102,7 +102,9 @@ struct Closure {
     ret: u64,
     symbol: u8[],
     tnames: u8[][],
-    bindings: u64[]
+    bindings: u64[],
+    // Lifetimes the parameters introduced (`|x: &T|`): regions 2.. of the closure's own namespace.
+    regions: u64
 }
 struct ImplParams {
     decl: u64,
@@ -12444,17 +12446,22 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
     }
     mut names = u8[][];
     mut params = u64[];
+    mut param_regions = 0;
     if eat(&mut c, view("||")) == 0 {
         expect(&mut c, view("|"));
         exchange(&mut c.no_union, 1);
         if eat(&mut c, view("|")) == 0 {
+            // Parameters are typed in the closure's own lifetime namespace (`env` is region 1): each
+            // elided reference is a fresh input lifetime, borrowed anew on every call.
+            mut closure_names = u8[][];
+            closure_names.push(copy_bytes(view("env")));
+            outer_names := exchange(&mut c.rnames, closure_names);
+            outer_inputs := exchange(&mut c.input_regions, u64[]);
+            outer_parsing := exchange(&mut c.parsing_input, 1);
             while true {
                 n := ident(&mut c);
                 expect(&mut c, view(":"));
                 ty := parse_type(&mut c);
-                if contains_borrow(&mut c, ty, 0) {
-                    fail(&mut c, view("closure parameters cannot hold borrows yet"));
-                }
                 names.push(n);
                 params.push(ty);
                 if eat(&mut c, view("|")) {
@@ -12462,6 +12469,10 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
                 }
                 expect(&mut c, view(","));
             }
+            inner := exchange(&mut c.rnames, outer_names);
+            param_regions = inner.len() - 1;
+            exchange(&mut c.input_regions, outer_inputs);
+            exchange(&mut c.parsing_input, outer_parsing);
         }
     }
     exchange(&mut c.no_union, 0);
@@ -12661,6 +12672,7 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
                     symbol: symbol,
                     tnames: tn,
                     bindings: bn,
+                    regions: param_regions,
                 }
             );
     }
@@ -12724,6 +12736,35 @@ fn capture_field<a, b>(c: (&a mut C), name: &b [u8], address: u64) -> Val {
     observe(&mut c, n);
     return val(n, fty);
 }
+// The token just past a closure body starting at `start`: a braced block, or one expression ending
+// at a `,`, `;` or closing bracket of the enclosing call.
+fn closure_body_end<a>(c: (&a mut C), start: u64) -> u64 {
+    if kind_at(&mut c, start) == 123 {
+        return block_end(&mut c, start);
+    }
+    mut i = start;
+    mut depth = 0;
+    while true {
+        k := kind_at(&mut c, i);
+        if k == 0 {
+            return i;
+        }
+        if (k == 40) + (k == 91) + (k == 123) {
+            depth += 1;
+        }
+        if (k == 41) + (k == 93) + (k == 125) {
+            if depth == 0 {
+                return i;
+            }
+            depth -= 1;
+        }
+        if ((k == 44) + (k == 59)) & (depth == 0) {
+            return i;
+        }
+        i += 1;
+    }
+    return i;
+}
 fn emit_closures<a>(c: (&a mut C)) -> unit {
     mut i = 0;
     while i < c.closures.len() {
@@ -12755,8 +12796,18 @@ fn emit_closures<a>(c: (&a mut C)) -> unit {
         exchange(&mut c.origins, Origin[]);
         mut regions = u8[][];
         regions.push(copy_bytes(view("env")));
-        exchange(&mut c.rnames, regions);
         closure := &c.closures[i];
+        // The parameters' own lifetimes (see closure_literal), inputs of this closure function.
+        mut inputs = u64[];
+        for r in closure.regions {
+            mut name = u8[];
+            name.push(35);
+            decimal(&mut name, r + 1);
+            regions.push(name);
+            inputs.push(r + 2);
+        }
+        exchange(&mut c.rnames, regions);
+        exchange(&mut c.input_regions, inputs);
         tn := copy_names(&closure.tnames);
         bn := copy_numbers(&closure.bindings);
         exchange(&mut c.tnames, tn);
@@ -12773,6 +12824,9 @@ fn emit_closures<a>(c: (&a mut C)) -> unit {
         forever := c.toks.len();
         mut envlocal = &mut c.locals[0];
         exchange(&mut envlocal.last, forever);
+        // Parameters live to their last use in the body, so the body's end must be known first.
+        body_end := closure_body_end(&mut c, start);
+        exchange(&mut c.scope_end, body_end);
         for j in params.len() {
             pid := fresh(&mut c);
             pn := &names[j];
