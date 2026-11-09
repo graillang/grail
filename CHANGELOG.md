@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- A rejected program makes the compiler exit with status 1 instead of aborting (which dumped core).
+- An `impl` whose method signature does not match its interface is reported at that method; the
+  error used to point at the end of the last input file (often `os-linux.grl`).
 - Abundance port cleanup: the cluster builder and `.abgeo` reader use the float methods, `wrapping_u32`/`wrapping_u8`,
   `vecs::insert_sorted` and `vecs::sort_by_key` instead of hand-written helpers, and `!x` instead of `x == false`; the
   `.abgeo` test builds its lines with `format` and parses with `strings::split`/`parse_num`. Output unchanged.

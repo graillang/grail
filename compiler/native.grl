@@ -3508,7 +3508,8 @@ fn fail<a, b>(c: (&a mut C), msg: &b [u8]) -> unit {
     }
     c.out.push(10);
     host::print(view(c.out));
-    assert(0);
+    // A rejected program is an ordinary failure (status 1), not a crash of the compiler.
+    host::exit(1);
     return ();
 }
 // Command-line errors happen before any token stream exists, so they bypass the caret diagnostic.
@@ -7021,7 +7022,16 @@ fn check_interfaces<a>(c: (&a mut C)) -> unit {
             signature := bound_signature(&mut c, abstract, &arguments);
             mut empty = u64[];
             concrete := bound_signature(&mut c, actual, &empty);
-            require_type(&mut c, concrete, signature);
+            if same_type(&mut c, concrete, signature) == 0 {
+                // Report at the implementing method, not wherever parsing ended.
+                g := &c.funcs[actual];
+                file := g.file;
+                pos := g.pos;
+                load_file(&mut c, file);
+                exchange(&mut c.file, file);
+                exchange(&mut c.pos, pos);
+                fail(&mut c, view("method signature does not match the interface"));
+            }
         }
     }
     return ();
