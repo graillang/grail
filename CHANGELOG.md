@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- `for item in items` consumes vectors of owned elements in default-u64 mode too, including
+  temporary vectors. Each iteration owns its element; early exits clean up the remainder.
+  Borrow with `&items` to preserve the vector. Previously this worked only outside default-u64 mode.
+
 - A rejected program makes the compiler exit with status 1 instead of aborting (which dumped core).
 - An `impl` whose method signature does not match its interface is reported at that method; the
   error used to point at the end of the last input file (often `os-linux.grl`).

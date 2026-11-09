@@ -18175,8 +18175,9 @@ fn statement<a>(c: (&a mut C)) -> unit {
         // `for x in &s` / `for x in &mut s` over a slice borrows each element.
         borrowed := is(&mut c, view("&"));
         mut v = expr(&mut c, 0);
-        // `for x in v` copies scalar elements of a vector or byte sequence; the collection is observed
-        // before every iteration, so moving it inside the body is rejected.
+        // `for x in v` moves owned elements; `for x in &v` borrows them. Scalar and byte
+        // elements retain copy iteration in --default-u64 mode. The iterable itself is pinned
+        // for the duration of the loop, so its storage cannot move or grow in the body.
         mut seq = 0;
         mut elemty = 0;
         mut iterable = 0;
@@ -18206,7 +18207,9 @@ fn statement<a>(c: (&a mut C)) -> unit {
                 if (k == 6) + (k == 27) {
                     a := ty_arg(&mut c, x.ty);
                     elemty = a;
-                    if (c.default_u64 == 0) & (ty_kind(&mut c, v.ty) == 6) {
+                    // Owners are moved out one at a time in both numeric modes. Plain scalar
+                    // loops keep their existing copy semantics in --default-u64 mode.
+                    if ((c.default_u64 == 0) + (scalar(&mut c, a) == 0)) & (ty_kind(&mut c, v.ty) == 6) {
                         owned := move_value(&mut c, v);
                         bind(&mut c, copy_bytes(view("__iterated")), owned.ty, owned.t, 0);
                         hidden_local = c.locals.len();
