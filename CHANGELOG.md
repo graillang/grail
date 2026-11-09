@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- A block that does not start with `{` (such as a brace-less `match` arm) is reported as
+  "expected { to start a block"; the compiler used to crash on an arithmetic underflow.
 - `for item in items` consumes vectors of owned elements in default-u64 mode too, including
   temporary vectors. Each iteration owns its element; early exits clean up the remainder.
   Borrow with `&items` to preserve the vector. Previously this worked only outside default-u64 mode.
