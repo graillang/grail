@@ -13662,6 +13662,7 @@ fn collection_literal<a>(c: (&a mut C), ty: u64, bytes: u64) -> Val {
     slot := apply(&mut c, view("rt_new"), u64[]);
     own(&mut c, slot, ty);
     if eat(&mut c, view("]")) == 0 {
+        mut first = 1;
         while 1 {
             estart := c.pos;
             mut v = expr(&mut c, 0);
@@ -13682,6 +13683,32 @@ fn collection_literal<a>(c: (&a mut C), ty: u64, bytes: u64) -> Val {
                     }
                 }
             }
+            if first & is(&mut c, view(";")) {
+                // `T[v; n]`: n copies of a plain value, built in one reservation.
+                advance(&mut c);
+                if (c.raw == 0) & (bytes == 0) {
+                    element := ty_arg(&mut c, ty);
+                    if needs_drop(&mut c, element) {
+                        fail(&mut c, view("a repeated element must be a plain value; build owned elements with push"));
+                    }
+                }
+                nstart := c.pos;
+                mut count = expr(&mut c, 0);
+                nend := c.pos;
+                if c.raw == 0 {
+                    count = adopt_value(&mut c, count, nstart, nend, 0);
+                    require_type(&mut c, count.ty, 0);
+                }
+                expect(&mut c, view("]"));
+                mut fill = "rt_fill";
+                if bytes {
+                    fill = "rt_fillb";
+                }
+                mut args = two(slot, v.t);
+                args.push(count.t);
+                invoke(&mut c, view(fill), args);
+                return val(slot, ty);
+            }
             value := v.t;
             source := place_of(&mut c, value);
             move_out(&mut c, val(value, v.ty));
@@ -13696,6 +13723,7 @@ fn collection_literal<a>(c: (&a mut C), ty: u64, bytes: u64) -> Val {
             invoke(&mut c, view(f), two(slot, value));
             target := place_of(&mut c, slot);
             transfer_bonds(&mut c, source, target);
+            first = 0;
             if eat(&mut c, view("]")) {
                 break;
             }
@@ -15358,6 +15386,42 @@ fn map_index<a>(c: (&a mut C), value: Val, mapty: u64, access: u64) -> Val {
     return map_read_place(&mut c, result);
 }
 
+// From c.pos: whether the tokens up to the closing `]` form a side-effect-free index (names, integer
+// literals, arithmetic, comparisons and grouping parentheses), so evaluating it cannot move,
+// mutate or drop the sequence being indexed. Calls, field access, indexing, slices and blocks
+// are not simple.
+fn simple_index_ahead<a>(c: (&a mut C)) -> u64 {
+    mut i = c.pos;
+    mut depth: u64 = 0;
+    mut prev: u64 = 0;
+    while true {
+        k := kind_at(&mut c, i);
+        if (k == 93) & (depth == 0) {
+            return 1;
+        }
+        if k == 40 {
+            if (prev == 1) + (prev == 41) != 0 {
+                return 0;
+            }
+            depth += 1;
+        } else {
+            if k == 41 {
+                if depth == 0 {
+                    return 0;
+                }
+                depth -= 1;
+            } else {
+                operator := (k == 43) + (k == 45) + (k == 42) + (k == 47) + (k == 37) + (k == 38) + (k == 124) + (k == 94) + (k == 60) + (k == 62) + (k == 126);
+                if (k != 1) & (k != 2) & (operator == 0) {
+                    return 0;
+                }
+            }
+        }
+        prev = k;
+        i += 1;
+    }
+    return 0;
+}
 fn index_view<a>(c: (&a mut C), value: Val, access: u64) -> Val {
     unchecked := (c.raw == 0) & proven_index(&mut c, val(value.t, value.ty));
     advance(&mut c);
@@ -15411,6 +15475,27 @@ fn index_view<a>(c: (&a mut C), value: Val, access: u64) -> Val {
         if (k != 3) & (k != 4) & (k != 5) {
             fail(&mut c, view("index/slice requires byte sequence/view"));
         }
+    }
+    if simple_index_ahead(&mut c) {
+        // `bytes[i]` with an index that cannot move or mutate anything: read the element
+        // straight from the sequence (its first two words are {ptr, len}, as in a view
+        // descriptor), with no temporary view to allocate, borrow-track and free.
+        bstart := c.pos;
+        mut bound = expr(&mut c, 0);
+        bend := c.pos;
+        if c.raw == 0 {
+            bound = adopt_value(&mut c, bound, bstart, bend, 0);
+            require_type(&mut c, bound.ty, 0);
+        }
+        expect(&mut c, view("]"));
+        mut f = "rt_atb";
+        if unchecked {
+            f = "rt_atbu";
+        }
+        result := apply(&mut c, view(f), two(x.t, bound.t));
+        release_temporary(&mut c, input);
+        exchange(&mut c.byte_end, c.pos);
+        return val(result, 0);
     }
     vty := intern_full(&mut c, 5, 0, 0, u64[]);
     slot := apply(&mut c, view("rt_view"), one(x.t));
@@ -17279,7 +17364,14 @@ fn statement<a>(c: (&a mut C)) -> unit {
                 fail(&mut c, view("loop backedge consumes entry storage"));
             }
         }
-        ownership::merge(&mut c.check, &entry);
+        // A body that always returns or continues reaches the exit only through the entry state
+        // (and any breaks): its dead end state, where `return` dropped every local, must not be
+        // merged in.
+        if c.terminated {
+            ownership::restore(&mut c.check, &entry);
+        } else {
+            ownership::merge(&mut c.check, &entry);
+        }
         if c.hasbreak {
             broken := ownership::snapshot(&c.breaks);
             ownership::merge(&mut c.check, &broken);
@@ -17511,7 +17603,14 @@ fn statement<a>(c: (&a mut C)) -> unit {
                 fail(&mut c, view("loop backedge consumes entry storage"));
             }
         }
-        ownership::merge(&mut c.check, &entry);
+        // A body that always returns or continues reaches the exit only through the entry state
+        // (and any breaks): its dead end state, where `return` dropped every local, must not be
+        // merged in.
+        if c.terminated {
+            ownership::restore(&mut c.check, &entry);
+        } else {
+            ownership::merge(&mut c.check, &entry);
+        }
         if c.hasbreak {
             broken := ownership::snapshot(&c.breaks);
             ownership::merge(&mut c.check, &broken);
@@ -18834,8 +18933,8 @@ pub fn main() -> u64 {
     if (c.debug != 0) & (((c.target == 4) + (c.plat != 0)) != 0) {
         fail_option(&mut c, view("--debug line info is only implemented for Linux and Windows x86_64"));
     }
-    if (c.backend != 0) & (((c.target != 0) + (c.plat != 0) + (c.debug != 0)) != 0) {
-        fail_option(&mut c, view("--backend=llvm is implemented for Linux x86_64 without --debug"));
+    if (c.backend != 0) & (((c.target > 2) + (c.plat != 0) + (c.debug != 0)) != 0) {
+        fail_option(&mut c, view("--backend=llvm is implemented for Linux x86_64, aarch64 and riscv64 without --debug"));
     }
     for pass in 3 {
         if pass == 1 {
@@ -19087,6 +19186,20 @@ pub fn main() -> u64 {
         // The .loc/.file directives pass through instruction selection unchanged; the DWARF
         // sections refer only to labels, so they are appended after lowering.
         out = debug_locs(view(out));
+    }
+    if c.backend != 0 {
+        // LLVM IR (PATH.ll) for the lifted functions; the remainder goes through the usual
+        // instruction selection, followed by the calling-convention thunks.
+        lowered := llvm::lower_for(view(out), target);
+        mut ir_path = copy_bytes(view(path));
+        push_bytes(&mut ir_path, view(".ll"));
+        written := host::write_file(view(ir_path), view(lowered.ir));
+        if written != 0 {
+            return written;
+        }
+        mut image = machine::lower(view(lowered.native), target, c.plat);
+        push_bytes(&mut image, view(lowered.thunks));
+        return host::write_file(view(path), view(with_link_notes(&c.libs, view(image))));
     }
     mut native = machine::lower(view(out), target, c.plat);
     if c.debug != 0 {

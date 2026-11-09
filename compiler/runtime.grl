@@ -232,6 +232,38 @@ fn rt_push(s: u64, v: u64) -> u64 {
     return 0;
 }
 // Byte sequences (bytes, string, views) store one byte per element; vectors store words.
+// `T[v; n]`: n copies of a plain word value, reserved once.
+fn rt_fill(s: u64, v: u64, n: u64) -> u64 {
+    if 144115188075855872 < n {
+        rt_abort();
+    }
+    if n != 0 {
+        ptr := rt_grow(raw_load(s), 0, n * 8);
+        raw_store(s, ptr);
+        raw_store(s + 16, n);
+    }
+    mut i: u64 = 0;
+    while i < n {
+        raw_store(raw_load(s) + i * 8, v);
+        i = i + 1;
+    }
+    raw_store(s + 8, n);
+    return 0;
+}
+// `u8[v; n]`: n copies of a byte; stops the program when v does not fit a byte.
+fn rt_fillb(s: u64, v: u64, n: u64) -> u64 {
+    if 255 < v {
+        rt_abort();
+    }
+    rt_reserveb(s, n);
+    mut i: u64 = 0;
+    while i < n {
+        raw_putbyte(raw_load(s) + i, v);
+        i = i + 1;
+    }
+    raw_store(s + 8, n);
+    return 0;
+}
 fn rt_pushb(s: u64, v: u64) -> u64 {
     n := raw_load(s + 8);
     cap := raw_load(s + 16);

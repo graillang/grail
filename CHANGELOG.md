@@ -2,6 +2,48 @@
 
 ## Unreleased
 
+- Abundance port: `abundance/src/abgeo.grl` reads `.abgeo` cluster-geometry files with every check
+  the C++ `MeshView::open` makes, decodes zstd-compressed pages (`zstd::frame_content_size` is new),
+  and decodes clusters (bit-packed positions and uv0, octahedral normal + tangent frames, indices,
+  alpha bits, colour), and selects LOD cuts (`select_cut` for a view with partial residency,
+  `select_cut_error` at an object-space error). `abundance/tests/abgeo_test.grl` matches the C++
+  reader on fixtures built by Abundance's own cluster builder, plain and zstd-paged: 486 lines,
+  floats as bits, including 180 cuts.
+- Abundance port: `abundance/src/cluster_builder.grl` builds `.abgeo` files from a source mesh
+  (clusters, the per-material cluster-LOD DAG via grail-meshopt's clod, per-level BVHs, page packing
+  and dependencies, attribute codec). Its output is byte-identical to Abundance's C++ builder on the
+  three procedural test meshes (single material, three materials, two-sided foliage with wind).
+  Canonical voxel meshes, alpha-contour trimming and voxel LOD levels are not ported yet and are
+  refused. `tools/abundance-test.mjs` fetches grail-meshopt at a pinned commit into `.work/deps`
+  (`GRAIL_MESHOPT` selects a local checkout).
+
+- `lib/zstd.grl`: Zstandard decompression (RFC 8878), `zstd::decompress(bytes) -> u8[]?`: raw,
+  RLE and compressed blocks, Huffman literals (one or four streams, FSE or direct weights,
+  treeless), FSE sequence tables (predefined, RLE, compressed, repeat) with repeat offsets, the
+  XXH64 content checksum and skippable frames; dictionaries are not supported. Checked against 101
+  streams from the reference library (`tests/lib/reference/zstd_corpus.py`).
+
+- `lib/xxhash.grl`: XXH64 (`xxhash::hash64(bytes, seed)`), identical to the reference `xxhash.h`; zstd
+  frame checksums and Abundance fixture identities use it.
+- Ownership: after a `while` or `for` whose body always returns or continues, locals are usable again.
+  The dead end state of such a body (where `return` had dropped every local) was merged into the
+  loop exit, so any use after the loop was rejected as a use of a moved value.
+
+- LLVM backend: when every frame access in a function is a constant offset below rbp, each 8-byte
+  slot becomes its own alloca, so borrowing one local no longer makes the whole frame escape and
+  LLVM keeps the rest in registers. With `--backend=llvm` the benchmarks are now 1.2x (fnv, sieve),
+  1.5x (sort), 2.3x (nbody) and 3.2x (matmul) of C `-O2`.
+
+- Repeat literals: `u8[0; n]`, `u64[7; n]`, `f32[0.0; n]` make `n` copies of a plain value in a
+  single allocation (Go's `make([]byte, n)`, Rust's `vec![0; n]`). A byte value above 255 stops the
+  program; an owned element type is rejected. The sieve benchmark uses it in place of a push loop.
+
+- `bytes[i]` reads the element straight from the sequence when the index is simple (names, integer
+  literals, arithmetic, grouping): no temporary view is allocated, borrow-tracked and freed per
+  access. Other index expressions keep the borrowed-view path, so moving or mutating the sequence
+  inside them is still rejected. The fnv benchmark goes from 36.1 s to 3.0 s on the native backend
+  and from 5.1 s to 0.63 s (1.1x C `-O2`) on `--backend=llvm`.
+
 - `view("literal")` builds nothing at run time: the bytes, a `u8[]` object for them and the view
   descriptor are read-only data behind block headers marked static, which `rt_free` leaves alone.
   The literal used to be copied into a fresh string, UTF-8 checked and wrapped in a heap view on

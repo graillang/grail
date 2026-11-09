@@ -1,6 +1,7 @@
 # Byte buffers and text
 
-`u8[]` creates an empty owned growable byte sequence; `u8[10, 20, 30]` initializes one directly.
+`u8[]` creates an empty owned growable byte sequence; `u8[10, 20, 30]` initializes one directly,
+and `u8[0; n]` makes `n` copies of one byte (a value above 255 stops the program).
 `data.push(byte)` appends a byte, `data.pop()` removes the last byte, and `data.len()` reports its
 length. Read an individual byte with `data[index]`.
 

@@ -298,7 +298,7 @@ export function compileProgram(compiler, inputs, directory, { target = hostTarge
   const files = [...inputs.map(p => resolve(root, p)), resolve(root, runtime), ...platform];
   const numeric = [...(defaultU64 ? ['--default-u64'] : []), ...(typedRefs ? ['--typed-refs'] : [])];
   const llvm = backend === 'llvm';
-  if (llvm && target !== 'x86_64') throw new Error('the LLVM backend is implemented for x86_64');
+  if (llvm && !['x86_64', 'aarch64', 'riscv64'].includes(target)) throw new Error('the LLVM backend is implemented for Linux x86_64, aarch64 and riscv64');
   command([compiler, ...numeric, ...(llvm ? ['--backend=llvm'] : []), '--target', target, `--overflow=${overflow}`, assembly, ...files]);
   const linkArgs = linkInputs(readFileSync(assembly, 'utf8'), dirname(resolve(root, inputs[0])));
   if (llvm) {

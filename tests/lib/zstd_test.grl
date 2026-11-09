@@ -1,0 +1,92 @@
+use zstd;
+use xxhash;
+use fs;
+use io;
+
+// Decompresses every stream in tests/lib/zstd (made by the reference zstd library; see
+// tests/lib/reference/zstd_corpus.py) and checks the length and XXH64 of the output; `reject`
+// streams must give None. argv: the corpus directory. Returns the number of failures.
+
+fn read_corpus<a>(path: &a [u8]) -> u8[] {
+    match fs::read(path) {
+        d: u8[] => {
+            return d;
+        },
+        e: io::Error => {
+            println("cannot read a corpus file");
+            return u8[];
+        }
+    }
+}
+
+fn path_of<a, b, c>(dir: &a [u8], name: &b [u8], suffix: &c [u8]) -> u8[] {
+    mut out = dir.copy();
+    out.push(47);
+    for i in name.len() {
+        out.push(name[i]);
+    }
+    for i in suffix.len() {
+        out.push(suffix[i]);
+    }
+    return out;
+}
+
+fn number<a>(text: &a [u8]) -> u64 {
+    mut v: u64 = 0;
+    for i in text.len() {
+        v = v * 10 + (text[i] - 48);
+    }
+    return v;
+}
+
+fn main(dir: &[u8]) -> u64 {
+    manifest := read_corpus(path_of(dir, "manifest", ".txt"));
+    mut failures: u64 = 0;
+    mut cases: u64 = 0;
+    mut start: u64 = 0;
+    for i in manifest.len() {
+        if manifest[i] != 10 {
+            continue;
+        }
+        mut fields = u8[][];
+        mut s = start;
+        while s < i {
+            mut e = s;
+            while (e < i) && (manifest[e] != 32) {
+                e += 1;
+            }
+            fields.push(manifest[s: e].copy());
+            s = e + 1;
+        }
+        start = i + 1;
+        cases += 1;
+        input := read_corpus(path_of(dir, fields[1], ".in"));
+        result := zstd::decompress(&input);
+        mut ok = false;
+        if fields[0][0] == 114 {
+            match result {
+                Some(out) => {
+                    ok = false;
+                },
+                None => {
+                    ok = true;
+                }
+            }
+        } else {
+            match result {
+                Some(out) => {
+                    ok = (out.len() == number(fields[2])) && (xxhash::hash64(&out, 0) == number(fields[3]));
+                },
+                None => {
+                    ok = false;
+                }
+            }
+        }
+        if ok == false {
+            println("FAIL {}", fields[1].text());
+            failures += 1;
+        }
+    }
+    println("{} cases, {} failures", cases, failures);
+    return failures;
+}
