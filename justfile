@@ -36,6 +36,10 @@ windows-check:
 test *args:
     bun tools/test-native.mjs "$@"
 
+# Self-hosting fixpoint: the compiler compiles itself twice with identical output.
+test-selfhost:
+    bun tools/test-selfhost.mjs
+
 # Run the Abundance CPU-port parity tests (math, compared bit-for-bit with Abundance's own C++).
 abundance-test:
     bun tools/abundance-test.mjs

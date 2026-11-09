@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `tools/test-selfhost.mjs` (`just test-selfhost`, a CI job): the compiler compiles itself twice and the outputs must
+  be identical.
 - Closures can take reference parameters (`|a: &T, b: &T| -> bool ...`), each borrowed afresh per call;
   they were rejected ("closure parameters cannot hold borrows yet").
 - Functions are values of closure type: any function whose signature matches (up to lifetime names)
