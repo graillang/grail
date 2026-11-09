@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- The statement builtins `write`, `drop` and `assert` apply only before `(` and when no local
+  shadows them, so a binding named `write` can be assigned (`write += 3`).
+- `loop` is a keyword only before `{`: a binding named `loop` can be indexed and assigned
+  (`loop[i] = x` used to send the compiler into an infinite loop).
+
 - Byte reads (`bytes[i]`) are 0..255 words that adopt any integer type holding that range, so
   `hexval(text[i])` with `hexval(c: u8)` works without a conversion, while `bytes[i] << 24` still
   computes in a full word. Byte buffers and byte literals accept `u8` values.

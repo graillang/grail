@@ -15964,6 +15964,23 @@ fn fold_constant(k: u64, a: u64, b: u64) -> u64[] {
     }
     return u64[0, 0];
 }
+// A statement builtin (`drop(x)`, `write(...)`, `assert(...)`) only when the name is followed by
+// `(` and is not shadowed by a local; consumes the name on success. A binding named `write` or
+// `drop` is then an ordinary name (`write += 3`).
+fn statement_builtin<a, b>(c: (&a mut C), name: &b [u8]) -> u64 {
+    if is(&mut c, &name) == 0 {
+        return 0;
+    }
+    here := c.pos;
+    if kind_at(&mut c, here + 1) != 40 {
+        return 0;
+    }
+    if find_local(&mut c, &name) != 0 {
+        return 0;
+    }
+    advance(&mut c);
+    return 1;
+}
 // Walks the accessors of an assignment target from c.pos up to (not including) `stop`: each
 // `[i]` and `.f` run yields a mutable reference to the element or field, so `v[i][j] = x` and
 // `v[i].f = x` reach the final store through ordinary borrows.
@@ -16749,7 +16766,9 @@ fn statement<a>(c: (&a mut C)) -> unit {
         return ();
     }
     // `loop { }` is `while` without a condition; without a break, code after it is unreachable.
-    endless := is(&mut c, view("loop"));
+    // `loop` is a keyword only before `{`; otherwise it is an ordinary name (`loop[i] = x`).
+    here := c.pos;
+    endless := is(&mut c, view("loop")) & (kind_at(&mut c, here + 1) == 123);
     if endless + is(&mut c, view("while")) {
         advance(&mut c);
         // while let Variant(b) = value { }: loops while the value matches; a non-matching value is dropped.
@@ -17401,7 +17420,7 @@ fn statement<a>(c: (&a mut C)) -> unit {
         mark(&mut c, end);
         return ();
     }
-    if eat(&mut c, view("drop")) {
+    if statement_builtin(&mut c, view("drop")) {
         expect(&mut c, view("("));
         name := ident(&mut c);
         mut l = find_local(&mut c, view(name));
@@ -17425,11 +17444,11 @@ fn statement<a>(c: (&a mut C)) -> unit {
         }
         return ();
     }
-    if eat(&mut c, view("write")) {
+    if statement_builtin(&mut c, view("write")) {
         write_statement(&mut c);
         return ();
     }
-    if eat(&mut c, view("assert")) {
+    if statement_builtin(&mut c, view("assert")) {
         expect(&mut c, view("("));
         mut v = expr(&mut c, 0);
         if c.raw == 0 {
