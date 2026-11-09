@@ -1,17 +1,17 @@
 # Language readiness before graphics and porting
 
-Audit date: 2026-11-08, against `main` (compiler with the host-TLS bridge, `a3babb1` and later).
+Audit date: 2026-11-09, against `main` with the nested-record, float-record and CodeView-locals work.
 Priority is Windows first, then Linux, then macOS. Evidence is the compiler, the test suites and
 the design notes named below; `implementation-status.md` is current except where noted.
 
-## A. Core work - status (2026-11-08)
+## A. Core work - status (2026-11-09)
 
 | # | Item | Status | Evidence |
 | --- | --- | --- | --- |
 | A1 | FFI floats | **Done** for direct and `cfn` calls and for callbacks (parameters and results) on SysV, Win64, AAPCS64, RV64 LP64D | `tests/ffi/call_abi.grl`, `callback_floats.grl` on 3 Linux targets + Windows x64 (Wine) |
 | A2 | FFI narrow integers | **Done** for calls and callbacks (callee-side extension), and narrow C-record field stores write only their width | same; native case `ffi-c-record-narrow-assign` |
-| A3 | C records by value | **Results done** (registers and hidden result pointer, all ABIs); `f32`/`f64` fields done (by pointer). Remaining: records passed *by value* as arguments (needs syntax, see B7), nested records, float-field records as by-value results | `call_records.grl`, `float_records.grl` |
-| A4 | Stack arguments / variadic | **Done**: 64 argument words; variadic C calls on SysV, Win64, AAPCS64 (Linux), RV64. macOS arm64 variadics refused | `call_variadic.grl` on 3 Linux targets + Windows x64 |
+| A3 | C records by value | **Done except by-value arguments**: results in registers or a hidden pointer on every ABI, including float-field results (SysV eightbyte classes, AAPCS64 HFAs, RV64 flattening); `f32`/`f64` fields; nested records embedded by value. Remaining: records passed *by value* as arguments (needs syntax, see B7) | `call_records.grl`, `float_records.grl`, `float_record_results.grl`, `nested_records.grl` |
+| A4 | Stack arguments / variadic | **Done**: any number of arguments; variadic C calls on SysV, Win64, AAPCS64 (Linux and Apple's stack convention), RV64 | `call_variadic.grl` on 3 Linux targets + Windows x64; `test-macos` (static) |
 | A5 | Windows FFI / COM | **Done**: `extern "C"` calls and callbacks (Win64 thunk); COM methods of any arity and with floats through a typed `cfn` vtable slot | Windows suite: 33 checks, 19 under Wine; `call_com_slot.grl` |
 | A6 | Dynamic loading | **Done**: Windows x64 (Wine), Linux x86-64/AArch64/RISC-V (host-TLS bridge; executed under qemu with glibc sysroots), macOS linked for both targets | `dlopen.grl`, `ffi-dynamic-loading`, `test-macos` |
 | A7 | Stdlib on Windows | **Done** for files, sockets, processes/threads, output capture | `tools/test-ffi-runtime-windows.mjs`, 4 tests under Wine |
@@ -20,11 +20,11 @@ the design notes named below; `implementation-status.md` is current except where
 | A10 | Windows ARM64 threads | **Done statically** (bridge emitted and published); no ARM64 Windows runner | ARM64 static checks |
 | A11 | Mutable/borrowed captures, borrowed closure params | **Open - needs a design decision** (see B6) | `docs/design/closures.md` |
 | A12 | Iteration | **Partial**: `vecs::fold` (any type), `any/all/count/position_num`; generic predicates need A11 | native case `vecs-fold-and-predicates` |
-| A13 | Debug info | **Done for line tables and variable types**: DWARF lines + base types on Linux x86-64 (gdb prints typed locals; `--verify` clean), CodeView lines + PDB on Windows x64. Remaining: CodeView locals/types, DWARF on AArch64/RISC-V, record/string member layout | `tools/test-debug-lines.mjs` |
+| A13 | Debug info | **Done for line tables and typed locals**: DWARF lines + base types on Linux x86-64, AArch64 and RISC-V 64 (`--verify` clean; gdb prints typed locals); CodeView on Windows x64 with line tables and S_GPROC32/S_REGREL32 symbols (typed, rbp-relative parameters and locals) in the PDB. Remaining: record/string member layout (owned values show as their 8-byte handle) | `tools/test-debug-lines.mjs` |
 
-Remaining implementable core gaps: nested C records and float-field records as by-value results
-(SSE/HFA classification); CodeView locals and types; DWARF on AArch64/RISC-V; variadic calls on
-macOS arm64. Everything else in A1-A13 is either done or waits on a decision in section B.
+Remaining implementable core gap: record and string member layout in the debug info. Everything
+else in A1-A13 is either done or waits on a decision in section B (by-value record arguments need
+B7's syntax; closures need B6).
 
 ## B. Decisions needed from the project owner before implementation
 

@@ -636,6 +636,137 @@ fn record_debug_func<a, b, d>(c: (&a mut C), name: &b [u8], module: &d [u8], sit
         );
     return ();
 }
+// CodeView type index for a debug slot: a predefined base type (so no .debug$T stream is needed).
+// Owned values (strings, records, vectors) are shown as their 64-bit handle, as in DWARF.
+fn cv_type<a>(v: &a DebugVar) -> u64 {
+    if v.tenc == 4 {
+        // T_REAL64 (an f32 slot holds the binary64 word of its value).
+        return 65;
+    }
+    if v.tenc == 2 {
+        // T_BOOL08
+        return 48;
+    }
+    if v.tenc == 16 {
+        // T_CHAR32
+        return 123;
+    }
+    if v.tenc == 5 {
+        // T_CHAR, T_SHORT, T_INT4, T_QUAD
+        if v.tsize == 1 {
+            return 16;
+        }
+        if v.tsize == 2 {
+            return 17;
+        }
+        if v.tsize == 4 {
+            return 116;
+        }
+        return 19;
+    }
+    name := view(v.tname);
+    if (2 <= name.len()) & (name[0] == 117) & (48 <= name[1]) & (name[1] <= 57) {
+        // T_UCHAR, T_USHORT, T_UINT4, T_UQUAD
+        if v.tsize == 1 {
+            return 32;
+        }
+        if v.tsize == 2 {
+            return 33;
+        }
+        if v.tsize == 4 {
+            return 117;
+        }
+        return 35;
+    }
+    if same(name, view("word")) {
+        return 35;
+    }
+    // T_64PVOID
+    return 1539;
+}
+fn cv_label<a>(out: (&a mut u8[]), name: &a [u8], i: u64, j: u64) -> unit {
+    push_bytes(&mut out, view(".Lcv"));
+    push_bytes(&mut out, name);
+    decimal(&mut out, i);
+    out.push(95);
+    decimal(&mut out, j);
+    return ();
+}
+// A CodeView symbol record: the 2-byte length, then kind and body up to a 4-byte boundary.
+fn cv_record_start<a>(out: (&a mut u8[]), i: u64, j: u64, kind: u64) -> unit {
+    push_bytes(&mut out, view(".short "));
+    cv_label(&mut out, view("e"), i, j);
+    out.push(45);
+    cv_label(&mut out, view("s"), i, j);
+    out.push(10);
+    cv_label(&mut out, view("s"), i, j);
+    push_bytes(&mut out, view(":\n.short "));
+    decimal(&mut out, kind);
+    out.push(10);
+    return ();
+}
+fn cv_record_end<a>(out: (&a mut u8[]), i: u64, j: u64) -> unit {
+    push_bytes(&mut out, view(".p2align 2\n"));
+    cv_label(&mut out, view("e"), i, j);
+    push_bytes(&mut out, view(":\n"));
+    return ();
+}
+// The DEBUG_S_SYMBOLS subsection: per function an S_GPROC32 over its .L range, an S_FRAMEPROC
+// naming rbp as the frame register, an S_REGREL32 per parameter and local at rbp-8*(slot+1)
+// (the slot DWARF's fbreg describes), and S_END. lld-link links the scopes into the PDB.
+fn codeview_symbols<a>(c: &a C) -> u8[] {
+    mut out = u8[];
+    push_bytes(&mut out, view(".long 241\n.long .Lcvsyms_end-.Lcvsyms\n.Lcvsyms:\n"));
+    for i in c.debug_funcs.len() {
+        f := &c.debug_funcs[i];
+        fstart := f.start;
+        fend := f.end;
+        mut range = u8[];
+        push_bytes(&mut range, view(".long .L"));
+        decimal(&mut range, fend);
+        push_bytes(&mut range, view("-.L"));
+        decimal(&mut range, fstart);
+        range.push(10);
+        cv_record_start(&mut out, i, 0, 4368);
+        // parent, end, next: lld-link fills the scope links.
+        push_bytes(&mut out, view(".long 0\n.long 0\n.long 0\n"));
+        push_bytes(&mut out, view(range));
+        push_bytes(&mut out, view(".long 0\n"));
+        push_bytes(&mut out, view(range));
+        push_bytes(&mut out, view(".long 0\n.secrel32 .L"));
+        decimal(&mut out, fstart);
+        push_bytes(&mut out, view("\n.secidx .L"));
+        decimal(&mut out, fstart);
+        push_bytes(&mut out, view("\n.byte 0\n.asciz \""));
+        if f.module.len() != 0 {
+            push_bytes(&mut out, view(f.module));
+            push_bytes(&mut out, view("::"));
+        }
+        push_bytes(&mut out, view(f.name));
+        push_bytes(&mut out, view("\"\n"));
+        cv_record_end(&mut out, i, 0);
+        // S_FRAMEPROC: locals and parameters are addressed from rbp (encoded register 2).
+        cv_record_start(&mut out, i, 1, 4114);
+        push_bytes(&mut out, view(".long 0\n.long 0\n.long 0\n.long 0\n.long 0\n.short 0\n.long 163840\n"));
+        cv_record_end(&mut out, i, 1);
+        for j in f.vars.len() {
+            v := &f.vars[j];
+            cv_record_start(&mut out, i, j + 2, 4369);
+            push_bytes(&mut out, view(".long -"));
+            decimal(&mut out, (v.slot + 1) * 8);
+            push_bytes(&mut out, view("\n.long "));
+            decimal(&mut out, cv_type(&v));
+            // CV_AMD64_RBP
+            push_bytes(&mut out, view("\n.short 334\n.asciz \""));
+            push_bytes(&mut out, view(v.name));
+            push_bytes(&mut out, view("\"\n"));
+            cv_record_end(&mut out, i, j + 2);
+        }
+        push_bytes(&mut out, view(".short 2\n.short 6\n"));
+    }
+    push_bytes(&mut out, view(".Lcvsyms_end:\n"));
+    return out;
+}
 fn debug_sections<a, b>(c: &a C, entry: &b [u8]) -> u8[] {
     mut out = u8[];
     if c.debug == 0 {
@@ -18705,9 +18836,12 @@ pub fn main() -> u64 {
             mut image = win_unwind(view(out));
             if c.debug != 0 {
                 image = debug_locs(view(image));
-                // CodeView: one line table per recorded function, then the file checksums and the
-                // string table they index; lld-link /DEBUG builds the PDB from this section.
+                // CodeView: the symbol records (functions with their typed locals), one line table
+                // per recorded function, then the file checksums and the string table they index;
+                // lld-link /DEBUG builds the PDB from this section.
                 push_bytes(&mut image, view(".section .debug$S,\"dr\"\n.p2align 2\n.long 4\n"));
+                symbols := codeview_symbols(&c);
+                push_bytes(&mut image, view(symbols));
                 for i in c.debug_funcs.len() {
                     push_bytes(&mut image, view(".cv_linetable "));
                     decimal(&mut image, i);
