@@ -215,7 +215,7 @@ fn get8<a>(r: (&a mut Reader)) -> u64 {
 fn grow<a>(r: (&a mut Reader)) -> unit {
     while true {
         mut b: u64 = 0;
-        if r.nomore == false {
+        if !r.nomore {
             b = get8(&mut r);
         }
         if b == 255 {
@@ -360,13 +360,13 @@ fn decode_block<a, b, c>(r: (&a mut Reader), z: (&b mut Jpeg), data: (&c mut i64
         diff = extend_receive(&mut r, u64(t));
     }
     pred := z.comps[n].dc_pred;
-    if add_valid(pred, diff) == false {
+    if !add_valid(pred, diff) {
         return false;
     }
     dc := pred + diff;
     z.comps[n].dc_pred = dc;
     q0 := i64(z.dequant[tq * 64]);
-    if mul_short_valid(dc, q0) == false {
+    if !mul_short_valid(dc, q0) {
         return false;
     }
     data[0] = short(dc * q0);
@@ -432,13 +432,13 @@ fn decode_prog_dc<a, b, c>(r: (&a mut Reader), z: (&b mut Jpeg), data: (&c mut i
             diff = extend_receive(&mut r, u64(t));
         }
         pred := z.comps[n].dc_pred;
-        if add_valid(pred, diff) == false {
+        if !add_valid(pred, diff) {
             return false;
         }
         dc := pred + diff;
         z.comps[n].dc_pred = dc;
         scale := i64(1 << z.succ_low);
-        if mul_short_valid(dc, scale) == false {
+        if !mul_short_valid(dc, scale) {
             return false;
         }
         data[base] = short(dc * scale);
@@ -753,7 +753,7 @@ fn restart<a, b>(r: (&a mut Reader), z: (&b mut Jpeg)) -> bool {
         if r.bits < 24 {
             grow(&mut r);
         }
-        if is_restart(r.marker) == false {
+        if !is_restart(r.marker) {
             return false;
         }
         reset(&mut r, &mut z);
@@ -781,17 +781,17 @@ fn entropy<a, b>(r: (&a mut Reader), z: (&b mut Jpeg)) -> bool {
                         ok = decode_prog_ac(&mut r, &mut z, &mut coeff, base, ha);
                     }
                     exchange(&mut z.comps[n].coeff, coeff);
-                    if ok == false {
+                    if !ok {
                         return false;
                     }
                 } else {
-                    if decode_block(&mut r, &mut z, &mut data, n) == false {
+                    if !decode_block(&mut r, &mut z, &mut data, n) {
                         return false;
                     }
                     at := z.comps[n].w2 * j * 8 + i * 8;
                     store_block(&mut z, n, &data, 0, at);
                 }
-                if restart(&mut r, &mut z) == false {
+                if !restart(&mut r, &mut z) {
                     return true;
                 }
             }
@@ -818,13 +818,13 @@ fn entropy<a, b>(r: (&a mut Reader), z: (&b mut Jpeg)) -> bool {
                             mut coeff = exchange(&mut z.comps[n].coeff, i64[]);
                             ok := decode_prog_dc(&mut r, &mut z, &mut coeff, base, n);
                             exchange(&mut z.comps[n].coeff, coeff);
-                            if ok == false {
+                            if !ok {
                                 return false;
                             }
                         } else {
                             x2 := (i * ch + x) * 8;
                             y2 := (j * cv + y) * 8;
-                            if decode_block(&mut r, &mut z, &mut data, n) == false {
+                            if !decode_block(&mut r, &mut z, &mut data, n) {
                                 return false;
                             }
                             at := w2 * y2 + x2;
@@ -833,7 +833,7 @@ fn entropy<a, b>(r: (&a mut Reader), z: (&b mut Jpeg)) -> bool {
                     }
                 }
             }
-            if restart(&mut r, &mut z) == false {
+            if !restart(&mut r, &mut z) {
                 return true;
             }
         }
@@ -910,7 +910,7 @@ fn process_marker<a, b>(r: (&a mut Reader), z: (&b mut Jpeg), m: u64) -> bool {
             }
             left -= 17;
             mut h = empty_huff();
-            if build_huffman(&mut h, &sizes) == false {
+            if !build_huffman(&mut h, &sizes) {
                 return false;
             }
             for i in total {
@@ -1144,8 +1144,8 @@ fn decode_image<a, b>(r: (&a mut Reader), z: (&b mut Jpeg)) -> bool {
         return false;
     }
     mut m = get_marker(&mut r);
-    while ((m == 192) || (m == 193) || (m == 194)) == false {
-        if process_marker(&mut r, &mut z, m) == false {
+    while !((m == 192) || (m == 193) || (m == 194)) {
+        if !process_marker(&mut r, &mut z, m) {
             return false;
         }
         m = get_marker(&mut r);
@@ -1157,16 +1157,16 @@ fn decode_image<a, b>(r: (&a mut Reader), z: (&b mut Jpeg)) -> bool {
         }
     }
     z.progressive = m == 194;
-    if frame_header(&mut r, &mut z) == false {
+    if !frame_header(&mut r, &mut z) {
         return false;
     }
     m = get_marker(&mut r);
     while m != 217 {
         if m == 218 {
-            if scan_header(&mut r, &mut z) == false {
+            if !scan_header(&mut r, &mut z) {
                 return false;
             }
-            if entropy(&mut r, &mut z) == false {
+            if !entropy(&mut r, &mut z) {
                 return false;
             }
             if r.marker == NONE {
@@ -1186,7 +1186,7 @@ fn decode_image<a, b>(r: (&a mut Reader), z: (&b mut Jpeg)) -> bool {
                 m = get_marker(&mut r);
             } else {
                 // stb ends decoding (successfully) at a marker it cannot process.
-                if process_marker(&mut r, &mut z, m) == false {
+                if !process_marker(&mut r, &mut z, m) {
                     if z.progressive {
                         finish_progressive(&mut z);
                     }
@@ -1315,9 +1315,9 @@ fn assemble<a>(z: (&a Jpeg), req: u64) -> Image {
             n = 1;
         }
     }
-    is_rgb := (z.n == 3) && ((z.rgb == 3) || ((z.app14 == 0) && (z.jfif == false)));
+    is_rgb := (z.n == 3) && ((z.rgb == 3) || ((z.app14 == 0) && (!z.jfif)));
     mut decode_n = z.n;
-    if (z.n == 3) && (n < 3) && (is_rgb == false) {
+    if (z.n == 3) && (n < 3) && (!is_rgb) {
         decode_n = 1;
     }
     // Per-component resampling state.
@@ -1447,7 +1447,7 @@ pub fn decode<a>(data: &a [u8], desired: u64) -> Image? {
         acs.push(empty_huff());
     }
     mut z = Jpeg { dc: dcs, ac: acs, fast_ac: zeros_i(2048), dequant: zeros_u(256), comps: Comp[], width: 0, height: 0, n: 0, h_max: 1, v_max: 1, mcu_x: 0, mcu_y: 0, progressive: false, spec_start: 0, spec_end: 0, succ_high: 0, succ_low: 0, eob_run: 0, jfif: false, app14: -1, rgb: 0, scan_n: 0, order: zeros_u(4), restart_interval: 0, todo: 0 };
-    if decode_image(&mut r, &mut z) == false {
+    if !decode_image(&mut r, &mut z) {
         return None;
     }
     return Some(assemble(&z, desired));

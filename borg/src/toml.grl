@@ -987,44 +987,11 @@ impl Shaper {
     }
 
     fn emit_number<a, b>(self: (&a mut Shaper), path: (&b [u8]), kind: (&b [u8]), value: u64) {
-        mut digits = u8[];
-        if value == 0 {
-            digits.push(48);
-        } else {
-            mut reversed_digits = u8[];
-            mut left = value;
-            while left > 0 {
-                reversed_digits.push(48 + left % 10);
-                left = left / 10;
-            }
-            while reversed_digits.len() > 0 {
-                digits.push(reversed_digits.pop());
-            }
-        }
-        self.out.push(Shape { path: copy_text(path), kind: copy_text(kind), text: digits.text() });
+        self.out.push(Shape { path: copy_text(path), kind: copy_text(kind), text: format("{}", value) });
     }
 
     fn emit_signed<a, b>(self: (&a mut Shaper), path: (&b [u8]), value: i64) {
-        mut digits = u8[];
-        mut magnitude = value;
-        if value < 0 {
-            digits.push(45);
-            magnitude = 0 - value;
-        }
-        mut body = u64(magnitude);
-        if body == 0 {
-            digits.push(48);
-        } else {
-            mut reversed_digits = u8[];
-            while body > 0 {
-                reversed_digits.push(48 + body % 10);
-                body = body / 10;
-            }
-            while reversed_digits.len() > 0 {
-                digits.push(reversed_digits.pop());
-            }
-        }
-        self.out.push(Shape { path: copy_text(path), kind: "int".text(), text: digits.text() });
+        self.out.push(Shape { path: copy_text(path), kind: "int".text(), text: format("{}", value) });
     }
 
     fn walk<a, b>(self: (&a mut Shaper), node: (&b Toml), path: (&b [u8])) {
@@ -1042,26 +1009,8 @@ impl Shaper {
                 self.emit_number(&path, "array", items.len());
                 mut index = 0;
                 for item in items {
-                    mut child = u8[];
-                    for byte in &path {
-                        child.push(byte);
-                    }
-                    child.push(91);
-                    mut reversed_digits = u8[];
-                    mut value = index;
-                    if value == 0 {
-                        child.push(48);
-                    } else {
-                        while value > 0 {
-                            reversed_digits.push(48 + value % 10);
-                            value = value / 10;
-                        }
-                        while reversed_digits.len() > 0 {
-                            child.push(reversed_digits.pop());
-                        }
-                    }
-                    child.push(93);
-                    self.walk(item, &child);
+                    child := format("{}[{}]", path.text(), index);
+                    self.walk(item, view(child));
                     index += 1;
                 }
             },

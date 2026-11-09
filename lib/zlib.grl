@@ -116,7 +116,7 @@ fn need<a>(z: (&a mut Inflater), n: u64) -> bool {
 }
 
 fn take<a>(z: (&a mut Inflater), n: u64) -> u64 {
-    if need(&mut z, n) == false {
+    if !need(&mut z, n) {
         z.failed = true;
         return 0;
     }
@@ -145,7 +145,7 @@ fn decode<a, b>(z: (&a mut Inflater), h: (&b Huffman)) -> u64 {
     mut len: u64 = 1;
     while len < 16 {
         if z.nbits == 0 {
-            if need(&mut z, 1) == false {
+            if !need(&mut z, 1) {
                 return 9999;
             }
         }
@@ -345,7 +345,7 @@ fn blocks<a>(z: (&a mut Inflater)) -> bool {
             // Return whole input bytes still buffered as bits before reading LEN.
             back := z.nbits / 8;
             z.at = z.at - back;
-            if stored(&mut z) == false {
+            if !stored(&mut z) {
                 return false;
             }
             continue;
@@ -364,7 +364,7 @@ fn blocks<a>(z: (&a mut Inflater)) -> bool {
                 return false;
             }
         }
-        if codes(&mut z, &tables[0], &tables[1]) == false {
+        if !codes(&mut z, &tables[0], &tables[1]) {
             return false;
         }
     }
@@ -374,7 +374,7 @@ fn blocks<a>(z: (&a mut Inflater)) -> bool {
 // Raw DEFLATE data (no zlib header): the decompressed bytes, or None for a malformed stream.
 pub fn inflate_raw<a>(data: &a [u8]) -> u8[]? {
     mut z = Inflater { data: data.copy(), at: 0, bits: 0, nbits: 0, out: u8[], failed: false };
-    if blocks(&mut z) == false {
+    if !blocks(&mut z) {
         return None;
     }
     return Some(exchange(&mut z.out, u8[]));
@@ -402,7 +402,7 @@ pub fn inflate<a>(data: &a [u8]) -> u8[]? {
         return None;
     }
     mut z = Inflater { data: data.copy(), at: 2, bits: 0, nbits: 0, out: u8[], failed: false };
-    if blocks(&mut z) == false {
+    if !blocks(&mut z) {
         return None;
     }
     // The trailer starts at the next byte boundary after the final block.
@@ -434,7 +434,7 @@ pub fn inflate_lenient<a>(data: &a [u8], header: bool) -> u8[]? {
         start = 2;
     }
     mut z = Inflater { data: data.copy(), at: start, bits: 0, nbits: 0, out: u8[], failed: false };
-    if blocks(&mut z) == false {
+    if !blocks(&mut z) {
         return None;
     }
     return Some(exchange(&mut z.out, u8[]));
