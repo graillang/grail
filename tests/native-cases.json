@@ -4665,5 +4665,58 @@
     "source": "fn main() {\n    data := u8[1, 2];\n    r := &data;\n    p := &mut r[0];\n    println(*p);\n}\n",
     "reject": true,
     "diagnostic": "mutation through readonly reference"
+  },
+  {
+    "name": "record-pattern-copy-bind",
+    "source": "struct Reading {\n    count: u64,\n    ratio: f32,\n    letter: char,\n    ok: bool\n}\nfn main() {\n    r := Reading { count: 3, ratio: 1.5, letter: 'g', ok: true };\n    match r {\n        Reading { count, ratio: other, letter, ok } => {\n            println(\"{} {} {} {}\", count, other, letter, ok);\n        }\n    }\n}\n",
+    "stdout": "3 1.5 g true\n"
+  },
+  {
+    "name": "record-pattern-move-bind",
+    "source": "struct Message {\n    body: u8[],\n    label: u64\n}\nfn take(body: u8[]) -> u64 {\n    return body.len();\n}\nfn main() {\n    m := Message { body: u8[1, 2, 3], label: 7 };\n    match m {\n        Message { body, label } => {\n            println(\"{} {}\", take(body), label);\n        }\n    }\n}\n",
+    "stdout": "3 7\n",
+    "note": "A moved scrutinee gives owned fields away: `body` is consumed by take, and the record's own storage is freed when the pattern binds."
+  },
+  {
+    "name": "record-pattern-shared-reference",
+    "source": "struct Point {\n    x: u64,\n    tags: u8[]\n}\nfn width<a>(p: (&a Point)) -> u64 {\n    match p {\n        Point { x, tags } => {\n            return x + tags.len();\n        }\n    }\n}\nfn main() {\n    p := Point { x: 4, tags: u8[1, 2] };\n    println(\"{}\", width(&p));\n    println(\"{}\", p.tags.len());\n}\n",
+    "stdout": "6\n2\n",
+    "note": "`match &p` binds owned fields as shared references, so width reads tags without taking the caller's record."
+  },
+  {
+    "name": "record-pattern-mutable-reference",
+    "source": "struct Point {\n    x: u64,\n    tags: u8[]\n}\nfn grow<a>(p: (&a mut Point)) {\n    match p {\n        Point { tags, .. } => {\n            tags.push(3);\n        }\n    }\n}\nfn main() {\n    mut p = Point { x: 1, tags: u8[9] };\n    grow(&mut p);\n    match p {\n        Point { x, tags } => {\n            println(\"{} {}\", x, tags.len());\n        }\n    }\n}\n",
+    "stdout": "1 2\n",
+    "note": "`match &mut p` binds owned fields exclusively: tags.push writes through the reference and the arm's loan ends with the match."
+  },
+  {
+    "name": "record-pattern-rest",
+    "source": "struct Stats {\n    low: i32,\n    high: i32,\n    tags: u8[]\n}\nfn peak(s: Stats) -> i32 {\n    match s {\n        Stats { high, .. } => {\n            return high;\n        }\n    }\n}\nfn main() {\n    s := Stats { low: -3, high: 30, tags: u8[1] };\n    println(\"{}\", peak(s));\n}\n",
+    "stdout": "30\n",
+    "note": "`..` leaves `low` and the owned `tags` out of the pattern; both are dropped with the record's storage."
+  },
+  {
+    "name": "record-pattern-catch-all-after",
+    "source": "struct Point {\n    x: u64,\n    y: u64\n}\nfn main() {\n    p := Point { x: 1, y: 2 };\n    match p {\n        Point { x, y } => {\n            println(\"{} {}\", x, y);\n        },\n        _ => {\n            println(\"unreachable\");\n        }\n    }\n    println(\"done\");\n}\n",
+    "stdout": "1 2\ndone\n",
+    "note": "A record arm matches every value, so a following `_` arm is never taken; it is still checked and does not disturb the statement's cleanup."
+  },
+  {
+    "name": "record-pattern-unknown-field",
+    "source": "struct Point {\n    x: u64,\n    y: u64\n}\nfn main() {\n    p := Point { x: 1, y: 2 };\n    match p {\n        Point { x, z } => {\n            println(\"{}\", x);\n        }\n    }\n}\n",
+    "reject": true,
+    "diagnostic": "unknown field in record pattern: z"
+  },
+  {
+    "name": "record-pattern-missing-field",
+    "source": "struct Point {\n    x: u64,\n    y: u64\n}\nfn main() {\n    p := Point { x: 1, y: 2 };\n    match p {\n        Point { x } => {\n            println(\"{}\", x);\n        }\n    }\n}\n",
+    "reject": true,
+    "diagnostic": "record pattern is missing field: y"
+  },
+  {
+    "name": "record-pattern-second-record-arm",
+    "source": "struct Point {\n    x: u64,\n    y: u64\n}\nfn main() {\n    p := Point { x: 1, y: 2 };\n    match p {\n        Point { x, y } => {\n            println(\"{} {}\", x, y);\n        },\n        Point { y, x } => {\n            println(\"{} {}\", y, x);\n        }\n    }\n}\n",
+    "reject": true,
+    "diagnostic": "a record pattern must be the only pattern arm"
   }
 ]
