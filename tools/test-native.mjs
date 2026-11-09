@@ -71,7 +71,8 @@ for (const test of cases) {
     writeFileSync(assembly, 'prior valid artifact');
     const numeric = [...(test.defaultU64 === false ? [] : ['--default-u64']), ...(typedRefs ? ['--typed-refs'] : [])];
     const result = execute(compiler, [...numeric, '--target', target, assembly, ...files, runtime, osRuntime]);
-    assert.notEqual(result.status, 0, `${test.name}: unsafe/invalid program was accepted`);
+    assert.equal(result.signal, null, `${test.name}: compiler crashed (${result.signal}): ${result.stdout}${result.stderr}`);
+    assert.equal(result.status, 1, `${test.name}: a rejected program must exit 1: ${result.stdout}${result.stderr}`);
     if (test.diagnostic) assert.ok(`${result.stdout}${result.stderr}`.includes(test.diagnostic), `${test.name}: expected diagnostic ${test.diagnostic}: ${result.stdout}${result.stderr}`);
     assert.equal(readFileSync(assembly, 'utf8'), 'prior valid artifact', `${test.name}: invalid program overwrote prior output`);
   } else {

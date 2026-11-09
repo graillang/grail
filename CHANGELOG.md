@@ -8,6 +8,15 @@
   current syntax (`data[:]`/`&data` instead of `view(data)`, direct writes through references, `bool` instead of
   `u64` flags); new side-by-side examples for typed slices and stable sorting with a closure; stale "preview" notes
   replaced by an accurate list of what is not implemented yet.
+- A block that does not start with `{` (such as a brace-less `match` arm) is reported as
+  "expected { to start a block"; the compiler used to crash on an arithmetic underflow.
+- `for item in items` consumes vectors of owned elements in default-u64 mode too, including
+  temporary vectors. Each iteration owns its element; early exits clean up the remainder.
+  Borrow with `&items` to preserve the vector. Previously this worked only outside default-u64 mode.
+
+- A rejected program makes the compiler exit with status 1 instead of aborting (which dumped core).
+- An `impl` whose method signature does not match its interface is reported at that method; the
+  error used to point at the end of the last input file (often `os-linux.grl`).
 - Abundance port cleanup: the cluster builder and `.abgeo` reader use the float methods, `wrapping_u32`/`wrapping_u8`,
   `vecs::insert_sorted` and `vecs::sort_by_key` instead of hand-written helpers, and `!x` instead of `x == false`; the
   `.abgeo` test builds its lines with `format` and parses with `strings::split`/`parse_num`. Output unchanged.

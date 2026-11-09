@@ -1042,7 +1042,7 @@
     "name": "interface-wrong-implementation",
     "source": "interface Value{fn value<a>(x:(&a Self))->u64;}impl Value for u64{fn value<a>(x:(&a Self))->u8[]{return u8[];}}fn main(){}",
     "reject": true,
-    "diagnostic": "type mismatch"
+    "diagnostic": "method signature does not match the interface"
   },
   {
     "name": "interface-missing-method",
@@ -1102,7 +1102,7 @@
     "name": "interface-return-origin-mismatch",
     "source": "interface Pick{fn pick<a,b,c>(x:&a [u8],y:&b [u8],self:(&c Self))->&a [u8];}impl Pick for u64{fn pick<a,b,c>(x:&a [u8],y:&b [u8],self:(&c Self))->&b [u8]{return y;}}fn main(){}",
     "reject": true,
-    "diagnostic": "type mismatch"
+    "diagnostic": "method signature does not match the interface"
   },
   {
     "name": "interface-owned-argument-moved",
@@ -1652,12 +1652,6 @@
       "compiler/tests/iteration.grl"
     ],
     "stdout": "42\n"
-  },
-  {
-    "name": "for-in-non-scalar-rejected",
-    "source": "fn main(){v:=u8[][u8[1]];for x in v{}}",
-    "reject": true,
-    "diagnostic": "needs &v"
   },
   {
     "name": "for-in-move-collection-rejected",
@@ -2408,12 +2402,6 @@
     "source": "struct P{x:u64}fn main(){mut v=P[P{x:1}];for p in &v{v.push(P{x:2});}}",
     "reject": true,
     "diagnostic": "conflicts with live borrow"
-  },
-  {
-    "name": "for-owned-non-scalar-rejected",
-    "source": "fn main(){v:=u8[][u8[1]];for w in v{}}",
-    "reject": true,
-    "diagnostic": "needs &v"
   },
   {
     "name": "for-shared-element-mutation-rejected",
@@ -4544,5 +4532,59 @@
     "source": "fn main() {\n    v := u64[1, 2, 3];\n    want := u64[2, 3];\n    println(v[1:] == want);\n    println(want == v[1:]);\n}\n",
     "stdout": "true\ntrue\n",
     "status": 0
+  },
+  {
+    "name": "interface-signature-mismatch-located",
+    "source": "use hash;\nstruct Key {\n    number: u64\n}\nimpl hash::Equal for Key {\n    fn equal<a, b>(left: (&a Self), right: (&b Self)) -> u64 {\n        return left.number == right.number;\n    }\n}\nfn main() {\n    a := Key { number: 1 };\n    println(\"{}\", hash::equal(&a, &a));\n}\n",
+    "reject": true,
+    "diagnostic": "input.grl:6:5: method signature does not match the interface",
+    "modules": [
+      "lib/hash.grl",
+      "lib/core.grl"
+    ]
+  },
+  {
+    "name": "compile-error-does-not-abort",
+    "source": "fn ok(x: u64) -> bool { return x > 1; }\nfn main() { if ok!(3) { println(\"y\"); } }\n",
+    "reject": true,
+    "diagnostic": "unwrap/propagate requires enum"
+  },
+  {
+    "name": "for-owned-elements",
+    "source": "struct Item { name: string, data: u64[] }\nfn main() {\n    items := Item[Item { name: \"one\", data: u64[1] }, Item { name: \"two\", data: u64[2, 3] }];\n    for item in items {\n        label := item.name;\n        println(\"{} {}\", label, item.data.len());\n    }\n    for text in string[\"alpha\".text(), \"beta\".text()] {\n        println(\"{}\", text);\n    }\n    mut sum = 0;\n    for data in u64[][u64[7], u64[8], u64[9]] {\n        sum += data[0];\n        if data[0] == 7 { continue; }\n        break;\n    }\n    println(sum);\n}\n",
+    "stdout": "one 1\ntwo 2\nalpha\nbeta\n15\n"
+  },
+  {
+    "name": "for-owned-return-element",
+    "source": "fn take_first(values: u64[][]) -> u64[] {\n    for value in values { return value; }\n    return u64[];\n}\nfn main() {\n    v := take_first(u64[][u64[4, 5], u64[6]]);\n    println(\"{}\", v);\n}\n",
+    "stdout": "[4, 5]\n"
+  },
+  {
+    "name": "for-owned-borrow-preserves-vector",
+    "source": "fn main() {\n    values := u64[][u64[1], u64[2, 3]];\n    for value in &values { println(value.len()); }\n    println(values.len());\n}\n",
+    "stdout": "1\n2\n2\n"
+  },
+  {
+    "name": "for-owned-use-after-loop",
+    "source": "fn main() {\n    values := u64[][u64[1]];\n    for value in values { println(value.len()); }\n    println(values.len());\n}\n",
+    "reject": true,
+    "diagnostic": "use of moved"
+  },
+  {
+    "name": "for-owned-element-use-after-move",
+    "source": "fn take(v:u64[]){} fn main(){values:=u64[][u64[1]];for value in values{take(value);println(value.len());}}",
+    "reject": true,
+    "diagnostic": "use of moved"
+  },
+  {
+    "name": "for-owned-grow-consumed-vector",
+    "source": "fn main(){mut values=u64[][u64[1]];for value in values{values.push(u64[2]);}}",
+    "reject": true,
+    "diagnostic": "use of moved"
+  },
+  {
+    "name": "for-owned-empty-and-nested",
+    "source": "fn count<T>(values:T[])->u64{mut n=0;for value in values{drop(value);n+=1;}return n;} fn main(){empty:=u64[][];println(count(empty));mut n=0;for group in u64[][][u64[][u64[1],u64[2]],u64[][u64[3]]]{for values in group{n+=values.len();}}println(n);println(count(string[\"a\".text(),\"b\".text()]));}",
+    "stdout": "0\n3\n2\n"
   }
 ]

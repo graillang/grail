@@ -17,5 +17,10 @@ would consume the same outer value on repeated iterations is rejected.
 `for value in values` copies scalar elements; `for value in &values` borrows each element, which a
 vector of owners needs, and `for value in &mut values` lets the body change them in place. A
 temporary works the same way: `for part in &name.split(' ')`.
+`for value in values` moves owned elements out of the vector, one at a time; after the loop the
+vector has been consumed. A temporary works too: `for part in name.split(' ')`. `break`, `continue`
+and `return` drop any unconsumed elements and loop-local owners exactly once. Use `for value in
+&values` to borrow elements and keep the vector, or `for value in &mut values` to edit them.
+Numeric and byte elements retain copy iteration in the default-u64 mode.
 
 **Try it:** remove the `continue` and predict the new total.
