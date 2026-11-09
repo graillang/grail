@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Borrows made to pass arguments end once the value is computed (when it holds no borrow itself):
+  `b.words[i] = f(&b)` and `M { flags: word(&bytes, 0), bytes: bytes }` compile, as in Rust. A value
+  that does hold the borrow still keeps it alive.
 - `==`/`!=` compare vectors and slices of numbers, bool and char by length and elements (floats by value:
   `-0.0 == 0.0`, NaN unequal); before, only record fields of vector type could be compared.
 - Typed slices: `&[T]` and `&mut [T]` for every element type (`v[a: b]`, `&mut v[a: b]`, open bounds,

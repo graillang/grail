@@ -8380,7 +8380,11 @@ fn record<a>(c: (&a mut C), d: u64, explicit: u64) -> Val {
             mut v = val(0, 0);
             // Point { x, y } is shorthand for Point { x: x, y: y }.
             if has_colon {
+                field_mark := c.resources.len();
                 v = expr_expected(&mut c, 0, context);
+                if (c.raw == 0) & (contains_borrow(&mut c, v.ty, 0) == 0) {
+                    end_temporaries(&mut c, field_mark, v.t);
+                }
             } else {
                 local := find_local(&mut c, view(f));
                 if local == 0 {
@@ -13752,6 +13756,26 @@ fn collection_literal<a>(c: (&a mut C), ty: u64, bytes: u64) -> Val {
     return val(slot, ty);
 }
 // `&place` and `&mut place` create typed references; indexing still returns element refs.
+// Ends the non-owning temporaries created since `mark` (views and references made to pass
+// arguments), except `keep`. Called once a value that holds no borrow has been computed, so later
+// parts of the same statement may use what those temporaries borrowed: an assignment's place after
+// its right side (`b.words[i] = f(&b)`), a record field after an earlier field (`M { n: f(&x), x }`),
+// a loop body after its count. They own nothing, so no code is emitted.
+fn end_temporaries<a>(c: (&a mut C), mark: u64, keep: u64) -> unit {
+    mut r = c.resources.len();
+    while mark < r {
+        r = r - 1;
+        info := &c.resources[r];
+        flag := info.flag;
+        slot := info.slot;
+        if (flag == 0) & (slot != keep) & (is_local_slot(&mut c, slot) == 0) {
+            release(&mut c, r);
+        }
+    }
+    close_loans(&mut c);
+    expire_locals(&mut c);
+    return ();
+}
 fn reference_borrow<a>(c: (&a mut C), write: u64) -> Val {
     if c.raw == 0 {
         // `&s` / `&mut s` on a slice binding reborrows the slice (Rust's implicit reborrow): a slice
@@ -16843,8 +16867,12 @@ fn index_assignment<a>(c: (&a mut C)) -> unit {
     operator := kind_at(&mut c, oppos);
     exchange(&mut c.pos, oppos + 1);
     vstart := c.pos;
+    rhs_mark := c.resources.len();
     mut v = expr(&mut c, 0);
     vend := c.pos;
+    if (c.raw == 0) & (contains_borrow(&mut c, v.ty, 0) == 0) {
+        end_temporaries(&mut c, rhs_mark, v.t);
+    }
     expect(&mut c, view(";"));
     after := c.pos;
     ls := c.lit_start;
@@ -17813,18 +17841,7 @@ fn statement<a>(c: (&a mut C)) -> unit {
             // A count bound is read once (Go semantics): the temporary views it borrowed through
             // (`z.comps[n].v`) end now, so the body may borrow `z` mutably. Only non-owning
             // temporaries are released; they emit no code.
-            mut r = c.resources.len();
-            while loopbase < r {
-                r = r - 1;
-                info := &c.resources[r];
-                flag := info.flag;
-                slot := info.slot;
-                if (flag == 0) & (slot != v.t) & (is_local_slot(&mut c, slot) == 0) {
-                    release(&mut c, r);
-                }
-            }
-            close_loans(&mut c);
-            expire_locals(&mut c);
+            end_temporaries(&mut c, loopbase, v.t);
         }
         // `for i in a..b` counts from a up to (not including) b.
         mut range = 0;

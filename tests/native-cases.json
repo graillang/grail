@@ -4293,5 +4293,22 @@
     "source": "fn main() {\n    a := u64[1, 2];\n    b := u64[1, 3];\n    println(\"{} {} {}\", a == b, a != b, a[: 1] == b[: 1]);\n    c := f32[1.0, -0.0];\n    d := f32[1.0, 0.0];\n    e := f64[0.5];\n    println(\"{} {}\", c == d, e == f64[0.5]);\n    n := i32[-1, 5];\n    m := i32[-1, 6];\n    println(\"{} {}\", n == m, n[: 1] == m[: 1]);\n}\n",
     "stdout": "false true true\ntrue true\nfalse true\n",
     "status": 0
+  },
+  {
+    "name": "borrow-ends-before-place",
+    "note": "an assignment's right side and an earlier record field end their argument borrows before the place is written or the value moved",
+    "source": "struct M { flags: u64, bytes: u8[] }\nstruct C { words: u64[] }\nstruct B { clusters: C[], k: u64 }\nfn word<a>(b: &a [u8], at: u64) -> u64 { return u64(b[at]); }\nfn sum<a>(v: (&a u64[])) -> u64 { mut s = 0; for x in v { s += *x; } return s; }\nfn f<a>(b: (&a B), x: u64) -> u64 { return b.k + x; }\nfn main() {\n    mut v = u64[1, 2, 3];\n    v[0] = sum(&v);\n    bytes := u8[7, 9];\n    m := M { flags: word(&bytes, 1), bytes: bytes };\n    mut b = B { clusters: C[C { words: u64[1, 2] }], k: 10 };\n    b.clusters[0].words[1] = f(&b, b.clusters[0].words[1]);\n    println(\"{} {} {} {}\", v, m.flags, m.bytes.len(), b.clusters[0].words[1]);\n}\n",
+    "stdout": "[6, 2, 3] 9 2 12\n",
+    "status": 0
+  },
+  {
+    "name": "borrow-held-by-field-blocks-move",
+    "source": "struct H<a> { r: (&a u8[]), x: u8[] }\nfn main() {\n    x := u8[1];\n    h := H { r: &x, x: x };\n    println(\"{}\", h.x.len());\n}\n",
+    "reject": true
+  },
+  {
+    "name": "borrow-used-after-write-rejected",
+    "source": "fn first<a>(v: (&a u64[])) -> (&a u64) { return &v[0]; }\nfn main() {\n    mut v = u64[1, 2];\n    r := first(&v);\n    v[1] = *r;\n    println(\"{} {}\", v, *r);\n}\n",
+    "reject": true
   }
 ]
