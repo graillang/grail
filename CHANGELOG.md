@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- `&mut z.comps[i].data` and `&grid[y][x]` borrow the whole accessor chain; the borrow used to
+  stop after the first index, so the following field was read as a value (a type mismatch).
+
 - Dereference is `*r` and store-through is `*r = v` / `*r += v`, as in C, Rust, Go and Zig. Reading
   copies plain values and refuses owners ("use exchange"); `*r = v` drops the old value, and
   `exchange(r, v)` remains the way to move an owned value out. The `load(r)` builtin is replaced

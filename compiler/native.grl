@@ -13398,10 +13398,47 @@ fn reference_borrow<a>(c: (&a mut C), write: u64) -> Val {
         return borrow_temporary(&mut c, write);
     }
     mut v = place(&mut c, write);
-    if is(&mut c, view("[")) {
-        v = index_view(&mut c, v, 1 + write);
+    // `&mut cs[i].data`, `&grid[y][x]`: the rest of the accessor chain is borrowed too.
+    stop := borrow_chain_end(&mut c);
+    if stop != c.pos {
+        v = chain_walk_mode(&mut c, v, stop, write);
     }
     return v;
+}
+// From c.pos: the end of a run of `[...]` groups and `.field` accessors (stopping before a
+// method call `.m(`).
+fn borrow_chain_end<a>(c: (&a mut C)) -> u64 {
+    mut e = c.pos;
+    while true {
+        k := kind_at(&mut c, e);
+        if (k == 46) & (kind_at(&mut c, e + 1) == 1) & (kind_at(&mut c, e + 2) != 40) {
+            e = e + 2;
+            continue;
+        }
+        if k == 91 {
+            mut depth = 0;
+            while true {
+                kk := kind_at(&mut c, e);
+                if (kk == 0) + (kk == 59) {
+                    return e;
+                }
+                if kk == 91 {
+                    depth = depth + 1;
+                }
+                if kk == 93 {
+                    depth = depth - 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                e = e + 1;
+            }
+            e = e + 1;
+            continue;
+        }
+        break;
+    }
+    return e;
 }
 // Prefix byte-view borrowing binds tighter than binary operators.
 fn view_borrow<a>(c: (&a mut C)) -> Val {
@@ -16025,10 +16062,14 @@ fn statement_builtin<a, b>(c: (&a mut C), name: &b [u8]) -> u64 {
 // `[i]` and `.f` run yields a mutable reference to the element or field, so `v[i][j] = x` and
 // `v[i].f = x` reach the final store through ordinary borrows.
 fn chain_walk<a>(c: (&a mut C), base: Val, stop: u64) -> Val {
+    return chain_walk_mode(&mut c, base, stop, 1);
+}
+// chain_walk with a borrow mode: write = 1 borrows each step mutably, 0 shares it.
+fn chain_walk_mode<a>(c: (&a mut C), base: Val, stop: u64, write: u64) -> Val {
     mut v = base;
     while c.pos < stop {
         if kind(&mut c) == 91 {
-            v = index_view(&mut c, v, 2);
+            v = index_view(&mut c, v, 1 + write);
             continue;
         }
         if kind(&mut c) == 46 {
@@ -16036,12 +16077,12 @@ fn chain_walk<a>(c: (&a mut C), base: Val, stop: u64) -> Val {
             while (kind_at(&mut c, q) == 46) & (kind_at(&mut c, q + 1) == 1) & (q < stop) {
                 q += 2;
             }
-            r := field_path(&mut c, v.t, v.ty, 2);
+            r := field_path(&mut c, v.t, v.ty, 1 + write);
             target := target_of(&mut c, r.t);
             res := resource(&mut c, r.t);
             info := &c.resources[res - 1];
             owner := info.base - 1;
-            v = borrow_reference(&mut c, r.t, r.ty, owner, target, 1);
+            v = borrow_reference(&mut c, r.t, r.ty, owner, target, write);
             continue;
         }
         fail(&mut c, view("expected [index] or .field in assignment target"));
