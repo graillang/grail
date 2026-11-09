@@ -10,469 +10,1251 @@ module json;
 // keys are an error unless `Options.allow_duplicate_keys`, which keeps the first position and
 // the last value. Nesting deeper than `Options.max_depth` (default 128) arrays/objects is an
 // error. Every failure is an `Error` value with a byte offset; malformed input never aborts.
-pub enum Value{Null,Bool(bool),Int(i64),Float(f64),Str(string),Array(Value[]),Object(Member[])}
-pub struct Member{key:string,value:Value}
-pub enum ErrorKind{UnexpectedEnd,UnexpectedByte,InvalidNumber,NumberOutOfRange,InvalidEscape,LoneSurrogate,
-    ControlCharacter,InvalidUtf8,DuplicateKey,TooDeep,TrailingData}
-pub struct Error{kind:ErrorKind,offset:u64}
-pub struct Options{max_depth:u64,allow_duplicate_keys:bool}
-struct Cursor{pos:u64,depth:u64,max_depth:u64,allow_duplicate_keys:bool}
+pub enum Value {
+    Null,
+    Bool(bool),
+    Int(i64),
+    Float(f64),
+    Str(string),
+    Array(Value[]),
+    Object(Member[])
+}
+pub struct Member {
+    key: string,
+    value: Value
+}
+pub enum ErrorKind {
+    UnexpectedEnd,
+    UnexpectedByte,
+    InvalidNumber,
+    NumberOutOfRange,
+    InvalidEscape,
+    LoneSurrogate,
+    ControlCharacter,
+    InvalidUtf8,
+    DuplicateKey,
+    TooDeep,
+    TrailingData
+}
+pub struct Error {
+    kind: ErrorKind,
+    offset: u64
+}
+pub struct Options {
+    max_depth: u64,
+    allow_duplicate_keys: bool
+}
+struct Cursor {
+    pos: u64,
+    depth: u64,
+    max_depth: u64,
+    allow_duplicate_keys: bool
+}
 
-pub fn default_options()->Options{return Options{max_depth:128u64,allow_duplicate_keys:false};}
-pub fn parse<a>(text:&a [u8])->Value |? Error{return parse_with(text,default_options());}
-pub fn parse_with<a>(text:&a [u8],options:Options)->Value |? Error{
-    mut cur=Cursor{pos:0u64,depth:0u64,max_depth:options.max_depth,allow_duplicate_keys:options.allow_duplicate_keys};
-    value:=parse_value(&text,&mut cur)?;
-    skip_ws(&text,&mut cur);
-    if cur.pos<text.len(){return Error{kind:ErrorKind::TrailingData,offset:cur.pos};}
+pub fn default_options() -> Options {
+    return Options { max_depth: 128u64, allow_duplicate_keys: false };
+}
+pub fn parse<a>(text: &a [u8]) -> Value |? Error {
+    return parse_with(text, default_options());
+}
+pub fn parse_with<a>(text: &a [u8], options: Options) -> Value |? Error {
+    mut cur = Cursor {
+        pos: 0u64,
+        depth: 0u64,
+        max_depth: options.max_depth,
+        allow_duplicate_keys: options.allow_duplicate_keys,
+    };
+    value := parse_value(&text, &mut cur)?;
+    skip_ws(&text, &mut cur);
+    if cur.pos < text.len() {
+        return Error { kind: ErrorKind::TrailingData, offset: cur.pos };
+    }
     return value;
 }
 
-impl ErrorKind{
-    pub fn show<a>(self:(&a ErrorKind))->string{
-        match self{
-            UnexpectedEnd=>{return "unexpected end of input".text();},UnexpectedByte=>{return "unexpected byte".text();},
-            InvalidNumber=>{return "invalid number".text();},NumberOutOfRange=>{return "number out of range".text();},
-            InvalidEscape=>{return "invalid escape".text();},LoneSurrogate=>{return "lone surrogate escape".text();},
-            ControlCharacter=>{return "control character in string".text();},InvalidUtf8=>{return "invalid UTF-8".text();},
-            DuplicateKey=>{return "duplicate key".text();},TooDeep=>{return "nesting too deep".text();},
-            TrailingData=>{return "trailing data after value".text();}
+impl ErrorKind {
+    pub fn show<a>(self: (&a ErrorKind)) -> string {
+        match self {
+            UnexpectedEnd => {
+                return "unexpected end of input".text();
+            },
+            UnexpectedByte => {
+                return "unexpected byte".text();
+            },
+            InvalidNumber => {
+                return "invalid number".text();
+            },
+            NumberOutOfRange => {
+                return "number out of range".text();
+            },
+            InvalidEscape => {
+                return "invalid escape".text();
+            },
+            LoneSurrogate => {
+                return "lone surrogate escape".text();
+            },
+            ControlCharacter => {
+                return "control character in string".text();
+            },
+            InvalidUtf8 => {
+                return "invalid UTF-8".text();
+            },
+            DuplicateKey => {
+                return "duplicate key".text();
+            },
+            TooDeep => {
+                return "nesting too deep".text();
+            },
+            TrailingData => {
+                return "trailing data after value".text();
+            }
         }
     }
 }
-impl Error{
-    pub fn show<a>(self:(&a Error))->string{return format("json: {} at byte {}",self.kind.show(),self.offset);}
+impl Error {
+    pub fn show<a>(self: (&a Error)) -> string {
+        return format("json: {} at byte {}", self.kind.show(), self.offset);
+    }
 }
 
-fn error(kind:ErrorKind,offset:u64)->Error{return Error{kind:kind,offset:offset};}
+fn error(kind: ErrorKind, offset: u64) -> Error {
+    return Error { kind: kind, offset: offset };
+}
 // The error for a missing or wrong byte at `at`: end of input or an unexpected byte.
-fn wrong<a>(text:&a [u8],at:u64)->Error{
-    if at>=text.len(){return error(ErrorKind::UnexpectedEnd,text.len());}return error(ErrorKind::UnexpectedByte,at);
-}
-fn skip_ws<a,b>(text:&a [u8],cur:(&b mut Cursor)){
-    n:=text.len();
-    while cur.pos<n{b:=text[cur.pos];if (b!=32)&(b!=9)&(b!=10)&(b!=13){break;}cur.pos+=1;}
-}
-fn literal<a,b,d>(text:&a [u8],cur:(&b mut Cursor),word:&d [u8])->unit |? Error{
-    for i in word.len(){at:=cur.pos+i;if at>=text.len(){return wrong(&text,at);}if text[at]!=word[i]{return wrong(&text,at);}}
-    cur.pos+=word.len();return ();
-}
-fn parse_value<a,b>(text:&a [u8],cur:(&b mut Cursor))->Value |? Error{
-    skip_ws(&text,&mut cur);
-    if cur.pos>=text.len(){return error(ErrorKind::UnexpectedEnd,cur.pos);}
-    b:=text[cur.pos];
-    if b=='{'{return parse_object(&text,&mut cur);}
-    if b=='['{return parse_array(&text,&mut cur);}
-    if b=='"'{s:=parse_string(&text,&mut cur)?;return Value::Str(s);}
-    if b=='t'{literal(&text,&mut cur,"true")?;return Value::Bool(true);}
-    if b=='f'{literal(&text,&mut cur,"false")?;return Value::Bool(false);}
-    if b=='n'{literal(&text,&mut cur,"null")?;return Value::Null;}
-    if (b=='-')|((b>='0')&(b<='9')){return parse_number(&text,&mut cur);}
-    return error(ErrorKind::UnexpectedByte,cur.pos);
-}
-fn enter<b>(cur:(&b mut Cursor))->unit |? Error{
-    if cur.depth>=cur.max_depth{return error(ErrorKind::TooDeep,cur.pos);}
-    cur.depth+=1;cur.pos+=1;return ();
-}
-fn parse_array<a,b>(text:&a [u8],cur:(&b mut Cursor))->Value |? Error{
-    enter(&mut cur)?;mut items=Value[];skip_ws(&text,&mut cur);
-    if (cur.pos<text.len())&&(text[cur.pos]==']'){cur.pos+=1;cur.depth-=1;return Value::Array(items);}
-    while true{
-        item:=parse_value(&text,&mut cur)?;items.push(item);skip_ws(&text,&mut cur);
-        if cur.pos>=text.len(){return error(ErrorKind::UnexpectedEnd,cur.pos);}
-        c:=text[cur.pos];cur.pos+=1;
-        if c==']'{break;}
-        if c!=','{return error(ErrorKind::UnexpectedByte,cur.pos-1);}
+fn wrong<a>(text: &a [u8], at: u64) -> Error {
+    if at >= text.len() {
+        return error(ErrorKind::UnexpectedEnd, text.len());
     }
-    cur.depth-=1;return Value::Array(items);
+    return error(ErrorKind::UnexpectedByte, at);
+}
+fn skip_ws<a, b>(text: &a [u8], cur: (&b mut Cursor)) {
+    n := text.len();
+    while cur.pos < n {
+        b := text[cur.pos];
+        if (b != 32) & (b != 9) & (b != 10) & (b != 13) {
+            break;
+        }
+        cur.pos += 1;
+    }
+}
+fn literal<a, b, d>(text: &a [u8], cur: (&b mut Cursor), word: &d [u8]) -> unit |? Error {
+    for i in word.len() {
+        at := cur.pos + i;
+        if at >= text.len() {
+            return wrong(&text, at);
+        }
+        if text[at] != word[i] {
+            return wrong(&text, at);
+        }
+    }
+    cur.pos += word.len();
+    return ();
+}
+fn parse_value<a, b>(text: &a [u8], cur: (&b mut Cursor)) -> Value |? Error {
+    skip_ws(&text, &mut cur);
+    if cur.pos >= text.len() {
+        return error(ErrorKind::UnexpectedEnd, cur.pos);
+    }
+    b := text[cur.pos];
+    if b == '{' {
+        return parse_object(&text, &mut cur);
+    }
+    if b == '[' {
+        return parse_array(&text, &mut cur);
+    }
+    if b == '"' {
+        s := parse_string(&text, &mut cur)?;
+        return Value::Str(s);
+    }
+    if b == 't' {
+        literal(&text, &mut cur, "true")?;
+        return Value::Bool(true);
+    }
+    if b == 'f' {
+        literal(&text, &mut cur, "false")?;
+        return Value::Bool(false);
+    }
+    if b == 'n' {
+        literal(&text, &mut cur, "null")?;
+        return Value::Null;
+    }
+    if (b == '-') | ((b >= '0') & (b <= '9')) {
+        return parse_number(&text, &mut cur);
+    }
+    return error(ErrorKind::UnexpectedByte, cur.pos);
+}
+fn enter<b>(cur: (&b mut Cursor)) -> unit |? Error {
+    if cur.depth >= cur.max_depth {
+        return error(ErrorKind::TooDeep, cur.pos);
+    }
+    cur.depth += 1;
+    cur.pos += 1;
+    return ();
+}
+fn parse_array<a, b>(text: &a [u8], cur: (&b mut Cursor)) -> Value |? Error {
+    enter(&mut cur)?;
+    mut items = Value[];
+    skip_ws(&text, &mut cur);
+    if (cur.pos < text.len()) && (text[cur.pos] == ']') {
+        cur.pos += 1;
+        cur.depth -= 1;
+        return Value::Array(items);
+    }
+    while true {
+        item := parse_value(&text, &mut cur)?;
+        items.push(item);
+        skip_ws(&text, &mut cur);
+        if cur.pos >= text.len() {
+            return error(ErrorKind::UnexpectedEnd, cur.pos);
+        }
+        c := text[cur.pos];
+        cur.pos += 1;
+        if c == ']' {
+            break;
+        }
+        if c != ',' {
+            return error(ErrorKind::UnexpectedByte, cur.pos - 1);
+        }
+    }
+    cur.depth -= 1;
+    return Value::Array(items);
 }
 // Parses `"key" : value` after optional whitespace; the key's offset is returned for errors.
-fn parse_member<a,b>(text:&a [u8],cur:(&b mut Cursor))->Member |? Error{
-    skip_ws(&text,&mut cur);
-    if (cur.pos>=text.len())||(text[cur.pos]!='"'){return wrong(&text,cur.pos);}
-    key:=parse_string(&text,&mut cur)?;skip_ws(&text,&mut cur);
-    if (cur.pos>=text.len())||(text[cur.pos]!=':'){return wrong(&text,cur.pos);}
-    cur.pos+=1;value:=parse_value(&text,&mut cur)?;
-    return Member{key:key,value:value};
+fn parse_member<a, b>(text: &a [u8], cur: (&b mut Cursor)) -> Member |? Error {
+    skip_ws(&text, &mut cur);
+    if (cur.pos >= text.len()) || (text[cur.pos] != '"') {
+        return wrong(&text, cur.pos);
+    }
+    key := parse_string(&text, &mut cur)?;
+    skip_ws(&text, &mut cur);
+    if (cur.pos >= text.len()) || (text[cur.pos] != ':') {
+        return wrong(&text, cur.pos);
+    }
+    cur.pos += 1;
+    value := parse_value(&text, &mut cur)?;
+    return Member { key: key, value: value };
 }
 // After a member: true when another follows (`,`), false at `}`.
-fn member_separator<a,b>(text:&a [u8],cur:(&b mut Cursor))->bool |? Error{
-    skip_ws(&text,&mut cur);
-    if cur.pos>=text.len(){return error(ErrorKind::UnexpectedEnd,cur.pos);}
-    c:=text[cur.pos];cur.pos+=1;
-    if c=='}'{return false;}
-    if c!=','{return error(ErrorKind::UnexpectedByte,cur.pos-1);}
+fn member_separator<a, b>(text: &a [u8], cur: (&b mut Cursor)) -> bool |? Error {
+    skip_ws(&text, &mut cur);
+    if cur.pos >= text.len() {
+        return error(ErrorKind::UnexpectedEnd, cur.pos);
+    }
+    c := text[cur.pos];
+    cur.pos += 1;
+    if c == '}' {
+        return false;
+    }
+    if c != ',' {
+        return error(ErrorKind::UnexpectedByte, cur.pos - 1);
+    }
     return true;
 }
 // Index of key among members, or members.len().
-fn find_key<a,b>(members:(&a Member[]),key:&b [u8])->u64{
-    for i in members.len(){m:=&members[i];if m.key==key{return i;}}return members.len();
+fn find_key<a, b>(members: (&a Member[]), key: &b [u8]) -> u64 {
+    for i in members.len() {
+        m := &members[i];
+        if m.key == key {
+            return i;
+        }
+    }
+    return members.len();
 }
 // Objects up to this many members check duplicates by scanning; larger ones switch to a map.
 const SCAN_LIMIT: u64 = 32;
-fn add_member<a,b,d>(members:(&a mut Member[]),member:Member,at:u64,index:u64,cur:(&d Cursor))->unit |? Error{
-    if index==members.len(){members.push(member);return ();}
-    if !cur.allow_duplicate_keys{return error(ErrorKind::DuplicateKey,at);}
-    slot:=&mut members[index];exchange(&mut slot.value,member.value);return ();
+fn add_member<a, b, d>(
+    members: (&a mut Member[]),
+    member: Member,
+    at: u64,
+    index: u64,
+    cur: (&d Cursor)
+) -> unit
+    |? Error {
+    if index == members.len() {
+        members.push(member);
+        return ();
+    }
+    if !cur.allow_duplicate_keys {
+        return error(ErrorKind::DuplicateKey, at);
+    }
+    slot := &mut members[index];
+    exchange(&mut slot.value, member.value);
+    return ();
 }
-fn parse_object<a,b>(text:&a [u8],cur:(&b mut Cursor))->Value |? Error{
-    enter(&mut cur)?;mut members=Member[];skip_ws(&text,&mut cur);
-    if (cur.pos<text.len())&&(text[cur.pos]=='}'){cur.pos+=1;cur.depth-=1;return Value::Object(members);}
-    while true{
-        skip_ws(&text,&mut cur);at:=cur.pos;member:=parse_member(&text,&mut cur)?;
-        index:=find_key(&members,&member.key);add_member(&mut members,member,at,index,&cur)?;
-        more:=member_separator(&text,&mut cur)?;
-        if !more{cur.depth-=1;return Value::Object(members);}
-        if members.len()>=SCAN_LIMIT{break;}
+fn parse_object<a, b>(text: &a [u8], cur: (&b mut Cursor)) -> Value |? Error {
+    enter(&mut cur)?;
+    mut members = Member[];
+    skip_ws(&text, &mut cur);
+    if (cur.pos < text.len()) && (text[cur.pos] == '}') {
+        cur.pos += 1;
+        cur.depth -= 1;
+        return Value::Object(members);
+    }
+    while true {
+        skip_ws(&text, &mut cur);
+        at := cur.pos;
+        member := parse_member(&text, &mut cur)?;
+        index := find_key(&members, &member.key);
+        add_member(&mut members, member, at, index, &cur)?;
+        more := member_separator(&text, &mut cur)?;
+        if !more {
+            cur.depth -= 1;
+            return Value::Object(members);
+        }
+        if members.len() >= SCAN_LIMIT {
+            break;
+        }
     }
     // Large object: index keys in a map so duplicate checks stay linear overall.
-    mut keys=[string:u64]();
-    for i in members.len(){m:=&members[i];keys.insert(m.key.text(),i);}
-    while true{
-        skip_ws(&text,&mut cur);at:=cur.pos;member:=parse_member(&text,&mut cur)?;
-        mut index=members.len();
-        if let Some(found) = keys.get(&member.key) {index=load(found);}
-        if index==members.len(){keys.insert(member.key.text(),index);}
-        add_member(&mut members,member,at,index,&cur)?;
-        more:=member_separator(&text,&mut cur)?;
-        if !more{break;}
+    mut keys = [string: u64]();
+    for i in members.len() {
+        m := &members[i];
+        keys.insert(m.key.text(), i);
     }
-    cur.depth-=1;return Value::Object(members);
+    while true {
+        skip_ws(&text, &mut cur);
+        at := cur.pos;
+        member := parse_member(&text, &mut cur)?;
+        mut index = members.len();
+        if let Some(found) = keys.get(&member.key) {
+            index = *found;
+        }
+        if index == members.len() {
+            keys.insert(member.key.text(), index);
+        }
+        add_member(&mut members, member, at, index, &cur)?;
+        more := member_separator(&text, &mut cur)?;
+        if !more {
+            break;
+        }
+    }
+    cur.depth -= 1;
+    return Value::Object(members);
 }
 
-fn hex_digit(b:u64)->u64{
-    if (b>='0')&(b<='9'){return b-'0';}if (b>='a')&(b<='f'){return b-'a'+10;}if (b>='A')&(b<='F'){return b-'A'+10;}
+fn hex_digit(b: u64) -> u64 {
+    if (b >= '0') & (b <= '9') {
+        return b - '0';
+    }
+    if (b >= 'a') & (b <= 'f') {
+        return b - 'a' + 10;
+    }
+    if (b >= 'A') & (b <= 'F') {
+        return b - 'A' + 10;
+    }
     return 16;
 }
 // Four hex digits at text[at:at+4] for the \u escape that starts at `escape`.
-fn hex4<a>(text:&a [u8],at:u64,escape:u64)->u64 |? Error{
-    mut v:u64=0;
-    for i in 4{
-        if at+i>=text.len(){return error(ErrorKind::UnexpectedEnd,text.len());}
-        d:=hex_digit(text[at+i]);if d==16{return error(ErrorKind::InvalidEscape,escape);}
-        v=v*16+d;
+fn hex4<a>(text: &a [u8], at: u64, escape: u64) -> u64 |? Error {
+    mut v: u64 = 0;
+    for i in 4 {
+        if at + i >= text.len() {
+            return error(ErrorKind::UnexpectedEnd, text.len());
+        }
+        d := hex_digit(text[at + i]);
+        if d == 16 {
+            return error(ErrorKind::InvalidEscape, escape);
+        }
+        v = v * 16 + d;
     }
     return v;
 }
-fn push_utf8<a>(out:(&a mut u8[]),v:u64){
-    if v<128{out.push(v);return ();}
-    if v<2048{out.push(192+v/64);out.push(128+v%64);return ();}
-    if v<65536{out.push(224+v/4096);out.push(128+(v/64)%64);out.push(128+v%64);return ();}
-    out.push(240+v/262144);out.push(128+(v/4096)%64);out.push(128+(v/64)%64);out.push(128+v%64);
-}
-fn continuation(b:u64)->bool{return (b>=128)&(b<=191);}
-// Width of the well-formed UTF-8 sequence starting at text[i] (a byte >= 0x80), or 0.
-fn utf8_width<a>(text:&a [u8],i:u64)->u64{
-    n:=text.len();b:=text[i];
-    if (b>=194)&(b<=223){if (i+1<n)&&continuation(text[i+1]){return 2;}return 0;}
-    if (b>=224)&(b<=239){
-        if i+2>=n{return 0;}c1:=text[i+1];
-        mut low:u64=128;mut high:u64=191;if b==224{low=160;}if b==237{high=159;}
-        if (c1>=low)&(c1<=high)&continuation(text[i+2]){return 3;}return 0;
+fn push_utf8<a>(out: (&a mut u8[]), v: u64) {
+    if v < 128 {
+        out.push(v);
+        return ();
     }
-    if (b>=240)&(b<=244){
-        if i+3>=n{return 0;}c1:=text[i+1];
-        mut low:u64=128;mut high:u64=191;if b==240{low=144;}if b==244{high=143;}
-        if (c1>=low)&(c1<=high)&continuation(text[i+2])&continuation(text[i+3]){return 4;}return 0;
+    if v < 2048 {
+        out.push(192 + v / 64);
+        out.push(128 + v % 64);
+        return ();
+    }
+    if v < 65536 {
+        out.push(224 + v / 4096);
+        out.push(128 + (v / 64) % 64);
+        out.push(128 + v % 64);
+        return ();
+    }
+    out.push(240 + v / 262144);
+    out.push(128 + (v / 4096) % 64);
+    out.push(128 + (v / 64) % 64);
+    out.push(128 + v % 64);
+}
+fn continuation(b: u64) -> bool {
+    return (b >= 128) & (b <= 191);
+}
+// Width of the well-formed UTF-8 sequence starting at text[i] (a byte >= 0x80), or 0.
+fn utf8_width<a>(text: &a [u8], i: u64) -> u64 {
+    n := text.len();
+    b := text[i];
+    if (b >= 194) & (b <= 223) {
+        if (i + 1 < n) && continuation(text[i + 1]) {
+            return 2;
+        }
+        return 0;
+    }
+    if (b >= 224) & (b <= 239) {
+        if i + 2 >= n {
+            return 0;
+        }
+        c1 := text[i + 1];
+        mut low: u64 = 128;
+        mut high: u64 = 191;
+        if b == 224 {
+            low = 160;
+        }
+        if b == 237 {
+            high = 159;
+        }
+        if (c1 >= low) & (c1 <= high) & continuation(text[i + 2]) {
+            return 3;
+        }
+        return 0;
+    }
+    if (b >= 240) & (b <= 244) {
+        if i + 3 >= n {
+            return 0;
+        }
+        c1 := text[i + 1];
+        mut low: u64 = 128;
+        mut high: u64 = 191;
+        if b == 240 {
+            low = 144;
+        }
+        if b == 244 {
+            high = 143;
+        }
+        if (c1 >= low) & (c1 <= high) & continuation(text[i + 2]) & continuation(text[i + 3]) {
+            return 4;
+        }
+        return 0;
     }
     return 0;
 }
 // The byte a one-character escape stands for, or 256 when e is not one (or is `u`).
-fn simple_escape(e:u64)->u64{
-    if (e=='"')|(e=='\\')|(e=='/'){return e;}
-    if e=='b'{return 8;}if e=='f'{return 12;}if e=='n'{return 10;}if e=='r'{return 13;}if e=='t'{return 9;}
+fn simple_escape(e: u64) -> u64 {
+    if (e == '"') | (e == '\\') | (e == '/') {
+        return e;
+    }
+    if e == 'b' {
+        return 8;
+    }
+    if e == 'f' {
+        return 12;
+    }
+    if e == 'n' {
+        return 10;
+    }
+    if e == 'r' {
+        return 13;
+    }
+    if e == 't' {
+        return 9;
+    }
     return 256;
 }
-fn parse_string<a,b>(text:&a [u8],cur:(&b mut Cursor))->string |? Error{
-    n:=text.len();mut i=cur.pos+1;mut out=u8[];
-    while true{
-        if i>=n{return error(ErrorKind::UnexpectedEnd,n);}
-        b:=text[i];
-        if b=='"'{cur.pos=i+1;return out.text();}
-        if b<32{return error(ErrorKind::ControlCharacter,i);}
-        if b<128{
-            if b!='\\'{out.push(b);i+=1;continue;}
-            escape:=i;if i+1>=n{return error(ErrorKind::UnexpectedEnd,n);}
-            e:=text[i+1];i+=2;
-            simple:=simple_escape(e);if simple<256{out.push(simple);continue;}
-            if e!='u'{return error(ErrorKind::InvalidEscape,escape);}
-            mut code=hex4(&text,i,escape)?;i+=4;
-            if (code>=56320)&(code<=57343){return error(ErrorKind::LoneSurrogate,escape);}
-            if (code>=55296)&(code<=56319){
-                if (i+1>=n)||(text[i]!='\\')||(text[i+1]!='u'){return error(ErrorKind::LoneSurrogate,escape);}
-                low:=hex4(&text,i+2,i)?;
-                if (low<56320)|(low>57343){return error(ErrorKind::LoneSurrogate,escape);}
-                code=65536+(code-55296)*1024+(low-56320);i+=6;
-            }
-            push_utf8(&mut out,code);continue;
+fn parse_string<a, b>(text: &a [u8], cur: (&b mut Cursor)) -> string |? Error {
+    n := text.len();
+    mut i = cur.pos + 1;
+    mut out = u8[];
+    while true {
+        if i >= n {
+            return error(ErrorKind::UnexpectedEnd, n);
         }
-        width:=utf8_width(&text,i);
-        if width==0{return error(ErrorKind::InvalidUtf8,i);}
-        for k in width{out.push(text[i+k]);}
-        i+=width;
+        b := text[i];
+        if b == '"' {
+            cur.pos = i + 1;
+            return out.text();
+        }
+        if b < 32 {
+            return error(ErrorKind::ControlCharacter, i);
+        }
+        if b < 128 {
+            if b != '\\' {
+                out.push(b);
+                i += 1;
+                continue;
+            }
+            escape := i;
+            if i + 1 >= n {
+                return error(ErrorKind::UnexpectedEnd, n);
+            }
+            e := text[i + 1];
+            i += 2;
+            simple := simple_escape(e);
+            if simple < 256 {
+                out.push(simple);
+                continue;
+            }
+            if e != 'u' {
+                return error(ErrorKind::InvalidEscape, escape);
+            }
+            mut code = hex4(&text, i, escape)?;
+            i += 4;
+            if (code >= 56320) & (code <= 57343) {
+                return error(ErrorKind::LoneSurrogate, escape);
+            }
+            if (code >= 55296) & (code <= 56319) {
+                if (i + 1 >= n) || (text[i] != '\\') || (text[i + 1] != 'u') {
+                    return error(ErrorKind::LoneSurrogate, escape);
+                }
+                low := hex4(&text, i + 2, i)?;
+                if (low < 56320) | (low > 57343) {
+                    return error(ErrorKind::LoneSurrogate, escape);
+                }
+                code = 65536 + (code - 55296) * 1024 + (low - 56320);
+                i += 6;
+            }
+            push_utf8(&mut out, code);
+            continue;
+        }
+        width := utf8_width(&text, i);
+        if width == 0 {
+            return error(ErrorKind::InvalidUtf8, i);
+        }
+        for k in width {
+            out.push(text[i + k]);
+        }
+        i += width;
     }
     return out.text();
 }
 
-fn is_digit<a>(text:&a [u8],i:u64)->bool{return (i<text.len())&&(text[i]>='0')&&(text[i]<='9');}
-// Error for a required digit at i: end of input or an invalid number.
-fn want_digit<a>(text:&a [u8],i:u64)->Error{
-    if i>=text.len(){return error(ErrorKind::UnexpectedEnd,i);}return error(ErrorKind::InvalidNumber,i);
+fn is_digit<a>(text: &a [u8], i: u64) -> bool {
+    return (i < text.len()) && (text[i] >= '0') && (text[i] <= '9');
 }
-fn parse_number<a,b>(text:&a [u8],cur:(&b mut Cursor))->Value |? Error{
-    start:=cur.pos;mut i=cur.pos;negative:=text[i]=='-';
-    if negative{i+=1;}
-    int_start:=i;
-    if !is_digit(&text,i){return want_digit(&text,i);}
-    if text[i]=='0'{i+=1;if is_digit(&text,i){return error(ErrorKind::InvalidNumber,i);}}
-    else{while is_digit(&text,i){i+=1;}}
-    int_end:=i;mut frac_end=i;mut integral=true;
-    if (i<text.len())&&(text[i]=='.'){
-        integral=false;i+=1;if !is_digit(&text,i){return want_digit(&text,i);}
-        while is_digit(&text,i){i+=1;}frac_end=i;
+// Error for a required digit at i: end of input or an invalid number.
+fn want_digit<a>(text: &a [u8], i: u64) -> Error {
+    if i >= text.len() {
+        return error(ErrorKind::UnexpectedEnd, i);
     }
-    mut exponent:i64=0;
-    if (i<text.len())&&((text[i]=='e')||(text[i]=='E')){
-        integral=false;i+=1;mut exp_negative=false;
-        if (i<text.len())&&((text[i]=='+')||(text[i]=='-')){exp_negative=text[i]=='-';i+=1;}
-        if !is_digit(&text,i){return want_digit(&text,i);}
+    return error(ErrorKind::InvalidNumber, i);
+}
+fn parse_number<a, b>(text: &a [u8], cur: (&b mut Cursor)) -> Value |? Error {
+    start := cur.pos;
+    mut i = cur.pos;
+    negative := text[i] == '-';
+    if negative {
+        i += 1;
+    }
+    int_start := i;
+    if !is_digit(&text, i) {
+        return want_digit(&text, i);
+    }
+    if text[i] == '0' {
+        i += 1;
+        if is_digit(&text, i) {
+            return error(ErrorKind::InvalidNumber, i);
+        }
+    } else {
+        while is_digit(&text, i) {
+            i += 1;
+        }
+    }
+    int_end := i;
+    mut frac_end = i;
+    mut integral = true;
+    if (i < text.len()) && (text[i] == '.') {
+        integral = false;
+        i += 1;
+        if !is_digit(&text, i) {
+            return want_digit(&text, i);
+        }
+        while is_digit(&text, i) {
+            i += 1;
+        }
+        frac_end = i;
+    }
+    mut exponent: i64 = 0;
+    if (i < text.len()) && ((text[i] == 'e') || (text[i] == 'E')) {
+        integral = false;
+        i += 1;
+        mut exp_negative = false;
+        if (i < text.len()) && ((text[i] == '+') || (text[i] == '-')) {
+            exp_negative = text[i] == '-';
+            i += 1;
+        }
+        if !is_digit(&text, i) {
+            return want_digit(&text, i);
+        }
         // Saturate: anything this large is out of range or zero whatever the mantissa.
-        while is_digit(&text,i){if exponent<1000000000000i64{exponent=exponent*10+i64(text[i]-'0');}i+=1;}
-        if exp_negative{exponent=-exponent;}
+        while is_digit(&text, i) {
+            if exponent < 1000000000000i64 {
+                exponent = exponent * 10 + i64(text[i] - '0');
+            }
+            i += 1;
+        }
+        if exp_negative {
+            exponent = -exponent;
+        }
     }
-    cur.pos=i;
-    if integral&&(int_end-int_start<=19){
-        mut magnitude:u64=0;for k in int_start..int_end{magnitude=magnitude*10+(text[k]-'0');}
-        if negative{
-            if magnitude==9223372036854775808{return Value::Int(-9223372036854775807i64-1);}
-            if (magnitude!=0)&(magnitude<9223372036854775808){return Value::Int(-i64(magnitude));}
-        }else{if magnitude<9223372036854775808{return Value::Int(i64(magnitude));}}
+    cur.pos = i;
+    if integral && (int_end - int_start <= 19) {
+        mut magnitude: u64 = 0;
+        for k in int_start..int_end {
+            magnitude = magnitude * 10 + (text[k] - '0');
+        }
+        if negative {
+            if magnitude == 9223372036854775808 {
+                return Value::Int(-9223372036854775807i64 - 1);
+            }
+            if (magnitude != 0) & (magnitude < 9223372036854775808) {
+                return Value::Int(-i64(magnitude));
+            }
+        } else {
+            if magnitude < 9223372036854775808 {
+                return Value::Int(i64(magnitude));
+            }
+        }
     }
     // Significant digits without leading/trailing zeros; value = digits * 10^scale.
-    mut digits=u8[];mut scale=exponent;
-    for k in int_start..int_end{d:=text[k]-'0';if (digits.len()!=0)|(d!=0){digits.push(d);}}
-    if frac_end>int_end{
-        for k in int_end+1..frac_end{d:=text[k]-'0';if (digits.len()!=0)|(d!=0){digits.push(d);}scale-=1;}
+    mut digits = u8[];
+    mut scale = exponent;
+    for k in int_start..int_end {
+        d := text[k] - '0';
+        if (digits.len() != 0) | (d != 0) {
+            digits.push(d);
+        }
     }
-    while (digits.len()!=0)&&(digits[digits.len()-1]==0){digits.pop();scale+=1;}
-    bits:=decimal_to_f64(&digits,scale);
-    if bits==INFINITY_BITS{return error(ErrorKind::NumberOutOfRange,start);}
-    mut sign:u64=0;if negative{sign=9223372036854775808;}
-    return Value::Float(f64_from_bits(bits|sign));
+    if frac_end > int_end {
+        for k in int_end + 1..frac_end {
+            d := text[k] - '0';
+            if (digits.len() != 0) | (d != 0) {
+                digits.push(d);
+            }
+            scale -= 1;
+        }
+    }
+    while (digits.len() != 0) && (digits[digits.len() - 1] == 0) {
+        digits.pop();
+        scale += 1;
+    }
+    bits := decimal_to_f64(&digits, scale);
+    if bits == INFINITY_BITS {
+        return error(ErrorKind::NumberOutOfRange, start);
+    }
+    mut sign: u64 = 0;
+    if negative {
+        sign = 9223372036854775808;
+    }
+    return Value::Float(f64_from_bits(bits | sign));
 }
 
 // Correctly rounded decimal -> binary64 conversion (round half to even).
 const INFINITY_BITS: u64 = 9218868437227405312;
 const MAX_DIGITS: u64 = 800;
-fn decimal_to_f64<a>(input:&a [u8],scale_in:i64)->u64{
-    if input.len()==0{return 0;}
+fn decimal_to_f64<a>(input: &a [u8], scale_in: i64) -> u64 {
+    if input.len() == 0 {
+        return 0;
+    }
     // Beyond 800 digits only "something nonzero follows" matters: a halfway point between two
     // doubles has at most 767 significant digits, so a sticky 1 keeps the rounding direction.
-    mut digits=u8[];mut scale=scale_in;
-    if input.len()>MAX_DIGITS{
-        for k in MAX_DIGITS-1{digits.push(input[k]);}digits.push(1u64);scale+=i64(input.len()-MAX_DIGITS);
-    }else{for d in input{digits.push(d);}}
-    n:=i64(digits.len());
+    mut digits = u8[];
+    mut scale = scale_in;
+    if input.len() > MAX_DIGITS {
+        for k in MAX_DIGITS - 1 {
+            digits.push(input[k]);
+        }
+        digits.push(1u64);
+        scale += i64(input.len() - MAX_DIGITS);
+    } else {
+        for d in input {
+            digits.push(d);
+        }
+    }
+    n := i64(digits.len());
     // value is in [10^(n+scale-1), 10^(n+scale))
-    if n+scale>310{return INFINITY_BITS;}
-    if n+scale< -324{return 0;}
-    if (n<=15)&(scale>= -22)&(scale<=22){
-        mut m:u64=0;for d in digits{m=m*10+d;}
-        mut x=f64(m);
-        if scale>=0{x=x*pow10(u64(scale));}else{x=x/pow10(u64(-scale));}
+    if n + scale > 310 {
+        return INFINITY_BITS;
+    }
+    if n + scale < -324 {
+        return 0;
+    }
+    if (n <= 15) & (scale >= -22) & (scale <= 22) {
+        mut m: u64 = 0;
+        for d in digits {
+            m = m * 10 + d;
+        }
+        mut x = f64(m);
+        if scale >= 0 {
+            x = x * pow10(u64(scale));
+        } else {
+            x = x / pow10(u64(-scale));
+        }
         return bits(x);
     }
-    mut num=big_from_digits(&digits);mut den=u64[1];
-    if scale>=0{big_mul_pow10(&mut num,u64(scale));}else{big_mul_pow10(&mut den,u64(-scale));}
+    mut num = big_from_digits(&digits);
+    mut den = u64[1];
+    if scale >= 0 {
+        big_mul_pow10(&mut num, u64(scale));
+    } else {
+        big_mul_pow10(&mut den, u64(-scale));
+    }
     // Scale so that q = floor(num*2^s/den) lies in [2^53, 2^55).
-    s:=54-(i64(big_bits(&num))-i64(big_bits(&den)));
-    if s>0{num=big_shl(&num,u64(s));}
-    if s<0{den=big_shl(&den,u64(-s));}
-    mut shifted=big_shl(&den,55);mut q:u64=0;
-    for step in 56{
-        q=q*2;
-        if big_cmp(&num,&shifted)!=0{big_sub(&mut num,&shifted);q+=1;}
+    s := 54 - (i64(big_bits(&num)) - i64(big_bits(&den)));
+    if s > 0 {
+        num = big_shl(&num, u64(s));
+    }
+    if s < 0 {
+        den = big_shl(&den, u64(-s));
+    }
+    mut shifted = big_shl(&den, 55);
+    mut q: u64 = 0;
+    for step in 56 {
+        q = q * 2;
+        if big_cmp(&num, &shifted) != 0 {
+            big_sub(&mut num, &shifted);
+            q += 1;
+        }
         big_shr1(&mut shifted);
     }
-    sticky:=num.len()!=0;
-    mut length:i64=0;mut probe=q;while probe!=0{probe=probe>>1;length+=1;}
+    sticky := num.len() != 0;
+    mut length: i64 = 0;
+    mut probe = q;
+    while probe != 0 {
+        probe = probe >> 1;
+        length += 1;
+    }
     // The kept significand has unit 2^unit; subnormals fix the unit at 2^-1074.
-    mut unit=length-1-s-52;if unit< -1074{unit=-1074;}
-    drop:=unit+s;
-    if drop>56{return 0;}
-    mut m=q>>u64(drop);rest:=q&((1<<u64(drop))-1);half:=1<<u64(drop-1);
-    if (rest>half)|((rest==half)&(sticky|((m&1)==1))){m+=1;}
-    if m==9007199254740992{m=4503599627370496;unit+=1;}
-    if m<4503599627370496{return m;}
-    if unit+52>1023{return INFINITY_BITS;}
-    return u64(unit+52+1023)*4503599627370496+(m-4503599627370496);
+    mut unit = length - 1 - s - 52;
+    if unit < -1074 {
+        unit = -1074;
+    }
+    drop := unit + s;
+    if drop > 56 {
+        return 0;
+    }
+    mut m = q >> u64(drop);
+    rest := q & ((1 << u64(drop)) - 1);
+    half := 1 << u64(drop - 1);
+    if (rest > half) | ((rest == half) & (sticky | ((m & 1) == 1))) {
+        m += 1;
+    }
+    if m == 9007199254740992 {
+        m = 4503599627370496;
+        unit += 1;
+    }
+    if m < 4503599627370496 {
+        return m;
+    }
+    if unit + 52 > 1023 {
+        return INFINITY_BITS;
+    }
+    return u64(unit + 52 + 1023) * 4503599627370496 + (m - 4503599627370496);
 }
-fn pow10(k:u64)->f64{
-    mut x=1.0;for i in k{x=x*10.0;}return x;
+fn pow10(k: u64) -> f64 {
+    mut x = 1.0;
+    for i in k {
+        x = x * 10.0;
+    }
+    return x;
 }
 // Little-endian base-2^32 naturals, trimmed (no high zero limbs; zero is empty).
-fn big_mul_add<a>(x:(&a mut u64[]),m:u64,add:u64){
-    mut carry=add;
-    for i in x.len(){v:=x[i]*m+carry;x[i]=v&4294967295;carry=v>>32;}
-    if carry!=0{x.push(carry);}
+fn big_mul_add<a>(x: (&a mut u64[]), m: u64, add: u64) {
+    mut carry = add;
+    for i in x.len() {
+        v := x[i] * m + carry;
+        x[i] = v & 4294967295;
+        carry = v >> 32;
+    }
+    if carry != 0 {
+        x.push(carry);
+    }
 }
-fn big_from_digits<a>(digits:&a [u8])->u64[]{
-    mut x=u64[];for d in digits{big_mul_add(&mut x,10,d);}big_trim(&mut x);return x;
+fn big_from_digits<a>(digits: &a [u8]) -> u64[] {
+    mut x = u64[];
+    for d in digits {
+        big_mul_add(&mut x, 10, d);
+    }
+    big_trim(&mut x);
+    return x;
 }
-fn big_mul_pow10<a>(x:(&a mut u64[]),k:u64){
-    mut left=k;while left>=9{big_mul_add(&mut x,1000000000,0);left-=9;}
-    while left>0{big_mul_add(&mut x,10,0);left-=1;}
+fn big_mul_pow10<a>(x: (&a mut u64[]), k: u64) {
+    mut left = k;
+    while left >= 9 {
+        big_mul_add(&mut x, 1000000000, 0);
+        left -= 9;
+    }
+    while left > 0 {
+        big_mul_add(&mut x, 10, 0);
+        left -= 1;
+    }
 }
-fn big_trim<a>(x:(&a mut u64[])){while (x.len()!=0)&&(x[x.len()-1]==0){x.pop();}}
-fn big_bits<a>(x:(&a u64[]))->u64{
-    if x.len()==0{return 0;}mut top=x[x.len()-1];mut b:u64=0;while top!=0{top=top>>1;b+=1;}
-    return (x.len()-1)*32+b;
+fn big_trim<a>(x: (&a mut u64[])) {
+    while (x.len() != 0) && (x[x.len() - 1] == 0) {
+        x.pop();
+    }
 }
-fn big_shl<a>(x:(&a u64[]),n:u64)->u64[]{
-    mut out=u64[];for i in n/32{out.push(0u64);}
-    bit:=n%32;mut carry:u64=0;
-    for i in x.len(){v:=(x[i]<<bit)|carry;out.push(v&4294967295);carry=v>>32;}
-    if carry!=0{out.push(carry);}
-    big_trim(&mut out);return out;
+fn big_bits<a>(x: (&a u64[])) -> u64 {
+    if x.len() == 0 {
+        return 0;
+    }
+    mut top = x[x.len() - 1];
+    mut b: u64 = 0;
+    while top != 0 {
+        top = top >> 1;
+        b += 1;
+    }
+    return (x.len() - 1) * 32 + b;
+}
+fn big_shl<a>(x: (&a u64[]), n: u64) -> u64[] {
+    mut out = u64[];
+    for i in n / 32 {
+        out.push(0u64);
+    }
+    bit := n % 32;
+    mut carry: u64 = 0;
+    for i in x.len() {
+        v := (x[i] << bit) | carry;
+        out.push(v & 4294967295);
+        carry = v >> 32;
+    }
+    if carry != 0 {
+        out.push(carry);
+    }
+    big_trim(&mut out);
+    return out;
 }
 // 0 less, 1 equal, 2 greater.
-fn big_cmp<a,b>(x:(&a u64[]),y:(&b u64[]))->u64{
-    if x.len()<y.len(){return 0;}if y.len()<x.len(){return 2;}
-    mut i=x.len();
-    while i>0{i-=1;if x[i]<y[i]{return 0;}if y[i]<x[i]{return 2;}}
+fn big_cmp<a, b>(x: (&a u64[]), y: (&b u64[])) -> u64 {
+    if x.len() < y.len() {
+        return 0;
+    }
+    if y.len() < x.len() {
+        return 2;
+    }
+    mut i = x.len();
+    while i > 0 {
+        i -= 1;
+        if x[i] < y[i] {
+            return 0;
+        }
+        if y[i] < x[i] {
+            return 2;
+        }
+    }
     return 1;
 }
-fn big_sub<a,b>(x:(&a mut u64[]),y:(&b u64[])){
-    mut borrow:u64=0;
-    for i in x.len(){
-        mut sub=borrow;if i<y.len(){sub+=y[i];}
-        v:=x[i];if v<sub{x[i]=v+4294967296-sub;borrow=1;}else{x[i]=v-sub;borrow=0;}
+fn big_sub<a, b>(x: (&a mut u64[]), y: (&b u64[])) {
+    mut borrow: u64 = 0;
+    for i in x.len() {
+        mut sub = borrow;
+        if i < y.len() {
+            sub += y[i];
+        }
+        v := x[i];
+        if v < sub {
+            x[i] = v + 4294967296 - sub;
+            borrow = 1;
+        } else {
+            x[i] = v - sub;
+            borrow = 0;
+        }
     }
     big_trim(&mut x);
 }
-fn big_shr1<a>(x:(&a mut u64[])){
-    mut carry:u64=0;mut i=x.len();
-    while i>0{i-=1;v:=x[i];x[i]=(v>>1)|(carry<<31);carry=v&1;}
+fn big_shr1<a>(x: (&a mut u64[])) {
+    mut carry: u64 = 0;
+    mut i = x.len();
+    while i > 0 {
+        i -= 1;
+        v := x[i];
+        x[i] = (v >> 1) | (carry << 31);
+        carry = v & 1;
+    }
     big_trim(&mut x);
 }
 
 // Serialization. `to_text` is compact; `to_pretty` indents by two spaces. Floats use the
 // shortest digits that read back as the same f64 and always carry a `.` or exponent so they
 // parse back as Float; non-finite floats (which `parse` never produces) are written as null.
-pub fn to_text<a>(value:(&a Value))->string{mut out=u8[];write_value(&mut out,value,0,0);return out.text();}
-pub fn to_pretty<a>(value:(&a Value))->string{mut out=u8[];write_value(&mut out,value,2,0);return out.text();}
-fn push_all<a,b>(out:(&a mut u8[]),bytes:&b [u8]){for b in bytes{out.push(b);}}
-fn newline<a>(out:(&a mut u8[]),indent:u64,level:u64){
-    if indent==0{return ();}out.push(10u64);for i in indent*level{out.push(32u64);}
+pub fn to_text<a>(value: (&a Value)) -> string {
+    mut out = u8[];
+    write_value(&mut out, value, 0, 0);
+    return out.text();
 }
-fn write_value<a,b>(out:(&a mut u8[]),value:(&b Value),indent:u64,level:u64){
-    match value{
-        Null=>{push_all(&mut out,"null");},
-        Bool(flag)=>{if flag{push_all(&mut out,"true");}else{push_all(&mut out,"false");}},
-        Int(number)=>{text:=format("{}",number);push_all(&mut out,&text);},
-        Float(number)=>{write_float(&mut out,number);},
-        Str(text)=>{write_string(&mut out,&text);},
-        Array(items)=>{
+pub fn to_pretty<a>(value: (&a Value)) -> string {
+    mut out = u8[];
+    write_value(&mut out, value, 2, 0);
+    return out.text();
+}
+fn push_all<a, b>(out: (&a mut u8[]), bytes: &b [u8]) {
+    for b in bytes {
+        out.push(b);
+    }
+}
+fn newline<a>(out: (&a mut u8[]), indent: u64, level: u64) {
+    if indent == 0 {
+        return ();
+    }
+    out.push(10u64);
+    for i in indent * level {
+        out.push(32u64);
+    }
+}
+fn write_value<a, b>(out: (&a mut u8[]), value: (&b Value), indent: u64, level: u64) {
+    match value {
+        Null => {
+            push_all(&mut out, "null");
+        },
+        Bool(flag) => {
+            if flag {
+                push_all(&mut out, "true");
+            } else {
+                push_all(&mut out, "false");
+            }
+        },
+        Int(number) => {
+            text := format("{}", number);
+            push_all(&mut out, &text);
+        },
+        Float(number) => {
+            write_float(&mut out, number);
+        },
+        Str(text) => {
+            write_string(&mut out, &text);
+        },
+        Array(items) => {
             out.push('[');
-            for i in items.len(){if i>0{out.push(',');}newline(&mut out,indent,level+1);write_value(&mut out,&items[i],indent,level+1);}
-            if items.len()!=0{newline(&mut out,indent,level);}
+            for i in items.len() {
+                if i > 0 {
+                    out.push(',');
+                }
+                newline(&mut out, indent, level + 1);
+                write_value(&mut out, &items[i], indent, level + 1);
+            }
+            if items.len() != 0 {
+                newline(&mut out, indent, level);
+            }
             out.push(']');
         },
-        Object(members)=>{
+        Object(members) => {
             out.push('{');
-            for i in members.len(){
-                if i>0{out.push(',');}newline(&mut out,indent,level+1);
-                m:=&members[i];write_string(&mut out,&m.key);out.push(':');if indent!=0{out.push(32u64);}
-                write_value(&mut out,&m.value,indent,level+1);
+            for i in members.len() {
+                if i > 0 {
+                    out.push(',');
+                }
+                newline(&mut out, indent, level + 1);
+                m := &members[i];
+                write_string(&mut out, &m.key);
+                out.push(':');
+                if indent != 0 {
+                    out.push(32u64);
+                }
+                write_value(&mut out, &m.value, indent, level + 1);
             }
-            if members.len()!=0{newline(&mut out,indent,level);}
+            if members.len() != 0 {
+                newline(&mut out, indent, level);
+            }
             out.push('}');
         }
     }
 }
-fn write_string<a,b>(out:(&a mut u8[]),text:&b [u8]){
-    hex:="0123456789abcdef";out.push('"');
-    for b in text{
-        if b=='"'{push_all(&mut out,"\\\"");}
-        else{if b=='\\'{push_all(&mut out,"\\\\");}
-        else{if b==10{push_all(&mut out,"\\n");}
-        else{if b==13{push_all(&mut out,"\\r");}
-        else{if b==9{push_all(&mut out,"\\t");}
-        else{if b==8{push_all(&mut out,"\\b");}
-        else{if b==12{push_all(&mut out,"\\f");}
-        else{if b<32{push_all(&mut out,"\\u00");out.push(hex[b>>4]);out.push(hex[b&15]);}
-        else{out.push(b);}}}}}}}}
+fn write_string<a, b>(out: (&a mut u8[]), text: &b [u8]) {
+    hex := "0123456789abcdef";
+    out.push('"');
+    for b in text {
+        if b == '"' {
+            push_all(&mut out, "\\\"");
+        } else {
+            if b == '\\' {
+                push_all(&mut out, "\\\\");
+            } else {
+                if b == 10 {
+                    push_all(&mut out, "\\n");
+                } else {
+                    if b == 13 {
+                        push_all(&mut out, "\\r");
+                    } else {
+                        if b == 9 {
+                            push_all(&mut out, "\\t");
+                        } else {
+                            if b == 8 {
+                                push_all(&mut out, "\\b");
+                            } else {
+                                if b == 12 {
+                                    push_all(&mut out, "\\f");
+                                } else {
+                                    if b < 32 {
+                                        push_all(&mut out, "\\u00");
+                                        out.push(hex[b >> 4]);
+                                        out.push(hex[b & 15]);
+                                    } else {
+                                        out.push(b);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
     out.push('"');
 }
-fn write_float<a>(out:(&a mut u8[]),x:f64){
-    if x.is_nan()|(x-x!=0.0){push_all(&mut out,"null");return ();}
-    // `{}` prints the shortest round-trip digits in positional form; re-spell them compactly.
-    text:=format("{}",x);mut i:u64=0;
-    if text[0]=='-'{out.push('-');i=1;}
-    mut digits=u8[];mut point:i64=0;mut seen_point=false;
-    while i<text.len(){
-        c:=text[i];i+=1;
-        if c=='.'{seen_point=true;continue;}
-        if (digits.len()==0)&(c=='0'){if seen_point{point-=1;}continue;}
-        digits.push(c);if !seen_point{point+=1;}
+fn write_float<a>(out: (&a mut u8[]), x: f64) {
+    if x.is_nan() | (x - x != 0.0) {
+        push_all(&mut out, "null");
+        return ();
     }
-    while (digits.len()!=0)&&(digits[digits.len()-1]=='0'){digits.pop();}
-    if digits.len()==0{push_all(&mut out,"0.0");return ();}
-    n:=i64(digits.len());
-    if (point>=n)&(point<=21){push_all(&mut out,&digits);for k in u64(point-n){out.push('0');}push_all(&mut out,".0");return ();}
-    if (point>0)&(point<=21){push_all(&mut out,&digits[:u64(point)]);out.push('.');push_all(&mut out,&digits[u64(point):]);return ();}
-    if (point<=0)&(point> -6){push_all(&mut out,"0.");for k in u64(-point){out.push('0');}push_all(&mut out,&digits);return ();}
+    // `{}` prints the shortest round-trip digits in positional form; re-spell them compactly.
+    text := format("{}", x);
+    mut i: u64 = 0;
+    if text[0] == '-' {
+        out.push('-');
+        i = 1;
+    }
+    mut digits = u8[];
+    mut point: i64 = 0;
+    mut seen_point = false;
+    while i < text.len() {
+        c := text[i];
+        i += 1;
+        if c == '.' {
+            seen_point = true;
+            continue;
+        }
+        if (digits.len() == 0) & (c == '0') {
+            if seen_point {
+                point -= 1;
+            }
+            continue;
+        }
+        digits.push(c);
+        if !seen_point {
+            point += 1;
+        }
+    }
+    while (digits.len() != 0) && (digits[digits.len() - 1] == '0') {
+        digits.pop();
+    }
+    if digits.len() == 0 {
+        push_all(&mut out, "0.0");
+        return ();
+    }
+    n := i64(digits.len());
+    if (point >= n) & (point <= 21) {
+        push_all(&mut out, &digits);
+        for k in u64(point - n) {
+            out.push('0');
+        }
+        push_all(&mut out, ".0");
+        return ();
+    }
+    if (point > 0) & (point <= 21) {
+        push_all(&mut out, &digits[: u64(point)]);
+        out.push('.');
+        push_all(&mut out, &digits[u64(point):]);
+        return ();
+    }
+    if (point <= 0) & (point > -6) {
+        push_all(&mut out, "0.");
+        for k in u64(-point) {
+            out.push('0');
+        }
+        push_all(&mut out, &digits);
+        return ();
+    }
     out.push(digits[0]);
-    if n>1{out.push('.');push_all(&mut out,&digits[1:]);}
-    e:=format("e{}",point-1);push_all(&mut out,&e);
+    if n > 1 {
+        out.push('.');
+        push_all(&mut out, &digits[1:]);
+    }
+    e := format("e{}", point - 1);
+    push_all(&mut out, &e);
 }
 
-impl Value{
-    pub fn show<a>(self:(&a Value))->string{return to_text(self);}
-    pub fn is_null<a>(self:(&a Value))->bool{match self{Null=>{return true;},_=>{return false;}}}
-    pub fn as_bool<a>(self:(&a Value))->bool?{match self{Bool(flag)=>{return Some(flag);},_=>{return None;}}}
-    pub fn as_i64<a>(self:(&a Value))->i64?{match self{Int(number)=>{return Some(number);},_=>{return None;}}}
-    // Int or Float as f64 (an Int beyond 2^53 rounds).
-    pub fn as_f64<a>(self:(&a Value))->f64?{
-        match self{Int(number)=>{return Some(f64(number));},Float(number)=>{return Some(number);},_=>{return None;}}
+impl Value {
+    pub fn show<a>(self: (&a Value)) -> string {
+        return to_text(self);
     }
-    pub fn as_str<a>(self:(&a Value))->(&a string)?{match self{Str(text)=>{return Some(text);},_=>{return None;}}}
-    pub fn as_array<a>(self:(&a Value))->(&a Value[])?{match self{Array(items)=>{return Some(items);},_=>{return None;}}}
-    pub fn as_object<a>(self:(&a Value))->(&a Member[])?{match self{Object(members)=>{return Some(members);},_=>{return None;}}}
+    pub fn is_null<a>(self: (&a Value)) -> bool {
+        match self {
+            Null => {
+                return true;
+            },
+            _ => {
+                return false;
+            }
+        }
+    }
+    pub fn as_bool<a>(self: (&a Value)) -> bool? {
+        match self {
+            Bool(flag) => {
+                return Some(flag);
+            },
+            _ => {
+                return None;
+            }
+        }
+    }
+    pub fn as_i64<a>(self: (&a Value)) -> i64? {
+        match self {
+            Int(number) => {
+                return Some(number);
+            },
+            _ => {
+                return None;
+            }
+        }
+    }
+    // Int or Float as f64 (an Int beyond 2^53 rounds).
+    pub fn as_f64<a>(self: (&a Value)) -> f64? {
+        match self {
+            Int(number) => {
+                return Some(f64(number));
+            },
+            Float(number) => {
+                return Some(number);
+            },
+            _ => {
+                return None;
+            }
+        }
+    }
+    pub fn as_str<a>(self: (&a Value)) -> (&a string)? {
+        match self {
+            Str(text) => {
+                return Some(text);
+            },
+            _ => {
+                return None;
+            }
+        }
+    }
+    pub fn as_array<a>(self: (&a Value)) -> (&a Value[])? {
+        match self {
+            Array(items) => {
+                return Some(items);
+            },
+            _ => {
+                return None;
+            }
+        }
+    }
+    pub fn as_object<a>(self: (&a Value)) -> (&a Member[])? {
+        match self {
+            Object(members) => {
+                return Some(members);
+            },
+            _ => {
+                return None;
+            }
+        }
+    }
     // Elements of an array or members of an object; 0 for scalars.
-    pub fn len<a>(self:(&a Value))->u64{match self{Array(items)=>{return items.len();},Object(members)=>{return members.len();},_=>{return 0;}}}
+    pub fn len<a>(self: (&a Value)) -> u64 {
+        match self {
+            Array(items) => {
+                return items.len();
+            },
+            Object(members) => {
+                return members.len();
+            },
+            _ => {
+                return 0;
+            }
+        }
+    }
     // Object member by key.
-    pub fn get<a,b>(self:(&a Value),key:&b [u8])->(&a Value)?{
-        match self{
-            Object(members)=>{for i in members.len(){m:=&members[i];if m.key==key{return Some(&m.value);}}return None;},
-            _=>{return None;}
+    pub fn get<a, b>(self: (&a Value), key: &b [u8]) -> (&a Value)? {
+        match self {
+            Object(members) => {
+                for i in members.len() {
+                    m := &members[i];
+                    if m.key == key {
+                        return Some(&m.value);
+                    }
+                }
+                return None;
+            },
+            _ => {
+                return None;
+            }
         }
     }
     // Array element by index.
-    pub fn at<a>(self:(&a Value),index:u64)->(&a Value)?{
-        match self{Array(items)=>{if index<items.len(){return Some(&items[index]);}return None;},_=>{return None;}}
+    pub fn at<a>(self: (&a Value), index: u64) -> (&a Value)? {
+        match self {
+            Array(items) => {
+                if index < items.len() {
+                    return Some(&items[index]);
+                }
+                return None;
+            },
+            _ => {
+                return None;
+            }
+        }
     }
 }
 // Structural equality; floats compare by bit pattern (so -0.0 != 0.0), objects in order.
-pub fn equal<a,b>(left:(&a Value),right:(&b Value))->bool{
-    match left{
-        Null=>{return right.is_null();},
-        Bool(flag)=>{if let Some(other) = right.as_bool() {return other==flag;}return false;},
-        Int(number)=>{match right{Int(other)=>{return other==number;},_=>{return false;}}},
-        Float(number)=>{match right{Float(other)=>{return bits(other)==bits(number);},_=>{return false;}}},
-        Str(text)=>{if let Some(other) = right.as_str() {return other==text;}return false;},
-        Array(items)=>{
-            if let Some(others) = right.as_array() {
-                if others.len()!=items.len(){return false;}
-                for i in items.len(){if !equal(&items[i],&others[i]){return false;}}return true;
+pub fn equal<a, b>(left: (&a Value), right: (&b Value)) -> bool {
+    match left {
+        Null => {
+            return right.is_null();
+        },
+        Bool(flag) => {
+            if let Some(other) = right.as_bool() {
+                return other == flag;
             }
             return false;
         },
-        Object(members)=>{
+        Int(number) => {
+            match right {
+                Int(other) => {
+                    return other == number;
+                },
+                _ => {
+                    return false;
+                }
+            }
+        },
+        Float(number) => {
+            match right {
+                Float(other) => {
+                    return bits(other) == bits(number);
+                },
+                _ => {
+                    return false;
+                }
+            }
+        },
+        Str(text) => {
+            if let Some(other) = right.as_str() {
+                return other == text;
+            }
+            return false;
+        },
+        Array(items) => {
+            if let Some(others) = right.as_array() {
+                if others.len() != items.len() {
+                    return false;
+                }
+                for i in items.len() {
+                    if !equal(&items[i], &others[i]) {
+                        return false;
+                    }
+                }
+                return true;
+            }
+            return false;
+        },
+        Object(members) => {
             if let Some(others) = right.as_object() {
-                if others.len()!=members.len(){return false;}
-                for i in members.len(){m:=&members[i];o:=&others[i];if m.key!=o.key{return false;}if !equal(&m.value,&o.value){return false;}}
+                if others.len() != members.len() {
+                    return false;
+                }
+                for i in members.len() {
+                    m := &members[i];
+                    o := &others[i];
+                    if m.key != o.key {
+                        return false;
+                    }
+                    if !equal(&m.value, &o.value) {
+                        return false;
+                    }
+                }
                 return true;
             }
             return false;
