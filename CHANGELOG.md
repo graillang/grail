@@ -4,10 +4,11 @@
 
 - `f32[]`, `u32[]` and `i32[]` store their elements in 4 bytes (they were 8-byte words), halving
   their memory and letting the LLVM backend use 32-bit loads, single-precision arithmetic and
-  vector lanes. Programs print the same output. Such elements, like the narrow fields of an
-  `extern "C" record` and `u8[]` bytes, can no longer be borrowed (`&mut v[i]`, `for x in &mut v`);
-  read and assign them in place. Borrowing a narrow C-record field (`&mut rec.x`) used to compile
-  and silently lose writes made through the reference; it is now an error.
+  vector lanes (matmul: 3.2x -> 1.3x of C). Programs print the same output, and every element can
+  still be borrowed (`&mut v[i]`, `for x in &mut v`, generic `&mut T`).
+- Bytes can be borrowed: `&mut buf[i]` on a `u8[]` or a mutable byte view is a `&mut u8` (it was
+  rejected). Borrowing a narrow field of an `extern "C" record` (`&mut rec.x` with `x: f32`) used to
+  compile and silently lose writes made through the reference; it now reads and writes the field.
 - New compiler intrinsics `raw_load32`/`raw_store32` (32-bit `movl` on every target, an `i32`
   load/store in LLVM); the LLVM lifter now handles `movd`, `cvtss2sd` and `cvtsd2ss`.
 

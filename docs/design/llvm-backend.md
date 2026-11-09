@@ -153,11 +153,25 @@ held as its binary64 value, integers as words), so only the element boundary mov
   32 bits for the integers; then a 32-bit store.
 
 The element width is a property of the static type, so the compiler picks the narrow runtime routines
-(`rt_push4`, `rt_fill4`, `rt_at4`, `rt_set4`, `rt_vec_copy4`, ...) the way it already picks `rt_pushb`
-for bytes; the header carries no width. Generic word routines that only move elements (`insert`,
-`remove`, `swap`, `reverse`, `truncate`) get width-parameterised forms; comparisons and `contains`
-compare decoded values, so `-0.0 == 0.0` and NaN behave as they do on words today. Nested vectors
-(`f32[][]`) are word vectors of narrow vectors, and record fields are unchanged.
+(`rt_push4`, `rt_fill4`, `rt_at4`, ...) the way it already picks `rt_pushb` for bytes; the header
+carries no width. Ordering and equality compare the 32-bit units, which order exactly as the words
+the same values occupy in a word vector.
+
+References. Every element stays borrowable (`&mut v[i]`, `for x in &mut v`, a `&mut` to a narrow
+field of an `extern "C"` record, and a byte of `u8[]`). A reference to a sub-word type (`f32`, `i32`,
+`u32`, `i16`, `u16`, `i8`, `u8`) is a pointer whose top bit (63) says how its target is stored:
+
+- clear: a word slot (a local, a Grail record field, a map value), read and written as 8 bytes, as
+  every reference was before;
+- set: narrow storage (a 4-byte element, a byte, a narrow C field), at the pointer with the bit
+  cleared, read and written with the type's width and encoding.
+
+User-space addresses have bit 63 clear on every supported target (Linux, Windows and macOS on
+x86-64, AArch64 and RISC-V 64), whatever their alignment (a byte's address may be odd, so the low
+bit is not free), and Grail never exposes a reference's address, so the bit is free. Only the three narrow places produce tagged references; every other reference is
+untagged, exactly as before. Reading or writing through a sub-word reference tests the bit (a shift,
+a `test` and a branch, which LLVM removes wherever the origin is visible). References to word types
+are never tagged and their accesses are unchanged.
 
 In the LLVM lowering a narrow load is `load float` + `fpext`, and a store is `fptrunc` + `store float`.
 LLVM then narrows `fptrunc(fmul(fpext a, fpext b))` to `fmul float` and vectorises 4-byte lanes.
