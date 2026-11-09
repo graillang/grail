@@ -17,6 +17,23 @@
   An unknown field and a field left out without `..` are reported by name, and a record arm may not
   be followed by any pattern but `_`. The book's records chapter documents the form with a
   `record-patterns` example.
+- Abundance port: the cluster builder builds canonical voxel meshes (`Source::canonical_voxel`). Cluster attributes
+  carry the raw RGBA8 grade/excavated grade channel, the quantization grid refines itself (AUTO) until every canonical
+  position and every open or non-manifold boundary survives the position codec and the decode remap, and the encoded
+  positions of a shared metadata class are locked. Previously refused.
+- Abundance port: the cluster builder trims alpha contours (`Options::alpha_trim_levels`, `alpha_trim_budget`). A masked
+  material carries its full-resolution alpha as an image (`AlphaSource::Bytes`) or a pixel provider
+  (`AlphaSource::Sample`); four-state per-triangle opacity classes produce the per-cluster alpha-test bits and remove
+  fully transparent triangles; unclassifiable cutout triangles are split 1:4 at shared edge midpoints, fully
+  transparent children dropped and T-junctions repaired, so the kept leaf cards follow their alpha shape. The C++
+  source validation for those paths is ported too (finite attributes, measured position encoding error, masked alpha
+  rules, one alpha source per material). Previously refused.
+- Abundance port parity: `abundance/tests/parity/abgeo.cpp` now also builds a canonical voxel chunk and a leaf card
+  with image alpha and pixel-provider alpha; the Grail builder matches all 681 reference lines byte for byte (was 489).
+- `bun tools/abundance-test.mjs --regenerate`: a reference may name the source program it shares (`cache` is
+  `world.cpp` run with different argv), so the `abgeo` and other references that need a source of their own no longer
+  fail on a missing `<name>.cpp`. References that link Abundance's world build tree still need that tree's headers.
+
 - A program's own `Task`, `Mutex`, `Atomic`, `Scope` or `CancelToken` type shadows the built-in generic of that name
   (`Task[...]` was a parse error). A slice compares with `==` against a vector of the same element type.
 - Book: duplicate chapters merged (numbers, bytes and text, records and vectors, views and slices); every example uses
