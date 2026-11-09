@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- `f32_bits(x)` returns the IEEE binary32 bit pattern of an `f32`, and `f32_from_bits(u)` builds an
+  `f32` from one (subnormals, infinities and NaN included). `bits(x)` on an `f32` still returns
+  the 64-bit pattern of the internally widened value, so these are the way to read and write
+  32-bit floats in binary formats.
+
 - FFI bare data pointers: `CPtr` (`const void *`) and `CMutPtr` (`void *`) parameters, results and
   extern-record fields, made with `unsafe cptr(bytes)`, `unsafe cptr_mut(&mut bytes)` and
   `cnull()`. C APIs that take lone buffer pointers (libsodium keys and outputs, Vulkan `pData`)
