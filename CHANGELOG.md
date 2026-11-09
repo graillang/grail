@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- `lib/xxhash.grl`: XXH64 (`xxhash::hash64(bytes, seed)`), identical to the reference `xxhash.h`; zstd
+  frame checksums and Abundance fixture identities use it.
+
 - LLVM backend: when every frame access in a function is a constant offset below rbp, each 8-byte
   slot becomes its own alloca, so borrowing one local no longer makes the whole frame escape and
   LLVM keeps the rest in registers. With `--backend=llvm` the benchmarks are now 1.2x (fnv, sieve),
