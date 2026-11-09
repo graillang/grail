@@ -1,7 +1,7 @@
 # LLVM backend
 
 Status: design, 2026-11-09. Approved direction: LLVM is the optimizing backend; the native
-backend stays for fast debug builds and bootstrap. The LLVM version is pinned (system 21.x).
+backend stays for fast debug builds and bootstrap. The LLVM version is pinned (system 23.x).
 
 ## Why
 
@@ -18,6 +18,16 @@ mesh, identical output): C++ `-O2` 0.027 s, Grail 6.3 s, about 230x. The optimis
   memory and bandwidth of C;
 - index arithmetic is overflow-checked and every access is bounds-checked, with nothing hoisted
   out of loops.
+
+Baseline from `tools/bench.mjs` (native backend, best of three, outputs identical to C):
+
+| benchmark | C `-O2` | Grail native | ratio |
+| --- | --- | --- | --- |
+| fnv (byte loop, wrapping multiply) | 0.682 s | 50.155 s | 73.6x |
+| matmul (256x256 `f32`) | 0.268 s | 84.363 s | 315.0x |
+| nbody (`f64`) | 0.147 s | 3.960 s | 26.9x |
+| sieve (bytes, bounds checks) | 0.805 s | 14.019 s | 17.4x |
+| sort (`u64` merge sort) | 1.207 s | 3.491 s | 2.9x |
 
 ## Where LLVM plugs in
 
