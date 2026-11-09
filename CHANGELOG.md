@@ -2,6 +2,83 @@
 
 ## Unreleased
 
+- `&mut z.comps[i].data` and `&grid[y][x]` borrow the whole accessor chain; the borrow used to
+  stop after the first index, so the following field was read as a value (a type mismatch).
+
+- Dereference is `*r` and store-through is `*r = v` / `*r += v`, as in C, Rust, Go and Zig. Reading
+  copies plain values and refuses owners ("use exchange"); `*r = v` drops the old value, and
+  `exchange(r, v)` remains the way to move an owned value out. The `load(r)` builtin is replaced
+  by `*r`; `lib/`, Borg, Abundance, the examples, the book and the tests were rewritten.
+
+- The statement builtins `write`, `drop` and `assert` apply only before `(` and when no local
+  shadows them, so a binding named `write` can be assigned (`write += 3`).
+- Statement and expression keywords (`loop`, `while`, `for`, `if`, `match`, `return`, `mut`, ...) are
+  reserved: naming a binding or parameter after one is rejected with "a keyword cannot name a binding". A binding named `loop` used to be
+  accepted, and `loop[i] = x` then sent the compiler into an infinite loop.
+
+- Byte reads (`bytes[i]`) are 0..255 words that adopt any integer type holding that range, so
+  `hexval(text[i])` with `hexval(c: u8)` works without a conversion, while `bytes[i] << 24` still
+  computes in a full word. Byte buffers and byte literals accept `u8` values.
+- Storing or pushing a value above 255 into a byte buffer now stops the program, as documented;
+  `buf[i] = v` and `buf.push(v)` used to keep only the low byte silently.
+
+- `match m.get(&k) { Some(v) => ..., None => m.insert(k, x) }` works: a borrow whose holders are
+  all dead (here the moved scrutinee's) ends before a conflicting borrow is refused, so the `None`
+  arm may modify the map; modifying it while the `Some` payload is still used is still rejected.
+- A `for` count bound is read once (Go semantics): `for y in z.comps[n].v { f(&mut z) }` no longer
+  holds a borrow of `z` for the whole loop.
+- An unknown method on text or a vector reports "unknown collection method" instead of the
+  misleading "owned storage mutation requires mut".
+
+- Functions, closures, interface methods and function types take any number of parameters; the
+  six-parameter (five for closures) limit is gone. Grail's own convention keeps five words in
+  registers and passes the rest in a record addressed by the sixth, which the callee copies into
+  its frame; C calls and callbacks keep following the platform C ABI.
+
+- A reference or view binding passed to a function by name is reborrowed instead of moved, so
+  `total(v) + total(v)` and two `bump(v)` calls through a `&mut` parameter work, as in Rust. The
+  borrow checker still rejects real conflicts (a `&mut` reborrow while a shared borrow is live).
+- A module's own function, or a callable local, named like a builtin (`load`, `join`, `view`, ...)
+  now shadows the builtin instead of failing with an unrelated error; non-callable locals do not.
+- `.copy()` works on vectors of plain values (numbers, floats, bools, handles), not only byte
+  collections; copying a vector of owners is rejected.
+- Arithmetic between untyped integer literals is an untyped constant (Go-style): `65536 + 16777216`
+  or `(1 << 20) - 1` adopts its context's type like a single literal, with the same range check.
+
+- Assignment to nested places: `v[i][j] = x`, `world.items[i].hp -= 1`, `rows[i].cells[j] += 1`
+  and any mix of indexes and fields, each step borrowed mutably for the statement. Mutating
+  method calls through an index (`rows[i].push(x)`, `m[k].push(x)`, user methods taking
+  `self: &mut`) borrow the element mutably instead of failing as a read-only access, which
+  removes the old need to `exchange` an inner vector out to push to it.
+
+- String literals decode escapes strictly: `\u{...}` (a Unicode scalar value, encoded as UTF-8)
+  now works in strings as it already did in character literals, `\xHH` is limited to `\x7F` so
+  a literal can never be invalid UTF-8, and an unknown escape such as `\q` is a compile error
+  instead of being kept as literal text.
+- `u8[]` has `.clear()` and `.truncate(n)` like other vectors (`clear` used to be a parse error).
+- `module::Type[]` and `module::Type[...]` collection literals work for another module's types.
+- In i64 mode an unsuffixed literal that does not fit `i64` (e.g. `9223372036854775808`) is a
+  compile error; it used to wrap silently to a negative value.
+- Standard-library modules are recognised by location (a file in the directory holding
+  `core.grl`) rather than a hard-coded name list, so every `lib/` module, including new ones,
+  compiles in the stdlib's own literal mode regardless of the program's mode.
+
+- `f32_bits(x)` returns the IEEE binary32 bit pattern of an `f32`, and `f32_from_bits(u)` builds an
+  `f32` from one (subnormals, infinities and NaN included). `bits(x)` on an `f32` still returns
+  the 64-bit pattern of the internally widened value, so these are the way to read and write
+  32-bit floats in binary formats.
+
+- FFI bare data pointers: `CPtr` (`const void *`) and `CMutPtr` (`void *`) parameters, results and
+  extern-record fields, made with `unsafe cptr(bytes)`, `unsafe cptr_mut(&mut bytes)` and
+  `cnull()`. C APIs that take lone buffer pointers (libsodium keys and outputs, Vulkan `pData`)
+  are now callable without a C shim. `tests/ffi/pointers.grl` runs on all three Linux targets.
+- `grail build` / `grail test` honour the compiler's `// grail-link:` requests: bare library
+  names become `-lNAME`, relative objects resolve against the entry file, and an executable that
+  links a shared library gets the platform dynamic loader and system library directories
+  (Linux), or the library inputs on the Mach-O link line. Previously the CLI linked every program
+  statically and ignored foreign libraries, so only the test harness could link C code.
+- `docs/ffi.md`: the supported-types table now lists narrow integers, floats, record results
+  and the bare pointer types, which were already supported but documented as rejected.
 - Borrow checker: a reference obtained from an unwrapped optional reference (`items := get(&v)!`)
   and used only inside one branch of an `if` no longer reports "cleanup conflicts with live loan"
   when its owner is cleaned up. The anonymous origin behind the returned reference was left

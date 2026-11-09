@@ -238,6 +238,13 @@ fn rt_pushb(s: u64, v: u64) -> u64 {
     raw_store(s + 8, n + 1);
     return 0;
 }
+// `bytes.push(v)` from user code: stops the program when v does not fit a byte.
+fn rt_pushb_checked(s: u64, v: u64) -> u64 {
+    if 255 < v {
+        rt_abort();
+    }
+    return rt_pushb(s, v);
+}
 // Grows a byte sequence's capacity to at least `need` bytes (doubling, minimum 16).
 fn rt_reserveb(s: u64, need: u64) -> u64 {
     cap := raw_load(s + 16);
@@ -351,10 +358,11 @@ fn rt_at(s: u64, i: u64) -> u64 {
     return raw_load(rt_slot(s, i));
 }
 fn rt_write(s: u64, i: u64, v: u64) -> u64 {
-    if (i < raw_load(s + 8)) == 0 {
+    // A byte store stops the program when the value does not fit a byte.
+    if ((i < raw_load(s + 8)) == 0) + (255 < v) {
         rt_abort();
     }
-    raw_putbyte(raw_load(s) + i, v & 255);
+    raw_putbyte(raw_load(s) + i, v);
     return 0;
 }
 fn rt_slice(s: u64, a: u64, b: u64) -> u64 {
@@ -403,6 +411,54 @@ fn rt_store_sized(a: u64, v: u64, width: u64) -> u64 {
     }
     return 0;
 }
+// IEEE binary32 bits of an f32 (held as the binary64 word of the same value). Every f32 value is
+// a normal or zero binary64, so the conversion is exact integer rearrangement.
+fn rt_f32_bits(w: u64) -> u64 {
+    sign := (w >> 63) << 31;
+    e := (w >> 52) & 2047;
+    m := w & 4503599627370495;
+    if e == 2047 {
+        mut frac = m >> 29;
+        if (m != 0) & (frac == 0) {
+            frac = 4194304;
+        }
+        return sign | 2139095040 | frac;
+    }
+    if e == 0 {
+        return sign;
+    }
+    if 896 < e {
+        return sign | ((e - 896) << 23) | (m >> 29);
+    }
+    // A binary32 subnormal: shift the implicit bit in.
+    shift := 897 - e;
+    return sign | ((m | 4503599627370496) >> (29 + shift));
+}
+// The f32 with the given binary32 bits, as its binary64 word.
+fn rt_f32_from_bits(u: u64) -> u64 {
+    sign := ((u >> 31) & 1) << 63;
+    e := (u >> 23) & 255;
+    m := u & 8388607;
+    if e == 255 {
+        return sign | 9218868437227405312 | (m << 29);
+    }
+    if e == 0 {
+        if m == 0 {
+            return sign;
+        }
+        mut p: u64 = 22;
+        while ((m >> p) & 1) == 0 {
+            p = p - 1;
+        }
+        frac := (m - (1 << p)) << (52 - p);
+        return sign | ((p + 874) << 52) | frac;
+    }
+    return sign | ((e + 896) << 52) | (m << 29);
+}
+// The data pointer of a byte sequence or view (no terminator check).
+fn rt_view_ptr(s: u64) -> u64 {
+    return raw_load(s);
+}
 fn rt_cstr_view(s: u64) -> u64 {
     n := raw_load(s + 8);
     if n == 0 {
@@ -425,6 +481,17 @@ fn rt_append(dst: u64, src: u64) -> u64 {
 fn rt_copy(src: u64) -> u64 {
     dst := rt_new();
     rt_append(dst, src);
+    return dst;
+}
+// A copy of a vector of plain words (elements that need no drop).
+fn rt_vec_copy(src: u64) -> u64 {
+    dst := rt_new();
+    n := raw_load(src + 8);
+    mut i = 0;
+    while i < n {
+        rt_push(dst, raw_load(raw_load(src) + i * 8));
+        i = i + 1;
+    }
     return dst;
 }
 fn rt_lit(ptr: u64, n: u64) -> u64 {

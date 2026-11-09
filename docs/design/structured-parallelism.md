@@ -6,7 +6,7 @@ Linux. It is a real multi-threaded runtime, not a sequential stand-in.
 ## `mutex<T>`
 
 ```grl
-fn add<a>(total:(&mut a num),amount:num)->num{exchange(total,load(total)+amount);return 0;}
+fn add<a>(total:(&mut a num),amount:num)->num{exchange(total,*total+amount);return 0;}
 fn main(){m:=mutex(0);m.lock_with(42,add);}
 ```
 

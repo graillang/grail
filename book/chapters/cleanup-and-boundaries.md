@@ -15,8 +15,7 @@ small slabs for reuse, while large single-object arenas are released immediately
 - The execution matrix is: Linux x86-64 (native, full compiler and runtime evidence); Linux AArch64
   and RISC-V 64 (cross-built; qemu execution only when a runner is installed); Windows x86-64 (PE32+
   images, ten test programs under Wine, not native Windows); Windows AArch64 and macOS
-  x86-64/AArch64 (static-only objects and images, not executable here). Calls support at most six
-  word parameters. A cross-built object is not platform support; only the evidence in that matrix
+  x86-64/AArch64 (static-only objects and images, not executable here). A cross-built object is not platform support; only the evidence in that matrix
   counts.
 - Not executable yet: Windows AArch64 and both macOS targets. Not implemented: D3D12 and Metal
   backends, debugger attach, and a profiler; COM remains open on `main` (a branch implementation

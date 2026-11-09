@@ -12,8 +12,8 @@ returned. Generic function items need explicit arguments when used as values (`i
 Closures can copy or move values into themselves and read those captures in their bodies; borrowed and mutable captures are rejected. The Rust example uses a plain function pointer. A function may return an owned buffer or record as well
 as a scalar; moving that result transfers responsibility for cleanup to its caller.
 
-Functions have fixed arity; general variadics are not implemented. The current native ABI
-supports at most six one-word parameters. `unit` is the no-value type,
+Functions have fixed arity and any number of parameters; general variadics are not implemented.
+`unit` is the no-value type,
 written `()` as a value; a function with no result annotation returns unit. Its closing brace supplies the normal
 return. There are no tail-expression returns: a function that produces a value uses `return`, and
 `return ();` is still available for an explicit early exit.

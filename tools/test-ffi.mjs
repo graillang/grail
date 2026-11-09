@@ -60,6 +60,10 @@ const fixtures = [
     name: 'nested_records',
     stdout: '49044\n21\n3\n-7\n100000000000\n42\n9\n77\n154\n6\n7\n42\n',
     symbols: ['c_outer_sum', 'c_outer_fill', 'c_outer_size', 'c_make_wrap'],
+    // Bare data pointers: cptr / cptr_mut / cnull, and a pointer field in an extern record.
+    name: 'pointers',
+    stdout: '10\n198\n1\n0\n60\n24\n',
+    symbols: ['c_ptr_sum', 'c_ptr_fill', 'c_is_null', 'c_buf_sum'],
   },
   {
     // A COM-shaped vtable call with seven arguments and two floats through a typed cfn slot.

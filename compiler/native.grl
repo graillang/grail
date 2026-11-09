@@ -284,6 +284,9 @@ struct C {
     bce_index: u8[],
     bce_base: u8[],
     lit_negative: u64,
+    // Span of the most recent byte read (`bytes[i]`): an untyped word known to be 0..255.
+    byte_start: u64,
+    byte_end: u64,
     flit_start: u64,
     flit_end: u64,
     flit_tok: u64,
@@ -1633,9 +1636,66 @@ fn imm<a>(c: (&a mut C), n: u64) -> u64 {
     o(&mut c, view(",%rax\n"));
     return save(&mut c);
 }
+// Grail's own calling convention passes six words in registers. A call with more arguments keeps
+// the first five in registers and passes the rest in a heap record whose address is the sixth
+// register; the callee copies them into its frame and frees the record. ABI-neutral: only
+// register moves and loads/stores through a pointer, which every target lowers.
+fn load_call_args<a, b>(c: (&a mut C), args: (&b u64[]), shift: u64) -> unit {
+    total := args.len() + shift;
+    if total <= 6 {
+        for i in args.len() {
+            r := argreg(i + shift);
+            get(&mut c, args[i], view(r));
+        }
+        return ();
+    }
+    extra := total - 5;
+    n := imm(&mut c, extra);
+    record := invoke(&mut c, view("rt_rec"), one(n));
+    for k in extra {
+        get(&mut c, record, view("%rcx"));
+        get(&mut c, args[5 - shift + k], view("%rax"));
+        o(&mut c, view("movq %rax,"));
+        on(&mut c, k * 8);
+        o(&mut c, view("(%rcx)\n"));
+    }
+    for i in 5 - shift {
+        r := argreg(i + shift);
+        get(&mut c, args[i], view(r));
+    }
+    get(&mut c, record, view("%r9"));
+    return ();
+}
+// Prologue: parameter i of `count` into frame slot i (see load_call_args for more than six).
+fn store_params<a>(c: (&a mut C), count: u64) -> unit {
+    mut regs = count;
+    if 6 < count {
+        regs = 5;
+    }
+    for i in regs {
+        reg := argreg(i);
+        o(&mut c, view("movq "));
+        o(&mut c, view(reg));
+        c.out.push(44);
+        stack_slot(&mut c, i);
+        c.out.push(10);
+    }
+    if 6 < count {
+        for k in count - 5 {
+            o(&mut c, view("movq "));
+            on(&mut c, k * 8);
+            o(&mut c, view("(%r9),%rax\nmovq %rax,"));
+            stack_slot(&mut c, 5 + k);
+            c.out.push(10);
+        }
+        o(&mut c, view("movq %r9,%rdi\ncall rt_free\n"));
+    }
+    return ();
+}
 fn invoke<a, b>(c: (&a mut C), name: &b [u8], args: u64[]) -> u64 {
     if 6 < args.len() {
-        fail(&mut c, view("native call exceeds six arguments"));
+        // Runtime helpers take at most six words; more would need the spill record.
+        fail(&mut c, view("runtime call exceeds six arguments"));
     }
     for i in args.len() {
         mut r = argreg(i);
@@ -2829,6 +2889,12 @@ fn bind_loan<a>(c: (&a mut C), value: u64, source: u64, target: u64, mode: u64) 
         }
     } else {
         loan = ownership::borrow_place(&mut c.check, target, mode);
+        if loan == 0 {
+            // Loans whose holders are all dead (a moved match scrutinee's payload loans) end
+            // here, then the borrow is retried; a real conflict still fails.
+            close_loans(&mut c);
+            loan = ownership::borrow_place(&mut c.check, target, mode);
+        }
     }
     if loan == 0 {
         fail(&mut c, view("borrow conflicts with active access"));
@@ -4687,9 +4753,6 @@ fn base_named<a>(c: (&a mut C), first: u8[]) -> u64 {
                 expect(&mut c, view(","));
             }
         }
-        if 6 < params.len() {
-            fail(&mut c, view("function type exceeds six word arguments"));
-        }
         expect(&mut c, view("->"));
         result := parse_type(&mut c);
         return intern_args(&mut c, 12, result, 0, u64[], params);
@@ -4718,6 +4781,12 @@ fn base_named<a>(c: (&a mut C), first: u8[]) -> u64 {
     }
     if same(view(first), view("string")) {
         return 3;
+    }
+    if same(view(first), view("CPtr")) + same(view(first), view("CMutPtr")) {
+        // One word: a bare C data pointer (`const void *` / `void *`) into Grail-owned bytes,
+        // made by `unsafe cptr(view)` / `unsafe cptr_mut(&mut bytes)`. Mode 1 is writable.
+        mode := same(view(first), view("CMutPtr"));
+        return intern_full(&mut c, 26, 0, mode, u64[]);
     }
     if same(view(first), view("CStr")) {
         // One word: a NUL-terminated byte pointer owned by the C side. Building one
@@ -4977,7 +5046,22 @@ fn decl<a>(c: (&a mut C), pass: u64) -> unit {
     );
     return ();
 }
+// Words that start a statement or expression inside a body; they cannot name a binding or
+// parameter. Declaration heads (`fn`, `struct`, `module`, `use`, ...) are recognised only at the
+// top level and may name bindings.
+fn is_keyword<a>(name: &a [u8]) -> u64 {
+    words := u8[][copy_bytes(view("mut")), copy_bytes(view("if")), copy_bytes(view("else")), copy_bytes(view("while")), copy_bytes(view("for")), copy_bytes(view("in")), copy_bytes(view("loop")), copy_bytes(view("match")), copy_bytes(view("return")), copy_bytes(view("break")), copy_bytes(view("continue")), copy_bytes(view("unsafe")), copy_bytes(view("true")), copy_bytes(view("false"))];
+    for i in words.len() {
+        if same(view(words[i]), view(name)) {
+            return 1;
+        }
+    }
+    return 0;
+}
 fn bind<a>(c: (&a mut C), name: u8[], ty: u64, id: u64, mutable: u64) -> unit {
+    if is_keyword(view(name)) {
+        fail(&mut c, view("a keyword cannot name a binding"));
+    }
     if c.raw == 0 {
         if place_of(&mut c, id) == 0 {
             kind := ty_kind(&mut c, ty);
@@ -5614,7 +5698,7 @@ fn ffi_param<a, b>(c: (&a mut C), ty: u64, what: &b [u8]) -> unit {
     if (k == 18) & (ty_arg(&mut c, ty) == 64) {
         return ();
     }
-    if (k == 23) + (k == 24) + (k == 5) + (k == 25) {
+    if (k == 23) + (k == 24) + (k == 5) + (k == 25) + (k == 26) {
         return ();
     }
     if k == 8 {
@@ -5637,7 +5721,7 @@ fn ffi_result<a, b>(c: (&a mut C), ty: u64, what: &b [u8]) -> unit {
     if (k == 18) & (ty_arg(&mut c, ty) == 64) {
         return ();
     }
-    if (k == 23) + (k == 24) + (k == 25) {
+    if (k == 23) + (k == 24) + (k == 25) + (k == 26) {
         // A function-pointer result is how a dynamic loader hands back a resolved
         // symbol; the declaration states the signature the address is called with.
         return ();
@@ -5692,7 +5776,7 @@ fn ffi_field_align<a>(c: (&a mut C), ty: u64) -> u64 {
         }
         return 8;
     }
-    if (k == 23) + (k == 24) {
+    if (k == 23) + (k == 24) + (k == 26) {
         return 8;
     }
     if k == 18 {
@@ -5721,7 +5805,7 @@ fn ffi_field_size<a>(c: (&a mut C), ty: u64) -> u64 {
         }
         return 8;
     }
-    if (k == 23) + (k == 24) {
+    if (k == 23) + (k == 24) + (k == 26) {
         return 8;
     }
     if k == 18 {
@@ -6162,9 +6246,6 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
             expect(&mut c, view(","));
         }
     }
-    if 6 < count {
-        fail(&mut c, view("native function exceeds six parameters"));
-    }
     exchange(&mut c.parsing_input, 0);
     if c.receiver_region != 0 {
         exchange(&mut c.output_region, c.receiver_region);
@@ -6348,14 +6429,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         exchange(&mut c.export_fret, fret);
     } else {
         exchange(&mut c.export_fret, 0);
-        for i in count {
-            reg := argreg(i);
-            o(&mut c, view("movq "));
-            o(&mut c, view(reg));
-            c.out.push(44);
-            stack_slot(&mut c, i);
-            c.out.push(10);
-        }
+        store_params(&mut c, count);
     }
     o(&mut c, view("leaq -.F"));
     on(&mut c, frame);
@@ -6490,9 +6564,6 @@ fn interface_declaration<a>(c: (&a mut C), pass: u64) -> unit {
                 }
                 expect(&mut c, view(","));
             }
-        }
-        if 6 < count {
-            fail(&mut c, view("interface method exceeds six arguments"));
         }
         mut ret = 1;
         if eat(&mut c, view("->")) {
@@ -8605,7 +8676,16 @@ fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
                     context = bind_types(&mut c, formal, &map);
                 }
             }
-            mut v = expr_expected(&mut c, 0, context);
+            // A reference or view binding passed by name is reborrowed, not moved: `f(r); g(r);`
+            // works as Rust's shared-reference copy / implicit `&mut` reborrow, and the borrow
+            // checker still sees each call's loan.
+            mut v = val(0, 0);
+            reborrow := reborrow_argument(&mut c);
+            if reborrow != 0 {
+                v = place(&mut c, reborrow - 1);
+            } else {
+                v = expr_expected(&mut c, 0, context);
+            }
             aend := c.pos;
             if c.raw == 0 {
                 if (
@@ -8856,18 +8936,12 @@ fn emit_resolved_call<a>(
         }
         return ffi_emit_call(&mut c, &args, &argtypes, ret, view(ffi_symbol), 0);
     }
-    if 6 < args.len() {
-        fail(&mut c, view("native call exceeds six arguments"));
-    }
     for i in args.len() {
         slot := args[i];
         ty := argtypes[i];
         move_out(&mut c, val(slot, ty));
     }
-    for i in args.len() {
-        reg := argreg(i);
-        get(&mut c, args[i], view(reg));
-    }
+    load_call_args(&mut c, &args, 0);
     o(&mut c, view("call "));
     mangle(&mut c, view(destination), view(symbol));
     c.out.push(10);
@@ -9085,12 +9159,9 @@ fn indirect_call<a>(c: (&a mut C), value: Val, opened: u64) -> Val {
         release_temporary(&mut c, input);
         return val(rslot, resulttype);
     }
+    load_call_args(&mut c, &args, shift);
     if shift {
         get(&mut c, envp, view("%rdi"));
-    }
-    for i in args.len() {
-        r := argreg(i + shift);
-        get(&mut c, args[i], view(r));
     }
     get(&mut c, target, view("%rax"));
     o(&mut c, view("call *%rax\n"));
@@ -9128,6 +9199,15 @@ fn builtin_id<a>(n: &a [u8]) -> u64 {
     }
     if same(view(n), view("cstr")) {
         return 39;
+    }
+    if same(view(n), view("cptr")) {
+        return 40;
+    }
+    if same(view(n), view("cptr_mut")) {
+        return 41;
+    }
+    if same(view(n), view("cnull")) {
+        return 42;
     }
     if same(view(n), view("view_mut")) {
         return 38;
@@ -10548,6 +10628,11 @@ fn builtin<a>(c: (&a mut C), id: u64) -> Val {
         return raw_builtin(&mut c, id);
     }
     expect(&mut c, view("("));
+    if id == 42 {
+        // `cnull()`: the null data pointer, for optional C pointer parameters.
+        expect(&mut c, view(")"));
+        return val(imm(&mut c, 0), intern_full(&mut c, 26, 0, 0, u64[]));
+    }
     if (id == 13) + (id == 14) {
         if borrow_place_ahead(&mut c) == 0 {
             v := borrow_temporary(&mut c, id == 14);
@@ -10567,6 +10652,32 @@ fn builtin<a>(c: (&a mut C), id: u64) -> Val {
         return v;
     }
     a := expr(&mut c, 0);
+    if (id == 40) + (id == 41) {
+        // `cptr(bytes)` / `cptr_mut(&mut bytes)`: the bare data pointer of a byte sequence or
+        // view, for C parameters and record fields typed `const void *` / `void *`. Unsafe:
+        // C may keep or (for cptr_mut) write through the pointer, which Grail cannot track.
+        expect(&mut c, view(")"));
+        if (c.raw == 0) & (c.unsafe_depth == 0) {
+            fail(&mut c, view("cptr and cptr_mut require an unsafe block"));
+        }
+        writable := id == 41;
+        x := deref(&mut c, a);
+        k := ty_kind(&mut c, x.ty);
+        if (k != 2) & (k != 3) & (k != 4) & (k != 5) {
+            fail(&mut c, view("cptr requires a byte sequence or view"));
+        }
+        if writable {
+            // Only a mutable byte view or a mutable sequence may be written through.
+            if (k == 5) & (ty_mode(&mut c, x.ty) == 0) {
+                fail(&mut c, view("cptr_mut requires a mutable byte view (&mut [u8])"));
+            }
+            if k != 5 {
+                require_write(&mut c, x.t);
+            }
+        }
+        slot := apply(&mut c, view("rt_view_ptr"), one(x.t));
+        return val(slot, intern_full(&mut c, 26, 0, writable, u64[]));
+    }
     if id == 39 {
         // `cstr(sequence)` is the checked, zero-copy C string view: the bytes must
         // end in NUL (verified at runtime) and the cast is unsafe because C may keep
@@ -10699,69 +10810,74 @@ fn builtin<a>(c: (&a mut C), id: u64) -> Val {
         return exchange_into(&mut c, a, b);
     }
     if id == 15 {
-        observe(&mut c, a.t);
-        if c.raw == 0 {
-            if ty_kind(&mut c, a.ty) != 7 {
-                fail(&mut c, view("load requires typed reference"));
-            }
-        }
         expect(&mut c, view(")"));
-        ty := ty_arg(&mut c, a.ty);
-        get(&mut c, a.t, view("%rax"));
-        o(&mut c, view("movq (%rax),%rax\n"));
-        n := save(&mut c);
-        if c.raw == 0 {
-            k := ty_kind(&mut c, ty);
-            if k == 7 {
-                fail(&mut c, view("indirect reference copies require explicit reborrow"));
-            }
-            if k == 5 {
-                if ty_mode(&mut c, ty) {
-                    fail(&mut c, view("load cannot copy exclusive view; reborrow explicitly"));
-                }
-                slot := invoke(&mut c, view("rt_view"), one(n));
-                own(&mut c, slot, ty);
-                target := target_of(&mut c, a.t);
-                c
-                    .resources
-                    .push(
-                        Resource {
-                            slot: n,
-                            ty: ty,
-                            flag: 0,
-                            base: a.t + 1,
-                            field: 0,
-                            via: 1,
-                            place: target,
-                            target: 0,
-                            authority: a.t + 1,
-                        }
-                    );
-                frame := place_of(&mut c, a.t);
-                count := c.bonds.len();
-                for i in count {
-                    mut b = &c.bonds[i];
-                    holder := b.holder;
-                    loan := b.loan;
-                    guard := b.guard;
-                    if (holder == frame) & guard {
-                        bond_kind(&mut c, target, loan, guard);
-                    }
-                }
-                stored_source(&mut c, n, ty);
-                view_bonds(&mut c, slot, n, 0);
-                release_temporary(&mut c, a.t);
-                return val(slot, ty);
-            }
-            if needs_drop(&mut c, ty) {
-                fail(&mut c, view("load cannot copy owned referent"));
-            }
-        }
-        release_temporary(&mut c, a.t);
-        return val(n, ty);
+        return deref_value(&mut c, a);
     }
     fail(&mut c, view("unknown builtin"));
     return val(0, 0);
+}
+// `*r` (and the `load` builtin): copies the referent of a typed reference. Only values that need no
+// drop can be copied; a shared view referent is reborrowed.
+fn deref_value<a>(c: (&a mut C), a: Val) -> Val {
+    observe(&mut c, a.t);
+    if c.raw == 0 {
+        if ty_kind(&mut c, a.ty) != 7 {
+            fail(&mut c, view("* requires a typed reference"));
+        }
+    }
+    ty := ty_arg(&mut c, a.ty);
+    get(&mut c, a.t, view("%rax"));
+    o(&mut c, view("movq (%rax),%rax\n"));
+    n := save(&mut c);
+    if c.raw == 0 {
+        k := ty_kind(&mut c, ty);
+        if k == 7 {
+            fail(&mut c, view("indirect reference copies require explicit reborrow"));
+        }
+        if k == 5 {
+            if ty_mode(&mut c, ty) {
+                fail(&mut c, view("cannot copy an exclusive view out of a reference; reborrow explicitly"));
+            }
+            slot := invoke(&mut c, view("rt_view"), one(n));
+            own(&mut c, slot, ty);
+            target := target_of(&mut c, a.t);
+            c
+                .resources
+                .push(
+                    Resource {
+                        slot: n,
+                        ty: ty,
+                        flag: 0,
+                        base: a.t + 1,
+                        field: 0,
+                        via: 1,
+                        place: target,
+                        target: 0,
+                        authority: a.t + 1,
+                    }
+                );
+            frame := place_of(&mut c, a.t);
+            count := c.bonds.len();
+            for i in count {
+                mut b = &c.bonds[i];
+                holder := b.holder;
+                loan := b.loan;
+                guard := b.guard;
+                if (holder == frame) & guard {
+                    bond_kind(&mut c, target, loan, guard);
+                }
+            }
+            stored_source(&mut c, n, ty);
+            view_bonds(&mut c, slot, n, 0);
+            release_temporary(&mut c, a.t);
+            return val(slot, ty);
+        }
+        if needs_drop(&mut c, ty) {
+            fail(&mut c, view("cannot copy an owned value out of a reference; use exchange"));
+        }
+    }
+    release_temporary(&mut c, a.t);
+    return val(n, ty);
 }
 fn require_capability<a, b>(c: (&a mut C), ty: u64, shared: u64, message: &b [u8]) -> unit {
     mut trail = u64[];
@@ -11841,6 +11957,13 @@ fn adopt_value<a>(c: (&a mut C), v: Val, start: u64, end: u64, expected: u64) ->
     if literal_target(&mut c, expected) == 0 {
         return v;
     }
+    // A byte read (`bytes[i]`) is an untyped word in 0..255: it adopts any integer type that
+    // holds 0..255 without a check, like a literal that fits.
+    if (v.ty == 0) & (c.byte_start == start) & (c.byte_end == end) & (c.raw == 0) {
+        if literal_fits(&mut c, expected, 255, 0) {
+            return val(v.t, expected);
+        }
+    }
     if (c.lit_start != start) + (c.lit_end != end) {
         return v;
     }
@@ -12107,9 +12230,6 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
         }
     }
     exchange(&mut c.no_union, 0);
-    if 5 < params.len() {
-        fail(&mut c, view("closure exceeds five parameters"));
-    }
     mut ret = 1;
     if eat(&mut c, view("->")) {
         ret = parse_type(&mut c);
@@ -12437,14 +12557,7 @@ fn emit_closures<a>(c: (&a mut C)) -> unit {
             on(&mut c, frame);
             o(&mut c, view(",%rsp\n"));
         }
-        for j in count {
-            reg := argreg(j);
-            o(&mut c, view("movq "));
-            o(&mut c, view(reg));
-            c.out.push(44);
-            stack_slot(&mut c, j);
-            c.out.push(10);
-        }
+        store_params(&mut c, count);
         o(&mut c, view("leaq -.F"));
         on(&mut c, frame);
         o(&mut c, view("(%rbp),%rdi\nmovq $.F"));
@@ -13082,10 +13195,16 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
             f = "rt_text";
             ty = 3;
         }
-        if c.raw == 0 {
-            if k == 6 {
-                fail(&mut c, view("copy/text requires byte collection"));
+        if (c.raw == 0) & (k == 6) {
+            // `.copy()` of a vector of plain values (no element needs a drop) is an independent
+            // vector of the same type; copying owners would duplicate ownership.
+            elem := ty_arg(&mut c, xty);
+            if same(view(name), view("text")) + needs_drop(&mut c, elem) {
+                fail(&mut c, view("copy requires a byte collection or a vector of plain values"));
             }
+            slot := apply(&mut c, view("rt_vec_copy"), one(xt));
+            release_temporary(&mut c, input);
+            return own(&mut c, slot, xty);
         }
         slot := apply(&mut c, view(f), one(xt));
         release_temporary(&mut c, input);
@@ -13128,6 +13247,21 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
         release_temporary(&mut c, input);
         bt := bool_type(&mut c);
         return val(r, bt);
+    }
+    // Every remaining method mutates its receiver; an unknown name is reported as such before the
+    // receiver's mutability is checked.
+    known := same(view(name), view("pop"))
+        + same(view(name), view("clear"))
+        + same(view(name), view("truncate"))
+        + same(view(name), view("reverse"))
+        + same(view(name), view("swap"))
+        + same(view(name), view("remove"))
+        + same(view(name), view("insert"))
+        + same(view(name), view("push"))
+        + same(view(name), view("push_char"))
+        + same(view(name), view("append"));
+    if known == 0 {
+        fail(&mut c, view("unknown collection method"));
     }
     require_mutable_binding(&mut c, xt, 0);
     if same(view(name), view("pop")) {
@@ -13292,15 +13426,18 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
         invoke(&mut c, view("rt_append_text"), two(xt, bt));
         return val(imm(&mut c, 0), 1);
     }
-    if same(view(name), view("push")) == 0 {
-        fail(&mut c, view("unknown collection method"));
-    }
     if c.raw == 0 {
         if (k != 3) & (k != 6) {
             fail(&mut c, view("push requires bytes/vector"));
         }
         if k == 3 {
-            require_type(&mut c, b.ty, 0);
+            // A byte buffer takes a u8 (always fits) or any other integer, which stops the
+            // program at run time if it does not fit a byte, like `buf[i] = b`.
+            if (b.ty != int_type(&mut c, 8, 0)) & (b.ty != 0) {
+                if integer(&mut c, b.ty) == 0 {
+                    require_type(&mut c, b.ty, 0);
+                }
+            }
         } else {
             expected := ty_arg(&mut c, xty);
             require_type(&mut c, b.ty, expected);
@@ -13312,7 +13449,11 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
     require_write(&mut c, xt);
     mut f = "rt_push";
     if k == 3 {
-        f = "rt_pushb";
+        // A u8 always fits; an untyped word is range-checked like a byte store.
+        f = "rt_pushb_checked";
+        if b.ty == int_type(&mut c, 8, 0) {
+            f = "rt_pushb";
+        }
     }
     source := place_of(&mut c, bt);
     move_out(&mut c, val(bt, b.ty));
@@ -13336,7 +13477,9 @@ fn collection_literal<a>(c: (&a mut C), ty: u64, bytes: u64) -> Val {
                     expected = ty_arg(&mut c, ty);
                 }
                 v = adopt_value(&mut c, v, estart, eend, expected);
-                require_type(&mut c, v.ty, expected);
+                if (bytes == 0) + (v.ty != int_type(&mut c, 8, 0)) {
+                    require_type(&mut c, v.ty, expected);
+                }
                 if bytes != 0 {
                     lit := (c.lit_start == estart) & (c.lit_end == eend);
                     if lit & (c.lit_value > 255) {
@@ -13349,7 +13492,11 @@ fn collection_literal<a>(c: (&a mut C), ty: u64, bytes: u64) -> Val {
             move_out(&mut c, val(value, v.ty));
             mut f = "rt_push";
             if bytes {
-                f = "rt_pushb";
+                // A u8 element always fits; an untyped word is range-checked at run time.
+                f = "rt_pushb_checked";
+                if v.ty == int_type(&mut c, 8, 0) {
+                    f = "rt_pushb";
+                }
             }
             invoke(&mut c, view(f), two(slot, value));
             target := place_of(&mut c, slot);
@@ -13371,10 +13518,47 @@ fn reference_borrow<a>(c: (&a mut C), write: u64) -> Val {
         return borrow_temporary(&mut c, write);
     }
     mut v = place(&mut c, write);
-    if is(&mut c, view("[")) {
-        v = index_view(&mut c, v, 1 + write);
+    // `&mut cs[i].data`, `&grid[y][x]`: the rest of the accessor chain is borrowed too.
+    stop := borrow_chain_end(&mut c);
+    if stop != c.pos {
+        v = chain_walk_mode(&mut c, v, stop, write);
     }
     return v;
+}
+// From c.pos: the end of a run of `[...]` groups and `.field` accessors (stopping before a
+// method call `.m(`).
+fn borrow_chain_end<a>(c: (&a mut C)) -> u64 {
+    mut e = c.pos;
+    while true {
+        k := kind_at(&mut c, e);
+        if (k == 46) & (kind_at(&mut c, e + 1) == 1) & (kind_at(&mut c, e + 2) != 40) {
+            e = e + 2;
+            continue;
+        }
+        if k == 91 {
+            mut depth = 0;
+            while true {
+                kk := kind_at(&mut c, e);
+                if (kk == 0) + (kk == 59) {
+                    return e;
+                }
+                if kk == 91 {
+                    depth = depth + 1;
+                }
+                if kk == 93 {
+                    depth = depth - 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                e = e + 1;
+            }
+            e = e + 1;
+            continue;
+        }
+        break;
+    }
+    return e;
 }
 // Prefix byte-view borrowing binds tighter than binary operators.
 fn view_borrow<a>(c: (&a mut C)) -> Val {
@@ -13707,6 +13891,12 @@ fn map_expression<a>(c: (&a mut C), expected: u64) -> Val {
 
 fn primary<a>(c: (&a mut C)) -> Val {
     k := kind(&mut c);
+    if (k == 42) & (c.typed_refs != 0) {
+        // `*r`: dereference; postfix accessors bind tighter (`*r.f` is `*(r.f)`).
+        advance(&mut c);
+        r := expr(&mut c, 10);
+        return deref_value(&mut c, r);
+    }
     if k == 38 {
         if c.typed_refs == 0 {
             return view_borrow(&mut c);
@@ -14160,6 +14350,27 @@ fn primary<a>(c: (&a mut C)) -> Val {
                 return val(slot, ty);
             }
         }
+        if same(view(first), view("f32_from_bits")) + same(view(first), view("f32_bits")) {
+            if (find_local(&mut c, view(first)) == 0)
+                & (find_func(&mut c, view(m), view(first)) == 0) {
+                from := same(view(first), view("f32_from_bits"));
+                advance(&mut c);
+                value := expr(&mut c, 0);
+                expect(&mut c, view(")"));
+                if from {
+                    // binary32 bits (u64) -> f32
+                    require_type(&mut c, value.ty, 0);
+                    t := invoke(&mut c, view("rt_f32_from_bits"), one(value.t));
+                    return val(t, f32_type(&mut c));
+                }
+                // f32 -> its binary32 bits
+                if is_f32(&mut c, value.ty) == 0 {
+                    fail(&mut c, view("f32_bits needs an f32"));
+                }
+                t := invoke(&mut c, view("rt_f32_bits"), one(value.t));
+                return val(t, 0);
+            }
+        }
         if same(view(first), view("f64_from_bits")) {
             if (find_local(&mut c, view(first)) == 0)
                 & (find_func(&mut c, view(m), view(first)) == 0) {
@@ -14236,7 +14447,24 @@ fn primary<a>(c: (&a mut C)) -> Val {
                 fail(&mut c, view("borrow_mut was removed; write &mut value"));
             }
         }
+        // A function of this module, or a callable local (closure, function pointer), named like a
+        // builtin shadows it, as predeclared identifiers are in Go.
         mut b = builtin_id(view(first));
+        here := module_copy(&mut c);
+        if (b != 0) & (find_func(&mut c, view(here), view(first)) != 0) {
+            b = 0;
+        }
+        shadow := find_local(&mut c, view(first));
+        if (b != 0) & (shadow != 0) {
+            mut callable = local_ty(&mut c, shadow - 1);
+            while ty_kind(&mut c, callable) == 7 {
+                callable = ty_arg(&mut c, callable);
+            }
+            ck := ty_kind(&mut c, callable);
+            if (ck == 12) + (ck == 20) + (ck == 25) {
+                b = 0;
+            }
+        }
         if b != 0 {
             return builtin(&mut c, b);
         }
@@ -15038,6 +15266,7 @@ fn index_view<a>(c: (&a mut C), value: Val, access: u64) -> Val {
     expect(&mut c, view("]"));
     result := apply(&mut c, view(f), two(slot, start));
     release_temporary(&mut c, slot);
+    exchange(&mut c.byte_end, c.pos);
     return val(result, 0);
 }
 fn expr<a>(c: (&a mut C), min: u64) -> Val {
@@ -15058,9 +15287,9 @@ fn expr_expected<a>(c: (&a mut C), min: u64, expected: u64) -> Val {
             first = primary(&mut c);
         }
     }
-    lend := c.pos;
+    mut lend = c.pos;
     mut left_lit = (c.lit_start == lstart) & (c.lit_end == lend);
-    lvalue := c.lit_value;
+    mut lvalue = c.lit_value;
     lneg := c.lit_negative;
     mut left_flit = (c.flit_start == lstart) & (c.flit_end == lend);
     lftok := c.flit_tok;
@@ -15096,9 +15325,30 @@ fn expr_expected<a>(c: (&a mut C), min: u64, expected: u64) -> Val {
             ty = result.ty;
         } else {
             if k == 91 {
-                result := index_view(&mut c, val(t, ty), 0);
+                // `v[i].push(x)` / `v[i].f.set(x)`: borrow the element mutably when the call that
+                // follows mutates its receiver; a plain read stays a shared access.
+                mut access = 0;
+                mut elem = 0;
+                k6 := ty_kind(&mut c, ty);
+                if k6 == 7 {
+                    inner := ty_arg(&mut c, ty);
+                    if ty_kind(&mut c, inner) == 6 {
+                        elem = ty_arg(&mut c, inner);
+                    }
+                }
+                if k6 == 6 {
+                    elem = ty_arg(&mut c, ty);
+                }
+                if mutating_call_after_index(&mut c, elem) {
+                    access = 2;
+                }
+                result := index_view(&mut c, val(t, ty), access);
                 t = result.t;
                 ty = result.ty;
+                // A byte read spans from the start of the indexed operand.
+                if c.byte_end == c.pos {
+                    exchange(&mut c.byte_start, lstart);
+                }
             } else {
                 if (k == 46) & (next_kind(&mut c) == 46) {
                     break;
@@ -15189,6 +15439,30 @@ fn expr_expected<a>(c: (&a mut C), min: u64, expected: u64) -> Val {
                                 rlit := (c.lit_start == rstart) & (c.lit_end == rend);
                                 llit := left_lit;
                                 left_lit = false;
+                                // Untyped constant arithmetic (Go-style): `65536 + 16777216` or
+                                // `1 << 20` between two untyped integer literals is itself an
+                                // untyped literal, folded here and adopted by its context.
+                                rvalue := c.lit_value;
+                                rneg := c.lit_negative;
+                                if llit & rlit & (ty == 0) & (rty == 0) & (lneg == 0) & (rneg == 0) {
+                                    folded := fold_constant(k, lvalue, rvalue);
+                                    if folded[0] != 0 {
+                                        value := folded[1];
+                                        o(&mut c, view("movabsq $"));
+                                        on(&mut c, value);
+                                        o(&mut c, view(",%rax\n"));
+                                        t = save(&mut c);
+                                        ty = 0;
+                                        exchange(&mut c.lit_start, lstart);
+                                        exchange(&mut c.lit_end, rend);
+                                        exchange(&mut c.lit_value, value);
+                                        exchange(&mut c.lit_negative, 0);
+                                        left_lit = true;
+                                        lvalue = value;
+                                        lend = rend;
+                                        continue;
+                                    }
+                                }
                                 if (ty != rty) & literal_target(&mut c, ty) & rlit {
                                     if adopt_literal(&mut c, rstart, rend, ty) {
                                         rty = ty;
@@ -15531,42 +15805,73 @@ fn compound_operator(k: u64) -> u64 {
     return 267;
 }
 // `xs[i] = v;`, `s.items[i] += v;`, `buf[i] = b;`: the operator token position, or 0.
-fn index_assignment_ahead<a>(c: (&a mut C)) -> u64 {
+// Scans an assignment target `name(.f)*(  [..] | .f )*` followed by an assignment operator.
+// Returns [operator position, start of the last accessor, bracket groups, 1 if the last accessor
+// is a field] or [0, 0, 0, 0] when the statement is not such an assignment.
+fn assign_chain<a>(c: (&a mut C)) -> u64[] {
+    none := u64[0, 0, 0, 0];
     if kind(&mut c) != 1 {
-        return 0;
+        return none;
     }
     mut e = c.pos + 1;
-    while (kind_at(&mut c, e) == 46) & (kind_at(&mut c, e + 1) == 1) {
-        e = e + 2;
-    }
-    if kind_at(&mut c, e) != 91 {
-        return 0;
-    }
-    mut depth = 0;
+    mut groups: u64 = 0;
+    mut last: u64 = 0;
+    mut field: u64 = 0;
     while true {
         k := kind_at(&mut c, e);
-        if k == 0 {
-            return 0;
+        if (k == 46) & (kind_at(&mut c, e + 1) == 1) {
+            // A method call (`.f(`) is not an assignment target.
+            if kind_at(&mut c, e + 2) == 40 {
+                return none;
+            }
+            last = e;
+            field = 1;
+            e = e + 2;
+            continue;
         }
         if k == 91 {
-            depth = depth + 1;
-        }
-        if k == 93 {
-            depth = depth - 1;
-            if depth == 0 {
-                break;
+            last = e;
+            field = 0;
+            groups += 1;
+            mut depth = 0;
+            while true {
+                kk := kind_at(&mut c, e);
+                if (kk == 0) + (kk == 59) {
+                    return none;
+                }
+                if kk == 91 {
+                    depth = depth + 1;
+                }
+                if kk == 93 {
+                    depth = depth - 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                e = e + 1;
             }
+            e = e + 1;
+            continue;
         }
-        if k == 59 {
-            return 0;
-        }
-        e = e + 1;
+        break;
     }
-    k := kind_at(&mut c, e + 1);
-    if (k == 61) + ((261 < k) & (k < 267)) + (k == 268) {
-        return e + 1;
+    k := kind_at(&mut c, e);
+    if (groups != 0) & ((k == 61) + ((261 < k) & (k < 267)) + (k == 268)) {
+        return u64[e, last, groups, field];
     }
-    return 0;
+    return none;
+}
+fn index_assignment_ahead<a>(c: (&a mut C)) -> u64 {
+    chain := assign_chain(&mut c);
+    if chain[3] != 0 {
+        return 0;
+    }
+    return chain[0];
+}
+// `v[i].f = x`, `v[i][j].f.g += x`: a field store through an indexed place.
+fn chained_field_assignment_ahead<a>(c: (&a mut C)) -> u64 {
+    chain := assign_chain(&mut c);
+    return (chain[0] != 0) & (chain[3] != 0);
 }
 // Combines an old numeric value with an operand for a compound assignment of type ty.
 fn compound_value<a>(c: (&a mut C), op: u64, old: u64, v: Val, ty: u64) -> Val {
@@ -15745,6 +16050,208 @@ fn index_assignment_operator<a>(c: (&a mut C)) -> u64 {
     return 0;
 }
 
+fn mutating_method_name<a>(c: (&a mut C), name: &a [u8], elem: u64) -> u64 {
+    builtin := u8[][copy_bytes(view("push")), copy_bytes(view("pop")), copy_bytes(view("insert")), copy_bytes(view("remove")), copy_bytes(view("clear")), copy_bytes(view("truncate")), copy_bytes(view("append")), copy_bytes(view("sort")), copy_bytes(view("reverse")), copy_bytes(view("swap")), copy_bytes(view("extend")), copy_bytes(view("get_mut")), copy_bytes(view("entry")), copy_bytes(view("retain"))];
+    for i in builtin.len() {
+        if same(view(builtin[i]), view(name)) {
+            return 1;
+        }
+    }
+    // A user method of the element's own type whose receiver is `self: &mut ...`.
+    for i in c.funcs.len() {
+        f := &c.funcs[i];
+        if (f.owner != 0) & (f.count != 0) & same(view(f.name), view(name)) {
+            first := f.first;
+            owner := f.owner;
+            pty := c.params[first];
+            if (ty_kind(&mut c, pty) == 7) & (ty_mode(&mut c, pty) != 0) & (elem != 0) {
+                if (ty_kind(&mut c, elem) == 8) & (ty_arg(&mut c, elem) == owner - 1) {
+                    return 1;
+                }
+            }
+        }
+    }
+    return 0;
+}
+// At `[`: whether the matching `]` is followed by `(.field)*.method(` with a mutating method.
+fn mutating_call_after_index<a>(c: (&a mut C), elem: u64) -> u64 {
+    mut q = c.pos;
+    mut depth = 0;
+    while true {
+        k := kind_at(&mut c, q);
+        if (k == 0) + (k == 59) {
+            return 0;
+        }
+        if k == 91 {
+            depth = depth + 1;
+        }
+        if k == 93 {
+            depth = depth - 1;
+            if depth == 0 {
+                break;
+            }
+        }
+        q = q + 1;
+    }
+    q = q + 1;
+    while (kind_at(&mut c, q) == 46) & (kind_at(&mut c, q + 1) == 1) {
+        if kind_at(&mut c, q + 2) == 40 {
+            name := tok_text(&mut c, q + 1);
+            return mutating_method_name(&mut c, view(name), elem);
+        }
+        q = q + 2;
+    }
+    return 0;
+}
+// 1 + write mode when the next argument is exactly a reference/view binding (`name` followed by
+// `,` or `)`), else 0.
+fn reborrow_argument<a>(c: (&a mut C)) -> u64 {
+    if (c.raw != 0) + (kind(&mut c) != 1) {
+        return 0;
+    }
+    here := c.pos;
+    after := kind_at(&mut c, here + 1);
+    if (after != 44) & (after != 41) {
+        return 0;
+    }
+    name := tok_text(&mut c, here);
+    l := find_local(&mut c, view(name));
+    if l == 0 {
+        return 0;
+    }
+    ty := local_ty(&mut c, l - 1);
+    k := ty_kind(&mut c, ty);
+    if (k != 5) & (k != 7) {
+        return 0;
+    }
+    return 1 + (ty_mode(&mut c, ty) != 0);
+}
+// [1, value] when `a OP b` folds to a non-negative constant that fits 64 bits, else [0, 0].
+fn fold_constant(k: u64, a: u64, b: u64) -> u64[] {
+    if k == 43 {
+        if a <= 18446744073709551615 - b {
+            return u64[1, a + b];
+        }
+    }
+    if (k == 45) & (b <= a) {
+        return u64[1, a - b];
+    }
+    if k == 42 {
+        if (a == 0) + (b <= 18446744073709551615 / a) {
+            return u64[1, a * b];
+        }
+    }
+    if (k == 47) & (b != 0) {
+        return u64[1, a / b];
+    }
+    if (k == 37) & (b != 0) {
+        return u64[1, a % b];
+    }
+    if (k == 271) & (b < 64) {
+        if a <= (18446744073709551615 >> b) {
+            return u64[1, a << b];
+        }
+    }
+    if (k == 272) & (b < 64) {
+        return u64[1, a >> b];
+    }
+    if k == 38 {
+        return u64[1, a & b];
+    }
+    if k == 124 {
+        return u64[1, a | b];
+    }
+    if k == 94 {
+        return u64[1, a ^ b];
+    }
+    return u64[0, 0];
+}
+// A statement builtin (`drop(x)`, `write(...)`, `assert(...)`) only when the name is followed by
+// `(` and is not shadowed by a local; consumes the name on success. A binding named `write` or
+// `drop` is then an ordinary name (`write += 3`).
+fn statement_builtin<a, b>(c: (&a mut C), name: &b [u8]) -> u64 {
+    if is(&mut c, &name) == 0 {
+        return 0;
+    }
+    here := c.pos;
+    if kind_at(&mut c, here + 1) != 40 {
+        return 0;
+    }
+    if find_local(&mut c, &name) != 0 {
+        return 0;
+    }
+    advance(&mut c);
+    return 1;
+}
+// Walks the accessors of an assignment target from c.pos up to (not including) `stop`: each
+// `[i]` and `.f` run yields a mutable reference to the element or field, so `v[i][j] = x` and
+// `v[i].f = x` reach the final store through ordinary borrows.
+fn chain_walk<a>(c: (&a mut C), base: Val, stop: u64) -> Val {
+    return chain_walk_mode(&mut c, base, stop, 1);
+}
+// chain_walk with a borrow mode: write = 1 borrows each step mutably, 0 shares it.
+fn chain_walk_mode<a>(c: (&a mut C), base: Val, stop: u64, write: u64) -> Val {
+    mut v = base;
+    while c.pos < stop {
+        if kind(&mut c) == 91 {
+            v = index_view(&mut c, v, 1 + write);
+            continue;
+        }
+        if kind(&mut c) == 46 {
+            mut q = c.pos;
+            while (kind_at(&mut c, q) == 46) & (kind_at(&mut c, q + 1) == 1) & (q < stop) {
+                q += 2;
+            }
+            r := field_path(&mut c, v.t, v.ty, 1 + write);
+            target := target_of(&mut c, r.t);
+            res := resource(&mut c, r.t);
+            info := &c.resources[res - 1];
+            owner := info.base - 1;
+            v = borrow_reference(&mut c, r.t, r.ty, owner, target, write);
+            continue;
+        }
+        fail(&mut c, view("expected [index] or .field in assignment target"));
+    }
+    return v;
+}
+// `v[i].f = x` / `v[i][j].f.g += x`: the indexed prefix is borrowed mutably, then the final field
+// run is assigned exactly like `binding.f = x`.
+fn chained_field_assignment<a>(c: (&a mut C)) -> unit {
+    chain := assign_chain(&mut c);
+    oppos := chain[0];
+    // The final field run starts at the first `.` after the last bracket group.
+    mut q = c.pos + 1;
+    mut final_run = 0;
+    while q < oppos {
+        if kind_at(&mut c, q) == 91 {
+            mut depth = 0;
+            while true {
+                kk := kind_at(&mut c, q);
+                if kk == 91 {
+                    depth = depth + 1;
+                }
+                if kk == 93 {
+                    depth = depth - 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                q = q + 1;
+            }
+            q = q + 1;
+            final_run = q;
+            continue;
+        }
+        q = q + 2;
+    }
+    head := place(&mut c, 1);
+    base := chain_walk(&mut c, head, final_run);
+    a := field_path(&mut c, base.t, base.ty, 2);
+    target := a.t;
+    fieldty := ty_arg(&mut c, a.ty);
+    assignment_tail(&mut c, 0, base.t, base.ty, target, u64[1, fieldty]);
+    return ();
+}
 // Legacy vector/byte assignment evaluates RHS before parsing its mutable target.
 fn index_assignment<a>(c: (&a mut C)) -> unit {
     start := c.pos;
@@ -15777,10 +16284,12 @@ fn index_assignment<a>(c: (&a mut C)) -> unit {
         }
     }
     mut base = val(0, 0);
-    if capability {
+    chain := assign_chain(&mut c);
+    if (capability != 0) & (chain[2] == 1) {
         base = primary(&mut c);
     } else {
         base = place(&mut c, 1);
+        base = chain_walk(&mut c, base, chain[1]);
     }
     x := deref(&mut c, val(base.t, base.ty));
     k := ty_kind(&mut c, x.ty);
@@ -16668,6 +17177,20 @@ fn statement<a>(c: (&a mut C)) -> unit {
         if iterable {
             observe(&mut c, seq);
         } else {
+            // A count bound is read once (Go semantics): the temporary views it borrowed through
+            // (`z.comps[n].v`) end now, so the body may borrow `z` mutably. Only non-owning
+            // temporaries are released; they emit no code.
+            mut r = c.resources.len();
+            while loopbase < r {
+                r = r - 1;
+                info := &c.resources[r];
+                flag := info.flag;
+                slot := info.slot;
+                if (flag == 0) & (slot != v.t) & (is_local_slot(&mut c, slot) == 0) {
+                    release(&mut c, r);
+                }
+            }
+            close_loans(&mut c);
             expire_locals(&mut c);
         }
         // `for i in a..b` counts from a up to (not including) b.
@@ -16854,6 +17377,10 @@ fn statement<a>(c: (&a mut C)) -> unit {
         if byref == 0 {
             move_out(&mut c, val(xt, x.ty));
         }
+        // A by-value scrutinee that holds a loan, such as the optional reference of `match m.get(&k)`, ends
+        // its loan in each arm once no payload reference is live, like a `match &s` scrutinee: the
+        // `None` arm may then modify `m`.
+        borrowed := (byref == 0) & (c.raw == 0) & (contains_borrow(&mut c, x.ty, 0) != 0);
         before := ownership::snapshot(&c.check);
         mut exits = ownership::new();
         mut have = 0;
@@ -16897,7 +17424,7 @@ fn statement<a>(c: (&a mut C)) -> unit {
                     drop_call(&mut c, x.ty);
                 }
                 expect(&mut c, view("=>"));
-                if byref {
+                if byref + borrowed {
                     arm_scrutinee(&mut c, sslot, sty);
                 }
                 block(&mut c);
@@ -17015,7 +17542,7 @@ fn statement<a>(c: (&a mut C)) -> unit {
                 }
             }
             expect(&mut c, view("=>"));
-            if byref {
+            if byref + borrowed {
                 arm_scrutinee(&mut c, sslot, sty);
             }
             block(&mut c);
@@ -17097,7 +17624,7 @@ fn statement<a>(c: (&a mut C)) -> unit {
         mark(&mut c, end);
         return ();
     }
-    if eat(&mut c, view("drop")) {
+    if statement_builtin(&mut c, view("drop")) {
         expect(&mut c, view("("));
         name := ident(&mut c);
         mut l = find_local(&mut c, view(name));
@@ -17121,11 +17648,11 @@ fn statement<a>(c: (&a mut C)) -> unit {
         }
         return ();
     }
-    if eat(&mut c, view("write")) {
+    if statement_builtin(&mut c, view("write")) {
         write_statement(&mut c);
         return ();
     }
-    if eat(&mut c, view("assert")) {
+    if statement_builtin(&mut c, view("assert")) {
         expect(&mut c, view("("));
         mut v = expr(&mut c, 0);
         if c.raw == 0 {
@@ -17142,11 +17669,52 @@ fn statement<a>(c: (&a mut C)) -> unit {
         return ();
     }
     if index_assignment_ahead(&mut c) {
-        if map_assignment_ahead(&mut c) {
+        groups := assign_chain(&mut c)[2];
+        if (groups == 1) & (map_assignment_ahead(&mut c) != 0) {
             map_index_assignment(&mut c);
         } else {
             index_assignment(&mut c);
         }
+        return ();
+    }
+    if chained_field_assignment_ahead(&mut c) {
+        chained_field_assignment(&mut c);
+        return ();
+    }
+    if (kind(&mut c) == 42) & (c.typed_refs != 0) {
+        // `*r = v`: store through a mutable reference; the old value is dropped. `*r op= v`
+        // combines with the current (copyable) value first.
+        advance(&mut c);
+        r := expr(&mut c, 10);
+        rt := r.t;
+        rty := r.ty;
+        op := kind(&mut c);
+        if ty_kind(&mut c, rty) != 7 {
+            fail(&mut c, view("* requires a typed reference"));
+        }
+        mut v = val(0, 0);
+        vstart := c.pos + 1;
+        if op == 61 {
+            advance(&mut c);
+            v = expr(&mut c, 0);
+        } else {
+            if (261 < op) & (op < 267) {
+                advance(&mut c);
+                current := deref_value(&mut c, val(rt, rty));
+                rstart := c.pos;
+                mut rhs = expr(&mut c, 0);
+                rend := c.pos;
+                rhs = adopt_value(&mut c, rhs, rstart, rend, current.ty);
+                v = compound_value(&mut c, compound_operator(op), current.t, rhs, current.ty);
+            } else {
+                fail(&mut c, view("expected = after *reference"));
+            }
+        }
+        vend := c.pos;
+        expect(&mut c, view(";"));
+        expected := ty_arg(&mut c, rty);
+        v = adopt_value(&mut c, v, vstart, vend, expected);
+        exchange_into(&mut c, val(rt, rty), v);
         return ();
     }
     if assignment_ahead(&mut c) {
@@ -17177,212 +17745,7 @@ fn statement<a>(c: (&a mut C)) -> unit {
             through = 1;
             fieldty = ty_arg(&mut c, a.ty);
         }
-        if through {
-            pin_assignment(&mut c, target);
-        }
-        operator := kind(&mut c);
-        advance(&mut c);
-        mut oldvalue = 0;
-        mut reservation = 0;
-        mut expected = ty;
-        if through {
-            expected = fieldty;
-        }
-        if operator != 61 {
-            if c.raw == 0 {
-                if (integer(&mut c, expected) + is_float(&mut c, expected)) == 0 {
-                    fail(&mut c, view("compound assignment needs a numeric variable"));
-                }
-            }
-            if through {
-                narrow := caddr_ty(&mut c, target);
-                if narrow != 0 {
-                    oldvalue = caddr_load(&mut c, target, narrow);
-                } else {
-                    get(&mut c, target, view("%rax"));
-                    o(&mut c, view("movq (%rax),%rax\n"));
-                    oldvalue = save(&mut c);
-                }
-                if c.raw == 0 {
-                    idx := resource(&mut c, target);
-                    r := &c.resources[idx - 1];
-                    place := r.target;
-                    authority := r.authority;
-                    c
-                        .resources
-                        .push(
-                            Resource {
-                                slot: oldvalue,
-                                ty: 0,
-                                flag: 0,
-                                base: target + 1,
-                                field: 0,
-                                via: 1,
-                                place: place,
-                                target: 0,
-                                authority: authority,
-                            }
-                        );
-                    observe(&mut c, oldvalue);
-                }
-            } else {
-                observe(&mut c, id);
-                get(&mut c, id, view("%rax"));
-                oldvalue = save(&mut c);
-            }
-        }
-        if operator != 61 {
-            reservation = reserve_compound(&mut c, target, through);
-        }
-        vstart := c.pos;
-        mut v = expr_expected(&mut c, 0, expected);
-        vend := c.pos;
-        expect(&mut c, view(";"));
-        if (through == 0) & (c.raw == 0) {
-            expected = settle_flex(&mut c, l - 1, v.ty);
-            if (operator != 61) & (oldvalue != 0) {
-                get(&mut c, id, view("%rax"));
-                o(&mut c, view("movq %rax,"));
-                stack_slot(&mut c, oldvalue);
-                c.out.push(10);
-            }
-        }
-        if reservation {
-            release(&mut c, reservation - 1);
-        }
-        if (operator == 61) & (c.raw == 0) {
-            v = adopt_value(&mut c, v, vstart, vend, expected);
-        }
-        if operator != 61 {
-            op := compound_operator(operator);
-            if (c.raw == 0) & is_float(&mut c, expected) {
-                v = adopt_float(&mut c, v, vstart, vend, expected);
-                require_type(&mut c, v.ty, expected);
-                if (op != 43) & (op != 45) & (op != 42) & (op != 47) {
-                    fail(&mut c, view("operator not defined for floats"));
-                }
-                opv := imm(&mut c, op);
-                mut value = invoke(&mut c, view("rt_f64_op"), three(opv, oldvalue, v.t));
-                if is_f32(&mut c, expected) {
-                    value = invoke(&mut c, view("rt_f32_round"), one(value));
-                }
-                v = val(value, expected);
-            } else {
-                if (c.raw == 0) & (ty_kind(&mut c, expected) == 18) {
-                    v = hint_use(&mut c, v, vstart, vend, expected);
-                    mut vty = v.ty;
-                    if (vty == 0) & (c.lit_start == vstart) & (c.lit_end == vend) {
-                        if adopt_literal(&mut c, vstart, vend, expected) {
-                            vty = expected;
-                        }
-                    }
-                    require_type(&mut c, vty, expected);
-                    r := int_binary(&mut c, op, oldvalue, v.t, expected);
-                    v = val(r.t, expected);
-                } else {
-                    if c.raw == 0 {
-                        require_type(&mut c, v.ty, 0);
-                    }
-                    value := binary(&mut c, op, oldvalue, v.t);
-                    v = val(value, 0);
-                }
-            }
-        }
-
-        mut storage = ty;
-        if through {
-            storage = fieldty;
-        }
-        if contains_borrow(&mut c, storage, 0) == 0 {
-            expire_locals(&mut c);
-        }
-        source := place_of(&mut c, v.t);
-        mut destination = place_of(&mut c, target);
-        if through {
-            destination = target_of(&mut c, target);
-        }
-        if c.raw == 0 {
-            check_writeback(&mut c, destination, storage, source);
-            if through {
-                require_write(&mut c, target);
-            } else {
-                place := place_of(&mut c, target);
-                if place != 0 {
-                    if ownership::can_cleanup(&c.check, place) == 0 {
-                        fail(&mut c, view("assignment conflicts with live borrow"));
-                    }
-                }
-            }
-            mut expected = local_ty(&mut c, l - 1);
-            if through {
-                expected = fieldty;
-            }
-            require_type(&mut c, v.ty, expected);
-        }
-        if through == 0 {
-            if target == v.t {
-                return ();
-            }
-        } else {
-            if (destination != 0) & (destination == source) {
-                return ();
-            }
-        }
-        if through {
-            storage_bonds(&mut c, source, destination);
-            move_out(&mut c, val(v.t, v.ty));
-        }
-        if through == 0 {
-            old := resource(&mut c, target);
-            if old != 0 {
-                release(&mut c, old - 1);
-            }
-        }
-        // An embedded C record's old bytes are plain data, overwritten in place (no drop).
-        embedded := (caddr_ty(&mut c, target) != 0) & (is_c_record(&mut c, fieldty) != 0);
-        if through & (embedded == 0) {
-            if needs_drop(&mut c, fieldty) {
-                get(&mut c, target, view("%rax"));
-                o(&mut c, view("movq (%rax),%rdi\n"));
-                drop_call(&mut c, fieldty);
-            }
-        }
-        narrow_store := caddr_ty(&mut c, target) * through;
-        if narrow_store != 0 {
-            caddr_store(&mut c, target, narrow_store, v.t);
-            return ();
-        }
-        get(&mut c, v.t, view("%rax"));
-        if through {
-            get(&mut c, target, view("%rcx"));
-            o(&mut c, view("movq %rax,(%rcx)\n"));
-        } else {
-            o(&mut c, view("movq %rax,"));
-            stack_slot(&mut c, target);
-            c.out.push(10);
-            old := resource(&mut c, target);
-            if old != 0 {
-                mut r = &c.resources[old - 1];
-                flag := r.flag;
-                place := place_of(&mut c, target);
-                if place != 0 {
-                    ownership::initialize(&mut c.check, place);
-                }
-                if flag != 0 {
-                    o(&mut c, view("movq $1,"));
-                    stack_slot(&mut c, flag - 1);
-                    c.out.push(10);
-                }
-            }
-        }
-        if through == 0 {
-            transfer_bonds(&mut c, source, destination);
-            newtarget := target_of(&mut c, v.t);
-            move_out(&mut c, val(v.t, v.ty));
-            if ty_kind(&mut c, ty) == 7 {
-                set_target(&mut c, target, newtarget, target + 1);
-            }
-        }
+        assignment_tail(&mut c, l, id, ty, target, u64[through, fieldty]);
         return ();
     }
     mut v = expr(&mut c, 0);
@@ -17402,6 +17765,219 @@ fn statement<a>(c: (&a mut C)) -> unit {
             }
         } else {
             release(&mut c, r - 1);
+        }
+    }
+    return ();
+}
+// The rest of an assignment once its target is known: `target` is the binding slot (through =
+// 0, `l` its local) or a field reference (through = 1, `fieldty` the field type).
+fn assignment_tail<a>(c: (&a mut C), l: u64, id: u64, ty: u64, target: u64, through_fieldty: u64[]) -> unit {
+    through := through_fieldty[0];
+    fieldty := through_fieldty[1];
+    if through {
+        pin_assignment(&mut c, target);
+    }
+    operator := kind(&mut c);
+    advance(&mut c);
+    mut oldvalue = 0;
+    mut reservation = 0;
+    mut expected = ty;
+    if through {
+        expected = fieldty;
+    }
+    if operator != 61 {
+        if c.raw == 0 {
+            if (integer(&mut c, expected) + is_float(&mut c, expected)) == 0 {
+                fail(&mut c, view("compound assignment needs a numeric variable"));
+            }
+        }
+        if through {
+            narrow := caddr_ty(&mut c, target);
+            if narrow != 0 {
+                oldvalue = caddr_load(&mut c, target, narrow);
+            } else {
+                get(&mut c, target, view("%rax"));
+                o(&mut c, view("movq (%rax),%rax\n"));
+                oldvalue = save(&mut c);
+            }
+            if c.raw == 0 {
+                idx := resource(&mut c, target);
+                r := &c.resources[idx - 1];
+                place := r.target;
+                authority := r.authority;
+                c
+                    .resources
+                    .push(
+                        Resource {
+                            slot: oldvalue,
+                            ty: 0,
+                            flag: 0,
+                            base: target + 1,
+                            field: 0,
+                            via: 1,
+                            place: place,
+                            target: 0,
+                            authority: authority,
+                        }
+                    );
+                observe(&mut c, oldvalue);
+            }
+        } else {
+            observe(&mut c, id);
+            get(&mut c, id, view("%rax"));
+            oldvalue = save(&mut c);
+        }
+    }
+    if operator != 61 {
+        reservation = reserve_compound(&mut c, target, through);
+    }
+    vstart := c.pos;
+    mut v = expr_expected(&mut c, 0, expected);
+    vend := c.pos;
+    expect(&mut c, view(";"));
+    if (through == 0) & (c.raw == 0) {
+        expected = settle_flex(&mut c, l - 1, v.ty);
+        if (operator != 61) & (oldvalue != 0) {
+            get(&mut c, id, view("%rax"));
+            o(&mut c, view("movq %rax,"));
+            stack_slot(&mut c, oldvalue);
+            c.out.push(10);
+        }
+    }
+    if reservation {
+        release(&mut c, reservation - 1);
+    }
+    if (operator == 61) & (c.raw == 0) {
+        v = adopt_value(&mut c, v, vstart, vend, expected);
+    }
+    if operator != 61 {
+        op := compound_operator(operator);
+        if (c.raw == 0) & is_float(&mut c, expected) {
+            v = adopt_float(&mut c, v, vstart, vend, expected);
+            require_type(&mut c, v.ty, expected);
+            if (op != 43) & (op != 45) & (op != 42) & (op != 47) {
+                fail(&mut c, view("operator not defined for floats"));
+            }
+            opv := imm(&mut c, op);
+            mut value = invoke(&mut c, view("rt_f64_op"), three(opv, oldvalue, v.t));
+            if is_f32(&mut c, expected) {
+                value = invoke(&mut c, view("rt_f32_round"), one(value));
+            }
+            v = val(value, expected);
+        } else {
+            if (c.raw == 0) & (ty_kind(&mut c, expected) == 18) {
+                v = hint_use(&mut c, v, vstart, vend, expected);
+                mut vty = v.ty;
+                if (vty == 0) & (c.lit_start == vstart) & (c.lit_end == vend) {
+                    if adopt_literal(&mut c, vstart, vend, expected) {
+                        vty = expected;
+                    }
+                }
+                require_type(&mut c, vty, expected);
+                r := int_binary(&mut c, op, oldvalue, v.t, expected);
+                v = val(r.t, expected);
+            } else {
+                if c.raw == 0 {
+                    require_type(&mut c, v.ty, 0);
+                }
+                value := binary(&mut c, op, oldvalue, v.t);
+                v = val(value, 0);
+            }
+        }
+    }
+
+    mut storage = ty;
+    if through {
+        storage = fieldty;
+    }
+    if contains_borrow(&mut c, storage, 0) == 0 {
+        expire_locals(&mut c);
+    }
+    source := place_of(&mut c, v.t);
+    mut destination = place_of(&mut c, target);
+    if through {
+        destination = target_of(&mut c, target);
+    }
+    if c.raw == 0 {
+        check_writeback(&mut c, destination, storage, source);
+        if through {
+            require_write(&mut c, target);
+        } else {
+            place := place_of(&mut c, target);
+            if place != 0 {
+                if ownership::can_cleanup(&c.check, place) == 0 {
+                    fail(&mut c, view("assignment conflicts with live borrow"));
+                }
+            }
+        }
+        mut expected = fieldty;
+        if through == 0 {
+            expected = local_ty(&mut c, l - 1);
+        }
+        require_type(&mut c, v.ty, expected);
+    }
+    if through == 0 {
+        if target == v.t {
+            return ();
+        }
+    } else {
+        if (destination != 0) & (destination == source) {
+            return ();
+        }
+    }
+    if through {
+        storage_bonds(&mut c, source, destination);
+        move_out(&mut c, val(v.t, v.ty));
+    }
+    if through == 0 {
+        old := resource(&mut c, target);
+        if old != 0 {
+            release(&mut c, old - 1);
+        }
+    }
+    // An embedded C record's old bytes are plain data, overwritten in place (no drop).
+    embedded := (caddr_ty(&mut c, target) != 0) & (is_c_record(&mut c, fieldty) != 0);
+    if through & (embedded == 0) {
+        if needs_drop(&mut c, fieldty) {
+            get(&mut c, target, view("%rax"));
+            o(&mut c, view("movq (%rax),%rdi\n"));
+            drop_call(&mut c, fieldty);
+        }
+    }
+    narrow_store := caddr_ty(&mut c, target) * through;
+    if narrow_store != 0 {
+        caddr_store(&mut c, target, narrow_store, v.t);
+        return ();
+    }
+    get(&mut c, v.t, view("%rax"));
+    if through {
+        get(&mut c, target, view("%rcx"));
+        o(&mut c, view("movq %rax,(%rcx)\n"));
+    } else {
+        o(&mut c, view("movq %rax,"));
+        stack_slot(&mut c, target);
+        c.out.push(10);
+        old := resource(&mut c, target);
+        if old != 0 {
+            mut r = &c.resources[old - 1];
+            flag := r.flag;
+            place := place_of(&mut c, target);
+            if place != 0 {
+                ownership::initialize(&mut c.check, place);
+            }
+            if flag != 0 {
+                o(&mut c, view("movq $1,"));
+                stack_slot(&mut c, flag - 1);
+                c.out.push(10);
+            }
+        }
+    }
+    if through == 0 {
+        transfer_bonds(&mut c, source, destination);
+        newtarget := target_of(&mut c, v.t);
+        move_out(&mut c, val(v.t, v.ty));
+        if ty_kind(&mut c, ty) == 7 {
+            set_target(&mut c, target, newtarget, target + 1);
         }
     }
     return ();
@@ -17876,6 +18452,8 @@ pub fn main() -> u64 {
         bce_index: u8[],
         bce_base: u8[],
         lit_negative: 0,
+        byte_start: 0,
+        byte_end: 0,
         flit_start: 0,
         flit_end: 0,
         flit_tok: 0,
