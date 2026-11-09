@@ -56,6 +56,12 @@ const fixtures = [
     symbols: ['c_vec2', 'c_vec3d', 'c_fi', 'c_di', 'c_quad'],
   },
   {
+    // Extern records embedded by value (offsets, projection, assignment, copy-out, results).
+    name: 'nested_records',
+    stdout: '49044\n21\n3\n-7\n100000000000\n42\n9\n77\n154\n6\n7\n42\n',
+    symbols: ['c_outer_sum', 'c_outer_fill', 'c_outer_size', 'c_make_wrap'],
+  },
+  {
     // A COM-shaped vtable call with seven arguments and two floats through a typed cfn slot.
     name: 'call_com_slot',
     stdout: '1007\n1045\n',

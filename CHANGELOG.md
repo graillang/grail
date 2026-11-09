@@ -7,6 +7,12 @@
   when its owner is cleaned up. The anonymous origin behind the returned reference was left
   "maybe live" by the branch join and never ended; it now ends once no live loan reaches it, so
   a reference still in use after the join keeps the owner borrowed exactly as before.
+- Nested C records: an `extern "C" record` field may itself be an extern record, embedded by
+  value at its C offset with C alignment and size. Reads and writes project through it in place
+  (`o.inner.x = v`), whole-record assignment copies the bytes in, a value read copies them out,
+  and nested records come back from C by value. Results with floats inside an embedded record
+  are refused for now. `tests/ffi/nested_records.grl` checks `sizeof`/`offsetof` against clang
+  and runs on x86-64, AArch64 and RISC-V 64 Linux and on Windows x86-64 (Wine).
 
 - DWARF debug info on Linux AArch64 and RISC-V 64: `--debug` emits the same line table and
   typed variables as on x86-64 (frame base `x29` / `s0`). Under qemu with gdb's remote stub,

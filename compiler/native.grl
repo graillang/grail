@@ -229,6 +229,8 @@ struct C {
     caddr: u64[],
     // An exported callback's float result: 0 none, 1 f64, 2 f32 (returned in xmm0/d0/fa0).
     export_fret: u64,
+    // Set for one cfield_load: another `.field` projection follows this one.
+    cfield_more: u64,
     alias_next: u64,
     types: Ty[],
     decls: Decl[],
@@ -5253,6 +5255,11 @@ fn ffi_emit_call<a, b, d, e>(
             rslot = invoke(&mut c, view("rt_rec"), one(words));
             rmode = 1;
             rdecl = rd;
+            if ffi_record_has_nested(&mut c, rd) & ffi_record_has_float_deep(&mut c, rd) {
+                // Classifying floats inside an embedded record needs the flattened field list;
+                // refuse rather than read the wrong registers.
+                fail(&mut c, view("extern C record results with floats inside an embedded record are not supported yet"));
+            }
             if ffi_record_has_float(&mut c, rd) {
                 fplan = ffi_float_plan(&mut c, rd, abi);
             }
@@ -5648,16 +5655,31 @@ fn ffi_align_up(n: u64, a: u64) -> u64 {
     return n + a - r;
 }
 fn ffi_layout_fail<a>(c: (&a mut C)) -> unit {
-    // Nested extern records are deliberately absent: a Grail record value is a heap
-    // pointer, so embedding one would store the pointer where C expects the bytes.
-    fail(&mut c, view("extern record fields must be 8/16/32/64-bit integers, f32, f64, handles or CStr"));
+    // Ordinary Grail records are heap pointers and cannot be embedded; extern records embed by
+    // value (their bytes at the field's C offset).
+    fail(&mut c, view("extern record fields must be 8/16/32/64-bit integers, f32, f64, handles, CStr or extern records"));
     return ();
+}
+fn is_c_record<a>(c: (&a mut C), ty: u64) -> u64 {
+    if ty_kind(&mut c, ty) != 8 {
+        return 0;
+    }
+    d := ty_arg(&mut c, ty);
+    if c.decls[d].is_enum {
+        return 0;
+    }
+    return c.decls[d].c_layout;
 }
 fn ffi_field_align<a>(c: (&a mut C), ty: u64) -> u64 {
     if ty == 0 {
         return 8;
     }
     k := ty_kind(&mut c, ty);
+    // An embedded extern record: its bytes in place, with its own C alignment and size.
+    if is_c_record(&mut c, ty) {
+        inner := ty_arg(&mut c, ty);
+        return ffi_record_align(&mut c, inner);
+    }
     // f32 is C float (4 bytes), f64 is C double (8 bytes).
     if k == 21 {
         if is_f32(&mut c, ty) {
@@ -5682,6 +5704,11 @@ fn ffi_field_size<a>(c: (&a mut C), ty: u64) -> u64 {
         return 8;
     }
     k := ty_kind(&mut c, ty);
+    // An embedded extern record: its bytes in place, with its own C alignment and size.
+    if is_c_record(&mut c, ty) {
+        inner := ty_arg(&mut c, ty);
+        return ffi_record_size(&mut c, inner);
+    }
     // f32 is C float (4 bytes), f64 is C double (8 bytes).
     if k == 21 {
         if is_f32(&mut c, ty) {
@@ -7111,6 +7138,26 @@ fn cfield_load<a>(c: (&a mut C), base: u64, d: u64, k: u64, address: u64) -> u64
     ty := field_ty(&mut c, d, k);
     off := ffi_offset(&mut c, d, k);
     size := ffi_field_size(&mut c, ty);
+    more := exchange(&mut c.cfield_more, 0);
+    if is_c_record(&mut c, ty) {
+        // The embedded record's bytes start at base+off: a further projection (o.inner.x) and an
+        // assignment place (o.inner = r) use that interior address; a value read copies them
+        // into a fresh record, since C structs are plain data.
+        get(&mut c, base, view("%rax"));
+        o(&mut c, view("leaq "));
+        on(&mut c, off);
+        o(&mut c, view("(%rax),%rax\n"));
+        at := save(&mut c);
+        if address {
+            c.caddr.push(at);
+            c.caddr.push(ty);
+            return at;
+        }
+        if more {
+            return at;
+        }
+        return c_record_copy(&mut c, at, ty);
+    }
     get(&mut c, base, view("%rax"));
     if address {
         o(&mut c, view("leaq "));
@@ -7160,6 +7207,15 @@ fn cfield_store<a>(c: (&a mut C), base: u64, d: u64, k: u64, value: u64) -> unit
     ty := field_ty(&mut c, d, k);
     off := ffi_offset(&mut c, d, k);
     size := ffi_field_size(&mut c, ty);
+    if is_c_record(&mut c, ty) {
+        get(&mut c, base, view("%rax"));
+        o(&mut c, view("leaq "));
+        on(&mut c, off);
+        o(&mut c, view("(%rax),%rax\n"));
+        at := save(&mut c);
+        caddr_store(&mut c, at, ty, value);
+        return ();
+    }
     if size == 8 {
         get(&mut c, base, view("%rcx"));
         get(&mut c, value, view("%rax"));
@@ -7186,6 +7242,17 @@ fn cfield_store<a>(c: (&a mut C), base: u64, d: u64, k: u64, value: u64) -> unit
     w := imm(&mut c, size);
     invoke(&mut c, view("rt_store_sized"), three(addr, stored, w));
     return ();
+}
+// A fresh record holding a copy of the C record bytes at `src`.
+fn c_record_copy<a>(c: (&a mut C), src: u64, ty: u64) -> u64 {
+    d := ty_arg(&mut c, ty);
+    words := ffi_record_words(&mut c, d);
+    n := imm(&mut c, words);
+    fresh := invoke(&mut c, view("rt_rec"), one(n));
+    size := ffi_record_size(&mut c, d);
+    bytes := imm(&mut c, size);
+    invoke(&mut c, view("rt_copy_bytes"), three(fresh, src, bytes));
+    return fresh;
 }
 // The C field type behind an address slot made by cfield_load, or 0 for an ordinary word.
 fn caddr_ty<a>(c: (&a mut C), slot: u64) -> u64 {
@@ -7218,6 +7285,15 @@ fn caddr_load<a>(c: (&a mut C), slot: u64, ty: u64) -> u64 {
 }
 // Stores a Grail word into a narrow C field through its address slot.
 fn caddr_store<a>(c: (&a mut C), slot: u64, ty: u64, value: u64) -> unit {
+    if is_c_record(&mut c, ty) {
+        // The moved-in record's bytes replace the embedded ones; its own buffer is released.
+        d := ty_arg(&mut c, ty);
+        size := ffi_record_size(&mut c, d);
+        bytes := imm(&mut c, size);
+        invoke(&mut c, view("rt_copy_bytes"), three(slot, value, bytes));
+        invoke(&mut c, view("rt_free"), one(value));
+        return ();
+    }
     mut stored = value;
     if is_f32(&mut c, ty) {
         get(&mut c, value, view("%rax"));
@@ -7451,6 +7527,34 @@ fn ffi_record_has_float<a>(c: (&a mut C), d: u64) -> u64 {
     }
     return 0;
 }
+// 1 when a C-layout record embeds another extern record.
+fn ffi_record_has_nested<a>(c: (&a mut C), d: u64) -> u64 {
+    count := c.decls[d].count;
+    for i in count {
+        ty := field_ty(&mut c, d, i);
+        if is_c_record(&mut c, ty) {
+            return 1;
+        }
+    }
+    return 0;
+}
+// Floats anywhere in the record, embedded records included.
+fn ffi_record_has_float_deep<a>(c: (&a mut C), d: u64) -> u64 {
+    count := c.decls[d].count;
+    for i in count {
+        ty := field_ty(&mut c, d, i);
+        if is_float(&mut c, ty) {
+            return 1;
+        }
+        if is_c_record(&mut c, ty) {
+            inner := ty_arg(&mut c, ty);
+            if ffi_record_has_float_deep(&mut c, inner) {
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
 fn field_path<a>(c: (&a mut C), id: u64, lty: u64, address: u64) -> Val {
     mut t = id;
     mut ty = lty;
@@ -7482,6 +7586,8 @@ fn field_path<a>(c: (&a mut C), id: u64, lty: u64, address: u64) -> Val {
         last := (kind(&mut c) != 46) & (address != 0);
         mut n = 0;
         if c.decls[d].c_layout {
+            more := kind(&mut c) == 46;
+            exchange(&mut c.cfield_more, more);
             n = cfield_load(&mut c, b, d, k, last);
         } else {
             n = rec_load(&mut c, b, k, last);
@@ -7509,6 +7615,16 @@ fn field_path<a>(c: (&a mut C), id: u64, lty: u64, address: u64) -> Val {
                     );
             }
             return val(n, ty);
+        }
+        outer_c := c.decls[d].c_layout;
+        next_dot := kind(&mut c) == 46;
+        inner_c := is_c_record(&mut c, fty);
+        if outer_c & (address == 0) & (next_dot == 0) & (inner_c != 0) {
+            // A copied-out embedded C record is a fresh value, independent of the field's place:
+            // reading it is a read of the containing record, and the copy is owned by the reader.
+            observe(&mut c, b);
+            own(&mut c, n, fty);
+            return val(n, fty);
         }
         alias_field(&mut c, n, fty, b, k, via);
         t = n;
@@ -17107,7 +17223,9 @@ fn statement<a>(c: (&a mut C)) -> unit {
                 release(&mut c, old - 1);
             }
         }
-        if through {
+        // An embedded C record's old bytes are plain data, overwritten in place (no drop).
+        embedded := (caddr_ty(&mut c, target) != 0) & (is_c_record(&mut c, fieldty) != 0);
+        if through & (embedded == 0) {
             if needs_drop(&mut c, fieldty) {
                 get(&mut c, target, view("%rax"));
                 o(&mut c, view("movq (%rax),%rdi\n"));
@@ -17501,7 +17619,12 @@ fn emit_drops<a>(c: (&a mut C)) -> unit {
                 }
                 if kind == 8 {
                     d := &c.decls[arg];
-                    count := d.count;
+                    // A C-layout record's fields are plain bytes (embedded records included):
+                    // only its own buffer is freed.
+                    mut count = d.count;
+                    if d.c_layout {
+                        count = 0;
+                    }
                     is_enum := d.is_enum;
                     for i in count {
                         t := field_type(&mut c, ty, i);
@@ -17591,6 +17714,7 @@ pub fn main() -> u64 {
         ffi_fixed: 0,
         caddr: u64[],
         export_fret: 0,
+        cfield_more: 0,
         alias_next: 1,
         types: Ty[],
         decls: Decl[],

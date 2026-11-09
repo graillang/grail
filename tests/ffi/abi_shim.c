@@ -132,3 +132,13 @@ struct vec3d c_vec3d(double s) { struct vec3d r = { s, s * 2, s * 3 }; return r;
 struct fi c_fi(float f, int i) { struct fi r = { f, i }; return r; }
 struct di c_di(double d, long long i) { struct di r = { d, i }; return r; }
 struct quad c_quad(float s) { struct quad r = { s, s + 1, s + 2, s + 3 }; return r; }
+
+/* ---- nested records: C embeds the inner struct's bytes at its aligned offset ---- */
+struct inner2 { short a; long long b; };            /* 16 bytes, align 8 */
+struct outer2 { char tag; struct inner2 in; int tail; struct inner2 last; };
+long long c_outer_sum(const struct outer2 *o) { return o->tag + o->in.a + o->in.b + o->tail + o->last.a + o->last.b; }
+void c_outer_fill(struct outer2 *o) { o->tag = 3; o->in.a = -7; o->in.b = 100000000000LL; o->tail = 42; o->last.a = 9; o->last.b = -5; }
+long long c_outer_size(void) { return (long long)sizeof(struct outer2) * 1000 + (long long)__builtin_offsetof(struct outer2, in) * 100 + (long long)__builtin_offsetof(struct outer2, tail) * 10 + (long long)(__builtin_offsetof(struct outer2, last) / 8); }
+struct pair_in { int x; int y; };
+struct wrap { struct pair_in p; long long z; };
+struct wrap c_make_wrap(int x, int y) { struct wrap w = { { x, y }, (long long)x * y }; return w; }

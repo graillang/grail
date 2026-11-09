@@ -1,0 +1,37 @@
+// Extern records embedded by value: C offsets and sizes, projection through the embedded
+// record (o.inn.b), assignment of a whole embedded record, copying it out, and a by-value
+// result whose first field is a record.
+extern "C" record Inner2 { a: i16, b: i64 }
+extern "C" record Outer2 { tag: i8, inn: Inner2, tail: i32, last: Inner2 }
+extern "C" record PairIn { x: i32, y: i32 }
+extern "C" record Wrap { p: PairIn, z: i64 }
+extern "C" lib "shim.o" fn c_outer_sum(o: Outer2) -> i64;
+extern "C" lib "shim.o" fn c_outer_fill(o: Outer2) -> unit;
+extern "C" lib "shim.o" fn c_outer_size() -> i64;
+extern "C" lib "shim.o" fn c_make_wrap(x: i32, y: i32) -> Wrap;
+
+fn main() -> u64 {
+    mut o = Outer2 { tag: 1, inn: Inner2 { a: 2, b: 3 }, tail: 4, last: Inner2 { a: 5, b: 6 } };
+    unsafe {
+        println(c_outer_size());
+        println(c_outer_sum(o));
+        c_outer_fill(o);
+    }
+    println(o.tag);
+    println(o.inn.a);
+    println(o.inn.b);
+    println(o.tail);
+    o.last.b = 77;
+    o.inn = Inner2 { a: 11, b: 12 };
+    copy := o.last;
+    println(copy.a);
+    println(copy.b);
+    unsafe {
+        println(c_outer_sum(o));
+        w := c_make_wrap(6, 7);
+        println(w.p.x);
+        println(w.p.y);
+        println(w.z);
+    }
+    return 0;
+}

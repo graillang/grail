@@ -187,5 +187,16 @@
     "stdout": "1.5\n-2.25\n3\n0.75\n-9\n3.125\n1234567890123\n46\n",
     "status": 0,
     "note": "Win64 classifies record results by size only: 8-byte records in rax, others through a hidden pointer"
+  },
+  {
+    "name": "ffi-nested-records",
+    "shim": {
+      "windows-x86_64": "tests/ffi/abi_shim.c",
+      "windows-aarch64": "tests/ffi/abi_shim.c"
+    },
+    "source": "// Extern records embedded by value: C offsets and sizes, projection through the embedded\n// record (o.inn.b), assignment of a whole embedded record, copying it out, and a by-value\n// result whose first field is a record.\nextern \"C\" record Inner2 { a: i16, b: i64 }\nextern \"C\" record Outer2 { tag: i8, inn: Inner2, tail: i32, last: Inner2 }\nextern \"C\" record PairIn { x: i32, y: i32 }\nextern \"C\" record Wrap { p: PairIn, z: i64 }\nextern \"C\" lib \"shim.o\" fn c_outer_sum(o: Outer2) -> i64;\nextern \"C\" lib \"shim.o\" fn c_outer_fill(o: Outer2) -> unit;\nextern \"C\" lib \"shim.o\" fn c_outer_size() -> i64;\nextern \"C\" lib \"shim.o\" fn c_make_wrap(x: i32, y: i32) -> Wrap;\n\nfn main() -> u64 {\n    mut o = Outer2 { tag: 1, inn: Inner2 { a: 2, b: 3 }, tail: 4, last: Inner2 { a: 5, b: 6 } };\n    unsafe {\n        println(c_outer_size());\n        println(c_outer_sum(o));\n        c_outer_fill(o);\n    }\n    println(o.tag);\n    println(o.inn.a);\n    println(o.inn.b);\n    println(o.tail);\n    o.last.b = 77;\n    o.inn = Inner2 { a: 11, b: 12 };\n    copy := o.last;\n    println(copy.a);\n    println(copy.b);\n    unsafe {\n        println(c_outer_sum(o));\n        w := c_make_wrap(6, 7);\n        println(w.p.x);\n        println(w.p.y);\n        println(w.z);\n    }\n    return 0;\n}\n",
+    "stdout": "49044\n21\n3\n-7\n100000000000\n42\n9\n77\n154\n6\n7\n42\n",
+    "status": 0,
+    "note": "extern records embedded by value at C offsets"
   }
 ]
