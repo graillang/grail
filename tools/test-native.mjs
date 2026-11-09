@@ -62,8 +62,10 @@ for (const test of cases) {
   const directory = join(work, test.name);
   rmSync(directory, { recursive: true, force: true });
   mkdirSync(directory, { recursive: true });
-  let files = test.files;
-  if (!files) { const input = join(directory, 'input.grl'); writeFileSync(input, test.source); files = [input, ...(test.modules ?? [])]; }
+  // A case's own files (or its inline source) come first, then the modules it lists.
+  let files;
+  if (test.files) files = [...test.files, ...(test.modules ?? [])];
+  else { const input = join(directory, 'input.grl'); writeFileSync(input, test.source); files = [input, ...(test.modules ?? [])]; }
   if (test.reject) {
     const assembly = join(directory, 'prior.s');
     writeFileSync(assembly, 'prior valid artifact');
