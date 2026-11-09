@@ -4235,5 +4235,27 @@
     "source": "struct D {\n    out: u8[]\n}\nfn run(n: u64) -> u64 {\n    mut d = D { out: u8[] };\n    mut v = u8[1];\n    while n > 9 {\n        return 7;\n    }\n    for i in n {\n        if i > 100 {\n            continue;\n        }\n        return 8;\n    }\n    v.push(2);\n    out := exchange(&mut d.out, u8[]);\n    return v.len() + out.len();\n}\nfn main() {\n    println(run(0));\n    println(run(3));\n    println(run(12));\n}\n",
     "stdout": "2\n8\n7\n",
     "note": "a loop body that always returns or continues leaves the exit with the entry state; locals stay usable after the loop (they used to read as moved)"
+  },
+  {
+    "name": "narrow-vectors",
+    "note": "f32[]/u32[]/i32[] hold 4-byte elements: every vector operation, by-value loops, printing and generic use",
+    "source": "fn total<a, T>(v: (&a T[])) -> u64 {\n    return v.len();\n}\nfn main() {\n    mut f = f32[1.5, -2.25, 3.0];\n    f.push(0.1);\n    f[1] = f[1] * 2.0;\n    f[2] += 0.5;\n    mut s: f32 = 0.0;\n    for x in f {\n        s = s + x;\n    }\n    println(\"{} {} {} {}\", f[0], f[1], f[2], f[3]);\n    println(\"{}\", s);\n    println(\"{}\", f);\n    mut u = u32[4000000000, 7];\n    u.push(4294967295);\n    u.insert(0, 1);\n    println(\"{} {}\", u, u.contains(4294967295));\n    mut i = i32[-5, 6];\n    i.push(-2147483648);\n    i[0] -= 1;\n    println(\"{} {} {}\", i, i.pop(), i.len());\n    z := f32[0.25; 5];\n    w := z.copy();\n    println(\"{} {}\", w, total(&w));\n    mut r = i32[1, 2, 3, 4];\n    r.reverse();\n    r.swap(0, 3);\n    removed := r.remove(1);\n    println(\"{} {}\", r, removed);\n    r.truncate(1);\n    println(\"{}\", r);\n}\n",
+    "stdout": "1.5 -4.5 3.5 0.1\n0.6\n[1.5, -4.5, 3.5, 0.1]\n[1, 4000000000, 7, 4294967295] true\n[-6, 6, -2147483648] -2147483648 2\n[0.25, 0.25, 0.25, 0.25, 0.25] 5\n[1, 2, 4] 3\n[1]\n",
+    "status": 0
+  },
+  {
+    "name": "narrow-vector-borrow-loop",
+    "source": "fn main() {\n    mut f = f32[1.0];\n    for x in &mut f {\n        *x = 2.0;\n    }\n}\n",
+    "reject": true
+  },
+  {
+    "name": "narrow-vector-borrow-element",
+    "source": "fn bump<a>(r: (&a mut f32)) {\n    *r = *r + 1.0;\n}\nfn main() {\n    mut f = f32[1.0];\n    bump(&mut f[0]);\n}\n",
+    "reject": true
+  },
+  {
+    "name": "narrow-c-field-borrow",
+    "source": "extern \"C\" record P { x: f32, y: i32 }\nfn bump<a>(r: (&a mut f32)) {\n    *r = *r + 1.0;\n}\nfn main() {\n    mut p = P { x: 1.5, y: -3 };\n    bump(&mut p.x);\n}\n",
+    "reject": true
   }
 ]
