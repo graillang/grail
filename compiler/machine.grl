@@ -414,22 +414,33 @@ fn read_operand<a, b, c>(o: (&a mut Out), operand: &b [u8], dst: &c [u8], byte: 
         }
         return ();
     }
+    // `byte` is the access width: 0 a word, 1 a byte, 2 a zero-extended 32-bit word (movl).
     address(&mut o, view((operand)));
     if target == 1 {
-        if byte {
+        if byte == 1 {
             put(&mut o, view("ldrb "));
             w := armword(view((dst)));
             put(&mut o, view(w));
         } else {
-            put(&mut o, view("ldr "));
-            put(&mut o, view((dst)));
+            if byte == 2 {
+                put(&mut o, view("ldr "));
+                w := armword(view((dst)));
+                put(&mut o, view(w));
+            } else {
+                put(&mut o, view("ldr "));
+                put(&mut o, view((dst)));
+            }
         }
         put(&mut o, view(",[x13]\n"));
     } else {
-        if byte {
+        if byte == 1 {
             put(&mut o, view("lbu "));
         } else {
-            put(&mut o, view("ld "));
+            if byte == 2 {
+                put(&mut o, view("lwu "));
+            } else {
+                put(&mut o, view("ld "));
+            }
         }
         put(&mut o, view((dst)));
         put(&mut o, view(",0(t3)\n"));
@@ -475,16 +486,24 @@ fn store<a, b>(o: (&a mut Out), operand: &b [u8], byte: u64) -> unit {
     }
     address(&mut o, view((operand)));
     if target == 1 {
-        if byte {
+        if byte == 1 {
             put(&mut o, view("strb w10,[x13]\n"));
         } else {
-            put(&mut o, view("str x10,[x13]\n"));
+            if byte == 2 {
+                put(&mut o, view("str w10,[x13]\n"));
+            } else {
+                put(&mut o, view("str x10,[x13]\n"));
+            }
         }
     } else {
-        if byte {
+        if byte == 1 {
             put(&mut o, view("sb t1,0(t3)\n"));
         } else {
-            put(&mut o, view("sd t1,0(t3)\n"));
+            if byte == 2 {
+                put(&mut o, view("sw t1,0(t3)\n"));
+            } else {
+                put(&mut o, view("sd t1,0(t3)\n"));
+            }
         }
     }
     return ();
@@ -1358,12 +1377,24 @@ fn instruction<a, b>(o: (&a mut Out), line: &b [u8]) -> unit {
         + eq(view((op)), view("movabsq"))
         + eq(view((op)), view("movb"))
         + eq(view((op)), view("movzbq")) {
-        if target == 1 {
-            read_operand(&mut o, view(src), view("x10"), eq(view(op), view("movzbq")));
-        } else {
-            read_operand(&mut o, view(src), view("t1"), eq(view(op), view("movzbq")));
+        mut rw = eq(view(op), view("movzbq"));
+        mut sw = eq(view(op), view("movb"));
+        if eq(view(op), view("movl")) {
+            // A 32-bit move: a memory source is a zero-extending 32-bit load, a memory destination a
+            // 32-bit store; register to register zero-extends through the small-register store.
+            if (src[0] != 36) & (src[0] != 37) {
+                rw = 2;
+            }
+            if dst[0] != 37 {
+                sw = 2;
+            }
         }
-        store(&mut o, view(dst), eq(view(op), view("movb")));
+        if target == 1 {
+            read_operand(&mut o, view(src), view("x10"), rw);
+        } else {
+            read_operand(&mut o, view(src), view("t1"), rw);
+        }
+        store(&mut o, view(dst), sw);
         return ();
     }
     if eq(view((op)), view("leaq")) {

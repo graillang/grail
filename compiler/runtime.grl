@@ -3338,6 +3338,22 @@ fn rt_fmt_value(acc: u64, v: u64, code: u64) -> u64 {
         rt_pushb(acc, 93);
         return 0;
     }
+    if (code & 4095) == 8 {
+        inner := rt_div(code, 4096);
+        n := rt_len(v);
+        rt_pushb(acc, 91);
+        mut i = 0;
+        while i < n {
+            if i != 0 {
+                rt_pushb(acc, 44);
+                rt_pushb(acc, 32);
+            }
+            rt_fmt_value(acc, rt_narrow_decode(rt_at4(v, i), inner), inner);
+            i += 1;
+        }
+        rt_pushb(acc, 93);
+        return 0;
+    }
     if 1023 < code {
         return rt_fmt_int(acc, v, code - 1024);
     }
@@ -3520,6 +3536,10 @@ fn rt_vec_cmp(op: u64, a: u64, b: u64) -> u64 {
             order = 2;
         }
     }
+    return rt_order_result(op, order);
+}
+// The comparison `op` (== != < > <= >=) given an ordering 0 less, 1 equal, 2 greater.
+fn rt_order_result(op: u64, order: u64) -> u64 {
     if op == 258 {
         return order == 1;
     }
@@ -3856,6 +3876,203 @@ fn rt_seq_split(a: u64, sep: u64, valid: u64) -> u64 {
     return parts;
 }
 
+// ---- narrow vectors: f32[], u32[], i32[] store 4-byte elements ----
+// 32-bit little-endian access. The compiler has raw_load32/raw_store32 (one movl); the runtime uses
+// these until the bootstrap seed knows them (the seed compiles this file to build the compiler).
+fn rt_load32(p: u64) -> u64 {
+    return raw_byte(p) | (raw_byte(p + 1) << 8) | (raw_byte(p + 2) << 16) | (raw_byte(p + 3) << 24);
+}
+fn rt_store32(p: u64, v: u64) -> u64 {
+    raw_putbyte(p, v & 255);
+    raw_putbyte(p + 1, (v >> 8) & 255);
+    raw_putbyte(p + 2, (v >> 16) & 255);
+    raw_putbyte(p + 3, (v >> 24) & 255);
+    return 0;
+}
+// The compiler encodes each value before it reaches these routines (an f32 as its binary32 bits;
+// an integer's low 32 bits are stored) and decodes what they return, so they only move 32-bit units.
+// len and cap count elements. Ordering and equality compare the 32-bit units unsigned, which orders
+// exactly as the words the same values occupy in a word vector.
+fn rt_push4(s: u64, v: u64) -> u64 {
+    n := raw_load(s + 8);
+    cap := raw_load(s + 16);
+    if n == cap {
+        mut capacity = cap * 2;
+        if capacity == 0 {
+            capacity = 8;
+        }
+        if 288230376151711744 < capacity {
+            rt_abort();
+        }
+        ptr := rt_grow(raw_load(s), n * 4, capacity * 4);
+        raw_store(s, ptr);
+        raw_store(s + 16, capacity);
+    }
+    rt_store32(raw_load(s) + n * 4, v);
+    raw_store(s + 8, n + 1);
+    return 0;
+}
+fn rt_fill4(s: u64, v: u64, n: u64) -> u64 {
+    if 288230376151711744 < n {
+        rt_abort();
+    }
+    if n != 0 {
+        ptr := rt_grow(raw_load(s), 0, n * 4);
+        raw_store(s, ptr);
+        raw_store(s + 16, n);
+    }
+    mut i: u64 = 0;
+    while i < n {
+        rt_store32(raw_load(s) + i * 4, v);
+        i = i + 1;
+    }
+    raw_store(s + 8, n);
+    return 0;
+}
+fn rt_slot4u(s: u64, i: u64) -> u64 {
+    return raw_load(s) + i * 4;
+}
+fn rt_slot4(s: u64, i: u64) -> u64 {
+    if (i < raw_load(s + 8)) == 0 {
+        rt_abort();
+    }
+    return raw_load(s) + i * 4;
+}
+fn rt_at4u(s: u64, i: u64) -> u64 {
+    return rt_load32(raw_load(s) + i * 4);
+}
+fn rt_at4(s: u64, i: u64) -> u64 {
+    return rt_load32(rt_slot4(s, i));
+}
+fn rt_set4(s: u64, i: u64, v: u64) -> u64 {
+    rt_store32(raw_load(s) + i * 4, v);
+    return 0;
+}
+fn rt_pop4(s: u64) -> u64 {
+    n := raw_load(s + 8);
+    if n == 0 {
+        rt_abort();
+    }
+    v := rt_load32(raw_load(s) + (n - 1) * 4);
+    raw_store(s + 8, n - 1);
+    return v;
+}
+fn rt_vec_copy4(src: u64) -> u64 {
+    dst := rt_new();
+    n := raw_load(src + 8);
+    mut i = 0;
+    while i < n {
+        rt_push4(dst, rt_load32(raw_load(src) + i * 4));
+        i = i + 1;
+    }
+    return dst;
+}
+fn rt_vec_insert4(s: u64, index: u64, v: u64) -> u64 {
+    n := rt_len(s);
+    if n < index {
+        rt_abort();
+    }
+    rt_push4(s, 0);
+    mut i = n;
+    while index < i {
+        rt_set4(s, i, rt_at4(s, i - 1));
+        i -= 1;
+    }
+    rt_set4(s, index, v);
+    return 0;
+}
+fn rt_vec_remove4(s: u64, index: u64) -> u64 {
+    n := rt_len(s);
+    if (index < n) == 0 {
+        rt_abort();
+    }
+    v := rt_at4(s, index);
+    mut i = index;
+    while i + 1 < n {
+        rt_set4(s, i, rt_at4(s, i + 1));
+        i += 1;
+    }
+    rt_pop4(s);
+    return v;
+}
+fn rt_vec_swap4(s: u64, i: u64, j: u64) -> u64 {
+    n := rt_len(s);
+    if ((i < n) == 0) + ((j < n) == 0) {
+        rt_abort();
+    }
+    a := rt_at4(s, i);
+    rt_set4(s, i, rt_at4(s, j));
+    rt_set4(s, j, a);
+    return 0;
+}
+fn rt_vec_reverse4(s: u64) -> u64 {
+    n := rt_len(s);
+    mut i = 0;
+    while i < rt_div(n, 2) {
+        rt_vec_swap4(s, i, n - 1 - i);
+        i += 1;
+    }
+    return 0;
+}
+fn rt_vec_truncate4(s: u64, keep: u64) -> u64 {
+    if keep < rt_len(s) {
+        raw_store(s + 8, keep);
+    }
+    return 0;
+}
+fn rt_vec_contains4(s: u64, v: u64) -> u64 {
+    n := rt_len(s);
+    want := v & 4294967295;
+    mut i = 0;
+    while i < n {
+        if rt_at4(s, i) == want {
+            return 1;
+        }
+        i += 1;
+    }
+    return 0;
+}
+// A 4-byte element as the word Grail holds, given its element code: f32 (7) widened, a signed
+// integer (int code bit 8) sign-extended, an unsigned one as is.
+fn rt_narrow_decode(unit: u64, code: u64) -> u64 {
+    if code == 7 {
+        return rt_f32_from_bits(unit);
+    }
+    if (1023 < code) & (((code - 1024) & 256) != 0) {
+        if (unit & 2147483648) != 0 {
+            return unit | 18446744069414584320;
+        }
+    }
+    return unit;
+}
+fn rt_vec_cmp4(op: u64, a: u64, b: u64) -> u64 {
+    n := rt_len(a);
+    m := rt_len(b);
+    mut i = 0;
+    mut order = 1; // 0 less, 1 equal, 2 greater
+    while (i < n) & (i < m) {
+        x := rt_at4(a, i);
+        y := rt_at4(b, i);
+        if x != y {
+            if x < y {
+                order = 0;
+            } else {
+                order = 2;
+            }
+            break;
+        }
+        i += 1;
+    }
+    if order == 1 {
+        if n < m {
+            order = 0;
+        }
+        if m < n {
+            order = 2;
+        }
+    }
+    return rt_order_result(op, order);
+}
 // ---- vector methods (elements are words: values or owning pointers; nothing is copied) ----
 fn rt_vec_set(s: u64, i: u64, v: u64) -> u64 {
     raw_store(raw_load(s) + i * 8, v);
