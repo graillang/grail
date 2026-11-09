@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- `view("literal")` builds nothing at run time: the bytes, a `u8[]` object for them and the view
+  descriptor are read-only data behind block headers marked static, which `rt_free` leaves alone.
+  The literal used to be copied into a fresh string, UTF-8 checked and wrapped in a heap view on
+  every evaluation; compiling the compiler is about 10% faster.
+
 - LLVM backend (`--backend=llvm`, Linux x86-64): `compiler/llvm.grl` lowers the raw word stream to
   LLVM IR for every function it fully understands and keeps the rest (data, the entry, stack
   switching, indirect calls) as native assembly; the compiler writes `PATH.ll` beside `PATH`, and
