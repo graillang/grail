@@ -16464,7 +16464,7 @@ fn expr_expected<a>(c: (&a mut C), min: u64, expected: u64) -> Val {
                                                 if c.raw == 0 {
                                                     require_type(&mut c, ty, 0);
                                                     require_type(&mut c, rty, 0);
-                                                    strict_bool_check(&mut c, k, ty, rty);
+                                                    strict_bool_check(&mut c, k, ty, rty, lstart, rstart, rend);
                                                 }
                                                 both := is_bool(&mut c, ty)
                                                     & is_bool(&mut c, rty);
@@ -16493,7 +16493,7 @@ fn expr_expected<a>(c: (&a mut C), min: u64, expected: u64) -> Val {
 // Bools and integers do not mix (Go, Zig and Rust reject all of these): `&`, `|`, `^` between a bool and
 // an integer (`code & (a == 0)` is 2 & 1 == 0), arithmetic on bools (`true + true`), and an integer
 // condition (`if n`). Logic is `&&`, `||` and `!`; integers compare explicitly (`n != 0`).
-fn strict_bool_check<a>(c: (&a mut C), k: u64, left: u64, right: u64) -> unit {
+fn strict_bool_check<a>(c: (&a mut C), k: u64, left: u64, right: u64, lstart: u64, rstart: u64, rend: u64) -> unit {
     if c.strict_bool == 0 {
         return ();
     }
@@ -16505,6 +16505,11 @@ fn strict_bool_check<a>(c: (&a mut C), k: u64, left: u64, right: u64) -> unit {
     if lb & rb & (is_comparison(k) + (k == 38) + (k == 124) + (k == 94)) {
         return ();
     }
+    if c.strict_bool == 3 {
+        // FIX bin path left_start op_start op_end right_start right_end left_bool right_bool
+        strict_fix_record(&mut c, view("bin"), lstart, rstart - 1, rstart, rend, lb, rb);
+        return ();
+    }
     if lb & rb {
         strict_bool_fail(&mut c, view("arithmetic on bools; use && and || for logic"));
         return ();
@@ -16512,10 +16517,31 @@ fn strict_bool_check<a>(c: (&a mut C), k: u64, left: u64, right: u64) -> unit {
     strict_bool_fail(&mut c, view("bool and integer do not mix; use && / || / ! for logic and compare integers explicitly"));
     return ();
 }
-fn strict_condition<a>(c: (&a mut C), ty: u64) -> unit {
+fn strict_condition<a>(c: (&a mut C), ty: u64, cstart: u64) -> unit {
+    if (c.strict_bool == 3) & (is_bool(&mut c, ty) == 0) {
+        // FIX cond path start: the condition's tokens [cstart, pos).
+        here := c.pos;
+        strict_fix_record(&mut c, view("cond"), cstart, here, here, here, 0, 0);
+        return ();
+    }
     if (c.strict_bool != 0) & (is_bool(&mut c, ty) == 0) {
         strict_bool_fail(&mut c, view("a condition must be a bool; compare explicitly (n != 0)"));
     }
+    return ();
+}
+// Mode 3: a machine record of the violation's spans (byte offsets), for tools/strict-bool-fix.py.
+fn strict_fix_record<a, b>(c: (&a mut C), kind: &b [u8], lstart: u64, op: u64, rstart: u64, rend: u64, lb: u64, rb: u64) -> unit {
+    path := host::arg(c.file + c.arg_offset);
+    l := &c.toks[lstart];
+    ls := l.start;
+    o_ := &c.toks[op];
+    os := o_.start;
+    oe := o_.end;
+    r := &c.toks[rstart];
+    rs := r.start;
+    last := &c.toks[rend - 1];
+    re := last.end;
+    println("FIX {} {} {} {} {} {} {} {} {}", kind, view(path), ls, os, oe, rs, re, lb, rb);
     return ();
 }
 // Mode 1 stops at the violation; mode 2 (survey) prints file:line:column and continues.
@@ -17940,10 +17966,11 @@ fn statement<a>(c: (&a mut C)) -> unit {
         }
         if (endless == 0) & (pattern == 0) {
             tests := c.resources.len();
+            cstart := c.pos;
             mut v = expr(&mut c, 0);
             if c.raw == 0 {
                 require_type(&mut c, v.ty, 0);
-                strict_condition(&mut c, v.ty);
+                strict_condition(&mut c, v.ty, cstart);
             }
             cleanup(&mut c, tests);
             expire_locals(&mut c);
@@ -18506,10 +18533,11 @@ fn statement<a>(c: (&a mut C)) -> unit {
             return ();
         }
         tests := c.resources.len();
+        cstart := c.pos;
         mut v = expr(&mut c, 0);
         if c.raw == 0 {
             require_type(&mut c, v.ty, 0);
-            strict_condition(&mut c, v.ty);
+            strict_condition(&mut c, v.ty, cstart);
         }
         cleanup(&mut c, tests);
         expire_locals(&mut c);
@@ -19512,13 +19540,16 @@ pub fn main() -> u64 {
                         c.export_hits.push(0);
                         offset += 2;
                     } else {
-                    if same(view(option), view("--typed-refs")) + same(view(option), view("--strict-bool")) + same(view(option), view("--strict-bool-report")) {
+                    if same(view(option), view("--typed-refs")) + same(view(option), view("--strict-bool")) + same(view(option), view("--strict-bool-report")) + same(view(option), view("--strict-bool-fix")) {
                         if same(view(option), view("--strict-bool")) {
                             // Survey: bools and integers do not mix (see strict_bool_check).
                             exchange(&mut c.strict_bool, 1);
                         }
                         if same(view(option), view("--strict-bool-report")) {
                             exchange(&mut c.strict_bool, 2);
+                        }
+                        if same(view(option), view("--strict-bool-fix")) {
+                            exchange(&mut c.strict_bool, 3);
                         }
                         if same(view(option), view("--typed-refs")) {
                             exchange(&mut c.typed_refs_flag, 1);
