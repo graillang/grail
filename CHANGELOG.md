@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Typed slices: `&[T]` and `&mut [T]` for every element type (`v[a: b]`, `&mut v[a: b]`, open bounds,
+  sub-slicing, indexing, element borrows, loops by value or reference, `len`, `copy`, `contains`,
+  formatting), with the vector's ownership rules: a slice cannot outlive its vector, the vector
+  cannot grow or be written elsewhere while a slice of it lives, and an exclusive slice excludes
+  every other access. `&s`/`&mut s` on a slice binding reborrows it. Design:
+  `docs/design/typed-slices.md`.
+
 - `f32[]`, `u32[]` and `i32[]` store their elements in 4 bytes (they were 8-byte words), halving
   their memory and letting the LLVM backend use 32-bit loads, single-precision arithmetic and
   vector lanes (matmul: 3.2x -> 1.3x of C). Programs print the same output, and every element can
