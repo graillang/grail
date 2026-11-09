@@ -2575,18 +2575,111 @@ fn rt_int_from_f64(v: u64, code: u64) -> u64 {
     }
     return wrapping_add(raw_i64_from_f64(raw_fsub(v, big)), 9223372036854775808);
 }
+// Rounding on the binary64 word, exact by construction (bits are cleared, never computed).
+// trunc: toward zero, keeping the sign (-0.5 -> -0.0); NaN, infinities and integral values return.
+fn rt_f64_trunc(v: u64) -> u64 {
+    e := (v >> 52) & 2047;
+    if 1074 < e {
+        return v;
+    }
+    if e < 1023 {
+        return v & 9223372036854775808;
+    }
+    fraction := (1 << (1075 - e)) - 1;
+    return v & (18446744073709551615 - fraction);
+}
 fn rt_f64_floor(v: u64) -> u64 {
-    if raw_feq(v, v) == 0 {
-        return v;
-    }
-    if raw_flt(rt_f64_abs(v), rt_f64_pow2(52)) == 0 {
-        return v;
-    }
-    t := raw_f64_from_i64(raw_i64_from_f64(v));
+    t := rt_f64_trunc(v);
     if raw_flt(v, t) {
         return raw_fsub(t, rt_f64_pow2(0));
     }
     return t;
+}
+fn rt_f64_ceil(v: u64) -> u64 {
+    t := rt_f64_trunc(v);
+    if raw_flt(t, v) {
+        return raw_fadd(t, rt_f64_pow2(0));
+    }
+    return t;
+}
+// round: to nearest, halves away from zero (C round, Rust f64::round). x - trunc(x) is exact.
+fn rt_f64_round(v: u64) -> u64 {
+    t := rt_f64_trunc(v);
+    d := rt_f64_abs(raw_fsub(v, t));
+    if raw_flt(d, rt_f64_pow2(0) - 4503599627370496) {
+        return t;
+    }
+    if (v >> 63) != 0 {
+        return raw_fsub(t, rt_f64_pow2(0));
+    }
+    return raw_fadd(t, rt_f64_pow2(0));
+}
+// min/max: a NaN operand yields the other (IEEE minNum/maxNum, Rust f64::min/max).
+fn rt_f64_min(a: u64, b: u64) -> u64 {
+    if raw_feq(a, a) == 0 {
+        return b;
+    }
+    if raw_feq(b, b) == 0 {
+        return a;
+    }
+    if raw_flt(b, a) {
+        return b;
+    }
+    return a;
+}
+fn rt_f64_max(a: u64, b: u64) -> u64 {
+    if raw_feq(a, a) == 0 {
+        return b;
+    }
+    if raw_feq(b, b) == 0 {
+        return a;
+    }
+    if raw_flt(a, b) {
+        return b;
+    }
+    return a;
+}
+fn rt_f64_is_finite(v: u64) -> u64 {
+    return ((v >> 52) & 2047) != 2047;
+}
+fn rt_f64_is_infinite(v: u64) -> u64 {
+    return (v & 9223372036854775807) == 9218868437227405312;
+}
+// next_up/next_down: the adjacent representable value (NaN returns itself; +-0 step to the smallest
+// subnormal). `bits` is 64 for f64; for f32 the step is taken on the binary32 bits.
+fn rt_float_step(v: u64, up: u64, single: u64) -> u64 {
+    if raw_feq(v, v) == 0 {
+        return v;
+    }
+    mut b = v;
+    mut sign: u64 = 9223372036854775808;
+    mut inf: u64 = 9218868437227405312;
+    if single {
+        b = rt_f32_bits(v);
+        sign = 2147483648;
+        inf = 2139095040;
+    }
+    magnitude := b & (sign - 1);
+    negative := (b & sign) != 0;
+    mut r = b;
+    if magnitude == 0 {
+        r = 1;
+        if up == 0 {
+            r = sign | 1;
+        }
+    } else {
+        if up != negative {
+            if magnitude != inf {
+                r = b + 1;
+            }
+        } else {
+            r = b - 1;
+        }
+    }
+    if single {
+        return rt_f32_from_bits(r);
+    }
+    return r;
 }
 // Fixed-width decimal bignums: 48 little-endian limbs of base 10^9 (up to ~10^432).
 fn rt_big(v: u64) -> u64 {

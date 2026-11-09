@@ -73,7 +73,9 @@ assembler. `+ - * /` and comparisons follow IEEE 754 (NaN is unequal to everythi
 true for NaN); `%` and bitwise operators are not defined. There are no implicit conversions:
 `f64(n)` converts an integer (rounding to nearest), and `i64(x)`, `num(x)`, `u8(x)` ... truncate
 toward zero and stop the program for NaN or out-of-range values. `bits(x)` gives the raw bit
-pattern and `f64_from_bits(n)` the reverse. Methods: `sqrt()`, `abs()`, `floor()`, `is_nan()`.
+pattern and `f64_from_bits(n)` the reverse. Methods: `sqrt()`, `abs()`, `floor()`, `ceil()`, `trunc()`, `round()` (halves away from zero),
+`min(y)`/`max(y)` (a NaN operand yields the other), `is_nan()`, `is_finite()`, `is_infinite()`,
+`next_up()`/`next_down()` (the adjacent value in the type's own precision); all bit-identical to libm.
 `print`, `println` and `format` produce the shortest digits that read back exactly, laid out like
 Rust's `{}` (`0.30000000000000004`, `1000000000000000000000`, `-0`, `inf`, `NaN`). `{:.N}` prints
 exactly N decimals, rounding the exact binary value half to even (`{:.1}` of 0.25 is `0.2`), as Rust does.

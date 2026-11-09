@@ -13254,9 +13254,28 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
         return mutex_method(&mut c, val(xt, xty), view(name));
     }
     if k == 21 {
+        single := is_f32(&mut c, xty);
+        if same(view(name), view("min")) + same(view(name), view("max")) {
+            // x.min(y) / x.max(y): y of the same float type; a NaN operand yields the other.
+            observe(&mut c, xt);
+            ystart := c.pos;
+            mut y = expr(&mut c, 0);
+            yend := c.pos;
+            expect(&mut c, view(")"));
+            y = adopt_value(&mut c, y, ystart, yend, xty);
+            require_type(&mut c, y.ty, xty);
+            mut f = "rt_f64_min";
+            if same(view(name), view("max")) {
+                f = "rt_f64_max";
+            }
+            slot := invoke(&mut c, view(f), two(xt, y.t));
+            release_temporary(&mut c, input);
+            return val(slot, xty);
+        }
         expect(&mut c, view(")"));
         observe(&mut c, xt);
         mut f = "";
+        mut boolean = 0;
         if same(view(name), view("sqrt")) {
             f = "rt_f64_sqrt";
         }
@@ -13266,19 +13285,46 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
         if same(view(name), view("floor")) {
             f = "rt_f64_floor";
         }
+        if same(view(name), view("ceil")) {
+            f = "rt_f64_ceil";
+        }
+        if same(view(name), view("trunc")) {
+            f = "rt_f64_trunc";
+        }
+        if same(view(name), view("round")) {
+            f = "rt_f64_round";
+        }
         if same(view(name), view("is_nan")) {
             f = "rt_f64_is_nan";
+            boolean = 1;
+        }
+        if same(view(name), view("is_finite")) {
+            f = "rt_f64_is_finite";
+            boolean = 1;
+        }
+        if same(view(name), view("is_infinite")) {
+            f = "rt_f64_is_infinite";
+            boolean = 1;
+        }
+        if same(view(name), view("next_up")) + same(view(name), view("next_down")) {
+            up := imm(&mut c, same(view(name), view("next_up")));
+            precision := imm(&mut c, single);
+            mut args = two(xt, up);
+            args.push(precision);
+            slot := invoke(&mut c, view("rt_float_step"), args);
+            release_temporary(&mut c, input);
+            return val(slot, xty);
         }
         if f.len() == 0 {
-            fail(&mut c, view("unknown float method (expected sqrt, abs, floor or is_nan)"));
+            fail(&mut c, view("unknown float method (sqrt, abs, floor, ceil, trunc, round, min, max, is_nan, is_finite, is_infinite, next_up, next_down)"));
         }
         mut slot = invoke(&mut c, view(f), one(xt));
         release_temporary(&mut c, input);
-        if same(view(name), view("is_nan")) {
+        if boolean {
             bt := bool_type(&mut c);
             return val(slot, bt);
         }
-        if is_f32(&mut c, xty) & same(view(name), view("sqrt")) {
+        if single & same(view(name), view("sqrt")) {
             slot = invoke(&mut c, view("rt_f32_round"), one(slot));
         }
         return val(slot, xty);

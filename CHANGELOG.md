@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Float methods `ceil`, `trunc`, `round`, `min`, `max`, `is_finite`, `is_infinite`, `next_up` and
+  `next_down` on `f64` and `f32`, bit-identical to libm; `floor(-0.0)` now keeps the sign.
 - Borrows made to pass arguments end once the value is computed (when it holds no borrow itself):
   `b.words[i] = f(&b)` and `M { flags: word(&bytes, 0), bytes: bytes }` compile, as in Rust. A value
   that does hold the borrow still keeps it alive.
