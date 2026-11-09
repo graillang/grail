@@ -28,7 +28,7 @@ struct L {
     t: u64,
     dead: u64,
     term: u64,
-    labels: u8[][],
+    labels: Set,
     calls: u8[][],
     refs: u8[][],
     lifted: u8[][],
@@ -510,7 +510,7 @@ fn address<a, b>(l: (&a mut L), op: &b [u8]) -> u8[] {
             bad(&mut l);
             return copy(view("null"));
         }
-        add_once(&mut l.refs, view(disp));
+        l.refs.push(copy(view(disp)));
         mut sym = u8[];
         put(&mut sym, view("@\""));
         put(&mut sym, view(disp));
@@ -811,7 +811,7 @@ fn lower_call<a, b>(l: (&a mut L), target: &b [u8]) -> unit {
         set_reg(&mut l, view("rax"), view(word));
         return ();
     }
-    add_once(&mut l.calls, target);
+    l.calls.push(copy(target));
     args := call_args(&mut l);
     mut c = u8[];
     put(&mut c, view("call {i64, i64} @\""));
@@ -1030,7 +1030,7 @@ fn instruction<a, b>(l: (&a mut L), line: &b [u8]) -> unit {
         return ();
     }
     if eq(view(op), view("jmp")) {
-        if member(&l.labels, view(o[0])) == 0 {
+        if set_has(&l.labels, view(o[0])) == 0 {
             bad(&mut l);
             return ();
         }
@@ -1039,7 +1039,7 @@ fn instruction<a, b>(l: (&a mut L), line: &b [u8]) -> unit {
         return ();
     }
     if starts(view(op), view("j")) {
-        if member(&l.labels, view(o[0])) == 0 {
+        if set_has(&l.labels, view(o[0])) == 0 {
             bad(&mut l);
             return ();
         }
@@ -1294,8 +1294,8 @@ fn lower_function<a, b>(l: (&a mut L), lines: (&b u8[][]), f: (&b Func)) -> unit
     l.body = u8[];
     l.fail = 0;
     l.term = 0;
-    l.labels = u8[][];
     body := body_lines(&lines, &f);
+    l.labels = set_new(body.len() / 4 + 16);
     mut i: u64 = 0;
     if (body.len() >= 2) && (eq(view(body[0]), view("pushq %rbp")) != 0) {
         if eq(view(body[1]), view("movq %rsp,%rbp")) {
@@ -1356,7 +1356,7 @@ fn lower_function<a, b>(l: (&a mut L), lines: (&b u8[][]), f: (&b Func)) -> unit
         }
         name := label_of(line);
         if (name.len() != 0) & (name.len() + 1 == line.len()) {
-            l.labels.push(name);
+            set_add(&mut l.labels, view(name));
         }
     }
     size := f.frame;
@@ -1449,7 +1449,7 @@ fn pool_name<a>(label: &a [u8]) -> u8[] {
 // Lowers a raw x86-64-spelled stream (target triple `triple`).
 pub fn lower<a, b>(stream: &a [u8], triple: &b [u8]) -> Lowered {
     lines := split_lines(stream);
-    mut l = L { ir: u8[], body: u8[], fail: 0, t: 0, dead: 0, term: 0, labels: u8[][], calls: u8[][], refs: u8[][], lifted: u8[][], flags: 0, frame: 0 };
+    mut l = L { ir: u8[], body: u8[], fail: 0, t: 0, dead: 0, term: 0, labels: set_new(16), calls: u8[][], refs: u8[][], lifted: u8[][], flags: 0, frame: 0 };
     mut funcs = Func[];
     mut data = u8[][];
     split(&lines, &mut funcs, &mut data);
@@ -1530,10 +1530,10 @@ pub fn lower<a, b>(stream: &a [u8], triple: &b [u8]) -> Lowered {
     for i in l.lifted.len() {
         set_add(&mut lifted, view(l.lifted[i]));
     }
-    add_once(&mut l.calls, view("rt_abort"));
-    add_once(&mut l.refs, view("rt_abort"));
+    // Calls and references were appended as found; the sets below deduplicate them.
+    l.calls.push(copy(view("rt_abort")));
     for i in l.calls.len() {
-        add_once(&mut l.refs, view(l.calls[i]));
+        l.refs.push(copy(view(l.calls[i])));
     }
     // The module text.
     mut ir = u8[];
@@ -1548,7 +1548,7 @@ pub fn lower<a, b>(stream: &a [u8], triple: &b [u8]) -> Lowered {
     mut exported = set_new(l.refs.len() + 16);
     for i in l.refs.len() {
         r := view(l.refs[i]);
-        if set_has(&lifted, r) {
+        if set_has(&lifted, r) + set_has(&exported, r) != 0 {
             continue;
         }
         mut name = copy(r);

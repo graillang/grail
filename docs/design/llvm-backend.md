@@ -100,6 +100,12 @@ native case (209) produces the same output and exit status, and the benchmarks r
 | sieve | 0.718 s | 14.019 s | 3.718 s |
 | sort | 1.071 s | 3.491 s | 2.674 s |
 
+Self-compilation: the compiler built through `--backend=llvm` (1 053 of its functions lifted)
+compiles the full compiler source to output byte-identical with the native-built compiler's
+(28 851 897 bytes) in 7.9 s instead of 35.3 s. Lowering the compiler takes 597 s and `clang -O2`
+190 s on the loaded build machine; making `llvm.grl` itself faster is the next item, since it
+runs in the native-built compiler during bootstrap.
+
 Stage 2 carries type information into the stream so both backends benefit: inline float
 arithmetic (no `rt_f64_op`), real `f32` values instead of rounded binary64 words, 4-byte
 elements for `f32[]`/`u32[]`/`i32[]`, and pointer-typed loads so LLVM's alias analysis works.
