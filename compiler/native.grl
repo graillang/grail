@@ -267,6 +267,7 @@ struct C {
     rnames: u8[][],
     tnames: u8[][],
     closures: Closure[],
+    fn_thunk_used: u64,
     closure_env: u64,
     inherent: u64,
     constants: Constant[],
@@ -4065,7 +4066,7 @@ fn callable_contract<a, b>(
             map.push(to);
         }
     }
-    if (ak == 6) + (ak == 7) + (ak == 12) + (ak == 13) + (ak == 14) + (ak == 16) + (ak == 20) {
+    if (ak == 6) + (ak == 27) + (ak == 7) + (ak == 12) + (ak == 13) + (ak == 14) + (ak == 16) + (ak == 20) {
         if callable_contract(&mut c, aa, ea, &mut map, depth + 1) == 0 {
             return false;
         }
@@ -9181,6 +9182,77 @@ fn function_value<a>(c: (&a mut C), index: u64) -> Val {
     o(&mut c, view("(%rip),%rax\n"));
     return val(save(&mut c), ty);
 }
+// A function value used where a closure type `Fn(...)` is expected (Rust/Zig let any function be
+// passed as a callable): a capture-free closure object {code, drop, target} whose code is the
+// shared adapter `grail_fn_thunk` (emitted once, see emit_fn_thunk). The signatures must match up to
+// renaming of lifetimes, so `fn less<a, b>(x: (&a T), y: (&b T))` is an `Fn(&T, &T) -> bool`.
+fn function_as_closure<a>(c: (&a mut C), v: Val, expected: u64) -> Val {
+    params := type_args(&mut c, v.ty);
+    result := ty_arg(&mut c, v.ty);
+    as_closure := intern_args(&mut c, 20, result, 0, u64[], params);
+    if same_type(&mut c, as_closure, expected) == 0 {
+        return v;
+    }
+    decl := fn_value_decl(&mut c);
+    record := intern_args(&mut c, 8, decl, 0, u64[], u64[]);
+    sz := imm(&mut c, 3);
+    obj := invoke(&mut c, view("rt_rec"), one(sz));
+    o(&mut c, view("leaq grail_fn_thunk(%rip),%rax\n"));
+    code := save(&mut c);
+    rec_store(&mut c, obj, 0, code);
+    o(&mut c, view("leaq "));
+    drop_name(&mut c, record);
+    o(&mut c, view("(%rip),%rax\n"));
+    dropper := save(&mut c);
+    rec_store(&mut c, obj, 1, dropper);
+    rec_store(&mut c, obj, 2, v.t);
+    exchange(&mut c.fn_thunk_used, 1);
+    own(&mut c, obj, expected);
+    return val(obj, expected);
+}
+// The record type of a function's closure object: {__code, __drop, target}, created once.
+fn fn_value_decl<a>(c: (&a mut C)) -> u64 {
+    for i in c.decls.len() {
+        d := &c.decls[i];
+        if same(view(d.module), view(".closure")) & same(view(d.name), view("FnValue")) {
+            return i;
+        }
+    }
+    first := c.fields.len();
+    c.fields.push(Field { name: copy_bytes(view("__code")), ty: 0 });
+    c.fields.push(Field { name: copy_bytes(view("__drop")), ty: 0 });
+    c.fields.push(Field { name: copy_bytes(view("target")), ty: 0 });
+    c
+        .decls
+        .push(
+            Decl {
+                module: copy_bytes(view(".closure")),
+                name: copy_bytes(view("FnValue")),
+                is_enum: 0,
+                opaque: 0,
+                c_layout: 0,
+                first: first,
+                count: 3,
+                regions: 0,
+                types: 0,
+                success: 0,
+                bounds: u64[],
+                constraints: u64[][],
+            }
+        );
+    return c.decls.len() - 1;
+}
+// The adapter every function-as-closure calls: %rdi addresses the slot holding the object; the
+// function's own arguments follow in %rsi.. (Fn types take at most five), so they shift down one
+// register and the target is called; its result returns unchanged.
+fn emit_fn_thunk<a>(c: (&a mut C)) -> unit {
+    if c.fn_thunk_used == 0 {
+        return ();
+    }
+    o(&mut c, view("grail_fn_thunk:\npushq %rbp\nmovq %rsp,%rbp\nmovq (%rdi),%rax\nmovq 16(%rax),%rax\n"));
+    o(&mut c, view("movq %rsi,%rdi\nmovq %rdx,%rsi\nmovq %rcx,%rdx\nmovq %r8,%rcx\nmovq %r9,%r8\ncall *%rax\nleave\nret\n"));
+    return ();
+}
 fn indirect_call<a>(c: (&a mut C), value: Val, opened: u64) -> Val {
     input := value.t;
     inty := value.ty;
@@ -11969,6 +12041,11 @@ fn is_option_storage<a>(c: (&a mut C), ty: u64) -> u64 {
 }
 // A bare literal (including a negated one) takes a sized integer type from its context.
 fn adopt_value<a>(c: (&a mut C), v: Val, start: u64, end: u64, expected: u64) -> Val {
+    if (c.raw == 0) & (expected != 0) & (expected != 18446744073709551615) {
+        if (ty_kind(&mut c, v.ty) == 12) & (ty_kind(&mut c, expected) == 20) {
+            return function_as_closure(&mut c, v, expected);
+        }
+    }
     mut v = hint_use(&mut c, v, start, end, expected);
     if (expected == 0) & is_default_i64(&mut c, v.ty) {
         return widen_to_u64(&mut c, v);
@@ -13506,6 +13583,7 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
         if code {
             unit := apply(&mut c, view("rt_pop4"), one(xt));
             element := narrow_decode(&mut c, code, unit);
+            own(&mut c, element, ty);
             return val(element, ty);
         }
         slot := apply(&mut c, view("rt_pop"), one(xt));
@@ -13601,6 +13679,7 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
             if code {
                 unit := apply(&mut c, view("rt_vec_remove4"), two(xt, i.t));
                 element := narrow_decode(&mut c, code, unit);
+                own(&mut c, element, elem);
                 return val(element, elem);
             }
             slot := apply(&mut c, view("rt_vec_remove"), two(xt, i.t));
@@ -19149,6 +19228,7 @@ pub fn main() -> u64 {
         rnames: u8[][],
         tnames: u8[][],
         closures: Closure[],
+        fn_thunk_used: 0,
         closure_env: 0,
         inherent: 0,
         constants: Constant[],
@@ -19407,6 +19487,7 @@ pub fn main() -> u64 {
     }
     emit_specializations(&mut c);
     emit_closures(&mut c);
+    emit_fn_thunk(&mut c);
     emit_drops(&mut c);
     e := c.entry;
     if e == 0 {

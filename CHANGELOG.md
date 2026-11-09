@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Functions are values of closure type: any function whose signature matches (up to lifetime names)
+  can be passed where an `Fn(...)` is expected, including ones taking references
+  (`fn less<a, b>(x: (&a T), y: (&b T)) -> bool` as `Fn(&T, &T) -> bool`). Before, only closures could.
+- `vecs::sort_by` (stable, comparator), `vecs::sort_by_key`, `vecs::insert_sorted` and
+  `vecs::binary_search`; `order::Ord` for `f32`.
 - Float methods `ceil`, `trunc`, `round`, `min`, `max`, `is_finite`, `is_infinite`, `next_up` and
   `next_down` on `f64` and `f32`, bit-identical to libm; `floor(-0.0)` now keeps the sign.
 - Borrows made to pass arguments end once the value is computed (when it holds no borrow itself):

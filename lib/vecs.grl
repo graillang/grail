@@ -62,3 +62,101 @@ pub fn is_sorted<a,T:order::Ord>(items:(&a T[]))->bool{for i in 1..items.len(){i
 // Index of the smallest/largest element (first one on ties); the vector must not be empty.
 pub fn min_index<a,T:order::Ord>(items:(&a T[]))->u64{assert(items.len()!=0);mut best=0;for i in 1..items.len(){if order::less(&items[i],&items[best]){best=i;}}return best;}
 pub fn max_index<a,T:order::Ord>(items:(&a T[]))->u64{assert(items.len()!=0);mut best=0;for i in 1..items.len(){if order::less(&items[best],&items[i]){best=i;}}return best;}
+
+// Stable sort by a comparator: `less(a, b)` is true when `a` must come before `b`; equal elements
+// keep their order. A bottom-up merge over an index permutation, then applied with swaps: elements
+// are moved, never copied, and the comparator is called from one place. O(n log n).
+pub fn sort_by<a,T>(items:(&a mut T[]),less:Fn(&T,&T)->bool){
+    n:=items.len();
+    mut idx=u64[0;n];
+    for i in n{idx[i]=i;}
+    mut tmp=u64[0;n];
+    mut width=1;
+    while width<n{
+        mut lo=0;
+        while lo<n{
+            mut mid=lo+width;if mid>n{mid=n;}
+            mut hi=lo+2*width;if hi>n{hi=n;}
+            mut i=lo;mut j=mid;mut k=lo;
+            while k<hi{
+                // Take from the right only when it must come strictly first (stability).
+                if (i<mid)&&((j>=hi)||!less(&items[idx[j]],&items[idx[i]])){tmp[k]=idx[i];i+=1;}
+                else{tmp[k]=idx[j];j+=1;}
+                k+=1;
+            }
+            lo=hi;
+        }
+        swapped:=exchange(&mut idx,tmp);
+        tmp=swapped;
+        width=width*2;
+    }
+    permute(items,&idx);
+}
+// Stable sort by a u64 key computed once per element.
+pub fn sort_by_key<a,T>(items:(&a mut T[]),key:Fn(&T)->u64){
+    n:=items.len();
+    mut keys=u64[0;n];
+    for i in n{keys[i]=key(&items[i]);}
+    mut idx=u64[0;n];
+    for i in n{idx[i]=i;}
+    mut tmp=u64[0;n];
+    mut width=1;
+    while width<n{
+        mut lo=0;
+        while lo<n{
+            mut mid=lo+width;if mid>n{mid=n;}
+            mut hi=lo+2*width;if hi>n{hi=n;}
+            mut i=lo;mut j=mid;mut k=lo;
+            while k<hi{
+                if (i<mid)&&((j>=hi)||(keys[idx[j]]>=keys[idx[i]])){tmp[k]=idx[i];i+=1;}
+                else{tmp[k]=idx[j];j+=1;}
+                k+=1;
+            }
+            lo=hi;
+        }
+        swapped:=exchange(&mut idx,tmp);
+        tmp=swapped;
+        width=width*2;
+    }
+    permute(items,&idx);
+}
+// Rearranges `items` so position k holds the element that was at order[k] (a permutation).
+fn permute<a,b,T>(items:(&a mut T[]),order:(&b u64[])){
+    n:=items.len();
+    // pos[o]: where original element o sits now; at[p]: which original element sits at p.
+    mut pos=u64[0;n];mut at=u64[0;n];
+    for i in n{pos[i]=i;at[i]=i;}
+    for k in n{
+        o:=order[k];p:=pos[o];
+        if p!=k{
+            items.swap(k,p);
+            moved:=at[k];
+            at[p]=moved;pos[moved]=p;
+            at[k]=o;pos[o]=k;
+        }
+    }
+}
+
+// Sorted-vector sets (Go/Zig style): `items` ascending and duplicate-free.
+// The index of `value` if present, else None; O(log n).
+pub fn binary_search<a,b,T:order::Ord>(items:(&a T[]),value:(&b T))->u64?{
+    mut lo=0;mut hi=items.len();
+    while lo<hi{
+        mid:=lo+(hi-lo)/2;
+        if order::less(&items[mid],value){lo=mid+1;}
+        else{if order::less(value,&items[mid]){hi=mid;}else{return Some(mid);}}
+    }
+    return None;
+}
+// Inserts `value` in order unless it is present; true if inserted.
+pub fn insert_sorted<a,T:order::Ord>(items:(&a mut T[]),value:T)->bool{
+    mut lo=0;mut hi=items.len();
+    while lo<hi{
+        mid:=lo+(hi-lo)/2;
+        if order::less(&items[mid],&value){lo=mid+1;}
+        else{if order::less(&value,&items[mid]){hi=mid;}else{return false;}}
+    }
+    items.insert(lo,value);
+    return true;
+}
+
