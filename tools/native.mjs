@@ -15,7 +15,7 @@ export const allTargets = [...targets, ...machoTargets];
 export const hostTarget = ({ x64: 'x86_64', arm64: 'aarch64', riscv64: 'riscv64' })[process.arch];
 // The compiler itself is a Linux host binary: its platform module is os-linux. darwin.grl (and
 // os-windows.grl) are per-target platform modules selected when building for those targets.
-export const compilerSources = ['native', 'lexer', 'ownership', 'machine', 'optimize', 'fmt', 'cli', 'runtime', 'os-linux'].map(n => join(root, 'compiler', `${n}.grl`));
+export const compilerSources = ['native', 'lexer', 'ownership', 'machine', 'optimize', 'llvm', 'fmt', 'cli', 'runtime', 'os-linux'].map(n => join(root, 'compiler', `${n}.grl`));
 const triples = { x86_64: 'x86_64-linux-gnu', aarch64: 'aarch64-linux-gnu', riscv64: 'riscv64-linux-gnu', 'macos-x86_64': 'x86_64-apple-macos11', 'macos-aarch64': 'arm64-apple-macos11' };
 const emulations = { x86_64: 'elf_x86_64', aarch64: 'aarch64elf', riscv64: 'elf64lriscv' };
 export const machoArchitectures = { 'macos-x86_64': 'x86_64', 'macos-aarch64': 'arm64' };

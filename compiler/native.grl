@@ -4,6 +4,7 @@ use host;
 use ownership;
 use machine;
 use optimize;
+use llvm;
 use cli;
 
 // Direct Linux native compiler: one checked word stream, target instruction selection in machine.grl.
@@ -207,6 +208,8 @@ struct C {
     plat: u64,
     // Emit .file/.loc DWARF line info (Linux x86-64 native output only).
     debug: u64,
+    // 1: lower the raw word stream to LLVM IR (compiler/llvm.grl) instead of optimize/machine.
+    backend: u64,
     debug_funcs: DebugFunc[],
     debug_vars: DebugVar[],
     arg_offset: u64,
@@ -18388,6 +18391,7 @@ pub fn main() -> u64 {
         target: 0,
         plat: 0,
         debug: 0,
+        backend: 0,
         debug_funcs: DebugFunc[],
         debug_vars: DebugVar[],
         arg_offset: 0,
@@ -18609,7 +18613,12 @@ pub fn main() -> u64 {
                                 exchange(&mut c.debug, 1);
                                 offset += 1;
                             } else {
-                                break;
+                                if same(view(option), view("--backend=llvm")) {
+                                    exchange(&mut c.backend, 1);
+                                    offset += 1;
+                                } else {
+                                    break;
+                                }
                             }
                         }
                     }
@@ -18632,6 +18641,9 @@ pub fn main() -> u64 {
     // /DEBUG) on Windows x86-64.
     if (c.debug != 0) & (((c.target == 4) + (c.plat != 0)) != 0) {
         fail_option(&mut c, view("--debug line info is only implemented for Linux and Windows x86_64"));
+    }
+    if (c.backend != 0) & (((c.target != 0) + (c.plat != 0) + (c.debug != 0)) != 0) {
+        fail_option(&mut c, view("--backend=llvm is implemented for Linux x86_64 without --debug"));
     }
     for pass in 3 {
         if pass == 1 {
@@ -18821,7 +18833,7 @@ pub fn main() -> u64 {
     }
     }
     mut out = u8[];
-    if c.debug != 0 {
+    if (c.debug != 0) + (c.backend != 0) != 0 {
         out = copy_bytes(view(c.out));
     } else {
         out = optimize::optimize(view(c.out));
@@ -18862,6 +18874,17 @@ pub fn main() -> u64 {
             for i in sections.len() {
                 out.push(sections[i]);
             }
+        }
+        if c.backend != 0 {
+            // LLVM IR for the lifted functions beside the native remainder: PATH.ll and PATH.
+            lowered := llvm::lower(view(out), view("x86_64-unknown-linux-gnu"));
+            mut ir_path = copy_bytes(view(path));
+            push_bytes(&mut ir_path, view(".ll"));
+            written := host::write_file(view(ir_path), view(lowered.ir));
+            if written != 0 {
+                return written;
+            }
+            return host::write_file(view(path), view(with_link_notes(&c.libs, view(lowered.native))));
         }
         return host::write_file(view(path), view(with_link_notes(&c.libs, view(out))));
     }

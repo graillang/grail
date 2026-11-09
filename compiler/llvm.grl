@@ -1,0 +1,1614 @@
+module llvm;
+
+// LLVM lowering of the compiler's closed word-machine stream (docs/design/llvm-backend.md).
+// The raw x86-64-spelled stream (before optimize.grl) becomes LLVM IR for every function whose
+// instructions are all understood here; the rest of the stream (data, the entry, functions that
+// switch stacks or use %rsp, indirect calls, functions whose labels data refers to) stays native
+// assembly. Machine registers, flags and the frame become allocas that mem2reg/SROA promote.
+// Grail-internal calls pass the six argument words and return the rax:rdx pair; check failures
+// call a noreturn cold stub so LLVM keeps them off the hot path.
+
+pub struct Lowered {
+    ir: u8[],
+    native: u8[]
+}
+
+struct Func {
+    name: u8[],
+    first: u64,
+    end: u64,
+    frame: u64,
+    framed: u64
+}
+
+struct L {
+    ir: u8[],
+    body: u8[],
+    fail: u64,
+    t: u64,
+    dead: u64,
+    term: u64,
+    labels: u8[][],
+    calls: u8[][],
+    refs: u8[][],
+    lifted: u8[][],
+    flags: u64,
+    frame: u64
+}
+
+fn eq<a, b>(a: &a [u8], b: &b [u8]) -> u64 {
+    if a.len() != b.len() {
+        return 0;
+    }
+    for i in a.len() {
+        if a[i] != b[i] {
+            return 0;
+        }
+    }
+    return 1;
+}
+fn starts<a, b>(a: &a [u8], b: &b [u8]) -> u64 {
+    if a.len() < b.len() {
+        return 0;
+    }
+    for i in b.len() {
+        if a[i] != b[i] {
+            return 0;
+        }
+    }
+    return 1;
+}
+fn ends<a, b>(a: &a [u8], b: &b [u8]) -> u64 {
+    if a.len() < b.len() {
+        return 0;
+    }
+    off := a.len() - b.len();
+    for i in b.len() {
+        if a[off + i] != b[i] {
+            return 0;
+        }
+    }
+    return 1;
+}
+// Whether `b` occurs in `a` at offset `at`.
+fn occurs_at<a, b>(a: &a [u8], at: u64, b: &b [u8]) -> u64 {
+    for k in b.len() {
+        if a[at + k] != b[k] {
+            return 0;
+        }
+    }
+    return 1;
+}
+fn has<a, b>(a: &a [u8], b: &b [u8]) -> u64 {
+    if a.len() < b.len() {
+        return 0;
+    }
+    for i in a.len() - b.len() + 1 {
+        if occurs_at(a, i, b) {
+            return 1;
+        }
+    }
+    return 0;
+}
+fn put<a, b>(out: (&a mut u8[]), s: &b [u8]) -> unit {
+    for i in s.len() {
+        out.push(s[i]);
+    }
+    return ();
+}
+fn num<a>(out: (&a mut u8[]), n: u64) -> unit {
+    if n >= 10 {
+        num(&mut out, n / 10);
+    }
+    out.push(48 + n % 10);
+    return ();
+}
+fn inum<a>(out: (&a mut u8[]), n: i64) -> unit {
+    if n < 0 {
+        out.push(45);
+        // |n| without overflowing at the most negative value.
+        num(&mut out, u64(0 - (n + 1)) + 1);
+        return ();
+    }
+    num(&mut out, u64(n));
+    return ();
+}
+fn copy<a>(s: &a [u8]) -> u8[] {
+    mut out = u8[];
+    put(&mut out, s);
+    return out;
+}
+fn member<a, b>(list: (&a u8[][]), s: &b [u8]) -> u64 {
+    for i in list.len() {
+        if eq(view(list[i]), s) {
+            return 1;
+        }
+    }
+    return 0;
+}
+fn add_once<a, b>(list: (&a mut u8[][]), s: &b [u8]) -> unit {
+    if member(&list, s) == 0 {
+        list.push(copy(s));
+    }
+    return ();
+}
+fn trim<a>(s: &a [u8]) -> u8[] {
+    mut a: u64 = 0;
+    mut b = s.len();
+    while (a < b) && ((s[a] == 32) + (s[a] == 9) != 0) {
+        a += 1;
+    }
+    while (b > a) && ((s[b - 1] == 32) + (s[b - 1] == 9) + (s[b - 1] == 13) != 0) {
+        b -= 1;
+    }
+    mut out = u8[];
+    for i in b - a {
+        out.push(s[a + i]);
+    }
+    return out;
+}
+fn sub<a>(s: &a [u8], from: u64, to: u64) -> u8[] {
+    mut out = u8[];
+    mut i = from;
+    while (i < to) && (i < s.len()) {
+        out.push(s[i]);
+        i += 1;
+    }
+    return out;
+}
+fn split_lines<a>(s: &a [u8]) -> u8[][] {
+    mut out = u8[][];
+    mut start: u64 = 0;
+    for i in s.len() {
+        if s[i] == 10 {
+            out.push(trim(view(sub(s, start, i))));
+            start = i + 1;
+        }
+    }
+    if start < s.len() {
+        out.push(trim(view(sub(s, start, s.len()))));
+    }
+    return out;
+}
+// A decimal (optionally negative) integer; ok is 0 when `s` is not one.
+struct Int {
+    ok: u64,
+    v: i64
+}
+fn parse_int<a>(s: &a [u8]) -> Int {
+    if s.len() == 0 {
+        return Int { ok: 0, v: 0 };
+    }
+    mut i: u64 = 0;
+    mut neg = 0;
+    if s[0] == 45 {
+        neg = 1;
+        i = 1;
+    }
+    if i == s.len() {
+        return Int { ok: 0, v: 0 };
+    }
+    mut v: u64 = 0;
+    mut ok: u64 = 1;
+    while i < s.len() {
+        ch := s[i];
+        if (ch < 48) + (ch > 57) != 0 {
+            ok = 0;
+        } else {
+            v = wrapping_add(wrapping_mul(v, 10), ch - 48);
+        }
+        i += 1;
+    }
+    // Words at or above 2^63 keep their bit pattern: LLVM spells them as negative i64 constants.
+    mut signed: i64 = 0;
+    if v >= 9223372036854775808 {
+        signed = 0 - i64(18446744073709551615 - v) - 1;
+    } else {
+        signed = i64(v);
+    }
+    if neg {
+        return Int { ok: ok, v: 0 - signed };
+    }
+    return Int { ok: ok, v: signed };
+}
+// `name:` (or `name: directive`) -> name, else empty.
+fn label_of<a>(line: &a [u8]) -> u8[] {
+    mut out = u8[];
+    for i in line.len() {
+        ch := line[i];
+        if ch == 58 {
+            return out;
+        }
+        ok := ((ch >= 97) & (ch <= 122)) + ((ch >= 65) & (ch <= 90)) + ((ch >= 48) & (ch <= 57)) + (ch == 95) + (ch == 46) + (ch == 36);
+        if ok == 0 {
+            return u8[];
+        }
+        out.push(ch);
+    }
+    return u8[];
+}
+fn is_local_label<a>(name: &a [u8]) -> u64 {
+    return starts(name, view(".L"));
+}
+
+// ---- function splitting ----
+
+// The stream's text functions: a non-.L label in .text up to its `.set .Fn,SIZE` (or the next
+// label or section change for frameless functions). Inline constant pools (`.pushsection` ...
+// `.popsection`) are moved to the data lines.
+fn split<a>(lines: (&a u8[][]), funcs: (&a mut Func[]), data: (&a mut u8[][])) -> unit {
+    mut text = 1;
+    mut open = 0;
+    mut pool = 0;
+    for i in lines.len() {
+        line := view(lines[i]);
+        if eq(line, view(".text")) {
+            text = 1;
+        }
+        if starts(line, view(".section")) + eq(line, view(".data")) + eq(line, view(".bss")) != 0 {
+            text = 0;
+            if open {
+                last := funcs.len() - 1;
+                funcs[last].end = i;
+                open = 0;
+            }
+        }
+        if open & (pool + starts(line, view(".pushsection")) != 0) {
+            if starts(line, view(".pushsection")) {
+                pool = 1;
+                mut d = u8[];
+                put(&mut d, view(".section"));
+                put(&mut d, view(sub(line, 12, line.len())));
+                data.push(d);
+                continue;
+            }
+            if starts(line, view(".popsection")) {
+                pool = 0;
+                continue;
+            }
+            data.push(copy(line));
+            continue;
+        }
+        name := label_of(line);
+        if text & (name.len() != 0) & (name.len() + 1 == line.len()) & (is_local_label(view(name)) == 0) {
+            if open {
+                last := funcs.len() - 1;
+                funcs[last].end = i;
+            }
+            funcs.push(Func { name: name, first: i + 1, end: i + 1, frame: 0, framed: 0 });
+            open = 1;
+            continue;
+        }
+        if open {
+            if starts(line, view(".set .F")) {
+                // `.set .Fn,SIZE`
+                mut comma = 0;
+                for k in line.len() {
+                    if line[k] == 44 {
+                        comma = k;
+                    }
+                }
+                size := parse_int(view(sub(line, comma + 1, line.len())));
+                last := funcs.len() - 1;
+                funcs[last].frame = u64(size.v);
+                funcs[last].framed = 1;
+                funcs[last].end = i;
+                open = 0;
+            }
+            continue;
+        }
+        data.push(copy(line));
+    }
+    if open {
+        last := funcs.len() - 1;
+        funcs[last].end = lines.len();
+    }
+    return ();
+}
+
+// ---- IR emission helpers ----
+
+// One body line from a template: each `{}` takes the next argument.
+fn emit<a, b, c>(l: (&a mut L), tmpl: &b [u8], args: (&c u8[][])) -> unit {
+    l.body.push(32);
+    l.body.push(32);
+    mut k: u64 = 0;
+    mut i: u64 = 0;
+    while i < tmpl.len() {
+        if (tmpl[i] == 123) & (i + 1 < tmpl.len()) {
+            if tmpl[i + 1] == 125 {
+                put(&mut l.body, view(args[k]));
+                k += 1;
+                i += 2;
+                continue;
+            }
+        }
+        l.body.push(tmpl[i]);
+        i += 1;
+    }
+    l.body.push(10);
+    return ();
+}
+fn raw_line<a, b>(l: (&a mut L), s: &b [u8]) -> unit {
+    put(&mut l.body, s);
+    l.body.push(10);
+    return ();
+}
+fn tmp<a>(l: (&a mut L)) -> u8[] {
+    l.t += 1;
+    mut out = u8[];
+    put(&mut out, view("%t"));
+    num(&mut out, l.t);
+    return out;
+}
+// %v = <tmpl with args>; returns %v.
+fn def<a, b, c>(l: (&a mut L), tmpl: &b [u8], args: (&c u8[][])) -> u8[] {
+    v := tmp(&mut l);
+    mut full = u8[];
+    put(&mut full, view(v));
+    put(&mut full, view(" = "));
+    put(&mut full, tmpl);
+    emit(&mut l, view(full), &args);
+    return v;
+}
+fn bad<a>(l: (&a mut L)) -> unit {
+    l.fail = 1;
+    return ();
+}
+
+// Registers: the fourteen integer registers by canonical name, with 32- and 8-bit aliases.
+fn reg_name<a>(name: &a [u8]) -> u8[] {
+    full := u8[][copy(view("rax")), copy(view("rbx")), copy(view("rcx")), copy(view("rdx")), copy(view("rsi")), copy(view("rdi")), copy(view("r8")), copy(view("r9")), copy(view("r10")), copy(view("r11")), copy(view("r12")), copy(view("r13")), copy(view("r14")), copy(view("r15"))];
+    if member(&full, name) {
+        return copy(name);
+    }
+    e32 := u8[][copy(view("eax")), copy(view("ebx")), copy(view("ecx")), copy(view("edx")), copy(view("esi")), copy(view("edi"))];
+    b8 := u8[][copy(view("al")), copy(view("bl")), copy(view("cl")), copy(view("dl")), copy(view("sil")), copy(view("dil"))];
+    for i in 6 {
+        if eq(view(e32[i]), name) + eq(view(b8[i]), name) != 0 {
+            return copy(view(full[i]));
+        }
+    }
+    if (name.len() >= 3) & (name[0] == 114) {
+        last := name[name.len() - 1];
+        if (last == 100) + (last == 98) != 0 {
+            base := sub(name, 0, name.len() - 1);
+            if member(&full, view(base)) {
+                return base;
+            }
+        }
+    }
+    return u8[];
+}
+fn reg_width<a>(name: &a [u8]) -> u64 {
+    if (name.len() == 3) & (name[0] == 101) {
+        return 32;
+    }
+    if eq(name, view("al")) + eq(name, view("bl")) + eq(name, view("cl")) + eq(name, view("dl")) + eq(name, view("sil")) + eq(name, view("dil")) != 0 {
+        return 8;
+    }
+    if (name.len() >= 3) & (name[0] == 114) {
+        last := name[name.len() - 1];
+        if last == 100 {
+            return 32;
+        }
+        if last == 98 {
+            return 8;
+        }
+    }
+    return 64;
+}
+fn is_xmm<a>(name: &a [u8]) -> u64 {
+    return starts(name, view("xmm"));
+}
+fn slot_of<a>(kind: &a [u8], name: &a [u8]) -> u8[] {
+    mut out = u8[];
+    put(&mut out, kind);
+    put(&mut out, name);
+    return out;
+}
+fn get_reg<a, b>(l: (&a mut L), name: &b [u8]) -> u8[] {
+    r := reg_name(name);
+    if r.len() == 0 {
+        bad(&mut l);
+        return copy(view("0"));
+    }
+    v := def(&mut l, view("load i64, ptr {}"), &u8[][slot_of(view("%r."), view(r))]);
+    w := reg_width(name);
+    if w == 32 {
+        return def(&mut l, view("and i64 {}, 4294967295"), &u8[][v]);
+    }
+    if w == 8 {
+        return def(&mut l, view("and i64 {}, 255"), &u8[][v]);
+    }
+    return v;
+}
+fn set_reg<a, b, c>(l: (&a mut L), name: &b [u8], value: &c [u8]) -> unit {
+    r := reg_name(name);
+    if r.len() == 0 {
+        bad(&mut l);
+        return ();
+    }
+    w := reg_width(name);
+    mut v = copy(value);
+    if w == 32 {
+        v = def(&mut l, view("and i64 {}, 4294967295"), &u8[][v]);
+    }
+    if w == 8 {
+        old := def(&mut l, view("load i64, ptr {}"), &u8[][slot_of(view("%r."), view(r))]);
+        hi := def(&mut l, view("and i64 {}, -256"), &u8[][old]);
+        lo := def(&mut l, view("and i64 {}, 255"), &u8[][v]);
+        v = def(&mut l, view("or i64 {}, {}"), &u8[][hi, lo]);
+    }
+    emit(&mut l, view("store i64 {}, ptr {}"), &u8[][v, slot_of(view("%r."), view(r))]);
+    return ();
+}
+fn set_flag<a, b>(l: (&a mut L), flag: &b [u8], value: &b [u8]) -> unit {
+    emit(&mut l, view("store i1 {}, ptr {}"), &u8[][copy(value), slot_of(view("%f."), flag)]);
+    return ();
+}
+fn get_flag<a, b>(l: (&a mut L), flag: &b [u8]) -> u8[] {
+    return def(&mut l, view("load i1, ptr {}"), &u8[][slot_of(view("%f."), flag)]);
+}
+fn zero_sign<a, b>(l: (&a mut L), r: &b [u8]) -> unit {
+    z := def(&mut l, view("icmp eq i64 {}, 0"), &u8[][copy(r)]);
+    set_flag(&mut l, view("Z"), view(z));
+    s := def(&mut l, view("icmp slt i64 {}, 0"), &u8[][copy(r)]);
+    set_flag(&mut l, view("S"), view(s));
+    return ();
+}
+
+// ---- operands ----
+
+// Operands of an instruction, split at top-level commas.
+fn operands<a>(rest: &a [u8]) -> u8[][] {
+    mut out = u8[][];
+    mut cur = u8[];
+    mut depth: u64 = 0;
+    for i in rest.len() {
+        ch := rest[i];
+        if ch == 40 {
+            depth += 1;
+        }
+        if ch == 41 {
+            depth -= 1;
+        }
+        if (ch == 44) & (depth == 0) {
+            out.push(trim(view(cur)));
+            cur = u8[];
+            continue;
+        }
+        cur.push(ch);
+    }
+    t := trim(view(cur));
+    if t.len() != 0 {
+        out.push(t);
+    }
+    return out;
+}
+// The address of a memory operand `disp(base,index,scale)` or `sym(%rip)` as a ptr value.
+fn address<a, b>(l: (&a mut L), op: &b [u8]) -> u8[] {
+    mut open = op.len();
+    for i in op.len() {
+        if (op[i] == 40) & (open == op.len()) {
+            open = i;
+        }
+    }
+    if (op.len() == 0) || (open == op.len()) || (op[op.len() - 1] != 41) {
+        bad(&mut l);
+        return copy(view("null"));
+    }
+    disp := sub(op, 0, open);
+    inner := operands(view(sub(op, open + 1, op.len() - 1)));
+    if (inner.len() == 0) + (inner.len() > 3) != 0 {
+        bad(&mut l);
+        return copy(view("null"));
+    }
+    base := sub(view(inner[0]), 1, inner[0].len());
+    if eq(view(base), view("rip")) {
+        if inner.len() != 1 {
+            bad(&mut l);
+            return copy(view("null"));
+        }
+        add_once(&mut l.refs, view(disp));
+        mut sym = u8[];
+        put(&mut sym, view("@\""));
+        put(&mut sym, view(disp));
+        sym.push(34);
+        return sym;
+    }
+    mut d: i64 = 0;
+    if disp.len() != 0 {
+        parsed := parse_int(view(disp));
+        d = parsed.v;
+        if parsed.ok == 0 {
+            bad(&mut l);
+            return copy(view("null"));
+        }
+    }
+    mut dt = u8[];
+    inum(&mut dt, d);
+    if eq(view(base), view("rbp")) & (inner.len() == 1) {
+        return def(&mut l, view("getelementptr i8, ptr %fbase, i64 {}"), &u8[][dt]);
+    }
+    mut acc = u8[];
+    if eq(view(base), view("rbp")) {
+        acc = copy(view("%rbpv"));
+    } else {
+        acc = get_reg(&mut l, view(base));
+    }
+    if inner.len() >= 2 {
+        index := get_reg(&mut l, view(sub(view(inner[1]), 1, inner[1].len())));
+        mut scale = copy(view("1"));
+        if inner.len() == 3 {
+            scale = copy(view(inner[2]));
+        }
+        scaled := def(&mut l, view("mul i64 {}, {}"), &u8[][index, scale]);
+        acc = def(&mut l, view("add i64 {}, {}"), &u8[][acc, scaled]);
+    }
+    if d != 0 {
+        acc = def(&mut l, view("add i64 {}, {}"), &u8[][acc, dt]);
+    }
+    return def(&mut l, view("inttoptr i64 {} to ptr"), &u8[][acc]);
+}
+fn width_type(width: u64) -> u8[] {
+    if width == 32 {
+        return copy(view("i32"));
+    }
+    if width == 16 {
+        return copy(view("i16"));
+    }
+    if width == 8 {
+        return copy(view("i8"));
+    }
+    return copy(view("i64"));
+}
+// The value of an operand, zero-extended to i64 (memory loads read `width` bits).
+fn value<a, b>(l: (&a mut L), op: &b [u8], width: u64) -> u8[] {
+    if op.len() == 0 {
+        bad(&mut l);
+        return copy(view("0"));
+    }
+    if op[0] == 36 {
+        n := parse_int(view(sub(op, 1, op.len())));
+        if n.ok == 0 {
+            bad(&mut l);
+            return copy(view("0"));
+        }
+        mut out = u8[];
+        inum(&mut out, n.v);
+        return out;
+    }
+    if op[0] == 37 {
+        name := sub(op, 1, op.len());
+        if is_xmm(view(name)) {
+            return def(&mut l, view("load i64, ptr {}"), &u8[][slot_of(view("%x."), view(name))]);
+        }
+        return get_reg(&mut l, view(name));
+    }
+    if has(op, view("(")) {
+        p := address(&mut l, op);
+        if width == 64 {
+            return def(&mut l, view("load i64, ptr {}, align 1"), &u8[][p]);
+        }
+        ty := width_type(width);
+        v := def(&mut l, view("load {}, ptr {}, align 1"), &u8[][copy(view(ty)), p]);
+        return def(&mut l, view("zext {} {} to i64"), &u8[][ty, v]);
+    }
+    bad(&mut l);
+    return copy(view("0"));
+}
+// Writes a value: registers take the whole word (with the alias's width rules), memory `width` bits.
+fn store<a, b, c>(l: (&a mut L), op: &b [u8], v: &c [u8], width: u64) -> unit {
+    if op.len() == 0 {
+        bad(&mut l);
+        return ();
+    }
+    if op[0] == 37 {
+        name := sub(op, 1, op.len());
+        if is_xmm(view(name)) {
+            emit(&mut l, view("store i64 {}, ptr {}"), &u8[][copy(v), slot_of(view("%x."), view(name))]);
+            return ();
+        }
+        set_reg(&mut l, view(name), v);
+        return ();
+    }
+    if has(op, view("(")) == 0 {
+        bad(&mut l);
+        return ();
+    }
+    p := address(&mut l, op);
+    if width == 64 {
+        emit(&mut l, view("store i64 {}, ptr {}, align 1"), &u8[][copy(v), p]);
+        return ();
+    }
+    ty := width_type(width);
+    tv := def(&mut l, view("trunc i64 {} to {}"), &u8[][copy(v), copy(view(ty))]);
+    emit(&mut l, view("store {} {}, ptr {}, align 1"), &u8[][ty, tv, p]);
+    return ();
+}
+fn as_double<a, b>(l: (&a mut L), v: &b [u8]) -> u8[] {
+    return def(&mut l, view("bitcast i64 {} to double"), &u8[][copy(v)]);
+}
+fn as_word<a, b>(l: (&a mut L), d: &b [u8]) -> u8[] {
+    return def(&mut l, view("bitcast double {} to i64"), &u8[][copy(d)]);
+}
+
+// ---- conditions ----
+
+fn not1<a, b>(l: (&a mut L), v: &b [u8]) -> u8[] {
+    return def(&mut l, view("xor i1 {}, true"), &u8[][copy(v)]);
+}
+fn op1<a, b, c>(l: (&a mut L), op: &b [u8], x: &c [u8], y: &c [u8]) -> u8[] {
+    mut t = u8[];
+    put(&mut t, op);
+    put(&mut t, view(" i1 {}, {}"));
+    return def(&mut l, view(t), &u8[][copy(x), copy(y)]);
+}
+// The i1 for a jcc/setcc condition code, from the flags the last flag-setting instruction stored.
+fn condition<a, b>(l: (&a mut L), cc: &b [u8]) -> u8[] {
+    if eq(cc, view("e")) + eq(cc, view("z")) != 0 {
+        return get_flag(&mut l, view("Z"));
+    }
+    if eq(cc, view("ne")) + eq(cc, view("nz")) != 0 {
+        z := get_flag(&mut l, view("Z"));
+        return not1(&mut l, view(z));
+    }
+    if eq(cc, view("b")) + eq(cc, view("c")) + eq(cc, view("nae")) != 0 {
+        return get_flag(&mut l, view("C"));
+    }
+    if eq(cc, view("ae")) + eq(cc, view("nc")) + eq(cc, view("nb")) != 0 {
+        c := get_flag(&mut l, view("C"));
+        return not1(&mut l, view(c));
+    }
+    if eq(cc, view("a")) + eq(cc, view("be")) != 0 {
+        c := get_flag(&mut l, view("C"));
+        z := get_flag(&mut l, view("Z"));
+        either := op1(&mut l, view("or"), view(c), view(z));
+        if eq(cc, view("be")) {
+            return either;
+        }
+        return not1(&mut l, view(either));
+    }
+    if eq(cc, view("l")) + eq(cc, view("ge")) + eq(cc, view("g")) + eq(cc, view("le")) != 0 {
+        s := get_flag(&mut l, view("S"));
+        o := get_flag(&mut l, view("O"));
+        less := op1(&mut l, view("xor"), view(s), view(o));
+        if eq(cc, view("l")) {
+            return less;
+        }
+        if eq(cc, view("ge")) {
+            return not1(&mut l, view(less));
+        }
+        z := get_flag(&mut l, view("Z"));
+        lesseq := op1(&mut l, view("or"), view(z), view(less));
+        if eq(cc, view("le")) {
+            return lesseq;
+        }
+        return not1(&mut l, view(lesseq));
+    }
+    if eq(cc, view("s")) {
+        return get_flag(&mut l, view("S"));
+    }
+    if eq(cc, view("ns")) {
+        s := get_flag(&mut l, view("S"));
+        return not1(&mut l, view(s));
+    }
+    if eq(cc, view("p")) {
+        return get_flag(&mut l, view("P"));
+    }
+    if eq(cc, view("np")) {
+        p := get_flag(&mut l, view("P"));
+        return not1(&mut l, view(p));
+    }
+    bad(&mut l);
+    return copy(view("false"));
+}
+fn block_name<a>(label: &a [u8]) -> u8[] {
+    mut out = u8[];
+    put(&mut out, view("b"));
+    for i in label.len() {
+        if label[i] == 46 {
+            out.push(95);
+        } else {
+            out.push(label[i]);
+        }
+    }
+    return out;
+}
+fn fresh_block<a>(l: (&a mut L)) -> u8[] {
+    l.dead += 1;
+    mut out = u8[];
+    put(&mut out, view("n"));
+    num(&mut out, l.dead);
+    return out;
+}
+fn begin_block<a, b>(l: (&a mut L), name: &b [u8]) -> unit {
+    put(&mut l.body, name);
+    put(&mut l.body, view(":\n"));
+    l.term = 0;
+    return ();
+}
+// add/sub/cmp: result and the four arithmetic flags.
+fn arith<a, b, c>(l: (&a mut L), kind: &b [u8], x: &c [u8], y: &c [u8]) -> u8[] {
+    mut call = u8[];
+    put(&mut call, view("call {i64, i1} @llvm."));
+    put(&mut call, kind);
+    put(&mut call, view(".with.overflow.i64(i64 {}, i64 {})"));
+    pair := def(&mut l, view(call), &u8[][copy(x), copy(y)]);
+    r := def(&mut l, view("extractvalue {i64, i1} {}, 0"), &u8[][copy(view(pair))]);
+    o := def(&mut l, view("extractvalue {i64, i1} {}, 1"), &u8[][pair]);
+    set_flag(&mut l, view("O"), view(o));
+    zero_sign(&mut l, view(r));
+    return r;
+}
+fn logic_flags<a, b>(l: (&a mut L), r: &b [u8]) -> unit {
+    set_flag(&mut l, view("C"), view("false"));
+    set_flag(&mut l, view("O"), view("false"));
+    zero_sign(&mut l, r);
+    return ();
+}
+fn binop_name<a>(op: &a [u8]) -> u8[] {
+    if eq(op, view("andq")) + eq(op, view("testq")) + eq(op, view("andb")) != 0 {
+        return copy(view("and"));
+    }
+    if eq(op, view("orq")) {
+        return copy(view("or"));
+    }
+    return copy(view("xor"));
+}
+fn float_op<a>(op: &a [u8]) -> u8[] {
+    if eq(op, view("addsd")) {
+        return copy(view("fadd"));
+    }
+    if eq(op, view("subsd")) {
+        return copy(view("fsub"));
+    }
+    if eq(op, view("mulsd")) {
+        return copy(view("fmul"));
+    }
+    return copy(view("fdiv"));
+}
+
+// ---- instructions ----
+
+fn ends_terminator<a>(l: (&a mut L)) -> unit {
+    l.term = 1;
+    return ();
+}
+fn call_args<a>(l: (&a mut L)) -> u8[] {
+    names := u8[][copy(view("rdi")), copy(view("rsi")), copy(view("rdx")), copy(view("rcx")), copy(view("r8")), copy(view("r9"))];
+    mut out = u8[];
+    for i in 6 {
+        if i != 0 {
+            put(&mut out, view(", "));
+        }
+        put(&mut out, view("i64 "));
+        v := get_reg(&mut l, view(names[i]));
+        put(&mut out, view(v));
+    }
+    return out;
+}
+fn lower_call<a, b>(l: (&a mut L), target: &b [u8]) -> unit {
+    if (target.len() == 0) || (target[0] == 42) {
+        bad(&mut l);
+        return ();
+    }
+    if eq(target, view("rt_abort")) {
+        // Check failures never return and are never the hot path.
+        emit(&mut l, view("call void @\"rt_abort.cold\"() #0"), &u8[][]);
+        emit(&mut l, view("unreachable"), &u8[][]);
+        ends_terminator(&mut l);
+        return ();
+    }
+    if eq(target, view("rt_f32_round")) {
+        // Rounding a binary64 word to the nearest f32 (ties to even) is fptrunc + fpext.
+        x := get_reg(&mut l, view("rdi"));
+        d := as_double(&mut l, view(x));
+        n := def(&mut l, view("fptrunc double {} to float"), &u8[][d]);
+        w := def(&mut l, view("fpext float {} to double"), &u8[][n]);
+        word := as_word(&mut l, view(w));
+        set_reg(&mut l, view("rax"), view(word));
+        return ();
+    }
+    add_once(&mut l.calls, target);
+    args := call_args(&mut l);
+    mut c = u8[];
+    put(&mut c, view("call {i64, i64} @\""));
+    put(&mut c, target);
+    put(&mut c, view("\"({})"));
+    pair := def(&mut l, view(c), &u8[][args]);
+    r0 := def(&mut l, view("extractvalue {i64, i64} {}, 0"), &u8[][copy(view(pair))]);
+    r1 := def(&mut l, view("extractvalue {i64, i64} {}, 1"), &u8[][pair]);
+    set_reg(&mut l, view("rax"), view(r0));
+    set_reg(&mut l, view("rdx"), view(r1));
+    return ();
+}
+fn wide<a, b>(l: (&a mut L), v: &b [u8]) -> u8[] {
+    return def(&mut l, view("zext i64 {} to i128"), &u8[][copy(v)]);
+}
+fn narrow<a, b>(l: (&a mut L), v: &b [u8]) -> u8[] {
+    return def(&mut l, view("trunc i128 {} to i64"), &u8[][copy(v)]);
+}
+fn instruction<a, b>(l: (&a mut L), line: &b [u8]) -> unit {
+    mut space = line.len();
+    for i in line.len() {
+        if (line[i] == 32) & (space == line.len()) {
+            space = i;
+        }
+    }
+    mut op = sub(line, 0, space);
+    mut rest = trim(view(sub(line, space + 1, line.len())));
+    if eq(view(op), view("lock")) {
+        // lock cmpxchgq %new,(mem): compares with rax, sets ZF, leaves the old value in rax.
+        o := operands(view(sub(view(rest), 9, rest.len())));
+        if (starts(view(rest), view("cmpxchgq ")) == 0) + (o.len() != 2) != 0 {
+            bad(&mut l);
+            return ();
+        }
+        p := address(&mut l, view(o[1]));
+        new := value(&mut l, view(o[0]), 64);
+        expected := get_reg(&mut l, view("rax"));
+        r := def(&mut l, view("cmpxchg ptr {}, i64 {}, i64 {} seq_cst seq_cst, align 8"), &u8[][p, expected, new]);
+        old := def(&mut l, view("extractvalue {i64, i1} {}, 0"), &u8[][copy(view(r))]);
+        ok := def(&mut l, view("extractvalue {i64, i1} {}, 1"), &u8[][r]);
+        set_reg(&mut l, view("rax"), view(old));
+        set_flag(&mut l, view("Z"), view(ok));
+        return ();
+    }
+    o := operands(view(rest));
+    n := o.len();
+    if eq(view(op), view("movq")) + eq(view(op), view("movabsq")) != 0 {
+        if n != 2 {
+            bad(&mut l);
+            return ();
+        }
+        v := value(&mut l, view(o[0]), 64);
+        store(&mut l, view(o[1]), view(v), 64);
+        return ();
+    }
+    if eq(view(op), view("movl")) + eq(view(op), view("movb")) != 0 {
+        if n != 2 {
+            bad(&mut l);
+            return ();
+        }
+        mut w: u64 = 32;
+        if eq(view(op), view("movb")) {
+            w = 8;
+        }
+        v := value(&mut l, view(o[0]), w);
+        store(&mut l, view(o[1]), view(v), w);
+        return ();
+    }
+    if eq(view(op), view("movzbq")) {
+        v := value(&mut l, view(o[0]), 8);
+        m := def(&mut l, view("and i64 {}, 255"), &u8[][v]);
+        store(&mut l, view(o[1]), view(m), 64);
+        return ();
+    }
+    if eq(view(op), view("leaq")) {
+        p := address(&mut l, view(o[0]));
+        v := def(&mut l, view("ptrtoint ptr {} to i64"), &u8[][p]);
+        store(&mut l, view(o[1]), view(v), 64);
+        return ();
+    }
+    if eq(view(op), view("addq")) + eq(view(op), view("subq")) + eq(view(op), view("cmpq")) != 0 {
+        if n != 2 {
+            bad(&mut l);
+            return ();
+        }
+        x := value(&mut l, view(o[1]), 64);
+        y := value(&mut l, view(o[0]), 64);
+        if eq(view(op), view("addq")) {
+            r := arith(&mut l, view("sadd"), view(x), view(y));
+            c := def(&mut l, view("icmp ult i64 {}, {}"), &u8[][copy(view(r)), copy(view(x))]);
+            set_flag(&mut l, view("C"), view(c));
+            store(&mut l, view(o[1]), view(r), 64);
+            return ();
+        }
+        r := arith(&mut l, view("ssub"), view(x), view(y));
+        c := def(&mut l, view("icmp ult i64 {}, {}"), &u8[][copy(view(x)), copy(view(y))]);
+        set_flag(&mut l, view("C"), view(c));
+        if eq(view(op), view("subq")) {
+            store(&mut l, view(o[1]), view(r), 64);
+        }
+        return ();
+    }
+    if eq(view(op), view("incq")) {
+        x := value(&mut l, view(o[0]), 64);
+        r := arith(&mut l, view("sadd"), view(x), view("1"));
+        store(&mut l, view(o[0]), view(r), 64);
+        return ();
+    }
+    if eq(view(op), view("andq")) + eq(view(op), view("orq")) + eq(view(op), view("xorq")) + eq(view(op), view("xorl")) + eq(view(op), view("testq")) + eq(view(op), view("andb")) != 0 {
+        if n != 2 {
+            bad(&mut l);
+            return ();
+        }
+        mut w: u64 = 64;
+        if eq(view(op), view("xorl")) {
+            w = 32;
+        }
+        if eq(view(op), view("andb")) {
+            w = 8;
+        }
+        x := value(&mut l, view(o[1]), w);
+        y := value(&mut l, view(o[0]), w);
+        mut t = binop_name(view(op));
+        put(&mut t, view(" i64 {}, {}"));
+        r := def(&mut l, view(t), &u8[][x, y]);
+        logic_flags(&mut l, view(r));
+        if eq(view(op), view("testq")) == 0 {
+            store(&mut l, view(o[1]), view(r), w);
+        }
+        return ();
+    }
+    if eq(view(op), view("shlq")) + eq(view(op), view("shrq")) + eq(view(op), view("sarq")) != 0 {
+        x := value(&mut l, view(o[1]), 64);
+        mut s = u8[];
+        if eq(view(o[0]), view("%cl")) {
+            s = get_reg(&mut l, view("cl"));
+        } else {
+            s = value(&mut l, view(o[0]), 64);
+        }
+        m := def(&mut l, view("and i64 {}, 63"), &u8[][s]);
+        mut k = copy(view("shl"));
+        if eq(view(op), view("shrq")) {
+            k = copy(view("lshr"));
+        }
+        if eq(view(op), view("sarq")) {
+            k = copy(view("ashr"));
+        }
+        put(&mut k, view(" i64 {}, {}"));
+        r := def(&mut l, view(k), &u8[][x, m]);
+        zero_sign(&mut l, view(r));
+        store(&mut l, view(o[1]), view(r), 64);
+        return ();
+    }
+    if eq(view(op), view("imulq")) {
+        if n != 2 {
+            bad(&mut l);
+            return ();
+        }
+        x := value(&mut l, view(o[1]), 64);
+        y := value(&mut l, view(o[0]), 64);
+        r := arith(&mut l, view("smul"), view(x), view(y));
+        overflow := get_flag(&mut l, view("O"));
+        set_flag(&mut l, view("C"), view(overflow));
+        store(&mut l, view(o[1]), view(r), 64);
+        return ();
+    }
+    if eq(view(op), view("mulq")) {
+        x := get_reg(&mut l, view("rax"));
+        y := value(&mut l, view(o[0]), 64);
+        xw := wide(&mut l, view(x));
+        yw := wide(&mut l, view(y));
+        p := def(&mut l, view("mul i128 {}, {}"), &u8[][xw, yw]);
+        lo := narrow(&mut l, view(p));
+        hs := def(&mut l, view("lshr i128 {}, 64"), &u8[][p]);
+        hi := narrow(&mut l, view(hs));
+        c := def(&mut l, view("icmp ne i64 {}, 0"), &u8[][copy(view(hi))]);
+        set_flag(&mut l, view("C"), view(c));
+        set_flag(&mut l, view("O"), view(c));
+        set_reg(&mut l, view("rax"), view(lo));
+        set_reg(&mut l, view("rdx"), view(hi));
+        return ();
+    }
+    if eq(view(op), view("divq")) {
+        lo := get_reg(&mut l, view("rax"));
+        hi := get_reg(&mut l, view("rdx"));
+        y := value(&mut l, view(o[0]), 64);
+        lw := wide(&mut l, view(lo));
+        hw := wide(&mut l, view(hi));
+        hs := def(&mut l, view("shl i128 {}, 64"), &u8[][hw]);
+        nw := def(&mut l, view("or i128 {}, {}"), &u8[][hs, lw]);
+        yw := wide(&mut l, view(y));
+        q := def(&mut l, view("udiv i128 {}, {}"), &u8[][copy(view(nw)), copy(view(yw))]);
+        r := def(&mut l, view("urem i128 {}, {}"), &u8[][nw, yw]);
+        qt := narrow(&mut l, view(q));
+        rt := narrow(&mut l, view(r));
+        set_reg(&mut l, view("rax"), view(qt));
+        set_reg(&mut l, view("rdx"), view(rt));
+        return ();
+    }
+    if starts(view(op), view("set")) {
+        if (n != 1) || (o[0].len() == 0) {
+            bad(&mut l);
+            return ();
+        }
+        c := condition(&mut l, view(sub(view(op), 3, op.len())));
+        z := def(&mut l, view("zext i1 {} to i64"), &u8[][c]);
+        if o[0][0] == 37 {
+            store(&mut l, view(o[0]), view(z), 64);
+        } else {
+            store(&mut l, view(o[0]), view(z), 8);
+        }
+        return ();
+    }
+    if (starts(view(op), view("j")) != 0) && (n != 1) {
+        bad(&mut l);
+        return ();
+    }
+    if eq(view(op), view("jmp")) {
+        if member(&l.labels, view(o[0])) == 0 {
+            bad(&mut l);
+            return ();
+        }
+        emit(&mut l, view("br label %{}"), &u8[][block_name(view(o[0]))]);
+        ends_terminator(&mut l);
+        return ();
+    }
+    if starts(view(op), view("j")) {
+        if member(&l.labels, view(o[0])) == 0 {
+            bad(&mut l);
+            return ();
+        }
+        c := condition(&mut l, view(sub(view(op), 1, op.len())));
+        next := fresh_block(&mut l);
+        emit(&mut l, view("br i1 {}, label %{}, label %{}"), &u8[][c, block_name(view(o[0])), copy(view(next))]);
+        begin_block(&mut l, view(next));
+        return ();
+    }
+    if eq(view(op), view("call")) {
+        lower_call(&mut l, view(rest));
+        return ();
+    }
+    if eq(view(op), view("leave")) {
+        return ();
+    }
+    if eq(view(op), view("ret")) {
+        a := get_reg(&mut l, view("rax"));
+        d := get_reg(&mut l, view("rdx"));
+        s1 := def(&mut l, view("insertvalue {i64, i64} undef, i64 {}, 0"), &u8[][a]);
+        s2 := def(&mut l, view("insertvalue {i64, i64} {}, i64 {}, 1"), &u8[][s1, d]);
+        emit(&mut l, view("ret {i64, i64} {}"), &u8[][s2]);
+        ends_terminator(&mut l);
+        return ();
+    }
+    if eq(view(op), view("mfence")) + eq(view(op), view("sfence")) + eq(view(op), view("lfence")) != 0 {
+        emit(&mut l, view("fence seq_cst"), &u8[][]);
+        return ();
+    }
+    if eq(view(op), view("xchgq")) {
+        mut a = copy(view(o[0]));
+        mut b = copy(view(o[1]));
+        if a[0] != 37 {
+            a = copy(view(o[1]));
+            b = copy(view(o[0]));
+        }
+        p := address(&mut l, view(b));
+        v := value(&mut l, view(a), 64);
+        old := def(&mut l, view("atomicrmw xchg ptr {}, i64 {} seq_cst, align 8"), &u8[][p, v]);
+        store(&mut l, view(a), view(old), 64);
+        return ();
+    }
+    if eq(view(op), view("syscall")) {
+        names := u8[][copy(view("rax")), copy(view("rdi")), copy(view("rsi")), copy(view("rdx")), copy(view("r10")), copy(view("r8")), copy(view("r9"))];
+        mut args = u8[];
+        for i in 7 {
+            if i != 0 {
+                put(&mut args, view(", "));
+            }
+            put(&mut args, view("i64 "));
+            put(&mut args, view(get_reg(&mut l, view(names[i]))));
+        }
+        v := def(&mut l, view("call i64 asm sideeffect \"syscall\", \"={rax},{rax},{rdi},{rsi},{rdx},{r10},{r8},{r9},~{rcx},~{r11},~{memory}\"({})"), &u8[][args]);
+        set_reg(&mut l, view("rax"), view(v));
+        return ();
+    }
+    if eq(view(op), view("addsd")) + eq(view(op), view("subsd")) + eq(view(op), view("mulsd")) + eq(view(op), view("divsd")) != 0 {
+        xv := value(&mut l, view(o[1]), 64);
+        yv := value(&mut l, view(o[0]), 64);
+        x := as_double(&mut l, view(xv));
+        y := as_double(&mut l, view(yv));
+        mut t = float_op(view(op));
+        put(&mut t, view(" double {}, {}"));
+        r := def(&mut l, view(t), &u8[][x, y]);
+        w := as_word(&mut l, view(r));
+        store(&mut l, view(o[1]), view(w), 64);
+        return ();
+    }
+    if eq(view(op), view("sqrtsd")) {
+        xv := value(&mut l, view(o[0]), 64);
+        x := as_double(&mut l, view(xv));
+        r := def(&mut l, view("call double @llvm.sqrt.f64(double {})"), &u8[][x]);
+        w := as_word(&mut l, view(r));
+        store(&mut l, view(o[1]), view(w), 64);
+        return ();
+    }
+    if eq(view(op), view("cvtsi2sdq")) {
+        x := value(&mut l, view(o[0]), 64);
+        r := def(&mut l, view("sitofp i64 {} to double"), &u8[][x]);
+        w := as_word(&mut l, view(r));
+        store(&mut l, view(o[1]), view(w), 64);
+        return ();
+    }
+    if eq(view(op), view("cvttsd2si")) {
+        xv := value(&mut l, view(o[0]), 64);
+        x := as_double(&mut l, view(xv));
+        r := def(&mut l, view("fptosi double {} to i64"), &u8[][x]);
+        store(&mut l, view(o[1]), view(r), 64);
+        return ();
+    }
+    if eq(view(op), view("ucomisd")) {
+        xv := value(&mut l, view(o[1]), 64);
+        yv := value(&mut l, view(o[0]), 64);
+        x := as_double(&mut l, view(xv));
+        y := as_double(&mut l, view(yv));
+        unordered := def(&mut l, view("fcmp uno double {}, {}"), &u8[][copy(view(x)), copy(view(y))]);
+        same := def(&mut l, view("fcmp ueq double {}, {}"), &u8[][copy(view(x)), copy(view(y))]);
+        below := def(&mut l, view("fcmp ult double {}, {}"), &u8[][x, y]);
+        set_flag(&mut l, view("Z"), view(same));
+        set_flag(&mut l, view("P"), view(unordered));
+        set_flag(&mut l, view("C"), view(below));
+        set_flag(&mut l, view("O"), view("false"));
+        set_flag(&mut l, view("S"), view("false"));
+        return ();
+    }
+    bad(&mut l);
+    return ();
+}
+
+// ---- a small string set (open addressing over FNV-1a), for symbol lookups on large streams ----
+
+struct Set {
+    keys: u8[][],
+    used: u64[],
+    count: u64
+}
+fn set_new(capacity: u64) -> Set {
+    mut size: u64 = 64;
+    while size < capacity * 2 {
+        size = size * 2;
+    }
+    mut keys = u8[][];
+    mut used = u64[];
+    for i in size {
+        keys.push(u8[]);
+        used.push(0);
+    }
+    return Set { keys: keys, used: used, count: 0 };
+}
+fn fnv<a>(s: &a [u8]) -> u64 {
+    mut h: u64 = 14695981039346656037;
+    for i in s.len() {
+        h = wrapping_mul(h ^ u64(s[i]), 1099511628211);
+    }
+    return h;
+}
+fn set_has<a, b>(s: (&a Set), key: &b [u8]) -> u64 {
+    mask := s.used.len() - 1;
+    mut i = fnv(key) & mask;
+    while s.used[i] != 0 {
+        if eq(view(s.keys[i]), key) {
+            return 1;
+        }
+        i = (i + 1) & mask;
+    }
+    return 0;
+}
+fn set_add<a, b>(s: (&a mut Set), key: &b [u8]) -> unit {
+    if set_has(&s, key) {
+        return ();
+    }
+    mask := s.used.len() - 1;
+    mut i = fnv(key) & mask;
+    while s.used[i] != 0 {
+        i = (i + 1) & mask;
+    }
+    s.keys[i] = copy(key);
+    s.used[i] = 1;
+    s.count += 1;
+    return ();
+}
+fn ident_char(ch: u64) -> u64 {
+    return ((ch >= 97) & (ch <= 122)) + ((ch >= 65) & (ch <= 90)) + ((ch >= 48) & (ch <= 57)) + (ch == 95) + (ch == 46) + (ch == 36);
+}
+// Every identifier-like token of a line into `out`.
+fn add_tokens<a, b>(out: (&a mut Set), line: &b [u8]) -> unit {
+    mut i: u64 = 0;
+    while i < line.len() {
+        if ident_char(line[i]) {
+            mut j = i;
+            while (j < line.len()) && (ident_char(line[j]) != 0) {
+                j += 1;
+            }
+            set_add(&mut out, view(sub(line, i, j)));
+            i = j;
+            continue;
+        }
+        i += 1;
+    }
+    return ();
+}
+// `line` with every `.L` token in `renamed` replaced by its pool name.
+fn rename_line<a, b>(line: &a [u8], renamed: (&b Set)) -> u8[] {
+    if (renamed.count == 0) + (has(line, view(".L")) == 0) != 0 {
+        return copy(line);
+    }
+    mut out = u8[];
+    mut i: u64 = 0;
+    while i < line.len() {
+        if ident_char(line[i]) {
+            mut j = i;
+            while (j < line.len()) && (ident_char(line[j]) != 0) {
+                j += 1;
+            }
+            token := sub(line, i, j);
+            if is_local_label(view(token)) & (set_has(&renamed, view(token)) != 0) {
+                put(&mut out, view(pool_name(view(token))));
+            } else {
+                put(&mut out, view(token));
+            }
+            i = j;
+            continue;
+        }
+        out.push(line[i]);
+        i += 1;
+    }
+    return out;
+}
+
+// ---- functions ----
+
+fn callee_saved<a>(line: &a [u8]) -> u64 {
+    regs := u8[][copy(view("%rbx")), copy(view("%r12")), copy(view("%r13")), copy(view("%r14")), copy(view("%r15"))];
+    for i in regs.len() {
+        for k in 2 {
+            mut full = u8[];
+            if k == 0 {
+                put(&mut full, view("pushq "));
+            } else {
+                put(&mut full, view("popq "));
+            }
+            put(&mut full, view(regs[i]));
+            if eq(line, view(full)) {
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+// The function's instruction lines, with pool lines dropped.
+fn body_lines<a, b>(lines: (&a u8[][]), f: (&b Func)) -> u8[][] {
+    mut out = u8[][];
+    mut pool = 0;
+    mut i = f.first;
+    while i < f.end {
+        line := view(lines[i]);
+        if starts(line, view(".pushsection")) {
+            pool = 1;
+        }
+        if pool == 0 {
+            out.push(copy(line));
+        }
+        if starts(line, view(".popsection")) {
+            pool = 0;
+        }
+        i += 1;
+    }
+    return out;
+}
+// Lowers one function into l.body; l.fail is set when any line is not understood.
+fn lower_function<a, b>(l: (&a mut L), lines: (&b u8[][]), f: (&b Func)) -> unit {
+    l.body = u8[];
+    l.fail = 0;
+    l.term = 0;
+    l.labels = u8[][];
+    body := body_lines(&lines, &f);
+    mut i: u64 = 0;
+    if (body.len() >= 2) && (eq(view(body[0]), view("pushq %rbp")) != 0) {
+        if eq(view(body[1]), view("movq %rsp,%rbp")) {
+            i = 2;
+        }
+    }
+    if i < body.len() {
+        if starts(view(body[i]), view("subq $.F")) & ends(view(body[i]), view(",%rsp")) {
+            i += 1;
+        }
+    }
+    // Parameter stores, then the frame-zeroing idiom `leaq -.Fn(%rbp),%rdi; movq $.Fn/8-K,%rcx;
+    // xorl %eax,%eax; rep stosq`, which clears the frame below the K parameter slots.
+    mut j = i;
+    while j < body.len() {
+        line := view(body[j]);
+        if (starts(line, view("movq %")) == 0) + (ends(line, view("(%rbp)")) == 0) + starts(line, view("movq %rax")) != 0 {
+            break;
+        }
+        j += 1;
+    }
+    mut zero: i64 = -1;
+    if j + 3 < body.len() {
+        if starts(view(body[j]), view("leaq -.F")) & eq(view(body[j + 2]), view("xorl %eax,%eax")) & eq(view(body[j + 3]), view("rep stosq")) {
+            c := view(body[j + 1]);
+            mut slash = 0;
+            for k in c.len() {
+                if (c[k] == 47) & (slash == 0) {
+                    slash = k;
+                }
+            }
+            if (slash != 0) & ends(c, view(",%rcx")) {
+                k := parse_int(view(sub(c, slash + 3, c.len() - 5)));
+                if k.ok {
+                    zero = k.v;
+                }
+            }
+        }
+    }
+    mut instrs = u8[][];
+    mut k = i;
+    while k < body.len() {
+        if (zero >= 0) & (k >= j) & (k < j + 4) {
+            k += 1;
+            continue;
+        }
+        line := view(body[k]);
+        if eq(line, view("pushq %rbp")) + eq(line, view("movq %rsp,%rbp")) + callee_saved(line) == 0 {
+            instrs.push(copy(line));
+        }
+        k += 1;
+    }
+    for m in instrs.len() {
+        line := view(instrs[m]);
+        if has(line, view("%rsp")) + has(line, view(".F")) != 0 {
+            bad(&mut l);
+            return ();
+        }
+        name := label_of(line);
+        if (name.len() != 0) & (name.len() + 1 == line.len()) {
+            l.labels.push(name);
+        }
+    }
+    size := f.frame;
+    names := u8[][copy(view("rax")), copy(view("rbx")), copy(view("rcx")), copy(view("rdx")), copy(view("rsi")), copy(view("rdi")), copy(view("r8")), copy(view("r9")), copy(view("r10")), copy(view("r11")), copy(view("r12")), copy(view("r13")), copy(view("r14")), copy(view("r15"))];
+    raw_line(&mut l, view("entry:"));
+    for r in names.len() {
+        emit(&mut l, view("{} = alloca i64"), &u8[][slot_of(view("%r."), view(names[r]))]);
+    }
+    for x in 16 {
+        mut xn = copy(view("xmm"));
+        num(&mut xn, x);
+        emit(&mut l, view("{} = alloca i64"), &u8[][slot_of(view("%x."), view(xn))]);
+    }
+    flags := u8[][copy(view("Z")), copy(view("C")), copy(view("S")), copy(view("O")), copy(view("P"))];
+    for q in flags.len() {
+        emit(&mut l, view("{} = alloca i1"), &u8[][slot_of(view("%f."), view(flags[q]))]);
+    }
+    mut fs = u8[];
+    num(&mut fs, size + 16);
+    emit(&mut l, view("%frame = alloca [{} x i8], align 16"), &u8[][fs]);
+    if zero >= 0 {
+        mut zs = u8[];
+        num(&mut zs, size - 8 * u64(zero));
+        emit(&mut l, view("call void @llvm.memset.p0.i64(ptr %frame, i8 0, i64 {}, i1 false)"), &u8[][zs]);
+    }
+    args := u8[][copy(view("rdi")), copy(view("rsi")), copy(view("rdx")), copy(view("rcx")), copy(view("r8")), copy(view("r9"))];
+    for a in 6 {
+        mut an = copy(view("%a"));
+        num(&mut an, a);
+        emit(&mut l, view("store i64 {}, ptr {}"), &u8[][an, slot_of(view("%r."), view(args[a]))]);
+    }
+    mut ss = u8[];
+    num(&mut ss, size);
+    emit(&mut l, view("%fbase = getelementptr i8, ptr %frame, i64 {}"), &u8[][ss]);
+    emit(&mut l, view("%rbpv = ptrtoint ptr %fbase to i64"), &u8[][]);
+    emit(&mut l, view("br label %body"), &u8[][]);
+    begin_block(&mut l, view("body"));
+    for m in instrs.len() {
+        if l.fail {
+            return ();
+        }
+        line := view(instrs[m]);
+        name := label_of(line);
+        if (name.len() != 0) & (name.len() + 1 == line.len()) {
+            b := block_name(view(name));
+            if l.term == 0 {
+                emit(&mut l, view("br label %{}"), &u8[][copy(view(b))]);
+            }
+            begin_block(&mut l, view(b));
+            continue;
+        }
+        if (line.len() == 0) || (line[0] == 46) {
+            bad(&mut l);
+            return ();
+        }
+        if l.term {
+            next := fresh_block(&mut l);
+            begin_block(&mut l, view(next));
+        }
+        instruction(&mut l, line);
+    }
+    if l.term == 0 {
+        emit(&mut l, view("unreachable"), &u8[][]);
+    }
+    return ();
+}
+
+// ---- the module ----
+
+fn header<a>(out: (&a mut u8[])) -> unit {
+    put(&mut out, view("attributes #0 = { noreturn cold nounwind }\n"));
+    put(&mut out, view("attributes #1 = { nounwind \"no-builtins\" }\n"));
+    put(&mut out, view("declare void @llvm.memset.p0.i64(ptr, i8, i64, i1)\n"));
+    put(&mut out, view("declare {i64, i1} @llvm.sadd.with.overflow.i64(i64, i64)\n"));
+    put(&mut out, view("declare {i64, i1} @llvm.ssub.with.overflow.i64(i64, i64)\n"));
+    put(&mut out, view("declare {i64, i1} @llvm.smul.with.overflow.i64(i64, i64)\n"));
+    put(&mut out, view("declare double @llvm.sqrt.f64(double)\n"));
+    put(&mut out, view("define internal void @\"rt_abort.cold\"() noreturn cold noinline nounwind {\n  call {i64, i64} @\"rt_abort\"(i64 0, i64 0, i64 0, i64 0, i64 0, i64 0)\n  unreachable\n}\n"));
+    // LLVM may turn copy and fill loops into these calls; Grail programs have no libc.
+    put(&mut out, view("define ptr @memset(ptr %d, i32 %c, i64 %n) #1 {\nentry:\n  %b = trunc i32 %c to i8\n  br label %loop\nloop:\n  %i = phi i64 [0, %entry], [%i1, %body]\n  %done = icmp eq i64 %i, %n\n  br i1 %done, label %exit, label %body\nbody:\n  %p = getelementptr i8, ptr %d, i64 %i\n  store i8 %b, ptr %p\n  %i1 = add i64 %i, 1\n  br label %loop\nexit:\n  ret ptr %d\n}\n"));
+    put(&mut out, view("define ptr @memcpy(ptr %d, ptr %s, i64 %n) #1 {\nentry:\n  br label %loop\nloop:\n  %i = phi i64 [0, %entry], [%i1, %body]\n  %done = icmp eq i64 %i, %n\n  br i1 %done, label %exit, label %body\nbody:\n  %q = getelementptr i8, ptr %s, i64 %i\n  %v = load i8, ptr %q\n  %p = getelementptr i8, ptr %d, i64 %i\n  store i8 %v, ptr %p\n  %i1 = add i64 %i, 1\n  br label %loop\nexit:\n  ret ptr %d\n}\n"));
+    put(&mut out, view("define ptr @memmove(ptr %d, ptr %s, i64 %n) #1 {\nentry:\n  %fwd = icmp ult ptr %d, %s\n  br i1 %fwd, label %f, label %b\nf:\n  %i = phi i64 [0, %entry], [%i1, %fb]\n  %fdone = icmp eq i64 %i, %n\n  br i1 %fdone, label %exit, label %fb\nfb:\n  %fq = getelementptr i8, ptr %s, i64 %i\n  %fv = load i8, ptr %fq\n  %fp = getelementptr i8, ptr %d, i64 %i\n  store i8 %fv, ptr %fp\n  %i1 = add i64 %i, 1\n  br label %f\nb:\n  %j = phi i64 [%n, %entry], [%j1, %bb]\n  %bdone = icmp eq i64 %j, 0\n  br i1 %bdone, label %exit, label %bb\nbb:\n  %j1 = sub i64 %j, 1\n  %bq = getelementptr i8, ptr %s, i64 %j1\n  %bv = load i8, ptr %bq\n  %bp = getelementptr i8, ptr %d, i64 %j1\n  store i8 %bv, ptr %bp\n  br label %b\nexit:\n  ret ptr %d\n}\n"));
+    return ();
+}
+fn pool_name<a>(label: &a [u8]) -> u8[] {
+    mut out = copy(view("grail.pool."));
+    put(&mut out, view(sub(label, 2, label.len())));
+    return out;
+}
+// Lowers a raw x86-64-spelled stream (target triple `triple`).
+pub fn lower<a, b>(stream: &a [u8], triple: &b [u8]) -> Lowered {
+    lines := split_lines(stream);
+    mut l = L { ir: u8[], body: u8[], fail: 0, t: 0, dead: 0, term: 0, labels: u8[][], calls: u8[][], refs: u8[][], lifted: u8[][], flags: 0, frame: 0 };
+    mut funcs = Func[];
+    mut data = u8[][];
+    split(&lines, &mut funcs, &mut data);
+    // Labels named from data (jump tables) keep the functions that define them native.
+    mut data_tokens = set_new(data.len() * 4 + 64);
+    for i in data.len() {
+        add_tokens(&mut data_tokens, view(data[i]));
+    }
+    mut functions = u8[];
+    mut native_lines = u8[][];
+    native_lines.push(copy(view(".text")));
+    mut native_tokens = set_new(funcs.len() * 64 + 64);
+    for fi in funcs.len() {
+        f := &funcs[fi];
+        mut pinned = 0;
+        own := body_lines(&lines, &f);
+        for q in own.len() {
+            name := label_of(view(own[q]));
+            if (name.len() != 0) & (name.len() + 1 == own[q].len()) & (set_has(&data_tokens, view(name)) != 0) {
+                pinned = 1;
+            }
+        }
+        saved_calls := l.calls.len();
+        saved_refs := l.refs.len();
+        if pinned == 0 {
+            lower_function(&mut l, &lines, &f);
+        }
+        if (pinned == 0) & (l.fail == 0) {
+            put(&mut functions, view("define {i64, i64} @\""));
+            put(&mut functions, view(f.name));
+            put(&mut functions, view("\"(i64 %a0, i64 %a1, i64 %a2, i64 %a3, i64 %a4, i64 %a5) {\n"));
+            put(&mut functions, view(l.body));
+            put(&mut functions, view("}\n"));
+            l.lifted.push(copy(view(f.name)));
+            continue;
+        }
+        // Native: drop what this function added to the call and reference lists.
+        while l.calls.len() > saved_calls {
+            l.calls.pop();
+        }
+        while l.refs.len() > saved_refs {
+            l.refs.pop();
+        }
+        mut g = copy(view(".globl "));
+        put(&mut g, view(f.name));
+        native_lines.push(g);
+        mut h = copy(view(".hidden "));
+        put(&mut h, view(f.name));
+        native_lines.push(h);
+        mut lab = copy(view(f.name));
+        lab.push(58);
+        native_lines.push(lab);
+        kept := body_lines(&lines, &f);
+        for k in kept.len() {
+            native_lines.push(copy(view(kept[k])));
+            add_tokens(&mut native_tokens, view(kept[k]));
+        }
+        if f.framed {
+            // The frame symbol is the one the prologue's `subq $.Fn,%rsp` names.
+            mut sym = u8[];
+            for k in kept.len() {
+                line := view(kept[k]);
+                if starts(line, view("subq $.F")) & (sym.len() == 0) {
+                    sym = sub(line, 6, line.len() - 5);
+                }
+            }
+            mut set = copy(view(".set "));
+            put(&mut set, view(sym));
+            set.push(44);
+            num(&mut set, f.frame);
+            native_lines.push(set);
+        }
+    }
+    for i in data.len() {
+        add_tokens(&mut native_tokens, view(data[i]));
+    }
+    mut lifted = set_new(l.lifted.len() + 16);
+    for i in l.lifted.len() {
+        set_add(&mut lifted, view(l.lifted[i]));
+    }
+    add_once(&mut l.calls, view("rt_abort"));
+    add_once(&mut l.refs, view("rt_abort"));
+    for i in l.calls.len() {
+        add_once(&mut l.refs, view(l.calls[i]));
+    }
+    // The module text.
+    mut ir = u8[];
+    put(&mut ir, view("target triple = \""));
+    put(&mut ir, triple);
+    put(&mut ir, view("\"\n"));
+    header(&mut ir);
+    mut callset = set_new(l.calls.len() + 16);
+    for i in l.calls.len() {
+        set_add(&mut callset, view(l.calls[i]));
+    }
+    mut exported = set_new(l.refs.len() + 16);
+    for i in l.refs.len() {
+        r := view(l.refs[i]);
+        if set_has(&lifted, r) {
+            continue;
+        }
+        mut name = copy(r);
+        if is_local_label(r) {
+            name = pool_name(r);
+        }
+        set_add(&mut exported, r);
+        if set_has(&callset, r) {
+            put(&mut ir, view("declare {i64, i64} @\""));
+            put(&mut ir, view(name));
+            put(&mut ir, view("\"(i64, i64, i64, i64, i64, i64)\n"));
+        } else {
+            put(&mut ir, view("@\""));
+            put(&mut ir, view(name));
+            put(&mut ir, view("\" = external hidden global i8\n"));
+        }
+    }
+    // Lifted functions native code does not name are internal (inlinable and removable).
+    fl := split_lines(view(functions));
+    for i in fl.len() {
+        line := view(fl[i]);
+        if starts(line, view("define {i64, i64} @\"")) {
+            mut e = 20;
+            while (e < line.len()) && (line[e] != 34) {
+                e += 1;
+            }
+            fname := sub(line, 20, e);
+            if (set_has(&native_tokens, view(fname)) == 0) & (eq(view(fname), view("_start")) == 0) {
+                put(&mut ir, view("define internal {i64, i64} @\""));
+                put(&mut ir, view(sub(line, 20, line.len())));
+                ir.push(10);
+                continue;
+            }
+        }
+        put(&mut ir, view(rename_line(line, &exported)));
+        ir.push(10);
+    }
+    // Native functions, then data: labels the IR references become hidden globals, and the
+    // assembler-temporary .L ones are renamed everywhere they appear.
+    mut native = u8[];
+    for i in native_lines.len() {
+        put(&mut native, view(rename_line(view(native_lines[i]), &exported)));
+        native.push(10);
+    }
+    for i in data.len() {
+        line := view(data[i]);
+        name := label_of(line);
+        if (name.len() != 0) & (set_has(&exported, view(name)) != 0) {
+            mut gname = copy(view(name));
+            if is_local_label(view(name)) {
+                gname = pool_name(view(name));
+            }
+            put(&mut native, view(".globl "));
+            put(&mut native, view(gname));
+            put(&mut native, view("\n.hidden "));
+            put(&mut native, view(gname));
+            native.push(10);
+        }
+        put(&mut native, view(rename_line(line, &exported)));
+        native.push(10);
+    }
+    return Lowered { ir: ir, native: native };
+}
