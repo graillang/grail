@@ -356,24 +356,54 @@ fn bad<a>(l: (&a mut L)) -> unit {
     return ();
 }
 
-// Registers: the fourteen integer registers by canonical name, with 32- and 8-bit aliases.
+// Registers: the fourteen integer registers by canonical name, with 32- and 8-bit aliases
+// (eax/al, sil/dil, r8d/r8b, ...). Compared byte by byte: this runs for every register operand.
+fn legacy_base(c: u64) -> u64 {
+    // a, b, c, d -> rax, rbx, rcx, rdx
+    return (c == 97) + (c == 98) + (c == 99) + (c == 100);
+}
 fn reg_name<a>(name: &a [u8]) -> u8[] {
-    full := u8[][copy(view("rax")), copy(view("rbx")), copy(view("rcx")), copy(view("rdx")), copy(view("rsi")), copy(view("rdi")), copy(view("r8")), copy(view("r9")), copy(view("r10")), copy(view("r11")), copy(view("r12")), copy(view("r13")), copy(view("r14")), copy(view("r15"))];
-    if member(&full, name) {
+    n := name.len();
+    if (n == 3) && (name[0] == 114) && (name[2] == 120) && (legacy_base(name[1]) != 0) {
         return copy(name);
     }
-    e32 := u8[][copy(view("eax")), copy(view("ebx")), copy(view("ecx")), copy(view("edx")), copy(view("esi")), copy(view("edi"))];
-    b8 := u8[][copy(view("al")), copy(view("bl")), copy(view("cl")), copy(view("dl")), copy(view("sil")), copy(view("dil"))];
-    for i in 6 {
-        if eq(view(e32[i]), name) + eq(view(b8[i]), name) != 0 {
-            return copy(view(full[i]));
-        }
+    if (n == 3) && (name[0] == 114) && (((name[1] == 115) + (name[1] == 100)) != 0) && (name[2] == 105) {
+        return copy(name);
     }
-    if (name.len() >= 3) & (name[0] == 114) {
-        last := name[name.len() - 1];
-        if (last == 100) + (last == 98) != 0 {
-            base := sub(name, 0, name.len() - 1);
-            if member(&full, view(base)) {
+    if (n == 2) && (name[0] == 114) && (name[1] >= 56) && (name[1] <= 57) {
+        return copy(name);
+    }
+    if (n == 3) && (name[0] == 114) && (name[1] == 49) && (name[2] >= 48) && (name[2] <= 53) {
+        return copy(name);
+    }
+    if (n == 3) && (name[0] == 101) && (name[2] == 120) && (legacy_base(name[1]) != 0) {
+        mut out = copy(view("r"));
+        out.push(name[1]);
+        out.push(120);
+        return out;
+    }
+    if (n == 3) && (name[0] == 101) && (((name[1] == 115) + (name[1] == 100)) != 0) && (name[2] == 105) {
+        mut out = copy(view("r"));
+        out.push(name[1]);
+        out.push(105);
+        return out;
+    }
+    if (n == 2) && (name[1] == 108) && (legacy_base(name[0]) != 0) {
+        mut out = copy(view("r"));
+        out.push(name[0]);
+        out.push(120);
+        return out;
+    }
+    if (n == 3) && (((name[0] == 115) + (name[0] == 100)) != 0) && (name[1] == 105) && (name[2] == 108) {
+        mut out = copy(view("r"));
+        out.push(name[0]);
+        out.push(105);
+        return out;
+    }
+    if (n >= 3) && (name[0] == 114) && (((name[n - 1] == 100) + (name[n - 1] == 98)) != 0) {
+        base := sub(name, 0, n - 1);
+        if reg_width(view(base)) == 64 {
+            if reg_name(view(base)).len() != 0 {
                 return base;
             }
         }
@@ -381,18 +411,21 @@ fn reg_name<a>(name: &a [u8]) -> u8[] {
     return u8[];
 }
 fn reg_width<a>(name: &a [u8]) -> u64 {
-    if (name.len() == 3) & (name[0] == 101) {
+    n := name.len();
+    if (n == 3) && (name[0] == 101) {
         return 32;
     }
-    if eq(name, view("al")) + eq(name, view("bl")) + eq(name, view("cl")) + eq(name, view("dl")) + eq(name, view("sil")) + eq(name, view("dil")) != 0 {
+    if (n == 2) && (name[1] == 108) {
         return 8;
     }
-    if (name.len() >= 3) & (name[0] == 114) {
-        last := name[name.len() - 1];
-        if last == 100 {
+    if (n == 3) && (name[2] == 108) && (name[1] == 105) {
+        return 8;
+    }
+    if (n >= 3) && (name[0] == 114) && (name[1] >= 48) && (name[1] <= 57) {
+        if name[n - 1] == 100 {
             return 32;
         }
-        if last == 98 {
+        if name[n - 1] == 98 {
             return 8;
         }
     }
@@ -1252,22 +1285,17 @@ fn rename_line<a, b>(line: &a [u8], renamed: (&b Set)) -> u8[] {
 // ---- functions ----
 
 fn callee_saved<a>(line: &a [u8]) -> u64 {
-    regs := u8[][copy(view("%rbx")), copy(view("%r12")), copy(view("%r13")), copy(view("%r14")), copy(view("%r15"))];
-    for i in regs.len() {
-        for k in 2 {
-            mut full = u8[];
-            if k == 0 {
-                put(&mut full, view("pushq "));
-            } else {
-                put(&mut full, view("popq "));
-            }
-            put(&mut full, view(regs[i]));
-            if eq(line, view(full)) {
-                return 1;
-            }
+    mut r = u8[];
+    if starts(line, view("pushq %")) {
+        r = sub(line, 7, line.len());
+    } else {
+        if starts(line, view("popq %")) {
+            r = sub(line, 6, line.len());
+        } else {
+            return 0;
         }
     }
-    return 0;
+    return eq(view(r), view("rbx")) + eq(view(r), view("r12")) + eq(view(r), view("r13")) + eq(view(r), view("r14")) + eq(view(r), view("r15"));
 }
 // The function's instruction lines, with pool lines dropped.
 fn body_lines<a, b>(lines: (&a u8[][]), f: (&b Func)) -> u8[][] {

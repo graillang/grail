@@ -104,7 +104,12 @@ Self-compilation: the compiler built through `--backend=llvm` (1 053 of its func
 compiles the full compiler source to output byte-identical with the native-built compiler's
 (28 851 897 bytes) in 7.9 s instead of 35.3 s. Lowering the compiler takes 597 s and `clang -O2`
 190 s on the loaded build machine; making `llvm.grl` itself faster is the next item, since it
-runs in the native-built compiler during bootstrap.
+runs in the native-built compiler during bootstrap. Allocation-free register lookup took it to
+499 s; sampling the rest shows allocator traffic, not lowering logic: every `view(x)` allocates and
+later frees a heap descriptor (`rt_view`/`rt_slice`/`.D4`), and `view("...")` rebuilds and
+UTF-8-checks its literal each time (`rt_string_lit`). Passing views as a pointer/length pair
+without allocation is the first stage-2 item: it speeds every Grail program on both backends,
+the compiler included, and is the same cost that dominates the fnv benchmark.
 
 Stage 2 carries type information into the stream so both backends benefit: inline float
 arithmetic (no `rt_f64_op`), real `f32` values instead of rounded binary64 words, 4-byte
