@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Green-task stack switches on AArch64 and RISC-V save every register the C ABI preserves
+  (x19-x28 and d8-d15; s0-s11 and fs0-fs11), not only those the native backend uses, so
+  LLVM-compiled code survives a task switch. A new task's initial frame grows to match.
+
 - `bytes[i]` reads the element straight from the sequence when the index is simple (names, integer
   literals, arithmetic, grouping): no temporary view is allocated, borrow-tracked and freed per
   access. Other index expressions keep the borrowed-view path, so moving or mutating the sequence

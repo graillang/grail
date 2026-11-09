@@ -1518,16 +1518,20 @@ fn rt_task_spawn(s: u64, f: u64, item: u64, arity: u64, dropper: u64) -> u64 {
     }
     raw_store(t + 8, stack);
     raw_store(t + 16, size);
-    // Initial switch frame: 8 words whose restored resume address enters rt_green_main.
-    frame := stack + size - 64;
-    mut slot = 0;
+    // Initial switch frame, as the target's switch saves it, whose restored resume address enters
+    // rt_green_main: x86-64 8 words (resume first); AArch64 22 words (resume first); RISC-V 26
+    // words (resume last).
     target := raw_target();
+    mut words = 8;
+    mut slot = 0;
     if target == 1 {
-        slot = 1;
+        words = 22;
     }
     if target == 2 {
-        slot = 7;
+        words = 26;
+        slot = 25;
     }
+    frame := stack + size - words * 8;
     raw_store(frame + slot * 8, rt_green_main);
     raw_store(t, frame);
     rt_enqueue(t);
