@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `hash::Equal::equal` and `hash::equal` return `bool` (they returned `u64`). The standard library no longer
+  mixes bools and integers (`||`/`&&` instead of `+`/`&` on comparisons, `>=` instead of `(a < b) == 0`).
 - `tools/test-selfhost.mjs` (`just test-selfhost`, a CI job): the compiler compiles itself twice and the outputs must
   be identical.
 - Closures can take reference parameters (`|a: &T, b: &T| -> bool ...`), each borrowed afresh per call;
