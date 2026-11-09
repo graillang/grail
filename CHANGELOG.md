@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Ownership: after a `while` or `for` whose body always returns or continues, locals are usable again.
+  The dead end state of such a body (where `return` had dropped every local) was merged into the
+  loop exit, so any use after the loop was rejected as a use of a moved value.
+
 - LLVM backend: when every frame access in a function is a constant offset below rbp, each 8-byte
   slot becomes its own alloca, so borrowing one local no longer makes the whole frame escape and
   LLVM keeps the rest in registers. With `--backend=llvm` the benchmarks are now 1.2x (fnv, sieve),
