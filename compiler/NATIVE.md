@@ -135,6 +135,15 @@ reference. **Conservative limit:** opaque external-frame writes without a recove
 contract are rejected. Whole-frame guards and weak updates may retain borrows longer than needed.
 This is not a soundness proof; the explicitly unsafe runtime is trusted.
 
+## LLVM backend
+
+`--backend=llvm` (Linux x86-64) skips `optimize.grl` and hands the raw stream to `llvm.grl`, which
+writes LLVM IR to `PATH.ll` for each function made only of understood instructions and native
+assembly for everything else to `PATH`; `clang -O2 -c PATH.ll` and the usual assembly are linked
+together. Grail-internal calls between the two keep the private convention (six argument words,
+the rax:rdx pair back), which on SysV x86-64 is the C convention. See
+[../docs/design/llvm-backend.md](../docs/design/llvm-backend.md).
+
 ## Optimization
 
 `optimize.grl` runs on every function of the x86-64-spelled word stream before `machine.grl`

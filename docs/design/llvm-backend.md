@@ -1,6 +1,6 @@
 # LLVM backend
 
-Status: design, 2026-11-09. Approved direction: LLVM is the optimizing backend; the native
+Status: stage 1 integrated (`compiler/llvm.grl`, `--backend=llvm`, Linux x86-64), 2026-11-09. Approved direction: LLVM is the optimizing backend; the native
 backend stays for fast debug builds and bootstrap. The LLVM version is pinned (system 23.x).
 
 ## Why
@@ -86,6 +86,19 @@ functions native.
 
 The remaining gap to C is front-end output: a view allocated and freed per byte access in some
 loops (fnv), 8-byte elements for `f32[]`, and bounds checks without loop versioning.
+
+### Integrated backend (stage 1)
+
+`compiler/llvm.grl` implements the prototype's lowering in Grail. Through it every executable
+native case (209) produces the same output and exit status, and the benchmarks run:
+
+| benchmark | C `-O2` | native | `--backend=llvm` |
+| --- | --- | --- | --- |
+| fnv | 0.651 s | 50.155 s | 6.574 s |
+| matmul | 0.255 s | 84.363 s | 2.142 s |
+| nbody | 0.117 s | 3.960 s | 1.213 s |
+| sieve | 0.718 s | 14.019 s | 3.718 s |
+| sort | 1.071 s | 3.491 s | 2.674 s |
 
 Stage 2 carries type information into the stream so both backends benefit: inline float
 arithmetic (no `rt_f64_op`), real `f32` values instead of rounded binary64 words, 4-byte
