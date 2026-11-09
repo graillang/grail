@@ -1,5 +1,5 @@
 import { readFileSync, writeFileSync, mkdirSync, rmSync, readdirSync } from 'node:fs';
-import { join, basename, resolve } from 'node:path';
+import { join, basename, resolve, dirname } from 'node:path';
 import assert from 'node:assert/strict';
 import { root, compilerSources, hostTarget, targetName, buildCompiler, compileProgram, execute } from './native.mjs';
 
@@ -39,10 +39,19 @@ const runtime = join(snapshot, 'runtime.grl');
 writeFileSync(runtime, readFileSync(join(root, 'compiler/runtime.grl')));
 const osRuntime = join(snapshot, 'os-linux.grl');
 writeFileSync(osRuntime, readFileSync(join(root, 'compiler/os-linux.grl')));
+// The standard library keeps its layout (a directory holding core.grl), because the compiler
+// recognises stdlib modules by location and compiles them in the stdlib's own modes.
+const stdSnapshot = join(snapshot, 'lib');
+mkdirSync(stdSnapshot, { recursive: true });
+for (const file of readdirSync(join(root, 'lib')).filter(f => f.endsWith('.grl'))) {
+  writeFileSync(join(stdSnapshot, file), readFileSync(join(root, 'lib', file)));
+}
 for (let i = 0; i < cases.length; i++) {
   for (const field of ['files', 'modules']) if (cases[i][field]) cases[i][field] = cases[i][field].map((file, j) => {
+    const source = resolve(root, file);
+    if (dirname(source) === join(root, 'lib')) return join(stdSnapshot, basename(source));
     const path = join(snapshot, `${i}-${field}-${j}-${basename(file)}`);
-    writeFileSync(path, readFileSync(resolve(root, file)));
+    writeFileSync(path, readFileSync(source));
     return path;
   });
 }

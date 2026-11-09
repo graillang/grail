@@ -210,6 +210,10 @@ struct C {
     debug_funcs: DebugFunc[],
     debug_vars: DebugVar[],
     arg_offset: u64,
+    // The file being parsed sits in the standard-library directory (one containing core.grl).
+    file_std: u64,
+    // Modules declared by standard-library files; they compile in the stdlib's own modes.
+    std_modules: u8[][],
     overflow: u64,
     default_u64: u64,
     default_u64_flag: u64,
@@ -3353,6 +3357,7 @@ fn load_file<a>(c: (&a mut C), index: u64) -> unit {
         host::exit(1);
     }
     src := host::read_file(view(path));
+    exchange(&mut c.file_std, in_std_dir(view(path)));
     mut toks = Tok[];
     lexed := lexer::tokenize(view(src));
     for i in lexed.len() {
@@ -6860,25 +6865,45 @@ fn constant_value<a, b, d>(c: (&a mut C), module: &b [u8], name: &d [u8]) -> Val
     }
     return val(0, 18446744073709551615);
 }
-fn stdlib_module<a, b>(m: &b [u8]) -> u64 {
-    if same(view(m), view("core")) + same(view(m), view("vecs")) + same(view(m), view("strings")) + same(view(m), view("collections")) {
+// 1 when `path` is in a directory that also holds core.grl: the standard-library directory in
+// the repository (lib/) and in every installed layout (std/). Both separators are accepted.
+fn in_std_dir<a>(path: &a [u8]) -> u64 {
+    mut cut = 0;
+    mut found = 0;
+    for i in path.len() {
+        if (path[i] == 47) + (path[i] == 92) {
+            cut = i + 1;
+            found = 1;
+        }
+    }
+    mut probe = u8[];
+    if found {
+        for i in cut {
+            probe.push(path[i]);
+        }
+    }
+    name := "core.grl";
+    for i in name.len() {
+        probe.push(name[i]);
+    }
+    return host::exists(view(probe));
+}
+fn stdlib_module<a, b>(mods: (&a u8[][]), m: &b [u8]) -> u64 {
+    // The runtime lives beside the compiler, not in the stdlib directory.
+    if same(view(m), view("runtime")) {
         return true;
     }
-    if same(view(m), view("hash")) + same(view(m), view("hashmap")) + same(view(m), view("concurrent_map")) {
-        return true;
+    for i in mods.len() {
+        if same(view(mods[i]), view(m)) {
+            return true;
+        }
     }
-    if same(view(m), view("fs")) + same(view(m), view("io")) + same(view(m), view("order")) + same(view(m), view("env")) {
-        return true;
-    }
-    if same(view(m), view("math")) + same(view(m), view("process")) {
-        return true;
-    }
-    return same(view(m), view("runtime"));
+    return false;
 }
 // Deferred generic and closure bodies must use their defining module's modes, not
 // those of the last file scanned (usually the runtime).
 fn module_modes<a>(c: (&a mut C)) -> unit {
-    is_std := stdlib_module(view(c.module));
+    is_std := stdlib_module(&c.std_modules, view(c.module));
     exchange(&mut c.default_u64, c.default_u64_flag);
     exchange(&mut c.typed_refs, (c.default_u64_flag == 0) + c.typed_refs_flag);
     if is_std {
@@ -6913,6 +6938,9 @@ fn toplevel<a>(c: (&a mut C), pass: u64) -> unit {
         if (same(view(m), view("darwin")) != 0) & (c.plat == 0) {
             fail(&mut c, view("the darwin module requires a macos-x86_64 or macos-aarch64 target"));
         }
+    }
+    if c.file_std & (stdlib_module(&c.std_modules, view(m)) == 0) {
+        c.std_modules.push(m.copy());
     }
     exchange(&mut c.module, m);
     module_modes(&mut c);
@@ -7460,51 +7488,21 @@ fn hex(b: u64) -> u64 {
 }
 fn string_lit<a>(c: (&a mut C)) -> Val {
     p := c.pos;
-    t := &c.toks[p];
-    st := t.start;
-    en := t.end;
+    bytes := decode_literal(&mut c, p);
     advance(&mut c);
     mut l = label(&mut c);
     rodata(&mut c);
     mark(&mut c, l);
-    mut i = st + 1;
-    mut count = 0;
-    while i < en - 1 {
-        mut b = c.src[i];
-        if b == 92 {
-            i = i + 1;
-            e := c.src[i];
-            b = e;
-            if e == 110 {
-                b = 10;
-            }
-            if e == 114 {
-                b = 13;
-            }
-            if e == 116 {
-                b = 9;
-            }
-            if e == 48 {
-                b = 0;
-            }
-            if e == 120 {
-                h := hex(c.src[i + 1]);
-                lo := hex(c.src[i + 2]);
-                b = h * 16 + lo;
-                i = i + 2;
-            }
-        }
+    for i in bytes.len() {
         o(&mut c, view(".byte "));
-        on(&mut c, b);
+        on(&mut c, bytes[i]);
         c.out.push(10);
-        count = count + 1;
-        i = i + 1;
     }
     o(&mut c, view(".byte 0\n.popsection\nleaq "));
     lname(&mut c, l);
     o(&mut c, view("(%rip),%rax\n"));
     ptr := save(&mut c);
-    n := imm(&mut c, count);
+    n := imm(&mut c, bytes.len());
     t := invoke(&mut c, view("rt_string_lit"), two(ptr, n));
     return own(&mut c, t, 3);
 }
@@ -10008,6 +10006,13 @@ fn format_spec_arg<a>(c: (&a mut C), acc: u64, sp: FormatSpec) -> unit {
     invoke(&mut c, view("rt_fmt_pad"), args);
     return ();
 }
+fn is_hex_digit(d: u64) -> u64 {
+    return ((47 < d) & (d < 58)) + ((64 < d) & (d < 71)) + ((96 < d) & (d < 103));
+}
+// The bytes of a string literal with its escapes decoded. Accepted escapes: \n \r \t \0 \\
+// \" \' , \xHH (two hex digits, at most 7F, so the text stays valid UTF-8) and \u{H...} (a
+// Unicode scalar value, 1-6 hex digits with optional _ separators, encoded as UTF-8). Any other
+// escape is a compile error rather than being kept as literal text.
 fn decode_literal<a>(c: (&a mut C), p: u64) -> u8[] {
     t := &c.toks[p];
     st := t.start;
@@ -10015,31 +10020,99 @@ fn decode_literal<a>(c: (&a mut C), p: u64) -> u8[] {
     mut out = u8[];
     mut i = st + 1;
     while i < en - 1 {
-        mut b = c.src[i];
-        if b == 92 {
+        b := c.src[i];
+        if b != 92 {
+            out.push(b);
             i = i + 1;
-            e := c.src[i];
-            b = e;
-            if e == 110 {
-                b = 10;
-            }
-            if e == 114 {
-                b = 13;
-            }
-            if e == 116 {
-                b = 9;
-            }
-            if e == 48 {
-                b = 0;
-            }
-            if e == 120 {
-                h := hex(c.src[i + 1]);
-                lo := hex(c.src[i + 2]);
-                b = h * 16 + lo;
-                i = i + 2;
-            }
+            continue;
         }
-        out.push(b);
+        i = i + 1;
+        e := c.src[i];
+        mut done = 0;
+        if e == 110 {
+            out.push(10);
+            done = 1;
+        }
+        if e == 114 {
+            out.push(13);
+            done = 1;
+        }
+        if e == 116 {
+            out.push(9);
+            done = 1;
+        }
+        if e == 48 {
+            out.push(0);
+            done = 1;
+        }
+        if (e == 92) + (e == 34) + (e == 39) {
+            out.push(e);
+            done = 1;
+        }
+        if e == 120 {
+            if (i + 2 >= en - 1) + (is_hex_digit(c.src[i + 1]) == 0) + (is_hex_digit(c.src[i + 2]) == 0) {
+                fail(&mut c, view("\\x escape needs two hex digits"));
+            }
+            v := hex(c.src[i + 1]) * 16 + hex(c.src[i + 2]);
+            if 127 < v {
+                fail(&mut c, view("\\x escape above \\x7F would make invalid UTF-8; use \\u{...}"));
+            }
+            out.push(v);
+            i = i + 2;
+            done = 1;
+        }
+        if e == 117 {
+            if c.src[i + 1] != 123 {
+                fail(&mut c, view("\\u escape needs braces: \\u{...}"));
+            }
+            mut j = i + 2;
+            mut v = 0;
+            mut digits = 0;
+            while (j < en - 1) & (c.src[j] != 125) {
+                d := c.src[j];
+                if d != 95 {
+                    if is_hex_digit(d) == 0 {
+                        fail(&mut c, view("invalid hex digit in \\u{...} escape"));
+                    }
+                    v = v * 16 + hex(d);
+                    digits += 1;
+                    if (6 < digits) + (1114111 < v) {
+                        fail(&mut c, view("\\u{...} escape is above U+10FFFF"));
+                    }
+                }
+                j += 1;
+            }
+            if (j >= en - 1) + (digits == 0) {
+                fail(&mut c, view("unterminated or empty \\u{...} escape"));
+            }
+            if (55295 < v) & (v < 57344) {
+                fail(&mut c, view("\\u{...} escape is a surrogate, not a Unicode scalar value"));
+            }
+            if v < 128 {
+                out.push(v);
+            } else {
+                if v < 2048 {
+                    out.push(192 | (v >> 6));
+                    out.push(128 | (v & 63));
+                } else {
+                    if v < 65536 {
+                        out.push(224 | (v >> 12));
+                        out.push(128 | ((v >> 6) & 63));
+                        out.push(128 | (v & 63));
+                    } else {
+                        out.push(240 | (v >> 18));
+                        out.push(128 | ((v >> 12) & 63));
+                        out.push(128 | ((v >> 6) & 63));
+                        out.push(128 | (v & 63));
+                    }
+                }
+            }
+            i = j;
+            done = 1;
+        }
+        if done == 0 {
+            fail(&mut c, view("unknown escape in string literal"));
+        }
         i = i + 1;
     }
     return out;
@@ -12783,6 +12856,20 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
         stored_source(&mut c, slot, ty);
         return val(slot, ty);
     }
+    if (k == 3) & (same(view(name), view("clear")) + same(view(name), view("truncate"))) {
+        mut keep = 0;
+        if same(view(name), view("truncate")) {
+            n := expr(&mut c, 0);
+            require_type(&mut c, n.ty, 0);
+            keep = n.t;
+        } else {
+            keep = imm(&mut c, 0);
+        }
+        expect(&mut c, view(")"));
+        require_write(&mut c, xt);
+        invoke(&mut c, view("rt_bytes_truncate"), two(xt, keep));
+        return val(imm(&mut c, 0), 1);
+    }
     if (k == 6)
         & (
             same(view(name), view("reverse"))
@@ -13200,7 +13287,13 @@ fn context_value<a>(c: (&a mut C), expected: u64) -> Val {
             fail(&mut c, view("map literal optional needs an expected type"));
         }
         if (c.default_u64 == 0) & (c.lit_start == start) & (c.lit_end == end) & (v.ty == 0) {
-            v = val(v.t, int_type(&mut c, 64, 1));
+            dty := int_type(&mut c, 64, 1);
+            lv := c.lit_value;
+            ln := c.lit_negative;
+            if literal_fits(&mut c, dty, lv, ln) == 0 {
+                fail(&mut c, view("integer literal out of range for i64, the default integer type; annotate it (x: u64 := ...)"));
+            }
+            v = val(v.t, dty);
         }
     }
     return v;
@@ -13600,6 +13693,19 @@ fn primary<a>(c: (&a mut C)) -> Val {
             return builtin(&mut c, 31);
         }
         fail(&mut c, view("unknown Mutex constructor"));
+    }
+    // `module::Type[...]` / `module::Type[]`: a type-first collection literal of another
+    // module's type (the head re-read as a type, as for an unqualified `Type[`).
+    q2 := c.pos + 2;
+    if is(&mut c, view("::")) & (kind_at(&mut c, q2) == 91) {
+        qp := c.pos + 1;
+        qname := tok_text(&mut c, qp);
+        if find_decl(&mut c, view(first), view(qname)) != 0 {
+            back := c.pos - 1;
+            exchange(&mut c.pos, back);
+            mut qty = parse_type_base(&mut c);
+            return finish_type_literal(&mut c, qty);
+        }
     }
     if eat(&mut c, view("::")) {
         second := ident(&mut c);
@@ -16016,7 +16122,11 @@ fn statement<a>(c: (&a mut C)) -> unit {
             }
         }
         if literal & (hint == 0) & (c.default_u64 == 0) {
-            v = val(v.t, int_type(&mut c, 64, 1));
+            dty := int_type(&mut c, 64, 1);
+            if literal_fits(&mut c, dty, value, negative) == 0 {
+                fail(&mut c, view("integer literal out of range for i64, the default integer type; annotate it (x: u64 := ...)"));
+            }
+            v = val(v.t, dty);
         }
         mut v = move_value(&mut c, v);
         bind(&mut c, name, v.ty, v.t, mutable);
@@ -17391,6 +17501,8 @@ pub fn main() -> u64 {
         debug_funcs: DebugFunc[],
         debug_vars: DebugVar[],
         arg_offset: 0,
+        file_std: 0,
+        std_modules: u8[][],
         overflow: 1,
         default_u64: 0,
         default_u64_flag: 0,
