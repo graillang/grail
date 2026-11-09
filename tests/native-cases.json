@@ -4586,5 +4586,121 @@
     "name": "for-owned-empty-and-nested",
     "source": "fn count<T>(values:T[])->u64{mut n=0;for value in values{drop(value);n+=1;}return n;} fn main(){empty:=u64[][];println(count(empty));mut n=0;for group in u64[][][u64[][u64[1],u64[2]],u64[][u64[3]]]{for values in group{n+=values.len();}}println(n);println(count(string[\"a\".text(),\"b\".text()]));}",
     "stdout": "0\n3\n2\n"
+  },
+  {
+    "name": "map-iteration-shared",
+    "source": "use hashmap;\nfn main(){mut m=hashmap::with_seed<u64,u64>(1,2);m.insert(1,10);m.insert(2,20);m.insert(3,30);for k,v in &m{println(*k);println(*v);}}",
+    "stdout": "1\n10\n2\n20\n3\n30\n",
+    "modules": [
+      "lib/hashmap.grl",
+      "lib/hash.grl",
+      "lib/core.grl"
+    ]
+  },
+  {
+    "name": "map-iteration-mutable",
+    "source": "use hashmap;\nfn main(){mut m=hashmap::with_seed<u64,u64>(1,2);m.insert(1,10);m.insert(2,20);for k,v in &mut m{*v=*k*100;}for k,v in &m{println(*k);println(*v);}}",
+    "stdout": "1\n100\n2\n200\n",
+    "modules": [
+      "lib/hashmap.grl",
+      "lib/hash.grl",
+      "lib/core.grl"
+    ]
+  },
+  {
+    "name": "map-iteration-break-continue-nested",
+    "source": "use hashmap;\nfn main(){mut a=hashmap::with_seed<u64,u64>(1,2);mut b=hashmap::with_seed<u64,u64>(3,4);a.insert(1,10);a.insert(2,20);a.insert(3,30);b.insert(1,2);b.insert(2,3);mut total=0;for k,v in &a{if *k==2{continue;}if *k==3{break;}for k2,v2 in &b{total+=*k+*v+*k2+*v2;}}println(total);}",
+    "stdout": "30\n",
+    "modules": [
+      "lib/hashmap.grl",
+      "lib/hash.grl",
+      "lib/core.grl"
+    ]
+  },
+  {
+    "name": "map-iteration-empty-and-reused",
+    "source": "use hashmap;\nfn main(){mut m=hashmap::with_seed<u64,u64>(1,2);mut n=0;for k,v in &m{n+=1;}println(n);m.insert(7,70);for k,v in &m{println(*v);}for k,v in &mut m{*v=*k;}println(m[7]);}",
+    "stdout": "0\n70\n7\n",
+    "modules": [
+      "lib/hashmap.grl",
+      "lib/hash.grl",
+      "lib/core.grl"
+    ]
+  },
+  {
+    "name": "map-iteration-accessor-methods",
+    "source": "use hashmap;\nfn main(){mut m=hashmap::with_seed<u64,u64>(1,2);m.insert(4,40);for i in m.len(){e:=m.entry_at(i);*e.value=*e.key+1;}for i in m.len(){println(*m.key_at(i));println(*m.value_at(i));}}",
+    "stdout": "4\n5\n",
+    "modules": [
+      "lib/hashmap.grl",
+      "lib/hash.grl",
+      "lib/core.grl"
+    ]
+  },
+  {
+    "name": "map-iteration-reject-by-value",
+    "source": "use hashmap;\nfn main(){mut m=hashmap::with_seed<u64,u64>(1,2);m.insert(1,10);for k,v in m{println(*k);}}",
+    "reject": true,
+    "diagnostic": "for k, v iterates a map by reference",
+    "modules": [
+      "lib/hashmap.grl",
+      "lib/hash.grl",
+      "lib/core.grl"
+    ]
+  },
+  {
+    "name": "map-iteration-reject-grow-shared",
+    "source": "use hashmap;\nfn main(){mut m=hashmap::with_seed<u64,u64>(1,2);m.insert(1,10);for k,v in &m{m.insert(2,20);println(*v);}}",
+    "reject": true,
+    "diagnostic": "borrow conflicts with active access",
+    "modules": [
+      "lib/hashmap.grl",
+      "lib/hash.grl",
+      "lib/core.grl"
+    ]
+  },
+  {
+    "name": "map-iteration-reject-grow-mutable",
+    "source": "use hashmap;\nfn main(){mut m=hashmap::with_seed<u64,u64>(1,2);m.insert(1,10);for k,v in &mut m{m.insert(2,20);*v=1;}}",
+    "reject": true,
+    "diagnostic": "use of moved",
+    "modules": [
+      "lib/hashmap.grl",
+      "lib/hash.grl",
+      "lib/core.grl"
+    ]
+  },
+  {
+    "name": "map-iteration-reject-write-shared",
+    "source": "use hashmap;\nfn main(){mut m=hashmap::with_seed<u64,u64>(1,2);m.insert(1,10);for k,v in &m{*v=1;}}",
+    "reject": true,
+    "diagnostic": "mutation through readonly reference",
+    "modules": [
+      "lib/hashmap.grl",
+      "lib/hash.grl",
+      "lib/core.grl"
+    ]
+  },
+  {
+    "name": "map-iteration-reject-read-in-mutable",
+    "source": "use hashmap;\nfn main(){mut m=hashmap::with_seed<u64,u64>(1,2);m.insert(1,10);for k,v in &mut m{*v=*m.get(&1)!;}}",
+    "reject": true,
+    "diagnostic": "use of moved",
+    "modules": [
+      "lib/hashmap.grl",
+      "lib/hash.grl",
+      "lib/core.grl"
+    ]
+  },
+  {
+    "name": "map-iteration-reject-immutable-map",
+    "source": "use hashmap;\nfn main(){m:=hashmap::with_seed<u64,u64>(1,2);for k,v in &mut m{*v=1;}}",
+    "reject": true,
+    "diagnostic": "owned storage mutation requires mut",
+    "modules": [
+      "lib/hashmap.grl",
+      "lib/hash.grl",
+      "lib/core.grl"
+    ]
   }
 ]

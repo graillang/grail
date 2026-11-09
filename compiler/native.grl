@@ -17801,6 +17801,154 @@ fn scalar_match<a>(c: (&a mut C), s: Val) -> unit {
     }
     return ();
 }
+// One field of the record value `base`, read by name: the last projection of field_path, without
+// tokens. The loop lowering below binds members of a call result this way.
+fn record_member<a, b>(c: (&a mut C), base: Val, name: &b [u8]) -> Val {
+    if ty_kind(&mut c, base.ty) != 8 {
+        fail(&mut c, view("map iteration needs a pair view"));
+        return val(0, 0);
+    }
+    d := ty_arg(&mut c, base.ty);
+    k := find_field(&mut c, d, view(name));
+    fty := field_type(&mut c, base.ty, k);
+    n := rec_load(&mut c, base.t, k, 0);
+    alias_field(&mut c, n, fty, base.t, k, 0);
+    observe(&mut c, n);
+    return val(n, fty);
+}
+// `for k, v in &m { .. }` and `for k, v in &mut m { .. }`: a map's layout is private to hashmap, so
+// the compiler counts positions and asks the map for the pair at each one, which is what
+// `map_len`/`key_at`/`value_at` exist for. The exclusive form asks for one `entry_at` view per
+// position instead: its shared key and exclusive value are the two bindings, the same split as
+// `Entry`. A single reference is held for the whole loop (in a hidden binding), so the body cannot
+// grow the map, and only the exclusive form can write to a value.
+fn map_loop<a, b, d>(c: (&a mut C), name: &b [u8], value_name: &d [u8]) -> unit {
+    loopbase := c.resources.len();
+    locals_base := c.locals.len();
+    map := expr(&mut c, 0);
+    // `&m`, `&mut m` and an already-borrowed map all iterate; an owned map would be moved, so it
+    // is refused with the fix written out.
+    mut mapty = 0;
+    if (c.raw == 0) & (ty_kind(&mut c, map.ty) == 7) {
+        mapty = ty_arg(&mut c, map.ty);
+    }
+    if is_map_type(&mut c, mapty) == 0 {
+        fail(
+            &mut c,
+            view(
+                "for k, v iterates a map by reference: `for k, v in &m` reads the pairs, `for k, v in &mut m` updates the values"
+            )
+        );
+        return ();
+    }
+    mode := ty_mode(&mut c, map.ty);
+    refty := map.ty;
+    refslot := map.t;
+    bind(&mut c, copy_bytes(view("__map")), refty, refslot, 0);
+    mut open = c.pos;
+    while kind_at(&mut c, open) != 123 {
+        open = open + 1;
+    }
+    loopend := block_end(&mut c, open);
+    last := c.locals.len() - 1;
+    mut hidden = &mut c.locals[last];
+    exchange(&mut hidden.last, loopend);
+    // The count is read once, before the body may borrow anything: growth inside the loop is a
+    // separate, later borrow that the held reference refuses.
+    mut count = Val[];
+    count.push(place_slot(&mut c, refslot, refty, 0));
+    e := map_call(&mut c, view("map_len"), mapty, count).t;
+    i := imm(&mut c, 0);
+    head := label(&mut c);
+    step := label(&mut c);
+    end := label(&mut c);
+    oldb := c.brk;
+    oldc := c.cont;
+    oldmark := c.loopmark;
+    oldstart := c.loop_start;
+    oldend := c.loop_end;
+    exchange(&mut c.loop_start, c.pos);
+    exchange(&mut c.loop_end, loopend);
+    loopmark := c.resources.len();
+    exchange(&mut c.loopmark, loopmark);
+    current := ownership::snapshot(&c.check);
+    oldloop := exchange(&mut c.loopcheck, current);
+    oldbreak := exchange(&mut c.breaks, ownership::new());
+    oldhas := c.hasbreak;
+    exchange(&mut c.hasbreak, 0);
+    exchange(&mut c.brk, end);
+    exchange(&mut c.cont, step);
+    mark(&mut c, head);
+    get(&mut c, e, view("%rcx"));
+    get(&mut c, i, view("%rax"));
+    o(&mut c, view("cmpq %rcx,%rax\n"));
+    jump(&mut c, view("jae"), end);
+    iteration := c.locals.len();
+    entry := ownership::snapshot(&c.check);
+    if mode {
+        mut args = Val[];
+        args.push(place_slot(&mut c, refslot, refty, 1));
+        args.push(val(i, 0));
+        pair := map_call(&mut c, view("entry_at"), mapty, args);
+        pair_slot := pair.t;
+        pair_type := pair.ty;
+        key := record_member(&mut c, val(pair_slot, pair_type), view("key"));
+        bind(&mut c, name.copy(), key.ty, key.t, 0);
+        value := record_member(&mut c, val(pair_slot, pair_type), view("value"));
+        bind(&mut c, value_name.copy(), value.ty, value.t, 0);
+    } else {
+        mut args = Val[];
+        args.push(place_slot(&mut c, refslot, refty, 0));
+        args.push(val(i, 0));
+        key := map_call(&mut c, view("key_at"), mapty, args);
+        bind(&mut c, name.copy(), key.ty, key.t, 0);
+        mut value_args = Val[];
+        value_args.push(place_slot(&mut c, refslot, refty, 0));
+        value_args.push(val(i, 0));
+        value := map_call(&mut c, view("value_at"), mapty, value_args);
+        bind(&mut c, value_name.copy(), value.ty, value.t, 0);
+    }
+    exchange(&mut c.terminated, 0);
+    block(&mut c);
+    if c.terminated == 0 {
+        cleanup(&mut c, loopmark);
+    }
+    if c.terminated == 0 {
+        loopstate := ownership::snapshot(&c.loopcheck);
+        if ownership::backedge(&c.check, &loopstate) != 0 {
+            fail(&mut c, view("loop backedge consumes entry storage"));
+        }
+    }
+    // A body that always returns or continues reaches the exit only through the entry state.
+    if c.terminated {
+        ownership::restore(&mut c.check, &entry);
+    } else {
+        ownership::merge(&mut c.check, &entry);
+    }
+    if c.hasbreak {
+        broken := ownership::snapshot(&c.breaks);
+        ownership::merge(&mut c.check, &broken);
+    }
+    exchange(&mut c.terminated, 0);
+    pop_locals(&mut c, iteration);
+    mark(&mut c, step);
+    o(&mut c, view("incq "));
+    stack_slot(&mut c, i);
+    c.out.push(10);
+    jump(&mut c, view("jmp"), head);
+    mark(&mut c, end);
+    cleanup(&mut c, loopbase);
+    pop_locals(&mut c, locals_base);
+    exchange(&mut c.brk, oldb);
+    exchange(&mut c.cont, oldc);
+    exchange(&mut c.loopmark, oldmark);
+    exchange(&mut c.loopcheck, oldloop);
+    exchange(&mut c.breaks, oldbreak);
+    exchange(&mut c.hasbreak, oldhas);
+    exchange(&mut c.loop_start, oldstart);
+    exchange(&mut c.loop_end, oldend);
+    return ();
+}
 fn statement<a>(c: (&a mut C)) -> unit {
     emit_loc(&mut c);
     // An `unsafe { ... }` block is the explicit boundary for foreign calls. It is
@@ -18192,7 +18340,16 @@ fn statement<a>(c: (&a mut C)) -> unit {
     }
     if eat(&mut c, view("for")) {
         name := ident(&mut c);
+        // `for k, v in &m` names both halves of a map pair; `map_loop` lowers that form.
+        mut second = u8[];
+        if eat(&mut c, view(",")) {
+            second = ident(&mut c);
+        }
         expect(&mut c, view("in"));
+        if second.len() != 0 {
+            map_loop(&mut c, name, second);
+            return ();
+        }
         counted := len_bound_ahead(&mut c, view(name));
         loopbase := c.resources.len();
         // `for x in &s` / `for x in &mut s` over a slice borrows each element.
