@@ -30,6 +30,17 @@
   `rhi.swapchain.result frames 3 of 3`. The pool carries
   VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT: one command buffer is re-recorded every frame, and
   beginning it again without that bit is undefined behaviour (it segfaults on RADV).
+  **3. one triangle, drawn from the committed SPIR-V.** `abundance/src/rhi_pipeline.grl` (new) creates
+  both shader modules from `abundance_rhi_shader_blob`'s bytes, and builds
+  `VkGraphicsPipelineCreateInfo`'s nine pointers out of records: the two stages as a record of two
+  `VkPipelineShaderStageCreateInfo`s (`pName` a `CStr` field), the vertex input from the layout the
+  shader build extracted (locations 0/1/2, offsets 0/12/20, formats R32G32B32/R32G32/R32G32B32A32,
+  stride 36 - checked to be contiguous and to sum to the stride), triangle list, a static viewport and
+  scissor, fill, no culling, one sample, blending off, no depth and no dynamic state. The vertex data
+  is a 108-byte record of three 36-byte vertices and is copied in with `vkCmdUpdateBuffer` from
+  `cptr(&triangle)` - no staging buffer and no mapped memory - followed by a memory barrier to the
+  vertex stage. The probe reads the entry point out of the SPIR-V's own `OpEntryPoint` and passes the
+  bytes it found, so a renamed shader cannot leave a stale name behind.
 - FFI: a C callback's extern-record parameter is borrowed, not owned. The parameter prologue marked
   every parameter as an owning binding, so the epilogue ran the record's drop glue on the address C
   handed over — freeing the caller's struct (or its stack) — and the process then aborted inside the
