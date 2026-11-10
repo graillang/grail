@@ -161,7 +161,7 @@ function hostFor(platform) {
   return host;
 }
 
-function buildTarget(platformId, options = {}) {
+export function buildTarget(platformId, options = {}) {
   const target = platformById(platformId);
   if (target.tier === PLANNED) throw new Blocked(`cannot build ${target.id}: ${target.blocker}`);
   if (target.id === 'windows-x86_64') return buildWindowsCompiler(target, options);
@@ -170,15 +170,20 @@ function buildTarget(platformId, options = {}) {
   if (host !== 'linux-x86_64' && host !== target.id) {
     throw new Blocked(`cannot build ${target.id} from ${host}; use the native ${target.id} lane or linux-x86_64`, EXIT.notApplicable);
   }
-  const bootstrap = bootstrapStatus();
-  if (!process.env.GRAIL_COMPILER && !bootstrap.fresh) {
-    throw new Blocked(`stage0 unavailable: ${bootstrap.detail}\n  set GRAIL_COMPILER=/path/to/tree-built/grail or run: bun tools/bootstrap.mjs update all`);
-  }
   let stage0;
-  try {
-    stage0 = buildCompiler();
-  } catch (error) {
-    throw new Blocked(`stage0 build failed: ${error.message}`);
+  if (options.stage0) {
+    stage0 = resolve(root, options.stage0);
+    if (!existsSync(stage0)) throw new Blocked(`stage0 not found: ${stage0}`, EXIT.missing);
+  } else {
+    const bootstrap = bootstrapStatus();
+    if (!process.env.GRAIL_COMPILER && !bootstrap.fresh) {
+      throw new Blocked(`stage0 unavailable: ${bootstrap.detail}\n  set GRAIL_COMPILER=/path/to/tree-built/grail or run: bun tools/bootstrap.mjs update all`);
+    }
+    try {
+      stage0 = buildCompiler();
+    } catch (error) {
+      throw new Blocked(`stage0 build failed: ${error.message}`);
+    }
   }
   const stage0Binary = inspectBinary(stage0);
   if (stage0Binary.format !== 'elf' || stage0Binary.arch !== (host === 'linux-x86_64' ? 'x86_64' : platformById(host).arch)) {
@@ -210,7 +215,7 @@ function buildTarget(platformId, options = {}) {
     target: target.triple,
     compilerTarget: target.compilerTarget,
     commit: gitCommit(),
-    stage0: { kind: process.env.GRAIL_COMPILER ? 'env' : 'bootstrap', path: stage0, sha256: sha256(readFileSync(stage0)), ...stage0Binary },
+    stage0: { kind: options.stage0 ? 'explicit' : process.env.GRAIL_COMPILER ? 'env' : 'bootstrap', path: stage0, sha256: sha256(readFileSync(stage0)), ...stage0Binary },
     binary,
     sources: sourceDigests(),
     assembly: assemblyArtifact,
@@ -246,15 +251,20 @@ function buildWindowsCompiler(target, options = {}) {
   if (host !== 'linux-x86_64') {
     throw new Blocked(`windows-x86_64 cross-builds run from linux-x86_64, not ${host}`, EXIT.notApplicable);
   }
-  const bootstrap = bootstrapStatus();
-  if (!process.env.GRAIL_COMPILER && !bootstrap.fresh) {
-    throw new Blocked(`stage0 unavailable: ${bootstrap.detail}\n  set GRAIL_COMPILER=/path/to/tree-built/grail or run: bun tools/bootstrap.mjs update all`);
-  }
   let stage0;
-  try {
-    stage0 = buildCompiler();
-  } catch (error) {
-    throw new Blocked(`stage0 build failed: ${error.message}`);
+  if (options.stage0) {
+    stage0 = resolve(root, options.stage0);
+    if (!existsSync(stage0)) throw new Blocked(`stage0 not found: ${stage0}`, EXIT.missing);
+  } else {
+    const bootstrap = bootstrapStatus();
+    if (!process.env.GRAIL_COMPILER && !bootstrap.fresh) {
+      throw new Blocked(`stage0 unavailable: ${bootstrap.detail}\n  set GRAIL_COMPILER=/path/to/tree-built/grail or run: bun tools/bootstrap.mjs update all`);
+    }
+    try {
+      stage0 = buildCompiler();
+    } catch (error) {
+      throw new Blocked(`stage0 build failed: ${error.message}`);
+    }
   }
   const stage0Binary = inspectBinary(stage0);
   if (stage0Binary.format !== 'elf' || stage0Binary.arch !== 'x86_64') {
@@ -262,7 +272,9 @@ function buildWindowsCompiler(target, options = {}) {
   }
   const work = join(root, '.work/ci', target.id);
   mkdirSync(work, { recursive: true });
-  const sources = compilerSources.filter(path => !path.endsWith('/runtime.grl'));
+  // compileWindowsProgram appends runtime.grl and os-windows.grl, so the Linux
+  // platform module must not be passed as well (duplicate rt_syscall/rt_syscall4).
+  const sources = compilerSources.filter(path => !path.endsWith('/runtime.grl') && !path.endsWith('/os-linux.grl'));
   const built = compileWindowsProgram(stage0, sources, work, { name: 'grail' });
   const staticChecks = inspectWindowsArtifacts(built);
   const binary = inspectBinary(built.executable);
@@ -289,7 +301,7 @@ function buildWindowsCompiler(target, options = {}) {
     runnable: false,
     runtime: 'unverified',
     commit: gitCommit(),
-    stage0: { kind: process.env.GRAIL_COMPILER ? 'env' : 'bootstrap', path: stage0, sha256: sha256(readFileSync(stage0)), ...stage0Binary },
+    stage0: { kind: options.stage0 ? 'explicit' : process.env.GRAIL_COMPILER ? 'env' : 'bootstrap', path: stage0, sha256: sha256(readFileSync(stage0)), ...stage0Binary },
     binary,
     staticChecks,
     sources: sourceDigests(),
@@ -479,6 +491,7 @@ function lint() {
   check('LSP stdio test exists', existsSync(join(root, 'tools/lsp.test.mjs')));
   check('DWARF line-table test exists', existsSync(join(root, 'tools/test-debug-lines.mjs')));
   check('VERSION file matches compiler --version', readFileSync(join(root, 'compiler/cli.grl'), 'utf8').includes(`grail ${version ?? '0.0.0'}`), version ?? '');
+
   const failed = checks.filter(entry => !entry.ok);
   return { ok: failed.length === 0, checks, failed };
 }
@@ -499,9 +512,12 @@ function run(argv) {
   detect [--platform ID] [--all]      toolchain/SDK/signing detection
   preflight [--json] [--strict]       host, stage0, bootstrap and toolchain status
   lint [--json]                       static checks (matrix, docs, workflow, scripts)
-  build --platform ID [--out DIR]     build the compiler for ID (Linux targets)
+  build --platform ID [--out DIR] [--stage0 PATH]
+                                      build the compiler for ID (Linux targets);
+                                      --stage0 uses an already-built ELF stage0
+                                      instead of the published bootstrap
   test --platform ID [--compile-only] run native/qemu tests or a cross compile check
-  package --platform ID [--compiler PATH] [--out DIR]
+  package --platform ID [--compiler PATH] [--stage0 PATH] [--out DIR]
                                       create a .tar.gz/.zip and SHA256SUMS
   objects --platform ID [--compiler PATH] [--out DIR]
                                       build a non-executable COFF/Mach-O object bundle
@@ -550,7 +566,7 @@ exit codes: 0 ok, 1 usage/internal, 2 not applicable, 3 blocked, 4 missing depen
 
   if (commandName === 'build') {
     try {
-      const built = buildTarget(platform, { out: options.out, version: options.version });
+      const built = buildTarget(platform, { out: options.out, version: options.version, stage0: options.stage0 });
       console.log(JSON.stringify(built, null, 2));
       return EXIT.ok;
     } catch (error) {
@@ -580,7 +596,7 @@ exit codes: 0 ok, 1 usage/internal, 2 not applicable, 3 blocked, 4 missing depen
       const version = options.version ?? readVersion();
       let compiler = options.compiler ? resolve(root, options.compiler) : null;
       if (!compiler) {
-        const built = buildTarget(platform, { out: options.out, version });
+        const built = buildTarget(platform, { out: options.out, version, stage0: options.stage0 });
         compiler = built.artifact;
       } else if (target.tier === PLANNED && !existsSync(compiler)) {
         throw new Blocked(`no compiler at ${compiler}; planned lanes package a supplied cross-built binary`);
@@ -636,7 +652,7 @@ exit codes: 0 ok, 1 usage/internal, 2 not applicable, 3 blocked, 4 missing depen
       return EXIT.blocked;
     }
     try {
-      const built = buildTarget(platform, { out: options.out, version: options.version });
+      const built = buildTarget(platform, { out: options.out, version: options.version, stage0: options.stage0 });
       console.log(`built ${built.artifact}`);
       const tested = testTarget(platform, { compiler: built.artifact, 'compile-only': options['compile-only'] });
       console.log(`tested ${tested.mode}`);
