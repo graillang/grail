@@ -53,6 +53,7 @@ extern "C" lib "shim.o" fn c_app_version(app: CPtr) -> i64;
 extern "C" lib "shim.o" fn c_fill_app(app: &mut AppInfo) -> i64;
 extern "C" lib "shim.o" fn c_alloc_handles(slots: &mut HandleSlots) -> i64;
 extern "C" lib "shim.o" fn c_sum_handles(slots: HandleSlots) -> i64;
+extern "C" lib "shim.o" fn c_slot0(slots: HandleSlots) -> Token;
 extern "C" lib "shim.o" fn c_ref_sum(first: CPtr, second: CPtr) -> i64;
 extern "C" lib "shim.o" fn c_enum_count(count: CountRecord) -> i64;
 extern "C" lib "shim.o" as "c_enum_count" fn c_enum_one(count: CountRecord, want: u64) -> i64;
@@ -116,6 +117,19 @@ fn main() -> u64 {
         seeded_total = c_sum_handles(seeded);
     }
     println(seeded_total); // 11 * 3 + 44
+
+    // The handle Grail reads out of the array is the handle C wrote into it. Reading it is legal
+    // only because the out-parameter call filled the record: before that, the binding's storage is
+    // zeroed but has no value (tests/native-cases.json, ffi-reject-handle-out-slot).
+    mut back: Token;
+    unsafe {
+        back = c_slot0(slots);
+    }
+    mut same: u64 = 0;
+    if slots.h0 == back {
+        same = 1;
+    }
+    println(same); // 1
 
     // ---- an array of structs, and an element of it -------------------------------------------
     // A record of embedded records is the array: the record's own address is the `T *`, and an

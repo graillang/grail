@@ -10107,6 +10107,9 @@ fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
                                 view("an extern C out-parameter needs a binding to write into; a temporary record would be discarded")
                             );
                         }
+                        // C writes the struct through the pointer, so the storage holds a value
+                        // afterwards and Grail may read the typed fields.
+                        ownership::filled(&mut c.check, place);
                         vt := v.ty;
                         x := deref(&mut c, v);
                         v = val(x.t, vt);
@@ -12169,6 +12172,9 @@ fn cptr_record<a>(c: (&a mut C), x: Val, writable: u64) -> Val {
     }
     if writable != 0 {
         require_write(&mut c, x.t);
+        // A writable pointer is a promise that C writes it, so the storage holds a value afterwards.
+        target := place_of(&mut c, x.t);
+        ownership::filled(&mut c.check, target);
     } else {
         observe(&mut c, x.t);
     }
@@ -19778,11 +19784,11 @@ fn map_loop<a, b, d>(c: (&a mut C), name: &b [u8], value_name: &d [u8]) -> unit 
     exchange(&mut c.loop_end, oldend);
     return ();
 }
-// `mut r: R;` for an extern "C" record is a zero-filled allocation, not an uninitialized slot: C's
-// out-parameter must be able to read every field it does not overwrite, `sizeof(struct)` bytes have
-// to exist before `&mut r` is taken, and zero is what a C library reads as a null handle, a zero
-// count or a zeroed flag. No other type is initialized this way - a Grail record or an integer
-// without an initializer still has no value.
+// `mut r: R;` for an extern "C" record allocates `sizeof(struct)` zeroed bytes, because C's
+// out-parameter must be able to read every field it does not overwrite and the address has to exist
+// before `&mut r` is taken. The *value* still does not exist: the place starts uninitialised, so
+// reading a field before a foreign call (or an assignment) wrote the storage is refused exactly as
+// it is for any other uninitialised binding. Zeroed storage is not an initialised handle.
 fn zero_record_binding<a>(c: (&a mut C), name: u8[], ty: u64, mutable: u64) -> unit {
     d := ty_arg(&mut c, ty);
     words := ffi_record_words(&mut c, d);
@@ -19794,6 +19800,17 @@ fn zero_record_binding<a>(c: (&a mut C), name: u8[], ty: u64, mutable: u64) -> u
     }
     own(&mut c, rec, ty);
     held := move_value(&mut c, val(rec, ty));
+    if c.raw == 0 {
+        // The drop glue is registered (the allocation is Grail's), but the place has no value: the
+        // zero bytes are storage, not an initialised record, so a read is refused until a foreign
+        // call or an assignment writes it.
+        place := ownership::unfilled_slot(&mut c.check, 0);
+        n := resource(&mut c, held.t);
+        if n != 0 {
+            mut r = &mut c.resources[n - 1];
+            r.place = place;
+        }
+    }
     bind(&mut c, name, ty, held.t, mutable);
     return ();
 }

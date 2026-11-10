@@ -165,6 +165,9 @@ long long c_alloc_handles(struct handle_slots *slots) {
 long long c_sum_handles(const struct handle_slots *slots) {
     return (long long)(slots->h0 + slots->h1 + slots->h2 + slots->h3);
 }
+/* The handle the caller's array holds in slot 0, as a handle result: Grail compares it with the
+ * field it read, which is the check that C's write landed in the storage Grail owns. */
+unsigned long long c_slot0(const struct handle_slots *slots) { return slots->h0; }
 
 /* An array of structs: the record's bytes are the array, and an element is an interior address. */
 struct ref_pair {

@@ -275,9 +275,13 @@ fn main() -> u64 {
   into: `c_fill(&mut Slots { ... })` is refused with `an extern C out-parameter needs a binding to
   write into; a temporary record would be discarded`, because the values C wrote would be dropped
   with the statement.
-- **A record slot starts zeroed.** An `extern "C"` record binding declared without an initializer
-  (`mut caps: Caps;`) is an allocation of `sizeof(struct)` zero bytes, so a callee that reads a field
-  before writing it reads 0, and a handle slot C fills is `VK_NULL_HANDLE` to begin with. That is how
+- **A record slot starts zeroed, not initialised.** An `extern "C"` record binding declared without
+  an initializer (`mut caps: Caps;`) is an allocation of `sizeof(struct)` zero bytes: the storage
+  exists so `&mut caps` is a valid pointer and a callee that reads a field before writing it reads 0
+  (a handle slot C fills starts as `VK_NULL_HANDLE`). The *value* does not exist yet — reading a
+  field of the binding, or moving it, before a foreign call or an assignment wrote it is refused with
+  `use of moved, borrowed or partially initialized value`, so a zeroed handle can never be read as if
+  it were one. That is how
   an array of handles is created without constructing a handle: `mut buffers: CommandBuffers;` then
   `c_alloc_command_buffers(&mut buffers)`. A handle-typed field may also be seeded from a handle the
   program already holds (`Slots { h0: swapchain }`), which is how `pSwapchains`/`pCommandBuffers`
@@ -299,7 +303,8 @@ fn main() -> u64 {
   callback could not store through the pointer C handed it.
 - A handle cannot be constructed at all, not even as null from Grail (`cnull()` is a `CPtr`, and
   `Slot { instance: cnull() }` is a type mismatch), so a declaration's out-parameter is the way to
-  obtain one — or the zero-filled record field described above, which is the same null. `tests/ffi/out_params.grl` executes it on x86-64, AArch64 and RISC-V 64, and on Windows
+  obtain one — or a record field a call filled, whose untouched slots are the null handle.
+  `tests/ffi/out_params.grl` executes it on x86-64, AArch64 and RISC-V 64, and on Windows
   x86-64 under Wine through `tests/windows-cases.json`: every C twin returns a checksum that reads
   the slot before writing it, so a slot passed by value, an uninitialized slot, or a write Grail does
   not see all change the printed values.
@@ -573,12 +578,13 @@ compiles `tests/ffi/call_scalars.grl` with the FFI build, links the two through 
   `extern_records` C layout in both directions (`1606`, `23`, `16`, `-2`, `7`), `out_params` the
   out-parameter slots including a seventh-argument slot and two slots in one call, `record_pointers`
   the record-by-pointer and record-out-parameter shapes (`13`, `5`, `0`, `4194304`, `0`, `0`, `110`,
-  `77`, `433`, `8` — a create-info reading a struct through `cptr(&app)`, `flags` as the zero a
-  zero-filled binding starts with, an array of handles C fills and Grail passes back, an array of
+  `77`, `1`, `433`, `8` — a create-info reading a struct through `cptr(&app)`, `flags` as the zero a
+  zeroed binding starts with, an array of handles C fills and Grail passes back (and the handle
+  Grail reads equals the one C hands back, `1`), an array of
   structs addressed at two interior elements, and one count record across two declarations of one
   symbol), and `call_words` seven, eight and nine word arguments with literal and computed values.
 - the suite executes every fixture on x86-64 and, through `qemu-<target>-static`, on AArch64 and
-  RISC-V 64: 52 executed fixture instances and no link-only cases, plus two cross-compiled-only ones
+  RISC-V 64: 52 executed fixture instances on x86-64 and no link-only cases there, plus two cross-compiled-only ones
   (`dlopen`, which needs a target glibc sysroot). `callback_words` executes the eight-register
   callback on AArch64 and RISC-V 64 and asserts that x86-64 and Windows refuse it by name. Without a
   qemu runner the cross targets are linked and the ABI-level check is reported as link-only. The same
@@ -600,7 +606,9 @@ diagnostics on every run of `bun tools/test-native.mjs`.
 The same corpus executes the new shapes without a C toolchain, by declaring the symbol and
 defining it as an `extern "C" fn` (a C-ABI Grail function), which is the same one-word pointer on
 both sides: `ffi-record-address` (`42`), `ffi-record-address-field` (`433`, two interior element
-addresses), `ffi-record-out-param` (`0` — a zero-filled binding the callee reads), the recorded
+addresses), `ffi-record-out-param` (`0`, then `0` — a zeroed binding the callee reads, and the
+same field read by Grail after the call, the accepted half of the `ffi-reject-handle-out-slot` pair),
+the recorded
 regression `ffi-record-two-declarations` (`8`, one count record across two declarations of one
 symbol, which must reach its exit status without aborting),
 `ffi-record-callback-parameter` (`20`, a callback's record parameter borrowed rather than freed) and

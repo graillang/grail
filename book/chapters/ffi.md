@@ -33,9 +33,12 @@ record Grail owns is passed as the *address of its own fields*, which is exactly
   how a create-info struct points at another struct — `VkInstanceCreateInfo::pApplicationInfo`,
   `VkRenderPassCreateInfo::pAttachments` — without laying the bytes out by hand.
 - `p: &mut R` in a declaration is the C `struct R *` the callee **writes**: the caller passes
-  `&mut` of a binding and reads the typed fields afterwards. An `extern "C"` record binding
-  declared without an initializer is zero-filled, so a field the callee leaves alone has a defined
-  value, and a handle slot it fills starts as the null handle.
+  `&mut` of a binding and reads the typed fields afterwards. An `extern "C"` record binding declared
+  without an initializer gets zeroed storage, so a field the callee leaves alone has a defined value
+  and a handle slot it fills starts as the null handle — but the binding has no *value* until the
+  call (or an assignment) gives it one, so reading a field before that is refused with
+  `use of moved, borrowed or partially initialized value`. Zeroed bytes are not an initialised
+  handle.
 
 `cptr` is `unsafe` for the same reason as `cptr` of a byte sequence: the pointer carries no length
 and no lifetime once C holds it, so C must not keep it or free it. The record it points at must be a
@@ -72,8 +75,8 @@ same numbers.
 - Ownership does not change hands. Grail frees what Grail allocated, C frees what C allocated, and a
   pointer Grail hands over must not be freed by C. A callback's record parameter is C's storage for
   the same reason: it is borrowed, never freed.
-- A `handle` is an opaque C token and still cannot be constructed: a null handle comes from a
-  zero-filled record field or from a declaration's out-parameter.
+- A `handle` is an opaque C token and still cannot be constructed: it comes from a declaration's
+  out-parameter or from a record field a foreign call filled.
 - A record crosses by pointer unless the declaration spells `v: byval R`, which passes the struct by
   value per the target ABI on the Linux targets and is refused by name on Windows. A callback cannot
   write through a pointer it is given (there is no deref-assignment), and there is no pointer
