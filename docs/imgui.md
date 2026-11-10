@@ -227,8 +227,8 @@ window is skipped, with the platform's own words.
 - **Fonts beyond the default.** The atlas is ImGui's default ProggyClean; a custom font needs an
   `ImFontConfig` (a C++ struct with an embedded array) behind a shim call of its own.
 - **Resize.** The swapchain is created once and destroyed at the end, as in the RHI increment: a
-  resize needs the `oldSwapchain` path, `ImGui_ImplVulkan_SetMinImageCount` (bound, unused) and a
-  rebuilt framebuffer set.
+  resize needs the `oldSwapchain` path, `ImGui_ImplVulkan_SetMinImageCount` and a rebuilt framebuffer
+  set.
 
 ## Limits, stated
 
