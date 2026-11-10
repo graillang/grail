@@ -1191,12 +1191,12 @@ fn share_text(count: u64, total: u64) -> u8[] {
     out.push(37);
     return out;
 }
-fn seconds_text(count: u64, rate: u64) -> u8[] {
-    if rate == 0 {
-        return copy(view("0.0 s"));
+// Hundredths of a second of measured CPU time, with the unit.
+fn nanos_text(ns: u64) -> u8[] {
+    if ns == 0 {
+        return copy(view("an unknown amount of time"));
     }
-    // Hundredths of a second of sampled CPU time: samples / rate.
-    hundredths := (count * 100 + rate / 2) / rate;
+    hundredths := (ns + 5000000) / 10000000;
     mut out = decimal(hundredths / 100);
     out.push(46);
     out.push(48 + (hundredths / 10) % 10);
@@ -1204,6 +1204,21 @@ fn seconds_text(count: u64, rate: u64) -> u8[] {
     out.push(32);
     out.push(115);
     return out;
+}
+// Samples per second of measured CPU time: what the kernel actually delivered.
+fn effective_rate(count: u64, ns: u64) -> u64 {
+    if ns == 0 {
+        return 0;
+    }
+    return count * 1000000000 / ns;
+}
+// True when the measured rate is less than three quarters of the request, which is how the kernel's
+// per-tick accounting shows up above roughly one kHz.
+fn capped(requested: u64, count: u64, ns: u64) -> bool {
+    if ns == 0 {
+        return false;
+    }
+    return effective_rate(count, ns) * 4 < requested * 3;
 }
 fn push_text<a>(out: (&mut u8[]), text: &a [u8]) -> unit {
     for i in text.len() {
@@ -1426,15 +1441,20 @@ fn profile_command<a>(args: (&a u8[][])) -> u64 {
     host::remove(view(samples), 0);
     host::remove(view(config), 0);
     host::remove(view(dir), 1);
-    if data.len() < 40 {
+    if data.len() < 48 {
         say(view("grail profile: truncated sample file"));
+        return 1;
+    }
+    if (data[0] != 71) || (data[6] != 50) {
+        say(view("grail profile: unsupported sample format; rebuild the program with this compiler"));
         return 1;
     }
     sample_rate := le64(view(data), 8);
     capacity := le64(view(data), 16);
     count := le64(view(data), 24);
     dropped := le64(view(data), 32);
-    if data.len() < 40 + count * 8 {
+    cpu_ns := le64(view(data), 40);
+    if data.len() < 48 + count * 8 {
         say(view("grail profile: truncated sample file"));
         return 1;
     }
@@ -1467,12 +1487,27 @@ fn profile_command<a>(args: (&a u8[][])) -> u64 {
         );
     }
     mut intro = cat(view("  "), view(decimal(sample_rate)));
-    intro = cat(view(intro), view(" Hz ITIMER_PROF (CPU time), "));
+    intro = cat(view(intro), view(" Hz ITIMER_PROF, "));
     intro = cat(view(intro), view(decimal(count)));
-    intro = cat(view(intro), view(" samples, about "));
-    intro = cat(view(intro), view(seconds_text(count, sample_rate)));
+    intro = cat(view(intro), view(" samples in "));
+    intro = cat(view(intro), view(nanos_text(cpu_ns)));
     intro = cat(view(intro), view(" of CPU time"));
+    if cpu_ns != 0 {
+        intro = cat(view(intro), view(" (effective "));
+        intro = cat(view(intro), view(decimal(effective_rate(count, cpu_ns))));
+        intro = cat(view(intro), view(" Hz)"));
+    }
     push_line(&mut out, view(intro));
+    if capped(sample_rate, count, cpu_ns) {
+        push_line(
+            &mut out,
+            view("  the effective rate is far below the request: the kernel accounts CPU time per")
+        );
+        push_line(
+            &mut out,
+            view("  tick, so intervals shorter than its granularity are rounded up")
+        );
+    }
     mut dropped_line = cat(view("  "), view(decimal(dropped)));
     dropped_line = cat(view(dropped_line), view(" samples dropped after the "));
     dropped_line = cat(view(dropped_line), view(decimal(capacity)));
@@ -1488,7 +1523,7 @@ fn profile_command<a>(args: (&a u8[][])) -> u64 {
     if elf && (kind != 3) {
         mut k: u64 = 0;
         while k < count {
-            slot := symbol_at(&symbols, &order, le64(view(data), 40 + k * 8));
+            slot := symbol_at(&symbols, &order, le64(view(data), 48 + k * 8));
             counts[slot] = counts[slot] + 1;
             k += 1;
         }

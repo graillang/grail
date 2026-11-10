@@ -86,7 +86,7 @@ try {
     '    return t;',
     '}',
     'fn main() {',
-    '    deadline := host::now_ms() + 400;',
+    '    deadline := host::now_ms() + 600;',
     '    mut total: u64 = 0;',
     '    mut k: u64 = 0;',
     '    while host::now_ms() < deadline {',
@@ -105,7 +105,7 @@ try {
   // The sampler reports link-time addresses; that is only true for a non-PIE build.
   const image = readFileSync(binary);
   assert.equal(image.readUInt16LE(16), 2, 'a default Grail build must be ET_EXEC (non-PIE)');
-  const rate = '1000';
+  const rate = '500';
   const report = join(work, 'report.txt');
   const profiled = ok([compiler, 'profile', '--rate', rate, '--out', report, '--', binary], { cwd: work, env });
   // The program's own output is forwarded first; the report follows it.
@@ -115,7 +115,12 @@ try {
   assert.match(text, new RegExp(`^grail profile: ${binary.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'm'), 'missing report header');
   assert.match(text, /non-PIE \(ET_EXEC\)/, 'the report must state how PIE is handled');
   assert.match(text, new RegExp(`${rate} Hz ITIMER_PROF`), 'the report must name the requested rate');
-  assert.match(text, /of CPU time/, 'the report must state the sampled CPU time');
+  assert.match(text, /samples in [\d.]+ s of CPU time \(effective \d+ Hz\)/, 'the report must state the measured CPU time and rate');
+  // The effective rate is samples per CPU second. It tracks the request on this host's timer but may
+  // be capped by a coarser kernel tick, so only the floor and the ceiling are asserted.
+  const effective = Number(/effective (\d+) Hz/.exec(text)[1]);
+  assert.ok(effective >= 50, `the effective rate ${effective} Hz is far below the 500 Hz request:\n${text}`);
+  assert.ok(effective <= 750, `the effective rate ${effective} Hz exceeds the request:\n${text}`);
   assert.equal(readFileSync(report, 'utf8'), text, '--out must hold the report that went to stdout');
 
   const table = rows(text);

@@ -4292,9 +4292,10 @@ fn rt_vec_contains(s: u64, v: u64) -> u64 {
 //   2304 sigaction             (32 bytes: handler, flags, restorer, mask)
 //   2336 sigaltstack           (24 bytes: stack pointer, flags, size)
 //   2400 config text scratch   (256 bytes, startup only)
+//   2656 timespec             (16 bytes: CLOCK_PROCESS_CPUTIME_ID at arm and at exit)
 //
 // The control page is the first 4096 bytes of the sample mapping:
-//   0 magic  8 sample base  16 capacity  24 claimed  32 dropped  40 rate
+//   0 magic  8 sample base  16 capacity  24 claimed  32 dropped  40 rate  48 cpu start (ns)
 fn rt_prof_words() -> u64 {
     return raw_state() + 2048;
 }
@@ -4460,6 +4461,12 @@ fn rt_prof_start() -> u64 {
     raw_store(page + 24, 0);
     raw_store(page + 32, 0);
     raw_store(page + 40, rate);
+    ts := words + 608;
+    if rt_error(rt_syscall(228, 2, ts, 0)) {
+        raw_store(page + 48, 0);
+    } else {
+        raw_store(page + 48, raw_load(ts) * 1000000000 + raw_load(ts + 8));
+    }
     raw_store(words, page);
     // ITIMER_PROF counts CPU time, so blocked programs do not accumulate samples. One tick interval
     // and one first tick: seconds stay zero because the rate is clamped to at most one per
@@ -4500,14 +4507,22 @@ fn rt_prof_dump() -> u64 {
     if rt_error(fd) {
         return 0;
     }
-    // "GRPROF1\n" then rate, capacity, count, dropped: everything the report needs to stay honest.
+    // "GRPROF2\n" then rate, capacity, count, dropped and the CPU nanoseconds the samples cover:
+    // the rate a caller asks for is capped by the kernel's timer granularity, so the report derives
+    // the effective rate from this measurement instead of assuming the request was honoured.
     h := words + 352;
-    raw_store(h, 734445520735457863);
+    raw_store(h, 734726995712168519);
     raw_store(h + 8, raw_load(page + 40));
     raw_store(h + 16, cap);
     raw_store(h + 24, count);
     raw_store(h + 32, raw_atomic_load(page + 32));
-    if rt_write_all(fd, h, 40) == 0 {
+    mut cpu = 0;
+    ts := words + 608;
+    if rt_error(rt_syscall(228, 2, ts, 0)) == 0 {
+        cpu = raw_load(ts) * 1000000000 + raw_load(ts + 8) - raw_load(page + 48);
+    }
+    raw_store(h + 40, cpu);
+    if rt_write_all(fd, h, 48) == 0 {
         rt_write_all(fd, raw_load(page + 8), count * 8);
     }
     rt_syscall(3, fd, 0, 0);

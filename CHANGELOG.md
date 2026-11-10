@@ -10,8 +10,12 @@
   handler and starts `ITIMER_PROF` at `1/rate` of CPU time. The handler reads the interrupted `RIP`
   from the kernel `ucontext_t`, claims a slot with a CAS loop and stores one word - it never
   allocates, never takes the allocator lock and never enters the kernel, so it cannot deadlock
-  against the runtime. Samples are written as `GRPROF1` plus the rate, capacity, count and dropped
-  count and the raw addresses on normal exit, `host::exit` or a runtime abort; the command then
+  against the runtime. Samples are written as `GRPROF2` plus the rate, capacity, count, dropped
+  count, the `CLOCK_PROCESS_CPUTIME_ID` nanoseconds the samples cover and the raw addresses on
+  normal exit, `host::exit` or a runtime abort. The report prints the measured CPU time and the
+  effective rate (`samples / CPU seconds`) and says so when the request was not honoured, because
+  the kernel accounts CPU time per tick and caps the effective rate near one kilohertz regardless of
+  `--rate`. The command then
   parses the program's ELF `.symtab` (`SHT_SYMTAB` + linked `.strtab`, `STT_FUNC` ranges since the
   compiler emits no `st_size`) and binary-searches each address. Addresses outside every symbol are
   reported in an always-present `[unknown]` row rather than dropped, and the report states that a
@@ -22,7 +26,9 @@
   job, and a `bun tools/ci.mjs lint` check) profiles a known hot loop at a fixed rate and asserts
   the hot function is the first row with over half of the attributed samples, that the rows sum to
   the total, that a stripped copy lands entirely in `[unknown]`, and that `--out` matches stdout.
-  `docs/tooling/profiler.md` documents the command, the columns and the limits: leaf-only
+  `docs/tooling/profiler.md` documents the command, the columns and the limits: the sampled code
+  cost (about 3.4 KiB of `x86-64` text in every program and one failing `openat` at startup when no
+  profile was requested), leaf-only
   attribution, optimiser inlining, no line granularity, CPU-time rather than wall-clock sampling,
   no report when the program is killed, and Linux x86-64 only (other targets compile the hook but
   never arm it, and `grail profile` refuses to run there).
