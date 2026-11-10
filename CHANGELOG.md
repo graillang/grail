@@ -56,6 +56,21 @@
     `compiler/examples`, `book/examples`, `examples/loops/cleanup.grl`), where `if flag` became
     `if flag != 0` and the fixture that asserted bool arithmetic now spells the conversion with
     `u64(1 == 1) + u64(2 == 2)`.
+- The RHI starts in Grail. `abundance/src/rhi_sdl3.grl` and `abundance/src/rhi_vulkan.grl` bind the
+  system SDL3 and Vulkan loaders through `extern \"C\"` declarations, and
+  `abundance/tests/rhi_device_probe.grl` exercises them against this machine: `SDL_GetVersion`,
+  `SDL_Init(SDL_INIT_VIDEO)`, `SDL_GetCurrentVideoDriver`, a hidden `SDL_WINDOW_VULKAN` window with
+  `SDL_GetWindowSize`/`SDL_GetWindowSizeInPixels` and `SDL_DestroyWindow`, then
+  `vkEnumerateInstanceVersion` and the loader's instance extensions and layers, decoded at their C
+  offsets out of `VkExtensionProperties`/`VkLayerProperties` byte buffers. `tools/abundance-test.mjs`
+  runs the probe after the parity suite under the same exclusive GPU lock `graphics/Makefile` takes,
+  and skips it when no `libSDL3.so`/`libvulkan.so` can be linked; the ten parity programs are
+  unchanged and still byte-identical, because the two FFI modules are linked only by the probe.
+  `VkInstance` creation is blocked by an FFI limit, not by a driver: `handle` and `CPtr` values enter
+  Grail only as a foreign call's *result*, so `vkCreateInstance`'s `VkInstance *` out-parameter has no
+  spelling. The new `ffi-reject-handle-out-slot` and `ffi-reject-handle-null-seed` native cases pin
+  the two refusals, and `docs/rhi.md` states what the increment covers, what it does not, and the
+  next three.
 - Merge the three design reviews from branch `claude/brave-heisenberg-0h3ska` as documents only
   (`docs/design/first-principles-architecture.md`, `architecture-reassessment.md`,
   `complexity-reassessment.md`, 2,746 lines). Their edits to README and to the research-phase

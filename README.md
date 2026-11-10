@@ -20,6 +20,7 @@ fn main() {
 - **Cross-platform CI / release tooling:** [docs/tooling/cross-platform-ci.md](docs/tooling/cross-platform-ci.md).
 - **LSP / debugger / profiler plan:** [docs/tooling/lsp-debugger-profiler.md](docs/tooling/lsp-debugger-profiler.md).
 - **Verified cross-platform status:** [docs/platform-status.md](docs/platform-status.md) distinguishes executed targets from scaffolding and cross-builds.
+- **Graphics RHI from Grail:** [docs/rhi.md](docs/rhi.md) covers the SDL3 window and Vulkan loader bindings in `abundance/src/`, what the FFI cannot express yet, and the next increments; `bun tools/abundance-test.mjs` runs the device probe.
 - **Cross-platform OS ABI (proposal/scaffold):** [docs/design/runtime-abi.md](docs/design/runtime-abi.md)
   and [runtime/abi/README.md](runtime/abi/README.md); `just abi-test` runs the C contract tests.
 - **First Grail wrappers over the C ABI:** [docs/design/grail-ffi-runtime.md](docs/design/grail-ffi-runtime.md);
