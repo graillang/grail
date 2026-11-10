@@ -509,7 +509,7 @@ fn sleb_neg<a>(out: (&a mut u8[]), n: u64) -> unit {
             b = b + 128;
         }
         v = (v - b) / 128;
-        if ((v == 0) & (b < 64)) + ((v == i64(0) - i64(1)) & (64 <= b)) {
+        if ((v == 0) && (b < 64)) || ((v == i64(0) - i64(1)) && (64 <= b)) {
             out.push(u64(b));
             return ();
         }
@@ -1605,7 +1605,7 @@ fn arm_unwind<a>(text: &a [u8]) -> u8[] {
     }
     // Frame values are positional, so a mismatch means the shape is not understood: keep the
     // assembly unchanged rather than describe the wrong function.
-    if (syms.len() != frames.len()) + (syms.len() == 0) {
+    if (syms.len() != frames.len()) || (syms.len() == 0) {
         return text.copy();
     }
     mut out = u8[];
@@ -1904,7 +1904,7 @@ fn own<a>(c: (&a mut C), slot: u64, ty: u64) -> Val {
 // A bond says that a live value retains a loan. Moves append bonds to the new holder;
 // historical bonds remain for flow restoration, but dead holders do not keep loans alive.
 fn bond_kind<a>(c: (&a mut C), holder: u64, loan: u64, guard: u64) -> unit {
-    if (holder == 0) + (loan == 0) {
+    if (holder == 0) || (loan == 0) {
         return ();
     }
     for i in c.bonds.len() {
@@ -1925,7 +1925,7 @@ fn loan_live<a>(c: (&a mut C), loan: u64) -> u64 {
     return l.live;
 }
 fn transfer_bonds<a>(c: (&a mut C), src: u64, dst: u64) -> unit {
-    if (src == 0) + (dst == 0) {
+    if (src == 0) || (dst == 0) {
         return ();
     }
     n := c.bonds.len();
@@ -1943,7 +1943,7 @@ fn transfer_bonds<a>(c: (&a mut C), src: u64, dst: u64) -> unit {
     return ();
 }
 fn return_bonds<a>(c: (&a mut C), src: u64, dst: u64, aggregate: u64) -> unit {
-    if (src == 0) + (dst == 0) {
+    if (src == 0) || (dst == 0) {
         return ();
     }
     n := c.bonds.len();
@@ -2313,7 +2313,7 @@ fn check_writeback<a>(c: (&a mut C), destination: u64, ty: u64, source: u64) -> 
                             found = 1;
                         }
                     }
-                    if (r == 0) + (found == 0) {
+                    if (r == 0) || (found == 0) {
                         fail(&mut c, view("captured writeback violates invariant lifetime"));
                     }
                 }
@@ -2324,7 +2324,7 @@ fn check_writeback<a>(c: (&a mut C), destination: u64, ty: u64, source: u64) -> 
 }
 fn seed_storage<a>(c: (&a mut C), storage: u64, ty: u64) -> unit {
     region := region_of(&mut c, storage);
-    if (region == 0) + (region == 18446744073709551615) {
+    if (region == 0) || (region == 18446744073709551615) {
         return ();
     }
     for i in c.bonds.len() {
@@ -2720,7 +2720,7 @@ fn require_mutable_binding<a>(c: (&a mut C), slot: u64, storage: u64) -> unit {
                 }
                 fail(&mut c, view("mutation through readonly reference"));
             }
-            if ((k == 5) + (k == 27)) & (storage == 0) {
+            if ((k == 5) || (k == 27)) && (storage == 0) {
                 if mode {
                     return ();
                 }
@@ -3170,7 +3170,7 @@ fn validate_return<a>(c: (&a mut C), v: Val) -> unit {
                     }
                 }
                 if region != 18446744073709551615 {
-                    if (region == 0) + (allowed == 0) {
+                    if (region == 0) || (allowed == 0) {
                         fail(&mut c, view("returned borrow escapes its declared input lifetime"));
                     }
                 }
@@ -4421,7 +4421,7 @@ fn named_type<a>(c: (&a mut C), m: u8[], n: u8[], args: u64[]) -> u64 {
     }
     d = d - 1;
     decl := &c.decls[d];
-    if (decl.regions != 0) + (decl.types != args.len()) {
+    if (decl.regions != 0) || (decl.types != args.len()) {
         fail(&mut c, view("concise type has incompatible library declaration"));
     }
     bounds := declaration_bounds(&c, d);
@@ -5096,7 +5096,7 @@ fn handle_declaration<a>(c: (&a mut C), pass: u64) -> unit {
         return ();
     }
     m := module_copy(&mut c);
-    if (find_decl(&mut c, view(m), view(name)) != 0) + (find_alias(&mut c, view(m), view(name)) != 0) {
+    if (find_decl(&mut c, view(m), view(name)) != 0) || (find_alias(&mut c, view(m), view(name)) != 0) {
         fail(&mut c, view("duplicate type"));
     }
     c
@@ -5874,7 +5874,7 @@ fn ffi_param<a, b>(c: (&a mut C), ty: u64, what: &b [u8]) -> unit {
 fn ffi_result<a, b>(c: (&a mut C), ty: u64, what: &b [u8]) -> unit {
     // A result is one word: scalars, a C handle or a C string pointer. A byte view
     // result is rejected because C cannot produce a Grail view record.
-    if (ty == 0) + (ty == 1) {
+    if (ty == 0) || (ty == 1) {
         return ();
     }
     k := ty_kind(&mut c, ty);
@@ -6448,7 +6448,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         }
         main := (c.file == 2) & (c.current_impl == 0) & (c.inherent == 0) & same(view(name), view("main"));
         if main {
-            if (1 < count) + (typecount != 0) {
+            if (1 < count) || (typecount != 0) {
                 fail(
                     &mut c,
                     view("main needs zero arguments or one readonly byte view and no type parameters")
@@ -7465,7 +7465,7 @@ fn cfield_load<a>(c: (&a mut C), base: u64, d: u64, k: u64, address: u64) -> u64
     return loaded;
 }
 fn ffi_f32_widen<a>(c: (&a mut C)) -> unit {
-    if (c.target == 0) + (c.target == 3) {
+    if (c.target == 0) || (c.target == 3) {
         o(&mut c, view("movd %eax,%xmm0\ncvtss2sd %xmm0,%xmm0\nmovq %xmm0,%rax\n"));
     } else {
         o(&mut c, view("cf32widen\n"));
@@ -7496,7 +7496,7 @@ fn cfield_store<a>(c: (&a mut C), base: u64, d: u64, k: u64, value: u64) -> unit
     mut stored = value;
     if is_f32(&mut c, ty) {
         get(&mut c, value, view("%rax"));
-        if (c.target == 0) + (c.target == 3) {
+        if (c.target == 0) || (c.target == 3) {
             o(&mut c, view("movq %rax,%xmm0\ncvtsd2ss %xmm0,%xmm0\nmovd %xmm0,%eax\n"));
         } else {
             o(&mut c, view("cf32bits\n"));
@@ -7566,7 +7566,7 @@ fn caddr_store<a>(c: (&a mut C), slot: u64, ty: u64, value: u64) -> unit {
     mut stored = value;
     if is_f32(&mut c, ty) {
         get(&mut c, value, view("%rax"));
-        if (c.target == 0) + (c.target == 3) {
+        if (c.target == 0) || (c.target == 3) {
             o(&mut c, view("movq %rax,%xmm0\ncvtsd2ss %xmm0,%xmm0\nmovd %xmm0,%eax\n"));
         } else {
             o(&mut c, view("cf32bits\n"));
@@ -7614,7 +7614,7 @@ fn narrow_encode<a>(c: (&a mut C), code: u64, value: u64) -> u64 {
         return value;
     }
     get(&mut c, value, view("%rax"));
-    if (c.target == 0) + (c.target == 3) {
+    if (c.target == 0) || (c.target == 3) {
         o(&mut c, view("movq %rax,%xmm0\ncvtsd2ss %xmm0,%xmm0\nmovd %xmm0,%eax\n"));
     } else {
         o(&mut c, view("cf32bits\n"));
@@ -7718,7 +7718,7 @@ fn ffi_float_plan<a>(c: (&a mut C), d: u64, abi: u64) -> u64 {
         return 1;
     }
     if abi == 2 {
-        if (count == 0) + (4 < count) {
+        if (count == 0) || (4 < count) {
             return 0;
         }
         first := field_ty(&mut c, d, 0);
@@ -7735,7 +7735,7 @@ fn ffi_float_plan<a>(c: (&a mut C), d: u64, abi: u64) -> u64 {
         return 2;
     }
     if abi == 3 {
-        if (count == 0) + (2 < count) {
+        if (count == 0) || (2 < count) {
             return 0;
         }
         mut floats = 0;
@@ -8392,7 +8392,7 @@ fn structural_eq<a>(c: (&a mut C), x: u64, y: u64, ty: u64, depth: u64) -> u64 {
         fail(&mut c, view("structural equality nests too deeply"));
     }
     k := ty_kind(&mut c, ty);
-    if (ty == 0) + (k == 18) + (k == 19) + (k == 22) {
+    if (ty == 0) || (k == 18) || (k == 19) || (k == 22) {
         get(&mut c, y, view("%rcx"));
         get(&mut c, x, view("%rax"));
         o(&mut c, view("cmpq %rcx,%rax\nsete %al\nmovzbq %al,%rax\n"));
@@ -8408,7 +8408,7 @@ fn structural_eq<a>(c: (&a mut C), x: u64, y: u64, ty: u64, depth: u64) -> u64 {
     if (k == 6) || (k == 27) {
         e := ty_arg(&mut c, ty);
         ek := ty_kind(&mut c, e);
-        if (e == 0) + (ek == 18) + (ek == 19) + (ek == 22) {
+        if (e == 0) || (ek == 18) || (ek == 19) || (ek == 22) {
             if narrow_code(&mut c, e) {
                 return invoke(&mut c, view("rt_vec_cmp4"), three(op, x, y));
             }
@@ -9015,11 +9015,7 @@ fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
             }
             aend := c.pos;
             if c.raw == 0 {
-                if (
-                    (v.ty == 0)
-                        + ((c.lit_negative != 0) & (c.lit_start == astart) & (c.lit_end == aend))
-                )
-                    & (args.len() < count) {
+                if ((v.ty == 0) || ((c.lit_negative != 0) && (c.lit_start == astart) && (c.lit_end == aend))) && (args.len() < count) {
                     formal := c.params[template_first + args.len()];
                     if (types == 0) & literal_target(&mut c, formal) {
                         if adopt_literal(&mut c, astart, aend, formal) {
@@ -9049,7 +9045,7 @@ fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
             }
             index := args.len();
             variadic := c.funcs[f - 1].ext == 2;
-            if (count < index + 1) & (variadic == 0) {
+            if (count < index + 1) && (variadic == 0) {
                 fail(&mut c, view("function argument count"));
             }
             if (count < index + 1) & variadic {
@@ -9823,7 +9819,7 @@ fn raw_builtin<a>(c: (&a mut C), id: u64) -> Val {
         }
     }
     if id == 135 {
-        if (args.len() == 0) + (5 < args.len()) {
+        if (args.len() == 0) || (5 < args.len()) {
             fail(&mut c, view("indirect Win32 call arity"));
         }
     }
@@ -10305,7 +10301,7 @@ fn raw_builtin<a>(c: (&a mut C), id: u64) -> Val {
         if id == 131 {
             name = "toi";
         }
-        if (c.target == 0) + (c.target == 3) {
+        if (c.target == 0) || (c.target == 3) {
             if id < 127 {
                 mut instr = "addsd";
                 if id == 124 {
@@ -10881,7 +10877,7 @@ fn decode_literal<a>(c: (&a mut C), p: u64) -> u8[] {
                 }
                 j += 1;
             }
-            if (j >= en - 1) + (digits == 0) {
+            if (j >= en - 1) || (digits == 0) {
                 fail(&mut c, view("unterminated or empty \\u{...} escape"));
             }
             if (55295 < v) & (v < 57344) {
@@ -11338,7 +11334,7 @@ fn parallel_map_builtin<a>(c: (&a mut C), items: Val) -> Val {
     closure := ty_kind(&mut c, fty) == 20;
     // Closures are shared read-only by every worker (captures are owned and never borrowed), and
     // parallel_map returns only after all workers finish, so the closure outlives them.
-    if (ty_kind(&mut c, fty) != 12) & (closure == 0) {
+    if (ty_kind(&mut c, fty) != 12) && (closure == 0) {
         fail(&mut c, view("parallel_map requires a callable"));
     }
     signature := type_args(&mut c, fty);
@@ -11489,7 +11485,7 @@ fn task_scope_builtin<a>(c: (&a mut C), context: Val) -> Val {
         fail(&mut c, view("task_scope body takes (ref Scope<C>, C)"));
     }
     sref := signature[0];
-    if (ty_kind(&mut c, sref) != 7) + (ty_mode(&mut c, sref) != 0) {
+    if (ty_kind(&mut c, sref) != 7) || (ty_mode(&mut c, sref) != 0) {
         fail(&mut c, view("task_scope body must take a shared Scope reference"));
     }
     sty := ty_arg(&mut c, sref);
@@ -11873,7 +11869,7 @@ fn float_bits_p<a, b>(c: (&a mut C), text: &b [u8], p: u64) -> u64 {
             big_shr1(&mut shifted);
         }
         subnormal := (kneg == 0) & (k == lowest);
-        if (q < half) & (subnormal == 0) {
+        if (q < half) && (subnormal == 0) {
             if kneg {
                 if k == 0 {
                     kneg = 0;
@@ -12356,10 +12352,7 @@ fn adopt_value<a>(c: (&a mut C), v: Val, start: u64, end: u64, expected: u64) ->
                 v = adopt_float(&mut c, v, start, end, args[which]);
             }
         }
-        if (found == 0)
-            & (c.lit_start == start)
-            & (c.lit_end == end)
-            & ((v.ty == 0) + (c.lit_negative != 0)) {
+        if (found == 0) && (c.lit_start == start) && (c.lit_end == end) && ((v.ty == 0) || (c.lit_negative != 0)) {
             value := c.lit_value;
             negative := c.lit_negative;
             for i in args.len() {
@@ -12749,7 +12742,7 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
                 }
                 depth -= 1;
             }
-            if ((k == 44) + (k == 59)) & (depth == 0) {
+            if ((k == 44) || (k == 59)) && (depth == 0) {
                 break;
             }
             advance(&mut c);
@@ -13030,7 +13023,7 @@ fn closure_body_end<a>(c: (&a mut C), start: u64) -> u64 {
             }
             depth -= 1;
         }
-        if ((k == 44) + (k == 59)) & (depth == 0) {
+        if ((k == 44) || (k == 59)) && (depth == 0) {
             return i;
         }
         i += 1;
@@ -13225,7 +13218,7 @@ fn mutex_method<a, b>(c: (&a mut C), value: Val, name: &b [u8]) -> Val {
     }
     guard := signature[0];
     expected := signature[1];
-    if (ty_kind(&mut c, guard) != 7) + (ty_mode(&mut c, guard) == 0) {
+    if (ty_kind(&mut c, guard) != 7) || (ty_mode(&mut c, guard) == 0) {
         fail(&mut c, view("lock_with callback must take an exclusive payload reference"));
     }
     inner := ty_arg(&mut c, guard);
@@ -13802,7 +13795,7 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
             f = "rt_text";
             ty = 3;
         }
-        if (c.raw == 0) & ((k == 6) + (k == 27)) {
+        if (c.raw == 0) && ((k == 6) || (k == 27)) {
             // `.copy()` of a vector (or slice) of plain values (no element needs a drop) is an independent
             // vector of the same type; copying owners would duplicate ownership.
             elem := ty_arg(&mut c, xty);
@@ -14134,7 +14127,7 @@ fn collection_literal<a>(c: (&a mut C), ty: u64, bytes: u64) -> Val {
                     expected = ty_arg(&mut c, ty);
                 }
                 v = adopt_value(&mut c, v, estart, eend, expected);
-                if (bytes == 0) + (v.ty != int_type(&mut c, 8, 0)) {
+                if (bytes == 0) || (v.ty != int_type(&mut c, 8, 0)) {
                     require_type(&mut c, v.ty, expected);
                 }
                 if bytes != 0 {
@@ -14301,7 +14294,7 @@ fn reference_borrow<a>(c: (&a mut C), write: u64) -> Val {
 // referent's width (see `ref_load`). Word storage is never tagged.
 fn tag_narrow_borrow<a>(c: (&a mut C), slot: u64) -> unit {
     narrow := caddr_ty(&mut c, slot);
-    if (c.raw != 0) + (narrow == 0) {
+    if (c.raw != 0) || (narrow == 0) {
         return ();
     }
     if is_c_record(&mut c, narrow) {
@@ -14407,7 +14400,7 @@ fn borrow_chain_end<a>(c: (&a mut C)) -> u64 {
             mut depth = 0;
             while true {
                 kk := kind_at(&mut c, e);
-                if (kk == 0) + (kk == 59) {
+                if (kk == 0) || (kk == 59) {
                     return e;
                 }
                 if kk == 91 {
@@ -14916,7 +14909,7 @@ fn primary<a>(c: (&a mut C)) -> Val {
         exchange(&mut c.lit_negative, 0);
         return val(slot, 0);
     }
-    if ((k == 124) + (k == 274)) & (c.raw == 0) {
+    if ((k == 124) || (k == 274)) && (c.raw == 0) {
         return closure_literal(&mut c);
     }
     if k == 33 {
@@ -15578,7 +15571,7 @@ fn propagate_union<a>(c: (&a mut C), x: Val, unwrap: u64) -> Val {
                     }
                 }
             }
-            if (i != 0) & ((found != 1) + (target == 0)) {
+            if (i != 0) && ((found != 1) || (target == 0)) {
                 fail(&mut c, view("union failure type is not a failure in return type"));
             }
             targets.push(target);
@@ -15647,7 +15640,7 @@ fn propagate<a>(c: (&a mut C), v: Val, unwrap: u64) -> Val {
     d := ty_arg(&mut c, x.ty);
     mut k = 0;
     shape := &c.decls[d];
-    if (shape.is_enum == 0) + (shape.count != 2) {
+    if (shape.is_enum == 0) || (shape.count != 2) {
         fail(&mut c, view("unwrap requires two-variant Option/Result"));
     }
     dd := &c.decls[d];
@@ -15760,7 +15753,7 @@ fn binary<a>(c: (&a mut C), k: u64, left: u64, right: u64) -> u64 {
     if k == 42 {
         o(&mut c, view("mulq %rcx\n"));
     }
-    if ((k == 43) + (k == 45) + (k == 42)) & (((c.overflow != 0) + (c.raw != 0)) != 0) {
+    if ((k == 43) || (k == 45) || (k == 42)) && (((c.overflow != 0) || (c.raw != 0))) {
         ok := label(&mut c);
         jump(&mut c, view("jnc"), ok);
         o(&mut c, view("call rt_abort\n"));
@@ -15773,7 +15766,7 @@ fn binary<a>(c: (&a mut C), k: u64, left: u64, right: u64) -> u64 {
         o(&mut c, view("orq %rcx,%rax\n"));
     }
     if (k == 271) || (k == 272) {
-        if (c.overflow != 0) + (c.raw != 0) {
+        if (c.overflow != 0) || (c.raw != 0) {
             limit := imm(&mut c, 63);
             get(&mut c, right, view("%rcx"));
             get(&mut c, limit, view("%rax"));
@@ -15790,7 +15783,7 @@ fn binary<a>(c: (&a mut C), k: u64, left: u64, right: u64) -> u64 {
             op = "shrq";
         }
         o(&mut c, view(op));
-        if (c.target == 0) + (c.target == 3) {
+        if (c.target == 0) || (c.target == 3) {
             o(&mut c, view(" %cl,%rax\n"));
         } else {
             o(&mut c, view(" %rcx,%rax\n"));
@@ -16984,7 +16977,7 @@ fn assign_chain<a>(c: (&a mut C)) -> u64[] {
             mut depth = 0;
             while true {
                 kk := kind_at(&mut c, e);
-                if (kk == 0) + (kk == 59) {
+                if (kk == 0) || (kk == 59) {
                     return none;
                 }
                 if kk == 91 {
@@ -17004,7 +16997,7 @@ fn assign_chain<a>(c: (&a mut C)) -> u64[] {
         break;
     }
     k := kind_at(&mut c, e);
-    if (groups != 0) & ((k == 61) + ((261 < k) & (k < 267)) + (k == 268)) {
+    if (groups != 0) && ((k == 61) || ((261 < k) && (k < 267)) || (k == 268)) {
         return u64[e, last, groups, field];
     }
     return none;
@@ -17227,7 +17220,7 @@ fn mutating_call_after_index<a>(c: (&a mut C), elem: u64) -> u64 {
     mut depth = 0;
     while true {
         k := kind_at(&mut c, q);
-        if (k == 0) + (k == 59) {
+        if (k == 0) || (k == 59) {
             return 0;
         }
         if k == 91 {
@@ -17254,7 +17247,7 @@ fn mutating_call_after_index<a>(c: (&a mut C), elem: u64) -> u64 {
 // 1 + write mode when the next argument is exactly a reference/view binding (`name` followed by
 // `,` or `)`), else 0.
 fn reborrow_argument<a>(c: (&a mut C)) -> u64 {
-    if (c.raw != 0) + (kind(&mut c) != 1) {
+    if (c.raw != 0) || (kind(&mut c) != 1) {
         return 0;
     }
     here := c.pos;
@@ -17285,7 +17278,7 @@ fn fold_constant(k: u64, a: u64, b: u64) -> u64[] {
         return u64[1, a - b];
     }
     if k == 42 {
-        if (a == 0) + (b <= 18446744073709551615 / a) {
+        if (a == 0) || (b <= 18446744073709551615 / a) {
             return u64[1, a * b];
         }
     }
@@ -17434,7 +17427,7 @@ fn index_assignment<a>(c: (&a mut C)) -> unit {
     if (l != 0) & (kind_at(&mut c, start + 1) == 91) {
         lt := local_ty(&mut c, l - 1);
         lk := ty_kind(&mut c, lt);
-        if ((lk == 5) + (lk == 7) + (lk == 27)) & (ty_mode(&mut c, lt) != 0) {
+        if ((lk == 5) || (lk == 7) || (lk == 27)) && (ty_mode(&mut c, lt) != 0) {
             capability = 1;
         }
         if (lk == 27) & (ty_mode(&mut c, lt) == 0) {
@@ -17503,7 +17496,7 @@ fn index_assignment<a>(c: (&a mut C)) -> unit {
     } else {
         // Bytes: buf[i] = b stores the low byte of a u8/u64 value.
         if c.raw == 0 {
-            if (k != 3) & ((k != 5) + (ty_mode(&mut c, x.ty) == 0)) {
+            if (k != 3) && ((k != 5) || (ty_mode(&mut c, x.ty) == 0)) {
                 fail(
                     &mut c,
                     view("index assignment needs a vector, bytes or a mutable byte view")
@@ -17584,7 +17577,7 @@ fn write_statement<a>(c: (&a mut C)) -> unit {
         if c.raw == 0 {
             if i == 0 {
                 k := ty_kind(&mut c, ty);
-                if (k != 5) + (ty_mode(&mut c, ty) == 0) {
+                if (k != 5) || (ty_mode(&mut c, ty) == 0) {
                     fail(&mut c, view("write requires mutable byte view"));
                 }
             } else {
@@ -18345,7 +18338,7 @@ fn statement<a>(c: (&a mut C)) -> unit {
         fret := c.export_fret;
         if fret != 0 {
             // A C caller reads a float result from the vector register.
-            if (c.target == 0) + (c.target == 3) {
+            if (c.target == 0) || (c.target == 3) {
                 o(&mut c, view("movq %rax,%xmm0\n"));
                 if fret == 2 {
                     o(&mut c, view("cvtsd2ss %xmm0,%xmm0\n"));
@@ -19696,7 +19689,7 @@ fn find_hint<a>(c: (&a mut C), at: u64) -> u64 {
 // `show(count)` where count is a committed literal binding and show wants a u8: remember that
 // count should have been a u8 and finish this attempt tolerantly; the function is recompiled.
 fn hint_use<a>(c: (&a mut C), v: Val, start: u64, end: u64, expected: u64) -> Val {
-    if (c.raw != 0) + (c.cf_local == 0) {
+    if (c.raw != 0) || (c.cf_local == 0) {
         return v;
     }
     if (c.cf_start != start) || (c.cf_end != end) {
@@ -20246,10 +20239,10 @@ pub fn main() -> u64 {
     }
     // DWARF on Linux x86-64, AArch64 and RISC-V 64; CodeView line tables (a PDB through lld-link
     // /DEBUG) on Windows x86-64.
-    if (c.debug != 0) & (((c.target == 4) + (c.plat != 0)) != 0) {
+    if (c.debug != 0) && (((c.target == 4) || (c.plat != 0))) {
         fail_option(&mut c, view("--debug line info is only implemented for Linux and Windows x86_64"));
     }
-    if (c.backend != 0) & (((c.target > 2) + (c.plat != 0) + (c.debug != 0)) != 0) {
+    if (c.backend != 0) && (((c.target > 2) || (c.plat != 0) || (c.debug != 0))) {
         fail_option(&mut c, view("--backend=llvm is implemented for Linux x86_64, aarch64 and riscv64 without --debug"));
     }
     for pass in 3 {
@@ -20441,7 +20434,7 @@ pub fn main() -> u64 {
     }
     }
     mut out = u8[];
-    if (c.debug != 0) + (c.backend != 0) != 0 {
+    if (c.debug != 0) || (c.backend != 0) {
         out = copy_bytes(view(c.out));
     } else {
         out = optimize::optimize(view(c.out));
@@ -20452,7 +20445,7 @@ pub fn main() -> u64 {
     }
     path := host::arg(1 + offset);
     target := c.target;
-    if (target == 0) + (target == 3) {
+    if (target == 0) || (target == 3) {
         if target == 3 {
             // PE/COFF unwind data must be emitted from the final frame sizes.
             mut image = win_unwind(view(out));
