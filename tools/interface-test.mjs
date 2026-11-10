@@ -171,11 +171,11 @@ function proveRejected(name, files, directory) {
   mkdirSync(directory, { recursive: true });
   const source = compile(files, join(directory, 'source'));
   assert.equal(source.status, 1, `${name}: the source build must reject this program\n${source.output}`);
-  // The declarations are fine even though the body is not, so the emitting run writes the
-  // interfaces before it fails; only the build against them has to reject.
+  // The emitting run may fail before it writes anything (a case rejected in its headers) or after
+  // (one rejected in a body); either way the build against the interfaces has to reject as well,
+  // rather than quietly compile something the source build refuses.
   const ifaces = join(directory, 'emit', 'ifaces');
   compile(files, join(directory, 'emit'), ['--emit-interface', ifaces]);
-  assert.ok(existsSync(join(ifaces, 'interfaces.manifest')), `${name}: the emitting run wrote no interfaces`);
   const viaInterface = compile(files, join(directory, 'interface'), ['--interface', ifaces]);
   assert.equal(viaInterface.status, 1, `${name}: the interface build must reject it too\n${viaInterface.output}`);
 }
