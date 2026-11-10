@@ -511,7 +511,7 @@ impl Reader {
 fn put_member<a>(members: (&a mut Member[]), key: string, value: Json) {
     mut index = 0;
     while index < members.len() {
-        if key_matches(&members[index], view(key)) {
+        if key_matches(&members[index], &key) {
             entry := &mut members[index];
             exchange(&mut entry.value, value);
             return ();
@@ -528,7 +528,7 @@ fn copied_value<a>(member: (&a Member)) -> Json {
 }
 
 fn copied_key<a>(member: (&a Member)) -> string {
-    return view(member.key).text();
+    return member.key.text();
 }
 
 fn copied_item<a>(item: (&a Json)) -> Json {
@@ -581,8 +581,8 @@ pub fn copy_of<a>(value: (&a Json)) -> Json {
     match value {
         Null => { return Json::Null; },
         Bool(flag) => { return Json::Bool(flag); },
-        Num(text) => { copied := view(text).text(); return Json::Num(copied); },
-        Str(text) => { copied := view(text).text(); return Json::Str(copied); },
+        Num(text) => { copied := text.text(); return Json::Num(copied); },
+        Str(text) => { copied := text.text(); return Json::Str(copied); },
         Arr(items) => {
             mut out = Json[];
             for item in items {
@@ -593,7 +593,7 @@ pub fn copy_of<a>(value: (&a Json)) -> Json {
         Obj(members) => {
             mut out = Member[];
             for member in members {
-                key := view(member.key).text();
+                key := member.key.text();
                 copied := copy_of(&member.value);
                 out.push(Member { key: key, value: copied });
             }
@@ -691,8 +691,8 @@ impl Builder {
                     self.bytes(&u8[102, 97, 108, 115, 101]);
                 }
             },
-            Num(text) => { self.bytes(view(text)); },
-            Str(text) => { self.quoted(view(text)); },
+            Num(text) => { self.bytes(&text); },
+            Str(text) => { self.quoted(&text); },
             Arr(items) => {
                 self.put(91);
                 mut index = 0;
@@ -712,7 +712,7 @@ impl Builder {
                     if index > 0 {
                         self.put(44);
                     }
-                    self.quoted(view(member.key));
+                    self.quoted(&member.key);
                     self.put(58);
                     self.node(&member.value);
                     index += 1;
@@ -759,7 +759,7 @@ pub fn object_of<a>(members: (&a Member[])) -> Json {
     mut index = 0;
     while index < members.len() {
         entry := &members[index];
-        key := view(entry.key).text();
+        key := entry.key.text();
         out.push(Member { key: key, value: copy_of(&entry.value) });
         index += 1;
     }
@@ -884,7 +884,7 @@ pub fn array_item<a>(value: (&a Json), index: u64) -> Json? {
 
 pub fn as_string<a>(value: (&a Json)) -> string? {
     match value {
-        Str(text) => { copied := view(text).text(); return Some(copied); },
+        Str(text) => { copied := text.text(); return Some(copied); },
         _ => { return None; }
     }
 }
@@ -898,17 +898,17 @@ pub fn as_bool<a>(value: (&a Json)) -> bool? {
 
 pub fn as_number<a>(value: (&a Json)) -> string? {
     match value {
-        Num(text) => { copied := view(text).text(); return Some(copied); },
+        Num(text) => { copied := text.text(); return Some(copied); },
         _ => { return None; }
     }
 }
 
 pub fn path_of<a>(field: (&a Field)) -> string {
-    return view(field.path).text();
+    return field.path.text();
 }
 
 pub fn text_of<a>(field: (&a Field)) -> string {
-    return view(field.text).text();
+    return field.text.text();
 }
 
 // ---- flattening ----
@@ -932,12 +932,12 @@ impl Flattener {
                     self.emit(&path, &u8[102, 97, 108, 115, 101]);
                 }
             },
-            Num(text) => { self.emit(&path, view(text)); },
+            Num(text) => { self.emit(&path, &text); },
             Str(text) => {
                 mut builder = Builder::new();
-                builder.quoted(view(text));
+                builder.quoted(&text);
                 quoted := builder.out.text();
-                self.emit(&path, view(quoted));
+                self.emit(&path, &quoted);
             },
             Arr(items) => {
                 mut index = 0;
@@ -948,7 +948,7 @@ impl Flattener {
                     builder.digits(index);
                     builder.put(93);
                     child := builder.out.text();
-                    self.walk(item, view(child));
+                    self.walk(item, &child);
                     index += 1;
                 }
             },
@@ -957,9 +957,9 @@ impl Flattener {
                     mut builder = Builder::new();
                     builder.bytes(&path);
                     builder.put(46);
-                    builder.bytes(view(member.key));
+                    builder.bytes(&member.key);
                     child := builder.out.text();
-                    self.walk(&member.value, view(child));
+                    self.walk(&member.value, &child);
                 }
             }
         }
