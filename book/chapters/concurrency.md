@@ -17,6 +17,22 @@ both owned results. All of them state the same rule: everything a job's closure 
 results come back in input order whatever order the jobs finish in. See
 `docs/design/parallelism.md`.
 
+`parallel_for_chunks(&mut data[a: b], chunks, f)` is the in-place form of the chunked one: the
+compiler splits an exclusive slice into disjoint exclusive chunks and hands each job `&mut [T]` over
+its own elements, so nothing is moved or copied - the same 3M-element pass that costs ~100 ms
+through `for_chunks` costs ~44 ms here, as one job. The `&mut` slice is the whole vector's loan, so
+no capture in the callback can reach that data, and the slice a callback holds has its own length,
+so an index past the chunk is a bounds check rather than a write into a neighbour.
+`pool::chunks_mut(data, chunks, f)` wraps it for the case where `f` is a named function.
+
+`parallel_spawn(f)` returns a `Job<R>` you can wait on later with `parallel_join(job)`, or
+`pool::spawn`/`pool::wait`. A handle may outlive the statement that made it, and even the frame: its
+captures were moved into the job and its result comes back owned, so nothing it holds is frame
+memory. The compiler refuses a callback that captured a *borrow* (the handle's type records no such
+lifetime), a job that would return another handle (two waits on one record), and sharing a handle
+between threads. Dropping a handle without waiting on it waits and discards the result, so a job is
+never left running with no owner.
+
 Four tasks each increment an `Atomic` counter and a `Mutex`-protected total 1000 times. The `Atomic`
 uses `fetch_add`; the `Mutex` is used with `lock_with(context, callback)`, which gives the callback
 exclusive access to the payload only while the lock is held. The compiler rejects callbacks that

@@ -70,6 +70,7 @@ nothing knows about is denied.
 | `&mut T` (7, exclusive) | transferable(T) | no |
 | `Mutex<T>` (13) | transferable(T) | transferable(T) |
 | `Task<R>` (16) | transferable(R) | no |
+| `Job<R>` (29) | transferable(R) | no |
 | `Scope<C>` (14) | no | no |
 | `byval(R)` (28) | R | R |
 | closure (20) | every capture | every capture |
@@ -394,15 +395,148 @@ Designed but not observable in safe code yet:
 | 8 | 30 ms | 8 ms | 3.8x |
 | default (24) | 27 ms | 8 ms | 3.4x |
 
-### What stage 2 needs from the compiler
+## Stage 2 as built
 
-1. **Closure-capture classification** in `native.grl` (`require_capability` over the closure type's
-   captures), so the safe surface stops being trusted-only.
-2. `parallel_for_chunks(&mut [T], chunks, f: Fn(&mut [T]))`: split the exclusive slice into disjoint
-   exclusive chunks and check the element type by name, which removes the copy the owned-chunk shape
-   pays today.
-3. A user-visible job handle, or the scoped equivalent, so `spawn`-then-`wait` can be expressed
-   outside a structured call; the runtime already supports it (`rt_pool_submit` / `rt_pool_wait`),
-   and only the builtin bridge is missing.
+Three additions, all of them compiler surface: `parallel_for_chunks` (disjoint `&mut [T]` chunks),
+`parallel_spawn`/`parallel_join` with a `Job<R>` handle, and the `pool::chunks_mut`, `pool::spawn`,
+`pool::wait` wrappers in `lib/pool.grl`. Stage 1's closure-capture classification (above) landed
+first and both new primitives call it.
+
+### `parallel_for_chunks(&mut [T], chunks, f: Fn(&mut [T]))`
+
+The runtime splits the exclusive slice and hands each job a descriptor over its own region of the
+caller's *own* elements - no second vector, no move, no copy. Chunk `k` is
+`[k*size, min(n, k*size + size))` with `size = ceil(n/chunks)`; asking for `0` gives one chunk and
+asking for more chunks than elements gives one element per chunk. The element type goes through the
+same structural walk as a `parallel_map` item, asking `transferable` rather than `shareable`: one
+worker owns its region, but it may store through it (dropping the previous element on that worker)
+and call methods reachable through it, so the element must be a type that may be used, and
+destroyed, on another thread. `&[File]` and `&mut [File]` are refused by name for the same reason:
+
+```
+cannot transfer parallel_for_chunks element: thread-affine (a foreign handle with no audited classification)
+cannot share closure capture `f`: f is thread-affine (a foreign handle with no audited classification)
+cannot share closure capture `w`: a mutable slice or view cannot be shared
+parallel_for_chunks writes through its chunks, so the slice must be exclusive (&mut [T])
+```
+
+The runtime also asserts the coverage invariant `sum(chunk lengths) == n`, so a split that skipped
+or repeated an element aborts instead of writing a plausible wrong answer.
+
+### The aliasing argument for chunk callbacks, and how it was proved
+
+**The compiler makes the aliasing impossible; it does not have to detect it.** Three facts, checked
+in that order:
+
+1. **The argument is an exclusive loan of the whole vector.** `&mut v[a: b]` creates a kind-27
+   writable slice whose loan is held until the builtin's expansion ends, i.e. until after every
+   worker is joined. Exclusivity covers the vector, not the range: `&mut v[2: 4]` excludes `v`.
+2. **Every capture path into the same vector is a borrow conflict.** A closure that moves `v`
+   cannot - `v` is loaned. A closure that captures a shared slice of it cannot - the loan excludes a
+   second borrow, including a sub-range's. A closure that captures an exclusive slice cannot - same
+   reason, one step earlier.
+3. **A capture that survives (1) and (2) cannot address the caller's data at all.** It is either a
+   `&[T]`/`&mut [T]` over *other* storage, or an owned value. `require_parallel_closure(fty, 1)` then
+   refuses a captured mutable slice or view outright (every worker calls one closure, so a captured
+   `&mut [T]` would be written by all of them), and reaches handles through records and slices.
+
+**Proof, mechanically.** Four native cases pin it, and all four are rejections with the diagnostic
+quoted above: `pool-reject-chunk-alias-vector` (the callback reads the same vector: "use of moved,
+borrowed or partially initialized value"), `pool-reject-chunk-mutable-capture` (a captured
+`&mut [u64]`: refused by name), `pool-reject-chunk-shared-slice` (a `&[T]` argument),
+`pool-reject-chunk-fnmut-capture` (an `FnMut` environment). The dynamic half - an index past the
+chunk's own length - is `pool-chunk-write-outside-aborts`: the descriptor a callback holds has its
+chunk's length, so `s[s.len()] = x` is a bounds abort, never a write into a sibling's region.
+
+**Proof, structurally.** Inside the callback ordinary Grail rules apply unchanged: it holds one
+`&mut [T]` value with one length, `s[i]` is checked against that length, and no other name for the
+caller's elements exists in its environment (fact 3). So "each element is written exactly once, by
+exactly one job" is a property of the split construction and the borrow rules together, not of a
+convention. The content checks in `pool-chunks-mut-split` measure it rather than assume it: a chunk
+that ran twice would double elements, one that never ran would leave them.
+
+### The `Job<R>` handle
+
+`Job<R>` is a new type kind (29), the same shape as `Task<R>` and for the same reason: it must be
+move-only and it must own its record.
+
+```
+h := parallel_spawn(|| -> u64[] build());   // Job<u64[]>
+...                                          // other work, or a second job
+r := parallel_join(h);                       // takes the result, frees the record
+```
+
+What the compiler checks, and why the shape cannot dangle:
+
+| rule | why |
+|---|---|
+| the closure's captures are classified `transferable` (one worker, not shared) | the environment moves to exactly one worker |
+| **no borrow in the closure type** (`contains_borrow(fty)`) | `Job<R>` records R, not the closure's lifetimes, so a borrowed capture could be returned out of the frame it points into. A capture that needs to be shared is passed in as an owned value instead |
+| the closure object moves into the job (heap box, `rt_job_box`) | a closure object is already a heap record; the job owns it and drops it on the worker that ran it, so nothing in the handle points at the caller's frame |
+| `R` is transferable, has no borrows, and is not a `Task`/`Job` | the result crosses to the thread that waits, and two waits on one record would free it twice |
+| shared `Job<R>` is denied (`a job handle cannot be shared`) | sharing a handle would let two threads wait on one record |
+| the handle is move-only (`needs_drop`) and its drop **waits** | there is no path that frees the record while a worker may still write to it, and no path that leaks a finished job |
+
+So: a handle may outlive the statement, the block, and the frame that created it, and it may be
+joined from any thread that can reach it - because everything reachable from it (the environment,
+the result) was moved in and is owned, and the one thread that waits is the one that frees the
+record. It cannot dangle because there is no borrow in it and no second owner of it. It cannot be
+abandoned unsafely because dropping it *is* a wait: `rt_pool_wait` frees the record after publishing
+the result, exactly as the structured `rt_parallel_map` does one job at a time.
+
+Two consequences worth stating: a job may read or write a captured value but may not move it out of
+its environment (the closure model accesses captures through a reference), so a job builds its
+result instead of returning a capture; and a callback that must see caller-owned data without
+copying it should use `parallel_map` (shared context) or `parallel_for_chunks` (exclusive regions),
+both of which are structured.
+
+### Measured (3M u64, six mix rounds per element, best of three rounds)
+
+`pool::for_chunks` (owned) against `parallel_for_chunks` (in place), milliseconds:
+
+| `GRAIL_POOL_WORKERS` | owned 1 chunk | owned 8 | in place 1 chunk | in place 8 | in-place speedup |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 104 | 107 | 45 | 48 | 0.94x |
+| 2 | 99 | 80 | 44 | 31 | 1.4x |
+| 4 | 93 | 66 | 42 | 14 | 3.0x |
+| 8 | 98 | 67 | 41 | 11 | 3.7x |
+| default (24) | 100 | 63 | 44 | 12 | 3.7x |
+
+The copy is what the first two columns pay and the last two do not: one job either way, so
+`owned 1 chunk - in place 1 chunk` is the two moves of every element, 55-60 ms for 3M words (~18 ns
+per element; stage 1 estimated 46-48 ms at 4 mix rounds). `pool-chunks-mut-timing` asserts the
+single-job gap (at least 1.33x) and the parallel one (eight in-place chunks at least 1.5x faster
+than one, above four cores), and prints all four times to stderr.
+
+`parallel_map` is untouched: the existing `pool-speedup-four-workers` case measures 33 ms (one job)
+and 11 ms (four jobs) at `GRAIL_POOL_WORKERS=4`, against 33 ms and 12 ms before this change.
+
+### What stage 4 still needs
+
+The handle makes a job *graph* expressible but not yet efficient or complete:
+
+- **Dependencies between jobs.** Today a dependency is expressed by joining and capturing the
+  result, which serialises the wait: `b` cannot start work that only needs `a`'s result until the
+  thread that waits for `a` wakes. A dependency edge that lets a worker continue as soon as `a`
+  completes (or as a continuation attached to a still-running job) is the missing primitive.
+- **No result channel other than the wait.** One job's result must be moved into the next closure by
+  hand; a graph wants results addressed by node, and this language has no place to put a
+  heterogeneous map of them yet (a per-node type index would be a new kind, and an untyped `u64`
+  slot would put the type safety back on the caller).
+- **Priorities / interactive work.** The pool has room (per-worker rings plus an injection ring) but
+  no second queue class, so a graph of asset-build jobs can still starve a frame job.
+- **Fail-fast between jobs.** A job's failure is still `rt_abort` (B5): there is no error value to
+  cross a boundary, so a graph cannot cancel its dependents and report. That is the same missing
+  typed-error path the note above already names.
+
+### What stage 2 asked for, and where each item stands
+
+1. **Closure-capture classification** in `native.grl` - landed in stage 1's second half
+   (`require_parallel_closure`), and both stage 2 primitives call it.
+2. `parallel_for_chunks(&mut [T], chunks, f)` - **built**; the copy is gone (measurements above).
+3. A user-visible job handle - **built** as `Job<R>` with `parallel_spawn`/`parallel_join`, including
+   the ownership rule that makes it safe to keep.
 4. The audited transferable/shareable declarations for the handles actually used (files, sockets,
-   Vulkan objects), with default-deny for unknown FFI types, surviving in exported interfaces.
+   Vulkan objects), with default-deny for unknown FFI types, surviving in exported interfaces - **not
+   yet**. Default-deny is in place, so every unaudited handle is refused by name; the declarations
+   and their export (B1) are the remaining item.
