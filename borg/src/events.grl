@@ -77,6 +77,14 @@ pub enum EventError {
     UnknownKind(string)
 }
 
+fn copy_text<a>(text: (&a [u8])) -> string {
+    mut out = u8[];
+    for byte in text {
+        out.push(byte);
+    }
+    return out.text();
+}
+
 fn same<a, b>(left: (&a [u8]), right: (&b [u8])) -> bool {
     if left.len() != right.len() {
         return false;
@@ -94,10 +102,10 @@ fn text_of<a, b>(root: (&a borg_json::Json), key: (&b [u8])) -> string | EventEr
         Some(node) => {
             match borg_json::as_string(&node) {
                 Some(text) => { found := text; return found; },
-                None => { reason := key.text(); return EventError::WrongType(reason); }
+                None => { reason := copy_text(&key); return EventError::WrongType(reason); }
             }
         },
-        None => { reason := key.text(); return EventError::Missing(reason); }
+        None => { reason := copy_text(&key); return EventError::Missing(reason); }
     }
 }
 
@@ -108,13 +116,13 @@ fn number_of<a, b>(root: (&a borg_json::Json), key: (&b [u8])) -> u64 | EventErr
                 Some(text) => {
                     match borg_json::whole_number(&text) {
                         Some(value) => { return value; },
-                        None => { reason := key.text(); return EventError::WrongType(reason); }
+                        None => { reason := copy_text(&key); return EventError::WrongType(reason); }
                     }
                 },
-                None => { reason := key.text(); return EventError::WrongType(reason); }
+                None => { reason := copy_text(&key); return EventError::WrongType(reason); }
             }
         },
-        None => { reason := key.text(); return EventError::Missing(reason); }
+        None => { reason := copy_text(&key); return EventError::Missing(reason); }
     }
 }
 
@@ -159,7 +167,7 @@ fn strings_of<a, b>(root: (&a borg_json::Json), key: (&b [u8])) -> string[] | Ev
     match borg_json::member(&root, &key) {
         Some(node) => {
             if borg_json::kind_of(&node) != borg_json::JsonKind::Arr {
-                reason := key.text();
+                reason := copy_text(&key);
                 return EventError::WrongType(reason);
             }
             mut index = 0;
@@ -168,7 +176,7 @@ fn strings_of<a, b>(root: (&a borg_json::Json), key: (&b [u8])) -> string[] | Ev
                     Some(item) => {
                         match borg_json::as_string(&item) {
                             Some(text) => { out.push(text); },
-                            None => { reason := key.text(); return EventError::WrongType(reason); }
+                            None => { reason := copy_text(&key); return EventError::WrongType(reason); }
                         }
                     },
                     None => { }
@@ -189,7 +197,7 @@ pub fn status_of<a>(name: (&a [u8])) -> borg_journal::Status | EventError {
     if same(&name, "completed") { return borg_journal::completed(); }
     if same(&name, "failed") { return borg_journal::failed(); }
     if same(&name, "stopped") { return borg_journal::stopped(); }
-    return EventError::UnknownKind(name.text());
+    return EventError::UnknownKind(copy_text(&name));
 }
 
 fn decode_kind<a>(root: (&a borg_json::Json)) -> Kind | EventError {
@@ -260,10 +268,10 @@ pub fn decode<a>(root: (&a borg_json::Json)) -> Event | EventError {
 
 // ---- accessors ----
 
-pub fn event_id<a>(value: (&a Event)) -> string { return value.id.text(); }
-pub fn event_session<a>(value: (&a Event)) -> string { return value.session_id.text(); }
+pub fn event_id<a>(value: (&a Event)) -> string { return copy_text(&value.id); }
+pub fn event_session<a>(value: (&a Event)) -> string { return copy_text(&value.session_id); }
 pub fn event_sequence<a>(value: (&a Event)) -> u64 { return value.sequence; }
-pub fn event_created<a>(value: (&a Event)) -> string { return value.created_at.text(); }
+pub fn event_created<a>(value: (&a Event)) -> string { return copy_text(&value.created_at); }
 
 pub fn tag_of<a>(value: (&a Event)) -> string {
     return tag_name(&value.kind);
@@ -281,7 +289,7 @@ fn tag_name<a>(value: (&a Kind)) -> string {
 
 pub fn title_of<a>(value: (&a Event)) -> string {
     match &value.kind {
-        Titled(inner) => { return inner.title.text(); },
+        Titled(inner) => { return copy_text(&inner.title); },
         _ => { return "-".text(); }
     }
 }
@@ -311,22 +319,22 @@ pub fn tokens_of<a>(value: (&a Event)) -> string {
 pub fn status_text<a>(value: (&a Event)) -> string {
     match &value.kind {
         Status(inner) => { return borg_journal::status_name(&inner.status); },
-        Message(inner) => { return inner.status.text(); },
+        Message(inner) => { return copy_text(&inner.status); },
         _ => { return "-".text(); }
     }
 }
 
 pub fn actor_of<a>(value: (&a Event)) -> string {
     match &value.kind {
-        Message(inner) => { return inner.actor.text(); },
+        Message(inner) => { return copy_text(&inner.actor); },
         _ => { return "-".text(); }
     }
 }
 
 pub fn text_of_message<a>(value: (&a Event)) -> string {
     match &value.kind {
-        Message(inner) => { return inner.text.text(); },
-        Delta(inner) => { return inner.delta.text(); },
+        Message(inner) => { return copy_text(&inner.text); },
+        Delta(inner) => { return copy_text(&inner.delta); },
         _ => { return "-".text(); }
     }
 }
@@ -379,7 +387,7 @@ fn copy_optional_number<a>(value: (&a u64?)) -> u64? {
 
 fn copy_optional<a>(value: (&a string?)) -> string? {
     match value {
-        Some(text) => { copied := text.text(); return Some(copied); },
+        Some(text) => { copied := copy_text(&text); return Some(copied); },
         None => { return None; }
     }
 }
@@ -391,7 +399,7 @@ fn put(members: (&mut borg_json::Member[]), key: (&[u8]), value: borg_json::Json
 }
 
 fn put_text(members: (&mut borg_json::Member[]), key: (&[u8]), text: (&[u8])) {
-    members.push(borg_json::new_member(&key, borg_json::Json::Str(text.text())));
+    members.push(borg_json::new_member(&key, borg_json::Json::Str(copy_text(&text))));
 }
 
 fn put_optional(members: (&mut borg_json::Member[]), key: (&[u8]), value: (&string?)) {
@@ -439,7 +447,7 @@ fn encode_kind<a>(value: (&a Kind)) -> borg_json::Json {
                 mut items = borg_json::empty_list();
                 mut index = 0;
                 while index < inner.attachments.len() {
-                    written := borg_json::Json::Str(inner.attachments[index].text());
+                    written := borg_json::Json::Str(copy_text(&inner.attachments[index]));
                     items.push(written);
                     index += 1;
                 }

@@ -102,6 +102,14 @@ pub fn max_header_bytes() -> u64 {
     return 8192;
 }
 
+fn copy_text<a>(text: (&a [u8])) -> string {
+    mut out = u8[];
+    for byte in text {
+        out.push(byte);
+    }
+    return out.text();
+}
+
 fn text_equals<a, b>(left: (&a [u8]), right: (&b [u8])) -> bool {
     if left.len() != right.len() {
         return false;
@@ -271,7 +279,7 @@ fn id_json(id: (&Id)) -> borg_json::Json {
         Null => { return borg_json::Json::Null; },
         Num(value) => { return borg_json::Json::Num(borg_json::number_text(value)); },
         Text(text) => {
-            copied := text.text();
+            copied := copy_text(&text);
             return borg_json::Json::Str(copied);
         }
     }
@@ -298,11 +306,11 @@ pub fn encode(frame: (&Frame)) -> string {
     match frame {
         Request(inner) => {
             members.push(member("id", id_json(&inner.id)));
-            members.push(member("method", borg_json::Json::Str(inner.method.text())));
+            members.push(member("method", borg_json::Json::Str(copy_text(&inner.method))));
             members.push(member("params", borg_json::copy_of(&inner.params)));
         },
         Notification(inner) => {
-            members.push(member("method", borg_json::Json::Str(inner.method.text())));
+            members.push(member("method", borg_json::Json::Str(copy_text(&inner.method))));
             members.push(member("params", borg_json::copy_of(&inner.params)));
         },
         Result(inner) => {
@@ -313,7 +321,7 @@ pub fn encode(frame: (&Frame)) -> string {
             members.push(member("id", id_json(&inner.id)));
             mut error_members = borg_json::empty_members();
             error_members.push(member("code", borg_json::Json::Num(borg_json::signed_text(inner.code))));
-            error_members.push(member("message", borg_json::Json::Str(inner.message.text())));
+            error_members.push(member("message", borg_json::Json::Str(copy_text(&inner.message))));
             members.push(member("error", object(&mut error_members)));
         }
     }
@@ -342,14 +350,14 @@ fn render_id(id: (&Id)) -> string {
     match id {
         Null => { return "null".text(); },
         Num(value) => { return borg_json::number_text(value); },
-        Text(text) => { return text.text(); }
+        Text(text) => { return copy_text(&text); }
     }
 }
 
 pub fn method_of(frame: (&Frame)) -> string {
     match frame {
-        Request(inner) => { return inner.method.text(); },
-        Notification(inner) => { return inner.method.text(); },
+        Request(inner) => { return copy_text(&inner.method); },
+        Notification(inner) => { return copy_text(&inner.method); },
         _ => { return "-".text(); }
     }
 }
@@ -433,7 +441,7 @@ pub fn taken_consumed(taken: (&Taken)) -> string {
 
 fn copy_optional_text<a>(value: (&a string?)) -> string? {
     match value {
-        Some(text) => { copied := text.text(); return Some(copied); },
+        Some(text) => { copied := copy_text(&text); return Some(copied); },
         None => { return None; }
     }
 }
@@ -468,16 +476,16 @@ pub fn shape_of<a>(text: (&a [u8])) -> string {
 pub fn copy_frame(frame: (&Frame)) -> Frame {
     match frame {
         Request(inner) => {
-            return request_frame(copy_id(&inner.id), inner.method.text(), borg_json::copy_of(&inner.params));
+            return request_frame(copy_id(&inner.id), copy_text(&inner.method), borg_json::copy_of(&inner.params));
         },
         Notification(inner) => {
-            return notification_frame(inner.method.text(), borg_json::copy_of(&inner.params));
+            return notification_frame(copy_text(&inner.method), borg_json::copy_of(&inner.params));
         },
         Result(inner) => {
             return result_frame(copy_id(&inner.id), borg_json::copy_of(&inner.result));
         },
         Failure(inner) => {
-            return failure_frame(copy_id(&inner.id), inner.code, inner.message.text());
+            return failure_frame(copy_id(&inner.id), inner.code, copy_text(&inner.message));
         }
     }
 }
@@ -486,7 +494,7 @@ fn copy_id(id: (&Id)) -> Id {
     match id {
         Null => { return Id::Null; },
         Num(value) => { return Id::Num(value); },
-        Text(text) => { return Id::Text(text.text()); }
+        Text(text) => { return Id::Text(copy_text(&text)); }
     }
 }
 
