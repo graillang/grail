@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Sequence element access is cheaper: the runtime's accessors (`rt_slot`, `rt_at`, the byte and
+  4-byte variants, `rt_push`, `rt_len`, the slice/view helpers) compose addresses with
+  `wrapping_add`/`wrapping_mul`, so the compiler stops emitting overflow guards for the length field
+  and the element address on every access. Bounds checks are unchanged and still abort on any
+  out-of-range index, including indexes whose byte offset would wrap. Against C `-O2` on x86-64,
+  `--backend=llvm`: nbody 2.3x -> 1.7x, sort 1.4x -> 1.3x. The native backend reads the same stream,
+  so the guards disappear there too. Design notes: `docs/design/llvm-backend.md`, stage 2b.
 - LLVM backend, stage 2b measurement (`docs/design/llvm-backend.md`): after stage 2a the benchmarks
   are within 1.0-1.2x of C except `nbody` (2.4x) and `sort` (1.5x), and in those two the remaining
   cost is the per-element validity/bounds/address checks the front end emits (44% and 21% of run

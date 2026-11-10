@@ -195,14 +195,9 @@ not conversions: it is the per-element validation the front end emits for every 
 
 Two of the three checks are not bounds checks at all: they are the front end's *overflow* checks on
 the address arithmetic (`s + 8` for the length field, `data + idx * 8` for the element), folded to a
-constant compare where the addend is known. Addresses cannot wrap for an allocation the runtime
-handed out -- user-space addresses have bit 63 clear on every supported target, the same axiom the
-tagged references of stage 2a rest on -- so a front end that keeps pointer arithmetic apart from
-integer arithmetic would emit both unchecked, leaving one compare and one branch per access. That
-is a language and front-end decision, not something a lowering of the untyped stream can take: from the stream the
-compare against `-8` and the `jb` after `addq` are indistinguishable from arithmetic on integers the
-program is allowed to overflow-check, so eliding them here would silently weaken the checks the
-front end asked for.
+constant compare where the addend is known. They are also the two the compiler can be told not to
+emit, because the source that asks for them is the runtime, which knows they are addresses of an
+allocation it handed out -- see *the runtime's own address arithmetic* below.
 
 An element access is a fixed instruction sequence in the stream, and the lowering emits it as it
 stands:
@@ -254,6 +249,44 @@ that stage 3 (a typed SSA IR emitted by the front end) is meant to supply. Loop 
 `if len >= 15` in front of the loop, the form a typed backend would use -- needs the same
 information: with `i*3+k` derived from `for i in 5 { for k in 3 }`, the front end knows the largest
 index, but it does not know the length at that point.
+
+#### The runtime's own address arithmetic
+
+The two address-overflow guards are removed at the source that asks for them rather than in the
+lowering: the sequence accessors of `compiler/runtime.grl` (`rt_slot`, `rt_at`, `rt_slotb`, `rt_atb`,
+`rt_write`, `rt_len`, `rt_push`, the `4`-wide and byte variants, and the slice/view helpers) now
+compose addresses with `wrapping_add`/`wrapping_mul` and read the length field at
+`wrapping_add(s, 8)`. The front end then emits a plain add for them and the `cmpq $-8` and `jb`
+guards disappear from every element access in every program. The bounds check -- the one that has
+meaning, `idx < len` -- is untouched, and user arithmetic stays checked.
+
+This is sound because a real sequence's `data` block cannot cross the top of the address space:
+user-space addresses have bit 63 clear on every supported target, the same axiom stage 2a's tagged
+references rest on, so neither guard can fire for a sequence the runtime created. A *corrupted*
+descriptor -- only reachable by writing through raw memory -- now wraps into a wild access instead of
+aborting. Every out-of-range index still stops, including the ones whose byte offset would wrap:
+`u64[1,2,3][2305843009213693952]` and `[...][18446744073709551615]` abort on both backends, and four
+cases in `tests/native-cases.json` pin that.
+
+Measured by compiling the five benchmarks with the same compiler and only `compiler/runtime.grl`
+swapped, then timing the two sets interleaved on the same machine (best of five; `--backend=llvm`,
+x86-64):
+
+| benchmark | before | after | change | vs C `-O2` before | after |
+| --- | --- | --- | --- | --- | --- |
+| nbody | 0.261 s | 0.196 s | **-25%** | 2.3x | **1.7x** |
+| sort | 1.522 s | 1.337 s | **-12%** | 1.4x | **1.3x** |
+| matmul | 0.266 s | 0.251 s | -6% | 1.2x | 1.1x |
+| sieve | 0.709 s | 0.666 s | -6% | 1.2x | 1.1x |
+| fnv | 0.646 s | 0.618 s | -4% | 1.0x | 1.0x |
+
+The native backend reads the same stream, so the same two guards disappear there; its timings are
+dominated by its own instruction selection and were not measured here.
+
+What is left is the bounds check itself, one compare and one branch per access, plus the sequence
+representation (slot load, header load, element access where C has one addressing mode). Removing
+the bounds check needs a loop guard -- `if len >= max index` in front of the loop -- which needs the
+range facts a typed front end has, i.e. stage 3.
 
 #### Measured and rejected
 
