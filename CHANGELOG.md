@@ -41,6 +41,11 @@
   - `native`: `is` (the current-token check, 88 call sites, 70 of them `while`/`if`
     `is(...) == 0`). `is_enum` and a constant's `value` are stored in u64 fields, and `imm()`
     takes the bool constant's value, so those three convert explicitly.
+  - `native`: `eat`, `is_union`, `lifetime_candidate`, `borrow_place_ahead`,
+    `type_literal_ahead`, `map_assignment_ahead`, `statement_builtin`, plus `type_keyword` and
+    `simple_type_head`. 35 `eat(...) == 0` guards become `!eat(...)`; the values that feed u64
+    parameters or fields (`public`, `negative`, `hneg`, `raw`, `write`, `mutable`) convert
+    explicitly. `is_f32` and `is_comparison` stay u64 — see below.
 - Maps iterate with `for key, value in &map`, in insertion order, and `for key, value in &mut map` binds the
   same shared key with an exclusive value (`value := map.value_at_mut(i)`), so values update in place. The loop
   holds one reference to the map throughout: inserting into it inside the body is rejected, a shared loop cannot

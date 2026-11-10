@@ -3539,12 +3539,12 @@ fn fail_option<a, b>(c: (&a mut C), msg: &b [u8]) -> unit {
     host::exit(1);
     return ();
 }
-fn eat<a, b>(c: (&a mut C), s: &b [u8]) -> u64 {
+fn eat<a, b>(c: (&a mut C), s: &b [u8]) -> bool {
     if is(&mut c, s) {
         advance(&mut c);
-        return 1;
+        return true;
     }
-    return 0;
+    return false;
 }
 fn expect<a, b>(c: (&a mut C), s: &b [u8]) -> unit {
     want := s.copy();
@@ -3973,7 +3973,7 @@ fn lifetime_parameters<a>(c: (&a mut C)) -> unit {
                             }
                             bounds += bit;
                         }
-                        if eat(&mut c, view("+")) == 0 {
+                        if !eat(&mut c, view("+")) {
                             break;
                         }
                     }
@@ -4456,8 +4456,8 @@ fn is_result_union<a>(c: (&a mut C), ty: u64) -> bool {
     decl := &c.decls[d];
     return same(view(decl.module), view(".result"));
 }
-fn is_union<a>(c: (&a mut C), ty: u64) -> u64 {
-    return is_ordinary_union(&mut c, ty) + is_result_union(&mut c, ty);
+fn is_union<a>(c: (&a mut C), ty: u64) -> bool {
+    return is_ordinary_union(&mut c, ty) || is_result_union(&mut c, ty);
 }
 fn result_success_count<a>(c: (&a mut C), ty: u64) -> u64 {
     d := ty_arg(&mut c, ty);
@@ -4573,7 +4573,7 @@ fn parse_type<a>(c: (&a mut C)) -> u64 {
     }
     while true {
         t = type_suffixes(&mut c, t);
-        if eat(&mut c, view("?")) == 0 {
+        if !eat(&mut c, view("?")) {
             break;
         }
         mut oa = u64[];
@@ -4634,7 +4634,7 @@ fn token_starts_type<a>(c: (&a mut C), p: u64) -> bool {
     }
     return (k == 40) || (k == 91) || (k == 38);
 }
-fn type_keyword<a>(c: (&a mut C), n: &a [u8]) -> u64 {
+fn type_keyword<a>(c: (&a mut C), n: &a [u8]) -> bool {
     if same(view(n), view("bool")) || same(view(n), view("char")) || same(view(n), view("string")) || same(view(n), view("u64")) {
         return true;
     }
@@ -4656,7 +4656,7 @@ fn type_keyword<a>(c: (&a mut C), n: &a [u8]) -> u64 {
     }
     return same(view(n), view("Task")) || same(view(n), view("CancelToken")) || same(view(n), view("fn")) || same(view(n), view("Fn"));
 }
-fn lifetime_candidate<a>(c: (&a mut C), p: u64) -> u64 {
+fn lifetime_candidate<a>(c: (&a mut C), p: u64) -> bool {
     if kind_at(&mut c, p) != 1 {
         return false;
     }
@@ -4664,7 +4664,7 @@ fn lifetime_candidate<a>(c: (&a mut C), p: u64) -> u64 {
     if n.len() == 0 {
         return false;
     }
-    if (n[0] < 97) + (122 < n[0]) {
+    if (n[0] < 97) || (122 < n[0]) {
         return false;
     }
     if type_keyword(&mut c, view(n)) {
@@ -4867,7 +4867,7 @@ fn base_named<a>(c: (&a mut C), first: u8[]) -> u64 {
     if same(view(first), view("Fn")) {
         expect(&mut c, view("("));
         mut params = u64[];
-        if eat(&mut c, view(")")) == 0 {
+        if !eat(&mut c, view(")")) {
             while true {
                 ty := parse_type(&mut c);
                 params.push(ty);
@@ -4889,7 +4889,7 @@ fn base_named<a>(c: (&a mut C), first: u8[]) -> u64 {
         // `extern "C"` definitions have such an address, so a closure cannot sneak in.
         expect(&mut c, view("("));
         mut params = u64[];
-        if eat(&mut c, view(")")) == 0 {
+        if !eat(&mut c, view(")")) {
             while 1 {
                 ty := parse_type(&mut c);
                 params.push(ty);
@@ -4916,7 +4916,7 @@ fn base_named<a>(c: (&a mut C), first: u8[]) -> u64 {
     if same(view(first), view("fn")) {
         expect(&mut c, view("("));
         mut params = u64[];
-        if eat(&mut c, view(")")) == 0 {
+        if !eat(&mut c, view(")")) {
             while true {
                 ty := parse_type(&mut c);
                 params.push(ty);
@@ -5170,7 +5170,7 @@ fn decl<a>(c: (&a mut C), pass: u64) -> unit {
     mut pending = Field[];
     mut count = 0;
     expect(&mut c, view("{"));
-    if eat(&mut c, view("}")) == 0 {
+    if !eat(&mut c, view("}")) {
         while 1 {
             f := ident(&mut c);
             mut ty = 1;
@@ -6084,7 +6084,7 @@ fn ffi_record<a>(c: (&a mut C), pass: u64) -> unit {
     mut pending = Field[];
     mut count = 0;
     expect(&mut c, view("{"));
-    if eat(&mut c, view("}")) == 0 {
+    if !eat(&mut c, view("}")) {
         while 1 {
             f := ident(&mut c);
             expect(&mut c, view(":"));
@@ -6252,7 +6252,7 @@ fn extern_declaration<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     mut words = 0;
     mut variadic = 0;
     expect(&mut c, view("("));
-    if eat(&mut c, view(")")) == 0 {
+    if !eat(&mut c, view(")")) {
         while 1 {
             // `...` ends the fixed parameters of a variadic C function (printf-style).
             if eat(&mut c, view(".")) {
@@ -6394,7 +6394,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     first := c.params.len();
     mut count = 0;
     expect(&mut c, view("("));
-    if eat(&mut c, view(")")) == 0 {
+    if !eat(&mut c, view(")")) {
         while 1 {
             p := ident(&mut c);
             expect(&mut c, view(":"));
@@ -6714,7 +6714,7 @@ fn interface_declaration<a>(c: (&a mut C), pass: u64) -> unit {
     proofs.push(proof);
     self := intern_args(&mut c, 9, 0, 0, u64[], proofs);
     exchange(&mut c.self_type, self + 1);
-    while eat(&mut c, view("}")) == 0 {
+    while !eat(&mut c, view("}")) {
         expect(&mut c, view("fn"));
         name := ident(&mut c);
         lifetime_parameters(&mut c);
@@ -6728,7 +6728,7 @@ fn interface_declaration<a>(c: (&a mut C), pass: u64) -> unit {
         first := c.params.len();
         expect(&mut c, view("("));
         mut count = 0;
-        if eat(&mut c, view(")")) == 0 {
+        if !eat(&mut c, view(")")) {
             while true {
                 ident(&mut c);
                 expect(&mut c, view(":"));
@@ -6908,8 +6908,8 @@ fn implementation<a>(c: (&a mut C), pass: u64) -> unit {
         exchange(&mut c.inherent, d);
         exchange(&mut c.self_type, ty + 1);
         expect(&mut c, view("{"));
-        while eat(&mut c, view("}")) == 0 {
-            public := eat(&mut c, view("pub"));
+        while !eat(&mut c, view("}")) {
+            public := u64(eat(&mut c, view("pub")));
             func(&mut c, pass, public);
         }
         exchange(&mut c.inherent, 0);
@@ -6979,7 +6979,7 @@ fn implementation<a>(c: (&a mut C), pass: u64) -> unit {
     exchange(&mut c.current_impl, id);
     exchange(&mut c.self_type, ty + 1);
     expect(&mut c, view("{"));
-    while eat(&mut c, view("}")) == 0 {
+    while !eat(&mut c, view("}")) {
         before := c.funcs.len();
         func(&mut c, pass, 0);
         if c.tnames.len() {
@@ -7096,7 +7096,7 @@ fn constant_declaration<a>(c: (&a mut C), pass: u64) -> unit {
             fail(&mut c, view("duplicate constant"));
         }
     }
-    negative := eat(&mut c, view("-"));
+    negative := u64(eat(&mut c, view("-")));
     here := c.pos;
     k := kind(&mut c);
     mut value = 0;
@@ -7249,7 +7249,7 @@ fn module_modes<a>(c: (&a mut C)) -> unit {
     return ();
 }
 fn toplevel<a>(c: (&a mut C), pass: u64) -> unit {
-    raw := eat(&mut c, view("unsafe"));
+    raw := u64(eat(&mut c, view("unsafe")));
     exchange(&mut c.raw, raw);
     mut m = "main".copy();
     if eat(&mut c, view("module")) {
@@ -7290,7 +7290,7 @@ fn toplevel<a>(c: (&a mut C), pass: u64) -> unit {
         expect(&mut c, view(";"));
     }
     while kind(&mut c) != 0 {
-        public := eat(&mut c, view("pub"));
+        public := u64(eat(&mut c, view("pub")));
         if is(&mut c, view("extern")) {
             extern_declaration(&mut c, pass, public);
             continue;
@@ -8068,7 +8068,7 @@ fn reference_slot<a>(c: (&a mut C), id: u64, ty: u64) -> Val {
     return val(slot, out);
 }
 // `&x`, `&x.f.g` and `&xs[i]` name places; anything else is a temporary.
-fn borrow_place_ahead<a>(c: (&a mut C)) -> u64 {
+fn borrow_place_ahead<a>(c: (&a mut C)) -> bool {
     if kind(&mut c) != 1 {
         return false;
     }
@@ -8082,7 +8082,7 @@ fn borrow_place_ahead<a>(c: (&a mut C)) -> u64 {
     if (k == 91) & (j == p + 1) {
         // `u64[1,2]` is a type-first literal, not indexing a local.
         if find_local(&mut c, view(name)) == 0 {
-            if simple_type_head(&mut c, view(name)) != 0 {
+            if simple_type_head(&mut c, view(name)) {
                 return false;
             }
             m := module_copy(&mut c);
@@ -8107,7 +8107,7 @@ fn borrow_place_ahead<a>(c: (&a mut C)) -> u64 {
             }
         }
     }
-    return (k == 41) + (k == 91);
+    return (k == 41) || (k == 91);
 }
 // `&f(x)`: the temporary is held by a hidden binding until the end of the enclosing
 // block (like `t := f(x); &t`), so the reference may be used after the statement.
@@ -8276,7 +8276,7 @@ fn infer_union_member<a, b>(
     map: (&b mut u64[])
 ) -> unit {
     // Infer a bare value against a unique unbound union member.
-    if is_union(&mut c, expected) & (is_union(&mut c, actual) == 0) {
+    if is_union(&mut c, expected) & !is_union(&mut c, actual) {
         members := type_args(&mut c, expected);
         mut known = 0;
         mut candidates = 0;
@@ -8575,7 +8575,7 @@ fn record<a>(c: (&a mut C), d: u64, explicit: u64) -> Val {
     }
     sz := imm(&mut c, size);
     n := invoke(&mut c, view("rt_rec"), one(sz));
-    if eat(&mut c, view("}")) == 0 {
+    if !eat(&mut c, view("}")) {
         while 1 {
             f := ident(&mut c);
             has_colon := eat(&mut c, view(":"));
@@ -8632,7 +8632,7 @@ fn record<a>(c: (&a mut C), d: u64, explicit: u64) -> Val {
             mut delay = 0;
             if (resolved == 0)
                 & is_union(&mut c, ft)
-                & (is_union(&mut c, v.ty) == 0) {
+                & !is_union(&mut c, v.ty) {
                 delay = 1;
             }
             if delay {
@@ -8998,7 +8998,7 @@ fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
     }
     mut more = 0;
     if method != 2 {
-        more = eat(&mut c, view(")")) == 0;
+        more = !eat(&mut c, view(")"));
     }
     if more {
         while 1 {
@@ -9102,7 +9102,7 @@ fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
                     mut delay = 0;
                     if (resolved == 0)
                         & is_union(&mut c, formal)
-                        & (is_union(&mut c, v.ty) == 0) {
+                        & !is_union(&mut c, v.ty) {
                         delay = 1;
                     }
                     if delay {
@@ -9509,7 +9509,7 @@ fn indirect_call<a>(c: (&a mut C), value: Val, opened: u64) -> Val {
     if opened == 0 {
         expect(&mut c, view("("));
     }
-    if eat(&mut c, view(")")) == 0 {
+    if !eat(&mut c, view(")")) {
         while true {
             index := args.len();
             if (index < signature.len()) == 0 {
@@ -9805,7 +9805,7 @@ fn raw_builtin<a>(c: (&a mut C), id: u64) -> Val {
             // raw_import("symbol", args...): a libSystem symbol under the Darwin C ABI.
             name = symbol_literal(&mut c);
         }
-        if eat(&mut c, view(")")) == 0 {
+        if !eat(&mut c, view(")")) {
             expect(&mut c, view(","));
             args = raw_arguments(&mut c);
         }
@@ -9813,7 +9813,7 @@ fn raw_builtin<a>(c: (&a mut C), id: u64) -> Val {
         if id == 134 {
             // raw_win_local(Symbol, args...): the symbol is compile-time text, not a value.
             api = ident(&mut c);
-            if eat(&mut c, view(")")) == 0 {
+            if !eat(&mut c, view(")")) {
                 expect(&mut c, view(","));
                 args = raw_arguments(&mut c);
             }
@@ -10430,7 +10430,7 @@ fn print_builtin<a>(c: (&a mut C), newline: u64) -> Val {
             if (b == 123) & (next == 125) {
                 print_raw(&mut c, view(piece));
                 piece = u8[];
-                if eat(&mut c, view(",")) == 0 {
+                if !eat(&mut c, view(",")) {
                     fail(&mut c, view("missing argument for {} in format string"));
                 }
                 value := expr(&mut c, 0);
@@ -10499,7 +10499,7 @@ fn format_builtin<a>(c: (&a mut C)) -> Val {
         if (b == 123) & (next == 125) {
             format_raw(&mut c, acc, view(piece));
             piece = u8[];
-            if eat(&mut c, view(",")) == 0 {
+            if !eat(&mut c, view(",")) {
                 fail(&mut c, view("missing argument for {} in format string"));
             }
             input := expr(&mut c, 0);
@@ -10781,7 +10781,7 @@ fn parse_spec<a, b>(c: (&a mut C), text: &b [u8], start: u64) -> FormatSpec {
 }
 // Formats the next argument per spec and appends it (padded) to acc.
 fn format_spec_arg<a>(c: (&a mut C), acc: u64, sp: FormatSpec) -> unit {
-    if eat(&mut c, view(",")) == 0 {
+    if !eat(&mut c, view(",")) {
         fail(&mut c, view("missing argument for {} in format string"));
     }
     value := expr(&mut c, 0);
@@ -11072,7 +11072,7 @@ fn builtin<a>(c: (&a mut C), id: u64) -> Val {
         return val(imm(&mut c, 0), intern_full(&mut c, 26, 0, 0, u64[]));
     }
     if (id == 13) + (id == 14) {
-        if borrow_place_ahead(&mut c) == 0 {
+        if !borrow_place_ahead(&mut c) {
             v := borrow_temporary(&mut c, id == 14);
             expect(&mut c, view(")"));
             return v;
@@ -12710,10 +12710,10 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
     mut names = u8[][];
     mut params = u64[];
     mut param_regions = 0;
-    if eat(&mut c, view("||")) == 0 {
+    if !eat(&mut c, view("||")) {
         expect(&mut c, view("|"));
         exchange(&mut c.no_union, 1);
-        if eat(&mut c, view("|")) == 0 {
+        if !eat(&mut c, view("|")) {
             // Parameters are typed in the closure's own lifetime namespace (`env` is region 1): each
             // elided reference is a fresh input lifetime, borrowed anew on every call.
             mut closure_names = u8[][];
@@ -14135,7 +14135,7 @@ fn collection_literal<a>(c: (&a mut C), ty: u64, bytes: u64) -> Val {
     expect(&mut c, view("["));
     slot := apply(&mut c, view("rt_new"), u64[]);
     own(&mut c, slot, ty);
-    if eat(&mut c, view("]")) == 0 {
+    if !eat(&mut c, view("]")) {
         mut first = 1;
         while 1 {
             estart := c.pos;
@@ -14274,7 +14274,7 @@ fn reference_borrow<a>(c: (&a mut C), write: u64) -> Val {
             }
         }
     }
-    if borrow_place_ahead(&mut c) == 0 {
+    if !borrow_place_ahead(&mut c) {
         return borrow_temporary(&mut c, write);
     }
     // `&mut s[i]` through a binding holding a slice or byte view borrows through the view's own
@@ -14444,7 +14444,7 @@ fn borrow_chain_end<a>(c: (&a mut C)) -> u64 {
 // Prefix byte-view borrowing binds tighter than binary operators.
 fn view_borrow<a>(c: (&a mut C)) -> Val {
     advance(&mut c);
-    write := eat(&mut c, view("mut"));
+    write := u64(eat(&mut c, view("mut")));
     a := primary(&mut c);
     if kind(&mut c) == 91 {
         return index_view(&mut c, a, 1 + write);
@@ -14475,7 +14475,7 @@ fn after_next_kind<a>(c: (&a mut C)) -> u64 {
     p := c.pos;
     return kind_at(&mut c, p + 2);
 }
-fn simple_type_head<a, b>(c: (&a mut C), name: &b [u8]) -> u64 {
+fn simple_type_head<a, b>(c: (&a mut C), name: &b [u8]) -> bool {
     n := name.copy();
     if int_name(view(n)) != 0 {
         return true;
@@ -14537,7 +14537,7 @@ fn simple_type_head<a, b>(c: (&a mut C), name: &b [u8]) -> u64 {
     return false;
 }
 // `Name[` or `Name<...>[` in expression position: a type-first collection literal.
-fn type_literal_ahead<a, b>(c: (&a mut C), name: &b [u8]) -> u64 {
+fn type_literal_ahead<a, b>(c: (&a mut C), name: &b [u8]) -> bool {
     p := c.pos;
     if kind_at(&mut c, p) == 60 {
         mut depth = 0;
@@ -14783,7 +14783,7 @@ fn primary<a>(c: (&a mut C)) -> Val {
             return view_borrow(&mut c);
         }
         advance(&mut c);
-        write := eat(&mut c, view("mut"));
+        write := u64(eat(&mut c, view("mut")));
         return reference_borrow(&mut c, write);
     }
     if k == 40 {
@@ -15031,7 +15031,7 @@ fn primary<a>(c: (&a mut C)) -> Val {
         exchange(&mut c.none_end, c.pos);
         return val(imm(&mut c, 0), 0);
     }
-    if type_literal_ahead(&mut c, view(first)) != 0 {
+    if type_literal_ahead(&mut c, view(first)) {
         // Rewind and re-read the whole head as a type so `<...>` arguments work.
         back := c.pos - 1;
         exchange(&mut c.pos, back);
@@ -15578,7 +15578,7 @@ fn propagate_union<a>(c: (&a mut C), x: Val, unwrap: u64) -> Val {
     result := c.result;
     mut targets = u64[];
     if unwrap == 0 {
-        if is_union(&mut c, result) == 0 {
+        if !is_union(&mut c, result) {
             fail(&mut c, view("union propagation requires a union return type"));
         }
         returned := type_args(&mut c, result);
@@ -17071,12 +17071,12 @@ fn compound_value<a>(c: (&a mut C), op: u64, old: u64, v: Val, ty: u64) -> Val {
     return val(value, 0);
 }
 // Look ahead through named fields without evaluating the target or key.
-fn map_assignment_ahead<a>(c: (&a mut C)) -> u64 {
+fn map_assignment_ahead<a>(c: (&a mut C)) -> bool {
     pos := c.pos;
     name := tok_text(&mut c, pos);
     local := find_local(&mut c, view(name));
     if local == 0 {
-        return 0;
+        return false;
     }
     mut ty = local_ty(&mut c, local - 1);
     mut q = pos + 1;
@@ -17085,7 +17085,7 @@ fn map_assignment_ahead<a>(c: (&a mut C)) -> u64 {
             ty = ty_arg(&mut c, ty);
         }
         if ty_kind(&mut c, ty) != 8 {
-            return 0;
+            return false;
         }
         name := tok_text(&mut c, q + 1);
         decl := ty_arg(&mut c, ty);
@@ -17340,19 +17340,19 @@ fn fold_constant(k: u64, a: u64, b: u64) -> u64[] {
 // A statement builtin (`drop(x)`, `write(...)`, `assert(...)`) only when the name is followed by
 // `(` and is not shadowed by a local; consumes the name on success. A binding named `write` or
 // `drop` is then an ordinary name (`write += 3`).
-fn statement_builtin<a, b>(c: (&a mut C), name: &b [u8]) -> u64 {
+fn statement_builtin<a, b>(c: (&a mut C), name: &b [u8]) -> bool {
     if !is(&mut c, &name) {
-        return 0;
+        return false;
     }
     here := c.pos;
     if kind_at(&mut c, here + 1) != 40 {
-        return 0;
+        return false;
     }
     if find_local(&mut c, &name) != 0 {
-        return 0;
+        return false;
     }
     advance(&mut c);
-    return 1;
+    return true;
 }
 // Walks the accessors of an assignment target from c.pos up to (not including) `stop`: each
 // `[i]` and `.f` run yields a mutable reference to the element or field, so `v[i][j] = x` and
@@ -17655,7 +17655,7 @@ fn if_let<a>(c: (&a mut C)) -> unit {
     mut binding = u8[];
     mut has_binding = 0;
     if eat(&mut c, view("(")) {
-        if eat(&mut c, view("_")) == 0 {
+        if !eat(&mut c, view("_")) {
             binding = ident(&mut c);
             has_binding = 1;
         }
@@ -17745,7 +17745,7 @@ fn scalar_match<a>(c: (&a mut C), s: Val) -> unit {
     mut default = 0;
     end := label(&mut c);
     expect(&mut c, view("{"));
-    while eat(&mut c, view("}")) == 0 {
+    while !eat(&mut c, view("}")) {
         ownership::restore(&mut c.check, &before);
         exchange(&mut c.terminated, 0);
         next := label(&mut c);
@@ -17772,7 +17772,7 @@ fn scalar_match<a>(c: (&a mut C), s: Val) -> unit {
             }
         } else {
             while true {
-                negative := eat(&mut c, view("-"));
+                negative := u64(eat(&mut c, view("-")));
                 here := c.pos;
                 k := kind(&mut c);
                 mut value = 0;
@@ -17815,7 +17815,7 @@ fn scalar_match<a>(c: (&a mut C), s: Val) -> unit {
                     // lo..hi (hi excluded): (x - lo) < (hi - lo) as unsigned words, correct for signed types too.
                     advance(&mut c);
                     advance(&mut c);
-                    hneg := eat(&mut c, view("-"));
+                    hneg := u64(eat(&mut c, view("-")));
                     there := c.pos;
                     hk := kind(&mut c);
                     mut high = 0;
@@ -17875,7 +17875,7 @@ fn scalar_match<a>(c: (&a mut C), s: Val) -> unit {
                     o(&mut c, view("cmpq %rcx,%rax\n"));
                     jump(&mut c, view("je"), body);
                 }
-                if eat(&mut c, view("|")) == 0 {
+                if !eat(&mut c, view("|")) {
                     break;
                 }
             }
@@ -17916,7 +17916,7 @@ fn scalar_match<a>(c: (&a mut C), s: Val) -> unit {
         }
         jump(&mut c, view("jmp"), end);
         mark(&mut c, next);
-        if eat(&mut c, view(",")) == 0 {
+        if !eat(&mut c, view(",")) {
             expect(&mut c, view("}"));
             break;
         }
@@ -18069,7 +18069,7 @@ fn record_match<a>(c: (&a mut C), sslot: u64, sty: u64, x: Val, byref: u64, refm
                 bind(&mut c, binder, fty, payload, 0);
             }
         }
-        if eat(&mut c, view(",")) == 0 {
+        if !eat(&mut c, view(",")) {
             expect(&mut c, view("}"));
             break;
         }
@@ -18315,7 +18315,7 @@ fn statement<a>(c: (&a mut C)) -> unit {
     }
     if is(&mut c, view("break")) || is(&mut c, view("continue")) {
         mut b = eat(&mut c, view("break"));
-        if b == 0 {
+        if !b {
             expect(&mut c, view("continue"));
         }
         expect(&mut c, view(";"));
@@ -18396,7 +18396,7 @@ fn statement<a>(c: (&a mut C)) -> unit {
                 & (next_kind(&mut c) == 58)
                 & (typed_binding_ahead(&mut c))
         ) {
-        mutable := eat(&mut c, view("mut"));
+        mutable := u64(eat(&mut c, view("mut")));
         name := ident(&mut c);
         // `mut x: T = expr;` and `x: T := expr;` declare the type; the initializer is checked against it.
         name_at := c.pos - 1;
@@ -18548,7 +18548,7 @@ fn statement<a>(c: (&a mut C)) -> unit {
             pattern = 1;
             variant = ident(&mut c);
             if eat(&mut c, view("(")) {
-                if eat(&mut c, view("_")) == 0 {
+                if !eat(&mut c, view("_")) {
                     binding = ident(&mut c);
                     has_binding = 1;
                 }
@@ -19009,7 +19009,7 @@ fn statement<a>(c: (&a mut C)) -> unit {
         mut default = 0;
         end := label(&mut c);
         expect(&mut c, view("{"));
-        while eat(&mut c, view("}")) == 0 {
+        while !eat(&mut c, view("}")) {
             ownership::restore(&mut c.check, &before);
             exchange(&mut c.terminated, 0);
             mut name = u8[];
@@ -19064,7 +19064,7 @@ fn statement<a>(c: (&a mut C)) -> unit {
                     }
                 }
                 jump(&mut c, view("jmp"), end);
-                if eat(&mut c, view(",")) == 0 {
+                if !eat(&mut c, view(",")) {
                     expect(&mut c, view("}"));
                     break;
                 }
@@ -19110,7 +19110,7 @@ fn statement<a>(c: (&a mut C)) -> unit {
             if byref {
                 mut b = binder;
                 if eat(&mut c, view("(")) {
-                    if eat(&mut c, view("_")) == 0 {
+                    if !eat(&mut c, view("_")) {
                         b = ident(&mut c);
                     }
                     expect(&mut c, view(")"));
@@ -19156,7 +19156,7 @@ fn statement<a>(c: (&a mut C)) -> unit {
                 invoke(&mut c, view("rt_free"), one(xt));
                 mut b = binder;
                 if eat(&mut c, view("(")) {
-                    if eat(&mut c, view("_")) == 0 {
+                    if !eat(&mut c, view("_")) {
                         b = ident(&mut c);
                     }
                     expect(&mut c, view(")"));
@@ -19183,7 +19183,7 @@ fn statement<a>(c: (&a mut C)) -> unit {
             }
             jump(&mut c, view("jmp"), end);
             mark(&mut c, next);
-            if eat(&mut c, view(",")) == 0 {
+            if !eat(&mut c, view(",")) {
                 expect(&mut c, view("}"));
                 break;
             }
@@ -19296,7 +19296,7 @@ fn statement<a>(c: (&a mut C)) -> unit {
     }
     if index_assignment_ahead(&mut c) {
         groups := assign_chain(&mut c)[2];
-        if (groups == 1) & (map_assignment_ahead(&mut c) != 0) {
+        if (groups == 1) & map_assignment_ahead(&mut c) {
             map_index_assignment(&mut c);
         } else {
             index_assignment(&mut c);
