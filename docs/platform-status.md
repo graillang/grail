@@ -39,6 +39,29 @@ Win64 is used at import boundaries. This is Wine verification, not Windows hardw
 and the Windows release artifacts are non-executable object bundles, not a hosted Windows
 toolchain.
 
+### Porting a program from Linux to Windows
+
+Task semantics carry over unchanged: `spawn`, `join`, `task_scope`, `parallel_map`, cancellation
+and the blocking host operations behave the same, a task runs until it yields or blocks, and a
+task parked in `sleep_ms`, `read_fd`/`write_fd` or an offloaded file operation does not stop the
+others. Three things a Linux program may have relied on by accident do not carry over:
+
+- **Interleaving order.** Linux works the run queue with one scheduler thread per CPU (clamped to
+  4-64), so two ready tasks can run at the same time. Windows has one scheduler thread, so its
+  queue is FIFO and an interleaving is deterministic - but portable code must not depend on either.
+  Depend on "runs until it yields or blocks", on scope/join, and on the blocking handoff.
+- **Cost, not behaviour.** A task costs a fiber (64 KiB committed inside 256 KiB reserved) instead
+  of a 256 KiB mapping, and a blocked task costs the only scheduler thread instead of one of the
+  pool's.
+- **`GRAIL_TASKS=thread` is not a perf flag.** It selects the opt-in thread-per-task scheduler on
+  both platforms: each task owns a thread, so a task that never yields still progresses, and
+  nothing keeps two tasks off the same memory. It is the right mode for CPU-bound fan-out once a
+  `Send`/`Sync` check exists, and the wrong mode for anything that assumed the cooperative tick.
+
+Unrelated porting concerns (ANSI-only paths, missing sockets/directory streams/`exe_path`, `mremap`
+emulation) stay listed in the Windows rows above and in
+[windows-backend.md](design/windows-backend.md).
+
 macOS has a libSystem layer and a platform-module runtime, and links frameworks and ad-hoc
 signatures with static LC_LOAD_DYLIB/CodeDirectory verification. It also emits shared Mach-O
 dylibs with explicit `--export` symbol lists, `@rpath/...` install names and `LC_RPATH` entries;

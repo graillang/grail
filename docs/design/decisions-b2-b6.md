@@ -140,15 +140,14 @@ Two facts that belong to the same decision, because they bound how far "it just 
   ([docs/ffi.md](../ffi.md), line 312), not merely slow code, and it applies equally to callbacks
   arriving on a foreign thread.
 - **The runtime isolates only the host operations it controls.** `host::read_file`,
-  `host::write_file`, `host::command`, `host::read_fd`, `host::write_fd` and `host::sleep_ms` park
-  the task when they would block (`rt_blocking_call`/`rt_io` in `compiler/runtime.grl`): the
-  blocking body runs on a dedicated OS thread and the task suspends until it completes
-  (`rt_offload`). That is a property of those builtins, not a contract for user foreign calls, and
-  it costs one OS thread per blocking call. On Linux the readiness reactor already suspends a green
-  task for `read_fd`/`write_fd`, and a timer parks `sleep_ms`; on Windows there is no reactor, so
-  every one of those operations takes the offload path. Either way the *task* waits and the
-  scheduler thread keeps running other tasks, which is what makes the two platforms observably
-  identical (see B4).
+  `host::write_file` and `host::command` hand their blocking body to a dedicated OS thread and
+  suspend the task (`rt_blocking_call` -> `rt_offload` in `compiler/runtime.grl`). `host::read_fd`,
+  `host::write_fd` and `host::sleep_ms` park the task too, by whichever mechanism the platform has:
+  on Linux the epoll registration and a timerfd suspend it, and on Windows - which has no reactor -
+  the call itself runs on a helper thread (`rt_io` -> `rt_offload`). Either way the *task* waits
+  and the scheduler thread keeps running other tasks, which is what makes the two platforms
+  observably identical (see B4). That is a property of those builtins, not a contract for user
+  foreign calls, and on the offload path it costs one OS thread per blocking call.
 
 **Alternatives considered.** (a) Keep the aspirational wording ("blocking foreign calls are
 explicitly isolated") and treat it as done: rejected, it is false for every `extern "C"` call and

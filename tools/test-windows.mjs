@@ -55,12 +55,13 @@ export async function check(compiler) {
   const declared = compilerImports();
   assert.deepEqual(declared, [...kernel32].sort(), 'compiler Win32 import table and kernel32.lib disagree');
   // Fiber entry points are the green-task switch on Windows; the runtime declares them itself.
-  for (const { library, name } of runtimeDeclarations()) {
+  const runtimeDeclared = runtimeDeclarations();
+  for (const { library, name } of runtimeDeclared) {
     const table = runtimeImports[/\.dll$/i.test(library) ? library : `${library}.dll`] ?? [];
     assert.ok(table.includes(name), `os-windows.grl declares ${name} but windows.mjs does not list it`);
   }
   for (const name of Object.values(runtimeImports).flat()) {
-    assert.ok(runtimeDeclarations().some(d => d.name === name), `windows.mjs lists runtime import ${name} that os-windows.grl does not declare`);
+    assert.ok(runtimeDeclared.some(d => d.name === name), `windows.mjs lists runtime import ${name} that os-windows.grl does not declare`);
   }
   const cases = JSON.parse(readFileSync(join(root, 'tests/windows-cases.json'), 'utf8'));
   const work = join(root, '.work/windows-tests');
