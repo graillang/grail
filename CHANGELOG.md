@@ -2,12 +2,26 @@
 
 ## Unreleased
 
-- Fixed: the peephole optimizer modelled a `call` as reading only `rdi`, `rsi`, `rdx`, `rcx`, `r8`
-  and `r9`, so a store to `%r10` or `%r11` - the seventh and eighth argument registers on AArch64
-  and RISC-V 64 - looked dead before a call and was deleted. An argument computed in a register (the
-  address of a by-value copy, for example) disappeared, and the call read garbage. Call liveness now
-  includes both registers (`compiler/optimize.grl`); the x86-64 SysV path is unaffected in
-  behaviour and only keeps one more store per call.
+- Records can be passed to C **by value**: `v: byval R` in an `extern "C"` declaration (or a
+  `cfn(...)` parameter list) passes the whole record the way C does, while a bare `R` keeps meaning
+  the C `R *`. The classification reuses the record's C layout and is per target ABI: SysV x86-64
+  classifies each eightbyte INTEGER or SSE (a mixed eightbyte is INTEGER, over 16 bytes is MEMORY on
+  the caller's stack, and an exhausted register class sends the whole record to the stack); AAPCS64
+  passes homogeneous float aggregates in `v0`-`v7`, other composites of 16 bytes or less in
+  consecutive `x0`-`x7`, and larger records by reference to a caller copy; RISC-V 64 passes records
+  over 2xXLEN by reference, and at or below it either one register per field (one or two fields with
+  at least one float) or one integer register per eightbyte. `byval` is refused with a diagnostic on
+  the Windows ABIs (MSVC struct rules, no Windows FFI execution path here), on anything that is not
+  an `extern "C"` record, and in an `extern "C" fn` definition (C calling Grail with a by-value
+  record), rather than approximated. `tests/ffi/byval_records.grl` with `tests/ffi/byval_shim.c`
+  executes 4-, 8-, 16- and 24-byte records, mixed int/float fields, an ImVec2-shaped float pair, an
+  embedded array, a byval argument after six integer arguments, a byval record sharing the stack area
+  with a following scalar and a `cfn` call on x86-64, AArch64 and RISC-V 64 (the latter two under
+  qemu); `docs/ffi.md` gains the syntax, the per-ABI rule table and the refusal cases.
+- A C-layout record argument to a `cfn` call is now borrowed, not moved, exactly as a direct extern
+  call treats it: the callee receives a pointer to (or a copy of) the record's fields and Grail keeps
+  ownership, so the value is still usable after the call.
+
 - Borg session state persists a typed event stream instead of an opaque payload
   (`borg/src/ffi/store.grl`, `borg/src/events.grl`). The frame still opens with the `BGS` magic and
   now carries the version digit `2`, a little-endian payload length and a sequence of tagged events;
