@@ -63,6 +63,14 @@ fn reason(status: u64) -> string {
     return "unnamed".text();
 }
 
+fn copy_text<a>(text: (&a [u8])) -> string {
+    mut out = u8[];
+    for byte in text {
+        out.push(byte);
+    }
+    return out.text();
+}
+
 fn path_join<a, b>(root: (&a [u8]), leaf: (&b [u8])) -> string {
     mut out = u8[];
     for byte in root {
@@ -129,7 +137,7 @@ fn put_envelope(out: (&mut u8[])) {
 // ---- files ----
 
 fn write_file<a, b, c>(directory: (&a [u8]), name: (&b [u8]), bytes: (&c [u8])) -> u64 |? Error {
-    mut path = directory.text();
+    mut path = copy_text(&directory);
     joined := path_join(&path, &name);
     path = joined;
     file := sys_grail::open(&path, sys_grail::OPEN_WRITE + sys_grail::OPEN_CREATE + sys_grail::OPEN_TRUNCATE, 384)?;
@@ -148,7 +156,7 @@ fn inspected<a, b, c>(directory: (&a [u8]), name: (&b [u8]), bytes: (&c [u8])) -
     if status != 0 {
         return "write-failed".text();
     }
-    mut path = directory.text();
+    mut path = copy_text(&directory);
     joined := path_join(&path, &name);
     path = joined;
     loaded := borg_store::load(&path);
@@ -200,7 +208,7 @@ fn push_event(events: (&mut borg_events::Event[]), text: (&[u8])) -> bool {
 // writer chose, and one line per event in file order. The round-trip line compares each reloaded
 // event's own wire form with the original's, so a field that changed type or went missing shows up.
 fn roundtrip<a, b>(directory: (&a [u8]), name: (&b [u8]), events: (&borg_events::Event[])) -> u64 |? Error {
-    mut path = directory.text();
+    mut path = copy_text(&directory);
     joined := path_join(&path, &name);
     path = joined;
     status := borg_store::persist(&path, &events)?;
@@ -375,7 +383,7 @@ fn malformed<a>(directory: (&a [u8])) -> u64 |? Error {
 }
 
 fn missing_file<a>(directory: (&a [u8])) -> u64 |? Error {
-    mut path = directory.text();
+    mut path = copy_text(&directory);
     joined := path_join(&path, "absent.bin");
     path = joined;
     loaded := borg_store::load(&path);
