@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- Separate compilation, stage 2: **checked module interfaces**. `grail check --interface DIR` writes
+  one `DIR/<module>.iface` per module plus `DIR/interfaces.manifest`; `grail build --interface DIR`
+  reads them instead of the modules' sources, and refuses by name when an interface is missing, when
+  the source it was built from no longer hashes to the digest it records, or (with `--verify`) when
+  it disagrees with the module. An interface carries what an importer needs to check a call -
+  exported declarations with their parameter and return types, types with their full structure, and
+  the audit results that must not be re-derived (`handle ... transfer= share=`, and a closure type's
+  environment record) - and nothing a body would carry. Text, versioned, one declaration per line,
+  sorted by name, with a digest over the file. `tools/interface-test.mjs` proves that a program built
+  against interfaces behaves like the program built from source (corpus, and the compiler compiling
+  itself), that stale and tampered interfaces are refused, and that an interface leaks no body, no
+  local name and no synthetic declaration. Bodies and generic templates still come from source: that
+  is stage 3 (bodies in interfaces) and stage 4 (one object per module, and the cache).
+
 - Windows task scheduling is now the same as Linux: a task is green on Windows, not an OS thread.
   One scheduler thread runs the tasks cooperatively, a task runs until it yields or blocks, and
   suspension parks the task rather than the thread. The switch is a Win32 fiber

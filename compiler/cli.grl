@@ -523,9 +523,11 @@ fn compile<a, b, d, e, g>(
     modules: (&d u8[][]),
     output: &e [u8],
     target: &g [u8],
-    flags: u64
+    flags: u64,
+    iface: &d [u8],
+    verify: u64
 ) -> u64 {
-    return compile_mode(h, entry, modules, output, target, flags);
+    return compile_mode(h, entry, modules, output, target, flags, iface, verify);
 }
 // check_only: type-check and generate code, but do not assemble or link.
 fn compile_mode<a, b, d, e, g>(
@@ -534,7 +536,9 @@ fn compile_mode<a, b, d, e, g>(
     modules: (&d u8[][]),
     output: &e [u8],
     target: &g [u8],
-    flags: u64
+    flags: u64,
+    iface: &d [u8],
+    verify: u64
 ) -> u64 {
     check_only := flags % 2;
     debug := (flags / 2) % 2;
@@ -555,6 +559,20 @@ fn compile_mode<a, b, d, e, g>(
     }
     if split != 0 {
         command.push(copy(view("--split")));
+    }
+    // B1 stage 2: `grail check --interface DIR` writes the interfaces, `grail build --interface DIR`
+    // reads them instead of the modules' sources, and `--verify` compares the two.
+    if iface.len() != 0 {
+        emit := u64(check_only != 0) * u64(verify == 0);
+        if emit != 0 {
+            command.push(copy(view("--emit-interface")));
+        } else {
+            command.push(copy(view("--interface")));
+        }
+        command.push(copy(view(iface)));
+        if (emit == 0) & (verify != 0) {
+            command.push(copy(view("--verify-interface")));
+        }
     }
     command.push(copy(view(asm)));
     command.push(copy(view(entry)));
@@ -810,6 +828,10 @@ struct Options {
     debug: u64,
     deny: u64,
     split: u64,
+    // Module interfaces (B1 stage 2): `--interface DIR` reads them, `grail check` writes them, and
+    // `--verify` compares the two instead of trusting either.
+    iface: u8[],
+    verify: u64,
     paths: u8[][]
 }
 fn options<a>(args: (&a u8[][])) -> Options {
@@ -822,6 +844,8 @@ fn options<a>(args: (&a u8[][])) -> Options {
         debug: 0,
         deny: 0,
         split: 0,
+        iface: u8[],
+        verify: 0,
         paths: u8[][],
     };
     mut i = 0;
@@ -855,11 +879,21 @@ fn options<a>(args: (&a u8[][])) -> Options {
                                 // One object per module, assembled concurrently (B1 stage 1).
                                 o.split = 1;
                             } else {
+                            if eq(view(a), view("--interface")) & (i + 1 < args.len()) {
+                                // Module interfaces (B1 stage 2): the directory holding them.
+                                i += 1;
+                                o.iface = item(&args, i);
+                            } else {
+                            if eq(view(a), view("--verify")) {
+                                o.verify = 1;
+                            } else {
                             if ends(view(a), view(".grl")) & (o.file.len() == 0) {
                                 o.file = copy(view(a));
                                 o.paths.push(a);
                             } else {
                                 o.paths.push(a);
+                            }
+                            }
                             }
                             }
                             }
@@ -885,7 +919,7 @@ fn build<a, b>(args: (&a u8[][]), o: (&b mut Options)) -> u64 {
             o.output = path_join(view("target"), view(stem));
         }
         mut none = u8[][];
-        return compile(&h, view(o.file), &none, view(o.output), view(o.target), o.debug * 2 + o.deny * 4 + o.split * 8);
+        return compile(&h, view(o.file), &none, view(o.output), view(o.target), o.debug * 2 + o.deny * 4 + o.split * 8, view(o.iface), o.verify);
     }
     p := load_project();
     if p.name.len() == 0 {
@@ -896,7 +930,7 @@ fn build<a, b>(args: (&a u8[][]), o: (&b mut Options)) -> u64 {
         o.output = path_join(view("target"), view(p.name));
     }
     modules := project_modules(&p, 1);
-    return compile(&h, view(p.entry), &modules, view(o.output), view(o.target), o.debug * 2 + o.deny * 4 + o.split * 8);
+    return compile(&h, view(p.entry), &modules, view(o.output), view(o.target), o.debug * 2 + o.deny * 4 + o.split * 8, view(o.iface), o.verify);
 }
 fn check_command<a>(args: (&a u8[][])) -> u64 {
     o := options(&args);
@@ -910,7 +944,7 @@ fn check_command<a>(args: (&a u8[][])) -> u64 {
         stem := basename(view(o.file));
         out := path_join(view("target"), view(stem));
         mut none = u8[][];
-        status = compile_mode(&h, view(o.file), &none, view(out), view(o.target), 1 + o.debug * 2 + o.deny * 4 + o.split * 8);
+        status = compile_mode(&h, view(o.file), &none, view(out), view(o.target), 1 + o.debug * 2 + o.deny * 4 + o.split * 8, view(o.iface), o.verify);
     } else {
         p := load_project();
         if p.name.len() == 0 {
@@ -919,7 +953,7 @@ fn check_command<a>(args: (&a u8[][])) -> u64 {
         }
         out := path_join(view("target"), view(p.name));
         modules := project_modules(&p, 1);
-        status = compile_mode(&h, view(p.entry), &modules, view(out), view(o.target), 1 + o.debug * 2 + o.deny * 4 + o.split * 8);
+        status = compile_mode(&h, view(p.entry), &modules, view(out), view(o.target), 1 + o.debug * 2 + o.deny * 4 + o.split * 8, view(o.iface), o.verify);
     }
     if status == 0 {
         say(view("ok"));
@@ -981,7 +1015,7 @@ fn test_command<a>(args: (&a u8[][])) -> u64 {
         host::print(view("test "));
         host::print(view(f));
         host::print(view(" ... "));
-        mut status = compile(&h, view(f), &modules, view(out), view(o.target), o.debug * 2 + o.deny * 4 + o.split * 8);
+        mut status = compile(&h, view(f), &modules, view(out), view(o.target), o.debug * 2 + o.deny * 4 + o.split * 8, view(o.iface), o.verify);
         if status == 0 {
             exe := path_join(view("."), view(out));
             status = host::command(u8[][exe]);
@@ -1764,8 +1798,10 @@ fn profile_command<a>(args: (&a u8[][])) -> u64 {
 fn help() {
     say(view("grail - the Grail compiler and project tool\n"));
     say(view("usage:"));
-    say(view("  grail build [FILE.grl] [-o OUT] [--target x86_64|aarch64|riscv64|macos-x86_64|macos-aarch64] [--split]"));
+    say(view("  grail build [FILE.grl] [-o OUT] [--target x86_64|aarch64|riscv64|macos-x86_64|macos-aarch64] [--split] [--interface DIR [--verify]]"));
     say(view("  grail check [FILE.grl]            type-check without building"));
+    say(view("  grail check --interface DIR       write one checked interface per module"));
+    say(view("  grail check --interface DIR --verify   refuse an interface that disagrees with its sources"));
     say(view("  grail debug lines|info BINARY     print DWARF line rows or .debug_info"));
     say(view("  grail profile [--rate N] [--out FILE] -- PROGRAM [ARGS]   sampling profile"));
     say(view("  grail run [FILE.grl] [-- ARGS...]"));

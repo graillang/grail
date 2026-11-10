@@ -74,13 +74,38 @@ for (const test of cases) {
     const assembly = join(directory, 'prior.s');
     writeFileSync(assembly, 'prior valid artifact');
     const numeric = [...(test.defaultU64 === false ? [] : ['--default-u64']), ...(typedRefs ? ['--typed-refs'] : [])];
+    // A case marked `interfaces` is checked twice: once from source and once from the interfaces a
+    // previous emit produced. A rejected program has to be rejected both ways, with the diagnostic
+    // naming the caller's own file and line.
+    if (test.interfaces) {
+      const ifaces = join(directory, 'ifaces');
+      execute(compiler, [...numeric, '--target', target, '--emit-interface', ifaces, join(directory, 'emit.s'), ...files, runtime, osRuntime]);
+      const viaInterface = execute(compiler, [...numeric, '--target', target, '--interface', ifaces, assembly, ...files, runtime, osRuntime]);
+      assert.equal(viaInterface.status, 1, `${test.name}: the interface build must reject it too: ${viaInterface.stdout}${viaInterface.stderr}`);
+      if (test.diagnostic) assert.ok(`${viaInterface.stdout}${viaInterface.stderr}`.includes(test.diagnostic), `${test.name}: interface build diagnostic ${test.diagnostic}: ${viaInterface.stdout}${viaInterface.stderr}`);
+    }
     const result = execute(compiler, [...numeric, '--target', target, assembly, ...files, runtime, osRuntime]);
     assert.equal(result.signal, null, `${test.name}: compiler crashed (${result.signal}): ${result.stdout}${result.stderr}`);
     assert.equal(result.status, 1, `${test.name}: a rejected program must exit 1: ${result.stdout}${result.stderr}`);
     if (test.diagnostic) assert.ok(`${result.stdout}${result.stderr}`.includes(test.diagnostic), `${test.name}: expected diagnostic ${test.diagnostic}: ${result.stdout}${result.stderr}`);
     assert.equal(readFileSync(assembly, 'utf8'), 'prior valid artifact', `${test.name}: invalid program overwrote prior output`);
   } else {
+    // Interface-first: emit one interface per module, then compile the same program against them.
+    // The interface build is the build this case's behaviour is asserted on when the case asks for
+    // it, so a gap in an interface is a test failure rather than a silent difference.
+    let viaInterface;
+    if (test.interfaces) {
+      const ifaces = join(directory, 'ifaces');
+      const numeric = [...(test.defaultU64 === false ? [] : ['--default-u64']), ...(typedRefs ? ['--typed-refs'] : [])];
+      const emit = execute(compiler, [...numeric, '--target', target, '--overflow=' + (test.overflow ?? 'checked'), '--emit-interface', ifaces, join(directory, 'emit.s'), ...files, runtime, osRuntime]);
+      assert.equal(emit.status, 0, `${test.name}: emitting interfaces failed: ${emit.stdout}${emit.stderr}`);
+      const verify = execute(compiler, [...numeric, '--target', target, '--interface', ifaces, '--verify-interface', join(directory, 'verify.s'), ...files, runtime, osRuntime]);
+      assert.equal(verify.status, 0, `${test.name}: interfaces disagree with their sources: ${verify.stdout}${verify.stderr}`);
+      viaInterface = { ifaces };
+    }
     const executable = compileProgram(compiler, files, directory, { target, overflow: test.overflow ?? 'checked', defaultU64: test.defaultU64 !== false, typedRefs, runtime, osRuntime });
+    // The interface build is a second program from the same sources; it has to behave the same.
+    const interfaceExecutable = viaInterface ? compileProgram(compiler, files, directory, { target, overflow: test.overflow ?? 'checked', defaultU64: test.defaultU64 !== false, typedRefs, runtime, osRuntime, name: 'program-interface', interfaces: viaInterface.ifaces }) : null;
     if (test.compileOnly) { passed++; continue; }
     // A case may pin the environment it needs (`"env": {"GRAIL_POOL_WORKERS": "1"}`), which is how a
     // test proves a pool size the host would not otherwise choose. Everything else is inherited.
@@ -94,6 +119,11 @@ for (const test of cases) {
       const errors = result.stderr.toString();
       const occurrences = errors.split(test.stderr).length - 1;
       assert.equal(occurrences, test.stderrCount ?? 1, `${test.name}: expected ${test.stderrCount ?? 1} x ${JSON.stringify(test.stderr)} in ${JSON.stringify(errors)}`);
+    }
+    if (interfaceExecutable) {
+      const ifaceResult = execute(interfaceExecutable, test.args ?? [], target, options);
+      assert.equal(ifaceResult.status, result.status, `${test.name}: the interface build exits differently: ${ifaceResult.stderr}`);
+      assert.equal(ifaceResult.stdout.toString(), result.stdout.toString(), `${test.name}: the interface build prints something else`);
     }
     if (test.signal) {
       assert.equal(result.signal, test.signal, `${test.name}: ${result.status}: ${result.stderr}`);
