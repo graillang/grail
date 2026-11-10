@@ -321,6 +321,29 @@ jobs:
           compiler="$PWD/$(ls dist/grail-*-linux-x86_64-compiler)"
           GRAIL_COMPILER="$compiler" bun tools/test-debug-lines.mjs
 
+  # Sampling profiler: a SIGPROF/setitimer sampler in the program's own runtime, symbolised from
+  # its ELF .symtab. Builds a hot-loop fixture and checks that the hot function dominates.
+  profiler:
+    name: sampling profiler
+    needs: preflight
+    if: needs.preflight.outputs.ready == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Install clang and LLD
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld llvm
+      - name: Build the host compiler
+        run: bun tools/ci.mjs build --platform linux-x86_64
+      - name: Profile a hot loop and check attribution
+        run: |
+          compiler="$PWD/$(ls dist/grail-*-linux-x86_64-compiler)"
+          GRAIL_COMPILER="$compiler" bun tools/test-profile.mjs
+
   # LSP MVP: a real stdio session against the compiler's diagnostics interface.
   lsp:
     name: LSP stdio session
