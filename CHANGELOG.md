@@ -15,6 +15,8 @@
     `opens`, `shuts`, `breakable`, `trailing_ok`, `arm_break`, `chain_dot`, `chain_break`,
     `list_break`, `op_break`. The space flag still lands in the numeric `f.lspace`, so that one
     assignment converts explicitly.
+  - `cli`: `eq`, `starts`, `ends`, `contains_name`, `is_macho`, `is_command`. The command handlers
+    that carry the process exit status are untouched.
 - Maps iterate with `for key, value in &map`, in insertion order, and `for key, value in &mut map` binds the
   same shared key with an exclusive value (`value := map.value_at_mut(i)`), so values update in place. The loop
   holds one reference to the map throughout: inserting into it inside the body is rejected, a shared loop cannot

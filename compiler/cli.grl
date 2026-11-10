@@ -17,7 +17,7 @@ struct Project {
     revs: u8[][]
 }
 
-fn eq<a, b>(x: &a [u8], y: &b [u8]) -> u64 {
+fn eq<a, b>(x: &a [u8], y: &b [u8]) -> bool {
     if x.len() != y.len() {
         return false;
     }
@@ -28,7 +28,7 @@ fn eq<a, b>(x: &a [u8], y: &b [u8]) -> u64 {
     }
     return true;
 }
-fn starts<a, b>(x: &a [u8], y: &b [u8]) -> u64 {
+fn starts<a, b>(x: &a [u8], y: &b [u8]) -> bool {
     if x.len() < y.len() {
         return false;
     }
@@ -39,7 +39,7 @@ fn starts<a, b>(x: &a [u8], y: &b [u8]) -> u64 {
     }
     return true;
 }
-fn ends<a, b>(x: &a [u8], y: &b [u8]) -> u64 {
+fn ends<a, b>(x: &a [u8], y: &b [u8]) -> bool {
     if x.len() < y.len() {
         return false;
     }
@@ -69,7 +69,7 @@ fn copy<a>(x: &a [u8]) -> u8[] {
     return o;
 }
 fn path_join<a, b>(dir: &a [u8], name: &b [u8]) -> u8[] {
-    if (dir.len() == 0) + eq(view(dir), view(".")) {
+    if (dir.len() == 0) || eq(view(dir), view(".")) {
         return copy(view(name));
     }
     if ends(view(dir), view("/")) {
@@ -220,7 +220,7 @@ fn collect<a, b>(dir: &a [u8], out: (&b mut u8[][])) {
     for i in entries.len() {
         name := item(&entries, i);
         if ends(view(name), view("/")) {
-            if (starts(view(name), view(".")) + eq(view(name), view("target/"))) == 0 {
+            if !(starts(view(name), view(".")) || eq(view(name), view("target/"))) {
                 sub := path_join(view(dir), view(name));
                 collect(view(sub), &mut out);
             }
@@ -267,13 +267,13 @@ fn use_names<a>(text: &a [u8]) -> u8[][] {
     }
     return out;
 }
-fn contains_name<a, b>(list: (&a u8[][]), name: &b [u8]) -> u64 {
+fn contains_name<a, b>(list: (&a u8[][]), name: &b [u8]) -> bool {
     for i in list.len() {
         if eq(view(list[i]), view(name)) {
-            return 1;
+            return true;
         }
     }
-    return 0;
+    return false;
 }
 // Standard-library files reachable from `sources` through `use`, in discovery order.
 fn used_std<a, b>(std: &a [u8], sources: (&b u8[][])) -> u8[][] {
@@ -297,7 +297,7 @@ fn used_std<a, b>(std: &a [u8], sources: (&b u8[][])) -> u8[][] {
         names := use_names(view(text));
         for n in names.len() {
             name := item(&names, n);
-            if contains_name(&seen, view(name)) == 0 {
+            if !contains_name(&seen, view(name)) {
                 seen.push(copy(view(name)));
                 candidate := path_join(view(std), view(cat(view(name), view(".grl"))));
                 if host::exists(view(candidate)) {
@@ -338,13 +338,13 @@ fn link_inputs<a, b>(asm: &a [u8], base: &b [u8]) -> u8[][] {
                 if (input.len() > 0) && ((input[0] == 47) || (input[0] == 45)) {
                     arg = input.copy();
                 } else {
-                    mut has_slash = 0;
+                    mut has_slash = false;
                     for j in input.len() {
                         if input[j] == 47 {
-                            has_slash = 1;
+                            has_slash = true;
                         }
                     }
-                    if has_slash + ends(view(input), view(".o")) + ends(view(input), view(".a")) + ends(view(input), view(".so")) + ends(view(input), view(".dylib")) {
+                    if has_slash || ends(view(input), view(".o")) || ends(view(input), view(".a")) || ends(view(input), view(".so")) || ends(view(input), view(".dylib")) {
                         arg = path_join(view(base), view(input));
                     } else {
                         arg = cat(view("-l"), view(input));
@@ -408,8 +408,8 @@ fn target_name(t: u64) -> u8[] {
     return copy(view("x86_64"));
 }
 // Mach-O targets compile the darwin module, which owns every libSystem call.
-fn is_macho<a>(target: &a [u8]) -> u64 {
-    return eq(view(target), view("macos-x86_64")) + eq(view(target), view("macos-aarch64"));
+fn is_macho<a>(target: &a [u8]) -> bool {
+    return eq(view(target), view("macos-x86_64")) || eq(view(target), view("macos-aarch64"));
 }
 fn tool<a, b>(variable: &a [u8], fallback: &b [u8]) -> u8[] {
     v := host::env(variable);
@@ -750,7 +750,7 @@ fn check_command<a>(args: (&a u8[][])) -> u64 {
 fn run_command<a>(args: (&a u8[][])) -> u64 {
     mut o = options(&args);
     host_target := target_name(host::target());
-    if eq(view(o.target), view(host_target)) == 0 {
+    if !eq(view(o.target), view(host_target)) {
         say(
             view("grail run: cross-target executables must be run with an emulator; use grail build --target")
         );
@@ -842,7 +842,7 @@ fn fmt_command<a>(args: (&a u8[][])) -> u64 {
         f := item(&files, i);
         data := host::read_file(view(f));
         out := fmt::format(view(data));
-        if eq(view(data), view(out)) == 0 {
+        if !eq(view(data), view(out)) {
             changed += 1;
             if o.check {
                 say2(view("would reformat "), view(f));
@@ -1080,21 +1080,21 @@ fn help() {
         view("  grail [--target T] [--overflow=checked|wrap] OUT.s ENTRY.grl MODULE.grl...  (compiler)")
     );
 }
-pub fn is_command<a>(name: &a [u8]) -> u64 {
+pub fn is_command<a>(name: &a [u8]) -> bool {
     return eq(view(name), view("build"))
-        + eq(view(name), view("check"))
-        + eq(view(name), view("run"))
-        + eq(view(name), view("test"))
-        + eq(view(name), view("fmt"))
-        + eq(view(name), view("new"))
-        + eq(view(name), view("add"))
-        + eq(view(name), view("fetch"))
-        + eq(view(name), view("debug"))
-        + eq(view(name), view("install"))
-        + eq(view(name), view("help"))
-        + eq(view(name), view("--help"))
-        + eq(view(name), view("version"))
-        + eq(view(name), view("--version"));
+        || eq(view(name), view("check"))
+        || eq(view(name), view("run"))
+        || eq(view(name), view("test"))
+        || eq(view(name), view("fmt"))
+        || eq(view(name), view("new"))
+        || eq(view(name), view("add"))
+        || eq(view(name), view("fetch"))
+        || eq(view(name), view("debug"))
+        || eq(view(name), view("install"))
+        || eq(view(name), view("help"))
+        || eq(view(name), view("--help"))
+        || eq(view(name), view("version"))
+        || eq(view(name), view("--version"));
 }
 pub fn run() -> u64 {
     name := host::arg(1);
@@ -1126,13 +1126,13 @@ pub fn run() -> u64 {
     if eq(view(name), view("add")) {
         return add_command(&args);
     }
-    if eq(view(name), view("fetch")) + eq(view(name), view("install")) {
+    if eq(view(name), view("fetch")) || eq(view(name), view("install")) {
         return fetch_command();
     }
     if eq(view(name), view("debug")) {
         return debug_command(&args);
     }
-    if eq(view(name), view("version")) + eq(view(name), view("--version")) {
+    if eq(view(name), view("version")) || eq(view(name), view("--version")) {
         say(view("grail 0.1.0"));
         return 0;
     }
