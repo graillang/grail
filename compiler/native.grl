@@ -233,8 +233,18 @@ struct C {
     // recently emitted (its site, which knows the opcode, records the fact after the call).
     f64_ops: u64,
     call_ord: u64,
-    // 1 with --verify-facts: the lifter checks every word a fact treats as an f32.
+    // F1: per-callee call counters and the ordinal of the call just emitted, which is the key a
+    // call-argument fact carries (docs/design/typed-ir.md).
+    f1_names: u8[][],
+    f1_counts: u64[],
+    f1_ord: u64,
+    // 1 with --verify-facts: the lifter checks every word a fact treats as an f32, and every word
+    // it treats as a sequence header.
     verify_facts: u64,
+    // --f1-what=N: a test aid that records a deliberately wrong F1 kind for every binding, so the
+    // checks --verify-facts emits can be shown to fire (docs/design/typed-ir.md, "Tests that catch
+    // a wrong fact"). 0, the default, records the type the front end actually has.
+    f1_what: u64,
     debug_funcs: DebugFunc[],
     debug_vars: DebugVar[],
     arg_offset: u64,
@@ -2032,6 +2042,22 @@ fn invoke<a, b>(c: (&a mut C), name: &b [u8], args: u64[]) -> u64 {
         n := c.f64_ops;
         exchange(&mut c.call_ord, n);
         exchange(&mut c.f64_ops, n + 1);
+    }
+    // The ordinal of this call among the calls to the same callee in this function; the lifter
+    // counts the same calls in the same order, so the two agree without either seeing the other.
+    mut hit = 0;
+    for i in c.f1_names.len() {
+        if same(view(c.f1_names[i]), view(name)) {
+            n := c.f1_counts[i];
+            exchange(&mut c.f1_ord, n);
+            exchange(&mut c.f1_counts[i], n + 1);
+            hit = 1;
+        }
+    }
+    if hit == 0 {
+        exchange(&mut c.f1_ord, 0);
+        c.f1_names.push(copy_bytes(view(name)));
+        c.f1_counts.push(1);
     }
     return save(&mut c);
 }
@@ -5578,14 +5604,77 @@ fn bind<a>(c: (&a mut C), name: u8[], ty: u64, id: u64, mutable: u64) -> unit {
 // The table travels beside the word stream and only the LLVM lifter reads it; a slot reused for a
 // non-f32 binding, or one the body touches in any way other than one eight-byte word at a time,
 // is dropped there and keeps the untyped lowering.
+// F1: `what` for a value whose word is a pointer to a sequence header -- 2/3/4 for a vector whose
+// elements are 8, 4 or 1 bytes wide (`+16` is `cap`), 5 for a descriptor `{data, len}`, whose
+// `+16` is uninitialised and must never be read -- and 0 for anything else.
+fn header_what<a>(c: (&a mut C), ty: u64) -> u64 {
+    if c.raw != 0 {
+        return 0;
+    }
+    t := base_type(&mut c, ty);
+    k := ty_kind(&mut c, t);
+    if (k == 3) || (k == 4) {
+        return 4;
+    }
+    if k != 6 {
+        return 0;
+    }
+    e := ty_arg(&mut c, t);
+    if narrow_code(&mut c, e) != 0 {
+        return 3;
+    }
+    return 2;
+}
+// F1: the element width of a sequence header, which is not the header's own stride.
+fn header_width<a>(c: (&a mut C), ty: u64) -> u64 {
+    t := base_type(&mut c, ty);
+    k := ty_kind(&mut c, t);
+    if (k == 3) || (k == 4) {
+        return 1;
+    }
+    e := ty_arg(&mut c, t);
+    if narrow_code(&mut c, e) != 0 {
+        return 4;
+    }
+    return 8;
+}
+// F1: argument 0 of the call just emitted is the header of `seq`, whose element type the word
+// stream loses. The lifter types the accessor's parameter with it and reads `data`/`len` once.
+fn fact_seq_arg<a>(c: (&a mut C), callee: &[u8], seq: u64, seqty: u64) -> unit {
+    if (c.backend == 0) || (c.validating != 0) || (c.raw != 0) || (c.facts_fn.len() == 0) {
+        return ();
+    }
+    hw := header_what(&mut c, seqty);
+    if hw == 0 {
+        return ();
+    }
+    name := copy_bytes(view(c.facts_fn));
+    cn := copy_bytes(callee);
+    wd := header_width(&mut c, seqty);
+    od := c.f1_ord;
+    llvm::fact_header_arg(&mut c.facts, name, od, cn, hw, wd);
+    return ();
+}
 fn emit_slot_fact<a>(c: (&a mut C), ty: u64, slot: u64) -> unit {
     // An `unsafe module` type-checks nothing, so in one a slot's declared type says nothing about
     // what is written to it; the fact is only sound where the front end enforces the type.
     if (c.backend == 0) || (c.validating != 0) || (c.raw != 0) || (c.facts_fn.len() == 0) {
         return ();
     }
-    f32 := u64(is_f32(&mut c, ty));
     name := copy_bytes(view(c.facts_fn));
+    hw := header_what(&mut c, ty);
+    if c.f1_what != 0 {
+        wd := header_width(&mut c, ty);
+        llvm::fact_header_slot(&mut c.facts, name, slot, c.f1_what, wd);
+        return ();
+    }
+    if hw != 0 {
+        // The slot holds a sequence header: the pointer type and the element width are the fact.
+        wd := header_width(&mut c, ty);
+        llvm::fact_header_slot(&mut c.facts, name, slot, hw, wd);
+        return ();
+    }
+    f32 := u64(is_f32(&mut c, ty));
     llvm::fact_slot(&mut c.facts, name, slot, f32);
     return ();
 }
@@ -6803,6 +6892,9 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     exchange(&mut c.facts_fn, sym);
     exchange(&mut c.f64_ops, 0);
     exchange(&mut c.call_ord, 0);
+    // The F1 call ordinals are per callee *and per function*, exactly as the lifter counts them.
+    exchange(&mut c.f1_names, u8[][]);
+    exchange(&mut c.f1_counts, u64[]);
     exchange(&mut c.scope_end, 0);
     exchange(&mut c.loop_start, 0);
     exchange(&mut c.loop_end, 0);
@@ -15092,6 +15184,7 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
     if same(view(name), view("len")) {
         expect(&mut c, view(")"));
         slot := apply(&mut c, view("rt_len"), one(xt));
+        fact_seq_arg(&mut c, view("rt_len"), xt, xty);
         release_temporary(&mut c, input);
         return val(slot, 0);
     }
@@ -17499,6 +17592,7 @@ fn index_view<a>(c: (&a mut C), value: Val, access: u64) -> Val {
         if (code != 0) & (access == 0) {
             // A narrow element read: a 32-bit load, decoded to the word Grail holds.
             at := apply(&mut c, view(f), two(xt, index));
+            fact_seq_arg(&mut c, view(f), xt, xty);
             get(&mut c, at, view("%rax"));
             o(&mut c, view("movl (%rax),%eax\n"));
             unit := save(&mut c);
@@ -17508,6 +17602,7 @@ fn index_view<a>(c: (&a mut C), value: Val, access: u64) -> Val {
         }
         ty := reference_type(&mut c, elem, access == 2);
         slot := apply(&mut c, view(f), two(xt, index));
+        fact_seq_arg(&mut c, view(f), xt, xty);
         if code != 0 {
             // The element's address is 4-byte storage: reads and writes through it are sized, and
             // borrowing it yields a tagged reference (tag_narrow_borrow).
@@ -17558,6 +17653,7 @@ fn index_view<a>(c: (&a mut C), value: Val, access: u64) -> Val {
         elem := int_type(&mut c, 8, 0);
         ty := reference_type(&mut c, elem, access == 2);
         slot := apply(&mut c, view("rt_slotb"), two(x.t, bound.t));
+        fact_seq_arg(&mut c, view("rt_slotb"), x.t, x.ty);
         get(&mut c, slot, view("%rax"));
         o(&mut c, view("movq $1,%rcx\nshlq $63,%rcx\norq %rcx,%rax\nmovq %rax,"));
         stack_slot(&mut c, slot);
@@ -17586,6 +17682,7 @@ fn index_view<a>(c: (&a mut C), value: Val, access: u64) -> Val {
             f = "rt_atbu";
         }
         result := apply(&mut c, view(f), two(x.t, bound.t));
+        fact_seq_arg(&mut c, view(f), x.t, x.ty);
         release_temporary(&mut c, input);
         exchange(&mut c.byte_end, c.pos);
         return val(result, 0);
@@ -21332,7 +21429,11 @@ pub fn main() -> u64 {
         facts_fn: u8[],
         f64_ops: 0,
         call_ord: 0,
+        f1_names: u8[][],
+        f1_counts: u64[],
+        f1_ord: 0,
         verify_facts: 0,
+        f1_what: 0,
         debug_funcs: DebugFunc[],
         debug_vars: DebugVar[],
         arg_offset: 0,
@@ -21580,11 +21681,22 @@ pub fn main() -> u64 {
                                     exchange(&mut c.backend, 1);
                                     offset += 1;
                                 } else {
-                                    if same(view(option), view("--verify-facts")) {
-                                        exchange(&mut c.verify_facts, 1);
+                                    if starts_with(view(option), view("--f1-what=")) {
+                                        // A test aid: record a deliberately wrong F1 kind so the
+                                        // --verify-facts checks can be shown to fire.
+                                        mut n = 0;
+                                        for d in option.len() - 10 {
+                                            n = n * 10 + u64(option[10 + d]) - 48;
+                                        }
+                                        exchange(&mut c.f1_what, n);
                                         offset += 1;
                                     } else {
-                                    break;
+                                        if same(view(option), view("--verify-facts")) {
+                                            exchange(&mut c.verify_facts, 1);
+                                            offset += 1;
+                                        } else {
+                                            break;
+                                        }
                                     }
                                 }
                             }
