@@ -15,10 +15,6 @@
   attacker-controlled length becomes an allocation. The same-directory temp file and rename are
   unchanged, and the write is still not fsynced. `just borg-store-test` covers the empty stream, one
   event of every variant, ordering, and every refusal (`borg/tests/ffi/store_test.grl`).
-- `tools/borg-test.mjs` sorts the port sources it compiles, so the module order no longer depends on
-  how the filesystem lists `borg/src`. The compiler aborts in its argument-hint path for some module
-  orders today (a checkout whose listing puts `events.grl` last reproduces it with an unchanged tree),
-  which made the suite's result a property of the directory rather than of the sources.
 - `lib/sys/grail_ffi.grl` re-binds the `&mut [u8]` argument of `read`, `env_get` and `recv` to a
   mutable local before the C call. The ownership checker requires a mutable binding for storage a
   call writes through, and a parameter binding cannot be `mut`, so forwarding the reference straight

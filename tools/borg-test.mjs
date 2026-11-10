@@ -48,11 +48,7 @@ const work = join(root, '.work/borg');
 mkdirSync(work, { recursive: true });
 
 // Modules every port test links: the port sources plus the standard-library modules they import.
-// Sorted, because a directory listing's order is filesystem-dependent: the compiler is sensitive to
-// module order today (an abort inside its argument-hint path when a module lands last), and a suite
-// that changes with the checkout's inode layout cannot be trusted to compare against a reference.
-const portSources = readdirSync(join(root, 'borg/src')).filter(f => f.endsWith('.grl'))
-  .map(f => `borg/src/${f}`).sort();
+const portSources = readdirSync(join(root, 'borg/src')).filter(f => f.endsWith('.grl')).map(f => `borg/src/${f}`);
 const stdModules = ['lib/core.grl', 'lib/strings.grl', 'lib/vecs.grl', 'lib/order.grl', 'lib/hash.grl',
                     'lib/io.grl', 'lib/fs.grl', 'lib/env.grl'];
 
