@@ -1,0 +1,98 @@
+// Wall-clock speedup: the same CPU-bound work as one job and as four jobs. The four-job run must
+// be at least 1.5x faster on a machine with four or more cores; below four cores the case says so
+// and skips the assertion rather than inventing a number.
+use pool;
+
+fn mix(x: u64) -> u64 {
+    mut v = x ^ 88172645463325252;
+    for i in 4 { v = v ^ (v << 13); v = v ^ (v >> 7); v = v ^ (v << 17); }
+    return v;
+}
+fn chunk_total(v: u64[]) -> u64 {
+    mut total = 0;
+    for x in v { total = total ^ mix(x); }
+    return total;
+}
+// `count` equal chunks of `each` elements, built before any timer starts.
+fn chunks_of(count: u64, each: u64) -> u64[][] {
+    mut all = u64[][];
+    for c in count {
+        mut part = u64[];
+        for i in each { part.push((c * each + i) * 2654435761); }
+        all.push(part);
+    }
+    return all;
+}
+// Count "processor" occurrences in /proc/cpuinfo: one per core, and the only way a safe module can
+// ask how many cores the host reports (the pool's own worker count is not exposed to safe code).
+fn wanted(i: u64) -> u64 {
+    if i == 0 { return 112; }
+    if i == 1 { return 114; }
+    if i == 2 { return 111; }
+    if i == 3 { return 99; }
+    if i == 4 { return 101; }
+    if i == 5 { return 115; }
+    if i == 6 { return 115; }
+    if i == 7 { return 111; }
+    return 114;
+}
+fn cores() -> u64 {
+    info := host::read_file("/proc/cpuinfo");
+    mut matched = 0;
+    mut total = 0;
+    for i in info.len() {
+        b := info[i];
+        if b == wanted(matched) {
+            matched += 1;
+            if matched == 9 {
+                total += 1;
+                matched = 0;
+            }
+        } else {
+            if b == 112 { matched = 1; } else { matched = 0; }
+        }
+    }
+    return total;
+}
+fn main() {
+    n := cores();
+    if n < 4 {
+        host::write_fd(2, format("pool speedup: skipped, {} cores reported (the 1.5x assertion needs four)\n", n).text());
+        println("ok");
+        return ();
+    }
+    mut best_one = 0;
+    mut best_four = 0;
+    mut answer = 0;
+    // Best of three: a loaded machine perturbs one round, and the best round is the least noisy
+    // estimate of what the pool can do. Each round is ~40 ms of work.
+    for round in 3 {
+        // The chunks are built before each window: this measures the job work, not the test's setup.
+        // One job over four chunks is the sequential time for exactly the same elements.
+        serial := chunks_of(1, 3000000);
+        parallel := chunks_of(4, 750000);
+        t0 := host::now_ms();
+        one := pool::map<u64[],u64>(serial, chunk_total);
+        t1 := host::now_ms();
+        four := pool::map<u64[],u64>(parallel, chunk_total);
+        t2 := host::now_ms();
+        mut serial_answer = 0;
+        for part in one { serial_answer = serial_answer ^ part; }
+        mut parallel_answer = 0;
+        for part in four { parallel_answer = parallel_answer ^ part; }
+        assert(serial_answer == parallel_answer);
+        answer = parallel_answer;
+        if (best_one == 0) || (t1 - t0 < best_one) { best_one = t1 - t0; }
+        if (best_four == 0) || (t2 - t1 < best_four) { best_four = t2 - t1; }
+    }
+    // Milliseconds are coarse; a zero would divide by zero, so a run that fits in one tick is
+    // reported as 1 ms, which can only make the assertion harder, never easier.
+    if best_one == 0 { best_one = 1; }
+    if best_four == 0 { best_four = 1; }
+    // The measurement is evidence for a human reader on stderr; stdout stays a fixed token so the
+    // native case can pin it (timings are never identical twice).
+    host::write_fd(2, format("pool speedup: {} cores, one job {} ms, four jobs {} ms\n", n, best_one, best_four).text());
+    println("ok");
+    assert(answer != 0);
+    assert(best_four * 3 <= best_one * 2); // one/four >= 1.5, without floating point
+}

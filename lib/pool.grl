@@ -1,0 +1,78 @@
+module pool;
+
+// Data-parallel jobs over owned values (docs/design/parallelism.md, stage 1).
+//
+// THE OWNERSHIP RULE, in one line: everything a job's closure touches it owns. A job takes its
+// inputs by value (vector elements are moved into it), builds an owned result, and no reference
+// ever crosses a job boundary - so no two jobs can address the same memory, and the compiler needs
+// no new property for this stage.
+//
+// What the checker already enforces here, and what it does not yet:
+//   - checked: item, result and context satisfy the structural Send/Share capability. A `handle`
+//     (file, socket, window) has neither, so a handle - even nested in a record or a vector - is
+//     refused with "does not satisfy Send", and a handle used as the shared context is refused with
+//     "does not satisfy Share". Plain data (integers, floats, bytes and records/enums of them) is
+//     accepted.
+//   - NOT checked yet: the closure's own captures. `|x: u64, u: u64| -> u64 touch(&held, x)` where
+//     `held` is a record holding a handle compiles today, in this module's functions exactly as in
+//     `parallel_map`, because the closure environment is not capability-checked. Until the
+//     compiler-side check lands, treat a closure passed to these functions as trusted: capture
+//     plain data only, and keep handles out of the capture. This is the one gap in stage 1, it is
+//     pre-existing in `parallel_map`, and it is being closed where the classification lives.
+//   - also not expressible yet: a job that outlives the call. There is no user-visible job handle;
+//     every function here is structured, so a job cannot outlive the memory of its caller.
+//
+// Ordering is a property of the API, not of the scheduler: results come back in input order
+// whatever order the jobs finish in.
+
+// One job per input element, results in input order. The closure captures are read-only on every
+// worker, so they must be plain data (see above).
+pub fn map<T:Send,U:Send>(items:T[],f:Fn(T)->U)->U[]{
+    return parallel_map(items,0,|item: T, unused: u64| -> U f(item));
+}
+
+// `count` independent jobs, job `i` calling f(i); results in index order, so this is the parallel
+// "map over 0..count" and the shape a chunked loop takes when the caller does its own splits.
+pub fn run<U:Send>(count:u64,f:Fn(u64)->U)->U[]{
+    mut index=u64[];
+    for i in count{index.push(i);}
+    return parallel_map(index,0,|i: u64, unused: u64| -> U f(i));
+}
+
+// The chunked shape, and the one Abundance's geometry/encode/compress work uses: consume the
+// vector, hand each job one contiguous, exclusively owned chunk, and concatenate the results in
+// chunk order. Elements are moved into their chunk, never copied, and no chunk can see another.
+// The split is still two worth-paying passes over the data (each element leaves the vector and
+// enters its chunk) because a split without an exclusive borrow cannot hand out slices; that pass
+// is what stage 2's `&mut [T]` chunks remove.
+pub fn for_chunks<T:Send,U:Send>(data:T[],chunks:u64,f:Fn(T[])->U)->U[]{
+    n:=data.len();
+    if n==0{return U[];}
+    mut count=chunks;
+    if count==0{count=1;}
+    if n<count{count=n;}
+    size:=(n+count-1)/count;
+    // Reverse once so chunks come out in input order while elements are popped (moved), not copied.
+    mut source=data;mut rev=T[];
+    while source.len()!=0{rev.push(source.pop());}
+    mut parts=T[][];
+    while rev.len()!=0{
+        mut take=size;
+        if rev.len()<take{take=rev.len();}
+        mut part=T[];
+        mut i=0;
+        while i<take{part.push(rev.pop());i+=1;}
+        parts.push(part);
+    }
+    return parallel_map(parts,0,|part: T[], unused: u64| -> U f(part));
+}
+
+// Two branches of a job graph, both owned: `first` runs on a worker while `second` runs on the
+// calling thread, so both make progress and the results come back owned, in the order given.
+// This is what "spawn two jobs, then join" means without a handle that could outlive the call.
+pub struct Pair<A,B>{first:A,second:B}
+pub fn join<A:Send,B:Send>(first:Fn()->A,second:Fn()->B)->Pair<A,B>{
+    mut one=u64[0];
+    mut done=parallel_map(one,0,|i: u64, unused: u64| -> A first());
+    return Pair{first:done.pop(),second:second()};
+}

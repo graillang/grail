@@ -5232,5 +5232,106 @@
       "compiler/tests/f32_borrowed.grl"
     ],
     "stdout": "3.75\n"
+  },
+  {
+    "name": "pool-chunks-owned",
+    "note": "A CPU-bound job set: 400k elements summed in 8 owned chunks through pool::for_chunks, asserted equal to the sequential answer. The chunk split is one owned vector per job, so no reference crosses a job boundary.",
+    "files": [
+      "tests/pool/chunks.grl"
+    ],
+    "modules": [
+      "lib/pool.grl",
+      "lib/core.grl"
+    ],
+    "stdout": "8782924083312428559\n"
+  },
+  {
+    "name": "pool-map-input-order",
+    "note": "Job 0 sleeps four times as long as job 3, so completion order is the reverse of input order; pool::map must still return results in input order.",
+    "files": [
+      "tests/pool/order.grl"
+    ],
+    "modules": [
+      "lib/pool.grl",
+      "lib/core.grl"
+    ],
+    "stdout": "[0, 1, 2, 3]\n"
+  },
+  {
+    "name": "pool-uneven-work-no-deadlock",
+    "note": "One long job (the sum of 0..1999999) among seven trivial ones: no deadlock, and the long job's result lands in its own slot.",
+    "files": [
+      "tests/pool/uneven.grl"
+    ],
+    "modules": [
+      "lib/pool.grl",
+      "lib/core.grl"
+    ],
+    "stdout": "[1999999000000, 1, 2, 3, 4, 5, 6, 7]\n"
+  },
+  {
+    "name": "pool-nested-one-worker",
+    "note": "Nested parallelism on a one-worker pool (GRAIL_POOL_WORKERS=1): a job waits on the jobs it queued, so only the helping scheduler can complete this without deadlock.",
+    "files": [
+      "tests/pool/nested.grl"
+    ],
+    "modules": [
+      "lib/pool.grl",
+      "lib/core.grl"
+    ],
+    "env": {
+      "GRAIL_POOL_WORKERS": "1"
+    },
+    "stdout": "[19900, 219900, 419900, 619900, 819900, 1019900]\n[19900, 20100, 20300, 20500]\n"
+  },
+  {
+    "name": "pool-abort-in-job",
+    "note": "A job that fails (out-of-bounds) ends the process promptly instead of hanging the pool or its waiter: the failure policy is the runtime's abort policy (B5), and nothing after the abort runs. The abort is raised on a pool worker and surfaces as the abort exit status, exactly like abort-in-green-task-ends-process; an abort raised on the main thread still dies by SIGABRT.",
+    "files": [
+      "tests/pool/abort.grl"
+    ],
+    "modules": [
+      "lib/pool.grl",
+      "lib/core.grl"
+    ],
+    "status": 134,
+    "stdout": "before\n"
+  },
+  {
+    "name": "pool-speedup-four-workers",
+    "note": "Wall clock: 3M CPU-bound elements as one job and as four jobs, twice each. Asserts the four-job run is at least 1.5x faster, and SKIPs honestly (stderr only, stdout still \"ok\") when /proc/cpuinfo reports fewer than four cores. stderr carries the measured times.",
+    "files": [
+      "tests/pool/speedup.grl"
+    ],
+    "modules": [
+      "lib/pool.grl",
+      "lib/core.grl"
+    ],
+    "targets": [
+      "x86_64"
+    ],
+    "stdout": "ok\n"
+  },
+  {
+    "name": "pool-reject-handle-item",
+    "note": "The safe pool surface denies a foreign handle: a `handle` has neither Send nor Share, so `pool::map` over handles is refused before any job exists.",
+    "source": "use pool;\nhandle H;\nfn work(h: H) -> u64 { return 1; }\nfn go(v: H[]) -> u64[] { return pool::map<H,u64>(v, work); }\nfn main(){}\n",
+    "modules": [
+      "lib/pool.grl",
+      "lib/core.grl"
+    ],
+    "reject": true,
+    "diagnostic": "type does not satisfy Send"
+  },
+  {
+    "name": "pool-reject-handle-in-record",
+    "note": "Structural: a record containing a handle is unshareable too, so it cannot be a pool item. This is the classification the safe surface inherits from parallel_map.",
+    "source": "use pool;\nhandle H;\nstruct Holder { file: H, n: u64 }\nfn work(h: Holder) -> u64 { return h.n; }\nfn go(v: Holder[]) -> u64[] { return pool::map<Holder,u64>(v, work); }\nfn main(){}\n",
+    "modules": [
+      "lib/pool.grl",
+      "lib/core.grl"
+    ],
+    "reject": true,
+    "diagnostic": "type does not satisfy Send"
   }
 ]
