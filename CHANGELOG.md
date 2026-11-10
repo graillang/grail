@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Fixed: the peephole optimizer modelled a `call` as reading only `rdi`, `rsi`, `rdx`, `rcx`, `r8`
+  and `r9`, so a store to `%r10` or `%r11` - the seventh and eighth argument registers on AArch64
+  and RISC-V 64 - looked dead before a call and was deleted. An argument computed in a register (the
+  address of a by-value copy, for example) disappeared, and the call read garbage. Call liveness now
+  includes both registers (`compiler/optimize.grl`); the x86-64 SysV path is unaffected in
+  behaviour and only keeps one more store per call.
 - Borg session state persists a typed event stream instead of an opaque payload
   (`borg/src/ffi/store.grl`, `borg/src/events.grl`). The frame still opens with the `BGS` magic and
   now carries the version digit `2`, a little-endian payload length and a sequence of tagged events;
