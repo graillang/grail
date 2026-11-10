@@ -44,6 +44,10 @@ test-authority:
 test-selfhost:
     bun tools/test-selfhost.mjs
 
+# Per-module emission (B1 stage 1): the split parts must be the single-file program.
+test-split:
+    bun tools/split-test.mjs
+
 # Run the Abundance CPU-port parity tests (math, compared bit-for-bit with Abundance's own C++).
 abundance-test:
     bun tools/abundance-test.mjs
