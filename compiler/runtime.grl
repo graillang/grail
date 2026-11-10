@@ -1222,39 +1222,88 @@ fn rt_thread_join(handle: u64) -> u64 {
 //   32 worker array  40 injection ring  48 injection head  56 injection tail
 //   64 injection capacity  72 steal cursor  80 jobs submitted  128 injection ring storage
 // Worker block (raw_map, one page per worker):
-//   0 ring  8 head  16 tail  24 deque lock  32 pool  40 index  48 capacity  128 ring storage
+//   0 ring  8 head  16 tail  24 deque lock  32 pool  40 index  48 capacity
+//   56 the kernel thread record that is running this worker  128 ring storage
 // Job block (rt_alloc, freed by the thread that waits for the job):
 //   0 callback  8 environment word  16 argument word  24 result word  32 state (futex word)
 //
-// The owner pushes and pops at the tail of its own ring (LIFO: a nested submit runs its children
-// before the parent resumes) while thieves take from the head (FIFO: a stolen job is the oldest, so
-// long jobs are spread out by stealing rather than by priority). Rings are bounded; a full ring runs
-// the job on the submitting thread instead of blocking, so submission is total and no submitter can
-// deadlock waiting for a free slot.
+// ---- process-state word map: one table, one owner per word -------------------------------
+// rt_state is 4096 bytes shared by every long-lived subsystem. A claim on a word means adding a row
+// to this table and taking the address from the accessor named in that row; no subsystem writes a
+// bare `raw_state() + N` for a word it owns. The offsets live here, once, so a collision is a
+// two-line diff rather than a merge-day surprise. The pool's first claim was `raw_state() + 88` for
+// its pointer; the Windows green scheduler later cached the task mode in 88, and the merged program
+// read the mode (1) as the pool pointer and faulted at address 0x9. That is the incident this table
+// exists to prevent.
+//
+//   word(s)      owner                        accessor                  claimed by
+//   0, 8, 16     argc / argv / envp           platform startup           --
+//   24           allocator live count         rt_live                    --
+//   32           allocator arena list         rt_shutdown                --
+//   64           allocator lock word          rt_allocator_lock          --
+//   72           green scheduler block        rt_sched                   --
+//   80           green scheduler create CAS   rt_sched                   --
+//   88           task-mode cache              rt_task_mode               win-green-tasks
+//   128..192     main thread's own record     rt_thread_init             --
+//   256..320     allocator bin heads          rt_alloc_unlocked          --
+//   768..832     allocator bin bump           rt_grow                    --
+//   1280..1344   allocator bin remaining      rt_grow                    --
+//   2048..2672   sampling profiler block      rt_prof_words              --
+//   3200         job pool pointer             rt_state_pool              job-pool
+//   3208         job pool creation CAS        rt_state_pool_cas          job-pool
+//   3392         Windows thread bridge        os-windows: rt_win_bridge  --
+//   3840         Windows fiber state          os-windows                 --
+//   3856..       Windows fiber table          os-windows                 --
+//
+// Not a claim: thread-record word 48 (raw_state() + 176 for the main thread). os-windows keeps the
+// per-thread WaitOnAddress expected value there, so nothing else may use it. The pool did, which was
+// the same disease as the 88 collision: an unowned word in a shared structure.
+fn rt_state_pool() -> u64 {
+    return raw_state() + 3200;
+}
+fn rt_state_pool_cas() -> u64 {
+    return raw_state() + 3208;
+}
 fn rt_pool() -> u64 {
-    p := raw_atomic_load(raw_state() + 88);
+    slot := rt_state_pool();
+    p := raw_atomic_load(slot);
     if p != 0 {
         return p;
     }
-    if raw_atomic_cas(raw_state() + 96, 0, 1) != 0 {
-        while raw_atomic_load(raw_state() + 88) == 0 {
+    if raw_atomic_cas(rt_state_pool_cas(), 0, 1) != 0 {
+        while raw_atomic_load(slot) == 0 {
             rt_syscall(24, 0, 0, 0);
         }
-        return raw_atomic_load(raw_state() + 88);
+        return raw_atomic_load(slot);
     }
     made := rt_pool_create();
-    raw_atomic_store_release(raw_state() + 88, made);
+    raw_atomic_store_release(slot, made);
     return made;
 }
-// Word 48 of every thread record is unused (0 self, 8 scheduler stack, 16 green task, 24 entry,
-// 32 argument, 40 clear-TID word), and a mapped stack is zeroed, so a pool worker can keep its
-// worker block there and a nested submit from a job finds the right deque.
+// Which worker block is this thread running, or 0 for a thread that is not a pool worker (the main
+// thread, a green scheduler thread, an offload thread). The answer is a scan of the worker array by
+// the thread record each worker published at startup; it costs a handful of loads and is only asked
+// on submit and wait, never inside a job's loop.
 fn rt_pool_self() -> u64 {
+    p := raw_atomic_load(rt_state_pool());
+    if p == 0 {
+        return 0;
+    }
     tp := raw_tp_get();
     if tp == 0 {
         return 0;
     }
-    return raw_load(tp + 48);
+    array := raw_load(p + 32);
+    workers := raw_load(p + 8);
+    mut i = 0;
+    while i < workers {
+        w := raw_load(array + i * 8);
+        if raw_load(w + 56) == tp {
+            return w;
+        }
+        i += 1;
+    }
+    return 0;
 }
 fn rt_pool_create() -> u64 {
     p := raw_map(4096);
@@ -1353,10 +1402,9 @@ fn rt_pool_worker_new(p: u64, index: u64) -> u64 {
 // it looks for work, so a submit that lands after that read bumps the sequence and either the scan
 // or the failed futex wait sees it: no wakeup can be lost, and no worker spins for work.
 fn rt_pool_worker_main(w: u64) -> u64 {
-    tp := raw_tp_get();
-    if tp != 0 {
-        raw_store(tp + 48, w);
-    }
+    // Publish this thread's record so rt_pool_self can find `w` from the thread itself. It is
+    // written before the worker takes any work, and no other thread reads it until it does.
+    raw_store(w + 56, raw_tp_get());
     p := raw_load(w + 32);
     while true {
         mut j = rt_pool_take(w);
