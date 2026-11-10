@@ -241,7 +241,7 @@ Adding a per-OS backend is an extension of an existing seam, not a new architect
 | Borg need | Grail today | Work | Stage |
 | --- | --- | --- | --- |
 | File/dir/env/argv/time | Present (`fs`, `env`, `host` ops) | None | — |
-| Pipes, `fork`/`exec`/`wait` | Present (`host::command`) | argv/env/cwd options, `WNOHANG` | 2 |
+| Pipes, `fork`/`exec`/`wait` | Present (`host::command`, `host::command_with` for an explicit argv and environment) | cwd option, `WNOHANG` | 2 |
 | JSON (exact decimals) | Absent | Codec in Grail | 0 |
 | Unix sockets + peer creds | Absent (`AF_INET` only) | New `AF_UNIX` ops + `SO_PEERCRED` | 2 |
 | Signals, process groups, PDEATHSIG | Absent (only `exit`) | New ops + typed results | 2 |

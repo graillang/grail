@@ -30,8 +30,8 @@ environment as entries, so the additive spelling is explicit rather than assumed
 ```grl
 mut env = host::environment();
 env.push("APP_MODE=batch".copy());
-status := host::command_with(argv, env);   // inherited entries plus APP_MODE
-status := host::command_with(argv, u8[][]); // no environment at all
+status := host::command_with(argv, env);    // inherited entries plus APP_MODE
+host::command_with(argv, u8[][]);           // no environment at all
 ```
 
 Both spellings consume their vectors, like `host::command`. The executable search happens in the
