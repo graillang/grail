@@ -17,6 +17,18 @@
   command of a settled frame: 2 draw lists, 270 vertices, 441 indices, 147 triangles, byte-identical
   to the same frames through ImGui's own C++ API in `abundance/tests/parity/imgui.cpp`. That is 11
   reference programs now, and the ten ports are unchanged.
+- Dear ImGui reaches the GPU: `abundance/src/imgui_platform.grl` (new) binds `ImGui_ImplSDL3_InitForVulkan`,
+  `ImGui_ImplVulkan_Init`, both backends' `NewFrame`, `ImGui_ImplVulkan_RenderDrawData` and both
+  shutdowns, in a second shared library (`libgrail_imgui_platform.so`) whose own dependencies are
+  `libSDL3` and `libvulkan`, so no headless program loads either. `ImGui_ImplVulkan_InitInfo` crosses as
+  `VulkanInitInfo` - the fields a host has - and the shim translates it into the real struct and zeroes
+  the rest; the record's 104-byte layout is round-tripped through the C offsets before the backend is
+  initialised. `imgui_frame_probe.grl` (new) runs the frame the editor needs end to end: SDL3 window,
+  device, swapchain, the RHI's clear render pass, ImGui recording into the command buffer inside it,
+  submit, present, and a readback of the presented image - 5 frames, 208 vertices and 348 indices per
+  settled frame, 22908 of 230400 pixels not the clear colour, and the last two frames' images
+  byte-identical. `imgui.status`/`imgui.frame.status` verdicts; a machine with no display server or
+  driver skips with the platform's own words.
 - RHI increment 4b, in four steps that each run before the next. The gate was the FFI's record
   pointer (`cptr(&record)`, record out-parameters, arrays of handles), so the whole Vulkan create-info
   graph is now records and pointers into them rather than byte layout:

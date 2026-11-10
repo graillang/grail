@@ -159,26 +159,76 @@ takes.
 `bun abundance/tools/build-imgui.mjs` prints the record table and checks it against Dear ImGui;
 `--table` prints it without rebuilding anything.
 
-## What still needs a device
+## A real frame
 
-- **The Vulkan renderer backend is declared and built, and is called only with a device.**
-  `abundance/src/imgui_platform.grl` binds `ImGui_ImplSDL3_InitForVulkan` and `ImGui_ImplVulkan_Init`
-  (through `GrVulkanInitInfo`, which carries the handles a host has; `imgui_shim_platform.cpp`
-  translates it and zeroes the rest, which is what the backend's header asks for),
-  `ImGui_ImplSDL3_NewFrame`, `ImGui_ImplVulkan_NewFrame`, `ImGui_ImplVulkan_RenderDrawData` and both
-  shutdowns. Initialising it needs a `VkDevice`, a queue and a render pass - which is exactly what
-  `abundance_rhi_device`, `abundance_rhi_render` and `abundance_rhi_swapchain` create - so the frame
-  that calls it is `imgui_frame_probe.grl`, and it skips rather than fails on a machine with no display
-  server or driver.
+`abundance/src/imgui_platform.grl` is the device half, and `abundance/tests/imgui_frame_probe.grl` is
+the frame that proves it: an SDL3 window, a Vulkan instance and device, a surface and swapchain, the
+clear render pass `abundance_rhi_render` creates, and ImGui's own Vulkan backend recording into the
+command buffer inside that pass. It links `libgrail_imgui_platform.so`, whose own `DT_NEEDED` carries
+`libSDL3` and `libvulkan`, so the headless programs never load either.
+
+The two init calls are upstream and unmodified:
+
+| Grail | Dear ImGui |
+| --- | --- |
+| `sdl3_init_for_vulkan(window)` | `ImGui_ImplSDL3_InitForVulkan` |
+| `vulkan_init(init_info(...))` | `ImGui_ImplVulkan_Init` |
+| `sdl3_new_frame()`, `vulkan_new_frame()` | `ImGui_ImplSDL3_NewFrame`, `ImGui_ImplVulkan_NewFrame` |
+| `vulkan_render_draw_data(command_buffer)` | `ImGui_ImplVulkan_RenderDrawData` |
+| `sdl3_shutdown()`, `vulkan_shutdown()` | `ImGui_ImplSDL3_Shutdown`, `ImGui_ImplVulkan_Shutdown` |
+
+`ImGui_ImplVulkan_InitInfo` cannot cross as itself (an `ImVector`, a
+`VkPipelineRenderingCreateInfoKHR` and two `VkShaderModuleCreateInfo` by value, and a function
+pointer), so `VulkanInitInfo` carries the fields a host has - instance, physical device, device,
+queue family, queue, render pass, subpass, sample count, image counts, a descriptor-pool *size*
+instead of a pool - and `imgui_shim_platform.cpp` translates it and zeroes the rest. Its 104-byte
+layout is printed by `imgui_layout.c`, and `vulkan_init_layout_ok()` round-trips the scalar fields
+through the C offsets before the backend is initialised, so a moved field is a number in the report
+rather than a mis-signalled device.
+
+What the probe prints on this machine (RX 7900 GRE, RADV, X11):
+
+```
+imgui.frame.backend.platform imgui_impl_sdl3 (3.4.18; 3.4.18) (x11)
+imgui.frame.backend.renderer imgui_impl_vulkan
+imgui.frame.io.backend_flags 30
+imgui.frame 0 image 0 of 4 lists 0 vtx 0 idx 0 presented VK_SUCCESS
+imgui.frame 1 image 1 of 4 lists 1 vtx 202 idx 327 presented VK_SUCCESS
+imgui.frame 2 image 2 of 4 lists 1 vtx 208 idx 348 presented VK_SUCCESS
+imgui.pixels 2 pixels 230400 clear 207492 drawn 22908 digest 17759077537127530277
+imgui.frame.settled previous 17759077537127530277 last 17759077537127530277 identical 1
+imgui.frame.result frames 5 of 5 drawn 91632
+imgui.frame.status ok
+```
+
+`io.BackendFlags 30` is what the two backends set for themselves: `RendererHasVtxOffset` (8),
+`RendererHasTextures` (16), and from SDL, `HasMouseCursors` (2) and `HasSetMousePos` (4). The first
+frame draws nothing for the same reason the headless test's first frame is empty. Every later frame
+draws 208 vertices and 348 indices - a different widget set from the headless test, which is why the
+counts differ - and 22908 of 230400 pixels on the presented image are not the clear colour. The
+probe reads that image back (the swapchain is created with `TRANSFER_SRC` when the surface allows it)
+and compares the last two frames' digests, so "a frame reached the image" is a statement about
+pixels, not about a return code.
+
+Outcomes are the RHI probes': `imgui.frame.status ok` / `skipped <reason>` / `failed`, exit 0 for the
+first two. A machine with no display server, no Vulkan driver, or a driver that cannot back a Vulkan
+window is skipped, with the platform's own words.
+
+## What still needs something else
+
 - **SDL's event pump.** The RHI has no event loop yet (`docs/rhi.md`), so `ImGui_ImplSDL3_ProcessEvent`
-  has nothing to feed it. Until it lands, a host drives ImGui with `mouse_pos`/`mouse_button` (what
-  `imgui_test.grl` does) or the backend's own input path once the pump exists.
+  is not bound: there is nothing to feed it. Until it lands, a host drives ImGui with
+  `mouse_pos`/`mouse_button` - which is what `imgui_test.grl` uses for its click - or hooks the
+  backend's own `ProcessEvent` once the pump exists.
 - **Text input.** `input_u64` covers the number case the editor's inspector needs. A text field needs
   ImGui to hold a pointer to a caller-owned buffer across frames; the buffer's capacity must be fixed
-  before the first frame, which wants a resize-callback shim and a fixed-capacity buffer type. That is
-  the next increment, not a limitation of the FFI.
+  before the first frame, which wants a resize-callback shim and a fixed-capacity buffer type. That
+  is the next increment, not a limitation of the FFI.
 - **Fonts beyond the default.** The atlas is ImGui's default ProggyClean; a custom font needs an
   `ImFontConfig` (a C++ struct with an embedded array) behind a shim call of its own.
+- **Resize.** The swapchain is created once and destroyed at the end, as in the RHI increment: a
+  resize needs the `oldSwapchain` path, `ImGui_ImplVulkan_SetMinImageCount` (bound, unused) and a
+  rebuilt framebuffer set.
 
 ## Limits, stated
 
