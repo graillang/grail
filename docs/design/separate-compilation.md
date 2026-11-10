@@ -439,12 +439,13 @@ and falls back to the compiler's own SHA-256 when it is not - the same digest ei
 instead of seconds for the big files. On the proof project a cached build costs about 55 ms of that
 overhead and saves the 0.7 s build it replaces.
 
-Measured by `tools/cache-test.mjs` (three modules plus runtime and `__start`, five parts):
+Measured by `tools/cache-test.mjs` (three modules plus runtime and `__start`, five parts; the absolute
+times move with the page cache, the ratio does not):
 
 | | |
 | --- | --- |
-| cold store, cached build | 715 ms - 0 hit, 5 miss |
-| unchanged sources, cached build | 57 ms - 5 hit, 0 miss, `program up to date` - 12.5x |
+| cold store, cached build | ~0.7-1.5 s - 0 hit, 5 miss |
+| unchanged sources, cached build | ~60-120 ms - 5 hit, 0 miss, `program up to date` - 12-13x |
 | one module's constant edited | 3 hit, 2 miss (`main`, `util`) - the edited module and the module that reads it |
 | one flag changed (`--overflow=wrap`) | 0 hit, 5 miss |
 | one interface tampered, no source edited | 4 hit, 1 miss (`main`) - the importer, and nothing else |
