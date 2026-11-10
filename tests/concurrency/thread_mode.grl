@@ -1,0 +1,36 @@
+// The opt-in thread-per-task scheduler (GRAIL_TASKS=thread). Two tasks really run at once, so a task
+// that spins without ever yielding still makes progress beside another: the waiter loops until the
+// setter, which sleeps 5 ms, stores the word it watches. Under the default green scheduler this
+// program cannot finish (the spinner never yields, so the setter never runs), which is exactly the
+// difference the opt-in buys and the reason it is not the default.
+// Expected stdout on both platforms: 1 (rt_task_threads() reports the mode) and 2 (both tasks
+// joined, each returning 1). The Windows case list sets GRAIL_TASKS=thread for it; the default
+// green scheduler on Windows is one thread, so a task that never yields would starve the setter
+// there, which is why this program is only ever run in the mode it pins.
+unsafe module runtime;
+use host;
+fn waiter(n: u64, word: u64) -> u64 {
+    mut spins = 0;
+    while rt_atomic_load(word) == 0 {
+        spins += 1;
+    }
+    assert(spins > 0);
+    return n;
+}
+fn setter(n: u64, word: u64) -> u64 {
+    host::sleep_ms(5);
+    rt_atomic_store(word, 1);
+    return n;
+}
+fn body<s>(sc: (&s Scope<u64>), word: u64) -> u64 {
+    first := spawn(sc, 1, waiter);
+    second := spawn(sc, 1, setter);
+    return join(first) + join(second);
+}
+fn main() {
+    println(rt_task_threads());
+    word := rt_alloc(8);
+    raw_store(word, 0);
+    println(task_scope(word, body));
+    rt_free(word);
+}

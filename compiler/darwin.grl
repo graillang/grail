@@ -280,3 +280,62 @@ pub fn rt_call4(n: u64, a: u64, b: u64, c: u64, d: u64) -> u64 {
 pub fn rt_thread(flags: u64, slot: u64, handle: u64) -> u64 {
     return wrapping_sub(0, 38);
 }
+
+// ---- green-task execution contexts ----
+// The same shape as the Linux boundary: a Mach-O build has a direct stack switch (raw_switch) and
+// asks for a reactor, which the platform still answers with -ENOSYS, so a green task there fails
+// loudly at scheduler start exactly as it did before this was split out by platform.
+fn rt_os_reactor() -> u64 {
+    return 1;
+}
+fn rt_os_workers() -> u64 {
+    mut workers = rt_cpus();
+    if workers < 4 {
+        workers = 4;
+    }
+    if 64 < workers {
+        workers = 64;
+    }
+    return workers;
+}
+fn rt_os_sched_prepare() -> u64 {
+    return 0;
+}
+fn rt_os_ctx_new(t: u64) -> u64 {
+    size := 262144;
+    stack := raw_map(size);
+    if rt_error(stack) {
+        rt_abort();
+    }
+    if rt_error(rt_syscall(10, stack, 4096, 0)) {
+        rt_abort();
+    }
+    raw_store(t + 8, stack);
+    raw_store(t + 16, size);
+    // x86-64 8 words (resume first); AArch64 22 words (resume first).
+    target := raw_target();
+    mut words = 8;
+    if target == 1 {
+        words = 22;
+    }
+    frame := stack + size - words * 8;
+    raw_store(frame, rt_green_main);
+    raw_store(t, frame);
+    return frame;
+}
+fn rt_os_ctx_enter(t: u64) -> u64 {
+    w := raw_tp_get();
+    raw_switch(w + 8, raw_load(t));
+    return 0;
+}
+fn rt_os_ctx_leave(t: u64) -> u64 {
+    w := raw_tp_get();
+    raw_switch(t, raw_load(w + 8));
+    return 0;
+}
+fn rt_os_ctx_release(t: u64) -> u64 {
+    if rt_error(rt_syscall(11, raw_load(t + 8), raw_load(t + 16), 0)) {
+        rt_abort();
+    }
+    return 0;
+}

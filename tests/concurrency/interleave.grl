@@ -1,0 +1,41 @@
+// Green tasks on one scheduler thread: a task runs until it *yields*, and a yield puts it back at
+// the end of the run queue. Two tasks spawned in order therefore interleave in a fixed order, and
+// the characters a task prints between two yields are never broken up by another task.
+//
+// This is the Windows default scheduler (Win32 fibers on one thread) and it is exactly what Linux
+// does for a queue worked by one worker. Expected stdout is "aaabbbaaabbb" (three characters, then
+// a yield, then three more, alternating between the two tasks) followed by the joined result "3",
+// so a scheduler that preempts, that runs a task out of turn or that never re-queues a yield fails
+// loudly instead of producing a quietly different interleaving. Executed under Wine; a Linux run of
+// this case would use a worker per CPU, where the order is deliberately not fixed.
+unsafe module runtime;
+use host;
+fn letter(n: u64) -> u64 {
+    if n == 1 {
+        host::print(view("a"));
+    } else {
+        host::print(view("b"));
+    }
+    return 0;
+}
+fn step(n: u64, unused: u64) -> u64 {
+    mut round = 0;
+    while round < 2 {
+        mut i = 0;
+        while i < 3 {
+            letter(n);
+            i += 1;
+        }
+        rt_yield();
+        round += 1;
+    }
+    return n;
+}
+fn body<s>(sc: (&s Scope<u64>), unused: u64) -> u64 {
+    first := spawn(sc, 1, step);
+    second := spawn(sc, 2, step);
+    return join(first) + join(second);
+}
+fn main() {
+    println(task_scope(0, body));
+}

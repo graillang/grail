@@ -216,7 +216,8 @@
     "linux": true,
     "stdout": "42\n9\n",
     "status": 0,
-    "note": "spawn/task_scope/parallel_map under the thread-per-task scheduler (this used to abort on a failed epoll_create)"
+    "note": "spawn/task_scope/parallel_map on the green scheduler: fibers on one scheduler thread, the same cooperative semantics Linux has",
+    "tasks": true
   },
   {
     "name": "tasks-sleep-overlap",
@@ -224,7 +225,8 @@
     "linux": true,
     "stdout": "6\ntrue\n",
     "status": 0,
-    "note": "four sleeping tasks overlap: suspension is the task thread's own blocking sleep, not a serialised wait"
+    "note": "four sleeping tasks overlap: each parks the task and lets the others run (the sleep runs on a helper thread because Windows has no timerfd)",
+    "tasks": true
   },
   {
     "name": "ffi-nested-records",
@@ -236,5 +238,47 @@
     "stdout": "49044\n21\n3\n-7\n100000000000\n42\n9\n77\n154\n6\n7\n42\n",
     "status": 0,
     "note": "extern records embedded by value at C offsets"
+  },
+  {
+    "name": "tasks-interleave-at-yield",
+    "file": "tests/concurrency/interleave.grl",
+    "entry": "main",
+    "tasks": true,
+    "stdout": "aaabbbaaabbb3\n",
+    "status": 0,
+    "note": "one scheduler thread, FIFO run queue: a task runs until it yields, so the two tasks alternate in a fixed order and neither is preempted mid-run. Not run as ELF: a Linux queue has a worker per CPU, where the order is deliberately free."
+  },
+  {
+    "name": "tasks-sleep-progress",
+    "file": "tests/concurrency/sleep_progress.grl",
+    "entry": "main",
+    "tasks": true,
+    "linux": true,
+    "stdout": "702\n",
+    "status": 0,
+    "note": "a task parked in host::sleep_ms does not stop another task from making progress: the sleeper reads the word the other task wrote while it slept"
+  },
+  {
+    "name": "tasks-read-file-offload",
+    "file": "tests/concurrency/read_file_offload.grl",
+    "entry": "main",
+    "tasks": true,
+    "linux": true,
+    "stdout": "512\n",
+    "status": 0,
+    "note": "host::read_file from a task hands the blocking I/O to an offload thread and parks the task (rt_blocking_call/rt_offload), so another task runs while the file is being read, on Windows as on Linux"
+  },
+  {
+    "name": "tasks-thread-mode",
+    "file": "tests/concurrency/thread_mode.grl",
+    "entry": "main",
+    "tasks": true,
+    "linux": true,
+    "env": {
+      "GRAIL_TASKS": "thread"
+    },
+    "stdout": "1\n2\n",
+    "status": 0,
+    "note": "the opt-in thread-per-task scheduler (GRAIL_TASKS=thread) still runs: a task that never yields makes progress beside another because both own an OS thread; rt_task_threads() reports the mode as 1"
   }
 ]
