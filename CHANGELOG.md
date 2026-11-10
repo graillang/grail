@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+- `parallel_for_chunks` and a job handle: the two things the pool surface was missing, and the
+  measured entry cost the owned-chunk shape paid is gone. `parallel_for_chunks(&mut data[a: b],
+  chunks, f)` splits an exclusive slice into disjoint exclusive chunks and hands each job `&mut [T]`
+  over its own elements, so no element is moved or copied: the same 3M-u64 CPU-bound pass measures
+  94 ms through `pool::for_chunks` (which moves every element into its chunk) against 38 ms in place
+  as one job, 63 ms against 11 ms as eight. The split is `size = ceil(n/chunks)`, chunk `k` being
+  `[k*size, min(n, k*size+size))`, so disjointness and coverage are arithmetic rather than a checked
+  property, and the runtime still asserts the chunk lengths sum to the element count. The element
+  type goes through the same structural walk `parallel_map` uses, asking `transferable`: `&mut
+  [File]` is refused exactly as `&[File]` is. A chunk callback cannot reach outside its chunk:
+  the argument is an exclusive loan of the whole vector, so a capture that could alias that data - a
+  move, a shared slice, a sub-range's slice - is a borrow error at the call site; a captured `&mut
+  [T]` is refused by name (every worker calls one closure); and the slice a callback holds has its
+  own length, so an index past it is a bounds abort. `parallel_spawn(f) -> Job<R>` with
+  `parallel_join(h) -> R` is spawn-then-wait as two statements, on the runtime's existing submit and
+  wait. `Job<R>` is a move-only type kind like `Task<R>`: the closure's environment moves into the
+  job through a heap box the job drops on the worker that ran it, the result is owned and
+  transferable, a callback that captured a borrow is refused (the handle's type records no such
+  lifetime), a job may not return another handle, sharing a handle is denied, and the handle's drop
+  *waits* - so dropping it instead of joining is a wait-and-discard, never a leak or a double free.
+  Nothing reachable from a handle is frame memory and it has exactly one owner, which is why it may
+  outlive the frame and cannot dangle. `lib/pool.grl` wraps all three as `chunks_mut`, `spawn` and
+  `wait`. Native cases: `pool-chunks-mut-split` (uneven, one, zero, more chunks than elements, more
+  chunks than workers, a sub-range, empty, nested chunking, f32/u32/bytes, all by content),
+  `pool-chunks-mut-timing`, `pool-job-handle`, six chunk rejections, four job rejections, the
+  out-of-chunk bounds abort, and the borrowed-closure refusal. No reseed is needed: the compiler's
+  own sources do not call the new builtins.
 - Windows task scheduling is now the same as Linux: a task is green on Windows, not an OS thread.
   One scheduler thread runs the tasks cooperatively, a task runs until it yields or blocks, and
   suspension parks the task rather than the thread. The switch is a Win32 fiber

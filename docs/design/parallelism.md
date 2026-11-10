@@ -502,6 +502,9 @@ both of which are structured.
 | 8 | 98 | 67 | 41 | 11 | 3.7x |
 | default (24) | 100 | 63 | 44 | 12 | 3.7x |
 
+A later run of the committed case itself, at the default worker count, measured 94 / 63 / 38 / 11 ms
+for the same four columns - the same picture, and the reader should expect that few percent.
+
 The copy is what the first two columns pay and the last two do not: one job either way, so
 `owned 1 chunk - in place 1 chunk` is the two moves of every element, 55-60 ms for 3M words (~18 ns
 per element; stage 1 estimated 46-48 ms at 4 mix rounds). `pool-chunks-mut-timing` asserts the
