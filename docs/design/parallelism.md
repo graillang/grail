@@ -50,6 +50,140 @@ cannot transfer job capture `decoder`:
 Classification metadata must survive in exported interfaces (B1) so separate compilation can check it
 later, and so explicit constraints could be added without redesign.
 
+## Stage 3 as built
+
+The derivation is one structural walk in `compiler/native.grl`,
+`transfer_capability(c, ty, shared, trail, depth)`. `shared` selects the question - 0 asks
+`transferable`, 1 asks `shareable` - so both properties come from one recursion that has the same
+shape; only the leaf rule and the borrow rule differ. It is not a trait: nothing is added to any
+signature, no user type can opt in (an opt-in would be a way to erase a restriction), and a type
+nothing knows about is denied.
+
+| Type kind | transferable | shareable |
+|---|---|---|
+| scalars: u64, unit, bytes, string, char, bool, sized int, Atomic, f64; capture-free fn pointer; CancelToken | yes | yes |
+| record / enum / union (8) | every field | every field |
+| vector (6) | element | element |
+| typed slice (27) | element | element, and only a read-only slice |
+| byte view (5) | yes | read-only only |
+| `&T` (7) | shareable(T) | shareable(T) |
+| `&mut T` (7, exclusive) | transferable(T) | no |
+| `Mutex<T>` (13) | transferable(T) | transferable(T) |
+| `Task<R>` (16) | transferable(R) | no |
+| `Scope<C>` (14) | no | no |
+| `byval(R)` (28) | R | R |
+| closure (20) | every capture | every capture |
+| handle (23) | declared `transferable` | declared `shareable` |
+| CStr (24), CPtr/CMutPtr (26), cfn (25) | no | no |
+| capability proof (9) | its transferable bit | its shareable bit |
+
+Three rules carry the review's corrections:
+
+- **A shared reference is only shareable when its referent is.** `&T` hands the holder every method
+  callable through `T`, so if `T` reaches a handle then `&T` is not shareable even though nothing can
+  be written through it. This is why a `&File` capture is refused.
+- **A slice reaches its elements.** The old walk treated a slice as bytes; `&[T]` now classifies as
+  `T`, for the same reason.
+- **A closure's environment is part of its type.** See below.
+
+The walk records which leaf denied (`cap_denial`) and the dotted path that reached it (`cap_segs`),
+so a rejection names a field rather than repeating the whole type.
+
+### The closure environment, and the hole it closed
+
+A closure type (kind 20) carried only its signature, and `parallel_map` checked the item, the result
+and the context but never the closure. So this compiled, and every worker could reach the handle
+through the environment:
+
+```grail
+g := |x: u64, u: u64| -> u64 touch(&h, x);   // plain-data signature, thread-affine capture
+parallel_map(items, 0, g);
+```
+
+Fixed by making the environment part of the closure's identity: `Ty.env` holds the environment
+record (kind 8) the closure is lowered into, interned into the type key, so two closures with one
+signature and different captures are different types - which they already were as layouts. The walk
+classifies every environment field (`__code` and `__drop` too, both plain words) and pushes a
+capture's name onto the path exactly like a record field. A closure that has escaped a job is
+covered by the same rule, because a closure in a result position is just a type of kind 20: what
+crosses is the whole environment, and it must be transferable. A closure that *borrows* its
+environment cannot escape at all, because a borrowed capture puts the lifetimes into the type and
+the existing `contains_borrow` result check refuses it.
+
+`parallel_map` also refuses an `FnMut` callback now: every worker shares one closure object, so a
+callback that writes a capture would have its workers race on the environment.
+
+### Diagnostics
+
+```
+cannot share closure capture `a`: a.file is thread-affine (a foreign handle with no audited classification)
+cannot share closure capture `f`: f is thread-affine (declared transferable, not shareable)
+cannot share parallel_map context: file is thread-affine (a foreign handle with no audited classification)
+cannot share parallel_map context: an exclusive borrow cannot be shared
+cannot transfer spawned result: thread-affine (a foreign handle with no audited classification)
+```
+
+### The audit
+
+A handle states its contract where it is declared - `handle File: transferable;`,
+`handle PhysicalDevice: transferable, shareable;`, `handle Window;` - and nothing declared is
+neither. `shareable` alone is an error, because a value usable on another thread may also be moved
+to it. Default-deny is the point: adding a foreign type to the compiler can never widen what a
+worker may reach.
+
+| Handle | Classification | Why |
+|---|---|---|
+| `sys_grail::File` | transferable | an fd/HANDLE with no wrapper-side state: it may be moved to a worker and closed there. Nothing serializes two users of one, so `close` under another worker's read is a race. |
+| `sys_grail::Socket` | transferable | the same, and the accept-loop-to-worker handoff is the intended use. |
+| `sys_grail::Process` | transferable | wait/kill/close are per-call syscalls on an owned child handle; nothing serializes concurrent calls. |
+| `sys_grail::Thread` | neither | its one correct disposal (join or detach, exactly once) is the creating thread's bookkeeping, and the shim hands every handle out through a `_Thread_local` slot, so acquisition itself is thread-local. |
+| `rhi_vulkan::Instance` | neither | created and destroyed on the thread that owns the display connection - on Linux the surface extension binds an Xlib display, thread-affine without `XInitThreads` - and Vulkan requires every child dead before it. |
+| `rhi_vulkan::PhysicalDevice` | transferable, shareable | owns nothing, has no destructor, and every operation is a query; sharing it puts capability and queue-family queries off the main thread. |
+
+`Device` is not a handle this module has yet. When it becomes one it should be
+**transferable-only**: a `VkDevice` is not thread-bound by the specification, but the queue and
+command pool this wrapper selects with it are main-thread state and Vulkan requires external
+synchronisation around them.
+
+### What a scoped parallel primitive must call
+
+`parallel_map` calls, in order: the callback shape; `require_parallel_closure(c, fty, 1,
+view("closure capture"))`; then `require_capability_named` on the item (0), the result (0) and the
+context (1). A scoped job primitive calls the same two predicates:
+
+```grail
+require_capability_named(&mut c, input_ty, 0, view("job input"));
+require_parallel_closure(&mut c, fty, 1, view("job capture"));  // environment shared by workers
+require_parallel_closure(&mut c, fty, 0, view("job capture"));  // environment moves to one worker
+require_capability_named(&mut c, result_ty, 0, view("job result"));
+```
+
+`shared` is 1 when several workers may call the environment at once (`parallel_map`,
+`parallel_for_chunks`) and 0 when the closure moves to exactly one worker (a single job).
+`require_parallel_closure` is one call so a surface cannot do half the job: it refuses an `FnMut`
+environment when it is shared (concurrent workers would race on it) and then classifies every
+capture. Both predicates reset the diagnostic state themselves and fail at the call site, naming the
+field.
+
+### Deliberately not classified
+
+`CStr` (24), `CPtr`/`CMutPtr` (26) and `CFn` (25) stay denied: each reaches foreign memory or code
+nobody has audited, and none of the handles we use needs them to cross a boundary. `CPtr` over
+Grail-owned bytes is the one that plausibly could, but its origin is a call-scoped borrow, so
+whoever audits it must also say what the pointee's lifetime is. The opt-in `Send`/`Share` generic
+bounds are the same walk under their old names; renaming them to `transferable`/`shareable` is a
+language change of its own and is not part of this stage.
+
+### B1
+
+Classification has to survive an exported interface or separate compilation re-derives the safe
+answer for the wrong reason: a module importing `sys_grail::File` would see an opaque declaration
+with `transfer = share = 0` and refuse a move the audit allowed. Nothing is lost today because the
+whole program is one declaration table, and B1 stage 1 emits per-module assembly only. When
+interface files land they must carry `Decl.transfer` and `Decl.share` for every handle, and
+`Ty.env` - the closure environment record, with its field names and types - for every closure type
+that appears in a signature.
+
 ## The safe surface: structured, not free spawn
 
 - **Scoped jobs.** A scope guarantees borrowed inputs outlive the workers and that no worker can still
