@@ -289,7 +289,7 @@ export function compileOnly(compiler, inputs, directory, { target = hostTarget, 
 }
 // backend 'llvm' (or GRAIL_BACKEND=llvm) lowers through compiler/llvm.grl: the compiler writes
 // NAME.s.ll beside NAME.s, clang -O2 compiles it, and the object joins the link.
-export function compileProgram(compiler, inputs, directory, { target = hostTarget, overflow = 'checked', name = 'program', defaultU64 = true, typedRefs = false, runtime = join(root, 'compiler/runtime.grl'), osRuntime = join(root, 'compiler/os-linux.grl'), darwin = join(root, 'compiler/darwin.grl'), frameworks = [], sdk = process.env.GRAIL_SDK, sign = false, backend = process.env.GRAIL_BACKEND ?? 'native', verifyFacts = process.env.GRAIL_VERIFY_FACTS === '1' } = {}) {
+export function compileProgram(compiler, inputs, directory, { target = hostTarget, overflow = 'checked', name = 'program', defaultU64 = true, typedRefs = false, runtime = join(root, 'compiler/runtime.grl'), osRuntime = join(root, 'compiler/os-linux.grl'), darwin = join(root, 'compiler/darwin.grl'), frameworks = [], sdk = process.env.GRAIL_SDK, sign = false, backend = process.env.GRAIL_BACKEND ?? 'native', verifyFacts = process.env.GRAIL_VERIFY_FACTS === '1', extra = [] } = {}) {
   targetName(target);
   if (!['checked', 'wrap'].includes(overflow)) throw new Error('overflow must be checked or wrap');
   mkdirSync(directory, { recursive: true });
@@ -300,7 +300,7 @@ export function compileProgram(compiler, inputs, directory, { target = hostTarge
   const llvm = backend === 'llvm';
   if (llvm && !['x86_64', 'aarch64', 'riscv64'].includes(target)) throw new Error('the LLVM backend is implemented for Linux x86_64, aarch64 and riscv64');
   if (verifyFacts && !llvm) throw new Error('--verify-facts checks the LLVM lifter; it needs the llvm backend');
-  command([compiler, ...numeric, ...(llvm ? ['--backend=llvm'] : []), ...(verifyFacts ? ['--verify-facts'] : []), '--target', target, `--overflow=${overflow}`, assembly, ...files]);
+  command([compiler, ...numeric, ...(llvm ? ['--backend=llvm'] : []), ...(verifyFacts ? ['--verify-facts'] : []), ...extra, '--target', target, `--overflow=${overflow}`, assembly, ...files]);
   const linkArgs = linkInputs(readFileSync(assembly, 'utf8'), dirname(resolve(root, inputs[0])));
   if (llvm) {
     const object = join(directory, `${name}.ll.o`);
