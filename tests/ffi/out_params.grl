@@ -1,0 +1,69 @@
+module ffi_out_params;
+
+// Out-parameters: a C function writes a handle or a bare pointer through a slot instead of
+// returning it (the Vulkan/D3D12/Metal create shape). `&mut H` in a declaration is the C `H *`;
+// the borrow is call-scoped, and a binding declared without an initializer starts as null, so the
+// slot always holds a defined word before the call. Every C twin returns a checksum that reads the
+// slot first, so these values change if the slot arrives uninitialized, if it is passed by value,
+// or if the write is not visible to Grail afterwards.
+handle Device;
+handle Queue;
+
+extern "C" lib "shim.o" fn c_out_create(slot: &mut Device, seed: i64) -> i64;
+extern "C" lib "shim.o" as "c_out_create" fn c_out_create_queue(slot: &mut Queue, seed: i64) -> i64;
+extern "C" lib "shim.o" fn c_out_reread(slot: &mut Device) -> i64;
+extern "C" lib "shim.o" fn c_out_id(h: Device) -> i64;
+extern "C" lib "shim.o" fn c_out_seventh(
+    a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, slot: &mut Device
+) -> i64;
+extern "C" lib "shim.o" fn c_out_two(tag: i64, first: &mut Device, second: &mut Queue) -> i64;
+extern "C" lib "shim.o" fn c_out_ptr(slot: &mut CPtr) -> i64;
+extern "C" lib "shim.o" fn c_out_ptr_sum(p: CPtr, n: i64) -> i64;
+extern "C" lib "shim.o" fn c_out_ptr_mut(slot: &mut CMutPtr) -> i64;
+extern "C" lib "shim.o" fn c_out_ptr_list(p: CPtr, n: i64) -> i64;
+extern "C" lib "shim.o" fn c_ptr_fill(p: CMutPtr, n: i64, v: i64) -> unit;
+extern "C" record OutInfo { magic: i64, flags: i64 }
+extern "C" lib "shim.o" fn c_out_info(info: OutInfo, bytes: &[u8], slot: &mut Device) -> i64;
+
+fn main() -> u64 {
+    // No initializer: each slot is null, which is what C reads before it writes.
+    mut dev: Device;
+    mut queue: Queue;
+    mut seventh: Device;
+    mut first: Device;
+    mut second: Queue;
+    mut bytes: CPtr;
+    mut mutable: CMutPtr;
+    mut instance: Device;
+    unsafe {
+        println(c_out_create(&mut dev, 7));
+        println(c_out_id(dev));
+        // A seeded slot keeps its value: C sees the handle the previous call wrote.
+        println(c_out_create(&mut dev, 9));
+        println(c_out_reread(&mut dev));
+        println(c_out_id(dev));
+        // A different opaque handle type through the same C function.
+        println(c_out_create_queue(&mut queue, 3));
+        println(c_out_id(dev));
+        // The out slot as the seventh word argument.
+        println(c_out_seventh(1, 2, 3, 4, 5, 6, &mut seventh));
+        println(c_out_id(seventh));
+        // Two out slots in one call.
+        println(c_out_two(5, &mut first, &mut second));
+        println(c_out_id(first));
+        println(c_out_id(second));
+        // A bare pointer written through `const void **`, read back through the pointer.
+        println(c_out_ptr(&mut bytes));
+        println(c_out_ptr_sum(bytes, 4));
+        // The writable form: C hands back its own buffer, Grail writes through it.
+        println(c_out_ptr_mut(&mut mutable));
+        c_ptr_fill(mutable, 3, 100);
+        println(c_out_ptr_list(mutable, 3));
+        // A create-info record, a byte view and the out slot last, as vkCreateInstance does.
+        info := OutInfo { magic: 100, flags: 7 };
+        data := u8[1, 2, 3];
+        println(c_out_info(info, data, &mut instance));
+        println(c_out_id(instance));
+    }
+    return 0;
+}

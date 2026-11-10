@@ -45,6 +45,7 @@ extern "C" fn c_identity(v: u64) -> u64;
 | `CPtr` / `CMutPtr` | `const void *` / `void *` | one 64-bit pointer |
 | `handle H` | an opaque C token (`uint64_t` by convention) | one 64-bit word |
 | `cfn(P...) -> R` | `R (*)(P...)` | one 64-bit code address |
+| `&mut H` (parameter, `H` a `handle`, `CPtr` or `CMutPtr`) | `H *` / `void **`: a slot the callee writes | one 64-bit pointer |
 | `extern "C" record R` (parameter) | `R *`, the address of the struct's fields | one 64-bit pointer |
 | `extern "C" record R` (result) | `R`, returned by value per the target ABI | registers or a hidden result pointer |
 | `unit` (result only) | `void` | result register ignored |
@@ -53,8 +54,8 @@ Results may be any of the scalar types above, `CStr`, `CPtr`/`CMutPtr`, a `handl
 extern record by value. A view is never a result, because C cannot produce a Grail view record; a
 C function that fills a buffer returns a length or status instead, and the Grail side re-slices.
 
-Anything else — `string`, references, plain (non-`extern "C"`) records, closures — is rejected
-with a diagnostic. The remaining gaps are listed under Limits.
+Anything else — `string`, any other reference shape, plain (non-`extern "C"`) records, closures —
+is rejected with a diagnostic. The remaining gaps are listed under Limits.
 
 ### Bare data pointers
 
@@ -182,6 +183,53 @@ increment: the compiler never frees one, so a program that opens a handle must c
 matching close/free declaration itself, and leaking one is an explicit leak rather than an
 implicit close.
 
+### Out-parameters
+
+A C function sometimes cannot return the object it creates: `vkCreateInstance(..., VkInstance
+*pInstance)` writes the new instance through a slot the caller passes, and so do the D3D12 and Metal
+create functions. A declaration spells that slot as a mutable borrow of a handle or bare pointer
+binding, and the call passes `&mut` of it:
+
+```grail
+handle Instance;
+
+extern "C" lib "shim.o" fn c_create(info: CMutPtr, slot: &mut Instance) -> i32;
+
+fn main() -> u64 {
+    mut instance: Instance;
+    unsafe {
+        c_create(cnull(), &mut instance);
+    }
+    return 0;
+}
+```
+
+- The parameter is the C `H *` / `void **`: one word, the address of the binding's own slot. The
+  callee writes the word; Grail reads the binding afterwards, and no cast or accessor is needed.
+- `&mut` is required. `&H` would be the C `const H *`, which C cannot store through, and is refused
+  with `an extern C out-parameter needs &mut; a shared &H is the C const pointer`.
+- Only `handle`, `CPtr` and `CMutPtr` bindings are out-parameter slots. Every other reference shape
+  — `&mut i64`, `&mut SomeRecord`, `&mut string` — is refused with
+  `an extern C out-parameter must be &mut a handle, CPtr or CMutPtr`.
+- **The initial value is defined.** A handle or bare pointer binding declared without an
+  initializer is null, not uninitialized (`mut instance: Instance;`), so the callee always reads a
+  defined word even if it only writes. A binding that already holds a value keeps it, so a second
+  call sees what the first one wrote; that is also how a slot is seeded. No other type is
+  null-initialized this way: a record or integer binding without an initializer is still
+  uninitialized and still rejected where it is used.
+- The slot is an ordinary mutable borrow. The same binding cannot be handed to one call twice
+  (`borrow conflicts with active access`), and nothing may read or write it while the call runs.
+- The borrow is call-scoped, like a view: the write is visible after the call, and the callee must
+  not keep the pointer. The call still sits inside an `unsafe` block.
+- Only a declaration Grail calls can take one. An `extern "C" fn` *definition* (a C callback) and a
+  `cfn` type declaring `&mut H` are refused by name, because Grail has no deref-assignment: a
+  callback could not store through the pointer C handed it.
+- A handle cannot be constructed at all, not even as null from Grail (`cnull()` is a `CPtr`, and
+  `Slot { instance: cnull() }` is a type mismatch), so a declaration's out-parameter is the way to
+  obtain one. `tests/ffi/out_params.grl` executes it on x86-64, AArch64 and RISC-V 64: every C twin
+  returns a checksum that reads the slot before writing it, so a slot passed by value, an
+  uninitialized slot, or a write Grail does not see all change the printed values.
+
 Argument and result registers are the C ABI's own, per target:
 
 | Target | Integer arguments (up to six) | Result | Call |
@@ -280,6 +328,27 @@ from a green task. `host::pipe` reads and writes wait on the readiness reactor, 
 - On Windows a task is an OS thread (see `concurrency-v1.md`), so a blocking foreign call blocks
   only the task that made it and no handoff is needed.
 
+## Direct calls: calling conventions
+
+A direct call to an `extern "C"` declaration is lowered per platform convention:
+
+| Target | Integer registers | Float registers | Stack |
+| --- | --- | --- | --- |
+| Linux/macOS x86-64 (SysV) | `rdi rsi rdx rcx r8 r9` | `xmm0`-`xmm7` | 8-byte slots after the registers |
+| Windows x86-64 (Win64) | `rcx rdx r8 r9`, by position | `xmm0`-`xmm3`, by position | 32-byte register home area, then slots from the fifth argument |
+| AArch64 (Linux, macOS, Windows) | `x0`-`x7` | `d0`-`d7` / `s0`-`s7` | 8-byte slots |
+| RISC-V 64 (LP64D) | `a0`-`a7` | `fa0`-`fa7`, then integer registers | 8-byte slots |
+
+Parameters and results of direct calls may be `f64` and `f32` (an `f32` crosses as a real
+binary32: narrowed on the way in, widened on the way out), and `i8`..`i32`/`u8`..`u32` (Grail keeps
+them sign- or zero-extended in a word, so they pass as is; results are re-extended after the
+call because C leaves the upper bits unspecified; RV64 receives `u32` sign-extended as its ABI
+requires). Up to 64 argument words are accepted and the outgoing stack area is limited to 2 KiB.
+On macOS arm64, which packs stack arguments by size, a narrow or `f32` argument that would land
+on the stack is refused. RISC-V objects use the hard-float `lp64d` ABI, which Linux C libraries
+use. `tests/ffi/call_abi.grl` executes on x86-64, AArch64 and RISC-V Linux and, through
+`tests/windows-cases.json`, on Windows x86-64 under Wine; Windows ARM64 is checked statically.
+
 ## Limits
 
 ## Direct calls: calling conventions
@@ -308,6 +377,8 @@ Not implemented yet, and each rejected rather than approximated:
 - C-callable callbacks with more than six parameters (C enters them through its register ABI and the
   callback thunk does not read stack arguments yet); macOS callbacks use the
   same SysV/AAPCS64 lowering but are compiled and linked only (no macOS runner);
+- an out-parameter on a C callback or a `cfn` type: only a declaration Grail calls can write a slot
+  (see Out-parameters above);
 - records *passed* by value as arguments (an extern record parameter is the C `R *`; the spelling
   `v: byval R` is decided - see [B7](design/decisions-b2-b6.md#b7-byval-record-parameters-accepted) -
   and implementation follows the separate-compilation work); record
@@ -388,6 +459,8 @@ compiles `tests/ffi/call_scalars.grl` with the FFI build, links the two through 
   reported as link-only.
 
 Rejections are part of the normal native corpus (`tests/native-cases.json`):
-`ffi-reject-safe-call`, `ffi-reject-abi`, `ffi-reject-parameter-type`,
-`ffi-reject-result-type`, `ffi-reject-arity` and `ffi-reject-duplicate`, so every target
+`ffi-reject-safe-call`, `ffi-reject-abi`, `ffi-reject-parameter-type`, `ffi-reject-result-type`,
+`ffi-reject-arity`, `ffi-reject-duplicate`, `ffi-reject-handle-out-slot`,
+`ffi-reject-handle-null-seed`, `ffi-reject-out-shared-borrow`, `ffi-reject-out-scalar`,
+`ffi-reject-out-callback`, `ffi-reject-out-cfn` and `ffi-reject-out-double-borrow`, so every target
 checks the diagnostics on every run of `bun tools/test-native.mjs`.

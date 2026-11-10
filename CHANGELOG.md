@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- FFI out-parameters: a C function can write a handle or bare pointer through a slot the caller owns,
+  spelled as a mutable borrow in the declaration (`slot: &mut Instance`) and `&mut binding` at the
+  call site. That is the Vulkan/D3D12/Metal create shape (`vkCreateInstance(..., VkInstance
+  *pInstance)`), which no result register can express. The parameter is the C `H *`; the callee
+  writes one word into the binding's own slot and Grail reads the binding afterwards. A handle or
+  bare pointer binding declared without an initializer is now null instead of uninitialized, so the
+  callee always reads a defined word and a binding that already holds a value seeds the next call.
+  Only `handle`, `CPtr` and `CMutPtr` slots are out-parameters; a shared `&H`, any other `&mut T`, a
+  C callback parameter and a `cfn` type's parameter are refused with their own diagnostic, and the
+  slot is an ordinary mutable borrow, so one call cannot take it twice
+  (`compiler/native.grl`, `docs/ffi.md`, `tests/ffi/out_params.grl`).
 - `grail profile [--rate N] [--out FILE] -- PROGRAM [ARGS]` samples a compiled Grail program and
   prints a per-function table (`samples`, `share`, `function`, `module`) plus `[unknown]` and
   `total` rows. The sampler is part of the program's runtime, not a wrapper around `perf`: on Linux

@@ -107,6 +107,19 @@ const fixtures = [
       'c_s8', 'c_u16', 'c_u32_above'],
   },
   {
+    // Out-parameters: C writes a handle or a bare pointer through `&mut` slot the Grail side owns,
+    // and the Grail side reads it back. Every C twin checksums the value it found in the slot, so
+    // these values change if the slot arrives uninitialized, if it is passed by value, or if the
+    // write never reaches Grail: 20743/20743, 20763745/20765746/20746 (a seeded slot, then the
+    // same slot again), 20739, 91/91 (the out slot as the seventh word), 819705/8197/12293 (two
+    // slots in one call), 40/100 and 1/1010202 for a `const void **` and a `void **`, and
+    // 28904/28788 for a create-info record with a byte view and the slot last.
+    name: 'out_params',
+    stdout: '20743\n20743\n20763745\n20765746\n20746\n20739\n20746\n91\n91\n819705\n8197\n12293\n40\n100\n1\n1010202\n28904\n28788\n',
+    symbols: ['c_out_create', 'c_out_reread', 'c_out_id', 'c_out_seventh', 'c_out_two',
+      'c_out_ptr', 'c_out_ptr_sum', 'c_out_ptr_mut', 'c_out_ptr_list', 'c_out_info'],
+  },
+  {
     // Dynamic loader hooks: a shared library is loaded by path, two symbols are
     // resolved through dlsym and called through the resolved addresses, then the
     // library is closed. libc is the link input, so the executable is dynamic.
