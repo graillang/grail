@@ -679,6 +679,24 @@ fn socket_short_read<a>(grants: (&a authority::Authority)) {
     host::close(listener);
 }
 
+// Opening the listener is the grant, and a grant that is not a socket grant cannot open one: the
+// daemon's and the client's only doors are `authority::listen` and `authority::connect`, so a
+// program holding process authority reaches neither. Nothing is printed — a failure here aborts the
+// program, which the suite reports — because the reference models the protocol, not this boundary.
+fn grant_checks() {
+    process := authority::process();
+    mut denied = 0;
+    match borg_daemon::listen(&process, 0) {
+        e: authority::Error => { denied = denied + 1; },
+        _ => { }
+    }
+    match borg_client::connect(&process, "127.0.0.1", 1) {
+        e: authority::Error => { denied = denied + 1; },
+        _ => { }
+    }
+    assert(denied == 2);
+}
+
 fn run_case<a, b>(grants: (&a authority::Authority), scenario: (&a borg_json::Json), fallback: (&b [u8])) {
     mut name = text_or(scenario, "name");
     if name.len() == 0 {
@@ -713,6 +731,7 @@ fn main() -> u64 {
         }
         index = index + 1;
     }
+    grant_checks();
     socket_short_read(&grants);
     return 0;
 }
