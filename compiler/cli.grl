@@ -68,6 +68,12 @@ fn copy<a>(x: &a [u8]) -> u8[] {
     }
     return o;
 }
+fn push_bytes<a, b>(out: (&a mut u8[]), s: &b [u8]) -> unit {
+    for i in s.len() {
+        out.push(s[i]);
+    }
+    return ();
+}
 fn path_join<a, b>(dir: &a [u8], name: &b [u8]) -> u8[] {
     if (dir.len() == 0) || eq(view(dir), view(".")) {
         return copy(view(name));
@@ -398,6 +404,99 @@ fn dynamic_link_flags<a, b>(target: &a [u8], inputs: (&b u8[][])) -> u8[][] {
     out.push(copy(view("-L/usr/lib64")));
     return out;
 }
+// ---- split assembly (B1 stage 1) ----
+// With `--split` the compiler writes one assembly file per module plus OUT.parts, which lists them
+// in link order and carries the `// grail-link:` request a single-file build puts at the head of
+// its assembly. The parts are assembled concurrently and linked once.
+struct Split {
+    asm: u8[][],
+    objects: u8[][],
+    link: u8[][]
+}
+fn with_object_ext<a>(path: &a [u8]) -> u8[] {
+    mut n = path.len();
+    if (n > 1) & (path[n - 1] == 115) & (path[n - 2] == 46) {
+        n = n - 2;
+    }
+    mut out = u8[];
+    for i in n {
+        out.push(path[i]);
+    }
+    push_bytes(&mut out, view(".o"));
+    return out;
+}
+fn read_split<a, b>(manifest: &a [u8], base: &b [u8]) -> Split {
+    text := host::read_file(view(manifest));
+    mut parts = u8[][];
+    rows := lines(view(text));
+    for i in rows.len() {
+        row := item(&rows, i);
+        if (row.len() != 0) & !starts(view(row), view("//")) {
+            parts.push(copy(view(row)));
+        }
+    }
+    mut objects = u8[][];
+    for i in parts.len() {
+        part := item(&parts, i);
+        objects.push(with_object_ext(view(part)));
+    }
+    return Split { asm: parts, objects: objects, link: link_inputs(view(manifest), view(base)) };
+}
+// Quote one argument for `sh -c`: single quotes keep every byte except a quote itself, which the
+// usual close-escape-reopen sequence carries.
+fn sh_word<a, b>(out: (&a mut u8[]), word: &b [u8]) -> unit {
+    out.push(39);
+    for i in word.len() {
+        b := word[i];
+        if b == 39 {
+            out.push(39);
+            out.push(92);
+            out.push(39);
+            out.push(39);
+        } else {
+            out.push(b);
+        }
+    }
+    out.push(39);
+    return ();
+}
+// Assemble every part at once: one assembler process per part, waited on together, so a build with
+// many modules pays for the slowest one instead of their sum. The driver has no process API of its
+// own, so the parallelism comes from the shell; a failure in any part fails the build.
+fn assemble_parts<a, b, d>(prefix: (&a u8[][]), parts: (&b u8[][]), objects: (&d u8[][])) -> u64 {
+    mut script = u8[];
+    push_bytes(&mut script, view("set -e\npids=''\n"));
+    for i in parts.len() {
+        for j in prefix.len() {
+            word := item(&prefix, j);
+            sh_word(&mut script, view(word));
+            script.push(32);
+        }
+        source := item(&parts, i);
+        object := item(&objects, i);
+        sh_word(&mut script, view(source));
+        push_bytes(&mut script, view(" -o "));
+        sh_word(&mut script, view(object));
+        push_bytes(&mut script, view(" &\npids=\"$pids $!\"\n"));
+    }
+    push_bytes(&mut script, view("for p in $pids; do wait \"$p\" || exit 1; done\n"));
+    mut command = u8[][copy(view("sh")), copy(view("-c")), script];
+    return host::command(command);
+}
+// A --check build removes what the compiler wrote instead of publishing it.
+fn remove_split<a>(output: &a [u8]) -> unit {
+    manifest := cat(view(output), view(".parts"));
+    text := host::read_file(view(manifest));
+    rows := lines(view(text));
+    for i in rows.len() {
+        row := item(&rows, i);
+        if (row.len() != 0) & !starts(view(row), view("//")) {
+            host::remove(view(row), 0);
+        }
+    }
+    host::remove(view(manifest), 0);
+    return ();
+}
 fn target_name(t: u64) -> u8[] {
     if t == 1 {
         return copy(view("aarch64"));
@@ -440,6 +539,7 @@ fn compile_mode<a, b, d, e, g>(
     check_only := flags % 2;
     debug := (flags / 2) % 2;
     deny := (flags / 4) % 2;
+    split := (flags / 8) % 2;
     asm := cat(view(output), view(".s"));
     object := cat(view(output), view(".o"));
     mut command = u8[][
@@ -452,6 +552,9 @@ fn compile_mode<a, b, d, e, g>(
     }
     if deny != 0 {
         command.push(copy(view("--deny-ambient-host")));
+    }
+    if split != 0 {
+        command.push(copy(view("--split")));
     }
     command.push(copy(view(asm)));
     command.push(copy(view(entry)));
@@ -481,7 +584,11 @@ fn compile_mode<a, b, d, e, g>(
         return 1;
     }
     if check_only != 0 {
-        host::remove(view(asm), 0);
+        if split != 0 {
+            remove_split(view(output));
+        } else {
+            host::remove(view(asm), 0);
+        }
         return 0;
     }
     if eq(view(target), view("windows-x86_64")) {
@@ -515,6 +622,9 @@ fn compile_mode<a, b, d, e, g>(
     }
     assemble.push(triple);
     assemble.push(copy(view("-c")));
+    if split != 0 {
+        return build_split(view(dirname(view(entry))), view(output), view(target), view(emulation), &assemble);
+    }
     assemble.push(copy(view(asm)));
     assemble.push(copy(view("-o")));
     assemble.push(copy(view(object)));
@@ -569,6 +679,58 @@ fn compile_mode<a, b, d, e, g>(
         link.push(item(&inputs, i));
     }
     dynamic := dynamic_link_flags(view(target), &inputs);
+    for i in dynamic.len() {
+        link.push(item(&dynamic, i));
+    }
+    link.push(copy(view("-o")));
+    link.push(copy(view(output)));
+    if host::command(link) != 0 {
+        say(view("grail: linking failed (needs ld.lld)"));
+        return 1;
+    }
+    return 0;
+}
+// A --split build: the compiler already wrote one assembly file per module and the manifest that
+// lists them; assemble them concurrently and link them once, in manifest order.
+fn build_split<a, b, d, e, g>(
+    base: &a [u8],
+    output: &b [u8],
+    target: &d [u8],
+    emulation: &e [u8],
+    prefix: (&g u8[][])
+) -> u64 {
+    if is_macho(view(target)) {
+        say(view("grail: --split is implemented for Linux x86_64, aarch64 and riscv64"));
+        return 1;
+    }
+    manifest := cat(view(output), view(".parts"));
+    text := host::read_file(view(manifest));
+    if !starts(view(text), view("// grail-parts 1")) {
+        say(view("grail: missing or unreadable parts manifest "));
+        say(view(manifest));
+        return 1;
+    }
+    parts := read_split(view(manifest), view(base));
+    if parts.asm.len() == 0 {
+        say(view("grail: the parts manifest lists no modules"));
+        return 1;
+    }
+    if assemble_parts(&prefix, &parts.asm, &parts.objects) != 0 {
+        say(view("grail: assembling failed (needs clang)"));
+        return 1;
+    }
+    mut link = u8[][
+        tool(view("GRAIL_LINKER"), view("ld.lld")),
+        copy(view("-m")),
+        copy(view(emulation))
+    ];
+    for i in parts.objects.len() {
+        link.push(item(&parts.objects, i));
+    }
+    for i in parts.link.len() {
+        link.push(item(&parts.link, i));
+    }
+    dynamic := dynamic_link_flags(view(target), &parts.link);
     for i in dynamic.len() {
         link.push(item(&dynamic, i));
     }
@@ -647,6 +809,7 @@ struct Options {
     check: u64,
     debug: u64,
     deny: u64,
+    split: u64,
     paths: u8[][]
 }
 fn options<a>(args: (&a u8[][])) -> Options {
@@ -658,6 +821,7 @@ fn options<a>(args: (&a u8[][])) -> Options {
         check: 0,
         debug: 0,
         deny: 0,
+        split: 0,
         paths: u8[][],
     };
     mut i = 0;
@@ -687,11 +851,16 @@ fn options<a>(args: (&a u8[][])) -> Options {
                             if eq(view(a), view("--deny-ambient-host")) {
                                 o.deny = 1;
                             } else {
+                            if eq(view(a), view("--split")) {
+                                // One object per module, assembled concurrently (B1 stage 1).
+                                o.split = 1;
+                            } else {
                             if ends(view(a), view(".grl")) & (o.file.len() == 0) {
                                 o.file = copy(view(a));
                                 o.paths.push(a);
                             } else {
                                 o.paths.push(a);
+                            }
                             }
                             }
                             }
@@ -716,7 +885,7 @@ fn build<a, b>(args: (&a u8[][]), o: (&b mut Options)) -> u64 {
             o.output = path_join(view("target"), view(stem));
         }
         mut none = u8[][];
-        return compile(&h, view(o.file), &none, view(o.output), view(o.target), o.debug * 2 + o.deny * 4);
+        return compile(&h, view(o.file), &none, view(o.output), view(o.target), o.debug * 2 + o.deny * 4 + o.split * 8);
     }
     p := load_project();
     if p.name.len() == 0 {
@@ -727,7 +896,7 @@ fn build<a, b>(args: (&a u8[][]), o: (&b mut Options)) -> u64 {
         o.output = path_join(view("target"), view(p.name));
     }
     modules := project_modules(&p, 1);
-    return compile(&h, view(p.entry), &modules, view(o.output), view(o.target), o.debug * 2 + o.deny * 4);
+    return compile(&h, view(p.entry), &modules, view(o.output), view(o.target), o.debug * 2 + o.deny * 4 + o.split * 8);
 }
 fn check_command<a>(args: (&a u8[][])) -> u64 {
     o := options(&args);
@@ -741,7 +910,7 @@ fn check_command<a>(args: (&a u8[][])) -> u64 {
         stem := basename(view(o.file));
         out := path_join(view("target"), view(stem));
         mut none = u8[][];
-        status = compile_mode(&h, view(o.file), &none, view(out), view(o.target), 1 + o.debug * 2 + o.deny * 4);
+        status = compile_mode(&h, view(o.file), &none, view(out), view(o.target), 1 + o.debug * 2 + o.deny * 4 + o.split * 8);
     } else {
         p := load_project();
         if p.name.len() == 0 {
@@ -750,7 +919,7 @@ fn check_command<a>(args: (&a u8[][])) -> u64 {
         }
         out := path_join(view("target"), view(p.name));
         modules := project_modules(&p, 1);
-        status = compile_mode(&h, view(p.entry), &modules, view(out), view(o.target), 1 + o.debug * 2 + o.deny * 4);
+        status = compile_mode(&h, view(p.entry), &modules, view(out), view(o.target), 1 + o.debug * 2 + o.deny * 4 + o.split * 8);
     }
     if status == 0 {
         say(view("ok"));
@@ -812,7 +981,7 @@ fn test_command<a>(args: (&a u8[][])) -> u64 {
         host::print(view("test "));
         host::print(view(f));
         host::print(view(" ... "));
-        mut status = compile(&h, view(f), &modules, view(out), view(o.target), o.debug * 2 + o.deny * 4);
+        mut status = compile(&h, view(f), &modules, view(out), view(o.target), o.debug * 2 + o.deny * 4 + o.split * 8);
         if status == 0 {
             exe := path_join(view("."), view(out));
             status = host::command(u8[][exe]);
@@ -1595,7 +1764,7 @@ fn profile_command<a>(args: (&a u8[][])) -> u64 {
 fn help() {
     say(view("grail - the Grail compiler and project tool\n"));
     say(view("usage:"));
-    say(view("  grail build [FILE.grl] [-o OUT] [--target x86_64|aarch64|riscv64|macos-x86_64|macos-aarch64]"));
+    say(view("  grail build [FILE.grl] [-o OUT] [--target x86_64|aarch64|riscv64|macos-x86_64|macos-aarch64] [--split]"));
     say(view("  grail check [FILE.grl]            type-check without building"));
     say(view("  grail debug lines|info BINARY     print DWARF line rows or .debug_info"));
     say(view("  grail profile [--rate N] [--out FILE] -- PROGRAM [ARGS]   sampling profile"));

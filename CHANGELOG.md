@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+- B1 stage 1, per-module emission: `grail build --split` writes one assembly file per module
+  (`OUT.NNN.module.s`) plus `OUT.parts`, assembles the parts concurrently and links them once,
+  instead of one `.s` for the whole program. Emission is still a single pass — the optimizer inlines
+  across modules and generic specialisations are emitted at the module that defines the generic — so
+  the compiler records a `.grail_part <module>` marker where the module changes, the optimizer
+  reports the offset each marker landed at (also after its inlining pass rewrites the stream), and
+  the writer cuts the finished stream at those offsets. Splitting therefore copies nothing and the
+  compile time is unchanged; what the parts cannot own goes to one synthetic `__start` part: the
+  entry stub, `rt_state`, the TLS bases and `.note.GNU-stack`. String literals travel with the
+  function that emits them (`.pushsection .rodata`/`.popsection` inside a module's own code), so
+  there is no program-wide literal pool to duplicate or pool. Two things differ from the single-file
+  build, both inherent to linking several objects: with `--split` a function another part calls is
+  `.globl` (names, sizes and order unchanged; in the compiler's own build the symbol table is the
+  same size and `sh_info` moves 2366 → 1139), and the linker inserts alignment padding between input
+  sections (15 bytes across nine boundaries for the compiler, a few bytes for small programs). Code
+  and data bytes do not change. A whole-program build is untouched: no `--split`, the same compiler,
+  the same `.s`, byte for byte. Scope is the Linux x86-64 assembler path, without `--debug` and
+  `--backend=llvm`; other targets keep the whole-program build because `machine::lower` rewrites the
+  stream after the optimizer. `bun tools/split-test.mjs` (also `just test-split`, and a CI job)
+  proves it on the book's `modules` example, a generic-heavy native corpus case and the compiler
+  itself: the parts minus their `.text` prologue and the added `.globl` lines concatenate to the
+  single assembly file byte for byte, the concatenated objects have the single object's `.text`
+  length and match outside relocation fields, the linked programs have the same `.rodata`/`.data`/
+  `.bss`, the same symbols and the same output, and `grail build --split` agrees with `grail build`.
+  Measured on the compiler compiling itself (10 modules, 33 MB of assembly): compile 15.6–15.8 s →
+  15.7–15.9 s, assemble 1.62–1.65 s → 0.99–1.02 s (−38 %), link 18–19 ms → 21–22 ms, total ~17.3 s →
+  ~16.8 s. See `docs/design/separate-compilation.md`, "Stage 1 as built".
 - RHI increment 2: `abundance/src/rhi_vulkan.grl` creates a real `VkInstance` and picks a real
   physical device. `vkCreateInstance` is called through the FFI's out-parameter form — `slot: &mut
   Instance` in the declaration, `&mut instance` at the call site — with `VkInstanceCreateInfo` as an
