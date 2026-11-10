@@ -328,10 +328,13 @@ as Linux ELF (clone/futex), so the portable test itself is cross-checked. For ev
   handlers) need hand-written thunks that save `%rdi/%rsi/%rbx/%r12-%r15`.
 - **Integer-only import arguments.** `raw_win32` passes pointer/integer words; floating-point
   and aggregate parameters or returns are not implemented, and there is no variadic support.
-- **Runtime services**: x86-64 threads, joins and address waits work, and `Scope`/`Task` is
-  implemented as thread-per-task (`rt_threaded()` in `runtime.grl`): each task is an OS thread, a
-  suspension is a `WaitOnAddress` park, `host::sleep_ms` sleeps that thread and `rt_wait_fd` returns
-  immediately, because there is no epoll, eventfd or timerfd and no stack switching. Sockets,
+- **Runtime services**: x86-64 threads, joins and address waits work, and `Scope`/`Task` runs the
+  same green scheduler as Linux (`rt_os_ctx_*` in `os-windows.grl`, selected by `rt_task_mode()` in
+  `runtime.grl`): a task is a Win32 fiber on one scheduler thread, a suspension is a `SwitchToFiber`
+  back to it, and the blocking host operations (`host::read_file`, `host::write_file`,
+  `host::command`, `host::read_fd`, `host::write_fd`, `host::sleep_ms`) run on a helper thread while
+  the task parks, because there is no epoll, eventfd or timerfd. `GRAIL_TASKS=thread` restores the
+  old thread-per-task scheduler as an opt-in. Sockets,
   directory listing, `exe_path` (`GetModuleFileNameA` is not wired) and `mremap` are missing. Environment lookups walk the
   pointer table built from `GetEnvironmentStringsA`; `GetEnvironmentVariableA` is unused.
 - **ANSI paths only.** `CreateFileA`/`GetFileAttributesA` truncate non-ANSI names to the active
@@ -344,8 +347,9 @@ as Linux ELF (clone/futex), so the portable test itself is cross-checked. For ev
 1. Exception personality and panics: `RaiseException` plus a handler, then unwinding through
    drop thunks (their conditional prologue needs reshaping before any description is valid).
 2. Optimizer support for the `.def` function form, including describing promoted registers.
-3. Threads: an ARM64 bridge (x86-64 `CreateThread`, joins, address waits and the thread-per-task
-   `Scope`/`Task` scheduler are done; an IOCP reactor is not implemented).
+3. Threads: a `CreateFiberEx`/`SwitchToFiber` bridge for ARM64 (the x86-64 fiber scheduler,
+   `CreateThread`, joins and address waits are done; an IOCP reactor is not implemented and the
+   runtime offloads a blocking host operation to a helper thread instead).
 4. Allocation: `mremap` emulation by allocate-copy-release and a Windows-aware arena policy.
 5. Files and processes: directory streams (`FindFirstFileA`), `GetModuleFileNameA`,
    `MoveFileA`/remove semantics, and the `*W` APIs with UTF-16 conversion.

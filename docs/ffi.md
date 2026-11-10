@@ -323,12 +323,17 @@ live owner in an unknown state.
 
 ## Blocking foreign calls
 
-**A foreign call blocks the executing task thread.** On Linux that thread is a worker of the green
-task pool, so while the call blocks, that worker runs no other task; with more blocking tasks than
-workers, the extra tasks wait. Only the runtime's own blocking operations hand off to a dedicated
-thread: `host::read_file`, `host::write_file` and `host::command`, and only when they are called
-from a green task. `host::pipe` reads and writes wait on the readiness reactor, and
-`host::sleep_ms` uses a timer, so those suspend instead of blocking.
+**A foreign call blocks the executing task.** A task is a green task on every platform - a
+suspended stack on a scheduler thread, not a thread of its own (see `concurrency-v1.md`) - so a
+call that blocks occupies the scheduler thread that was running the task, and while it blocks, that
+thread runs no other task. With more blocking tasks than scheduler threads (Linux runs one per CPU,
+clamped to 4-64; Windows runs one), the extra tasks wait. Only the runtime's own blocking operations
+hand off to a dedicated thread: `host::read_file`, `host::write_file`, `host::command`,
+`host::read_fd`, `host::write_fd` and `host::sleep_ms`, and only when they run inside a task. On
+Linux `host::read_fd`/`host::write_fd` wait on the readiness reactor and `host::sleep_ms` uses a
+timer, so those suspend; on Windows there is no reactor, so those calls are handed to a helper
+thread and the task parks on it. Either way the task, not the scheduler thread, waits, so the
+observable behaviour is the same on both platforms.
 
 - An `extern "C"` call, or a call through a `cfn` value, is not wrapped by the compiler: it runs on
   the calling task's thread and blocks it for as long as the C function runs. Nothing in the
@@ -341,8 +346,46 @@ from a green task. `host::pipe` reads and writes wait on the readiness reactor, 
 - The way out is the documented handoff: `rt_blocking_call(f, a, b)` runs `f(a, b)` on a dedicated
   OS thread and suspends the task, so the worker stays available. That is exactly what
   `host::read_file`, `host::write_file` and `host::command` do.
-- On Windows a task is an OS thread (see `concurrency-v1.md`), so a blocking foreign call blocks
-  only the task that made it and no handoff is needed.
+- The blocking contract above holds on Linux and on Windows alike, because a task is green on
+  both. The one difference is what a blocked task costs: on Linux a scheduler thread, on Windows
+  the single scheduler thread. In the opt-in thread-per-task mode (`GRAIL_TASKS=thread`, see
+  `concurrency-v1.md`) a task is an OS thread, so a blocking foreign call blocks only the task that
+  made it and no handoff is needed - and none of the suspension guarantees above apply.
+
+### Task scheduling is the same on both platforms
+
+A `spawn`ned task is a green task everywhere: it runs on a scheduler thread until it yields or
+blocks, and suspension parks the task rather than the thread. A program may rely on exactly that
+observable contract on every target:
+
+- `sleep_ms`, `read_fd`, `write_fd` and the blocking host operations park the calling task, so
+  other tasks keep running;
+- `join`, task-scope exit and cancellation behave identically;
+- the interleaving *order* of two tasks is not a guarantee, and portable code must not rely on it.
+  Linux works the run queue with one scheduler thread per CPU (clamped to 4-64), so two ready tasks
+  can run at the same time; Windows has one scheduler thread, so its queue is FIFO and the
+  interleaving is deterministic. A program that leans on Windows' FIFO order is as unportable as
+  one that leans on Linux' parallelism.
+
+What differs is only the mechanism, and it lives in the platform module:
+
+| | Linux (`os-linux.grl`) | Windows (`os-windows.grl`) |
+| --- | --- | --- |
+| Task stack | 256 KiB mapping with a guard page, `raw_switch` swaps stacks | Win32 fiber (`CreateFiberEx`), `SwitchToFiber` swaps contexts |
+| Scheduler threads | one per CPU, clamped to 4-64 | one |
+| Readiness | epoll + eventfd/timerfd reactor | none: the blocking host operation runs on a helper thread and the task parks (`rt_offload`) |
+| `host::sleep_ms` | timerfd arm + park | `Sleep` on a helper thread + park |
+| `rt_wait_fd` | parks on the epoll registration | reports ready; the parked task is inside the offloaded operation instead |
+
+`GRAIL_TASKS=thread` selects the opt-in **thread-per-task** scheduler instead, on any platform. It
+is a different semantic, not a faster one: each task is its own OS thread, a task that never yields
+still makes progress beside another, suspension blocks that task's thread, `rt_wait_fd` returns
+immediately because the ready task performs the blocking call on its own thread, and
+`rt_reactor_fence` is a no-op. It is the right choice for CPU-bound fan-out once there is a
+`Send`/`Sync` check to keep shared memory out of it; there is none yet, so two tasks can mutate the
+same memory at once and the compiler says nothing. Under the default green scheduler that race is
+much narrower (one task at a time on the Windows scheduler thread) but not absent on Linux, so this
+mode does not introduce a new kind of unsoundness - it makes an existing hazard easy to hit.
 
 ## Direct calls: calling conventions
 

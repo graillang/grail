@@ -1,0 +1,30 @@
+// A task calling host::read_file must not stall the others: the runtime hands the blocking file I/O
+// to an offload thread and parks the task (rt_blocking_call -> rt_offload), on Windows exactly as
+// on Linux. The reader task reads a file that main wrote, then reads a word that another task sets
+// while the reader is parked. If read_file had blocked the scheduler instead of the task, the other
+// task would not have run yet and the reader would see 0: the joined sum (5 * 100 + 10 bytes + 1)
+// is what proves the order.
+unsafe module runtime;
+use host;
+fn reader(n: u64, word: u64) -> u64 {
+    text := host::read_file(view("offload-probe.txt"));
+    bytes := text.len();
+    rt_drop_seq(text);
+    return rt_atomic_load(word) * 100 + bytes + n;
+}
+fn writer(n: u64, word: u64) -> u64 {
+    rt_atomic_store(word, 5);
+    return n;
+}
+fn body<s>(sc: (&s Scope<u64>), word: u64) -> u64 {
+    slow := spawn(sc, 1, reader);
+    fast := spawn(sc, 1, writer);
+    return join(slow) + join(fast);
+}
+fn main() {
+    assert(host::write_file(view("offload-probe.txt"), view("0123456789")) == 0);
+    word := rt_alloc(8);
+    raw_store(word, 0);
+    println(task_scope(word, body));
+    rt_free(word);
+}

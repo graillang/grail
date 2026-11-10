@@ -1,3 +1,5 @@
+# Changelog
+
 ## Unreleased
 
 - RHI increment 3: `abundance/src/rhi_surface.grl` (new) creates a real `VkSurfaceKHR` from the
@@ -33,6 +35,33 @@
   record Grail owns, and the submit/present arrays are arrays of *handles*, which cannot even be
   seeded. The probe reports `rhi.swapchain.result frames 0 of 3` plus one `unavailable` line per
   blocked call rather than pretending; docs/rhi.md lists the calls and what each one needs.
+- Windows task scheduling is now the same as Linux: a task is green on Windows, not an OS thread.
+  One scheduler thread runs the tasks cooperatively, a task runs until it yields or blocks, and
+  suspension parks the task rather than the thread. The switch is a Win32 fiber
+  (`CreateFiberEx`/`SwitchToFiber`/`DeleteFiber`/`ConvertThreadToFiber`, declared in
+  `compiler/os-windows.grl`, since `raw_switch` is not lowered for the PE targets) and the run queue
+  parks on the same address wait (`WaitOnAddress`/`WakeByAddressAll`) the Linux build uses for its
+  idle word. Windows has no epoll/eventfd/timerfd, so the platform reports no reactor
+  (`rt_os_reactor()` = 0) and the runtime parks tasks *inside* blocking host operations instead:
+  `host::read_file`, `host::write_file`, `host::command`, `host::read_fd`, `host::write_fd` and
+  `host::sleep_ms` run the blocking call on a helper thread (`rt_offload`) and suspend the task, so
+  another task keeps running, exactly as the reactor does on Linux. What is now identical:
+  `spawn`/`join`/`task_scope`/`parallel_map`, cancellation, scope-exit joining, the run-until-it-
+  yields-or-blocks rule, and the blocking-operation handoff. What still differs: Linux works the
+  queue with one scheduler thread per CPU (4-64) so two ready tasks can run at once, while Windows
+  has one thread and therefore a FIFO, deterministic interleaving; task stack cost is 256 KiB of
+  mapping on Linux and a 64 KiB-in-256 KiB fiber on Windows. The previous thread-per-task scheduler
+  is kept as an explicit opt-in, `GRAIL_TASKS=thread`, on every platform: each task then owns an OS
+  thread, a task that never yields still progresses, suspension blocks that thread, `rt_wait_fd`
+  returns immediately and `rt_reactor_fence` is a no-op. It is the better shape for CPU-bound
+  fan-out once a `Send`/`Sync` check exists; there is none yet, so it is not the default. A program
+  ported from Linux keeps its task semantics and must only stop relying on global interleaving
+  order. Verified by execution under Wine (`bun tools/windows.mjs check`):
+  `tasks-scope-and-parallel-map`, `tasks-sleep-overlap`, and the new `tasks-interleave-at-yield`
+  (deterministic FIFO interleaving at yields), `tasks-sleep-progress` (a parked sleeper does not
+  stop another task), `tasks-read-file-offload` (`host::read_file` from a task offloads and another
+  task runs) and `tasks-thread-mode` (the opt-in mode still runs). The same four programs are also
+  executed as Linux ELF where their result is platform-independent.
 - B1 stage 1, per-module emission: `grail build --split` writes one assembly file per module
   (`OUT.NNN.module.s`) plus `OUT.parts`, assembles the parts concurrently and links them once,
   instead of one `.s` for the whole program. Emission is still a single pass — the optimizer inlines
