@@ -213,8 +213,8 @@ fn rt_new() -> u64 {
     return rt_alloc(24);
 }
 fn rt_push(s: u64, v: u64) -> u64 {
-    n := raw_load(s + 8);
-    cap := raw_load(s + 16);
+    n := raw_load(wrapping_add(s, 8));
+    cap := raw_load(wrapping_add(s, 16));
     if n == cap {
         mut capacity = cap * 2;
         if capacity == 0 {
@@ -225,10 +225,10 @@ fn rt_push(s: u64, v: u64) -> u64 {
         }
         ptr := rt_grow(raw_load(s), n * 8, capacity * 8);
         raw_store(s, ptr);
-        raw_store(s + 16, capacity);
+        raw_store(wrapping_add(s, 16), capacity);
     }
-    raw_store(raw_load(s) + n * 8, v);
-    raw_store(s + 8, n + 1);
+    raw_store(wrapping_add(raw_load(s), wrapping_mul(n, 8)), v);
+    raw_store(wrapping_add(s, 8), n + 1);
     return 0;
 }
 // Byte sequences (bytes, string, views) store one byte per element; vectors store words.
@@ -240,14 +240,14 @@ fn rt_fill(s: u64, v: u64, n: u64) -> u64 {
     if n != 0 {
         ptr := rt_grow(raw_load(s), 0, n * 8);
         raw_store(s, ptr);
-        raw_store(s + 16, n);
+        raw_store(wrapping_add(s, 16), n);
     }
     mut i: u64 = 0;
     while i < n {
-        raw_store(raw_load(s) + i * 8, v);
+        raw_store(wrapping_add(raw_load(s), wrapping_mul(i, 8)), v);
         i = i + 1;
     }
-    raw_store(s + 8, n);
+    raw_store(wrapping_add(s, 8), n);
     return 0;
 }
 // `u8[v; n]`: n copies of a byte; stops the program when v does not fit a byte.
@@ -258,20 +258,20 @@ fn rt_fillb(s: u64, v: u64, n: u64) -> u64 {
     rt_reserveb(s, n);
     mut i: u64 = 0;
     while i < n {
-        raw_putbyte(raw_load(s) + i, v);
+        raw_putbyte(wrapping_add(raw_load(s), i), v);
         i = i + 1;
     }
-    raw_store(s + 8, n);
+    raw_store(wrapping_add(s, 8), n);
     return 0;
 }
 fn rt_pushb(s: u64, v: u64) -> u64 {
-    n := raw_load(s + 8);
-    cap := raw_load(s + 16);
+    n := raw_load(wrapping_add(s, 8));
+    cap := raw_load(wrapping_add(s, 16));
     if n == cap {
         rt_reserveb(s, n + 1);
     }
-    raw_putbyte(raw_load(s) + n, v & 255);
-    raw_store(s + 8, n + 1);
+    raw_putbyte(wrapping_add(raw_load(s), n), v & 255);
+    raw_store(wrapping_add(s, 8), n + 1);
     return 0;
 }
 // `bytes.push(v)` from user code: stops the program when v does not fit a byte.
@@ -283,7 +283,7 @@ fn rt_pushb_checked(s: u64, v: u64) -> u64 {
 }
 // Grows a byte sequence's capacity to at least `need` bytes (doubling, minimum 16).
 fn rt_reserveb(s: u64, need: u64) -> u64 {
-    cap := raw_load(s + 16);
+    cap := raw_load(wrapping_add(s, 16));
     if need < cap + 1 {
         return 0;
     }
@@ -297,10 +297,10 @@ fn rt_reserveb(s: u64, need: u64) -> u64 {
     if 1152921504606846976 < capacity {
         rt_abort();
     }
-    n := raw_load(s + 8);
+    n := raw_load(wrapping_add(s, 8));
     ptr := rt_grow(raw_load(s), n, capacity);
     raw_store(s, ptr);
-    raw_store(s + 16, capacity);
+    raw_store(wrapping_add(s, 16), capacity);
     return 0;
 }
 // Copies n bytes, a word at a time while possible.
@@ -318,18 +318,18 @@ fn rt_copy_bytes(dst: u64, src: u64, n: u64) -> u64 {
 }
 // Shortens a byte vector to `keep` bytes; a no-op when it is already that short (as for T[]).
 fn rt_bytes_truncate(s: u64, keep: u64) -> u64 {
-    if keep < raw_load(s + 8) {
-        raw_store(s + 8, keep);
+    if keep < raw_load(wrapping_add(s, 8)) {
+        raw_store(wrapping_add(s, 8), keep);
     }
     return 0;
 }
 fn rt_popb(s: u64) -> u64 {
-    n := raw_load(s + 8);
+    n := raw_load(wrapping_add(s, 8));
     if n == 0 {
         rt_abort();
     }
-    v := raw_byte(raw_load(s) + n - 1);
-    raw_store(s + 8, n - 1);
+    v := raw_byte(wrapping_add(raw_load(s), n - 1));
+    raw_store(wrapping_add(s, 8), n - 1);
     return v;
 }
 // Compiler-owned map construction requests fresh Linux entropy, never clock-derived seeds.
@@ -354,42 +354,42 @@ fn rt_random_seed() -> u64 {
 
 // Unchecked accessors, used only where the compiler proved the index is in bounds.
 fn rt_slotu(s: u64, i: u64) -> u64 {
-    return raw_load(s) + i * 8;
+    return wrapping_add(raw_load(s), wrapping_mul(i, 8));
 }
 // The address of byte i of a sequence or view (both start {ptr, len}), bounds-checked.
 fn rt_slotb(s: u64, i: u64) -> u64 {
-    if (i < raw_load(s + 8)) == 0 {
+    if (i < raw_load(wrapping_add(s, 8))) == 0 {
         rt_abort();
     }
-    return raw_load(s) + i;
+    return wrapping_add(raw_load(s), i);
 }
 fn rt_atbu(s: u64, i: u64) -> u64 {
-    return raw_byte(raw_load(s) + i);
+    return raw_byte(wrapping_add(raw_load(s), i));
 }
 fn rt_atb(s: u64, i: u64) -> u64 {
-    if (i < raw_load(s + 8)) == 0 {
+    if (i < raw_load(wrapping_add(s, 8))) == 0 {
         rt_abort();
     }
-    return raw_byte(raw_load(s) + i);
+    return raw_byte(wrapping_add(raw_load(s), i));
 }
 fn rt_pop(s: u64) -> u64 {
-    n := raw_load(s + 8);
+    n := raw_load(wrapping_add(s, 8));
     if n == 0 {
         rt_abort();
     }
-    v := raw_load(raw_load(s) + (n - 1) * 8);
-    raw_store(raw_load(s) + (n - 1) * 8, 0);
-    raw_store(s + 8, n - 1);
+    v := raw_load(wrapping_add(raw_load(s), wrapping_mul(n - 1, 8)));
+    raw_store(wrapping_add(raw_load(s), wrapping_mul(n - 1, 8)), 0);
+    raw_store(wrapping_add(s, 8), n - 1);
     return v;
 }
 fn rt_len(s: u64) -> u64 {
-    return raw_load(s + 8);
+    return raw_load(wrapping_add(s, 8));
 }
 fn rt_slot(s: u64, i: u64) -> u64 {
-    if (i < raw_load(s + 8)) == 0 {
+    if (i < raw_load(wrapping_add(s, 8))) == 0 {
         rt_abort();
     }
-    return raw_load(s) + i * 8;
+    return wrapping_add(raw_load(s), wrapping_mul(i, 8));
 }
 fn rt_take(s: u64, i: u64) -> u64 {
     p := rt_slot(s, i);
@@ -402,33 +402,33 @@ fn rt_at(s: u64, i: u64) -> u64 {
 }
 fn rt_write(s: u64, i: u64, v: u64) -> u64 {
     // A byte store stops the program when the value does not fit a byte.
-    if ((i < raw_load(s + 8)) == 0) + (255 < v) {
+    if ((i < raw_load(wrapping_add(s, 8))) == 0) + (255 < v) {
         rt_abort();
     }
-    raw_putbyte(raw_load(s) + i, v);
+    raw_putbyte(wrapping_add(raw_load(s), i), v);
     return 0;
 }
 fn rt_slice(s: u64, a: u64, b: u64) -> u64 {
-    if (b < a) + (raw_load(s + 8) < b) {
+    if (b < a) + (raw_load(wrapping_add(s, 8)) < b) {
         rt_abort();
     }
     v := rt_alloc(24);
-    raw_store(v, raw_load(s) + a);
+    raw_store(v, wrapping_add(raw_load(s), a));
     raw_store(v + 8, b - a);
     return v;
 }
 // A typed slice {ptr + a*width, b - a} of a vector or slice (both start {ptr, len}); a <= b <= len.
 fn rt_vslice(s: u64, a: u64, b: u64, width: u64) -> u64 {
-    if (b < a) + (raw_load(s + 8) < b) {
+    if (b < a) + (raw_load(wrapping_add(s, 8)) < b) {
         rt_abort();
     }
     v := rt_alloc(24);
-    raw_store(v, raw_load(s) + a * width);
+    raw_store(v, wrapping_add(raw_load(s), wrapping_mul(a, width)));
     raw_store(v + 8, b - a);
     return v;
 }
 fn rt_view(s: u64) -> u64 {
-    return rt_slice(s, 0, raw_load(s + 8));
+    return rt_slice(s, 0, raw_load(wrapping_add(s, 8)));
 }
 // Checked, zero-copy C string view: the sequence must be NUL-terminated. No
 // allocation and no copy, so the bytes stay owned by the caller. (rt_cstr copies
@@ -513,7 +513,7 @@ fn rt_view_ptr(s: u64) -> u64 {
     return raw_load(s);
 }
 fn rt_cstr_view(s: u64) -> u64 {
-    n := raw_load(s + 8);
+    n := raw_load(wrapping_add(s, 8));
     if n == 0 {
         rt_abort();
     }
@@ -551,7 +551,7 @@ fn rt_lit(ptr: u64, n: u64) -> u64 {
     s := rt_new();
     rt_reserveb(s, n);
     rt_copy_bytes(raw_load(s), ptr, n);
-    raw_store(s + 8, n);
+    raw_store(wrapping_add(s, 8), n);
     return s;
 }
 fn rt_rec(n: u64) -> u64 {
@@ -584,7 +584,7 @@ fn rt_drop_seq(s: u64) -> u64 {
     return 0;
 }
 fn rt_pack(s: u64) -> u64 {
-    n := raw_load(s + 8);
+    n := raw_load(wrapping_add(s, 8));
     buf := rt_alloc(n + 1);
     rt_copy_bytes(buf, raw_load(s), n);
     raw_putbyte(buf + n, 0);
@@ -592,7 +592,7 @@ fn rt_pack(s: u64) -> u64 {
 }
 fn rt_cstr(s: u64) -> u64 {
     buf := rt_pack(s);
-    n := raw_load(s + 8);
+    n := raw_load(wrapping_add(s, 8));
     mut i = 0;
     while i < n {
         if raw_byte(buf + i) == 0 {
@@ -1368,13 +1368,13 @@ fn rt_enqueue(t: u64) -> u64 {
     s := rt_sched();
     rt_spin_lock(s);
     raw_store(t + 32, 0);
-    tail := raw_load(s + 16);
+    tail := raw_load(wrapping_add(s, 16));
     if tail == 0 {
-        raw_store(s + 8, t);
+        raw_store(wrapping_add(s, 8), t);
     } else {
         raw_store(tail + 32, t);
     }
-    raw_store(s + 16, t);
+    raw_store(wrapping_add(s, 16), t);
     rt_spin_unlock(s);
     rt_atomic_fetch_add(s + 24, 1);
     rt_syscall(202, s + 24, 129, 1);
@@ -1384,12 +1384,12 @@ fn rt_dequeue(s: u64) -> u64 {
     while true {
         seq := raw_atomic_load(s + 24);
         rt_spin_lock(s);
-        t := raw_load(s + 8);
+        t := raw_load(wrapping_add(s, 8));
         if t != 0 {
             next := raw_load(t + 32);
-            raw_store(s + 8, next);
+            raw_store(wrapping_add(s, 8), next);
             if next == 0 {
-                raw_store(s + 16, 0);
+                raw_store(wrapping_add(s, 16), 0);
             }
             rt_spin_unlock(s);
             return t;
@@ -3994,8 +3994,8 @@ fn rt_seq_split(a: u64, sep: u64, valid: u64) -> u64 {
 // len and cap count elements. Ordering and equality compare the 32-bit units unsigned, which orders
 // exactly as the words the same values occupy in a word vector.
 fn rt_push4(s: u64, v: u64) -> u64 {
-    n := raw_load(s + 8);
-    cap := raw_load(s + 16);
+    n := raw_load(wrapping_add(s, 8));
+    cap := raw_load(wrapping_add(s, 16));
     if n == cap {
         mut capacity = cap * 2;
         if capacity == 0 {
@@ -4006,10 +4006,10 @@ fn rt_push4(s: u64, v: u64) -> u64 {
         }
         ptr := rt_grow(raw_load(s), n * 4, capacity * 4);
         raw_store(s, ptr);
-        raw_store(s + 16, capacity);
+        raw_store(wrapping_add(s, 16), capacity);
     }
-    raw_store32(raw_load(s) + n * 4, v);
-    raw_store(s + 8, n + 1);
+    raw_store32(wrapping_add(raw_load(s), wrapping_mul(n, 4)), v);
+    raw_store(wrapping_add(s, 8), n + 1);
     return 0;
 }
 fn rt_fill4(s: u64, v: u64, n: u64) -> u64 {
@@ -4019,42 +4019,42 @@ fn rt_fill4(s: u64, v: u64, n: u64) -> u64 {
     if n != 0 {
         ptr := rt_grow(raw_load(s), 0, n * 4);
         raw_store(s, ptr);
-        raw_store(s + 16, n);
+        raw_store(wrapping_add(s, 16), n);
     }
     mut i: u64 = 0;
     while i < n {
-        raw_store32(raw_load(s) + i * 4, v);
+        raw_store32(wrapping_add(raw_load(s), wrapping_mul(i, 4)), v);
         i = i + 1;
     }
-    raw_store(s + 8, n);
+    raw_store(wrapping_add(s, 8), n);
     return 0;
 }
 fn rt_slot4u(s: u64, i: u64) -> u64 {
-    return raw_load(s) + i * 4;
+    return wrapping_add(raw_load(s), wrapping_mul(i, 4));
 }
 fn rt_slot4(s: u64, i: u64) -> u64 {
-    if (i < raw_load(s + 8)) == 0 {
+    if (i < raw_load(wrapping_add(s, 8))) == 0 {
         rt_abort();
     }
-    return raw_load(s) + i * 4;
+    return wrapping_add(raw_load(s), wrapping_mul(i, 4));
 }
 fn rt_at4u(s: u64, i: u64) -> u64 {
-    return raw_load32(raw_load(s) + i * 4);
+    return raw_load32(wrapping_add(raw_load(s), wrapping_mul(i, 4)));
 }
 fn rt_at4(s: u64, i: u64) -> u64 {
     return raw_load32(rt_slot4(s, i));
 }
 fn rt_set4(s: u64, i: u64, v: u64) -> u64 {
-    raw_store32(raw_load(s) + i * 4, v);
+    raw_store32(wrapping_add(raw_load(s), wrapping_mul(i, 4)), v);
     return 0;
 }
 fn rt_pop4(s: u64) -> u64 {
-    n := raw_load(s + 8);
+    n := raw_load(wrapping_add(s, 8));
     if n == 0 {
         rt_abort();
     }
-    v := raw_load32(raw_load(s) + (n - 1) * 4);
-    raw_store(s + 8, n - 1);
+    v := raw_load32(wrapping_add(raw_load(s), wrapping_mul(n - 1, 4)));
+    raw_store(wrapping_add(s, 8), n - 1);
     return v;
 }
 fn rt_vec_copy4(src: u64) -> u64 {
@@ -4116,7 +4116,7 @@ fn rt_vec_reverse4(s: u64) -> u64 {
 }
 fn rt_vec_truncate4(s: u64, keep: u64) -> u64 {
     if keep < rt_len(s) {
-        raw_store(s + 8, keep);
+        raw_store(wrapping_add(s, 8), keep);
     }
     return 0;
 }
@@ -4199,7 +4199,7 @@ fn rt_vec_cmp4(op: u64, a: u64, b: u64) -> u64 {
 }
 // ---- vector methods (elements are words: values or owning pointers; nothing is copied) ----
 fn rt_vec_set(s: u64, i: u64, v: u64) -> u64 {
-    raw_store(raw_load(s) + i * 8, v);
+    raw_store(wrapping_add(raw_load(s), wrapping_mul(i, 8)), v);
     return 0;
 }
 fn rt_vec_insert(s: u64, index: u64, v: u64) -> u64 {
