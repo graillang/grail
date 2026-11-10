@@ -1,7 +1,38 @@
-# Changelog
-
 ## Unreleased
 
+- RHI increment 3: `abundance/src/rhi_surface.grl` (new) creates a real `VkSurfaceKHR` from the
+  SDL3 window and reads back what that surface accepts. The instance is now created with the
+  platform's own extension set: `abundance_rhi_vulkan::instance_create_info_with(extensions, count)`
+  fills `ppEnabledExtensionNames` from a `CPtr`, and `SDL_Vulkan_GetInstanceExtensions` returns
+  exactly that shape — C's `const char *const *` — so the array is C's memory and Grail never has to
+  build an array of strings (this host: 2 extensions for the `x11` driver, and the loader offers
+  `VK_KHR_surface`, `VK_KHR_xlib_surface` and `VK_KHR_wayland_surface`, each named in the report).
+  `SDL_Vulkan_CreateSurface` reaches the platform `vkCreate*SurfaceKHR` for whichever video driver
+  served the window, so no platform extension is named in Grail. `VkSurfaceCapabilitiesKHR` is an
+  `extern "C" record` (52 bytes of scalars, offsets checked with a C program against
+  `offsetof`/`sizeof`) rather than a byte buffer, and the format and present-mode lists are
+  fixed-capacity records of scalars — the record *is* the array, the count query and the seeded fill
+  call are the idiom the physical device list already used. On top of that the module makes the four
+  decisions a swapchain needs, each a stated rule instead of a constant: format (sRGB first, ties
+  keeping the surface's order, `format_by application` when the surface reports no preference),
+  present mode (MAILBOX, then FIFO, then FIFO_RELAXED, then IMMEDIATE), extent (`currentExtent`
+  unless it is `UINT32_MAX`, otherwise the window's pixel size clamped into the surface's range) and
+  image count (`minImageCount + 1`, clamped to a non-zero `maxImageCount`). The device is now chosen
+  as the highest-ranked one that has a queue family which both runs graphics and presents to this
+  surface (`vkGetPhysicalDeviceSurfaceSupportKHR`), not merely the fastest device on the machine.
+  `abundance/tests/rhi_swapchain_probe.grl` (new, wired into `tools/abundance-test.mjs` as the third
+  probe) prints the whole chain, takes the frame count as `argv[1]` (`GRAIL_RHI_FRAMES`, default 3),
+  skips with `rhi.status skipped no-display` where there is no display server, and asserts its own
+  handle balance (`rhi.handles created 3 destroyed 3 live 0`, a leak fails the run) because the
+  validation layer is not installed on this host; where it is installed the suite forces it on
+  through the loader (`VK_LOADER_LAYERS_ENABLE`/`VK_INSTANCE_LAYERS`) for a second run and fails on
+  any validation message, after requiring the layer's manifest to name a real ELF shared object,
+  since the loader skips a broken layer silently. What did *not* land is the swapchain itself and
+  everything downstream of it — device, `VkSwapchainKHR`, image views, the render pass, the clear and
+  the present — because all of them need an expression whose value is the address of an `extern "C"`
+  record Grail owns, and the submit/present arrays are arrays of *handles*, which cannot even be
+  seeded. The probe reports `rhi.swapchain.result frames 0 of 3` plus one `unavailable` line per
+  blocked call rather than pretending; docs/rhi.md lists the calls and what each one needs.
 - B1 stage 1, per-module emission: `grail build --split` writes one assembly file per module
   (`OUT.NNN.module.s`) plus `OUT.parts`, assembles the parts concurrently and links them once,
   instead of one `.s` for the whole program. Emission is still a single pass — the optimizer inlines
