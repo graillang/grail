@@ -3613,6 +3613,10 @@ fn load_file<a>(c: (&a mut C), index: u64) -> unit {
     exchange(&mut c.toks, toks);
     exchange(&mut c.src, src);
     exchange(&mut c.pos, 0);
+    // Token positions are indices into this file: a call-flex hint record from another file is stale.
+    exchange(&mut c.cf_start, 0);
+    exchange(&mut c.cf_end, 0);
+    exchange(&mut c.cf_local, 0);
     return ();
 }
 
@@ -6368,6 +6372,11 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         m = private_module(view(".inherent_"), c.inherent - 1);
     }
     exchange(&mut c.locals, Local[]);
+    // The call-flex hint record indexes `locals` and names token positions of the function being
+    // compiled, so it cannot outlive that function's token stream.
+    exchange(&mut c.cf_start, 0);
+    exchange(&mut c.cf_end, 0);
+    exchange(&mut c.cf_local, 0);
     exchange(&mut c.debug_vars, DebugVar[]);
     exchange(&mut c.resources, Resource[]);
     exchange(&mut c.next, 0);
@@ -13072,6 +13081,9 @@ fn emit_closures<a>(c: (&a mut C)) -> unit {
         module_modes(&mut c);
         exchange(&mut c.pos, start);
         exchange(&mut c.locals, Local[]);
+        exchange(&mut c.cf_start, 0);
+        exchange(&mut c.cf_end, 0);
+        exchange(&mut c.cf_local, 0);
         exchange(&mut c.resources, Resource[]);
         exchange(&mut c.next, 0);
         exchange(&mut c.scope_end, 0);
@@ -19699,6 +19711,17 @@ fn hint_use<a>(c: (&a mut C), v: Val, start: u64, end: u64, expected: u64) -> Va
     }
     if 3 < c.attempts {
         return v;
+    }
+    // `cf_local` is an index into the locals of the function that recorded it. The record is
+    // cleared wherever those locals or the token positions are replaced, so reaching this point
+    // with a dead index would be a compiler bug; say so instead of faulting the process.
+    if c.locals.len() < c.cf_local {
+        fail(
+            &mut c,
+            view(
+                "internal compiler error: a literal-type hint refers to a local binding that is no longer live"
+            )
+        );
     }
     l := &c.locals[c.cf_local - 1];
     origin := l.origin;
