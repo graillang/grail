@@ -327,7 +327,7 @@ Re-tested this round, all with no measurable effect, so none is in the tree:
 - `-funroll-loops`, and `-mllvm -inline-threshold=500` / `2000`: no benchmark improves; `sort` and
   `nbody` are up to 3% slower with more inlining.
 - `-mllvm -unroll-threshold=2000`: `nbody` 2.42x -> 1.77x (22%), everything else unchanged, at
-  +8-42% `clang` time and +27-51% object size on these five modules (measured per module). On the
+  +5-42% `clang` time and +27-51% object size on these five modules (measured per module). On the
   compiler's own module -- 190 s of `clang` at `-O2` -- that cost is not defensible for one
   benchmark, so the level stays `-O2` with the default threshold. Recorded rather than adopted.
 
@@ -377,8 +377,13 @@ be emitted as `fadd float` plus an `fpext`, which is bit-identical (the double a
 floats, and `fptrunc` of it is the correctly rounded float sum: with `53 >= 2*24+2` double rounding
 is safe, the same argument stage 2a already uses for `fmul`). That keeps the loop-carried value a
 `float`, so the accumulator never becomes a `phi double` and narrowing survives unrolling. Worth:
-`matmul` at 1.30x becomes 1.0x as soon as its kernel is unrolled (measured: the unrolled kernel is
-1.95x *because* of the widening), and it makes the unroll lever usable for `f32` code at all. Why
+on `matmul`'s kernel it removes two conversions and a binary64 add from the accumulator's chain --
+the unrolled kernel that pays them is measured at 1.95x against the un-unrolled 1.30x. What the
+narrowed *and* unrolled kernel would run at has not been built, so it is an extrapolation: there is
+no reason for it to be slower than the un-unrolled loop, and the widening is the whole of what the
+unrolled version added, but the number is not measured. What is measured is that the widening is
+the entire regression, and that this fact is what makes the unroll lever usable for `f32` code at
+all. Why
 the lifter cannot: `rt_f32_round`, `cvtss2sd` and narrow element loads each establish "`f32`" in
 the block that produces them, but the value then crosses a frame slot (and, for `matmul`'s `s`, the
 loop), and the front end's `rt_slot4`/`rt_f64_op` inlining happens in `clang`, after the lifter has
