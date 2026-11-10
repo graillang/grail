@@ -149,9 +149,32 @@ job's inputs are moved into it and its result is owned, and no reference crosses
 `for_chunks` is the Abundance shape and is sound for plain data today without a compiler change: it
 consumes the vector, hands each job one contiguous **owned** chunk, and concatenates the results in
 chunk order. It is the same shape stage 2's `&mut [T]` chunks will produce, minus the compiler
-split - and that is its cost: splitting by popping moves every element twice (two passes, measured
-~15 ns per u64 element, against ~3 ns to build the same vector). `parallel_for_chunks(&mut [T], ...)`
+split - and that is its cost: splitting by popping moves every element twice, about 46-48 ms for
+3M u64 elements against ~10 ms to build the same vector (~15 ns per element, against ~3 ns). `parallel_for_chunks(&mut [T], ...)`
 removes that copy entirely, which is one more reason stage 2 is where the compiler earns its keep.
+
+### The pool's share of the process state, and why the merge broke
+
+`rt_state` is 4096 bytes shared by every long-lived subsystem, and a claim on one of its words is
+now a row in a single table at the top of the pool section of `compiler/runtime.grl` - word, owner,
+accessor and who claimed it - with the offsets appearing exactly once, inside the accessor named by
+that row (`rt_state_pool()` and `rt_state_pool_cas()` for the pool). A comment would depend on
+people reading it; the table is the place a new claimant has to edit, next to everyone else's claim.
+
+Stage 1 first put the pool pointer in `raw_state() + 88` and the creation CAS in `+96`, because both
+were free at the time. Then the Windows green scheduler landed `rt_task_mode()`, which caches the
+resolved task mode in **88**. Merged, a program that ran a `task_scope` first (mode word = 1) and
+then `parallel_map` had `rt_pool()` read 1 as the pool pointer and `rt_parallel_map` dereference
+1 + 8: a fault at address 0x9, with the program's correct output already printed. The pool now sits
+at 3200/3208, which the table shows free in every platform module.
+
+The pool also used to borrow **word 48 of the thread record** as "which worker am I". That word is
+free on Linux but is the Windows address wait's per-thread expected-value slot, so the borrowing was
+a latent Windows bug on the unmerged branch too. A worker now publishes its own thread record in its
+worker block at startup and `rt_pool_self` finds it by scanning the worker array; no thread-record
+word is touched. `tests/pool/from_task.grl` (`pool-from-green-task`) pins the interaction: parallel
+work entered from a task scope and from spawned tasks, which is the combination neither branch
+tested alone.
 
 ### Determinism
 
@@ -187,7 +210,11 @@ Tested by native cases (`tests/native-cases.json`, fixtures in `tests/pool/`):
   surfaces as the runtime's abort exit status (134, i.e. 128 + SIGABRT), which is exactly what
   `abort-in-green-task-ends-process` already records for an abort raised on a runtime thread; raised
   on the main thread it is still SIGABRT. Both are a process abort with no hang and no code after
-  the abort, which is the property that matters;
+  the abort, which is the property that matters. **Do not "fix" the difference by making `rt_abort`
+  wait for the signal** (yielding or `tgkill` to self): the process-directed `SIGABRT` is delivered
+  to whichever thread does not block it, so the aborting thread's `exit_group(134)` can win the
+  race, and 134 is the status the recorded B5 contract and `abort-in-green-task-ends-process` both
+  expect. The exit status for a thread-side abort is 134 = 128 + SIGABRT, by design;
 - the chunk split does not change the answer (`pool-chunks-owned`) and four jobs are materially
   faster than one (`pool-speedup-four-workers`, which skips its assertion below four cores).
 
