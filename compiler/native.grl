@@ -22371,6 +22371,7 @@ fn iface_emit_func<a, b>(c: (&a mut C), out: (&a mut u8[]), index: u64, m: &b [u
     types := c.funcs[index].types;
     lifetimes := c.funcs[index].regions;
     ext := c.funcs[index].ext;
+    contract := c.funcs[index].contract;
     symbol := c.funcs[index].symbol.copy();
     pos := c.funcs[index].pos;
     mut own = copy_numbers(&c.funcs[index].bounds);
@@ -22429,9 +22430,10 @@ fn iface_emit_func<a, b>(c: (&a mut C), out: (&a mut u8[]), index: u64, m: &b [u
             out.push(10);
         }
     }
-    if types != 0 {
+    if (types != 0) & (contract == 0) {
         // A generic template's body is not in the interface: an importer that instantiates it needs
-        // the module's source. Stage 3 replaces this marker with a typed body reference.
+        // the module's source. Stage 3 replaces this marker with a typed body reference. An interface
+        // method carries no body, and its one implicit type parameter is not a template.
         push_bytes(&mut out, view("body "));
         iface_quoted(&mut out, view(source));
         push_bytes(&mut out, view(" pos "));
@@ -23112,7 +23114,7 @@ fn iface_join<a, b, d>(dir: &a [u8], name: &b [u8], ext: &d [u8]) -> u8[] {
 }
 fn iface_has_body<a, b>(c: (&a mut C), m: &b [u8]) -> u64 {
     for i in c.funcs.len() {
-        if same(view(c.funcs[i].module), view(m)) & (c.funcs[i].types != 0) {
+        if same(view(c.funcs[i].module), view(m)) & (c.funcs[i].types != 0) & (c.funcs[i].contract == 0) {
             return 1;
         }
     }
@@ -23895,6 +23897,9 @@ fn iface_define<a, b, d>(c: (&a mut C), st: (&a mut IState), line: &b [u8], path
         exchange(&mut st.section, 1);
         exchange(&mut st.owner, found - 1);
         exchange(&mut st.last_func, 0);
+        // A section header starts a new declaration: `require`/`bound` lines under it belong to the
+        // implementation's own parameters, not to the type declared above it.
+        exchange(&mut st.last_decl, 0);
         iface_impl_record(&mut c, &mut st, found, params[0], lifetimes[0]);
         return ();
     }
@@ -23907,6 +23912,7 @@ fn iface_define<a, b, d>(c: (&a mut C), st: (&a mut IState), line: &b [u8], path
         exchange(&mut st.section, 2);
         exchange(&mut st.contract, id);
         exchange(&mut st.last_func, 0);
+        exchange(&mut st.last_decl, 0);
         return ();
     }
     if same(view(word), view("impl")) {
@@ -23933,6 +23939,7 @@ fn iface_define<a, b, d>(c: (&a mut C), st: (&a mut IState), line: &b [u8], path
         exchange(&mut st.contract, id);
         exchange(&mut st.implementation, c.implementations.len());
         exchange(&mut st.last_func, 0);
+        exchange(&mut st.last_decl, 0);
         owner := ty_arg(&mut c, ty) + 1;
         iface_impl_record(&mut c, &mut st, owner, params[0], lifetimes[0]);
         return ();
