@@ -209,6 +209,13 @@ struct C {
     toks: Tok[],
     pos: u64,
     out: u8[],
+    // 1 (--split): mark module boundaries in `out` and write one assembly file per module.
+    split: u64,
+    // The module of the run being emitted, so a marker opens a run only when the module changes.
+    part: u8[],
+    // Where the markers ended up in the optimized stream, and the module each names.
+    marks: u64[],
+    part_names: u8[][],
     module: u8[],
     target: u64,
     plat: u64,
@@ -393,6 +400,154 @@ fn emit_path<a, b>(c: (&a mut C), path: &b [u8]) -> unit {
         c.out.push(b);
     }
     return ();
+}
+
+// ---- per-module emission (B1 stage 1) ----
+// `--split` writes one assembly file per module instead of one for the whole program. Emission stays
+// a single stream, because the whole-program optimizer, generic specialisation and closure lowering
+// all reach across modules; the stream is split after lowering, at the boundaries recorded here. A
+// marker line opens a run of one module's code and carries the `.text` directive that starts its
+// file. Markers are top-level lines, so optimize copies them through untouched and reports where
+// they landed; the parts minus those markers are the single-file stream, which is what
+// tools/split-test.mjs checks.
+fn part<a, b>(c: (&a mut C), name: &b [u8]) -> unit {
+    if c.split == 0 {
+        return ();
+    }
+    if same(view(c.part), view(name)) {
+        // Still the same module: the run continues, and its file already has its `.text`.
+        return ();
+    }
+    c.part = name.copy();
+    o(&mut c, view(".grail_part "));
+    o(&mut c, name);
+    o(&mut c, view("\n.text\n"));
+    return ();
+}
+// Decimal digits of a synthetic module suffix plus one, or 0 when the suffix is not a number.
+fn module_index<a>(name: &a [u8], from: u64) -> u64 {
+    if name.len() <= from {
+        return 0;
+    }
+    mut n = 0;
+    mut i = from;
+    while i < name.len() {
+        d := name[i];
+        if (d < 48) || (57 < d) {
+            return 0;
+        }
+        n = n * 10 + (d - 48);
+        i += 1;
+    }
+    return n + 1;
+}
+// The source module of an emission unit. `.impl_N` and `.inherent_N` are mangling names for one
+// declaration inside a file, not modules a build could name, so they resolve to the module that
+// file declares; every other name is already the module.
+fn unit_module<a, b>(c: (&a mut C), m: &b [u8]) -> u8[] {
+    if starts_with(view(m), view(".impl_")) {
+        n := module_index(view(m), 6);
+        if (n != 0) & (n <= c.implementations.len()) {
+            return c.implementations[n - 1].module.copy();
+        }
+    }
+    if starts_with(view(m), view(".inherent_")) {
+        n := module_index(view(m), 10);
+        if (n != 0) & (n <= c.decls.len()) {
+            return c.decls[n - 1].module.copy();
+        }
+    }
+    return m.copy();
+}
+// A part file name: `STEM.NNN.module.s`, numbered in stream order so the manifest order is also the
+// order `ls` shows. Characters that are not identifier-safe become '_' (a module name is an
+// identifier, so this only guards against a name that failed to resolve).
+fn part_file<a, b, d>(stem: &a [u8], seq: u64, name: &b [u8], ext: &d [u8]) -> u8[] {
+    mut out = stem.copy();
+    out.push(46);
+    if seq < 10 {
+        push_bytes(&mut out, view("00"));
+    } else {
+        if seq < 100 {
+            out.push(48);
+        }
+    }
+    decimal(&mut out, seq);
+    out.push(46);
+    for i in name.len() {
+        b := name[i];
+        if ((97 <= b) & (b <= 122)) || ((65 <= b) & (b <= 90)) || ((48 <= b) & (b <= 57)) || (b == 95) {
+            out.push(b);
+        } else {
+            out.push(95);
+        }
+    }
+    push_bytes(&mut out, view(ext));
+    return out;
+}
+// `PATH.s` -> `PATH`: the stem the part files and the manifest are named from.
+fn path_stem<a>(path: &a [u8]) -> u8[] {
+    mut n = path.len();
+    if (n > 1) & (path[n - 1] == 115) & (path[n - 2] == 46) {
+        n = n - 2;
+    }
+    mut out = u8[];
+    for i in n {
+        out.push(path[i]);
+    }
+    return out;
+}
+// Write the parts of one lowered image plus the manifest the driver reads back: the part files in
+// link order, then the `// grail-link:` request that a single-file build carries at the head of its
+// assembly. The optimizer reported where each marker landed, so a part is written as a slice of the
+// stream — splitting costs no copy — and every run already starts with its own `.text` directive.
+fn write_parts<a, b, d>(c: (&a mut C), path: &b [u8], text: &d [u8]) -> u64 {
+    stem := path_stem(view(path));
+    mut files = u8[][];
+    mut status: u64 = 0;
+    for k in c.marks.len() {
+        // Past the `.grail_part NAME` line: the run begins at the `.text` directive under it.
+        start := c.marks[k] + 12 + c.part_names[k].len() + 1;
+        mut end = text.len();
+        if k + 1 < c.marks.len() {
+            end = c.marks[k + 1];
+        }
+        if end > start {
+            file := part_file(view(stem), files.len(), view(c.part_names[k]), view(".s"));
+            if host::write_file(view(file), view((text[start: end]))) != 0 {
+                status = 1;
+            }
+            files.push(file);
+        }
+    }
+    if files.len() == 0 {
+        fail(&mut c, view("--split produced no module output"));
+    }
+    mut manifest = copy_bytes(view("// grail-parts 1\n"));
+    for i in files.len() {
+        push_bytes(&mut manifest, view(files[i]));
+        manifest.push(10);
+    }
+    for i in c.libs.len() {
+        push_bytes(&mut manifest, view("// grail-link: "));
+        push_bytes(&mut manifest, view(c.libs[i]));
+        manifest.push(10);
+    }
+    mut manifest_path = u8[];
+    push_bytes(&mut manifest_path, view(stem));
+    push_bytes(&mut manifest_path, view(".parts"));
+    if host::write_file(view(manifest_path), view(manifest)) != 0 {
+        status = 1;
+    }
+    return status;
+}
+// The one assembly write point: the whole-program image when --split is off, one file per module
+// plus a manifest when it is on.
+fn write_image<a, b, d>(c: (&a mut C), path: &b [u8], image: &d [u8]) -> u64 {
+    if c.split != 0 {
+        return write_parts(&mut c, view(path), view(image));
+    }
+    return host::write_file(view(path), view(with_link_notes(&c.libs, view(image))));
 }
 fn contains_text<a, b>(text: &a [u8], needle: &b [u8]) -> bool {
     if needle.len() > text.len() {
@@ -1104,6 +1259,9 @@ fn tls_bridge<a>(c: (&a mut C)) -> bool {
     return (c.plat == 0) && ((c.target == 0) || (c.target == 1) || (c.target == 2));
 }
 fn tls_bss<a>(c: (&a mut C)) -> unit {
+    if c.split != 0 {
+        o(&mut c, view(".globl rt_state\n.globl rt_host_tls\n.globl rt_grail_tls\n"));
+    }
     if tls_bridge(&mut c) {
         o(&mut c, view("ud2\n.bss\n.p2align 3\nrt_state: .zero 4096\nrt_host_tls: .zero 8\nrt_grail_tls: .zero 8\n"));
     } else {
@@ -1746,6 +1904,14 @@ fn func_directive<a, b, d>(c: (&a mut C), m: &b [u8], name: &b [u8], symbol: &d 
     // Mach-O defines a symbol by its label and carries neither .type nor .def records.
     if c.plat == 1 {
         return ();
+    }
+    // --split assembles one object per module, so a definition another part calls has to be visible
+    // to the linker: every function becomes global. The code is unchanged, and the single-file
+    // build keeps its local symbols.
+    if c.split != 0 {
+        o(&mut c, view(".globl "));
+        export_name(&mut c, view(m), view(name), view(symbol), export);
+        o(&mut c, view("\n"));
     }
     if (c.target == 3) || (c.target == 4) {
         o(&mut c, view(".def "));
@@ -6503,6 +6669,7 @@ fn extern_declaration<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
 fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     position := c.pos;
     out_mark := c.out.len();
+    part_mark := c.part.copy();
     closure_mark := c.closures.len();
     mut dstart = 0;
     mut dend = 0;
@@ -6719,6 +6886,8 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     // expects rdi, rsi and xmm6-xmm15 preserved; the body uses Grail's SysV-shaped convention. A
     // callback is therefore a Win64 thunk under the C symbol that saves those registers, moves
     // the arguments and calls the body, which is emitted under `<symbol>_grail_body`.
+    unit := unit_module(&mut c, view(m));
+    part(&mut c, view(unit));
     mut body_symbol = u8[];
     push_bytes(&mut body_symbol, view(export_symbol));
     if (c.target == 3) & (export == 2) {
@@ -6841,6 +7010,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     }
     // A literal binding learned its type from a later use: discard this attempt and recompile.
     if c.retry != 0 {
+        exchange(&mut c.part, part_mark);
         while out_mark < c.out.len() {
             c.out.pop();
         }
@@ -9482,10 +9652,12 @@ fn emit_specializations<a>(c: (&a mut C)) -> unit {
         contract := f.contract;
         if (types != 0) & (contract == 0) {
             saved := c.out.len();
+            part_mark := c.part.copy();
             replay_function(&mut c, i);
             while saved < c.out.len() {
                 c.out.pop();
             }
+            exchange(&mut c.part, part_mark);
         }
     }
     exchange(&mut c.validating, 0);
@@ -10058,6 +10230,10 @@ fn fn_value_decl<a>(c: (&a mut C)) -> u64 {
 fn emit_fn_thunk<a>(c: (&a mut C)) -> unit {
     if c.fn_thunk_used == 0 {
         return ();
+    }
+    part(&mut c, view("runtime"));
+    if c.split != 0 {
+        o(&mut c, view(".globl grail_fn_thunk\n"));
     }
     o(&mut c, view("grail_fn_thunk:\npushq %rbp\nmovq %rsp,%rbp\nmovq (%rdi),%rax\nmovq 16(%rax),%rax\n"));
     o(&mut c, view("movq %rsi,%rdi\nmovq %rdx,%rsi\nmovq %rcx,%rdx\nmovq %r8,%rcx\nmovq %r9,%r8\ncall *%rax\nleave\nret\n"));
@@ -14145,6 +14321,8 @@ fn emit_closures<a>(c: (&a mut C)) -> unit {
             bind(&mut c, pn.copy(), params[j], pid, 0);
         }
         count := 1 + params.len();
+        unit := module_copy(&mut c);
+        part(&mut c, view(unit));
         func_directive(&mut c, view(".closure"), view(symbol), view(symbol), 0);
         mangle(&mut c, view(".closure"), view(symbol));
         o(&mut c, view(":\npushq %rbp\nmovq %rsp,%rbp\n"));
@@ -20927,6 +21105,8 @@ fn with_link_notes<a, b>(libs: (&a u8[][]), body: &b [u8]) -> u8[] {
     return out;
 }
 fn emit_drops<a>(c: (&a mut C)) -> unit {
+    // Drop helpers are runtime symbols, not module code.
+    part(&mut c, view("runtime"));
     mut ty = 0;
     while ty < c.types.len() {
         kind := ty_kind(&mut c, ty);
@@ -20934,6 +21114,12 @@ fn emit_drops<a>(c: (&a mut C)) -> unit {
         if concrete_type(&mut c, ty) {
             if needs_drop(&mut c, ty) {
                 done := label(&mut c);
+                if c.split != 0 {
+                    // Defined here, called from every module: the linker has to see the name.
+                    o(&mut c, view(".globl "));
+                    drop_name(&mut c, ty);
+                    c.out.push(10);
+                }
                 drop_name(&mut c, ty);
                 o(&mut c, view(":\ntestq %rdi,%rdi\n"));
                 jump(&mut c, view("jz"), done);
@@ -21053,6 +21239,10 @@ pub fn main() -> u64 {
         toks: Tok[],
         pos: 0,
         out: u8[],
+        split: 0,
+        part: u8[],
+        marks: u64[],
+        part_names: u8[][],
         module: u8[],
         target: 0,
         plat: 0,
@@ -21206,8 +21396,14 @@ pub fn main() -> u64 {
     }
     while offset + 1 < argc {
         option := host::arg(offset + 1);
-        if same(view(option), view("--deny-ambient-host")) {
-            exchange(&mut c.deny_ambient, 1);
+        if same(view(option), view("--deny-ambient-host")) || same(view(option), view("--split")) {
+            // --split: one assembly file per module. OUT.s is replaced by OUT.NNN.module.s files,
+            // and OUT.parts lists them in link order for the driver.
+            if same(view(option), view("--split")) {
+                exchange(&mut c.split, 1);
+            } else {
+                exchange(&mut c.deny_ambient, 1);
+            }
             offset += 1;
         } else {
         if same(view(option), view("--target")) {
@@ -21316,7 +21512,7 @@ pub fn main() -> u64 {
         fail_option(
             &mut c,
             view(
-                "usage: grail [--target ARCH] [--overflow=checked|wrap] [--debug] [--deny-ambient-host] OUT.s ENTRY.grl MODULE.grl..."
+                "usage: grail [--target ARCH] [--overflow=checked|wrap] [--debug] [--deny-ambient-host] [--split] OUT.s ENTRY.grl MODULE.grl..."
             )
         );
     }
@@ -21327,6 +21523,14 @@ pub fn main() -> u64 {
     }
     if (c.backend != 0) && (((c.target > 2) || (c.plat != 0) || (c.debug != 0))) {
         fail_option(&mut c, view("--backend=llvm is implemented for Linux x86_64, aarch64 and riscv64 without --debug"));
+    }
+    // Splitting is a build-shape change on the native assembly path; the line tables and the LLVM
+    // route inspect the whole stream, and the Mach-O/PE writers rewrite it after selection.
+    if (c.split != 0) && ((c.target != 0) || (c.plat != 0) || (c.debug != 0) || (c.backend != 0)) {
+        fail_option(
+            &mut c,
+            view("--split is implemented for the Linux x86_64 assembler path, without --debug")
+        );
     }
     for pass in 3 {
         if pass == 1 {
@@ -21350,7 +21554,10 @@ pub fn main() -> u64 {
                     f += 1;
                 }
             }
-            o(&mut c, view(".text\n"));
+            // With --split every part file re-states `.text`; the stream carries no preamble.
+            if c.split == 0 {
+                o(&mut c, view(".text\n"));
+            }
         }
         mut i = 2;
         while i < n {
@@ -21406,6 +21613,9 @@ pub fn main() -> u64 {
             fail(&mut c, view("executable entry requires readonly argv view"));
         }
     }
+    // The entry stub and the process state (rt_state, the TLS bases, .note.GNU-stack) exist once per
+    // program and belong to no module, so they get their own synthetic part.
+    part(&mut c, view("__start"));
     if (c.target == 3) {
         // A PE image starts without arguments: the loader leaves argv to the runtime, which reads
         // the Win32 command line. The process state words start empty and are filled by
@@ -21520,7 +21730,11 @@ pub fn main() -> u64 {
     if (c.debug != 0) || (c.backend != 0) {
         out = copy_bytes(view(c.out));
     } else {
-        out = optimize::optimize(view(c.out));
+        if c.split != 0 {
+            out = optimize::optimize_parts(view(c.out), 1, &mut c.marks, &mut c.part_names);
+        } else {
+            out = optimize::optimize(view(c.out));
+        }
     }
     if c.plat == 1 {
         prefixed := darwinify(view(out));
@@ -21553,7 +21767,7 @@ pub fn main() -> u64 {
                 }
                 push_bytes(&mut image, view(".cv_filechecksums\n.cv_stringtable\n"));
             }
-            return host::write_file(view(path), view(with_link_notes(&c.libs, view(image))));
+            return write_image(&mut c, view(path), view(image));
         }
         if c.debug != 0 {
             out = debug_locs(view(out));
@@ -21571,9 +21785,9 @@ pub fn main() -> u64 {
             if written != 0 {
                 return written;
             }
-            return host::write_file(view(path), view(with_link_notes(&c.libs, view(lowered.native))));
+            return write_image(&mut c, view(path), view(lowered.native));
         }
-        return host::write_file(view(path), view(with_link_notes(&c.libs, view(out))));
+        return write_image(&mut c, view(path), view(out));
     }
     if c.debug != 0 {
         // The .loc/.file directives pass through instruction selection unchanged; the DWARF
@@ -21592,7 +21806,7 @@ pub fn main() -> u64 {
         }
         mut image = machine::lower(view(lowered.native), target, c.plat);
         push_bytes(&mut image, view(lowered.thunks));
-        return host::write_file(view(path), view(with_link_notes(&c.libs, view(image))));
+        return write_image(&mut c, view(path), view(image));
     }
     mut native = machine::lower(view(out), target, c.plat);
     if c.debug != 0 {
@@ -21603,7 +21817,7 @@ pub fn main() -> u64 {
     }
     if target == 4 {
         image := arm_unwind(view(native));
-        return host::write_file(view(path), view(with_link_notes(&c.libs, view(image))));
+        return write_image(&mut c, view(path), view(image));
     }
-    return host::write_file(view(path), view(with_link_notes(&c.libs, view(native))));
+    return write_image(&mut c, view(path), view(native));
 }

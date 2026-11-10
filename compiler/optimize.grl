@@ -2243,10 +2243,13 @@ fn inline_candidate<a, b>(o: (&a mut O), s: &b [u8], prologue: u64) {
     put(&mut o.inl_head, h, index + 1);
 }
 // Replaces `call NAME` lines for inlinable functions by their bodies with per-site labels.
-fn inline_calls<a>(o: (&a mut O)) {
+// Inlining rewrites the output, so the `--split` marker offsets recorded on the way through are
+// rewritten with it: markers are copied in stream order, and each one takes its new offset here.
+fn inline_calls<a>(o: (&a mut O), split: u64, marks: (&a mut u64[])) {
     text := exchange(&mut o.out, u8[]);
     mut start = 0;
     mut site = 0;
+    mut next = 0;
     for i in text.len() {
         if text[i] == 10 {
             a := start;
@@ -2270,6 +2273,12 @@ fn inline_calls<a>(o: (&a mut O)) {
                 }
             }
             if done == 0 {
+                if (split != 0) & (next < marks.len()) {
+                    if (e - a > 12) & (text[a] == 46) & same(view(text), a, a + 12, view(".grail_part ")) {
+                        exchange(&mut marks[next], o.out.len());
+                        next += 1;
+                    }
+                }
                 for x in e - a {
                     o.out.push(text[a + x]);
                 }
@@ -2458,6 +2467,14 @@ fn reset<a>(o: (&a mut O)) {
     exchange(&mut o.maxslot, 0);
 }
 pub fn optimize<b>(s: &b [u8]) -> u8[] {
+    mut marks = u64[];
+    mut names = u8[][];
+    return optimize_parts(view(s), 0, &mut marks, &mut names);
+}
+// `optimize` plus the positions of the `--split` module markers it kept: for each marker line, the
+// output offset of the line and the module name it carries. A single-file build passes `split` 0 and
+// pays nothing. `native.grl` splits at these offsets, so the stream never has to be scanned again.
+pub fn optimize_parts<b>(s: &b [u8], split: u64, marks: (&mut u64[]), names: (&mut u8[][])) -> u8[] {
     mut o = O {
         ls: u64[],
         le: u64[],
@@ -2511,6 +2528,16 @@ pub fn optimize<b>(s: &b [u8]) -> u8[] {
                     }
                 }
                 if inside == 0 {
+                    if split != 0 {
+                        if (e - a > 12) & (s[a] == 46) & same(view(s), a, a + 12, view(".grail_part ")) {
+                            marks.push(o.out.len());
+                            mut name = u8[];
+                            for k in e - a - 12 {
+                                name.push(s[a + 12 + k]);
+                            }
+                            names.push(name);
+                        }
+                    }
                     for x in e - a {
                         o.out.push(s[a + x]);
                     }
@@ -2535,7 +2562,7 @@ pub fn optimize<b>(s: &b [u8]) -> u8[] {
         o.out.push(s[start + x]);
     }
     if o.inl_names.len() != 0 {
-        inline_calls(&mut o);
+        inline_calls(&mut o, split, marks);
     }
     return exchange(&mut o.out, u8[]);
 }
