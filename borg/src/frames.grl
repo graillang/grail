@@ -1,0 +1,698 @@
+module borg_frames;
+use borg_events;
+use borg_replay;
+use core;
+
+// The transport layer for the typed session-event stream: length-prefixed frames over a TCP
+// connection, carrying the bytes `borg_events` already writes to a journal.
+//
+// The wire adds no encoding of its own. An event frame is exactly one encoded event — the tag, the
+// little-endian body length and the body that `borg_events::encode_stream` puts in a journal file —
+// so a frame captured off the socket is a journal a file reader can replay, and `frames(events)` is
+// byte-identical to `encode_stream(events)`. What the transport adds is what a stream needs and a
+// file does not: frame boundaries that arrive a few bytes at a time, a handshake, and refusals that
+// name the connection-level failure instead of the file-level one.
+//
+//   frame    u8 tag | u32 LE length | length bytes body
+//   tag      0 is a control frame; 1..5 are the event tags `borg_events` defines, and any other
+//            value is left for the journal reader to refuse by name rather than guessed here
+//   control  u8 opcode, then the opcode's body
+//   text     u32 LE byte length, then that many bytes — the same primitive an event body uses
+//
+// Control opcodes:
+//
+//   1 hello          u32 LE version | text session     client -> daemon, opens the conversation
+//   2 hello_ok       u32 LE version | text session     daemon -> client, echoes what it accepted
+//   3 hello_refused  u32 LE daemon | u32 LE client | text detail   both versions, by value
+//   4 reply          session facts and, when the fold refused, the refusal
+//   5 end            no body                           the client has sent every event it means to
+//
+// The handshake is a real negotiation: the client opens with the version it speaks and the session
+// it attaches to, the daemon answers with what it accepted or a refusal that carries *both*
+// versions as numbers, and an event frame that arrives before an accepted hello is refused rather
+// than folded into a session nobody named.
+//
+// Why a tag and a length per frame rather than a self-delimiting text protocol: an unknown tag is
+// named instead of decoded as some other kind, a frame whose bytes have not arrived is incomplete
+// rather than silently short, and a declared length is checked against the stated maximum *before*
+// the bytes are waited for, so a peer cannot make the reader hold a frame it never sends.
+
+pub const PROTOCOL_VERSION: u64 = 1;
+
+// ---- refusal codes ----
+//
+// A transport refusal is named and numbered. Codes 20-24 are the journal reader's own codes
+// (`borg_events`), passed through unchanged: the same bytes that make the file reader refuse make
+// the wire refuse, with the same number.
+//
+//   0   ok
+//   10  version-mismatch   the handshake named a version the daemon does not speak
+//   11  session-mismatch   an event belongs to a session the handshake did not name
+//   12  not-handshaken     an event frame (or end) before an accepted hello
+//   13  frame-too-large    a declared length above `max_frame_bytes()`
+//   14  short-read         the peer closed inside a frame, before its declared bytes arrived
+//   15  bad-control        a control frame that is truncated, unknown, or out of order
+//   16  bad-reply          a reply frame that is truncated, mislabelled or has a non-0/1 byte
+//   17  replay-refused     the frame decoded but the fold refused it: index and reason follow
+pub const OK: u64 = 0;
+pub const VERSION_MISMATCH: u64 = 10;
+pub const SESSION_MISMATCH: u64 = 11;
+pub const NOT_HANDSHAKEN: u64 = 12;
+pub const FRAME_TOO_LARGE: u64 = 13;
+pub const SHORT_READ: u64 = 14;
+pub const BAD_CONTROL: u64 = 15;
+pub const BAD_REPLY: u64 = 16;
+pub const REPLAY_REFUSED: u64 = 17;
+
+const OP_HELLO: u64 = 1;
+const OP_HELLO_OK: u64 = 2;
+const OP_HELLO_REFUSED: u64 = 3;
+const OP_REPLY: u64 = 4;
+const OP_END: u64 = 5;
+
+// The largest frame the transport will carry. It is the journal reader's own ceiling rather than a
+// second number to keep in step: anything the wire accepts is an event a journal file could hold,
+// and anything larger is refused at the header (`FRAME_TOO_LARGE`) or by the reader
+// (`LENGTH_OVERFLOW`, 22) if it ever reaches it as a file.
+pub fn opcode_hello() -> u64 { return OP_HELLO; }
+pub fn opcode_hello_ok() -> u64 { return OP_HELLO_OK; }
+pub fn opcode_hello_refused() -> u64 { return OP_HELLO_REFUSED; }
+pub fn opcode_reply() -> u64 { return OP_REPLY; }
+pub fn opcode_end() -> u64 { return OP_END; }
+
+pub fn max_frame_bytes() -> u64 {
+    return borg_events::MAX_EVENT_BODY;
+}
+
+pub fn code_name(code: u64) -> string {
+    if code == OK {
+        return "ok".text();
+    }
+    if code == VERSION_MISMATCH {
+        return "version-mismatch".text();
+    }
+    if code == SESSION_MISMATCH {
+        return "session-mismatch".text();
+    }
+    if code == NOT_HANDSHAKEN {
+        return "not-handshaken".text();
+    }
+    if code == FRAME_TOO_LARGE {
+        return "frame-too-large".text();
+    }
+    if code == SHORT_READ {
+        return "short-read".text();
+    }
+    if code == BAD_CONTROL {
+        return "bad-control".text();
+    }
+    if code == BAD_REPLY {
+        return "bad-reply".text();
+    }
+    if code == REPLAY_REFUSED {
+        return "replay-refused".text();
+    }
+    if code == borg_events::UNKNOWN_TAG {
+        return "unknown-tag".text();
+    }
+    if code == borg_events::TRUNCATED_EVENT {
+        return "truncated-event".text();
+    }
+    if code == borg_events::LENGTH_OVERFLOW {
+        return "length-overflow".text();
+    }
+    if code == borg_events::BAD_FIELD {
+        return "bad-field".text();
+    }
+    if code == borg_events::TRAILING_BYTES {
+        return "trailing-bytes".text();
+    }
+    return "unknown".text();
+}
+
+// The code the *file* reader reports for the same bytes, or `OK` when the transport refused
+// something a journal file cannot express (a handshake, a closed socket, a bad reply). This is what
+// makes "a truncated stream fails the same way the file reader does" a function rather than a
+// claim: a socket that stops inside a frame is `SHORT_READ` here and `TRUNCATED_EVENT` (21) there,
+// and a length beyond the ceiling is `FRAME_TOO_LARGE` here and `LENGTH_OVERFLOW` (22) there.
+pub fn journal_code(code: u64) -> u64 {
+    if code == SHORT_READ {
+        return borg_events::TRUNCATED_EVENT;
+    }
+    if code == FRAME_TOO_LARGE {
+        return borg_events::LENGTH_OVERFLOW;
+    }
+    if code >= borg_events::UNKNOWN_TAG && code <= borg_events::TRAILING_BYTES {
+        return code;
+    }
+    return OK;
+}
+
+fn same<a, b>(left: (&a [u8]), right: (&b [u8])) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    for i in left.len() {
+        if left[i] != right[i] {
+            return false;
+        }
+    }
+    return true;
+}
+
+// ---- a refusal ----
+//
+// `at`, `reason` and `detail` are rendered by `borg_replay` the way its other reports render them,
+// so `-` means absent: a refusal the fold made carries the index it stopped at and the reason name,
+// and a refusal the transport made carries `-` and no reason.
+
+pub struct Refusal {
+    code: u64,
+    at: string,
+    reason: string,
+    detail: string
+}
+
+pub fn refused<a>(code: u64, detail: (&a [u8])) -> Refusal {
+    return Refusal { code: code, at: "-".text(), reason: "".text(), detail: detail.text() };
+}
+
+// A fold refusal carries replay's own index and reason, so the wire says `sequence` (or `stream`, for
+// a reader refusal) rather than a transport name that would lose which rule stopped the fold.
+pub fn refused_fold<a>(value: (&a borg_replay::Refusal)) -> Refusal {
+    return Refusal {
+        code: REPLAY_REFUSED,
+        at: borg_replay::refusal_at(value),
+        reason: borg_replay::refusal_reason(value),
+        detail: borg_replay::refusal_detail(value)
+    };
+}
+
+pub fn refusal_code<a>(value: (&a Refusal)) -> u64 { return value.code; }
+pub fn refusal_at<a>(value: (&a Refusal)) -> string { return value.at.text(); }
+pub fn refusal_detail<a>(value: (&a Refusal)) -> string { return value.detail.text(); }
+
+pub fn refusal_name<a>(value: (&a Refusal)) -> string {
+    // A refusal the fold made is named by the fold's reason, which is more specific than
+    // `replay-refused`; everything else is named by its own code.
+    if value.reason.len() > 0 {
+        return value.reason.text();
+    }
+    return code_name(value.code);
+}
+
+pub fn copy_refusal<a>(value: (&a Refusal)) -> Refusal {
+    return Refusal {
+        code: value.code,
+        at: value.at.text(),
+        reason: value.reason.text(),
+        detail: value.detail.text()
+    };
+}
+
+// ---- encoding ----
+
+fn push_uint(out: (&mut u8[]), value: u64, width: u64) {
+    mut rest = value;
+    mut index = u64(0);
+    while index < width {
+        out.push(u8(rest % 256));
+        rest = rest / 256;
+        index = index + 1;
+    }
+}
+
+fn push_bytes<a>(out: (&mut u8[]), bytes: (&a [u8])) {
+    for byte in bytes {
+        out.push(byte);
+    }
+}
+
+fn push_text<a>(out: (&mut u8[]), text: (&a [u8])) {
+    push_uint(out, text.len(), 4);
+    push_bytes(out, text);
+}
+
+fn frame_of_body(tag: u64, body: (&[u8])) -> u8[] {
+    mut out = u8[];
+    push_uint(&mut out, tag, 1);
+    push_uint(&mut out, body.len(), 4);
+    push_bytes(&mut out, body);
+    return out;
+}
+
+fn control(op: u64, body: (&[u8])) -> u8[] {
+    mut framed = u8[];
+    push_uint(&mut framed, op, 1);
+    push_bytes(&mut framed, body);
+    return frame_of_body(0, &framed);
+}
+
+// One event's frame: `encode_stream` over a one-event journal, so the bytes are the journal's bytes
+// by construction rather than by a second encoder that has to agree with it.
+pub fn frame_of<a>(event: (&a borg_events::Event)) -> u8[] {
+    mut one = borg_events::Event[];
+    one.push(borg_events::copy_event(event));
+    return borg_events::encode_stream(&one);
+}
+
+// Every event's frame in order, which is exactly the journal the same events write.
+pub fn frames<a>(events: (&a borg_events::Event[])) -> u8[] {
+    return borg_events::encode_stream(events);
+}
+
+pub fn hello(version: u64, session: (&[u8])) -> u8[] {
+    mut body = u8[];
+    push_uint(&mut body, version, 4);
+    push_text(&mut body, session);
+    return control(OP_HELLO, &body);
+}
+
+pub fn hello_ok(version: u64, session: (&[u8])) -> u8[] {
+    mut body = u8[];
+    push_uint(&mut body, version, 4);
+    push_text(&mut body, session);
+    return control(OP_HELLO_OK, &body);
+}
+
+// A refused handshake carries both versions by value, so the answer names them whether or not the
+// detail text survives a log.
+pub fn hello_refused(daemon: u64, client: u64, detail: (&[u8])) -> u8[] {
+    mut body = u8[];
+    push_uint(&mut body, daemon, 4);
+    push_uint(&mut body, client, 4);
+    push_text(&mut body, detail);
+    return control(OP_HELLO_REFUSED, &body);
+}
+
+pub fn end_marker() -> u8[] {
+    mut body = u8[];
+    return control(OP_END, &body);
+}
+
+// ---- the answer ----
+//
+// A reply carries what the fold reconstructed and, when it refused, the refusal. Both are on the
+// wire at once because a refusal is a fact about *this* stream, not a reason to withhold the
+// session that the events before it described.
+
+pub struct Reply {
+    sequence: u64,
+    status: string,
+    events: u64,
+    refused: bool,
+    code: u64,
+    at: string,
+    reason: string,
+    detail: string
+}
+
+pub fn empty_reply() -> Reply {
+    return Reply {
+        sequence: 0,
+        status: "-".text(),
+        events: 0,
+        refused: false,
+        code: OK,
+        at: "-".text(),
+        reason: "".text(),
+        detail: "".text()
+    };
+}
+
+pub fn reply_of_state<a>(state: (&a borg_replay::State)) -> Reply {
+    return Reply {
+        sequence: borg_replay::sequence_of(state),
+        status: borg_replay::status_of(state),
+        events: borg_replay::events_of(state),
+        refused: false,
+        code: OK,
+        at: "-".text(),
+        reason: "".text(),
+        detail: "".text()
+    };
+}
+
+pub fn reply_of_refusal<a>(value: (&a Refusal)) -> Reply {
+    return Reply {
+        sequence: 0,
+        status: "-".text(),
+        events: 0,
+        refused: true,
+        code: value.code,
+        at: value.at.text(),
+        reason: value.reason.text(),
+        detail: value.detail.text()
+    };
+}
+
+pub fn reply_sequence<a>(value: (&a Reply)) -> u64 { return value.sequence; }
+pub fn reply_status<a>(value: (&a Reply)) -> string { return value.status.text(); }
+pub fn reply_events<a>(value: (&a Reply)) -> u64 { return value.events; }
+pub fn reply_refused<a>(value: (&a Reply)) -> bool { return value.refused; }
+pub fn reply_at<a>(value: (&a Reply)) -> string { return value.at.text(); }
+pub fn reply_detail<a>(value: (&a Reply)) -> string { return value.detail.text(); }
+
+pub fn reply_name<a>(value: (&a Reply)) -> string {
+    if value.reason.len() > 0 {
+        return value.reason.text();
+    }
+    return code_name(value.code);
+}
+
+pub fn reply_frame<a>(value: (&a Reply)) -> u8[] {
+    mut body = u8[];
+    push_uint(&mut body, value.sequence, 8);
+    push_text(&mut body, &value.status);
+    push_uint(&mut body, value.events, 8);
+    if value.refused {
+        push_uint(&mut body, 1, 1);
+        push_uint(&mut body, value.code, 8);
+        push_text(&mut body, &value.at);
+        push_text(&mut body, &value.reason);
+        push_text(&mut body, &value.detail);
+    } else {
+        push_uint(&mut body, 0, 1);
+    }
+    return control(OP_REPLY, &body);
+}
+
+// ---- decoding ----
+//
+// Every reader below is the `borg_events` shape: a cursor, an end, and a status word that the first
+// refusal sets, so a truncated body reports one named reason instead of reading past its extent.
+
+fn read_uint<a>(bytes: (&a [u8]), at: u64, width: u64) -> u64 {
+    mut value = u64(0);
+    mut index = width;
+    while index > 0 {
+        index = index - 1;
+        value = value * 256 + u64(bytes[at + index]);
+    }
+    return value;
+}
+
+fn take_uint<a>(bytes: (&a [u8]), at: (&mut u64), end: u64, width: u64, status: (&mut u64)) -> u64 {
+    if *status != OK {
+        return 0;
+    }
+    if end < *at || end - *at < width {
+        *status = BAD_CONTROL;
+        return 0;
+    }
+    value := read_uint(bytes, *at, width);
+    *at = *at + width;
+    return value;
+}
+
+fn take_text<a>(bytes: (&a [u8]), at: (&mut u64), end: u64, status: (&mut u64)) -> string {
+    mut out = u8[];
+    if *status != OK {
+        return out.text();
+    }
+    if end < *at || end - *at < 4 {
+        *status = BAD_CONTROL;
+        return out.text();
+    }
+    length := read_uint(bytes, *at, 4);
+    *at = *at + 4;
+    if end < *at || end - *at < length {
+        *status = BAD_CONTROL;
+        return out.text();
+    }
+    mut index = *at;
+    while index < *at + length {
+        out.push(bytes[index]);
+        index = index + 1;
+    }
+    *at = *at + length;
+    return out.text();
+}
+
+pub fn opcode_of<a>(value: (&a Frame)) -> u64 {
+    if value.body.len() < 1 {
+        return 0;
+    }
+    return read_uint(&value.body, 0, 1);
+}
+
+// ---- a frame ----
+
+pub struct Frame {
+    tag: u64,
+    body: u8[]
+}
+
+pub fn frame_tag<a>(value: (&a Frame)) -> u64 { return value.tag; }
+pub fn frame_length<a>(value: (&a Frame)) -> u64 { return value.body.len(); }
+pub fn frame_body<a>(value: (&a Frame)) -> u8[] { return value.body.copy(); }
+pub fn frame_is_control<a>(value: (&a Frame)) -> bool { return value.tag == 0; }
+
+// The frame exactly as it arrived, so it can be handed to the journal reader unchanged.
+pub fn frame_bytes<a>(value: (&a Frame)) -> u8[] {
+    return frame_of_body(value.tag, &value.body);
+}
+
+// The event a frame carries, decoded by the journal reader itself: the frame's own bytes are the
+// bytes a file would hold, so `decode_stream` gets exactly what it gets from a journal file.
+pub fn event_of<a>(value: (&a Frame)) -> borg_events::Event | Refusal {
+    stream := borg_events::decode_stream(&frame_bytes(value));
+    code := borg_events::stream_status(&stream);
+    if code != borg_events::STREAM_OK {
+        return refused(code, "");
+    }
+    events := borg_events::stream_events(&stream);
+    if events.len() != 1 {
+        return refused(borg_events::TRAILING_BYTES, "");
+    }
+    return borg_events::copy_event(&events[0]);
+}
+
+// ---- what a hello says ----
+
+pub struct Hello {
+    version: u64,
+    session: string
+}
+
+pub fn hello_version<a>(value: (&a Hello)) -> u64 { return value.version; }
+pub fn hello_session<a>(value: (&a Hello)) -> string { return value.session.text(); }
+
+pub fn hello_of<a>(value: (&a Frame)) -> Hello | Refusal {
+    if opcode_of(value) != OP_HELLO {
+        return refused(BAD_CONTROL, "hello");
+    }
+    mut at = u64(1);
+    mut status = OK;
+    end := value.body.len();
+    version := take_uint(&value.body, &mut at, end, 4, &mut status);
+    session := take_text(&value.body, &mut at, end, &mut status);
+    if status != OK || at != end {
+        return refused(BAD_CONTROL, "hello body");
+    }
+    if session.len() == 0 {
+        return refused(BAD_CONTROL, "hello names no session");
+    }
+    return Hello { version: version, session: session };
+}
+
+// A version mismatch is refused by `accept_hello`, and its detail names both versions so a client
+// that only logs the refusal still learns what it was talking to.
+fn version_detail(daemon: u64, client: u64) -> string {
+    return format("daemon {} client {}", daemon, client);
+}
+
+// ---- the transport ----
+//
+// A transport owns the bytes that have arrived but not yet been decoded, the session the handshake
+// accepted, and whether the handshake happened. It is pure: no descriptor, no clock, no allocation
+// beyond the frames themselves, so every refusal below is reachable from a byte string.
+
+pub struct Transport {
+    buffer: u8[],
+    version: u64,
+    session: string,
+    open: bool
+}
+
+pub fn transport() -> Transport {
+    return Transport { buffer: u8[], version: PROTOCOL_VERSION, session: "".text(), open: false };
+}
+
+pub fn handshaken<a>(value: (&a Transport)) -> bool { return value.open; }
+pub fn accepted_session<a>(value: (&a Transport)) -> string { return value.session.text(); }
+pub fn accepted_version<a>(value: (&a Transport)) -> u64 { return value.version; }
+
+pub fn feed<a>(value: (&a mut Transport), bytes: (&[u8])) {
+    for byte in bytes {
+        value.buffer.push(byte);
+    }
+}
+
+pub enum Next {
+    Frame(Frame),
+    Pending,
+    Refused(Refusal)
+}
+
+// The transport's half of the handshake: it accepts a hello it can speak, records the session, and
+// refuses a version it cannot speak with both versions named.
+pub fn accept_hello<a>(value: (&a mut Transport), hello: (&a Hello)) -> Refusal? {
+    if value.open {
+        return Some(refused(BAD_CONTROL, "second hello"));
+    }
+    peer := hello.version;
+    if peer != value.version {
+        said := version_detail(value.version, peer);
+        return Some(refused(VERSION_MISMATCH, &said));
+    }
+    value.session = hello.session.text();
+    value.open = true;
+    return None;
+}
+
+// An event is admitted only after an accepted handshake, into the session that handshake named.
+pub fn admit<a>(value: (&a mut Transport), event: (&a borg_events::Event)) -> Refusal? {
+    if !value.open {
+        return Some(refused(NOT_HANDSHAKEN, ""));
+    }
+    session := borg_events::event_session(event);
+    if !same(&session, &value.session) {
+        said := format("handshake {} event {}", value.session.text(), session);
+        return Some(refused(SESSION_MISMATCH, &said));
+    }
+    return None;
+}
+
+// One frame from the bytes that have arrived. `Pending` means the frame is not complete yet — the
+// caller reads more and asks again — and it is the only result that does not consume bytes.
+pub fn next<a>(value: (&a mut Transport)) -> Next {
+    if value.buffer.len() < 5 {
+        return Next::Pending;
+    }
+    tag := read_uint(&value.buffer, 0, 1);
+    length := read_uint(&value.buffer, 1, 4);
+    // The declared length is refused before its bytes are waited for.
+    if length > max_frame_bytes() {
+        said := format("{}/{}", length, max_frame_bytes());
+        return Next::Refused(refused(FRAME_TOO_LARGE, &said));
+    }
+    if tag == 0 && length < 1 {
+        return Next::Refused(refused(BAD_CONTROL, "control frame without an opcode"));
+    }
+    if value.buffer.len() - 5 < length {
+        return Next::Pending;
+    }
+    mut body = u8[];
+    mut index = u64(5);
+    while index < 5 + length {
+        body.push(value.buffer[index]);
+        index = index + 1;
+    }
+    mut rest = u8[];
+    mut keep = 5 + length;
+    while keep < value.buffer.len() {
+        rest.push(value.buffer[keep]);
+        keep = keep + 1;
+    }
+    value.buffer = rest;
+    return Next::Frame(Frame { tag: tag, body: body });
+}
+
+// The peer closed. Bytes that stopped inside a frame are a short read; an empty buffer is the end
+// of the conversation and not a refusal. `None` leaves the transport exactly as it was, so a caller
+// can still ask `next` what it already holds.
+pub fn close<a>(value: (&a mut Transport)) -> Refusal? {
+    if value.buffer.len() == 0 {
+        return None;
+    }
+    said := format("{} bytes into a frame", value.buffer.len());
+    return Some(refused(SHORT_READ, &said));
+}
+
+// ---- the answer, decoded ----
+
+pub fn reply_of<a>(value: (&a Frame)) -> Reply | Refusal {
+    if opcode_of(value) != OP_REPLY {
+        return refused(BAD_REPLY, "reply expected");
+    }
+    mut at = u64(1);
+    mut status = OK;
+    end := value.body.len();
+    sequence := take_uint(&value.body, &mut at, end, 8, &mut status);
+    shown := take_text(&value.body, &mut at, end, &mut status);
+    events := take_uint(&value.body, &mut at, end, 8, &mut status);
+    marker := take_uint(&value.body, &mut at, end, 1, &mut status);
+    if status != OK {
+        return refused(BAD_REPLY, "reply truncated");
+    }
+    if marker > 1 {
+        return refused(BAD_REPLY, "reply refusal marker");
+    }
+    if marker == 0 {
+        if at != end {
+            return refused(BAD_REPLY, "trailing bytes");
+        }
+        return Reply {
+            sequence: sequence,
+            status: shown,
+            events: events,
+            refused: false,
+            code: OK,
+            at: "-".text(),
+            reason: "".text(),
+            detail: "".text()
+        };
+    }
+    code := take_uint(&value.body, &mut at, end, 8, &mut status);
+    where := take_text(&value.body, &mut at, end, &mut status);
+    why := take_text(&value.body, &mut at, end, &mut status);
+    said := take_text(&value.body, &mut at, end, &mut status);
+    if status != OK || at != end {
+        return refused(BAD_REPLY, "reply refusal truncated");
+    }
+    return Reply {
+        sequence: sequence,
+        status: shown,
+        events: events,
+        refused: true,
+        code: code,
+        at: where,
+        reason: why,
+        detail: said
+    };
+}
+
+// What a daemon sends instead of a reply when it cannot accept the handshake at all.
+pub fn hello_refusal_of<a>(value: (&a Frame)) -> Refusal {
+    if opcode_of(value) != OP_HELLO_REFUSED {
+        return refused(BAD_CONTROL, "handshake answer expected");
+    }
+    mut at = u64(1);
+    mut status = OK;
+    end := value.body.len();
+    daemon := take_uint(&value.body, &mut at, end, 4, &mut status);
+    client := take_uint(&value.body, &mut at, end, 4, &mut status);
+    detail := take_text(&value.body, &mut at, end, &mut status);
+    if status != OK || at != end {
+        return refused(BAD_CONTROL, "handshake answer truncated");
+    }
+    said := version_detail(daemon, client);
+    return refused(VERSION_MISMATCH, &said);
+}
+
+pub fn hello_ok_of<a>(value: (&a Frame)) -> Hello | Refusal {
+    if opcode_of(value) != OP_HELLO_OK {
+        return refused(BAD_CONTROL, "handshake answer expected");
+    }
+    mut at = u64(1);
+    mut status = OK;
+    end := value.body.len();
+    version := take_uint(&value.body, &mut at, end, 4, &mut status);
+    session := take_text(&value.body, &mut at, end, &mut status);
+    if status != OK || at != end {
+        return refused(BAD_CONTROL, "handshake answer truncated");
+    }
+    return Hello { version: version, session: session };
+}
+

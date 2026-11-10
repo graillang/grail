@@ -1,0 +1,178 @@
+module borg_daemon;
+use authority;
+use borg_events;
+use borg_frames;
+use borg_replay;
+use core;
+use host;
+
+// The smallest useful daemon: a listener the authority granted, one connection at a time, and the
+// fold behind it.
+//
+// Opening the listening socket is the point where authority is asked for. `listen` below takes an
+// `authority::Authority` and hands the call straight to `authority::listen`, so a daemon cannot be
+// started at all without `authority::sockets()`: the grant is the only way to a listener, and every
+// connection this module accepts comes from a listener somebody was granted.
+//
+// What the grant covers and what it does not is the whole story of this file:
+//
+//   covered      who may listen. `listen` refuses a value that is not a socket grant, and `port`
+//                (needed to tell a client where to connect) is gated the same way.
+//   covered      who may connect. This module never connects; the client side does, through its
+//                own call to `authority::connect`, so a program that was not granted sockets
+//                cannot reach a listener either.
+//   not covered  what the peer does once connected. `accept`, `read_fd` and `write_fd` are ambient
+//                host operations: the grant decides that a socket exists, not what the bytes on it
+//                mean, not who the peer is, and not how long the conversation lasts. A daemon whose
+//                listener was granted will serve whoever the kernel hands it.
+//
+// The daemon decodes each frame with `borg_frames`, admits it against the session the handshake
+// named, and folds it with `borg_replay::apply` as it arrives, so a stream that cannot apply is
+// answered with the index and reason that stopped it rather than folded as far as it happened to
+// get. The answer is one reply frame carrying the reconstructed sequence and status plus any
+// refusal, and it is written whether the fold succeeded or refused: a refusal is a fact about the
+// stream, and a client that is not told has no way to know its events were not folded.
+
+// Opening the listener is the grant. There is no path to a listening descriptor in this module that
+// does not go through `authority`.
+pub fn listen<a>(grants: (&a authority::Authority), port: u64) -> u64 |? authority::Error {
+    return authority::listen(grants, port)?;
+}
+
+// The port a listener actually bound, for `listen(&grants, 0)`. Gated like `listen`, because a
+// caller that could not open a socket has nothing to ask about.
+pub fn port<a>(grants: (&a authority::Authority), listener: u64) -> u64 |? authority::Error {
+    return authority::port(grants, listener)?;
+}
+
+// The byte count is dropped on purpose: a reply that cannot be written has no reader left to tell,
+// and the client's own read is what turns a lost answer into a refusal it can see.
+fn write_reply(fd: u64, reply: (&borg_frames::Reply)) {
+    framed := borg_frames::reply_frame(reply);
+    host::write_fd(fd, view(framed));
+}
+
+// A refusal is answered, not withheld: the client learns the code, the index and the reason. The
+// reply is returned as well so a caller that also runs the client half can check what crossed the
+// socket.
+fn answered(fd: u64, value: (&borg_frames::Refusal)) -> borg_frames::Reply {
+    reply := borg_frames::reply_of_refusal(value);
+    write_reply(fd, &reply);
+    return reply;
+}
+
+fn finished(fd: u64, state: (&borg_replay::State)) -> borg_frames::Reply {
+    reply := borg_frames::reply_of_state(state);
+    write_reply(fd, &reply);
+    return reply;
+}
+
+// The conversation on one accepted connection: handshake, frames, fold, one answer. Every path
+// writes exactly one frame — the handshake's acknowledgement, its refusal, or the reply that
+// carries the fold or the refusal that stopped it — so a client is never left with two answers or
+// none.
+fn session(fd: u64) -> borg_frames::Reply {
+    mut state = borg_frames::transport();
+    mut folded = borg_replay::empty();
+    mut index = u64(0);
+    while true {
+        match borg_frames::next(&mut state) {
+            Frame(frame) => {
+                if borg_frames::frame_is_control(&frame) {
+                    op := borg_frames::opcode_of(&frame);
+                    if op == borg_frames::opcode_hello() {
+                        match borg_frames::hello_of(&frame) {
+                            parsed: borg_frames::Hello => {
+                                match borg_frames::accept_hello(&mut state, &parsed) {
+                                    Some(answer) => {
+                                        // The handshake refusal names both versions by value, so a
+                                        // client that only logs the line still learns which two
+                                        // versions disagreed.
+                                        said := borg_frames::refusal_detail(&answer);
+                                        framed := borg_frames::hello_refused(
+                                            borg_frames::accepted_version(&state),
+                                            borg_frames::hello_version(&parsed),
+                                            &said
+                                        );
+                                        host::write_fd(fd, view(framed));
+                                        return borg_frames::reply_of_refusal(&answer);
+                                    },
+                                    None => {
+                                        agreed := borg_frames::accepted_session(&state);
+                                        framed := borg_frames::hello_ok(
+                                            borg_frames::accepted_version(&state),
+                                            &agreed
+                                        );
+                                        host::write_fd(fd, view(framed));
+                                    }
+                                }
+                            },
+                            failure: borg_frames::Refusal => { return answered(fd, &failure); }
+                        }
+                    } else if op == borg_frames::opcode_end() {
+                        if !borg_frames::handshaken(&state) {
+                            return answered(
+                                fd,
+                                &borg_frames::refused(
+                                    borg_frames::NOT_HANDSHAKEN,
+                                    "end before hello"
+                                )
+                            );
+                        }
+                        return finished(fd, &folded);
+                    } else {
+                        return answered(
+                            fd,
+                            &borg_frames::refused(
+                                borg_frames::BAD_CONTROL,
+                                "unknown control opcode"
+                            )
+                        );
+                    }
+                } else {
+                    match borg_frames::event_of(&frame) {
+                        value: borg_events::Event => {
+                            match borg_frames::admit(&mut state, &value) {
+                                Some(answer) => { return answered(fd, &answer); },
+                                None => {
+                                    match borg_replay::apply(&folded, &value, index) {
+                                        next: borg_replay::State => {
+                                            folded = next;
+                                            index = index + 1;
+                                        },
+                                        refusal: borg_replay::Refusal => {
+                                            stopped := borg_frames::refused_fold(&refusal);
+                                            return answered(fd, &stopped);
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        failure: borg_frames::Refusal => { return answered(fd, &failure); }
+                    }
+                }
+            },
+            Pending => {
+                incoming := host::read_fd(fd, 65536);
+                if incoming.len() == 0 {
+                    match borg_frames::close(&mut state) {
+                        Some(answer) => { return answered(fd, &answer); },
+                        None => { return finished(fd, &folded); }
+                    }
+                }
+                borg_frames::feed(&mut state, view(incoming));
+            },
+            Refused(answer) => { return answered(fd, &answer); }
+        }
+    }
+    return finished(fd, &folded);
+}
+
+// Serve one connection: accept, fold what it sends, answer, close. The answer is returned as well
+// as written, so a caller can check what crossed the socket.
+pub fn serve_one(listener: u64) -> borg_frames::Reply {
+    connection := host::tcp_accept(listener);
+    answer := session(connection);
+    host::close(connection);
+    return answer;
+}
