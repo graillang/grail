@@ -156,3 +156,71 @@ fn rt_accept4(fd: u64) -> u64 {
 fn rt_os_init() -> u64 {
     return 0;
 }
+
+// ---- green-task execution contexts ----
+// Linux has both halves of the green design: a direct stack switch (raw_switch, emitted for the ELF
+// targets) and a readiness reactor (epoll plus eventfd/timerfd), so a task parks on an epoll
+// registration and a host operation that would block is offloaded instead (rt_offload).
+fn rt_os_reactor() -> u64 {
+    return 1;
+}
+// Scheduler threads behind the shared run queue: one per CPU, clamped to [4, 64].
+fn rt_os_workers() -> u64 {
+    mut workers = rt_cpus();
+    if workers < 4 {
+        workers = 4;
+    }
+    if 64 < workers {
+        workers = 64;
+    }
+    return workers;
+}
+fn rt_os_sched_prepare() -> u64 {
+    return 0;
+}
+// A task stack with a guard page below it. Its initial switch frame is what the target's switch
+// saves, and the address it resumes into is rt_green_main.
+fn rt_os_ctx_new(t: u64) -> u64 {
+    size := 262144;
+    stack := raw_map(size);
+    if rt_error(stack) {
+        rt_abort();
+    }
+    if rt_error(rt_syscall(10, stack, 4096, 0)) {
+        rt_abort();
+    }
+    raw_store(t + 8, stack);
+    raw_store(t + 16, size);
+    // x86-64 8 words (resume first); AArch64 22 words (resume first); RISC-V 26 words (resume
+    // last).
+    target := raw_target();
+    mut words = 8;
+    mut slot = 0;
+    if target == 1 {
+        words = 22;
+    }
+    if target == 2 {
+        words = 26;
+        slot = 25;
+    }
+    frame := stack + size - words * 8;
+    raw_store(frame + slot * 8, rt_green_main);
+    raw_store(t, frame);
+    return frame;
+}
+fn rt_os_ctx_enter(t: u64) -> u64 {
+    w := raw_tp_get();
+    raw_switch(w + 8, raw_load(t));
+    return 0;
+}
+fn rt_os_ctx_leave(t: u64) -> u64 {
+    w := raw_tp_get();
+    raw_switch(t, raw_load(w + 8));
+    return 0;
+}
+fn rt_os_ctx_release(t: u64) -> u64 {
+    if rt_error(rt_syscall(11, raw_load(t + 8), raw_load(t + 16), 0)) {
+        rt_abort();
+    }
+    return 0;
+}

@@ -68,32 +68,50 @@ or exposing Future state machines. This does **not** erase scheduling semantics:
   this path because they run atexit handlers, C++ destructors or DLL detach. This work does not
   claim panic isolation or unwinding that the language does not implement.
 
-## Platform divergence: on Windows a task is an OS thread
+## Platform mechanism: the same task semantics, a different switch
 
-Linux runs stackful green tasks over a worker pool with an epoll reactor: many tasks share a worker,
-suspension switches the stack away, and a blocking foreign call occupies a worker. Windows has no
-epoll, eventfd or timerfd, and the runtime has no stack switching there, so `rt_threaded()` selects
-a thread-per-task scheduler instead. The task API and its type rules are identical on both platforms;
-the observable scheduling is not:
+A task is green on every platform. Windows used to run a thread-per-task scheduler because it has
+no epoll, eventfd or timerfd and the ELF backend's stack switch is not reachable there; that was a
+semantic divergence, not a porting detail, so it is gone. What a program may rely on is now the
+same everywhere:
 
-- `spawn` creates the task record and a real OS thread; `join` and scope exit wait on the task's
+- `spawn` creates a task that runs on a scheduler thread until it *yields or blocks*. Suspension
+  parks the task, not the scheduler thread: the other tasks keep running.
+- `sleep_ms`, `read_fd`, `write_fd` and the blocking host operations (`read_file`, `write_file`,
+  `command`) park the calling task. On Linux the reactor suspends it on an epoll registration or a
+  timer; on Windows the blocking call runs on a helper thread (`rt_offload`) and the task parks on
+  its park word. The observable behaviour is the same; only the mechanism is.
+- `join`, task-scope exit, cancellation, result publication and the abort rules behave identically.
+- The interleaving *order* is not a portable guarantee. Linux works the run queue with one
+  scheduler thread per CPU (clamped to 4-64), so two ready tasks can run at the same time; Windows
+  has one scheduler thread, so its queue is FIFO and an interleaving there is deterministic.
+
+Mechanically, the platform module supplies five functions (`rt_os_reactor`, `rt_os_workers`,
+`rt_os_sched_prepare`, `rt_os_ctx_new/enter/leave/release`): Linux switches stacks with
+`raw_switch` under an epoll reactor with one worker per CPU; Windows switches Win32 fibers
+(`CreateFiberEx`/`SwitchToFiber`) on a single scheduler thread and answers `rt_os_reactor()` with 0,
+so the runtime parks tasks inside offloaded operations instead of on readiness registrations. The
+`Scope`/`Task` API and its type rules above this line are unchanged, and so are the tests that pin
+them.
+
+### The opt-in thread-per-task scheduler
+
+`GRAIL_TASKS=thread` in the environment selects the previous Windows scheduler on any platform, and
+it is a *different* semantic rather than a faster one:
+
+- `spawn` creates a task record and a real OS thread; `join` and scope exit wait on the task's
   finished word and then reap the thread, so its stack is unmapped only after it exited.
 - Suspension (`rt_suspend`/`rt_wake`, used by `rt_offload`) parks the task's own thread on its park
-  word with `WaitOnAddress`. There is no handoff and no stack switch.
+  word with `WaitOnAddress`.
 - `rt_wait_fd` returns immediately and `host::sleep_ms` sleeps the task's thread: readiness is the
-  blocking call on the thread that owns the task, which is the documented thread-per-blocking-call
-  policy. With no readiness reactor, a task blocked in a blocking call observes cancellation only
-  when that call returns.
-- `rt_reactor_fence` is a no-op, `rt_yield` is `SwitchToThread`, and a mutex blocks the task's thread.
-- Each task costs one OS thread and its stack, so the task count is bounded by threads and memory
-  rather than by the worker pool. A blocking foreign call blocks only the task that made it, so B3's
-  handoff is unnecessary there.
-- `rt_sched` never creates a reactor on Windows, so the old fatal `epoll_create` abort cannot happen:
-  `spawn`, `task_scope` and `parallel_map` work and are executed under Wine.
+  blocking call on the thread that owns the task. `rt_reactor_fence` is a no-op, `rt_yield` is
+  `SwitchToThread`, and a mutex blocks the task's thread.
+- A task that never yields still makes progress beside another one, because both own a thread. That
+  is the point of the mode (CPU-bound fan-out) and the reason it is not the default: there is no
+  `Send`/`Sync` check, so two tasks mutating the same memory race silently.
 
-This is thread-per-blocking-call, not IOCP: overlapped I/O and completion ports are still
-unimplemented, and there is no readiness-based fairness because every task already has its own
-thread.
+The mode is resolved once per process from the environment and cached in process state
+(`rt_task_mode`, word 88), so entering it costs no per-task check.
 
 ## Runtime and verification prerequisites
 
