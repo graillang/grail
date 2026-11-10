@@ -126,6 +126,13 @@ fn rt_syscall4(n: u64, a: u64, b: u64, c: u64, d: u64) -> u64 {
     }
     return wrapping_sub(0, 38);
 }
+// Abort's last step. Operation 231 is exit_group on every Linux target: it runs no atexit handlers,
+// no C++ destructors and no stdio flush, so an abort can never execute foreign cleanup. exit(2)
+// (operation 60 on x86-64) would, so the abort path never uses it.
+fn rt_hard_exit(code: u64) -> u64 {
+    rt_syscall(231, code, 0, 0);
+    return 0;
+}
 fn rt_readlinkat(path: u64, buf: u64, size: u64) -> u64 {
     if raw_target() == 0 {
         return raw_syscall4(267, wrapping_sub(0, 100), path, buf, size);

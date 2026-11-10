@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Decision B5 (abort/unwind policy): abort never unwinds, and nothing may unwind across the C
+  boundary. `rt_abort` is the only abort entry point and now ends in a platform `rt_hard_exit`:
+  `exit_group` on Linux, `TerminateProcess` on Windows, `_exit` on macOS. Two defects are fixed.
+  A Windows abort used `ExitProcess`, which runs DLL detach handlers and C++ static destructors; and
+  on x86-64 Linux the fallback was `exit(2)`, which ends only the calling thread, so an abort inside
+  a green task whose SIGABRT was caught by a foreign handler left the process waiting forever. Both
+  now end the whole process with no foreign cleanup. Tested from inside a Grail callback that C
+  called (glibc `qsort`) and from a green task: `tests/abort/` plus native cases
+  `abort-in-c-callback-*`, `abort-in-green-task-ends-process`, `abort-unwrap-none`, with a control
+  case proving C does return into Grail normally. The rule and its one-line rationale are stated in
+  `docs/ffi.md` ("Abort and unwinding across the boundary").
 - Merge the three design reviews from branch `claude/brave-heisenberg-0h3ska` as documents only
   (`docs/design/first-principles-architecture.md`, `architecture-reassessment.md`,
   `complexity-reassessment.md`, 2,746 lines). Their edits to README and to the research-phase

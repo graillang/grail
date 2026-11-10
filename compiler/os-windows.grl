@@ -139,6 +139,13 @@ fn rt_win_clock(spec: u64) -> u64 {
     raw_store(spec + 8, (ms % 1000) * 1000000);
     return 0;
 }
+// Abort's last step. TerminateProcess runs no DLL detach handlers, no atexit handlers and no C++
+// static destructors; ExitProcess (the normal exit path, operation 60) does run them, so abort never
+// uses it. (HANDLE)-1 is the current process pseudo-handle.
+fn rt_hard_exit(code: u64) -> u64 {
+    raw_win32(TerminateProcess, wrapping_sub(0, 1), code);
+    return 0;
+}
 fn rt_syscall(n: u64, a: u64, b: u64, c: u64) -> u64 {
     if n == 0 {
         return rt_win_read(rt_win_handle(a), b, c);

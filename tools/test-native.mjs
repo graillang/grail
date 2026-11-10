@@ -80,8 +80,12 @@ for (const test of cases) {
     if (test.compileOnly) { passed++; continue; }
     const result = execute(executable, test.args ?? [], target, { cwd: directory });
     if (result.error) throw result.error;
-    if (test.signal) assert.equal(result.signal, test.signal, `${test.name}: ${result.status}: ${result.stderr}`);
-    else { assert.equal(result.status, test.status ?? 0, `${test.name}: ${result.signal}: ${result.stderr}`); assert.equal(result.stdout.toString(), test.stdout, test.name); }
+    // A case that dies by signal can still pin its output: an abort must not resume the foreign or
+    // Grail code that ran before it, so what was printed up to the abort is part of the contract.
+    if (test.signal) {
+      assert.equal(result.signal, test.signal, `${test.name}: ${result.status}: ${result.stderr}`);
+      if (test.stdout !== undefined) assert.equal(result.stdout.toString(), test.stdout, test.name);
+    } else { assert.equal(result.status, test.status ?? 0, `${test.name}: ${result.signal}: ${result.stderr}`); assert.equal(result.stdout.toString(), test.stdout, test.name); }
   }
   passed++;
 }

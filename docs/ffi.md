@@ -239,6 +239,24 @@ marker; it is the call that crosses the boundary.
   (for example an error-code out-parameter), and that accessor's semantics are the
   runtime's, not the compiler's.
 
+## Abort and unwinding across the boundary
+
+**Abort never unwinds, and nothing may unwind across the C boundary.** A checked-arithmetic
+failure, an index bound, a failed `!`, a failed `assert` or an explicit abort ends the process on
+the spot. That is also true when the abort happens inside a Grail callback that C called: control
+never returns into the foreign frame, no C++ destructor, `atexit` handler or DLL detach runs, and
+the parent sees a SIGABRT (exit status 134 when a signal handler is installed or on Windows). The
+one-line rationale: Grail has no unwinding machinery, so a half-unwound stack would leave every
+live owner in an unknown state.
+
+- `rt_abort` sends SIGABRT on POSIX, then calls the platform's cleanup-free exit: `exit_group` on
+  Linux, `TerminateProcess` on Windows, `_exit` on macOS. `exit(2)` and `ExitProcess` are never on
+  this path, because they run foreign cleanup; `exit(2)` would also end only the calling thread.
+- Foreign code that installs a SIGABRT handler cannot change this: the handler runs, returns, and
+  the abort still exits the process. There is no supported way to catch a Grail abort in C.
+- A `defer`/scope cleanup inside the aborting Grail frame does not run either. Cleanup is for
+  ordinary return, error propagation and structured scope exit, not for abort.
+
 ## Limits
 
 ## Direct calls: calling conventions

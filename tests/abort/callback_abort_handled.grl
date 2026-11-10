@@ -1,0 +1,35 @@
+// The same abort, but a foreign library has installed a SIGABRT handler that returns. The handler
+// cannot turn the abort into an unwind or a return into C: the process still dies at the runtime's
+// hard exit (exit_group), so the exit status is 134 and the atexit handler never runs. Before that
+// hard exit the aborting thread called exit(2), which ends only that thread, so this program hung.
+unsafe module runtime;
+use host;
+extern "C" lib "c" fn qsort(base: u64, n: u64, size: u64, cmp: cfn(u64, u64) -> i32) -> unit;
+extern "C" lib "c" fn atexit(f: cfn() -> unit) -> i32;
+extern "C" lib "c" fn signal(sig: i32, handler: cfn(i32) -> unit) -> u64;
+fn cleanup() -> unit {
+    host::print(view("cleanup\n"));
+}
+fn onsig(sig: i32) -> unit {
+    return ();
+}
+fn compare(a: u64, b: u64) -> i32 {
+    mut v: u64 = 18446744073709551615;
+    v = v + raw_load(a);
+    return 0;
+}
+fn main() {
+    atexit(cleanup);
+    signal(6, onsig);
+    host::print(view("before\n"));
+    words := rt_alloc(32);
+    raw_store(words, 9);
+    raw_store(words + 8, 3);
+    raw_store(words + 16, 5);
+    raw_store(words + 24, 7);
+    unsafe {
+        qsort(words, 4, 8, compare);
+    }
+    host::print(view("after\n"));
+    rt_free(words);
+}

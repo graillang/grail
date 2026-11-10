@@ -1,9 +1,14 @@
 unsafe module runtime;
 
+// Abort: the process dies here and control never returns to the caller, not even when a foreign
+// frame called in (a C callback that aborts). The rule is "abort never unwinds, and nothing may
+// unwind across the C boundary": no atexit handler, C++ destructor, DLL detach, stack unwind or
+// foreign cleanup of any kind runs. SIGABRT (POSIX) makes the termination visible to the parent;
+// rt_hard_exit is the platform's cleanup-free exit (exit_group, TerminateProcess, _exit), because
+// exit(2) would run foreign cleanup. This is the only abort entry point in the runtime.
 fn rt_abort() -> u64 {
-    pid := rt_syscall(39, 0, 0, 0);
-    rt_syscall(62, pid, 6, 0);
-    rt_syscall(60, 134, 0, 0);
+    rt_syscall(62, rt_syscall(39, 0, 0, 0), 6, 0);
+    rt_hard_exit(134);
     return 0;
 }
 fn rt_error(n: u64) -> u64 {

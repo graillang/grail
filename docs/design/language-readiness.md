@@ -36,7 +36,32 @@ B7's syntax; closures need B6).
 | B4 | **Windows I/O readiness model**: the green-task reactor is epoll-only; Windows needs IOCP (or a documented thread-per-blocking-call policy). | `runtime.grl` |
 | B6 | **Closure capture model**: mutable captures (FnMut) and closure parameters that hold borrows need lifetime rules for the closure object - either region-bounded closures (cannot escape the borrow's scope) or by-reference capture cells with explicit `move`. Generic iterator adapters over borrowed elements depend on it. | `docs/design/closures.md` |
 | B7 | **Records passed by value to C**: an `extern "C" record` parameter is the C `R *` today (what Win32, Vulkan and D3D12 use). By-value struct arguments (ImGui `ImVec2`, some SDL calls) need a spelling, e.g. `v: byval R`, and per-ABI classification. | `docs/ffi.md` |
-| B5 | **Abort/unwind policy**: abort paths do not unwind, and nothing may unwind across the C boundary. | `implementation-status.md` |
+| B5 | **Abort/unwind policy**: abort paths do not unwind, and nothing may unwind across the C boundary. **Decided and implemented** (see B5 below). | `implementation-status.md` |
+
+### B5 (decided and implemented): abort never unwinds
+
+The rule is "abort never unwinds, and nothing may unwind across the C boundary"; the one-line
+rationale is that Grail has no unwinding machinery, so a half-unwound stack would leave every live
+owner in an unknown state. It is now true by construction rather than by description:
+
+- `rt_abort` is the only abort entry point. It sends SIGABRT (POSIX visibility for the parent and
+  core dumps) and then calls `rt_hard_exit`, which is `exit_group` on Linux, `TerminateProcess` on
+  Windows and `_exit` on macOS. `exit(2)` (operation 60 on x86-64) and `ExitProcess` are off this
+  path: the first runs atexit handlers and C++ destructors and ends only the calling thread, the
+  second runs DLL detach handlers. Before this increment a Windows abort used `ExitProcess`, and a
+  Linux abort from a green task with a SIGABRT handler installed killed only the worker thread and
+  left the process waiting forever.
+- Every abort path (checked arithmetic, index bounds, failed `!`, failed `assert`, explicit abort)
+  goes through that one function, so none of them can run foreign cleanup or return through a
+  foreign frame.
+- Evidence: native cases `abort-in-c-callback-arithmetic`, `abort-in-c-callback-bounds`,
+  `abort-in-c-callback-assert` (glibc `qsort` calls a Grail callback that aborts: SIGABRT, output
+  stops at "before"), `abort-in-c-callback-survives-foreign-handler` (a foreign SIGABRT handler
+  cannot turn the abort into a return: exit status 134, atexit never runs),
+  `abort-c-callback-control-returns-into-c` (the same C caller does return into Grail normally, so
+  the abort cases are not vacuous), `abort-in-green-task-ends-process` (an abort in a green task
+  ends the whole process; before the fix it hung) and `abort-unwrap-none`. The rule is documented
+  where a user looks for it: `docs/ffi.md`, "Abort and unwinding across the boundary".
 
 ## C. Libraries (not language core; needed by the ports, scheduled with them)
 

@@ -1,0 +1,31 @@
+// The control for the abort cases: the same C caller (glibc qsort) really does call the Grail
+// callback and really does continue after it returns, so "before" without "after" is evidence that
+// the aborting callback never returned into C. The comparator only orders by "<", and the sum below
+// is permutation-independent, so this case pins C's call-back-and-continue behaviour, not glibc's
+// sort order.
+unsafe module runtime;
+use host;
+extern "C" lib "c" fn qsort(base: u64, n: u64, size: u64, cmp: cfn(u64, u64) -> i32) -> unit;
+fn compare(a: u64, b: u64) -> i32 {
+    x := raw_load(a);
+    y := raw_load(b);
+    mut r: i32 = 0;
+    if x < y {
+        r = 1;
+    }
+    return r;
+}
+fn main() {
+    host::print(view("before\n"));
+    words := rt_alloc(32);
+    raw_store(words, 9);
+    raw_store(words + 8, 3);
+    raw_store(words + 16, 5);
+    raw_store(words + 24, 7);
+    unsafe {
+        qsort(words, 4, 8, compare);
+    }
+    host::print(view("after\n"));
+    println(raw_load(words) + raw_load(words + 8) + raw_load(words + 16) + raw_load(words + 24));
+    rt_free(words);
+}
