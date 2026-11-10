@@ -1,0 +1,26 @@
+// Suspension on Windows is a blocking call on the task's own thread, so four tasks that each sleep
+// 30 ms overlap instead of serialising: the whole scope takes about one sleep, not four. On Linux the
+// same program suspends the green tasks on the reactor timer. Both must print the same two lines.
+use host;
+fn nap(n: u64, c: u64) -> u64 {
+    host::sleep_ms(30);
+    return n;
+}
+fn body<s>(sc: (&s Scope<u64>), count: u64) -> u64 {
+    mut handles = Task<u64>[];
+    for i in count {
+        handles.push(spawn(sc, i, nap));
+    }
+    mut total = 0;
+    while handles.len() != 0 {
+        total += join(handles.pop());
+    }
+    return total;
+}
+fn main() {
+    start := host::now_ms();
+    total := task_scope(4, body);
+    elapsed := host::now_ms() - start;
+    println(total);
+    println(elapsed < 90);
+}

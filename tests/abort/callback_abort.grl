@@ -1,0 +1,41 @@
+// Abort inside a Grail callback that C called must terminate the process without returning into C.
+// glibc's qsort calls `compare`, which takes one abort path (selected by argv[1]) and never returns:
+// "0" checked arithmetic, "1" index bounds, "2" assert. The rule is "abort never
+// unwinds, and nothing may unwind across the C boundary": no atexit handler runs, no foreign frame
+// resumes, and the "after" marker is never reached. The parent sees SIGABRT.
+unsafe module runtime;
+use core;
+use host;
+extern "C" lib "c" fn qsort(base: u64, n: u64, size: u64, cmp: cfn(u64, u64) -> i32) -> unit;
+extern "C" lib "c" fn atexit(f: cfn() -> unit) -> i32;
+fn cleanup() -> unit {
+    host::print(view("cleanup\n"));
+}
+fn compare(a: u64, b: u64) -> i32 {
+    mode := host::arg(1)[0];
+    if mode == 48 {
+        mut v: u64 = 18446744073709551615;
+        v = v + raw_load(a);
+        return v;
+    }
+    if mode == 49 {
+        bytes := u8[1, 2, 3];
+        return bytes[raw_load(a) + 9];
+    }
+    assert(raw_load(a) == 424242);
+    return 0;
+}
+fn main() {
+    atexit(cleanup);
+    host::print(view("before\n"));
+    words := rt_alloc(32);
+    raw_store(words, 9);
+    raw_store(words + 8, 3);
+    raw_store(words + 16, 5);
+    raw_store(words + 24, 7);
+    unsafe {
+        qsort(words, 4, 8, compare);
+    }
+    host::print(view("after\n"));
+    rt_free(words);
+}

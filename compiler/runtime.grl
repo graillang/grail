@@ -1,9 +1,14 @@
 unsafe module runtime;
 
+// Abort: the process dies here and control never returns to the caller, not even when a foreign
+// frame called in (a C callback that aborts). The rule is "abort never unwinds, and nothing may
+// unwind across the C boundary": no atexit handler, C++ destructor, DLL detach, stack unwind or
+// foreign cleanup of any kind runs. SIGABRT (POSIX) makes the termination visible to the parent;
+// rt_hard_exit is the platform's cleanup-free exit (exit_group, TerminateProcess, _exit), because
+// exit(2) would run foreign cleanup. This is the only abort entry point in the runtime.
 fn rt_abort() -> u64 {
-    pid := rt_syscall(39, 0, 0, 0);
-    rt_syscall(62, pid, 6, 0);
-    rt_syscall(60, 134, 0, 0);
+    rt_syscall(62, rt_syscall(39, 0, 0, 0), 6, 0);
+    rt_hard_exit(134);
     return 0;
 }
 fn rt_error(n: u64) -> u64 {
@@ -621,10 +626,7 @@ fn f_host_arg(i: u64) -> u64 {
     return rt_lit(p, n);
 }
 fn f_host_read_file(path: u64) -> u64 {
-    if rt_current() != 0 {
-        return rt_offload(rt_read_file_blocking, path, 0);
-    }
-    return rt_read_file_blocking(path);
+    return rt_blocking_call(rt_read_file_blocking, path, 0);
 }
 fn rt_read_file_blocking(path: u64) -> u64 {
     name := rt_cstr(path);
@@ -678,10 +680,7 @@ fn rt_write_all(fd: u64, ptr: u64, n: u64) -> u64 {
     return 0;
 }
 fn f_host_write_file(path: u64, data: u64) -> u64 {
-    if rt_current() != 0 {
-        return rt_offload(rt_write_file_blocking, path, data);
-    }
-    return rt_write_file_blocking(path, data);
+    return rt_blocking_call(rt_write_file_blocking, path, data);
 }
 fn rt_write_file_blocking(path: u64, data: u64) -> u64 {
     name := rt_cstr(path);
@@ -903,10 +902,7 @@ fn rt_drop_exec_paths(paths: u64) -> u64 {
     return 0;
 }
 fn f_host_command(args: u64) -> u64 {
-    if rt_current() != 0 {
-        return rt_offload(rt_command_blocking, args, 0);
-    }
-    return rt_command_blocking(args);
+    return rt_blocking_call(rt_command_blocking, args, 0);
 }
 fn rt_command_blocking(args: u64) -> u64 {
     n := rt_len(args);
@@ -1313,8 +1309,21 @@ fn rt_spin_unlock(p: u64) -> u64 {
     return 0;
 }
 
+// ---- scheduling mode ----
+// Linux multiplexes stackful green tasks over a worker pool with an epoll reactor. Windows has no
+// epoll, eventfd or timerfd and no stack switching, so a task there is an OS thread of its own:
+// suspension is an address wait on the task's own park word, host::read_fd and host::sleep_ms block
+// that thread, rt_reactor_fence is a no-op, and a blocking foreign call blocks only the task that
+// made it. The task API above this point is identical on both, but the observable scheduling is not
+// (docs/design/concurrency-v1.md states the divergence). No reactor is created on Windows.
+fn rt_threaded() -> u64 {
+    t := raw_target();
+    return (t == 3) + (t == 4);
+}
+
 // Scheduler (raw_state()+72): 0 queue lock, 8 head, 16 tail, 24 idle sequence (futex),
-// 32 worker count, 40 epoll fd, 48 fence eventfd, 56 reactor batch epoch. Infrastructure is mapped, not counted as user allocation.
+// 32 worker count, 40 epoll fd, 48 fence eventfd, 56 reactor batch epoch, 64 blocking-call warning
+// flag. Infrastructure is mapped, not counted as user allocation.
 fn rt_sched() -> u64 {
     state := raw_state();
     s := raw_atomic_load(state + 72);
@@ -1325,6 +1334,11 @@ fn rt_sched() -> u64 {
         made := raw_map(4096);
         if rt_error(made) {
             rt_abort();
+        }
+        if rt_threaded() {
+            // No reactor and no worker pool: this block only carries the blocking-call warning flag.
+            raw_atomic_store(state + 72, made);
+            return made;
         }
         epoll := rt_syscall(291, 524288, 0, 0);
         if rt_error(epoll) {
@@ -1437,8 +1451,8 @@ fn rt_worker_loop(s: u64) -> u64 {
     }
     return 0;
 }
-fn rt_green_main() -> u64 {
-    t := rt_current();
+// The task's own call: arity 3 carries the scope's cancel token.
+fn rt_task_body(t: u64) -> u64 {
     f := raw_load(t + 40);
     item := raw_load(t + 48);
     context := raw_load(t + 56);
@@ -1448,11 +1462,28 @@ fn rt_green_main() -> u64 {
     } else {
         r = raw_call2(f, item, context);
     }
-    raw_store(t + 80, r);
+    return r;
+}
+fn rt_green_main() -> u64 {
+    t := rt_current();
+    raw_store(t + 80, rt_task_body(t));
     raw_store(t + 144, 1);
     w := raw_tp_get();
     raw_switch(t, raw_load(w + 8));
     rt_abort();
+    return 0;
+}
+// Thread-per-task entry (Windows): the task runs to completion on its own OS thread, then publishes
+// its result and wakes whoever waits on its finished word. No stack switch is involved, so a task
+// that blocks in a foreign call blocks only itself.
+fn rt_task_thread_main(t: u64) -> u64 {
+    w := raw_tp_get();
+    raw_store(w + 16, t);
+    raw_store(t + 80, rt_task_body(t));
+    raw_store(t + 144, 1);
+    raw_atomic_store(t + 96, 1);
+    rt_syscall(202, t + 96, 129, 2147483647);
+    raw_store(w + 16, 0);
     return 0;
 }
 // Suspend the current task until rt_wake. A wake that arrives first is not lost.
@@ -1461,6 +1492,16 @@ fn rt_suspend(t: u64) -> u64 {
         raw_atomic_store(t + 24, 0);
         return 0;
     }
+    if rt_threaded() {
+        // No stack switch: block this task's own thread on its park word until a wake marks it.
+        while true {
+            if raw_atomic_load(t + 24) == 3 {
+                raw_atomic_store(t + 24, 0);
+                return 0;
+            }
+            rt_syscall(202, t + 24, 128, 1);
+        }
+    }
     w := raw_tp_get();
     raw_switch(t, raw_load(w + 8));
     return 0;
@@ -1468,7 +1509,15 @@ fn rt_suspend(t: u64) -> u64 {
 fn rt_wake(t: u64) -> u64 {
     while true {
         s := raw_atomic_load(t + 24);
-        if s == 2 {
+        if rt_threaded() {
+            if s == 3 {
+                return 0;
+            }
+            if raw_atomic_cas(t + 24, s, 3) == s {
+                rt_syscall(202, t + 24, 129, 1);
+                return 0;
+            }
+        } else if s == 2 {
             if raw_atomic_cas(t + 24, 2, 0) == 2 {
                 rt_enqueue(t);
                 return 0;
@@ -1486,7 +1535,8 @@ fn rt_wake(t: u64) -> u64 {
 }
 fn rt_yield() -> u64 {
     t := rt_current();
-    if t == 0 {
+    if (t == 0) | rt_threaded() {
+        // A thread-per-task task owns its thread, so yielding is giving up the CPU, not a switch.
         rt_syscall(24, 0, 0, 0);
         return 0;
     }
@@ -1498,7 +1548,7 @@ fn rt_yield() -> u64 {
 // Mutex acquisition from a green task yields instead of blocking its worker, so a holder that
 // suspended (for I/O) can always resume on some worker.
 fn rt_mutex_lock(p: u64) -> u64 {
-    if rt_current() != 0 {
+    if (rt_current() != 0) & (rt_threaded() == 0) {
         while raw_atomic_cas(p, 0, 1) != 0 {
             rt_yield();
         }
@@ -1548,7 +1598,8 @@ fn rt_cancel(s: u64) -> u64 {
     return 0;
 }
 fn rt_task_spawn(s: u64, f: u64, item: u64, arity: u64, dropper: u64) -> u64 {
-    t := rt_alloc(152);
+    // Word 152 holds the task's OS thread handle in thread-per-task mode (0 in green mode).
+    t := rt_alloc(160);
     raw_store(t + 40, f);
     raw_store(t + 48, item);
     raw_store(t + 56, raw_load(s + 16));
@@ -1556,7 +1607,12 @@ fn rt_task_spawn(s: u64, f: u64, item: u64, arity: u64, dropper: u64) -> u64 {
     raw_store(t + 72, s + 8);
     raw_store(t + 112, dropper);
     raw_store(t + 120, raw_load(s + 24));
+    raw_store(t + 152, 0);
     raw_store(s + 24, t);
+    if rt_threaded() {
+        raw_store(t + 152, rt_thread_spawn(rt_task_thread_main, t));
+        return t;
+    }
     size := 262144;
     stack := raw_map(size);
     if rt_error(stack) {
@@ -1590,6 +1646,13 @@ fn rt_task_wait(t: u64) -> u64 {
     if raw_atomic_load(t + 96) {
         return 0;
     }
+    if rt_threaded() {
+        // The task's own thread publishes word 96 and wakes this address, so the waiter blocks here.
+        while raw_atomic_load(t + 96) == 0 {
+            rt_syscall(202, t + 96, 128, 0);
+        }
+        return 0;
+    }
     me := rt_current();
     if me != 0 {
         if raw_atomic_cas(t + 88, 0, me) == 0 {
@@ -1613,7 +1676,20 @@ fn rt_task_join(t: u64) -> u64 {
     }
     rt_task_wait(t);
     raw_store(t + 104, 1);
+    rt_task_reap(t);
     return raw_load(t + 80);
+}
+// A thread-per-task task owns an OS thread: the joiner reaps it once the finished word is set, so
+// the thread has exited before its stack is unmapped and the handle is released. Green tasks have
+// already released their own stack, so this is a no-op there.
+fn rt_task_reap(t: u64) -> u64 {
+    if rt_threaded() {
+        h := rt_atomic_swap(t + 152, 0);
+        if h != 0 {
+            rt_thread_join(h);
+        }
+    }
+    return 0;
 }
 // Dropping an unjoined handle never blocks: the scope exit joins and destroys the result.
 fn rt_task_abandon(t: u64) -> u64 {
@@ -1625,6 +1701,9 @@ fn rt_task_abandon(t: u64) -> u64 {
 // After this returns, no readiness batch read before the call is still being delivered, so a
 // task woken by cancellation (whose event may already have been read) can be freed safely.
 fn rt_reactor_fence() -> u64 {
+    if rt_threaded() {
+        return 0; // no reactor batch to fence
+    }
     s := raw_atomic_load(raw_state() + 72);
     if s == 0 {
         return 0;
@@ -1659,6 +1738,7 @@ fn rt_scope_end(s: u64) -> u64 {
         if (state == 2) & (dropper != 0) {
             raw_call2(dropper, raw_load(t + 80), 0);
         }
+        rt_task_reap(t);
         next := raw_load(t + 120);
         rt_free(t);
         t = next;
@@ -1701,6 +1781,11 @@ fn rt_reactor(s: u64) -> u64 {
 // Wait until fd is ready (events: 1 readable, 4 writable). A green task suspends; a plain OS
 // thread blocks in ppoll. Returns -125 (ECANCELED) if its scope is cancelled.
 fn rt_wait_fd(fd: u64, events: u64) -> u64 {
+    if rt_threaded() {
+        // No readiness reactor: the task's own thread does the blocking call that follows, so there
+        // is nothing to wait for here. This is the documented thread-per-blocking-call policy.
+        return 0;
+    }
     t := rt_current();
     if t == 0 {
         p := rt_alloc(8);
@@ -1744,7 +1829,7 @@ fn f_host_sleep_ms(ms: u64) -> u64 {
     spec := rt_alloc(32);
     raw_store(spec + 16, rt_div(ms, 1000));
     raw_store(spec + 24, (ms % 1000) * 1000000);
-    if rt_current() == 0 {
+    if (rt_current() == 0) | rt_threaded() {
         rt_syscall(35, spec + 16, 0, 0);
         rt_free(spec);
         return 0;
@@ -1841,6 +1926,43 @@ fn f_host_close(fd: u64) -> u64 {
         return wrapping_sub(0, r);
     }
     return 0;
+}
+
+// ---- blocking foreign calls (B3 contract) ----
+// The contract: a foreign call blocks the executing task thread. On Linux that thread is a green
+// worker, so the pool is one worker short for the whole call. The runtime's own blocking operations
+// never do that: they hand off through rt_blocking_call. A call the user makes through `extern "C"`
+// or a `cfn` runs on the worker itself, so a wrapper that knows it blocks declares it with
+// rt_blocking_enter, and the runtime says so once per process on stderr instead of a program
+// quietly losing a worker. Scheduler word 64 is the "already warned" flag.
+fn rt_blocking_enter() -> u64 {
+    if (rt_current() == 0) | rt_threaded() {
+        return 0;
+    }
+    s := rt_sched();
+    if raw_atomic_cas(s + 64, 0, 1) == 0 {
+        rt_blocking_warn();
+    }
+    return 0;
+}
+// The one line a user gets. It names the contract, the documentation and the way out; it is emitted
+// once per process because the same program will make the same call many times.
+fn rt_blocking_warn() -> u64 {
+    text := view(
+        "grail: a blocking foreign call is running on a green task's worker thread; that worker is unavailable until the call returns, so other runnable tasks wait for a free worker. host::read_file, host::write_file and host::command hand off to an offload thread; an extern \"C\" or cfn call does not. See docs/ffi.md, \"Blocking foreign calls\".\n"
+    );
+    packed := rt_pack(text);
+    rt_write_all(2, packed, rt_len(text));
+    rt_free(packed);
+    return 0;
+}
+// The only way a green task runs a blocking operation: hand it to a dedicated OS thread and suspend.
+// A plain OS thread already has its own thread, so it runs the call directly.
+fn rt_blocking_call(f: u64, a: u64, b: u64) -> u64 {
+    if rt_current() == 0 {
+        return raw_call2(f, a, b);
+    }
+    return rt_offload(f, a, b);
 }
 
 // Blocking-call boundary: a green task hands a blocking operation to a dedicated OS thread

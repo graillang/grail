@@ -1,0 +1,26 @@
+// An abort in a green task, with a foreign SIGABRT handler installed, must end the whole process.
+// The aborting thread is a worker, not the main thread, so a per-thread exit would leave the main
+// thread waiting on a task that can never finish; the runtime's hard exit is exit_group, so the
+// process ends with status 134 and never reaches "after".
+unsafe module runtime;
+use host;
+extern "C" lib "c" fn signal(sig: i32, handler: cfn(i32) -> unit) -> u64;
+fn onsig(sig: i32) -> unit {
+    return ();
+}
+fn victim(n: u64, c: u64) -> u64 {
+    host::print(view("victim\n"));
+    mut v: u64 = 18446744073709551615;
+    v = v + n;
+    return v;
+}
+fn body<s>(sc: (&s Scope<u64>), base: u64) -> u64 {
+    t := spawn(sc, base, victim);
+    return join(t);
+}
+fn main() {
+    signal(6, onsig);
+    host::print(view("before\n"));
+    println(task_scope(1, body));
+    host::print(view("after\n"));
+}

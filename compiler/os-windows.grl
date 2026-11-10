@@ -139,6 +139,13 @@ fn rt_win_clock(spec: u64) -> u64 {
     raw_store(spec + 8, (ms % 1000) * 1000000);
     return 0;
 }
+// Abort's last step. TerminateProcess runs no DLL detach handlers, no atexit handlers and no C++
+// static destructors; ExitProcess (the normal exit path, operation 60) does run them, so abort never
+// uses it. (HANDLE)-1 is the current process pseudo-handle.
+fn rt_hard_exit(code: u64) -> u64 {
+    raw_win32(TerminateProcess, wrapping_sub(0, 1), code);
+    return 0;
+}
 fn rt_syscall(n: u64, a: u64, b: u64, c: u64) -> u64 {
     if n == 0 {
         return rt_win_read(rt_win_handle(a), b, c);
@@ -409,9 +416,12 @@ fn rt_win_wait(addr: u64, expected: u64) -> u64 {
         raw_win32(CloseHandle, handle);
         return 0;
     }
-    scratch := rt_win_scratch();
-    raw_store(scratch + 16, expected);
-    if raw_win32(WaitOnAddress, addr, scratch + 16, 8, 4294967295) == 0 {
+    // WaitOnAddress compares against a word the caller supplies. Two threads waiting on different
+    // expected values must not share one word, so the expected value lives in the calling thread's
+    // own record (word 6 of the 64-byte record, unused by the scheduler).
+    mine := raw_tp_get() + 48;
+    raw_store(mine, expected);
+    if raw_win32(WaitOnAddress, addr, mine, 8, 4294967295) == 0 {
         return wrapping_sub(0, 110);
     }
     return 0;

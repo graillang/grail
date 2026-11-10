@@ -136,6 +136,37 @@
   into `just lsp-test`, `bun tools/ci.mjs lint` and the CI `lsp` lane, and the server is
   documented in `docs/tooling/lsp.md`.
 
+- Decision B4 (Windows I/O readiness): the green-task reactor is epoll-only, so on Windows
+  (`rt_threaded()`) a task is now an OS thread instead of aborting on a failed `epoll_create`:
+  `spawn` creates the thread, `join`/scope exit wait on the task's finished word and reap it,
+  suspension parks the task's own thread on its park word with `WaitOnAddress`, `host::sleep_ms`
+  sleeps that thread and `rt_wait_fd` returns immediately (thread-per-blocking-call). `rt_sched`
+  never creates a reactor there, so `spawn`, `task_scope` and `parallel_map` work; a blocking foreign
+  call blocks only its own task. `WaitOnAddress`'s expected value moved from one shared scratch word
+  to the calling thread's record, because two task threads can now wait on different values at once.
+  Windows cases `tasks-scope-and-parallel-map` and `tasks-sleep-overlap` execute under Wine and on
+  Linux. Not implemented: IOCP, overlapped I/O, and an ARM64 thread bridge.
+- Decision B3 (suspension and blocking contract): a foreign call blocks the executing task thread.
+  The runtime's own blocking operations hand the call to a dedicated OS thread and suspend the task
+  (`rt_blocking_call`, now the single entry point for `host::read_file`, `host::write_file` and
+  `host::command`), so no worker is lost; `host::pipe` and `host::sleep_ms` suspend on the reactor.
+  An `extern "C"`/`cfn` call is not wrapped by the compiler, so it runs on the worker and blocks it,
+  and a wrapper that knows it blocks declares that with `rt_blocking_enter`, which makes the runtime
+  warn once per process on stderr. Native cases `blocking-foreign-call-occupies-worker` (two tasks,
+  one blocking in libc `usleep`: the other keeps running and the warning appears exactly once) and
+  `blocking-foreign-call-handoff-is-silent` (the same call through the handoff: silent) pin the
+  contract; `docs/ffi.md` states it for users.
+- Decision B5 (abort/unwind policy): abort never unwinds, and nothing may unwind across the C
+  boundary. `rt_abort` is the only abort entry point and now ends in a platform `rt_hard_exit`:
+  `exit_group` on Linux, `TerminateProcess` on Windows, `_exit` on macOS. Two defects are fixed.
+  A Windows abort used `ExitProcess`, which runs DLL detach handlers and C++ static destructors; and
+  on x86-64 Linux the fallback was `exit(2)`, which ends only the calling thread, so an abort inside
+  a green task whose SIGABRT was caught by a foreign handler left the process waiting forever. Both
+  now end the whole process with no foreign cleanup. Tested from inside a Grail callback that C
+  called (glibc `qsort`) and from a green task: `tests/abort/` plus native cases
+  `abort-in-c-callback-*`, `abort-in-green-task-ends-process`, `abort-unwrap-none`, with a control
+  case proving C does return into Grail normally. The rule and its one-line rationale are stated in
+  `docs/ffi.md` ("Abort and unwinding across the boundary").
 - Merge the three design reviews from branch `claude/brave-heisenberg-0h3ska` as documents only
   (`docs/design/first-principles-architecture.md`, `architecture-reassessment.md`,
   `complexity-reassessment.md`, 2,746 lines). Their edits to README and to the research-phase

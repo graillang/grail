@@ -1,0 +1,44 @@
+// B3 contract: a foreign call blocks the executing task thread. `blocker` calls libc usleep, which
+// blocks its green worker for the whole 120 ms; `spinner` keeps running on another worker and only
+// stops once the blocked task finishes. So the blocking call really did block a worker, another
+// task really did keep running while it was blocked, and the runtime warned once that a blocking
+// foreign call occupies a worker (the diagnostic half of the contract). The three words are plain
+// runtime memory: word 0 = done, word 8 = spinner iterations, word 16 = measured block time.
+unsafe module runtime;
+use host;
+extern "C" lib "c" fn usleep(us: u32) -> i32;
+fn blocker(n: u64, word: u64) -> u64 {
+    rt_blocking_enter();
+    started := host::now_ms();
+    unsafe {
+        usleep(120000);
+    }
+    raw_store(word + 16, host::now_ms() - started);
+    rt_atomic_store(word, 1);
+    return n;
+}
+fn spinner(n: u64, word: u64) -> u64 {
+    mut i = 0;
+    while rt_atomic_load(word) == 0 {
+        rt_atomic_fetch_add(word + 8, 1);
+        i += 1;
+    }
+    return i;
+}
+fn body<s>(sc: (&s Scope<u64>), word: u64) -> u64 {
+    first := spawn(sc, 1, blocker);
+    second := spawn(sc, 2, spinner);
+    return join(first) + join(second);
+}
+fn main() {
+    word := rt_alloc(24);
+    raw_store(word, 0);
+    raw_store(word + 8, 0);
+    raw_store(word + 16, 0);
+    total := task_scope(word, body);
+    assert(rt_atomic_load(word + 8) > 0);
+    assert(raw_load(word + 16) >= 100);
+    assert(total > 2);
+    rt_free(word);
+    println(42);
+}

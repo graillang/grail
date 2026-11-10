@@ -285,8 +285,12 @@ export async function check(compiler) {
     const directory = join(work, `linux-${test.name}`);
     rmSync(directory, { recursive: true, force: true });
     mkdirSync(directory, { recursive: true });
-    const source = join(directory, 'input.grl');
-    writeFileSync(source, test.source);
+    // A case either carries inline source or points at a checked-in program.
+    let source = test.file;
+    if (!source) {
+      source = join(directory, 'input.grl');
+      writeFileSync(source, test.source);
+    }
     const elf = compileElf(compiler, [source], directory, { target: elfTarget, name: test.name });
     const run = execute(elf, test.args ?? [], elfTarget, { cwd: directory });
     assert.equal(run.status, test.status ?? 0, `${test.name}: linux exit ${run.status}: ${run.stderr}`);
