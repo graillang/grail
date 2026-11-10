@@ -882,15 +882,60 @@ fn rt_exec_paths(file: u64) -> u64 {
     rt_free(fallback);
     return paths;
 }
-// No allocations, frees, runtime locks or cleanup in the post-fork child.
-fn rt_exec(paths: u64, argv: u64) -> u64 {
-    env := raw_load(raw_state() + 16);
-    n := rt_len(paths);
+// The inherited environment: a NUL-terminated table of "NAME=VALUE" strings. The kernel supplies it
+// on Linux and macOS; rt_os_init copies it from GetEnvironmentStringsA on Windows.
+fn rt_environ() -> u64 {
+    return raw_load(raw_state() + 16);
+}
+// The caller's entries as the NUL-terminated table execve and CreateProcess take. Returns 0 when an
+// entry is not "NAME=VALUE" with a non-empty name: execve would silently start the child with no
+// environment at all and CreateProcess rejects such a block, so both refuse it instead. Each kept
+// entry is a copy, which is what lets the caller hand over owned strings.
+fn rt_env_table(env: u64) -> u64 {
+    n := rt_len(env);
+    table := rt_alloc((n + 1) * 8);
+    mut made = 0;
+    mut bad = 0;
+    while made < n {
+        p := rt_cstr(rt_at(env, made));
+        if p == 0 {
+            bad = 1;
+            break;
+        }
+        mut i = 0;
+        while raw_byte(p + i) != 0 {
+            if raw_byte(p + i) == 61 {
+                break;
+            }
+            i += 1;
+        }
+        if (i == 0) + (raw_byte(p + i) == 0) {
+            rt_free(p);
+            bad = 1;
+            break;
+        }
+        raw_store(table + made * 8, p);
+        made += 1;
+    }
+    if bad != 0 {
+        mut j = 0;
+        while j < made {
+            rt_free(raw_load(table + j * 8));
+            j += 1;
+        }
+        rt_free(table);
+        return 0;
+    }
+    raw_store(table + made * 8, 0);
+    return table;
+}
+fn rt_drop_env_table(table: u64, n: u64) -> u64 {
     mut i = 0;
     while i < n {
-        rt_syscall(59, rt_at(paths, i), argv, env);
+        rt_free(raw_load(table + i * 8));
         i += 1;
     }
+    rt_free(table);
     return 0;
 }
 fn rt_drop_exec_paths(paths: u64) -> u64 {
@@ -903,14 +948,57 @@ fn rt_drop_exec_paths(paths: u64) -> u64 {
     rt_drop_seq(paths);
     return 0;
 }
-fn f_host_command(args: u64) -> u64 {
-    return rt_blocking_call(rt_command_blocking, args, 0);
+// This process's environment as "NAME=VALUE" entries, so a caller can start from what it inherits
+// and add to it instead of replacing everything. Windows keeps "=C:=C:\dir" drive variables in its
+// block: they are not "NAME=VALUE" and an explicit CreateProcess block cannot carry them, so they
+// are not entries here.
+fn f_host_environment() -> u64 {
+    out := rt_new();
+    mut ep = rt_environ();
+    while raw_load(ep) != 0 {
+        p := raw_load(ep);
+        if raw_byte(p) != 61 {
+            mut n = 0;
+            while raw_byte(p + n) != 0 {
+                n += 1;
+            }
+            rt_push(out, rt_bytes_from(p, n));
+        }
+        ep = ep + 8;
+    }
+    return out;
 }
-fn rt_command_blocking(args: u64) -> u64 {
+// `env` is the child's complete environment, or 0 to inherit this process's. The platform's
+// rt_spawn_wait does the fork/exec (POSIX) or CreateProcess (Win32) and waits for the child.
+fn f_host_command(args: u64) -> u64 {
+    return rt_blocking_call(rt_command_run, args, 0);
+}
+fn f_host_command_with(args: u64, env: u64) -> u64 {
+    mut entries = env;
+    if entries == 0 {
+        // An empty vector is the null sequence, and the explicit spelling must mean "no
+        // environment", never "inherit": give it a real, empty sequence instead.
+        entries = rt_new();
+        raw_store(entries, 0);
+        raw_store(entries + 8, 0);
+        raw_store(entries + 16, 0);
+    }
+    return rt_blocking_call(rt_command_run, args, entries);
+}
+// Run `argv` and wait for it, then release both sequences. Every vector and every PATH candidate is
+// built here in the parent: a forked child must never acquire the allocator.
+// The status is 0..255 for an exit code, 128+N when a signal ended the child, and 256+errno when the
+// child could not be started or reaped; 278 (256+EINVAL) is an unusable vector or environment.
+fn rt_command_run(args: u64, env: u64) -> u64 {
     n := rt_len(args);
+    mut envc = 0;
+    if env != 0 {
+        envc = rt_len(env);
+    }
     mut result = 278;
     mut made = 0;
     argv := rt_alloc((n + 1) * 8);
+    raw_store(argv + n * 8, 0);
     if n != 0 {
         while made < n {
             p := rt_cstr(rt_at(args, made));
@@ -921,37 +1009,22 @@ fn rt_command_blocking(args: u64) -> u64 {
             made = made + 1;
         }
         if made == n {
-            paths := rt_exec_paths(raw_load(argv));
-            child := rt_syscall(57, 0, 0, 0);
-            if child == 0 {
-                rt_exec(paths, argv);
-                rt_syscall(60, 127, 0, 0);
-            }
-            if rt_error(child) {
-                result = 256 + wrapping_sub(0, child);
-            } else {
-                status := rt_alloc(8);
-                mut waited = 0;
-                while 1 {
-                    waited = rt_syscall(61, child, status, 0);
-                    if waited != wrapping_sub(0, 4) {
-                        break;
-                    }
+            mut envp = 0;
+            mut usable = 1;
+            if env != 0 {
+                envp = rt_env_table(env);
+                if envp == 0 {
+                    usable = 0;
                 }
-                if rt_error(waited) {
-                    result = 256 + wrapping_sub(0, waited);
-                } else {
-                    code := raw_load(status);
-                    sig := code & 127;
-                    if sig != 0 {
-                        result = 128 + sig;
-                    } else {
-                        result = rt_div(code, 256) & 255;
-                    }
-                }
-                rt_free(status);
             }
-            rt_drop_exec_paths(paths);
+            if usable != 0 {
+                paths := rt_exec_paths(raw_load(argv));
+                result = rt_spawn_wait(paths, argv, envp);
+                rt_drop_exec_paths(paths);
+            }
+            if envp != 0 {
+                rt_drop_env_table(envp, envc);
+            }
         }
     }
     mut i = 0;
@@ -966,6 +1039,14 @@ fn rt_command_blocking(args: u64) -> u64 {
         i = i + 1;
     }
     rt_drop_seq(args);
+    i = 0;
+    while i < envc {
+        rt_drop_seq(rt_at(env, i));
+        i = i + 1;
+    }
+    if env != 0 {
+        rt_drop_seq(env);
+    }
     return result;
 }
 // Text is UTF-8 even when its source is binary I/O or a byte view.
@@ -4868,22 +4949,23 @@ fn rt_vec_contains(s: u64, v: u64) -> u64 {
 }
 
 // ---- sampling profiler (Linux x86-64) -------------------------------------------------------
-// `grail profile` writes .grail-profile/config in the working directory and runs the target there.
-// The runtime reads that file during startup (rt_thread_init), samples the interrupted instruction
-// pointer from an ITIMER_PROF/SIGPROF timer and writes the raw addresses to the path named in the
-// config when the process ends. The handler never allocates, never takes the allocator lock and
+// `grail profile` puts the arming request in the target's environment as GRAIL_PROFILE and runs it.
+// The runtime reads that variable during startup (rt_thread_init), samples the interrupted
+// instruction pointer from an ITIMER_PROF/SIGPROF timer and writes the raw addresses to the path
+// named in the request when the process ends. The environment is the only channel: nothing is
+// written to the working directory, so a killed run leaves no stale request and the target needs no
+// writable directory. The handler never allocates, never takes the allocator lock and
 // never calls the kernel: it claims a slot with a CAS loop and stores one word, so a signal that
 // interrupts the allocator cannot deadlock against it.
 //
 // Process-state words (rt_state is 4096 bytes; these sit between the allocator's last bin word and
 // the Windows-only thread-bridge word at 3392):
 //   2048 control page pointer  (0 = not profiled; the only word the handler reads)
-//   2080 ".grail-profile/config" (NUL terminated, 64 bytes)
-//   2176 sample path           (NUL terminated, 96 bytes, copied from the config)
+//   2176 sample path           (NUL terminated, 96 bytes, copied from the request)
 //   2272 itimerval             (32 bytes: interval then value, seconds then microseconds)
 //   2304 sigaction             (32 bytes: handler, flags, restorer, mask)
 //   2336 sigaltstack           (24 bytes: stack pointer, flags, size)
-//   2400 config text scratch   (256 bytes, startup only)
+//   2400 request text scratch  (256 bytes, startup only)
 //   2656 timespec             (16 bytes: CLOCK_PROCESS_CPUTIME_ID at arm and at exit)
 //
 // The control page is the first 4096 bytes of the sample mapping:
@@ -4910,12 +4992,41 @@ fn rt_prof_handler(sig: u64, info: u64, ctx: u64) -> u64 {
     }
     return 0;
 }
-fn rt_prof_config_path(dst: u64) -> u64 {
-    // ".grail-profile/config", NUL terminated, as three little-endian words.
-    raw_store(dst, 8083236106062161710);
-    raw_store(dst + 8, 7147042649959460722);
-    raw_store(dst + 16, 444149952111);
-    return dst + 22;
+// True when the NUL-terminated string at `p` starts with "GRAIL_PROFILE=": "GRAIL_PR" and "OFILE="
+// as two little-endian words, so nothing is allocated on a program that is not being profiled.
+fn rt_prof_name(p: u64) -> u64 {
+    if raw_load(p) != 5931345490498114119 {
+        return 0;
+    }
+    if (raw_load(p + 8) & 4294967295) != 1279870543 {
+        return 0;
+    }
+    if (raw_load(p + 12) & 65535) != 15685 {
+        return 0;
+    }
+    return 1;
+}
+// Copies the value of GRAIL_PROFILE into `dst` and returns its length, or 0 when this process's
+// environment carries no request. Nothing is consumed: a child inherits the request only when it
+// inherits this environment, and an explicit `host::command_with` environment can drop it.
+fn rt_prof_request(dst: u64, capacity: u64) -> u64 {
+    mut ep = rt_environ();
+    while raw_load(ep) != 0 {
+        p := raw_load(ep);
+        if rt_prof_name(p) != 0 {
+            mut i = 0;
+            while raw_byte(p + 14 + i) != 0 {
+                if capacity <= i {
+                    return 0;
+                }
+                raw_putbyte(dst + i, raw_byte(p + 14 + i));
+                i += 1;
+            }
+            return i;
+        }
+        ep = ep + 8;
+    }
+    return 0;
 }
 // First byte of the next space-separated token at or after `at`; `n` at end of line.
 fn rt_prof_token(buf: u64, n: u64, at: u64) -> u64 {
@@ -4957,7 +5068,8 @@ fn rt_prof_num(buf: u64, n: u64, at: u64) -> u64 {
     }
     return value;
 }
-// Arms sampling from .grail-profile/config when that file exists and this is Linux x86-64.
+// Arms sampling from GRAIL_PROFILE when this process's environment carries it and this is Linux
+// x86-64.
 fn rt_prof_start() -> u64 {
     if raw_target() != 0 {
         return 0;
@@ -4966,18 +5078,9 @@ fn rt_prof_start() -> u64 {
     if raw_load(words) != 0 {
         return 0;
     }
-    rt_prof_config_path(words + 32);
-    fd := rt_syscall(2, words + 32, 524288, 0);
-    if rt_error(fd) {
-        return 0;
-    }
     text := words + 352;
-    n := rt_syscall(0, fd, text, 256);
-    rt_syscall(3, fd, 0, 0);
-    // One shot: the first Grail process that starts here consumes the arming request, so a stale
-    // file from a killed run cannot make later unrelated runs sample themselves.
-    rt_syscall(263, wrapping_sub(0, 100), words + 32, 0);
-    if rt_error(n) {
+    n := rt_prof_request(text, 256);
+    if n == 0 {
         return 0;
     }
     // "1 RATE CAPACITY PATH": the format version, the sampling rate in Hz, the sample capacity and

@@ -407,6 +407,12 @@ Linux `host::read_fd`/`host::write_fd` wait on the readiness reactor and `host::
 timer, so those suspend; on Windows there is no reactor, so those calls are handed to a helper
 thread and the task parks on it. Either way the task, not the scheduler thread, waits, so the
 observable behaviour is the same on both platforms.
+**A foreign call blocks the executing task thread.** On Linux that thread is a worker of the green
+task pool, so while the call blocks, that worker runs no other task; with more blocking tasks than
+workers, the extra tasks wait. Only the runtime's own blocking operations hand off to a dedicated
+thread: `host::read_file`, `host::write_file`, `host::command` and `host::command_with`, and only
+when they are called from a green task. `host::pipe` reads and writes wait on the readiness
+reactor, and `host::sleep_ms` uses a timer, so those suspend instead of blocking.
 
 - An `extern "C"` call, or a call through a `cfn` value, is not wrapped by the compiler: it runs on
   the calling task's thread and blocks it for as long as the C function runs. Nothing in the
@@ -459,6 +465,9 @@ immediately because the ready task performs the blocking call on its own thread,
 same memory at once and the compiler says nothing. Under the default green scheduler that race is
 much narrower (one task at a time on the Windows scheduler thread) but not absent on Linux, so this
 mode does not introduce a new kind of unsoundness - it makes an existing hazard easy to hit.
+  `host::read_file`, `host::write_file`, `host::command` and `host::command_with` do.
+- On Windows a task is an OS thread (see `concurrency-v1.md`), so a blocking foreign call blocks
+  only the task that made it and no handoff is needed.
 
 ## Direct calls: calling conventions
 
