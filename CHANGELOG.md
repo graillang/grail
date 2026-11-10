@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+- Separate compilation, stage 3: **generic bodies in interfaces**. A type-generic template's body
+  now travels in its module's interface (`// grail-interface 2`): one quoted `line` row per source
+  line under the template's `fn` line, so a changed statement is a changed line in a review diff.
+  `grail ... --use DIR` builds a module against a directory of interfaces whose sources are not on
+  the command line at all, and `--serve DIR` makes the module that *defines* a template emit the
+  instantiations its importers asked for. A specialisation's symbol is now content-addressed -
+  `f_<module>_<name>$<16 hex of the SHA-256 of module::name plus the canonical argument types>` -
+  so the definition and the reference agree in every compilation order, and the body is emitted
+  once, in the defining module's part, while importers reference it; each importer writes
+  `DIR/<module>.sreq` naming what it references, and the defining module's build serves that list.
+  Drop helpers are content-addressed and `.weak` for the same reason: an index into this run's type
+  table does not survive separate compilation. Capability metadata keeps its force across an
+  instantiation: a `T: Share` bound and a handle's audited `transfer`/`share` are read from the
+  interface, so instantiating a template on a handle that is transferable but not shareable is
+  refused by name (`type does not satisfy Share: handles::Lock is thread-affine (declared
+  transferable, not shareable)`) whether the module came from source or from its interface. Also
+  fixed: the interface manifest was never actually enforced (`iface_words` returned the whole file
+  as one word), and `--verify` now covers carried bodies. `tools/interface-test.mjs` proves one
+  emitted body across two importers, identical behaviour against the source build, the refusal by
+  name, and that a template without a body is refused. What stage 3 does not do: a body is still
+  replayed (re-parsed and re-checked) once per instantiation at the *caller*, because the checker
+  is per-instantiation and there is no typed IR yet; only emission moved. A generic instantiation
+  discovered while a defining module replays one of its own templates is filed in *its* request
+  file, so a driver has to iterate to a fixpoint (stage 4).
+
 - Separate compilation, stage 2: **checked module interfaces**. `grail check --interface DIR` writes
   one `DIR/<module>.iface` per module plus `DIR/interfaces.manifest`; `grail build --interface DIR`
   reads them instead of the modules' sources, and refuses by name when an interface is missing, when

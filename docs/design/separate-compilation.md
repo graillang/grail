@@ -217,6 +217,161 @@ What stage 2 does buy is the property it exists for: every cross-module referenc
 build is checked against the interface rather than against the imported module's source, and an
 interface that is missing, stale or different from its module stops the build by name.
 
+
+## Stage 3 as built: generic bodies in interfaces
+
+Implemented on `b1-generics`; `tools/interface-test.mjs` section (e) is the proof and this section is
+the record. The interface format goes to `// grail-interface 2`.
+
+### The representation
+
+A type-generic template's declaration text travels in its module's interface, under the `fn` line
+that already carried its checked signature:
+
+```
+fn generic::twice <1> ((tparam 0)) -> (tparam 0)
+body 3
+line "fn twice<T>(value: T) -> T {"
+line "    return value;"
+line "}"
+```
+
+- one `line` row per source line of the declaration, escaped (`\\`, `\"`, `\xHH` for anything
+  outside printable ASCII), because the interface's lexer refuses a raw control byte inside a
+  string. A changed statement is one changed line in a review diff, which is the property the text
+  format was chosen for;
+- `body N` states the row count, so a truncated section is refused rather than half-parsed;
+- the reader rebuilds the rows into a *virtual source file* (`<iface>:<module>::<name>`, index
+  1000000+) and points the function at it with position 0. `replay_function` already parsed a
+  template from `(file, pos)`; it now parses one that no command line mentions, and diagnostics
+  inside it name the interface and the template rather than a source file that is not there;
+- what is carried is the *checked* declaration, not a typed body: the `fn` line is the checked
+  signature (parameter types, result, lifetimes, bounds, interface requirements) and the text is
+  the body the declaration pass saw. Nothing is re-derived from a table index, and `--verify`
+  re-emits the module and compares, so an edited body is refused by name like any other line.
+
+`grail check --interface DIR` still requires every module's source, because it is describing the
+module as it is. A *build* no longer does:
+
+```
+grail ... --use DIR            # modules whose source is not on the command line come from DIR
+grail ... --serve DIR          # emit the instantiations DIR's request files ask for
+grail ... --no-entry           # this object is one module of a link, not a program
+```
+
+### Instantiations are emitted once
+
+The unit of deduplication is the *key*: the template's `module::name` plus the canonical spelling of
+its type arguments - the same spelling the interface format uses, after `canonical_type` has erased
+aliases and lifted captured lifetimes into fresh slots. It lives in the emitted symbol:
+
+```
+f_pair_make$3075c71d            # 16 hex digits: first 8 bytes of SHA-256 of the key
+```
+
+Why it is stable across compilation orders: the key is a function of the types alone. A position in
+`c.specs` (what stage 2 emitted, `$0`, `$1`, …) is a function of the order this run met
+instantiations in, of which other modules are in the build, and of how much each module instantiates
+- none of which two compiler invocations can reproduce. The digest can: verified by compiling the
+same program with its modules in different orders and with an extra module present, where the symbol
+is byte-identical.
+
+With the key fixed, the ownership rule is one line: **a specialisation's body is emitted by the
+module that defines the template, and only there.** A run that loaded a module's surface *and
+bodies* from an interface is not that module, so it emits a reference, and records the key in
+`DIR/<requester>.sreq`:
+
+```
+// grail-specs 1
+module main
+request generic::twice u64
+request generic::pick u64
+```
+
+The defining module's build reads every `*.sreq` in `--serve DIR`, re-specialises each request (the
+body is replayed from its own source, or from its own interface if it is being rebuilt without one),
+and emits the bodies. Duplicate requests - two importers asking for the same key - are one
+`c.specs` entry and therefore one body. The pair of files is the whole protocol, they are text,
+sorted by key, and a module that asks for nothing still gets a request file so a request that is no
+longer made cannot keep a dead body alive.
+
+Drop helpers had the same index-versus-content bug and got the same treatment: `.D<hex>` from the
+SHA-256 of the canonical type spelling, emitted `.weak` (a pure function of the type it drops, so two
+objects that emit it emit the same body and the linker merges them) and in a part of their own
+(`.helpers`) rather than the runtime's, so a linked build takes each module's code from exactly one
+object and merges the helpers.
+
+### What the caller still checks
+
+The body still replays at the caller for *checking* - once per instantiation - and that is
+deliberate: the checker is per-instantiation and there is no typed IR to reuse, so skipping it would
+skip the type check of the instantiation itself. What moved is emission and the source dependency.
+The replay at the caller is also what makes refusals land where the user wrote the call:
+
+```
+tests/interfaces/handle_bad.grl:7:54: type does not satisfy Share: handles::Lock is thread-affine
+  (declared transferable, not shareable)
+```
+
+### Capability metadata survives an instantiation
+
+An importer can only launder a type through a generic if the generic's checks stop applying at the
+instantiation. Three things keep them applying, all of them carried, none re-derived:
+
+- the template's **bounds** (`bound <i> <mask>`, `Send`/`Share`) travel on the `fn` line, and the
+  check runs at the call site against the substituted types, so the interface is the authority for
+  "this template requires `T: Share`";
+- a handle's audited contract (`transfer=`/`share=`) travels on its `type … handle` line, so the
+  substituted handle is classified by the interface, not by default-deny;
+- a closure type's `Ty.env` travels as `(closure … env)` plus the `env` section, and the reader
+  rebuilds the environment record.
+
+The refusal above is produced from the interface alone: `handles.grl` is on neither command line,
+and the diagnostic still says which handle and which classification refused it.
+
+### Measured
+
+Measured on this host, with the fixtures and the corpus:
+
+- **The compiler's own build is unaffected.** All of its type parameters are lifetimes
+  (`fn sum<a>` in an `inherent` block is `(&a Point)`), so its ten modules carry **no** template
+  bodies: `compiler-*.iface` files are unchanged in size and the self-build emits and assembles the
+  same text as before. The payload is paid only by a module that actually has `fn f<T>`.
+- **A generic-heavy library pays one row per source line.** The corpus's four-module
+  `vecs-fold-and-predicates` program carries 29 template bodies (15 in `vecs`, 11 in `core`, 2 in
+  `hash`, 1 in `order`); its interfaces go from 10,812 bytes in format 1 to 16,492 in format 2, of
+  which 7,044 bytes are the `line` rows. Text, not a blob: `git diff` of an interface shows the
+  statement that changed, and the 29 headers cost 0.25 KB of the difference.
+- **Emission stops being per importer.** In the interface suite's three-module proof (`main`,
+  `generic_a`, `generic_b` instantiate `generic::twice<u64>`), the two importers' objects define the
+  body zero times and reference it, the defining module emits it once from the request files alone,
+  and the linked program prints and exits exactly as the single-run source build. Before stage 3
+  those two modules could not be compiled at all without `generic.grl` on their command lines.
+
+What that is worth for a build shaped like the compiler's: nothing yet, because its modules
+instantiate no type-generic template. What it is worth for `lib/`-heavy code (`vecs`, `core`,
+`pool`, `hashmap`) is the unit the numbers above size: one body per instantiation per *build*, not
+per importing module.
+
+### What stage 3 does not do, and why
+
+- **No typed IR.** The body is text that the body pass replays; the "one parse, no re-check" shape
+  needs the typed IR that stage 3 was originally scheduled after, so it is still ahead of us. What
+  is gone is the *source* dependency and the duplicate emission.
+- **No driver.** `--use`/`--serve`/`--no-entry` are the primitives a driver needs, not the driver:
+  the order (importers first, so their request files exist; defining modules after) is the caller's
+  job today, and a request discovered while a defining module replays its own template is filed in
+  *its* request file, so a plan that chains two modules deep needs to iterate to a fixpoint.
+- **Requests are not re-checked for bounds.** The defining module re-specialises a request and
+  replays the body against the substituted types (which is a real check), but it does not re-run
+  `require_constraints` on the request's arguments: the run that asked for it already did.
+- **A request file has no manifest.** `--use` verifies each interface's own digest; a directory
+  rewritten wholesale is trusted, exactly as the manifest's own note says. Signing is stage 4's.
+- **No `__start`/runtime sharing.** `--no-entry` keeps a module's object from defining the process
+  state, but two runs still both emit the runtime module, so a full per-module link needs the
+  helpers weak (done) and the runtime split out (stage 4). `tools/interface-test.mjs` links each
+  module's part from one run and merges the helper parts.
+
 ## Stages
 
 - **Stage 1 — per-module emission, no interface files. Done** (`b1-module-emission`; what was built
@@ -229,8 +384,11 @@ interface that is missing, stale or different from its module stops the build by
   interface refuses to proceed when a hash disagrees. Generics record a source dependency (option 1).
   The compiler keeps a whole-program path (`grail build a.grl b.grl` today) so nothing is forced to
   migrate at once.
-- **Stage 3 — generic bodies in interfaces**, once the typed IR exists; drop the source-dependency
-  marker.
+- **Stage 3 — generic bodies in interfaces. Done** (`b1-generics`; the representation, the dedup
+  key and the named limits are recorded above). The body travels as checked text rather than typed
+  IR - the typed IR is still the thing that would make the *checking* shared too - and a
+  specialisation is emitted once, by the module that defines the template, under a
+  content-addressed symbol.
 - **Stage 4 — build cache and incremental driver**: content-addressed objects keyed by source hash +
   interface hashes + compiler version + flags; `grail build` learns to plan a module graph rather
   than take a file list.
