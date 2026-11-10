@@ -22,6 +22,9 @@
   call treats it: the callee receives a pointer to (or a copy of) the record's fields and Grail keeps
   ownership, so the value is still usable after the call.
 
+- Fixed: `tools/test-ffi.mjs` listed the `pointers` fixture by repeating keys inside the
+  `nested_records` entry, so `nested_records` never ran. Both fixtures are entries of their own and
+  both pass.
 - Borg session state persists a typed event stream instead of an opaque payload
   (`borg/src/ffi/store.grl`, `borg/src/events.grl`). The frame still opens with the `BGS` magic and
   now carries the version digit `2`, a little-endian payload length and a sequence of tagged events;

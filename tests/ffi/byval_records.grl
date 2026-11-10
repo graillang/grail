@@ -1,0 +1,172 @@
+module ffi_byval_records;
+
+// Records passed to C by value: `v: byval R` passes the whole record the way C does, per target ABI,
+// where a bare `R` stays the C `R *`. The shim computes a checksum over every field it receives, so
+// a misplaced register, eightbyte or stack slot changes the value. Each shape takes a different
+// path through the rules docs/ffi.md states:
+//
+//   Bv4    4 bytes                INTEGER register
+//   Bv8    8 bytes                one register, both fields packed
+//   Bv16   16 bytes               two integer registers
+//   Bv24   24 bytes               SysV: outgoing stack area; AAPCS64/RV64: by reference
+//   BvMix  int + float, 8 bytes   SysV/AAPCS64: one INTEGER register; RV64: a0 + fa0
+//   BvMd   double + int, 16       SysV: xmm0 + rdi; AAPCS64: x0,x1; RV64: fa0 + a0
+//   Bv2f   float + float, 8       ImVec2-shaped: SysV xmm0; AAPCS64 s0,s1; RV64 fa0,fa1
+//   BvArr  int[4], 16 bytes       an embedded array, in registers or by reference
+//   Bv4f   float x4, 16 bytes     a four-field float aggregate: four v registers, two xmm, two
+//                                 packed integer registers on RV64
+extern "C" record Bv4 { a: i32 }
+extern "C" record Bv8 { a: i32, b: i32 }
+extern "C" record Bv16 { a: i64, b: i64 }
+extern "C" record Bv24 { a: i64, b: i64, c: i64 }
+extern "C" record BvMix { i: i32, f: f32 }
+extern "C" record BvMd { d: f64, i: i64 }
+extern "C" record Bv2f { x: f32, y: f32 }
+// The C twin declares `struct bvarr { int v[4]; }`: Grail's C-layout records have no array field,
+// so the element list is spelled out, which is the same bytes.
+extern "C" record BvArr { v0: i32, v1: i32, v2: i32, v3: i32 }
+extern "C" record Bv4f { a: f32, b: f32, c: f32, d: f32 }
+
+extern "C" lib "shim.o" fn c_byval4(s: byval Bv4) -> i64;
+extern "C" lib "shim.o" fn c_byval8(s: byval Bv8) -> i64;
+extern "C" lib "shim.o" fn c_byval16(s: byval Bv16) -> i64;
+extern "C" lib "shim.o" fn c_byval24(s: byval Bv24) -> i64;
+extern "C" lib "shim.o" fn c_byval_mix(s: byval BvMix) -> i64;
+extern "C" lib "shim.o" fn c_byval_md(s: byval BvMd) -> i64;
+extern "C" lib "shim.o" fn c_byval_2f(s: byval Bv2f) -> i64;
+extern "C" lib "shim.o" fn c_byval_arr(s: byval BvArr) -> i64;
+extern "C" lib "shim.o" fn c_byval_4f(s: byval Bv4f) -> i64;
+extern "C" lib "shim.o" fn c_byval_after(pre: i64, s: byval Bv16, post: f64) -> i64;
+extern "C" lib "shim.o" fn c_byval_two(a: byval Bv8, b: byval Bv2f) -> i64;
+extern "C" lib "shim.o" fn c_byval_tail(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, s: byval Bv24) -> i64;
+extern "C" lib "shim.o" fn c_byval_mix_stack(a0: i64, a1: i64, a2: i64, a3: i64, a4: i64, a5: i64, s: byval Bv8, g: i64) -> i64;
+// The same signature as a C function pointer: Grail calls a resolved address with the byval
+// classification, not only a declared symbol.
+extern "C" lib "shim.o" as "c_byval_slot" fn byval_slot() -> cfn(byval Bv16) -> i64;
+
+fn main() -> u64 {
+    mut bad: u64 = 0;
+    mut s4 = Bv4 { a: 21 };
+    mut s8 = Bv8 { a: 5, b: -3 };
+    mut s16 = Bv16 { a: 7, b: 9000 };
+    mut s24 = Bv24 { a: 1, b: 2, c: 3 };
+    mut mix = BvMix { i: 7, f: 1.5 };
+    mut md = BvMd { d: 2.5, i: 10 };
+    mut v2 = Bv2f { x: 1.5, y: 2.25 };
+    mut arr = BvArr { v0: 1, v1: 2, v2: 3, v3: 4 };
+    mut f4 = Bv4f { a: 1.5, b: 2.5, c: 3.5, d: 4.5 };
+    mut r4: i64 = 0;
+    mut r8: i64 = 0;
+    mut r16: i64 = 0;
+    mut r24: i64 = 0;
+    mut rmix: i64 = 0;
+    mut rmd: i64 = 0;
+    mut r2f: i64 = 0;
+    mut rarr: i64 = 0;
+    mut r4f: i64 = 0;
+    mut rafter: i64 = 0;
+    mut rtwo: i64 = 0;
+    mut rtail: i64 = 0;
+    mut rstack: i64 = 0;
+    mut rslot: i64 = 0;
+    unsafe {
+        r4 = c_byval4(s4);
+        r8 = c_byval8(s8);
+        // The record stays Grail's: passing it by value copies the bytes, it does not move it.
+        r16 = c_byval16(s16);
+        r24 = c_byval24(s24);
+        rmix = c_byval_mix(mix);
+        rmd = c_byval_md(md);
+        r2f = c_byval_2f(v2);
+        rarr = c_byval_arr(arr);
+        r4f = c_byval_4f(f4);
+        rafter = c_byval_after(5, s16, 1.5);
+        rtwo = c_byval_two(s8, v2);
+        // 654321 + (1 + 2*1000 + 3*1000000): a record after six integer arguments.
+        rtail = c_byval_tail(1, 2, 3, 4, 5, 6, s24);
+        // 654321 + (7 + 8*1000) + 9*10000000: the record shares the outgoing stack area with a
+        // scalar argument that follows it.
+        rstack = c_byval_mix_stack(1, 2, 3, 4, 5, 6, Bv8 { a: 7, b: 8 }, 9);
+        slot := byval_slot();
+        rslot = slot(s16);
+    }
+    println(r4);
+    println(r8);
+    println(r16);
+    println(r24);
+    println(rmix);
+    println(rmd);
+    println(r2f);
+    println(rarr);
+    println(rafter);
+    println(rtwo);
+    println(r4f);
+    println(rslot);
+    println(rtail);
+    println(rstack);
+    // 21*3
+    if r4 != 63 {
+        bad = bad + 1;
+    }
+    // 5 + (-3)*1000
+    if r8 != -2995 {
+        bad = bad + 1;
+    }
+    // 7 + 9000*1000
+    if r16 != 9000007 {
+        bad = bad + 1;
+    }
+    // 1 + 2*1000 + 3*1000000
+    if r24 != 3002001 {
+        bad = bad + 1;
+    }
+    // 7*1000 + (long long)(1.5*4)
+    if rmix != 7006 {
+        bad = bad + 1;
+    }
+    // (long long)(2.5*10) + 10*1000
+    if rmd != 10025 {
+        bad = bad + 1;
+    }
+    // 1.5*100 + 2.25*10000
+    if r2f != 22650 {
+        bad = bad + 1;
+    }
+    // 1 + 2*10 + 3*100 + 4*1000
+    if rarr != 4321 {
+        bad = bad + 1;
+    }
+    // 5 + (7 + 9000*1000) + (long long)(1.5*2)
+    if rafter != 9000015 {
+        bad = bad + 1;
+    }
+    // 5 + (-3)*10 + 1 + 2.25*100
+    if rtwo != 176 {
+        bad = bad + 1;
+    }
+    // 1 + 2.5*10 + 3.5*100 + 4.5*1000
+    if r4f != 4876 {
+        bad = bad + 1;
+    }
+    // 7*1000000 + 9000, through a `cfn` value
+    if rslot != 7009000 {
+        bad = bad + 1;
+    }
+    if rtail != 3656322 {
+        bad = bad + 1;
+    }
+    if rstack != 90662328 {
+        bad = bad + 1;
+    }
+    // Fields are unchanged: the call passed a copy of them, not their storage.
+    if s16.a != 7 {
+        bad = bad + 1;
+    }
+    if v2.y != 2.25 {
+        bad = bad + 1;
+    }
+    if bad != 0 {
+        return 1;
+    }
+    return 0;
+}
