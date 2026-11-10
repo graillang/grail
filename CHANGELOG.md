@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+- RHI increment 2: `abundance/src/rhi_vulkan.grl` creates a real `VkInstance` and picks a real
+  physical device. `vkCreateInstance` is called through the FFI's out-parameter form — `slot: &mut
+  Instance` in the declaration, `&mut instance` at the call site — with `VkInstanceCreateInfo` as an
+  `extern "C" record` holding the C layout (64 bytes; `sType` 0, `pNext` 8, `flags` 16,
+  `pApplicationInfo` 24, the two counts and name arrays at 32/40/48/56), and `vkDestroyInstance` on
+  every path that created one, the paths where a later call failed included. Physical devices are
+  enumerated three ways through one symbol: a count query, a single handle slot (`&mut
+  PhysicalDevice`, which is also the seed the array form needs) and a fixed-capacity record of
+  handle fields, because a record *parameter* is the address of the record's fields and a handle
+  cannot be read out of a byte buffer. `VkPhysicalDeviceProperties` (824 bytes) and
+  `VkQueueFamilyProperties` (24 bytes each) are decoded at their C offsets, selection ranks device
+  types (discrete, integrated, virtual, CPU) with an optional name filter, and the first
+  graphics-capable queue family is chosen and printed. Two calls are deliberately not made:
+  `VkApplicationInfo` cannot be passed and `vkCreateDevice` is not declared, because Grail has no
+  expression whose value is the address of an owned `extern "C"` record, so a create-info cannot
+  point at another struct (`pApplicationInfo`, `pQueueCreateInfos`, `ppEnabledExtensionNames`,
+  `pNext`); `cptr` takes only byte sequences and views, and a `&mut` record is not an
+  out-parameter slot. Both refusals are pinned as `ffi-reject-record-address` and
+  `ffi-reject-record-out-param` in `tests/native-cases.json`, the probe says
+  `unavailable extern-C-cannot-take-the-address-of-a-record` on its own output line, and
+  `docs/rhi.md` states what that costs and what unblocks it. New program
+  `abundance/tests/rhi_vulkan_probe.grl` replaces the Vulkan half of `rhi_device_probe.grl`, which
+  now covers the SDL3 window alone; `tools/abundance-test.mjs` links one system library per probe,
+  so the Vulkan probe runs on a machine with no display server while the window probe skips there.
 - `FnMut`: a closure that mutates a captured value now works, with the rules B6 fixed in advance.
   The body is scanned for a store to a capture or to a place rooted at it (`n = ..`, `n += ..`,
   `s.field = ..`, `v[i] = ..`, `*r = ..`), a mutable borrow of it (`&mut n`) and method calls that
