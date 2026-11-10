@@ -344,9 +344,12 @@ move rules keep their cases.
 - A by-value `FnMut` *parameter* cannot be called in the callee: Grail parameters are not declared
   mutable, and calling one would need exactly that. Take `&mut FnMut(...)` instead. This is rule 5's
   shape and the reason the stdlib callables stay `Fn` (they only read).
-- Using a captured `&mut` in a way the write scan does not recognise as a write (handing it to
-  another function, iterating a captured view mutably, calling a method on a shared-typed capture in
-  an `Fn` closure) is refused by the read-only field type rather than silently allowed.
+- Using a captured `&mut` in a way the write scan does not recognise as a write is refused by the
+  read-only field type rather than silently allowed. Handing a captured `&mut u64` to a function
+  that takes `&mut u64` in a closure whose body writes nothing else reports plain
+  `type mismatch` (the field is `&u64` there); the fix is to write through it (`*r = ..`), which is
+  recognised as a write and makes the closure `FnMut`. Iterating a captured view mutably and
+  calling a method on a shared-typed capture inside an `Fn` closure are refused the same way.
 
 **Known limitations recorded, not fixed here:**
 
