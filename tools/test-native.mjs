@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, mkdirSync, rmSync, readdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, rmSync, readdirSync, existsSync } from 'node:fs';
 import { join, basename, resolve, dirname } from 'node:path';
 import assert from 'node:assert/strict';
 import { root, compilerSources, hostTarget, targetName, buildCompiler, compileProgram, execute } from './native.mjs';
@@ -15,6 +15,29 @@ const compiler = buildCompiler();
 const work = join(root, '.work/native-tests', target);
 mkdirSync(work, { recursive: true });
 const cases = JSON.parse(readFileSync(join(root, 'tests/native-cases.json'), 'utf8'));
+
+// A full run is minutes per backend, so the runner is sliceable. All three knobs are opt-in and a
+// plain invocation behaves exactly as before:
+//   GRAIL_TEST_FILTER=<regex>   only cases whose name matches (iterate on one area)
+//   GRAIL_TEST_SHARD=<i>/<n>     run shard i of n, chosen by position (parallel gates)
+//   GRAIL_TEST_RESUME=1          skip cases that already passed for this compiler + backend
+const filterArg = process.env.GRAIL_TEST_FILTER;
+const filter = filterArg ? new RegExp(filterArg) : null;
+const shardArg = process.env.GRAIL_TEST_SHARD;
+let shard = null;
+if (shardArg) {
+  const match = /^(\d+)\/(\d+)$/.exec(shardArg);
+  assert.ok(match, `GRAIL_TEST_SHARD must be i/n, got ${shardArg}`);
+  const [index, count] = [Number(match[1]), Number(match[2])];
+  assert.ok(count >= 1 && index >= 1 && index <= count, `GRAIL_TEST_SHARD ${shardArg}: index must be 1..${count}`);
+  shard = { index: index - 1, count };
+}
+const resume = process.env.GRAIL_TEST_RESUME === '1';
+// The marker names the compiler (its path is a content hash) and the backend, so a rebuilt compiler
+// or a different --backend never reuses another run's passes.
+const backend = `${process.env.GRAIL_BACKEND ?? 'native'}${process.env.GRAIL_VERIFY_FACTS === '1' ? '+facts' : ''}`;
+const markers = join(work, 'pass', basename(compiler) + '-' + backend);
+if (resume) mkdirSync(markers, { recursive: true });
 const legacyFiles = new Set();
 for (const test of cases) {
   if (test.removedSyntax !== undefined) assert.ok(test.removedSyntax === true && test.reject, `${test.name}: removedSyntax requires an intentional rejection`);
@@ -57,10 +80,15 @@ for (let i = 0; i < cases.length; i++) {
 }
 let passed = 0;
 let skipped = 0;
-for (const test of cases) {
+let filtered = 0;
+let resumed = 0;
+for (const [position, test] of cases.entries()) {
   // A case may name the targets it applies to (`"targets": ["x86_64"]`), for fixtures that link a
   // host C library or exercise a host-only facility.
   if (test.targets && !test.targets.includes(target)) { skipped++; continue; }
+  if (filter && !filter.test(test.name)) { filtered++; continue; }
+  if (shard && position % shard.count !== shard.index) { filtered++; continue; }
+  if (resume && existsSync(join(markers, test.name))) { resumed++; continue; }
   // Only a documented, explicit legacyRefs reason may opt a fixture out of typed mode.
   const typedRefs = test.legacyRefs === undefined;
   const directory = join(work, test.name);
@@ -100,6 +128,10 @@ for (const test of cases) {
       if (test.stdout !== undefined) assert.equal(result.stdout.toString(), test.stdout, test.name);
     } else { assert.equal(result.status, test.status ?? 0, `${test.name}: ${result.signal}: ${result.stderr}`); assert.equal(result.stdout.toString(), test.stdout, test.name); }
   }
+  if (resume) writeFileSync(join(markers, test.name), '');
   passed++;
 }
-console.log(`${target}: ${passed} native execution/rejection regressions passed` + (skipped ? `, ${skipped} skipped (host-only)` : ''));
+console.log(`${target}: ${passed} native execution/rejection regressions passed`
+  + (skipped ? `, ${skipped} skipped (host-only)` : '')
+  + (filtered ? `, ${filtered} not selected (filter/shard)` : '')
+  + (resumed ? `, ${resumed} already passed (resumed)` : ''));

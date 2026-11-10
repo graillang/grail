@@ -89,6 +89,17 @@ suite pass while the published seed still cannot build the compiler, so a branch
 and still fail CI's clean-clone preflight; `ci.mjs` already refuses a stale seed, it just never ran
 here.
 
+**Slice a suite instead of waiting for it.** A full native run is minutes per backend, so the runner
+takes three opt-in knobs (a plain invocation is unchanged):
+
+    GRAIL_TEST_FILTER='^ffi-' bun tools/test-native.mjs x86_64      # one area, seconds
+    GRAIL_TEST_SHARD=2/4 bun tools/test-native.mjs x86_64            # a quarter, for parallel gates
+    GRAIL_TEST_RESUME=1 bun tools/test-native.mjs x86_64             # skip cases that already passed
+
+Shards are safe to run **in parallel in one worktree**: each case owns `.work/native-tests/<target>/<case>`,
+so two shards never touch the same files. Resume markers are keyed by the compiler's content-addressed
+path and the backend, so a rebuilt compiler or a different `--backend` never reuses another run's passes.
+
 **Long suites outlive their shells.** `timeout 9000 bun tools/test-native.mjs …` keeps running when the
 wrapper process is killed (a backgrounded exec that is reaped, an OOM kill of the shell), so a retry
 silently doubles the load: two or more suites then share `.work/native-tests/<target>/` and both crawl,
