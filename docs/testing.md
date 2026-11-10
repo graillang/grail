@@ -58,7 +58,9 @@ already knows the builtin (build one from the same sources with an older seed th
 or with a seed that has been reseeded once):
 
 ```sh
-export GRAIL_COMPILER=/path/to/staged/grail     # a compiler that knows the new builtin
+unset GRAIL_COMPILER                            # the trap: an explicit stage0 is accepted as-is
+bun tools/ci.mjs preflight                      # sub-second; names a stale seed in its blockers
+export GRAIL_COMPILER=/path/to/staged/grail      # a compiler that knows the new builtin
 bun tools/native.mjs build                      # -> echoes GRAIL_COMPILER: the tree is buildable
 bun tools/bootstrap.mjs verify x86_64           # ~20 s, works with GRAIL_COMPILER set: "checked-in
                                                 #   bootstrap is stale" if the seed predates the builtin
@@ -67,10 +69,13 @@ unset GRAIL_COMPILER
 rm -rf .work && bun tools/native.mjs build       # the check CI runs: a fresh clone with no dev compiler
 ```
 
-`bootstrap.mjs verify <host>` is the cheapest exact check and the one to run before pushing:
-it compiles the compiler with whatever compiler is available, proves the result self-hosts to
-identical assembly, and compares that against the checked-in seed — so it still reports the staleness
-when `GRAIL_COMPILER` is set, which is exactly the case the suites cannot catch.
+`ci.mjs preflight` is the cheapest check of all: it compares the source digests recorded in
+`compiler/bootstrap/manifest.json` with the working tree and blocks with `published bootstrap is
+stale for: compiler/…`. **It only says that with `GRAIL_COMPILER` unset** — an explicit stage0 is
+accepted as-is, which is exactly how a branch can be green in every suite and still fail CI.
+`bootstrap.mjs verify <host>` is the slower exact version: it compiles the compiler with whatever
+compiler is available, proves the result self-hosts to identical assembly, and compares that against
+the checked-in seed, so it reports the staleness even when `GRAIL_COMPILER` is set.
 
 `bootstrap.mjs` calls `buildCompiler()`, which honours `GRAIL_COMPILER`, so both of its steps must
 run with the same variable set; without it, `update all` re-enters the stale seed and fails the same
