@@ -159,8 +159,8 @@ fn copy_optional_number<a>(value: (&a u64?)) -> u64? {
 
 pub fn encode(record: (&OwnerRecord)) -> borg_json::Json {
     mut members = borg_json::empty_members();
-    put(&mut members, "schema_version", borg_json::Json::Num(digits(record.schema_version)));
-    put(&mut members, "pid", borg_json::Json::Num(digits(record.pid)));
+    put(&mut members, "schema_version", borg_json::Json::Num(number_text(record.schema_version)));
+    put(&mut members, "pid", borg_json::Json::Num(number_text(record.pid)));
     put(&mut members, "executable_identity", borg_json::Json::Str(copy_text(&record.executable_identity)));
     package := copy_optional_text(&record.package_version);
     match package {
@@ -169,7 +169,7 @@ pub fn encode(record: (&OwnerRecord)) -> borg_json::Json {
     }
     started := copy_optional_number(&record.process_start_time);
     match started {
-        Some(value) => { put(&mut members, "process_start_time", borg_json::Json::Num(digits(value))); },
+        Some(value) => { put(&mut members, "process_start_time", borg_json::Json::Num(number_text(value))); },
         None => { put(&mut members, "process_start_time", borg_json::Json::Null); }
     }
     return borg_json::Json::Obj(members);
@@ -187,54 +187,13 @@ fn text_equals<a, b>(left: (&a [u8]), right: (&b [u8])) -> bool {
     return true;
 }
 
-fn append_number<a>(out: (&a mut u8[]), value: u64) {
-    if value == 0 {
-        out.push(48);
-        return ();
-    }
-    mut reversed_digits = u8[];
-    mut left = value;
-    while left > 0 {
-        reversed_digits.push(48 + left % 10);
-        left = left / 10;
-    }
-    while reversed_digits.len() > 0 {
-        out.push(reversed_digits.pop());
-    }
-}
-
 pub fn number_text(value: u64) -> string {
-    return digits(value);
-}
-
-fn digits(value: u64) -> string {
-    mut out = u8[];
-    append_number(&mut out, value);
-    return out.text();
-}
-
-fn append_signed<a>(out: (&a mut u8[]), value: i64) {
-    mut magnitude = value;
-    if value < 0 {
-        out.push(45);
-        magnitude = 0 - value;
-    }
-    append_number(out, u64(magnitude));
+    return format("{}", value);
 }
 
 // `executable_identity` (local_control.rs:559): five numbers joined by colons.
 pub fn identity(dev: u64, ino: u64, len: u64, mtime: i64, mtime_nsec: i64) -> string {
-    mut out = u8[];
-    append_number(&mut out, dev);
-    out.push(58);
-    append_number(&mut out, ino);
-    out.push(58);
-    append_number(&mut out, len);
-    out.push(58);
-    append_signed(&mut out, mtime);
-    out.push(58);
-    append_signed(&mut out, mtime_nsec);
-    return out.text();
+    return format("{}:{}:{}:{}:{}", dev, ino, len, mtime, mtime_nsec);
 }
 
 fn is_space(byte: u64) -> bool {
@@ -360,11 +319,11 @@ pub fn identity_of(record: (&OwnerRecord)) -> string {
 }
 
 pub fn pid_of(record: (&OwnerRecord)) -> string {
-    return digits(record.pid);
+    return number_text(record.pid);
 }
 
 pub fn version_of(record: (&OwnerRecord)) -> string {
-    return digits(record.schema_version);
+    return number_text(record.schema_version);
 }
 
 pub fn pid_value(record: (&OwnerRecord)) -> u64 {
@@ -386,7 +345,7 @@ pub fn package_of(record: (&OwnerRecord)) -> string {
 pub fn start_of(record: (&OwnerRecord)) -> string {
     started := copy_optional_number(&record.process_start_time);
     match started {
-        Some(value) => { return digits(value); },
+        Some(value) => { return number_text(value); },
         None => { return "-".text(); }
     }
 }
