@@ -170,7 +170,7 @@
       "rust": {
         "source": "rust/branches.rs",
         "output": "2\n",
-        "note": "Both use if/else for branching. Rust can return the value of an if expression; Grail uses explicit returns here. Grail comparisons produce numeric zero/one, while Rust comparisons produce bool."
+        "note": "Both use if/else for branching. Rust can return the value of an if expression; Grail uses explicit returns here. Both require a `bool` condition and both produce `bool` from a comparison, so an integer is refused where a condition is expected."
       }
     },
     {
@@ -181,6 +181,26 @@
         "source": "rust/loops.rs",
         "output": "16\n",
         "note": "Grail for i in n iterates from zero up to n, excluding n; Rust spells that range 0..n. Both support while, break and continue, and require an explicit mutable binding for updates."
+      }
+    },
+    {
+      "id": "consume-owned",
+      "entry": "examples/consume-owned.grl",
+      "output": "7\n8\n2\n",
+      "rust": {
+        "source": "rust/consume-owned.rs",
+        "output": "7\n8\n2\n",
+        "note": "Both loops move each owned element out of the vector, so the vector is consumed and each iteration owns the string it reads; borrowing the second vector with `&kept` leaves it usable afterwards, including its length. Grail writes `string[]` where Rust writes `Vec<String>`."
+      }
+    },
+    {
+      "id": "strict-condition",
+      "entry": "examples/strict-condition.grl",
+      "diagnostic": "a condition must be a bool",
+      "rust": {
+        "source": "rust/strict-condition.rs",
+        "diagnostic": "E0308",
+        "note": "Both languages require a `bool` condition: an integer is not a truth value in either, and the fix is `if level != 0`. Grail's comparisons produce `bool`, and `bool` and integers do not mix in arithmetic or comparison, so there is no quiet integer-to-condition path."
       }
     },
     {
@@ -219,7 +239,7 @@
       "output": "1\n",
       "rust": {
         "source": "rust/views.rs",
-        "note": "Both ranges are half-open and bounds-checked. Rust slices are borrowed pointer/length values. The current Grail runtime allocates view descriptors; do not infer zero-allocation views from this syntax.",
+        "note": "Both ranges are half-open and bounds-checked. Rust slices are borrowed pointer/length values. A view of a runtime value is a descriptor the runtime allocates and releases; only a literal's view is built at compile time, so do not infer zero-allocation views from this syntax.",
         "output": "1\n"
       }
     },
@@ -339,7 +359,7 @@
       "output": "1\n",
       "rust": {
         "source": "rust/enums.rs",
-        "note": "Both match tagged variants and move owned payloads into an arm. Rust qualifies variant patterns; Grail uses unqualified names in a consuming match. Grail true is currently numeric one (flag:u64), while Rust has a distinct bool.",
+        "note": "Both match tagged variants and move owned payloads into an arm. Rust qualifies variant patterns; Grail uses unqualified names in a consuming match. bool is its own type in both languages and the same `if flag` picks the variant in each.",
         "output": "1\n"
       }
     },
@@ -498,7 +518,7 @@
       "output": "1\n",
       "rust": {
         "source": "rust/cleanup.rs",
-        "note": "Both deterministically destroy owners on normal exits, including continue and early return. Rust supports custom Drop; Grail uses generated default cleanup. Grail’s flag is currently numeric true/false rather than Rust bool. No relative allocation/performance claim follows from this example.",
+        "note": "Both deterministically destroy owners on normal exits, including continue and early return. Rust supports custom Drop; Grail uses generated default cleanup. The flag is a `bool` in both languages, so each program drops the same values on the same path. No relative allocation/performance claim follows from this example.",
         "output": "1\n"
       }
     },
@@ -549,7 +569,7 @@
       "rust": {
         "source": "rust/closures.rs",
         "output": "15\n7\n5\n",
-        "note": "Grail closures behave like Rust move closures: captures are copied or moved into the closure and read in its body. Grail writes the closure type Fn(u64) -> u64 directly; Rust uses impl Fn or generics. Borrowed and mutable captures are rejected."
+        "note": "Grail closures behave like Rust move closures: captures are copied or moved into the closure and read in its body. Grail writes the closure type Fn(u64) -> u64 directly; Rust uses impl Fn or generics. Closures that capture a reference or view, and closures that write a capture (`FnMut`), are both supported; a struct or enum that merely holds a borrow is still not capturable."
       }
     },
     {
@@ -579,7 +599,7 @@
       "rust": {
         "source": "rust/showing.rs",
         "output": "origin inside: true\n(3, -4) inside: true\n(20, 1) inside: false\n71\n",
-        "note": "A Grail show method plays the role of Rust's Display implementation. Grail's 'G' is a byte (71), matching Rust's b'G'; Grail has no char type yet."
+        "note": "A Grail show method plays the role of Rust's Display implementation. Grail's 'G' is a byte (71), matching Rust's b'G'; Grail also has a `char`: `'G'` is a byte literal and `'ï'` would be a character."
       }
     },
     {
@@ -689,6 +709,16 @@
         "hash",
         "core"
       ]
+    },
+    {
+      "id": "byval-record",
+      "entry": "examples/byval-record.grl",
+      "diagnostic": "byval must name an extern \"C\" record",
+      "rust": {
+        "source": "rust/byval-record.rs",
+        "output": "5\n",
+        "note": "Rust passes a `#[repr(C)]` struct by value and derives the C classification from the layout. Grail keeps a bare record parameter meaning the C `R *`, so passing a whole record is written `v: byval Vec2`, and the record must be declared `extern \"C\"`; asking for `byval` on an ordinary record is the rejection above. With both spellings satisfied the call compiles and executes on x86-64, AArch64 and RISC-V 64; Windows x86-64 and ARM64 refuse `byval` rather than guess MSVC's struct rules."
+      }
     }
   ]
 }

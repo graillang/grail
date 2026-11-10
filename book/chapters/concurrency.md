@@ -25,8 +25,10 @@ The library also provides `[K: V]` maps (keyed SipHash, user key types via the `
 `task_scope(context, body)` starts structured tasks. Inside the body, `spawn(scope, context, f)`
 returns a `Task<R>` handle and `join(handle)` waits for its result; every task is joined or
 cancelled before the scope ends. `scope.cancel()` cancels the scope, and an optional
-`CancelToken` parameter lets a task observe cancellation. Blocking host reads inside a green
-task suspend that task and are resumed by the reactor, so other tasks keep running. General
-`async`/`await` syntax is not provided; the scope and task APIs are the current surface.
+`CancelToken` parameter lets a task observe cancellation. `host::read_file`, `host::write_file`
+and `host::command` inside a green task hand the blocking work to a dedicated OS thread and suspend
+the task until it finishes, so other tasks keep running. A foreign (`extern "C"`) call does not get
+that treatment: it occupies the thread that makes it, and foreign calls stay on the main thread.
+General `async`/`await` syntax is not provided; the scope and task APIs are the current surface.
 
 **Try it:** remove `shared.total.lock_with(1, add);` and compare the two totals.
