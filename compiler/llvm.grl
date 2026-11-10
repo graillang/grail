@@ -145,10 +145,10 @@ fn add_once<a, b>(list: (&a mut u8[][]), s: &b [u8]) -> unit {
 fn trim<a>(s: &a [u8]) -> u8[] {
     mut a: u64 = 0;
     mut b = s.len();
-    while (a < b) && ((s[a] == 32) + (s[a] == 9) != 0) {
+    while a < b && (s[a] == 32 || s[a] == 9) {
         a += 1;
     }
-    while (b > a) && ((s[b - 1] == 32) + (s[b - 1] == 9) + (s[b - 1] == 13) != 0) {
+    while b > a && (s[b - 1] == 32 || s[b - 1] == 9 || s[b - 1] == 13) {
         b -= 1;
     }
     mut out = u8[];
@@ -202,7 +202,7 @@ fn parse_int<a>(s: &a [u8]) -> Int {
     mut ok: u64 = 1;
     while i < s.len() {
         ch := s[i];
-        if (ch < 48) + (ch > 57) != 0 {
+        if ch < 48 || ch > 57 {
             ok = 0;
         } else {
             v = wrapping_add(wrapping_mul(v, 10), ch - 48);
@@ -229,8 +229,8 @@ fn label_of<a>(line: &a [u8]) -> u8[] {
         if ch == 58 {
             return out;
         }
-        ok := ((ch >= 97) & (ch <= 122)) + ((ch >= 65) & (ch <= 90)) + ((ch >= 48) & (ch <= 57)) + (ch == 95) + (ch == 46) + (ch == 36);
-        if ok == 0 {
+        ok := ident_char(ch);
+        if !ok {
             return u8[];
         }
         out.push(ch);
@@ -263,7 +263,7 @@ fn split<a>(lines: (&a u8[][]), funcs: (&a mut Func[]), data: (&a mut u8[][])) -
                 open = 0;
             }
         }
-        if open & (pool || starts(line, view(".pushsection"))) {
+        if open != 0 && (pool || starts(line, view(".pushsection"))) {
             if starts(line, view(".pushsection")) {
                 pool = true;
                 mut d = u8[];
@@ -280,7 +280,7 @@ fn split<a>(lines: (&a u8[][]), funcs: (&a mut Func[]), data: (&a mut u8[][])) -
             continue;
         }
         name := label_of(line);
-        if text & (name.len() != 0) & (name.len() + 1 == line.len()) & !is_local_label(view(name)) {
+        if text != 0 && name.len() != 0 && name.len() + 1 == line.len() && !is_local_label(view(name)) {
             if open {
                 last := funcs.len() - 1;
                 funcs[last].end = i;
@@ -377,7 +377,7 @@ fn reg_name<a>(name: &a [u8]) -> u8[] {
     if (n == 3) && (name[0] == 114) && (name[2] == 120) && legacy_base(name[1]) {
         return copy(name);
     }
-    if (n == 3) && (name[0] == 114) && (((name[1] == 115) + (name[1] == 100)) != 0) && (name[2] == 105) {
+    if n == 3 && name[0] == 114 && (name[1] == 115 || name[1] == 100) && name[2] == 105 {
         return copy(name);
     }
     if (n == 2) && (name[0] == 114) && (name[1] >= 56) && (name[1] <= 57) {
@@ -392,7 +392,7 @@ fn reg_name<a>(name: &a [u8]) -> u8[] {
         out.push(120);
         return out;
     }
-    if (n == 3) && (name[0] == 101) && (((name[1] == 115) + (name[1] == 100)) != 0) && (name[2] == 105) {
+    if n == 3 && name[0] == 101 && (name[1] == 115 || name[1] == 100) && name[2] == 105 {
         mut out = copy(view("r"));
         out.push(name[1]);
         out.push(105);
@@ -404,13 +404,13 @@ fn reg_name<a>(name: &a [u8]) -> u8[] {
         out.push(120);
         return out;
     }
-    if (n == 3) && (((name[0] == 115) + (name[0] == 100)) != 0) && (name[1] == 105) && (name[2] == 108) {
+    if n == 3 && (name[0] == 115 || name[0] == 100) && name[1] == 105 && name[2] == 108 {
         mut out = copy(view("r"));
         out.push(name[0]);
         out.push(105);
         return out;
     }
-    if (n >= 3) && (name[0] == 114) && (((name[n - 1] == 100) + (name[n - 1] == 98)) != 0) {
+    if n >= 3 && name[0] == 114 && (name[n - 1] == 100 || name[n - 1] == 98) {
         base := sub(name, 0, n - 1);
         if reg_width(view(base)) == 64 {
             if reg_name(view(base)).len() != 0 {
@@ -543,7 +543,7 @@ fn address<a, b>(l: (&a mut L), op: &b [u8]) -> u8[] {
     }
     disp := sub(op, 0, open);
     inner := operands(view(sub(op, open + 1, op.len() - 1)));
-    if (inner.len() == 0) + (inner.len() > 3) != 0 {
+    if inner.len() == 0 || inner.len() > 3 {
         bad(&mut l);
         return copy(view("null"));
     }
