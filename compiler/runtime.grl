@@ -7,6 +7,7 @@ unsafe module runtime;
 // rt_hard_exit is the platform's cleanup-free exit (exit_group, TerminateProcess, _exit), because
 // exit(2) would run foreign cleanup. This is the only abort entry point in the runtime.
 fn rt_abort() -> u64 {
+    rt_prof_dump();
     rt_syscall(62, rt_syscall(39, 0, 0, 0), 6, 0);
     rt_hard_exit(134);
     return 0;
@@ -203,6 +204,7 @@ fn rt_live() -> u64 {
     return n;
 }
 fn rt_shutdown() -> u64 {
+    rt_prof_dump();
     state := raw_state();
     mut arena = raw_load(state + 32);
     while arena != 0 {
@@ -1289,6 +1291,8 @@ fn rt_thread_init() -> u64 {
     // The PE entry has no stack arguments; the OS layer recovers argv/envp from Win32. Linux keeps
     // the entry stub's words and this is a no-op.
     rt_os_init();
+    // Armed only when `grail profile` left its rendezvous file in the working directory.
+    rt_prof_start();
     return 0;
 }
 fn rt_current() -> u64 {
@@ -3492,6 +3496,7 @@ fn rt_print_acc(acc: u64, newline: u64) -> u64 {
 
 // Ends the whole process immediately with the given status (no cleanup runs).
 fn f_host_exit(code: u64) -> u64 {
+    rt_prof_dump();
     rt_syscall(231, code & 255, 0, 0);
     return 0;
 }
@@ -4389,5 +4394,259 @@ fn rt_vec_contains(s: u64, v: u64) -> u64 {
         }
         i += 1;
     }
+    return 0;
+}
+
+// ---- sampling profiler (Linux x86-64) -------------------------------------------------------
+// `grail profile` writes .grail-profile/config in the working directory and runs the target there.
+// The runtime reads that file during startup (rt_thread_init), samples the interrupted instruction
+// pointer from an ITIMER_PROF/SIGPROF timer and writes the raw addresses to the path named in the
+// config when the process ends. The handler never allocates, never takes the allocator lock and
+// never calls the kernel: it claims a slot with a CAS loop and stores one word, so a signal that
+// interrupts the allocator cannot deadlock against it.
+//
+// Process-state words (rt_state is 4096 bytes; these sit between the allocator's last bin word and
+// the Windows-only thread-bridge word at 3392):
+//   2048 control page pointer  (0 = not profiled; the only word the handler reads)
+//   2080 ".grail-profile/config" (NUL terminated, 64 bytes)
+//   2176 sample path           (NUL terminated, 96 bytes, copied from the config)
+//   2272 itimerval             (32 bytes: interval then value, seconds then microseconds)
+//   2304 sigaction             (32 bytes: handler, flags, restorer, mask)
+//   2336 sigaltstack           (24 bytes: stack pointer, flags, size)
+//   2400 config text scratch   (256 bytes, startup only)
+//   2656 timespec             (16 bytes: CLOCK_PROCESS_CPUTIME_ID at arm and at exit)
+//
+// The control page is the first 4096 bytes of the sample mapping:
+//   0 magic  8 sample base  16 capacity  24 claimed  32 dropped  40 rate  48 cpu start (ns)
+fn rt_prof_words() -> u64 {
+    return raw_state() + 2048;
+}
+fn rt_prof_page() -> u64 {
+    return raw_load(raw_state() + 2048);
+}
+// One slot per sample: index = CAS-claimed counter, payload = interrupted instruction pointer.
+fn rt_prof_handler(sig: u64, info: u64, ctx: u64) -> u64 {
+    page := rt_prof_page();
+    if page == 0 {
+        return 0;
+    }
+    i := rt_atomic_fetch_add(page + 24, 1);
+    if i < raw_load(page + 16) {
+        // The kernel's rt_sigframe keeps the ucontext at a fixed offset from the third handler
+        // argument; RIP is gregs[16] inside its sigcontext, 40 + 16 * 8.
+        raw_store(raw_load(page + 8) + i * 8, raw_load(ctx + 168));
+    } else {
+        rt_atomic_fetch_add(page + 32, 1);
+    }
+    return 0;
+}
+fn rt_prof_config_path(dst: u64) -> u64 {
+    // ".grail-profile/config", NUL terminated, as three little-endian words.
+    raw_store(dst, 8083236106062161710);
+    raw_store(dst + 8, 7147042649959460722);
+    raw_store(dst + 16, 444149952111);
+    return dst + 22;
+}
+// First byte of the next space-separated token at or after `at`; `n` at end of line.
+fn rt_prof_token(buf: u64, n: u64, at: u64) -> u64 {
+    mut i = at;
+    while i < n {
+        c := raw_byte(buf + i);
+        if c == 10 {
+            return n;
+        }
+        if (c == 32) || (c == 9) || (c == 13) {
+            i = i + 1;
+        } else {
+            return i;
+        }
+    }
+    return n;
+}
+fn rt_prof_end(buf: u64, n: u64, at: u64) -> u64 {
+    mut i = at;
+    while i < n {
+        c := raw_byte(buf + i);
+        if (c < 48) || (57 < c) {
+            return i;
+        }
+        i = i + 1;
+    }
+    return i;
+}
+fn rt_prof_num(buf: u64, n: u64, at: u64) -> u64 {
+    mut i = at;
+    mut value = 0;
+    while i < n {
+        c := raw_byte(buf + i);
+        if (c < 48) || (57 < c) {
+            break;
+        }
+        value = value * 10 + (c - 48);
+        i = i + 1;
+    }
+    return value;
+}
+// Arms sampling from .grail-profile/config when that file exists and this is Linux x86-64.
+fn rt_prof_start() -> u64 {
+    if raw_target() != 0 {
+        return 0;
+    }
+    words := rt_prof_words();
+    if raw_load(words) != 0 {
+        return 0;
+    }
+    rt_prof_config_path(words + 32);
+    fd := rt_syscall(2, words + 32, 524288, 0);
+    if rt_error(fd) {
+        return 0;
+    }
+    text := words + 352;
+    n := rt_syscall(0, fd, text, 256);
+    rt_syscall(3, fd, 0, 0);
+    // One shot: the first Grail process that starts here consumes the arming request, so a stale
+    // file from a killed run cannot make later unrelated runs sample themselves.
+    rt_syscall(263, wrapping_sub(0, 100), words + 32, 0);
+    if rt_error(n) {
+        return 0;
+    }
+    // "1 RATE CAPACITY PATH": the format version, the sampling rate in Hz, the sample capacity and
+    // the file the raw addresses go to. The CLI writes it; a hand-written file is accepted too.
+    v := rt_prof_token(text, n, 0);
+    if rt_prof_num(text, n, v) != 1 {
+        return 0;
+    }
+    mut r = rt_prof_end(text, n, v);
+    mut rate = rt_prof_num(text, n, rt_prof_token(text, n, r));
+    r = rt_prof_end(text, n, rt_prof_token(text, n, r));
+    mut cap = rt_prof_num(text, n, rt_prof_token(text, n, r));
+    r = rt_prof_end(text, n, rt_prof_token(text, n, r));
+    path := rt_prof_token(text, n, r);
+    if (rate == 0) || (cap == 0) || (path == n) {
+        return 0;
+    }
+    if 1000000 < rate {
+        rate = 1000000;
+    }
+    if 1048576 < cap {
+        cap = 1048576;
+    }
+    mut used = 0;
+    while path + used < n {
+        c := raw_byte(text + path + used);
+        if c == 10 {
+            break;
+        }
+        if 95 < used {
+            return 0;
+        }
+        raw_putbyte(words + 128 + used, c);
+        used = used + 1;
+    }
+    raw_putbyte(words + 128 + used, 0);
+    page := raw_map(4096 + cap * 8);
+    if rt_error(page) {
+        return 0;
+    }
+    stack := raw_map(65536);
+    if rt_error(stack) {
+        return 0;
+    }
+    code := raw_map(4096);
+    if rt_error(code) {
+        return 0;
+    }
+    // The restorer the kernel returns through: movl $__NR_rt_sigreturn,%eax; syscall; ud2.
+    raw_store(code, 1082287778126892984);
+    raw_putbyte(code + 8, 11);
+    if rt_error(raw_syscall4(10, code, 4096, 5, 0)) {
+        return 0;
+    }
+    raw_store(words + 288, stack);
+    raw_store(words + 296, 0);
+    raw_store(words + 304, 65536);
+    if rt_error(raw_syscall4(131, words + 288, 0, 0, 0)) {
+        return 0;
+    }
+    sa := words + 256;
+    raw_store(sa, rt_prof_handler);
+    // SA_ONSTACK | SA_RESTORER | SA_RESTART | SA_SIGINFO
+    raw_store(sa + 8, 469762052);
+    raw_store(sa + 16, code);
+    raw_store(sa + 24, 0);
+    if rt_error(raw_syscall4(13, 27, sa, 0, 8)) {
+        return 0;
+    }
+    raw_store(page, 1347569201);
+    raw_store(page + 8, page + 4096);
+    raw_store(page + 16, cap);
+    raw_store(page + 24, 0);
+    raw_store(page + 32, 0);
+    raw_store(page + 40, rate);
+    ts := words + 608;
+    if rt_error(rt_syscall(228, 2, ts, 0)) {
+        raw_store(page + 48, 0);
+    } else {
+        raw_store(page + 48, raw_load(ts) * 1000000000 + raw_load(ts + 8));
+    }
+    raw_store(words, page);
+    // ITIMER_PROF counts CPU time, so blocked programs do not accumulate samples. One tick interval
+    // and one first tick: seconds stay zero because the rate is clamped to at most one per
+    // microsecond.
+    mut usec = rt_div(1000000, rate);
+    if usec == 0 {
+        usec = 1;
+    }
+    raw_store(words + 224, 0);
+    raw_store(words + 232, usec);
+    raw_store(words + 240, 0);
+    raw_store(words + 248, usec);
+    raw_syscall(38, 2, words + 224, 0);
+    return 0;
+}
+// Stops the timer and writes the header plus the sampled addresses. Safe to call twice.
+fn rt_prof_dump() -> u64 {
+    if raw_target() != 0 {
+        return 0;
+    }
+    words := rt_prof_words();
+    page := raw_load(words);
+    if page == 0 {
+        return 0;
+    }
+    raw_store(words, 0);
+    raw_store(words + 224, 0);
+    raw_store(words + 232, 0);
+    raw_store(words + 240, 0);
+    raw_store(words + 248, 0);
+    raw_syscall(38, 2, words + 224, 0);
+    cap := raw_load(page + 16);
+    mut count = raw_atomic_load(page + 24);
+    if cap < count {
+        count = cap;
+    }
+    fd := rt_syscall(2, words + 128, 524865, 438);
+    if rt_error(fd) {
+        return 0;
+    }
+    // "GRPROF2\n" then rate, capacity, count, dropped and the CPU nanoseconds the samples cover:
+    // the rate a caller asks for is capped by the kernel's timer granularity, so the report derives
+    // the effective rate from this measurement instead of assuming the request was honoured.
+    h := words + 352;
+    raw_store(h, 734726995712168519);
+    raw_store(h + 8, raw_load(page + 40));
+    raw_store(h + 16, cap);
+    raw_store(h + 24, count);
+    raw_store(h + 32, raw_atomic_load(page + 32));
+    mut cpu = 0;
+    ts := words + 608;
+    if rt_error(rt_syscall(228, 2, ts, 0)) == 0 {
+        cpu = raw_load(ts) * 1000000000 + raw_load(ts + 8) - raw_load(page + 48);
+    }
+    raw_store(h + 40, cpu);
+    if rt_write_all(fd, h, 48) == 0 {
+        rt_write_all(fd, raw_load(page + 8), count * 8);
+    }
+    rt_syscall(3, fd, 0, 0);
     return 0;
 }

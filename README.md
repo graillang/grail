@@ -19,6 +19,8 @@ fn main() {
 - **Tests:** `bun tools/test-native.mjs` and `bun tools/book.mjs check`.
 - **Cross-platform CI / release tooling:** [docs/tooling/cross-platform-ci.md](docs/tooling/cross-platform-ci.md).
 - **LSP / debugger / profiler plan:** [docs/tooling/lsp-debugger-profiler.md](docs/tooling/lsp-debugger-profiler.md).
+- **Sampling profiler (Linux x86-64):** `grail profile --rate N -- PROGRAM`; see
+  [docs/tooling/profiler.md](docs/tooling/profiler.md).
 - **Verified cross-platform status:** [docs/platform-status.md](docs/platform-status.md) distinguishes executed targets from scaffolding and cross-builds.
 - **Graphics RHI from Grail:** [docs/rhi.md](docs/rhi.md) covers the SDL3 window and Vulkan loader bindings in `abundance/src/`, what the FFI cannot express yet, and the next increments; `bun tools/abundance-test.mjs` runs the device probe.
 - **Cross-platform OS ABI (proposal/scaffold):** [docs/design/runtime-abi.md](docs/design/runtime-abi.md)

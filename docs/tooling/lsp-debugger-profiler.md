@@ -1,9 +1,10 @@
 # LSP, debugger and profiler integration plan
 
 Status: **LSP MVP implemented** (JSON-RPC lifecycle, didOpen/didChange and
-compiler-sourced diagnostics) and **DWARF `.debug_line` + `.debug_info`
-implemented for Linux x86-64**. Debugger attach, breakpoints and the profiler
-remain design only.
+compiler-sourced diagnostics), **DWARF `.debug_line` + `.debug_info`
+implemented for Linux x86-64**, and a **sampling profiler implemented for Linux
+x86-64** ([profiler.md](profiler.md)). Debugger attach, breakpoints and the
+instrumentation profiler remain design only.
 The build, test and distribution foundation in
 [cross-platform-ci.md](cross-platform-ci.md) defines the artifact and lane
 contract these tools ship through.
@@ -21,9 +22,10 @@ one language server, in the language it serves.
 
 ## What exists today
 
-- `grail check`, `grail build`, `grail run`, `grail fmt` and `grail test` in
-  `compiler/cli.grl`; diagnostics already use `file:line:column: message` on
-  stdout with a non-zero exit.
+- `grail check`, `grail build`, `grail run`, `grail fmt`, `grail test`,
+  `grail debug lines|info` and `grail profile` in `compiler/cli.grl`;
+  diagnostics already use `file:line:column: message` on stdout with a non-zero
+  exit.
 - A token-level formatter (`compiler/fmt.grl`) that is idempotent and
   byte-preserving for compilation.
 - Direct assembly emission (`native.grl` -> `machine.grl`) with no source map,
@@ -164,43 +166,43 @@ package only on platforms with an implemented backend.
 Remaining blockers: no type DIEs or location lists, no debugger adapter/attach,
 and no Windows/macOS debug sections.
 
-## Phase 3: profiler
+## Phase 3: profiler (sampling mode done for Linux x86-64)
 
-Two complementary modes, both selected at build time:
+The sampling mode changed shape from the original plan. Instead of driving
+`perf record` and converting its output, the sampler lives in the program's own
+runtime: `grail profile` writes a rendezvous file, the runtime arms an
+`ITIMER_PROF`/`SIGPROF` handler that records interrupted instruction pointers
+into a fixed buffer without allocating or locking, and the command symbolises
+those addresses from the program's ELF `.symtab`. There is no external sampler,
+no `perf`, and no frame-pointer change. See [profiler.md](profiler.md) for the
+command, the columns and the limitations (leaf-only attribution, inlining, no
+line granularity, CPU-time sampling).
 
-- **Sampling** (`grail build --profile=sample`): keep frame pointers and emit
-  function symbols; collect with `perf record` (Linux), Instruments (macOS) or
-  ETW/WPA (Windows). Provide `tools/profile.mjs` to invoke the platform sampler
-  and render a flame graph or pprof profile. No compiler changes beyond
-  `-fno-omit-frame-pointer`-style emission and symbol names.
+Still future work:
+
 - **Instrumentation** (`grail build --profile=instrument`): insert per-function
-  entry/exit counters and cycle reads (`rdtsc`, `CNTVCT_EL0`, `rdcycle`) behind
-  a runtime flag, then dump a JSON/pprof profile at exit. This works without an
-  external sampler and is the only option on locked-down hosts.
-
-Plan:
-
-1. Add `--profile=sample|instrument|off` to the compiler option parser
-   (alongside `--overflow`), with artifact suffix `-profile`.
-2. Reuse the runtime allocator/panic counters already maintained by
-   `compiler/runtime.grl`; add call counts and inclusive/exclusive cycles per
-   function.
-3. Emit the Chrome trace JSON and pprof protobuf formats; `tools/profile.mjs`
-   converts sampling output to the same shape.
-4. CI: a small benchmark suite with generous thresholds (no performance gate
-   until variance is measured on the hosted runners); publish profiles as
-   artifacts, never as required checks.
-5. Package `share/grail/profiler/` with the converter script and document the
-   exact commands per OS.
-
-Blockers: no symbol names in binaries, no profiling option, no benchmark
-harness. Windows/macOS samplers are untestable until those backends exist.
+  entry/exit counters and cycle reads (`rdtsc`, `CNTVCT_EL0`, `rdcycle`) behind a
+  runtime flag, then dump a JSON/pprof profile at exit. This is the only option
+  on locked-down hosts and gives call counts and inclusive/exclusive cycles.
+- Inclusive time and call graphs: the sampling handler currently records a leaf
+  only. A frame-pointer or `.eh_frame` unwinder would turn each sample into a
+  stack.
+- Line and column attribution: `--debug` builds already carry `.debug_line`, so
+  the report can be extended to rows of `file:line` the way `grail debug lines`
+  reads them today.
+- Other targets: AArch64 and RISC-V need their own `ucontext_t` offsets and
+  syscall numbers; Windows and macOS need a different sampler.
+- Chrome trace JSON / pprof output, flame graphs, and packaging a converter
+  under `share/grail/profiler/`.
+- CI: a benchmark suite with generous thresholds (no performance gate until
+  variance is measured on hosted runners); publish profiles as artifacts, never
+  as required checks.
 
 ## Delivery order and CI impact
 
 1. Phase 0 JSON diagnostics/symbols (text diagnostics already back L1).
 2. LSP L2: hover, definition, references and document symbols.
-3. Sampling profiler (symbols + frame pointers).
+3. Sampling profiler (done: in-runtime SIGPROF sampler, Linux x86-64).
 4. Debugger D1 attach/breakpoints on the now-emitted Linux x86-64 line table.
 5. LSP L3/L4, DWARF variable info, instrumentation profiler.
 

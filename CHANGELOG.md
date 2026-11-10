@@ -2,6 +2,37 @@
 
 ## Unreleased
 
+- `grail profile [--rate N] [--out FILE] -- PROGRAM [ARGS]` samples a compiled Grail program and
+  prints a per-function table (`samples`, `share`, `function`, `module`) plus `[unknown]` and
+  `total` rows. The sampler is part of the program's runtime, not a wrapper around `perf`: on Linux
+  x86-64 `compiler/runtime.grl` looks for a `.grail-profile/config` rendezvous file at startup,
+  maps a 65536-entry address buffer and a 64 KiB alternate signal stack, installs a `SIGPROF`
+  handler and starts `ITIMER_PROF` at `1/rate` of CPU time. The handler reads the interrupted `RIP`
+  from the kernel `ucontext_t`, claims a slot with a CAS loop and stores one word - it never
+  allocates, never takes the allocator lock and never enters the kernel, so it cannot deadlock
+  against the runtime. Samples are written as `GRPROF2` plus the rate, capacity, count, dropped
+  count, the `CLOCK_PROCESS_CPUTIME_ID` nanoseconds the samples cover and the raw addresses on
+  normal exit, `host::exit` or a runtime abort. The report prints the measured CPU time and the
+  effective rate (`samples / CPU seconds`) and says so when the request was not honoured, because
+  the kernel accounts CPU time per tick and caps the effective rate near one kilohertz regardless of
+  `--rate`. The command then
+  parses the program's ELF `.symtab` (`SHT_SYMTAB` + linked `.strtab`, `STT_FUNC` ranges since the
+  compiler emits no `st_size`) and binary-searches each address. Addresses outside every symbol are
+  reported in an always-present `[unknown]` row rather than dropped, and the report states that a
+  default build is `ET_EXEC` and needs no PIE adjustment (a relocated `ET_DYN` binary is reported as
+  unmatched instead of guessed). No `perf`, `nm`, `addr2line` or debug section is used at any
+  point; `.grail-profile/` is created and removed in the working directory because safe Grail code
+  cannot set a child's environment. `tools/test-profile.mjs` (`just profile-test`, the CI `profiler`
+  job, and a `bun tools/ci.mjs lint` check) profiles a known hot loop at a fixed rate and asserts
+  the hot function is the first row with over half of the attributed samples, that the rows sum to
+  the total, that a stripped copy lands entirely in `[unknown]`, and that `--out` matches stdout.
+  `docs/tooling/profiler.md` documents the command, the columns and the limits: the sampled code
+  cost (about 3.4 KiB of `x86-64` text in every program and one failing `openat` at startup when no
+  profile was requested), leaf-only
+  attribution, optimiser inlining, no line granularity, CPU-time rather than wall-clock sampling,
+  no report when the program is killed, and Linux x86-64 only (other targets compile the hook but
+  never arm it, and `grail profile` refuses to run there).
+
 - Borg session state persists a typed event stream instead of an opaque payload
   (`borg/src/ffi/store.grl`, `borg/src/events.grl`). The frame still opens with the `BGS` magic and
   now carries the version digit `2`, a little-endian payload length and a sequence of tagged events;

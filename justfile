@@ -160,6 +160,11 @@ macos-check:
 debug-lines-test:
     bun tools/test-debug-lines.mjs
 
+# Sampling profiler: profile a known hot loop and check per-function attribution (Linux x86-64).
+profile-test:
+    bun tools/test-profile.mjs
+
+# Run the Grail LSP MVP on stdio (requires GRAIL_LSP_COMPILER or GRAIL_COMPILER).
 # Build the Grail language server and run it on stdio (this is the editor entry point).
 lsp:
     bun tools/lsp.mjs

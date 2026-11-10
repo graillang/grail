@@ -493,6 +493,9 @@ function lint() {
   check('LSP stdio test exists', existsSync(join(root, 'tools/lsp-test.mjs')));
   check('CI runs the LSP stdio test', readFileSync(join(root, '.github/workflows/ci.yml'), 'utf8').includes('tools/lsp-test.mjs'));
   check('DWARF line-table test exists', existsSync(join(root, 'tools/test-debug-lines.mjs')));
+  check('sampling profiler test exists', existsSync(join(root, 'tools/test-profile.mjs')));
+  check('sampling profiler doc exists', existsSync(join(root, 'docs/tooling/profiler.md')));
+  check('CI runs the sampling profiler test', readFileSync(join(root, '.github/workflows/ci.yml'), 'utf8').includes('tools/test-profile.mjs'));
   check('VERSION file matches compiler --version', readFileSync(join(root, 'compiler/cli.grl'), 'utf8').includes(`grail ${version ?? '0.0.0'}`), version ?? '');
 
   // Release pipeline: one tag-triggered workflow that covers every platform,
