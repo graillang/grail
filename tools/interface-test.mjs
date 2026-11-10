@@ -255,6 +255,82 @@ function proveTampering() {
   writeFileSync(join(project, 'grail.pkg'), 'name tamper\n');
   writeFileSync(join(project, 'src/util.grl'), `module util;
 
+handle Stream: transferable;
+
+extern "C" lib "c" fn fopen(path: CStr, mode: CStr) -> Stream;
+
+pub struct Point {
+    x: u64,
+    y: u64
+}
+
+pub fn twice(x: u64) -> u64 {
+    return x * 2;
+}
+`);
+  writeFileSync(join(project, 'src/main.grl'), 'use util;\n\npub fn main() -> u64 {\n    p := util::Point { x: 1, y: 2 };\n    println(util::twice(p.x + p.y));\n    return 0;\n}\n');
+  const files = [join(project, 'src/main.grl'), join(project, 'src/util.grl'), runtime, platform];
+  const ifaces = emit(files, directory);
+  const util = join(ifaces, 'util.iface');
+  const original = readFileSync(util, 'utf8');
+  assert.match(original, /type util::Stream handle params=0 lifetimes=0 transfer=1 share=0/, 'the audited handle contract must travel');
+  const manifestPath = join(ifaces, 'interfaces.manifest');
+
+  // (c1) a changed `transfer` is refused: the manifest pins the bytes the emitting run wrote, so an
+  // edit to an audit result never reaches the checker.
+  writeFileSync(util, original.replace('transfer=1 share=0', 'transfer=0 share=0'));
+  const edited = compile(files, join(directory, 'edited'), ['--interface', ifaces]);
+  assert.equal(edited.status, 1, 'a tampered transfer must be refused');
+  assert.match(edited.output, /module `util`: the interface file does not match the manifest/, `the refusal must name the module and the manifest: ${edited.output}`);
+  assert.match(edited.output, /manifest says \S+, the file is \S+/, 'the refusal must show both digests');
+
+  // (c2) re-digesting the edit does not launder it: the manifest still pins the original bytes.
+  const tampered = original.replace('transfer=1 share=0', 'transfer=0 share=0');
+  const reDigested = `${tampered.slice(0, tampered.indexOf('\ndigest "') + 1)}digest "${sha256(tampered.slice(0, tampered.indexOf('\ndigest "') + 1))}"\n`;
+  writeFileSync(util, reDigested);
+  const laundered = compile(files, join(directory, 'laundered'), ['--interface', ifaces]);
+  assert.equal(laundered.status, 1, 'a re-digested tamper must still be refused');
+  assert.match(laundered.output, /module `util`: the interface file does not match the manifest/, `the refusal must name the manifest: ${laundered.output}`);
+
+  // (c3) with the manifest rewritten too, `--verify` still refuses and names the declaration: the
+  // entry is never silently honoured while the sources are available.
+  writeFileSync(manifestPath, readFileSync(manifestPath, 'utf8').replace(/^util \S+/m, `util ${sha256(reDigested)}`));
+  const verified = compile(files, join(directory, 'verify'), ['--interface', ifaces, '--verify-interface']);
+  assert.equal(verified.status, 1, '`--verify` must refuse a tampered transfer');
+  assert.match(verified.output, /module `util` does not match this interface/, `the refusal must name the module: ${verified.output}`);
+  assert.match(verified.output, /transfer=0/, 'the refusal must show the interface line that differs');
+  assert.match(verified.output, /transfer=1/, 'the refusal must show what the sources give');
+
+  // (c4) the same for a closure type's environment record. No source-level declaration produces a
+  // capturing closure type today (that arrives with generic bodies in interfaces), so the entry is
+  // injected in the format's own spelling - and it must be refused, not honoured.
+  writeFileSync(util, original);
+  writeFileSync(manifestPath, readFileSync(manifestPath, 'utf8').replace(/^util \S+/m, `util ${sha256(original)}`));
+  const withEnv = original.replace('field x u64', 'field x u64\nfield callback (closure 0 [] (u64) u64 (named .closure::env1))').replace(/\ndigest ".*"\n$/, '\n');
+  const injected = `${withEnv}env env1\nfield captured u64\ndigest "${sha256(withEnv)}"\n`;
+  writeFileSync(util, injected);
+  writeFileSync(manifestPath, readFileSync(manifestPath, 'utf8').replace(/^util \S+/m, `util ${sha256(injected)}`));
+  const envRefused = compile(files, join(directory, 'env'), ['--interface', ifaces, '--verify-interface']);
+  assert.equal(envRefused.status, 1, 'a tampered env entry must be refused');
+  assert.match(envRefused.output, /module `util` does not match this interface/, `the env refusal must name the module: ${envRefused.output}`);
+  assert.match(envRefused.output, /env|closure|field/, 'the env refusal must show the injected entry');
+
+  // Restore and prove the interface still builds, so the refusals above are about the edit.
+  writeFileSync(util, original);
+  writeFileSync(manifestPath, readFileSync(manifestPath, 'utf8').replace(/^util \S+/m, `util ${sha256(original)}`));
+  const restored = compile(files, join(directory, 'restored'), ['--interface', ifaces]);
+  assert.equal(restored.status, 0, `an untouched interface must still build\n${restored.output}`);
+  return { edited: edited.output.trim().split('\n')[0], manifest: laundered.output.trim().split('\n')[0], verify: verified.output.trim().split('\n')[0], env: envRefused.output.trim().split('\n')[0] };
+}
+
+// (d) no leakage, on a module whose source has a distinctive helper and distinctive locals.
+function proveLeakage() {
+  const directory = join(work, 'leak');
+  const project = join(directory, 'project');
+  mkdirSync(join(project, 'src'), { recursive: true });
+  writeFileSync(join(project, 'grail.pkg'), 'name leak\n');
+  writeFileSync(join(project, 'src/util.grl'), `module util;
+
 fn zzprivatehelper(value: u64) -> u64 {
     zzprivatecounter := value * 3;
     return zzprivatecounter;
@@ -280,10 +356,6 @@ pub fn twice(x: u64) -> u64 {
   const files = [join(project, 'src/main.grl'), join(project, 'src/util.grl'), runtime, platform];
   const ifaces = emit(files, directory);
   proveNoLeakage(ifaces, 'util');
-  const text = readFileSync(join(ifaces, 'util.iface'), 'utf8');
-  for (const marker of ['.impl_', '.inherent_', '.closure', '.union', '.result', '__start', 'return', 'fn sum<a>']) {
-    assert.ok(!text.includes(marker), `util.iface leaks ${marker}`);
-  }
   return interfaceFiles(ifaces).length;
 }
 
