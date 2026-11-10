@@ -533,3 +533,10 @@ Recorded here rather than discovered later:
   `interfaces.manifest`, so a cache that has to resist a hostile writer needs signed or keyed
   manifests. The store added above states the same boundary for itself.
 
+
+## Not expressible yet
+
+Some corpus programs use a type the interface format cannot describe (`grail: <interface>: this
+interface format cannot express a type of that kind`). Those are reported by `interface-test` as a
+named list rather than failing the run, so the gap stays visible: an interface build of such a program
+is refused, never silently approximated.
