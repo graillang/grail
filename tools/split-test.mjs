@@ -16,7 +16,7 @@
 // Usage: bun tools/split-test.mjs [--target T] [--timing]
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { basename, dirname, join, resolve } from 'node:path';
+import { dirname, join } from 'node:path';
 import assert from 'node:assert/strict';
 import { buildCompiler, command, compilerSources, emulations, hostTarget, linkInputs, root, targetName, triples } from './native.mjs';
 
