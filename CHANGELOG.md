@@ -2,6 +2,37 @@
 
 ## Unreleased
 
+- RHI increment 4a, the shader side: HLSL compiles offline to SPIR-V, the bytes are committed, and
+  the one create info that carries them is expressible today. `abundance/tests/shaders/
+  rhi_triangle.hlsl` is the source of truth (one vertex and one pixel stage);
+  `bun abundance/tools/build-shaders.mjs` compiles it with `glslangValidator -D -V --target-env
+  vulkan1.2 -S vert -e vs_main` (and `-S frag -e ps_main`), runs `spirv-val` on each module, extracts
+  the `VertexIn` layout, cross-checks that extraction against the compiled stage's own `OpName` /
+  `OpDecorate Location` / `OpTypeVector` decorations, and writes the `.spv` files, a manifest
+  (`abundance/tests/shaders/shaders.json`: compiler version, exact flags, entry points, sizes,
+  fnv1a64 hashes, layout, cross-check status) and `abundance/src/rhi_shader_blob.grl` (the bytes as
+  constants plus the layout). All four artifacts are committed, so a clean checkout builds, tests and
+  renders with no shader compiler installed; the generator is a maintenance tool, not a build step.
+  `abundance/src/rhi_shader.grl` (new) holds the loader shape - `VkShaderModuleCreateInfo` as an
+  `extern "C" record` (40 bytes; sType 0, pNext 8, flags 16, codeSize 24, pCode 32) whose `pCode` is
+  the one pointer inside a Vulkan create info the FFI can already fill, `unsafe cptr(&bytes)` - plus
+  a small SPIR-V decode (magic, version, generator, bound, schema, first `OpEntryPoint`) that checks
+  a module the way a loader can without a driver. `abundance/tests/rhi_shader_probe.grl` (new) is
+  the fourth probe and the only graphics check that links nothing at all: it runs under `env -i`,
+  with no display, no ICD and no shader compiler, reconstructs the bytes from the generated
+  constants, hashes them with Abundance's own `fnv1a64` and matches the recorded hash, decodes the
+  header and entry points, builds the create info and checks `codeSize`, and validates the layout
+  (declaration-order locations, contiguous offsets, stride equal to the sum). The suite runs it in
+  the default set and also ties its printed hash to the manifest; the generator's own `--check` is
+  two-tiered - everything that needs no toolchain always runs, and the recompile demands identical
+  bytes only when this machine's glslang matches the version the manifest records, otherwise it
+  prints `shader hash differs (glslang 11:16.6.0 recorded, <detected> present): not compared` and
+  passes. Verified with `DISPLAY`/`WAYLAND_DISPLAY` unset, `VK_ICD_FILENAMES=/nonexistent` and
+  `glslangValidator`/`spirv-val`/`spirv-dis` off `PATH`: `rhi_shader: ok`, the other three probes
+  skip, `10 test program(s) passed, 4 RHI probe(s) run`. Handle accounting in the swapchain probe is
+  now per class (`rhi.handles.window`, `.instance`, `.surface`, then `.total`), and a disagreement in
+  any class or in the total fails the run, so increment 4b's device, swapchain, images, views,
+  semaphores and fences arrive as classes rather than as one count they could hide in.
 - RHI increment 3: `abundance/src/rhi_surface.grl` (new) creates a real `VkSurfaceKHR` from the
   SDL3 window and reads back what that surface accepts. The instance is now created with the
   platform's own extension set: `abundance_rhi_vulkan::instance_create_info_with(extensions, count)`
