@@ -74,6 +74,30 @@ tates a captured value now works, with the rules B6 fixed in advance.
   `closure-shared-capture-still-fn`, `closure-shared-borrow-of-fn-closure`) plus the two former
   read-only rejections now accepted as `closure-capture-mutation-fnmut` and
   `closure-capture-borrow-mut-fnmut`, the book example `fnmut`, and the B6 decision record.
+- LLVM backend: typed-IR fact **F2**, "this word holds an `f32`". The front end now records, beside
+  the word stream rather than in it, that a local's frame slot holds an `f32` and that a given
+  `rt_f64_op` call computes on two `f32` operands with a given opcode; `compiler/llvm.grl` lowers an
+  accepted slot to `alloca float` with `load float`/`store float` and one `fpext` to the binary64
+  word the rest of the program expects, and an accepted call to `fadd`/`fsub`/`fmul`/`fdiv float`
+  plus the single `fpext` that produces the result word. `matmul`'s inner loop becomes
+  `movss`/`mulss`/`addss` with no `cvtss2sd`/`cvtsd2ss`, so the `f32` kernel stops being penalised
+  for being unrolled; output is bit-identical (the standard `p2 >= 2*p1 + 2` argument, pinned by new
+  cases that print each `f32` result as `f64`, i.e. its shortest round-trip decimal). The fact table
+  never enters the stream: `optimize.grl`, `machine.grl` and the native backend are untouched, the
+  native assembly is byte-identical, and a slot whose address is taken or that the body touches in
+  any way other than one eight-byte word is dropped and keeps the word lowering. `--verify-facts`
+  (off by default) emits `fpext(fptrunc(d)) == d` at every word a fact treats as an `f32` and writes
+  the table into the module as `; fact` comments; `tools/test-facts.mjs` runs it.
+  Measured on x86-64 with `tools/bench.mjs --rounds 9` (paired medians): `fnv`/`sieve`/`sort`/`nbody`
+  unchanged, and `nbody` correctly gets no fact at all (its 38 float operations are `f64`). `matmul`
+  does **not** get faster at default `-O2` on the measuring host: 0.220 s -> 0.214 s in the 9-round
+  paired run, and 1.000 / 1.014 (after/before) over two 41-round paired A/B runs, i.e. within noise
+  -- this LLVM already unrolls the kernel, and the second element of the unrolled pair hides the
+  widened dependency chain. What F2 is worth is the design's own experiment: with every check branch
+  deleted from the `.ll` (measurement only), `matmul` is 0.360 s / **1.95x** C before and 0.191 s /
+  **1.05x** C after, so F2 is what turns "remove the bounds checks" from a 1.9x regression into C
+  parity, which is F1's lever. Design and the full measured table: `docs/design/typed-ir.md`,
+  *Implemented: F2*.
 - FFI out-parameters: a C function can write a handle or bare pointer through a slot the caller owns,
   spelled as a mutable borrow in the declaration (`slot: &mut Instance`) and `&mut binding` at the
   call site. That is the Vulkan/D3D12/Metal create shape (`vkCreateInstance(..., VkInstance

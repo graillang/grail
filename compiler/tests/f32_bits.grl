@@ -1,0 +1,40 @@
+// Every f32 value is the binary64 word with the same value, and printing it as f64 gives the
+// shortest decimal that reads back to that word -- so a one-ulp difference anywhere in the
+// arithmetic changes the last digit. Each line is one fact the LLVM lifter consumes
+// (docs/design/typed-ir.md, F2): one operation, one chain that feeds each result into the next,
+// and the narrow load/store paths. Expected values are the correctly rounded binary32 results.
+fn show(x: f32) {
+    println(f64(x));
+}
+fn main() {
+    // + - * / , each rounded once to binary32.
+    show(f32(1.0) / f32(3.0));
+    show(f32(0.1) + f32(0.2));
+    show(f32(1.0) - f32(0.1));
+    show(f32(0.1) * f32(0.1));
+    show(f32(1.0) / f32(7.0));
+    // The accumulator chain of a dot product: each step depends on the previous rounding.
+    mut s: f32 = 0.0;
+    for i in 10 {
+        s = s + f32(i) * f32(0.1);
+    }
+    show(s);
+    // A sum that rounds to even at the binary32 precision boundary.
+    mut big: f32 = f32(16777216.0);
+    big = big + f32(1.0);
+    show(big);
+    // A narrow element store and load through an f32[] (four-byte elements).
+    mut v = f32[];
+    for i in 5 {
+        v.push(f32(i) * f32(1.5));
+    }
+    mut acc: f32 = 0.0;
+    for i in v.len() {
+        acc = acc + v[i];
+    }
+    show(acc);
+    // Literal, negation and the i64 -> f32 -> f64 conversions.
+    show(-f32(2.5));
+    show(f32(9007199254740993));
+    show(f32(0.0) - f32(0.0));
+}

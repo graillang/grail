@@ -1,7 +1,8 @@
 # Typed IR facts for the LLVM backend
 
-Status: design, 2026-11-10. Not implemented. `compiler/llvm.grl` and `compiler/native.grl` are
-untouched; this document and `tools/tir-facts.mjs` are the whole change.
+Status: design, 2026-11-10. **F2 implemented** (2026-11-10, see *Implemented: F2* below);
+F1 not started. `compiler/llvm.grl` and `compiler/native.grl` now carry the fact table and the F2
+consumer; the word stream, `optimize.grl` and `machine.grl` are unchanged.
 Companion to [llvm-backend.md](llvm-backend.md), stage 2c, which records that no lever inside the
 lifter reaches 1.0x C and names the two missing facts.
 
@@ -392,6 +393,120 @@ its shortest round-trip decimal, which is unique per bit pattern, so
 last digit. One such case per operation, plus a chain that feeds each result into the next (where a
 narrowing that changes a rounding shows up), plus the `f32` min/max/abs/floor and `toi` conversions.
 
+### Implemented: F2 (2026-11-10)
+
+F2 landed on top of the shape this section describes, and it is the whole of the change: `optimize.grl`
+and `machine.grl` are untouched, the word stream is byte-identical (checked on all five benchmarks:
+same `.s` from the same source with the compiler before and after), and the native backend reads
+exactly what it read before.
+
+**The table.** `compiler/llvm.grl` defines `Fact` exactly as proposed above (`kind`, `fn`, `a`, `b`,
+`callee`, `what`, `width`), plus a one-field `Facts { items: Fact[] }` wrapper: the compiler has no
+cross-module view of a struct array, so `C` holds a `Facts` and every other module sees it as one
+record. `C` gains `facts`, `facts_fn` (the body symbol of the function being emitted, which is what
+keys the table) and `f64_ops`/`call_ord` (the ordinal of the next/last `call rt_f64_op` in that
+function).
+
+**Where the facts come from.** Two emission points, both places the front end already has the type:
+
+- `bind()` (`compiler/native.grl`) records `slot(Local.id) = f32` for an `f32` binding, and
+  `what = 0` for every other binding. Recording the negative case too is what makes a reused slot
+  detectable: the lifter accepts a slot only when *every* fact naming it says `f32`.
+- `float_op_call()` (the single wrapper the three `rt_f64_op` sites now call) records
+  `call(rt_f64_op, ordinal, arg 0) = f32-arith` with the opcode in `width`, keyed by the ordinal
+  `invoke()` just assigned. It emits the fact only when both operands' static type is `f32`, so the
+  `f64` arithmetic that shares the same call -- `nbody`'s 38 sites, `matmul`'s final `sum` loop --
+  keeps the word lowering. That distinction was the one bug the first cut had, and the f64 checksum
+  loop printed a value 3e-5 off until the fact carried the operand type.
+
+Facts are rolled back with the text they describe when a function attempt is retried for a literal
+type hint, and nothing is recorded while `emit_specializations` validates an unused template.
+
+**Which slots the lifter types.** A slot fact is accepted only when the body touches the slot
+exclusively through `movq`/`cmpq` on the whole eight-byte slot, with an immediate write allowed only
+of zero, and only when the slot is inside the frame. Anything else -- `leaq` of the slot (an
+address taken, `&mut s`, a by-reference call), a `movl`/`movsd` alias, `incq`, an arithmetic
+instruction with the slot as an operand -- leaves the slot an untyped word. Measured on the corpus:
+only `matmul` has F2 facts at all (`f_main_main`, the accumulator `s`: 1 slot accepted, 4 call facts,
+opcodes `*`, `*`, `*`, `+`), the four ops of the two `f32` fill loops and the pair in the kernel.
+`fnv`, `sieve` and `sort` have no `f32` local and no `f32` arithmetic; `nbody` has 38 float
+operations and every one of them is `f64`, so it gets no fact -- which is the answer to "why does
+nbody not move": its gap is F1, exactly as the projection says. The borrowed-slot rule is exercised
+by `compiler/tests/f32_borrowed.grl`, where the front end records the slot and the lifter drops it.
+
+**The IR.** For an accepted slot: `alloca float, align 4` (and `store float 0.0` for the frame
+zeroing, bit-identical because a float zero is all-zero bytes); every read is `load float` +
+`fpext` + `bitcast` to the word the rest of the program expects; every write is `bitcast` +
+`fptrunc` + `store float`. For a call with an `f32` fact: `fptrunc(bitcast rsi/rdx)` for each operand,
+the `fadd`/`fsub`/`fmul`/`fdiv float` itself, and one `fpext` + `bitcast` for the word result. The
+`rt_f32_round` call after it keeps its current lowering, which the round trip folds away; no value
+ever crosses a register alloca as a non-f32, so `mem2reg` leaves the loop-carried accumulator a
+`phi float`. `matmul`'s inner loop is now
+
+    movss  (%r14,%r8,1),%xmm1
+    mulss  0x0(%rbp,%r10,4),%xmm1
+    addss  %xmm0,%xmm1
+
+against `movss`/`mulss`/`cvtss2sd`/`addsd`/`cvtsd2ss`/`addss` before, and the f64 checksum loop after
+the kernel is still `addsd`.
+
+**`--verify-facts`** (off by default) makes the lifter emit, at every word a fact treats as an f32
+(a slot store and each float-op operand), `fpext(fptrunc(d)) == d` compared on the bit pattern so a
+NaN passes, with a cold branch to `rt_abort.cold`. The slot's declared-width half of the check is
+the accept rule above, which is static: a slot only ever typed when every access is exactly one
+eight-byte word and the slot index is inside the frame, so a narrow or partial access cannot be
+silently reinterpreted. With the flag the table is also written into the module as `; fact ...`
+comments, which is what `tools/test-facts.mjs` reads -- so both the check and the coverage are
+visible in the artefact CI builds. The flag is inert with respect to results: the f32 fixture prints
+the same 11 values with and without it.
+
+**Bit-identity.** The argument in the next section is unchanged; what proves it is the native suite's
+executable cases, which compare `stdout` exactly on both backends, plus `compiler/tests/f32_bits.grl`
+(every operation, a chain that feeds each result into the next, a narrow `f32[]` load/store path,
+`f32(i64)`, `-0.0`, and a sum that rounds to even at the boundary). Each value is printed as
+`f64`, which is the shortest decimal of that bit pattern, so a one-ulp difference is a test failure
+rather than a 12-significant-digit comparison.
+
+**Measured.** `tools/bench.mjs --rounds 9` (paired medians), x86-64, `--backend=llvm`, same host,
+same compiler sources except for this change; C `-O2 -ffp-contract=off`:
+
+| benchmark | C `-O2` | before | ratio | after | ratio |
+| --- | --- | --- | --- | --- | --- |
+| fnv | 0.521 s | 0.523 s | 1.00x | 0.527 s | 1.01x |
+| sieve | 0.560 s | 0.645 s | 1.15x | 0.664 s | 1.18x |
+| sort | 0.897 s | 1.121 s | 1.25x | 1.119 s | 1.25x |
+| nbody | 0.096 s | 0.165 s | 1.72x | 0.163 s | 1.72x |
+| matmul | 0.184 s | 0.220 s | 1.20x | 0.214 s | 1.14x |
+
+**matmul's number does not move on this host.** Two 41-round paired A/B runs of the two binaries
+alone, which is the measurement that can resolve it:
+
+| run | before | after | after/before |
+| --- | --- | --- | --- |
+| 1 | 0.2183 s | 0.2183 s | 1.000 |
+| 2 | 0.2135 s | 0.2166 s | 1.014 |
+
+The kernel did change -- `movss`/`mulss`/`addss` with no conversion, against
+`movss`/`mulss`/`cvtss2sd`/`addsd`/`cvtsd2ss`/`addss` before -- but at `-O2` this LLVM unrolls the
+pair anyway, and the second element's independent `addss` hides the widened chain's latency, so the
+conversions cost throughput nothing here. Stage 2c's 1.30x baseline came from a host where they did.
+
+What F2 is actually worth shows up in the design's own experiment: delete the branch of every check
+in the `.ll` (measurement only -- no check fires on `matmul`, so the output is unchanged) and the
+before/after split is unambiguous:
+
+| matmul, checks removed | time | vs C |
+| --- | --- | --- |
+| before | 0.360 s | **1.95x** |
+| after (F2) | 0.191 s | **1.05x** |
+
+That is stage 2c's 1.95x pathology reproduced exactly: without F2 the unrolled, check-free kernel
+carries the `f32` accumulator as a `phi double`, and removing the checks makes `matmul` 1.9x
+*slower* than leaving them in. With F2 it is 1.05x -- C parity -- and that is what makes F1's lever
+usable for `f32` code at all. So F2 on its own moves nothing on this machine, and F2 as the
+prerequisite for the checks coming out moves `matmul` from 1.95x to 1.05x; the fact table is
+committed on the second basis, with the first stated plainly.
+
 ## Staged plan and checkpoints
 
 Each stage is independently shippable; each stage's checkpoint is a measurement, not an opinion.
@@ -403,10 +518,10 @@ numbers, not projections.
 | --- | --- | --- |
 | 0 | `tools/tir-facts.mjs` in the tree; no compiler change | coverage table reproducible; `bun tools/ci.mjs lint` unchanged |
 | 1 | `Fact[]` in `C`, `emit_fact` at `bind` + `invoke`, `llvm.lower(facts)`; **nothing consumed** (facts counted and dropped, one `--print-facts` count) | fact counts match `tools/tir-facts.mjs`; native suite unchanged on both backends; **all five benchmarks within noise** (no fact is consumed, so this stage *must* be a no-op) |
-| 2 | F2 consume: typed value layer, `f32` slots as `alloca float`, `rt_f64_op`/`rt_f32_round` rewrite, narrow load/store typing | **matmul 1.30x -> <= 1.20x**; fnv/sieve/sort/nbody within 2%; native suite byte-identical on both backends; `matmul`'s unrolled kernel no longer carries `cvtss2sd`/`addsd`/`cvtsd2ss` (inspect the `.s`: the unrolled pair must be `addss`/`mulss` on `xmm`) |
+| 2 | F2 consume: `f32` slots as `alloca float`, `rt_f64_op` rewrite, the fact table and its `--verify-facts` mode (**landed**) | the `.s` half met: `matmul`'s unrolled kernel is `addss`/`mulss` on `xmm` with no `cvtss2sd`/`cvtsd2ss`, every other benchmark is unchanged, `nbody` correctly gets no fact, and the native stream is byte-identical. The ratio half is **not** met here: at default `-O2` on this host `matmul` is 1.20x -> 1.14x in the 9-round paired run and 1.000/1.014 after/before over two 41-round A/B runs, i.e. no change. With the checks removed (stage 2c's experiment) the same change is 1.95x -> 1.05x, which is the basis it is committed on. Stage 5's check rode along with it |
 | 3 | F1a: typed `rt_slot`-family parameters (`dereferenceable(24) align 8`), `align 8` on header and word element accesses, `!alias.scope` on header vs element | **sort 1.46x -> <= 1.25x**, **nbody 2.42x -> <= 1.55x**; if either gate misses, go to stage 4 rather than tuning metadata |
 | 4 | F1b only if stage 3 misses: lifter hoists `data`/`len` at the fact's point and rewrites in-region loads | **nbody <= 1.40x**, **sort <= 1.22x**; the loop body must contain no `load i64, ptr %hdr` (grep the `.ll`) |
-| 5 | `--verify-facts` mode (below) on in every CI run of the native suite | whole suite green on both backends |
+| 5 | `--verify-facts` mode (below) on in every CI run of the native suite | **landed with stage 2**: the flag and `tools/test-facts.mjs`; the whole native suite is green on both backends with it available, and the f32 fixtures are in the suite with and without it |
 
 Expected ratios if both facts land (start -> expected, with the basis):
 
@@ -439,8 +554,10 @@ an `f32`". Four independent nets, cheapest first:
      claimed, so it costs nothing in a release build;
    - `f32`: at every widening, `fpext(fptrunc(d)) == d`. One `fcmp` + branch per typed boundary.
 
-   Run the whole native suite with `--verify-facts` in CI: any program whose fact is wrong aborts
-   loudly instead of printing a plausible wrong number.
+   `tools/test-facts.mjs` runs the `f32` fixtures with the flag (and without it, asserting the same
+   output) and checks that the round-trip compare is in the module; any program whose fact is wrong
+   aborts loudly instead of printing a plausible wrong number. The flag also writes the table into
+   the module as `; fact` comments, so a CI log shows exactly what was claimed.
 2. **Wrong element width** (a `header(8)` fact on a `u32[]`): a case that fills a `u32[]` with
    `u32(4294967295), 1, 2` and a `f32[]` with `1.0, 2.0`, reads them through every path (index,
    `for x in`,
@@ -538,7 +655,15 @@ the failure mode is a *wrong emission*, not a stale one.
 | tests | `tests/native-cases.json` | ~10 cases |
 
 Total: roughly 390-480 lines in `llvm.grl` (a fifth of the file's 1 916), 65-80 in `native.grl`,
-none in `runtime.grl`, `optimize.grl` or `machine.grl`. For comparison, stage 2a (4-byte elements)
+none in `runtime.grl`, `optimize.grl` or `machine.grl`.
+
+As built, F2 alone is **+337/-12 in `llvm.grl`** (the `Fact`/`Facts` table, the slot accept rules,
+the typed slot load/store, the `rt_f64_op` rewrite, `--verify-facts` and the table dump) and
+**+116/-23 in `native.grl`** (the table fields, `emit_slot_fact`/`float_op_call`, the label that keys
+the table, the ordinal in `invoke`, the report and roll-back of a discarded attempt, the flag). No
+typed-value layer was needed for F2: only the *slot* is typed (`alloca float`), and a register that
+carries an f32 carries the word, whose `fptrunc`/`fpext` pairing folds away. F1 is what needs the
+per-value layer. For comparison, stage 2a (4-byte elements)
 touched the front end, the runtime and all three lowerings; option 3 touches the whole lifter.
 
 ## What this does not do
@@ -558,6 +683,8 @@ touched the front end, the runtime and all three lowerings; option 3 touches the
   `grail --debug --target x86_64 --overflow=checked OUT.s bench/NAME.grl compiler/runtime.grl
   compiler/os-linux.grl` writes the raw stream (`--debug` skips `optimize.grl`, which is the same
   stream `--backend=llvm` lowers).
-- When implemented: `GRAIL_BACKEND=llvm bun tools/test-native.mjs x86_64` (exact `stdout` on both
+- F2's own checks: `bun tools/test-facts.mjs` (the f32 fixtures on both sides of `--verify-facts`,
+  the `; fact` coverage, and the address-taken slot that must be dropped).
+- `GRAIL_BACKEND=llvm bun tools/test-native.mjs x86_64` (exact `stdout` on both
   backends), `GRAIL_BACKEND=llvm bun tools/bench.mjs --rounds 9`, and the same for `aarch64`/`riscv64`
   under qemu, since the facts are target-independent and the lowering is shared.

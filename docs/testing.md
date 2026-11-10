@@ -13,12 +13,17 @@ export GRAIL_COMPILER=$C GRAIL_FFI_COMPILER=$C
 
 for t in 'test-native.mjs x86_64' test-cli.mjs 'book.mjs check' test-selfhost.mjs \
          abundance-test.mjs borg-test.mjs test-ffi.mjs 'ci.mjs lint' test-debug-lines.mjs \
-         'windows.mjs check' lsp-test.mjs test-profile.mjs test-authority.mjs \
+         'windows.mjs check' lsp-test.mjs test-profile.mjs test-authority.mjs test-facts.mjs \
          'test-native.mjs aarch64' 'test-native.mjs riscv64'; do
   echo "== $t"; bun tools/$t 2>&1 | tail -2
 done
 for t in x86_64 aarch64 riscv64; do GRAIL_BACKEND=llvm bun tools/test-native.mjs $t; done
 ```
+
+The typed-IR `f32` facts can be checked on top of that: `GRAIL_BACKEND=llvm GRAIL_VERIFY_FACTS=1
+bun tools/test-native.mjs x86_64` makes the lifter assert `fpext(fptrunc(d)) == d` at every word a
+fact treats as an `f32`, so a wrongly typed slot or call aborts instead of printing a plausible
+wrong number. It is off by default because the check costs a compare per fact use.
 
 `ci.mjs lint` is the cheapest check and catches most documentation and workflow drift.
 
@@ -53,6 +58,9 @@ gate is 2–3 hours; run it in a watched job that logs to a file rather than hol
   equivalent Rust program.
 - `abundance-test.mjs`, `borg-test.mjs` — the ports, compared bit-for-bit against their C++ and
   reference outputs.
+- `test-facts.mjs` — the typed-IR `f32` facts (docs/design/typed-ir.md, F2): the fixtures' exact
+  values with and without `--verify-facts`, the round-trip check in the module, and the
+  address-taken slot the lifter must drop.
 - `test-ffi.mjs` — C interop fixtures, reporting how many are executed versus cross-compiled only.
 - `windows.mjs check` — PE/COFF cross-builds plus the executed subset under Wine.
 - `lsp-test.mjs`, `test-profile.mjs`, `test-authority.mjs` — the language server, the sampling

@@ -2973,7 +2973,7 @@
     "source": "fn main(){ a: i32 := -2147483647; b := a - 1; c: i32 := -1; println(b / c); }\n",
     "signal": "SIGABRT"
   },
-{
+  {
     "name": "raw-module-sized-integer-arithmetic",
     "source": "// A sized integer keeps its stated signedness inside an `unsafe module`, whose other values are\n// untyped words: 0 - 1 is -1, the comparison against 0 is signed, i8 120 + 7 stops at 127.\n// The `extern \"C\"` declaration carries a `cfn` parameter, the shape the report named.\nunsafe module runtime;\nextern \"C\" lib \"c\" fn qsort(base: u64, n: u64, size: u64, cmp: cfn(u64, u64) -> i32) -> unit;\nfn main() {\n    mut x: i32 = 0;\n    x = x - 1;\n    println(x);\n    println(x < 0);\n    mut small: i8 = 120;\n    small = small + 7;\n    println(small);\n    mut wide: i64 = 0;\n    wide = wide - 1;\n    println(wide < 0);\n}\n",
     "stdout": "-1\ntrue\n127\ntrue\n",
@@ -5216,5 +5216,21 @@
     "note": "Only the capture the body writes is mutable: an untouched capture stays readable, and the closure is FnMut because of the written one.",
     "source": "fn main() {\n    mut hits = 0;\n    label := 7;\n    mut f = || -> u64 { hits += 1; return hits + label; };\n    println(\"{} {}\", f(), f());\n}\n",
     "stdout": "8 9\n"
+  },
+  {
+    "name": "f32-arithmetic-bits",
+    "note": "Every f32 arithmetic result printed as f64 is its shortest round-trip decimal, so a one-ulp difference anywhere (a widening that is not exact, an operation rounded twice) changes the last digit. The LLVM backend lowers these to fadd/fmul/fdiv float (docs/design/typed-ir.md, F2); the native backend computes in binary64 and rounds once.",
+    "files": [
+      "compiler/tests/f32_bits.grl"
+    ],
+    "stdout": "0.3333333432674408\n0.30000001192092896\n0.8999999761581421\n0.010000000707805157\n0.1428571492433548\n4.5\n16777216\n15\n-2.5\n9007199254740992\n0\n"
+  },
+  {
+    "name": "f32-borrowed-local",
+    "note": "An f32 local whose address is taken cannot keep its typed-IR fact: the slot is written through a pointer the lifter cannot type, so the fact is dropped and the word lowering stays.",
+    "files": [
+      "compiler/tests/f32_borrowed.grl"
+    ],
+    "stdout": "3.75\n"
   }
 ]
