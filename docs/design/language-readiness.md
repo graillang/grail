@@ -10,7 +10,7 @@ the design notes named below; `implementation-status.md` is current except where
 | --- | --- | --- | --- |
 | A1 | FFI floats | **Done** for direct and `cfn` calls and for callbacks (parameters and results) on SysV, Win64, AAPCS64, RV64 LP64D | `tests/ffi/call_abi.grl`, `callback_floats.grl` on 3 Linux targets + Windows x64 (Wine) |
 | A2 | FFI narrow integers | **Done** for calls and callbacks (callee-side extension), and narrow C-record field stores write only their width | same; native case `ffi-c-record-narrow-assign` |
-| A3 | C records by value | **Done except by-value arguments**: results in registers or a hidden pointer on every ABI, including float-field results (SysV eightbyte classes, AAPCS64 HFAs, RV64 flattening); `f32`/`f64` fields; nested records embedded by value. Remaining: records passed *by value* as arguments (spelling `byval` decided, B7; implementation after B1) | `call_records.grl`, `float_records.grl`, `float_record_results.grl`, `nested_records.grl` |
+| A3 | C records by value | **Done** for results and, with B7's `byval`, for arguments: results in registers or a hidden pointer on every ABI, including float-field results (SysV eightbyte classes, AAPCS64 HFAs, RV64 flattening); `f32`/`f64` fields; nested records embedded by value. `v: byval R` passes the whole record, executed on x86-64, AArch64 and RISC-V 64; the Windows ABIs and C callbacks refuse it | `call_records.grl`, `float_records.grl`, `float_record_results.grl`, `nested_records.grl`, `byval_records.grl` |
 | A4 | Stack arguments / variadic | **Done**: any number of arguments; variadic C calls on SysV, Win64, AAPCS64 (Linux and Apple's stack convention), RV64 | `call_variadic.grl` on 3 Linux targets + Windows x64; `test-macos` (static) |
 | A5 | Windows FFI / COM | **Done**: `extern "C"` calls and callbacks (Win64 thunk); COM methods of any arity and with floats through a typed `cfn` vtable slot | Windows suite: 33 checks, 19 under Wine; `call_com_slot.grl` |
 | A6 | Dynamic loading | **Done**: Windows x64 (Wine), Linux x86-64/AArch64/RISC-V (host-TLS bridge; executed under qemu with glibc sysroots), macOS linked for both targets | `dlopen.grl`, `ffi-dynamic-loading`, `test-macos` |
@@ -41,7 +41,7 @@ is not asked again:
 | B4 | Windows I/O readiness model | **Decided: thread-per-blocking-call, IOCP deferred** | Synchronous `ReadFile`/`WriteFile` on Windows; IOCP is a named future work item with a sketch, and green tasks on Windows abort at scheduler start today. See [B4](decisions-b2-b6.md#b4-windows-thread-per-blocking-call-iocp-deferred). |
 | B5 | Abort / unwind policy | **Decided: abort never unwinds** | `rt_abort` raises `SIGABRT` (Windows: `ExitProcess(134)`) and runs no cleanup at all - no `defer`, no drops, no message; nothing may unwind across the C boundary, which the compiler does not enforce. See [B5](decisions-b2-b6.md#b5-abort-never-unwinds). |
 | B6 | Closure capture model | **Decided: references and views are captured, `FnMut` deferred** | Closures capture direct references/views and cannot outlive the borrow (rejected: `returned borrow escapes its declared input lifetime`); mutating a capture is rejected today, and the six rules for `FnMut` are fixed in advance. See [B6](decisions-b2-b6.md#b6-references-captured-fnmut-deferred). |
-| B7 | Records passed by value to C | **Accepted, spelling `byval`**, implementation after B1 | `v: byval R` passes the whole record; bare `R` stays the C `R *`, and the per-ABI result classifier is reused for arguments. See [B7](decisions-b2-b6.md#b7-byval-record-parameters-accepted). |
+| B7 | Records passed by value to C | **Implemented** as decided, spelling `byval` | `v: byval R` passes the whole record per the target ABI; bare `R` stays the C `R *`. Executed on x86-64 (SysV), AArch64 and RISC-V 64 by `tests/ffi/byval_records.grl`; refused on the Windows targets and in `extern "C" fn` definitions. See [B7](decisions-b2-b6.md#b7-byval-record-parameters-accepted). |
 
 ## C. Libraries (not language core; needed by the ports, scheduled with them)
 
@@ -103,6 +103,6 @@ microseconds for ordinary magnitudes, more for very large or small exponents).
 
 A1-A5 (one compiler batch), A6, A7-A9, A10, A11-A12, A13; one bootstrap refresh per compiler
 batch. The B-items are decided (section B above and
-[decisions-b2-b6.md](decisions-b2-b6.md)): B1 and B7 are being implemented, B2-B6 are settled and
+[decisions-b2-b6.md](decisions-b2-b6.md)): B7 is implemented, B1 is being implemented, B2-B6 are settled and
 binding, and each names the condition that would reopen it. Graphics work (D3D12 pipelines,
 presentation, Metal) waits for the checkpoint after section A.

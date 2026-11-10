@@ -46,6 +46,7 @@ extern "C" fn c_identity(v: u64) -> u64;
 | `handle H` | an opaque C token (`uint64_t` by convention) | one 64-bit word |
 | `cfn(P...) -> R` | `R (*)(P...)` | one 64-bit code address |
 | `extern "C" record R` (parameter) | `R *`, the address of the struct's fields | one 64-bit pointer |
+| `byval R` (parameter) | `R`, the whole struct passed by value | registers and/or stack slots, per the target's by-value rules |
 | `extern "C" record R` (result) | `R`, returned by value per the target ABI | registers or a hidden result pointer |
 | `unit` (result only) | `void` | result register ignored |
 
@@ -171,6 +172,46 @@ extern "C" fn c_mixed_fill(m: Mixed, d: i64) -> i64;
 Verified by `tests/ffi/extern_records.grl`: the C shim reads fields Grail wrote, writes
 fields Grail reads back, and checks its own `offsetof`/`sizeof` values.
 
+### Records passed by value: `byval`
+
+An `extern "C" record` parameter is the C `R *`. Passing the whole record the way C does gets one
+explicit spelling: **`v: byval R`**, a parameter marked `byval`.
+
+```grl
+extern "C" record ImVec2 { x: f32, y: f32 }
+extern "C" lib "shim.o" fn c_imvec_len(v: byval ImVec2) -> f64;
+```
+
+- A bare `R` keeps meaning `R *`. Both spellings may name the same record in one program, and
+  neither is inferred from the record's size: an implicit switch would silently change existing
+  signatures and differ per target.
+- The record stays Grail's. The call copies its bytes into the argument registers and the outgoing
+  stack area, so the value is not moved, not freed, and C must not keep anything it takes.
+- `byval` is a contextual keyword, recognised only where a parameter type starts in an `extern "C"`
+  declaration or a `cfn(...)` parameter list.
+- The record may embed other records; the classification flattens them.
+
+The per-target rules, which is what the compiler implements and what `tests/ffi/byval_records.grl`
+executes on each target it runs on:
+
+| Target | Rule implemented |
+| --- | --- |
+| Linux/macOS x86-64 (SysV) | Eightbyte classification for records of 16 bytes or less: an eightbyte whose fields are all floats is SSE (one `xmm` register), anything else is INTEGER (one integer register), and a mixed eightbyte is INTEGER; the two classes draw from their own register files, in argument order. A record over 16 bytes is MEMORY: the caller writes the whole record into its outgoing argument area. If a class has no register left for the argument, the whole record goes on the stack. |
+| AArch64 (AAPCS64) | A homogeneous float aggregate - one to four float fields of one type, nothing else - travels in `v0`-`v7`, one `s`/`d` register per field. Any other composite of 16 bytes or less travels in consecutive `x0`-`x7` registers, one per eightbyte. A larger record is passed by reference: the caller copies it and passes the copy's address in an integer register. With no register left for the aggregate or for its address, the record is passed on the stack. |
+| RISC-V 64 (LP64D) | A record over 16 bytes (2xXLEN) is passed by reference to a caller copy. At or below 16 bytes, one or two fields with at least one float take a register each in field order (float fields in `fa0`-`fa7`, integer fields in `a0`-`a7`); every other shape is packed into one integer register per eightbyte. |
+| Windows x86-64 and ARM64 | **Refused**, with a diagnostic. MSVC passes 1/2/4/8-byte structs in a single integer register and everything larger by reference to a caller copy, which is not the AAPCS64 rule; there is no Windows FFI execution path in this repository, so `byval` is refused there rather than guessed. |
+
+Refused, each with its own diagnostic rather than an approximation:
+
+- `byval` on anything that is not an `extern "C"` record (`byval must name an extern "C" record
+  type; a bare record parameter is a pointer`);
+- `byval` on a Windows target (see the table);
+- `byval` in an `extern "C" fn` *definition* - C calling Grail with a by-value record - because the
+  callback prologue would have to copy the incoming record into a Grail record: `byval is only for
+  an extern "C" declaration parameter; a C callback cannot take a record by value yet`. Grail
+  *calling* C through a `cfn` value whose signature declares `byval` works, and is one of the
+  executed cases.
+
 ### Opaque handles
 
 `handle File;` declares a one-word opaque type for a C-owned resource. A handle can be
@@ -267,10 +308,9 @@ Not implemented yet, and each rejected rather than approximated:
 - C-callable callbacks with more than six parameters (C enters them through its register ABI and the
   callback thunk does not read stack arguments yet); macOS callbacks use the
   same SysV/AAPCS64 lowering but are compiled and linked only (no macOS runner);
-- records *passed* by value as arguments (an extern record parameter is the C `R *`; the spelling
-  `v: byval R` is decided - see [B7](design/decisions-b2-b6.md#b7-byval-record-parameters-accepted) -
-  and implementation follows the separate-compilation work); record
-  results are returned by value on every ABI, float fields included
+- records passed by value *to* C use the spelling `v: byval R` (see "Records passed by value"
+  above); the Windows targets and `extern "C" fn` definitions refuse it. Record results are
+  returned by value on every ABI, float fields included
   (`tests/ffi/call_records.grl`, `float_record_results.grl`), and nested records included,
   except a result whose embedded records contain floats (its register classification needs the
   flattened field list; refused with a diagnostic);
@@ -341,12 +381,24 @@ compiles `tests/ffi/call_scalars.grl` with the FFI build, links the two through 
   a NUL-terminated `CStr`, a read-only view, a mutable view written by C, and a handle
   round trip (`259`, `1`), `extern_records` checks C layout in both directions (`1606`,
   `23`, `16`, `-2`, `7`), and `callbacks` checks C calling back into Grail, including
-  callee-saved register preservation (`42`, `42`, `10`). All four fixtures execute on x86-64 and,
-  through `qemu-<target>-static`, on AArch64 and RISC-V 64: 12 executed fixture instances and no
-  link-only cases. Without a qemu runner the cross targets are linked and the ABI-level check is
-  reported as link-only.
+  callee-saved register preservation (`42`, `42`, `10`). Every fixture executes on x86-64 and,
+  through `qemu-<target>-static`, on AArch64 and RISC-V 64: 43 executed fixture instances and no
+  link-only cases, with `dlopen` cross-compiled only for the two cross targets (its shared library
+  needs a glibc sysroot). Without a qemu runner the cross targets are linked and the ABI-level check
+  is reported as link-only.
+
+`byval_records` is the by-value argument fixture: a 4-, 8-, 16- and 24-byte record, one with mixed
+`int`/`float` fields, one with a `double` and an `i64`, an ImVec2-shaped float pair, a four-field
+float aggregate (four `v` registers on AAPCS64, two `xmm` on SysV, two packed integer registers on
+RV64), one with an embedded array, a byval parameter after six integer arguments (the seventh
+argument register on AAPCS64/RV64, the outgoing stack area on SysV), a byval record that shares the
+outgoing stack area with a scalar after it, and a call through a `cfn` whose signature declares the
+byval parameter. The C twins return a checksum over every field, so a misplaced register or stack
+word changes the value.
 
 Rejections are part of the normal native corpus (`tests/native-cases.json`):
 `ffi-reject-safe-call`, `ffi-reject-abi`, `ffi-reject-parameter-type`,
-`ffi-reject-result-type`, `ffi-reject-arity` and `ffi-reject-duplicate`, so every target
-checks the diagnostics on every run of `bun tools/test-native.mjs`.
+`ffi-reject-result-type`, `ffi-reject-byval-plain-record`, `ffi-reject-byval-scalar`,
+`ffi-reject-byval-callback`, `ffi-reject-arity` and `ffi-reject-duplicate`, so every target
+checks the diagnostics on every run of `bun tools/test-native.mjs`. The Windows refusal of `byval`
+is asserted by `tools/test-ffi.mjs`.

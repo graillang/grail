@@ -23,7 +23,7 @@ decision without a stated trigger is what made these items outstanding for so lo
 | B4 | Windows uses **thread-per-blocking-call**. IOCP is a named future work item with the design sketch in this page. Green tasks on Windows currently abort at scheduler start. | Decided |
 | B5 | **Abort never unwinds**; nothing may unwind across the C boundary. There is no `defer` and no cleanup runs on an abort path. | Decided |
 | B6 | Closures capture references and views today and cannot outlive the borrow; **`FnMut`/mutable captures are deferred** with the rules that will apply fixed below. | Decided (part deferred) |
-| B7 | Records passed by value to C: **accepted**, spelling `v: byval R`. | Implementation after B1 |
+| B7 | Records passed by value to C: **accepted**, spelling `v: byval R`. | Implemented |
 
 ## B1: separate compilation accepted
 
@@ -375,9 +375,11 @@ one: the classification is shared with results, so only the marker changes. A wr
 classification is worse - it miscompiles silently - which is why the implementation must extend the
 executed record tests rather than adding a compile-only case.
 
-**Enforced by.** [docs/ffi.md](../ffi.md) (today: refused, with the decision recorded) and readiness
-rows A3/B7. The compiler currently rejects a record parameter passed by value; the implementation
-replaces that diagnostic with the syntax.
+**Enforced by.** [docs/ffi.md](../ffi.md) (the syntax, the per-target rule table and the refusal
+cases) and readiness rows A3/B7. `tests/ffi/byval_records.grl` executes the classification on x86-64,
+AArch64 and RISC-V 64; `tools/test-ffi.mjs` also asserts the Windows refusal. C calling Grail with a
+by-value record stays refused: the callback prologue would have to copy the incoming record into a
+Grail record, and the decision covers arguments Grail passes.
 
 ## Corrections to earlier documents
 
