@@ -386,8 +386,9 @@ because a stale claim is what makes a decided item get re-opened.
 
 1. [runtime-api.md](runtime-api.md) opens with "the compiler does not yet accept `extern "C"`
    declarations". It does: [docs/ffi.md](../ffi.md) is the implemented contract and `tests/ffi` plus
-   the Windows cases execute it on six targets. The OS-API design in that page needs to be re-based
-   on the FFI that exists before it is used as the capability plan.
+   the Windows cases execute it on six targets. A premise note is added there in this change; the
+   OS-API, capability and error design in that page still needs to be re-based on the FFI that
+   exists before it is used as the capability plan.
 2. [implementation-status.md](implementation-status.md) still has "User FFI boundary | Missing - no
    general extern C declarations". FFI is implemented, tested and documented; that row was
    outdated. Fixed in this change.
@@ -407,9 +408,9 @@ because a stale claim is what makes a decided item get re-opened.
 
 ## Not decided here
 
-The vocabulary this page deliberately does not settle: the module-interface format and cache keys
-(B1's own implementation), the capability types and their names (B2's revisit trigger), a foreign-call
-offload trampoline or per-thread host TLS (B3's revisit trigger), the IOCP implementation (B4), any
-unwinding or `defer` feature (B5), and the `FnMut` implementation detail beyond the six rules above
-(B6). Each of those is a design task with a stated trigger, not an open question about these
+The vocabulary this page deliberately does not settle: the module-interface details beyond the
+obligations in B1 (its plan of record is [separate-compilation.md](separate-compilation.md)), the
+capability types and their names (B2's revisit trigger), a foreign-call offload trampoline or
+per-thread host TLS (B3's revisit trigger), the IOCP implementation (B4), any unwinding or `defer`
+feature (B5), and the `FnMut` implementation detail beyond the six rules above (B6). Each of those is a design task with a stated trigger, not an open question about these
 decisions.
