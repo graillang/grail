@@ -1,0 +1,59 @@
+# Running the tests locally
+
+Every suite runs from the repository root with Bun. The compiler is built on demand and cached by
+content under `.work/native/<hash>/`; the tools print the compiler path when `GRAIL_COMPILER` is not
+set.
+
+## The full gate
+
+```sh
+export PATH="$HOME/.local/qemu-static/usr/bin:$PATH"     # qemu-user for the cross targets
+C=$(bun tools/native.mjs build 2>&1 | tail -1)
+export GRAIL_COMPILER=$C GRAIL_FFI_COMPILER=$C
+
+for t in 'test-native.mjs x86_64' test-cli.mjs 'book.mjs check' test-selfhost.mjs \
+         abundance-test.mjs borg-test.mjs test-ffi.mjs 'ci.mjs lint' test-debug-lines.mjs \
+         'windows.mjs check' lsp-test.mjs test-profile.mjs test-authority.mjs \
+         'test-native.mjs aarch64' 'test-native.mjs riscv64'; do
+  echo "== $t"; bun tools/$t 2>&1 | tail -2
+done
+for t in x86_64 aarch64 riscv64; do GRAIL_BACKEND=llvm bun tools/test-native.mjs $t; done
+```
+
+`ci.mjs lint` is the cheapest check and catches most documentation and workflow drift.
+
+## Two traps worth knowing
+
+**Do not set `GRAIL_SYSROOT_*` unless you have a real glibc sysroot.** The cross targets link
+statically by default, which needs no libc. Without a sysroot, a case that declares
+`extern "C"` cannot link on aarch64/riscv64 (there is no `-lc` to find), so those fixtures carry
+`"targets": ["x86_64"]` and the runner reports them as `skipped (host-only)`. Pointing
+`GRAIL_SYSROOT_AARCH64` at a tree that only holds QEMU binaries *causes* the `-lc` failure, because
+it switches the link to dynamic.
+
+**Run one suite per worktree at a time.** `test-native.mjs` and the other runners use
+`.work/native-tests/<target>/<case>/` inside the worktree, so two suites started in the same
+checkout delete each other's intermediate files. The symptom is a bogus clang failure such as
+`unable to rename temporary … .o.tmp: No such file or directory`, which looks like a backend bug and
+is not. Use a separate worktree per concurrent run, or serialize them.
+
+## Timing
+
+On a loaded machine the x86-64 native suite is roughly 10–20 minutes, the aarch64 and riscv64 suites
+are slower because every case runs under QEMU, and the LLVM legs recompile the whole corpus. A full
+gate is 2–3 hours; run it in a watched job that logs to a file rather than holding a terminal.
+
+## What each suite covers
+
+- `test-native.mjs <target>` — compile, run and compare `tests/native-cases.json` (execution,
+  diagnostics and intentional rejections). `GRAIL_BACKEND=llvm` runs the same corpus through the
+  LLVM backend.
+- `test-selfhost.mjs` — the compiler compiles itself twice and the two outputs must be identical.
+- `book.mjs check` — every book example compiles, runs, and matches its expected output next to an
+  equivalent Rust program.
+- `abundance-test.mjs`, `borg-test.mjs` — the ports, compared bit-for-bit against their C++ and
+  reference outputs.
+- `test-ffi.mjs` — C interop fixtures, reporting how many are executed versus cross-compiled only.
+- `windows.mjs check` — PE/COFF cross-builds plus the executed subset under Wine.
+- `lsp-test.mjs`, `test-profile.mjs`, `test-authority.mjs` — the language server, the sampling
+  profiler and the capability model.
