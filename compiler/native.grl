@@ -104,7 +104,11 @@ struct Closure {
     tnames: u8[][],
     bindings: u64[],
     // Lifetimes the parameters introduced (`|x: &T|`): regions 2.. of the closure's own namespace.
-    regions: u64
+    regions: u64,
+    // The captures the body writes, one flag per entry of `captures`. Only a written capture is
+    // mutable in the body, and a closure with any written capture is `FnMut` (mode 1), not `Fn`.
+    written: u64[],
+    mode: u64
 }
 struct ImplParams {
     decl: u64,
@@ -4181,7 +4185,7 @@ fn callable_contract<a, b>(
     }
     aa := ty_arg(&mut c, actual);
     ea := ty_arg(&mut c, expected);
-    if (ak == 5) || (ak == 7) || (ak == 27) || (ak == 10) {
+    if (ak == 5) || (ak == 7) || (ak == 27) || (ak == 10) || (ak == 20) {
         am := ty_mode(&mut c, actual);
         em := ty_mode(&mut c, expected);
         if am != em {
@@ -4373,6 +4377,24 @@ fn require_type<a>(c: (&a mut C), actual: u64, expected: u64) -> unit {
         fail(&mut c, view("a handle has no value in this context; pass it back to C or compare it with another handle"));
     }
     if same_type(&mut c, actual, want) == 0 {
+        // `Fn` and `FnMut` have the same signature and differ only in whether a call needs
+        // exclusive access: say so instead of reporting a shape mismatch.
+        if (ty_kind(&mut c, actual) == 20) & (ty_kind(&mut c, want) == 20) {
+            am := ty_mode(&mut c, actual);
+            em := ty_mode(&mut c, want);
+            if (am == 1) & (em == 0) {
+                aresult := ty_arg(&mut c, actual);
+                aregions := type_regions(&mut c, actual);
+                aargs := type_args(&mut c, actual);
+                shared := intern_args(&mut c, 20, aresult, 0, aregions, aargs);
+                if same_type(&mut c, shared, want) != 0 {
+                    fail(
+                        &mut c,
+                        view("a closure that mutates a captured value is FnMut, not Fn: calling it needs exclusive access to the closure, so it cannot be used where a shared call is required")
+                    );
+                }
+            }
+        }
         fail(&mut c, view("type mismatch"));
     }
     return ();
@@ -4679,7 +4701,11 @@ fn type_keyword<a>(c: (&a mut C), n: &a [u8]) -> bool {
     if same(view(n), view("mut")) || same(view(n), view("Atomic")) || same(view(n), view("Mutex")) || same(view(n), view("Scope")) {
         return true;
     }
-    return same(view(n), view("Task")) || same(view(n), view("CancelToken")) || same(view(n), view("fn")) || same(view(n), view("Fn"));
+    return same(view(n), view("Task"))
+        || same(view(n), view("CancelToken"))
+        || same(view(n), view("fn"))
+        || same(view(n), view("Fn"))
+        || same(view(n), view("FnMut"));
 }
 fn lifetime_candidate<a>(c: (&a mut C), p: u64) -> bool {
     if kind_at(&mut c, p) != 1 {
@@ -4889,7 +4915,9 @@ fn base_named<a>(c: (&a mut C), first: u8[]) -> u64 {
         }
         return nominal_type(&mut c, d - 1);
     }
-    if same(view(first), view("Fn")) {
+    if same(view(first), view("Fn")) || same(view(first), view("FnMut")) {
+        // `Fn` is callable through a shared reference; `FnMut` needs exclusive access to the value.
+        fnmut := u64(same(view(first), view("FnMut")));
         expect(&mut c, view("("));
         mut params = u64[];
         if !eat(&mut c, view(")")) {
@@ -4907,7 +4935,7 @@ fn base_named<a>(c: (&a mut C), first: u8[]) -> u64 {
         }
         expect(&mut c, view("->"));
         result := parse_type(&mut c);
-        return intern_args(&mut c, 20, result, 0, u64[], params);
+        return intern_args(&mut c, 20, result, fnmut, u64[], params);
     }
     if same(view(first), view("cfn")) {
         // C function pointer: one word, no environment, called with the C ABI. Only
@@ -8550,21 +8578,7 @@ fn place<a>(c: (&a mut C), write: u64, slot: u64) -> Val {
     name := ident(&mut c);
     mut l = find_local(&mut c, view(name));
     if l == 0 {
-        if write != 0 {
-            fail(&mut c, view("captured values are read-only inside a closure"));
-        }
-        v := capture_field(&mut c, view(name), 1);
-        if v.ty == 18446744073709551615 {
-            fail(
-                &mut c,
-                view("reference needs a variable or field (bind the value first: x := ...; &x)")
-            );
-        }
-        target := target_of(&mut c, v.t);
-        r := resource(&mut c, v.t);
-        info := &c.resources[r - 1];
-        base := info.base - 1;
-        return borrow_reference(&mut c, v.t, v.ty, base, target, 0);
+        return capture_place(&mut c, view(name), write);
     }
     id := local_id(&mut c, l - 1);
     ty := local_ty(&mut c, l - 1);
@@ -9984,7 +9998,8 @@ fn function_value<a>(c: (&a mut C), index: u64) -> Val {
 fn function_as_closure<a>(c: (&a mut C), v: Val, expected: u64) -> Val {
     params := type_args(&mut c, v.ty);
     result := ty_arg(&mut c, v.ty);
-    as_closure := intern_args(&mut c, 20, result, 0, u64[], params);
+    mode := ty_mode(&mut c, expected);
+    as_closure := intern_args(&mut c, 20, result, mode, u64[], params);
     if same_type(&mut c, as_closure, expected) == 0 {
         return v;
     }
@@ -10048,6 +10063,75 @@ fn emit_fn_thunk<a>(c: (&a mut C)) -> unit {
     o(&mut c, view("movq %rsi,%rdi\nmovq %rdx,%rsi\nmovq %rcx,%rdx\nmovq %r8,%rcx\nmovq %r9,%r8\ncall *%rax\nleave\nret\n"));
     return ();
 }
+// Calling an `FnMut` value needs exclusive access to the closure: its environment is reachable
+// only through that value, so a second call (or a live shared borrow of the closure) would alias
+// what the first one writes. The loan is taken on the closure's own storage and ends when the call
+// returns; bonding it to that storage keeps `close_loans` from ending it early while the arguments
+// are evaluated.
+fn call_access<a>(c: (&a mut C), slot: u64) -> u64 {
+    if c.raw != 0 {
+        return 0;
+    }
+    place := place_of(&mut c, slot);
+    if place == 0 {
+        return 0;
+    }
+    authority := authority_of(&mut c, slot);
+    mut loan = 0;
+    if authority != 0 {
+        parent := authority_loan(&mut c, authority, place);
+        if parent == 0 {
+            fail(&mut c, view("closure call has no live reference authority"));
+        }
+        loan = ownership::reborrow_place(&mut c.check, parent, place, 1);
+    } else {
+        loan = ownership::borrow_place(&mut c.check, place, 1);
+    }
+    if loan == 0 {
+        fail(
+            &mut c,
+            view("calling a FnMut closure needs exclusive access to the closure: it is already borrowed or being called")
+        );
+    }
+    bond(&mut c, place, loan);
+    return loan;
+}
+// A shared read succeeds while a shared loan lives, so an exclusive loan on the closure (a live
+// `&mut f`, or an enclosing call of the same closure) is what a call has to reject here: say which.
+fn call_conflict<a>(c: (&a mut C), slot: u64) -> unit {
+    if c.raw != 0 {
+        return ();
+    }
+    place := place_of(&mut c, slot);
+    if place == 0 {
+        return ();
+    }
+    if authority_of(&mut c, slot) != 0 {
+        return ();
+    }
+    if ownership::read(&c.check, place) == 3 {
+        fail(
+            &mut c,
+            view("calling a FnMut closure needs exclusive access to the closure: it is already borrowed or being called")
+        );
+    }
+    return ();
+}
+// The binding that holds an `FnMut` closure must itself be exclusive: `mut f = |...|` for a local,
+// a `&mut` reference for a value reached through one.
+fn require_exclusive_call<a>(c: (&a mut C), slot: u64) -> unit {
+    if c.raw != 0 {
+        return ();
+    }
+    if binding_mode(&c, slot) == 1 {
+        fail(
+            &mut c,
+            view("calling a FnMut closure needs a mutable binding (write: mut f = |...| { ... })")
+        );
+    }
+    require_mutable_binding(&mut c, slot, 0);
+    return ();
+}
 fn indirect_call<a>(c: (&a mut C), value: Val, opened: u64) -> Val {
     input := value.t;
     inty := value.ty;
@@ -10058,7 +10142,18 @@ fn indirect_call<a>(c: (&a mut C), value: Val, opened: u64) -> Val {
     if (kind != 12) & (kind != 20) & (kind != 25) {
         fail(&mut c, view("expression is not callable"));
     }
-    observe(&mut c, pointer);
+    // An `FnMut` closure writes its environment through this value, so the call borrows it
+    // exclusively for the whole call. A closure with no written capture stays `Fn`: reading it
+    // through a shared reference and calling it repeatedly is still allowed.
+    mut call_loan = 0;
+    if (kind == 20) & (ty_mode(&mut c, ty) == 1) {
+        require_exclusive_call(&mut c, pointer);
+        call_conflict(&mut c, pointer);
+        observe(&mut c, pointer);
+        call_loan = call_access(&mut c, pointer);
+    } else {
+        observe(&mut c, pointer);
+    }
     get(&mut c, pointer, view("%rax"));
     // Closures: code is word 0 of the object; the hidden first argument points at the slot holding it.
     mut envp = 0;
@@ -10184,6 +10279,9 @@ fn indirect_call<a>(c: (&a mut C), value: Val, opened: u64) -> Val {
     call_writebacks(&mut c, first, &sources, &types);
     call_bonds(&mut c, val(slot, resulttype), first, &sources, resulttype);
     release_temporary(&mut c, input);
+    if call_loan != 0 {
+        ownership::end_loan(&mut c.check, call_loan);
+    }
     return val(slot, resulttype);
 }
 fn builtin_id<a>(n: &a [u8]) -> u64 {
@@ -12838,6 +12936,61 @@ fn literal_fits<a>(c: (&a mut C), ty: u64, value: u64, negative: u64) -> u64 {
     }
     return u64(value < max || value == max);
 }
+// A closure that writes nothing is `Fn`; it can be used where `FnMut` is expected, because a call
+// that takes exclusive access is stricter than the shared call an `Fn` promises. The value is the
+// same record, so this only widens the call contract - but it still moves, never copies, so the
+// environment keeps one owner.
+fn fn_as_fnmut<a>(c: (&a mut C), ty: u64, expected: u64) -> u64 {
+    if ty_mode(&mut c, ty) != 0 {
+        return 0;
+    }
+    if ty_mode(&mut c, expected) != 1 {
+        return 0;
+    }
+    result := ty_arg(&mut c, ty);
+    regions := type_regions(&mut c, ty);
+    args := type_args(&mut c, ty);
+    widened := intern_args(&mut c, 20, result, 1, regions, args);
+    if same_type(&mut c, widened, expected) == 0 {
+        return 0;
+    }
+    return 1;
+}
+// `&mut Fn(...)` used where `&mut FnMut(...)` is expected: same referent, same loan, wider call
+// contract. Only the reference's own type changes, so nothing is copied or re-owned.
+fn reference_as_fnmut<a>(c: (&a mut C), slot: u64, ty: u64, expected: u64) -> u64 {
+    if ty_mode(&mut c, ty) != 1 {
+        return 0;
+    }
+    if ty_mode(&mut c, expected) != 1 {
+        return 0;
+    }
+    inner := ty_arg(&mut c, ty);
+    want := ty_arg(&mut c, expected);
+    if fn_as_fnmut(&mut c, inner, want) == 0 {
+        return 0;
+    }
+    index := resource(&mut c, slot);
+    if index == 0 {
+        return 0;
+    }
+    mut r = &mut c.resources[index - 1];
+    exchange(&mut r.ty, expected);
+    return 1;
+}
+// `move_value`, re-owning the moved value under a wider call contract (`Fn` used as `FnMut`).
+fn move_as<a>(c: (&a mut C), v: Val, ty: u64) -> Val {
+    get(&mut c, v.t, view("%rax"));
+    slot := save(&mut c);
+    old := place_of(&mut c, v.t);
+    move_out(&mut c, val(v.t, v.ty));
+    own(&mut c, slot, ty);
+    dst := place_of(&mut c, slot);
+    if contains_borrow(&mut c, v.ty, 0) {
+        return_bonds(&mut c, old, dst, 1);
+    }
+    return val(slot, ty);
+}
 fn adopt_literal<a>(c: (&a mut C), start: u64, end: u64, ty: u64) -> bool {
     if (c.lit_start != start) || (c.lit_end != end) {
         return false;
@@ -12862,6 +13015,16 @@ fn adopt_value<a>(c: (&a mut C), v: Val, start: u64, end: u64, expected: u64) ->
     if (c.raw == 0) & (expected != 0) & (expected != 18446744073709551615) {
         if (ty_kind(&mut c, v.ty) == 12) & (ty_kind(&mut c, expected) == 20) {
             return function_as_closure(&mut c, v, expected);
+        }
+        if (ty_kind(&mut c, v.ty) == 20) & (ty_kind(&mut c, expected) == 20) {
+            if fn_as_fnmut(&mut c, v.ty, expected) != 0 {
+                return move_as(&mut c, v, expected);
+            }
+        }
+        if (ty_kind(&mut c, v.ty) == 7) & (ty_kind(&mut c, expected) == 7) {
+            if reference_as_fnmut(&mut c, v.t, v.ty, expected) != 0 {
+                return val(v.t, expected);
+            }
         }
     }
     mut v = hint_use(&mut c, v, start, end, expected);
@@ -13307,6 +13470,171 @@ fn capture_field_type<a>(c: (&a mut C), ty: u64) -> u64 {
     mode := ty_mode(&mut c, ty);
     return intern_args(&mut c, k, arg, mode, rs, u64[]);
 }
+// `=`, `+=`, `-=`, `*=`, `/=`, `%=` or `**=`.
+fn is_assign_kind(k: u64) -> bool {
+    return (k == 61) || ((261 < k) && (k < 267)) || (k == 268);
+}
+// Whether a place rooted just past `j` (`.field` and `[index]` steps) is assigned to: the body
+// stores into the capture itself, a field of it, or an element of it.
+fn place_assign_after<a>(c: (&a mut C), j: u64, end: u64) -> bool {
+    mut p = j;
+    while p < end {
+        k := kind_at(&mut c, p);
+        if k == 46 {
+            if kind_at(&mut c, p + 1) != 1 {
+                return false;
+            }
+            p = p + 2;
+        } else if k == 91 {
+            mut depth = 0;
+            mut closed = 0;
+            while p < end {
+                kk := kind_at(&mut c, p);
+                if (kk == 40) || (kk == 91) || (kk == 123) {
+                    depth += 1;
+                } else if (kk == 41) || (kk == 93) || (kk == 125) {
+                    depth -= 1;
+                    if depth == 0 {
+                        p = p + 1;
+                        closed = 1;
+                        break;
+                    }
+                    if depth < 0 {
+                        return false;
+                    }
+                }
+                p = p + 1;
+            }
+            if closed == 0 {
+                return false;
+            }
+        } else {
+            break;
+        }
+    }
+    return is_assign_kind(kind_at(&mut c, p));
+}
+// Container methods that never mutate their receiver. Anything not named here is treated as a
+// write, so a closure calling it needs exclusive access rather than silently aliasing.
+fn read_only_method<a>(n: &a [u8]) -> bool {
+    return same(view(n), view("len"))
+        || same(view(n), view("is_empty"))
+        || same(view(n), view("contains"))
+        || same(view(n), view("first"))
+        || same(view(n), view("last"))
+        || same(view(n), view("get"))
+        || same(view(n), view("position"))
+        || same(view(n), view("index_of"))
+        || same(view(n), view("keys"))
+        || same(view(n), view("values"))
+        || same(view(n), view("entries"))
+        || same(view(n), view("upper"))
+        || same(view(n), view("lower"))
+        || same(view(n), view("to_uppercase"))
+        || same(view(n), view("to_lowercase"))
+        || same(view(n), view("trim"))
+        || same(view(n), view("chars"))
+        || same(view(n), view("split"))
+        || same(view(n), view("repeat"))
+        || same(view(n), view("starts_with"))
+        || same(view(n), view("ends_with"))
+        || same(view(n), view("size"))
+        || same(view(n), view("capacity"));
+}
+// Whether the use of a capture at token `i` writes it. A write is a store to the capture or to a
+// place rooted at it (`n = ...`, `n += ...`, `r.f = ...`, `v[i] = ...`, `*r = ...`, which is the
+// same shape), a mutable borrow of it (`&mut n`), or a method call that may mutate its receiver.
+// A shared reference or view can only be read through, so its methods stay reads.
+fn capture_written_at<a>(c: (&a mut C), i: u64, end: u64, ty: u64) -> bool {
+    if place_assign_after(&mut c, i + 1, end) {
+        return true;
+    }
+    if i > 1 {
+        // `&mut n`: an exclusive borrow of the capture, so the environment must be exclusive too.
+        if (kind_at(&mut c, i - 2) == 38) & same(view(tok_text(&mut c, i - 1)), view("mut")) {
+            return true;
+        }
+    }
+    if (kind_at(&mut c, i + 1) == 46) & (kind_at(&mut c, i + 3) == 40) {
+        k := ty_kind(&mut c, ty);
+        if ((k == 5) || (k == 7) || (k == 27)) & (ty_mode(&mut c, ty) == 0) {
+            return false;
+        }
+        if (ty_kind(&mut c, ty) != 8) & (ty_kind(&mut c, ty) != 20) {
+            m := tok_text(&mut c, i + 2);
+            if read_only_method(view(m)) {
+                return false;
+            }
+        }
+        return true;
+    }
+    return false;
+}
+// Index + 1 of `name` in `names`, or 0.
+fn capture_index<a, b>(names: (&a u8[][]), name: &b [u8]) -> u64 {
+    for j in names.len() {
+        x := &names[j];
+        if same(view(x), view(name)) {
+            return j + 1;
+        }
+    }
+    return 0;
+}
+// Index + 1 of a capture of the closure being compiled, or 0.
+fn capture_of<a, b>(c: (&a mut C), name: &b [u8]) -> u64 {
+    current := c.closure_env;
+    if current == 0 {
+        return 0;
+    }
+    cl := &c.closures[current - 1];
+    for j in cl.captures.len() {
+        x := &cl.captures[j];
+        if same(view(x), view(name)) {
+            return j + 1;
+        }
+    }
+    return 0;
+}
+// Whether the closure being compiled writes the named capture: only then may the body take
+// exclusive access to the environment field that holds it.
+fn capture_writable<a, b>(c: (&a mut C), name: &b [u8]) -> bool {
+    j := capture_of(&mut c, view(name));
+    if j == 0 {
+        return false;
+    }
+    cl := &c.closures[c.closure_env - 1];
+    return cl.written[j - 1] != 0;
+}
+// A reference to a capture's environment field: shared for a read (`&name`), exclusive for a store.
+// The field belongs to the environment, so an exclusive reference needs an `FnMut` closure.
+fn capture_place<a, b>(c: (&a mut C), name: &b [u8], write: u64) -> Val {
+    if write != 0 {
+        if capture_writable(&mut c, view(name)) == 0 {
+            fail(&mut c, view("captured values are read-only inside a closure"));
+        }
+    }
+    v := capture_field(&mut c, view(name), 1, write);
+    if v.ty == 18446744073709551615 {
+        fail(
+            &mut c,
+            view("reference needs a variable or field (bind the value first: x := ...; &x)")
+        );
+    }
+    target := target_of(&mut c, v.t);
+    r := resource(&mut c, v.t);
+    info := &c.resources[r - 1];
+    base := info.base - 1;
+    before := c.check.loans.len();
+    mut ref = borrow_reference(&mut c, v.t, v.ty, base, target, write);
+    // A reborrow from the environment's own authority records no bond of its own: the reference
+    // holds the loan to the field, so the store through it must find that loan here.
+    after := c.check.loans.len();
+    if after > before {
+        holder := place_of(&mut c, ref.t);
+        bond(&mut c, holder, after);
+    }
+    return ref;
+}
 fn closure_literal<a>(c: (&a mut C)) -> Val {
     // Inside a generic function the closure is compiled once per specialization, with its bindings.
     if (c.tnames.len() != 0) & (c.bindings.len() == 0) & (c.validating == 0) {
@@ -13425,6 +13753,37 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
         }
         i += 1;
     }
+    // Which captures the body writes. This decides the closure's call contract (`Fn` or `FnMut`)
+    // and which environment fields are mutable inside the body.
+    mut written = u64[];
+    for j in captures.len() {
+        written.push(u64(0));
+    }
+    i = start;
+    while i < end {
+        if kind_at(&mut c, i) == 1 {
+            name := tok_text(&mut c, i);
+            j := capture_index(&captures, view(name));
+            if j != 0 {
+                if written[j - 1] == 0 {
+                    local := find_local(&mut c, view(name));
+                    if local != 0 {
+                        ty := local_ty(&mut c, local - 1);
+                        if capture_written_at(&mut c, i, end, ty) {
+                            written[j - 1] = 1;
+                        }
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+    mut mode = 0;
+    for j in written.len() {
+        if written[j] != 0 {
+            mode = 1;
+        }
+    }
     // Template validation checks captures and moves only; specializations build the real object.
     if c.validating != 0 {
         mut caps = u64[];
@@ -13443,7 +13802,7 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
                 move_out(&mut c, held);
             }
         }
-        vfn := intern_args(&mut c, 20, ret, 0, caps, copy_numbers(&params));
+        vfn := intern_args(&mut c, 20, ret, mode, caps, copy_numbers(&params));
         placeholder := imm(&mut c, 0);
         return own(&mut c, placeholder, vfn);
     }
@@ -13498,7 +13857,7 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
         );
     decl := c.decls.len() - 1;
     envty := intern_args(&mut c, 8, decl, 0, u64[], u64[]);
-    fnty := intern_args(&mut c, 20, ret, 0, caps, copy_numbers(&params));
+    fnty := intern_args(&mut c, 20, ret, mode, caps, copy_numbers(&params));
     // Build the object.
     sz := imm(&mut c, count);
     obj := invoke(&mut c, view("rt_rec"), one(sz));
@@ -13563,6 +13922,8 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
                     tnames: tn,
                     bindings: bn,
                     regions: param_regions,
+                    written: written,
+                    mode: mode,
                 }
             );
     }
@@ -13575,8 +13936,60 @@ fn copy_bytes<a>(x: &a [u8]) -> u8[] {
     }
     return o;
 }
-// A captured name inside a closure body reads the environment field (read-only alias).
-fn capture_field<a, b>(c: (&a mut C), name: &b [u8], address: u64) -> Val {
+// The field type inside the body. A capture the body does not write is read-only there, even when
+// the value it holds is an exclusive reference or view: exclusive access to it needs the closure to
+// be `FnMut`, so an `Fn` closure must not be able to reach through it.
+fn capture_readonly_type<a>(c: (&a mut C), ty: u64) -> u64 {
+    k := ty_kind(&mut c, ty);
+    if (k == 5) || (k == 7) || (k == 27) {
+        if ty_mode(&mut c, ty) != 0 {
+            inner := ty_arg(&mut c, ty);
+            rs := type_regions(&mut c, ty);
+            return intern_full(&mut c, k, inner, 0, rs);
+        }
+    }
+    return ty;
+}
+// `name = v` / `name op= v` where `name` is a capture: the environment field is the storage, so the
+// store goes through an exclusive reference to it, exactly like `*r = v` writes through a reference.
+fn capture_assignment<a, b>(c: (&a mut C), name: &b [u8]) -> unit {
+    if capture_writable(&mut c, view(name)) == 0 {
+        fail(&mut c, view("captured values are read-only inside a closure"));
+    }
+    // The old value for `op=` comes from a shared read of the field: reading through a reference
+    // ends that reference's temporary, so the exclusive one is created only for the store.
+    read := capture_field(&mut c, view(name), 0, 0);
+    if read.ty == 18446744073709551615 {
+        fail(&mut c, view("undefined assignment"));
+    }
+    fty := read.ty;
+    op := kind(&mut c);
+    advance(&mut c);
+    mut v = val(0, 0);
+    vstart := c.pos;
+    if op == 61 {
+        v = expr(&mut c, 0);
+    } else {
+        if (261 < op) & (op < 268) {
+            rstart := c.pos;
+            mut rhs = expr(&mut c, 0);
+            rend := c.pos;
+            rhs = adopt_value(&mut c, rhs, rstart, rend, fty);
+            v = compound_value(&mut c, compound_operator(op), read.t, rhs, fty);
+        } else {
+            fail(&mut c, view("expected = after a captured value"));
+        }
+    }
+    vend := c.pos;
+    expect(&mut c, view(";"));
+    v = adopt_value(&mut c, v, vstart, vend, fty);
+    ref := capture_place(&mut c, view(name), 1);
+    exchange_into(&mut c, ref, v);
+    return ();
+}
+// A captured name inside a closure body reads the environment field (read-only alias). With
+// `address` set and `mode` exclusive, it instead yields a reference to that field for a store.
+fn capture_field<a, b>(c: (&a mut C), name: &b [u8], address: u64, mode: u64) -> Val {
     current := c.closure_env;
     if current == 0 {
         return val(0, 18446744073709551615);
@@ -13592,15 +14005,19 @@ fn capture_field<a, b>(c: (&a mut C), name: &b [u8], address: u64) -> Val {
     if index == 18446744073709551615 {
         return val(0, 18446744073709551615);
     }
+    writable := capture_writable(&mut c, view(name));
     env := local_id(&mut c, 0);
     envref := local_ty(&mut c, 0);
     base := deref(&mut c, val(env, envref));
     b := base.t;
     k := index + 2;
-    fty := field_type(&mut c, base.ty, k);
+    mut fty = field_type(&mut c, base.ty, k);
+    if writable == 0 {
+        fty = capture_readonly_type(&mut c, fty);
+    }
     if address != 0 {
         n := rec_load(&mut c, b, k, 1);
-        ty := reference_type(&mut c, fty, 0);
+        ty := reference_type(&mut c, fty, mode);
         root := place_of(&mut c, b);
         target := member_place(&mut c, root, k, fty);
         authority := authority_of(&mut c, b);
@@ -13664,6 +14081,7 @@ fn emit_closures<a>(c: (&a mut C)) -> unit {
         module := cl.module.copy();
         ret := cl.ret;
         decl := cl.decl;
+        envmode := cl.mode;
         symbol := cl.symbol.copy();
         names := copy_names(&cl.names);
         params := copy_numbers(&cl.params);
@@ -13710,7 +14128,8 @@ fn emit_closures<a>(c: (&a mut C)) -> unit {
         envty := intern_args(&mut c, 8, decl, 0, u64[], u64[]);
         mut rs = u64[];
         rs.push(1);
-        envref := intern_full(&mut c, 7, envty, 0, rs);
+        // `&Env` for `Fn` (the body only reads captures), `&mut Env` for `FnMut` (it writes them).
+        envref := intern_full(&mut c, 7, envty, envmode, rs);
         id := fresh(&mut c);
         bind(&mut c, copy_bytes(view(".env")), envref, id, 0);
         // The environment is never named in the body; keep it live until the closure returns.
@@ -15097,6 +15516,9 @@ fn simple_type_head<a, b>(c: (&a mut C), name: &b [u8]) -> bool {
     if same(view(n), view("Fn")) {
         return true;
     }
+    if same(view(n), view("FnMut")) {
+        return true;
+    }
     if same(view(n), view("bool")) {
         return true;
     }
@@ -15978,7 +16400,7 @@ fn primary<a>(c: (&a mut C)) -> Val {
             }
         }
         if local == 0 {
-            captured := capture_field(&mut c, view(first), 0);
+            captured := capture_field(&mut c, view(first), 0, 0);
             if captured.ty != 18446744073709551615 {
                 ck := ty_kind(&mut c, captured.ty);
                 if (ck == 12) || (ck == 20) || (ck == 25) {
@@ -16029,7 +16451,7 @@ fn primary<a>(c: (&a mut C)) -> Val {
         }
         return field_path(&mut c, id, ty, 0);
     }
-    captured := capture_field(&mut c, view(first), 0);
+    captured := capture_field(&mut c, view(first), 0, 0);
     if captured.ty != 18446744073709551615 {
         return captured;
     }
@@ -19953,9 +20375,19 @@ fn statement<a>(c: (&a mut C)) -> unit {
         name := ident(&mut c);
         mut l = find_local(&mut c, view(name));
         if l == 0 {
-            captured := capture_field(&mut c, view(name), 0);
-            if captured.ty != 18446744073709551615 {
-                fail(&mut c, view("captured values are read-only inside a closure"));
+            if capture_of(&mut c, view(name)) != 0 {
+                // A capture is a field of the closure's environment: the store goes through an
+                // exclusive reference to that field, which only an `FnMut` closure may take.
+                if (kind(&mut c) == 46) & (next_kind(&mut c) != 40) {
+                    head := capture_place(&mut c, view(name), 1);
+                    a := field_path(&mut c, head.t, head.ty, 2);
+                    target := a.t;
+                    fieldty := ty_arg(&mut c, a.ty);
+                    assignment_tail(&mut c, 0, head.t, head.ty, target, u64[1, fieldty]);
+                    return ();
+                }
+                capture_assignment(&mut c, view(name));
+                return ();
             }
             fail(&mut c, view("undefined assignment"));
         }
