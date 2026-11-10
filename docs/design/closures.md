@@ -24,8 +24,8 @@ Semantics (v1):
   type, so the closure cannot outlive what it borrows (returning it from the function is rejected)
   and the enclosing function's loan checks still see the borrow. A struct or enum that merely holds
   a borrow is not captured, because its layout and dropper are its own.
-- Inside the body captures are read-only fields of the closure's environment: they can be read
-  and borrowed shared, not assigned, mutably borrowed or moved out.
+- Inside the body a capture the body does not write is a read-only field of the closure's
+  environment: it can be read and borrowed shared, not assigned, mutably borrowed or moved out.
 - A closure value is affine (it owns its environment): moving it transfers ownership, calling it
   does not consume it, and dropping it drops its captures. Copying requires moving.
 - Representation: a heap record `{code, drop function, captures...}`; calls pass a pointer to the
@@ -33,8 +33,13 @@ Semantics (v1):
   parameter accepts closures only.
 - Closures may appear inside generic functions; each specialization compiles its own closure body.
   A closure can call a captured closure or function value.
-- Not yet: mutating a capture inside the body (`FnMut` semantics), mutable/borrowed closure
-  parameters, Send/Share for closures, and coercing named functions to `Fn`.
-- `FnMut` is deferred with its rules fixed in advance (a closure that writes a capture is a
-  different type; calling it takes exclusive access to the closure for the call; only written
-  captures change mode): see [the B6 decision](decisions-b2-b6.md#b6-references-captured-fnmut-deferred).
+- A capture the body writes makes the closure `FnMut(...)`: the environment field is mutable in the
+  body, the body's hidden environment parameter is `&mut Env`, and calling the closure takes
+  exclusive access to the closure for the call. Only written captures change mode, so a closure
+  that writes nothing stays `Fn` and keeps its shared-call contract. `Fn` and `FnMut` are different
+  types; a `Fn` closure is accepted where `FnMut` is expected (wider call contract), the reverse is
+  rejected. The rules and the known limitations are in
+  [the B6 decision](decisions-b2-b6.md#b6-references-captured-fnmut-implemented).
+- Not yet: mutable/borrowed closure parameters (a by-value `FnMut` parameter cannot be called
+  because parameters are not mutable storage; take `&mut FnMut(...)`), Send/Share for closures, and
+  coercing named functions to `Fn`.

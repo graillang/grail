@@ -7,12 +7,43 @@ A closure is a function written inline that can use values from where it was cre
 
 Closures have the type `Fn(params) -> result`, so they can be passed to and returned from
 functions. Numbers and other plain values are copied into the closure; owned values such as the
-text in `words` are moved into it, and the original name can no longer be used. Inside the body,
-captured values are read-only. A closure is called like a function and can be called many times;
-when it goes out of scope, the values it captured are cleaned up with it.
+text in `words` are moved into it, and the original name can no longer be used. A closure is
+called like a function and can be called many times; when it goes out of scope, the values it
+captured are cleaned up with it. Closures work inside generic functions; the checker keeps their
+captures affine like other values.
 
-Mutating captured state is rejected: captures are read-only inside the body. Closures work inside
-generic functions; the checker keeps their captures affine like other values.
+A closure that only reads what it captured is `Fn`, and calling it only reads the closure, so it is
+callable through a shared reference and stays usable where a shared call is promised.
+
+## Mutating a capture: `FnMut`
+
+A closure that writes what it captured is `FnMut(...)` instead of `Fn(...)`. Writing means the body
+stores to the capture or to a place rooted at it (`count += 1`, `s.field = 2`, `v[0] = 7`,
+`*r = 5`), borrows it mutably (`&mut count`), or calls a method that may change its receiver. The
+binding that holds the closure must then be mutable, and calling it borrows the closure
+exclusively: a call cannot overlap another call of the same closure, and it cannot overlap a
+shared reference to the closure that is still live.
+
+{{example:fnmut}}
+
+Only the captures the body actually writes change mode; an untouched capture is still read-only
+inside the body, even when what it holds is a `&mut`. Two closures have separate environments, so
+one being called does not block the other, and calls in sequence are fine — the exclusive borrow
+ends when a call returns. A closure that writes a capture still cannot outlive what it captured.
+
+`Fn` and `FnMut` are different types. A closure that writes a capture is rejected where an `Fn` is
+required, with a message that says why, rather than being silently made exclusive. A closure that
+writes nothing is `Fn` and is accepted where `FnMut` is expected, because a call that takes the
+closure exclusively is a stricter promise than the shared call an `Fn` makes.
+
+`FnMut` is written in a type position the same way as `Fn`. A function that has to call the
+caller's closure exclusively takes `&mut FnMut(...)` and calls it through that reference:
+
+```grl
+fn apply_once<a>(step: (&a mut FnMut(u64) -> u64), start: u64) -> u64 {
+    return step(start);
+}
+```
 
 ## Capturing a borrowed value
 
@@ -45,4 +76,25 @@ Any function with a matching signature can be passed where an `Fn` is expected, 
 `vecs::sort_by(&mut tasks, by_priority)` works too. `vecs::sort_by_key` sorts by a computed `u64`
 key, and `vecs::insert_sorted` / `vecs::binary_search` keep a vector as a sorted set.
 
+The stdlib callbacks read their elements, so they take `Fn`: a comparator that writes a captured
+value is `FnMut` and is rejected there instead of being called exclusively behind `sort_by`'s back.
+Count outside the comparator, or pass the count in and return it.
+
 **Try it:** use `words` again after creating `length` and read the compiler's message.
+
+## What is not supported
+
+These are refusals with a diagnostic, not silent behaviour:
+
+- A function parameter is not mutable storage, so a `FnMut` value taken *by value* cannot be called
+  in the callee. Take `&mut FnMut(...)` instead (shown above).
+- A method call on a captured value counts as a write unless the capture is a shared reference or
+  view, so a `Fn` closure cannot call even a reading method on a captured record, vector or string;
+  declaring the closure `mut` and calling it exclusively is the fix.
+- Handing a captured `&mut` to another function, or iterating a captured view mutably, is only
+  accepted inside a `FnMut` closure; the forms the compiler recognises as writes are the ones
+  listed above.
+- A callable reached through a *reference parameter* (`&Fn`, `&mut Fn`, `&mut FnMut`) can be called
+  once, in straight-line code: a second call, or a call inside an `if` or a loop, is rejected today
+  with `access has no live reference authority`. Calling a closure you hold directly is not
+  affected. That is the existing reference-parameter limitation, not something `FnMut` adds.

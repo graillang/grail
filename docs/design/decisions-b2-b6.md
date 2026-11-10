@@ -22,7 +22,7 @@ decision without a stated trigger is what made these items outstanding for so lo
 | B3 | A foreign call **blocks the executing thread**; no green-task scheduling integration is promised for v1. Foreign calls also remain main-thread-only (process-wide host TLS base). | Decided |
 | B4 | Windows uses **thread-per-blocking-call**. IOCP is a named future work item with the design sketch in this page. Green tasks on Windows currently abort at scheduler start. | Decided |
 | B5 | **Abort never unwinds**; nothing may unwind across the C boundary. There is no `defer` and no cleanup runs on an abort path. | Decided |
-| B6 | Closures capture references and views today and cannot outlive the borrow; **`FnMut`/mutable captures are deferred** with the rules that will apply fixed below. | Decided (part deferred) |
+| B6 | Closures capture references and views and cannot outlive the borrow; **`FnMut`/mutable captures are implemented** under the six rules fixed below. | Implemented |
 | B7 | Records passed by value to C: **accepted**, spelling `v: byval R`. | Implementation after B1 |
 
 ## B1: separate compilation accepted
@@ -274,74 +274,103 @@ before dying.
 without handlers; the native abort cases; and the "Abort paths do not unwind" statement in
 [implementation-status.md](implementation-status.md).
 
-## B6: references captured, FnMut deferred
+## B6: references captured, FnMut implemented
 
-**Decision.** Record what exists and fix the rules for the deferred part.
+**Decision.** The deferred part of this record is now implemented under exactly the rules it fixed.
+`FnMut` is a distinct closure type; a closure that writes a capture is `FnMut`, calling one takes
+exclusive access to the closure, and only written captures change mode.
 
-Implemented now (verified on `9caae07`, not just intended):
+Implemented and verified in `compiler/native.grl` (`closure_literal`, `capture_written_at`,
+`capture_place`, `capture_assignment`, `capture_field`, `emit_closures`, `indirect_call`,
+`call_access`, `require_type`, `base_named`):
 
-- Captures are found from the enclosing function's locals named in the body. Plain values are
-  copied; owned values move in (the original binding is gone). A **direct reference or view**
-  (`&T`, `&[T]`, `&[u8]`, `&mut T`) moves in as pointer *and* loan, and the borrowed region becomes
-  part of the closure's type - `Fn(...) -> R` carries the regions it borrows - so a closure cannot
-  outlive what it borrows. Returning it from the function is rejected:
-  `returned borrow escapes its declared input lifetime`.
-- An aggregate that merely *holds* a borrow is not capturable:
-  `closures can capture owned values and direct references, not a struct or enum holding a borrow`.
-  Its layout and dropper are its own.
-- The environment's own fields are declared in the environment's region (`env` is region 1), so the
-  body re-borrows the captured pointer from the environment and never names the enclosing function's
-  lifetimes, which do not exist there (`capture_borrow`, `capture_region`, `capture_field_type`,
-  `compiler/native.grl:12659-12720`; environment construction near `12810-12880`).
-- Captures are **read-only inside the body**: assignment, mutably borrowing a capture or moving one
-  out is rejected (`captured values are read-only inside a closure`). Task handles cannot be
-  captured at all.
-- The closure value is affine and owns its environment: moving transfers it, calling does not
-  consume it, dropping runs the environment's dropper, and calls pass a pointer to the environment
-  as a hidden first argument.
+- **Captures** are found as before. Plain values are copied, owned values move in, and a direct
+  reference or view (`&T`, `&[T]`, `&mut T`) moves in as pointer *and* loan, with the borrowed
+  region in the closure's type, so the closure still cannot outlive what it borrows
+  (`returned borrow escapes its declared input lifetime`). An aggregate that merely holds a borrow
+  is still not capturable.
+- **Written captures.** The body is scanned for a store to a capture or to a place rooted at it
+  (`n = ..`, `n op= ..`, `s.f = ..`, `v[i] = ..`, `*r = ..`), a mutable borrow of it (`&mut n`), and
+  a method call on it that may mutate its receiver (a name in a read-only allowlist — `len`,
+  `contains`, `get`, … — stays a read; any method call on a captured record or closure counts as a
+  write). A capture is written if any of those appears; `Closure.written` records one flag per
+  capture and `Closure.mode` is 1 when any flag is set.
+- **Type.** `Fn(...)` and `FnMut(...)` are different types (`callable_contract` compares the mode, so
+  `same_type` separates them). A `FnMut` closure used where `Fn` is required is rejected with
+  `a closure that mutates a captured value is FnMut, not Fn: calling it needs exclusive access to
+  the closure, so it cannot be used where a shared call is required`. That covers the `Fn(...)`
+  parameter type, function values coerced to it, and the stdlib callback shapes
+  (`vecs::sort_by`, `sort_by_key`, `fold`, `filter_nums`, …) — the evidence case
+  `closure-fnmut-sort-by-rejected` is a comparator that increments a captured counter.
+- **Environment.** The closure body's hidden first parameter is `&Env` for `Fn` and `&mut Env` for
+  `FnMut`, so a store reaches the environment field through an exclusive reference and the existing
+  loan machinery has real authority to check. A store to a plain capture is compiled like `*r = v`
+  (`capture_assignment`): read the field for `op=`, then `exchange_into` an exclusive reference to
+  the field. `s.f = v` and `v[i] = v` route through the same reference, and `&mut capture` returns
+  one. Only a *written* capture is mutable in the body; an unwritten exclusive reference or view is
+  read-only there (`capture_readonly_type`), so an `Fn` closure cannot reach through a captured
+  `&mut`.
+- **Calls.** `indirect_call` on an `FnMut` value requires a mutable binding
+  (`calling a FnMut closure needs a mutable binding (write: mut f = |...| { ... })`), takes an
+  exclusive loan on the closure's own storage for the whole call — arguments included — and ends it
+  when the call returns. A second simultaneous call (`f(f(1))`) or a live shared borrow of the
+  closure is rejected with `calling a FnMut closure needs exclusive access to the closure: it is
+  already borrowed or being called`. A closure with no written capture stays `Fn`: no mutable
+  binding, repeated calls, and calls through a live shared reference all keep working.
+- **Widening.** A closure that writes nothing is `Fn` and is accepted where `FnMut` is expected,
+  because an exclusive call is a stricter promise than the shared call `Fn` makes: by value
+  (`move_as`, one owner, never a copy) and as `&mut Fn(...)` for `&mut FnMut(...)`
+  (`reference_as_fnmut`, same referent and loan, wider call contract). The reverse direction is the
+  rejection above.
 
-Evidence: the native cases `closure-captures-reference` (runs, prints 8),
-`closure-captures-exclusive-reference`, `closure-captured-slice-moves-in`,
-`closure-captured-slice-sort-by`, `closure-borrowed-capture-escape-rejected`,
-`closure-borrowed-capture-through-callee-escape-rejected`, `closure-capture-mutation-rejected`,
-`closure-capture-borrow-mut-rejected`, `closure-aggregate-borrow-capture-rejected`; all three
-diagnostics above were reproduced directly in this review from those cases' sources.
+Evidence (native corpus, all executed on x86-64): `closure-fnmut-counter`,
+`closure-fnmut-disjoint-captures`, `closure-fnmut-sequential-calls`,
+`closure-fnmut-second-call-rejected`, `closure-fnmut-shared-borrow-rejected`,
+`closure-fnmut-not-fn-rejected`, `closure-fnmut-sort-by-rejected`,
+`closure-shared-capture-still-fn`, `closure-shared-borrow-of-fn-closure`,
+`closure-fnmut-vector-element`, `closure-fnmut-captured-field`,
+`closure-fnmut-needs-mut-binding`, `closure-fnmut-through-exclusive-reference`,
+`closure-fnmut-mixed-captures`, plus `closure-capture-mutation-fnmut` and
+`closure-capture-borrow-mut-fnmut` (the two former read-only rejections, now accepted). The book
+example `fnmut` runs in `bun tools/book.mjs check`. The pre-existing escape, aggregate-capture and
+move rules keep their cases.
 
-**Deferred: `FnMut` (mutating a capture in the body) and mutable or borrowed closure parameters.**
-When they are added these rules apply; they are decided here so the feature is not re-litigated:
+**Rejected rather than allowed** (each is a diagnostic, not a silent behaviour):
 
-1. `Fn(...)` and `FnMut(...)` are different types. A closure literal whose body writes a capture is
-   `FnMut`; passing it where `Fn` is expected is rejected rather than silently upgraded.
-2. Calling an `FnMut` value takes exclusive access to the closure for the duration of the call: the
-   binding must be mutable, the call borrows it exclusively, and the loan ends when the call
-   returns. No shared borrow of that closure may exist across the call.
-3. Only the captures the body actually writes change mode; untouched captures stay read-only.
-   Otherwise every closure becomes `FnMut` and the `Fn`-taking stdlib signatures
-   (`vecs::sort_by`, `fold`, `parallel_map` callbacks) lose their types.
-4. A captured `&mut T` is tracked exactly as today's exclusive-reference capture: the region moves
-   with the pointer, the closure cannot outlive it, and writes through the captured view are allowed
-   only while the closure holds it exclusively.
-5. Adapters over borrowed elements keep taking `Fn` (they read). An adapter that hands out `&mut`
-   elements takes `FnMut`, and is the reason to add the mode at all.
-6. Send/Share for closures stays out of scope until `FnMut` exists.
+- A `FnMut` closure where an `Fn` is required — the aliasing hole rule 2 closes would otherwise be
+  open through `sort_by`-style callbacks called from a shared context.
+- Calling a `FnMut` closure through a `&FnMut`/`&Fn` reference — a shared reference to the closure
+  cannot grant the exclusive access a call needs (`mutation through readonly frame`).
+- A by-value `FnMut` *parameter* cannot be called in the callee: Grail parameters are not declared
+  mutable, and calling one would need exactly that. Take `&mut FnMut(...)` instead. This is rule 5's
+  shape and the reason the stdlib callables stay `Fn` (they only read).
+- Using a captured `&mut` in a way the write scan does not recognise as a write (handing it to
+  another function, iterating a captured view mutably, calling a method on a shared-typed capture in
+  an `Fn` closure) is refused by the read-only field type rather than silently allowed.
 
-**Alternatives considered.** (a) `&mut` capture by default, as pre-1.0 Rust did: rejected - it
-forces `mut` at every capture site, breaks every `Fn` parameter, and gives up the read-only body
-rule that lets a closure holding a borrowed view still be passed where `Fn` is expected. (b) By-reference capture
-cells with explicit `move`: rejected for v1 - a second capture discipline plus a shared,
-reference-counted or arena-stored environment contradicts the affine owned environment and would
-need its own escape rules. (c) Make the environment mutable now and defer the type distinction:
-rejected, that is precisely the aliasing hole rule 2 closes. (d) Capturing aggregates that hold
-borrows: deferred, not rejected - it needs layout-aware droppers plus region derivation from fields.
+**Known limitations recorded, not fixed here:**
 
-**Consequence if wrong.** If the read-only body rule is relaxed without rule 2's exclusive call
-loan, a closure can write storage the caller still reads - a silent aliasing hole, not a diagnostic.
-If `FnMut` is added by making all closures mutable, every `Fn` parameter in the stdlib and in the
-ports changes type, a large mechanical churn that the mode-per-written-capture rule exists to avoid.
+- A callable reached through a *reference parameter* (`&Fn`, `&mut Fn`, `&mut FnMut`) can be called
+  once, in straight-line code. A second call, or a call inside an `if` or a loop, is rejected with
+  `access has no live reference authority`. This is pre-existing: it reproduces on `origin/main`
+  with `&Fn` and no `FnMut` involved, and it is why `apply`-style adapters are pinned with a single
+  call. Fixing it belongs to the reference-parameter work, not to closures.
+- The write scan is syntactic. A method call on a captured *record or closure* is always treated as
+  a write (there is no cheap receiver-mode lookup at scan time), so a read-only method call on a
+  captured record makes the closure `FnMut` and needs a `mut` binding. Builtin container methods
+  outside the read-only allowlist are treated the same way.
+- `Send`/`Share` for closures and `mut`-declared parameters stay out of scope, as rule 6 says.
 
-**Enforced by.** The tests above; `capture_borrow`/`capture_field_type` and the read-only environment
-parameter in the closure body; [closures.md](closures.md) (updated with this decision);
-[implementation-status.md](implementation-status.md) and readiness row A11/B6.
+**Consequence if wrong.** If the write scan misses a write, the closure stays `Fn` and the body
+either refuses the store (the read-only field type) or — for a `&mut` capture the scan did not
+flag — the call would not take the closure exclusively. The scan therefore errs towards calling a
+use a write, and the field type is the second line of defence: broad corpus runs (796 native cases,
+the stdlib, `abundance`, the book) found no case where the two disagree silently.
+
+**Enforced by.** The compiler paths listed above; the native cases listed above; the book chapter
+[closures.md](closures.md) (design) and the book chapter `book/chapters/closures.md` with its `fnmut`
+example; the readiness rows A11/B6 in
+[language-readiness.md](language-readiness.md) and [implementation-status.md](implementation-status.md).
 
 ## B7: byval record parameters accepted
 
@@ -392,8 +421,9 @@ because a stale claim is what makes a decided item get re-opened.
 2. [implementation-status.md](implementation-status.md) still has "User FFI boundary | Missing - no
    general extern C declarations". FFI is implemented, tested and documented; that row was
    outdated. Fixed in this change.
-3. The same file's closures row says borrowing captures are missing. They are implemented; only
-   mutating captures and mutable/borrowed closure parameters are missing. Fixed in this change.
+3. The same file's closures row says borrowing captures are missing. They are implemented, and so
+   are mutating captures (`FnMut`); mutable/borrowed closure parameters remain out of scope. Fixed
+   in this change and again when B6 landed.
 4. [borg-agent-port.md](borg-agent-port.md) lists "No user FFI" (blocker 1) and "No macOS or
    Windows target at all" (blocker 3) as exact blockers. Both were resolved by the A-section work;
    blocker 8 ("no suspension-effect contract or cancellation rule for foreign blocking calls") is
@@ -404,7 +434,8 @@ because a stale claim is what makes a decided item get re-opened.
 6. README claimed Windows threads are missing while `windows-backend.md` documents them and the
    `thread-join`/`thread-wake` cases run under Wine; the same paragraph was duplicated. Corrected.
 7. [language-readiness.md](language-readiness.md) row A11 said mutable/borrowed captures are open.
-   Borrowed captures are implemented; only `FnMut` is deferred (B6). Updated.
+   Borrowed captures are implemented, `FnMut` landed under B6, and only mutable/borrowed closure
+   parameters remain deferred. Updated.
 
 ## Not decided here
 
@@ -412,5 +443,6 @@ The vocabulary this page deliberately does not settle: the module-interface deta
 obligations in B1 (its plan of record is [separate-compilation.md](separate-compilation.md)), the
 capability types and their names (B2's revisit trigger), a foreign-call offload trampoline or
 per-thread host TLS (B3's revisit trigger), the IOCP implementation (B4), any unwinding or `defer`
-feature (B5), and the `FnMut` implementation detail beyond the six rules above (B6). Each of those is a design task with a stated trigger, not an open question about these
-decisions.
+feature (B5), and any widening of `FnMut` beyond the six rules above (B6) — for example making a
+by-value `FnMut` parameter callable, which needs `mut` parameters. Each of those is a design task
+with a stated trigger, not an open question about these decisions.
