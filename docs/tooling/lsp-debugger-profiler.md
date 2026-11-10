@@ -8,52 +8,16 @@ The build, test and distribution foundation in
 [cross-platform-ci.md](cross-platform-ci.md) defines the artifact and lane
 contract these tools ship through.
 
-## Implemented LSP MVP
+## Implemented LSP
 
-`tools/lsp.mjs` is a stdio language server:
+The language server is `tools/lsp/main.grl`: a Grail program started by `bun tools/lsp.mjs`,
+with JSON-RPC framing, the lifecycle, full-text sync, compiler-sourced diagnostics and
+`textDocument/definition` for same-file declarations. Capabilities, the diagnostics mapping,
+robustness and the deliberate omissions are documented in [lsp.md](lsp.md); the phase plan
+below covers what is still missing.
 
-```sh
-GRAIL_LSP_COMPILER=/path/to/grail GRAIL_HOME=/path/to/grail-tree bun tools/lsp.mjs
-```
-
-Implemented:
-
-- JSON-RPC 2.0 with `Content-Length` framing, `initialize`/`initialized`,
-  `shutdown`/`exit`, and JSON-RPC errors for unknown requests.
-- `textDocument/didOpen`, `didChange` (full-document sync) and `didClose`.
-- `textDocument/publishDiagnostics` sourced from the compiler's existing
-  `grail check FILE` interface. No client-side or heuristic diagnostics exist:
-  if the compiler is missing or cannot run, the server sends
-  `window/showMessage` and publishes nothing.
-- Versioned diagnostics, a short debounce, and a generation guard so a stale
-  check cannot overwrite a newer document.
-- Compiler byte columns are converted to LSP UTF-16 positions using the
-  document line, not copied as character offsets.
-
-Diagnostics path: the overlay text is written to a temporary `.grl` file, the
-server runs `grail check <file>` in that directory, parses
-`file:line:column: message` from the compiler output, maps the range back to
-the open document and publishes it. A successful check publishes `[]`. If the
-compiler fails without a structured line, its output is surfaced once with
-code `compiler-output`; it is never replaced by a fabricated message.
-
-Limitations of the MVP:
-
-- Each check covers one file plus the runtime and standard library. Project
-  modules and `grail.pkg` dependencies are not included; workspace-wide
-  diagnostics are future work.
-- The compiler reports the first error and exits, so one diagnostic per run.
-- Only push diagnostics are implemented; hover, definition, references,
-  formatting, completion, rename and pull diagnostics are not.
-- `GRAIL_LSP_COMPILER`/`GRAIL_COMPILER`, an installed `grail`, or a host
-  `dist/grail-*-compiler` must be available. The server does not build one.
-
-Tests: `bun test tools/lsp.test.mjs` drives a real stdio session, checks
-initialize/shutdown, an unknown request, one valid document (`[]`), one invalid
-document (the compiler's `unknown function` diagnostic at the expected range),
-a `didChange` to the invalid text and a repair back to `[]`. CI runs the
-protocol tests in the tooling job and the full compiler-backed session in a
-preflight-gated `lsp` job.
+The server was written after the earlier `tools/lsp.mjs` MVP (JavaScript) and replaces it:
+one language server, in the language it serves.
 
 ## What exists today
 
