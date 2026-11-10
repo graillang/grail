@@ -4364,7 +4364,21 @@ fn require_interfaces<a, b, d>(c: (&a mut C), arguments: (&b u64[]), sets: (&d u
         for j in set.len() {
             id := set[j];
             if !satisfies_interface(&mut c, ty, id) {
-                fail(&mut c, view("type does not satisfy interface bound"));
+                // Name the bound and the type that fails it: "does not satisfy interface bound" alone
+                // sends the reader looking for the wrong declaration.
+                mut msg = u8[];
+                push_bytes(&mut msg, view("type does not satisfy interface bound `"));
+                if id <= c.interfaces.len() {
+                    push_bytes(&mut msg, view(c.interfaces[id - 1].module));
+                    push_bytes(&mut msg, view("::"));
+                    push_bytes(&mut msg, view(c.interfaces[id - 1].name));
+                }
+                push_bytes(&mut msg, view("` (argument type kind "));
+                decimal(&mut msg, ty_kind(&mut c, ty));
+                push_bytes(&mut msg, view(", in module "));
+                push_bytes(&mut msg, view(c.module));
+                push_bytes(&mut msg, view(")"));
+                fail(&mut c, view(msg));
             }
         }
     }
@@ -23667,6 +23681,13 @@ fn iface_load<a, b>(c: (&a mut C), path: &a [u8], source_path: &b [u8], phase: u
     for i in lines.len() {
         iface_define(&mut c, &mut state, view(lines[i]), view(path), i + 1);
     }
+    // Now that every parameter name, bound and requirement is in place, give each implementation the
+    // self type the source parse would have built (with its proofs), exactly once.
+    for i in c.impl_params.len() {
+        if c.impl_params[i].self_ty == 0 {
+            iface_impl_self(&mut c, i);
+        }
+    }
     return module;
 }
 
@@ -24084,6 +24105,36 @@ fn iface_env_type<a, b, d>(c: (&a mut C), p: (&b mut IPos), local: &d [u8]) -> u
 }
 // The parameter record of a generic implementation: `impl<T> Foo<T>` is checked against its own
 // parameters when an importer replays one of its generic methods.
+// The self type of an implementation (`impl<K: Hash + Equal, V> Map<K, V>` is `Map<K, V>`) has to
+// carry the same bounds and interface proofs the source parse gives it: `validate_type_constraints`
+// walks every nominal type in the store, so a bare `Map<K, V>` is a real type it would reject.
+fn iface_impl_self<a>(c: (&a mut C), record: u64) -> unit {
+    decl := c.impl_params[record].decl;
+    params := c.impl_params[record].tnames.len();
+    mut bounds = copy_numbers(&c.impl_params[record].bounds);
+    mut reqs = u64[][];
+    for i in c.impl_params[record].interfaces.len() {
+        reqs.push(copy_numbers(&c.impl_params[record].interfaces[i]));
+    }
+    mut args = u64[];
+    for i in params {
+        mut proofs = u64[];
+        if i < reqs.len() {
+            for j in reqs[i].len() {
+                proofs.push(intern_args(&mut c, 15, reqs[i][j], 0, u64[], u64[]));
+            }
+        }
+        mut bits = 0;
+        if i < bounds.len() {
+            bits = bounds[i];
+        }
+        args.push(intern_args(&mut c, 9, i, bits, u64[], proofs));
+    }
+    self := intern_args(&mut c, 8, decl - 1, 0, u64[], args);
+    mut item = &mut c.impl_params[record];
+    exchange(&mut item.self_ty, self);
+    return ();
+}
 fn iface_impl_record<a>(c: (&a mut C), st: (&a mut IState), owner: u64, params: u64, lifetimes: u64) -> unit {
     exchange(&mut st.impl_first, c.impl_params.len());
     if (params == 0) & (lifetimes == 0) {
@@ -24108,7 +24159,7 @@ fn iface_impl_record<a>(c: (&a mut C), st: (&a mut IState), owner: u64, params: 
                 tnames: u8[][],
                 bounds: bounds,
                 interfaces: requirements,
-                self_ty: intern_args(&mut c, 8, owner - 1, 0, u64[], args),
+                self_ty: 0,
             }
         );
     return ();

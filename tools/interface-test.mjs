@@ -60,8 +60,8 @@ function link(files, directory, name = 'program') {
   return assemble(asm, join(directory, name), target, linkArgs);
 }
 
-function run(executable) {
-  const result = spawnSync(executable, [], { encoding: 'utf8', timeout: 900_000 });
+function run(executable, args = [], options = {}) {
+  const result = spawnSync(executable, args, { encoding: 'utf8', timeout: 900_000, ...options });
   return { status: result.status, signal: result.signal, stdout: result.stdout ?? '' };
 }
 
@@ -138,7 +138,7 @@ function proveNoLeakage(directory, module) {
 }
 
 // (a) Equivalence for one program: source build, interface build, verify build.
-function proveEquivalent(name, files, directory, { stdout: expected } = {}) {
+function proveEquivalent(name, files, directory, { stdout: expected, args = [], env = {} } = {}) {
   mkdirSync(directory, { recursive: true });
   const source = compile(files, join(directory, 'source'));
   assert.equal(source.status, 0, `${name}: source build failed\n${source.output}`);
@@ -155,9 +155,12 @@ function proveEquivalent(name, files, directory, { stdout: expected } = {}) {
   assert.equal(verified.status, 0, `${name}: interfaces disagree with their sources\n${verified.output}`);
   const verifyExe = link(files, join(directory, 'verify'));
 
-  const a = run(sourceExe);
-  const b = run(interfaceExe);
-  const c = run(verifyExe);
+  // A case's arguments and its working directory are part of what it tests (a fixture path, for
+  // example), so both builds run exactly the way tests/native-cases.json runs them.
+  const runOptions = { cwd: directory, env: env && Object.keys(env).length ? { ...process.env, ...env } : process.env };
+  const a = run(sourceExe, args, runOptions);
+  const b = run(interfaceExe, args, runOptions);
+  const c = run(verifyExe, args, runOptions);
   assert.equal(b.status, a.status, `${name}: exit status ${b.status} != ${a.status}`);
   assert.equal(b.stdout, a.stdout, `${name}: interface build prints something else`);
   assert.equal(c.status, a.status, `${name}: verify build exit status`);
@@ -282,6 +285,19 @@ pub fn twice(x: u64) -> u64 {
   assert.match(original, /type util::Stream handle params=0 lifetimes=0 transfer=1 share=0/, 'the audited handle contract must travel');
   const manifestPath = join(ifaces, 'interfaces.manifest');
 
+  // (c0) the manifest is consulted at all: corrupt only its recorded digest, leave the interface
+  // untouched, and the build must refuse. Without this, a tamper test can pass for the wrong reason
+  // (e.g. the interface's own digest catching an edit before the manifest is ever read), and a
+  // manifest check that silently compares nothing would look green.
+  const hostDigest = readFileSync(manifestPath, 'utf8').replace(/^util \S+/m, `util ${'0'.repeat(64)}`);
+  writeFileSync(manifestPath, hostDigest);
+  const uncatalogued = compile(files, join(directory, 'uncatalogued'), ['--interface', ifaces]);
+  assert.equal(uncatalogued.status, 1, 'the manifest must be consulted, not decorative');
+  assert.match(uncatalogued.output, /module `util`: the interface file does not match the manifest/, `the manifest refusal must name the module: ${uncatalogued.output}`);
+  writeFileSync(manifestPath, readFileSync(manifestPath, 'utf8').replace(/^util \S+/m, `util ${sha256(original)}`));
+  const recatalogued = compile(files, join(directory, 'recatalogued'), ['--interface', ifaces]);
+  assert.equal(recatalogued.status, 0, `an interface matching its manifest must build\n${recatalogued.output}`);
+
   // (c1) a changed `transfer` is refused: the manifest pins the bytes the emitting run wrote, so an
   // edit to an audit result never reaches the checker.
   writeFileSync(util, original.replace('transfer=1 share=0', 'transfer=0 share=0'));
@@ -387,7 +403,7 @@ function proveCorpus() {
   const selected = corpusCases();
   let passed = 0;
   for (const { index, test, modules } of selected) {
-    const directory = join(work, 'corpus', `${index}-${test.name.replace(/[^A-Za-z0-9_-]/g, '_')}`);
+    const directory = join(work, `${index}-${test.name.replace(/[^A-Za-z0-9_-]/g, '_')}`);
     mkdirSync(directory, { recursive: true });
     let files;
     if (test.files) files = [...test.files.map(file => resolve(root, file)), ...modules];
@@ -406,7 +422,7 @@ function proveCorpus() {
       const viaInterface = compile(files, join(directory, 'interface'), ['--interface', ifaces]);
       assert.equal(viaInterface.status, 0, `${test.name}: interface build failed\n${viaInterface.output}`);
     } else {
-      proveEquivalent(test.name, files, directory, { stdout: test.stdout });
+      proveEquivalent(test.name, files, directory, { stdout: test.stdout, args: test.args ?? [], env: test.env ?? {} });
     }
     passed += 1;
   }
