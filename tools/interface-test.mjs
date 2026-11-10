@@ -389,7 +389,12 @@ report('no body, local or synthetic declaration in an interface', `${leaked} int
 function proveCallerRejected() {
   const directory = join(work, 'caller');
   const files = [join(root, 'tests/interfaces/reject_user.grl'), join(root, 'tests/interfaces/pair.grl'), runtime, platform];
-  const ifaces = emit(files, directory);
+  // The fixture is rejected in its body, so the emitting run exits 1 after it has written the
+  // interfaces (they describe declarations, which are fine); the interface build is what has to
+  // reject the caller.
+  const ifaces = join(directory, 'ifaces');
+  compile(files, directory, ['--emit-interface', ifaces]);
+  assert.ok(existsSync(join(ifaces, 'interfaces.manifest')), 'the emitting run wrote no interfaces');
   const rejected = compile(files, join(directory, 'build'), ['--interface', ifaces]);
   assert.equal(rejected.status, 1, 'a caller that disagrees with the interface must be rejected');
   assert.match(rejected.output, /reject_user\.grl:\d+:\d+: function argument count/, `the rejection must be in the caller's file: ${rejected.output}`);
