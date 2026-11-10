@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- The compiler no longer dies of SIGABRT on a stale call-flex hint record. `hint_use` remembers the
+  token span and `locals` index of a committed literal binding whose type a later use may fix, but the
+  record outlived the file that made it: token spans are indices into one file's token stream, so a
+  record from one file could match an unrelated argument in the next, and the `locals` index it
+  carried could reach past that function's locals. On the Borg module set that aborted the compiler
+  with no diagnostic and no output. The record is now cleared wherever the token stream or `locals` is
+  replaced (file load, function, closure body), and a stale index is reported as a
+  `file:line:column` internal-error diagnostic instead of faulting the process.
+  `compiler/tests/hint_scope_record.grl` + `hint_scope_stale.grl` (case `literal-hint-scope`)
+  reproduce the abort in two eight-line files; the triggering program is valid, so the `.copy()` and
+  `.text()` call sites that exposed it are unchanged.
 - Merge the three design reviews from branch `claude/brave-heisenberg-0h3ska` as documents only
   (`docs/design/first-principles-architecture.md`, `architecture-reassessment.md`,
   `complexity-reassessment.md`, 2,746 lines). Their edits to README and to the research-phase
