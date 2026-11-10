@@ -19,8 +19,11 @@ Semantics (v1):
 
 - Captures are found from the enclosing function's locals named in the body. Plain values
   (`num`, sized integers, `bool`, function values) are copied; owned values are moved in, so the
-  original binding is unavailable afterwards. Capturing a borrowed reference or view is rejected
-  (lifetimes of closure environments are not tracked yet).
+  original binding is unavailable afterwards. A direct reference or view (`&T`, `&[T]`, `&[u8]`,
+  `&mut T`) moves in as well, pointer and loan together: its lifetime becomes part of the closure's
+  type, so the closure cannot outlive what it borrows (returning it from the function is rejected)
+  and the enclosing function's loan checks still see the borrow. A struct or enum that merely holds
+  a borrow is not captured, because its layout and dropper are its own.
 - Inside the body captures are read-only fields of the closure's environment: they can be read
   and borrowed shared, not assigned, mutably borrowed or moved out.
 - A closure value is affine (it owns its environment): moving it transfers ownership, calling it
@@ -30,5 +33,5 @@ Semantics (v1):
   parameter accepts closures only.
 - Closures may appear inside generic functions; each specialization compiles its own closure body.
   A closure can call a captured closure or function value.
-- Not yet: borrowed or mutable captures (`FnMut`), closure parameters that hold borrows,
-  Send/Share for closures, and coercing named functions to `Fn`.
+- Not yet: mutating a capture inside the body (`FnMut` semantics), Send/Share for closures, and
+  coercing named functions to `Fn`.

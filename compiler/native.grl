@@ -2204,6 +2204,19 @@ fn call_bonds<a>(
         source := place_of(&mut c, slot);
         ty := c.params[first + i];
         kind := ty_kind(&mut c, ty);
+        // A closure argument can carry lifetimes its parameter's `Fn(...)` type does not name. The
+        // caller keeps the loan by handing it to the result: a callee that returns the callable
+        // cannot make it outlive what it borrows.
+        if kind == 20 {
+            n := resource(&mut c, slot);
+            if n != 0 {
+                info := &c.resources[n - 1];
+                actual := info.ty;
+                if (ty_kind(&mut c, actual) == 20) & contains_borrow(&mut c, actual, 0) {
+                    return_bonds(&mut c, source, holder, 1);
+                }
+            }
+        }
         mut rs = type_caps(&mut c, ty, 0);
         if kind == 7 {
             rs = type_regions(&mut c, ty);
@@ -2908,7 +2921,7 @@ fn stored_source<a>(c: (&a mut C), slot: u64, ty: u64) -> unit {
         return ();
     }
     k := ty_kind(&mut c, ty);
-    if (k != 5) & (k != 7) {
+    if (k != 5) & (k != 7) & (k != 27) {
         return ();
     }
     if has_bonds(&mut c, place) {
@@ -3131,9 +3144,9 @@ fn validate_return<a>(c: (&a mut C), v: Val) -> unit {
     if c.raw {
         return ();
     }
-    if contains_borrow(&mut c, v.ty, 0) == 0 {
-        return ();
-    }
+    // Every returned value is checked, not only one whose type names a borrow: a closure that
+    // captured a reference keeps its loan in the environment, and a value that merely holds such a
+    // closure (`struct Holder { f: Fn(u64) -> u64 }`) still must not carry a loan out of the frame.
     place := place_of(&mut c, v.t);
     if place == 0 {
         return ();
@@ -4185,25 +4198,30 @@ fn callable_contract<a, b>(
     }
     ar := type_regions(&mut c, actual);
     er := type_regions(&mut c, expected);
-    if ar.len() != er.len() {
-        return false;
-    }
-    for i in ar.len() {
-        from := ar[i];
-        to := er[i];
-        mut seen = 0;
-        for j in map.len() / 2 {
-            if map[j * 2] == from {
-                if map[j * 2 + 1] != to {
-                    return false;
-                }
-                seen = 1;
-                break;
-            }
+    // A closure's own regions are the lifetimes it captured, not part of its signature: a closure
+    // that borrows is accepted where a plain `Fn(...)` is expected. The loan stays on the value, so
+    // letting the value outlive the borrow is still rejected elsewhere.
+    if ak != 20 {
+        if ar.len() != er.len() {
+            return false;
         }
-        if seen == 0 {
-            map.push(from);
-            map.push(to);
+        for i in ar.len() {
+            from := ar[i];
+            to := er[i];
+            mut seen = 0;
+            for j in map.len() / 2 {
+                if map[j * 2] == from {
+                    if map[j * 2 + 1] != to {
+                        return false;
+                    }
+                    seen = 1;
+                    break;
+                }
+            }
+            if seen == 0 {
+                map.push(from);
+                map.push(to);
+            }
         }
     }
     if (ak == 6) + (ak == 27) + (ak == 7) + (ak == 12) + (ak == 13) + (ak == 14) + (ak == 16) + (ak == 20) {
@@ -4288,6 +4306,15 @@ fn borrow_walk<a, b>(c: (&a mut C), ty: u64, trail: (&b mut u64[])) -> u64 {
     arg := ty_arg(&mut c, ty);
     if (k == 5) + (k == 7) + (k == 27) {
         return 1;
+    }
+    // A closure that captured a reference or view holds the loan: the regions it carries are the
+    // lifetimes it depends on, so every borrow rule applies to the closure value itself.
+    if k == 20 {
+        rs := type_regions(&mut c, ty);
+        if rs.len() != 0 {
+            return 1;
+        }
+        return 0;
     }
     if (k == 10) + (k == 6) + (k == 13) {
         return borrow_walk(&mut c, arg, &mut trail);
@@ -12578,9 +12605,10 @@ fn int_binary<a>(c: (&a mut C), k: u64, left: u64, right: u64, ty: u64) -> Val {
 }
 // ---- capturing closures: `|x: T, ...| -> R body`, type Fn(T,...)->R (kind 20) ----
 // The value is an owned record {code, dropper, captures...}. Scalars are copied into it and owned
-// values moved; borrowed values cannot be captured yet. The body is compiled afterwards as a
-// separate function whose hidden first parameter is a shared reference to that record, so
-// captures are read-only fields (no mutation, no moving out).
+// values moved; a direct reference or view (`&T`, `&[T]`, `&mut T`) moves in as well, pointer and
+// loan together, so the closure's type carries the regions it borrows and it cannot outlive them.
+// The body is compiled afterwards as a separate function whose hidden first parameter is a shared
+// reference to that record, so captures are read-only fields (no mutation, no moving out).
 fn closure_free_name<a, b>(c: (&a mut C), name: &b [u8], params: (&a u8[][])) -> u64 {
     for i in params.len() {
         p := &params[i];
@@ -12589,6 +12617,55 @@ fn closure_free_name<a, b>(c: (&a mut C), name: &b [u8], params: (&a u8[][])) ->
         }
     }
     return true;
+}
+// A capture that is itself a reference or view: the pointer moves into the environment and the
+// loan moves with it. Aggregates that merely contain a borrow keep their own layout and dropper, so
+// they are rejected rather than silently copied.
+fn capture_borrow<a>(c: (&a mut C), ty: u64) -> u64 {
+    k := ty_kind(&mut c, ty);
+    if (k == 5) + (k == 7) + (k == 27) {
+        return 1;
+    }
+    if contains_borrow(&mut c, ty, 0) {
+        fail(
+            &mut c,
+            view("closures can capture owned values and direct references, not a struct or enum holding a borrow")
+        );
+    }
+    return 0;
+}
+// The lifetime a captured reference actually borrows: the region of the place its live loan reads.
+// A local source has region 0, which no closure type may carry out of the function.
+fn capture_region<a>(c: (&a mut C), slot: u64) -> u64 {
+    place := place_of(&mut c, slot);
+    if place == 0 {
+        return 0;
+    }
+    for i in c.bonds.len() {
+        mut b = &c.bonds[i];
+        holder := b.holder;
+        loan := b.loan;
+        guard := b.guard;
+        if (holder == place) & (guard == 0) {
+            if loan_live(&mut c, loan) {
+                mut l = &c.check.loans[loan - 1];
+                source := l.source;
+                return region_of(&mut c, source);
+            }
+        }
+    }
+    return 0;
+}
+// The environment field is declared in the environment's own lifetime (`env` is region 1): the body
+// re-borrows the captured reference from the environment, never from the enclosing function's
+// lifetime names, which do not exist there.
+fn capture_field_type<a>(c: (&a mut C), ty: u64) -> u64 {
+    mut rs = u64[];
+    rs.push(1);
+    k := ty_kind(&mut c, ty);
+    arg := ty_arg(&mut c, ty);
+    mode := ty_mode(&mut c, ty);
+    return intern_args(&mut c, k, arg, mode, rs, u64[]);
 }
 fn closure_literal<a>(c: (&a mut C)) -> Val {
     // Inside a generic function the closure is compiled once per specialization, with its bindings.
@@ -12710,21 +12787,23 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
     }
     // Template validation checks captures and moves only; specializations build the real object.
     if c.validating {
+        mut caps = u64[];
         for j in captures.len() {
             name := &captures[j];
             local := find_local(&mut c, view(name));
             id := local_id(&mut c, local - 1);
             ty := local_ty(&mut c, local - 1);
-            if contains_borrow(&mut c, ty, 0) + (ty_kind(&mut c, ty) == 7) {
-                fail(&mut c, view("closures cannot capture borrowed values yet"));
+            // A capture contributes the lifetime it borrows to the closure's type.
+            if capture_borrow(&mut c, ty) {
+                add_region(&mut caps, capture_region(&mut c, id));
             }
             observe(&mut c, id);
-            if needs_drop(&mut c, ty) {
+            if needs_drop(&mut c, ty) + (ty_kind(&mut c, ty) == 7) {
                 held := move_value(&mut c, val(id, ty));
                 move_out(&mut c, held);
             }
         }
-        vfn := intern_args(&mut c, 20, ret, 0, u64[], copy_numbers(&params));
+        vfn := intern_args(&mut c, 20, ret, 0, caps, copy_numbers(&params));
         placeholder := imm(&mut c, 0);
         return own(&mut c, placeholder, vfn);
     }
@@ -12737,20 +12816,26 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
     c.fields.push(Field { name: copy_bytes(view("__drop")), ty: 0 });
     mut slots = u64[];
     mut types = u64[];
+    mut borrowed = u64[];
+    mut caps = u64[];
     for j in captures.len() {
         name := &captures[j];
         local := find_local(&mut c, view(name));
         id := local_id(&mut c, local - 1);
         ty := local_ty(&mut c, local - 1);
-        if contains_borrow(&mut c, ty, 0) + (ty_kind(&mut c, ty) == 7) {
-            fail(&mut c, view("closures cannot capture borrowed values yet"));
-        }
         if contains_task(&mut c, ty, 0) {
             fail(&mut c, view("closures cannot capture Task handles"));
         }
-        c.fields.push(Field { name: name.copy(), ty: ty });
+        borrow := capture_borrow(&mut c, ty);
+        mut field = ty;
+        if borrow {
+            add_region(&mut caps, capture_region(&mut c, id));
+            field = capture_field_type(&mut c, ty);
+        }
+        c.fields.push(Field { name: name.copy(), ty: field });
         slots.push(id);
-        types.push(ty);
+        types.push(field);
+        borrowed.push(borrow);
     }
     count := 2 + captures.len();
     c
@@ -12773,10 +12858,13 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
         );
     decl := c.decls.len() - 1;
     envty := intern_args(&mut c, 8, decl, 0, u64[], u64[]);
-    fnty := intern_args(&mut c, 20, ret, 0, u64[], copy_numbers(&params));
+    fnty := intern_args(&mut c, 20, ret, 0, caps, copy_numbers(&params));
     // Build the object.
     sz := imm(&mut c, count);
     obj := invoke(&mut c, view("rt_rec"), one(sz));
+    // The environment's place exists before the captures are stored, so a borrowed capture can
+    // record its loan against the field it lands in.
+    own(&mut c, obj, fnty);
     mut symbol = copy_bytes(view("c"));
     decimal(&mut symbol, index);
     o(&mut c, view("leaq "));
@@ -12793,7 +12881,18 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
         slot := slots[j];
         ty := types[j];
         observe(&mut c, slot);
-        if needs_drop(&mut c, ty) {
+        if borrowed[j] {
+            // The reference moves in: the field takes over its loans, so the closure object is what
+            // keeps the referent alive and cannot be used past the end of the loan.
+            root := place_of(&mut c, obj);
+            field_place := member_place(&mut c, root, 2 + j, ty);
+            source := place_of(&mut c, slot);
+            transfer_bonds(&mut c, source, field_place);
+            get(&mut c, slot, view("%rax"));
+            pointer := save(&mut c);
+            rec_store(&mut c, obj, 2 + j, pointer);
+            move_out(&mut c, val(slot, ty));
+        } else if needs_drop(&mut c, ty) {
             held := move_value(&mut c, val(slot, ty));
             rec_store(&mut c, obj, 2 + j, held.t);
             move_out(&mut c, held);
@@ -12827,7 +12926,7 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
                 }
             );
     }
-    return own(&mut c, obj, fnty);
+    return val(obj, fnty);
 }
 fn copy_bytes<a>(x: &a [u8]) -> u8[] {
     mut o = u8[];

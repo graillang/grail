@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- A closure may capture a reference or view (`&T`, `&[T]`, `&[u8]`, `&mut T`): the pointer moves into
+  the closure and its loan moves with it, so a comparator can read a key that lives outside the value
+  it is given (`groups := &b.groups; vecs::sort_by(&mut order, |x, y| ... groups[*x] ...)`). The closure
+  type records the captured lifetime, so a closure that borrows cannot be returned out of the
+  function or stored where the borrow does not reach; a struct or enum that merely holds a borrow is
+  still rejected. Returning a value that carries a live loan is now rejected whatever its type says.
+  The Abundance cluster builder sorts pages with such a comparator again instead of precomputing keys
+  into a vector (`vecs::sort_by_key`); output unchanged.
 - A program's own `Task`, `Mutex`, `Atomic`, `Scope` or `CancelToken` type shadows the built-in generic of that name
   (`Task[...]` was a parse error). A slice compares with `==` against a vector of the same element type.
 - Book: duplicate chapters merged (numbers, bytes and text, records and vectors, views and slices); every example uses

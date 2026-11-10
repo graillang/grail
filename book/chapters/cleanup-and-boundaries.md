@@ -43,7 +43,7 @@ small slabs for reuse, while large single-object arenas are released immediately
 
 - Map iteration with `for key, value in map`; use indexing, `get` and `entry` instead.
 - Record patterns in `match`; read the fields instead.
-- Closures that capture a borrowed value; capture an owned copy instead.
+- Closures that capture a struct or enum holding a borrow; capture the reference itself instead.
 - Consuming loops over owned elements (`for item in items` where items own data); use `&items`.
 
 Indexed map assignment currently updates a named map or a field path only; a temporary receiver or a
