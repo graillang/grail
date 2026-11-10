@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- Fixed: `!` on a `None` inside an `extern "C"` callback died of SIGSEGV instead of reaching the
+  checked abort (SIGABRT / exit 134, the B5 policy). The unwrap was right; the value never existed.
+  A declaration (`absent: u64? := None`), an assignment and a `return` in an `unsafe module` all
+  skipped `adopt_value`, which is the context *lowering* - `None`/`Some` construction, union
+  injection, a function used as a closure - and not a check, so a raw module left `None` as an
+  untyped `0` and `absent!` dereferenced a null payload. The three sites now run `adopt_value`
+  regardless of raw mode; only `require_type` and the literal-typing tail (a raw module's literals
+  stay untyped words) remain safe-mode. The `None` token span is also cleared when the token stream
+  or `locals` is replaced, like the call-flex hint record, so a span from another file can never
+  fabricate an option object. `tests/ffi/unwrap_none_callback.grl` (an `extern "C"` callback that C
+  calls through the shim) asserts SIGABRT and the output printed before it; without the fix the same
+  program dies of SIGSEGV.
 - Fixed: a sized integer in an `unsafe module` (the runtime's raw mode) computed its arithmetic as
   an untyped unsigned word, so `x: i32 = 0; x = x - 1` aborted in checked mode instead of producing
   `-1`, and an `i64` comparison such as `status < 0` was an unsigned compare. Raw mode skips the

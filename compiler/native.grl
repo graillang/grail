@@ -3613,10 +3613,13 @@ fn load_file<a>(c: (&a mut C), index: u64) -> unit {
     exchange(&mut c.toks, toks);
     exchange(&mut c.src, src);
     exchange(&mut c.pos, 0);
-    // Token positions are indices into this file: a call-flex hint record from another file is stale.
+    // Token positions are indices into this file: a call-flex hint record or a `None` span from
+    // another file is stale.
     exchange(&mut c.cf_start, 0);
     exchange(&mut c.cf_end, 0);
     exchange(&mut c.cf_local, 0);
+    exchange(&mut c.none_start, 0);
+    exchange(&mut c.none_end, 0);
     return ();
 }
 
@@ -6466,6 +6469,8 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     exchange(&mut c.cf_start, 0);
     exchange(&mut c.cf_end, 0);
     exchange(&mut c.cf_local, 0);
+    exchange(&mut c.none_start, 0);
+    exchange(&mut c.none_end, 0);
     exchange(&mut c.debug_vars, DebugVar[]);
     exchange(&mut c.resources, Resource[]);
     exchange(&mut c.next, 0);
@@ -12908,6 +12913,11 @@ fn adopt_value<a>(c: (&a mut C), v: Val, start: u64, end: u64, expected: u64) ->
     if (v.ty != 0) & (c.lit_negative == 0) {
         return v;
     }
+    // Literal typing is a safe-mode feature; below here only that adoption remains, and a raw
+    // module's literals are untyped words.
+    if c.raw != 0 {
+        return v;
+    }
     if adopt_literal(&mut c, start, end, expected) {
         return val(v.t, expected);
     }
@@ -18825,10 +18835,12 @@ fn statement<a>(c: (&a mut C)) -> unit {
         mut v = expr_expected(&mut c, 0, expected_result);
         rend := c.pos;
         expect(&mut c, view(";"));
+        // Context lowering (None/Some, union injection, a function used as a closure) is not a
+        // check: an `unsafe module` needs the value built the same way everywhere, or a `!` on a
+        // None that was left as a raw 0 dereferences a null payload instead of aborting.
+        v = adopt_value(&mut c, v, rstart, rend, expected_result);
         if c.raw == 0 {
-            result := c.result;
-            v = adopt_value(&mut c, v, rstart, rend, result);
-            require_type(&mut c, v.ty, result);
+            require_type(&mut c, v.ty, expected_result);
         }
         validate_return(&mut c, val(v.t, v.ty));
         move_out(&mut c, val(v.t, v.ty));
@@ -18884,8 +18896,8 @@ fn statement<a>(c: (&a mut C)) -> unit {
                 mut v = expr_expected(&mut c, 0, ty);
                 vend := c.pos;
                 expect(&mut c, view(";"));
+                v = adopt_value(&mut c, v, vstart, vend, ty);
                 if c.raw == 0 {
-                    v = adopt_value(&mut c, v, vstart, vend, ty);
                     if (ty == 0) & is_bool(&mut c, v.ty) {
                         fail(&mut c, view("type mismatch"));
                     }
@@ -19935,7 +19947,7 @@ fn assignment_tail<a>(c: (&a mut C), l: u64, id: u64, ty: u64, target: u64, thro
     if reservation != 0 {
         release(&mut c, reservation - 1);
     }
-    if (operator == 61) & (c.raw == 0) {
+    if operator == 61 {
         v = adopt_value(&mut c, v, vstart, vend, expected);
     }
     if operator != 61 {
