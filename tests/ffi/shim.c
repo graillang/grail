@@ -115,3 +115,75 @@ void c_ptr_fill(unsigned char *p, long long n, long long v) { for (long long i =
 long long c_is_null(const void *p) { return p == 0; }
 struct cbuf { const unsigned char *data; long long len; };
 long long c_buf_sum(const struct cbuf *b) { return c_ptr_sum(b->data, b->len); }
+
+/* ---- records reached through a pointer Grail owns (tests/ffi/record_pointers.grl) ----
+ *
+ * `cptr(&r)` hands C the address of r's own C-layout fields, which is what a create-info
+ * struct needs when it points at another struct: `p_app` is a `const struct app_info *`
+ * filled by Grail, not by C. */
+struct app_info {
+    unsigned api_version;
+    unsigned flags;
+};
+struct create_info {
+    unsigned s_type;
+    unsigned pad;
+    const struct app_info *p_app;
+    const void *p_names;
+    unsigned count;
+};
+long long c_create_info(const struct create_info *info) {
+    return (long long)info->p_app->api_version + (long long)info->count + (long long)info->s_type;
+}
+long long c_app_version(const struct app_info *app) { return (long long)app->api_version; }
+
+/* A record out-parameter: C writes the struct in place and leaves `flags` alone, so the caller's
+ * zero-filled binding is what `flags` reads afterwards. The result is the value C found there. */
+long long c_fill_app(struct app_info *app) {
+    long long seen = (long long)app->flags;
+    app->api_version = 4194304;
+    return seen;
+}
+
+/* An array of handles: a fixed-capacity record of handle fields is the array, and its own
+ * address is the `T *` C writes. */
+struct handle_slots {
+    unsigned s_type;
+    unsigned pad;
+    unsigned long long h0;
+    unsigned long long h1;
+    unsigned long long h2;
+    unsigned long long h3;
+};
+long long c_alloc_handles(struct handle_slots *slots) {
+    slots->h0 = 11;
+    slots->h1 = 22;
+    slots->h2 = 33;
+    slots->h3 = 44;
+    return 0;
+}
+long long c_sum_handles(const struct handle_slots *slots) {
+    return (long long)(slots->h0 + slots->h1 + slots->h2 + slots->h3);
+}
+
+/* An array of structs: the record's bytes are the array, and an element is an interior address. */
+struct ref_pair {
+    unsigned a;
+    unsigned b;
+};
+struct ref_array {
+    struct ref_pair first;
+    struct ref_pair second;
+};
+long long c_ref_sum(const struct ref_pair *first, const struct ref_pair *second) {
+    return (long long)(first->a + first->b + second->a + second->b);
+}
+
+/* Two declarations of one symbol, both taking the same count record: the regression case for the
+ * exit-time abort the RHI work hit (docs/rhi.md). The two C-visible signatures differ, the C
+ * function reads the record either way. */
+struct count_record {
+    unsigned s_type;
+    unsigned count;
+};
+long long c_enum_count(const struct count_record *count) { return (long long)count->count; }

@@ -1,0 +1,146 @@
+// Record pointers, record out-parameters and arrays of handles: the three shapes a Vulkan
+// create-info graph needs and the FFI could not express before (docs/ffi.md, "Records by pointer").
+//
+//   - `cptr(&r)` / `cptr_mut(&mut r)` is the address of an extern record's own fields, so a struct
+//     that *points at* another struct crosses as C's `const R *` / `R *`;
+//   - `p: &mut R` in a declaration is the C `R *` C writes through, and the typed fields are read
+//     back afterwards;
+//   - an array of handles is a record of handle fields: C writes the array (`c_alloc_handles`), and
+//     Grail seeds another one from it and passes it back (`c_sum_handles`);
+//   - one count record crosses two declarations of one symbol, which used to abort at exit.
+
+extern "C" record AppInfo {
+    api_version: u32,
+    flags: u32
+}
+
+extern "C" record CreateInfo {
+    s_type: u32,
+    pad: u32,
+    p_app: CPtr,
+    p_names: CPtr,
+    count: u32
+}
+
+extern "C" record RefPair {
+    a: u32,
+    b: u32
+}
+
+extern "C" record RefArray {
+    first: RefPair,
+    second: RefPair
+}
+
+handle Token;
+
+extern "C" record HandleSlots {
+    s_type: u32,
+    pad: u32,
+    h0: Token,
+    h1: Token,
+    h2: Token,
+    h3: Token
+}
+
+extern "C" record CountRecord {
+    s_type: u32,
+    count: u32
+}
+
+extern "C" lib "shim.o" fn c_create_info(info: CreateInfo) -> i64;
+extern "C" lib "shim.o" fn c_app_version(app: CPtr) -> i64;
+extern "C" lib "shim.o" fn c_fill_app(app: &mut AppInfo) -> i64;
+extern "C" lib "shim.o" fn c_alloc_handles(slots: &mut HandleSlots) -> i64;
+extern "C" lib "shim.o" fn c_sum_handles(slots: HandleSlots) -> i64;
+extern "C" lib "shim.o" fn c_ref_sum(first: CPtr, second: CPtr) -> i64;
+extern "C" lib "shim.o" fn c_enum_count(count: CountRecord) -> i64;
+extern "C" lib "shim.o" as "c_enum_count" fn c_enum_one(count: CountRecord, want: u64) -> i64;
+
+fn main() -> u64 {
+    // ---- the address of a record, as a pointer field of another record ----------------------
+    // `p_app` is a `const struct app_info *`: Grail keeps ownership of `app`, C only reads it.
+    mut app = AppInfo { api_version: 5, flags: 0 };
+    mut info = CreateInfo { s_type: 1, pad: 0, p_app: cnull(), p_names: cnull(), count: 7 };
+    unsafe {
+        info.p_app = cptr(&app);
+        info.p_names = cptr(&app);
+    }
+    mut created: i64 = 0;
+    mut version: i64 = 0;
+    unsafe {
+        created = c_create_info(info);
+        version = c_app_version(info.p_app);
+    }
+    println(created); // 5 + 7 + 1
+    println(version); // 5
+
+    // ---- a record out-parameter: C fills the struct in place ---------------------------------
+    // Declared without an initializer, an extern record is zero-filled, so the fields C does not
+    // write still have a defined value (`flags` comes back 0) and the address of the record is
+    // what `&mut filled` hands over.
+    mut filled: AppInfo;
+    mut seen: i64 = 0;
+    unsafe {
+        seen = c_fill_app(&mut filled);
+    }
+    println(seen);           // 0, the value C found in flags
+    println(filled.api_version); // 4194304, written by C
+    println(filled.flags);       // 0, never written by C
+
+    // ---- an array of handles, written by C, then passed back ---------------------------------
+    // A handle cannot be constructed, so the array C fills is a zero-filled record of handle
+    // fields, and the seeded array below is built from the handles C produced.
+    mut slots: HandleSlots;
+    mut st: i64 = 0;
+    unsafe {
+        st = c_alloc_handles(&mut slots);
+    }
+    println(st); // 0
+    mut total: i64 = 0;
+    unsafe {
+        total = c_sum_handles(slots);
+    }
+    println(total); // 11 + 22 + 33 + 44
+
+    mut seeded = HandleSlots {
+        s_type: 2,
+        pad: 0,
+        h0: slots.h0,
+        h1: slots.h0,
+        h2: slots.h0,
+        h3: slots.h3
+    };
+    mut seeded_total: i64 = 0;
+    unsafe {
+        seeded_total = c_sum_handles(seeded);
+    }
+    println(seeded_total); // 11 * 3 + 44
+
+    // ---- an array of structs, and an element of it -------------------------------------------
+    // A record of embedded records is the array: the record's own address is the `T *`, and an
+    // element's address is interior to it.
+    mut pairs = RefArray {
+        first: RefPair { a: 1, b: 2 },
+        second: RefPair { a: 30, b: 400 }
+    };
+    mut sum: i64 = 0;
+    unsafe {
+        sum = c_ref_sum(cptr(&pairs.first), cptr(&pairs.second));
+    }
+    println(sum); // 1 + 2 + 30 + 400
+
+    // ---- one record, two declarations of one symbol ------------------------------------------
+    // The count record crosses a declaration that takes only the record and one that takes the
+    // record plus a word, both bound to `c_enum_count`. This is the shape that used to abort at
+    // exit in the runtime's free path after main had already returned 0.
+    mut count = CountRecord { s_type: 0, count: 4 };
+    mut both: i64 = 0;
+    unsafe {
+        a := c_enum_count(count);
+        b := c_enum_one(count, 1);
+        both = a + b;
+    }
+    println(both); // 4 + 4
+    return 0;
+}

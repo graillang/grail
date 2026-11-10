@@ -43,9 +43,10 @@ extern "C" fn c_identity(v: u64) -> u64;
 | `&mut [u8]` (parameter) | `uint8_t *, size_t` | two: pointer then length |
 | `CStr` | `const char *` (NUL-terminated) | one 64-bit pointer |
 | `CPtr` / `CMutPtr` | `const void *` / `void *` | one 64-bit pointer |
+| `&r` / `&mut r` with `cptr`/`cptr_mut` (`r` an extern record) | `const R *` / `R *` | one 64-bit pointer |
 | `handle H` | an opaque C token (`uint64_t` by convention) | one 64-bit word |
 | `cfn(P...) -> R` | `R (*)(P...)` | one 64-bit code address |
-| `&mut H` (parameter, `H` a `handle`, `CPtr` or `CMutPtr`) | `H *` / `void **`: a slot the callee writes | one 64-bit pointer |
+| `&mut H` (parameter, `H` a `handle`, `CPtr`, `CMutPtr` or an extern record) | `H *` / `void **` / `R *`: storage the callee writes | one 64-bit pointer |
 | `extern "C" record R` (parameter) | `R *`, the address of the struct's fields | one 64-bit pointer |
 | `extern "C" record R` (result) | `R`, returned by value per the target ABI | registers or a hidden result pointer |
 | `unit` (result only) | `void` | result register ignored |
@@ -86,6 +87,55 @@ fn digest<a>(input: &a [u8]) -> u8[] {
   so C may read or write past the bytes, or keep the pointer after Grail frees them. The Grail
   side stays responsible for passing a buffer of the size C expects.
 - The bytes stay owned by Grail and alive until the end of the statement that made the pointer.
+
+### Records by pointer
+
+A C struct that *points at* another struct — `VkInstanceCreateInfo::pApplicationInfo`,
+`VkRenderPassCreateInfo::pAttachments`, `VkPresentInfoKHR::pSwapchains` — needs the address of an
+`extern "C"` record Grail owns. `cptr(&r)` is that address as a `CPtr`, and `cptr_mut(&mut r)` the
+same address as a `CMutPtr`:
+
+```grail
+extern "C" record AppInfo { api_version: u32, flags: u32 }
+extern "C" record CreateInfo { s_type: u32, pad: u32, p_app: CPtr, p_names: CPtr, count: u32 }
+extern "C" lib "shim.o" fn c_create_info(info: CreateInfo) -> i64;
+
+fn main() -> u64 {
+    mut app = AppInfo { api_version: 5, flags: 0 };
+    mut info = CreateInfo { s_type: 1, pad: 0, p_app: cnull(), p_names: cnull(), count: 7 };
+    unsafe {
+        info.p_app = cptr(&app);
+    }
+    mut created: i64 = 0;
+    unsafe {
+        created = c_create_info(info);
+    }
+    println(created); // 5 + 7 + 1
+    return 0;
+}
+```
+
+- The pointer is the address of the record's *own fields* — the pointer a record *parameter* already
+  is — so `cptr(&r)` and passing `r` itself reach the same bytes. One pointer type does not replace
+  the other: a record parameter stays the way to pass a struct to a call, and `cptr` is the way to
+  *name* its address when it has to be stored in a field, kept in a binding or compared.
+- Only an `extern "C"` record has a C layout to point at. `cptr(&plain_record)` is refused with
+  `cptr takes the address of an extern "C" record; a Grail record has no C layout`.
+- The record must be a name: `cptr(&AppInfo { ... })` is refused with `cptr needs a named record:
+  the address of a temporary would not outlive the pointer`, because a temporary's storage is a
+  binding nobody can see and its lifetime would be a guess the caller cannot check.
+- The borrow is the ordinary call-scoped one: while the pointer is live the record cannot be moved,
+  dropped or handed to C again. `c_two(cptr(&r), cptr_mut(&mut r))` fails with `the value handed to
+  C as a writable pointer is already borrowed in this expression`, and the read-only-then-writable
+  order with `the value handed to C as a read-only pointer is already mutably borrowed in this
+  expression`. `cptr_mut` also requires a mutable place, as `cptr_mut` of a byte sequence does.
+- It is `unsafe` for the same reason as `cptr` of bytes: the pointer carries no length and no
+  lifetime once C holds it. Grail keeps ownership of the record and frees it at the end of the Grail
+  scope, so C must not free or retain it.
+- A field of an embedded record is interior storage, and its address is the `R *` a nested struct
+  member has in C: `cptr(&pairs.first)` where `pairs` is a record of `RefPair` fields points into
+  `pairs` at that element's offset. An array of structs is therefore a record of embedded records
+  and needs no separate array type — the record's address *is* the array.
 
 ### Byte views
 
@@ -213,9 +263,24 @@ fn main() -> u64 {
   callee writes the word; Grail reads the binding afterwards, and no cast or accessor is needed.
 - `&mut` is required. `&H` would be the C `const H *`, which C cannot store through, and is refused
   with `an extern C out-parameter needs &mut; a shared &H is the C const pointer`.
-- Only `handle`, `CPtr` and `CMutPtr` bindings are out-parameter slots. Every other reference shape
-  — `&mut i64`, `&mut SomeRecord`, `&mut string` — is refused with
-  `an extern C out-parameter must be &mut a handle, CPtr or CMutPtr`.
+- A `handle`, a `CPtr`/`CMutPtr`, or an `extern "C"` record is an out-parameter slot. Every other
+  reference shape — `&mut i64`, `&mut some_grail_record`, `&mut string` — is refused with
+  `an extern C out-parameter must be &mut a handle, CPtr, CMutPtr or extern "C" record`.
+- `p: &mut R` for an extern record is the C `R *`: the address of the record's own fields, so the
+  callee fills the struct in place and Grail reads the typed fields afterwards
+  (`vkGetPhysicalDeviceSurfaceCapabilitiesKHR`, `vkGetSurfaceFormats`). It needs a binding to write
+  into: `c_fill(&mut Slots { ... })` is refused with `an extern C out-parameter needs a binding to
+  write into; a temporary record would be discarded`, because the values C wrote would be dropped
+  with the statement.
+- **A record slot starts zeroed.** An `extern "C"` record binding declared without an initializer
+  (`mut caps: Caps;`) is an allocation of `sizeof(struct)` zero bytes, so a callee that reads a field
+  before writing it reads 0, and a handle slot C fills is `VK_NULL_HANDLE` to begin with. That is how
+  an array of handles is created without constructing a handle: `mut buffers: CommandBuffers;` then
+  `c_alloc_command_buffers(&mut buffers)`. A handle-typed field may also be seeded from a handle the
+  program already holds (`Slots { h0: swapchain }`), which is how `pSwapchains`/`pCommandBuffers`
+  are built for `vkQueuePresentKHR` and `vkQueueSubmit`. A *non*-extern record or an integer
+  declared without an initializer is still uninitialized and still rejected where it is used, and a
+  handle itself still cannot be constructed (`File {}` is an error).
 - **The initial value is defined.** A handle or bare pointer binding declared without an
   initializer is null, not uninitialized (`mut instance: Instance;`), so the callee always reads a
   defined word even if it only writes. A binding that already holds a value keeps it, so a second
@@ -231,7 +296,7 @@ fn main() -> u64 {
   callback could not store through the pointer C handed it.
 - A handle cannot be constructed at all, not even as null from Grail (`cnull()` is a `CPtr`, and
   `Slot { instance: cnull() }` is a type mismatch), so a declaration's out-parameter is the way to
-  obtain one. `tests/ffi/out_params.grl` executes it on x86-64, AArch64 and RISC-V 64, and on Windows
+  obtain one — or the zero-filled record field described above, which is the same null. `tests/ffi/out_params.grl` executes it on x86-64, AArch64 and RISC-V 64, and on Windows
   x86-64 under Wine through `tests/windows-cases.json`: every C twin returns a checksum that reads
   the slot before writing it, so a slot passed by value, an uninitialized slot, or a write Grail does
   not see all change the printed values.
@@ -425,6 +490,13 @@ Not implemented yet, and each rejected rather than approximated:
   (`tests/ffi/call_records.grl`, `float_record_results.grl`), and nested records included,
   except a result whose embedded records contain floats (its register classification needs the
   flattened field list; refused with a diagnostic);
+- pointer arithmetic, an index of a `CPtr`, and a view built from an address: an array is a
+  fixed-capacity record with its count checked afterwards, and elements are reached by field name;
+- a record address that outlives the statement that took it. The borrow is statement-scoped, exactly
+  as `cptr` of a byte sequence is, so a `CPtr` kept in a binding or in a record field is a pointer
+  the compiler stops tracking: `p := cptr(&sub); sub = other;` compiles, and the pointer dangles.
+  Taking the address of a *temporary* is refused for that reason, because there is no name to
+  outlive anything;
 - variadic callbacks, callback results that are themselves function pointers, and
   taking the address of a foreign *declaration* (`f := c_add;` is rejected: a C
   declaration is not a Grail function value);
@@ -492,10 +564,14 @@ compiles `tests/ffi/call_scalars.grl` with the FFI build, links the two through 
   read-only view, a mutable view written by C and a handle round trip (`259`, `1`), `callbacks` C
   calling back into Grail including callee-saved register preservation (`42`, `42`, `10`),
   `extern_records` C layout in both directions (`1606`, `23`, `16`, `-2`, `7`), `out_params` the
-  out-parameter slots including a seventh-argument slot and two slots in one call, and `call_words`
-  seven, eight and nine word arguments with literal and computed values.
+  out-parameter slots including a seventh-argument slot and two slots in one call, `record_pointers`
+  the record-by-pointer and record-out-parameter shapes (`13`, `5`, `0`, `4194304`, `0`, `0`, `110`,
+  `77`, `433`, `8` — a create-info reading a struct through `cptr(&app)`, `flags` as the zero a
+  zero-filled binding starts with, an array of handles C fills and Grail passes back, an array of
+  structs addressed at two interior elements, and one count record across two declarations of one
+  symbol), and `call_words` seven, eight and nine word arguments with literal and computed values.
 - the suite executes every fixture on x86-64 and, through `qemu-<target>-static`, on AArch64 and
-  RISC-V 64: 51 executed fixture instances and no link-only cases, plus two cross-compiled-only ones
+  RISC-V 64: 52 executed fixture instances and no link-only cases, plus two cross-compiled-only ones
   (`dlopen`, which needs a target glibc sysroot). `callback_words` executes the eight-register
   callback on AArch64 and RISC-V 64 and asserts that x86-64 and Windows refuse it by name. Without a
   qemu runner the cross targets are linked and the ABI-level check is reported as link-only. The same
@@ -506,7 +582,18 @@ compiles `tests/ffi/call_scalars.grl` with the FFI build, links the two through 
 
 Rejections are part of the normal native corpus (`tests/native-cases.json`):
 `ffi-reject-safe-call`, `ffi-reject-abi`, `ffi-reject-parameter-type`, `ffi-reject-result-type`,
-`ffi-reject-arity`, `ffi-reject-duplicate`, `ffi-reject-handle-out-slot`,
-`ffi-reject-handle-null-seed`, `ffi-reject-out-shared-borrow`, `ffi-reject-out-scalar`,
-`ffi-reject-out-callback`, `ffi-reject-out-cfn` and `ffi-reject-out-double-borrow`, so every target
-checks the diagnostics on every run of `bun tools/test-native.mjs`.
+`ffi-reject-arity`, `ffi-reject-duplicate`, `ffi-reject-handle-null-seed`,
+`ffi-reject-out-shared-borrow`, `ffi-reject-out-scalar`, `ffi-reject-out-callback`,
+`ffi-reject-out-cfn`, `ffi-reject-out-double-borrow`, `ffi-reject-record-address-temporary`,
+`ffi-reject-record-address-plain`, `ffi-reject-record-pointer-alias-writable`,
+`ffi-reject-record-pointer-alias-shared`, `ffi-reject-record-out-plain`,
+`ffi-reject-record-out-shared` and `ffi-reject-record-out-temporary`, so every target checks the
+diagnostics on every run of `bun tools/test-native.mjs`.
+
+The same corpus executes the new shapes without a C toolchain, by declaring the symbol and
+defining it as an `extern "C" fn` (a C-ABI Grail function), which is the same one-word pointer on
+both sides: `ffi-record-address` (`42`), `ffi-record-address-field` (`433`, two interior element
+addresses), `ffi-record-out-param` (`0` — a zero-filled binding the callee reads), the recorded
+regression `ffi-record-two-declarations` (`8`, one count record across two declarations of one
+symbol, which must reach its exit status without aborting) and `ffi-record-array-pointer` (`34`, an array of slots read through the record's own address). The handle-typed twins of the last one need a real C library
+to produce the handles, so `tests/ffi/record_pointers.grl` covers them.

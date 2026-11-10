@@ -283,6 +283,13 @@ struct C {
     raw: u64,
     // Lexical `unsafe { ... }` depth. Foreign calls are rejected at depth 0.
     unsafe_depth: u64,
+    // Set while an operand of `cptr`/`cptr_mut` is being checked, so a borrow conflict inside it
+    // is reported as the C aliasing it is. 1 for `cptr` (read-only), 2 for `cptr_mut` (writable).
+    cptr_address: u64,
+    // (slot, type) pairs for the proxy slots an embedded record's place uses: the slot holds the
+    // address of bytes interior to its container, so writing through the place replaces those bytes
+    // instead of storing a pointer into them.
+    embedded: u64[],
     // Linker inputs declared by `extern "C" lib "..."`, deduplicated in order.
     libs: u8[][],
     // Set while an `extern "C" fn` definition is handed to the function parser:
@@ -3245,6 +3252,18 @@ fn bind_loan<a>(c: (&a mut C), value: u64, source: u64, target: u64, mode: u64) 
         }
     }
     if loan == 0 {
+        if (c.raw == 0) & (c.cptr_address != 0) {
+            if c.cptr_address == 2 {
+                fail(
+                    &mut c,
+                    view("the value handed to C as a writable pointer is already borrowed in this expression")
+                );
+            }
+            fail(
+                &mut c,
+                view("the value handed to C as a read-only pointer is already mutably borrowed in this expression")
+            );
+        }
         fail(&mut c, view("borrow conflicts with active access"));
     }
     holder := place_of(&mut c, value);
@@ -6233,7 +6252,27 @@ fn ffi_emit_call<a, b, d, e, f>(
 // caller's slot; a binding declared without an initializer starts as null, so the slot always has a
 // defined value before the call.
 fn ffi_out_slot_type<a>(c: (&a mut C), ty: u64) -> bool {
+    // A handle or bare pointer is one word the callee writes; an extern "C" record is the C `R *`,
+    // the address of the record's own fields, so the callee fills the struct in place and Grail
+    // reads the typed fields afterwards.
+    if is_c_record(&mut c, ty) != 0 {
+        return true;
+    }
     return (ty_kind(&mut c, ty) == 23) || (ty_kind(&mut c, ty) == 26);
+}
+// `p: &mut R` in an extern declaration: the C `R *`, written by the callee.
+fn ffi_record_out_param<a>(c: (&a mut C), ty: u64) -> u64 {
+    if ty_kind(&mut c, ty) != 7 {
+        return 0;
+    }
+    if ty_mode(&mut c, ty) == 0 {
+        return 0;
+    }
+    inner := ty_arg(&mut c, ty);
+    if is_c_record(&mut c, inner) != 0 {
+        return inner;
+    }
+    return 0;
 }
 // `p: &mut Instance` in an extern declaration: a mutable borrow of a handle or bare pointer binding.
 // Only a mutable borrow is a writable slot - `&H` would hand C a `const H *` it cannot store through.
@@ -6276,7 +6315,10 @@ fn ffi_param<a, b>(c: (&a mut C), ty: u64, what: &b [u8]) -> unit {
             }
             fail(&mut c, view("an extern C out-parameter needs &mut; a shared &H is the C const pointer"));
         }
-        fail(&mut c, view("an extern C out-parameter must be &mut a handle, CPtr or CMutPtr"));
+        fail(
+            &mut c,
+            view("an extern C out-parameter must be &mut a handle, CPtr, CMutPtr or extern \"C\" record")
+        );
     }
     fail(&mut c, what);
     return ();
@@ -8009,6 +8051,19 @@ fn caddr_ty<a>(c: (&a mut C), slot: u64) -> u64 {
     }
     return 0;
 }
+// 1 when `slot` is the place of an embedded record: an interior address, not a slot holding a
+// pointer to one. Storage written through such a place is bytes, so the old value is overwritten
+// rather than dropped, and the write copies bytes instead of storing a pointer.
+fn embedded_place<a>(c: (&a mut C), slot: u64) -> bool {
+    mut i = c.embedded.len();
+    while 1 < i {
+        i = i - 2;
+        if c.embedded[i] == slot {
+            return true;
+        }
+    }
+    return false;
+}
 // Loads a narrow C field through its address slot as a Grail word (sign- or zero-extended,
 // f32 widened to the binary64 word Grail holds).
 fn caddr_load<a>(c: (&a mut C), slot: u64, ty: u64) -> u64 {
@@ -8788,6 +8843,22 @@ fn field_path<a>(c: (&a mut C), id: u64, lty: u64, address: u64) -> Val {
         }
         if last {
             ty := reference_type(&mut c, fty, address == 2);
+            mut ref = n;
+            if is_c_record(&mut c, fty) != 0 {
+                // An embedded record has no slot of its own: its bytes are interior to the
+                // containing struct, and `n` holds their address. A reference is a pointer to a
+                // slot that holds the record's address, so the place is a proxy slot holding the
+                // interior address, and the reference points at it. That keeps `ref_load`'s one
+                // representation ("load the record's address through the reference") valid on
+                // both sides of a call - `&mut o.inner` used to read the first field as an address
+                // and fault in the callee.
+                o(&mut c, view("leaq "));
+                stack_slot(&mut c, n);
+                o(&mut c, view(",%rax\n"));
+                ref = save(&mut c);
+                c.embedded.push(ref);
+                c.embedded.push(fty);
+            }
             root := place_of(&mut c, b);
             target := member_place(&mut c, root, k, fty);
             authority := authority_of(&mut c, b);
@@ -8796,7 +8867,7 @@ fn field_path<a>(c: (&a mut C), id: u64, lty: u64, address: u64) -> Val {
                     .resources
                     .push(
                         Resource {
-                            slot: n,
+                            slot: ref,
                             ty: ty,
                             flag: 0,
                             base: b + 1,
@@ -8808,7 +8879,7 @@ fn field_path<a>(c: (&a mut C), id: u64, lty: u64, address: u64) -> Val {
                         }
                     );
             }
-            return val(n, ty);
+            return val(ref, ty);
         }
         outer_c := c.decls[d].c_layout;
         next_dot := kind(&mut c) == 46;
@@ -9982,6 +10053,30 @@ fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
                 if k == 8 {
                     d := ty_arg(&mut c, v.ty);
                     if c.decls[d].c_layout != 0 {
+                        shared = 1;
+                    }
+                }
+                if (shared == 0) & (c.raw == 0) {
+                    // A record out-parameter (`p: &mut R`) is the C `R *`: the address of the
+                    // record's own fields, loaded through the borrow, so the callee's writes land
+                    // in the record and are visible to Grail afterwards. The argument's declared
+                    // type stays the borrow, which is what the signature check compared; only the
+                    // word that crosses changes.
+                    formal := c.params[template_first + index];
+                    if ffi_record_out_param(&mut c, formal) != 0 {
+                        slot := v.t;
+                        place := target_of(&mut c, slot);
+                        if borrowed_temporary(&mut c, place) {
+                            // C would write the handles into storage the caller never sees again:
+                            // a record out-parameter is a binding the callee fills in place.
+                            fail(
+                                &mut c,
+                                view("an extern C out-parameter needs a binding to write into; a temporary record would be discarded")
+                            );
+                        }
+                        vt := v.ty;
+                        x := deref(&mut c, v);
+                        v = val(x.t, vt);
                         shared = 1;
                     }
                 }
@@ -12015,6 +12110,59 @@ fn exchange_into<a>(c: (&a mut C), a: Val, b: Val) -> Val {
     }
     return val(slot, ty);
 }
+// `cptr(&r)` / `cptr_mut(&mut r)` for an `extern "C"` record: one pointer word holding the address
+// of the record's own fields, which is what C means by `const R *` / `R *`. Used for a parameter
+// typed `CPtr`/`CMutPtr` and for a record field that points at another struct
+// (`VkRenderPassCreateInfo::pAttachments`). The borrow is the ordinary call-scoped one: the record
+// cannot be moved, dropped, or borrowed again while the pointer is live, and the pointer carries no
+// length or lifetime, which is why the whole expression sits in an `unsafe` block.
+fn cptr_record<a>(c: (&a mut C), x: Val, writable: u64) -> Val {
+    if is_c_record(&mut c, x.ty) == 0 {
+        fail(
+            &mut c,
+            view("cptr takes the address of an extern \"C\" record; a Grail record has no C layout")
+        );
+    }
+    if c.raw == 0 {
+        place := place_of(&mut c, x.t);
+        if borrowed_temporary(&mut c, place) {
+            // Nothing names the storage a temporary lives in, so nothing tells the caller how long
+            // the pointer stays valid: C may keep it, and the hidden binding dies with the block.
+            fail(
+                &mut c,
+                view("cptr needs a named record: the address of a temporary would not outlive the pointer")
+            );
+        }
+    }
+    if writable != 0 {
+        require_write(&mut c, x.t);
+    } else {
+        observe(&mut c, x.t);
+    }
+    // The slot's own word is the address of the record's fields: `deref` already loaded it out of
+    // the borrow - a whole binding's record pointer, or an embedded field's interior address - so
+    // the pointer is a word copy and not a projection of the record. For a byte sequence the slot
+    // holds a view record, one word further out, which is why `rt_view_ptr` reads that one.
+    get(&mut c, x.t, view("%rax"));
+    slot := save(&mut c);
+    return val(slot, intern_full(&mut c, 26, 0, writable, u64[]));
+}
+// 1 when `place` belongs to the hidden binding `borrow_temporary` created for `&expr`, i.e. the
+// record the caller is taking the address of is not a name.
+fn borrowed_temporary<a>(c: (&a mut C), place: u64) -> bool {
+    if place == 0 {
+        return false;
+    }
+    for i in c.locals.len() {
+        l := &c.locals[i];
+        name := l.name.copy();
+        id := l.id;
+        if same(view(name), view(".borrowed")) & (place_of(&mut c, id) == place) {
+            return true;
+        }
+    }
+    return false;
+}
 fn builtin<a>(c: (&a mut C), id: u64) -> Val {
     if (id == 17) || (id == 18) {
         return print_builtin(&mut c, id == 18);
@@ -12058,7 +12206,11 @@ fn builtin<a>(c: (&a mut C), id: u64) -> Val {
         expect(&mut c, view(")"));
         return v;
     }
+    if (id == 40) || (id == 41) {
+        exchange(&mut c.cptr_address, id - 39);
+    }
     a := expr(&mut c, 0);
+    exchange(&mut c.cptr_address, 0);
     if (id == 40) || (id == 41) {
         // `cptr(bytes)` / `cptr_mut(&mut bytes)`: the bare data pointer of a byte sequence or
         // view, for C parameters and record fields typed `const void *` / `void *`. Unsafe:
@@ -12070,6 +12222,9 @@ fn builtin<a>(c: (&a mut C), id: u64) -> Val {
         writable := id == 41;
         x := deref(&mut c, a);
         k := ty_kind(&mut c, x.ty);
+        if k == 8 {
+            return cptr_record(&mut c, x, writable);
+        }
         if (k != 2) & (k != 3) & (k != 4) & (k != 5) {
             fail(&mut c, view("cptr requires a byte sequence or view"));
         }
@@ -15667,8 +15822,17 @@ fn ref_load<a>(c: (&a mut C), r: u64, ty: u64) -> u64 {
 // Writes `value` (a `ty`) through a reference slot, as `ref_load` reads.
 fn ref_store<a>(c: (&a mut C), r: u64, ty: u64, value: u64) -> unit {
     narrow := caddr_ty(&mut c, r);
-    if (narrow != 0) & (is_c_record(&mut c, narrow) == 0) {
+    if narrow != 0 {
         caddr_store(&mut c, r, narrow, value);
+        return ();
+    }
+    if is_c_record(&mut c, ty) != 0 {
+        // A record written through a reference replaces the referenced bytes: the destination is
+        // the address the reference loads - a binding's own record, or an embedded field's interior
+        // address - so the value's bytes are copied there and its buffer is released. Storing the
+        // pointer would leave the fields untouched and leak the value.
+        dst := ref_load(&mut c, r, ty);
+        caddr_store(&mut c, dst, ty, value);
         return ();
     }
     if !subword(&mut c, ty) {
@@ -19581,6 +19745,25 @@ fn map_loop<a, b, d>(c: (&a mut C), name: &b [u8], value_name: &d [u8]) -> unit 
     exchange(&mut c.loop_end, oldend);
     return ();
 }
+// `mut r: R;` for an extern "C" record is a zero-filled allocation, not an uninitialized slot: C's
+// out-parameter must be able to read every field it does not overwrite, `sizeof(struct)` bytes have
+// to exist before `&mut r` is taken, and zero is what a C library reads as a null handle, a zero
+// count or a zeroed flag. No other type is initialized this way - a Grail record or an integer
+// without an initializer still has no value.
+fn zero_record_binding<a>(c: (&a mut C), name: u8[], ty: u64, mutable: u64) -> unit {
+    d := ty_arg(&mut c, ty);
+    words := ffi_record_words(&mut c, d);
+    sz := imm(&mut c, words);
+    rec := invoke(&mut c, view("rt_rec"), one(sz));
+    zero := imm(&mut c, 0);
+    for k in words {
+        rec_store(&mut c, rec, k, zero);
+    }
+    own(&mut c, rec, ty);
+    held := move_value(&mut c, val(rec, ty));
+    bind(&mut c, name, ty, held.t, mutable);
+    return ();
+}
 fn statement<a>(c: (&a mut C)) -> unit {
     emit_loc(&mut c);
     // An `unsafe { ... }` block is the explicit boundary for foreign calls. It is
@@ -19714,6 +19897,9 @@ fn statement<a>(c: (&a mut C)) -> unit {
             }
             ty := parse_type(&mut c);
             expect(&mut c, view(";"));
+            if is_c_record(&mut c, ty) != 0 {
+                return zero_record_binding(&mut c, name, ty, mutable);
+            }
             n := imm(&mut c, 0);
             // A handle or bare pointer declared without an initializer is null, not uninitialized:
             // its slot already holds the zero `imm` above, and null is the value a C out-parameter
@@ -20852,8 +21038,10 @@ fn assignment_tail<a>(c: (&a mut C), l: u64, id: u64, ty: u64, target: u64, thro
             release(&mut c, old - 1);
         }
     }
-    // An embedded C record's old bytes are plain data, overwritten in place (no drop).
-    embedded := (caddr_ty(&mut c, target) != 0) & (is_c_record(&mut c, fieldty) != 0);
+    // An embedded C record's old bytes are plain data, overwritten in place (no drop). The place
+    // is either the interior address itself (an address slot) or the proxy slot that holds it.
+    embedded := (is_c_record(&mut c, fieldty) != 0)
+        & ((caddr_ty(&mut c, target) != 0) | embedded_place(&mut c, target));
     if through != 0 && !embedded {
         if needs_drop(&mut c, fieldty) {
             get(&mut c, target, view("%rax"));
@@ -21371,6 +21559,8 @@ pub fn main() -> u64 {
         cont: 0,
         raw: 0,
         unsafe_depth: 0,
+        cptr_address: 0,
+        embedded: u64[],
         libs: u8[][],
         pending_ext: 0,
         pending_symbol: u8[],

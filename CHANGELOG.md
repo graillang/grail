@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+- FFI: the address of a Grail-owned `extern "C"` record is now a value, and C can fill a record in
+  place. `unsafe cptr(&r)` is a `CPtr` and `cptr_mut(&mut r)` a `CMutPtr` holding the address of the
+  record's own fields — the same pointer a record *parameter* already was — so a struct that points
+  at another struct (`VkInstanceCreateInfo::pApplicationInfo`, `VkRenderPassCreateInfo::pAttachments`)
+  is expressible without laying bytes out by hand; a field, a binding and a declaration parameter
+  typed `const void *`/`void *` all take it. `p: &mut R` in a declaration is the C `R *` the callee
+  writes, and the caller reads the typed fields afterwards
+  (`vkGetPhysicalDeviceSurfaceCapabilitiesKHR`). An `extern "C"` record binding declared without an
+  initializer is zero-filled instead of uninitialized, so an out-struct's untouched fields have
+  defined values and, with handle-typed fields seeded from handles the program already holds (or
+  filled by C through `&mut`), `vkQueueSubmit`'s `pCommandBuffers` and `VkPresentInfoKHR`'s
+  `pSwapchains` are expressible as arrays of handles. The borrow rules are the call-scoped ones
+  `cptr` already had, with named failures for each hazard: `cptr needs a named record: the address of
+  a temporary would not outlive the pointer`, `cptr takes the address of an extern "C" record; a
+  Grail record has no C layout`, `the value handed to C as a writable pointer is already borrowed in
+  this expression`, `the value handed to C as a read-only pointer is already mutably borrowed in this
+  expression`, and `an extern C out-parameter needs a binding to write into; a temporary record would
+  be discarded`. Also fixed, on the way: an embedded record's place (`o.inner`) is a proxy slot
+  holding its interior address, so `&mut o.inner` no longer reads the first field as an address
+  (it faulted on x86-64 and wrote through a stack slot on assignment). Verified by
+  `tests/ffi/record_pointers.grl` against a real C shim on all three targets, twelve new cases in
+  `tests/native-cases.json`, and a new book chapter (`Calling C`) whose Grail and Rust twins link
+  one C file.
+
 - Windows task scheduling is now the same as Linux: a task is green on Windows, not an OS thread.
   One scheduler thread runs the tasks cooperatively, a task runs until it yields or blocks, and
   suspension parks the task rather than the thread. The switch is a Win32 fiber
