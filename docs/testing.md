@@ -89,6 +89,24 @@ suite pass while the published seed still cannot build the compiler, so a branch
 and still fail CI's clean-clone preflight; `ci.mjs` already refuses a stale seed, it just never ran
 here.
 
+**Long suites outlive their shells.** `timeout 9000 bun tools/test-native.mjs …` keeps running when the
+wrapper process is killed (a backgrounded exec that is reaped, an OOM kill of the shell), so a retry
+silently doubles the load: two or more suites then share `.work/native-tests/<target>/` and both crawl,
+which looks exactly like a hang. Before retrying, check and kill the *inner* command:
+
+    ps -eo pid,etime,args | rg 'tools/test-nativ[e]\.mjs'   # note the bracket: it stops the pattern matching itself
+    pkill -f 'tools/test-nativ[e]\.mjs'
+
+**A `pkill -f` pattern that matches your own command line kills the run you just started.** A command
+like `pkill -f 'test-native.mjs x86_64'; … bun tools/test-native.mjs x86_64` matches its own wrapper
+and dies before the suite starts, producing no log and no output — which reads identically to a suite
+that failed silently. Use the bracketed pattern above, or kill by pid.
+
+**Check memory before a long run.** The LLVM and `--verify-facts` passes compile and link every case;
+on a machine that is also building something large, the kernel's OOM killer ends them as
+`exit=137` / `compiler crashed (SIGKILL)`, which is not a compiler failure. `free -g` first: below
+about 30 GB available, wait.
+
 **Run one suite per worktree at a time.** `test-native.mjs` and the other runners use
 `.work/native-tests/<target>/<case>/` inside the worktree, so two suites started in the same
 checkout delete each other's intermediate files. The symptom is a bogus clang failure such as
