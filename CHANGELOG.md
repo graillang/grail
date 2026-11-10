@@ -26,6 +26,12 @@
   - `native`: `same` (the hottest helper, 437 call sites) first, because most other predicates are
     written in terms of it. Its `same(a) + same(b)` sums become `||`; `mode`, `permitted` and the
     `imm()` argument stay numeric and convert explicitly.
+  - `native`, type and span predicates: `span_is`, `span_has`, `needs_drop`, `intersects`,
+    `is_local_slot`, `concrete_type`, `ffi_record_has_nested`, `is_text`, `is_float`, `is_char`,
+    `literal_target`, `is_bool`, `scalar`, `integer`, `adopt_literal`, `capture_borrow`,
+    `contains_text`, `has_bonds`, `numbers_equal`, `satisfies_interface`, `callable_contract`,
+    `token_starts_type`, `starts_with`, `flex_read`, `element_index_ahead`, `simple_index_ahead`,
+    `slice_ahead`, `typed_binding_ahead_at`.
 - Maps iterate with `for key, value in &map`, in insertion order, and `for key, value in &mut map` binds the
   same shared key with an exclusive value (`value := map.value_at_mut(i)`), so values update in place. The loop
   holds one reference to the map throughout: inserting into it inside the body is rejected, a shared loop cannot
