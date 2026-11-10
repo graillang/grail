@@ -3,6 +3,12 @@
 // prints the shortest round-trip form and C %.17g). Reports the best of three runs and the ratio.
 //   bun tools/bench.mjs [NAME...]        GRAIL_COMPILER selects the compiler (default: build it)
 //   GRAIL_BACKEND=llvm                    builds the Grail side through the LLVM backend
+//   bun tools/bench.mjs --rounds N [NAME...]
+//       Interleaves the two binaries round by round (C, Grail, C, Grail, ...) and reports the
+//       median of N runs each instead of the best, with the observed spread in brackets. A shared
+//       machine drifts; pairing the runs puts both sides under the same load, and the median is
+//       not a favourable outlier. N should be odd and at least 5 to say anything about a gap of a
+//       few percent.
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -23,15 +29,23 @@ function compiler() {
   return built;
 }
 
+function once(exe) {
+  const start = process.hrtime.bigint();
+  const out = run([exe]).stdout;
+  return { time: Number(process.hrtime.bigint() - start) / 1e9, out };
+}
+
 function best(exe) {
   let time = Infinity, out = '';
   for (let i = 0; i < 3; i++) {
-    const start = process.hrtime.bigint();
-    out = run([exe]).stdout;
-    time = Math.min(time, Number(process.hrtime.bigint() - start) / 1e9);
+    const r = once(exe);
+    out = r.out;
+    time = Math.min(time, r.time);
   }
   return { time, out };
 }
+
+const median = values => [...values].sort((a, b) => a - b)[values.length >> 1];
 
 function numbers(text) {
   return text.trim().split(/\s+/).map(word => {
@@ -41,19 +55,39 @@ function numbers(text) {
 }
 
 const grail = compiler();
-const names = process.argv.length > 2 ? process.argv.slice(2)
+const argv = process.argv.slice(2);
+const roundsAt = argv.indexOf('--rounds');
+const rounds = roundsAt >= 0 ? Number(argv[roundsAt + 1]) : 0;
+if (roundsAt >= 0 && !(rounds >= 1)) throw new Error('--rounds needs a count of at least 1');
+const rest = roundsAt >= 0 ? argv.filter((_, i) => i !== roundsAt && i !== roundsAt + 1) : argv;
+const names = rest.length ? rest
   : readdirSync(join(root, 'bench')).filter(f => f.endsWith('.grl')).map(f => f.slice(0, -4)).sort();
 const work = mkdtempSync(join(tmpdir(), 'grail-bench-'));
 let failed = 0;
 try {
-  console.log(`benchmark      C -O2      Grail (${process.env.GRAIL_BACKEND ?? 'native'})      ratio`);
+  console.log(rounds
+    ? `benchmark      C -O2      Grail (${process.env.GRAIL_BACKEND ?? 'native'})      ratio   (median of ${rounds} paired, spread C/G)`
+    : `benchmark      C -O2      Grail (${process.env.GRAIL_BACKEND ?? 'native'})      ratio`);
   for (const name of names) {
     const exe = compileProgram(grail, [join(root, 'bench', `${name}.grl`), join(root, 'lib/core.grl')], join(work, name), { typedRefs: true }), cexe = join(work, `${name}-c`);
     run(['clang', '-O2', '-ffp-contract=off', join(root, 'bench', `${name}.c`), '-o', cexe, '-lm']);
-    const g = best(exe), c = best(cexe);
+    let g, c, spread = '';
+    if (rounds) {
+      const gs = [], cs = [];
+      once(exe); once(cexe); // warm the page cache before the first paired round
+      for (let i = 0; i < rounds; i++) {
+        const grun = once(exe), crun = once(cexe);
+        gs.push(grun.time); cs.push(crun.time);
+        g = { time: grun.time, out: grun.out }; c = { time: crun.time, out: crun.out };
+      }
+      g = { time: median(gs), out: g.out }; c = { time: median(cs), out: c.out };
+      spread = `   [${(Math.max(...cs) - Math.min(...cs)).toFixed(3)}/${(Math.max(...gs) - Math.min(...gs)).toFixed(3)}]`;
+    } else {
+      g = best(exe); c = best(cexe); // C first, so neither side alone sees a cold cache
+    }
     const same = JSON.stringify(numbers(g.out)) === JSON.stringify(numbers(c.out));
     if (!same) failed++;
-    console.log(`${name.padEnd(12)} ${c.time.toFixed(3).padStart(7)} s ${g.time.toFixed(3).padStart(8)} s ${(g.time / c.time).toFixed(1).padStart(8)}x${same ? '' : '   OUTPUT DIFFERS: ' + JSON.stringify([g.out, c.out])}`);
+    console.log(`${name.padEnd(12)} ${c.time.toFixed(3).padStart(7)} s ${g.time.toFixed(3).padStart(8)} s ${(g.time / c.time).toFixed(1).padStart(8)}x${same ? '' : '   OUTPUT DIFFERS: ' + JSON.stringify([g.out, c.out])}${spread}`);
   }
 } finally {
   rmSync(work, { recursive: true, force: true });

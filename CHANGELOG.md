@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- `tools/bench.mjs --rounds N` interleaves the C and Grail binaries round by round and reports the
+  median of N runs each with the observed spread, because a shared machine drifts within a single
+  run: the default best-of-three favours whichever side happens to run first when the host is busy.
+  The default (best-of-three) is unchanged.
 - Merge the three design reviews from branch `claude/brave-heisenberg-0h3ska` as documents only
   (`docs/design/first-principles-architecture.md`, `architecture-reassessment.md`,
   `complexity-reassessment.md`, 2,746 lines). Their edits to README and to the research-phase
