@@ -28,6 +28,15 @@
   tools/bootstrap.mjs update all`, owned by the bootstrap workstream); until then build with
   `GRAIL_COMPILER` pointing at a compiler staged from this tree, which is how the suites for this
   change were run.
+- `authority::spawn_with(&a, argv, env)` gates an explicit environment with the same `may_spawn`
+  grant as `authority::spawn`: spawning with an environment of your choosing is still a spawn, so
+  neither route becomes a way around the other, and a file grant is refused exactly as it is for a
+  plain spawn. `authority::environment()` returns this process's own entries so a program compiled
+  with `--deny-ambient-host` can build an additive environment without opting into `use host;`;
+  reading your own environment stays ungated, because every grant already implies the process can
+  see its own configuration. What the grant covers is unchanged and still narrow: it decides
+  *whether* a child starts, not what program it runs, and the child's own environment reads are
+  outside the model.
 - `grail profile` no longer uses a rendezvous file: the arming request
   (`GRAIL_PROFILE="1 RATE CAPACITY SAMPLES"`) travels in the target's environment through
   `host::command_with`, the samples go to a private `mkdir`-claimed scratch directory under

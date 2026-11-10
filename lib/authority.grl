@@ -248,6 +248,33 @@ pub fn spawn<a,b>(a:&a Authority,argv:&b u8[][])->u64 |? Error{
     }
     return host::command(args);
 }
+// Run `argv` with `env` as the child's whole environment instead of the inherited one. Every entry
+// is "NAME=VALUE"; an empty vector means the child starts with no environment from us (the
+// platform may still add its own, as Windows does with SystemRoot).
+//
+// This is the same capability as `spawn`: asking for an explicit environment changes what the child
+// starts with, not whether this process may start a child, so the `may_spawn` grant covers both and
+// neither becomes a way around the other. Compose from what is inherited with
+// `environment()` when the child should keep this process's variables.
+pub fn spawn_with<a,b,c>(a:&a Authority,argv:&b u8[][],env:&c u8[][])->u64 |? Error{
+    if a.may_spawn==0{return Error::Denied;}
+    mut args=u8[][];
+    for i in argv.len(){
+        args.push(copy_bytes(argv[i]));
+    }
+    mut entries=u8[][];
+    for i in env.len(){
+        entries.push(copy_bytes(env[i]));
+    }
+    return host::command_with(args,entries);
+}
+// This process's environment as "NAME=VALUE" entries, for `spawn_with` callers that want the
+// inherited variables plus a few. Reading your own environment is not gated: every grant already
+// implies the process can see its own configuration, and `host::env` is available to any module
+// that opts into `use host;`.
+pub fn environment()->u8[][]{
+    return host::environment();
+}
 // Connect to `address:port` and return the socket descriptor.
 pub fn connect<a,b>(a:&a Authority,address:&b [u8],port:u64)->u64 |? Error{
     if a.may_socket==0{return Error::Denied;}

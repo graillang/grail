@@ -64,6 +64,26 @@ fn main() {
     }
     println(refused);
 
+    // An explicit environment is the same capability: the grant decides whether a child may start,
+    // not what it starts with. A file grant is refused exactly as it is for a plain spawn.
+    mut env = u8[][];
+    env.push("GRAIL_AUTHORITY_TAG=tag".copy());
+    mut probe = u8[][];
+    probe.push("sh".copy());
+    probe.push("-c".copy());
+    probe.push("test \"$GRAIL_AUTHORITY_TAG\" = tag".copy());
+    println(authority::spawn_with(&p, &probe, &env)!);
+    mut spawn_with_refused = 0;
+    match authority::spawn_with(&a, &probe, &env) {
+        e: authority::Error => { spawn_with_refused = 1; },
+        _ => {}
+    }
+    println(spawn_with_refused);
+
+    // Composing additions needs this process's own environment, which the gated module offers so a
+    // program compiled with --deny-ambient-host can still build one.
+    println(authority::environment().len() > 0);
+
     // Socket authority listens, reports the bound port, connects and closes.
     s := authority::sockets();
     assert(s.can_connect());
