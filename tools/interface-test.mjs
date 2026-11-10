@@ -199,9 +199,13 @@ function proveSelfHosting() {
   const versionB = spawnSync(b, ['version'], { encoding: 'utf8' });
   assert.equal(versionB.stdout, versionA.stdout, 'compiler: the interface-built compiler does not answer `version` the same way');
   assert.equal(versionB.status, 0, 'compiler: the interface-built compiler does not run');
+  // A generic-heavy program from the corpus: both compilers must produce the same assembly for it.
+  const corpus = JSON.parse(readFileSync(join(root, 'tests/native-cases.json'), 'utf8'));
+  const sampleCase = corpus.find(entry => entry.name === 'vecs-fold-and-predicates');
+  assert.ok(sampleCase, 'tests/native-cases.json: no vecs-fold-and-predicates case');
   const sample = join(directory, 'sample.grl');
-  writeFileSync(sample, 'use vecs;\nuse order;\npub fn main() -> u64 {\n    mut v = u64[3, 1, 2];\n    v.sort_by(|a: u64, b: u64| a < b);\n    println(v.len());\n    return 0;\n}\n');
-  const sampleFiles = [sample, join(root, 'lib/vecs.grl'), join(root, 'lib/order.grl'), join(root, 'lib/hash.grl'), join(root, 'lib/core.grl'), runtime, platform];
+  writeFileSync(sample, sampleCase.source);
+  const sampleFiles = [sample, ...(sampleCase.modules ?? []).map(file => resolve(root, file)), runtime, platform];
   const asmA = join(directory, 'sample-a.s');
   const asmB = join(directory, 'sample-b.s');
   for (const [compilerPath, asm] of [[a, asmA], [b, asmB]]) {
@@ -211,7 +215,7 @@ function proveSelfHosting() {
   assert.equal(readFileSync(asmB, 'utf8'), readFileSync(asmA, 'utf8'), 'compiler: the two compilers compile a program differently');
   const exe = assemble(asmA, join(directory, 'sample'), target, linkInputs(readFileSync(asmA, 'utf8'), dirname(sample)));
   const ran = run(exe);
-  assert.equal(ran.stdout, '3\n', 'compiler: the program the two compilers built prints something else');
+  assert.equal(ran.stdout, sampleCase.stdout, 'compiler: the program those two compilers built prints something else');
 
   const verified = compile(compilerSources, join(directory, 'verify'), ['--interface', ifaces, '--verify-interface']);
   assert.equal(verified.status, 0, `compiler: interfaces disagree with the compiler sources\n${verified.output}`);
@@ -430,6 +434,20 @@ pub fn twice(x: u64) -> u64 {
 
 const leaked = proveLeakage();
 report('no body, local or synthetic declaration in an interface', `${leaked} interfaces checked`);
+
+// A caller that disagrees with an interface is rejected in an interface build, in its own file.
+function proveCallerRejected() {
+  const directory = join(work, 'caller');
+  const files = [join(root, 'tests/interfaces/reject_user.grl'), join(root, 'tests/interfaces/pair.grl'), runtime, platform];
+  const ifaces = emit(files, directory);
+  const rejected = compile(files, join(directory, 'build'), ['--interface', ifaces]);
+  assert.equal(rejected.status, 1, 'a caller that disagrees with the interface must be rejected');
+  assert.match(rejected.output, /reject_user\.grl:\d+:\d+: function argument count/, `the rejection must be in the caller's file: ${rejected.output}`);
+  return rejected.output.trim().split('\n')[0];
+}
+
+const caller = proveCallerRejected();
+report('caller rejected against an interface', caller);
 
 const corpus = proveCorpus();
 report('corpus agrees with source builds', `${corpus} programs (interface build, verify build and source build agree)` + (full ? ' - full corpus' : ''));

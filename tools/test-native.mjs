@@ -74,16 +74,6 @@ for (const test of cases) {
     const assembly = join(directory, 'prior.s');
     writeFileSync(assembly, 'prior valid artifact');
     const numeric = [...(test.defaultU64 === false ? [] : ['--default-u64']), ...(typedRefs ? ['--typed-refs'] : [])];
-    // A case marked `interfaces` is checked twice: once from source and once from the interfaces a
-    // previous emit produced. A rejected program has to be rejected both ways, with the diagnostic
-    // naming the caller's own file and line.
-    if (test.interfaces) {
-      const ifaces = join(directory, 'ifaces');
-      execute(compiler, [...numeric, '--target', target, '--emit-interface', ifaces, join(directory, 'emit.s'), ...files, runtime, osRuntime]);
-      const viaInterface = execute(compiler, [...numeric, '--target', target, '--interface', ifaces, assembly, ...files, runtime, osRuntime]);
-      assert.equal(viaInterface.status, 1, `${test.name}: the interface build must reject it too: ${viaInterface.stdout}${viaInterface.stderr}`);
-      if (test.diagnostic) assert.ok(`${viaInterface.stdout}${viaInterface.stderr}`.includes(test.diagnostic), `${test.name}: interface build diagnostic ${test.diagnostic}: ${viaInterface.stdout}${viaInterface.stderr}`);
-    }
     const result = execute(compiler, [...numeric, '--target', target, assembly, ...files, runtime, osRuntime]);
     assert.equal(result.signal, null, `${test.name}: compiler crashed (${result.signal}): ${result.stdout}${result.stderr}`);
     assert.equal(result.status, 1, `${test.name}: a rejected program must exit 1: ${result.stdout}${result.stderr}`);
