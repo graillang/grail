@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- The runtime's narrow-vector routines (`f32[]`, `u32[]` and `i32[]` push, fill, indexing, copy,
+  insert, remove, swap, reverse, truncate, contains and compare) read and write their 4-byte elements
+  with the `raw_load32`/`raw_store32` intrinsics, one access each, instead of composing each from four
+  byte loads and stores; behaviour and output are unchanged. The bootstrap seeds are refreshed so a
+  fresh clone builds this runtime without a development compiler, and the seed manifest carries the
+  new source and artifact digests.
 - Maps iterate with `for key, value in &map`, in insertion order, and `for key, value in &mut map` binds the
   same shared key with an exclusive value (`value := map.value_at_mut(i)`), so values update in place. The loop
   holds one reference to the map throughout: inserting into it inside the body is rejected, a shared loop cannot

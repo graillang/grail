@@ -177,9 +177,9 @@ In the LLVM lowering a narrow load is `load float` + `fpext`, and a store is `fp
 LLVM then narrows `fptrunc(fmul(fpext a, fpext b))` to `fmul float` and vectorises 4-byte lanes.
 
 Measured (x86-64, `--backend=llvm`, loaded machine): matmul (256x256 `f32`) 0.605 s -> 0.239 s, 3.2x
--> 1.3x of C `-O2`; the `f64` benchmarks are unchanged. Until the bootstrap seed knows
-`raw_load32`/`raw_store32`, the runtime's narrow routines (push, fill, copy, ...) compose 32-bit
-accesses from bytes; compiled element reads and writes use one `movl` already.
+-> 1.3x of C `-O2`; the `f64` benchmarks are unchanged. The runtime's narrow routines (push, fill,
+copy, ...) reach memory through `raw_load32`/`raw_store32`, one 32-bit access each, exactly as
+compiled element reads and writes do.
 
 Verification: the native suite on all three Linux targets and Windows, the package suites (meshopt and
 clod are `f32[]`-heavy and bit-exact against C), the Abundance suite, and the benchmarks; output is
