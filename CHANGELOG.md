@@ -2,10 +2,13 @@
 
 ## Unreleased
 
-- Strict-bool phase 1, lexer: `lexer::whitespace` and `lexer::punctuation` return `bool` instead of a
-  0/1 `u64`, and their `+` chains of comparisons became `||`. The compiler's own predicates migrate
-  first so a caller's `if f(x)` stops reading as an integer test; the six helpers that carry a real
-  status keep `u64`.
+- Strict-bool phase 1 (`docs/design/strict-bool-migration.md`): the compiler's own predicate helpers
+  return `bool` instead of a 0/1 `u64`, so a caller's `if f(x)` stops reading as an integer test and
+  `f(x) == 0` reads as `!f(x)`. Internal only; no language change. The six helpers that carry a real
+  status code (`compile_mode`, the `*_command` handlers, `frame_split`) keep `u64`.
+  - `lexer`: `whitespace`, `punctuation`.
+  - `ownership`: `ancestor`, `loan_ancestor`, `can_cleanup`, and `overlaps`, whose body was the sum of
+    two `ancestor` calls and is now `||`.
 - Maps iterate with `for key, value in &map`, in insertion order, and `for key, value in &mut map` binds the
   same shared key with an exclusive value (`value := map.value_at_mut(i)`), so values update in place. The loop
   holds one reference to the map throughout: inserting into it inside the body is rejected, a shared loop cannot
