@@ -14,7 +14,8 @@ already uses for the compiler and the other Grail programs the test harness buil
 
 Editors point their Grail client at that command. The server needs a `grail` executable to
 run the compiler for diagnostics: `GRAIL_LSP_COMPILER`, then `GRAIL_COMPILER`, then `grail`
-on `PATH`, in that order. It never builds a compiler of its own.
+on `PATH`, in that order. The launcher passes the compiler it built from this tree, so a
+checkout works with no configuration; the server itself never builds one.
 
 ## What is supported
 

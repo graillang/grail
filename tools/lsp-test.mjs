@@ -34,15 +34,17 @@ function frame(message) {
 }
 
 class Client {
-  constructor() {
+  // Defaults to the server binary built from this tree. `command`/`args`/`env` exist so the
+  // documented entry point (`bun tools/lsp.mjs`) can be driven the same way.
+  constructor({ command = server, args = [], env = { GRAIL_LSP_COMPILER: compiler, GRAIL_HOME: root } } = {}) {
     this.messages = [];
     this.waiters = [];
     this.buffer = Buffer.alloc(0);
     this.stderr = '';
     this.exitCode = undefined;
-    this.child = spawn(server, [], {
+    this.child = spawn(command, args, {
       cwd: root,
-      env: { ...process.env, GRAIL_LSP_COMPILER: compiler, GRAIL_HOME: root },
+      env: { ...process.env, ...env },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     this.child.stdout.on('data', chunk => this.receive(chunk));
@@ -302,6 +304,20 @@ const URI = 'file:///virtual/session.grl';
 
   equal(await client.stop(), 0, 'clean exit');
   equal(client.stderr, '', 'no stderr noise');
+}
+
+// --- 6. The documented entry point -----------------------------------------------
+// `bun tools/lsp.mjs` must hand the server its stdio and the compiler it built, otherwise
+// a fresh checkout would start a server that can only answer with an environment warning.
+{
+  const launcher = new Client({ command: process.execPath, args: [join(root, 'tools/lsp.mjs')], env: { GRAIL_HOME: root } });
+  const init = await launcher.initialize();
+  equal(init.result.capabilities.definitionProvider, true, 'the launcher starts the server');
+  const uri = 'file:///virtual/launcher.grl';
+  const diagnostics = await launcher.open(uri, 1, UNKNOWN_CALL);
+  equal(diagnostics.params.diagnostics.length, 1, 'the launcher gives the server a compiler without configuration');
+  ok(diagnostics.params.diagnostics[0].message.includes('unknown function'), 'the launcher session reports the compiler diagnostic');
+  equal(await launcher.stop(), 0, 'the launcher session exits cleanly');
 }
 
 console.log(`lsp: ${checks} checks passed`);

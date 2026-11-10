@@ -21,7 +21,13 @@ export function buildServer({ directory = join(root, '.work/lsp'), compiler = bu
 }
 
 if (import.meta.main) {
-  const child = spawn(buildServer(), [], { stdio: 'inherit' });
+  const compiler = buildCompiler();
+  const child = spawn(buildServer({ compiler }), [], {
+    stdio: 'inherit',
+    // The compiler this checkout just built is the one the server should check with, so a
+    // fresh worktree needs no configuration. An installed setup overrides it.
+    env: { ...process.env, GRAIL_LSP_COMPILER: process.env.GRAIL_LSP_COMPILER ?? compiler },
+  });
   child.on('exit', code => process.exit(code ?? 1));
   child.on('error', error => {
     process.stderr.write(`grail lsp: cannot start the server: ${error.message}\n`);
