@@ -3967,7 +3967,7 @@
     "name": "ffi-reject-out-scalar",
     "source": "module ffi_reject;extern \"C\" fn c_take(p: &mut i64) -> i64;fn main(){}",
     "reject": true,
-    "diagnostic": "an extern C out-parameter must be &mut a handle, CPtr, CMutPtr or extern \"C\" record",
+    "diagnostic": "an extern C out-parameter must be &mut a handle, CPtr or CMutPtr",
     "note": "only a handle or bare pointer slot is an out-parameter; a scalar borrow is not writable through the boundary"
   },
   {
@@ -5688,5 +5688,67 @@
     "source": "fn main() {\n    f := || -> u64 42;\n    h := parallel_spawn(&f);\n    println(parallel_join(h));\n}\n",
     "reject": true,
     "diagnostic": "a pool job takes its closure by value"
+  },
+  {
+    "name": "ffi-reject-record-address",
+    "source": "module ffi_reject;extern \"C\" record AppInfo { api_version: u32 }extern \"C\" fn c_take(p: CPtr) -> i64;fn main(){mut app = AppInfo { api_version: 4194304 };mut v: i64 = 0;unsafe { v = c_take(cptr(&app)); }}",
+    "reject": true,
+    "diagnostic": "cptr requires a byte sequence or view",
+    "note": "no expression yields the address of an owned extern record, so a create-info struct cannot point at another struct (VkInstanceCreateInfo::pApplicationInfo)"
+  },
+  {
+    "name": "ffi-reject-record-out-param",
+    "source": "module ffi_reject;extern \"C\" record AppInfo { api_version: u32 }extern \"C\" fn c_fill(p: &mut AppInfo) -> i64;fn main(){}",
+    "reject": true,
+    "diagnostic": "an extern C out-parameter must be &mut a handle, CPtr or CMutPtr",
+    "note": "a record borrow is not an out-parameter slot either: C cannot fill a Grail record through one"
+  },
+  {
+    "name": "interfaces-two-modules",
+    "files": [
+      "tests/interfaces/pair_user.grl"
+    ],
+    "modules": [
+      "tests/interfaces/pair.grl"
+    ],
+    "interfaces": true,
+    "stdout": "9\n9\n",
+    "note": "B1 stage 2: a two-module program built interface-first. `pair` (record, inherent method, enum, type alias, constant) comes from `pair.iface`; the program must print what the source build prints"
+  },
+  {
+    "name": "interfaces-handle-audit",
+    "files": [
+      "tests/handles/stream_user.grl"
+    ],
+    "modules": [
+      "tests/handles/stream_def.grl"
+    ],
+    "interfaces": true,
+    "stdout": "1\ntrue\nfalse\n7\ntrue\n0\n0\n",
+    "note": "the audited handle contract travels: `stream_def::Stream` is `transferable` in its interface, so the importer accepts exactly the moves it accepts from source"
+  },
+  {
+    "name": "interfaces-generic-source-dependency",
+    "files": [
+      "tests/interfaces/generic_user.grl"
+    ],
+    "modules": [
+      "tests/interfaces/generic.grl"
+    ],
+    "interfaces": true,
+    "stdout": "42\n",
+    "note": "a generic template in another module: the interface records a source dependency (`body ... pos ...`) instead of a body, and the importer instantiates it exactly as from source"
+  },
+  {
+    "name": "interfaces-reject-caller",
+    "files": [
+      "tests/interfaces/reject_user.grl"
+    ],
+    "modules": [
+      "tests/interfaces/pair.grl"
+    ],
+    "reject": true,
+    "diagnostic": "function argument count",
+    "note": "a caller that disagrees with `pair`'s declarations; tools/interface-test.mjs proves the same rejection from the interface"
   }
 ]

@@ -71,6 +71,175 @@ that module as a dependency (so rebuilds stay sound and nothing is silently stal
 with the typed IR as stage 3, at which point the "source dependency" marker in interfaces becomes a
 body reference. Option 3 is rejected: it would break the ports.
 
+## Stage 2 as built: checked module interfaces
+
+Implemented on `b1-interfaces`; `tools/interface-test.mjs` is the proof and this section is the
+record. `compiler/native.grl` carries the writer, the reader and the build path; `compiler/cli.grl`
+exposes them as `grail check --interface DIR [--verify]` and `grail build --interface DIR [--verify]`.
+
+### Commands
+
+```
+grail check --interface DIR                 # write DIR/<module>.iface + DIR/interfaces.manifest
+grail check --interface DIR --verify        # refuse an interface that disagrees with its sources
+grail build --interface DIR                 # read DIR/<module>.iface instead of the module's source
+grail build --interface DIR --verify        # parse the sources and compare them with DIR
+```
+
+`--interface` and `--emit-interface` on the compiler itself are the same two operations for a flat
+file list (`grail check`/`grail build` just supply the project's modules).
+
+### What an interface contains
+
+One line per declaration, declarations sorted by name, and a header that states where the file came
+from. The format version is the first line, so a file written by another compiler is refused rather
+than misread.
+
+```
+ // grail-interface 1
+ module pair
+ source "tests/interfaces/pair.grl"
+ sha256 "ad1f2b3cf421decab61ea22f7dfc572fec79a74a3078b3ef330f4e49a94db2d0"
+ mode typed_refs=1 default_u64=1 overflow=checked target=x86_64
+ unsafe 0
+ std 0
+ host 0
+ templates 0
+ type pair::Pair struct params=0 lifetimes=0
+ field left u64
+ field right u64
+ type pair::Which enum params=0 lifetimes=0
+ variant First unit
+ variant Second u64
+ alias pair::Row (named pair::Pair)
+ const pair::SCALE u64 int 3
+ fn pair::flatten ((named pair::Which)) -> u64
+ fn pair::make (u64, u64) -> (named pair::Pair)
+ inherent pair::Pair
+ fn sum ((ref [1] (named pair::Pair))) -> u64
+ lifetimes 1
+ digest "90e9eed4bebaf86f0d546893afa2f78c1b32991c77912ef551fc2b8adde33892"
+```
+
+Types are written in one canonical prefix spelling (`(ref [1] (named pair::Pair))`: kind word, mode
+when it is not 0, regions when there are any, then the payload). A declaration's identity is
+`module::name`, never a table index, so an interface is a description of a module and not a dump of
+one compiler's internals.
+
+Text was chosen over a binary format because an interface is read by reviewers and by the compiler
+in roughly equal measure: a changed declaration has to be one changed line in a review diff.
+Ordering is by name for the same reason - moving a function in the source does not reshuffle the
+file. Each file ends with a digest of every byte above it, and `DIR/interfaces.manifest` records the
+bytes of every interface the emitting run wrote.
+
+The audit metadata the parallelism design asks for travels with it:
+
+- `handle` declarations carry `transfer=N share=N` (default both 0), so a module that reads the
+  interface sees the contract its author audited instead of re-deriving default-deny;
+- a closure type carries its environment record: `Ty.env` is written as `(closure mode regions
+  (params) result ENV)` where `ENV` is either `0` or a `(named .closure::envN ...)` type whose record
+  the file carries as an `env envN` section with one `field` line per capture. No source-level
+  declaration produces a capturing closure type today (the only producer is a closure expression), so
+  no emitted interface contains one yet; the format, the writer and the reader all handle it, and
+  `--verify` re-reads every type it writes to prove the reader rebuilds it, so stage 3 starts from a
+  format that cannot lose it;
+- `T?` / `T | E` unions are structural: the file states their members (`(union 0 (...))`) and the
+  reader rebuilds the same synthesised declaration by the same rule, instead of naming a table index.
+
+### What an interface deliberately does not contain
+
+- **Bodies.** A module's code is not in its interface; `--interface` still compiles the bodies it
+  needs, because one object for the whole program cannot leave a module out (see "still missing").
+- **Local names, statements, comments.** The writer never emits token text: only declarations, types
+  and flags.
+- **Synthetic compiler modules.** `.impl_N`, `.inherent_N`, `.interface_N`, `.union`, `.result`,
+  `.closure` and `__start` never appear as modules: an implementation's methods travel under the
+  declaration they belong to (`inherent`/`impl` sections), a union travels as its members, an
+  environment record travels as the closure type's environment, and the process entry belongs to no
+  module at all.
+- **The runtime.** `module runtime` (the portable runtime and the platform module) is the trusted
+  base: it is compiled from source in every build and has no interface.
+- **Anything the language keeps private.** `pub` is not a visibility boundary in Grail today: a
+  caller can name any top-level declaration of another module, and the corpus does so
+  (`stream_def::Stream` and `stream_def::fopen` are not `pub`). An interface therefore carries the
+  module's whole top-level surface - exactly what an importer can name - and adds a `pub` flag only
+  once the language grows a visibility rule to enforce. `tools/interface-test.mjs` pins the part that
+  is enforceable now: no body, no local name, no synthetic module and no other module's declaration
+  appears in an interface.
+
+### Refusals
+
+All three are named, exit 1, and name the module and the file:
+
+1. **missing** - `--interface DIR` wants `DIR/util.iface` and it is not there;
+2. **stale** - the source on the command line no longer hashes to the `sha256` line:
+   `grail: DIR/util.iface: module `util` changed since this interface was written: the interface
+   records source-sha256 <a> for "src/util.grl", but src/util.grl is <b>`;
+3. **disagreeing** - `--verify` (or a mismatched manifest) refuses with the first differing line:
+   `grail: DIR/util.iface: module `util` does not match this interface: line 12: the interface says
+   `type util::Stream handle params=0 lifetimes=0 transfer=0 share=0`, the sources give
+   `... transfer=1 share=0``.
+
+An interface is checked, not trusted: the format version, the module, the compiler modes (typed
+refs, numeric default, overflow, target), the source digest, the file's own digest and the manifest
+are all verified before one declaration is installed. The trust boundary is stated rather than
+implied: whoever can rewrite `DIR` can also rewrite `DIR/interfaces.manifest`, so the manifest is an
+integrity check against a stale or edited file, not an authenticity check against a hostile writer -
+that is the build cache's problem (stage 4), and it will key on the same digests.
+
+### Generics: option 1, as planned
+
+A type-generic template's body is not in the interface. The file records
+`templates 1` for the module and `body "<path>" pos <n>` for each template; an importer that
+instantiates one needs that source on its command line, and refuses by name when it is not there.
+Nothing is silently stale: the source dependency is exactly as visible as the digest that pins it.
+
+### Stage 2 as built, measured
+
+The compiler's own ten modules emit nine interfaces (the runtime has none) in one run; `--interface`
+compiles the same compiler and links a binary that answers `version` and compiles a generic-heavy
+corpus program to byte-identical assembly. `tools/interface-test.mjs` records the numbers and runs
+the corpus.
+
+### The one place this was wrong, and what it was
+
+An earlier commit of this branch compiled every program that included `lib/hashmap.grl` against
+interfaces into `type does not satisfy interface bound`. The interface was complete: `Map` carried
+`require 0 hash::Hash` / `require 0 hash::Equal`, its field carried the proofs on `K`, and
+`impl<K: hash::Hash + hash::Equal, V> Map<K, V>` travelled with `ptype`/`require` lines. The bug was
+one type the **loader** invented: it interned the implementation's self type (`Map<K, V>`) from bare
+type parameters *before* the section's requirements were read, and `validate_type_constraints` walks
+every nominal type in the store, so that bare `Map<K, V>` was rejected. The self type is now built
+once, after the section's names, bounds and requirements are in place, with the same interface proofs
+the source parse produces, and the loader no longer interns a half-built one.
+
+Two things were wrong in the test as well, and are worth naming because they made a green run
+unlikely to mean what it said:
+
+- it ran a case's program with no arguments and from the repository root, so a case such as
+  `lib-zlib` (whose fixture path is relative to the case directory) could never print what it
+  expected;
+- nothing asserted that the manifest is consulted at all, so a manifest check that compared nothing
+  would have looked exactly like a passing tamper test. There is now a case that corrupts only the
+  manifest's recorded digest and requires a refusal, separate from the case that edits the interface
+  itself.
+
+### What stage 2 does not do, and why
+
+`--interface` reads declarations from interfaces, but the module's **bodies are still parsed and
+emitted in the same run**. That is deliberate and it is the honest boundary of stage 2:
+
+- a build still produces one object for the whole program, so it cannot leave a module's code out;
+- leaving the code out needs one object per module - the invocation model stage 1's record
+  describes - and that driver is stage 4 ("`grail build` learns to plan a module graph") together
+  with its cache;
+- a generic's typed body has to be in the interface before a module that instantiates it can be
+  compiled without its source, and that is stage 3.
+
+What stage 2 does buy is the property it exists for: every cross-module reference in a `--interface`
+build is checked against the interface rather than against the imported module's source, and an
+interface that is missing, stale or different from its module stops the build by name.
+
 ## Stages
 
 - **Stage 1 — per-module emission, no interface files. Done** (`b1-module-emission`; what was built
@@ -78,10 +247,11 @@ body reference. Option 3 is rejected: it would break the ports.
   assembled in parallel, linked once. No semantic change, no new format; immediately gives parallel
   assembly and smaller diffs in generated code. Verifiable by comparing the result against today's
   single-file build for the native suite, the book and the compiler itself.
-- **Stage 2 — interface files, checked.** Emit and read interfaces as above; a module compiled
-  against an interface refuses to proceed when a hash disagrees. Generics record a source
-  dependency (option 1). The compiler keeps a whole-program path (`grail build a.grl b.grl` today)
-  so nothing is forced to migrate at once.
+- **Stage 2 — interface files, checked. Done** (`b1-interfaces`; what was built, the format and its
+  named limits are recorded below). Emit and read interfaces as above; a module compiled against an
+  interface refuses to proceed when a hash disagrees. Generics record a source dependency (option 1).
+  The compiler keeps a whole-program path (`grail build a.grl b.grl` today) so nothing is forced to
+  migrate at once.
 - **Stage 3 — generic bodies in interfaces**, once the typed IR exists; drop the source-dependency
   marker.
 - **Stage 4 — build cache and incremental driver**: content-addressed objects keyed by source hash +
@@ -209,3 +379,34 @@ try to parallelise the Grail compile itself.
   interface still names the module the user wrote, not the interface file.
 - Self-hosting stays a fixpoint test: the compiler must still compile itself, which after stage 2
   means compiling against its own interfaces — a good stress test for the format.
+
+## What stage 3 and stage 4 still have to solve
+
+Recorded here rather than discovered later:
+
+**Stage 3 - generic bodies in interfaces.**
+- a typed body format in a file, so `templates 1` / `body "<path>" pos <n>` becomes a body
+  reference and a module can be used without its source;
+- closures in signatures: today no declaration-level construct produces a capturing closure type,
+  so the environment-record path in the format (`(closure ... env)` plus the `env` section) is
+  implemented and verified but unexercised by the corpus - stage 3 is what makes it routine;
+- the interface must then carry what replay needs today from the parser: a template's parameter
+  lifetimes and bounds are already in the file, its typed body is not;
+- a monomorphisation decision follows: a specialisation of a foreign generic currently lands in the
+  part of the module that *defines* it, which is right for one object and wrong for one object per
+  module.
+
+**Stage 4 - object cache and the incremental driver.**
+- one compiler invocation per module (no `__start`, no whole-program stream), which is what lets a
+  module's code stop being parsed at all - the thing stage 2 deliberately does not do;
+- content-addressed objects keyed by `(source sha256, interface digests, compiler version, flags)`;
+  the interface header already carries every input except the compiler version, which is a one-line
+  addition to the header;
+- the driver plans a module graph instead of taking a file list, and decides which modules must be
+  compiled from source because a generic body is needed;
+- visibility: `pub` becomes a checked boundary, which shrinks an interface to the exported surface
+  and needs a language rule the corpus does not have yet;
+- the authenticity question the manifest cannot answer: anything that can rewrite `DIR` can rewrite
+  `interfaces.manifest`, so a cache that has to resist a hostile writer needs signed or keyed
+  manifests.
+
