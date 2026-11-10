@@ -420,18 +420,6 @@ function report(label, detail) {
   console.log(`interface: ${label}: ${detail}`);
 }
 
-const self = proveSelfHosting();
-report('compiler compiled against its own interfaces', `${self.modules} interfaces, ${self.digests} digests, same assembly`);
-
-const stale = proveStale();
-report('stale interface refused', stale);
-
-const tamper = proveTampering();
-report('edited transfer refused (manifest)', tamper.edited);
-report('re-digested transfer refused (manifest)', tamper.manifest);
-report('edited transfer refused (--verify)', tamper.verify);
-report('edited env refused (--verify)', tamper.env);
-
 const leaked = proveLeakage();
 report('no body, local or synthetic declaration in an interface', `${leaked} interfaces checked`);
 
@@ -453,6 +441,19 @@ function proveCallerRejected() {
 
 const caller = proveCallerRejected();
 report('caller rejected against an interface', caller);
+
+const self = proveSelfHosting();
+report('compiler compiled against its own interfaces', `${self.modules} interfaces, ${self.digests} digests, same assembly`);
+
+const stale = proveStale();
+report('stale interface refused', stale);
+
+const tamper = proveTampering();
+report('edited transfer refused (manifest)', tamper.edited);
+report('re-digested transfer refused (manifest)', tamper.manifest);
+report('edited transfer refused (--verify)', tamper.verify);
+report('edited env refused (--verify)', tamper.env);
+
 
 const corpus = proveCorpus();
 report('corpus agrees with source builds', `${corpus} programs (interface build, verify build and source build agree)` + (full ? ' - full corpus' : ''));
