@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- Two cross-lane defects found while wiring the release pipeline: `bun tools/ci.mjs build
+  --platform windows-x86_64` no longer passes `compiler/os-linux.grl` alongside the
+  `compiler/os-windows.grl` that `tools/windows.mjs` appends, which made the PE/COFF build fail with
+  a duplicate `rt_syscall`; and the Mach-O object check reads `llvm-nm --extern-only` so the
+  compiler object's local symbols no longer overflow the command buffer. Windows x86-64 and both
+  macOS object lanes build again.
+- Release pipeline for `v*` tags (`.github/workflows/release.yml`, `tools/release.mjs`,
+  `docs/releases.md`). Every supported target builds from the checked-in bootstrap seed with no
+  development compiler (`GRAIL_COMPILER` is refused) and no network beyond the runner toolchain;
+  the workflow publishes one GitHub release per tag with the per-target artifacts, a `SHA256SUMS`
+  file, `release.json` provenance and a generated `RELEASE-README.md`. Linux x86-64, AArch64 and
+  RISC-V 64 ship real ELF compiler executables; windows-x86_64 ships a cross-built PE32+ compiler
+  image and COFF object bundle that are static-checked but not runnable on Windows yet; macOS
+  ships static-checked Mach-O object bundles only; windows-aarch64 remains planned and is not
+  published. `tools/ci.mjs build`/`package` gained `--stage0 PATH` for a seed-built stage0, and
+  `bun tools/ci.mjs lint` now checks the release workflow against the platform matrix.
 - Merge the three design reviews from branch `claude/brave-heisenberg-0h3ska` as documents only
   (`docs/design/first-principles-architecture.md`, `architecture-reassessment.md`,
   `complexity-reassessment.md`, 2,746 lines). Their edits to README and to the research-phase

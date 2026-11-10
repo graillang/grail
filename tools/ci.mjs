@@ -492,6 +492,46 @@ function lint() {
   check('DWARF line-table test exists', existsSync(join(root, 'tools/test-debug-lines.mjs')));
   check('VERSION file matches compiler --version', readFileSync(join(root, 'compiler/cli.grl'), 'utf8').includes(`grail ${version ?? '0.0.0'}`), version ?? '');
 
+  // Release pipeline: one tag-triggered workflow that covers every platform,
+  // builds from the checked-in seed and publishes checksums plus the generated
+  // README. docs/releases.md is the human contract for the same facts.
+  const releaseTool = join(root, 'tools/release.mjs');
+  check('release tool exists', existsSync(releaseTool));
+  const releaseWorkflow = join(root, '.github/workflows/release.yml');
+  if (existsSync(releaseWorkflow)) {
+    const text = readFileSync(releaseWorkflow, 'utf8');
+    check('release workflow triggers on v tags', /tags:\s*\[\s*['"]v\*['"]\s*\]/.test(text));
+    check('release workflow validates the tag against VERSION', text.includes('tools/release.mjs version --tag'));
+    check('release workflow runs the static checks', text.includes('bun tools/ci.mjs lint'));
+    for (const platform of PLATFORMS) {
+      if (platform.tier === PLANNED) {
+        check(`release workflow explains planned ${platform.id}`, text.includes(platform.id) && /planned|not built|deliberately absent/i.test(text));
+      } else {
+        check(`release workflow builds ${platform.id}`, text.includes(`--platform ${platform.id}`) || text.includes(`platform: ${platform.id}`));
+      }
+    }
+    check('release workflow assembles SHA256SUMS', text.includes('tools/release.mjs assemble') && text.includes('SHA256SUMS'));
+    check('release workflow verifies the assembled release', text.includes('tools/release.mjs verify'));
+    check('release workflow uploads the release README', text.includes('RELEASE-README.md'));
+    check('release workflow publishes a GitHub release', text.includes('gh release create'));
+    check('release workflow installs no compiler of its own', !/GRAIL_COMPILER:\s*\$\{\{\s*secrets/.test(text));
+  } else {
+    check('release workflow exists', false, '.github/workflows/release.yml');
+  }
+  const releaseDoc = join(root, 'docs/releases.md');
+  if (existsSync(releaseDoc)) {
+    const text = readFileSync(releaseDoc, 'utf8');
+    for (const id of ids) check(`release doc mentions ${id}`, text.includes(id));
+    check('release doc documents the dry run', text.includes('bun tools/release.mjs dry-run'));
+    check('release doc documents checksums', text.includes('SHA256SUMS'));
+    check('release doc says GRAIL_COMPILER is refused', text.includes('GRAIL_COMPILER'));
+    check('release doc marks windows-aarch64 as not built', /windows-aarch64[^\n]*(planned|not built|no compiler)/i.test(text));
+  } else {
+    check('release doc exists', false, 'docs/releases.md');
+  }
+  check('README links the release doc', readFileSync(join(root, 'README.md'), 'utf8').includes('docs/releases.md'));
+  check('justfile has a release dry run', readFileSync(join(root, 'justfile'), 'utf8').includes('release-dry-run'));
+
   const failed = checks.filter(entry => !entry.ok);
   return { ok: failed.length === 0, checks, failed };
 }
