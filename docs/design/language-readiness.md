@@ -18,13 +18,13 @@ the design notes named below; `implementation-status.md` is current except where
 | A8 | Typed OS errors on Windows | **Done** for the host layer (`GetLastError` -> errno) | `io-error-mapping` Wine case |
 | A9 | Process stdio capture | **Done** (`pipe`, `spawn_with`, `read_to_end`) | Linux + Wine |
 | A10 | Windows ARM64 threads | **Done statically** (bridge emitted and published); no ARM64 Windows runner | ARM64 static checks |
-| A11 | Mutable/borrowed captures, borrowed closure params | **Borrowed captures done; `FnMut` deferred** (B6) | Closures capture references and views and cannot escape their borrow (native cases `closure-captures-reference`, `closure-borrowed-capture-escape-rejected`, `closure-capture-mutation-rejected`); mutating captures, mutable/borrowed closure params and generic iterator adapters wait on the deferred `FnMut` work (B6). `docs/design/closures.md` |
+| A11 | Mutable/borrowed captures, borrowed closure params | **Done**: borrowed captures, mutable captures (`FnMut`) and exclusive calls | Closures capture references and views and cannot escape their borrow (native cases `closure-captures-reference`, `closure-borrowed-capture-escape-rejected`); a closure that writes a capture is `FnMut` and calling it takes exclusive access (B6: `closure-fnmut-counter`, `closure-fnmut-second-call-rejected`, `closure-fnmut-not-fn-rejected`). A by-value `FnMut` parameter cannot be called (parameters are not mutable storage); adapters take `&mut FnMut(...)`. `docs/design/closures.md` |
 | A12 | Iteration | **Partial**: `vecs::fold` (any type), `any/all/count/position_num`; generic predicates need A11 | native case `vecs-fold-and-predicates` |
 | A13 | Debug info | **Done for line tables and typed locals**: DWARF lines + base types on Linux x86-64, AArch64 and RISC-V 64 (`--verify` clean; gdb prints typed locals); CodeView on Windows x64 with line tables and S_GPROC32/S_REGREL32 symbols (typed, rbp-relative parameters and locals) in the PDB. Remaining: record/string member layout (owned values show as their 8-byte handle) | `tools/test-debug-lines.mjs` |
 
 Remaining implementable core gap: record and string member layout in the debug info. Everything
 else in A1-A13 is either done or waits on a decided item in section B (by-value record arguments get
-B7's `byval` spelling; mutating closure captures wait on B6's deferred `FnMut`).
+B7's `byval` spelling; mutating closure captures are implemented under B6's rules).
 
 ## B. Owner decisions (settled 2026-11-10)
 

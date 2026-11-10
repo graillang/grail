@@ -1706,10 +1706,10 @@
     "diagnostic": "use of moved"
   },
   {
-    "name": "closure-capture-mutation-rejected",
-    "source": "fn main(){mut n=1;f:=|| -> u64 {n=2;return n;};}",
-    "reject": true,
-    "diagnostic": "read-only"
+    "name": "closure-capture-mutation-fnmut",
+    "note": "A capture the body writes makes the closure FnMut: the store reaches the environment field through an exclusive reference, and the binding that holds the closure must be mutable.",
+    "source": "fn main(){mut n=1;mut f=|| -> u64 {n=2;return n;};println(\"{}\",f());}",
+    "stdout": "2\n"
   },
   {
     "name": "closure-copy-rejected",
@@ -1718,10 +1718,9 @@
     "diagnostic": "use of moved"
   },
   {
-    "name": "closure-capture-borrow-mut-rejected",
-    "source": "fn main(){d:=u8[1];f:=|| -> u64 {mut b=&mut d;return 0;};}",
-    "reject": true,
-    "diagnostic": "read-only"
+    "name": "closure-capture-borrow-mut-fnmut",
+    "source": "fn main(){d:=u8[1];mut f=|| -> u64 {mut b=&mut d;b[0]=5;return b[0];};println(\"{}\",f());}",
+    "stdout": "5\n"
   },
   {
     "name": "closure-argument-type-rejected",
@@ -5110,5 +5109,98 @@
       "compiler/tests/hint_scope_stale.grl"
     ],
     "stdout": "9\n"
+  },
+  {
+    "name": "closure-fnmut-counter",
+    "note": "A counter closure: the body writes the captured `count`, so the closure is FnMut and calling it takes exclusive access to the closure value; the calls are sequential, so each one sees the previous write.",
+    "source": "fn main() {\n    mut count = 1;\n    mut next = || -> u64 { count += 1; return count; };\n    println(\"{} {} {}\", next(), next(), next());\n}\n",
+    "stdout": "2 3 4\n"
+  },
+  {
+    "name": "closure-fnmut-disjoint-captures",
+    "note": "Two FnMut closures over disjoint captures: each writes only its own environment, and holding one exclusively does not block the other.",
+    "source": "fn main() {\n    mut a = 0;\n    mut b = 10;\n    mut left = || -> u64 { a += 1; return a; };\n    mut right = || -> u64 { b += 2; return b; };\n    println(\"{} {} {} {}\", left(), right(), left(), right());\n}\n",
+    "stdout": "1 12 2 14\n"
+  },
+  {
+    "name": "closure-fnmut-sequential-calls",
+    "source": "fn main() {\n    mut n = 0;\n    mut bump = || -> u64 { n += 1; return n; };\n    first := bump();\n    second := bump();\n    println(\"{} {}\", first, second);\n}\n",
+    "stdout": "1 2\n"
+  },
+  {
+    "name": "closure-fnmut-second-call-rejected",
+    "note": "The outer call holds the closure exclusively while its arguments are evaluated, so a call from an argument is a second simultaneous call on the same environment.",
+    "source": "fn main() {\n    mut n = 0;\n    mut f = |x: u64| -> u64 { n += 1; return n + x; };\n    println(\"{}\", f(f(1)));\n}\n",
+    "reject": true,
+    "diagnostic": "needs exclusive access"
+  },
+  {
+    "name": "closure-fnmut-shared-borrow-rejected",
+    "note": "A shared reference to the closure that is still live (used after the call) blocks the exclusive call. A borrow whose last use has passed is not live, and does not.",
+    "source": "fn main() {\n    mut n = 0;\n    mut f = || -> u64 { n += 1; return n; };\n    r := &f;\n    println(\"{}\", f());\n    h := r;\n}\n",
+    "reject": true,
+    "diagnostic": "needs exclusive access"
+  },
+  {
+    "name": "closure-fnmut-not-fn-rejected",
+    "note": "FnMut and Fn are different types: a closure that writes a capture cannot be used where a shared call is required, and the diagnostic says why.",
+    "source": "fn apply(f: Fn(u64) -> u64) -> u64 { return f(1); }\nfn main() {\n    mut n = 0;\n    mut c = |x: u64| -> u64 { n += 1; return n + x; };\n    println(\"{}\", apply(c));\n}\n",
+    "reject": true,
+    "diagnostic": "FnMut, not Fn"
+  },
+  {
+    "name": "closure-fnmut-sort-by-rejected",
+    "note": "The stdlib callback shapes take Fn (vecs::sort_by reads elements): a comparator that writes a capture is FnMut and is rejected rather than silently made exclusive.",
+    "source": "use vecs;\nfn main() {\n    mut items = u64[3, 1, 2];\n    mut seen = 0;\n    vecs::sort_by(&mut items, |a: &u64, b: &u64| -> bool { seen += 1; return *a < *b; });\n    println(\"{}\", seen);\n}\n",
+    "reject": true,
+    "diagnostic": "FnMut, not Fn",
+    "modules": [
+      "lib/vecs.grl",
+      "lib/order.grl",
+      "lib/hash.grl",
+      "lib/core.grl"
+    ]
+  },
+  {
+    "name": "closure-shared-capture-still-fn",
+    "note": "A closure that only reads its capture stays Fn: no mutable binding, repeated calls, and it passes where Fn is expected.",
+    "source": "fn pick(f: Fn(u64) -> u64) -> u64 { return f(1); }\nfn main() {\n    base := 10;\n    f := |x: u64| -> u64 { return base + x; };\n    println(\"{} {} {}\", f(2), pick(f), base);\n}\n",
+    "stdout": "12 11 10\n"
+  },
+  {
+    "name": "closure-shared-borrow-of-fn-closure",
+    "note": "Calling a Fn closure through a live shared reference stays allowed: a shared call does not need the closure exclusively.",
+    "source": "fn main() {\n    base := 10;\n    f := |x: u64| -> u64 { return base + x; };\n    r := &f;\n    println(\"{} {}\", f(2), f(3));\n}\n",
+    "stdout": "12 13\n"
+  },
+  {
+    "name": "closure-fnmut-vector-element",
+    "note": "A FnMut closure over a captured exclusive element reference: each call writes through the captured `&mut u64` and sees the previous value.",
+    "source": "fn main() {\n    mut v = u64[1, 2, 3];\n    r := &mut v[0];\n    mut f = || -> u64 { *r += 5; return *r; };\n    println(\"{} {}\", f(), f());\n}\n",
+    "stdout": "6 11\n"
+  },
+  {
+    "name": "closure-fnmut-captured-field",
+    "note": "Writing a field of a captured record stores through an exclusive reference to the environment field.",
+    "source": "struct Box2 { n: u64 }\nfn main() {\n    b := Box2 { n: 1 };\n    mut f = || -> u64 { b.n += 2; return b.n; };\n    println(\"{}\", f());\n}\n",
+    "stdout": "3\n"
+  },
+  {
+    "name": "closure-fnmut-needs-mut-binding",
+    "source": "fn main() {\n    mut n = 0;\n    f := || -> u64 { n += 1; return n; };\n    println(\"{}\", f());\n}\n",
+    "reject": true,
+    "diagnostic": "needs a mutable binding"
+  },
+  {
+    "name": "closure-fnmut-through-exclusive-reference",
+    "note": "An adapter takes `&mut FnMut(...)` so it can call the closure exclusively; two calls through the same reference are sequential, so both are allowed.",
+    "source": "fn apply<a>(f: (&a mut FnMut(u64) -> u64)) -> u64 { return f(1); }\nfn main() {\n    mut n = 10;\n    mut c = |x: u64| -> u64 { n += 1; return n + x; };\n    println(\"{} {}\", apply(&mut c), apply(&mut c));\n}\n",
+    "stdout": "12 13\n"
+  },
+  {
+    "name": "closure-fnmut-mixed-captures",
+    "note": "Only the capture the body writes is mutable: an untouched capture stays readable, and the closure is FnMut because of the written one.",
+    "source": "fn main() {\n    mut hits = 0;\n    label := 7;\n    mut f = || -> u64 { hits += 1; return hits + label; };\n    println(\"{} {}\", f(), f());\n}\n",
+    "stdout": "8 9\n"
   }
 ]
