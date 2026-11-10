@@ -1,0 +1,286 @@
+module authority;
+use host;
+use io;
+use fs;
+
+// Operating-system authority is a value, not an ambient property of the process. An
+// `Authority` holds one explicit grant: read files under a root, write files under a root,
+// spawn processes, or open sockets. The gated functions below refuse work the grant does not
+// cover, and the compiler flag `--deny-ambient-host` turns a direct `host::` OS call into a
+// compile error unless the module opts in with `use host;`. See docs/authority.md.
+//
+// This module is the one place that opts in: it is the recommended route, so it declares
+// `use host;` once and every program can stay off the ambient interface.
+pub enum Error{Denied,EmptyRoot,Io(io::Error)}
+
+impl Error{
+    // A short human-readable description, for diagnostics and logs.
+    pub fn show<a>(self:(&a Error))->string{
+        match self{
+            Denied=>{return "denied by authority".text();},
+            EmptyRoot=>{return "authority root is empty".text();},
+            Io(e)=>{return e.show();}
+        }
+    }
+}
+
+// Capabilities are named bits plus the normalised root they apply to. Fields stay private so a
+// value can only be built by a constructor and only read through its methods.
+pub struct Authority{
+    root:u8[],
+    may_read:u64,
+    may_write:u64,
+    may_spawn:u64,
+    may_socket:u64,
+}
+
+// ---- constructors: each one is an explicit grant ----
+
+fn with_root<a>(root:&a [u8],r:u64,w:u64)->Authority |? Error{
+    if root.len()==0{return Error::EmptyRoot;}
+    p:=normalize(root)?;
+    return Authority{root:p,may_read:r,may_write:w,may_spawn:0,may_socket:0};
+}
+// Read files under `root`. The root is normalised when the grant is created, and `resolve`
+// normalises it again idempotently so `contains` also works on a raw root.
+pub fn open_read<a>(root:&a [u8])->Authority |? Error{return with_root(root,1,0);}
+// Write files under `root`. This grants no read access.
+pub fn open_write<a>(root:&a [u8])->Authority |? Error{return with_root(root,0,1);}
+// Read and write files under `root`.
+pub fn open<a>(root:&a [u8])->Authority |? Error{return with_root(root,1,1);}
+// Spawn processes. It grants no file access and no sockets.
+pub fn process()->Authority{
+    return Authority{root:u8[],may_read:0,may_write:0,may_spawn:1,may_socket:0};
+}
+// Open sockets: connect, listen, report a listener's port, and close a descriptor.
+pub fn sockets()->Authority{
+    return Authority{root:u8[],may_read:0,may_write:0,may_spawn:0,may_socket:1};
+}
+
+impl Authority{
+    pub fn can_read<a>(self:(&a Authority))->bool{return self.may_read!=0;}
+    pub fn can_write<a>(self:(&a Authority))->bool{return self.may_write!=0;}
+    pub fn can_spawn<a>(self:(&a Authority))->bool{return self.may_spawn!=0;}
+    pub fn can_connect<a>(self:(&a Authority))->bool{return self.may_socket!=0;}
+    // The normalised root as bytes; empty means the process working directory (a "." grant).
+    pub fn root<a>(self:(&a Authority))->u8[]{return self.root.copy();}
+}
+
+// ---- path normalisation and containment ----
+
+// Both separators are treated as separators on every platform. A Linux file name may legally
+// contain a backslash; refusing to read it is conservative, never permissive.
+fn separator(b:u8)->bool{
+    if (b==47)+(b==92){return true;}
+    return false;
+}
+fn letter(b:u8)->bool{
+    if (65<=b)&(b<=90){return true;}
+    if (97<=b)&(b<=122){return true;}
+    return false;
+}
+// A leading separator, or a Windows drive letter ("C:..."), makes a path absolute.
+fn absolute_path<a>(path:&a [u8])->bool{
+    if path.len()==0{return false;}
+    if separator(path[0]){return true;}
+    if 1<path.len(){
+        if (path[1]==58)&letter(path[0]){return true;}
+    }
+    return false;
+}
+fn dot_at<a>(path:&a [u8],start:u64,end:u64)->bool{
+    if (end-start)!=1{return false;}
+    return path[start]==46;
+}
+fn dotdot_at<a>(path:&a [u8],start:u64,end:u64)->bool{
+    if (end-start)!=2{return false;}
+    if path[start]!=46{return false;}
+    return path[start+1]==46;
+}
+
+// Normalise `path` into `/`-separated components: `.` components disappear, empty components
+// collapse, and `..` removes the previous component. A `..` with nothing left to remove is
+// `Denied` - normalisation never produces a path that climbs above its starting point, so a
+// normalised relative path cannot escape and a normalised absolute path cannot escape its root.
+//
+// A drive letter is kept as the first component and cannot be removed by `..`. Drive-relative
+// Windows paths ("C:name") are treated as absolute ("C:/name"); Grail never changes the
+// process working directory, so the difference is not observable here.
+pub fn normalize<a>(path:&a [u8])->u8[] |? Error{
+    mut absolute = 0;
+    mut floor = 0;
+    mut start = 0;
+    if path.len()!=0{
+        if separator(path[0]){
+            absolute=1;
+            start=1;
+        }else{
+            if 1<path.len(){
+                if (path[1]==58)&letter(path[0]){
+                    absolute=1;
+                    floor=1;
+                }
+            }
+        }
+    }
+    mut out=u8[];
+    mut starts=u64[];
+    if absolute!=0{
+        if floor==0{out.push(47);}
+    }
+    mut i=start;
+    while i<path.len(){
+        mut end=i;
+        while end<path.len(){
+            if separator(path[end]){break;}
+            end+=1;
+        }
+        if i!=end{
+            if dot_at(path,i,end){
+                // "." contributes nothing.
+            }else{
+                if dotdot_at(path,i,end){
+                    if starts.len()<=floor{return Error::Denied;}
+                    at:=starts.pop();
+                    mut kept=u8[];
+                    for j in at{
+                        kept.push(out[j]);
+                    }
+                    // Drop the separator that introduced the removed component, keeping an
+                    // absolute prefix ("/" or "C:/") intact.
+                    if 1<kept.len(){
+                        if separator(kept[kept.len()-1]){kept.pop();}
+                    }
+                    out=kept;
+                }else{
+                    if 0<starts.len(){out.push(47);}
+                    starts.push(out.len());
+                    mut j=i;
+                    while j<end{
+                        out.push(path[j]);
+                        j+=1;
+                    }
+                }
+            }
+        }
+        i=end+1;
+    }
+    return out;
+}
+
+// True when `path` is `root` or a component-wise descendant of it. A byte prefix is not enough:
+// "/database" is not under "/data".
+fn under<a,b>(root:&a [u8],path:&b [u8])->bool{
+    if root.len()==0{return false;}
+    if path.len()<root.len(){return false;}
+    for i in root.len(){
+        if root[i]!=path[i]{return false;}
+    }
+    if path.len()==root.len(){return true;}
+    if separator(root[root.len()-1]){return true;}
+    return separator(path[root.len()]);
+}
+fn join<a,b>(root:&a [u8],rel:&b [u8])->u8[]{
+    if rel.len()==0{return root.copy();}
+    mut out=u8[];
+    for i in root.len(){
+        out.push(root[i]);
+    }
+    if 0<out.len(){
+        if !separator(out[out.len()-1]){out.push(47);}
+    }
+    for i in rel.len(){
+        out.push(rel[i]);
+    }
+    return out;
+}
+
+// The path a gated operation will actually use, or `Denied`. An absolute path must be inside an
+// absolute root; a relative path is relative to the root and may not climb out of it.
+pub fn resolve<a,b>(root:&a [u8],path:&b [u8])->u8[] |? Error{
+    r:=normalize(root)?;
+    p:=normalize(path)?;
+    if absolute_path(path){
+        if !absolute_path(root){return Error::Denied;}
+        if !under(view(r),view(p)){return Error::Denied;}
+        return p;
+    }
+    return join(view(r),view(p));
+}
+
+// The capability check on its own: does `root` contain `path`? Exposed so callers and tests can
+// inspect the rule without performing I/O.
+pub fn contains<a,b>(root:&a [u8],path:&b [u8])->bool{
+    match resolve(root,path){
+        u8[]=>{return true;},
+        _=>{return false;}
+    }
+}
+
+// ---- gated operations ----
+
+// Read the whole file at `path`. Fails with `Denied` when the grant does not cover it, and with
+// `Io` when the operating system refuses the read.
+pub fn read_file<a,b>(a:&a Authority,path:&b [u8])->u8[] |? Error{
+    if a.may_read==0{return Error::Denied;}
+    p:=resolve(view(a.root),path)?;
+    match fs::read(view(p)){
+        data:u8[]=>{return data;},
+        e:io::Error=>{return Error::Io(e);}
+    }
+}
+// Write `data` to `path`, replacing any existing file.
+pub fn write_file<a,b,c>(a:&a Authority,path:&b [u8],data:&c [u8])->unit |? Error{
+    if a.may_write==0{return Error::Denied;}
+    p:=resolve(view(a.root),path)?;
+    match fs::write(view(p),data){
+        e:io::Error=>{return Error::Io(e);},
+        _=>{return ();}
+    }
+}
+// Run `argv` without a shell and return its exit status. The argument vector is copied, so the
+// caller keeps ownership of its own vector.
+pub fn spawn<a,b>(a:&a Authority,argv:&b u8[][])->u64 |? Error{
+    if a.may_spawn==0{return Error::Denied;}
+    mut args=u8[][];
+    for i in argv.len(){
+        args.push(copy_bytes(argv[i]));
+    }
+    return host::command(args);
+}
+// Connect to `address:port` and return the socket descriptor.
+pub fn connect<a,b>(a:&a Authority,address:&b [u8],port:u64)->u64 |? Error{
+    if a.may_socket==0{return Error::Denied;}
+    fd:=host::tcp_connect(address,port);
+    if 9223372036854775807<fd{return Error::Io(io::from_errno(wrapping_sub(0,fd)));}
+    return fd;
+}
+// Listen on `port` (0 picks a free port) and return the listener descriptor.
+pub fn listen<a>(a:&a Authority,port:u64)->u64 |? Error{
+    if a.may_socket==0{return Error::Denied;}
+    fd:=host::tcp_listen(port);
+    if 9223372036854775807<fd{return Error::Io(io::from_errno(wrapping_sub(0,fd)));}
+    return fd;
+}
+// The port a listener actually bound, for `listen(&a, 0)`.
+pub fn port<a>(a:&a Authority,listener:u64)->u64 |? Error{
+    if a.may_socket==0{return Error::Denied;}
+    p:=host::tcp_port(listener);
+    if 9223372036854775807<p{return Error::Io(io::from_errno(wrapping_sub(0,p)));}
+    return p;
+}
+// Close a socket descriptor.
+pub fn close<a>(a:&a Authority,fd:u64)->unit |? Error{
+    if a.may_socket==0{return Error::Denied;}
+    error:=host::close(fd);
+    if error!=0{return Error::Io(io::from_errno(error));}
+    return ();
+}
+
+fn copy_bytes<a>(x:&a [u8])->u8[]{
+    mut out=u8[];
+    for i in x.len(){
+        out.push(x[i]);
+    }
+    return out;
+}

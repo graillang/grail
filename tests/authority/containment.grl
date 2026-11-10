@@ -1,0 +1,134 @@
+// Path containment is the security-critical part of the authority model. Every case here is a
+// lexical check: no filesystem, no symlinks, and no dependence on the working directory.
+use authority;
+
+fn same<a, b>(x: &a [u8], y: &b [u8]) -> bool {
+    if x.len() != y.len() { return false; }
+    for i in x.len() {
+        if x[i] != y[i] { return false; }
+    }
+    return true;
+}
+// Returns 1 so the caller can count the cases it actually ran.
+fn expect<a, b>(root: &a [u8], path: &b [u8], want: bool) -> u64 {
+    got := authority::contains(root, path);
+    if got != want {
+        println("containment mismatch");
+        println(root);
+        println(path);
+        println(got);
+        assert(false);
+    }
+    return 1;
+}
+fn expect_norm<a, b>(path: &a [u8], want: &b [u8]) -> u64 {
+    got := authority::normalize(path)!;
+    if !same(view(got), want) {
+        println("normalize mismatch");
+        println(path);
+        println(got);
+        assert(false);
+    }
+    return 1;
+}
+fn expect_norm_denied<a>(path: &a [u8]) -> u64 {
+    mut denied = 0;
+    match authority::normalize(path) {
+        u8[] => {},
+        e: authority::Error => { denied = 1; }
+    }
+    if denied == 0 {
+        println("normalize should deny");
+        println(path);
+        assert(false);
+    }
+    return 1;
+}
+
+fn main() {
+    mut n = 0;
+    // Absolute root, absolute paths.
+    n += expect("/data", "/data/file", true);
+    n += expect("/data", "/data", true);
+    n += expect("/data", "/data/", true);
+    n += expect("/data", "/data//x", true);
+    n += expect("/data", "/data/./x", true);
+    n += expect("/data", "/data/a/../x", true);
+    n += expect("/data", "/data/.", true);
+    n += expect("/data", "/data/x/..", true);
+    // Escapes, and component boundaries rather than string prefixes.
+    n += expect("/data", "/data/../etc/passwd", false);
+    n += expect("/data", "/data/a/../../etc", false);
+    n += expect("/data", "/data/x/../..", false);
+    n += expect("/data", "/data/..", false);
+    n += expect("/data", "/database/x", false);
+    n += expect("/data", "/datax", false);
+    n += expect("/data", "/", false);
+    n += expect("/data/x", "/data", false);
+    // Relative paths are relative to the root and may not climb out of it.
+    n += expect("/data", "file", true);
+    n += expect("/data", "a/b", true);
+    n += expect("/data", "a/./b/../c", true);
+    n += expect("/data", "", true);
+    n += expect("/data", ".", true);
+    n += expect("/data", "../data/x", false);
+    n += expect("/data", "a/../../b", false);
+    n += expect("/data", "a/../..", false);
+    // A root of "/" is an explicit full-filesystem grant; a relative root grants nothing absolute.
+    n += expect("/", "/etc/passwd", true);
+    n += expect("/", "/", true);
+    n += expect("/", "..", false);
+    n += expect("rel", "a/b", true);
+    n += expect("rel", "a/../b", true);
+    n += expect("rel", "/abs", false);
+    n += expect("rel", "../x", false);
+    n += expect(".", "a", true);
+    n += expect(".", "../a", false);
+    n += expect(".", "/etc", false);
+    // Windows-shaped paths: a drive letter is an absolute component and cannot be popped.
+    n += expect("C:/data", "C:/data/x", true);
+    n += expect("C:/data", "C:/data/../x", false);
+    n += expect("C:/data", "C:/database", false);
+    n += expect("C:/data", "D:/data", false);
+    n += expect("C:/", "C:/anything", true);
+    n += expect("/data", "C:/data/x", false);
+    // Both separators are separators everywhere, so a Windows spelling cannot slip past.
+    n += expect("/data", "\\data\\x", true);
+    n += expect("/data", "/data\\..\\etc", false);
+    // Roots are normalised once, when the grant is created.
+    n += expect("/data/../data", "/data/x", true);
+    n += expect("/data/./", "/data/x", true);
+    n += expect("/data//", "/data//x", true);
+    // Ordinary names that merely look special.
+    n += expect("/data", "/data/...", true);
+    n += expect("/data", "/data/.hidden", true);
+    // Direct normalisation checks.
+    n += expect_norm("/a/./b/../c", "/a/c");
+    n += expect_norm("a//b", "a/b");
+    n += expect_norm("a/../b", "b");
+    n += expect_norm("C:/x/../y", "C:/y");
+    n += expect_norm_denied("../x");
+    n += expect_norm_denied("/..");
+    n += expect_norm_denied("a/../..");
+    n += expect_norm_denied("C:/..");
+    // A grant stores the normalised root, and an empty root is refused.
+    g := authority::open_read("/data/../data/x/..")!;
+    if !same(view(g.root()), "/data") {
+        println("grant root mismatch");
+        println(g.root());
+        assert(false);
+    }
+    n += 1;
+    mut empty = 0;
+    match authority::open_read("") {
+        e: authority::Error => { empty = 1; },
+        _ => {}
+    }
+    if empty == 0 {
+        println("an empty root should be refused");
+        assert(false);
+    }
+    n += 1;
+    println(n);
+    println("containment ok");
+}

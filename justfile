@@ -36,6 +36,10 @@ windows-check:
 test *args:
     bun tools/test-native.mjs "$@"
 
+# Authority/capability model: path containment, gated OS access and --deny-ambient-host.
+test-authority:
+    bun tools/test-authority.mjs
+
 # Self-hosting fixpoint: the compiler compiles itself twice with identical output.
 test-selfhost:
     bun tools/test-selfhost.mjs

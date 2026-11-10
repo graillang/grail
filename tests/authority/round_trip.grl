@@ -1,0 +1,77 @@
+// The gated read/write round trip runs in a scratch directory supplied by the suite: the
+// process working directory. Nothing here names a host:: function, so this file also compiles
+// under --deny-ambient-host without an opt-in.
+use authority;
+
+fn main() {
+    a := authority::open(".")!;
+    assert(a.can_read());
+    assert(a.can_write());
+    assert(!a.can_spawn());
+    assert(!a.can_connect());
+
+    authority::write_file(&a, "scratch/note.txt", "Grail\n")!;
+    data := authority::read_file(&a, "scratch/note.txt")!;
+    println(data.len());
+
+    // Escapes are refused in both directions, and the refused write leaves no file behind.
+    mut denied = 0;
+    match authority::write_file(&a, "../escape.txt", "x") {
+        e: authority::Error => { denied += 1; },
+        _ => {}
+    }
+    match authority::read_file(&a, "../../etc/passwd") {
+        e: authority::Error => { denied += 1; },
+        _ => {}
+    }
+    println(denied);
+
+    // A read-only grant cannot write.
+    ro := authority::open_read(".")!;
+    match authority::write_file(&ro, "scratch/other.txt", "x") {
+        e: authority::Error => { denied += 1; },
+        _ => {}
+    }
+    println(denied);
+
+    // A narrower root sees its own tree and refuses a sibling.
+    inner := authority::open_read("scratch")!;
+    note := authority::read_file(&inner, "note.txt")!;
+    println(note.len());
+    match authority::read_file(&inner, "../round_trip.grl") {
+        e: authority::Error => { denied += 1; },
+        _ => {}
+    }
+    println(denied);
+
+    // A missing file is an operating-system error, not a denial: the capability allowed the read.
+    match authority::read_file(&a, "scratch/absent.txt") {
+        e: authority::Error => { println(e.show()); },
+        _ => {}
+    }
+
+    // Process authority spawns without a shell; a file grant cannot.
+    p := authority::process();
+    assert(p.can_spawn());
+    assert(!p.can_read());
+    mut argv = u8[][];
+    argv.push("/bin/true".copy());
+    println(authority::spawn(&p, &argv)!);
+    mut refused = 0;
+    match authority::spawn(&a, &argv) {
+        e: authority::Error => { refused = 1; },
+        _ => {}
+    }
+    println(refused);
+
+    // Socket authority listens, reports the bound port, connects and closes.
+    s := authority::sockets();
+    assert(s.can_connect());
+    listener := authority::listen(&s, 0)!;
+    port := authority::port(&s, listener)!;
+    client := authority::connect(&s, "127.0.0.1", port)!;
+    authority::close(&s, client)!;
+    authority::close(&s, listener)!;
+    assert(port != 0);
+    println("round trip ok");
+}

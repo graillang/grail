@@ -71,6 +71,23 @@
   spelling. The new `ffi-reject-handle-out-slot` and `ffi-reject-handle-null-seed` native cases pin
   the two refusals, and `docs/rhi.md` states what the increment covers, what it does not, and the
   next three.
+- **Authority/capability model for OS access (decision B2).** `lib/authority.grl` makes OS access
+  an explicit value: `authority::open_read(root)`, `open_write(root)`, `open(root)`, `process()`
+  and `sockets()` create an owned `Authority`, and `authority::read_file`, `write_file`, `spawn`,
+  `connect`, `listen`, `port` and `close` enforce it. Path containment is lexical and
+  component-wise after normalising `.`, `..` and duplicate separators (both `/` and `\`), so
+  `/database` is not under `/data` and `/data/../etc/passwd` is `Denied`; the operation opens the
+  same resolved path the check approved. `authority::Error` keeps an OS error (`not found`)
+  distinct from a denial. The new compiler switch `--deny-ambient-host` rejects any `host::`
+  reference in a module whose `use` lines do not name `host`, covering calls, function values and
+  constants; `use host;` is the module-level opt-in (Grail has no attribute syntax), and ambient
+  `host::` remains the default without the switch. `grail build`, `grail check` and `grail test`
+  forward the flag. The switch does not cover `extern "C"` declarations, compiler builtins or
+  descriptor values, and containment does not resolve symlinks (see `docs/authority.md`). New
+  `bun tools/test-authority.mjs` (74 checks: 57 containment cases, a gated read/write/spawn/socket
+  round trip, and the switch), wired into `just test-authority` and the full linux-x86_64 CI lane.
+  Book: a "Capabilities instead of ambient access" section and the `authority` example with its
+  Rust comparison.
 - Merge the three design reviews from branch `claude/brave-heisenberg-0h3ska` as documents only
   (`docs/design/first-principles-architecture.md`, `architecture-reassessment.md`,
   `complexity-reassessment.md`, 2,746 lines). Their edits to README and to the research-phase

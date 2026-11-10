@@ -326,7 +326,10 @@ struct C {
     receiver_region: u64,
     input_regions: u64[],
     none_start: u64,
-    none_end: u64
+    none_end: u64,
+    deny_ambient: u64,
+    host_optin: u64,
+    host_modules: u8[][]
 }
 
 fn same<a, b>(x: &a [u8], y: &b [u8]) -> bool {
@@ -7212,6 +7215,16 @@ fn in_std_dir<a>(path: &a [u8]) -> u64 {
     }
     return host::exists(view(probe));
 }
+// Modules that declared `use host;`. Recorded per module so a replayed generic body is checked
+// against its defining module, not against whichever file was parsed last.
+fn host_opted<a, b>(c: (&a C), m: &b [u8]) -> bool {
+    for i in c.host_modules.len() {
+        if same(view(c.host_modules[i]), view(m)) {
+            return true;
+        }
+    }
+    return false;
+}
 fn stdlib_module<a, b>(mods: (&a u8[][]), m: &b [u8]) -> bool {
     // The runtime lives beside the compiler, not in the stdlib directory.
     if same(view(m), view("runtime")) {
@@ -7269,8 +7282,17 @@ fn toplevel<a>(c: (&a mut C), pass: u64) -> unit {
     exchange(&mut c.module, m);
     module_modes(&mut c);
     exchange(&mut c.imports, Import[]);
+    exchange(&mut c.host_optin, 0);
     while eat(&mut c, view("use")) {
         m = ident(&mut c);
+        // `use host;` (or `use host::name;`) is this module's explicit opt-in to the ambient
+        // `host::` interface; --deny-ambient-host refuses host:: references without it.
+        if same(view(m), view("host")) {
+            exchange(&mut c.host_optin, 1);
+            if !host_opted(&c, view(c.module)) {
+                c.host_modules.push(module_copy(&mut c));
+            }
+        }
         if eat(&mut c, view("::")) {
             n := ident(&mut c);
             c.imports.push(Import { module: m, name: n });
@@ -8860,6 +8882,8 @@ fn replay_function<a>(c: (&a mut C), template: u64) -> unit {
     exchange(&mut c.pos, pos);
     exchange(&mut c.raw, raw);
     exchange(&mut c.module, module);
+    opted := u64(host_opted(&c, view(c.module)));
+    exchange(&mut c.host_optin, opted);
     module_modes(&mut c);
     func(&mut c, 4, 0);
     exchange(&mut c.inherent, 0);
@@ -15061,6 +15085,17 @@ fn primary<a>(c: (&a mut C)) -> Val {
     }
     if eat(&mut c, view("::")) {
         second := ident(&mut c);
+        // --deny-ambient-host: OS access must be an explicit grant. A module opts in to the
+        // ambient `host::` interface by declaring `use host;`; the gated stdlib module
+        // (lib/authority.grl) is the recommended route and opts in exactly once.
+        if same(view(first), view("host")) & (c.deny_ambient != 0) & (c.host_optin == 0) {
+            fail(
+                &mut c,
+                view(
+                    "ambient host access is denied: add `use host;` to this module or call the gated authority:: functions (--deny-ambient-host)"
+                )
+            );
+        }
         // `Some(value)` and `None` are the only spellings; the core constructors they lower to
         // cannot be named directly.
         if same(view(first), view("core")) & (same(view(second), view("some")) || same(view(second), view("none"))) {
@@ -20041,6 +20076,9 @@ pub fn main() -> u64 {
         input_regions: u64[],
         none_start: 0,
         none_end: 0,
+        deny_ambient: 0,
+        host_optin: 0,
+        host_modules: u8[][],
     };
     exchange(&mut c.target, host::target());
     for k in 5 {
@@ -20086,6 +20124,10 @@ pub fn main() -> u64 {
     }
     while offset + 1 < argc {
         option := host::arg(offset + 1);
+        if same(view(option), view("--deny-ambient-host")) {
+            exchange(&mut c.deny_ambient, 1);
+            offset += 1;
+        } else {
         if same(view(option), view("--target")) {
             if argc < offset + 3 {
                 fail_option(
@@ -20184,6 +20226,7 @@ pub fn main() -> u64 {
                 }
             }
         }
+        }
     }
     exchange(&mut c.arg_offset, offset);
     n := argc - offset;
@@ -20191,7 +20234,7 @@ pub fn main() -> u64 {
         fail_option(
             &mut c,
             view(
-                "usage: grail [--target ARCH] [--overflow=checked|wrap] [--debug] OUT.s ENTRY.grl MODULE.grl..."
+                "usage: grail [--target ARCH] [--overflow=checked|wrap] [--debug] [--deny-ambient-host] OUT.s ENTRY.grl MODULE.grl..."
             )
         );
     }
