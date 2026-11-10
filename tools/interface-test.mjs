@@ -360,6 +360,12 @@ pub fn twice(x: u64) -> u64 {
 }
 
 // ---- the proofs -------------------------------------------------------------
+const results = [];
+function report(label, detail) {
+  results.push({ label, detail });
+  console.log(`interface: ${label}: ${detail}`);
+}
+
 const self = proveSelfHosting();
 report('compiler compiled against its own interfaces', `${self.modules} interfaces, ${self.digests} digests, same assembly`);
 
