@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- Book and status documents match the 2026-11-10 increments. The book (54 examples, each with its
+  Rust comparison) adds strict bool conditions (`strict-condition`: an integer condition is refused
+  in both languages), consuming loops over owned elements (`consume-owned`) and range loops in
+  *Branches and loops*, and a *Calling C* section in *Cleanup and current boundaries* with the
+  `byval` record marker (`byval-record`), the handle and out-parameter surface, and what the FFI
+  still refuses. Claims that map iteration, owned-element consumption, `FnMut`, borrowed captures,
+  `char`, the sampling profiler, `.debug_info` locals or the language server were missing or
+  rejected are gone, and so are the comparison notes that said Grail comparisons produce a number
+  rather than `bool`. [docs/design/language-readiness.md](docs/design/language-readiness.md) now
+  reports B1 stage 1, B2, B6 and B7 as implemented, with the Windows `byval` refusal;
+  [docs/platform-status.md](docs/platform-status.md) replaces the stale FFI, tooling and COM rows;
+  [docs/ffi.md](docs/ffi.md) documents the `byval` marker instead of listing it as decided-but-absent;
+  and [docs/design/decisions-b2-b6.md](docs/design/decisions-b2-b6.md) records what landed for B1,
+  B2 and B7.
+- Fixed: the `FnMut` entry below had a duplicated half-paragraph spliced into it.
 - B1 stage 1, per-module emission: `grail build --split` writes one assembly file per module
   (`OUT.NNN.module.s`) plus `OUT.parts`, assembles the parts concurrently and links them once,
   instead of one `.s` for the whole program. Emission is still a single pass — the optimizer inlines
@@ -54,30 +69,6 @@
   now covers the SDL3 window alone; `tools/abundance-test.mjs` links one system library per probe,
   so the Vulkan probe runs on a machine with no display server while the window probe skips there.
 - `FnMut`: a closure that mutates a captured value now works, with the rules B6 fixed in advance.
-  The body is scanned for a store to a capture or to a place rooted at it (`n = ..`, `n += ..`,
-  `s.field = ..`, `v[i] = ..`, `*r = ..`), a mutable borrow of it (`&mut n`) and method calls that
-  may mutate their receiver; a closure with any such capture is `FnMut(...)` instead of `Fn(...)`.
-  Only the written captures are mutable in the body, and the body's hidden environment parameter is
-  `&mut Env`, so a store goes through an exclusive reference to the environment field and the
-  existing loan checks apply. Calling an `FnMut` value needs a mutable binding (`mut f = |...|`),
-  borrows the closure exclusively for the whole call and ends that borrow when the call returns: a
-  second simultaneous call (`f(f(1))`) or a live shared borrow of the closure is rejected, and a
-  `FnMut` closure used where `Fn` is required (the `Fn(...)` parameter type, a function value
-  coerced to it, `vecs::sort_by` and the other stdlib callbacks) is rejected with a diagnostic that
-  says why instead of being silently made exclusive. A closure that writes nothing stays `Fn` and is
-  accepted where `FnMut` is expected, by value and as `&mut Fn(...)` for `&mut FnMut(...)`; `FnMut`
-  is written in type position like `Fn`. A by-value `FnMut` parameter cannot be called, because
-  parameters are not mutable storage — adapters take `&mut FnMut(...)`, and even then a callable
-  reached through a reference parameter can be called once in straight-line code (the pre-existing
-  `access has no live reference authority` limitation, which reproduces on `main` with `&Fn`).
-  `compiler/native.grl`, fourteen cases in `tests/native-cases.json` (`closure-fnmut-counter`,
-  `-disjoint-captures`, `-sequential-calls`, `-second-call-rejected`, `-shared-borrow-rejected`,
-  `-not-fn-rejected`, `-sort-by-rejected`, `-vector-element`, `-captured-field`,
-  `-needs-mut-binding`, `-through-exclusive-reference`, `-mixed-captures`,
-  `closure-shared-capture-still-fn`, `closure-shared-borrow-of-fn-closure`) plus the two former
-  read-only rejections now accepted as `closure-capture-mutation-fnmut` and
-  `closure-capture-borrow-mut-fnmut`, the book example `fnmut`, and the B6 decision record.
-tates a captured value now works, with the rules B6 fixed in advance.
   The body is scanned for a store to a capture or to a place rooted at it (`n = ..`, `n += ..`,
   `s.field = ..`, `v[i] = ..`, `*r = ..`), a mutable borrow of it (`&mut n`) and method calls that
   may mutate their receiver; a closure with any such capture is `FnMut(...)` instead of `Fn(...)`.
