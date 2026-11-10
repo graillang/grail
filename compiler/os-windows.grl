@@ -416,9 +416,12 @@ fn rt_win_wait(addr: u64, expected: u64) -> u64 {
         raw_win32(CloseHandle, handle);
         return 0;
     }
-    scratch := rt_win_scratch();
-    raw_store(scratch + 16, expected);
-    if raw_win32(WaitOnAddress, addr, scratch + 16, 8, 4294967295) == 0 {
+    // WaitOnAddress compares against a word the caller supplies. Two threads waiting on different
+    // expected values must not share one word, so the expected value lives in the calling thread's
+    // own record (word 6 of the 64-byte record, unused by the scheduler).
+    mine := raw_tp_get() + 48;
+    raw_store(mine, expected);
+    if raw_win32(WaitOnAddress, addr, mine, 8, 4294967295) == 0 {
         return wrapping_sub(0, 110);
     }
     return 0;

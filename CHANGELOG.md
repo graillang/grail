@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Decision B4 (Windows I/O readiness): the green-task reactor is epoll-only, so on Windows
+  (`rt_threaded()`) a task is now an OS thread instead of aborting on a failed `epoll_create`:
+  `spawn` creates the thread, `join`/scope exit wait on the task's finished word and reap it,
+  suspension parks the task's own thread on its park word with `WaitOnAddress`, `host::sleep_ms`
+  sleeps that thread and `rt_wait_fd` returns immediately (thread-per-blocking-call). `rt_sched`
+  never creates a reactor there, so `spawn`, `task_scope` and `parallel_map` work; a blocking foreign
+  call blocks only its own task. `WaitOnAddress`'s expected value moved from one shared scratch word
+  to the calling thread's record, because two task threads can now wait on different values at once.
+  Windows cases `tasks-scope-and-parallel-map` and `tasks-sleep-overlap` execute under Wine and on
+  Linux. Not implemented: IOCP, overlapped I/O, and an ARM64 thread bridge.
 - Decision B3 (suspension and blocking contract): a foreign call blocks the executing task thread.
   The runtime's own blocking operations hand the call to a dedicated OS thread and suspend the task
   (`rt_blocking_call`, now the single entry point for `host::read_file`, `host::write_file` and

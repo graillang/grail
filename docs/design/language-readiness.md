@@ -33,7 +33,7 @@ B7's syntax; closures need B6).
 | B1 | **Separate compilation and checked module interfaces.** The compiler reads every module and emits one assembly file. Borg (about 363,000 lines) cannot be built that way; Abundance probably can at first. Needs a module-interface design. | `implementation-status.md`, `borg-agent-port.md` blocker 2 |
 | B2 | **Authority / capability model** for OS access (ambient `host::` functions today). | `implementation-status.md` |
 | B3 | **Suspension and blocking contract** for foreign calls inside green tasks (what happens when a task calls a blocking DLL function). **Decided and implemented** (see B3 below). | `implementation-status.md`, `concurrency-v1.md` |
-| B4 | **Windows I/O readiness model**: the green-task reactor is epoll-only; Windows needs IOCP (or a documented thread-per-blocking-call policy). | `runtime.grl` |
+| B4 | **Windows I/O readiness model**: the green-task reactor is epoll-only; Windows needs IOCP (or a documented thread-per-blocking-call policy). **Decided and implemented** as thread-per-blocking-call (see B4 below). | `runtime.grl` |
 | B6 | **Closure capture model**: mutable captures (FnMut) and closure parameters that hold borrows need lifetime rules for the closure object - either region-bounded closures (cannot escape the borrow's scope) or by-reference capture cells with explicit `move`. Generic iterator adapters over borrowed elements depend on it. | `docs/design/closures.md` |
 | B7 | **Records passed by value to C**: an `extern "C" record` parameter is the C `R *` today (what Win32, Vulkan and D3D12 use). By-value struct arguments (ImGui `ImVec2`, some SDL calls) need a spelling, e.g. `v: byval R`, and per-ABI classification. | `docs/ffi.md` |
 | B5 | **Abort/unwind policy**: abort paths do not unwind, and nothing may unwind across the C boundary. **Decided and implemented** (see B5 below). | `implementation-status.md` |
@@ -86,6 +86,34 @@ owner in an unknown state. It is now true by construction rather than by descrip
   the abort cases are not vacuous), `abort-in-green-task-ends-process` (an abort in a green task
   ends the whole process; before the fix it hung) and `abort-unwrap-none`. The rule is documented
   where a user looks for it: `docs/ffi.md`, "Abort and unwinding across the boundary".
+
+### B4 (decided and implemented): Windows runs a task per OS thread
+
+The green-task scheduler is an epoll reactor over a worker pool, and Windows has no epoll, eventfd
+or timerfd and no stack switching, so `rt_sched` used to abort the process when `epoll_create`
+failed: the first `spawn`, `task_scope` or `parallel_map` killed the program with no message. The
+honest answer for this increment is thread-per-blocking-call, implemented as thread-per-task and
+selected by `rt_threaded()` (Windows x86-64 and ARM64):
+
+- `spawn` creates the task record plus a real OS thread; `join` and scope exit wait on the task's
+  finished word and then reap the thread, so its stack is unmapped only after it exited.
+- Suspension (`rt_suspend`/`rt_wake`, used by `rt_offload`) parks the task's own thread on its park
+  word with `WaitOnAddress`; `host::sleep_ms` sleeps that thread; `rt_wait_fd` returns immediately
+  because the blocking call that follows *is* the readiness wait; `rt_reactor_fence` is a no-op and
+  `rt_yield` is `SwitchToThread`.
+- `rt_sched` allocates no reactor on Windows, so the fatal `epoll_create` path is unreachable. A
+  blocking foreign call blocks only its own task, so B3's handoff is unnecessary there.
+- `WaitOnAddress`'s expected value moved from one process-wide scratch word to the calling thread's
+  record: with a task per thread, two tasks can wait on different values at the same time.
+
+Evidence: `tests/concurrency/scope_tasks.grl` (spawn + `task_scope` + `parallel_map`, prints
+`42` and `9`) and `tests/concurrency/sleeping_tasks.grl` (four tasks that sleep 30 ms overlap:
+`6` and `true`) are Windows cases that execute under Wine and on Linux. Static checks cover the
+COFF/PE build of both.
+
+What remains: IOCP and overlapped I/O (so readiness-based fairness and non-blocking sockets are not
+there), ARM64 thread creation, and any Windows-hardware verification — the executed evidence is
+Wine only.
 
 ## C. Libraries (not language core; needed by the ports, scheduled with them)
 

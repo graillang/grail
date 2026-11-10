@@ -27,9 +27,10 @@ Linux x86-64 is the only target with full compiler and runtime execution evidenc
 Linux AArch64 and RISC-V 64 build and pass ELF checks; qemu-static was used for both self-hosting
 and the 12 executed FFI fixture instances. They still lack a full native-runtime test lane. Windows x86-64 has `.pdata`/`.xdata`, a
 Win32 console/files/argv/time layer, Win32 threads and address waits (`CreateThread`, joins through
-`WaitForSingleObject`, futex operations mapped to `WaitOnAddress`/`WakeByAddress*`), and 10 executed
-programs under Wine. Windows AArch64 has PE/COFF images and `.pdata`/`.xdata` frame records,
-statically verified. ARM64 thread creation, sockets and epoll remain unimplemented. COM has a
+`WaitForSingleObject`, futex operations mapped to `WaitOnAddress`/`WakeByAddress*`), a
+thread-per-task `Scope`/`Task` scheduler (`spawn`, `task_scope`, `parallel_map` execute under Wine),
+and executed programs under Wine. Windows AArch64 has PE/COFF images and `.pdata`/`.xdata` frame records,
+statically verified. ARM64 thread creation, sockets and an IOCP reactor remain unimplemented. COM has a
 22-check/11-Wine branch implementation that is not yet integrated on `main`; its remaining limits
 stay open. Grail-internal calls still use the private register convention;
 Win64 is used at import boundaries. This is Wine verification, not Windows hardware verification,

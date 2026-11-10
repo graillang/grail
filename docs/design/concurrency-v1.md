@@ -64,6 +64,33 @@ or exposing Future state machines. This does **not** erase scheduling semantics:
   this path because they run atexit handlers, C++ destructors or DLL detach. This work does not
   claim panic isolation or unwinding that the language does not implement.
 
+## Platform divergence: on Windows a task is an OS thread
+
+Linux runs stackful green tasks over a worker pool with an epoll reactor: many tasks share a worker,
+suspension switches the stack away, and a blocking foreign call occupies a worker. Windows has no
+epoll, eventfd or timerfd, and the runtime has no stack switching there, so `rt_threaded()` selects
+a thread-per-task scheduler instead. The task API and its type rules are identical on both platforms;
+the observable scheduling is not:
+
+- `spawn` creates the task record and a real OS thread; `join` and scope exit wait on the task's
+  finished word and then reap the thread, so its stack is unmapped only after it exited.
+- Suspension (`rt_suspend`/`rt_wake`, used by `rt_offload`) parks the task's own thread on its park
+  word with `WaitOnAddress`. There is no handoff and no stack switch.
+- `rt_wait_fd` returns immediately and `host::sleep_ms` sleeps the task's thread: readiness is the
+  blocking call on the thread that owns the task, which is the documented thread-per-blocking-call
+  policy. With no readiness reactor, a task blocked in a blocking call observes cancellation only
+  when that call returns.
+- `rt_reactor_fence` is a no-op, `rt_yield` is `SwitchToThread`, and a mutex blocks the task's thread.
+- Each task costs one OS thread and its stack, so the task count is bounded by threads and memory
+  rather than by the worker pool. A blocking foreign call blocks only the task that made it, so B3's
+  handoff is unnecessary there.
+- `rt_sched` never creates a reactor on Windows, so the old fatal `epoll_create` abort cannot happen:
+  `spawn`, `task_scope` and `parallel_map` work and are executed under Wine.
+
+This is thread-per-blocking-call, not IOCP: overlapped I/O and completion ports are still
+unimplemented, and there is no readiness-based fairness because every task already has its own
+thread.
+
 ## Runtime and verification prerequisites
 
 The allocator, live counter and slab lists now use a serialized atomic lock; concurrent allocation
