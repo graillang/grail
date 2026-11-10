@@ -344,13 +344,15 @@ are removed is unrolled by two, and the unrolled pair carries the `f32` accumula
     2051c8: addss %xmm0,%xmm1           ; second element of the pair, narrow
     2051cf: cvtss2sd %xmm1,%xmm0        ; widen for the next iteration
 
-Two converts and a binary64 add per element, all on the accumulator's dependency chain, where the
-un-unrolled loop has a single `addss`. That is why the "no checks" build is 60% *slower* rather
-than faster: the source value is a word holding a binary64, the round to `f32` is
-`fptrunc`+`fpext`, and once the loop-carried `phi` is `double` `InstCombine` can no longer narrow
-`fptrunc (fadd double)` to `fadd float` -- the operand is a `phi double`, not an `fpext` of a
-float. The stage 2a narrowing of `fptrunc (fmul (fpext a), (fpext b))` works because both operands
-are visibly `fpext`; the accumulate's second operand is not.
+A convert per element, plus a binary64 add and a convert back per pair, all on the accumulator's
+dependency chain, where the un-unrolled loop has a single `addss`. That is why the "no checks"
+build takes 56% *longer* rather than less (`0.274 s` -> `0.427 s`): the value in the word is a
+binary64, the round to `f32` is `fptrunc`+`fpext`, and once the loop-carried `phi` is `double`
+`InstCombine` can no longer narrow `fptrunc (fadd double)` to `fadd float`, because the
+accumulator operand is a `phi double` and not visibly an `fpext` of a float. The stage 2a
+narrowing of `fptrunc (fmul (fpext a), (fpext b))` works precisely because both operands are; the
+second element of the unrolled pair narrows for the same reason, and only the carried one does
+not.
 
 #### The two facts the lifter cannot supply
 
