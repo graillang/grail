@@ -12,8 +12,9 @@
   environment record) - and nothing a body would carry. Text, versioned, one declaration per line,
   sorted by name, with a digest over the file. `tools/interface-test.mjs` proves that a program built
   against interfaces behaves like the program built from source (corpus, and the compiler compiling
-  itself), that stale and tampered interfaces are refused, and that an interface leaks no body, no
-  local name and no synthetic declaration. Bodies and generic templates still come from source: that
+  itself), that stale and tampered interfaces are refused - an edited `transfer`/`share`/environment
+  entry, a re-digested file, and a file whose manifest entry was rewritten - and that an interface
+  leaks no body, no local name and no synthetic declaration. Bodies and generic templates still come from source: that
   is stage 3 (bodies in interfaces) and stage 4 (one object per module, and the cache).
 
 - Windows task scheduling is now the same as Linux: a task is green on Windows, not an OS thread.
