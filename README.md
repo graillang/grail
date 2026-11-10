@@ -22,7 +22,7 @@ fn main() {
 - **Sampling profiler (Linux x86-64):** `grail profile --rate N -- PROGRAM`; see
   [docs/tooling/profiler.md](docs/tooling/profiler.md).
 - **Verified cross-platform status:** [docs/platform-status.md](docs/platform-status.md) distinguishes executed targets from scaffolding and cross-builds.
-- **Graphics RHI from Grail:** [docs/rhi.md](docs/rhi.md) covers the SDL3 window and Vulkan loader bindings in `abundance/src/`, what the FFI cannot express yet, and the next increments; `bun tools/abundance-test.mjs` runs the device probe.
+- **Graphics RHI from Grail:** [docs/rhi.md](docs/rhi.md) covers the SDL3 window and the Vulkan instance, physical devices and queue families in `abundance/src/`, what the FFI cannot express yet, and the next increments; `bun tools/abundance-test.mjs` runs both RHI probes.
 - **Cross-platform OS ABI (proposal/scaffold):** [docs/design/runtime-abi.md](docs/design/runtime-abi.md)
   and [runtime/abi/README.md](runtime/abi/README.md); `just abi-test` runs the C contract tests.
 - **First Grail wrappers over the C ABI:** [docs/design/grail-ffi-runtime.md](docs/design/grail-ffi-runtime.md);
