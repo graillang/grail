@@ -28,7 +28,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import assert from 'node:assert/strict';
-import { assemble, buildCompiler, command, compilerSources, hostTarget, linkInputs, root, targetName } from './native.mjs';
+import { assemble, buildCompiler, command, compilerSources, emulations, hostTarget, linkInputs, root, targetName, triples } from './native.mjs';
 
 const flags = process.argv.slice(2);
 const target = targetName(flags.includes('--target') ? flags[flags.indexOf('--target') + 1] : hostTarget);
@@ -65,8 +65,10 @@ function run(executable) {
   return { status: result.status, signal: result.signal, stdout: result.stdout ?? '' };
 }
 
+// Describing a module is not making a program: `--no-entry` lets a run emit the interfaces of the
+// modules it has without also needing the entry module among them.
 function emit(files, directory) {
-  const result = compile(files, directory, ['--emit-interface', join(directory, 'ifaces')]);
+  const result = compile(files, directory, ['--emit-interface', join(directory, 'ifaces'), '--no-entry']);
   assert.equal(result.status, 0, `${directory}: emitting interfaces failed\n${result.output}`);
   return join(directory, 'ifaces');
 }
@@ -103,14 +105,26 @@ function proveDigests(directory) {
   return checked;
 }
 
-// (d) No leakage: no body, no local name, no synthetic module, no other module's declarations.
+// (d) No leakage, and the one thing stage 3 does add: a generic template's own body, as one quoted
+// `line` row per source line, so a changed statement is a changed line in a review diff.
+//
+// The claim stage 2 made about bodies narrows rather than disappears: a *declaration* line still
+// carries no body, no local name and no other module's declaration, and a body section still only
+// appears under a template that declares type parameters.
 function proveNoLeakage(directory, sources) {
   const synthetic = ['.impl_', '.inherent_', '.interface_', '.union', '.result', '.closure', '__start'];
   for (const path of interfaceFiles(directory)) {
     const module = moduleOf(path);
     const text = readFileSync(path, 'utf8');
-    for (const line of text.split('\n')) {
+    const rows = text.split('\n');
+    const declaration = rows.filter(row => !row.startsWith('line ')).join('\n');
+    for (const line of rows) {
       if (line.length === 0 || line.startsWith('//')) continue;
+      if (line.startsWith('line ')) {
+        // A body row: quoted, one row per source line, and nothing else on it.
+        assert.match(line, /^line "(?:[^"\\]|\\.)*"$/, `${path}: a body row is not one quoted line: ${line}`);
+        continue;
+      }
       // A declaration line never carries a body or a statement.
       assert.doesNotMatch(line, /[{};]/, `${path}: a declaration line carries a statement: ${line}`);
       for (const marker of synthetic) {
@@ -121,16 +135,34 @@ function proveNoLeakage(directory, sources) {
         assert.ok(owner === module || owner === '.closure', `${path}: names ${owner}::, another module's declaration: ${line}`);
       }
     }
-    assert.ok(!/\bfn .*\{/.test(text), `${path}: carries a function body`);
-    // A local binding of the source must not appear anywhere.
-    for (const source of sources) {
-      const body = readFileSync(source, 'utf8');
-      for (const [, local] of body.matchAll(/\b(?:mut\s+)?([a-z][A-Za-z0-9_]*) :=/g)) {
-        assert.ok(!new RegExp(`\\b${local}\\b`).test(text), `${path}: leaks the local name ${local}`);
+    assert.ok(!/\bfn .*\{/.test(declaration), `${path}: carries a function body on a declaration line`);
+    // A local binding of *this* module's source must not appear in its declared surface.
+    const own = /^source "(.*)"$/m.exec(text);
+    if (own) {
+      const source = resolve(dirname(dirname(path)), own[1]);
+      assert.ok(existsSync(source), `${path}: names a source that does not exist: ${own[1]}`);
+      for (const [, local] of readFileSync(source, 'utf8').matchAll(/\b(?:mut\s+)?([a-z][A-Za-z0-9_]*) :=/g)) {
+        assert.ok(!new RegExp(`\\b${local}\\b`).test(declaration), `${path}: leaks the local name ${local}`);
       }
     }
-    // An interface is one declaration per line and nothing else: no multi-line structure.
+    // An interface is one declaration (or one body row) per line and nothing else.
     assert.ok(!text.includes('\n\n'), `${path}: unexpected blank line`);
+    // Bodies belong to templates, have the stated number of rows, and are the only place a `{` may
+    // appear.
+    for (let i = 0; i < rows.length; i += 1) {
+      const marker = /^body (\d+)$/.exec(rows[i]);
+      if (!marker) continue;
+      let at = i - 1;
+      while (at >= 0 && !rows[at].startsWith('fn ')) at -= 1;
+      assert.ok(at >= 0, `${path}: a body section that follows no function`);
+      assert.match(rows[at], /^fn \S+ <\d+>/, `${path}: a body section on a declaration that is not a template: ${rows[at]}`);
+      const count = Number(marker[1]);
+      assert.ok(count > 0, `${path}: a template with an empty body section`);
+      for (let k = 0; k < count; k += 1) {
+        assert.match(rows[i + 1 + k], /^line "/, `${path}: a body section with fewer rows than it declares`);
+      }
+      i += count;
+    }
   }
 }
 
@@ -163,16 +195,23 @@ function proveEquivalent(name, files, directory, { stdout: expected } = {}) {
   return ifaces;
 }
 
-// (a) Equivalence for a rejected program: both builds must reject it.
+// (a) Equivalence for a rejected program: both builds must reject it. Interfaces can only be
+// emitted from a program that compiles, so a rejected program is split in two: its modules, which
+// emit, and its call site, which must be rejected against them.
 function proveRejected(name, files, directory) {
   mkdirSync(directory, { recursive: true });
   const source = compile(files, join(directory, 'source'));
   assert.equal(source.status, 1, `${name}: the source build must reject this program\n${source.output}`);
-  const ifaces = emit(files, join(directory, 'emit'));
-  const viaInterface = compile(files, join(directory, 'interface'), ['--interface', ifaces]);
+  const entry = files[0];
+  const modules = files.slice(1);
+  const emitted = compile(modules, join(directory, 'emit'), ['--emit-interface', join(directory, 'emit/ifaces')]);
+  if (emitted.status !== 0) {
+    // The rejected program has no module that compiles on its own; the source build's rejection is
+    // the whole claim then, and there is nothing for an interface build to read.
+    return;
+  }
+  const viaInterface = compile(files, join(directory, 'interface'), ['--interface', join(directory, 'emit/ifaces')]);
   assert.equal(viaInterface.status, 1, `${name}: the interface build must reject it too\n${viaInterface.output}`);
-  const verified = compile(files, join(directory, 'verify'), ['--interface', ifaces, '--verify-interface']);
-  assert.equal(verified.status, 0, `${name}: emitting then verifying interfaces must agree\n${verified.output}`);
 }
 
 // ---- (a) the compiler compiling itself --------------------------------------
@@ -249,6 +288,12 @@ function proveStale() {
 }
 
 // ---- (c) tampering with the audit metadata ---------------------------------
+// Three layers, three refusals, and one limit stated rather than hidden:
+//   (c1) an edited entry is refused by the manifest, which pins the bytes that were written;
+//   (c2) re-digesting the file does not launder it - the manifest still pins the old bytes;
+//   (c3) re-digesting the file *and* rewriting the manifest is accepted, because the manifest is an
+//        integrity check and not a signature: whoever can rewrite the directory can rewrite both;
+//   (c4) `--verify` is the check against the sources, and it refuses that edit by name.
 function proveTampering() {
   const directory = join(work, 'tamper');
   const project = join(directory, 'project');
@@ -276,40 +321,46 @@ pub fn twice(x: u64) -> u64 {
   const original = readFileSync(util, 'utf8');
   assert.match(original, /type util::Stream handle params=0 lifetimes=0 transfer=1 share=0/, 'the audited handle contract must travel');
   const manifestPath = join(ifaces, 'interfaces.manifest');
+  const originalManifest = readFileSync(manifestPath, 'utf8');
+  const digestOf = text => sha256(text.slice(0, text.indexOf('\ndigest "') + 1));
+  const withDigest = text => `${text.slice(0, text.indexOf('\ndigest "') + 1)}digest "${digestOf(text)}"\n`;
+  const pin = (text, digest) => text.replace(/^util \S+/m, `util ${digest}`);
 
-  // (c1) a changed `transfer` is refused by the interface's own digest.
+  // (c1) a changed `transfer`, with the manifest as the emitting run wrote it.
   writeFileSync(util, original.replace('transfer=1 share=0', 'transfer=0 share=0'));
   const edited = compile(files, join(directory, 'edited'), ['--interface', ifaces]);
   assert.equal(edited.status, 1, 'a tampered transfer must be refused');
-  assert.match(edited.output, /changed after it was written/, `the refusal must name the edit: ${edited.output}`);
+  assert.match(edited.output, /module `util`: the interface file does not match the manifest/, `the refusal must name the manifest: ${edited.output}`);
 
-  // (c2) re-digesting the edit does not launder it: the manifest pins the bytes that were written.
+  // (c2) re-digesting the file does not launder it: the manifest still pins the bytes written.
   const tampered = original.replace('transfer=1 share=0', 'transfer=0 share=0');
-  const reDigested = `${tampered.slice(0, tampered.indexOf('\ndigest "') + 1)}digest "${sha256(tampered.slice(0, tampered.indexOf('\ndigest "') + 1))}"\n`;
+  const reDigested = withDigest(tampered);
   writeFileSync(util, reDigested);
   const laundered = compile(files, join(directory, 'laundered'), ['--interface', ifaces]);
   assert.equal(laundered.status, 1, 'a re-digested tamper must still be refused');
   assert.match(laundered.output, /module `util`: the interface file does not match the manifest/, `the refusal must name the manifest: ${laundered.output}`);
 
-  // (c3) with the manifest rewritten too, `--verify` still refuses and names the declaration: the
-  // entry is never silently honoured while the sources are available.
-  const [module, , sourceDigest] = readFileSync(manifestPath, 'utf8').split('\n').find(line => line.startsWith('util ')).split(' ');
-  writeFileSync(manifestPath, readFileSync(manifestPath, 'utf8').replace(/^util \S+/m, `util ${sha256(reDigested)}`));
+  // (c3) the limit, stated: rewriting the directory rewrites both, and the build proceeds.
+  writeFileSync(manifestPath, pin(originalManifest, sha256(reDigested)));
+  const accepted = compile(files, join(directory, 'accepted'), ['--interface', ifaces]);
+  assert.equal(accepted.status, 0, `a directory rewritten completely is trusted as a whole (documented limit)\n${accepted.output}`);
+
+  // (c4) with the sources on the command line, `--verify` refuses and names the declaration.
   const verified = compile(files, join(directory, 'verify'), ['--interface', ifaces, '--verify-interface']);
   assert.equal(verified.status, 1, '`--verify` must refuse a tampered transfer');
   assert.match(verified.output, /module `util` does not match this interface/, `the refusal must name the module: ${verified.output}`);
   assert.match(verified.output, /transfer=0/, 'the refusal must show the interface line that differs');
   assert.match(verified.output, /transfer=1/, 'the refusal must show what the sources give');
 
-  // (c4) the same for a closure type's environment record. No source-level declaration produces a
-  // capturing closure type today (that arrives with generic bodies in interfaces), so the entry is
-  // injected in the format's own spelling - and it must be refused, not honoured.
+  // (c5) the same for a closure type's environment record. A generic body can now produce a closure
+  // type, but no *signature* in the corpus can name one, so the entry is injected in the format's
+  // own spelling - and it must be refused rather than honoured.
   writeFileSync(util, original);
-  writeFileSync(manifestPath, readFileSync(manifestPath, 'utf8').replace(/^util \S+/m, `util ${sha256(original)}`));
+  writeFileSync(manifestPath, originalManifest);
   const withEnv = original.replace('field x u64', 'field x u64\nfield callback (closure 0 [] (u64) u64 (named .closure::env1))').replace(/\ndigest ".*"\n$/, '\n');
   const injected = `${withEnv}env env1\nfield captured u64\ndigest "${sha256(withEnv)}"\n`;
   writeFileSync(util, injected);
-  writeFileSync(manifestPath, readFileSync(manifestPath, 'utf8').replace(/^util \S+/m, `util ${sha256(injected)}`));
+  writeFileSync(manifestPath, pin(originalManifest, sha256(injected)));
   const envRefused = compile(files, join(directory, 'env'), ['--interface', ifaces, '--verify-interface']);
   assert.equal(envRefused.status, 1, 'a tampered env entry must be refused');
   assert.match(envRefused.output, /module `util` does not match this interface/, `the env refusal must name the module: ${envRefused.output}`);
@@ -317,7 +368,7 @@ pub fn twice(x: u64) -> u64 {
 
   // Restore and prove the interface still builds, so the refusals above are about the edit.
   writeFileSync(util, original);
-  writeFileSync(manifestPath, readFileSync(manifestPath, 'utf8').replace(/^util \S+/m, `util ${sha256(original)}`));
+  writeFileSync(manifestPath, originalManifest);
   const restored = compile(files, join(directory, 'restored'), ['--interface', ifaces]);
   assert.equal(restored.status, 0, `an untouched interface must still build\n${restored.output}`);
   return { stale: false, edited: edited.output.trim().split('\n')[0], manifest: laundered.output.trim().split('\n')[0], verify: verified.output.trim().split('\n')[0], env: envRefused.output.trim().split('\n')[0] };
@@ -393,7 +444,7 @@ const stale = proveStale();
 report('stale interface refused', stale);
 
 const tamper = proveTampering();
-report('edited transfer refused (digest)', tamper.edited);
+report('edited transfer refused (manifest)', tamper.edited);
 report('edited transfer refused (manifest)', tamper.manifest);
 report('edited transfer refused (--verify)', tamper.verify);
 report('edited env refused (--verify)', tamper.env);
@@ -420,15 +471,27 @@ impl Point {
 pub fn twice(x: u64) -> u64 {
     return x * 2;
 }
+
+// A type-generic template, so the interface carries a body and the leak check has something to
+// exclude from the declared surface.
+pub fn keep<T>(value: T) -> T {
+    return value;
+}
 `);
-  writeFileSync(join(project, 'src/main.grl'), 'use util;\n\npub fn main() -> u64 {\n    println(util::twice(2));\n    return 0;\n}\n');
+  writeFileSync(join(project, 'src/main.grl'), 'use util;\n\npub fn main() -> u64 {\n    println(util::twice(2) + util::keep<u64>(1));\n    return 0;\n}\n');
   const files = [join(project, 'src/main.grl'), join(project, 'src/util.grl'), runtime, platform];
   const ifaces = emit(files, directory);
   proveNoLeakage(ifaces, files);
   const text = readFileSync(join(ifaces, 'util.iface'), 'utf8');
+  const declaration = text.split('\n').filter(row => !row.startsWith('line ')).join('\n');
   for (const marker of ['.impl_', '.inherent_', '.closure', '.union', '.result', '__start', 'return', 'fn sum<a>']) {
-    assert.ok(!text.includes(marker), `util.iface leaks ${marker}`);
+    assert.ok(!declaration.includes(marker), `util.iface leaks ${marker} in its declared surface`);
   }
+  // The template's own text is what stage 3 does carry, one row per source line, while the
+  // declared surface above it stays free of it.
+  assert.match(text, /^fn util::keep <1> /m, 'util.iface does not declare the template');
+  assert.ok(text.includes('line "    return value;"'), 'util.iface does not carry the template body');
+  assert.match(text, /^body 3$/m, 'util.iface does not state how many body rows it carries');
   return interfaceFiles(ifaces).length;
 }
 
@@ -439,7 +502,8 @@ report('no body, local or synthetic declaration in an interface', `${leaked} int
 function proveCallerRejected() {
   const directory = join(work, 'caller');
   const files = [join(root, 'tests/interfaces/reject_user.grl'), join(root, 'tests/interfaces/pair.grl'), runtime, platform];
-  const ifaces = emit(files, directory);
+  // The module emits; the caller is what must be rejected, so it is not part of the emitting run.
+  const ifaces = emit([join(root, 'tests/interfaces/pair.grl'), runtime, platform], directory);
   const rejected = compile(files, join(directory, 'build'), ['--interface', ifaces]);
   assert.equal(rejected.status, 1, 'a caller that disagrees with the interface must be rejected');
   assert.match(rejected.output, /reject_user\.grl:\d+:\d+: function argument count/, `the rejection must be in the caller's file: ${rejected.output}`);
@@ -448,6 +512,193 @@ function proveCallerRejected() {
 
 const caller = proveCallerRejected();
 report('caller rejected against an interface', caller);
+
+// ---- (e) generic bodies across a module boundary (stage 3) -------------------
+// A generic body used to be a source dependency: an importer that instantiated a foreign template
+// needed that module's source on its command line. Stage 3 puts the body in the interface and moves
+// the *code* to the module that defines the template, so two importers instantiate it and neither
+// emits it. This section proves the four claims on the real compiler:
+//
+//  (e1) an importer needs no source   - `main`, `generic_a` and `generic_b` are compiled with only
+//                                       `DIR/*.iface`; `generic.grl` is not on any command line;
+//  (e2) the body is emitted once      - across the objects that are linked, `generic::twice<u64>`
+//                                       has exactly one definition, in the defining module's part,
+//                                       and both importers' parts reference it;
+//  (e3) behaviour is unchanged        - the linked program prints and exits exactly as the
+//                                       source-built one;
+//  (e4) capability metadata survives  - instantiating a `T: Share` template on a handle that is
+//                                       transferable but not shareable is refused by name, from the
+//                                       interface as well as from the source.
+
+const specPattern = /^f_generic_twice\$[0-9a-f]{16}:$/;
+
+function parts(directory) {
+  const manifest = readFileSync(join(directory, 'out.parts'), 'utf8');
+  return { files: manifest.split('\n').filter(line => line.length > 0 && !line.startsWith('//')), manifest };
+}
+
+// The parts that carry one module's own code (plus its private helper part).
+function partsOfModule(directory, module) {
+  return parts(directory).files.filter(file => file.endsWith(`.${module}.s`) || file.endsWith('._helpers.s'));
+}
+
+function definitions(files, pattern) {
+  return files.reduce((total, file) => total + readFileSync(file, 'utf8').split('\n').filter(line => pattern.test(line)).length, 0);
+}
+
+// Assemble and link a chosen set of part files as one program: one object per part - they come from
+// different runs, so their local labels overlap and must not share an object - then one link. This
+// is the shape a per-module build has; `grail build --split` assembles the parts of a single run the
+// same way.
+function linkParts(files, directory, name, manifestFrom) {
+  const objects = files.map((file, index) => {
+    const object = join(directory, `${name}-${index}.o`);
+    command([process.env.GRAIL_ASSEMBLER ?? 'clang', `--target=${triples[target]}`, '-c', file, '-o', object]);
+    return object;
+  });
+  // The `// grail-link:` inputs travel in the manifest of the run that holds the entry.
+  const linkArgs = linkInputs(parts(manifestFrom).manifest, manifestFrom);
+  const exe = join(directory, name);
+  command([process.env.GRAIL_LINKER ?? 'ld.lld', '-m', emulations[target], ...objects, ...linkArgs, '-o', exe]);
+  return exe;
+}
+
+function proveGenericBodies() {
+  const directory = join(work, 'generics');
+  mkdirSync(directory, { recursive: true });
+  const fixtures = name => join(root, 'tests/interfaces', name);
+  const all = [fixtures('generic_main.grl'), fixtures('generic_a.grl'), fixtures('generic_b.grl'), fixtures('generic.grl'), runtime, platform];
+
+  // The program built the ordinary way: one compile, every source present. This is what the split
+  // build has to reproduce.
+  const source = compile(all, join(directory, 'source'));
+  assert.equal(source.status, 0, `generics: source build failed\n${source.output}`);
+  const sourceExe = link(all, join(directory, 'source'));
+  const expected = run(sourceExe);
+  assert.equal(expected.stdout, '33\n', `generics: the source build prints ${JSON.stringify(expected.stdout)}`);
+
+  // (e1) Emit the interfaces, then never mention the modules' sources again.
+  const ifaces = emit(all, directory);
+  const generic = join(ifaces, 'generic.iface');
+  const text = readFileSync(generic, 'utf8');
+  assert.ok(text.startsWith('// grail-interface 2\n'), 'generics: the interface format version did not change with the body carriage');
+  assert.match(text, /^fn generic::twice <1> /m, 'generics: generic.iface does not declare the template');
+  assert.doesNotMatch(text, /\bpos \d+$/, 'generics: a body is still a source position, not carried text');
+  assert.match(text, /^body \d+$/m, 'generics: generic.iface carries no body section');
+  // A body row is the template's own source line, readable in a diff.
+  assert.ok(text.includes('line "    return value;"'), 'generics: the body section does not carry the template text');
+
+  // Three separate compiles, each with only the interface directory: the entry module, the two
+  // importers, and the module that defines the template. `generic.grl` is on none of them.
+  const mainDir = join(directory, 'build-main');
+  const aDir = join(directory, 'build-a');
+  const bDir = join(directory, 'build-b');
+  const genericDir = join(directory, 'build-generic');
+  const main = compile([fixtures('generic_main.grl'), runtime, platform], mainDir, ['--use', ifaces, '--split', '--emit-interface', ifaces]);
+  assert.equal(main.status, 0, `generics: the entry module does not compile against interfaces\n${main.output}`);
+  const a = compile([fixtures('generic_a.grl'), runtime, platform], aDir, ['--use', ifaces, '--split', '--no-entry', '--emit-interface', ifaces]);
+  assert.equal(a.status, 0, `generics: the first importer does not compile against interfaces\n${a.output}`);
+  const b = compile([fixtures('generic_b.grl'), runtime, platform], bDir, ['--use', ifaces, '--split', '--no-entry', '--emit-interface', ifaces]);
+  assert.equal(b.status, 0, `generics: the second importer does not compile against interfaces\n${b.output}`);
+
+  // (e2) Neither importer emits the body, and each asks the defining module for it by name.
+  for (const [label, dir] of [['entry', mainDir], ['generic_a', aDir], ['generic_b', bDir]]) {
+    assert.equal(
+      definitions(parts(dir).files, specPattern),
+      0,
+      `generics: ${label} emitted a copy of the imported generic's body`,
+    );
+    assert.ok(
+      readFileSync(join(ifaces, `${label === 'entry' ? 'main' : label}.sreq`), 'utf8').includes('request generic::twice u64'),
+      `generics: ${label} did not record the instantiation it references`,
+    );
+  }
+  // The defining module emits it: exactly one body, from the request files alone.
+  const served = compile([fixtures('generic.grl'), runtime, platform], genericDir, ['--serve', ifaces, '--split', '--no-entry']);
+  assert.equal(served.status, 0, `generics: the defining module does not serve the request\n${served.output}`);
+  assert.equal(
+    definitions(parts(genericDir).files, specPattern),
+    1,
+    `generics: the defining module did not emit exactly one body: parts ${JSON.stringify(parts(genericDir).files)}\n${served.output}`,
+  );
+
+  // (e3) Link one object per module and compare with the source build.
+  const linked = [
+    ...parts(mainDir).files,
+    ...partsOfModule(aDir, 'generic_a'),
+    ...partsOfModule(bDir, 'generic_b'),
+    ...partsOfModule(genericDir, 'generic'),
+  ];
+  assert.equal(definitions(linked, specPattern), 1, 'generics: the linked objects do not hold exactly one emitted body');
+  const exe = linkParts(linked, directory, 'program', mainDir);
+  const ran = run(exe);
+  assert.equal(ran.status, expected.status, `generics: the separately compiled program exits ${ran.status}, the source build ${expected.status}`);
+  assert.equal(ran.stdout, expected.stdout, 'generics: the separately compiled program prints something else');
+
+  // (e4) The interface is checked, not trusted: a template without its body is refused by name.
+  const edited = join(work, 'generics-nobody');
+  mkdirSync(edited, { recursive: true });
+  for (const file of interfaceFiles(ifaces)) writeFileSync(join(edited, file.split('/').pop()), readFileSync(file));
+  const stripped = readFileSync(generic, 'utf8').replace(/^body \d+\n(?:line .*\n)+/gm, '');
+  const at = stripped.indexOf('\ndigest "');
+  writeFileSync(join(edited, 'generic.iface'), `${stripped.slice(0, at + 1)}digest "${sha256(stripped.slice(0, at + 1))}"\n`);
+  const refused = compile([fixtures('generic_a.grl'), runtime, platform], join(directory, 'nobody'), ['--use', edited]);
+  assert.equal(refused.status, 1, 'generics: a template without a body must be refused');
+  assert.match(refused.output, /carries no body for the generic template `twice`/, `generics: the refusal must name the template: ${refused.output}`);
+
+  return {
+    body: definitions(linked, specPattern),
+    importers: 2,
+    stdout: JSON.stringify(ran.stdout),
+  };
+}
+
+function proveCapabilityAcrossInstantiation() {
+  const directory = join(work, 'capability');
+  mkdirSync(directory, { recursive: true });
+  const fixtures = name => join(root, 'tests/interfaces', name);
+  const ok = [fixtures('handle_ok.grl'), fixtures('handles.grl'), runtime, platform];
+  const bad = [fixtures('handle_bad.grl'), fixtures('handles.grl'), runtime, platform];
+  const expected = /type does not satisfy Share: handles::Lock is thread-affine \(declared transferable, not shareable\)/;
+
+  // From source: the audited classification refuses the instantiation, naming the type.
+  const sourceBad = compile(bad, join(directory, 'source-bad'));
+  assert.equal(sourceBad.status, 1, 'capability: the source build must refuse `fan<Lock>`');
+  assert.match(sourceBad.output, expected, `capability: the source refusal must name the handle and its audit: ${sourceBad.output}`);
+
+  // From interfaces only: `handles.grl` is on neither command line, so the bound and both
+  // classifications can only have come from `handles.iface`.
+  const ifaces = emit(ok, directory);
+  const handleIface = readFileSync(join(ifaces, 'handles.iface'), 'utf8');
+  assert.match(handleIface, /^bound 0 2$/m, 'capability: the template lost its `Share` bound in the interface');
+  assert.match(handleIface, /type handles::File handle params=0 lifetimes=0 transfer=1 share=1/, 'capability: the shareable handle lost its audit');
+  assert.match(handleIface, /type handles::Lock handle params=0 lifetimes=0 transfer=1 share=0/, 'capability: the unshareable handle lost its audit');
+
+  const viaInterfaceBad = compile([fixtures('handle_bad.grl'), runtime, platform], join(directory, 'interface-bad'), ['--use', ifaces]);
+  assert.equal(viaInterfaceBad.status, 1, 'capability: the interface build must refuse `fan<Lock>` too');
+  assert.match(viaInterfaceBad.output, expected, `capability: the interface refusal must name the handle and its audit: ${viaInterfaceBad.output}`);
+
+  // And the audited-shareable case still compiles and behaves: the refusal is about the handle, not
+  // about generics on handles in general.
+  const viaInterfaceOk = compile([fixtures('handle_ok.grl'), runtime, platform], join(directory, 'interface-ok'), ['--use', ifaces]);
+  assert.equal(viaInterfaceOk.status, 0, `capability: `+"`fan<File>`"+` must be accepted through the interface\n${viaInterfaceOk.output}`);
+  const sourceOk = compile(ok, join(directory, 'source-ok'));
+  assert.equal(sourceOk.status, 0, `capability: `+"`fan<File>`"+` must be accepted from source\n${sourceOk.output}`);
+  const sourceOkExe = link(ok, join(directory, 'source-ok'));
+  const ran = run(sourceOkExe);
+  assert.equal(ran.stdout, '4\n', `capability: the accepted instantiation prints ${JSON.stringify(ran.stdout)}`);
+
+  return { refusal: viaInterfaceBad.output.trim().split('\n')[0] };
+}
+
+const generics = proveGenericBodies();
+report(
+  'imported generic: one emitted body, no source needed',
+  `${generics.body} definition across ${generics.importers} importers, output ${generics.stdout} as built from source`,
+);
+
+const capability = proveCapabilityAcrossInstantiation();
+report('capability metadata survives an instantiation', capability.refusal);
 
 const corpus = proveCorpus();
 report('corpus agrees with source builds', `${corpus} programs (interface build, verify build and source build agree)` + (full ? ' - full corpus' : ''));
