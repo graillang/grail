@@ -1,0 +1,216 @@
+name: release
+
+# Tag-time release artifacts. Every build starts from the checked-in bootstrap
+# seed; no development compiler is downloaded or accepted. Publication is one
+# GitHub release per tag with per-target artifacts, SHA256SUMS, release.json and
+# a generated RELEASE-README.md that says what each artifact runs on.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  GRAIL_VERSION: ${{ github.ref_name }}
+
+jobs:
+  checks:
+    name: release checks
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Install clang, LLD and LLVM inspection tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld llvm
+      - name: Validate the tag against VERSION
+        id: version
+        run: |
+          version="$(bun tools/release.mjs version --tag "$GITHUB_REF_NAME")"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "releasing Grail $version from $GITHUB_REF_NAME"
+      - name: Static checks and tooling tests
+        run: |
+          bun tools/ci.mjs lint
+          bun test tools/platforms.test.mjs tools/archive.test.mjs tools/sign.test.mjs tools/objects.test.mjs
+
+  # Linux native lanes: the shipped compiler is executed on its own architecture.
+  linux-native:
+    name: release linux ${{ matrix.platform }}
+    needs: checks
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x86_64
+            runner: ubuntu-24.04
+          - platform: linux-aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Install clang, LLD and LLVM inspection tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld llvm
+      - name: Build linux-x86_64 and linux-aarch64 from the checked-in seed
+        run: |
+          bun tools/release.mjs build --platform ${{ matrix.platform }} --out dist/release/${{ matrix.platform }}
+      - name: Native test suite against the shipped compiler
+        run: |
+          compiler="$PWD/dist/release/${{ matrix.platform }}/grail-${{ needs.checks.outputs.version }}-${{ matrix.platform }}-compiler"
+          bun tools/ci.mjs test --platform ${{ matrix.platform }} --compiler "$compiler"
+      - name: CLI regressions against the shipped x86-64 compiler
+        if: matrix.platform == 'linux-x86_64'
+        run: |
+          export GRAIL_COMPILER="$PWD/dist/release/linux-x86_64/grail-${{ needs.checks.outputs.version }}-linux-x86_64-compiler"
+          bun tools/test-cli.mjs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.platform }}
+          path: dist/release/${{ matrix.platform }}
+          if-no-files-found: error
+
+  # RISC-V 64 is cross-built on x86-64 here: the shipped ELF is smoke-run under
+  # qemu and a program is compile-checked. The full qemu suite stays in ci.yml.
+  linux-riscv64:
+    name: release linux-riscv64 (cross-built)
+    needs: checks
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Install clang, LLD, LLVM and qemu-user
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld llvm qemu-user-static
+          qemu-riscv64-static --version
+      - name: Build linux-riscv64 from the checked-in seed
+        run: bun tools/release.mjs build --platform linux-riscv64 --out dist/release/linux-riscv64
+      - name: Smoke-run the shipped compiler under qemu
+        run: |
+          qemu-riscv64-static "dist/release/linux-riscv64/grail-${{ needs.checks.outputs.version }}-linux-riscv64-compiler" --version
+      - name: Compile-only ELF check (no RISC-V test suite in the release lane)
+        run: |
+          compiler="$PWD/dist/release/linux-riscv64/grail-${{ needs.checks.outputs.version }}-linux-riscv64-compiler"
+          bun tools/ci.mjs test --platform linux-riscv64 --compiler "$compiler" --compile-only
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-linux-riscv64
+          path: dist/release/linux-riscv64
+          if-no-files-found: error
+
+  # Windows x86-64 is cross-built on Linux. The PE image and COFF objects pass
+  # static checks; nothing is executed on Windows and the image is not runnable
+  # as a compiler until the Windows runtime lands. The artifact says so.
+  windows-x86_64:
+    name: release windows-x86_64 (cross-built, build-only)
+    needs: checks
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Install clang, LLD and LLVM inspection tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld llvm
+          lld-link --version
+          llvm-readobj --version
+      - name: Build windows-x86_64 from the checked-in seed
+        run: bun tools/release.mjs build --platform windows-x86_64 --out dist/release/windows-x86_64
+      - name: Static COFF/PE checks (no Windows execution)
+        run: bun tools/ci.mjs test --platform windows-x86_64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-windows-x86_64
+          path: dist/release/windows-x86_64
+          if-no-files-found: error
+
+  # macOS has no executable release: the toolchain produces static-checked
+  # Mach-O object bundles and this job publishes exactly that. windows-aarch64
+  # remains planned and is deliberately absent from this workflow.
+  macos-objects:
+    name: release ${{ matrix.platform }} objects (static)
+    needs: checks
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-aarch64
+          - platform: macos-x86_64
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Install clang, LLD and LLVM inspection tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld llvm
+      - name: Build the macOS object bundle from the checked-in seed
+        run: bun tools/release.mjs build --platform ${{ matrix.platform }} --out dist/release/${{ matrix.platform }}
+      - name: Mach-O static checks (no execution)
+        run: bun tools/ci.mjs test --platform ${{ matrix.platform }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.platform }}
+          path: dist/release/${{ matrix.platform }}
+          if-no-files-found: error
+
+  publish:
+    name: publish GitHub release
+    needs: [checks, linux-native, linux-riscv64, windows-x86_64, macos-objects]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: dist/release
+      - name: Assemble checksums and the release README
+        run: |
+          bun tools/release.mjs assemble --dir dist/release --out dist/release/upload
+          bun tools/release.mjs verify --dir dist/release/upload
+      - name: Show what will be published
+        run: |
+          ls -l dist/release/upload
+          cat dist/release/upload/SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-upload
+          path: dist/release/upload
+          if-no-files-found: error
+      - name: Publish the tag release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${{ needs.checks.outputs.version }}"
+          prerelease=""
+          case "$version" in *-*) prerelease="--prerelease" ;; esac
+          gh release create "v${version}" dist/release/upload/* \
+            --title "Grail ${version}" \
+            --notes-file dist/release/upload/RELEASE-README.md \
+            --verify-tag $prerelease

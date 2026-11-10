@@ -34,6 +34,23 @@ fn main() {
   that would reopen it.
 - **Proposed numeric types:** [docs/design/numeric-types.md](docs/design/numeric-types.md) (partly implemented: sized integers, `f64`, `f32`, `char`).
 
+## Release artifacts
+
+Tagging `vX.Y.Z` runs `.github/workflows/release.yml`, which builds every target from the
+checked-in bootstrap seed (no development compiler, no network) and publishes a GitHub release
+with the artifacts below, one `SHA256SUMS` file, `release.json` provenance and a generated
+`RELEASE-README.md`. The full procedure is in [docs/releases.md](docs/releases.md).
+
+| Target | Artifact | Runs on |
+| --- | --- | --- |
+| `linux-x86_64` | `grail-VERSION-linux-x86_64.tar.gz` plus the raw compiler | Linux x86-64, static ELF; executed natively in the release lane |
+| `linux-aarch64` | `grail-VERSION-linux-aarch64.tar.gz` plus the raw compiler | Linux AArch64, static ELF; executed natively on the AArch64 release runner |
+| `linux-riscv64` | `grail-VERSION-linux-riscv64.tar.gz` plus the raw compiler | Linux RISC-V 64, static ELF; cross-built and smoke-run under qemu, not on RISC-V hardware |
+| `windows-x86_64` | `grail-VERSION-windows-x86_64.zip`, `...-compiler.exe`, `...-objects.zip` | **Not runnable yet**: cross-built PE32+ image and COFF objects, static checks only |
+| `windows-aarch64` | none | **Not built**: ARM64 PE code generation is not implemented; the lane is planned |
+| `macos-aarch64` | `grail-VERSION-macos-aarch64-objects.tar.gz` | **Nothing**: non-executable Mach-O objects, statically checked only |
+| `macos-x86_64` | `grail-VERSION-macos-x86_64-objects.tar.gz` | **Nothing**: non-executable Mach-O objects, statically checked only |
+
 Build the compiler with `bun tools/native.mjs build` (Bun, Clang assembler and LLD required).
 There is no Rust seed or C-backend dependency. `just book` builds and opens the offline book;
 Rust is needed only to verify the book's Rust counterparts.

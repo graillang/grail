@@ -153,7 +153,9 @@ export function inspectObject(platform, object) {
     if (!/MH_MAGIC_64/.test(headers)) throw new Error(`${object}: not a 64-bit Mach-O object`);
     if (!new RegExp(`MH_MAGIC_64\\s+${expected}\\b`).test(headers)) throw new Error(`${object}: wrong Mach-O cputype (expected ${expected})`);
     if (!/LC_BUILD_VERSION[\s\S]*platform macos/.test(headers)) throw new Error(`${object}: missing macOS LC_BUILD_VERSION`);
-    const symbols = command(['llvm-nm', object]).stdout.toString();
+    // Only external symbols are needed and the full local-symbol listing for the
+    // compiler object overflows command()'s output buffer.
+    const symbols = command(['llvm-nm', '--extern-only', object]).stdout.toString();
     if (!/\bT _main$/m.test(symbols)) throw new Error(`${object}: _main is not a defined text symbol`);
     const binary = inspectBinary(object);
     return { format: 'macho', arch: binary.arch, magic: 'MH_MAGIC_64' };

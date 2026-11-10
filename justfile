@@ -112,6 +112,23 @@ build-platform platform:
 package platform:
     bun tools/ci.mjs package --platform {{platform}}
 
+# Build every locally buildable release target from the checked-in seed, then assemble and verify.
+release-dry-run:
+    bun tools/release.mjs dry-run --out dist/release
+
+# Build one target's release assets and metadata into dist/release/PLATFORM.
+release-build platform:
+    bun tools/release.mjs build --platform {{platform}} --out dist/release/{{platform}}
+
+# Merge built targets into dist/release/upload with SHA256SUMS, release.json and RELEASE-README.md.
+release-assemble:
+    bun tools/release.mjs assemble --dir dist/release --out dist/release/upload
+    bun tools/release.mjs verify --dir dist/release/upload
+
+# Validate a release tag against VERSION (usage: just release-version v0.1.0).
+release-version tag:
+    bun tools/release.mjs version --tag {{tag}}
+
 # Print signing/notarization commands; add --execute after setting credentials.
 sign platform artifact:
     bun tools/ci.mjs sign --platform {{platform}} --artifact {{artifact}}

@@ -114,6 +114,12 @@ The macOS lanes compile with `--target macos-x86_64|macos-aarch64`, the
     `grail debug lines|info` for Linux x86-64.
 
 `release-sign` is tag-only and environment-gated (`RELEASE_SIGNING=true`).
+`.github/workflows/release.yml` is the tag-driven artifact pipeline described in
+[docs/releases.md](../releases.md): it builds every non-planned target from the
+checked-in bootstrap seed, runs the target-appropriate checks, and publishes one
+GitHub release with per-target artifacts, `SHA256SUMS`, `release.json` and a
+generated `RELEASE-README.md`. It does not replace the lanes above; those remain
+the broader execution evidence.
 
 ## Windows x86-64 build-only lane
 
@@ -315,11 +321,12 @@ Exit codes: `0` ok, `1` usage/internal, `2` not applicable to this host,
 
 ## Current blockers
 
-1. **Stale published bootstrap.** `compiler/bootstrap/manifest.json` records
-   source hashes from before the typed-reference migration, so
-   `bun tools/native.mjs build` cannot compile the current tree. Workaround:
-   build a stage0 from a migration-capable compiler and pass
-   `GRAIL_COMPILER=/path/to/grail`. Refreshing bootstraps needs
+1. **Stale bootstrap source manifest.** `compiler/bootstrap/manifest.json`
+   records source digests from before the latest compiler-source edits, so
+   `bun tools/ci.mjs preflight` reports `ready: false` and the preflight-gated
+   lanes in `ci.yml` skip. The seed artifacts themselves are intact and
+   `bun tools/native.mjs build` still compiles the current tree (the release
+   pipeline relies on exactly that). Refreshing the manifest and seeds needs
    `bun tools/bootstrap.mjs update all` on a host where all three bootstraps
    execute (QEMU for AArch64/RISC-V64).
 2. **No qemu-user on the development host.** Linux x86-64 native tests pass;
