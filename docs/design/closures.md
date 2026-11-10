@@ -33,5 +33,8 @@ Semantics (v1):
   parameter accepts closures only.
 - Closures may appear inside generic functions; each specialization compiles its own closure body.
   A closure can call a captured closure or function value.
-- Not yet: mutating a capture inside the body (`FnMut` semantics), Send/Share for closures, and
-  coercing named functions to `Fn`.
+- Not yet: mutating a capture inside the body (`FnMut` semantics), mutable/borrowed closure
+  parameters, Send/Share for closures, and coercing named functions to `Fn`.
+- `FnMut` is deferred with its rules fixed in advance (a closure that writes a capture is a
+  different type; calling it takes exclusive access to the closure for the call; only written
+  captures change mode): see [the B6 decision](decisions-b2-b6.md#b6-references-captured-fnmut-deferred).

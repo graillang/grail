@@ -19,6 +19,27 @@
   mutable local before the C call. The ownership checker requires a mutable binding for storage a
   call writes through, and a parameter binding cannot be `mut`, so forwarding the reference straight
   through no longer compiled: the FFI wrapper, and every test that links it, failed to build.
+- The seven owner decisions left open in `docs/design/language-readiness.md` section B are settled
+  and recorded in `docs/design/decisions-b2-b6.md`: B1 (separate compilation with checked module
+  interfaces) and B7 (records passed by value, spelling `v: byval R`) are accepted and in progress;
+  B2 keeps ambient `host::` for v1 as a recorded deviation with the conditions that force a change;
+  B3 makes a foreign call block the executing thread with no green-task integration; B4 keeps
+  thread-per-blocking-call on Windows and names IOCP as future work with a sketch; B5 fixes abort as
+  "never unwinds, nothing unwinds across the C boundary"; B6 records that closures capture
+  references and views under region checking and defers `FnMut` with six fixed rules. Section B of
+  the readiness audit now marks every row decided with a one-line summary and a link, so the work
+  can proceed without re-arguing the choices.
+- Documentation corrections found while writing those decisions: `implementation-status.md` reported
+  the user FFI boundary as missing (it is implemented and executed on six targets) and borrowing
+  closure captures as missing (they exist; only `FnMut` is deferred); `concurrency-v1.md` claimed
+  blocking foreign calls are isolated (only `host::read_file`, `host::write_file` and
+  `host::command` are offloaded, from a green task); `windows-backend.md` and B4 now state that a
+  green-task spawn aborts on Windows because the scheduler treats a missing `epoll` as fatal, which
+  a task-scope program reproducing it confirms (exit 134 under Wine, no output, against `42` and
+  exit 0 on Linux); `borg-agent-port.md` blockers 1 and 3 are annotated as resolved before that
+  record; README lost a duplicated Windows paragraph and no longer reports Windows threads as
+  missing; `runtime-api.md` keeps its OS-wrapper plan but records that its premise - the compiler
+  not yet accepting `extern "C"` declarations - has changed. No compiler or runtime code changed.
 - Merge the three design reviews from branch `claude/brave-heisenberg-0h3ska` as documents only
   (`docs/design/first-principles-architecture.md`, `architecture-reassessment.md`,
   `complexity-reassessment.md`, 2,746 lines). Their edits to README and to the research-phase

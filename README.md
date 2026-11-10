@@ -27,6 +27,10 @@ fn main() {
   file/time/env, loopback TCP socket and process/thread tests.
 - **Windows ABI evidence under Wine:** `just abi-wine-test` cross-builds the C harness with Zig,
   runs the metadata/reparse/DNS paths under Wine, and statically checks the macOS ARM64 call sites.
+- **Owner decisions on language readiness (B1-B7):** [docs/design/decisions-b2-b6.md](docs/design/decisions-b2-b6.md)
+  - separate compilation, ambient authority, blocking foreign calls, Windows I/O readiness,
+  abort/unwind, closure captures and `byval` records, each with its alternatives and the condition
+  that would reopen it.
 - **Proposed numeric types:** [docs/design/numeric-types.md](docs/design/numeric-types.md) (partly implemented: sized integers, `f64`, `f32`, `char`).
 
 Build the compiler with `bun tools/native.mjs build` (Bun, Clang assembler and LLD required).
@@ -38,10 +42,9 @@ The Windows x86-64 backend emits PE/COFF objects and PE32+ images; Windows progr
 verified under Wine, while release artifacts are non-executable object bundles. The macOS
 x86-64 and AArch64 backends emit Mach-O objects and linked images that are checked statically
 but never executed here (see [docs/design/windows-backend.md](docs/design/windows-backend.md)).
-The Windows x86-64 backend emits and links PE32+ console images, and its runtime layer covers
-console output, files, exit codes and argv under Wine; threads, sockets and unwinding are still
-missing (see [docs/design/windows-backend.md](docs/design/windows-backend.md)).
 The Windows backends emit and link PE32+ console images for x86-64 and ARM64; the x86-64 runtime
-layer covers console output, files, exit codes and argv under Wine (ARM64 is statically
-validated), while threads, sockets and exception unwinding are still missing (see [docs/design/windows-backend.md](docs/design/windows-backend.md)).
+layer covers console output, files, exit codes, argv and OS threads under Wine (ARM64 is statically
+validated), and sockets plus processes/threads are reachable through the FFI shim. The built-in
+socket operations, the green-task scheduler and exception unwinding are still missing there (see
+[docs/design/windows-backend.md](docs/design/windows-backend.md)).
 Additional numeric primitives and structured concurrency are not yet implemented. Historical research under `research/` records earlier design experiments.

@@ -1,0 +1,416 @@
+# Owner decisions: language readiness B1-B7
+
+Decided 2026-11-10 against `main` at `9caae07`, under the project owner's direction to "do
+everything properly" and to settle the seven open items in
+[language readiness](language-readiness.md) section B. The owner delegated the choices; this page
+records them, so that they are not re-argued as if they were still open.
+
+The page is named after the items that were still open (B2-B6). B1 and B7 are recorded here as
+well, because they are decided *and in progress* and the readiness table links one page per row.
+
+Every item states the decision, the alternatives that were considered and rejected, what breaks if
+the decision is wrong, and where the compiler, runtime, tests or documents enforce it. A later
+change that wants to depart from a decision has to name the condition under "Revisit when" - a
+decision without a stated trigger is what made these items outstanding for so long.
+
+## Summary
+
+| # | Decision | State |
+| --- | --- | --- |
+| B1 | Separate compilation with checked module interfaces: **accepted**. The plan of record is [separate-compilation.md](separate-compilation.md); this record fixes the decision and its obligations, not the format. | Implementation starting |
+| B2 | Ambient `host::` stays for v1 as a **recorded deviation** from the capability model, with the conditions that force the change listed below. | Decided |
+| B3 | A foreign call **blocks the executing thread**; no green-task scheduling integration is promised for v1. Foreign calls also remain main-thread-only (process-wide host TLS base). | Decided |
+| B4 | Windows uses **thread-per-blocking-call**. IOCP is a named future work item with the design sketch in this page. Green tasks on Windows currently abort at scheduler start. | Decided |
+| B5 | **Abort never unwinds**; nothing may unwind across the C boundary. There is no `defer` and no cleanup runs on an abort path. | Decided |
+| B6 | Closures capture references and views today and cannot outlive the borrow; **`FnMut`/mutable captures are deferred** with the rules that will apply fixed below. | Decided (part deferred) |
+| B7 | Records passed by value to C: **accepted**, spelling `v: byval R`. | Implementation after B1 |
+
+## B1: separate compilation accepted
+
+**Decision.** The compiler grows a separate-compilation path with a checked module-interface
+artifact: a module's exported signatures, layouts and ownership/origin contracts are checked once
+and consumed by importers without re-reading every other module's source or re-emitting one
+assembly file per program. The decision is the *capability and its obligations*; the format,
+incrementality policy, cache keys and the artifact's on-disk encoding belong to the implementation,
+whose plan of record is [separate-compilation.md](separate-compilation.md) (text interfaces with a
+hash-verified dependency list, per-module objects, and - for v1 - source availability for generic
+instantiation sites rather than serialised generic bodies).
+
+Obligations the implementation must satisfy, taken from decisions already in the ledger:
+
+- An importer's check may not depend on a provider's body (P02 in [decisions.md](decisions.md)).
+- The artifact is content-addressed and invalidates transitively; a stale provider must fail the
+  build rather than produce a green one (P11's evidence hashes; the bootstrap manifest is the
+  existing precedent for recording source and artifact digests).
+- Anything a client needs to check - exported origins, capture bounds, and later effect summaries -
+  is in the artifact; "the provider compiled" is not a substitute for a contract.
+
+**Alternatives considered.** (a) Keep whole-program compilation only: rejected, a 363,000-line port
+cannot be built that way and every build pays for modules it does not use
+([borg-agent-port.md](borg-agent-port.md) blocker 2). (b) C-header-style textual interfaces:
+rejected, aggregate layout and ownership/origin contracts would be hand-maintained and unchecked.
+(c) Link LLVM IR/objects now: rejected, it fixes codegen ABI details before the language's contract
+artifact exists and moves diagnostics after the link.
+
+**Consequence if wrong.** If the artifact turns out to be insufficient for the ownership and
+origin checks, clients are either unsound (a program with a borrow that is invalid across a module
+edge is accepted) or we fall back to whole-program checking. The cost is a redesign of the artifact
+format, not of the language.
+
+**Enforced by.** Nothing yet: the implementation is in progress. Until it lands every build is
+whole-program - the compiler reads all input files and writes one assembly file - and
+[implementation-status.md](implementation-status.md) keeps reporting "Separate compilation with
+checked library contracts" as missing. The readiness row B1 tracks it.
+
+## B2: ambient host authority, a recorded deviation
+
+**Decision.** For v1, OS access stays ambient: any module may call the `host::` builtins and they
+need no capability, effect or `unsafe` block. This is recorded as a **known deviation** from the
+capability model the design wants, not as the intended end state.
+
+What actually exists today (verified against the compiler):
+
+- The `host::` surface is 28 builtins registered in `compiler/native.grl` (`host_fn` table, near
+  line 20115): `target`, `argc`, `arg`, `read_file`, `write_file`, `print`, `print_num`, `newline`,
+  `command`, `sleep_ms`, `now_ms`, `pipe`, `read_fd`, `write_fd`, `close`, `env`, `exe_path`,
+  `exists`, `mkdir`, `list_dir`, `tcp_listen`, `tcp_port`, `tcp_accept`, `tcp_connect`, `open`,
+  `exit`, `remove`, `create_dir`. They are compiler-known names, not library functions, so a
+  module cannot shadow or restrict them, and nothing records who used them.
+- A module that is not `main` can call `host::print` directly (compiled and linked in this review);
+  the module declaration does not grant or withhold authority.
+- The authority boundaries that *do* exist are about the raw machine, not the OS: `unsafe module`
+  is reserved by name to `runtime` (and `darwin` on macOS) - `compiler/native.grl:7265-7274`
+  rejects any other module that claims it; the runtime may not publish safe interfaces or be called
+  from safe code (`native.grl:6684`, `native.grl:8932`); a foreign call, `cstr`, `cptr` and
+  `cptr_mut` need a lexical `unsafe { }` block (`native.grl:9267-9272`, `11108-11134`).
+- FFI is therefore gated by `unsafe`, while files, processes, sockets, environment and process exit
+  through `host::` are not gated at all.
+
+**Revisit when** any of these becomes true; each one breaks the deviation rather than merely making
+it inconvenient:
+
+1. Grail runs untrusted code in process - third-party modules, plugins or extensions that are not
+   part of the program being built. Ambient `host::` then means any loaded module has the file,
+   process, network and exit authority of the host.
+2. A sandbox or restriction is promised (path roots, network allow-lists, no subprocesses). There is
+   currently no place to express "this component may not spawn processes".
+3. `host::` appears in a published interface. An interface artifact (B1) that hides ambient
+   authority would be lying about its dependencies.
+4. A library is shipped as a component with an authority claim in its documentation.
+
+**Alternatives considered.** (a) Capabilities as ordinary parameters now (`Console`, `Dir`, `Net`,
+`Allocator` values passed at the entry point): deferred, not rejected. It needs the interface and
+summary machinery B1 is building plus the lexical-context question in
+[memory-model-competition.md](memory-model-competition.md) section 7 (P04), and it would rewrite
+every stdlib and port call site before there is a second implementation to test the design against.
+(b) A suspension/effect name (`effects(fs)`) as the primary mechanism: rejected as *the* model,
+because effects describe operations while authority must describe retained permission
+([memory-model-competition.md](memory-model-competition.md) rule 6 in section 7); a function with
+no `fs` effect may still hold a directory handle. (c) Drop the capability goal: rejected, that
+deletes the first step of the V3 order in [syntax-v2-scope.md](syntax-v2-scope.md) without saying
+so.
+
+**Consequence if wrong.** If Grail is combined with untrusted modules before the change, the
+sandbox claim is false: any module can read and write files, spawn processes, open sockets and exit
+the process, and there is no diagnostic to catch it. If the change is made too late, the cost is
+mechanical: dozens of stdlib entry points and call sites gain a parameter, with the compiler
+finding all of them.
+
+**Enforced by.** Today: the compiler's sealing of the runtime (above), the `unsafe` gate on FFI, and
+documentation - the readiness row B2, the "Explicit authority / capabilities" row of
+[implementation-status.md](implementation-status.md), the V3 order in
+[syntax-v2-scope.md](syntax-v2-scope.md), and the "no ambient console authority" paragraph of
+[surface-sketch.md](surface-sketch.md). The deviation itself is recorded in this page.
+
+## B3: foreign calls block the executing thread
+
+**Decision.** A foreign call is a blocking call. The compiler emits it as a direct C-ABI call with
+no runtime interception (`ffi_emit_call`, `compiler/native.grl:5485`), so the thread that makes the
+call is occupied for its whole duration: on a green task that is a worker of the scheduler pool,
+and a pool whose workers are all inside foreign code makes every other task wait. This is
+documented behaviour for v1 - **no green-task scheduling integration, offload or suspension effect
+is promised for foreign calls**, and no part of the type system records that a function blocks.
+
+Two facts that belong to the same decision, because they bound how far "it just blocks" is true:
+
+- **FFI stays main-thread-only.** The host TLS bridge keeps one process-wide base
+  (`rt_host_tls`, `compiler/native.grl:1098-1120`) that every foreign call swaps in. A worker or
+  green thread has no libc TCB of its own, so a call that touches libc state (errno, allocator
+  caches) from a worker shares the main thread's TCB. That is a documented misuse
+  ([docs/ffi.md](../ffi.md), line 312), not merely slow code, and it applies equally to callbacks
+  arriving on a foreign thread.
+- **The runtime isolates only the three host operations it controls.** `host::read_file`,
+  `host::write_file` and `host::command` call `rt_offload` when they run in a green task
+  (`compiler/runtime.grl:625, 682, 907`), which hands the blocking body to a dedicated OS thread,
+  suspends the task and wakes it on completion (`rt_offload`, `runtime.grl:1855`). That is a
+  property of those three builtins, not a contract for user foreign calls, and it costs one OS
+  thread per blocking call.
+
+**Alternatives considered.** (a) Keep the aspirational wording ("blocking foreign calls are
+explicitly isolated") and treat it as done: rejected, it is false for every `extern "C"` call and
+was the single largest source of confusion between [concurrency-v1.md](concurrency-v1.md) and the
+runtime. (b) Offload every foreign call to a thread: rejected for v1 - `rt_offload` calls a
+two-argument Grail function through `raw_call2`, so a general trampoline is needed for arbitrary
+signatures, it costs a thread per call, and it does not fix the process-wide TLS base, which is the
+real reason a worker cannot call libc. (c) Reject foreign calls lexically inside a task scope
+(compile error): attractive, but it needs a checked suspension/effect summary - the same missing
+machinery as B1's interface contracts - so it is a later increment, not a v1 promise.
+
+**Revisit when** any of: the host TLS base becomes per-thread (then the main-thread restriction
+becomes "callbacks run on the thread that made the call" and worker-side FFI becomes legal); a
+foreign-call offload trampoline exists; effect/suspension summaries are published, at which point
+"this call blocks" becomes checkable and a `nosuspend` context can be enforced.
+
+**Consequence if wrong.** The failure mode is a runtime fault, not a diagnostic: a server that
+calls a blocking foreign function from tasks starves or deadlocks its worker pool (correctly, in
+the sense that it blocks exactly as documented), and multi-threaded FFI corrupts libc state silently
+instead of failing. If instead we had promised isolation we do not have, libraries would rely on it.
+
+**Enforced by.** Documentation now: [docs/ffi.md](../ffi.md), line 312 (main-thread limit),
+[concurrency-v1.md](concurrency-v1.md) (corrected to state what is offloaded and what is not), this
+page, and the "Suspension effects and non-suspending cleanup" row of
+[implementation-status.md](implementation-status.md). Tests: blocking-call isolation remains an
+acceptance gate named in [concurrency-v1.md](concurrency-v1.md); nothing enforces the absence of a
+blocking foreign call today.
+
+## B4: Windows thread-per-blocking-call, IOCP deferred
+
+**Decision.** On Windows every I/O operation is synchronous and occupies its calling OS thread:
+`ReadFile`/`WriteFile`/`CloseHandle` with no `OVERLAPPED` structure and no completion port
+(`compiler/os-windows.grl:28-51`). Thread-per-blocking-call is the v1 policy. IOCP is a named future
+work item with the sketch below; it is not promised for v1 and no code is written for it yet.
+
+**What is true today, verified, and worse than the plans say.** The portable runtime's scheduler
+treats a failed `epoll_create` as fatal (`rt_sched`, `compiler/runtime.grl:1318-1332`), and the
+Windows OS layer answers the readiness operations - epoll (291), eventfd (290), sockets, `mremap` -
+with `-ENOSYS` (`compiler/os-windows.grl:200`). So the first green-task spawn is not slow or
+degraded on Windows: **it aborts the process**. Reproduced in this review with a task-scope program:
+the same source prints `42` and exits 0 on Linux x86-64, and exits 134 with no output under Wine.
+OS threads, in contrast, do work on Windows x86-64 (`CreateThread`/`WaitForSingleObject`; the
+`thread-join` and `thread-wake` cases run under Wine), which is exactly why thread-per-blocking-call
+is the right v1 answer there.
+
+**IOCP sketch** (for the future work item, enough to pick it up without rediscovering the shape):
+one completion port created where the scheduler now creates its epoll fd; overlapped
+`ReadFile`/`WriteFile` with a completion key identifying the pending operation; a reactor thread
+calling `GetQueuedCompletionStatus` where the reactor now calls `epoll_wait`; the portable
+`rt_wait_ready`/`rt_suspend`/`rt_wake` protocol unchanged, with the readiness id translation living
+in `os-windows.grl`; `WaitOnAddress`/`WakeByAddress*` keep serving the futex operations. The
+prerequisite is that handles are opened as overlapped (including console handles) and that a
+Windows concurrency test lane exists, which is why this is not a port of one function.
+
+**Alternatives considered.** (a) Ship IOCP now: rejected for sequencing - the Windows port needs
+correct file and console I/O before it needs 10k concurrent connections, and an overlapped I/O lane
+without a Windows test runner would be unverified code. (b) `select`-based reactor: rejected, no
+per-operation completion, and sockets still need overlapped I/O to scale. (c) Emulate epoll with
+`WaitForMultipleObjects`: rejected, bounded at 64 handles and the wrong completion shape.
+(d) Keep green tasks "working" on Windows by silently serialising them: rejected - it would be a
+parallel API executing sequentially, which [concurrency-v1.md](concurrency-v1.md) explicitly
+forbids.
+
+**Consequence if wrong.** A Windows program that spawns a task aborts at the first spawn today, so
+the failure is immediate and loud rather than subtle. If thread-per-call is kept too long, a server
+pays one OS thread per blocked operation and runs into thread limits and per-thread stack memory
+(each green task already maps 256 KiB, so the same shape at 10k connections is not viable). If IOCP
+is adopted later, the portable suspend/resume protocol survives; only the OS layer changes.
+
+**Enforced by.** `compiler/os-windows.grl` (`-ENOSYS` for readiness, synchronous `ReadFile`),
+`compiler/runtime.grl` (fatal scheduler start), [windows-backend.md](windows-backend.md), the
+readiness row B4, and the "Windows I/O" part of [implementation-status.md](implementation-status.md).
+
+## B5: abort never unwinds
+
+**Decision.** An abort terminates the process and runs nothing on the way out. Nothing may unwind
+across the C boundary - that is a calling-convention obligation on the program, because the compiler
+does not and will not enforce it. There is no `defer` statement: what looks like deferred cleanup is
+the compiler's generated dropper calls at each scope exit, which exist on return paths only.
+
+**What the runtime actually does** (checked against the code and by running it, because the earlier
+assumption "cleanup runs before the abort" is not what happens):
+
+- Every abort site calls `rt_abort` (`compiler/runtime.grl:3-7`): `kill(getpid(), SIGABRT)`, then
+  `exit(134)`. On Windows `kill` is a no-op and the same function is `ExitProcess(134)`. There is no
+    message - not to stdout, not to stderr - and the native abort cases (`arithmetic-abort-0`,
+  `index-assignment-out-of-bounds-aborts`) check the signal `SIGABRT`; the harness compares no
+  output on a signal case, so a message would go unnoticed. A probe printing `before abort` and
+  then overflowing printed that line and died with 134 (shell: `Aborted (core dumped)`), with
+  nothing on stderr.
+- Nothing runs before it: no destructors in the aborting frame, none in any caller's frame, no
+  `atexit`, no flush. Output that was already written survives because the runtime writes with
+  unbuffered `write(2)` syscalls, not stdio buffers - that is the only reason the last line before
+  an abort is not lost, and it is not cleanup.
+- Abort sites are the runtime guards and the compiler-emitted checks: bounds, checked overflow,
+  division by zero, `!` on a failed Option/Result, allocation failure, a `cstr` without its
+  terminator, internal runtime invariants, and the end-of-`main` leak counter (`rt_live() != 0` ->
+  `call rt_abort`, `compiler/native.grl:20426-20429`).
+- There is nothing to unwind *with*: the ELF backend emits no CFI directives and no
+  `.eh_frame`/`.debug_frame` (checked with `readelf -S` on a built executable: neither section
+  exists). The only unwind data in the project is PE `.pdata` for Windows x86-64, which the OS
+  unwinder requires and which contains no Grail handlers ([windows-backend.md](windows-backend.md)).
+  A C++ exception thrown through a Grail frame therefore has no Grail cleanup to skip on Linux (it
+  has no tables, so the runtime terminates) and may be walked over on Windows (skipping the drops
+  that a normal return would have run).
+
+**Alternatives considered.** (a) Unwinding-based cleanup with a `defer` statement: rejected for v1 -
+it needs tables on every target, a defined interaction with the C ABI (`.eh_frame` on Linux,
+`.pdata` handlers on Windows, and a decision about foreign exceptions), and it replaces deterministic
+scope-exit destruction with an exception path that has to be proven to run exactly once. (b) Catch
+and recover (`panic = abort` off): rejected, it is the same machinery plus a recovery contract, and
+the ledger already rejects hidden blocking destructors and invisible failure paths. (c) Enforce
+"nothing unwinds across C" with a compile-time check: rejected as impossible in principle - the
+caller controls whether a foreign function throws - so it stays a documented obligation and a test
+concern.
+
+**Consequence if wrong.** If any later feature assumes unwinding (catching, error cleanup through
+unwinding, a `defer`), every abort site, both backends' unwind data and the C ABI policy have to
+change together; a half-unwinding runtime would run some drops and not others and lose the
+deterministic-cleanup argument that owned values are freed exactly at their scope exit. If the
+program relies on cleanup after a failed foreign call, it silently leaks or leaves a resource open
+before dying.
+
+**Enforced by.** `rt_abort` and the 100+ guard sites in `compiler/runtime.grl`; the compiler's
+`call rt_abort` emissions at each guard and at the leak check (`compiler/native.grl`, e.g.
+`20426-20429`); the absence of CFI/`.eh_frame` in `compiler/native.grl`'s emission; PE `.pdata`
+without handlers; the native abort cases; and the "Abort paths do not unwind" statement in
+[implementation-status.md](implementation-status.md).
+
+## B6: references captured, FnMut deferred
+
+**Decision.** Record what exists and fix the rules for the deferred part.
+
+Implemented now (verified on `9caae07`, not just intended):
+
+- Captures are found from the enclosing function's locals named in the body. Plain values are
+  copied; owned values move in (the original binding is gone). A **direct reference or view**
+  (`&T`, `&[T]`, `&[u8]`, `&mut T`) moves in as pointer *and* loan, and the borrowed region becomes
+  part of the closure's type - `Fn(...) -> R` carries the regions it borrows - so a closure cannot
+  outlive what it borrows. Returning it from the function is rejected:
+  `returned borrow escapes its declared input lifetime`.
+- An aggregate that merely *holds* a borrow is not capturable:
+  `closures can capture owned values and direct references, not a struct or enum holding a borrow`.
+  Its layout and dropper are its own.
+- The environment's own fields are declared in the environment's region (`env` is region 1), so the
+  body re-borrows the captured pointer from the environment and never names the enclosing function's
+  lifetimes, which do not exist there (`capture_borrow`, `capture_region`, `capture_field_type`,
+  `compiler/native.grl:12659-12720`; environment construction near `12810-12880`).
+- Captures are **read-only inside the body**: assignment, mutably borrowing a capture or moving one
+  out is rejected (`captured values are read-only inside a closure`). Task handles cannot be
+  captured at all.
+- The closure value is affine and owns its environment: moving transfers it, calling does not
+  consume it, dropping runs the environment's dropper, and calls pass a pointer to the environment
+  as a hidden first argument.
+
+Evidence: the native cases `closure-captures-reference` (runs, prints 8),
+`closure-captures-exclusive-reference`, `closure-captured-slice-moves-in`,
+`closure-captured-slice-sort-by`, `closure-borrowed-capture-escape-rejected`,
+`closure-borrowed-capture-through-callee-escape-rejected`, `closure-capture-mutation-rejected`,
+`closure-capture-borrow-mut-rejected`, `closure-aggregate-borrow-capture-rejected`; all three
+diagnostics above were reproduced directly in this review from those cases' sources.
+
+**Deferred: `FnMut` (mutating a capture in the body) and mutable or borrowed closure parameters.**
+When they are added these rules apply; they are decided here so the feature is not re-litigated:
+
+1. `Fn(...)` and `FnMut(...)` are different types. A closure literal whose body writes a capture is
+   `FnMut`; passing it where `Fn` is expected is rejected rather than silently upgraded.
+2. Calling an `FnMut` value takes exclusive access to the closure for the duration of the call: the
+   binding must be mutable, the call borrows it exclusively, and the loan ends when the call
+   returns. No shared borrow of that closure may exist across the call.
+3. Only the captures the body actually writes change mode; untouched captures stay read-only.
+   Otherwise every closure becomes `FnMut` and the `Fn`-taking stdlib signatures
+   (`vecs::sort_by`, `fold`, `parallel_map` callbacks) lose their types.
+4. A captured `&mut T` is tracked exactly as today's exclusive-reference capture: the region moves
+   with the pointer, the closure cannot outlive it, and writes through the captured view are allowed
+   only while the closure holds it exclusively.
+5. Adapters over borrowed elements keep taking `Fn` (they read). An adapter that hands out `&mut`
+   elements takes `FnMut`, and is the reason to add the mode at all.
+6. Send/Share for closures stays out of scope until `FnMut` exists.
+
+**Alternatives considered.** (a) `&mut` capture by default, as pre-1.0 Rust did: rejected - it
+forces `mut` at every capture site, breaks every `Fn` parameter, and gives up the read-only body
+rule that lets a closure holding a borrowed view still be passed where `Fn` is expected. (b) By-reference capture
+cells with explicit `move`: rejected for v1 - a second capture discipline plus a shared,
+reference-counted or arena-stored environment contradicts the affine owned environment and would
+need its own escape rules. (c) Make the environment mutable now and defer the type distinction:
+rejected, that is precisely the aliasing hole rule 2 closes. (d) Capturing aggregates that hold
+borrows: deferred, not rejected - it needs layout-aware droppers plus region derivation from fields.
+
+**Consequence if wrong.** If the read-only body rule is relaxed without rule 2's exclusive call
+loan, a closure can write storage the caller still reads - a silent aliasing hole, not a diagnostic.
+If `FnMut` is added by making all closures mutable, every `Fn` parameter in the stdlib and in the
+ports changes type, a large mechanical churn that the mode-per-written-capture rule exists to avoid.
+
+**Enforced by.** The tests above; `capture_borrow`/`capture_field_type` and the read-only environment
+parameter in the closure body; [closures.md](closures.md) (updated with this decision);
+[implementation-status.md](implementation-status.md) and readiness row A11/B6.
+
+## B7: byval record parameters accepted
+
+**Decision.** An `extern "C"` record parameter is the C `R *` today, and stays so (Win32, Vulkan and
+D3D12 are written that way). By-value struct arguments get one explicit spelling: **`v: byval R`**, a
+parameter of `extern "C" record R` type marked `byval`, meaning the ABI passes the whole record as
+C does. Implementation starts after B1 lands.
+
+Implementation notes that follow from the decision (so the implementer does not re-decide):
+
+- Reuse the per-ABI classification the compiler already has for record *results* - SysV eightbyte
+  classes, AAPCS64 HFAs, RV64 flattening, Win64 shadow space plus hidden result pointer - for
+  arguments, rather than writing a second classifier.
+- Keep the bare `R` meaning `R *`. A silent switch to by-value for "small" records would change the
+  meaning of existing signatures.
+- `byval` is refused for anything that is not an `extern "C"` record, and for records whose
+  classification is still unsupported (a result whose embedded records contain floats is already
+  refused), so the new spelling never degrades to an approximation.
+- [docs/ffi.md](../ffi.md) gains the syntax row and drops the corresponding Limits bullet;
+  `tests/ffi/call_records.grl` extends to ImVec2-shaped two-float and mixed int/float records on
+  every executed target.
+
+**Alternatives considered.** (a) Implicit by-value when the record is small: rejected - a silent ABI
+change that is invisible at the call site and differs per target. (b) A distinct wrapper type
+(`by_value(R)`): rejected - two types for one layout, and layout/classification would have to be
+duplicated. (c) Pointer-only, let callers copy into a temporary: rejected - ImGui's `ImVec2`
+parameters take by value and hand-written temporaries at every call site are worse than a marker.
+
+**Consequence if wrong.** A wrong spelling is a source-level break across the port, but a mechanical
+one: the classification is shared with results, so only the marker changes. A wrong ABI
+classification is worse - it miscompiles silently - which is why the implementation must extend the
+executed record tests rather than adding a compile-only case.
+
+**Enforced by.** [docs/ffi.md](../ffi.md) (today: refused, with the decision recorded) and readiness
+rows A3/B7. The compiler currently rejects a record parameter passed by value; the implementation
+replaces that diagnostic with the syntax.
+
+## Corrections to earlier documents
+
+These were found while verifying the decisions. They are recorded rather than smoothed over,
+because a stale claim is what makes a decided item get re-opened.
+
+1. [runtime-api.md](runtime-api.md) opens with "the compiler does not yet accept `extern "C"`
+   declarations". It does: [docs/ffi.md](../ffi.md) is the implemented contract and `tests/ffi` plus
+   the Windows cases execute it on six targets. A premise note is added there in this change; the
+   OS-API, capability and error design in that page still needs to be re-based on the FFI that
+   exists before it is used as the capability plan.
+2. [implementation-status.md](implementation-status.md) still has "User FFI boundary | Missing - no
+   general extern C declarations". FFI is implemented, tested and documented; that row was
+   outdated. Fixed in this change.
+3. The same file's closures row says borrowing captures are missing. They are implemented; only
+   mutating captures and mutable/borrowed closure parameters are missing. Fixed in this change.
+4. [borg-agent-port.md](borg-agent-port.md) lists "No user FFI" (blocker 1) and "No macOS or
+   Windows target at all" (blocker 3) as exact blockers. Both were resolved by the A-section work;
+   blocker 8 ("no suspension-effect contract or cancellation rule for foreign blocking calls") is
+   what B3 now answers. The list is annotated in this change; the remaining blockers stand.
+5. [concurrency-v1.md](concurrency-v1.md) said "blocking foreign calls are explicitly isolated".
+   Only `host::read_file`, `host::write_file` and `host::command` are, and only from a green task.
+   Corrected to describe the offload that exists and the worker-blocking that does not.
+6. README claimed Windows threads are missing while `windows-backend.md` documents them and the
+   `thread-join`/`thread-wake` cases run under Wine; the same paragraph was duplicated. Corrected.
+7. [language-readiness.md](language-readiness.md) row A11 said mutable/borrowed captures are open.
+   Borrowed captures are implemented; only `FnMut` is deferred (B6). Updated.
+
+## Not decided here
+
+The vocabulary this page deliberately does not settle: the module-interface details beyond the
+obligations in B1 (its plan of record is [separate-compilation.md](separate-compilation.md)), the
+capability types and their names (B2's revisit trigger), a foreign-call offload trampoline or
+per-thread host TLS (B3's revisit trigger), the IOCP implementation (B4), any unwinding or `defer`
+feature (B5), and the `FnMut` implementation detail beyond the six rules above (B6). Each of those is a design task with a stated trigger, not an open question about these
+decisions.

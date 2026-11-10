@@ -17,6 +17,15 @@ See [the memory-model competition](memory-model-competition.md) for revisions pr
 - AI is an untrusted proposer, never a correctness authority.
 - Preserve independent intent; deriving behavior from implementation is not requirements validation.
 
+## Owner decisions on language readiness (2026-11-10)
+
+The seven open items B1-B7 of [language readiness](language-readiness.md) are decided. The record -
+decision, alternatives rejected, consequence if wrong, and where code, tests or documents enforce it
+- is [decisions-b2-b6.md](decisions-b2-b6.md). In this ledger's terms, B1 (separate compilation with
+checked module interfaces) and B7 (`byval` records passed to C) are directed and being implemented;
+B2-B6 are directed with the revisit conditions stated there. Those seven rows supersede the "open"
+wording of the readiness audit's section B, and none of them is a research recommendation any more.
+
 ## Recommended, awaiting discussion
 
 | ID | Proposal | Reason / cost |
@@ -307,15 +316,16 @@ regions and local affine access checking, not full G1 place-content/post-state i
 not an adoption of every rule in the external complexity reassessment, nor an approval of automatic
 expressiveness fallbacks. Earlier pure results remain evidence, not the current compiler foundation.
 
-[The seed](../../seed/README.md) checks body-hidden clients and lowers the same validated IR to
-C and LLVM. [Measured results](seed-measurements.md) favor retaining TinyCC as a development
+The seed prototype (removed from this tree) checks body-hidden clients and lowers the same
+validated IR to C and LLVM. The measured seed results favor retaining TinyCC as a development
 candidate for this slice. Optimized C/LLVM execution is promising, but broad runtime/build claims
 remain unestablished. The native emitters remain experimental; no self-hosting has occurred.
 
 ## Bootstrap v0 source path
 
-The human approved the [bootstrap v0 rules](bootstrap-v0.md) and implementation toward self-hosting.
-The first source path uses explicit interfaces plus conservative local loan ending, and extends
+The human approved the bootstrap v0 rules (that note is no longer in this tree) and implementation
+toward self-hosting. The first source path uses explicit interfaces plus conservative local loan
+ending, and extends
 checked IR with slices, byte writes and numeric branches. Source modules remain one-function,
 direct-import units, not a package system. The zero-copy parser is a real `.grl` example; owned
 heap containers, general generics, Result and self-hosting remain subsequent gates, not claims.

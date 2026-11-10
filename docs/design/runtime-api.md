@@ -1,10 +1,18 @@
 # Grail-facing OS API design
 
 2026-11-08. Status: **design only**. No `.grl` modules are added by this proposal, because the
-compiler does not yet accept `extern "C"` declarations and a non-compiling module under `lib/`
+compiler did not yet accept `extern "C"` declarations when this was written and a non-compiling
+module under `lib/`
 would break every build. The C contract in [runtime-abi.md](runtime-abi.md) and
 `include/grail/` is the implemented part; this document fixes the surface those wrappers will
 expose once the FFI increment lands.
+
+> Premise update (2026-11-10): the FFI increment landed - `extern "C"` declarations, calls and
+> callbacks are implemented and executed on six targets, and [docs/ffi.md](../ffi.md) is their
+> contract. The layering below is still the plan for the OS wrappers, but the capability and error
+> design must now be checked against the FFI that exists rather than the one that was anticipated
+> ([B2](decisions-b2-b6.md#b2-ambient-host-authority-a-recorded-deviation), and correction 1 in
+> [the decision record](decisions-b2-b6.md#corrections-to-earlier-documents)).
 
 ## Layers
 
