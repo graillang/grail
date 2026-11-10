@@ -326,6 +326,118 @@ would cut the block count per iteration without removing the compares, but it ne
 "an element store cannot write the descriptor" fact to move a later access's check in front of an
 earlier store, so it is blocked by the same missing type information.
 
+### Stage 2c: re-measured on a shared machine, and the two facts still missing (2026-11-10)
+
+The stage 2b numbers were best-of-three on an idle machine. Re-measured with `tools/bench.mjs
+--rounds 9`, which interleaves the two binaries round by round and reports the median of each, on
+the same 24-core host under a load average of 17 (`nbody` C time `0.107 s`, `sort` `1.004 s`):
+
+| benchmark | C `-O2` | `--backend=llvm` | ratio | checks' branches removed | ... and `-unroll-threshold=2000` |
+| --- | --- | --- | --- | --- | --- |
+| fnv | 0.570 s | 0.600 s | 1.05x | 1.01x | 1.00x |
+| sieve | 0.682 s | 0.726 s | 1.07x | 1.09x | 0.99x |
+| matmul | 0.210 s | 0.274 s | 1.30x | 1.95x | 1.73x |
+| sort | 1.004 s | 1.469 s | 1.46x | 1.21x | 1.20x |
+| nbody | 0.107 s | 0.259 s | 2.42x | 1.48x | 1.25x |
+
+Pairing and a median matter here: an earlier 7-round paired run, at a load average of 9.5, gave
+1.05/1.14/1.24/1.55/2.29, while single runs of `sieve`'s C baseline moved between `0.55 s` and
+`0.89 s` depending on what else was running on the host. The two paired runs agree within 7% on
+every ratio (`sieve` 1.07x against 1.14x), so a difference smaller than that is not a result on
+this machine. The "checks removed" column deletes the branch
+of every check (measurement only: no check fires on these programs, so the output is unchanged),
+and bounds what removing the validation entirely could buy.
+
+Re-tested this round, all with no measurable effect, so none is in the tree:
+
+- `!alias.scope`/`!noalias` over *three* disjoint regions -- frame slots (allocas), sequence
+  headers (the `i64` accesses through `inttoptr`) and element storage -- rather than the
+  header/element pair of stage 2b. The metadata verifies and reaches the IR; still nothing is
+  hoisted and no benchmark moves. This is the strongest form of the "say the aliasing facts
+  explicitly" experiment, and it confirms the stage 2b reading: non-aliasing is not what is
+  missing.
+- `llvm.loop.unroll.full` on every loop-closing branch (the latch), re-confirmed: ignored.
+- `-funroll-loops`, and `-mllvm -inline-threshold=500` / `2000`: no benchmark improves; `sort` and
+  `nbody` are up to 3% slower with more inlining.
+- `-mllvm -unroll-threshold=2000`: `nbody` 2.42x -> 1.77x (22%), everything else unchanged, at
+  +5-42% `clang` time and +27-51% object size on these five modules (measured per module). On the
+  compiler's own module -- 190 s of `clang` at `-O2` -- that cost is not defensible for one
+  benchmark, so the level stays `-O2` with the default threshold. Recorded rather than adopted.
+
+#### Why "removing the checks" makes `matmul` slower
+
+Stage 2b called this "latency bound on the `addss` chain". It is not. The kernel after the branches
+are removed is unrolled by two, and the unrolled pair carries the `f32` accumulator **as a double**:
+
+    2051a0: movss (%r10),%xmm2          ; a[i*4+k]
+    2051a5: mulss (%r11),%xmm2
+    2051b0: cvtss2sd %xmm2,%xmm2
+    2051b4: addsd %xmm0,%xmm2           ; the sum, in binary64
+    2051bb: cvtsd2ss %xmm2,%xmm0        ; round back to f32
+    2051c8: addss %xmm0,%xmm1           ; second element of the pair, narrow
+    2051cf: cvtss2sd %xmm1,%xmm0        ; widen for the next iteration
+
+A convert per element, plus a binary64 add and a convert back per pair, all on the accumulator's
+dependency chain, where the un-unrolled loop has a single `addss`. That is why the "no checks"
+build takes 56% *longer* rather than less (`0.274 s` -> `0.427 s`): the value in the word is a
+binary64, the round to `f32` is `fptrunc`+`fpext`, and once the loop-carried `phi` is `double`
+`InstCombine` can no longer narrow `fptrunc (fadd double)` to `fadd float`, because the
+accumulator operand is a `phi double` and not visibly an `fpext` of a float. The stage 2a
+narrowing of `fptrunc (fmul (fpext a), (fpext b))` works precisely because both operands are; the
+second element of the unrolled pair narrows for the same reason, and only the carried one does
+not.
+
+#### The two facts the lifter cannot supply
+
+Everything left is one of two pieces of type information. Both are cheap to state and both are
+outside what a lowering of the untyped word stream can derive, however it is written, because the
+fact is destroyed before the lifter sees it.
+
+**F1 -- "this word is a pointer to a 24-byte sequence header `{data, len, cap}`, and element storage
+is a separate allocation."** It would let the header loads (`len` at +8, `data` at +0) be emitted as
+loads through a real `ptr` carrying `dereferenceable(24)`, with element accesses in a different
+alias scope. Unblocks: hoisting `len`/`data` and with them the bounds compare out of the loop, and
+only then does the per-access cost fall from three dependent loads and three compare/branch pairs
+(the `movq slot,%rax; cmpq $-8; jae ... cmpq 8(%rax),%idx; jae ... movq (%rax); addq; jb` sequence
+of stage 2b) to one addressing mode. Worth: the whole of the checks column above -- 44% on `nbody`,
+22% on `sort`, and it is the only route to the representation floor (1.3x on `nbody` with the
+checks already gone) because that floor *is* the un-hoisted header load. Why the lifter cannot:
+it sees `i64` words, so every access is `inttoptr`; alias metadata alone changes nothing
+(measured above), and a load through `inttoptr` is never provably dereferenceable, so there is
+nothing to hoist on. The `cmpq $-8` that validates the descriptor proves the property to a human
+and to nothing else.
+
+**F2 -- "this word holds an `f32`".** It would let an `addsd` whose operands are both `f32`-valued
+be emitted as `fadd float` plus an `fpext`, which is bit-identical (the double add is exact for two
+floats, and `fptrunc` of it is the correctly rounded float sum: with `53 >= 2*24+2` double rounding
+is safe, the same argument stage 2a already uses for `fmul`). That keeps the loop-carried value a
+`float`, so the accumulator never becomes a `phi double` and narrowing survives unrolling. Worth:
+on `matmul`'s kernel it removes two conversions and a binary64 add from the accumulator's chain --
+the unrolled kernel that pays them is measured at 1.95x against the un-unrolled 1.30x. What the
+narrowed *and* unrolled kernel would run at has not been built, so it is an extrapolation: there is
+no reason for it to be slower than the un-unrolled loop, and the widening is the whole of what the
+unrolled version added, but the number is not measured. What is measured is that the widening is
+the entire regression, and that this fact is what makes the unroll lever usable for `f32` code at
+all. Why
+the lifter cannot: `rt_f32_round`, `cvtss2sd` and narrow element loads each establish "`f32`" in
+the block that produces them, but the value then crosses a frame slot (and, for `matmul`'s `s`, the
+loop), and the front end's `rt_slot4`/`rt_f64_op` inlining happens in `clang`, after the lifter has
+finished, so the word's `f32`-ness is not visible where the arithmetic is emitted.
+
+Ranked next steps: F2 first (self-contained, one benchmark at 1.3x, and it unblocks unrolling for
+all `f32` code); then F1 (the larger prize, but it changes the sequence ABI the lifter emits and
+touches every access). Both are stage 3 -- a typed SSA IR emitted by the front end -- and neither
+is reachable by further work inside `llvm.grl` alone, which is what this stage set out to test.
+
+#### What was not attempted
+
+Eliding the address-overflow check (`addq %rsi,%off; jb`) or the descriptor-validity check
+(`cmpq $-8`) by pattern-matching the access idiom was considered and dropped: it is sound under the
+same axiom as the tagged references of stage 2a, but recognising the idiom needs per-value
+provenance ("this is the `data` field of a descriptor whose `len` bounding this index"), and a
+change that elides a check it should have kept violates the bit-identical requirement. It is a
+front-end job, for the same reason as F1.
+
 ## Verification
 
 - A benchmark suite (`tools/bench.mjs`) times Grail against C `-O2` on meshopt simplify, clod,
