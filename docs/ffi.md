@@ -188,6 +188,42 @@ increment: the compiler never frees one, so a program that opens a handle must c
 matching close/free declaration itself, and leaking one is an explicit leak rather than an
 implicit close.
 
+#### Classifying a handle for the thread boundary
+
+A handle declaration also carries the audited foreign-resource contract that the parallel surface
+reads (`docs/design/parallelism.md`):
+
+```grail
+handle File: transferable;                    // may move to a worker, not be used concurrently
+handle PhysicalDevice: transferable, shareable;
+handle Window;                                // thread-affine: neither, and this is the default
+```
+
+Two properties come out of it. **transferable(T)**: a value may cross to another thread, including
+being destroyed there. **shareable(T)**: concurrent shared access is permitted. For Grail-defined
+types both are derived structurally - a record is transferable when every field is, shareable when
+every field is, a slice when its element is. For a handle they are read from its declaration.
+
+**Nothing declared means neither.** A handle no one has audited is thread-affine, so it cannot reach
+a worker by accident, and adding a foreign type to the compiler never widens what a worker may
+reach. `shareable` implies `transferable` - a value usable on another thread may also be moved to
+it - and writing `shareable` alone is an error.
+
+The audit is a claim about the C library, not about Grail's wrapper, and the module that declares
+the handle is where it is made. `sys_grail` declares `File`, `Socket` and `Process` transferable
+only: each is an owned OS resource with no wrapper-side state, so it can be handed to a worker and
+closed there, but nothing in the module serializes two users of one, so `close` under another
+worker's read is a race the type cannot see. `Thread` is neither: its one correct disposal - join or
+detach, exactly once - is bookkeeping the creating thread owns, and this shim hands every handle out
+through a `_Thread_local` slot, so the acquisition path itself is thread-local. `rhi_vulkan`
+declares `Instance` neither - it is created and destroyed on the thread that owns the display
+connection, with every child object dead before it - and `PhysicalDevice` both, because it owns
+nothing, has no destructor and every operation on it is a query.
+
+A safe wrapper cannot erase a restriction. `struct Holder { file: File }` is transferable only when
+`File` is, `&Holder` is shareable only when `Holder` is, and a closure that captures either
+inherits the restriction, because its environment is part of its type.
+
 ### Out-parameters
 
 A C function sometimes cannot return the object it creates: `vkCreateInstance(..., VkInstance

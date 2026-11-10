@@ -29,6 +29,44 @@
   stop another task), `tasks-read-file-offload` (`host::read_file` from a task offloads and another
   task runs) and `tasks-thread-mode` (the opt-in mode still runs). The same four programs are also
   executed as Linux ELF where their result is platform-independent.
+- Transferable and shareable, derived and default-denied, and a real soundness hole closed. The
+  parallel surface asked one question of a type and answered it with a structural walk; the walk is
+  now the design note's two properties and it reaches a closure's captures. `transfer_capability(c,
+  ty, shared, trail, depth)` keeps its role as the single derivation engine and `shared` selects
+  which property is asked, so `transferable(T)` and `shareable(T)` come from one recursion and stay
+  genuinely distinct (a movable-but-not-shareable decoder context is one and not the other). Rules by
+  kind: scalars (now including `char`) are both; a record, enum or union is both when every field is;
+  a vector is its element; a typed slice is its element and is shareable only read-only; `&T` is
+  shareable when `T` is (so a `&File` is refused even though nothing can be written through it);
+  `&mut T` transfers but is never shareable; `Mutex<T>` and `Task<R>` and `byval(R)` behave as the
+  table in `docs/design/parallelism.md` says; `Scope<C>` is neither. **A foreign handle is neither
+  unless its own declaration says otherwise** - `handle File: transferable;`, `handle
+  PhysicalDevice: transferable, shareable;`, `handle Window;` - and `shareable` alone is an error
+  because sharing implies moving. `sys_grail` audits `File`, `Socket` and `Process` transferable-only
+  (owned OS resources with no wrapper-side state, but nothing serializes two users of one) and
+  `Thread` as neither (disposal is the creating thread's bookkeeping, and the shim hands every handle
+  out through a `_Thread_local` slot); `abundance/src/rhi_vulkan.grl` audits `Instance` as neither
+  (created and destroyed on the display's thread, every child dead before it) and `PhysicalDevice` as
+  both (it owns nothing and every operation is a query). The hole: a closure type carried only its
+  signature, so `parallel_map` checked the item, the result and the context but never the callback,
+  and `g := |x: u64, u: u64| -> u64 touch(&h, x)` compiled - a plain-data signature with a
+  thread-affine capture that every worker could reach. The environment is now part of the closure's
+  type (`Ty.env`, interned into the type key, so two closures with one signature and different
+  captures are the different types they already were as layouts), the walk classifies every capture,
+  and `parallel_map` also refuses an `FnMut` callback because every worker shares one closure object.
+  Rejections name the field instead of the type: `cannot share closure capture `a`: a.file is
+  thread-affine (a foreign handle with no audited classification)`, `cannot share parallel_map
+  context: file is thread-affine`, `cannot transfer spawned result: thread-affine (a foreign handle
+  with no audited classification)`. The parallel surface speaks `transferable`/`shareable`; the
+  opt-in generic bounds keep their old `Send`/`Share` names, since renaming a user-visible bound is a
+  separate language change. `CStr`, `CPtr`/`CMutPtr` and `CFn` stay denied. Pinned by 12 cases in
+  `tests/native-cases.json` - two accepted (a closure capturing a record of plain data and a shared
+  slice of numbers, and a transferable handle crossing as a spawned result) and ten rejected, each
+  with the field in its diagnostic. A scoped job primitive calls `require_capability_named` for the
+  values it moves and `require_parallel_closure` for the closure it accepts, `shared` = 1 when the
+  environment is called by several workers. Classification must reach B1's interface files before
+  separate compilation can check it; `docs/design/parallelism.md` records the table, the audit and
+  that contract.
 - B1 stage 1, per-module emission: `grail build --split` writes one assembly file per module
   (`OUT.NNN.module.s`) plus `OUT.parts`, assembles the parts concurrently and links them once,
   instead of one `.s` for the whole program. Emission is still a single pass — the optimizer inlines

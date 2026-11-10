@@ -7,16 +7,30 @@
 //
 // Ownership rules are documented in docs/design/grail-ffi-runtime.md:
 //   - path/data arguments are call-scoped byte-view borrows;
-//   - File, Socket, Process and Thread are opaque C-owned handles; call
+//   - File, Socket and Process are opaque C-owned handles that may move to a worker but not be
+//     shared by concurrent users; Thread is thread-affine (see the audit below). Call
 //     close/socket_close/process_close or join/detach exactly once;
 //   - out-records are Grail-owned storage written by C for this call;
 //   - C never returns a Grail-owned pointer or a view.
 
 module sys_grail;
 
-handle File;
-handle Socket;
-handle Process;
+// Audited foreign-resource classification (docs/ffi.md, docs/design/parallelism.md). A handle with
+// no classification is thread-affine: it cannot cross to a worker and cannot be shared. Every entry
+// here is a decision about the C library, not about Grail's wrappers.
+//
+// File, Socket and Process are owned OS resources with no wrapper-side state: an fd, a socket and a
+// child process handle may be handed to a worker and closed there, which is the normal handoff out
+// of an accept/read loop. They are not shareable, because nothing in this module serializes two
+// cells using one of them: `close` while another worker reads is a race, and read/write/seek
+// ordering through one unsynchronized wrapper is not something a type can promise.
+handle File: transferable;
+handle Socket: transferable;
+handle Process: transferable;
+// A thread handle is the exception. Its one correct disposal - join or detach, exactly once - is
+// bookkeeping the creating thread owns, and this shim hands every handle out through a
+// `_Thread_local` slot (`grail_ffi_thread_handle` reads the calling thread's last spawn), so the
+// acquisition path itself is thread-local. Neither property is audited yet, so both stay denied.
 handle Thread;
 
 extern "C" record LengthOut { value: u64 }
