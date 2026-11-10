@@ -62,31 +62,6 @@ pub fn fact_op<a>(facts: (&a mut Facts), name: u8[], ordinal: u64, op: u64) -> u
 pub fn facts_len<a>(facts: (&a Facts)) -> u64 {
     return facts.items.len();
 }
-// --verify-facts writes the table into the module as comments, so a test can see exactly which
-// slots and which calls the lowering typed without reading the compiler's memory.
-fn dump_facts<a>(out: (&a mut u8[]), facts: (&a Facts)) -> unit {
-    for i in facts.items.len() {
-        f := &facts.items[i];
-        put(&mut out, view("; fact "));
-        put(&mut out, view(f.fn));
-        if f.kind == 0 {
-            put(&mut out, view(" slot "));
-        } else {
-            put(&mut out, view(" call "));
-            put(&mut out, view(f.callee));
-            out.push(44);
-            num(&mut out, f.b);
-            put(&mut out, view(" ordinal "));
-        }
-        num(&mut out, f.a);
-        put(&mut out, view(" what "));
-        num(&mut out, f.what);
-        put(&mut out, view(" width "));
-        num(&mut out, f.width);
-        out.push(10);
-    }
-    return ();
-}
 // Drops the facts of a function attempt the front end threw away.
 pub fn facts_truncate<a>(facts: (&a mut Facts), n: u64) -> unit {
     while n < facts.items.len() {
@@ -122,7 +97,15 @@ struct L {
     frame: u64,
     // 1 when every frame access is a constant negative offset from rbp: each 8-byte slot is then
     // its own alloca, so borrowing one local does not make the whole frame escape.
-    split: u64
+    split: u64,
+    // Accepted f32 slot facts of the function being lowered: every slot in here is emitted as
+    // `alloca float` and read and written with `load float`/`store float` (docs/design/typed-ir.md).
+    fslots: u64[],
+    // Per `rt_f64_op` call in the function being lowered, indexed by its ordinal: 0 when the call
+    // has no fact, else the opcode (42, 43, 45, 47) the call performs on two f32 operands.
+    fops: u64[],
+    // Ordinal of the next `call rt_f64_op` in the function being lowered.
+    fordinal: u64
 }
 
 fn eq<a, b>(a: &a [u8], b: &b [u8]) -> bool {
@@ -720,6 +703,16 @@ fn value<a, b>(l: (&a mut L), op: &b [u8], width: u64) -> u8[] {
         return get_reg(&mut l, view(name));
     }
     if has(op, view("(")) {
+        k := slot_operand(&l, op);
+        if k != 0 {
+            if width != 64 {
+                bad(&mut l);
+                return copy(view("0"));
+            }
+            sn := slot_name(k - 1);
+            f := def(&mut l, view("load float, ptr {}, align 4"), &u8[][sn]);
+            return word_of_float(&mut l, view(f));
+        }
         p := address(&mut l, op);
         if width == 64 {
             return def(&mut l, view("load i64, ptr {}, align 1"), &u8[][p]);
@@ -750,6 +743,18 @@ fn store<a, b, c>(l: (&a mut L), op: &b [u8], v: &c [u8], width: u64) -> unit {
         bad(&mut l);
         return ();
     }
+    k := slot_operand(&l, op);
+    if k != 0 {
+        if width != 64 {
+            bad(&mut l);
+            return ();
+        }
+        sn := slot_name(k - 1);
+        d := as_double(&mut l, view(v));
+        f := def(&mut l, view("fptrunc double {} to float"), &u8[][copy(view(d))]);
+        emit(&mut l, view("store float {}, ptr {}, align 4"), &u8[][f, sn]);
+        return ();
+    }
     p := address(&mut l, op);
     if width == 64 {
         emit(&mut l, view("store i64 {}, ptr {}, align 1"), &u8[][copy(v), p]);
@@ -765,6 +770,141 @@ fn as_double<a, b>(l: (&a mut L), v: &b [u8]) -> u8[] {
 }
 fn as_word<a, b>(l: (&a mut L), d: &b [u8]) -> u8[] {
     return def(&mut l, view("bitcast double {} to i64"), &u8[][copy(d)]);
+}
+
+// ---- F2: "this word holds an f32" (docs/design/typed-ir.md) ----
+
+// The word form of an f32: its binary64 widening, which is what the untyped rest of the program
+// already holds for an f32 value today.
+fn word_of_float<a, b>(l: (&a mut L), f: &b [u8]) -> u8[] {
+    d := def(&mut l, view("fpext float {} to double"), &u8[][copy(f)]);
+    return as_word(&mut l, view(d));
+}
+// The f32 an f32-valued word holds. Lossless only because the fact says the word is exactly the
+// widening of an f32; that is the one boundary a wrong fact would corrupt, so --verify-facts
+// checks it there.
+fn float_of_word<a, b>(l: (&a mut L), w: &b [u8]) -> u8[] {
+    d := as_double(&mut l, view(w));
+    return def(&mut l, view("fptrunc double {} to float"), &u8[][d]);
+}
+fn slot_name(k: u64) -> u8[] {
+    mut out = copy(view("%s."));
+    num(&mut out, k);
+    return out;
+}
+// The stack operand of slot k: `-8(k+1)(%rbp)`.
+fn slot_needle(k: u64) -> u8[] {
+    mut out = u8[];
+    out.push(45);
+    num(&mut out, 8 * (k + 1));
+    put(&mut out, view("(%rbp)"));
+    return out;
+}
+// Whether slot k is one of the function's accepted f32 slots.
+fn slot_typed<a>(l: (&a L), k: u64) -> bool {
+    for i in l.fslots.len() {
+        if l.fslots[i] == k {
+            return true;
+        }
+    }
+    return false;
+}
+// The slot an eight-byte frame operand addresses, plus one, when that slot carries an accepted
+// f32 fact; 0 otherwise (including every mode that does not split the frame into slots).
+fn slot_operand<a, b>(l: (&a L), op: &b [u8]) -> u64 {
+    if (l.split == 0) || (l.fslots.len() == 0) || !ends(op, view("(%rbp)")) {
+        return 0;
+    }
+    n := op.len() - 6;
+    // `-N(%rbp)` only: a bare `(%rbp)` has no slot, and an indexed operand does not end in
+    // `(%rbp)` at all.
+    if n < 2 {
+        return 0;
+    }
+    d := parse_int(view(sub(op, 0, n)));
+    if (d.ok == 0) || (d.v >= 0) {
+        return 0;
+    }
+    k := u64(0 - (d.v + 1)) / 8;
+    // Exactly the whole slot: a partial or unaligned access is not an f32 in a float slot.
+    if d.v + i64(8 * (k + 1)) != 0 {
+        return 0;
+    }
+    if !slot_typed(&l, k) {
+        return 0;
+    }
+    return k + 1;
+}
+// Whether every access to slot k in the body is one the float typing can carry: an eight-byte
+// `movq` read, write or compare, with an immediate write only of zero (a float zero is all-zero
+// bytes). Anything else -- an address taken, a four-byte alias, an integer operation -- makes the
+// slot stay an untyped word, which is always correct.
+fn slot_body_ok<a, b>(instrs: (&a u8[][]), k: u64) -> bool {
+    needle := slot_needle(k);
+    for m in instrs.len() {
+        line := view(instrs[m]);
+        if !has(line, view(needle)) {
+            continue;
+        }
+        if !starts(line, view("movq ")) && !starts(line, view("cmpq ")) {
+            return false;
+        }
+        // `movq $imm,slot` writes an f32 only when the word is zero: a float zero is all zero
+        // bytes. The immediate is everything between `movq $` and the comma before the operand.
+        if starts(line, view("movq $")) && !eq(view(sub(line, 6, line.len() - needle.len() - 1)), view("0")) {
+            return false;
+        }
+    }
+    return true;
+}
+// Fills l.fslots with the function's f32 slots that the lowering may type. A slot is dropped when
+// any fact for it says something else (a slot reused for a non-f32 binding) or when the body
+// touches it in a way the word ABI does not spell as one eight-byte word.
+fn accept_slots<a, b, c, d>(l: (&a mut L), instrs: (&b u8[][]), facts: (&c Facts), fname: (&d [u8]), slots: u64) -> unit {
+    exchange(&mut l.fslots, u64[]);
+    mut cand = u64[];
+    mut bad = u64[];
+    for i in facts.items.len() {
+        f := &facts.items[i];
+        if (f.kind != 0) || !eq(view(f.fn), view(fname)) {
+            continue;
+        }
+        mut seen = 0;
+        for j in cand.len() {
+            if cand[j] == f.a {
+                seen = 1;
+            }
+        }
+        if seen == 0 {
+            cand.push(f.a);
+        }
+        // The declared width is part of the fact: an f32 slot is four bytes, and a slot fact that
+        // says anything else is not the value this lowering can carry.
+        if (f.what != 1) || (f.width != 4) {
+            bad.push(f.a);
+        }
+    }
+    for i in cand.len() {
+        k := cand[i];
+        mut rejected = 0;
+        for j in bad.len() {
+            if bad[j] == k {
+                rejected = 1;
+            }
+        }
+        if (rejected == 0) & (k < slots) & slot_body_ok(&instrs, k) {
+            l.fslots.push(k);
+        }
+    }
+    return ();
+}
+// The opcode of the f32-arithmetic fact for the `rt_f64_op` call at `ordinal`, or 0 when the call
+// has no fact and must keep the word lowering.
+fn call_op<a>(l: (&a L), ordinal: u64) -> u64 {
+    if ordinal < l.fops.len() {
+        return l.fops[ordinal];
+    }
+    return 0;
 }
 
 // ---- conditions ----
@@ -943,6 +1083,36 @@ fn lower_call<a, b>(l: (&a mut L), target: &b [u8]) -> unit {
         word := as_word(&mut l, view(w));
         set_reg(&mut l, view("rax"), view(word));
         return ();
+    }
+    if eq(target, view("rt_f64_op")) {
+        // F2: with a fact for this call, both operands are f32-valued words, so the operation is
+        // a correctly rounded binary32 operation on the widened floats and the result is widened
+        // back once. Bit-identical by p2 >= 2*p1 + 2 (53 >= 2*24 + 2), the same argument the
+        // narrowing of `fptrunc (fmul (fpext a), (fpext b))` in stage 2a uses.
+        ordinal := l.fordinal;
+        l.fordinal += 1;
+        op := call_op(&l, ordinal);
+        if op != 0 {
+            lhs := get_reg(&mut l, view("rsi"));
+            rhs := get_reg(&mut l, view("rdx"));
+            mut kind = copy(view("fadd"));
+            if op == 42 {
+                kind = copy(view("fmul"));
+            }
+            if op == 45 {
+                kind = copy(view("fsub"));
+            }
+            if op == 47 {
+                kind = copy(view("fdiv"));
+            }
+            put(&mut kind, view(" float {}, {}"));
+            fa := float_of_word(&mut l, view(lhs));
+            fb := float_of_word(&mut l, view(rhs));
+            r := def(&mut l, view(kind), &u8[][fa, fb]);
+            w := word_of_float(&mut l, view(r));
+            set_reg(&mut l, view("rax"), view(w));
+            return ();
+        }
     }
     l.calls.push(copy(target));
     args := call_args(&mut l);
@@ -1499,6 +1669,20 @@ fn lower_function<a, b, c>(l: (&a mut L), lines: (&b u8[][]), f: (&b Func), fact
     l.body = u8[];
     l.fail = 0;
     l.term = 0;
+    l.fordinal = 0;
+    exchange(&mut l.fops, u64[]);
+    exchange(&mut l.fslots, u64[]);
+    for i in facts.items.len() {
+        q := &facts.items[i];
+        // Only the call this rewrite knows: `rt_f64_op(op, lhs, rhs)` on two f32 operands.
+        if (q.kind != 1) || (q.what != 7) || !eq(view(q.callee), view("rt_f64_op")) || !eq(view(q.fn), view(f.name)) {
+            continue;
+        }
+        while l.fops.len() <= q.a {
+            l.fops.push(0);
+        }
+        l.fops[q.a] = q.width;
+    }
     body := body_lines(&lines, &f);
     l.labels = set_new(body.len() / 4 + 16);
     mut i: u64 = 0;
@@ -1584,6 +1768,7 @@ fn lower_function<a, b, c>(l: (&a mut L), lines: (&b u8[][]), f: (&b Func), fact
     if l.split != 0 {
         // One alloca per slot; the prologue's zeroing covers the slots below the parameters.
         slots := size / 8;
+        accept_slots(&mut l, &instrs, &facts, view(f.name), slots);
         mut count = slots;
         if deepest + 1 > count {
             count = deepest + 1;
@@ -1591,9 +1776,18 @@ fn lower_function<a, b, c>(l: (&a mut L), lines: (&b u8[][]), f: (&b Func), fact
         for k in count {
             mut sn = copy(view("%s."));
             num(&mut sn, k);
-            emit(&mut l, view("{} = alloca i64, align 8"), &u8[][copy(view(sn))]);
-            if (zero >= 0) && (k >= u64(zero)) && (k < slots) {
-                emit(&mut l, view("store i64 0, ptr {}"), &u8[][sn]);
+            // An f32 slot is a real `float` so the loop-carried value stays a float; a float
+            // zero is all-zero bytes, so the frame clear is bit-identical.
+            if slot_typed(&l, k) {
+                emit(&mut l, view("{} = alloca float, align 4"), &u8[][copy(view(sn))]);
+                if (zero >= 0) && (k >= u64(zero)) && (k < slots) {
+                    emit(&mut l, view("store float 0.0, ptr {}"), &u8[][sn]);
+                }
+            } else {
+                emit(&mut l, view("{} = alloca i64, align 8"), &u8[][copy(view(sn))]);
+                if (zero >= 0) && (k >= u64(zero)) && (k < slots) {
+                    emit(&mut l, view("store i64 0, ptr {}"), &u8[][sn]);
+                }
             }
         }
     } else {
@@ -1767,7 +1961,7 @@ pub fn lower<a, b, c>(stream: &a [u8], triple: &b [u8], facts: (&c Facts)) -> Lo
 }
 fn lower_target<a, b, c>(stream: &a [u8], triple: &b [u8], target: u64, facts: (&c Facts)) -> Lowered {
     lines := split_lines(stream);
-    mut l = L { target: target, ir: u8[], body: u8[], fail: 0, t: 0, dead: 0, term: 0, labels: set_new(16), calls: u8[][], addrs: u8[][], split: 0, refs: u8[][], lifted: u8[][], flags: 0, frame: 0 };
+    mut l = L { target: target, ir: u8[], body: u8[], fail: 0, t: 0, dead: 0, term: 0, labels: set_new(16), calls: u8[][], addrs: u8[][], split: 0, refs: u8[][], lifted: u8[][], flags: 0, frame: 0, fslots: u64[], fops: u64[], fordinal: 0 };
     mut funcs = Func[];
     mut data = u8[][];
     split(&lines, &mut funcs, &mut data);
