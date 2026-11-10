@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+- FFI out-parameters: a C function can write a handle or bare pointer through a slot the caller owns,
+  spelled as a mutable borrow in the declaration (`slot: &mut Instance`) and `&mut binding` at the
+  call site. That is the Vulkan/D3D12/Metal create shape (`vkCreateInstance(..., VkInstance
+  *pInstance)`), which no result register can express. The parameter is the C `H *`; the callee
+  writes one word into the binding's own slot and Grail reads the binding afterwards. A handle or
+  bare pointer binding declared without an initializer is now null instead of uninitialized, so the
+  callee always reads a defined word and a binding that already holds a value seeds the next call.
+  Only `handle`, `CPtr` and `CMutPtr` slots are out-parameters; a shared `&H`, any other `&mut T`, a
+  C callback parameter and a `cfn` type's parameter are refused with their own diagnostic, and the
+  slot is an ordinary mutable borrow, so one call cannot take it twice
+  (`compiler/native.grl`, `docs/ffi.md`, `tests/ffi/out_params.grl`, and the `ffi-out-params` case
+  that executes under Wine on Windows x86-64).
+- FFI calls of more than six word arguments execute with the target's own limit: six integer argument
+  registers on x86-64 and the outgoing stack after them, eight on AArch64 and RISC-V 64. Argument
+  words past the register file are stack slots (up to 64 words, 2 KiB of outgoing area), so Vulkan
+  entry points of seven to ten words are expressible. `tests/ffi/call_words.grl` executes seven,
+  eight and nine word arguments with literal and computed values on x86-64, AArch64 and RISC-V 64, so
+  a dropped or misplaced word changes the printed sum; with the old peephole argument-register model
+  the same fixture returns 91 and 603 instead of 140 and 204 on AArch64 and RISC-V 64. The
+  `ffi-call-words` case runs the same calls on Windows x86-64 under Wine.
+- Fixed: an exported C callback with a seventh or eighth parameter read the sixth again. The callback
+  prologue clamped at `%r9` instead of reading the seventh and eighth integer argument registers, so
+  on AArch64 and RISC-V 64 the extra parameters arrived as copies of the sixth. It now reads the
+  target's own argument registers, which `tests/ffi/callback_words.grl` executes on those two
+  targets (1 + 2*2 + ... + 8*8 = 204, previously 181). x86-64 and Windows, whose callback prologue
+  reads registers only, refuse a parameter list beyond six integer words by name instead of reading
+  a register that holds something else.
 - `grail profile [--rate N] [--out FILE] -- PROGRAM [ARGS]` samples a compiled Grail program and
   prints a per-function table (`samples`, `share`, `function`, `module`) plus `[unknown]` and
   `total` rows. The sampler is part of the program's runtime, not a wrapper around `perf`: on Linux

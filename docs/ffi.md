@@ -45,6 +45,7 @@ extern "C" fn c_identity(v: u64) -> u64;
 | `CPtr` / `CMutPtr` | `const void *` / `void *` | one 64-bit pointer |
 | `handle H` | an opaque C token (`uint64_t` by convention) | one 64-bit word |
 | `cfn(P...) -> R` | `R (*)(P...)` | one 64-bit code address |
+| `&mut H` (parameter, `H` a `handle`, `CPtr` or `CMutPtr`) | `H *` / `void **`: a slot the callee writes | one 64-bit pointer |
 | `extern "C" record R` (parameter) | `R *`, the address of the struct's fields | one 64-bit pointer |
 | `extern "C" record R` (result) | `R`, returned by value per the target ABI | registers or a hidden result pointer |
 | `unit` (result only) | `void` | result register ignored |
@@ -53,8 +54,8 @@ Results may be any of the scalar types above, `CStr`, `CPtr`/`CMutPtr`, a `handl
 extern record by value. A view is never a result, because C cannot produce a Grail view record; a
 C function that fills a buffer returns a length or status instead, and the Grail side re-slices.
 
-Anything else — `string`, references, plain (non-`extern "C"`) records, closures — is rejected
-with a diagnostic. The remaining gaps are listed under Limits.
+Anything else — `string`, any other reference shape, plain (non-`extern "C"`) records, closures —
+is rejected with a diagnostic. The remaining gaps are listed under Limits.
 
 ### Bare data pointers
 
@@ -182,23 +183,81 @@ increment: the compiler never frees one, so a program that opens a handle must c
 matching close/free declaration itself, and leaking one is an explicit leak rather than an
 implicit close.
 
+### Out-parameters
+
+A C function sometimes cannot return the object it creates: `vkCreateInstance(..., VkInstance
+*pInstance)` writes the new instance through a slot the caller passes, and so do the D3D12 and Metal
+create functions. A declaration spells that slot as a mutable borrow of a handle or bare pointer
+binding, and the call passes `&mut` of it:
+
+```grail
+handle Instance;
+
+extern "C" lib "shim.o" fn c_create(info: CMutPtr, slot: &mut Instance) -> i32;
+
+fn main() -> u64 {
+    mut instance: Instance;
+    unsafe {
+        c_create(cnull(), &mut instance);
+    }
+    return 0;
+}
+```
+
+- The parameter is the C `H *` / `void **`: one word, the address of the binding's own slot. The
+  callee writes the word; Grail reads the binding afterwards, and no cast or accessor is needed.
+- `&mut` is required. `&H` would be the C `const H *`, which C cannot store through, and is refused
+  with `an extern C out-parameter needs &mut; a shared &H is the C const pointer`.
+- Only `handle`, `CPtr` and `CMutPtr` bindings are out-parameter slots. Every other reference shape
+  — `&mut i64`, `&mut SomeRecord`, `&mut string` — is refused with
+  `an extern C out-parameter must be &mut a handle, CPtr or CMutPtr`.
+- **The initial value is defined.** A handle or bare pointer binding declared without an
+  initializer is null, not uninitialized (`mut instance: Instance;`), so the callee always reads a
+  defined word even if it only writes. A binding that already holds a value keeps it, so a second
+  call sees what the first one wrote; that is also how a slot is seeded. No other type is
+  null-initialized this way: a record or integer binding without an initializer is still
+  uninitialized and still rejected where it is used.
+- The slot is an ordinary mutable borrow. The same binding cannot be handed to one call twice
+  (`borrow conflicts with active access`), and nothing may read or write it while the call runs.
+- The borrow is call-scoped, like a view: the write is visible after the call, and the callee must
+  not keep the pointer. The call still sits inside an `unsafe` block.
+- Only a declaration Grail calls can take one. An `extern "C" fn` *definition* (a C callback) and a
+  `cfn` type declaring `&mut H` are refused by name, because Grail has no deref-assignment: a
+  callback could not store through the pointer C handed it.
+- A handle cannot be constructed at all, not even as null from Grail (`cnull()` is a `CPtr`, and
+  `Slot { instance: cnull() }` is a type mismatch), so a declaration's out-parameter is the way to
+  obtain one. `tests/ffi/out_params.grl` executes it on x86-64, AArch64 and RISC-V 64, and on Windows
+  x86-64 under Wine through `tests/windows-cases.json`: every C twin returns a checksum that reads
+  the slot before writing it, so a slot passed by value, an uninitialized slot, or a write Grail does
+  not see all change the printed values.
+
 Argument and result registers are the C ABI's own, per target:
 
-| Target | Integer arguments (up to six) | Result | Call |
+| Target | Integer arguments | Result | Call |
 | --- | --- | --- | --- |
-| x86-64 (SysV) | `rdi, rsi, rdx, rcx, r8, r9` | `rax` | `call SYMBOL` |
-| AArch64 (AAPCS64) | `x0, x1, x2, x3, x4, x5` | `x0` | `bl SYMBOL` |
-| RISC-V 64 (LP64) | `a0, a1, a2, a3, a4, a5` | `a0` | `call SYMBOL` |
+| x86-64 (SysV) | `rdi, rsi, rdx, rcx, r8, r9`, then the outgoing stack | `rax` | `call SYMBOL` |
+| AArch64 (AAPCS64) | `x0`-`x7`, then the outgoing stack | `x0` | `bl SYMBOL` |
+| RISC-V 64 (LP64) | `a0`-`a7`, then the outgoing stack | `a0` | `call SYMBOL` |
 
-These are the same registers Grail already uses for its own calls, so a foreign call is
-a direct symbol call with the same argument/result plumbing. Frames stay 16-byte aligned
-at call sites, and generated Grail functions preserve the callee-saved registers they
-allocate (the internal prologue saves and restores them), which is what lets C call back into
-an `extern "C"` definition.
+So a call takes six word arguments in registers on x86-64 and eight on AArch64 and RISC-V 64; every
+further word is an eight-byte outgoing stack slot (Win64: four registers, a 32-byte home area, then
+slots). Six is not a compiler limit and no compiler limit has replaced it: a declaration may carry up
+to 64 argument words and the outgoing stack area is limited to 2 KiB. `tests/ffi/call_words.grl`
+executes calls of seven, eight and nine words, with both literal and computed arguments, on x86-64,
+AArch64 and RISC-V 64, and on Windows x86-64 under Wine.
 
-Direct and `cfn` calls pass arguments beyond the registers on the stack (see the calling
-conventions below); an exported callback takes at most six parameters (any of them floats), and a seventh
-is rejected rather than dropped.
+The result register is `rax`/`x0`/`a0` on all three. A foreign call is a direct symbol call with the
+same argument/result plumbing as a Grail call. Frames stay 16-byte aligned at call sites, and
+generated Grail functions preserve the callee-saved registers they allocate (the internal prologue
+saves and restores them), which is what lets C call back into an `extern "C"` definition.
+
+The reverse direction — C calling a Grail callback — reads parameters from the register file only,
+because there is no caller frame to read stack arguments from (on Win64 a thunk under the C symbol
+moves the four registers and the fifth and sixth stack words into Grail's registers, and no further).
+An exported callback may therefore use up to six integer argument words on x86-64 and Windows, and up
+to eight on AArch64 and RISC-V 64, plus up to eight floating-point arguments. A longer parameter list
+is refused by name rather than read from a register that holds something else:
+`a C callback cannot read that many integer argument words`.
 
 ## The unsafe boundary
 
@@ -280,8 +339,6 @@ from a green task. `host::pipe` reads and writes wait on the readiness reactor, 
 - On Windows a task is an OS thread (see `concurrency-v1.md`), so a blocking foreign call blocks
   only the task that made it and no handoff is needed.
 
-## Limits
-
 ## Direct calls: calling conventions
 
 A direct call to an `extern "C"` declaration is lowered per platform convention:
@@ -303,11 +360,16 @@ on the stack is refused. RISC-V objects use the hard-float `lp64d` ABI, which Li
 use. `tests/ffi/call_abi.grl` executes on x86-64, AArch64 and RISC-V Linux and, through
 `tests/windows-cases.json`, on Windows x86-64 under Wine; Windows ARM64 is checked statically.
 
+## Limits
+
 Not implemented yet, and each rejected rather than approximated:
 
-- C-callable callbacks with more than six parameters (C enters them through its register ABI and the
-  callback thunk does not read stack arguments yet); macOS callbacks use the
-  same SysV/AAPCS64 lowering but are compiled and linked only (no macOS runner);
+- C-callable callbacks that need more integer argument words than the target passes in registers (six
+  on x86-64, eight on AArch64 and RISC-V 64): the callback prologue has no caller frame to read stack
+  arguments from, so a longer parameter list is refused by name; macOS callbacks use the same
+  SysV/AAPCS64 lowering but are compiled and linked only (no macOS runner);
+- an out-parameter on a C callback or a `cfn` type: only a declaration Grail calls can write a slot
+  (see Out-parameters above);
 - records *passed* by value as arguments (an extern record parameter is the C `R *`; the spelling
   `v: byval R` is decided - see [B7](design/decisions-b2-b6.md#b7-byval-record-parameters-accepted) -
   and implementation follows the separate-compilation work); record
@@ -377,17 +439,26 @@ compiles `tests/ffi/call_scalars.grl` with the FFI build, links the two through 
 - unmangled calls to `c_add`, `c_mul` (renamed with `as`), `c_identity`, `c_sum4` and
   `c_choose` in the generated assembly;
 - the object references the C symbol but does not define it;
-- the linked executables run and return the expected values — `call_scalars` checks the
-  six-argument call, the `as` rename and `u64` results (`83`, `7`), `views_handles` checks
-  a NUL-terminated `CStr`, a read-only view, a mutable view written by C, and a handle
-  round trip (`259`, `1`), `extern_records` checks C layout in both directions (`1606`,
-  `23`, `16`, `-2`, `7`), and `callbacks` checks C calling back into Grail, including
-  callee-saved register preservation (`42`, `42`, `10`). All four fixtures execute on x86-64 and,
-  through `qemu-<target>-static`, on AArch64 and RISC-V 64: 12 executed fixture instances and no
-  link-only cases. Without a qemu runner the cross targets are linked and the ABI-level check is
-  reported as link-only.
+- the linked executables run and return the expected values. `call_scalars` checks the six-argument
+  call, the `as` rename and `u64` results (`83`, `7`), `views_handles` a NUL-terminated `CStr`, a
+  read-only view, a mutable view written by C and a handle round trip (`259`, `1`), `callbacks` C
+  calling back into Grail including callee-saved register preservation (`42`, `42`, `10`),
+  `extern_records` C layout in both directions (`1606`, `23`, `16`, `-2`, `7`), `out_params` the
+  out-parameter slots including a seventh-argument slot and two slots in one call, and `call_words`
+  seven, eight and nine word arguments with literal and computed values.
+- the suite executes every fixture on x86-64 and, through `qemu-<target>-static`, on AArch64 and
+  RISC-V 64: 51 executed fixture instances and no link-only cases, plus two cross-compiled-only ones
+  (`dlopen`, which needs a target glibc sysroot). `callback_words` executes the eight-register
+  callback on AArch64 and RISC-V 64 and asserts that x86-64 and Windows refuse it by name. Without a
+  qemu runner the cross targets are linked and the ABI-level check is reported as link-only. The same
+  `out_params` and `call_words` sources are `ffi-out-params` and `ffi-call-words` cases in
+  `tests/windows-cases.json`, which `bun tools/windows.mjs check` builds as a PE image and executes
+  under Wine on Windows x86-64; Windows ARM64 is checked statically, because there is no ARM64
+  Windows runner.
 
 Rejections are part of the normal native corpus (`tests/native-cases.json`):
-`ffi-reject-safe-call`, `ffi-reject-abi`, `ffi-reject-parameter-type`,
-`ffi-reject-result-type`, `ffi-reject-arity` and `ffi-reject-duplicate`, so every target
+`ffi-reject-safe-call`, `ffi-reject-abi`, `ffi-reject-parameter-type`, `ffi-reject-result-type`,
+`ffi-reject-arity`, `ffi-reject-duplicate`, `ffi-reject-handle-out-slot`,
+`ffi-reject-handle-null-seed`, `ffi-reject-out-shared-borrow`, `ffi-reject-out-scalar`,
+`ffi-reject-out-callback`, `ffi-reject-out-cfn` and `ffi-reject-out-double-borrow`, so every target
 checks the diagnostics on every run of `bun tools/test-native.mjs`.

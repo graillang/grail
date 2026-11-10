@@ -107,6 +107,39 @@ const fixtures = [
       'c_s8', 'c_u16', 'c_u32_above'],
   },
   {
+    // Out-parameters: C writes a handle or a bare pointer through `&mut` slot the Grail side owns,
+    // and the Grail side reads it back. Every C twin checksums the value it found in the slot, so
+    // these values change if the slot arrives uninitialized, if it is passed by value, or if the
+    // write never reaches Grail: 20743/20743, 20763745/20765746/20746 (a seeded slot, then the
+    // same slot again), 20739, 91/91 (the out slot as the seventh word), 819705/8197/12293 (two
+    // slots in one call), 40/100 and 1/1010202 for a `const void **` and a `void **`, and
+    // 28904/28788 for a create-info record with a byte view and the slot last.
+    name: 'out_params',
+    stdout: '20743\n20743\n20763745\n20765746\n20746\n20739\n20746\n91\n91\n819705\n8197\n12293\n40\n100\n1\n1010202\n28904\n28788\n',
+    symbols: ['c_out_create', 'c_out_reread', 'c_out_id', 'c_out_seventh', 'c_out_two',
+      'c_out_ptr', 'c_out_ptr_sum', 'c_out_ptr_mut', 'c_out_ptr_list', 'c_out_info'],
+  },
+  {
+    // More than six word arguments: 7, 8 and 9 words, then the same calls with every argument
+    // computed just before the call, so the seventh and eighth argument registers
+    // (`%r10`/`%r11` in the compiler's spelling) carry live stores across the call. The position
+    // weighted sums are 140, 204, 285; the order check is 123456789; 204 again for eight narrow
+    // words; 900, 504 and 868 for the computed arguments.
+    name: 'call_words',
+    stdout: '140\n204\n285\n123456789\n204\n900\n504\n868\n',
+    symbols: ['c_words7', 'c_words8', 'c_words9', 'c_words9_order', 'c_words8n'],
+  },
+  {
+    // C calling back into Grail with eight word arguments: 1 + 2*2 + ... + 8*8 = 204. Only the
+    // targets whose ABI passes all eight in integer registers; x86-64 SysV puts the seventh and
+    // eighth on the stack, which the callback prologue does not read, so it is refused there.
+    name: 'callback_words',
+    stdout: '204\n',
+    symbols: ['c_call_words8'],
+    defines: ['g_words8'],
+    targets: ['aarch64', 'riscv64'],
+  },
+  {
     // Dynamic loader hooks: a shared library is loaded by path, two symbols are
     // resolved through dlsym and called through the resolved addresses, then the
     // library is closed. libc is the link input, so the executable is dynamic.
@@ -162,7 +195,11 @@ for (const target of selected) {
     ], { cwd: root, maxBuffer: 8 * 1024 * 1024, timeout: 300_000 });
     if (library.status !== 0) throw new Error(`dl_shim.c for ${target} failed: ${library.stderr}`);
   }
-  for (const { name, stdout, symbols, defines = [], linkNote = '// grail-link: shim.o', hostOnly = false } of fixtures) {
+  for (const { name, stdout, symbols, defines = [], linkNote = '// grail-link: shim.o', hostOnly = false,
+    targets: onlyTargets = null } of fixtures) {
+    // A fixture whose shape one target refuses is compiled and executed only where it is valid; the
+    // refusal itself is asserted at the end of this file.
+    if (onlyTargets && !onlyTargets.includes(target)) continue;
     if (hostOnly && target !== hostTarget && !sysroot) {
       // A host-loader fixture still has to compile for every target; it cannot be
       // linked there because the host's libc and loader are not target libraries.
@@ -218,6 +255,21 @@ const windows = spawnSync(compiler, [
 assert.notEqual(windows.status, 0, 'windows-x86_64: byval was accepted instead of refused');
 assert.match(`${windows.stdout}${windows.stderr}`, /byval is not implemented for the Windows x86-64 and Windows ARM64 ABIs/,
   'windows-x86_64: missing byval refusal diagnostic');
+
+// A callback whose parameters do not fit the target's integer argument registers is refused by
+// name instead of reading a register that holds something else (x86-64 SysV passes the seventh word
+// on the stack; the Win64 thunk moves only the fifth and sixth).
+for (const target of ['x86_64', 'windows-x86_64']) {
+  const platform = target === 'x86_64' ? 'os-linux.grl' : 'os-windows.grl';
+  const refused = spawnSync(compiler, [
+    '--default-u64', '--typed-refs', '--target', target, join(work, `${target}-callback-words.s`),
+    join(root, 'tests/ffi/callback_words.grl'), join(root, 'compiler/runtime.grl'),
+    join(root, `compiler/${platform}`),
+  ], { cwd: root, maxBuffer: 16 * 1024 * 1024, timeout: 900_000 });
+  assert.notEqual(refused.status, 0, `${target}: a seven-or-more word callback was accepted`);
+  assert.match(`${refused.stdout}${refused.stderr}`, /a C callback cannot read that many integer argument words/,
+    `${target}: missing callback register diagnostic`);
+}
 
 const skipped = linkedOnly ? ` (${linkedOnly} linked but not executed: no cross emulator installed)` : '';
 console.log(`ffi: ${executed} linked and executed, ${linkedOnly} linked only, ${crossCompiled} cross-compiled only${skipped}`);

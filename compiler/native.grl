@@ -4914,6 +4914,12 @@ fn base_named<a>(c: (&a mut C), first: u8[]) -> u64 {
             fail(&mut c, view("cfn type exceeds 64 arguments"));
         }
         for i in params.len() {
+            if ffi_out_param(&mut c, params[i]) {
+                fail(
+                    &mut c,
+                    view("an out-parameter is only for an extern \"C\" declaration; a cfn type cannot declare one")
+                );
+            }
             ffi_direct_param(
                 &mut c,
                 params[i],
@@ -5938,6 +5944,26 @@ fn ffi_emit_call<a, b, d, e, f>(
     }
     return val(slot, ret);
 }
+// A handle (kind 23) or bare pointer (kind 26) is the one kind of value C cannot produce as a
+// result alone: the Vulkan/D3D12/Metal shape `vkCreateInstance(..., VkInstance *pInstance)` writes it
+// through an out-parameter. The parameter is `&mut H` and the callee writes the new word into the
+// caller's slot; a binding declared without an initializer starts as null, so the slot always has a
+// defined value before the call.
+fn ffi_out_slot_type<a>(c: (&a mut C), ty: u64) -> bool {
+    return (ty_kind(&mut c, ty) == 23) || (ty_kind(&mut c, ty) == 26);
+}
+// `p: &mut Instance` in an extern declaration: a mutable borrow of a handle or bare pointer binding.
+// Only a mutable borrow is a writable slot - `&H` would hand C a `const H *` it cannot store through.
+fn ffi_out_param<a>(c: (&a mut C), ty: u64) -> bool {
+    if ty_kind(&mut c, ty) != 7 {
+        return false;
+    }
+    if ty_mode(&mut c, ty) == 0 {
+        return false;
+    }
+    inner := ty_arg(&mut c, ty);
+    return ffi_out_slot_type(&mut c, inner);
+}
 fn ffi_param<a, b>(c: (&a mut C), ty: u64, what: &b [u8]) -> unit {
     // u64 is the portable one-word type at index 0; i64/isize is the 64-bit signed
     // integer. Handles (kind 23) and CStr (kind 24) are one-word C pointers, and a
@@ -5958,6 +5984,16 @@ fn ffi_param<a, b>(c: (&a mut C), ty: u64, what: &b [u8]) -> unit {
         if c.decls[ty_arg(&mut c, ty)].c_layout != 0 {
             return ();
         }
+    }
+    if k == 7 {
+        inner := ty_arg(&mut c, ty);
+        if ffi_out_slot_type(&mut c, inner) {
+            if ty_mode(&mut c, ty) != 0 {
+                return ();
+            }
+            fail(&mut c, view("an extern C out-parameter needs &mut; a shared &H is the C const pointer"));
+        }
+        fail(&mut c, view("an extern C out-parameter must be &mut a handle, CPtr or CMutPtr"));
     }
     fail(&mut c, what);
     return ();
@@ -6535,8 +6571,17 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         if export != 0 {
             // The body is Grail, but C will call it: every parameter and the result
             // must live in the C ABI slice, and the symbol is the stated C name.
+            ffi_callback_fits(&mut c, first, count);
             for i in count {
                 formal := c.params[first + i];
+                if ffi_out_param(&mut c, formal) {
+                    // Grail has no deref-assignment, so a callback cannot store through the pointer
+                    // C hands it; only a declaration Grail calls writes the slot from Grail's side.
+                    fail(
+                        &mut c,
+                        view("an out-parameter is only for an extern \"C\" declaration parameter; a C callback cannot take one")
+                    );
+                }
                 if !(is_float(&mut c, formal) || ffi_narrow(&mut c, formal).len() != 0) {
                     ffi_param(
                         &mut c,
@@ -7761,6 +7806,41 @@ fn narrow_decode<a>(c: (&a mut C), code: u64, unit: u64) -> u64 {
     }
     return save(&mut c);
 }
+// How many integer argument words this target's callback prologue can read: the Win64 thunk under
+// the C symbol moves four registers plus the fifth and sixth stack words into Grail's registers, and
+// x86-64 SysV, AArch64 and RISC-V 64 read their own integer argument registers.
+fn callback_int_words(abi: u64) -> u64 {
+    if abi == 1 {
+        return 6;
+    }
+    return ffi_int_regs(abi);
+}
+// Ceiling for readback of an exported callback's parameter list; see ffi_callback_fits.
+fn ffi_callback_fits<a>(c: (&a mut C), first: u64, count: u64) -> unit {
+    abi := ffi_abi(&mut c);
+    mut ints = 0;
+    mut floats = 0;
+    for i in count {
+        formal := c.params[first + i];
+        if is_float(&mut c, formal) {
+            floats = floats + 1;
+        } else {
+            ints = ints + ffi_words(&mut c, formal);
+        }
+    }
+    if callback_int_words(abi) < ints {
+        fail(
+            &mut c,
+            view(
+                "a C callback cannot read that many integer argument words: this target passes the rest on the stack and the callback prologue reads registers only; pass a pointer or a record instead"
+            )
+        );
+    }
+    if 8 < floats {
+        fail(&mut c, view("a C callback cannot read that many floating-point arguments: this target passes the rest on the stack"));
+    }
+    return ();
+}
 // An exported callback's prologue: each parameter is read from where a C caller put it (Win64:
 // positionally, the thunk having moved rcx/rdx/r8/r9 and stack words five and six into Grail's
 // registers; SysV/AAPCS64/RV64: integer-class parameters packed into the integer registers and
@@ -7768,6 +7848,10 @@ fn narrow_decode<a>(c: (&a mut C), code: u64, unit: u64) -> u64 {
 fn callback_params<a>(c: (&a mut C), count: u64) -> unit {
     win := c.target == 3;
     x86 := c.target == 0 || win;
+    // Win64 arguments arrive in Grail's registers because the thunk under the C symbol has already
+    // moved them; everywhere else the C integer argument registers of the target's own ABI are read
+    // directly, so the seventh and eighth words come from %r10/%r11 (x6/x7, a6/a7).
+    abi := ffi_abi(&mut c);
     mut ints = 0;
     mut floats = 0;
     for i in count {
@@ -7815,7 +7899,11 @@ fn callback_params<a>(c: (&a mut C), count: u64) -> unit {
                 ipos = i;
             }
             o(&mut c, view("movq "));
-            o(&mut c, view(argreg(ipos)));
+            if win {
+                o(&mut c, view(argreg(ipos)));
+            } else {
+                o(&mut c, view(ffi_int_reg(abi, ipos)));
+            }
             o(&mut c, view(",%rax\n"));
             suffix := ffi_narrow(&mut c, ty);
             if suffix.len() != 0 {
@@ -18891,13 +18979,18 @@ fn statement<a>(c: (&a mut C)) -> unit {
             ty := parse_type(&mut c);
             expect(&mut c, view(";"));
             n := imm(&mut c, 0);
+            // A handle or bare pointer declared without an initializer is null, not uninitialized:
+            // its slot already holds the zero `imm` above, and null is the value a C out-parameter
+            // starts from (`mut instance: Instance; vkCreateInstance(..., &mut instance)`). Any other
+            // type stays uninitialized, because its zero word is not a value.
+            live := u64(ffi_out_slot_type(&mut c, ty));
             if c.raw == 0 {
                 mut flag = 0;
                 copy := !needs_drop(&mut c, ty);
                 if !copy {
                     flag = imm(&mut c, 0) + 1;
                 }
-                place := ownership::root(&mut c.check, copy, 0);
+                place := ownership::root(&mut c.check, copy, live);
                 c
                     .resources
                     .push(
