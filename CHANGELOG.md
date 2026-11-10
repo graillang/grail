@@ -19,6 +19,17 @@
   view, and a total - with the queue closed by `vkDestroyDevice` and the images by
   `vkDestroySwapchainKHR`, so `rhi.handles.total created 14 destroyed 14 live 0` is a fact about this
   machine rather than an assumption.
+  **2. a clear, a fence and a present loop.** `abundance/src/rhi_render.grl` (new) has the render pass
+  (`pAttachments`/`pSubpasses`/`pDependencies`, each a record passed with `cptr(&record)`), one
+  framebuffer per image view (`pAttachments` as a record of one `ImageView` field), a command pool and
+  one command buffer, a clear colour as a `VkClearValue` record, `VkSubmitInfo`/`VkPresentInfoKHR` with
+  their arrays of handles as one-field records, and the barriers that move the image from
+  COLOR_ATTACHMENT_OPTIMAL to TRANSFER_SRC_OPTIMAL and PRESENT_SRC_KHR. The probe runs the
+  acquire/submit/present loop for `GRAIL_RHI_FRAMES` frames (default 3), waiting on a
+  fence each frame, and prints one `rhi.frame` line per frame plus
+  `rhi.swapchain.result frames 3 of 3`. The pool carries
+  VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT: one command buffer is re-recorded every frame, and
+  beginning it again without that bit is undefined behaviour (it segfaults on RADV).
 - FFI: a C callback's extern-record parameter is borrowed, not owned. The parameter prologue marked
   every parameter as an owning binding, so the epilogue ran the record's drop glue on the address C
   handed over — freeing the caller's struct (or its stack) — and the process then aborted inside the
