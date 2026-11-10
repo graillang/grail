@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Merge the three design reviews from branch `claude/brave-heisenberg-0h3ska` as documents only
+  (`docs/design/first-principles-architecture.md`, `architecture-reassessment.md`,
+  `complexity-reassessment.md`, 2,746 lines). Their edits to README and to the research-phase
+  decision log were not taken: those files describe the compiler as it is today, and the reviews
+  were written against the earlier research-phase text.
 - Maps iterate with `for key, value in &map`, in insertion order, and `for key, value in &mut map` binds the
   same shared key with an exclusive value (`value := map.value_at_mut(i)`), so values update in place. The loop
   holds one reference to the map throughout: inserting into it inside the body is rejected, a shared loop cannot
