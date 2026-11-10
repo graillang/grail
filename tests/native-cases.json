@@ -1060,42 +1060,54 @@
     "note": "host::command_with hands the child exactly the environment it is given: FOO reaches the shell, and the parent's own PATH still finds sh, because the executable search happens in the parent.",
     "source": "use host;fn main(){mut env=u8[][];env.push(\"FOO=bar\".copy());mut argv=u8[][];argv.push(\"sh\".copy());argv.push(\"-c\".copy());argv.push(\"echo $FOO\".copy());assert(host::command_with(argv,env)==0);}",
     "stdout": "bar\n",
-    "targets": ["x86_64"]
+    "targets": [
+      "x86_64"
+    ]
   },
   {
     "name": "command-with-empty-env-clears-everything",
     "note": "An empty environment is the whole environment: `env` prints no variable at all. The shell is not asked, because it would invent a default PATH.",
     "source": "use host;fn main(){mut env=u8[][];mut argv=u8[][];argv.push(\"env\".copy());assert(host::command_with(argv,env)==0);}",
     "stdout": "",
-    "targets": ["x86_64"]
+    "targets": [
+      "x86_64"
+    ]
   },
   {
     "name": "command-with-env-built-from-the-inherited-one",
     "note": "host::environment plus one entry is the additive spelling: the child keeps what this process had (PATH) and gains FOO.",
     "source": "use host;fn main(){mut env=host::environment();env.push(\"FOO=bar\".copy());mut argv=u8[][];argv.push(\"sh\".copy());argv.push(\"-c\".copy());argv.push(\"echo $FOO; echo ${PATH+set}\".copy());assert(host::command_with(argv,env)==0);}",
     "stdout": "bar\nset\n",
-    "targets": ["x86_64"]
+    "targets": [
+      "x86_64"
+    ]
   },
   {
     "name": "command-without-env-still-inherits",
     "note": "The two-argument spelling replaces the environment and nothing else: host::command keeps inheriting this process's, which is why the old call sites did not change.",
     "source": "use host;fn main(){mut argv=u8[][];argv.push(\"sh\".copy());argv.push(\"-c\".copy());argv.push(\"echo ${PATH+inherited}\".copy());assert(host::command(argv)==0);}",
     "stdout": "inherited\n",
-    "targets": ["x86_64"]
+    "targets": [
+      "x86_64"
+    ]
   },
   {
     "name": "command-with-env-refuses-malformed-entry",
     "note": "An entry without = and a non-empty name would make execve start the child with no environment at all (and CreateProcess reject the block), so it is refused with 256+EINVAL and nothing is spawned.",
     "source": "use host;fn main(){mut env=u8[][];env.push(\"NOEQUALS\".copy());mut argv=u8[][];argv.push(\"true\".copy());println(host::command_with(argv,env));}",
     "stdout": "278\n",
-    "targets": ["x86_64"]
+    "targets": [
+      "x86_64"
+    ]
   },
   {
     "name": "command-with-env-reports-a-signalled-child",
     "note": "The result convention is shared with host::command: 128+N when signal N ended the child and a normal exit code otherwise, whatever the environment was.",
     "source": "use host;fn main(){mut env=u8[][];env.push(\"X=1\".copy());mut argv=u8[][];argv.push(\"sh\".copy());argv.push(\"-c\".copy());argv.push(\"kill -TERM $$\".copy());println(host::command_with(argv,env));}",
     "stdout": "143\n",
-    "targets": ["x86_64"]
+    "targets": [
+      "x86_64"
+    ]
   },
   {
     "name": "command-parent-prepares-paths",
@@ -3955,8 +3967,8 @@
     "name": "ffi-reject-out-scalar",
     "source": "module ffi_reject;extern \"C\" fn c_take(p: &mut i64) -> i64;fn main(){}",
     "reject": true,
-    "diagnostic": "an extern C out-parameter must be &mut a handle, CPtr, CMutPtr or extern \"C\" record",
-    "note": "only a handle, bare pointer or extern \"C\" record is an out-parameter; a scalar borrow is not writable through the boundary"
+    "diagnostic": "an extern C out-parameter must be &mut a handle, CPtr or CMutPtr",
+    "note": "only a handle or bare pointer slot is an out-parameter; a scalar borrow is not writable through the boundary"
   },
   {
     "name": "ffi-reject-out-callback",
@@ -5553,5 +5565,142 @@
     "reject": true,
     "diagnostic": "an extern C out-parameter needs a binding to write into; a temporary record would be discarded",
     "note": "C would write the array into storage dropped at the end of the statement"
+  },
+  {
+    "name": "ffi-reject-record-address",
+    "source": "module ffi_reject;extern \"C\" record AppInfo { api_version: u32 }extern \"C\" fn c_take(p: CPtr) -> i64;fn main(){mut app = AppInfo { api_version: 4194304 };mut v: i64 = 0;unsafe { v = c_take(cptr(&app)); }}",
+    "reject": true,
+    "diagnostic": "cptr requires a byte sequence or view",
+    "note": "no expression yields the address of an owned extern record, so a create-info struct cannot point at another struct (VkInstanceCreateInfo::pApplicationInfo)"
+  },
+  {
+    "name": "ffi-reject-record-out-param",
+    "source": "module ffi_reject;extern \"C\" record AppInfo { api_version: u32 }extern \"C\" fn c_fill(p: &mut AppInfo) -> i64;fn main(){}",
+    "reject": true,
+    "diagnostic": "an extern C out-parameter must be &mut a handle, CPtr or CMutPtr",
+    "note": "a record borrow is not an out-parameter slot either: C cannot fill a Grail record through one"
+  },
+  {
+    "name": "pool-chunks-mut-split",
+    "note": "In-place chunking over an exclusive slice (parallel_for_chunks / pool::chunks_mut): uneven chunks (10 elements in 3 chunks is 4,4,2), one chunk, zero chunks, more chunks than elements, more chunks than workers (1000 in 64), a sub-range that leaves its neighbours alone, an empty slice that runs no job, nested chunking inside a chunk callback, narrow (f32/u32) elements at their 4-byte stride, a byte buffer through a &mut [u8] view, and the library wrapper. Every check compares CONTENT: a chunk that ran twice doubles its elements, one that never ran leaves them, and one that wrote outside its region would fault or fail the borrow checker.",
+    "files": [
+      "tests/pool/chunks_mut.grl"
+    ],
+    "modules": [
+      "lib/pool.grl",
+      "lib/core.grl"
+    ],
+    "stdout": "ok\n"
+  },
+  {
+    "name": "pool-chunks-mut-timing",
+    "note": "The measured case for stage 2: the same 3M-u64 CPU-bound workload through the owned chunk split and through the in-place split, best of three. Asserts the copy is gone (one owned chunk at least 1.33x slower than one in-place chunk, both single-job, so no core count can explain it) and that parallelism still pays (eight in-place chunks at least 1.5x faster than one, asserted only above four cores). stderr carries the times; stdout is a fixed token.",
+    "files": [
+      "tests/pool/chunks_mut_timing.grl"
+    ],
+    "modules": [
+      "lib/pool.grl",
+      "lib/core.grl"
+    ],
+    "targets": [
+      "x86_64"
+    ],
+    "stdout": "ok\n"
+  },
+  {
+    "name": "pool-job-handle",
+    "note": "spawn-then-wait outside a structured call (parallel_spawn/parallel_join, pool::spawn/wait): an owned result, two live jobs joined in the reverse of the order they started, a handle that outlives the frame that made it, a handle dropped without being waited on (its drop waits and discards), a job that runs a job and chunks a vector of its own, and results consumed by later statements.",
+    "files": [
+      "tests/pool/job_handle.grl"
+    ],
+    "modules": [
+      "lib/pool.grl",
+      "lib/core.grl"
+    ],
+    "stdout": "abandoned\nok\n"
+  },
+  {
+    "name": "pool-reject-chunk-alias-vector",
+    "note": "The aliasing case the in-place surface must refuse: a chunk callback that reaches the same vector the call already holds exclusively. The argument is an exclusive loan of the whole vector, so the capture cannot be formed - the refusal happens at the call site, before any job exists.",
+    "source": "fn main() {\n    mut v = u64[1, 2, 3, 4];\n    parallel_for_chunks(&mut v[0: 4], 2, |s: &mut [u64]| -> unit {\n        for i in s.len() { s[i] = v[i]; }\n    });\n}\n",
+    "reject": true,
+    "diagnostic": "use of moved, borrowed or partially initialized value"
+  },
+  {
+    "name": "pool-reject-chunk-mutable-capture",
+    "note": "A chunk callback may not hold an exclusive slice at all: every worker calls the same closure, so a captured &mut [T] would be written by every worker at once. Refused by name, which is the closest a chunk callback gets to writing outside its own region.",
+    "source": "fn main() {\n    mut other = u64[9, 9, 9];\n    w := &mut other[0: 3];\n    mut v = u64[1, 2, 3, 4];\n    parallel_for_chunks(&mut v[0: 4], 2, |s: &mut [u64]| -> unit {\n        for i in s.len() { s[i] = w[0]; }\n    });\n}\n",
+    "reject": true,
+    "diagnostic": "cannot share closure capture `w`: a mutable slice or view cannot be shared"
+  },
+  {
+    "name": "pool-reject-chunk-shared-slice",
+    "note": "The in-place surface needs exclusive access, so a shared &[T] is refused rather than handed out as &mut [T].",
+    "source": "fn main() {\n    v := u64[1, 2];\n    parallel_for_chunks(&v[0: 2], 1, |s: &mut [u64]| -> unit { });\n}\n",
+    "reject": true,
+    "diagnostic": "parallel_for_chunks writes through its chunks, so the slice must be exclusive"
+  },
+  {
+    "name": "pool-reject-chunk-handle-element",
+    "note": "The element type goes through the same structural walk as a parallel_map item, so a slice of unaudited handles is refused by name before any job exists - exactly as &[File] is refused as a shared item.",
+    "source": "handle H;\nfn main() {\n    mut f: H;\n    mut hs = H[f];\n    parallel_for_chunks(&mut hs[0: 1], 1, |s: &mut [H]| -> unit { });\n}\n",
+    "reject": true,
+    "diagnostic": "cannot transfer parallel_for_chunks element: thread-affine (a foreign handle with no audited classification)"
+  },
+  {
+    "name": "pool-reject-chunk-handle-capture",
+    "note": "The closure environment is classified for chunks exactly as for parallel_map: a handle captured by the callback reaches a thread-affine resource from every worker.",
+    "source": "handle H;\nfn main() {\n    mut f: H;\n    mut v = u64[1, 2];\n    parallel_for_chunks(&mut v[0: 2], 1, |s: &mut [u64]| -> unit { s[0] = 1; println(f == f); });\n}\n",
+    "reject": true,
+    "diagnostic": "cannot share closure capture `f`: f is thread-affine (a foreign handle with no audited classification)"
+  },
+  {
+    "name": "pool-reject-chunk-fnmut-capture",
+    "note": "An FnMut closure shared by every worker would race on its own environment, the same refusal parallel_map gives.",
+    "source": "fn main() {\n    mut n = 0;\n    mut v = u64[1, 2];\n    parallel_for_chunks(&mut v[0: 2], 1, |s: &mut [u64]| -> unit { n += 1; });\n}\n",
+    "reject": true,
+    "diagnostic": "a callback shared by concurrent workers must not write a captured value"
+  },
+  {
+    "name": "pool-chunk-write-outside-aborts",
+    "note": "The runtime half of 'a chunk cannot write outside itself': the slice a callback holds has its own length, so an index at or past that length is a bounds abort rather than a write into a sibling chunk. Nothing after the abort runs.",
+    "source": "fn main() {\n    mut v = u64[1, 2, 3, 4];\n    println(\"before\");\n    parallel_for_chunks(&mut v[0: 4], 2, |s: &mut [u64]| -> unit { s[s.len()] = 9; });\n    println(v);\n}\n",
+    "status": 134,
+    "stdout": "before\n"
+  },
+  {
+    "name": "pool-reject-job-borrowed-capture",
+    "note": "A job handle outlives the statement that spawned it, and a Job<R>'s type records no lifetime, so a callback that captured a borrow could carry it out of the frame it points into: refused instead of silently made unsound.",
+    "source": "fn main() {\n    v := u64[1, 2, 3];\n    r := &v[0: 3];\n    h := parallel_spawn(|| -> u64 r[0]);\n    println(parallel_join(h));\n}\n",
+    "reject": true,
+    "diagnostic": "a job handle may outlive this statement, so its callback cannot capture a borrow"
+  },
+  {
+    "name": "pool-reject-job-of-job",
+    "note": "A job cannot return a handle: two waits on one record would free it twice.",
+    "source": "fn main() {\n    h := parallel_spawn(|| -> Job<u64> parallel_spawn(|| -> u64 1));\n    println(1);\n}\n",
+    "reject": true,
+    "diagnostic": "a pool job cannot return a Task or Job handle"
+  },
+  {
+    "name": "pool-reject-job-double-join",
+    "note": "A handle is move-only: the wait consumes it, so the record is freed exactly once and no second wait can exist.",
+    "source": "fn main() {\n    h := parallel_spawn(|| -> u64 1);\n    a := parallel_join(h);\n    b := parallel_join(h);\n    println(a + b);\n}\n",
+    "reject": true,
+    "diagnostic": "use of moved, borrowed or partially initialized value"
+  },
+  {
+    "name": "pool-reject-job-in-map",
+    "note": "A handle cannot cross another job boundary as an item or a result: it is a must-wait value with one owner.",
+    "source": "fn main() {\n    out := parallel_map(u64[1], 0, |x: u64, u: u64| -> Job<u64> parallel_spawn(|| -> u64 x));\n    println(out.len());\n}\n",
+    "reject": true,
+    "diagnostic": "parallel_map cannot move Task or job handles between threads"
+  },
+  {
+    "name": "pool-reject-job-borrowed-closure",
+    "note": "A job owns its closure: it drops the environment on the worker that ran it. A closure passed by reference is still dropped by its owner, so taking it would free one object twice - refused rather than left to the caller's drop.",
+    "source": "fn main() {\n    f := || -> u64 42;\n    h := parallel_spawn(&f);\n    println(parallel_join(h));\n}\n",
+    "reject": true,
+    "diagnostic": "a pool job takes its closure by value"
   }
 ]
