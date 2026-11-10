@@ -7,27 +7,59 @@ graphics contract (`graphics/include/grail/`), and the three do not overlap:
 
 | Route | Caller | Reaches the GPU by | Today |
 | --- | --- | --- | --- |
-| In-process FFI (`abundance/src/rhi_sdl3.grl`, `rhi_vulkan.grl`, `rhi_surface.grl`) | any Grail program linked with `-lSDL3` / `-lvulkan` | calling `SDL_*` and `vk*` symbols directly | window created and sized; a real `VkInstance` created with the platform's own instance extension set, and destroyed; physical devices enumerated, named, typed and selected; queue families read; a real `VkSurfaceKHR` created from the window, its capabilities, formats and present modes read back, and the swapchain's format, extent, image count and present mode chosen |
+| In-process FFI (`abundance/src/rhi_sdl3.grl`, `rhi_vulkan.grl`, `rhi_surface.grl`, `rhi_device.grl`, `rhi_swapchain.grl`, `rhi_render.grl`, `rhi_pipeline.grl`) | any Grail program linked with `-lSDL3` / `-lvulkan` | calling `SDL_*` and `vk*` symbols directly | the whole path: window, instance, surface, its capabilities, a logical device and queue, a swapchain with its images and views, a render pass that clears, framebuffers, a command buffer, semaphores and a fence, a graphics pipeline from the committed SPIR-V, and N presented frames read back and asserted pixel by pixel |
 | Wire framing (`abundance/src/rhi_bridge.grl`) | a static Grail ELF with no libc | packing `gr_wire_packet` and writing it to a socket | framing ported and parity-tested; the host side is still to come |
 | The C ABI backend (`graphics/`, `GR_BACKEND_NULL`) | C/C++ hosts | the `grail_rhi.h` contract | the contract, a null backend, and a Vulkan device probe in C |
 
 The FFI route is the one that makes Grail the language of the renderer rather than a client of
 one. It is also the only route where the *language* is the thing being tested: every limitation
-below is a statement about Grail's FFI, not about SDL3 or Vulkan.
+below is a statement about Grail's FFI, not about SDL3 or Vulkan - and the two compiler bugs this
+increment walked into ("What the FFI does not do safely") are statements about the language too.
 
 The in-process route is four programs, because its four halves need different parts of this machine
 to be present. `abundance/tests/rhi_shader_probe.grl` needs nothing at all - the shader blobs are
 committed and it links no library, so it runs everywhere, CI included.
 `abundance/tests/rhi_vulkan_probe.grl` needs a loader and a driver but no display server;
 `abundance/tests/rhi_device_probe.grl` needs a display server and SDL3 but no Vulkan device; and
-`abundance/tests/rhi_swapchain_probe.grl` needs all three, because a `VkSurfaceKHR` is the one object
-that belongs to both a window and an instance.
+`abundance/tests/rhi_swapchain_probe.grl` is the whole path - window, surface, device, swapchain,
+frames, readback - so it needs all three, and it is the only one that draws.
 
 ## What is real
 
 All four probes run from the suite and print this machine rather than a fixture. The shader probe
-needs nothing and is quoted in "Shaders" below; the other three, in order. The window half, unchanged
-from the previous increment:
+needs nothing and is quoted in "Shaders" below; the other three, in order.
+
+The swapchain probe is the one that draws, and this is what increment 4b added to it - one machine's
+real numbers, quoted from one run of `bun tools/abundance-test.mjs`:
+
+```
+  rhi.device.created 1 extensions 1 api 1.0
+  rhi.device.queue 0 family 0
+  rhi.swapchain.created 1 images 4 format VK_FORMAT_B8G8R8A8_SRGB extent 1280x720 present_mode MAILBOX usage transfer_src|color_attachment
+  rhi.image_views.created 4 format VK_FORMAT_B8G8R8A8_SRGB type 2D
+  rhi.render_pass.created 1 attachments 1 subpasses 1 dependencies 1 load clear store store initial UNDEFINED final COLOR_ATTACHMENT_OPTIMAL
+  rhi.framebuffers.created 4 1280x720 attachment image_view
+  rhi.command_pool.created 1 family 0 level PRIMARY buffers 1
+  rhi.semaphores.created 5 available 1 finished 4
+  rhi.fence.created 1 unsignalled
+  rhi.shader.vertex bytes 876 entry vs_main stage vertex vertex_entry 1
+  rhi.shader.fragment bytes 596 entry ps_main stage fragment fragment_entry 1
+  rhi.vertex_layout inputs 3 stride 36 offsets 0,12,20 formats VK_FORMAT_R32G32B32_SFLOAT,VK_FORMAT_R32G32_SFLOAT,VK_FORMAT_R32G32B32A32_SFLOAT consistent 1
+  rhi.shader_modules.created 2 vertex 876 fragment 596
+  rhi.vertex_buffer.created 1 bytes 108 memory 112 memory_type 0 device_local
+  rhi.readback_buffer.created 1 pixels 921600 bytes 3686400 memory 3686400 memory_type 2 host_visible|host_coherent
+  rhi.pipeline.created 1 stages 2 vertex vs_main fragment ps_main viewport 1280x720 topology triangle_list polygon fill cull none samples 1 blend off depth none dynamic none
+  rhi.frame 0 image 0 of 4 clear 0.000,0.000,0.000,1.000 triangle 3 vertices presented VK_SUCCESS
+  rhi.pixels 0 0 pixels 921600 clear 626688 triangle 294912 other 0 expected 294912 covered 1
+  rhi.pixels 0 0 corner 4,4 0,0,0,255 inside 640,270 0,0,255,255 clear_pixel 1 triangle_pixel 1
+  rhi.pixels 0 0 digest 10439646140818629413
+  ...the same three lines for frames 1 and 2, same digest...
+  rhi.swapchain.result frames 3 of 3 format VK_FORMAT_B8G8R8A8_SRGB extent 1280x720 present_mode MAILBOX
+  rhi.handles.total created 35 destroyed 35 live 0
+  rhi.status ok
+```
+
+The window half, unchanged from the previous increment:
 
 ```
 $ bun tools/abundance-test.mjs
@@ -161,38 +193,197 @@ Then the four decisions, each a stated rule rather than a constant:
   the driver's minimum is the least that can present without stalling, and one more gives the
   renderer an image to draw into while the presentation engine holds another. `3 + 1 = 4` here.
 
-### Teardown, and the handle balance
+### The device, and the queue a frame is submitted on
 
-Every path that creates a handle destroys it, in the reverse of the order it was created: the
-surface, then the instance, then the window, then SDL's video subsystem - and each exit path in the
-probe runs the same two functions (`teardown`, then `report_all`), so no branch can forget half of
-it. The program counts what it created and what it destroyed **per handle class**, and prints the
-classes and the total:
+`abundance/src/rhi_device.grl` is new, and it is the first module that could only exist because the
+FFI grew a record pointer. `vkCreateDevice`'s `pQueueCreateInfos` is unavoidable -
+`queueCreateInfoCount` must be at least one - so the queue create info is an `extern "C"` record and
+`cptr(&queue_info)` is the pointer:
+
+- `VkDeviceQueueCreateInfo` (40 bytes: sType 0, pNext 8, flags 16, queueFamilyIndex 20, queueCount 24,
+  pQueuePriorities 32) has exactly one pointer that matters, `pQueuePriorities`, and it points at
+  `Priorities` - a one-field record whose single `f32` *is* the `const float *` C wants. A record is
+  the only way this language hands out the address of a scalar.
+- `VkDeviceCreateInfo` (72 bytes) also has `ppEnabledExtensionNames`, which is `const char *const *`
+  and is a record of `CStr` fields: with one name in it, the record's bytes are the one-element array
+  of pointers, which is how `VK_KHR_swapchain` is enabled without a byte buffer anywhere.
+- `pEnabledFeatures` is null on purpose: nothing here needs a feature past core 1.0, and enabling one
+  the pipeline does not use would be a claim the program cannot check.
+- The queue is `vkGetDeviceQueue`'s out-parameter, and it is not destroyed individually: it goes with
+  the device, and the ledger counts it at `vkDestroyDevice`.
+
+The device is the highest-ranked physical device that has a queue family which both runs graphics
+work and presents to the surface (`present_family`), so the family in the create info is the family
+the frames are submitted on.
+
+### The swapchain, its images and their views
+
+`abundance/src/rhi_swapchain.grl` is new. It creates `VkSwapchainCreateInfoKHR` (104 bytes) from the
+four decisions `abundance_rhi_surface` already made - it does not choose anything twice - and it
+checks nothing the surface has not already answered. Three details are worth stating:
+
+- `oldSwapchain` is a **null handle**, and a handle binding declared without an initializer *is*
+  `VK_NULL_HANDLE`, so the null crosses as a value the language already has. There is no resize in
+  this increment: one swapchain is created per run and destroyed at the end.
+- The images come back as an array of *handles* C writes. `vkGetSwapchainImagesKHR` is declared twice:
+  a count query with a null data pointer, and a fill call whose `VkImage *` is `&mut ImageSlots`
+  (`i0..i7`). The count the driver writes back is clamped into the record's capacity before any slot
+  is read, and a driver reporting more images than that is reported as truncated rather than read past.
+- Each image gets one `VkImageView`, a 2D colour view of mip 0 layer 0 in the swapchain's format.
+  Creation writes one handle at a time through `&mut ImageView` and stores it in the slot record -
+  which is why the probe keeps each slot record as its *own* binding (see "What the FFI does not do
+  safely").
+- The usage asked for is `COLOR_ATTACHMENT` plus `TRANSFER_SRC` when the surface's
+  `supportedUsageFlags` allows both, because the readback in step 4 needs the second. The probe prints
+  which usage it got, so a surface that could not be a transfer source would say so rather than fail
+  later.
+
+On this machine: 4 images (the surface's `minImageCount` 3 plus one), `VK_FORMAT_B8G8R8A8_SRGB`,
+1280x720, `MAILBOX`.
+
+### The render pass, the clear, and the present loop
+
+`abundance/src/rhi_render.grl` is new. It is the module where the frame happens, and every pointer in
+it is the address of a record:
+
+- `VkRenderPassCreateInfo` points at `VkAttachmentDescription` (36 bytes), `VkSubpassDescription`
+  (72) and `VkSubpassDependency` (28); the subpass points at an `VkAttachmentReference` (8). One
+  colour attachment, 1 sample, `loadOp = CLEAR`, `storeOp = STORE`, `initialLayout = UNDEFINED`
+  (the image was just acquired and its contents are the previous frame's), `finalLayout =
+  COLOR_ATTACHMENT_OPTIMAL`. The dependency is `EXTERNAL -> subpass 0` at
+  `COLOR_ATTACHMENT_OUTPUT`, which orders the layout transition before the writes that need it.
+- One `VkFramebuffer` per image view, `pAttachments` being a record of one `ImageView` field - the
+  one-element array.
+- One command pool on the drawing family, with
+  `VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT`, and one command buffer reused every frame.
+  *That flag is not cosmetic*: beginning a command buffer that has already been executed is only
+  legal after a reset, and without the bit RADV segfaults on the second `vkBeginCommandBuffer`.
+- `VkRenderPassBeginInfo`'s `pClearValues` points at a `ClearValue` record - four floats, 16 bytes,
+  which is the colour arm of the `VkClearValue` union - and the render area is a `VkRect2D` record.
+- `VkSubmitInfo` and `VkPresentInfoKHR` need arrays of handles and an array of `u32`:
+  `pWaitSemaphores`, `pSignalSemaphores`, `pCommandBuffers`, `pSwapchains` and `pImageIndices` are
+  each a one-field record seeded from the handle or index the frame already holds.
+- The frame is: acquire with `vkAcquireNextImageKHR` (one image-available semaphore, one null fence),
+  record the clear and the draw, barrier `COLOR_ATTACHMENT_OPTIMAL -> TRANSFER_SRC_OPTIMAL` and copy
+  the image out (step 4), barrier on to `PRESENT_SRC_KHR`, submit waiting on the acquire semaphore and
+  signalling a *per-image* render-finished semaphore, wait on the fence, then present.
+
+One image-available semaphore is enough because exactly one frame is in flight: nothing is submitted
+again until the fence is signalled. Render-finished semaphores are per image, because a binary
+semaphore must not be signalled again until the present that waited on it has finished - and only
+re-acquiring that image proves it has.
+
+Frame count is the probe's argument (`GRAIL_RHI_FRAMES`, default 3):
+`rhi.swapchain.result frames 3 of 3` on this machine.
+
+### The pipeline, and the triangle
+
+`abundance/src/rhi_pipeline.grl` is new. `VkGraphicsPipelineCreateInfo` (144 bytes) is the struct
+that listed nine pointers, and each is now a record address:
+
+| Field | What it points at |
+| --- | --- |
+| `pStages` | a record of two `VkPipelineShaderStageCreateInfo` (48 bytes each), `pName` a `CStr` field |
+| `pVertexInputState` | a record holding one `VkVertexInputBindingDescription` (12) and one `VertexAttributes` (three 16-byte records) |
+| `pInputAssemblyState` | triangle list, no primitive restart |
+| `pViewportState` | a record pointing at a `VkViewport` (24) and a `VkRect2D` (16) - static, so `pDynamicState` is null |
+| `pRasterizationState` | fill, no culling, clockwise front face, no depth bias, lineWidth 1 |
+| `pMultisampleState` | one sample, no sample shading, no alpha-to-coverage |
+| `pColorBlendState` | one attachment, blending off, all four channels written |
+| `pDepthStencilState` | null: no depth attachment, no depth test |
+| `pTessellationState` | null |
+
+The vertex input is the layout `abundance/tools/build-shaders.mjs` extracted from the compiled vertex
+stage, not a transcription: `vertex_input_count`, `vertex_stride` and location/offset/format per
+input come from `abundance_rhi_shader_blob`, and `vertex_input_consistent()` checks the two things
+that admit without a driver - the offsets are contiguous in declaration order, and the stride is the
+sum of the widths (0 + 12 + 8 + 16 = 36).
+
+The vertex data is a record of three 36-byte vertices, and it reaches the GPU with `vkCmdUpdateBuffer`
+from `cptr(&triangle)` - a `const void *` and a size, no staging buffer, no mapped memory and no byte
+layout. A `VkMemoryBarrier` then orders that transfer write before the vertex fetch. The vertex buffer
+itself is device-local memory chosen from `VkPhysicalDeviceMemoryProperties` - which is 520 bytes with
+32 memory types and 16 heaps inside it, and is therefore a record of embedded records rather than a
+byte buffer.
+
+The triangle is flat red on black: all three vertices carry colour (1,0,0,1) and uv (1,1), so the
+pixel shader's `color * float4(uv, 1, 1)` is (1,0,0,1) everywhere inside it. Both 0.0 and 1.0 are
+fixed points of the sRGB encoding the swapchain format applies, so the bytes a frame produces are
+exact rather than approximate - which is what makes the next section an assertion.
+
+### The readback, and what a frame's bytes are
+
+"It presented" is not evidence. Every frame is copied out of its swapchain image
+(`vkCmdCopyImageToBuffer`, one `VkBufferImageCopy` region record), into a host-visible coherent
+buffer, and after the fence that buffer is mapped, `memcpy`'d into Grail bytes and inspected. A mapped
+`void *` cannot be indexed here, so `memcpy` is the bridge - the same one the window probe uses for
+SDL's error text.
+
+On this machine, per frame:
 
 ```
+  rhi.frame 0 image 0 of 4 clear 0.000,0.000,0.000,1.000 triangle 3 vertices presented VK_SUCCESS
+  rhi.pixels 0 0 pixels 921600 clear 626688 triangle 294912 other 0 expected 294912 covered 1
+  rhi.pixels 0 0 corner 4,4 0,0,0,255 inside 640,270 0,0,255,255 clear_pixel 1 triangle_pixel 1
+  rhi.pixels 0 0 digest 10439646140818629413
+```
+
+and the same three lines for frames 1 and 2, with the same digest. The assertions behind those lines:
+
+- every pixel is either the clear colour or the triangle's - `other 0` - so no blending, filtering or
+  stray draw is happening;
+- the cleared and covered counts add up to the extent (`626688 + 294912 = 921600`);
+- the covered count equals the triangle's own area, `0.32 x width x height` (the triangle spans 1.6
+  in x and 1.6 in y of normalised device coordinates), to within a row of pixels - which is a check on
+  the pipeline's rasterisation and not just on the colour;
+- the corner (4,4) reads `0,0,0,255` and the centre (640,270) reads `0,0,255,255`, in the
+  `B8G8R8A8_SRGB` byte order the swapchain actually has - so the clear colour *and* the channel order
+  are asserted, not assumed;
+- all frames hash the same, which is the steady-state claim: the same commands produce the same
+  bytes.
+
+### Teardown, and the handle balance
+
+Every path that creates a handle destroys it, in the reverse of the order it was created, and each
+exit path in the probe runs the same two functions (`teardown`, then `report_all`) so no branch can
+forget half of it. The program counts what it created and what it destroyed **per handle class**:
+
+```
+  rhi.fence.destroyed 1
+  rhi.semaphores.destroyed 5
+  rhi.command_pool.destroyed 1 buffers 1
+  rhi.framebuffers.destroyed 4
+  rhi.render_pass.destroyed 1
+  rhi.image_views.destroyed 4
+  rhi.swapchain.destroyed 1 images 4
+  rhi.device.destroyed 1
   rhi.surface.destroyed 1
   rhi.instance.destroyed 1
   rhi.window.destroyed 1
   rhi.handles.window created 1 destroyed 1 live 0
-  rhi.handles.instance created 1 destroyed 1 live 0
-  rhi.handles.surface created 1 destroyed 1 live 0
-  rhi.handles.total created 3 destroyed 3 live 0
+  ...
+  rhi.handles.buffer created 2 destroyed 2 live 0
+  rhi.handles.device_memory created 2 destroyed 2 live 0
+  rhi.handles.total created 35 destroyed 35 live 0
 ```
 
+Nineteen classes: window, instance, surface, device, queue, swapchain, image, image view, render
+pass, framebuffer, command pool, command buffer, semaphore, fence, shader module, pipeline layout,
+pipeline, buffer and device memory. Three are closed by their owner rather than by a call of their
+own, and the ledger counts them at the moment the owner goes: the queue with `vkDestroyDevice`, the
+swapchain's images with `vkDestroySwapchainKHR`, and the command buffer with `vkDestroyCommandPool`.
+
 A disagreement in any class, or in the total, fails the run (`rhi.status failed handles-leaked`,
-exit 1), so a leaked instance, a leaked surface or a leaked window cannot pass quietly. The classes
-are separate rather than one count because increment 4b adds a device, a swapchain, its images and
-views, and the semaphores and fences of a frame: each is a class, and a leak in one cannot hide
-inside a total that happens to balance. This is the assertion, not the validation
-layer: the layer is not installed on this host (the loader reports 8 layers, none of them
-`VK_LAYER_KHRONOS_validation`), and enabling it from here would need
-`VkInstanceCreateInfo::ppEnabledLayerNames` - another array of C strings Grail would have to build.
-Where the layer *is* installed, the suite forces it on through the loader
-(`VK_LOADER_LAYERS_ENABLE`/`VK_INSTANCE_LAYERS`) for a second run of the probe and fails on any
-validation message, and it requires the layer's manifest to name a real ELF shared object before it
-claims anything was validated, because the loader skips a broken layer without a word. On this host
-that variant reports `validation skipped (no VK_LAYER_KHRONOS_validation library on this host)`, and
-the probe says `rhi.vulkan.validation unavailable not-installed`.
+exit 1), so a leaked device, a leaked framebuffer or a leaked semaphore cannot pass quietly. This is
+the assertion, not the validation layer: the layer is not installed on this host (the loader reports
+8 layers, none of them `VK_LAYER_KHRONOS_validation`), and enabling it from here would need
+`VkInstanceCreateInfo::ppEnabledLayerNames` - an array of C strings Grail would have to build, which
+the device create info's `ppEnabledExtensionNames` shows is now possible but is not wired up for
+layers. Where the layer *is* installed, the suite forces it on through the loader
+(`VK_LOADER_LAYERS_ENABLE`/`VK_INSTANCE_LAYERS`) for a second run and fails on any validation message,
+and it requires the layer's manifest to name a real ELF shared object before it claims anything was
+validated. On this host that variant reports `validation skipped (no VK_LAYER_KHRONOS_validation
+library on this host)`.
 
 ## Shaders
 
@@ -249,9 +440,10 @@ error, not a silent remap).
 **The loader shape.** `VkShaderModuleCreateInfo` is an `extern "C"` record - 40 bytes, `sType` 0,
 `pNext` 8, `flags` 16, `codeSize` 24, `pCode` 32 - and `pCode` is the one pointer inside a Vulkan
 create info that Grail can already fill: the bytes are a Grail `u8[]` and `unsafe cptr(&bytes)` is
-their data pointer. `vkCreateShaderModule` itself needs a device, so it is not called yet; the probe
+their data pointer. `vkCreateShaderModule` itself needs a device, so the *probe* does not call it - it
 builds the create info, sets `pCode` from the bytes, and asserts that `codeSize` is the blob's own
-length.
+length. The call itself is `abundance_rhi_pipeline::create_shader_module`, which the swapchain probe
+reaches with a real device.
 
 **What the probe proves**, on a machine with no device, no display, no driver and no shader
 compiler - it links nothing but the Grail runtime:
@@ -295,87 +487,98 @@ on every machine.
 
 ## What is not there, and why
 
-**No device, no swapchain, no images, no render pass, no clear, no present.** All of it waits on one
-missing FFI feature, unchanged since the previous increment (the shader side does not, and is
-described above):
+Increment 4b closed the gap this page was written around. A Vulkan create-info graph is now a graph of
+`extern "C"` records, and the pointers in it are `cptr(&record)` / `cptr_mut(&mut record)` or the
+addresses of records inside records - so `VkDeviceCreateInfo`, `VkSwapchainCreateInfoKHR`,
+`VkRenderPassCreateInfo`, `VkFramebufferCreateInfo`, `VkRenderPassBeginInfo`, `VkSubmitInfo`,
+`VkPresentInfoKHR` and `VkGraphicsPipelineCreateInfo` are all real calls on this branch, and the
+frames they produce are asserted byte for byte. Nothing in this RHI lays a struct out in a `u8[]`:
+the only byte sequences are a shader's SPIR-V (which is bytes by definition), a mapped frame (which is
+copied, not interpreted) and the loader's own C-written property blocks, which a record cannot express
+because they contain `char` arrays.
 
-> **There is no expression whose value is the address of an owned `extern "C"` record.**
+What is *not* here, by intent rather than by limitation:
 
-A record *parameter* is the address of the record's fields, so a call that takes a struct by
-pointer already works - that is how `VkInstanceCreateInfo`, the surface capability record and the
-slot arrays cross. What Grail cannot do is *name* that address as a value, which is what a struct
-that **contains pointers** needs, and every remaining call is that shape:
+- **resize.** One swapchain per run; `oldSwapchain` is always null, and a `VK_ERROR_OUT_OF_DATE_KHR`
+  from acquire or present fails the run instead of rebuilding the swapchain. The window is created
+  hidden and never resized, so nothing in this increment needs it.
+- **more than one frame in flight.** One command buffer, one image-available semaphore, one fence, and
+  a CPU wait per frame. That is a steady loop - the same commands and the same pixels every frame - but
+  not a pipelined one: `N` frames take `N` round trips.
+- **depth, MSAA, blending, textures, descriptor sets.** The pipeline has no depth attachment, one
+  sample, blending off and no descriptor sets; the render pass has one colour attachment and one
+  subpass. `VkPipelineLayout` is created with zero sets and zero push-constant ranges.
+- **the validation layer.** Not installable from here (see the teardown section): it needs
+  `ppEnabledLayerNames`, which means an array of `CStr` on the *instance* create info. The device
+  create info already does exactly that for extensions, so this is a small increment, not a gap.
+- **vertex and index buffers that are mapped rather than updated.** The triangle goes in through
+  `vkCmdUpdateBuffer`, which is capped at 64 KiB per call and is not what a mesh with tens of
+  thousands of vertices would use; a real upload path wants a staging buffer and
+  `vkCmdCopyBuffer`, and then `vkMapMemory`/`memcpy` to fill it - the FFI has no way to *write*
+  through a mapped `void *`, only to copy from it.
+- **anything downstream of a frame**: input, the event pump, displays, clipboard, debug messengers,
+  bindless tables, timeline semaphores, swapchain recreation, presentation timing.
 
-| Call | What it needs | Blocked by |
-| --- | --- | --- |
-| `vkCreateDevice` | `pQueueCreateInfos` -> array of `VkDeviceQueueCreateInfo` | address of a record |
-| device extensions | `ppEnabledExtensionNames` -> array of `const char *` (`VK_KHR_swapchain`) | address of an array of strings |
-| `vkCreateSwapchainKHR` | `pQueueFamilyIndices` for concurrent sharing (exclusive needs nothing) | address of an array |
-| `vkCreateRenderPass` | `pAttachments` -> `VkAttachmentDescription`, `pSubpasses` -> `VkSubpassDescription`, which itself points at `VkAttachmentReference` | address of a record |
-| `vkCreateFramebuffer` | `pAttachments` -> array of `VkImageView` **handles** | address of a record, *and* a handle it cannot construct |
-| `vkCmdBeginRenderPass` | `pClearValues` -> `VkClearValue` | address of a record |
-| `vkQueueSubmit` | `pWaitSemaphores`, `pSignalSemaphores` -> arrays of **handles** | both |
-| `vkQueuePresentKHR` | `pWaitSemaphores`, `pSwapchains`, `pImageIndices` -> arrays of **handles** | both |
+## What the FFI does not do safely
 
-The last four rows are why the swapchain increment cannot be half-built: a handle cannot be
-constructed in Grail at all (`cnull()` is a `CPtr`, and a record field typed `handle` is a type
-mismatch), so an array *of handles* cannot even be seeded - the record-of-handles idiom in this RHI
-works only when C is the writer, which is true of `vkEnumeratePhysicalDevices` and
-`vkGetSwapchainImagesKHR` and false of every array in `VkSubmitInfo` and `VkPresentInfoKHR`. The
-refusals are pinned as cases in `tests/native-cases.json` so the limit cannot quietly change:
+Two defects in the record-pointer work surfaced while building this increment. Both are compiler bugs
+rather than missing features, both are reproducible without Vulkan, both are written down here because
+they constrain how the RHI is written until they are fixed, and neither is worked around by laying
+bytes out by hand. (`compiler/` is off limits in this increment, so they are reported rather than
+patched.)
 
-| Attempt | Result | Case |
-| --- | --- | --- |
-| `cptr(&app)` for an extern record `app` | `cptr requires a byte sequence or view` | `ffi-reject-record-address` |
-| `CreateInfo{ p_app: app }` | `generic argument shape mismatch` | — |
-| `extern "C" fn f(p: &mut AppInfo)` | `an extern C out-parameter must be &mut a handle, CPtr or CMutPtr` | `ffi-reject-record-out-param` |
-| `PresentInfo{ swapchain: Swapchain {} }` | `opaque handles cannot be constructed` | `ffi-reject-handle-construction` |
-| `mut slot: Slot;` then `slot.instance` | `use of moved, borrowed or partially initialized value` | `ffi-reject-handle-out-slot` |
+**1. `&mut` of an extern record field of a plain record does not reach the field's storage.** A place
+made from an interior extern record is a proxy slot; *writing a field through that reference* writes
+into the proxy and not into the container, and the write is silently lost (or lands in the next field).
+A slot array written through such a reference is a record of null handles, and a null framebuffer
+handle is a segfault inside the driver - which is how it was found. Minimal case:
 
-What this costs, concretely, in this increment: nothing that already works, and the whole frame.
-`VkCreateSwapchainKHR`, `vkCreateImageView`, `vkCreateCommandPool`, `vkAllocateCommandBuffers`,
-`vkCreateFence` and `vkCmdClearColorImage` are all reachable in shape (no pointer fields, or a null
-one) *once a device exists* - and a device cannot be created, so none of them can be called either.
-That is why `rhi.swapchain.result` reports zero frames presented while the configuration it reports
-is a real one: the surface answered every question the swapchain would be built from.
+```grail
+extern "C" record Pair { x: i64, y: i64 }
+struct Bag { pair: Pair, count: i64 }
+fn set_y(pair: &mut Pair, value: i64) -> unit { pair.y = value; }
 
-The alternative this module refuses, again: laying the create-infos out in `u8[]` byte buffers at
-hand-written offsets. It would work for the all-scalar structs and it would move `sType`, every
-count and every pointer slot out of the type system's reach, where a mis-ordered field is a
-plausible-looking number instead of a diagnostic - and every one of those structs has to be written
-as a record anyway when the FFI form lands. The structs Grail *builds* stay records.
+mut bag = Bag { pair: Pair { x: 0, y: 0 }, count: 0 };
+set_y(&mut bag.pair, 7);
+println(format("{} {}", bag.pair.x, bag.pair.y));   // prints "0 0"; with `set_y(&mut pair, 7)` on a
+                                                    // standalone record it prints "0 7"
+```
 
-### The three messages that define the language work
+Direct field writes (`bag.pair.y = 7`), and passing the interior record by value to an `extern "C"`
+call, both work; only a *reference* to the interior record is wrong. The RHI therefore keeps each slot
+record as its own binding and passes `&mut` of that, which is sound.
 
-The gap is one feature - *C needs a pointer to memory Grail owns, in and out* - and these are the
-three diagnostics that define it, reproduced from the compiler on this branch. They are the
-acceptance tests for whoever closes it:
+**2. a `CStr` taken from a string literal must not outlive the statement that made it.** `cstr(value)`
+is zero-copy, and for a literal the bytes are a temporary: keeping the `CStr` in a binding and using it
+in a later statement reads freed memory. It reads *correctly* often enough to be missed - it did here -
+which is why the pipeline's entry-point names are copied out of the SPIR-V into byte-sequence bindings
+and `cstr` is taken of those bytes (as a view, so they are not moved):
 
-1. `cptr(&record)` → `cptr requires a byte sequence or view`. There is no way to hand C the address
-   of a Grail-owned record as a pointer to a struct, and every `Vk*CreateInfo` with a `pNext` chain
-   or a pointer to a further struct needs exactly that.
-2. `&mut Record` as an out-parameter → `an extern C out-parameter must be &mut a handle, CPtr or
-   CMutPtr`. The out-parameter feature this RHI already uses covers handles and bare pointers, not
-   records C fills; the surface capability records get by because a record *parameter* is already
-   the address of its fields, which is not the same thing.
-3. `PresentInfo { swapchain: Swapchain {} }` → `opaque handles cannot be constructed`. Arrays *of
-   handles* cannot be seeded from Grail at all, and `vkQueueSubmit` and `vkQueuePresentKHR` are
-   arrays of handles: semaphores, swapchains and image indices. The record-of-handles idiom this RHI
-   uses works only where C is the writer.
+```grail
+mut bytes = u8[118, 115, 95, 109, 97, 105, 110, 0];   // "vs_main\0"
+mut name: CStr;
+unsafe { name = cstr(&bytes); }                       // the bytes are the binding's, not a temporary's
+```
 
-Also absent by intent, not by limitation: the event pump, input, displays, clipboard
-(`grail_window.h`'s other half), debug messengers, device memory and allocations, bindless tables,
-and everything downstream of a device.
+`SDL_CreateWindow(cstr("..."))` is fine for the same reason in reverse: the pointer is used inside the
+statement that made it.
+
+The three diagnostics the previous increment was written around -
+`cptr requires a byte sequence or view`, `an extern C out-parameter must be &mut a handle, CPtr or
+CMutPtr` and `opaque handles cannot be constructed` - are gone: `cptr(&record)`, `&mut Record` and
+`Slot { handle: h }` from a handle the program holds all compile and run. `tests/native-cases.json`
+pins the new refusals in their place (a `cptr` of a temporary, a `cptr` of a non-extern record, two
+pointers to one record in one call, an out-parameter without a binding).
 
 ### One record, one call
 
-A workaround this increment had to make, and the reason it is written down: passing one count
+A workaround from increment 3 that still holds, and the reason it is written down: passing one count
 record to two *different declarations of the same symbol* (`vkEnumeratePhysicalDevices` as a count
-query, then `vkEnumeratePhysicalDevices` as the single-slot form) made the program abort at exit,
-inside the runtime's free path, after it had already printed everything and returned 0 from `main`.
-Each call gets its own record now. The two-declaration idiom itself is fine - the probes use it for
-the count-then-fill pairs - so this is about one record instance crossing two calls, not about the
-shape. It was not chased further because `compiler/` is off limits while a bootstrap reseed runs.
+query, then as the single-slot form) made the program abort at exit, inside the runtime's free path,
+after it had already printed everything and returned 0 from `main`. Each call gets its own record
+now - `rhi_swapchain::swapchain_images` and `rhi_render::create_semaphores` both build a fresh
+`Uint32Out` per call for that reason. The two-declaration idiom itself is fine, and this increment
+uses it three more times.
 
 ## Linking, skipping and the GPU lock
 
@@ -428,31 +631,26 @@ shape. It was not chased further because `compiler/` is off limits while a boots
 
 ## The next increments
 
-1. **A bare pointer to an owned record in the FFI** - still the one feature everything else waits
-   on, now with the whole list of what it unblocks in the table above and the three acceptance tests
-   below it. The narrow shape: `cptr(&record)` / `cptr_mut(&mut record)` for an `extern "C"` record,
-   one word, `unsafe`, with the same call-scoped borrow rules as a view (`docs/ffi.md` would
-   document it beside `cptr` of a byte sequence). An array of structs is then a record of embedded
-   record fields - their bytes are laid out contiguously, so the record's address *is* the array -
-   and an array of `char *` is a record of `CStr` fields. For the arrays of *handles* in
-   `VkSubmitInfo` and `VkPresentInfoKHR` the same form has to work over a record of handle fields,
-   which is the one part that needs the feature to accept a record whose fields are handles, not
-   just scalars.
-2. **Device, swapchain, render pass, clear, present** - nothing new in design:
-   `abundance_rhi_surface` already picks the format, present mode, extent and image count, and
-   `abundance_rhi_vulkan` already picks the device and the queue family. What is new is the
-   `VkDeviceQueueCreateInfo` and `VkDeviceCreateInfo` graphs, the `VK_KHR_swapchain` name array, a
-   `VkRenderPassCreateInfo` with one colour attachment that loads `CLEAR` and stores to
-   `PRESENT_SRC_KHR`, one framebuffer per swapchain image, one command buffer recording
-   `vkCmdBeginRenderPass` + `vkCmdEndRenderPass`, one fence waited per frame, and the
-   acquire/submit/present loop with a semaphore chain. The clear colour can be a `VkClearValue` in
-   the record, so no shader is needed for that frame - and when one is, `vkCreateShaderModule` is
-   ready: `pCode`/`codeSize` come from `abundance_rhi_shader` and the committed blobs.
-3. **Pipelines, and the first frame drawn into.** `VkGraphicsPipelineCreateInfo` points at
-   `pStages`, `pVertexInputState`, `pInputAssemblyState`, `pViewportState`, `pRasterizationState`,
-   `pMultisampleState`, `pDepthStencilState`, `pColorBlendState` and `pDynamicState`, so it waits on
-   increment 1. The vertex input it needs is already emitted as constants by the shader build
-   (`vertex_input_count`, `vertex_stride`, and location/offset/format per input in
-   `abundance_rhi_shader_blob`), so no reflection happens at run time; the remaining unknown is
-   whether the first pipeline uses push constants or a uniform buffer, which is a design decision
-   for that increment rather than a toolchain question.
+The path these increments were ordered along is finished: the FFI can pass records to C, and a Grail
+program now creates a device, presents N frames with a pipeline in them, and reads the pixels back.
+What is worth building next, in the order the RHI would feel it:
+
+1. **Two frames in flight, and swapchain recreation.** Two command buffers, two fences, two
+   image-available semaphores, and a `VK_ERROR_OUT_OF_DATE_KHR` path that rebuilds the swapchain from
+   the surface's new answers (`create_swapchain` already takes every decision as a parameter, so this
+   is a caller change and a `oldSwapchain` that is no longer null).
+2. **A staging buffer, and a mapped upload path.** `vkMapMemory` returns `void *` and this language can
+   copy *from* it but not write *through* it; a vertex upload larger than `vkCmdUpdateBuffer`'s 64 KiB
+   needs a `vkCmdCopyBuffer` from a host-visible staging buffer that something filled. The missing
+   piece is a writable byte view of a mapped range - a small FFI addition, and the same shape a
+   texture upload would need.
+3. **The validation layer.** `ppEnabledLayerNames` on `VkInstanceCreateInfo` is now expressible (a
+   record of `CStr` fields, exactly like the device's extension names), so the suite's validated
+   variant could stop saying `not-installed` and start finding things on this machine.
+4. **Depth, and a second attachment.** The render pass takes more than one attachment and the pipeline
+   takes a `VkPipelineDepthStencilStateCreateInfo`; both are the same records with more fields.
+5. **Descriptors and a uniform buffer.** `VkDescriptorSetLayoutCreateInfo`,
+   `VkDescriptorPoolCreateInfo` and `VkWriteDescriptorSet` are the first create infos whose pointers
+   point at *arrays of structs built by Grail* rather than at one struct - which is a record of
+   embedded records, i.e. the shape this increment already uses for `ShaderStages` and
+   `VertexAttributes`. No new FFI feature is expected.

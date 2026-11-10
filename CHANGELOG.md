@@ -41,6 +41,27 @@
   `cptr(&triangle)` - no staging buffer and no mapped memory - followed by a memory barrier to the
   vertex stage. The probe reads the entry point out of the SPIR-V's own `OpEntryPoint` and passes the
   bytes it found, so a renamed shader cannot leave a stale name behind.
+  **4. the readback.** Every presented frame is copied out of the swapchain image
+  (`vkCmdCopyImageToBuffer`, one `VkBufferImageCopy` region record, into a host-visible coherent
+  buffer) after a COLOR_ATTACHMENT_OPTIMAL -> TRANSFER_SRC_OPTIMAL barrier, then barriered on to
+  PRESENT_SRC_KHR, and after the fence the buffer is mapped, memcpy'd into Grail bytes and checked:
+  626688 cleared pixels and 294912 covered ones out of 921600, none of any other colour, the covered
+  count equal to the triangle's own area (0.32 x width x height), the corner (4,4) reading 0,0,0,255
+  and the centre (640,270) reading 0,0,255,255 in B8G8R8A8 order, and the same FNV-1a digest for all
+  three frames. "It presented" is not the evidence; the bytes are.
+- FFI, found by increment 4b and recorded in `docs/rhi.md` ("What the FFI does not do safely"),
+  both reproducible without Vulkan and neither worked around by laying bytes out by hand:
+  **`&mut` of an extern record field of a plain record does not reach the field's storage.** A write
+  through such a reference lands in the proxy slot, not in the container - `set_y(&mut bag.pair, 7)`
+  leaves `bag.pair.y` at 0 and puts the 7 in the next field. A slot array written through such a
+  reference is a record of null handles, which is how it was found: a null `VkFramebuffer` handle, and
+  a segfault inside the driver. Direct field writes and passing the interior record by value are both
+  correct; only the reference is wrong. **A `CStr` taken from a string literal must not outlive the
+  statement that made it**: `cstr` is zero-copy and a literal's bytes are a temporary, so keeping the
+  `CStr` in a binding and using it later reads freed memory - it read correctly often enough to be
+  missed here, and the pipeline's entry-point names now come out of the SPIR-V into byte-sequence
+  bindings instead. Both are `compiler/` bugs and `compiler/` is off limits in this increment, so they
+  are reported rather than patched.
 - FFI: a C callback's extern-record parameter is borrowed, not owned. The parameter prologue marked
   every parameter as an owning binding, so the epilogue ran the record's drop glue on the address C
   handed over — freeing the caller's struct (or its stack) — and the process then aborted inside the
