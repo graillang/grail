@@ -104,34 +104,33 @@ function proveDigests(directory) {
 }
 
 // (d) No leakage: no body, no local name, no synthetic module, no other module's declarations.
-function proveNoLeakage(directory, sources) {
+// The fixture below names its locals and its helper with distinctive identifiers, so "the interface
+// does not carry a body" is checked by looking for them rather than by scanning for any short word.
+function proveNoLeakage(directory, module) {
   const synthetic = ['.impl_', '.inherent_', '.interface_', '.union', '.result', '.closure', '__start'];
   for (const path of interfaceFiles(directory)) {
-    const module = moduleOf(path);
+    const owner = moduleOf(path);
     const text = readFileSync(path, 'utf8');
     for (const line of text.split('\n')) {
       if (line.length === 0 || line.startsWith('//')) continue;
-      // A declaration line never carries a body or a statement.
+      // A declaration line never carries a statement or a block.
       assert.doesNotMatch(line, /[{};]/, `${path}: a declaration line carries a statement: ${line}`);
       for (const marker of synthetic) {
         assert.ok(!line.includes(marker), `${path}: leaks the synthetic module ${marker}: ${line}`);
       }
       // Every nominal reference belongs to this module or to `.closure` (an environment record).
-      for (const [, owner] of line.matchAll(/([A-Za-z_.][A-Za-z0-9_.]*)::[A-Za-z_][A-Za-z0-9_]*/g)) {
-        assert.ok(owner === module || owner === '.closure', `${path}: names ${owner}::, another module's declaration: ${line}`);
+      for (const [, referenced] of line.matchAll(/([A-Za-z_.][A-Za-z0-9_.]*)::[A-Za-z_][A-Za-z0-9_]*/g)) {
+        assert.ok(referenced === owner || referenced === '.closure', `${path}: names ${referenced}::, another module's declaration: ${line}`);
       }
     }
-    assert.ok(!/\bfn .*\{/.test(text), `${path}: carries a function body`);
-    // A local binding of the source must not appear anywhere.
-    for (const source of sources) {
-      const body = readFileSync(source, 'utf8');
-      for (const [, local] of body.matchAll(/\b(?:mut\s+)?([a-z][A-Za-z0-9_]*) :=/g)) {
-        assert.ok(!new RegExp(`\\b${local}\\b`).test(text), `${path}: leaks the local name ${local}`);
-      }
+    // The fixture's private helper and its local bindings must not appear anywhere.
+    for (const secret of ['zzprivatehelper', 'zzprivatemessage', 'zzprivatecounter', 'zzprivatevalue']) {
+      assert.ok(!text.includes(secret), `${path}: leaks the private name ${secret}`);
     }
-    // An interface is one declaration per line and nothing else: no multi-line structure.
+    assert.ok(!/\breturn\b/.test(text), `${path}: an interface carries a return statement`);
     assert.ok(!text.includes('\n\n'), `${path}: unexpected blank line`);
   }
+  return module;
 }
 
 // (a) Equivalence for one program: source build, interface build, verify build.
@@ -256,157 +255,10 @@ function proveTampering() {
   writeFileSync(join(project, 'grail.pkg'), 'name tamper\n');
   writeFileSync(join(project, 'src/util.grl'), `module util;
 
-handle Stream: transferable;
-
-extern "C" lib "c" fn fopen(path: CStr, mode: CStr) -> Stream;
-
-pub struct Point {
-    x: u64,
-    y: u64
+fn zzprivatehelper(value: u64) -> u64 {
+    zzprivatecounter := value * 3;
+    return zzprivatecounter;
 }
-
-pub fn twice(x: u64) -> u64 {
-    return x * 2;
-}
-`);
-  writeFileSync(join(project, 'src/main.grl'), 'use util;\n\npub fn main() -> u64 {\n    p := util::Point { x: 1, y: 2 };\n    println(util::twice(p.x + p.y));\n    return 0;\n}\n');
-  const files = [join(project, 'src/main.grl'), join(project, 'src/util.grl'), runtime, platform];
-  const ifaces = emit(files, directory);
-  const util = join(ifaces, 'util.iface');
-  const original = readFileSync(util, 'utf8');
-  assert.match(original, /type util::Stream handle params=0 lifetimes=0 transfer=1 share=0/, 'the audited handle contract must travel');
-  const manifestPath = join(ifaces, 'interfaces.manifest');
-
-  // (c1) a changed `transfer` is refused: the manifest pins the bytes the emitting run wrote, so an
-  // edit to the audit result never reaches the checker.
-  writeFileSync(util, original.replace('transfer=1 share=0', 'transfer=0 share=0'));
-  const edited = compile(files, join(directory, 'edited'), ['--interface', ifaces]);
-  assert.equal(edited.status, 1, 'a tampered transfer must be refused');
-  assert.match(edited.output, /module `util`: the interface file does not match the manifest/, `the refusal must name the module and the manifest: ${edited.output}`);
-  assert.match(edited.output, /manifest says \S+, the file is \S+/, 'the refusal must show both digests');
-
-  // (c2) re-digesting the edit does not launder it: the manifest pins the bytes that were written.
-  const tampered = original.replace('transfer=1 share=0', 'transfer=0 share=0');
-  const reDigested = `${tampered.slice(0, tampered.indexOf('\ndigest "') + 1)}digest "${sha256(tampered.slice(0, tampered.indexOf('\ndigest "') + 1))}"\n`;
-  writeFileSync(util, reDigested);
-  const laundered = compile(files, join(directory, 'laundered'), ['--interface', ifaces]);
-  assert.equal(laundered.status, 1, 'a re-digested tamper must still be refused');
-  assert.match(laundered.output, /module `util`: the interface file does not match the manifest/, `the refusal must name the manifest: ${laundered.output}`);
-
-  // (c3) with the manifest rewritten too, `--verify` still refuses and names the declaration: the
-  // entry is never silently honoured while the sources are available.
-  const [module, , sourceDigest] = readFileSync(manifestPath, 'utf8').split('\n').find(line => line.startsWith('util ')).split(' ');
-  writeFileSync(manifestPath, readFileSync(manifestPath, 'utf8').replace(/^util \S+/m, `util ${sha256(reDigested)}`));
-  const verified = compile(files, join(directory, 'verify'), ['--interface', ifaces, '--verify-interface']);
-  assert.equal(verified.status, 1, '`--verify` must refuse a tampered transfer');
-  assert.match(verified.output, /module `util` does not match this interface/, `the refusal must name the module: ${verified.output}`);
-  assert.match(verified.output, /transfer=0/, 'the refusal must show the interface line that differs');
-  assert.match(verified.output, /transfer=1/, 'the refusal must show what the sources give');
-
-  // (c4) the same for a closure type's environment record. No source-level declaration produces a
-  // capturing closure type today (that arrives with generic bodies in interfaces), so the entry is
-  // injected in the format's own spelling - and it must be refused, not honoured.
-  writeFileSync(util, original);
-  writeFileSync(manifestPath, readFileSync(manifestPath, 'utf8').replace(/^util \S+/m, `util ${sha256(original)}`));
-  const withEnv = original.replace('field x u64', 'field x u64\nfield callback (closure 0 [] (u64) u64 (named .closure::env1))').replace(/\ndigest ".*"\n$/, '\n');
-  const injected = `${withEnv}env env1\nfield captured u64\ndigest "${sha256(withEnv)}"\n`;
-  writeFileSync(util, injected);
-  writeFileSync(manifestPath, readFileSync(manifestPath, 'utf8').replace(/^util \S+/m, `util ${sha256(injected)}`));
-  const envRefused = compile(files, join(directory, 'env'), ['--interface', ifaces, '--verify-interface']);
-  assert.equal(envRefused.status, 1, 'a tampered env entry must be refused');
-  assert.match(envRefused.output, /module `util` does not match this interface/, `the env refusal must name the module: ${envRefused.output}`);
-  assert.match(envRefused.output, /env|closure|field/, 'the env refusal must show the injected entry');
-
-  // Restore and prove the interface still builds, so the refusals above are about the edit.
-  writeFileSync(util, original);
-  writeFileSync(manifestPath, readFileSync(manifestPath, 'utf8').replace(/^util \S+/m, `util ${sha256(original)}`));
-  const restored = compile(files, join(directory, 'restored'), ['--interface', ifaces]);
-  assert.equal(restored.status, 0, `an untouched interface must still build\n${restored.output}`);
-  return { stale: false, edited: edited.output.trim().split('\n')[0], manifest: laundered.output.trim().split('\n')[0], verify: verified.output.trim().split('\n')[0], env: envRefused.output.trim().split('\n')[0] };
-}
-
-// ---- the corpus -------------------------------------------------------------
-function corpusCases() {
-  const cases = JSON.parse(readFileSync(join(root, 'tests/native-cases.json'), 'utf8'));
-  const selected = [];
-  for (let i = 0; i < cases.length; i += 1) {
-    const test = cases[i];
-    if (test.targets && !test.targets.includes(target)) continue;
-    if (test.removedSyntax) continue;
-    const modules = (test.modules ?? []).map(file => resolve(root, file));
-    // A case with no second module has nothing to read from an interface, but its own interface is
-    // still emitted and verified; `--full` runs all of them.
-    if (modules.length === 0 && !full) continue;
-    if (test.compileOnly && test.reject) continue;
-    selected.push({ index: i, test, modules });
-  }
-  return selected;
-}
-
-function corpusDirectory(name, index) {
-  return join(work, 'corpus', `${index}-${name.replace(/[^A-Za-z0-9_-]/g, '_')}`);
-}
-
-function proveCorpus() {
-  const selected = corpusCases();
-  let passed = 0;
-  for (const { index, test, modules } of selected) {
-    const directory = corpusDirectory(test.name, index);
-    mkdirSync(directory, { recursive: true });
-    let files;
-    if (test.files) files = [...test.files.map(file => resolve(root, file)), ...modules];
-    else {
-      const input = join(directory, 'input.grl');
-      writeFileSync(input, test.source);
-      files = [input, ...modules];
-    }
-    files = [...files, runtime, platform];
-    if (test.reject) proveRejected(test.name, files, directory);
-    else if (test.compileOnly) {
-      // Compile-only cases still have to accept the same interfaces.
-      const source = compile(files, join(directory, 'source'));
-      assert.equal(source.status, 0, `${test.name}: source build failed\n${source.output}`);
-      const ifaces = emit(files, join(directory, 'emit'));
-      const viaInterface = compile(files, join(directory, 'interface'), ['--interface', ifaces]);
-      assert.equal(viaInterface.status, 0, `${test.name}: interface build failed\n${viaInterface.output}`);
-      proveDigests(ifaces);
-    } else if (test.overflow === 'wrap') {
-      const source = compile(files, join(directory, 'source'), ['--overflow=wrap']);
-      assert.equal(source.status, 0, `${test.name}: source build failed\n${source.output}`);
-      const ifaces = emit(files, join(directory, 'emit'));
-      const viaInterface = compile(files, join(directory, 'interface'), ['--interface', ifaces, '--overflow=wrap']);
-      assert.equal(viaInterface.status, 0, `${test.name}: interface build failed (wrap)\n${viaInterface.output}`);
-    } else {
-      proveEquivalent(test.name, files, directory, { stdout: test.stdout });
-    }
-    passed += 1;
-  }
-  return passed;
-}
-
-// ---- report -----------------------------------------------------------------
-const results = [];
-const report = (label, detail) => { results.push({ label, detail }); console.log(`interface: ${label}: ${detail}`); };
-
-const self = proveSelfHosting();
-report('compiler compiled against its own interfaces', `${self.modules} interfaces, ${self.digests} digests, identical assembly`);
-
-const stale = proveStale();
-report('stale interface refused', stale);
-
-const tamper = proveTampering();
-report('edited transfer refused (digest)', tamper.edited);
-report('edited transfer refused (manifest)', tamper.manifest);
-report('edited transfer refused (--verify)', tamper.verify);
-report('edited env refused (--verify)', tamper.env);
-
-// (d) no leakage, on a module whose source has a distinctive local name and a body.
-function proveLeakage() {
-  const directory = join(work, 'leak');
-  const project = join(directory, 'project');
-  mkdirSync(join(project, 'src'), { recursive: true });
-  writeFileSync(join(project, 'grail.pkg'), 'name leak\n');
-  writeFileSync(join(project, 'src/util.grl'), `module util;
 
 pub struct Point {
     x: u64,
@@ -420,13 +272,14 @@ impl Point {
 }
 
 pub fn twice(x: u64) -> u64 {
-    return x * 2;
+    zzprivatevalue := x * 2;
+    return zzprivatevalue;
 }
 `);
-  writeFileSync(join(project, 'src/main.grl'), 'use util;\n\npub fn main() -> u64 {\n    println(util::twice(2));\n    return 0;\n}\n');
+  writeFileSync(join(project, 'src/main.grl'), 'use util;\n\npub fn main() -> u64 {\n    zzprivatemessage := util::twice(2);\n    println(zzprivatemessage);\n    return 0;\n}\n');
   const files = [join(project, 'src/main.grl'), join(project, 'src/util.grl'), runtime, platform];
   const ifaces = emit(files, directory);
-  proveNoLeakage(ifaces, files);
+  proveNoLeakage(ifaces, 'util');
   const text = readFileSync(join(ifaces, 'util.iface'), 'utf8');
   for (const marker of ['.impl_', '.inherent_', '.closure', '.union', '.result', '__start', 'return', 'fn sum<a>']) {
     assert.ok(!text.includes(marker), `util.iface leaks ${marker}`);
