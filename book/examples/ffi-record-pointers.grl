@@ -1,0 +1,45 @@
+// Two shapes every C library with create-info structs needs, and the two FFI forms that reach
+// them: the address of a record Grail owns, and a record C fills in place.
+//
+// `book/ffi/record-pointers.c` is the C side, compiled by clang beside this file:
+//
+//     long long book_create(const struct create_info *info) {
+//         return info->p_app->api_version + info->count;
+//     }
+//     long long book_fill(struct app_info *app) {   // leaves `flags` alone
+//         long long seen = app->flags;
+//         app->api_version = 7;
+//         return seen;
+//     }
+extern "C" record AppInfo { api_version: u32, flags: u32 }
+extern "C" record CreateInfo { s_type: u32, pad: u32, p_app: CPtr, count: u32 }
+
+extern "C" lib "record-pointers.o" fn book_create(info: CreateInfo) -> i64;
+extern "C" lib "record-pointers.o" fn book_fill(app: &mut AppInfo) -> i64;
+
+fn main() -> u64 {
+    // A struct that *points at* another struct: `p_app` is the `const struct app_info *` C reads,
+    // and `cptr(&app)` is the address of `app`'s own fields.
+    mut app = AppInfo { api_version: 1, flags: 0 };
+    mut info = CreateInfo { s_type: 0, pad: 0, p_app: cnull(), count: 7 };
+    unsafe {
+        info.p_app = cptr(&app);
+    }
+    mut created: i64 = 0;
+    unsafe {
+        created = book_create(info);
+    }
+    println(created); // 1 + 7
+
+    // A struct C fills: `&mut filled` is the `struct app_info *`. Declared without an initializer,
+    // an extern record is zero-filled, which is what `flags` reads back - and `api_version` is
+    // whatever C wrote there.
+    mut filled: AppInfo;
+    mut seen: i64 = 0;
+    unsafe {
+        seen = book_fill(&mut filled);
+    }
+    println(seen);
+    println(filled.api_version);
+    return 0;
+}
