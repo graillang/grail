@@ -486,9 +486,10 @@ Not implemented yet, and each rejected rather than approximated:
   SysV/AAPCS64 lowering but are compiled and linked only (no macOS runner);
 - an out-parameter on a C callback or a `cfn` type: only a declaration Grail calls can write a slot
   (see Out-parameters above);
-- records *passed* by value as arguments (an extern record parameter is the C `R *`; the spelling
-  `v: byval R` is decided - see [B7](design/decisions-b2-b6.md#b7-byval-record-parameters-accepted) -
-  and implementation follows the separate-compilation work); record
+- records passed by value on the Windows ABIs: `v: byval R` is implemented for the Linux/macOS
+  ABIs and refused by name for Windows x86-64 and Windows ARM64
+  (`tests/ffi/byval_records.grl`), and a `byval` parameter on a callback is refused too (C calling
+  Grail with a by-value record). Without `byval`, an extern record parameter is the C `R *`; record
   results are returned by value on every ABI, float fields included
   (`tests/ffi/call_records.grl`, `float_record_results.grl`), and nested records included,
   except a result whose embedded records contain floats (its register classification needs the

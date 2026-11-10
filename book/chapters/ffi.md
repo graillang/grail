@@ -74,7 +74,11 @@ same numbers.
   the same reason: it is borrowed, never freed.
 - A `handle` is an opaque C token and still cannot be constructed: a null handle comes from a
   zero-filled record field or from a declaration's out-parameter.
-- Records cannot yet be passed **by value** (`v: byval R` is decided and in progress), a callback
-  cannot write through a pointer it is given (no deref-assignment), and there is no pointer
-  arithmetic, so an array of dynamic length is a fixed-capacity record with the count checked
+- A record crosses by pointer unless the declaration spells `v: byval R`, which passes the struct by
+  value per the target ABI on the Linux targets and is refused by name on Windows. A callback cannot
+  write through a pointer it is given (there is no deref-assignment), and there is no pointer
+  arithmetic, so an array of dynamic length is a fixed-capacity record with its count checked
   afterwards.
+- A `CPtr` is a word with no lifetime: the borrow that produced it lasts for the statement, so a
+  pointer kept in a binding past that statement is the program's responsibility, and the address of
+  a temporary is refused outright.
