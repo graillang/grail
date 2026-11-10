@@ -32,11 +32,35 @@ B7's syntax; closures need B6).
 | --- | --- | --- |
 | B1 | **Separate compilation and checked module interfaces.** The compiler reads every module and emits one assembly file. Borg (about 363,000 lines) cannot be built that way; Abundance probably can at first. Needs a module-interface design. | `implementation-status.md`, `borg-agent-port.md` blocker 2 |
 | B2 | **Authority / capability model** for OS access (ambient `host::` functions today). | `implementation-status.md` |
-| B3 | **Suspension and blocking contract** for foreign calls inside green tasks (what happens when a task calls a blocking DLL function). | `implementation-status.md`, `concurrency-v1.md` |
+| B3 | **Suspension and blocking contract** for foreign calls inside green tasks (what happens when a task calls a blocking DLL function). **Decided and implemented** (see B3 below). | `implementation-status.md`, `concurrency-v1.md` |
 | B4 | **Windows I/O readiness model**: the green-task reactor is epoll-only; Windows needs IOCP (or a documented thread-per-blocking-call policy). | `runtime.grl` |
 | B6 | **Closure capture model**: mutable captures (FnMut) and closure parameters that hold borrows need lifetime rules for the closure object - either region-bounded closures (cannot escape the borrow's scope) or by-reference capture cells with explicit `move`. Generic iterator adapters over borrowed elements depend on it. | `docs/design/closures.md` |
 | B7 | **Records passed by value to C**: an `extern "C" record` parameter is the C `R *` today (what Win32, Vulkan and D3D12 use). By-value struct arguments (ImGui `ImVec2`, some SDL calls) need a spelling, e.g. `v: byval R`, and per-ABI classification. | `docs/ffi.md` |
 | B5 | **Abort/unwind policy**: abort paths do not unwind, and nothing may unwind across the C boundary. **Decided and implemented** (see B5 below). | `implementation-status.md` |
+
+### B3 (decided and implemented): a foreign call blocks the executing task thread
+
+The contract is one sentence: a foreign call blocks the executing task thread, and the runtime never
+pretends otherwise. On Linux that thread is a green worker, so a blocking `extern "C"`/`cfn` call
+takes one worker out of the pool for its whole duration; more blocking tasks than workers means the
+extra tasks wait. The runtime's own blocking operations do not do this: `host::read_file`,
+`host::write_file` and `host::command` hand the call to a dedicated OS thread and suspend the task
+(`rt_blocking_call`, the single documented handoff), while `host::pipe` reads/writes and
+`host::sleep_ms` suspend on the reactor. On Windows a task is an OS thread, so a blocking call
+blocks only that task (see B4).
+
+What is enforced rather than described: the handoff is the only way a green task runs a blocking
+operation, and a declared blocking call makes the runtime say so once per process on stderr
+(`rt_blocking_enter`), naming the contract, `docs/ffi.md` and the handoff. Evidence:
+`tests/concurrency/blocking_call.grl` (two tasks: one calls libc `usleep` and declares it, one spins
+until the blocked task finishes; asserts the spinner ran during the block, the block really lasted,
+and the warning appears exactly once) and `blocking_call_handoff.grl` (the same call through
+`rt_blocking_call`: the spinner still runs and stderr stays silent).
+
+What is not implemented: the compiler does not wrap `extern "C"`/`cfn` call sites, so an undeclared
+blocking call is not detected and does not warn; making every foreign call declare itself needs the
+call lowering in `compiler/native.grl`, which this increment does not touch. There is also no
+migration or preemption: a task blocked in C cannot be moved to another thread.
 
 ### B5 (decided and implemented): abort never unwinds
 

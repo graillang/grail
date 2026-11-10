@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Decision B3 (suspension and blocking contract): a foreign call blocks the executing task thread.
+  The runtime's own blocking operations hand the call to a dedicated OS thread and suspend the task
+  (`rt_blocking_call`, now the single entry point for `host::read_file`, `host::write_file` and
+  `host::command`), so no worker is lost; `host::pipe` and `host::sleep_ms` suspend on the reactor.
+  An `extern "C"`/`cfn` call is not wrapped by the compiler, so it runs on the worker and blocks it,
+  and a wrapper that knows it blocks declares that with `rt_blocking_enter`, which makes the runtime
+  warn once per process on stderr. Native cases `blocking-foreign-call-occupies-worker` (two tasks,
+  one blocking in libc `usleep`: the other keeps running and the warning appears exactly once) and
+  `blocking-foreign-call-handoff-is-silent` (the same call through the handoff: silent) pin the
+  contract; `docs/ffi.md` states it for users.
 - Decision B5 (abort/unwind policy): abort never unwinds, and nothing may unwind across the C
   boundary. `rt_abort` is the only abort entry point and now ends in a platform `rt_hard_exit`:
   `exit_group` on Linux, `TerminateProcess` on Windows, `_exit` on macOS. Two defects are fixed.

@@ -257,6 +257,29 @@ live owner in an unknown state.
 - A `defer`/scope cleanup inside the aborting Grail frame does not run either. Cleanup is for
   ordinary return, error propagation and structured scope exit, not for abort.
 
+## Blocking foreign calls
+
+**A foreign call blocks the executing task thread.** On Linux that thread is a worker of the green
+task pool, so while the call blocks, that worker runs no other task; with more blocking tasks than
+workers, the extra tasks wait. Only the runtime's own blocking operations hand off to a dedicated
+thread: `host::read_file`, `host::write_file` and `host::command`, and only when they are called
+from a green task. `host::pipe` reads and writes wait on the readiness reactor, and
+`host::sleep_ms` uses a timer, so those suspend instead of blocking.
+
+- An `extern "C"` call, or a call through a `cfn` value, is not wrapped by the compiler: it runs on
+  the calling task's thread and blocks it for as long as the C function runs. Nothing in the
+  scheduler preempts it or moves the task to another thread.
+- A wrapper that knows its call blocks declares it with the runtime hook
+  `rt_blocking_enter()` (in `unsafe module runtime`), immediately before the call. The runtime then
+  emits one warning per process on stderr naming this contract, the documentation and the way out,
+  so a program cannot quietly lose a worker. Nothing warns for an undeclared call, because the
+  compiler does not wrap call sites.
+- The way out is the documented handoff: `rt_blocking_call(f, a, b)` runs `f(a, b)` on a dedicated
+  OS thread and suspends the task, so the worker stays available. That is exactly what
+  `host::read_file`, `host::write_file` and `host::command` do.
+- On Windows a task is an OS thread (see `concurrency-v1.md`), so a blocking foreign call blocks
+  only the task that made it and no handoff is needed.
+
 ## Limits
 
 ## Direct calls: calling conventions

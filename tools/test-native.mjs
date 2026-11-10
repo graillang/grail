@@ -82,6 +82,12 @@ for (const test of cases) {
     if (result.error) throw result.error;
     // A case that dies by signal can still pin its output: an abort must not resume the foreign or
     // Grail code that ran before it, so what was printed up to the abort is part of the contract.
+    // A diagnostic the runtime promises (once per process) is part of the observable contract.
+    if (test.stderr !== undefined) {
+      const errors = result.stderr.toString();
+      const occurrences = errors.split(test.stderr).length - 1;
+      assert.equal(occurrences, test.stderrCount ?? 1, `${test.name}: expected ${test.stderrCount ?? 1} x ${JSON.stringify(test.stderr)} in ${JSON.stringify(errors)}`);
+    }
     if (test.signal) {
       assert.equal(result.signal, test.signal, `${test.name}: ${result.status}: ${result.stderr}`);
       if (test.stdout !== undefined) assert.equal(result.stdout.toString(), test.stdout, test.name);
