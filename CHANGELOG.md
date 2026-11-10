@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- Strict-bool is now the language's rule, not an opt-in survey: a `bool` and an integer no longer mix,
+  and every `if`/`while` condition must be a `bool`. `if n` is written `if n != 0`, `(a < b) + (c < d)`
+  is `a < b || c < d`, `flag & (x == 0)` is `flag != 0 && x == 0`, and `f(x) == 0` on a predicate is
+  `!f(x)`. The compiler's own sources were migrated first (`docs/design/strict-bool-migration.md`):
+  `--strict-bool-report` over them went 1595 -> 1409 (predicates that return `bool` instead of a 0/1
+  `u64`) -> 405 (operators) -> 0 (conditions).
+  - `--strict-bool` is gone: the rule is enforced whenever the compiler type-checks a program (it stays
+    off in `unsafe module` sources, as before), and a violation is a compile error.
+  - `--strict-bool-report` remains as the survey mode: it prints `file:line:column: message` for every
+    violation, keeps compiling and exits 0.
+  - `--strict-bool-fix` and its `FIX ...` records are deleted; the `tools/strict-bool-fix.py` they were
+    meant for never existed.
+  - Migrated with it: the test corpus and the examples (`tests/native-cases.json`, `compiler/tests`,
+    `compiler/examples`, `book/examples`, `examples/loops/cleanup.grl`), where `if flag` became
+    `if flag != 0` and the fixture that asserted bool arithmetic now spells the conversion with
+    `u64(1 == 1) + u64(2 == 2)`.
 - Merge the three design reviews from branch `claude/brave-heisenberg-0h3ska` as documents only
   (`docs/design/first-principles-architecture.md`, `architecture-reassessment.md`,
   `complexity-reassessment.md`, 2,746 lines). Their edits to README and to the research-phase

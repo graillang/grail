@@ -1,9 +1,10 @@
 // Extract the u64 functions that are really predicates.
 //
-// `--strict-bool` (compiler/native.grl, `strict_bool_check` / `strict_condition`) reports a u64
-// function that returns a comparison, `true`/`false` or another predicate as bool/integer mixing.
-// Converting those helpers to `-> bool` is the first migration phase: while a predicate still
-// returns u64, every caller's condition reads as an integer condition.
+// compiler/native.grl's `strict_bool_check` / `strict_condition` enforce that bools and integers do
+// not mix, but a `u64` function that returns a comparison (`return n == 0`) is not itself a violation
+// until something tests it, and then the report blames the caller's condition instead of the
+// declaration that is wrong. This tool finds those declarations ahead of the checker: while a
+// predicate still returns u64, every caller's condition reads as an integer condition.
 //
 // Not every bool-shaped u64 function is a predicate. The compiler's command handlers return 0/1 as
 // a *process exit status* (`test_command` ends with `return failed != 0`), and the runtime's void
