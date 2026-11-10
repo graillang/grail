@@ -12,14 +12,16 @@
   Only `handle`, `CPtr` and `CMutPtr` slots are out-parameters; a shared `&H`, any other `&mut T`, a
   C callback parameter and a `cfn` type's parameter are refused with their own diagnostic, and the
   slot is an ordinary mutable borrow, so one call cannot take it twice
-  (`compiler/native.grl`, `docs/ffi.md`, `tests/ffi/out_params.grl`).
+  (`compiler/native.grl`, `docs/ffi.md`, `tests/ffi/out_params.grl`, and the `ffi-out-params` case
+  that executes under Wine on Windows x86-64).
 - FFI calls of more than six word arguments execute with the target's own limit: six integer argument
   registers on x86-64 and the outgoing stack after them, eight on AArch64 and RISC-V 64. Argument
   words past the register file are stack slots (up to 64 words, 2 KiB of outgoing area), so Vulkan
   entry points of seven to ten words are expressible. `tests/ffi/call_words.grl` executes seven,
   eight and nine word arguments with literal and computed values on x86-64, AArch64 and RISC-V 64, so
   a dropped or misplaced word changes the printed sum; with the old peephole argument-register model
-  the same fixture returns 91 and 603 instead of 140 and 204 on AArch64 and RISC-V 64.
+  the same fixture returns 91 and 603 instead of 140 and 204 on AArch64 and RISC-V 64. The
+  `ffi-call-words` case runs the same calls on Windows x86-64 under Wine.
 - Fixed: an exported C callback with a seventh or eighth parameter read the sixth again. The callback
   prologue clamped at `%r9` instead of reading the seventh and eighth integer argument registers, so
   on AArch64 and RISC-V 64 the extra parameters arrived as copies of the sixth. It now reads the

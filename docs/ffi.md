@@ -226,9 +226,10 @@ fn main() -> u64 {
   callback could not store through the pointer C handed it.
 - A handle cannot be constructed at all, not even as null from Grail (`cnull()` is a `CPtr`, and
   `Slot { instance: cnull() }` is a type mismatch), so a declaration's out-parameter is the way to
-  obtain one. `tests/ffi/out_params.grl` executes it on x86-64, AArch64 and RISC-V 64: every C twin
-  returns a checksum that reads the slot before writing it, so a slot passed by value, an
-  uninitialized slot, or a write Grail does not see all change the printed values.
+  obtain one. `tests/ffi/out_params.grl` executes it on x86-64, AArch64 and RISC-V 64, and on Windows
+  x86-64 under Wine through `tests/windows-cases.json`: every C twin returns a checksum that reads
+  the slot before writing it, so a slot passed by value, an uninitialized slot, or a write Grail does
+  not see all change the printed values.
 
 Argument and result registers are the C ABI's own, per target:
 
@@ -242,8 +243,8 @@ So a call takes six word arguments in registers on x86-64 and eight on AArch64 a
 further word is an eight-byte outgoing stack slot (Win64: four registers, a 32-byte home area, then
 slots). Six is not a compiler limit and no compiler limit has replaced it: a declaration may carry up
 to 64 argument words and the outgoing stack area is limited to 2 KiB. `tests/ffi/call_words.grl`
-executes calls of seven, eight and nine words, with both literal and computed arguments, on all three
-targets.
+executes calls of seven, eight and nine words, with both literal and computed arguments, on x86-64,
+AArch64 and RISC-V 64, and on Windows x86-64 under Wine.
 
 The result register is `rax`/`x0`/`a0` on all three. A foreign call is a direct symbol call with the
 same argument/result plumbing as a Grail call. Frames stay 16-byte aligned at call sites, and
@@ -449,7 +450,11 @@ compiles `tests/ffi/call_scalars.grl` with the FFI build, links the two through 
   RISC-V 64: 51 executed fixture instances and no link-only cases, plus two cross-compiled-only ones
   (`dlopen`, which needs a target glibc sysroot). `callback_words` executes the eight-register
   callback on AArch64 and RISC-V 64 and asserts that x86-64 and Windows refuse it by name. Without a
-  qemu runner the cross targets are linked and the ABI-level check is reported as link-only.
+  qemu runner the cross targets are linked and the ABI-level check is reported as link-only. The same
+  `out_params` and `call_words` sources are `ffi-out-params` and `ffi-call-words` cases in
+  `tests/windows-cases.json`, which `bun tools/windows.mjs check` builds as a PE image and executes
+  under Wine on Windows x86-64; Windows ARM64 is checked statically, because there is no ARM64
+  Windows runner.
 
 Rejections are part of the normal native corpus (`tests/native-cases.json`):
 `ffi-reject-safe-call`, `ffi-reject-abi`, `ffi-reject-parameter-type`, `ffi-reject-result-type`,
