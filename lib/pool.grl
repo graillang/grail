@@ -7,18 +7,27 @@ module pool;
 // ever crosses a job boundary - so no two jobs can address the same memory, and the compiler needs
 // no new property for this stage.
 //
-// What the checker already enforces here, and what it does not yet:
-//   - checked: item, result and context satisfy the structural Send/Share capability. A `handle`
-//     (file, socket, window) has neither, so a handle - even nested in a record or a vector - is
-//     refused with "does not satisfy Send", and a handle used as the shared context is refused with
-//     "does not satisfy Share". Plain data (integers, floats, bytes and records/enums of them) is
-//     accepted.
-//   - NOT checked yet: the closure's own captures. `|x: u64, u: u64| -> u64 touch(&held, x)` where
-//     `held` is a record holding a handle compiles today, in this module's functions exactly as in
-//     `parallel_map`, because the closure environment is not capability-checked. Until the
-//     compiler-side check lands, treat a closure passed to these functions as trusted: capture
-//     plain data only, and keep handles out of the capture. This is the one gap in stage 1, it is
-//     pre-existing in `parallel_map`, and it is being closed where the classification lives.
+// What the checker enforces here, and what it still does not:
+//   - checked, structurally, through the compiler's transferable/shareable classification: the item,
+//     the result, the shared context AND the closure's captured environment. A `handle` (file,
+//     socket, window) is thread-affine and carries no audited classification, so a handle - bare,
+//     nested in a record, or captured by the closure - is refused by name:
+//         cannot share closure capture `h`: h.file is thread-affine (a foreign handle with no
+//         audited classification)
+//     An `FnMut` closure is refused (concurrent workers would race on its own environment, so a
+//     capture is written through a Mutex or the result is owned instead); a `Task` handle, an
+//     exclusive borrow, a mutable slice and a type parameter with no capability proof are refused
+//     for the same reason. Plain data - integers, floats, bytes and records/enums of them - is
+//     accepted, and so is an audited declaration (`handle File: transferable;` - which is still not
+//     shareable unless it says `transferable, shareable`).
+//   - not checked: whether the *foreign library* behind a value is safe on another thread is what an
+//     audited declaration states, not something this module can see. `CStr`, `CPtr`, `CMutPtr` and
+//     `cfn` are deliberately unclassified, so they are refused as "unclassified foreign authority"
+//     rather than silently allowed, and there is no audited opt-in for them yet - a legitimate
+//     foreign blob cannot cross a job boundary today. `unsafe module` code can build or convert
+//     anything, so the classification above is exactly as strong as the safe surface over it. And
+//     two jobs writing the same OS descriptor is not a data race any type system can catch; it stays
+//     a documented hazard.
 //   - also not expressible yet: a job that outlives the call. There is no user-visible job handle;
 //     every function here is structured, so a job cannot outlive the memory of its caller.
 //

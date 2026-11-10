@@ -85,10 +85,15 @@
   `pool::run(count, f)`, `pool::for_chunks(data, chunks, f)` (consume a vector, one contiguous owned
   chunk per job, results concatenated in chunk order) and `pool::join(a, b)`; results are always in
   input order, and the ownership rule "everything a job's closure touches it owns" is stated in the
-  module. Known gap, documented there and in `docs/design/parallelism.md`: item, result and context
-  are capability-checked (handles are neither `Send` nor `Share`, so a handle inside a record or
-  vector is refused), but the closure *environment* is not yet checked - closing that is the
-  compiler-side stage, and until it lands a closure passed to `pool` must be treated as trusted.
+  module. Once the structural classification landed, item, result, context and the closure's
+  captured environment are all classified: a handle - bare, inside a record, or captured - is refused
+  by name (`cannot share closure capture `h`: h.file is thread-affine ...`), as are an `FnMut`
+  closure shared with workers, a `Task` handle, an exclusive borrow, a mutable slice and an
+  unproven type parameter. `CStr`, `CPtr`, `CMutPtr` and `cfn` stay deliberately unclassified, so
+  they are refused as unclassified foreign authority rather than silently allowed; a classification
+  states that a value may move, never that the library behind it tolerates that, and `unsafe module`
+  code can still build anything - the safe surface is as strong as the classification under it, not
+  more.
   Measured on 24 reported cores, 3M CPU-bound elements, one job vs four: 27 ms → 8 ms (3.4x) at the
   default size, 28 → 12 ms (2.3x) at four workers, 27 → 28 ms (0.96x) at one. Six native cases:
   owned-chunk split equals the sequential answer, `map` order independent of completion order,
