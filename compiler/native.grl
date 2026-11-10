@@ -408,8 +408,11 @@ struct C {
     // Every module the program loaded, in command-line order, with what its interface records about
     // the file it came from.
     iface_list: IModule[],
-    // Files whose declarations came from an interface instead of their source.
+    // Files whose declarations came from an interface instead of their source, and the modules
+    // waiting for their definition sweep.
     iface_files: u64[],
+    iface_loaded: u8[][],
+    iface_loaded_path: u8[][],
     // Environment records (module `.closure`) the surface being emitted reaches, and the name each
     // is given inside the interface, so a reader can rebuild a closure type's captures exactly.
     iface_env: u64[],
@@ -1459,6 +1462,9 @@ fn win32_arity<a>(name: (&a [u8])) -> u64 {
     if same(view(name), view("GetFileAttributesA")) {
         return 1;
     }
+    if same(view(name), view("GetExitCodeProcess")) {
+        return 2;
+    }
     if same(view(name), view("GetSystemTimeAsFileTime")) {
         return 1;
     }
@@ -1473,6 +1479,9 @@ fn win32_arity<a>(name: (&a [u8])) -> u64 {
     }
     if same(view(name), view("CreateFileA")) {
         return 7;
+    }
+    if same(view(name), view("CreateProcessA")) {
+        return 10;
     }
     if same(view(name), view("CloseHandle")) {
         return 1;
@@ -4453,7 +4462,21 @@ fn require_interfaces<a, b, d>(c: (&a mut C), arguments: (&b u64[]), sets: (&d u
         for j in set.len() {
             id := set[j];
             if !satisfies_interface(&mut c, ty, id) {
-                fail(&mut c, view("type does not satisfy interface bound"));
+                // Name the bound and the type that fails it: "does not satisfy interface bound" alone
+                // sends the reader looking for the wrong declaration.
+                mut msg = u8[];
+                push_bytes(&mut msg, view("type does not satisfy interface bound `"));
+                if id <= c.interfaces.len() {
+                    push_bytes(&mut msg, view(c.interfaces[id - 1].module));
+                    push_bytes(&mut msg, view("::"));
+                    push_bytes(&mut msg, view(c.interfaces[id - 1].name));
+                }
+                push_bytes(&mut msg, view("` (argument type kind "));
+                decimal(&mut msg, ty_kind(&mut c, ty));
+                push_bytes(&mut msg, view(", in module "));
+                push_bytes(&mut msg, view(c.module));
+                push_bytes(&mut msg, view(")"));
+                fail(&mut c, view(msg));
             }
         }
     }
@@ -21650,9 +21673,12 @@ fn host_fn<a, b>(c: (&a mut C), name: &b [u8], ret: u64) -> unit {
         c.params.push(4);
         c.params.push(4);
     }
-    if same(view(name), view("command")) {
+    if same(view(name), view("command")) || same(view(name), view("command_with")) {
         ty := intern(&mut c, 6, 2);
         c.params.push(ty);
+        if same(view(name), view("command_with")) {
+            c.params.push(ty);
+        }
     }
     if same(view(name), view("sleep_ms")) || same(view(name), view("close")) {
         c.params.push(0);
@@ -22201,8 +22227,16 @@ fn iface_type_raw<a, b>(out: (&a mut u8[]), c: (&b mut C), ty: u64) -> unit {
     args := type_args(&mut c, ty);
     env := ty_env(&mut c, ty);
     arg := ty_arg(&mut c, ty);
-    if (k == 1) || (k == 2) || (k == 3) || (k == 4) || (k == 11) || (k == 17) || (k == 19) || (k == 21) || (k == 22)
-        || (k == 24) {
+    if k == 21 {
+        // The width lives in the argument: 32 bits is f32, 0 is f64.
+        if arg == 32 {
+            push_bytes(&mut out, view("f32"));
+        } else {
+            push_bytes(&mut out, view("f64"));
+        }
+        return ();
+    }
+    if (k == 1) || (k == 2) || (k == 3) || (k == 4) || (k == 11) || (k == 17) || (k == 19) || (k == 22) || (k == 24) {
         push_bytes(&mut out, view(iface_plain_word(k)));
         return ();
     }
@@ -22281,8 +22315,18 @@ fn iface_type_raw<a, b>(out: (&a mut u8[]), c: (&b mut C), ty: u64) -> unit {
         return ();
     }
     if k == 9 {
+        // An opaque type parameter carries its bound bits in `mode` and the interface proofs it
+        // satisfies in `args`, so both are written: a `T: Send + Ord` is not a plain `T`.
         push_bytes(&mut out, view("(tparam "));
         decimal(&mut out, arg);
+        out.push(32);
+        decimal(&mut out, mode);
+        out.push(32);
+        iface_regions(&mut out, &rs);
+        for i in args.len() {
+            out.push(32);
+            iface_type_raw(&mut out, &mut c, args[i]);
+        }
         push_bytes(&mut out, view(")"));
         return ();
     }
@@ -22575,6 +22619,7 @@ fn iface_emit_func<a, b>(c: (&a mut C), out: (&a mut u8[]), index: u64, m: &b [u
     types := c.funcs[index].types;
     lifetimes := c.funcs[index].regions;
     ext := c.funcs[index].ext;
+    contract := c.funcs[index].contract;
     symbol := c.funcs[index].symbol.copy();
     contract := c.funcs[index].contract;
     mut own = copy_numbers(&c.funcs[index].bounds);
@@ -22637,7 +22682,8 @@ fn iface_emit_func<a, b>(c: (&a mut C), out: (&a mut u8[]), index: u64, m: &b [u
         // A generic template's body travels with the interface: without it a module that
         // instantiates the template cannot be compiled unless this module's source is on the
         // command line, which is what separate compilation has to remove. One quoted line per
-        // source line, so a changed statement is a changed line in a review diff.
+        // source line, so a changed statement is a changed line in a review diff. An interface
+        // method carries no body, and its one implicit type parameter is not a template.
         body := c.funcs[index].body.copy();
         if body.len() == 0 {
             // The declaration pass captures every template's text. A template without one is a
@@ -23160,7 +23206,7 @@ fn iface_parse_type<a>(c: (&a mut C), p: (&a mut IPos)) -> u64 {
             push_bytes(&mut msg, view(word));
             iface_fail(&p, view(msg));
         }
-        return intern_args(&mut c, k, 0, 0, u64[], u64[]);
+        return intern_args(&mut c, k, iface_word_arg(view(word), k), 0, u64[], u64[]);
     }
     {
         head := ip_word(&mut p);
@@ -23176,8 +23222,13 @@ fn iface_parse_type<a>(c: (&a mut C), p: (&a mut IPos)) -> u64 {
         }
         if same(view(head), view("tparam")) {
             n := ip_number(&mut p);
-            ip_expect(&mut p, view(")"));
-            return intern_args(&mut c, 9, n, 0, u64[], u64[]);
+            bounds := ip_number(&mut p);
+            proofs := ip_regions(&mut p);
+            mut args = u64[];
+            while !ip_eat(&mut p, view(")")) {
+                args.push(iface_parse_type(&mut c, &mut p));
+            }
+            return intern_args(&mut c, 9, n, bounds, proofs, args);
         }
         if same(view(head), view("union")) || same(view(head), view("result")) {
             // `T?` / `T | E`: the member list is the whole type, and the compiler rebuilds the
@@ -23310,6 +23361,13 @@ fn iface_parse_type<a>(c: (&a mut C), p: (&a mut IPos)) -> u64 {
         return 0;
     }
 }
+fn iface_word_arg<a>(word: &a [u8], k: u64) -> u64 {
+    // The two floats share a kind and differ in the argument that records their width.
+    if (k == 21) & same(view(word), view("f32")) {
+        return 32;
+    }
+    return 0;
+}
 fn iface_word_kind<a>(word: &a [u8]) -> u64 {
     if same(view(word), view("u64")) {
         return 1;
@@ -23335,7 +23393,7 @@ fn iface_word_kind<a>(word: &a [u8]) -> u64 {
     if same(view(word), view("bool")) {
         return 19;
     }
-    if same(view(word), view("f64")) {
+    if same(view(word), view("f64")) || same(view(word), view("f32")) {
         return 21;
     }
     if same(view(word), view("char")) {
@@ -23358,7 +23416,7 @@ fn iface_join<a, b, d>(dir: &a [u8], name: &b [u8], ext: &d [u8]) -> u8[] {
 }
 fn iface_has_body<a, b>(c: (&a mut C), m: &b [u8]) -> u64 {
     for i in c.funcs.len() {
-        if same(view(c.funcs[i].module), view(m)) & (c.funcs[i].types != 0) {
+        if same(view(c.funcs[i].module), view(m)) & (c.funcs[i].types != 0) & (c.funcs[i].contract == 0) {
             return 1;
         }
     }
@@ -23706,37 +23764,6 @@ fn iface_self_check<a>(path: &a [u8], text: &a [u8]) -> unit {
 }
 // Every interface a build reads is checked against the manifest the emitting run wrote, so an
 // interface that was edited *and* had its own digest line recomputed is still refused.
-// Whitespace-separated words of the manifest, with quotes stripped: the same reason paths and
-// digests are quoted in an interface.
-// Whitespace-separated words, skipping `//` comments and the quotes around a value. The manifest is
-// three words per module - name, interface digest, source digest - and every check that reads it
-// depends on this splitting the file rather than swallowing it whole.
-fn iface_words<a>(text: &a [u8]) -> u8[][] {
-    mut out = u8[][];
-    mut i = 0;
-    while i < text.len() {
-        c := text[i];
-        if (c == 32) || (c == 10) || (c == 9) || (c == 13) || (c == 34) {
-            i += 1;
-        } else if (c == 47) & (i + 1 < text.len()) & (text[i + 1] == 47) {
-            while (i < text.len()) & (text[i] != 10) {
-                i += 1;
-            }
-        } else {
-            mut word = u8[];
-            while i < text.len() {
-                b := text[i];
-                if (b == 32) || (b == 10) || (b == 9) || (b == 13) || (b == 34) {
-                    break;
-                }
-                word.push(b);
-                i += 1;
-            }
-            out.push(word);
-        }
-    }
-    return out;
-}
 fn iface_check_manifest<a, b>(c: (&a mut C), dir: &b [u8]) -> unit {
     manifest := iface_join(view(dir), view("interfaces"), view(".manifest"));
     mut text = u8[];
@@ -23749,13 +23776,35 @@ fn iface_check_manifest<a, b>(c: (&a mut C), dir: &b [u8]) -> unit {
             view("is missing: interfaces are checked against the manifest their emitting run wrote (run `grail check --interface DIR` again)")
         );
     }
-    words := iface_words(&text);
-    mut at = 0;
-    // One row per module: name, the interface's digest, the source's digest.
-    while at + 2 < words.len() {
-        module := words[at].copy();
-        want := words[at + 1].copy();
-        at += 3;
+    lines := iface_lines(&text);
+    for i in lines.len() {
+        line := lines[i].copy();
+        if line.len() == 0 {
+            continue;
+        }
+        if line[0] == 47 {
+            // `// grail-interfaces 1`: a comment, not a module.
+            continue;
+        }
+        mut module = u8[];
+        mut want = u8[];
+        mut part = 0;
+        for k in line.len() {
+            b := line[k];
+            if b == 32 {
+                if part == 2 {
+                    break;
+                }
+                part += 1;
+            } else if part == 0 {
+                module.push(b);
+            } else if part == 1 {
+                want.push(b);
+            }
+        }
+        if want.len() == 0 {
+            continue;
+        }
         file := iface_join(view(dir), view(module), view(".iface"));
         mut bytes = u8[];
         if host::exists(view(file)) != 0 {
@@ -23780,7 +23829,7 @@ fn iface_check_manifest<a, b>(c: (&a mut C), dir: &b [u8]) -> unit {
     return ();
 }
 // Reads one interface and installs its declarations, after every check. Returns the module name.
-fn iface_load<a, b>(c: (&a mut C), path: &a [u8], source_path: &b [u8]) -> u8[] {
+fn iface_load<a, b>(c: (&a mut C), path: &a [u8], source_path: &b [u8], phase: u64) -> u8[] {
     mut text = u8[];
     if host::exists(view(path)) != 0 {
         text = host::read_file(view(path));
@@ -23913,13 +23962,12 @@ fn iface_load<a, b>(c: (&a mut C), path: &a [u8], source_path: &b [u8]) -> u8[] 
     }
     // The sources this interface was built from must be the ones on this command line - when there
     // are any. `--use` reads an interface for a module whose source this build does not have, which
-    // is the whole point of stage 3; the file's own digest and the manifest are what remain.
-    mut source = u8[];
-    if source_path.len() != 0 {
-        source = host::read_file(view(source_path));
-    }
-    got := iface_digest(&source);
-    if (source_path.len() != 0) & !same(view(got), view(source_digest)) {
+    // is the whole point of stage 3; the file's own digest is what remains. Phase 2 (the definition
+    // sweep) has no source to check: phase 1 has already done it, once.
+    if (phase != 2) & (source_path.len() != 0) {
+        source := host::read_file(view(source_path));
+        got := iface_digest(&source);
+        if !same(view(got), view(source_digest)) {
         mut msg = u8[];
         push_bytes(&mut msg, view("module `"));
         push_bytes(&mut msg, view(module));
@@ -23932,11 +23980,31 @@ fn iface_load<a, b>(c: (&a mut C), path: &a [u8], source_path: &b [u8]) -> u8[] 
         push_bytes(&mut msg, view(" is "));
         push_bytes(&mut msg, view(got));
         iface_refuse(view(path), view(msg));
+        }
     }
     // Two passes: names first, so a declaration can refer to one declared after it (a record field
     // naming a type further down the file is ordinary), then fields and signatures.
-    for i in lines.len() {
-        iface_register(&mut c, view(lines[i]), view(path), i + 1, view(module));
+    // Phase 1 registers every name the file declares (types, aliases, interfaces) and stops there:
+    // module B's interface may name an interface declared by module C, and C's interface may not have
+    // been read yet. Phase 2 installs fields and signatures once every name in the program exists.
+    if phase == 1 {
+        for i in lines.len() {
+            iface_register(&mut c, view(lines[i]), view(path), i + 1, view(module));
+        }
+        c.iface_loaded.push(module.copy());
+        c.iface_loaded_path.push(path.copy());
+        c
+            .iface_list
+            .push(
+                IModule {
+                    module: module.copy(),
+                    path: source_path.copy(),
+                    std: std_flag,
+                    unsafe: unsafe_flag,
+                    host: host_flag
+                }
+            );
+        return module;
     }
     mut state = IState {
         module: module.copy(),
@@ -23976,17 +24044,13 @@ fn iface_load<a, b>(c: (&a mut C), path: &a [u8], source_path: &b [u8]) -> u8[] 
             iface_refuse(view(path), view(msg));
         }
     }
-    c
-        .iface_list
-        .push(
-            IModule {
-                module: module.copy(),
-                path: source_path.copy(),
-                std: std_flag,
-                unsafe: unsafe_flag,
-                host: host_flag
-            }
-        );
+    // Now that every parameter name, bound and requirement is in place, give each implementation the
+    // self type the source parse would have built (with its proofs), exactly once.
+    for i in c.impl_params.len() {
+        if c.impl_params[i].self_ty == 0 {
+            iface_impl_self(&mut c, i);
+        }
+    }
     return module;
 }
 
@@ -24116,7 +24180,7 @@ fn iface_load_used<a, b>(c: (&a mut C), dir: &b [u8]) -> unit {
         if have != 0 {
             continue;
         }
-        module := iface_load(&mut c, view(file), view(""));
+        module := iface_load(&mut c, view(file), view(""), 1);
         if !same(view(module), view(name)) {
             mut msg = u8[];
             push_bytes(&mut msg, view("describes module `"));
@@ -24387,6 +24451,9 @@ fn iface_define<a, b, d>(c: (&a mut C), st: (&a mut IState), line: &b [u8], path
         exchange(&mut st.section, 1);
         exchange(&mut st.owner, found - 1);
         exchange(&mut st.last_func, 0);
+        // A section header starts a new declaration: `require`/`bound` lines under it belong to the
+        // implementation's own parameters, not to the type declared above it.
+        exchange(&mut st.last_decl, 0);
         iface_impl_record(&mut c, &mut st, found, params[0], lifetimes[0]);
         return ();
     }
@@ -24399,6 +24466,7 @@ fn iface_define<a, b, d>(c: (&a mut C), st: (&a mut IState), line: &b [u8], path
         exchange(&mut st.section, 2);
         exchange(&mut st.contract, id);
         exchange(&mut st.last_func, 0);
+        exchange(&mut st.last_decl, 0);
         return ();
     }
     if same(view(word), view("impl")) {
@@ -24425,6 +24493,7 @@ fn iface_define<a, b, d>(c: (&a mut C), st: (&a mut IState), line: &b [u8], path
         exchange(&mut st.contract, id);
         exchange(&mut st.implementation, c.implementations.len());
         exchange(&mut st.last_func, 0);
+        exchange(&mut st.last_decl, 0);
         owner := ty_arg(&mut c, ty) + 1;
         iface_impl_record(&mut c, &mut st, owner, params[0], lifetimes[0]);
         return ();
@@ -24601,6 +24670,36 @@ fn iface_env_type<a, b, d>(c: (&a mut C), p: (&b mut IPos), local: &d [u8]) -> u
 }
 // The parameter record of a generic implementation: `impl<T> Foo<T>` is checked against its own
 // parameters when an importer replays one of its generic methods.
+// The self type of an implementation (`impl<K: Hash + Equal, V> Map<K, V>` is `Map<K, V>`) has to
+// carry the same bounds and interface proofs the source parse gives it: `validate_type_constraints`
+// walks every nominal type in the store, so a bare `Map<K, V>` is a real type it would reject.
+fn iface_impl_self<a>(c: (&a mut C), record: u64) -> unit {
+    decl := c.impl_params[record].decl;
+    params := c.impl_params[record].tnames.len();
+    mut bounds = copy_numbers(&c.impl_params[record].bounds);
+    mut reqs = u64[][];
+    for i in c.impl_params[record].interfaces.len() {
+        reqs.push(copy_numbers(&c.impl_params[record].interfaces[i]));
+    }
+    mut args = u64[];
+    for i in params {
+        mut proofs = u64[];
+        if i < reqs.len() {
+            for j in reqs[i].len() {
+                proofs.push(intern_args(&mut c, 15, reqs[i][j], 0, u64[], u64[]));
+            }
+        }
+        mut bits = 0;
+        if i < bounds.len() {
+            bits = bounds[i];
+        }
+        args.push(intern_args(&mut c, 9, i, bits, u64[], proofs));
+    }
+    self := intern_args(&mut c, 8, decl - 1, 0, u64[], args);
+    mut item = &mut c.impl_params[record];
+    exchange(&mut item.self_ty, self);
+    return ();
+}
 fn iface_impl_record<a>(c: (&a mut C), st: (&a mut IState), owner: u64, params: u64, lifetimes: u64) -> unit {
     exchange(&mut st.impl_first, c.impl_params.len());
     if (params == 0) & (lifetimes == 0) {
@@ -24625,7 +24724,7 @@ fn iface_impl_record<a>(c: (&a mut C), st: (&a mut IState), owner: u64, params: 
                 tnames: u8[][],
                 bounds: bounds,
                 interfaces: requirements,
-                self_ty: intern_args(&mut c, 8, owner - 1, 0, u64[], args),
+                self_ty: 0,
             }
         );
     return ();
@@ -24772,10 +24871,19 @@ fn iface_define_func<a>(c: (&a mut C), st: (&a mut IState), p: (&a mut IPos)) ->
                 body: u8[],
             }
         );
+    index := c.funcs.len() - 1;
     exchange(&mut st.last_func, c.funcs.len());
     exchange(&mut st.last_decl, 0);
     if st.section == 3 {
-        c.implementations[st.implementation - 1].methods.push(c.funcs.len() - 1);
+        // An implementation's method list is what dispatch walks.
+        mut item = &mut c.implementations[st.implementation - 1];
+        item.methods.push(index);
+    }
+    if st.section == 2 {
+        // The interface's own method list is what `check_interfaces` compares an implementation
+        // against, so it has to be as complete as the implementations are.
+        mut item = &mut c.interfaces[st.contract - 1];
+        item.methods.push(index);
     }
     return ();
 }
@@ -25036,6 +25144,8 @@ pub fn main() -> u64 {
         iface_verify: 0,
         iface_list: IModule[],
         iface_files: u64[],
+        iface_loaded: u8[][],
+        iface_loaded_path: u8[][],
         iface_env: u64[],
         iface_env_names: u8[][],
         virt_path: u8[][],
@@ -25055,6 +25165,7 @@ pub fn main() -> u64 {
     host_fn(&mut c, view("print_num"), 1);
     host_fn(&mut c, view("newline"), 1);
     host_fn(&mut c, view("command"), 0);
+    host_fn(&mut c, view("command_with"), 0);
     host_fn(&mut c, view("sleep_ms"), 1);
     host_fn(&mut c, view("now_ms"), 0);
     numbers := intern(&mut c, 6, 0);
@@ -25067,6 +25178,7 @@ pub fn main() -> u64 {
     host_fn(&mut c, view("exists"), 0);
     host_fn(&mut c, view("mkdir"), 0);
     names := intern(&mut c, 6, 2);
+    host_fn(&mut c, view("environment"), names);
     host_fn(&mut c, view("list_dir"), names);
     host_fn(&mut c, view("tcp_listen"), 0);
     host_fn(&mut c, view("tcp_port"), 0);
@@ -25327,7 +25439,7 @@ pub fn main() -> u64 {
                     file.push(47);
                     push_bytes(&mut file, view(name));
                     push_bytes(&mut file, view(".iface"));
-                    loaded := iface_load(&mut c, view(file), view(path));
+                    loaded := iface_load(&mut c, view(file), view(path), 1);
                     if !same(view(loaded), view(name)) {
                         mut msg = u8[];
                         push_bytes(&mut msg, view("describes module `"));
@@ -25372,6 +25484,15 @@ pub fn main() -> u64 {
                     );
             }
             i = i + 1;
+        }
+        // The definition sweep for the interfaces read above, once every module's names exist.
+        // `--interface` and `--use` both land here; the path each interface came from was recorded
+        // when its names were registered.
+        if (pass == 0) & (c.iface_verify == 0) {
+            for k in c.iface_loaded.len() {
+                file := c.iface_loaded_path[k].copy();
+                iface_load(&mut c, view(file), view(""), 2);
+            }
         }
         if pass == 1 {
             exchange(&mut c.headers_complete, 1);

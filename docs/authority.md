@@ -23,6 +23,7 @@ The gated operations take the value and enforce it:
 | `authority::read_file(&a, path)` | read under the root | `Denied` or `Io(io::Error)` |
 | `authority::write_file(&a, path, data)` | write under the root | `Denied` or `Io(io::Error)` |
 | `authority::spawn(&a, argv)` | spawn | `Denied`; returns the exit status |
+| `authority::spawn_with(&a, argv, env)` | spawn | `Denied`; returns the exit status |
 | `authority::connect(&a, host, port)`, `listen`, `port`, `close` | sockets | `Denied` or `Io(io::Error)` |
 
 `can_read`, `can_write`, `can_spawn` and `can_connect` report what a value grants, and `root`
@@ -109,16 +110,24 @@ default when the switch is absent, so existing programs are unaffected.
   that points outside it passes the check, because resolving it needs an OS call the model does
   not have. The check is also not atomic with the open: a path can be swapped between the two
   (TOCTOU).
-- **Spawn grants the whole process.** `authority::spawn` bounds *whether* a process is created,
-  not what it may do; a child inherits the parent's full ambient authority. There is no argv,
-  environment or user restriction.
+- **Spawn grants the whole process.** `authority::spawn` and `authority::spawn_with` bound
+  *whether* a process is created, not what it may do: a child inherits the parent's full ambient
+  authority, runs as the same user, in the same working directory, and `spawn_with` only decides
+  what the child starts with. Nothing checks the program, the argument vector or the individual
+  environment entries. The child's own reads of its environment - and of anything else - are
+  outside the model entirely.
+- **Composing an environment.** `spawn_with` takes the child's *complete* environment, so a caller
+  that wants to add one variable must start from what it inherits. `authority::environment()`
+  returns this process's entries for exactly that; reading your own environment is not gated,
+  because every grant already implies the process can see its own configuration.
 - **Sockets are gated at open, not at I/O.** `connect`, `listen`, `port` and `close` are gated;
   reading and writing the descriptor still uses `host::read_fd`/`host::write_fd`, so a program
   under `--deny-ambient-host` that needs socket I/O still opts in with `use host;`.
-- **Remaining ambient paths**: `host::env`, `host::arg`, `host::exe_path`, `host::now_ms`,
-  `host::sleep_ms`, `host::exit`, `host::remove`, `host::mkdir`, `host::list_dir`, `host::open`,
-  `host::read_fd`, `host::write_fd`, `host::tcp_accept`, and the `fs`, `env`, `process` modules
-  built on them are still reachable with `use host;` (or through `fs::`, which opts in itself).
+- **Remaining ambient paths**: `host::env`, `host::environment`, `host::command`,
+  `host::command_with`, `host::arg`, `host::exe_path`, `host::now_ms`, `host::sleep_ms`,
+  `host::exit`, `host::remove`, `host::mkdir`, `host::list_dir`, `host::open`, `host::read_fd`,
+  `host::write_fd`, `host::tcp_accept`, and the `fs`, `env`, `process` modules built on them are
+  still reachable with `use host;` (or through `fs::`, which opts in itself).
   The model does not remove ambient authority; it gives a checked route and a switch that makes
   the ambient one visible.
 - **No runtime enforcement.** An `Authority` is a checked convention for code that goes through
@@ -132,8 +141,9 @@ default when the switch is absent, so existing programs are unaffected.
 - 57 containment/normalisation cases: `..` escapes, absolute versus relative paths, component
   boundaries, drive letters, both separators, root normalisation, and the grant's stored root;
 - a gated read/write round trip in a scratch directory, including refused escapes, a read-only
-  grant, a narrower root, an OS error versus a denial, a gated spawn, and a listen/connect/close
-  socket cycle;
+  grant, a narrower root, an OS error versus a denial, a gated spawn, a gated spawn with an
+  explicit environment (refused for a file grant exactly as a plain spawn is), and a
+  listen/connect/close socket cycle;
 - the compiler switch: a direct `host::read_file` compiles by default and is rejected under
   `--deny-ambient-host`, the same call compiles after `use host;`, a generic body is checked
   against its defining module, the gated route compiles with and without the switch, and

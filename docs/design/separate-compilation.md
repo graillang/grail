@@ -201,6 +201,29 @@ compiles the same compiler and links a binary that answers `version` and compile
 corpus program to byte-identical assembly. `tools/interface-test.mjs` records the numbers and runs
 the corpus.
 
+### The one place this was wrong, and what it was
+
+An earlier commit of this branch compiled every program that included `lib/hashmap.grl` against
+interfaces into `type does not satisfy interface bound`. The interface was complete: `Map` carried
+`require 0 hash::Hash` / `require 0 hash::Equal`, its field carried the proofs on `K`, and
+`impl<K: hash::Hash + hash::Equal, V> Map<K, V>` travelled with `ptype`/`require` lines. The bug was
+one type the **loader** invented: it interned the implementation's self type (`Map<K, V>`) from bare
+type parameters *before* the section's requirements were read, and `validate_type_constraints` walks
+every nominal type in the store, so that bare `Map<K, V>` was rejected. The self type is now built
+once, after the section's names, bounds and requirements are in place, with the same interface proofs
+the source parse produces, and the loader no longer interns a half-built one.
+
+Two things were wrong in the test as well, and are worth naming because they made a green run
+unlikely to mean what it said:
+
+- it ran a case's program with no arguments and from the repository root, so a case such as
+  `lib-zlib` (whose fixture path is relative to the case directory) could never print what it
+  expected;
+- nothing asserted that the manifest is consulted at all, so a manifest check that compared nothing
+  would have looked exactly like a passing tamper test. There is now a case that corrupts only the
+  manifest's recorded digest and requires a refusal, separate from the case that edits the interface
+  itself.
+
 ### What stage 2 does not do, and why
 
 `--interface` reads declarations from interfaces, but the module's **bodies are still parsed and
