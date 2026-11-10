@@ -1,0 +1,1385 @@
+module grail_lsp;
+use host;
+use json;
+use lexer;
+
+// The Grail language server: JSON-RPC 2.0 over stdio (`Content-Length` framing).
+//
+// Scope, stated plainly because `initialize` advertises exactly this and nothing else:
+//
+//   * full-text synchronisation (open/change/close) and pushed diagnostics;
+//   * `textDocument/definition` for declarations in the same file.
+//
+// Diagnostics are not invented here. The open buffer is written to a scratch file and
+// `grail check <file>` is run on it; the compiler prints `file:line:column: message`
+// and this server maps that text into an LSP range. A clean check publishes `[]`, which
+// is how a fixed buffer clears its squiggles. Nothing is published when the compiler
+// cannot be run at all: that is reported with `window/showMessage` instead.
+//
+// Requests are answered from `lib/json.grl` (strict parsing, exact integers) and every
+// response is written as bytes built by hand, so an id, a uri or a compiler message can
+// never break the framing. Malformed input is answered with the JSON-RPC error that
+// describes it; the server has no path that aborts on a client message.
+
+// ---------------------------------------------------------------------------
+// bytes
+// ---------------------------------------------------------------------------
+
+fn no_index() -> u64 {
+    return 9223372036854775807;
+}
+fn eq<a, b>(x: &a [u8], y: &b [u8]) -> bool {
+    if x.len() != y.len() {
+        return false;
+    }
+    for i in x.len() {
+        if x[i] != y[i] {
+            return false;
+        }
+    }
+    return true;
+}
+fn has_prefix<a, b>(x: &a [u8], y: &b [u8]) -> bool {
+    if x.len() < y.len() {
+        return false;
+    }
+    for i in y.len() {
+        if x[i] != y[i] {
+            return false;
+        }
+    }
+    return true;
+}
+fn has_suffix<a, b>(x: &a [u8], y: &b [u8]) -> bool {
+    if x.len() < y.len() {
+        return false;
+    }
+    offset := x.len() - y.len();
+    for i in y.len() {
+        if x[offset + i] != y[i] {
+            return false;
+        }
+    }
+    return true;
+}
+fn copy_bytes<a>(text: &a [u8]) -> u8[] {
+    mut out = u8[];
+    for i in text.len() {
+        out.push(text[i]);
+    }
+    return out;
+}
+fn joined<a, b>(head: &a [u8], tail: &b [u8]) -> u8[] {
+    mut out = copy_bytes(head);
+    for i in tail.len() {
+        out.push(tail[i]);
+    }
+    return out;
+}
+fn put<a, b>(out: &a mut u8[], text: &b [u8]) {
+    for i in text.len() {
+        out.push(text[i]);
+    }
+}
+fn put_num<a>(out: &a mut u8[], value: u64) {
+    text := format("{}", value);
+    put(&mut out, &text);
+}
+fn put_int<a>(out: &a mut u8[], value: i64) {
+    text := format("{}", value);
+    put(&mut out, &text);
+}
+fn hex_digit(value: u64) -> u64 {
+    if value < 10 {
+        return 48 + value;
+    }
+    return 87 + value;
+}
+// A JSON string: quotes, backslashes and the escapes JSON requires.
+fn put_string<a, b>(out: &a mut u8[], text: &b [u8]) {
+    out.push(34);
+    for i in text.len() {
+        b := text[i];
+        if b == 34 {
+            put(&mut out, view("\\\""));
+        } else if b == 92 {
+            put(&mut out, view("\\\\"));
+        } else if b == 10 {
+            put(&mut out, view("\\n"));
+        } else if b == 13 {
+            put(&mut out, view("\\r"));
+        } else if b == 9 {
+            put(&mut out, view("\\t"));
+        } else if b < 32 {
+            put(&mut out, view("\\u00"));
+            out.push(hex_digit(b / 16));
+            out.push(hex_digit(b % 16));
+        } else {
+            out.push(b);
+        }
+    }
+    out.push(34);
+}
+fn is_digit(c: u64) -> bool {
+    return (47 < c) && (c < 58);
+}
+
+// ---------------------------------------------------------------------------
+// framing
+// ---------------------------------------------------------------------------
+
+const LIMIT: u64 = 16777216;
+
+// Index of the `\r\n\r\n` that ends the header block, or `no_index()`.
+fn header_end<a>(buffer: &a [u8]) -> u64 {
+    if buffer.len() < 4 {
+        return no_index();
+    }
+    mut i = 0;
+    while i + 4 <= buffer.len() {
+        if (buffer[i] == 13) && (buffer[i + 1] == 10) {
+            if (buffer[i + 2] == 13) && (buffer[i + 3] == 10) {
+                return i;
+            }
+        }
+        i += 1;
+    }
+    return no_index();
+}
+// Where the next header line begins (a `Content-Length` line at the start of a line).
+// Used to resynchronise after a frame that carried no usable length.
+fn header_start<a>(buffer: &a [u8]) -> u64 {
+    mut i = 0;
+    while i < buffer.len() {
+        if ((i == 0) || (buffer[i - 1] == 10)) && (i + 15 <= buffer.len()) {
+            if lower_equals(buffer[i:i + 15], view("content-length:")) {
+                return i;
+            }
+        }
+        i += 1;
+    }
+    return no_index();
+}
+fn lower_equals<a, b>(x: &a [u8], y: &b [u8]) -> bool {
+    if x.len() != y.len() {
+        return false;
+    }
+    for i in x.len() {
+        mut c = x[i];
+        if (64 < c) && (c < 91) {
+            c += 32;
+        }
+        if c != y[i] {
+            return false;
+        }
+    }
+    return true;
+}
+// The `Content-Length` value of a header block, or `no_index()` when it is absent,
+// not a number, out of range, or followed by junk.
+fn content_length<a>(header: &a [u8]) -> u64 {
+    mut i = 0;
+    while i < header.len() {
+        start := i;
+        while (i < header.len()) && (header[i] != 10) {
+            i += 1;
+        }
+        mut end = i;
+        if i < header.len() {
+            i += 1;
+        }
+        if (start < end) && (header[end - 1] == 13) {
+            end -= 1;
+        }
+        mut colon = start;
+        while colon < end {
+            if header[colon] == 58 {
+                break;
+            }
+            colon += 1;
+        }
+        if (start < colon) && (colon < end) {
+            if lower_equals(header[start:colon], view("content-length")) {
+                mut j = colon + 1;
+                while (j < end) && (header[j] == 32) {
+                    j += 1;
+                }
+                mut value = 0;
+                mut digits = 0;
+                while (j < end) && is_digit(header[j]) {
+                    value = value * 10 + (header[j] - 48);
+                    digits += 1;
+                    if LIMIT < value {
+                        return no_index();
+                    }
+                    j += 1;
+                }
+                if digits == 0 {
+                    return no_index();
+                }
+                while (j < end) && (header[j] == 32) {
+                    j += 1;
+                }
+                if j < end {
+                    return no_index();
+                }
+                return value;
+            }
+        }
+    }
+    return no_index();
+}
+
+// ---------------------------------------------------------------------------
+// documents
+// ---------------------------------------------------------------------------
+
+struct Document {
+    uri: u8[],
+    text: u8[],
+    version: i64,
+    versioned: bool
+}
+struct Snapshot {
+    uri: u8[],
+    text: u8[],
+    version: i64,
+    versioned: bool
+}
+struct Diagnostic {
+    line: u64,
+    start: u64,
+    end: u64,
+    message: u8[]
+}
+struct Server {
+    pending: u8[],
+    docs: Document[],
+    state: u64,
+    serial: u64,
+    reported: bool
+}
+
+fn server_new() -> Server {
+    return Server {
+        pending: u8[],
+        docs: Document[],
+        state: 0,
+        serial: 0,
+        reported: false
+    };
+}
+fn find_document<a>(docs: (&a Document[]), uri: &b [u8]) -> u64 {
+    for i in docs.len() {
+        d := &docs[i];
+        if eq(d.uri, uri) {
+            return i;
+        }
+    }
+    return no_index();
+}
+fn snapshot_at<a>(docs: (&a Document[]), index: u64) -> Snapshot {
+    d := &docs[index];
+    return Snapshot {
+        uri: d.uri.copy(),
+        text: d.text.copy(),
+        version: d.version,
+        versioned: d.versioned
+    };
+}
+
+// ---------------------------------------------------------------------------
+// utf-16 mapping
+// ---------------------------------------------------------------------------
+
+// The bytes of document line `line` (0-based), without its newline.
+fn line_bytes<a>(text: &a [u8], line: u64) -> (&a [u8]) {
+    mut current = 0;
+    mut start = 0;
+    mut i = 0;
+    while i < text.len() {
+        if text[i] == 10 {
+            if current == line {
+                mut end = i;
+                if (start < end) && (text[end - 1] == 13) {
+                    end -= 1;
+                }
+                return text[start:end];
+            }
+            current += 1;
+            start = i + 1;
+        }
+        i += 1;
+    }
+    return text[start:text.len()];
+}
+// UTF-16 code units in the first `bytes` bytes of `line`. A truncated sequence counts as
+// one unit, so a bad offset still names a position inside the line.
+fn utf16_prefix<a>(line: &a [u8], bytes: u64) -> u64 {
+    mut limit = bytes;
+    if line.len() < limit {
+        limit = line.len();
+    }
+    mut units = 0;
+    mut i = 0;
+    while i < limit {
+        b := line[i];
+        if b < 128 {
+            i += 1;
+        } else if b < 224 {
+            i += 2;
+        } else if b < 240 {
+            i += 3;
+        } else {
+            units += 1;
+            i += 4;
+        }
+        units += 1;
+    }
+    return units;
+}
+fn utf16_len<a>(line: &a [u8]) -> u64 {
+    return utf16_prefix(line, line.len());
+}
+// The byte offset of UTF-16 position `units` in `line`, clamped to the line.
+fn utf16_offset<a>(line: &a [u8], units: u64) -> u64 {
+    mut seen = 0;
+    mut i = 0;
+    while (i < line.len()) && (seen < units) {
+        b := line[i];
+        mut width = 1;
+        mut weight = 1;
+        if b < 128 {
+            width = 1;
+        } else if b < 224 {
+            width = 2;
+        } else if b < 240 {
+            width = 3;
+        } else {
+            width = 4;
+            weight = 2;
+        }
+        if units < seen + weight {
+            return i;
+        }
+        seen += weight;
+        i += width;
+    }
+    if line.len() < i {
+        return line.len();
+    }
+    return i;
+}
+
+// ---------------------------------------------------------------------------
+// compiler diagnostics
+// ---------------------------------------------------------------------------
+
+struct Check {
+    diagnostics: Diagnostic[],
+    status: u64,
+    failed: bool
+}
+
+fn temp_root() -> u8[] {
+    value := host::env(view("TMPDIR"));
+    if value.len() != 0 {
+        return value;
+    }
+    if host::exists(view("/tmp")) != 0 {
+        return copy_bytes(view("/tmp"));
+    }
+    return copy_bytes(view("."));
+}
+fn path_join<a, b>(dir: &a [u8], name: &b [u8]) -> u8[] {
+    mut out = copy_bytes(dir);
+    if !has_suffix(view(out), view("/")) {
+        out.push(47);
+    }
+    for i in name.len() {
+        out.push(name[i]);
+    }
+    return out;
+}
+// The compiler is this server's own tree unless the environment names one.
+fn compiler_path() -> u8[] {
+    value := host::env(view("GRAIL_LSP_COMPILER"));
+    if value.len() != 0 {
+        return value;
+    }
+    other := host::env(view("GRAIL_COMPILER"));
+    if other.len() != 0 {
+        return other;
+    }
+    return copy_bytes(view("grail"));
+}
+fn name_char(c: u64) -> bool {
+    if (64 < c) && (c < 91) {
+        return true;
+    }
+    if (96 < c) && (c < 123) {
+        return true;
+    }
+    if is_digit(c) {
+        return true;
+    }
+    return (c == 46) || (c == 95) || (c == 45);
+}
+// A scratch file name for the buffer: the uri's last segment, sanitised, always `.grl`.
+fn buffer_name(uri: &[u8]) -> u8[] {
+    mut start = 0;
+    for i in uri.len() {
+        if uri[i] == 47 {
+            start = i + 1;
+        }
+    }
+    mut name = u8[];
+    mut i = start;
+    while i < uri.len() {
+        c := uri[i];
+        if name_char(c) {
+            name.push(c);
+        } else {
+            name.push(95);
+        }
+        i += 1;
+    }
+    if !has_suffix(view(name), view(".grl")) {
+        put(&mut name, view(".grl"));
+    }
+    return name;
+}
+
+// One `file:line:column: message` diagnostic line, mapped back onto the buffer.
+fn diagnostic_from(line: &[u8], offset: u64, text: &[u8]) -> (Diagnostic)? {
+    mut i = offset;
+    if line.len() <= i {
+        return None;
+    }
+    if line[i] != 58 {
+        return None;
+    }
+    i += 1;
+    mut number = 0;
+    mut digits = 0;
+    while (i < line.len()) && is_digit(line[i]) {
+        number = number * 10 + (line[i] - 48);
+        digits += 1;
+        i += 1;
+    }
+    if (digits == 0) || (line.len() <= i) {
+        return None;
+    }
+    if line[i] != 58 {
+        return None;
+    }
+    i += 1;
+    mut column = 0;
+    digits = 0;
+    while (i < line.len()) && is_digit(line[i]) {
+        column = column * 10 + (line[i] - 48);
+        digits += 1;
+        i += 1;
+    }
+    if (digits == 0) || (line.len() <= i) || (number == 0) {
+        return None;
+    }
+    if line[i] != 58 {
+        return None;
+    }
+    i += 1;
+    if (i < line.len()) && (line[i] == 32) {
+        i += 1;
+    }
+    message := line[i:line.len()];
+    if message.len() == 0 {
+        return None;
+    }
+    doc_line := line_bytes(text, number - 1);
+    total := utf16_len(doc_line);
+    mut start = utf16_prefix(doc_line, column - 1);
+    if total < start {
+        start = total;
+    }
+    mut end = start + 1;
+    if total < end {
+        end = total;
+    }
+    return Some(
+        Diagnostic {
+            line: number - 1,
+            start: start,
+            end: end,
+            message: message.copy()
+        }
+    );
+}
+fn parse_diagnostics(output: &[u8], name: &[u8], text: &[u8]) -> Diagnostic[] {
+    mut found = Diagnostic[];
+    mut i = 0;
+    while i < output.len() {
+        start := i;
+        while (i < output.len()) && (output[i] != 10) {
+            i += 1;
+        }
+        mut end = i;
+        if i < output.len() {
+            i += 1;
+        }
+        if (start < end) && (output[end - 1] == 13) {
+            end -= 1;
+        }
+        line := output[start:end];
+        if has_prefix(line, name) {
+            match diagnostic_from(line, name.len(), text) {
+                Some(diagnostic) => {
+                    found.push(diagnostic);
+                },
+                None => {},
+            }
+        }
+    }
+    return found;
+}
+
+// Compile the buffer in a scratch directory and read the diagnostics back. The compiler
+// writes `file:line:column: message` to stdout; `host::command` inherits this process's
+// stdio, so the check runs under `sh -c` with both streams redirected to a file inside
+// its own working directory. Nothing is written into the user's tree.
+fn run_check(uri: &[u8], text: &[u8], serial: u64) -> Check {
+    root := temp_root();
+    serial_text := format("{}", serial);
+    dir := path_join(view(root), joined(view("grail-lsp-"), &serial_text));
+    name := buffer_name(uri);
+    path := path_join(view(dir), view(name));
+    out_path := path_join(view(dir), view("diagnostics.txt"));
+    host::mkdir(view(dir));
+    written := host::write_file(view(path), text);
+    if written != 0 {
+        host::remove(view(dir), 1);
+        return Check { diagnostics: Diagnostic[], status: 1, failed: true };
+    }
+    exe := compiler_path();
+    mut command = u8[][];
+    command.push(copy_bytes(view("sh")));
+    command.push(copy_bytes(view("-c")));
+    command.push(copy_bytes(view("cd \"$1\" || exit 125; exec \"$2\" check \"$3\" >\"$4\" 2>&1")));
+    command.push(copy_bytes(view("grail-lsp")));
+    command.push(copy_bytes(view(dir)));
+    command.push(exe);
+    command.push(copy_bytes(view(name)));
+    command.push(copy_bytes(view(out_path)));
+    status := host::command(command);
+    output := host::read_file(view(out_path));
+    diagnostics := parse_diagnostics(view(output), view(name), text);
+    target_dir := path_join(view(dir), view("target"));
+    host::remove(view(out_path), 0);
+    host::remove(view(target_dir), 1);
+    host::remove(view(path), 0);
+    host::remove(view(dir), 1);
+    return Check {
+        diagnostics: diagnostics,
+        status: status,
+        failed: (output.len() == 0) && (status != 0)
+    };
+}
+
+// ---------------------------------------------------------------------------
+// responses
+// ---------------------------------------------------------------------------
+
+fn send_body(body: u8[]) {
+    mut frame = u8[];
+    header := format("Content-Length: {}\r\n\r\n", body.len());
+    put(&mut frame, &header);
+    put(&mut frame, view(body));
+    host::write_fd(1, view(frame));
+}
+fn send_result(id: u8[], result: &[u8]) {
+    mut body = u8[];
+    put(&mut body, view("{\"jsonrpc\":\"2.0\",\"id\":"));
+    put(&mut body, view(id));
+    put(&mut body, view(",\"result\":"));
+    put(&mut body, result);
+    put(&mut body, view("}"));
+    send_body(body);
+}
+fn send_error(id: u8[], code: i64, message: &[u8]) {
+    mut body = u8[];
+    put(&mut body, view("{\"jsonrpc\":\"2.0\",\"id\":"));
+    put(&mut body, view(id));
+    put(&mut body, view(",\"error\":{\"code\":"));
+    put_int(&mut body, code);
+    put(&mut body, view(",\"message\":"));
+    put_string(&mut body, message);
+    put(&mut body, view("}}"));
+    send_body(body);
+}
+fn publish(uri: &[u8], version: i64, versioned: bool, diagnostics: Diagnostic[]) {
+    mut body = u8[];
+    put(&mut body, view("{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/publishDiagnostics\",\"params\":{\"uri\":"));
+    put_string(&mut body, uri);
+    if versioned {
+        put(&mut body, view(",\"version\":"));
+        put_int(&mut body, version);
+    }
+    put(&mut body, view(",\"diagnostics\":["));
+    for i in diagnostics.len() {
+        mut d = &diagnostics[i];
+        if 0 < i {
+            body.push(44);
+        }
+        put(&mut body, view("{\"range\":{\"start\":{\"line\":"));
+        put_num(&mut body, d.line);
+        put(&mut body, view(",\"character\":"));
+        put_num(&mut body, d.start);
+        put(&mut body, view("},\"end\":{\"line\":"));
+        put_num(&mut body, d.line);
+        put(&mut body, view(",\"character\":"));
+        put_num(&mut body, d.end);
+        put(&mut body, view("}},\"severity\":1,\"source\":\"grail\",\"code\":\"compiler\",\"message\":"));
+        put_string(&mut body, view(d.message));
+        put(&mut body, view("}"));
+    }
+    put(&mut body, view("]}}"));
+    send_body(body);
+}
+// The one message that is not a diagnostic: the compiler could not be run at all.
+// It is sent once, and diagnostics stay as they were instead of being invented.
+fn report_environment(s: &mut Server, status: u64) {
+    if s.reported {
+        return ();
+    }
+    s.reported = true;
+    exe := compiler_path();
+    note := format(
+        "grail lsp: could not run '{} check' (exit {}); set GRAIL_LSP_COMPILER to a Grail executable",
+        exe.text(),
+        status
+    );
+    mut body = u8[];
+    put(&mut body, view("{\"jsonrpc\":\"2.0\",\"method\":\"window/showMessage\",\"params\":{\"type\":1,\"message\":"));
+    put_string(&mut body, view(note));
+    put(&mut body, view("}}"));
+    send_body(body);
+}
+
+// ---------------------------------------------------------------------------
+// documents and requests
+// ---------------------------------------------------------------------------
+
+fn text_member<a, b>(value: (&a json::Value), key: &b [u8]) -> (u8[])? {
+    match value.get(key) {
+        Some(member) => {
+            match member.as_str() {
+                Some(text) => {
+                    return Some(text.copy());
+                },
+                None => {
+                    return None;
+                }
+            }
+        },
+        None => {
+            return None;
+        }
+    }
+}
+fn text_or<a, b>(value: (&a json::Value), key: &b [u8]) -> u8[] {
+    match text_member(value, key) {
+        Some(text) => {
+            return text;
+        },
+        None => {
+            return u8[];
+        }
+    }
+}
+fn int_member<a, b>(value: (&a json::Value), key: &b [u8]) -> (i64)? {
+    match value.get(key) {
+        Some(member) => {
+            return member.as_i64();
+        },
+        None => {
+            return None;
+        }
+    }
+}
+fn int_or<a, b>(value: (&a json::Value), key: &b [u8], fallback: i64) -> i64 {
+    match int_member(value, key) {
+        Some(number) => {
+            return number;
+        },
+        None => {
+            return fallback;
+        }
+    }
+}
+fn has_member<a, b>(value: (&a json::Value), key: &b [u8]) -> bool {
+    match value.get(key) {
+        Some(found) => {
+            return true;
+        },
+        None => {
+            return false;
+        }
+    }
+}
+fn id_bytes(msg: &json::Value) -> (u8[])? {
+    match msg.get(view("id")) {
+        Some(value) => {
+            text := json::to_text(value);
+            return Some(text.copy());
+        },
+        None => {
+            return None;
+        }
+    }
+}
+// An error answer, unless the message was a notification (which never gets one).
+fn answer_error(msg: &json::Value, code: i64, text: &[u8]) {
+    match id_bytes(msg) {
+        Some(id) => {
+            send_error(id, code, text);
+        },
+        None => {
+            return ();
+        }
+    }
+}
+
+fn check_document(s: &mut Server, index: u64) {
+    if s.docs.len() <= index {
+        return ();
+    }
+    snapshot := snapshot_at(&s.docs, index);
+    s.serial += 1;
+    outcome := run_check(view(snapshot.uri), view(snapshot.text), s.serial);
+    if outcome.failed {
+        report_environment(s, outcome.status);
+        return ();
+    }
+    publish(view(snapshot.uri), snapshot.version, snapshot.versioned, outcome.diagnostics);
+}
+
+fn store_document(s: &mut Server, uri: u8[], text: u8[], version: i64, versioned: bool) -> u64 {
+    index := find_document(&s.docs, view(uri));
+    if index != no_index() {
+        mut d = &mut s.docs[index];
+        exchange(&mut d.text, text);
+        exchange(&mut d.version, version);
+        exchange(&mut d.versioned, versioned);
+        return index;
+    }
+    s.docs.push(Document { uri: uri, text: text, version: version, versioned: versioned });
+    return s.docs.len() - 1;
+}
+
+fn open_document(s: &mut Server, document: (&json::Value)) {
+    uri := text_or(document, view("uri"));
+    if uri.len() == 0 {
+        return ();
+    }
+    text := text_or(document, view("text"));
+    version := int_or(document, view("version"), 0);
+    versioned := has_member(document, view("version"));
+    index := store_document(s, uri, text, version, versioned);
+    check_document(s, index);
+}
+fn handle_open(s: &mut Server, msg: &json::Value) {
+    match msg.get(view("params")) {
+        Some(params) => {
+            match params.get(view("textDocument")) {
+                Some(document) => {
+                    open_document(s, document);
+                },
+                None => {
+                    return ();
+                }
+            }
+        },
+        None => {
+            return ();
+        }
+    }
+}
+// Full-text synchronisation: the first content change carries the whole buffer.
+fn changed_text(params: (&json::Value)) -> (u8[])? {
+    match params.get(view("contentChanges")) {
+        Some(changes) => {
+            match changes.at(0) {
+                Some(change) => {
+                    if has_member(change, view("text")) {
+                        return Some(text_or(change, view("text")));
+                    }
+                    return None;
+                },
+                None => {
+                    return None;
+                }
+            }
+        },
+        None => {
+            return None;
+        }
+    }
+}
+fn handle_change(s: &mut Server, msg: &json::Value) {
+    match msg.get(view("params")) {
+        Some(params) => {
+            match params.get(view("textDocument")) {
+                Some(document) => {
+                    uri := text_or(document, view("uri"));
+                    if uri.len() == 0 {
+                        return ();
+                    }
+                    index := find_document(&s.docs, view(uri));
+                    if index == no_index() {
+                        return ();
+                    }
+                    match changed_text(params) {
+                        Some(text) => {
+                            version := int_or(document, view("version"), 0);
+                            versioned := has_member(document, view("version"));
+                            mut d = &mut s.docs[index];
+                            exchange(&mut d.text, text);
+                            exchange(&mut d.version, version);
+                            exchange(&mut d.versioned, versioned);
+                            check_document(s, index);
+                        },
+                        None => {
+                            return ();
+                        }
+                    }
+                },
+                None => {
+                    return ();
+                }
+            }
+        },
+        None => {
+            return ();
+        }
+    }
+}
+fn handle_close(s: &mut Server, msg: &json::Value) {
+    match msg.get(view("params")) {
+        Some(params) => {
+            match params.get(view("textDocument")) {
+                Some(document) => {
+                    uri := text_or(document, view("uri"));
+                    if uri.len() == 0 {
+                        return ();
+                    }
+                    index := find_document(&s.docs, view(uri));
+                    if index == no_index() {
+                        return ();
+                    }
+                    mut kept = Document[];
+                    for i in s.docs.len() {
+                        if i != index {
+                            d := &s.docs[i];
+                            kept.push(
+                                Document {
+                                    uri: d.uri.copy(),
+                                    text: d.text.copy(),
+                                    version: d.version,
+                                    versioned: d.versioned
+                                }
+                            );
+                        }
+                    }
+                    exchange(&mut s.docs, kept);
+                    publish(view(uri), 0, false, Diagnostic[]);
+                },
+                None => {
+                    return ();
+                }
+            }
+        },
+        None => {
+            return ();
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// definition
+// ---------------------------------------------------------------------------
+
+// The lexer's token stream with the brace depth in front of each token. Names are not
+// copied: a token's text is the document slice it spans.
+struct Token {
+    kind: u64,
+    start: u64,
+    end: u64,
+    depth: u64
+}
+struct Declaration {
+    token: u64,
+    depth: u64,
+    function: bool
+}
+fn tokenize<a>(text: &a [u8]) -> Token[] {
+    lexed := lexer::tokenize(text);
+    mut tokens = Token[];
+    mut depth = 0;
+    for i in lexed.len() {
+        t := &lexed[i];
+        if t.kind == 125 {
+            if 0 < depth {
+                depth -= 1;
+            }
+        }
+        tokens.push(Token { kind: t.kind, start: t.start, end: t.end, depth: depth });
+        if t.kind == 123 {
+            depth += 1;
+        }
+    }
+    return tokens;
+}
+fn prev_is<a, b, c>(text: &a [u8], tokens: (&b Token[]), index: u64, word: &c [u8]) -> bool {
+    if index == 0 {
+        return false;
+    }
+    t := &tokens[index - 1];
+    if t.kind != 1 {
+        return false;
+    }
+    return eq(text[t.start:t.end], word);
+}
+fn next_kind<a>(tokens: (&a Token[]), index: u64) -> u64 {
+    if tokens.len() <= index + 1 {
+        return 0;
+    }
+    return tokens[index + 1].kind;
+}
+// The brace depth of the `fn NAME(...)` header an identifier sits in as a parameter, or
+// `no_index()` when it is not a plain parameter name.
+fn parameter_depth<a, b>(text: &a [u8], tokens: (&b Token[]), index: u64) -> u64 {
+    if index == 0 {
+        return no_index();
+    }
+    if (tokens[index - 1].kind != 40) && (tokens[index - 1].kind != 44) {
+        return no_index();
+    }
+    mut i = index;
+    mut depth = 0;
+    mut angles = 0;
+    while 0 < i {
+        i -= 1;
+        k := tokens[i].kind;
+        if k == 41 {
+            depth += 1;
+        } else if k == 40 {
+            if depth == 0 {
+                if (2 <= i) && (tokens[i - 1].kind == 1) {
+                    if prev_is(text, tokens, i - 1, view("fn")) {
+                        return tokens[i - 2].depth;
+                    }
+                }
+                return no_index();
+            }
+            depth -= 1;
+        } else if k == 62 {
+            angles += 1;
+        } else if k == 60 {
+            if angles == 0 {
+                // a generic list, not the parameter list
+                return no_index();
+            }
+            angles -= 1;
+        } else if (k == 123) || (k == 125) || (k == 59) {
+            return no_index();
+        }
+    }
+    return no_index();
+}
+// Every name this file declares: `fn NAME`, `NAME :=`, `mut NAME`, `for NAME in` and a
+// parameter of a function header.
+fn collect_declarations<a, b>(text: &a [u8], tokens: (&b Token[])) -> Declaration[] {
+    mut out = Declaration[];
+    for i in tokens.len() {
+        t := &tokens[i];
+        if t.kind != 1 {
+            continue;
+        }
+        if prev_is(text, tokens, i, view("fn")) {
+            out.push(Declaration { token: i, depth: t.depth, function: true });
+        } else if prev_is(text, tokens, i, view("mut")) || prev_is(text, tokens, i, view("for")) {
+            out.push(Declaration { token: i, depth: t.depth, function: false });
+        } else if next_kind(tokens, i) == 261 {
+            out.push(Declaration { token: i, depth: t.depth, function: false });
+        }
+        depth := parameter_depth(text, tokens, i);
+        if depth != no_index() {
+            out.push(Declaration { token: i, depth: depth, function: false });
+        }
+    }
+    return out;
+}
+// The declaration a use at `offset` refers to: the nearest preceding declaration of that
+// name in an enclosing block, else a function of that name anywhere in the file.
+fn resolve<a, b, c>(text: &a [u8], tokens: (&b Token[]), declarations: (&c Declaration[]), offset: u64) -> u64 {
+    mut at = no_index();
+    for i in tokens.len() {
+        t := &tokens[i];
+        if (t.kind == 1) && (t.start <= offset) && (offset < t.end) {
+            at = i;
+        }
+    }
+    if at == no_index() {
+        return no_index();
+    }
+    if 0 < at {
+        before := tokens[at - 1].kind;
+        // A field, a method or a module-qualified name is not answered from this file.
+        if (before == 46) || (before == 260) {
+            return no_index();
+        }
+    }
+    for i in declarations.len() {
+        d := &declarations[i];
+        if d.token == at {
+            return at;
+        }
+    }
+    name := text[tokens[at].start:tokens[at].end];
+    depth := tokens[at].depth;
+    mut best = no_index();
+    for i in declarations.len() {
+        d := &declarations[i];
+        if (d.token < at) && (d.depth <= depth) {
+            if eq(text[tokens[d.token].start:tokens[d.token].end], name) {
+                best = d.token;
+            }
+        }
+    }
+    if best != no_index() {
+        return best;
+    }
+    for i in declarations.len() {
+        d := &declarations[i];
+        if d.function {
+            if eq(text[tokens[d.token].start:tokens[d.token].end], name) {
+                return d.token;
+            }
+        }
+    }
+    return no_index();
+}
+fn line_start<a>(text: &a [u8], line: u64) -> u64 {
+    mut current = 0;
+    mut start = 0;
+    mut i = 0;
+    while i < text.len() {
+        if text[i] == 10 {
+            if current == line {
+                return start;
+            }
+            current += 1;
+            start = i + 1;
+        }
+        i += 1;
+    }
+    if current == line {
+        return start;
+    }
+    return no_index();
+}
+fn line_of<a>(text: &a [u8], offset: u64) -> u64 {
+    mut line = 0;
+    mut i = 0;
+    while (i < text.len()) && (i < offset) {
+        if text[i] == 10 {
+            line += 1;
+        }
+        i += 1;
+    }
+    return line;
+}
+// Byte offset of an LSP position, or `no_index()` when the position is outside the buffer.
+fn document_offset<a>(text: &a [u8], line: i64, character: i64) -> u64 {
+    if (line < 0) || (character < 0) {
+        return no_index();
+    }
+    row := u64(line);
+    start := line_start(text, row);
+    if start == no_index() {
+        return no_index();
+    }
+    content := line_bytes(text, row);
+    return start + utf16_offset(content, u64(character));
+}
+fn answer_location(id: u8[], uri: &[u8], text: &[u8], line: i64, character: i64) {
+    offset := document_offset(text, line, character);
+    if offset == no_index() {
+        send_result(id, view("null"));
+        return ();
+    }
+    tokens := tokenize(text);
+    declarations := collect_declarations(text, &tokens);
+    target := resolve(text, &tokens, &declarations, offset);
+    if target == no_index() {
+        send_result(id, view("null"));
+        return ();
+    }
+    t := &tokens[target];
+    row := line_of(text, t.start);
+    column := utf16_prefix(line_bytes(text, row), t.start - line_start(text, row));
+    mut result = u8[];
+    put(&mut result, view("{\"uri\":"));
+    put_string(&mut result, uri);
+    put(&mut result, view(",\"range\":{\"start\":{\"line\":"));
+    put_num(&mut result, row);
+    put(&mut result, view(",\"character\":"));
+    put_num(&mut result, column);
+    put(&mut result, view("},\"end\":{\"line\":"));
+    put_num(&mut result, row);
+    put(&mut result, view(",\"character\":"));
+    put_num(&mut result, column + (t.end - t.start));
+    put(&mut result, view("}}}"));
+    send_result(id, view(result));
+}
+fn handle_definition(s: &mut Server, msg: &json::Value) {
+    match msg.get(view("params")) {
+        Some(params) => {
+            match params.get(view("textDocument")) {
+                Some(document) => {
+                    match params.get(view("position")) {
+                        Some(position) => {
+                            uri := text_or(document, view("uri"));
+                            line := int_or(position, view("line"), 0);
+                            character := int_or(position, view("character"), 0);
+                            answer_definition(s, msg, view(uri), line, character);
+                        },
+                        None => {
+                            answer_error(
+                                msg,
+                                -32602,
+                                view("invalid params: textDocument/definition needs a position")
+                            );
+                        }
+                    }
+                },
+                None => {
+                    answer_error(
+                        msg,
+                        -32602,
+                        view("invalid params: textDocument/definition needs a textDocument")
+                    );
+                }
+            }
+        },
+        None => {
+            answer_error(msg, -32602, view("invalid params: textDocument/definition needs params"));
+        }
+    }
+}
+fn answer_definition(s: &mut Server, msg: &json::Value, uri: &[u8], line: i64, character: i64) {
+    match id_bytes(msg) {
+        Some(id) => {
+            index := find_document(&s.docs, uri);
+            if index == no_index() {
+                send_result(id, view("null"));
+                return ();
+            }
+            snapshot := snapshot_at(&s.docs, index);
+            answer_location(id, view(snapshot.uri), view(snapshot.text), line, character);
+        },
+        None => {
+            return ();
+        }
+    }
+}
+
+const SERVER_VERSION: string = "0.1.0";
+
+fn initialize_result() -> u8[] {
+    mut out = u8[];
+    put(
+        &mut out,
+        view(
+            "{\"capabilities\":{\"textDocumentSync\":{\"openClose\":true,\"change\":1},\"definitionProvider\":true},\"serverInfo\":{\"name\":\"grail-lsp\",\"version\":\""
+        )
+    );
+    put(&mut out, view(SERVER_VERSION));
+    put(&mut out, view("\"}}"));
+    return out;
+}
+fn handle_initialize(s: &mut Server, msg: &json::Value) {
+    match id_bytes(msg) {
+        Some(id) => {
+            if s.state != 0 {
+                send_error(id, -32600, view("initialize has already been received"));
+                return ();
+            }
+            s.state = 1;
+            result := initialize_result();
+            send_result(id, view(result));
+        },
+        None => {
+            return ();
+        }
+    }
+}
+fn handle_shutdown(s: &mut Server, msg: &json::Value) {
+    match id_bytes(msg) {
+        Some(id) => {
+            s.state = 2;
+            send_result(id, view("null"));
+        },
+        None => {
+            return ();
+        }
+    }
+}
+fn exit_server(s: &mut Server) {
+    if s.state == 2 {
+        host::exit(0);
+    }
+    host::exit(1);
+}
+fn route_named<a>(s: &mut Server, msg: &json::Value, name: &a string) {
+    if name == "initialize" {
+        handle_initialize(s, msg);
+        return ();
+    }
+    if name == "initialized" {
+        return ();
+    }
+    if name == "shutdown" {
+        handle_shutdown(s, msg);
+        return ();
+    }
+    if name == "exit" {
+        exit_server(s);
+        return ();
+    }
+    if name == "$/cancelRequest" {
+        return ();
+    }
+    if s.state == 0 {
+        answer_error(msg, -32002, view("server not initialized"));
+        return ();
+    }
+    if s.state == 2 {
+        answer_error(msg, -32600, view("server is shutting down"));
+        return ();
+    }
+    if name == "textDocument/didOpen" {
+        handle_open(s, msg);
+        return ();
+    }
+    if name == "textDocument/didChange" {
+        handle_change(s, msg);
+        return ();
+    }
+    if name == "textDocument/didClose" {
+        handle_close(s, msg);
+        return ();
+    }
+    if name == "textDocument/definition" {
+        handle_definition(s, msg);
+        return ();
+    }
+    answer_error(msg, -32601, view("method not found"));
+}
+fn dispatch(s: &mut Server, msg: &json::Value) {
+    match msg.get(view("method")) {
+        Some(method) => {
+            match method.as_str() {
+                Some(name) => {
+                    route_named(s, msg, name);
+                },
+                None => {
+                    answer_error(msg, -32600, view("invalid request: method must be a string"));
+                }
+            }
+        },
+        None => {
+            // A response, or an object with no method: nothing is pending, so ignore it.
+            return ();
+        }
+    }
+}
+fn receive(s: &mut Server, body: &[u8]) {
+    match json::parse(body) {
+        value: json::Value => {
+            dispatch(s, &value);
+        },
+        error: json::Error => {
+            send_error(copy_bytes(view("null")), -32700, view("parse error"));
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// framing loop
+// ---------------------------------------------------------------------------
+
+fn drop_prefix(s: &mut Server, count: u64) {
+    mut kept = u8[];
+    mut i = count;
+    while i < s.pending.len() {
+        kept.push(s.pending[i]);
+        i += 1;
+    }
+    exchange(&mut s.pending, kept);
+}
+fn pump(s: &mut Server) {
+    while true {
+        end := header_end(view(s.pending));
+        if end == no_index() {
+            if 65536 < s.pending.len() {
+                exchange(&mut s.pending, u8[]);
+                send_error(copy_bytes(view("null")), -32700, view("invalid frame: no header terminator"));
+            }
+            return ();
+        }
+        start := end + 4;
+        length := content_length(s.pending[0:end]);
+        if length == no_index() {
+            // The frame cannot be bounded, so it is answered and discarded. Whatever is left
+            // is unattributable unless a header line starts it, and is dropped in that case
+            // too; the next frame that arrives is then read from its own header.
+            drop_prefix(s, start);
+            next := header_start(view(s.pending));
+            if next != no_index() {
+                drop_prefix(s, next);
+            } else {
+                exchange(&mut s.pending, u8[]);
+            }
+            send_error(
+                copy_bytes(view("null")),
+                -32700,
+                view("invalid frame: Content-Length is missing or malformed")
+            );
+            continue;
+        }
+        total := start + length;
+        if s.pending.len() < total {
+            return ();
+        }
+        mut body = u8[];
+        for i in length {
+            body.push(s.pending[start + i]);
+        }
+        drop_prefix(s, total);
+        receive(s, view(body));
+    }
+}
+fn main() -> u64 {
+    mut server = server_new();
+    while true {
+        chunk := host::read_fd(0, 65536);
+        if chunk.len() == 0 {
+            return 0;
+        }
+        for i in chunk.len() {
+            server.pending.push(chunk[i]);
+        }
+        pump(&mut server);
+    }
+    return 0;
+}
