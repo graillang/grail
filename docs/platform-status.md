@@ -206,5 +206,5 @@ make -C graphics vk-probe       # Vulkan device/capability probe (GPU)
 make -C graphics shader-check   # real DXC/SPIR-V artifacts and reflection
 make -C graphics perm-test      # shader permutations
 just abundance-test             # Abundance bit-exact parity (313 values, 9 programs)
-just borg-test                  # Borg reference-line parity (921 lines, 11 suites)
+just borg-test                  # Borg reference-line parity (1014 lines, 12 suites)
 ```
