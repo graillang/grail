@@ -1,4 +1,4 @@
-import { buildCompiler, assemble, execute, hostTarget, targetName } from './native.mjs';
+import { buildCompiler, assemble, execute, hostTarget, targetName, triples } from './native.mjs';
 import { readFileSync, mkdirSync, writeFileSync, copyFileSync, rmSync } from 'node:fs';
 import { resolve, dirname, relative, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -28,6 +28,10 @@ export function loadBook(manifest = join(source, 'book.json')) {
     if (!example.rust || typeof example.rust.source !== 'string' || typeof example.rust.note !== 'string' || !example.rust.note.trim()) throw new Error(`Example ${example.id} needs a Rust comparison with source and note`);
     if ((typeof example.rust.output === 'string') === (typeof example.rust.diagnostic === 'string')) throw new Error(`Rust comparison ${example.id} needs output or diagnostic`);
     readFileSync(sourcePath(example.rust.source));
+    if (example.c !== undefined) {
+      if (!example.c.endsWith('.c')) throw new Error(`Example ${example.id} needs a .c C fixture`);
+      readFileSync(sourcePath(example.c));
+    }
     if ((example.modules ?? []).length !== (example.rust.modules ?? []).length) throw new Error(`Example ${example.id} needs a Rust counterpart for each supporting module`);
     for (const path of example.rust.modules ?? []) readFileSync(sourcePath(path));
     for (const path of [example.entry, ...(example.modules ?? [])]) readFileSync(sourcePath(path));
@@ -106,7 +110,8 @@ export function verifyExample(example, compiler, suppliedArgs, target = hostTarg
     return diagnostic;
   }
   if (!result.success) throw new Error(`${example.id}: compilation failed\n${result.stdout}${result.stderr}`);
-  const exe = assemble(asm, join(directory, 'program'), target);
+  const objects = example.c ? [compileC(example.c, directory, target)] : [];
+  const exe = assemble(asm, join(directory, 'program'), target, objects);
   writeFixtures(directory, example.fixtures);
   const execution = execute(exe, suppliedArgs ?? example.args ?? [], target, { cwd: directory });
   if (execution.error) throw execution.error;
@@ -115,6 +120,19 @@ export function verifyExample(example, compiler, suppliedArgs, target = hostTarg
   if (suppliedArgs === undefined && stdout !== example.output) throw new Error(`${example.id}: stdout mismatch\nexpected ${JSON.stringify(example.output)}\nreceived ${JSON.stringify(stdout)}`);
   verifyFiles(directory, example.files, example.id);
   return stdout;
+}
+// An example may carry a C fixture (`"c": "ffi/record-pointers.c"`): a freestanding C file the
+// example and its Rust twin both link, so an FFI chapter shows C compiled by C rather than a Grail
+// stand-in. The object is written beside each program under the name the declaration's `lib`
+// clause asks for, which is also the input the FFI suite links.
+function compileC(source, directory, target) {
+  const object = join(directory, source.split('/').pop().replace(/\.c$/, '.o'));
+  const flags = target === 'riscv64' ? ['-march=rv64imafd', '-mabi=lp64d'] : [];
+  runCommand([
+    process.env.GRAIL_ASSEMBLER ?? 'clang', `--target=${triples[target]}`, ...flags, '-c', '-O1',
+    '-ffreestanding', '-fno-stack-protector', '-fPIC', sourcePath(source), '-o', object,
+  ]);
+  return object;
 }
 function fixturePath(directory, name) {
   const target = resolve(directory, name);
@@ -138,7 +156,11 @@ export function verifyRust(example) {
   rmSync(directory, { recursive: true, force: true });
   mkdirSync(directory, { recursive: true });
   const exe = join(directory, 'rust-example');
-  const result = Bun.spawnSync(['rustc', '--edition=2024', '-C', 'overflow-checks=on', '-C', 'panic=abort', sourcePath(rust.source), '-o', exe], { cwd: root, stdout: 'pipe', stderr: 'pipe' });
+  // The same C fixture the Grail side links, so the pair compares the same C.
+  const objects = example.c ? [compileC(example.c, directory, hostTarget)] : [];
+  const result = Bun.spawnSync(['rustc', '--edition=2024', '-C', 'overflow-checks=on', '-C', 'panic=abort',
+    ...objects.map(object => `-Clink-arg=${object}`), sourcePath(rust.source), '-o', exe],
+    { cwd: root, stdout: 'pipe', stderr: 'pipe' });
   if (rust.diagnostic) {
     if (result.success || !result.stderr.toString().includes(rust.diagnostic)) throw new Error(`${example.id}: expected Rust rejection ${rust.diagnostic}\n${result.stderr}`);
   } else {

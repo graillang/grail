@@ -2,6 +2,48 @@
 
 ## Unreleased
 
+- FFI: a C callback's extern-record parameter is borrowed, not owned. The parameter prologue marked
+  every parameter as an owning binding, so the epilogue ran the record's drop glue on the address C
+  handed over — freeing the caller's struct (or its stack) — and the process then aborted inside the
+  runtime's free path at exit, after `main` had printed everything and returned 0. That is the abort
+  the RHI work recorded in `docs/rhi.md`: the shape is "a record crosses an `extern "C"` call", and
+  the two-declarations-of-one-symbol case that pinned it is now a case of its own. A callback's
+  record parameter is the `const R *` the C caller owns, so `func`'s prologue registers it through
+  `borrow_parameter` (a real place, no drop glue) instead of `own`, and the fields stay readable
+  under the ordinary borrow rules. Verified by `ffi-record-callback-parameter` in
+  `tests/native-cases.json` (20, and the process reaches its exit status) and by the same shape in
+  `tests/ffi/record_pointers.grl` against a real C shim.
+
+- FFI: the address of a Grail-owned `extern "C"` record is now a value, and C can fill a record in
+  place. `unsafe cptr(&r)` is a `CPtr` and `cptr_mut(&mut r)` a `CMutPtr` holding the address of the
+  record's own fields — the same pointer a record *parameter* already was — so a struct that points
+  at another struct (`VkInstanceCreateInfo::pApplicationInfo`, `VkRenderPassCreateInfo::pAttachments`)
+  is expressible without laying bytes out by hand; a field, a binding and a declaration parameter
+  typed `const void *`/`void *` all take it. `p: &mut R` in a declaration is the C `R *` the callee
+  writes, and the caller reads the typed fields afterwards
+  (`vkGetPhysicalDeviceSurfaceCapabilitiesKHR`). An `extern "C"` record binding declared without an
+  initializer gets `sizeof(struct)` zeroed bytes instead of nothing, so `&mut r` is a valid pointer
+  and a callee that reads a field it does not overwrite reads 0 - but the binding still holds no
+  *value*: reading a field (or moving the record) before a foreign call or an assignment wrote it is
+  refused with `use of moved, borrowed or partially initialized value`, which is what keeps a zeroed
+  handle from being read as one. With handle-typed fields filled by C through `&mut`, or seeded from
+  handles the program already holds, `vkQueueSubmit`'s `pCommandBuffers` and `VkPresentInfoKHR`'s
+  `pSwapchains` are expressible as arrays of handles. The borrow rules are the call-scoped ones
+  `cptr` already had, with named failures for each hazard: `cptr needs a named record: the address of
+  a temporary would not outlive the pointer`, `cptr takes the address of an extern "C" record; a
+  Grail record has no C layout`, `the value handed to C as a writable pointer is already borrowed in
+  this expression`, `the value handed to C as a read-only pointer is already mutably borrowed in this
+  expression`, and `an extern C out-parameter needs a binding to write into; a temporary record would
+  be discarded`. Also fixed, on the way: an embedded record's place (`o.inner`) is a proxy slot
+  holding its interior address, so `&mut o.inner` no longer reads the first field as an address
+  (it faulted on x86-64 and wrote through a stack slot on assignment); and a C callback's record
+  parameter is now borrowed rather than owned, because the epilogue used to free C's struct, which
+  aborted in the runtime's free path at exit after `main` had already printed everything. Verified
+  by `tests/ffi/record_pointers.grl` against a real C shim on all three targets (including a handle
+  Grail reads out of an array C filled comparing equal to the one C hands back), fourteen new cases
+  in `tests/native-cases.json`, and a new book chapter (`Calling C`) whose Grail and Rust twins link
+  one C file.
+
 - Windows task scheduling is now the same as Linux: a task is green on Windows, not an OS thread.
   One scheduler thread runs the tasks cooperatively, a task runs until it yields or blocks, and
   suspension parks the task rather than the thread. The switch is a Win32 fiber

@@ -131,6 +131,20 @@ const fixtures = [
       'c_out_ptr', 'c_out_ptr_sum', 'c_out_ptr_mut', 'c_out_ptr_list', 'c_out_info'],
   },
   {
+    // Records reached by pointer: `cptr(&r)` is the address of r's own C-layout fields, so a
+    // create-info struct can point at another struct (13); `&mut R` is the C `R *` the callee fills
+    // in place (0), including the fields it leaves alone (0) after C wrote api_version (4194304);
+    // an array of handles is a record of handle fields C writes (0 for the call) and Grail passes
+    // back (110), a seeded array built from those handles sums to 77, and the handle Grail reads out
+    // of the array equals the one C handed back (1); an array of structs sums through two interior
+    // element addresses (433); and one count record crosses two declarations of one symbol (8)
+    // without aborting at exit.
+    name: 'record_pointers',
+    stdout: '13\n5\n0\n4194304\n0\n0\n110\n77\n1\n433\n8\n',
+    symbols: ['c_create_info', 'c_app_version', 'c_fill_app', 'c_alloc_handles', 'c_sum_handles',
+      'c_slot0', 'c_ref_sum', 'c_enum_count'],
+  },
+  {
     // More than six word arguments: 7, 8 and 9 words, then the same calls with every argument
     // computed just before the call, so the seventh and eighth argument registers
     // (`%r10`/`%r11` in the compiler's spelling) carry live stores across the call. The position
