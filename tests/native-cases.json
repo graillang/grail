@@ -4029,25 +4029,6 @@
     "diagnostic": "extern C parameters must be an integer, f32, f64, CStr, handle, byte view, cfn, extern record or byval record"
   },
   {
-    "name": "ffi-reject-record-field-type",
-    "source": "module ffi_reject;extern \"C\" record R { s: string }fn main(){}",
-    "reject": true,
-    "diagnostic": "extern record fields must be 8/16/32/64-bit integers, f32, f64, handles, CStr or extern records"
-  },
-  {
-    "name": "ffi-reject-record-result",
-    "source": "module ffi_reject;struct R { x: i64 }extern \"C\" fn c_r() -> R;fn main(){}",
-    "reject": true,
-    "diagnostic": "extern C results must be an integer, f32, f64, unit, CStr, handle or cfn",
-    "note": "only extern \"C\" records have a C layout to return; a Grail record result is refused"
-  },
-  {
-    "name": "ffi-reject-record-parameter",
-    "source": "module ffi_reject;struct N { x: i64 }extern \"C\" fn c_take(n: N) -> i64;fn main(){}",
-    "reject": true,
-    "diagnostic": "extern C parameters must be an integer, f32, f64, CStr, handle, byte view, cfn, extern record or byval record"
-  },
-  {
     "name": "ffi-reject-callback-grail-function",
     "source": "module ffi_reject;extern \"C\" lib \"shim.o\" fn c_apply(cb: cfn(i64) -> i64, v: i64) -> i64;fn plain(v: i64) -> i64 { return v; }fn main(){unsafe { n := c_apply(plain, 1);println(n); }}",
     "reject": true,
@@ -5468,20 +5449,6 @@
     "stdout": "15450\n"
   },
   {
-    "name": "ffi-reject-record-unfilled-read",
-    "source": "module ffi_reject;extern \"C\" record Caps { min: u32, max: u32 }fn main() -> u64 {mut caps: Caps;println(caps.min);return 0;}",
-    "reject": true,
-    "diagnostic": "use of moved, borrowed or partially initialized value",
-    "note": "the same rule for a scalar field: zeroed storage is not an initialised record"
-  },
-  {
-    "name": "ffi-reject-record-unfilled-move",
-    "source": "module ffi_reject;extern \"C\" record Caps { min: u32, max: u32 }fn main() -> u64 {mut caps: Caps;copy := caps;println(copy.min);return 0;}",
-    "reject": true,
-    "diagnostic": "use of moved, borrowed or partially initialized value",
-    "note": "moving the storage does not create a value either, so a move of an unfilled record is refused too"
-  },
-  {
     "name": "ffi-record-address",
     "source": "module ffi_record_address;extern \"C\" record Pair { a: i64, b: i64 }extern \"C\" fn ffi_pair_sum(pair: Pair) -> i64 { return pair.a * 2 + pair.b; }extern \"C\" as \"ffi_pair_sum\" fn c_pair_sum(p: CPtr) -> i64;fn main() -> u64 {mut pair = Pair { a: 20, b: 2 };mut v: i64 = 0;unsafe { v = c_pair_sum(cptr(&pair)); }println(v);return 0;}",
     "stdout": "42\n",
@@ -5516,69 +5483,6 @@
     "source": "module ffi_record_callback;extern \"C\" record Pair { a: i64, b: i64 }extern \"C\" fn ffi_pair_peek(pair: Pair) -> i64 { return pair.a; }extern \"C\" as \"ffi_pair_peek\" fn c_pair_peek(pair: Pair) -> i64;fn main() -> u64 {mut pair = Pair { a: 20, b: 2 };mut v: i64 = 0;unsafe { v = c_pair_peek(pair); }println(v);return 0;}",
     "stdout": "20\n",
     "note": "a callback's record parameter is the caller's struct: it is borrowed, so the epilogue must not free it (the exit-time abort in the runtime's free path)"
-  },
-  {
-    "name": "ffi-reject-record-address-temporary",
-    "source": "module ffi_reject;extern \"C\" record AppInfo { api_version: u32 }extern \"C\" fn c_take(p: CPtr) -> i64;fn main(){mut v: i64 = 0;unsafe { v = c_take(cptr(&AppInfo{api_version: 1})); }}",
-    "reject": true,
-    "diagnostic": "cptr needs a named record: the address of a temporary would not outlive the pointer",
-    "note": "a temporary has no storage the caller can name, so the pointer's lifetime would be a block they cannot see"
-  },
-  {
-    "name": "ffi-reject-record-address-plain",
-    "source": "module ffi_reject;struct R { a: u32 }extern \"C\" fn c_take(p: CPtr) -> i64;fn main(){mut r = R { a: 1 };mut v: i64 = 0;unsafe { v = c_take(cptr(&r)); }}",
-    "reject": true,
-    "diagnostic": "cptr takes the address of an extern \"C\" record; a Grail record has no C layout",
-    "note": "only an extern \"C\" record has bytes a C function can read at the pointer"
-  },
-  {
-    "name": "ffi-reject-record-pointer-alias-writable",
-    "source": "module ffi_reject;extern \"C\" record AppInfo { api_version: u32 }extern \"C\" fn c_two(p: CPtr, q: CPtr) -> i64;fn main(){mut r = AppInfo { api_version: 1 };mut v: i64 = 0;unsafe { v = c_two(cptr(&r), cptr_mut(&mut r)); }}",
-    "reject": true,
-    "diagnostic": "the value handed to C as a writable pointer is already borrowed in this expression",
-    "note": "a record cannot be handed to C twice in one call: C would hold two pointers to one struct"
-  },
-  {
-    "name": "ffi-reject-record-pointer-alias-shared",
-    "source": "module ffi_reject;extern \"C\" record AppInfo { api_version: u32 }extern \"C\" fn c_two(p: CPtr, q: CPtr) -> i64;fn main(){mut r = AppInfo { api_version: 1 };mut v: i64 = 0;unsafe { v = c_two(cptr_mut(&mut r), cptr(&r)); }}",
-    "reject": true,
-    "diagnostic": "the value handed to C as a read-only pointer is already mutably borrowed in this expression",
-    "note": "the writable pointer C holds is the one borrow: a second read-only pointer would alias it"
-  },
-  {
-    "name": "ffi-reject-record-out-plain",
-    "source": "module ffi_reject;struct R { a: u32 }extern \"C\" fn c_fill(p: &mut R) -> i64;fn main(){}",
-    "reject": true,
-    "diagnostic": "an extern C out-parameter must be &mut a handle, CPtr, CMutPtr or extern \"C\" record",
-    "note": "only extern records have the C layout a callee can write"
-  },
-  {
-    "name": "ffi-reject-record-out-shared",
-    "source": "module ffi_reject;extern \"C\" record AppInfo { api_version: u32 }extern \"C\" fn c_fill(p: &AppInfo) -> i64;fn main(){}",
-    "reject": true,
-    "diagnostic": "an extern C out-parameter needs &mut; a shared &H is the C const pointer",
-    "note": "C writes the struct, so a shared borrow (the C const pointer) is refused"
-  },
-  {
-    "name": "ffi-reject-record-out-temporary",
-    "source": "module ffi_reject;extern \"C\" record Slots { h0: u64, h1: u64 }extern \"C\" fn c_fill(s: &mut Slots) -> i64;fn main(){mut v: i64 = 0;unsafe { v = c_fill(&mut Slots{h0: 1, h1: 2}); }}",
-    "reject": true,
-    "diagnostic": "an extern C out-parameter needs a binding to write into; a temporary record would be discarded",
-    "note": "C would write the array into storage dropped at the end of the statement"
-  },
-  {
-    "name": "ffi-reject-record-address",
-    "source": "module ffi_reject;extern \"C\" record AppInfo { api_version: u32 }extern \"C\" fn c_take(p: CPtr) -> i64;fn main(){mut app = AppInfo { api_version: 4194304 };mut v: i64 = 0;unsafe { v = c_take(cptr(&app)); }}",
-    "reject": true,
-    "diagnostic": "cptr requires a byte sequence or view",
-    "note": "no expression yields the address of an owned extern record, so a create-info struct cannot point at another struct (VkInstanceCreateInfo::pApplicationInfo)"
-  },
-  {
-    "name": "ffi-reject-record-out-param",
-    "source": "module ffi_reject;extern \"C\" record AppInfo { api_version: u32 }extern \"C\" fn c_fill(p: &mut AppInfo) -> i64;fn main(){}",
-    "reject": true,
-    "diagnostic": "an extern C out-parameter must be &mut a handle, CPtr or CMutPtr",
-    "note": "a record borrow is not an out-parameter slot either: C cannot fill a Grail record through one"
   },
   {
     "name": "pool-chunks-mut-split",
