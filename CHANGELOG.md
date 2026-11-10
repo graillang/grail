@@ -2,6 +2,34 @@
 
 ## Unreleased
 
+- Documents: the claims this week's compiler work made false are gone, each checked against the
+  compiler in this tree first. [docs/rhi.md](docs/rhi.md) said "there is no expression whose value is
+  the address of an owned `extern \"C\"` record" and listed `cptr(&app)`, a record out-parameter and a
+  `cnull()`-seeded handle field as refused - all three work now (the first two compile, the third is
+  still `generic argument shape mismatch`), so the probe's own two `unavailable` lines are a port that
+  has not been made rather than a language limit, and the refusal table now lists what is *still*
+  refused: the address of a temporary, the same record twice in one expression, an out-parameter with
+  no binding, and an out-parameter that is not a handle/`CPtr`/`CMutPtr`/extern record.
+  [docs/platform-status.md](docs/platform-status.md) listed the same refusal and 18 executable FFI
+  fixtures with 54 instances - [docs/ffi.md](docs/ffi.md) already said 19, and
+  `bun tools/test-ffi.mjs x86_64` reports "19 linked and executed", so the counts are 19 fixtures and
+  57 instances, and the FFI row now includes record addresses, `&mut R` out-parameters and arrays of
+  handles. [book/chapters/cleanup-and-boundaries.md](book/chapters/cleanup-and-boundaries.md) listed
+  taking a record's address as still refused and said the book cannot show C ABI tests because its
+  examples link no C library - two of them now link a freestanding fixture in `book/ffi/`.
+  [docs/testing.md](docs/testing.md) described `test-facts.mjs` and `--verify-facts` as the `f32` fact
+  alone (F1 landed this week and the same suite covers its header facts) and omitted `split-test.mjs`
+  from the gate and from the suite list.
+  [docs/design/implementation-status.md](docs/design/implementation-status.md) still said `Send`/`Share`
+  for closures was deferred, which a neighbouring row of the same file contradicted and the
+  parallelism work replaced, and [docs/design/decisions-b2-b6.md](docs/design/decisions-b2-b6.md)
+  recorded the same scope limit; both now point at the structural classification that reaches a
+  closure's environment. [docs/design/parallelism.md](docs/design/parallelism.md) described in-place
+  chunks in the future tense ("stage 2's `&mut [T]` chunks will produce") after measuring them, and
+  now states the copy it removed with the numbers.
+  [docs/design/llvm-backend.md](docs/design/llvm-backend.md)'s 660-case requirement names the corpus
+  and its current count. Historical records of past runs (`755 cases`, `796 native cases`, `49
+  examples` for a branch) are left as the records they are.
 - Book: four new example pairs for the week's compiler work, each run by `bun tools/book.mjs check`
   against an equivalent Rust program. **`pool-chunks-mut`**: `parallel_for_chunks` over a ten-element
   vector in three chunks (4, 4, 2, the `ceil(n/chunks)` split) and then `pool::chunks_mut` at 5 and 5,

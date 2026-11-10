@@ -27,7 +27,7 @@ targets are static-only.
 
 Linux x86-64 is the only target with full compiler and runtime execution evidence on this host.
 Linux AArch64 and RISC-V 64 build and pass ELF checks; qemu-static was used for both self-hosting
-and the FFI fixture instances (18 fixtures, executed on all three when both runners are installed). They still lack a full native-runtime test lane. Windows x86-64 has `.pdata`/`.xdata`, a
+and the FFI fixture instances (19 fixtures, 57 instances, executed on all three when both runners are installed). They still lack a full native-runtime test lane. Windows x86-64 has `.pdata`/`.xdata`, a
 Win32 console/files/argv/time layer, Win32 threads and address waits (`CreateThread`, joins through
 `WaitForSingleObject`, futex operations mapped to `WaitOnAddress`/`WakeByAddress*`), the same
 green `Scope`/`Task` scheduler Linux runs - one scheduler thread, Win32 fibers, blocking host
@@ -92,28 +92,30 @@ The FFI is implemented and executed (`docs/ffi.md` is the contract): `extern "C"
 `unsafe` calls, symbol renaming and link notes; scalar, float (by call and by callback) and
 narrow-integer parameters and results, extended and re-extended per target;
 `f32`/`f64` and narrow C-layout record fields written at their own width; byte/string views, `CStr`
-and bare `cptr`/`cptr_mut`/`cnull`; opaque handles, nameable across modules and comparable by
-identity; C-layout `extern "C" record` values by pointer and as by-value *results* (SysV eightbyte
-classes, AAPCS64 HFAs, RV64 flattening, nested records and float fields included); records passed by
-value as *arguments* spelled `v: byval R` on SysV x86-64, AAPCS64 and RV64; out-parameter slots
-(`slot: &mut H`) for handles and bare pointers; calls of seven to nine word arguments through the
-target's registers and then the outgoing stack; variadic C calls; C callbacks and `cfn` function
-pointers including the COM-shaped seven-argument slot; and `dlopen`/`dlsym`/`dlclose` on the three
-Linux targets through a host-TLS bridge (main thread only) or, on Windows x86-64, through ordinary
-`LoadLibraryA`/`GetProcAddress` imports.
+and bare `cptr`/`cptr_mut`/`cnull`; the address of a Grail-owned `extern "C"` record as a value
+(`cptr(&r)`/`cptr_mut(&mut r)`), so a struct can point at another struct and a record of embedded
+records is an array of structs; opaque handles, nameable across modules and comparable by identity,
+including a record of handle fields as an array of handles; C-layout `extern "C" record` values by
+pointer and as by-value *results* (SysV eightbyte classes, AAPCS64 HFAs, RV64 flattening, nested
+records and float fields included); records passed by value as *arguments* spelled `v: byval R` on
+SysV x86-64, AAPCS64 and RV64; out-parameter slots (`slot: &mut H`) for handles, bare pointers and
+`extern "C"` records, the last being the C `R *` a callee fills in place; calls of seven to nine
+word arguments through the target's registers and then the outgoing stack; variadic C calls; C
+callbacks and `cfn` function pointers including the COM-shaped seven-argument slot; and
+`dlopen`/`dlsym`/`dlclose` on the three Linux targets through a host-TLS bridge (main thread only)
+or, on Windows x86-64, through ordinary `LoadLibraryA`/`GetProcAddress` imports.
 
-`bun tools/test-ffi.mjs` holds 18 executable fixtures; on a host with the qemu runners all 54
-fixture instances execute (18 on x86-64 alone, 36 reported link-only without a runner), and the
+`bun tools/test-ffi.mjs` holds 19 executable fixtures; on a host with the qemu runners all 57
+fixture instances execute (19 on x86-64 alone, 38 reported link-only without a runner), and the
 `ffi-out-params`, `ffi-call-words` and callback-abort sources are also `tests/windows-cases.json`
 cases that execute under Wine on Windows x86-64.
 
 Still refused with a diagnostic rather than approximated: `byval` on the Windows x86-64 and ARM64
 ABIs (`byval is not implemented for the Windows x86-64 and Windows ARM64 ABIs; pass the record by
 pointer`); a `byval` record parameter on a C callback; a by-value record *result* whose embedded
-records contain floats; variadic callbacks; callback results that are function pointers; taking the
-address of an `extern "C"` record, which is what a create-info struct pointing at another struct
-needs; foreign calls and callbacks on threads other than the main thread on Linux; and dynamic
-loading on macOS. The C headers under `include/grail` are the runtime ABI contract.
+records contain floats; variadic callbacks; callback results that are function pointers; the address
+of a *temporary* record (`cptr needs a named record`); foreign calls and callbacks on threads other
+than the main thread on Linux; and dynamic loading on macOS. The C headers under `include/grail` are the runtime ABI contract.
 
 ## Graphics and shaders
 
