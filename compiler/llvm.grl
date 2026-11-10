@@ -1827,11 +1827,12 @@ fn lower_call<a, b, c>(l: (&a mut L), target: &b [u8], facts: (&c Facts)) -> uni
                 have = 1;
             }
         }
-        if (have != 0) & (chain_kind(&l, kid) == 1) & (k < l.hslots.len() + 4096) {
+        // The fact is used only where the two words it hoists are already current *and* dominate
+        // this call. Otherwise the call keeps the word lowering: an absent fact is always correct,
+        // and a sibling call whose `data`/`len` had to be re-read here would be a longer instruction
+        // sequence doing the same loads as the body it replaced.
+        if (have != 0) & (chain_kind(&l, kid) == 1) & (k < l.hslots.len() + 4096) & reachable(&l, k) {
             a0 := get_reg(&mut l, view("rdi"));
-            if !reachable(&l, k) {
-                establish(&mut l, k, view(a0));
-            }
             p := def(&mut l, view("inttoptr i64 {} to ptr"), &u8[][a0]);
             mut c = u8[];
             put(&mut c, view("call {i64, i64} @\""));
