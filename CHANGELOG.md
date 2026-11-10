@@ -38,6 +38,9 @@
     `is_option_storage`, `closure_free_name`, `char_method`, `subword`, `is_map_type`,
     `proven_index`. `format_arg`'s `numeric` flag becomes bool; the mask it feeds converts
     explicitly.
+  - `native`: `is` (the current-token check, 88 call sites, 70 of them `while`/`if`
+    `is(...) == 0`). `is_enum` and a constant's `value` are stored in u64 fields, and `imm()`
+    takes the bool constant's value, so those three convert explicitly.
 - Maps iterate with `for key, value in &map`, in insertion order, and `for key, value in &mut map` binds the
   same shared key with an exclusive value (`value := map.value_at_mut(i)`), so values update in place. The loop
   holds one reference to the map throughout: inserting into it inside the body is rejected, a shared loop cannot

@@ -3448,7 +3448,7 @@ fn tok_text<a>(c: (&a mut C), i: u64) -> u8[] {
     en := t.end;
     return (c.src[st: en]).copy();
 }
-fn is<a, b>(c: (&a mut C), s: &b [u8]) -> u64 {
+fn is<a, b>(c: (&a mut C), s: &b [u8]) -> bool {
     p := c.pos;
     t := tok_text(&mut c, p);
     return same(view(t), s);
@@ -3939,10 +3939,10 @@ fn lifetime_parameters<a>(c: (&a mut C)) -> unit {
                     while true {
                         constraint := ident(&mut c);
                         mut bit = 0;
-                        if same(view(constraint), view("Send")) & (is(&mut c, view("::")) == 0) {
+                        if same(view(constraint), view("Send")) & !is(&mut c, view("::")) {
                             bit = 1;
                         }
-                        if same(view(constraint), view("Share")) & (is(&mut c, view("::")) == 0) {
+                        if same(view(constraint), view("Share")) & !is(&mut c, view("::")) {
                             bit = 2;
                         }
                         if bit == 0 {
@@ -5066,7 +5066,7 @@ fn alias_declaration<a>(c: (&a mut C), pass: u64) -> unit {
     module := module_copy(&mut c);
     expect(&mut c, view("="));
     if pass == 1 {
-        while is(&mut c, view(";")) == 0 {
+        while !is(&mut c, view(";")) {
             advance(&mut c);
         }
         expect(&mut c, view(";"));
@@ -5077,7 +5077,7 @@ fn alias_declaration<a>(c: (&a mut C), pass: u64) -> unit {
         return ();
     }
     if pass == 3 {
-        while is(&mut c, view(";")) == 0 {
+        while !is(&mut c, view(";")) {
             advance(&mut c);
         }
         expect(&mut c, view(";"));
@@ -5129,7 +5129,7 @@ fn handle_declaration<a>(c: (&a mut C), pass: u64) -> unit {
     return ();
 }
 fn decl<a>(c: (&a mut C), pass: u64) -> unit {
-    is_enum := is(&mut c, view("enum"));
+    is_enum := u64(is(&mut c, view("enum")));
     advance(&mut c);
     name := ident(&mut c);
     lifetime_parameters(&mut c);
@@ -6066,7 +6066,7 @@ fn ffi_record<a>(c: (&a mut C), pass: u64) -> unit {
                     }
                 );
         }
-        while is(&mut c, view("}")) == 0 {
+        while !is(&mut c, view("}")) {
             if kind(&mut c) == 0 {
                 fail(&mut c, view("unterminated extern record"));
             }
@@ -6233,7 +6233,7 @@ fn extern_declaration<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         return ();
     }
     if pass != 2 {
-        while is(&mut c, view(";")) == 0 {
+        while !is(&mut c, view(";")) {
             advance(&mut c);
         }
         expect(&mut c, view(";"));
@@ -6698,7 +6698,7 @@ fn interface_declaration<a>(c: (&a mut C), pass: u64) -> unit {
         }
         item := &mut c.interfaces[id - 1];
         exchange(&mut item.defined, 1);
-        if is(&mut c, view("{")) == 0 {
+        if !is(&mut c, view("{")) {
             fail(&mut c, view("expected interface body"));
         }
         skip_braces(&mut c);
@@ -6849,14 +6849,14 @@ fn implementation<a>(c: (&a mut C), pass: u64) -> unit {
     expect(&mut c, view("impl"));
     // `impl Type { fn ... }`: methods and associated functions of a nominal type in this module.
     if ((kind(&mut c) == 1) & (next_kind(&mut c) == 123))
-        + is(&mut c, view("<"))
-        + (
+        || is(&mut c, view("<"))
+        || (
             (kind(&mut c) == 1)
                 & (next_kind(&mut c) == 60)
                 & !impl_has_for(&mut c)
         ) {
         if pass == 1 {
-            while is(&mut c, view("{")) == 0 {
+            while !is(&mut c, view("{")) {
                 advance(&mut c);
             }
             skip_braces(&mut c);
@@ -6917,7 +6917,7 @@ fn implementation<a>(c: (&a mut C), pass: u64) -> unit {
         return ();
     }
     if pass == 1 {
-        while is(&mut c, view("{")) == 0 {
+        while !is(&mut c, view("{")) {
             if kind(&mut c) == 0 {
                 fail(&mut c, view("unclosed implementation"));
             }
@@ -7081,7 +7081,7 @@ fn constant_declaration<a>(c: (&a mut C), pass: u64) -> unit {
     name := ident(&mut c);
     expect(&mut c, view(":"));
     if pass != 2 {
-        while is(&mut c, view(";")) == 0 {
+        while !is(&mut c, view(";")) {
             advance(&mut c);
         }
         advance(&mut c);
@@ -7156,11 +7156,11 @@ fn constant_declaration<a>(c: (&a mut C), pass: u64) -> unit {
                 text = decode_literal(&mut c, here);
                 advance(&mut c);
             } else {
-                if is(&mut c, view("true")) + is(&mut c, view("false")) {
+                if is(&mut c, view("true")) || is(&mut c, view("false")) {
                     if !is_bool(&mut c, ty) {
                         fail(&mut c, view("bool constant needs type bool"));
                     }
-                    value = is(&mut c, view("true"));
+                    value = u64(is(&mut c, view("true")));
                     advance(&mut c);
                 } else {
                     fail(&mut c, view("constants must be integer, float, bool or text literals"));
@@ -7311,7 +7311,7 @@ fn toplevel<a>(c: (&a mut C), pass: u64) -> unit {
                     if is(&mut c, view("impl")) {
                         implementation(&mut c, pass);
                     } else {
-                        if is(&mut c, view("struct")) + is(&mut c, view("enum")) {
+                        if is(&mut c, view("struct")) || is(&mut c, view("enum")) {
                             decl(&mut c, pass);
                         } else {
                             func(&mut c, pass, public);
@@ -8969,7 +8969,7 @@ fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
     method := c.has_receiver;
     exchange(&mut c.has_receiver, 0);
     if method == 0 {
-        if is(&mut c, view("(")) == 0 {
+        if !is(&mut c, view("(")) {
             return specialized_function_value(&mut c, f - 1, map);
         }
         expect(&mut c, view("("));
@@ -15015,8 +15015,8 @@ fn primary<a>(c: (&a mut C)) -> Val {
         zero := imm(&mut c, 0);
         return int_binary(&mut c, 45, zero, operand.t, ot);
     }
-    if is(&mut c, view("true")) + is(&mut c, view("false")) {
-        truth := is(&mut c, view("true"));
+    if is(&mut c, view("true")) || is(&mut c, view("false")) {
+        truth := u64(is(&mut c, view("true")));
         advance(&mut c);
         ty := bool_type(&mut c);
         return val(imm(&mut c, truth), ty);
@@ -15129,7 +15129,7 @@ fn primary<a>(c: (&a mut C)) -> Val {
         if (r != 0) & is(&mut c, view("{")) {
             return record(&mut c, r - 1, 18446744073709551615);
         }
-        if (is(&mut c, view("(")) + is(&mut c, view("<"))) == 0 {
+        if !(is(&mut c, view("(")) || is(&mut c, view("<"))) {
             function := find_func(&mut c, view(first), view(second));
             if function != 0 {
                 return function_value(&mut c, function - 1);
@@ -16875,7 +16875,7 @@ fn block<a>(c: (&a mut C)) -> unit {
     expect(&mut c, view("{"));
     mark := c.locals.len();
     mut owners = c.resources.len();
-    while is(&mut c, view("}")) == 0 {
+    while !is(&mut c, view("}")) {
         stmt(&mut c);
     }
     advance(&mut c);
@@ -17341,7 +17341,7 @@ fn fold_constant(k: u64, a: u64, b: u64) -> u64[] {
 // `(` and is not shadowed by a local; consumes the name on success. A binding named `write` or
 // `drop` is then an ordinary name (`write += 3`).
 fn statement_builtin<a, b>(c: (&a mut C), name: &b [u8]) -> u64 {
-    if is(&mut c, &name) == 0 {
+    if !is(&mut c, &name) {
         return 0;
     }
     here := c.pos;
@@ -17756,15 +17756,15 @@ fn scalar_match<a>(c: (&a mut C), s: Val) -> unit {
             wildcard = 1;
         } else {
             if (kind(&mut c) == 1)
-                & (is(&mut c, view("true")) == 0)
-                & (is(&mut c, view("false")) == 0) {
+                & !is(&mut c, view("true"))
+                & !is(&mut c, view("false")) {
                 binding = ident(&mut c);
                 wildcard = 1;
             }
         }
         // `if` after a pattern adds a guard; a guarded arm never makes the match exhaustive.
         if wildcard {
-            if is(&mut c, view("if")) == 0 {
+            if !is(&mut c, view("if")) {
                 if default {
                     fail(&mut c, view("duplicate catch-all arm"));
                 }
@@ -17783,7 +17783,7 @@ fn scalar_match<a>(c: (&a mut C), s: Val) -> unit {
                     if is(&mut c, view("true")) {
                         value = 1;
                     } else {
-                        if is(&mut c, view("false")) == 0 {
+                        if !is(&mut c, view("false")) {
                             fail(&mut c, view("bool patterns are true or false"));
                         }
                     }
@@ -18115,7 +18115,7 @@ fn record_match<a>(c: (&a mut C), sslot: u64, sty: u64, x: Val, byref: u64, refm
     cleanup(&mut c, payloads);
     pop_locals(&mut c, mark);
     eaten := eat(&mut c, view(","));
-    if eaten & (is(&mut c, view("_")) == 0) & (is(&mut c, view("}")) == 0) {
+    if eaten & !is(&mut c, view("_")) & !is(&mut c, view("}")) {
         fail(&mut c, view("a record pattern must be the only pattern arm"));
     }
     if is(&mut c, view("_")) {
@@ -18313,7 +18313,7 @@ fn statement<a>(c: (&a mut C)) -> unit {
             return ();
         }
     }
-    if is(&mut c, view("break")) + is(&mut c, view("continue")) {
+    if is(&mut c, view("break")) || is(&mut c, view("continue")) {
         mut b = eat(&mut c, view("break"));
         if b == 0 {
             expect(&mut c, view("continue"));
@@ -18536,14 +18536,14 @@ fn statement<a>(c: (&a mut C)) -> unit {
     }
     // `loop { }` is `while` without a condition; without a break, code after it is unreachable.
     endless := is(&mut c, view("loop"));
-    if endless + is(&mut c, view("while")) {
+    if endless || is(&mut c, view("while")) {
         advance(&mut c);
         // while let Variant(b) = value { }: loops while the value matches; a non-matching value is dropped.
         mut pattern = 0;
         mut variant = u8[];
         mut binding = u8[];
         mut has_binding = 0;
-        if (endless == 0) & is(&mut c, view("let")) {
+        if !endless & is(&mut c, view("let")) {
             advance(&mut c);
             pattern = 1;
             variant = ident(&mut c);
@@ -18626,7 +18626,7 @@ fn statement<a>(c: (&a mut C)) -> unit {
                 bind(&mut c, binding.copy(), pty, payload, 0);
             }
         }
-        if (endless == 0) & (pattern == 0) {
+        if !endless & (pattern == 0) {
             tests := c.resources.len();
             cstart := c.pos;
             mut v = expr(&mut c, 0);
