@@ -49,21 +49,21 @@ pub fn status<a>(s: (&a State), id: u64) -> u64 {
     mut p = &s.places[id - 1];
     return p.status;
 }
-pub fn ancestor<a>(s: (&a State), outer: u64, inner: u64) -> u64 {
+pub fn ancestor<a>(s: (&a State), outer: u64, inner: u64) -> bool {
     if (outer == 0) + (inner == 0) + (s.places.len() < inner) + (s.places.len() < outer) {
-        return 0;
+        return false;
     }
     mut p = inner;
     while p != 0 {
         if p == outer {
-            return 1;
+            return true;
         }
         p = parent_of(&s, p);
     }
-    return 0;
+    return false;
 }
-fn overlaps<a>(s: (&a State), a: u64, b: u64) -> u64 {
-    return ancestor(&s, a, b) + ancestor(&s, b, a);
+fn overlaps<a>(s: (&a State), a: u64, b: u64) -> bool {
+    return ancestor(&s, a, b) || ancestor(&s, b, a);
 }
 fn present<a>(s: (&a State), id: u64) -> u64 {
     if (id == 0) + (s.places.len() < id) {
@@ -198,15 +198,15 @@ fn loan_parent<a>(s: (&a State), id: u64) -> u64 {
     mut l = &s.loans[id - 1];
     return l.parent;
 }
-fn loan_ancestor<a>(s: (&a State), outer: u64, inner: u64) -> u64 {
+fn loan_ancestor<a>(s: (&a State), outer: u64, inner: u64) -> bool {
     mut p = inner;
     while p != 0 {
         if p == outer {
-            return 1;
+            return true;
         }
         p = loan_parent(&s, p);
     }
-    return 0;
+    return false;
 }
 pub fn use_loan<a>(s: (&a State), id: u64, write: u64) -> u64 {
     if (id == 0) + (s.loans.len() < id) {
@@ -255,7 +255,7 @@ pub fn reborrow<a>(s: (&a mut State), parent: u64, mode: u64) -> u64 {
         omode := other.mode;
         osource := other.source;
         if live & (i + 1 != parent) {
-            if loan_ancestor(&s, i + 1, parent) == 0 {
+            if !loan_ancestor(&s, i + 1, parent) {
                 if mode + omode {
                     if overlaps(&s, source, osource) {
                         return 0;
@@ -487,7 +487,7 @@ pub fn access_loan<a>(s: (&a State), parent: u64, target: u64, write: u64) -> u6
     if write & (mode == 0) {
         return 4;
     }
-    if ancestor(&s, source, target) == 0 {
+    if !ancestor(&s, source, target) {
         return 4;
     }
     e := complete(&s, target);
@@ -500,7 +500,7 @@ pub fn access_loan<a>(s: (&a State), parent: u64, target: u64, write: u64) -> u6
         m := l.mode;
         mut p = l.source;
         if active {
-            if loan_ancestor(&s, i + 1, parent) == 0 {
+            if !loan_ancestor(&s, i + 1, parent) {
                 if write + m {
                     if overlaps(&s, target, p) {
                         return 3;
@@ -528,9 +528,9 @@ pub fn reborrow_place<a>(s: (&a mut State), parent: u64, target: u64, mode: u64)
     s.loans.push(Loan { source: target, parent: authority, mode: mode, live: 1 });
     return s.loans.len();
 }
-pub fn can_cleanup<a>(s: (&a State), id: u64) -> u64 {
+pub fn can_cleanup<a>(s: (&a State), id: u64) -> bool {
     if (id == 0) + (s.places.len() < id) {
-        return 0;
+        return false;
     }
     return conflict(&s, id, 1) == 0;
 }

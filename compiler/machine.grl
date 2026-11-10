@@ -11,7 +11,7 @@ struct Out {
     plat: u64,
     next: u64
 }
-fn eq<a, b>(a: &a [u8], b: &b [u8]) -> u64 {
+fn eq<a, b>(a: &a [u8], b: &b [u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }
@@ -22,7 +22,7 @@ fn eq<a, b>(a: &a [u8], b: &b [u8]) -> u64 {
     }
     return true;
 }
-fn starts<a, b>(a: &a [u8], b: &b [u8]) -> u64 {
+fn starts<a, b>(a: &a [u8], b: &b [u8]) -> bool {
     if a.len() < b.len() {
         return false;
     }
@@ -102,55 +102,55 @@ fn split<a>(s: &a [u8], delimiter: u64) -> u8[][] {
     return out;
 }
 fn reg<a>(target: u64, s: &a [u8]) -> string {
-    if eq(view((s)), view("%rax")) + eq(view((s)), view("%eax")) + eq(view((s)), view("%al")) {
+    if eq(view((s)), view("%rax")) || eq(view((s)), view("%eax")) || eq(view((s)), view("%al")) {
         if target == 1 {
             return "x9";
         }
         return "t0";
     }
-    if eq(view((s)), view("%rdi")) + eq(view((s)), view("%edi")) {
+    if eq(view((s)), view("%rdi")) || eq(view((s)), view("%edi")) {
         if target == 1 {
             return "x0";
         }
         return "a0";
     }
-    if eq(view((s)), view("%rsi")) + eq(view((s)), view("%esi")) {
+    if eq(view((s)), view("%rsi")) || eq(view((s)), view("%esi")) {
         if target == 1 {
             return "x1";
         }
         return "a1";
     }
-    if eq(view((s)), view("%rdx")) + eq(view((s)), view("%edx")) {
+    if eq(view((s)), view("%rdx")) || eq(view((s)), view("%edx")) {
         if target == 1 {
             return "x2";
         }
         return "a2";
     }
-    if eq(view((s)), view("%rcx")) + eq(view((s)), view("%ecx")) {
+    if eq(view((s)), view("%rcx")) || eq(view((s)), view("%ecx")) {
         if target == 1 {
             return "x3";
         }
         return "a3";
     }
-    if eq(view((s)), view("%r8")) + eq(view((s)), view("%r8d")) {
+    if eq(view((s)), view("%r8")) || eq(view((s)), view("%r8d")) {
         if target == 1 {
             return "x4";
         }
         return "a4";
     }
-    if eq(view((s)), view("%r9")) + eq(view((s)), view("%r9d")) {
+    if eq(view((s)), view("%r9")) || eq(view((s)), view("%r9d")) {
         if target == 1 {
             return "x5";
         }
         return "a5";
     }
-    if eq(view((s)), view("%r10")) + eq(view((s)), view("%r10d")) {
+    if eq(view((s)), view("%r10")) || eq(view((s)), view("%r10d")) {
         if target == 1 {
             return "x6";
         }
         return "a6";
     }
-    if eq(view((s)), view("%r11")) + eq(view((s)), view("%r11d")) {
+    if eq(view((s)), view("%r11")) || eq(view((s)), view("%r11d")) {
         if target == 1 {
             return "x7";
         }
@@ -198,16 +198,16 @@ fn reg<a>(target: u64, s: &a [u8]) -> string {
     bad(view((s)));
     return "";
 }
-fn small_reg<a>(s: &a [u8]) -> u64 {
+fn small_reg<a>(s: &a [u8]) -> bool {
     return eq(view((s)), view("%eax"))
-        + eq(view((s)), view("%edi"))
-        + eq(view((s)), view("%esi"))
-        + eq(view((s)), view("%edx"))
-        + eq(view((s)), view("%ecx"))
-        + eq(view((s)), view("%r8d"))
-        + eq(view((s)), view("%r9d"))
-        + eq(view((s)), view("%r10d"))
-        + eq(view((s)), view("%r11d"));
+        || eq(view((s)), view("%edi"))
+        || eq(view((s)), view("%esi"))
+        || eq(view((s)), view("%edx"))
+        || eq(view((s)), view("%ecx"))
+        || eq(view((s)), view("%r8d"))
+        || eq(view((s)), view("%r9d"))
+        || eq(view((s)), view("%r10d"))
+        || eq(view((s)), view("%r11d"));
 }
 fn armword<a>(s: &a [u8]) -> string {
     if eq(view((s)), view("sp")) {
@@ -356,7 +356,7 @@ fn address<a, b>(o: (&a mut Out), operand: &b [u8]) -> unit {
                 if eq(view(scale), view("8")) {
                     shift = 3;
                 } else {
-                    if eq(view(scale), view("1")) == 0 {
+                    if !eq(view(scale), view("1")) {
                         bad(view(scale));
                     }
                 }
@@ -376,7 +376,7 @@ fn address<a, b>(o: (&a mut Out), operand: &b [u8]) -> unit {
             put(&mut o, view("\nadd t3,t3,t2\n"));
         }
     }
-    if (disp.len() != 0) & (eq(view((disp)), view("0")) == 0) {
+    if (disp.len() != 0) & !eq(view((disp)), view("0")) {
         if target == 1 {
             constant(&mut o, view("x12"), view((disp)));
             put(&mut o, view("add x13,x13,x12\n"));
@@ -523,16 +523,16 @@ fn branch<a, b, c>(o: (&a mut Out), op: &b [u8], dest: &c [u8]) -> unit {
     }
     n := fresh(&mut o);
     if o.target == 1 {
-        if eq(view((op)), view("je")) + eq(view((op)), view("jz")) {
+        if eq(view((op)), view("je")) || eq(view((op)), view("jz")) {
             put(&mut o, view("b.ne "));
         } else {
-            if eq(view((op)), view("jne")) + eq(view((op)), view("jnz")) {
+            if eq(view((op)), view("jne")) || eq(view((op)), view("jnz")) {
                 put(&mut o, view("b.eq "));
             } else {
-                if eq(view((op)), view("jnc")) + eq(view((op)), view("jae")) {
+                if eq(view((op)), view("jnc")) || eq(view((op)), view("jae")) {
                     put(&mut o, view("cbnz x15,"));
                 } else {
-                    if eq(view((op)), view("jb")) + eq(view((op)), view("jc")) {
+                    if eq(view((op)), view("jb")) || eq(view((op)), view("jc")) {
                         put(&mut o, view("cbz x15,"));
                     } else {
                         bad(view((op)));
@@ -545,16 +545,16 @@ fn branch<a, b, c>(o: (&a mut Out), op: &b [u8], dest: &c [u8]) -> unit {
         put(&mut o, view((dest)));
         put(&mut o, view("\n"));
     } else {
-        if eq(view((op)), view("je")) + eq(view((op)), view("jz")) {
+        if eq(view((op)), view("je")) || eq(view((op)), view("jz")) {
             put(&mut o, view("beqz t4,"));
         } else {
-            if eq(view((op)), view("jne")) + eq(view((op)), view("jnz")) {
+            if eq(view((op)), view("jne")) || eq(view((op)), view("jnz")) {
                 put(&mut o, view("bnez t4,"));
             } else {
-                if eq(view((op)), view("jnc")) + eq(view((op)), view("jae")) {
+                if eq(view((op)), view("jnc")) || eq(view((op)), view("jae")) {
                     put(&mut o, view("bnez t6,"));
                 } else {
-                    if eq(view((op)), view("jb")) + eq(view((op)), view("jc")) {
+                    if eq(view((op)), view("jb")) || eq(view((op)), view("jc")) {
                         put(&mut o, view("beqz t6,"));
                     } else {
                         bad(view((op)));
@@ -622,7 +622,7 @@ fn arithmetic<a, b, c, d>(o: (&a mut Out), op: &b [u8], src: &c [u8], dst: &d [u
                     );
                 }
             } else {
-                if eq(view((op)), view("xorq")) + eq(view((op)), view("xorl")) {
+                if eq(view((op)), view("xorq")) || eq(view((op)), view("xorl")) {
                     if target == 1 {
                         put(&mut o, view("eor x10,x11,x10\ncmp x10,#0\nmov x15,#0\n"));
                     } else {
@@ -677,9 +677,9 @@ fn arithmetic<a, b, c, d>(o: (&a mut Out), op: &b [u8], src: &c [u8], dst: &d [u
     store(&mut o, view((dst)), 0);
     return ();
 }
-fn atomic_instruction<a, b, c>(o: (&a mut Out), op: &b [u8], rest: &c [u8]) -> u64 {
+fn atomic_instruction<a, b, c>(o: (&a mut Out), op: &b [u8], rest: &c [u8]) -> bool {
     target := o.target;
-    if eq(view(op), view("mfence")) + eq(view(op), view("lfence")) + eq(view(op), view("sfence")) {
+    if eq(view(op), view("mfence")) || eq(view(op), view("lfence")) || eq(view(op), view("sfence")) {
         if target == 1 {
             if eq(view(op), view("lfence")) {
                 put(&mut o, view("dmb ishld\n"));
@@ -706,7 +706,7 @@ fn atomic_instruction<a, b, c>(o: (&a mut Out), op: &b [u8], rest: &c [u8]) -> u
         }
         source := args[0].copy();
         destination := args[1].copy();
-        if eq(view(source), view("%rax")) == 0 {
+        if !eq(view(source), view("%rax")) {
             bad(view(rest));
         }
         address(&mut o, view(destination));
@@ -723,7 +723,7 @@ fn atomic_instruction<a, b, c>(o: (&a mut Out), op: &b [u8], rest: &c [u8]) -> u
         return true;
     }
     if eq(view(op), view("lock")) {
-        if starts(view(rest), view("cmpxchgq ")) == 0 {
+        if !starts(view(rest), view("cmpxchgq ")) {
             bad(view(rest));
         }
         args := split(rest[9:], 44);
@@ -732,7 +732,7 @@ fn atomic_instruction<a, b, c>(o: (&a mut Out), op: &b [u8], rest: &c [u8]) -> u
         }
         source := args[0].copy();
         destination := args[1].copy();
-        if eq(view(source), view("%rcx")) == 0 {
+        if !eq(view(source), view("%rcx")) {
             bad(view(rest));
         }
         address(&mut o, view(destination));
@@ -796,7 +796,7 @@ fn win_exit<a>(o: (&a mut Out)) -> unit {
 // same value, a sized integer sign- or zero-extended. These pseudo-instructions move %rax (x9/t0)
 // across that boundary: into the N-th float argument register, out of the float result register,
 // re-extended after a narrow integer result, and into the outgoing stack argument area.
-fn c_abi<a, b, c>(o: (&a mut Out), op: &b [u8], rest: &c [u8]) -> u64 {
+fn c_abi<a, b, c>(o: (&a mut Out), op: &b [u8], rest: &c [u8]) -> bool {
     arm := o.target == 1;
     if eq(view((op)), view("cfarg64")) {
         if arm {
@@ -808,7 +808,7 @@ fn c_abi<a, b, c>(o: (&a mut Out), op: &b [u8], rest: &c [u8]) -> u64 {
             put(&mut o, view(rest));
             put(&mut o, view(",t0\n"));
         }
-        return 1;
+        return true;
     }
     if eq(view((op)), view("cfarg32")) {
         if arm {
@@ -820,7 +820,7 @@ fn c_abi<a, b, c>(o: (&a mut Out), op: &b [u8], rest: &c [u8]) -> u64 {
             put(&mut o, view(rest));
             put(&mut o, view(",ft0\n"));
         }
-        return 1;
+        return true;
     }
     if eq(view((op)), view("cfret64")) {
         if arm {
@@ -828,7 +828,7 @@ fn c_abi<a, b, c>(o: (&a mut Out), op: &b [u8], rest: &c [u8]) -> u64 {
         } else {
             put(&mut o, view("fmv.x.d t0,fa0\n"));
         }
-        return 1;
+        return true;
     }
     if eq(view((op)), view("cfret32")) {
         if arm {
@@ -836,7 +836,7 @@ fn c_abi<a, b, c>(o: (&a mut Out), op: &b [u8], rest: &c [u8]) -> u64 {
         } else {
             put(&mut o, view("fcvt.d.s fa0,fa0\nfmv.x.d t0,fa0\n"));
         }
-        return 1;
+        return true;
     }
     // A callback's float parameter k (d_k / fa_k, widened from s_k when `k s`) into x9/t0.
     if eq(view((op)), view("cbfarg")) {
@@ -874,7 +874,7 @@ fn c_abi<a, b, c>(o: (&a mut Out), op: &b [u8], rest: &c [u8]) -> u64 {
             u64(&mut o, k);
             put(&mut o, view("\n"));
         }
-        return 1;
+        return true;
     }
     // `cfrstore K s|d OFF`: store float return register K at OFF(x6/a6) (%r10 in Grail's
     // spelling), binary32 for `s`, binary64 for `d`.
@@ -906,7 +906,7 @@ fn c_abi<a, b, c>(o: (&a mut Out), op: &b [u8], rest: &c [u8]) -> u64 {
             put(&mut o, view(parts[2]));
             put(&mut o, view("(a6)\n"));
         }
-        return 1;
+        return true;
     }
     // A callback's float result: x9/t0 into d0/fa0 (narrowed to s0 for f32).
     if eq(view((op)), view("cbfret64")) {
@@ -915,7 +915,7 @@ fn c_abi<a, b, c>(o: (&a mut Out), op: &b [u8], rest: &c [u8]) -> u64 {
         } else {
             put(&mut o, view("fmv.d.x fa0,t0\n"));
         }
-        return 1;
+        return true;
     }
     if eq(view((op)), view("cbfret32")) {
         if arm {
@@ -923,7 +923,7 @@ fn c_abi<a, b, c>(o: (&a mut Out), op: &b [u8], rest: &c [u8]) -> u64 {
         } else {
             put(&mut o, view("fmv.d.x fa0,t0\nfcvt.s.d fa0,fa0\n"));
         }
-        return 1;
+        return true;
     }
     // The inverse: binary32 bits in x9/t0 widened to the binary64 word Grail holds.
     if eq(view((op)), view("cf32widen")) {
@@ -932,7 +932,7 @@ fn c_abi<a, b, c>(o: (&a mut Out), op: &b [u8], rest: &c [u8]) -> u64 {
         } else {
             put(&mut o, view("fmv.w.x ft0,t0\nfcvt.d.s ft0,ft0\nfmv.x.d t0,ft0\n"));
         }
-        return 1;
+        return true;
     }
     // The binary32 bits of an f32 value, for a stack slot or an integer register.
     if eq(view((op)), view("cf32bits")) {
@@ -941,7 +941,7 @@ fn c_abi<a, b, c>(o: (&a mut Out), op: &b [u8], rest: &c [u8]) -> u64 {
         } else {
             put(&mut o, view("fmv.d.x ft0,t0\nfcvt.s.d ft0,ft0\nfmv.x.w t0,ft0\n"));
         }
-        return 1;
+        return true;
     }
     if eq(view((op)), view("cext")) {
         if arm {
@@ -959,14 +959,14 @@ fn c_abi<a, b, c>(o: (&a mut Out), op: &b [u8], rest: &c [u8]) -> u64 {
             if eq(view(rest), view("u16")) { put(&mut o, view("slli t0,t0,48\nsrli t0,t0,48\n")); }
             if eq(view(rest), view("u32")) { put(&mut o, view("slli t0,t0,32\nsrli t0,t0,32\n")); }
         }
-        return 1;
+        return true;
     }
     // AAPCS64 passes a large result's address in x8, outside the argument registers.
     if eq(view((op)), view("csret")) {
         if arm {
             put(&mut o, view("mov x8,x9\n"));
         }
-        return 1;
+        return true;
     }
     if eq(view((op)), view("cstack")) {
         if arm {
@@ -976,7 +976,7 @@ fn c_abi<a, b, c>(o: (&a mut Out), op: &b [u8], rest: &c [u8]) -> u64 {
         }
         put(&mut o, view(rest));
         put(&mut o, view("\n"));
-        return 1;
+        return true;
     }
     if eq(view((op)), view("cunstack")) {
         if arm {
@@ -986,7 +986,7 @@ fn c_abi<a, b, c>(o: (&a mut Out), op: &b [u8], rest: &c [u8]) -> u64 {
         }
         put(&mut o, view(rest));
         put(&mut o, view("\n"));
-        return 1;
+        return true;
     }
     if eq(view((op)), view("cstarg")) {
         if arm {
@@ -998,9 +998,9 @@ fn c_abi<a, b, c>(o: (&a mut Out), op: &b [u8], rest: &c [u8]) -> u64 {
             put(&mut o, view(rest));
             put(&mut o, view("(sp)\n"));
         }
-        return 1;
+        return true;
     }
-    return 0;
+    return false;
 }
 fn instruction<a, b>(o: (&a mut Out), line: &b [u8]) -> unit {
     target := o.target;
@@ -1102,7 +1102,7 @@ fn instruction<a, b>(o: (&a mut Out), line: &b [u8]) -> unit {
         }
         return ();
     }
-    if eq(view((op)), view("pushq")) + eq(view((op)), view("popq")) {
+    if eq(view((op)), view("pushq")) || eq(view((op)), view("popq")) {
         push := eq(view((op)), view("pushq"));
         r := reg(target, view(rest));
         if eq(view(rest), view("%rbp")) {
@@ -1291,7 +1291,7 @@ fn instruction<a, b>(o: (&a mut Out), line: &b [u8]) -> unit {
         return ();
     }
     if eq(view((op)), view("rep")) {
-        if eq(view(rest), view("stosq")) == 0 {
+        if !eq(view(rest), view("stosq")) {
             bad(view((line)));
         }
         n := fresh(&mut o);
@@ -1313,7 +1313,7 @@ fn instruction<a, b>(o: (&a mut Out), line: &b [u8]) -> unit {
         mark(&mut o, end);
         return ();
     }
-    if eq(view((op)), view("sete")) + eq(view((op)), view("setne")) + eq(view((op)), view("setb")) {
+    if eq(view((op)), view("sete")) || eq(view((op)), view("setne")) || eq(view((op)), view("setb")) {
         if target == 1 {
             if eq(view((op)), view("setb")) {
                 put(&mut o, view("mov x10,x15\n"));
@@ -1350,7 +1350,7 @@ fn instruction<a, b>(o: (&a mut Out), line: &b [u8]) -> unit {
         store(&mut o, view(rest), 0);
         return ();
     }
-    if eq(view((op)), view("mulq")) + eq(view((op)), view("divq")) {
+    if eq(view((op)), view("mulq")) || eq(view((op)), view("divq")) {
         if target == 1 {
             read_operand(&mut o, view(rest), view("x10"), 0);
             if eq(view((op)), view("mulq")) {
@@ -1381,12 +1381,18 @@ fn instruction<a, b>(o: (&a mut Out), line: &b [u8]) -> unit {
     src := args[0].copy();
     dst := args[1].copy();
     if eq(view((op)), view("movq"))
-        + eq(view((op)), view("movl"))
-        + eq(view((op)), view("movabsq"))
-        + eq(view((op)), view("movb"))
-        + eq(view((op)), view("movzbq")) {
-        mut rw = eq(view(op), view("movzbq"));
-        mut sw = eq(view(op), view("movb"));
+        || eq(view((op)), view("movl"))
+        || eq(view((op)), view("movabsq"))
+        || eq(view((op)), view("movb"))
+        || eq(view((op)), view("movzbq")) {
+        mut rw = 0;
+        mut sw = 0;
+        if eq(view(op), view("movzbq")) {
+            rw = 1;
+        }
+        if eq(view(op), view("movb")) {
+            sw = 1;
+        }
         if eq(view(op), view("movl")) {
             // A 32-bit move: a memory source is a zero-extending 32-bit load, a memory destination a
             // 32-bit store; register to register zero-extends through the small-register store.
@@ -1448,12 +1454,12 @@ pub fn lower<a>(input: &a [u8], target: u64, plat: u64) -> u8[] {
             line := trim(view((input[start: i])));
             start = i + 1;
             if line.len() != 0 {
-                if starts(view((line)), view(".set ")) == 0 {
+                if !starts(view((line)), view(".set ")) {
                     if (line[0] == 46)
-                        + (line[line.len() - 1] == 58)
-                        + starts(view(line), view("rt_state:"))
-                        + starts(view(line), view("rt_host_tls:"))
-                        + starts(view(line), view("rt_grail_tls:")) {
+                        || (line[line.len() - 1] == 58)
+                        || starts(view(line), view("rt_state:"))
+                        || starts(view(line), view("rt_host_tls:"))
+                        || starts(view(line), view("rt_grail_tls:")) {
                         put(&mut out, view((line)));
                         put(&mut out, view("\n"));
                     } else {

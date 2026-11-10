@@ -328,16 +328,16 @@ struct C {
     none_end: u64
 }
 
-fn same<a, b>(x: &a [u8], y: &b [u8]) -> u64 {
+fn same<a, b>(x: &a [u8], y: &b [u8]) -> bool {
     if x.len() != y.len() {
-        return 0;
+        return false;
     }
     for i in x.len() {
         if x[i] != y[i] {
-            return 0;
+            return false;
         }
     }
-    return 1;
+    return true;
 }
 fn div(n: u64, d: u64) -> u64 {
     mut q = 0;
@@ -386,9 +386,9 @@ fn emit_path<a, b>(c: (&a mut C), path: &b [u8]) -> unit {
     }
     return ();
 }
-fn contains_text<a, b>(text: &a [u8], needle: &b [u8]) -> u64 {
+fn contains_text<a, b>(text: &a [u8], needle: &b [u8]) -> bool {
     if needle.len() > text.len() {
-        return 0;
+        return false;
     }
     mut i = 0;
     while i + needle.len() <= text.len() {
@@ -401,11 +401,11 @@ fn contains_text<a, b>(text: &a [u8], needle: &b [u8]) -> u64 {
             j += 1;
         }
         if ok {
-            return 1;
+            return true;
         }
         i += 1;
     }
-    return 0;
+    return false;
 }
 // `.loc` before a literal section switch is dropped by the assembler, so re-assert the last
 // source location after every `.popsection`. This keeps the first statement of a function on the
@@ -418,7 +418,7 @@ fn debug_locs<a>(text: &a [u8]) -> u8[] {
         b := text[i];
         line.push(b);
         if b == 10 {
-            if (starts_with(view(line), view(".loc ")) + starts_with(view(line), view(".cv_loc "))) != 0 {
+            if starts_with(view(line), view(".loc ")) || starts_with(view(line), view(".cv_loc ")) {
                 mut fresh = u8[];
                 for k in line.len() {
                     fresh.push(line[k]);
@@ -428,7 +428,7 @@ fn debug_locs<a>(text: &a [u8]) -> u8[] {
             for k in line.len() {
                 out.push(line[k]);
             }
-            if contains_text(view(line), view(".popsection")) != 0 {
+            if contains_text(view(line), view(".popsection")) {
                 for k in loc.len() {
                     out.push(loc[k]);
                 }
@@ -1032,7 +1032,7 @@ fn darwin_line<a, b>(out: (&a mut u8[]), line: &b [u8]) -> unit {
             bare = 1;
         }
     }
-    if (same(view(op), view("call")) + same(view(op), view("leaq"))) & bare {
+    if (same(view(op), view("call")) || same(view(op), view("leaq"))) & bare {
         copy_to(&mut out, line[: space + 1]);
         out.push(95);
         copy_to(&mut out, rest);
@@ -1316,27 +1316,27 @@ struct WinUnwind {
     frame_at: u64,
     state: u64
 }
-fn span_is<a, b>(s: &a [u8], a: u64, e: u64, t: &b [u8]) -> u64 {
+fn span_is<a, b>(s: &a [u8], a: u64, e: u64, t: &b [u8]) -> bool {
     if e - a != t.len() {
-        return 0;
+        return false;
     }
     for i in t.len() {
         if s[a + i] != t[i] {
-            return 0;
+            return false;
         }
     }
-    return 1;
+    return true;
 }
-fn span_has<a, b>(s: &a [u8], a: u64, e: u64, t: &b [u8]) -> u64 {
+fn span_has<a, b>(s: &a [u8], a: u64, e: u64, t: &b [u8]) -> bool {
     if e - a < t.len() {
-        return 0;
+        return false;
     }
     for i in t.len() {
         if s[a + i] != t[i] {
-            return 0;
+            return false;
         }
     }
-    return 1;
+    return true;
 }
 fn span_copy<a>(s: &a [u8], a: u64, e: u64) -> u8[] {
     mut out = u8[];
@@ -1479,10 +1479,10 @@ fn win_unwind_line<a, b>(u: (&a mut WinUnwind), text: &b [u8], a: u64, e: u64) -
 // describes the prologue the lowering produced; a function whose shape does not match is left
 // without a record instead of getting a wrong one (leaf functions need no record at all).
 fn arm_saved_reg<a>(text: &a [u8], a: u64, e: u64) -> u64 {
-    if span_has(view(text), a, e, view("str x")) == 0 {
+    if !span_has(view(text), a, e, view("str x")) {
         return 0;
     }
-    if span_has(view(text), a, e, view(",[sp,#-16]!")) == 0 {
+    if !span_has(view(text), a, e, view(",[sp,#-16]!")) {
         return 0;
     }
     mut i = a + 5;
@@ -1846,20 +1846,20 @@ fn invoke<a, b>(c: (&a mut C), name: &b [u8], args: u64[]) -> u64 {
 }
 
 // Owned values have independent stack flags. Aliased field loads are not owners until moved.
-fn needs_drop<a>(c: (&a mut C), ty: u64) -> u64 {
+fn needs_drop<a>(c: (&a mut C), ty: u64) -> bool {
     k := ty_kind(&mut c, ty);
     return (k == 3)
-        + (k == 4)
-        + (k == 5)
-        + (k == 27)
-        + (k == 6)
-        + (k == 8)
-        + (k == 9)
-        + (k == 10)
-        + (k == 11)
-        + (k == 13)
-        + (k == 16)
-        + (k == 20);
+        || (k == 4)
+        || (k == 5)
+        || (k == 27)
+        || (k == 6)
+        || (k == 8)
+        || (k == 9)
+        || (k == 10)
+        || (k == 11)
+        || (k == 13)
+        || (k == 16)
+        || (k == 20);
 }
 fn resource<a>(c: (&a mut C), slot: u64) -> u64 {
     mut i = c.resources.len();
@@ -1876,7 +1876,7 @@ fn own<a>(c: (&a mut C), slot: u64, ty: u64) -> Val {
     if c.raw == 0 {
         k := ty_kind(&mut c, ty);
         drops := needs_drop(&mut c, ty);
-        if drops + (k == 7) {
+        if drops || k == 7 {
             mut flag = 0;
             if drops {
                 flag = imm(&mut c, 1) + 1;
@@ -2043,7 +2043,7 @@ fn member_place<a>(c: (&a mut C), root: u64, field: u64, ty: u64) -> u64 {
         }
     }
     kind := ty_kind(&mut c, ty);
-    copy := (needs_drop(&mut c, ty) == 0) & (kind != 7);
+    copy := !needs_drop(&mut c, ty) & (kind != 7);
     place := ownership::field(&mut c.check, root, copy);
     c.members.push(Member { base: root, field: field, place: place });
     return place;
@@ -2140,16 +2140,16 @@ fn caps_walk<a, b>(c: (&a mut C), ty: u64, trail: (&b mut u64[])) -> u64[] {
     }
     return rs;
 }
-fn intersects<a, b>(a: (&a u64[]), b: (&b u64[])) -> u64 {
+fn intersects<a, b>(a: (&a u64[]), b: (&b u64[])) -> bool {
     for i in a.len() {
         mut r = a[i];
         for j in b.len() {
             if b[j] == r {
-                return 1;
+                return true;
             }
         }
     }
-    return 0;
+    return false;
 }
 fn normalize_readonly<a>(c: (&a mut C), slot: u64, ty: u64) -> unit {
     k := ty_kind(&mut c, ty);
@@ -2246,7 +2246,7 @@ fn call_bonds<a>(
     k := ty_kind(&mut c, result.ty);
     if (k == 5) + (k == 7) + (k == 27) {
         stored_source(&mut c, result.t, result.ty);
-        if has_bonds(&mut c, holder) == 0 {
+        if !has_bonds(&mut c, holder) {
             fail(&mut c, view("borrowed result has no declared input source"));
         }
     }
@@ -2602,14 +2602,14 @@ fn last_name<a, b>(c: (&a mut C), name: &b [u8], from: u64, to: u64) -> u64 {
     }
     return last;
 }
-fn is_local_slot<a>(c: (&a mut C), slot: u64) -> u64 {
+fn is_local_slot<a>(c: (&a mut C), slot: u64) -> bool {
     for i in c.locals.len() {
         mut l = &c.locals[i];
         if l.id == slot {
-            return 1;
+            return true;
         }
     }
-    return 0;
+    return false;
 }
 fn release_temporary<a>(c: (&a mut C), slot: u64) -> unit {
     if c.raw {
@@ -2899,7 +2899,7 @@ fn init_parameter<a>(c: (&a mut C), slot: u64, ty: u64) -> unit {
     }
     return ();
 }
-fn has_bonds<a>(c: (&a mut C), holder: u64) -> u64 {
+fn has_bonds<a>(c: (&a mut C), holder: u64) -> bool {
     for i in c.bonds.len() {
         mut b = &c.bonds[i];
         h := b.holder;
@@ -2907,11 +2907,11 @@ fn has_bonds<a>(c: (&a mut C), holder: u64) -> u64 {
         loan := b.loan;
         if (h == holder) & (guard == 0) {
             if loan_live(&mut c, loan) {
-                return 1;
+                return true;
             }
         }
     }
-    return 0;
+    return false;
 }
 // Stored captures in an abstract input referent have their declared data lifetime,
 // distinct from the lifetime of the outer reference frame.
@@ -3104,7 +3104,7 @@ fn view_bonds<a>(c: (&a mut C), slot: u64, source: u64, mode: u64) -> unit {
                         fail(&mut c, view("unique field reborrow requires mutable frame"));
                     }
                 } else {
-                    if ownership::can_cleanup(&c.check, root) == 0 {
+                    if !ownership::can_cleanup(&c.check, root) {
                         fail(&mut c, view("field frame is shared"));
                     }
                 }
@@ -3367,7 +3367,7 @@ fn move_out<a>(c: (&a mut C), v: Val) -> unit {
     if c.raw {
         return ();
     }
-    if needs_drop(&mut c, v.ty) == 0 {
+    if !needs_drop(&mut c, v.ty) {
         if ty_kind(&mut c, v.ty) != 7 {
             return ();
         }
@@ -3448,7 +3448,7 @@ fn tok_text<a>(c: (&a mut C), i: u64) -> u8[] {
     en := t.end;
     return (c.src[st: en]).copy();
 }
-fn is<a, b>(c: (&a mut C), s: &b [u8]) -> u64 {
+fn is<a, b>(c: (&a mut C), s: &b [u8]) -> bool {
     p := c.pos;
     t := tok_text(&mut c, p);
     return same(view(t), s);
@@ -3539,12 +3539,12 @@ fn fail_option<a, b>(c: (&a mut C), msg: &b [u8]) -> unit {
     host::exit(1);
     return ();
 }
-fn eat<a, b>(c: (&a mut C), s: &b [u8]) -> u64 {
+fn eat<a, b>(c: (&a mut C), s: &b [u8]) -> bool {
     if is(&mut c, s) {
         advance(&mut c);
-        return 1;
+        return true;
     }
-    return 0;
+    return false;
 }
 fn expect<a, b>(c: (&a mut C), s: &b [u8]) -> unit {
     want := s.copy();
@@ -3561,7 +3561,7 @@ fn ident<a>(c: (&a mut C)) -> u8[] {
     }
     p := c.pos;
     t := tok_text(&mut c, p);
-    if same(view(t), view("true")) + same(view(t), view("false")) {
+    if same(view(t), view("true")) || same(view(t), view("false")) {
         fail(&mut c, view("truth keyword is not an identifier"));
     }
     advance(&mut c);
@@ -3613,16 +3613,16 @@ fn load_file<a>(c: (&a mut C), index: u64) -> unit {
 }
 
 // ---- types and declarations ----
-fn numbers_equal<a, b>(a: (&a u64[]), b: (&b u64[])) -> u64 {
+fn numbers_equal<a, b>(a: (&a u64[]), b: (&b u64[])) -> bool {
     if a.len() != b.len() {
-        return 0;
+        return false;
     }
     for i in a.len() {
         if a[i] != b[i] {
-            return 0;
+            return false;
         }
     }
-    return 1;
+    return true;
 }
 fn intern_args<a>(c: (&a mut C), k: u64, arg: u64, mode: u64, regions: u64[], args: u64[]) -> u64 {
     for i in c.types.len() {
@@ -3866,7 +3866,7 @@ fn find_implementation<a>(c: (&a mut C), contract: u64, ty: u64) -> u64 {
     }
     return 0;
 }
-fn satisfies_interface<a>(c: (&a mut C), ty: u64, contract: u64) -> u64 {
+fn satisfies_interface<a>(c: (&a mut C), ty: u64, contract: u64) -> bool {
     actual := base_type(&mut c, ty);
     if ty_kind(&mut c, actual) == 9 {
         proofs := type_args(&mut c, actual);
@@ -3894,7 +3894,7 @@ fn require_interfaces<a, b, d>(c: (&a mut C), arguments: (&b u64[]), sets: (&d u
         set := &sets[i];
         for j in set.len() {
             id := set[j];
-            if satisfies_interface(&mut c, ty, id) == 0 {
+            if !satisfies_interface(&mut c, ty, id) {
                 fail(&mut c, view("type does not satisfy interface bound"));
             }
         }
@@ -3939,10 +3939,10 @@ fn lifetime_parameters<a>(c: (&a mut C)) -> unit {
                     while true {
                         constraint := ident(&mut c);
                         mut bit = 0;
-                        if same(view(constraint), view("Send")) & (is(&mut c, view("::")) == 0) {
+                        if same(view(constraint), view("Send")) & !is(&mut c, view("::")) {
                             bit = 1;
                         }
-                        if same(view(constraint), view("Share")) & (is(&mut c, view("::")) == 0) {
+                        if same(view(constraint), view("Share")) & !is(&mut c, view("::")) {
                             bit = 2;
                         }
                         if bit == 0 {
@@ -3973,7 +3973,7 @@ fn lifetime_parameters<a>(c: (&a mut C)) -> unit {
                             }
                             bounds += bit;
                         }
-                        if eat(&mut c, view("+")) == 0 {
+                        if !eat(&mut c, view("+")) {
                             break;
                         }
                     }
@@ -4138,25 +4138,25 @@ fn field_type<a>(c: (&a mut C), ty: u64, index: u64) -> u64 {
     }
     return substitute(&mut c, field, &rs);
 }
-fn concrete_type<a>(c: (&a mut C), ty: u64) -> u64 {
+fn concrete_type<a>(c: (&a mut C), ty: u64) -> bool {
     k := ty_kind(&mut c, ty);
     if k == 9 {
-        return 0;
+        return false;
     }
     arg := ty_arg(&mut c, ty);
     if (k == 6) + (k == 27) + (k == 7) + (k == 10) + (k == 12) + (k == 13) + (k == 14) + (k == 16) + (k == 20) {
-        if concrete_type(&mut c, arg) == 0 {
-            return 0;
+        if !concrete_type(&mut c, arg) {
+            return false;
         }
     }
     mut args = type_args(&mut c, ty);
     for i in args.len() {
         a := args[i];
-        if concrete_type(&mut c, a) == 0 {
-            return 0;
+        if !concrete_type(&mut c, a) {
+            return false;
         }
     }
-    return 1;
+    return true;
 }
 fn reference_type<a>(c: (&a mut C), ty: u64, mode: u64) -> u64 {
     return intern_full(&mut c, 7, ty, mode, u64[]);
@@ -4168,7 +4168,7 @@ fn callable_contract<a, b>(
     expected: u64,
     map: (&b mut u64[]),
     depth: u64
-) -> u64 {
+) -> bool {
     if 64 < depth {
         return false;
     }
@@ -4225,7 +4225,7 @@ fn callable_contract<a, b>(
         }
     }
     if (ak == 6) + (ak == 27) + (ak == 7) + (ak == 12) + (ak == 13) + (ak == 14) + (ak == 16) + (ak == 20) {
-        if callable_contract(&mut c, aa, ea, &mut map, depth + 1) == 0 {
+        if !callable_contract(&mut c, aa, ea, &mut map, depth + 1) {
             return false;
         }
     }
@@ -4237,7 +4237,7 @@ fn callable_contract<a, b>(
     for i in ax.len() {
         left := ax[i];
         right := ex[i];
-        if callable_contract(&mut c, left, right, &mut map, depth + 1) == 0 {
+        if !callable_contract(&mut c, left, right, &mut map, depth + 1) {
             return false;
         }
     }
@@ -4375,10 +4375,10 @@ fn find_decl_internal<a, b, d>(c: (&a mut C), m: &b [u8], n: &d [u8]) -> u64 {
 // These declarations back concise syntax and are not public nominal types.
 fn find_decl<a, b, d>(c: (&a mut C), m: &b [u8], n: &d [u8]) -> u64 {
     here := module_copy(&mut c);
-    if same(view(m), view("core")) & same(view(n), view("OptionStorage")) & (same(view(here), view("core")) == 0) {
+    if same(view(m), view("core")) & same(view(n), view("OptionStorage")) & !same(view(here), view("core")) {
         return 0;
     }
-    if same(view(m), view("hashmap")) & same(view(n), view("Map")) & (same(view(here), view("hashmap")) == 0) {
+    if same(view(m), view("hashmap")) & same(view(n), view("Map")) & !same(view(here), view("hashmap")) {
         return 0;
     }
     return find_decl_internal(&mut c, m, n);
@@ -4440,7 +4440,7 @@ fn named_type<a>(c: (&a mut C), m: u8[], n: u8[], args: u64[]) -> u64 {
     return intern_args(&mut c, 8, d, 0, u64[], args);
 }
 // Union members use an internal tagged layout, independent of library declarations.
-fn is_ordinary_union<a>(c: (&a mut C), ty: u64) -> u64 {
+fn is_ordinary_union<a>(c: (&a mut C), ty: u64) -> bool {
     if ty_kind(&mut c, ty) != 8 {
         return false;
     }
@@ -4448,7 +4448,7 @@ fn is_ordinary_union<a>(c: (&a mut C), ty: u64) -> u64 {
     decl := &c.decls[d];
     return same(view(decl.module), view(".union"));
 }
-fn is_result_union<a>(c: (&a mut C), ty: u64) -> u64 {
+fn is_result_union<a>(c: (&a mut C), ty: u64) -> bool {
     if ty_kind(&mut c, ty) != 8 {
         return false;
     }
@@ -4456,8 +4456,8 @@ fn is_result_union<a>(c: (&a mut C), ty: u64) -> u64 {
     decl := &c.decls[d];
     return same(view(decl.module), view(".result"));
 }
-fn is_union<a>(c: (&a mut C), ty: u64) -> u64 {
-    return is_ordinary_union(&mut c, ty) + is_result_union(&mut c, ty);
+fn is_union<a>(c: (&a mut C), ty: u64) -> bool {
+    return is_ordinary_union(&mut c, ty) || is_result_union(&mut c, ty);
 }
 fn result_success_count<a>(c: (&a mut C), ty: u64) -> u64 {
     d := ty_arg(&mut c, ty);
@@ -4573,7 +4573,7 @@ fn parse_type<a>(c: (&a mut C)) -> u64 {
     }
     while true {
         t = type_suffixes(&mut c, t);
-        if eat(&mut c, view("?")) == 0 {
+        if !eat(&mut c, view("?")) {
             break;
         }
         mut oa = u64[];
@@ -4627,36 +4627,36 @@ fn type_suffixes<a>(c: (&a mut C), base: u64) -> u64 {
     }
     return out;
 }
-fn token_starts_type<a>(c: (&a mut C), p: u64) -> u64 {
+fn token_starts_type<a>(c: (&a mut C), p: u64) -> bool {
     k := kind_at(&mut c, p);
     if k == 1 {
         return true;
     }
-    return (k == 40) + (k == 91) + (k == 38);
+    return (k == 40) || (k == 91) || (k == 38);
 }
-fn type_keyword<a>(c: (&a mut C), n: &a [u8]) -> u64 {
-    if same(view(n), view("bool")) + same(view(n), view("char")) + same(view(n), view("string")) + same(view(n), view("u64")) {
+fn type_keyword<a>(c: (&a mut C), n: &a [u8]) -> bool {
+    if same(view(n), view("bool")) || same(view(n), view("char")) || same(view(n), view("string")) || same(view(n), view("u64")) {
         return true;
     }
-    if same(view(n), view("u8")) + same(view(n), view("u16")) + same(view(n), view("u32")) + same(view(n), view("u64")) {
+    if same(view(n), view("u8")) || same(view(n), view("u16")) || same(view(n), view("u32")) || same(view(n), view("u64")) {
         return true;
     }
     if same(view(n), view("i8"))
-        + same(view(n), view("i16"))
-        + same(view(n), view("i32"))
-        + same(view(n), view("i64"))
-        + same(view(n), view("isize")) {
+        || same(view(n), view("i16"))
+        || same(view(n), view("i32"))
+        || same(view(n), view("i64"))
+        || same(view(n), view("isize")) {
         return true;
     }
-    if same(view(n), view("f32")) + same(view(n), view("f64")) + same(view(n), view("unit")) + same(view(n), view("read")) {
+    if same(view(n), view("f32")) || same(view(n), view("f64")) || same(view(n), view("unit")) || same(view(n), view("read")) {
         return true;
     }
-    if same(view(n), view("mut")) + same(view(n), view("Atomic")) + same(view(n), view("Mutex")) + same(view(n), view("Scope")) {
+    if same(view(n), view("mut")) || same(view(n), view("Atomic")) || same(view(n), view("Mutex")) || same(view(n), view("Scope")) {
         return true;
     }
-    return same(view(n), view("Task")) + same(view(n), view("CancelToken")) + same(view(n), view("fn")) + same(view(n), view("Fn"));
+    return same(view(n), view("Task")) || same(view(n), view("CancelToken")) || same(view(n), view("fn")) || same(view(n), view("Fn"));
 }
-fn lifetime_candidate<a>(c: (&a mut C), p: u64) -> u64 {
+fn lifetime_candidate<a>(c: (&a mut C), p: u64) -> bool {
     if kind_at(&mut c, p) != 1 {
         return false;
     }
@@ -4664,15 +4664,15 @@ fn lifetime_candidate<a>(c: (&a mut C), p: u64) -> u64 {
     if n.len() == 0 {
         return false;
     }
-    if (n[0] < 97) + (122 < n[0]) {
+    if (n[0] < 97) || (122 < n[0]) {
         return false;
     }
     if type_keyword(&mut c, view(n)) {
         return false;
     }
-    return token_starts_type(&mut c, p + 1) + is_at(&mut c, p + 1, view("mut"));
+    return token_starts_type(&mut c, p + 1) || is_at(&mut c, p + 1, view("mut"));
 }
-fn is_at<a, b>(c: (&a mut C), p: u64, text: &b [u8]) -> u64 {
+fn is_at<a, b>(c: (&a mut C), p: u64, text: &b [u8]) -> bool {
     if p < c.toks.len() {
         t := tok_text(&mut c, p);
         return same(view(t), view(text));
@@ -4700,7 +4700,7 @@ fn fresh_lifetime<a>(c: (&a mut C)) -> u64 {
     c.rnames.push(name);
     return c.rnames.len();
 }
-fn slice_ahead<a>(c: (&a mut C), p: u64) -> u64 {
+fn slice_ahead<a>(c: (&a mut C), p: u64) -> bool {
     mut i = p + 1;
     mut depth = 0;
     while i < c.toks.len() {
@@ -4708,10 +4708,10 @@ fn slice_ahead<a>(c: (&a mut C), p: u64) -> u64 {
         if k == 0 {
             return false;
         }
-        if (k == 40) + (k == 91) + (k == 123) {
+        if (k == 40) || (k == 91) || (k == 123) {
             depth += 1;
         }
-        if (k == 41) + (k == 93) + (k == 125) {
+        if (k == 41) || (k == 93) || (k == 125) {
             if depth == 0 {
                 return k == 93;
             }
@@ -4867,7 +4867,7 @@ fn base_named<a>(c: (&a mut C), first: u8[]) -> u64 {
     if same(view(first), view("Fn")) {
         expect(&mut c, view("("));
         mut params = u64[];
-        if eat(&mut c, view(")")) == 0 {
+        if !eat(&mut c, view(")")) {
             while true {
                 ty := parse_type(&mut c);
                 params.push(ty);
@@ -4889,7 +4889,7 @@ fn base_named<a>(c: (&a mut C), first: u8[]) -> u64 {
         // `extern "C"` definitions have such an address, so a closure cannot sneak in.
         expect(&mut c, view("("));
         mut params = u64[];
-        if eat(&mut c, view(")")) == 0 {
+        if !eat(&mut c, view(")")) {
             while 1 {
                 ty := parse_type(&mut c);
                 params.push(ty);
@@ -4916,7 +4916,7 @@ fn base_named<a>(c: (&a mut C), first: u8[]) -> u64 {
     if same(view(first), view("fn")) {
         expect(&mut c, view("("));
         mut params = u64[];
-        if eat(&mut c, view(")")) == 0 {
+        if !eat(&mut c, view(")")) {
             while true {
                 ty := parse_type(&mut c);
                 params.push(ty);
@@ -4955,10 +4955,10 @@ fn base_named<a>(c: (&a mut C), first: u8[]) -> u64 {
     if same(view(first), view("string")) {
         return 3;
     }
-    if same(view(first), view("CPtr")) + same(view(first), view("CMutPtr")) {
+    if same(view(first), view("CPtr")) || same(view(first), view("CMutPtr")) {
         // One word: a bare C data pointer (`const void *` / `void *`) into Grail-owned bytes,
         // made by `unsafe cptr(view)` / `unsafe cptr_mut(&mut bytes)`. Mode 1 is writable.
-        mode := same(view(first), view("CMutPtr"));
+        mode := u64(same(view(first), view("CMutPtr")));
         return intern_full(&mut c, 26, 0, mode, u64[]);
     }
     if same(view(first), view("CStr")) {
@@ -4966,7 +4966,7 @@ fn base_named<a>(c: (&a mut C), first: u8[]) -> u64 {
         // is `unsafe cstr(view)` because it asserts termination and lifetime.
         return intern(&mut c, 24, 0);
     }
-    if same(view(first), view("read")) + same(view(first), view("mut")) {
+    if same(view(first), view("read")) || same(view(first), view("mut")) {
         if c.typed_refs {
             fail(&mut c, view("legacy byte-view types were removed; write &[u8] or &mut [u8]"));
         }
@@ -4974,7 +4974,7 @@ fn base_named<a>(c: (&a mut C), first: u8[]) -> u64 {
         if rs.len() != 1 {
             fail(&mut c, view("view lifetime arity"));
         }
-        mode := same(view(first), view("mut"));
+        mode := u64(same(view(first), view("mut")));
         return intern_full(&mut c, 5, 0, mode, rs);
     }
     // User declarations shadow the built-in generic types (a program may declare its own `Task`).
@@ -5066,7 +5066,7 @@ fn alias_declaration<a>(c: (&a mut C), pass: u64) -> unit {
     module := module_copy(&mut c);
     expect(&mut c, view("="));
     if pass == 1 {
-        while is(&mut c, view(";")) == 0 {
+        while !is(&mut c, view(";")) {
             advance(&mut c);
         }
         expect(&mut c, view(";"));
@@ -5077,7 +5077,7 @@ fn alias_declaration<a>(c: (&a mut C), pass: u64) -> unit {
         return ();
     }
     if pass == 3 {
-        while is(&mut c, view(";")) == 0 {
+        while !is(&mut c, view(";")) {
             advance(&mut c);
         }
         expect(&mut c, view(";"));
@@ -5129,7 +5129,7 @@ fn handle_declaration<a>(c: (&a mut C), pass: u64) -> unit {
     return ();
 }
 fn decl<a>(c: (&a mut C), pass: u64) -> unit {
-    is_enum := is(&mut c, view("enum"));
+    is_enum := u64(is(&mut c, view("enum")));
     advance(&mut c);
     name := ident(&mut c);
     lifetime_parameters(&mut c);
@@ -5170,7 +5170,7 @@ fn decl<a>(c: (&a mut C), pass: u64) -> unit {
     mut pending = Field[];
     mut count = 0;
     expect(&mut c, view("{"));
-    if eat(&mut c, view("}")) == 0 {
+    if !eat(&mut c, view("}")) {
         while 1 {
             f := ident(&mut c);
             mut ty = 1;
@@ -5225,14 +5225,14 @@ fn decl<a>(c: (&a mut C), pass: u64) -> unit {
 // Words that start a statement or expression inside a body; they cannot name a binding or
 // parameter. Declaration heads (`fn`, `struct`, `module`, `use`, ...) are recognised only at the
 // top level and may name bindings.
-fn is_keyword<a>(name: &a [u8]) -> u64 {
+fn is_keyword<a>(name: &a [u8]) -> bool {
     words := u8[][copy_bytes(view("mut")), copy_bytes(view("if")), copy_bytes(view("else")), copy_bytes(view("while")), copy_bytes(view("for")), copy_bytes(view("in")), copy_bytes(view("loop")), copy_bytes(view("match")), copy_bytes(view("return")), copy_bytes(view("break")), copy_bytes(view("continue")), copy_bytes(view("unsafe")), copy_bytes(view("true")), copy_bytes(view("false"))];
     for i in words.len() {
         if same(view(words[i]), view(name)) {
-            return 1;
+            return true;
         }
     }
-    return 0;
+    return false;
 }
 fn bind<a>(c: (&a mut C), name: u8[], ty: u64, id: u64, mutable: u64) -> unit {
     if is_keyword(view(name)) {
@@ -5419,7 +5419,7 @@ fn ffi_x86_extend<a, b>(c: (&a mut C), suffix: &b [u8]) -> unit {
     }
     return ();
 }
-fn ffi_direct_type<a>(c: (&a mut C), ty: u64) -> u64 {
+fn ffi_direct_type<a>(c: (&a mut C), ty: u64) -> bool {
     if is_float(&mut c, ty) {
         return true;
     }
@@ -6066,7 +6066,7 @@ fn ffi_record<a>(c: (&a mut C), pass: u64) -> unit {
                     }
                 );
         }
-        while is(&mut c, view("}")) == 0 {
+        while !is(&mut c, view("}")) {
             if kind(&mut c) == 0 {
                 fail(&mut c, view("unterminated extern record"));
             }
@@ -6084,7 +6084,7 @@ fn ffi_record<a>(c: (&a mut C), pass: u64) -> unit {
     mut pending = Field[];
     mut count = 0;
     expect(&mut c, view("{"));
-    if eat(&mut c, view("}")) == 0 {
+    if !eat(&mut c, view("}")) {
         while 1 {
             f := ident(&mut c);
             expect(&mut c, view(":"));
@@ -6189,7 +6189,7 @@ fn extern_declaration<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     position := c.pos;
     expect(&mut c, view("extern"));
     abi := ffi_string(&mut c, view("extern requires a quoted ABI name"));
-    if same(view(abi), view("C")) == 0 {
+    if !same(view(abi), view("C")) {
         fail(&mut c, view("only extern \"C\" declarations are supported"));
     }
     mut input = u8[];
@@ -6233,7 +6233,7 @@ fn extern_declaration<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         return ();
     }
     if pass != 2 {
-        while is(&mut c, view(";")) == 0 {
+        while !is(&mut c, view(";")) {
             advance(&mut c);
         }
         expect(&mut c, view(";"));
@@ -6252,7 +6252,7 @@ fn extern_declaration<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     mut words = 0;
     mut variadic = 0;
     expect(&mut c, view("("));
-    if eat(&mut c, view(")")) == 0 {
+    if !eat(&mut c, view(")")) {
         while 1 {
             // `...` ends the fixed parameters of a variadic C function (printf-style).
             if eat(&mut c, view(".")) {
@@ -6351,7 +6351,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     if c.inherent {
         prepend_impl_params(&mut c);
     }
-    if same(view(name), view("print")) + same(view(name), view("println")) {
+    if same(view(name), view("print")) || same(view(name), view("println")) {
         fail(&mut c, view("print and println are reserved prelude names"));
     }
     typecount := c.tnames.len();
@@ -6394,7 +6394,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     first := c.params.len();
     mut count = 0;
     expect(&mut c, view("("));
-    if eat(&mut c, view(")")) == 0 {
+    if !eat(&mut c, view(")")) {
         while 1 {
             p := ident(&mut c);
             expect(&mut c, view(":"));
@@ -6445,7 +6445,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
             // must live in the C ABI slice, and the symbol is the stated C name.
             for i in count {
                 formal := c.params[first + i];
-                if (is_float(&mut c, formal) + (ffi_narrow(&mut c, formal).len() != 0)) == 0 {
+                if !(is_float(&mut c, formal) || ffi_narrow(&mut c, formal).len() != 0) {
                     ffi_param(
                         &mut c,
                         formal,
@@ -6454,7 +6454,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
                 }
             }
             if ret != 1 {
-                if (is_float(&mut c, ret) + (ffi_narrow(&mut c, ret).len() != 0)) == 0 {
+                if !(is_float(&mut c, ret) || ffi_narrow(&mut c, ret).len() != 0) {
                     ffi_result(&mut c, ret, view("extern C callback results must be an integer, f32, f64, unit, CStr or handle"));
                 }
             }
@@ -6685,7 +6685,7 @@ fn interface_declaration<a>(c: (&a mut C), pass: u64) -> unit {
     }
     expect(&mut c, view("interface"));
     name := ident(&mut c);
-    if same(view(name), view("Send")) + same(view(name), view("Share")) {
+    if same(view(name), view("Send")) || same(view(name), view("Share")) {
         fail(&mut c, view("structural capability names are reserved"));
     }
     module := module_copy(&mut c);
@@ -6698,7 +6698,7 @@ fn interface_declaration<a>(c: (&a mut C), pass: u64) -> unit {
         }
         item := &mut c.interfaces[id - 1];
         exchange(&mut item.defined, 1);
-        if is(&mut c, view("{")) == 0 {
+        if !is(&mut c, view("{")) {
             fail(&mut c, view("expected interface body"));
         }
         skip_braces(&mut c);
@@ -6714,7 +6714,7 @@ fn interface_declaration<a>(c: (&a mut C), pass: u64) -> unit {
     proofs.push(proof);
     self := intern_args(&mut c, 9, 0, 0, u64[], proofs);
     exchange(&mut c.self_type, self + 1);
-    while eat(&mut c, view("}")) == 0 {
+    while !eat(&mut c, view("}")) {
         expect(&mut c, view("fn"));
         name := ident(&mut c);
         lifetime_parameters(&mut c);
@@ -6728,7 +6728,7 @@ fn interface_declaration<a>(c: (&a mut C), pass: u64) -> unit {
         first := c.params.len();
         expect(&mut c, view("("));
         mut count = 0;
-        if eat(&mut c, view(")")) == 0 {
+        if !eat(&mut c, view(")")) {
             while true {
                 ident(&mut c);
                 expect(&mut c, view(":"));
@@ -6779,7 +6779,7 @@ fn interface_declaration<a>(c: (&a mut C), pass: u64) -> unit {
     exchange(&mut c.self_type, 0);
     return ();
 }
-fn impl_has_for<a>(c: (&a mut C)) -> u64 {
+fn impl_has_for<a>(c: (&a mut C)) -> bool {
     mut i = c.pos;
     while (kind_at(&mut c, i) != 123) & (kind_at(&mut c, i) != 0) {
         t := tok_text(&mut c, i);
@@ -6849,14 +6849,14 @@ fn implementation<a>(c: (&a mut C), pass: u64) -> unit {
     expect(&mut c, view("impl"));
     // `impl Type { fn ... }`: methods and associated functions of a nominal type in this module.
     if ((kind(&mut c) == 1) & (next_kind(&mut c) == 123))
-        + is(&mut c, view("<"))
-        + (
+        || is(&mut c, view("<"))
+        || (
             (kind(&mut c) == 1)
                 & (next_kind(&mut c) == 60)
-                & (impl_has_for(&mut c) == 0)
+                & !impl_has_for(&mut c)
         ) {
         if pass == 1 {
-            while is(&mut c, view("{")) == 0 {
+            while !is(&mut c, view("{")) {
                 advance(&mut c);
             }
             skip_braces(&mut c);
@@ -6908,8 +6908,8 @@ fn implementation<a>(c: (&a mut C), pass: u64) -> unit {
         exchange(&mut c.inherent, d);
         exchange(&mut c.self_type, ty + 1);
         expect(&mut c, view("{"));
-        while eat(&mut c, view("}")) == 0 {
-            public := eat(&mut c, view("pub"));
+        while !eat(&mut c, view("}")) {
+            public := u64(eat(&mut c, view("pub")));
             func(&mut c, pass, public);
         }
         exchange(&mut c.inherent, 0);
@@ -6917,7 +6917,7 @@ fn implementation<a>(c: (&a mut C), pass: u64) -> unit {
         return ();
     }
     if pass == 1 {
-        while is(&mut c, view("{")) == 0 {
+        while !is(&mut c, view("{")) {
             if kind(&mut c) == 0 {
                 fail(&mut c, view("unclosed implementation"));
             }
@@ -6957,7 +6957,7 @@ fn implementation<a>(c: (&a mut C), pass: u64) -> unit {
         }
         owner := module_copy(&mut c);
         item := &c.interfaces[contract - 1];
-        mut permitted = same(view(item.module), view(owner));
+        mut permitted = u64(same(view(item.module), view(owner)));
         if ty_kind(&mut c, ty) == 8 {
             decl := ty_arg(&mut c, ty);
             d := &c.decls[decl];
@@ -6979,7 +6979,7 @@ fn implementation<a>(c: (&a mut C), pass: u64) -> unit {
     exchange(&mut c.current_impl, id);
     exchange(&mut c.self_type, ty + 1);
     expect(&mut c, view("{"));
-    while eat(&mut c, view("}")) == 0 {
+    while !eat(&mut c, view("}")) {
         before := c.funcs.len();
         func(&mut c, pass, 0);
         if c.tnames.len() {
@@ -7081,7 +7081,7 @@ fn constant_declaration<a>(c: (&a mut C), pass: u64) -> unit {
     name := ident(&mut c);
     expect(&mut c, view(":"));
     if pass != 2 {
-        while is(&mut c, view(";")) == 0 {
+        while !is(&mut c, view(";")) {
             advance(&mut c);
         }
         advance(&mut c);
@@ -7096,13 +7096,13 @@ fn constant_declaration<a>(c: (&a mut C), pass: u64) -> unit {
             fail(&mut c, view("duplicate constant"));
         }
     }
-    negative := eat(&mut c, view("-"));
+    negative := u64(eat(&mut c, view("-")));
     here := c.pos;
     k := kind(&mut c);
     mut value = 0;
     mut text = u8[];
     if negative & (k == 5) {
-        if is_float(&mut c, ty) == 0 {
+        if !is_float(&mut c, ty) {
             fail(&mut c, view("float constant needs type f64 or f32"));
         }
         t := tok_text(&mut c, here);
@@ -7141,7 +7141,7 @@ fn constant_declaration<a>(c: (&a mut C), pass: u64) -> unit {
             fail(&mut c, view("only integer constants can be negative"));
         }
         if k == 5 {
-            if is_float(&mut c, ty) == 0 {
+            if !is_float(&mut c, ty) {
                 fail(&mut c, view("float constant needs type f64 or f32"));
             }
             t := tok_text(&mut c, here);
@@ -7156,11 +7156,11 @@ fn constant_declaration<a>(c: (&a mut C), pass: u64) -> unit {
                 text = decode_literal(&mut c, here);
                 advance(&mut c);
             } else {
-                if is(&mut c, view("true")) + is(&mut c, view("false")) {
-                    if is_bool(&mut c, ty) == 0 {
+                if is(&mut c, view("true")) || is(&mut c, view("false")) {
+                    if !is_bool(&mut c, ty) {
                         fail(&mut c, view("bool constant needs type bool"));
                     }
-                    value = is(&mut c, view("true"));
+                    value = u64(is(&mut c, view("true")));
                     advance(&mut c);
                 } else {
                     fail(&mut c, view("constants must be integer, float, bool or text literals"));
@@ -7224,7 +7224,7 @@ fn in_std_dir<a>(path: &a [u8]) -> u64 {
     }
     return host::exists(view(probe));
 }
-fn stdlib_module<a, b>(mods: (&a u8[][]), m: &b [u8]) -> u64 {
+fn stdlib_module<a, b>(mods: (&a u8[][]), m: &b [u8]) -> bool {
     // The runtime lives beside the compiler, not in the stdlib directory.
     if same(view(m), view("runtime")) {
         return true;
@@ -7249,7 +7249,7 @@ fn module_modes<a>(c: (&a mut C)) -> unit {
     return ();
 }
 fn toplevel<a>(c: (&a mut C), pass: u64) -> unit {
-    raw := eat(&mut c, view("unsafe"));
+    raw := u64(eat(&mut c, view("unsafe")));
     exchange(&mut c.raw, raw);
     mut m = "main".copy();
     if eat(&mut c, view("module")) {
@@ -7268,14 +7268,14 @@ fn toplevel<a>(c: (&a mut C), pass: u64) -> unit {
     if raw {
         // Two trusted modules: the portable runtime, and darwin for the macOS libSystem boundary,
         // which only exists in Mach-O builds.
-        if (same(view(m), view("runtime")) + same(view(m), view("darwin"))) == 0 {
+        if !(same(view(m), view("runtime")) || same(view(m), view("darwin"))) {
             fail(&mut c, view("unsafe module reserved for runtime and darwin"));
         }
-        if (same(view(m), view("darwin")) != 0) & (c.plat == 0) {
+        if same(view(m), view("darwin")) & (c.plat == 0) {
             fail(&mut c, view("the darwin module requires a macos-x86_64 or macos-aarch64 target"));
         }
     }
-    if c.file_std & (stdlib_module(&c.std_modules, view(m)) == 0) {
+    if c.file_std & !stdlib_module(&c.std_modules, view(m)) {
         c.std_modules.push(m.copy());
     }
     exchange(&mut c.module, m);
@@ -7290,7 +7290,7 @@ fn toplevel<a>(c: (&a mut C), pass: u64) -> unit {
         expect(&mut c, view(";"));
     }
     while kind(&mut c) != 0 {
-        public := eat(&mut c, view("pub"));
+        public := u64(eat(&mut c, view("pub")));
         if is(&mut c, view("extern")) {
             extern_declaration(&mut c, pass, public);
             continue;
@@ -7311,7 +7311,7 @@ fn toplevel<a>(c: (&a mut C), pass: u64) -> unit {
                     if is(&mut c, view("impl")) {
                         implementation(&mut c, pass);
                     } else {
-                        if is(&mut c, view("struct")) + is(&mut c, view("enum")) {
+                        if is(&mut c, view("struct")) || is(&mut c, view("enum")) {
                             decl(&mut c, pass);
                         } else {
                             func(&mut c, pass, public);
@@ -7735,7 +7735,7 @@ fn ffi_float_plan<a>(c: (&a mut C), d: u64, abi: u64) -> u64 {
             return 0;
         }
         first := field_ty(&mut c, d, 0);
-        if is_float(&mut c, first) == 0 {
+        if !is_float(&mut c, first) {
             return 0;
         }
         single := is_f32(&mut c, first);
@@ -7787,7 +7787,7 @@ fn ffi_float_result<a>(c: (&a mut C), slot: u64, d: u64, plan: u64) -> unit {
             for i in count {
                 ty := field_ty(&mut c, d, i);
                 off := ffi_offset(&mut c, d, i);
-                if (off / 8 == e) & (is_float(&mut c, ty) == 0) {
+                if (off / 8 == e) & !is_float(&mut c, ty) {
                     sse = 0;
                 }
             }
@@ -7836,7 +7836,7 @@ fn ffi_float_result<a>(c: (&a mut C), slot: u64, d: u64, plan: u64) -> unit {
     }
     for i in count {
         ty := field_ty(&mut c, d, i);
-        if is_float(&mut c, ty) == 0 {
+        if !is_float(&mut c, ty) {
             cfield_store(&mut c, slot, d, i, held);
         }
     }
@@ -7855,43 +7855,43 @@ fn ffi_float_store<a>(c: (&a mut C), k: u64, single: u64, off: u64) -> unit {
     return ();
 }
 // 1 when a C-layout record has a floating-point field (its by-value classification differs).
-fn ffi_record_has_float<a>(c: (&a mut C), d: u64) -> u64 {
+fn ffi_record_has_float<a>(c: (&a mut C), d: u64) -> bool {
     count := c.decls[d].count;
     for i in count {
         ty := field_ty(&mut c, d, i);
         if is_float(&mut c, ty) {
-            return 1;
+            return true;
         }
     }
-    return 0;
+    return false;
 }
 // 1 when a C-layout record embeds another extern record.
-fn ffi_record_has_nested<a>(c: (&a mut C), d: u64) -> u64 {
+fn ffi_record_has_nested<a>(c: (&a mut C), d: u64) -> bool {
     count := c.decls[d].count;
     for i in count {
         ty := field_ty(&mut c, d, i);
         if is_c_record(&mut c, ty) {
-            return 1;
+            return true;
         }
     }
-    return 0;
+    return false;
 }
 // Floats anywhere in the record, embedded records included.
-fn ffi_record_has_float_deep<a>(c: (&a mut C), d: u64) -> u64 {
+fn ffi_record_has_float_deep<a>(c: (&a mut C), d: u64) -> bool {
     count := c.decls[d].count;
     for i in count {
         ty := field_ty(&mut c, d, i);
         if is_float(&mut c, ty) {
-            return 1;
+            return true;
         }
         if is_c_record(&mut c, ty) {
             inner := ty_arg(&mut c, ty);
             if ffi_record_has_float_deep(&mut c, inner) {
-                return 1;
+                return true;
             }
         }
     }
-    return 0;
+    return false;
 }
 fn field_path<a>(c: (&a mut C), id: u64, lty: u64, address: u64) -> Val {
     mut t = id;
@@ -8068,7 +8068,7 @@ fn reference_slot<a>(c: (&a mut C), id: u64, ty: u64) -> Val {
     return val(slot, out);
 }
 // `&x`, `&x.f.g` and `&xs[i]` name places; anything else is a temporary.
-fn borrow_place_ahead<a>(c: (&a mut C)) -> u64 {
+fn borrow_place_ahead<a>(c: (&a mut C)) -> bool {
     if kind(&mut c) != 1 {
         return false;
     }
@@ -8082,7 +8082,7 @@ fn borrow_place_ahead<a>(c: (&a mut C)) -> u64 {
     if (k == 91) & (j == p + 1) {
         // `u64[1,2]` is a type-first literal, not indexing a local.
         if find_local(&mut c, view(name)) == 0 {
-            if simple_type_head(&mut c, view(name)) != 0 {
+            if simple_type_head(&mut c, view(name)) {
                 return false;
             }
             m := module_copy(&mut c);
@@ -8107,7 +8107,7 @@ fn borrow_place_ahead<a>(c: (&a mut C)) -> u64 {
             }
         }
     }
-    return (k == 41) + (k == 91);
+    return (k == 41) || (k == 91);
 }
 // `&f(x)`: the temporary is held by a hidden binding until the end of the enclosing
 // block (like `t := f(x); &t`), so the reference may be used after the statement.
@@ -8276,7 +8276,7 @@ fn infer_union_member<a, b>(
     map: (&b mut u64[])
 ) -> unit {
     // Infer a bare value against a unique unbound union member.
-    if is_union(&mut c, expected) & (is_union(&mut c, actual) == 0) {
+    if is_union(&mut c, expected) & !is_union(&mut c, actual) {
         members := type_args(&mut c, expected);
         mut known = 0;
         mut candidates = 0;
@@ -8363,11 +8363,11 @@ fn member_name<a>(c: (&a mut C)) -> u8[] {
     return ident(&mut c);
 }
 // name ':' type ('=' | ':=') ... ; scans to the end of the statement for an initializer.
-fn typed_binding_ahead<a>(c: (&a mut C)) -> u64 {
+fn typed_binding_ahead<a>(c: (&a mut C)) -> bool {
     p := c.pos;
     return typed_binding_ahead_at(&mut c, p);
 }
-fn typed_binding_ahead_at<a>(c: (&a mut C), name_pos: u64) -> u64 {
+fn typed_binding_ahead_at<a>(c: (&a mut C), name_pos: u64) -> bool {
     if kind_at(&mut c, name_pos + 1) != 58 {
         return false;
     }
@@ -8378,20 +8378,20 @@ fn typed_binding_ahead_at<a>(c: (&a mut C), name_pos: u64) -> u64 {
         if k == 0 {
             return false;
         }
-        if (k == 60) + (k == 40) + (k == 91) {
+        if (k == 60) || (k == 40) || (k == 91) {
             depth += 1;
         }
-        if (k == 62) + (k == 41) + (k == 93) {
+        if (k == 62) || (k == 41) || (k == 93) {
             if depth == 0 {
                 return false;
             }
             depth -= 1;
         }
         if depth == 0 {
-            if (k == 61) + (k == 261) {
+            if (k == 61) || (k == 261) {
                 return true;
             }
-            if (k == 59) + (k == 123) + (k == 125) {
+            if (k == 59) || (k == 123) || (k == 125) {
                 return false;
             }
         }
@@ -8575,7 +8575,7 @@ fn record<a>(c: (&a mut C), d: u64, explicit: u64) -> Val {
     }
     sz := imm(&mut c, size);
     n := invoke(&mut c, view("rt_rec"), one(sz));
-    if eat(&mut c, view("}")) == 0 {
+    if !eat(&mut c, view("}")) {
         while 1 {
             f := ident(&mut c);
             has_colon := eat(&mut c, view(":"));
@@ -8632,7 +8632,7 @@ fn record<a>(c: (&a mut C), d: u64, explicit: u64) -> Val {
             mut delay = 0;
             if (resolved == 0)
                 & is_union(&mut c, ft)
-                & (is_union(&mut c, v.ty) == 0) {
+                & !is_union(&mut c, v.ty) {
                 delay = 1;
             }
             if delay {
@@ -8969,7 +8969,7 @@ fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
     method := c.has_receiver;
     exchange(&mut c.has_receiver, 0);
     if method == 0 {
-        if is(&mut c, view("(")) == 0 {
+        if !is(&mut c, view("(")) {
             return specialized_function_value(&mut c, f - 1, map);
         }
         expect(&mut c, view("("));
@@ -8998,7 +8998,7 @@ fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
     }
     mut more = 0;
     if method != 2 {
-        more = eat(&mut c, view(")")) == 0;
+        more = !eat(&mut c, view(")"));
     }
     if more {
         while 1 {
@@ -9102,7 +9102,7 @@ fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
                     mut delay = 0;
                     if (resolved == 0)
                         & is_union(&mut c, formal)
-                        & (is_union(&mut c, v.ty) == 0) {
+                        & !is_union(&mut c, v.ty) {
                         delay = 1;
                     }
                     if delay {
@@ -9509,7 +9509,7 @@ fn indirect_call<a>(c: (&a mut C), value: Val, opened: u64) -> Val {
     if opened == 0 {
         expect(&mut c, view("("));
     }
-    if eat(&mut c, view(")")) == 0 {
+    if !eat(&mut c, view(")")) {
         while true {
             index := args.len();
             if (index < signature.len()) == 0 {
@@ -9805,7 +9805,7 @@ fn raw_builtin<a>(c: (&a mut C), id: u64) -> Val {
             // raw_import("symbol", args...): a libSystem symbol under the Darwin C ABI.
             name = symbol_literal(&mut c);
         }
-        if eat(&mut c, view(")")) == 0 {
+        if !eat(&mut c, view(")")) {
             expect(&mut c, view(","));
             args = raw_arguments(&mut c);
         }
@@ -9813,7 +9813,7 @@ fn raw_builtin<a>(c: (&a mut C), id: u64) -> Val {
         if id == 134 {
             // raw_win_local(Symbol, args...): the symbol is compile-time text, not a value.
             api = ident(&mut c);
-            if eat(&mut c, view(")")) == 0 {
+            if !eat(&mut c, view(")")) {
                 expect(&mut c, view(","));
                 args = raw_arguments(&mut c);
             }
@@ -10430,7 +10430,7 @@ fn print_builtin<a>(c: (&a mut C), newline: u64) -> Val {
             if (b == 123) & (next == 125) {
                 print_raw(&mut c, view(piece));
                 piece = u8[];
-                if eat(&mut c, view(",")) == 0 {
+                if !eat(&mut c, view(",")) {
                     fail(&mut c, view("missing argument for {} in format string"));
                 }
                 value := expr(&mut c, 0);
@@ -10499,7 +10499,7 @@ fn format_builtin<a>(c: (&a mut C)) -> Val {
         if (b == 123) & (next == 125) {
             format_raw(&mut c, acc, view(piece));
             piece = u8[];
-            if eat(&mut c, view(",")) == 0 {
+            if !eat(&mut c, view(",")) {
                 fail(&mut c, view("missing argument for {} in format string"));
             }
             input := expr(&mut c, 0);
@@ -10621,7 +10621,7 @@ fn format_precision_end<a>(text: &a [u8], start: u64) -> u64 {
     }
     return i + 1;
 }
-fn format_arg<a>(c: (&a mut C), acc: u64, input: Val) -> u64 {
+fn format_arg<a>(c: (&a mut C), acc: u64, input: Val) -> bool {
     original := input.t;
     inty := input.ty;
     value := deref(&mut c, input);
@@ -10683,7 +10683,7 @@ fn format_arg<a>(c: (&a mut C), acc: u64, input: Val) -> u64 {
         }
     }
     release_temporary(&mut c, original);
-    return (kind0 == 1) + (kind0 == 18) + (kind0 == 21);
+    return (kind0 == 1) || (kind0 == 18) || (kind0 == 21);
 }
 struct FormatSpec {
     precision: u64,
@@ -10781,14 +10781,14 @@ fn parse_spec<a, b>(c: (&a mut C), text: &b [u8], start: u64) -> FormatSpec {
 }
 // Formats the next argument per spec and appends it (padded) to acc.
 fn format_spec_arg<a>(c: (&a mut C), acc: u64, sp: FormatSpec) -> unit {
-    if eat(&mut c, view(",")) == 0 {
+    if !eat(&mut c, view(",")) {
         fail(&mut c, view("missing argument for {} in format string"));
     }
     value := expr(&mut c, 0);
     tmp := invoke(&mut c, view("rt_new"), u64[]);
-    mut numeric = 1;
+    mut numeric = true;
     if sp.precision != 18446744073709551615 {
-        if is_float(&mut c, value.ty) == 0 {
+        if !is_float(&mut c, value.ty) {
             fail(&mut c, view("{:.N} needs an f64 argument"));
         }
         dv := imm(&mut c, sp.precision);
@@ -10811,7 +10811,7 @@ fn format_spec_arg<a>(c: (&a mut C), acc: u64, sp: FormatSpec) -> unit {
     args.push(w);
     al := imm(&mut c, align);
     args.push(al);
-    z := imm(&mut c, sp.zero & numeric);
+    z := imm(&mut c, sp.zero & u64(numeric));
     args.push(z);
     f := imm(&mut c, sp.fill);
     args.push(f);
@@ -11072,7 +11072,7 @@ fn builtin<a>(c: (&a mut C), id: u64) -> Val {
         return val(imm(&mut c, 0), intern_full(&mut c, 26, 0, 0, u64[]));
     }
     if (id == 13) + (id == 14) {
-        if borrow_place_ahead(&mut c) == 0 {
+        if !borrow_place_ahead(&mut c) {
             v := borrow_temporary(&mut c, id == 14);
             expect(&mut c, view(")"));
             return v;
@@ -11491,7 +11491,7 @@ fn task_scope_builtin<a>(c: (&a mut C), context: Val) -> Val {
     input := callee.t;
     ct := context.ty;
     ck := ty_kind(&mut c, ct);
-    if needs_drop(&mut c, ct) + ((ck == 7) & (ty_mode(&mut c, ct) != 0)) {
+    if needs_drop(&mut c, ct) || ((ck == 7) & (ty_mode(&mut c, ct) != 0)) {
         fail(&mut c, view("task_scope context must be a plain value or shared reference"));
     }
     require_capability(&mut c, ct, 1, view("task_scope context does not satisfy Share"));
@@ -11641,7 +11641,7 @@ fn scope_method<a, b>(c: (&a mut C), value: u64, kind: u64, name: &b [u8]) -> Va
     return val(0, 0);
 }
 // ---- sized integers: kind 18 (arg = bits, mode = signed). ----
-fn starts_with<a, b>(x: &a [u8], y: &b [u8]) -> u64 {
+fn starts_with<a, b>(x: &a [u8], y: &b [u8]) -> bool {
     if x.len() < y.len() {
         return false;
     }
@@ -11983,18 +11983,18 @@ fn bool_type<a>(c: (&a mut C)) -> u64 {
 fn float_type<a>(c: (&a mut C)) -> u64 {
     return intern(&mut c, 21, 0);
 }
-fn is_text<a>(c: (&a mut C), ty: u64) -> u64 {
+fn is_text<a>(c: (&a mut C), ty: u64) -> bool {
     k := ty_kind(&mut c, ty);
-    return (k == 3) + (k == 4) + (k == 5);
+    return (k == 3) || (k == 4) || (k == 5);
 }
-fn ref_to_text<a>(c: (&a mut C), ty: u64) -> u64 {
+fn ref_to_text<a>(c: (&a mut C), ty: u64) -> bool {
     if ty_kind(&mut c, ty) != 7 {
         return false;
     }
     inner := ty_arg(&mut c, ty);
-    return is_text(&mut c, inner) != 0;
+    return is_text(&mut c, inner);
 }
-fn is_float<a>(c: (&a mut C), ty: u64) -> u64 {
+fn is_float<a>(c: (&a mut C), ty: u64) -> bool {
     return ty_kind(&mut c, ty) == 21;
 }
 // f32 shares the float kind (argument 32); its values are binary64 words holding binary32 values.
@@ -12017,21 +12017,21 @@ fn float_precision<a>(c: (&a mut C), ty: u64) -> u64 {
 fn char_type<a>(c: (&a mut C)) -> u64 {
     return intern(&mut c, 22, 0);
 }
-fn is_char<a>(c: (&a mut C), ty: u64) -> u64 {
+fn is_char<a>(c: (&a mut C), ty: u64) -> bool {
     return ty_kind(&mut c, ty) == 22;
 }
 // Integer literals adopt sized integer and char contexts.
-fn literal_target<a>(c: (&a mut C), ty: u64) -> u64 {
+fn literal_target<a>(c: (&a mut C), ty: u64) -> bool {
     k := ty_kind(&mut c, ty);
-    return (k == 18) + (k == 22);
+    return (k == 18) || (k == 22);
 }
-fn is_bool<a>(c: (&a mut C), ty: u64) -> u64 {
+fn is_bool<a>(c: (&a mut C), ty: u64) -> bool {
     return ty_kind(&mut c, ty) == 19;
 }
 // Copy scalars: u64, sized integers and bool are loaded by value from collections.
-fn scalar<a>(c: (&a mut C), ty: u64) -> u64 {
+fn scalar<a>(c: (&a mut C), ty: u64) -> bool {
     k := ty_kind(&mut c, ty);
-    return (ty == 0) + (k == 18) + (k == 19) + (k == 21) + (k == 22);
+    return (ty == 0) || (k == 18) || (k == 19) || (k == 21) || (k == 22);
 }
 fn int_type<a>(c: (&a mut C), bits: u64, signed: u64) -> u64 {
     if (bits == 64) & (signed == 0) {
@@ -12061,7 +12061,7 @@ fn int_name<a>(n: &a [u8]) -> u64 {
     if same(view(n), view("i32")) {
         return 288;
     }
-    if same(view(n), view("i64")) + same(view(n), view("isize")) {
+    if same(view(n), view("i64")) || same(view(n), view("isize")) {
         return 320;
     }
     return 0;
@@ -12069,8 +12069,8 @@ fn int_name<a>(n: &a [u8]) -> u64 {
 fn int_type_named<a>(c: (&a mut C), code: u64) -> u64 {
     return int_type(&mut c, code % 256, code / 256);
 }
-fn integer<a>(c: (&a mut C), ty: u64) -> u64 {
-    return (ty == 0) + (ty_kind(&mut c, ty) == 18);
+fn integer<a>(c: (&a mut C), ty: u64) -> bool {
+    return (ty == 0) || (ty_kind(&mut c, ty) == 18);
 }
 // Runtime type code: bits | signed<<8 | wrap<<9.
 fn int_code<a>(c: (&a mut C), ty: u64) -> u64 {
@@ -12235,8 +12235,8 @@ fn literal_fits<a>(c: (&a mut C), ty: u64, value: u64, negative: u64) -> u64 {
     }
     return (value < max) + (value == max);
 }
-fn adopt_literal<a>(c: (&a mut C), start: u64, end: u64, ty: u64) -> u64 {
-    if (c.lit_start != start) + (c.lit_end != end) {
+fn adopt_literal<a>(c: (&a mut C), start: u64, end: u64, ty: u64) -> bool {
+    if (c.lit_start != start) || (c.lit_end != end) {
         return false;
     }
     value := c.lit_value;
@@ -12246,7 +12246,7 @@ fn adopt_literal<a>(c: (&a mut C), start: u64, end: u64, ty: u64) -> u64 {
     }
     return true;
 }
-fn is_option_storage<a>(c: (&a mut C), ty: u64) -> u64 {
+fn is_option_storage<a>(c: (&a mut C), ty: u64) -> bool {
     if ty_kind(&mut c, ty) != 8 {
         return false;
     }
@@ -12404,7 +12404,7 @@ fn adopt_value<a>(c: (&a mut C), v: Val, start: u64, end: u64, expected: u64) ->
     if is_f32(&mut c, expected) {
         return adopt_float(&mut c, v, start, end, expected);
     }
-    if literal_target(&mut c, expected) == 0 {
+    if !literal_target(&mut c, expected) {
         return v;
     }
     // A byte read (`bytes[i]`) is an untyped word in 0..255: it adopts any integer type that
@@ -12430,7 +12430,7 @@ fn adopt_float<a>(c: (&a mut C), v: Val, start: u64, end: u64, expected: u64) ->
     if (c.flit_start != start) + (c.flit_end != end) {
         return v;
     }
-    if is_float(&mut c, v.ty) == 0 {
+    if !is_float(&mut c, v.ty) {
         return v;
     }
     if is_f32(&mut c, v.ty) {
@@ -12644,7 +12644,7 @@ fn int_binary<a>(c: (&a mut C), k: u64, left: u64, right: u64, ty: u64) -> Val {
 // loan together, so the closure's type carries the regions it borrows and it cannot outlive them.
 // The body is compiled afterwards as a separate function whose hidden first parameter is a shared
 // reference to that record, so captures are read-only fields (no mutation, no moving out).
-fn closure_free_name<a, b>(c: (&a mut C), name: &b [u8], params: (&a u8[][])) -> u64 {
+fn closure_free_name<a, b>(c: (&a mut C), name: &b [u8], params: (&a u8[][])) -> bool {
     for i in params.len() {
         p := &params[i];
         if same(view(p), view(name)) {
@@ -12656,10 +12656,10 @@ fn closure_free_name<a, b>(c: (&a mut C), name: &b [u8], params: (&a u8[][])) ->
 // A capture that is itself a reference or view: the pointer moves into the environment and the
 // loan moves with it. Aggregates that merely contain a borrow keep their own layout and dropper, so
 // they are rejected rather than silently copied.
-fn capture_borrow<a>(c: (&a mut C), ty: u64) -> u64 {
+fn capture_borrow<a>(c: (&a mut C), ty: u64) -> bool {
     k := ty_kind(&mut c, ty);
-    if (k == 5) + (k == 7) + (k == 27) {
-        return 1;
+    if (k == 5) || (k == 7) || (k == 27) {
+        return true;
     }
     if contains_borrow(&mut c, ty, 0) {
         fail(
@@ -12667,7 +12667,7 @@ fn capture_borrow<a>(c: (&a mut C), ty: u64) -> u64 {
             view("closures can capture owned values and direct references, not a struct or enum holding a borrow")
         );
     }
-    return 0;
+    return false;
 }
 // The lifetime a captured reference actually borrows: the region of the place its live loan reads.
 // A local source has region 0, which no closure type may carry out of the function.
@@ -12710,10 +12710,10 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
     mut names = u8[][];
     mut params = u64[];
     mut param_regions = 0;
-    if eat(&mut c, view("||")) == 0 {
+    if !eat(&mut c, view("||")) {
         expect(&mut c, view("|"));
         exchange(&mut c.no_union, 1);
-        if eat(&mut c, view("|")) == 0 {
+        if !eat(&mut c, view("|")) {
             // Parameters are typed in the closure's own lifetime namespace (`env` is region 1): each
             // elided reference is a fresh input lifetime, borrowed anew on every call.
             mut closure_names = u8[][];
@@ -12833,7 +12833,7 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
                 add_region(&mut caps, capture_region(&mut c, id));
             }
             observe(&mut c, id);
-            if needs_drop(&mut c, ty) + (ty_kind(&mut c, ty) == 7) {
+            if needs_drop(&mut c, ty) || ty_kind(&mut c, ty) == 7 {
                 held := move_value(&mut c, val(id, ty));
                 move_out(&mut c, held);
             }
@@ -13205,7 +13205,7 @@ fn mutex_type<a>(c: (&a mut C), payload: u64) -> u64 {
 // m.lock_with(context, callback): exclusive payload access exists only for the callback's
 // duration. The callback is capture-free; its result and context cannot carry the payload loan.
 fn mutex_method<a, b>(c: (&a mut C), value: Val, name: &b [u8]) -> Val {
-    if same(view(name), view("lock_with")) == 0 {
+    if !same(view(name), view("lock_with")) {
         fail(&mut c, view("unknown Mutex method (expected lock_with)"));
     }
     cell := value.t;
@@ -13377,7 +13377,7 @@ fn method_receiver<a>(c: (&a mut C), input: u64, inty: u64, xty: u64, formal: u6
             mode := ty_mode(&mut c, formal);
             refty := reference_type(&mut c, xty, mode);
             mut temporary = 0;
-            if is_local_slot(&mut c, input) == 0 {
+            if !is_local_slot(&mut c, input) {
                 index := resource(&mut c, input);
                 if index != 0 {
                     info := &c.resources[index - 1];
@@ -13504,7 +13504,7 @@ fn show_value<a>(c: (&a mut C), input: u64, inty: u64, xty: u64) -> Val {
 // Built-in methods on string / bytes / views. Results are new values; `string` input gives `string`.
 fn text_arg<a>(c: (&a mut C)) -> Val {
     v := expr(&mut c, 0);
-    if is_text(&mut c, v.ty) == 0 {
+    if !is_text(&mut c, v.ty) {
         fail(&mut c, view("text method argument must be text"));
     }
     return v;
@@ -13515,7 +13515,7 @@ fn text_method<a, b>(c: (&a mut C), xt: u64, k: u64, name: &b [u8]) -> Val {
         result = 3;
     }
     bt := bool_type(&mut c);
-    if same(view(name), view("contains")) + same(view(name), view("starts_with")) + same(view(name), view("ends_with")) {
+    if same(view(name), view("contains")) || same(view(name), view("starts_with")) || same(view(name), view("ends_with")) {
         arg := text_arg(&mut c);
         expect(&mut c, view(")"));
         mut f = "rt_seq_contains";
@@ -13529,7 +13529,7 @@ fn text_method<a, b>(c: (&a mut C), xt: u64, k: u64, name: &b [u8]) -> Val {
         release_temporary(&mut c, arg.t);
         return val(r, bt);
     }
-    if same(view(name), view("to_upper")) + same(view(name), view("to_lower")) + same(view(name), view("trim")) {
+    if same(view(name), view("to_upper")) || same(view(name), view("to_lower")) || same(view(name), view("trim")) {
         expect(&mut c, view(")"));
         mut f = "rt_seq_trim";
         if same(view(name), view("to_upper")) {
@@ -13582,17 +13582,17 @@ fn text_method<a, b>(c: (&a mut C), xt: u64, k: u64, name: &b [u8]) -> Val {
     }
     return val(0, 18446744073709551615);
 }
-fn char_method<a>(n: &a [u8]) -> u64 {
+fn char_method<a>(n: &a [u8]) -> bool {
     return same(view(n), view("is_alphabetic"))
-        + same(view(n), view("is_alphanumeric"))
-        + same(view(n), view("is_ascii_digit"))
-        + same(view(n), view("is_whitespace"))
-        + same(view(n), view("is_uppercase"))
-        + same(view(n), view("is_lowercase"))
-        + same(view(n), view("is_ascii"))
-        + same(view(n), view("to_uppercase"))
-        + same(view(n), view("to_lowercase"))
-        + same(view(n), view("len_utf8"));
+        || same(view(n), view("is_alphanumeric"))
+        || same(view(n), view("is_ascii_digit"))
+        || same(view(n), view("is_whitespace"))
+        || same(view(n), view("is_uppercase"))
+        || same(view(n), view("is_lowercase"))
+        || same(view(n), view("is_ascii"))
+        || same(view(n), view("to_uppercase"))
+        || same(view(n), view("to_lowercase"))
+        || same(view(n), view("len_utf8"));
 }
 fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
     // ' '.is_whitespace(): a bare character literal receiver of a char method is a char.
@@ -13671,7 +13671,7 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
     }
     if k == 21 {
         single := is_f32(&mut c, xty);
-        if same(view(name), view("min")) + same(view(name), view("max")) {
+        if same(view(name), view("min")) || same(view(name), view("max")) {
             // x.min(y) / x.max(y): y of the same float type; a NaN operand yields the other.
             observe(&mut c, xt);
             ystart := c.pos;
@@ -13722,8 +13722,8 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
             f = "rt_f64_is_infinite";
             boolean = 1;
         }
-        if same(view(name), view("next_up")) + same(view(name), view("next_down")) {
-            up := imm(&mut c, same(view(name), view("next_up")));
+        if same(view(name), view("next_up")) || same(view(name), view("next_down")) {
+            up := imm(&mut c, u64(same(view(name), view("next_up"))));
             precision := imm(&mut c, single);
             mut args = two(xt, up);
             args.push(precision);
@@ -13807,7 +13807,7 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
         release_temporary(&mut c, input);
         return val(slot, 0);
     }
-    if same(view(name), view("copy")) + same(view(name), view("text")) {
+    if same(view(name), view("copy")) || same(view(name), view("text")) {
         expect(&mut c, view(")"));
         mut f = "rt_copy";
         mut ty = 2;
@@ -13819,7 +13819,7 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
             // `.copy()` of a vector (or slice) of plain values (no element needs a drop) is an independent
             // vector of the same type; copying owners would duplicate ownership.
             elem := ty_arg(&mut c, xty);
-            if same(view(name), view("text")) + needs_drop(&mut c, elem) {
+            if same(view(name), view("text")) || needs_drop(&mut c, elem) {
                 fail(&mut c, view("copy requires a byte collection or a vector of plain values"));
             }
             mut f = "rt_vec_copy";
@@ -13857,7 +13857,7 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
     }
     if ((k == 6) + (k == 27)) & same(view(name), view("contains")) {
         elem := ty_arg(&mut c, xty);
-        if (integer(&mut c, elem) + is_bool(&mut c, elem)) == 0 {
+        if !(integer(&mut c, elem) || is_bool(&mut c, elem)) {
             fail(
                 &mut c,
                 view("contains on vectors needs integer or bool elements (use vecs::contains for others)")
@@ -13881,15 +13881,15 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
     // Every remaining method mutates its receiver; an unknown name is reported as such before the
     // receiver's mutability is checked.
     known := same(view(name), view("pop"))
-        + same(view(name), view("clear"))
-        + same(view(name), view("truncate"))
-        + same(view(name), view("reverse"))
-        + same(view(name), view("swap"))
-        + same(view(name), view("remove"))
-        + same(view(name), view("insert"))
-        + same(view(name), view("push"))
-        + same(view(name), view("push_char"))
-        + same(view(name), view("append"));
+        || same(view(name), view("clear"))
+        || same(view(name), view("truncate"))
+        || same(view(name), view("reverse"))
+        || same(view(name), view("swap"))
+        || same(view(name), view("remove"))
+        || same(view(name), view("insert"))
+        || same(view(name), view("push"))
+        || same(view(name), view("push_char"))
+        || same(view(name), view("append"));
     if known == 0 {
         fail(&mut c, view("unknown collection method"));
     }
@@ -13932,7 +13932,7 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
         stored_source(&mut c, slot, ty);
         return val(slot, ty);
     }
-    if (k == 3) & (same(view(name), view("clear")) + same(view(name), view("truncate"))) {
+    if (k == 3) & (same(view(name), view("clear")) || same(view(name), view("truncate"))) {
         mut keep = 0;
         if same(view(name), view("truncate")) {
             n := expr(&mut c, 0);
@@ -13949,11 +13949,11 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
     if (k == 6)
         & (
             same(view(name), view("reverse"))
-                + same(view(name), view("swap"))
-                + same(view(name), view("remove"))
-                + same(view(name), view("clear"))
-                + same(view(name), view("truncate"))
-                + same(view(name), view("insert"))
+                || same(view(name), view("swap"))
+                || same(view(name), view("remove"))
+                || same(view(name), view("clear"))
+                || same(view(name), view("truncate"))
+                || same(view(name), view("insert"))
         ) {
         elem := ty_arg(&mut c, xty);
         code := narrow_code(&mut c, elem);
@@ -13982,7 +13982,7 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
             invoke(&mut c, view(f), three(xt, i.t, j.t));
             return val(imm(&mut c, 0), 1);
         }
-        if same(view(name), view("clear")) + same(view(name), view("truncate")) {
+        if same(view(name), view("clear")) || same(view(name), view("truncate")) {
             mut keep = 0;
             if same(view(name), view("truncate")) {
                 n := expr(&mut c, 0);
@@ -14098,7 +14098,7 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
             // A byte buffer takes a u8 (always fits) or any other integer, which stops the
             // program at run time if it does not fit a byte, like `buf[i] = b`.
             if (b.ty != int_type(&mut c, 8, 0)) & (b.ty != 0) {
-                if integer(&mut c, b.ty) == 0 {
+                if !integer(&mut c, b.ty) {
                     require_type(&mut c, b.ty, 0);
                 }
             }
@@ -14135,7 +14135,7 @@ fn collection_literal<a>(c: (&a mut C), ty: u64, bytes: u64) -> Val {
     expect(&mut c, view("["));
     slot := apply(&mut c, view("rt_new"), u64[]);
     own(&mut c, slot, ty);
-    if eat(&mut c, view("]")) == 0 {
+    if !eat(&mut c, view("]")) {
         mut first = 1;
         while 1 {
             estart := c.pos;
@@ -14240,7 +14240,7 @@ fn release_temporaries<a>(c: (&a mut C), mark: u64, keep: u64) -> unit {
         info := &c.resources[r];
         flag := info.flag;
         slot := info.slot;
-        if (flag == 0) & (slot != keep) & (is_local_slot(&mut c, slot) == 0) {
+        if (flag == 0) & (slot != keep) & !is_local_slot(&mut c, slot) {
             release(&mut c, r);
         }
     }
@@ -14274,7 +14274,7 @@ fn reference_borrow<a>(c: (&a mut C), write: u64) -> Val {
             }
         }
     }
-    if borrow_place_ahead(&mut c) == 0 {
+    if !borrow_place_ahead(&mut c) {
         return borrow_temporary(&mut c, write);
     }
     // `&mut s[i]` through a binding holding a slice or byte view borrows through the view's own
@@ -14335,18 +14335,18 @@ fn tag_narrow_borrow<a>(c: (&a mut C), slot: u64) -> unit {
     return ();
 }
 // A type narrow storage can hold: f32 or an 8-, 16- or 32-bit integer.
-fn subword<a>(c: (&a mut C), alias: u64) -> u64 {
-    if (c.raw != 0) + (alias == 0) {
-        return 0;
+fn subword<a>(c: (&a mut C), alias: u64) -> bool {
+    if (c.raw != 0) || (alias == 0) {
+        return false;
     }
     ty := base_type(&mut c, alias);
     if is_f32(&mut c, ty) {
-        return 1;
+        return true;
     }
     if ty_kind(&mut c, ty) == 18 {
         return ty_arg(&mut c, ty) < 64;
     }
-    return 0;
+    return false;
 }
 // Reads the `ty` value a reference slot points at: word storage with an 8-byte load, tagged narrow
 // storage with the type's width and encoding.
@@ -14355,7 +14355,7 @@ fn ref_load<a>(c: (&a mut C), r: u64, ty: u64) -> u64 {
     if (narrow != 0) & (is_c_record(&mut c, narrow) == 0) {
         return caddr_load(&mut c, r, narrow);
     }
-    if subword(&mut c, ty) == 0 {
+    if !subword(&mut c, ty) {
         get(&mut c, r, view("%rax"));
         o(&mut c, view("movq (%rax),%rax\n"));
         return save(&mut c);
@@ -14383,7 +14383,7 @@ fn ref_store<a>(c: (&a mut C), r: u64, ty: u64, value: u64) -> unit {
         caddr_store(&mut c, r, narrow, value);
         return ();
     }
-    if subword(&mut c, ty) == 0 {
+    if !subword(&mut c, ty) {
         get(&mut c, value, view("%rax"));
         get(&mut c, r, view("%rcx"));
         o(&mut c, view("movq %rax,(%rcx)\n"));
@@ -14444,7 +14444,7 @@ fn borrow_chain_end<a>(c: (&a mut C)) -> u64 {
 // Prefix byte-view borrowing binds tighter than binary operators.
 fn view_borrow<a>(c: (&a mut C)) -> Val {
     advance(&mut c);
-    write := eat(&mut c, view("mut"));
+    write := u64(eat(&mut c, view("mut")));
     a := primary(&mut c);
     if kind(&mut c) == 91 {
         return index_view(&mut c, a, 1 + write);
@@ -14475,7 +14475,7 @@ fn after_next_kind<a>(c: (&a mut C)) -> u64 {
     p := c.pos;
     return kind_at(&mut c, p + 2);
 }
-fn simple_type_head<a, b>(c: (&a mut C), name: &b [u8]) -> u64 {
+fn simple_type_head<a, b>(c: (&a mut C), name: &b [u8]) -> bool {
     n := name.copy();
     if int_name(view(n)) != 0 {
         return true;
@@ -14537,7 +14537,7 @@ fn simple_type_head<a, b>(c: (&a mut C), name: &b [u8]) -> u64 {
     return false;
 }
 // `Name[` or `Name<...>[` in expression position: a type-first collection literal.
-fn type_literal_ahead<a, b>(c: (&a mut C), name: &b [u8]) -> u64 {
+fn type_literal_ahead<a, b>(c: (&a mut C), name: &b [u8]) -> bool {
     p := c.pos;
     if kind_at(&mut c, p) == 60 {
         mut depth = 0;
@@ -14593,12 +14593,12 @@ fn finish_type_literal<a>(c: (&a mut C), ty: u64) -> Val {
     return val(slot, out);
 }
 // Maps remain ordinary nominal library values; only their concise surface is compiler-owned.
-fn is_map_type<a>(c: (&a mut C), ty: u64) -> u64 {
+fn is_map_type<a>(c: (&a mut C), ty: u64) -> bool {
     if ty == 18446744073709551615 {
-        return 0;
+        return false;
     }
     if ty_kind(&mut c, ty) != 8 {
-        return 0;
+        return false;
     }
     d := ty_arg(&mut c, ty);
     item := &c.decls[d];
@@ -14702,12 +14702,12 @@ fn map_expression<a>(c: (&a mut C), expected: u64) -> Val {
     following := kind_at(&mut c, q + 1);
     if (following == 40) + (following == 260) {
         ty := parse_type(&mut c);
-        if is_map_type(&mut c, ty) == 0 {
+        if !is_map_type(&mut c, ty) {
             fail(&mut c, view("map constructor needs [K: V]"));
         }
         if eat(&mut c, view("::")) {
             name := ident(&mut c);
-            if same(view(name), view("with_seed")) == 0 {
+            if !same(view(name), view("with_seed")) {
                 fail(&mut c, view("unknown map constructor"));
             }
             expect(&mut c, view("("));
@@ -14783,7 +14783,7 @@ fn primary<a>(c: (&a mut C)) -> Val {
             return view_borrow(&mut c);
         }
         advance(&mut c);
-        write := eat(&mut c, view("mut"));
+        write := u64(eat(&mut c, view("mut")));
         return reference_borrow(&mut c, write);
     }
     if k == 40 {
@@ -14937,7 +14937,7 @@ fn primary<a>(c: (&a mut C)) -> Val {
         operand := expr(&mut c, 10);
         ot := operand.ty;
         if c.raw == 0 {
-            if (is_bool(&mut c, ot) + (ot == 0)) == 0 {
+            if !(is_bool(&mut c, ot) || ot == 0) {
                 fail(&mut c, view("! needs a bool (or u64)"));
             }
         }
@@ -15015,8 +15015,8 @@ fn primary<a>(c: (&a mut C)) -> Val {
         zero := imm(&mut c, 0);
         return int_binary(&mut c, 45, zero, operand.t, ot);
     }
-    if is(&mut c, view("true")) + is(&mut c, view("false")) {
-        truth := is(&mut c, view("true"));
+    if is(&mut c, view("true")) || is(&mut c, view("false")) {
+        truth := u64(is(&mut c, view("true")));
         advance(&mut c);
         ty := bool_type(&mut c);
         return val(imm(&mut c, truth), ty);
@@ -15031,7 +15031,7 @@ fn primary<a>(c: (&a mut C)) -> Val {
         exchange(&mut c.none_end, c.pos);
         return val(imm(&mut c, 0), 0);
     }
-    if type_literal_ahead(&mut c, view(first)) != 0 {
+    if type_literal_ahead(&mut c, view(first)) {
         // Rewind and re-read the whole head as a type so `<...>` arguments work.
         back := c.pos - 1;
         exchange(&mut c.pos, back);
@@ -15084,7 +15084,7 @@ fn primary<a>(c: (&a mut C)) -> Val {
         second := ident(&mut c);
         // `Some(value)` and `None` are the only spellings; the core constructors they lower to
         // cannot be named directly.
-        if same(view(first), view("core")) & (same(view(second), view("some")) + same(view(second), view("none"))) {
+        if same(view(first), view("core")) & (same(view(second), view("some")) || same(view(second), view("none"))) {
             fail(&mut c, view("use Some(value)/None, not core::some/core::none"));
         }
         if is(&mut c, view("<")) {
@@ -15129,7 +15129,7 @@ fn primary<a>(c: (&a mut C)) -> Val {
         if (r != 0) & is(&mut c, view("{")) {
             return record(&mut c, r - 1, 18446744073709551615);
         }
-        if (is(&mut c, view("(")) + is(&mut c, view("<"))) == 0 {
+        if !(is(&mut c, view("(")) || is(&mut c, view("<"))) {
             function := find_func(&mut c, view(first), view(second));
             if function != 0 {
                 return function_value(&mut c, function - 1);
@@ -15160,7 +15160,7 @@ fn primary<a>(c: (&a mut C)) -> Val {
                 if is_float(&mut c, source) {
                     return val(value.t, ty);
                 }
-                if integer(&mut c, source) == 0 {
+                if !integer(&mut c, source) {
                     fail(&mut c, view("f64 conversion needs an integer or f64"));
                 }
                 from := int_code(&mut c, source);
@@ -15187,7 +15187,7 @@ fn primary<a>(c: (&a mut C)) -> Val {
                     slot := invoke(&mut c, view("rt_f32_round"), one(value.t));
                     return val(slot, ty);
                 }
-                if integer(&mut c, source) == 0 {
+                if !integer(&mut c, source) {
                     fail(&mut c, view("f32 conversion needs an integer or float"));
                 }
                 from := int_code(&mut c, source);
@@ -15214,7 +15214,7 @@ fn primary<a>(c: (&a mut C)) -> Val {
                 if is_char(&mut c, value.ty) {
                     return val(value.t, ty);
                 }
-                if integer(&mut c, value.ty) == 0 {
+                if !integer(&mut c, value.ty) {
                     fail(&mut c, view("char conversion needs an integer"));
                 }
                 if ty_mode(&mut c, value.ty) {
@@ -15231,7 +15231,7 @@ fn primary<a>(c: (&a mut C)) -> Val {
                 return val(slot, ty);
             }
         }
-        if same(view(first), view("f32_from_bits")) + same(view(first), view("f32_bits")) {
+        if same(view(first), view("f32_from_bits")) || same(view(first), view("f32_bits")) {
             if (find_local(&mut c, view(first)) == 0)
                 & (find_func(&mut c, view(m), view(first)) == 0) {
                 from := same(view(first), view("f32_from_bits"));
@@ -15405,7 +15405,7 @@ fn primary<a>(c: (&a mut C)) -> Val {
         if (c.raw == 0) & (kind(&mut c) != 46) {
             entry := &c.locals[l - 1];
             if entry.origin != 0 {
-                if flex_read(&mut c, l - 1) == 0 {
+                if !flex_read(&mut c, l - 1) {
                     p := c.pos;
                     exchange(&mut c.cf_start, p - 1);
                     exchange(&mut c.cf_end, p);
@@ -15488,7 +15488,7 @@ fn propagate_result_union<a>(c: (&a mut C), x: Val, unwrap: u64) -> Val {
     result := c.result;
     mut failure_targets = u64[];
     if unwrap == 0 {
-        if is_result_union(&mut c, result) == 0 {
+        if !is_result_union(&mut c, result) {
             fail(&mut c, view("result propagation requires a result return type"));
         }
         returned := type_args(&mut c, result);
@@ -15578,7 +15578,7 @@ fn propagate_union<a>(c: (&a mut C), x: Val, unwrap: u64) -> Val {
     result := c.result;
     mut targets = u64[];
     if unwrap == 0 {
-        if is_union(&mut c, result) == 0 {
+        if !is_union(&mut c, result) {
             fail(&mut c, view("union propagation requires a union return type"));
         }
         returned := type_args(&mut c, result);
@@ -15860,7 +15860,7 @@ fn len_bound_ahead<a, b>(c: (&a mut C), name: &b [u8]) -> u8[] {
         return u8[];
     }
     method := tok_text(&mut c, p + 2);
-    if same(view(method), view("len")) == 0 {
+    if !same(view(method), view("len")) {
         return u8[];
     }
     base := tok_text(&mut c, p);
@@ -15876,9 +15876,9 @@ fn len_bound_ahead<a, b>(c: (&a mut C), name: &b [u8]) -> u8[] {
         }
         if k == 1 {
             t := tok_text(&mut c, j);
-            if same(view(t), view("for")) + same(view(t), view("mut")) {
+            if same(view(t), view("for")) || same(view(t), view("mut")) {
                 nt := tok_text(&mut c, j + 1);
-                if same(view(nt), view(name)) + same(view(nt), view(base)) {
+                if same(view(nt), view(name)) || same(view(nt), view(base)) {
                     return u8[];
                 }
             }
@@ -15918,7 +15918,7 @@ fn len_bound_ahead<a, b>(c: (&a mut C), name: &b [u8]) -> u8[] {
     return base.copy();
 }
 // Whether `[ i ]` at the cursor indexes the proven base with the proven loop variable.
-fn proven_index<a>(c: (&a mut C), value: Val) -> u64 {
+fn proven_index<a>(c: (&a mut C), value: Val) -> bool {
     if c.bce_index.len() == 0 {
         return false;
     }
@@ -15931,7 +15931,7 @@ fn proven_index<a>(c: (&a mut C), value: Val) -> u64 {
     }
     t := tok_text(&mut c, p + 1);
     ix := c.bce_index.copy();
-    if same(view(t), view(ix)) == 0 {
+    if !same(view(t), view(ix)) {
         return false;
     }
     base := c.bce_base.copy();
@@ -15995,7 +15995,7 @@ fn map_key<a>(c: (&a mut C), keyty: u64) -> Val {
     // Scalar expression results have no drop resource until bound. Give this
     // borrowed key argument a tracked copyable place without inventing an owner.
     if place_of(&mut c, key.t) == 0 {
-        if scalar(&mut c, key.ty) == 0 {
+        if !scalar(&mut c, key.ty) {
             fail(&mut c, view("map lookup key has no tracked place"));
         }
         place := ownership::root(&mut c.check, 1, 1);
@@ -16048,37 +16048,37 @@ fn map_index<a>(c: (&a mut C), value: Val, mapty: u64, access: u64) -> Val {
 // literals, arithmetic, comparisons and grouping parentheses), so evaluating it cannot move,
 // mutate or drop the sequence being indexed. Calls, field access, indexing, slices and blocks
 // are not simple.
-fn simple_index_ahead<a>(c: (&a mut C)) -> u64 {
+fn simple_index_ahead<a>(c: (&a mut C)) -> bool {
     mut i = c.pos;
     mut depth: u64 = 0;
     mut prev: u64 = 0;
     while true {
         k := kind_at(&mut c, i);
         if (k == 93) & (depth == 0) {
-            return 1;
+            return true;
         }
         if k == 40 {
-            if (prev == 1) + (prev == 41) != 0 {
-                return 0;
+            if (prev == 1) || (prev == 41) {
+                return false;
             }
             depth += 1;
         } else {
             if k == 41 {
                 if depth == 0 {
-                    return 0;
+                    return false;
                 }
                 depth -= 1;
             } else {
-                operator := (k == 43) + (k == 45) + (k == 42) + (k == 47) + (k == 37) + (k == 38) + (k == 124) + (k == 94) + (k == 60) + (k == 62) + (k == 126);
-                if (k != 1) & (k != 2) & (operator == 0) {
-                    return 0;
+                operator := (k == 43) || (k == 45) || (k == 42) || (k == 47) || (k == 37) || (k == 38) || (k == 124) || (k == 94) || (k == 60) || (k == 62) || (k == 126);
+                if (k != 1) & (k != 2) & !operator {
+                    return false;
                 }
             }
         }
         prev = k;
         i += 1;
     }
-    return 0;
+    return false;
 }
 // `v[a: b]` (either bound optional) on a vector or slice: a typed slice borrowing those elements,
 // exclusive when the access writes (docs/design/typed-slices.md).
@@ -16131,29 +16131,29 @@ fn vector_slice<a>(c: (&a mut C), x: Val, input: u64, access: u64) -> Val {
     return val(result, sty);
 }
 // From just after `[`: whether the brackets hold a single index (no `:` at their own depth).
-fn element_index_ahead<a>(c: (&a mut C)) -> u64 {
+fn element_index_ahead<a>(c: (&a mut C)) -> bool {
     mut i = c.pos;
     mut depth = 0;
     while true {
         k := kind_at(&mut c, i);
         if k == 0 {
-            return 0;
+            return false;
         }
-        if (k == 40) + (k == 91) + (k == 123) {
+        if (k == 40) || (k == 91) || (k == 123) {
             depth += 1;
         }
-        if (k == 41) + (k == 93) + (k == 125) {
+        if (k == 41) || (k == 93) || (k == 125) {
             if depth == 0 {
                 return k == 93;
             }
             depth -= 1;
         }
         if (k == 58) & (depth == 0) {
-            return 0;
+            return false;
         }
         i += 1;
     }
-    return 0;
+    return false;
 }
 fn index_view<a>(c: (&a mut C), value: Val, access: u64) -> Val {
     unchecked := (c.raw == 0) & proven_index(&mut c, val(value.t, value.ty));
@@ -16165,7 +16165,7 @@ fn index_view<a>(c: (&a mut C), value: Val, access: u64) -> Val {
         return map_index(&mut c, val(input, inty), x.ty, access);
     }
     vk := ty_kind(&mut c, x.ty);
-    if ((vk == 6) + (vk == 27)) & (element_index_ahead(&mut c) == 0) & (c.raw == 0) {
+    if ((vk == 6) + (vk == 27)) & !element_index_ahead(&mut c) & (c.raw == 0) {
         return vector_slice(&mut c, x, input, access);
     }
     if (vk == 6) + (vk == 27) {
@@ -16460,7 +16460,7 @@ fn expr_expected<a>(c: (&a mut C), min: u64, expected: u64) -> Val {
                                 // Short-circuit: the right operand runs only when needed (frames start zeroed, so
                                 // cleanup flags of skipped temporaries stay clear).
                                 if c.raw == 0 {
-                                    if (is_bool(&mut c, ty) + (ty == 0)) == 0 {
+                                    if !(is_bool(&mut c, ty) || ty == 0) {
                                         fail(
                                             &mut c,
                                             view("&& and || need bool (or u64) operands")
@@ -16481,7 +16481,7 @@ fn expr_expected<a>(c: (&a mut C), min: u64, expected: u64) -> Val {
                                 right := expr(&mut c, p + 1);
                                 rt := right.ty;
                                 if c.raw == 0 {
-                                    if (is_bool(&mut c, rt) + (rt == 0)) == 0 {
+                                    if !(is_bool(&mut c, rt) || rt == 0) {
                                         fail(
                                             &mut c,
                                             view("&& and || need bool (or u64) operands")
@@ -16611,7 +16611,7 @@ fn expr_expected<a>(c: (&a mut C), min: u64, expected: u64) -> Val {
                             // References to text compare and concatenate like the text itself.
                             if c.raw == 0 {
                                 if ref_to_text(&mut c, ty)
-                                    + ref_to_text(&mut c, rty) {
+                                    || ref_to_text(&mut c, rty) {
                                     if ref_to_text(&mut c, ty) {
                                         x := deref(&mut c, val(t, ty));
                                         snap = x.t;
@@ -16783,7 +16783,7 @@ fn strict_bool_check<a>(c: (&a mut C), k: u64, left: u64, right: u64, lstart: u6
     }
     lb := is_bool(&mut c, left);
     rb := is_bool(&mut c, right);
-    if (lb == 0) & (rb == 0) {
+    if !lb & !rb {
         return ();
     }
     if lb & rb & (is_comparison(k) + (k == 38) + (k == 124) + (k == 94)) {
@@ -16802,13 +16802,13 @@ fn strict_bool_check<a>(c: (&a mut C), k: u64, left: u64, right: u64, lstart: u6
     return ();
 }
 fn strict_condition<a>(c: (&a mut C), ty: u64, cstart: u64) -> unit {
-    if (c.strict_bool == 3) & (is_bool(&mut c, ty) == 0) {
+    if (c.strict_bool == 3) & !is_bool(&mut c, ty) {
         // FIX cond path start: the condition's tokens [cstart, pos).
         here := c.pos;
         strict_fix_record(&mut c, view("cond"), cstart, here, here, here, 0, 0);
         return ();
     }
-    if (c.strict_bool != 0) & (is_bool(&mut c, ty) == 0) {
+    if (c.strict_bool != 0) & !is_bool(&mut c, ty) {
         strict_bool_fail(&mut c, view("a condition must be a bool; compare explicitly (n != 0)"));
     }
     return ();
@@ -16875,7 +16875,7 @@ fn block<a>(c: (&a mut C)) -> unit {
     expect(&mut c, view("{"));
     mark := c.locals.len();
     mut owners = c.resources.len();
-    while is(&mut c, view("}")) == 0 {
+    while !is(&mut c, view("}")) {
         stmt(&mut c);
     }
     advance(&mut c);
@@ -17071,12 +17071,12 @@ fn compound_value<a>(c: (&a mut C), op: u64, old: u64, v: Val, ty: u64) -> Val {
     return val(value, 0);
 }
 // Look ahead through named fields without evaluating the target or key.
-fn map_assignment_ahead<a>(c: (&a mut C)) -> u64 {
+fn map_assignment_ahead<a>(c: (&a mut C)) -> bool {
     pos := c.pos;
     name := tok_text(&mut c, pos);
     local := find_local(&mut c, view(name));
     if local == 0 {
-        return 0;
+        return false;
     }
     mut ty = local_ty(&mut c, local - 1);
     mut q = pos + 1;
@@ -17085,7 +17085,7 @@ fn map_assignment_ahead<a>(c: (&a mut C)) -> u64 {
             ty = ty_arg(&mut c, ty);
         }
         if ty_kind(&mut c, ty) != 8 {
-            return 0;
+            return false;
         }
         name := tok_text(&mut c, q + 1);
         decl := ty_arg(&mut c, ty);
@@ -17148,7 +17148,7 @@ fn map_index_assignment<a>(c: (&a mut C)) -> unit {
         receiver := place_slot(&mut c, reservation.t, reservation.ty, 0);
         keyref := place_slot(&mut c, keypin.t, keypin.ty, 0);
         oldref = map_lookup(&mut c, mapty, receiver, keyref, 0);
-        if (integer(&mut c, valuety) + is_float(&mut c, valuety)) == 0 {
+        if !(integer(&mut c, valuety) || is_float(&mut c, valuety)) {
             fail(&mut c, view("compound map assignment needs numeric values"));
         }
         get(&mut c, oldref.t, view("%rax"));
@@ -17168,7 +17168,7 @@ fn map_index_assignment<a>(c: (&a mut C)) -> unit {
     while temps < j {
         j -= 1;
         slot := c.resources[j].slot;
-        if is_local_slot(&mut c, slot) == 0 {
+        if !is_local_slot(&mut c, slot) {
             release(&mut c, j);
         }
     }
@@ -17340,19 +17340,19 @@ fn fold_constant(k: u64, a: u64, b: u64) -> u64[] {
 // A statement builtin (`drop(x)`, `write(...)`, `assert(...)`) only when the name is followed by
 // `(` and is not shadowed by a local; consumes the name on success. A binding named `write` or
 // `drop` is then an ordinary name (`write += 3`).
-fn statement_builtin<a, b>(c: (&a mut C), name: &b [u8]) -> u64 {
-    if is(&mut c, &name) == 0 {
-        return 0;
+fn statement_builtin<a, b>(c: (&a mut C), name: &b [u8]) -> bool {
+    if !is(&mut c, &name) {
+        return false;
     }
     here := c.pos;
     if kind_at(&mut c, here + 1) != 40 {
-        return 0;
+        return false;
     }
     if find_local(&mut c, &name) != 0 {
-        return 0;
+        return false;
     }
     advance(&mut c);
-    return 1;
+    return true;
 }
 // Walks the accessors of an assignment target from c.pos up to (not including) `stop`: each
 // `[i]` and `.f` run yields a mutable reference to the element or field, so `v[i][j] = x` and
@@ -17495,7 +17495,7 @@ fn index_assignment<a>(c: (&a mut C)) -> unit {
         code := narrow_code(&mut c, elem);
         if operator != 61 {
             if c.raw == 0 {
-                if (integer(&mut c, elem) + is_float(&mut c, elem)) == 0 {
+                if !(integer(&mut c, elem) || is_float(&mut c, elem)) {
                     fail(&mut c, view("compound assignment needs numeric elements"));
                 }
             }
@@ -17655,7 +17655,7 @@ fn if_let<a>(c: (&a mut C)) -> unit {
     mut binding = u8[];
     mut has_binding = 0;
     if eat(&mut c, view("(")) {
-        if eat(&mut c, view("_")) == 0 {
+        if !eat(&mut c, view("_")) {
             binding = ident(&mut c);
             has_binding = 1;
         }
@@ -17745,7 +17745,7 @@ fn scalar_match<a>(c: (&a mut C), s: Val) -> unit {
     mut default = 0;
     end := label(&mut c);
     expect(&mut c, view("{"));
-    while eat(&mut c, view("}")) == 0 {
+    while !eat(&mut c, view("}")) {
         ownership::restore(&mut c.check, &before);
         exchange(&mut c.terminated, 0);
         next := label(&mut c);
@@ -17756,15 +17756,15 @@ fn scalar_match<a>(c: (&a mut C), s: Val) -> unit {
             wildcard = 1;
         } else {
             if (kind(&mut c) == 1)
-                & (is(&mut c, view("true")) == 0)
-                & (is(&mut c, view("false")) == 0) {
+                & !is(&mut c, view("true"))
+                & !is(&mut c, view("false")) {
                 binding = ident(&mut c);
                 wildcard = 1;
             }
         }
         // `if` after a pattern adds a guard; a guarded arm never makes the match exhaustive.
         if wildcard {
-            if is(&mut c, view("if")) == 0 {
+            if !is(&mut c, view("if")) {
                 if default {
                     fail(&mut c, view("duplicate catch-all arm"));
                 }
@@ -17772,7 +17772,7 @@ fn scalar_match<a>(c: (&a mut C), s: Val) -> unit {
             }
         } else {
             while true {
-                negative := eat(&mut c, view("-"));
+                negative := u64(eat(&mut c, view("-")));
                 here := c.pos;
                 k := kind(&mut c);
                 mut value = 0;
@@ -17783,7 +17783,7 @@ fn scalar_match<a>(c: (&a mut C), s: Val) -> unit {
                     if is(&mut c, view("true")) {
                         value = 1;
                     } else {
-                        if is(&mut c, view("false")) == 0 {
+                        if !is(&mut c, view("false")) {
                             fail(&mut c, view("bool patterns are true or false"));
                         }
                     }
@@ -17811,11 +17811,11 @@ fn scalar_match<a>(c: (&a mut C), s: Val) -> unit {
                         value = wrapping_sub(0, value);
                     }
                 }
-                if (boolean == 0) & (kind(&mut c) == 46) & (next_kind(&mut c) == 46) {
+                if !boolean & (kind(&mut c) == 46) & (next_kind(&mut c) == 46) {
                     // lo..hi (hi excluded): (x - lo) < (hi - lo) as unsigned words, correct for signed types too.
                     advance(&mut c);
                     advance(&mut c);
-                    hneg := eat(&mut c, view("-"));
+                    hneg := u64(eat(&mut c, view("-")));
                     there := c.pos;
                     hk := kind(&mut c);
                     mut high = 0;
@@ -17875,7 +17875,7 @@ fn scalar_match<a>(c: (&a mut C), s: Val) -> unit {
                     o(&mut c, view("cmpq %rcx,%rax\n"));
                     jump(&mut c, view("je"), body);
                 }
-                if eat(&mut c, view("|")) == 0 {
+                if !eat(&mut c, view("|")) {
                     break;
                 }
             }
@@ -17889,7 +17889,7 @@ fn scalar_match<a>(c: (&a mut C), s: Val) -> unit {
         if eat(&mut c, view("if")) {
             tests := c.resources.len();
             g := expr(&mut c, 0);
-            if (is_bool(&mut c, g.ty) + (g.ty == 0)) == 0 {
+            if !(is_bool(&mut c, g.ty) || g.ty == 0) {
                 fail(&mut c, view("match guard must be a bool"));
             }
             cleanup(&mut c, tests);
@@ -17916,7 +17916,7 @@ fn scalar_match<a>(c: (&a mut C), s: Val) -> unit {
         }
         jump(&mut c, view("jmp"), end);
         mark(&mut c, next);
-        if eat(&mut c, view(",")) == 0 {
+        if !eat(&mut c, view(",")) {
             expect(&mut c, view("}"));
             break;
         }
@@ -17976,7 +17976,7 @@ fn record_match<a>(c: (&a mut C), sslot: u64, sty: u64, x: Val, byref: u64, refm
         fail(&mut c, view("match on a record takes a record pattern"));
     }
     name := ident(&mut c);
-    if same(view(name), view(c.decls[d].name)) == 0 {
+    if !same(view(name), view(c.decls[d].name)) {
         fail(&mut c, view("pattern type is not the scrutinee's record type"));
     }
     if c.decls[d].c_layout {
@@ -18069,7 +18069,7 @@ fn record_match<a>(c: (&a mut C), sslot: u64, sty: u64, x: Val, byref: u64, refm
                 bind(&mut c, binder, fty, payload, 0);
             }
         }
-        if eat(&mut c, view(",")) == 0 {
+        if !eat(&mut c, view(",")) {
             expect(&mut c, view("}"));
             break;
         }
@@ -18115,7 +18115,7 @@ fn record_match<a>(c: (&a mut C), sslot: u64, sty: u64, x: Val, byref: u64, refm
     cleanup(&mut c, payloads);
     pop_locals(&mut c, mark);
     eaten := eat(&mut c, view(","));
-    if eaten & (is(&mut c, view("_")) == 0) & (is(&mut c, view("}")) == 0) {
+    if eaten & !is(&mut c, view("_")) & !is(&mut c, view("}")) {
         fail(&mut c, view("a record pattern must be the only pattern arm"));
     }
     if is(&mut c, view("_")) {
@@ -18181,7 +18181,7 @@ fn map_loop<a, b, d>(c: (&a mut C), name: &b [u8], value_name: &d [u8]) -> unit 
     if (c.raw == 0) & (ty_kind(&mut c, map.ty) == 7) {
         mapty = ty_arg(&mut c, map.ty);
     }
-    if is_map_type(&mut c, mapty) == 0 {
+    if !is_map_type(&mut c, mapty) {
         fail(
             &mut c,
             view(
@@ -18313,9 +18313,9 @@ fn statement<a>(c: (&a mut C)) -> unit {
             return ();
         }
     }
-    if is(&mut c, view("break")) + is(&mut c, view("continue")) {
+    if is(&mut c, view("break")) || is(&mut c, view("continue")) {
         mut b = eat(&mut c, view("break"));
-        if b == 0 {
+        if !b {
             expect(&mut c, view("continue"));
         }
         expect(&mut c, view(";"));
@@ -18396,7 +18396,7 @@ fn statement<a>(c: (&a mut C)) -> unit {
                 & (next_kind(&mut c) == 58)
                 & (typed_binding_ahead(&mut c))
         ) {
-        mutable := eat(&mut c, view("mut"));
+        mutable := u64(eat(&mut c, view("mut")));
         name := ident(&mut c);
         // `mut x: T = expr;` and `x: T := expr;` declare the type; the initializer is checked against it.
         name_at := c.pos - 1;
@@ -18434,7 +18434,7 @@ fn statement<a>(c: (&a mut C)) -> unit {
             n := imm(&mut c, 0);
             if c.raw == 0 {
                 mut flag = 0;
-                copy := needs_drop(&mut c, ty) == 0;
+                copy := !needs_drop(&mut c, ty);
                 if copy == 0 {
                     flag = imm(&mut c, 0) + 1;
                 }
@@ -18536,19 +18536,19 @@ fn statement<a>(c: (&a mut C)) -> unit {
     }
     // `loop { }` is `while` without a condition; without a break, code after it is unreachable.
     endless := is(&mut c, view("loop"));
-    if endless + is(&mut c, view("while")) {
+    if endless || is(&mut c, view("while")) {
         advance(&mut c);
         // while let Variant(b) = value { }: loops while the value matches; a non-matching value is dropped.
         mut pattern = 0;
         mut variant = u8[];
         mut binding = u8[];
         mut has_binding = 0;
-        if (endless == 0) & is(&mut c, view("let")) {
+        if !endless & is(&mut c, view("let")) {
             advance(&mut c);
             pattern = 1;
             variant = ident(&mut c);
             if eat(&mut c, view("(")) {
-                if eat(&mut c, view("_")) == 0 {
+                if !eat(&mut c, view("_")) {
                     binding = ident(&mut c);
                     has_binding = 1;
                 }
@@ -18626,7 +18626,7 @@ fn statement<a>(c: (&a mut C)) -> unit {
                 bind(&mut c, binding.copy(), pty, payload, 0);
             }
         }
-        if (endless == 0) & (pattern == 0) {
+        if !endless & (pattern == 0) {
             tests := c.resources.len();
             cstart := c.pos;
             mut v = expr(&mut c, 0);
@@ -18715,7 +18715,7 @@ fn statement<a>(c: (&a mut C)) -> unit {
         mut consume = 0;
         mut hidden_local = 0;
         mut bytewise = 0;
-        if (c.raw == 0) & (v.ty != 0) & (is_bool(&mut c, v.ty) == 0) {
+        if (c.raw == 0) & (v.ty != 0) & !is_bool(&mut c, v.ty) {
             x := deref(&mut c, val(v.t, v.ty));
             k := ty_kind(&mut c, x.ty);
             if (k == 3) + (k == 4) + (k == 5) {
@@ -18738,7 +18738,7 @@ fn statement<a>(c: (&a mut C)) -> unit {
                     elemty = a;
                     // Owners are moved out one at a time in both numeric modes. Plain scalar
                     // loops keep their existing copy semantics in --default-u64 mode.
-                    if (((c.default_u64 == 0) + (scalar(&mut c, a) == 0)) != 0) & (ty_kind(&mut c, v.ty) == 6) {
+                    if ((c.default_u64 == 0) || !scalar(&mut c, a)) & (ty_kind(&mut c, v.ty) == 6) {
                         owned := move_value(&mut c, v);
                         bind(&mut c, copy_bytes(view("__iterated")), owned.ty, owned.t, 0);
                         hidden_local = c.locals.len();
@@ -18757,7 +18757,7 @@ fn statement<a>(c: (&a mut C)) -> unit {
                                 byref = 1;
                                 refmode = ty_mode(&mut c, x.ty);
                             } else {
-                                if scalar(&mut c, a) == 0 {
+                                if !scalar(&mut c, a) {
                                     fail(
                                         &mut c,
                                         view("for x in v over non-scalar elements needs &v (each element is borrowed)")
@@ -19009,7 +19009,7 @@ fn statement<a>(c: (&a mut C)) -> unit {
         mut default = 0;
         end := label(&mut c);
         expect(&mut c, view("{"));
-        while eat(&mut c, view("}")) == 0 {
+        while !eat(&mut c, view("}")) {
             ownership::restore(&mut c.check, &before);
             exchange(&mut c.terminated, 0);
             mut name = u8[];
@@ -19064,7 +19064,7 @@ fn statement<a>(c: (&a mut C)) -> unit {
                     }
                 }
                 jump(&mut c, view("jmp"), end);
-                if eat(&mut c, view(",")) == 0 {
+                if !eat(&mut c, view(",")) {
                     expect(&mut c, view("}"));
                     break;
                 }
@@ -19110,7 +19110,7 @@ fn statement<a>(c: (&a mut C)) -> unit {
             if byref {
                 mut b = binder;
                 if eat(&mut c, view("(")) {
-                    if eat(&mut c, view("_")) == 0 {
+                    if !eat(&mut c, view("_")) {
                         b = ident(&mut c);
                     }
                     expect(&mut c, view(")"));
@@ -19156,7 +19156,7 @@ fn statement<a>(c: (&a mut C)) -> unit {
                 invoke(&mut c, view("rt_free"), one(xt));
                 mut b = binder;
                 if eat(&mut c, view("(")) {
-                    if eat(&mut c, view("_")) == 0 {
+                    if !eat(&mut c, view("_")) {
                         b = ident(&mut c);
                     }
                     expect(&mut c, view(")"));
@@ -19183,7 +19183,7 @@ fn statement<a>(c: (&a mut C)) -> unit {
             }
             jump(&mut c, view("jmp"), end);
             mark(&mut c, next);
-            if eat(&mut c, view(",")) == 0 {
+            if !eat(&mut c, view(",")) {
                 expect(&mut c, view("}"));
                 break;
             }
@@ -19296,7 +19296,7 @@ fn statement<a>(c: (&a mut C)) -> unit {
     }
     if index_assignment_ahead(&mut c) {
         groups := assign_chain(&mut c)[2];
-        if (groups == 1) & (map_assignment_ahead(&mut c) != 0) {
+        if (groups == 1) & map_assignment_ahead(&mut c) {
             map_index_assignment(&mut c);
         } else {
             index_assignment(&mut c);
@@ -19382,7 +19382,7 @@ fn statement<a>(c: (&a mut C)) -> unit {
         base := info.base;
         kind := ty_kind(&mut c, v.ty);
         if base != 0 {
-            if needs_drop(&mut c, v.ty) + (kind == 7) {
+            if needs_drop(&mut c, v.ty) || kind == 7 {
                 moved := move_value(&mut c, v);
                 owner := resource(&mut c, moved.t);
                 release(&mut c, owner - 1);
@@ -19413,7 +19413,7 @@ fn assignment_tail<a>(c: (&a mut C), l: u64, id: u64, ty: u64, target: u64, thro
     }
     if operator != 61 {
         if c.raw == 0 {
-            if (integer(&mut c, expected) + is_float(&mut c, expected)) == 0 {
+            if !(integer(&mut c, expected) || is_float(&mut c, expected)) {
                 fail(&mut c, view("compound assignment needs a numeric variable"));
             }
         }
@@ -19524,7 +19524,7 @@ fn assignment_tail<a>(c: (&a mut C), l: u64, id: u64, ty: u64, target: u64, thro
         } else {
             place := place_of(&mut c, target);
             if place != 0 {
-                if ownership::can_cleanup(&c.check, place) == 0 {
+                if !ownership::can_cleanup(&c.check, place) {
                     fail(&mut c, view("assignment conflicts with live borrow"));
                 }
             }
@@ -19634,7 +19634,7 @@ fn arm_scrutinee<a>(c: (&a mut C), slot: u64, ty: u64) -> unit {
 }
 // Whether a read of local index i still denotes its literal. A mutable binding qualifies only
 // before any assignment can have run: not inside a loop opened after its declaration.
-fn flex_read<a>(c: (&a mut C), i: u64) -> u64 {
+fn flex_read<a>(c: (&a mut C), i: u64) -> bool {
     l := &c.locals[i];
     if l.flex == 0 {
         return false;
@@ -19775,10 +19775,10 @@ fn stmt<a>(c: (&a mut C)) -> unit {
 }
 fn host_fn<a, b>(c: (&a mut C), name: &b [u8], ret: u64) -> unit {
     first := c.params.len();
-    if same(view(name), view("arg")) + same(view(name), view("print_num")) {
+    if same(view(name), view("arg")) || same(view(name), view("print_num")) {
         c.params.push(0);
     }
-    if same(view(name), view("read_file")) + same(view(name), view("print")) {
+    if same(view(name), view("read_file")) || same(view(name), view("print")) {
         c.params.push(4);
     }
     if same(view(name), view("write_file")) {
@@ -19789,7 +19789,7 @@ fn host_fn<a, b>(c: (&a mut C), name: &b [u8], ret: u64) -> unit {
         ty := intern(&mut c, 6, 2);
         c.params.push(ty);
     }
-    if same(view(name), view("sleep_ms")) + same(view(name), view("close")) {
+    if same(view(name), view("sleep_ms")) || same(view(name), view("close")) {
         c.params.push(0);
     }
     if same(view(name), view("read_fd")) {
@@ -19797,15 +19797,15 @@ fn host_fn<a, b>(c: (&a mut C), name: &b [u8], ret: u64) -> unit {
         c.params.push(0);
     }
     if same(view(name), view("env"))
-        + same(view(name), view("exists"))
-        + same(view(name), view("mkdir"))
-        + same(view(name), view("list_dir")) {
+        || same(view(name), view("exists"))
+        || same(view(name), view("mkdir"))
+        || same(view(name), view("list_dir")) {
         c.params.push(4);
     }
-    if same(view(name), view("tcp_listen")) + same(view(name), view("tcp_port")) + same(view(name), view("tcp_accept")) {
+    if same(view(name), view("tcp_listen")) || same(view(name), view("tcp_port")) || same(view(name), view("tcp_accept")) {
         c.params.push(0);
     }
-    if same(view(name), view("tcp_connect")) + same(view(name), view("open")) {
+    if same(view(name), view("tcp_connect")) || same(view(name), view("open")) {
         c.params.push(4);
         c.params.push(0);
     }
@@ -20217,7 +20217,7 @@ pub fn main() -> u64 {
                         c.export_hits.push(0);
                         offset += 2;
                     } else {
-                    if same(view(option), view("--typed-refs")) + same(view(option), view("--strict-bool")) + same(view(option), view("--strict-bool-report")) + same(view(option), view("--strict-bool-fix")) {
+                    if same(view(option), view("--typed-refs")) || same(view(option), view("--strict-bool")) || same(view(option), view("--strict-bool-report")) || same(view(option), view("--strict-bool-fix")) {
                         if same(view(option), view("--strict-bool")) {
                             // Survey: bools and integers do not mix (see strict_bool_check).
                             exchange(&mut c.strict_bool, 1);

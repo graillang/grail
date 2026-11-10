@@ -13,6 +13,50 @@
   byte loads and stores; behaviour and output are unchanged. The bootstrap seeds are refreshed so a
   fresh clone builds this runtime without a development compiler, and the seed manifest carries the
   new source and artifact digests.
+- Strict-bool phase 1 (`docs/design/strict-bool-migration.md`): the compiler's own predicate helpers
+  return `bool` instead of a 0/1 `u64`, so a caller's `if f(x)` stops reading as an integer test and
+  `f(x) == 0` reads as `!f(x)`. Internal only; no language change. The six helpers that carry a real
+  status code (`compile_mode`, the `*_command` handlers, `frame_split`) keep `u64`.
+  - `lexer`: `whitespace`, `punctuation`.
+  - `ownership`: `ancestor`, `loan_ancestor`, `can_cleanup`, and `overlaps`, whose body was the sum of
+    two `ancestor` calls and is now `||`.
+  - `optimize`: `same`, `movelike`, `arith`, `slot_read`, `slot_written`, `reg_fact_valid`,
+    `dead_after`, `promotable_use`. Sums of predicates used as a truth value became `||`.
+  - `fmt`: `is`, `keyword`, `binary`, `prefix_position`, `unary`, `space`, `opener`, `closer`,
+    `opens`, `shuts`, `breakable`, `trailing_ok`, `arm_break`, `chain_dot`, `chain_break`,
+    `list_break`, `op_break`. The space flag still lands in the numeric `f.lspace`, so that one
+    assignment converts explicitly.
+  - `cli`: `eq`, `starts`, `ends`, `contains_name`, `is_macho`, `is_command`. The command handlers
+    that carry the process exit status are untouched.
+  - `llvm`: `eq`, `starts`, `ends`, `occurs_at`, `has`, `member`, `is_local_label`, `legacy_base`,
+    `is_xmm`, `set_has`, `callee_saved`. `frame_split` stays u64: it is stored in the lowering
+    state's `split` field.
+  - `machine`: `eq`, `starts`, `small_reg`, `atomic_instruction`, `c_abi`. The register-width codes
+    `rw`/`sw` stay numeric (0, 1 or 2), so the two `eq` results that initialize them are read through
+    an `if`.
+  - `native`: `same` (the hottest helper, 437 call sites) first, because most other predicates are
+    written in terms of it. Its `same(a) + same(b)` sums become `||`; `mode`, `permitted` and the
+    `imm()` argument stay numeric and convert explicitly.
+  - `native`, type and span predicates: `span_is`, `span_has`, `needs_drop`, `intersects`,
+    `is_local_slot`, `concrete_type`, `ffi_record_has_nested`, `is_text`, `is_float`, `is_char`,
+    `literal_target`, `is_bool`, `scalar`, `integer`, `adopt_literal`, `capture_borrow`,
+    `contains_text`, `has_bonds`, `numbers_equal`, `satisfies_interface`, `callable_contract`,
+    `token_starts_type`, `starts_with`, `flex_read`, `element_index_ahead`, `simple_index_ahead`,
+    `slice_ahead`, `typed_binding_ahead_at`.
+  - `native`, unions, maps and FFI: `is_ordinary_union`, `is_result_union`, `is_at`, `is_keyword`,
+    `ffi_direct_type`, `impl_has_for`, `stdlib_module`, `ffi_record_has_float`,
+    `ffi_record_has_float_deep`, `typed_binding_ahead`, `format_arg`, `ref_to_text`,
+    `is_option_storage`, `closure_free_name`, `char_method`, `subword`, `is_map_type`,
+    `proven_index`. `format_arg`'s `numeric` flag becomes bool; the mask it feeds converts
+    explicitly.
+  - `native`: `is` (the current-token check, 88 call sites, 70 of them `while`/`if`
+    `is(...) == 0`). `is_enum` and a constant's `value` are stored in u64 fields, and `imm()`
+    takes the bool constant's value, so those three convert explicitly.
+  - `native`: `eat`, `is_union`, `lifetime_candidate`, `borrow_place_ahead`,
+    `type_literal_ahead`, `map_assignment_ahead`, `statement_builtin`, plus `type_keyword` and
+    `simple_type_head`. 35 `eat(...) == 0` guards become `!eat(...)`; the values that feed u64
+    parameters or fields (`public`, `negative`, `hneg`, `raw`, `write`, `mutable`) convert
+    explicitly. `is_f32` and `is_comparison` stay u64 — see below.
 - Maps iterate with `for key, value in &map`, in insertion order, and `for key, value in &mut map` binds the
   same shared key with an exclusive value (`value := map.value_at_mut(i)`), so values update in place. The loop
   holds one reference to the map throughout: inserting into it inside the body is rejected, a shared loop cannot

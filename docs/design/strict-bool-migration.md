@@ -531,6 +531,24 @@ Checks after each commit: `bun tools/test-selfhost.mjs` (stage 2 and stage 3 mus
 this is what catches a `bool` threaded into a `u64` local), `bun tools/test-native.mjs x86_64`, and
 `bun tools/book.mjs check`.
 
+**Status.** Landed on `strictbool-preds`. 110 of the declarations in 3.2 return `bool`; the tool now
+reports two predicates left, and both are deliberate:
+
+- `is_f32` (`compiler/native.grl:12004`) — one caller reads it as a number, not a test:
+  `fret = 1 + is_f32(&mut c, ret)` builds the callback return code (1 f64, 2 f32), which is later
+  compared with `fret == 2`.
+- `is_comparison` (`compiler/native.grl:15437`) — `p := is_comparison(k) * 3` sizes the operand list
+  in `binary`, so the value is a count, not a truth value.
+
+Both need a caller rewrite (a separate `mut fret` / `mut p` decided by an `if`) before they can flip;
+doing it as part of the mechanical pass would have hidden a number behind `u64(...)`.
+
+Two smaller corrections to 3.2 while landing this: the list is 112 declarations, not 111, because
+`capture_borrow` (`native.grl:12659`) arrived with closures; and the tool misses predicates whose
+bodies it cannot classify, which is why `task_walk` (`native.grl:11435`), `punct` (`fmt.grl:243`) and
+`letter`/`digit` (`lexer.grl:16`, `:19`) are still `u64`. Each of those is tested by a caller and
+belongs in a later pass.
+
 ### Phase 2 — operators
 
 Now the `arithmetic on bools` and `bool and integer do not mix` reports that appeared in phase 1:
