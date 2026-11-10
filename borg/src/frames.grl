@@ -1,4 +1,5 @@
 module borg_frames;
+use borg_aggregates;
 use borg_events;
 use borg_replay;
 use core;
@@ -14,8 +15,9 @@ use core;
 // name the connection-level failure instead of the file-level one.
 //
 //   frame    u8 tag | u32 LE length | length bytes body
-//   tag      0 is a control frame; 1..5 are the event tags `borg_events` defines, and any other
-//            value is left for the journal reader to refuse by name rather than guessed here
+//   tag      0 is a control frame; 1..9 are the event tags `borg_events` defines (five transcript
+//            kinds and four aggregate kinds), and any other value is left for the journal reader to
+//            refuse by name rather than guessed here
 //   control  u8 opcode, then the opcode's body
 //   text     u32 LE byte length, then that many bytes — the same primitive an event body uses
 //
@@ -26,6 +28,16 @@ use core;
 //   3 hello_refused  u32 LE daemon | u32 LE client | text detail   both versions, by value
 //   4 reply          session facts and, when the fold refused, the refusal
 //   5 end            no body                           the client has sent every event it means to
+//   6 state          the goal, the plan and the work list the daemon reconstructed
+//
+// Opcode 6 is what a daemon that keeps its session between connections answers with *besides* the
+// reply: the reply says what the batch just did, and the state frame says what the session now holds.
+// A daemon that serves one batch and forgets (`borg_daemon::serve_one`) still answers once, with the
+// reply, so the transport's own contract - one answer per conversation - is unchanged; the frame is
+// an addition, not a replacement.
+//
+// The state frame is not a journal and does not pretend to be: it carries the reconstructed
+// aggregates, so a client that never folded anything prints exactly what the daemon holds.
 //
 // The handshake is a real negotiation: the client opens with the version it speaks and the session
 // it attaches to, the daemon answers with what it accepted or a refusal that carries *both*
@@ -69,6 +81,7 @@ const OP_HELLO_OK: u64 = 2;
 const OP_HELLO_REFUSED: u64 = 3;
 const OP_REPLY: u64 = 4;
 const OP_END: u64 = 5;
+const OP_STATE: u64 = 6;
 
 // The largest frame the transport will carry. It is the journal reader's own ceiling rather than a
 // second number to keep in step: anything the wire accepts is an event a journal file could hold,
@@ -79,6 +92,7 @@ pub fn opcode_hello_ok() -> u64 { return OP_HELLO_OK; }
 pub fn opcode_hello_refused() -> u64 { return OP_HELLO_REFUSED; }
 pub fn opcode_reply() -> u64 { return OP_REPLY; }
 pub fn opcode_end() -> u64 { return OP_END; }
+pub fn opcode_state() -> u64 { return OP_STATE; }
 
 pub fn max_frame_bytes() -> u64 {
     return borg_events::MAX_EVENT_BODY;
@@ -233,6 +247,41 @@ fn push_text<a>(out: (&mut u8[]), text: (&a [u8])) {
     push_bytes(out, text);
 }
 
+fn copy_optional_number<a>(value: (&a u64?)) -> u64? {
+    match value {
+        Some(number) => { return Some(number); },
+        None => { return None; }
+    }
+}
+
+fn push_bool(out: (&mut u8[]), value: bool) {
+    if value {
+        push_uint(out, 1, 1);
+    } else {
+        push_uint(out, 0, 1);
+    }
+}
+
+fn push_optional_number(out: (&mut u8[]), value: (&u64?)) {
+    match value {
+        Some(number) => {
+            push_uint(out, 1, 1);
+            push_uint(out, number, 8);
+        },
+        None => { push_uint(out, 0, 1); }
+    }
+}
+
+fn push_optional_text(out: (&mut u8[]), value: (&string?)) {
+    match value {
+        Some(text) => {
+            push_uint(out, 1, 1);
+            push_text(out, &text);
+        },
+        None => { push_uint(out, 0, 1); }
+    }
+}
+
 fn frame_of_body(tag: u64, body: (&[u8])) -> u8[] {
     mut out = u8[];
     push_uint(&mut out, tag, 1);
@@ -346,6 +395,22 @@ pub fn reply_of_refusal<a>(value: (&a Refusal)) -> Reply {
     };
 }
 
+// A reply is copied by value: the daemon returns what it wrote as well as writing it, so a caller
+// can compare the two.
+pub fn copy_reply<a>(value: (&a Reply)) -> Reply {
+    return Reply {
+        sequence: value.sequence,
+        status: value.status.text(),
+        events: value.events,
+        refused: value.refused,
+        code: value.code,
+        at: value.at.text(),
+        reason: value.reason.text(),
+        detail: value.detail.text()
+    };
+}
+
+pub fn reply_code<a>(value: (&a Reply)) -> u64 { return value.code; }
 pub fn reply_sequence<a>(value: (&a Reply)) -> u64 { return value.sequence; }
 pub fn reply_status<a>(value: (&a Reply)) -> string { return value.status.text(); }
 pub fn reply_events<a>(value: (&a Reply)) -> u64 { return value.events; }
@@ -375,6 +440,263 @@ pub fn reply_frame<a>(value: (&a Reply)) -> u8[] {
         push_uint(&mut body, 0, 1);
     }
     return control(OP_REPLY, &body);
+}
+
+// ---- the state frame ----
+//
+// The aggregates a daemon holds, encoded once so a client prints what the daemon reconstructed
+// rather than its own guess at what it sent. The layout is the journal's primitives - a presence
+// byte, a u32 length and the bytes, a u64 little endian - because the transport already knows how to
+// read those and a second encoding would need a second reader that could disagree with itself:
+//
+//   state      u8 goal | text goal_id | text objective | optional u64 budget | text goal_status
+//              text participant | u64 plan revision | u32 plan count
+//               plan item: text id | text content | text status | optional text work_id
+//              u64 work revision | u32 work count
+//               work item: text id | text title | optional text assignee | text status
+//
+// A status is carried as its name and *re-read* through `borg_events` on the way in, so a status the
+// model has no variant for is a `bad-reply` on the wire instead of a snapshot holding a word the
+// rest of the port would refuse.
+
+pub struct Snapshot {
+    goal: bool,
+    goal_id: string,
+    objective: string,
+    budget: u64?,
+    goal_status: string,
+    participant: string,
+    plan_revision: u64,
+    plan: borg_events::PlanItem[],
+    work_revision: u64,
+    work: borg_events::WorkItem[]
+}
+
+pub fn copy_snapshot<a>(value: (&a Snapshot)) -> Snapshot {
+    return Snapshot {
+        goal: value.goal,
+        goal_id: value.goal_id.text(),
+        objective: value.objective.text(),
+        budget: copy_optional_number(&value.budget),
+        goal_status: value.goal_status.text(),
+        participant: value.participant.text(),
+        plan_revision: value.plan_revision,
+        plan: borg_events::copy_plan_items(&value.plan),
+        work_revision: value.work_revision,
+        work: borg_events::copy_work_items(&value.work)
+    };
+}
+
+pub fn snapshot_goal<a>(value: (&a Snapshot)) -> bool { return value.goal; }
+pub fn snapshot_goal_id<a>(value: (&a Snapshot)) -> string { return value.goal_id.text(); }
+pub fn snapshot_objective<a>(value: (&a Snapshot)) -> string { return value.objective.text(); }
+pub fn snapshot_goal_status<a>(value: (&a Snapshot)) -> string { return value.goal_status.text(); }
+pub fn snapshot_participant<a>(value: (&a Snapshot)) -> string { return value.participant.text(); }
+pub fn snapshot_plan_revision<a>(value: (&a Snapshot)) -> u64 { return value.plan_revision; }
+pub fn snapshot_plan_count<a>(value: (&a Snapshot)) -> u64 { return value.plan.len(); }
+pub fn snapshot_work_revision<a>(value: (&a Snapshot)) -> u64 { return value.work_revision; }
+pub fn snapshot_work_count<a>(value: (&a Snapshot)) -> u64 { return value.work.len(); }
+
+pub fn snapshot_budget<a>(value: (&a Snapshot)) -> string {
+    match &value.budget {
+        Some(number) => { return format("{}", number); },
+        None => { return "-".text(); }
+    }
+}
+
+pub fn snapshot_plan_item<a>(value: (&a Snapshot), index: u64) -> borg_events::PlanItem {
+    return borg_events::copy_plan_item(&value.plan[index]);
+}
+
+pub fn snapshot_work_item<a>(value: (&a Snapshot), index: u64) -> borg_events::WorkItem {
+    return borg_events::copy_work_item(&value.work[index]);
+}
+
+pub fn state_frame<a>(value: (&a borg_aggregates::State)) -> u8[] {
+    mut body = u8[];
+    push_bool(&mut body, borg_aggregates::has_goal(value));
+    goal_id := borg_aggregates::goal_of(value);
+    push_text(&mut body, &goal_id);
+    objective := borg_aggregates::objective_of(value);
+    push_text(&mut body, &objective);
+    budget := borg_aggregates::budget_number(value);
+    push_optional_number(&mut body, &budget);
+    goal_status := borg_aggregates::goal_status_of(value);
+    push_text(&mut body, &goal_status);
+    participant := borg_aggregates::participant_of(value);
+    push_text(&mut body, &participant);
+    push_uint(&mut body, borg_aggregates::revision_of(value), 8);
+    push_uint(&mut body, borg_aggregates::plan_count(value), 4);
+    mut index = u64(0);
+    while index < borg_aggregates::plan_count(value) {
+        item := borg_aggregates::plan_at(value, index);
+        id := borg_events::plan_item_id(&item);
+        push_text(&mut body, &id);
+        content := borg_events::plan_item_content(&item);
+        push_text(&mut body, &content);
+        shown := borg_events::plan_item_status(&item);
+        push_text(&mut body, &shown);
+        link := borg_events::plan_item_work(&item);
+        push_optional_text(&mut body, &link);
+        index += 1;
+    }
+    push_uint(&mut body, borg_aggregates::work_revision_of(value), 8);
+    push_uint(&mut body, borg_aggregates::work_count(value), 4);
+    mut cursor = u64(0);
+    while cursor < borg_aggregates::work_count(value) {
+        item := borg_aggregates::work_at(value, cursor);
+        id := borg_events::work_item_id(&item);
+        push_text(&mut body, &id);
+        title := borg_events::work_item_title(&item);
+        push_text(&mut body, &title);
+        assignee := borg_events::work_item_assignee(&item);
+        push_optional_text(&mut body, &assignee);
+        shown := borg_events::work_item_status(&item);
+        push_text(&mut body, &shown);
+        cursor += 1;
+    }
+    return control(OP_STATE, &body);
+}
+
+fn take_bool<a>(bytes: (&a [u8]), at: (&mut u64), end: u64, status: (&mut u64)) -> bool {
+    if *status != OK {
+        return false;
+    }
+    if end < *at || end - *at < 1 {
+        *status = BAD_REPLY;
+        return false;
+    }
+    marker := read_uint(bytes, *at, 1);
+    *at = *at + 1;
+    if marker == 1 {
+        return true;
+    }
+    if marker != 0 {
+        *status = BAD_REPLY;
+    }
+    return false;
+}
+
+fn take_optional_text<a>(bytes: (&a [u8]), at: (&mut u64), end: u64, status: (&mut u64)) -> string? {
+    if *status != OK {
+        return None;
+    }
+    if end < *at || end - *at < 1 {
+        *status = BAD_REPLY;
+        return None;
+    }
+    marker := read_uint(bytes, *at, 1);
+    *at = *at + 1;
+    if marker == 0 {
+        return None;
+    }
+    if marker != 1 {
+        *status = BAD_REPLY;
+        return None;
+    }
+    text := take_text(bytes, at, end, status);
+    if *status != OK {
+        return None;
+    }
+    return Some(text);
+}
+
+fn take_optional_number<a>(bytes: (&a [u8]), at: (&mut u64), end: u64, status: (&mut u64)) -> u64? {
+    if *status != OK {
+        return None;
+    }
+    if end < *at || end - *at < 1 {
+        *status = BAD_REPLY;
+        return None;
+    }
+    marker := read_uint(bytes, *at, 1);
+    *at = *at + 1;
+    if marker == 0 {
+        return None;
+    }
+    if marker != 1 {
+        *status = BAD_REPLY;
+        return None;
+    }
+    value := take_uint(bytes, at, end, 8, status);
+    if *status != OK {
+        return None;
+    }
+    return Some(value);
+}
+
+pub fn state_of<a>(value: (&a Frame)) -> Snapshot | Refusal {
+    if opcode_of(value) != OP_STATE {
+        return refused(BAD_REPLY, "state expected");
+    }
+    mut at = u64(1);
+    mut status = OK;
+    end := value.body.len();
+    present := take_bool(&value.body, &mut at, end, &mut status);
+    goal_id := take_text(&value.body, &mut at, end, &mut status);
+    objective := take_text(&value.body, &mut at, end, &mut status);
+    budget := take_optional_number(&value.body, &mut at, end, &mut status);
+    goal_status := take_text(&value.body, &mut at, end, &mut status);
+    participant := take_text(&value.body, &mut at, end, &mut status);
+    revision := take_uint(&value.body, &mut at, end, 8, &mut status);
+    count := take_uint(&value.body, &mut at, end, 4, &mut status);
+    mut items = borg_events::PlanItem[];
+    mut index = u64(0);
+    while (status == OK) && (index < count) {
+        id := take_text(&value.body, &mut at, end, &mut status);
+        content := take_text(&value.body, &mut at, end, &mut status);
+        shown := take_text(&value.body, &mut at, end, &mut status);
+        link := take_optional_text(&value.body, &mut at, end, &mut status);
+        mut work = "".text();
+        match link {
+            Some(text) => { work = text; },
+            None => { }
+        }
+        if status == OK {
+            match borg_events::plan_item(&id, &content, &shown, &work) {
+                item: borg_events::PlanItem => { items.push(item); },
+                failure: borg_events::EventError => { status = BAD_REPLY; }
+            }
+        }
+        index += 1;
+    }
+    work_revision := take_uint(&value.body, &mut at, end, 8, &mut status);
+    work_count := take_uint(&value.body, &mut at, end, 4, &mut status);
+    mut work_items = borg_events::WorkItem[];
+    mut cursor = u64(0);
+    while (status == OK) && (cursor < work_count) {
+        id := take_text(&value.body, &mut at, end, &mut status);
+        title := take_text(&value.body, &mut at, end, &mut status);
+        assignee := take_optional_text(&value.body, &mut at, end, &mut status);
+        shown := take_text(&value.body, &mut at, end, &mut status);
+        mut holder = "".text();
+        match assignee {
+            Some(text) => { holder = text; },
+            None => { }
+        }
+        if status == OK {
+            match borg_events::work_item(&id, &title, &holder, &shown) {
+                item: borg_events::WorkItem => { work_items.push(item); },
+                failure: borg_events::EventError => { status = BAD_REPLY; }
+            }
+        }
+        cursor += 1;
+    }
+    if status != OK || at != end {
+        return refused(BAD_REPLY, "state truncated");
+    }
+    return Snapshot {
+        goal: present,
+        goal_id: goal_id,
+        objective: objective,
+        budget: budget,
+        goal_status: goal_status,
+        participant: participant,
+        plan_revision: revision,
+        plan: items,
+        work_revision: work_revision,
+        work: work_items
+    };
 }
 
 // ---- decoding ----

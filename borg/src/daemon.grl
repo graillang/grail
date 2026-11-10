@@ -32,6 +32,21 @@ use host;
 // get. The answer is one reply frame carrying the reconstructed sequence and status plus any
 // refusal, and it is written whether the fold succeeded or refused: a refusal is a fact about the
 // stream, and a client that is not told has no way to know its events were not folded.
+//
+// Two daemons share that machinery and differ in one thing: whether they remember.
+//
+//   serve_one       one connection, one answer, nothing kept. What a client carrying a whole journal
+//                   wants, and what the wire itself promises: `session` folds the batch it was sent.
+//   serve_stateful  one connection per command, and the folded session kept between them. A command
+//                   that sends no events (`list-work`, `attach`) is asking a question, and the only
+//                   way to answer it with the session's real state is to hold that state here rather
+//                   than in the client. The answer is the reply frame *and* a state frame, so the
+//                   client prints what the daemon reconstructed.
+//
+// A stateful daemon is also the appender: it assigns the sequence, the id and the timestamp as it
+// folds, because a command cannot know the journal's cursor and a client that guessed would be
+// writing the cursor in two places. The fold's sequence rule is unchanged - every event that reaches
+// it carries exactly the next sequence, because the daemon just assigned it.
 
 // Opening the listener is the grant. There is no path to a listening descriptor in this module that
 // does not go through `authority`.
@@ -173,6 +188,152 @@ fn session(fd: u64) -> borg_frames::Reply {
 pub fn serve_one(listener: u64) -> borg_frames::Reply {
     connection := host::tcp_accept(listener);
     answer := session(connection);
+    host::close(connection);
+    return answer;
+}
+
+// ---- the daemon that remembers ----
+
+// What a stateful conversation produced: the reply for the batch and the session as the daemon now
+// holds it, which is what the state frame carried.
+pub struct Served {
+    reply: borg_frames::Reply,
+    state: borg_replay::State
+}
+
+pub fn served_reply<a>(value: (&a Served)) -> borg_frames::Reply {
+    return borg_frames::copy_reply(&value.reply);
+}
+
+pub fn served_state<a>(value: (&a Served)) -> borg_replay::State {
+    return borg_replay::copy_of(&value.state);
+}
+
+// The reply, then the state: two frames, in that order, so a client that only wants the batch outcome
+// can stop reading after the first and a client that wants the session keeps reading.
+fn finished_stateful(fd: u64, folded: (&borg_replay::State)) -> Served {
+    reply := borg_frames::reply_of_state(folded);
+    host::write_fd(fd, view(borg_frames::reply_frame(&reply)));
+    held := borg_replay::aggregates_of(folded);
+    host::write_fd(fd, view(borg_frames::state_frame(&held)));
+    return Served { reply: reply, state: borg_replay::copy_of(folded) };
+}
+
+fn answered_stateful(fd: u64, value: (&borg_frames::Refusal), folded: (&borg_replay::State)) -> Served {
+    reply := borg_frames::reply_of_refusal(value);
+    host::write_fd(fd, view(borg_frames::reply_frame(&reply)));
+    held := borg_replay::aggregates_of(folded);
+    host::write_fd(fd, view(borg_frames::state_frame(&held)));
+    return Served { reply: reply, state: borg_replay::copy_of(folded) };
+}
+
+fn stateful_session(fd: u64, held: (&borg_replay::State)) -> Served {
+    mut state = borg_frames::transport();
+    mut folded = borg_replay::copy_of(held);
+    // The cursor this batch starts from. Taking it once is what makes `batch + index` the sequence:
+    // reading it per event would count the events this same batch already applied twice.
+    cursor := borg_replay::sequence_of(&folded);
+    mut index = u64(0);
+    while true {
+        match borg_frames::next(&mut state) {
+            Frame(frame) => {
+                if borg_frames::frame_is_control(&frame) {
+                    op := borg_frames::opcode_of(&frame);
+                    if op == borg_frames::opcode_hello() {
+                        match borg_frames::hello_of(&frame) {
+                            parsed: borg_frames::Hello => {
+                                match borg_frames::accept_hello(&mut state, &parsed) {
+                                    Some(answer) => {
+                                        said := borg_frames::refusal_detail(&answer);
+                                        framed := borg_frames::hello_refused(
+                                            borg_frames::accepted_version(&state),
+                                            borg_frames::hello_version(&parsed),
+                                            &said
+                                        );
+                                        host::write_fd(fd, view(framed));
+                                        // The handshake was refused before any event arrived, so the
+                                        // session is untouched and the state frame still describes it.
+                                        return answered_stateful(fd, &answer, &folded);
+                                    },
+                                    None => {
+                                        agreed := borg_frames::accepted_session(&state);
+                                        framed := borg_frames::hello_ok(
+                                            borg_frames::accepted_version(&state),
+                                            &agreed
+                                        );
+                                        host::write_fd(fd, view(framed));
+                                    }
+                                }
+                            },
+                            failure: borg_frames::Refusal => { return answered_stateful(fd, &failure, &folded); }
+                        }
+                    } else if op == borg_frames::opcode_end() {
+                        if !borg_frames::handshaken(&state) {
+                            return answered_stateful(
+                                fd,
+                                &borg_frames::refused(borg_frames::NOT_HANDSHAKEN, "end before hello"),
+                                &folded
+                            );
+                        }
+                        return finished_stateful(fd, &folded);
+                    } else {
+                        return answered_stateful(
+                            fd,
+                            &borg_frames::refused(borg_frames::BAD_CONTROL, "unknown control opcode"),
+                            &folded
+                        );
+                    }
+                } else {
+                    match borg_frames::event_of(&frame) {
+                        value: borg_events::Event => {
+                            match borg_frames::admit(&mut state, &value) {
+                                Some(answer) => { return answered_stateful(fd, &answer, &folded); },
+                                None => {
+                                    // The daemon appends: the cursor, the id and the clock are its
+                                    // own, assigned here rather than trusted from the command.
+                                    sequence := cursor + index + 1;
+                                    id := format("e{}", sequence);
+                                    stamp := host::now_ms();
+                                    created := format("{}", stamp);
+                                    stamped := borg_events::stamped(&value, &id, sequence, &created);
+                                    match borg_replay::apply(&folded, &stamped, index) {
+                                        next: borg_replay::State => {
+                                            folded = next;
+                                            index = index + 1;
+                                        },
+                                        refusal: borg_replay::Refusal => {
+                                            stopped := borg_frames::refused_fold(&refusal);
+                                            return answered_stateful(fd, &stopped, &folded);
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        failure: borg_frames::Refusal => { return answered_stateful(fd, &failure, &folded); }
+                    }
+                }
+            },
+            Pending => {
+                incoming := host::read_fd(fd, 65536);
+                if incoming.len() == 0 {
+                    match borg_frames::close(&mut state) {
+                        Some(answer) => { return answered_stateful(fd, &answer, &folded); },
+                        None => { return finished_stateful(fd, &folded); }
+                    }
+                }
+                borg_frames::feed(&mut state, view(incoming));
+            },
+            Refused(answer) => { return answered_stateful(fd, &answer, &folded); }
+        }
+    }
+    return finished_stateful(fd, &folded);
+}
+
+// Serve one command against a session the caller keeps: accept, fold what arrived into `held`, answer
+// with the reply and the state, close. The session as it now stands is returned as well as written.
+pub fn serve_stateful(listener: u64, held: (&borg_replay::State)) -> Served {
+    connection := host::tcp_accept(listener);
+    answer := stateful_session(connection, held);
     host::close(connection);
     return answer;
 }
