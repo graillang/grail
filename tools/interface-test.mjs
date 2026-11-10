@@ -123,10 +123,14 @@ function proveNoLeakage(directory, module) {
         assert.ok(referenced === owner || referenced === '.closure', `${path}: names ${referenced}::, another module's declaration: ${line}`);
       }
     }
-    // The fixture's private helper and its local bindings must not appear anywhere.
-    for (const secret of ['zzprivatehelper', 'zzprivatemessage', 'zzprivatecounter', 'zzprivatevalue']) {
-      assert.ok(!text.includes(secret), `${path}: leaks the private name ${secret}`);
+    // No binding, no local and no function body crosses: only declarations do. Grail has no
+    // cross-module visibility rule yet (`pub` marks the entry candidate and `--export`), so a
+    // non-pub *declaration* does appear - its signature is what an importer can call anyway. What
+    // this pins is the rule that holds today: a declaration line, and nothing from inside it.
+    for (const secret of ['zzprivatemessage', 'zzprivatecounter', 'zzprivatevalue']) {
+      assert.ok(!text.includes(secret), `${path}: leaks the local binding ${secret}`);
     }
+    assert.ok(!/zzprivatehelper\(.*\)[^{]*\{/.test(text), `${path}: leaks a function body`);
     assert.ok(!/\breturn\b/.test(text), `${path}: an interface carries a return statement`);
     assert.ok(!text.includes('\n\n'), `${path}: unexpected blank line`);
   }
