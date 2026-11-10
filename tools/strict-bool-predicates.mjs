@@ -167,13 +167,19 @@ function callName(tokens) {
 
 // How bool-like a return expression is: 2 a bool value (comparison, `true`/`false`, logic, a
 // predicate call), 1 only 0/1 constants, 0 an ordinary integer.
-function shape(tokens, predicates) {
+//
+// `+` joining comparisons is the `overlaps` shape (`ancestor(a, b) + ancestor(b, a)`), and `&`/`|`/
+// `^` joining them is the same logic spelled bitwise: both take the minimum over their operands, so
+// one integer operand makes the whole expression an integer. `self` is the function being classified:
+// a recursive call returns whatever the function returns, so it counts as bool once the other
+// returns are.
+function shape(tokens, predicates, self) {
   const t = strip(tokens);
   if (t.length === 0) return 0;
   if (t.length === 1 && t[0].kind === 'ident' && (t[0].value === 'true' || t[0].value === 'false')) return 2;
   if (t.length === 1 && t[0].kind === 'number' && (t[0].value === '0' || t[0].value === '1')) return 1;
-  if (t[0].kind === 'punct' && t[0].value === '!' && t.length > 1) return shape(t.slice(1), predicates) >= 1 ? 2 : 0;
-  for (const ops of [new Set(['+']), new Set(['&&', '||'])]) {
+  if (t[0].kind === 'punct' && t[0].value === '!' && t.length > 1) return shape(t.slice(1), predicates, self) >= 1 ? 2 : 0;
+  for (const ops of [new Set(['+']), new Set(['&&', '||', '&', '|', '^'])]) {
     const arms = topLevel(t, ops);
     if (arms.length === 0) continue;
     let level = 2;
@@ -182,7 +188,7 @@ function shape(tokens, predicates) {
       const part = t.slice(start, at);
       start = at + 1;
       if (part.length === 0) continue;
-      const partLevel = shape(part, predicates);
+      const partLevel = shape(part, predicates, self);
       if (partLevel === 0) return 0;
       level = Math.min(level, partLevel);
     }
@@ -190,7 +196,7 @@ function shape(tokens, predicates) {
   }
   if (topLevel(t, comparisons).length > 0) return 2;
   const call = callName(t);
-  if (call && predicates.has(call)) return 2;
+  if (call && (predicates.has(call) || call === self)) return 2;
   return 0;
 }
 
@@ -327,7 +333,7 @@ for (let changed = true; changed;) {
     if (predicates.has(f.name)) continue;
     const rets = returns(f.body);
     if (rets.length === 0) continue;
-    const levels = rets.map(r => shape(r, predicates));
+    const levels = rets.map(r => shape(r, predicates, f.name));
     if (levels.some(l => l === 0)) continue;
     if (levels.some(l => l === 2) || hasCondition(callsOf(f))) {
       predicates.add(f.name);
@@ -341,7 +347,7 @@ for (const f of u64) {
   if (sources.find(src => src.path === f.path)?.unsafe) continue; // exempt module: not part of the migration
   const rets = returns(f.body);
   if (rets.length === 0) continue;
-  const levels = rets.map(r => shape(r, predicates));
+  const levels = rets.map(r => shape(r, predicates, f.name));
   if (levels.some(l => l === 0)) continue;
   const calls = callsOf(f);
   const literalOnly = levels.every(l => l === 1);
