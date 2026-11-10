@@ -16,7 +16,9 @@ use cli;
 // Type kinds: 1 u64, 2 unit, 3 bytes, 4 string, 5 view, 6 vec(arg), 7 ref(arg),
 // 8 named(decl, args), 9 opaque template parameter, 10 opaque bound parameter (arg, identity),
 // 11 Atomic<u64>, 12 capture-free typed function pointer, 13 Mutex<T>, 14 Scope<C>, 15 interface proof,
-// 16 Task<R>, 17 CancelToken, 18 sized integer (arg bits, mode signed), 19 bool, 20 closure Fn(..)->R, 21 f64.
+// 16 Task<R>, 17 CancelToken, 18 sized integer (arg bits, mode signed), 19 bool, 20 closure Fn(..)->R, 21 f64,
+// 22 char, 23 opaque foreign handle (arg = decl), 24 CStr, 25 cfn pointer, 26 bare C pointer,
+// 27 slice (arg = element, mode 1 writable), 28 byval(extern record).
 
 struct Tok {
     kind: u64,
@@ -28,7 +30,12 @@ struct Ty {
     arg: u64,
     mode: u64,
     regions: u64[],
-    args: u64[]
+    args: u64[],
+    // A closure (kind 20) is the only type whose behaviour depends on the values it carries: the
+    // environment record (kind 8) holding its captures, or 0 for a capture-free `Fn(..)` signature.
+    // It is part of the interned identity, because two closures with one signature but different
+    // captures are different types, and a capability check has to reach the captures.
+    env: u64
 }
 struct Decl {
     module: u8[],
@@ -36,6 +43,12 @@ struct Decl {
     is_enum: u64,
     // 1 for `handle Name;`: a one-word opaque foreign handle, not a layout.
     opaque: u64,
+    // The audited foreign-resource contract of a `handle` (docs/ffi.md): may a value cross to
+    // another thread (`transfer`), and may it be used concurrently (`share`)? Both default to 0, so
+    // a handle nothing has been declared about is thread-affine - the safe answer for a foreign
+    // resource we have not audited. Ignored for every non-handle declaration.
+    transfer: u64,
+    share: u64,
     // 1 for `extern record`: fields use C layout (natural alignment, padding).
     c_layout: u64,
     first: u64,
@@ -352,7 +365,12 @@ struct C {
     none_end: u64,
     deny_ambient: u64,
     host_optin: u64,
-    host_modules: u8[][]
+    host_modules: u8[][],
+    // Capability diagnostics for the parallel surface (docs/design/parallelism.md): the reason code
+    // of the first denied leaf and the field path that reached it. `capability_begin` resets both,
+    // so a rejection names the offending field instead of repeating the whole type.
+    cap_denial: u64,
+    cap_segs: u8[][]
 }
 
 fn same<a, b>(x: &a [u8], y: &b [u8]) -> bool {
@@ -3822,10 +3840,18 @@ fn numbers_equal<a, b>(a: (&a u64[]), b: (&b u64[])) -> bool {
     }
     return true;
 }
-fn intern_args<a>(c: (&a mut C), k: u64, arg: u64, mode: u64, regions: u64[], args: u64[]) -> u64 {
+fn intern_env<a>(
+    c: (&a mut C),
+    k: u64,
+    arg: u64,
+    mode: u64,
+    regions: u64[],
+    args: u64[],
+    env: u64
+) -> u64 {
     for i in c.types.len() {
         t := &c.types[i];
-        if (t.kind == k) & (t.arg == arg) & (t.mode == mode) {
+        if (t.kind == k) & (t.arg == arg) & (t.mode == mode) & (t.env == env) {
             if numbers_equal(&t.regions, &regions) {
                 if numbers_equal(&t.args, &args) {
                     return i;
@@ -3833,8 +3859,16 @@ fn intern_args<a>(c: (&a mut C), k: u64, arg: u64, mode: u64, regions: u64[], ar
             }
         }
     }
-    c.types.push(Ty { kind: k, arg: arg, mode: mode, regions: regions, args: args });
+    c.types.push(Ty { kind: k, arg: arg, mode: mode, regions: regions, args: args, env: env });
     return c.types.len() - 1;
+}
+fn intern_args<a>(c: (&a mut C), k: u64, arg: u64, mode: u64, regions: u64[], args: u64[]) -> u64 {
+    return intern_env(&mut c, k, arg, mode, regions, args, 0);
+}
+// The environment record of a closure type, or 0 when it carries no captures.
+fn ty_env<a>(c: (&a mut C), ty: u64) -> u64 {
+    t := &c.types[ty];
+    return t.env;
 }
 fn intern_full<a>(c: (&a mut C), k: u64, arg: u64, mode: u64, regions: u64[]) -> u64 {
     return intern_args(&mut c, k, arg, mode, regions, u64[]);
@@ -3857,6 +3891,17 @@ fn copy_numbers<a>(input: (&a u64[])) -> u64[] {
     }
     return out;
 }
+// `transferable(T)` and `shareable(T)` for one type, derived structurally over Grail's types
+// (docs/design/parallelism.md). Not a trait system and not a bound on every signature: a property of
+// the type alone, computed where a value is about to cross a thread boundary.
+//
+// `shared` selects the question: 0 asks whether a value may cross to another worker (transferable),
+// 1 whether concurrent shared access to it is allowed (shareable). One walk answers both because the
+// recursion has the same shape; only the leaf rule and the borrow rule differ. The two are genuinely
+// distinct - a movable-but-not-shareable decoder context is transferable and not shareable.
+//
+// A denial records why (`cap_denial`) and the field path that reached the leaf (`cap_segs`), so the
+// diagnostic names the offending field. `capability_begin` resets both at each entry point.
 fn transfer_capability<a, b>(
     c: (&a mut C),
     ty: u64,
@@ -3865,33 +3910,85 @@ fn transfer_capability<a, b>(
     depth: u64
 ) -> u64 {
     if 64 < depth {
-        return false;
+        return deny(&mut c, 10);
     }
     k := ty_kind(&mut c, ty);
     arg := ty_arg(&mut c, ty);
-    if (k == 1) || (k == 2) || (k == 3) || (k == 4) || (k == 11) || (k == 12) || (k == 17) || (k == 18) || (k == 19) || (k == 21) {
+    // Plain data: no foreign authority and no interior mutability.
+    if (k == 1) || (k == 2) || (k == 3) || (k == 4) || (k == 11) || (k == 12) || (k == 17) || (k == 18) || (k == 19) || (k == 21) || (k == 22) {
         return true;
     }
+    // A Scope is the thread that runs its body: it never leaves that thread.
     if k == 14 {
-        return false;
+        return deny(&mut c, 3);
     }
     if (k == 5) || (k == 27) {
         if shared != 0 {
-            return ty_mode(&mut c, ty) == 0;
+            if ty_mode(&mut c, ty) != 0 {
+                return deny(&mut c, 4);
+            }
+        }
+        // A typed slice reaches its elements, so sharing `&[T]` shares `T`: a `&[File]` reaches a
+        // file handle even though the slice itself is only a borrowed view (docs/design/parallelism.md).
+        if k == 27 {
+            return transfer_capability(&mut c, arg, shared, &mut trail, depth + 1);
         }
         return true;
     }
+    // A capability proof (kind 9) carries its own bits: 1 transferable, 2 shareable.
     if k == 9 {
         proof := ty_mode(&mut c, ty);
         mut bit = 1;
         if shared != 0 {
             bit = 2;
         }
-        return (proof & bit) != 0;
+        if (proof & bit) != 0 {
+            return true;
+        }
+        return deny(&mut c, 8);
     }
     if k == 10 {
         return transfer_capability(&mut c, arg, shared, &mut trail, depth + 1);
     }
+    // An audited foreign handle. Nothing declared means neither: a handle is thread-affine until its
+    // own declaration says otherwise, and that default is the whole point of the audit.
+    if k == 23 {
+        tr := c.decls[arg].transfer;
+        sh := c.decls[arg].share;
+        if shared != 0 {
+            if sh != 0 {
+                return true;
+            }
+            if tr != 0 {
+                return deny(&mut c, 2);
+            }
+            return deny(&mut c, 1);
+        }
+        if tr != 0 {
+            return true;
+        }
+        if sh != 0 {
+            return deny(&mut c, 2);
+        }
+        return deny(&mut c, 1);
+    }
+    // A C string and a bare C pointer reach foreign memory we have not audited, and a `cfn` pointer
+    // is code we have not audited: all three stay unclassified, so all three are denied.
+    if k == 24 {
+        return deny(&mut c, 7);
+    }
+    if k == 26 {
+        return deny(&mut c, 7);
+    }
+    if k == 25 {
+        return deny(&mut c, 9);
+    }
+    // `byval(R)` states an ABI, not a second type: it classifies as R.
+    if k == 28 {
+        return transfer_capability(&mut c, arg, shared, &mut trail, depth + 1);
+    }
+    // A type already on the walk is its own cycle: assume it satisfies the property and let the
+    // fields decide.
     key := ty * 2 + shared;
     for i in trail.len() {
         if trail[i] == key {
@@ -3900,17 +3997,20 @@ fn transfer_capability<a, b>(
     }
     trail.push(key);
     mut allowed = 0;
+    mut why = 7;
     if k == 6 {
         allowed = transfer_capability(&mut c, arg, shared, &mut trail, depth + 1);
     }
-    // A mutex serializes access: sharing it only requires that its payload may move between threads.
+    // A mutex serializes access: sharing it only requires that its payload may move.
     if k == 13 {
         allowed = transfer_capability(&mut c, arg, 0, &mut trail, depth + 1);
     }
-    // A scope stays on the thread running its body; a task handle may move (join is ownership-based).
+    // A task handle may move (joining is ownership-based) but never be shared.
     if k == 16 {
         if shared == 0 {
             allowed = transfer_capability(&mut c, arg, 0, &mut trail, depth + 1);
+        } else {
+            why = 6;
         }
     }
     if k == 7 {
@@ -3918,26 +4018,167 @@ fn transfer_capability<a, b>(
         if mode != 0 {
             if shared == 0 {
                 allowed = transfer_capability(&mut c, arg, 0, &mut trail, depth + 1);
+            } else {
+                why = 5;
             }
         } else {
+            // A shared reference is shareable only when its referent is: `&T` gives the holder
+            // every method callable through `T`.
             allowed = transfer_capability(&mut c, arg, 1, &mut trail, depth + 1);
         }
     }
     if k == 8 {
-        d := &c.decls[arg];
-        count := d.count;
+        count := c.decls[arg].count;
+        first := c.decls[arg].first;
         allowed = 1;
         for i in count {
+            name := c.fields[first + i].name.copy();
             field := field_type(&mut c, ty, i);
+            c.cap_segs.push(name);
             if transfer_capability(&mut c, field, shared, &mut trail, depth + 1)
                 == 0 {
-                allowed = 0;
-                break;
+                trail.pop();
+                return 0;
+            }
+            c.cap_segs.pop();
+        }
+    }
+    // A closure's environment counts, not just its signature: the captures are what a worker can
+    // actually reach. `__code` and `__drop` are plain words, so walking every environment field
+    // needs no special case; a capture name is pushed like a record field.
+    if k == 20 {
+        env := ty_env(&mut c, ty);
+        allowed = 1;
+        if env != 0 {
+            d := ty_arg(&mut c, env);
+            count := c.decls[d].count;
+            first := c.decls[d].first;
+            for i in count {
+                name := c.fields[first + i].name.copy();
+                field := field_type(&mut c, env, i);
+                c.cap_segs.push(name);
+                if transfer_capability(&mut c, field, shared, &mut trail, depth + 1)
+                    == 0 {
+                    trail.pop();
+                    return 0;
+                }
+                c.cap_segs.pop();
             }
         }
     }
     trail.pop();
-    return allowed;
+    if allowed != 0 {
+        return true;
+    }
+    return deny(&mut c, why);
+}
+// Records why the first denied leaf was denied, and denies. The codes are turned into words only
+// when a diagnostic is built, so the walk itself allocates nothing.
+//   1 a foreign handle with no audited classification (thread-affine)
+//   2 a foreign handle declared transferable but not shareable (thread-affine)
+//   3 a scope, bound to the thread running its body
+//   4 a mutable slice or view, which cannot be shared
+//   5 an exclusive borrow, which cannot be shared
+//   6 a Task handle, which cannot be shared
+//   7 a value of a foreign or unclassified kind
+//   8 no capability proof for the type parameter
+//   9 an unclassified C function pointer
+//  10 a type that nests too deeply to classify
+fn deny<a>(c: (&a mut C), code: u64) -> u64 {
+    if c.cap_denial == 0 {
+        exchange(&mut c.cap_denial, code);
+    }
+    return 0;
+}
+fn capability_begin<a>(c: (&a mut C)) -> unit {
+    exchange(&mut c.cap_denial, 0);
+    exchange(&mut c.cap_segs, u8[][]);
+    return ();
+}
+// The dotted field path to the denied leaf, e.g. `decoder.context`.
+fn dotted_path<a, b>(c: (&a mut C), out: (&b mut u8[])) -> unit {
+    for i in c.cap_segs.len() {
+        if i != 0 {
+            out.push(46);
+        }
+        dput(&mut out, view(c.cap_segs[i]));
+    }
+    return ();
+}
+fn cap_denial_text<a, b>(c: (&a mut C), out: (&b mut u8[])) -> unit {
+    code := c.cap_denial;
+    if code == 1 {
+        dput(&mut out, view("thread-affine (a foreign handle with no audited classification)"));
+    } else {
+        if code == 2 {
+            dput(&mut out, view("thread-affine (declared transferable, not shareable)"));
+        } else {
+            if code == 3 {
+                dput(&mut out, view("the scope is bound to the thread running its body"));
+            } else {
+                if code == 4 {
+                    dput(&mut out, view("a mutable slice or view cannot be shared"));
+                } else {
+                    if code == 5 {
+                        dput(&mut out, view("an exclusive borrow cannot be shared"));
+                    } else {
+                        if code == 6 {
+                            dput(&mut out, view("a Task handle cannot be shared"));
+                        } else {
+                            if code == 7 {
+                                dput(&mut out, view("unclassified foreign authority"));
+                            } else {
+                                if code == 8 {
+                                    dput(&mut out, view("no capability proof for the type parameter"));
+                                } else {
+                                    if code == 9 {
+                                        dput(&mut out, view("an unclassified C function pointer"));
+                                    } else {
+                                        dput(&mut out, view("a type that nests too deeply to classify"));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return ();
+}
+// `cannot transfer parallel_map item: file is thread-affine`, or for a named subject
+// `cannot share closure capture `h`: h.file is thread-affine`. `name` is empty for a value that has
+// no name in the diagnostic (an item or a result type).
+fn capability_fail<a, b, d>(c: (&a mut C), shared: u64, subject: &b [u8], name: &d [u8]) -> unit {
+    mut msg = u8[];
+    dput(&mut msg, view("cannot "));
+    if shared != 0 {
+        dput(&mut msg, view("share "));
+    } else {
+        dput(&mut msg, view("transfer "));
+    }
+    dput(&mut msg, subject);
+    if name.len() != 0 {
+        // `closure capture `a`: a.file is thread-affine`
+        dput(&mut msg, view(" `"));
+        dput(&mut msg, name);
+        dput(&mut msg, view("`: "));
+        dput(&mut msg, name);
+        if c.cap_segs.len() != 0 {
+            dput(&mut msg, view("."));
+            dotted_path(&mut c, &mut msg);
+        }
+        dput(&mut msg, view(" is "));
+    } else {
+        // `parallel_map item: file is thread-affine`
+        dput(&mut msg, view(": "));
+        if c.cap_segs.len() != 0 {
+            dotted_path(&mut c, &mut msg);
+            dput(&mut msg, view(" is "));
+        }
+    }
+    cap_denial_text(&mut c, &mut msg);
+    fail(&mut c, view(msg));
 }
 fn require_constraints<a, b, d>(c: (&a mut C), arguments: (&b u64[]), bounds: (&d u64[])) -> unit {
     if arguments.len() != bounds.len() {
@@ -4281,7 +4522,8 @@ fn substitute<a, b>(c: (&a mut C), ty: u64, map: (&b u64[])) -> u64 {
         mut v = substitute(&mut c, t, &map);
         exchange(&mut args[i], v);
     }
-    return intern_args(&mut c, k, arg, mode, rs, args);
+    env := ty_env(&mut c, ty);
+    return intern_env(&mut c, k, arg, mode, rs, args, env);
 }
 fn bind_types<a, b>(c: (&a mut C), ty: u64, map: (&b u64[])) -> u64 {
     k := ty_kind(&mut c, ty);
@@ -4314,7 +4556,8 @@ fn bind_types<a, b>(c: (&a mut C), ty: u64, map: (&b u64[])) -> u64 {
         }
     }
     mut rs = type_regions(&mut c, ty);
-    return intern_args(&mut c, k, arg, mode, rs, args);
+    env := ty_env(&mut c, ty);
+    return intern_env(&mut c, k, arg, mode, rs, args, env);
 }
 fn field_type<a>(c: (&a mut C), ty: u64, index: u64) -> u64 {
     d := ty_arg(&mut c, ty);
@@ -4753,6 +4996,8 @@ fn make_union<a>(c: (&a mut C), args: u64[], success: u64, module: u8[], prefix:
                     name: name,
                     is_enum: 1,
                     opaque: 0,
+                    transfer: 0,
+                    share: 0,
                     c_layout: 0,
                     first: first,
                     count: args.len(),
@@ -5370,6 +5615,38 @@ fn handle_declaration<a>(c: (&a mut C), pass: u64) -> unit {
     name := ident(&mut c);
     exchange(&mut c.parsing_input, 0);
     exchange(&mut c.output_region, 0);
+    // The audited foreign-resource contract, stated where the handle is declared:
+    //   handle File: transferable;              owned, movable, not concurrently usable
+    //   handle Socket: transferable, shareable; safe to move and to use from several threads
+    //   handle Window;                          thread-affine: neither (the default)
+    // Nothing declared is neither, so an unaudited handle cannot reach a worker by accident.
+    mut transfer = 0;
+    mut share = 0;
+    if eat(&mut c, view(":")) {
+        mut more = 1;
+        while more != 0 {
+            if is(&mut c, view("transferable")) {
+                transfer = 1;
+            } else {
+                if is(&mut c, view("shareable")) {
+                    share = 1;
+                } else {
+                    fail(
+                        &mut c,
+                        view("a handle is classified `transferable` or `transferable, shareable`; a handle with no classification is thread-affine (neither)")
+                    );
+                }
+            }
+            advance(&mut c);
+            more = u64(eat(&mut c, view(",")));
+        }
+    }
+    if (share != 0) & (transfer == 0) {
+        fail(
+            &mut c,
+            view("`shareable` implies `transferable`: a value that may be used on another thread may also be moved to it")
+        );
+    }
     expect(&mut c, view(";"));
     if pass != 1 {
         return ();
@@ -5386,6 +5663,8 @@ fn handle_declaration<a>(c: (&a mut C), pass: u64) -> unit {
                 name: name,
                 is_enum: 0,
                 opaque: 1,
+                transfer: transfer,
+                share: share,
                 c_layout: 0,
                 first: 0,
                 count: 0,
@@ -5420,6 +5699,8 @@ fn decl<a>(c: (&a mut C), pass: u64) -> unit {
                         name: name,
                         is_enum: is_enum,
                         opaque: 0,
+                        transfer: 0,
+                        share: 0,
                         c_layout: 0,
                         first: 0,
                         count: 0,
@@ -5480,6 +5761,8 @@ fn decl<a>(c: (&a mut C), pass: u64) -> unit {
             name: name,
             is_enum: is_enum,
             opaque: 0,
+            transfer: 0,
+            share: 0,
             c_layout: 0,
             first: first,
             count: count,
@@ -6449,6 +6732,8 @@ fn ffi_record<a>(c: (&a mut C), pass: u64) -> unit {
                         name: name,
                         is_enum: 0,
                         opaque: 0,
+                        transfer: 0,
+                        share: 0,
                         c_layout: 1,
                         first: 0,
                         count: 0,
@@ -6511,6 +6796,8 @@ fn ffi_record<a>(c: (&a mut C), pass: u64) -> unit {
             name: name,
             is_enum: 0,
             opaque: 0,
+            transfer: 0,
+            share: 0,
             c_layout: 1,
             first: first,
             count: count,
@@ -9645,7 +9932,8 @@ fn canonical_type<a, b>(c: (&a mut C), ty: u64, next: (&b mut u64)) -> u64 {
         exchange(&mut next, n);
         rs.push(n);
     }
-    return intern_args(&mut c, k, arg, mode, rs, args);
+    env := ty_env(&mut c, ty);
+    return intern_env(&mut c, k, arg, mode, rs, args, env);
 }
 fn decimal<a>(out: (&a mut u8[]), n: u64) -> unit {
     if 9 < n {
@@ -10295,6 +10583,8 @@ fn fn_value_decl<a>(c: (&a mut C)) -> u64 {
                 name: copy_bytes(view("FnValue")),
                 is_enum: 0,
                 opaque: 0,
+                transfer: 0,
+                share: 0,
                 c_layout: 0,
                 first: first,
                 count: 3,
@@ -12284,11 +12574,55 @@ fn deref_value<a>(c: (&a mut C), a: Val) -> Val {
     release_temporary(&mut c, a.t);
     return val(n, ty);
 }
-fn require_capability<a, b>(c: (&a mut C), ty: u64, shared: u64, message: &b [u8]) -> unit {
+// The parallel surface's one capability question (docs/design/parallelism.md). `subject` names what
+// is being moved or shared (`parallel_map item`, `job input`), so a rejection names the field that
+// failed rather than repeating the whole type.
+fn require_capability_named<a, b>(c: (&a mut C), ty: u64, shared: u64, subject: &b [u8]) -> unit {
+    capability_begin(&mut c);
     mut trail = u64[];
     if transfer_capability(&mut c, ty, shared, &mut trail, 0) == 0 {
-        fail(&mut c, message);
+        capability_fail(&mut c, shared, subject, view(""));
     }
+    return ();
+}
+// Classifies a closure's environment, not just its signature: every capture is a value a worker can
+// reach, so `shared` is asked of each capture's type - 1 for an environment that concurrent workers
+// share, 0 for one that moves to a single worker. This is the check a signature-only test misses:
+// `|i: u64| -> u64 touch(&h, i)` has a plain-data signature and a thread-affine capture.
+fn require_closure_captures<a, b>(c: (&a mut C), ty: u64, shared: u64, subject: &b [u8]) -> unit {
+    env := ty_env(&mut c, ty);
+    if env == 0 {
+        return ();
+    }
+    d := ty_arg(&mut c, env);
+    count := c.decls[d].count;
+    first := c.decls[d].first;
+    for i in count {
+        name := c.fields[first + i].name.copy();
+        field := field_type(&mut c, env, i);
+        capability_begin(&mut c);
+        mut trail = u64[];
+        if transfer_capability(&mut c, field, shared, &mut trail, 0) == 0 {
+            capability_fail(&mut c, shared, subject, view(name));
+        }
+    }
+    return ();
+}
+// The whole check a scoped parallel primitive owes a callback, in one call so a surface cannot do
+// half of it: an `FnMut` environment would be raced on by concurrent workers, and every capture is
+// classified (`shared` as for `require_closure_captures`). A capture-free function value needs
+// nothing. This is the predicate a job pool calls for the closure it accepts.
+fn require_parallel_closure<a, b>(c: (&a mut C), ty: u64, shared: u64, subject: &b [u8]) -> unit {
+    if ty_kind(&mut c, ty) != 20 {
+        return ();
+    }
+    if (shared != 0) & (ty_mode(&mut c, ty) != 0) {
+        fail(
+            &mut c,
+            view("a callback shared by concurrent workers must not write a captured value: an FnMut closure would race on its own environment; use a Mutex or return an owned result")
+        );
+    }
+    require_closure_captures(&mut c, ty, shared, subject);
     return ();
 }
 // parallel_map(items, context, f): structured fork-join. Items move to workers, the context is
@@ -12319,6 +12653,8 @@ fn parallel_map_builtin<a>(c: (&a mut C), items: Val) -> Val {
     if signature.len() != 2 {
         fail(&mut c, view("parallel_map callback takes (item, context)"));
     }
+    // The environment, not the signature: a capture is what a worker can actually reach.
+    require_parallel_closure(&mut c, fty, 1, view("closure capture"));
     first := signature[0];
     second := signature[1];
     require_type(&mut c, item, first);
@@ -12330,14 +12666,9 @@ fn parallel_map_builtin<a>(c: (&a mut C), items: Val) -> Val {
             view("parallel_map context must be a shared reference, view or plain value")
         );
     }
-    require_capability(&mut c, item, 0, view("parallel_map item does not satisfy Send"));
-    require_capability(&mut c, result, 0, view("parallel_map result does not satisfy Send"));
-    require_capability(
-        &mut c,
-        context.ty,
-        1,
-        view("parallel_map context does not satisfy Share")
-    );
+    require_capability_named(&mut c, item, 0, view("parallel_map item"));
+    require_capability_named(&mut c, result, 0, view("parallel_map result"));
+    require_capability_named(&mut c, context.ty, 1, view("parallel_map context"));
     if contains_borrow(&mut c, result, 0) {
         fail(&mut c, view("parallel_map result cannot contain borrows"));
     }
@@ -12431,14 +12762,13 @@ fn callee_signature<a>(c: (&a mut C), callee: Val) -> Val {
     target := save(&mut c);
     return val(target, function.ty);
 }
-fn require_sendable_owned<a, b>(c: (&a mut C), ty: u64, what: &b [u8]) -> unit {
-    mut trail = u64[];
-    mut bad = u64(transfer_capability(&mut c, ty, 0, &mut trail, 0) == 0);
-    if contains_borrow(&mut c, ty, 0) || contains_task(&mut c, ty, 0) {
-        bad = 1;
+fn require_sendable_owned<a, b>(c: (&a mut C), ty: u64, subject: &b [u8]) -> unit {
+    require_capability_named(&mut c, ty, 0, subject);
+    if contains_borrow(&mut c, ty, 0) {
+        fail(&mut c, view("a spawned value cannot borrow: the worker may outlive the loan"));
     }
-    if bad != 0 {
-        fail(&mut c, what);
+    if contains_task(&mut c, ty, 0) {
+        fail(&mut c, view("a Task handle cannot cross a spawn boundary"));
     }
     return ();
 }
@@ -12454,7 +12784,7 @@ fn task_scope_builtin<a>(c: (&a mut C), context: Val) -> Val {
     if needs_drop(&mut c, ct) || ((ck == 7) & (ty_mode(&mut c, ct) != 0)) {
         fail(&mut c, view("task_scope context must be a plain value or shared reference"));
     }
-    require_capability(&mut c, ct, 1, view("task_scope context does not satisfy Share"));
+    require_capability_named(&mut c, ct, 1, view("task_scope context"));
     body := callee_signature(&mut c, callee);
     signature := type_args(&mut c, body.ty);
     result := ty_arg(&mut c, body.ty);
@@ -12531,16 +12861,8 @@ fn spawn_builtin<a>(c: (&a mut C), scope: Val) -> Val {
             fail(&mut c, view("third spawned callback parameter must be CancelToken"));
         }
     }
-    require_sendable_owned(
-        &mut c,
-        item.ty,
-        view("spawned item must be an owned Send value without borrows or Task handles")
-    );
-    require_sendable_owned(
-        &mut c,
-        result,
-        view("spawned result must be an owned Send value without borrows or Task handles")
-    );
+    require_sendable_owned(&mut c, item.ty, view("spawned item"));
+    require_sendable_owned(&mut c, result, view("spawned result"));
     value := item.t;
     if c.raw == 0 {
         move_out(&mut c, item);
@@ -14104,6 +14426,8 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
                 name: decl_name,
                 is_enum: 0,
                 opaque: 0,
+                transfer: 0,
+                share: 0,
                 c_layout: 0,
                 first: first,
                 count: count,
@@ -14116,7 +14440,7 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
         );
     decl := c.decls.len() - 1;
     envty := intern_args(&mut c, 8, decl, 0, u64[], u64[]);
-    fnty := intern_args(&mut c, 20, ret, mode, caps, copy_numbers(&params));
+    fnty := intern_env(&mut c, 20, ret, mode, caps, copy_numbers(&params), envty);
     // Build the object.
     sz := imm(&mut c, count);
     obj := invoke(&mut c, view("rt_rec"), one(sz));
@@ -21436,6 +21760,8 @@ pub fn main() -> u64 {
         deny_ambient: 0,
         host_optin: 0,
         host_modules: u8[][],
+        cap_denial: 0,
+        cap_segs: u8[][],
     };
     exchange(&mut c.target, host::target());
     for k in 5 {
