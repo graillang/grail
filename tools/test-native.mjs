@@ -56,7 +56,11 @@ for (let i = 0; i < cases.length; i++) {
   });
 }
 let passed = 0;
+let skipped = 0;
 for (const test of cases) {
+  // A case may name the targets it applies to (`"targets": ["x86_64"]`), for fixtures that link a
+  // host C library or exercise a host-only facility.
+  if (test.targets && !test.targets.includes(target)) { skipped++; continue; }
   // Only a documented, explicit legacyRefs reason may opt a fixture out of typed mode.
   const typedRefs = test.legacyRefs === undefined;
   const directory = join(work, test.name);
@@ -95,4 +99,4 @@ for (const test of cases) {
   }
   passed++;
 }
-console.log(`${target}: ${passed} native execution/rejection regressions passed`);
+console.log(`${target}: ${passed} native execution/rejection regressions passed` + (skipped ? `, ${skipped} skipped (host-only)` : ''));
