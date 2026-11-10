@@ -363,6 +363,54 @@ pub fn twice(x: u64) -> u64 {
   return interfaceFiles(ifaces).length;
 }
 
+// ---- the corpus -------------------------------------------------------------
+function corpusCases() {
+  const cases = JSON.parse(readFileSync(join(root, 'tests/native-cases.json'), 'utf8'));
+  const selected = [];
+  for (let i = 0; i < cases.length; i += 1) {
+    const test = cases[i];
+    if (test.targets && !test.targets.includes(target)) continue;
+    if (test.removedSyntax) continue;
+    const modules = (test.modules ?? []).map(file => resolve(root, file));
+    // A case with no second module has nothing to read from an interface; its own interface is
+    // still emitted and checked when `--full` asks for every case.
+    if (modules.length === 0 && !full) continue;
+    if (test.compileOnly && test.reject) continue;
+    selected.push({ index: i, test, modules });
+  }
+  return selected;
+}
+
+function proveCorpus() {
+  const selected = corpusCases();
+  let passed = 0;
+  for (const { index, test, modules } of selected) {
+    const directory = join(work, 'corpus', `${index}-${test.name.replace(/[^A-Za-z0-9_-]/g, '_')}`);
+    mkdirSync(directory, { recursive: true });
+    let files;
+    if (test.files) files = [...test.files.map(file => resolve(root, file)), ...modules];
+    else {
+      const input = join(directory, 'input.grl');
+      writeFileSync(input, test.source);
+      files = [input, ...modules];
+    }
+    files = [...files, runtime, platform];
+    if (test.reject) proveRejected(test.name, files, directory);
+    else if (test.compileOnly) {
+      const source = compile(files, join(directory, 'source'));
+      assert.equal(source.status, 0, `${test.name}: source build failed\n${source.output}`);
+      const ifaces = emit(files, join(directory, 'emit'));
+      proveDigests(ifaces);
+      const viaInterface = compile(files, join(directory, 'interface'), ['--interface', ifaces]);
+      assert.equal(viaInterface.status, 0, `${test.name}: interface build failed\n${viaInterface.output}`);
+    } else {
+      proveEquivalent(test.name, files, directory, { stdout: test.stdout });
+    }
+    passed += 1;
+  }
+  return passed;
+}
+
 // ---- the proofs -------------------------------------------------------------
 const results = [];
 function report(label, detail) {
