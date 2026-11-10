@@ -172,6 +172,43 @@ extern "C" fn c_mixed_fill(m: Mixed, d: i64) -> i64;
 Verified by `tests/ffi/extern_records.grl`: the C shim reads fields Grail wrote, writes
 fields Grail reads back, and checks its own `offsetof`/`sizeof` values.
 
+### Records by value as arguments
+
+An `extern "C" record` parameter is the C `R *`, which is what Win32, Vulkan and D3D12 declare. A C
+function that instead takes the whole record by value (`ImVec2`, some SDL calls) is declared with the
+`byval` marker:
+
+```grail
+extern "C" record Vec2 { x: f32, y: f32 }
+
+extern "C" fn c_length(v: byval Vec2) -> f32;
+
+vec := Vec2 { x: 3.0, y: 4.0 };
+length := unsafe { c_length(vec) };
+```
+
+- The marker is part of the parameter's type, so one declaration can use both spellings
+  (`near: byval Vec2, far: Vec2`) and each call site is checked against the one it names.
+- Classification reuses the record's C layout, flattened through embedded records, and follows the
+  target ABI: SysV x86-64 per-eightbyte INTEGER/SSE classes with a mixed eightbyte counting as
+  INTEGER, MEMORY over 16 bytes or when a register class is exhausted; AAPCS64 homogeneous float
+  aggregates in `v0`-`v7`, other composites up to 16 bytes in consecutive `x` registers, larger
+  records by reference to a caller copy; RV64 by reference over 2*XLEN and otherwise one register per
+  field for one or two fields with a float, else one integer register per eightbyte. The argument
+  counters of the call are advanced by the plan, so a `byval` record keeps its place among the
+  arguments around it, and a call through a `cfn` that declares the marker uses the same lowering.
+- The record is borrowed, not moved: it is still usable after the call, like a C-layout record passed
+  by pointer.
+- Refused with a diagnostic rather than approximated: the Windows x86-64 and ARM64 ABIs
+  (`byval is not implemented for the Windows x86-64 and Windows ARM64 ABIs; pass the record by
+  pointer`), anything that is not an `extern "C"` record (`byval must name an extern "C" record type;
+  a bare record parameter is a pointer`), and an `extern "C" fn` definition, because a C callback
+  cannot take a record by value yet.
+- `tests/ffi/byval_records.grl` executes 4-, 8-, 16- and 24-byte records, mixed int/float fields, an
+  ImVec2-shaped float pair, an embedded array, a `byval` parameter after six integer arguments and a
+  record sharing the stack area with a following scalar, with `tests/ffi/byval_shim.c` returning a
+  checksum over every field each twin received, on x86-64, AArch64 and RISC-V 64.
+
 ### Opaque handles
 
 `handle File;` declares a one-word opaque type for a C-owned resource. A handle can be
@@ -454,13 +491,11 @@ Not implemented yet, and each rejected rather than approximated:
   SysV/AAPCS64 lowering but are compiled and linked only (no macOS runner);
 - an out-parameter on a C callback or a `cfn` type: only a declaration Grail calls can write a slot
   (see Out-parameters above);
-- records *passed* by value as arguments (an extern record parameter is the C `R *`; the spelling
-  `v: byval R` is decided - see [B7](design/decisions-b2-b6.md#b7-byval-record-parameters-accepted) -
-  and implementation follows the separate-compilation work); record
-  results are returned by value on every ABI, float fields included
-  (`tests/ffi/call_records.grl`, `float_record_results.grl`), and nested records included,
-  except a result whose embedded records contain floats (its register classification needs the
-  flattened field list; refused with a diagnostic);
+- a `byval` record parameter on Windows (x86-64 and ARM64) and on a C callback, and a record
+  *result* whose embedded records contain floats (its register classification needs the flattened
+  field list; refused with a diagnostic). Record results are otherwise returned by value on every
+  ABI, float fields included (`tests/ffi/call_records.grl`, `float_record_results.grl`), and nested
+  records included;
 - variadic callbacks, callback results that are themselves function pointers, and
   taking the address of a foreign *declaration* (`f := c_add;` is rejected: a C
   declaration is not a Grail function value);
@@ -528,10 +563,13 @@ compiles `tests/ffi/call_scalars.grl` with the FFI build, links the two through 
   read-only view, a mutable view written by C and a handle round trip (`259`, `1`), `callbacks` C
   calling back into Grail including callee-saved register preservation (`42`, `42`, `10`),
   `extern_records` C layout in both directions (`1606`, `23`, `16`, `-2`, `7`), `out_params` the
-  out-parameter slots including a seventh-argument slot and two slots in one call, and `call_words`
-  seven, eight and nine word arguments with literal and computed values.
-- the suite executes every fixture on x86-64 and, through `qemu-<target>-static`, on AArch64 and
-  RISC-V 64: 51 executed fixture instances and no link-only cases, plus two cross-compiled-only ones
+  out-parameter slots including a seventh-argument slot and two slots in one call, `call_words`
+  seven, eight and nine word arguments with literal and computed values, and `byval_records` the
+  by-value record shapes with a checksum over every field each C twin received.
+- the suite holds 18 executable fixtures: each executes on x86-64 and, through
+  `qemu-<target>-static`, on AArch64 and RISC-V 64 as well, so a host with both runners reports 54
+  executed fixture instances and none link-only; without a runner the cross targets link and are
+  reported as link-only (18 executed, 36 link-only here). Two more fixtures are cross-compiled only
   (`dlopen`, which needs a target glibc sysroot). `callback_words` executes the eight-register
   callback on AArch64 and RISC-V 64 and asserts that x86-64 and Windows refuse it by name. Without a
   qemu runner the cross targets are linked and the ABI-level check is reported as link-only. The same
@@ -544,5 +582,9 @@ Rejections are part of the normal native corpus (`tests/native-cases.json`):
 `ffi-reject-safe-call`, `ffi-reject-abi`, `ffi-reject-parameter-type`, `ffi-reject-result-type`,
 `ffi-reject-arity`, `ffi-reject-duplicate`, `ffi-reject-handle-out-slot`,
 `ffi-reject-handle-null-seed`, `ffi-reject-out-shared-borrow`, `ffi-reject-out-scalar`,
-`ffi-reject-out-callback`, `ffi-reject-out-cfn` and `ffi-reject-out-double-borrow`, so every target
-checks the diagnostics on every run of `bun tools/test-native.mjs`.
+`ffi-reject-out-callback`, `ffi-reject-out-cfn`, `ffi-reject-out-double-borrow`,
+`ffi-reject-byval-plain-record`, `ffi-reject-byval-scalar`, `ffi-reject-byval-callback`,
+`handle-reject-arithmetic` and `ffi-reject-handle-construction`, so every target checks the diagnostics on every
+run of `bun tools/test-native.mjs`. `tests/handles/stream_def.grl` declares a handle and its libc
+declarations, `stream_user.grl` uses it as a parameter, a result and a record field and compares two
+handles: the executed `cross-module-handle-signatures` case.
