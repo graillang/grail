@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- RHI increment 4b, in four steps that each run before the next. The gate was the FFI's record
+  pointer (`cptr(&record)`, record out-parameters, arrays of handles), so the whole Vulkan create-info
+  graph is now records and pointers into them rather than byte layout:
+  **1. device, queue, swapchain, images and views.** `abundance/src/rhi_device.grl` (new) creates the
+  logical device with `pQueueCreateInfos` pointing at a `VkDeviceQueueCreateInfo` record whose
+  `pQueuePriorities` points at a one-field record holding the `float`, and `ppEnabledExtensionNames`
+  pointing at a record of `CStr` fields - the array itself - to enable `VK_KHR_swapchain`;
+  `abundance/src/rhi_swapchain.grl` (new) creates the swapchain from the four decisions
+  `abundance_rhi_surface` already makes (B8G8R8A8_SRGB, currentExtent, minImageCount+1, MAILBOX with
+  FIFO fallback), takes its images through a record of handle fields (`vkGetSwapchainImagesKHR`
+  writing them in place, four on this machine) and makes one 2D colour view per image. The surface's
+  `supportedUsageFlags` decides whether a transfer source can be asked for; the report says
+  `rhi.swapchain.readback supported` or names the missing bit. The probe's
+  handle ledger is now per class - window, instance, surface, device, queue, swapchain, image, image
+  view, and a total - with the queue closed by `vkDestroyDevice` and the images by
+  `vkDestroySwapchainKHR`, so `rhi.handles.total created 14 destroyed 14 live 0` is a fact about this
+  machine rather than an assumption.
 - FFI: a C callback's extern-record parameter is borrowed, not owned. The parameter prologue marked
   every parameter as an owning binding, so the epilogue ran the record's drop glue on the address C
   handed over — freeing the caller's struct (or its stack) — and the process then aborted inside the
