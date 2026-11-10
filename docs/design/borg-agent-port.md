@@ -354,11 +354,14 @@ both must refuse at the same index for the same reason. The committed reference 
 writes and reads the byte stream, so a fingerprint or checksum difference shows up as a diff line.
 
 What replay still cannot cover, and why that is visible rather than silent: a real journal from a
-running session also carries `PlanProjected`, `SubagentRegistered`, `SessionConfigured`, usage and
-provider events, none of which the port models. `decode_stream` refuses an unknown tag and hands
-back no events, so replaying such a journal fails by name today instead of returning the subset it
-understood. Closing the gap means porting those kinds and their projection arms in
-session_store.rs:941-1341, not extending the fold with fields nothing writes.
+running session also carries `SubagentRegistered`, `SubagentActivity`, `SessionConfigured`,
+`UsageUpdated`, `TurnStarted`/`TurnCompleted`, approvals, provider interactions and provider events,
+none of which the port models. `decode_stream` refuses an unknown tag and hands back no events, so
+replaying such a journal fails by name today instead of returning the subset it understood. Closing
+the gap means porting those kinds and their projection arms in session_store.rs:941-1341, not
+extending the fold with fields nothing writes. The goal, the plan and the work list were the first
+three of those gaps to close, and they closed as their own aggregate (§ below) rather than as four
+more fields inside the session fold.
 
 ### The transport, as built
 
@@ -379,8 +382,9 @@ captured off the socket is a journal prefix; the test proves it by handing the c
 
 ```
 frame    u8 tag | u32 LE length | length bytes body
-tag      0 is a control frame; 1..5 are the journal's event tags; anything else is left for the
-         journal reader to refuse by name rather than guessed at the framing layer
+tag      0 is a control frame; 1..9 are the journal's event tags (1..5 transcript, 6..9 aggregate);
+         anything else is left for the journal reader to refuse by name rather than guessed at the
+         framing layer
 control  u8 opcode, then that opcode's body
 text     u32 LE byte length, then that many bytes — the primitive an event body already uses
 ```
@@ -435,7 +439,7 @@ the transport refused something a file cannot express (a handshake, a closed soc
 | `bad-control` | 15 | a control frame with no opcode, an unknown opcode, a second hello, or a cut hello body | — |
 | `bad-reply` | 16 | a reply that is truncated, mislabelled, or has a refusal marker that is not 0 or 1 | — |
 | `replay-refused` | 17 | the frame decoded and the fold refused it: the index and replay's reason travel with it | — |
-| `unknown-tag` | 20 | a tag outside 1..5 | `unknown-tag` 20 |
+| `unknown-tag` | 20 | a tag outside 1..9 | `unknown-tag` 20 |
 | `truncated-event` | 21 | the frame is complete but its body stops inside a field | `truncated-event` 21 |
 | `length-overflow` | 22 | a declared length past `MAX_EVENT_BODY` as a *file* reads it | `length-overflow` 22 |
 | `bad-field` | 23 | a presence or boolean byte that is neither 0 nor 1 | `bad-field` 23 |
@@ -497,6 +501,139 @@ is a `short-read` at the client. The committed reference
 (`borg/tests/parity/ref/src/bin/frames.rs`) is an independent implementation of the frame layout, the
 refusal classification and the fold, with a real socket on its side too, so a byte-level disagreement
 shows up as a diff line.
+
+### The goal, the plan and the work list, as built
+
+`borg/src/aggregates.grl` folds the three aggregates Borg keeps beside the transcript, and
+`borg/src/events.grl` carries their events. Each event is the journal's usual shape — a tag, a
+little-endian length and a body of `u32`-length-prefixed texts — so an aggregate event is a journal
+frame the transport already knows how to carry and the file reader already knows how to refuse.
+
+| Kind | Tag | Payload | JSON fields |
+| --- | ---: | --- | --- |
+| `GoalCreated` | 6 | `text goal_id, text objective, optional u64 token_budget` | `goal_id`, `objective`, `token_budget` (null when absent) |
+| `GoalUpdated` | 7 | `text goal_id, text status` | `goal_id`, `status` |
+| `PlanProjected` | 8 | `text participant_id, u64 workspace_revision, plan item[]` | `participant_id`, `workspace_revision`, `items` |
+| `WorkProjected` | 9 | `u64 revision, work item[]` | `revision`, `items` |
+| plan item | — | `text id, text content, text status, optional text work_id` | `id`, `content`, `status`, `work_id` (null when absent) |
+| work item | — | `text id, text title, optional text assignee, text status` | `id`, `title`, `assignee` (null when absent), `status` |
+
+The statuses are enums whose spelling is the schema. A goal status is one of `active`, `complete`,
+`blocked` — `ModelGoalStatus` (contract.rs:2337), the three a model may set, not the six
+`GoalStatus` values the host uses for its own budget accounting. An item status is one of `pending`,
+`in_progress`, `blocked`, `awaiting_review`, `completed` (`WorkStatus`, workspace.rs:310, which
+`PlanItemStatus` aliases at contract.rs:3082). A plan item's `work_id` is the port's own link from a
+todo to the shared work item it tracks; Borg's `PlanItem` has three fields, and the link is what lets
+the fold refuse a todo that points at work nobody can find instead of quietly dropping the reference.
+
+A refused event names its rule. The reader's refusals happen before any event exists, and the fold's
+happen while applying one — with the index it stopped at:
+
+| Refusal | Decided by | Refused when | Where the rule comes from |
+| --- | --- | --- | --- |
+| `unknown-goal-status` | reader | a goal status outside the three | contract.rs:2337 |
+| `unknown-item-status` | reader | an item status outside the five | workspace.rs:310 |
+| `unknown-kind` | reader | a `type` outside the nine kinds | the enclosing union, contract.rs:2624 |
+| `missing` / `type` / `not-object` | reader | an absent field, a field of the wrong shape, a payload that is not an object | the derive's own diagnostics, by class |
+| `goal-exists` | fold | `goal_created` while a goal is set | two goals is a state the model has no field for |
+| `no-goal` | fold | `goal_updated` before any goal was created | session_store.rs:1163 (an update replaces a goal that exists) |
+| `goal-mismatch` | fold | `goal_updated` naming another goal id | updating a goal that is not this session's |
+| `goal-finished` | fold | any update once the goal is `complete` | complete is terminal; a second completion is not a new fact |
+| `unknown-work` | fold | a plan item whose `work_id` is not in the reconstructed work list | the port's link (see above) |
+| `duplicate-item` | fold | two plan items with one id in a projection | an id names one row |
+| `duplicate-work` | fold | two work items with one id in a projection | as above |
+| `sequence` / `session` | fold | a cursor gap, or another session's `session_id` | session_store.rs:930, unchanged by this work |
+
+One rule does not refuse, and it is the model's: a plan projection that is not newer than the one
+already applied is *dropped*, not refused. `session_store.rs:1178-1191` replaces the plan when
+`workspace_revision >= plan_workspace_revision` for the same participant and unconditionally for a
+different one, so a client catching up cannot rewrite the plan and a participant taking the plan over
+can. The fold reproduces the comparison exactly and counts the drop (`plans_stale`), the way the
+sticky-title rule counts its own. The drop is applied *before* the items are examined: a projection
+Borg would ignore cannot make the fold refuse.
+
+What replay reconstructs is therefore the state those four kinds write: the goal (id, objective,
+budget, status), the plan (who projected it, at which revision, and its items in order) and the work
+list (revision and items with their assignees and states), carried inside `borg_replay::State` as one
+`borg_aggregates::State`. The session fingerprint is deliberately unchanged — adding aggregates must
+not change the checksum of a journal that has none — and the aggregate fingerprint is a second one,
+with every field length-prefixed so no two states render the same bytes.
+
+`borg/tests/aggregates_test.grl` covers the clean journal, each refusal above (built from a fixture a
+journal could contain, not from a constructed value), the stale plan drop, a plan taken over by
+another participant, a sequence gap and a cut byte stream, and for *every* fixture three properties:
+the same journal through the encoded stream, replayed twice, and replayed as a prefix plus a direct
+apply of the last event. The committed reference is
+`borg/tests/parity/ref/src/bin/aggregates.rs`, an independent implementation of the kinds, the fold,
+the fingerprint and the properties, so a rule the port gets wrong is a diff line.
+
+What is still not modelled, and is refused by name rather than guessed at: `SubagentRegistered` and
+the agent roster, `UsageUpdated` and the token and time accounting `SessionGoal` carries
+(`tokens_used`, `time_used_seconds`), `GoalCleared`, the paused and budget-limited goal statuses,
+`AgentPlanProjected`, and the workspace's own event stream — the port folds a `work_projected` event
+the way a workspace snapshot would look, not the workspace journal that produces it. A real journal
+containing any of those refuses through `decode_stream`'s unknown tag rather than folding the subset
+it understood.
+
+### The daemon and its command line, as built
+
+`borg/src/cli.grl` is `borg`: the daemon that serves the transport, and the client that sends one
+command per connection. Five commands, each mapping to events the journal already has:
+
+| Command | Events | Refused by |
+| --- | --- | --- |
+| `create-goal --goal --objective [--budget]` | one `goal_created` | `goal-exists` (fold), `bad-argument` |
+| `update-goal --goal --status` | one `goal_updated` | `unknown-goal-status` (reader), `no-goal`, `goal-mismatch`, `goal-finished` (fold), `bad-argument` |
+| `set-plan --participant --revision [--work …]* [--item …]*` | one `work_projected` for the work it declares, then one `plan_projected` | `unknown-item-status` (reader), `unknown-work`, `duplicate-item`, `duplicate-work` (fold), `bad-argument` |
+| `list-work` | none — it asks | `bad-argument`, or whatever the transport refuses |
+| `attach` | none — it asks | as above |
+
+`set-plan` declares work in the same command as the plan that points at it, and the work projection
+goes first, because the fold refuses an item whose work id is not in the list it has already applied.
+A plan item spec is `id|status|content|work`, a work spec is `id|title|assignee|status`; an empty
+`work` or `assignee` is an absent optional. `bad-argument` is the command line's own name for a
+command it cannot read; everything else is the model's name, because it is decided by the model's own
+function (`borg_events::goal_status_of`, `borg_events::item_status_of`) or by the fold.
+
+Two things make the daemon a runtime rather than a log. It **keeps its state**: `serve_one` answers
+one batch and forgets it, while `borg_daemon::serve_stateful` takes the folded session it was given,
+folds the batch into it, and returns it — which is what makes `list-work` and `attach`, commands that
+send no events at all, answerable with the session's real state instead of an empty one. And it
+**appends**: it assigns the sequence, the event id and the timestamp as it folds, so a command
+carries placeholders and cannot put the journal's cursor in two places. The fold's sequence rule is
+unchanged — every event that reaches it carries exactly the next sequence, because the daemon just
+assigned it.
+
+The answer is two frames. The reply frame is the transport's, unchanged: sequence, status, events and
+any refusal. The state frame (opcode 6) is new, and it is what the client prints:
+
+```
+state    u8 goal | text goal_id | text objective | optional u64 budget | text goal_status
+         text participant | u64 plan_revision | u32 plan count
+          plan item: text id | text content | text status | optional text work_id
+         u64 work_revision | u32 work count
+          work item: text id | text title | optional text assignee | text status
+```
+
+A status crosses the wire as its name and is re-read through the same function on arrival, so a
+status the model has no variant for is a `bad-reply` rather than a snapshot holding a word the rest
+of the port would refuse. The daemon answers *two* frames only on the stateful path: `serve_one`, and
+with it the transport's own contract of one answer per conversation, is untouched.
+
+`borg/tests/aggregates_test.grl` runs a whole command session on `127.0.0.1`: each command is parsed
+and built by `borg_cli::prepare` (the program's own parser), sent with the transport, folded by
+`borg_daemon::serve_stateful`, decoded by `borg_client::resume_answered` and printed by
+`borg_cli::show_answer`. Every answer is compared with the daemon's own account of what it sent, so a
+line printed from local state instead of the socket would be a mismatch rather than a plausible
+transcript. The reference (`borg/tests/parity/ref/src/bin/aggregates.rs`) runs the same session over
+its own socket with its own daemon, its own framing and its own printing.
+
+What the command line deliberately does not do: it holds one session in memory and does not write a
+journal file, so a daemon restart loses what it folded; it does not authenticate or encrypt (the
+transport does not either); it reads one answer per connection and does not reconnect or resume; it
+schedules nothing, serving one connection at a time; and it has no `create-work` of its own — work
+enters the journal through `set-plan`, because the five commands are the surface this stage set out to
+port, not the surface Borg has.
 
 ## 13. Staged plan
 
