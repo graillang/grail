@@ -778,29 +778,11 @@ pub fn new_member<a, b>(key: (&a [u8]), value: Json) -> Member {
     return Member { key: out.text(), value: value };
 }
 
-// Whole-number JSON text to u64: a fractional or exponent form is not a count.
+// Whole-number JSON text to u64: decimal digits only, and a fractional or exponent form is not a
+// count. `strings::parse_num` is the same scanner (empty input, any non-digit and overflow are
+// None).
 pub fn whole_number<a>(text: (&a [u8])) -> u64? {
-    if text.len() == 0 {
-        return None;
-    }
-    mut value = 0;
-    mut index = 0;
-    while index < text.len() {
-        byte := text[index];
-        if (byte < 48) || (byte > 57) {
-            return None;
-        }
-        if value > 1844674407370955161 {
-            return None;
-        }
-        next := value * 10;
-        if next > 18446744073709551615 - (byte - 48) {
-            return None;
-        }
-        value = next + (byte - 48);
-        index += 1;
-    }
-    return Some(value);
+    return strings::parse_num(text);
 }
 
 // Signed integer text, for values such as JSON-RPC error codes.
@@ -817,22 +799,22 @@ pub fn signed_number<a>(text: (&a [u8])) -> i64? {
     if at >= text.len() {
         return None;
     }
-    mut value = u64(0);
-    while at < text.len() {
-        byte := text[at];
-        if (byte < 48) || (byte > 57) {
+    match strings::parse_num(&text[at:]) {
+        Some(value) => {
+            // The digit loop this replaces rejected anything that would exceed 2^63 + 1, so
+            // `-9223372036854775808` still stops the conversion rather than parsing.
+            if value > 9223372036854775809 {
+                return None;
+            }
+            if negative {
+                return Some(0 - i64(value));
+            }
+            return Some(i64(value));
+        },
+        None => {
             return None;
         }
-        if value > 922337203685477580 {
-            return None;
-        }
-        value = value * 10 + (byte - 48);
-        at += 1;
     }
-    if negative {
-        return Some(0 - i64(value));
-    }
-    return Some(i64(value));
 }
 
 pub fn number_text(value: u64) -> string {
