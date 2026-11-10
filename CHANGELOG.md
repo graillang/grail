@@ -52,6 +52,17 @@
   still rejected. Returning a value that carries a live loan is now rejected whatever its type says.
   The Abundance cluster builder sorts pages with such a comparator again instead of precomputing keys
   into a vector (`vecs::sort_by_key`); output unchanged.
+- LLVM backend, stage 2b measurement (`docs/design/llvm-backend.md`): after stage 2a the benchmarks
+  are within 1.0-1.2x of C except `nbody` (2.4x) and `sort` (1.5x), and in those two the remaining
+  cost is the per-element validity/bounds/address checks the front end emits (44% and 21% of run
+  time, measured by rebuilding the lowered IR with the check branches deleted). LLVM cannot hoist
+  them out of the loops: the word stream carries no type or alias information, so the descriptor's
+  length and data loads cannot be merged across an element store, and LLVM will not speculate a
+  load through `inttoptr`. Alias scopes, TBAA, alignment metadata, `nounwind`, branch weights, loop
+  unroll pragmas and `-O3` were measured and rejected; the only lever that moves them is aggressive
+  unrolling (a compile-policy decision: `nbody` 21% faster, `sort` 6%, at five times the code).
+  Closing the gap needs the typed front-end IR of stage 3. `fnv`, `sieve` and `matmul` are at their
+  floor.
 - A program's own `Task`, `Mutex`, `Atomic`, `Scope` or `CancelToken` type shadows the built-in generic of that name
   (`Task[...]` was a parse error). A slice compares with `==` against a vector of the same element type.
 - Book: duplicate chapters merged (numbers, bytes and text, records and vectors, views and slices); every example uses
