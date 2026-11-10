@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- `docs/design/llvm-backend.md` stage 2c: the five benchmarks re-measured with paired medians, seven
+  further lowering and driver levers recorded as measured-and-rejected (three-region alias metadata,
+  loop pragmas on the latch, `-funroll-loops`, inline thresholds, an unroll threshold with its
+  compile-time cost), the cause of `matmul`'s "removing the checks is slower" anomaly corrected to
+  the `f32` accumulator widening to a `binary64` phi when the loop unrolls, and the two pieces of
+  type information that block the remaining gap named precisely (`F1` a typed pointer to a sequence
+  header; `F2` a word that holds an `f32`), each with the lever it unblocks and what that lever is
+  worth. No lowering change: nothing tested paid for itself.
 - `tools/bench.mjs --rounds N` interleaves the C and Grail binaries round by round and reports the
   median of N runs each with the observed spread, because a shared machine drifts within a single
   run: the default best-of-three favours whichever side happens to run first when the host is busy.
