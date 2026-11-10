@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+- Book: four new example pairs for the week's compiler work, each run by `bun tools/book.mjs check`
+  against an equivalent Rust program. **`pool-chunks-mut`**: `parallel_for_chunks` over a ten-element
+  vector in three chunks (4, 4, 2, the `ceil(n/chunks)` split) and then `pool::chunks_mut` at 5 and 5,
+  against `chunks_mut(4)`/`chunks_mut(5)` under `thread::scope` - the same arithmetic split, the same
+  ten numbers, and no element copied in either language. **`pool-job-handle`**: spawn, do other work,
+  join; then two live handles joined in the reverse of their start order, against
+  `std::thread::spawn`/`JoinHandle::join`. **`ffi-handle-array`**: a record of `handle` fields as the
+  array C writes - `c_alloc_buffers(&mut buffers)` fills four slots, the record goes back to C as a
+  parameter, a second array is seeded from handles already held, and the handle Grail reads out of the
+  array compares equal to the one C hands back - against a Rust twin using `MaybeUninit`/`assume_init`
+  on the same C file. **`ffi-uninitialised-record`** is the uninitialised-handle rule as an intentional
+  rejection in both languages: reading a field of an `extern "C"` record before anything wrote it is
+  `use of moved, borrowed or partially initialized value` in Grail and E0381 in Rust. The book is now
+  59 Grail examples with 59 Rust twins. The concurrency and FFI chapters gain a *What this month added*
+  section (in-place chunks and the measured difference against `pool::for_chunks`, the job handle and
+  what its drop does, the capture classification; record pointers, records C fills, arrays of handles,
+  and the borrowed callback record parameter that used to abort at exit). The modules chapter states
+  the build cache flag (`grail build --cache`, `b1-cache`) and checked module interfaces
+  (`b1-interfaces`) with **no** Rust comparison, and says why: they are build-driver flags, and Rust
+  splits the same work between `rustc`'s incremental mode and Cargo, so a pair of programs would
+  compare nothing. That section also says plainly that neither flag is in this tree yet, so the book
+  does not claim to verify it.
 - FFI: a C callback's extern-record parameter is borrowed, not owned. The parameter prologue marked
   every parameter as an owning binding, so the epilogue ran the record's drop glue on the address C
   handed over — freeing the caller's struct (or its stack) — and the process then aborted inside the

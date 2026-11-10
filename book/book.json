@@ -558,6 +558,34 @@
       }
     },
     {
+      "id": "pool-chunks-mut",
+      "entry": "examples/pool-chunks-mut.grl",
+      "std": [
+        "pool",
+        "core"
+      ],
+      "output": "4\n7\n10\n13\n16\n19\n22\n25\n28\n31\n",
+      "rust": {
+        "source": "rust/pool-chunks-mut.rs",
+        "output": "4\n7\n10\n13\n16\n19\n22\n25\n28\n31\n",
+        "note": "`parallel_for_chunks(&mut data[0: 10], 3, f)` splits an exclusive slice into disjoint exclusive chunks: size = ceil(n/chunks), so ten elements over three chunks is 4, 4 and 2, and each job writes the caller's own elements. Rust has no pool in `std`, so the twin is `chunks_mut(4)` - the same arithmetic split - with one scoped thread per chunk; `thread::scope` joins them before the vector is read, exactly as the Grail call joins its jobs. Neither program copies an element, and the second pass shows the same shape at `chunks_mut(5)` through `pool::chunks_mut`."
+      }
+    },
+    {
+      "id": "pool-job-handle",
+      "entry": "examples/pool-job-handle.grl",
+      "std": [
+        "pool",
+        "core"
+      ],
+      "output": "499500\n4\n1024\n279936\n",
+      "rust": {
+        "source": "rust/pool-job-handle.rs",
+        "output": "499500\n4\n1024\n279936\n",
+        "note": "`parallel_spawn(f)` returns a `Job<R>` and `parallel_join(job)` takes the owned result; `std::thread::spawn` and `JoinHandle::join` are the same two steps in Rust, and a handle is move-only and owned by the thread that waits on it in both. The handle may outlive the statement that started the work, and a result belongs to its own handle, so joining two live jobs in the reverse of their start order prints the same numbers in both languages. Grail refuses a callback that captured a borrow for the same reason Rust's `'static` bound does: the handle records the result type, not the closure's lifetimes."
+      }
+    },
+    {
       "id": "integers",
       "entry": "examples/integers.grl",
       "output": "255\n-2\ntrue\n17\n400\n44\n",
@@ -724,6 +752,27 @@
         "source": "rust/ffi-record-pointers.rs",
         "note": "The same C file, the same two shapes. Rust's `#[repr(C)]` states the layout, `*const AppInfo` in a field is Grail's `CPtr` field (and borrow checking is Rust's own: `p_app: &app` keeps the reference alive for the call), and `&mut filled` is the `struct app_info *` `book_fill` writes. `AppInfo { api_version: 0, flags: 0 }` is the value Grail's `mut filled: AppInfo;` ends up with: the callee wrote `api_version`, and `flags` is the zero the storage started as.",
         "output": "8\n0\n7\n"
+      }
+    },
+    {
+      "id": "ffi-handle-array",
+      "entry": "examples/ffi-handle-array.grl",
+      "c": "ffi/handle-array.c",
+      "output": "4\n16394\n16391\n1\n",
+      "rust": {
+        "source": "rust/ffi-handle-array.rs",
+        "output": "4\n16394\n16391\n1\n",
+        "note": "A record of `handle` fields is the array C writes: `c_alloc_buffers(&mut buffers)` is the `struct command_buffers *`, and the same record goes back to C as a parameter without a copy. Rust has no handle type, so the twin stores words and spells the same rule with `MaybeUninit`: the storage exists for C to write, and `assume_init` is the point where the bytes become a value. Both programs print the same four numbers, including the identity check between the handle Grail read out of the array and the one C handed back."
+      }
+    },
+    {
+      "id": "ffi-uninitialised-record",
+      "entry": "examples/ffi-uninitialised-record.grl",
+      "diagnostic": "use of moved, borrowed or partially initialized value",
+      "rust": {
+        "source": "rust/ffi-uninitialised-record.rs",
+        "diagnostic": "E0381",
+        "note": "Both languages refuse to read a field of a binding that nothing has written, for the same reason: the value does not exist yet. Grail's storage is `sizeof(struct)` zeroed bytes, so `&mut caps` is a valid pointer for C to fill and a field C leaves alone reads 0 - but reading a field before a foreign call or an assignment wrote one is a partially initialized value. Rust's uninitialised binding is the same error under another name (E0381), and `MaybeUninit` is Rust's spelling of the zeroed-but-unwritten state Grail gives an `extern \"C\"` record by default."
       }
     },
     {
