@@ -31,7 +31,7 @@ B7's syntax; closures need B6).
 | # | Decision | Evidence |
 | --- | --- | --- |
 | B1 | **Separate compilation and checked module interfaces.** The compiler reads every module and emits one assembly file. Borg (about 363,000 lines) cannot be built that way; Abundance probably can at first. Needs a module-interface design. | `implementation-status.md`, `borg-agent-port.md` blocker 2 |
-| B2 | **Authority / capability model** for OS access (ambient `host::` functions today). | `implementation-status.md` |
+| B2 | **Authority / capability model** for OS access (ambient `host::` functions today). **Implemented** (2026-11-10): `lib/authority.grl` and `--deny-ambient-host`; see `docs/authority.md`. | `implementation-status.md`, `docs/authority.md` |
 | B3 | **Suspension and blocking contract** for foreign calls inside green tasks (what happens when a task calls a blocking DLL function). | `implementation-status.md`, `concurrency-v1.md` |
 | B4 | **Windows I/O readiness model**: the green-task reactor is epoll-only; Windows needs IOCP (or a documented thread-per-blocking-call policy). | `runtime.grl` |
 | B6 | **Closure capture model**: mutable captures (FnMut) and closure parameters that hold borrows need lifetime rules for the closure object - either region-bounded closures (cannot escape the borrow's scope) or by-reference capture cells with explicit `move`. Generic iterator adapters over borrowed elements depend on it. | `docs/design/closures.md` |
