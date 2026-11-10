@@ -13,11 +13,11 @@ pub struct Token<a> {
     end: u64
 }
 
-fn letter(c: u64) -> u64 {
-    return ((64 < c) & (c < 91)) + ((96 < c) & (c < 123)) + (c == 95);
+fn letter(c: u64) -> bool {
+    return ((64 < c) && (c < 91)) || ((96 < c) && (c < 123)) || (c == 95);
 }
-fn digit(c: u64) -> u64 {
-    return (47 < c) & (c < 58);
+fn digit(c: u64) -> bool {
+    return (47 < c) && (c < 58);
 }
 fn whitespace(c: u64) -> bool {
     return (c == 32) || (c == 9) || (c == 10) || (c == 12) || (c == 13);
@@ -121,7 +121,7 @@ pub fn tokenize<a>(source: &a [u8]) -> Token<a>[] {
                     comment = 1;
                 }
             }
-            if comment {
+            if comment != 0 {
                 i = i + 2;
                 while i < size {
                     if source[i] == 10 {
@@ -178,7 +178,7 @@ pub fn tokenize<a>(source: &a [u8]) -> Token<a>[] {
                         closed = 1;
                         break;
                     }
-                    assert((b < 32) == 0);
+                    assert(!(b < 32));
                     if b == 92 {
                         i = i + 1;
                         if i == size {
@@ -194,7 +194,7 @@ pub fn tokenize<a>(source: &a [u8]) -> Token<a>[] {
                     i = i + 1;
                     while i < size {
                         b := source[i];
-                        if (letter(b) + digit(b)) == 0 {
+                        if !letter(b) && !digit(b) {
                             break;
                         }
                         i = i + 1;
@@ -207,25 +207,22 @@ pub fn tokenize<a>(source: &a [u8]) -> Token<a>[] {
                         mut radix = 0;
                         if (c == 48) & (i < size) {
                             r := source[i];
-                            if (r == 120) + (r == 98) + (r == 111) {
+                            if r == 120 || r == 98 || r == 111 {
                                 radix = 1;
                                 i = i + 1;
                             }
                         }
                         while i < size {
                             b := source[i];
-                            if radix {
-                                if (
-                                    digit(b)
-                                        + ((96 < b) & (b < 103))
-                                        + ((64 < b) & (b < 71))
-                                        + (b == 95)
-                                )
-                                    == 0 {
+                            if radix != 0 {
+                                if !(digit(b)
+                                    || ((96 < b) && (b < 103))
+                                    || ((64 < b) && (b < 71))
+                                    || (b == 95)) {
                                     break;
                                 }
                             } else {
-                                if (digit(b) == 0) & (b != 95) {
+                                if !digit(b) && b != 95 {
                                     break;
                                 }
                             }
@@ -233,9 +230,9 @@ pub fn tokenize<a>(source: &a [u8]) -> Token<a>[] {
                         }
                         // 1e9, 2.5e-3: an exponent alone also makes a float literal.
                         if (radix == 0) & (i + 1 < size) {
-                            if (source[i] == 101) + (source[i] == 69) {
+                            if source[i] == 101 || source[i] == 69 {
                                 mut j = i + 1;
-                                if (source[j] == 43) + (source[j] == 45) {
+                                if source[j] == 43 || source[j] == 45 {
                                     j = j + 1;
                                 }
                                 if j < size {
@@ -243,7 +240,7 @@ pub fn tokenize<a>(source: &a [u8]) -> Token<a>[] {
                                         kind = 5;
                                         i = j;
                                         while i < size {
-                                            if digit(source[i]) == 0 {
+                                            if !digit(source[i]) {
                                                 break;
                                             }
                                             i = i + 1;
@@ -259,22 +256,22 @@ pub fn tokenize<a>(source: &a [u8]) -> Token<a>[] {
                                     kind = 5;
                                     i = i + 1;
                                     while i < size {
-                                        if digit(source[i]) == 0 {
+                                        if !digit(source[i]) {
                                             break;
                                         }
                                         i = i + 1;
                                     }
                                     if i + 1 < size {
-                                        if (source[i] == 101) + (source[i] == 69) {
+                                        if source[i] == 101 || source[i] == 69 {
                                             mut j = i + 1;
-                                            if (source[j] == 43) + (source[j] == 45) {
+                                            if source[j] == 43 || source[j] == 45 {
                                                 j = j + 1;
                                             }
                                             if j < size {
                                                 if digit(source[j]) {
                                                     i = j;
                                                     while i < size {
-                                                        if digit(source[i]) == 0 {
+                                                        if !digit(source[i]) {
                                                             break;
                                                         }
                                                         i = i + 1;

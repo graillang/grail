@@ -145,10 +145,10 @@ fn add_once<a, b>(list: (&a mut u8[][]), s: &b [u8]) -> unit {
 fn trim<a>(s: &a [u8]) -> u8[] {
     mut a: u64 = 0;
     mut b = s.len();
-    while (a < b) && ((s[a] == 32) + (s[a] == 9) != 0) {
+    while a < b && (s[a] == 32 || s[a] == 9) {
         a += 1;
     }
-    while (b > a) && ((s[b - 1] == 32) + (s[b - 1] == 9) + (s[b - 1] == 13) != 0) {
+    while b > a && (s[b - 1] == 32 || s[b - 1] == 9 || s[b - 1] == 13) {
         b -= 1;
     }
     mut out = u8[];
@@ -202,7 +202,7 @@ fn parse_int<a>(s: &a [u8]) -> Int {
     mut ok: u64 = 1;
     while i < s.len() {
         ch := s[i];
-        if (ch < 48) + (ch > 57) != 0 {
+        if ch < 48 || ch > 57 {
             ok = 0;
         } else {
             v = wrapping_add(wrapping_mul(v, 10), ch - 48);
@@ -216,7 +216,7 @@ fn parse_int<a>(s: &a [u8]) -> Int {
     } else {
         signed = i64(v);
     }
-    if neg {
+    if neg != 0 {
         return Int { ok: ok, v: 0 - signed };
     }
     return Int { ok: ok, v: signed };
@@ -229,8 +229,8 @@ fn label_of<a>(line: &a [u8]) -> u8[] {
         if ch == 58 {
             return out;
         }
-        ok := ((ch >= 97) & (ch <= 122)) + ((ch >= 65) & (ch <= 90)) + ((ch >= 48) & (ch <= 57)) + (ch == 95) + (ch == 46) + (ch == 36);
-        if ok == 0 {
+        ok := ident_char(ch);
+        if !ok {
             return u8[];
         }
         out.push(ch);
@@ -257,13 +257,13 @@ fn split<a>(lines: (&a u8[][]), funcs: (&a mut Func[]), data: (&a mut u8[][])) -
         }
         if starts(line, view(".section")) || eq(line, view(".data")) || eq(line, view(".bss")) {
             text = 0;
-            if open {
+            if open != 0 {
                 last := funcs.len() - 1;
                 funcs[last].end = i;
                 open = 0;
             }
         }
-        if open & (pool || starts(line, view(".pushsection"))) {
+        if open != 0 && (pool || starts(line, view(".pushsection"))) {
             if starts(line, view(".pushsection")) {
                 pool = true;
                 mut d = u8[];
@@ -280,8 +280,8 @@ fn split<a>(lines: (&a u8[][]), funcs: (&a mut Func[]), data: (&a mut u8[][])) -
             continue;
         }
         name := label_of(line);
-        if text & (name.len() != 0) & (name.len() + 1 == line.len()) & !is_local_label(view(name)) {
-            if open {
+        if text != 0 && name.len() != 0 && name.len() + 1 == line.len() && !is_local_label(view(name)) {
+            if open != 0 {
                 last := funcs.len() - 1;
                 funcs[last].end = i;
             }
@@ -289,7 +289,7 @@ fn split<a>(lines: (&a u8[][]), funcs: (&a mut Func[]), data: (&a mut u8[][])) -
             open = 1;
             continue;
         }
-        if open {
+        if open != 0 {
             if starts(line, view(".set .F")) {
                 // `.set .Fn,SIZE`
                 mut comma = 0;
@@ -309,7 +309,7 @@ fn split<a>(lines: (&a u8[][]), funcs: (&a mut Func[]), data: (&a mut u8[][])) -
         }
         data.push(copy(line));
     }
-    if open {
+    if open != 0 {
         last := funcs.len() - 1;
         funcs[last].end = lines.len();
     }
@@ -377,7 +377,7 @@ fn reg_name<a>(name: &a [u8]) -> u8[] {
     if (n == 3) && (name[0] == 114) && (name[2] == 120) && legacy_base(name[1]) {
         return copy(name);
     }
-    if (n == 3) && (name[0] == 114) && (((name[1] == 115) + (name[1] == 100)) != 0) && (name[2] == 105) {
+    if n == 3 && name[0] == 114 && (name[1] == 115 || name[1] == 100) && name[2] == 105 {
         return copy(name);
     }
     if (n == 2) && (name[0] == 114) && (name[1] >= 56) && (name[1] <= 57) {
@@ -392,7 +392,7 @@ fn reg_name<a>(name: &a [u8]) -> u8[] {
         out.push(120);
         return out;
     }
-    if (n == 3) && (name[0] == 101) && (((name[1] == 115) + (name[1] == 100)) != 0) && (name[2] == 105) {
+    if n == 3 && name[0] == 101 && (name[1] == 115 || name[1] == 100) && name[2] == 105 {
         mut out = copy(view("r"));
         out.push(name[1]);
         out.push(105);
@@ -404,13 +404,13 @@ fn reg_name<a>(name: &a [u8]) -> u8[] {
         out.push(120);
         return out;
     }
-    if (n == 3) && (((name[0] == 115) + (name[0] == 100)) != 0) && (name[1] == 105) && (name[2] == 108) {
+    if n == 3 && (name[0] == 115 || name[0] == 100) && name[1] == 105 && name[2] == 108 {
         mut out = copy(view("r"));
         out.push(name[0]);
         out.push(105);
         return out;
     }
-    if (n >= 3) && (name[0] == 114) && (((name[n - 1] == 100) + (name[n - 1] == 98)) != 0) {
+    if n >= 3 && name[0] == 114 && (name[n - 1] == 100 || name[n - 1] == 98) {
         base := sub(name, 0, n - 1);
         if reg_width(view(base)) == 64 {
             if reg_name(view(base)).len() != 0 {
@@ -543,7 +543,7 @@ fn address<a, b>(l: (&a mut L), op: &b [u8]) -> u8[] {
     }
     disp := sub(op, 0, open);
     inner := operands(view(sub(op, open + 1, op.len() - 1)));
-    if (inner.len() == 0) + (inner.len() > 3) != 0 {
+    if inner.len() == 0 || inner.len() > 3 {
         bad(&mut l);
         return copy(view("null"));
     }
@@ -573,7 +573,7 @@ fn address<a, b>(l: (&a mut L), op: &b [u8]) -> u8[] {
     mut dt = u8[];
     inum(&mut dt, d);
     if eq(view(base), view("rbp")) & (inner.len() == 1) {
-        if l.split {
+        if l.split != 0 {
             // Slot k covers [-8(k+1), -8k) below rbp.
             k := u64(0 - (d + 1)) / 8;
             within := d + i64(8 * (k + 1));
@@ -1291,8 +1291,11 @@ fn set_add<a, b>(s: (&a mut Set), key: &b [u8]) -> unit {
     s.count += 1;
     return ();
 }
-fn ident_char(ch: u64) -> u64 {
-    return ((ch >= 97) & (ch <= 122)) + ((ch >= 65) & (ch <= 90)) + ((ch >= 48) & (ch <= 57)) + (ch == 95) + (ch == 46) + (ch == 36);
+fn ident_char(ch: u64) -> bool {
+    return ((ch >= 97) && (ch <= 122))
+        || ((ch >= 65) && (ch <= 90))
+        || ((ch >= 48) && (ch <= 57))
+        || (ch == 95) || (ch == 46) || (ch == 36);
 }
 // Every identifier-like token of a line into `out`.
 fn add_tokens<a, b>(out: (&a mut Set), line: &b [u8]) -> unit {
@@ -1300,7 +1303,7 @@ fn add_tokens<a, b>(out: (&a mut Set), line: &b [u8]) -> unit {
     while i < line.len() {
         if ident_char(line[i]) {
             mut j = i;
-            while (j < line.len()) && (ident_char(line[j]) != 0) {
+            while j < line.len() && ident_char(line[j]) {
                 j += 1;
             }
             set_add(&mut out, view(sub(line, i, j)));
@@ -1321,7 +1324,7 @@ fn rename_line<a, b>(line: &a [u8], renamed: (&b Set)) -> u8[] {
     while i < line.len() {
         if ident_char(line[i]) {
             mut j = i;
-            while (j < line.len()) && (ident_char(line[j]) != 0) {
+            while j < line.len() && ident_char(line[j]) {
                 j += 1;
             }
             token := sub(line, i, j);
@@ -1452,7 +1455,7 @@ fn lower_function<a, b>(l: (&a mut L), lines: (&b u8[][]), f: (&b Func)) -> unit
             }
             if (slash != 0) & ends(c, view(",%rcx")) {
                 k := parse_int(view(sub(c, slash + 3, c.len() - 5)));
-                if k.ok {
+                if k.ok != 0 {
                     zero = k.v;
                 }
             }
@@ -1499,7 +1502,7 @@ fn lower_function<a, b>(l: (&a mut L), lines: (&b u8[][]), f: (&b Func)) -> unit
     }
     mut deepest: u64 = 0;
     l.split = frame_split(&instrs, &mut deepest);
-    if l.split {
+    if l.split != 0 {
         // One alloca per slot; the prologue's zeroing covers the slots below the parameters.
         slots := size / 8;
         mut count = slots;
@@ -1539,7 +1542,7 @@ fn lower_function<a, b>(l: (&a mut L), lines: (&b u8[][]), f: (&b Func)) -> unit
     emit(&mut l, view("br label %body"), &u8[][]);
     begin_block(&mut l, view("body"));
     for m in instrs.len() {
-        if l.fail {
+        if l.fail != 0 {
             return ();
         }
         line := view(instrs[m]);
@@ -1556,7 +1559,7 @@ fn lower_function<a, b>(l: (&a mut L), lines: (&b u8[][]), f: (&b Func)) -> unit
             bad(&mut l);
             return ();
         }
-        if l.term {
+        if l.term != 0 {
             next := fresh_block(&mut l);
             begin_block(&mut l, view(next));
         }
@@ -1747,7 +1750,7 @@ fn lower_target<a, b>(stream: &a [u8], triple: &b [u8], target: u64) -> Lowered 
             native_lines.push(copy(view(kept[k])));
             add_tokens(&mut native_tokens, view(kept[k]));
         }
-        if f.framed {
+        if f.framed != 0 {
             // The frame symbol is the one the prologue's `subq $.Fn,%rsp` names.
             mut sym = u8[];
             for k in kept.len() {

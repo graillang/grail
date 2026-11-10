@@ -19,11 +19,11 @@ struct F {
     lindent: u64[],
     out: u8[]
 }
-fn letter(c: u64) -> u64 {
-    return ((64 < c) & (c < 91)) + ((96 < c) & (c < 123)) + (c == 95);
+fn letter(c: u64) -> bool {
+    return ((64 < c) && (c < 91)) || ((96 < c) && (c < 123)) || (c == 95);
 }
-fn digit(c: u64) -> u64 {
-    return (47 < c) & (c < 58);
+fn digit(c: u64) -> bool {
+    return (47 < c) && (c < 58);
 }
 fn pair(c: u64, d: u64) -> u64 {
     if (c == 45) & (d == 62) {
@@ -95,7 +95,7 @@ fn scan<a, b>(f: (&a mut F), s: &b [u8]) {
             i += 1;
             continue;
         }
-        if (c == 32) + (c == 9) + (c == 13) + (c == 12) {
+        if c == 32 || c == 9 || c == 13 || c == 12 {
             i += 1;
             continue;
         }
@@ -161,7 +161,7 @@ fn scan<a, b>(f: (&a mut F), s: &b [u8]) {
         if letter(c) {
             while i < n {
                 d := s[i];
-                if (letter(d) + digit(d)) == 0 {
+                if !letter(d) && !digit(d) {
                     break;
                 }
                 i += 1;
@@ -173,7 +173,7 @@ fn scan<a, b>(f: (&a mut F), s: &b [u8]) {
         if digit(c) {
             while i < n {
                 d := s[i];
-                if (letter(d) + digit(d)) == 0 {
+                if !letter(d) && !digit(d) {
                     mut keep = 0;
                     if (d == 46) & (i + 1 < n) {
                         if digit(s[i + 1]) {
@@ -182,9 +182,9 @@ fn scan<a, b>(f: (&a mut F), s: &b [u8]) {
                             }
                         }
                     }
-                    if ((d == 43) + (d == 45)) & (i + 1 < n) {
+                    if (d == 43 || d == 45) && i + 1 < n {
                         p := s[i - 1];
-                        if ((p == 101) + (p == 69)) & digit(s[i + 1]) {
+                        if (p == 101 || p == 69) && digit(s[i + 1]) {
                             keep = 1;
                         }
                     }
@@ -238,8 +238,8 @@ fn is<a, b, d>(f: (&a F), s: &b [u8], i: u64, word: &d [u8]) -> bool {
     }
     return true;
 }
-fn punct<a>(f: (&a F), i: u64, code: u64) -> u64 {
-    return (f.kind[i] == 4) & (f.code[i] == code);
+fn punct<a>(f: (&a F), i: u64, code: u64) -> bool {
+    return (f.kind[i] == 4) && (f.code[i] == code);
 }
 fn keyword<a, b>(f: (&a F), s: &b [u8], i: u64) -> bool {
     return is(&f, view(s), i, view("return"))
@@ -259,7 +259,7 @@ fn binary<a>(f: (&a F), i: u64) -> bool {
     if 255 < c {
         return (c != 260);
     }
-    if f.generic[i] {
+    if f.generic[i] != 0 {
         return false;
     }
     return (c == 61)
@@ -278,7 +278,7 @@ fn binary<a>(f: (&a F), i: u64) -> bool {
 fn mark_generics<a, b>(f: (&a mut F), s: &b [u8]) {
     n := f.kind.len();
     for i in n {
-        if punct(&f, i, 60) & (0 < i) {
+        if punct(&f, i, 60) && 0 < i {
             if f.kind[i - 1] == 1 {
                 mut depth = 0;
                 mut j = i;
@@ -286,21 +286,21 @@ fn mark_generics<a, b>(f: (&a mut F), s: &b [u8]) {
                 while j < n {
                     k := f.kind[j];
                     c := f.code[j];
-                    mut ok = (k == 1) + (k == 2);
+                    mut ok = k == 1 || k == 2;
                     if k == 4 {
-                        ok = (c == 60)
-                            + (c == 62)
-                            + (c == 44)
-                            + (c == 260)
-                            + (c == 40)
-                            + (c == 41)
-                            + (c == 256)
-                            + (c == 43)
-                            + (c == 58)
-                            + (c == 91)
-                            + (c == 93);
+                        ok = c == 60
+                            || c == 62
+                            || c == 44
+                            || c == 260
+                            || c == 40
+                            || c == 41
+                            || c == 256
+                            || c == 43
+                            || c == 58
+                            || c == 91
+                            || c == 93;
                     }
-                    if ok == 0 {
+                    if !ok {
                         break;
                     }
                     if (k == 4) & (c == 60) {
@@ -339,17 +339,17 @@ fn mark_pipes<a, b>(f: (&a mut F), s: &b [u8]) {
     n := f.kind.len();
     mut i = 0;
     while i < n {
-        if punct(&f, i, 124) & prefix_position(&f, view(s), i) {
+        if punct(&f, i, 124) && prefix_position(&f, view(s), i) {
             mut j = i + 1;
             mut depth = 0;
             while j < n {
                 k := f.kind[j];
                 c := f.code[j];
                 if k == 4 {
-                    if (c == 40) + (c == 91) + (c == 123) {
+                    if c == 40 || c == 91 || c == 123 {
                         depth += 1;
                     }
-                    if (c == 41) + (c == 93) + (c == 125) {
+                    if c == 41 || c == 93 || c == 125 {
                         if depth == 0 {
                             break;
                         }
@@ -380,7 +380,7 @@ fn prefix_position<a, b>(f: (&a F), s: &b [u8], i: u64) -> bool {
     }
     p := i - 1;
     k := f.kind[p];
-    if (k == 2) + (k == 3) {
+    if k == 2 || k == 3 {
         return false;
     }
     if k == 1 {
@@ -388,10 +388,10 @@ fn prefix_position<a, b>(f: (&a F), s: &b [u8], i: u64) -> bool {
     }
     if k == 4 {
         c := f.code[p];
-        if (c == 41) + (c == 93) + (c == 125) + (c == 33) + (c == 63) {
+        if c == 41 || c == 93 || c == 125 || c == 33 || c == 63 {
             return false;
         }
-        if f.generic[p] & (c == 62) {
+        if f.generic[p] != 0 && c == 62 {
             return false;
         }
     }
@@ -420,18 +420,18 @@ fn space<a, b>(f: (&a F), s: &b [u8], p: u64, i: u64, inline: u64) -> bool {
         return true;
     }
     if k == 4 {
-        if (c == 41)
-            + (c == 93)
-            + (c == 44)
-            + (c == 59)
-            + (c == 46)
-            + (c == 260)
-            + (c == 63)
-            + (c == 58) {
+        if c == 41
+            || c == 93
+            || c == 44
+            || c == 59
+            || c == 46
+            || c == 260
+            || c == 63
+            || c == 58 {
             return false;
         }
         if c == 33 {
-            if (pk == 4) & ((pc == 40) + (pc == 91) + (pc == 123)) {
+            if pk == 4 && (pc == 40 || pc == 91 || pc == 123) {
                 return false;
             }
             return prefix_position(&f, view(s), i);
@@ -443,7 +443,7 @@ fn space<a, b>(f: (&a F), s: &b [u8], p: u64, i: u64, inline: u64) -> bool {
         }
     }
     if pk == 4 {
-        if (pc == 46) + (pc == 260) + (pc == 40) + (pc == 91) {
+        if pc == 46 || pc == 260 || pc == 40 || pc == 91 {
             return false;
         }
     }
@@ -451,7 +451,7 @@ fn space<a, b>(f: (&a F), s: &b [u8], p: u64, i: u64, inline: u64) -> bool {
         return true;
     }
     if (k == 4) & (c == 125) {
-        return punct(&f, p, 123) == 0;
+        return !punct(&f, p, 123);
     }
     if (pk == 4) & (pc == 123) {
         return true;
@@ -460,11 +460,11 @@ fn space<a, b>(f: (&a F), s: &b [u8], p: u64, i: u64, inline: u64) -> bool {
         return true;
     }
     // Adjacent << / >> (two tokens, never generic) stay together as a shift operator.
-    if (pk == 4)
-        & (k == 4)
-        & (f.generic[i] == 0)
-        & (f.generic[p] == 0)
-        & (((pc == 60) & (c == 60)) + ((pc == 62) & (c == 62))) {
+    if pk == 4
+        && k == 4
+        && f.generic[i] == 0
+        && f.generic[p] == 0
+        && ((pc == 60 && c == 60) || (pc == 62 && c == 62)) {
         if f.start[i] == f.end[p] {
             return false;
         }
@@ -486,7 +486,7 @@ fn space<a, b>(f: (&a F), s: &b [u8], p: u64, i: u64, inline: u64) -> bool {
             return false;
         }
         if k == 4 {
-            if (c == 40) + (c == 91) + (c == 260) + (c == 46) + (c == 123) == 0 {
+            if !(c == 40 || c == 91 || c == 260 || c == 46 || c == 123) {
                 return true;
             }
             if c == 123 {
@@ -507,7 +507,7 @@ fn space<a, b>(f: (&a F), s: &b [u8], p: u64, i: u64, inline: u64) -> bool {
             return false;
         }
         if pk == 4 {
-            if (pc == 41) + (pc == 93) + (pc == 33) + (pc == 63) {
+            if pc == 41 || pc == 93 || pc == 33 || pc == 63 {
                 return false;
             }
         }
@@ -518,7 +518,7 @@ fn space<a, b>(f: (&a F), s: &b [u8], p: u64, i: u64, inline: u64) -> bool {
             return keyword(&f, view(s), p);
         }
         if pk == 4 {
-            if (pc == 41) + (pc == 93) {
+            if pc == 41 || pc == 93 {
                 return false;
             }
         }
@@ -534,13 +534,13 @@ fn space<a, b>(f: (&a F), s: &b [u8], p: u64, i: u64, inline: u64) -> bool {
         return true;
     }
     // A space after `,` and after the `;` of a repeat literal (`u8[0; n]`).
-    if (pk == 4) & ((pc == 44) + (pc == 59) != 0) {
+    if pk == 4 && (pc == 44 || pc == 59) {
         return true;
     }
     if (pk != 4) & (k != 4) {
         return true;
     }
-    if (pk == 4) & ((pc == 41) + (pc == 93) + (pc == 33) + (pc == 63)) {
+    if pk == 4 && (pc == 41 || pc == 93 || pc == 33 || pc == 63) {
         return k != 4;
     }
     if (k == 4) & (c == 38) {
@@ -569,28 +569,25 @@ fn layout<a, b>(f: (&a mut F), s: &b [u8]) {
         k := f.kind[i];
         c := f.code[i];
         mut top = 0;
-        if stack.len() {
+        if stack.len() != 0 {
             top = stack[stack.len() - 1];
         }
-        closes := (k == 4) & (c == 125) & ((top == 1) + (top == 2) + (top == 3));
+        closes := k == 4 && c == 125 && (top == 1 || top == 2 || top == 3);
         if closes {
             stack.pop();
             indent -= 1;
             empty := punct(&f, i - 1, 123);
-            if empty & (pending != 0) {
+            if empty && pending != 0 {
                 pending = 0;
                 emit(&mut f, i, 0);
                 start = 1;
                 header = 0;
                 if i + 1 < n {
-                    if (
-                        punct(&f, i + 1, 44)
-                            + punct(&f, i + 1, 41)
-                            + punct(&f, i + 1, 59)
-                            + punct(&f, i + 1, 93)
-                            + u64(is(&f, view(s), i + 1, view("else")))
-                    )
-                        == 0 {
+                    if !(punct(&f, i + 1, 44)
+                        || punct(&f, i + 1, 41)
+                        || punct(&f, i + 1, 59)
+                        || punct(&f, i + 1, 93)
+                        || is(&f, view(s), i + 1, view("else"))) {
                         pending = 1;
                     }
                 } else {
@@ -606,9 +603,9 @@ fn layout<a, b>(f: (&a mut F), s: &b [u8]) {
             pending = 1;
             continue;
         }
-        if pending {
-            if (1 < f.nl[i]) & (lines != 0) & (closes == 0) {
-                if punct(&f, i - 1, 123) == 0 {
+        if pending != 0 {
+            if 1 < f.nl[i] && lines != 0 && !closes {
+                if !punct(&f, i - 1, 123) {
                     new_line(&mut f, 0);
                 }
             }
@@ -624,7 +621,7 @@ fn layout<a, b>(f: (&a mut F), s: &b [u8]) {
             sp := u64(space(&f, view(s), i - 1, i, inline));
             emit(&mut f, i, sp);
         }
-        if start & (k == 1) {
+        if start != 0 && k == 1 {
             mut word = i;
             if is(&f, view(s), i, view("pub")) || is(&f, view(s), i, view("unsafe")) {
                 word = i;
@@ -652,7 +649,7 @@ fn layout<a, b>(f: (&a mut F), s: &b [u8]) {
                 start = 0;
             }
         }
-        if start & (k != 1) & (k != 5) {
+        if start != 0 && k != 1 && k != 5 {
             start = 0;
         }
         if k == 5 {
@@ -664,17 +661,17 @@ fn layout<a, b>(f: (&a mut F), s: &b [u8]) {
         }
         if c == 123 {
             mut kind = 4;
-            nested := (top == 4) + (top == 5) + (top == 6);
+            nested := top == 4 || top == 5 || top == 6;
             if punct(&f, i - 1, 257) {
                 kind = 1;
             } else {
-                if (header == 1) & (nested == 0) {
+                if header == 1 && !nested {
                     kind = 2;
                 } else {
-                    if (header == 3) & (nested == 0) {
+                    if header == 3 && !nested {
                         kind = 3;
                     } else {
-                        if (header == 2) & (nested == 0) {
+                        if header == 2 && !nested {
                             kind = 1;
                         }
                     }
@@ -689,7 +686,7 @@ fn layout<a, b>(f: (&a mut F), s: &b [u8]) {
             }
             continue;
         }
-        if (c == 125) & (closes == 0) {
+        if c == 125 && !closes {
             if top == 4 {
                 stack.pop();
             }
@@ -700,14 +697,11 @@ fn layout<a, b>(f: (&a mut F), s: &b [u8]) {
             header = 0;
             pending = 1;
             if i + 1 < n {
-                if (
-                    punct(&f, i + 1, 44)
-                        + punct(&f, i + 1, 41)
-                        + punct(&f, i + 1, 59)
-                        + punct(&f, i + 1, 93)
-                        + u64(is(&f, view(s), i + 1, view("else")))
-                )
-                    != 0 {
+                if punct(&f, i + 1, 44)
+                    || punct(&f, i + 1, 41)
+                    || punct(&f, i + 1, 59)
+                    || punct(&f, i + 1, 93)
+                    || is(&f, view(s), i + 1, view("else")) {
                     pending = 0;
                 }
             }
@@ -721,14 +715,14 @@ fn layout<a, b>(f: (&a mut F), s: &b [u8]) {
             stack.push(6);
             continue;
         }
-        if (c == 41) + (c == 93) {
-            if (top == 5) + (top == 6) {
+        if c == 41 || c == 93 {
+            if top == 5 || top == 6 {
                 stack.pop();
             }
             continue;
         }
         if c == 59 {
-            if (top == 1) + (top == 0) {
+            if top == 1 || top == 0 {
                 pending = 1;
                 start = 1;
                 header = 0;
@@ -736,7 +730,7 @@ fn layout<a, b>(f: (&a mut F), s: &b [u8]) {
             continue;
         }
         if c == 44 {
-            if (top == 2) + (top == 3) {
+            if top == 2 || top == 3 {
                 pending = 1;
                 start = 1;
             }
@@ -841,15 +835,15 @@ fn breakable<a, b>(f: (&a F), s: &b [u8], j: u64) -> bool {
         return false;
     }
     c := f.code[t];
-    if (c == 61)
-        + (c == 256)
-        + (c == 257)
-        + (c == 261)
-        + (c == 262)
-        + (c == 263)
-        + (c == 264)
-        + (c == 265)
-        + (c == 266) {
+    if c == 61
+        || c == 256
+        || c == 257
+        || c == 261
+        || c == 262
+        || c == 263
+        || c == 264
+        || c == 265
+        || c == 266 {
         return false;
     }
     if unary(&f, view(s), t) {
@@ -871,7 +865,7 @@ fn trailing_ok<a>(f: (&a F), lo: u64, hi: u64) -> bool {
             d -= 1;
         }
         if d == 0 {
-            if (c == 59) + (c == 261) + (c == 257) {
+            if c == 59 || c == 261 || c == 257 {
                 return false;
             }
             if c == 44 {
@@ -1087,7 +1081,7 @@ fn op_break<a, b>(f: (&a mut F), s: &b [u8], lo: u64, hi: u64, indent: u64) -> b
     return true;
 }
 fn render<a, b>(f: (&a mut F), s: &b [u8], lo: u64, hi: u64, indent: u64) {
-    if (indent * 4 + range_width(&f, lo, hi) < 101) + (hi - lo < 3) {
+    if indent * 4 + range_width(&f, lo, hi) < 101 || hi - lo < 3 {
         write_range(&mut f, view(s), lo, hi, indent);
         return ();
     }

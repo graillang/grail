@@ -1,12 +1,12 @@
 # Strict bool migration
 
-Grail is moving to a language where `bool` and integers do not mix. The checker already exists ahead
-of the rule; this note records what it reports today, which helpers have to change type first, in
-what order to land the work, and how to keep it from regressing. Nothing here changes the language
-yet: `--strict-bool` and `--strict-bool-report` are opt-in, and the sources under `compiler/` are
-still written in the current dialect.
+Grail is a language where `bool` and integers do not mix, and that rule is now enforced: an
+`if`/`while` condition must be a `bool`, and a `bool` operand does not appear beside an integer one.
+This note records what the checker reported before the migration, which helpers had to change type
+first, in what order the work landed, and how the rule is kept from regressing. The body below is
+the plan as written at the start; section 6 records how it finished.
 
-Base: `lang-par` at 3916d9a. Every line number below is from that commit.
+Base: `lang-par` at 3916d9a. Every line number below is from that commit, except in section 6.
 
 ## 1. The rule, and what the check covers
 
@@ -42,17 +42,15 @@ if n { return 1; }  // a condition must be a bool
 
 ### 1.2 Modes
 
-| flag | `c.strict_bool` | behaviour |
+| flag | `c.strict_bool_report` | behaviour |
 |---|---|---|
-| (none) | 0 | check disabled |
-| `--strict-bool` | 1 | stop at the first violation (`fail`), exit status 1 |
-| `--strict-bool-report` | 2 | print `file:line:column: message` for every violation, keep compiling, exit status 0 |
-| `--strict-bool-fix` | 3 | print machine-readable `FIX ...` records (byte spans) |
+| (none) | 0 | stop at the first violation (`fail`), exit status 1 |
+| `--strict-bool-report` | 1 | print `file:line:column: message` for every violation, keep compiling, exit status 0 |
 
-Mode 2 is the one this migration is driven by: it never fails the build, so a partially migrated tree
-still compiles and can be measured. Mode 3 has no consumer — the `tools/strict-bool-fix.py` that
-`compiler/native.grl:16682` mentions does not exist in the tree — so it should be deleted with the
-flags rather than migrated.
+The survey mode is what drove this migration: it never fails the build, so a partially migrated tree
+still compiles and can be measured. Before the rule was enforced it was `--strict-bool` (mode 1) with
+two further modes beside it — the disabled default and a mode 3 that printed machine-readable `FIX ...`
+records for a `tools/strict-bool-fix.py` that never existed in the tree. Both are gone; see section 6.
 
 ### 1.3 What the check does not cover yet
 
@@ -654,3 +652,73 @@ That is the same information as `strict_return` without a compiler change, and i
 `tests/native-cases.json` (`reject: true`) so the diagnostics cannot regress: an integer condition, a
 `bool & integer`, and — after phase 0 — a `u64` function returning a comparison.
 `tools/test-native.mjs` runs them for every selected target.
+
+## 6. How it landed
+
+Branch `strictbool-full` off `main` at 33f37af (phase 1 was already merged as `strictbool-preds`).
+Every number below is `--strict-bool-report` over the ten compiler sources with
+`--default-u64 --typed-refs`, measured at the commit named.
+
+| step | commit subject | reports |
+|---|---|---|
+| start | phase 1 merged | 1595 (847 condition, 424 mixing, 324 arithmetic) |
+| phase 1.5 | predicates the extractor could not see | 1409 (741 / 361 / 307) |
+| phase 2 | operators | 405 (0 mixing, 0 arithmetic) |
+| phase 3 | conditions | 0 |
+| phase 4 | enforced by default | 0 |
+
+**Phase 1.5.** The extractor was the real gap, not the code: it split a body on `+` and on
+`&&`/`||` only, so a predicate written `(47 < d) & (d < 58)` or one returning its own recursive
+call was invisible. Splitting on `&`/`|`/`^` and treating a self-call as bool turned 2 predicates
+into 20 — the four this note predicted (`task_walk`, `punct`, `letter`, `digit`) plus
+`tls_bridge`, `contains_borrow`/`borrow_walk`, `is_hex_digit`, `contains_task`, `is_default_i64`,
+`chained_field_assignment_ahead`, `assignment_ahead` and the two below. `is_f32` and
+`is_comparison` flipped once their integer callers were rewritten as section 3.3 predicted: the
+callback return code is built by an `if` (`fret = 1`, then `fret = 2`) and the comparison operand
+width by `mut p = 0` set to 3, and `ffi_float_store`'s `single` parameter became `bool`.
+`bun tools/strict-bool-predicates.mjs` now reports 0 predicate, 6 status, 3 void.
+
+**Phase 2.** 668 operator sites. The mechanical shapes (a top-level `+` or `&` chain of comparisons,
+`(cmp) == 0`) were rewritten by a throwaway script driven by the report and validated by
+precedence — `+` binds tighter than `==` in Grail, so only chains whose operands are all
+comparisons qualify. The rest were decided from the operand declarations: an integer flag used as
+logic reads `flag != 0`, a bool local compared with 0 reads `!flag`, and a 0/1 sum handed to a u64
+parameter keeps its value as `u64(a || b)`. Locals that only ever held a disjunction became `bool`
+(`carrier`, `empty`, `complete`, `checked`, `x86`, `closes`, `nested`, `ok`, `when`).
+
+**Phase 3.** 405 conditions became explicit comparisons; `while 1` became `while true`. This is the
+phase where the compiler reads differently, so it was reviewed as code rather than swept: the
+common shapes are `if x.len() != 0`, `if flag != 0`, and `if ((writes(&o, k) >> 1) & 1) != 0`.
+The one idiom the sweep could not express was a condition that summed two comparisons
+(`if exclusive + mode`), which is now `if (exclusive + mode) != 0`.
+
+**Phase 4.** `C.strict_bool` became `C.strict_bool_report` (0 = enforce, 1 = survey),
+`strict_fix_record` and the `--strict-bool` / `--strict-bool-fix` flags were deleted, and
+`strict_bool_check`/`strict_condition` were collapsed to their enforced form. The sources needed no
+seed refresh at the time of writing: the pre-strict-bool seeds still compile them, and
+`bun tools/bootstrap.mjs update all` is the follow-up that bakes the current compiler into the seed.
+
+The corpus needed 13 small edits to follow the rule: `if flag` -> `if flag != 0` in
+`compiler/tests/{generic_functions,cleanup,higher_order,structural_union}.grl`,
+`compiler/examples/native_numbers.grl`, `book/examples/{cleanup,enums}.grl` (where the parameter
+became `bool`, since both call sites already pass `true`), `examples/loops/cleanup.grl` and two
+inline cases in `tests/native-cases.json`; `(a > b) == 0` -> `!(a > b)` in the `comparison-operators`
+case and `async_io.grl`; the local `some` and `is_none` helpers return `bool`; `booleans.grl`
+counted comparisons with `(1 == 1) + (2 == 2)`, which is now `u64(1 == 1) + u64(2 == 2)`; and the
+three cleanup rejection cases spelled `if 1` / `while 1` as `if true` / `while true` so they keep
+rejecting for the reason they are named after instead of for a bool condition.
+
+Verification at the end of the branch: `bun tools/test-selfhost.mjs` (stage 2 and stage 3
+byte-identical), `bun tools/test-native.mjs x86_64` (755 cases), `bun tools/book.mjs check`
+(49 examples + 49 Rust comparisons), `bun tools/test-cli.mjs` (187 checks, cross-target section
+skipped: no qemu on the host), `bun tools/abundance-test.mjs` and `bun tools/borg-test.mjs`.
+
+**Still open.** Three things section 5 asked for and this branch did not do:
+
+- `strict_return` (phase 0) is not implemented: a `u64` function returning a comparison still
+  compiles. `tools/strict-bool-predicates.mjs` is the stand-in, and it now reports nothing for the
+  compiler's sources; wiring it into `tools/ci.mjs lint` is the cheap gate.
+- `x == false` is still legal. It is rarer than the note expected — the corpus had one
+  (`some(...) == false`, migrated by hand) — but the rule remains unstated.
+- `tools/strict-bool.mjs` (§5.2) does not exist, so `lib/`, `abundance/` and `borg/` are only
+  covered by the checker when their own test suites compile them. All three are clean today.

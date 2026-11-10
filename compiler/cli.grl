@@ -136,15 +136,15 @@ fn words<a>(line: &a [u8]) -> u8[][] {
     mut cur = u8[];
     for i in line.len() {
         c := line[i];
-        if (c == 32) + (c == 9) + (c == 13) {
-            if cur.len() {
+        if c == 32 || c == 9 || c == 13 {
+            if cur.len() != 0 {
                 out.push(exchange(&mut cur, u8[]));
             }
         } else {
             cur.push(c);
         }
     }
-    if cur.len() {
+    if cur.len() != 0 {
         out.push(cur);
     }
     return out;
@@ -160,7 +160,7 @@ fn lines<a>(text: &a [u8]) -> u8[][] {
             cur.push(c);
         }
     }
-    if cur.len() {
+    if cur.len() != 0 {
         out.push(cur);
     }
     return out;
@@ -168,9 +168,9 @@ fn lines<a>(text: &a [u8]) -> u8[][] {
 
 fn home() -> Home {
     env := host::env(view("GRAIL_HOME"));
-    if env.len() {
+    if env.len() != 0 {
         installed := path_join(view(env), view("runtime.grl"));
-        if host::exists(view(installed)) {
+        if host::exists(view(installed)) != 0 {
             os := path_join(view(dirname(view(installed))), view("os-linux.grl"));
             return Home {
                 runtime: installed,
@@ -179,7 +179,7 @@ fn home() -> Home {
             };
         }
         repo := path_join(view(env), view("compiler/runtime.grl"));
-        if host::exists(view(repo)) {
+        if host::exists(view(repo)) != 0 {
             os := path_join(view(dirname(view(repo))), view("os-linux.grl"));
             return Home {
                 runtime: repo,
@@ -192,7 +192,7 @@ fn home() -> Home {
     mut dir = dirname(view(exe));
     for level in 6 {
         installed := path_join(view(dir), view("lib/grail/runtime.grl"));
-        if host::exists(view(installed)) {
+        if host::exists(view(installed)) != 0 {
             prefix := path_join(view(dir), view("lib/grail"));
             os := path_join(view(prefix), view("os-linux.grl"));
             return Home {
@@ -202,7 +202,7 @@ fn home() -> Home {
             };
         }
         repo := path_join(view(dir), view("compiler/runtime.grl"));
-        if host::exists(view(repo)) {
+        if host::exists(view(repo)) != 0 {
             os := path_join(view(dirname(view(repo))), view("os-linux.grl"));
             return Home {
                 runtime: repo,
@@ -285,7 +285,7 @@ fn used_std<a, b>(std: &a [u8], sources: (&b u8[][])) -> u8[][] {
     mut out = u8[][];
     // core is always compiled: `Some(x)` and `None` lower to its constructors.
     prelude := path_join(view(std), view("core.grl"));
-    if host::exists(view(prelude)) {
+    if host::exists(view(prelude)) != 0 {
         seen.push(copy(view("core")));
         out.push(copy(view(prelude)));
     }
@@ -300,7 +300,7 @@ fn used_std<a, b>(std: &a [u8], sources: (&b u8[][])) -> u8[][] {
             if !contains_name(&seen, view(name)) {
                 seen.push(copy(view(name)));
                 candidate := path_join(view(std), view(cat(view(name), view(".grl"))));
-                if host::exists(view(candidate)) {
+                if host::exists(view(candidate)) != 0 {
                     out.push(copy(view(candidate)));
                     queue.push(candidate);
                 }
@@ -388,7 +388,7 @@ fn dynamic_link_flags<a, b>(target: &a [u8], inputs: (&b u8[][])) -> u8[][] {
     }
     for i in loaders.len() {
         candidate := item(&loaders, i);
-        if host::exists(view(candidate)) {
+        if host::exists(view(candidate)) != 0 {
             out.push(copy(view("--dynamic-linker")));
             out.push(candidate);
             break;
@@ -413,7 +413,7 @@ fn is_macho<a>(target: &a [u8]) -> bool {
 }
 fn tool<a, b>(variable: &a [u8], fallback: &b [u8]) -> u8[] {
     v := host::env(variable);
-    if v.len() {
+    if v.len() != 0 {
         return v;
     }
     return copy(fallback);
@@ -476,7 +476,7 @@ fn compile_mode<a, b, d, e, g>(
     if host::command(command) != 0 {
         return 1;
     }
-    if check_only {
+    if check_only != 0 {
         host::remove(view(asm), 0);
         return 0;
     }
@@ -518,7 +518,7 @@ fn compile_mode<a, b, d, e, g>(
         say(view("grail: assembling failed (needs clang)"));
         return 1;
     }
-    if macho {
+    if macho != 0 {
         // Without an SDK there is no libSystem stub to link against, so the object is the result.
         root := host::env(view("GRAIL_SDK"));
         if root.len() == 0 {
@@ -629,7 +629,7 @@ fn project_modules<a>(p: (&a Project), skip_entry: u64) -> u8[][] {
     mut out = u8[][];
     for i in all.len() {
         f := item(&all, i);
-        if (skip_entry & eq(view(f), view(p.entry))) == 0 {
+        if !(skip_entry != 0 && eq(view(f), view(p.entry))) {
             out.push(f);
         }
     }
@@ -658,7 +658,7 @@ fn options<a>(args: (&a u8[][])) -> Options {
     mut passthrough = 0;
     while i < args.len() {
         a := item(&args, i);
-        if passthrough {
+        if passthrough != 0 {
             o.rest.push(a);
         } else {
             if eq(view(a), view("--")) {
@@ -700,7 +700,7 @@ fn build<a, b>(args: (&a u8[][]), o: (&b mut Options)) -> u64 {
         return 1;
     }
     host::mkdir(view("target"));
-    if o.file.len() {
+    if o.file.len() != 0 {
         if o.output.len() == 0 {
             stem := basename(view(o.file));
             o.output = path_join(view("target"), view(stem));
@@ -727,7 +727,7 @@ fn check_command<a>(args: (&a u8[][])) -> u64 {
     }
     host::mkdir(view("target"));
     mut status = 0;
-    if o.file.len() {
+    if o.file.len() != 0 {
         stem := basename(view(o.file));
         out := path_join(view("target"), view(stem));
         mut none = u8[][];
@@ -778,7 +778,7 @@ fn test_command<a>(args: (&a u8[][])) -> u64 {
         return 1;
     }
     mut files = u8[][];
-    if o.paths.len() {
+    if o.paths.len() != 0 {
         for i in o.paths.len() {
             x := item(&o.paths, i);
             if ends(view(x), view(".grl")) {
@@ -844,7 +844,7 @@ fn fmt_command<a>(args: (&a u8[][])) -> u64 {
         out := fmt::format(view(data));
         if !eq(view(data), view(out)) {
             changed += 1;
-            if o.check {
+            if o.check != 0 {
                 say2(view("would reformat "), view(f));
             } else {
                 host::write_file(view(f), view(out));
@@ -852,7 +852,7 @@ fn fmt_command<a>(args: (&a u8[][])) -> u64 {
             }
         }
     }
-    if o.check {
+    if o.check != 0 {
         return changed != 0;
     }
     return 0;
@@ -863,7 +863,7 @@ fn new_command<a>(args: (&a u8[][])) -> u64 {
         return 1;
     }
     name := item(&args, 0);
-    if host::exists(view(name)) {
+    if host::exists(view(name)) != 0 {
         say2(view("grail new: already exists: "), view(name));
         return 1;
     }
@@ -909,7 +909,7 @@ fn fetch_command() -> u64 {
         return 1;
     }
     mut lock = u8[];
-    if host::exists(view("grail.lock")) {
+    if host::exists(view("grail.lock")) != 0 {
         lock = host::read_file(view("grail.lock"));
     }
     host::mkdir(view(".grail"));
@@ -933,7 +933,7 @@ fn fetch_command() -> u64 {
             if pin.len() == 0 {
                 pin = copy(view(rev));
             }
-            if pin.len() {
+            if pin.len() != 0 {
                 if host::command(
                     u8[][
                         copy(view("git")),
@@ -998,7 +998,7 @@ fn add_command<a>(args: (&a u8[][])) -> u64 {
         }
     }
     mut text = host::read_file(view("grail.pkg"));
-    if text.len() {
+    if text.len() != 0 {
         if text[text.len() - 1] != 10 {
             text.push(10);
         }
