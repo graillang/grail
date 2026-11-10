@@ -16,6 +16,85 @@ pub struct Lowered {
     thunks: u8[]
 }
 
+// One typed-IR fact (docs/design/typed-ir.md), carried beside the word stream by the front end.
+// The stream itself is unchanged: an absent fact means today's word lowering, and only F2
+// (`what` 1 for a slot, 7 for a call) is consumed so far.
+pub struct Fact {
+    // 0 frame slot, 1 call argument.
+    kind: u64,
+    // Body symbol of the function the fact is about, as emitted in the stream.
+    fn: u8[],
+    // kind 0: the frame slot index (slot k covers [-8(k+1), -8k) below rbp).
+    // kind 1: the ordinal of the call to `callee` inside `fn` (0-based, in emission order).
+    a: u64,
+    // kind 1: the argument index. Unused for kind 0.
+    b: u64,
+    // kind 1: the callee symbol.
+    callee: u8[],
+    // 0 not a typed value, 1 f32, 7 float arithmetic on two f32 operands (kind 1 only).
+    what: u64,
+    // kind 0: the slot's declared width in bytes (4 for an f32 slot).
+    // kind 1: the opcode the call performs (42 `*`, 43 `+`, 45 `-`, 47 `/`).
+    width: u64
+}
+// The table itself. The front end owns one for the whole compile and fills it where it knows a
+// type; the lifter reads it per function beside the word stream.
+pub struct Facts {
+    items: Fact[]
+}
+pub fn facts_new() -> Facts {
+    return Facts { items: Fact[] };
+}
+// `slot` holds an f32 when `f32` is 1, and an untyped word otherwise.
+pub fn fact_slot<a>(facts: (&a mut Facts), name: u8[], slot: u64, f32: u64) -> unit {
+    mut width: u64 = 8;
+    if f32 != 0 {
+        width = 4;
+    }
+    facts.items.push(Fact { kind: 0, fn: name, a: slot, b: 0, callee: u8[], what: f32, width: width });
+    return ();
+}
+// The call to `rt_f64_op` `ordinal` in `name` computes `op` on two f32 operands.
+pub fn fact_op<a>(facts: (&a mut Facts), name: u8[], ordinal: u64, op: u64) -> unit {
+    facts.items.push(Fact { kind: 1, fn: name, a: ordinal, b: 0, callee: copy(view("rt_f64_op")), what: 7, width: op });
+    return ();
+}
+pub fn facts_len<a>(facts: (&a Facts)) -> u64 {
+    return facts.items.len();
+}
+// --verify-facts writes the table into the module as comments, so a test can see exactly which
+// slots and which calls the lowering typed without reading the compiler's memory.
+fn dump_facts<a>(out: (&a mut u8[]), facts: (&a Facts)) -> unit {
+    for i in facts.items.len() {
+        f := &facts.items[i];
+        put(&mut out, view("; fact "));
+        put(&mut out, view(f.fn));
+        if f.kind == 0 {
+            put(&mut out, view(" slot "));
+        } else {
+            put(&mut out, view(" call "));
+            put(&mut out, view(f.callee));
+            out.push(44);
+            num(&mut out, f.b);
+            put(&mut out, view(" ordinal "));
+        }
+        num(&mut out, f.a);
+        put(&mut out, view(" what "));
+        num(&mut out, f.what);
+        put(&mut out, view(" width "));
+        num(&mut out, f.width);
+        out.push(10);
+    }
+    return ();
+}
+// Drops the facts of a function attempt the front end threw away.
+pub fn facts_truncate<a>(facts: (&a mut Facts), n: u64) -> unit {
+    while n < facts.items.len() {
+        facts.items.pop();
+    }
+    return ();
+}
+
 struct Func {
     name: u8[],
     first: u64,
@@ -1416,7 +1495,7 @@ fn frame_split<a>(instrs: (&a u8[][]), deepest: (&a mut u64)) -> u64 {
     return 1;
 }
 // Lowers one function into l.body; l.fail is set when any line is not understood.
-fn lower_function<a, b>(l: (&a mut L), lines: (&b u8[][]), f: (&b Func)) -> unit {
+fn lower_function<a, b, c>(l: (&a mut L), lines: (&b u8[][]), f: (&b Func), facts: (&c Facts)) -> unit {
     l.body = u8[];
     l.fail = 0;
     l.term = 0;
@@ -1679,14 +1758,14 @@ fn rename_calls<a, b>(line: &a [u8], lifted: (&b Set)) -> u8[] {
     }
     return out;
 }
-pub fn lower_for<a>(stream: &a [u8], target: u64) -> Lowered {
+pub fn lower_for<a, b>(stream: &a [u8], target: u64, facts: (&b Facts)) -> Lowered {
     triple := target_triple(target);
-    return lower_target(stream, view(triple), target);
+    return lower_target(stream, view(triple), target, facts);
 }
-pub fn lower<a, b>(stream: &a [u8], triple: &b [u8]) -> Lowered {
-    return lower_target(stream, triple, 0);
+pub fn lower<a, b, c>(stream: &a [u8], triple: &b [u8], facts: (&c Facts)) -> Lowered {
+    return lower_target(stream, triple, 0, facts);
 }
-fn lower_target<a, b>(stream: &a [u8], triple: &b [u8], target: u64) -> Lowered {
+fn lower_target<a, b, c>(stream: &a [u8], triple: &b [u8], target: u64, facts: (&c Facts)) -> Lowered {
     lines := split_lines(stream);
     mut l = L { target: target, ir: u8[], body: u8[], fail: 0, t: 0, dead: 0, term: 0, labels: set_new(16), calls: u8[][], addrs: u8[][], split: 0, refs: u8[][], lifted: u8[][], flags: 0, frame: 0 };
     mut funcs = Func[];
@@ -1715,7 +1794,7 @@ fn lower_target<a, b>(stream: &a [u8], triple: &b [u8], target: u64) -> Lowered 
         saved_refs := l.refs.len();
         saved_addrs := l.addrs.len();
         if pinned == 0 {
-            lower_function(&mut l, &lines, &f);
+            lower_function(&mut l, &lines, &f, facts);
         }
         if (pinned == 0) & (l.fail == 0) {
             put(&mut functions, view("define {i64, i64} @\""));
