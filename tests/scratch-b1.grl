@@ -1,0 +1,66 @@
+use pool;
+
+fn mix(x: u64) -> u64 {
+    mut v = x ^ 88172645463325252;
+    for i in 6 { v = v ^ (v << 13); v = v ^ (v >> 7); v = v ^ (v << 17); }
+    return v;
+}
+fn big(n: u64) -> u64[] {
+    mut v = u64[];
+    for i in n { v.push(i * 2654435761); }
+    return v;
+}
+fn owned_total(v: u64[]) -> u64 {
+    mut total = 0;
+    for x in v { total = total ^ mix(x); }
+    return total;
+}
+fn inplace_mix(s: &mut [u64]) {
+    for i in s.len() { s[i] = mix(s[i]); }
+}
+fn fold(v: u64[]) -> u64 {
+    mut total = 0;
+    for x in v { total = total ^ x; }
+    return total;
+}
+fn main() {
+    n := 3000000;
+    mut best_build = 0;
+    mut best_owned1 = 0;
+    mut best_owned8 = 0;
+    mut best_mut1 = 0;
+    mut best_mut8 = 0;
+    mut answer_a = 0;
+    mut answer_b = 0;
+    for round in 3 {
+        t0 := host::now_ms();
+        fresh := big(n);
+        t1 := host::now_ms();
+        owned := pool::for_chunks(fresh, 1, owned_total);
+        t2 := host::now_ms();
+        fresh8 := big(n);
+        t3 := host::now_ms();
+        owned8 := pool::for_chunks(fresh8, 8, owned_total);
+        t4 := host::now_ms();
+        mut data = big(n);
+        t5 := host::now_ms();
+        parallel_for_chunks(&mut data[0: n], 1, inplace_mix);
+        t6 := host::now_ms();
+        answer_a = fold(data);
+        parallel_for_chunks(&mut data[0: n], 8, inplace_mix);
+        t7 := host::now_ms();
+        answer_b = fold(data);
+        mut one = 0;
+        for x in owned { one = one ^ x; }
+        mut eight = 0;
+        for x in owned8 { eight = eight ^ x; }
+        host::write_fd(2, format("round {}: build {} owned1 {} owned8 {} mut1 {} mut8 {} | owned1={} mut1(after 2 passes)={} owned8={} mut8={}\n", round, t1 - t0, t2 - t1, t4 - t3, t6 - t5, t7 - t6, one, answer_a, eight, answer_b).text());
+        if (best_build == 0) || (t1 - t0 < best_build) { best_build = t1 - t0; }
+        if (best_owned1 == 0) || (t2 - t1 < best_owned1) { best_owned1 = t2 - t1; }
+        if (best_owned8 == 0) || (t4 - t3 < best_owned8) { best_owned8 = t4 - t3; }
+        if (best_mut1 == 0) || (t6 - t5 < best_mut1) { best_mut1 = t6 - t5; }
+        if (best_mut8 == 0) || (t7 - t6 < best_mut8) { best_mut8 = t7 - t6; }
+    }
+    host::write_fd(2, format("best: build {} owned1 {} owned8 {} mut1 {} mut8 {}\n", best_build, best_owned1, best_owned8, best_mut1, best_mut8).text());
+    println("ok");
+}

@@ -4153,7 +4153,7 @@ fn cap_denial_text<a, b>(c: (&a mut C), out: (&b mut u8[])) -> unit {
                                         if code == 11 {
                                             dput(&mut out, view("a job handle cannot be shared"));
                                         } else {
-                                        dput(&mut out, view("a type that nests too deeply to classify"));
+                                            dput(&mut out, view("a type that nests too deeply to classify"));
                                         }
                                     }
                                 }
@@ -12840,15 +12840,13 @@ fn parallel_for_chunks_builtin<a>(c: (&a mut C), data: Val) -> Val {
     // Every worker calls the same closure object, so its captures are shared, not moved.
     require_parallel_closure(&mut c, fty, 1, view("closure capture"));
     observe(&mut c, function.t);
+    // A closure is called as `code(&slot, args...)`: the environment is the address of the word
+    // holding the object, and the code pointer is the object's first word.
     mut env = imm(&mut c, 0);
     if closure {
-        if ty_kind(&mut c, data.ty) == 7 {
-            get(&mut c, data.t, view("%rax"));
-        } else {
-            o(&mut c, view("leaq "));
-            stack_slot(&mut c, function.t);
-            o(&mut c, view(",%rax\n"));
-        }
+        o(&mut c, view("leaq "));
+        stack_slot(&mut c, function.t);
+        o(&mut c, view(",%rax\n"));
         env = save(&mut c);
     }
     get(&mut c, function.t, view("%rax"));
@@ -12885,11 +12883,18 @@ fn parallel_for_chunks_builtin<a>(c: (&a mut C), data: Val) -> Val {
 fn parallel_spawn_builtin<a>(c: (&a mut C), callee: Val) -> Val {
     expect(&mut c, view(")"));
     input := callee.t;
+    inty := callee.ty;
     function := deref(&mut c, callee);
     fty := function.ty;
     closure := ty_kind(&mut c, fty) == 20;
     if (ty_kind(&mut c, fty) != 12) & !closure {
         fail(&mut c, view("parallel_spawn requires a callable"));
+    }
+    if closure & (ty_kind(&mut c, inty) == 7) {
+        fail(
+            &mut c,
+            view("a pool job takes its closure by value: a borrowed closure is still dropped by its owner, so the job cannot own it")
+        );
     }
     signature := type_args(&mut c, fty);
     if signature.len() != 0 {
