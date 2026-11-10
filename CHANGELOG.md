@@ -67,6 +67,48 @@
   environment is called by several workers. Classification must reach B1's interface files before
   separate compilation can check it; `docs/design/parallelism.md` records the table, the audit and
   that contract.
+- Parallelism stage 1: a real bounded work-stealing job pool in the runtime, and `lib/pool.grl` as
+  the safe surface over it. The pool is one process-wide singleton created by the first parallel
+  call: N workers (default max(4, available CPUs) capped at 64, `GRAIL_POOL_WORKERS` overrides it),
+  one bounded ring per worker plus a bounded injection ring for threads that are not workers, owner
+  push/pop at the tail (LIFO) and thieves taking from the head (FIFO) with a rotating victim cursor,
+  and idle workers parked in the kernel on one futex wake sequence read *before* each scan, so no
+  wakeup is lost and nothing spins for work. A job owns its callback, one environment word, one
+  argument word and the single word it returns; the worker publishes the result with a release store
+  and the thread that waits for the job frees the record, so every allocation has one releasing
+  thread. A waiting worker runs queued work itself, so nested parallelism cannot deadlock even on a
+  one-worker pool. `parallel_map` is now a client of the pool - it submits a few contiguous owned
+  ranges per worker and waits for every job - instead of creating and joining threads per call, and
+  it asserts that the per-job item counts sum to the item count, so an item written twice or not at
+  all aborts rather than returning a plausible wrong answer. `rt_offload` stays the blocking path;
+  a blocking foreign call never runs on a pool worker. Safe surface: `pool::map(items, f)`,
+  `pool::run(count, f)`, `pool::for_chunks(data, chunks, f)` (consume a vector, one contiguous owned
+  chunk per job, results concatenated in chunk order) and `pool::join(a, b)`; results are always in
+  input order, and the ownership rule "everything a job's closure touches it owns" is stated in the
+  module. Known gap, documented there and in `docs/design/parallelism.md`: item, result and context
+  are capability-checked (handles are neither `Send` nor `Share`, so a handle inside a record or
+  vector is refused), but the closure *environment* is not yet checked - closing that is the
+  compiler-side stage, and until it lands a closure passed to `pool` must be treated as trusted.
+  Measured on 24 reported cores, 3M CPU-bound elements, one job vs four: 27 ms → 8 ms (3.4x) at the
+  default size, 28 → 12 ms (2.3x) at four workers, 27 → 28 ms (0.96x) at one. Six native cases:
+  owned-chunk split equals the sequential answer, `map` order independent of completion order,
+  uneven work without deadlock, nested parallelism on a one-worker pool, an aborting job that
+  ends the process instead of hanging, and the speedup assertion (which skips honestly below four cores).
+  The test harness gained an `env` field for the one-worker case.
+- Fixed an interaction between the pool and the Windows green scheduler, found only when the two
+  branches met: the pool cached its pointer in `raw_state()+88`, and the green scheduler's new
+  task-mode cache then stored the resolved mode (1) there, so a program that ran a `task_scope`
+  before its first `parallel_map` read 1 as the pool pointer and faulted at address 0x9 - correct
+  output first, then SIGSEGV inside `rt_parallel_map` (`program-parallel-primes`), and the same page
+  fault under Wine. The pool's words are now 3200/3208, taken from named accessors that appear in a
+  single process-state table in `compiler/runtime.grl` (word, owner, accessor, claimant) instead of
+  a comment nobody owns. The same review found a second borrowing of the same kind: the pool read
+  "which worker am I" from thread-record word 48, which is free on Linux but is the Windows address
+  wait's per-thread expected-value slot, so every Windows wait and the pool marker fought over it;
+  a worker now publishes its thread record into its own worker block and `rt_pool_self` scans the
+  worker array, touching no thread-record word on any platform. Pinned by `pool-from-green-task`
+  (parallel work entered from a task scope and from spawned tasks), which fails with 139 against the
+  merged-but-unfixed runtime.
 - B1 stage 1, per-module emission: `grail build --split` writes one assembly file per module
   (`OUT.NNN.module.s`) plus `OUT.parts`, assembles the parts concurrently and links them once,
   instead of one `.s` for the whole program. Emission is still a single pass — the optimizer inlines
