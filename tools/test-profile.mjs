@@ -10,6 +10,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import assert from 'node:assert/strict';
 import { root } from './platforms.mjs';
+import { buildCompiler } from './native.mjs';
 
 function findCompiler() {
   for (const candidate of [process.env.GRAIL_COMPILER, process.env.GRAIL_LSP_COMPILER]) {
@@ -22,7 +23,13 @@ function findCompiler() {
     const names = readdirSync(dist).filter(name => name.startsWith('grail-') && name.endsWith('-linux-x86_64-compiler')).sort().reverse();
     if (names.length) return join(dist, names[0]);
   }
-  return null;
+  // Same fallback as the other compiler-backed suites: build the tree's own compiler.
+  try {
+    return buildCompiler();
+  } catch (error) {
+    console.error(`profile: no Grail compiler and none could be built: ${error.message}`);
+    return null;
+  }
 }
 
 function run(argv, options = {}) {
