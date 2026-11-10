@@ -1605,12 +1605,6 @@
     "diagnostic": "read-only"
   },
   {
-    "name": "closure-borrowed-capture-rejected",
-    "source": "fn g<a>(r:&a [u8]){f:=|| -> u64 r.len();}fn main(){}",
-    "reject": true,
-    "diagnostic": "cannot capture borrowed"
-  },
-  {
     "name": "closure-copy-rejected",
     "source": "fn main(){f:=|x: u64| -> u64 x;y:=f;z:=f;}",
     "reject": true,
@@ -4834,5 +4828,61 @@
       "lib/hash.grl",
       "lib/core.grl"
     ]
+  },
+  {
+    "name": "closure-captures-borrowed-parameter",
+    "source": "fn count<a>(r: &a [u8]) -> u64 {\n    f := || -> u64 r.len();\n    return f();\n}\nfn main() { s := \"abcd\"; println(\"{}\", count(s.text())); }\n",
+    "stdout": "4\n"
+  },
+  {
+    "name": "closure-captures-reference",
+    "source": "struct Group { depth: u64 }\nfn pick(f: Fn(u64) -> u64) -> u64 { return f(1); }\nfn main() {\n    g := Group { depth: 7 };\n    ref := &g;\n    f := |i: u64| -> u64 { return ref.depth + i; };\n    println(\"{}\", pick(f));\n}\n",
+    "stdout": "8\n"
+  },
+  {
+    "name": "closure-captures-exclusive-reference",
+    "source": "fn main() {\n    mut n = 5;\n    r := &mut n;\n    f := |x: u64| -> u64 { return *r + x; };\n    println(\"{}\", f(1));\n}\n",
+    "stdout": "6\n"
+  },
+  {
+    "name": "closure-captured-slice-sort-by",
+    "source": "use vecs;\nstruct Group { depth: u64, deps: u64[] }\nfn main() {\n    mut gs = Group[];\n    gs.push(Group { depth: 5, deps: u64[] });\n    gs.push(Group { depth: 1, deps: u64[1] });\n    gs.push(Group { depth: 3, deps: u64[1, 2] });\n    groups := &gs;\n    mut order = u64[0; groups.len()];\n    for i in order.len() { order[i] = i; }\n    vecs::sort_by(&mut order, |x: &u64, y: &u64| -> bool {\n        gx := &groups[*x];\n        gy := &groups[*y];\n        return ((u64(gx.deps.len() != 0) << 32) | (4294967295 - gx.depth)) < ((u64(gy.deps.len() != 0) << 32) | (4294967295 - gy.depth));\n    });\n    for i in order.len() { println(\"{}\", order[i]); }\n}\n",
+    "stdout": "0\n2\n1\n",
+    "modules": [
+      "lib/vecs.grl",
+      "lib/order.grl",
+      "lib/hash.grl",
+      "lib/core.grl"
+    ]
+  },
+  {
+    "name": "closure-borrowed-capture-escape-rejected",
+    "source": "struct Group { depth: u64 }\nfn key() -> Fn(u64) -> u64 {\n    b := Group { depth: 3 };\n    g := &b;\n    return |x: u64| -> u64 { return g.depth + x; };\n}\nfn main() { f := key(); println(\"{}\", f(4)); }\n",
+    "reject": true,
+    "diagnostic": "escapes its declared input lifetime"
+  },
+  {
+    "name": "closure-borrowed-capture-in-record-escape-rejected",
+    "source": "struct Holder { f: Fn(u64) -> u64 }\nstruct Group { depth: u64 }\nfn make() -> Holder {\n    b := Group { depth: 3 };\n    g := &b;\n    return Holder { f: |x: u64| -> u64 { return g.depth + x; } };\n}\nfn main() { h := make(); f := h.f; println(\"{}\", f(1)); }\n",
+    "reject": true,
+    "diagnostic": "escapes its declared input lifetime"
+  },
+  {
+    "name": "closure-borrowed-capture-through-callee-escape-rejected",
+    "source": "struct Holder { f: Fn(u64) -> u64 }\nstruct Group { depth: u64 }\nfn stash(less: Fn(u64) -> u64) -> Holder { return Holder { f: less }; }\nfn make() -> Holder {\n    b := Group { depth: 3 };\n    g := &b;\n    return stash(|x: u64| -> u64 { return g.depth + x; });\n}\nfn main() { h := make(); f := h.f; println(\"{}\", f(1)); }\n",
+    "reject": true,
+    "diagnostic": "escapes its declared input lifetime"
+  },
+  {
+    "name": "closure-captured-slice-moves-in",
+    "source": "fn main() {\n    v := u64[5, 6];\n    s := v[0: 2];\n    f := |x: u64| -> u64 { return s[x]; };\n    println(\"{}\", f(1));\n    println(\"{}\", s.len());\n}\n",
+    "reject": true,
+    "diagnostic": "use of moved"
+  },
+  {
+    "name": "closure-aggregate-borrow-capture-rejected",
+    "source": "struct W<a> { r: (&a u64) }\nfn main() {\n    n := 5;\n    w := W { r: &n };\n    f := |x: u64| -> u64 { return *w.r + x; };\n    println(\"{}\", f(1));\n}\n",
+    "reject": true,
+    "diagnostic": "not a struct or enum holding a borrow"
   }
 ]

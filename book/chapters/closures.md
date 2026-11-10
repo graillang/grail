@@ -11,7 +11,28 @@ text in `words` are moved into it, and the original name can no longer be used. 
 captured values are read-only. A closure is called like a function and can be called many times;
 when it goes out of scope, the values it captured are cleaned up with it.
 
-Grail closures always own their captures, like Rust's `move` closures. Capturing a borrowed reference and mutating captured state are rejected. Closures work inside generic functions; the checker keeps their captures affine like other values.
+Mutating captured state is rejected: captures are read-only inside the body. Closures work inside
+generic functions; the checker keeps their captures affine like other values.
+
+## Capturing a borrowed value
+
+A closure may also capture a reference or view — `&T`, `&[T]`, `&[u8]`, `&mut T` — and that is how
+a closure reads something that lives outside the value it is given. The reference moves into the
+closure, pointer and loan together, so the name it moved from cannot be used afterwards, and the
+closure may not outlive what it borrows: returning it, or storing it somewhere the borrow does not
+reach, is rejected.
+
+```grl
+groups := &b.groups;
+vecs::sort_by(&mut order, |x: &u64, y: &u64| -> bool {
+    gx := &groups[*x];
+    gy := &groups[*y];
+    return gx.depth > gy.depth;
+});
+```
+
+A struct or enum that merely holds a borrow is not captured (its layout and cleanup are its own):
+bind the reference itself, or reach the value through one.
 
 ## Sorting with a closure
 
