@@ -317,17 +317,38 @@ in, and `for_chunks` returns chunk order. The runtime also asserts an exactness 
 the per-job counts must sum to the item count, so an item written twice or not at all aborts instead
 of returning a plausible wrong answer.
 
-### The gap this stage does not close
+### What is checked, and what is not
 
-`parallel_map` - and therefore everything above - capability-checks the item, the result and the
-context structurally: a `handle` is neither `Send` nor `Share` (type kind 14, `transfer_capability`
-returns false), so `H[]`, `Holder{file: H}[]` and a handle as the context are all refused with a
-diagnostic. What is **not** checked is the closure environment: `|x: u64, u: u64| -> u64 touch(&held,
-x)` with `held` a record holding a handle compiles and reaches that handle read-only from every
-worker. That hole is pre-existing in `parallel_map`, not introduced here, and it is closed where the
-classification lives - the closure-capture capability check in `compiler/native.grl`. Until it
-lands, the module doc says plainly: treat a closure passed to `pool` as trusted, capture plain data,
-keep handles out of the capture.
+Both the values that cross a job boundary and the closure's environment are now classified. The
+compiler's structural walk (`transfer_capability`) is the single derivation engine, reached through
+`require_parallel_closure` for a callback, and it names the field that denies:
+
+    a handle captured by the closure
+      cannot share closure capture `h`: h.file is thread-affine (a foreign handle with no audited classification)
+    a handle as the item, or a record holding one
+      cannot transfer parallel_map item: thread-affine (a foreign handle with no audited classification)
+      cannot transfer parallel_map item: file is thread-affine (a foreign handle with no audited classification)
+    unclassified FFI authority (`CStr`, `CPtr`, `CMutPtr`)
+      cannot transfer parallel_map item: unclassified foreign authority
+
+Also refused: an `FnMut` closure shared with concurrent workers ("an FnMut closure would race on its
+own environment"), a `Task` handle, an exclusive borrow, a mutable slice or view, and a type
+parameter with no capability proof. A type declared transferable but not shareable is accepted for an
+item and refused as a shared context, which is the distinction the design note's table draws.
+
+What this does **not** buy, and must not be read as buying:
+
+- **The foreign library's behaviour.** A classification says a value may move or be shared; it does
+  not say the library behind it tolerates that. That is what an audited declaration asserts, and the
+  declarations for the handles actually used (files, sockets, Vulkan objects) are still to come.
+- **The FFI surface is default-denied, not audited.** `CStr`, `CPtr`, `CMutPtr` and `cfn` are
+  deliberately unclassified, so they are refused as "unclassified foreign authority" or "an
+  unclassified C function pointer" today. Conservative and correct, and it means a legitimate
+  foreign blob cannot cross a job boundary until its declaration exists.
+- **`unsafe module` code.** It can construct or convert anything, so the classification is exactly
+  as strong as the safe surface above it.
+- **Shared OS resources.** Two jobs writing the same descriptor is not a data race and no type
+  catches it; it stays a documented hazard, mediated by the authority model and by owner actors.
 
 ### Lifecycle properties: tested vs designed
 
