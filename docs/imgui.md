@@ -141,16 +141,17 @@ takes.
   | Assertion | Value |
   | --- | --- |
   | frame 0 (a window with no size yet) | `cmd_lists 0`, `total_vtx 0`, `total_idx 0` |
-  | frame 1 (laid out) | `cmd_lists 2`, `total_vtx 270`, `total_idx 441` |
-  | the settled frame | `cmd_lists 2`, `total_vtx 270`, `total_idx 441` |
-  | draw list 0 | 234 vertices, 387 indices, 2 commands |
+  | frame 1 (laid out) | `cmd_lists 2`, `total_vtx 310`, `total_idx 501` |
+  | the settled frame | `cmd_lists 2`, `total_vtx 310`, `total_idx 501` |
+  | draw list 0 | 274 vertices, 447 indices, 2 commands |
   | draw list 1 | 36 vertices, 54 indices, 1 command |
-  | `io.metrics_render_vertices` vs `draw.total_vtx` | 270 = 270 |
+  | `io.metrics_render_vertices` vs `draw.total_vtx` | 310 = 310 |
+  | `input.value` through `InputScalar` | 1000 (nothing typed; the record came back as it went in) |
   | `id.pushed != id.base`, `id.restored == id.base` | 1, 1 |
   | a click on the button's own rectangle | 0 on hover, 0 on press, 1 on release, 0 after the mouse leaves |
 
   Those counts are not a fixture: they are what the two programs printed, and the suite fails if either
-  changes. The triangle list itself is in the reference file (`list.tri i a b c`, 441 indices as 147
+  changes. The triangle list itself is in the reference file (`list.tri i a b c`, 501 indices as 167
   triangles), which is also where a change in ImGui's tessellation shows up as a diff.
 
 - **`imgui_layout_probe.grl`, a verdict probe like the RHI ones.** It reports

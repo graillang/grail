@@ -14,7 +14,7 @@
   again at run time by `imgui_layout_probe.grl` in both directions. `imgui_test.grl` (new) runs
   widgets, IDs, a table, a child, an `InputU64` (ImGui's `InputScalar` over `ImGuiDataType_U64`), a
   real click on a button's own rectangle, and then prints every vertex, every triangle and every draw
-  command of a settled frame: 2 draw lists, 270 vertices, 441 indices, 147 triangles, byte-identical
+  command of a settled frame: 2 draw lists, 310 vertices, 501 indices, 167 triangles, byte-identical
   to the same frames through ImGui's own C++ API in `abundance/tests/parity/imgui.cpp`. That is 11
   reference programs now, and the ten ports are unchanged.
 - Dear ImGui reaches the GPU: `abundance/src/imgui_platform.grl` (new) binds `ImGui_ImplSDL3_InitForVulkan`,
