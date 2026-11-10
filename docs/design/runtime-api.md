@@ -334,6 +334,8 @@ runtime, FFI and tests:
 | `host::now_ms`, `sleep_ms` | `time::now`, `time::sleep` | nanoseconds; task-aware sleep |
 | `host::tcp_listen`, `tcp_accept`, `tcp_connect`, `tcp_port` | `net` | readiness stays private |
 | `host::command` | `process::Command`/`run` | argv, not shell syntax |
+| `host::command_with` | `process::Command::env_clear` + `env` | the second vector is the child's whole environment |
+| `host::environment` | `std::env::vars` | for the additive spelling: this process's entries |
 | `host::print`, `host::newline` | runtime stdio | not an OS service; stays in the runtime |
 | `host::exit` | runtime exit | not an OS service; cleanup checks stay in the runtime |
 | `host::target` | compiler target query | not an OS service |

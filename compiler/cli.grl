@@ -1278,10 +1278,11 @@ fn debug_command<a>(args: (&a u8[][])) -> u64 {
     return host::command(decoded);
 }
 // ---- `grail profile` -------------------------------------------------------------------------
-// The target profiles itself: its runtime reads .grail-profile/config, arms an ITIMER_PROF timer
-// and writes the interrupted instruction pointers to the file named there (see runtime.grl). This
-// side owns the rendezvous file, the ELF symbol table and the report; no perf, nm or addr2line is
-// involved, and only the program's own instruction pointer is sampled.
+// The target profiles itself: its runtime reads GRAIL_PROFILE from its environment, arms an
+// ITIMER_PROF timer and writes the interrupted instruction pointers to the file named there (see
+// runtime.grl). This side owns the request, the scratch directory, the ELF symbol table and the
+// report; no perf, nm or addr2line is involved, and only the program's own instruction pointer is
+// sampled.
 struct Symbol {
     start: u64,
     function: u8[],
@@ -1565,6 +1566,31 @@ fn by_count<a, b>(counts: (&a u64[]), slots: (&b u64[])) -> u64[] {
     }
     return order;
 }
+// Where per-run scratch lives: TMPDIR when the environment names one, /tmp otherwise. `grail
+// profile` refuses non-Linux targets, so there is no platform-specific temp directory here.
+fn profile_temp() -> u8[] {
+    named := host::env(view("TMPDIR"));
+    if named.len() != 0 {
+        return named;
+    }
+    return copy(view("/tmp"));
+}
+// A directory of our own for one run: `mkdir` is the atomic claim, so two profilers started in the
+// same millisecond cannot share a sample file, and the directory is removed once the report is read.
+fn profile_scratch() -> u8[] {
+    base := profile_temp();
+    stamp := host::now_ms();
+    mut n: u64 = 0;
+    while n < 10000 {
+        name := cat(view("grail-profile-"), view(decimal(stamp + n)));
+        dir := path_join(view(base), view(name));
+        if host::mkdir(view(dir)) == 0 {
+            return dir;
+        }
+        n += 1;
+    }
+    return u8[];
+}
 fn profile_command<a>(args: (&a u8[][])) -> u64 {
     mut rate: u64 = 200;
     mut out_path = u8[];
@@ -1609,13 +1635,15 @@ fn profile_command<a>(args: (&a u8[][])) -> u64 {
         say(view(program));
         return 2;
     }
-    // Rendezvous: the runtime looks for this file relative to the working directory it inherits.
-    dir := copy(view(".grail-profile"));
+    // The arming request travels in the child's environment, so the target needs no writable
+    // working directory and a killed run cannot leave a stale request behind for the next one.
+    dir := profile_scratch();
+    if dir.len() == 0 {
+        say(view("grail profile: cannot create a directory for the samples under "));
+        say(view(profile_temp()));
+        return 2;
+    }
     samples := path_join(view(dir), view("samples"));
-    config := path_join(view(dir), view("config"));
-    host::mkdir(view(dir));
-    host::remove(view(samples), 0);
-    host::remove(view(config), 0);
     mut text = decimal(1);
     text.push(32);
     text = cat(view(text), view(decimal(rate)));
@@ -1623,12 +1651,11 @@ fn profile_command<a>(args: (&a u8[][])) -> u64 {
     text = cat(view(text), view(decimal(65536)));
     text.push(32);
     text = cat(view(text), view(samples));
-    text.push(10);
-    if host::write_file(view(config), text) != 0 {
-        say(view("grail profile: cannot write "));
-        say(view(config));
-        return 2;
-    }
+    // The inherited environment plus the request, so the profiled program still sees everything it
+    // would have seen; a child started with an explicit environment is not armed unless it copies
+    // this entry.
+    mut environment = host::environment();
+    environment.push(cat(view("GRAIL_PROFILE="), view(text)));
     mut command = u8[][];
     command.push(item(&rest, 0));
     for n in rest.len() {
@@ -1636,7 +1663,7 @@ fn profile_command<a>(args: (&a u8[][])) -> u64 {
             command.push(item(&rest, n));
         }
     }
-    status := host::command(command);
+    status := host::command_with(command, environment);
     mut out = u8[];
     mut title = cat(view("grail profile: "), view(program));
     push_line(&mut out, view(title));
@@ -1646,13 +1673,11 @@ fn profile_command<a>(args: (&a u8[][])) -> u64 {
             view("  no samples: the target did not arm the sampling runtime at startup")
         );
         say(view(out));
-        host::remove(view(config), 0);
         host::remove(view(dir), 1);
         return status;
     }
     data := host::read_file(view(samples));
     host::remove(view(samples), 0);
-    host::remove(view(config), 0);
     host::remove(view(dir), 1);
     if data.len() < 48 {
         say(view("grail profile: truncated sample file"));

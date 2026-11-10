@@ -128,6 +128,102 @@
   worker array, touching no thread-record word on any platform. Pinned by `pool-from-green-task`
   (parallel work entered from a task scope and from spawned tasks), which fails with 139 against the
   merged-but-unfixed runtime.
+- Book and status documents match the 2026-11-10 increments. The book (54 examples, each with its
+  Rust comparison) adds strict bool conditions (`strict-condition`: an integer condition is refused
+  in both languages), consuming loops over owned elements (`consume-owned`) and range loops in
+  *Branches and loops*, and a *Calling C* section in *Cleanup and current boundaries* with the
+  `byval` record marker (`byval-record`), the handle and out-parameter surface, and what the FFI
+  still refuses. Claims that map iteration, owned-element consumption, `FnMut`, borrowed captures,
+  `char`, the sampling profiler, `.debug_info` locals or the language server were missing or
+  rejected are gone, and so are the comparison notes that said Grail comparisons produce a number
+  rather than `bool`. [docs/design/language-readiness.md](docs/design/language-readiness.md) now
+  reports B1 stage 1, B2, B6 and B7 as implemented, with the Windows `byval` refusal;
+  [docs/platform-status.md](docs/platform-status.md) replaces the stale FFI, tooling and COM rows;
+  [docs/ffi.md](docs/ffi.md) documents the `byval` marker instead of listing it as decided-but-absent;
+  and [docs/design/decisions-b2-b6.md](docs/design/decisions-b2-b6.md) records what landed for B1,
+  B2 and B7.
+- Fixed: the `FnMut` entry below had a duplicated half-paragraph spliced into it.
+- Borg journals replay into the in-memory session state (`borg/src/replay.grl`). The module folds a
+  decoded event stream with the rules of `SessionState::reduce`/`apply` (session_store.rs:906-959,
+  1036-1041, 1320-1336) over the five transcript kinds `borg/src/events.grl` carries, and
+  reconstructs exactly what those kinds write: the sequence cursor, when the session started, the
+  activity clock, status and detail, the title with the rule that a generated title is final
+  (session_store.rs:952), the first and latest prompt and the latest reply. It folds typed events
+  rather than bytes, so it cannot disagree with the reader about what an event says, and
+  `replay_stream` propagates the reader's refusal — a cut tail, an unknown tag — instead of folding
+  the rows that arrived before the cut; a refused stream yields no state at all. An event that cannot
+  apply is refused by name with the index that stopped the fold and never skipped or forced:
+  `sequence` (not the expected `last + 1`), `session` (another session's `session_id`),
+  `unknown-actor` and `unknown-message-status` (outside `EventActor`'s and `MessageStatus`'
+  four variants), and `stream` (the reader's own code). The one rule that drops rather than refuses —
+  a title event while the current title was generated — is the model's own rule, so replay counts
+  the drop (`titles_frozen`) instead of rejecting a journal Borg writes. `borg_events` gains typed
+  accessors (`title_value`, `status_value`, `actor_value`, `tokens_value`, ...) so a fold can tell an
+  absent optional from a text that happens to be `-`, and `no_event()`. `borg/tests/replay_test.grl`
+  covers a clean journal, the empty one (which replays to the default state, not an error),
+  out-of-order, unknown actor, unknown message status, a foreign session, the sticky title, and a
+  journal read back from the typed byte stream intact and cut short, then generates journals: a
+  seeded xorshift makes six events per seed and each seed must replay to the same checksum twice and
+  to the same checksum as `prefix + [last]` versus `replay(prefix)` plus a direct `apply` — refusals
+  compared by index and reason, so both sides must fail identically. The committed reference
+  (`borg/tests/parity/ref/src/bin/replay.rs`) is an independent implementation of the same rules and
+  of the byte stream, and the suite compares fingerprints and FNV-1a checksums field by field.
+  `docs/design/borg-agent-port.md` records what replay reconstructs, the refusal table, and what it
+  cannot cover yet: a real journal also carries `PlanProjected`, `SubagentRegistered` and provider
+  events, whose unknown tags the reader refuses, so replaying one fails by name rather than
+  returning the subset it understood.
+- Explicit environments for spawned processes: `host::command_with(argv, env)` runs `argv` with
+  `env` as the child's *whole* environment and returns the same status encoding `host::command`
+  returns (0–255 exit code, 128+N for a signal, 256+errno when the child could not be started, and
+  278 = 256+EINVAL for a vector or entry that cannot be used). Nothing is inherited: an empty vector
+  means the child starts with no environment from us, and a malformed entry (no `=`, or an empty
+  name) is refused before anything is spawned, because `execve` would otherwise start the child with
+  no environment at all and `CreateProcess` rejects the block. Both vectors are consumed, like
+  `host::command`. `host::environment()` reports this process's own environment as `NAME=VALUE`
+  entries, which is the additive spelling made explicit — `env := host::environment();
+  env.push("APP_MODE=batch".copy()); host::command_with(argv, env)`. The executable search stays in
+  the parent against the parent's `PATH`, so an explicit environment does not stop `"sh"` from being
+  found. The spawn moved out of the portable runtime into the platform modules: `rt_spawn_wait` is
+  `fork`/`execve`/`wait4` in `compiler/os-linux.grl` and `compiler/darwin.grl`, and `CreateProcessA`
+  with an explicit (sorted, double-NUL-terminated) environment block in `compiler/os-windows.grl`,
+  which also makes `host::command` work on windows-x86_64 for the first time: a NULL block inherits,
+  a non-NULL one replaces. The Windows argument vector is quoted back into the command line with the
+  `CommandLineToArgvW` rules; the ARM64 PE target reports the call as unimplemented because the
+  ARM64 Win32 call path passes seven register arguments and `CreateProcessA` needs ten. Tests: six
+  native cases (`command-with-env-carries-its-entries`, `-empty-env-clears-everything`,
+  `-built-from-the-inherited-one`, `command-without-env-still-inherits`, `-refuses-malformed-entry`,
+  `-reports-a-signalled-child`) and four Windows cases executed under Wine (`command-with-env`,
+  `-inherit-env`, `-empty-env`, `-argv-round-trip`) plus one static ARM64 build. A host builtin that
+  `compiler/*.grl` itself calls needs a **two-step bootstrap**, because the checked-in seed *is* the
+  compiler and carries the `host::` table of the commit it was recorded from: stage a compiler that
+  knows the builtin and point `GRAIL_COMPILER` at it, then reseed with that same variable
+  (`bun tools/bootstrap.mjs update all` — `bootstrap.mjs` uses `buildCompiler()`, which honours
+  `GRAIL_COMPILER`), then confirm on a clean tree (`rm -rf .work && bun tools/native.mjs build` with
+  no `GRAIL_COMPILER`). `bun tools/bootstrap.mjs verify x86_64` is the 20-second version of that
+  check: it still reports "checked-in bootstrap is stale" when `GRAIL_COMPILER` is set, which is the
+  case the suites cannot catch. Until the reseed lands, a plain build of this branch fails at the seed with
+  `unknown function` for `host::environment`; `docs/testing.md` records the cycle next to the other
+  reseed notes.
+- `authority::spawn_with(&a, argv, env)` gates an explicit environment with the same `may_spawn`
+  grant as `authority::spawn`: spawning with an environment of your choosing is still a spawn, so
+  neither route becomes a way around the other, and a file grant is refused exactly as it is for a
+  plain spawn. `authority::environment()` returns this process's own entries so a program compiled
+  with `--deny-ambient-host` can build an additive environment without opting into `use host;`;
+  reading your own environment stays ungated, because every grant already implies the process can
+  see its own configuration. What the grant covers is unchanged and still narrow: it decides
+  *whether* a child starts, not what program it runs, and the child's own environment reads are
+  outside the model.
+- `grail profile` no longer uses a rendezvous file: the arming request
+  (`GRAIL_PROFILE="1 RATE CAPACITY SAMPLES"`) travels in the target's environment through
+  `host::command_with`, the samples go to a private `mkdir`-claimed scratch directory under
+  `TMPDIR`, and nothing is written to the target's working directory. A killed run can no longer
+  leave a stale request behind, the target no longer needs a writable working directory, and
+  concurrent profiles no longer collide on `.grail-profile/`. The runtime reads the variable at
+  startup instead of a config file. A profiled program that spawns Grail children with the
+  inherited environment now arms them too (they share one sample file); a child started with an
+  explicit environment is not armed unless the request is copied into it. `tools/test-profile.mjs`
+  now also asserts that the target still sees a variable the runner set, and that no
+  `grail-profile-` scratch directory is left behind.
 - B1 stage 1, per-module emission: `grail build --split` writes one assembly file per module
   (`OUT.NNN.module.s`) plus `OUT.parts`, assembles the parts concurrently and links them once,
   instead of one `.s` for the whole program. Emission is still a single pass — the optimizer inlines
@@ -180,30 +276,6 @@
   now covers the SDL3 window alone; `tools/abundance-test.mjs` links one system library per probe,
   so the Vulkan probe runs on a machine with no display server while the window probe skips there.
 - `FnMut`: a closure that mutates a captured value now works, with the rules B6 fixed in advance.
-  The body is scanned for a store to a capture or to a place rooted at it (`n = ..`, `n += ..`,
-  `s.field = ..`, `v[i] = ..`, `*r = ..`), a mutable borrow of it (`&mut n`) and method calls that
-  may mutate their receiver; a closure with any such capture is `FnMut(...)` instead of `Fn(...)`.
-  Only the written captures are mutable in the body, and the body's hidden environment parameter is
-  `&mut Env`, so a store goes through an exclusive reference to the environment field and the
-  existing loan checks apply. Calling an `FnMut` value needs a mutable binding (`mut f = |...|`),
-  borrows the closure exclusively for the whole call and ends that borrow when the call returns: a
-  second simultaneous call (`f(f(1))`) or a live shared borrow of the closure is rejected, and a
-  `FnMut` closure used where `Fn` is required (the `Fn(...)` parameter type, a function value
-  coerced to it, `vecs::sort_by` and the other stdlib callbacks) is rejected with a diagnostic that
-  says why instead of being silently made exclusive. A closure that writes nothing stays `Fn` and is
-  accepted where `FnMut` is expected, by value and as `&mut Fn(...)` for `&mut FnMut(...)`; `FnMut`
-  is written in type position like `Fn`. A by-value `FnMut` parameter cannot be called, because
-  parameters are not mutable storage — adapters take `&mut FnMut(...)`, and even then a callable
-  reached through a reference parameter can be called once in straight-line code (the pre-existing
-  `access has no live reference authority` limitation, which reproduces on `main` with `&Fn`).
-  `compiler/native.grl`, fourteen cases in `tests/native-cases.json` (`closure-fnmut-counter`,
-  `-disjoint-captures`, `-sequential-calls`, `-second-call-rejected`, `-shared-borrow-rejected`,
-  `-not-fn-rejected`, `-sort-by-rejected`, `-vector-element`, `-captured-field`,
-  `-needs-mut-binding`, `-through-exclusive-reference`, `-mixed-captures`,
-  `closure-shared-capture-still-fn`, `closure-shared-borrow-of-fn-closure`) plus the two former
-  read-only rejections now accepted as `closure-capture-mutation-fnmut` and
-  `closure-capture-borrow-mut-fnmut`, the book example `fnmut`, and the B6 decision record.
-tates a captured value now works, with the rules B6 fixed in advance.
   The body is scanned for a store to a capture or to a place rooted at it (`n = ..`, `n += ..`,
   `s.field = ..`, `v[i] = ..`, `*r = ..`), a mutable borrow of it (`&mut n`) and method calls that
   may mutate their receiver; a closure with any such capture is `FnMut(...)` instead of `Fn(...)`.
