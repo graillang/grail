@@ -1064,12 +1064,496 @@ fn debug_command<a>(args: (&a u8[][])) -> u64 {
     ];
     return host::command(decoded);
 }
+// ---- `grail profile` -------------------------------------------------------------------------
+// The target profiles itself: its runtime reads .grail-profile/config, arms an ITIMER_PROF timer
+// and writes the interrupted instruction pointers to the file named there (see runtime.grl). This
+// side owns the rendezvous file, the ELF symbol table and the report; no perf, nm or addr2line is
+// involved, and only the program's own instruction pointer is sampled.
+struct Symbol {
+    start: u64,
+    function: u8[],
+    module: u8[]
+}
+fn byte_at<a>(image: &a [u8], at: u64) -> u64 {
+    if at < image.len() {
+        return u64(image[at]);
+    }
+    return 0;
+}
+fn le16<a>(image: &a [u8], at: u64) -> u64 {
+    if image.len() < at + 2 {
+        return 0;
+    }
+    return byte_at(view(image), at) + byte_at(view(image), at + 1) * 256;
+}
+fn le32<a>(image: &a [u8], at: u64) -> u64 {
+    if image.len() < at + 4 {
+        return 0;
+    }
+    return le16(view(image), at) + le16(view(image), at + 2) * 65536;
+}
+fn le64<a>(image: &a [u8], at: u64) -> u64 {
+    if image.len() < at + 8 {
+        return 0;
+    }
+    return le32(view(image), at) + le32(view(image), at + 4) * 4294967296;
+}
+fn bytes_between<a>(image: &a [u8], from: u64, to: u64) -> u8[] {
+    mut out = u8[];
+    mut i = from;
+    while i < to {
+        out.push(image[i]);
+        i += 1;
+    }
+    return out;
+}
+fn cstring_at<a>(image: &a [u8], at: u64) -> u8[] {
+    mut out = u8[];
+    mut i = at;
+    while (i < image.len()) && (image[i] != 0) {
+        out.push(image[i]);
+        i += 1;
+    }
+    return out;
+}
+fn starts_with<a, b>(text: &a [u8], prefix: &b [u8]) -> bool {
+    if text.len() < prefix.len() {
+        return false;
+    }
+    for i in prefix.len() {
+        if text[i] != prefix[i] {
+            return false;
+        }
+    }
+    return true;
+}
+fn decimal(n: u64) -> u8[] {
+    mut out = u8[];
+    mut v = n;
+    if v == 0 {
+        out.push(48);
+        return out;
+    }
+    while 0 < v {
+        out.push(48 + v % 10);
+        v = v / 10;
+    }
+    mut flipped = u8[];
+    mut i = out.len();
+    while 0 < i {
+        i -= 1;
+        flipped.push(out[i]);
+    }
+    return flipped;
+}
+fn number_of<a>(text: &a [u8]) -> u64 {
+    mut value: u64 = 0;
+    for i in text.len() {
+        c := u64(text[i]);
+        if (c < 48) || (57 < c) {
+            return 0;
+        }
+        value = value * 10 + (c - 48);
+    }
+    return value;
+}
+fn pad_left<a>(text: &a [u8], width: u64) -> u8[] {
+    mut out = u8[];
+    mut i = text.len();
+    while i < width {
+        out.push(32);
+        i += 1;
+    }
+    for i in text.len() {
+        out.push(text[i]);
+    }
+    return out;
+}
+fn padded<a>(text: &a [u8], width: u64) -> u8[] {
+    mut out = u8[];
+    for i in text.len() {
+        out.push(text[i]);
+    }
+    while out.len() < width {
+        out.push(32);
+    }
+    return out;
+}
+fn share_text(count: u64, total: u64) -> u8[] {
+    if total == 0 {
+        return copy(view("0.0%"));
+    }
+    // One decimal place, rounded to the nearest tenth of a percent.
+    tenths := (count * 1000 + total / 2) / total;
+    mut out = decimal(tenths / 10);
+    out.push(46);
+    out.push(48 + tenths % 10);
+    out.push(37);
+    return out;
+}
+fn seconds_text(count: u64, rate: u64) -> u8[] {
+    if rate == 0 {
+        return copy(view("0.0 s"));
+    }
+    // Hundredths of a second of sampled CPU time: samples / rate.
+    hundredths := (count * 100 + rate / 2) / rate;
+    mut out = decimal(hundredths / 100);
+    out.push(46);
+    out.push(48 + (hundredths / 10) % 10);
+    out.push(48 + hundredths % 10);
+    out.push(32);
+    out.push(115);
+    return out;
+}
+fn push_text<a>(out: (&mut u8[]), text: &a [u8]) -> unit {
+    for i in text.len() {
+        out.push(text[i]);
+    }
+}
+fn push_line<a>(out: (&mut u8[]), text: &a [u8]) -> unit {
+    push_text(&mut out, view(text));
+    out.push(10);
+}
+// Every STT_FUNC symbol in .symtab, split into `f_<module>_<function>`. The compiler emits no
+// st_size for its functions, so a range runs from a symbol's start to the next symbol's start.
+fn elf_symbols<a>(image: &a [u8]) -> Symbol[] {
+    mut out = Symbol[];
+    if image.len() < 64 {
+        return out;
+    }
+    if (image[0] != 127) || (image[1] != 69) || (image[2] != 76) || (image[3] != 70) {
+        return out;
+    }
+    shoff := le64(view(image), 40);
+    entsize := le16(view(image), 58);
+    count := le16(view(image), 60);
+    mut symoff: u64 = 0;
+    mut symsize: u64 = 0;
+    mut step: u64 = 0;
+    mut stroff: u64 = 0;
+    mut found: u64 = 0;
+    mut i: u64 = 0;
+    while i < count {
+        base := shoff + i * entsize;
+        if le32(view(image), base + 4) == 2 {
+            symoff = le64(view(image), base + 24);
+            symsize = le64(view(image), base + 32);
+            step = le64(view(image), base + 56);
+            link := le32(view(image), base + 40);
+            stroff = le64(view(image), shoff + link * entsize + 24);
+            found = 1;
+        }
+        i += 1;
+    }
+    if (found == 0) || (step == 0) {
+        return out;
+    }
+    mut at: u64 = 0;
+    while at + step <= symsize {
+        entry := symoff + at;
+        if byte_at(view(image), entry + 4) % 16 == 2 {
+            address := le64(view(image), entry + 8);
+            if address != 0 {
+                name := cstring_at(view(image), stroff + le32(view(image), entry));
+                mut module = u8[];
+                mut function = copy(view(name));
+                if starts_with(view(name), view("f_")) {
+                    mut k: u64 = 2;
+                    while (k < name.len()) && (name[k] != 95) {
+                        k += 1;
+                    }
+                    module = bytes_between(view(name), 2, k);
+                    function = bytes_between(view(name), k + 1, name.len());
+                } else if starts_with(view(name), view("rt_")) {
+                    module = copy(view("runtime"));
+                }
+                out.push(Symbol { start: address, function: function, module: module });
+            }
+        }
+        at += step;
+    }
+    return out;
+}
+// Symbol indices ordered by start address.
+fn by_start<a>(symbols: (&a Symbol[])) -> u64[] {
+    mut order = u64[];
+    for i in symbols.len() {
+        order.push(i);
+    }
+    mut k: u64 = 1;
+    while k < order.len() {
+        mut j = k;
+        while 0 < j {
+            if symbols[order[j - 1]].start <= symbols[order[j]].start {
+                break;
+            }
+            swapped := order[j - 1];
+            order[j - 1] = order[j];
+            order[j] = swapped;
+            j -= 1;
+        }
+        k += 1;
+    }
+    return order;
+}
+// The symbol whose range holds `pc`, or symbols.len() when no known symbol covers it.
+fn symbol_at<a, b>(symbols: (&a Symbol[]), order: (&b u64[]), pc: u64) -> u64 {
+    mut lo: u64 = 0;
+    mut hi: u64 = order.len();
+    while lo < hi {
+        mid := lo + (hi - lo) / 2;
+        if symbols[order[mid]].start <= pc {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    if lo == 0 {
+        return symbols.len();
+    }
+    return order[lo - 1];
+}
+// Symbol indices with at least one sample, most samples first.
+fn by_count<a, b>(counts: (&a u64[]), slots: (&b u64[])) -> u64[] {
+    mut order = u64[];
+    for i in slots.len() {
+        if counts[slots[i]] != 0 {
+            order.push(slots[i]);
+        }
+    }
+    mut k: u64 = 1;
+    while k < order.len() {
+        mut j = k;
+        while 0 < j {
+            if counts[order[j - 1]] >= counts[order[j]] {
+                break;
+            }
+            swapped := order[j - 1];
+            order[j - 1] = order[j];
+            order[j] = swapped;
+            j -= 1;
+        }
+        k += 1;
+    }
+    return order;
+}
+fn profile_command<a>(args: (&a u8[][])) -> u64 {
+    mut rate: u64 = 200;
+    mut out_path = u8[];
+    mut i: u64 = 0;
+    while i < args.len() {
+        a := item(&args, i);
+        if eq(view(a), view("--")) {
+            i += 1;
+            break;
+        }
+        if eq(view(a), view("--rate")) && (i + 1 < args.len()) {
+            i += 1;
+            rate = number_of(view(item(&args, i)));
+        } else if eq(view(a), view("--out")) && (i + 1 < args.len()) {
+            i += 1;
+            out_path = item(&args, i);
+        } else {
+            break;
+        }
+        i += 1;
+    }
+    mut rest = u8[][];
+    while i < args.len() {
+        rest.push(item(&args, i));
+        i += 1;
+    }
+    if rest.len() == 0 {
+        say(view("usage: grail profile [--rate N] [--out FILE] -- PROGRAM [ARGS]"));
+        return 2;
+    }
+    if (rate == 0) || (1000000 < rate) {
+        say(view("grail profile: --rate must be between 1 and 1000000 samples per second"));
+        return 2;
+    }
+    if host::target() != 0 {
+        say(view("grail profile: sampling is implemented for Linux x86-64 only"));
+        return 2;
+    }
+    program := item(&rest, 0);
+    if host::exists(view(program)) == 0 {
+        say(view("grail profile: no such file: "));
+        say(view(program));
+        return 2;
+    }
+    // Rendezvous: the runtime looks for this file relative to the working directory it inherits.
+    dir := copy(view(".grail-profile"));
+    samples := path_join(view(dir), view("samples"));
+    config := path_join(view(dir), view("config"));
+    host::mkdir(view(dir));
+    host::remove(view(samples), 0);
+    host::remove(view(config), 0);
+    mut text = decimal(1);
+    text.push(32);
+    text = cat(view(text), view(decimal(rate)));
+    text.push(32);
+    text = cat(view(text), view(decimal(65536)));
+    text.push(32);
+    text = cat(view(text), view(samples));
+    text.push(10);
+    if host::write_file(view(config), text) != 0 {
+        say(view("grail profile: cannot write "));
+        say(view(config));
+        return 2;
+    }
+    mut command = u8[][];
+    command.push(item(&rest, 0));
+    for n in rest.len() {
+        if n != 0 {
+            command.push(item(&rest, n));
+        }
+    }
+    status := host::command(command);
+    mut out = u8[];
+    mut title = cat(view("grail profile: "), view(program));
+    push_line(&mut out, view(title));
+    if host::exists(view(samples)) == 0 {
+        push_line(
+            &mut out,
+            view("  no samples: the target did not arm the sampling runtime at startup")
+        );
+        say(view(out));
+        host::remove(view(config), 0);
+        host::remove(view(dir), 1);
+        return status;
+    }
+    data := host::read_file(view(samples));
+    host::remove(view(samples), 0);
+    host::remove(view(config), 0);
+    host::remove(view(dir), 1);
+    if data.len() < 40 {
+        say(view("grail profile: truncated sample file"));
+        return 1;
+    }
+    sample_rate := le64(view(data), 8);
+    capacity := le64(view(data), 16);
+    count := le64(view(data), 24);
+    dropped := le64(view(data), 32);
+    if data.len() < 40 + count * 8 {
+        say(view("grail profile: truncated sample file"));
+        return 1;
+    }
+    image := host::read_file(view(program));
+    symbols := elf_symbols(view(image));
+    kind := le16(view(image), 16);
+    mut elf = false;
+    if 4 <= image.len() {
+        if (image[0] == 127) && (image[1] == 69) && (image[2] == 76) && (image[3] == 70) {
+            elf = true;
+        }
+    }
+    if !elf {
+        push_line(&mut out, view("  not an ELF image: no symbols to attribute, every sample is [unknown]"));
+    } else if kind == 3 {
+        push_line(
+            &mut out,
+            view("  position independent (ET_DYN): sample addresses are relocated")
+        );
+        push_line(
+            &mut out,
+            view("  and cannot be matched to link-time symbols, so every sample is [unknown]")
+        );
+    } else {
+        push_line(
+            &mut out,
+            view(
+                "  non-PIE (ET_EXEC): sample addresses are link-time .symtab addresses, no adjustment"
+            )
+        );
+    }
+    mut intro = cat(view("  "), view(decimal(sample_rate)));
+    intro = cat(view(intro), view(" Hz ITIMER_PROF (CPU time), "));
+    intro = cat(view(intro), view(decimal(count)));
+    intro = cat(view(intro), view(" samples, about "));
+    intro = cat(view(intro), view(seconds_text(count, sample_rate)));
+    intro = cat(view(intro), view(" of CPU time"));
+    push_line(&mut out, view(intro));
+    mut dropped_line = cat(view("  "), view(decimal(dropped)));
+    dropped_line = cat(view(dropped_line), view(" samples dropped after the "));
+    dropped_line = cat(view(dropped_line), view(decimal(capacity)));
+    dropped_line = cat(view(dropped_line), view("-sample buffer filled"));
+    if dropped != 0 {
+        push_line(&mut out, view(dropped_line));
+    }
+    order := by_start(&symbols);
+    mut counts = u64[];
+    for n in symbols.len() + 1 {
+        counts.push(0);
+    }
+    if elf && (kind != 3) {
+        mut k: u64 = 0;
+        while k < count {
+            slot := symbol_at(&symbols, &order, le64(view(data), 40 + k * 8));
+            counts[slot] = counts[slot] + 1;
+            k += 1;
+        }
+    } else {
+        counts[symbols.len()] = count;
+    }
+    mut width: u64 = 20;
+    for n in symbols.len() {
+        if width < symbols[n].function.len() {
+            width = symbols[n].function.len();
+        }
+    }
+    push_line(&mut out, view(""));
+    mut header = copy(view("  "));
+    header = cat(view(header), view(pad_left(view("samples"), 7)));
+    header = cat(view(header), view(" "));
+    header = cat(view(header), view(pad_left(view("share"), 6)));
+    header = cat(view(header), view("  "));
+    header = cat(view(header), view(padded(view("function"), width + 2)));
+    header = cat(view(header), view("module"));
+    push_line(&mut out, view(header));
+    rows := by_count(&counts, &order);
+    for n in rows.len() {
+        s := &symbols[rows[n]];
+        mut line = copy(view("  "));
+        line = cat(view(line), view(pad_left(view(decimal(counts[rows[n]])), 7)));
+        line = cat(view(line), view(" "));
+        line = cat(view(line), view(pad_left(view(share_text(counts[rows[n]], count)), 6)));
+        line = cat(view(line), view("  "));
+        line = cat(view(line), view(padded(view(s.function), width + 2)));
+        line = cat(view(line), view(s.module));
+        push_line(&mut out, view(line));
+    }
+    mut unknown = copy(view("  "));
+    unknown = cat(view(unknown), view(pad_left(view(decimal(counts[symbols.len()])), 7)));
+    unknown = cat(view(unknown), view(" "));
+    unknown = cat(view(unknown), view(pad_left(view(share_text(counts[symbols.len()], count)), 6)));
+    unknown = cat(view(unknown), view("  "));
+    unknown = cat(view(unknown), view(padded(view("[unknown]"), width + 2)));
+    unknown = cat(view(unknown), view("-"));
+    push_line(&mut out, view(unknown));
+    mut total = copy(view("  "));
+    total = cat(view(total), view(pad_left(view(decimal(count)), 7)));
+    total = cat(view(total), view(" "));
+    total = cat(view(total), view(pad_left(view(share_text(count, count)), 6)));
+    total = cat(view(total), view("  total"));
+    push_line(&mut out, view(total));
+    host::print(view(out));
+    if out_path.len() != 0 {
+        if host::write_file(view(out_path), out) != 0 {
+            say(view("grail profile: cannot write "));
+            say(view(out_path));
+            return 1;
+        }
+    }
+    return status;
+}
+
 fn help() {
     say(view("grail - the Grail compiler and project tool\n"));
     say(view("usage:"));
     say(view("  grail build [FILE.grl] [-o OUT] [--target x86_64|aarch64|riscv64|macos-x86_64|macos-aarch64]"));
     say(view("  grail check [FILE.grl]            type-check without building"));
     say(view("  grail debug lines|info BINARY     print DWARF line rows or .debug_info"));
+    say(view("  grail profile [--rate N] [--out FILE] -- PROGRAM [ARGS]   sampling profile"));
     say(view("  grail run [FILE.grl] [-- ARGS...]"));
     say(view("  grail test [FILES or DIRS]        compile and run tests/ (exit status 0 = pass)"));
     say(view("  grail fmt [--check] [FILES or DIRS]"));
@@ -1090,6 +1574,7 @@ pub fn is_command<a>(name: &a [u8]) -> bool {
         || eq(view(name), view("add"))
         || eq(view(name), view("fetch"))
         || eq(view(name), view("debug"))
+        || eq(view(name), view("profile"))
         || eq(view(name), view("install"))
         || eq(view(name), view("help"))
         || eq(view(name), view("--help"))
@@ -1131,6 +1616,9 @@ pub fn run() -> u64 {
     }
     if eq(view(name), view("debug")) {
         return debug_command(&args);
+    }
+    if eq(view(name), view("profile")) {
+        return profile_command(&args);
     }
     if eq(view(name), view("version")) || eq(view(name), view("--version")) {
         say(view("grail 0.1.0"));
