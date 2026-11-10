@@ -511,7 +511,7 @@ impl Reader {
 fn put_member<a>(members: (&a mut Member[]), key: string, value: Json) {
     mut index = 0;
     while index < members.len() {
-        if key_matches(&members[index], view(key)) {
+        if key_matches(&members[index], &key) {
             entry := &mut members[index];
             exchange(&mut entry.value, value);
             return ();
@@ -528,7 +528,7 @@ fn copied_value<a>(member: (&a Member)) -> Json {
 }
 
 fn copied_key<a>(member: (&a Member)) -> string {
-    return view(member.key).text();
+    return member.key.text();
 }
 
 fn copied_item<a>(item: (&a Json)) -> Json {
@@ -549,34 +549,13 @@ fn key_matches<a>(member: (&a Member), key: (&[u8])) -> bool {
 
 // Canonical member order: byte order on keys, which is what a BTreeMap iterates in.
 fn sort_members<a>(members: (&a Member[])) -> Member[] {
-    mut keys = string[];
-    for member in members {
-        copied_key := view(member.key).text();
-        keys.push(copied_key);
-    }
-    vecs::sort(&mut keys);
     mut out = Member[];
-    mut taken = u64[];
-    for i in members.len() {
-        taken.push(0);
+    for member in members {
+        key_copy := copied_key(member);
+        value_copy := copied_value(member);
+        out.push(Member { key: key_copy, value: value_copy });
     }
-    mut slot = 0;
-    while slot < keys.len() {
-        mut index = 0;
-        while index < members.len() {
-            if taken[index] == 0 {
-                if key_matches(&members[index], view(keys[slot])) {
-                    taken[index] = 1;
-                    key_copy := copied_key(&members[index]);
-                    value_copy := copied_value(&members[index]);
-                    out.push(Member { key: key_copy, value: value_copy });
-                    break;
-                }
-            }
-            index += 1;
-        }
-        slot += 1;
-    }
+    vecs::sort_by(&mut out, |left: &Member, right: &Member| -> bool left.key < right.key);
     return out;
 }
 
@@ -602,8 +581,8 @@ pub fn copy_of<a>(value: (&a Json)) -> Json {
     match value {
         Null => { return Json::Null; },
         Bool(flag) => { return Json::Bool(flag); },
-        Num(text) => { copied := view(text).text(); return Json::Num(copied); },
-        Str(text) => { copied := view(text).text(); return Json::Str(copied); },
+        Num(text) => { copied := text.text(); return Json::Num(copied); },
+        Str(text) => { copied := text.text(); return Json::Str(copied); },
         Arr(items) => {
             mut out = Json[];
             for item in items {
@@ -614,7 +593,7 @@ pub fn copy_of<a>(value: (&a Json)) -> Json {
         Obj(members) => {
             mut out = Member[];
             for member in members {
-                key := view(member.key).text();
+                key := member.key.text();
                 copied := copy_of(&member.value);
                 out.push(Member { key: key, value: copied });
             }
@@ -645,19 +624,7 @@ impl Builder {
     }
 
     fn digits<a>(self: (&a mut Builder), value: u64) {
-        if value == 0 {
-            self.out.push(48);
-            return ();
-        }
-        mut reversed_digits = u8[];
-        mut left = value;
-        while left > 0 {
-            reversed_digits.push(48 + left % 10);
-            left = left / 10;
-        }
-        while reversed_digits.len() > 0 {
-            self.out.push(reversed_digits.pop());
-        }
+        self.bytes(&format("{}", value));
     }
 
     // serde_json writes `"` and `\`, the short escapes for \b \f \n \r \t, `\u00xx` (lowercase) for
@@ -724,8 +691,8 @@ impl Builder {
                     self.bytes(&u8[102, 97, 108, 115, 101]);
                 }
             },
-            Num(text) => { self.bytes(view(text)); },
-            Str(text) => { self.quoted(view(text)); },
+            Num(text) => { self.bytes(&text); },
+            Str(text) => { self.quoted(&text); },
             Arr(items) => {
                 self.put(91);
                 mut index = 0;
@@ -745,7 +712,7 @@ impl Builder {
                     if index > 0 {
                         self.put(44);
                     }
-                    self.quoted(view(member.key));
+                    self.quoted(&member.key);
                     self.put(58);
                     self.node(&member.value);
                     index += 1;
@@ -789,12 +756,9 @@ pub fn empty_object() -> Json {
 // An object built from a member list the caller assembled (the members are copied).
 pub fn object_of<a>(members: (&a Member[])) -> Json {
     mut out = empty_members();
-    mut index = 0;
-    while index < members.len() {
-        entry := &members[index];
-        key := view(entry.key).text();
+    for entry in members {
+        key := entry.key.text();
         out.push(Member { key: key, value: copy_of(&entry.value) });
-        index += 1;
     }
     return Json::Obj(out);
 }
@@ -804,36 +768,14 @@ pub fn empty_list() -> Json[] {
 }
 
 pub fn new_member<a, b>(key: (&a [u8]), value: Json) -> Member {
-    mut out = u8[];
-    for byte in key {
-        out.push(byte);
-    }
-    return Member { key: out.text(), value: value };
+    return Member { key: key.text(), value: value };
 }
 
-// Whole-number JSON text to u64: a fractional or exponent form is not a count.
+// Whole-number JSON text to u64: decimal digits only, and a fractional or exponent form is not a
+// count. `strings::parse_num` is the same scanner (empty input, any non-digit and overflow are
+// None).
 pub fn whole_number<a>(text: (&a [u8])) -> u64? {
-    if text.len() == 0 {
-        return None;
-    }
-    mut value = 0;
-    mut index = 0;
-    while index < text.len() {
-        byte := text[index];
-        if (byte < 48) || (byte > 57) {
-            return None;
-        }
-        if value > 1844674407370955161 {
-            return None;
-        }
-        next := value * 10;
-        if next > 18446744073709551615 - (byte - 48) {
-            return None;
-        }
-        value = next + (byte - 48);
-        index += 1;
-    }
-    return Some(value);
+    return strings::parse_num(text);
 }
 
 // Signed integer text, for values such as JSON-RPC error codes.
@@ -850,59 +792,30 @@ pub fn signed_number<a>(text: (&a [u8])) -> i64? {
     if at >= text.len() {
         return None;
     }
-    mut value = u64(0);
-    while at < text.len() {
-        byte := text[at];
-        if (byte < 48) || (byte > 57) {
+    match strings::parse_num(&text[at:]) {
+        Some(value) => {
+            // The digit loop this replaces rejected anything that would exceed 2^63 + 1, so
+            // `-9223372036854775808` still stops the conversion rather than parsing.
+            if value > 9223372036854775809 {
+                return None;
+            }
+            if negative {
+                return Some(0 - i64(value));
+            }
+            return Some(i64(value));
+        },
+        None => {
             return None;
         }
-        if value > 922337203685477580 {
-            return None;
-        }
-        value = value * 10 + (byte - 48);
-        at += 1;
     }
-    if negative {
-        return Some(0 - i64(value));
-    }
-    return Some(i64(value));
 }
 
 pub fn number_text(value: u64) -> string {
-    mut digits = u8[];
-    append_digits(&mut digits, value);
-    return digits.text();
+    return format("{}", value);
 }
 
 pub fn signed_text(value: i64) -> string {
-    mut digits = u8[];
-    append_signed(&mut digits, value);
-    return digits.text();
-}
-
-pub fn append_digits<a>(out: (&a mut u8[]), value: u64) {
-    if value == 0 {
-        out.push(48);
-        return ();
-    }
-    mut reversed_digits = u8[];
-    mut left = value;
-    while left > 0 {
-        reversed_digits.push(48 + left % 10);
-        left = left / 10;
-    }
-    while reversed_digits.len() > 0 {
-        out.push(reversed_digits.pop());
-    }
-}
-
-pub fn append_signed<a>(out: (&a mut u8[]), value: i64) {
-    mut magnitude = value;
-    if value < 0 {
-        out.push(45);
-        magnitude = 0 - value;
-    }
-    append_digits(out, u64(magnitude));
+    return format("{}", value);
 }
 
 pub fn kind_of<a>(value: (&a Json)) -> JsonKind {
@@ -919,12 +832,10 @@ pub fn kind_of<a>(value: (&a Json)) -> JsonKind {
 pub fn member<a>(value: (&a Json), wanted: (&[u8])) -> Json? {
     match value {
         Obj(members) => {
-            mut index = 0;
-            while index < members.len() {
-                if key_matches(&members[index], &wanted) {
-                    return Some(copied_value(&members[index]));
+            for entry in members {
+                if key_matches(&entry, &wanted) {
+                    return Some(copied_value(&entry));
                 }
-                index += 1;
             }
             return None;
         },
@@ -935,12 +846,10 @@ pub fn member<a>(value: (&a Json), wanted: (&[u8])) -> Json? {
 pub fn has<a>(value: (&a Json), wanted: (&[u8])) -> bool {
     match value {
         Obj(members) => {
-            mut index = 0;
-            while index < members.len() {
-                if key_matches(&members[index], &wanted) {
+            for entry in members {
+                if key_matches(&entry, &wanted) {
                     return true;
                 }
-                index += 1;
             }
             return false;
         },
@@ -964,7 +873,7 @@ pub fn array_item<a>(value: (&a Json), index: u64) -> Json? {
 
 pub fn as_string<a>(value: (&a Json)) -> string? {
     match value {
-        Str(text) => { copied := view(text).text(); return Some(copied); },
+        Str(text) => { copied := text.text(); return Some(copied); },
         _ => { return None; }
     }
 }
@@ -978,17 +887,17 @@ pub fn as_bool<a>(value: (&a Json)) -> bool? {
 
 pub fn as_number<a>(value: (&a Json)) -> string? {
     match value {
-        Num(text) => { copied := view(text).text(); return Some(copied); },
+        Num(text) => { copied := text.text(); return Some(copied); },
         _ => { return None; }
     }
 }
 
 pub fn path_of<a>(field: (&a Field)) -> string {
-    return view(field.path).text();
+    return field.path.text();
 }
 
 pub fn text_of<a>(field: (&a Field)) -> string {
-    return view(field.text).text();
+    return field.text.text();
 }
 
 // ---- flattening ----
@@ -1012,12 +921,12 @@ impl Flattener {
                     self.emit(&path, &u8[102, 97, 108, 115, 101]);
                 }
             },
-            Num(text) => { self.emit(&path, view(text)); },
+            Num(text) => { self.emit(&path, &text); },
             Str(text) => {
                 mut builder = Builder::new();
-                builder.quoted(view(text));
+                builder.quoted(&text);
                 quoted := builder.out.text();
-                self.emit(&path, view(quoted));
+                self.emit(&path, &quoted);
             },
             Arr(items) => {
                 mut index = 0;
@@ -1028,7 +937,7 @@ impl Flattener {
                     builder.digits(index);
                     builder.put(93);
                     child := builder.out.text();
-                    self.walk(item, view(child));
+                    self.walk(item, &child);
                     index += 1;
                 }
             },
@@ -1037,9 +946,9 @@ impl Flattener {
                     mut builder = Builder::new();
                     builder.bytes(&path);
                     builder.put(46);
-                    builder.bytes(view(member.key));
+                    builder.bytes(&member.key);
                     child := builder.out.text();
-                    self.walk(&member.value, view(child));
+                    self.walk(&member.value, &child);
                 }
             }
         }

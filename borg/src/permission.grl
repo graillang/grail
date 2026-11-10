@@ -1,5 +1,6 @@
 module borg_permission;
 use core;
+use strings;
 
 // Permission gates for tool calls: permission modes, path scoping and approval decisions.
 //
@@ -43,14 +44,6 @@ pub fn traversal_components() -> string { return "path contains unsupported trav
 pub fn must_identify_item() -> string { return "path must identify an item under the workspace root".text(); }
 pub fn no_symlinks() -> string { return "workspace file operations do not follow symlinks".text(); }
 pub fn must_stay_under_root() -> string { return "path must stay under the workspace root".text(); }
-
-fn copy_text<a>(text: (&a [u8])) -> string {
-    mut out = u8[];
-    for byte in text {
-        out.push(byte);
-    }
-    return out.text();
-}
 
 fn same<a, b>(left: (&a [u8]), right: (&b [u8])) -> bool {
     if left.len() != right.len() {
@@ -97,23 +90,11 @@ pub fn approval_name<a>(value: (&a Approval)) -> string {
 
 fn components<a>(path: (&a [u8])) -> string[] {
     mut out = string[];
-    mut current = u8[];
-    mut index = 0;
-    while index < path.len() {
-        byte := path[index];
-        if byte == 47 {
-            if current.len() > 0 {
-                out.push(current.text());
-                current = u8[];
-            }
-            index += 1;
-            continue;
+    // Empty parts are the leading and repeated separators an absolute path may carry.
+    for part in strings::split(&path, 47) {
+        if part.len() > 0 {
+            out.push(part.text());
         }
-        current.push(byte);
-        index += 1;
-    }
-    if current.len() > 0 {
-        out.push(current.text());
     }
     return out;
 }
@@ -161,13 +142,11 @@ pub fn validate_relative<a>(path: (&a [u8]), allow_root: bool) -> string? {
 
 // The requested root must sit under one of the host's enrolled roots (both already canonical).
 pub fn root_enrolled<a, b>(requested: (&a [u8]), enrolled: (&b string[])) -> bool {
-    mut index = 0;
-    while index < enrolled.len() {
-        root := copy_text(&enrolled[index]);
+    for entry in enrolled {
+        root := entry.text();
         if contains(&root, &requested) {
             return true;
         }
-        index += 1;
     }
     return false;
 }
@@ -193,7 +172,7 @@ pub fn verdict_text<a>(value: (&a Verdict)) -> string {
     match value {
         Allowed => { return "allowed".text(); },
         NeedsApproval => { return "needs-approval".text(); },
-        Denied(reason) => { return copy_text(&reason); }
+        Denied(reason) => { return reason.text(); }
     }
 }
 
@@ -223,21 +202,18 @@ impl Grants {
             return ();
         }
         self.entries.push(Grant {
-            tool: copy_text(tool),
-            scope: copy_text(scope),
+            tool: tool.text(),
+            scope: scope.text(),
             session_wide: session_wide
         });
     }
 
     // A fresh call asks for permission unless a session-wide grant already covers it.
     pub fn covered<a, b, c>(self: (&a mut Grants), tool: (&b [u8]), scope: (&c [u8])) -> bool {
-        mut index = 0;
-        while index < self.entries.len() {
-            entry := &self.entries[index];
+        for entry in &self.entries {
             if entry.session_wide && same(&entry.tool, &tool) && same(&entry.scope, &scope) {
                 return true;
             }
-            index += 1;
         }
         return false;
     }
