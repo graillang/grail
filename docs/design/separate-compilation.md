@@ -201,6 +201,26 @@ compiles the same compiler and links a binary that answers `version` and compile
 corpus program to byte-identical assembly. `tools/interface-test.mjs` records the numbers and runs
 the corpus.
 
+### Known defect at this commit
+
+`grail build --interface DIR` fails on `lib/hashmap.grl`: the module's *body* pass reports
+`type does not satisfy interface bound` (the diagnostic points at the last file loaded, because the
+check runs while replaying hashmap's own bodies). The interface itself is complete - `Map` carries
+`require 0 hash::Hash` / `require 0 hash::Equal`, its fields carry the proofs on `K`, and
+`impl<K: hash::Hash + hash::Equal, V> Map<K, V>` travels with `ptype`/`require` lines - so this is a
+defect in how the checker consumes a bound across the boundary, not missing metadata. It reproduces
+without any map use in the entry:
+
+```
+grail --typed-refs --emit-interface DIR out.s main.grl lib/hashmap.grl lib/hash.grl lib/core.grl runtime os-linux
+grail --typed-refs --interface DIR out.s main.grl lib/hashmap.grl lib/hash.grl lib/core.grl runtime os-linux
+grail: compiler/os-linux.grl:227:1: type does not satisfy interface bound
+```
+
+Every other case the corpus exercises - including `interfaces-two-modules`,
+`interfaces-handle-audit`, `interfaces-generic-source-dependency`, the compiler's own eight modules,
+and a two-module generic impl with requirements - builds and runs identically through interfaces.
+
 ### What stage 2 does not do, and why
 
 `--interface` reads declarations from interfaces, but the module's **bodies are still parsed and
