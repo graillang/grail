@@ -67,17 +67,17 @@ should be split or re-run at a lower rate.
 
 ## How it works
 
-1. `grail profile` creates `.grail-profile/` in the working directory, writes `config` with the
-   format version, the rate, the capacity and the sample-file path, and runs the program with the
-   working directory unchanged.
-2. At startup the runtime (`compiler/runtime.grl`) looks for `.grail-profile/config`. When it exists
-   on Linux x86-64 it maps a control page plus a 65536-entry address buffer, installs a 64 KiB
+1. `grail profile` creates a private scratch directory under `TMPDIR` (`/tmp` when the variable is
+   unset) with `mkdir`, which is the atomic claim that keeps two profilers started in the same
+   millisecond apart, and puts the arming request in the target's environment:
+   `GRAIL_PROFILE="1 RATE CAPACITY SAMPLEPATH"`. The environment is the inherited one plus that
+   entry, composed with `host::environment()` and passed with `host::command_with`, so the target
+   still sees everything it would have seen and nothing is written to its working directory.
+2. At startup the runtime (`compiler/runtime.grl`) reads `GRAIL_PROFILE`. When it is present on
+   Linux x86-64 it maps a control page plus a 65536-entry address buffer, installs a 64 KiB
    alternate signal stack, installs a `SIGPROF` handler with `SA_SIGINFO|SA_RESTART|SA_ONSTACK` and
-   starts `ITIMER_PROF` with interval `1/rate`.
-   The environment is not used because safe Grail code cannot set a child's environment: the
-   rendezvous file is the only channel between the command and the runtime. The runtime unlinks the
-   config as soon as it reads it, so the request is consumed exactly once and a file left behind by
-   a killed run cannot make later, unrelated runs sample themselves.
+   starts `ITIMER_PROF` with interval `1/rate`. A killed run cannot arm a later one: the request
+   exists only in the environment of the process the command started.
 3. The handler reads the interrupted `RIP` from the `ucontext_t` the kernel passes as its third
    argument, claims a slot with a CAS loop (no lock, no allocation, no syscall) and stores one word.
    It cannot deadlock against the allocator: it never takes the allocator lock and never allocates.
@@ -85,7 +85,8 @@ should be split or re-run at a lower rate.
 4. On normal exit, `host::exit` or a runtime abort, the runtime stops the timer and writes
    `GRPROF2\n`, the rate, capacity, count, dropped count and the measured CPU nanoseconds, then the
    raw addresses.
-5. `grail profile` reads the sample file, parses the program's ELF `.symtab` (section headers,
+5. `grail profile` reads the sample file, removes it and the scratch directory, parses the
+   program's ELF `.symtab` (section headers,
    `SHT_SYMTAB` and its linked `.strtab`) and attributes each address with a binary search over
    `STT_FUNC` symbols sorted by address. The compiler emits no `st_size`, so a function's range runs
    from its start to the next function's start; trailing literal data inside `.text` is therefore
@@ -117,17 +118,19 @@ profile itself needs neither a debug section nor a symbol server.
   be attributed unevenly across runs. Above roughly one kilohertz the kernel's per-tick accounting
   rounds the interval up, so the effective rate stops following `--rate`; that is reported rather
   than hidden.
-- **One process, not its children.** Arming is one-shot: the file is consumed by the first Grail
-  process that starts in the directory, so a program that spawns other Grail programs with
-  `host::command` profiles only itself and leaves the children unsampled. Nested and concurrent
-  profiles in one working directory are unsupported: run them from different directories.
+- **One process, not its children.** The request is an environment variable, so a program that
+  spawns Grail programs *with the inherited environment* arms them too, and all of them write to
+  the same sample path: the report is whichever process wrote last (normally the target). A child
+  started with an explicit environment - `host::command_with`, or `authority::spawn_with` - is not
+  armed unless the request is copied into that environment. Nested and concurrent profiles are no
+  longer tied to a working directory, but a target that spawns Grail children still shares one
+  sample file with them.
 - **No report without an exit.** Samples are written when the runtime shuts down. A killed program
   (SIGKILL, a crash inside foreign code, a `SIGSEGV` the runtime does not handle) leaves no report.
 - **Cost in every program.** The sampler is compiled into every Grail binary: about 3.4 KiB of
-  x86-64 `.text` on a hello-world build, plus one `openat` of `.grail-profile/config` at every
-  program start (it normally fails with `ENOENT` in a few microseconds). With no config file no
-  timer is started and no signal handler is installed, so an unprofiled program only pays that one
-  syscall.
+  x86-64 `.text` on a hello-world build, plus a scan of the environment for `GRAIL_PROFILE` at
+  every program start (a few hundred comparisons over the inherited variable names, no allocation
+  and no syscall). With no such variable no timer is started and no signal handler is installed.
 - **Linux x86-64 only.** The handler reads the `ucontext_t` layout of that ABI and uses its syscall
   numbers. The code is compiled into every program but does nothing on other targets;
   `grail profile` refuses to run there. AArch64 and RISC-V would need their `ucontext_t` offsets and
@@ -135,15 +138,18 @@ profile itself needs neither a debug section nor a symbol server.
 - **Stripped or non-Graal binaries.** A stripped program reports every sample as `[unknown]`. A
   binary without the Grail runtime never writes samples, and `grail profile` reports that instead of
   inventing a profile.
-- **`.grail-profile/` needs a writable working directory.** The rendezvous file is created, read and
-  removed there, relative to the inherited working directory of the target.
+- **The sample file needs a writable `TMPDIR`.** The command creates its scratch directory there and
+  the target writes the samples into it. A target whose environment has no `TMPDIR` does not care:
+  the path is absolute and comes from the request, not from the target's own variables.
 
 ## Tests and CI
 
 `tools/test-profile.mjs` builds a program with a known hot loop, checks that the default build is
 `ET_EXEC`, runs `grail profile --rate 1000`, and asserts that the hot function is the first row with
 more than half of the attributed samples, that the `[unknown]` row exists, that the rows add up to
-the total, that `--out` matches stdout, and that no rendezvous directory is left behind. When
+the total, that `--out` matches stdout, that the target still sees an environment variable the
+runner set (the request travels through `host::command_with`, not through a file), and that no
+rendezvous directory and no `grail-profile-` scratch directory is left behind. When
 `llvm-strip` or `strip` is available it also strips a copy and asserts that every sample then falls
 into `[unknown]` instead of being dropped. Run it with `just profile-test`; CI runs it in the
 `profiler` job and `bun tools/ci.mjs lint` asserts the test, this page and the job exist.

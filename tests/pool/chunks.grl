@@ -1,0 +1,41 @@
+// A CPU-bound job set: sum a large array in N owned chunks, parallel, and compare with the
+// sequential computation. The chunk split must not change the answer.
+use pool;
+
+fn mix(x: u64) -> u64 {
+    mut v = x ^ 88172645463325252;
+    for i in 6 { v = v ^ (v << 13); v = v ^ (v >> 7); v = v ^ (v << 17); }
+    return v;
+}
+fn chunk_total(v: u64[]) -> u64 {
+    // Xor accumulation: a fingerprint of the chunk, and it cannot overflow (checked arithmetic
+    // would abort on a wrapped sum).
+    mut total = 0;
+    for x in v { total = total ^ mix(x); }
+    return total;
+}
+fn big(n: u64) -> u64[] {
+    mut v = u64[];
+    for i in n { v.push(i * 2654435761); }
+    return v;
+}
+// Identity on owned chunks: proves the split is contiguous, disjoint and in input order.
+fn keep(v: u64[]) -> u64[] {
+    return v;
+}
+fn main() {
+    original := big(40);
+    parts := pool::for_chunks<u64,u64[]>(big(40), 7, keep);
+    assert(parts.len() == 7);
+    mut flat = u64[];
+    for part in parts { for x in part { flat.push(x); } }
+    assert(flat.len() == original.len());
+    for i in flat.len() { assert(flat[i] == original[i]); }
+    sequential := chunk_total(big(400000));
+    parts := pool::for_chunks<u64,u64>(big(400000), 8, chunk_total);
+    mut parallel = 0;
+    for part in parts { parallel = parallel ^ part; }
+    assert(parts.len() == 8);
+    assert(sequential == parallel);
+    println(parallel);
+}

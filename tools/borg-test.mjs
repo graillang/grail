@@ -65,6 +65,7 @@ const fixtures = {
   journal: ['borg/tests/fixtures/journal'],
   events: ['borg/tests/fixtures/events'],
   permission: ['borg/tests/fixtures/permission'],
+  replay: ['borg/tests/fixtures/replay'],
 };
 
 function fixturePaths(name) {

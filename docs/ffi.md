@@ -225,6 +225,43 @@ extern "C" fn c_mixed_fill(m: Mixed, d: i64) -> i64;
 Verified by `tests/ffi/extern_records.grl`: the C shim reads fields Grail wrote, writes
 fields Grail reads back, and checks its own `offsetof`/`sizeof` values.
 
+### Records by value as arguments
+
+An `extern "C" record` parameter is the C `R *`, which is what Win32, Vulkan and D3D12 declare. A C
+function that instead takes the whole record by value (`ImVec2`, some SDL calls) is declared with the
+`byval` marker:
+
+```grail
+extern "C" record Vec2 { x: f32, y: f32 }
+
+extern "C" fn c_length(v: byval Vec2) -> f32;
+
+vec := Vec2 { x: 3.0, y: 4.0 };
+length := unsafe { c_length(vec) };
+```
+
+- The marker is part of the parameter's type, so one declaration can use both spellings
+  (`near: byval Vec2, far: Vec2`) and each call site is checked against the one it names.
+- Classification reuses the record's C layout, flattened through embedded records, and follows the
+  target ABI: SysV x86-64 per-eightbyte INTEGER/SSE classes with a mixed eightbyte counting as
+  INTEGER, MEMORY over 16 bytes or when a register class is exhausted; AAPCS64 homogeneous float
+  aggregates in `v0`-`v7`, other composites up to 16 bytes in consecutive `x` registers, larger
+  records by reference to a caller copy; RV64 by reference over 2*XLEN and otherwise one register per
+  field for one or two fields with a float, else one integer register per eightbyte. The argument
+  counters of the call are advanced by the plan, so a `byval` record keeps its place among the
+  arguments around it, and a call through a `cfn` that declares the marker uses the same lowering.
+- The record is borrowed, not moved: it is still usable after the call, like a C-layout record passed
+  by pointer.
+- Refused with a diagnostic rather than approximated: the Windows x86-64 and ARM64 ABIs
+  (`byval is not implemented for the Windows x86-64 and Windows ARM64 ABIs; pass the record by
+  pointer`), anything that is not an `extern "C"` record (`byval must name an extern "C" record type;
+  a bare record parameter is a pointer`), and an `extern "C" fn` definition, because a C callback
+  cannot take a record by value yet.
+- `tests/ffi/byval_records.grl` executes 4-, 8-, 16- and 24-byte records, mixed int/float fields, an
+  ImVec2-shaped float pair, an embedded array, a `byval` parameter after six integer arguments and a
+  record sharing the stack area with a following scalar, with `tests/ffi/byval_shim.c` returning a
+  checksum over every field each twin received, on x86-64, AArch64 and RISC-V 64.
+
 ### Opaque handles
 
 `handle File;` declares a one-word opaque type for a C-owned resource. A handle can be
@@ -240,6 +277,42 @@ or status accessor rather than assuming a sentinel. Handles are not linear in th
 increment: the compiler never frees one, so a program that opens a handle must call the
 matching close/free declaration itself, and leaking one is an explicit leak rather than an
 implicit close.
+
+#### Classifying a handle for the thread boundary
+
+A handle declaration also carries the audited foreign-resource contract that the parallel surface
+reads (`docs/design/parallelism.md`):
+
+```grail
+handle File: transferable;                    // may move to a worker, not be used concurrently
+handle PhysicalDevice: transferable, shareable;
+handle Window;                                // thread-affine: neither, and this is the default
+```
+
+Two properties come out of it. **transferable(T)**: a value may cross to another thread, including
+being destroyed there. **shareable(T)**: concurrent shared access is permitted. For Grail-defined
+types both are derived structurally - a record is transferable when every field is, shareable when
+every field is, a slice when its element is. For a handle they are read from its declaration.
+
+**Nothing declared means neither.** A handle no one has audited is thread-affine, so it cannot reach
+a worker by accident, and adding a foreign type to the compiler never widens what a worker may
+reach. `shareable` implies `transferable` - a value usable on another thread may also be moved to
+it - and writing `shareable` alone is an error.
+
+The audit is a claim about the C library, not about Grail's wrapper, and the module that declares
+the handle is where it is made. `sys_grail` declares `File`, `Socket` and `Process` transferable
+only: each is an owned OS resource with no wrapper-side state, so it can be handed to a worker and
+closed there, but nothing in the module serializes two users of one, so `close` under another
+worker's read is a race the type cannot see. `Thread` is neither: its one correct disposal - join or
+detach, exactly once - is bookkeeping the creating thread owns, and this shim hands every handle out
+through a `_Thread_local` slot, so the acquisition path itself is thread-local. `rhi_vulkan`
+declares `Instance` neither - it is created and destroyed on the thread that owns the display
+connection, with every child object dead before it - and `PhysicalDevice` both, because it owns
+nothing, has no destructor and every operation on it is a query.
+
+A safe wrapper cannot erase a restriction. `struct Holder { file: File }` is transferable only when
+`File` is, `&Holder` is shareable only when `Holder` is, and a closure that captures either
+inherits the restriction, because its environment is part of its type.
 
 ### Out-parameters
 
@@ -407,6 +480,12 @@ Linux `host::read_fd`/`host::write_fd` wait on the readiness reactor and `host::
 timer, so those suspend; on Windows there is no reactor, so those calls are handed to a helper
 thread and the task parks on it. Either way the task, not the scheduler thread, waits, so the
 observable behaviour is the same on both platforms.
+**A foreign call blocks the executing task thread.** On Linux that thread is a worker of the green
+task pool, so while the call blocks, that worker runs no other task; with more blocking tasks than
+workers, the extra tasks wait. Only the runtime's own blocking operations hand off to a dedicated
+thread: `host::read_file`, `host::write_file`, `host::command` and `host::command_with`, and only
+when they are called from a green task. `host::pipe` reads and writes wait on the readiness
+reactor, and `host::sleep_ms` uses a timer, so those suspend instead of blocking.
 
 - An `extern "C"` call, or a call through a `cfn` value, is not wrapped by the compiler: it runs on
   the calling task's thread and blocks it for as long as the C function runs. Nothing in the
@@ -459,6 +538,9 @@ immediately because the ready task performs the blocking call on its own thread,
 same memory at once and the compiler says nothing. Under the default green scheduler that race is
 much narrower (one task at a time on the Windows scheduler thread) but not absent on Linux, so this
 mode does not introduce a new kind of unsoundness - it makes an existing hazard easy to hit.
+  `host::read_file`, `host::write_file`, `host::command` and `host::command_with` do.
+- On Windows a task is an OS thread (see `concurrency-v1.md`), so a blocking foreign call blocks
+  only the task that made it and no handoff is needed.
 
 ## Direct calls: calling conventions
 
@@ -491,14 +573,11 @@ Not implemented yet, and each rejected rather than approximated:
   SysV/AAPCS64 lowering but are compiled and linked only (no macOS runner);
 - an out-parameter on a C callback or a `cfn` type: only a declaration Grail calls can write a slot
   (see Out-parameters above);
-- records passed by value on the Windows ABIs: `v: byval R` is implemented for the Linux/macOS
-  ABIs and refused by name for Windows x86-64 and Windows ARM64
-  (`tests/ffi/byval_records.grl`), and a `byval` parameter on a callback is refused too (C calling
-  Grail with a by-value record). Without `byval`, an extern record parameter is the C `R *`; record
-  results are returned by value on every ABI, float fields included
-  (`tests/ffi/call_records.grl`, `float_record_results.grl`), and nested records included,
-  except a result whose embedded records contain floats (its register classification needs the
-  flattened field list; refused with a diagnostic);
+- a `byval` record parameter on Windows (x86-64 and ARM64) and on a C callback, and a record
+  *result* whose embedded records contain floats (its register classification needs the flattened
+  field list; refused with a diagnostic). Record results are otherwise returned by value on every
+  ABI, float fields included (`tests/ffi/call_records.grl`, `float_record_results.grl`), and nested
+  records included;
 - a callback that *writes* into the record C hands it: a parameter is not a mutable binding and
   Grail has no deref-assignment, so `p.field = v` inside an `extern "C" fn` is
   `owned storage mutation requires mut` (reading the fields works, and the storage is C's);
@@ -578,13 +657,16 @@ compiles `tests/ffi/call_scalars.grl` with the FFI build, links the two through 
   `extern_records` C layout in both directions (`1606`, `23`, `16`, `-2`, `7`), `out_params` the
   out-parameter slots including a seventh-argument slot and two slots in one call, `record_pointers`
   the record-by-pointer and record-out-parameter shapes (`13`, `5`, `0`, `4194304`, `0`, `0`, `110`,
-  `77`, `1`, `433`, `8` — a create-info reading a struct through `cptr(&app)`, `flags` as the zero a
-  zeroed binding starts with, an array of handles C fills and Grail passes back (and the handle
-  Grail reads equals the one C hands back, `1`), an array of
-  structs addressed at two interior elements, and one count record across two declarations of one
-  symbol), and `call_words` seven, eight and nine word arguments with literal and computed values.
-- the suite executes every fixture on x86-64 and, through `qemu-<target>-static`, on AArch64 and
-  RISC-V 64: 52 executed fixture instances on x86-64 and no link-only cases there, plus two cross-compiled-only ones
+  `77`, `1`, `433`, `8` — a create-info reading a struct through `cptr(&app)`, `flags` as the zero
+  the storage started as, an array of handles C fills and Grail passes back with the handle Grail
+  reads equal to the one C hands back, an array of structs addressed at two interior elements, and
+  one count record across two declarations of one symbol), `call_words` seven, eight and nine word
+  arguments with literal and computed values, and `byval_records` the by-value record shapes with a
+  checksum over every field each C twin received.
+- the suite holds 19 executable fixtures: each executes on x86-64 and, through
+  `qemu-<target>-static`, on AArch64 and RISC-V 64 as well, so a host with both runners reports 57
+  executed fixture instances and none link-only; without a runner the cross targets link and are
+  reported as link-only (19 executed, 38 link-only here). Two more fixtures are cross-compiled only
   (`dlopen`, which needs a target glibc sysroot). `callback_words` executes the eight-register
   callback on AArch64 and RISC-V 64 and asserts that x86-64 and Windows refuse it by name. Without a
   qemu runner the cross targets are linked and the ABI-level check is reported as link-only. The same
@@ -595,22 +677,28 @@ compiles `tests/ffi/call_scalars.grl` with the FFI build, links the two through 
 
 Rejections are part of the normal native corpus (`tests/native-cases.json`):
 `ffi-reject-safe-call`, `ffi-reject-abi`, `ffi-reject-parameter-type`, `ffi-reject-result-type`,
-`ffi-reject-arity`, `ffi-reject-duplicate`, `ffi-reject-handle-null-seed`,
-`ffi-reject-out-shared-borrow`, `ffi-reject-out-scalar`, `ffi-reject-out-callback`,
-`ffi-reject-out-cfn`, `ffi-reject-out-double-borrow`, `ffi-reject-record-address-temporary`,
-`ffi-reject-record-address-plain`, `ffi-reject-record-pointer-alias-writable`,
-`ffi-reject-record-pointer-alias-shared`, `ffi-reject-record-out-plain`,
-`ffi-reject-record-out-shared` and `ffi-reject-record-out-temporary`, so every target checks the
-diagnostics on every run of `bun tools/test-native.mjs`.
+`ffi-reject-arity`, `ffi-reject-duplicate`, `ffi-reject-handle-out-slot`,
+`ffi-reject-handle-null-seed`, `ffi-reject-out-shared-borrow`, `ffi-reject-out-scalar`,
+`ffi-reject-out-callback`, `ffi-reject-out-cfn`, `ffi-reject-out-double-borrow`,
+`ffi-reject-byval-plain-record`, `ffi-reject-byval-scalar`, `ffi-reject-byval-callback`,
+`handle-reject-arithmetic`, `ffi-reject-handle-construction`,
+`ffi-reject-record-address-temporary`, `ffi-reject-record-address-plain`,
+`ffi-reject-record-pointer-alias-writable`, `ffi-reject-record-pointer-alias-shared`,
+`ffi-reject-record-out-plain`, `ffi-reject-record-out-shared`, `ffi-reject-record-out-temporary`,
+`ffi-reject-record-unfilled-read` and `ffi-reject-record-unfilled-move`, so every target checks the
+diagnostics on every run of `bun tools/test-native.mjs`. `tests/handles/stream_def.grl` declares a
+handle and its libc declarations, `stream_user.grl` uses it as a parameter, a result and a record
+field and compares two handles: the executed `cross-module-handle-signatures` case.
 
-The same corpus executes the new shapes without a C toolchain, by declaring the symbol and
+The same corpus executes the record shapes without a C toolchain, by declaring the symbol and
 defining it as an `extern "C" fn` (a C-ABI Grail function), which is the same one-word pointer on
 both sides: `ffi-record-address` (`42`), `ffi-record-address-field` (`433`, two interior element
-addresses), `ffi-record-out-param` (`0`, then `0` — a zeroed binding the callee reads, and the
-same field read by Grail after the call, the accepted half of the `ffi-reject-handle-out-slot` pair),
-the recorded
-regression `ffi-record-two-declarations` (`8`, one count record across two declarations of one
-symbol, which must reach its exit status without aborting),
+addresses), `ffi-record-out-param` (`0`, then `0` — a zeroed binding the callee reads, and the same
+field read by Grail after the call: the accepted half of the `ffi-reject-handle-out-slot` pair), the
+recorded regression `ffi-record-two-declarations` (`8`, one count record across two declarations of
+one symbol, which must reach its exit status without aborting),
 `ffi-record-callback-parameter` (`20`, a callback's record parameter borrowed rather than freed) and
-`ffi-record-array-pointer` (`34`, an array of slots read through the record's own address). The handle-typed twins of the last one need a real C library
-to produce the handles, so `tests/ffi/record_pointers.grl` covers them.
+`ffi-record-array-pointer` (`34`, an array of slots read through the record's own address). The
+handle-typed twin of the array shapes needs a real C library to produce the handles, so
+`tests/ffi/record_pointers.grl` covers it, including the comparison that the handle Grail reads out
+of the array equals the one C hands back.

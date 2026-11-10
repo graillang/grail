@@ -1,0 +1,23 @@
+// Nested parallelism: a job submits its own parallel work. Run on a one-worker pool (the case sets
+// GRAIL_POOL_WORKERS=1), the only thing that prevents a deadlock is the waiting worker helping.
+use pool;
+
+fn chunk_sum(v: u64[]) -> u64 {
+    mut total = 0;
+    for x in v { total += x; }
+    return total;
+}
+fn inner(base: u64) -> u64 {
+    mut v = u64[];
+    for i in 200 { v.push(base + i); }
+    parts := pool::for_chunks<u64,u64>(v, 4, chunk_sum);
+    mut total = 0;
+    for part in parts { total += part; }
+    return total;
+}
+fn main() {
+    totals := pool::run(6, |i: u64| -> u64 inner(i * 1000));
+    println(totals);
+    nested := pool::run(4, |i: u64| -> u64 inner(i));
+    println(nested);
+}

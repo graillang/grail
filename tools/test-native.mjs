@@ -82,7 +82,10 @@ for (const test of cases) {
   } else {
     const executable = compileProgram(compiler, files, directory, { target, overflow: test.overflow ?? 'checked', defaultU64: test.defaultU64 !== false, typedRefs, runtime, osRuntime });
     if (test.compileOnly) { passed++; continue; }
-    const result = execute(executable, test.args ?? [], target, { cwd: directory });
+    // A case may pin the environment it needs (`"env": {"GRAIL_POOL_WORKERS": "1"}`), which is how a
+    // test proves a pool size the host would not otherwise choose. Everything else is inherited.
+    const options = test.env ? { cwd: directory, env: { ...process.env, ...test.env } } : { cwd: directory };
+    const result = execute(executable, test.args ?? [], target, options);
     if (result.error) throw result.error;
     // A case that dies by signal can still pin its output: an abort must not resume the foreign or
     // Grail code that ran before it, so what was printed up to the abort is part of the contract.

@@ -152,6 +152,58 @@ fn rt_accept4(fd: u64) -> u64 {
     return raw_syscall4(242, fd, 0, 0, 526336);
 }
 
+// Runs `argv` (a NUL-terminated table of words) once per candidate in `paths` and waits for the
+// child. `envp` is a NUL-terminated "NAME=VALUE" table the child starts with, or 0 to inherit this
+// process's environment. fork/execve/wait4 only: every candidate, every string and the whole
+// environment are prepared by the caller, so the post-fork child allocates nothing, takes no
+// runtime lock and runs no cleanup.
+//
+// Returns 0..255 for an exit code, 128+N when signal N ended the child, and 256+errno when the child
+// could not be forked or reaped.
+fn rt_spawn_wait(paths: u64, argv: u64, envp: u64) -> u64 {
+    mut environment = envp;
+    if environment == 0 {
+        environment = raw_load(raw_state() + 16);
+    }
+    child := rt_syscall(57, 0, 0, 0);
+    if child == 0 {
+        n := rt_len(paths);
+        mut i = 0;
+        while i < n {
+            // execve only returns when the candidate failed; the next one is tried with the same
+            // environment. No dynamic loader is involved, so envp is the child's whole environment.
+            rt_syscall(59, rt_at(paths, i), argv, environment);
+            i += 1;
+        }
+        rt_syscall(60, 127, 0, 0);
+    }
+    if rt_error(child) {
+        return 256 + wrapping_sub(0, child);
+    }
+    status := rt_alloc(8);
+    mut waited = 0;
+    while 1 {
+        waited = rt_syscall(61, child, status, 0);
+        if waited != wrapping_sub(0, 4) {
+            break;
+        }
+    }
+    mut result = 0;
+    if rt_error(waited) {
+        result = 256 + wrapping_sub(0, waited);
+    } else {
+        code := raw_load(status);
+        sig := code & 127;
+        if sig != 0 {
+            result = 128 + sig;
+        } else {
+            result = rt_div(code, 256) & 255;
+        }
+    }
+    rt_free(status);
+    return result;
+}
+
 // Linux keeps argv/envp from the entry stub and needs no further process setup.
 fn rt_os_init() -> u64 {
     return 0;

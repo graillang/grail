@@ -882,15 +882,60 @@ fn rt_exec_paths(file: u64) -> u64 {
     rt_free(fallback);
     return paths;
 }
-// No allocations, frees, runtime locks or cleanup in the post-fork child.
-fn rt_exec(paths: u64, argv: u64) -> u64 {
-    env := raw_load(raw_state() + 16);
-    n := rt_len(paths);
+// The inherited environment: a NUL-terminated table of "NAME=VALUE" strings. The kernel supplies it
+// on Linux and macOS; rt_os_init copies it from GetEnvironmentStringsA on Windows.
+fn rt_environ() -> u64 {
+    return raw_load(raw_state() + 16);
+}
+// The caller's entries as the NUL-terminated table execve and CreateProcess take. Returns 0 when an
+// entry is not "NAME=VALUE" with a non-empty name: execve would silently start the child with no
+// environment at all and CreateProcess rejects such a block, so both refuse it instead. Each kept
+// entry is a copy, which is what lets the caller hand over owned strings.
+fn rt_env_table(env: u64) -> u64 {
+    n := rt_len(env);
+    table := rt_alloc((n + 1) * 8);
+    mut made = 0;
+    mut bad = 0;
+    while made < n {
+        p := rt_cstr(rt_at(env, made));
+        if p == 0 {
+            bad = 1;
+            break;
+        }
+        mut i = 0;
+        while raw_byte(p + i) != 0 {
+            if raw_byte(p + i) == 61 {
+                break;
+            }
+            i += 1;
+        }
+        if (i == 0) + (raw_byte(p + i) == 0) {
+            rt_free(p);
+            bad = 1;
+            break;
+        }
+        raw_store(table + made * 8, p);
+        made += 1;
+    }
+    if bad != 0 {
+        mut j = 0;
+        while j < made {
+            rt_free(raw_load(table + j * 8));
+            j += 1;
+        }
+        rt_free(table);
+        return 0;
+    }
+    raw_store(table + made * 8, 0);
+    return table;
+}
+fn rt_drop_env_table(table: u64, n: u64) -> u64 {
     mut i = 0;
     while i < n {
-        rt_syscall(59, rt_at(paths, i), argv, env);
+        rt_free(raw_load(table + i * 8));
         i += 1;
     }
+    rt_free(table);
     return 0;
 }
 fn rt_drop_exec_paths(paths: u64) -> u64 {
@@ -903,14 +948,57 @@ fn rt_drop_exec_paths(paths: u64) -> u64 {
     rt_drop_seq(paths);
     return 0;
 }
-fn f_host_command(args: u64) -> u64 {
-    return rt_blocking_call(rt_command_blocking, args, 0);
+// This process's environment as "NAME=VALUE" entries, so a caller can start from what it inherits
+// and add to it instead of replacing everything. Windows keeps "=C:=C:\dir" drive variables in its
+// block: they are not "NAME=VALUE" and an explicit CreateProcess block cannot carry them, so they
+// are not entries here.
+fn f_host_environment() -> u64 {
+    out := rt_new();
+    mut ep = rt_environ();
+    while raw_load(ep) != 0 {
+        p := raw_load(ep);
+        if raw_byte(p) != 61 {
+            mut n = 0;
+            while raw_byte(p + n) != 0 {
+                n += 1;
+            }
+            rt_push(out, rt_bytes_from(p, n));
+        }
+        ep = ep + 8;
+    }
+    return out;
 }
-fn rt_command_blocking(args: u64) -> u64 {
+// `env` is the child's complete environment, or 0 to inherit this process's. The platform's
+// rt_spawn_wait does the fork/exec (POSIX) or CreateProcess (Win32) and waits for the child.
+fn f_host_command(args: u64) -> u64 {
+    return rt_blocking_call(rt_command_run, args, 0);
+}
+fn f_host_command_with(args: u64, env: u64) -> u64 {
+    mut entries = env;
+    if entries == 0 {
+        // An empty vector is the null sequence, and the explicit spelling must mean "no
+        // environment", never "inherit": give it a real, empty sequence instead.
+        entries = rt_new();
+        raw_store(entries, 0);
+        raw_store(entries + 8, 0);
+        raw_store(entries + 16, 0);
+    }
+    return rt_blocking_call(rt_command_run, args, entries);
+}
+// Run `argv` and wait for it, then release both sequences. Every vector and every PATH candidate is
+// built here in the parent: a forked child must never acquire the allocator.
+// The status is 0..255 for an exit code, 128+N when a signal ended the child, and 256+errno when the
+// child could not be started or reaped; 278 (256+EINVAL) is an unusable vector or environment.
+fn rt_command_run(args: u64, env: u64) -> u64 {
     n := rt_len(args);
+    mut envc = 0;
+    if env != 0 {
+        envc = rt_len(env);
+    }
     mut result = 278;
     mut made = 0;
     argv := rt_alloc((n + 1) * 8);
+    raw_store(argv + n * 8, 0);
     if n != 0 {
         while made < n {
             p := rt_cstr(rt_at(args, made));
@@ -921,37 +1009,22 @@ fn rt_command_blocking(args: u64) -> u64 {
             made = made + 1;
         }
         if made == n {
-            paths := rt_exec_paths(raw_load(argv));
-            child := rt_syscall(57, 0, 0, 0);
-            if child == 0 {
-                rt_exec(paths, argv);
-                rt_syscall(60, 127, 0, 0);
-            }
-            if rt_error(child) {
-                result = 256 + wrapping_sub(0, child);
-            } else {
-                status := rt_alloc(8);
-                mut waited = 0;
-                while 1 {
-                    waited = rt_syscall(61, child, status, 0);
-                    if waited != wrapping_sub(0, 4) {
-                        break;
-                    }
+            mut envp = 0;
+            mut usable = 1;
+            if env != 0 {
+                envp = rt_env_table(env);
+                if envp == 0 {
+                    usable = 0;
                 }
-                if rt_error(waited) {
-                    result = 256 + wrapping_sub(0, waited);
-                } else {
-                    code := raw_load(status);
-                    sig := code & 127;
-                    if sig != 0 {
-                        result = 128 + sig;
-                    } else {
-                        result = rt_div(code, 256) & 255;
-                    }
-                }
-                rt_free(status);
             }
-            rt_drop_exec_paths(paths);
+            if usable != 0 {
+                paths := rt_exec_paths(raw_load(argv));
+                result = rt_spawn_wait(paths, argv, envp);
+                rt_drop_exec_paths(paths);
+            }
+            if envp != 0 {
+                rt_drop_env_table(envp, envc);
+            }
         }
     }
     mut i = 0;
@@ -966,6 +1039,14 @@ fn rt_command_blocking(args: u64) -> u64 {
         i = i + 1;
     }
     rt_drop_seq(args);
+    i = 0;
+    while i < envc {
+        rt_drop_seq(rt_at(env, i));
+        i = i + 1;
+    }
+    if env != 0 {
+        rt_drop_seq(env);
+    }
     return result;
 }
 // Text is UTF-8 even when its source is binary I/O or a byte view.
@@ -1207,28 +1288,418 @@ fn rt_thread_join(handle: u64) -> u64 {
     rt_free(handle);
     return 0;
 }
-// Job words: 0 callback,1 item data,2 count,3 context,4 result data,5 next index,6 finished workers.
-fn rt_parallel_worker(job: u64) -> u64 {
-    f := raw_load(job);
-    data := raw_load(job + 8);
-    n := raw_load(job + 16);
-    context := raw_load(job + 24);
-    out := raw_load(job + 32);
-    env := raw_load(job + 56);
-    while true {
-        i := rt_atomic_fetch_add(job + 40, 1);
-        if (i < n) == 0 {
-            break;
-        }
-        if env == 0 {
-            raw_store(out + i * 8, raw_call2(f, raw_load(data + i * 8), context));
-        } else {
-            raw_store(out + i * 8, raw_call3(f, env, raw_load(data + i * 8), context));
-        }
+// ---- job pool: bounded, work-stealing, one owned result per job -------------------------------
+// The process has one pool, created by the first parallel call and never destroyed: its workers are
+// the runtime's own persistent OS threads (rt_thread_spawn_detached, the same primitive the green
+// scheduler and the blocking offload path use), so later jobs pay no thread-creation cost. A job
+// owns everything it touches - its callback, one environment word, one argument word and the single
+// word it returns - so no reference is reachable from two workers, and every allocation is released
+// by exactly one thread: the job's own worker builds the result, the thread that waits for the job
+// releases it. That ownership rule is what makes stage 1 (docs/design/parallelism.md) sound with no
+// new type property; the closure environment is the part the type checker does not classify yet.
+//
+// Pool block (raw_map: infrastructure, not counted as user allocation, like the scheduler block):
+//   0 futex mutex   8 worker count   16 wake sequence (futex word)   24 idle workers
+//   32 worker array  40 injection ring  48 injection head  56 injection tail
+//   64 injection capacity  72 steal cursor  80 jobs submitted  128 injection ring storage
+// Worker block (raw_map, one page per worker):
+//   0 ring  8 head  16 tail  24 deque lock  32 pool  40 index  48 capacity
+//   56 the kernel thread record that is running this worker  128 ring storage
+// Job block (rt_alloc, freed by the thread that waits for the job):
+//   0 callback  8 environment word  16 argument word  24 result word  32 state (futex word)
+//
+// ---- process-state word map: one table, one owner per word -------------------------------
+// rt_state is 4096 bytes shared by every long-lived subsystem. A claim on a word means adding a row
+// to this table and taking the address from the accessor named in that row; no subsystem writes a
+// bare `raw_state() + N` for a word it owns. The offsets live here, once, so a collision is a
+// two-line diff rather than a merge-day surprise. The pool's first claim was `raw_state() + 88` for
+// its pointer; the Windows green scheduler later cached the task mode in 88, and the merged program
+// read the mode (1) as the pool pointer and faulted at address 0x9. That is the incident this table
+// exists to prevent.
+//
+//   word(s)      owner                        accessor                  claimed by
+//   0, 8, 16     argc / argv / envp           platform startup           --
+//   24           allocator live count         rt_live                    --
+//   32           allocator arena list         rt_shutdown                --
+//   64           allocator lock word          rt_allocator_lock          --
+//   72           green scheduler block        rt_sched                   --
+//   80           green scheduler create CAS   rt_sched                   --
+//   88           task-mode cache              rt_task_mode               win-green-tasks
+//   128..192     main thread's own record     rt_thread_init             --
+//   256..320     allocator bin heads          rt_alloc_unlocked          --
+//   768..832     allocator bin bump           rt_grow                    --
+//   1280..1344   allocator bin remaining      rt_grow                    --
+//   2048..2672   sampling profiler block      rt_prof_words              --
+//   3200         job pool pointer             rt_state_pool              job-pool
+//   3208         job pool creation CAS        rt_state_pool_cas          job-pool
+//   3392         Windows thread bridge        os-windows: rt_win_bridge  --
+//   3840         Windows fiber state          os-windows                 --
+//   3856..       Windows fiber table          os-windows                 --
+//
+// Not a claim: thread-record word 48 (raw_state() + 176 for the main thread). os-windows keeps the
+// per-thread WaitOnAddress expected value there, so nothing else may use it. The pool did, which was
+// the same disease as the 88 collision: an unowned word in a shared structure.
+fn rt_state_pool() -> u64 {
+    return raw_state() + 3200;
+}
+fn rt_state_pool_cas() -> u64 {
+    return raw_state() + 3208;
+}
+fn rt_pool() -> u64 {
+    slot := rt_state_pool();
+    p := raw_atomic_load(slot);
+    if p != 0 {
+        return p;
     }
-    rt_atomic_fetch_add(job + 48, 1);
+    if raw_atomic_cas(rt_state_pool_cas(), 0, 1) != 0 {
+        while raw_atomic_load(slot) == 0 {
+            rt_syscall(24, 0, 0, 0);
+        }
+        return raw_atomic_load(slot);
+    }
+    made := rt_pool_create();
+    raw_atomic_store_release(slot, made);
+    return made;
+}
+// Which worker block is this thread running, or 0 for a thread that is not a pool worker (the main
+// thread, a green scheduler thread, an offload thread). The answer is a scan of the worker array by
+// the thread record each worker published at startup; it costs a handful of loads and is only asked
+// on submit and wait, never inside a job's loop.
+fn rt_pool_self() -> u64 {
+    p := raw_atomic_load(rt_state_pool());
+    if p == 0 {
+        return 0;
+    }
+    tp := raw_tp_get();
+    if tp == 0 {
+        return 0;
+    }
+    array := raw_load(p + 32);
+    workers := raw_load(p + 8);
+    mut i = 0;
+    while i < workers {
+        w := raw_load(array + i * 8);
+        if raw_load(w + 56) == tp {
+            return w;
+        }
+        i += 1;
+    }
     return 0;
 }
+fn rt_pool_create() -> u64 {
+    p := raw_map(4096);
+    if rt_error(p) {
+        rt_abort();
+    }
+    raw_store(p + 40, p + 128);
+    raw_store(p + 64, 496);
+    workers := rt_pool_count();
+    raw_store(p + 8, workers);
+    array := raw_map(workers * 8);
+    if rt_error(array) {
+        rt_abort();
+    }
+    raw_store(p + 32, array);
+    mut i = 0;
+    while i < workers {
+        raw_store(array + i * 8, rt_pool_worker_new(p, i));
+        i += 1;
+    }
+    // Workers start only once the array they are reachable through is complete.
+    i = 0;
+    while i < workers {
+        rt_thread_spawn_detached(rt_pool_worker_main, raw_load(array + i * 8));
+        i += 1;
+    }
+    return p;
+}
+// Default: at least four workers, so the runtime's own four-way barrier fixture stays satisfiable
+// as it was with the previous threaded map, and at most 64. An explicit override is honoured as
+// given (1..64), which is how a nested-parallel test proves the helping scheduler cannot deadlock.
+fn rt_pool_count() -> u64 {
+    override := rt_pool_env_count();
+    if override != 0 {
+        if 64 < override {
+            return 64;
+        }
+        return override;
+    }
+    mut n = rt_cpus();
+    if n < 4 {
+        n = 4;
+    }
+    if 64 < n {
+        n = 64;
+    }
+    return n;
+}
+fn rt_pool_env_count() -> u64 {
+    name := view("GRAIL_POOL_WORKERS=");
+    width := rt_len(name);
+    mut ep = raw_load(raw_state() + 16);
+    mut value = 0;
+    while raw_load(ep) != 0 {
+        entry := raw_load(ep);
+        if rt_pool_prefix(entry, raw_load(name), width) != 0 {
+            mut i = 0;
+            mut more = 1;
+            while more != 0 {
+                b := raw_byte(entry + width + i);
+                if (48 <= b) & (b <= 57) {
+                    value = value * 10 + (b - 48);
+                    i += 1;
+                } else {
+                    more = 0;
+                }
+            }
+            return value;
+        }
+        ep = ep + 8;
+    }
+    return 0;
+}
+fn rt_pool_prefix(at: u64, base: u64, width: u64) -> u64 {
+    mut i = 0;
+    while i < width {
+        if raw_byte(at + i) != raw_byte(base + i) {
+            return 0;
+        }
+        i += 1;
+    }
+    return 1;
+}
+fn rt_pool_worker_new(p: u64, index: u64) -> u64 {
+    w := raw_map(8192);
+    if rt_error(w) {
+        rt_abort();
+    }
+    raw_store(w, w + 128);
+    raw_store(w + 32, p);
+    raw_store(w + 40, index);
+    raw_store(w + 48, 1008);
+    return w;
+}
+// Idle workers sleep in the kernel on the pool's wake sequence. The loop reads the sequence before
+// it looks for work, so a submit that lands after that read bumps the sequence and either the scan
+// or the failed futex wait sees it: no wakeup can be lost, and no worker spins for work.
+fn rt_pool_worker_main(w: u64) -> u64 {
+    // Publish this thread's record so rt_pool_self can find `w` from the thread itself. It is
+    // written before the worker takes any work, and no other thread reads it until it does.
+    raw_store(w + 56, raw_tp_get());
+    p := raw_load(w + 32);
+    while true {
+        mut j = rt_pool_take(w);
+        if j != 0 {
+            rt_pool_run(j);
+        } else {
+            seq := raw_atomic_load(p + 16);
+            j = rt_pool_take(w);
+            if j != 0 {
+                rt_pool_run(j);
+            } else {
+                rt_atomic_fetch_add(p + 24, 1);
+                rt_syscall(202, p + 16, 128, seq);
+                rt_atomic_fetch_sub(p + 24, 1);
+            }
+        }
+    }
+    return 0;
+}
+// Own deque first (locality), then the injection ring (other threads), then one steal pass whose
+// start rotates so idle workers do not all pounce on the same victim.
+fn rt_pool_take(w: u64) -> u64 {
+    mut j = rt_pool_pop(w);
+    if j != 0 {
+        return j;
+    }
+    p := raw_load(w + 32);
+    j = rt_pool_inject_pop(p);
+    if j != 0 {
+        return j;
+    }
+    workers := raw_load(p + 8);
+    first := rt_atomic_fetch_add(p + 72, 1);
+    mut k = 0;
+    while k < workers {
+        victim := (first + k) % workers;
+        if victim != raw_load(w + 40) {
+            j = rt_pool_steal(raw_load(raw_load(p + 32) + victim * 8));
+            if j != 0 {
+                return j;
+            }
+        }
+        k += 1;
+    }
+    return 0;
+}
+fn rt_pool_push(w: u64, j: u64) -> u64 {
+    rt_spin_lock(w + 24);
+    head := raw_load(w + 8);
+    tail := raw_load(w + 16);
+    cap := raw_load(w + 48);
+    if tail - head == cap {
+        rt_spin_unlock(w + 24);
+        return 0;
+    }
+    raw_store(raw_load(w) + (tail % cap) * 8, j);
+    raw_store(w + 16, tail + 1);
+    rt_spin_unlock(w + 24);
+    return 1;
+}
+fn rt_pool_pop(w: u64) -> u64 {
+    rt_spin_lock(w + 24);
+    head := raw_load(w + 8);
+    tail := raw_load(w + 16);
+    if head == tail {
+        rt_spin_unlock(w + 24);
+        return 0;
+    }
+    cap := raw_load(w + 48);
+    last := tail - 1;
+    j := raw_load(raw_load(w) + (last % cap) * 8);
+    raw_store(w + 16, last);
+    rt_spin_unlock(w + 24);
+    return j;
+}
+fn rt_pool_steal(v: u64) -> u64 {
+    rt_spin_lock(v + 24);
+    head := raw_load(v + 8);
+    tail := raw_load(v + 16);
+    if head == tail {
+        rt_spin_unlock(v + 24);
+        return 0;
+    }
+    cap := raw_load(v + 48);
+    j := raw_load(raw_load(v) + (head % cap) * 8);
+    raw_store(v + 8, head + 1);
+    rt_spin_unlock(v + 24);
+    return j;
+}
+fn rt_pool_inject_push(p: u64, j: u64) -> u64 {
+    rt_mutex_lock(p);
+    head := raw_load(p + 48);
+    tail := raw_load(p + 56);
+    cap := raw_load(p + 64);
+    if tail - head == cap {
+        rt_mutex_unlock(p);
+        return 0;
+    }
+    raw_store(raw_load(p + 40) + (tail % cap) * 8, j);
+    raw_store(p + 56, tail + 1);
+    rt_mutex_unlock(p);
+    return 1;
+}
+fn rt_pool_inject_pop(p: u64) -> u64 {
+    rt_mutex_lock(p);
+    head := raw_load(p + 48);
+    tail := raw_load(p + 56);
+    if head == tail {
+        rt_mutex_unlock(p);
+        return 0;
+    }
+    cap := raw_load(p + 64);
+    j := raw_load(raw_load(p + 40) + (head % cap) * 8);
+    raw_store(p + 48, head + 1);
+    rt_mutex_unlock(p);
+    return j;
+}
+// The worker builds the job's result and publishes it with a release store before waking waiters;
+// nothing touches the job afterwards except this wake, which is why the waiter can free it.
+fn rt_pool_run(j: u64) -> u64 {
+    r := raw_call2(raw_load(j), raw_load(j + 8), raw_load(j + 16));
+    raw_store(j + 24, r);
+    raw_atomic_store_release(j + 32, 1);
+    rt_syscall(202, j + 32, 129, 2147483647);
+    return 0;
+}
+// Submission is legal from any thread. From a pool worker (a nested submit) the job goes on that
+// worker's own deque, so the parent helps run its children instead of sleeping; from anywhere else
+// it goes on the injection ring. A full queue runs the job here rather than growing the queue.
+fn rt_pool_submit(f: u64, env: u64, arg: u64) -> u64 {
+    p := rt_pool();
+    j := rt_alloc(48);
+    raw_store(j, f);
+    raw_store(j + 8, env);
+    raw_store(j + 16, arg);
+    raw_store(j + 24, 0);
+    raw_store(j + 32, 0);
+    w := rt_pool_self();
+    mut placed = 0;
+    if w != 0 {
+        placed = rt_pool_push(w, j);
+    }
+    if placed == 0 {
+        placed = rt_pool_inject_push(p, j);
+    }
+    if placed == 0 {
+        rt_pool_run(j);
+    } else {
+        rt_atomic_fetch_add(p + 80, 1);
+        rt_atomic_fetch_add(p + 16, 1);
+        rt_syscall(202, p + 16, 129, 2147483647);
+    }
+    return j;
+}
+// Waiting is where the pool cannot deadlock: a worker waiting on a job it queued runs queued jobs
+// itself, so a pool whose every worker is waiting still makes progress. A thread that is not a
+// worker only sleeps, because helping from a non-worker could run an unrelated long job in front of
+// the one it is waiting for. The record is freed here: the waiter owns it, the worker never touches
+// it after publishing the result.
+fn rt_pool_wait(j: u64) -> u64 {
+    w := rt_pool_self();
+    // A sequentially consistent read (a CAS loop, like the map counter this replaces), not a plain
+    // load: the runner's release store publishes the result word, and a plain load would only order
+    // that pair on x86. `raw_atomic_load_acquire` is not lowered on AArch64/RV64, so the CAS form is
+    // what keeps this correct on every target.
+    while rt_atomic_fetch_add(j + 32, 0) == 0 {
+        mut helped = 0;
+        if w != 0 {
+            k := rt_pool_take(w);
+            if k != 0 {
+                rt_pool_run(k);
+                helped = 1;
+            }
+        }
+        if helped == 0 {
+            rt_syscall(202, j + 32, 128, 0);
+        }
+    }
+    r := raw_load(j + 24);
+    rt_free(j);
+    return r;
+}
+// Map descriptor: 0 callback, 8 environment, 16 context, 24 items base, 32 result base, 40 count,
+// 48 items per job. One job per contiguous range: contiguous writes, no per-item atomic.
+fn rt_pool_map_chunk(d: u64, start: u64) -> u64 {
+    f := raw_load(d);
+    env := raw_load(d + 8);
+    context := raw_load(d + 16);
+    items := raw_load(d + 24);
+    out := raw_load(d + 32);
+    n := raw_load(d + 40);
+    if n <= start {
+        return 0;
+    }
+    mut stop = start + raw_load(d + 48);
+    if n < stop {
+        stop = n;
+    }
+    mut i = start;
+    while i < stop {
+        mut r = 0;
+        if env == 0 {
+            r = raw_call2(f, raw_load(items + i * 8), context);
+        } else {
+            r = raw_call3(f, env, raw_load(items + i * 8), context);
+        }
+        raw_store(out + i * 8, r);
+        i += 1;
+    }
+    return stop - start;
+}
+// Results land in their input slots, so the order of `out` is the input order whatever order the
+// jobs finish in. The caller waits for every job it submitted, so no worker can still write into
+// `out` (or read `items`) when this returns; that is the whole structured-join contract.
 fn rt_parallel_map(items: u64, context: u64, f: u64, env: u64) -> u64 {
     n := rt_len(items);
     out := rt_new();
@@ -1237,46 +1708,45 @@ fn rt_parallel_map(items: u64, context: u64, f: u64, env: u64) -> u64 {
         rt_push(out, 0);
         i += 1;
     }
-    job := rt_alloc(64);
-    raw_store(job + 56, env);
-    raw_store(job + 40, 0);
-    raw_store(job + 48, 0);
-    raw_store(job, f);
-    raw_store(job + 8, raw_load(items));
-    raw_store(job + 16, n);
-    raw_store(job + 24, context);
-    raw_store(job + 32, raw_load(out));
-    mut workers = rt_cpus();
-    if workers < 4 {
-        workers = 4;
+    if n == 0 {
+        rt_drop_seq(items);
+        return out;
     }
-    if 64 < workers {
-        workers = 64;
+    // A few jobs per worker keeps every worker busy and lets stealing even out uneven items.
+    p := rt_pool();
+    mut tasks = raw_load(p + 8) * 4;
+    if n < tasks {
+        tasks = n;
     }
-    if n < workers {
-        workers = n;
+    chunk := (n + tasks - 1) / tasks;
+    d := rt_alloc(56);
+    raw_store(d, f);
+    raw_store(d + 8, env);
+    raw_store(d + 16, context);
+    raw_store(d + 24, raw_load(items));
+    raw_store(d + 32, raw_load(out));
+    raw_store(d + 40, n);
+    raw_store(d + 48, chunk);
+    jobs := rt_alloc(tasks * 8);
+    mut k = 0;
+    mut start = 0;
+    while k < tasks {
+        raw_store(jobs + k * 8, rt_pool_submit(rt_pool_map_chunk, d, start));
+        start += chunk;
+        k += 1;
     }
-    if workers == 0 {
-        workers = 1;
+    mut written = 0;
+    k = 0;
+    while k < tasks {
+        written += rt_pool_wait(raw_load(jobs + k * 8));
+        k += 1;
     }
-    handles := rt_alloc(workers * 8);
-    mut w = 1;
-    while w < workers {
-        raw_store(handles + w * 8, rt_thread_spawn(rt_parallel_worker, job));
-        w += 1;
-    }
-    rt_parallel_worker(job);
-    w = 1;
-    while w < workers {
-        rt_thread_join(raw_load(handles + w * 8));
-        w += 1;
-    }
-    // Each worker's final sequentially consistent increment orders its result stores before this read.
-    if rt_atomic_load(job + 48) != workers {
+    // Every item is written exactly once: a chunk that wrote none, or wrote one twice, is a bug.
+    if written != n {
         rt_abort();
     }
-    rt_free(handles);
-    rt_free(job);
+    rt_free(jobs);
+    rt_free(d);
     rt_drop_seq(items);
     return out;
 }
@@ -4479,22 +4949,23 @@ fn rt_vec_contains(s: u64, v: u64) -> u64 {
 }
 
 // ---- sampling profiler (Linux x86-64) -------------------------------------------------------
-// `grail profile` writes .grail-profile/config in the working directory and runs the target there.
-// The runtime reads that file during startup (rt_thread_init), samples the interrupted instruction
-// pointer from an ITIMER_PROF/SIGPROF timer and writes the raw addresses to the path named in the
-// config when the process ends. The handler never allocates, never takes the allocator lock and
+// `grail profile` puts the arming request in the target's environment as GRAIL_PROFILE and runs it.
+// The runtime reads that variable during startup (rt_thread_init), samples the interrupted
+// instruction pointer from an ITIMER_PROF/SIGPROF timer and writes the raw addresses to the path
+// named in the request when the process ends. The environment is the only channel: nothing is
+// written to the working directory, so a killed run leaves no stale request and the target needs no
+// writable directory. The handler never allocates, never takes the allocator lock and
 // never calls the kernel: it claims a slot with a CAS loop and stores one word, so a signal that
 // interrupts the allocator cannot deadlock against it.
 //
 // Process-state words (rt_state is 4096 bytes; these sit between the allocator's last bin word and
 // the Windows-only thread-bridge word at 3392):
 //   2048 control page pointer  (0 = not profiled; the only word the handler reads)
-//   2080 ".grail-profile/config" (NUL terminated, 64 bytes)
-//   2176 sample path           (NUL terminated, 96 bytes, copied from the config)
+//   2176 sample path           (NUL terminated, 96 bytes, copied from the request)
 //   2272 itimerval             (32 bytes: interval then value, seconds then microseconds)
 //   2304 sigaction             (32 bytes: handler, flags, restorer, mask)
 //   2336 sigaltstack           (24 bytes: stack pointer, flags, size)
-//   2400 config text scratch   (256 bytes, startup only)
+//   2400 request text scratch  (256 bytes, startup only)
 //   2656 timespec             (16 bytes: CLOCK_PROCESS_CPUTIME_ID at arm and at exit)
 //
 // The control page is the first 4096 bytes of the sample mapping:
@@ -4521,12 +4992,41 @@ fn rt_prof_handler(sig: u64, info: u64, ctx: u64) -> u64 {
     }
     return 0;
 }
-fn rt_prof_config_path(dst: u64) -> u64 {
-    // ".grail-profile/config", NUL terminated, as three little-endian words.
-    raw_store(dst, 8083236106062161710);
-    raw_store(dst + 8, 7147042649959460722);
-    raw_store(dst + 16, 444149952111);
-    return dst + 22;
+// True when the NUL-terminated string at `p` starts with "GRAIL_PROFILE=": "GRAIL_PR" and "OFILE="
+// as two little-endian words, so nothing is allocated on a program that is not being profiled.
+fn rt_prof_name(p: u64) -> u64 {
+    if raw_load(p) != 5931345490498114119 {
+        return 0;
+    }
+    if (raw_load(p + 8) & 4294967295) != 1279870543 {
+        return 0;
+    }
+    if (raw_load(p + 12) & 65535) != 15685 {
+        return 0;
+    }
+    return 1;
+}
+// Copies the value of GRAIL_PROFILE into `dst` and returns its length, or 0 when this process's
+// environment carries no request. Nothing is consumed: a child inherits the request only when it
+// inherits this environment, and an explicit `host::command_with` environment can drop it.
+fn rt_prof_request(dst: u64, capacity: u64) -> u64 {
+    mut ep = rt_environ();
+    while raw_load(ep) != 0 {
+        p := raw_load(ep);
+        if rt_prof_name(p) != 0 {
+            mut i = 0;
+            while raw_byte(p + 14 + i) != 0 {
+                if capacity <= i {
+                    return 0;
+                }
+                raw_putbyte(dst + i, raw_byte(p + 14 + i));
+                i += 1;
+            }
+            return i;
+        }
+        ep = ep + 8;
+    }
+    return 0;
 }
 // First byte of the next space-separated token at or after `at`; `n` at end of line.
 fn rt_prof_token(buf: u64, n: u64, at: u64) -> u64 {
@@ -4568,7 +5068,8 @@ fn rt_prof_num(buf: u64, n: u64, at: u64) -> u64 {
     }
     return value;
 }
-// Arms sampling from .grail-profile/config when that file exists and this is Linux x86-64.
+// Arms sampling from GRAIL_PROFILE when this process's environment carries it and this is Linux
+// x86-64.
 fn rt_prof_start() -> u64 {
     if raw_target() != 0 {
         return 0;
@@ -4577,18 +5078,9 @@ fn rt_prof_start() -> u64 {
     if raw_load(words) != 0 {
         return 0;
     }
-    rt_prof_config_path(words + 32);
-    fd := rt_syscall(2, words + 32, 524288, 0);
-    if rt_error(fd) {
-        return 0;
-    }
     text := words + 352;
-    n := rt_syscall(0, fd, text, 256);
-    rt_syscall(3, fd, 0, 0);
-    // One shot: the first Grail process that starts here consumes the arming request, so a stale
-    // file from a killed run cannot make later unrelated runs sample themselves.
-    rt_syscall(263, wrapping_sub(0, 100), words + 32, 0);
-    if rt_error(n) {
+    n := rt_prof_request(text, 256);
+    if n == 0 {
         return 0;
     }
     // "1 RATE CAPACITY PATH": the format version, the sampling rate in Hz, the sample capacity and

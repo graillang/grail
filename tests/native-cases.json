@@ -1056,6 +1056,48 @@
     "diagnostic": "duplicate structural constraint"
   },
   {
+    "name": "command-with-env-carries-its-entries",
+    "note": "host::command_with hands the child exactly the environment it is given: FOO reaches the shell, and the parent's own PATH still finds sh, because the executable search happens in the parent.",
+    "source": "use host;fn main(){mut env=u8[][];env.push(\"FOO=bar\".copy());mut argv=u8[][];argv.push(\"sh\".copy());argv.push(\"-c\".copy());argv.push(\"echo $FOO\".copy());assert(host::command_with(argv,env)==0);}",
+    "stdout": "bar\n",
+    "targets": ["x86_64"]
+  },
+  {
+    "name": "command-with-empty-env-clears-everything",
+    "note": "An empty environment is the whole environment: `env` prints no variable at all. The shell is not asked, because it would invent a default PATH.",
+    "source": "use host;fn main(){mut env=u8[][];mut argv=u8[][];argv.push(\"env\".copy());assert(host::command_with(argv,env)==0);}",
+    "stdout": "",
+    "targets": ["x86_64"]
+  },
+  {
+    "name": "command-with-env-built-from-the-inherited-one",
+    "note": "host::environment plus one entry is the additive spelling: the child keeps what this process had (PATH) and gains FOO.",
+    "source": "use host;fn main(){mut env=host::environment();env.push(\"FOO=bar\".copy());mut argv=u8[][];argv.push(\"sh\".copy());argv.push(\"-c\".copy());argv.push(\"echo $FOO; echo ${PATH+set}\".copy());assert(host::command_with(argv,env)==0);}",
+    "stdout": "bar\nset\n",
+    "targets": ["x86_64"]
+  },
+  {
+    "name": "command-without-env-still-inherits",
+    "note": "The two-argument spelling replaces the environment and nothing else: host::command keeps inheriting this process's, which is why the old call sites did not change.",
+    "source": "use host;fn main(){mut argv=u8[][];argv.push(\"sh\".copy());argv.push(\"-c\".copy());argv.push(\"echo ${PATH+inherited}\".copy());assert(host::command(argv)==0);}",
+    "stdout": "inherited\n",
+    "targets": ["x86_64"]
+  },
+  {
+    "name": "command-with-env-refuses-malformed-entry",
+    "note": "An entry without = and a non-empty name would make execve start the child with no environment at all (and CreateProcess reject the block), so it is refused with 256+EINVAL and nothing is spawned.",
+    "source": "use host;fn main(){mut env=u8[][];env.push(\"NOEQUALS\".copy());mut argv=u8[][];argv.push(\"true\".copy());println(host::command_with(argv,env));}",
+    "stdout": "278\n",
+    "targets": ["x86_64"]
+  },
+  {
+    "name": "command-with-env-reports-a-signalled-child",
+    "note": "The result convention is shared with host::command: 128+N when signal N ended the child and a normal exit code otherwise, whatever the environment was.",
+    "source": "use host;fn main(){mut env=u8[][];env.push(\"X=1\".copy());mut argv=u8[][];argv.push(\"sh\".copy());argv.push(\"-c\".copy());argv.push(\"kill -TERM $$\".copy());println(host::command_with(argv,env));}",
+    "stdout": "143\n",
+    "targets": ["x86_64"]
+  },
+  {
     "name": "command-parent-prepares-paths",
     "source": "use host;fn main(){assert(host::command(u8[][\"true\".copy()])==0);assert(host::command(u8[][\"sh\".copy(),\"-c\".copy(),\"exit 7\".copy()])==7);assert(host::command(u8[][\"grail-no-such-command-a2e682\".copy()])==127);assert(host::command(u8[][\"/bin/true\".copy()])==0);}",
     "stdout": ""
@@ -1380,7 +1422,7 @@
     "name": "parallel-reject-exclusive-context",
     "source": "fn f<a>(x:u64,c:(&a mut u64))->u64{return x;}fn main(){mut n=0;r:=parallel_map(u64[1],&mut n,f);}",
     "reject": true,
-    "diagnostic": "does not satisfy Share"
+    "diagnostic": "cannot share parallel_map context"
   },
   {
     "name": "parallel-reject-owned-context",
@@ -1447,13 +1489,13 @@
     "name": "task-reject-borrowed-item",
     "source": "fn f<a>(v:(&a u8[]),c:u64)->u64{return 0;}fn b<s>(sc:(&s Scope<u64>),c:u64)->u64{local:=u8[1];t:=spawn(sc,&local,f);return join(t);}fn main(){}",
     "reject": true,
-    "diagnostic": "spawned item must be an owned Send value"
+    "diagnostic": "a spawned value cannot borrow"
   },
   {
     "name": "task-reject-borrowed-result",
     "source": "fn f<a>(n:u64,c:(&a u8[]))->(&a u8[]){return c;}fn b<s,a>(sc:(&s Scope<(&a u8[])>),c:(&a u8[]))->u64{t:=spawn(sc,1,f);return 0;}fn main(){}",
     "reject": true,
-    "diagnostic": "spawned result must be an owned Send value"
+    "diagnostic": "a spawned value cannot borrow"
   },
   {
     "name": "task-reject-exclusive-context",
@@ -1477,7 +1519,7 @@
     "name": "task-reject-scope-shared-to-threads",
     "source": "fn w<s>(n:u64,sc:(&s Scope<u64>))->u64{return n;}fn b<s>(sc:(&s Scope<u64>),c:u64)->u64{r:=parallel_map(u64[1],sc,w);return 0;}fn main(){}",
     "reject": true,
-    "diagnostic": "does not satisfy Share"
+    "diagnostic": "cannot share parallel_map context"
   },
   {
     "name": "task-reject-wrong-token",
@@ -3863,22 +3905,7 @@
     "name": "ffi-reject-handle-out-slot",
     "source": "module ffi_reject;handle Instance;extern \"C\" record Slot { instance: Instance }fn main(){mut slot: Slot;x:=slot.instance;}",
     "reject": true,
-    "diagnostic": "use of moved, borrowed or partially initialized value",
-    "note": "`mut slot: Slot` allocates zeroed storage C may write, but the record has no value yet: reading a handle field before a foreign call (or an assignment) filled it is refused. The accepted half of this pair is ffi-record-out-param"
-  },
-  {
-    "name": "ffi-reject-record-unfilled-read",
-    "source": "module ffi_reject;extern \"C\" record Caps { min: u32, max: u32 }fn main() -> u64 {mut caps: Caps;println(caps.min);return 0;}",
-    "reject": true,
-    "diagnostic": "use of moved, borrowed or partially initialized value",
-    "note": "the same rule for a scalar field: zeroed storage is not an initialised record"
-  },
-  {
-    "name": "ffi-reject-record-unfilled-move",
-    "source": "module ffi_reject;extern \"C\" record Caps { min: u32, max: u32 }fn main() -> u64 {mut caps: Caps;copy := caps;println(copy.min);return 0;}",
-    "reject": true,
-    "diagnostic": "use of moved, borrowed or partially initialized value",
-    "note": "moving the storage does not create a value either, so a move of an unfilled record is refused too"
+    "diagnostic": "use of moved, borrowed or partially initialized value"
   },
   {
     "name": "ffi-reject-handle-null-seed",
@@ -5233,6 +5260,214 @@
       "compiler/tests/f32_borrowed.grl"
     ],
     "stdout": "3.75\n"
+  },
+  {
+    "name": "parallel-closure-capture-plain-data",
+    "note": "The closure environment is classified structurally: a record of plain data and a captured shared slice of numbers are both transferable and shareable, so the closure crosses to the workers.",
+    "source": "struct Pair { a: u64, b: u64 }\nfn main() {\n    p := Pair { a: 2, b: 3 };\n    mut t = u64[4, 5, 6];\n    r := &t;\n    out := parallel_map(u64[0, 1, 2], 0, |x: u64, unused: u64| -> u64 r[x] + p.a + p.b);\n    mut total = 0;\n    for i in out.len() {\n        total += out[i];\n    }\n    println(total);\n}\n",
+    "stdout": "30\n",
+    "status": 0
+  },
+  {
+    "name": "handle-classification-transferable-moves-to-worker",
+    "note": "An audited `handle H: transferable;` may cross to a worker as an owned value (a spawned result here); the declaration is what changes the answer from the default deny.",
+    "source": "handle H: transferable;\nfn make(n: u64, c: u64) -> H {\n    mut h: H;\n    return h;\n}\nfn body<s>(sc: (&s Scope<u64>), base: u64) -> u64 {\n    first := spawn(sc, base, make);\n    got := join(first);\n    if got == got {\n        return 7;\n    }\n    return 8;\n}\nfn main() {\n    println(task_scope(1, body));\n}\n",
+    "stdout": "7\n",
+    "status": 0
+  },
+  {
+    "name": "parallel-reject-closure-capture-handle-record",
+    "note": "The reported soundness hole: a plain-data signature with a thread-affine capture. The capture reaches a handle through a field, and the diagnostic names that field.",
+    "source": "handle H;\nstruct Holder { file: H, n: u64 }\nfn touch(h: (&Holder), x: u64) -> u64 { return x; }\nfn job(a: (&Holder)) -> u64 {\n    g := |x: u64, u: u64| -> u64 touch(a, x);\n    out := parallel_map(u64[1], 0, g);\n    return out.len();\n}\nfn main() { println(1); }\n",
+    "reject": true,
+    "diagnostic": "cannot share closure capture `a`: a.file is thread-affine"
+  },
+  {
+    "name": "parallel-reject-closure-capture-owned-handle",
+    "source": "handle H;\nfn keep(h: H, x: u64) -> u64 { return x; }\nfn main() {\n    mut f: H;\n    out := parallel_map(u64[1], 0, |x: u64, u: u64| -> u64 keep(f, x));\n    println(out.len());\n}\n",
+    "reject": true,
+    "diagnostic": "cannot share closure capture `f`: f is thread-affine"
+  },
+  {
+    "name": "parallel-reject-closure-capture-handle-borrow",
+    "note": "A shared reference is only shareable when its referent is: `&File` reaches the handle.",
+    "source": "handle H;\nfn peek<a>(h: (&a H), x: u64) -> u64 { return x; }\nfn main() {\n    mut fh: H;\n    out := parallel_map(u64[1], 0, |x: u64, u: u64| -> u64 peek(&fh, x));\n    println(out.len());\n}\n",
+    "reject": true,
+    "diagnostic": "cannot share closure capture `fh`: fh is thread-affine"
+  },
+  {
+    "name": "parallel-reject-closure-capture-handle-vector",
+    "source": "handle H;\nfn main() {\n    mut f: H;\n    hs := H[f];\n    out := parallel_map(u64[1], 0, |x: u64, u: u64| -> u64 hs.len());\n    println(out.len());\n}\n",
+    "reject": true,
+    "diagnostic": "cannot share closure capture `hs`: hs is thread-affine"
+  },
+  {
+    "name": "parallel-reject-closure-capture-narrow-handle",
+    "note": "A handle audited transferable-only may not be shared: parallel_map shares one closure environment with every worker.",
+    "source": "handle H: transferable;\nfn keep(h: H, x: u64) -> u64 { return x; }\nfn main() {\n    mut f: H;\n    out := parallel_map(u64[1], 0, |x: u64, u: u64| -> u64 keep(f, x));\n    println(out.len());\n}\n",
+    "reject": true,
+    "diagnostic": "cannot share closure capture `f`: f is thread-affine (declared transferable, not shareable)"
+  },
+  {
+    "name": "parallel-reject-fnmut-capture",
+    "note": "An FnMut closure shared by every worker would race on its environment.",
+    "source": "fn main() {\n    mut n = 0;\n    out := parallel_map(u64[1], 0, |x: u64, u: u64| -> u64 { n += 1; return x; });\n    println(out.len());\n}\n",
+    "reject": true,
+    "diagnostic": "a callback shared by concurrent workers must not write a captured value"
+  },
+  {
+    "name": "parallel-reject-context-record-with-handle",
+    "note": "The field is named outside a capture too: a record context whose field reaches a handle.",
+    "source": "handle H;\nstruct Holder { file: H, n: u64 }\nfn f<a>(x: u64, c: (&a Holder)) -> u64 { return x; }\nfn job(a: (&Holder)) -> u64 { return parallel_map(u64[1], a, f).len(); }\nfn main() { println(1); }\n",
+    "reject": true,
+    "diagnostic": "cannot share parallel_map context: file is thread-affine"
+  },
+  {
+    "name": "parallel-reject-spawned-handle-result",
+    "note": "An unaudited handle defaults to thread-affine, so it cannot be a spawned result.",
+    "source": "handle H;\nfn make(n: u64, c: u64) -> H {\n    mut h: H;\n    return h;\n}\nfn body<s>(sc: (&s Scope<u64>), base: u64) -> u64 {\n    first := spawn(sc, base, make);\n    got := join(first);\n    return 7;\n}\nfn main() { println(1); }\n",
+    "reject": true,
+    "diagnostic": "cannot transfer spawned result: thread-affine (a foreign handle with no audited classification)"
+  },
+  {
+    "name": "handle-classification-reject-shareable-alone",
+    "note": "Sharing implies moving: a value usable on another thread may also be moved to it.",
+    "source": "handle H: shareable;\nfn main() { println(1); }\n",
+    "reject": true,
+    "diagnostic": "`shareable` implies `transferable`"
+  },
+  {
+    "name": "handle-classification-reject-unknown-word",
+    "source": "handle H: movable;\nfn main() { println(1); }\n",
+    "reject": true,
+    "diagnostic": "a handle is classified `transferable` or `transferable, shareable`"
+  },
+  {
+    "name": "pool-chunks-owned",
+    "note": "A CPU-bound job set: 400k elements summed in 8 owned chunks through pool::for_chunks, asserted equal to the sequential answer. The chunk split is one owned vector per job, so no reference crosses a job boundary.",
+    "files": [
+      "tests/pool/chunks.grl"
+    ],
+    "modules": [
+      "lib/pool.grl",
+      "lib/core.grl"
+    ],
+    "stdout": "8782924083312428559\n"
+  },
+  {
+    "name": "pool-map-input-order",
+    "note": "Job 0 sleeps four times as long as job 3, so completion order is the reverse of input order; pool::map must still return results in input order.",
+    "files": [
+      "tests/pool/order.grl"
+    ],
+    "modules": [
+      "lib/pool.grl",
+      "lib/core.grl"
+    ],
+    "stdout": "[0, 1, 2, 3]\n"
+  },
+  {
+    "name": "pool-uneven-work-no-deadlock",
+    "note": "One long job (the sum of 0..1999999) among seven trivial ones: no deadlock, and the long job's result lands in its own slot.",
+    "files": [
+      "tests/pool/uneven.grl"
+    ],
+    "modules": [
+      "lib/pool.grl",
+      "lib/core.grl"
+    ],
+    "stdout": "[1999999000000, 1, 2, 3, 4, 5, 6, 7]\n"
+  },
+  {
+    "name": "pool-nested-one-worker",
+    "note": "Nested parallelism on a one-worker pool (GRAIL_POOL_WORKERS=1): a job waits on the jobs it queued, so only the helping scheduler can complete this without deadlock.",
+    "files": [
+      "tests/pool/nested.grl"
+    ],
+    "modules": [
+      "lib/pool.grl",
+      "lib/core.grl"
+    ],
+    "env": {
+      "GRAIL_POOL_WORKERS": "1"
+    },
+    "stdout": "[19900, 219900, 419900, 619900, 819900, 1019900]\n[19900, 20100, 20300, 20500]\n"
+  },
+  {
+    "name": "pool-abort-in-job",
+    "note": "A job that fails (out-of-bounds) ends the process promptly instead of hanging the pool or its waiter: the failure policy is the runtime's abort policy (B5), and nothing after the abort runs. The abort is raised on a pool worker and surfaces as the abort exit status, exactly like abort-in-green-task-ends-process; an abort raised on the main thread still dies by SIGABRT.",
+    "files": [
+      "tests/pool/abort.grl"
+    ],
+    "modules": [
+      "lib/pool.grl",
+      "lib/core.grl"
+    ],
+    "status": 134,
+    "stdout": "before\n"
+  },
+  {
+    "name": "pool-speedup-four-workers",
+    "note": "Wall clock: 3M CPU-bound elements as one job and as four jobs, twice each. Asserts the four-job run is at least 1.5x faster, and SKIPs honestly (stderr only, stdout still \"ok\") when /proc/cpuinfo reports fewer than four cores. stderr carries the measured times.",
+    "files": [
+      "tests/pool/speedup.grl"
+    ],
+    "modules": [
+      "lib/pool.grl",
+      "lib/core.grl"
+    ],
+    "targets": [
+      "x86_64"
+    ],
+    "stdout": "ok\n"
+  },
+  {
+    "name": "pool-reject-handle-item",
+    "note": "The safe pool surface denies a foreign handle: a `handle` has neither Send nor Share, so `pool::map` over handles is refused before any job exists.",
+    "source": "use pool;\nhandle H;\nfn work(h: H) -> u64 { return 1; }\nfn go(v: H[]) -> u64[] { return pool::map<H,u64>(v, work); }\nfn main(){}\n",
+    "modules": [
+      "lib/pool.grl",
+      "lib/core.grl"
+    ],
+    "reject": true,
+    "diagnostic": "type does not satisfy Send"
+  },
+  {
+    "name": "pool-reject-handle-in-record",
+    "note": "Structural: a record containing a handle is unshareable too, so it cannot be a pool item. This is the classification the safe surface inherits from parallel_map.",
+    "source": "use pool;\nhandle H;\nstruct Holder { file: H, n: u64 }\nfn work(h: Holder) -> u64 { return h.n; }\nfn go(v: Holder[]) -> u64[] { return pool::map<Holder,u64>(v, work); }\nfn main(){}\n",
+    "modules": [
+      "lib/pool.grl",
+      "lib/core.grl"
+    ],
+    "reject": true,
+    "diagnostic": "type does not satisfy Send"
+  },
+  {
+    "name": "pool-from-green-task",
+    "note": "Parallel work entered from green tasks rather than from the main thread: task_scope resolves the task mode before the pool is ever touched, and two spawned tasks plus the acting task all run owned-chunk jobs. This is the interaction that broke when the task-mode cache and the pool's process-state word were the same word (the pool then 'existed' at address 1 and rt_parallel_map read 0x9), and it is the combination neither branch tested alone.",
+    "files": [
+      "tests/pool/from_task.grl"
+    ],
+    "modules": [
+      "lib/pool.grl",
+      "lib/core.grl"
+    ],
+    "stdout": "15450\n"
+  },
+  {
+    "name": "ffi-reject-record-unfilled-read",
+    "source": "module ffi_reject;extern \"C\" record Caps { min: u32, max: u32 }fn main() -> u64 {mut caps: Caps;println(caps.min);return 0;}",
+    "reject": true,
+    "diagnostic": "use of moved, borrowed or partially initialized value",
+    "note": "the same rule for a scalar field: zeroed storage is not an initialised record"
+  },
+  {
+    "name": "ffi-reject-record-unfilled-move",
+    "source": "module ffi_reject;extern \"C\" record Caps { min: u32, max: u32 }fn main() -> u64 {mut caps: Caps;copy := caps;println(copy.min);return 0;}",
+    "reject": true,
+    "diagnostic": "use of moved, borrowed or partially initialized value",
+    "note": "moving the storage does not create a value either, so a move of an unfilled record is refused too"
   },
   {
     "name": "ffi-record-address",

@@ -55,11 +55,16 @@ joined before the call returns. Therefore no task can outlive borrowed data. Che
 T and R are Send, the context is Share and a plain value, shared reference or readonly view,
 R holds no borrows, and borrowed items are references whose exclusive referents hold no borrows.
 
-Runtime: workers are OS threads created with `clone` (1 MiB stacks with a guard page), joined
-via the kernel's clear-TID futex wake. Work is claimed dynamically through an atomic index;
-the caller participates. Worker count is max(4, available CPUs), capped at 64 and at the item
-count. Allocation is serialized by the allocator lock. Results are published by each worker's
-final sequentially consistent counter increment before the caller reads them.
+Runtime: `parallel_map` is a client of the process-wide work-stealing job pool
+(`docs/design/parallelism.md`, stage 1). The pool's workers are OS threads created once with
+`clone` (1 MiB stacks with a guard page) and parked on a futex when idle; the caller does not
+participate on a worker thread but never needs to, because the workers drain the queue. The map
+splits its items into a few contiguous owned ranges per worker and submits one job per range, so
+stealing balances uneven items; results are written into their input slots, so `out` is in input
+order whatever order the jobs finish in. The call waits for every job it submitted, and its
+allocations are released before it returns. Worker count defaults to max(4, available CPUs),
+capped at 64, and `GRAIL_POOL_WORKERS` overrides it. Allocation is serialized by the allocator
+lock.
 
 Tests (`compiler/tests/parallel.grl`) include a barrier that only completes when four tasks run
 simultaneously, 16-thread atomic and mutex contention with exact totals, and 8-way concurrent map
@@ -133,6 +138,6 @@ server task.
 ## Still missing (not claimed)
 
 Checked suspension effects (a static "does not suspend" contract);
-cancellation propagation into nested scopes; timeouts on joins; DNS/IPv6 (TCP over IPv4 addresses only); work stealing (one shared run queue);
+cancellation propagation into nested scopes; timeouts on joins; DNS/IPv6 (TCP over IPv4 addresses only);
 channels; lifetime-carrying mutex payloads; read-write locks. `parallel_map` called from a
 task still blocks that worker while its threads run.

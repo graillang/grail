@@ -1,0 +1,34 @@
+// Parallel work executed by green tasks rather than by the main thread: the pool is entered from
+// a task scope (the acting task itself) and from two spawned tasks. This is the combination neither
+// the pool branch nor the green-scheduler branch tested alone; it is also what resolved the task
+// mode before the pool was created, which is how a shared process-state word turned into a crash.
+use pool;
+
+fn chunk_sum(v: u64[]) -> u64 {
+    mut total = 0;
+    for x in v { total += x; }
+    return total;
+}
+// Owned chunks in, one value out - run from inside a task.
+fn inner(base: u64) -> u64 {
+    mut v = u64[];
+    for i in 100 { v.push(base + i); }
+    parts := pool::for_chunks<u64,u64>(v, 4, chunk_sum);
+    mut total = 0;
+    for part in parts { total += part; }
+    return total;
+}
+fn work(item: u64, unused: u64) -> u64 {
+    return inner(item);
+}
+fn body<s>(sc: (&s Scope<u64>), context: u64) -> u64 {
+    a := spawn(sc, 1, work);
+    b := spawn(sc, 2, work);
+    // Parallel work from the acting task too, not only from the spawned ones.
+    mine := inner(3);
+    return mine + join(a) + join(b);
+}
+fn main() {
+    // inner(1) = 5050, inner(2) = 5150, inner(3) = 5250.
+    println(task_scope(0, body));
+}
