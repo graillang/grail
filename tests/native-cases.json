@@ -1056,6 +1056,48 @@
     "diagnostic": "duplicate structural constraint"
   },
   {
+    "name": "command-with-env-carries-its-entries",
+    "note": "host::command_with hands the child exactly the environment it is given: FOO reaches the shell, and the parent's own PATH still finds sh, because the executable search happens in the parent.",
+    "source": "use host;fn main(){mut env=u8[][];env.push(\"FOO=bar\".copy());mut argv=u8[][];argv.push(\"sh\".copy());argv.push(\"-c\".copy());argv.push(\"echo $FOO\".copy());assert(host::command_with(argv,env)==0);}",
+    "stdout": "bar\n",
+    "targets": ["x86_64"]
+  },
+  {
+    "name": "command-with-empty-env-clears-everything",
+    "note": "An empty environment is the whole environment: `env` prints no variable at all. The shell is not asked, because it would invent a default PATH.",
+    "source": "use host;fn main(){mut env=u8[][];mut argv=u8[][];argv.push(\"env\".copy());assert(host::command_with(argv,env)==0);}",
+    "stdout": "",
+    "targets": ["x86_64"]
+  },
+  {
+    "name": "command-with-env-built-from-the-inherited-one",
+    "note": "host::environment plus one entry is the additive spelling: the child keeps what this process had (PATH) and gains FOO.",
+    "source": "use host;fn main(){mut env=host::environment();env.push(\"FOO=bar\".copy());mut argv=u8[][];argv.push(\"sh\".copy());argv.push(\"-c\".copy());argv.push(\"echo $FOO; echo ${PATH+set}\".copy());assert(host::command_with(argv,env)==0);}",
+    "stdout": "bar\nset\n",
+    "targets": ["x86_64"]
+  },
+  {
+    "name": "command-without-env-still-inherits",
+    "note": "The two-argument spelling replaces the environment and nothing else: host::command keeps inheriting this process's, which is why the old call sites did not change.",
+    "source": "use host;fn main(){mut argv=u8[][];argv.push(\"sh\".copy());argv.push(\"-c\".copy());argv.push(\"echo ${PATH+inherited}\".copy());assert(host::command(argv)==0);}",
+    "stdout": "inherited\n",
+    "targets": ["x86_64"]
+  },
+  {
+    "name": "command-with-env-refuses-malformed-entry",
+    "note": "An entry without = and a non-empty name would make execve start the child with no environment at all (and CreateProcess reject the block), so it is refused with 256+EINVAL and nothing is spawned.",
+    "source": "use host;fn main(){mut env=u8[][];env.push(\"NOEQUALS\".copy());mut argv=u8[][];argv.push(\"true\".copy());println(host::command_with(argv,env));}",
+    "stdout": "278\n",
+    "targets": ["x86_64"]
+  },
+  {
+    "name": "command-with-env-reports-a-signalled-child",
+    "note": "The result convention is shared with host::command: 128+N when signal N ended the child and a normal exit code otherwise, whatever the environment was.",
+    "source": "use host;fn main(){mut env=u8[][];env.push(\"X=1\".copy());mut argv=u8[][];argv.push(\"sh\".copy());argv.push(\"-c\".copy());argv.push(\"kill -TERM $$\".copy());println(host::command_with(argv,env));}",
+    "stdout": "143\n",
+    "targets": ["x86_64"]
+  },
+  {
     "name": "command-parent-prepares-paths",
     "source": "use host;fn main(){assert(host::command(u8[][\"true\".copy()])==0);assert(host::command(u8[][\"sh\".copy(),\"-c\".copy(),\"exit 7\".copy()])==7);assert(host::command(u8[][\"grail-no-such-command-a2e682\".copy()])==127);assert(host::command(u8[][\"/bin/true\".copy()])==0);}",
     "stdout": ""

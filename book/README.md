@@ -1,7 +1,7 @@
 # Grail by Example
 
 An offline, example-first introduction to the **implemented native language and the approved
-syntax-v2 surface**: 28 chapters, 45 checked Grail programs, each with a checked Rust comparison
+syntax-v2 surface**: 24 chapters, 54 checked Grail programs, each with a checked Rust comparison
 (including paired helper modules). Rust comparisons are on by default,
 with aligned code and output beside Grail on wide screens and a note below. The global toggle
 remembers an explicit choice across chapters. Light mode is the default; a chosen theme is saved.
@@ -29,8 +29,8 @@ arguments). An opener failure is reported rather than silently claiming a browse
 
 Building/reading needs no Grail toolchain. Running Grail examples supports **Linux x86-64,
 ARM64 and RISC-V 64**, with Clang used only as an assembler and LLD as linker. This is the
-book-check matrix, not the whole compiler matrix: Windows x86-64 emits PE32+ images and runs ten
-test programs under Wine, while Windows AArch64 and macOS are static-only; see
+book-check matrix, not the whole compiler matrix: Windows x86-64 emits PE32+ images and runs the
+programs in `tests/windows-cases.json` under Wine, while Windows AArch64 and macOS are static-only; see
 `docs/platform-status.md`. The runner builds
 the Grail-written compiler from generated assembly bootstraps; it uses no Rust seed or C backend.
 Cross execution uses QEMU; pass `--target=aarch64` or `--target=riscv64` to the book check command. Checking Rust comparisons additionally needs **rustc with edition 2024**. The verification

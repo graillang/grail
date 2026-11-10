@@ -68,7 +68,7 @@ function ok(label, condition, detail) {
   assert.equal(result.status, 0, `round trip: ${result.signal}: ${result.stdout}${result.stderr}`);
   assert.equal(
     result.stdout.toString(),
-    '6\n2\n3\n6\n4\nnot found\n0\n1\nround trip ok\n',
+    '6\n2\n3\n6\n4\nnot found\n0\n1\n0\n1\ntrue\nround trip ok\n',
     'round trip: stdout changed',
   );
   assert.equal(readFileSync(join(compiled.directory, 'scratch/note.txt'), 'utf8'), 'Grail\n', 'round trip: written bytes differ');
