@@ -62,6 +62,31 @@ pub fn fact_op<a>(facts: (&a mut Facts), name: u8[], ordinal: u64, op: u64) -> u
 pub fn facts_len<a>(facts: (&a Facts)) -> u64 {
     return facts.items.len();
 }
+// --verify-facts writes the table into the module as comments, so a test can see exactly which
+// slots and which calls the lowering typed without reading the compiler's memory.
+fn dump_facts<a>(out: (&a mut u8[]), facts: (&a Facts)) -> unit {
+    for i in facts.items.len() {
+        f := &facts.items[i];
+        put(&mut out, view("; fact "));
+        put(&mut out, view(f.fn));
+        if f.kind == 0 {
+            put(&mut out, view(" slot "));
+        } else {
+            put(&mut out, view(" call "));
+            put(&mut out, view(f.callee));
+            out.push(44);
+            num(&mut out, f.b);
+            put(&mut out, view(" ordinal "));
+        }
+        num(&mut out, f.a);
+        put(&mut out, view(" what "));
+        num(&mut out, f.what);
+        put(&mut out, view(" width "));
+        num(&mut out, f.width);
+        out.push(10);
+    }
+    return ();
+}
 // Drops the facts of a function attempt the front end threw away.
 pub fn facts_truncate<a>(facts: (&a mut Facts), n: u64) -> unit {
     while n < facts.items.len() {
@@ -105,7 +130,10 @@ struct L {
     // has no fact, else the opcode (42, 43, 45, 47) the call performs on two f32 operands.
     fops: u64[],
     // Ordinal of the next `call rt_f64_op` in the function being lowered.
-    fordinal: u64
+    fordinal: u64,
+    // 1 with --verify-facts: check `fpext(fptrunc(d)) == d` at every word that a fact treats as
+    // an f32, so a mis-typed fact aborts instead of silently changing a value.
+    verify: u64
 }
 
 fn eq<a, b>(a: &a [u8], b: &b [u8]) -> bool {
@@ -752,6 +780,7 @@ fn store<a, b, c>(l: (&a mut L), op: &b [u8], v: &c [u8], width: u64) -> unit {
         sn := slot_name(k - 1);
         d := as_double(&mut l, view(v));
         f := def(&mut l, view("fptrunc double {} to float"), &u8[][copy(view(d))]);
+        verify_fact(&mut l, view(v), view(f));
         emit(&mut l, view("store float {}, ptr {}, align 4"), &u8[][f, sn]);
         return ();
     }
@@ -786,6 +815,24 @@ fn word_of_float<a, b>(l: (&a mut L), f: &b [u8]) -> u8[] {
 fn float_of_word<a, b>(l: (&a mut L), w: &b [u8]) -> u8[] {
     d := as_double(&mut l, view(w));
     return def(&mut l, view("fptrunc double {} to float"), &u8[][d]);
+}
+// --verify-facts: assert `fpext(fptrunc(d)) == d` for the word a fact is about, compared on the
+// bit pattern so a NaN passes. One compare and a cold branch per fact use; off by default.
+fn verify_fact<a, b, c>(l: (&a mut L), w: &b [u8], f: &c [u8]) -> unit {
+    if l.verify == 0 {
+        return ();
+    }
+    d := def(&mut l, view("fpext float {} to double"), &u8[][copy(f)]);
+    back := as_word(&mut l, view(d));
+    same := def(&mut l, view("icmp eq i64 {}, {}"), &u8[][copy(w), back]);
+    good := fresh_block(&mut l);
+    wrong := fresh_block(&mut l);
+    emit(&mut l, view("br i1 {}, label %{}, label %{}"), &u8[][same, copy(view(good)), copy(view(wrong))]);
+    begin_block(&mut l, view(wrong));
+    emit(&mut l, view("call void @\"rt_abort.cold\"() #0"), &u8[][]);
+    emit(&mut l, view("unreachable"), &u8[][]);
+    begin_block(&mut l, view(good));
+    return ();
 }
 fn slot_name(k: u64) -> u8[] {
     mut out = copy(view("%s."));
@@ -1107,7 +1154,9 @@ fn lower_call<a, b>(l: (&a mut L), target: &b [u8]) -> unit {
             }
             put(&mut kind, view(" float {}, {}"));
             fa := float_of_word(&mut l, view(lhs));
+            verify_fact(&mut l, view(lhs), view(fa));
             fb := float_of_word(&mut l, view(rhs));
+            verify_fact(&mut l, view(rhs), view(fb));
             r := def(&mut l, view(kind), &u8[][fa, fb]);
             w := word_of_float(&mut l, view(r));
             set_reg(&mut l, view("rax"), view(w));
@@ -1952,16 +2001,16 @@ fn rename_calls<a, b>(line: &a [u8], lifted: (&b Set)) -> u8[] {
     }
     return out;
 }
-pub fn lower_for<a, b>(stream: &a [u8], target: u64, facts: (&b Facts)) -> Lowered {
+pub fn lower_for<a, b>(stream: &a [u8], target: u64, facts: (&b Facts), verify: u64) -> Lowered {
     triple := target_triple(target);
-    return lower_target(stream, view(triple), target, facts);
+    return lower_target(stream, view(triple), target, facts, verify);
 }
-pub fn lower<a, b, c>(stream: &a [u8], triple: &b [u8], facts: (&c Facts)) -> Lowered {
-    return lower_target(stream, triple, 0, facts);
+pub fn lower<a, b, c>(stream: &a [u8], triple: &b [u8], facts: (&c Facts), verify: u64) -> Lowered {
+    return lower_target(stream, triple, 0, facts, verify);
 }
-fn lower_target<a, b, c>(stream: &a [u8], triple: &b [u8], target: u64, facts: (&c Facts)) -> Lowered {
+fn lower_target<a, b, c>(stream: &a [u8], triple: &b [u8], target: u64, facts: (&c Facts), verify: u64) -> Lowered {
     lines := split_lines(stream);
-    mut l = L { target: target, ir: u8[], body: u8[], fail: 0, t: 0, dead: 0, term: 0, labels: set_new(16), calls: u8[][], addrs: u8[][], split: 0, refs: u8[][], lifted: u8[][], flags: 0, frame: 0, fslots: u64[], fops: u64[], fordinal: 0 };
+    mut l = L { target: target, ir: u8[], body: u8[], fail: 0, t: 0, dead: 0, term: 0, labels: set_new(16), calls: u8[][], addrs: u8[][], split: 0, refs: u8[][], lifted: u8[][], flags: 0, frame: 0, fslots: u64[], fops: u64[], fordinal: 0, verify: verify };
     mut funcs = Func[];
     mut data = u8[][];
     split(&lines, &mut funcs, &mut data);
@@ -2068,6 +2117,9 @@ fn lower_target<a, b, c>(stream: &a [u8], triple: &b [u8], target: u64, facts: (
         }
     }
     put(&mut ir, view(head));
+    if verify != 0 {
+        dump_facts(&mut ir, facts);
+    }
     mut callset = set_new(l.calls.len() + 16);
     for i in l.calls.len() {
         set_add(&mut callset, view(l.calls[i]));

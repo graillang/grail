@@ -222,6 +222,8 @@ struct C {
     // recently emitted (its site, which knows the opcode, records the fact after the call).
     f64_ops: u64,
     call_ord: u64,
+    // 1 with --verify-facts: the lifter checks every word a fact treats as an f32.
+    verify_facts: u64,
     debug_funcs: DebugFunc[],
     debug_vars: DebugVar[],
     arg_offset: u64,
@@ -20708,6 +20710,7 @@ pub fn main() -> u64 {
         facts_fn: u8[],
         f64_ops: 0,
         call_ord: 0,
+        verify_facts: 0,
         debug_funcs: DebugFunc[],
         debug_vars: DebugVar[],
         arg_offset: 0,
@@ -20949,7 +20952,12 @@ pub fn main() -> u64 {
                                     exchange(&mut c.backend, 1);
                                     offset += 1;
                                 } else {
+                                    if same(view(option), view("--verify-facts")) {
+                                        exchange(&mut c.verify_facts, 1);
+                                        offset += 1;
+                                    } else {
                                     break;
+                                    }
                                 }
                             }
                         }
@@ -20966,7 +20974,7 @@ pub fn main() -> u64 {
         fail_option(
             &mut c,
             view(
-                "usage: grail [--target ARCH] [--overflow=checked|wrap] [--debug] [--deny-ambient-host] OUT.s ENTRY.grl MODULE.grl..."
+                "usage: grail [--target ARCH] [--overflow=checked|wrap] [--debug] [--backend=llvm [--verify-facts]] [--deny-ambient-host] OUT.s ENTRY.grl MODULE.grl..."
             )
         );
     }
@@ -20977,6 +20985,9 @@ pub fn main() -> u64 {
     }
     if (c.backend != 0) && (((c.target > 2) || (c.plat != 0) || (c.debug != 0))) {
         fail_option(&mut c, view("--backend=llvm is implemented for Linux x86_64, aarch64 and riscv64 without --debug"));
+    }
+    if (c.verify_facts != 0) && (c.backend == 0) {
+        fail_option(&mut c, view("--verify-facts checks the facts the LLVM lifter consumes; add --backend=llvm"));
     }
     for pass in 3 {
         if pass == 1 {
@@ -21214,7 +21225,7 @@ pub fn main() -> u64 {
         }
         if c.backend != 0 {
             // LLVM IR for the lifted functions beside the native remainder: PATH.ll and PATH.
-            lowered := llvm::lower(view(out), view("x86_64-unknown-linux-gnu"), &c.facts);
+            lowered := llvm::lower(view(out), view("x86_64-unknown-linux-gnu"), &c.facts, c.verify_facts);
             mut ir_path = copy_bytes(view(path));
             push_bytes(&mut ir_path, view(".ll"));
             written := host::write_file(view(ir_path), view(lowered.ir));
@@ -21233,7 +21244,7 @@ pub fn main() -> u64 {
     if c.backend != 0 {
         // LLVM IR (PATH.ll) for the lifted functions; the remainder goes through the usual
         // instruction selection, followed by the calling-convention thunks.
-        lowered := llvm::lower_for(view(out), target, &c.facts);
+        lowered := llvm::lower_for(view(out), target, &c.facts, c.verify_facts);
         mut ir_path = copy_bytes(view(path));
         push_bytes(&mut ir_path, view(".ll"));
         written := host::write_file(view(ir_path), view(lowered.ir));
