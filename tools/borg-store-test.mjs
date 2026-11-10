@@ -1,9 +1,10 @@
 // Native test for Borg session-state persistence through the C OS ABI.
 //
 // Builds the Linux reference backend into `lib/sys/grail_ffi_linux.o` (the object the wrapper
-// declares), compiles `borg/tests/store_test.grl` with `lib/sys/grail_ffi.grl` and `borg/src/store.grl`,
-// links against the host C library and runs it in a scratch directory. The expected output is the
-// committed `borg/tests/parity/store.txt`.
+// declares), compiles `borg/tests/ffi/store_test.grl` with `lib/sys/grail_ffi.grl`,
+// `borg/src/ffi/store.grl` and the event modules it persists, links against the host C library and
+// runs it in a scratch directory. The expected output is the committed
+// `borg/tests/parity/store.txt`.
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -70,7 +71,7 @@ const compiler = buildCompiler();
 const assembly = join(work, 'store.s');
 run(compiler, ['--default-u64', '--typed-refs', '--target', 'x86_64', '--overflow=checked', assembly,
   'borg/tests/ffi/store_test.grl', 'borg/src/ffi/store.grl', 'lib/sys/grail_ffi.grl',
-  'borg/src/json.grl', 'lib/core.grl', 'lib/strings.grl', 'lib/vecs.grl', 'lib/order.grl',
+  'borg/src/events.grl', 'borg/src/journal.grl', 'borg/src/json.grl', 'lib/core.grl', 'lib/strings.grl', 'lib/vecs.grl', 'lib/order.grl',
   'lib/hash.grl', 'lib/io.grl', 'lib/fs.grl', 'lib/env.grl', runtime,
   'compiler/os-linux.grl']);
 
