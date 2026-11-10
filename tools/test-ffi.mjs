@@ -92,6 +92,17 @@ const fixtures = [
       'c_byval_mix_stack'],
   },
   {
+    // `!` on None inside an `extern "C"` callback: the unwrap reaches the checked abort path, so C
+    // never resumes and the parent sees SIGABRT - not the SIGSEGV a null payload would cause. The
+    // fixture is an `unsafe module` (the runtime's raw mode), which is where the defect lived.
+    name: 'unwrap_none_callback',
+    stdout: 'before\n',
+    symbols: ['c_apply'],
+    defines: ['unwrap_none_cb'],
+    modules: ['lib/core.grl'],
+    signal: 'SIGABRT',
+  },
+  {
     // C records returned by value in registers and through a hidden result pointer.
     name: 'call_records',
     stdout: '-7\n300000\n4096\n-12\n42\n-5\n77\n',
@@ -196,7 +207,7 @@ for (const target of selected) {
     if (library.status !== 0) throw new Error(`dl_shim.c for ${target} failed: ${library.stderr}`);
   }
   for (const { name, stdout, symbols, defines = [], linkNote = '// grail-link: shim.o', hostOnly = false,
-    targets: onlyTargets = null } of fixtures) {
+    modules = [], signal = null, targets: onlyTargets = null } of fixtures) {
     // A fixture whose shape one target refuses is compiled and executed only where it is valid; the
     // refusal itself is asserted at the end of this file.
     if (onlyTargets && !onlyTargets.includes(target)) continue;
@@ -218,7 +229,7 @@ for (const target of selected) {
     // relative to the declaring source, which is the documented rule.
     const source = join(directory, `${name}.grl`);
     copyFileSync(join(root, `tests/ffi/${name}.grl`), source);
-    const executable = compileProgram(compiler, [source], directory, { target, name, defaultU64: true, typedRefs: true });
+    const executable = compileProgram(compiler, [source, ...modules.map(m => join(root, m))], directory, { target, name, defaultU64: true, typedRefs: true });
     const assembly = readFileSync(join(directory, `${name}.s`), 'utf8');
     const notes = assembly.split('\n').filter(line => line.startsWith('// grail-link: '));
     const expectedNotes = Array.isArray(linkNote) ? linkNote : [linkNote];
@@ -240,6 +251,14 @@ for (const target of selected) {
       continue;
     }
     const result = execute(executable, [], target, { cwd: directory });
+    if (signal) {
+      // An aborting fixture pins the signal (SIGABRT, not the SIGSEGV a bad unwrap would produce)
+      // and whatever ran before it.
+      assert.equal(result.signal, signal, `${target}/${name}: expected ${signal}, got ${result.signal} (${result.status})`);
+      assert.equal(result.stdout.toString(), stdout, `${target}/${name}: output before the abort`);
+      executed++;
+      continue;
+    }
     assert.equal(result.status, 0, `${target}/${name}: exit ${result.status}: ${result.stderr}`);
     assert.equal(result.stdout.toString(), stdout, `${target}/${name}: calls returned wrong values`);
     executed++;

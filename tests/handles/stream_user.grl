@@ -1,0 +1,58 @@
+// A handle type from another module is usable as a parameter, a result and a record field, with the
+// handle rules intact: it carries no value (no arithmetic, no ordering, no size, no construction),
+// but it can be passed back to C, stored, and compared with == / != against a handle of its type.
+module stream_user;
+
+use stream_def;
+
+struct Holder {
+    stream: stream_def::Stream,
+    tag: u64
+}
+
+fn open_null() -> stream_def::Stream {
+    unsafe {
+        return stream_def::fopen(cstr("/dev/null\0"), cstr("r\0"));
+    }
+}
+
+fn descriptor(stream: stream_def::Stream) -> i32 {
+    unsafe {
+        return stream_def::fileno(stream);
+    }
+}
+
+// A handle as a parameter of this module's own function.
+fn describe(stream: stream_def::Stream) -> u64 {
+    fd := descriptor(stream);
+    if fd < 0 {
+        return 0;
+    }
+    return 1;
+}
+
+// A handle stored in this module's record field.
+fn wrap(stream: stream_def::Stream, tag: u64) -> Holder {
+    return Holder { stream: stream, tag: tag };
+}
+
+// A handle handed back to C.
+fn release(stream: stream_def::Stream) -> i32 {
+    unsafe {
+        return stream_def::fclose(stream);
+    }
+}
+
+fn main() -> u64 {
+    first := open_null();
+    second := open_null();
+    println(describe(first));
+    println(first == first);
+    println(first == second);
+    held := wrap(second, 7);
+    println(held.tag);
+    println(held.stream == second);
+    println(release(first));
+    println(release(held.stream));
+    return 0;
+}

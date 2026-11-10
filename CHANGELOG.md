@@ -29,6 +29,44 @@
   targets (1 + 2*2 + ... + 8*8 = 204, previously 181). x86-64 and Windows, whose callback prologue
   reads registers only, refuse a parameter list beyond six integer words by name instead of reading
   a register that holds something else.
+- Opaque handles across modules, and identity comparison. A `handle` declared in one module is
+  nameable in any module that imports it (`use sys_grail;` then `sys_grail::File`, or
+  `use sys_grail::File;` then `File`), so another module can name it in a parameter, a result and a
+  record field - `tests/handles/stream_def.grl` + `stream_user.grl` execute an `fopen`/`fileno`/
+  `fclose` round trip through a field and back to C, which pins it. `==`/`!=` between two handles of
+  the same type now compile to a word compare, the "compared by identity" rule `docs/ffi.md` already
+  stated but which failed with `type mismatch`; a record field of handle type compares the same way.
+  A handle used where it has no value names the rule instead of `type mismatch`: arithmetic and
+  ordering say "a handle is a foreign token: pass it, store it in a field, or compare it with == / !=
+  against a handle of the same type; it has no arithmetic, ordering or size", a value of another type
+  where a handle is expected says it cannot be constructed or converted (only a foreign call produces
+  one), and two different handle types say they do not mix. Handles stay one-word values the compiler
+  never frees (`docs/ffi.md`), so binding one copies the word rather than moving it; that documented
+  non-linearity is unchanged. `tests/native-cases.json` gains `cross-module-handle-signatures` and
+  `handle-reject-arithmetic`.
+- Fixed: `!` on a `None` inside an `extern "C"` callback died of SIGSEGV instead of reaching the
+  checked abort (SIGABRT / exit 134, the B5 policy). The unwrap was right; the value never existed.
+  A declaration (`absent: u64? := None`), an assignment and a `return` in an `unsafe module` all
+  skipped `adopt_value`, which is the context *lowering* - `None`/`Some` construction, union
+  injection, a function used as a closure - and not a check, so a raw module left `None` as an
+  untyped `0` and `absent!` dereferenced a null payload. The three sites now run `adopt_value`
+  regardless of raw mode; only `require_type` and the literal-typing tail (a raw module's literals
+  stay untyped words) remain safe-mode. The `None` token span is also cleared when the token stream
+  or `locals` is replaced, like the call-flex hint record, so a span from another file can never
+  fabricate an option object. `tests/ffi/unwrap_none_callback.grl` (an `extern "C"` callback that C
+  calls through the shim) asserts SIGABRT and the output printed before it; without the fix the same
+  program dies of SIGSEGV.
+- Fixed: a sized integer in an `unsafe module` (the runtime's raw mode) computed its arithmetic as
+  an untyped unsigned word, so `x: i32 = 0; x = x - 1` aborted in checked mode instead of producing
+  `-1`, and an `i64` comparison such as `status < 0` was an unsigned compare. Raw mode skips the
+  *checks* for a stated integer type, not the type itself: the binary operator path, compound
+  assignment and `compound_value` now pick `int_binary` whenever an operand's type is a sized
+  integer (taking it from either operand), so subtraction, comparison, shifts, division and
+  multiplication keep the stated signedness and width inside `unsafe module runtime`/`darwin` code.
+  `tests/native-cases.json` `raw-module-sized-integer-arithmetic` pins `0 - 1` as `-1`, a signed
+  comparison, `i8` 120 + 7 and an `i64` comparison, with an `extern "C"` declaration that carries a
+  `cfn` parameter in the same module - the shape the report named, though the `cfn` itself was not
+  the trigger: any `unsafe module` showed it.
 - `grail profile [--rate N] [--out FILE] -- PROGRAM [ARGS]` samples a compiled Grail program and
   prints a per-function table (`samples`, `share`, `function`, `module`) plus `[unknown]` and
   `total` rows. The sampler is part of the program's runtime, not a wrapper around `perf`: on Linux

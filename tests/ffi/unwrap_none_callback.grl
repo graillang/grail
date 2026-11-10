@@ -1,0 +1,23 @@
+// `!` on a `None` inside a C callback must take the same checked abort path as any other unwrap:
+// SIGABRT, with nothing resuming into C. This fixture is an `unsafe module`: that is where the
+// runtime workstream writes code, and a raw module used to leave `None` as an untyped 0, so the
+// unwrap dereferenced a null payload and the process died of SIGSEGV instead of aborting.
+unsafe module runtime;
+use core;
+use host;
+extern "C" lib "shim.o" fn c_apply(callback: cfn(i64) -> i64, value: i64) -> i64;
+
+fn absent_option() -> u64? {
+    return None;
+}
+extern "C" fn unwrap_none_cb(v: i64) -> i64 {
+    absent := absent_option();
+    return i64(absent!);
+}
+fn main() {
+    host::print(view("before\n"));
+    unsafe {
+        c_apply(unwrap_none_cb, 0);
+    }
+    host::print(view("after\n"));
+}
