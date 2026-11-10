@@ -125,9 +125,10 @@ design considered. It was rejected for one measurable reason: the server's JSON 
 `lib/json.grl`, which needs `lib/core.grl` and the map module `lib/hashmap.grl` (+ `lib/hash.grl`)
 to compile, so a `use json;` inside the compiler would put all four standard-library modules
 into the compiler binary and, through
-`compilerSources`, into every checked-in bootstrap seed. Those seeds are ~20 MB of assembly
-per target and are what gate `bun tools/ci.mjs build`; growing them for a tool that is not
-part of the language is not a trade worth making. Keeping the server a program also keeps
+`compilerSources`, into every checked-in bootstrap seed. Measured on x86-64, the compiler's
+assembly grows from 31,214,769 to 31,960,736 bytes (+2.4%, one target of three) for a tool
+that is not part of the language, and the seeds are what gate `bun tools/ci.mjs build`. That
+is not a trade worth making. Keeping the server a program also keeps
 the compiler's source set — and therefore the seed digests — untouched.
 
 If the compiler ever grows a machine-readable diagnostics interface (`grail check --json`,
