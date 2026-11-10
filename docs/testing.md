@@ -69,6 +69,9 @@ gate is 2–3 hours; run it in a watched job that logs to a file rather than hol
   values with and without `--verify-facts`, the round-trip check in the module, and the
   address-taken slot the lifter must drop.
 - `test-ffi.mjs` — C interop fixtures, reporting how many are executed versus cross-compiled only.
-- `windows.mjs check` — PE/COFF cross-builds plus the executed subset under Wine.
+- `windows.mjs check` — PE/COFF cross-builds plus the executed subset under Wine. The task cases
+  run on the default green scheduler; `tasks-thread-mode` sets `GRAIL_TASKS=thread` (per-case `env`
+  in `tests/windows-cases.json`, passed to both the Wine and the ELF run) to pin the opt-in
+  thread-per-task scheduler.
 - `lsp-test.mjs`, `test-profile.mjs`, `test-authority.mjs` — the language server, the sampling
   profiler and the capability model.
