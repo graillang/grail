@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- Opaque handles across modules, and identity comparison. A `handle` declared in one module is
+  nameable in any module that imports it (`use sys_grail;` then `sys_grail::File`, or
+  `use sys_grail::File;` then `File`), so another module can name it in a parameter, a result and a
+  record field - `tests/handles/stream_def.grl` + `stream_user.grl` execute an `fopen`/`fileno`/
+  `fclose` round trip through a field and back to C, which pins it. `==`/`!=` between two handles of
+  the same type now compile to a word compare, the "compared by identity" rule `docs/ffi.md` already
+  stated but which failed with `type mismatch`; a record field of handle type compares the same way.
+  A handle used where it has no value names the rule instead of `type mismatch`: arithmetic and
+  ordering say "a handle is a foreign token: pass it, store it in a field, or compare it with == / !=
+  against a handle of the same type; it has no arithmetic, ordering or size", a value of another type
+  where a handle is expected says it cannot be constructed or converted (only a foreign call produces
+  one), and two different handle types say they do not mix. Handles stay one-word values the compiler
+  never frees (`docs/ffi.md`), so binding one copies the word rather than moving it; that documented
+  non-linearity is unchanged. `tests/native-cases.json` gains `cross-module-handle-signatures` and
+  `handle-reject-arithmetic`.
 - Fixed: `!` on a `None` inside an `extern "C"` callback died of SIGSEGV instead of reaching the
   checked abort (SIGABRT / exit 134, the B5 policy). The unwrap was right; the value never existed.
   A declaration (`absent: u64? := None`), an assignment and a `return` in an `unsafe module` all

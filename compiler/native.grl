@@ -4355,6 +4355,23 @@ fn require_type<a>(c: (&a mut C), actual: u64, expected: u64) -> unit {
     if (want == 0) & is_bool(&mut c, actual) {
         return ();
     }
+    if (ty_kind(&mut c, want) == 23) || (ty_kind(&mut c, actual) == 23) {
+        // A handle carries no value of another type: C produces one and hands it back, and the only
+        // things it can be compared with are handles of its own type.
+        if same_type(&mut c, actual, want) != 0 {
+            return ();
+        }
+        if (ty_kind(&mut c, want) == 23) & (ty_kind(&mut c, actual) == 23) {
+            fail(&mut c, view("handles of different types do not mix"));
+        }
+        if ty_kind(&mut c, want) == 23 {
+            fail(
+                &mut c,
+                view("a handle cannot be constructed or converted: only a foreign call produces one, and it passes back to C")
+            );
+        }
+        fail(&mut c, view("a handle has no value in this context; pass it back to C or compare it with another handle"));
+    }
     if same_type(&mut c, actual, want) == 0 {
         fail(&mut c, view("type mismatch"));
     }
@@ -8875,7 +8892,9 @@ fn structural_eq<a>(c: (&a mut C), x: u64, y: u64, ty: u64, depth: u64) -> u64 {
         fail(&mut c, view("structural equality nests too deeply"));
     }
     k := ty_kind(&mut c, ty);
-    if (ty == 0) || (k == 18) || (k == 19) || (k == 22) {
+    // A handle is one opaque word: equality is a word compare, and it is the only operator the
+    // type has (no ordering, no arithmetic, no size). A field of handle type compares the same way.
+    if (ty == 0) || (k == 18) || (k == 19) || (k == 22) || (k == 23) {
         get(&mut c, y, view("%rcx"));
         get(&mut c, x, view("%rax"));
         o(&mut c, view("cmpq %rcx,%rax\nsete %al\nmovzbq %al,%rax\n"));
@@ -17124,9 +17143,14 @@ fn expr_expected<a>(c: (&a mut C), min: u64, expected: u64) -> Val {
                                     }
                                 }
                             }
+                            // Handles take this path too: `==`/`!=` between two handles of the same
+                            // type is the one operator the type has (see structural_eq).
                             if c.raw == 0
                                 && (k == 258 || k == 259)
-                                && (ty_kind(&mut c, ty) == 8 || ty_kind(&mut c, ty) == 6 || ty_kind(&mut c, ty) == 27)
+                                && (ty_kind(&mut c, ty) == 8
+                                    || ty_kind(&mut c, ty) == 6
+                                    || ty_kind(&mut c, ty) == 27
+                                    || ty_kind(&mut c, ty) == 23)
                                 && comparable_sequences(&mut c, ty, rty) {
                                 // Structural equality of records (field by field) and of vectors and
                                 // slices (length, then element by element).
@@ -17254,6 +17278,14 @@ fn expr_expected<a>(c: (&a mut C), min: u64, expected: u64) -> Val {
                                                     );
                                                 }
                                             } else {
+                                                if (ty_kind(&mut c, ty) == 23) || (ty_kind(&mut c, rty) == 23) {
+                                                    fail(
+                                                        &mut c,
+                                                        view(
+                                                            "a handle is a foreign token: pass it, store it in a field, or compare it with == / != against a handle of the same type; it has no arithmetic, ordering or size"
+                                                        )
+                                                    );
+                                                }
                                                 if c.raw == 0 {
                                                     require_type(&mut c, ty, 0);
                                                     require_type(&mut c, rty, 0);

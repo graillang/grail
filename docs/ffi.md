@@ -175,7 +175,12 @@ fields Grail reads back, and checks its own `offsetof`/`sizeof` values.
 
 `handle File;` declares a one-word opaque type for a C-owned resource. A handle can be
 bound, passed to declarations, returned from them and compared by identity; it cannot be
-constructed (`File {}` is an error), inspected, sized, borrowed as bytes or dropped. Zero
+constructed (`File {}` is an error), inspected, sized, borrowed as bytes or dropped. A handle
+declared in one module is nameable in any module that imports it - `use sys_grail;` then
+`sys_grail::File`, or `use sys_grail::File;` then `File` - so another module's parameters,
+results and record fields can name it, and it stays opaque there: binding, passing, storing and
+`==`/`!=` against a handle of the same type are the whole surface, and arithmetic, ordering, a
+conversion or a construction is a compile error that says so. Zero
 validity is the C library's convention, not the compiler's: ask the library for a validity
 or status accessor rather than assuming a sentinel. Handles are not linear in this
 increment: the compiler never frees one, so a program that opens a handle must call the
