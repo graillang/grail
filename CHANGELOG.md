@@ -2,6 +2,36 @@
 
 ## Unreleased
 
+- The Borg transport layer carries the typed event stream over TCP with the refusals the journal
+  already has (`borg/src/frames.grl`, `borg/src/daemon.grl`, `borg/src/client.grl`). A frame is one
+  encoded event — the journal's `u8 tag | u32 LE length | body` — so the wire and the journal are the
+  same bytes by construction (`frame_of` is `encode_stream` over a one-event journal, `frames` is
+  `encode_stream`), and a frame captured off the socket replays through the file reader. Tag `0`
+  marks a control frame: `hello` (version, session), `hello_ok`, `hello_refused` (both versions as
+  numbers), `reply` (the folded sequence/status/events plus any refusal) and `end` (the batch is
+  complete). Refusals are named and numbered, and the reader's codes 20-24 pass through unchanged:
+  `version-mismatch` 10, `session-mismatch` 11, `not-handshaken` 12, `frame-too-large` 13,
+  `short-read` 14, `bad-control` 15, `bad-reply` 16, `replay-refused` 17, then `unknown-tag` 20,
+  `truncated-event` 21, `length-overflow` 22, `bad-field` 23 and `trailing-bytes` 24. A cut stream
+  fails the way the file reader fails, as a function rather than a claim: `journal_code(14)` is 21
+  and `journal_code(13)` is 22, and the test prints both columns for the same bytes. A declared
+  length is refused at the header before its body is waited for, and the ceiling is the journal's
+  own `MAX_EVENT_BODY`, so an accepted frame is an event a journal file could hold. The daemon folds
+  each event as it arrives with `borg_replay::apply` and answers a refusal with the index and the
+  fold's own reason; the client returns that refusal instead of reporting success, and a peer that
+  closes without answering is `short-read` rather than silence. Opening the listener is an explicit
+  grant — `borg_daemon::listen` takes `authority::Authority` and calls `authority::listen`, and
+  `borg_client::connect` calls `authority::connect` — so the grant decides who may listen and who may
+  connect, while `accept`/`read_fd`/`write_fd` stay ambient: what the peer does after connecting is
+  not covered. No authentication, encryption, reconnection or multiplexing, and the docs say so.
+  `borg/tests/frames_test.grl` prints every frame in hex, decodes the capture whole and one byte at a
+  time, hands it to the file path, builds all thirteen refusals from the bytes a peer would send, and
+  runs a real loopback round trip per fixture (a clean fold, a frame that decodes and replays to a
+  refusal, a foreign session, a version mismatch) plus a peer that stops inside a reply frame; the
+  daemon's account of its answer is compared with the line the client decoded from the socket. The
+  committed reference (`borg/tests/parity/ref/src/bin/frames.rs`) implements the frame layout, the
+  refusal classification and the fold independently, including its own socket, and the module is
+  called `frames` because `borg/src/transport.grl` already holds the local-control channel's rules.
 - Borg journals replay into the in-memory session state (`borg/src/replay.grl`). The module folds a
   decoded event stream with the rules of `SessionState::reduce`/`apply` (session_store.rs:906-959,
   1036-1041, 1320-1336) over the five transcript kinds `borg/src/events.grl` carries, and

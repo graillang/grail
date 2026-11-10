@@ -360,6 +360,144 @@ back no events, so replaying such a journal fails by name today instead of retur
 understood. Closing the gap means porting those kinds and their projection arms in
 session_store.rs:941-1341, not extending the fold with fields nothing writes.
 
+### The transport, as built
+
+`borg/src/frames.grl` is the transport layer: a TCP stream carrying the typed event stream, with the
+daemon and client halves in `borg/src/daemon.grl` and `borg/src/client.grl`. It is called `frames`
+rather than `transport` because `borg/src/transport.grl` already exists and holds something else —
+the *rules* of Borg's local-control channel (a Unix socket, one JSON command per connection, a
+bounded command and reply, `local_control.rs`), which is a different protocol with a different
+framing. Renaming that module to free the name would have changed one of the twelve test programs
+this work had to keep byte-identical, so the framed event transport took the name of what it adds.
+
+**No new event encoding.** An event frame *is* one encoded event: the tag, the little-endian body
+length and the body that `borg_events::encode_stream` writes to a journal file. `frame_of(event)` is
+`encode_stream` over a one-event journal and `frames(events)` is `encode_stream` itself, so the wire
+and the journal are the same bytes by construction rather than by two encoders agreeing. A frame
+captured off the socket is a journal prefix; the test proves it by handing the captured bytes to
+`decode_stream` and `replay_stream` and comparing the checksum with the fold the daemon performed.
+
+```
+frame    u8 tag | u32 LE length | length bytes body
+tag      0 is a control frame; 1..5 are the journal's event tags; anything else is left for the
+         journal reader to refuse by name rather than guessed at the framing layer
+control  u8 opcode, then that opcode's body
+text     u32 LE byte length, then that many bytes — the primitive an event body already uses
+```
+
+One `session_started` event (`id` `e1`, session `s1`, sequence 1, `created_at` `t1`), 31 bytes:
+
+```
+01             tag 1: session_started
+1a000000       body length 26
+02000000 6531              text "e1"
+02000000 7331              text "s1"
+0100000000000000           sequence 1, little endian
+02000000 7431              text "t1"
+```
+
+and the reply that carries a folded session (`sequence 4`, `status running`, `4` events, no
+refusal), 34 bytes:
+
+```
+00             tag 0: control frame
+1d000000       body length 29
+04             opcode 4: reply
+0400000000000000           sequence 4
+07000000 72756e6e696e67     text "running"
+0400000000000000           events 4
+00                         no refusal
+```
+
+Control opcodes: `1` hello, `2` hello_ok, `3` hello_refused, `4` reply, `5` end.
+
+**The handshake** is a version and a session in each direction. The client opens with
+`hello(version, session)`; the daemon answers `hello_ok(version, session)` with what it accepted, or
+`hello_refused(daemon version, client version, detail)` — both versions as numbers, so the answer
+names them whether or not the detail text survives a log. An event frame that arrives before an
+accepted hello is refused (`not-handshaken`) instead of being folded into a session nobody named,
+and an event whose `session_id` is not the one the handshake named is refused (`session-mismatch`).
+The client checks the session echoed by `hello_ok` rather than ignoring it. The version is `1`; a
+daemon that does not speak the version a client opens with says so and reads nothing further.
+
+**Refusals over the wire** are named and numbered. Codes 20–24 are the journal reader's own, passed
+through unchanged, so the same bytes that make the file reader refuse make the wire refuse with the
+same number; the last column is the code the file reader reports for the same bytes, and `0` means
+the transport refused something a file cannot express (a handshake, a closed socket, a bad reply).
+
+| Refusal | Code | When | File reader |
+| --- | ---: | --- | ---: |
+| `version-mismatch` | 10 | the handshake named a version the daemon does not speak; both versions are named | — |
+| `session-mismatch` | 11 | an event belongs to a session the handshake did not name, or the echoed session differs | — |
+| `not-handshaken` | 12 | an event frame, or `end`, before an accepted hello | — |
+| `frame-too-large` | 13 | a declared length above the ceiling, refused at the header before the bytes are waited for | `length-overflow` 22 |
+| `short-read` | 14 | the peer closed inside a frame, before its declared bytes arrived | `truncated-event` 21 |
+| `bad-control` | 15 | a control frame with no opcode, an unknown opcode, a second hello, or a cut hello body | — |
+| `bad-reply` | 16 | a reply that is truncated, mislabelled, or has a refusal marker that is not 0 or 1 | — |
+| `replay-refused` | 17 | the frame decoded and the fold refused it: the index and replay's reason travel with it | — |
+| `unknown-tag` | 20 | a tag outside 1..5 | `unknown-tag` 20 |
+| `truncated-event` | 21 | the frame is complete but its body stops inside a field | `truncated-event` 21 |
+| `length-overflow` | 22 | a declared length past `MAX_EVENT_BODY` as a *file* reads it | `length-overflow` 22 |
+| `bad-field` | 23 | a presence or boolean byte that is neither 0 nor 1 | `bad-field` 23 |
+| `trailing-bytes` | 24 | an event body with bytes past its last field | `trailing-bytes` 24 |
+
+*A truncated stream fails the same way the file reader does*, and that is a function rather than a
+claim: `journal_code(14)` is `21` and `journal_code(13)` is `22`, and the test prints both columns
+from the same byte string, once through the transport and once through `decode_stream`. The detail
+differs because the facts differ — the socket knows how many bytes of a frame it received
+(`68 bytes into a frame`), the file reader knows only that the stream ended — and the *reason* is the
+same one.
+
+The transport's ceiling is the journal's: `max_frame_bytes()` is `borg_events::MAX_EVENT_BODY`
+(262144), so a frame the wire accepts is an event a journal file could hold, and there is no second
+number to keep in step. A declared length is checked *at the header*, before the body is waited for,
+so a peer cannot make the reader hold a frame it never sends.
+
+**Authority.** Opening the daemon's listening socket is an explicit grant:
+`borg_daemon::listen` takes an `authority::Authority` and hands the call straight to
+`authority::listen`, so a daemon cannot be started without `authority::sockets()`, and `port` — how a
+client learns where to connect — is gated the same way. The client's side is the same shape:
+`borg_client::connect` takes the grant and calls `authority::connect`, so a program that was not
+granted sockets cannot reach a listener either. That is what the grant covers: **who may listen and
+who may connect.**
+
+What it cannot cover is everything after the connection exists. `accept`, `read_fd`, `write_fd` and
+`close` are ambient host operations, not gated calls: the grant decides that a socket exists, not
+what the bytes on it mean, not who the peer is, and not how long the conversation lasts. A daemon
+whose listener was granted serves whoever the kernel hands it; the transport therefore refuses
+*messages* it cannot read (a bad frame, a foreign session, a version it cannot speak) and does not
+pretend to refuse *peers*. Anything stronger — peer credentials, a token, TLS — is a layer above
+this one, and the port has none of it yet.
+
+**What the transport deliberately does not do.**
+
+- *No authentication and no encryption.* The connection is plain TCP. Anyone who can reach the
+  listener can send frames, and the daemon will decode them; the refusal table protects the reader
+  from malformed bytes, not the session from a hostile peer.
+- *No reconnection and no retry.* `resume` reads one answer from one connection. A connection that
+  closes mid-frame is a `short-read` refusal, not something to be resumed with a cursor: the client
+  has to reconnect and send a whole batch again.
+- *No multiplexing.* One conversation per connection, one batch at a time, delimited by `end`. Two
+  sessions on one connection would need a stream id in every frame and a scheduler that interleaves
+  them; the whole point of the frame layout is that it is the journal's, which has neither.
+- *No flow control and no acknowledgement per event.* The client writes its batch and waits for the
+  one reply. The handshake acknowledgement is the only early answer, and it exists so a client learns
+  a version mismatch before sending events, not so it can pace itself.
+- *No scheduling.* `serve_one` accepts one connection and returns. A daemon that serves many is a
+  task loop around it (`task_scope` and `spawn`), which is the caller's decision and not the
+  transport's.
+
+**Evidence.** `borg/tests/frames_test.grl` covers the wire bytes (each frame printed in hex, decoded
+whole and one byte at a time), the capture through the file path, the whole refusal table above from
+bytes a peer would have to send, and a real loopback round trip on `127.0.0.1` for each fixture: a
+clean fold, a frame that decodes and replays to a refusal, a foreign session over the wire, and a
+version mismatch whose refusal names both versions. The daemon's account of what it answered is
+compared with the line the client decoded from the socket, and a peer that stops inside a reply frame
+is a `short-read` at the client. The committed reference
+(`borg/tests/parity/ref/src/bin/frames.rs`) is an independent implementation of the frame layout, the
+refusal classification and the fold, with a real socket on its side too, so a byte-level disagreement
+shows up as a diff line.
+
 ## 13. Staged plan
 
 Each stage has a gate: the stage is done when its acceptance check runs on the named OSes.
