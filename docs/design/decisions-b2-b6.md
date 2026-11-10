@@ -17,13 +17,13 @@ decision without a stated trigger is what made these items outstanding for so lo
 
 | # | Decision | State |
 | --- | --- | --- |
-| B1 | Separate compilation with checked module interfaces: **accepted**. The plan of record is [separate-compilation.md](separate-compilation.md); this record fixes the decision and its obligations, not the format. | Implementation starting |
-| B2 | Ambient `host::` stays for v1 as a **recorded deviation** from the capability model, with the conditions that force the change listed below. | Decided |
+| B1 | Separate compilation with checked module interfaces: **accepted**. The plan of record is [separate-compilation.md](separate-compilation.md); this record fixes the decision and its obligations, not the format. | Stage 1 implemented (per-module emission); checked interface artifact next |
+| B2 | Ambient `host::` stays for v1 as a **recorded deviation** from the capability model, with the conditions that force the change listed below. | Implemented as an opt-in: `lib/authority.grl` and `--deny-ambient-host`; ambient `host::` remains the default |
 | B3 | A foreign call **blocks the executing thread**; no green-task scheduling integration is promised for v1. Foreign calls also remain main-thread-only (process-wide host TLS base). | Decided |
 | B4 | Windows uses **thread-per-blocking-call**. IOCP is a named future work item with the design sketch in this page. Green tasks on Windows currently abort at scheduler start. | Decided |
 | B5 | **Abort never unwinds**; nothing may unwind across the C boundary. There is no `defer` and no cleanup runs on an abort path. | Decided |
 | B6 | Closures capture references and views and cannot outlive the borrow; **`FnMut`/mutable captures are implemented** under the six rules fixed below. | Implemented |
-| B7 | Records passed by value to C: **accepted**, spelling `v: byval R`. | Implementation after B1 |
+| B7 | Records passed by value to C: **accepted**, spelling `v: byval R`. | Implemented on x86-64, AArch64 and RISC-V 64; Windows x86-64 and ARM64 refuse the marker |
 
 ## B1: separate compilation accepted
 
@@ -57,10 +57,13 @@ origin checks, clients are either unsound (a program with a borrow that is inval
 edge is accepted) or we fall back to whole-program checking. The cost is a redesign of the artifact
 format, not of the language.
 
-**Enforced by.** Nothing yet: the implementation is in progress. Until it lands every build is
-whole-program - the compiler reads all input files and writes one assembly file - and
-[implementation-status.md](implementation-status.md) keeps reporting "Separate compilation with
-checked library contracts" as missing. The readiness row B1 tracks it.
+**Enforced by.** Stage 1: `grail build --split` writes one assembly file per module (`.grail_part`
+markers from the emitter, offsets from the optimizer, the writer cutting the finished stream), the
+CLI assembles the parts concurrently and links once, and `bun tools/split-test.mjs` (`just test-split`,
+a CI job) proves that the parts concatenate to the single assembly file and that `--split` and
+whole-program builds run the same program. Whole-program emission is still the default and there is no
+interface artifact yet, so [implementation-status.md](implementation-status.md) keeps reporting
+"Separate compilation with checked library contracts" as missing. The readiness row B1 tracks it.
 
 ## B2: ambient host authority, a recorded deviation
 
@@ -85,6 +88,23 @@ What actually exists today (verified against the compiler):
   `cptr_mut` need a lexical `unsafe { }` block (`native.grl:9267-9272`, `11108-11134`).
 - FFI is therefore gated by `unsafe`, while files, processes, sockets, environment and process exit
   through `host::` are not gated at all.
+
+**What landed since, and what it does not change.** Two increments give a program a way out of the
+deviation without changing the default:
+
+- `lib/authority.grl` is an ordinary Grail module (not a builtin) whose `Authority` value carries one
+  grant - read or write under a root, processes, sockets - and whose gated functions refuse a path
+  outside it before the operating system sees it. Containment is lexical and component-wise after
+  normalising `.`, `..` and duplicate separators, so `/database` is not under `/data`; a denial is a
+  distinct `authority::Error` value, not an OS error. `docs/authority.md` states the rule and the
+  paths it does not cover.
+- `--deny-ambient-host` turns every `host::` reference in a module that has not written `use host;`
+  into a compile error, and `lib/authority.grl` is the only standard-library module that opts in. A
+  program written against `authority::` therefore needs no ambient access at all.
+
+Neither is the capability model: `host::` stays ambient unless the switch is given, the switch is
+per-build rather than per-component, and there is still no place to express "this component may not
+spawn processes" for a module the build did not author. Revisit triggers 1-4 are unchanged.
 
 **Revisit when** any of these becomes true; each one breaks the deviation rather than merely making
 it inconvenient:
@@ -116,8 +136,10 @@ the process, and there is no diagnostic to catch it. If the change is made too l
 mechanical: dozens of stdlib entry points and call sites gain a parameter, with the compiler
 finding all of them.
 
-**Enforced by.** Today: the compiler's sealing of the runtime (above), the `unsafe` gate on FFI, and
-documentation - the readiness row B2, the "Explicit authority / capabilities" row of
+**Enforced by.** Today: `lib/authority.grl` and its `bun tools/test-authority.mjs` suite,
+`--deny-ambient-host` in `compiler/cli.grl`, the book's *Capabilities instead of ambient access*
+section with its `authority` example, the compiler's sealing of the runtime (above), the `unsafe` gate
+on FFI, and documentation - the readiness row B2, the "Explicit authority / capabilities" row of
 [implementation-status.md](implementation-status.md), the V3 order in
 [syntax-v2-scope.md](syntax-v2-scope.md), and the "no ambient console authority" paragraph of
 [surface-sketch.md](surface-sketch.md). The deviation itself is recorded in this page.
@@ -407,9 +429,16 @@ one: the classification is shared with results, so only the marker changes. A wr
 classification is worse - it miscompiles silently - which is why the implementation must extend the
 executed record tests rather than adding a compile-only case.
 
-**Enforced by.** [docs/ffi.md](../ffi.md) (today: refused, with the decision recorded) and readiness
-rows A3/B7. The compiler currently rejects a record parameter passed by value; the implementation
-replaces that diagnostic with the syntax.
+**Enforced by.** [docs/ffi.md](../ffi.md) (the `byval` row and the syntax), readiness rows A3/B7, the
+book example `byval-record`, and `tests/ffi/byval_records.grl` with its C twins in
+`tests/ffi/byval_shim.c`: 4-, 8-, 16- and 24-byte records, mixed int/float fields, an ImVec2-shaped
+float pair, an embedded array, a `byval` parameter after six integer arguments, a record sharing the
+stack area with a following scalar, and a call through a `cfn` declaring the same signature - each
+twin returns a checksum over every field it received, and the fixture executes on x86-64, AArch64 and
+RISC-V 64. The refusals are pinned as `ffi-reject-byval-plain-record`, `ffi-reject-byval-scalar` and
+`ffi-reject-byval-callback`, and the Windows x86-64/ARM64 refusal is the diagnostic
+`byval is not implemented for the Windows x86-64 and Windows ARM64 ABIs; pass the record by
+pointer`.
 
 ## Corrections to earlier documents
 
