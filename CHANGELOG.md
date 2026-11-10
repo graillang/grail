@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- `lib/sys/grail_ffi.grl` re-binds the `&mut [u8]` argument of `read`, `env_get` and `recv` to a
+  mutable local before the C call. The ownership checker requires a mutable binding for storage a
+  call writes through, and a parameter binding cannot be `mut`, so forwarding the reference straight
+  through no longer compiled: the FFI wrapper, and every test that links it, failed to build.
 - Merge the three design reviews from branch `claude/brave-heisenberg-0h3ska` as documents only
   (`docs/design/first-principles-architecture.md`, `architecture-reassessment.md`,
   `complexity-reassessment.md`, 2,746 lines). Their edits to README and to the research-phase
