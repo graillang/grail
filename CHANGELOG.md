@@ -27,7 +27,8 @@
   `borg/tests/frames_test.grl` prints every frame in hex, decodes the capture whole and one byte at a
   time, hands it to the file path, builds all thirteen refusals from the bytes a peer would send, and
   runs a real loopback round trip per fixture (a clean fold, a frame that decodes and replays to a
-  refusal, a foreign session, a version mismatch) plus a peer that stops inside a reply frame; the
+  refusal, a foreign session, a version mismatch) plus a peer that stops inside a reply frame, and a process grant that opens neither a listener nor a
+  connection; the
   daemon's account of its answer is compared with the line the client decoded from the socket. The
   committed reference (`borg/tests/parity/ref/src/bin/frames.rs`) implements the frame layout, the
   refusal classification and the fold independently, including its own socket, and the module is

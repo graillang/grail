@@ -459,7 +459,7 @@ so a peer cannot make the reader hold a frame it never sends.
 client learns where to connect — is gated the same way. The client's side is the same shape:
 `borg_client::connect` takes the grant and calls `authority::connect`, so a program that was not
 granted sockets cannot reach a listener either. That is what the grant covers: **who may listen and
-who may connect.**
+who may connect** — the test holds a process grant and checks that it opens neither.
 
 What it cannot cover is everything after the connection exists. `accept`, `read_fd`, `write_fd` and
 `close` are ambient host operations, not gated calls: the grant decides that a socket exists, not
