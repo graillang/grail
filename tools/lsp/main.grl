@@ -69,13 +69,6 @@ fn copy_bytes<a>(text: &a [u8]) -> u8[] {
     }
     return out;
 }
-fn joined<a, b>(head: &a [u8], tail: &b [u8]) -> u8[] {
-    mut out = copy_bytes(head);
-    for i in tail.len() {
-        out.push(tail[i]);
-    }
-    return out;
-}
 fn put<a, b>(out: &a mut u8[], text: &b [u8]) {
     for i in text.len() {
         out.push(text[i]);
@@ -152,7 +145,7 @@ fn header_start<a>(buffer: &a [u8]) -> u64 {
     mut i = 0;
     while i < buffer.len() {
         if ((i == 0) || (buffer[i - 1] == 10)) && (i + 15 <= buffer.len()) {
-            if lower_equals(buffer[i:i + 15], view("content-length:")) {
+            if lower_equals(buffer[i: i + 15], view("content-length:")) {
                 return i;
             }
         }
@@ -199,7 +192,7 @@ fn content_length<a>(header: &a [u8]) -> u64 {
             colon += 1;
         }
         if (start < colon) && (colon < end) {
-            if lower_equals(header[start:colon], view("content-length")) {
+            if lower_equals(header[start: colon], view("content-length")) {
                 mut j = colon + 1;
                 while (j < end) && (header[j] == 32) {
                     j += 1;
@@ -261,13 +254,7 @@ struct Server {
 }
 
 fn server_new() -> Server {
-    return Server {
-        pending: u8[],
-        docs: Document[],
-        state: 0,
-        serial: 0,
-        reported: false
-    };
+    return Server { pending: u8[], docs: Document[], state: 0, serial: 0, reported: false };
 }
 fn find_document<a>(docs: (&a Document[]), uri: &b [u8]) -> u64 {
     for i in docs.len() {
@@ -284,7 +271,7 @@ fn snapshot_at<a>(docs: (&a Document[]), index: u64) -> Snapshot {
         uri: d.uri.copy(),
         text: d.text.copy(),
         version: d.version,
-        versioned: d.versioned
+        versioned: d.versioned,
     };
 }
 
@@ -304,14 +291,14 @@ fn line_bytes<a>(text: &a [u8], line: u64) -> (&a [u8]) {
                 if (start < end) && (text[end - 1] == 13) {
                     end -= 1;
                 }
-                return text[start:end];
+                return text[start: end];
             }
             current += 1;
             start = i + 1;
         }
         i += 1;
     }
-    return text[start:text.len()];
+    return text[start: text.len()];
 }
 // UTF-16 code units in the first `bytes` bytes of `line`. A truncated sequence counts as
 // one unit, so a bad offset still names a position inside the line.
@@ -491,7 +478,7 @@ fn diagnostic_from(line: &[u8], offset: u64, text: &[u8]) -> (Diagnostic)? {
     if (i < line.len()) && (line[i] == 32) {
         i += 1;
     }
-    message := line[i:line.len()];
+    message := line[i: line.len()];
     if message.len() == 0 {
         return None;
     }
@@ -505,14 +492,7 @@ fn diagnostic_from(line: &[u8], offset: u64, text: &[u8]) -> (Diagnostic)? {
     if total < end {
         end = total;
     }
-    return Some(
-        Diagnostic {
-            line: number - 1,
-            start: start,
-            end: end,
-            message: message.copy()
-        }
-    );
+    return Some(Diagnostic { line: number - 1, start: start, end: end, message: message.copy() });
 }
 fn parse_diagnostics(output: &[u8], name: &[u8], text: &[u8]) -> Diagnostic[] {
     mut found = Diagnostic[];
@@ -529,7 +509,7 @@ fn parse_diagnostics(output: &[u8], name: &[u8], text: &[u8]) -> Diagnostic[] {
         if (start < end) && (output[end - 1] == 13) {
             end -= 1;
         }
-        line := output[start:end];
+        line := output[start: end];
         if has_prefix(line, name) {
             match diagnostic_from(line, name.len(), text) {
                 Some(diagnostic) => {
@@ -548,8 +528,10 @@ fn parse_diagnostics(output: &[u8], name: &[u8], text: &[u8]) -> Diagnostic[] {
 // its own working directory. Nothing is written into the user's tree.
 fn run_check(uri: &[u8], text: &[u8], serial: u64) -> Check {
     root := temp_root();
-    serial_text := format("{}", serial);
-    dir := path_join(view(root), joined(view("grail-lsp-"), &serial_text));
+    // Unique per process (start time) and per check (serial), so two servers never share
+    // a scratch directory.
+    stamp := format("grail-lsp-{}-{}", host::now_ms(), serial);
+    dir := path_join(view(root), &stamp);
     name := buffer_name(uri);
     path := path_join(view(dir), view(name));
     out_path := path_join(view(dir), view("diagnostics.txt"));
@@ -577,11 +559,10 @@ fn run_check(uri: &[u8], text: &[u8], serial: u64) -> Check {
     host::remove(view(target_dir), 1);
     host::remove(view(path), 0);
     host::remove(view(dir), 1);
-    return Check {
-        diagnostics: diagnostics,
-        status: status,
-        failed: (output.len() == 0) && (status != 0)
-    };
+    problems := diagnostics.len();
+    return Check { diagnostics: diagnostics, status: status, // A non-zero status with no diagnostic line is the compiler failing, not the
+    // buffer being wrong: that is reported, never turned into an empty diagnostic list.
+    failed: (status != 0) && (problems == 0) };
 }
 
 // ---------------------------------------------------------------------------
@@ -617,7 +598,12 @@ fn send_error(id: u8[], code: i64, message: &[u8]) {
 }
 fn publish(uri: &[u8], version: i64, versioned: bool, diagnostics: Diagnostic[]) {
     mut body = u8[];
-    put(&mut body, view("{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/publishDiagnostics\",\"params\":{\"uri\":"));
+    put(
+        &mut body,
+        view(
+            "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/publishDiagnostics\",\"params\":{\"uri\":"
+        )
+    );
     put_string(&mut body, uri);
     if versioned {
         put(&mut body, view(",\"version\":"));
@@ -637,7 +623,10 @@ fn publish(uri: &[u8], version: i64, versioned: bool, diagnostics: Diagnostic[])
         put_num(&mut body, d.line);
         put(&mut body, view(",\"character\":"));
         put_num(&mut body, d.end);
-        put(&mut body, view("}},\"severity\":1,\"source\":\"grail\",\"code\":\"compiler\",\"message\":"));
+        put(
+            &mut body,
+            view("}},\"severity\":1,\"source\":\"grail\",\"code\":\"compiler\",\"message\":")
+        );
         put_string(&mut body, view(d.message));
         put(&mut body, view("}"));
     }
@@ -658,7 +647,12 @@ fn report_environment(s: &mut Server, status: u64) {
         status
     );
     mut body = u8[];
-    put(&mut body, view("{\"jsonrpc\":\"2.0\",\"method\":\"window/showMessage\",\"params\":{\"type\":1,\"message\":"));
+    put(
+        &mut body,
+        view(
+            "{\"jsonrpc\":\"2.0\",\"method\":\"window/showMessage\",\"params\":{\"type\":1,\"message\":"
+        )
+    );
     put_string(&mut body, view(note));
     put(&mut body, view("}}"));
     send_body(body);
@@ -884,7 +878,7 @@ fn handle_close(s: &mut Server, msg: &json::Value) {
                                     uri: d.uri.copy(),
                                     text: d.text.copy(),
                                     version: d.version,
-                                    versioned: d.versioned
+                                    versioned: d.versioned,
                                 }
                             );
                         }
@@ -946,7 +940,7 @@ fn prev_is<a, b, c>(text: &a [u8], tokens: (&b Token[]), index: u64, word: &c [u
     if t.kind != 1 {
         return false;
     }
-    return eq(text[t.start:t.end], word);
+    return eq(text[t.start: t.end], word);
 }
 fn next_kind<a>(tokens: (&a Token[]), index: u64) -> u64 {
     if tokens.len() <= index + 1 {
@@ -1020,7 +1014,12 @@ fn collect_declarations<a, b>(text: &a [u8], tokens: (&b Token[])) -> Declaratio
 }
 // The declaration a use at `offset` refers to: the nearest preceding declaration of that
 // name in an enclosing block, else a function of that name anywhere in the file.
-fn resolve<a, b, c>(text: &a [u8], tokens: (&b Token[]), declarations: (&c Declaration[]), offset: u64) -> u64 {
+fn resolve<a, b, c>(
+    text: &a [u8],
+    tokens: (&b Token[]),
+    declarations: (&c Declaration[]),
+    offset: u64
+) -> u64 {
     mut at = no_index();
     for i in tokens.len() {
         t := &tokens[i];
@@ -1044,13 +1043,13 @@ fn resolve<a, b, c>(text: &a [u8], tokens: (&b Token[]), declarations: (&c Decla
             return at;
         }
     }
-    name := text[tokens[at].start:tokens[at].end];
+    name := text[tokens[at].start: tokens[at].end];
     depth := tokens[at].depth;
     mut best = no_index();
     for i in declarations.len() {
         d := &declarations[i];
         if (d.token < at) && (d.depth <= depth) {
-            if eq(text[tokens[d.token].start:tokens[d.token].end], name) {
+            if eq(text[tokens[d.token].start: tokens[d.token].end], name) {
                 best = d.token;
             }
         }
@@ -1061,7 +1060,7 @@ fn resolve<a, b, c>(text: &a [u8], tokens: (&b Token[]), declarations: (&c Decla
     for i in declarations.len() {
         d := &declarations[i];
         if d.function {
-            if eq(text[tokens[d.token].start:tokens[d.token].end], name) {
+            if eq(text[tokens[d.token].start: tokens[d.token].end], name) {
                 return d.token;
             }
         }
@@ -1333,12 +1332,16 @@ fn pump(s: &mut Server) {
         if end == no_index() {
             if 65536 < s.pending.len() {
                 exchange(&mut s.pending, u8[]);
-                send_error(copy_bytes(view("null")), -32700, view("invalid frame: no header terminator"));
+                send_error(
+                    copy_bytes(view("null")),
+                    -32700,
+                    view("invalid frame: no header terminator")
+                );
             }
             return ();
         }
         start := end + 4;
-        length := content_length(s.pending[0:end]);
+        length := content_length(s.pending[0: end]);
         if length == no_index() {
             // The frame cannot be bounded, so it is answered and discarded. Whatever is left
             // is unattributable unless a header line starts it, and is dropped in that case
