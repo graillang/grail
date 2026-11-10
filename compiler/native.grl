@@ -23367,37 +23367,6 @@ fn iface_self_check<a>(path: &a [u8], text: &a [u8]) -> unit {
 }
 // Every interface a build reads is checked against the manifest the emitting run wrote, so an
 // interface that was edited *and* had its own digest line recomputed is still refused.
-// Whitespace-separated words of the manifest, with quotes stripped: the same reason paths and
-// digests are quoted in an interface.
-fn iface_words<a>(text: &a [u8]) -> u8[][] {
-    mut out = u8[][];
-    mut i = 0;
-    while i < text.len() {
-        c := text[i];
-        if (c == 32) || (c == 10) || (c == 9) || (c == 13) {
-            i += 1;
-        } else {
-            mut word = u8[];
-            while i < text.len() {
-                b := text[i];
-                if (b == 32) || (b == 10) || (b == 9) || (b == 13) || (b == 34) {
-                    i += 1;
-                } else {
-                    if (b == 47) & (i + 1 < text.len()) & (text[i + 1] == 47) {
-                        while (i < text.len()) & (text[i] != 10) {
-                            i += 1;
-                        }
-                    } else {
-                        word.push(b);
-                        i += 1;
-                    }
-                }
-            }
-            out.push(word);
-        }
-    }
-    return out;
-}
 fn iface_check_manifest<a, b>(c: (&a mut C), dir: &b [u8]) -> unit {
     manifest := iface_join(view(dir), view("interfaces"), view(".manifest"));
     mut text = u8[];
@@ -23410,12 +23379,35 @@ fn iface_check_manifest<a, b>(c: (&a mut C), dir: &b [u8]) -> unit {
             view("is missing: interfaces are checked against the manifest their emitting run wrote (run `grail check --interface DIR` again)")
         );
     }
-    words := iface_words(&text);
-    mut at = 0;
-    while at + 1 < words.len() {
-        module := words[at].copy();
-        want := words[at + 1].copy();
-        at += 2;
+    lines := iface_lines(&text);
+    for i in lines.len() {
+        line := lines[i].copy();
+        if line.len() == 0 {
+            continue;
+        }
+        if line[0] == 47 {
+            // `// grail-interfaces 1`: a comment, not a module.
+            continue;
+        }
+        mut module = u8[];
+        mut want = u8[];
+        mut part = 0;
+        for k in line.len() {
+            b := line[k];
+            if b == 32 {
+                if part == 2 {
+                    break;
+                }
+                part += 1;
+            } else if part == 0 {
+                module.push(b);
+            } else if part == 1 {
+                want.push(b);
+            }
+        }
+        if want.len() == 0 {
+            continue;
+        }
         file := iface_join(view(dir), view(module), view(".iface"));
         mut bytes = u8[];
         if host::exists(view(file)) != 0 {
