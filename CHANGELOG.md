@@ -2,6 +2,35 @@
 
 ## Unreleased
 
+- Borg journals replay into the in-memory session state (`borg/src/replay.grl`). The module folds a
+  decoded event stream with the rules of `SessionState::reduce`/`apply` (session_store.rs:906-959,
+  1036-1041, 1320-1336) over the five transcript kinds `borg/src/events.grl` carries, and
+  reconstructs exactly what those kinds write: the sequence cursor, when the session started, the
+  activity clock, status and detail, the title with the rule that a generated title is final
+  (session_store.rs:952), the first and latest prompt and the latest reply. It folds typed events
+  rather than bytes, so it cannot disagree with the reader about what an event says, and
+  `replay_stream` propagates the reader's refusal — a cut tail, an unknown tag — instead of folding
+  the rows that arrived before the cut; a refused stream yields no state at all. An event that cannot
+  apply is refused by name with the index that stopped the fold and never skipped or forced:
+  `sequence` (not the expected `last + 1`), `session` (another session's `session_id`),
+  `unknown-actor` and `unknown-message-status` (outside `EventActor`'s and `MessageStatus`'
+  four variants), and `stream` (the reader's own code). The one rule that drops rather than refuses —
+  a title event while the current title was generated — is the model's own rule, so replay counts
+  the drop (`titles_frozen`) instead of rejecting a journal Borg writes. `borg_events` gains typed
+  accessors (`title_value`, `status_value`, `actor_value`, `tokens_value`, ...) so a fold can tell an
+  absent optional from a text that happens to be `-`, and `no_event()`. `borg/tests/replay_test.grl`
+  covers a clean journal, the empty one (which replays to the default state, not an error),
+  out-of-order, unknown actor, unknown message status, a foreign session, the sticky title, and a
+  journal read back from the typed byte stream intact and cut short, then generates journals: a
+  seeded xorshift makes six events per seed and each seed must replay to the same checksum twice and
+  to the same checksum as `prefix + [last]` versus `replay(prefix)` plus a direct `apply` — refusals
+  compared by index and reason, so both sides must fail identically. The committed reference
+  (`borg/tests/parity/ref/src/bin/replay.rs`) is an independent implementation of the same rules and
+  of the byte stream, and the suite compares fingerprints and FNV-1a checksums field by field.
+  `docs/design/borg-agent-port.md` records what replay reconstructs, the refusal table, and what it
+  cannot cover yet: a real journal also carries `PlanProjected`, `SubagentRegistered` and provider
+  events, whose unknown tags the reader refuses, so replaying one fails by name rather than
+  returning the subset it understood.
 - B1 stage 1, per-module emission: `grail build --split` writes one assembly file per module
   (`OUT.NNN.module.s`) plus `OUT.parts`, assembles the parts concurrently and links them once,
   instead of one `.s` for the whole program. Emission is still a single pass — the optimizer inlines
