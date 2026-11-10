@@ -69,6 +69,7 @@ const fixtures = {
   frames: ['borg/tests/fixtures/frames'],
   permission: ['borg/tests/fixtures/permission'],
   replay: ['borg/tests/fixtures/replay'],
+  aggregates: ['borg/tests/fixtures/aggregates'],
 };
 
 function fixturePaths(name) {
