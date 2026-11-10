@@ -2196,19 +2196,6 @@ fn instruction<a, b, c>(l: (&a mut L), line: &b [u8], facts: (&c Facts)) -> unit
             bad(&mut l);
             return ();
         }
-        // The front end's inline bounds check -- `cmpq 8(%h),%i` then `jb` past the cold `rt_abort` --
-        // is decided by the range fact: the compare is redundant and the branch is not emitted.
-        if l.proof.len() > l.rline {
-            v := l.proof[l.rline];
-            if v == 1 {
-                emit(&mut l, view("br label %{}"), &u8[][block_name(view(o[0]))]);
-                ends_terminator(&mut l);
-                return ();
-            }
-            if v == 2 {
-                return ();
-            }
-        }
         c := condition(&mut l, view(sub(view(op), 1, op.len())));
         next := fresh_block(&mut l);
         emit(&mut l, view("br i1 {}, label %{}, label %{}"), &u8[][c, block_name(view(o[0])), copy(view(next))]);
@@ -4139,83 +4126,6 @@ fn rg_jump_rel(op: (&[u8])) -> u64 {
     }
     return 0;
 }
-// 1 when `b rel a` holds for every value the facts allow, 0 when it holds for none, 2 when the
-// facts do not decide it.
-fn rg_decide(rc: (&RC), st: (&u64[]), b: (&[u8]), a: (&[u8]), rel: u64) -> u64 {
-    x := rg_span_of(&rc, &st, b);
-    y := rg_read(&rc, &st, a);
-    if (y.ok == 4) & (rel == 1) {
-        // `index < len(k)`, the shape the front end's bounds check and a `for i in v.len()` guard
-        // both have.
-        if rg_below(&rc, &st, &x, y.lo) {
-            return 1;
-        }
-        return 2;
-    }
-    if (x.ok != 1) || (y.ok != 1) {
-        return 2;
-    }
-    if rel == 1 {
-        if x.hi < y.lo {
-            return 1;
-        }
-        if x.lo >= y.hi {
-            return 0;
-        }
-        return 2;
-    }
-    if rel == 2 {
-        if x.hi <= y.lo {
-            return 1;
-        }
-        if x.lo > y.hi {
-            return 0;
-        }
-        return 2;
-    }
-    if rel == 3 {
-        if x.lo >= y.hi {
-            return 1;
-        }
-        if x.hi < y.lo {
-            return 0;
-        }
-        return 2;
-    }
-    if rel == 4 {
-        if x.lo > y.hi {
-            return 1;
-        }
-        if x.hi <= y.lo {
-            return 0;
-        }
-        return 2;
-    }
-    if rel == 5 {
-        if (x.lo == x.hi) & (y.lo == y.hi) {
-            if x.lo == y.lo {
-                return 1;
-            }
-            return 0;
-        }
-        if (x.hi < y.lo) || (y.hi < x.lo) {
-            return 0;
-        }
-        return 2;
-    }
-    if rel == 6 {
-        if (x.hi < y.lo) || (y.hi < x.lo) {
-            return 1;
-        }
-        if (x.lo == x.hi) & (y.lo == y.hi) {
-            if x.lo == y.lo {
-                return 0;
-            }
-        }
-        return 2;
-    }
-    return 2;
-}
 // The same comparison read the other way round: `b rel a` is also `a flip(rel) b`.
 fn rg_flip(rel: u64) -> u64 {
     if rel == 1 {
@@ -4250,35 +4160,6 @@ fn rg_inverse(rel: u64) -> u64 {
         return 6;
     }
     return 5;
-}
-// Whether the conditional jump on a `cmpq` of a word against a length word is decided by the facts:
-// 1 always taken, 2 never taken, 0 not provable.
-fn rg_check_verdict(rc: (&RC), st: (&u64[]), line: (&[u8]), cmp: (&[u8])) -> u64 {
-    o := operands(view(cmp));
-    if o.len() != 2 {
-        return 0;
-    }
-    m := rg_mem(view(o[0]));
-    if (m.ok == 0) || (m.off != 8) {
-        return 0;
-    }
-    id := rg_hdr_of(&rc, &st, m.base);
-    if id == 0 {
-        return 0;
-    }
-    s := rg_span_of(&rc, &st, view(o[1]));
-    if !rg_below(&rc, &st, &s, id - 1) {
-        return 0;
-    }
-    // The comparison passes (`index < len`): `jb`/`jbe` take the good path, `jae`/`ja` the bad one.
-    rel := rg_jump_rel(view(rg_op(line)));
-    if (rel == 1) || (rel == 2) {
-        return 1;
-    }
-    if (rel == 3) || (rel == 4) {
-        return 2;
-    }
-    return 0;
 }
 // The verdict of a call line: 3 when the accessor's bounds check cannot fire here.
 fn rg_call_verdict(rc: (&RC), st: (&u64[]), line: (&[u8])) -> u64 {
@@ -4324,9 +4205,10 @@ fn rg_run(rc: (&RC), cur: (&mut u64[]), instrs: (&u8[][]), start: u64, stop: u64
     }
     return ();
 }
-// The two states a conditional jump hands its successors, and the verdict it carries: 1 when the
-// comparison the jump tests holds for every value the facts allow, 2 when it holds for none (the
-// edge it would take is then dead and is not propagated), 0 when the facts do not decide it.
+// The two states a conditional jump hands its successors: each edge is refined with the relation
+// the branch tests, on both operands. A branch is never *decided*: the state a block is entered with
+// is the join over every path that reaches it, so a comparison that holds there holds on every
+// arrival -- including a loop's last, which is why deciding a guard from it would be wrong.
 fn rg_edges(rc: (&RC), st: (&mut u64[][]), nblk: u64, s1: u64, s2: u64, instrs: (&u8[][]), start: u64, stop: u64, cur: (&u64[]), out: (&mut u64[]), pcmp: (&u64[]), snap: (&u64[])) -> u64 {
     if s2 == rg_none() {
         if s1 != rg_none() {
@@ -4340,33 +4222,13 @@ fn rg_edges(rc: (&RC), st: (&mut u64[][]), nblk: u64, s1: u64, s2: u64, instrs: 
     rel := rg_jump_rel(view(rg_op(last)));
     mut taken = cur.copy();
     mut fall = cur.copy();
-    mut dead = 0;
     if (rel != 0) & (stop - start >= 2) {
         cmp := view(instrs[stop - 2]);
         if starts(cmp, view("cmpq ")) {
             o := operands(view(sub(cmp, 5, cmp.len())));
             if o.len() == 2 {
-                d := rg_decide(&rc, &cur, view(o[1]), view(o[0]), rel);
-                dead = 1;
-                if d == 1 {
-                    rg_relate(&rc, &mut taken, view(o[0]), view(o[1]), rel, &pcmp, &instrs, stop, &snap);
-                    dead = 2;
-                }
-                if d == 0 {
-                    rg_relate(&rc, &mut fall, view(o[0]), view(o[1]), rg_inverse(rel), &pcmp, &instrs, stop, &snap);
-                    dead = 3;
-                }
-                if dead == 1 {
-                    rg_relate(&rc, &mut taken, view(o[0]), view(o[1]), rel, &pcmp, &instrs, stop, &snap);
-                    rg_relate(&rc, &mut fall, view(o[0]), view(o[1]), rg_inverse(rel), &pcmp, &instrs, stop, &snap);
-                    dead = 0;
-                }
-                if dead == 2 {
-                    out[stop - 1] = 1;
-                }
-                if dead == 3 {
-                    out[stop - 1] = 2;
-                }
+                rg_relate(&rc, &mut taken, view(o[0]), view(o[1]), rel, &pcmp, &instrs, stop, &snap);
+                rg_relate(&rc, &mut fall, view(o[0]), view(o[1]), rg_inverse(rel), &pcmp, &instrs, stop, &snap);
             }
         }
         if starts(cmp, view("testq ")) {
@@ -4382,8 +4244,6 @@ fn rg_edges(rc: (&RC), st: (&mut u64[][]), nblk: u64, s1: u64, s2: u64, instrs: 
                     if t < instrs.len() {
                         co := operands(view(sub(view(instrs[t]), 5, instrs[t].len())));
                         if co.len() == 2 {
-                            // The word is `(a prel b)` inverted when `neg` says so; `jz` is the
-                            // word being zero, `jnz` the word being set.
                             // `holds` 1 when the taken edge means `a prel b` is true.
                             mut holds: u64 = 0;
                             if rel == 5 {
@@ -4395,30 +4255,12 @@ fn rg_edges(rc: (&RC), st: (&mut u64[][]), nblk: u64, s1: u64, s2: u64, instrs: 
                                     holds = 1;
                                 }
                             }
-                            d := rg_decide(&rc, &cur, view(co[1]), view(co[0]), prel);
-                            mut branch = 0;
-                            if d != 2 {
-                                if (d == 1) == (holds != 0) {
-                                    branch = 1;
-                                } else {
-                                    branch = 0;
-                                }
-                            }
                             if holds != 0 {
                                 rg_relate(&rc, &mut taken, view(co[0]), view(co[1]), prel, &pcmp, &instrs, stop, &snap);
                                 rg_relate(&rc, &mut fall, view(co[0]), view(co[1]), rg_inverse(prel), &pcmp, &instrs, stop, &snap);
                             } else {
                                 rg_relate(&rc, &mut fall, view(co[0]), view(co[1]), prel, &pcmp, &instrs, stop, &snap);
                                 rg_relate(&rc, &mut taken, view(co[0]), view(co[1]), rg_inverse(prel), &pcmp, &instrs, stop, &snap);
-                            }
-                            if d != 2 {
-                                if branch != 0 {
-                                    out[stop - 1] = 1;
-                                    dead = 2;
-                                } else {
-                                    out[stop - 1] = 2;
-                                    dead = 3;
-                                }
                             }
                         }
                     }
@@ -4428,15 +4270,11 @@ fn rg_edges(rc: (&RC), st: (&mut u64[][]), nblk: u64, s1: u64, s2: u64, instrs: 
     }
     // 1 when the target changed, 2 when the fall-through did, 3 for both.
     mut changed = 0;
-    if dead != 2 {
-        if rg_into(&rc, &mut st, nblk, s2, &fall) != 0 {
-            changed = 2;
-        }
+    if rg_into(&rc, &mut st, nblk, s2, &fall) != 0 {
+        changed = 2;
     }
-    if dead != 3 {
-        if rg_into(&rc, &mut st, nblk, s1, &taken) != 0 {
-            changed = changed | 1;
-        }
+    if rg_into(&rc, &mut st, nblk, s1, &taken) != 0 {
+        changed = changed | 1;
     }
     return changed;
 }
@@ -4634,6 +4472,26 @@ fn range_proofs(instrs: (&u8[][]), nslots: u64, split: u64) -> u64[] {
                 changed = 1;
             }
         }
+    }
+    // The verdicts are read off the fixpoint and nowhere else. A branch decided from a state that
+    // still had a backedge left to join could decide a loop's exit the wrong way round -- the
+    // counter is in range on every iteration but the last -- so the walk that records them runs
+    // once more, over every reachable block, when nothing is left to change. At the fixpoint the
+    // joins it performs again change nothing.
+    for b in nblk {
+        if stx[b].len() == 0 {
+            continue;
+        }
+        for q in prov.len() {
+            prov[q] = 0;
+            snap[q] = 0;
+        }
+        for q in 5 {
+            pcmp2[q] = 0;
+        }
+        mut cur3 = stx[b].copy();
+        rg_run(&rc, &mut cur3, &instrs, bstart[b], bstop[b], &trip, &mut out, 1, &mut prov, &mut pcmp2, &mut snap);
+        rg_edges(&rc, &mut stx, nblk, s1[b], s2[b], &instrs, bstart[b], bstop[b], &cur3, &mut out, &pcmp2, &snap);
     }
     return out;
 }
