@@ -5232,5 +5232,86 @@
       "compiler/tests/f32_borrowed.grl"
     ],
     "stdout": "3.75\n"
+  },
+  {
+    "name": "parallel-closure-capture-plain-data",
+    "note": "The closure environment is classified structurally: a record of plain data and a captured shared slice of numbers are both transferable and shareable, so the closure crosses to the workers.",
+    "source": "struct Pair { a: u64, b: u64 }\nfn main() {\n    p := Pair { a: 2, b: 3 };\n    mut t = u64[4, 5, 6];\n    r := &t;\n    out := parallel_map(u64[0, 1, 2], 0, |x: u64, unused: u64| -> u64 r[x] + p.a + p.b);\n    mut total = 0;\n    for i in out.len() {\n        total += out[i];\n    }\n    println(total);\n}\n",
+    "stdout": "30\n",
+    "status": 0
+  },
+  {
+    "name": "handle-classification-transferable-moves-to-worker",
+    "note": "An audited `handle H: transferable;` may cross to a worker as an owned value (a spawned result here); the declaration is what changes the answer from the default deny.",
+    "source": "handle H: transferable;\nfn make(n: u64, c: u64) -> H {\n    mut h: H;\n    return h;\n}\nfn body<s>(sc: (&s Scope<u64>), base: u64) -> u64 {\n    first := spawn(sc, base, make);\n    got := join(first);\n    if got == got {\n        return 7;\n    }\n    return 8;\n}\nfn main() {\n    println(task_scope(1, body));\n}\n",
+    "stdout": "7\n",
+    "status": 0
+  },
+  {
+    "name": "parallel-reject-closure-capture-handle-record",
+    "note": "The reported soundness hole: a plain-data signature with a thread-affine capture. The capture reaches a handle through a field, and the diagnostic names that field.",
+    "source": "handle H;\nstruct Holder { file: H, n: u64 }\nfn touch(h: (&Holder), x: u64) -> u64 { return x; }\nfn job(a: (&Holder)) -> u64 {\n    g := |x: u64, u: u64| -> u64 touch(a, x);\n    out := parallel_map(u64[1], 0, g);\n    return out.len();\n}\nfn main() { println(1); }\n",
+    "reject": true,
+    "diagnostic": "cannot share closure capture `a`: a.file is thread-affine"
+  },
+  {
+    "name": "parallel-reject-closure-capture-owned-handle",
+    "source": "handle H;\nfn keep(h: H, x: u64) -> u64 { return x; }\nfn main() {\n    mut f: H;\n    out := parallel_map(u64[1], 0, |x: u64, u: u64| -> u64 keep(f, x));\n    println(out.len());\n}\n",
+    "reject": true,
+    "diagnostic": "cannot share closure capture `f`: f is thread-affine"
+  },
+  {
+    "name": "parallel-reject-closure-capture-handle-borrow",
+    "note": "A shared reference is only shareable when its referent is: `&File` reaches the handle.",
+    "source": "handle H;\nfn peek<a>(h: (&a H), x: u64) -> u64 { return x; }\nfn main() {\n    mut fh: H;\n    out := parallel_map(u64[1], 0, |x: u64, u: u64| -> u64 peek(&fh, x));\n    println(out.len());\n}\n",
+    "reject": true,
+    "diagnostic": "cannot share closure capture `fh`: fh is thread-affine"
+  },
+  {
+    "name": "parallel-reject-closure-capture-handle-vector",
+    "source": "handle H;\nfn main() {\n    mut f: H;\n    hs := H[f];\n    out := parallel_map(u64[1], 0, |x: u64, u: u64| -> u64 hs.len());\n    println(out.len());\n}\n",
+    "reject": true,
+    "diagnostic": "cannot share closure capture `hs`: hs is thread-affine"
+  },
+  {
+    "name": "parallel-reject-closure-capture-narrow-handle",
+    "note": "A handle audited transferable-only may not be shared: parallel_map shares one closure environment with every worker.",
+    "source": "handle H: transferable;\nfn keep(h: H, x: u64) -> u64 { return x; }\nfn main() {\n    mut f: H;\n    out := parallel_map(u64[1], 0, |x: u64, u: u64| -> u64 keep(f, x));\n    println(out.len());\n}\n",
+    "reject": true,
+    "diagnostic": "cannot share closure capture `f`: f is thread-affine (declared transferable, not shareable)"
+  },
+  {
+    "name": "parallel-reject-fnmut-capture",
+    "note": "An FnMut closure shared by every worker would race on its environment.",
+    "source": "fn main() {\n    mut n = 0;\n    out := parallel_map(u64[1], 0, |x: u64, u: u64| -> u64 { n += 1; return x; });\n    println(out.len());\n}\n",
+    "reject": true,
+    "diagnostic": "a callback shared by concurrent workers must not write a captured value"
+  },
+  {
+    "name": "parallel-reject-context-record-with-handle",
+    "note": "The field is named outside a capture too: a record context whose field reaches a handle.",
+    "source": "handle H;\nstruct Holder { file: H, n: u64 }\nfn f<a>(x: u64, c: (&a Holder)) -> u64 { return x; }\nfn job(a: (&Holder)) -> u64 { return parallel_map(u64[1], a, f).len(); }\nfn main() { println(1); }\n",
+    "reject": true,
+    "diagnostic": "cannot share parallel_map context: file is thread-affine"
+  },
+  {
+    "name": "parallel-reject-spawned-handle-result",
+    "note": "An unaudited handle defaults to thread-affine, so it cannot be a spawned result.",
+    "source": "handle H;\nfn make(n: u64, c: u64) -> H {\n    mut h: H;\n    return h;\n}\nfn body<s>(sc: (&s Scope<u64>), base: u64) -> u64 {\n    first := spawn(sc, base, make);\n    got := join(first);\n    return 7;\n}\nfn main() { println(1); }\n",
+    "reject": true,
+    "diagnostic": "cannot transfer spawned result: thread-affine (a foreign handle with no audited classification)"
+  },
+  {
+    "name": "handle-classification-reject-shareable-alone",
+    "note": "Sharing implies moving: a value usable on another thread may also be moved to it.",
+    "source": "handle H: shareable;\nfn main() { println(1); }\n",
+    "reject": true,
+    "diagnostic": "`shareable` implies `transferable`"
+  },
+  {
+    "name": "handle-classification-reject-unknown-word",
+    "source": "handle H: movable;\nfn main() { println(1); }\n",
+    "reject": true,
+    "diagnostic": "a handle is classified `transferable` or `transferable, shareable`"
   }
 ]
