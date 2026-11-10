@@ -232,21 +232,31 @@ fn main() -> u64 {
 
 Argument and result registers are the C ABI's own, per target:
 
-| Target | Integer arguments (up to six) | Result | Call |
+| Target | Integer arguments | Result | Call |
 | --- | --- | --- | --- |
-| x86-64 (SysV) | `rdi, rsi, rdx, rcx, r8, r9` | `rax` | `call SYMBOL` |
-| AArch64 (AAPCS64) | `x0, x1, x2, x3, x4, x5` | `x0` | `bl SYMBOL` |
-| RISC-V 64 (LP64) | `a0, a1, a2, a3, a4, a5` | `a0` | `call SYMBOL` |
+| x86-64 (SysV) | `rdi, rsi, rdx, rcx, r8, r9`, then the outgoing stack | `rax` | `call SYMBOL` |
+| AArch64 (AAPCS64) | `x0`-`x7`, then the outgoing stack | `x0` | `bl SYMBOL` |
+| RISC-V 64 (LP64) | `a0`-`a7`, then the outgoing stack | `a0` | `call SYMBOL` |
 
-These are the same registers Grail already uses for its own calls, so a foreign call is
-a direct symbol call with the same argument/result plumbing. Frames stay 16-byte aligned
-at call sites, and generated Grail functions preserve the callee-saved registers they
-allocate (the internal prologue saves and restores them), which is what lets C call back into
-an `extern "C"` definition.
+So a call takes six word arguments in registers on x86-64 and eight on AArch64 and RISC-V 64; every
+further word is an eight-byte outgoing stack slot (Win64: four registers, a 32-byte home area, then
+slots). Six is not a compiler limit and no compiler limit has replaced it: a declaration may carry up
+to 64 argument words and the outgoing stack area is limited to 2 KiB. `tests/ffi/call_words.grl`
+executes calls of seven, eight and nine words, with both literal and computed arguments, on all three
+targets.
 
-Direct and `cfn` calls pass arguments beyond the registers on the stack (see the calling
-conventions below); an exported callback takes at most six parameters (any of them floats), and a seventh
-is rejected rather than dropped.
+The result register is `rax`/`x0`/`a0` on all three. A foreign call is a direct symbol call with the
+same argument/result plumbing as a Grail call. Frames stay 16-byte aligned at call sites, and
+generated Grail functions preserve the callee-saved registers they allocate (the internal prologue
+saves and restores them), which is what lets C call back into an `extern "C"` definition.
+
+The reverse direction — C calling a Grail callback — reads parameters from the register file only,
+because there is no caller frame to read stack arguments from (on Win64 a thunk under the C symbol
+moves the four registers and the fifth and sixth stack words into Grail's registers, and no further).
+An exported callback may therefore use up to six integer argument words on x86-64 and Windows, and up
+to eight on AArch64 and RISC-V 64, plus up to eight floating-point arguments. A longer parameter list
+is refused by name rather than read from a register that holds something else:
+`a C callback cannot read that many integer argument words`.
 
 ## The unsafe boundary
 
@@ -351,32 +361,12 @@ use. `tests/ffi/call_abi.grl` executes on x86-64, AArch64 and RISC-V Linux and, 
 
 ## Limits
 
-## Direct calls: calling conventions
-
-A direct call to an `extern "C"` declaration is lowered per platform convention:
-
-| Target | Integer registers | Float registers | Stack |
-| --- | --- | --- | --- |
-| Linux/macOS x86-64 (SysV) | `rdi rsi rdx rcx r8 r9` | `xmm0`-`xmm7` | 8-byte slots after the registers |
-| Windows x86-64 (Win64) | `rcx rdx r8 r9`, by position | `xmm0`-`xmm3`, by position | 32-byte register home area, then slots from the fifth argument |
-| AArch64 (Linux, macOS, Windows) | `x0`-`x7` | `d0`-`d7` / `s0`-`s7` | 8-byte slots |
-| RISC-V 64 (LP64D) | `a0`-`a7` | `fa0`-`fa7`, then integer registers | 8-byte slots |
-
-Parameters and results of direct calls may be `f64` and `f32` (an `f32` crosses as a real
-binary32: narrowed on the way in, widened on the way out), and `i8`..`i32`/`u8`..`u32` (Grail keeps
-them sign- or zero-extended in a word, so they pass as is; results are re-extended after the
-call because C leaves the upper bits unspecified; RV64 receives `u32` sign-extended as its ABI
-requires). Up to 64 argument words are accepted and the outgoing stack area is limited to 2 KiB.
-On macOS arm64, which packs stack arguments by size, a narrow or `f32` argument that would land
-on the stack is refused. RISC-V objects use the hard-float `lp64d` ABI, which Linux C libraries
-use. `tests/ffi/call_abi.grl` executes on x86-64, AArch64 and RISC-V Linux and, through
-`tests/windows-cases.json`, on Windows x86-64 under Wine; Windows ARM64 is checked statically.
-
 Not implemented yet, and each rejected rather than approximated:
 
-- C-callable callbacks with more than six parameters (C enters them through its register ABI and the
-  callback thunk does not read stack arguments yet); macOS callbacks use the
-  same SysV/AAPCS64 lowering but are compiled and linked only (no macOS runner);
+- C-callable callbacks that need more integer argument words than the target passes in registers (six
+  on x86-64, eight on AArch64 and RISC-V 64): the callback prologue has no caller frame to read stack
+  arguments from, so a longer parameter list is refused by name; macOS callbacks use the same
+  SysV/AAPCS64 lowering but are compiled and linked only (no macOS runner);
 - an out-parameter on a C callback or a `cfn` type: only a declaration Grail calls can write a slot
   (see Out-parameters above);
 - records *passed* by value as arguments (an extern record parameter is the C `R *`; the spelling
@@ -448,15 +438,18 @@ compiles `tests/ffi/call_scalars.grl` with the FFI build, links the two through 
 - unmangled calls to `c_add`, `c_mul` (renamed with `as`), `c_identity`, `c_sum4` and
   `c_choose` in the generated assembly;
 - the object references the C symbol but does not define it;
-- the linked executables run and return the expected values — `call_scalars` checks the
-  six-argument call, the `as` rename and `u64` results (`83`, `7`), `views_handles` checks
-  a NUL-terminated `CStr`, a read-only view, a mutable view written by C, and a handle
-  round trip (`259`, `1`), `extern_records` checks C layout in both directions (`1606`,
-  `23`, `16`, `-2`, `7`), and `callbacks` checks C calling back into Grail, including
-  callee-saved register preservation (`42`, `42`, `10`). All four fixtures execute on x86-64 and,
-  through `qemu-<target>-static`, on AArch64 and RISC-V 64: 12 executed fixture instances and no
-  link-only cases. Without a qemu runner the cross targets are linked and the ABI-level check is
-  reported as link-only.
+- the linked executables run and return the expected values. `call_scalars` checks the six-argument
+  call, the `as` rename and `u64` results (`83`, `7`), `views_handles` a NUL-terminated `CStr`, a
+  read-only view, a mutable view written by C and a handle round trip (`259`, `1`), `callbacks` C
+  calling back into Grail including callee-saved register preservation (`42`, `42`, `10`),
+  `extern_records` C layout in both directions (`1606`, `23`, `16`, `-2`, `7`), `out_params` the
+  out-parameter slots including a seventh-argument slot and two slots in one call, and `call_words`
+  seven, eight and nine word arguments with literal and computed values.
+- the suite executes every fixture on x86-64 and, through `qemu-<target>-static`, on AArch64 and
+  RISC-V 64: 51 executed fixture instances and no link-only cases, plus two cross-compiled-only ones
+  (`dlopen`, which needs a target glibc sysroot). `callback_words` executes the eight-register
+  callback on AArch64 and RISC-V 64 and asserts that x86-64 and Windows refuse it by name. Without a
+  qemu runner the cross targets are linked and the ABI-level check is reported as link-only.
 
 Rejections are part of the normal native corpus (`tests/native-cases.json`):
 `ffi-reject-safe-call`, `ffi-reject-abi`, `ffi-reject-parameter-type`, `ffi-reject-result-type`,

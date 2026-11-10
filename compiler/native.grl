@@ -6571,6 +6571,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         if export != 0 {
             // The body is Grail, but C will call it: every parameter and the result
             // must live in the C ABI slice, and the symbol is the stated C name.
+            ffi_callback_fits(&mut c, first, count);
             for i in count {
                 formal := c.params[first + i];
                 if ffi_out_param(&mut c, formal) {
@@ -7805,6 +7806,41 @@ fn narrow_decode<a>(c: (&a mut C), code: u64, unit: u64) -> u64 {
     }
     return save(&mut c);
 }
+// How many integer argument words this target's callback prologue can read: the Win64 thunk under
+// the C symbol moves four registers plus the fifth and sixth stack words into Grail's registers, and
+// x86-64 SysV, AArch64 and RISC-V 64 read their own integer argument registers.
+fn callback_int_words(abi: u64) -> u64 {
+    if abi == 1 {
+        return 6;
+    }
+    return ffi_int_regs(abi);
+}
+// Ceiling for readback of an exported callback's parameter list; see ffi_callback_fits.
+fn ffi_callback_fits<a>(c: (&a mut C), first: u64, count: u64) -> unit {
+    abi := ffi_abi(&mut c);
+    mut ints = 0;
+    mut floats = 0;
+    for i in count {
+        formal := c.params[first + i];
+        if is_float(&mut c, formal) {
+            floats = floats + 1;
+        } else {
+            ints = ints + ffi_words(&mut c, formal);
+        }
+    }
+    if callback_int_words(abi) < ints {
+        fail(
+            &mut c,
+            view(
+                "a C callback cannot read that many integer argument words: this target passes the rest on the stack and the callback prologue reads registers only; pass a pointer or a record instead"
+            )
+        );
+    }
+    if 8 < floats {
+        fail(&mut c, view("a C callback cannot read that many floating-point arguments: this target passes the rest on the stack"));
+    }
+    return ();
+}
 // An exported callback's prologue: each parameter is read from where a C caller put it (Win64:
 // positionally, the thunk having moved rcx/rdx/r8/r9 and stack words five and six into Grail's
 // registers; SysV/AAPCS64/RV64: integer-class parameters packed into the integer registers and
@@ -7812,6 +7848,10 @@ fn narrow_decode<a>(c: (&a mut C), code: u64, unit: u64) -> u64 {
 fn callback_params<a>(c: (&a mut C), count: u64) -> unit {
     win := c.target == 3;
     x86 := c.target == 0 || win;
+    // Win64 arguments arrive in Grail's registers because the thunk under the C symbol has already
+    // moved them; everywhere else the C integer argument registers of the target's own ABI are read
+    // directly, so the seventh and eighth words come from %r10/%r11 (x6/x7, a6/a7).
+    abi := ffi_abi(&mut c);
     mut ints = 0;
     mut floats = 0;
     for i in count {
@@ -7859,7 +7899,11 @@ fn callback_params<a>(c: (&a mut C), count: u64) -> unit {
                 ipos = i;
             }
             o(&mut c, view("movq "));
-            o(&mut c, view(argreg(ipos)));
+            if win {
+                o(&mut c, view(argreg(ipos)));
+            } else {
+                o(&mut c, view(ffi_int_reg(abi, ipos)));
+            }
             o(&mut c, view(",%rax\n"));
             suffix := ffi_narrow(&mut c, ty);
             if suffix.len() != 0 {
