@@ -32,6 +32,12 @@
     `contains_text`, `has_bonds`, `numbers_equal`, `satisfies_interface`, `callable_contract`,
     `token_starts_type`, `starts_with`, `flex_read`, `element_index_ahead`, `simple_index_ahead`,
     `slice_ahead`, `typed_binding_ahead_at`.
+  - `native`, unions, maps and FFI: `is_ordinary_union`, `is_result_union`, `is_at`, `is_keyword`,
+    `ffi_direct_type`, `impl_has_for`, `stdlib_module`, `ffi_record_has_float`,
+    `ffi_record_has_float_deep`, `typed_binding_ahead`, `format_arg`, `ref_to_text`,
+    `is_option_storage`, `closure_free_name`, `char_method`, `subword`, `is_map_type`,
+    `proven_index`. `format_arg`'s `numeric` flag becomes bool; the mask it feeds converts
+    explicitly.
 - Maps iterate with `for key, value in &map`, in insertion order, and `for key, value in &mut map` binds the
   same shared key with an exclusive value (`value := map.value_at_mut(i)`), so values update in place. The loop
   holds one reference to the map throughout: inserting into it inside the body is rejected, a shared loop cannot

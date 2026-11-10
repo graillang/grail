@@ -4440,7 +4440,7 @@ fn named_type<a>(c: (&a mut C), m: u8[], n: u8[], args: u64[]) -> u64 {
     return intern_args(&mut c, 8, d, 0, u64[], args);
 }
 // Union members use an internal tagged layout, independent of library declarations.
-fn is_ordinary_union<a>(c: (&a mut C), ty: u64) -> u64 {
+fn is_ordinary_union<a>(c: (&a mut C), ty: u64) -> bool {
     if ty_kind(&mut c, ty) != 8 {
         return false;
     }
@@ -4448,7 +4448,7 @@ fn is_ordinary_union<a>(c: (&a mut C), ty: u64) -> u64 {
     decl := &c.decls[d];
     return same(view(decl.module), view(".union"));
 }
-fn is_result_union<a>(c: (&a mut C), ty: u64) -> u64 {
+fn is_result_union<a>(c: (&a mut C), ty: u64) -> bool {
     if ty_kind(&mut c, ty) != 8 {
         return false;
     }
@@ -4670,9 +4670,9 @@ fn lifetime_candidate<a>(c: (&a mut C), p: u64) -> u64 {
     if type_keyword(&mut c, view(n)) {
         return false;
     }
-    return token_starts_type(&mut c, p + 1) + is_at(&mut c, p + 1, view("mut"));
+    return token_starts_type(&mut c, p + 1) || is_at(&mut c, p + 1, view("mut"));
 }
-fn is_at<a, b>(c: (&a mut C), p: u64, text: &b [u8]) -> u64 {
+fn is_at<a, b>(c: (&a mut C), p: u64, text: &b [u8]) -> bool {
     if p < c.toks.len() {
         t := tok_text(&mut c, p);
         return same(view(t), view(text));
@@ -5225,14 +5225,14 @@ fn decl<a>(c: (&a mut C), pass: u64) -> unit {
 // Words that start a statement or expression inside a body; they cannot name a binding or
 // parameter. Declaration heads (`fn`, `struct`, `module`, `use`, ...) are recognised only at the
 // top level and may name bindings.
-fn is_keyword<a>(name: &a [u8]) -> u64 {
+fn is_keyword<a>(name: &a [u8]) -> bool {
     words := u8[][copy_bytes(view("mut")), copy_bytes(view("if")), copy_bytes(view("else")), copy_bytes(view("while")), copy_bytes(view("for")), copy_bytes(view("in")), copy_bytes(view("loop")), copy_bytes(view("match")), copy_bytes(view("return")), copy_bytes(view("break")), copy_bytes(view("continue")), copy_bytes(view("unsafe")), copy_bytes(view("true")), copy_bytes(view("false"))];
     for i in words.len() {
         if same(view(words[i]), view(name)) {
-            return 1;
+            return true;
         }
     }
-    return 0;
+    return false;
 }
 fn bind<a>(c: (&a mut C), name: u8[], ty: u64, id: u64, mutable: u64) -> unit {
     if is_keyword(view(name)) {
@@ -5419,7 +5419,7 @@ fn ffi_x86_extend<a, b>(c: (&a mut C), suffix: &b [u8]) -> unit {
     }
     return ();
 }
-fn ffi_direct_type<a>(c: (&a mut C), ty: u64) -> u64 {
+fn ffi_direct_type<a>(c: (&a mut C), ty: u64) -> bool {
     if is_float(&mut c, ty) {
         return true;
     }
@@ -6779,7 +6779,7 @@ fn interface_declaration<a>(c: (&a mut C), pass: u64) -> unit {
     exchange(&mut c.self_type, 0);
     return ();
 }
-fn impl_has_for<a>(c: (&a mut C)) -> u64 {
+fn impl_has_for<a>(c: (&a mut C)) -> bool {
     mut i = c.pos;
     while (kind_at(&mut c, i) != 123) & (kind_at(&mut c, i) != 0) {
         t := tok_text(&mut c, i);
@@ -6853,7 +6853,7 @@ fn implementation<a>(c: (&a mut C), pass: u64) -> unit {
         + (
             (kind(&mut c) == 1)
                 & (next_kind(&mut c) == 60)
-                & (impl_has_for(&mut c) == 0)
+                & !impl_has_for(&mut c)
         ) {
         if pass == 1 {
             while is(&mut c, view("{")) == 0 {
@@ -7224,7 +7224,7 @@ fn in_std_dir<a>(path: &a [u8]) -> u64 {
     }
     return host::exists(view(probe));
 }
-fn stdlib_module<a, b>(mods: (&a u8[][]), m: &b [u8]) -> u64 {
+fn stdlib_module<a, b>(mods: (&a u8[][]), m: &b [u8]) -> bool {
     // The runtime lives beside the compiler, not in the stdlib directory.
     if same(view(m), view("runtime")) {
         return true;
@@ -7275,7 +7275,7 @@ fn toplevel<a>(c: (&a mut C), pass: u64) -> unit {
             fail(&mut c, view("the darwin module requires a macos-x86_64 or macos-aarch64 target"));
         }
     }
-    if c.file_std & (stdlib_module(&c.std_modules, view(m)) == 0) {
+    if c.file_std & !stdlib_module(&c.std_modules, view(m)) {
         c.std_modules.push(m.copy());
     }
     exchange(&mut c.module, m);
@@ -7855,15 +7855,15 @@ fn ffi_float_store<a>(c: (&a mut C), k: u64, single: u64, off: u64) -> unit {
     return ();
 }
 // 1 when a C-layout record has a floating-point field (its by-value classification differs).
-fn ffi_record_has_float<a>(c: (&a mut C), d: u64) -> u64 {
+fn ffi_record_has_float<a>(c: (&a mut C), d: u64) -> bool {
     count := c.decls[d].count;
     for i in count {
         ty := field_ty(&mut c, d, i);
         if is_float(&mut c, ty) {
-            return 1;
+            return true;
         }
     }
-    return 0;
+    return false;
 }
 // 1 when a C-layout record embeds another extern record.
 fn ffi_record_has_nested<a>(c: (&a mut C), d: u64) -> bool {
@@ -7877,21 +7877,21 @@ fn ffi_record_has_nested<a>(c: (&a mut C), d: u64) -> bool {
     return false;
 }
 // Floats anywhere in the record, embedded records included.
-fn ffi_record_has_float_deep<a>(c: (&a mut C), d: u64) -> u64 {
+fn ffi_record_has_float_deep<a>(c: (&a mut C), d: u64) -> bool {
     count := c.decls[d].count;
     for i in count {
         ty := field_ty(&mut c, d, i);
         if is_float(&mut c, ty) {
-            return 1;
+            return true;
         }
         if is_c_record(&mut c, ty) {
             inner := ty_arg(&mut c, ty);
             if ffi_record_has_float_deep(&mut c, inner) {
-                return 1;
+                return true;
             }
         }
     }
-    return 0;
+    return false;
 }
 fn field_path<a>(c: (&a mut C), id: u64, lty: u64, address: u64) -> Val {
     mut t = id;
@@ -8363,7 +8363,7 @@ fn member_name<a>(c: (&a mut C)) -> u8[] {
     return ident(&mut c);
 }
 // name ':' type ('=' | ':=') ... ; scans to the end of the statement for an initializer.
-fn typed_binding_ahead<a>(c: (&a mut C)) -> u64 {
+fn typed_binding_ahead<a>(c: (&a mut C)) -> bool {
     p := c.pos;
     return typed_binding_ahead_at(&mut c, p);
 }
@@ -10621,7 +10621,7 @@ fn format_precision_end<a>(text: &a [u8], start: u64) -> u64 {
     }
     return i + 1;
 }
-fn format_arg<a>(c: (&a mut C), acc: u64, input: Val) -> u64 {
+fn format_arg<a>(c: (&a mut C), acc: u64, input: Val) -> bool {
     original := input.t;
     inty := input.ty;
     value := deref(&mut c, input);
@@ -10683,7 +10683,7 @@ fn format_arg<a>(c: (&a mut C), acc: u64, input: Val) -> u64 {
         }
     }
     release_temporary(&mut c, original);
-    return (kind0 == 1) + (kind0 == 18) + (kind0 == 21);
+    return (kind0 == 1) || (kind0 == 18) || (kind0 == 21);
 }
 struct FormatSpec {
     precision: u64,
@@ -10786,7 +10786,7 @@ fn format_spec_arg<a>(c: (&a mut C), acc: u64, sp: FormatSpec) -> unit {
     }
     value := expr(&mut c, 0);
     tmp := invoke(&mut c, view("rt_new"), u64[]);
-    mut numeric = 1;
+    mut numeric = true;
     if sp.precision != 18446744073709551615 {
         if !is_float(&mut c, value.ty) {
             fail(&mut c, view("{:.N} needs an f64 argument"));
@@ -10811,7 +10811,7 @@ fn format_spec_arg<a>(c: (&a mut C), acc: u64, sp: FormatSpec) -> unit {
     args.push(w);
     al := imm(&mut c, align);
     args.push(al);
-    z := imm(&mut c, sp.zero & numeric);
+    z := imm(&mut c, sp.zero & u64(numeric));
     args.push(z);
     f := imm(&mut c, sp.fill);
     args.push(f);
@@ -11987,7 +11987,7 @@ fn is_text<a>(c: (&a mut C), ty: u64) -> bool {
     k := ty_kind(&mut c, ty);
     return (k == 3) || (k == 4) || (k == 5);
 }
-fn ref_to_text<a>(c: (&a mut C), ty: u64) -> u64 {
+fn ref_to_text<a>(c: (&a mut C), ty: u64) -> bool {
     if ty_kind(&mut c, ty) != 7 {
         return false;
     }
@@ -12246,7 +12246,7 @@ fn adopt_literal<a>(c: (&a mut C), start: u64, end: u64, ty: u64) -> bool {
     }
     return true;
 }
-fn is_option_storage<a>(c: (&a mut C), ty: u64) -> u64 {
+fn is_option_storage<a>(c: (&a mut C), ty: u64) -> bool {
     if ty_kind(&mut c, ty) != 8 {
         return false;
     }
@@ -12644,7 +12644,7 @@ fn int_binary<a>(c: (&a mut C), k: u64, left: u64, right: u64, ty: u64) -> Val {
 // loan together, so the closure's type carries the regions it borrows and it cannot outlive them.
 // The body is compiled afterwards as a separate function whose hidden first parameter is a shared
 // reference to that record, so captures are read-only fields (no mutation, no moving out).
-fn closure_free_name<a, b>(c: (&a mut C), name: &b [u8], params: (&a u8[][])) -> u64 {
+fn closure_free_name<a, b>(c: (&a mut C), name: &b [u8], params: (&a u8[][])) -> bool {
     for i in params.len() {
         p := &params[i];
         if same(view(p), view(name)) {
@@ -13582,7 +13582,7 @@ fn text_method<a, b>(c: (&a mut C), xt: u64, k: u64, name: &b [u8]) -> Val {
     }
     return val(0, 18446744073709551615);
 }
-fn char_method<a>(n: &a [u8]) -> u64 {
+fn char_method<a>(n: &a [u8]) -> bool {
     return same(view(n), view("is_alphabetic"))
         || same(view(n), view("is_alphanumeric"))
         || same(view(n), view("is_ascii_digit"))
@@ -14335,18 +14335,18 @@ fn tag_narrow_borrow<a>(c: (&a mut C), slot: u64) -> unit {
     return ();
 }
 // A type narrow storage can hold: f32 or an 8-, 16- or 32-bit integer.
-fn subword<a>(c: (&a mut C), alias: u64) -> u64 {
-    if (c.raw != 0) + (alias == 0) {
-        return 0;
+fn subword<a>(c: (&a mut C), alias: u64) -> bool {
+    if (c.raw != 0) || (alias == 0) {
+        return false;
     }
     ty := base_type(&mut c, alias);
     if is_f32(&mut c, ty) {
-        return 1;
+        return true;
     }
     if ty_kind(&mut c, ty) == 18 {
         return ty_arg(&mut c, ty) < 64;
     }
-    return 0;
+    return false;
 }
 // Reads the `ty` value a reference slot points at: word storage with an 8-byte load, tagged narrow
 // storage with the type's width and encoding.
@@ -14355,7 +14355,7 @@ fn ref_load<a>(c: (&a mut C), r: u64, ty: u64) -> u64 {
     if (narrow != 0) & (is_c_record(&mut c, narrow) == 0) {
         return caddr_load(&mut c, r, narrow);
     }
-    if subword(&mut c, ty) == 0 {
+    if !subword(&mut c, ty) {
         get(&mut c, r, view("%rax"));
         o(&mut c, view("movq (%rax),%rax\n"));
         return save(&mut c);
@@ -14383,7 +14383,7 @@ fn ref_store<a>(c: (&a mut C), r: u64, ty: u64, value: u64) -> unit {
         caddr_store(&mut c, r, narrow, value);
         return ();
     }
-    if subword(&mut c, ty) == 0 {
+    if !subword(&mut c, ty) {
         get(&mut c, value, view("%rax"));
         get(&mut c, r, view("%rcx"));
         o(&mut c, view("movq %rax,(%rcx)\n"));
@@ -14593,12 +14593,12 @@ fn finish_type_literal<a>(c: (&a mut C), ty: u64) -> Val {
     return val(slot, out);
 }
 // Maps remain ordinary nominal library values; only their concise surface is compiler-owned.
-fn is_map_type<a>(c: (&a mut C), ty: u64) -> u64 {
+fn is_map_type<a>(c: (&a mut C), ty: u64) -> bool {
     if ty == 18446744073709551615 {
-        return 0;
+        return false;
     }
     if ty_kind(&mut c, ty) != 8 {
-        return 0;
+        return false;
     }
     d := ty_arg(&mut c, ty);
     item := &c.decls[d];
@@ -14702,7 +14702,7 @@ fn map_expression<a>(c: (&a mut C), expected: u64) -> Val {
     following := kind_at(&mut c, q + 1);
     if (following == 40) + (following == 260) {
         ty := parse_type(&mut c);
-        if is_map_type(&mut c, ty) == 0 {
+        if !is_map_type(&mut c, ty) {
             fail(&mut c, view("map constructor needs [K: V]"));
         }
         if eat(&mut c, view("::")) {
@@ -15488,7 +15488,7 @@ fn propagate_result_union<a>(c: (&a mut C), x: Val, unwrap: u64) -> Val {
     result := c.result;
     mut failure_targets = u64[];
     if unwrap == 0 {
-        if is_result_union(&mut c, result) == 0 {
+        if !is_result_union(&mut c, result) {
             fail(&mut c, view("result propagation requires a result return type"));
         }
         returned := type_args(&mut c, result);
@@ -15918,7 +15918,7 @@ fn len_bound_ahead<a, b>(c: (&a mut C), name: &b [u8]) -> u8[] {
     return base.copy();
 }
 // Whether `[ i ]` at the cursor indexes the proven base with the proven loop variable.
-fn proven_index<a>(c: (&a mut C), value: Val) -> u64 {
+fn proven_index<a>(c: (&a mut C), value: Val) -> bool {
     if c.bce_index.len() == 0 {
         return false;
     }
@@ -16611,7 +16611,7 @@ fn expr_expected<a>(c: (&a mut C), min: u64, expected: u64) -> Val {
                             // References to text compare and concatenate like the text itself.
                             if c.raw == 0 {
                                 if ref_to_text(&mut c, ty)
-                                    + ref_to_text(&mut c, rty) {
+                                    || ref_to_text(&mut c, rty) {
                                     if ref_to_text(&mut c, ty) {
                                         x := deref(&mut c, val(t, ty));
                                         snap = x.t;
@@ -18181,7 +18181,7 @@ fn map_loop<a, b, d>(c: (&a mut C), name: &b [u8], value_name: &d [u8]) -> unit 
     if (c.raw == 0) & (ty_kind(&mut c, map.ty) == 7) {
         mapty = ty_arg(&mut c, map.ty);
     }
-    if is_map_type(&mut c, mapty) == 0 {
+    if !is_map_type(&mut c, mapty) {
         fail(
             &mut c,
             view(
