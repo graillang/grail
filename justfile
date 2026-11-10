@@ -48,6 +48,10 @@ test-selfhost:
 test-split:
     bun tools/split-test.mjs
 
+# Build cache (B1 stage 4): reuse what is unchanged, and nothing else.
+test-cache:
+    bun tools/cache-test.mjs
+
 # Run the Abundance CPU-port parity tests (math, compared bit-for-bit with Abundance's own C++).
 abundance-test:
     bun tools/abundance-test.mjs
