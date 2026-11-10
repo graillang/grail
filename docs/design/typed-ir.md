@@ -1,8 +1,11 @@
 # Typed IR facts for the LLVM backend
 
-Status: design, 2026-11-10. **F2 implemented** (2026-11-10, see *Implemented: F2* below);
-F1 not started. `compiler/llvm.grl` and `compiler/native.grl` now carry the fact table and the F2
-consumer; the word stream, `optimize.grl` and `machine.grl` are unchanged.
+Status: design, 2026-11-10. **F2 implemented** (2026-11-10, see *Implemented: F2* below). **F1
+implemented and gated off by its measurement** (2026-11-10, see *Implemented: F1* below): the fact,
+its invalidation rules and its `--verify-facts` checks are in the tree, the lowering consumes it only
+where the hoist it performs is provably usable, which on this corpus is nowhere, and F1 is therefore
+neutral in `tools/bench.mjs`. `compiler/llvm.grl` and `compiler/native.grl` carry the fact table and
+both consumers; the word stream, `optimize.grl` and `machine.grl` are unchanged.
 Companion to [llvm-backend.md](llvm-backend.md), stage 2c, which records that no lever inside the
 lifter reaches 1.0x C and names the two missing facts.
 
@@ -506,6 +509,125 @@ carries the `f32` accumulator as a `phi double`, and removing the checks makes `
 usable for `f32` code at all. So F2 on its own moves nothing on this machine, and F2 as the
 prerequisite for the checks coming out moves `matmul` from 1.95x to 1.05x; the fact table is
 committed on the second basis, with the first stated plainly.
+
+### Implemented: F1 (2026-11-10)
+
+F1 landed in the shape above, and then was **gated off by the measurement**: the fact table, the
+invalidation rules and the `--verify-facts` checks are in the tree, but the lowering that consumes
+them is only taken where the hoist it performs is provably usable, which on this corpus is nowhere.
+`optimize.grl` and `machine.grl` are untouched and the word stream is unchanged throughout, so the
+native backend emits exactly what it emitted before.
+
+**The table.** `what` 2/3/4 means a *vector* header whose elements are 8, 4 or 1 bytes wide (`+16` is
+`cap`). `what` 0 on a slot is the negative case F2 already needed, so a slot reused for another
+binding is dropped. Facts are recorded at two points, both places the front end has the type:
+
+- `emit_slot_fact` (`compiler/native.grl`), which already ran at every `bind`, records `what` and
+  `width` from `header_what`/`header_width` (`ty_kind` 6 with a narrow element is a 4-byte vector,
+  3/4 are byte sequences). `f32` and header facts are mutually exclusive, so one entry per slot
+  still suffices.
+- `fact_seq_arg` records `(function, callee, ordinal, argument 0) = header` at the access sites in
+  `index_view` and at `.len()`. The ordinal is the call's index *among the calls to that callee in
+  that function*: `invoke` bumps a per-callee counter and the lifter counts the same `call` lines
+  back, both reset per function. A fact whose ordinal does not line up is simply not found, which
+  falls back to the word lowering.
+
+**Which slots the lifter types.** `accept_headers` keeps F2's rule that every fact naming a slot
+must agree, and adds a body rule: every line that mentions the slot must be a whole-eight-byte
+`movq`, a `cmpq`, or a `leaq` of it (`&v`). A constant written into the slot, a four-byte alias or
+any integer operation leaves it an untyped word. Measured with `--verify-facts` on the corpus:
+`nbody`'s `f_main_main` records three header slots (`p`, `v`, `m`, `what 2 width 8`) and 32 call
+facts on `rt_slot`; `total(&v)` in `compiler/tests/f1_header.grl` records its two vectors the same
+way. Every slot whose entry says `what 0` is dropped, as designed. A **borrowed `&[T]` parameter is
+not typed**: its word is the *address* the front end passed, which for `&v` is the vector's own
+header but not provably one to the lifter, so `header_what` records no fact for `ty_kind` 5/27. That
+is the reason nothing in this implementation claims `!invariant.load` or `!alias.scope`: the only
+place those are unconditionally true is a descriptor, and a descriptor is exactly the case the fact
+table cannot speak about.
+
+**The lowering.** A fact-carrying call targets an internal sibling of the accessor:
+
+    define internal {i64, i64} @"rt_slot.h2w8"(ptr nocapture nofree dereferenceable(24) align 8 %a0,
+                                               i64 %a1, i64 %a2, i64 %a3, i64 %a4, i64 %a5,
+                                               i64 %d, i64 %l)
+
+It is the callee's *own* word-machine body re-emitted from the same stream text, with argument 0
+typed as a `ptr` and with the two header fields passed in: every load of `+0`/`+8` through a
+header-derived value becomes `%d`/`%l` (`sibling_load`), the machine's word for the pointer is
+`ptrtoint %a0`, and any other offset still loads through the pointer, so a body that read `+16`
+would read exactly the bytes it reads today. The call site passes the words the lifter hoisted.
+
+**The invalidation rules, enforced where the facts are consumed.** `L.eon[slot]` is 1 while the two
+words are current and 2 once the header may have been rewritten; the pair is invalidated by
+
+- any call that is given the header word and is not one of the read-only accessors (`rt_slot*`,
+  `rt_at*`, `rt_len`, `rt_view`, `rt_slice`, `rt_vslice`, `rt_write`) -- which is where
+  `rt_push*`/`rt_fill*`/`rt_reserve*`/`rt_pop`/`rt_vec_*`/`rt_append*`/`rt_drop_seq` land, so `data`
+  dies on growth and `len` dies on push/pop/insert/remove/truncate/fill/clear under one rule;
+- any `leaq` of the slot: the callee holds the header's address and may rebind or grow it;
+- any untyped write to the slot, which clears it outright.
+
+`cap` is never read from a fact: the only words an F1 fact supplies are `+0` and `+8`, so a
+descriptor's uninitialised `+16` is unreachable from one. `--verify-facts` reads `+16` only to check
+`cap >= len`, and only for a vector fact.
+
+**Why the lowering is gated, and what the measurement said.** The design expected the typed
+parameter to let LLVM's LICM hoist the header loads, with `!alias.scope` supplying the aliasing fact.
+Measured directly with `opt -O2` on a hand-written module of the same shape, that is false, and the
+reason is the caller rather than the callee: after inlining, the pointer LLVM sees is
+`inttoptr i64 (load %s.N)` out of a frame slot, which is not dereferenceable at the loop preheader, so
+the load may not be speculated there -- the callee's `dereferenceable(24)` is not re-derived for the
+inlined argument. (`!invariant.load` *does* hoist such a load and fold the bounds compare into the
+loop condition; a vector may still grow, so F1 may not claim it.)
+
+So F1's hoist has to be the lifter's own: emit `data`/`len` where the fact is established and pass
+them in. That is only correct where the establishing block *dominates* the call, and the lifter
+cannot assume it -- the word machine spills every temporary to a frame slot, so `nbody`'s `main` is
+143 blocks and the sites that carry a fact are in blocks that the establishing block does not
+dominate. Rather than estimate dominance, the consumer requires the two words to be established in
+the *same block* as the call, and otherwise keeps today's `call rt_slot`. That is the "an absent fact
+is always safe" rule applied to the half of the fact that is a promise about liveness.
+
+Measured the first time round with that rule relaxed -- the call site re-reading `data`/`len` when
+they were not established, which is what a fact-gated lowering can always do safely -- `nbody` went
+from 1.72x to 1.89x (0.165 s -> 0.182 s): the sibling call with eight arguments plus two loads at the
+call site is strictly more work than the six-argument call whose body does the same two loads. So the
+relaxed form is not a lowering worth having, and it is not in the tree.
+
+**Measured, with the gate in place.** `tools/bench.mjs --rounds 9` (paired medians), x86-64,
+`--backend=llvm`, same host, the same compiler sources except for this change; C `-O2
+-ffp-contract=off`. "before" is `origin/main` measured the same way an hour earlier; note that *every*
+row's C baseline drifted up ~4% between the two runs, which is this host, not this change:
+
+| benchmark | C `-O2` before | Grail before | ratio | C `-O2` after | Grail after | ratio |
+| --- | --- | --- | --- | --- | --- | --- |
+| fnv | 0.527 s | 0.527 s | 1.00x | 0.551 s | 0.549 s | 1.00x |
+| sieve | 0.557 s | 0.646 s | 1.16x | 0.566 s | 0.664 s | 1.17x |
+| sort | 0.890 s | 1.135 s | 1.28x | 0.917 s | 1.133 s | 1.24x |
+| nbody | 0.095 s | 0.164 s | 1.72x | 0.099 s | 0.173 s | 1.75x |
+| matmul | 0.183 s | 0.214 s | 1.17x | 0.193 s | 0.228 s | 1.18x |
+
+Stage 2c's baselines for the same five, from `llvm-backend.md`, are 1.05x / 1.07x / 1.46x / 2.42x /
+1.30x; F2 moved `matmul` to 1.14-1.20x on this host and nothing else. F1 changes no ratio outside
+the observed spread: it is **neutral**, which is the honest description of a fact the lowering
+declines to use.
+
+**Was it worth it?** No, not as a performance lever on this corpus, and the measurement is what says
+so. What the fact buys is blocked by two things that are not type facts: LLVM will not speculate a
+header load whose pointer is not dereferenceable at the preheader, and the lifter cannot place its
+own hoist without knowing which block dominates which. Both are fixable and neither is F1's job:
+
+- a **region fact** from the front end -- "no `rt_push*`-family call on this value inside this loop"
+  -- turns the lifter's hoist into a real preheader hoist for an owned vector, and would let a
+  *descriptor* fact carry `!invariant.load`, which is measured to hoist on its own;
+- the remaining `sort`/`nbody` gap is the per-access bounds compare, which needs the **range fact**
+  and a loop-guard proof (`llvm-backend.md` stage 3), not a type.
+
+The two things F1 does leave behind are worth keeping: the fact table now carries a *pointer* type
+with its element width, which is the half of the design that outlives this attempt, and
+`--verify-facts` checks it -- including `cap >= len`, the check that makes a
+vector-fact-on-a-descriptor abort rather than corrupt a length, exercised by
+`tools/test-facts.mjs`'s `--f1-what=2` case.
 
 ## Staged plan and checkpoints
 

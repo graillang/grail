@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+- Typed-IR F1, a sequence-header fact for the LLVM backend: the front end now records, beside the
+  word stream, that a frame slot or a call's argument 0 holds a pointer to a 24-byte sequence header
+  -- `{data, len, cap}` for a vector, `what` 2/3/4 with element width 8/4/1 -- and the LLVM lifter
+  can consume it, so nothing in `.s`, `optimize.grl`, `machine.grl` or the native backend changes. A
+  fact-carrying `call rt_slot` is lowered into an internal sibling of the accessor emitted from the
+  same word-machine body with argument 0 typed `ptr nocapture nofree dereferenceable(24) align 8` and
+  with `data`/`len` passed in, so the two header loads leave the body; the call site emits them once
+  where the fact is established, at `align 8`, and passes them. `len` dies on
+  push/pop/remove/insert/truncate/fill/clear and `data` on any growth or untyped write to the slot,
+  enforced by invalidating the hoisted pair on any call that is given the header and is not a
+  read-only accessor, and on any `leaq` of the slot; `cap` is never read, so a descriptor's
+  uninitialised `+16` is unreachable from an F1 fact.
+  `--verify-facts` now checks F1 too: non-null and eight-byte aligned, `cap >= len` through `+16`
+  for a vector fact (the tripwire for a vector fact on a descriptor), and the element pointer inside
+  `data .. data + len*width` for the wide accessors. `tools/test-facts.mjs` compiles a fixture with a
+  deliberately wrong fact (`--f1-what=N`, a test aid) and shows the flag aborting in that check
+  instead of printing a plausible number. Measured with `tools/bench.mjs --rounds 9`, F1 is
+  **neutral, not a win**: `dereferenceable(24)` on the accessor's parameter is not re-derived for the
+  inlined argument, so LLVM still will not speculate the header load out of a loop, and the lifter's
+  own hoist is only sound where the establishing block dominates the call -- which the word machine's
+  frame-spilled temporaries never make true on this corpus. Letting the call site re-read the fields
+  when they are not established instead is measured at `nbody` 1.72x -> 1.89x, so that form is not in
+  the tree. The fact and its verifier stay because a pointer type with an element width is the half
+  that outlives this attempt. See `docs/design/typed-ir.md`, "Implemented: F1".
 - B1 stage 1, per-module emission: `grail build --split` writes one assembly file per module
   (`OUT.NNN.module.s`) plus `OUT.parts`, assembles the parts concurrently and links them once,
   instead of one `.s` for the whole program. Emission is still a single pass — the optimizer inlines
