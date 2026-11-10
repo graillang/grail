@@ -89,6 +89,11 @@ suite pass while the published seed still cannot build the compiler, so a branch
 and still fail CI's clean-clone preflight; `ci.mjs` already refuses a stale seed, it just never ran
 here.
 
+**An abort case is host-only.** qemu reports an abort as a delivered signal (`qemu: uncaught target
+signal 6`), while natively the process exits 134 (128+SIGABRT) - the B5 policy. A case that pins the
+exit *status* of an abort therefore carries `"targets": ["x86_64"]`, and the policy is verified natively
+(plus on Windows under Wine, with its own case), not through emulation.
+
 **Slice a suite instead of waiting for it.** A full native run is minutes per backend, so the runner
 takes three opt-in knobs (a plain invocation is unchanged):
 
