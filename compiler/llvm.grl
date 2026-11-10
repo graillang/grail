@@ -1068,13 +1068,16 @@ fn storage_of(l: (&L), op: &[u8]) -> u64 {
         return 0;
     }
     d := parse_int(view(sub(op, 0, n)));
-    if (d.ok == 0) || (d.v >= 0) {
+    // A frame displacement, and only that: the exact-slot arithmetic below must not see a 64-bit
+    // immediate, which a `movabsq` operand can spell.
+    if (d.ok == 0) || (d.v >= 0) || (d.v < -1073741824) {
         return 0;
     }
-    if d.v + i64(8 * (u64(0 - (d.v + 1)) / 8 + 1)) != 0 {
+    k := u64(0 - (d.v + 1)) / 8;
+    if 0 - i64(8 * (k + 1)) != d.v {
         return 0;
     }
-    return 15 + u64(0 - (d.v + 1)) / 8;
+    return 15 + k;
 }
 // The chain a storage location carries: 0 nothing, 1 the header pointer of slot `vo` plus `vo2`
 // bytes, 2 the constant `vo2`. A frame slot with an accepted F1 fact is a header pointer by
@@ -1158,12 +1161,22 @@ fn chain_arith(l: (&mut L), dst: (&[u8]), src: (&[u8]), minus: u64) -> unit {
     dk := op_chain_kind(&l, dst);
     sk := op_chain_kind(&l, src);
     mut so = op_chain_off(&l, src);
+    // Only a small displacement keeps a header pointer a header pointer; anything else (a 64-bit
+    // immediate, an address) ends the chain, and negating one could overflow.
+    if (so > 1073741824) || (so < -1073741824) {
+        set_chain(&mut l, did, 0, 0, 0);
+        return ();
+    }
     if minus != 0 {
         so = 0 - so;
     }
     dso := op_chain_slot(&l, dst);
     dof := op_chain_off(&l, dst);
     sso := op_chain_slot(&l, src);
+    if (dof > 1073741824) || (dof < -1073741824) {
+        set_chain(&mut l, did, 0, 0, 0);
+        return ();
+    }
     if (dk == 1) & (sk == 2) {
         set_chain(&mut l, did, 1, dso, dof + so);
         return ();
@@ -1180,7 +1193,9 @@ fn chain_arith(l: (&mut L), dst: (&[u8]), src: (&[u8]), minus: u64) -> unit {
     return ();
 }
 fn set_chain(l: (&mut L), id: u64, kind: u64, slot: u64, off: i64) -> unit {
-    if id == 0 {
+    // The chain arrays cover the registers and frame slots of a *split* frame only; a function whose
+    // frame is one blob has nothing for a chain to be attached to.
+    if (id == 0) || (id > l.vk.len()) {
         return ();
     }
     l.vk[id - 1] = kind;
@@ -1247,11 +1262,11 @@ fn header_operand(l: (&L), op: &[u8]) -> u64 {
         return 0;
     }
     d := parse_int(view(sub(op, 0, n)));
-    if (d.ok == 0) || (d.v >= 0) {
+    if (d.ok == 0) || (d.v >= 0) || (d.v < -1073741824) {
         return 0;
     }
     k := u64(0 - (d.v + 1)) / 8;
-    if d.v + i64(8 * (k + 1)) != 0 {
+    if 0 - i64(8 * (k + 1)) != d.v {
         return 0;
     }
     if header_slot_kind(&l, k) == 0 {
