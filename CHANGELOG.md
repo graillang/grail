@@ -23,11 +23,17 @@
   native cases (`command-with-env-carries-its-entries`, `-empty-env-clears-everything`,
   `-built-from-the-inherited-one`, `command-without-env-still-inherits`, `-refuses-malformed-entry`,
   `-reports-a-signalled-child`) and four Windows cases executed under Wine (`command-with-env`,
-  `-inherit-env`, `-empty-env`, `-argv-round-trip`) plus one static ARM64 build. A new host builtin
-  needs a bootstrap reseed before a plain `bun tools/native.mjs build` works (`bun
-  tools/bootstrap.mjs update all`, owned by the bootstrap workstream); until then build with
-  `GRAIL_COMPILER` pointing at a compiler staged from this tree, which is how the suites for this
-  change were run.
+  `-inherit-env`, `-empty-env`, `-argv-round-trip`) plus one static ARM64 build. A host builtin that
+  `compiler/*.grl` itself calls needs a **two-step bootstrap**, because the checked-in seed *is* the
+  compiler and carries the `host::` table of the commit it was recorded from: stage a compiler that
+  knows the builtin and point `GRAIL_COMPILER` at it, then reseed with that same variable
+  (`bun tools/bootstrap.mjs update all` — `bootstrap.mjs` uses `buildCompiler()`, which honours
+  `GRAIL_COMPILER`), then confirm on a clean tree (`rm -rf .work && bun tools/native.mjs build` with
+  no `GRAIL_COMPILER`). `bun tools/bootstrap.mjs verify x86_64` is the 20-second version of that
+  check: it still reports "checked-in bootstrap is stale" when `GRAIL_COMPILER` is set, which is the
+  case the suites cannot catch. Until the reseed lands, a plain build of this branch fails at the seed with
+  `unknown function` for `host::environment`; `docs/testing.md` records the cycle next to the other
+  reseed notes.
 - `authority::spawn_with(&a, argv, env)` gates an explicit environment with the same `may_spawn`
   grant as `authority::spawn`: spawning with an environment of your choosing is still a spawn, so
   neither route becomes a way around the other, and a file grant is refused exactly as it is for a

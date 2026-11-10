@@ -43,6 +43,47 @@ compiler for every target and *runs* the aarch64/riscv64 results to check self-h
 it starts and refuses to publish if they change mid-run, so do not edit `compiler/*.grl` while it
 runs. Expect up to an hour per emulated target.
 
+**A host builtin that the compiler itself calls needs a two-step bootstrap.** The checked-in seed
+(`compiler/bootstrap/native.s`) *is* the compiler, including its table of `host::` builtins in
+`compiler/native.grl` — so a seed recorded before the builtin existed cannot compile a
+`compiler/*.grl` that calls it:
+
+```text
+compiler/cli.grl:1623:40: unknown function at byte 50438 near '('
+  |     mut environment = host::environment();
+```
+
+The cycle is closed in two steps, and both of them need `GRAIL_COMPILER` set to a compiler that
+already knows the builtin (build one from the same sources with an older seed that does not call it,
+or with a seed that has been reseeded once):
+
+```sh
+export GRAIL_COMPILER=/path/to/staged/grail     # a compiler that knows the new builtin
+bun tools/native.mjs build                      # -> echoes GRAIL_COMPILER: the tree is buildable
+bun tools/bootstrap.mjs verify x86_64           # ~20 s, works with GRAIL_COMPILER set: "checked-in
+                                                #   bootstrap is stale" if the seed predates the builtin
+bun tools/bootstrap.mjs update all              # reseeds every target from these sources
+unset GRAIL_COMPILER
+rm -rf .work && bun tools/native.mjs build       # the check CI runs: a fresh clone with no dev compiler
+```
+
+`bootstrap.mjs verify <host>` is the cheapest exact check and the one to run before pushing:
+it compiles the compiler with whatever compiler is available, proves the result self-hosts to
+identical assembly, and compares that against the checked-in seed — so it still reports the staleness
+when `GRAIL_COMPILER` is set, which is exactly the case the suites cannot catch.
+
+`bootstrap.mjs` calls `buildCompiler()`, which honours `GRAIL_COMPILER`, so both of its steps must
+run with the same variable set; without it, `update all` re-enters the stale seed and fails the same
+way. A builtin used *only* by user code (a program, `lib/`, a fixture) does not need any of this: it
+is resolved when that program is compiled by a compiler that has the new table, and the seed is only
+ever asked to compile the compiler's own sources. If the compiler's own sources must call the
+builtin, a reseed on the same branch is part of the change, not a follow-up.
+
+The fresh-clone step is the one to run before pushing such a change. `GRAIL_COMPILER` makes every
+suite pass while the published seed still cannot build the compiler, so a branch can be green locally
+and still fail CI's clean-clone preflight; `ci.mjs` already refuses a stale seed, it just never ran
+here.
+
 **Run one suite per worktree at a time.** `test-native.mjs` and the other runners use
 `.work/native-tests/<target>/<case>/` inside the worktree, so two suites started in the same
 checkout delete each other's intermediate files. The symptom is a bogus clang failure such as
