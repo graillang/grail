@@ -36,6 +36,13 @@ statically by default, which needs no libc. Without a sysroot, a case that decla
 `GRAIL_SYSROOT_AARCH64` at a tree that only holds QEMU binaries *causes* the `-lc` failure, because
 it switches the link to dynamic.
 
+**The bootstrap reseed needs QEMU on `PATH` too.** `bun tools/bootstrap.mjs update all` compiles the
+compiler for every target and *runs* the aarch64/riscv64 results to check self-hosting, so without
+`$HOME/.local/qemu-static/usr/bin` on `PATH` it fails with `compiler execution failed (null)` and a
+`qemu-aarch64-static: not found` line in the captured output. It also hashes the compiler sources as
+it starts and refuses to publish if they change mid-run, so do not edit `compiler/*.grl` while it
+runs. Expect up to an hour per emulated target.
+
 **Run one suite per worktree at a time.** `test-native.mjs` and the other runners use
 `.work/native-tests/<target>/<case>/` inside the worktree, so two suites started in the same
 checkout delete each other's intermediate files. The symptom is a bogus clang failure such as
