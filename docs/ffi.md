@@ -182,6 +182,9 @@ extern "C" fn c_apply(callback: cfn(i64) -> i64, value: i64) -> i64;
   16-byte aligned at every call, which is what lets C call back into it.
   `tests/ffi/callbacks.grl` calls two callbacks through C, and the shim clobbers
   `rbx`/`r12`-`r15` around one of them to prove the C ABI contract holds.
+- A record parameter of an `extern "C" fn` definition is the `const R *` the C caller passes: it is
+  *borrowed*, never freed. Its fields are readable and the storage belongs to C, so a callback that
+  receives an 800-byte `VkPhysicalDeviceProperties`-shaped struct neither copies nor releases it.
 - The callback's parameter types are a promise the compiler cannot verify against the
   actual C function-pointer type (a function pointer carries no signature at run time),
   so the declaration and the C prototype must agree; a mismatch is an ABI bug the
@@ -490,6 +493,9 @@ Not implemented yet, and each rejected rather than approximated:
   (`tests/ffi/call_records.grl`, `float_record_results.grl`), and nested records included,
   except a result whose embedded records contain floats (its register classification needs the
   flattened field list; refused with a diagnostic);
+- a callback that *writes* into the record C hands it: a parameter is not a mutable binding and
+  Grail has no deref-assignment, so `p.field = v` inside an `extern "C" fn` is
+  `owned storage mutation requires mut` (reading the fields works, and the storage is C's);
 - pointer arithmetic, an index of a `CPtr`, and a view built from an address: an array is a
   fixed-capacity record with its count checked afterwards, and elements are reached by field name;
 - a record address that outlives the statement that took it. The borrow is statement-scoped, exactly
@@ -595,5 +601,7 @@ defining it as an `extern "C" fn` (a C-ABI Grail function), which is the same on
 both sides: `ffi-record-address` (`42`), `ffi-record-address-field` (`433`, two interior element
 addresses), `ffi-record-out-param` (`0` — a zero-filled binding the callee reads), the recorded
 regression `ffi-record-two-declarations` (`8`, one count record across two declarations of one
-symbol, which must reach its exit status without aborting) and `ffi-record-array-pointer` (`34`, an array of slots read through the record's own address). The handle-typed twins of the last one need a real C library
+symbol, which must reach its exit status without aborting),
+`ffi-record-callback-parameter` (`20`, a callback's record parameter borrowed rather than freed) and
+`ffi-record-array-pointer` (`34`, an array of slots read through the record's own address). The handle-typed twins of the last one need a real C library
 to produce the handles, so `tests/ffi/record_pointers.grl` covers them.

@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- FFI: a C callback's extern-record parameter is borrowed, not owned. The parameter prologue marked
+  every parameter as an owning binding, so the epilogue ran the record's drop glue on the address C
+  handed over — freeing the caller's struct (or its stack) — and the process then aborted inside the
+  runtime's free path at exit, after `main` had printed everything and returned 0. That is the abort
+  the RHI work recorded in `docs/rhi.md`: the shape is "a record crosses an `extern "C"` call", and
+  the two-declarations-of-one-symbol case that pinned it is now a case of its own. A callback's
+  record parameter is the `const R *` the C caller owns, so `func`'s prologue registers it through
+  `borrow_parameter` (a real place, no drop glue) instead of `own`, and the fields stay readable
+  under the ordinary borrow rules. Verified by `ffi-record-callback-parameter` in
+  `tests/native-cases.json` (20, and the process reaches its exit status) and by the same shape in
+  `tests/ffi/record_pointers.grl` against a real C shim.
+
 - FFI: the address of a Grail-owned `extern "C"` record is now a value, and C can fill a record in
   place. `unsafe cptr(&r)` is a `CPtr` and `cptr_mut(&mut r)` a `CMutPtr` holding the address of the
   record's own fields — the same pointer a record *parameter* already was — so a struct that points
@@ -21,8 +33,10 @@
   expression`, and `an extern C out-parameter needs a binding to write into; a temporary record would
   be discarded`. Also fixed, on the way: an embedded record's place (`o.inner`) is a proxy slot
   holding its interior address, so `&mut o.inner` no longer reads the first field as an address
-  (it faulted on x86-64 and wrote through a stack slot on assignment). Verified by
-  `tests/ffi/record_pointers.grl` against a real C shim on all three targets, twelve new cases in
+  (it faulted on x86-64 and wrote through a stack slot on assignment); and a C callback's record
+  parameter is now borrowed rather than owned, because the epilogue used to free C's struct, which
+  aborted in the runtime's free path at exit after `main` had already printed everything. Verified
+  by `tests/ffi/record_pointers.grl` against a real C shim on all three targets, 13 new cases in
   `tests/native-cases.json`, and a new book chapter (`Calling C`) whose Grail and Rust twins link
   one C file.
 

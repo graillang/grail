@@ -2070,6 +2070,31 @@ fn resource<a>(c: (&a mut C), slot: u64) -> u64 {
     }
     return 0;
 }
+// A parameter whose storage belongs to the caller rather than to this function: a C callback's
+// extern-record parameter is the address of a struct C owns, so the value is readable (and writable,
+// with the ordinary borrow rules) but nothing frees it on return. `flag: 0` is what `release` reads
+// as "no drop glue"; the place is a fresh external root so loans and reads still have a subject.
+fn borrow_parameter<a>(c: (&a mut C), slot: u64, ty: u64) -> Val {
+    if c.raw == 0 {
+        place := ownership::root(&mut c.check, 0, 1);
+        c
+            .resources
+            .push(
+                Resource {
+                    slot: slot,
+                    ty: ty,
+                    flag: 0,
+                    base: 0,
+                    field: 0,
+                    via: 0,
+                    place: place,
+                    target: 0,
+                    authority: 0
+                }
+            );
+    }
+    return val(slot, ty);
+}
 fn own<a>(c: (&a mut C), slot: u64, ty: u64) -> Val {
     if c.raw == 0 {
         k := ty_kind(&mut c, ty);
@@ -7100,8 +7125,16 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         mut l = &c.locals[i];
         slot := l.id;
         ty := l.ty;
-        own(&mut c, slot, ty);
-        init_parameter(&mut c, slot, ty);
+        // A C callback's extern-record parameter is the address of a struct the *caller* owns: it
+        // is borrowed, never freed here. Owning it made the epilogue free C's storage, which is the
+        // exit-time abort in the runtime's free path after main had already printed everything.
+        if (export == 2) & (is_c_record(&mut c, ty) != 0) {
+            borrow_parameter(&mut c, slot, ty);
+            init_parameter(&mut c, slot, ty);
+        } else {
+            own(&mut c, slot, ty);
+            init_parameter(&mut c, slot, ty);
+        }
     }
     mut tls_slot = 0;
     if (export == 2) & tls_bridge(&mut c) {
