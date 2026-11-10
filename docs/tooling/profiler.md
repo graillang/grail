@@ -114,6 +114,11 @@ profile itself needs neither a debug section nor a symbol server.
   profiles in one working directory are unsupported: run them from different directories.
 - **No report without an exit.** Samples are written when the runtime shuts down. A killed program
   (SIGKILL, a crash inside foreign code, a `SIGSEGV` the runtime does not handle) leaves no report.
+- **Cost in every program.** The sampler is compiled into every Grail binary: about 3.4 KiB of
+  x86-64 `.text` on a hello-world build, plus one `openat` of `.grail-profile/config` at every
+  program start (it normally fails with `ENOENT` in a few microseconds). With no config file no
+  timer is started and no signal handler is installed, so an unprofiled program only pays that one
+  syscall.
 - **Linux x86-64 only.** The handler reads the `ucontext_t` layout of that ABI and uses its syscall
   numbers. The code is compiled into every program but does nothing on other targets;
   `grail profile` refuses to run there. AArch64 and RISC-V would need their `ucontext_t` offsets and
