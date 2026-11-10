@@ -491,6 +491,8 @@ function lint() {
   check('CI runs the FFI shim test', readFileSync(join(root, '.github/workflows/ci.yml'), 'utf8').includes('tools/test-ffi.mjs'));
   check('module interface test exists', existsSync(join(root, 'tools/interface-test.mjs')));
   check('CI runs the module interface test', readFileSync(join(root, '.github/workflows/ci.yml'), 'utf8').includes('tools/interface-test.mjs'));
+  check('build cache test exists', existsSync(join(root, 'tools/cache-test.mjs')));
+  check('CI runs the build cache test', readFileSync(join(root, '.github/workflows/ci.yml'), 'utf8').includes('tools/cache-test.mjs'));
   check('native cases cover an interface-first build', readFileSync(join(root, 'tests/native-cases.json'), 'utf8').includes('"interfaces": true'));
   check('LSP server exists', existsSync(join(root, 'tools/lsp/main.grl')));
   check('LSP stdio test exists', existsSync(join(root, 'tools/lsp-test.mjs')));

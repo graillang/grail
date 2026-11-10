@@ -71,6 +71,23 @@
   `pool-chunks-mut-timing`, `pool-job-handle`, six chunk rejections, four job rejections, the
   out-of-chunk bounds abort, and the borrowed-closure refusal. No reseed is needed: the compiler's
   own sources do not call the new builtins.
+- Separate compilation, stage 4 (first half): **a build cache**. `grail build --cache` reuses what a
+  previous build produced, from a content-addressed store under `.work/cache/<target>/`. An unchanged
+  program is not rebuilt at all, and an unchanged module is not reassembled: the store is keyed by what
+  actually determines each output - a module's source digest, the digests of the interfaces it reads,
+  the compiler's own digest, the target, the assembler's and the linker's identity, and the compiler's
+  whole flag vector - and each entry is filed under the digest of its bytes, published by rename, and
+  re-hashed before it is ever reused, so a corrupted or unreadable entry is a miss and never a wrong
+  binary. `grail build --cache` reports one line - what hit, what missed by name, and what ran. The
+  flag implies `--split`, so it is available where that is: the Linux x86-64 assembler path, without
+  `--debug`. `grail build` also accepts `--overflow=wrap|checked`, which until now only the compiler
+  driver itself could pass. Without `--cache` nothing about a build changes. `tools/cache-test.mjs`
+  proves the six claims (a cached build is the uncached build byte for byte, a second build is a full
+  hit and 12x faster, one module's edit misses that module and its importers and nothing else, a flag
+  change misses everything, a tampered interface misses the importer, corruption rebuilds and repairs)
+  and pins the one thing the module level cannot do yet: the emitter numbers its local labels over one
+  stream, so an edit re-spells every module emitted after it and those modules reassemble.
+
 - Separate compilation, stage 2: **checked module interfaces**. `grail check --interface DIR` writes
   one `DIR/<module>.iface` per module plus `DIR/interfaces.manifest`; `grail build --interface DIR`
   reads them instead of the modules' sources, and refuses by name when an interface is missing, when

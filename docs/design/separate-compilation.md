@@ -254,9 +254,12 @@ interface that is missing, stale or different from its module stops the build by
   migrate at once.
 - **Stage 3 — generic bodies in interfaces**, once the typed IR exists; drop the source-dependency
   marker.
-- **Stage 4 — build cache and incremental driver**: content-addressed objects keyed by source hash +
-  interface hashes + compiler version + flags; `grail build` learns to plan a module graph rather
-  than take a file list.
+- **Stage 4 — build cache and incremental driver. Started** (`b1-cache`; the cache as built is
+  recorded below). Content-addressed objects keyed by source hash + interface hashes + compiler
+  digest + toolchain + flags are in place and proven by `tools/cache-test.mjs`, and `grail build
+  --cache` reuses them. What is left is the other half: one compiler invocation per module, so an
+  unchanged module is not re-parsed either, and `grail build` plans a module graph rather than taking
+  a file list.
 
 Borg's port starts at stage 2. Its build script will need to know module → file, which
 `docs/design/borg-agent-port.md` already records as a blocker.
@@ -369,6 +372,124 @@ try to parallelise the Grail compile itself.
 - `tools/split-test.mjs` is the harness to extend: it already compares text, objects, images and
   behaviour for both shapes.
 
+## Stage 4 as built: a build cache
+
+Implemented on `b1-cache`; `tools/cache-test.mjs` is the proof. `compiler/cli.grl` carries the store and
+the driver, and `grail build --cache` is the flag. The build shape is still stage 1's `--split` (the
+cache reuses what that produces, per module), so `--cache` implies `--split` and is available where
+`--split` is: the Linux x86-64 assembler path, without `--debug`.
+
+### Three entries, each keyed by what determines its artifact
+
+The cache is not one key. Each artifact it can skip producing has its own key, over exactly the inputs
+that determine that artifact - nothing that cannot change it, and nothing that can.
+
+| entry | the key | names | what a hit saves |
+| --- | --- | --- | --- |
+| `map/prog` | every input the build reads (entry, modules, the std modules reached through `use`, the runtime and platform modules, each with its digest), the digest of `DIR/interfaces.manifest` when interfaces are read, the compiler's own digest, the target, the flag vector, the assembler's and the linker's identity, the output name, and the content of every file a `// grail-link:` note names | the linked image | the whole build |
+| `map/lnk` | the object digests in link order, the link inputs with their digests, the linker's identity, the target | the linked image | the link |
+| `map/mod` | the module's source digest, the digests of the interfaces it reads, the compiler's digest, the assembler's identity, the target, the flag vector, the runtime and platform digests, and the module's position in the emission stream | that module's object | assembling that module |
+
+The flag component is not a list somebody maintains. `build_argv` is the one place the compiler
+invocation is spelled out, and the key hashes that vector, so a flag or an input file added to the
+driver is in the key by construction - there is no second place to forget. `--debug`, `--overflow=`,
+`--backend=llvm`, `--deny-ambient-host`, `--interface`, `--verify-interface` and the capability flags
+the compiler takes are all covered for the same reason.
+
+The compiler's own digest is in every key, so a new compiler cannot reuse an old object. The
+*assembler* and the *linker* are in the keys for the same reason: an object is a function of the text
+and of the assembler, and an image is a function of the objects and of the linker.
+
+### The store
+
+```
+.work/cache/<target>/
+  blob/<sha256>     artifact bytes; the file name is the digest of the bytes inside it
+  map/prog/<key>    `blob <digest>`, `parts <n>`, `output <path>`, `link <digest> <path>` ...
+  map/lnk/<key>     `blob <digest>`
+  map/mod/<key>     `module <name>`, `asm <digest>`, `blob <digest>`
+  stage/            every write lands here first and is renamed into place
+```
+
+This is the discipline `tools/native.mjs` and `tools/bootstrap.mjs` already use - content in the
+path, write to a staging name, rename into place - extended to a store shared by all builds of a
+target. A record is written to `stage/` and `mv`d; a blob is copied to `stage/` and `mv`d. A crash
+leaves at worst a file in `stage/`, which the next build overwrites; it can never leave a partial
+entry under a name a later build would trust.
+
+A blob is only reused after its bytes have been hashed again and matched against the name it is filed
+under, and a module entry is only reused when the digest of the assembly it was built from still
+matches the assembly just emitted. So a corrupted, truncated, edited or unreadable entry is a miss and
+a rebuild, and filing a repaired artifact replaces the damaged entry instead of leaving it to miss
+forever. `tools/cache-test.mjs` damages an object, an image and a record and asserts the rebuild, the
+repair and the byte-identical result.
+
+What the store does *not* claim is authenticity: anything that can write `.work/` can plant an entry
+whose bytes match its name. That is the same boundary stage 2's `interfaces.manifest` states, and
+signed or keyed manifests are still what a cache that has to resist a hostile writer needs.
+
+### What is not in the key, and why that is safe
+
+- **Other modules' bodies.** A module's key names the interfaces it reads, not the bodies behind them -
+  that is the point of an interface. But today's front end is one whole-program pass: the optimizer
+  inlines across module boundaries and the emitter numbers its local labels over one stream, so a
+  module's emitted text can change because *another* module changed. A module entry therefore records
+  the digest of the assembly its object was built from, and reuse requires it to match. A stale object
+  is impossible; the cost is a miss, and `tools/cache-test.mjs` measures it: editing the entry module
+  of a five-part program misses all five, because every later module's local labels are renumbered.
+  This is also what keeps stage 3 honest in the meantime: a generic body that moves into an interface
+  is not in the importer's key, but a change to it changes the importer's emitted text, and the guard
+  catches that.
+- **The toolchain's contents.** The assembler and the linker are identified by the words they are
+  invoked with and the `--version` they report, not by the digest of their binaries: a 100 MB clang
+  would cost more to hash than most builds save. A rebuilt tool that reports the same version from the
+  same path is therefore not separated from the old one. This is the one input whose *content* is not
+  in the key, and it is deliberate.
+- **The rest of the environment.** `GRAIL_HOME`, `GRAIL_ASSEMBLER`, `GRAIL_LINKER` and `GRAIL_SDK`
+  reach the key through the paths and words they resolve to. A `PATH` change that resolves a different
+  tool with the same words and the same version is not caught.
+- **Non-determinism.** If an assembler produced different bytes for the same text, the cache would
+  hand back the first result. The identity test - a cached build byte-compared against an uncached one
+  - is what would catch it, which is why that comparison is part of the proof and not a nicety.
+- **The interface set as a whole** is in the program key but not in a module key, because a module's
+  assembly cannot depend on an interface it does not read; its own dependencies are named one by one.
+
+### What it costs, and what it saves
+
+A cached build pays for hashing: the compiler's own binary (12 MB), every source, the tools' version
+probes, and a `sh` per digest. That is why the store prefers the host's `sha256sum` when it is there
+and falls back to the compiler's own SHA-256 when it is not - the same digest either way, milliseconds
+instead of seconds for the big files. On the proof project a cached build costs about 55 ms of that
+overhead and saves the 0.7 s build it replaces.
+
+Measured by `tools/cache-test.mjs` (three modules plus runtime and `__start`, five parts; the absolute
+times move with the page cache, the ratio does not):
+
+| | |
+| --- | --- |
+| cold store, cached build | ~0.7-1.5 s - 0 hit, 5 miss |
+| unchanged sources, cached build | ~60-120 ms - 5 hit, 0 miss, `program up to date` - 12-13x |
+| one module's constant edited | 3 hit, 2 miss (`main`, `util`) - the edited module and the module that reads it |
+| one flag changed (`--overflow=wrap`) | 0 hit, 5 miss |
+| one interface tampered, no source edited | 4 hit, 1 miss (`main`) - the importer, and nothing else |
+| an object entry corrupted | 1 miss (`helper`), rebuilt, entry repaired, output byte-identical |
+| an image entry corrupted | relinked, entry repaired, output byte-identical |
+
+### What stage 4 still does not do
+
+- **One compiler invocation per module.** Parsing and code generation are still one whole-program pass,
+  so the cache cannot skip the front end for an unchanged module; it skips that module's assembly, and
+  the whole build when nothing changed. This is the boundary of what `compiler/cli.grl` can do: one
+  invocation per module needs the emitter in `compiler/native.grl` (no `__start` in every run, no
+  shared stream), which is stage 4's other half.
+- The **label renumbering** above disappears with it: a module compiled alone emits its own text, its
+  own labels, and is determined by its own key. At that point the emitted-assembly guard becomes
+  redundant and the module entry can be keyed by its inputs alone.
+- **Visibility.** `pub` is still not a checked boundary, so an interface still carries a module's whole
+  top-level surface and every edit to it invalidates its importers.
+- **Store maintenance.** There is no garbage collection: entries that nothing names accumulate under
+  `.work/cache/<target>/blob`, exactly as `.work/native/<hash>` directories do today.
+
 ## What must stay true
 
 - The whole-program path keeps working: the bootstrap seed, `book.mjs`, `test-native.mjs` and every
@@ -397,16 +518,18 @@ Recorded here rather than discovered later:
   module.
 
 **Stage 4 - object cache and the incremental driver.**
+- ~~content-addressed objects keyed by `(source sha256, interface digests, compiler digest, toolchain,
+  flags)`~~ - built on `b1-cache`, with the key, the store and its limits recorded above in "Stage 4 as
+  built";
 - one compiler invocation per module (no `__start`, no whole-program stream), which is what lets a
-  module's code stop being parsed at all - the thing stage 2 deliberately does not do;
-- content-addressed objects keyed by `(source sha256, interface digests, compiler version, flags)`;
-  the interface header already carries every input except the compiler version, which is a one-line
-  addition to the header;
+  module's code stop being parsed at all - the thing stage 2 deliberately does not do, and the reason
+  the cache cannot yet skip the front end. It also removes the label renumbering that makes an edit
+  re-spell every module emitted after it;
 - the driver plans a module graph instead of taking a file list, and decides which modules must be
   compiled from source because a generic body is needed;
 - visibility: `pub` becomes a checked boundary, which shrinks an interface to the exported surface
   and needs a language rule the corpus does not have yet;
 - the authenticity question the manifest cannot answer: anything that can rewrite `DIR` can rewrite
   `interfaces.manifest`, so a cache that has to resist a hostile writer needs signed or keyed
-  manifests.
+  manifests. The store added above states the same boundary for itself.
 
