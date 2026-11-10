@@ -129,23 +129,15 @@ pub fn decode<a>(root: (&a borg_json::Json)) -> OwnerRecord | RecordError {
     };
 }
 
-fn copy_text<a>(text: (&a [u8])) -> string {
-    mut out = u8[];
-    for byte in text {
-        out.push(byte);
-    }
-    return out.text();
-}
-
 fn put(members: (&mut borg_json::Member[]), key: (&[u8]), value: borg_json::Json) {
-    members.push(borg_json::Member { key: copy_text(&key), value: value });
+    members.push(borg_json::Member { key: key.text(), value: value });
 }
 
 // Matching an `Option` *field* of a borrow moves it; matching a borrow of the option copies the
 // payload instead, which is what these two do.
 fn copy_optional_text<a>(value: (&a string?)) -> string? {
     match value {
-        Some(text) => { copied := copy_text(&text); return Some(copied); },
+        Some(text) => { copied := text.text(); return Some(copied); },
         None => { return None; }
     }
 }
@@ -161,7 +153,7 @@ pub fn encode(record: (&OwnerRecord)) -> borg_json::Json {
     mut members = borg_json::empty_members();
     put(&mut members, "schema_version", borg_json::Json::Num(number_text(record.schema_version)));
     put(&mut members, "pid", borg_json::Json::Num(number_text(record.pid)));
-    put(&mut members, "executable_identity", borg_json::Json::Str(copy_text(&record.executable_identity)));
+    put(&mut members, "executable_identity", borg_json::Json::Str(record.executable_identity.text()));
     package := copy_optional_text(&record.package_version);
     match package {
         Some(text) => { put(&mut members, "package_version", borg_json::Json::Str(text)); },
@@ -315,7 +307,7 @@ pub fn empty_record() -> OwnerRecord {
 }
 
 pub fn identity_of(record: (&OwnerRecord)) -> string {
-    return copy_text(&record.executable_identity);
+    return record.executable_identity.text();
 }
 
 pub fn pid_of(record: (&OwnerRecord)) -> string {
