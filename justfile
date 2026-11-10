@@ -160,10 +160,10 @@ macos-check:
 debug-lines-test:
     bun tools/test-debug-lines.mjs
 
-# Run the Grail LSP MVP on stdio (requires GRAIL_LSP_COMPILER or GRAIL_COMPILER).
+# Build the Grail language server and run it on stdio (this is the editor entry point).
 lsp:
     bun tools/lsp.mjs
 
-# LSP protocol and compiler-diagnostic tests over a real stdio session.
+# Language-server session over real pipes: handshake, diagnostics, definition, bad input.
 lsp-test:
-    bun test tools/lsp.test.mjs
+    bun tools/lsp-test.mjs

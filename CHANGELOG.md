@@ -115,6 +115,27 @@
   ships static-checked Mach-O object bundles only; windows-aarch64 remains planned and is not
   published. `tools/ci.mjs build`/`package` gained `--stage0 PATH` for a seed-built stage0, and
   `bun tools/ci.mjs lint` now checks the release workflow against the platform matrix.
+- A language server for Grail, **written in Grail** (`tools/lsp/main.grl`, launched by
+  `bun tools/lsp.mjs`, also `just lsp`), replacing the JavaScript MVP that lived in
+  `tools/lsp.mjs`/`tools/lsp.test.mjs` (both removed). It speaks JSON-RPC 2.0 over stdio with
+  `Content-Length` framing and implements `initialize`/`initialized`, `shutdown`/`exit`,
+  full-text `didOpen`/`didChange`/`didClose`, and `textDocument/publishDiagnostics` from the
+  existing compiler: the buffer is written to a scratch file, `grail check` runs on it in its
+  own directory, and the compiler's `file:line:column: message` diagnostics are published as
+  UTF-16 ranges (severity Error, `source: grail`, `code: compiler`) and cleared with `[]` when
+  the buffer checks clean or is closed. `textDocument/definition` answers from the same file
+  for a function declaration, a local `NAME :=`/`mut NAME` binding, a `for` binding and a
+  function parameter, using `compiler/lexer.grl` in process. Malformed input is answered with
+  the JSON-RPC error that describes it — `-32700` for framing and JSON, `-32601` for unknown
+  methods, `-32002` before `initialize`, `-32600` after `shutdown`, `-32602` for definition
+  params — and never terminates the server; a frame that carried no usable `Content-Length`
+  is discarded and the reader resynchronises on the next header line. `initialize` advertises
+  only `textDocumentSync` and `definitionProvider`: no hover, completion, rename, formatting,
+  references, symbols or pull diagnostics. `bun tools/lsp-test.mjs` (55 checks, hermetic: it
+  builds the compiler and the server from the tree) drives a real stdio session, is wired
+  into `just lsp-test`, `bun tools/ci.mjs lint` and the CI `lsp` lane, and the server is
+  documented in `docs/tooling/lsp.md`.
+
 - Merge the three design reviews from branch `claude/brave-heisenberg-0h3ska` as documents only
   (`docs/design/first-principles-architecture.md`, `architecture-reassessment.md`,
   `complexity-reassessment.md`, 2,746 lines). Their edits to README and to the research-phase
