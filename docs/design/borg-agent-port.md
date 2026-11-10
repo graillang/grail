@@ -364,6 +364,15 @@ injected one-character mutation.
 
 ## 15. Exact blockers
 
+> Status note (2026-11-10): blocker 1 ("no user FFI") and blocker 3 ("no macOS or Windows target")
+> were resolved before this record - `extern "C"` declarations, calls and callbacks are implemented
+> and executed on six targets (`docs/ffi.md`), and Windows/macOS images are emitted (Windows x86-64
+> runs under Wine). Blocker 8 is answered by decision
+> [B3](decisions-b2-b6.md#b3-foreign-calls-block-the-executing-thread): foreign calls block the
+> calling thread and get no suspension contract in v1. Blocker 7 stands, and
+> [B4](decisions-b2-b6.md#b4-windows-thread-per-blocking-call-iocp-deferred) is what Windows does
+> about it. The numbered entries below are kept as written for traceability.
+
 1. **No user FFI.** Blocks a real TLS client, `dlopen`-based extensions, macOS `AXUIElement`,
    and Windows COM/UI Automation. D-Bus, Wayland and `evdev`/`uinput` are reachable without FFI
    (sockets and `ioctl`), but only by growing the runtime's operation set. Where FFI is refused,

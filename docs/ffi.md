@@ -267,7 +267,9 @@ Not implemented yet, and each rejected rather than approximated:
 - C-callable callbacks with more than six parameters (C enters them through its register ABI and the
   callback thunk does not read stack arguments yet); macOS callbacks use the
   same SysV/AAPCS64 lowering but are compiled and linked only (no macOS runner);
-- records *passed* by value as arguments (an extern record parameter is the C `R *`); record
+- records *passed* by value as arguments (an extern record parameter is the C `R *`; the spelling
+  `v: byval R` is decided - see [B7](design/decisions-b2-b6.md#b7-byval-record-parameters-accepted) -
+  and implementation follows the separate-compilation work); record
   results are returned by value on every ABI, float fields included
   (`tests/ffi/call_records.grl`, `float_record_results.grl`), and nested records included,
   except a result whose embedded records contain floats (its register classification needs the
@@ -309,9 +311,11 @@ its TCB (errno, malloc tcache, stack guard). On Linux the compiler therefore bri
 - every exported `extern "C" fn` (a callback entry) saves the caller's FS base, switches to
   `rt_grail_tls`, and restores the caller's base on every return path.
 
-Both bases are process-wide, so foreign calls and callbacks are only valid on the main
-thread: threads created by the Grail runtime have no libc TCB, and a callback arriving on a
-foreign thread would share the main thread's worker record. On x86-64 each switch is an
+Both bases are process-wide, so foreign calls and callbacks are only valid on the main thread
+(a worker or green-task call that touches libc state shares the main thread's TCB; see
+[B3](design/decisions-b2-b6.md#b3-foreign-calls-block-the-executing-thread)): threads created by the
+Grail runtime have no libc TCB, and a callback arriving on a foreign thread would share the main
+thread's worker record. On x86-64 each switch is an
 `arch_prctl` system call; on AArch64 and RISC-V it is a register write. `tests/ffi/dlopen.grl` loads `libdlshim.so`, calls two resolved
 functions, passes a Grail callback that itself calls `strlen`, and closes the library
 (42, 42, 42, 0) with the runtime initialized. On AArch64 and RISC-V 64 it runs under qemu when

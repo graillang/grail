@@ -181,6 +181,18 @@ ARM64 thread creation is still unimplemented (the intrinsic traps); sockets, epo
 streams remain `-ENOSYS`, and `mremap` is unimplemented, so growing an allocation of 512 KiB or
 more aborts instead of moving the arena.
 
+### Blocking I/O and readiness (decided)
+
+I/O on Windows is synchronous: `ReadFile`/`WriteFile` with no `OVERLAPPED` structure and no
+completion port, so a blocked call occupies its OS thread. **Thread-per-blocking-call is the v1
+policy**; IOCP is a named future work item with a design sketch
+([B4](decisions-b2-b6.md#b4-windows-thread-per-blocking-call-iocp-deferred)).
+
+Because there is no epoll, the portable scheduler cannot start: `rt_sched` treats a failed
+`epoll_create` as fatal, so **the first green-task spawn (`spawn`, `task_scope`, `parallel_map`)
+aborts the process on Windows**. A task-scope program that prints `42` and exits 0 on Linux x86-64
+exits 134 with no output under Wine. OS threads are the Windows concurrency facility today.
+
 ## windows-aarch64
 
 The ARM64 target reuses the x86-64 word machine and the existing AArch64 instruction selector.
