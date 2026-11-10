@@ -216,7 +216,7 @@ fn parse_int<a>(s: &a [u8]) -> Int {
     } else {
         signed = i64(v);
     }
-    if neg {
+    if neg != 0 {
         return Int { ok: ok, v: 0 - signed };
     }
     return Int { ok: ok, v: signed };
@@ -257,7 +257,7 @@ fn split<a>(lines: (&a u8[][]), funcs: (&a mut Func[]), data: (&a mut u8[][])) -
         }
         if starts(line, view(".section")) || eq(line, view(".data")) || eq(line, view(".bss")) {
             text = 0;
-            if open {
+            if open != 0 {
                 last := funcs.len() - 1;
                 funcs[last].end = i;
                 open = 0;
@@ -281,7 +281,7 @@ fn split<a>(lines: (&a u8[][]), funcs: (&a mut Func[]), data: (&a mut u8[][])) -
         }
         name := label_of(line);
         if text != 0 && name.len() != 0 && name.len() + 1 == line.len() && !is_local_label(view(name)) {
-            if open {
+            if open != 0 {
                 last := funcs.len() - 1;
                 funcs[last].end = i;
             }
@@ -289,7 +289,7 @@ fn split<a>(lines: (&a u8[][]), funcs: (&a mut Func[]), data: (&a mut u8[][])) -
             open = 1;
             continue;
         }
-        if open {
+        if open != 0 {
             if starts(line, view(".set .F")) {
                 // `.set .Fn,SIZE`
                 mut comma = 0;
@@ -309,7 +309,7 @@ fn split<a>(lines: (&a u8[][]), funcs: (&a mut Func[]), data: (&a mut u8[][])) -
         }
         data.push(copy(line));
     }
-    if open {
+    if open != 0 {
         last := funcs.len() - 1;
         funcs[last].end = lines.len();
     }
@@ -573,7 +573,7 @@ fn address<a, b>(l: (&a mut L), op: &b [u8]) -> u8[] {
     mut dt = u8[];
     inum(&mut dt, d);
     if eq(view(base), view("rbp")) & (inner.len() == 1) {
-        if l.split {
+        if l.split != 0 {
             // Slot k covers [-8(k+1), -8k) below rbp.
             k := u64(0 - (d + 1)) / 8;
             within := d + i64(8 * (k + 1));
@@ -1455,7 +1455,7 @@ fn lower_function<a, b>(l: (&a mut L), lines: (&b u8[][]), f: (&b Func)) -> unit
             }
             if (slash != 0) & ends(c, view(",%rcx")) {
                 k := parse_int(view(sub(c, slash + 3, c.len() - 5)));
-                if k.ok {
+                if k.ok != 0 {
                     zero = k.v;
                 }
             }
@@ -1502,7 +1502,7 @@ fn lower_function<a, b>(l: (&a mut L), lines: (&b u8[][]), f: (&b Func)) -> unit
     }
     mut deepest: u64 = 0;
     l.split = frame_split(&instrs, &mut deepest);
-    if l.split {
+    if l.split != 0 {
         // One alloca per slot; the prologue's zeroing covers the slots below the parameters.
         slots := size / 8;
         mut count = slots;
@@ -1542,7 +1542,7 @@ fn lower_function<a, b>(l: (&a mut L), lines: (&b u8[][]), f: (&b Func)) -> unit
     emit(&mut l, view("br label %body"), &u8[][]);
     begin_block(&mut l, view("body"));
     for m in instrs.len() {
-        if l.fail {
+        if l.fail != 0 {
             return ();
         }
         line := view(instrs[m]);
@@ -1559,7 +1559,7 @@ fn lower_function<a, b>(l: (&a mut L), lines: (&b u8[][]), f: (&b Func)) -> unit
             bad(&mut l);
             return ();
         }
-        if l.term {
+        if l.term != 0 {
             next := fresh_block(&mut l);
             begin_block(&mut l, view(next));
         }
@@ -1750,7 +1750,7 @@ fn lower_target<a, b>(stream: &a [u8], triple: &b [u8], target: u64) -> Lowered 
             native_lines.push(copy(view(kept[k])));
             add_tokens(&mut native_tokens, view(kept[k]));
         }
-        if f.framed {
+        if f.framed != 0 {
             // The frame symbol is the one the prologue's `subq $.Fn,%rsp` names.
             mut sym = u8[];
             for k in kept.len() {
