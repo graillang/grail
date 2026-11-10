@@ -1,0 +1,476 @@
+// Replay test: folding a journal of typed events back into the in-memory session state.
+//
+// Each fixture is one scenario, either applied event by event or encoded into the typed byte stream
+// (and, where the scenario says so, cut short) and read back before replaying. Every scenario prints
+// either the reconstructed state or the refusal that stopped it:
+//
+//   case <name> ok <checksum>
+//   state <name> <field> <value>
+//   case <name> refused <reason> at <index|-> code <code|-> detail <detail|->
+//
+// The property section is generated rather than read: a seeded xorshift produces a journal of six
+// events for each seed, and for every seed it checks that
+//
+//   * replaying the same journal twice produces the same checksum (idempotence), and
+//   * replaying prefix + [last] produces what replay(prefix) followed by a direct `apply` of the
+//     last event produces - including when either side refuses, in which case both must refuse at
+//     the same index for the same reason.
+//
+//   property <seed> <ok|fail> <checksum|refused:<reason>@<index>>
+
+use borg_events;
+use borg_json;
+use borg_replay;
+use core;
+use env;
+use fs;
+
+fn append<a, b>(out: (&a mut u8[]), text: (&b [u8])) {
+    for byte in text {
+        out.push(byte);
+    }
+}
+
+// Append a field and the space that follows it, so every line is a sequence of `word`s plus one
+// final value.
+fn word<a, b>(out: (&a mut u8[]), text: (&b [u8])) {
+    append(out, text);
+    out.push(32);
+}
+
+fn text_is<a, b>(text: (&a [u8]), wanted: (&b [u8])) -> bool {
+    if text.len() != wanted.len() {
+        return false;
+    }
+    for i in text.len() {
+        if text[i] != wanted[i] {
+            return false;
+        }
+    }
+    return true;
+}
+
+// An empty text is a real value (no session yet, no detail), which a space separated line cannot
+// show; `-` says "absent" without pretending the value is the two characters "-".
+fn readable<a>(text: (&a [u8])) -> string {
+    if text.len() == 0 {
+        return "-".text();
+    }
+    return text.text();
+}
+
+fn text_field<a, b>(spec: (&a borg_json::Json), key: (&b [u8])) -> string? {
+    match borg_json::member(spec, key) {
+        Some(node) => {
+            if borg_json::kind_of(&node) == borg_json::JsonKind::Null {
+                return None;
+            }
+            return borg_json::as_string(&node);
+        },
+        None => { return None; }
+    }
+}
+
+fn text_or<a, b>(spec: (&a borg_json::Json), key: (&b [u8])) -> string {
+    mut value = "".text();
+    match text_field(&spec, &key) {
+        Some(text) => { value = text; },
+        None => { }
+    }
+    return value;
+}
+
+fn number_or<a, b>(spec: (&a borg_json::Json), key: (&b [u8]), fallback: u64) -> u64 {
+    match borg_json::member(spec, key) {
+        Some(node) => {
+            match borg_json::as_number(&node) {
+                Some(text) => {
+                    match borg_json::whole_number(&text) {
+                        Some(value) => { return value; },
+                        None => { return fallback; }
+                    }
+                },
+                None => { return fallback; }
+            }
+        },
+        None => { return fallback; }
+    }
+}
+
+fn state_line<a, b, c>(name: (&a [u8]), field: (&b [u8]), value: (&c [u8])) {
+    mut out = u8[];
+    word(&mut out, "state");
+    word(&mut out, name);
+    word(&mut out, field);
+    append(&mut out, value);
+    println(out.text());
+}
+
+fn case_line<a, b, c>(name: (&a [u8]), verdict: (&b [u8]), value: (&c [u8])) {
+    mut out = u8[];
+    word(&mut out, "case");
+    word(&mut out, name);
+    word(&mut out, verdict);
+    append(&mut out, value);
+    println(out.text());
+}
+
+fn show_state<a, b>(name: (&a [u8]), state: (&b borg_replay::State)) {
+    checksum := borg_replay::checksum_text(state);
+    case_line(name, "ok", &checksum);
+    sequence := format("{}", borg_replay::sequence_of(state));
+    state_line(name, "seq", &sequence);
+    events := format("{}", borg_replay::events_of(state));
+    state_line(name, "events", &events);
+    session := readable(&borg_replay::session_of(state));
+    state_line(name, "session", &session);
+    started := borg_replay::started_of(state);
+    state_line(name, "started", &started);
+    activity := borg_replay::activity_of(state);
+    state_line(name, "activity", &activity);
+    status := borg_replay::status_of(state);
+    state_line(name, "status", &status);
+    detail := borg_replay::detail_of(state);
+    state_line(name, "detail", &detail);
+    title := borg_replay::title_of(state);
+    state_line(name, "title", &title);
+    generated := borg_replay::generated_of(state);
+    state_line(name, "generated", &generated);
+    tokens := borg_replay::tokens_of(state);
+    state_line(name, "tokens", &tokens);
+    model := borg_replay::model_of(state);
+    state_line(name, "model", &model);
+    first := borg_replay::first_prompt_of(state);
+    state_line(name, "first", &first);
+    prompt := borg_replay::latest_prompt_of(state);
+    state_line(name, "prompt", &prompt);
+    response := borg_replay::latest_response_of(state);
+    state_line(name, "response", &response);
+    titles := borg_replay::titles_of(state);
+    state_line(name, "titles", &titles);
+}
+
+fn show_refusal<a, b>(name: (&a [u8]), refusal: (&b borg_replay::Refusal)) {
+    at := borg_replay::refusal_at(refusal);
+    reason := borg_replay::refusal_reason(refusal);
+    code := borg_replay::refusal_code(refusal);
+    detail := readable(&borg_replay::refusal_detail(refusal));
+    mut out = u8[];
+    word(&mut out, "case");
+    word(&mut out, name);
+    word(&mut out, "refused");
+    word(&mut out, reason);
+    word(&mut out, "at");
+    word(&mut out, &at);
+    word(&mut out, "code");
+    word(&mut out, &code);
+    word(&mut out, "detail");
+    append(&mut out, &detail);
+    println(out.text());
+}
+
+fn events_of<a, b>(scenario: (&a borg_json::Json), name: (&b [u8])) -> borg_events::Event[] {
+    mut out = borg_events::Event[];
+    match borg_json::member(scenario, "events") {
+        Some(list) => {
+            mut index = 0;
+            while index < borg_json::array_len(&list) {
+                match borg_json::array_item(&list, index) {
+                    Some(item) => {
+                        match borg_events::decode(&item) {
+                            event: borg_events::Event => { out.push(event); },
+                            failure: borg_events::EventError => { case_line(name, "malformed", "event"); }
+                        }
+                    },
+                    None => { case_line(name, "malformed", "item"); }
+                }
+                index += 1;
+            }
+        },
+        None => { }
+    }
+    return out;
+}
+
+fn replay_stream_case<a, b>(name: (&a [u8]), events: (&b borg_events::Event[]), truncate: u64) {
+    bytes := borg_events::encode_stream(events);
+    total := bytes.len();
+    mut kept = total;
+    if truncate < total {
+        kept = total - truncate;
+    }
+    mut cut = u8[];
+    mut index = 0;
+    while index < kept {
+        cut.push(bytes[index]);
+        index += 1;
+    }
+    stream := borg_events::decode_stream(&cut);
+    match borg_replay::replay_stream(&stream) {
+        state: borg_replay::State => { show_state(name, &state); },
+        refusal: borg_replay::Refusal => { show_refusal(name, &refusal); }
+    }
+}
+
+fn run_case<a>(scenario: (&a borg_json::Json), fallback: (&[u8])) {
+    mut name = text_or(scenario, "name");
+    if name.len() == 0 {
+        name = fallback.text();
+    }
+    events := events_of(scenario, &name);
+    via := text_or(scenario, "via");
+    if text_is(&via, "stream") {
+        replay_stream_case(&name, &events, number_or(scenario, "truncate", 0));
+    } else {
+        match borg_replay::replay(&events) {
+            state: borg_replay::State => { show_state(&name, &state); },
+            refusal: borg_replay::Refusal => { show_refusal(&name, &refusal); }
+        }
+    }
+}
+
+// ---- generated sequences ----
+
+// xorshift64, so a seed produces the same journal here and in the reference generator without a
+// shared file: every step is multiplication, addition and shift by a literal.
+fn step(state: (&mut u64)) -> u64 {
+    mut x = *state;
+    if x == 0 {
+        x = 88172645463325252;
+    }
+    x = x ^ (x / 8192);
+    x = x ^ wrapping_mul(x, 1099511628211);
+    x = x ^ (x / 131072);
+    *state = x;
+    return x;
+}
+
+fn decimal(value: u64) -> string {
+    return format("{}", value);
+}
+
+// One event of the generated journal, as JSON the event decoder is asked to read - the property then
+// exercises the same decode path a fixture takes.
+fn make_event(sequence: u64, kind_body: (&[u8])) -> borg_events::Event {
+    mut out = u8[];
+    append(&mut out, "{\"id\":\"e");
+    append(&mut out, &decimal(sequence));
+    append(&mut out, "\",\"session_id\":\"s1\",\"sequence\":");
+    append(&mut out, &decimal(sequence));
+    append(&mut out, ",\"created_at\":\"t");
+    append(&mut out, &decimal(sequence));
+    append(&mut out, "\",\"kind\":");
+    append(&mut out, kind_body);
+    out.push(125);
+    text := out.text();
+    match borg_json::parse(&text) {
+        document: borg_json::Json => {
+            match borg_events::decode(&document) {
+                event: borg_events::Event => { return event; },
+                failure: borg_events::EventError => { }
+            }
+        },
+        failure: borg_json::ParseError => { }
+    }
+    return borg_events::no_event();
+}
+
+fn generate(seed: u64, count: u64) -> borg_events::Event[] {
+    mut out = borg_events::Event[];
+    mut random = seed;
+    mut index = 0;
+    while index < count {
+        index += 1;
+        roll := step(&mut random);
+        // A hole in the sequence now and then, so the property covers the refusal path too.
+        mut sequence = index;
+        if (roll % 100) >= 96 {
+            sequence = index + 3;
+        }
+        mut body = u8[];
+        choice := roll % 8;
+        if choice == 0 {
+            append(&mut body, "{\"type\":\"session_started\"}");
+        } else if choice == 1 {
+            append(&mut body, "{\"type\":\"session_titled\",\"title\":\"t");
+            append(&mut body, &decimal(roll % 3));
+            append(&mut body, "\",\"generated\":");
+            if (roll % 2) == 0 {
+                append(&mut body, "true");
+            } else {
+                append(&mut body, "false");
+            }
+            append(&mut body, ",\"usage_tokens\":");
+            append(&mut body, &decimal(roll % 500));
+            append(&mut body, ",\"model\":\"m1\"}");
+        } else if choice == 2 {
+            append(&mut body, "{\"type\":\"status_changed\",\"status\":\"");
+            shown_status := status_word(roll);
+            append(&mut body, &shown_status);
+            append(&mut body, "\",\"detail\":");
+            if (roll % 3) == 0 {
+                append(&mut body, "null}");
+            } else {
+                append(&mut body, "\"d");
+                append(&mut body, &decimal(roll % 4));
+                append(&mut body, "\"}");
+            }
+        } else if choice == 3 {
+            append(&mut body, "{\"type\":\"message\",\"message_id\":\"m");
+            append(&mut body, &decimal(roll % 4));
+            append(&mut body, "\",\"actor\":\"user\",\"text\":\"  p");
+            append(&mut body, &decimal(roll % 3));
+            append(&mut body, "  \",\"status\":\"complete\"}");
+        } else if choice == 4 {
+            append(&mut body, "{\"type\":\"message\",\"message_id\":\"a");
+            append(&mut body, &decimal(roll % 3));
+            append(&mut body, "\",\"actor\":\"assistant\",\"text\":\"r");
+            append(&mut body, &decimal(roll % 3));
+            append(&mut body, "\",\"status\":");
+            if (roll % 2) == 0 {
+                append(&mut body, "\"complete\"}");
+            } else {
+                append(&mut body, "\"in_progress\"}");
+            }
+        } else if choice == 5 {
+            append(&mut body, "{\"type\":\"message\",\"message_id\":\"x");
+            append(&mut body, &decimal(roll % 3));
+            append(&mut body, "\",\"actor\":\"tool\",\"text\":\"tool\",\"status\":\"in_progress\"}");
+        } else if choice == 6 {
+            if ((roll / 8) % 8) == 0 {
+                // An actor the model has no variant for: the seed that draws this refuses by name.
+                append(&mut body, "{\"type\":\"message\",\"message_id\":\"g1\",\"actor\":\"ghost\",\"text\":\"boo\",\"status\":\"complete\"}");
+            } else {
+                append(&mut body, "{\"type\":\"message\",\"message_id\":\"x");
+                append(&mut body, &decimal(roll % 3));
+                append(&mut body, "\",\"actor\":\"tool\",\"text\":\"tool\",\"status\":\"in_progress\"}");
+            }
+        } else {
+            append(&mut body, "{\"type\":\"message_delta\",\"message_id\":\"m1\",\"delta\":\"d\"}");
+        }
+        shown := body.text();
+        out.push(make_event(sequence, &shown));
+    }
+    return out;
+}
+
+fn status_word(roll: u64) -> string {
+    choice := roll % 7;
+    if choice == 0 { return "starting".text(); }
+    if choice == 1 { return "ready".text(); }
+    if choice == 2 { return "running".text(); }
+    if choice == 3 { return "waiting_for_approval".text(); }
+    if choice == 4 { return "completed".text(); }
+    if choice == 5 { return "failed".text(); }
+    return "stopped".text();
+}
+
+// The outcome of a replay, rendered: the checksum of the state, or the refusal it stopped at. Two
+// outcomes that render the same bytes are the same outcome.
+fn outcome<a>(events: (&a borg_events::Event[])) -> string {
+    match borg_replay::replay(events) {
+        state: borg_replay::State => { return borg_replay::checksum_text(&state); },
+        refusal: borg_replay::Refusal => { return refusal_text(&refusal); }
+    }
+}
+
+fn refusal_text<a>(refusal: (&a borg_replay::Refusal)) -> string {
+    mut out = u8[];
+    append(&mut out, "refused:");
+    at_index := borg_replay::refusal_at(refusal);
+    label := borg_replay::refusal_reason(refusal);
+    append(&mut out, &label);
+    append(&mut out, "@");
+    append(&mut out, &at_index);
+    return out.text();
+}
+
+// Replaying prefix + [last] must equal replay(prefix) followed by a direct apply of the last event.
+fn append_matches<a>(events: (&a borg_events::Event[])) -> bool {
+    total := events.len();
+    if total == 0 {
+        return true;
+    }
+    mut prefix = borg_events::Event[];
+    mut index = 0;
+    while index + 1 < total {
+        prefix.push(borg_events::copy_event(&events[index]));
+        index += 1;
+    }
+    whole := outcome(events);
+    match borg_replay::replay(&prefix) {
+        state: borg_replay::State => {
+            applied := borg_replay::apply(&state, &events[total - 1], total - 1);
+            match applied {
+                next: borg_replay::State => {
+                    return borg_replay::checksum_text(&next) == whole;
+                },
+                refusal: borg_replay::Refusal => {
+                    return refusal_text(&refusal) == whole;
+                }
+            }
+        },
+        refusal: borg_replay::Refusal => {
+            // Once a prefix refuses, appending cannot make the journal applicable again.
+            return refusal_text(&refusal) == whole;
+        }
+    }
+}
+
+fn property(seed: u64) {
+    events := generate(seed, 6);
+    // Twice, from the same journal: idempotent replay.
+    first := outcome(&events);
+    second := outcome(&events);
+    stable := text_is(&first, &second);
+    appended := append_matches(&events);
+    mut verdict = "fail".text();
+    if stable {
+        if appended {
+            verdict = "ok".text();
+        }
+    }
+    mut out = u8[];
+    word(&mut out, "property");
+    append(&mut out, &decimal(seed));
+    out.push(32);
+    append(&mut out, &verdict);
+    out.push(32);
+    append(&mut out, &first);
+    println(out.text());
+}
+
+fn main() -> u64 {
+    args := env::args();
+    mut index = 1;
+    while index < args.len() {
+        path := args[index];
+        name := basename(&path);
+        data := fs::read(&path)!;
+        match borg_json::parse(&data) {
+            scenario: borg_json::Json => { run_case(&scenario, &name); },
+            failure: borg_json::ParseError => { case_line(&name, "malformed", "scenario"); }
+        }
+        index += 1;
+    }
+    mut seed = 1;
+    while seed <= 24 {
+        property(seed);
+        seed += 1;
+    }
+    return 0;
+}
+
+fn basename<a>(path: (&a [u8])) -> string {
+    mut start = 0;
+    for i in path.len() {
+        if path[i] == 47 {
+            start = i + 1;
+        }
+    }
+    mut out = u8[];
+    for i in start..path.len() {
+        out.push(path[i]);
+    }
+    return out.text();
+}
