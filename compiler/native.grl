@@ -4072,7 +4072,7 @@ fn substitute<a, b>(c: (&a mut C), ty: u64, map: (&b u64[])) -> u64 {
     mode := ty_mode(&mut c, ty);
     mut arg = ty_arg(&mut c, ty);
     mut rs = type_regions(&mut c, ty);
-    if (k == 6) || (k == 27) || (k == 7) || (k == 12) || (k == 13) || (k == 14) || (k == 16) || (k == 20) {
+    if (k == 6) || (k == 27) || (k == 28) || (k == 7) || (k == 12) || (k == 13) || (k == 14) || (k == 16) || (k == 20) {
         arg = substitute(&mut c, arg, &map);
     }
     for i in rs.len() {
@@ -4103,7 +4103,7 @@ fn bind_types<a, b>(c: (&a mut C), ty: u64, map: (&b u64[])) -> u64 {
         }
         return map[arg];
     }
-    if (k == 6) || (k == 27) || (k == 7) || (k == 12) || (k == 13) || (k == 14) || (k == 16) || (k == 20) {
+    if (k == 6) || (k == 27) || (k == 28) || (k == 7) || (k == 12) || (k == 13) || (k == 14) || (k == 16) || (k == 20) {
         arg = bind_types(&mut c, arg, &map);
     }
     mut args = type_args(&mut c, ty);
@@ -4223,7 +4223,7 @@ fn callable_contract<a, b>(
             }
         }
     }
-    if (ak == 6) || (ak == 27) || (ak == 7) || (ak == 12) || (ak == 13) || (ak == 14) || (ak == 16) || (ak == 20) {
+    if (ak == 6) || (ak == 27) || (ak == 28) || (ak == 7) || (ak == 12) || (ak == 13) || (ak == 14) || (ak == 16) || (ak == 20) {
         if !callable_contract(&mut c, aa, ea, &mut map, depth + 1) {
             return false;
         }
@@ -4261,7 +4261,7 @@ fn same_type<a>(c: (&a mut C), x: u64, y: u64) -> u64 {
             return 0;
         }
     }
-    if (a == 6) || (a == 7) || (a == 27) || (a == 13) || (a == 14) || (a == 16) {
+    if (a == 6) || (a == 7) || (a == 27) || (a == 28) || (a == 13) || (a == 14) || (a == 16) {
         return same_type(&mut c, aa, bb);
     }
     if a == 8 {
@@ -4343,10 +4343,16 @@ fn require_type<a>(c: (&a mut C), actual: u64, expected: u64) -> unit {
     if c.tolerant != 0 {
         return ();
     }
-    if (expected == 0) & is_bool(&mut c, actual) {
+    // A `byval` parameter is checked as the record it wraps: the marker states the ABI, not a
+    // second type for the same layout.
+    mut want = expected;
+    if ffi_byval(&mut c, want) {
+        want = ty_arg(&mut c, want);
+    }
+    if (want == 0) & is_bool(&mut c, actual) {
         return ();
     }
-    if same_type(&mut c, actual, expected) == 0 {
+    if same_type(&mut c, actual, want) == 0 {
         fail(&mut c, view("type mismatch"));
     }
     return ();
@@ -4890,7 +4896,13 @@ fn base_named<a>(c: (&a mut C), first: u8[]) -> u64 {
         mut params = u64[];
         if !eat(&mut c, view(")")) {
             while true {
-                ty := parse_type(&mut c);
+                mut ty = 0;
+                if ffi_byval_ahead(&mut c) {
+                    advance(&mut c);
+                    ty = ffi_byval_parameter(&mut c);
+                } else {
+                    ty = parse_type(&mut c);
+                }
                 params.push(ty);
                 if eat(&mut c, view(")")) {
                     break;
@@ -4905,7 +4917,7 @@ fn base_named<a>(c: (&a mut C), first: u8[]) -> u64 {
             ffi_direct_param(
                 &mut c,
                 params[i],
-                view("cfn parameters must be an integer, f32, f64, CStr, handle, byte view, cfn or extern record")
+                view("cfn parameters must be an integer, f32, f64, CStr, handle, byte view, cfn, extern record or byval record")
             );
         }
         expect(&mut c, view("->"));
@@ -5313,6 +5325,13 @@ fn ffi_words<a>(c: (&a mut C), ty: u64) -> u64 {
     if ty_kind(&mut c, ty) == 5 {
         return 2;
     }
+    if ty_kind(&mut c, ty) == 28 {
+        // A `byval` record is the ABI's business, not a word count: the declaration's 64-word cap
+        // counts its eightbytes, which is an upper bound on what any target passes.
+        inner := ty_arg(&mut c, ty);
+        d := ty_arg(&mut c, inner);
+        return ffi_record_words(&mut c, d);
+    }
     return 1;
 }
 // ---- direct extern calls: one lowering per C calling convention ----
@@ -5411,6 +5430,43 @@ fn ffi_x86_extend<a, b>(c: (&a mut C), suffix: &b [u8]) -> unit {
     }
     return ();
 }
+// A parameter of `extern "C" record` type spelled `v: byval R` passes the whole record by value;
+// a bare `R` stays the C `R *`. The marker is its own parameter type - kind 28, wrapping the record
+// type - so one declaration can use both spellings and every call site is checked against the one
+// it names, while the value itself is checked as the record it wraps (see require_type).
+fn ffi_byval<a>(c: (&a mut C), ty: u64) -> bool {
+    return ty_kind(&mut c, ty) == 28;
+}
+// 1 when a `byval R` parameter follows: `byval` and then the start of a type, so a type that
+// happens to be named `byval` is not mistaken for the marker.
+fn ffi_byval_ahead<a>(c: (&a mut C)) -> bool {
+    if !is(&mut c, view("byval")) {
+        return false;
+    }
+    p := c.pos + 1;
+    return token_starts_type(&mut c, p);
+}
+// Parses the record type after `byval` and returns the parameter type.
+fn ffi_byval_parameter<a>(c: (&a mut C)) -> u64 {
+    ty := parse_type(&mut c);
+    if ffi_byval_target(&mut c) == 0 {
+        fail(
+            &mut c,
+            view("byval is not implemented for the Windows x86-64 and Windows ARM64 ABIs; pass the record by pointer")
+        );
+    }
+    if is_c_record(&mut c, ty) == 0 {
+        fail(&mut c, view("byval must name an extern \"C\" record type; a bare record parameter is a pointer"));
+    }
+    return intern(&mut c, 28, ty);
+}
+// 1 when this target's by-value classification is implemented and exercised by the FFI gate.
+fn ffi_byval_target<a>(c: (&a mut C)) -> u64 {
+    if (c.target == 3) || (c.target == 4) {
+        return 0;
+    }
+    return 1;
+}
 fn ffi_direct_type<a>(c: (&a mut C), ty: u64) -> bool {
     if is_float(&mut c, ty) {
         return true;
@@ -5421,6 +5477,9 @@ fn ffi_direct_type<a>(c: (&a mut C), ty: u64) -> bool {
     return false;
 }
 fn ffi_direct_param<a, b>(c: (&a mut C), ty: u64, what: &b [u8]) -> unit {
+    if ffi_byval(&mut c, ty) {
+        return ();
+    }
     if ffi_direct_type(&mut c, ty) {
         return ();
     }
@@ -5474,10 +5533,11 @@ fn ffi_f32_bits<a>(c: (&a mut C), x86: u64) -> unit {
 }
 // `symbol` names the callee; when it is empty, `target` is the slot holding a `cfn` address and
 // the call is indirect (through %rax, which no C convention uses for an argument).
-fn ffi_emit_call<a, b, d, e>(
+fn ffi_emit_call<a, b, d, e, f>(
     c: (&a mut C),
     args: &b u64[],
     argtypes: &d u64[],
+    formals: &f u64[],
     ret: u64,
     symbol: &e [u8],
     target: u64
@@ -5553,12 +5613,28 @@ fn ffi_emit_call<a, b, d, e>(
     mut ints = shift;
     mut floats = 0;
     mut stack = 0;
+    // A `byval` argument's placement is decided here and replayed when the call is emitted, so the
+    // two passes cannot disagree; its counters advance the same integer/float/stack allocation.
+    mut copies = 0;
+    mut plans = FFIPlan[];
     for i in args.len() {
         ty := argtypes[i];
         // RV64 passes variadic floating-point arguments in integer registers; Apple arm64 passes
         // every variadic argument on the stack in its own 8-byte slot.
         rv_var := (abi == 3) & (fixed < i + 1);
         apple_var := apple_arm & (fixed < i + 1);
+        if (formals.len() > i) && ffi_byval(&mut c, formals[i]) {
+            inner := ty_arg(&mut c, formals[i]);
+            rd := ty_arg(&mut c, inner);
+            plan := ffi_byval_plan(&mut c, rd, abi, ints, floats, stack, copies);
+            ints = plan.ints;
+            floats = plan.floats;
+            stack = plan.stack;
+            copies = plan.copies;
+            plans.push(plan);
+            continue;
+        }
+        plans.push(ffi_empty_plan());
         if apple_var {
             for w in ffi_words(&mut c, ty) {
                 stack = stack + 1;
@@ -5597,7 +5673,7 @@ fn ffi_emit_call<a, b, d, e>(
     if abi == 1 {
         base = 32; // the callee's register home area
     }
-    mut area = base + stack * 8;
+    mut area = base + stack * 8 + copies;
     area = (area + 15) / 16 * 16;
     if 2048 < area {
         fail(&mut c, view("extern C call needs more than 2 KiB of stack arguments"));
@@ -5629,6 +5705,13 @@ fn ffi_emit_call<a, b, d, e>(
         ty := argtypes[i];
         variadic_arg := fixed < i + 1;
         rv_var := (abi == 3) & variadic_arg;
+        if plans[i].byval != 0 {
+            ffi_byval_emit(&mut c, args[i], &plans[i], base + stack * 8, x86, abi);
+            ints = plans[i].ints;
+            floats = plans[i].floats;
+            next = plans[i].stack;
+            continue;
+        }
         if apple_arm & variadic_arg {
             // Promoted value (int to 64 bits as Grail holds it, float to double) in an 8-byte slot.
             vwords := ffi_words(&mut c, ty);
@@ -6259,11 +6342,17 @@ fn extern_declaration<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
             }
             p := ident(&mut c);
             expect(&mut c, view(":"));
-            ty := parse_type(&mut c);
+            mut ty = 0;
+            if ffi_byval_ahead(&mut c) {
+                advance(&mut c);
+                ty = ffi_byval_parameter(&mut c);
+            } else {
+                ty = parse_type(&mut c);
+            }
             ffi_direct_param(
                 &mut c,
                 ty,
-                view("extern C parameters must be an integer, f32, f64, CStr, handle, byte view, cfn or extern record")
+                view("extern C parameters must be an integer, f32, f64, CStr, handle, byte view, cfn, extern record or byval record")
             );
             words = words + ffi_words(&mut c, ty);
             c.params.push(ty);
@@ -6395,6 +6484,12 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         while true {
             p := ident(&mut c);
             expect(&mut c, view(":"));
+            if ffi_byval_ahead(&mut c) {
+                fail(
+                    &mut c,
+                    view("byval is only for an extern \"C\" declaration parameter; a C callback cannot take a record by value yet")
+                );
+            }
             ty := parse_type(&mut c);
             if same(view(p), view("self")) & (ty_kind(&mut c, ty) == 7) {
                 rr := outer_region(&mut c, ty);
@@ -7736,6 +7831,357 @@ fn callback_params<a>(c: (&a mut C), count: u64) -> unit {
         }
         o(&mut c, view("movq %rax,"));
         stack_slot(&mut c, i);
+        c.out.push(10);
+    }
+    return ();
+}
+// ---- `byval` record arguments (decision B7, docs/ffi.md) ----
+// One scalar leaf of an extern record. An embedded record is flattened, so a leaf's offset is
+// measured from the outermost record's start.
+struct FFILeaf {
+    off: u64,
+    size: u64,
+    // 0 integer (handles, CStr and cfn words included), 1 f32, 2 f64.
+    cls: u64
+}
+// One destination for a slice of a byval argument: dst 1 an integer argument register, 2 a float
+// argument register, 3 an outgoing stack word, 4 the address of the argument's copy in an integer
+// register, 5 the address of the copy in an outgoing stack word.
+struct FFIMove {
+    off: u64,
+    size: u64,
+    dst: u64,
+    index: u64
+}
+// A whole byval argument: the moves that place its bytes, the call's argument counters after it,
+// and the copy a by-reference argument needs.
+struct FFIPlan {
+    byval: u64,
+    moves: FFIMove[],
+    ints: u64,
+    floats: u64,
+    stack: u64,
+    copies: u64,
+    copy_rel: u64,
+    copy_bytes: u64
+}
+fn ffi_empty_plan() -> FFIPlan {
+    mut moves = FFIMove[];
+    return FFIPlan {
+        byval: 0,
+        moves: moves,
+        ints: 0,
+        floats: 0,
+        stack: 0,
+        copies: 0,
+        copy_rel: 0,
+        copy_bytes: 0
+    };
+}
+fn ffi_move(off: u64, size: u64, dst: u64, index: u64) -> FFIMove {
+    return FFIMove { off: off, size: size, dst: dst, index: index };
+}
+// The scalar leaves of an extern record, embedded records flattened, in field order.
+fn ffi_leaves<a>(c: (&a mut C), d: u64, base: u64) -> FFILeaf[] {
+    mut out = FFILeaf[];
+    count := c.decls[d].count;
+    for i in count {
+        ty := field_ty(&mut c, d, i);
+        off := base + ffi_offset(&mut c, d, i);
+        if is_c_record(&mut c, ty) != 0 {
+            nested := ty_arg(&mut c, ty);
+            inner := ffi_leaves(&mut c, nested, off);
+            for j in inner.len() {
+                leaf := inner[j];
+                out.push(FFILeaf { off: leaf.off, size: leaf.size, cls: leaf.cls });
+            }
+        } else {
+            mut cls = 0;
+            if is_float(&mut c, ty) {
+                cls = 2;
+                if is_f32(&mut c, ty) {
+                    cls = 1;
+                }
+            }
+            out.push(FFILeaf { off: off, size: ffi_field_size(&mut c, ty), cls: cls });
+        }
+    }
+    return out;
+}
+// The placement decision for one byval argument on `abi`. Entry 0 is the mode and, for mode 5, the
+// entries after it are the eightbytes' classes (1 SSE, 2 INTEGER). Modes: 0 an empty record (nothing
+// crosses), 1 one integer register per eightbyte, 2 the record in consecutive outgoing stack words,
+// 3 one register per leaf in field order (integer leaves to integer registers, float leaves to float
+// registers), 4 by reference to a copy the caller makes, 5 SysV eightbyte classes.
+//
+// The rules are the ABI's own and are stated again in docs/ffi.md, which is the contract:
+//
+// - SysV x86-64: an eightbyte is SSE when it holds only floats and INTEGER otherwise (a mixed
+//   eightbyte is INTEGER), and each class draws from its own register file. Over 16 bytes, or when
+//   a class has no register left, the whole record goes in the outgoing argument area (MEMORY).
+// - AAPCS64: a homogeneous float aggregate of 1-4 fields of one float type travels in v0-v7, one
+//   register per field. Any other composite of 16 bytes or less travels in consecutive x0-x7, one
+//   register per eightbyte; a larger one is passed by reference to a caller copy. With no register
+//   left for the aggregate or the address, it is passed on the stack.
+// - RV64: over 2*XLEN (16 bytes) a record is passed by reference. At or below it, one or two fields
+//   with at least one float take a register each in field order (float fields in fa0-fa7, integer
+//   fields in a0-a7); every other shape is packed into one integer register per eightbyte.
+fn ffi_byval_mode<a>(
+    c: (&a mut C),
+    abi: u64,
+    size: u64,
+    words: u64,
+    leaves: (&a FFILeaf[]),
+    ints: u64,
+    floats: u64
+) -> u64[] {
+    mut decision = u64[];
+    if size == 0 {
+        decision.push(0);
+        return decision;
+    }
+    if abi == 0 {
+        if 16 < size {
+            decision.push(2);
+            return decision;
+        }
+        eights := ffi_align_up(size, 8) / 8;
+        mut klass = u64[];
+        for e in eights {
+            klass.push(0);
+        }
+        for i in leaves.len() {
+            e := leaves[i].off / 8;
+            if leaves[i].cls == 0 {
+                exchange(&mut klass[e], 2);
+            } else {
+                if klass[e] == 0 {
+                    exchange(&mut klass[e], 1);
+                }
+            }
+        }
+        mut need_int = 0;
+        mut need_sse = 0;
+        for e in eights {
+            if klass[e] == 1 {
+                need_sse = need_sse + 1;
+            } else {
+                need_int = need_int + 1;
+            }
+        }
+        if (6 < ints + need_int) | (8 < floats + need_sse) {
+            decision.push(2);
+            return decision;
+        }
+        decision.push(5);
+        for e in eights {
+            decision.push(klass[e]);
+        }
+        return decision;
+    }
+    if abi == 2 {
+        mut hfa = 0;
+        if (0 < leaves.len()) && (leaves.len() <= 4) && (0 < leaves[0].cls) {
+            first := leaves[0].cls;
+            hfa = 1;
+            for i in leaves.len() {
+                if leaves[i].cls != first {
+                    hfa = 0;
+                }
+            }
+        }
+        if hfa != 0 {
+            if floats + leaves.len() <= 8 {
+                decision.push(3);
+            } else {
+                decision.push(2);
+            }
+            return decision;
+        }
+        if 16 < size {
+            decision.push(4);
+            return decision;
+        }
+        if 8 < ints + words {
+            decision.push(2);
+        } else {
+            decision.push(1);
+        }
+        return decision;
+    }
+    // RV64 (abi 3). Win64 (abi 1) never reaches here: ffi_byval_parameter refuses `byval` on the
+    // Windows targets when the declaration is parsed.
+    if 16 < size {
+        decision.push(4);
+        return decision;
+    }
+    mut nfloat = 0;
+    for i in leaves.len() {
+        if leaves[i].cls != 0 {
+            nfloat = nfloat + 1;
+        }
+    }
+    if (nfloat != 0) & (leaves.len() <= 2) {
+        nint := leaves.len() - nfloat;
+        if (8 < ints + nint) | (8 < floats + nfloat) {
+            decision.push(2);
+        } else {
+            decision.push(3);
+        }
+        return decision;
+    }
+    if 8 < ints + words {
+        decision.push(2);
+    } else {
+        decision.push(1);
+    }
+    return decision;
+}
+// How one byval argument is passed: the moves that place its bytes and the call's argument counters
+// after it. `ints`, `floats` and `stack` are the counters the ordinary argument loop keeps, so the
+// allocation of the arguments around a byval record stays in step.
+fn ffi_byval_plan<a>(c: (&a mut C), d: u64, abi: u64, ints: u64, floats: u64, stack: u64, copies: u64) -> FFIPlan {
+    size := ffi_record_size(&mut c, d);
+    words := ffi_align_up(size, 8) / 8;
+    leaves := ffi_leaves(&mut c, d, 0);
+    decision := ffi_byval_mode(&mut c, abi, size, words, &leaves, ints, floats);
+    mode := decision[0];
+    mut ints2 = ints;
+    mut floats2 = floats;
+    mut stack2 = stack;
+    mut copies2 = copies;
+    mut copy_rel = 0;
+    mut copy_bytes = 0;
+    mut moves = FFIMove[];
+    if mode == 1 {
+        for w in words {
+            moves.push(ffi_move(w * 8, 8, 1, ints2 + w));
+        }
+        ints2 = ints2 + words;
+    }
+    if mode == 2 {
+        for w in words {
+            moves.push(ffi_move(w * 8, 8, 3, stack2 + w));
+        }
+        stack2 = stack2 + words;
+    }
+    if mode == 3 {
+        for i in leaves.len() {
+            if leaves[i].cls == 0 {
+                moves.push(ffi_move((leaves[i].off / 8) * 8, 8, 1, ints2));
+                ints2 = ints2 + 1;
+            } else {
+                moves.push(ffi_move(leaves[i].off, leaves[i].size, 2, floats2));
+                floats2 = floats2 + 1;
+            }
+        }
+    }
+    if mode == 4 {
+        copy_rel = copies2;
+        copy_bytes = ffi_align_up(size, 8);
+        copies2 = copies2 + copy_bytes;
+        if ints2 < 8 {
+            moves.push(ffi_move(0, 0, 4, ints2));
+            ints2 = ints2 + 1;
+        } else {
+            moves.push(ffi_move(0, 0, 5, stack2));
+            stack2 = stack2 + 1;
+        }
+    }
+    if mode == 5 {
+        for e in decision.len() - 1 {
+            mut width = size - e * 8;
+            if 8 < width {
+                width = 8;
+            }
+            if decision[e + 1] == 1 {
+                moves.push(ffi_move(e * 8, width, 2, floats2));
+                floats2 = floats2 + 1;
+            } else {
+                moves.push(ffi_move(e * 8, 8, 1, ints2));
+                ints2 = ints2 + 1;
+            }
+        }
+    }
+    return FFIPlan {
+        byval: 1,
+        moves: moves,
+        ints: ints2,
+        floats: floats2,
+        stack: stack2,
+        copies: copies2,
+        copy_rel: copy_rel,
+        copy_bytes: copy_bytes
+    };
+}
+// Places one byval argument's bytes where the plan says, making the copy a by-reference argument
+// needs at `copy_base` bytes above the outgoing stack pointer.
+fn ffi_byval_emit<a>(c: (&a mut C), slot: u64, plan: (&FFIPlan), copy_base: u64, x86: u64, abi: u64) -> unit {
+    if 0 < plan.copy_bytes {
+        for w in plan.copy_bytes / 8 {
+            get(&mut c, slot, view("%rax"));
+            o(&mut c, view("movq "));
+            on(&mut c, w * 8);
+            o(&mut c, view("(%rax),%rax\n"));
+            ffi_store_stack(&mut c, x86, copy_base + w * 8);
+        }
+    }
+    for i in plan.moves.len() {
+        m := plan.moves[i];
+        if (m.dst == 4) || (m.dst == 5) {
+            // Passed by reference: the address of the copy, not the record's bytes.
+            o(&mut c, view("leaq "));
+            on(&mut c, copy_base + plan.copy_rel);
+            o(&mut c, view("(%rsp),%rax\n"));
+            if m.dst == 4 {
+                o(&mut c, view("movq %rax,"));
+                o(&mut c, view(ffi_int_reg(abi, m.index)));
+                c.out.push(10);
+            } else {
+                ffi_store_stack(&mut c, x86, m.index * 8);
+            }
+            continue;
+        }
+        get(&mut c, slot, view("%rax"));
+        if (m.dst == 2) & (m.size == 4) {
+            o(&mut c, view("movl "));
+        } else {
+            o(&mut c, view("movq "));
+        }
+        on(&mut c, m.off);
+        o(&mut c, view("(%rax),%rax\n"));
+        if m.dst == 1 {
+            o(&mut c, view("movq %rax,"));
+            o(&mut c, view(ffi_int_reg(abi, m.index)));
+            c.out.push(10);
+        }
+        if m.dst == 2 {
+            ffi_float_arg(&mut c, m.index, m.size == 4, x86);
+        }
+        if m.dst == 3 {
+            ffi_store_stack(&mut c, x86, m.index * 8);
+        }
+    }
+    return ();
+}
+// %rax's word as the bits of float argument register `index`, without conversion: a record's bytes
+// are already the field's representation.
+fn ffi_float_arg<a>(c: (&a mut C), index: u64, single: bool, x86: u64) -> unit {
+    if x86 != 0 {
+        if single {
+            o(&mut c, view("movd %eax,%xmm"));
+        } else {
+            o(&mut c, view("movq %rax,%xmm"));
+        }
+        on(&mut c, index);
+        c.out.push(10);
+    } else {
+        if single {
+            o(&mut c, view("cfbits32 "));
+        } else {
+            o(&mut c, view("cfbits64 "));
+        }
+        on(&mut c, index);
         c.out.push(10);
     }
     return ();
@@ -9291,7 +9737,13 @@ fn emit_resolved_call<a>(
         if ext == 2 {
             exchange(&mut c.ffi_fixed, count);
         }
-        return ffi_emit_call(&mut c, &args, &argtypes, ret, view(ffi_symbol), 0);
+        // The declared parameter types decide which arguments cross by value (`byval`); the values
+        // were checked against them above.
+        mut formals = u64[];
+        for i in count {
+            formals.push(c.params[template_first + i]);
+        }
+        return ffi_emit_call(&mut c, &args, &argtypes, &formals, ret, view(ffi_symbol), 0);
     }
     for i in args.len() {
         slot := args[i];
@@ -9523,6 +9975,10 @@ fn indirect_call<a>(c: (&a mut C), value: Val, opened: u64) -> Val {
     mut args = u64[];
     mut sources = u64[];
     mut types = u64[];
+    // Arguments a C function pointer only borrows: a C-layout record travels as a pointer to its
+    // fields (or as a copy of them, for a `byval` parameter), and Grail keeps ownership - the same
+    // rule a direct extern call follows.
+    mut shared = u64[];
     if opened == 0 {
         expect(&mut c, view("("));
     }
@@ -9557,9 +10013,21 @@ fn indirect_call<a>(c: (&a mut C), value: Val, opened: u64) -> Val {
                 place := target_of(&mut c, slot);
                 capture_authority(&mut c, place);
             }
+            mut borrowed = 0;
+            if kind == 8 {
+                d := ty_arg(&mut c, actual);
+                if c.decls[d].c_layout != 0 {
+                    observe(&mut c, slot);
+                    borrowed = 1;
+                    shared.push(slot);
+                }
+            }
             sources.push(slot);
             types.push(actual);
-            held := move_value(&mut c, value);
+            mut held = val(slot, actual);
+            if borrowed == 0 {
+                held = move_value(&mut c, value);
+            }
             args.push(held.t);
             if eat(&mut c, view(")")) {
                 break;
@@ -9573,12 +10041,20 @@ fn indirect_call<a>(c: (&a mut C), value: Val, opened: u64) -> Val {
     for i in args.len() {
         slot := args[i];
         actual := types[i];
-        move_out(&mut c, val(slot, actual));
+        mut borrowed = 0;
+        for j in shared.len() {
+            if shared[j] == slot {
+                borrowed = 1;
+            }
+        }
+        if borrowed == 0 {
+            move_out(&mut c, val(slot, actual));
+        }
     }
     if kind == 25 {
         // A C function pointer is called with the platform's C convention, exactly like a direct
         // extern call (floats, narrow integers, stack arguments, Win64, the host-TLS bridge).
-        result := ffi_emit_call(&mut c, &args, &signature, resulttype, view(""), target);
+        result := ffi_emit_call(&mut c, &args, &signature, &signature, resulttype, view(""), target);
         rslot := result.t;
         call_writebacks(&mut c, first, &sources, &types);
         call_bonds(&mut c, val(rslot, resulttype), first, &sources, resulttype);

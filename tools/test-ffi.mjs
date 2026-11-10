@@ -60,6 +60,8 @@ const fixtures = [
     name: 'nested_records',
     stdout: '49044\n21\n3\n-7\n100000000000\n42\n9\n77\n154\n6\n7\n42\n',
     symbols: ['c_outer_sum', 'c_outer_fill', 'c_outer_size', 'c_make_wrap'],
+  },
+  {
     // Bare data pointers: cptr / cptr_mut / cnull, and a pointer field in an extern record.
     name: 'pointers',
     stdout: '10\n198\n1\n0\n60\n24\n',
@@ -77,6 +79,17 @@ const fixtures = [
     name: 'call_variadic',
     stdout: '60\n55\n3.75\n146.5\n',
     symbols: ['c_vsum', 'c_vmix'],
+  },
+  {
+    // Records passed to C by value (`v: byval R`): 4, 8, 16 and 24 bytes, mixed int/float fields,
+    // an ImVec2-shaped float pair and an embedded array, plus a byval parameter after six integer
+    // arguments, a byval record sharing the stack area with a following scalar, and a call through
+    // a `cfn` whose signature declares the byval parameter.
+    name: 'byval_records',
+    stdout: '63\n-2995\n9000007\n3002001\n7006\n10025\n22650\n4321\n9000015\n176\n4876\n7009000\n3656322\n90662328\n',
+    symbols: ['c_byval4', 'c_byval8', 'c_byval16', 'c_byval24', 'c_byval_mix', 'c_byval_md',
+      'c_byval_2f', 'c_byval_arr', 'c_byval_4f', 'c_byval_after', 'c_byval_two', 'c_byval_slot', 'c_byval_tail',
+      'c_byval_mix_stack'],
   },
   {
     // C records returned by value in registers and through a hidden result pointer.
@@ -195,5 +208,16 @@ for (const target of selected) {
     executed++;
   }
 }
+// `byval` is implemented only where the classification can be executed: the Windows ABIs use
+// different struct rules and have no FFI execution path here, so they are refused rather than
+// guessed (docs/ffi.md).
+const windows = spawnSync(compiler, [
+  '--default-u64', '--typed-refs', '--target', 'windows-x86_64', join(work, 'windows-byval.s'),
+  join(root, 'tests/ffi/byval_records.grl'), join(root, 'compiler/runtime.grl'), join(root, 'compiler/os-windows.grl'),
+], { cwd: root, maxBuffer: 16 * 1024 * 1024, timeout: 900_000 });
+assert.notEqual(windows.status, 0, 'windows-x86_64: byval was accepted instead of refused');
+assert.match(`${windows.stdout}${windows.stderr}`, /byval is not implemented for the Windows x86-64 and Windows ARM64 ABIs/,
+  'windows-x86_64: missing byval refusal diagnostic');
+
 const skipped = linkedOnly ? ` (${linkedOnly} linked but not executed: no cross emulator installed)` : '';
 console.log(`ffi: ${executed} linked and executed, ${linkedOnly} linked only, ${crossCompiled} cross-compiled only${skipped}`);
