@@ -1,60 +1,98 @@
 # Real parallelism
 
-Goal: use every core, especially for Abundance's chunked geometry and asset work, without importing
-a general Send/Sync trait system.
+Goal: use every core, especially for Abundance's chunked geometry, image and asset work, without
+importing a trait system and without shipping a safe API that is unsound.
 
-## What Grail already has
+This note replaced an earlier plan whose central premise was wrong. It is kept honest here.
 
-- Ownership and exclusivity: two exclusive references cannot exist, `&T` is read-only.
-- **Typed slices** (`&mut [T]`), which express disjoint mutation at the type level.
-- No interior mutability in Grail's own types. The only `!Sync` things are **opaque handles**
-  (files, sockets, Vulkan/COM objects) whose methods mutate through `&self`, and `unsafe module` code.
-- Green tasks, so no data race is possible *between tasks* today; `rt_offload` already hands blocking
-  foreign calls to a worker thread.
+## What was wrong in the first draft
 
-## The property actually needed
+The first draft said: *a job owns its inputs and returns an owned result, so nothing can race and no
+compiler change is needed.* An external review (GPT-6.1 Sol, high effort) refuted it, and it is right:
 
-Not Send/Sync. A Send/Sync check exists in Rust because arbitrary `&T` may be shared and `T` may have
-interior mutability. In Grail that surface is one bit:
+- **Ownership is not transferability.** A window/context must be created, used *and destroyed* on its
+  creating thread; a Vulkan object may refer to a thread-affine command pool; a buffer may have to be
+  freed on its allocating thread. Moving such a value to a worker is not a memory race but is unsound.
+- **Foreign libraries hold hidden state** - process-global or per-thread scratch -, and may call
+  registered callbacks from their own threads.
+- **A read-only `&T` is not automatically shareable**: if `T` reaches a handle (directly, through a
+  field, or through a closure capture, or as a returned reference into foreign scratch) then methods
+  callable through `&T` can mutate foreign state.
+- So a check over the argument type alone is insufficient. The whole **closure environment, the
+  result, and the reachable foreign authority** must be classified.
 
-- **`shareable(T)`** — "contains no handle" (and no `unsafe`-module type). Derived structurally over
-  records, enums and generics; false only for handles. No traits, no variance questions, no user
-  annotations.
+## The model
 
-Disjoint mutation needs no check at all, because a parallel primitive hands each job its own
-exclusive slice — two jobs cannot address the same memory.
+Two compiler-derived properties, **not** traits and **not** bounds on every signature:
 
-## Staged plan
+- **Transferable(T)** - a value may cross to another worker, including being destroyed there.
+- **Shareable(T)** - concurrent shared access is permitted.
 
-**Stage 1 (no language change): pool of owned jobs.** A work-stealing pool with N = cores workers.
-A job owns its inputs and returns an owned result; a handle to the job's completion transfers
-ownership back. No reference crosses a job boundary, so no check is needed and nothing can race. This
-is exactly Abundance's `job_executor` shape and is implementable in the runtime plus `lib/`.
+| Type | Transferable | Shareable |
+|---|---:|---:|
+| Plain data (integers, floats, bytes, records/enums/slices of them) | yes | yes |
+| Unique foreign context, movable but not concurrently usable | yes | no |
+| Main-thread window/context | no | no |
+| Audited immutable foreign blob | maybe | maybe |
 
-**Stage 2: disjoint slice parallelism.** `parallel_for_chunks(&mut [T], chunks, f)` where
-`f: Fn(&mut [T])`. The compiler splits the exclusive slice into disjoint exclusive chunks; inside a
-chunk, ordinary Grail rules apply, so element writes are safe by construction. This is where the
-compiler earns its keep, and it needs no new type property.
+Derived structurally for Grail-defined types: a record is transferable when its fields are; shareable
+when its fields are. **Unknown FFI classification defaults to denied.** A safe wrapper cannot erase a
+restriction, and being declared in an `unsafe module` is not by itself the criterion - the boundary
+needs an explicit foreign-resource contract.
 
-**Stage 3: read-only sharing.** `parallel_map(&[T], f) -> V[]` requires `shareable(T)` — refused for
-anything holding a handle, with a diagnostic naming the field that makes it unshareable.
+Checked after monomorphisation, so diagnostics name the field:
 
-**Stage 4: job graph.** Dependencies between jobs, each producing an owned value its dependents take
-by move. Covers Abundance's build DAG.
+```
+cannot transfer job capture `decoder`:
+  decoder.context is thread-affine
+```
 
-## Why not Send/Sync
+Classification metadata must survive in exported interfaces (B1) so separate compilation can check it
+later, and so explicit constraints could be added without redesign.
 
-A language-wide auto-derived trait would have to be computed through records, enums, unions, generics,
-closures and every FFI type, and Grail has no traits to hang it on. It buys nothing that stages 1–4
-do not, and it would push a `Send + Sync` bound into every signature that ever touches a task. If
-shared mutable state across jobs is ever needed (a shared allocator, a global cache), it should be an
-explicit audited facility — a handle-shaped object that opts in — rather than a language-wide trait.
+## The safe surface: structured, not free spawn
 
-## Non-goals / honest limits
+- **Scoped jobs.** A scope guarantees borrowed inputs outlive the workers and that no worker can still
+  reach frame memory after the scope ends. This is what makes shared captures sound without a trait
+  system, and it is the property an unrestricted `spawn(&x)` can never give you.
+- **`parallel_for_chunks(&mut [T], chunks, f: Fn(&mut [T]))`** - the compiler splits an exclusive
+  slice into disjoint exclusive chunks, and the elements must be transferable. Disjointness is
+  constructed, not checked. This is the Abundance workload.
+- **`parallel_map(&[T], f) -> V[]`** - requires `Shareable(T)`; results returned in input order.
+- **Owner actors** for externally mutable resources (asset caches, sockets, the main thread). Not a
+  primitive; a consequence: thread-affine work runs on a main-thread executor and workers hand back
+  CPU-side results.
+- An unrestricted spawn is **not** part of the safe surface. A trusted/unsafe primitive may exist for
+  the runtime itself, clearly named and documented as such.
 
-- Two jobs writing the same OS descriptor is not a data race and no type check catches it; it stays a
-  documented hazard, mediated where possible by the authority model.
-- `unsafe module` is the escape hatch, and the soundness of stages 3–4 is only as good as that surface
-  staying small.
-- Green tasks remain the default for *task* code; this pool is for data-parallel work. Which is right
-  for Abundance because its parallelism is over buffers, not over interleaved state machines.
+## Lifecycle rules that must be designed in, not retrofitted
+
+- **Fail-fast scope exit**: one job failing cancels its siblings, then joins them, and only then
+  releases the inputs.
+- **Cooperative cancellation** cannot let a parent reclaim memory a running child still borrows.
+- **Helping scheduler**: a worker that waits on children it queued must make progress itself,
+  otherwise a pool can deadlock when every worker waits. Nested parallelism reuses the pool rather
+  than creating core-count pools.
+- **Blocking separation**: blocking foreign calls must not run on the CPU pool. `rt_offload` already
+  exists for this and now crosses a thread boundary itself, so it needs the same classification audit.
+- **Allocators**: cross-worker ownership implies cross-worker destruction. Start with an allocator
+  that supports that; locality is an optimisation later.
+- **Determinism**: result ordering and reductions are defined independently of execution order.
+  Floating-point reductions must not silently depend on which worker finished first.
+
+## Build order
+
+1. Bounded pool + structured scope/join, with the lifecycle rules above and tests for them.
+2. `parallel_for_chunks` over plain-data element types, refused by name for anything else.
+3. Structural derivation of transferable/shareable, with default-deny for unknown FFI types, and the
+   audited declarations for the handles we actually use (files, sockets, Vulkan objects).
+4. `parallel_map` with the shareable check.
+5. Job graph with dependencies, once the lifecycle is proven.
+6. Abundance: move `job_executor` and the geometry chunking onto it; main-thread executor for the RHI.
+
+## Deferred on purpose
+
+NUMA, elaborate priorities, a public work-stealing policy, and deterministic scheduler replay. The
+one thing not deferred: an API shape that assumes all work is interchangeable forever - interactive
+frame work must eventually be able to avoid starvation behind bulk asset builds, so the pool needs
+room for that even if priorities are not implemented yet.
