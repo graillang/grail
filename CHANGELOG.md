@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- Borg session state persists a typed event stream instead of an opaque payload
+  (`borg/src/ffi/store.grl`, `borg/src/events.grl`). The frame still opens with the `BGS` magic and
+  now carries the version digit `2`, a little-endian payload length and a sequence of tagged events;
+  a `1` file is refused as `unsupported-version` rather than decoded as events. Each event is a
+  one-byte tag, a 32-bit body length and explicitly typed fields: little-endian numbers,
+  length-prefixed text, 0/1 booleans, presence-tagged optional values and length-counted text lists.
+  An unknown tag, an event cut short, a body length past the 256 KiB per-event ceiling, a boolean or
+  presence byte that is neither 0 nor 1, and bytes past an event's last field are each refused by
+  name, and a refused stream yields no events. Every declared length is checked against the bytes
+  actually present, and the payload is capped at 1 MiB before the file is read, so no
+  attacker-controlled length becomes an allocation. The same-directory temp file and rename are
+  unchanged, and the write is still not fsynced. `just borg-store-test` covers the empty stream, one
+  event of every variant, ordering, and every refusal (`borg/tests/ffi/store_test.grl`).
+- `lib/sys/grail_ffi.grl` re-binds the `&mut [u8]` argument of `read`, `env_get` and `recv` to a
+  mutable local before the C call. The ownership checker requires a mutable binding for storage a
+  call writes through, and a parameter binding cannot be `mut`, so forwarding the reference straight
+  through no longer compiled: the FFI wrapper, and every test that links it, failed to build.
 - Merge the three design reviews from branch `claude/brave-heisenberg-0h3ska` as documents only
   (`docs/design/first-principles-architecture.md`, `architecture-reassessment.md`,
   `complexity-reassessment.md`, 2,746 lines). Their edits to README and to the research-phase

@@ -226,8 +226,11 @@ pub fn open(path: &[u8], flags: u64, mode: u64) -> File |? Error {
 pub fn read(file: File, buffer: &mut [u8]) -> u64 |? Error {
     mut out = LengthOut { value: 0 };
     mut status: i64 = 0;
+    // A mutable borrow reaches C storage, so the checker wants a mutable binding to hand it to a
+    // call that writes through it; a parameter binding cannot be `mut`, so re-bind it once.
+    mut target = buffer;
     unsafe {
-        status = grail_os_file_read(file, buffer, out);
+        status = grail_os_file_read(file, target, out);
     }
     if status < 0 {
         return Error::Status(status);
@@ -346,8 +349,11 @@ pub fn wall() -> i64 |? Error {
 
 pub fn env_get(name: &[u8], out: &mut [u8]) -> u64 |? Error {
     mut length: i64 = 0;
+    // A mutable borrow reaches C storage, so the checker wants a mutable binding to hand it to a
+    // call that writes through it; a parameter binding cannot be `mut`, so re-bind it once.
+    mut target = out;
     unsafe {
-        length = grail_os_env_get(name, out);
+        length = grail_os_env_get(name, target);
     }
     if length < 0 {
         return Error::Status(length);
@@ -506,8 +512,11 @@ pub fn send(socket: Socket, data: &[u8]) -> u64 |? Error {
 pub fn recv(socket: Socket, buffer: &mut [u8]) -> u64 |? Error {
     mut out = LengthOut { value: 0 };
     mut status: i64 = 0;
+    // A mutable borrow reaches C storage, so the checker wants a mutable binding to hand it to a
+    // call that writes through it; a parameter binding cannot be `mut`, so re-bind it once.
+    mut target = buffer;
     unsafe {
-        status = grail_os_socket_recv(socket, buffer, out);
+        status = grail_os_socket_recv(socket, target, out);
     }
     if status < 0 {
         return Error::Status(status);

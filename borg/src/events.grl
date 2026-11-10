@@ -480,3 +480,516 @@ pub fn encode<a>(value: (&a Event)) -> borg_json::Json {
     put(&mut root, "kind", boxed);
     return borg_json::object_of(&root);
 }
+
+// ---- binary event stream ----
+//
+// The persisted session state is a sequence of these events, not an opaque payload, so a reader can
+// refuse by name what it does not understand instead of decoding the wrong fields:
+//
+//   event    u8      tag: 1 started, 2 titled, 3 status_changed, 4 message, 5 message_delta
+//            u32 LE  body length N
+//            N bytes body
+//   body     text id, text session_id, u64 LE sequence, text created_at, then the kind
+//              started         nothing
+//              titled          text title, u8 generated, optional u64 usage_tokens, optional text model
+//              status_changed  text status, optional text detail
+//              message         text message_id, text actor, text text, text[] attachments,
+//                              text status, optional text delivery
+//              message_delta   text message_id, text delta
+//   text     u32 LE byte length, then that many bytes
+//   text[]   u32 LE count, then that many texts
+//   u8       boolean 0 or 1; any other value is refused rather than read as "true"
+//   optional u8 presence, 0 absent or 1 present and the value follows; any other value is refused
+//
+// A tag and a length per event make three things possible that an opaque payload cannot: an unknown
+// tag is named instead of being decoded as some other kind, a final event whose bytes are missing is
+// refused instead of truncated into a plausible row, and a declared length is always checked against
+// the bytes that are actually present before it is used, so no attacker-controlled length is ever
+// turned into an allocation. The list count is checked the same way (each element needs at least its
+// four byte length) so a huge count cannot spin the reader.
+pub const STREAM_OK: u64 = 0;
+// A tag outside 1..5.
+pub const UNKNOWN_TAG: u64 = 20;
+// The bytes end before a declared extent (an event body, a text, or a list) does.
+pub const TRUNCATED_EVENT: u64 = 21;
+// A declared length exceeds what one event may occupy; refused before the read starts.
+pub const LENGTH_OVERFLOW: u64 = 22;
+// A presence or boolean byte that is neither 0 nor 1.
+pub const BAD_FIELD: u64 = 23;
+// An event body carried bytes past its last field.
+pub const TRAILING_BYTES: u64 = 24;
+
+const TAG_STARTED: u64 = 1;
+const TAG_TITLED: u64 = 2;
+const TAG_STATUS: u64 = 3;
+const TAG_MESSAGE: u64 = 4;
+const TAG_DELTA: u64 = 5;
+
+// The ceiling on one event's body: a declared length above it is refused as LENGTH_OVERFLOW rather
+// than compared against a file that would have to be that large to be honest.
+pub const MAX_EVENT_BODY: u64 = 262144;
+
+pub struct Stream {
+    status: u64,
+    events: Event[]
+}
+
+pub fn stream_status<a>(value: (&a Stream)) -> u64 {
+    return value.status;
+}
+
+
+// A refused stream carries no events: nothing half-decoded is handed to a caller.
+pub fn stream_events<a>(value: (&a Stream)) -> Event[] {
+    mut out = Event[];
+    mut index = 0;
+    while index < value.events.len() {
+        out.push(copy_event(&value.events[index]));
+        index = index + 1;
+    }
+    return out;
+}
+
+pub fn copy_event<a>(value: (&a Event)) -> Event {
+    return Event {
+        id: copy_text(&value.id),
+        session_id: copy_text(&value.session_id),
+        sequence: value.sequence,
+        created_at: copy_text(&value.created_at),
+        kind: copy_kind(&value.kind)
+    };
+}
+
+fn copy_kind<a>(value: (&a Kind)) -> Kind {
+    // Built by assignment rather than returned from an arm: a `return` of an enum constructor around
+    // a struct literal inside a match arm does not parse.
+    mut out = Kind::Started;
+    match value {
+        Started => { },
+        Titled(inner) => {
+            out = Kind::Titled(Titled {
+                title: copy_text(&inner.title),
+                generated: inner.generated,
+                usage_tokens: copy_optional_number(&inner.usage_tokens),
+                model: copy_optional(&inner.model)
+            });
+        },
+        Status(inner) => {
+            out = Kind::Status(StatusChange {
+                status: copy_status(&inner.status),
+                detail: copy_optional(&inner.detail)
+            });
+        },
+        Message(inner) => {
+            out = Kind::Message(Message {
+                message_id: copy_text(&inner.message_id),
+                actor: copy_text(&inner.actor),
+                text: copy_text(&inner.text),
+                attachments: copy_list(&inner.attachments),
+                status: copy_text(&inner.status),
+                delivery: copy_optional(&inner.delivery)
+            });
+        },
+        Delta(inner) => {
+            out = Kind::Delta(Delta {
+                message_id: copy_text(&inner.message_id),
+                delta: copy_text(&inner.delta)
+            });
+        }
+    }
+    return out;
+}
+
+// A status is an enum, so it is copied by name rather than moved out of the borrowed event.
+fn copy_status<a>(value: (&a borg_journal::Status)) -> borg_journal::Status {
+    name := borg_journal::status_name(value);
+    mut out = borg_journal::starting();
+    match status_of(&name) {
+        mapped: borg_journal::Status => { out = mapped; },
+        failure: EventError => { }
+    }
+    return out;
+}
+
+fn copy_list<a>(value: (&a string[])) -> string[] {
+    mut out = string[];
+    mut index = 0;
+    while index < value.len() {
+        out.push(copy_text(&value[index]));
+        index = index + 1;
+    }
+    return out;
+}
+
+fn empty_event() -> Event {
+    return Event {
+        id: "".text(),
+        session_id: "".text(),
+        sequence: 0,
+        created_at: "".text(),
+        kind: Kind::Started
+    };
+}
+
+// ---- writer ----
+
+fn push_uint(out: (&mut u8[]), value: u64, width: u64) {
+    mut rest = value;
+    mut index = u64(0);
+    while index < width {
+        out.push(u8(rest % 256));
+        rest = rest / 256;
+        index = index + 1;
+    }
+}
+
+fn push_bytes<a>(out: (&mut u8[]), bytes: (&a [u8])) {
+    for byte in bytes {
+        out.push(byte);
+    }
+}
+
+fn push_text<a>(out: (&mut u8[]), text: (&a [u8])) {
+    push_uint(out, text.len(), 4);
+    push_bytes(out, text);
+}
+
+fn push_bool(out: (&mut u8[]), value: bool) {
+    if value {
+        push_uint(out, 1, 1);
+    } else {
+        push_uint(out, 0, 1);
+    }
+}
+
+fn push_optional_number<a>(out: (&mut u8[]), value: (&a u64?)) {
+    match value {
+        Some(number) => {
+            push_uint(out, 1, 1);
+            push_uint(out, number, 8);
+        },
+        None => { push_uint(out, 0, 1); }
+    }
+}
+
+fn push_optional_text<a>(out: (&mut u8[]), value: (&a string?)) {
+    match value {
+        Some(text) => {
+            push_uint(out, 1, 1);
+            push_text(out, &text);
+        },
+        None => { push_uint(out, 0, 1); }
+    }
+}
+
+fn push_text_list<a>(out: (&mut u8[]), items: (&a string[])) {
+    push_uint(out, items.len(), 4);
+    mut index = 0;
+    while index < items.len() {
+        push_text(out, &items[index]);
+        index = index + 1;
+    }
+}
+
+fn tag_code<a>(value: (&a Kind)) -> u64 {
+    match value {
+        Started => { return TAG_STARTED; },
+        Titled(inner) => { return TAG_TITLED; },
+        Status(inner) => { return TAG_STATUS; },
+        Message(inner) => { return TAG_MESSAGE; },
+        Delta(inner) => { return TAG_DELTA; }
+    }
+}
+
+fn encode_body<a>(value: (&a Event)) -> u8[] {
+    mut out = u8[];
+    push_text(&mut out, &value.id);
+    push_text(&mut out, &value.session_id);
+    push_uint(&mut out, value.sequence, 8);
+    push_text(&mut out, &value.created_at);
+    match &value.kind {
+        Started => { },
+        Titled(inner) => {
+            push_text(&mut out, &inner.title);
+            push_bool(&mut out, inner.generated);
+            push_optional_number(&mut out, &inner.usage_tokens);
+            push_optional_text(&mut out, &inner.model);
+        },
+        Status(inner) => {
+            name := borg_journal::status_name(&inner.status);
+            push_text(&mut out, &name);
+            push_optional_text(&mut out, &inner.detail);
+        },
+        Message(inner) => {
+            push_text(&mut out, &inner.message_id);
+            push_text(&mut out, &inner.actor);
+            push_text(&mut out, &inner.text);
+            push_text_list(&mut out, &inner.attachments);
+            push_text(&mut out, &inner.status);
+            push_optional_text(&mut out, &inner.delivery);
+        },
+        Delta(inner) => {
+            push_text(&mut out, &inner.message_id);
+            push_text(&mut out, &inner.delta);
+        }
+    }
+    return out;
+}
+
+pub fn encode_stream<a>(events: (&a Event[])) -> u8[] {
+    mut out = u8[];
+    mut index = 0;
+    while index < events.len() {
+        body := encode_body(&events[index]);
+        push_uint(&mut out, tag_code(&events[index].kind), 1);
+        push_uint(&mut out, body.len(), 4);
+        push_bytes(&mut out, &body);
+        index = index + 1;
+    }
+    return out;
+}
+
+// ---- reader ----
+
+// Little endian, most significant byte last: accumulating from the top keeps every intermediate
+// inside u64, where a 256^width scale would overflow the checked arithmetic on the last step.
+fn read_uint<a>(bytes: (&a [u8]), at: u64, width: u64) -> u64 {
+    mut value = u64(0);
+    mut index = width;
+    while index > 0 {
+        index = index - 1;
+        value = value * 256 + u64(bytes[at + index]);
+    }
+    return value;
+}
+
+// Every field reader takes the cursor so a short read can both name its refusal and leave the rest of
+// the decode harmless: once `status` is no longer STREAM_OK the readers return a default and the
+// caller reports the first reason.
+fn decode_text<a>(bytes: (&a [u8]), at: (&mut u64), end: u64, status: (&mut u64)) -> string {
+    mut out = u8[];
+    if *status != STREAM_OK {
+        return out.text();
+    }
+    if end - *at < 4 {
+        *status = TRUNCATED_EVENT;
+        return out.text();
+    }
+    length := read_uint(bytes, *at, 4);
+    *at = *at + 4;
+    if length > end - *at {
+        *status = TRUNCATED_EVENT;
+        return out.text();
+    }
+    mut index = *at;
+    while index < *at + length {
+        out.push(bytes[index]);
+        index = index + 1;
+    }
+    *at = *at + length;
+    return out.text();
+}
+
+fn decode_u64<a>(bytes: (&a [u8]), at: (&mut u64), end: u64, status: (&mut u64)) -> u64 {
+    if *status != STREAM_OK {
+        return 0;
+    }
+    if end - *at < 8 {
+        *status = TRUNCATED_EVENT;
+        return 0;
+    }
+    value := read_uint(bytes, *at, 8);
+    *at = *at + 8;
+    return value;
+}
+
+fn decode_bool<a>(bytes: (&a [u8]), at: (&mut u64), end: u64, status: (&mut u64)) -> bool {
+    if *status != STREAM_OK {
+        return false;
+    }
+    if end - *at < 1 {
+        *status = TRUNCATED_EVENT;
+        return false;
+    }
+    marker := u64(bytes[*at]);
+    *at = *at + 1;
+    if marker == 1 {
+        return true;
+    }
+    if marker != 0 {
+        *status = BAD_FIELD;
+    }
+    return false;
+}
+
+fn decode_optional_text<a>(bytes: (&a [u8]), at: (&mut u64), end: u64, status: (&mut u64)) -> string? {
+    if *status != STREAM_OK {
+        return None;
+    }
+    if end - *at < 1 {
+        *status = TRUNCATED_EVENT;
+        return None;
+    }
+    marker := u64(bytes[*at]);
+    *at = *at + 1;
+    if marker == 0 {
+        return None;
+    }
+    if marker != 1 {
+        *status = BAD_FIELD;
+        return None;
+    }
+    text := decode_text(bytes, at, end, status);
+    if *status != STREAM_OK {
+        return None;
+    }
+    return Some(text);
+}
+
+fn decode_optional_number<a>(bytes: (&a [u8]), at: (&mut u64), end: u64, status: (&mut u64)) -> u64? {
+    if *status != STREAM_OK {
+        return None;
+    }
+    if end - *at < 1 {
+        *status = TRUNCATED_EVENT;
+        return None;
+    }
+    marker := u64(bytes[*at]);
+    *at = *at + 1;
+    if marker == 0 {
+        return None;
+    }
+    if marker != 1 {
+        *status = BAD_FIELD;
+        return None;
+    }
+    value := decode_u64(bytes, at, end, status);
+    if *status != STREAM_OK {
+        return None;
+    }
+    return Some(value);
+}
+
+fn decode_text_list<a>(bytes: (&a [u8]), at: (&mut u64), end: u64, status: (&mut u64)) -> string[] {
+    mut out = string[];
+    if *status != STREAM_OK {
+        return out;
+    }
+    if end - *at < 4 {
+        *status = TRUNCATED_EVENT;
+        return out;
+    }
+    count := read_uint(bytes, *at, 4);
+    *at = *at + 4;
+    // Each element carries at least its own four byte length, so a count that could not fit in the
+    // remaining bytes is refused before the loop rather than after billions of empty iterations.
+    if count > (end - *at) / 4 {
+        *status = TRUNCATED_EVENT;
+        return out;
+    }
+    mut index = u64(0);
+    while index < count {
+        item := decode_text(bytes, at, end, status);
+        if *status != STREAM_OK {
+            return out;
+        }
+        out.push(item);
+        index = index + 1;
+    }
+    return out;
+}
+
+fn decode_event<a>(bytes: (&a [u8]), tag: u64, at: (&mut u64), end: u64, status: (&mut u64)) -> Event {
+    if *status != STREAM_OK {
+        return empty_event();
+    }
+    id := decode_text(bytes, at, end, status);
+    session_id := decode_text(bytes, at, end, status);
+    sequence := decode_u64(bytes, at, end, status);
+    created_at := decode_text(bytes, at, end, status);
+    mut kind = Kind::Started;
+    if tag == TAG_TITLED {
+        title := decode_text(bytes, at, end, status);
+        generated := decode_bool(bytes, at, end, status);
+        tokens := decode_optional_number(bytes, at, end, status);
+        model := decode_optional_text(bytes, at, end, status);
+        kind = Kind::Titled(Titled {
+            title: title,
+            generated: generated,
+            usage_tokens: tokens,
+            model: model
+        });
+    } else if tag == TAG_STATUS {
+        name := decode_text(bytes, at, end, status);
+        detail := decode_optional_text(bytes, at, end, status);
+        if *status == STREAM_OK {
+            match status_of(&name) {
+                mapped: borg_journal::Status => {
+                    kind = Kind::Status(StatusChange { status: mapped, detail: detail });
+                },
+                failure: EventError => { *status = BAD_FIELD; }
+            }
+        }
+    } else if tag == TAG_MESSAGE {
+        message_id := decode_text(bytes, at, end, status);
+        actor := decode_text(bytes, at, end, status);
+        text := decode_text(bytes, at, end, status);
+        attachments := decode_text_list(bytes, at, end, status);
+        row_status := decode_text(bytes, at, end, status);
+        delivery := decode_optional_text(bytes, at, end, status);
+        kind = Kind::Message(Message {
+            message_id: message_id,
+            actor: actor,
+            text: text,
+            attachments: attachments,
+            status: row_status,
+            delivery: delivery
+        });
+    } else if tag == TAG_DELTA {
+        message_id := decode_text(bytes, at, end, status);
+        delta := decode_text(bytes, at, end, status);
+        kind = Kind::Delta(Delta { message_id: message_id, delta: delta });
+    }
+    if (*status == STREAM_OK) && (*at != end) {
+        *status = TRAILING_BYTES;
+    }
+    return Event {
+        id: id,
+        session_id: session_id,
+        sequence: sequence,
+        created_at: created_at,
+        kind: kind
+    };
+}
+
+pub fn decode_stream<a>(bytes: (&a [u8])) -> Stream {
+    mut events = Event[];
+    mut at = u64(0);
+    while at < bytes.len() {
+        if bytes.len() - at < 5 {
+            // The stream ends inside an event header: its tag or its length is cut off.
+            return Stream { status: TRUNCATED_EVENT, events: Event[] };
+        }
+        tag := read_uint(bytes, at, 1);
+        length := read_uint(bytes, at + 1, 4);
+        at = at + 5;
+        if (tag < TAG_STARTED) || (tag > TAG_DELTA) {
+            return Stream { status: UNKNOWN_TAG, events: Event[] };
+        }
+        if length > MAX_EVENT_BODY {
+            return Stream { status: LENGTH_OVERFLOW, events: Event[] };
+        }
+        if length > bytes.len() - at {
+            return Stream { status: TRUNCATED_EVENT, events: Event[] };
+        }
+        mut status = STREAM_OK;
+        end := at + length;
+        event := decode_event(bytes, tag, &mut at, end, &mut status);
+        if status != STREAM_OK {
+            return Stream { status: status, events: Event[] };
+        }
+        events.push(event);
+        at = end;
+    }
+    return Stream { status: STREAM_OK, events: events };
+}

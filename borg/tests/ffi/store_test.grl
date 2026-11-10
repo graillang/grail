@@ -1,77 +1,74 @@
-// Round-trip and refusal test for session-state persistence through the C OS ABI.
+// Round-trip and refusal test for the persisted session state: a typed event stream behind a
+// versioned frame, written and read through the C OS ABI.
 //
-// Every line is `<case> <result>`; the build script compares them. A refused file names its reason,
-// so a short file, a foreign magic and a length disagreement are distinguishable.
+// Every line is `<case> <name> <result>`; the build script compares them. A refused file names its
+// reason and returns no events, so a short file, a foreign magic, another version, a length
+// disagreement, a payload over the ceiling, an unknown event tag, a truncated event, an over-long
+// declared length, a bad field marker and trailing body bytes are all distinguishable.
 
 module store_test;
 
+use borg_events;
+use borg_json;
+use borg_store;
 use env;
 use sys_grail;
 use sys_grail::Error;
-use borg_store;
+
+fn append<a, b>(out: (&a mut u8[]), text: (&b [u8])) {
+    for byte in text {
+        out.push(byte);
+    }
+}
 
 fn line<a, b, c>(label: (&a [u8]), name: (&b [u8]), value: (&c [u8])) {
-    print(label);
-    print(" ");
-    print(name);
-    print(" ");
-    println(value);
+    mut out = u8[];
+    append(&mut out, label);
+    out.push(32);
+    append(&mut out, name);
+    out.push(32);
+    append(&mut out, value);
+    println(out.text());
+}
+
+// `<label> <name> <first> <second> <last>`.
+fn row<a, b, c, d, e>(label: (&a [u8]), name: (&b [u8]), first: (&c [u8]), second: (&d [u8]), last: (&e [u8])) {
+    mut out = u8[];
+    append(&mut out, label);
+    out.push(32);
+    append(&mut out, name);
+    out.push(32);
+    append(&mut out, first);
+    out.push(32);
+    append(&mut out, second);
+    out.push(32);
+    append(&mut out, last);
+    println(out.text());
 }
 
 fn reason(status: u64) -> string {
-    if status == borg_store::OK {
-        return "ok".text();
-    }
-    if status == borg_store::SHORT_FILE {
-        return "short-file".text();
-    }
-    if status == borg_store::BAD_MAGIC {
-        return "bad-magic".text();
-    }
-    if status == borg_store::LENGTH_MISMATCH {
-        return "length-mismatch".text();
-    }
-    return "write-failed".text();
+    if status == borg_store::OK { return "ok".text(); }
+    if status == borg_store::SHORT_FILE { return "short-file".text(); }
+    if status == borg_store::BAD_MAGIC { return "bad-magic".text(); }
+    if status == borg_store::LENGTH_MISMATCH { return "length-mismatch".text(); }
+    if status == borg_store::UNSUPPORTED_VERSION { return "unsupported-version".text(); }
+    if status == borg_store::PAYLOAD_TOO_LARGE { return "payload-too-large".text(); }
+    if status == borg_store::WRITE_SHORT { return "write-short".text(); }
+    if status == borg_store::RENAME_FAILED { return "rename-failed".text(); }
+    if status == borg_events::UNKNOWN_TAG { return "unknown-tag".text(); }
+    if status == borg_events::TRUNCATED_EVENT { return "truncated-event".text(); }
+    if status == borg_events::LENGTH_OVERFLOW { return "length-overflow".text(); }
+    if status == borg_events::BAD_FIELD { return "bad-field".text(); }
+    if status == borg_events::TRAILING_BYTES { return "trailing-bytes".text(); }
+    return "unnamed".text();
 }
 
-fn roundtrip<a, b, c>(directory: (&a [u8]), name: (&b [u8]), payload: (&c [u8])) -> u64 |? Error {
-    mut path = directory.text();
-    joined := path_join(&path, &name);
-    path = joined;
-    status := borg_store::persist(&path, &payload)?;
-    if status != 0 {
-        line("roundtrip", &name, "write-failed");
-        return 0;
+fn copy_text<a>(text: (&a [u8])) -> string {
+    mut out = u8[];
+    for byte in text {
+        out.push(byte);
     }
-    stored := borg_store::load(&path);
-    match stored {
-        value: borg_store::Loaded => {
-            if borg_store::loaded_status(&value) != borg_store::OK {
-                line("roundtrip", &name, "refused");
-                return 0;
-            }
-            loaded := borg_store::loaded_payload(&value);
-            if loaded.len() != payload.len() {
-                line("roundtrip", &name, "length-differs");
-                return 0;
-            }
-            mut index = 0;
-            mut same = true;
-            while index < payload.len() {
-                if loaded[index] != payload[index] {
-                    same = false;
-                }
-                index = index + 1;
-            }
-            if same {
-                line("roundtrip", &name, "ok");
-            } else {
-                line("roundtrip", &name, "bytes-differ");
-            }
-        },
-        failure: Error => { line("roundtrip", &name, "open-failed"); }
-    }
-    return 0;
+    return out.text();
 }
 
 fn path_join<a, b>(root: (&a [u8]), leaf: (&b [u8])) -> string {
@@ -86,60 +83,311 @@ fn path_join<a, b>(root: (&a [u8]), leaf: (&b [u8])) -> string {
     return out.text();
 }
 
-// Writes a raw byte vector (already framed or deliberately malformed) and reports how it loads.
-fn refusal<a, b, c>(directory: (&a [u8]), name: (&b [u8]), bytes: (&c [u8])) -> u64 |? Error {
-    mut path = directory.text();
+fn same<a, b>(left: (&a [u8]), right: (&b [u8])) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    for i in left.len() {
+        if left[i] != right[i] {
+            return false;
+        }
+    }
+    return true;
+}
+
+fn number_text(value: u64) -> string {
+    return format("{}", value);
+}
+
+// ---- the format, written out by hand so a hostile file can be built on purpose ----
+
+fn put_uint(out: (&mut u8[]), value: u64, width: u64) {
+    mut rest = value;
+    mut index = u64(0);
+    while index < width {
+        out.push(u8(rest % 256));
+        rest = rest / 256;
+        index = index + 1;
+    }
+}
+
+fn put_text<a>(out: (&mut u8[]), text: (&a [u8])) {
+    put_uint(out, text.len(), 4);
+    for byte in text {
+        out.push(byte);
+    }
+}
+
+fn put_event<a>(out: (&mut u8[]), tag: u64, body: (&a [u8])) {
+    put_uint(out, tag, 1);
+    put_uint(out, body.len(), 4);
+    for byte in body {
+        out.push(byte);
+    }
+}
+
+// The envelope every event body opens with: id, session_id, sequence, created_at.
+fn put_envelope(out: (&mut u8[])) {
+    put_text(out, "e9");
+    put_text(out, "s1");
+    put_uint(out, 9, 8);
+    put_text(out, "2026-11-10T00:00:09Z");
+}
+
+// ---- files ----
+
+fn write_file<a, b, c>(directory: (&a [u8]), name: (&b [u8]), bytes: (&c [u8])) -> u64 |? Error {
+    mut path = copy_text(&directory);
     joined := path_join(&path, &name);
     path = joined;
     file := sys_grail::open(&path, sys_grail::OPEN_WRITE + sys_grail::OPEN_CREATE + sys_grail::OPEN_TRUNCATE, 384)?;
     written := sys_grail::write(file, &bytes)?;
-    if written != bytes.len() {
-        line("refuse", &name, "write-failed");
-        return 0;
-    }
     sys_grail::close(file)?;
-    stored := borg_store::load(&path);
-    match stored {
+    if written != bytes.len() {
+        return 1;
+    }
+    return 0;
+}
+
+// Writes raw bytes and reports how the store names the file's refusal, with the number of events it
+// handed back (always 0 for a refusal).
+fn inspected<a, b, c>(directory: (&a [u8]), name: (&b [u8]), bytes: (&c [u8])) -> string |? Error {
+    status := write_file(&directory, &name, &bytes)?;
+    if status != 0 {
+        return "write-failed".text();
+    }
+    mut path = copy_text(&directory);
+    joined := path_join(&path, &name);
+    path = joined;
+    loaded := borg_store::load(&path);
+    match loaded {
         value: borg_store::Loaded => {
             shown := reason(borg_store::loaded_status(&value));
-            line("refuse", &name, &shown);
+            count := number_text(borg_store::loaded_count(&value));
+            mut out = u8[];
+            append(&mut out, &shown);
+            out.push(32);
+            append(&mut out, &count);
+            return out.text();
         },
-        failure: Error => { line("refuse", &name, "missing"); }
+        failure: Error => { return "missing".text(); }
     }
+}
+
+fn refusal<a, b, c>(directory: (&a [u8]), name: (&b [u8]), payload: (&c [u8])) -> u64 |? Error {
+    framed := borg_store::frame(&payload);
+    shown := inspected(&directory, &name, &framed)?;
+    line("refuse", &name, &shown);
+    return 0;
+}
+
+fn refusal_raw<a, b, c>(directory: (&a [u8]), name: (&b [u8]), bytes: (&c [u8])) -> u64 |? Error {
+    shown := inspected(&directory, &name, &bytes)?;
+    line("refuse", &name, &shown);
+    return 0;
+}
+
+// ---- events ----
+
+fn push_event(events: (&mut borg_events::Event[]), text: (&[u8])) -> bool {
+    match borg_json::parse(&text) {
+        document: borg_json::Json => {
+            match borg_events::decode(&document) {
+                event: borg_events::Event => {
+                    events.push(event);
+                    return true;
+                },
+                failure: borg_events::EventError => { return false; }
+            }
+        },
+        failure: borg_json::ParseError => { return false; }
+    }
+}
+
+// Writes the stream, reads it back, and prints what came back: the event count, the payload size the
+// writer chose, and one line per event in file order. The round-trip line compares each reloaded
+// event's own wire form with the original's, so a field that changed type or went missing shows up.
+fn roundtrip<a, b>(directory: (&a [u8]), name: (&b [u8]), events: (&borg_events::Event[])) -> u64 |? Error {
+    mut path = copy_text(&directory);
+    joined := path_join(&path, &name);
+    path = joined;
+    status := borg_store::persist(&path, &events)?;
+    if status != borg_store::OK {
+        line("roundtrip", &name, &reason(status));
+        return 0;
+    }
+    loaded := borg_store::load(&path);
+    match loaded {
+        value: borg_store::Loaded => {
+            if borg_store::loaded_status(&value) != borg_store::OK {
+                line("roundtrip", &name, &reason(borg_store::loaded_status(&value)));
+                return 0;
+            }
+            stored := borg_store::loaded_events(&value);
+            payload := borg_events::encode_stream(&events);
+            line("stream", &name, &number_text(stored.len()));
+            line("payload", &name, &number_text(payload.len()));
+            mut index = 0;
+            mut ok = stored.len() == events.len();
+            while index < events.len() {
+                original := borg_events::wire(&events[index]);
+                mut shown = "-".text();
+                if index < stored.len() {
+                    shown = borg_events::wire(&stored[index]);
+                }
+                if !same(&original, &shown) {
+                    ok = false;
+                }
+                tag := borg_events::tag_of(&events[index]);
+                row("event", &name, &number_text(index), &tag, &shown);
+                index = index + 1;
+            }
+            if ok {
+                line("roundtrip", &name, "ok");
+            } else {
+                line("roundtrip", &name, "differs");
+            }
+        },
+        failure: Error => { line("roundtrip", &name, "open-failed"); }
+    }
+    return 0;
+}
+
+fn empty_stream<a>(directory: (&a [u8])) -> u64 |? Error {
+    mut none = borg_events::Event[];
+    roundtrip(&directory, &"empty.bin", &none)?;
+    return 0;
+}
+
+// One event of every variant, in sequence order: numbers (sequence, usage_tokens), text, booleans and
+// optional values that are present on some events and absent on others.
+fn each_variant<a>(directory: (&a [u8])) -> u64 |? Error {
+    mut events = borg_events::Event[];
+    mut built = push_event(&mut events, "{\"id\":\"e1\",\"session_id\":\"s1\",\"sequence\":1,\"created_at\":\"2026-11-10T00:00:01Z\",\"kind\":{\"type\":\"session_started\"}}");
+    if built {
+        built = push_event(&mut events, "{\"id\":\"e2\",\"session_id\":\"s1\",\"sequence\":2,\"created_at\":\"2026-11-10T00:00:02Z\",\"kind\":{\"type\":\"session_titled\",\"title\":\"typed events\",\"generated\":true,\"usage_tokens\":1234,\"model\":null}}");
+    }
+    if built {
+        built = push_event(&mut events, "{\"id\":\"e3\",\"session_id\":\"s1\",\"sequence\":3,\"created_at\":\"2026-11-10T00:00:03Z\",\"kind\":{\"type\":\"status_changed\",\"status\":\"waiting_for_approval\",\"detail\":\"needs a human\"}}");
+    }
+    if built {
+        built = push_event(&mut events, "{\"id\":\"e4\",\"session_id\":\"s1\",\"sequence\":4,\"created_at\":\"2026-11-10T00:00:04Z\",\"kind\":{\"type\":\"message\",\"message_id\":\"m1\",\"actor\":\"user\",\"text\":\"hello, world\",\"attachments\":[\"a.txt\",\"b.txt\"],\"status\":\"delivered\",\"delivery\":null}}");
+    }
+    if built {
+        built = push_event(&mut events, "{\"id\":\"e5\",\"session_id\":\"s1\",\"sequence\":5,\"created_at\":\"2026-11-10T00:00:05Z\",\"kind\":{\"type\":\"message_delta\",\"message_id\":\"m1\",\"delta\":\"lo, wor\"}}");
+    }
+    if !built {
+        line("setup", &"each.bin", "bad-document");
+        return 0;
+    }
+    roundtrip(&directory, &"each.bin", &events)?;
     return 0;
 }
 
 fn malformed<a>(directory: (&a [u8])) -> u64 |? Error {
-    // A header-only file is short; a foreign magic is refused by name; a length that disagrees with
-    // the payload is refused rather than truncated or padded.
-    header_only := borg_store::frame(&u8[]);
-    mut truncated = u8[];
+    // Frame-level refusals: a cut header, a foreign magic, two versions this build does not read
+    // (1 was the opaque payload), a length that disagrees with the bytes, and a declared length over
+    // the ceiling, refused before the file is read.
+    framed := borg_store::frame(&u8[]);
+    mut short = u8[];
     mut index = 0;
-    while index < header_only.len() - 1 {
-        truncated.push(header_only[index]);
+    while index < framed.len() - 1 {
+        short.push(framed[index]);
         index = index + 1;
     }
-    refusal(&directory, &"short.bin".text(), &truncated)?;
+    refusal_raw(&directory, "short.bin", &short)?;
+    refusal_raw(&directory, "empty-file.bin", &u8[])?;
 
-    mut foreign = borg_store::frame(&u8[65, 66]);
-    foreign[0] = 88;
-    refusal(&directory, &"magic.bin".text(), &foreign)?;
+    mut magic = borg_store::frame(&u8[]);
+    magic[0] = 88;
+    refusal_raw(&directory, "magic.bin", &magic)?;
 
-    mut longer = borg_store::frame(&u8[65, 66]);
-    longer.push(67);
-    refusal(&directory, &"length.bin".text(), &longer)?;
+    mut old = borg_store::frame(&u8[]);
+    old[3] = 49;
+    refusal_raw(&directory, "version-one.bin", &old)?;
 
-    empty := u8[];
-    refusal(&directory, &"empty.bin".text(), &empty)?;
+    mut future = borg_store::frame(&u8[]);
+    future[3] = 51;
+    refusal_raw(&directory, "version-three.bin", &future)?;
+
+    mut longer = borg_store::frame(&u8[]);
+    longer.push(0);
+    refusal_raw(&directory, "length.bin", &longer)?;
+
+    mut oversized = u8[];
+    oversized.push(66);
+    oversized.push(71);
+    oversized.push(83);
+    oversized.push(50);
+    put_uint(&mut oversized, borg_store::MAX_PAYLOAD + 1, 8);
+    refusal_raw(&directory, "oversized.bin", &oversized)?;
+
+    // Event-level refusals: a tag outside the union, a stream that ends inside an event header, a
+    // stream whose last event lost its bytes, and a declared body length over the per-event ceiling.
+    mut unknown = u8[];
+    put_event(&mut unknown, 9, &u8[]);
+    refusal(&directory, "unknown-tag.bin", &unknown)?;
+
+    mut mid_header = u8[];
+    put_event(&mut mid_header, 1, &u8[]);
+    mut cut = u8[];
+    mut at = 0;
+    while at < mid_header.len() - 2 {
+        cut.push(mid_header[at]);
+        at = at + 1;
+    }
+    refusal(&directory, "mid-header.bin", &cut)?;
+
+    mut one = borg_events::Event[];
+    push_event(&mut one, "{\"id\":\"e7\",\"session_id\":\"s1\",\"sequence\":7,\"created_at\":\"2026-11-10T00:00:07Z\",\"kind\":{\"type\":\"message_delta\",\"message_id\":\"m7\",\"delta\":\"tail\"}}");
+    whole := borg_events::encode_stream(&one);
+    mut truncated = u8[];
+    mut kept = 0;
+    while kept < whole.len() - 1 {
+        truncated.push(whole[kept]);
+        kept = kept + 1;
+    }
+    refusal(&directory, "truncated.bin", &truncated)?;
+
+    mut overflow = u8[];
+    put_uint(&mut overflow, 2, 1);
+    put_uint(&mut overflow, 4294967295, 4);
+    refusal(&directory, "overflow.bin", &overflow)?;
+
+    // A titled body whose `generated` byte is 7 is not a boolean, and a started body with a byte past
+    // its last field is not that event any more: both are refused rather than read as plausible.
+    mut titled = u8[];
+    put_envelope(&mut titled);
+    put_text(&mut titled, "typed events");
+    put_uint(&mut titled, 7, 1);
+    mut bad_bool = u8[];
+    put_event(&mut bad_bool, 2, &titled);
+    refusal(&directory, "bad-bool.bin", &bad_bool)?;
+
+    mut started = u8[];
+    put_envelope(&mut started);
+    started.push(0);
+    mut trailing = u8[];
+    put_event(&mut trailing, 1, &started);
+    refusal(&directory, "trailing.bin", &trailing)?;
+
+    // An optional value with a presence byte that is neither 0 nor 1 is refused too.
+    mut status = u8[];
+    put_envelope(&mut status);
+    put_text(&mut status, "running");
+    put_uint(&mut status, 2, 1);
+    mut bad_presence = u8[];
+    put_event(&mut bad_presence, 3, &status);
+    refusal(&directory, "bad-presence.bin", &bad_presence)?;
     return 0;
 }
 
 fn missing_file<a>(directory: (&a [u8])) -> u64 |? Error {
-    mut path = directory.text();
-    joined := path_join(&path, "absent.bin".text());
+    mut path = copy_text(&directory);
+    joined := path_join(&path, "absent.bin");
     path = joined;
-    stored := borg_store::load(&path);
-    match stored {
+    loaded := borg_store::load(&path);
+    match loaded {
         value: borg_store::Loaded => { line("refuse", &"absent.bin", "accepted-a-missing-file"); },
         failure: Error => { line("refuse", &"absent.bin", "missing"); }
     }
@@ -160,7 +408,7 @@ fn main() -> u64 {
     match outcome {
         status: u64 => { return status; },
         failure: Error => {
-            line("suite", &"ffi".text(), "error");
+            line("suite", &"ffi", "error");
             return 1;
         }
     }
@@ -168,9 +416,8 @@ fn main() -> u64 {
 
 fn run<a>(directory: (&a [u8])) -> u64 |? Error {
     sys_grail::init()?;
-    roundtrip(&directory, &"empty.bin", &u8[])?;
-    roundtrip(&directory, &"small.bin", &u8[1, 2, 3, 4, 5])?;
-    roundtrip(&directory, &"state.bin", &"{\"sequence\":3,\"status\":\"running\"}".text())?;
+    empty_stream(&directory)?;
+    each_variant(&directory)?;
     malformed(&directory)?;
     missing_file(&directory)?;
     sys_grail::shutdown()?;
