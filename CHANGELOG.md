@@ -20,6 +20,9 @@
   - `llvm`: `eq`, `starts`, `ends`, `occurs_at`, `has`, `member`, `is_local_label`, `legacy_base`,
     `is_xmm`, `set_has`, `callee_saved`. `frame_split` stays u64: it is stored in the lowering
     state's `split` field.
+  - `machine`: `eq`, `starts`, `small_reg`, `atomic_instruction`, `c_abi`. The register-width codes
+    `rw`/`sw` stay numeric (0, 1 or 2), so the two `eq` results that initialize them are read through
+    an `if`.
 - Maps iterate with `for key, value in &map`, in insertion order, and `for key, value in &mut map` binds the
   same shared key with an exclusive value (`value := map.value_at_mut(i)`), so values update in place. The loop
   holds one reference to the map throughout: inserting into it inside the body is rejected, a shared loop cannot
