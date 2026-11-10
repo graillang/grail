@@ -201,6 +201,12 @@ executes on each target it runs on:
 | RISC-V 64 (LP64D) | A record over 16 bytes (2xXLEN) is passed by reference to a caller copy. At or below 16 bytes, one or two fields with at least one float take a register each in field order (float fields in `fa0`-`fa7`, integer fields in `a0`-`a7`); every other shape is packed into one integer register per eightbyte. |
 | Windows x86-64 and ARM64 | **Refused**, with a diagnostic. MSVC passes 1/2/4/8-byte structs in a single integer register and everything larger by reference to a caller copy, which is not the AAPCS64 rule; there is no Windows FFI execution path in this repository, so `byval` is refused there rather than guessed. |
 
+Two corners are stated rather than claimed: an empty record passes nothing (no register and no stack
+word), and macOS arm64 - compiled and linked but never executed here, since there is no macOS runner -
+uses this same AAPCS64 classification; the one place it could differ is a byval record spilled to the
+stack once the argument registers are exhausted, where Apple packs stack arguments by size instead
+of using whole 8-byte slots.
+
 Refused, each with its own diagnostic rather than an approximation:
 
 - `byval` on anything that is not an `extern "C"` record (`byval must name an extern "C" record
