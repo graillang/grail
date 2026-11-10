@@ -17204,8 +17204,18 @@ fn expr_expected<a>(c: (&a mut C), min: u64, expected: u64) -> Val {
                                             t = binary(&mut c, k, snap, right.t);
                                             ty = bool_type(&mut c);
                                         } else {
-                                            if (c.raw == 0) & (ty_kind(&mut c, ty) == 18) {
-                                                require_type(&mut c, rty, ty);
+                                            // A stated sized-integer type decides the operation's
+                                            // signedness and width, including in an `unsafe module`
+                                            // whose other values are untyped words: raw mode skips
+                                            // the *checks*, not the type.
+                                            mut it = ty;
+                                            if (ty_kind(&mut c, it) != 18) & (ty_kind(&mut c, rty) == 18) {
+                                                it = rty;
+                                            }
+                                            if ty_kind(&mut c, it) == 18 {
+                                                if c.raw == 0 {
+                                                    require_type(&mut c, rty, ty);
+                                                }
                                                 if k == 38
                                                     || k == 94
                                                     || k == 124
@@ -17223,7 +17233,7 @@ fn expr_expected<a>(c: (&a mut C), min: u64, expected: u64) -> Val {
                                                         k,
                                                         snap,
                                                         right.t,
-                                                        ty
+                                                        it
                                                     );
                                                     t = result.t;
                                                     ty = result.ty;
@@ -17516,8 +17526,10 @@ fn compound_value<a>(c: (&a mut C), op: u64, old: u64, v: Val, ty: u64) -> Val {
         }
         return val(value, ty);
     }
-    if (c.raw == 0) & (ty_kind(&mut c, ty) == 18) {
-        require_type(&mut c, v.ty, ty);
+    if ty_kind(&mut c, ty) == 18 {
+        if c.raw == 0 {
+            require_type(&mut c, v.ty, ty);
+        }
         r := int_binary(&mut c, op, old, v.t, ty);
         return val(r.t, ty);
     }
@@ -19941,15 +19953,17 @@ fn assignment_tail<a>(c: (&a mut C), l: u64, id: u64, ty: u64, target: u64, thro
             }
             v = val(value, expected);
         } else {
-            if (c.raw == 0) & (ty_kind(&mut c, expected) == 18) {
-                v = hint_use(&mut c, v, vstart, vend, expected);
-                mut vty = v.ty;
-                if (vty == 0) & (c.lit_start == vstart) & (c.lit_end == vend) {
-                    if adopt_literal(&mut c, vstart, vend, expected) {
-                        vty = expected;
+            if ty_kind(&mut c, expected) == 18 {
+                if c.raw == 0 {
+                    v = hint_use(&mut c, v, vstart, vend, expected);
+                    mut vty = v.ty;
+                    if (vty == 0) & (c.lit_start == vstart) & (c.lit_end == vend) {
+                        if adopt_literal(&mut c, vstart, vend, expected) {
+                            vty = expected;
+                        }
                     }
+                    require_type(&mut c, vty, expected);
                 }
-                require_type(&mut c, vty, expected);
                 r := int_binary(&mut c, op, oldvalue, v.t, expected);
                 v = val(r.t, expected);
             } else {

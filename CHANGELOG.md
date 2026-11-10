@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Fixed: a sized integer in an `unsafe module` (the runtime's raw mode) computed its arithmetic as
+  an untyped unsigned word, so `x: i32 = 0; x = x - 1` aborted in checked mode instead of producing
+  `-1`, and an `i64` comparison such as `status < 0` was an unsigned compare. Raw mode skips the
+  *checks* for a stated integer type, not the type itself: the binary operator path, compound
+  assignment and `compound_value` now pick `int_binary` whenever an operand's type is a sized
+  integer (taking it from either operand), so subtraction, comparison, shifts, division and
+  multiplication keep the stated signedness and width inside `unsafe module runtime`/`darwin` code.
+  `tests/native-cases.json` `raw-module-sized-integer-arithmetic` pins `0 - 1` as `-1`, a signed
+  comparison, `i8` 120 + 7 and an `i64` comparison, with an `extern "C"` declaration that carries a
+  `cfn` parameter in the same module - the shape the report named, though the `cfn` itself was not
+  the trigger: any `unsafe module` showed it.
 - `grail profile [--rate N] [--out FILE] -- PROGRAM [ARGS]` samples a compiled Grail program and
   prints a per-function table (`samples`, `share`, `function`, `module`) plus `[unknown]` and
   `total` rows. The sampler is part of the program's runtime, not a wrapper around `perf`: on Linux
