@@ -2,6 +2,43 @@
 
 ## Unreleased
 
+- Explicit environments for spawned processes: `host::command_with(argv, env)` runs `argv` with
+  `env` as the child's *whole* environment and returns the same status encoding `host::command`
+  returns (0–255 exit code, 128+N for a signal, 256+errno when the child could not be started, and
+  278 = 256+EINVAL for a vector or entry that cannot be used). Nothing is inherited: an empty vector
+  means the child starts with no environment from us, and a malformed entry (no `=`, or an empty
+  name) is refused before anything is spawned, because `execve` would otherwise start the child with
+  no environment at all and `CreateProcess` rejects the block. Both vectors are consumed, like
+  `host::command`. `host::environment()` reports this process's own environment as `NAME=VALUE`
+  entries, which is the additive spelling made explicit — `env := host::environment();
+  env.push("APP_MODE=batch".copy()); host::command_with(argv, env)`. The executable search stays in
+  the parent against the parent's `PATH`, so an explicit environment does not stop `"sh"` from being
+  found. The spawn moved out of the portable runtime into the platform modules: `rt_spawn_wait` is
+  `fork`/`execve`/`wait4` in `compiler/os-linux.grl` and `compiler/darwin.grl`, and `CreateProcessA`
+  with an explicit (sorted, double-NUL-terminated) environment block in `compiler/os-windows.grl`,
+  which also makes `host::command` work on windows-x86_64 for the first time: a NULL block inherits,
+  a non-NULL one replaces. The Windows argument vector is quoted back into the command line with the
+  `CommandLineToArgvW` rules; the ARM64 PE target reports the call as unimplemented because the
+  ARM64 Win32 call path passes seven register arguments and `CreateProcessA` needs ten. Tests: six
+  native cases (`command-with-env-carries-its-entries`, `-empty-env-clears-everything`,
+  `-built-from-the-inherited-one`, `command-without-env-still-inherits`, `-refuses-malformed-entry`,
+  `-reports-a-signalled-child`) and four Windows cases executed under Wine (`command-with-env`,
+  `-inherit-env`, `-empty-env`, `-argv-round-trip`) plus one static ARM64 build. A new host builtin
+  needs a bootstrap reseed before a plain `bun tools/native.mjs build` works (`bun
+  tools/bootstrap.mjs update all`, owned by the bootstrap workstream); until then build with
+  `GRAIL_COMPILER` pointing at a compiler staged from this tree, which is how the suites for this
+  change were run.
+- `grail profile` no longer uses a rendezvous file: the arming request
+  (`GRAIL_PROFILE="1 RATE CAPACITY SAMPLES"`) travels in the target's environment through
+  `host::command_with`, the samples go to a private `mkdir`-claimed scratch directory under
+  `TMPDIR`, and nothing is written to the target's working directory. A killed run can no longer
+  leave a stale request behind, the target no longer needs a writable working directory, and
+  concurrent profiles no longer collide on `.grail-profile/`. The runtime reads the variable at
+  startup instead of a config file. A profiled program that spawns Grail children with the
+  inherited environment now arms them too (they share one sample file); a child started with an
+  explicit environment is not armed unless the request is copied into it. `tools/test-profile.mjs`
+  now also asserts that the target still sees a variable the runner set, and that no
+  `grail-profile-` scratch directory is left behind.
 - B1 stage 1, per-module emission: `grail build --split` writes one assembly file per module
   (`OUT.NNN.module.s`) plus `OUT.parts`, assembles the parts concurrently and links them once,
   instead of one `.s` for the whole program. Emission is still a single pass — the optimizer inlines

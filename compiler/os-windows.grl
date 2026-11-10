@@ -439,6 +439,228 @@ fn rt_win_join_wait(addr: u64) -> u64 {
     return 0;
 }
 
+// ---- process creation ------------------------------------------------------------------------
+// CreateProcessA takes one command line, not an argument vector, so every argument is quoted back
+// into a line that rt_win_split (and CommandLineToArgvW) reads as the same vector: a backslash only
+// escapes a quote when it precedes one, and a quote is escaped by doubling the backslashes in front
+// of it.
+fn rt_win_quote(dst: u64, at: u64, src: u64) -> u64 {
+    mut len = 0;
+    mut need = 0;
+    while raw_byte(src + len) != 0 {
+        b := raw_byte(src + len);
+        if (b == 32) + (b == 9) + (b == 34) {
+            need = 1;
+        }
+        len += 1;
+    }
+    // An empty argument must still be quoted, or it disappears from the child's vector.
+    if len == 0 {
+        need = 1;
+    }
+    if need == 0 {
+        mut i = 0;
+        while i < len {
+            raw_putbyte(dst + at + i, raw_byte(src + i));
+            i += 1;
+        }
+        return at + len;
+    }
+    mut out = at;
+    raw_putbyte(dst + out, 34);
+    out += 1;
+    mut i = 0;
+    while i < len {
+        mut slashes = 0;
+        while raw_byte(src + i) == 92 {
+            slashes += 1;
+            i += 1;
+        }
+        b := raw_byte(src + i);
+        if b == 0 {
+            // Trailing backslashes: doubled, so they cannot escape the closing quote.
+            slashes = slashes * 2;
+        } else {
+            if b == 34 {
+                // A literal quote: 2N+1 backslashes, then the quote.
+                slashes = slashes * 2 + 1;
+            }
+        }
+        mut k = 0;
+        while k < slashes {
+            raw_putbyte(dst + out, 92);
+            out += 1;
+            k += 1;
+        }
+        if b == 0 {
+            break;
+        }
+        raw_putbyte(dst + out, b);
+        out += 1;
+        i += 1;
+    }
+    raw_putbyte(dst + out, 34);
+    return out + 1;
+}
+fn rt_win_upper(b: u64) -> u64 {
+    if (96 < b) & (b < 123) {
+        return b - 32;
+    }
+    return b;
+}
+// Name order, case-insensitively: CreateProcess requires the block sorted that way.
+fn rt_win_env_less(a: u64, b: u64) -> u64 {
+    mut i = 0;
+    while 1 {
+        x := rt_win_upper(raw_byte(a + i));
+        y := rt_win_upper(raw_byte(b + i));
+        if x != y {
+            return x < y;
+        }
+        if x == 0 {
+            return 0;
+        }
+        i += 1;
+    }
+}
+// A Win32 environment block: the entries in name order, each NUL-terminated, the list closed by one
+// more NUL. Unlike an inherited environment (CreateProcess with a NULL block), this block is the
+// child's whole environment: nothing is added from this process unless it is in the table.
+fn rt_win_env_block(envp: u64) -> u64 {
+    mut count = 0;
+    while raw_load(envp + count * 8) != 0 {
+        count += 1;
+    }
+    order := rt_alloc((count + 1) * 8);
+    mut i = 0;
+    while i < count {
+        raw_store(order + i * 8, raw_load(envp + i * 8));
+        i += 1;
+    }
+    i = 1;
+    while i < count {
+        mut j = i;
+        while 0 < j {
+            if rt_win_env_less(raw_load(order + j * 8), raw_load(order + (j - 1) * 8)) == 0 {
+                break;
+            }
+            moved := raw_load(order + j * 8);
+            raw_store(order + j * 8, raw_load(order + (j - 1) * 8));
+            raw_store(order + (j - 1) * 8, moved);
+            j -= 1;
+        }
+        i += 1;
+    }
+    mut total = 1;
+    i = 0;
+    while i < count {
+        p := raw_load(order + i * 8);
+        mut n = 0;
+        while raw_byte(p + n) != 0 {
+            n += 1;
+        }
+        total += n + 1;
+        i += 1;
+    }
+    block := rt_alloc(total);
+    mut at = 0;
+    i = 0;
+    while i < count {
+        p := raw_load(order + i * 8);
+        mut n = 0;
+        while raw_byte(p + n) != 0 {
+            raw_putbyte(block + at, raw_byte(p + n));
+            at += 1;
+            n += 1;
+        }
+        raw_putbyte(block + at, 0);
+        at += 1;
+        i += 1;
+    }
+    raw_putbyte(block + at, 0);
+    rt_free(order);
+    return block;
+}
+// Runs `argv` and waits for it. `envp` is a NUL-terminated "NAME=VALUE" table that becomes the
+// child's whole environment, or 0 for the inherited one (CreateProcess with a NULL block). The child
+// gets this console's standard handles because dwFlags is 0, and CreateProcess searches PATH itself
+// when the first argument has no directory, so `paths` (built for the POSIX exec loop) is unused.
+// Same status convention as os-linux.grl: 0..255 exit code, 256+errno on failure.
+fn rt_spawn_wait(paths: u64, argv: u64, envp: u64) -> u64 {
+    if raw_target() == 4 {
+        // windows-aarch64: the ARM64 Win32 call path passes seven register arguments and
+        // CreateProcessA needs ten, so it is reported as unimplemented instead of mis-called.
+        return wrapping_sub(0, 38);
+    }
+    mut size = 1;
+    mut count = 0;
+    while raw_load(argv + count * 8) != 0 {
+        p := raw_load(argv + count * 8);
+        mut n = 0;
+        while raw_byte(p + n) != 0 {
+            n += 1;
+        }
+        size += n * 2 + 4;
+        count += 1;
+    }
+    line := rt_alloc(size);
+    mut at = 0;
+    mut i = 0;
+    while i < count {
+        if i != 0 {
+            raw_putbyte(line + at, 32);
+            at += 1;
+        }
+        at = rt_win_quote(line, at, raw_load(argv + i * 8));
+        i += 1;
+    }
+    raw_putbyte(line + at, 0);
+    mut block = 0;
+    if envp != 0 {
+        block = rt_win_env_block(envp);
+    }
+    // STARTUPINFOA is 104 bytes on Win64 and PROCESS_INFORMATION 24; both zeroed, so no standard
+    // handle is overridden and no console is forced.
+    startup := rt_alloc(128);
+    info := rt_alloc(32);
+    i = 0;
+    while i < 128 {
+        raw_store(startup + i, 0);
+        i += 8;
+    }
+    i = 0;
+    while i < 32 {
+        raw_store(info + i, 0);
+        i += 8;
+    }
+    raw_store(startup, 104);
+    mut result = 0;
+    started := raw_win32(CreateProcessA, 0, line, 0, 0, 0, 0, block, 0, startup, info);
+    if started == 0 {
+        result = 256 + wrapping_sub(0, rt_win_errno());
+    } else {
+        process := raw_load(info);
+        thread := raw_load(info + 8);
+        code := rt_win_scratch();
+        raw_store(code, 0);
+        raw_win32(WaitForSingleObject, process, 4294967295);
+        if raw_win32(GetExitCodeProcess, process, code) == 0 {
+            result = 256 + wrapping_sub(0, rt_win_errno());
+        } else {
+            result = raw_load(code) & 255;
+        }
+        raw_win32(CloseHandle, thread);
+        raw_win32(CloseHandle, process);
+    }
+    rt_free(line);
+    rt_free(startup);
+    rt_free(info);
+    if block != 0 {
+        rt_free(block);
+    }
+    return result;
+}
+
 // Process setup for the PE entry: argv from GetCommandLineA, envp from GetEnvironmentStringsA.
 // Both live in untracked mappings so they do not count as user allocations at shutdown.
 fn rt_os_init() -> u64 {

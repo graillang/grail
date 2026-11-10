@@ -236,5 +236,33 @@
     "stdout": "49044\n21\n3\n-7\n100000000000\n42\n9\n77\n154\n6\n7\n42\n",
     "status": 0,
     "note": "extern records embedded by value at C offsets"
+  },
+  {
+    "name": "command-with-env",
+    "source": "use host;\nfn main() {\n    mut env = u8[][];\n    env.push(\"FOO=bar\".copy());\n    mut argv = u8[][];\n    argv.push(\"cmd\".copy());\n    argv.push(\"/c\".copy());\n    argv.push(\"if \\\"%FOO%\\\"==\\\"bar\\\" (exit 3) else (exit 9)\".copy());\n    println(host::command_with(argv, env));\n}\n",
+    "stdout": "3\n",
+    "status": 0,
+    "note": "CreateProcessA with an explicit environment block: FOO reaches the child"
+  },
+  {
+    "name": "command-inherit-env",
+    "source": "use host;\nfn main() {\n    mut argv = u8[][];\n    argv.push(\"cmd\".copy());\n    argv.push(\"/c\".copy());\n    argv.push(\"if defined PATH (exit 5) else (exit 6)\".copy());\n    println(host::command(argv));\n}\n",
+    "stdout": "5\n",
+    "status": 0,
+    "note": "host::command passes a NULL environment block, so the child keeps this process's variables"
+  },
+  {
+    "name": "command-empty-env",
+    "source": "use host;\nfn main() {\n    mut env = u8[][];\n    mut argv = u8[][];\n    argv.push(\"cmd\".copy());\n    argv.push(\"/c\".copy());\n    argv.push(\"if defined PATH (exit 5) else (exit 6)\".copy());\n    println(host::command_with(argv, env));\n}\n",
+    "stdout": "6\n",
+    "status": 0,
+    "note": "an explicit empty block replaces the environment; Wine still adds its own system variables, PATH is not one of them"
+  },
+  {
+    "name": "command-argv-round-trip",
+    "source": "use host;\nfn main() {\n    if host::argc() == 3 {\n        println(host::arg(1));\n        println(host::arg(2));\n    } else {\n        if host::argc() == 1 {\n            mut env = host::environment();\n            mut argv = u8[][];\n            argv.push(host::arg(0));\n            argv.push(\"one two\".copy());\n            argv.push(\"q\\\"uote\\\\ tail\".copy());\n            println(host::command_with(argv, env));\n        } else {\n            println(host::argc());\n        }\n    }\n}\n",
+    "stdout": "one two\nq\"uote\\ tail\n0\n",
+    "status": 0,
+    "note": "the argument vector is quoted back into a command line: a spaced argument, a literal quote and a backslash reach the child unchanged"
   }
 ]
