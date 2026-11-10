@@ -277,11 +277,13 @@ pub fn twice(x: u64) -> u64 {
   assert.match(original, /type util::Stream handle params=0 lifetimes=0 transfer=1 share=0/, 'the audited handle contract must travel');
   const manifestPath = join(ifaces, 'interfaces.manifest');
 
-  // (c1) a changed `transfer` is refused by the interface's own digest.
+  // (c1) a changed `transfer` is refused: the manifest pins the bytes the emitting run wrote, so an
+  // edit to the audit result never reaches the checker.
   writeFileSync(util, original.replace('transfer=1 share=0', 'transfer=0 share=0'));
   const edited = compile(files, join(directory, 'edited'), ['--interface', ifaces]);
   assert.equal(edited.status, 1, 'a tampered transfer must be refused');
-  assert.match(edited.output, /changed after it was written/, `the refusal must name the edit: ${edited.output}`);
+  assert.match(edited.output, /module `util`: the interface file does not match the manifest/, `the refusal must name the module and the manifest: ${edited.output}`);
+  assert.match(edited.output, /manifest says \S+, the file is \S+/, 'the refusal must show both digests');
 
   // (c2) re-digesting the edit does not launder it: the manifest pins the bytes that were written.
   const tampered = original.replace('transfer=1 share=0', 'transfer=0 share=0');
@@ -313,7 +315,7 @@ pub fn twice(x: u64) -> u64 {
   const envRefused = compile(files, join(directory, 'env'), ['--interface', ifaces, '--verify-interface']);
   assert.equal(envRefused.status, 1, 'a tampered env entry must be refused');
   assert.match(envRefused.output, /module `util` does not match this interface/, `the env refusal must name the module: ${envRefused.output}`);
-  assert.match(envRefused.output, /env|closure/, 'the env refusal must show the injected entry');
+  assert.match(envRefused.output, /env|closure|field/, 'the env refusal must show the injected entry');
 
   // Restore and prove the interface still builds, so the refusals above are about the edit.
   writeFileSync(util, original);
