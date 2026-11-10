@@ -354,6 +354,8 @@ function testTarget(platformId, options = {}) {
   if (options.full && target.id === 'linux-x86_64') {
     const cli = spawnSync('bun', ['tools/test-cli.mjs'], { cwd: root, stdio: 'inherit', env: { ...process.env, GRAIL_COMPILER: compiler } });
     if (cli.status !== 0) throw new Error(`linux-x86_64 CLI tests failed (${cli.status})`);
+    const authority = spawnSync('bun', ['tools/test-authority.mjs'], { cwd: root, stdio: 'inherit', env: { ...process.env, GRAIL_COMPILER: compiler } });
+    if (authority.status !== 0) throw new Error(`linux-x86_64 authority tests failed (${authority.status})`);
   }
   return { platform: target.id, compiler, mode: 'native', status: 'passed' };
 }
