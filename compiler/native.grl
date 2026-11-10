@@ -328,16 +328,16 @@ struct C {
     none_end: u64
 }
 
-fn same<a, b>(x: &a [u8], y: &b [u8]) -> u64 {
+fn same<a, b>(x: &a [u8], y: &b [u8]) -> bool {
     if x.len() != y.len() {
-        return 0;
+        return false;
     }
     for i in x.len() {
         if x[i] != y[i] {
-            return 0;
+            return false;
         }
     }
-    return 1;
+    return true;
 }
 fn div(n: u64, d: u64) -> u64 {
     mut q = 0;
@@ -1032,7 +1032,7 @@ fn darwin_line<a, b>(out: (&a mut u8[]), line: &b [u8]) -> unit {
             bare = 1;
         }
     }
-    if (same(view(op), view("call")) + same(view(op), view("leaq"))) & bare {
+    if (same(view(op), view("call")) || same(view(op), view("leaq"))) & bare {
         copy_to(&mut out, line[: space + 1]);
         out.push(95);
         copy_to(&mut out, rest);
@@ -3561,7 +3561,7 @@ fn ident<a>(c: (&a mut C)) -> u8[] {
     }
     p := c.pos;
     t := tok_text(&mut c, p);
-    if same(view(t), view("true")) + same(view(t), view("false")) {
+    if same(view(t), view("true")) || same(view(t), view("false")) {
         fail(&mut c, view("truth keyword is not an identifier"));
     }
     advance(&mut c);
@@ -4375,10 +4375,10 @@ fn find_decl_internal<a, b, d>(c: (&a mut C), m: &b [u8], n: &d [u8]) -> u64 {
 // These declarations back concise syntax and are not public nominal types.
 fn find_decl<a, b, d>(c: (&a mut C), m: &b [u8], n: &d [u8]) -> u64 {
     here := module_copy(&mut c);
-    if same(view(m), view("core")) & same(view(n), view("OptionStorage")) & (same(view(here), view("core")) == 0) {
+    if same(view(m), view("core")) & same(view(n), view("OptionStorage")) & !same(view(here), view("core")) {
         return 0;
     }
-    if same(view(m), view("hashmap")) & same(view(n), view("Map")) & (same(view(here), view("hashmap")) == 0) {
+    if same(view(m), view("hashmap")) & same(view(n), view("Map")) & !same(view(here), view("hashmap")) {
         return 0;
     }
     return find_decl_internal(&mut c, m, n);
@@ -4635,26 +4635,26 @@ fn token_starts_type<a>(c: (&a mut C), p: u64) -> u64 {
     return (k == 40) + (k == 91) + (k == 38);
 }
 fn type_keyword<a>(c: (&a mut C), n: &a [u8]) -> u64 {
-    if same(view(n), view("bool")) + same(view(n), view("char")) + same(view(n), view("string")) + same(view(n), view("u64")) {
+    if same(view(n), view("bool")) || same(view(n), view("char")) || same(view(n), view("string")) || same(view(n), view("u64")) {
         return true;
     }
-    if same(view(n), view("u8")) + same(view(n), view("u16")) + same(view(n), view("u32")) + same(view(n), view("u64")) {
+    if same(view(n), view("u8")) || same(view(n), view("u16")) || same(view(n), view("u32")) || same(view(n), view("u64")) {
         return true;
     }
     if same(view(n), view("i8"))
-        + same(view(n), view("i16"))
-        + same(view(n), view("i32"))
-        + same(view(n), view("i64"))
-        + same(view(n), view("isize")) {
+        || same(view(n), view("i16"))
+        || same(view(n), view("i32"))
+        || same(view(n), view("i64"))
+        || same(view(n), view("isize")) {
         return true;
     }
-    if same(view(n), view("f32")) + same(view(n), view("f64")) + same(view(n), view("unit")) + same(view(n), view("read")) {
+    if same(view(n), view("f32")) || same(view(n), view("f64")) || same(view(n), view("unit")) || same(view(n), view("read")) {
         return true;
     }
-    if same(view(n), view("mut")) + same(view(n), view("Atomic")) + same(view(n), view("Mutex")) + same(view(n), view("Scope")) {
+    if same(view(n), view("mut")) || same(view(n), view("Atomic")) || same(view(n), view("Mutex")) || same(view(n), view("Scope")) {
         return true;
     }
-    return same(view(n), view("Task")) + same(view(n), view("CancelToken")) + same(view(n), view("fn")) + same(view(n), view("Fn"));
+    return same(view(n), view("Task")) || same(view(n), view("CancelToken")) || same(view(n), view("fn")) || same(view(n), view("Fn"));
 }
 fn lifetime_candidate<a>(c: (&a mut C), p: u64) -> u64 {
     if kind_at(&mut c, p) != 1 {
@@ -4955,10 +4955,10 @@ fn base_named<a>(c: (&a mut C), first: u8[]) -> u64 {
     if same(view(first), view("string")) {
         return 3;
     }
-    if same(view(first), view("CPtr")) + same(view(first), view("CMutPtr")) {
+    if same(view(first), view("CPtr")) || same(view(first), view("CMutPtr")) {
         // One word: a bare C data pointer (`const void *` / `void *`) into Grail-owned bytes,
         // made by `unsafe cptr(view)` / `unsafe cptr_mut(&mut bytes)`. Mode 1 is writable.
-        mode := same(view(first), view("CMutPtr"));
+        mode := u64(same(view(first), view("CMutPtr")));
         return intern_full(&mut c, 26, 0, mode, u64[]);
     }
     if same(view(first), view("CStr")) {
@@ -4966,7 +4966,7 @@ fn base_named<a>(c: (&a mut C), first: u8[]) -> u64 {
         // is `unsafe cstr(view)` because it asserts termination and lifetime.
         return intern(&mut c, 24, 0);
     }
-    if same(view(first), view("read")) + same(view(first), view("mut")) {
+    if same(view(first), view("read")) || same(view(first), view("mut")) {
         if c.typed_refs {
             fail(&mut c, view("legacy byte-view types were removed; write &[u8] or &mut [u8]"));
         }
@@ -4974,7 +4974,7 @@ fn base_named<a>(c: (&a mut C), first: u8[]) -> u64 {
         if rs.len() != 1 {
             fail(&mut c, view("view lifetime arity"));
         }
-        mode := same(view(first), view("mut"));
+        mode := u64(same(view(first), view("mut")));
         return intern_full(&mut c, 5, 0, mode, rs);
     }
     // User declarations shadow the built-in generic types (a program may declare its own `Task`).
@@ -6189,7 +6189,7 @@ fn extern_declaration<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     position := c.pos;
     expect(&mut c, view("extern"));
     abi := ffi_string(&mut c, view("extern requires a quoted ABI name"));
-    if same(view(abi), view("C")) == 0 {
+    if !same(view(abi), view("C")) {
         fail(&mut c, view("only extern \"C\" declarations are supported"));
     }
     mut input = u8[];
@@ -6351,7 +6351,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     if c.inherent {
         prepend_impl_params(&mut c);
     }
-    if same(view(name), view("print")) + same(view(name), view("println")) {
+    if same(view(name), view("print")) || same(view(name), view("println")) {
         fail(&mut c, view("print and println are reserved prelude names"));
     }
     typecount := c.tnames.len();
@@ -6685,7 +6685,7 @@ fn interface_declaration<a>(c: (&a mut C), pass: u64) -> unit {
     }
     expect(&mut c, view("interface"));
     name := ident(&mut c);
-    if same(view(name), view("Send")) + same(view(name), view("Share")) {
+    if same(view(name), view("Send")) || same(view(name), view("Share")) {
         fail(&mut c, view("structural capability names are reserved"));
     }
     module := module_copy(&mut c);
@@ -6957,7 +6957,7 @@ fn implementation<a>(c: (&a mut C), pass: u64) -> unit {
         }
         owner := module_copy(&mut c);
         item := &c.interfaces[contract - 1];
-        mut permitted = same(view(item.module), view(owner));
+        mut permitted = u64(same(view(item.module), view(owner)));
         if ty_kind(&mut c, ty) == 8 {
             decl := ty_arg(&mut c, ty);
             d := &c.decls[decl];
@@ -7268,10 +7268,10 @@ fn toplevel<a>(c: (&a mut C), pass: u64) -> unit {
     if raw {
         // Two trusted modules: the portable runtime, and darwin for the macOS libSystem boundary,
         // which only exists in Mach-O builds.
-        if (same(view(m), view("runtime")) + same(view(m), view("darwin"))) == 0 {
+        if !(same(view(m), view("runtime")) || same(view(m), view("darwin"))) {
             fail(&mut c, view("unsafe module reserved for runtime and darwin"));
         }
-        if (same(view(m), view("darwin")) != 0) & (c.plat == 0) {
+        if same(view(m), view("darwin")) & (c.plat == 0) {
             fail(&mut c, view("the darwin module requires a macos-x86_64 or macos-aarch64 target"));
         }
     }
@@ -12061,7 +12061,7 @@ fn int_name<a>(n: &a [u8]) -> u64 {
     if same(view(n), view("i32")) {
         return 288;
     }
-    if same(view(n), view("i64")) + same(view(n), view("isize")) {
+    if same(view(n), view("i64")) || same(view(n), view("isize")) {
         return 320;
     }
     return 0;
@@ -13205,7 +13205,7 @@ fn mutex_type<a>(c: (&a mut C), payload: u64) -> u64 {
 // m.lock_with(context, callback): exclusive payload access exists only for the callback's
 // duration. The callback is capture-free; its result and context cannot carry the payload loan.
 fn mutex_method<a, b>(c: (&a mut C), value: Val, name: &b [u8]) -> Val {
-    if same(view(name), view("lock_with")) == 0 {
+    if !same(view(name), view("lock_with")) {
         fail(&mut c, view("unknown Mutex method (expected lock_with)"));
     }
     cell := value.t;
@@ -13515,7 +13515,7 @@ fn text_method<a, b>(c: (&a mut C), xt: u64, k: u64, name: &b [u8]) -> Val {
         result = 3;
     }
     bt := bool_type(&mut c);
-    if same(view(name), view("contains")) + same(view(name), view("starts_with")) + same(view(name), view("ends_with")) {
+    if same(view(name), view("contains")) || same(view(name), view("starts_with")) || same(view(name), view("ends_with")) {
         arg := text_arg(&mut c);
         expect(&mut c, view(")"));
         mut f = "rt_seq_contains";
@@ -13529,7 +13529,7 @@ fn text_method<a, b>(c: (&a mut C), xt: u64, k: u64, name: &b [u8]) -> Val {
         release_temporary(&mut c, arg.t);
         return val(r, bt);
     }
-    if same(view(name), view("to_upper")) + same(view(name), view("to_lower")) + same(view(name), view("trim")) {
+    if same(view(name), view("to_upper")) || same(view(name), view("to_lower")) || same(view(name), view("trim")) {
         expect(&mut c, view(")"));
         mut f = "rt_seq_trim";
         if same(view(name), view("to_upper")) {
@@ -13584,15 +13584,15 @@ fn text_method<a, b>(c: (&a mut C), xt: u64, k: u64, name: &b [u8]) -> Val {
 }
 fn char_method<a>(n: &a [u8]) -> u64 {
     return same(view(n), view("is_alphabetic"))
-        + same(view(n), view("is_alphanumeric"))
-        + same(view(n), view("is_ascii_digit"))
-        + same(view(n), view("is_whitespace"))
-        + same(view(n), view("is_uppercase"))
-        + same(view(n), view("is_lowercase"))
-        + same(view(n), view("is_ascii"))
-        + same(view(n), view("to_uppercase"))
-        + same(view(n), view("to_lowercase"))
-        + same(view(n), view("len_utf8"));
+        || same(view(n), view("is_alphanumeric"))
+        || same(view(n), view("is_ascii_digit"))
+        || same(view(n), view("is_whitespace"))
+        || same(view(n), view("is_uppercase"))
+        || same(view(n), view("is_lowercase"))
+        || same(view(n), view("is_ascii"))
+        || same(view(n), view("to_uppercase"))
+        || same(view(n), view("to_lowercase"))
+        || same(view(n), view("len_utf8"));
 }
 fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
     // ' '.is_whitespace(): a bare character literal receiver of a char method is a char.
@@ -13671,7 +13671,7 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
     }
     if k == 21 {
         single := is_f32(&mut c, xty);
-        if same(view(name), view("min")) + same(view(name), view("max")) {
+        if same(view(name), view("min")) || same(view(name), view("max")) {
             // x.min(y) / x.max(y): y of the same float type; a NaN operand yields the other.
             observe(&mut c, xt);
             ystart := c.pos;
@@ -13722,8 +13722,8 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
             f = "rt_f64_is_infinite";
             boolean = 1;
         }
-        if same(view(name), view("next_up")) + same(view(name), view("next_down")) {
-            up := imm(&mut c, same(view(name), view("next_up")));
+        if same(view(name), view("next_up")) || same(view(name), view("next_down")) {
+            up := imm(&mut c, u64(same(view(name), view("next_up"))));
             precision := imm(&mut c, single);
             mut args = two(xt, up);
             args.push(precision);
@@ -13807,7 +13807,7 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
         release_temporary(&mut c, input);
         return val(slot, 0);
     }
-    if same(view(name), view("copy")) + same(view(name), view("text")) {
+    if same(view(name), view("copy")) || same(view(name), view("text")) {
         expect(&mut c, view(")"));
         mut f = "rt_copy";
         mut ty = 2;
@@ -13881,15 +13881,15 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
     // Every remaining method mutates its receiver; an unknown name is reported as such before the
     // receiver's mutability is checked.
     known := same(view(name), view("pop"))
-        + same(view(name), view("clear"))
-        + same(view(name), view("truncate"))
-        + same(view(name), view("reverse"))
-        + same(view(name), view("swap"))
-        + same(view(name), view("remove"))
-        + same(view(name), view("insert"))
-        + same(view(name), view("push"))
-        + same(view(name), view("push_char"))
-        + same(view(name), view("append"));
+        || same(view(name), view("clear"))
+        || same(view(name), view("truncate"))
+        || same(view(name), view("reverse"))
+        || same(view(name), view("swap"))
+        || same(view(name), view("remove"))
+        || same(view(name), view("insert"))
+        || same(view(name), view("push"))
+        || same(view(name), view("push_char"))
+        || same(view(name), view("append"));
     if known == 0 {
         fail(&mut c, view("unknown collection method"));
     }
@@ -13932,7 +13932,7 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
         stored_source(&mut c, slot, ty);
         return val(slot, ty);
     }
-    if (k == 3) & (same(view(name), view("clear")) + same(view(name), view("truncate"))) {
+    if (k == 3) & (same(view(name), view("clear")) || same(view(name), view("truncate"))) {
         mut keep = 0;
         if same(view(name), view("truncate")) {
             n := expr(&mut c, 0);
@@ -13949,11 +13949,11 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
     if (k == 6)
         & (
             same(view(name), view("reverse"))
-                + same(view(name), view("swap"))
-                + same(view(name), view("remove"))
-                + same(view(name), view("clear"))
-                + same(view(name), view("truncate"))
-                + same(view(name), view("insert"))
+                || same(view(name), view("swap"))
+                || same(view(name), view("remove"))
+                || same(view(name), view("clear"))
+                || same(view(name), view("truncate"))
+                || same(view(name), view("insert"))
         ) {
         elem := ty_arg(&mut c, xty);
         code := narrow_code(&mut c, elem);
@@ -13982,7 +13982,7 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
             invoke(&mut c, view(f), three(xt, i.t, j.t));
             return val(imm(&mut c, 0), 1);
         }
-        if same(view(name), view("clear")) + same(view(name), view("truncate")) {
+        if same(view(name), view("clear")) || same(view(name), view("truncate")) {
             mut keep = 0;
             if same(view(name), view("truncate")) {
                 n := expr(&mut c, 0);
@@ -14707,7 +14707,7 @@ fn map_expression<a>(c: (&a mut C), expected: u64) -> Val {
         }
         if eat(&mut c, view("::")) {
             name := ident(&mut c);
-            if same(view(name), view("with_seed")) == 0 {
+            if !same(view(name), view("with_seed")) {
                 fail(&mut c, view("unknown map constructor"));
             }
             expect(&mut c, view("("));
@@ -15084,7 +15084,7 @@ fn primary<a>(c: (&a mut C)) -> Val {
         second := ident(&mut c);
         // `Some(value)` and `None` are the only spellings; the core constructors they lower to
         // cannot be named directly.
-        if same(view(first), view("core")) & (same(view(second), view("some")) + same(view(second), view("none"))) {
+        if same(view(first), view("core")) & (same(view(second), view("some")) || same(view(second), view("none"))) {
             fail(&mut c, view("use Some(value)/None, not core::some/core::none"));
         }
         if is(&mut c, view("<")) {
@@ -15231,7 +15231,7 @@ fn primary<a>(c: (&a mut C)) -> Val {
                 return val(slot, ty);
             }
         }
-        if same(view(first), view("f32_from_bits")) + same(view(first), view("f32_bits")) {
+        if same(view(first), view("f32_from_bits")) || same(view(first), view("f32_bits")) {
             if (find_local(&mut c, view(first)) == 0)
                 & (find_func(&mut c, view(m), view(first)) == 0) {
                 from := same(view(first), view("f32_from_bits"));
@@ -15860,7 +15860,7 @@ fn len_bound_ahead<a, b>(c: (&a mut C), name: &b [u8]) -> u8[] {
         return u8[];
     }
     method := tok_text(&mut c, p + 2);
-    if same(view(method), view("len")) == 0 {
+    if !same(view(method), view("len")) {
         return u8[];
     }
     base := tok_text(&mut c, p);
@@ -15876,9 +15876,9 @@ fn len_bound_ahead<a, b>(c: (&a mut C), name: &b [u8]) -> u8[] {
         }
         if k == 1 {
             t := tok_text(&mut c, j);
-            if same(view(t), view("for")) + same(view(t), view("mut")) {
+            if same(view(t), view("for")) || same(view(t), view("mut")) {
                 nt := tok_text(&mut c, j + 1);
-                if same(view(nt), view(name)) + same(view(nt), view(base)) {
+                if same(view(nt), view(name)) || same(view(nt), view(base)) {
                     return u8[];
                 }
             }
@@ -15931,7 +15931,7 @@ fn proven_index<a>(c: (&a mut C), value: Val) -> u64 {
     }
     t := tok_text(&mut c, p + 1);
     ix := c.bce_index.copy();
-    if same(view(t), view(ix)) == 0 {
+    if !same(view(t), view(ix)) {
         return false;
     }
     base := c.bce_base.copy();
@@ -17976,7 +17976,7 @@ fn record_match<a>(c: (&a mut C), sslot: u64, sty: u64, x: Val, byref: u64, refm
         fail(&mut c, view("match on a record takes a record pattern"));
     }
     name := ident(&mut c);
-    if same(view(name), view(c.decls[d].name)) == 0 {
+    if !same(view(name), view(c.decls[d].name)) {
         fail(&mut c, view("pattern type is not the scrutinee's record type"));
     }
     if c.decls[d].c_layout {
@@ -19775,10 +19775,10 @@ fn stmt<a>(c: (&a mut C)) -> unit {
 }
 fn host_fn<a, b>(c: (&a mut C), name: &b [u8], ret: u64) -> unit {
     first := c.params.len();
-    if same(view(name), view("arg")) + same(view(name), view("print_num")) {
+    if same(view(name), view("arg")) || same(view(name), view("print_num")) {
         c.params.push(0);
     }
-    if same(view(name), view("read_file")) + same(view(name), view("print")) {
+    if same(view(name), view("read_file")) || same(view(name), view("print")) {
         c.params.push(4);
     }
     if same(view(name), view("write_file")) {
@@ -19789,7 +19789,7 @@ fn host_fn<a, b>(c: (&a mut C), name: &b [u8], ret: u64) -> unit {
         ty := intern(&mut c, 6, 2);
         c.params.push(ty);
     }
-    if same(view(name), view("sleep_ms")) + same(view(name), view("close")) {
+    if same(view(name), view("sleep_ms")) || same(view(name), view("close")) {
         c.params.push(0);
     }
     if same(view(name), view("read_fd")) {
@@ -19797,15 +19797,15 @@ fn host_fn<a, b>(c: (&a mut C), name: &b [u8], ret: u64) -> unit {
         c.params.push(0);
     }
     if same(view(name), view("env"))
-        + same(view(name), view("exists"))
-        + same(view(name), view("mkdir"))
-        + same(view(name), view("list_dir")) {
+        || same(view(name), view("exists"))
+        || same(view(name), view("mkdir"))
+        || same(view(name), view("list_dir")) {
         c.params.push(4);
     }
-    if same(view(name), view("tcp_listen")) + same(view(name), view("tcp_port")) + same(view(name), view("tcp_accept")) {
+    if same(view(name), view("tcp_listen")) || same(view(name), view("tcp_port")) || same(view(name), view("tcp_accept")) {
         c.params.push(0);
     }
-    if same(view(name), view("tcp_connect")) + same(view(name), view("open")) {
+    if same(view(name), view("tcp_connect")) || same(view(name), view("open")) {
         c.params.push(4);
         c.params.push(0);
     }
@@ -20217,7 +20217,7 @@ pub fn main() -> u64 {
                         c.export_hits.push(0);
                         offset += 2;
                     } else {
-                    if same(view(option), view("--typed-refs")) + same(view(option), view("--strict-bool")) + same(view(option), view("--strict-bool-report")) + same(view(option), view("--strict-bool-fix")) {
+                    if same(view(option), view("--typed-refs")) || same(view(option), view("--strict-bool")) || same(view(option), view("--strict-bool-report")) || same(view(option), view("--strict-bool-fix")) {
                         if same(view(option), view("--strict-bool")) {
                             // Survey: bools and integers do not mix (see strict_bool_check).
                             exchange(&mut c.strict_bool, 1);

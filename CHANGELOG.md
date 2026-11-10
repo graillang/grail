@@ -23,6 +23,9 @@
   - `machine`: `eq`, `starts`, `small_reg`, `atomic_instruction`, `c_abi`. The register-width codes
     `rw`/`sw` stay numeric (0, 1 or 2), so the two `eq` results that initialize them are read through
     an `if`.
+  - `native`: `same` (the hottest helper, 437 call sites) first, because most other predicates are
+    written in terms of it. Its `same(a) + same(b)` sums become `||`; `mode`, `permitted` and the
+    `imm()` argument stay numeric and convert explicitly.
 - Maps iterate with `for key, value in &map`, in insertion order, and `for key, value in &mut map` binds the
   same shared key with an exclusive value (`value := map.value_at_mut(i)`), so values update in place. The loop
   holds one reference to the map throughout: inserting into it inside the body is rejected, a shared loop cannot
