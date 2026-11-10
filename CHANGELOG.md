@@ -11,6 +11,10 @@
     two `ancestor` calls and is now `||`.
   - `optimize`: `same`, `movelike`, `arith`, `slot_read`, `slot_written`, `reg_fact_valid`,
     `dead_after`, `promotable_use`. Sums of predicates used as a truth value became `||`.
+  - `fmt`: `is`, `keyword`, `binary`, `prefix_position`, `unary`, `space`, `opener`, `closer`,
+    `opens`, `shuts`, `breakable`, `trailing_ok`, `arm_break`, `chain_dot`, `chain_break`,
+    `list_break`, `op_break`. The space flag still lands in the numeric `f.lspace`, so that one
+    assignment converts explicitly.
 - Maps iterate with `for key, value in &map`, in insertion order, and `for key, value in &mut map` binds the
   same shared key with an exclusive value (`value := map.value_at_mut(i)`), so values update in place. The loop
   holds one reference to the map throughout: inserting into it inside the body is rejected, a shared loop cannot
