@@ -19,11 +19,11 @@ struct F {
     lindent: u64[],
     out: u8[]
 }
-fn letter(c: u64) -> u64 {
-    return ((64 < c) & (c < 91)) + ((96 < c) & (c < 123)) + (c == 95);
+fn letter(c: u64) -> bool {
+    return ((64 < c) && (c < 91)) || ((96 < c) && (c < 123)) || (c == 95);
 }
-fn digit(c: u64) -> u64 {
-    return (47 < c) & (c < 58);
+fn digit(c: u64) -> bool {
+    return (47 < c) && (c < 58);
 }
 fn pair(c: u64, d: u64) -> u64 {
     if (c == 45) & (d == 62) {
@@ -161,7 +161,7 @@ fn scan<a, b>(f: (&a mut F), s: &b [u8]) {
         if letter(c) {
             while i < n {
                 d := s[i];
-                if (letter(d) + digit(d)) == 0 {
+                if !letter(d) && !digit(d) {
                     break;
                 }
                 i += 1;
@@ -173,7 +173,7 @@ fn scan<a, b>(f: (&a mut F), s: &b [u8]) {
         if digit(c) {
             while i < n {
                 d := s[i];
-                if (letter(d) + digit(d)) == 0 {
+                if !letter(d) && !digit(d) {
                     mut keep = 0;
                     if (d == 46) & (i + 1 < n) {
                         if digit(s[i + 1]) {
@@ -184,7 +184,7 @@ fn scan<a, b>(f: (&a mut F), s: &b [u8]) {
                     }
                     if ((d == 43) + (d == 45)) & (i + 1 < n) {
                         p := s[i - 1];
-                        if ((p == 101) + (p == 69)) & digit(s[i + 1]) {
+                        if (p == 101 || p == 69) && digit(s[i + 1]) {
                             keep = 1;
                         }
                     }
@@ -238,8 +238,8 @@ fn is<a, b, d>(f: (&a F), s: &b [u8], i: u64, word: &d [u8]) -> bool {
     }
     return true;
 }
-fn punct<a>(f: (&a F), i: u64, code: u64) -> u64 {
-    return (f.kind[i] == 4) & (f.code[i] == code);
+fn punct<a>(f: (&a F), i: u64, code: u64) -> bool {
+    return (f.kind[i] == 4) && (f.code[i] == code);
 }
 fn keyword<a, b>(f: (&a F), s: &b [u8], i: u64) -> bool {
     return is(&f, view(s), i, view("return"))
@@ -278,7 +278,7 @@ fn binary<a>(f: (&a F), i: u64) -> bool {
 fn mark_generics<a, b>(f: (&a mut F), s: &b [u8]) {
     n := f.kind.len();
     for i in n {
-        if punct(&f, i, 60) & (0 < i) {
+        if punct(&f, i, 60) && 0 < i {
             if f.kind[i - 1] == 1 {
                 mut depth = 0;
                 mut j = i;
@@ -339,7 +339,7 @@ fn mark_pipes<a, b>(f: (&a mut F), s: &b [u8]) {
     n := f.kind.len();
     mut i = 0;
     while i < n {
-        if punct(&f, i, 124) & prefix_position(&f, view(s), i) {
+        if punct(&f, i, 124) && prefix_position(&f, view(s), i) {
             mut j = i + 1;
             mut depth = 0;
             while j < n {
@@ -451,7 +451,7 @@ fn space<a, b>(f: (&a F), s: &b [u8], p: u64, i: u64, inline: u64) -> bool {
         return true;
     }
     if (k == 4) & (c == 125) {
-        return punct(&f, p, 123) == 0;
+        return !punct(&f, p, 123);
     }
     if (pk == 4) & (pc == 123) {
         return true;
@@ -577,20 +577,17 @@ fn layout<a, b>(f: (&a mut F), s: &b [u8]) {
             stack.pop();
             indent -= 1;
             empty := punct(&f, i - 1, 123);
-            if empty & (pending != 0) {
+            if empty && pending != 0 {
                 pending = 0;
                 emit(&mut f, i, 0);
                 start = 1;
                 header = 0;
                 if i + 1 < n {
-                    if (
-                        punct(&f, i + 1, 44)
-                            + punct(&f, i + 1, 41)
-                            + punct(&f, i + 1, 59)
-                            + punct(&f, i + 1, 93)
-                            + u64(is(&f, view(s), i + 1, view("else")))
-                    )
-                        == 0 {
+                    if !(punct(&f, i + 1, 44)
+                        || punct(&f, i + 1, 41)
+                        || punct(&f, i + 1, 59)
+                        || punct(&f, i + 1, 93)
+                        || is(&f, view(s), i + 1, view("else"))) {
                         pending = 1;
                     }
                 } else {
@@ -608,7 +605,7 @@ fn layout<a, b>(f: (&a mut F), s: &b [u8]) {
         }
         if pending {
             if (1 < f.nl[i]) & (lines != 0) & (closes == 0) {
-                if punct(&f, i - 1, 123) == 0 {
+                if !punct(&f, i - 1, 123) {
                     new_line(&mut f, 0);
                 }
             }
@@ -700,14 +697,11 @@ fn layout<a, b>(f: (&a mut F), s: &b [u8]) {
             header = 0;
             pending = 1;
             if i + 1 < n {
-                if (
-                    punct(&f, i + 1, 44)
-                        + punct(&f, i + 1, 41)
-                        + punct(&f, i + 1, 59)
-                        + punct(&f, i + 1, 93)
-                        + u64(is(&f, view(s), i + 1, view("else")))
-                )
-                    != 0 {
+                if punct(&f, i + 1, 44)
+                    || punct(&f, i + 1, 41)
+                    || punct(&f, i + 1, 59)
+                    || punct(&f, i + 1, 93)
+                    || is(&f, view(s), i + 1, view("else")) {
                     pending = 0;
                 }
             }
