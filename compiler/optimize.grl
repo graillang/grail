@@ -45,7 +45,7 @@ struct O {
 fn put<a>(v: (&a mut u64[]), i: u64, x: u64) {
     exchange(&mut v[i], x);
 }
-fn same<b, d>(s: &b [u8], a: u64, e: u64, w: &d [u8]) -> u64 {
+fn same<b, d>(s: &b [u8], a: u64, e: u64, w: &d [u8]) -> bool {
     if e - a != w.len() {
         return false;
     }
@@ -691,18 +691,18 @@ fn parse<a, b>(o: (&a mut O), s: &b [u8], a: u64, e: u64) {
         }
     }
 }
-fn movelike(op: u64) -> u64 {
-    return (op == 1) + (op == 2) + (op == 3) + (op == 28);
+fn movelike(op: u64) -> bool {
+    return (op == 1) || (op == 2) || (op == 3) || (op == 28);
 }
-fn arith(op: u64) -> u64 {
+fn arith(op: u64) -> bool {
     return (op == 4)
-        + (op == 5)
-        + (op == 8)
-        + (op == 9)
-        + (op == 10)
-        + (op == 14)
-        + (op == 33)
-        + (op == 34);
+        || (op == 5)
+        || (op == 8)
+        || (op == 9)
+        || (op == 10)
+        || (op == 14)
+        || (op == 33)
+        || (op == 34);
 }
 fn is_jump(op: u64) -> u64 {
     return (15 < op) & (op < 25);
@@ -748,7 +748,7 @@ fn reads<a>(o: (&a O), i: u64) -> u64 {
             return 0;
         }
     }
-    if arith(op) + (op == 6) + (op == 7) {
+    if arith(op) || (op == 6) || (op == 7) {
         return src | dst;
     }
     if op == 11 {
@@ -792,7 +792,7 @@ fn writes<a>(o: (&a O), i: u64) -> u64 {
     if is_jump(op) {
         return 0;
     }
-    if movelike(op) + arith(op) + (op == 11) + (op == 32) {
+    if movelike(op) || arith(op) || (op == 11) || (op == 32) {
         return dst_writes(&o, i);
     }
     if (op == 12) + (op == 13) {
@@ -813,7 +813,7 @@ fn writes<a>(o: (&a O), i: u64) -> u64 {
     return all_regs();
 }
 // Whether operand j of instruction i reads / writes a frame slot.
-fn slot_read<a>(o: (&a O), i: u64, j: u64) -> u64 {
+fn slot_read<a>(o: (&a O), i: u64, j: u64) -> bool {
     op := o.op[i];
     if j == 0 {
         return o.k0[i] == 2;
@@ -824,14 +824,14 @@ fn slot_read<a>(o: (&a O), i: u64, j: u64) -> u64 {
     if movelike(op) {
         return false;
     }
-    return 1;
+    return true;
 }
-fn slot_written<a>(o: (&a O), i: u64) -> u64 {
+fn slot_written<a>(o: (&a O), i: u64) -> bool {
     op := o.op[i];
     if o.k1[i] != 2 {
         return false;
     }
-    return movelike(op) + arith(op) + (op == 11) + (op == 0);
+    return movelike(op) || arith(op) || (op == 11) || (op == 0);
 }
 fn set_operand<a>(o: (&a mut O), i: u64, j: u64, k: u64, v: u64) {
     if j == 0 {
@@ -898,11 +898,11 @@ fn reg_written<a>(f: (&a mut F), r: u64) {
     put(&mut f.rslot, r, 0);
     put(&mut f.rcopy, r, 0);
 }
-fn reg_fact_valid<a>(f: (&a F), r: u64) -> u64 {
+fn reg_fact_valid<a>(f: (&a F), r: u64) -> bool {
     return f.rep[r] == f.epoch;
 }
 fn copy_source<a>(f: (&a F), q: u64) -> u64 {
-    if reg_fact_valid(&f, q) == 0 {
+    if !reg_fact_valid(&f, q) {
         return q;
     }
     c := f.rcopy[q];
@@ -1312,7 +1312,7 @@ fn next_insn<a>(o: (&a O), i: u64, last: u64) -> u64 {
     return last;
 }
 // Whether register r is dead after instruction i: followed forward through jumps (bounded).
-fn dead_after<a>(o: (&a O), i: u64, r: u64, budget: u64) -> u64 {
+fn dead_after<a>(o: (&a O), i: u64, r: u64, budget: u64) -> bool {
     last := o.op.len();
     if budget == 0 {
         return false;
@@ -1345,7 +1345,7 @@ fn dead_after<a>(o: (&a O), i: u64, r: u64, budget: u64) -> u64 {
             if op == 16 {
                 j = t;
             } else {
-                if dead_after(&o, t, r, budget - 1) == 0 {
+                if !dead_after(&o, t, r, budget - 1) {
                     return false;
                 }
             }
@@ -1578,7 +1578,7 @@ fn peephole<a, b>(o: (&a mut O), s: &b [u8], first: u64, last: u64) {
     }
 }
 // Slot use permitted after promotion: the instruction stays valid with a register operand.
-fn promotable_use<a>(o: (&a O), i: u64) -> u64 {
+fn promotable_use<a>(o: (&a O), i: u64) -> bool {
     op := o.op[i];
     if (op == 1)
         + (op == 4)
@@ -1593,9 +1593,9 @@ fn promotable_use<a>(o: (&a O), i: u64) -> u64 {
         if o.k1[i] == 2 {
             other = o.k0[i];
         }
-        return (other == 0) + (other == 1) + (other == 3) + (other == 5);
+        return (other == 0) || (other == 1) || (other == 3) || (other == 5);
     }
-    return (op == 11) + (op == 12) + (op == 13);
+    return (op == 11) || (op == 12) || (op == 13);
 }
 fn emit_operand<a, b>(o: (&a mut O), s: &b [u8], i: u64, j: u64) {
     mut k = o.k0[i];
@@ -2120,7 +2120,7 @@ fn inline_candidate<a, b>(o: (&a mut O), s: &b [u8], prologue: u64) {
                         if o.k0[i] != 4 {
                             return ();
                         }
-                        if same(view(s), o.s0[i], o.e0[i], view("rt_abort")) == 0 {
+                        if !same(view(s), o.s0[i], o.e0[i], view("rt_abort")) {
                             return ();
                         }
                     }
@@ -2503,7 +2503,7 @@ pub fn optimize<b>(s: &b [u8]) -> u8[] {
             start = i + 1;
             if inside == 0 {
                 if (e - a > 15) & (s[a] == 46) & (s[a + 1] == 116) {
-                    if same(view(s), a, a + 6, view(".type ")) == 0 {} else {
+                    if !same(view(s), a, a + 6, view(".type ")) {} else {
                         if same(view(s), e - 9, e, view("@function")) {
                             inside = 1;
                         }
