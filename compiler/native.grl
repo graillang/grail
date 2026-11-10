@@ -18,7 +18,8 @@ use cli;
 // 11 Atomic<u64>, 12 capture-free typed function pointer, 13 Mutex<T>, 14 Scope<C>, 15 interface proof,
 // 16 Task<R>, 17 CancelToken, 18 sized integer (arg bits, mode signed), 19 bool, 20 closure Fn(..)->R, 21 f64,
 // 22 char, 23 opaque foreign handle (arg = decl), 24 CStr, 25 cfn pointer, 26 bare C pointer,
-// 27 slice (arg = element, mode 1 writable), 28 byval(extern record).
+// 27 slice (arg = element, mode 1 writable), 28 byval(extern record),
+// 29 job (arg = result): a running pool job handle. Move-only, like Task<R>, and its drop waits.
 
 struct Tok {
     kind: u64,
@@ -2068,7 +2069,8 @@ fn needs_drop<a>(c: (&a mut C), ty: u64) -> bool {
         || (k == 11)
         || (k == 13)
         || (k == 16)
-        || (k == 20);
+        || (k == 20)
+        || (k == 29);
 }
 fn resource<a>(c: (&a mut C), slot: u64) -> u64 {
     mut i = c.resources.len();
@@ -2321,7 +2323,7 @@ fn caps_walk<a, b>(c: (&a mut C), ty: u64, trail: (&b mut u64[])) -> u64[] {
     mut rs = type_regions(&mut c, ty);
     k := ty_kind(&mut c, ty);
     arg := ty_arg(&mut c, ty);
-    if (k == 6) || (k == 27) || (k == 7) || (k == 10) || (k == 13) || (k == 14) || (k == 16) {
+    if (k == 6) || (k == 27) || (k == 7) || (k == 10) || (k == 13) || (k == 14) || (k == 16) || (k == 29) {
         inner := caps_walk(&mut c, arg, &mut trail);
         for i in inner.len() {
             mut r = inner[i];
@@ -4013,6 +4015,15 @@ fn transfer_capability<a, b>(
             why = 6;
         }
     }
+    // A pool job handle is the same shape: ownership-based joining, never shared. Sharing it would
+    // let two threads wait on one record, and the second wait would free it twice.
+    if k == 29 {
+        if shared == 0 {
+            allowed = transfer_capability(&mut c, arg, 0, &mut trail, depth + 1);
+        } else {
+            why = 11;
+        }
+    }
     if k == 7 {
         mode := ty_mode(&mut c, ty);
         if mode != 0 {
@@ -4105,6 +4116,11 @@ fn dotted_path<a, b>(c: (&a mut C), out: (&b mut u8[])) -> unit {
     }
     return ();
 }
+// Whether the denial text is an adjective that needs a subject (`file is thread-affine`) or a
+// clause that already has one (`a mutable slice or view cannot be shared`).
+fn cap_denial_adjective(code: u64) -> u64 {
+    return u64((code == 1) || (code == 2));
+}
 fn cap_denial_text<a, b>(c: (&a mut C), out: (&b mut u8[])) -> unit {
     code := c.cap_denial;
     if code == 1 {
@@ -4134,7 +4150,11 @@ fn cap_denial_text<a, b>(c: (&a mut C), out: (&b mut u8[])) -> unit {
                                     if code == 9 {
                                         dput(&mut out, view("an unclassified C function pointer"));
                                     } else {
+                                        if code == 11 {
+                                            dput(&mut out, view("a job handle cannot be shared"));
+                                        } else {
                                         dput(&mut out, view("a type that nests too deeply to classify"));
+                                        }
                                     }
                                 }
                             }
@@ -4159,16 +4179,20 @@ fn capability_fail<a, b, d>(c: (&a mut C), shared: u64, subject: &b [u8], name: 
     }
     dput(&mut msg, subject);
     if name.len() != 0 {
-        // `closure capture `a`: a.file is thread-affine`
+        // `closure capture `a`: a.file is thread-affine`. Only the adjective denials take `is`; the
+        // ones that are already a clause (`a mutable slice or view cannot be shared`) read as a
+        // sentence after the backticked name, which is where the name belongs.
         dput(&mut msg, view(" `"));
         dput(&mut msg, name);
         dput(&mut msg, view("`: "));
-        dput(&mut msg, name);
-        if c.cap_segs.len() != 0 {
-            dput(&mut msg, view("."));
-            dotted_path(&mut c, &mut msg);
+        if cap_denial_adjective(c.cap_denial) != 0 {
+            dput(&mut msg, name);
+            if c.cap_segs.len() != 0 {
+                dput(&mut msg, view("."));
+                dotted_path(&mut c, &mut msg);
+            }
+            dput(&mut msg, view(" is "));
         }
-        dput(&mut msg, view(" is "));
     } else {
         // `parallel_map item: file is thread-affine`
         dput(&mut msg, view(": "));
@@ -4503,7 +4527,7 @@ fn substitute<a, b>(c: (&a mut C), ty: u64, map: (&b u64[])) -> u64 {
     mode := ty_mode(&mut c, ty);
     mut arg = ty_arg(&mut c, ty);
     mut rs = type_regions(&mut c, ty);
-    if (k == 6) || (k == 27) || (k == 28) || (k == 7) || (k == 12) || (k == 13) || (k == 14) || (k == 16) || (k == 20) {
+    if (k == 6) || (k == 27) || (k == 28) || (k == 7) || (k == 12) || (k == 13) || (k == 14) || (k == 16) || (k == 20) || (k == 29) {
         arg = substitute(&mut c, arg, &map);
     }
     for i in rs.len() {
@@ -4535,7 +4559,7 @@ fn bind_types<a, b>(c: (&a mut C), ty: u64, map: (&b u64[])) -> u64 {
         }
         return map[arg];
     }
-    if (k == 6) || (k == 27) || (k == 28) || (k == 7) || (k == 12) || (k == 13) || (k == 14) || (k == 16) || (k == 20) {
+    if (k == 6) || (k == 27) || (k == 28) || (k == 7) || (k == 12) || (k == 13) || (k == 14) || (k == 16) || (k == 20) || (k == 29) {
         arg = bind_types(&mut c, arg, &map);
     }
     mut args = type_args(&mut c, ty);
@@ -4576,7 +4600,7 @@ fn concrete_type<a>(c: (&a mut C), ty: u64) -> bool {
         return false;
     }
     arg := ty_arg(&mut c, ty);
-    if (k == 6) || (k == 27) || (k == 7) || (k == 10) || (k == 12) || (k == 13) || (k == 14) || (k == 16) || (k == 20) {
+    if (k == 6) || (k == 27) || (k == 7) || (k == 10) || (k == 12) || (k == 13) || (k == 14) || (k == 16) || (k == 20) || (k == 29) {
         if !concrete_type(&mut c, arg) {
             return false;
         }
@@ -4656,7 +4680,7 @@ fn callable_contract<a, b>(
             }
         }
     }
-    if (ak == 6) || (ak == 27) || (ak == 28) || (ak == 7) || (ak == 12) || (ak == 13) || (ak == 14) || (ak == 16) || (ak == 20) {
+    if (ak == 6) || (ak == 27) || (ak == 28) || (ak == 7) || (ak == 12) || (ak == 13) || (ak == 14) || (ak == 16) || (ak == 20) || (ak == 29) {
         if !callable_contract(&mut c, aa, ea, &mut map, depth + 1) {
             return false;
         }
@@ -4694,7 +4718,7 @@ fn same_type<a>(c: (&a mut C), x: u64, y: u64) -> u64 {
             return 0;
         }
     }
-    if (a == 6) || (a == 7) || (a == 27) || (a == 28) || (a == 13) || (a == 14) || (a == 16) {
+    if (a == 6) || (a == 7) || (a == 27) || (a == 28) || (a == 13) || (a == 14) || (a == 16) || (a == 29) {
         return same_type(&mut c, aa, bb);
     }
     if a == 8 {
@@ -4749,6 +4773,9 @@ fn borrow_walk<a, b>(c: (&a mut C), ty: u64, trail: (&b mut u64[])) -> bool {
         return false;
     }
     if k == 10 || k == 6 || k == 13 {
+        return borrow_walk(&mut c, arg, &mut trail);
+    }
+    if k == 29 {
         return borrow_walk(&mut c, arg, &mut trail);
     }
     if k == 8 {
@@ -5130,6 +5157,7 @@ fn type_keyword<a>(c: (&a mut C), n: &a [u8]) -> bool {
         return true;
     }
     return same(view(n), view("Task"))
+        || same(view(n), view("Job"))
         || same(view(n), view("CancelToken"))
         || same(view(n), view("fn"))
         || same(view(n), view("Fn"))
@@ -5493,6 +5521,12 @@ fn base_named<a>(c: (&a mut C), first: u8[]) -> u64 {
         e := parse_type(&mut c);
         expect(&mut c, view(">"));
         return intern(&mut c, 16, e);
+    }
+    if (shadowed == false) & same(view(first), view("Job")) {
+        expect(&mut c, view("<"));
+        e := parse_type(&mut c);
+        expect(&mut c, view(">"));
+        return intern(&mut c, 29, e);
     }
     if (shadowed == false) & same(view(first), view("CancelToken")) {
         return intern(&mut c, 17, 0);
@@ -9358,7 +9392,7 @@ fn infer_type<a, b>(c: (&a mut C), formal: u64, actual: u64, map: (&b mut u64[])
             fail(&mut c, view("generic reference mode mismatch"));
         }
     }
-    if (k == 6) || (k == 27) || (k == 7) || (k == 13) || (k == 14) || (k == 16) {
+    if (k == 6) || (k == 27) || (k == 7) || (k == 13) || (k == 14) || (k == 16) || (k == 29) {
         aa := ty_arg(&mut c, actual);
         infer_type(&mut c, arg, aa, &mut map);
         return ();
@@ -9908,7 +9942,7 @@ fn canonical_type<a, b>(c: (&a mut C), ty: u64, next: (&b mut u64)) -> u64 {
     if k == 10 {
         return canonical_type(&mut c, arg, &mut next);
     }
-    if (k == 6) || (k == 27) || (k == 7) || (k == 12) || (k == 13) || (k == 14) || (k == 16) || (k == 20) {
+    if (k == 6) || (k == 27) || (k == 7) || (k == 12) || (k == 13) || (k == 14) || (k == 16) || (k == 20) || (k == 29) {
         arg = canonical_type(&mut c, arg, &mut next);
     }
     mut args = type_args(&mut c, ty);
@@ -10842,6 +10876,15 @@ fn builtin_id<a>(n: &a [u8]) -> u64 {
     }
     if same(view(n), view("parallel_map")) {
         return 32;
+    }
+    if same(view(n), view("parallel_for_chunks")) {
+        return 43;
+    }
+    if same(view(n), view("parallel_spawn")) {
+        return 44;
+    }
+    if same(view(n), view("parallel_join")) {
+        return 45;
     }
     if same(view(n), view("task_scope")) {
         return 33;
@@ -12421,6 +12464,15 @@ fn builtin<a>(c: (&a mut C), id: u64) -> Val {
     if id == 32 {
         return parallel_map_builtin(&mut c, a);
     }
+    if id == 43 {
+        return parallel_for_chunks_builtin(&mut c, a);
+    }
+    if id == 44 {
+        return parallel_spawn_builtin(&mut c, a);
+    }
+    if id == 45 {
+        return parallel_join_builtin(&mut c, a);
+    }
     if id == 33 {
         return task_scope_builtin(&mut c, a);
     }
@@ -12673,7 +12725,7 @@ fn parallel_map_builtin<a>(c: (&a mut C), items: Val) -> Val {
         fail(&mut c, view("parallel_map result cannot contain borrows"));
     }
     if contains_task(&mut c, result, 0) || contains_task(&mut c, item, 0) {
-        fail(&mut c, view("parallel_map cannot move Task handles between threads"));
+        fail(&mut c, view("parallel_map cannot move Task or job handles between threads"));
     }
     if contains_borrow(&mut c, item, 0) {
         if ty_kind(&mut c, item) != 7 {
@@ -12719,6 +12771,185 @@ fn parallel_map_builtin<a>(c: (&a mut C), items: Val) -> Val {
     close_loans(&mut c);
     return own(&mut c, slot, ty);
 }
+// parallel_for_chunks(&mut [T], chunks, f): the exclusive-slice shape of the pool, and the one
+// Abundance's geometry work wants. The caller's slice is split by the runtime into `chunks`
+// contiguous, disjoint regions and each job receives `&mut [T]` over its own; the descriptors address
+// the caller's elements, so no element is copied. Distinct from the owned-chunk split in lib/pool.grl,
+// which moves every element twice, and that difference is the point of this builtin.
+//
+// The split is constructed, not checked: with size = ceil(n / chunks), job k covers
+// [k * size, min(n, k * size + size)). A function of n alone cannot produce two regions that overlap,
+// and the runtime asserts their lengths sum to n, so "each element in exactly one chunk" is an
+// arithmetic identity rather than a property a checker has to trust.
+//
+// Reads are why the element is classified as transferable rather than shareable: a worker owns its
+// region exclusively, but it can store through it (which drops the old element on that worker) and
+// read methods callable through it, so the element must be a type that may be used, and destroyed,
+// on another thread. Default-deny means a `handle` element is refused by name, exactly as `&[File]`
+// is refused as a shared parallel_map item.
+fn parallel_for_chunks_builtin<a>(c: (&a mut C), data: Val) -> Val {
+    expect(&mut c, view(","));
+    chunks := expr(&mut c, 0);
+    expect(&mut c, view(","));
+    callee := expr(&mut c, 0);
+    expect(&mut c, view(")"));
+    input := callee.t;
+    slice := data.ty;
+    k := ty_kind(&mut c, slice);
+    if c.raw == 0 {
+        if (k != 27) & (k != 5) {
+            fail(&mut c, view("parallel_for_chunks requires an exclusive slice: write &mut data[a: b]"));
+        }
+        if ty_mode(&mut c, slice) == 0 {
+            fail(
+                &mut c,
+                view("parallel_for_chunks writes through its chunks, so the slice must be exclusive (&mut [T]); a shared &[T] cannot be handed out as &mut [T]")
+            );
+        }
+    }
+    mut width = imm(&mut c, 8);
+    if k == 27 {
+        elem := ty_arg(&mut c, slice);
+        require_capability_named(&mut c, elem, 0, view("parallel_for_chunks element"));
+        if contains_task(&mut c, elem, 0) {
+            fail(&mut c, view("parallel_for_chunks cannot hand Task or job handles to workers"));
+        }
+        if narrow_code(&mut c, elem) != 0 {
+            width = imm(&mut c, 4);
+        }
+    } else {
+        // A byte view's elements are bytes: plain data, one byte apart.
+        width = imm(&mut c, 1);
+    }
+    require_type(&mut c, chunks.ty, 0);
+    function := deref(&mut c, callee);
+    fty := function.ty;
+    closure := ty_kind(&mut c, fty) == 20;
+    if (ty_kind(&mut c, fty) != 12) & !closure {
+        fail(&mut c, view("parallel_for_chunks requires a callable"));
+    }
+    signature := type_args(&mut c, fty);
+    if signature.len() != 1 {
+        fail(&mut c, view("parallel_for_chunks callback takes (&mut [T])"));
+    }
+    require_type(&mut c, slice, signature[0]);
+    result := ty_arg(&mut c, fty);
+    if ty_kind(&mut c, result) != 2 {
+        fail(&mut c, view("parallel_for_chunks callback returns unit: write the elements"));
+    }
+    // Every worker calls the same closure object, so its captures are shared, not moved.
+    require_parallel_closure(&mut c, fty, 1, view("closure capture"));
+    observe(&mut c, function.t);
+    mut env = imm(&mut c, 0);
+    if closure {
+        if ty_kind(&mut c, data.ty) == 7 {
+            get(&mut c, data.t, view("%rax"));
+        } else {
+            o(&mut c, view("leaq "));
+            stack_slot(&mut c, function.t);
+            o(&mut c, view(",%rax\n"));
+        }
+        env = save(&mut c);
+    }
+    get(&mut c, function.t, view("%rax"));
+    if closure {
+        o(&mut c, view("movq (%rax),%rax\n"));
+    }
+    target := save(&mut c);
+    observe(&mut c, data.t);
+    mut pargs = three(data.t, chunks.t, target);
+    pargs.push(env);
+    pargs.push(width);
+    slot := invoke(&mut c, view("rt_parallel_for_chunks"), pargs);
+    release_temporary(&mut c, data.t);
+    release_temporary(&mut c, input);
+    close_loans(&mut c);
+    return own(&mut c, slot, 1);
+}
+// parallel_spawn(f) -> Job<R>: spawn-then-wait as two statements. The runtime already submits and
+// waits (`rt_pool_submit`/`rt_pool_wait`); this is the ownership bridge, and it is what makes the
+// handle safe to keep:
+//
+//   - the closure object moves into the job. A closure object is a heap record, so the job takes it
+//     by moving the pointer into a one-word box the job owns; nothing points into the caller's frame.
+//   - a closure that captured a reference or view is refused. A `Job<R>`'s type says nothing about
+//     that lifetime, so if the handle could be returned the borrow would escape the frame it points
+//     into. Owned captures move with the object, so they are fine.
+//   - R is transferable and owned: no borrows (the result comes back to whoever waits, which may be
+//     another thread) and no Task or Job handle (a second wait would free one record twice).
+//   - the handle is move-only (needs_drop) and its drop waits, so the job record is freed exactly
+//     once, by the thread that takes the result - never by a worker.
+//
+// That is why it cannot dangle: nothing reachable from a handle is frame memory, and the handle
+// owns both the environment and the result until one wait consumes it.
+fn parallel_spawn_builtin<a>(c: (&a mut C), callee: Val) -> Val {
+    expect(&mut c, view(")"));
+    input := callee.t;
+    function := deref(&mut c, callee);
+    fty := function.ty;
+    closure := ty_kind(&mut c, fty) == 20;
+    if (ty_kind(&mut c, fty) != 12) & !closure {
+        fail(&mut c, view("parallel_spawn requires a callable"));
+    }
+    signature := type_args(&mut c, fty);
+    if signature.len() != 0 {
+        fail(&mut c, view("a pool job callback takes no arguments: move what it needs in as captures"));
+    }
+    result := ty_arg(&mut c, fty);
+    // One worker runs it, so the environment is transferable, not shared.
+    require_parallel_closure(&mut c, fty, 0, view("job capture"));
+    if contains_borrow(&mut c, fty, 0) {
+        fail(
+            &mut c,
+            view("a job handle may outlive this statement, so its callback cannot capture a borrow: move the value in instead")
+        );
+    }
+    require_capability_named(&mut c, result, 0, view("job result"));
+    if contains_borrow(&mut c, result, 0) {
+        fail(&mut c, view("a job result cannot contain borrows: the job owns what it returns"));
+    }
+    if contains_task(&mut c, result, 0) {
+        fail(&mut c, view("a pool job cannot return a Task or Job handle"));
+    }
+    observe(&mut c, function.t);
+    mut box = imm(&mut c, 0);
+    mut target = function.t;
+    if closure {
+        // The box is the slot the closure ABI reads: `code(box, ...)` loads the object from it.
+        get(&mut c, function.t, view("%rax"));
+        o(&mut c, view("movq (%rax),%rax\n"));
+        target = save(&mut c);
+        get(&mut c, function.t, view("%rax"));
+        object := save(&mut c);
+        if c.raw == 0 {
+            // The job owns the closure object from here: no frame drop for it, and the job's release
+            // calls the object's own drop (the environment record's) once.
+            move_out(&mut c, function);
+        }
+        box = apply(&mut c, view("rt_job_box"), one(object));
+    }
+    mut pargs = two(target, box);
+    slot := invoke(&mut c, view("rt_parallel_spawn"), pargs);
+    ty := intern(&mut c, 29, result);
+    release_temporary(&mut c, input);
+    close_loans(&mut c);
+    return own(&mut c, slot, ty);
+}
+// parallel_join(h) -> R: take the result and free the record. The handle moves in, so no wait can
+// happen twice and nothing can reach the record afterwards.
+fn parallel_join_builtin<a>(c: (&a mut C), handle: Val) -> Val {
+    expect(&mut c, view(")"));
+    if ty_kind(&mut c, handle.ty) != 29 {
+        fail(&mut c, view("parallel_join requires an owned Job handle"));
+    }
+    result := ty_arg(&mut c, handle.ty);
+    value := handle.t;
+    if c.raw == 0 {
+        move_out(&mut c, handle);
+    }
+    slot := invoke(&mut c, view("rt_pool_wait"), one(value));
+    return own(&mut c, slot, result);
+}
 fn contains_task<a>(c: (&a mut C), ty: u64, depth: u64) -> bool {
     mut trail = u64[];
     return task_walk(&mut c, ty, &mut trail);
@@ -12726,7 +12957,7 @@ fn contains_task<a>(c: (&a mut C), ty: u64, depth: u64) -> bool {
 fn task_walk<a, b>(c: (&a mut C), ty: u64, trail: (&b mut u64[])) -> bool {
     k := ty_kind(&mut c, ty);
     arg := ty_arg(&mut c, ty);
-    if k == 16 {
+    if (k == 16) || (k == 29) {
         return true;
     }
     if k == 6 || k == 10 || k == 13 {
@@ -12768,7 +12999,7 @@ fn require_sendable_owned<a, b>(c: (&a mut C), ty: u64, subject: &b [u8]) -> uni
         fail(&mut c, view("a spawned value cannot borrow: the worker may outlive the loan"));
     }
     if contains_task(&mut c, ty, 0) {
-        fail(&mut c, view("a Task handle cannot cross a spawn boundary"));
+        fail(&mut c, view("a Task or job handle cannot cross a spawn boundary"));
     }
     return ();
 }
@@ -21539,6 +21770,16 @@ fn emit_drops<a>(c: (&a mut C)) -> unit {
                 }
                 if kind == 16 {
                     o(&mut c, view("movq %r12,%rdi\ncall rt_task_abandon\n"));
+                }
+                if kind == 29 {
+                    // A job handle is never abandoned: the wait is what owns the record, so dropping
+                    // it takes the result and drops that. Leaving it to a leak would keep the job's
+                    // captures and its result alive for the life of the process.
+                    o(&mut c, view("movq %r12,%rdi\ncall rt_pool_wait\n"));
+                    if needs_drop(&mut c, arg) {
+                        o(&mut c, view("movq %rax,%rdi\n"));
+                        drop_call(&mut c, arg);
+                    }
                 }
                 if kind == 20 {
                     o(&mut c, view("movq %r12,%rdi\nmovq 8(%r12),%rax\ncall *%rax\n"));

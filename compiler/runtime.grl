@@ -1669,6 +1669,115 @@ fn rt_parallel_map(items: u64, context: u64, f: u64, env: u64) -> u64 {
     rt_drop_seq(items);
     return out;
 }
+// Chunk split descriptor (rt_alloc, freed by the submitting thread after every job is joined):
+//   0 callback   8 environment   16 data base   24 element width   32 element count
+//   40 chunk length
+// Job (d, k) covers elements [k * chunk, min(count, k * chunk + chunk)) of the caller's data. The
+// slice it hands the callback addresses the caller's memory directly, so no element is copied: this
+// is what the owned-chunk split cannot do, because it moves every element twice.
+//
+// The slice descriptor itself is a fresh 24-byte block per job, exactly what `v[a: b]` allocates,
+// because a slice parameter is owned by the callee: the callback's own cleanup frees the descriptor
+// when its statement ends. Handing out slots of one array instead would have the first callback free
+// the whole array under its siblings (and corrupt the allocator, which checks its block marks).
+fn rt_pool_chunk_job(d: u64, k: u64) -> u64 {
+    n := raw_load(d + 32);
+    chunk := raw_load(d + 40);
+    start := k * chunk;
+    if n <= start {
+        return 0;
+    }
+    mut stop = start + chunk;
+    if n < stop {
+        stop = n;
+    }
+    slot := rt_alloc(24);
+    raw_store(slot, raw_load(d + 16) + start * raw_load(d + 24));
+    raw_store(slot + 8, stop - start);
+    // The callback takes one argument, so the second word is unused: it holds 0 for a plain
+    // function and the environment pointer for a closure (the environment comes first).
+    f := raw_load(d);
+    env := raw_load(d + 8);
+    if env == 0 {
+        raw_call2(f, slot, 0);
+    } else {
+        raw_call2(f, env, slot);
+    }
+    return stop - start;
+}
+// Split an exclusive slice into `chunks` disjoint exclusive slices and run one job per chunk. The
+// split is constructed, never checked: chunk k is a function of n alone, so the regions cannot
+// overlap and their lengths sum to n - the invariant rt_parallel_map asserts, asserted here too.
+// The caller holds the loan on the data until this returns, so no job can outlive the slice and no
+// other code in the frame can address it while the jobs run.
+fn rt_parallel_for_chunks(s: u64, chunks: u64, f: u64, env: u64, width: u64) -> u64 {
+    n := rt_len(s);
+    if n == 0 {
+        return 0;
+    }
+    mut count = chunks;
+    if count == 0 {
+        count = 1;
+    }
+    size := (n + count - 1) / count;
+    tasks := (n + size - 1) / size;
+    d := rt_alloc(56);
+    raw_store(d, f);
+    raw_store(d + 8, env);
+    raw_store(d + 16, raw_load(s));
+    raw_store(d + 24, width);
+    raw_store(d + 32, n);
+    raw_store(d + 40, size);
+    jobs := rt_alloc(tasks * 8);
+    mut k = 0;
+    while k < tasks {
+        raw_store(jobs + k * 8, rt_pool_submit(rt_pool_chunk_job, d, k));
+        k += 1;
+    }
+    mut covered = 0;
+    k = 0;
+    while k < tasks {
+        covered += rt_pool_wait(raw_load(jobs + k * 8));
+        k += 1;
+    }
+    if covered != n {
+        rt_abort();
+    }
+    rt_free(jobs);
+    rt_free(d);
+    return 0;
+}
+// A job handle (type kind 29) wraps one pool job record. The submitter owns the record and the
+// thread that waits takes the result word and frees it, exactly as rt_parallel_map does one job at
+// a time; the difference is only that the handle can be passed around before the wait happens.
+//
+// The closure object cannot stay in the caller's frame, because the handle may outlive a statement
+// and the calling thread keeps running while the job does: `box` is a one-word heap slot holding the
+// object pointer, which is exactly the slot the closure ABI reads (the callee's first argument is
+// the address of a word holding the object). The job owns the object and drops it - calling the
+// environment record's own drop, the same call the frame would have made - before it publishes the
+// result. Nothing else frees either allocation except rt_pool_wait, which frees the job record.
+fn rt_parallel_spawn(f: u64, box: u64) -> u64 {
+    return rt_pool_submit(rt_pool_job_run, box, f);
+}
+// The one-word heap slot the closure ABI reads: rt_pool_job_run passes its address as the callee's
+// first argument, and the callee loads the object from it. Made and freed here, so the box belongs
+// to the job record's lifetime and no frame owns it.
+fn rt_job_box(object: u64) -> u64 {
+    box := rt_alloc(8);
+    raw_store(box, object);
+    return box;
+}
+fn rt_pool_job_run(box: u64, f: u64) -> u64 {
+    if box == 0 {
+        return raw_call2(f, 0, 0);
+    }
+    r := raw_call2(f, box, 0);
+    obj := raw_load(box);
+    raw_call2(raw_load(obj + 8), obj, 0);
+    rt_free(box);
+    return r;
+}
 
 // ---- colourless tasks: stackful green threads on a worker pool with an epoll reactor ----
 // Every OS thread has a worker record reachable through the thread pointer:
