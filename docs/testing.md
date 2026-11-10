@@ -96,8 +96,11 @@ takes three opt-in knobs (a plain invocation is unchanged):
     GRAIL_TEST_SHARD=2/4 bun tools/test-native.mjs x86_64            # a quarter, for parallel gates
     GRAIL_TEST_RESUME=1 bun tools/test-native.mjs x86_64             # skip cases that already passed
 
-Shards are safe to run **in parallel in one worktree**: each case owns `.work/native-tests/<target>/<case>`,
-so two shards never touch the same files. Resume markers are keyed by the compiler's content-addressed
+Shards are safe to run **in parallel with each other** in one worktree: each case owns
+`.work/native-tests/<target>/<case>`, and a shard's case set is disjoint from every other shard's. What
+is *not* safe is a shard or a filtered run started while a **full** run of the same target is still
+alive — they select overlapping cases and then collide on the same directory (`unable to rename
+temporary … .o.tmp`). Kill the full run first; a killed shell does not kill it. Resume markers are keyed by the compiler's content-addressed
 path and the backend, so a rebuilt compiler or a different `--backend` never reuses another run's passes.
 
 **Long suites outlive their shells.** `timeout 9000 bun tools/test-native.mjs …` keeps running when the
