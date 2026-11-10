@@ -1,0 +1,23 @@
+// A job that fails must not hang the pool or its waiter: the failure policy is the runtime's abort
+// policy (B5), so the process ends promptly instead of blocking a join forever. The abort is raised
+// on a pool worker, so the process ends through the runtime's abort exit status (134) rather than
+// the SIGABRT a main-thread abort produces - the same thing abort-in-green-task-ends-process
+// records for a runtime thread - and nothing after the abort runs.
+use pool;
+
+fn work(x: u64) -> u64 {
+    if x == 3 {
+        mut v = u64[];
+        for i in 4 { v.push(i); }
+        return v[99];
+    }
+    mut total = 0;
+    for i in 4000000 { total += i; }
+    return total;
+}
+fn main() {
+    println("before");
+    results := pool::map<u64,u64>(u64[0, 1, 2, 3, 4, 5, 6, 7], work);
+    println("after");
+    println(results);
+}
