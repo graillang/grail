@@ -90,8 +90,52 @@ const borrowedTable = readFileSync(borrowed.ll, 'utf8').split('\n').filter(line 
 ok('the front end still records the borrowed slot', borrowedTable.length >= 1);
 ok('the lifter drops a borrowed slot', !readFileSync(borrowed.ll, 'utf8').includes('alloca float'));
 
+// ---- F1: a frame slot or a call argument 0 is a sequence header ----
+// `total(&v)` reads through the vector's own header and `main` reads the same vector by index, so
+// the fixture exercises what a fact names and what it must never be wrong about.
+const native = build('f1-native', 'f1_header.grl', { backend: 'native' });
+const f1 = build('f1-header', 'f1_header.grl', { backend: 'llvm' });
+const f1checked = build('f1-header-verify', 'f1_header.grl', { backend: 'llvm', verifyFacts: true });
+const reference = run([native.exe]).stdout.trim();
+const f1out = run([f1.exe]).stdout.trim();
+const f1checkedOut = run([f1checked.exe]).stdout.trim();
+ok('F1 output matches the native backend', f1out === reference, `${f1out} vs ${reference}`);
+ok('--verify-facts does not change an F1 value', f1checkedOut === f1out, `${f1checkedOut} vs ${f1out}`);
+
+const f1ir = readFileSync(f1checked.ll, 'utf8');
+const f1table = f1ir.split('\n').filter(line => line.startsWith('; fact'));
+const headerSlots = f1table.filter(line => /slot \d+ what (2|3|4|5) /.test(line));
+const headerArgs = f1table.filter(line => /call rt_slot\d?w?/.test(line) || /call rt_len/.test(line));
+ok('the table names the header slots', headerSlots.length >= 2, `${headerSlots.length} entries`);
+ok('the table names the header call arguments', headerArgs.length >= 2, `${headerArgs.length} entries`);
+ok('every header fact is a vector kind (2/3/4)',
+  f1table.every(line => !/ what (5|6|7|8|9) /.test(line)));
+
+ok('the accessor gets a typed sibling', /define internal \{i64, i64\} @"rt_slot\.h2w8"/.test(f1ir));
+ok('the sibling states the header is 24 bytes at eight-byte alignment',
+  /define internal \{i64, i64\} @"rt_slot\.h2w8"\(ptr nocapture nofree dereferenceable\(24\) align 8 %a0/.test(f1ir));
+ok('a fact-carrying site passes a real ptr', /\(ptr nocapture nofree dereferenceable\(24\) align 8 %t\d+/.test(f1ir));
+ok('the header fields are passed in, not re-loaded', /dereferenceable\(24\) align 8 %t\d+, i64 %t\d+, i64 %t\d+, i64 %t\d+, i64 %t\d+, i64 %t\d+, i64 %t\d+, i64 %t\d+\)/.test(f1ir));
+ok('the header loads are `align 8`', /load i64, ptr %t\d+, align 8/.test(f1ir));
+// A vector may still grow, so the lowering claims nothing about its header being invariant: the
+// hoist is the two loads it emits itself, not a promise to LLVM.
+ok('a vector fact carries no invariant.load', !f1ir.includes('!invariant.load'));
+ok('a vector fact carries no alias.scope', !f1ir.includes('!alias.scope'));
+ok('--verify-facts emits the header checks', /icmp ne i64 %t\d+, 0/.test(f1ir) && /icmp uge i64 %t\d+, %t\d+/.test(f1ir));
+ok('--verify-facts emits the element-range check', /icmp ult i64 %t\d+, %t\d+/.test(f1ir));
+
+// ---- a deliberately wrong fact must abort, not print a plausible number ----
+// `--f1-what=N` is a test aid that records the wrong kind for every binding. Claiming a vector
+// header for a slot that holds something else makes the `cap >= len` check read `+16` of a word
+// that is not a header, which is exactly the failure mode `--verify-facts` exists for.
+const wrong = build('f1-wrong', 'f1_header.grl', { backend: 'llvm', verifyFacts: true, extra: ['--f1-what=2'] });
+const wrongRun = run([wrong.exe]);
+ok('a wrong fact aborts under --verify-facts', wrongRun.status !== 0,
+  `exit ${wrongRun.status}, printed ${JSON.stringify(wrongRun.stdout.trim())}`);
+ok('the right facts do not abort', run([f1checked.exe]).status === 0);
+
 if (failed) {
   console.log(`facts: ${failed} check(s) failed`);
   process.exit(1);
 }
-console.log('facts: the f32 facts hold, and --verify-facts checks every one of them');
+console.log('facts: the f32 and F1 facts hold, --verify-facts checks every one of them, and a wrong F1 fact aborts');
