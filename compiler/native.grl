@@ -489,6 +489,8 @@ struct C {
     diag_labels: DiagLabel[],
     diag_help: u8[][],
     diag_notes: u8[][],
+    // Text under the primary span (`expected `u64`, found `string``).
+    diag_primary: u8[],
     lib_owner: u8[][]
 }
 
@@ -4671,6 +4673,7 @@ fn fail<a, b>(c: (&a mut C), msg: &b [u8]) -> unit {
     // Labels in this file, by line, and the widest line number the excerpt prints.
     labels := exchange(&mut c.diag_labels, DiagLabel[]);
     helps := exchange(&mut c.diag_help, u8[][]);
+    primary := exchange(&mut c.diag_primary, u8[]);
     notes := exchange(&mut c.diag_notes, u8[][]);
     mut width = diag_digits(here.line);
     mut shown = DiagLabel[];
@@ -4724,7 +4727,7 @@ fn fail<a, b>(c: (&a mut C), msg: &b [u8]) -> unit {
             if 60 < span {
                 span = 60;
             }
-            diag_excerpt(&mut c, width, &here, span, 94, view(""));
+            diag_excerpt(&mut c, width, &here, span, 94, view(primary));
             last_line = here.line;
             done = true;
             continue;
@@ -5915,6 +5918,94 @@ fn borrow_walk<a, b>(c: (&a mut C), ty: u64, trail: (&b mut u64[])) -> bool {
     }
     return false;
 }
+// A type as the programmer writes it: `u64`, `string`, `u8[]`, `&mut Pair<u64>`, `T?`. Falls back to
+// the interface spelling for the kinds that have no surface syntax.
+fn source_type_name<a>(c: (&a mut C), ty: u64) -> u8[] {
+    mut out = u8[];
+    if ty == 0 {
+        push_bytes(&mut out, view("u64"));
+        return out;
+    }
+    k := ty_kind(&mut c, ty);
+    arg := ty_arg(&mut c, ty);
+    if k == 18 {
+        if ty_mode(&mut c, ty) != 0 {
+            out.push(105);
+        } else {
+            out.push(117);
+        }
+        decimal(&mut out, arg);
+        return out;
+    }
+    if k == 21 {
+        if arg == 32 {
+            push_bytes(&mut out, view("f32"));
+        } else {
+            push_bytes(&mut out, view("f64"));
+        }
+        return out;
+    }
+    if k == 19 {
+        push_bytes(&mut out, view("bool"));
+        return out;
+    }
+    if k == 22 {
+        push_bytes(&mut out, view("char"));
+        return out;
+    }
+    if k == 3 {
+        push_bytes(&mut out, view("string"));
+        return out;
+    }
+    if k == 4 {
+        push_bytes(&mut out, view("u8[]"));
+        return out;
+    }
+    if k == 6 {
+        inner := source_type_name(&mut c, arg);
+        push_bytes(&mut out, view(inner));
+        push_bytes(&mut out, view("[]"));
+        return out;
+    }
+    if k == 7 {
+        out.push(38);
+        if ty_mode(&mut c, ty) != 0 {
+            push_bytes(&mut out, view("mut "));
+        }
+        inner := source_type_name(&mut c, arg);
+        push_bytes(&mut out, view(inner));
+        return out;
+    }
+    if k == 8 {
+        owner := c.decls[arg].module.copy();
+        args := type_args(&mut c, ty);
+        if same(view(owner), view(".union")) & (args.len() == 1) {
+            inner := source_type_name(&mut c, args[0]);
+            push_bytes(&mut out, view(inner));
+            out.push(63);
+            return out;
+        }
+        here := module_copy(&mut c);
+        if !same(view(owner), view(here)) & (owner.len() != 0) & (owner[0] != 46) {
+            push_bytes(&mut out, view(owner));
+            push_bytes(&mut out, view("::"));
+        }
+        push_bytes(&mut out, view(c.decls[arg].name));
+        if args.len() != 0 {
+            out.push(60);
+            for i in args.len() {
+                if i != 0 {
+                    push_bytes(&mut out, view(", "));
+                }
+                inner := source_type_name(&mut c, args[i]);
+                push_bytes(&mut out, view(inner));
+            }
+            out.push(62);
+        }
+        return out;
+    }
+    return type_name(&mut c, ty);
+}
 fn require_type<a>(c: (&a mut C), actual: u64, expected: u64) -> unit {
     // While a type hint is pending the function is recompiled anyway; mismatches are not final.
     if c.tolerant != 0 {
@@ -5965,6 +6056,14 @@ fn require_type<a>(c: (&a mut C), actual: u64, expected: u64) -> unit {
                 }
             }
         }
+        mut said = copy_bytes(view("expected `"));
+        wanted := source_type_name(&mut c, want);
+        push_bytes(&mut said, view(wanted));
+        push_bytes(&mut said, view("`, found `"));
+        got := source_type_name(&mut c, actual);
+        push_bytes(&mut said, view(got));
+        push_bytes(&mut said, view("`"));
+        exchange(&mut c.diag_primary, said);
         fail(&mut c, view("type mismatch"));
     }
     return ();
@@ -27859,6 +27958,7 @@ pub fn main() -> u64 {
         diag_labels: DiagLabel[],
         diag_help: u8[][],
         diag_notes: u8[][],
+        diag_primary: u8[],
         lib_owner: u8[][],
     };
     exchange(&mut c.target, host::target());

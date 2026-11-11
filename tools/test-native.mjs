@@ -106,7 +106,11 @@ for (const [position, test] of cases.entries()) {
     const result = execute(compiler, [...numeric, '--target', target, assembly, ...files, runtime, osRuntime]);
     assert.equal(result.signal, null, `${test.name}: compiler crashed (${result.signal}): ${result.stdout}${result.stderr}`);
     assert.equal(result.status, 1, `${test.name}: a rejected program must exit 1: ${result.stdout}${result.stderr}`);
-    if (test.diagnostic) assert.ok(`${result.stdout}${result.stderr}`.includes(test.diagnostic), `${test.name}: expected diagnostic ${test.diagnostic}: ${result.stdout}${result.stderr}`);
+    // `diagnostic` is one required fragment of the error output, or a list of them (the message and
+    // its location are on different lines of a rendered error).
+    for (const fragment of [test.diagnostic ?? []].flat()) {
+      assert.ok(`${result.stdout}${result.stderr}`.includes(fragment), `${test.name}: expected diagnostic ${fragment}: ${result.stdout}${result.stderr}`);
+    }
     assert.equal(readFileSync(assembly, 'utf8'), 'prior valid artifact', `${test.name}: invalid program overwrote prior output`);
   } else {
     // Interface-first: emit one interface per module, then compile the same program against them.
