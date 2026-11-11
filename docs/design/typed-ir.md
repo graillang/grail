@@ -662,6 +662,210 @@ front end's `for i in 15` over a 15-element `f64[]`, or the `i*3 + k` bounds it 
 guard. That is stage 3 proper in `llvm-backend.md`'s terms and is deliberately out of scope here: it
 needs the range in the front end's representation, not a type in the lifter's.
 
+## What the checks cost, by kind (measured 2026-11-11)
+
+Status: **measurement**. `compiler/` is untouched: the experiment is `tools/checks-budget.mjs`,
+which classifies the abort arms in the emitted `.ll`, then times variants of that same `.ll` with
+one kind of arm deleted. No temporary counter was added to the front end -- the kind of an arm is
+decided by two facts that need no instrumentation: the accessor functions are the only place a
+bounds check lives (`compiler/runtime.grl`), and an arm that `--overflow=wrap` does not emit is an
+arithmetic check.
+
+Four readings, all x86-64, `--backend=llvm`, `clang -O2` for the `.ll` and `-O2 -ffp-contract=off`
+for C, `--rounds 9` (median of nine interleaved rounds, the method of `tools/bench.mjs`). The host
+is 24 cores under a load average of 11; `llvm-backend.md` stage 2c already records that a difference
+under 5-7% is not a result on this machine, and that is the resolution to read every table below at.
+
+### The arms, by kind
+
+`bun tools/checks-budget.mjs count`. "Reachable" follows direct calls from `f_main*`; the module
+also carries the whole runtime and core library, most of which a benchmark never runs.
+
+| benchmark | arms in the `.ll` | reachable | bounds | overflow | other | in `f_main*` | index accesses per inner iteration |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| fnv | 1154 | 144 | 6 | 3 | 135 | 3 | 1 |
+| sieve | 1156 | 131 | 9 | 5 | 117 | 5 | 2 |
+| sort | 1164 | 140 | 6 | 12 | 122 | 13 | 3 |
+| nbody | 1197 | 238 | 10 | 46 | 182 | 46 | 6 |
+| matmul | 1161 | 228 | 16 | 8 | 204 | 10 | 2 |
+
+*bounds* is an arm inside a sequence accessor (`rt_slot*`, `rt_at*`, `rt_write`, the slices, the
+pushes, `vec_*`); *overflow* is an arm the checked build has and `--overflow=wrap` does not, by
+function; *other* is everything else reachable -- allocation, formatting, UTF-8, division and
+conversion, all of which run O(1) times per program except matmul's `f32` round trip, which is once
+per accumulate.
+
+The first structural fact this table shows: **a bounds check is not an arm at the call site**. Every
+`v[i]` is a `call rt_slot` (`rt_slot4` for `f32`, `rt_atb` for `u8`), and the bounds test is the one
+arm inside the accessor. So the static bounds count is 6-16 for every program while the number of
+bounds checks *executed* is one per element access: 1 per inner iteration for `fnv`, 2 for `sieve`
+and `matmul`, 3 for `sort`, 6 for `nbody`. A static count can size the arithmetic checks (which the
+program's own functions carry: 46 in `nbody`, 12 in `sort`, 8 in `matmul`, 5 in `sieve`, 3 in
+`fnv`) but not the bounds check. That is why everything below is timed.
+
+### The time, by kind
+
+`bun tools/checks-budget.mjs time --rounds 9`. Seconds, and the ratio to C in the same round.
+
+| benchmark | C `-O2` | checked | `--overflow=wrap` | every arm deleted | wrap, bounds arms deleted | wrap, every arm deleted | checked, overflow arms deleted |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| fnv | 0.569 | 0.577 1.01x | 0.577 1.01x | 0.578 1.01x | 0.577 1.01x | 0.582 1.02x | 0.576 1.01x |
+| sieve | 0.507 | 0.597 1.18x | 0.620 1.22x | 0.551 1.09x | 0.599 1.18x | 0.582 1.15x | 0.567 1.12x |
+| sort | 0.919 | 1.235 1.34x | 1.235 1.34x | 1.091 1.19x | 1.118 1.22x | 1.081 1.18x | 1.242 1.35x |
+| matmul | 0.221 | 0.255 1.15x | 0.248 1.12x | 0.238 1.07x | 0.240 1.09x | 0.233 1.05x | 0.254 1.15x |
+| nbody | 0.108 | 0.185 1.71x | 0.191 1.77x | 0.137 1.27x | 0.142 1.31x | 0.145 1.34x | 0.188 1.74x |
+
+Shares of the checked-over-C gap, in the same run:
+
+| benchmark | gap | overflow (`--overflow=wrap`) | overflow (branch only) | bounds (wrap base) | other (wrap base) | all checks | interaction | floor |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| fnv | 8 ms | 1% | 13% | 0% | -59% | -8% | 50% | 108% |
+| sieve | 90 ms | -26% | 33% | 24% | 18% | 51% | 34% | 49% |
+| sort | 316 ms | 0% | -2% | 37% | 12% | 46% | -3% | 54% |
+| matmul | 34 ms | 21% | 3% | 23% | 22% | 52% | -14% | 48% |
+| nbody | 77 ms | -8% | -4% | 64% | -4% | 62% | 9% | 39% |
+
+*interaction* is `all checks - (the three deltas)`: the individual deletions do not sum, because
+removing a check changes what LLVM unrolls and schedules. *floor* is the residual `no arms / C - 1`
+as a share of the gap -- the representation and whatever else is not a check.
+
+### `--overflow=wrap` does not measure the overflow check
+
+The variant was asked for and it is honest about one thing: what a program that *declares* its
+arithmetic unchecked pays. It is not a clean isolate of the branch, because the front end also stops
+emitting the flag materialization (`store i1 %f.C`/`%f.Z` and the compare that feeds it) that the
+same machine's *comparisons* then read, so the emitted arithmetic differs in more than the branch.
+The table above shows the consequence: `nbody` 1.71x -> 1.77x and `sieve` 1.18x -> 1.22x are
+**slower** with fewer checks, `sort` and `fnv` do not move, and only `matmul` gains (1.15x -> 1.12x).
+The right isolate is the third column of the shares table, which deletes exactly the arms
+`--overflow=wrap` does not emit and leaves the rest of the checked build as the front end wrote it:
+
+- `sieve` 0.597 s -> 0.567 s, the one real arithmetic-check win in the corpus (**5%**, a third of its
+  gap; `i * i` and the stride adds in the `while` loops);
+- `fnv`, `matmul`, `sort` unchanged, `nbody` 1.6% *slower* (0.185 s -> 0.188 s).
+
+So the arithmetic checks cost nothing measurable on four of the five programs, and 5% on `sieve`.
+Declared against measured: the two variants disagree by up to 8 points of the gap, and the
+disagreement is the variant, not the check.
+
+### The ceiling, re-measured
+
+`checked` against "every abort arm deleted", against the numbers this design and
+`llvm-backend.md` stage 2c quote:
+
+| benchmark | quoted ceiling | measured, checked base | measured, wrap base | checked ratio in that run |
+| --- | --- | --- | --- | --- |
+| fnv | 1.001 | **1.002** | 1.009 | 1.01x |
+| sieve | 0.955 | **0.923** | 0.975 | 1.18x |
+| sort | 0.921 | **0.883** | 0.875 | 1.34x |
+| matmul | 0.883 | **0.933** | 0.914 | 1.15x |
+| nbody | 0.746 | **0.741** | 0.784 | 1.71x |
+
+`fnv` and `nbody` reproduce to 0.005. `sieve`, `sort` and `matmul` are 3-5 points off and two of the
+three order differently, while the *other* base moves the same three rows by 2-9 points in the
+opposite direction -- i.e. the spread of this measurement is the size of the discrepancy. The floors
+land where the design says they are, which is the more useful check: `1.002 / 1.042 / 1.120 / 1.121 /
+1.256` here (see the next section) against the design's ~1.00 / 1.05 / 1.16 (sort) / 1.34 (nbody).
+
+### The floor: representation against everything else
+
+`bun tools/checks-budget.mjs floor --rounds 9`, check-free build, then the same build with every
+sequence accessor marked `alwaysinline` (which removes the call and the return and nothing else --
+LLVM still may not merge the header load across an element store, which is the F1 argument):
+
+| benchmark | C `-O2` | no checks | accessors inlined | what inlining buys |
+| --- | --- | --- | --- | --- |
+| fnv | 0.531 | 1.012x | 1.009x | 0.3% |
+| matmul | 0.192 | 1.042x | 1.048x | -0.6% |
+| sieve | 0.506 | 1.120x | 1.097x | 2.3% |
+| sort | 0.914 | 1.121x | 1.129x | -0.8% |
+| nbody | 0.101 | 1.256x | 1.269x | -1.3% |
+
+So **call overhead is at most ~2% of the floor on one benchmark and nothing on the other four**:
+the accessor call is not what the residual is made of. What is left is the two-dependent-load chain
+per access (slot -> header -> element) and the word machine's own shape (every scalar is a
+sign-extended word in a frame slot, every f64 operation a `call rt_f64_op` -- 19 of those in
+`nbody`'s inner nest). The one experiment that separates the header load from the rest is F1's
+typed sibling, which passes `data`/`len` as arguments: measured in *Implemented: F1*, it made
+`nbody` 1.72x -> 1.89x (0.165 s -> 0.182 s), i.e. two loads at the call site plus two more arguments
+cost more than the two loads in the callee they replaced. **The header's share of the floor is therefore not attributable by any experiment in
+this tree, and the two facts this document is about do not remove the floor** -- F2's own stand-alone
+effect on `matmul` at `-O2` is also nil (1.000/1.014 over two 41-round A/B runs).
+
+### Which proof would remove the most checks
+
+`bun tools/checks-budget.mjs proofs --rounds 9` deletes exactly the arms one candidate proof would
+remove, from the checked build, and nothing else. Bytes are the `.text` delta of the `.ll` object
+(`objdump -h`) -- for a single accessor that is the check's own code across all the sites clang
+inlined it into; for a multi-function deletion the number is not interpretable (deleting eight
+accessors makes `matmul`'s text 5.4 KB *larger*, because the smaller functions inline more).
+
+Each row is measured inside its own paired run, so the *after* column and the share are comparable
+within the table and not against the table above (the C baseline moves 3-15% between runs on this
+host, which is why the same program shows `checked 1.15x` here and `1.17x` there).
+
+| benchmark | proof | arms | bytes | after | share of the gap |
+| --- | --- | --- | --- | --- | --- |
+| matmul | bounds: `i*n+k`, `k*n+j` < `n*n == len(a)`, from `for i in n { for k in n }` (`rt_slot4`) | 1 | 144 B | 1.049x (was 1.170x) | **72%** |
+| nbody | bounds: `i*3+k < 15 == len(p)`, from `for i in 5 { for k in 3 }` (`rt_slot`) | 1 | 368 B | 1.287x (was 1.731x) | **61%** |
+| sieve | bounds: `len(composite) == n + 1`, `i`, `j <= n` (`rt_atb` + `rt_write`) | 3 | 352 B | 1.036x (was 1.059x) | 41% |
+| sort | bounds: `i < mid <= hi <= n == len(v)`, `k < hi` (`rt_slot`) | 1 | 256 B | 1.217x (was 1.342x) | 37% |
+| fnv | bounds: `len(data) == n` from the fill loop (`rt_atb`) | 1 | 336 B | 1.018x (was 1.012x) | none |
+| matmul | overflow: `i*n+k`, `k*n+j` do not overflow (`n = 256`) | 8 | 0 B | 1.178x | 0% |
+| nbody | overflow: `i*3`, `i*3+k` do not overflow (both < 15) | 46 | 0 B | 1.726x | 0% |
+| sort | overflow: `lo + width`, `2 * width` do not overflow | 12 | 0 B | 1.359x | 0% |
+| sieve | overflow: `i * i` does not overflow | 5 | 16 B | 1.040x | none |
+
+Ordered by measured nanoseconds saved, the bounds proofs are `sort` 106 ms > `nbody` 44 ms >
+`matmul` 23 ms > `sieve` 13 ms > `fnv` 0; ordered by bytes of code they are `nbody` 368 B >
+`sieve` 352 B > `fnv` 336 B > `sort` 256 B > `matmul` 144 B; every arithmetic proof is 0-16 B and
+0 ms (the front end's arithmetic check is a compare on values already in registers, and LLVM hoists
+or predicates it). The two orderings disagree because the bytes are a per-inlined-site cost and the
+seconds are a per-execution cost: `matmul` runs 3.4·10^8 inner iterations with two loads each and
+has the smallest check, `sort` moves 4.2·10^6 elements through 22 merge passes with three accesses
+per move -- ~3·10^8 accesses -- and has code for a wider element.
+
+Read the two orderings together and the answer is the same rule three times, not three rules:
+
+1. **A length fact plus a loop guard on the index: `len` of a sequence is a literal, or the bound of
+   the loop that filled it, and the index is `c*i + k` with `i`, `k` bounded by literal loop
+   bounds.** In `nbody` that is `i*3+k < 15` with `p`, `v` literal `f64[15]` arrays; in `matmul`
+   `i*n+k < n*n` with `n = 256`; in `sieve` `i, j <= n < n+1 = len(composite)`; in `sort` the merge
+   indices against `n == len(v)`; in `fnv` `i < n == len(data)` after the fill loop. It is 1 arm in
+   the source and 144-368 bytes across the inlined sites, and it is worth 61% of `nbody`'s gap, 37%
+   of `sort`'s, 72% of `matmul`'s, 41% of `sieve`'s and nothing on `fnv`.
+2. **The arithmetic checks are worth nothing except on `sieve`** (5%, `i*i`), so the "both operands
+   are bounded by the integration step" proof for `nbody` -- true and easy -- would move 0 ms.
+   Building it first would be building the proof that measures zero.
+3. **`fnv` has no gap** (6-8 ms, and every deletion makes it slower): no proof is worth building
+   for it, which is what its 1.001 ceiling already said.
+
+**Build first: the range fact (F3) restricted to the loop-guard form of item 1, and start with
+`nbody`.** It is the largest single check in the corpus (61% of a 1.71x gap, 44 ms), its shape is the
+simplest instance of the rule (a literal `f64[15]` indexed by `i*3+k` from two literal `for`
+bounds -- no fill-loop reasoning, no alias question), and the fallback is free: an absent fact keeps
+today's `rt_slot`. `matmul` is the same rule one step further (the payload is `i*n+k` over `n*n`,
+and it is the largest *fraction*, 72%) and is the second thing to build; `sort` needs the same fact
+plus the `mid`/`hi` clamping to follow, and `sieve`/`fnv` are the last 13 ms and 0 ms.
+
+### What this measurement could not attribute
+
+- **The floor's split between the 24-byte header and the word-shaped scalars.** Inlining the
+  accessors removes the call and measures ~0 (table above), and F1's typed sibling -- the one
+  experiment that removes the header load itself -- was slower than the code it replaced. Both say
+  the floor is not "the call" and neither says how much of it is the header, so the honest statement
+  is that the floor is 1.01-1.26x of C and this document's two facts do not remove it.
+- **`sieve`.** Its gap moved between 0.5x and 0.9x of the same story across runs, the wrap base and
+  the checked base disagree in sign (+21 ms vs -13 ms for the bounds arms), and the C baseline moved
+  0.474-0.547 s across runs. Only "the arithmetic branches are worth ~5%" reproduced; sieve's bounds
+  share is somewhere in 24-40% and I would not put a tighter number on it.
+- **The interaction term, 9-34% on `nbody` and `sieve`.** Deleting a check changes unrolling, so the
+  per-kind shares are a decomposition of measured deltas, not a partition of the cycles; the three
+  deltas and the total differ by that term, and it is large on exactly the two benchmarks where the
+  loop shape changes (`matmul`'s -14% is the F2 story: removing its checks once made it *slower*).
+- **`fnv`.** 6-8 ms of a 1% gap, with deletions that make it slower: nothing is attributable, and no
+  ordering of the deltas is meaningful.
+
 ## Tests that catch a wrong fact
 
 The two failure modes are "the pointer was not a header" (or the wrong width) and "the word was not

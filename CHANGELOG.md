@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- Measured what the validation in a Grail program costs, split by kind; the compiler is untouched.
+  [tools/checks-budget.mjs](tools/checks-budget.mjs) classifies the abort arms in the emitted `.ll`
+  by the predicate that guards them (bounds: the arms inside the sequence accessors; overflow: the
+  arms `--overflow=wrap` does not emit; other: allocation, formatting and conversions), then times
+  variants of that same `.ll` with one kind of arm deleted, paired with C `-O2` over nine rounds.
+  On the five `tools/bench.mjs` programs, x86-64 `--backend=llvm`: the index/length check is 61% of
+  `nbody`'s gap to C and 37% of `sort`'s, 72% of `matmul`'s and 41% of `sieve`'s, and worth nothing
+  on `fnv`, which has no gap; the arithmetic checks are worth ~5% on `sieve` and 0 ms on the other
+  four, so `nbody`'s "both operands are bounded by the integration step" proof would move nothing.
+  `--overflow=wrap` is *not* a clean isolate -- it also drops the flag materialization the same
+  machine's comparisons read, so `nbody` and `sieve` come out 3-4% slower with fewer checks -- and
+  the report uses the branch-only variant for that share. Inlining the accessors in the check-free
+  build is worth at most ~2%, so the residual 1.01-1.26x floor is not call overhead.
+  [docs/design/typed-ir.md](docs/design/typed-ir.md) carries the tables, the explanation of what
+  could not be attributed (the floor's split between the 24-byte header and the word-shaped scalars,
+  `sieve`, `fnv`, and the 9-34% interaction term), and ranks the proofs a range fact would buy:
+  the loop-guard/literal-length bounds proof first, `nbody` as its first instance.
 - Documents: the claims this week's compiler work made false are gone, each checked against the
   compiler in this tree first. [docs/rhi.md](docs/rhi.md) said "there is no expression whose value is
   the address of an owned `extern \"C\"` record" and listed `cptr(&app)`, a record out-parameter and a
