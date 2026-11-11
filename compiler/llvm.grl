@@ -3051,8 +3051,21 @@ fn rg_set_len(rc: (&RC), st: (&mut u64[]), k: u64, n: u64) -> unit {
     rg_lset(&rc, &mut st, k, 1, n, wrapping_add(g, 1));
     return ();
 }
-// dst |= src over both halves of the state; 1 when dst changed.
-fn rg_join(rc: (&RC), dst: (&mut u64[]), src: (&u64[])) -> u64 {
+// dst |= src over both halves of the state; 1 when dst changed. With `widen` set - from the fourth
+// round of the fixpoint on, and only on a back edge (a join into a block at or before the one the
+// edge leaves, i.e. a loop head; widening a forward join such as a guard's edge into the body would
+// throw away exactly the bound the guard just proved) - a join that would move a bound jumps
+// instead (widening with thresholds): an upper bound that grew goes to the smallest immediate in
+// the function that still covers it - the loop guard's own bound, typically, so `while i < 300`
+// holds the counter at [0, 300] at the head and the guard narrows it to [0, 299] in the body - or
+// to rg_max when none does; a lower bound that fell goes to 0; and a length generation the two
+// paths disagree on becomes a fixed value for this block and identity, which no bound was ever
+// stated against. All of these only lose facts, so they stay sound, and none moves twice, so a
+// loop of any trip count converges in a few rounds.
+fn rg_widen_gen(block: u64, id: u64) -> u64 {
+    return 9223372036854775808 + block * 1099511627776 + id * 1048576;
+}
+fn rg_join(rc: (&RC), dst: (&mut u64[]), src: (&u64[]), widen: u64, block: u64, thr: (&u64[])) -> u64 {
     mut changed = 0;
     if dst.len() != src.len() {
         return 0;
@@ -3073,11 +3086,23 @@ fn rg_join(rc: (&RC), dst: (&mut u64[]), src: (&u64[])) -> u64 {
             mut lo = dst[b + 1];
             if src[b + 1] < lo {
                 lo = src[b + 1];
+                if widen != 0 {
+                    lo = 0;
+                }
                 changed = 1;
             }
             mut hi = dst[b + 2];
             if src[b + 2] > hi {
                 hi = src[b + 2];
+                if widen != 0 {
+                    mut top = rg_max();
+                    for t in thr.len() {
+                        if (thr[t] >= hi) & (thr[t] < top) {
+                            top = thr[t];
+                        }
+                    }
+                    hi = top;
+                }
                 changed = 1;
             }
             mut sym = dst[b + 3];
@@ -3103,6 +3128,9 @@ fn rg_join(rc: (&RC), dst: (&mut u64[]), src: (&u64[])) -> u64 {
         mut gen = dst[b + 2];
         if src[b + 2] > gen {
             gen = src[b + 2];
+        }
+        if (widen != 0) & (src[b + 2] != dst[b + 2]) {
+            gen = rg_widen_gen(block, i);
         }
         mut have = dst[b];
         mut lb = dst[b + 1];
@@ -4189,7 +4217,7 @@ fn rg_call_verdict(rc: (&RC), st: (&u64[]), line: (&[u8])) -> u64 {
     return 3;
 }
 // dst |= src, taking src wholesale when dst has nothing on it yet.
-fn rg_into(rc: (&RC), st: (&mut u64[][]), nblk: u64, b: u64, src: (&u64[])) -> u64 {
+fn rg_into(rc: (&RC), st: (&mut u64[][]), nblk: u64, b: u64, src: (&u64[]), widen: u64, thr: (&u64[])) -> u64 {
     if b >= nblk {
         return 0;
     }
@@ -4197,7 +4225,7 @@ fn rg_into(rc: (&RC), st: (&mut u64[][]), nblk: u64, b: u64, src: (&u64[])) -> u
         st[b] = src.copy();
         return 1;
     }
-    return rg_join(&rc, &mut st[b], &src);
+    return rg_join(&rc, &mut st[b], &src, widen, b, &thr);
 }
 // Walks a block from `cur`, applying each instruction and recording the two verdicts a fact proves.
 fn rg_run(rc: (&RC), cur: (&mut u64[]), instrs: (&u8[][]), start: u64, stop: u64, trip: (&u64[]), out: (&mut u64[]), proofs: u64, prov: (&mut u64[]), pcmp: (&mut u64[]), snap: (&mut u64[])) -> unit {
@@ -4217,10 +4245,10 @@ fn rg_run(rc: (&RC), cur: (&mut u64[]), instrs: (&u8[][]), start: u64, stop: u64
 // the branch tests, on both operands. A branch is never *decided*: the state a block is entered with
 // is the join over every path that reaches it, so a comparison that holds there holds on every
 // arrival -- including a loop's last, which is why deciding a guard from it would be wrong.
-fn rg_edges(rc: (&RC), st: (&mut u64[][]), nblk: u64, s1: u64, s2: u64, instrs: (&u8[][]), start: u64, stop: u64, cur: (&u64[]), out: (&mut u64[]), pcmp: (&u64[]), snap: (&u64[])) -> u64 {
+fn rg_edges(rc: (&RC), st: (&mut u64[][]), nblk: u64, s1: u64, s2: u64, instrs: (&u8[][]), start: u64, stop: u64, cur: (&u64[]), out: (&mut u64[]), pcmp: (&u64[]), snap: (&u64[]), widen: u64, thr: (&u64[]), from: u64) -> u64 {
     if s2 == rg_none() {
         if s1 != rg_none() {
-            if rg_into(&rc, &mut st, nblk, s1, &cur) != 0 {
+            if rg_into(&rc, &mut st, nblk, s1, &cur, widen & u64(s1 <= from), &thr) != 0 {
                 return 1;
             }
         }
@@ -4278,10 +4306,10 @@ fn rg_edges(rc: (&RC), st: (&mut u64[][]), nblk: u64, s1: u64, s2: u64, instrs: 
     }
     // 1 when the target changed, 2 when the fall-through did, 3 for both.
     mut changed = 0;
-    if rg_into(&rc, &mut st, nblk, s2, &fall) != 0 {
+    if rg_into(&rc, &mut st, nblk, s2, &fall, widen & u64(s2 <= from), &thr) != 0 {
         changed = 2;
     }
-    if rg_into(&rc, &mut st, nblk, s1, &taken) != 0 {
+    if rg_into(&rc, &mut st, nblk, s1, &taken, widen & u64(s1 <= from), &thr) != 0 {
         changed = changed | 1;
     }
     return changed;
@@ -4447,11 +4475,38 @@ fn range_proofs(instrs: (&u8[][]), nslots: u64, split: u64) -> u64[] {
     }
     mut rounds: u64 = 0;
     mut changed: u64 = 1;
+    mut widen: u64 = 0;
+    // Widening thresholds: every non-negative immediate in the function (`movabsq $c` / `movq $c`
+    // load a guard's bound into the register it is compared through; `cmpq $c` compares directly).
+    mut thr = u64[];
+    for q in n {
+        line := view(instrs[q]);
+        mut k: u64 = 0;
+        while (k < line.len()) && (line[k] != 36) {
+            k += 1;
+        }
+        if (k < line.len()) && (starts(line, view("mov")) || starts(line, view("cmpq"))) {
+            k += 1;
+            mut v: u64 = 0;
+            mut digits: u64 = 0;
+            while (k < line.len()) && (line[k] >= 48) && (line[k] <= 57) && (digits < 18) {
+                v = v * 10 + u64(line[k] - 48);
+                digits += 1;
+                k += 1;
+            }
+            if (digits != 0) && (k < line.len()) && (line[k] == 44) {
+                thr.push(v);
+            }
+        }
+    }
     // A worklist: only the blocks a join changed are walked again, so the cost is one pass over
     // the function plus the blocks a loop actually re-enters.
     while (changed != 0) & (rounds < 24) {
         changed = 0;
         rounds += 1;
+        if rounds > 3 {
+            widen = 1;
+        }
         for b in nblk {
             if (dirty[b] == 0) || (stx[b].len() == 0) {
                 continue;
@@ -4466,7 +4521,7 @@ fn range_proofs(instrs: (&u8[][]), nslots: u64, split: u64) -> u64[] {
             }
             mut cur2 = stx[b].copy();
             rg_run(&rc, &mut cur2, &instrs, bstart[b], bstop[b], &trip, &mut out, 1, &mut prov, &mut pcmp2, &mut snap);
-            mask := rg_edges(&rc, &mut stx, nblk, s1[b], s2[b], &instrs, bstart[b], bstop[b], &cur2, &mut out, &pcmp2, &snap);
+            mask := rg_edges(&rc, &mut stx, nblk, s1[b], s2[b], &instrs, bstart[b], bstop[b], &cur2, &mut out, &pcmp2, &snap, widen, &thr, b);
             if (mask & 1) != 0 {
                 if s1[b] != rg_none() {
                     dirty[s1[b]] = 1;
@@ -4481,11 +4536,11 @@ fn range_proofs(instrs: (&u8[][]), nslots: u64, split: u64) -> u64[] {
             }
         }
     }
-    // A fixpoint stopped by the round cap is not a fixpoint: the joins have no widening, so a loop
-    // counter's interval grows by one step per round, and a state taken after 24 rounds of a
-    // 100-trip loop holds the counter in about [0, 23] -- below a length the loop does exceed.
-    // Likewise a loop that pushes moves the length generation every round. Either way nothing
-    // is decided: every access keeps the check it was emitted with.
+    // A fixpoint stopped by the round cap is not a fixpoint. Widening makes every loop converge
+    // well inside the cap, so this is a backstop: without it a counter's interval grew one step
+    // per round, and a state taken after 24 rounds of a 100-trip loop held the counter in about
+    // [0, 23] -- below a length the loop does exceed. Nothing is decided then: every access keeps
+    // the check it was emitted with.
     if changed != 0 {
         for q in n {
             out[q] = 0;
@@ -4510,7 +4565,7 @@ fn range_proofs(instrs: (&u8[][]), nslots: u64, split: u64) -> u64[] {
         }
         mut cur3 = stx[b].copy();
         rg_run(&rc, &mut cur3, &instrs, bstart[b], bstop[b], &trip, &mut out, 1, &mut prov, &mut pcmp2, &mut snap);
-        rg_edges(&rc, &mut stx, nblk, s1[b], s2[b], &instrs, bstart[b], bstop[b], &cur3, &mut out, &pcmp2, &snap);
+        rg_edges(&rc, &mut stx, nblk, s1[b], s2[b], &instrs, bstart[b], bstop[b], &cur3, &mut out, &pcmp2, &snap, widen, &thr, b);
     }
     return out;
 }
