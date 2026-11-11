@@ -41,6 +41,8 @@ struct Ty {
 struct Decl {
     module: u8[],
     name: u8[],
+    // 0 when declared without `pub`: private to `module` (separate-compilation.md, "Visibility").
+    public: u64,
     is_enum: u64,
     // 1 for `handle Name;`: a one-word opaque foreign handle, not a layout.
     opaque: u64,
@@ -67,6 +69,8 @@ struct Import {
 struct Alias {
     module: u8[],
     name: u8[],
+    // 0 when declared without `pub`: private to `module` (separate-compilation.md, "Visibility").
+    public: u64,
     ty: u64
 }
 struct Field {
@@ -76,6 +80,10 @@ struct Field {
 struct Func {
     module: u8[],
     name: u8[],
+    // 0 when declared without `pub`: private to `module` (separate-compilation.md, "Visibility").
+    public: u64,
+    // The source module that declared it (`module` is a synthetic owner for methods).
+    home: u8[],
     first: u64,
     count: u64,
     ret: u64,
@@ -99,6 +107,8 @@ struct Func {
 struct Interface {
     module: u8[],
     name: u8[],
+    // 0 when declared without `pub`: private to `module` (separate-compilation.md, "Visibility").
+    public: u64,
     defined: u64,
     methods: u64[]
 }
@@ -143,6 +153,8 @@ struct ImplParams {
 struct Constant {
     module: u8[],
     name: u8[],
+    // 0 when declared without `pub`: private to `module` (separate-compilation.md, "Visibility").
+    public: u64,
     ty: u64,
     value: u64,
     text: u8[]
@@ -377,6 +389,10 @@ struct C {
     // The pass a module-level compile-time form runs in (0 inside a function body).
     ct_pass: u64,
     ct_in_if: bool,
+    // `pub` on the declaration being parsed (1 for anything the compiler synthesises), and 1 while
+    // the compiler reads interfaces or looks names up for itself, which skips the visibility check.
+    decl_public: u64,
+    vis_off: u64,
     // Copy-backs for `p: &mut R` callback parameters: (C pointer slot, copy slot, bytes) triples.
     export_copyback: u64[],
     rnames: u8[][],
@@ -468,9 +484,7 @@ struct C {
     // Every module the program loaded, in command-line order, with what its interface records about
     // the file it came from.
     iface_list: IModule[],
-    // Files whose declarations came from an interface instead of their source, and the modules
-    // waiting for their definition sweep.
-    iface_files: u64[],
+    // Interfaces read with `--use`, waiting for their definition sweep.
     iface_loaded: u8[][],
     iface_loaded_path: u8[][],
     // Environment records (module `.closure`) the surface being emitted reaches, and the name each
@@ -5403,12 +5417,23 @@ fn resolve_import<a, b>(c: (&a mut C), n: &b [u8]) -> u8[] {
     }
     return module;
 }
+// An interface (a set of methods a type implements) is private to its module unless declared
+// `pub`, like any other item: naming it in a bound, an `impl` or a call from elsewhere is refused.
+fn interface_visible<a>(c: (&a mut C), id: u64) -> unit {
+    if (id == 0) || (c.interfaces[id - 1].public != 0) || (c.interfaces[id - 1].defined == 0) {
+        return ();
+    }
+    home := c.interfaces[id - 1].module.copy();
+    name := c.interfaces[id - 1].name.copy();
+    require_visible(&mut c, view(home), view(name));
+    return ();
+}
 fn ensure_interface<a>(c: (&a mut C), module: u8[], name: u8[]) -> u64 {
     existing := find_interface(&c, view(module), view(name));
     if existing != 0 {
         return existing;
     }
-    c.interfaces.push(Interface { module: module, name: name, defined: 0, methods: u64[] });
+    c.interfaces.push(Interface { module: module, name: name, public: 1, defined: 0, methods: u64[] });
     return c.interfaces.len();
 }
 fn base_type<a>(c: (&a mut C), ty: u64) -> u64 {
@@ -5541,6 +5566,7 @@ fn lifetime_parameters<a>(c: (&a mut C)) -> unit {
                                 }
                             }
                             id := ensure_interface(&mut c, m, n);
+                            interface_visible(&mut c, id);
                             for i in requirements.len() {
                                 if requirements[i] == id {
                                     fail(&mut c, view("duplicate interface constraint"));
@@ -6076,13 +6102,19 @@ fn require_type<a>(c: (&a mut C), actual: u64, expected: u64) -> unit {
 }
 // Type alias index + 1, or 0.
 fn find_alias<a, b, d>(c: (&a mut C), m: &b [u8], n: &d [u8]) -> u64 {
+    mut found = 0;
     for i in c.aliases.len() {
         a := &c.aliases[i];
         if same(view(a.module), view(m)) & same(view(a.name), view(n)) {
-            return i + 1;
+            found = i + 1;
+            break;
         }
     }
-    return 0;
+    if (found != 0) && (c.aliases[found - 1].public == 0) {
+        home := c.aliases[found - 1].module.copy();
+        require_visible(&mut c, view(home), view(n));
+    }
+    return found;
 }
 // Declaration index + 1, or 0.
 fn find_decl_internal<a, b, d>(c: (&a mut C), m: &b [u8], n: &d [u8]) -> u64 {
@@ -6103,16 +6135,54 @@ fn find_decl<a, b, d>(c: (&a mut C), m: &b [u8], n: &d [u8]) -> u64 {
     if same(view(m), view("hashmap")) & same(view(n), view("Map")) & !same(view(here), view("hashmap")) {
         return 0;
     }
-    return find_decl_internal(&mut c, m, n);
+    found := find_decl_internal(&mut c, m, n);
+    if (found != 0) && (c.decls[found - 1].public == 0) {
+        home := c.decls[found - 1].module.copy();
+        require_visible(&mut c, view(home), view(n));
+    }
+    return found;
 }
 fn find_func<a, b, d>(c: (&a mut C), m: &b [u8], n: &d [u8]) -> u64 {
+    mut found = 0;
     for i in c.funcs.len() {
         x := &c.funcs[i];
         if same(view(x.module), view(m)) & same(view(x.name), view(n)) {
-            return i + 1;
+            found = i + 1;
+            break;
         }
     }
-    return 0;
+    if (found != 0) && (c.funcs[found - 1].public == 0) {
+        home := c.funcs[found - 1].home.copy();
+        require_visible(&mut c, view(home), view(n));
+    }
+    return found;
+}
+// Visibility (docs/design/separate-compilation.md, "Visibility"): an item declared without `pub` is
+// private to the module that declares it. Naming it from any other module is refused; the trusted
+// runtime and the compiler's own lookups (`vis_off`: interfaces being read) are not checked.
+fn require_visible<a, b, d>(c: (&a mut C), home: &b [u8], name: &d [u8]) -> unit {
+    if c.vis_off != 0 {
+        return ();
+    }
+    here := module_copy(&mut c);
+    // The runtime is the trusted base on both sides: it reaches every module's items, and the unsafe
+    // modules that call into it reach its own, which never take `pub`.
+    if same(view(here), view(home)) || same(view(here), view("runtime")) || same(view(home), view("runtime")) {
+        return ();
+    }
+    mut text = copy_bytes(view("`"));
+    push_bytes(&mut text, view(name));
+    push_bytes(&mut text, view("` is private to module `"));
+    push_bytes(&mut text, view(home));
+    push_bytes(&mut text, view("`"));
+    mut help = copy_bytes(view("declare it `pub` in `"));
+    push_bytes(&mut help, view(home));
+    push_bytes(&mut help, view("` to use it from `"));
+    push_bytes(&mut help, view(here));
+    push_bytes(&mut help, view("`"));
+    diag_help(&mut c, view(help));
+    fail(&mut c, view(text));
+    return ();
 }
 // Field index within decl, failing when absent.
 fn find_field<a, b>(c: (&a mut C), decl: u64, n: &b [u8]) -> u64 {
@@ -6237,10 +6307,12 @@ fn make_union<a>(c: (&a mut C), args: u64[], success: u64, module: u8[], prefix:
             bounds.push(0);
             constraints.push(u64[]);
         }
+        item_public_1 := c.decl_public;
         c
             .decls
             .push(
                 Decl {
+                    public: item_public_1,
                     module: module,
                     name: name,
                     is_enum: 1,
@@ -6898,7 +6970,8 @@ fn alias_declaration<a>(c: (&a mut C), pass: u64) -> unit {
         if find_alias(&mut c, view(module), view(name)) != 0 {
             fail(&mut c, view("duplicate type alias"));
         }
-        c.aliases.push(Alias { module: module, name: name, ty: 18446744073709551615 });
+        alias_public := c.decl_public;
+        c.aliases.push(Alias { module: module, name: name, public: alias_public, ty: 18446744073709551615 });
         return ();
     }
     if pass == 3 {
@@ -6965,10 +7038,12 @@ fn handle_declaration<a>(c: (&a mut C), pass: u64) -> unit {
     if (find_decl(&mut c, view(m), view(name)) != 0) || (find_alias(&mut c, view(m), view(name)) != 0) {
         fail(&mut c, view("duplicate type"));
     }
+    item_public_2 := c.decl_public;
     c
         .decls
         .push(
             Decl {
+                public: item_public_2,
                 module: m,
                 name: name,
                 is_enum: 0,
@@ -7001,10 +7076,12 @@ fn decl<a>(c: (&a mut C), pass: u64) -> unit {
     if pass != 2 {
         if pass == 1 {
             m := module_copy(&mut c);
+            item_public_3 := c.decl_public;
             c
                 .decls
                 .push(
                     Decl {
+                        public: item_public_3,
                         module: m,
                         name: name,
                         is_enum: is_enum,
@@ -7064,9 +7141,11 @@ fn decl<a>(c: (&a mut C), pass: u64) -> unit {
     while reverse.len() != 0 {
         c.fields.push(reverse.pop());
     }
+    item_public_4 := c.decl_public;
     exchange(
         &mut c.decls[d - 1],
         Decl {
+            public: item_public_4,
             module: m,
             name: name,
             is_enum: is_enum,
@@ -8103,10 +8182,12 @@ fn ffi_record<a>(c: (&a mut C), pass: u64) -> unit {
     if pass != 2 {
         if pass == 1 {
             m := module_copy(&mut c);
+            item_public_5 := c.decl_public;
             c
                 .decls
                 .push(
                     Decl {
+                        public: item_public_5,
                         module: m,
                         name: name,
                         is_enum: 0,
@@ -8168,9 +8249,11 @@ fn ffi_record<a>(c: (&a mut C), pass: u64) -> unit {
     while reverse.len() != 0 {
         c.fields.push(reverse.pop());
     }
+    item_public_6 := c.decl_public;
     exchange(
         &mut c.decls[d - 1],
         Decl {
+            public: item_public_6,
             module: m,
             name: name,
             is_enum: 0,
@@ -8381,10 +8464,14 @@ fn extern_declaration<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
             ffi_link(&mut c, view(input));
         }
     }
+    item_public_7 := c.decl_public;
+    item_home_7 := module_copy(&mut c);
     c
         .funcs
         .push(
             Func {
+                public: item_public_7,
+                home: item_home_7,
                 module: m,
                 name: name,
                 first: first,
@@ -8407,6 +8494,8 @@ fn extern_declaration<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     return ();
 }
 fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
+    // A body's synthesised declarations (closure environments) are not the function's to hide.
+    exchange(&mut c.decl_public, 1);
     position := c.pos;
     out_mark := c.out.len();
     fact_mark := llvm::facts_len(&c.facts);
@@ -8606,10 +8695,15 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         raw := c.raw;
         bounds := copy_numbers(&c.type_bounds);
         constraints := copy_constraints(&c.type_interfaces);
+        // A method of an interface implementation is as visible as the interface it implements.
+        item_public_8 := public | u64(c.current_impl != 0);
+        item_home_8 := module_copy(&mut c);
         c
             .funcs
             .push(
                 Func {
+                    public: item_public_8,
+                    home: item_home_8,
                     module: m,
                     name: name,
                     first: first,
@@ -8880,6 +8974,7 @@ fn interface_declaration<a>(c: (&a mut C), pass: u64) -> unit {
     }
     module := module_copy(&mut c);
     id := ensure_interface(&mut c, module, name);
+    interface_public := c.decl_public;
     if pass == 1 {
         item := &c.interfaces[id - 1];
         defined := item.defined;
@@ -8888,6 +8983,7 @@ fn interface_declaration<a>(c: (&a mut C), pass: u64) -> unit {
         }
         item := &mut c.interfaces[id - 1];
         exchange(&mut item.defined, 1);
+        exchange(&mut item.public, interface_public);
         if !is(&mut c, view("{")) {
             fail(&mut c, view("expected interface body"));
         }
@@ -8940,10 +9036,14 @@ fn interface_declaration<a>(c: (&a mut C), pass: u64) -> unit {
         mut requirements = u64[][];
         requirements.push(u64[id]);
         regions := c.rnames.len();
+        item_public_9 := c.decl_public;
+        item_home_9 := module_copy(&mut c);
         c
             .funcs
             .push(
                 Func {
+                    public: item_public_9,
+                    home: item_home_9,
                     module: module,
                     name: name,
                     first: first,
@@ -9136,6 +9236,7 @@ fn implementation<a>(c: (&a mut C), pass: u64) -> unit {
         }
     }
     contract := find_interface(&c, view(module), view(name));
+    interface_visible(&mut c, contract);
     if contract == 0 {
         fail(&mut c, view("unknown implemented interface"));
     }
@@ -9688,7 +9789,8 @@ fn module_binding<a>(c: (&a mut C), pass: u64) -> unit {
         }
     }
     expect(&mut c, view(";"));
-    c.constants.push(Constant { module: module, name: name, ty: ty, value: value, text: text });
+    constant_public := c.decl_public;
+    c.constants.push(Constant { module: module, name: name, public: constant_public, ty: ty, value: value, text: text });
     return ();
 }
 fn constant_declaration<a>(c: (&a mut C), pass: u64) -> unit {
@@ -9727,10 +9829,12 @@ fn constant_declaration<a>(c: (&a mut C), pass: u64) -> unit {
         bits := float_bits_p(&mut c, view(t), fp);
         advance(&mut c);
         expect(&mut c, view(";"));
+        item_public_10 := c.decl_public;
         c
             .constants
             .push(
                 Constant {
+                    public: item_public_10,
                     module: module,
                     name: name,
                     ty: ty,
@@ -9808,7 +9912,8 @@ fn constant_declaration<a>(c: (&a mut C), pass: u64) -> unit {
         }
     }
     expect(&mut c, view(";"));
-    c.constants.push(Constant { module: module, name: name, ty: ty, value: value, text: text });
+    constant_public := c.decl_public;
+    c.constants.push(Constant { module: module, name: name, public: constant_public, ty: ty, value: value, text: text });
     return ();
 }
 fn constant_value<a, b, d>(c: (&a mut C), module: &b [u8], name: &d [u8]) -> Val {
@@ -9818,6 +9923,11 @@ fn constant_value<a, b, d>(c: (&a mut C), module: &b [u8], name: &d [u8]) -> Val
             ty := k.ty;
             value := k.value;
             text := k.text.copy();
+            kpublic := k.public;
+            khome := k.module.copy();
+            if kpublic == 0 {
+                require_visible(&mut c, view(khome), view(name));
+            }
             if ty == 3 {
                 l := label(&mut c);
                 rodata(&mut c);
@@ -9964,6 +10074,17 @@ fn toplevel_item<a>(c: (&a mut C), pass: u64) -> unit {
             return ();
         }
         public := u64(eat(&mut c, view("pub")));
+        // Every item takes `pub`; without it the item is private to this module.
+        exchange(&mut c.decl_public, public);
+        declaration_item(&mut c, pass, public);
+        exchange(&mut c.decl_public, 1);
+        return ();
+    }
+    return ();
+}
+// A declaration after its optional `pub`.
+fn declaration_item<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
+    if true {
         if is(&mut c, view("extern")) {
             extern_declaration(&mut c, pass, public);
             return ();
@@ -12720,10 +12841,12 @@ fn fn_value_decl<a>(c: (&a mut C)) -> u64 {
     c.fields.push(Field { name: copy_bytes(view("__code")), ty: 0 });
     c.fields.push(Field { name: copy_bytes(view("__drop")), ty: 0 });
     c.fields.push(Field { name: copy_bytes(view("target")), ty: 0 });
+    item_public_11 := c.decl_public;
     c
         .decls
         .push(
             Decl {
+                public: item_public_11,
                 module: copy_bytes(view(".closure")),
                 name: copy_bytes(view("FnValue")),
                 is_enum: 0,
@@ -17317,10 +17440,12 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
         borrowed.push(borrow);
     }
     count := 2 + captures.len();
+    item_public_12 := c.decl_public;
     c
         .decls
         .push(
             Decl {
+                public: item_public_12,
                 module: copy_bytes(view(".closure")),
                 name: decl_name,
                 is_enum: 0,
@@ -19911,6 +20036,7 @@ fn primary<a>(c: (&a mut C)) -> Val {
             third := ident(&mut c);
             interface := find_interface(&c, view(first), view(second));
             if interface != 0 {
+                interface_visible(&mut c, interface);
                 return interface_call(&mut c, interface, view(third));
             }
             d := find_decl(&mut c, view(first), view(second));
@@ -24596,10 +24722,14 @@ fn host_fn<a, b>(c: (&a mut C), name: &b [u8], ret: u64) -> unit {
         c.params.push(4);
     }
     count := c.params.len() - first;
+    item_public_13 := c.decl_public;
+    item_home_13 := "host".copy();
     c
         .funcs
         .push(
             Func {
+                public: item_public_13,
+                home: item_home_13,
                 module: "host".copy(),
                 name: name.copy(),
                 first: first,
@@ -24997,7 +25127,7 @@ fn iface_hex<a>(bytes: &a [u8]) -> u8[] {
     return out;
 }
 // The SHA-256 of a byte view as 64 lowercase hex characters.
-fn iface_digest<a>(data: &a [u8]) -> u8[] {
+pub fn iface_digest<a>(data: &a [u8]) -> u8[] {
     d := sha256(data);
     return iface_hex(&d);
 }
@@ -26337,6 +26467,151 @@ fn iface_has_body<a, b>(c: (&a mut C), m: &b [u8]) -> u64 {
 }
 // The interface of one module, as text. Everything an importer needs to check a call to it and
 // nothing a body would carry; the header states where it came from and the digest covers the file.
+fn iface_span<a>(spans: (&a mut u64[]), start: u64, end: u64, kind: u64, index: u64, public: u64, owner: u64) -> unit {
+    spans.push(start);
+    spans.push(end);
+    spans.push(kind);
+    spans.push(index);
+    spans.push(public);
+    spans.push(owner);
+    return ();
+}
+// The name an interface item is found by: what a kept span's text has to mention for a private item
+// to be needed.
+fn iface_span_name<a, b>(c: (&a mut C), spans: (&b u64[]), k: u64) -> u8[] {
+    kind := spans[k * 6 + 2];
+    index := spans[k * 6 + 3];
+    if kind == 1 {
+        return c.decls[index].name.copy();
+    }
+    if kind == 2 {
+        return c.aliases[index].name.copy();
+    }
+    if kind == 3 {
+        return c.constants[index].name.copy();
+    }
+    if (kind == 4) || (kind == 6) {
+        return c.funcs[index].name.copy();
+    }
+    if kind == 7 {
+        return c.interfaces[index].name.copy();
+    }
+    return u8[];
+}
+// True when `name` occurs in `text` as a whole identifier.
+fn iface_mentions<a, b>(text: &a [u8], name: &b [u8]) -> bool {
+    if name.len() == 0 {
+        return false;
+    }
+    mut i = 0;
+    while i + name.len() <= text.len() {
+        mut hit = true;
+        for j in name.len() {
+            if text[i + j] != name[j] {
+                hit = false;
+                break;
+            }
+        }
+        if hit {
+            before_ok := (i == 0) || !ident_byte(text[i - 1]);
+            after := i + name.len();
+            after_ok := (after == text.len()) || !ident_byte(text[after]);
+            if before_ok & after_ok {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    return false;
+}
+fn ident_byte(b: u8) -> bool {
+    return ((97 <= b) & (b <= 122)) || ((65 <= b) & (b <= 90)) || ((48 <= b) & (b <= 57)) || (b == 95);
+}
+// The public surface (separate-compilation.md, "Visibility"): every `pub` item, every implementation
+// and closure environment, and the private items that text mentions - a public template's body that
+// calls a private helper, a signature that names a private type - to a fixpoint. A carried private
+// item gets a `private` line, so an importer can compile the template but cannot name the item.
+fn iface_select<a, b, d>(c: (&a mut C), out: (&b u8[]), header_end: u64, spans: (&d u64[])) -> u8[] {
+    n := spans.len() / 6;
+    mut keep = u64[];
+    for k in n {
+        keep.push(spans[k * 6 + 4]);
+    }
+    mut changed = true;
+    while changed {
+        changed = false;
+        mut kept = u8[];
+        for k in n {
+            if (keep[k] != 0) & (spans[k * 6 + 2] != 5) {
+                for b in spans[k * 6]..spans[k * 6 + 1] {
+                    kept.push(out[b]);
+                }
+            }
+        }
+        for k in n {
+            if (keep[k] == 0) & (spans[k * 6 + 2] != 5) {
+                name := iface_span_name(&mut c, spans, k);
+                if iface_mentions(view(kept), view(name)) {
+                    exchange(&mut keep[k], 1);
+                    changed = true;
+                }
+            }
+        }
+    }
+    // An `inherent` header is written when a method under it is.
+    for k in n {
+        if spans[k * 6 + 2] == 5 {
+            mut any = 0;
+            for j in n {
+                if (spans[j * 6 + 2] == 6) & (spans[j * 6 + 5] == spans[k * 6 + 5]) & (keep[j] != 0) {
+                    any = 1;
+                }
+            }
+            exchange(&mut keep[k], any);
+        }
+    }
+    mut text = u8[];
+    for b in header_end {
+        text.push(out[b]);
+    }
+    for k in n {
+        if keep[k] != 0 {
+            for b in spans[k * 6]..spans[k * 6 + 1] {
+                text.push(out[b]);
+            }
+        }
+    }
+    for k in n {
+        kind := spans[k * 6 + 2];
+        if (keep[k] != 0) & (spans[k * 6 + 4] == 0) & (kind != 5) & (kind != 8) & (kind != 9) {
+            push_bytes(&mut text, view("private "));
+            if kind == 1 {
+                push_bytes(&mut text, view("type "));
+            }
+            if kind == 2 {
+                push_bytes(&mut text, view("alias "));
+            }
+            if kind == 3 {
+                push_bytes(&mut text, view("const "));
+            }
+            if kind == 4 {
+                push_bytes(&mut text, view("fn "));
+            }
+            if kind == 6 {
+                push_bytes(&mut text, view("method "));
+                owner := spans[k * 6 + 5];
+                push_bytes(&mut text, view(c.decls[owner].name));
+                text.push(32);
+            }
+            if kind == 7 {
+                push_bytes(&mut text, view("interface "));
+            }
+            push_bytes(&mut text, view(iface_span_name(&mut c, spans, k)));
+            text.push(10);
+        }
+    }
+    return text;
+}
 fn iface_module_text<a, b, d>(c: (&a mut C), m: &b [u8], path: &d [u8], in_std: u64, unsafe_flag: u64, host_opt: u64) -> u8[] {
     exchange(&mut c.iface_env, u64[]);
     exchange(&mut c.iface_env_names, u8[][]);
@@ -26378,13 +26653,20 @@ fn iface_module_text<a, b, d>(c: (&a mut C), m: &b [u8], path: &d [u8], in_std: 
             out.push(10);
         }
     }
+    // Every item below is written as a span of `out`; the spans are then filtered to the public
+    // surface (iface_select). spans: start, end, kind, index, public, owner decl.
+    header_end := out.len();
+    mut spans = u64[];
     // Nominal types, then aliases, then constants: a declaration an importer can name, with its
     // structure in declaration order.
     decls := iface_decl_ids(&mut c, view(m));
     names := iface_names_of_decls(&mut c, &decls);
     for i in iface_sort_ids(&names, &decls).len() {
         index := iface_sort_ids(&names, &decls)[i];
+        start := out.len();
         iface_emit_decl(&mut c, &mut out, index, view(m));
+        visible := c.decls[index].public;
+        iface_span(&mut spans, start, out.len(), 1, index, visible, 0);
     }
     mut picks = u64[];
     mut pick_names = u8[][];
@@ -26395,7 +26677,11 @@ fn iface_module_text<a, b, d>(c: (&a mut C), m: &b [u8], path: &d [u8], in_std: 
         }
     }
     for i in iface_sort_ids(&pick_names, &picks).len() {
-        iface_emit_alias(&mut c, &mut out, iface_sort_ids(&pick_names, &picks)[i]);
+        index := iface_sort_ids(&pick_names, &picks)[i];
+        start := out.len();
+        iface_emit_alias(&mut c, &mut out, index);
+        visible := c.aliases[index].public;
+        iface_span(&mut spans, start, out.len(), 2, index, visible, 0);
     }
     mut consts = u64[];
     mut const_names = u8[][];
@@ -26406,13 +26692,21 @@ fn iface_module_text<a, b, d>(c: (&a mut C), m: &b [u8], path: &d [u8], in_std: 
         }
     }
     for i in iface_sort_ids(&const_names, &consts).len() {
-        iface_emit_const(&mut c, &mut out, iface_sort_ids(&const_names, &consts)[i], view(m));
+        index := iface_sort_ids(&const_names, &consts)[i];
+        start := out.len();
+        iface_emit_const(&mut c, &mut out, index, view(m));
+        visible := c.constants[index].public;
+        iface_span(&mut spans, start, out.len(), 3, index, visible, 0);
     }
     // Module-level functions.
     funcs := iface_func_ids(&mut c, view(m));
     fnames := iface_names_of_funcs(&mut c, &funcs);
     for i in iface_sort_ids(&fnames, &funcs).len() {
-        iface_emit_func(&mut c, &mut out, iface_sort_ids(&fnames, &funcs)[i], view(m), 1);
+        index := iface_sort_ids(&fnames, &funcs)[i];
+        start := out.len();
+        iface_emit_func(&mut c, &mut out, index, view(m), 1);
+        visible := c.funcs[index].public;
+        iface_span(&mut spans, start, out.len(), 4, index, visible, 0);
     }
     // Inherent methods, attached to the type that owns them.
     for i in iface_sort_ids(&names, &decls).len() {
@@ -26422,13 +26716,19 @@ fn iface_module_text<a, b, d>(c: (&a mut C), m: &b [u8], path: &d [u8], in_std: 
         if methods.len() == 0 {
             continue;
         }
+        head := out.len();
         push_bytes(&mut out, view("inherent "));
         iface_decl_ref(&mut out, &mut c, index);
         iface_emit_impl_params(&mut c, &mut out, index + 1);
         out.push(10);
+        iface_span(&mut spans, head, out.len(), 5, index, 0, index);
         mnames := iface_names_of_funcs(&mut c, &methods);
         for j in iface_sort_ids(&mnames, &methods).len() {
-            iface_emit_func(&mut c, &mut out, iface_sort_ids(&mnames, &methods)[j], view(owner), 0);
+            method := iface_sort_ids(&mnames, &methods)[j];
+            start := out.len();
+            iface_emit_func(&mut c, &mut out, method, view(owner), 0);
+            visible := c.funcs[method].public;
+            iface_span(&mut spans, start, out.len(), 6, method, visible, index);
         }
     }
     // Interface declarations and their methods.
@@ -26442,6 +26742,7 @@ fn iface_module_text<a, b, d>(c: (&a mut C), m: &b [u8], path: &d [u8], in_std: 
     }
     for i in iface_sort_ids(&iface_names, &ifaces).len() {
         index := iface_sort_ids(&iface_names, &ifaces)[i];
+        start := out.len();
         push_bytes(&mut out, view("interface "));
         iface_interface_ref(&mut out, &mut c, index + 1);
         out.push(10);
@@ -26451,6 +26752,8 @@ fn iface_module_text<a, b, d>(c: (&a mut C), m: &b [u8], path: &d [u8], in_std: 
         for j in iface_sort_ids(&mnames, &methods).len() {
             iface_emit_func(&mut c, &mut out, iface_sort_ids(&mnames, &methods)[j], view(owner), 0);
         }
+        visible := c.interfaces[index].public;
+        iface_span(&mut spans, start, out.len(), 7, index, visible, 0);
     }
     // Interface implementations owned by this module.
     mut impls = u64[];
@@ -26469,6 +26772,7 @@ fn iface_module_text<a, b, d>(c: (&a mut C), m: &b [u8], path: &d [u8], in_std: 
         index := iface_sort_ids(&impl_names, &impls)[i];
         contract := c.implementations[index].contract;
         ty := c.implementations[index].ty;
+        impl_start := out.len();
         push_bytes(&mut out, view("impl "));
         iface_interface_ref(&mut out, &mut c, contract);
         push_bytes(&mut out, view(" for "));
@@ -26487,16 +26791,21 @@ fn iface_module_text<a, b, d>(c: (&a mut C), m: &b [u8], path: &d [u8], in_std: 
         for j in iface_sort_ids(&mnames, &methods).len() {
             iface_emit_func(&mut c, &mut out, iface_sort_ids(&mnames, &methods)[j], view(owner), 0);
         }
+        // An implementation is as visible as the interface and the type it joins: always carried.
+        iface_span(&mut spans, impl_start, out.len(), 8, index, 1, 0);
     }
     // Environment records a closure type in this surface carries. Writing a field can reach another
     // record, so this runs to a fixpoint.
     mut at = 0;
+    env_start := out.len();
     while at < c.iface_env.len() {
         decl := c.iface_env[at];
         local := c.iface_env_names[at].copy();
         iface_emit_env(&mut c, &mut out, decl, view(local));
         at += 1;
     }
+    iface_span(&mut spans, env_start, out.len(), 9, 0, 1, 0);
+    out = iface_select(&mut c, &out, header_end, &spans);
     // Integrity: the digest covers every byte above it, so an edited file is refused by the reader
     // (and a second copy of the same bytes is recorded in interfaces.manifest).
     tail := iface_digest(&out);
@@ -26889,9 +27198,13 @@ fn iface_load<a, b>(c: (&a mut C), path: &a [u8], source_path: &b [u8], phase: u
         body_name: u8[]
     };
     funcs_before := c.funcs.len();
+    // The interface names its own module's items, private ones included, and other modules' public
+    // ones: reading it is the compiler's lookup, not the importer's.
+    vis_was := exchange(&mut c.vis_off, 1);
     for i in lines.len() {
         iface_define(&mut c, &mut state, view(lines[i]), view(path), i + 1);
     }
+    exchange(&mut c.vis_off, vis_was);
     if state.body_left != 0 {
         iface_refuse(view(path), view("ends in the middle of a body section; it is not a complete interface"));
     }
@@ -27047,10 +27360,12 @@ fn iface_register<a, b, d>(c: (&a mut C), line: &b [u8], path: &d [u8], n: u64, 
             bounds.push(0);
             requirements.push(u64[]);
         }
+        item_public_14 := c.decl_public;
         c
             .decls
             .push(
                 Decl {
+                    public: item_public_14,
                     module: ip_ref_module(&ref),
                     name: ip_ref_name(&ref),
                     is_enum: u64(same(view(kind), view("enum"))),
@@ -27075,10 +27390,12 @@ fn iface_register<a, b, d>(c: (&a mut C), line: &b [u8], path: &d [u8], n: u64, 
         push_bytes(&mut name, view(module));
         name.push(95);
         push_bytes(&mut name, view(local));
+        item_public_15 := c.decl_public;
         c
             .decls
             .push(
                 Decl {
+                    public: item_public_15,
                     module: copy_bytes(view(".closure")),
                     name: name,
                     is_enum: 0,
@@ -27106,7 +27423,8 @@ fn iface_register<a, b, d>(c: (&a mut C), line: &b [u8], path: &d [u8], n: u64, 
         if find_alias(&mut c, view(m), view(name)) != 0 {
             iface_fail(&p, view("declares a type alias twice"));
         }
-        c.aliases.push(Alias { module: m, name: name, ty: 18446744073709551615 });
+        alias_public := c.decl_public;
+        c.aliases.push(Alias { module: m, name: name, public: alias_public, ty: 18446744073709551615 });
         return ();
     }
     if same(view(word), view("interface")) {
@@ -27145,6 +27463,70 @@ fn iface_flags<a>(p: (&a mut IPos), params: (&a mut u64[]), lifetimes: (&a mut u
     }
     return ();
 }
+// `private <kind> <name>`: an item this interface carries only because a public template's body
+// uses it. It is defined like any other, then hidden from every module but its own.
+fn iface_private<a>(c: (&a mut C), st: (&a mut IState), p: (&a mut IPos)) -> unit {
+    what := ip_word(&mut p);
+    name := ip_word(&mut p);
+    m := st.module.copy();
+    if same(view(what), view("fn")) {
+        for i in c.funcs.len() {
+            if same(view(c.funcs[i].module), view(m)) && same(view(c.funcs[i].name), view(name)) {
+                exchange(&mut c.funcs[i].public, 0);
+            }
+        }
+        return ();
+    }
+    if same(view(what), view("type")) {
+        d := find_decl_internal(&mut c, view(m), view(name));
+        if d == 0 {
+            iface_fail(&p, view("private names an unknown type"));
+        }
+        exchange(&mut c.decls[d - 1].public, 0);
+        return ();
+    }
+    if same(view(what), view("const")) {
+        for i in c.constants.len() {
+            if same(view(c.constants[i].module), view(m)) && same(view(c.constants[i].name), view(name)) {
+                exchange(&mut c.constants[i].public, 0);
+            }
+        }
+        return ();
+    }
+    if same(view(what), view("alias")) {
+        for i in c.aliases.len() {
+            if same(view(c.aliases[i].module), view(m)) && same(view(c.aliases[i].name), view(name)) {
+                exchange(&mut c.aliases[i].public, 0);
+            }
+        }
+        return ();
+    }
+    if same(view(what), view("method")) {
+        // `private method Type name`: `name` is the type's own (inherent) method.
+        method := ip_word(&mut p);
+        d := find_decl_internal(&mut c, view(m), view(name));
+        if d == 0 {
+            iface_fail(&p, view("private method names an unknown type"));
+        }
+        owner := private_module(view(".inherent_"), d - 1);
+        for i in c.funcs.len() {
+            if same(view(c.funcs[i].module), view(owner)) && same(view(c.funcs[i].name), view(method)) {
+                exchange(&mut c.funcs[i].public, 0);
+            }
+        }
+        return ();
+    }
+    if same(view(what), view("interface")) {
+        id := find_interface(&c, view(m), view(name));
+        if id == 0 {
+            iface_fail(&p, view("private names an unknown interface"));
+        }
+        exchange(&mut c.interfaces[id - 1].public, 0);
+        return ();
+    }
+    iface_fail(&p, view("private takes fn, method, type, const, alias or interface"));
+    return ();
+}
 fn iface_define<a, b, d>(c: (&a mut C), st: (&a mut IState), line: &b [u8], path: &d [u8], n: u64) -> unit {
     if st.body_left != 0 {
         iface_body_line(&mut c, &mut st, view(line), view(path), n);
@@ -27155,6 +27537,10 @@ fn iface_define<a, b, d>(c: (&a mut C), st: (&a mut IState), line: &b [u8], path
         return ();
     }
     word := ip_word(&mut p);
+    if same(view(word), view("private")) {
+        iface_private(&mut c, &mut st, &mut p);
+        return ();
+    }
     if same(view(word), view("type")) {
         ref := ip_ref(&mut p);
         found := find_decl_internal(&mut c, view(ip_ref_module(&ref)), view(ip_ref_name(&ref)));
@@ -27221,10 +27607,12 @@ fn iface_define<a, b, d>(c: (&a mut C), st: (&a mut IState), line: &b [u8], path
                 iface_fail(&p, view("constants are `int N` or `str HEX`"));
             }
         }
+        item_public_16 := c.decl_public;
         c
             .constants
             .push(
                 Constant {
+                    public: item_public_16,
                     module: ip_ref_module(&ref),
                     name: ip_ref_name(&ref),
                     ty: ty,
@@ -27645,10 +28033,14 @@ fn iface_define_func<a>(c: (&a mut C), st: (&a mut IState), p: (&a mut IPos)) ->
         exchange(&mut bounds[0], 0);
         requirements[0].push(st.contract);
     }
+    item_public_17 := c.decl_public;
+    item_home_17 := st.module.copy();
     c
         .funcs
         .push(
             Func {
+                public: item_public_17,
+                home: item_home_17,
                 module: module,
                 name: name,
                 first: first,
@@ -27732,6 +28124,23 @@ fn iface_ident_byte(b: u64) -> bool {
 }
 // Compares the interface on disk with the one this compiler would write from the sources it has
 // just parsed: the third refusal of stage 2 - an interface that disagrees with its module.
+// The `sha256 "..."` an interface file records for its source, or nothing.
+fn iface_recorded_digest<a>(text: (&a u8[])) -> u8[] {
+    rows := iface_lines(view(text));
+    for i in rows.len() {
+        row := rows[i].copy();
+        if (row.len() > 9) && (row[0] == 115) && (row[1] == 104) && (row[2] == 97) && (row[6] == 32) && (row[7] == 34) {
+            mut out = u8[];
+            mut j = 8;
+            while (j < row.len()) && (row[j] != 34) {
+                out.push(row[j]);
+                j += 1;
+            }
+            return out;
+        }
+    }
+    return u8[];
+}
 fn iface_verify_module<a>(c: (&a mut C), index: u64) -> unit {
     m := c.iface_list[index].module.copy();
     path := c.iface_list[index].path.copy();
@@ -27751,6 +28160,21 @@ fn iface_verify_module<a>(c: (&a mut C), index: u64) -> unit {
         push_bytes(&mut msg, view("has no interface for module `"));
         push_bytes(&mut msg, view(m));
         push_bytes(&mut msg, view("` (expected this file); run `grail check --interface DIR` to write it"));
+        iface_refuse(view(file), view(msg));
+    }
+    // A changed source is staleness, said as such, before any line of the surface is compared.
+    recorded := iface_recorded_digest(&want);
+    actual := iface_digest(&host::read_file(view(path)));
+    if (recorded.len() != 0) && !same(view(recorded), view(actual)) {
+        mut msg = u8[];
+        push_bytes(&mut msg, view("module `"));
+        push_bytes(&mut msg, view(m));
+        push_bytes(&mut msg, view("` changed since this interface was written: the interface records source-sha256 "));
+        push_bytes(&mut msg, view(recorded));
+        push_bytes(&mut msg, view(", but "));
+        push_bytes(&mut msg, view(path));
+        push_bytes(&mut msg, view(" is "));
+        push_bytes(&mut msg, view(actual));
         iface_refuse(view(file), view(msg));
     }
     got := iface_module_text(&mut c, view(m), view(path), in_std, unsafe_flag, optin);
@@ -27876,6 +28300,8 @@ pub fn main() -> u64 {
         export_adopt: 0,
         ct_pass: 0,
         ct_in_if: false,
+        decl_public: 1,
+        vis_off: 0,
         export_copyback: u64[],
         rnames: u8[][],
         tnames: u8[][],
@@ -27954,7 +28380,6 @@ pub fn main() -> u64 {
         iface_emit: u8[],
         iface_verify: 0,
         iface_list: IModule[],
-        iface_files: u64[],
         iface_loaded: u8[][],
         iface_loaded_path: u8[][],
         iface_env: u64[],
@@ -28023,14 +28448,16 @@ pub fn main() -> u64 {
             }
             offset += 1;
         } else if same(view(option), view("--interface")) || same(view(option), view("--emit-interface")) {
-            // B1 stage 2: declarations come from `DIR/<module>.iface` instead of the module's
-            // source (`--interface`), or the interfaces for this program are written there
-            // (`--emit-interface`).
+            // B1 stage 2: `--interface DIR` checks every module given as source against
+            // `DIR/<module>.iface` (the source is compiled, and its interface must say what the
+            // source says); `--emit-interface DIR` writes them. Building a module against other
+            // modules' interfaces, without their source, is `--use`.
             if argc < offset + 3 {
                 fail_option(&mut c, view("--interface and --emit-interface need a directory"));
             }
             if same(view(option), view("--interface")) {
                 exchange(&mut c.iface_dir, host::arg(offset + 2));
+                exchange(&mut c.iface_verify, 1);
             } else {
                 exchange(&mut c.iface_emit, host::arg(offset + 2));
             }
@@ -28248,50 +28675,6 @@ pub fn main() -> u64 {
         mut i = 2;
         while i < n {
             path := host::arg(i + offset);
-            mut replaced = 0;
-            for j in c.iface_files.len() {
-                if c.iface_files[j] == i {
-                    replaced = 1;
-                }
-            }
-            // A module whose declarations come from an interface is loaded once and then skipped by
-            // every pass: it has no body to check and no code to emit here.
-            if (replaced == 0) & (pass == 0) & (c.iface_dir.len() != 0) & (c.iface_verify == 0) & (i != 2) {
-                name := iface_scan(view(path));
-                if name.len() != 0 && !same(view(name), view("runtime")) {
-                    mut file = u8[];
-                    push_bytes(&mut file, view(c.iface_dir));
-                    file.push(47);
-                    push_bytes(&mut file, view(name));
-                    push_bytes(&mut file, view(".iface"));
-                    loaded := iface_load(&mut c, view(file), view(path), 1);
-                    if !same(view(loaded), view(name)) {
-                        mut msg = u8[];
-                        push_bytes(&mut msg, view("describes module `"));
-                        push_bytes(&mut msg, view(loaded));
-                        push_bytes(&mut msg, view("`, but this file declares `"));
-                        push_bytes(&mut msg, view(name));
-                        push_bytes(&mut msg, view("`"));
-                        iface_refuse(view(file), view(msg));
-                    }
-                    c.iface_files.push(i);
-                    replaced = 1;
-                }
-            }
-            if replaced != 0 {
-                // The declarations came from the interface. The module's *bodies* still have to be
-                // emitted - one object for the whole program means no module's code can be left
-                // out - so the body pass runs against the interface's declarations: the checker
-                // never sees this module's source. Stage 3 (bodies in interfaces) and stage 4
-                // (one object per module) are what remove this parse.
-                if pass == 2 {
-                    load_file(&mut c, i);
-                    exchange(&mut c.file, i);
-                    toplevel(&mut c, 3);
-                }
-                i = i + 1;
-                continue;
-            }
             load_file(&mut c, i);
             exchange(&mut c.file, i);
             toplevel(&mut c, pass + 1);

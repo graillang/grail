@@ -23,6 +23,43 @@ After `use order::Ord;`, write `Ord` unqualified in bounds and implementations. 
 `order::Ord` when a name is ambiguous or the qualified form is clearer. Module functions, types,
 variants and interfaces all use `::` for qualification; `.` remains field and method access.
 
+## Visibility
+
+What a module offers other modules is what it marks `pub`; everything else is its own. That holds
+for every kind of item: functions, `extern` declarations, records, enums, handles, constants, type
+aliases, interfaces and methods.
+
+```grl
+module shapes;
+
+pub struct Circle {
+    r: u64
+}
+
+pub fn area(c: &Circle) -> u64 {
+    return 3 * square(c.r);
+}
+
+fn square(x: u64) -> u64 {
+    return x * x;
+}
+```
+
+Another module can call `shapes::area` and build a `shapes::Circle`, but `shapes::square(2)` is a
+compile error at the call:
+
+```
+error: `square` is private to module `shapes`
+help: declare it `pub` in `shapes` to use it from `main`
+```
+
+As in Rust, the default is private and `pub` is the export. Two differences: a `pub` record's
+fields are public with it (Grail has no per-field visibility), and the methods of an
+`impl Interface for T` are as visible as the interface they implement. A module's interface file
+carries only its public surface, so changing a private function does not make its importers
+rebuild - unless a public generic function's body calls it, in which case it travels in the
+interface marked private, usable by the generic's code and still not nameable.
+
 The Grail-written compiler is the sole implementation; declarations, generic bodies and
 dependencies are checked before an output artifact is replaced.
 

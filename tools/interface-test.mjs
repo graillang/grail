@@ -301,9 +301,9 @@ function proveTampering() {
   writeFileSync(join(project, 'grail.pkg'), 'name tamper\n');
   writeFileSync(join(project, 'src/util.grl'), `module util;
 
-handle Stream: transferable;
+pub handle Stream: transferable;
 
-extern "C" lib "c" fn fopen(path: CStr, mode: CStr) -> Stream;
+pub extern "C" lib "c" fn fopen(path: CStr, mode: CStr) -> Stream;
 
 pub struct Point {
     x: u64,
