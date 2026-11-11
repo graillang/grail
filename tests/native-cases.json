@@ -5991,5 +5991,42 @@
     "stdout": "3 11 2 1.5\n",
     "status": 0,
     "note": "`&mut R` through a cfn is the C `R *` (the record's own address), and a callback taking `p: &mut R` writes back into it"
+  },
+  {
+    "name": "comptime-constants-if-assert",
+    "source": "const PAGE: u64 = 4 * 1024;\nMASK := PAGE - 1;\nSQUARE := PAGE ** 2;\nDEBUG := false;\nNAME := \"grail\";\nextern \"C\" record Header { magic: u32, flags: u16, kind: u8, pad: u8, size: u64 }\n\n@assert(size_of(Header) == 16, \"Header is read from disk\");\n@if target.os == .linux {\n    fn platform() -> u64 {\n        return 1;\n    }\n} else {\n    fn platform() -> u64 {\n        return 2;\n    }\n}\n\nfn main() -> u64 {\n    println(MASK);\n    println(SQUARE);\n    println(NAME);\n    println(platform());\n    @if target.os == .windows {\n        this_function_does_not_exist();\n    } else @if DEBUG {\n        println(\"debug\");\n    } else {\n        println(\"release\");\n    }\n    @assert((MASK & PAGE) == 0, \"PAGE is a power of two\");\n    x := @(PAGE * 2) + 1;\n    println(x);\n    println(size_of(u32) + align_of(Header) * 100);\n    return 0;\n}\n",
+    "stdout": "4095\n16777216\ngrail\n1\nrelease\n8193\n804\n",
+    "status": 0,
+    "note": "comptime C1: constant expressions over constants, module := bindings, a module-level @if choosing a definition, a statement @if whose untaken branch names a function that does not exist, @assert, @expr, size_of/align_of of a scalar and a C record"
+  },
+  {
+    "name": "comptime-assert-fails",
+    "source": "fn main() -> u64 {\n    @assert(size_of(u16) == 4, \"u16 is two bytes, so this must fail\");\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": "@assert failed: u16 is two bytes, so this must fail"
+  },
+  {
+    "name": "comptime-hash-is-not-a-comment",
+    "source": "fn main() -> u64 {\n    # a python-style comment\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": "`#` is not Grail syntax: comments start with //, and compile-time forms with @"
+  },
+  {
+    "name": "comptime-call-needs-run-tier",
+    "source": "fn f() -> u64 {\n    return 3;\n}\nX := f();\nfn main() -> u64 {\n    return X;\n}\n",
+    "reject": true,
+    "diagnostic": "not a compile-time constant"
+  },
+  {
+    "name": "comptime-module-if-record-layout",
+    "source": "extern \"C\" record H { a: u32 }\n@if size_of(H) == 4 {\n    fn f() -> u64 {\n        return 1;\n    }\n}\nfn main() -> u64 {\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": "a module-level @if cannot depend on the layout of a record"
+  },
+  {
+    "name": "comptime-overflow-is-an-error",
+    "source": "BIG := 18446744073709551615 + 1;\nfn main() -> u64 {\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": "compile-time integer overflow"
   }
 ]
