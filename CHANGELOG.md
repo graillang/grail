@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Fixed: `--range-facts` (off by default) could remove a bounds check that a loop does exceed. The
+  pass stopped its fixpoint after 24 rounds and recorded verdicts from whatever state it had, and
+  without widening a loop counter's interval grows one step per round, so `while i < 100` over a
+  30-element vector read past the end instead of aborting. A function whose fixpoint has not
+  converged at the cap now gets no verdicts, and every access keeps its check; a loop that pushes,
+  which never converged either, keeps its check too. `compiler/tests/range_long_trip.grl` and
+  `range_push_loop.grl` pin both in `tools/test-facts.mjs`.
 - Typed-IR range facts for the LLVM backend (F3), behind `--range-facts`: the lifter derives, from
   the word stream alone, that a slot holds an integer in `[lo, hi]` at a point, and uses it where
   the front end's bounds check lives. A *state* is one flat vector per block over the 14 registers, the frame slots

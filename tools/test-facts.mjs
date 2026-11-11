@@ -165,6 +165,29 @@ ok('--range-facts proves the access it is given and stops calling the accessor',
 ok('--verify-facts re-inserts a runtime check for it', /icmp ult i64 %t\d+, %t\d+/.test(checkedIr));
 ok('--verify-facts records the verdict it checked', /^; range \d+ 3$/m.test(checkedIr));
 
+// ---- the fixpoint must converge before it decides anything ----
+// The joins have no widening and the fixpoint stops after a round cap, so a loop longer than the cap
+// is judged on an interval that has not converged: `while i < 100` over `u8[0; 30]` was proved after
+// 24 rounds with `i` in about [0, 23], and the --range-facts build read 70 bytes past the end instead
+// of aborting. A pushing loop never converges either (the length generation moves every round). In
+// both the pass must record no verdict and keep the accessor call, i.e. the checked code.
+const mainOf = text => {
+  const at = text.indexOf('define {i64, i64} @"f_main_main"');
+  return text.slice(at, text.indexOf('\n}\n', at));
+};
+for (const [fixture, aborts] of [['range_long_trip.grl', true], ['range_push_loop.grl', false]]) {
+  const tag = fixture.replace('.grl', '').replace(/_/g, '-');
+  const native = run([build(`${tag}-native`, fixture, { backend: 'native' }).exe]);
+  const on = build(`${tag}-on`, fixture, { backend: 'llvm', rangeFacts: true });
+  const verify = build(`${tag}-verify`, fixture, { backend: 'llvm', rangeFacts: true, verifyFacts: true });
+  const onRun = run([on.exe]);
+  ok(`${fixture}: the native reference ${aborts ? 'aborts' : 'exits 0'}`, (native.status !== 0) === aborts, `exit ${native.status}`);
+  ok(`${fixture}: --range-facts behaves as the checked build`, onRun.status === native.status && onRun.stdout === native.stdout,
+    `exit ${onRun.status} ${JSON.stringify(onRun.stdout.trim())} vs exit ${native.status} ${JSON.stringify(native.stdout.trim())}`);
+  ok(`${fixture}: --range-facts keeps the accessor call`, accessorCalls(mainOf(readFileSync(on.ll, 'utf8'))) === 1);
+  ok(`${fixture}: no verdict is recorded`, !readFileSync(verify.ll, 'utf8').includes('; range '));
+}
+
 if (failed) {
   console.log(`facts: ${failed} check(s) failed`);
   process.exit(1);
