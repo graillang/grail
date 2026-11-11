@@ -686,6 +686,19 @@ that has since moved proves nothing, so the generation is part of the fact.
 - a narrowing that is not provably in range ends the fact instead of being reinterpreted;
 - a join the lattice cannot express (two kinds, two identities, two length generations);
 - a refinement that contradicts the fact the path started from;
+- **element stores, decided drop flags, loads through a slot address, drop glue**: four transfer
+  rules that keep a vector's facts alive through the code `p[i] = x` and its temporaries lower to.
+  `rt_slot` returns the address of one heap element (kind 6), and a store through it changes that
+  element only. A `cmpq $C, X; jcc` whose X this same block set with `movq $K, X` (a drop flag cleared
+  just before its guarded drop) carries state down the edge it takes only, so the dead drop call
+  is never analysed - decided from the block's own straight-line code, never from its entry state.
+  `movq (%rax)` through the address of a frame slot reads that slot's word (it used to be read as
+  the header's first field, losing the identity). And drop glue (`.D<hash>`) is given the dropped
+  value, never a frame address, so it clobbers caller-saved registers but leaves escaped slots'
+  facts. Measured (llvm, median of 7, quiet machine): nbody 1.7x and matmul 1.2x of C -O2, with or
+  without `--range-facts`: the accesses inside nbody's update loop still lose the escaped vector
+  after the first iteration's back edge (traced: header and length known in round 1, gone in round
+  2), which is the next cause to find; matmul still needs the counted fill-loop summary.
 - **widening at loop heads, and no verdicts without a fixpoint**: from the fourth round, a join on a
   back edge (into a block at or before the one the edge leaves) widens instead of creeping: an
   upper bound that grew jumps to the smallest immediate in the function that covers it - the guard's

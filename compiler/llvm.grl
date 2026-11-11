@@ -2773,7 +2773,8 @@ fn lower_function<a, b, c>(l: (&a mut L), lines: (&b u8[][]), f: (&b Func), fact
 // Per location i (0-13 a register in `reg_index` order, 14+k frame slot k):
 //   kind 0 no fact (and dead for good: a location two paths disagree about stays untyped),
 //   1 the interval [lo, hi], 2 a sequence header of identity `lo`, 3 the address of frame slot
-//   `lo`, 4 the length word of identity `lo`; `sym` is identity+1 while the word is proven to be
+//   `lo`, 4 the length word of identity `lo`, 5 a comparison result, 6 the address of an element in
+//   a sequence's heap buffer (what `rt_slot` returns); `sym` is identity+1 while the word is proven to be
 //   `< len(identity)`, and `sgen` is the length generation that bound was stated in.
 // Per identity k: `have` (1 when `lb` is meaningful), `lb` a lower bound on the length, and `gen`,
 // bumped by every event that may change the length -- the generation an `sym` bound is checked
@@ -3225,14 +3226,10 @@ fn rg_read(rc: (&RC), st: (&u64[]), op: (&[u8])) -> Span {
     if m.ok == 0 {
         return no_span();
     }
-    h := rg_hdr_of(&rc, &st, m.base);
-    if h != 0 {
-        if m.off == 8 {
-            return Span { ok: 4, lo: h - 1, hi: 0, sym: 0, sgen: 0 };
-        }
-        return no_span();
-    }
-    // A load through the address of a frame slot reads that slot's word.
+    // A load through the address of a frame slot reads that slot's word - checked first, because
+    // rg_hdr_of sees through such an address to the header the slot holds (right for an accessor's
+    // `&v` argument), which would make `(%rax)` here look like the header's first field instead of
+    // the header word itself, and lose the vector's identity on `p[i] = ...`.
     if (rg_k(&st, m.base) == 3) & (m.off == 0) {
         sk := rg_lo(&st, m.base);
         loc2 := 14 + sk;
@@ -3243,6 +3240,14 @@ fn rg_read(rc: (&RC), st: (&u64[]), op: (&[u8])) -> Span {
         if k2 != 0 {
             return Span { ok: k2, lo: rg_lo(&st, loc2), hi: 0, sym: 0, sgen: 0 };
         }
+        return no_span();
+    }
+    h := rg_hdr_of(&rc, &st, m.base);
+    if h != 0 {
+        if m.off == 8 {
+            return Span { ok: 4, lo: h - 1, hi: 0, sym: 0, sgen: 0 };
+        }
+        return no_span();
     }
     return no_span();
 }
@@ -3263,6 +3268,10 @@ fn rg_wrote(rc: (&RC), st: (&mut u64[]), op: (&[u8])) -> unit {
     }
     m := rg_mem(op);
     if m.ok == 0 {
+        return ();
+    }
+    if rg_k(&st, m.base) == 6 {
+        // A store into a sequence element (`p[i] = ...`) reaches heap element storage only.
         return ();
     }
     if rg_k(&st, m.base) == 3 {
@@ -3482,8 +3491,23 @@ fn rg_call(rc: (&RC), st: (&mut u64[]), target: (&[u8]), seed: u64, trip: u64) -
         }
         return ();
     }
+    if starts(target, view(".D")) {
+        // Drop glue (`.D<hash>`, emitted per type) is given the value being dropped and frees what
+        // that value owns. It never receives a frame slot's address and cannot write one, and the
+        // value it frees is dead by the ownership rules, so no other identity's facts change.
+        rg_clobber(&rc, &mut st);
+        return ();
+    }
     if rg_readonly(target) {
         rg_clobber(&rc, &mut st);
+        if eq(target, view("rt_slot")) || eq(target, view("rt_slotu")) {
+            // The address of one element in the sequence's heap buffer: a store through it changes
+            // that element and nothing else - never a frame slot, a header or a length word.
+            rax := rg_loc(&rc, view("%rax"));
+            if rax != rg_none() {
+                rg_put(&mut st, rax, 6, 0, 0, 0, 0);
+            }
+        }
         return ();
     }
     // Anything else may take a sequence by reference and rewrite its header: every identity whose
@@ -4245,6 +4269,69 @@ fn rg_run(rc: (&RC), cur: (&mut u64[]), instrs: (&u8[][]), start: u64, stop: u64
 // the branch tests, on both operands. A branch is never *decided*: the state a block is entered with
 // is the join over every path that reaches it, so a comparison that holds there holds on every
 // arrival -- including a loop's last, which is why deciding a guard from it would be wrong.
+// The outcome of a conditional jump decided inside its own block: `cmpq $C, X` where X was last
+// written in this block by `movq $K, X`, with nothing in between that could write X (no call, no
+// other write to X, no store through a register). Returns 1 when the jump is taken, 2 when it is
+// not, 0 when undecided. Only the block's own straight-line code is used - never the state the block
+// is entered with, which joins a loop's iterations and would decide a guard from one of them.
+fn rg_local_branch(instrs: (&u8[][]), start: u64, stop: u64, rel: u64) -> u64 {
+    if (rel == 0) || (stop - start < 3) {
+        return 0;
+    }
+    cmp := view(instrs[stop - 2]);
+    if !starts(cmp, view("cmpq $")) {
+        return 0;
+    }
+    o := operands(view(sub(cmp, 5, cmp.len())));
+    if o.len() != 2 {
+        return 0;
+    }
+    c := rg_imm(view(o[0]));
+    if c.ok != 1 {
+        return 0;
+    }
+    x := view(o[1]);
+    mut i = stop - 2;
+    while i > start {
+        i -= 1;
+        line := view(instrs[i]);
+        if starts(line, view("call")) || starts(line, view("rep ")) {
+            return 0;
+        }
+        lo := operands(view(sub(line, 5, line.len())));
+        if lo.len() == 0 {
+            continue;
+        }
+        dst := view(lo[lo.len() - 1]);
+        if eq(dst, x) {
+            if starts(line, view("movq $")) & (lo.len() == 2) {
+                k := rg_imm(view(lo[0]));
+                if k.ok != 1 {
+                    return 0;
+                }
+                a := k.lo;
+                b := c.lo;
+                mut holds = false;
+                if rel == 1 { holds = a < b; }
+                if rel == 2 { holds = a <= b; }
+                if rel == 3 { holds = a >= b; }
+                if rel == 4 { holds = a > b; }
+                if rel == 5 { holds = a == b; }
+                if rel == 6 { holds = a != b; }
+                if holds {
+                    return 1;
+                }
+                return 2;
+            }
+            return 0;
+        }
+        // A store through a register may reach X if its address escaped.
+        if (dst.len() != 0) && (dst[dst.len() - 1] == 41) && !ends(dst, view("(%rbp)")) && !starts(line, view("cmp")) && !starts(line, view("test")) {
+            return 0;
+        }
+    }
+    return 0;
+}
 fn rg_edges(rc: (&RC), st: (&mut u64[][]), nblk: u64, s1: u64, s2: u64, instrs: (&u8[][]), start: u64, stop: u64, cur: (&u64[]), out: (&mut u64[]), pcmp: (&u64[]), snap: (&u64[]), widen: u64, thr: (&u64[]), from: u64) -> u64 {
     if s2 == rg_none() {
         if s1 != rg_none() {
@@ -4256,6 +4343,21 @@ fn rg_edges(rc: (&RC), st: (&mut u64[][]), nblk: u64, s1: u64, s2: u64, instrs: 
     }
     last := view(instrs[stop - 1]);
     rel := rg_jump_rel(view(rg_op(last)));
+    // A branch on a value this block itself just set (a drop flag cleared before a guarded drop)
+    // goes one way only: the other edge carries no state, so its block stays unreachable.
+    decided := rg_local_branch(&instrs, start, stop, rel);
+    if decided == 1 {
+        if rg_into(&rc, &mut st, nblk, s1, &cur, widen & u64(s1 <= from), &thr) != 0 {
+            return 1;
+        }
+        return 0;
+    }
+    if decided == 2 {
+        if rg_into(&rc, &mut st, nblk, s2, &cur, widen & u64(s2 <= from), &thr) != 0 {
+            return 2;
+        }
+        return 0;
+    }
     mut taken = cur.copy();
     mut fall = cur.copy();
     if (rel != 0) & (stop - start >= 2) {
