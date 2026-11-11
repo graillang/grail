@@ -618,26 +618,24 @@ function proveGenericBodies() {
   const b = compile([fixtures('generic_b.grl'), runtime, platform], bDir, ['--use', ifaces, '--split', '--no-entry', '--emit-interface', ifaces]);
   assert.equal(b.status, 0, `generics: the second importer does not compile against interfaces\n${b.output}`);
 
-  // (e2) Neither importer emits the body, and each asks the defining module for it by name.
-  for (const [label, dir] of [['entry', mainDir], ['generic_a', aDir], ['generic_b', bDir]]) {
-    assert.equal(
-      definitions(parts(dir).files, specPattern),
-      0,
-      `generics: ${label} emitted a copy of the imported generic's body`,
-    );
-    assert.ok(
-      readFileSync(join(ifaces, `${label === 'entry' ? 'main' : label}.sreq`), 'utf8').includes('request generic::twice u64'),
-      `generics: ${label} did not record the instantiation it references`,
-    );
+  // (e2) Each importer emits the body itself, replayed from the interface, weak and under the one
+  // content-addressed name: three objects, three copies the linker merges, no request protocol.
+  const bodyNames = new Set();
+  for (const [label, dir, module] of [['entry', mainDir, 'main'], ['generic_a', aDir, 'generic_a'], ['generic_b', bDir, 'generic_b']]) {
+    const own = module === 'main' ? parts(dir).files : partsOfModule(dir, module);
+    assert.equal(definitions(own, specPattern), 1, `generics: ${label} did not emit the instantiation its code calls`);
+    for (const file of own) {
+      for (const line of readFileSync(file, 'utf8').split('\n')) {
+        if (specPattern.test(line)) bodyNames.add(line);
+      }
+    }
+    assert.ok(own.some(file => /^\.weak f_generic_twice\$[0-9a-f]{16}$/m.test(readFileSync(file, 'utf8'))),
+      `generics: ${label} emitted the instantiation without a weak binding`);
   }
-  // The defining module emits it: exactly one body, from the request files alone.
-  const served = compile([fixtures('generic.grl'), runtime, platform], genericDir, ['--serve', ifaces, '--split', '--no-entry']);
-  assert.equal(served.status, 0, `generics: the defining module does not serve the request\n${served.output}`);
-  assert.equal(
-    definitions(parts(genericDir).files, specPattern),
-    1,
-    `generics: the defining module did not emit exactly one body: parts ${JSON.stringify(parts(genericDir).files)}\n${served.output}`,
-  );
+  assert.equal(bodyNames.size, 1, `generics: the importers named one instantiation differently: ${[...bodyNames].join(', ')}`);
+  // The defining module compiles on its own like any other: nothing asks it for anything.
+  const served = compile([fixtures('generic.grl'), runtime, platform], genericDir, ['--use', ifaces, '--split', '--no-entry']);
+  assert.equal(served.status, 0, `generics: the defining module does not compile against interfaces\n${served.output}`);
 
   // (e3) Link one object per module and compare with the source build.
   const linked = [
@@ -646,7 +644,7 @@ function proveGenericBodies() {
     ...partsOfModule(bDir, 'generic_b'),
     ...partsOfModule(genericDir, 'generic'),
   ];
-  assert.equal(definitions(linked, specPattern), 1, 'generics: the linked objects do not hold exactly one emitted body');
+  assert.equal(definitions(linked, specPattern), 3, 'generics: the linked objects do not hold the three importers\' weak copies');
   const exe = linkParts(linked, directory, 'program', mainDir);
   const ran = run(exe);
   assert.equal(ran.status, expected.status, `generics: the separately compiled program exits ${ran.status}, the source build ${expected.status}`);
@@ -821,22 +819,18 @@ function proveStructuralKeyAcrossModules() {
   }
 
   const pattern = /^f_closure_gen_keep\$[0-9a-f]{16}:$/;
-  for (const module of ['main', 'closure_a', 'closure_b']) {
-    assert.equal(definitions(parts(dirs[module]).files, pattern), 0, `closure-key: ${module} emitted a body it does not own`);
-  }
-  // Both importers asked for the same instantiation: one key, so one body.
-  const requests = ['closure_a', 'closure_b'].map(module => {
-    const text = readFileSync(join(ifaces, `${module}.sreq`), 'utf8');
-    const line = text.split('\n').find(row => row.startsWith('request closure_gen::keep '));
-    assert.ok(line, `closure-key: ${module} did not record its instantiation\n${text}`);
+  // Both importers emit the instantiation on a capturing closure themselves, and the structural key
+  // gives it one name in both objects although each run synthesised its own environment record.
+  const names = ['closure_a', 'closure_b'].map(module => {
+    const own = partsOfModule(dirs[module], module);
+    assert.equal(definitions(own, pattern), 1, `closure-key: ${module} did not emit the instantiation it calls`);
+    const line = own.flatMap(file => readFileSync(file, 'utf8').split('\n')).find(row => pattern.test(row));
     return line;
   });
-  assert.equal(requests[1], requests[0], 'closure-key: the two modules disagree about the instantiation key');
-
+  assert.equal(names[1], names[0], 'closure-key: the two modules named the instantiation differently');
   const genericDir = join(directory, 'gen');
-  const served = compile([fixtures('closure_gen.grl'), runtime, platform], genericDir, ['--serve', ifaces, '--split', '--no-entry']);
-  assert.equal(served.status, 0, `closure-key: the defining module does not serve the request\n${served.output}`);
-  assert.equal(definitions(parts(genericDir).files, pattern), 1, 'closure-key: the defining module did not emit exactly one body');
+  const served = compile([fixtures('closure_gen.grl'), runtime, platform], genericDir, ['--use', ifaces, '--split', '--no-entry']);
+  assert.equal(served.status, 0, `closure-key: the defining module does not compile against interfaces\n${served.output}`);
 
   const linked = [
     ...parts(dirs.main).files,
@@ -844,17 +838,45 @@ function proveStructuralKeyAcrossModules() {
     ...partsOfModule(dirs.closure_b, 'closure_b'),
     ...partsOfModule(genericDir, 'closure_gen'),
   ];
-  assert.equal(definitions(linked, pattern), 1, 'closure-key: the linked objects do not hold exactly one body');
+  assert.equal(definitions(linked, pattern), 2, 'closure-key: the linked objects do not hold the two importers\' weak copies');
   const ran = run(linkParts(linked, directory, 'program', dirs.main));
   assert.equal(ran.status, expected.status, 'closure-key: the separately compiled program exits differently');
   assert.equal(ran.stdout, expected.stdout, 'closure-key: the separately compiled program prints something else');
-  return { key: requests[0].replace('request closure_gen::keep ', ''), stdout: JSON.stringify(ran.stdout) };
+  return { key: names[0].replace(/:$/, ''), stdout: JSON.stringify(ran.stdout) };
+}
+
+// Separately compiled modules calling each other's inherent methods, interface implementations and
+// a generic that instantiates another generic: each module compiled alone against interfaces, only
+// its own part linked. Symbols name declarations, not this run's table positions, and a nested
+// instantiation is emitted by the module that asked for the outer one.
+function proveUnitsAcrossModules() {
+  const directory = join(work, 'units');
+  mkdirSync(directory, { recursive: true });
+  const fixtures = name => join(root, 'tests/interfaces', name);
+  const all = [fixtures('units_main.grl'), fixtures('units_shapes.grl'), runtime, platform];
+  const source = compile(all, join(directory, 'source'));
+  assert.equal(source.status, 0, `units: source build failed\n${source.output}`);
+  const expected = run(link(all, join(directory, 'source')));
+  const ifaces = emit(all, directory);
+  const mainDir = join(directory, 'main');
+  const shapesDir = join(directory, 'shapes');
+  const main = compile([fixtures('units_main.grl'), runtime, platform], mainDir, ['--use', ifaces, '--split']);
+  assert.equal(main.status, 0, `units: the entry module does not compile against interfaces\n${main.output}`);
+  const shapes = compile([fixtures('units_shapes.grl'), runtime, platform], shapesDir, ['--use', ifaces, '--split', '--no-entry']);
+  assert.equal(shapes.status, 0, `units: units_shapes does not compile against interfaces\n${shapes.output}`);
+  const linked = [...parts(mainDir).files, ...partsOfModule(shapesDir, 'units_shapes')];
+  const text = linked.map(file => readFileSync(file, 'utf8')).join('\n');
+  assert.doesNotMatch(text, /\.(inherent|impl|interface)_\d/, 'units: a symbol still spells a table index');
+  const ran = run(linkParts(linked, directory, 'program', mainDir));
+  assert.equal(ran.status, expected.status, `units: the separately compiled program exits ${ran.status}`);
+  assert.equal(ran.stdout, expected.stdout, `units: the separately compiled program prints ${JSON.stringify(ran.stdout)}`);
+  return JSON.stringify(ran.stdout);
 }
 
 const generics = proveGenericBodies();
 report(
-  'imported generic: one emitted body, no source needed',
-  `${generics.body} definition across ${generics.importers} importers, output ${generics.stdout} as built from source`,
+  'imported generic: each importer emits it weak, one name, no source needed',
+  `${generics.body} weak copies across ${generics.importers} importers, linked as one, output ${generics.stdout} as built from source`,
 );
 
 const capability = proveCapabilityAcrossInstantiation();
@@ -862,9 +884,12 @@ report('capability metadata survives an instantiation', capability.refusal);
 
 const closureKey = proveStructuralKeyAcrossModules();
 report(
-  'two modules, one unnameable type: one body',
-  `${closureKey.key} asked for by both, one definition, output ${closureKey.stdout} as built from source`,
+  'two modules, one unnameable type: one name',
+  `${closureKey.key} emitted by both under one name, output ${closureKey.stdout} as built from source`,
 );
+
+const units = proveUnitsAcrossModules();
+report('methods, implementations and nested generics across separately compiled modules', `output ${units} as built from source`);
 
 const naming = proveNamingIsTotal();
 report(

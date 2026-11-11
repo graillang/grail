@@ -125,6 +125,11 @@ struct Closure {
     // The captures the body writes, one flag per entry of `captures`. Only a written capture is
     // mutable in the body, and a closure with any written capture is `FnMut` (mode 1), not `Fn`.
     written: u64[],
+    // A closure created while a specialisation is replayed belongs to that specialisation: every
+    // object that emits the specialisation emits it too, under the same name, weak (B1 stage 4).
+    weak: u64,
+    // The part (module) its body is emitted into.
+    unit: u8[],
     mode: u64
 }
 struct ImplParams {
@@ -323,6 +328,8 @@ struct C {
     specs: Spec[],
     bindings: u64[],
     current_spec: u64,
+    // Closures created so far by the specialisation being replayed: their names are ordinals within it.
+    spec_closures: u64,
     validating: u64,
     // Named-parameter count of the variadic extern call being lowered; 0 otherwise.
     ffi_fixed: u64,
@@ -446,15 +453,11 @@ struct C {
     // trusting either side. Nothing here changes the whole-program path when all three are off.
     iface_dir: u8[],
     iface_use: u8[],
-    serve: u8[],
     no_entry: u64,
     iface_used: u8[][],
     // The module whose body is being compiled right now, and the modules whose requested
     // specialisations this run emits (B1 stage 3).
     body_module: u8[],
-    serving: u8[][],
-    req_module: u8[][],
-    req_spec: u64[],
     drop_names: u8[][],
     spec_emitted: u8[][],
     spell_lenient: u64,
@@ -587,9 +590,11 @@ fn module_index<a>(name: &a [u8], from: u64) -> u64 {
 // file declares; every other name is already the module.
 fn unit_module<a, b>(c: (&a mut C), m: &b [u8]) -> u8[] {
     if starts_with(view(m), view(".impl_")) {
+        // `.impl_K` is written from c.current_impl, which is 1-based (0 means none), so it names
+        // implementations[K - 1]; module_index returns K + 1.
         n := module_index(view(m), 6);
-        if (n != 0) & (n <= c.implementations.len()) {
-            return c.implementations[n - 1].module.copy();
+        if (1 < n) & (n - 1 <= c.implementations.len()) {
+            return c.implementations[n - 2].module.copy();
         }
     }
     if starts_with(view(m), view(".inherent_")) {
@@ -6477,9 +6482,60 @@ fn mangle_into<a, b, d>(out: (&a mut u8[]), plat: u64, m: &b [u8], n: &d [u8]) -
     push_bytes(&mut out, n);
     return ();
 }
+// The unit name a symbol spells. `.inherent_K`, `.impl_K` and `.interface_K` are positions in this
+// run's declaration tables - good keys inside one run, but two runs that compile different modules
+// number them differently, so a module calling another's method would name a symbol the other
+// object never defines. The symbol spells the declaration instead: the type's module and name, the
+// interface's module and name, and for an implementation also a digest of the implementing type
+// (B1 stage 4).
+fn symbol_unit<a, b>(c: (&a mut C), m: &b [u8]) -> u8[] {
+    if starts_with(view(m), view(".inherent_")) {
+        n := module_index(view(m), 10);
+        if (n != 0) & (n <= c.decls.len()) {
+            mut out = copy_bytes(view(".inherent$"));
+            push_bytes(&mut out, view(c.decls[n - 1].module));
+            out.push(36);
+            push_bytes(&mut out, view(c.decls[n - 1].name));
+            return out;
+        }
+    }
+    if starts_with(view(m), view(".impl_")) {
+        n := module_index(view(m), 6);
+        if (1 < n) & (n - 1 <= c.implementations.len()) {
+            contract := c.implementations[n - 2].contract;
+            ty := c.implementations[n - 2].ty;
+            mut out = copy_bytes(view(".impl$"));
+            push_bytes(&mut out, view(c.implementations[n - 2].module));
+            out.push(36);
+            if (contract != 0) & (contract <= c.interfaces.len()) {
+                push_bytes(&mut out, view(c.interfaces[contract - 1].name));
+            }
+            out.push(36);
+            mut key = u8[];
+            type_key(&mut c, &mut key, ty, 0);
+            digest := iface_digest(&key);
+            for i in 16 {
+                out.push(digest[i]);
+            }
+            return out;
+        }
+    }
+    if starts_with(view(m), view(".interface_")) {
+        n := module_index(view(m), 11);
+        if (1 < n) & (n - 1 <= c.interfaces.len()) {
+            mut out = copy_bytes(view(".interface$"));
+            push_bytes(&mut out, view(c.interfaces[n - 2].module));
+            out.push(36);
+            push_bytes(&mut out, view(c.interfaces[n - 2].name));
+            return out;
+        }
+    }
+    return m.copy();
+}
 fn mangle<a, b, d>(c: (&a mut C), m: &b [u8], n: &d [u8]) -> unit {
     plat := c.plat;
-    mangle_into(&mut c.out, plat, m, n);
+    unit := symbol_unit(&mut c, m);
+    mangle_into(&mut c.out, plat, view(unit), n);
     return ();
 }
 // The symbol a function body is emitted under, as a value: the one thing the fact table is keyed
@@ -8026,6 +8082,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     fact_mark := llvm::facts_len(&c.facts);
     part_mark := c.part.copy();
     closure_mark := c.closures.len();
+    spec_closure_mark := c.spec_closures;
     mut dstart = 0;
     mut dend = 0;
     expect(&mut c, view("fn"));
@@ -8058,10 +8115,14 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         return ();
     }
     mut m = module_copy(&mut c);
-    // A specialisation is requested by the module whose body instantiates the template. A replayed
-    // template counts as its own module, which is right: the nested instantiations are the defining
-    // module's to emit, and its own run discovers them while it replays the body.
-    exchange(&mut c.body_module, m.copy());
+    // A specialisation is requested by the module whose body instantiates the template.
+    mut asker = m.copy();
+    if c.current_spec != 0 {
+        // A specialisation the replayed body instantiates in turn is asked for by the same module
+        // that asked for this one, and is emitted into its part (B1 stage 4).
+        asker = c.specs[c.current_spec - 1].requester.copy();
+    }
+    exchange(&mut c.body_module, asker);
     export := c.pending_ext;
     export_symbol := c.pending_symbol.copy();
     if c.current_impl != 0 {
@@ -8088,7 +8149,8 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         spec := c.current_spec;
         label = special_name(&mut c, spec - 1);
     }
-    sym := body_label(&c, view(m), view(label), view(export_symbol), export);
+    sym_unit := symbol_unit(&mut c, view(m));
+    sym := body_label(&c, view(sym_unit), view(label), view(export_symbol), export);
     exchange(&mut c.facts_fn, sym);
     exchange(&mut c.f64_ops, 0);
     exchange(&mut c.call_ord, 0);
@@ -8274,7 +8336,14 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     // expects rdi, rsi and xmm6-xmm15 preserved; the body uses Grail's SysV-shaped convention. A
     // callback is therefore a Win64 thunk under the C symbol that saves those registers, moves
     // the arguments and calls the body, which is emitted under `<symbol>_grail_body`.
-    unit := unit_module(&mut c, view(m));
+    mut unit = unit_module(&mut c, view(m));
+    if c.current_spec != 0 {
+        // A specialisation is emitted by the module that asked for it, whichever module defines the
+        // template, and weak: every object that instantiates the same key emits the same body under
+        // the same content-addressed name, and the linker keeps one (B1 stage 4).
+        requester := c.specs[c.current_spec - 1].requester.copy();
+        unit = unit_module(&mut c, view(requester));
+    }
     part(&mut c, view(unit));
     mut body_symbol = u8[];
     push_bytes(&mut body_symbol, view(export_symbol));
@@ -8315,6 +8384,11 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     }
     exchange(&mut c.caddr, u64[]);
     func_directive(&mut c, view(m), view(name), view(body_symbol), export);
+    if c.current_spec != 0 {
+        o(&mut c, view(".weak "));
+        export_name(&mut c, view(m), view(name), view(body_symbol), export);
+        c.out.push(10);
+    }
     if (c.debug != 0) & (c.validating == 0) {
         dstart = label(&mut c);
         mark(&mut c, dstart);
@@ -8446,6 +8520,8 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         while closure_mark < c.closures.len() {
             c.closures.pop();
         }
+        // The retried body creates its closures again, so their ordinals start where they did.
+        exchange(&mut c.spec_closures, spec_closure_mark);
         exchange(&mut c.retry, 0);
         exchange(&mut c.tolerant, 0);
         a := c.attempts + 1;
@@ -11603,26 +11679,6 @@ fn special_name<a>(c: (&a mut C), index: u64) -> u8[] {
     }
     return out;
 }
-// The key a request line carries: the same template reference and the *interface* spelling of its
-// arguments, because the module that reads the request parses it with the interface reader. Only
-// written for an instantiation whose types all have a spelling; the caller checks first.
-fn request_key<a>(c: (&a mut C), index: u64) -> u8[] {
-    mut module = c.funcs[c.specs[index].template].module.copy();
-    mut name = c.funcs[c.specs[index].template].name.copy();
-    mut args = u64[];
-    for i in c.specs[index].args.len() {
-        args.push(c.specs[index].args[i]);
-    }
-    mut out = u8[];
-    push_bytes(&mut out, view(module));
-    push_bytes(&mut out, view("::"));
-    push_bytes(&mut out, view(name));
-    for i in args.len() {
-        out.push(32);
-        iface_type_raw(&mut out, &mut c, args[i]);
-    }
-    return out;
-}
 fn specialize<a, b>(c: (&a mut C), template: u64, map: (&b u64[])) -> u64 {
     f := &c.funcs[template];
     mut next = f.regions;
@@ -11723,42 +11779,10 @@ fn drain_specs<a>(c: (&a mut C), from: u64) -> u64 {
     while i < c.specs.len() {
         spec := &c.specs[i];
         template := spec.template;
-        // A module read from an interface owns its code: its object defines this body, and this run
-        // only references the symbol (the request recorded at `specialize` tells it to emit one).
-        // The exception is the run that is serving that module's requests - that run *is* the
-        // module's object, compiled from its interface.
-        mut tmodule = c.funcs[template].module.copy();
-        if iface_owned(&mut c, view(tmodule)) & !serving(&mut c, view(tmodule)) {
-            mut spellable = 1;
-            for j in c.specs[i].args.len() {
-                arg := c.specs[i].args[j];
-                if iface_spellable(&mut c, arg) == false {
-                    spellable = 0;
-                }
-            }
-            if spellable == 0 {
-                // The defining module has to emit this body, and the only way to ask it is a request
-                // line that names the instantiation in the interface format. A type that format
-                // cannot spell cannot appear in an exported signature either, so this is the point
-                // to refuse it - by name, rather than writing a request the other build cannot
-                // read.
-                mut msg = u8[];
-                push_bytes(&mut msg, view("cannot instantiate `"));
-                push_bytes(&mut msg, view(tmodule));
-                push_bytes(&mut msg, view("::"));
-                push_bytes(&mut msg, view(c.funcs[template].name.copy()));
-                push_bytes(&mut msg, view("` on a type this build cannot name across an interface: the module that defines the template would have to emit the body"));
-                fail(&mut c, view(msg));
-            }
-            // This run references the body and does not emit it, so the module that owns it has to:
-            // the request is filed under the requester, keyed by the same string as the symbol.
-            c.req_module.push(c.specs[i].requester.copy());
-            // The key is rendered when the file is written, not here: rendering it registers the
-            // environment records it mentions, and those rows belong to this module's file.
-            c.req_spec.push(i);
-            i = i + 1;
-            continue;
-        }
+        // Every run emits the specialisations its own code asks for, whichever module defines the
+        // template - replayed from that module's interface when its source is not part of this run.
+        // The body is weak and content-addressed, so every object that asks for one key emits the
+        // same body under the same name and the linker keeps one (B1 stage 4).
         // One definition per key, not per entry in `c.specs`: two interned argument lists can
         // describe the same type - a capturing closure whose environment record was synthesised
         // twice has the same captures and a different declaration index - and the key is what
@@ -11779,6 +11803,7 @@ fn drain_specs<a>(c: (&a mut C), from: u64) -> u64 {
         }
         exchange(&mut c.bindings, bindings);
         exchange(&mut c.current_spec, i + 1);
+        exchange(&mut c.spec_closures, 0);
         replay_function(&mut c, template);
         exchange(&mut c.bindings, u64[]);
         exchange(&mut c.current_spec, 0);
@@ -11801,15 +11826,6 @@ fn iface_owned<a, b>(c: (&a mut C), m: &b [u8]) -> bool {
 fn instantiated<a>(c: (&a mut C), template: u64) -> bool {
     for i in c.specs.len() {
         if c.specs[i].template == template {
-            return true;
-        }
-    }
-    return false;
-}
-// True when this run emits that module's requested specialisations.
-fn serving<a, b>(c: (&a mut C), m: &b [u8]) -> bool {
-    for i in c.serving.len() {
-        if same(view(c.serving[i]), view(m)) {
             return true;
         }
     }
@@ -16897,9 +16913,28 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
     // still enough.
     mut here = module_copy(&mut c);
     mut symbol = unit_module(&mut c, view(here));
-    symbol.push(95);
-    symbol.push(99);
-    decimal(&mut symbol, index);
+    mut weak = 0;
+    mut owner_unit = symbol.copy();
+    if c.current_spec != 0 {
+        // Inside a specialisation the closure is part of the specialisation's body: its name is the
+        // specialisation's content-addressed name and its ordinal within that body, which every
+        // object replaying the same body reaches in the same order. It is emitted weak, into the
+        // part of the module that asked for the specialisation.
+        spec := c.current_spec - 1;
+        symbol = special_name(&mut c, spec);
+        requester := c.specs[spec].requester.copy();
+        owner_unit = unit_module(&mut c, view(requester));
+        n := c.spec_closures;
+        exchange(&mut c.spec_closures, n + 1);
+        symbol.push(95);
+        symbol.push(99);
+        decimal(&mut symbol, n);
+        weak = 1;
+    } else {
+        symbol.push(95);
+        symbol.push(99);
+        decimal(&mut symbol, index);
+    }
     o(&mut c, view("leaq "));
     mangle(&mut c, view(".closure"), view(symbol));
     o(&mut c, view("(%rip),%rax\n"));
@@ -16965,6 +17000,8 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
                     bindings: bn,
                     regions: param_regions,
                     written: written,
+                    weak: weak,
+                    unit: owner_unit,
                     mode: mode,
                 }
             );
@@ -17189,9 +17226,15 @@ fn emit_closures<a>(c: (&a mut C), from: u64) -> u64 {
             bind(&mut c, pn.copy(), params[j], pid, 0);
         }
         count := 1 + params.len();
-        unit := module_copy(&mut c);
+        unit := c.closures[i].unit.copy();
+        weak := c.closures[i].weak;
         part(&mut c, view(unit));
         func_directive(&mut c, view(".closure"), view(symbol), view(symbol), 0);
+        if weak != 0 {
+            o(&mut c, view(".weak "));
+            mangle(&mut c, view(".closure"), view(symbol));
+            c.out.push(10);
+        }
         mangle(&mut c, view(".closure"), view(symbol));
         o(&mut c, view(":\npushq %rbp\nmovq %rsp,%rbp\n"));
         frame := label(&mut c);
@@ -26039,76 +26082,6 @@ fn iface_emit_all<a>(c: (&a mut C)) -> unit {
     host::write_file(view(iface_join(view(dir), view("interfaces"), view(".manifest"))), view(manifest));
     return ();
 }
-// The request files: one per module this run compiled, naming the specialisations of *other*
-// modules' templates its code references, by the same key the symbol is derived from. The defining
-// module's build reads them and emits each body once. A module that asks for nothing still gets a
-// file, so a request that is no longer made cannot linger and keep a dead body alive.
-fn specs_emit_all<a>(c: (&a mut C)) -> unit {
-    dir := c.iface_emit.copy();
-    if dir.len() == 0 {
-        return ();
-    }
-    host::mkdir(view(dir));
-    mut done = u8[][];
-    for i in c.iface_list.len() {
-        m := c.iface_list[i].module.copy();
-        if same(view(m), view("runtime")) {
-            continue;
-        }
-        // A module read from an interface is not compiled here, so this run asks for nothing on its
-        // behalf; the run that compiles it owns its request file.
-        if iface_owned(&mut c, view(m)) {
-            continue;
-        }
-        mut seen = 0;
-        for j in done.len() {
-            if same(view(done[j]), view(m)) {
-                seen = 1;
-            }
-        }
-        if seen != 0 {
-            continue;
-        }
-        done.push(m.copy());
-        // Rendering a key registers the environment records it names, so the registry is cleared
-        // per module and its rows go into this module's file.
-        exchange(&mut c.iface_env, u64[]);
-        exchange(&mut c.iface_env_names, u8[][]);
-        mut keys = u8[][];
-        for j in c.req_spec.len() {
-            if same(view(c.req_module[j]), view(m)) {
-                index := c.req_spec[j];
-                keys.push(request_key(&mut c, index));
-            }
-        }
-        // A request key can name a synthesised environment record - an instantiation on a closure -
-        // and the defining module has to rebuild that record to compile the body. The rows for it
-        // travel here exactly as they do in an interface, so a request is a self-contained fragment
-        // rather than a reference to something only the requester knows.
-        mut text = u8[];
-        push_bytes(&mut text, view("// grail-specs 1\n"));
-        push_bytes(&mut text, view("module "));
-        push_bytes(&mut text, view(m));
-        text.push(10);
-        order := iface_sorted(&keys);
-        for j in order.len() {
-            push_bytes(&mut text, view("request "));
-            push_bytes(&mut text, view(keys[order[j]]));
-            text.push(10);
-        }
-        for j in c.iface_env.len() {
-            decl := c.iface_env[j];
-            local := c.iface_env_names[j].copy();
-            iface_emit_env(&mut c, &mut text, decl, view(local));
-        }
-        file := iface_join(view(dir), view(m), view(".sreq"));
-        written := host::write_file(view(file), view(text));
-        if written != 0 {
-            iface_refuse(view(file), view("cannot write a request file"));
-        }
-    }
-    return ();
-}
 fn out_push<a>(out: (&a mut u8[]), b: u64) -> unit {
     out.push(b);
     return ();
@@ -26463,118 +26436,6 @@ fn iface_load<a, b>(c: (&a mut C), path: &a [u8], source_path: &b [u8], phase: u
     return module;
 }
 
-// The specialisations other modules asked this one for. Each `request` line is a template reference
-// and canonical argument types - the same string the symbol is derived from - so the definer emits
-// exactly the bodies its importers reference, under exactly the names they call.
-fn specs_serve<a, b>(c: (&a mut C), dir: &b [u8]) -> unit {
-    entries := host::list_dir(view(dir));
-    for k in entries.len() {
-        entry := entries[k].copy();
-        if !iface_suffix(view(entry), view(".sreq")) {
-            continue;
-        }
-        mut file = u8[];
-        push_bytes(&mut file, view(dir));
-        file.push(47);
-        push_bytes(&mut file, view(entry));
-        text := host::read_file(view(file));
-        if !iface_starts(view(text), view("// grail-specs 1\n")) {
-            iface_refuse(view(file), view("is not a request file; expected a `// grail-specs 1` header"));
-        }
-        lines := iface_lines(&text);
-        // Names first, requests second: a request may name an environment record whose rows come
-        // later in the file.
-        mut owner = u8[];
-        for i in lines.len() {
-            line := lines[i].copy();
-            if line.len() == 0 {
-                continue;
-            }
-            mut probe = ip_here(view(line), view(file), i + 1);
-            if ip_done(&probe) {
-                continue;
-            }
-            if same(view(ip_word(&mut probe)), view("module")) {
-                owner = ip_word(&mut probe);
-            }
-        }
-        for i in lines.len() {
-            iface_register(&mut c, view(lines[i]), view(file), i + 1, view(owner));
-        }
-        // The records a request names have to be *defined*, not just named: their fields are what
-        // the key and the emitted body are built from.
-        mut state = IState {
-            module: owner.copy(),
-            unsafe: 0,
-            source: 0,
-            cur_decl: 18446744073709551615,
-            first: 0,
-            section: 0,
-            owner: 0,
-            contract: 0,
-            implementation: 0,
-            last_func: 0,
-            last_decl: 0,
-            impl_first: 0,
-            impl_names: u8[][],
-            body_func: 0,
-            body_total: 0,
-            body_left: 0,
-            body_text: u8[],
-            body_name: u8[]
-        };
-        for i in lines.len() {
-            iface_define(&mut c, &mut state, view(lines[i]), view(file), i + 1);
-        }
-        for i in lines.len() {
-            line := lines[i].copy();
-            if line.len() == 0 {
-                continue;
-            }
-            mut p = ip_here(view(line), view(file), i + 1);
-            if ip_done(&p) {
-                continue;
-            }
-            word := ip_word(&mut p);
-            if same(view(word), view("module")) {
-                continue;
-            }
-            if same(view(word), view("env")) || same(view(word), view("field")) {
-                continue;
-            }
-            if !same(view(word), view("request")) {
-                iface_fail(&p, view("expected `request`, `module` or nothing"));
-            }
-            ref := ip_ref(&mut p);
-            module := ip_ref_module(&ref);
-            name := ip_ref_name(&ref);
-            mut args = u64[];
-            while !ip_done(&p) {
-                ty := iface_parse_type(&mut c, &mut p);
-                args.push(ty);
-            }
-            template := find_func(&mut c, view(module), view(name));
-            if template == 0 {
-                // A request for a module this run does not compile belongs to that module's build.
-                if funcs_of_module(&mut c, view(module)) == 0 {
-                    continue;
-                }
-                mut msg = u8[];
-                push_bytes(&mut msg, view("asks for the unknown template `"));
-                push_bytes(&mut msg, view(name));
-                push_bytes(&mut msg, view("` of module `"));
-                push_bytes(&mut msg, view(module));
-                push_bytes(&mut msg, view("`"));
-                iface_fail(&p, view(msg));
-            }
-            specialize(&mut c, template - 1, &args);
-            if !serving(&mut c, view(module)) {
-                c.serving.push(module.copy());
-            }
-        }
-    }
-    return ();
-}
 fn funcs_of_module<a, b>(c: (&a mut C), m: &b [u8]) -> u64 {
     mut n = 0;
     for i in c.funcs.len() {
@@ -27503,6 +27364,7 @@ pub fn main() -> u64 {
         specs: Spec[],
         bindings: u64[],
         current_spec: 0,
+        spec_closures: 0,
         validating: 0,
         ffi_fixed: 0,
         caddr: u64[],
@@ -27601,13 +27463,9 @@ pub fn main() -> u64 {
         cap_segs: u8[][],
         iface_dir: u8[],
         iface_use: u8[],
-        serve: u8[],
         no_entry: 0,
         iface_used: u8[][],
         body_module: u8[],
-        serving: u8[][],
-        req_module: u8[][],
-        req_spec: u64[],
         drop_names: u8[][],
         spec_emitted: u8[][],
         spell_lenient: 0,
@@ -27702,15 +27560,6 @@ pub fn main() -> u64 {
                 fail_option(&mut c, view("--use needs a directory"));
             }
             exchange(&mut c.iface_use, host::arg(offset + 2));
-            offset += 2;
-        } else if same(view(option), view("--serve")) {
-            // B1 stage 3: emit the specialisations the request files in DIR ask of the modules this
-            // run compiles. This is the defining module's side of the split: importers record what
-            // they reference, its build emits each body once.
-            if argc < offset + 3 {
-                fail_option(&mut c, view("--serve needs a directory"));
-            }
-            exchange(&mut c.serve, host::arg(offset + 2));
             offset += 2;
         } else if same(view(option), view("--no-entry")) {
             // A run that emits one module's code for a link, not a program: no entry stub, so the
@@ -28012,10 +27861,6 @@ pub fn main() -> u64 {
     }
     // Requests are read once every declaration is known: a request names a template and the types
     // to instantiate it with, which is all `specialize` needs to add the body to this build.
-    if c.serve.len() != 0 {
-        serve_dir := c.serve.copy();
-        specs_serve(&mut c, view(serve_dir));
-    }
     emit_specializations(&mut c);
     // A closure body can instantiate a generic (`Some(x)` inside `|| ...`) and a specialisation can
     // create a closure, so the two are emitted to a fixpoint; request files are written once both
@@ -28026,7 +27871,6 @@ pub fn main() -> u64 {
         specs_done = drain_specs(&mut c, specs_done);
         closures_done = emit_closures(&mut c, closures_done);
     }
-    specs_emit_all(&mut c);
     emit_fn_thunk(&mut c);
     emit_drops(&mut c);
     if c.no_entry != 0 {
