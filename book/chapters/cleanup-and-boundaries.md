@@ -41,13 +41,16 @@ and `byval` is only accepted on an `extern "C"` record, on x86-64, AArch64 and R
 The rest of the surface is implemented and executed, and `docs/ffi.md` is the contract:
 
 - `extern "C"` declarations and exports: scalar, float and narrow-integer parameters and results,
-  byte views and `CStr`, opaque handles, C-layout records by pointer and by value as results,
-  callbacks and `cfn` function pointers, and variadic C functions.
+  byte views and `CStr`, opaque handles, C-layout records by pointer and by value as results, the
+  address of a record as a value (`cptr`/`cptr_mut`), callbacks and `cfn` function pointers, and
+  variadic C functions.
 - A handle can appear in another module's signature (`use sys_grail::File;`), and two handles of the
   same type compare with `==`/`!=` by identity; a handle has no arithmetic, ordering or size, and
   only a foreign call produces one.
-- Out-parameters: a handle or bare pointer binding passed as `&mut` is the C `H *`, so a create
-  function can write a handle into a slot the caller owns.
+- Out-parameters: a handle, bare pointer or `extern "C"` record binding passed as `&mut` is the C
+  `H *`/`void **`/`R *`, so a create function can write a handle into a slot the caller owns or fill
+  a struct in place. A record declared without an initializer is zeroed storage with no value, which
+  is how an array of handles exists before C fills it.
 - Calls of seven to nine word arguments use the target's own register file and then the outgoing
   stack (six registers on x86-64, eight on AArch64 and RISC-V 64).
 - Dynamic loading through `dlopen`/`dlsym`/`dlclose` on the three Linux targets, where foreign
@@ -56,11 +59,12 @@ The rest of the surface is implemented and executed, and `docs/ffi.md` is the co
 
 Windows x86-64 and ARM64 refuse `byval` rather than guess MSVC's struct rules. Still refused, with a
 diagnostic: a `byval` callback parameter, an out-parameter on a callback or `cfn` type, more integer
-argument words than a callback's registers can carry, taking the address of an `extern "C"` record
-(which is what a create-info struct pointing at another struct needs), foreign calls from a thread
-other than the main one on Linux, and dynamic loading on macOS. Tests that execute the C ABI rather
-than compiling against a stub live in `tests/ffi/`; the book cannot show them, because its examples
-link no C library of their own.
+argument words than a callback's registers can carry, the address of a *temporary* record (`cptr
+needs a named record`) or of a record that has no C layout, foreign calls from a thread other than
+the main one on Linux, and dynamic loading on macOS. Tests that execute the C ABI against real
+libraries live in `tests/ffi/`; the book's own C examples link a freestanding shim beside them
+(`book/ffi/`), which is enough to run the same C from both languages and not enough to need a
+system library.
 
 ## What this book does not promise
 

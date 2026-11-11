@@ -281,12 +281,14 @@ b)`, all built on `parallel_map` because a safe module cannot call the runtime d
 ownership rule is stated at the top of the file: **everything a job's closure touches it owns** - a
 job's inputs are moved into it and its result is owned, and no reference crosses a job boundary.
 
-`for_chunks` is the Abundance shape and is sound for plain data today without a compiler change: it
+`for_chunks` is the Abundance shape and is sound for plain data without a compiler change: it
 consumes the vector, hands each job one contiguous **owned** chunk, and concatenates the results in
-chunk order. It is the same shape stage 2's `&mut [T]` chunks will produce, minus the compiler
-split - and that is its cost: splitting by popping moves every element twice, about 46-48 ms for
-3M u64 elements against ~10 ms to build the same vector (~15 ns per element, against ~3 ns). `parallel_for_chunks(&mut [T], ...)`
-removes that copy entirely, which is one more reason stage 2 is where the compiler earns its keep.
+chunk order. The cost is the split itself: popping every element into its chunk moves it twice,
+about 46-48 ms for 3M u64 elements against ~10 ms to build the same vector (~15 ns per element,
+against ~3 ns). Stage 2 (below) produces the same shape without that pass -
+`parallel_for_chunks(&mut [T], ...)` hands each job an exclusive chunk of the caller's own vector -
+and the measured difference is exactly the copy: 100 ms against 44 ms as one job, 63 ms against
+11 ms as eight.
 
 ### The pool's share of the process state, and why the merge broke
 

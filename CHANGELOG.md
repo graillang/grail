@@ -2,6 +2,56 @@
 
 ## Unreleased
 
+- Documents: the claims this week's compiler work made false are gone, each checked against the
+  compiler in this tree first. [docs/rhi.md](docs/rhi.md) said "there is no expression whose value is
+  the address of an owned `extern \"C\"` record" and listed `cptr(&app)`, a record out-parameter and a
+  `cnull()`-seeded handle field as refused - all three work now (the first two compile, the third is
+  still `generic argument shape mismatch`), so the probe's own two `unavailable` lines are a port that
+  has not been made rather than a language limit, and the refusal table now lists what is *still*
+  refused: the address of a temporary, the same record twice in one expression, an out-parameter with
+  no binding, and an out-parameter that is not a handle/`CPtr`/`CMutPtr`/extern record.
+  [docs/platform-status.md](docs/platform-status.md) listed the same refusal and 18 executable FFI
+  fixtures with 54 instances - [docs/ffi.md](docs/ffi.md) already said 19, and
+  `bun tools/test-ffi.mjs x86_64` reports "19 linked and executed", so the counts are 19 fixtures and
+  57 instances, and the FFI row now includes record addresses, `&mut R` out-parameters and arrays of
+  handles. [book/chapters/cleanup-and-boundaries.md](book/chapters/cleanup-and-boundaries.md) listed
+  taking a record's address as still refused and said the book cannot show C ABI tests because its
+  examples link no C library - two of them now link a freestanding fixture in `book/ffi/`.
+  [docs/testing.md](docs/testing.md) described `test-facts.mjs` and `--verify-facts` as the `f32` fact
+  alone (F1 landed this week and the same suite covers its header facts) and omitted `split-test.mjs`
+  from the gate and from the suite list.
+  [docs/design/implementation-status.md](docs/design/implementation-status.md) still said `Send`/`Share`
+  for closures was deferred, which a neighbouring row of the same file contradicted and the
+  parallelism work replaced, and [docs/design/decisions-b2-b6.md](docs/design/decisions-b2-b6.md)
+  recorded the same scope limit; both now point at the structural classification that reaches a
+  closure's environment. [docs/design/parallelism.md](docs/design/parallelism.md) described in-place
+  chunks in the future tense ("stage 2's `&mut [T]` chunks will produce") after measuring them, and
+  now states the copy it removed with the numbers.
+  [docs/design/llvm-backend.md](docs/design/llvm-backend.md)'s 660-case requirement names the corpus
+  and its current count. Historical records of past runs (`755 cases`, `796 native cases`, `49
+  examples` for a branch) are left as the records they are.
+- Book: four new example pairs for the week's compiler work, each run by `bun tools/book.mjs check`
+  against an equivalent Rust program. **`pool-chunks-mut`**: `parallel_for_chunks` over a ten-element
+  vector in three chunks (4, 4, 2, the `ceil(n/chunks)` split) and then `pool::chunks_mut` at 5 and 5,
+  against `chunks_mut(4)`/`chunks_mut(5)` under `thread::scope` - the same arithmetic split, the same
+  ten numbers, and no element copied in either language. **`pool-job-handle`**: spawn, do other work,
+  join; then two live handles joined in the reverse of their start order, against
+  `std::thread::spawn`/`JoinHandle::join`. **`ffi-handle-array`**: a record of `handle` fields as the
+  array C writes - `c_alloc_buffers(&mut buffers)` fills four slots, the record goes back to C as a
+  parameter, a second array is seeded from handles already held, and the handle Grail reads out of the
+  array compares equal to the one C hands back - against a Rust twin using `MaybeUninit`/`assume_init`
+  on the same C file. **`ffi-uninitialised-record`** is the uninitialised-handle rule as an intentional
+  rejection in both languages: reading a field of an `extern "C"` record before anything wrote it is
+  `use of moved, borrowed or partially initialized value` in Grail and E0381 in Rust. The book is now
+  59 Grail examples with 59 Rust twins. The concurrency and FFI chapters gain a *What this month added*
+  section (in-place chunks and the measured difference against `pool::for_chunks`, the job handle and
+  what its drop does, the capture classification; record pointers, records C fills, arrays of handles,
+  and the borrowed callback record parameter that used to abort at exit). The modules chapter states
+  the build cache flag (`grail build --cache`, `b1-cache`) and checked module interfaces
+  (`b1-interfaces`) with **no** Rust comparison, and says why: they are build-driver flags, and Rust
+  splits the same work between `rustc`'s incremental mode and Cargo, so a pair of programs would
+  compare nothing. That section also says plainly that neither flag is in this tree yet, so the book
+  does not claim to verify it.
 - FFI: a C callback's extern-record parameter is borrowed, not owned. The parameter prologue marked
   every parameter as an owning binding, so the epilogue ran the record's drop glue on the address C
   handed over — freeing the caller's struct (or its stack) — and the process then aborted inside the

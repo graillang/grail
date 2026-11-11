@@ -68,6 +68,29 @@ the zero the binding started with. Both languages run the same C file — Grail'
 Rust's `*const AppInfo`, Grail's `&mut AppInfo` is Rust's `*mut AppInfo` — so the numbers are the
 same numbers.
 
+## Arrays of handles
+
+A record of `handle` fields is an array of handles for the same reason a record of records is an
+array of structs: the fields are laid out contiguously, so the record's address is the array. This is
+the shape `pCommandBuffers` and `pSwapchains` take, and it is where the uninitialised-record rule
+matters most, because a handle cannot be constructed at all.
+
+{{example:ffi-handle-array}}
+
+`mut buffers: CommandBuffers;` is storage - `sizeof(struct command_buffers)` zero bytes - and
+`c_alloc_buffers(&mut buffers)` is the pointer C writes the four slots through. Only after that call
+are the fields *values*: reading one before it is the error below, so a zeroed slot can never be read
+as if C had produced a handle. A non-extern record, or an integer, declared without an initializer is
+still plain uninitialized and still refused where it is used; a bare `handle` binding is the one
+exception, being null rather than uninitialized, because C reads it even when it only writes.
+
+{{example:ffi-uninitialised-record}}
+
+That is the whole rule in one line, and it is the same rule Rust states as E0381: a binding nothing
+wrote has no value to read. The difference is what the storage is - Grail zero-fills an `extern "C"`
+record so the callee's pointer is always valid, and then refuses to let the zeroes be mistaken for
+data.
+
 ## What crosses, and what does not
 
 - A record parameter or a `cptr` address is one word: C reads or writes the fields at that address
@@ -85,3 +108,32 @@ same numbers.
 - A `CPtr` is a word with no lifetime: the borrow that produced it lasts for the statement, so a
   pointer kept in a binding past that statement is the program's responsibility, and the address of
   a temporary is refused outright.
+
+## What this month added
+
+The FFI grew the two shapes every C API with create-info structs needs, and one fix that was a
+soundness bug.
+
+- **A pointer to a record Grail owns.** `unsafe cptr(&r)` is that address as a `CPtr` and
+  `cptr_mut(&mut r)` the same as a `CMutPtr`, so a struct that points at another struct -
+  `VkInstanceCreateInfo::pApplicationInfo`, `VkRenderPassCreateInfo::pAttachments` - is expressible
+  without laying bytes out by hand. The address is the one a record *parameter* already was, so the
+  two forms reach the same bytes; `cptr` is how a program *names* it, in a field, a binding or a
+  parameter typed `const void *`/`void *`. An embedded record's field is interior storage, so
+  `cptr(&pairs.first)` is an element address and an array of structs needs no array type.
+- **Records C fills.** `p: &mut R` in a declaration is the C `R *`: the callee writes the struct in
+  place and the caller reads the typed fields afterwards. The slots start zeroed, so a field the
+  callee leaves alone reads 0 - but the binding has no value until something wrote it, which is what
+  keeps a zeroed handle from being read as one.
+- **Arrays of handles**, seeded by C through `&mut` or built by the program from handles it already
+  holds, which is how a submit or present call gets its handle array.
+- **A callback's record parameter is borrowed, not owned.** The parameter prologue used to mark every
+  parameter as an owning binding, so the epilogue ran drop glue on the address C handed over and the
+  process aborted inside the runtime's free path at exit - after `main` had printed everything and
+  returned 0. A callback's record parameter is the `const R *` the caller owns, so it is registered
+  as a borrow now and the fields stay readable under the ordinary rules.
+
+What still has no expression: pointer arithmetic (an array of dynamic length is a fixed-capacity
+record with its count checked afterwards), writing *through* a pointer inside a C callback (there is
+no deref-assignment), and a `byval` record on the Windows ABIs. `docs/ffi.md` states each of those
+with the diagnostic it produces.

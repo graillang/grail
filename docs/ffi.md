@@ -375,7 +375,8 @@ fn main() -> u64 {
   `cfn` type declaring `&mut H` are refused by name, because Grail has no deref-assignment: a
   callback could not store through the pointer C handed it.
 - A handle cannot be constructed at all, not even as null from Grail (`cnull()` is a `CPtr`, and
-  `Slot { instance: cnull() }` is a type mismatch), so a declaration's out-parameter is the way to
+  `Slot { instance: cnull() }` is refused with `generic argument shape mismatch`), so a
+  declaration's out-parameter is the way to
   obtain one — or a record field a call filled, whose untouched slots are the null handle.
   `tests/ffi/out_params.grl` executes it on x86-64, AArch64 and RISC-V 64, and on Windows
   x86-64 under Wine through `tests/windows-cases.json`: every C twin returns a checksum that reads

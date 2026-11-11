@@ -436,7 +436,10 @@ move rules keep their cases.
   a write (there is no cheap receiver-mode lookup at scan time), so a read-only method call on a
   captured record makes the closure `FnMut` and needs a `mut` binding. Builtin container methods
   outside the read-only allowlist are treated the same way.
-- `Send`/`Share` for closures and `mut`-declared parameters stay out of scope, as rule 6 says.
+- `mut`-declared parameters stay out of scope, as rule 6 says. `Send`/`Share` for closures was
+  out of scope here and was taken up by the parallelism work instead: a closure's environment is
+  part of its type now and `require_parallel_closure` classifies every capture
+  (`docs/design/parallelism.md`).
 
 **Consequence if wrong.** If the write scan misses a write, the closure stays `Fn` and the body
 either refuses the store (the read-only field type) or — for a `&mut` capture the scan did not

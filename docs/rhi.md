@@ -63,8 +63,9 @@ rhi_vulkan: ok
 ```
 
 Every value above is returned by a call: nothing is defaulted, guessed or filled in. The two
-`unavailable` lines are the part of this increment that did not land, and they are the subject of
-"What is not there, and why" below.
+`unavailable` lines are the part of this increment that did not land: the FFI can express what they
+need now, and `abundance/src/rhi_vulkan.grl` has not been ported onto it - see "What is not there,
+and why" below.
 
 The window half (`rhi_sdl3.grl`), unchanged from the previous increment:
 
@@ -122,51 +123,64 @@ The Vulkan half (`rhi_vulkan.grl`) is new in this increment:
 
 ## What is not there, and why
 
-**No logical device, so no queues, no surface, no swapchain, no pipelines.** Both blocked calls need
-the same missing FFI feature, and it is one feature:
+**No logical device, so no queues, no surface, no swapchain, no pipelines.** The probe still stops
+here, but the reason has changed: the FFI gap this section used to describe is closed, and what is
+missing now is the port.
 
-> **There is no expression whose value is the address of an owned `extern "C"` record.**
+Until this increment the language had no expression whose value is the address of an owned
+`extern "C"` record, and Vulkan create-info graphs are built out of exactly that. The FFI now has the
+three forms it needs (`docs/ffi.md`, "Records by pointer" and "Out-parameters"):
 
-Vulkan create-info graphs are built out of exactly that: `VkInstanceCreateInfo::pApplicationInfo`
-points at a `VkApplicationInfo`, `VkDeviceCreateInfo::pQueueCreateInfos` points at an array of
-`VkDeviceQueueCreateInfo`, every `VkPipelineCreateInfo` field points at a state struct, `pNext`
-chains point at extension structs, and `ppEnabledExtensionNames` points at an array of `char *`.
-`cptr` and `cptr_mut` produce a bare pointer only for a byte sequence or a view, and an
-out-parameter slot is `&mut` of a `handle`, `CPtr` or `CMutPtr` — one word. A record *parameter* is
-the address of the record's fields, which is why a call that takes the struct itself works, but
-nothing hands that address back to Grail as a value. The refusals, pinned as cases in
-`tests/native-cases.json` so the limit cannot quietly change:
+| shape | meaning |
+| --- | --- |
+| `unsafe cptr(&r)` / `cptr_mut(&mut r)` | the address of an `extern "C"` record's own fields, as a `CPtr` / `CMutPtr`; a field, a binding and a `const void *`/`void *` parameter all take it |
+| `p: &mut R` in a declaration | the C `R *` the callee writes; the typed fields are read afterwards |
+| a record of `handle` fields | an array of handles: C fills the slots through `&mut`, or the program seeds them from handles it already holds |
 
-| Attempt | Result | Case |
-| --- | --- | --- |
-| `cptr(&app)` for an extern record `app` | `cptr requires a byte sequence or view` | `ffi-reject-record-address` |
-| `c_take(app)` where `p: CPtr` | `type mismatch` | — |
-| `extern "C" fn f(p: &mut AppInfo)` | `an extern C out-parameter must be &mut a handle, CPtr or CMutPtr` | `ffi-reject-record-out-param` |
-| `Slot{instance: cnull()}` to seed a handle field | `generic argument shape mismatch` | `ffi-reject-handle-null-seed` |
-| `mut slot: Slot;` then `slot.instance` | `use of moved, borrowed or partially initialized value` | `ffi-reject-handle-out-slot` |
+With those, `VkInstanceCreateInfo::pApplicationInfo` is a field assignment, `VkApplicationInfo` itself
+is a record of scalars and `CStr` fields, `pQueueCreateInfos` is a record of embedded
+`VkDeviceQueueCreateInfo` fields, `ppEnabledExtensionNames` is a record of `CStr` fields, and
+`VkDeviceQueueCreateInfo`'s `pQueuePriorities` is `cptr` of a float array. An `extern "C"` record
+declared without an initializer is `sizeof(struct)` zeroed bytes, so an array of handles can be
+created without constructing one; it has no *value* until a call or an assignment wrote it.
+
+What the probe prints has not caught up: `rhi.vulkan.instance.app_info` and `rhi.vulkan.device` still
+read `unavailable`, because `abundance/src/rhi_vulkan.grl` has not been ported - it calls
+`vkCreateInstance` with `pApplicationInfo` null, does not declare `vkCreateDevice`, and its header
+comment still states the old limit. That is a port to do, not a language feature to add.
+
+What the language still refuses, with the diagnostic for each (all but the last are pinned in
+`tests/native-cases.json`):
+
+| Attempt | Result |
+| --- | --- |
+| `cptr(&AppInfo { ... })` - the address of a temporary | `cptr needs a named record: the address of a temporary would not outlive the pointer` |
+| `c_two(cptr(&r), cptr_mut(&mut r))` - the same record twice in one expression | `the value handed to C as a writable pointer is already borrowed in this expression` |
+| `c_fill(&mut Slots { ... })` - an out-parameter with no binding to write into | `an extern C out-parameter needs a binding to write into; a temporary record would be discarded` |
+| `extern "C" fn f(p: &mut i64)` - an out-parameter that is not a handle, `CPtr`/`CMutPtr` or extern record | `an extern C out-parameter must be &mut a handle, CPtr, CMutPtr or extern "C" record` |
+| `Slot { instance: cnull() }` - seeding a handle field from a `CPtr` | `generic argument shape mismatch` |
+| `mut slot: Slot;` then `slot.instance`, before anything wrote it | `use of moved, borrowed or partially initialized value` |
 
 What that costs, concretely:
 
-- **`VkApplicationInfo` cannot be passed at all.** `vkCreateInstance` is therefore called with
-  `pApplicationInfo` null, which is legal — the specification then fixes the instance at API
-  version 1.0 — so `rhi.vulkan.instance.api` reads `1.0.0` while the loader is 1.4.363 and the
-  driver supports 1.4.354. Every call this increment makes is core 1.0, so nothing else is
-  affected. A `VkApplicationInfo` could not even be laid out in a byte buffer instead, because its
-  own `pApplicationName`/`pEngineName` are pointers, and a pointer cannot be written into a
-  `u8[]`.
-- **`vkCreateDevice` is not declared at all.** `queueCreateInfoCount` must be at least one, so
-  `pQueueCreateInfos` cannot be avoided by passing null the way `pApplicationInfo` can, and there is
-  no `VkDeviceQueueCreateInfo` array to point at.
-- **No instance extension can be enabled.** `ppEnabledExtensionNames` is a `const char *const *`,
-  so `VK_KHR_surface` (and with it every swapchain path) waits on the same feature.
+- **`VkApplicationInfo` is not passed yet.** `vkCreateInstance` is called with `pApplicationInfo`
+  null, which is legal - the specification then fixes the instance at API version 1.0 - so
+  `rhi.vulkan.instance.api` reads `1.0.0` while the loader is 1.4.363 and the driver supports
+  1.4.354. Every call the probe makes is core 1.0, so nothing else is affected; the port is what
+  changes the number.
+- **`vkCreateDevice` is not declared yet.** `queueCreateInfoCount` must be at least one, so
+  `pQueueCreateInfos` cannot be avoided by passing null the way `pApplicationInfo` can - it is the
+  first thing the port needs.
+- **No instance extension is enabled yet**, because the module has no `ppEnabledExtensionNames` to
+  point at. With the forms above that is a record of `CStr` fields and one call.
 
 The alternative this module refuses: laying the create-infos out in `u8[]` byte buffers at
 hard-coded offsets, which is what it already does for structs C *writes* (extensions, layers,
-properties, queue families — none of which a record can express). Doing it for structs Grail
+properties, queue families - none of which a record can express). Doing it for structs Grail
 *builds* would put `sType`, the counts and the pointer slots outside the type system's reach, and the
 pointer slots could not be written into a `u8[]` at all. A mis-ordered create-info field has to be a
 compile error or a failing check, never a plausible-looking number, so the structs Grail *builds*
-stay records and the calls that need their addresses wait for the FFI form that can take one.
+stay records.
 
 Also absent by intent, not by limitation: the event pump, input, displays, clipboard
 (`grail_window.h`'s other half), debug messengers, device memory and allocations, bindless tables,
@@ -204,35 +218,33 @@ and everything downstream of a device.
 
 ## The next three increments
 
-1. **A bare pointer to an owned record in the FFI** — the one feature everything else waits on.
-   The narrow shape: `cptr(&record)` / `cptr_mut(&mut record)` for an `extern "C"` record, one word,
-   `unsafe`, with the same call-scoped borrow rules as a view (`docs/ffi.md` would document it
-   beside `cptr` of a byte sequence). Once it exists, an array of structs is a record of embedded
-   record fields — their bytes are laid out contiguously, so the record's address *is* the array —
-   and an array of `char *` is a record of `CStr` fields. That unblocks, in one step:
-   `VkApplicationInfo` and a 1.4 instance, `ppEnabledExtensionNames` with `VK_KHR_surface`,
-   `vkCreateDevice` with `pQueueCreateInfos`, `vkGetDeviceQueue` and `vkDestroyDevice`. The
-   declaration for the device is already written down in `graphics/include/grail/
-   grail_backend_vulkan.h`'s feature set (dynamic rendering, synchronization2, timeline semaphore,
-   buffer device address, scalar block layout, descriptor indexing), and this increment's queue
-   family selection is what feeds it.
+1. **Port `abundance/src/rhi_vulkan.grl` onto the FFI that exists now.** The feature this increment
+   waited on has landed (`docs/ffi.md`, "Records by pointer"): a record's address as a value, a
+   record out-parameter C writes, and a record of handle fields as an array. The port is
+   `VkApplicationInfo` as a record and `pApplicationInfo = cptr(&app)` for a 1.4 instance,
+   `ppEnabledExtensionNames` as a record of `CStr` fields with `VK_KHR_surface`, `vkCreateDevice`
+   with `pQueueCreateInfos`, then `vkGetDeviceQueue` and `vkDestroyDevice`. The declaration for the
+   device is already written down in `graphics/include/grail/grail_backend_vulkan.h`'s feature set
+   (dynamic rendering, synchronization2, timeline semaphore, buffer device address, scalar block
+   layout, descriptor indexing), and this increment's queue family selection is what feeds it.
 2. **A `VkSurfaceKHR` and a swapchain from the window the previous increment already creates**:
    `SDL_Vulkan_CreateSurface` from the `Window` handle, the platform surface extension, surface
-   capabilities and formats (both byte buffers — `VkSurfaceCapabilitiesKHR` is 52 bytes and
-   `VkSurfaceFormatKHR` 8), and a present loop that at minimum clears the image. This needs
-   increment 1 for the extension-name array and for `VkSwapchainCreateInfoKHR`'s own pointers
-   (`pNext`, `pQueueFamilyIndices`); `vkCreateSwapchainKHR`, `vkCreateImageView` and the
-   `vkGetSwapchainImagesKHR` handle array are all reachable today — the swapchain images come back
-   through the same fixed-capacity record-of-handles idiom this increment introduced for physical
-   devices.
-3. **Pipelines, and the first frame drawn into**: `vkCreateShaderModule` already works — its
-   `pCode` is `const uint32_t *` and a shader's bytes *are* addressable through `cptr` — but
-   `VkGraphicsPipelineCreateInfo` points at `pStages`, `pVertexInputState`, `pInputAssemblyState`,
-   `pViewportState`, `pRasterizationState`, `pMultisampleState`, `pDepthStencilState`,
-   `pColorBlendState` and `pDynamicState`, so it needs increment 1 as well. Queues and the command
-   pool/command buffer pair come from increment 2. The cross-check to keep is `graphics/`'s own
-   `gr_vk_probe_run()` and its test suite: the Grail and C sides have to agree on the same machine,
-   which is how this increment's device name, type, API version and graphics family were verified.
+   capabilities and formats (`VkSurfaceCapabilitiesKHR` is 52 bytes and `VkSurfaceFormatKHR` 8, so
+   these stay records or byte buffers depending on whether Grail builds them or C fills them), and a
+   present loop that at minimum clears the image. This needs increment 1 for the extension-name array
+   and for `VkSwapchainCreateInfoKHR`'s own pointers (`pNext`, `pQueueFamilyIndices`);
+   `vkCreateSwapchainKHR`, `vkCreateImageView` and the `vkGetSwapchainImagesKHR` handle array are
+   reachable today - the swapchain images come back through the same record-of-handles idiom this
+   increment introduced for physical devices, which C can now fill directly.
+3. **Pipelines, and the first frame drawn into**: `vkCreateShaderModule` already works - its
+   `pCode` is `const uint32_t *` and a shader's bytes *are* addressable through `cptr` - but
+   `VkGraphicsPipelineCreateInfo` points at `pStages`, `pVertexInputState`,
+   `pInputAssemblyState`, `pViewportState`, `pRasterizationState`, `pMultisampleState`,
+   `pDepthStencilState`, `pColorBlendState` and `pDynamicState`, so it needs increment 1 as well.
+   Queues and the command pool/command buffer pair come from increment 2. The cross-check to keep is
+   `graphics/`'s own `gr_vk_probe_run()` and its test suite: the Grail and C sides have to agree on
+   the same machine, which is how this increment's device name, type, API version and graphics
+   family were verified.
 
 The order is not arbitrary: (1) is a language change with no graphics in it, (2) is the first
 frame, (3) is the first frame that can be drawn into. Anything built before (1) would have to be

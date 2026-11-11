@@ -442,8 +442,9 @@ front-end job, for the same reason as F1.
 
 - A benchmark suite (`tools/bench.mjs`) times Grail against C `-O2` on meshopt simplify, clod,
   JPEG/PNG decode, zlib inflate and the Borg wire codec, and records the ratio per backend.
-- The LLVM backend must pass the full native suite (660 cases) and every package suite, and
-  produce byte-identical program output to the native backend.
+- The LLVM backend must pass the full native suite (`tests/native-cases.json` - 855 cases at the
+  time of writing, and the count is not a target) and every package suite, and produce
+  byte-identical program output to the native backend.
 - Self-compilation through LLVM must produce a compiler whose output matches the native-built
   compiler's output byte for byte.
 

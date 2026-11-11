@@ -14,15 +14,16 @@ export GRAIL_COMPILER=$C GRAIL_FFI_COMPILER=$C
 for t in 'test-native.mjs x86_64' test-cli.mjs 'book.mjs check' test-selfhost.mjs \
          abundance-test.mjs borg-test.mjs test-ffi.mjs 'ci.mjs lint' test-debug-lines.mjs \
          'windows.mjs check' lsp-test.mjs test-profile.mjs test-authority.mjs test-facts.mjs \
-         'test-native.mjs aarch64' 'test-native.mjs riscv64'; do
+         split-test.mjs 'test-native.mjs aarch64' 'test-native.mjs riscv64'; do
   echo "== $t"; bun tools/$t 2>&1 | tail -2
 done
 for t in x86_64 aarch64 riscv64; do GRAIL_BACKEND=llvm bun tools/test-native.mjs $t; done
 ```
 
-The typed-IR `f32` facts can be checked on top of that: `GRAIL_BACKEND=llvm GRAIL_VERIFY_FACTS=1
-bun tools/test-native.mjs x86_64` makes the lifter assert `fpext(fptrunc(d)) == d` at every word a
-fact treats as an `f32`, so a wrongly typed slot or call aborts instead of printing a plausible
+The typed-IR facts (two of them, F1 and F2) can be checked on top of that: `GRAIL_BACKEND=llvm
+GRAIL_VERIFY_FACTS=1 bun tools/test-native.mjs x86_64` makes the lifter assert `fpext(fptrunc(d)) ==
+d` at every word a fact treats as an `f32` (F2), and check `cap >= len` on every word a fact treats
+as a sequence header (F1), so a wrongly typed slot or call aborts instead of printing a plausible
 wrong number. It is off by default because the check costs a compare per fact use.
 
 `ci.mjs lint` is the cheapest check and catches most documentation and workflow drift.
@@ -144,13 +145,19 @@ gate is 2–3 hours; run it in a watched job that logs to a file rather than hol
   diagnostics and intentional rejections). `GRAIL_BACKEND=llvm` runs the same corpus through the
   LLVM backend.
 - `test-selfhost.mjs` — the compiler compiles itself twice and the two outputs must be identical.
+- `split-test.mjs` — per-module emission (B1 stage 1): the parts must concatenate to the single
+  assembly file, the objects must match it outside relocations, and the linked programs must behave
+  identically. It also covers `grail build --split` itself.
 - `book.mjs check` — every book example compiles, runs, and matches its expected output next to an
   equivalent Rust program.
 - `abundance-test.mjs`, `borg-test.mjs` — the ports, compared bit-for-bit against their C++ and
   reference outputs.
-- `test-facts.mjs` — the typed-IR `f32` facts (docs/design/typed-ir.md, F2): the fixtures' exact
-  values with and without `--verify-facts`, the round-trip check in the module, and the
-  address-taken slot the lifter must drop.
+- `test-facts.mjs` — both typed-IR facts (docs/design/typed-ir.md): F2's `f32` fixtures' exact values
+  with and without `--verify-facts` and the round-trip check in the module, F1's header facts on a
+  vector read through its own header (the fact table in the module, the slots and call arguments
+  that carry one, and that the native backend's answer is unchanged), and the address-taken slot the
+  lifter must drop. F1 is consumed only where the hoist it performs is provably usable, which on this
+  corpus is nowhere, so its numbers are about the fact table rather than speed.
 - `test-ffi.mjs` — C interop fixtures, reporting how many are executed versus cross-compiled only.
 - `windows.mjs check` — PE/COFF cross-builds plus the executed subset under Wine. The task cases
   run on the default green scheduler; `tasks-thread-mode` sets `GRAIL_TASKS=thread` (per-case `env`
