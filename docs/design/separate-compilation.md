@@ -96,7 +96,7 @@ from. The format version is the first line, so a file written by another compile
 than misread.
 
 ```
- // grail-interface 1
+ // grail-interface 3
  module pair
  source "tests/interfaces/pair.grl"
  sha256 "ad1f2b3cf421decab61ea22f7dfc572fec79a74a3078b3ef330f4e49a94db2d0"
@@ -244,7 +244,8 @@ interface that is missing, stale or different from its module stops the build by
 ## Stage 3 as built: generic bodies in interfaces
 
 Implemented on `b1-generics`; `tools/interface-test.mjs` section (e) is the proof and this section is
-the record. The interface format goes to `// grail-interface 2`.
+the record. The interface format went to `// grail-interface 2` for this, and to 3 when pool job
+handles (`Job<T>`, spelled `(job T)`) became expressible, which emptied the not-expressible list.
 
 ### The representation
 
@@ -723,12 +724,13 @@ Recorded here rather than discovered later:
   manifests. The store added above states the same boundary for itself.
 
 
-## Not expressible yet
+## Every type is expressible
 
-Some corpus programs use a type the interface format cannot describe (`grail: <interface>: this
-interface format cannot express a type of that kind`). Those are reported by `interface-test` as a
-named list rather than failing the run, so the gap stays visible: an interface build of such a program
-is refused, never silently approximated.
+Format 3 spells every store kind the compiler has; the last one added was the pool job handle
+(`Job<T>`, `(job T)`), which had kept the 11 pool programs out of interface builds. `interface-test`
+now treats a refusal (`this interface format cannot express a type of that kind`) as a failure, so
+a new store kind cannot land without its interface spelling. The refusal itself stays: an interface
+is never written with an approximated type.
 
 ## One compiler invocation per module (`grail build --per-module`)
 
