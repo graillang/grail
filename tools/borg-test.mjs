@@ -49,8 +49,10 @@ mkdirSync(work, { recursive: true });
 
 // Modules every port test links: the port sources plus the standard-library modules they import.
 const portSources = readdirSync(join(root, 'borg/src')).filter(f => f.endsWith('.grl')).map(f => `borg/src/${f}`);
-const stdModules = ['lib/core.grl', 'lib/strings.grl', 'lib/vecs.grl', 'lib/order.grl', 'lib/hash.grl',
-                    'lib/io.grl', 'lib/fs.grl', 'lib/env.grl'];
+// `lib/authority.grl` is here because the transport's listener and client are opened through an
+// authority grant, and a test that opens a real socket needs the same grant a program would ask for.
+const stdModules = ['lib/authority.grl', 'lib/core.grl', 'lib/strings.grl', 'lib/vecs.grl', 'lib/order.grl',
+                    'lib/hash.grl', 'lib/io.grl', 'lib/fs.grl', 'lib/env.grl'];
 
 // Each test names its fixture directories; both sides receive the same sorted file list on argv.
 const fixtures = {
@@ -64,8 +66,10 @@ const fixtures = {
   transport: ['borg/tests/fixtures/transport'],
   journal: ['borg/tests/fixtures/journal'],
   events: ['borg/tests/fixtures/events'],
+  frames: ['borg/tests/fixtures/frames'],
   permission: ['borg/tests/fixtures/permission'],
   replay: ['borg/tests/fixtures/replay'],
+  aggregates: ['borg/tests/fixtures/aggregates'],
 };
 
 function fixturePaths(name) {

@@ -1,0 +1,739 @@
+// Frames test: the transport layer — the wire bytes, the refusal table, the file path and a real
+// socket.
+//
+// Each fixture is one session: the session id the handshake names, an event list, and optionally the
+// protocol version the client opens with. For every fixture the test prints
+//
+//   frame <name> <i> <tag> <len> <hex>     one line per event frame, byte for byte
+//   split <name> <i> <tag> <len> <hex>     the same capture decoded one byte at a time
+//   capture <name> <count> <result>        the captured bytes handed to the journal reader and fold
+//   loopback <name> <line>                 a real 127.0.0.1 round trip, decoded by the client
+//
+// The refusal table is built rather than read, because these are the bytes a peer would have to
+// send to produce them:
+//
+//   refused <case> <name> <journal> <at>   a named transport refusal, the code the file reader
+//                                          reports for the same bytes (0 when a file cannot say
+//                                          it), and the event index a fold refusal stopped at
+//   file <name> <code-name> <code>         the file reader's own answer for that byte string
+//
+// The `loopback` line is the daemon's answer decoded from the socket, and the test asserts it equals
+// the answer the daemon says it sent: one crossed the kernel, the other never left the process.
+//
+// `use host` is deliberate. One case plays a broken peer — a socket that stops inside a reply frame
+// — and a test cannot misbehave through the modules it is checking.
+
+use authority;
+use borg_client;
+use borg_daemon;
+use borg_events;
+use borg_frames;
+use borg_json;
+use borg_replay;
+use core;
+use env;
+use fs;
+use host;
+
+// ---- text building ----
+
+fn append<a, b>(out: (&a mut u8[]), text: (&b [u8])) {
+    for byte in text {
+        out.push(byte);
+    }
+}
+
+fn word<a, b>(out: (&a mut u8[]), text: (&b [u8])) {
+    append(out, text);
+    out.push(32);
+}
+
+fn number(value: u64) -> string {
+    return format("{}", value);
+}
+
+fn same<a, b>(left: (&a [u8]), right: (&b [u8])) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    for i in left.len() {
+        if left[i] != right[i] {
+            return false;
+        }
+    }
+    return true;
+}
+
+fn digit(value: u64) -> u8 {
+    if value < 10 {
+        return u8(48 + value);
+    }
+    return u8(87 + value);
+}
+
+fn hex<a>(bytes: (&a [u8])) -> string {
+    mut out = u8[];
+    for byte in bytes {
+        value := u64(byte);
+        out.push(digit(value / 16));
+        out.push(digit(value % 16));
+    }
+    return out.text();
+}
+
+// ---- bytes ----
+
+fn push_uint(out: (&mut u8[]), value: u64, width: u64) {
+    mut rest = value;
+    mut index = u64(0);
+    while index < width {
+        out.push(u8(rest % 256));
+        rest = rest / 256;
+        index = index + 1;
+    }
+}
+
+fn push_text<a>(out: (&mut u8[]), text: (&a [u8])) {
+    push_uint(out, text.len(), 4);
+    append(out, text);
+}
+
+// The five byte frame header on its own: a tag and a little-endian length.
+fn header(tag: u64, length: u64) -> u8[] {
+    mut out = u8[];
+    push_uint(&mut out, tag, 1);
+    push_uint(&mut out, length, 4);
+    return out;
+}
+
+fn concat<a, b>(first: (&a [u8]), second: (&b [u8])) -> u8[] {
+    mut out = u8[];
+    append(&mut out, first);
+    append(&mut out, second);
+    return out;
+}
+
+fn prefix<a>(bytes: (&a [u8]), count: u64) -> u8[] {
+    mut out = u8[];
+    mut index = u64(0);
+    while index < count {
+        out.push(bytes[index]);
+        index = index + 1;
+    }
+    return out;
+}
+
+// A frame whose declared length is one byte longer than its body, with that byte appended: the frame
+// is complete and its event body carries a byte past the last field.
+fn padded<a>(value: (&a borg_frames::Frame), byte: u8) -> u8[] {
+    frame_body := borg_frames::frame_body(value);
+    mut out = header(borg_frames::frame_tag(value), frame_body.len() + 1);
+    for each in frame_body {
+        out.push(each);
+    }
+    out.push(byte);
+    return out;
+}
+
+// A frame that is complete at the framing level but short inside: the declared length is one byte
+// less than the body a reader needs, and the last body byte is dropped to match.
+fn clipped<a>(value: (&a borg_frames::Frame)) -> u8[] {
+    frame_body := borg_frames::frame_body(value);
+    mut out = header(borg_frames::frame_tag(value), frame_body.len() - 1);
+    mut index = u64(0);
+    while index + 1 < frame_body.len() {
+        out.push(frame_body[index]);
+        index = index + 1;
+    }
+    return out;
+}
+
+// A titled event body built by hand, so one field can carry a value no reader accepts. The layout is
+// the journal's: text id, text session, u64 sequence, text created_at, text title, u8 generated.
+fn titled_body(marker: u8) -> u8[] {
+    mut out = u8[];
+    push_text(&mut out, "e1");
+    push_text(&mut out, "s1");
+    push_uint(&mut out, 1, 8);
+    push_text(&mut out, "t1");
+    push_text(&mut out, "wire");
+    out.push(marker);
+    return out;
+}
+
+// ---- fixture reading ----
+
+fn text_field<a, b>(spec: (&a borg_json::Json), key: (&b [u8])) -> string? {
+    match borg_json::member(spec, key) {
+        Some(node) => {
+            if borg_json::kind_of(&node) == borg_json::JsonKind::Null {
+                return None;
+            }
+            return borg_json::as_string(&node);
+        },
+        None => { return None; }
+    }
+}
+
+fn text_or<a, b>(spec: (&a borg_json::Json), key: (&b [u8])) -> string {
+    mut value = "".text();
+    match text_field(&spec, &key) {
+        Some(text) => { value = text; },
+        None => { }
+    }
+    return value;
+}
+
+fn number_or<a, b>(spec: (&a borg_json::Json), key: (&b [u8]), fallback: u64) -> u64 {
+    match borg_json::member(spec, key) {
+        Some(node) => {
+            match borg_json::as_number(&node) {
+                Some(text) => {
+                    match borg_json::whole_number(&text) {
+                        Some(value) => { return value; },
+                        None => { return fallback; }
+                    }
+                },
+                None => { return fallback; }
+            }
+        },
+        None => { return fallback; }
+    }
+}
+
+fn events_of<a>(scenario: (&a borg_json::Json)) -> borg_events::Event[] {
+    mut out = borg_events::Event[];
+    match borg_json::member(scenario, "events") {
+        Some(list) => {
+            mut index = 0;
+            while index < borg_json::array_len(&list) {
+                match borg_json::array_item(&list, index) {
+                    Some(item) => {
+                        match borg_events::decode(&item) {
+                            event: borg_events::Event => { out.push(event); },
+                            failure: borg_events::EventError => { }
+                        }
+                    },
+                    None => { }
+                }
+                index += 1;
+            }
+        },
+        None => { }
+    }
+    return out;
+}
+
+fn basename<a>(path: (&a [u8])) -> string {
+    mut start = 0;
+    for i in path.len() {
+        if path[i] == 47 {
+            start = i + 1;
+        }
+    }
+    mut out = u8[];
+    for i in start..path.len() {
+        out.push(path[i]);
+    }
+    return out.text();
+}
+
+// The capture a client puts on the wire for a fixture's events: one frame per event, concatenated.
+fn capture<a>(events: (&a borg_events::Event[])) -> u8[] {
+    mut out = u8[];
+    mut index = 0;
+    while index < events.len() {
+        piece := borg_frames::frame_of(&events[index]);
+        for byte in piece {
+            out.push(byte);
+        }
+        index = index + 1;
+    }
+    return out;
+}
+
+// ---- lines ----
+
+fn frame_line<a, b>(kind: (&a [u8]), name: (&b [u8]), index: u64, value: (&borg_frames::Frame)) {
+    mut out = u8[];
+    word(&mut out, kind);
+    word(&mut out, name);
+    word(&mut out, &number(index));
+    word(&mut out, &number(borg_frames::frame_tag(value)));
+    word(&mut out, &number(borg_frames::frame_length(value)));
+    append(&mut out, &hex(&borg_frames::frame_bytes(value)));
+    println(out.text());
+}
+
+fn shown<a>(text: (&a [u8])) -> string {
+    if text.len() == 0 {
+        return "-".text();
+    }
+    return text.text();
+}
+
+// `refused <case> <name> <code> <journal> <at> <detail>`: the name and number of the refusal, the
+// code the file reader reports for the same bytes, the event index a fold refusal stopped at, and
+// what the refusal has to say — both versions for a handshake, both sessions for a wrong session.
+fn refused_line<a>(label: (&a [u8]), value: (&borg_frames::Refusal)) {
+    code := borg_frames::refusal_code(value);
+    name := borg_frames::refusal_name(value);
+    detail := shown(&borg_frames::refusal_detail(value));
+    mut out = u8[];
+    word(&mut out, "refused");
+    word(&mut out, label);
+    word(&mut out, &name);
+    word(&mut out, &number(code));
+    word(&mut out, &number(borg_frames::journal_code(code)));
+    word(&mut out, &borg_frames::refusal_at(value));
+    append(&mut out, &detail);
+    println(out.text());
+}
+
+fn code_line<a>(name: (&a [u8]), code: u64) {
+    mut out = u8[];
+    word(&mut out, "file");
+    word(&mut out, name);
+    word(&mut out, &borg_frames::code_name(code));
+    append(&mut out, &number(code));
+    println(out.text());
+}
+
+fn loopback_line<a, b>(name: (&a [u8]), line: (&b [u8])) {
+    mut out = u8[];
+    word(&mut out, "loopback");
+    word(&mut out, name);
+    append(&mut out, line);
+    println(out.text());
+}
+
+fn note_line<a>(name: (&a [u8])) {
+    mut out = u8[];
+    word(&mut out, "decoded");
+    append(&mut out, name);
+    println(out.text());
+}
+
+// ---- the sections ----
+
+// Every frame in a capture, in order.
+fn show_frames<a>(name: (&a [u8]), bytes: (&a [u8])) {
+    mut whole = borg_frames::transport();
+    borg_frames::feed(&mut whole, bytes);
+    mut index = u64(0);
+    while true {
+        match borg_frames::next(&mut whole) {
+            Frame(value) => {
+                frame_line("frame", name, index, &value);
+                index = index + 1;
+            },
+            Pending => { return (); },
+            Refused(answer) => { return (); }
+        }
+    }
+}
+
+// The same capture delivered one byte at a time, which is what a socket may do.
+fn show_split<a>(name: (&a [u8]), bytes: (&a [u8])) {
+    mut slow = borg_frames::transport();
+    mut index = u64(0);
+    mut at = u64(0);
+    mut stopped = false;
+    while at < bytes.len() {
+        mut one = u8[];
+        one.push(bytes[at]);
+        borg_frames::feed(&mut slow, &one);
+        at = at + 1;
+        mut more = !stopped;
+        while more {
+            match borg_frames::next(&mut slow) {
+                Frame(value) => {
+                    frame_line("split", name, index, &value);
+                    index = index + 1;
+                },
+                Pending => { more = false; },
+                Refused(answer) => { more = false; stopped = true; }
+            }
+        }
+    }
+}
+
+// The captured bytes through the path a journal file takes: `decode_stream`, then the fold. This is
+// the claim that the wire and the journal are the same bytes, checked rather than asserted.
+fn show_capture<a>(name: (&a [u8]), events: (&a borg_events::Event[])) {
+    bytes := capture(events);
+    journal := borg_frames::frames(events);
+    assert(same(&bytes, &journal));
+    mut result = "-".text();
+    stream := borg_events::decode_stream(&bytes);
+    match borg_replay::replay_stream(&stream) {
+        state: borg_replay::State => { result = borg_replay::checksum_text(&state); },
+        refusal: borg_replay::Refusal => {
+            result = format(
+                "{}/{}",
+                borg_replay::refusal_reason(&refusal),
+                borg_replay::refusal_at(&refusal)
+            );
+        }
+    }
+    mut out = u8[];
+    word(&mut out, "capture");
+    word(&mut out, name);
+    word(&mut out, &number(events.len()));
+    append(&mut out, &result);
+    println(out.text());
+}
+
+// ---- the refusal table ----
+
+// A byte string the *framing* refuses.
+fn header_case<a>(label: (&a [u8]), bytes: (&a [u8])) {
+    mut state = borg_frames::transport();
+    borg_frames::feed(&mut state, bytes);
+    match borg_frames::next(&mut state) {
+        Frame(value) => { frame_line("frame", label, 0, &value); },
+        Pending => { note_line(label); },
+        Refused(answer) => { refused_line("header", &answer); }
+    }
+}
+
+// A frame the framing accepts and the event reader refuses, plus what the file reader says about the
+// same bytes.
+fn event_case<a>(label: (&a [u8]), bytes: (&a [u8])) {
+    mut state = borg_frames::transport();
+    borg_frames::feed(&mut state, bytes);
+    match borg_frames::next(&mut state) {
+        Frame(value) => {
+            match borg_frames::event_of(&value) {
+                event: borg_events::Event => { note_line(label); },
+                failure: borg_frames::Refusal => { refused_line("event", &failure); }
+            }
+        },
+        Pending => { note_line(label); },
+        Refused(answer) => { refused_line("header", &answer); }
+    }
+    stream := borg_events::decode_stream(bytes);
+    code_line(label, borg_events::stream_status(&stream));
+}
+
+// A stream that stops before its last frame is complete.
+fn stream_case<a>(label: (&a [u8]), bytes: (&a [u8])) {
+    mut state = borg_frames::transport();
+    borg_frames::feed(&mut state, bytes);
+    mut stopped = false;
+    while true {
+        match borg_frames::next(&mut state) {
+            Frame(value) => { },
+            Pending => { break; },
+            Refused(answer) => {
+                refused_line("stream", &answer);
+                stopped = true;
+                break;
+            }
+        }
+    }
+    if !stopped {
+        match borg_frames::close(&mut state) {
+            Some(answer) => { refused_line("stream", &answer); },
+            None => { note_line(label); }
+        }
+    }
+    stream := borg_events::decode_stream(bytes);
+    code_line(label, borg_events::stream_status(&stream));
+}
+
+fn show_refusals<a>(events: (&a borg_events::Event[])) {
+    bytes := capture(events);
+
+    // A capture that stops three bytes inside its last frame.
+    cut := prefix(&bytes, bytes.len() - 3);
+    stream_case("short-read", &cut);
+
+    // A declared length past the stated maximum: refused at the header, before the bytes are read.
+    too_large := header(1, borg_frames::max_frame_bytes() + 1);
+    header_case("frame-too-large", &too_large);
+    stream := borg_events::decode_stream(&too_large);
+    code_line("frame-too-large", borg_events::stream_status(&stream));
+
+    // A tag the journal does not define. It is 10 rather than 6 because 6 became `goal_created` when
+    // the aggregates were ported: the fixture asserts "no such tag", so it has to use one that still
+    // has none. What it prints - `unknown-tag`, code 20 in both readers - is unchanged.
+    unknown := header(10, 0);
+    event_case("unknown-tag", &unknown);
+
+    // Frames that are complete but wrong inside.
+    mut first = borg_frames::transport();
+    borg_frames::feed(&mut first, &bytes);
+    match borg_frames::next(&mut first) {
+        Frame(value) => {
+            clipped_frame := clipped(&value);
+            event_case("truncated-event", &clipped_frame);
+            padded_frame := padded(&value, 0);
+            event_case("trailing-bytes", &padded_frame);
+        },
+        Pending => { },
+        Refused(answer) => { }
+    }
+
+    // A presence byte that is neither 0 nor 1.
+    bad := titled_body(2);
+    bad_field := concat(&header(2, bad.len()), &bad);
+    event_case("bad-field", &bad_field);
+
+    // A control frame with no opcode at all.
+    empty_control := header(0, 0);
+    header_case("bad-control", &empty_control);
+
+    // A reply whose refusal marker is not 0 or 1.
+    reply := borg_frames::reply_frame(&borg_frames::empty_reply());
+    mut broken = prefix(&reply, reply.len() - 1);
+    broken.push(2);
+    mut answer = borg_frames::transport();
+    borg_frames::feed(&mut answer, &broken);
+    match borg_frames::next(&mut answer) {
+        Frame(value) => {
+            match borg_frames::reply_of(&value) {
+                reply_value: borg_frames::Reply => { note_line("bad-reply"); },
+                failure: borg_frames::Refusal => { refused_line("reply", &failure); }
+            }
+        },
+        Pending => { },
+        Refused(value) => { refused_line("reply", &value); }
+    }
+
+    // An event frame before any handshake.
+    mut fresh = borg_frames::transport();
+    borg_frames::feed(&mut fresh, &bytes);
+    match borg_frames::next(&mut fresh) {
+        Frame(value) => {
+            match borg_frames::event_of(&value) {
+                event: borg_events::Event => {
+                    match borg_frames::admit(&mut fresh, &event) {
+                        Some(refusal) => { refused_line("handshake", &refusal); },
+                        None => { note_line("not-handshaken"); }
+                    }
+                },
+                failure: borg_frames::Refusal => { }
+            }
+        },
+        Pending => { },
+        Refused(value) => { }
+    }
+
+    // An event for a session the handshake did not name.
+    mut foreign = borg_frames::transport();
+    opening := borg_frames::hello(borg_frames::PROTOCOL_VERSION, "handshake");
+    borg_frames::feed(&mut foreign, &opening);
+    mut agreed = false;
+    match borg_frames::next(&mut foreign) {
+        Frame(value) => {
+            match borg_frames::hello_of(&value) {
+                parsed: borg_frames::Hello => {
+                    match borg_frames::accept_hello(&mut foreign, &parsed) {
+                        Some(refusal) => { },
+                        None => { agreed = true; }
+                    }
+                },
+                failure: borg_frames::Refusal => { }
+            }
+        },
+        Pending => { },
+        Refused(value) => { }
+    }
+    assert(agreed);
+    borg_frames::feed(&mut foreign, &bytes);
+    match borg_frames::next(&mut foreign) {
+        Frame(value) => {
+            match borg_frames::event_of(&value) {
+                event: borg_events::Event => {
+                    match borg_frames::admit(&mut foreign, &event) {
+                        Some(refusal) => { refused_line("session", &refusal); },
+                        None => { note_line("session-mismatch"); }
+                    }
+                },
+                failure: borg_frames::Refusal => { }
+            }
+        },
+        Pending => { },
+        Refused(value) => { }
+    }
+
+    // A version the daemon does not speak, naming both.
+    mut dated = borg_frames::transport();
+    older := borg_frames::hello(2, "s1");
+    borg_frames::feed(&mut dated, &older);
+    match borg_frames::next(&mut dated) {
+        Frame(value) => {
+            match borg_frames::hello_of(&value) {
+                parsed: borg_frames::Hello => {
+                    match borg_frames::accept_hello(&mut dated, &parsed) {
+                        Some(refusal) => { refused_line("version", &refusal); },
+                        None => { note_line("version-mismatch"); }
+                    }
+                },
+                failure: borg_frames::Refusal => { }
+            }
+        },
+        Pending => { },
+        Refused(value) => { }
+    }
+
+    // A frame that decodes and then cannot be applied: the fold's own index and reason, carried.
+    mut folded = borg_replay::empty();
+    mut step = u64(0);
+    mut state = borg_frames::transport();
+    borg_frames::feed(&mut state, &bytes);
+    while true {
+        match borg_frames::next(&mut state) {
+            Frame(value) => {
+                match borg_frames::event_of(&value) {
+                    event: borg_events::Event => {
+                        match borg_replay::apply(&folded, &event, step) {
+                            next: borg_replay::State => {
+                                folded = next;
+                                step = step + 1;
+                            },
+                            refusal: borg_replay::Refusal => {
+                                stopped := borg_frames::refused_fold(&refusal);
+                                refused_line("fold", &stopped);
+                                return ();
+                            }
+                        }
+                    },
+                    failure: borg_frames::Refusal => { }
+                }
+            },
+            Pending => { return (); },
+            Refused(value) => { return (); }
+        }
+    }
+}
+
+// ---- the socket ----
+
+// One real round trip: the listener is opened with the socket grant, the client writes the whole
+// conversation, the daemon folds it, and the answer is decoded from the bytes that came back. The
+// daemon's own account of the answer never left the process, so the two must agree.
+fn loopback<a, b>(grants: (&a authority::Authority), name: (&b [u8]), scenario: (&a borg_json::Json), events: (&a borg_events::Event[])) {
+    session := text_or(scenario, "session");
+    version := number_or(scenario, "client_version", borg_frames::PROTOCOL_VERSION);
+    listener := borg_daemon::listen(grants, 0)!;
+    port := borg_daemon::port(grants, listener)!;
+    client := borg_client::connect(grants, "127.0.0.1", port)!;
+    mut outbound = u8[];
+    if version == borg_frames::PROTOCOL_VERSION {
+        outbound = borg_client::request(&session, events);
+        // What the client writes is the journal this test folded, between a hello and an end marker:
+        // the bytes on the socket and the bytes in `capture` are one byte string, which is what makes
+        // a frame captured from the wire replayable through the file path.
+        opening := borg_frames::hello(borg_frames::PROTOCOL_VERSION, &session);
+        closing := borg_frames::end_marker();
+        mut expected = u8[];
+        for byte in opening {
+            expected.push(byte);
+        }
+        for byte in capture(events) {
+            expected.push(byte);
+        }
+        for byte in closing {
+            expected.push(byte);
+        }
+        assert(same(&outbound, &expected));
+    } else {
+        // Only the handshake: a daemon that refuses it does not read the events, and a connection
+        // closed with unread bytes answers with a reset instead of the refusal.
+        outbound = borg_frames::hello(version, &session);
+    }
+    sent := borg_client::send(client, &outbound);
+    assert(sent == outbound.len());
+    answer := borg_daemon::serve_one(listener);
+    said := borg_client::reply_line(&answer);
+    mut heard = "-".text();
+    match borg_client::resume(client, &session) {
+        reply: borg_frames::Reply => { heard = borg_client::reply_line(&reply); },
+        refusal: borg_frames::Refusal => { heard = borg_client::refusal_line(&refusal); }
+    }
+    loopback_line(name, &heard);
+    assert(same(&heard, &said));
+    host::close(client);
+    host::close(listener);
+}
+
+// A peer that stops inside a reply frame: the client's read is short, not empty, and the refusal is
+// the one the file reader names for a cut stream.
+fn socket_short_read<a>(grants: (&a authority::Authority)) {
+    listener := borg_daemon::listen(grants, 0)!;
+    port := borg_daemon::port(grants, listener)!;
+    client := borg_client::connect(grants, "127.0.0.1", port)!;
+    peer := host::tcp_accept(listener);
+    half := borg_frames::reply_frame(&borg_frames::empty_reply());
+    cut := prefix(&half, half.len() / 2);
+    host::write_fd(peer, view(cut));
+    host::close(peer);
+    match borg_client::resume(client, "s1") {
+        reply: borg_frames::Reply => { note_line("socket"); },
+        refusal: borg_frames::Refusal => {
+            line := borg_client::refusal_line(&refusal);
+            loopback_line("socket", &line);
+        }
+    }
+    host::close(client);
+    host::close(listener);
+}
+
+// Opening the listener is the grant, and a grant that is not a socket grant cannot open one: the
+// daemon's and the client's only doors are `authority::listen` and `authority::connect`, so a
+// program holding process authority reaches neither. Nothing is printed — a failure here aborts the
+// program, which the suite reports — because the reference models the protocol, not this boundary.
+fn grant_checks() {
+    process := authority::process();
+    mut denied = 0;
+    match borg_daemon::listen(&process, 0) {
+        e: authority::Error => { denied = denied + 1; },
+        _ => { }
+    }
+    match borg_client::connect(&process, "127.0.0.1", 1) {
+        e: authority::Error => { denied = denied + 1; },
+        _ => { }
+    }
+    assert(denied == 2);
+}
+
+fn run_case<a, b>(grants: (&a authority::Authority), scenario: (&a borg_json::Json), fallback: (&b [u8])) {
+    mut name = text_or(scenario, "name");
+    if name.len() == 0 {
+        name = fallback.text();
+    }
+    events := events_of(scenario);
+    bytes := capture(&events);
+    show_frames(&name, &bytes);
+    show_split(&name, &bytes);
+    show_capture(&name, &events);
+    show_refusals(&events);
+    loopback(grants, &name, scenario, &events);
+}
+
+fn main() -> u64 {
+    grants := authority::sockets();
+    args := env::args();
+    mut index = 1;
+    while index < args.len() {
+        path := args[index];
+        name := basename(&path);
+        data := fs::read(&path)!;
+        match borg_json::parse(&data) {
+            scenario: borg_json::Json => { run_case(&grants, &scenario, &name); },
+            failure: borg_json::ParseError => {
+                mut out = u8[];
+                word(&mut out, "case");
+                word(&mut out, &name);
+                append(&mut out, "malformed");
+                println(out.text());
+            }
+        }
+        index = index + 1;
+    }
+    grant_checks();
+    socket_short_read(&grants);
+    return 0;
+}

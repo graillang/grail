@@ -1,4 +1,5 @@
 module borg_replay;
+use borg_aggregates;
 use borg_events;
 use borg_journal;
 use core;
@@ -21,11 +22,16 @@ use strings;
 //   StatusChanged                    session_store.rs:1036-1041 status and detail, both replaced
 //   Message                          session_store.rs:1320-1336 first/latest prompt, latest reply
 //
-// The state reconstructed here is exactly the one those fields hold. It is not a transcript: Borg's
-// projection keeps the *session* facts (when it started, what it is called, what it is doing, the
-// last prompt and reply) and nowhere else in the fold are message rows rebuilt. A message log, a
-// goal, the plan and the agent roster are separate aggregates in Borg, fed by event kinds the port
-// does not carry yet, so inventing them here would be inventing semantics rather than replaying.
+// The state reconstructed here is exactly the one those fields hold, plus the three aggregates the
+// rest of this file folds through `borg_aggregates`: the goal, the plan (the todo list) and the work
+// items those todos track. Those are separate aggregates in Borg, fed by their own event kinds
+// (`GoalUpdated`, `PlanProjected`, workspace `SharedWork`), so they are folded by their own module
+// and carried here rather than re-derived: one rule, one refusal name.
+//
+// What is still not reconstructed is the transcript itself: message rows, the agent roster,
+// subagent activity, usage and provider events. Borg's projection keeps the *session* facts (when it
+// started, what it is called, what it is doing, the last prompt and reply) and the aggregates, and
+// nothing here rebuilds a message log, because the event kinds that would carry it are not ported.
 //
 // Three rules are the reason this is a fold and not a decoder:
 //
@@ -36,7 +42,10 @@ use strings;
 //     `MessageStatus` (contract.rs:2470) cannot be represented in the model, so it is refused by
 //     name instead of being coerced into a field the model has no variant for;
 //   * an event carrying another session's `session_id` is refused, because a journal is one
-//     session's events and folding a second session into the same state would merge two transcripts.
+//     session's events and folding a second session into the same state would merge two transcripts;
+//   * an aggregate event that cannot be applied keeps its own name (`goal-finished`, `unknown-work`
+//     and the rest of `borg_aggregates::Rejected`) instead of being flattened into one reason, so a
+//     diagnostic says which rule stopped the fold.
 //
 // One rule deliberately does *not* refuse. A title event while the current title was *generated* is
 // dropped (`session_store.rs:952`), because that is the model's own rule: once generation has named
@@ -61,7 +70,9 @@ pub enum Reason {
     // A message actor outside `EventActor`'s four variants.
     UnknownActor,
     // A message status outside `MessageStatus`' four variants.
-    UnknownMessageStatus
+    UnknownMessageStatus,
+    // The aggregate fold refused: the goal, plan or work item that could not be applied.
+    Aggregate(borg_aggregates::Rejected)
 }
 
 // A refusal names where the fold stopped and why. `at` is the index of the event in the journal the
@@ -89,7 +100,10 @@ pub struct State {
     latest_response: string?,
     events_seen: u64,
     titles_applied: u64,
-    titles_frozen: u64
+    titles_frozen: u64,
+    // The goal, the plan and the work list, folded by `borg_aggregates`. Held as one value so the
+    // aggregate rules stay in one module and this fold only carries them.
+    aggregates: borg_aggregates::State
 }
 
 // `SessionState::default` (session_store.rs:837): every field starts empty, so an empty journal
@@ -111,7 +125,8 @@ pub fn empty() -> State {
         latest_response: None,
         events_seen: 0,
         titles_applied: 0,
-        titles_frozen: 0
+        titles_frozen: 0,
+        aggregates: borg_aggregates::empty()
     };
 }
 
@@ -188,7 +203,8 @@ fn copy_state<a>(value: (&a State)) -> State {
         latest_response: copy_text(&value.latest_response),
         events_seen: value.events_seen,
         titles_applied: value.titles_applied,
-        titles_frozen: value.titles_frozen
+        titles_frozen: value.titles_frozen,
+        aggregates: borg_aggregates::copy_state(&value.aggregates)
     };
 }
 
@@ -210,11 +226,29 @@ fn known_message_status<a>(name: (&a [u8])) -> bool {
     return false;
 }
 
-// `advances_activity_clock` (session_store.rs:582-602) for the five ported kinds: a title is bookkeeping
-// and a terminal status is tidying up; everything else is activity.
+// Whether a tag is one of the aggregate kinds `borg_aggregates` folds.
+fn is_aggregate<a>(tag: (&a [u8])) -> bool {
+    if same(tag, "goal_created") { return true; }
+    if same(tag, "goal_updated") { return true; }
+    if same(tag, "plan_projected") { return true; }
+    if same(tag, "work_projected") { return true; }
+    return false;
+}
+
+// `advances_activity_clock` (session_store.rs:582-602) for the ported kinds: a title and a plan or
+// work projection are bookkeeping and a terminal status is tidying up; everything else is activity.
+// The projections are on the model's own exclusion list (`PlanProjected`, `AgentPlanProjected`), and
+// a work projection is the same kind of fact: it says what the todo list looks like right now, not
+// that somebody did something.
 fn advances_clock<a>(event: (&a borg_events::Event)) -> bool {
     tag := borg_events::tag_of(event);
     if same(&tag, "session_titled") {
+        return false;
+    }
+    if same(&tag, "plan_projected") {
+        return false;
+    }
+    if same(&tag, "work_projected") {
         return false;
     }
     if same(&tag, "status_changed") {
@@ -296,6 +330,17 @@ pub fn apply<a>(state: (&a State), event: (&a borg_events::Event), at: u64) -> S
     } else if same(&tag, "status_changed") {
         next.status = borg_events::status_value(event);
         next.status_detail = borg_events::detail_value(event);
+    } else if is_aggregate(&tag) {
+        match borg_aggregates::apply(&next.aggregates, event) {
+            folded: borg_aggregates::State => { next.aggregates = folded; },
+            rejection: borg_aggregates::Rejection => {
+                return Refusal {
+                    at: Some(at),
+                    reason: Reason::Aggregate(borg_aggregates::rejection_kind(&rejection)),
+                    detail: borg_aggregates::rejection_detail(&rejection)
+                };
+            }
+        }
     } else if same(&tag, "message") {
         // session_store.rs:1320-1336: the first and latest prompt come from a user message, the
         // latest reply from a completed assistant message, and an empty or blank text changes
@@ -497,6 +542,12 @@ pub fn checksum_text<a>(state: (&a State)) -> string {
 
 // ---- accessors ----
 
+// A state is copied by value so a caller can hold one it received (a daemon keeps the session
+// between connections) without reaching into the original.
+pub fn copy_of<a>(state: (&a State)) -> State {
+    return copy_state(state);
+}
+
 pub fn session_of<a>(state: (&a State)) -> string { return state.session_id.text(); }
 pub fn sequence_of<a>(state: (&a State)) -> u64 { return state.latest_sequence; }
 pub fn events_of<a>(state: (&a State)) -> u64 { return state.events_seen; }
@@ -538,13 +589,49 @@ pub fn first_prompt_of<a>(state: (&a State)) -> string { return shown(&state.fir
 pub fn latest_prompt_of<a>(state: (&a State)) -> string { return shown(&state.latest_prompt); }
 pub fn latest_response_of<a>(state: (&a State)) -> string { return shown(&state.latest_response); }
 
+// ---- the aggregates the fold carries ----
+//
+// The session fingerprint above deliberately stops at the session facts, so adding aggregates to a
+// journal cannot change the checksum of a journal that has none. These accessors are how a client
+// reads the other half, and `aggregate_fingerprint` is what a double replay compares.
+
+pub fn aggregates_of<a>(state: (&a State)) -> borg_aggregates::State {
+    return borg_aggregates::copy_state(&state.aggregates);
+}
+
+pub fn goal_of<a>(state: (&a State)) -> string { return borg_aggregates::goal_of(&state.aggregates); }
+pub fn objective_of<a>(state: (&a State)) -> string { return borg_aggregates::objective_of(&state.aggregates); }
+pub fn budget_of<a>(state: (&a State)) -> string { return borg_aggregates::budget_of(&state.aggregates); }
+pub fn goal_status_of<a>(state: (&a State)) -> string { return borg_aggregates::goal_status_of(&state.aggregates); }
+pub fn plan_participant_of<a>(state: (&a State)) -> string { return borg_aggregates::participant_of(&state.aggregates); }
+pub fn plan_revision_of<a>(state: (&a State)) -> u64 { return borg_aggregates::revision_of(&state.aggregates); }
+pub fn plan_count_of<a>(state: (&a State)) -> u64 { return borg_aggregates::plan_count(&state.aggregates); }
+pub fn plan_item_of<a>(state: (&a State), index: u64) -> borg_events::PlanItem {
+    return borg_aggregates::plan_at(&state.aggregates, index);
+}
+pub fn work_revision_of<a>(state: (&a State)) -> u64 { return borg_aggregates::work_revision_of(&state.aggregates); }
+pub fn work_count_of<a>(state: (&a State)) -> u64 { return borg_aggregates::work_count(&state.aggregates); }
+pub fn work_item_of<a>(state: (&a State), index: u64) -> borg_events::WorkItem {
+    return borg_aggregates::work_at(&state.aggregates, index);
+}
+pub fn plans_of<a>(state: (&a State)) -> string { return borg_aggregates::plans_of(&state.aggregates); }
+
+pub fn aggregate_fingerprint<a>(state: (&a State)) -> string {
+    return borg_aggregates::fingerprint(&state.aggregates);
+}
+
+pub fn aggregate_checksum_text<a>(state: (&a State)) -> string {
+    return borg_aggregates::checksum_text(&state.aggregates);
+}
+
 pub fn reason_name<a>(value: (&a Reason)) -> string {
     match value {
         Stream(code) => { return "stream".text(); },
         Sequence => { return "sequence".text(); },
         Session => { return "session".text(); },
         UnknownActor => { return "unknown-actor".text(); },
-        UnknownMessageStatus => { return "unknown-message-status".text(); }
+        UnknownMessageStatus => { return "unknown-message-status".text(); },
+        Aggregate(inner) => { return borg_aggregates::rejected_name(inner); }
     }
 }
 

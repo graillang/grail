@@ -1,0 +1,553 @@
+module borg_aggregates;
+use borg_events;
+use core;
+
+// The goal, the plan and the shared work items: three aggregates a journal reconstructs beside the
+// transcript.
+//
+// A session's journal is not just what was said. It is also what the session is *for* (the goal),
+// what it means to do next in order (the plan, which is the todo list a reader sees), and which
+// pieces of shared work those steps are tracking. Borg keeps each of them as its own aggregate, fed
+// by event kinds the transcript never carries:
+//
+//   goal      `GoalUpdated`/`GoalCleared`            session_store.rs:1163-1172
+//   plan      `PlanUpdated`/`PlanProjected`          session_store.rs:1173-1192
+//   work      workspace `SharedWork` items           workspace.rs:274-330
+//
+// This module folds those kinds. It does not fold them into the session state by itself — replay
+// owns that — but it owns the rules, so the refusal table lives in one place and the session fold
+// cannot grow a second opinion about what a goal is.
+//
+// The rules, and why each refuses rather than repairs:
+//
+//   goal-exists        a `goal_created` while a goal is already set. Two goals in one session is a
+//                      state the model has no field for; a second goal means the first must be
+//                      cleared first, and the fold says so instead of overwriting the objective
+//                      somebody is working towards.
+//   no-goal            a `goal_updated` before any goal was created. An update names what it
+//                      changes; with nothing to change it is a journal that has lost an event.
+//   goal-mismatch      a `goal_updated` naming a different goal id than the one set. Updating a
+//                      goal that is not this session's goal is the same lost-event failure with the
+//                      wrong id attached, which is worse than nothing because it looks plausible.
+//   goal-finished      any update once the goal is `complete`. Complete is terminal (contract.rs:
+//                      2318 starts a goal active and only the goal tool moves it), so "completing an
+//                      already-complete goal" is refused rather than counted twice.
+//   unknown-work       a plan item naming a `work_id` that is not in the reconstructed work list.
+//                      The alternative - keeping the item and losing the reference - would make a
+//                      todo that claims to track work nobody can find.
+//   duplicate-item     two plan items with the same id in one projection.
+//   duplicate-work     two work items with the same id in one projection.
+//
+// One rule deliberately does not refuse. A plan projection whose workspace revision is not newer
+// than the one already applied is *dropped* (`session_store.rs:1178-1191` replaces only when
+// `workspace_revision >= plan_workspace_revision` for the same participant, and unconditionally for a
+// different one), because that is the model's own rule: a stale projection is a client catching up,
+// and refusing it would reject journals Borg itself writes. The fold counts the drop (`plans_stale`)
+// so the state records it instead of the event vanishing silently. The drop is applied before the
+// items are examined: a projection Borg would ignore cannot refuse.
+//
+// Work projections replace the list and are last-writer-wins within a journal, because a
+// `work_projected` event carries the whole list - it *is* the projection, not a patch - so an older
+// revision arriving second would have to be a journal written out of order, which the sequence
+// cursor already refuses.
+
+// Why a fold of the aggregate kinds could not be applied.
+pub enum Rejected {
+    GoalExists,
+    NoGoal,
+    GoalMismatch,
+    GoalFinished,
+    UnknownWork,
+    DuplicateItem,
+    DuplicateWork
+}
+
+// A refusal names the rule and the value that broke it: the goal id, the plan item and work id, or
+// the id that appeared twice. `detail` is empty when the rule has nothing more specific to say.
+pub struct Rejection {
+    kind: Rejected,
+    detail: string
+}
+
+// The reconstructed aggregates: `SessionState`'s goal and todos (session_store.rs:837-900) plus the
+// work list the todos point at. A field left as `None` or empty is a valid starting state, so a
+// journal without any of these events folds to the same value as an empty journal.
+pub struct State {
+    goal_id: string?,
+    goal_objective: string?,
+    goal_budget: u64?,
+    goal_status: borg_events::GoalStatus?,
+    plan_participant: string?,
+    plan_revision: u64,
+    plan: borg_events::PlanItem[],
+    work_revision: u64,
+    work: borg_events::WorkItem[],
+    plans_applied: u64,
+    plans_stale: u64
+}
+
+pub fn empty() -> State {
+    return State {
+        goal_id: None,
+        goal_objective: None,
+        goal_budget: None,
+        goal_status: None,
+        plan_participant: None,
+        plan_revision: 0,
+        plan: borg_events::PlanItem[],
+        work_revision: 0,
+        work: borg_events::WorkItem[],
+        plans_applied: 0,
+        plans_stale: 0
+    };
+}
+
+fn same<a, b>(left: (&a [u8]), right: (&b [u8])) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    for i in left.len() {
+        if left[i] != right[i] {
+            return false;
+        }
+    }
+    return true;
+}
+
+fn copy_text<a>(value: (&a string?)) -> string? {
+    match value {
+        Some(text) => { copied := text.text(); return Some(copied); },
+        None => { return None; }
+    }
+}
+
+fn copy_number<a>(value: (&a u64?)) -> u64? {
+    match value {
+        Some(number) => { return Some(number); },
+        None => { return None; }
+    }
+}
+
+fn copy_goal<a>(value: (&a borg_events::GoalStatus?)) -> borg_events::GoalStatus? {
+    match value {
+        Some(inner) => { return Some(borg_events::copy_goal_status(inner)); },
+        None => { return None; }
+    }
+}
+
+// The id a state currently holds, and `-` when it holds none: a refusal that names nothing would
+// read like a refusal for no reason.
+fn shown<a>(value: (&a string?)) -> string {
+    match value {
+        Some(text) => { return text.text(); },
+        None => { return "-".text(); }
+    }
+}
+
+pub fn has_goal<a>(value: (&a State)) -> bool {
+    match &value.goal_id {
+        Some(inner) => { return true; },
+        None => { return false; }
+    }
+}
+
+pub fn copy_state<a>(value: (&a State)) -> State {
+    return State {
+        goal_id: copy_text(&value.goal_id),
+        goal_objective: copy_text(&value.goal_objective),
+        goal_budget: copy_number(&value.goal_budget),
+        goal_status: copy_goal(&value.goal_status),
+        plan_participant: copy_text(&value.plan_participant),
+        plan_revision: value.plan_revision,
+        plan: borg_events::copy_plan_items(&value.plan),
+        work_revision: value.work_revision,
+        work: borg_events::copy_work_items(&value.work),
+        plans_applied: value.plans_applied,
+        plans_stale: value.plans_stale
+    };
+}
+
+pub fn rejected_name<a>(value: (&a Rejected)) -> string {
+    match value {
+        GoalExists => { return "goal-exists".text(); },
+        NoGoal => { return "no-goal".text(); },
+        GoalMismatch => { return "goal-mismatch".text(); },
+        GoalFinished => { return "goal-finished".text(); },
+        UnknownWork => { return "unknown-work".text(); },
+        DuplicateItem => { return "duplicate-item".text(); },
+        DuplicateWork => { return "duplicate-work".text(); }
+    }
+}
+
+pub fn rejection_detail<a>(value: (&a Rejection)) -> string {
+    return value.detail.text();
+}
+
+// The rule the rejection broke, as a value: replay carries it into its own refusal so a wire
+// refusal names `goal-finished` rather than a generic "the fold refused".
+pub fn rejection_kind<a>(value: (&a Rejection)) -> Rejected {
+    return copy_rejected(&value.kind);
+}
+
+pub fn copy_rejection<a>(value: (&a Rejection)) -> Rejection {
+    mut out = Rejected::GoalExists;
+    match &value.kind {
+        GoalExists => { out = Rejected::GoalExists; },
+        NoGoal => { out = Rejected::NoGoal; },
+        GoalMismatch => { out = Rejected::GoalMismatch; },
+        GoalFinished => { out = Rejected::GoalFinished; },
+        UnknownWork => { out = Rejected::UnknownWork; },
+        DuplicateItem => { out = Rejected::DuplicateItem; },
+        DuplicateWork => { out = Rejected::DuplicateWork; }
+    }
+    return Rejection { kind: out, detail: value.detail.text() };
+}
+
+pub fn copy_rejected<a>(value: (&a Rejected)) -> Rejected {
+    mut out = Rejected::GoalExists;
+    match value {
+        GoalExists => { out = Rejected::GoalExists; },
+        NoGoal => { out = Rejected::NoGoal; },
+        GoalMismatch => { out = Rejected::GoalMismatch; },
+        GoalFinished => { out = Rejected::GoalFinished; },
+        UnknownWork => { out = Rejected::UnknownWork; },
+        DuplicateItem => { out = Rejected::DuplicateItem; },
+        DuplicateWork => { out = Rejected::DuplicateWork; }
+    }
+    return out;
+}
+
+// ---- the fold ----
+
+fn created<a>(state: (&a State), event: (&a borg_events::Event)) -> State | Rejection {
+    if has_goal(state) {
+        return Rejection { kind: Rejected::GoalExists, detail: shown(&state.goal_id) };
+    }
+    mut next = copy_state(state);
+    next.goal_id = borg_events::goal_id_value(event);
+    next.goal_objective = borg_events::goal_objective_value(event);
+    next.goal_budget = borg_events::goal_budget_value(event);
+    next.goal_status = Some(borg_events::goal_active());
+    return next;
+}
+
+fn updated<a>(state: (&a State), event: (&a borg_events::Event)) -> State | Rejection {
+    if !has_goal(state) {
+        return Rejection { kind: Rejected::NoGoal, detail: shown(&borg_events::goal_id_value(event)) };
+    }
+    named := shown(&borg_events::goal_id_value(event));
+    if !same(&named, &shown(&state.goal_id)) {
+        return Rejection { kind: Rejected::GoalMismatch, detail: named };
+    }
+    match &state.goal_status {
+        Some(inner) => {
+            if same(&borg_events::goal_status_name(inner), "complete") {
+                return Rejection { kind: Rejected::GoalFinished, detail: named };
+            }
+        },
+        None => { }
+    }
+    mut next = copy_state(state);
+    next.goal_status = borg_events::goal_status_value(event);
+    return next;
+}
+
+// Whether a projection's revision is one the model would ignore. A projection from another
+// participant replaces the plan regardless of revision; the plan belongs to whoever projected it
+// last, and comparing revisions across participants would keep a departed participant's plan.
+fn stale<a>(state: (&a State), participant: (&a [u8]), revision: u64) -> bool {
+    mut known = "-".text();
+    match &state.plan_participant {
+        Some(inner) => { known = inner.text(); },
+        None => { return false; }
+    }
+    if !same(participant, &known) {
+        return false;
+    }
+    return revision < state.plan_revision;
+}
+
+fn find_work<a>(state: (&a State), id: (&a [u8])) -> bool {
+    mut index = 0;
+    while index < state.work.len() {
+        if same(&borg_events::work_item_id(&state.work[index]), id) {
+            return true;
+        }
+        index += 1;
+    }
+    return false;
+}
+
+fn duplicate_plan_item<a>(items: (&a borg_events::PlanItem[]), at: u64) -> bool {
+    id := borg_events::plan_item_id(&items[at]);
+    mut index = 0;
+    while index < at {
+        if same(&borg_events::plan_item_id(&items[index]), &id) {
+            return true;
+        }
+        index += 1;
+    }
+    return false;
+}
+
+fn duplicate_work_item<a>(items: (&a borg_events::WorkItem[]), at: u64) -> bool {
+    id := borg_events::work_item_id(&items[at]);
+    mut index = 0;
+    while index < at {
+        if same(&borg_events::work_item_id(&items[index]), &id) {
+            return true;
+        }
+        index += 1;
+    }
+    return false;
+}
+
+fn projected<a>(state: (&a State), event: (&a borg_events::Event)) -> State | Rejection {
+    participant := shown(&borg_events::plan_participant_value(event));
+    mut revision = u64(0);
+    match borg_events::plan_revision_value(event) {
+        Some(value) => { revision = value; },
+        None => { }
+    }
+    // The model's own rule first: a projection it would ignore cannot refuse.
+    if stale(state, &participant, revision) {
+        mut ignored = copy_state(state);
+        ignored.plans_stale = ignored.plans_stale + 1;
+        return ignored;
+    }
+    items := borg_events::plan_items_value(event);
+    mut index = u64(0);
+    while index < items.len() {
+        if duplicate_plan_item(&items, index) {
+            said := format("plan item {}", borg_events::plan_item_id(&items[index]));
+            return Rejection { kind: Rejected::DuplicateItem, detail: said };
+        }
+        match borg_events::plan_item_work(&items[index]) {
+            Some(work) => {
+                if !find_work(state, &work) {
+                    said := format(
+                        "plan item {} wants work {}",
+                        borg_events::plan_item_id(&items[index]),
+                        work
+                    );
+                    return Rejection { kind: Rejected::UnknownWork, detail: said };
+                }
+            },
+            None => { }
+        }
+        index += 1;
+    }
+    mut next = copy_state(state);
+    next.plan_participant = Some(participant);
+    next.plan_revision = revision;
+    next.plan = items;
+    next.plans_applied = next.plans_applied + 1;
+    return next;
+}
+
+fn work_of<a>(state: (&a State), event: (&a borg_events::Event)) -> State | Rejection {
+    items := borg_events::work_items_value(event);
+    mut index = u64(0);
+    while index < items.len() {
+        if duplicate_work_item(&items, index) {
+            said := format("work item {}", borg_events::work_item_id(&items[index]));
+            return Rejection { kind: Rejected::DuplicateWork, detail: said };
+        }
+        index += 1;
+    }
+    mut next = copy_state(state);
+    next.work = items;
+    next.work_revision = 0;
+    match borg_events::work_revision_value(event) {
+        Some(value) => { next.work_revision = value; },
+        None => { }
+    }
+    return next;
+}
+
+// One aggregate event onto one aggregate state. An event of another kind leaves the aggregates
+// alone, so replay can hand every event here without having to classify it first.
+pub fn apply<a>(state: (&a State), event: (&a borg_events::Event)) -> State | Rejection {
+    tag := borg_events::tag_of(event);
+    if same(&tag, "goal_created") {
+        return created(state, event);
+    }
+    if same(&tag, "goal_updated") {
+        return updated(state, event);
+    }
+    if same(&tag, "plan_projected") {
+        return projected(state, event);
+    }
+    if same(&tag, "work_projected") {
+        return work_of(state, event);
+    }
+    return copy_state(state);
+}
+
+// ---- the state, rendered ----
+//
+// Every aggregate field in a fixed order, with text length-prefixed so no two different states can
+// render the same bytes. This is what a double replay compares and what the CLI prints, and it is
+// separate from the session fingerprint on purpose: adding aggregates to a journal must not change
+// the checksum of a journal that has none.
+
+fn put_bytes<a>(out: (&mut u8[]), text: (&a [u8])) {
+    for byte in text {
+        out.push(byte);
+    }
+}
+
+fn put_key<a>(out: (&mut u8[]), key: (&a [u8])) {
+    if out.len() > 0 {
+        out.push(59);
+    }
+    put_bytes(out, key);
+    out.push(61);
+}
+
+fn put_text<a>(out: (&mut u8[]), key: (&a [u8]), value: string?) {
+    put_key(out, key);
+    match value {
+        Some(text) => {
+            length := format("{}", text.len());
+            put_bytes(out, &length);
+            out.push(58);
+            put_bytes(out, &text);
+        },
+        None => { out.push(45); }
+    }
+}
+
+fn put_number<a>(out: (&mut u8[]), key: (&a [u8]), value: u64) {
+    put_key(out, key);
+    shown_number := format("{}", value);
+    put_bytes(out, &shown_number);
+}
+
+fn put_optional_number<a>(out: (&mut u8[]), key: (&a [u8]), value: (&a u64?)) {
+    put_key(out, key);
+    match value {
+        Some(number) => {
+            shown_number := format("{}", number);
+            put_bytes(out, &shown_number);
+        },
+        None => { out.push(45); }
+    }
+}
+
+fn put_goal_status<a>(out: (&mut u8[]), key: (&a [u8]), value: (&a borg_events::GoalStatus?)) {
+    match value {
+        Some(inner) => {
+            named := borg_events::goal_status_name(inner);
+            put_text(out, key, Some(named));
+        },
+        None => { put_text(out, key, None); }
+    }
+}
+
+pub fn fingerprint<a>(value: (&a State)) -> string {
+    mut out = u8[];
+    put_text(&mut out, "goal", copy_text(&value.goal_id));
+    put_text(&mut out, "objective", copy_text(&value.goal_objective));
+    put_optional_number(&mut out, "budget", &value.goal_budget);
+    put_goal_status(&mut out, "goal-status", &value.goal_status);
+    put_text(&mut out, "participant", copy_text(&value.plan_participant));
+    put_number(&mut out, "revision", value.plan_revision);
+    mut item_index = 0;
+    while item_index < value.plan.len() {
+        put_text(&mut out, "item", Some(borg_events::plan_item_id(&value.plan[item_index])));
+        put_text(&mut out, "content", Some(borg_events::plan_item_content(&value.plan[item_index])));
+        put_text(&mut out, "status", Some(borg_events::plan_item_status(&value.plan[item_index])));
+        put_text(&mut out, "work", borg_events::plan_item_work(&value.plan[item_index]));
+        item_index += 1;
+    }
+    put_number(&mut out, "work-revision", value.work_revision);
+    mut work_index = 0;
+    while work_index < value.work.len() {
+        put_text(&mut out, "work-id", Some(borg_events::work_item_id(&value.work[work_index])));
+        put_text(&mut out, "work-title", Some(borg_events::work_item_title(&value.work[work_index])));
+        put_text(&mut out, "assignee", borg_events::work_item_assignee(&value.work[work_index]));
+        put_text(&mut out, "work-status", Some(borg_events::work_item_status(&value.work[work_index])));
+        work_index += 1;
+    }
+    put_key(&mut out, "plans");
+    counters := format("{}/{}", value.plans_applied, value.plans_stale);
+    put_bytes(&mut out, &counters);
+    return out.text();
+}
+
+// FNV-1a over the fingerprint: the same checksum replay uses, so a test can compare two replay
+// results without comparing two strings.
+pub fn checksum<a>(value: (&a State)) -> u64 {
+    shown_fingerprint := fingerprint(value);
+    mut hash = 14695981039346656037;
+    for byte in &shown_fingerprint {
+        hash = hash ^ u64(byte);
+        hash = wrapping_mul(hash, 1099511628211);
+    }
+    return hash;
+}
+
+fn hex_digit(value: u64) -> u8 {
+    if value < 10 {
+        return u8(48 + value);
+    }
+    return u8(87 + value);
+}
+
+pub fn checksum_text<a>(value: (&a State)) -> string {
+    mut rest = checksum(value);
+    mut digits = u8[];
+    mut index = 0;
+    while index < 16 {
+        digits.push(hex_digit(rest % 16));
+        rest = rest / 16;
+        index += 1;
+    }
+    mut out = u8[];
+    mut at = 16;
+    while at > 0 {
+        at -= 1;
+        out.push(digits[at]);
+    }
+    return out.text();
+}
+
+// ---- accessors ----
+
+pub fn goal_of<a>(value: (&a State)) -> string { return shown(&value.goal_id); }
+pub fn objective_of<a>(value: (&a State)) -> string { return shown(&value.goal_objective); }
+
+pub fn budget_of<a>(value: (&a State)) -> string {
+    match &value.goal_budget {
+        Some(number) => { return format("{}", number); },
+        None => { return "-".text(); }
+    }
+}
+
+pub fn goal_status_of<a>(value: (&a State)) -> string {
+    match &value.goal_status {
+        Some(inner) => { return borg_events::goal_status_name(inner); },
+        None => { return "-".text(); }
+    }
+}
+
+// The typed optionals, for a caller that has to re-encode the state rather than print it: the
+// accessors above render `-` for an absent value, which a wire format cannot tell from a text that
+// really is a dash.
+pub fn budget_number<a>(value: (&a State)) -> u64? { return copy_number(&value.goal_budget); }
+
+pub fn participant_of<a>(value: (&a State)) -> string { return shown(&value.plan_participant); }
+pub fn revision_of<a>(value: (&a State)) -> u64 { return value.plan_revision; }
+pub fn plan_count<a>(value: (&a State)) -> u64 { return value.plan.len(); }
+pub fn plan_at<a>(value: (&a State), index: u64) -> borg_events::PlanItem {
+    return borg_events::copy_plan_item(&value.plan[index]);
+}
+pub fn work_revision_of<a>(value: (&a State)) -> u64 { return value.work_revision; }
+pub fn work_count<a>(value: (&a State)) -> u64 { return value.work.len(); }
+pub fn work_at<a>(value: (&a State), index: u64) -> borg_events::WorkItem {
+    return borg_events::copy_work_item(&value.work[index]);
+}
+pub fn plans_of<a>(value: (&a State)) -> string {
+    return format("{}/{}", value.plans_applied, value.plans_stale);
+}

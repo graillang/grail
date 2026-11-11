@@ -1,0 +1,642 @@
+// Aggregates test: the goal, the plan and the work list, folded from a journal and answered over a
+// real socket by the daemon the command line talks to.
+//
+// Each fixture is one journal. For every fixture the test prints
+//
+//   case <name> ok <checksum>                    the aggregate fingerprint, as a checksum
+//   state <name> seq <n> events <n>              the session cursor the same journal reconstructs
+//   state <name> goal <id|-> <status|-> budget <n|->>
+//   state <name> objective <text|->
+//   state <name> plan <participant|-> revision <n> items <n>
+//   item <name> <index> <id> <status> work <work|-> <content>
+//   state <name> work revision <n> items <n>
+//   work <name> <index> <id> <assignee|-> <status> <title>
+//   state <name> session <id|-> status <status|-> title <text|->
+//
+// or, when the journal cannot be applied,
+//
+//   case <name> refused <reason> at <index|-> code <code|-> detail <detail|->
+//   case <name> malformed <class> at <index>      a kind the event reader refused by name
+//
+// and then, for every fixture, three properties:
+//
+//   capture <name> <ok|refused:<reason>@<index>>  the same journal through the byte stream: encoded,
+//                                                 read back and folded, then compared with the fold
+//                                                 of the decoded events
+//   twice <name> <ok|fail>                        replaying the same journal twice gives the same
+//                                                 fingerprints - session and aggregates
+//   append <name> <ok|fail>                       prefix + [last] equals replay(prefix) plus a direct
+//                                                 apply of the last event, including refusals
+//
+// The last section is a command line session over a real 127.0.0.1 socket. Each command is prepared by
+// `borg_cli::prepare` (the same parsing and event building the program uses), sent with the transport,
+// folded by `borg_daemon::serve_stateful` - the daemon that keeps the session between connections -
+// and printed by `borg_cli::show_answer`. The lines printed are what the client decoded from the
+// socket, and each answer is compared with the daemon's own account of what it sent, so a line that
+// came from local state instead of the daemon would show up as a mismatch.
+//
+//   cli <command and arguments>
+//   <the lines the command printed>
+
+use authority;
+use borg_cli;
+use borg_client;
+use borg_daemon;
+use borg_events;
+use borg_frames;
+use borg_json;
+use borg_replay;
+use core;
+use env;
+use fs;
+use host;
+
+fn append<a, b>(out: (&a mut u8[]), text: (&b [u8])) {
+    for byte in text {
+        out.push(byte);
+    }
+}
+
+fn word<a, b>(out: (&a mut u8[]), text: (&b [u8])) {
+    append(out, text);
+    out.push(32);
+}
+
+fn number(value: u64) -> string {
+    return format("{}", value);
+}
+
+fn text_is<a, b>(text: (&a [u8]), wanted: (&b [u8])) -> bool {
+    if text.len() != wanted.len() {
+        return false;
+    }
+    for i in text.len() {
+        if text[i] != wanted[i] {
+            return false;
+        }
+    }
+    return true;
+}
+
+// An empty text is a real value and a space separated line cannot show it; `-` says absent.
+fn readable<a>(text: (&a [u8])) -> string {
+    if text.len() == 0 {
+        return "-".text();
+    }
+    return text.text();
+}
+
+fn text_field<a, b>(spec: (&a borg_json::Json), key: (&b [u8])) -> string? {
+    match borg_json::member(spec, key) {
+        Some(node) => {
+            if borg_json::kind_of(&node) == borg_json::JsonKind::Null {
+                return None;
+            }
+            return borg_json::as_string(&node);
+        },
+        None => { return None; }
+    }
+}
+
+fn text_or<a, b>(spec: (&a borg_json::Json), key: (&b [u8])) -> string {
+    mut value = "".text();
+    match text_field(&spec, &key) {
+        Some(text) => { value = text; },
+        None => { }
+    }
+    return value;
+}
+
+fn number_or<a, b>(spec: (&a borg_json::Json), key: (&b [u8]), fallback: u64) -> u64 {
+    match borg_json::member(spec, key) {
+        Some(node) => {
+            match borg_json::as_number(&node) {
+                Some(text) => {
+                    match borg_json::whole_number(&text) {
+                        Some(value) => { return value; },
+                        None => { return fallback; }
+                    }
+                },
+                None => { return fallback; }
+            }
+        },
+        None => { return fallback; }
+    }
+}
+
+fn row<a, b, c, d, e>(first: (&a [u8]), name: (&b [u8]), second: (&c [u8]), third: (&d [u8]), value: (&e [u8])) {
+    mut out = u8[];
+    word(&mut out, first);
+    word(&mut out, name);
+    word(&mut out, second);
+    word(&mut out, third);
+    append(&mut out, value);
+    println(out.text());
+}
+
+fn pair_line<a, b, c>(first: (&a [u8]), name: (&b [u8]), value: (&c [u8])) {
+    mut out = u8[];
+    word(&mut out, first);
+    word(&mut out, name);
+    append(&mut out, value);
+    println(out.text());
+}
+
+fn two_words<a, b, c, d>(first: (&a [u8]), name: (&b [u8]), second: (&c [u8]), value: (&d [u8])) {
+    mut out = u8[];
+    word(&mut out, first);
+    word(&mut out, name);
+    word(&mut out, second);
+    append(&mut out, value);
+    println(out.text());
+}
+
+// ---- the fold, rendered ----
+
+fn goal_row<a>(name: (&a [u8]), state: (&borg_replay::State)) {
+    mut out = u8[];
+    word(&mut out, "state");
+    word(&mut out, name);
+    word(&mut out, "goal");
+    word(&mut out, &borg_replay::goal_of(state));
+    word(&mut out, &borg_replay::goal_status_of(state));
+    word(&mut out, "budget");
+    append(&mut out, &borg_replay::budget_of(state));
+    println(out.text());
+}
+
+fn show_state<a, b>(name: (&a [u8]), state: (&b borg_replay::State)) {
+    checksum := borg_replay::aggregate_checksum_text(state);
+    two_words("case", name, "ok", &checksum);
+    mut out = u8[];
+    word(&mut out, "state");
+    word(&mut out, name);
+    word(&mut out, "seq");
+    word(&mut out, &number(borg_replay::sequence_of(state)));
+    word(&mut out, "events");
+    append(&mut out, &number(borg_replay::events_of(state)));
+    println(out.text());
+    goal_row(name, state);
+    two_words("state", name, "objective", &readable(&borg_replay::objective_of(state)));
+    mut plan = u8[];
+    word(&mut plan, "state");
+    word(&mut plan, name);
+    word(&mut plan, "plan");
+    word(&mut plan, &borg_replay::plan_participant_of(state));
+    word(&mut plan, "revision");
+    word(&mut plan, &number(borg_replay::plan_revision_of(state)));
+    word(&mut plan, "items");
+    append(&mut plan, &number(borg_replay::plan_count_of(state)));
+    println(plan.text());
+    mut index = u64(0);
+    while index < borg_replay::plan_count_of(state) {
+        item := borg_replay::plan_item_of(state, index);
+        mut link = "-".text();
+        match borg_events::plan_item_work(&item) {
+            Some(text) => { link = text; },
+            None => { }
+        }
+        mut line = u8[];
+        word(&mut line, "item");
+        word(&mut line, name);
+        word(&mut line, &number(index));
+        word(&mut line, &borg_events::plan_item_id(&item));
+        word(&mut line, &borg_events::plan_item_status(&item));
+        word(&mut line, "work");
+        word(&mut line, &link);
+        append(&mut line, &borg_events::plan_item_content(&item));
+        println(line.text());
+        index += 1;
+    }
+    mut work = u8[];
+    word(&mut work, "state");
+    word(&mut work, name);
+    word(&mut work, "work");
+    word(&mut work, "revision");
+    word(&mut work, &number(borg_replay::work_revision_of(state)));
+    word(&mut work, "items");
+    append(&mut work, &number(borg_replay::work_count_of(state)));
+    println(work.text());
+    mut cursor = u64(0);
+    while cursor < borg_replay::work_count_of(state) {
+        item := borg_replay::work_item_of(state, cursor);
+        mut holder = "-".text();
+        match borg_events::work_item_assignee(&item) {
+            Some(text) => { holder = text; },
+            None => { }
+        }
+        mut line = u8[];
+        word(&mut line, "work");
+        word(&mut line, name);
+        word(&mut line, &number(cursor));
+        word(&mut line, &borg_events::work_item_id(&item));
+        word(&mut line, &holder);
+        word(&mut line, &borg_events::work_item_status(&item));
+        append(&mut line, &borg_events::work_item_title(&item));
+        println(line.text());
+        cursor += 1;
+    }
+    // The transcript half of the same fold, so a journal that mixes both kinds is visibly folded whole.
+    mut session = u8[];
+    word(&mut session, "state");
+    word(&mut session, name);
+    word(&mut session, "session");
+    word(&mut session, &readable(&borg_replay::session_of(state)));
+    word(&mut session, "status");
+    word(&mut session, &borg_replay::status_of(state));
+    word(&mut session, "title");
+    append(&mut session, &readable(&borg_replay::title_of(state)));
+    println(session.text());
+    two_words("state", name, "plans", &borg_replay::plans_of(state));
+}
+
+fn show_refusal<a, b>(name: (&a [u8]), refusal: (&b borg_replay::Refusal)) {
+    mut out = u8[];
+    word(&mut out, "case");
+    word(&mut out, name);
+    word(&mut out, "refused");
+    word(&mut out, &borg_replay::refusal_reason(refusal));
+    word(&mut out, "at");
+    word(&mut out, &borg_replay::refusal_at(refusal));
+    word(&mut out, "code");
+    word(&mut out, &borg_replay::refusal_code(refusal));
+    word(&mut out, "detail");
+    append(&mut out, &readable(&borg_replay::refusal_detail(refusal)));
+    println(out.text());
+}
+
+fn malformed<a>(name: (&a [u8]), failure: (&borg_events::EventError), index: u64) {
+    mut out = u8[];
+    word(&mut out, "case");
+    word(&mut out, name);
+    word(&mut out, "malformed");
+    word(&mut out, &borg_events::error_class(failure));
+    word(&mut out, "at");
+    append(&mut out, &number(index));
+    println(out.text());
+}
+
+// ---- one fixture ----
+
+fn outcome<a>(events: (&a borg_events::Event[])) -> string {
+    match borg_replay::replay(events) {
+        state: borg_replay::State => { return borg_replay::aggregate_checksum_text(&state); },
+        refusal: borg_replay::Refusal => { return refusal_text(&refusal); }
+    }
+}
+
+fn refusal_text<a>(refusal: (&a borg_replay::Refusal)) -> string {
+    mut out = u8[];
+    append(&mut out, "refused:");
+    append(&mut out, &borg_replay::refusal_reason(refusal));
+    append(&mut out, "@");
+    append(&mut out, &borg_replay::refusal_at(refusal));
+    return out.text();
+}
+
+// The same journal through the byte stream. The stream carries exactly these events, so the fold of
+// the captured bytes has to be the fold of the events - a difference would mean the encoder or the
+// reader lost something the fold can see.
+fn capture_case<a, b>(name: (&a [u8]), events: (&b borg_events::Event[]), truncate: u64) {
+    bytes := borg_events::encode_stream(events);
+    total := bytes.len();
+    mut kept = total;
+    if truncate < total {
+        kept = total - truncate;
+    }
+    mut cut = u8[];
+    mut index = u64(0);
+    while index < kept {
+        cut.push(bytes[index]);
+        index += 1;
+    }
+    stream := borg_events::decode_stream(&cut);
+    mut verdict = "ok".text();
+    match borg_replay::replay_stream(&stream) {
+        state: borg_replay::State => {
+            if !text_is(&borg_replay::aggregate_checksum_text(&state), &outcome(events)) {
+                verdict = "differs".text();
+            }
+        },
+        refusal: borg_replay::Refusal => { verdict = refusal_text(&refusal); }
+    }
+    pair_line("capture", name, &verdict);
+}
+
+fn twice_case<a, b>(name: (&a [u8]), events: (&b borg_events::Event[])) {
+    mut verdict = "fail".text();
+    match borg_replay::replay(events) {
+        first: borg_replay::State => {
+            match borg_replay::replay(events) {
+                second: borg_replay::State => {
+                    mut same_state = text_is(&borg_replay::checksum_text(&first), &borg_replay::checksum_text(&second));
+                    if same_state {
+                        if text_is(&borg_replay::aggregate_checksum_text(&first), &borg_replay::aggregate_checksum_text(&second)) {
+                            if text_is(&borg_replay::aggregate_fingerprint(&first), &borg_replay::aggregate_fingerprint(&second)) {
+                                verdict = "ok".text();
+                            }
+                        }
+                    }
+                },
+                refusal: borg_replay::Refusal => { }
+            }
+        },
+        refusal: borg_replay::Refusal => {
+            // A refusal is an outcome too: replaying the same journal must refuse the same way.
+            match borg_replay::replay(events) {
+                state: borg_replay::State => { },
+                second: borg_replay::Refusal => {
+                    if text_is(&refusal_text(&refusal), &refusal_text(&second)) {
+                        verdict = "ok".text();
+                    }
+                }
+            }
+        }
+    }
+    pair_line("twice", name, &verdict);
+}
+
+fn append_case<a, b>(name: (&a [u8]), events: (&b borg_events::Event[])) {
+    total := events.len();
+    mut verdict = "ok".text();
+    if total > 0 {
+        mut prefix = borg_events::Event[];
+        mut index = 0;
+        while index + 1 < total {
+            prefix.push(borg_events::copy_event(&events[index]));
+            index += 1;
+        }
+        whole := outcome(events);
+        match borg_replay::replay(&prefix) {
+            state: borg_replay::State => {
+                match borg_replay::apply(&state, &events[total - 1], total - 1) {
+                    next: borg_replay::State => {
+                        if !text_is(&borg_replay::aggregate_checksum_text(&next), &whole) {
+                            verdict = "fail".text();
+                        }
+                    },
+                    refusal: borg_replay::Refusal => {
+                        if !text_is(&refusal_text(&refusal), &whole) {
+                            verdict = "fail".text();
+                        }
+                    }
+                }
+            },
+            refusal: borg_replay::Refusal => {
+                if !text_is(&refusal_text(&refusal), &whole) {
+                    verdict = "fail".text();
+                }
+            }
+        }
+    }
+    pair_line("append", name, &verdict);
+}
+
+struct Decoded {
+    events: borg_events::Event[],
+    failed: bool
+}
+
+fn events_of<a, b>(scenario: (&a borg_json::Json), name: (&b [u8])) -> Decoded {
+    mut out = Decoded { events: borg_events::Event[], failed: false };
+    match borg_json::member(scenario, "events") {
+        Some(list) => {
+            mut index = 0;
+            while index < borg_json::array_len(&list) {
+                match borg_json::array_item(&list, index) {
+                    Some(item) => {
+                        match borg_events::decode(&item) {
+                            event: borg_events::Event => { out.events.push(event); },
+                            failure: borg_events::EventError => {
+                                malformed(name, &failure, index);
+                                out.failed = true;
+                                return out;
+                            }
+                        }
+                    },
+                    None => { }
+                }
+                index += 1;
+            }
+        },
+        None => { }
+    }
+    return out;
+}
+
+// The journal as a byte stream: encoded, cut back when the fixture asks for it, read, and folded. A
+// cut stream is a refusal the reader reports before any event reaches the fold, so the properties
+// afterwards describe the events the reader actually handed over.
+fn stream_case<a>(name: (&a [u8]), events: (&borg_events::Event[]), truncate: u64) {
+    bytes := borg_events::encode_stream(events);
+    total := bytes.len();
+    mut kept = total;
+    if truncate < total {
+        kept = total - truncate;
+    }
+    mut cut = u8[];
+    mut index = u64(0);
+    while index < kept {
+        cut.push(bytes[index]);
+        index += 1;
+    }
+    stream := borg_events::decode_stream(&cut);
+    match borg_replay::replay_stream(&stream) {
+        state: borg_replay::State => { show_state(name, &state); },
+        refusal: borg_replay::Refusal => { show_refusal(name, &refusal); }
+    }
+    handed := borg_events::stream_events(&stream);
+    twice_case(name, &handed);
+    append_case(name, &handed);
+}
+
+fn direct_case<a>(name: (&a [u8]), events: (&borg_events::Event[]), truncate: u64) {
+    match borg_replay::replay(events) {
+        state: borg_replay::State => { show_state(name, &state); },
+        refusal: borg_replay::Refusal => { show_refusal(name, &refusal); }
+    }
+    capture_case(name, events, truncate);
+    twice_case(name, events);
+    append_case(name, events);
+}
+
+fn run_case<a>(scenario: (&a borg_json::Json), fallback: (&[u8])) {
+    mut name = text_or(scenario, "name");
+    if name.len() == 0 {
+        name = fallback.text();
+    }
+    decoded := events_of(scenario, &name);
+    // A fixture the event reader refused is a refusal, not a prefix: the fold is not asked to apply
+    // the events that happened to arrive before the bad one.
+    if decoded.failed {
+        return ();
+    }
+    events := decoded.events;
+    truncate := number_or(scenario, "truncate", 0);
+    via := text_or(scenario, "via");
+    if text_is(&via, "stream") {
+        stream_case(&name, &events, truncate);
+        return ();
+    }
+    direct_case(&name, &events, truncate);
+}
+
+// ---- the command line over a real socket ----
+
+// One `borg ...` argument list, built here so the test drives the program's own parser.
+fn command_args<x>(first: (&x [u8])) -> string[] {
+    mut out = string[];
+    out.push("borg".text());
+    out.push(first.text());
+    return out;
+}
+
+fn with_flag<x, y>(args: (&x mut string[]), flag: (&y [u8]), value: (&y [u8])) {
+    args.push(flag.text());
+    args.push(value.text());
+}
+
+fn echo_args<x>(args: (&x string[])) -> string {
+    mut out = u8[];
+    mut index = 0;
+    while index < args.len() {
+        if index > 0 {
+            out.push(32);
+        }
+        append(&mut out, &args[index]);
+        index += 1;
+    }
+    return out.text();
+}
+
+// One command: prepare it, send it, let the daemon fold it, then print what came back. The daemon's
+// account of the reply is compared with the client's, so a line printed from local state instead of
+// the socket is a mismatch rather than a plausible transcript.
+fn cli_case<x>(grants: (&x authority::Authority), listener: u64, held: (&borg_replay::State), args: (&x string[]), work_only: bool) -> borg_replay::State {
+    println(format("cli {}", echo_args(args)));
+    prepared := borg_cli::prepare(args);
+    refusal := borg_cli::prepared_refusal(&prepared);
+    if refusal.len() > 0 {
+        borg_cli::show_refusal_line(&refusal);
+        return borg_replay::copy_of(held);
+    }
+    port := borg_daemon::port(grants, listener)!;
+    client := borg_client::connect(grants, "127.0.0.1", port)!;
+    session := borg_cli::prepared_session(&prepared);
+    events := borg_cli::prepared_events(&prepared);
+    request := borg_client::request(&session, &events);
+    sent := borg_client::send(client, &request);
+    assert(sent == request.len());
+    served := borg_daemon::serve_stateful(listener, held);
+    mut folded = borg_daemon::served_state(&served);
+    match borg_client::resume_answered(client, &session) {
+        answered: borg_client::Answered => {
+            said := borg_client::reply_line(&borg_client::answered_reply(&answered));
+            daemon := borg_client::reply_line(&borg_daemon::served_reply(&served));
+            assert(text_is(&said, &daemon));
+            borg_cli::show_answer(&borg_cli::prepared_command(&prepared), &answered, work_only);
+        },
+        failure: borg_frames::Refusal => {
+            borg_cli::show_failure(&borg_cli::prepared_command(&prepared), &failure);
+        }
+    }
+    host::close(client);
+    return folded;
+}
+
+fn cli_session(grants: (&authority::Authority)) {
+    listener := borg_daemon::listen(grants, 0)!;
+    mut bus = borg_replay::empty();
+    // create-goal: one event, and the daemon's answer already carries the goal.
+    mut create = command_args("create-goal");
+    with_flag(&mut create, "--session", "s1");
+    with_flag(&mut create, "--goal", "g1");
+    with_flag(&mut create, "--objective", "fix-the-build");
+    with_flag(&mut create, "--budget", "1000");
+    bus = cli_case(grants, listener, &bus, &create, false);
+    // update-goal to complete, then the same update again: the second is refused by the fold, and the
+    // daemon's state still says complete.
+    mut done = command_args("update-goal");
+    with_flag(&mut done, "--session", "s1");
+    with_flag(&mut done, "--goal", "g1");
+    with_flag(&mut done, "--status", "complete");
+    bus = cli_case(grants, listener, &bus, &done, false);
+    bus = cli_case(grants, listener, &bus, &done, false);
+    // A status outside the enum never leaves the process: refused by the model's own mapping.
+    mut wrong = command_args("update-goal");
+    with_flag(&mut wrong, "--session", "s1");
+    with_flag(&mut wrong, "--goal", "g1");
+    with_flag(&mut wrong, "--status", "done");
+    bus = cli_case(grants, listener, &bus, &wrong, false);
+    // set-plan: a work projection, then a plan that points at it.
+    mut plan = command_args("set-plan");
+    with_flag(&mut plan, "--session", "s1");
+    with_flag(&mut plan, "--participant", "p1");
+    with_flag(&mut plan, "--revision", "2");
+    with_flag(&mut plan, "--work", "w1|write-the-fold|alice|in_progress");
+    with_flag(&mut plan, "--item", "i1|in_progress|write-the-fold|w1");
+    bus = cli_case(grants, listener, &bus, &plan, false);
+    // A plan item that names work nobody declared: refused by the fold, with the item and the work id.
+    mut dangling = command_args("set-plan");
+    with_flag(&mut dangling, "--session", "s1");
+    with_flag(&mut dangling, "--participant", "p1");
+    with_flag(&mut dangling, "--revision", "3");
+    with_flag(&mut dangling, "--item", "i2|pending|review|w9");
+    bus = cli_case(grants, listener, &bus, &dangling, false);
+    // An item status outside the enum, refused before it is sent.
+    mut item_status = command_args("set-plan");
+    with_flag(&mut item_status, "--session", "s1");
+    with_flag(&mut item_status, "--participant", "p1");
+    with_flag(&mut item_status, "--revision", "3");
+    with_flag(&mut item_status, "--item", "i2|done|review|");
+    bus = cli_case(grants, listener, &bus, &item_status, false);
+    // list-work asks for the work list alone; attach asks for everything.
+    mut list = command_args("list-work");
+    with_flag(&mut list, "--session", "s1");
+    bus = cli_case(grants, listener, &bus, &list, true);
+    mut attach = command_args("attach");
+    with_flag(&mut attach, "--session", "s1");
+    bus = cli_case(grants, listener, &bus, &attach, false);
+    // A command naming another session cannot be folded into this one.
+    mut foreign = command_args("create-goal");
+    with_flag(&mut foreign, "--session", "s2");
+    with_flag(&mut foreign, "--goal", "g2");
+    with_flag(&mut foreign, "--objective", "other");
+    bus = cli_case(grants, listener, &bus, &foreign, false);
+    // A command with no session is a usage error and never reaches the daemon.
+    mut anonymous = command_args("attach");
+    bus = cli_case(grants, listener, &bus, &anonymous, false);
+    host::close(listener);
+}
+
+fn basename<a>(path: (&a [u8])) -> string {
+    mut start = 0;
+    for i in path.len() {
+        if path[i] == 47 {
+            start = i + 1;
+        }
+    }
+    mut out = u8[];
+    for i in start..path.len() {
+        out.push(path[i]);
+    }
+    return out.text();
+}
+
+fn main() -> u64 {
+    args := env::args();
+    mut index = 1;
+    while index < args.len() {
+        path := args[index];
+        name := basename(&path);
+        data := fs::read(&path)!;
+        match borg_json::parse(&data) {
+            scenario: borg_json::Json => { run_case(&scenario, &name); },
+            failure: borg_json::ParseError => { two_words("case", &name, "malformed", "scenario"); }
+        }
+        index += 1;
+    }
+    grants := authority::sockets();
+    cli_session(&grants);
+    return 0;
+}

@@ -3,12 +3,12 @@ use borg_json;
 use borg_journal;
 use core;
 
-// Typed session-event payloads: the transcript kinds a reader sees.
+// Typed session-event payloads: the transcript kinds a reader sees, and the three aggregates.
 //
 // `SessionEvent` is the journal row and `SessionEventKind` is a serde-tagged union
 // (`contract.rs:2624`, `#[serde(tag = "type", rename_all = "snake_case")]`). This module ports the
-// envelope and the five transcript kinds, with the serialization details that a hand-written port
-// gets wrong:
+// envelope, the five transcript kinds and the four aggregate kinds, with the serialization details
+// that a hand-written port gets wrong:
 //
 //   SessionStarted                       no payload
 //   SessionTitled                        title, generated (always written), usage_tokens, model
@@ -16,17 +16,19 @@ use core;
 //   Message                              message_id, actor, text, attachments (omitted when empty),
 //                                        status, delivery (always written)
 //   MessageDelta                         message_id, delta
+//   GoalCreated                          goal_id, objective, token_budget (null when absent)
+//   GoalUpdated                          goal_id, status (active, complete or blocked)
+//   PlanProjected                        participant_id, workspace_revision, items
+//   WorkProjected                        revision, items
+//
+// The aggregate kinds are what make a journal a runtime rather than a log: they carry the goal, the
+// plan (the todo list a session is working through) and the shared work items those todos point at,
+// and the fold in `borg_replay` reconstructs all three from them.
 //
 // Kinds outside this set are refused by name rather than half-decoded: a reader that silently
-// ignores an unknown kind would drop transcript rows.
-
-pub enum KindTag {
-    Started,
-    Titled,
-    Status,
-    Message,
-    Delta
-}
+// ignores an unknown kind would drop transcript rows. A *status* outside its enum is refused by
+// name too (`UnknownGoalStatus`, `UnknownItemStatus`), because a status coerced into a neighbouring
+// variant is a state the model never had.
 
 pub struct Event {
     id: string,
@@ -41,7 +43,11 @@ pub enum Kind {
     Titled(Titled),
     Status(StatusChange),
     Message(Message),
-    Delta(Delta)
+    Delta(Delta),
+    GoalCreated(GoalCreated),
+    GoalUpdated(GoalUpdated),
+    PlanProjected(PlanProjected),
+    WorkProjected(WorkProjected)
 }
 
 pub struct Titled {
@@ -70,11 +76,85 @@ pub struct Delta {
     delta: string
 }
 
+// ---- the goal, plan and work aggregates ----
+//
+// Three aggregates ride the journal beside the transcript, and each one is written the way the
+// transcript is: a typed kind, a status enum whose *spelling* is part of the schema
+// (`rename_all = "snake_case"`), and a refusal by name when a status is not one the model has.
+//
+//   GoalStatus    `GoalStatus` (contract.rs:2293) narrowed to the three a model may set
+//                 (`ModelGoalStatus`, contract.rs:2337): active, complete, blocked. The other three
+//                 Borg statuses describe the host's budget accounting, not a decision a turn makes,
+//                 and modelling them here would mean inventing who sets them.
+//   ItemStatus    `WorkStatus`/`PlanItemStatus` (workspace.rs:310, contract.rs:3082): pending,
+//                 in_progress, blocked, awaiting_review, completed.
+//
+// `token_budget`, `work_id` and `assignee` are optionals that serialize as null rather than being
+// omitted, which is what the derive does for a field without `skip_serializing_if`. A plan item's
+// `work_id` is the port's own link from a todo to the shared work item it tracks; Borg's `PlanItem`
+// has three fields, and the link is what lets the fold refuse a todo pointing at work that does not
+// exist instead of silently losing the reference.
+
+pub enum GoalStatus {
+    Active,
+    Complete,
+    Blocked
+}
+
+pub enum ItemStatus {
+    Pending,
+    InProgress,
+    Blocked,
+    AwaitingReview,
+    Completed
+}
+
+pub struct GoalCreated {
+    goal_id: string,
+    objective: string,
+    token_budget: u64?
+}
+
+pub struct GoalUpdated {
+    goal_id: string,
+    status: GoalStatus
+}
+
+pub struct PlanItem {
+    id: string,
+    content: string,
+    status: ItemStatus,
+    work_id: string?
+}
+
+pub struct PlanProjected {
+    participant: string,
+    revision: u64,
+    items: PlanItem[]
+}
+
+pub struct WorkItem {
+    id: string,
+    title: string,
+    assignee: string?,
+    status: ItemStatus
+}
+
+pub struct WorkProjected {
+    revision: u64,
+    items: WorkItem[]
+}
+
 pub enum EventError {
     NotObject,
     Missing(string),
     WrongType(string),
-    UnknownKind(string)
+    UnknownKind(string),
+    // A status string outside the enum it was read for. The two spaces are separate variants
+    // rather than one carrying a label, so a diagnostic says which status was violated without a
+    // second field to parse out of it.
+    UnknownGoalStatus(string),
+    UnknownItemStatus(string)
 }
 
 fn same<a, b>(left: (&a [u8]), right: (&b [u8])) -> bool {
@@ -192,6 +272,115 @@ pub fn status_of<a>(name: (&a [u8])) -> borg_journal::Status | EventError {
     return EventError::UnknownKind(name.text());
 }
 
+// The goal statuses a model may set, spelled as `ModelGoalStatus` serializes them.
+pub fn goal_status_of<a>(name: (&a [u8])) -> GoalStatus | EventError {
+    if same(&name, "active") { return GoalStatus::Active; }
+    if same(&name, "complete") { return GoalStatus::Complete; }
+    if same(&name, "blocked") { return GoalStatus::Blocked; }
+    return EventError::UnknownGoalStatus(name.text());
+}
+
+pub fn goal_status_name<a>(value: (&a GoalStatus)) -> string {
+    match value {
+        Active => { return "active".text(); },
+        Complete => { return "complete".text(); },
+        Blocked => { return "blocked".text(); }
+    }
+}
+
+// `WorkStatus` (workspace.rs:310) as `PlanItemStatus` aliases it (contract.rs:3082).
+pub fn item_status_of<a>(name: (&a [u8])) -> ItemStatus | EventError {
+    if same(&name, "pending") { return ItemStatus::Pending; }
+    if same(&name, "in_progress") { return ItemStatus::InProgress; }
+    if same(&name, "blocked") { return ItemStatus::Blocked; }
+    if same(&name, "awaiting_review") { return ItemStatus::AwaitingReview; }
+    if same(&name, "completed") { return ItemStatus::Completed; }
+    return EventError::UnknownItemStatus(name.text());
+}
+
+pub fn item_status_name<a>(value: (&a ItemStatus)) -> string {
+    match value {
+        Pending => { return "pending".text(); },
+        InProgress => { return "in_progress".text(); },
+        Blocked => { return "blocked".text(); },
+        AwaitingReview => { return "awaiting_review".text(); },
+        Completed => { return "completed".text(); }
+    }
+}
+
+// One item of a plan projection. A list element that is not an object, or an item without the
+// fields the model has, is refused by the item list's own key rather than by a field path, because
+// a serde diagnostic for `items[3].status` is the same class of failure as `items`.
+fn plan_item_of<a, b>(node: (&a borg_json::Json), key: (&b [u8])) -> PlanItem | EventError {
+    if borg_json::kind_of(&node) != borg_json::JsonKind::Obj {
+        reason := key.text();
+        return EventError::WrongType(reason);
+    }
+    id := text_of(&node, "id")?;
+    content := text_of(&node, "content")?;
+    shown := text_of(&node, "status")?;
+    status := item_status_of(&shown)?;
+    work := optional_text(&node, "work_id");
+    return PlanItem { id: id, content: content, status: status, work_id: work };
+}
+
+fn work_item_of<a, b>(node: (&a borg_json::Json), key: (&b [u8])) -> WorkItem | EventError {
+    if borg_json::kind_of(&node) != borg_json::JsonKind::Obj {
+        reason := key.text();
+        return EventError::WrongType(reason);
+    }
+    id := text_of(&node, "id")?;
+    title := text_of(&node, "title")?;
+    assignee := optional_text(&node, "assignee");
+    shown := text_of(&node, "status")?;
+    status := item_status_of(&shown)?;
+    return WorkItem { id: id, title: title, assignee: assignee, status: status };
+}
+
+fn plan_items_of<a, b>(root: (&a borg_json::Json), key: (&b [u8])) -> PlanItem[] | EventError {
+    mut out = PlanItem[];
+    match borg_json::member(&root, &key) {
+        Some(list) => {
+            if borg_json::kind_of(&list) != borg_json::JsonKind::Arr {
+                reason := key.text();
+                return EventError::WrongType(reason);
+            }
+            mut index = 0;
+            while index < borg_json::array_len(&list) {
+                match borg_json::array_item(&list, index) {
+                    Some(node) => { out.push(plan_item_of(&node, &key)?); },
+                    None => { }
+                }
+                index += 1;
+            }
+            return out;
+        },
+        None => { reason := key.text(); return EventError::Missing(reason); }
+    }
+}
+
+fn work_items_of<a, b>(root: (&a borg_json::Json), key: (&b [u8])) -> WorkItem[] | EventError {
+    mut out = WorkItem[];
+    match borg_json::member(&root, &key) {
+        Some(list) => {
+            if borg_json::kind_of(&list) != borg_json::JsonKind::Arr {
+                reason := key.text();
+                return EventError::WrongType(reason);
+            }
+            mut index = 0;
+            while index < borg_json::array_len(&list) {
+                match borg_json::array_item(&list, index) {
+                    Some(node) => { out.push(work_item_of(&node, &key)?); },
+                    None => { }
+                }
+                index += 1;
+            }
+            return out;
+        },
+        None => { reason := key.text(); return EventError::Missing(reason); }
+    }
+}
+
 fn decode_kind<a>(root: (&a borg_json::Json)) -> Kind | EventError {
     kind := text_of(&root, "type")?;
     if same(&kind, "session_started") {
@@ -229,6 +418,37 @@ fn decode_kind<a>(root: (&a borg_json::Json)) -> Kind | EventError {
         message_id := text_of(&root, "message_id")?;
         delta := text_of(&root, "delta")?;
         return Kind::Delta(Delta { message_id: message_id, delta: delta });
+    }
+    if same(&kind, "goal_created") {
+        goal_id := text_of(&root, "goal_id")?;
+        objective := text_of(&root, "objective")?;
+        budget := optional_number(&root, "token_budget");
+        return Kind::GoalCreated(GoalCreated {
+            goal_id: goal_id,
+            objective: objective,
+            token_budget: budget
+        });
+    }
+    if same(&kind, "goal_updated") {
+        goal_id := text_of(&root, "goal_id")?;
+        shown := text_of(&root, "status")?;
+        status := goal_status_of(&shown)?;
+        return Kind::GoalUpdated(GoalUpdated { goal_id: goal_id, status: status });
+    }
+    if same(&kind, "plan_projected") {
+        participant := text_of(&root, "participant_id")?;
+        revision := number_of(&root, "workspace_revision")?;
+        items := plan_items_of(&root, "items")?;
+        return Kind::PlanProjected(PlanProjected {
+            participant: participant,
+            revision: revision,
+            items: items
+        });
+    }
+    if same(&kind, "work_projected") {
+        revision := number_of(&root, "revision")?;
+        items := work_items_of(&root, "items")?;
+        return Kind::WorkProjected(WorkProjected { revision: revision, items: items });
     }
     return EventError::UnknownKind(kind);
 }
@@ -275,7 +495,11 @@ fn tag_name<a>(value: (&a Kind)) -> string {
         Titled(inner) => { return "session_titled".text(); },
         Status(inner) => { return "status_changed".text(); },
         Message(inner) => { return "message".text(); },
-        Delta(inner) => { return "message_delta".text(); }
+        Delta(inner) => { return "message_delta".text(); },
+        GoalCreated(inner) => { return "goal_created".text(); },
+        GoalUpdated(inner) => { return "goal_updated".text(); },
+        PlanProjected(inner) => { return "plan_projected".text(); },
+        WorkProjected(inner) => { return "work_projected".text(); }
     }
 }
 
@@ -455,6 +679,183 @@ pub fn text_value<a>(value: (&a Event)) -> string? {
     }
 }
 
+// ---- typed accessors for the aggregates ----
+//
+// The fold needs the typed value, and another module cannot read a field of a struct it did not
+// define, so every aggregate field is readable here. Each accessor answers `None` for a kind that
+// does not carry the field, which is what keeps "this event has no goal id" distinguishable from
+// "the goal id is empty".
+
+pub fn goal_id_value<a>(value: (&a Event)) -> string? {
+    match &value.kind {
+        GoalCreated(inner) => { return Some(inner.goal_id.text()); },
+        GoalUpdated(inner) => { return Some(inner.goal_id.text()); },
+        _ => { return None; }
+    }
+}
+
+pub fn goal_objective_value<a>(value: (&a Event)) -> string? {
+    match &value.kind {
+        GoalCreated(inner) => { return Some(inner.objective.text()); },
+        _ => { return None; }
+    }
+}
+
+pub fn goal_budget_value<a>(value: (&a Event)) -> u64? {
+    match &value.kind {
+        GoalCreated(inner) => { return copy_optional_number(&inner.token_budget); },
+        _ => { return None; }
+    }
+}
+
+pub fn goal_status_value<a>(value: (&a Event)) -> GoalStatus? {
+    match &value.kind {
+        GoalUpdated(inner) => { return Some(copy_goal_status(&inner.status)); },
+        _ => { return None; }
+    }
+}
+
+pub fn plan_participant_value<a>(value: (&a Event)) -> string? {
+    match &value.kind {
+        PlanProjected(inner) => { return Some(inner.participant.text()); },
+        _ => { return None; }
+    }
+}
+
+pub fn plan_revision_value<a>(value: (&a Event)) -> u64? {
+    match &value.kind {
+        PlanProjected(inner) => { return Some(inner.revision); },
+        _ => { return None; }
+    }
+}
+
+pub fn plan_items_value<a>(value: (&a Event)) -> PlanItem[] {
+    match &value.kind {
+        PlanProjected(inner) => { return copy_plan_items(&inner.items); },
+        _ => { return PlanItem[]; }
+    }
+}
+
+pub fn work_revision_value<a>(value: (&a Event)) -> u64? {
+    match &value.kind {
+        WorkProjected(inner) => { return Some(inner.revision); },
+        _ => { return None; }
+    }
+}
+
+pub fn work_items_value<a>(value: (&a Event)) -> WorkItem[] {
+    match &value.kind {
+        WorkProjected(inner) => { return copy_work_items(&inner.items); },
+        _ => { return WorkItem[]; }
+    }
+}
+
+pub fn plan_item_id<a>(value: (&a PlanItem)) -> string { return value.id.text(); }
+pub fn plan_item_content<a>(value: (&a PlanItem)) -> string { return value.content.text(); }
+pub fn plan_item_status<a>(value: (&a PlanItem)) -> string { return item_status_name(&value.status); }
+pub fn plan_item_work<a>(value: (&a PlanItem)) -> string? { return copy_optional(&value.work_id); }
+
+pub fn work_item_id<a>(value: (&a WorkItem)) -> string { return value.id.text(); }
+pub fn work_item_title<a>(value: (&a WorkItem)) -> string { return value.title.text(); }
+pub fn work_item_status<a>(value: (&a WorkItem)) -> string { return item_status_name(&value.status); }
+pub fn work_item_assignee<a>(value: (&a WorkItem)) -> string? { return copy_optional(&value.assignee); }
+
+// ---- builders ----
+//
+// A command is an event, so the command line builds one here rather than in its own module: the
+// payload types stay private, and an unknown status name is refused by the same function the JSON
+// and byte readers use, so `update-goal --status done` refuses with one reason wherever it is read.
+// An empty text in `work` or `assignee` means the optional is absent, because an empty work id is
+// not a reference to anything.
+
+// The class of a decode failure, by name: the names `borg/tests/events_test.grl` prints and the ones a
+// command line reports when it cannot build an event from an argument.
+pub fn error_class<a>(value: (&a EventError)) -> string {
+    match value {
+        NotObject => { return "not-object".text(); },
+        Missing(key) => { return "missing".text(); },
+        WrongType(key) => { return "type".text(); },
+        UnknownKind(kind) => { return "unknown-kind".text(); },
+        UnknownGoalStatus(name) => { return "unknown-goal-status".text(); },
+        UnknownItemStatus(name) => { return "unknown-item-status".text(); }
+    }
+}
+
+pub fn event_with<a, b, c>(id: (&a [u8]), session: (&b [u8]), sequence: u64, created_at: (&c [u8]), kind: Kind) -> Event {
+    return Event {
+        id: id.text(),
+        session_id: session.text(),
+        sequence: sequence,
+        created_at: created_at.text(),
+        kind: kind
+    };
+}
+
+// The daemon appends, so it owns the envelope: it stamps a sequence and a timestamp onto what a
+// client sent instead of trusting the client's placeholders.
+pub fn stamped<a, b, c>(value: (&a Event), id: (&b [u8]), sequence: u64, created_at: (&c [u8])) -> Event {
+    mut copied = copy_event(value);
+    copied.id = id.text();
+    copied.sequence = sequence;
+    copied.created_at = created_at.text();
+    return copied;
+}
+
+// A created goal is active: `SessionGoal::new` (contract.rs:2318) starts there, so the fold does not
+// need to read a status the event does not carry.
+pub fn goal_active() -> GoalStatus { return GoalStatus::Active; }
+
+pub fn goal_created_kind<a, b>(goal_id: (&a [u8]), objective: (&b [u8]), budget: u64?) -> Kind {
+    return Kind::GoalCreated(GoalCreated {
+        goal_id: goal_id.text(),
+        objective: objective.text(),
+        token_budget: budget
+    });
+}
+
+pub fn goal_updated_kind<a, b>(goal_id: (&a [u8]), status: (&b [u8])) -> Kind | EventError {
+    typed := goal_status_of(&status)?;
+    return Kind::GoalUpdated(GoalUpdated { goal_id: goal_id.text(), status: typed });
+}
+
+pub fn plan_item<a, b, c, d>(id: (&a [u8]), content: (&b [u8]), status: (&c [u8]), work: (&d [u8])) -> PlanItem | EventError {
+    typed := item_status_of(&status)?;
+    if work.len() == 0 {
+        return PlanItem { id: id.text(), content: content.text(), status: typed, work_id: None };
+    }
+    return PlanItem {
+        id: id.text(),
+        content: content.text(),
+        status: typed,
+        work_id: Some(work.text())
+    };
+}
+
+pub fn work_item<a, b, c, d>(id: (&a [u8]), title: (&b [u8]), assignee: (&c [u8]), status: (&d [u8])) -> WorkItem | EventError {
+    typed := item_status_of(&status)?;
+    if assignee.len() == 0 {
+        return WorkItem { id: id.text(), title: title.text(), assignee: None, status: typed };
+    }
+    return WorkItem {
+        id: id.text(),
+        title: title.text(),
+        assignee: Some(assignee.text()),
+        status: typed
+    };
+}
+
+pub fn plan_kind<a>(participant: (&a [u8]), revision: u64, items: PlanItem[]) -> Kind {
+    return Kind::PlanProjected(PlanProjected {
+        participant: participant.text(),
+        revision: revision,
+        items: items
+    });
+}
+
+pub fn work_kind(revision: u64, items: WorkItem[]) -> Kind {
+    return Kind::WorkProjected(WorkProjected { revision: revision, items: items });
+}
+
 // ---- encoding ----
 
 fn put(members: (&mut borg_json::Member[]), key: (&[u8]), value: borg_json::Json) {
@@ -470,6 +871,26 @@ fn put_optional(members: (&mut borg_json::Member[]), key: (&[u8]), value: (&stri
         Some(text) => { put_text(&mut members, &key, &text); },
         None => { put(&mut members, &key, borg_json::null_value()); }
     }
+}
+
+fn encode_plan_item<a>(value: (&a PlanItem)) -> borg_json::Json {
+    mut members = borg_json::empty_members();
+    put_text(&mut members, "id", &value.id);
+    put_text(&mut members, "content", &value.content);
+    shown := item_status_name(&value.status);
+    put_text(&mut members, "status", &shown);
+    put_optional(&mut members, "work_id", &value.work_id);
+    return borg_json::object_of(&members);
+}
+
+fn encode_work_item<a>(value: (&a WorkItem)) -> borg_json::Json {
+    mut members = borg_json::empty_members();
+    put_text(&mut members, "id", &value.id);
+    put_text(&mut members, "title", &value.title);
+    put_optional(&mut members, "assignee", &value.assignee);
+    shown := item_status_name(&value.status);
+    put_text(&mut members, "status", &shown);
+    return borg_json::object_of(&members);
 }
 
 // The kind object, with the serialization details the Rust derive produces.
@@ -523,6 +944,47 @@ fn encode_kind<a>(value: (&a Kind)) -> borg_json::Json {
             put_text(&mut out, "type", "message_delta");
             put_text(&mut out, "message_id", &inner.message_id);
             put_text(&mut out, "delta", &inner.delta);
+        },
+        GoalCreated(inner) => {
+            put_text(&mut out, "type", "goal_created");
+            put_text(&mut out, "goal_id", &inner.goal_id);
+            put_text(&mut out, "objective", &inner.objective);
+            // A budget is a number on the wire, or null when the goal has none.
+            match copy_optional_number(&inner.token_budget) {
+                Some(count) => {
+                    put(&mut out, "token_budget", borg_json::Json::Num(borg_json::number_text(count)));
+                },
+                None => { put(&mut out, "token_budget", borg_json::null_value()); }
+            }
+        },
+        GoalUpdated(inner) => {
+            put_text(&mut out, "type", "goal_updated");
+            put_text(&mut out, "goal_id", &inner.goal_id);
+            shown := goal_status_name(&inner.status);
+            put_text(&mut out, "status", &shown);
+        },
+        PlanProjected(inner) => {
+            put_text(&mut out, "type", "plan_projected");
+            put_text(&mut out, "participant_id", &inner.participant);
+            put(&mut out, "workspace_revision", borg_json::Json::Num(borg_json::number_text(inner.revision)));
+            mut items = borg_json::empty_list();
+            mut index = 0;
+            while index < inner.items.len() {
+                items.push(encode_plan_item(&inner.items[index]));
+                index += 1;
+            }
+            put(&mut out, "items", borg_json::Json::Arr(items));
+        },
+        WorkProjected(inner) => {
+            put_text(&mut out, "type", "work_projected");
+            put(&mut out, "revision", borg_json::Json::Num(borg_json::number_text(inner.revision)));
+            mut items = borg_json::empty_list();
+            mut index = 0;
+            while index < inner.items.len() {
+                items.push(encode_work_item(&inner.items[index]));
+                index += 1;
+            }
+            put(&mut out, "items", borg_json::Json::Arr(items));
         }
     }
     return borg_json::object_of(&out);
@@ -549,7 +1011,8 @@ pub fn encode<a>(value: (&a Event)) -> borg_json::Json {
 // The persisted session state is a sequence of these events, not an opaque payload, so a reader can
 // refuse by name what it does not understand instead of decoding the wrong fields:
 //
-//   event    u8      tag: 1 started, 2 titled, 3 status_changed, 4 message, 5 message_delta
+//   event    u8      tag: 1 started, 2 titled, 3 status_changed, 4 message, 5 message_delta,
+//                         6 goal_created, 7 goal_updated, 8 plan_projected, 9 work_projected
 //            u32 LE  body length N
 //            N bytes body
 //   body     text id, text session_id, u64 LE sequence, text created_at, then the kind
@@ -559,6 +1022,12 @@ pub fn encode<a>(value: (&a Event)) -> borg_json::Json {
 //              message         text message_id, text actor, text text, text[] attachments,
 //                              text status, optional text delivery
 //              message_delta   text message_id, text delta
+//              goal_created    text goal_id, text objective, optional u64 token_budget
+//              goal_updated    text goal_id, text status
+//              plan_projected  text participant_id, u64 workspace_revision, plan item[] items
+//              work_projected  u64 revision, work item[] items
+//   plan item              text id, text content, text status, optional text work_id
+//   work item              text id, text title, optional text assignee, text status
 //   text     u32 LE byte length, then that many bytes
 //   text[]   u32 LE count, then that many texts
 //   u8       boolean 0 or 1; any other value is refused rather than read as "true"
@@ -571,7 +1040,7 @@ pub fn encode<a>(value: (&a Event)) -> borg_json::Json {
 // turned into an allocation. The list count is checked the same way (each element needs at least its
 // four byte length) so a huge count cannot spin the reader.
 pub const STREAM_OK: u64 = 0;
-// A tag outside 1..5.
+// A tag outside 1..9.
 pub const UNKNOWN_TAG: u64 = 20;
 // The bytes end before a declared extent (an event body, a text, or a list) does.
 pub const TRUNCATED_EVENT: u64 = 21;
@@ -587,6 +1056,10 @@ const TAG_TITLED: u64 = 2;
 const TAG_STATUS: u64 = 3;
 const TAG_MESSAGE: u64 = 4;
 const TAG_DELTA: u64 = 5;
+const TAG_GOAL_CREATED: u64 = 6;
+const TAG_GOAL_UPDATED: u64 = 7;
+const TAG_PLAN: u64 = 8;
+const TAG_WORK: u64 = 9;
 
 // The ceiling on one event's body: a declared length above it is refused as LENGTH_OVERFLOW rather
 // than compared against a file that would have to be that large to be honest.
@@ -658,7 +1131,91 @@ fn copy_kind<a>(value: (&a Kind)) -> Kind {
                 message_id: inner.message_id.text(),
                 delta: inner.delta.text()
             });
+        },
+        GoalCreated(inner) => {
+            out = Kind::GoalCreated(GoalCreated {
+                goal_id: inner.goal_id.text(),
+                objective: inner.objective.text(),
+                token_budget: copy_optional_number(&inner.token_budget)
+            });
+        },
+        GoalUpdated(inner) => {
+            out = Kind::GoalUpdated(GoalUpdated {
+                goal_id: inner.goal_id.text(),
+                status: copy_goal_status(&inner.status)
+            });
+        },
+        PlanProjected(inner) => {
+            out = Kind::PlanProjected(PlanProjected {
+                participant: inner.participant.text(),
+                revision: inner.revision,
+                items: copy_plan_items(&inner.items)
+            });
+        },
+        WorkProjected(inner) => {
+            out = Kind::WorkProjected(WorkProjected {
+                revision: inner.revision,
+                items: copy_work_items(&inner.items)
+            });
         }
+    }
+    return out;
+}
+
+pub fn copy_goal_status<a>(value: (&a GoalStatus)) -> GoalStatus {
+    name := goal_status_name(value);
+    mut out = GoalStatus::Active;
+    match goal_status_of(&name) {
+        mapped: GoalStatus => { out = mapped; },
+        failure: EventError => { }
+    }
+    return out;
+}
+
+pub fn copy_item_status<a>(value: (&a ItemStatus)) -> ItemStatus {
+    name := item_status_name(value);
+    mut out = ItemStatus::Pending;
+    match item_status_of(&name) {
+        mapped: ItemStatus => { out = mapped; },
+        failure: EventError => { }
+    }
+    return out;
+}
+
+pub fn copy_plan_item<a>(value: (&a PlanItem)) -> PlanItem {
+    return PlanItem {
+        id: value.id.text(),
+        content: value.content.text(),
+        status: copy_item_status(&value.status),
+        work_id: copy_optional(&value.work_id)
+    };
+}
+
+pub fn copy_plan_items<a>(value: (&a PlanItem[])) -> PlanItem[] {
+    mut out = PlanItem[];
+    mut index = 0;
+    while index < value.len() {
+        out.push(copy_plan_item(&value[index]));
+        index += 1;
+    }
+    return out;
+}
+
+pub fn copy_work_item<a>(value: (&a WorkItem)) -> WorkItem {
+    return WorkItem {
+        id: value.id.text(),
+        title: value.title.text(),
+        assignee: copy_optional(&value.assignee),
+        status: copy_item_status(&value.status)
+    };
+}
+
+pub fn copy_work_items<a>(value: (&a WorkItem[])) -> WorkItem[] {
+    mut out = WorkItem[];
+    mut index = 0;
+    while index < value.len() {
+        out.push(copy_work_item(&value[index]));
+        index += 1;
     }
     return out;
 }
@@ -767,7 +1324,37 @@ fn tag_code<a>(value: (&a Kind)) -> u64 {
         Titled(inner) => { return TAG_TITLED; },
         Status(inner) => { return TAG_STATUS; },
         Message(inner) => { return TAG_MESSAGE; },
-        Delta(inner) => { return TAG_DELTA; }
+        Delta(inner) => { return TAG_DELTA; },
+        GoalCreated(inner) => { return TAG_GOAL_CREATED; },
+        GoalUpdated(inner) => { return TAG_GOAL_UPDATED; },
+        PlanProjected(inner) => { return TAG_PLAN; },
+        WorkProjected(inner) => { return TAG_WORK; }
+    }
+}
+
+fn push_plan_items<a>(out: (&mut u8[]), items: (&a PlanItem[])) {
+    push_uint(out, items.len(), 4);
+    mut index = 0;
+    while index < items.len() {
+        push_text(out, &items[index].id);
+        push_text(out, &items[index].content);
+        shown := item_status_name(&items[index].status);
+        push_text(out, &shown);
+        push_optional_text(out, &items[index].work_id);
+        index += 1;
+    }
+}
+
+fn push_work_items<a>(out: (&mut u8[]), items: (&a WorkItem[])) {
+    push_uint(out, items.len(), 4);
+    mut index = 0;
+    while index < items.len() {
+        push_text(out, &items[index].id);
+        push_text(out, &items[index].title);
+        push_optional_text(out, &items[index].assignee);
+        shown := item_status_name(&items[index].status);
+        push_text(out, &shown);
+        index += 1;
     }
 }
 
@@ -801,6 +1388,25 @@ fn encode_body<a>(value: (&a Event)) -> u8[] {
         Delta(inner) => {
             push_text(&mut out, &inner.message_id);
             push_text(&mut out, &inner.delta);
+        },
+        GoalCreated(inner) => {
+            push_text(&mut out, &inner.goal_id);
+            push_text(&mut out, &inner.objective);
+            push_optional_number(&mut out, &inner.token_budget);
+        },
+        GoalUpdated(inner) => {
+            push_text(&mut out, &inner.goal_id);
+            shown := goal_status_name(&inner.status);
+            push_text(&mut out, &shown);
+        },
+        PlanProjected(inner) => {
+            push_text(&mut out, &inner.participant);
+            push_uint(&mut out, inner.revision, 8);
+            push_plan_items(&mut out, &inner.items);
+        },
+        WorkProjected(inner) => {
+            push_uint(&mut out, inner.revision, 8);
+            push_work_items(&mut out, &inner.items);
         }
     }
     return out;
@@ -969,6 +1575,78 @@ fn decode_text_list<a>(bytes: (&a [u8]), at: (&mut u64), end: u64, status: (&mut
     return out;
 }
 
+// A count whose elements could not fit in the remaining bytes is refused before the loop, exactly as
+// `decode_text_list` does: each item carries at least its own four byte length somewhere, so a count
+// larger than the remaining bytes divided by four cannot be honest.
+fn decode_count<a>(bytes: (&a [u8]), at: (&mut u64), end: u64, status: (&mut u64)) -> u64 {
+    if *status != STREAM_OK {
+        return 0;
+    }
+    if end - *at < 4 {
+        *status = TRUNCATED_EVENT;
+        return 0;
+    }
+    count := read_uint(bytes, *at, 4);
+    *at = *at + 4;
+    if count > (end - *at) / 4 {
+        *status = TRUNCATED_EVENT;
+        return 0;
+    }
+    return count;
+}
+
+fn decode_plan_items<a>(bytes: (&a [u8]), at: (&mut u64), end: u64, status: (&mut u64)) -> PlanItem[] {
+    mut out = PlanItem[];
+    count := decode_count(bytes, at, end, status);
+    if *status != STREAM_OK {
+        return out;
+    }
+    mut index = u64(0);
+    while index < count {
+        id := decode_text(bytes, at, end, status);
+        content := decode_text(bytes, at, end, status);
+        shown := decode_text(bytes, at, end, status);
+        work := decode_optional_text(bytes, at, end, status);
+        mut typed = ItemStatus::Pending;
+        match item_status_of(&shown) {
+            mapped: ItemStatus => { typed = mapped; },
+            failure: EventError => { *status = BAD_FIELD; }
+        }
+        if *status != STREAM_OK {
+            return out;
+        }
+        out.push(PlanItem { id: id, content: content, status: typed, work_id: work });
+        index = index + 1;
+    }
+    return out;
+}
+
+fn decode_work_items<a>(bytes: (&a [u8]), at: (&mut u64), end: u64, status: (&mut u64)) -> WorkItem[] {
+    mut out = WorkItem[];
+    count := decode_count(bytes, at, end, status);
+    if *status != STREAM_OK {
+        return out;
+    }
+    mut index = u64(0);
+    while index < count {
+        id := decode_text(bytes, at, end, status);
+        title := decode_text(bytes, at, end, status);
+        assignee := decode_optional_text(bytes, at, end, status);
+        shown := decode_text(bytes, at, end, status);
+        mut typed = ItemStatus::Pending;
+        match item_status_of(&shown) {
+            mapped: ItemStatus => { typed = mapped; },
+            failure: EventError => { *status = BAD_FIELD; }
+        }
+        if *status != STREAM_OK {
+            return out;
+        }
+        out.push(WorkItem { id: id, title: title, assignee: assignee, status: typed });
+        index = index + 1;
+    }
+    return out;
+}
+
 fn decode_event<a>(bytes: (&a [u8]), tag: u64, at: (&mut u64), end: u64, status: (&mut u64)) -> Event {
     if *status != STREAM_OK {
         return empty_event();
@@ -1019,6 +1697,39 @@ fn decode_event<a>(bytes: (&a [u8]), tag: u64, at: (&mut u64), end: u64, status:
         message_id := decode_text(bytes, at, end, status);
         delta := decode_text(bytes, at, end, status);
         kind = Kind::Delta(Delta { message_id: message_id, delta: delta });
+    } else if tag == TAG_GOAL_CREATED {
+        goal_id := decode_text(bytes, at, end, status);
+        objective := decode_text(bytes, at, end, status);
+        budget := decode_optional_number(bytes, at, end, status);
+        kind = Kind::GoalCreated(GoalCreated {
+            goal_id: goal_id,
+            objective: objective,
+            token_budget: budget
+        });
+    } else if tag == TAG_GOAL_UPDATED {
+        goal_id := decode_text(bytes, at, end, status);
+        shown := decode_text(bytes, at, end, status);
+        if *status == STREAM_OK {
+            match goal_status_of(&shown) {
+                mapped: GoalStatus => {
+                    kind = Kind::GoalUpdated(GoalUpdated { goal_id: goal_id, status: mapped });
+                },
+                failure: EventError => { *status = BAD_FIELD; }
+            }
+        }
+    } else if tag == TAG_PLAN {
+        participant := decode_text(bytes, at, end, status);
+        revision := decode_u64(bytes, at, end, status);
+        items := decode_plan_items(bytes, at, end, status);
+        kind = Kind::PlanProjected(PlanProjected {
+            participant: participant,
+            revision: revision,
+            items: items
+        });
+    } else if tag == TAG_WORK {
+        revision := decode_u64(bytes, at, end, status);
+        items := decode_work_items(bytes, at, end, status);
+        kind = Kind::WorkProjected(WorkProjected { revision: revision, items: items });
     }
     if (*status == STREAM_OK) && (*at != end) {
         *status = TRAILING_BYTES;
@@ -1043,7 +1754,7 @@ pub fn decode_stream<a>(bytes: (&a [u8])) -> Stream {
         tag := read_uint(bytes, at, 1);
         length := read_uint(bytes, at + 1, 4);
         at = at + 5;
-        if (tag < TAG_STARTED) || (tag > TAG_DELTA) {
+        if (tag < TAG_STARTED) || (tag > TAG_WORK) {
             return Stream { status: UNKNOWN_TAG, events: Event[] };
         }
         if length > MAX_EVENT_BODY {

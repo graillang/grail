@@ -1,0 +1,456 @@
+module borg_cli;
+use authority;
+use borg_client;
+use borg_daemon;
+use borg_events;
+use borg_frames;
+use borg_replay;
+use core;
+use env;
+use strings;
+
+// `borg`: the command line in front of the daemon, and the daemon itself.
+//
+// A command is one event (or, for `set-plan`, two), sent over the transport to a daemon that holds
+// the session and folds what it receives. Every command prints what came back off the socket, never
+// what the command meant to send:
+//
+//   daemon         the transport, kept between connections, serving stateful conversations
+//   create-goal    one `goal_created` event     goal_id, objective, optional token budget
+//   update-goal    one `goal_updated` event     goal_id, status (active, complete or blocked)
+//   set-plan       a `work_projected` event for the work items it declares, then a
+//                  `plan_projected` event for the todo list, which may name those work items
+//   list-work      no events: ask the daemon for the work list it holds
+//   attach         no events: ask the daemon for everything it holds
+//
+// A command is prepared and then run. `prepare` parses the arguments and builds the events; `run`
+// connects, sends them, and prints the answer. Split that way, a test drives the same parsing,
+// building and printing over a real socket without a second implementation of any of it.
+//
+// The refusals are the model's, because they are decided by the model's own functions. A status
+// outside the enum is refused by `borg_events` before an event is built, so it never crosses the
+// socket; a goal that is already complete, a plan item naming work that does not exist, or a
+// duplicate id is refused by the fold inside the daemon and travels back as a named refusal with the
+// index it stopped at. One name is the command line's own: `bad-argument`, for a command it cannot
+// read, which is a usage error rather than an event a journal could hold.
+//
+// The daemon assigns the envelope - sequence, event id and timestamp - as it folds, so an event
+// prepared here carries placeholders. A client that assigned them itself would be writing the
+// journal's cursor in two places, and its first command against a session it had not read would be
+// wrong.
+
+fn same<a, b>(left: (&a [u8]), right: (&b [u8])) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    for i in left.len() {
+        if left[i] != right[i] {
+            return false;
+        }
+    }
+    return true;
+}
+
+// ---- arguments ----
+//
+// Flags start at index 2: `borg`, then the command, then its flags. A flag whose value is missing
+// reads as absent, so a truncated command is a usage error rather than an event with an empty field.
+
+fn text_arg<a, b>(args: (&a string[]), flag: (&b [u8])) -> string {
+    mut index = 2;
+    while index + 1 < args.len() {
+        if same(&args[index], &flag) {
+            return args[index + 1].text();
+        }
+        index += 1;
+    }
+    return "".text();
+}
+
+fn values_of<a, b>(args: (&a string[]), flag: (&b [u8])) -> string[] {
+    mut out = string[];
+    mut index = 2;
+    while index + 1 < args.len() {
+        if same(&args[index], &flag) {
+            out.push(args[index + 1].text());
+        }
+        index += 1;
+    }
+    return out;
+}
+
+fn number_arg<a, b>(args: (&a string[]), flag: (&b [u8])) -> u64? {
+    shown := text_arg(args, flag);
+    return strings::parse_num(&shown);
+}
+
+// ---- a prepared command ----
+
+pub struct Prepared {
+    command: string,
+    session: string,
+    port: u64,
+    events: borg_events::Event[],
+    work_only: bool,
+    refusal: string,
+    usage: bool
+}
+
+fn shell<a>(args: (&a string[])) -> Prepared {
+    mut out = Prepared {
+        command: "".text(),
+        session: "".text(),
+        port: 0,
+        events: borg_events::Event[],
+        work_only: false,
+        refusal: "".text(),
+        usage: false
+    };
+    if args.len() >= 2 {
+        out.command = args[1].text();
+    }
+    mut port = u64(0);
+    match number_arg(args, "--port") {
+        Some(value) => { port = value; },
+        None => { }
+    }
+    out.port = port;
+    return out;
+}
+
+// A refusal line in the shape every command prints: the command, the name, the index (a command that
+// refuses before sending has none) and the detail.
+fn refused<a, b, c>(command: (&a [u8]), name: (&b [u8]), detail: (&c [u8])) -> string {
+    return format("{} refused {} at - detail {}", command, name, detail);
+}
+
+fn reject<a, b, c>(out: (&a mut Prepared), name: (&b [u8]), detail: (&c [u8]), usage: bool) {
+    out.refusal = refused(&out.command, name, detail);
+    out.usage = usage;
+}
+
+pub fn prepared_command<a>(value: (&a Prepared)) -> string { return value.command.text(); }
+pub fn prepared_session<a>(value: (&a Prepared)) -> string { return value.session.text(); }
+pub fn prepared_port<a>(value: (&a Prepared)) -> u64 { return value.port; }
+pub fn prepared_events<a>(value: (&a Prepared)) -> borg_events::Event[] {
+    mut out = borg_events::Event[];
+    mut index = 0;
+    while index < value.events.len() {
+        out.push(borg_events::copy_event(&value.events[index]));
+        index += 1;
+    }
+    return out;
+}
+pub fn prepared_work_only<a>(value: (&a Prepared)) -> bool { return value.work_only; }
+pub fn prepared_refusal<a>(value: (&a Prepared)) -> string { return value.refusal.text(); }
+
+// ---- building the events ----
+
+// One `id|status|content|work` spec. An empty fourth field is an item that tracks no work.
+fn plan_item_of<a>(spec: (&a [u8])) -> borg_events::PlanItem | borg_events::EventError {
+    parts := strings::split(spec, 124);
+    if parts.len() < 4 {
+        return borg_events::EventError::Missing("item".text());
+    }
+    return borg_events::plan_item(&parts[0], &parts[2], &parts[1], &parts[3])?;
+}
+
+// One `id|title|assignee|status` spec. An empty third field is unassigned work.
+fn work_item_of<a>(spec: (&a [u8])) -> borg_events::WorkItem | borg_events::EventError {
+    parts := strings::split(spec, 124);
+    if parts.len() < 4 {
+        return borg_events::EventError::Missing("work".text());
+    }
+    return borg_events::work_item(&parts[0], &parts[1], &parts[2], &parts[3])?;
+}
+
+fn create_goal<a>(args: (&a string[]), out: (&a mut Prepared)) {
+    goal := text_arg(args, "--goal");
+    objective := text_arg(args, "--objective");
+    if goal.len() == 0 {
+        reject(out, "bad-argument", "--goal is required", true);
+        return ();
+    }
+    if objective.len() == 0 {
+        reject(out, "bad-argument", "--objective is required", true);
+        return ();
+    }
+    budget := number_arg(args, "--budget");
+    kind := borg_events::goal_created_kind(&goal, &objective, budget);
+    out.events.push(borg_events::event_with("-", &out.session, 0, "-", kind));
+}
+
+fn update_goal<a>(args: (&a string[]), out: (&a mut Prepared)) {
+    goal := text_arg(args, "--goal");
+    shown := text_arg(args, "--status");
+    if goal.len() == 0 {
+        reject(out, "bad-argument", "--goal is required", true);
+        return ();
+    }
+    if shown.len() == 0 {
+        reject(out, "bad-argument", "--status is required", true);
+        return ();
+    }
+    // The status is read by the model's own mapping, so a word outside the enum is refused here with
+    // the name the fold and the readers use, before anything is sent.
+    match borg_events::goal_updated_kind(&goal, &shown) {
+        typed: borg_events::Kind => {
+            out.events.push(borg_events::event_with("-", &out.session, 0, "-", typed));
+        },
+        failure: borg_events::EventError => {
+            reject(out, &borg_events::error_class(&failure), &shown, false);
+        }
+    }
+}
+
+fn set_plan<a>(args: (&a string[]), out: (&a mut Prepared)) {
+    participant := text_arg(args, "--participant");
+    mut revision = u64(0);
+    match number_arg(args, "--revision") {
+        Some(value) => { revision = value; },
+        None => {
+            reject(out, "bad-argument", "--revision is required", true);
+            return ();
+        }
+    }
+    if participant.len() == 0 {
+        reject(out, "bad-argument", "--participant is required", true);
+        return ();
+    }
+    mut work = borg_events::WorkItem[];
+    specs := values_of(args, "--work");
+    mut index = 0;
+    while index < specs.len() {
+        match work_item_of(&specs[index]) {
+            item: borg_events::WorkItem => { work.push(item); },
+            failure: borg_events::EventError => {
+                reject(out, &borg_events::error_class(&failure), &specs[index], false);
+                return ();
+            }
+        }
+        index += 1;
+    }
+    mut items = borg_events::PlanItem[];
+    plan_specs := values_of(args, "--item");
+    mut cursor = 0;
+    while cursor < plan_specs.len() {
+        match plan_item_of(&plan_specs[cursor]) {
+            item: borg_events::PlanItem => { items.push(item); },
+            failure: borg_events::EventError => {
+                reject(out, &borg_events::error_class(&failure), &plan_specs[cursor], false);
+                return ();
+            }
+        }
+        cursor += 1;
+    }
+    // The work projection comes first: a plan item may name work declared by the same command, and
+    // the fold refuses an item whose work id is not in the list it has already applied.
+    if work.len() > 0 {
+        kind := borg_events::work_kind(revision, work);
+        out.events.push(borg_events::event_with("-", &out.session, 0, "-", kind));
+    }
+    kind := borg_events::plan_kind(&participant, revision, items);
+    out.events.push(borg_events::event_with("-", &out.session, 0, "-", kind));
+}
+
+// Parsing and building, with no socket: a command that cannot be built carries the line it would
+// have printed and never reaches a daemon.
+pub fn prepare<a>(args: (&a string[])) -> Prepared {
+    mut out = shell(args);
+    if args.len() < 2 {
+        out.command = "borg".text();
+        reject(&mut out, "bad-argument", "no command", true);
+        return out;
+    }
+    session := text_arg(args, "--session");
+    out.session = session.text();
+    if session.len() == 0 {
+        reject(&mut out, "bad-argument", "--session is required", true);
+        return out;
+    }
+    if same(&out.command, "create-goal") {
+        create_goal(args, &mut out);
+        return out;
+    }
+    if same(&out.command, "update-goal") {
+        update_goal(args, &mut out);
+        return out;
+    }
+    if same(&out.command, "set-plan") {
+        set_plan(args, &mut out);
+        return out;
+    }
+    if same(&out.command, "list-work") {
+        out.work_only = true;
+        return out;
+    }
+    if same(&out.command, "attach") {
+        return out;
+    }
+    reject(&mut out, "bad-argument", "no such command", true);
+    return out;
+}
+
+// ---- what a command prints ----
+//
+// Every line below comes from the state frame the daemon sent: the goal, the plan and the work list
+// are the daemon's, not this process's.
+
+fn goal_line(snapshot: (&borg_frames::Snapshot)) {
+    if borg_frames::snapshot_goal(snapshot) {
+        println(format(
+            "goal {} {} budget {} {}",
+            borg_frames::snapshot_goal_id(snapshot),
+            borg_frames::snapshot_goal_status(snapshot),
+            borg_frames::snapshot_budget(snapshot),
+            borg_frames::snapshot_objective(snapshot)
+        ));
+    } else {
+        println("goal - - budget -".text());
+    }
+}
+
+fn plan_lines(snapshot: (&borg_frames::Snapshot)) {
+    println(format(
+        "plan {} revision {}",
+        borg_frames::snapshot_participant(snapshot),
+        borg_frames::snapshot_plan_revision(snapshot)
+    ));
+    mut index = u64(0);
+    while index < borg_frames::snapshot_plan_count(snapshot) {
+        item := borg_frames::snapshot_plan_item(snapshot, index);
+        mut link = "-".text();
+        match borg_events::plan_item_work(&item) {
+            Some(text) => { link = text; },
+            None => { }
+        }
+        println(format(
+            "  item {} {} work {} {}",
+            borg_events::plan_item_id(&item),
+            borg_events::plan_item_status(&item),
+            link,
+            borg_events::plan_item_content(&item)
+        ));
+        index += 1;
+    }
+}
+
+fn work_lines(snapshot: (&borg_frames::Snapshot)) {
+    println(format(
+        "work revision {}",
+        borg_frames::snapshot_work_revision(snapshot)
+    ));
+    mut index = u64(0);
+    while index < borg_frames::snapshot_work_count(snapshot) {
+        item := borg_frames::snapshot_work_item(snapshot, index);
+        mut holder = "-".text();
+        match borg_events::work_item_assignee(&item) {
+            Some(text) => { holder = text; },
+            None => { }
+        }
+        println(format(
+            "  work {} {} {} {}",
+            borg_events::work_item_id(&item),
+            holder,
+            borg_events::work_item_status(&item),
+            borg_events::work_item_title(&item)
+        ));
+        index += 1;
+    }
+}
+
+// `asked` names what the command wants to see of the state: the work list alone, or everything.
+pub fn show_answer<a>(command: (&a [u8]), answer: (&a borg_client::Answered), work_only: bool) {
+    println(format("{} {}", command, borg_client::reply_line(&borg_client::answered_reply(answer))));
+    snapshot := borg_client::answered_state(answer);
+    if !work_only {
+        goal_line(&snapshot);
+        plan_lines(&snapshot);
+    }
+    work_lines(&snapshot);
+}
+
+pub fn show_failure<a>(command: (&a [u8]), value: (&a borg_frames::Refusal)) {
+    println(format("{} {}", command, borg_client::refusal_line(value)));
+}
+
+pub fn show_refusal_line<a>(line: (&a [u8])) {
+    println(line.text());
+}
+
+// ---- running a prepared command ----
+
+// One command over one connection: the whole request in one write, then the reply and the state the
+// daemon reconstructed. A refused handshake, a closed socket or a malformed frame comes back as the
+// transport's own refusal, so the caller has one shape to print.
+fn talk<a>(grants: (&a authority::Authority), port: u64, session: (&[u8]), events: (&borg_events::Event[]), command: (&[u8]), work_only: bool) -> u64 {
+    fd := borg_client::connect(grants, "127.0.0.1", port)!;
+    request := borg_client::request(session, events);
+    sent := borg_client::send(fd, &request);
+    assert(sent == request.len());
+    mut code = u64(0);
+    match borg_client::resume_answered(fd, session) {
+        answered: borg_client::Answered => {
+            show_answer(command, &answered, work_only);
+            if borg_frames::reply_refused(&borg_client::answered_reply(&answered)) {
+                code = 1;
+            }
+        },
+        failure: borg_frames::Refusal => {
+            show_failure(command, &failure);
+            code = 1;
+        }
+    }
+    match authority::close(grants, fd) {
+        closed: unit => { },
+        failure: authority::Error => { }
+    }
+    return code;
+}
+
+pub fn run<a>(value: (&a Prepared), grants: (&a authority::Authority)) -> u64 {
+    if value.refusal.len() > 0 {
+        show_refusal_line(&value.refusal);
+        if value.usage {
+            return 2;
+        }
+        return 1;
+    }
+    events := prepared_events(value);
+    return talk(grants, value.port, &value.session, &events, &value.command, value.work_only);
+}
+
+// ---- the daemon ----
+
+pub fn run_daemon<a>(args: (&a string[])) -> u64 {
+    grants := authority::sockets();
+    mut requested = u64(0);
+    match number_arg(args, "--port") {
+        Some(value) => { requested = value; },
+        None => { }
+    }
+    listener := borg_daemon::listen(&grants, requested)!;
+    bound := borg_daemon::port(&grants, listener)!;
+    println(format("daemon listening {}", bound));
+    mut held = borg_replay::empty();
+    while true {
+        served := borg_daemon::serve_stateful(listener, &held);
+        held = borg_daemon::served_state(&served);
+    }
+    return 0;
+}
+
+fn main() -> u64 {
+    args := env::args();
+    if args.len() < 2 {
+        println("borg daemon | create-goal | update-goal | set-plan | list-work | attach".text());
+        return 2;
+    }
+    command := args[1].text();
+    if same(&command, "daemon") {
+        return run_daemon(&args);
+    }
+    grants := authority::sockets();
+    prepared := prepare(&args);
+    return run(&prepared, &grants);
+}

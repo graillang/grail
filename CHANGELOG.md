@@ -277,6 +277,101 @@
   record Grail owns, and the submit/present arrays are arrays of *handles*, which cannot even be
   seeded. The probe reports `rhi.swapchain.result frames 0 of 3` plus one `unavailable` line per
   blocked call rather than pretending; docs/rhi.md lists the calls and what each one needs.
+- Borg's goal, plan and work list fold out of a journal, and `borg` serves them (`borg/src/aggregates.grl`,
+  `borg/src/cli.grl`). Four new journal kinds join the five transcript ones, each with the journal's
+  encoding — a tag, a little-endian length and a body of length-prefixed texts — and each refusing by
+  name what it cannot represent: `goal_created` (6) carries a goal id, an objective and an optional
+  token budget; `goal_updated` (7) a goal id and a status of `active`, `complete` or `blocked`
+  (`ModelGoalStatus`, contract.rs:2337); `plan_projected` (8) a participant, a workspace revision and
+  its items (`id`, `content`, a `pending`/`in_progress`/`blocked`/`awaiting_review`/`completed`
+  status, and the port's own optional `work_id`); `work_projected` (9) a revision and its shared work
+  items with their assignees and states. A status outside its enum is `unknown-goal-status` or
+  `unknown-item-status` from the reader rather than a variant coerced to a neighbour. The fold is its
+  own module with its own refusals: `goal-exists` (a second `goal_created`), `no-goal`, `goal-mismatch`
+  (an update naming another goal), `goal-finished` (any update of a completed goal — the terminal
+  rule), `unknown-work` (a plan item pointing at work the journal never carried), `duplicate-item` and
+  `duplicate-work`; replay carries them with the event index and its own reason, so a diagnostic names
+  the rule that stopped it. The one rule that does not refuse is the model's: a plan projection that is
+  not newer than the one applied is dropped and counted (`plans_stale`), exactly as
+  `session_store.rs:1178-1191` compares revisions, and the drop is decided before the items are
+  examined. `borg_replay::State` now holds the goal, the plan and the work list, with the session
+  fingerprint unchanged (a journal without aggregates keeps its checksum) and a second fingerprint over
+  the aggregates only. `borg daemon` serves the transport while keeping the folded session between
+  connections (`borg_daemon::serve_stateful`, `serve_one` untouched), stamps the sequence, event id and
+  timestamp onto what a client sends — the daemon appends, so a command cannot write the cursor in two
+  places — and answers with the reply frame *and* a new state frame (opcode 6) carrying the aggregates,
+  whose statuses are re-read through the same functions on arrival. The client has `create-goal`,
+  `update-goal`, `set-plan` (a work projection, then a plan that may name it), `list-work` and `attach`,
+  each printing what came back off the socket rather than what it meant to send, and each refusing with
+  the model's own names; `bad-argument` is the command line's own for a command it cannot read. The
+  transport's unknown-tag fixture moved from tag 6 to tag 10 because 6 is now a real kind, and what it
+  prints is unchanged. `borg/tests/aggregates_test.grl` covers every refusal, the stale plan drop, a
+  plan taken over by another participant, a sequence gap, a cut stream, and for every fixture three
+  properties — the same journal through the byte stream, twice-replay identity, and prefix-plus-apply —
+  then runs a whole command session on 127.0.0.1 where each answer is compared with the daemon's own
+  account of what it sent. The committed reference (`borg/tests/parity/ref/src/bin/aggregates.rs`)
+  implements the kinds, the fold, the fingerprint and the command session independently, over its own
+  socket.
+- The Borg transport layer carries the typed event stream over TCP with the refusals the journal
+  already has (`borg/src/frames.grl`, `borg/src/daemon.grl`, `borg/src/client.grl`). A frame is one
+  encoded event — the journal's `u8 tag | u32 LE length | body` — so the wire and the journal are the
+  same bytes by construction (`frame_of` is `encode_stream` over a one-event journal, `frames` is
+  `encode_stream`), and a frame captured off the socket replays through the file reader. Tag `0`
+  marks a control frame: `hello` (version, session), `hello_ok`, `hello_refused` (both versions as
+  numbers), `reply` (the folded sequence/status/events plus any refusal) and `end` (the batch is
+  complete). Refusals are named and numbered, and the reader's codes 20-24 pass through unchanged:
+  `version-mismatch` 10, `session-mismatch` 11, `not-handshaken` 12, `frame-too-large` 13,
+  `short-read` 14, `bad-control` 15, `bad-reply` 16, `replay-refused` 17, then `unknown-tag` 20,
+  `truncated-event` 21, `length-overflow` 22, `bad-field` 23 and `trailing-bytes` 24. A cut stream
+  fails the way the file reader fails, as a function rather than a claim: `journal_code(14)` is 21
+  and `journal_code(13)` is 22, and the test prints both columns for the same bytes. A declared
+  length is refused at the header before its body is waited for, and the ceiling is the journal's
+  own `MAX_EVENT_BODY`, so an accepted frame is an event a journal file could hold. The daemon folds
+  each event as it arrives with `borg_replay::apply` and answers a refusal with the index and the
+  fold's own reason; the client returns that refusal instead of reporting success, and a peer that
+  closes without answering is `short-read` rather than silence. Opening the listener is an explicit
+  grant — `borg_daemon::listen` takes `authority::Authority` and calls `authority::listen`, and
+  `borg_client::connect` calls `authority::connect` — so the grant decides who may listen and who may
+  connect, while `accept`/`read_fd`/`write_fd` stay ambient: what the peer does after connecting is
+  not covered. No authentication, encryption, reconnection or multiplexing, and the docs say so.
+  `borg/tests/frames_test.grl` prints every frame in hex, decodes the capture whole and one byte at a
+  time, hands it to the file path, builds all thirteen refusals from the bytes a peer would send, and
+  runs a real loopback round trip per fixture (a clean fold, a frame that decodes and replays to a
+  refusal, a foreign session, a version mismatch) plus a peer that stops inside a reply frame, and a process grant that opens neither a listener nor a
+  connection; the
+  daemon's account of its answer is compared with the line the client decoded from the socket. The
+  committed reference (`borg/tests/parity/ref/src/bin/frames.rs`) implements the frame layout, the
+  refusal classification and the fold independently, including its own socket, and the module is
+  called `frames` because `borg/src/transport.grl` already holds the local-control channel's rules.
+- Borg journals replay into the in-memory session state (`borg/src/replay.grl`). The module folds a
+  decoded event stream with the rules of `SessionState::reduce`/`apply` (session_store.rs:906-959,
+  1036-1041, 1320-1336) over the five transcript kinds `borg/src/events.grl` carries, and
+  reconstructs exactly what those kinds write: the sequence cursor, when the session started, the
+  activity clock, status and detail, the title with the rule that a generated title is final
+  (session_store.rs:952), the first and latest prompt and the latest reply. It folds typed events
+  rather than bytes, so it cannot disagree with the reader about what an event says, and
+  `replay_stream` propagates the reader's refusal — a cut tail, an unknown tag — instead of folding
+  the rows that arrived before the cut; a refused stream yields no state at all. An event that cannot
+  apply is refused by name with the index that stopped the fold and never skipped or forced:
+  `sequence` (not the expected `last + 1`), `session` (another session's `session_id`),
+  `unknown-actor` and `unknown-message-status` (outside `EventActor`'s and `MessageStatus`'
+  four variants), and `stream` (the reader's own code). The one rule that drops rather than refuses —
+  a title event while the current title was generated — is the model's own rule, so replay counts
+  the drop (`titles_frozen`) instead of rejecting a journal Borg writes. `borg_events` gains typed
+  accessors (`title_value`, `status_value`, `actor_value`, `tokens_value`, ...) so a fold can tell an
+  absent optional from a text that happens to be `-`, and `no_event()`. `borg/tests/replay_test.grl`
+  covers a clean journal, the empty one (which replays to the default state, not an error),
+  out-of-order, unknown actor, unknown message status, a foreign session, the sticky title, and a
+  journal read back from the typed byte stream intact and cut short, then generates journals: a
+  seeded xorshift makes six events per seed and each seed must replay to the same checksum twice and
+  to the same checksum as `prefix + [last]` versus `replay(prefix)` plus a direct `apply` — refusals
+  compared by index and reason, so both sides must fail identically. The committed reference
+  (`borg/tests/parity/ref/src/bin/replay.rs`) is an independent implementation of the same rules and
+  of the byte stream, and the suite compares fingerprints and FNV-1a checksums field by field.
+  `docs/design/borg-agent-port.md` records what replay reconstructs, the refusal table, and what it
+  cannot cover yet: a real journal also carries `PlanProjected`, `SubagentRegistered` and provider
+  events, whose unknown tags the reader refuses, so replaying one fails by name rather than
+  returning the subset it understood.
 - Windows task scheduling is now the same as Linux: a task is green on Windows, not an OS thread.
   One scheduler thread runs the tasks cooperatively, a task runs until it yields or blocks, and
   suspension parks the task rather than the thread. The switch is a Win32 fiber

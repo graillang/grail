@@ -1,0 +1,238 @@
+module borg_client;
+use authority;
+use borg_events;
+use borg_frames;
+use core;
+use host;
+
+// The client half of the transport: one request, one answer, and no way to lose a refusal.
+//
+// `request` is the whole outgoing conversation as one byte string — hello, one frame per event, and
+// the end marker — so a client cannot send half a batch by failing between two writes. `resume`
+// reads the answer from an open connection and returns either what the daemon folded or the refusal
+// that stopped it; a refusal the daemon sent, a handshake it would not accept, and a stream that
+// ended before an answer are all returned as a refusal. Nothing here reports a session as fine when
+// no answer arrived.
+//
+// Connecting is a grant: `connect` takes an `authority::Authority`, so a client that was not given
+// `authority::sockets()` cannot reach a daemon at all. What the grant does *not* decide is anything
+// after the connection is up — the bytes are read and written with ambient host operations, and a
+// client that connects can say whatever it likes.
+
+fn same<a, b>(left: (&a [u8]), right: (&b [u8])) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    for i in left.len() {
+        if left[i] != right[i] {
+            return false;
+        }
+    }
+    return true;
+}
+
+pub fn connect<a>(grants: (&a authority::Authority), address: (&[u8]), port: u64) -> u64 |? authority::Error {
+    return authority::connect(grants, address, port)?;
+}
+
+// The bytes a client sends for one batch: hello, the events, the end marker.
+pub fn request<a, b>(session: (&a [u8]), events: (&b borg_events::Event[])) -> u8[] {
+    mut out = borg_frames::hello(borg_frames::PROTOCOL_VERSION, session);
+    framed := borg_frames::frames(events);
+    for byte in framed {
+        out.push(byte);
+    }
+    closing := borg_frames::end_marker();
+    for byte in closing {
+        out.push(byte);
+    }
+    return out;
+}
+
+// Write a request to an open connection in one call, so a client cannot send half a batch.
+pub fn send(fd: u64, bytes: (&[u8])) -> u64 {
+    return host::write_fd(fd, view(bytes));
+}
+
+// One answer from an open connection. A handshake acknowledgement is checked against the session
+// that was asked for rather than skipped, so a daemon that acknowledges the wrong session is a
+// refusal and not a success.
+pub fn resume<a>(fd: u64, session: (&a [u8])) -> borg_frames::Reply | borg_frames::Refusal {
+    mut state = borg_frames::transport();
+    while true {
+        match borg_frames::next(&mut state) {
+            Frame(frame) => {
+                if !borg_frames::frame_is_control(&frame) {
+                    return borg_frames::refused(
+                        borg_frames::BAD_CONTROL,
+                        "event frame from the daemon"
+                    );
+                }
+                op := borg_frames::opcode_of(&frame);
+                if op == borg_frames::opcode_hello_ok() {
+                    match borg_frames::hello_ok_of(&frame) {
+                        echoed: borg_frames::Hello => {
+                            acknowledged := borg_frames::hello_session(&echoed);
+                            if !same(&acknowledged, session) {
+                                return borg_frames::refused(
+                                    borg_frames::SESSION_MISMATCH,
+                                    "the daemon acknowledged another session"
+                                );
+                            }
+                        },
+                        failure: borg_frames::Refusal => { return failure; }
+                    }
+                } else if op == borg_frames::opcode_hello_refused() {
+                    return borg_frames::hello_refusal_of(&frame);
+                } else if op == borg_frames::opcode_reply() {
+                    match borg_frames::reply_of(&frame) {
+                        reply: borg_frames::Reply => { return reply; },
+                        failure: borg_frames::Refusal => { return failure; }
+                    }
+                } else {
+                    return borg_frames::refused(
+                        borg_frames::BAD_CONTROL,
+                        "unexpected control opcode"
+                    );
+                }
+            },
+            Pending => {
+                incoming := host::read_fd(fd, 65536);
+                if incoming.len() == 0 {
+                    match borg_frames::close(&mut state) {
+                        Some(answer) => { return borg_frames::copy_refusal(&answer); },
+                        None => {
+                            return borg_frames::refused(
+                                borg_frames::SHORT_READ,
+                                "the daemon closed without an answer"
+                            );
+                        }
+                    }
+                }
+                borg_frames::feed(&mut state, view(incoming));
+            },
+            Refused(answer) => { return answer; }
+        }
+    }
+    return borg_frames::refused(borg_frames::SHORT_READ, "no answer");
+}
+
+// ---- the answer a stateful daemon gives ----
+//
+// A daemon that keeps its session answers twice: the reply frame for the batch, then the state frame
+// for the session as it now stands. `resume` stops at the reply, which is all a client that sent a
+// whole journal needs; this is the reader that keeps going. It is a second loop rather than a flag
+// because `resume` leaves the bytes that arrived after the reply in a transport it drops, so a
+// second call would never see the state frame.
+
+pub struct Answered {
+    reply: borg_frames::Reply,
+    snapshot: borg_frames::Snapshot
+}
+
+pub fn answered_reply<a>(value: (&a Answered)) -> borg_frames::Reply {
+    return borg_frames::copy_reply(&value.reply);
+}
+
+pub fn answered_state<a>(value: (&a Answered)) -> borg_frames::Snapshot {
+    return borg_frames::copy_snapshot(&value.snapshot);
+}
+
+pub fn resume_answered<a>(fd: u64, session: (&a [u8])) -> Answered | borg_frames::Refusal {
+    mut state = borg_frames::transport();
+    mut reply = borg_frames::empty_reply();
+    while true {
+        match borg_frames::next(&mut state) {
+            Frame(frame) => {
+                if !borg_frames::frame_is_control(&frame) {
+                    return borg_frames::refused(
+                        borg_frames::BAD_CONTROL,
+                        "event frame from the daemon"
+                    );
+                }
+                op := borg_frames::opcode_of(&frame);
+                if op == borg_frames::opcode_hello_ok() {
+                    match borg_frames::hello_ok_of(&frame) {
+                        echoed: borg_frames::Hello => {
+                            acknowledged := borg_frames::hello_session(&echoed);
+                            if !same(&acknowledged, session) {
+                                return borg_frames::refused(
+                                    borg_frames::SESSION_MISMATCH,
+                                    "the daemon acknowledged another session"
+                                );
+                            }
+                        },
+                        failure: borg_frames::Refusal => { return failure; }
+                    }
+                } else if op == borg_frames::opcode_hello_refused() {
+                    return borg_frames::hello_refusal_of(&frame);
+                } else if op == borg_frames::opcode_reply() {
+                    match borg_frames::reply_of(&frame) {
+                        parsed: borg_frames::Reply => { reply = parsed; },
+                        failure: borg_frames::Refusal => { return failure; }
+                    }
+                } else if op == borg_frames::opcode_state() {
+                    match borg_frames::state_of(&frame) {
+                        snapshot: borg_frames::Snapshot => {
+                            return Answered { reply: reply, snapshot: snapshot };
+                        },
+                        failure: borg_frames::Refusal => { return failure; }
+                    }
+                } else {
+                    return borg_frames::refused(
+                        borg_frames::BAD_CONTROL,
+                        "unexpected control opcode"
+                    );
+                }
+            },
+            Pending => {
+                incoming := host::read_fd(fd, 65536);
+                if incoming.len() == 0 {
+                    match borg_frames::close(&mut state) {
+                        Some(answer) => { return borg_frames::copy_refusal(&answer); },
+                        None => {
+                            return borg_frames::refused(
+                                borg_frames::SHORT_READ,
+                                "the daemon closed without a state"
+                            );
+                        }
+                    }
+                }
+                borg_frames::feed(&mut state, view(incoming));
+            },
+            Refused(answer) => { return answer; }
+        }
+    }
+    return borg_frames::refused(borg_frames::SHORT_READ, "no answer");
+}
+
+// ---- what the client shows ----
+//
+// One line per answer, in the shape the rest of the port reports in: the facts when the fold
+// succeeded, and the refusal — named, with the index it stopped at — when it did not.
+
+pub fn reply_line<a>(value: (&a borg_frames::Reply)) -> string {
+    if borg_frames::reply_refused(value) {
+        return format(
+            "refused {} at {} detail {}",
+            borg_frames::reply_name(value),
+            borg_frames::reply_at(value),
+            borg_frames::reply_detail(value)
+        );
+    }
+    return format(
+        "ok sequence {} status {} events {}",
+        borg_frames::reply_sequence(value),
+        borg_frames::reply_status(value),
+        borg_frames::reply_events(value)
+    );
+}
+
+pub fn refusal_line<a>(value: (&a borg_frames::Refusal)) -> string {
+    return format(
+        "refused {} at {} detail {}",
+        borg_frames::refusal_name(value),
+        borg_frames::refusal_at(value),
+        borg_frames::refusal_detail(value)
+    );
+}
