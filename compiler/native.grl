@@ -401,7 +401,31 @@ struct C {
     // The link inputs each module's `extern "C" lib "..."` declarations ask for. `libs` stays
     // program-wide (that is what the stream carries); this attributes them to a module so an
     // interface can re-request them.
-    lib_owner: u8[][]
+    lib_owner: u8[][],
+    // B1 stage 4: one compiler invocation per module. `module_only` is the module this run emits
+    // (empty for a whole-program build), `no_entry` suppresses entry-stub synthesis, `emit_unit` is
+    // the identity content-addressed names are keyed on (empty for a whole-program build, the
+    // module's name otherwise), and `deps_path` names the file this run reports what it read to.
+    module_only: u8[],
+    no_entry: u64,
+    emit_unit: u8[],
+    deps_path: u8[],
+    dep_ifaces: u8[][],
+    dep_sources: u8[][],
+    // Sources a generic body was replayed from; they are not on the command line.
+    extra_files: u8[][],
+    // Modules whose source this run parsed. Their declarations are already installed, so an
+    // interface for one of them must never be read on top.
+    source_modules: u8[][],
+    // Memoised content-addressed names. A table index would be cheap and wrong across invocations,
+    // so each name is computed once from what it names and cached here.
+    spec_names: u8[][],
+    drop_names: u8[][],
+    impl_names: u8[][],
+    // Types whose drop helper this run's code calls, in discovery order, and a flag per type so
+    // asking twice is O(1): the request is on the hot path of every scope that ends.
+    drop_wanted: u64[],
+    drop_seen: u64[]
 }
 
 fn same<a, b>(x: &a [u8], y: &b [u8]) -> bool {
@@ -485,40 +509,42 @@ fn part<a, b>(c: (&a mut C), name: &b [u8]) -> unit {
     o(&mut c, view("\n.text\n"));
     return ();
 }
-// Decimal digits of a synthetic module suffix plus one, or 0 when the suffix is not a number.
-fn module_index<a>(name: &a [u8], from: u64) -> u64 {
-    if name.len() <= from {
-        return 0;
-    }
-    mut n = 0;
-    mut i = from;
-    while i < name.len() {
-        d := name[i];
-        if (d < 48) || (57 < d) {
-            return 0;
-        }
-        n = n * 10 + (d - 48);
-        i += 1;
-    }
-    return n + 1;
-}
-// The source module of an emission unit. `.impl_N` and `.inherent_N` are mangling names for one
-// declaration inside a file, not modules a build could name, so they resolve to the module that
-// file declares; every other name is already the module.
+// The module a unit's code belongs to. A private unit (`.inherent$…`, `.interface$…`, `.impl$…`)
+// names its owning module as the first `$`-separated field, so the part a body lands in follows the
+// module it belongs to and not a table index; every other name is already the module.
 fn unit_module<a, b>(c: (&a mut C), m: &b [u8]) -> u8[] {
-    if starts_with(view(m), view(".impl_")) {
-        n := module_index(view(m), 6);
-        if (n != 0) & (n <= c.implementations.len()) {
-            return c.implementations[n - 1].module.copy();
+    if starts_with(view(m), view(".")) {
+        mut i = 0;
+        while (i < m.len()) & (m[i] != 36) {
+            i += 1;
         }
-    }
-    if starts_with(view(m), view(".inherent_")) {
-        n := module_index(view(m), 10);
-        if (n != 0) & (n <= c.decls.len()) {
-            return c.decls[n - 1].module.copy();
+        if i < m.len() {
+            mut j = i + 1;
+            mut out = u8[];
+            while (j < m.len()) & (m[j] != 36) {
+                out.push(m[j]);
+                j += 1;
+            }
+            if out.len() != 0 {
+                return out;
+            }
         }
     }
     return m.copy();
+}
+// The symbol a closure body is emitted under. The index is per invocation, so the emitting unit is
+// part of the name: two modules that instantiate the same foreign generic each emit the closure it
+// creates, and neither may name it the same as the other.
+fn closure_symbol<a, b>(c: (&a mut C), module: &b [u8], name: &b [u8]) -> unit {
+    if c.emit_unit.len() == 0 {
+        owner := unit_module(&mut c, view(module));
+        mangle(&mut c, view(owner), view(name));
+        return ();
+    }
+    unit := c.emit_unit.copy();
+    owner := unit_module(&mut c, view(unit));
+    mangle(&mut c, view(owner), view(name));
+    return ();
 }
 // A part file name: `STEM.NNN.module.s`, numbered in stream order so the manifest order is also the
 // order `ls` shows. Characters that are not identifier-safe become '_' (a module name is an
@@ -1320,7 +1346,7 @@ fn tls_bridge<a>(c: (&a mut C)) -> bool {
     return (c.plat == 0) && ((c.target == 0) || (c.target == 1) || (c.target == 2));
 }
 fn tls_bss<a>(c: (&a mut C)) -> unit {
-    if c.split != 0 {
+    if (c.split != 0) || (c.emit_unit.len() != 0) {
         o(&mut c, view(".globl rt_state\n.globl rt_host_tls\n.globl rt_grail_tls\n"));
     }
     if tls_bridge(&mut c) {
@@ -1969,7 +1995,7 @@ fn func_directive<a, b, d>(c: (&a mut C), m: &b [u8], name: &b [u8], symbol: &d 
     // --split assembles one object per module, so a definition another part calls has to be visible
     // to the linker: every function becomes global. The code is unchanged, and the single-file
     // build keeps its local symbols.
-    if c.split != 0 {
+    if (c.split != 0) || (c.emit_unit.len() != 0) {
         o(&mut c, view(".globl "));
         export_name(&mut c, view(m), view(name), view(symbol), export);
         o(&mut c, view("\n"));
@@ -3549,8 +3575,10 @@ fn alias_field<a>(c: (&a mut C), slot: u64, ty: u64, base: u64, field: u64, via:
     return val(slot, ty);
 }
 fn drop_name<a>(c: (&a mut C), ty: u64) -> unit {
+    want_drop(&mut c, ty);
+    key := drop_key(&mut c, ty);
     o(&mut c, view(".D"));
-    on(&mut c, ty);
+    o(&mut c, view(key));
     return ();
 }
 fn release<a>(c: (&a mut C), index: u64) -> unit {
@@ -3828,9 +3856,22 @@ fn skip_braces<a>(c: (&a mut C)) -> unit {
     }
     return ();
 }
-fn load_file<a>(c: (&a mut C), index: u64) -> unit {
+// The path of input file `index`. Files 2..n-1 are the command line's; a generic body replayed from
+// another module's source is registered past them, because that source is not on the command line
+// of a run that compiles one module.
+fn source_path<a>(c: (&a mut C), index: u64) -> u8[] {
     offset := c.arg_offset;
-    path := host::arg(index + offset);
+    n := host::argc() - offset;
+    if index < n {
+        return copy_bytes(view(host::arg(index + offset)));
+    }
+    if index - n < c.extra_files.len() {
+        return c.extra_files[index - n].copy();
+    }
+    return u8[];
+}
+fn load_file<a>(c: (&a mut C), index: u64) -> unit {
+    path := source_path(&mut c, index);
     if host::exists(view(path)) == 0 {
         host::print(view("grail: cannot read input file "));
         host::print(view(path));
@@ -4362,10 +4403,138 @@ fn require_interfaces<a, b, d>(c: (&a mut C), arguments: (&b u64[]), sets: (&d u
     }
     return ();
 }
-fn private_module<a>(prefix: &a [u8], id: u64) -> u8[] {
-    mut out = prefix.copy();
-    decimal(&mut out, id);
+// ---- content-addressed names for compiler-private units (B1 stage 4) ----
+// A private unit is a lookup key: a type's own methods, an interface's abstract methods, one
+// implementation of an interface for a type. The key also reaches the symbol table, so it is
+// spelled from the identity of what it names - the declaring module and name, the contract, the
+// implemented type's canonical spelling - and never from a table index. Two modules compiled in
+// separate invocations number their tables differently, and an index in a symbol name is a
+// cross-object reference that only agrees by luck; docs/design/separate-compilation.md, "one
+// compiler invocation per module", is where that is recorded.
+fn key_hash<a>(data: &a [u8]) -> u8[] {
+    d := sha256(data);
+    digits := "0123456789abcdef";
+    mut out = u8[];
+    for i in 8 {
+        b := d[i];
+        out.push(digits[b >> 4]);
+        out.push(digits[b & 15]);
+    }
     return out;
+}
+// The spelling two invocations agree on for one type: a named record by `module::name`, everything
+// else structurally. It is the interface format's spelling, which is already the one canonical
+// description of a type the compiler has.
+fn type_identity<a>(c: (&a mut C), ty: u64) -> u8[] {
+    mut out = u8[];
+    iface_type_raw(&mut out, &mut c, ty);
+    // `f32` and `f64` are both kind 21 and the interface spelling does not separate them (only the
+    // declared width does), so a name keyed on the spelling alone would file `impl Ord for f32` and
+    // `impl Ord for f64` under one symbol. The width is appended for exactly that kind; every other
+    // kind's payload is either in the spelling already or is a table index, which must stay out.
+    if ty_kind(&mut c, ty) == 21 {
+        out.push(58);
+        decimal(&mut out, ty_arg(&mut c, ty));
+    }
+    return out;
+}
+// The unit a type's own methods live in: `.inherent$<module>$<Type>`, an identity two modules
+// agree on. `index` is 0-based, the same convention `c.inherent` uses.
+fn inherent_module<a>(c: (&a mut C), index: u64) -> u8[] {
+    mut out = copy_bytes(view(".inherent$"));
+    push_bytes(&mut out, view(c.decls[index].module));
+    out.push(36);
+    push_bytes(&mut out, view(c.decls[index].name));
+    return out;
+}
+// The unit an interface's abstract methods live in; `index` is 1-based, like `c.interfaces`.
+fn interface_module<a>(c: (&a mut C), index: u64) -> u8[] {
+    mut out = copy_bytes(view(".interface$"));
+    push_bytes(&mut out, view(c.interfaces[index - 1].module));
+    out.push(36);
+    push_bytes(&mut out, view(c.interfaces[index - 1].name));
+    return out;
+}
+// The unit one implementation's methods live in: the module that wrote it, the contract it
+// implements and the type it implements that contract for. `index` is 1-based, like
+// `c.implementations`.
+fn impl_module<a>(c: (&a mut C), index: u64) -> u8[] {
+    while c.impl_names.len() <= index {
+        c.impl_names.push(u8[]);
+    }
+    cached := &c.impl_names[index];
+    if cached.len() != 0 {
+        return cached.copy();
+    }
+    owner := c.implementations[index - 1].module.copy();
+    contract := c.implementations[index - 1].contract;
+    ty := c.implementations[index - 1].ty;
+    cm := c.interfaces[contract - 1].module.copy();
+    cn := c.interfaces[contract - 1].name.copy();
+    mut out = copy_bytes(view(".impl$"));
+    push_bytes(&mut out, view(owner));
+    out.push(36);
+    push_bytes(&mut out, view(cm));
+    out.push(36);
+    push_bytes(&mut out, view(cn));
+    out.push(36);
+    push_bytes(&mut out, view(key_hash(view(type_identity(&mut c, ty)))));
+    exchange(&mut c.impl_names[index], out.copy());
+    return out;
+}
+// The identity a drop helper is filed under: the emitting unit plus the type's spelling. The unit is
+// part of it because a closure's environment record is named `.closure::envN` - unique inside one
+// compilation, and not unique across two.
+fn drop_key<a>(c: (&a mut C), ty: u64) -> u8[] {
+    while c.drop_names.len() <= ty {
+        c.drop_names.push(u8[]);
+    }
+    cached := &c.drop_names[ty];
+    if cached.len() != 0 {
+        return cached.copy();
+    }
+    mut text = c.emit_unit.copy();
+    text.push(10);
+    push_bytes(&mut text, view(type_identity(&mut c, ty)));
+    key := key_hash(view(text));
+    exchange(&mut c.drop_names[ty], key.copy());
+    return key;
+}
+// The identity a specialization is filed under: the emitting unit plus the canonical arguments.
+// Two modules that instantiate the same foreign generic emit the same body twice rather than
+// relying on a linker to pick one, so the unit is in the name.
+fn spec_key<a>(c: (&a mut C), index: u64) -> u8[] {
+    while c.spec_names.len() <= index {
+        c.spec_names.push(u8[]);
+    }
+    cached := &c.spec_names[index];
+    if cached.len() != 0 {
+        return cached.copy();
+    }
+    mut text = c.emit_unit.copy();
+    text.push(10);
+    for i in c.specs[index].args.len() {
+        arg := c.specs[index].args[i];
+        push_bytes(&mut text, view(type_identity(&mut c, arg)));
+        text.push(10);
+    }
+    key := key_hash(view(text));
+    exchange(&mut c.spec_names[index], key.copy());
+    return key;
+}
+// Whether a drop helper for `ty` is one this run has to emit.
+fn want_drop<a>(c: (&a mut C), ty: u64) -> unit {
+    while c.drop_seen.len() <= ty {
+        c.drop_seen.push(0);
+    }
+    if c.drop_seen[ty] != 0 {
+        return ();
+    }
+    exchange(&mut c.drop_seen[ty], 1);
+    if needs_drop(&mut c, ty) {
+        c.drop_wanted.push(ty);
+    }
+    return ();
 }
 fn region_id<a>(c: (&a mut C)) -> u64 {
     n := ident(&mut c);
@@ -4421,6 +4590,8 @@ fn lifetime_parameters<a>(c: (&a mut C)) -> unit {
                                     m = imported;
                                 }
                             }
+                            named_module := m.copy();
+                            ensure_iface(&mut c, view(named_module));
                             id := ensure_interface(&mut c, m, n);
                             for i in requirements.len() {
                                 if requirements[i] == id {
@@ -4857,7 +5028,94 @@ fn require_type<a>(c: (&a mut C), actual: u64, expected: u64) -> unit {
     return ();
 }
 // Type alias index + 1, or 0.
+// ---- B1 stage 4: declarations on demand ----
+// A module compiled alone is handed interfaces, not sources. Its own file is parsed; every other
+// module's declarations are installed from `DIR/<module>.iface` the first time the source names
+// anything in it, which makes the set of interfaces a module reads a fact the compiler can report
+// (see `write_deps`) instead of a graph the driver has to guess.
+fn ensure_iface<a, b>(c: (&a mut C), name: &b [u8]) -> unit {
+    if c.iface_dir.len() == 0 {
+        return ();
+    }
+    if name.len() == 0 || name[0] == 46 {
+        // An empty or compiler-private (`.impl$…`) name is not a module a build could name.
+        return ();
+    }
+    if same(view(name), view("runtime")) || same(view(name), view("host")) {
+        // The runtime is compiled from source and the host surface is built in.
+        return ();
+    }
+    for i in c.source_modules.len() {
+        if same(view(c.source_modules[i]), view(name)) {
+            // This run parses that module's own source: its declarations are already installed.
+            return ();
+        }
+    }
+    for i in c.dep_ifaces.len() {
+        if same(view(c.dep_ifaces[i]), view(name)) {
+            return ();
+        }
+    }
+    file := iface_join(view(c.iface_dir), view(name), view(".iface"));
+    if host::exists(view(file)) == 0 {
+        if c.module_only.len() == 0 {
+            // A whole-program build may simply not list the module; the lookup miss says so in the
+            // usual way. A per-module build has been handed the interface directory, and a module
+            // missing from it is a build that cannot be finished - name it.
+            mut msg = u8[];
+            push_bytes(&mut msg, view("module `"));
+            push_bytes(&mut msg, view(name));
+            push_bytes(&mut msg, view("` is not in this interface directory; run `grail check --interface "));
+            push_bytes(&mut msg, view(c.iface_dir));
+            push_bytes(&mut msg, view("` to write it"));
+            iface_refuse(view(file), view(msg));
+        }
+        return ();
+    }
+    // Claim the module before loading it: an interface names types of other modules, so the reader
+    // can recurse into this function, and a second claim would load the same file twice.
+    c.dep_ifaces.push(name.copy());
+    recorded := iface_recorded_source(view(file));
+    mut source = recorded.copy();
+    if (source.len() == 0) || (host::exists(view(source)) == 0) {
+        dir := c.iface_dir.copy();
+        source = path_join_name(&mut c, view(dir), view(recorded));
+    }
+    if source.len() == 0 {
+        mut msg = u8[];
+        push_bytes(&mut msg, view("records its source as \""));
+        push_bytes(&mut msg, view(recorded));
+        push_bytes(&mut msg, view("\", which is not there; a module compiled against an interface needs it for its generic bodies"));
+        iface_refuse(view(file), view(msg));
+    }
+    iface_load(&mut c, view(file), view(source));
+    return ();
+}
+// The `source "…"` line of an interface, read without parsing the whole file.
+fn iface_recorded_source<a>(path: &a [u8]) -> u8[] {
+    text := host::read_file(view(path));
+    rows := iface_lines(&text);
+    for i in rows.len() {
+        row := rows[i].copy();
+        if (row.len() < 2) || (row[0] != 47) || (row[1] != 47) {
+            mut p = ip_here(view(row), view(path), i + 1);
+            key := ip_word(&mut p);
+            if same(view(key), view("source")) {
+                return ip_quoted(&mut p);
+            }
+        }
+    }
+    return u8[];
+}
 fn find_alias<a, b, d>(c: (&a mut C), m: &b [u8], n: &d [u8]) -> u64 {
+    a := find_alias_scan(&mut c, view(m), view(n));
+    if a != 0 {
+        return a;
+    }
+    ensure_iface(&mut c, view(m));
+    return find_alias_scan(&mut c, view(m), view(n));
+}
+fn find_alias_scan<a, b, d>(c: (&a mut C), m: &b [u8], n: &d [u8]) -> u64 {
     for i in c.aliases.len() {
         a := &c.aliases[i];
         if same(view(a.module), view(m)) & same(view(a.name), view(n)) {
@@ -4885,9 +5143,22 @@ fn find_decl<a, b, d>(c: (&a mut C), m: &b [u8], n: &d [u8]) -> u64 {
     if same(view(m), view("hashmap")) & same(view(n), view("Map")) & !same(view(here), view("hashmap")) {
         return 0;
     }
+    d := find_decl_internal(&mut c, m, n);
+    if d != 0 {
+        return d;
+    }
+    ensure_iface(&mut c, view(m));
     return find_decl_internal(&mut c, m, n);
 }
 fn find_func<a, b, d>(c: (&a mut C), m: &b [u8], n: &d [u8]) -> u64 {
+    f := find_func_scan(&mut c, view(m), view(n));
+    if f != 0 {
+        return f;
+    }
+    ensure_iface(&mut c, view(m));
+    return find_func_scan(&mut c, view(m), view(n));
+}
+fn find_func_scan<a, b, d>(c: (&a mut C), m: &b [u8], n: &d [u8]) -> u64 {
     for i in c.funcs.len() {
         x := &c.funcs[i];
         if same(view(x.module), view(m)) & same(view(x.name), view(n)) {
@@ -4929,6 +5200,12 @@ fn vec_of<a>(c: (&a mut C), e: u64) -> u64 {
 }
 fn named_type<a>(c: (&a mut C), m: u8[], n: u8[], args: u64[]) -> u64 {
     mut d = find_decl_internal(&mut c, view(m), view(n));
+    if d == 0 {
+        // `T?` and `T | E` name a standard-library declaration, which a module compiled alone
+        // reads from that module's interface like any other.
+        ensure_iface(&mut c, view(m));
+        d = find_decl_internal(&mut c, view(m), view(n));
+    }
     if d == 0 {
         fail(&mut c, view("concise type needs its standard library module"));
     }
@@ -7098,10 +7375,12 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     export := c.pending_ext;
     export_symbol := c.pending_symbol.copy();
     if c.current_impl != 0 {
-        m = private_module(view(".impl_"), c.current_impl);
+        impl := c.current_impl;
+        m = impl_module(&mut c, impl);
     }
     if c.inherent != 0 {
-        m = private_module(view(".inherent_"), c.inherent - 1);
+        here := c.inherent;
+        m = inherent_module(&mut c, here - 1);
     }
     exchange(&mut c.locals, Local[]);
     // The call-flex hint record indexes `locals` and names token positions of the function being
@@ -7228,7 +7507,10 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
                 );
             }
         }
-        entry := main
+        // `--no-entry`: this run emits a module that does not hold the entry, so nothing in it is
+        // the process entry even when it looks like one.
+        entry := (c.no_entry == 0)
+            && (main
             || (
                 c.current_impl == 0
                     && c.inherent == 0
@@ -7237,7 +7519,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
                     && public != 0
                     && count < 2
                     && typecount == 0
-            );
+            ));
         file := c.file;
         raw := c.raw;
         bounds := copy_numbers(&c.type_bounds);
@@ -7289,8 +7571,15 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     // expects rdi, rsi and xmm6-xmm15 preserved; the body uses Grail's SysV-shaped convention. A
     // callback is therefore a Win64 thunk under the C symbol that saves those registers, moves
     // the arguments and calls the body, which is emitted under `<symbol>_grail_body`.
-    unit := unit_module(&mut c, view(m));
-    part(&mut c, view(unit));
+    if c.emit_unit.len() == 0 {
+        unit := unit_module(&mut c, view(m));
+        part(&mut c, view(unit));
+    } else {
+        // One invocation, one module: every body it emits - its own, a replayed generic's, a drop
+        // helper's - belongs to this module's object.
+        unit := c.emit_unit.copy();
+        part(&mut c, view(unit));
+    }
     mut body_symbol = u8[];
     push_bytes(&mut body_symbol, view(export_symbol));
     if (c.target == 3) & (export == 2) {
@@ -7486,7 +7775,7 @@ fn interface_declaration<a>(c: (&a mut C), pass: u64) -> unit {
         if c.tnames.len() != 0 {
             fail(&mut c, view("interface method type parameters are not implemented yet"));
         }
-        module := private_module(view(".interface_"), id);
+        module := interface_module(&mut c, id);
         if find_func(&mut c, view(module), view(name)) != 0 {
             fail(&mut c, view("duplicate interface method"));
         }
@@ -7709,6 +7998,8 @@ fn implementation<a>(c: (&a mut C), pass: u64) -> unit {
             module = imported;
         }
     }
+    named_module := module.copy();
+    ensure_iface(&mut c, view(named_module));
     contract := find_interface(&c, view(module), view(name));
     if contract == 0 {
         fail(&mut c, view("unknown implemented interface"));
@@ -7837,7 +8128,7 @@ fn check_interfaces<a>(c: (&a mut C)) -> unit {
     return ();
 }
 fn interface_call<a, b>(c: (&a mut C), contract: u64, name: &b [u8]) -> Val {
-    module := private_module(view(".interface_"), contract);
+    module := interface_module(&mut c, contract);
     return call(&mut c, view(module), view(name));
 }
 // const NAME: T = literal; (integers, bool, text). Uses inline the value.
@@ -9978,12 +10269,10 @@ fn decimal<a>(out: (&a mut u8[]), n: u64) -> unit {
     return ();
 }
 fn special_name<a>(c: (&a mut C), index: u64) -> u8[] {
-    spec := &c.specs[index];
-    template := spec.template;
-    f := &c.funcs[template];
-    mut out = f.name.copy();
+    template := c.specs[index].template;
+    mut out = c.funcs[template].name.copy();
     out.push(36);
-    decimal(&mut out, index);
+    push_bytes(&mut out, view(spec_key(&mut c, index)));
     return out;
 }
 fn specialize<a, b>(c: (&a mut C), template: u64, map: (&b u64[])) -> u64 {
@@ -10053,10 +10342,9 @@ fn emit_specializations<a>(c: (&a mut C)) -> unit {
     count := c.funcs.len();
     exchange(&mut c.validating, 1);
     for i in count {
-        f := &c.funcs[i];
-        types := f.types;
-        contract := f.contract;
-        if (types != 0) & (contract == 0) {
+        types := c.funcs[i].types;
+        contract := c.funcs[i].contract;
+        if (types != 0) & (contract == 0) & (template_here(&mut c, i) != 0) {
             saved := c.out.len();
             part_mark := c.part.copy();
             replay_function(&mut c, i);
@@ -10089,6 +10377,22 @@ fn emit_specializations<a>(c: (&a mut C)) -> unit {
     }
     return ();
 }
+// Whether a template's body is in this run: its own module's code is, another module's interface
+// carries declarations and a body marker, not a body. A module compiled alone can only validate the
+// templates it could replay, and only those belong to its object.
+fn template_here<a>(c: (&a mut C), index: u64) -> u64 {
+    owner := c.funcs[index].module.copy();
+    return unit_here(&mut c, view(owner));
+}
+// Whether a unit's code belongs to this run's object. A whole-program run owns everything.
+fn unit_here<a, b>(c: (&a mut C), module: &b [u8]) -> u64 {
+    if c.emit_unit.len() == 0 {
+        return 1;
+    }
+    here := unit_module(&mut c, view(module));
+    unit := c.emit_unit.copy();
+    return u64(same(view(here), view(unit)));
+}
 fn type_args_for_spec<a>(c: (&a mut C), index: u64) -> u64[] {
     spec := &c.specs[index];
     mut out = u64[];
@@ -10108,7 +10412,7 @@ fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
         here := module_copy(&mut c);
         d := find_decl(&mut c, view(here), view(m));
         if d != 0 {
-            owner := private_module(view(".inherent_"), d - 1);
+            owner := inherent_module(&mut c, d - 1);
             f = find_func(&mut c, view(owner), view(name));
         }
     }
@@ -10639,9 +10943,17 @@ fn emit_fn_thunk<a>(c: (&a mut C)) -> unit {
     if c.fn_thunk_used == 0 {
         return ();
     }
-    part(&mut c, view("runtime"));
-    if c.split != 0 {
-        o(&mut c, view(".globl grail_fn_thunk\n"));
+    if c.emit_unit.len() != 0 {
+        // Every module that takes a function value needs the one dispatcher; its body is a fixed
+        // sequence, so a weak definition in each object is the same body once the linker is done.
+        unit := c.emit_unit.copy();
+        part(&mut c, view(unit));
+        o(&mut c, view(".weak grail_fn_thunk\n.globl grail_fn_thunk\n"));
+    } else {
+        part(&mut c, view("runtime"));
+        if c.split != 0 {
+            o(&mut c, view(".globl grail_fn_thunk\n"));
+        }
     }
     o(&mut c, view("grail_fn_thunk:\npushq %rbp\nmovq %rsp,%rbp\nmovq (%rdi),%rax\nmovq 16(%rax),%rax\n"));
     o(&mut c, view("movq %rsi,%rdi\nmovq %rdx,%rsi\nmovq %rcx,%rdx\nmovq %r8,%rcx\nmovq %r9,%r8\ncall *%rax\nleave\nret\n"));
@@ -14482,10 +14794,11 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
     // The environment's place exists before the captures are stored, so a borrowed capture can
     // record its loan against the field it lands in.
     own(&mut c, obj, fnty);
-    mut symbol = copy_bytes(view("c"));
+    mut symbol = copy_bytes(view("closure$"));
     decimal(&mut symbol, index);
+    here := module_copy(&mut c);
     o(&mut c, view("leaq "));
-    mangle(&mut c, view(".closure"), view(symbol));
+    closure_symbol(&mut c, view(here), view(symbol));
     o(&mut c, view("(%rip),%rax\n"));
     code := save(&mut c);
     rec_store(&mut c, obj, 0, code);
@@ -14693,6 +15006,10 @@ fn closure_body_end<a>(c: (&a mut C), start: u64) -> u64 {
 fn emit_closures<a>(c: (&a mut C)) -> unit {
     mut i = 0;
     while i < c.closures.len() {
+        // One invocation emits one module: a closure another module created is that module's code.
+        here := c.closures[i].module.copy();
+        skip := 1 - unit_here(&mut c, view(here));
+        if skip == 0 {
         cl := &c.closures[i];
         file := cl.file;
         start := cl.start;
@@ -14765,8 +15082,8 @@ fn emit_closures<a>(c: (&a mut C)) -> unit {
         count := 1 + params.len();
         unit := module_copy(&mut c);
         part(&mut c, view(unit));
-        func_directive(&mut c, view(".closure"), view(symbol), view(symbol), 0);
-        mangle(&mut c, view(".closure"), view(symbol));
+        func_directive(&mut c, view(unit), view(symbol), view(symbol), 0);
+        closure_symbol(&mut c, view(unit), view(symbol));
         o(&mut c, view(":\npushq %rbp\nmovq %rsp,%rbp\n"));
         frame := label(&mut c);
         if c.target == 4 {
@@ -14821,6 +15138,7 @@ fn emit_closures<a>(c: (&a mut C)) -> unit {
         on(&mut c, div(n + 1, 2) * 16);
         c.out.push(10);
         exchange(&mut c.closure_env, 0);
+        }
         i += 1;
     }
     return ();
@@ -15127,7 +15445,7 @@ fn show_value<a>(c: (&a mut C), input: u64, inty: u64, xty: u64) -> Val {
         return val(0, 18446744073709551615);
     }
     d := ty_arg(&mut c, xty);
-    owner := private_module(view(".inherent_"), d);
+    owner := inherent_module(&mut c, d);
     f := find_func(&mut c, view(owner), view("show"));
     if f == 0 {
         return val(0, 18446744073709551615);
@@ -15260,7 +15578,7 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
     k := ty_kind(&mut c, xty);
     if k == 8 {
         d := ty_arg(&mut c, xty);
-        mut owner = private_module(view(".inherent_"), d);
+        mut owner = inherent_module(&mut c, d);
         mut method = find_func(&mut c, view(owner), view(name));
         // Otherwise an interface method implemented for this type: value.less(other).
         if method == 0 {
@@ -15269,7 +15587,7 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
                 item := &c.implementations[i];
                 ity := item.ty;
                 if same_type(&mut c, ity, xty) != 0 {
-                    candidate := private_module(view(".impl_"), i + 1);
+                    candidate := impl_module(&mut c, i + 1);
                     m2 := find_func(&mut c, view(candidate), view(name));
                     if m2 != 0 {
                         if found != 0 {
@@ -16762,6 +17080,8 @@ fn primary<a>(c: (&a mut C)) -> Val {
 
         if eat(&mut c, view("::")) {
             third := ident(&mut c);
+            named := first.copy();
+            ensure_iface(&mut c, view(named));
             interface := find_interface(&c, view(first), view(second));
             if interface != 0 {
                 return interface_call(&mut c, interface, view(third));
@@ -16778,7 +17098,7 @@ fn primary<a>(c: (&a mut C)) -> Val {
         }
         d := find_decl(&mut c, view(m), view(first));
         if d != 0 {
-            owner := private_module(view(".inherent_"), d - 1);
+            owner := inherent_module(&mut c, d - 1);
             if find_func(&mut c, view(owner), view(second)) != 0 {
                 return call(&mut c, view(owner), view(second));
             }
@@ -21544,16 +21864,37 @@ fn with_link_notes<a, b>(libs: (&a u8[][]), body: &b [u8]) -> u8[] {
     return out;
 }
 fn emit_drops<a>(c: (&a mut C)) -> unit {
+    if c.emit_unit.len() != 0 {
+        // A module compiled alone emits the drop glue its own code calls, in its own object. When
+        // two modules need the same helper they each emit it: the names are keyed on the unit, so
+        // there is never a definition two objects share.
+        unit := c.emit_unit.copy();
+        part(&mut c, view(unit));
+        mut i = 0;
+        while i < c.drop_wanted.len() {
+            ty := c.drop_wanted[i];
+            emit_drop_one(&mut c, ty);
+            i = i + 1;
+        }
+        return ();
+    }
     // Drop helpers are runtime symbols, not module code.
     part(&mut c, view("runtime"));
     mut ty = 0;
     while ty < c.types.len() {
+        emit_drop_one(&mut c, ty);
+        ty = ty + 1;
+    }
+    return ();
+}
+fn emit_drop_one<a>(c: (&a mut C), ty: u64) -> unit {
+    {
         kind := ty_kind(&mut c, ty);
         arg := ty_arg(&mut c, ty);
         if concrete_type(&mut c, ty) {
             if needs_drop(&mut c, ty) {
                 done := label(&mut c);
-                if c.split != 0 {
+                if (c.split != 0) || (c.emit_unit.len() != 0) {
                     // Defined here, called from every module: the linker has to see the name.
                     o(&mut c, view(".globl "));
                     drop_name(&mut c, ty);
@@ -21638,7 +21979,6 @@ fn emit_drops<a>(c: (&a mut C)) -> unit {
                 o(&mut c, view("ret\n"));
             }
         }
-        ty = ty + 1;
     }
     return ();
 }
@@ -22001,6 +22341,12 @@ fn iface_type_raw<a, b>(out: (&a mut u8[]), c: (&b mut C), ty: u64) -> unit {
     arg := ty_arg(&mut c, ty);
     if (k == 1) || (k == 2) || (k == 3) || (k == 4) || (k == 11) || (k == 17) || (k == 19) || (k == 21) || (k == 22)
         || (k == 24) {
+        if (k == 21) & (arg == 32) {
+            // Two float widths share one kind; an interface that spelled both `f64` would give two
+            // different types one declaration, so the width is a word of its own.
+            push_bytes(&mut out, view("f32"));
+            return ();
+        }
         push_bytes(&mut out, view(iface_plain_word(k)));
         return ();
     }
@@ -22854,7 +23200,13 @@ fn ip_type_list<a>(c: (&a mut C), p: (&a mut IPos)) -> u64[] {
     return out;
 }
 fn iface_find_decl<a, b, d, e>(c: (&a mut C), p: (&b mut IPos), module: &d [u8], name: &e [u8]) -> u64 {
-    d := find_decl_internal(&mut c, view(module), view(name));
+    mut d = find_decl_internal(&mut c, view(module), view(name));
+    if d == 0 {
+        // An interface names types of other modules; the reader is what makes reading one interface
+        // pull in the interfaces its declarations refer to.
+        ensure_iface(&mut c, view(module));
+        d = find_decl_internal(&mut c, view(module), view(name));
+    }
     if d == 0 {
         mut msg = u8[];
         push_bytes(&mut msg, view("names a type this program does not declare: "));
@@ -22874,6 +23226,9 @@ fn iface_parse_type<a>(c: (&a mut C), p: (&a mut IPos)) -> u64 {
             name := ip_word(&mut p);
             decl := iface_find_decl(&mut c, &mut p, view(word), view(name));
             return intern_args(&mut c, 8, decl, 0, u64[], u64[]);
+        }
+        if same(view(word), view("f32")) {
+            return intern_args(&mut c, 21, 32, 0, u64[], u64[]);
         }
         k := iface_word_kind(view(word));
         if k == 0 {
@@ -23060,6 +23415,9 @@ fn iface_word_kind<a>(word: &a [u8]) -> u64 {
     if same(view(word), view("f64")) {
         return 21;
     }
+    if same(view(word), view("f32")) {
+        return 21;
+    }
     if same(view(word), view("char")) {
         return 22;
     }
@@ -23168,7 +23526,7 @@ fn iface_module_text<a, b, d>(c: (&a mut C), m: &b [u8], path: &d [u8], in_std: 
     // Inherent methods, attached to the type that owns them.
     for i in iface_sort_ids(&names, &decls).len() {
         index := iface_sort_ids(&names, &decls)[i];
-        owner := private_module(view(".inherent_"), index);
+        owner := inherent_module(&mut c, index);
         methods := iface_func_ids(&mut c, view(owner));
         if methods.len() == 0 {
             continue;
@@ -23196,7 +23554,7 @@ fn iface_module_text<a, b, d>(c: (&a mut C), m: &b [u8], path: &d [u8], in_std: 
         push_bytes(&mut out, view("interface "));
         iface_interface_ref(&mut out, &mut c, index + 1);
         out.push(10);
-        owner := private_module(view(".interface_"), index + 1);
+        owner := interface_module(&mut c, index + 1);
         methods := iface_func_ids(&mut c, view(owner));
         mnames := iface_names_of_funcs(&mut c, &methods);
         for j in iface_sort_ids(&mnames, &methods).len() {
@@ -23227,7 +23585,7 @@ fn iface_module_text<a, b, d>(c: (&a mut C), m: &b [u8], path: &d [u8], in_std: 
         owner := ty_arg(&mut c, ty) + 1;
         iface_emit_impl_params(&mut c, &mut out, owner);
         out.push(10);
-        owner := private_module(view(".impl_"), index + 1);
+        owner := impl_module(&mut c, index + 1);
         methods := iface_func_ids(&mut c, view(owner));
         mnames := iface_names_of_funcs(&mut c, &methods);
         for j in iface_sort_ids(&mnames, &methods).len() {
@@ -23588,7 +23946,7 @@ fn iface_load<a, b>(c: (&a mut C), path: &a [u8], source_path: &b [u8]) -> u8[] 
     mut state = IState {
         module: module.copy(),
         unsafe: unsafe_flag,
-        source: iface_file_index(&mut c, view(source_path)),
+        source: arg_file_index(&mut c, view(source_path)),
         cur_decl: 18446744073709551615,
         first: 0,
         section: 0,
@@ -23858,7 +24216,9 @@ fn iface_define<a, b, d>(c: (&a mut C), st: (&a mut IState), line: &b [u8], path
     }
     if same(view(word), view("interface")) {
         ref := ip_ref(&mut p);
-        id := find_interface(&c, view(ip_ref_module(&ref)), view(ip_ref_name(&ref)));
+        bound_module := ip_ref_module(&ref);
+        ensure_iface(&mut c, view(bound_module));
+        id := find_interface(&c, view(bound_module), view(ip_ref_name(&ref)));
         if id == 0 {
             iface_fail(&p, view("unknown interface"));
         }
@@ -23869,7 +24229,9 @@ fn iface_define<a, b, d>(c: (&a mut C), st: (&a mut IState), line: &b [u8], path
     }
     if same(view(word), view("impl")) {
         ref := ip_ref(&mut p);
-        id := find_interface(&c, view(ip_ref_module(&ref)), view(ip_ref_name(&ref)));
+        bound_module := ip_ref_module(&ref);
+        ensure_iface(&mut c, view(bound_module));
+        id := find_interface(&c, view(bound_module), view(ip_ref_name(&ref)));
         if id == 0 {
             iface_fail(&p, view("unknown interface"));
         }
@@ -23958,7 +24320,9 @@ fn iface_define<a, b, d>(c: (&a mut C), st: (&a mut IState), line: &b [u8], path
     if same(view(word), view("require")) {
         at := ip_number(&mut p);
         ref := ip_ref(&mut p);
-        id := find_interface(&c, view(ip_ref_module(&ref)), view(ip_ref_name(&ref)));
+        bound_module := ip_ref_module(&ref);
+        ensure_iface(&mut c, view(bound_module));
+        id := find_interface(&c, view(bound_module), view(ip_ref_name(&ref)));
         if id == 0 {
             iface_fail(&p, view("unknown interface"));
         }
@@ -24001,7 +24365,7 @@ fn iface_define<a, b, d>(c: (&a mut C), st: (&a mut IState), line: &b [u8], path
         if st.last_func == 0 {
             iface_fail(&p, view("`body` must follow a function"));
         }
-        file := iface_file_index(&mut c, view(source));
+        file := source_file_index(&mut c, view(source));
         if file == 0 {
             mut msg = u8[];
             push_bytes(&mut msg, view("needs the source file "));
@@ -24078,7 +24442,10 @@ fn iface_nibble(b: u64) -> u64 {
     }
     return b - 87;
 }
-fn iface_file_index<a, b>(c: (&a mut C), path: &b [u8]) -> u64 {
+// The index of `path` when it is already one of this run's arguments, else 0. Used where a file is
+// only *identified* and may never be read: an interface's own source is not needed by a run that
+// instantiates none of its templates.
+fn arg_file_index<a, b>(c: (&a mut C), path: &b [u8]) -> u64 {
     argc := host::argc();
     mut i = 2;
     while i < argc - c.arg_offset {
@@ -24088,6 +24455,75 @@ fn iface_file_index<a, b>(c: (&a mut C), path: &b [u8]) -> u64 {
         i += 1;
     }
     return 0;
+}
+// The index of `path` among this run's input files, registering it when it is not there yet.
+//
+// A `body` marker names the source a generic template's body has to be replayed from. In a build
+// that lists every module's source the file is already an argument. A module compiled alone has
+// only its own source, so the file the interface names is registered here: the run lexes that one
+// file, which is the source dependency stage 2 chose (option 1) and stage 3 replaces with a typed
+// body. An interface whose recorded source cannot be found is refused by name, never guessed at.
+fn source_file_index<a, b>(c: (&a mut C), path: &b [u8]) -> u64 {
+    argc := host::argc();
+    n := argc - c.arg_offset;
+    mut i = 2;
+    while i < n {
+        if same(view(host::arg(i + c.arg_offset)), view(path)) {
+            return i;
+        }
+        i += 1;
+    }
+    for j in c.extra_files.len() {
+        if same(view(c.extra_files[j]), view(path)) {
+            return n + j;
+        }
+    }
+    mut resolved = copy_bytes(view(path));
+    if host::exists(view(resolved)) == 0 {
+        dir := c.iface_dir.copy();
+        if dir.len() != 0 {
+            beside := path_join_name(&mut c, view(dir), view(path));
+            if beside.len() != 0 {
+                resolved = beside;
+            }
+        }
+    }
+    if host::exists(view(resolved)) == 0 {
+        return 0;
+    }
+    c.extra_files.push(resolved.copy());
+    c.dep_sources.push(resolved.copy());
+    return n + c.extra_files.len() - 1;
+}
+// `DIR/NAME` for the tail of `path`, or `DIR/PATH`, whichever exists; empty when neither does.
+fn path_join_name<a, b>(c: (&a mut C), dir: &b [u8], path: &b [u8]) -> u8[] {
+    mut from = 0;
+    mut i = 0;
+    while i < path.len() {
+        if path[i] == 47 {
+            from = i + 1;
+        }
+        i += 1;
+    }
+    mut out = u8[];
+    push_bytes(&mut out, view(dir));
+    out.push(47);
+    i = from;
+    while i < path.len() {
+        out.push(path[i]);
+        i += 1;
+    }
+    if host::exists(view(out)) != 0 {
+        return out;
+    }
+    mut under = u8[];
+    push_bytes(&mut under, view(dir));
+    under.push(47);
+    push_bytes(&mut under, view(path));
+    if host::exists(view(under)) != 0 {
+        return under;
+    }
+    return u8[];
 }
 
 fn iface_define_func<a>(c: (&a mut C), st: (&a mut IState), p: (&a mut IPos)) -> unit {
@@ -24099,13 +24535,13 @@ fn iface_define_func<a>(c: (&a mut C), st: (&a mut IState), p: (&a mut IPos)) ->
         name = ip_ref_name(&ref);
     } else if st.section == 1 {
         name = ip_ident(&mut p);
-        module = private_module(view(".inherent_"), st.owner);
+        module = inherent_module(&mut c, st.owner);
     } else if st.section == 2 {
         name = ip_ident(&mut p);
-        module = private_module(view(".interface_"), st.contract);
+        module = interface_module(&mut c, st.contract);
     } else {
         name = ip_ident(&mut p);
-        module = private_module(view(".impl_"), st.implementation);
+        module = impl_module(&mut c, st.implementation);
     }
     mut params = u64[0];
     if ip_eat(&mut p, view("<")) {
@@ -24198,6 +24634,12 @@ fn iface_define_func<a>(c: (&a mut C), st: (&a mut IState), p: (&a mut IPos)) ->
         );
     exchange(&mut st.last_func, c.funcs.len());
     exchange(&mut st.last_decl, 0);
+    if st.section == 2 {
+        // An abstract interface's methods are part of the interface record, exactly as
+        // `interface_method` records them when the module is parsed: `check_interfaces` compares
+        // that count with the count each implementation provides.
+        c.interfaces[st.contract - 1].methods.push(c.funcs.len() - 1);
+    }
     if st.section == 3 {
         c.implementations[st.implementation - 1].methods.push(c.funcs.len() - 1);
     }
@@ -24321,475 +24763,36 @@ fn iface_clip<a>(line: &a [u8]) -> u8[] {
     return out;
 }
 
-pub fn main() -> u64 {
-    mut c = C {
-        src: u8[],
-        toks: Tok[],
-        pos: 0,
-        out: u8[],
-        split: 0,
-        part: u8[],
-        marks: u64[],
-        part_names: u8[][],
-        module: u8[],
-        target: 0,
-        plat: 0,
-        debug: 0,
-        backend: 0,
-        facts: llvm::facts_new(),
-        facts_fn: u8[],
-        f64_ops: 0,
-        call_ord: 0,
-        verify_facts: 0,
-        debug_funcs: DebugFunc[],
-        debug_vars: DebugVar[],
-        arg_offset: 0,
-        file_std: 0,
-        std_modules: u8[][],
-        overflow: 1,
-        default_u64: 0,
-        default_u64_flag: 0,
-        typed_refs: 0,
-        strict_bool_report: 0,
-        typed_refs_flag: 0,
-        exports: u8[][],
-        export_hits: u64[],
-        specs: Spec[],
-        bindings: u64[],
-        current_spec: 0,
-        validating: 0,
-        ffi_fixed: 0,
-        caddr: u64[],
-        export_fret: 0,
-        cfield_more: 0,
-        alias_next: 1,
-        types: Ty[],
-        decls: Decl[],
-        aliases: Alias[],
-        imports: Import[],
-        fields: Field[],
-        funcs: Func[],
-        params: u64[],
-        locals: Local[],
-        next: 0,
-        entry: 0,
-        file: 0,
-        label: 1,
-        brk: 0,
-        cont: 0,
-        raw: 0,
-        unsafe_depth: 0,
-        libs: u8[][],
-        pending_ext: 0,
-        pending_symbol: u8[],
-        export_tls: 0,
-        rnames: u8[][],
-        tnames: u8[][],
-        closures: Closure[],
-        fn_thunk_used: 0,
-        closure_env: 0,
-        inherent: 0,
-        constants: Constant[],
-        impl_params: ImplParams[],
-        receiver: 0,
-        receiver_ty: 0,
-        has_receiver: 0,
-        lit_start: 0,
-        lit_end: 0,
-        lit_value: 0,
-        hints: u64[],
-        tolerant: 0,
-        retry: 0,
-        attempts: 0,
-        cf_start: 0,
-        cf_end: 0,
-        cf_local: 0,
-        bce_index: u8[],
-        bce_base: u8[],
-        lit_negative: 0,
-        byte_start: 0,
-        byte_end: 0,
-        flit_start: 0,
-        flit_end: 0,
-        flit_tok: 0,
-        flit_neg: 0,
-        type_bounds: u64[],
-        type_interfaces: u64[][],
-        interfaces: Interface[],
-        implementations: Implementation[],
-        self_type: 0,
-        current_impl: 0,
-        headers_complete: 0,
-        resources: Resource[],
-        loopmark: 0,
-        result: 0,
-        check: ownership::new(),
-        members: Member[],
-        terminated: 0,
-        loopcheck: ownership::new(),
-        breaks: ownership::new(),
-        hasbreak: 0,
-        bonds: Bond[],
-        origins: Origin[],
-        scope_end: 0,
-        loop_start: 0,
-        loop_end: 0,
-        no_union: 0,
-        parsing_input: 0,
-        output_region: 0,
-        receiver_region: 0,
-        input_regions: u64[],
-        none_start: 0,
-        none_end: 0,
-        deny_ambient: 0,
-        host_optin: 0,
-        host_modules: u8[][],
-        cap_denial: 0,
-        cap_segs: u8[][],
-        iface_dir: u8[],
-        iface_emit: u8[],
-        iface_verify: 0,
-        iface_list: IModule[],
-        iface_files: u64[],
-        iface_env: u64[],
-        iface_env_names: u8[][],
-        lib_owner: u8[][],
-    };
-    exchange(&mut c.target, host::target());
-    for k in 5 {
-        intern(&mut c, k + 1, 0);
+// What this run read, for the build to key the object it produced on. The driver digests each
+// named file: an interface's bytes and a generic body's bytes are exactly what an unchanged module
+// depends on, and nothing else is.
+fn write_deps<a>(c: (&a mut C)) -> unit {
+    mut out = u8[];
+    push_bytes(&mut out, view("// grail-deps 1\nmodule "));
+    push_bytes(&mut out, view(c.emit_unit));
+    out.push(10);
+    for i in c.dep_ifaces.len() {
+        push_bytes(&mut out, view("iface "));
+        push_bytes(&mut out, view(c.dep_ifaces[i]));
+        out.push(10);
     }
-    host_fn(&mut c, view("target"), 0);
-    host_fn(&mut c, view("argc"), 0);
-    host_fn(&mut c, view("arg"), 2);
-    host_fn(&mut c, view("read_file"), 2);
-    host_fn(&mut c, view("write_file"), 0);
-    host_fn(&mut c, view("print"), 1);
-    host_fn(&mut c, view("print_num"), 1);
-    host_fn(&mut c, view("newline"), 1);
-    host_fn(&mut c, view("command"), 0);
-    host_fn(&mut c, view("sleep_ms"), 1);
-    host_fn(&mut c, view("now_ms"), 0);
-    numbers := intern(&mut c, 6, 0);
-    host_fn(&mut c, view("pipe"), numbers);
-    host_fn(&mut c, view("read_fd"), 2);
-    host_fn(&mut c, view("write_fd"), 0);
-    host_fn(&mut c, view("close"), 0);
-    host_fn(&mut c, view("env"), 2);
-    host_fn(&mut c, view("exe_path"), 2);
-    host_fn(&mut c, view("exists"), 0);
-    host_fn(&mut c, view("mkdir"), 0);
-    names := intern(&mut c, 6, 2);
-    host_fn(&mut c, view("list_dir"), names);
-    host_fn(&mut c, view("tcp_listen"), 0);
-    host_fn(&mut c, view("tcp_port"), 0);
-    host_fn(&mut c, view("tcp_accept"), 0);
-    host_fn(&mut c, view("tcp_connect"), 0);
-    host_fn(&mut c, view("open"), 0);
-    host_fn(&mut c, view("exit"), 1);
-    host_fn(&mut c, view("remove"), 0);
-    host_fn(&mut c, view("create_dir"), 0);
-    argc := host::argc();
-    mut offset = 0;
-    if 1 < argc {
-        first := host::arg(1);
-        if cli::is_command(view(first)) {
-            return cli::run();
-        }
+    for i in c.dep_sources.len() {
+        push_bytes(&mut out, view("source "));
+        push_bytes(&mut out, view(c.dep_sources[i]));
+        out.push(10);
     }
-    while offset + 1 < argc {
-        option := host::arg(offset + 1);
-        if same(view(option), view("--deny-ambient-host")) || same(view(option), view("--split")) {
-            // --split: one assembly file per module. OUT.s is replaced by OUT.NNN.module.s files,
-            // and OUT.parts lists them in link order for the driver.
-            if same(view(option), view("--split")) {
-                exchange(&mut c.split, 1);
-            } else {
-                exchange(&mut c.deny_ambient, 1);
-            }
-            offset += 1;
-        } else if same(view(option), view("--interface")) || same(view(option), view("--emit-interface")) {
-            // B1 stage 2: declarations come from `DIR/<module>.iface` instead of the module's
-            // source (`--interface`), or the interfaces for this program are written there
-            // (`--emit-interface`).
-            if argc < offset + 3 {
-                fail_option(&mut c, view("--interface and --emit-interface need a directory"));
-            }
-            if same(view(option), view("--interface")) {
-                exchange(&mut c.iface_dir, host::arg(offset + 2));
-            } else {
-                exchange(&mut c.iface_emit, host::arg(offset + 2));
-            }
-            offset += 2;
-        } else if same(view(option), view("--verify-interface")) {
-            // Check the interfaces on disk against the sources just parsed instead of trusting
-            // either side: an interface that disagrees is refused, naming the declaration.
-            exchange(&mut c.iface_verify, 1);
-            offset += 1;
-        } else {
-        if same(view(option), view("--target")) {
-            if argc < offset + 3 {
-                fail_option(
-                    &mut c,
-                    view(
-                        "--target needs x86_64, aarch64, riscv64, windows-x86_64, windows-aarch64, macos-x86_64 or macos-aarch64"
-                    )
-                );
-            }
-            target := host::arg(offset + 2);
-            exchange(&mut c.plat, 0);
-            if same(view(target), view("x86_64")) {
-                exchange(&mut c.target, 0);
-            } else {
-                if same(view(target), view("aarch64")) {
-                    exchange(&mut c.target, 1);
-                } else {
-                    if same(view(target), view("riscv64")) {
-                        exchange(&mut c.target, 2);
-                    } else {
-                        if same(view(target), view("windows-x86_64")) {
-                            exchange(&mut c.target, 3);
-                        } else {
-                            if same(view(target), view("windows-aarch64")) {
-                                exchange(&mut c.target, 4);
-                            } else {
-                                if same(view(target), view("macos-x86_64")) {
-                                    exchange(&mut c.target, 0);
-                                    exchange(&mut c.plat, 1);
-                                } else {
-                                    if same(view(target), view("macos-aarch64")) {
-                                        exchange(&mut c.target, 1);
-                                        exchange(&mut c.plat, 1);
-                                    } else {
-                                        fail_option(
-                                            &mut c,
-                                            view(
-                                                "unsupported target (expected x86_64, aarch64, riscv64, windows-x86_64, windows-aarch64, macos-x86_64 or macos-aarch64)"
-                                            )
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            offset += 2;
-        } else {
-            if same(view(option), view("--overflow=wrap")) {
-                exchange(&mut c.overflow, 0);
-                offset += 1;
-            } else {
-                if same(view(option), view("--overflow=checked")) {
-                    exchange(&mut c.overflow, 1);
-                    offset += 1;
-                } else {
-                    if same(view(option), view("--export")) {
-                        if argc < offset + 3 {
-                            fail_option(&mut c, view("--export needs a function name"));
-                        }
-                        c.exports.push(host::arg(offset + 2));
-                        c.export_hits.push(0);
-                        offset += 2;
-                    } else {
-                    if same(view(option), view("--typed-refs")) || same(view(option), view("--strict-bool-report")) {
-                        // Survey: report every bool/integer violation and keep compiling.
-                        if same(view(option), view("--strict-bool-report")) {
-                            exchange(&mut c.strict_bool_report, 1);
-                        }
-                        if same(view(option), view("--typed-refs")) {
-                            exchange(&mut c.typed_refs_flag, 1);
-                        }
-                        offset += 1;
-                    } else {
+    written := host::write_file(view(c.deps_path), view(out));
+    if written != 0 {
+        host::exit(written);
+    }
+    return ();
+}
 
-                        if same(view(option), view("--default-u64")) {
-                            exchange(&mut c.default_u64, 1);
-                            exchange(&mut c.default_u64_flag, 1);
-                            offset += 1;
-                        } else {
-                            if same(view(option), view("--debug")) {
-                                exchange(&mut c.debug, 1);
-                                offset += 1;
-                            } else {
-                                if same(view(option), view("--backend=llvm")) {
-                                    exchange(&mut c.backend, 1);
-                                    offset += 1;
-                                } else {
-                                    if same(view(option), view("--verify-facts")) {
-                                        exchange(&mut c.verify_facts, 1);
-                                        offset += 1;
-                                    } else {
-                                    break;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    }
-                }
-            }
-        }
-        }
-    }
-    exchange(&mut c.arg_offset, offset);
-    // Interfaces are checked against the manifest the emitting run wrote before anything reads one.
-    mut iface_dir = c.iface_dir.copy();
-    if iface_dir.len() != 0 {
-        iface_check_manifest(&mut c, view(iface_dir));
-    }
-    n := argc - offset;
-    if !(2 < n) {
-        fail_option(
-            &mut c,
-            view(
-                "usage: grail [--target ARCH] [--overflow=checked|wrap] [--debug] [--backend=llvm [--verify-facts]] [--deny-ambient-host] [--split] OUT.s ENTRY.grl MODULE.grl..."
-            )
-        );
-    }
-    // DWARF on Linux x86-64, AArch64 and RISC-V 64; CodeView line tables (a PDB through lld-link
-    // /DEBUG) on Windows x86-64.
-    if (c.debug != 0) && (((c.target == 4) || (c.plat != 0))) {
-        fail_option(&mut c, view("--debug line info is only implemented for Linux and Windows x86_64"));
-    }
-    if (c.backend != 0) && (((c.target > 2) || (c.plat != 0) || (c.debug != 0))) {
-        fail_option(&mut c, view("--backend=llvm is implemented for Linux x86_64, aarch64 and riscv64 without --debug"));
-    }
-    if (c.verify_facts != 0) && (c.backend == 0) {
-        fail_option(&mut c, view("--verify-facts checks the facts the LLVM lifter consumes; add --backend=llvm"));
-    }
-    // Splitting is a build-shape change on the native assembly path; the line tables and the LLVM
-    // route inspect the whole stream, and the Mach-O/PE writers rewrite it after selection.
-    if (c.split != 0) && ((c.target != 0) || (c.plat != 0) || (c.debug != 0) || (c.backend != 0)) {
-        fail_option(
-            &mut c,
-            view("--split is implemented for the Linux x86_64 assembler path, without --debug")
-        );
-    }
-    for pass in 3 {
-        if pass == 1 {
-            if c.plat == 1 {
-                o(&mut c, view(".build_version macos, 11, 0\n"));
-            }
-            if c.debug != 0 {
-                mut f = 2;
-                while f < n {
-                    path := host::arg(f + offset);
-                    number := f - 1;
-                    if c.target == 3 {
-                        o(&mut c, view(".cv_file "));
-                    } else {
-                        o(&mut c, view(".file "));
-                    }
-                    on(&mut c, number);
-                    o(&mut c, view(" \""));
-                    emit_path(&mut c, view(path));
-                    o(&mut c, view("\"\n"));
-                    f += 1;
-                }
-            }
-            // With --split every part file re-states `.text`; the stream carries no preamble.
-            if c.split == 0 {
-                o(&mut c, view(".text\n"));
-            }
-        }
-        mut i = 2;
-        while i < n {
-            path := host::arg(i + offset);
-            mut replaced = 0;
-            for j in c.iface_files.len() {
-                if c.iface_files[j] == i {
-                    replaced = 1;
-                }
-            }
-            // A module whose declarations come from an interface is loaded once and then skipped by
-            // every pass: it has no body to check and no code to emit here.
-            if (replaced == 0) & (pass == 0) & (c.iface_dir.len() != 0) & (c.iface_verify == 0) & (i != 2) {
-                name := iface_scan(view(path));
-                if name.len() != 0 && !same(view(name), view("runtime")) {
-                    mut file = u8[];
-                    push_bytes(&mut file, view(c.iface_dir));
-                    file.push(47);
-                    push_bytes(&mut file, view(name));
-                    push_bytes(&mut file, view(".iface"));
-                    loaded := iface_load(&mut c, view(file), view(path));
-                    if !same(view(loaded), view(name)) {
-                        mut msg = u8[];
-                        push_bytes(&mut msg, view("describes module `"));
-                        push_bytes(&mut msg, view(loaded));
-                        push_bytes(&mut msg, view("`, but this file declares `"));
-                        push_bytes(&mut msg, view(name));
-                        push_bytes(&mut msg, view("`"));
-                        iface_refuse(view(file), view(msg));
-                    }
-                    c.iface_files.push(i);
-                    replaced = 1;
-                }
-            }
-            if replaced != 0 {
-                // The declarations came from the interface. The module's *bodies* still have to be
-                // emitted - one object for the whole program means no module's code can be left
-                // out - so the body pass runs against the interface's declarations: the checker
-                // never sees this module's source. Stage 3 (bodies in interfaces) and stage 4
-                // (one object per module) are what remove this parse.
-                if pass == 2 {
-                    load_file(&mut c, i);
-                    exchange(&mut c.file, i);
-                    toplevel(&mut c, 3);
-                }
-                i = i + 1;
-                continue;
-            }
-            load_file(&mut c, i);
-            exchange(&mut c.file, i);
-            toplevel(&mut c, pass + 1);
-            if pass == 0 {
-                c
-                    .iface_list
-                    .push(
-                        IModule {
-                            module: module_copy(&mut c),
-                            path: path.copy(),
-                            std: in_std_dir(view(path)),
-                            unsafe: c.raw,
-                            host: 0
-                        }
-                    );
-            }
-            i = i + 1;
-        }
-        if pass == 1 {
-            exchange(&mut c.headers_complete, 1);
-            check_interfaces(&mut c);
-            validate_type_constraints(&mut c);
-            if c.iface_verify != 0 {
-                for j in c.iface_list.len() {
-                    if !same(view(c.iface_list[j].module), view("runtime")) {
-                        iface_verify_module(&mut c, j);
-                    }
-                }
-            }
-            iface_emit_all(&mut c);
-        }
-    }
-    // Every definition has been emitted by now, so an --export name that never matched is a typo.
-    for i in c.exports.len() {
-        if c.export_hits[i] == 0 {
-            host::print(view("grail: export '"));
-            missing := &c.exports[i];
-            host::print(view(missing));
-            host::print(view("' is not defined by any function\n"));
-            host::exit(1);
-        }
-    }
-    emit_specializations(&mut c);
-    emit_closures(&mut c);
-    emit_fn_thunk(&mut c);
-    emit_drops(&mut c);
+// The entry stub and the process state: `_start` (or the platform equivalent), `rt_state`, the
+// TLS bases and the `.note.GNU-stack` note. They exist exactly once per program and belong to no
+// module, so only the run that owns the entry emits them (B1 stage 1 gave them their own part).
+fn entry_stub<a>(c: (&a mut C)) -> unit {
     e := c.entry;
-    if e == 0 {
-        fail(&mut c, view("no public entry function with at most one parameter"));
-    }
     f := &c.funcs[e - 1];
     m := f.module.copy();
     name := f.name.copy();
@@ -24925,6 +24928,543 @@ pub fn main() -> u64 {
         }
     }
     }
+    }
+}
+
+pub fn main() -> u64 {
+    mut c = C {
+        src: u8[],
+        toks: Tok[],
+        pos: 0,
+        out: u8[],
+        split: 0,
+        part: u8[],
+        marks: u64[],
+        part_names: u8[][],
+        module: u8[],
+        target: 0,
+        plat: 0,
+        debug: 0,
+        backend: 0,
+        facts: llvm::facts_new(),
+        facts_fn: u8[],
+        f64_ops: 0,
+        call_ord: 0,
+        verify_facts: 0,
+        debug_funcs: DebugFunc[],
+        debug_vars: DebugVar[],
+        arg_offset: 0,
+        file_std: 0,
+        std_modules: u8[][],
+        overflow: 1,
+        default_u64: 0,
+        default_u64_flag: 0,
+        typed_refs: 0,
+        strict_bool_report: 0,
+        typed_refs_flag: 0,
+        exports: u8[][],
+        export_hits: u64[],
+        specs: Spec[],
+        bindings: u64[],
+        current_spec: 0,
+        validating: 0,
+        ffi_fixed: 0,
+        caddr: u64[],
+        export_fret: 0,
+        cfield_more: 0,
+        alias_next: 1,
+        types: Ty[],
+        decls: Decl[],
+        aliases: Alias[],
+        imports: Import[],
+        fields: Field[],
+        funcs: Func[],
+        params: u64[],
+        locals: Local[],
+        next: 0,
+        entry: 0,
+        file: 0,
+        label: 1,
+        brk: 0,
+        cont: 0,
+        raw: 0,
+        unsafe_depth: 0,
+        libs: u8[][],
+        pending_ext: 0,
+        pending_symbol: u8[],
+        export_tls: 0,
+        rnames: u8[][],
+        tnames: u8[][],
+        closures: Closure[],
+        fn_thunk_used: 0,
+        closure_env: 0,
+        inherent: 0,
+        constants: Constant[],
+        impl_params: ImplParams[],
+        receiver: 0,
+        receiver_ty: 0,
+        has_receiver: 0,
+        lit_start: 0,
+        lit_end: 0,
+        lit_value: 0,
+        hints: u64[],
+        tolerant: 0,
+        retry: 0,
+        attempts: 0,
+        cf_start: 0,
+        cf_end: 0,
+        cf_local: 0,
+        bce_index: u8[],
+        bce_base: u8[],
+        lit_negative: 0,
+        byte_start: 0,
+        byte_end: 0,
+        flit_start: 0,
+        flit_end: 0,
+        flit_tok: 0,
+        flit_neg: 0,
+        type_bounds: u64[],
+        type_interfaces: u64[][],
+        interfaces: Interface[],
+        implementations: Implementation[],
+        self_type: 0,
+        current_impl: 0,
+        headers_complete: 0,
+        resources: Resource[],
+        loopmark: 0,
+        result: 0,
+        check: ownership::new(),
+        members: Member[],
+        terminated: 0,
+        loopcheck: ownership::new(),
+        breaks: ownership::new(),
+        hasbreak: 0,
+        bonds: Bond[],
+        origins: Origin[],
+        scope_end: 0,
+        loop_start: 0,
+        loop_end: 0,
+        no_union: 0,
+        parsing_input: 0,
+        output_region: 0,
+        receiver_region: 0,
+        input_regions: u64[],
+        none_start: 0,
+        none_end: 0,
+        deny_ambient: 0,
+        host_optin: 0,
+        host_modules: u8[][],
+        cap_denial: 0,
+        cap_segs: u8[][],
+        iface_dir: u8[],
+        iface_emit: u8[],
+        iface_verify: 0,
+        iface_list: IModule[],
+        iface_files: u64[],
+        iface_env: u64[],
+        iface_env_names: u8[][],
+        lib_owner: u8[][],
+        module_only: u8[],
+        no_entry: 0,
+        emit_unit: u8[],
+        deps_path: u8[],
+        dep_ifaces: u8[][],
+        dep_sources: u8[][],
+        extra_files: u8[][],
+        source_modules: u8[][],
+        spec_names: u8[][],
+        drop_names: u8[][],
+        impl_names: u8[][],
+        drop_wanted: u64[],
+        drop_seen: u64[],
+    };
+    exchange(&mut c.target, host::target());
+    for k in 5 {
+        intern(&mut c, k + 1, 0);
+    }
+    host_fn(&mut c, view("target"), 0);
+    host_fn(&mut c, view("argc"), 0);
+    host_fn(&mut c, view("arg"), 2);
+    host_fn(&mut c, view("read_file"), 2);
+    host_fn(&mut c, view("write_file"), 0);
+    host_fn(&mut c, view("print"), 1);
+    host_fn(&mut c, view("print_num"), 1);
+    host_fn(&mut c, view("newline"), 1);
+    host_fn(&mut c, view("command"), 0);
+    host_fn(&mut c, view("sleep_ms"), 1);
+    host_fn(&mut c, view("now_ms"), 0);
+    numbers := intern(&mut c, 6, 0);
+    host_fn(&mut c, view("pipe"), numbers);
+    host_fn(&mut c, view("read_fd"), 2);
+    host_fn(&mut c, view("write_fd"), 0);
+    host_fn(&mut c, view("close"), 0);
+    host_fn(&mut c, view("env"), 2);
+    host_fn(&mut c, view("exe_path"), 2);
+    host_fn(&mut c, view("exists"), 0);
+    host_fn(&mut c, view("mkdir"), 0);
+    names := intern(&mut c, 6, 2);
+    host_fn(&mut c, view("list_dir"), names);
+    host_fn(&mut c, view("tcp_listen"), 0);
+    host_fn(&mut c, view("tcp_port"), 0);
+    host_fn(&mut c, view("tcp_accept"), 0);
+    host_fn(&mut c, view("tcp_connect"), 0);
+    host_fn(&mut c, view("open"), 0);
+    host_fn(&mut c, view("exit"), 1);
+    host_fn(&mut c, view("remove"), 0);
+    host_fn(&mut c, view("create_dir"), 0);
+    argc := host::argc();
+    mut offset = 0;
+    if 1 < argc {
+        first := host::arg(1);
+        if cli::is_command(view(first)) {
+            return cli::run();
+        }
+    }
+    while offset + 1 < argc {
+        option := host::arg(offset + 1);
+        if same(view(option), view("--deny-ambient-host")) || same(view(option), view("--split")) {
+            // --split: one assembly file per module. OUT.s is replaced by OUT.NNN.module.s files,
+            // and OUT.parts lists them in link order for the driver.
+            if same(view(option), view("--split")) {
+                exchange(&mut c.split, 1);
+            } else {
+                exchange(&mut c.deny_ambient, 1);
+            }
+            offset += 1;
+        } else if same(view(option), view("--interface")) || same(view(option), view("--emit-interface")) {
+            // B1 stage 2: declarations come from `DIR/<module>.iface` instead of the module's
+            // source (`--interface`), or the interfaces for this program are written there
+            // (`--emit-interface`).
+            if argc < offset + 3 {
+                fail_option(&mut c, view("--interface and --emit-interface need a directory"));
+            }
+            if same(view(option), view("--interface")) {
+                exchange(&mut c.iface_dir, host::arg(offset + 2));
+            } else {
+                exchange(&mut c.iface_emit, host::arg(offset + 2));
+            }
+            offset += 2;
+        } else if same(view(option), view("--verify-interface")) {
+            // Check the interfaces on disk against the sources just parsed instead of trusting
+            // either side: an interface that disagrees is refused, naming the declaration.
+            exchange(&mut c.iface_verify, 1);
+            offset += 1;
+        } else if same(view(option), view("--module")) {
+            // B1 stage 4: emit one module's code and nothing else, against the interfaces in
+            // `--interface DIR`. The files on the command line are that module's own sources.
+            if argc < offset + 3 {
+                fail_option(&mut c, view("--module needs a module name"));
+            }
+            exchange(&mut c.module_only, host::arg(offset + 2));
+            offset += 2;
+        } else if same(view(option), view("--no-entry")) {
+            // A module compiled alone that does not hold the entry: no `_start`, and no "no public
+            // entry function" refusal either.
+            exchange(&mut c.no_entry, 1);
+            offset += 1;
+        } else if same(view(option), view("--deps")) {
+            // Report what this run read - every interface and every generic body - so the build can
+            // key the object it produced on exactly that.
+            if argc < offset + 3 {
+                fail_option(&mut c, view("--deps needs a file"));
+            }
+            exchange(&mut c.deps_path, host::arg(offset + 2));
+            offset += 2;
+        } else {
+        if same(view(option), view("--target")) {
+            if argc < offset + 3 {
+                fail_option(
+                    &mut c,
+                    view(
+                        "--target needs x86_64, aarch64, riscv64, windows-x86_64, windows-aarch64, macos-x86_64 or macos-aarch64"
+                    )
+                );
+            }
+            target := host::arg(offset + 2);
+            exchange(&mut c.plat, 0);
+            if same(view(target), view("x86_64")) {
+                exchange(&mut c.target, 0);
+            } else {
+                if same(view(target), view("aarch64")) {
+                    exchange(&mut c.target, 1);
+                } else {
+                    if same(view(target), view("riscv64")) {
+                        exchange(&mut c.target, 2);
+                    } else {
+                        if same(view(target), view("windows-x86_64")) {
+                            exchange(&mut c.target, 3);
+                        } else {
+                            if same(view(target), view("windows-aarch64")) {
+                                exchange(&mut c.target, 4);
+                            } else {
+                                if same(view(target), view("macos-x86_64")) {
+                                    exchange(&mut c.target, 0);
+                                    exchange(&mut c.plat, 1);
+                                } else {
+                                    if same(view(target), view("macos-aarch64")) {
+                                        exchange(&mut c.target, 1);
+                                        exchange(&mut c.plat, 1);
+                                    } else {
+                                        fail_option(
+                                            &mut c,
+                                            view(
+                                                "unsupported target (expected x86_64, aarch64, riscv64, windows-x86_64, windows-aarch64, macos-x86_64 or macos-aarch64)"
+                                            )
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            offset += 2;
+        } else {
+            if same(view(option), view("--overflow=wrap")) {
+                exchange(&mut c.overflow, 0);
+                offset += 1;
+            } else {
+                if same(view(option), view("--overflow=checked")) {
+                    exchange(&mut c.overflow, 1);
+                    offset += 1;
+                } else {
+                    if same(view(option), view("--export")) {
+                        if argc < offset + 3 {
+                            fail_option(&mut c, view("--export needs a function name"));
+                        }
+                        c.exports.push(host::arg(offset + 2));
+                        c.export_hits.push(0);
+                        offset += 2;
+                    } else {
+                    if same(view(option), view("--typed-refs")) || same(view(option), view("--strict-bool-report")) {
+                        // Survey: report every bool/integer violation and keep compiling.
+                        if same(view(option), view("--strict-bool-report")) {
+                            exchange(&mut c.strict_bool_report, 1);
+                        }
+                        if same(view(option), view("--typed-refs")) {
+                            exchange(&mut c.typed_refs_flag, 1);
+                        }
+                        offset += 1;
+                    } else {
+
+                        if same(view(option), view("--default-u64")) {
+                            exchange(&mut c.default_u64, 1);
+                            exchange(&mut c.default_u64_flag, 1);
+                            offset += 1;
+                        } else {
+                            if same(view(option), view("--debug")) {
+                                exchange(&mut c.debug, 1);
+                                offset += 1;
+                            } else {
+                                if same(view(option), view("--backend=llvm")) {
+                                    exchange(&mut c.backend, 1);
+                                    offset += 1;
+                                } else {
+                                    if same(view(option), view("--verify-facts")) {
+                                        exchange(&mut c.verify_facts, 1);
+                                        offset += 1;
+                                    } else {
+                                    break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    }
+                }
+            }
+        }
+        }
+    }
+    exchange(&mut c.arg_offset, offset);
+    // Everything this run emits belongs to one unit: the module `--module` names, or the program.
+    // Every content-addressed name is keyed on it, so a module compiled alone never names a symbol
+    // the same way another module does.
+    if c.module_only.len() != 0 {
+        unit := c.module_only.copy();
+        exchange(&mut c.emit_unit, unit);
+    }
+    // Interfaces are checked against the manifest the emitting run wrote before anything reads one.
+    mut iface_dir = c.iface_dir.copy();
+    if iface_dir.len() != 0 {
+        iface_check_manifest(&mut c, view(iface_dir));
+    }
+    n := argc - offset;
+    if !(2 < n) {
+        fail_option(
+            &mut c,
+            view(
+                "usage: grail [--target ARCH] [--overflow=checked|wrap] [--debug] [--backend=llvm [--verify-facts]] [--deny-ambient-host] [--split] OUT.s ENTRY.grl MODULE.grl..."
+            )
+        );
+    }
+    // DWARF on Linux x86-64, AArch64 and RISC-V 64; CodeView line tables (a PDB through lld-link
+    // /DEBUG) on Windows x86-64.
+    if (c.debug != 0) && (((c.target == 4) || (c.plat != 0))) {
+        fail_option(&mut c, view("--debug line info is only implemented for Linux and Windows x86_64"));
+    }
+    if (c.backend != 0) && (((c.target > 2) || (c.plat != 0) || (c.debug != 0))) {
+        fail_option(&mut c, view("--backend=llvm is implemented for Linux x86_64, aarch64 and riscv64 without --debug"));
+    }
+    if (c.verify_facts != 0) && (c.backend == 0) {
+        fail_option(&mut c, view("--verify-facts checks the facts the LLVM lifter consumes; add --backend=llvm"));
+    }
+    // Splitting is a build-shape change on the native assembly path; the line tables and the LLVM
+    // route inspect the whole stream, and the Mach-O/PE writers rewrite it after selection.
+    if (c.split != 0) && ((c.target != 0) || (c.plat != 0) || (c.debug != 0) || (c.backend != 0)) {
+        fail_option(
+            &mut c,
+            view("--split is implemented for the Linux x86_64 assembler path, without --debug")
+        );
+    }
+    // Every module whose source is on this command line is parsed, so no interface for one of
+    // them may be read on demand: its declarations are installed by the passes below. The module a
+    // file declares is read without parsing it, which is what `iface_scan` already does.
+    mut k = 2;
+    while k < n {
+        name := iface_scan(view(host::arg(k + offset)));
+        if name.len() != 0 {
+            c.source_modules.push(name);
+        }
+        k = k + 1;
+    }
+    for pass in 3 {
+        if pass == 1 {
+            if c.plat == 1 {
+                o(&mut c, view(".build_version macos, 11, 0\n"));
+            }
+            if c.debug != 0 {
+                mut f = 2;
+                while f < n {
+                    path := host::arg(f + offset);
+                    number := f - 1;
+                    if c.target == 3 {
+                        o(&mut c, view(".cv_file "));
+                    } else {
+                        o(&mut c, view(".file "));
+                    }
+                    on(&mut c, number);
+                    o(&mut c, view(" \""));
+                    emit_path(&mut c, view(path));
+                    o(&mut c, view("\"\n"));
+                    f += 1;
+                }
+            }
+            // With --split every part file re-states `.text`; the stream carries no preamble.
+            if c.split == 0 {
+                o(&mut c, view(".text\n"));
+            }
+        }
+        mut i = 2;
+        while i < n {
+            path := host::arg(i + offset);
+            mut replaced = 0;
+            for j in c.iface_files.len() {
+                if c.iface_files[j] == i {
+                    replaced = 1;
+                }
+            }
+            // A module whose declarations come from an interface is loaded once and then skipped by
+            // every pass: it has no body to check and no code to emit here.
+            if (replaced == 0) & (pass == 0) & (c.iface_dir.len() != 0) & (c.iface_verify == 0) & (i != 2) {
+                name := iface_scan(view(path));
+                if name.len() != 0 && !same(view(name), view("runtime")) {
+                    mut file = u8[];
+                    push_bytes(&mut file, view(c.iface_dir));
+                    file.push(47);
+                    push_bytes(&mut file, view(name));
+                    push_bytes(&mut file, view(".iface"));
+                    loaded := iface_load(&mut c, view(file), view(path));
+                    if !same(view(loaded), view(name)) {
+                        mut msg = u8[];
+                        push_bytes(&mut msg, view("describes module `"));
+                        push_bytes(&mut msg, view(loaded));
+                        push_bytes(&mut msg, view("`, but this file declares `"));
+                        push_bytes(&mut msg, view(name));
+                        push_bytes(&mut msg, view("`"));
+                        iface_refuse(view(file), view(msg));
+                    }
+                    c.iface_files.push(i);
+                    replaced = 1;
+                }
+            }
+            if replaced != 0 {
+                // The declarations came from the interface. The module's *bodies* still have to be
+                // emitted - one object for the whole program means no module's code can be left
+                // out - so the body pass runs against the interface's declarations: the checker
+                // never sees this module's source. Stage 3 (bodies in interfaces) and stage 4
+                // (one object per module) are what remove this parse.
+                if pass == 2 {
+                    load_file(&mut c, i);
+                    exchange(&mut c.file, i);
+                    toplevel(&mut c, 3);
+                }
+                i = i + 1;
+                continue;
+            }
+            load_file(&mut c, i);
+            exchange(&mut c.file, i);
+            toplevel(&mut c, pass + 1);
+            if pass == 0 {
+                here := module_copy(&mut c);
+                mut known = 0;
+                for j in c.source_modules.len() {
+                    if same(view(c.source_modules[j]), view(here)) {
+                        known = 1;
+                    }
+                }
+                if known == 0 {
+                    c.source_modules.push(here);
+                }
+                c
+                    .iface_list
+                    .push(
+                        IModule {
+                            module: module_copy(&mut c),
+                            path: path.copy(),
+                            std: in_std_dir(view(path)),
+                            unsafe: c.raw,
+                            host: 0
+                        }
+                    );
+            }
+            i = i + 1;
+        }
+        if pass == 1 {
+            exchange(&mut c.headers_complete, 1);
+            check_interfaces(&mut c);
+            validate_type_constraints(&mut c);
+            if c.iface_verify != 0 {
+                for j in c.iface_list.len() {
+                    if !same(view(c.iface_list[j].module), view("runtime")) {
+                        iface_verify_module(&mut c, j);
+                    }
+                }
+            }
+            iface_emit_all(&mut c);
+        }
+    }
+    // Every definition has been emitted by now, so an --export name that never matched is a typo.
+    for i in c.exports.len() {
+        if c.export_hits[i] == 0 {
+            host::print(view("grail: export '"));
+            missing := &c.exports[i];
+            host::print(view(missing));
+            host::print(view("' is not defined by any function\n"));
+            host::exit(1);
+        }
+    }
+    emit_specializations(&mut c);
+    emit_closures(&mut c);
+    emit_fn_thunk(&mut c);
+    emit_drops(&mut c);
+    // A module compiled alone that does not hold the entry synthesizes no stub: `_start`, the
+    // process state and the TLS bases exist once per program, in the module that owns the entry.
+    if c.entry != 0 {
+        entry_stub(&mut c);
+    }
+    if c.deps_path.len() != 0 {
+        write_deps(&mut c);
     }
     mut out = u8[];
     if (c.debug != 0) || (c.backend != 0) {
