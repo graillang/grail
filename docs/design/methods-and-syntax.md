@@ -97,8 +97,8 @@ the sign, and `{:.2}` (alone or as `{:8.2}`) gives an `f64` exactly 2 decimals.
 (`less(left, right) -> bool`; provided for integers, `f64` with NaN last, `u8[]` and `string`). It is
 a stable merge sort that moves elements instead of copying them. `vecs::is_sorted`, `min_index` and
 `max_index` use the same order. Implement `order::Ord` for your own types to sort them.
-`vecs::sort_by(&mut v, less)` sorts stably by a comparator `Fn(&T, &T) -> bool` (any function with
-that signature, or a closure); `vecs::sort_by_key(&mut v, key)` by a `u64` key computed once per
+`vecs::sort_by(&mut v, less)` sorts stably by a comparator `FnMut(&T, &T) -> bool` (any function with
+that signature, or a closure, which may write its captures); `vecs::sort_by_key(&mut v, key)` by a `u64` key computed once per
 element. Sorted-vector sets: `vecs::insert_sorted(&mut v, x)` (keeps order, rejects duplicates) and
 `vecs::binary_search(&v, &x) -> u64?`.
 

@@ -109,11 +109,15 @@ pub fn chunks_mut<T:Send>(data: (&mut [T]), chunks: u64, f: Fn((&mut [T]))->unit
 // Two branches of a job graph, both owned: `first` runs on a worker while `second` runs on the
 // calling thread, so both make progress and the results come back owned, in the order given.
 // This is what "spawn two jobs, then join" means without a handle that could outlive the call.
+// `first` crosses to a worker, so it is an `Fn` with classified captures like every callback in
+// this module; `second` never leaves the calling thread and is called once, so it is an `FnMut`
+// and may write its own captures.
 pub struct Pair<A,B>{first:A,second:B}
-pub fn join<A:Send,B:Send>(first:Fn()->A,second:Fn()->B)->Pair<A,B>{
+pub fn join<A:Send,B:Send>(first:Fn()->A,second:FnMut()->B)->Pair<A,B>{
+    mut here=second;
     mut one=u64[0];
     mut done=parallel_map(one,0,|i: u64, unused: u64| -> A first());
-    return Pair{first:done.pop(),second:second()};
+    return Pair{first:done.pop(),second:here()};
 }
 
 // A job handle: `spawn` starts a job and returns it, `wait` takes its result. This is spawn-then-wait

@@ -72,13 +72,26 @@ comparator. `vecs::sort_by` sorts stably: elements that compare equal keep their
 
 {{example:sorting}}
 
-Any function with a matching signature can be passed where an `Fn` is expected, so
+Any function with a matching signature can be passed where a callback is expected, so
 `vecs::sort_by(&mut tasks, by_priority)` works too. `vecs::sort_by_key` sorts by a computed `u64`
 key, and `vecs::insert_sorted` / `vecs::binary_search` keep a vector as a sorted set.
 
-The stdlib callbacks read their elements, so they take `Fn`: a comparator that writes a captured
-value is `FnMut` and is rejected there instead of being called exclusively behind `sort_by`'s back.
-Count outside the comparator, or pass the count in and return it.
+The stdlib callbacks that run on your thread, one call at a time — `vecs::map`, `fold`,
+`filter_nums`, `any_num`/`all_num`/`count_num`/`position_num`, `sort_by`, `sort_by_key`, an
+option's `map` and the second callback of `pool::join` — take `FnMut`, so a comparator or predicate
+may write what it captured. To see the result in the caller, capture a `&mut` and write through it;
+a captured number is the closure's own copy:
+
+```grl
+mut compares = 0;
+counter := &mut compares;
+vecs::sort_by(&mut items, |a: &u64, b: &u64| -> bool { *counter += 1; return *a < *b; });
+println(compares);
+```
+
+The `pool` callbacks that run on workers (`pool::map`, `run`, `for_chunks`, `chunks_mut`, `spawn`
+and the first callback of `join`) stay `Fn`: every worker shares one closure, so a closure that
+writes its captures is refused there with the `FnMut, not Fn` message.
 
 **Try it:** use `words` again after creating `length` and read the compiler's message.
 
@@ -87,7 +100,8 @@ Count outside the comparator, or pass the count in and return it.
 These are refusals with a diagnostic, not silent behaviour:
 
 - A function parameter is not mutable storage, so a `FnMut` value taken *by value* cannot be called
-  in the callee. Take `&mut FnMut(...)` instead (shown above).
+  in the callee directly. Move it into a mutable binding first (`mut call = f;`, as the stdlib does)
+  or take `&mut FnMut(...)` (shown above).
 - A method call on a captured value counts as a write unless the capture is a shared reference or
   view, so a `Fn` closure cannot call even a reading method on a captured record, vector or string;
   declaring the closure `mut` and calling it exclusively is the fix.
