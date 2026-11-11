@@ -695,10 +695,13 @@ its TCB (errno, malloc tcache, stack guard, DTV). On Linux the compiler bridges 
 So foreign calls are valid on any runtime thread, including from pool jobs and green tasks, and libc
 state is the calling thread's: errno set on a worker is not the main thread's errno. A callback runs
 on the thread that called into C, with that thread's record (on a green task's scheduler thread, the
-task that made the foreign call). **A callback that arrives on a thread C created itself is not
-supported yet**: its TCB names no Grail record, and the entry aborts with a named message on stderr
-rather than borrow another thread's record (adopting a record for such a thread is the next step, see
-[B3](design/decisions-b2-b6.md#b3-foreign-calls-block-the-executing-thread)). A dynamically linked
+task that made the foreign call). **A callback that arrives on a thread C created itself** finds no Grail record and adopts one:
+the outermost callback on that thread maps a fresh record (its own TCB in word 56, no task or
+scheduler state), publishes it for the duration of the callback, and unmaps it when the callback
+returns to C. Inside, the callback may allocate, make foreign calls (on that thread's TCB, with its
+own errno) and be re-entered through C; a nested callback finds the published record and adopts
+nothing. The cost is one `mmap` and one `munmap` per outermost callback on such a thread
+(`tests/ffi/foreign_thread.grl`; see [B3](design/decisions-b2-b6.md#b3-foreign-calls-block-the-executing-thread)). A dynamically linked
 program is always linked against libc (`-lc` is added with the loader), because the runtime binds
 `pthread_create` weakly; a libc-loading program without it aborts by name at its first thread. On
 x86-64 a foreign call costs two `arch_prctl` system calls and a callback two, plus one TLS load; on

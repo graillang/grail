@@ -197,6 +197,18 @@ const fixtures = [
     modules: ['lib/pool.grl'],
     hostOnly: true,
   },
+  {
+    // A callback entered on a pthread the shim creates (a thread the runtime never saw) adopts a
+    // record for the outermost callback: it allocates, makes a foreign call whose errno is that
+    // thread's (EBADF), and re-enters C for a nested callback. Three rounds, so each adoption is
+    // released and redone: 11, 111, 211.
+    name: 'foreign_thread',
+    stdout: '11\n111\n211\n',
+    symbols: ['ts_call_on_new_thread', 'ts_call_here', 'close'],
+    linkNote: ['// grail-link: thread_shim.o', '// grail-link: c'],
+    modules: [],
+    hostOnly: true,
+  },
 ];
 const selected = process.argv[2] ? [targetName(process.argv[2])] : [hostTarget, ...targets.filter(t => t !== hostTarget)];
 const compiler = buildCompiler();

@@ -170,8 +170,8 @@ Two facts that belong to the same decision, because they bound how far "it just 
   which a fabricated TCB would join. Letting glibc build the thread costs an unused glibc-sized stack
   per runtime thread (glibc's default size; the green stacks are the runtime's own) and is what keeps
   every one of those invariants true by construction. **A callback on a thread C created** finds no
-  record and aborts by name (`rt_callback_foreign_thread`) instead of sharing the main thread's;
-  adopting a record for it is the next increment. Two limits remain: a callback must not suspend the
+  record and adopts one for the outermost callback (mapped, published in `rt_tls_record`, unmapped
+  on return), instead of sharing the main thread's. Two limits remain: a callback must not suspend the
   green task that made the foreign call (it could return into C on another thread), and glibc's
   internal signals (`setuid`'s `SIGSETXID`, cancellation) assume the thread pointer is the TCB, which
   is false while a thread runs Grail code.
@@ -195,15 +195,14 @@ real reason a worker could not call libc (since fixed separately, above). (c) Re
 (compile error): attractive, but it needs a checked suspension/effect summary - the same missing
 machinery as B1's interface contracts - so it is a later increment, not a v1 promise.
 
-**Revisit when** any of: callbacks on C-created threads adopt a record (the host TLS base is
-per-thread now, so worker-side FFI is legal and callbacks run on the thread that made the call); a
-foreign-call offload trampoline exists; effect/suspension summaries are published, at which point
+**Revisit when** any of: a foreign-call offload trampoline exists (the host TLS base is per-thread
+and callbacks on C-created threads adopt a record, so FFI is legal on every thread); effect/suspension summaries are published, at which point
 "this call blocks" becomes checkable and a `nosuspend` context can be enforced.
 
 **Consequence if wrong.** The failure mode is a runtime fault, not a diagnostic: a server that
 calls a blocking foreign function from tasks starves or deadlocks its worker pool (correctly, in
 the sense that it blocks exactly as documented), and multi-threaded FFI corrupted libc state silently
-until host TLS became per-thread; a callback on a C-created thread now aborts by name. If instead we had promised isolation we do not have, libraries would rely on it.
+until host TLS became per-thread; a callback on a C-created thread now adopts a record of its own. If instead we had promised isolation we do not have, libraries would rely on it.
 
 **Enforced by.** `tests/ffi/threads.grl` (`bun tools/test-ffi.mjs`, x86-64 and, with a glibc sysroot,
 AArch64 and RISC-V 64 under qemu) runs libc calls with errno from a pool worker and a green task and
@@ -548,8 +547,8 @@ because a stale claim is what makes a decided item get re-opened.
 
 The vocabulary this page deliberately does not settle: the module-interface details beyond the
 obligations in B1 (its plan of record is [separate-compilation.md](separate-compilation.md)), the
-capability types and their names (B2's revisit trigger), a foreign-call offload trampoline or
-record adoption for callbacks on C-created threads (B3's revisit trigger), the IOCP implementation (B4), any unwinding or `defer`
+capability types and their names (B2's revisit trigger), a foreign-call offload trampoline
+(B3's revisit trigger), the IOCP implementation (B4), any unwinding or `defer`
 feature (B5), and any widening of `FnMut` beyond the six rules above (B6) — for example making a
 by-value `FnMut` parameter callable, which needs `mut` parameters. Each of those is a design task
 with a stated trigger, not an open question about these decisions.

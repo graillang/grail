@@ -1,0 +1,56 @@
+module ffi_foreign_thread;
+
+// A callback entered on a thread that C created, not the runtime: the runtime adopts a record for
+// the thread for the duration of the outermost callback. Inside it the callback can make foreign
+// calls (running on that thread's own glibc TCB, so errno is the thread's), allocate, and be
+// re-entered through C (a nested callback that adopts nothing). Called several times, so each
+// adoption is torn down and redone.
+extern "C" lib "thread_shim.o" fn ts_call_on_new_thread(callback: cfn(i64) -> i64, value: i64) -> i64;
+extern "C" lib "thread_shim.o" fn ts_call_here(callback: cfn(i64) -> i64, value: i64) -> i64;
+extern "C" lib "thread_shim.o" fn ts_errno() -> i64;
+extern "C" lib "c" fn close(fd: i32) -> i32;
+extern "C" lib "c" fn pthread_self() -> u64;
+
+extern "C" fn inner(v: i64) -> i64 {
+    return v + 1;
+}
+extern "C" fn outer(v: i64) -> i64 {
+    // Owned allocation on the adopted thread, freed before returning.
+    mut parts = u64[1, 2, 3];
+    parts.push(4);
+    mut sum: i64 = 0;
+    for p in &parts {
+        sum += i64(*p);
+    }
+    mut nested: i64 = 0;
+    mut err: i64 = 0;
+    unsafe {
+        bad: i32 := -1;
+        close(bad);
+        err = ts_errno();
+        nested = ts_call_here(inner, v);
+    }
+    // 9 is EBADF: the foreign call ran on this thread's TCB.
+    if err != 9 {
+        return -1;
+    }
+    return nested + sum;
+}
+
+fn main() -> u64 {
+    mut total: i64 = 0;
+    mut i: i64 = 0;
+    while i < 3 {
+        mut r: i64 = 0;
+        unsafe {
+            r = ts_call_on_new_thread(outer, i * 100);
+        }
+        println(r);
+        total += r;
+        i += 1;
+    }
+    if total != 333 {
+        return 1;
+    }
+    return 0;
+}

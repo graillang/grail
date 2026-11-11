@@ -348,6 +348,7 @@ struct C {
     pending_symbol: u8[],
     // Slot holding the host TLS base inside an exported function's body, or 0.
     export_tls: u64,
+    export_adopt: u64,
     rnames: u8[][],
     tnames: u8[][],
     closures: Closure[],
@@ -1507,11 +1508,16 @@ fn tls_enter_foreign<a>(c: (&a mut C), slot: u64) -> unit {
 }
 // Callback entry: in a process that loaded libc, the caller runs on a libc TCB whose
 // `rt_tls_record` names this thread's record; `slot` keeps the caller's thread pointer. A thread
-// with no record (C created it) stops in rt_callback_foreign_thread instead of borrowing another
-// thread's record. In a static program the thread pointer already is the record and `slot` is 0.
-fn tls_enter_callback<a>(c: (&a mut C), slot: u64) -> unit {
+// with no record was created by C: the outermost callback on it adopts one (rt_adopt_record maps a
+// record for this thread and the entry publishes it in `rt_tls_record`), keeps it in `adopt`, and
+// the matching tls_leave_callback unpublishes and unmaps it, so the thread is again unknown to the
+// runtime once C regains control. Nested callbacks on that thread find the published record and
+// adopt nothing. In a static program the thread pointer already is the record and `slot` is 0.
+fn tls_enter_callback<a>(c: (&a mut C), slot: u64, adopt: u64) -> unit {
     o(&mut c, view("xorl %eax,%eax\nmovq %rax,"));
     stack_slot(&mut c, slot);
+    o(&mut c, view("\nmovq %rax,"));
+    stack_slot(&mut c, adopt);
     c.out.push(10);
     done := label(&mut c);
     have := label(&mut c);
@@ -1520,13 +1526,36 @@ fn tls_enter_callback<a>(c: (&a mut C), slot: u64) -> unit {
     tls_record_address(&mut c);
     o(&mut c, view("movq (%rax),%rsi\ntestq %rsi,%rsi\n"));
     jump(&mut c, view("jne"), have);
-    o(&mut c, view("call rt_callback_foreign_thread\n"));
+    o(&mut c, view("call rt_adopt_record\nmovq %rax,"));
+    stack_slot(&mut c, adopt);
+    c.out.push(10);
+    tls_record_address(&mut c);
+    o(&mut c, view("movq "));
+    stack_slot(&mut c, adopt);
+    o(&mut c, view(",%rsi\nmovq %rsi,(%rax)\n"));
     mark(&mut c, have);
     tp_read(&mut c);
     o(&mut c, view("movq %rax,"));
     stack_slot(&mut c, slot);
     c.out.push(10);
     tp_write(&mut c);
+    mark(&mut c, done);
+    return ();
+}
+// Leave a callback: restore the caller's thread pointer, then, if this entry adopted the thread,
+// clear `rt_tls_record` (now on the caller's TCB, so the TLS word is addressable) and unmap the
+// record. Runs before the return value is loaded, so it may clobber any register.
+fn tls_leave_callback<a>(c: (&a mut C), slot: u64, adopt: u64) -> unit {
+    tls_leave(&mut c, slot);
+    done := label(&mut c);
+    o(&mut c, view("movq "));
+    stack_slot(&mut c, adopt);
+    o(&mut c, view(",%rdi\ntestq %rdi,%rdi\n"));
+    jump(&mut c, view("je"), done);
+    tls_record_address(&mut c);
+    o(&mut c, view("xorl %ecx,%ecx\nmovq %rcx,(%rax)\nmovq "));
+    stack_slot(&mut c, adopt);
+    o(&mut c, view(",%rdi\ncall rt_release_record\n"));
     mark(&mut c, done);
     return ();
 }
@@ -8024,13 +8053,17 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         }
     }
     mut tls_slot = 0;
+    mut adopt_slot = 0;
     if (export == 2) & tls_bridge(&mut c) {
         tls_slot = fresh(&mut c);
-        tls_enter_callback(&mut c, tls_slot);
+        adopt_slot = fresh(&mut c);
+        tls_enter_callback(&mut c, tls_slot, adopt_slot);
         exchange(&mut c.export_tls, tls_slot);
+        exchange(&mut c.export_adopt, adopt_slot);
     }
     block(&mut c);
     exchange(&mut c.export_tls, 0);
+    exchange(&mut c.export_adopt, 0);
     if c.raw == 0 {
         if (c.terminated == 0) & (ret != 1) {
             fail(&mut c, view("function may fall through without return"));
@@ -8038,7 +8071,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     }
     cleanup(&mut c, 0);
     if tls_slot != 0 {
-        tls_leave(&mut c, tls_slot);
+        tls_leave_callback(&mut c, tls_slot, adopt_slot);
     }
     o(&mut c, view("xorq %rax,%rax\nleave\nret\n.set .F"));
     on(&mut c, frame);
@@ -21564,7 +21597,8 @@ fn statement<a>(c: (&a mut C)) -> unit {
         cleanup(&mut c, 0);
         restore := c.export_tls;
         if restore != 0 {
-            tls_leave(&mut c, restore);
+            adopted := c.export_adopt;
+            tls_leave_callback(&mut c, restore, adopted);
         }
         get(&mut c, v.t, view("%rax"));
         fret := c.export_fret;
@@ -26503,6 +26537,7 @@ pub fn main() -> u64 {
         pending_ext: 0,
         pending_symbol: u8[],
         export_tls: 0,
+        export_adopt: 0,
         rnames: u8[][],
         tnames: u8[][],
         closures: Closure[],

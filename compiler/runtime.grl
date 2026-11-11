@@ -1296,17 +1296,24 @@ fn rt_thread_no_libc_threads() -> u64 {
     rt_abort();
     return 0;
 }
-// Reached from a callback entry (native.grl tls_enter_callback) on a thread whose libc TCB names no
-// Grail record: C created the thread. It runs on that TCB, touches no thread record and never
-// returns; running the callback on another thread's record would share its task and scheduler state.
-fn rt_callback_foreign_thread() -> u64 {
-    text := view(
-        "grail: a C callback was entered on a thread the Grail runtime did not create; callbacks are supported only on the main thread and on runtime threads (pool workers, task scheduler threads) while they are inside a foreign call. See docs/ffi.md, \"Dynamic loading and the host TLS bridge\".\n"
-    );
-    packed := rt_pack(text);
-    rt_write_all(2, packed, rt_len(text));
-    rt_free(packed);
-    rt_abort();
+// Callback adoption (native.grl tls_enter_callback): a callback entered on a thread C created finds
+// no Grail record in `rt_tls_record`. The entry calls rt_adopt_record while still on C's TCB: it maps
+// a zeroed record for this thread, word 0 pointing to itself (the thread-pointer ABI) and word 56 the
+// thread's own TCB, so foreign calls made inside the callback run on it. The record has no task,
+// scheduler or pool state, like the main thread's before it spawns anything. tls_leave_callback
+// clears `rt_tls_record` and calls rt_release_record once the outermost callback returns.
+// Cost: one mmap and one munmap per outermost callback on such a thread.
+fn rt_adopt_record() -> u64 {
+    record := raw_map(4096);
+    if rt_error(record) {
+        rt_abort();
+    }
+    raw_store(record, record);
+    raw_store(record + 56, raw_tp_get());
+    return record;
+}
+fn rt_release_record(record: u64) -> u64 {
+    rt_syscall(11, record, 4096, 0);
     return 0;
 }
 fn rt_thread_main(record: u64) -> u64 {

@@ -25,3 +25,26 @@ long ts_errno_hold(long value) {
 long ts_arrived(void) { return atomic_load(&arrived); }
 
 long ts_errno(void) { return errno; }
+
+/* Foreign-thread callbacks (tests/ffi/foreign_thread.grl): run `cb(value)` on a pthread this shim
+ * creates, so the callback lands on a thread the Grail runtime never saw, and return its result.
+ * `ts_call_here` lets that callback re-enter C and call back again (a nested callback on the same
+ * foreign thread). */
+typedef long (*ts_cb)(long);
+struct ts_job { ts_cb cb; long value; long result; };
+
+static void *ts_run(void *arg) {
+  struct ts_job *job = arg;
+  job->result = job->cb(job->value);
+  return 0;
+}
+
+long ts_call_on_new_thread(ts_cb cb, long value) {
+  struct ts_job job = {cb, value, -1};
+  pthread_t thread;
+  if (pthread_create(&thread, 0, ts_run, &job) != 0) return -2;
+  pthread_join(thread, 0);
+  return job.result;
+}
+
+long ts_call_here(ts_cb cb, long value) { return cb(value); }
