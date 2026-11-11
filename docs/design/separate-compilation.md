@@ -278,7 +278,6 @@ module as it is. A *build* no longer does:
 
 ```
 grail ... --use DIR            # modules whose source is not on the command line come from DIR
-grail ... --serve DIR          # emit the instantiations DIR's request files ask for
 grail ... --no-entry           # this object is one module of a link, not a program
 ```
 
@@ -317,24 +316,24 @@ One definition per key, not per entry in `c.specs`: two interned argument lists 
 type (two closures with the same captures, two views of different element types), so the emitter
 records the names it has emitted and skips a repeat. The key is the identity; an index is not.
 
-With the key fixed, the ownership rule is one line: **a specialisation's body is emitted by the
-module that defines the template, and only there.** A run that loaded a module's surface *and
-bodies* from an interface is not that module, so it emits a reference, and records the key in
-`DIR/<requester>.sreq`:
+With the key fixed, the ownership rule is one line: **a specialisation's body is emitted by every
+module that asks for it, weak, under its content-addressed name; the linker keeps one.** A run that
+loaded the template from an interface replays the body the interface carries; nothing is requested
+of the defining module, so a module's object depends only on its own source and the interfaces it
+read - the property one invocation per module needs. (An earlier version had the defining module
+emit the body and importers file `.sreq` requests that its build served with `--serve`; that made an
+importer's edit force a rebuild of the defining module and needed the build order iterated to a
+fixpoint, and was replaced.)
 
-```
-// grail-specs 1
-module main
-request generic::twice u64
-request generic::pick u64
-```
-
-The defining module's build reads every `*.sreq` in `--serve DIR`, re-specialises each request (the
-body is replayed from its own source, or from its own interface if it is being rebuilt without one),
-and emits the bodies. Duplicate requests - two importers asking for the same key - are one
-`c.specs` entry and therefore one body. The pair of files is the whole protocol, they are text,
-sorted by key, and a module that asks for nothing still gets a request file so a request that is no
-longer made cannot keep a dead body alive.
+- The body goes into the *requester's* part, so `--split` keeps a module's code - including the
+  instantiations it uses - in that module's part.
+- A closure created while a specialisation is replayed is part of that body: it is named
+  `<specialisation>_c<n>` by its ordinal within the replay (which every object reaches in the same
+  order; a retried body rewinds the ordinal) and emitted weak alongside it.
+- `tools/interface-test.mjs` section (e) compiles the entry and two importers against interfaces only,
+  checks each emits the instantiation weak under one name, links three copies and runs the program
+  against the source build; the closure-key section does the same for an instantiation on a
+  capturing closure, which two runs synthesise independently.
 
 Drop helpers had the same index-versus-content bug and got the same treatment: `.D<hex>` from the
 SHA-256 of `type_key`, emitted `.weak` (a pure function of the type it drops, so two objects that

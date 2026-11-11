@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Changed (separate compilation): every module emits the specialisations its code uses, weak and content-addressed, replaying the template from its interface when the source is not in the build; the linker keeps one copy. The `--serve` option and `.sreq` request files are gone, so a module's object depends only on its own source and the interfaces it reads.
 - Added: an iterator protocol. A record with an inherent `fn next(self: &mut Self) -> T?` is iterable: `for x in it` takes the iterator, `for x in &mut it` lends it so the loop can stop early and a later loop carry on; `for x in &it` is refused by name. A plain `for` over a vector compiles exactly as before.
 - Added: `lib/iter.grl`, lazy adapters over a closure-backed `Iter<T>` - `upto`, `of`, `map`, `filter`, `take`, `enumerate`, `zip` and `collect` - with a new book chapter, *Iteration*, and Rust comparisons.
 - Fixed: a closure body that instantiates a generic (`Some(i)` inside `|| ...`) no longer leaves an undefined symbol at link time; closures and specialisations are emitted to a fixpoint.
