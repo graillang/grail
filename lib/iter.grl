@@ -1,0 +1,146 @@
+module iter;
+
+use core;
+
+// Lazy iteration. `Iter<T>` is a closure that produces the next item or None; its `next` method
+// makes it iterable by `for x in it` (the iterator protocol: any record with
+// `fn next(self: &mut Self) -> T?`). Adapters wrap one iterator in another, so nothing runs and
+// nothing is allocated until a loop or `collect` pulls items through.
+pub struct Iter<T> { step: FnMut() -> T? }
+
+// An item with its position, from `enumerate`.
+pub struct Indexed<T> { index: u64, value: T }
+// One item from each side, from `zip`.
+pub struct Pair<A, B> { left: A, right: B }
+
+impl<T> Iter<T> {
+    pub fn next(self: &mut Self) -> T? {
+        return (self.step)();
+    }
+}
+
+// An iterator from any closure that yields the next item.
+pub fn from_fn<T>(step: FnMut() -> T?) -> Iter<T> {
+    return Iter { step: step };
+}
+
+// lo, lo+1, ..., hi-1.
+pub fn upto(lo: u64, hi: u64) -> Iter<u64> {
+    mut i = lo;
+    return Iter { step: || -> u64? {
+        if i < hi {
+            v := i;
+            i = i + 1;
+            return Some(v);
+        }
+        return None;
+    } };
+}
+
+// Every element of a vector, in order, moved out one at a time. (To iterate a vector you keep, use
+// `for x in &v`, or a record iterator holding `&a T[]` - see the book's iteration chapter: an item
+// borrowed from captured storage cannot be handed out through a closure.)
+pub fn of<T>(v: T[]) -> Iter<T> {
+    mut src = v;
+    mut rev = T[];
+    while src.len() > 0 {
+        rev.push(src.pop());
+    }
+    return Iter { step: || -> T? {
+        if rev.len() == 0 {
+            return None;
+        }
+        return Some(rev.pop());
+    } };
+}
+
+pub fn map<T, U>(it: Iter<T>, f: FnMut(T) -> U) -> Iter<U> {
+    mut src = it;
+    mut g = f;
+    return Iter { step: || -> U? {
+        match src.next() {
+            Some(x) => {
+                return Some(g(x));
+            },
+            None => {
+                return None;
+            }
+        }
+    } };
+}
+
+pub fn filter<a, T>(it: Iter<T>, keep: FnMut((&a T)) -> bool) -> Iter<T> {
+    mut src = it;
+    mut k = keep;
+    return Iter { step: || -> T? {
+        while let Some(x) = src.next() {
+            if k(&x) {
+                return Some(x);
+            }
+        }
+        return None;
+    } };
+}
+
+// At most the first n items.
+pub fn take<T>(it: Iter<T>, n: u64) -> Iter<T> {
+    mut src = it;
+    mut left = n;
+    return Iter { step: || -> T? {
+        if left == 0 {
+            return None;
+        }
+        left = left - 1;
+        return src.next();
+    } };
+}
+
+pub fn enumerate<T>(it: Iter<T>) -> Iter<Indexed<T>> {
+    mut src = it;
+    mut n = 0;
+    return Iter { step: || -> Indexed<T>? {
+        match src.next() {
+            Some(x) => {
+                i := n;
+                n = n + 1;
+                return Some(Indexed { index: i, value: x });
+            },
+            None => {
+                return None;
+            }
+        }
+    } };
+}
+
+// Pairs items from both until either runs out.
+pub fn zip<A, B>(left: Iter<A>, right: Iter<B>) -> Iter<Pair<A, B>> {
+    mut l = left;
+    mut r = right;
+    return Iter { step: || -> Pair<A, B>? {
+        match l.next() {
+            Some(a) => {
+                match r.next() {
+                    Some(b) => {
+                        return Some(Pair { left: a, right: b });
+                    },
+                    None => {
+                        return None;
+                    }
+                }
+            },
+            None => {
+                return None;
+            }
+        }
+    } };
+}
+
+// Every remaining item, in order, in a new vector.
+pub fn collect<T>(it: Iter<T>) -> T[] {
+    mut src = it;
+    mut out = T[];
+    while let Some(x) = src.next() {
+        out.push(x);
+    }
+    return out;
+}
