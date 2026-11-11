@@ -641,11 +641,11 @@ Not implemented yet, and each rejected rather than approximated:
   executed (the Wine runner has no C shim to call them);
 - an out-parameter on a C callback or a `cfn` type: only a declaration Grail calls can write a slot
   (see Out-parameters above);
-- a `byval` record parameter on Windows (x86-64 and ARM64) and on a C callback, and a record
-  *result* whose embedded records contain floats (its register classification needs the flattened
-  field list; refused with a diagnostic). Record results are otherwise returned by value on every
-  ABI, float fields included (`tests/ffi/call_records.grl`, `float_record_results.grl`), and nested
-  records included;
+- a `byval` record parameter on Windows (x86-64 and ARM64) and on a C callback. Record results are
+  returned by value on every ABI, float fields included, embedded records included: the register
+  classification runs over the flattened field list, so a float inside an embedded record is
+  classified like one at the top level (`tests/ffi/call_records.grl`, `float_record_results.grl`,
+  `nested_float_results.grl`);
 - pointer arithmetic, an index of a `CPtr`, and a view built from an address: an array is a
   fixed-capacity record with its count checked afterwards, and elements are reached by field name;
 - a pointer that C keeps after the call returns. A `CPtr` made by `cptr`/`cptr_mut` is a checked borrow

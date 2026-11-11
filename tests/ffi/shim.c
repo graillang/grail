@@ -231,3 +231,20 @@ long c_call_record_write(rw_cb cb, int mode) {
   if (f.before != 111 || f.after != 222) return -1;
   return (long)r * 100000 + (long)f.p.x * 1000 + (long)f.p.y * 10 + (long)(f.p.w * 4);
 }
+
+/* Record results whose embedded records hold floats (tests/ffi/nested_float_results.grl). Each ABI
+ * classifies the flattened field list: SysV per eightbyte (np_pd: two SSE eightbytes, xmm0/xmm1;
+ * nf_mixed: INTEGER then SSE, rax/xmm0), AAPCS64 homogeneous aggregates through nesting (nh_3d:
+ * d0-d2; memory on SysV and RV64 at 24 bytes), RV64 one float plus one integer (nf_fi: fa0 + a0). */
+struct np_pair { float x; float y; };
+struct np_pd { struct np_pair p; double d; };
+struct np_pd c_np_pd(float x, double d) { struct np_pd r = {{x, x * 2.0f}, d}; return r; }
+struct nf_if { int i; float f; };
+struct nf_mixed { struct nf_if a; double d; };
+struct nf_mixed c_nf_mixed(int i, double d) { struct nf_mixed r = {{i, 0.25f}, d}; return r; }
+struct nh_2d { double x; double y; };
+struct nh_3d { struct nh_2d a; double z; };
+struct nh_3d c_nh_3d(double s) { struct nh_3d r = {{s, s + 1.0}, s + 2.0}; return r; }
+struct nf_f { float f; };
+struct nf_fi { struct nf_f a; int i; };
+struct nf_fi c_nf_fi(float f, int i) { struct nf_fi r = {{f}, i}; return r; }

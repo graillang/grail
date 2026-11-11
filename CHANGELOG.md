@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Added: a C function may return a record whose embedded records contain floats. Result classification (SysV eightbytes, AAPCS64 homogeneous aggregates, RV64 float+int pairs) now runs over the flattened field list instead of refusing the shape (`tests/ffi/nested_float_results.grl`, executed on x86-64, AArch64 and RISC-V).
 - Added: a C callback may write into the struct C passes it: declare the parameter `p: &mut R` for an extern record `R`. The body works on a Grail-owned copy that every exit writes back into C's storage, so field writes, passing `p` on and whole-value replacement are all sound. A `cfn` type may declare `&mut R`, and a call through it passes the record's own address.
 - Added: a C callback may take any number of parameters. Arguments past the registers are read from the caller's stack on SysV x86-64, AAPCS64, RV64 (which first spills extra floats into free integer registers) and Win64, instead of the parameter list being refused (`tests/ffi/callback_stack.grl`, executed on x86-64, AArch64 and RISC-V).
 - Added: a C callback that arrives on a thread C created now runs instead of aborting. The outermost callback on such a thread adopts a record (its own TCB, no task state) for the duration of the call and releases it on return, so it can allocate, make foreign calls with its own errno, and be re-entered through C.

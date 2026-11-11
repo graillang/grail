@@ -6811,12 +6811,7 @@ fn ffi_emit_call<a, b, d, e, f>(
             rslot = invoke(&mut c, view("rt_rec"), one(words));
             rmode = 1;
             rdecl = rd;
-            if ffi_record_has_nested(&mut c, rd) & ffi_record_has_float_deep(&mut c, rd) {
-                // Classifying floats inside an embedded record needs the flattened field list;
-                // refuse rather than read the wrong registers.
-                fail(&mut c, view("extern C record results with floats inside an embedded record are not supported yet"));
-            }
-            if ffi_record_has_float(&mut c, rd) {
+            if ffi_record_has_float_deep(&mut c, rd) {
                 fplan = ffi_float_plan(&mut c, rd, abi);
             }
             if fplan == 2 {
@@ -9675,7 +9670,10 @@ fn ffi_float_arg<a>(c: (&a mut C), index: u64, single: bool, x86: u64) -> unit {
 // or two fields, at least one float), 0 the integer-register/memory rules (Win64 by size, AAPCS64
 // non-HFA composites, RV64 records the flattening rule does not cover).
 fn ffi_float_plan<a>(c: (&a mut C), d: u64, abi: u64) -> u64 {
-    count := c.decls[d].count;
+    // Classified over the flattened scalar leaves, so a float inside an embedded record counts
+    // exactly as one at the top level (the C ABIs all classify the flattened field list).
+    leaves := ffi_leaves(&mut c, d, 0);
+    count := leaves.len();
     if abi == 0 {
         return 1;
     }
@@ -9683,14 +9681,12 @@ fn ffi_float_plan<a>(c: (&a mut C), d: u64, abi: u64) -> u64 {
         if (count == 0) || (4 < count) {
             return 0;
         }
-        first := field_ty(&mut c, d, 0);
-        if !is_float(&mut c, first) {
+        kind := leaves[0].cls;
+        if kind == 0 {
             return 0;
         }
-        single := is_f32(&mut c, first);
         for i in count {
-            ty := field_ty(&mut c, d, i);
-            if !is_float(&mut c, ty) || is_f32(&mut c, ty) != single {
+            if leaves[i].cls != kind {
                 return 0;
             }
         }
@@ -9702,12 +9698,11 @@ fn ffi_float_plan<a>(c: (&a mut C), d: u64, abi: u64) -> u64 {
         }
         mut floats = 0;
         for i in count {
-            ty := field_ty(&mut c, d, i);
-            if is_float(&mut c, ty) {
+            if leaves[i].cls != 0 {
                 floats = floats + 1;
             } else {
                 // Only scalar integers pair with a float (handles and CStr are pointer words).
-                if 8 < ffi_field_size(&mut c, ty) {
+                if 8 < leaves[i].size {
                     return 0;
                 }
             }
@@ -9719,12 +9714,14 @@ fn ffi_float_plan<a>(c: (&a mut C), d: u64, abi: u64) -> u64 {
     }
     return 0;
 }
-// Stores a float-classified record result from the return registers into its allocation.
+// Stores a float-classified record result from the return registers into its allocation, leaf by
+// leaf of the flattened record (embedded records included).
 fn ffi_float_result<a>(c: (&a mut C), slot: u64, d: u64, plan: u64) -> unit {
-    count := c.decls[d].count;
+    leaves := ffi_leaves(&mut c, d, 0);
+    count := leaves.len();
     size := ffi_record_size(&mut c, d);
     if plan == 1 {
-        // SysV: each eightbyte is SSE when all its fields are floats, else INTEGER; INTEGER
+        // SysV: each eightbyte is SSE when all its leaves are floats, else INTEGER; INTEGER
         // eightbytes come from rax then rdx, SSE ones from xmm0 then xmm1.
         mut eights = (size + 7) / 8;
         mut ints = 0;
@@ -9734,9 +9731,7 @@ fn ffi_float_result<a>(c: (&a mut C), slot: u64, d: u64, plan: u64) -> unit {
         for e in eights {
             mut sse = 1;
             for i in count {
-                ty := field_ty(&mut c, d, i);
-                off := ffi_offset(&mut c, d, i);
-                if (off / 8 == e) & !is_float(&mut c, ty) {
+                if (leaves[i].off / 8 == e) & (leaves[i].cls == 0) {
                     sse = 0;
                 }
             }
@@ -9762,31 +9757,30 @@ fn ffi_float_result<a>(c: (&a mut C), slot: u64, d: u64, plan: u64) -> unit {
     if plan == 2 {
         get(&mut c, slot, view("%r10"));
         for i in count {
-            ty := field_ty(&mut c, d, i);
-            single := is_f32(&mut c, ty);
-            off := ffi_offset(&mut c, d, i);
-            ffi_float_store(&mut c, i, single, off);
+            ffi_float_store(&mut c, i, leaves[i].cls == 1, leaves[i].off);
         }
         return ();
     }
-    // RV64 flattened: floats in fa0, fa1 in field order; the integer field (if any) in a0, which
+    // RV64 flattened: floats in fa0, fa1 in leaf order; the integer leaf (if any) in a0, which
     // the call lowering leaves in %rax.
     held := save(&mut c);
     get(&mut c, slot, view("%r10"));
     mut fk = 0;
     for i in count {
-        ty := field_ty(&mut c, d, i);
-        if is_float(&mut c, ty) {
-            single := is_f32(&mut c, ty);
-            off := ffi_offset(&mut c, d, i);
-            ffi_float_store(&mut c, fk, single, off);
+        if leaves[i].cls != 0 {
+            ffi_float_store(&mut c, fk, leaves[i].cls == 1, leaves[i].off);
             fk = fk + 1;
         }
     }
     for i in count {
-        ty := field_ty(&mut c, d, i);
-        if !is_float(&mut c, ty) {
-            cfield_store(&mut c, slot, d, i, held);
+        if leaves[i].cls == 0 {
+            get(&mut c, slot, view("%rax"));
+            o(&mut c, view("addq $"));
+            on(&mut c, leaves[i].off);
+            o(&mut c, view(",%rax\n"));
+            addr := save(&mut c);
+            w := imm(&mut c, leaves[i].size);
+            invoke(&mut c, view("rt_store_sized"), three(addr, held, w));
         }
     }
     return ();
@@ -9802,28 +9796,6 @@ fn ffi_float_store<a>(c: (&a mut C), k: u64, single: bool, off: u64) -> unit {
     on(&mut c, off);
     c.out.push(10);
     return ();
-}
-// 1 when a C-layout record has a floating-point field (its by-value classification differs).
-fn ffi_record_has_float<a>(c: (&a mut C), d: u64) -> bool {
-    count := c.decls[d].count;
-    for i in count {
-        ty := field_ty(&mut c, d, i);
-        if is_float(&mut c, ty) {
-            return true;
-        }
-    }
-    return false;
-}
-// 1 when a C-layout record embeds another extern record.
-fn ffi_record_has_nested<a>(c: (&a mut C), d: u64) -> bool {
-    count := c.decls[d].count;
-    for i in count {
-        ty := field_ty(&mut c, d, i);
-        if is_c_record(&mut c, ty) != 0 {
-            return true;
-        }
-    }
-    return false;
 }
 // Floats anywhere in the record, embedded records included.
 fn ffi_record_has_float_deep<a>(c: (&a mut C), d: u64) -> bool {

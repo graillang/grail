@@ -56,6 +56,12 @@ const fixtures = [
     symbols: ['c_vec2', 'c_vec3d', 'c_fi', 'c_di', 'c_quad'],
   },
   {
+    // Record results with floats inside an embedded record, classified over the flattened leaves.
+    name: 'nested_float_results',
+    stdout: '1.5 3 10.25\n-7 0.25 3.5\n0.5 1.5 2.5\n2.75 42\n',
+    symbols: ['c_np_pd', 'c_nf_mixed', 'c_nh_3d', 'c_nf_fi'],
+  },
+  {
     // Extern records embedded by value (offsets, projection, assignment, copy-out, results).
     name: 'nested_records',
     stdout: '49044\n21\n3\n-7\n100000000000\n42\n9\n77\n154\n6\n7\n42\n',
