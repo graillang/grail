@@ -26,8 +26,9 @@ the design notes named below; `implementation-status.md` is current except where
 
 Remaining implementable core gap: record and string member layout in the debug info. Every other
 A-row is done or explicitly partial (A12); nothing in A waits on a B decision any more. B2, B6 and B7
-are implemented and B1's stage 1 has landed - the parts of B1 and B7 that remain are the checked
-module-interface artifact and the Windows struct ABI, named in their own sections.
+are implemented, and B1 stages 1-4 have landed (per-module emission, checked interfaces, generics
+across modules, the build cache). What remains of B1 is one compiler invocation per module; of B7,
+the Windows struct ABI - both named in their own sections.
 
 ## B. Owner decisions (settled 2026-11-10)
 
