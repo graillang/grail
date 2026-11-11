@@ -5549,6 +5549,168 @@
     "note": "the writable pointer C holds is the one borrow: a second read-only pointer would alias it"
   },
   {
+    "name": "ffi-cptr-readonly-from-mut",
+    "source": "module ffi_cptr_readonly_from_mut;extern \"C\" record AppInfo { api_version: u32, flags: u32 }extern \"C\" fn ffi_app_version(app: AppInfo) -> i64 { return i64(app.api_version); }extern \"C\" as \"ffi_app_version\" fn c_version(p: CPtr) -> i64;fn main() -> u64 {mut app = AppInfo { api_version: 6, flags: 0 };mut p = cnull();unsafe { p = cptr(&mut app); }println(app.flags);mut v: i64 = 0;unsafe { v = c_version(p); }println(v);return 0;}",
+    "stdout": "0\n6\n",
+    "note": "cptr of a `&mut` temporary is a read-only pointer, so it holds a shared borrow and the record stays readable"
+  },
+  {
+    "name": "ffi-reject-cptr-readonly-from-mut-write",
+    "source": "module ffi_reject;extern \"C\" record AppInfo { api_version: u32, flags: u32 }extern \"C\" fn ffi_app_version(app: AppInfo) -> i64 { return i64(app.api_version); }extern \"C\" as \"ffi_app_version\" fn c_version(p: CPtr) -> i64;fn main(){mut app = AppInfo { api_version: 6, flags: 0 };mut p = cnull();unsafe { p = cptr(&mut app); }app.flags = 1;mut v: i64 = 0;unsafe { v = c_version(p); }}",
+    "reject": true,
+    "diagnostic": "cannot modify `app` while a C pointer to it is live in `p`",
+    "note": "the shared borrow still forbids writes"
+  },
+  {
+    "name": "ffi-reject-cptr-reassign-live",
+    "source": "module ffi_reject;extern \"C\" record AppInfo { api_version: u32, flags: u32 }extern \"C\" record CreateInfo { s_type: u32, pad: u32, p_app: CPtr, count: u32 }extern \"C\" fn c_take(p: CPtr) -> i64;extern \"C\" fn c_info(info: CreateInfo) -> i64;fn main(){mut sub = AppInfo { api_version: 1, flags: 0 };mut p = cnull();unsafe { p = cptr(&sub); }sub = AppInfo { api_version: 2, flags: 0 };mut v: i64 = 0;unsafe { v = c_take(p); }}",
+    "reject": true,
+    "diagnostic": "cannot assign to `sub` while a C pointer to it is live in `p` (made by cptr at line 1)",
+    "note": "the pointer in `p` borrows `sub` until its last use: replacing `sub` first would leave it dangling"
+  },
+  {
+    "name": "ffi-reject-cptr-modify-live",
+    "source": "module ffi_reject;extern \"C\" record AppInfo { api_version: u32, flags: u32 }extern \"C\" record CreateInfo { s_type: u32, pad: u32, p_app: CPtr, count: u32 }extern \"C\" fn c_take(p: CPtr) -> i64;extern \"C\" fn c_info(info: CreateInfo) -> i64;fn main(){mut sub = AppInfo { api_version: 1, flags: 0 };mut p = cnull();unsafe { p = cptr(&sub); }sub.flags = 3;mut v: i64 = 0;unsafe { v = c_take(p); }}",
+    "reject": true,
+    "diagnostic": "cannot modify `sub` while a C pointer to it is live in `p`",
+    "note": "a read-only C pointer is a shared borrow: the record is not written behind it"
+  },
+  {
+    "name": "ffi-reject-cptr-move-live",
+    "source": "module ffi_reject;extern \"C\" record AppInfo { api_version: u32, flags: u32 }extern \"C\" record CreateInfo { s_type: u32, pad: u32, p_app: CPtr, count: u32 }extern \"C\" fn c_take(p: CPtr) -> i64;extern \"C\" fn c_info(info: CreateInfo) -> i64;fn main(){mut sub = AppInfo { api_version: 1, flags: 0 };mut p = cnull();unsafe { p = cptr(&sub); }m := sub;mut v: i64 = 0;unsafe { v = c_take(p); }println(m.flags);}",
+    "reject": true,
+    "diagnostic": "cannot move `sub` while a C pointer to it is live in `p`",
+    "note": "moving the record would move the storage the pointer names"
+  },
+  {
+    "name": "ffi-reject-cptr-mut-use-live",
+    "source": "module ffi_reject;extern \"C\" record AppInfo { api_version: u32, flags: u32 }extern \"C\" record CreateInfo { s_type: u32, pad: u32, p_app: CPtr, count: u32 }extern \"C\" fn c_take(p: CPtr) -> i64;extern \"C\" fn c_info(info: CreateInfo) -> i64;fn main(){mut sub = AppInfo { api_version: 1, flags: 0 };mut p = cnull();unsafe { p = cptr_mut(&mut sub); }println(sub.flags);mut v: i64 = 0;unsafe { v = c_take(p); }}",
+    "reject": true,
+    "diagnostic": "cannot use `sub` while a C pointer to it is live in `p` (made by cptr_mut at line 1)",
+    "note": "a writable C pointer is the exclusive borrow: no other path may reach the record while it is live"
+  },
+  {
+    "name": "ffi-reject-cptr-bytes-modify-live",
+    "source": "module ffi_reject;extern \"C\" record AppInfo { api_version: u32, flags: u32 }extern \"C\" record CreateInfo { s_type: u32, pad: u32, p_app: CPtr, count: u32 }extern \"C\" fn c_take(p: CPtr) -> i64;extern \"C\" fn c_info(info: CreateInfo) -> i64;fn main(){mut b = u8[1, 2, 3];mut p = cnull();unsafe { p = cptr(&b); }b.push(4);mut v: i64 = 0;unsafe { v = c_take(p); }}",
+    "reject": true,
+    "diagnostic": "cannot modify `b` while a C pointer to it is live in `p`",
+    "note": "a push may reallocate the bytes the pointer points into"
+  },
+  {
+    "name": "ffi-reject-cptr-bytes-drop-live",
+    "source": "module ffi_reject;extern \"C\" record AppInfo { api_version: u32, flags: u32 }extern \"C\" record CreateInfo { s_type: u32, pad: u32, p_app: CPtr, count: u32 }extern \"C\" fn c_take(p: CPtr) -> i64;extern \"C\" fn c_info(info: CreateInfo) -> i64;fn main(){mut b = u8[1, 2, 3];mut p = cnull();unsafe { p = cptr(b); }drop(b);mut v: i64 = 0;unsafe { v = c_take(p); }}",
+    "reject": true,
+    "diagnostic": "cannot drop `b` while a C pointer to it is live in `p`",
+    "note": "cptr of an owned sequence borrows the binding exactly as cptr(&b) does"
+  },
+  {
+    "name": "ffi-reject-cptr-copy-live",
+    "source": "module ffi_reject;extern \"C\" record AppInfo { api_version: u32, flags: u32 }extern \"C\" record CreateInfo { s_type: u32, pad: u32, p_app: CPtr, count: u32 }extern \"C\" fn c_take(p: CPtr) -> i64;extern \"C\" fn c_info(info: CreateInfo) -> i64;fn main(){mut sub = AppInfo { api_version: 1, flags: 0 };mut p = cnull();unsafe { p = cptr(&sub); }q := p;sub = AppInfo { api_version: 2, flags: 0 };mut v: i64 = 0;unsafe { v = c_take(q); }}",
+    "reject": true,
+    "diagnostic": "cannot assign to `sub` while a C pointer to it is live in `q`",
+    "note": "a copy of the pointer holds the same borrow"
+  },
+  {
+    "name": "ffi-reject-cptr-field-read-live",
+    "source": "module ffi_reject;extern \"C\" record AppInfo { api_version: u32, flags: u32 }extern \"C\" record CreateInfo { s_type: u32, pad: u32, p_app: CPtr, count: u32 }extern \"C\" fn c_take(p: CPtr) -> i64;extern \"C\" fn c_info(info: CreateInfo) -> i64;fn main(){mut sub = AppInfo { api_version: 1, flags: 0 };mut info = CreateInfo { s_type: 1, pad: 0, p_app: cnull(), count: 7 };unsafe { info.p_app = cptr(&sub); }q := info.p_app;sub = AppInfo { api_version: 2, flags: 0 };mut v: i64 = 0;unsafe { v = c_take(q); }}",
+    "reject": true,
+    "diagnostic": "cannot assign to `sub` while a C pointer to it is live in `q`",
+    "note": "reading the pointer back out of the record keeps the borrow"
+  },
+  {
+    "name": "ffi-reject-cptr-record-move-live",
+    "source": "module ffi_reject;extern \"C\" record AppInfo { api_version: u32, flags: u32 }extern \"C\" record CreateInfo { s_type: u32, pad: u32, p_app: CPtr, count: u32 }extern \"C\" fn c_take(p: CPtr) -> i64;extern \"C\" fn c_info(info: CreateInfo) -> i64;fn main(){mut sub = AppInfo { api_version: 1, flags: 0 };mut info = CreateInfo { s_type: 1, pad: 0, p_app: cnull(), count: 7 };unsafe { info.p_app = cptr(&sub); }m := info;sub = AppInfo { api_version: 2, flags: 0 };mut v: i64 = 0;unsafe { v = c_info(m); }}",
+    "reject": true,
+    "diagnostic": "cannot assign to `sub` while a C pointer to it is live in `m`",
+    "note": "moving the create-info moves the borrow with it"
+  },
+  {
+    "name": "ffi-reject-cptr-literal-field-live",
+    "source": "module ffi_reject;extern \"C\" record AppInfo { api_version: u32, flags: u32 }extern \"C\" record CreateInfo { s_type: u32, pad: u32, p_app: CPtr, count: u32 }extern \"C\" fn c_take(p: CPtr) -> i64;extern \"C\" fn c_info(info: CreateInfo) -> i64;fn main(){mut sub = AppInfo { api_version: 1, flags: 0 };mut info = CreateInfo { s_type: 1, pad: 0, p_app: cnull(), count: 7 };unsafe { info = CreateInfo { s_type: 1, pad: 0, p_app: cptr(&sub), count: 7 }; }sub = AppInfo { api_version: 2, flags: 0 };mut v: i64 = 0;unsafe { v = c_info(info); }}",
+    "reject": true,
+    "diagnostic": "cannot assign to `sub` while a C pointer to it is live in `info`",
+    "note": "a pointer in a record literal field is held by the record"
+  },
+  {
+    "name": "ffi-reject-cptr-longer-lived-record",
+    "source": "module ffi_reject;extern \"C\" record AppInfo { api_version: u32, flags: u32 }extern \"C\" record CreateInfo { s_type: u32, pad: u32, p_app: CPtr, count: u32 }extern \"C\" fn c_take(p: CPtr) -> i64;extern \"C\" fn c_info(info: CreateInfo) -> i64;fn main(){mut info = CreateInfo { s_type: 1, pad: 0, p_app: cnull(), count: 7 };if true { mut app = AppInfo { api_version: 5, flags: 0 };unsafe { info.p_app = cptr(&app); } }mut v: i64 = 0;unsafe { v = c_info(info); }}",
+    "reject": true,
+    "diagnostic": "`app` goes out of scope while a C pointer to it is live in `info` (made by cptr at line 1)",
+    "note": "the create-info outlives the record it points at"
+  },
+  {
+    "name": "ffi-reject-cptr-out-parameter-local",
+    "source": "module ffi_reject;extern \"C\" record AppInfo { api_version: u32, flags: u32 }extern \"C\" record CreateInfo { s_type: u32, pad: u32, p_app: CPtr, count: u32 }extern \"C\" fn c_take(p: CPtr) -> i64;extern \"C\" fn c_info(info: CreateInfo) -> i64;fn fill(out: &mut CreateInfo) -> unit { app := AppInfo { api_version: 5, flags: 0 };unsafe { out.p_app = cptr(&app); } }fn main(){}",
+    "reject": true,
+    "diagnostic": "`app` goes out of scope while a C pointer to it is live in `*out`",
+    "note": "the caller's record outlives the callee's local"
+  },
+  {
+    "name": "ffi-reject-cptr-return-local",
+    "source": "module ffi_reject;extern \"C\" record AppInfo { api_version: u32, flags: u32 }extern \"C\" record CreateInfo { s_type: u32, pad: u32, p_app: CPtr, count: u32 }extern \"C\" fn c_take(p: CPtr) -> i64;extern \"C\" fn c_info(info: CreateInfo) -> i64;fn leak() -> CPtr { app := AppInfo { api_version: 5, flags: 0 };mut p = cnull();unsafe { p = cptr(&app); }return p; }fn main(){}",
+    "reject": true,
+    "diagnostic": "cannot return a C pointer to `app`: the pointer would outlive it (made by cptr at line 1)",
+    "note": "a returned pointer to a local dangles as soon as the frame ends"
+  },
+  {
+    "name": "ffi-reject-cptr-return-in-record",
+    "source": "module ffi_reject;extern \"C\" record AppInfo { api_version: u32, flags: u32 }extern \"C\" record CreateInfo { s_type: u32, pad: u32, p_app: CPtr, count: u32 }extern \"C\" fn c_take(p: CPtr) -> i64;extern \"C\" fn c_info(info: CreateInfo) -> i64;fn leak() -> CreateInfo { app := AppInfo { api_version: 5, flags: 0 };mut info = CreateInfo { s_type: 1, pad: 0, p_app: cnull(), count: 7 };unsafe { info.p_app = cptr(&app); }return info; }fn main(){}",
+    "reject": true,
+    "diagnostic": "cannot return a C pointer to `app`: the pointer would outlive it",
+    "note": "a create-info that points at a local cannot leave the frame either"
+  },
+  {
+    "name": "ffi-reject-cptr-closure-escape",
+    "source": "module ffi_reject;extern \"C\" record AppInfo { api_version: u32, flags: u32 }extern \"C\" record CreateInfo { s_type: u32, pad: u32, p_app: CPtr, count: u32 }extern \"C\" fn c_take(p: CPtr) -> i64;extern \"C\" fn c_info(info: CreateInfo) -> i64;fn leak() -> Fn(u64) -> i64 { app := AppInfo { api_version: 5, flags: 0 };mut p = cnull();unsafe { p = cptr(&app); }return |x: u64| -> i64 { mut v: i64 = 0; unsafe { v = c_take(p); } return v; }; }fn main(){}",
+    "reject": true,
+    "diagnostic": "cannot return a C pointer to `app`: the pointer would outlive it",
+    "note": "a closure that captured the pointer holds the borrow in its environment"
+  },
+  {
+    "name": "ffi-reject-cptr-launder-through-call",
+    "source": "module ffi_reject;extern \"C\" record AppInfo { api_version: u32, flags: u32 }extern \"C\" record CreateInfo { s_type: u32, pad: u32, p_app: CPtr, count: u32 }extern \"C\" fn c_take(p: CPtr) -> i64;extern \"C\" fn c_info(info: CreateInfo) -> i64;fn keep(p: CPtr) -> CPtr { return p; }fn main(){mut sub = AppInfo { api_version: 1, flags: 0 };mut p = cnull();unsafe { p = keep(cptr(&sub)); }sub = AppInfo { api_version: 2, flags: 0 };mut v: i64 = 0;unsafe { v = c_take(p); }}",
+    "reject": true,
+    "diagnostic": "cannot assign to `sub` while a C pointer to it is live in `p`",
+    "note": "a Grail call's pointer result is assumed to keep every pointer its arguments carried"
+  },
+  {
+    "name": "ffi-reject-cptr-launder-through-out-parameter",
+    "source": "module ffi_reject;extern \"C\" record AppInfo { api_version: u32, flags: u32 }extern \"C\" record CreateInfo { s_type: u32, pad: u32, p_app: CPtr, count: u32 }extern \"C\" fn c_take(p: CPtr) -> i64;extern \"C\" fn c_info(info: CreateInfo) -> i64;fn put(out: &mut CreateInfo, p: CPtr) -> unit { out.p_app = p; }fn main(){mut sub = AppInfo { api_version: 1, flags: 0 };mut info = CreateInfo { s_type: 1, pad: 0, p_app: cnull(), count: 7 };unsafe { put(&mut info, cptr(&sub)); }sub = AppInfo { api_version: 2, flags: 0 };mut v: i64 = 0;unsafe { v = c_info(info); }}",
+    "reject": true,
+    "diagnostic": "cannot assign to `sub` while a C pointer to it is live in `info`",
+    "note": "a `&mut` argument that can hold a pointer is assumed to keep the call's pointers"
+  },
+  {
+    "name": "ffi-cptr-binding-then-reassign",
+    "source": "module ffi_cptr_binding_then_reassign;extern \"C\" record AppInfo { api_version: u32, flags: u32 }extern \"C\" record CreateInfo { s_type: u32, pad: u32, p_app: CPtr, count: u32 }extern \"C\" fn ffi_app_version(app: AppInfo) -> i64 { return i64(app.api_version); }extern \"C\" as \"ffi_app_version\" fn c_version(p: CPtr) -> i64;extern \"C\" fn ffi_info_sum(info: CreateInfo) -> i64 { return i64(info.count) + i64(info.s_type); }extern \"C\" as \"ffi_info_sum\" fn c_info(info: CreateInfo) -> i64;fn main() -> u64 {mut sub = AppInfo { api_version: 5, flags: 0 };mut p = cnull();unsafe { p = cptr(&sub); }mut v: i64 = 0;unsafe { v = c_version(p); }sub = AppInfo { api_version: 6, flags: 0 };unsafe { v = v * 10 + c_version(cptr(&sub)); }println(v);return 0;}",
+    "stdout": "56\n",
+    "note": "a pointer kept in a binding borrows the record until its last use; after it the record may be replaced"
+  },
+  {
+    "name": "ffi-cptr-create-info-chain",
+    "source": "module ffi_cptr_create_info_chain;extern \"C\" record AppInfo { api_version: u32, flags: u32 }extern \"C\" record CreateInfo { s_type: u32, pad: u32, p_app: CPtr, count: u32 }extern \"C\" fn ffi_app_version(app: AppInfo) -> i64 { return i64(app.api_version); }extern \"C\" as \"ffi_app_version\" fn c_version(p: CPtr) -> i64;extern \"C\" fn ffi_info_sum(info: CreateInfo) -> i64 { return i64(info.count) + i64(info.s_type); }extern \"C\" as \"ffi_info_sum\" fn c_info(info: CreateInfo) -> i64;fn main() -> u64 {mut app = AppInfo { api_version: 5, flags: 0 };mut info = CreateInfo { s_type: 1, pad: 0, p_app: cnull(), count: 7 };unsafe { info.p_app = cptr(&app); }mut v: i64 = 0;unsafe { v = c_info(info) + c_version(info.p_app); }app.flags = 2;println(v);println(app.flags);return 0;}",
+    "stdout": "13\n2\n",
+    "note": "a pointer stored in a create-info field is live while the create-info is; the record is writable again after the last use"
+  },
+  {
+    "name": "ffi-cptr-param-into-local-record",
+    "source": "module ffi_cptr_param_into_local_record;extern \"C\" record AppInfo { api_version: u32, flags: u32 }extern \"C\" record CreateInfo { s_type: u32, pad: u32, p_app: CPtr, count: u32 }extern \"C\" fn ffi_app_version(app: AppInfo) -> i64 { return i64(app.api_version); }extern \"C\" as \"ffi_app_version\" fn c_version(p: CPtr) -> i64;extern \"C\" fn ffi_info_sum(info: CreateInfo) -> i64 { return i64(info.count) + i64(info.s_type); }extern \"C\" as \"ffi_info_sum\" fn c_info(info: CreateInfo) -> i64;fn version_of(app: &AppInfo) -> i64 {mut info = CreateInfo { s_type: 1, pad: 0, p_app: cnull(), count: 7 };unsafe { info.p_app = cptr(app); }mut v: i64 = 0;unsafe { v = c_version(info.p_app); }return v;}fn main() -> u64 {a := AppInfo { api_version: 9, flags: 0 };println(version_of(&a));return 0;}",
+    "stdout": "9\n",
+    "note": "a pointer into a borrowed parameter may be kept in a local record for the length of the call"
+  },
+  {
+    "name": "ffi-cptr-helper-out-parameter",
+    "source": "module ffi_cptr_helper_out_parameter;extern \"C\" record AppInfo { api_version: u32, flags: u32 }extern \"C\" record CreateInfo { s_type: u32, pad: u32, p_app: CPtr, count: u32 }extern \"C\" fn ffi_app_version(app: AppInfo) -> i64 { return i64(app.api_version); }extern \"C\" as \"ffi_app_version\" fn c_version(p: CPtr) -> i64;extern \"C\" fn ffi_info_sum(info: CreateInfo) -> i64 { return i64(info.count) + i64(info.s_type); }extern \"C\" as \"ffi_info_sum\" fn c_info(info: CreateInfo) -> i64;fn put(out: &mut CreateInfo, p: CPtr) -> unit { out.p_app = p; }fn main() -> u64 {mut app = AppInfo { api_version: 4, flags: 0 };mut info = CreateInfo { s_type: 1, pad: 0, p_app: cnull(), count: 7 };unsafe { put(&mut info, cptr(&app)); }mut v: i64 = 0;unsafe { v = c_version(info.p_app); }app = AppInfo { api_version: 3, flags: 0 };println(v);println(app.api_version);return 0;}",
+    "stdout": "4\n3\n",
+    "note": "a helper that fills a create-info keeps the borrow in the caller's record, which ends at the record's last use"
+  },
+  {
+    "name": "ffi-cptr-closure-local",
+    "source": "module ffi_cptr_closure_local;extern \"C\" record AppInfo { api_version: u32, flags: u32 }extern \"C\" record CreateInfo { s_type: u32, pad: u32, p_app: CPtr, count: u32 }extern \"C\" fn ffi_app_version(app: AppInfo) -> i64 { return i64(app.api_version); }extern \"C\" as \"ffi_app_version\" fn c_version(p: CPtr) -> i64;extern \"C\" fn ffi_info_sum(info: CreateInfo) -> i64 { return i64(info.count) + i64(info.s_type); }extern \"C\" as \"ffi_info_sum\" fn c_info(info: CreateInfo) -> i64;fn main() -> u64 {app := AppInfo { api_version: 8, flags: 0 };mut p = cnull();unsafe { p = cptr(&app); }f := |x: u64| -> i64 { mut v: i64 = 0; unsafe { v = c_version(p); } return v + i64(x); };println(f(1));return 0;}",
+    "stdout": "9\n",
+    "note": "a closure that captures the pointer may be called while the record is alive"
+  },
+  {
     "name": "ffi-reject-record-out-plain",
     "source": "module ffi_reject;struct R { a: u32 }extern \"C\" fn c_fill(p: &mut R) -> i64;fn main(){}",
     "reject": true,

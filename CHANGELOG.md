@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+- Fixed (soundness): a C pointer made by `cptr(&r)`, `cptr_mut(&mut r)` or `cptr(bytes)` is now a
+  borrow of what it points at for as long as the pointer is live. Before, the borrow ended with the
+  statement, so `p := cptr(&sub); sub = other;` compiled and left `p` dangling. The pointer holds the
+  same loan a reference would, through bindings, copies, record fields (assigned or in a literal),
+  values read back out of them, moves of the record holding it and closures that capture it. While
+  it is live the storage cannot be assigned, modified, moved, dropped or re-borrowed, and a
+  `cptr_mut` pointer is exclusive, so the storage cannot be read either. The pointer also cannot
+  outlive the storage, so keeping it in an outer-scope record, writing it through a `&mut`
+  parameter, returning it or returning a closure that holds it are all refused. A Grail call whose
+  arguments carry a pointer is assumed to pass it to its result and its `&mut` arguments, so a
+  helper cannot launder it. `cptr(&mut v)` is a read-only pointer and holds a shared borrow.
+  Each refusal names the storage, the binding holding the pointer and the `cptr` that made it:
+  `cannot assign to `sub` while a C pointer to it is live in `p` (made by cptr at line 5)`,
+  `` `app` goes out of scope while a C pointer to it is live in `info` ``, `cannot return a C
+  pointer to `app`: the pointer would outlive it`. A C call still borrows the pointer only for the
+  call, and C must not keep it. Abundance's renderer (`abundance/src/rhi_*.grl`) and every FFI
+  fixture compile unchanged. `CStr` from `cstr(...)` is not covered yet. See
+  [docs/ffi.md](docs/ffi.md), "Pointer lifetimes", and the book's "Calling C" chapter.
 - Fixed: LLVM builds no longer fail with `changed binding to STB_GLOBAL` - a kept-native function the emitter declared `.weak` (content-addressed drop helpers) keeps that binding instead of being re-declared `.globl`. The weak-name table is sized for every name, so programs with many drop helpers no longer hang the lowering.
 - Fixed: `GRAIL_TEST_RESUME` keys pass markers by the compiler's content-hash directory rather than its file name, which is `grail` for every build, so a rebuilt compiler never inherits another build's passes.
 - Measured what the validation in a Grail program costs, split by kind; the compiler is untouched.
