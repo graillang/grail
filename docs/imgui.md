@@ -146,6 +146,7 @@ takes.
   | draw list 0 | 274 vertices, 447 indices, 2 commands |
   | draw list 1 | 36 vertices, 54 indices, 1 command |
   | `io.metrics_render_vertices` vs `draw.total_vtx` | 310 = 310 |
+  | `frame1.display_size_x/y`, `framebuffer_scale_x` | 1280, 720, 1 - read out of ImGuiIO as numbers |
   | `input.value` through `InputScalar` | 1000 (nothing typed; the record came back as it went in) |
   | `id.pushed != id.base`, `id.restored == id.base` | 1, 1 |
   | a click on the button's own rectangle | 0 on hover, 0 on press, 1 on release, 0 after the mouse leaves |
@@ -156,6 +157,25 @@ takes.
 
 - **`imgui_layout_probe.grl`, a verdict probe like the RHI ones.** It reports
   `imgui.layout.round_trip 0`, `imgui.constants.mismatched 0` and `imgui.status ok`.
+
+Two printing conventions, chosen for what each line is for, and both named in the output:
+
+- **live values are numbers.** `imgui_layout_probe.grl` prints `imgui.io.display_size 1280 720`,
+  `imgui.io.delta_time 0.015625` and `imgui.io.framerate 64`, then asserts them by value:
+  `display_size_is_1280x720`, `delta_time_is_1_over_64`, `delta_time_in_range`,
+  `framerate_in_range`. `imgui_frame_probe.grl` does the same against the window SDL reports
+  (`io.display_size_is_window_pixels`, `delta_time_is_1_over_64`). A float field that read out of
+  an `extern "C"` record as a raw word fails these on the first comparison;
+- **exactness uses bit patterns, and says so.** The parity reference compares Grail's floats against
+  C++'s floats across two printf implementations, where a decimal format could hide a 1-ulp
+  difference, so the vertex positions, uvs and clip rectangles are printed as the bit pattern of
+  their binary64 widening under labels that end in `_bits` (`pos_bits`, `uv_bits`, `clip_bits`,
+  `target.min_x_bits`). They are an encoding, not a reading of a value.
+
+An earlier revision of `imgui_layout_probe.grl` used the second convention for the io block, so a
+correct `1280.0` appeared as `4653344314980564992`. The read was right and the presentation was
+misleading; the fix was to print the number and assert it, which is what those four assertion lines
+above are.
 
 `bun abundance/tools/build-imgui.mjs` prints the record table and checks it against Dear ImGui;
 `--table` prints it without rebuilding anything.
