@@ -6582,7 +6582,7 @@ fn base_named<a>(c: (&a mut C), first: u8[]) -> u64 {
     for i in c.tnames.len() {
         t := &c.tnames[i];
         if same(view(t), view(first)) {
-            if (c.type_bounds[i] & 4) != 0 {
+            if (i < c.type_bounds.len()) && ((c.type_bounds[i] & 4) != 0) {
                 fail(&mut c, view("this is a value parameter, not a type"));
             }
             if c.bindings.len() != 0 {
@@ -9320,9 +9320,13 @@ fn ct_val(value: u64, ty: u64) -> CVal {
 }
 // A value parameter in scope named `name`: index + 1, or 0.
 fn value_param<a, b>(c: (&a mut C), name: &b [u8]) -> u64 {
+    // type_bounds can be shorter than tnames (closures carry their parent's names), and `&` does
+    // not short-circuit, so the bound is read only once the index is known to be in range.
     for i in c.tnames.len() {
-        if same(view(c.tnames[i]), name) & ((c.type_bounds[i] & 4) != 0) {
-            return i + 1;
+        if (i < c.type_bounds.len()) && same(view(c.tnames[i]), name) {
+            if (c.type_bounds[i] & 4) != 0 {
+                return i + 1;
+            }
         }
     }
     return 0;
