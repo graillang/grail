@@ -205,6 +205,24 @@ try {
       assert.ok(offset < 0 && offset % 8 === 0, `${name}: ${local} offset ${offset} is not a negative slot`);
     }
   }
+  // CodeView member layout: the same record, string, vector and C-record types as the DWARF test,
+  // as LF_STRUCTURE / LF_FIELDLIST / LF_MEMBER / LF_POINTER records the PDB resolves.
+  {
+    const membersWin = compileProgram(compiler, [join(root, 'tests/debug_members.grl')], join(work, 'windows-members'), { debug: true });
+    const types = ok(['llvm-pdbutil', 'dump', '--types', membersWin.pdb]).stdout;
+    for (const [structure, size, fields] of [['Outer', 32, [['count', 0], ['ratio', 8], ['inner', 16], ['label', 24]]], ['Inner', 16, [['id', 0], ['tag', 8]]], ['Pt', 12, [['x', 0], ['y', 4], ['w', 8]]], ['u8[]', 24, [['data', 0], ['len', 8], ['cap', 16]]]]) {
+      const full = new RegExp(`LF_STRUCTURE \\[size = \\d+\\] \`${structure.replace(/[[\]]/g, '\\$&')}\`\\s+vtable: <no type>, base list: <no type>, field list: (0x[0-9A-F]+)\\s+options: , sizeof ${size}`);
+      const found = types.match(full);
+      assert.ok(found, `CodeView has no full definition of ${structure} (sizeof ${size})`);
+      const list = types.slice(types.indexOf(`${found[1]} | LF_FIELDLIST`));
+      for (const [field, offset] of fields) {
+        assert.match(list.split(/\n  0x/)[0], new RegExp(`LF_MEMBER \\[name = \`${field}\`, Type = 0x[0-9A-F]+[^\\]]*, offset = ${offset},`), `${structure}.${field} not at offset ${offset}`);
+      }
+    }
+    const membersSymbols = ok(['llvm-pdbutil', 'dump', '--symbols', membersWin.pdb]).stdout;
+    assert.match(membersSymbols, /S_REGREL32 \[size = \d+\] `o`\s+type = 0x[0-9A-F]+ \(Outer\*\*\)/, 'the local o is not typed Outer**');
+    console.log('debug-lines: windows-x86_64 PDB describes record, string, vector and C-record members');
+  }
   const unwind = ok(['llvm-readobj', '--unwind', win.object]).stdout;
   assert.match(unwind, /StartAddress: f_main_main/, 'debug build lost the main unwind entry');
   assert.match(unwind, /StartAddress: f_main_add/, 'debug build lost the add unwind entry');
