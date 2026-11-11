@@ -172,6 +172,16 @@ const fixtures = [
     defines: ['g_words8'],
   },
   {
+    // A callback writing into the struct C passes (`p: &mut R`): copy-in/copy-out, written back on
+    // every exit. mode 0 edits y and w then falls through (1, x=4, y=15, w=1.5 -> 104156); mode 1
+    // returns early after editing x (7, x=14, y=5 -> 714052); mode 2 replaces the whole value
+    // (returns 4+5=9, x=9, y=8, w=2.25 -> 909089).
+    name: 'callback_record_write',
+    stdout: '104156\n714052\n909089\n',
+    symbols: ['c_call_record_write'],
+    defines: ['edit'],
+  },
+  {
     // Callbacks with arguments on the caller's stack (decision B7 follow-up, docs/ffi.md): 24
     // parameters mixing integers, doubles, a sign-extended i16, a widened f32 and a zero-extended
     // u8, and a doubles-first list RV64 spills into integer registers. 2895 + 4 * 382.25 = 4424;

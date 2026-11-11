@@ -1,0 +1,32 @@
+module ffi_callback_record_write;
+
+// A C callback that writes into the struct C hands it: `p: &mut Point` is the `struct rw_point *`
+// the caller owns. The body works on a Grail-owned copy that every exit writes back into C's
+// storage - here the fall-through at the end, an early `return`, and a whole-value replacement
+// through `exchange` - so C reads the new fields once the callback returns. C checks the words
+// either side of the struct are untouched.
+extern "C" record Point { x: i32, y: i32, w: f64 }
+
+extern "C" fn edit(p: &mut Point, mode: i32) -> i32 {
+    if mode == 1 {
+        p.x = p.x + 10;
+        return 7;
+    }
+    if mode == 2 {
+        old := exchange(p, Point { x: 9, y: 8, w: 2.25 });
+        return old.x + old.y;
+    }
+    p.y = p.y * 3;
+    p.w = p.w + 1.0;
+    return 1;
+}
+extern "C" lib "shim.o" fn c_call_record_write(cb: cfn(&mut Point, i32) -> i32, mode: i32) -> i64;
+
+fn main() -> u64 {
+    unsafe {
+        println(c_call_record_write(edit, 0));
+        println(c_call_record_write(edit, 1));
+        println(c_call_record_write(edit, 2));
+    }
+    return 0;
+}

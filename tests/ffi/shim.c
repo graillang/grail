@@ -218,3 +218,16 @@ typedef double (*cs_floats)(double, double, double, double, double, double, doub
 double c_call_floats(cs_floats cb) {
   return cb(0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5, 9.5, 7);
 }
+
+/* Callbacks writing into a struct C passes by pointer (tests/ffi/callback_record_write.grl). The
+ * guards around `p` catch a write that lands outside it; the checksum is computed by C after the
+ * callback returns, so a write Grail kept in a private copy shows up as a wrong result. */
+struct rw_point { int x; int y; double w; };
+struct rw_frame { long before; struct rw_point p; long after; };
+typedef int (*rw_cb)(struct rw_point *, int);
+long c_call_record_write(rw_cb cb, int mode) {
+  struct rw_frame f = {111, {4, 5, 0.5}, 222};
+  int r = cb(&f.p, mode);
+  if (f.before != 111 || f.after != 222) return -1;
+  return (long)r * 100000 + (long)f.p.x * 1000 + (long)f.p.y * 10 + (long)(f.p.w * 4);
+}

@@ -430,9 +430,16 @@ fn main() -> u64 {
   (`borrow conflicts with active access`), and nothing may read or write it while the call runs.
 - The borrow is call-scoped, like a view: the write is visible after the call, and the callee must
   not keep the pointer. The call still sits inside an `unsafe` block.
-- Only a declaration Grail calls can take one. An `extern "C" fn` *definition* (a C callback) and a
-  `cfn` type declaring `&mut H` are refused by name, because Grail has no deref-assignment: a
-  callback could not store through the pointer C handed it.
+- Only a declaration Grail calls can take a handle or pointer out-parameter. An `extern "C" fn`
+  *definition* (a C callback) and a `cfn` type declaring `&mut H` are refused by name, because
+  Grail has no deref-assignment: a callback could not store a word through the pointer C handed it.
+- A record out-parameter is the exception: a callback may take `p: &mut R` for the `R *` C passes,
+  and a `cfn` type may declare it. The callback's body works on a Grail-owned copy of C's struct,
+  and every exit - falling off the end or any `return` - copies the bytes back into C's storage
+  before the copy is freed, so `p.field = v`, passing `p` on, and even `exchange(p, other)` are all
+  sound (one record-sized copy each way). A call *through* such a `cfn` passes the record's own
+  address, as a direct extern call does (`tests/ffi/callback_record_write.grl`,
+  `ffi-cfn-record-mut-param`).
 - A handle cannot be constructed at all, not even as null from Grail (`cnull()` is a `CPtr`, and
   `Slot { instance: cnull() }` is refused with `generic argument shape mismatch`), so a
   declaration's out-parameter is the way to
@@ -639,9 +646,6 @@ Not implemented yet, and each rejected rather than approximated:
   field list; refused with a diagnostic). Record results are otherwise returned by value on every
   ABI, float fields included (`tests/ffi/call_records.grl`, `float_record_results.grl`), and nested
   records included;
-- a callback that *writes* into the record C hands it: a parameter is not a mutable binding and
-  Grail has no deref-assignment, so `p.field = v` inside an `extern "C" fn` is
-  `owned storage mutation requires mut` (reading the fields works, and the storage is C's);
 - pointer arithmetic, an index of a `CPtr`, and a view built from an address: an array is a
   fixed-capacity record with its count checked afterwards, and elements are reached by field name;
 - a pointer that C keeps after the call returns. A `CPtr` made by `cptr`/`cptr_mut` is a checked borrow

@@ -349,6 +349,8 @@ struct C {
     // Slot holding the host TLS base inside an exported function's body, or 0.
     export_tls: u64,
     export_adopt: u64,
+    // Copy-backs for `p: &mut R` callback parameters: (C pointer slot, copy slot, bytes) triples.
+    export_copyback: u64[],
     rnames: u8[][],
     tnames: u8[][],
     closures: Closure[],
@@ -1557,6 +1559,20 @@ fn tls_leave_callback<a>(c: (&a mut C), slot: u64, adopt: u64) -> unit {
     stack_slot(&mut c, adopt);
     o(&mut c, view(",%rdi\ncall rt_release_record\n"));
     mark(&mut c, done);
+    return ();
+}
+// Before a callback's frame is torn down: copy each `p: &mut R` parameter's Grail copy back into
+// the struct C passed (see the prologue). Runs before cleanup frees the copies; the copy slot is
+// read at exit, so a record swapped in through `p` is the one written back.
+fn callback_copy_back<a>(c: (&a mut C)) -> unit {
+    n := c.export_copyback.len() / 3;
+    for k in n {
+        keep := c.export_copyback[3 * k];
+        copy := c.export_copyback[3 * k + 1];
+        size := c.export_copyback[3 * k + 2];
+        bytes := imm(&mut c, size);
+        invoke(&mut c, view("rt_copy_bytes"), three(keep, copy, bytes));
+    }
     return ();
 }
 // Undo either entry: restore the thread pointer `slot` saved, if it saved one.
@@ -5969,7 +5985,10 @@ fn base_named<a>(c: (&a mut C), first: u8[]) -> u64 {
             fail(&mut c, view("cfn type exceeds 64 arguments"));
         }
         for i in params.len() {
-            if ffi_out_param(&mut c, params[i]) {
+            // `&mut R` of an extern record is the C `R *` a callback writes through (copy-in/copy-out
+            // in the callback, the record's own address at a call); any other out-parameter is a
+            // declaration-only feature.
+            if ffi_out_param(&mut c, params[i]) & (ffi_record_out_param(&mut c, params[i]) == 0) {
                 fail(
                     &mut c,
                     view("an out-parameter is only for an extern \"C\" declaration; a cfn type cannot declare one")
@@ -7842,9 +7861,10 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
             ffi_callback_fits(&mut c, first, count);
             for i in count {
                 formal := c.params[first + i];
-                if ffi_out_param(&mut c, formal) {
-                    // Grail has no deref-assignment, so a callback cannot store through the pointer
-                    // C hands it; only a declaration Grail calls writes the slot from Grail's side.
+                if ffi_out_param(&mut c, formal) & (ffi_record_out_param(&mut c, formal) == 0) {
+                    // Grail has no deref-assignment, so a callback cannot store a word through the
+                    // pointer C hands it; only a declaration Grail calls writes such a slot. A
+                    // `&mut R` record parameter is the exception (bound by copy-in/copy-out below).
                     fail(
                         &mut c,
                         view("an out-parameter is only for an extern \"C\" declaration parameter; a C callback cannot take one")
@@ -8047,6 +8067,30 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         if (export == 2) & (is_c_record(&mut c, ty) != 0) {
             borrow_parameter(&mut c, slot, ty);
             init_parameter(&mut c, slot, ty);
+        } else if (export == 2) & (ffi_record_out_param(&mut c, ty) != 0) {
+            // `p: &mut R` in a C callback: C passed the `R *` it owns. The body works on a
+            // Grail-owned copy - every Grail operation through `p` is then sound, whole-value
+            // replacement included - and each exit copies the bytes back into C's struct before
+            // the copy is freed (callback_copy_back). Cost: one record-sized copy each way.
+            rty := ty_arg(&mut c, ty);
+            d := ty_arg(&mut c, rty);
+            copy := c_record_copy(&mut c, slot, rty);
+            own(&mut c, copy, rty);
+            keep := fresh(&mut c);
+            get(&mut c, slot, view("%rax"));
+            o(&mut c, view("movq %rax,"));
+            stack_slot(&mut c, keep);
+            o(&mut c, view("\nleaq "));
+            stack_slot(&mut c, copy);
+            o(&mut c, view(",%rax\nmovq %rax,"));
+            stack_slot(&mut c, slot);
+            c.out.push(10);
+            size := ffi_record_size(&mut c, d);
+            c.export_copyback.push(keep);
+            c.export_copyback.push(copy);
+            c.export_copyback.push(size);
+            own(&mut c, slot, ty);
+            init_parameter(&mut c, slot, ty);
         } else {
             own(&mut c, slot, ty);
             init_parameter(&mut c, slot, ty);
@@ -8064,6 +8108,10 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     block(&mut c);
     exchange(&mut c.export_tls, 0);
     exchange(&mut c.export_adopt, 0);
+    if c.terminated == 0 {
+        callback_copy_back(&mut c);
+    }
+    exchange(&mut c.export_copyback, u64[]);
     if c.raw == 0 {
         if (c.terminated == 0) & (ret != 1) {
             fail(&mut c, view("function may fall through without return"));
@@ -11701,6 +11749,7 @@ fn indirect_call<a>(c: (&a mut C), value: Val, opened: u64) -> Val {
     // fields (or as a copy of them, for a `byval` parameter), and Grail keeps ownership - the same
     // rule a direct extern call follows.
     mut shared = u64[];
+    cfn_call := kind == 25;
     if opened == 0 {
         expect(&mut c, view("("));
     }
@@ -11717,7 +11766,7 @@ fn indirect_call<a>(c: (&a mut C), value: Val, opened: u64) -> Val {
             if c.raw == 0 {
                 value = adopt_value(&mut c, value, astart, aend, expected);
             }
-            slot := value.t;
+            mut slot = value.t;
             mut actual = value.ty;
             if (actual == 0
                     || ((c.lit_negative != 0) && c.lit_start == astart && c.lit_end == aend))
@@ -11743,6 +11792,23 @@ fn indirect_call<a>(c: (&a mut C), value: Val, opened: u64) -> Val {
                     borrowed = 1;
                     shared.push(slot);
                 }
+            }
+            if cfn_call & (c.raw == 0) & (ffi_record_out_param(&mut c, expected) != 0) {
+                // `&mut R` through a C function pointer is the C `R *`, exactly as at a direct
+                // extern call: the word that crosses is the record's own address, loaded through
+                // the borrow, and C's writes land in the record.
+                place := target_of(&mut c, slot);
+                if borrowed_temporary(&mut c, place) {
+                    fail(
+                        &mut c,
+                        view("an extern C out-parameter needs a binding to write into; a temporary record would be discarded")
+                    );
+                }
+                ownership::filled(&mut c.check, place);
+                x := deref(&mut c, val(slot, actual));
+                slot = x.t;
+                borrowed = 1;
+                shared.push(slot);
             }
             sources.push(slot);
             types.push(actual);
@@ -21631,6 +21697,7 @@ fn statement<a>(c: (&a mut C)) -> unit {
         }
         validate_return(&mut c, val(v.t, v.ty));
         move_out(&mut c, val(v.t, v.ty));
+        callback_copy_back(&mut c);
         cleanup(&mut c, 0);
         restore := c.export_tls;
         if restore != 0 {
@@ -26575,6 +26642,7 @@ pub fn main() -> u64 {
         pending_symbol: u8[],
         export_tls: 0,
         export_adopt: 0,
+        export_copyback: u64[],
         rnames: u8[][],
         tnames: u8[][],
         closures: Closure[],
