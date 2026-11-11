@@ -442,6 +442,84 @@ fn rt_view(s: u64) -> u64 {
 // into a freshly packed NUL-terminated buffer and is used for process arguments.)
 // C-layout field access for widths below one word. Portable byte-wise load/store so
 // no target needs new instruction selection: `width` is 1, 2 or 4.
+// C arrays inline in extern records (`f: [T; N]`) are copied whole into and out of Grail vectors.
+// kind 0: integers and words (`size` bytes, sign-extended when `signed`); 1: f32 (binary32 in
+// memory, binary64 in Grail); 2: extern records of `size` bytes, each a fresh `words`-word record;
+// 3: bytes, into and out of a Grail byte sequence (`[u8; N]`); 4: 32-bit units into and out of a
+// narrow vector (`f32[]`, `u32[]`, `i32[]` store binary32 bits and low words already, as C does).
+fn rt_carray_load(src: u64, n: u64, size: u64, signed: u64, kind: u64, words: u64) -> u64 {
+    out := rt_new();
+    mut i = 0;
+    while i < n {
+        a := src + i * size;
+        if kind == 4 {
+            rt_push4(out, rt_load_sized(a, 4, 0));
+        } else if kind == 3 {
+            rt_pushb(out, raw_byte(a));
+        } else if kind == 2 {
+            r := rt_rec(words);
+            rt_copy_bytes(r, a, size);
+            rt_push(out, r);
+        } else {
+            if kind == 1 {
+                rt_push(out, rt_f32_from_bits(rt_load_sized(a, 4, 0)));
+            } else if size == 8 {
+                // A whole word (i64, u64, CStr, CPtr): rt_load_sized's scale would overflow.
+                rt_push(out, raw_load(a));
+            } else {
+                rt_push(out, rt_load_sized(a, size, signed));
+            }
+        }
+        i = i + 1;
+    }
+    return out;
+}
+// The vector's length must be the array's: a C array has no room for more and C reads all N.
+fn rt_carray_store(dst: u64, v: u64, n: u64, size: u64, kind: u64) -> u64 {
+    if rt_len(v) != n {
+        rt_abort();
+    }
+    mut i = 0;
+    while i < n {
+        a := dst + i * size;
+        if kind == 4 {
+            rt_store_sized(a, rt_at4u(v, i), 4);
+            i = i + 1;
+            continue;
+        }
+        if kind == 3 {
+            rt_store_sized(a, rt_atb(v, i), 1);
+            i = i + 1;
+            continue;
+        }
+        x := rt_at(v, i);
+        if kind == 2 {
+            rt_copy_bytes(a, x, size);
+        } else {
+            if kind == 1 {
+                rt_store_sized(a, rt_f32_bits(x), 4);
+            } else if size == 8 {
+                raw_store(a, x);
+            } else {
+                rt_store_sized(a, x, size);
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+// `cstr_bytes(s)`: the bytes of a NUL-terminated C string, copied into a Grail byte sequence (the
+// NUL not included). A null CStr reads as empty.
+fn rt_cstr_bytes(p: u64) -> u64 {
+    if p == 0 {
+        return rt_new();
+    }
+    mut n = 0;
+    while raw_byte(p + n) != 0 {
+        n = n + 1;
+    }
+    return rt_bytes_from(p, n);
+}
 fn rt_load_sized(a: u64, width: u64, signed: u64) -> u64 {
     mut v = 0;
     mut scale = 1;

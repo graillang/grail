@@ -80,23 +80,20 @@ rhi_device: ok
   ...
   rhi.vulkan.instance.created 1
   rhi.vulkan.instance.api 1.0.0
-  rhi.vulkan.instance.app_info unavailable extern-C-cannot-take-the-address-of-a-record
+  rhi.vulkan.instance.app_info none
   rhi.vulkan.devices 2
   rhi.vulkan.device 0 discrete_gpu api 1.4.354 AMD Radeon RX 7900 GRE (RADV NAVI31)
   rhi.vulkan.device 1 integrated_gpu api 1.4.354 AMD Ryzen 9 7900X 12-Core Processor (RADV RAPHAEL_MENDOCINO)
   rhi.vulkan.selected 0 discrete_gpu AMD Radeon RX 7900 GRE (RADV NAVI31)
   rhi.vulkan.queue_families 5
   rhi.vulkan.queue_family.chosen 0 1
-  rhi.vulkan.device unavailable extern-C-cannot-take-the-address-of-a-record
+  rhi.vulkan.device by rhi_device
   rhi.vulkan.instance.destroyed 1
   rhi.status ok
 rhi_vulkan: ok
 ```
 
-Every value above is returned by a call: nothing is defaulted, guessed or filled in. The two
-`unavailable` lines are the part of this increment that did not land: the FFI can express what they
-need now, and `abundance/src/rhi_vulkan.grl` has not been ported onto it - see "What is not there,
-and why" below.
+Every value above is returned by a call: nothing is defaulted, guessed or filled in.
 The surface half, new in this increment, on the same host:
 
 ```
@@ -104,6 +101,8 @@ The surface half, new in this increment, on the same host:
   rhi.sdl3.video_driver x11
   rhi.window.pixel 1280 720
   rhi.instance.extensions 2
+  rhi.instance.extension VK_KHR_surface
+  rhi.instance.extension VK_KHR_xlib_surface
   rhi.vulkan.instance_extension VK_KHR_surface 1
   rhi.vulkan.instance_extension VK_KHR_xlib_surface 1
   rhi.vulkan.instance_extension VK_KHR_wayland_surface 1
@@ -126,10 +125,9 @@ The surface half, new in this increment, on the same host:
   rhi.surface.present_mode 3 FIFO_RELAXED
   rhi.swapchain.choice format_by surface present_mode_by surface
   rhi.swapchain.config format 50 VK_FORMAT_B8G8R8A8_SRGB color_space 0 SRGB_NONLINEAR extent 1280x720 images 4 present_mode 1 MAILBOX
-  rhi.swapchain.result frames 0 of 3 format VK_FORMAT_B8G8R8A8_SRGB extent 1280x720 present_mode MAILBOX
-  rhi.swapchain.created unavailable extern-C-cannot-take-the-address-of-a-record
-  rhi.swapchain.render_pass unavailable extern-C-cannot-take-the-address-of-a-record pAttachments-and-pSubpasses
-  rhi.swapchain.present unavailable extern-C-cannot-take-the-address-of-a-record
+  rhi.swapchain.created 1 images 5 format VK_FORMAT_B8G8R8A8_SRGB extent 1280x720 present_mode MAILBOX usage transfer_src|color_attachment
+  ...
+  rhi.swapchain.result frames 3 of 3 format VK_FORMAT_B8G8R8A8_SRGB extent 1280x720 present_mode MAILBOX
   rhi.vulkan.validation unavailable not-installed
   rhi.surface.destroyed 1
   rhi.instance.destroyed 1
@@ -506,7 +504,7 @@ three forms it needs (`docs/ffi.md`, "Records by pointer" and "Out-parameters"):
 | --- | --- |
 | `unsafe cptr(&r)` / `cptr_mut(&mut r)` | the address of an `extern "C"` record's own fields, as a `CPtr` / `CMutPtr`; a field, a binding and a `const void *`/`void *` parameter all take it |
 | `p: &mut R` in a declaration | the C `R *` the callee writes; the typed fields are read afterwards |
-| a record of `handle` fields | an array of handles: C fills the slots through `&mut`, or the program seeds them from handles it already holds |
+| a `[handle; N]` field | an array of handles: C fills the slots through the record, or the program seeds them from handles it already holds (`PhysicalDeviceSlots`) |
 
 With those, `VkInstanceCreateInfo::pApplicationInfo` is a field assignment, `VkApplicationInfo` itself
 is a record of scalars and `CStr` fields, `pQueueCreateInfos` is a record of embedded
@@ -515,10 +513,12 @@ is a record of scalars and `CStr` fields, `pQueueCreateInfos` is a record of emb
 declared without an initializer is `sizeof(struct)` zeroed bytes, so an array of handles can be
 created without constructing one; it has no *value* until a call or an assignment wrote it.
 
-What the probe prints has not caught up: `rhi.vulkan.instance.app_info` and `rhi.vulkan.device` still
-read `unavailable`, because `abundance/src/rhi_vulkan.grl` has not been ported - it calls
-`vkCreateInstance` with `pApplicationInfo` null, does not declare `vkCreateDevice`, and its header
-comment still states the old limit. That is a port to do, not a language feature to add.
+The instance probe now says what it does: `rhi.vulkan.instance.app_info none` (the instance asks
+for API 1.0 by leaving `pApplicationInfo` null, and every call this RHI makes is 1.0) and
+`rhi.vulkan.device by rhi_device` (the logical device is `abundance_rhi_device`'s, created by
+`rhi_device_probe`). C arrays are read with `[T; N]` record fields and `cslice` (docs/ffi.md, "C
+arrays"): `VkPhysicalDeviceProperties` is a record with its `char deviceName[256]` inline, and the
+swapchain probe prints the extension names SDL asks for.
 
 What the language still refuses, with the diagnostic for each (all but the last are pinned in
 `tests/native-cases.json`):

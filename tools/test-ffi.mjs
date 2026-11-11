@@ -44,6 +44,16 @@ const fixtures = [
     symbols: ['c_point_sum', 'c_point_swap', 'c_mixed_sum', 'c_mixed_fill', 'c_mixed_size', 'c_mixed_off_d'],
   },
   {
+    // Inline C arrays in a C record: bytes, u32, f32, records and i8 read whole as vectors, one
+    // assigned back (C sums 100+101+102+1000 + 9 - 3 + 150 = 1459); C strings read back with
+    // cstr_bytes (a null CStr reads as empty); and C arrays handed out by pointer and length
+    // (strings, ints, records) copied with cslice.
+    name: 'c_arrays',
+    stdout: '80\nRadeon 680M\n4 100 103\n0.5 1.5\n-3 2.5\n-1 -3\n424242\n1459\nhello from C\n0\n'
+      + 'VK_KHR_surface\nVK_KHR_xlib_surface\nVK_EXT_debug_utils\n-6 -8\n2 0.5\n',
+    symbols: ['c_ca_fill', 'c_ca_sum', 'c_ca_size', 'c_ca_greeting', 'c_ca_null', 'c_ca_names', 'c_ca_ints', 'c_ca_pts'],
+  },
+  {
     // C records with f32/f64 fields at C offsets, written by Grail and by C.
     name: 'float_records',
     stdout: '960003.75\n1.5\n-2.25\n640\n1\n7\n0.125\n48\n',

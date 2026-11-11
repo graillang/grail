@@ -248,3 +248,34 @@ struct nh_3d c_nh_3d(double s) { struct nh_3d r = {{s, s + 1.0}, s + 2.0}; retur
 struct nf_f { float f; };
 struct nf_fi { struct nf_f a; int i; };
 struct nf_fi c_nf_fi(float f, int i) { struct nf_fi r = {{f}, i}; return r; }
+/* C arrays inline in records (`f: [T; N]` in Grail) and C strings read back (`cstr_bytes`). */
+struct ca_pt { int x; float w; };
+struct ca_dev { unsigned short kind; char name[16]; unsigned ids[4]; float weights[3]; struct ca_pt pts[2]; signed char deltas[3]; long long tail; };
+void c_ca_fill(struct ca_dev *d) {
+  const char *n = "Radeon 680M";
+  int i = 0;
+  for (; n[i]; i++) d->name[i] = n[i];
+  for (; i < 16; i++) d->name[i] = 0;
+  d->kind = 7;
+  for (i = 0; i < 4; i++) d->ids[i] = 100 + i;
+  for (i = 0; i < 3; i++) d->weights[i] = 0.5f * (i + 1);
+  for (i = 0; i < 3; i++) d->deltas[i] = (signed char)(-1 - i);
+  d->pts[0].x = -3; d->pts[0].w = 1.25f; d->pts[1].x = 9; d->pts[1].w = 2.5f;
+  d->tail = 424242;
+}
+long long c_ca_sum(struct ca_dev *d) {
+  long long s = d->pts[1].x + d->deltas[2];
+  for (int i = 0; i < 4; i++) s += d->ids[i];
+  return s + (long long)(d->weights[2] * 100);
+}
+unsigned long long c_ca_size(void) { return sizeof(struct ca_dev); }
+const char *c_ca_greeting(void) { return "hello from C"; }
+const char *c_ca_null(void) { return 0; }
+/* C arrays handed out by pointer and length (`cslice(T, p, n)` in Grail). */
+static const char *ca_names[3] = {"VK_KHR_surface", "VK_KHR_xlib_surface", "VK_EXT_debug_utils"};
+const char *const *c_ca_names(void) { return ca_names; }
+unsigned long long c_ca_name_count(void) { return 3; }
+static int ca_ints[4] = {5, -6, 7, -8};
+const int *c_ca_ints(void) { return ca_ints; }
+static struct ca_pt ca_pts[2] = {{1, 0.5f}, {2, 1.5f}};
+const struct ca_pt *c_ca_pts(void) { return ca_pts; }
