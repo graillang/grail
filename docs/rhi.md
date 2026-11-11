@@ -565,10 +565,10 @@ What is *not* here, by intent rather than by limitation:
 
 ## What the FFI does not do safely
 
-Two defects in the record-pointer work surfaced while building this increment. Both are compiler bugs
-rather than missing features, both are reproducible without Vulkan, both are written down here because
-they constrain how the RHI is written until they are fixed, and neither is worked around by laying
-bytes out by hand. (`compiler/` is off limits in this increment, so they are reported rather than
+Two defects in the record-pointer work surfaced while building this increment (the first is now
+fixed). Both are compiler bugs rather than missing features, both are reproducible without Vulkan,
+both are written down here because they constrain how the RHI is written until they are fixed, and
+neither is worked around by laying bytes out by hand. (`compiler/` is off limits in this increment, so they are reported rather than
 patched.)
 
 - **`VkApplicationInfo` is not passed yet.** `vkCreateInstance` is called with `pApplicationInfo`
@@ -589,11 +589,12 @@ properties, queue families - none of which a record can express). Doing it for s
 pointer slots could not be written into a `u8[]` at all. A mis-ordered create-info field has to be a
 compile error or a failing check, never a plausible-looking number, so the structs Grail *builds*
 stay records.
-**1. `&mut` of an extern record field of a plain record does not reach the field's storage.** A place
-made from an interior extern record is a proxy slot; *writing a field through that reference* writes
-into the proxy and not into the container, and the write is silently lost (or lands in the next field).
-A slot array written through such a reference is a record of null handles, and a null framebuffer
-handle is a segfault inside the driver - which is how it was found. Minimal case:
+**1. Fixed: `&mut` of an extern record field of a plain record now reaches the field's storage.** A
+place made from an interior extern record used to be wrapped in the proxy slot an *embedded* C-layout
+field needs, even when the container was a plain record whose field already is a word holding the
+record's address, so a write through the reference landed in the container's next word and was lost
+there. A slot array written through such a reference was a record of null handles, and a null
+framebuffer handle is a segfault inside the driver - which is how it was found. Minimal case:
 
 ```grail
 extern "C" record Pair { x: i64, y: i64 }
@@ -602,13 +603,12 @@ fn set_y(pair: &mut Pair, value: i64) -> unit { pair.y = value; }
 
 mut bag = Bag { pair: Pair { x: 0, y: 0 }, count: 0 };
 set_y(&mut bag.pair, 7);
-println(format("{} {}", bag.pair.x, bag.pair.y));   // prints "0 0"; with `set_y(&mut pair, 7)` on a
-                                                    // standalone record it prints "0 7"
+println(format("{} {}", bag.pair.x, bag.pair.y));   // "0 7"; it printed "0 0" and set `count`
 ```
 
-Direct field writes (`bag.pair.y = 7`), and passing the interior record by value to an `extern "C"`
-call, both work; only a *reference* to the interior record is wrong. The RHI therefore keeps each slot
-record as its own binding and passes `&mut` of that, which is sound.
+The proxy is now made only for a C-layout container, and `tests/ffi/record_field_refs.grl` executes
+the shape with a Grail callee and with a C callee that checksums the fields before writing them. The
+RHI still keeps each slot record as its own binding; that remains sound and need not change.
 
 **2. a `CStr` taken from a string literal must not outlive the statement that made it.** `cstr(value)`
 is zero-copy, and for a literal the bytes are a temporary: keeping the `CStr` in a binding and using it

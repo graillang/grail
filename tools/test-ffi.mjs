@@ -145,6 +145,14 @@ const fixtures = [
       'c_slot0', 'c_ref_sum', 'c_enum_count'],
   },
   {
+    // `&mut` of an extern record held in a plain record's field: a Grail callee's write (7) and two
+    // C writes that first checksum what they find (102, 307) reach that field and no other, so the
+    // fields read back 40/41/60/61 and the neighbouring `count` stays 5.
+    name: 'record_field_refs',
+    stdout: '7\n102\n307\n40\n41\n60\n61\n5\n',
+    symbols: ['c_pair_write'],
+  },
+  {
     // More than six word arguments: 7, 8 and 9 words, then the same calls with every argument
     // computed just before the call, so the seventh and eighth argument registers
     // (`%r10`/`%r11` in the compiler's spelling) carry live stores across the call. The position

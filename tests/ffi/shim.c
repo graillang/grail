@@ -137,6 +137,18 @@ long long c_create_info(const struct create_info *info) {
 }
 long long c_app_version(const struct app_info *app) { return (long long)app->api_version; }
 
+/* A `&mut` of an extern record that is a field of a plain Grail record: C must receive the address
+ * of that record's own fields. The result reads both fields before writing them, so a pointer to
+ * the container's field word (or to a proxy slot) produces a different checksum, and the write must
+ * be visible to Grail afterwards in this field and in no other. */
+struct field_pair { long long x, y; };
+long long c_pair_write(struct field_pair *p, long long v) {
+    long long seen = p->x * 100 + p->y;
+    p->x = v;
+    p->y = v + 1;
+    return seen;
+}
+
 /* A record out-parameter: C writes the struct in place and leaves `flags` alone, so the caller's
  * zero-filled binding is what `flags` reads afterwards. The result is the value C found there. */
 long long c_fill_app(struct app_info *app) {

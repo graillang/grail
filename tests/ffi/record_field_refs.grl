@@ -1,0 +1,32 @@
+module ffi_record_field_refs;
+
+// `&mut` of an extern record that is a field of a plain (non-C-layout) record. A plain record's
+// field is a word holding the extern record's own address, so the reference is that word's
+// address; it must not be wrapped in the proxy slot an embedded C-layout field uses, or a write
+// through it lands in the container's words (here `second` or `count`) instead of the record.
+extern "C" record Pair { x: i64, y: i64 }
+struct Bag { first: Pair, second: Pair, count: i64 }
+
+extern "C" lib "shim.o" fn c_pair_write(p: &mut Pair, v: i64) -> i64;
+
+fn set_y(pair: &mut Pair, value: i64) -> unit {
+    pair.y = value;
+}
+
+fn main() -> u64 {
+    mut bag = Bag { first: Pair { x: 1, y: 2 }, second: Pair { x: 3, y: 4 }, count: 5 };
+    // A Grail callee writes through the reference (the docs/rhi.md reproducer).
+    set_y(&mut bag.second, 7);
+    println(bag.second.y);
+    unsafe {
+        // C reads x*100+y before writing: 1*100+2, then 3*100+7 after the Grail write.
+        println(c_pair_write(&mut bag.first, 40));
+        println(c_pair_write(&mut bag.second, 60));
+    }
+    println(bag.first.x);
+    println(bag.first.y);
+    println(bag.second.x);
+    println(bag.second.y);
+    println(bag.count);
+    return 0;
+}

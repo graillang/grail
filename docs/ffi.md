@@ -661,13 +661,15 @@ compiles `tests/ffi/call_scalars.grl` with the FFI build, links the two through 
   `77`, `1`, `433`, `8` — a create-info reading a struct through `cptr(&app)`, `flags` as the zero
   the storage started as, an array of handles C fills and Grail passes back with the handle Grail
   reads equal to the one C hands back, an array of structs addressed at two interior elements, and
-  one count record across two declarations of one symbol), `call_words` seven, eight and nine word
+  one count record across two declarations of one symbol), `record_field_refs` `&mut` of an extern
+  record held in a plain record's field, written by a Grail callee and by C, with the neighbouring
+  fields unchanged (`7`, `102`, `307`, `40`, `41`, `60`, `61`, `5`), `call_words` seven, eight and nine word
   arguments with literal and computed values, and `byval_records` the by-value record shapes with a
   checksum over every field each C twin received.
-- the suite holds 19 executable fixtures: each executes on x86-64 and, through
-  `qemu-<target>-static`, on AArch64 and RISC-V 64 as well, so a host with both runners reports 57
+- the suite holds 20 executable fixtures: each executes on x86-64 and, through
+  `qemu-<target>-static`, on AArch64 and RISC-V 64 as well, so a host with both runners reports 60
   executed fixture instances and none link-only; without a runner the cross targets link and are
-  reported as link-only (19 executed, 38 link-only here). Two more fixtures are cross-compiled only
+  reported as link-only (20 executed, 40 link-only here). Two more fixtures are cross-compiled only
   (`dlopen`, which needs a target glibc sysroot). `callback_words` executes the eight-register
   callback on AArch64 and RISC-V 64 and asserts that x86-64 and Windows refuse it by name. Without a
   qemu runner the cross targets are linked and the ABI-level check is reported as link-only. The same

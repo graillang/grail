@@ -3,6 +3,12 @@
 ## Unreleased
 
 - Fixed: a generic instantiated on both `f32` and `f64` no longer shares one specialisation - the structural type key now records float width, so the f64 call ran the f32 body before (found by the per-module work).
+- Fixed: `&mut` of an `extern "C"` record held in a field of a plain record (`set_y(&mut bag.pair,
+  7)`, or the same reference passed to C as an `R *`) silently lost the write: the place was wrapped
+  in the proxy slot only an embedded C-layout field needs, so the callee wrote into the container's
+  next word instead of the record. The proxy is now made only for a C-layout container;
+  `tests/ffi/record_field_refs.grl` executes the shape with a Grail and a C callee on x86-64,
+  AArch64 and RISC-V 64 (reproducer from [docs/rhi.md](docs/rhi.md)).
 - Fixed: LLVM builds no longer fail with `changed binding to STB_GLOBAL` - a kept-native function the emitter declared `.weak` (content-addressed drop helpers) keeps that binding instead of being re-declared `.globl`. The weak-name table is sized for every name, so programs with many drop helpers no longer hang the lowering.
 - Fixed: `GRAIL_TEST_RESUME` keys pass markers by the compiler's content-hash directory rather than its file name, which is `grail` for every build, so a rebuilt compiler never inherits another build's passes.
 - Measured what the validation in a Grail program costs, split by kind; the compiler is untouched.
