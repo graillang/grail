@@ -11404,7 +11404,14 @@ fn emit_specializations<a>(c: (&a mut C)) -> unit {
         }
     }
     exchange(&mut c.validating, 0);
-    mut i = 0;
+    drain_specs(&mut c, 0);
+    return ();
+}
+// Emits the specialisations requested from `from` onward - including any requested while emitting
+// them - and returns how many there are. Closures and specialisations can each request the other,
+// so the caller alternates this with emit_closures until neither list grows.
+fn drain_specs<a>(c: (&a mut C), from: u64) -> u64 {
+    mut i = from;
     while i < c.specs.len() {
         spec := &c.specs[i];
         template := spec.template;
@@ -11469,7 +11476,7 @@ fn emit_specializations<a>(c: (&a mut C)) -> unit {
         exchange(&mut c.current_spec, 0);
         i = i + 1;
     }
-    return ();
+    return i;
 }
 // True when this module's surface and bodies came from an interface rather than from a file on the
 // command line: its code belongs to its own object.
@@ -16799,8 +16806,9 @@ fn closure_body_end<a>(c: (&a mut C), start: u64) -> u64 {
     }
     return i;
 }
-fn emit_closures<a>(c: (&a mut C)) -> unit {
-    mut i = 0;
+// Emits the closure bodies recorded from `from` onward and returns how many there are.
+fn emit_closures<a>(c: (&a mut C), from: u64) -> u64 {
+    mut i = from;
     while i < c.closures.len() {
         cl := &c.closures[i];
         file := cl.file;
@@ -16933,7 +16941,7 @@ fn emit_closures<a>(c: (&a mut C)) -> unit {
         exchange(&mut c.closure_env, 0);
         i += 1;
     }
-    return ();
+    return i;
 }
 fn copy_names<a>(input: (&a u8[][])) -> u8[][] {
     mut out = u8[][];
@@ -17257,6 +17265,219 @@ fn show_value<a>(c: (&a mut C), input: u64, inty: u64, xty: u64) -> Val {
     exchange(&mut c.receiver_ty, prepared.ty);
     exchange(&mut c.has_receiver, 2);
     return call(&mut c, view(owner), view("show"));
+}
+// The iterator protocol: a record with an inherent `fn next(self: &mut Self) -> T?` is iterable,
+// and `for x in it` is `while let Some(x) = it.next() { ... }`. An owned iterator is moved into a
+// hidden mutable local that lives for the loop; `for x in &mut it` iterates a borrowed one and leaves
+// it usable afterwards. Each `next` call reborrows the iterator, so an iterator that borrows a
+// collection keeps that loan for the whole loop (the collection cannot be mutated in the body).
+// Returns false, consuming nothing, when `v` is not such an iterator.
+fn iterator_loop<a>(c: (&a mut C), name: u8[], vt: u64, vty: u64, loopbase: u64) -> bool {
+    mut xty = vty;
+    if ty_kind(&mut c, xty) == 7 {
+        xty = ty_arg(&mut c, xty);
+    }
+    if ty_kind(&mut c, xty) != 8 {
+        return false;
+    }
+    d := ty_arg(&mut c, xty);
+    if c.decls[d].is_enum != 0 {
+        return false;
+    }
+    owner := private_module(view(".inherent_"), d);
+    f := find_func(&mut c, view(owner), view("next"));
+    if f == 0 {
+        return false;
+    }
+    info := &c.funcs[f - 1];
+    first := info.first;
+    count := info.count;
+    formal := c.params[first];
+    if (count != 1) || (ty_kind(&mut c, formal) != 7) || (ty_mode(&mut c, formal) == 0) {
+        fail(&mut c, view("for x in it needs fn next(self: &mut Self) -> T? on the iterator"));
+    }
+    if (ty_kind(&mut c, vty) == 7) & (ty_mode(&mut c, vty) == 0) {
+        fail(&mut c, view("for x in &it needs &mut it: next advances the iterator"));
+    }
+    mark := c.locals.len();
+    mut input = vt;
+    inty := vty;
+    if ty_kind(&mut c, vty) != 7 {
+        owned := move_value(&mut c, val(vt, vty));
+        bind(&mut c, copy_bytes(view("__iterator")), owned.ty, owned.t, 1);
+        input = owned.t;
+        mut open = c.pos;
+        while kind_at(&mut c, open) != 123 {
+            open = open + 1;
+        }
+        loopend := block_end(&mut c, open);
+        last := c.locals.len() - 1;
+        mut l = &mut c.locals[last];
+        l.last = loopend;
+    }
+    pattern_loop(&mut c, false, 1, copy_bytes(view("Some")), name, 1, owner, input, inty, xty, formal);
+    // Everything the iterable expression made ends with the loop: the hidden iterator is dropped,
+    // and the `&mut it` reborrow of a lent iterator releases its loan.
+    cleanup(&mut c, loopbase);
+    pop_locals(&mut c, mark);
+    return true;
+}
+// The body of `loop`, `while` and `while let` (and of `for x in it` over an iterator, which is
+// `while let Some(x) = it.next()`): the header is already parsed. With `iter_owner` set, the
+// pattern's scrutinee is a call of that module's `next` on `iter_input` instead of an expression.
+fn pattern_loop<a>(
+    c: (&a mut C),
+    endless: bool,
+    pattern: u64,
+    variant: u8[],
+    binding: u8[],
+    has_binding: u64,
+    iter_owner: u8[],
+    iter_input: u64,
+    iter_inty: u64,
+    iter_xty: u64,
+    iter_formal: u64
+) -> unit {
+    head := label(&mut c);
+    end := label(&mut c);
+    oldb := c.brk;
+    oldc := c.cont;
+    oldmark := c.loopmark;
+    oldstart := c.loop_start;
+    oldend := c.loop_end;
+    loopstart := c.pos;
+    mut open = loopstart;
+    while kind_at(&mut c, open) != 123 {
+        open = open + 1;
+    }
+    loopend := block_end(&mut c, open);
+    exchange(&mut c.loop_start, loopstart);
+    exchange(&mut c.loop_end, loopend);
+    loopmark := c.resources.len();
+    exchange(&mut c.loopmark, loopmark);
+    current := ownership::snapshot(&c.check);
+    oldloop := exchange(&mut c.loopcheck, current);
+    oldbreak := exchange(&mut c.breaks, ownership::new());
+    oldhas := c.hasbreak;
+    exchange(&mut c.hasbreak, 0);
+    exchange(&mut c.brk, end);
+    exchange(&mut c.cont, head);
+    mark(&mut c, head);
+    mut nomatch = 0;
+    mut scrutinee = 0;
+    mut scrutty = 0;
+    mut payloads = 0;
+    mut patmark = 0;
+    if pattern != 0 {
+        mut s = val(0, 0);
+        if iter_owner.len() != 0 {
+            // `for x in it`: the scrutinee is `it.next()`, called afresh at every iteration on a
+            // reborrow of the iterator (iterator_loop).
+            prepared := method_receiver(&mut c, iter_input, iter_inty, iter_xty, iter_formal);
+            exchange(&mut c.receiver, prepared.t);
+            exchange(&mut c.receiver_ty, prepared.ty);
+            exchange(&mut c.has_receiver, 2);
+            s = call(&mut c, view(iter_owner), view("next"));
+        } else {
+            s = expr(&mut c, 0);
+        }
+        x := deref(&mut c, s);
+        xt := x.t;
+        xty := x.ty;
+        scrutinee = xt;
+        scrutty = xty;
+        if ty_kind(&mut c, xty) != 8 {
+            fail(&mut c, view("while let requires an enum value"));
+        }
+        d := ty_arg(&mut c, xty);
+        decl := &c.decls[d];
+        if decl.is_enum == 0 {
+            fail(&mut c, view("while let requires an enum value"));
+        }
+        k := find_field(&mut c, d, view(variant));
+        pty := field_type(&mut c, xty, k);
+        tag := rec_load(&mut c, xt, 0, 0);
+        move_out(&mut c, val(xt, xty));
+        nomatch = label(&mut c);
+        get(&mut c, tag, view("%rax"));
+        o(&mut c, view("cmpq $"));
+        on(&mut c, k);
+        o(&mut c, view(",%rax\n"));
+        jump(&mut c, view("jne"), nomatch);
+        patmark = c.locals.len();
+        payloads = c.resources.len();
+        payload := rec_load(&mut c, xt, 1, 0);
+        own(&mut c, payload, pty);
+        source := place_of(&mut c, xt);
+        dest := place_of(&mut c, payload);
+        if contains_borrow(&mut c, pty, 0) {
+            transfer_bonds(&mut c, source, dest);
+        }
+        stored_source(&mut c, payload, pty);
+        invoke(&mut c, view("rt_free"), one(xt));
+        if has_binding != 0 {
+            bind(&mut c, binding.copy(), pty, payload, 0);
+        }
+    }
+    if !endless & (pattern == 0) {
+        tests := c.resources.len();
+        mut v = expr(&mut c, 0);
+        if c.raw == 0 {
+            require_type(&mut c, v.ty, 0);
+            strict_condition(&mut c, v.ty);
+        }
+        cleanup(&mut c, tests);
+        expire_locals(&mut c);
+        get(&mut c, v.t, view("%rax"));
+        o(&mut c, view("testq %rax,%rax\n"));
+        jump(&mut c, view("jz"), end);
+    }
+    entry := ownership::snapshot(&c.check);
+    exchange(&mut c.terminated, 0);
+    block(&mut c);
+    if c.terminated == 0 {
+        loopstate := ownership::snapshot(&c.loopcheck);
+        if ownership::backedge(&c.check, &loopstate) != 0 {
+            fail(&mut c, view("loop backedge consumes entry storage"));
+        }
+    }
+    // A body that always returns or continues reaches the exit only through the entry state
+    // (and any breaks): its dead end state, where `return` dropped every local, must not be
+    // merged in.
+    if c.terminated != 0 {
+        ownership::restore(&mut c.check, &entry);
+    } else {
+        ownership::merge(&mut c.check, &entry);
+    }
+    if c.hasbreak != 0 {
+        broken := ownership::snapshot(&c.breaks);
+        ownership::merge(&mut c.check, &broken);
+    }
+    exchange(&mut c.terminated, 0);
+    if pattern != 0 {
+        cleanup(&mut c, payloads);
+        pop_locals(&mut c, patmark);
+    }
+    jump(&mut c, view("jmp"), head);
+    if pattern != 0 {
+        mark(&mut c, nomatch);
+        get(&mut c, scrutinee, view("%rdi"));
+        drop_call(&mut c, scrutty);
+    }
+    mark(&mut c, end);
+    broke := c.hasbreak;
+    exchange(&mut c.brk, oldb);
+    exchange(&mut c.cont, oldc);
+    exchange(&mut c.loopmark, oldmark);
+    exchange(&mut c.loopcheck, oldloop);
+    exchange(&mut c.breaks, oldbreak);
+    exchange(&mut c.hasbreak, oldhas);
+    exchange(&mut c.loop_start, oldstart);
+    exchange(&mut c.loop_end, oldend);
+    if endless & (broke == 0) {
+        exchange(&mut c.terminated, 1);
+    }
+    return ();
 }
 // Built-in methods on string / bytes / views. Results are new values; `string` input gives `string`.
 fn text_arg<a>(c: (&a mut C)) -> Val {
@@ -22384,134 +22605,7 @@ fn statement<a>(c: (&a mut C)) -> unit {
             }
             expect(&mut c, view("="));
         }
-        head := label(&mut c);
-        end := label(&mut c);
-        oldb := c.brk;
-        oldc := c.cont;
-        oldmark := c.loopmark;
-        oldstart := c.loop_start;
-        oldend := c.loop_end;
-        loopstart := c.pos;
-        mut open = loopstart;
-        while kind_at(&mut c, open) != 123 {
-            open = open + 1;
-        }
-        loopend := block_end(&mut c, open);
-        exchange(&mut c.loop_start, loopstart);
-        exchange(&mut c.loop_end, loopend);
-        loopmark := c.resources.len();
-        exchange(&mut c.loopmark, loopmark);
-        current := ownership::snapshot(&c.check);
-        oldloop := exchange(&mut c.loopcheck, current);
-        oldbreak := exchange(&mut c.breaks, ownership::new());
-        oldhas := c.hasbreak;
-        exchange(&mut c.hasbreak, 0);
-        exchange(&mut c.brk, end);
-        exchange(&mut c.cont, head);
-        mark(&mut c, head);
-        mut nomatch = 0;
-        mut scrutinee = 0;
-        mut scrutty = 0;
-        mut payloads = 0;
-        mut patmark = 0;
-        if pattern != 0 {
-            s := expr(&mut c, 0);
-            x := deref(&mut c, s);
-            xt := x.t;
-            xty := x.ty;
-            scrutinee = xt;
-            scrutty = xty;
-            if ty_kind(&mut c, xty) != 8 {
-                fail(&mut c, view("while let requires an enum value"));
-            }
-            d := ty_arg(&mut c, xty);
-            decl := &c.decls[d];
-            if decl.is_enum == 0 {
-                fail(&mut c, view("while let requires an enum value"));
-            }
-            k := find_field(&mut c, d, view(variant));
-            pty := field_type(&mut c, xty, k);
-            tag := rec_load(&mut c, xt, 0, 0);
-            move_out(&mut c, val(xt, xty));
-            nomatch = label(&mut c);
-            get(&mut c, tag, view("%rax"));
-            o(&mut c, view("cmpq $"));
-            on(&mut c, k);
-            o(&mut c, view(",%rax\n"));
-            jump(&mut c, view("jne"), nomatch);
-            patmark = c.locals.len();
-            payloads = c.resources.len();
-            payload := rec_load(&mut c, xt, 1, 0);
-            own(&mut c, payload, pty);
-            source := place_of(&mut c, xt);
-            dest := place_of(&mut c, payload);
-            if contains_borrow(&mut c, pty, 0) {
-                transfer_bonds(&mut c, source, dest);
-            }
-            stored_source(&mut c, payload, pty);
-            invoke(&mut c, view("rt_free"), one(xt));
-            if has_binding != 0 {
-                bind(&mut c, binding.copy(), pty, payload, 0);
-            }
-        }
-        if !endless & (pattern == 0) {
-            tests := c.resources.len();
-            mut v = expr(&mut c, 0);
-            if c.raw == 0 {
-                require_type(&mut c, v.ty, 0);
-                strict_condition(&mut c, v.ty);
-            }
-            cleanup(&mut c, tests);
-            expire_locals(&mut c);
-            get(&mut c, v.t, view("%rax"));
-            o(&mut c, view("testq %rax,%rax\n"));
-            jump(&mut c, view("jz"), end);
-        }
-        entry := ownership::snapshot(&c.check);
-        exchange(&mut c.terminated, 0);
-        block(&mut c);
-        if c.terminated == 0 {
-            loopstate := ownership::snapshot(&c.loopcheck);
-            if ownership::backedge(&c.check, &loopstate) != 0 {
-                fail(&mut c, view("loop backedge consumes entry storage"));
-            }
-        }
-        // A body that always returns or continues reaches the exit only through the entry state
-        // (and any breaks): its dead end state, where `return` dropped every local, must not be
-        // merged in.
-        if c.terminated != 0 {
-            ownership::restore(&mut c.check, &entry);
-        } else {
-            ownership::merge(&mut c.check, &entry);
-        }
-        if c.hasbreak != 0 {
-            broken := ownership::snapshot(&c.breaks);
-            ownership::merge(&mut c.check, &broken);
-        }
-        exchange(&mut c.terminated, 0);
-        if pattern != 0 {
-            cleanup(&mut c, payloads);
-            pop_locals(&mut c, patmark);
-        }
-        jump(&mut c, view("jmp"), head);
-        if pattern != 0 {
-            mark(&mut c, nomatch);
-            get(&mut c, scrutinee, view("%rdi"));
-            drop_call(&mut c, scrutty);
-        }
-        mark(&mut c, end);
-        broke := c.hasbreak;
-        exchange(&mut c.brk, oldb);
-        exchange(&mut c.cont, oldc);
-        exchange(&mut c.loopmark, oldmark);
-        exchange(&mut c.loopcheck, oldloop);
-        exchange(&mut c.breaks, oldbreak);
-        exchange(&mut c.hasbreak, oldhas);
-        exchange(&mut c.loop_start, oldstart);
-        exchange(&mut c.loop_end, oldend);
-        if endless & (broke == 0) {
-            exchange(&mut c.terminated, 1);
-        }
+        pattern_loop(&mut c, endless, pattern, variant, binding, has_binding, u8[], 0, 0, 0, 0);
         return ();
     }
     if eat(&mut c, view("for")) {
@@ -22531,6 +22625,11 @@ fn statement<a>(c: (&a mut C)) -> unit {
         // `for x in &s` / `for x in &mut s` over a slice borrows each element.
         borrowed := is(&mut c, view("&"));
         mut v = expr(&mut c, 0);
+        if (c.raw == 0) & (v.ty != 0) {
+            if iterator_loop(&mut c, name.copy(), v.t, v.ty, loopbase) {
+                return ();
+            }
+        }
         // `for x in v` moves owned elements; `for x in &v` borrows them. Scalar and byte
         // elements retain copy iteration in --default-u64 mode. The iterable itself is pinned
         // for the duration of the loop, so its storage cannot move or grow in the body.
@@ -27609,8 +27708,16 @@ pub fn main() -> u64 {
         specs_serve(&mut c, view(serve_dir));
     }
     emit_specializations(&mut c);
+    // A closure body can instantiate a generic (`Some(x)` inside `|| ...`) and a specialisation can
+    // create a closure, so the two are emitted to a fixpoint; request files are written once both
+    // lists are complete.
+    mut specs_done = c.specs.len();
+    mut closures_done = emit_closures(&mut c, 0);
+    while (specs_done < c.specs.len()) || (closures_done < c.closures.len()) {
+        specs_done = drain_specs(&mut c, specs_done);
+        closures_done = emit_closures(&mut c, closures_done);
+    }
     specs_emit_all(&mut c);
-    emit_closures(&mut c);
     emit_fn_thunk(&mut c);
     emit_drops(&mut c);
     if c.no_entry != 0 {
