@@ -4,7 +4,7 @@
 // lines with llvm-dwarfdump, exercises `grail debug lines`, and checks that a normal build has
 // no line table. Nothing here executes a cross target.
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { readFileSync, existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import assert from 'node:assert/strict';
@@ -112,6 +112,38 @@ try {
   assert.match(infoCommand, /DW_TAG_subprogram/, 'grail debug info did not print subprograms');
   assert.match(infoCommand, /DW_AT_name\s+\("total"\)/, 'grail debug info did not print the local');
 
+  // Record, string, vector and C-record members: a debugger walks a Grail value's fields through
+  // the pointers the program holds (tests/debug_members.grl).
+  {
+    const membersSource = join(root, 'tests/debug_members.grl');
+    const asm = join(work, 'members.s');
+    const exe = join(work, 'members');
+    ok([compiler, '--target', 'x86_64', '--debug', asm, membersSource, runtime, osLinux]);
+    ok(['clang', '--target=x86_64-linux-gnu', '-c', asm, '-o', `${exe}.o`]);
+    ok(['ld.lld', '-m', 'elf_x86_64', `${exe}.o`, '-o', exe]);
+    const membersInfo = ok(['llvm-dwarfdump', '--debug-info', exe]).stdout;
+    for (const [structure, fields] of [['Outer', ['count', 'ratio', 'inner', 'label']], ['Inner', ['id', 'tag']], ['Pt', ['x', 'y', 'w']], ['u8[]', ['data', 'len', 'cap']]]) {
+      assert.match(membersInfo, new RegExp(`DW_TAG_structure_type\\s+DW_AT_name\\s+\\("${structure.replace(/[[\]]/g, '\\$&')}"\\)`), `no structure type ${structure}`);
+      for (const field of fields) {
+        assert.match(membersInfo, new RegExp(`DW_TAG_member\\s+DW_AT_name\\s+\\("${field}"\\)`), `${structure} has no member ${field}`);
+      }
+    }
+    assert.match(membersInfo, /DW_AT_name\s+\("y"\)[\s\S]*?DW_AT_data_member_location\s+\((?:0x0)?4\)/, 'Pt.y is not at offset 4');
+    const membersVerified = ok(['llvm-dwarfdump', '--verify', exe]).stdout;
+    assert.match(membersVerified, /No errors\./, `member DWARF does not verify:\n${membersVerified}`);
+    if (run(['gdb', '--version']).status === 0) {
+      const line = readFileSync(membersSource, 'utf8').split('\n').findIndex(row => row.includes('total := ')) + 1;
+      const shown = run(['gdb', '-q', '-batch', '-ex', 'set debuginfod enabled off', '-ex', `break debug_members.grl:${line}`, '-ex', 'run',
+        '-ex', 'print **o', '-ex', 'print *(*o)->inner', '-ex', 'print (*o)->label->data', '-ex', 'print **p', '-ex', 'print (*v)->data[0]@3', '-ex', 'print (*s)->data', exe]).stdout;
+      for (const expected of ['count = 7, ratio = 2.5', 'id = 42', '"outer-label"', 'x = -3, y = 9, w = 1.5', '{10, 20, 30}', '"hello debugger"']) {
+        assert.ok(shown.includes(expected), `gdb did not show ${expected}:\n${shown}`);
+      }
+      console.log('debug-lines: gdb prints record, nested record, string, vector and C-record members');
+    } else {
+      console.log('debug-lines: gdb not installed; member DWARF checked with llvm-dwarfdump only');
+    }
+  }
+
   const plainBinary = build(join(work, 'plain.s'), join(work, 'plain'), false);
   const plainDump = ok(['llvm-dwarfdump', '--debug-line', plainBinary]).stdout;
   assert.equal(rows(plainDump).length, 0, 'a normal build unexpectedly contains .debug_line rows');
@@ -172,6 +204,24 @@ try {
       const offset = Number(record[1]) - 2 ** 32;
       assert.ok(offset < 0 && offset % 8 === 0, `${name}: ${local} offset ${offset} is not a negative slot`);
     }
+  }
+  // CodeView member layout: the same record, string, vector and C-record types as the DWARF test,
+  // as LF_STRUCTURE / LF_FIELDLIST / LF_MEMBER / LF_POINTER records the PDB resolves.
+  {
+    const membersWin = compileProgram(compiler, [join(root, 'tests/debug_members.grl')], join(work, 'windows-members'), { debug: true });
+    const types = ok(['llvm-pdbutil', 'dump', '--types', membersWin.pdb]).stdout;
+    for (const [structure, size, fields] of [['Outer', 32, [['count', 0], ['ratio', 8], ['inner', 16], ['label', 24]]], ['Inner', 16, [['id', 0], ['tag', 8]]], ['Pt', 12, [['x', 0], ['y', 4], ['w', 8]]], ['u8[]', 24, [['data', 0], ['len', 8], ['cap', 16]]]]) {
+      const full = new RegExp(`LF_STRUCTURE \\[size = \\d+\\] \`${structure.replace(/[[\]]/g, '\\$&')}\`\\s+vtable: <no type>, base list: <no type>, field list: (0x[0-9A-F]+)\\s+options: , sizeof ${size}`);
+      const found = types.match(full);
+      assert.ok(found, `CodeView has no full definition of ${structure} (sizeof ${size})`);
+      const list = types.slice(types.indexOf(`${found[1]} | LF_FIELDLIST`));
+      for (const [field, offset] of fields) {
+        assert.match(list.split(/\n  0x/)[0], new RegExp(`LF_MEMBER \\[name = \`${field}\`, Type = 0x[0-9A-F]+[^\\]]*, offset = ${offset},`), `${structure}.${field} not at offset ${offset}`);
+      }
+    }
+    const membersSymbols = ok(['llvm-pdbutil', 'dump', '--symbols', membersWin.pdb]).stdout;
+    assert.match(membersSymbols, /S_REGREL32 \[size = \d+\] `o`\s+type = 0x[0-9A-F]+ \(Outer\*\*\)/, 'the local o is not typed Outer**');
+    console.log('debug-lines: windows-x86_64 PDB describes record, string, vector and C-record members');
   }
   const unwind = ok(['llvm-readobj', '--unwind', win.object]).stdout;
   assert.match(unwind, /StartAddress: f_main_main/, 'debug build lost the main unwind entry');
