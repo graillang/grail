@@ -4476,6 +4476,85 @@ fn is<a, b>(c: (&a mut C), s: &b [u8]) -> bool {
     t := tok_text(&mut c, p);
     return same(view(t), s);
 }
+// Edit distance between two names (insertions, deletions, substitutions), for "did you mean".
+fn edit_distance<a, b>(x: &a [u8], y: &b [u8]) -> u64 {
+    mut row = u64[];
+    for j in y.len() + 1 {
+        row.push(j);
+    }
+    for i in x.len() {
+        mut diagonal = row[0];
+        row[0] = i + 1;
+        for j in y.len() {
+            above := row[j + 1];
+            mut best = above + 1;
+            if row[j] + 1 < best {
+                best = row[j] + 1;
+            }
+            mut swap = diagonal;
+            if x[i] != y[j] {
+                swap = diagonal + 1;
+            }
+            if swap < best {
+                best = swap;
+            }
+            row[j + 1] = best;
+            diagonal = above;
+        }
+    }
+    return row[y.len()];
+}
+// The closest name this scope could have meant: live locals, then this module's functions,
+// constants and types. Close means at most a third of the name's length edited (at least one).
+fn suggest_name<a, b, d>(c: (&a mut C), module: &b [u8], name: &d [u8]) -> u8[] {
+    mut limit = name.len() / 3;
+    if limit == 0 {
+        limit = 1;
+    }
+    mut best = u8[];
+    mut best_cost = limit + 1;
+    for i in c.locals.len() {
+        candidate := c.locals[i].name.copy();
+        if (candidate.len() != 0) & (candidate[0] != 46) {
+            cost := edit_distance(view(name), view(candidate));
+            if cost < best_cost {
+                best_cost = cost;
+                best = candidate;
+            }
+        }
+    }
+    for i in c.funcs.len() {
+        if same(view(c.funcs[i].module), module) {
+            candidate := c.funcs[i].name.copy();
+            cost := edit_distance(view(name), view(candidate));
+            if cost < best_cost {
+                best_cost = cost;
+                best = candidate;
+            }
+        }
+    }
+    for i in c.constants.len() {
+        if same(view(c.constants[i].module), module) {
+            candidate := c.constants[i].name.copy();
+            cost := edit_distance(view(name), view(candidate));
+            if cost < best_cost {
+                best_cost = cost;
+                best = candidate;
+            }
+        }
+    }
+    for i in c.decls.len() {
+        if same(view(c.decls[i].module), module) {
+            candidate := c.decls[i].name.copy();
+            cost := edit_distance(view(name), view(candidate));
+            if cost < best_cost {
+                best_cost = cost;
+                best = candidate;
+            }
+        }
+    }
+    return best;
+}
 // A secondary label: another source position that explains the error (`borrowed here`).
 struct DiagLabel {
     pos: u64,
@@ -12001,6 +12080,20 @@ fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
         }
     }
     if f == 0 {
+        mut back = c.pos;
+        while (0 < back) & !((kind_at(&mut c, back) == 1) & same(view(tok_text(&mut c, back)), view(name))) {
+            back -= 1;
+        }
+        exchange(&mut c.pos, back);
+        guess := suggest_name(&mut c, view(m), view(name));
+        if guess.len() != 0 {
+            mut help = copy_bytes(view("a name with a similar spelling is in `"));
+            push_bytes(&mut help, view(m));
+            push_bytes(&mut help, view("`: `"));
+            push_bytes(&mut help, view(guess));
+            push_bytes(&mut help, view("`"));
+            diag_help(&mut c, view(help));
+        }
         fail(&mut c, view("unknown function"));
     }
     info := &c.funcs[f - 1];
@@ -20040,6 +20133,19 @@ fn primary<a>(c: (&a mut C)) -> Val {
     mut r = find_decl(&mut c, view(m), view(first));
     if r != 0 {
         return record(&mut c, r - 1, 18446744073709551615);
+    }
+    // Point at the name itself, and offer the closest one in scope.
+    mut back = c.pos;
+    while (0 < back) & !((kind_at(&mut c, back) == 1) & same(view(tok_text(&mut c, back)), view(first))) {
+        back -= 1;
+    }
+    exchange(&mut c.pos, back);
+    guess := suggest_name(&mut c, view(m), view(first));
+    if guess.len() != 0 {
+        mut help = copy_bytes(view("a name with a similar spelling is in scope: `"));
+        push_bytes(&mut help, view(guess));
+        push_bytes(&mut help, view("`"));
+        diag_help(&mut c, view(help));
     }
     fail(&mut c, view("undefined name"));
     return val(0, 0);
