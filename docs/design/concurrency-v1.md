@@ -49,8 +49,9 @@ or exposing Future state machines. This does **not** erase scheduling semantics:
 - Stackful tasks use a real readiness reactor and resume owned frames, rather than polling/blocking
   the same worker under an async-looking interface.
 - CPU workers use bounded scheduling/work stealing. Blocking foreign calls are **not** isolated in
-  v1: a foreign call occupies its worker for its whole duration, and FFI is valid on the main thread
-  only because the host TLS base is process-wide. The runtime offloads only `host::read_file`,
+  v1: a foreign call occupies its worker for its whole duration. FFI is valid on every runtime thread
+  (each has its own glibc TCB when libc is loaded); a callback on a thread C created aborts by name.
+  The runtime offloads only `host::read_file`,
   `host::write_file` and `host::command` when they run in a green task
   ([B3](decisions-b2-b6.md#b3-foreign-calls-block-the-executing-thread)).
 - Worker-affine state/guards require pinning or a checked non-migration boundary. A suspended task

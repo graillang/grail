@@ -1218,54 +1218,95 @@ fn rt_cpus() -> u64 {
     }
     return n;
 }
-// Thread handle words: 0 kernel TID (cleared + futex-woken on exit), 1 stack base, 2 stack size.
+// Thread handle words: 0 kernel TID (cleared + futex-woken on exit), 1 region base, 2 region size.
 fn rt_thread_spawn(entry: u64, arg: u64) -> u64 {
-    size := 1048576;
-    stack := raw_map(size);
-    if rt_error(stack) {
-        rt_abort();
-    }
-    if rt_error(rt_syscall(10, stack, 4096, 0)) {
-        rt_abort();
-    } // guard page below the stack
     handle := rt_alloc(24);
-    raw_store(handle + 8, stack);
-    raw_store(handle + 16, size);
-    // Top 64 bytes: this thread's worker record {self, scheduler sp, current task, entry, arg}.
-    top := stack + size;
-    record := top - 64;
-    raw_store(record + 24, entry);
-    raw_store(record + 32, arg);
-    raw_store(top - 80, rt_thread_main);
-    raw_store(top - 72, record);
-    // VM|FS|FILES|SIGHAND|THREAD|SYSVSEM|PARENT_SETTID|CHILD_CLEARTID
-    tid := raw_thread_clone(3477248, top - 80, handle);
-    if rt_error(tid) {
-        rt_abort();
-    }
+    rt_thread_start(entry, arg, handle);
     return handle;
 }
 // Persistent runtime threads (workers, reactor): no counted handle; the kernel TID word lives in
-// the thread's own stack-top record and is never joined.
+// the thread's own record and is never joined.
 fn rt_thread_spawn_detached(entry: u64, arg: u64) -> u64 {
-    size := 1048576;
-    stack := raw_map(size);
-    if rt_error(stack) {
+    rt_thread_start(entry, arg, 0);
+    return 0;
+}
+// One OS thread running entry(arg) on its own worker record. The record is the top 64 bytes of a
+// mapped region: {0 self, 8 scheduler sp, 16 current task, 24 entry, 32 arg, 40 TID word of a
+// persistent thread, 48 Windows wait value, 56 host TLS base}. Word 56 is this thread's libc TCB,
+// which every foreign call made on the thread switches to (0: there is none, the call runs on the
+// record). The two words under the record are the start block {rt_thread_main, record}.
+//
+// In a process that loaded libc (process-state word 3216 is set) glibc creates the thread, so it
+// has a real TCB of its own: the region is one page holding only the record, glibc owns the stack,
+// and rt_host_thread (native.grl) clears the TID word when the thread's Grail work is done. Without
+// libc the runtime clones the thread itself on a 1 MiB region with a guard page, and the kernel
+// clears the TID word.
+fn rt_thread_start(entry: u64, arg: u64, handle: u64) -> u64 {
+    bridge := raw_load(rt_state_host_thread());
+    if (bridge == 0) & (raw_load(raw_state() + 184) != 0) & (raw_target() != 3) & (raw_target() != 4) {
+        // libc is loaded but pthread_create was not linked: a thread cloned here would have no TCB,
+        // and its first foreign call would run libc on another thread's.
+        rt_thread_no_libc_threads();
+    }
+    mut size = 1048576;
+    if bridge != 0 {
+        size = 4096;
+    }
+    region := raw_map(size);
+    if rt_error(region) {
         rt_abort();
     }
-    if rt_error(rt_syscall(10, stack, 4096, 0)) {
-        rt_abort();
+    if bridge == 0 {
+        if rt_error(rt_syscall(10, region, 4096, 0)) {
+            rt_abort();
+        } // guard page below the stack
     }
-    top := stack + size;
+    top := region + size;
     record := top - 64;
     raw_store(record + 24, entry);
     raw_store(record + 32, arg);
     raw_store(top - 80, rt_thread_main);
     raw_store(top - 72, record);
-    tid := raw_thread_clone(3477248, top - 80, record + 40);
+    mut tid_word = record + 40;
+    if handle != 0 {
+        raw_store(handle + 8, region);
+        raw_store(handle + 16, size);
+        tid_word = handle;
+    }
+    if bridge != 0 {
+        if rt_error(raw_call2(bridge, top - 80, tid_word)) {
+            rt_abort();
+        }
+        return 0;
+    }
+    // VM|FS|FILES|SIGHAND|THREAD|SYSVSEM|PARENT_SETTID|CHILD_CLEARTID
+    tid := raw_thread_clone(3477248, top - 80, tid_word);
     if rt_error(tid) {
         rt_abort();
     }
+    return 0;
+}
+fn rt_thread_no_libc_threads() -> u64 {
+    text := view(
+        "grail: this program loaded libc but does not link pthread_create, so the runtime cannot give a new thread a libc TCB; link libc (extern \"C\" lib \"c\"). See docs/ffi.md, \"Dynamic loading and the host TLS bridge\".\n"
+    );
+    packed := rt_pack(text);
+    rt_write_all(2, packed, rt_len(text));
+    rt_free(packed);
+    rt_abort();
+    return 0;
+}
+// Reached from a callback entry (native.grl tls_enter_callback) on a thread whose libc TCB names no
+// Grail record: C created the thread. It runs on that TCB, touches no thread record and never
+// returns; running the callback on another thread's record would share its task and scheduler state.
+fn rt_callback_foreign_thread() -> u64 {
+    text := view(
+        "grail: a C callback was entered on a thread the Grail runtime did not create; callbacks are supported only on the main thread and on runtime threads (pool workers, task scheduler threads) while they are inside a foreign call. See docs/ffi.md, \"Dynamic loading and the host TLS bridge\".\n"
+    );
+    packed := rt_pack(text);
+    rt_write_all(2, packed, rt_len(text));
+    rt_free(packed);
+    rt_abort();
     return 0;
 }
 fn rt_thread_main(record: u64) -> u64 {
@@ -1326,12 +1367,14 @@ fn rt_thread_join(handle: u64) -> u64 {
 //   80           green scheduler create CAS   rt_sched                   --
 //   88           task-mode cache              rt_task_mode               win-green-tasks
 //   128..192     main thread's own record     rt_thread_init             --
+//   184          main thread's host TLS base  _start (tls_capture)       ffi-threads
 //   256..320     allocator bin heads          rt_alloc_unlocked          --
 //   768..832     allocator bin bump           rt_grow                    --
 //   1280..1344   allocator bin remaining      rt_grow                    --
 //   2048..2672   sampling profiler block      rt_prof_words              --
 //   3200         job pool pointer             rt_state_pool              job-pool
 //   3208         job pool creation CAS        rt_state_pool_cas          job-pool
+//   3216         glibc thread bridge          rt_state_host_thread       ffi-threads
 //   3392         Windows thread bridge        os-windows: rt_win_bridge  --
 //   3840         Windows fiber state          os-windows                 --
 //   3856..       Windows fiber table          os-windows                 --
@@ -1341,6 +1384,11 @@ fn rt_thread_join(handle: u64) -> u64 {
 // the same disease as the 88 collision: an unowned word in a shared structure.
 fn rt_state_pool() -> u64 {
     return raw_state() + 3200;
+}
+// rt_host_thread's address, written by _start when the process loaded libc and links
+// pthread_create; 0 everywhere else, and then the runtime clones its own threads.
+fn rt_state_host_thread() -> u64 {
+    return raw_state() + 3216;
 }
 fn rt_state_pool_cas() -> u64 {
     return raw_state() + 3208;

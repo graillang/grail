@@ -373,7 +373,7 @@ fn link_inputs<a, b>(asm: &a [u8], base: &b [u8]) -> u8[][] {
     return out;
 }
 // A shared-library input (-lNAME) makes the ELF executable dynamically linked: ld.lld then needs
-// the platform loader and the system library directories, which it has no defaults for.
+// the platform loader, the system library directories, which it has no defaults for, and libc.
 fn dynamic_link_flags<a, b>(target: &a [u8], inputs: (&b u8[][])) -> u8[][] {
     mut out = u8[][];
     mut shared = 0;
@@ -402,6 +402,10 @@ fn dynamic_link_flags<a, b>(target: &a [u8], inputs: (&b u8[][])) -> u8[][] {
     }
     out.push(copy(view("-L/usr/lib")));
     out.push(copy(view("-L/usr/lib64")));
+    // A dynamic process has loaded libc whatever it named, and the runtime creates its threads
+    // through pthread_create so each has a libc TCB (docs/ffi.md); a weak reference only binds
+    // when libc is on the link line.
+    out.push(copy(view("-lc")));
     return out;
 }
 // ---- split assembly (B1 stage 1) ----

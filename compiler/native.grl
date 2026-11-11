@@ -1356,67 +1356,181 @@ fn stack_slot<a>(c: (&a mut C), id: u64) -> unit {
     o(&mut c, view("(%rbp)"));
     return ();
 }
-// ---- host TLS bridge (Linux x86-64) ----
-// The runtime installs its worker record as the hardware thread pointer
-// (`arch_prctl(ARCH_SET_FS)`), which is where the dynamic loader keeps its TCB
-// (errno, tcache, stack guard). Foreign calls therefore run on the loader's TLS
-// base and exported callbacks run on Grail's, restoring the other on the way out.
-// Linux keeps libc's TCB in the thread pointer the Grail runtime also uses (x86-64 FS base,
-// AArch64 tpidr_el0, RISC-V tp), so foreign calls and callbacks swap it. x86-64 needs the
-// arch_prctl system call; AArch64 and RISC-V write the register directly (tpget/tpset).
+// ---- host TLS bridge (Linux ELF: x86-64, AArch64, RISC-V 64) ----
+// The runtime installs each OS thread's worker record as the hardware thread pointer (x86-64 FS
+// base through arch_prctl, AArch64 tpidr_el0, RISC-V tp), which is also where a dynamically linked
+// process keeps glibc's TCB (errno, malloc tcache, stack guard, DTV). Every thread therefore carries
+// its own pair: the record (thread-pointer word 0 points to itself, as the x86-64 TLS ABI also
+// requires of a TCB) and record word 56, the thread's libc TCB, or 0 when there is none (a static
+// program, which never loaded libc). A foreign call runs on the calling thread's TCB and restores
+// the record; a callback finds its thread's record through `rt_tls_record`, an initial-exec ELF TLS
+// word that glibc allocates in every thread it creates, and runs on it.
+//
+// Runtime threads of a process that loaded libc are created by glibc (`pthread_create` through the
+// rt_host_thread stub below), so each has a real TCB that glibc built, links and tears down itself;
+// docs/design/decisions-b2-b6.md (B3) records why the runtime does not fabricate one.
 fn tls_bridge<a>(c: (&a mut C)) -> bool {
     return (c.plat == 0) && ((c.target == 0) || (c.target == 1) || (c.target == 2));
 }
+// %rax = the current thread pointer: a Grail record or a libc TCB, both self-pointing on x86-64.
+fn tp_read<a>(c: (&a mut C)) -> unit {
+    if c.target == 0 {
+        o(&mut c, view("movq %fs:0,%rax\n"));
+    } else {
+        o(&mut c, view("tpget\n"));
+    }
+    return ();
+}
+// Thread pointer := %rsi (clobbers %rax, %rdi; %rcx and %r11 too on x86-64).
+fn tp_write<a>(c: (&a mut C)) -> unit {
+    if c.target == 0 {
+        o(&mut c, view("movl $4098,%edi\nmovl $158,%eax\nsyscall\n"));
+    } else {
+        o(&mut c, view("movq %rsi,%rdi\ntpset\n"));
+    }
+    return ();
+}
+// %rax = this thread's `rt_tls_record` word. Valid only while the thread pointer is a libc TCB.
+fn tls_record_address<a>(c: (&a mut C)) -> unit {
+    if c.target == 0 {
+        o(&mut c, view("movq %fs:0,%rax\nleaq rt_tls_record@tpoff(%rax),%rax\n"));
+    } else {
+        o(&mut c, view("tlsaddr\n"));
+    }
+    return ();
+}
 fn tls_bss<a>(c: (&a mut C)) -> unit {
     if c.split != 0 {
-        o(&mut c, view(".globl rt_state\n.globl rt_host_tls\n.globl rt_grail_tls\n"));
+        o(&mut c, view(".globl rt_state\n"));
+        if tls_bridge(&mut c) {
+            o(&mut c, view(".globl rt_tls_record\n"));
+        }
     }
+    o(&mut c, view("ud2\n"));
     if tls_bridge(&mut c) {
-        o(&mut c, view("ud2\n.bss\n.p2align 3\nrt_state: .zero 4096\nrt_host_tls: .zero 8\nrt_grail_tls: .zero 8\n"));
-    } else {
-        o(&mut c, view("ud2\n.bss\n.p2align 3\nrt_state: .zero 4096\n"));
+        tls_thread_stubs(&mut c);
+    }
+    o(&mut c, view(".bss\n.p2align 3\nrt_state: .zero 4096\n"));
+    if tls_bridge(&mut c) {
+        o(&mut c, view(".section .tbss,\"awT\",@nobits\n.p2align 3\nrt_tls_record: .zero 8\n"));
     }
     o(&mut c, view(".section .note.GNU-stack,\"\",@progbits\n"));
     return ();
 }
+// Thread creation through glibc. rt_host_thread(block, tid_word) is reached from the runtime's
+// rt_thread_start (Grail calling convention; the address is the process-state word at 3216, which
+// _start fills only when the process loaded libc and `pthread_create` is linked). `block` is
+// {entry function, record} (rt_thread_main and the new thread's record); the joinable TID word goes
+// into the word below it, is set to 1 here and cleared and futex-woken once the thread's Grail work
+// has finished and it is back on its own TCB. pthread_create and pthread_detach run on the calling
+// thread's TCB, like any foreign call.
+//
+// rt_host_thread_start is the start routine glibc calls on the new thread: it publishes the
+// thread's TCB in record word 56 and the record in `rt_tls_record`, runs rt_thread_main, and
+// returns to glibc on glibc's TCB so its own thread exit runs normally.
+fn tls_thread_stubs<a>(c: (&a mut C)) -> unit {
+    o(&mut c, view(".weak pthread_create\n.weak pthread_detach\n"));
+    o(&mut c, view(".globl rt_host_thread\nrt_host_thread:\npushq %rbp\nmovq %rsp,%rbp\nsubq $48,%rsp\n"));
+    o(&mut c, view("movq %rdi,-8(%rbp)\nmovq %rsi,-16(%rbp)\nmovq %rsi,-8(%rdi)\nmovl $1,%eax\nmovq %rax,(%rsi)\n"));
+    tp_read(&mut c);
+    o(&mut c, view("movq %rax,-24(%rbp)\nmovq 56(%rax),%rsi\n"));
+    tp_write(&mut c);
+    o(&mut c, view("leaq -32(%rbp),%rdi\nxorl %esi,%esi\nleaq rt_host_thread_start(%rip),%rdx\nmovq -8(%rbp),%rcx\ncall pthread_create\nmovq %rax,-40(%rbp)\ntestq %rax,%rax\n"));
+    failed := label(&mut c);
+    jump(&mut c, view("jne"), failed);
+    o(&mut c, view("movq -32(%rbp),%rdi\ncall pthread_detach\n"));
+    mark(&mut c, failed);
+    o(&mut c, view("movq -24(%rbp),%rsi\n"));
+    tp_write(&mut c);
+    o(&mut c, view("movq -40(%rbp),%rcx\nxorl %eax,%eax\nsubq %rcx,%rax\nleave\nret\n"));
+    o(&mut c, view("rt_host_thread_start:\npushq %rbp\nmovq %rsp,%rbp\nsubq $16,%rsp\nmovq %rdi,-8(%rbp)\n"));
+    tp_read(&mut c);
+    o(&mut c, view("movq -8(%rbp),%rcx\nmovq 8(%rcx),%rcx\nmovq %rax,56(%rcx)\n"));
+    tls_record_address(&mut c);
+    o(&mut c, view("movq -8(%rbp),%rcx\nmovq 8(%rcx),%rcx\nmovq %rcx,(%rax)\nmovq %rcx,%rdi\ncall rt_thread_main\n"));
+    o(&mut c, view("movq -8(%rbp),%rcx\nmovq 8(%rcx),%rcx\nmovq 56(%rcx),%rsi\n"));
+    tp_write(&mut c);
+    // Load the TID word's address before releasing it: once it reads 0 the joiner may unmap the
+    // block and the record.
+    o(&mut c, view("movq -8(%rbp),%rcx\nmovq -8(%rcx),%rdi\nmovq %rdi,-16(%rbp)\nxorl %eax,%eax\nsfence\nmovq %rax,(%rdi)\n"));
+    if c.target == 0 {
+        o(&mut c, view("movl $202,%eax\n"));
+    } else {
+        o(&mut c, view("movl $98,%eax\n"));
+    }
+    o(&mut c, view("movq -16(%rbp),%rdi\nmovl $1,%esi\nmovl $1,%edx\nsyscall\nxorl %eax,%eax\nleave\nret\n"));
+    return ();
+}
+// In _start, before rt_thread_init installs the main record: record the loader's TLS base (0 in a
+// static program) as the main record's word 56, and when there is one, publish the main record in
+// this thread's `rt_tls_record` and arm the glibc thread path if `pthread_create` is linked.
 fn tls_capture<a>(c: (&a mut C)) -> unit {
-    if c.target != 0 {
-        o(&mut c, view("tpget\nmovq %rax,rt_host_tls(%rip)\n"));
-        return ();
+    if c.target == 0 {
+        o(&mut c, view("movl $4099,%edi\nleaq rt_state+184(%rip),%rsi\nmovl $158,%eax\nsyscall\n"));
+    } else {
+        o(&mut c, view("tpget\nmovq %rax,rt_state+184(%rip)\n"));
     }
-    o(&mut c, view("movl $4099,%edi\nleaq rt_host_tls(%rip),%rsi\nmovl $158,%eax\nsyscall\n"));
+    done := label(&mut c);
+    o(&mut c, view("movq rt_state+184(%rip),%rax\ntestq %rax,%rax\n"));
+    jump(&mut c, view("je"), done);
+    tls_record_address(&mut c);
+    o(&mut c, view("leaq rt_state+128(%rip),%rcx\nmovq %rcx,(%rax)\nleaq pthread_create(%rip),%rax\ntestq %rax,%rax\n"));
+    jump(&mut c, view("je"), done);
+    o(&mut c, view("leaq rt_host_thread(%rip),%rax\nmovq %rax,rt_state+3216(%rip)\n"));
+    mark(&mut c, done);
     return ();
 }
-fn tls_get<a>(c: (&a mut C), slot: u64) -> unit {
-    if c.target != 0 {
-        o(&mut c, view("tpget\nmovq %rax,"));
-        stack_slot(&mut c, slot);
-        c.out.push(10);
-        return ();
-    }
-    o(&mut c, view("movl $4099,%edi\nleaq "));
+// Foreign call entry: when this thread has a libc TCB, `slot` keeps the record and the thread
+// pointer becomes the TCB; otherwise `slot` is 0 and nothing changes.
+fn tls_enter_foreign<a>(c: (&a mut C), slot: u64) -> unit {
+    o(&mut c, view("xorl %eax,%eax\nmovq %rax,"));
     stack_slot(&mut c, slot);
-    o(&mut c, view(",%rsi\nmovl $158,%eax\nsyscall\n"));
+    c.out.push(10);
+    tp_read(&mut c);
+    o(&mut c, view("movq 56(%rax),%rsi\ntestq %rsi,%rsi\n"));
+    done := label(&mut c);
+    jump(&mut c, view("je"), done);
+    o(&mut c, view("movq %rax,"));
+    stack_slot(&mut c, slot);
+    c.out.push(10);
+    tp_write(&mut c);
+    mark(&mut c, done);
     return ();
 }
-fn tls_set_global<a, b>(c: (&a mut C), name: &b [u8]) -> unit {
-    o(&mut c, view("movq "));
-    o(&mut c, name);
-    if c.target != 0 {
-        o(&mut c, view("(%rip),%rdi\ntpset\n"));
-        return ();
-    }
-    o(&mut c, view("(%rip),%rsi\nmovl $4098,%edi\nmovl $158,%eax\nsyscall\n"));
+// Callback entry: in a process that loaded libc, the caller runs on a libc TCB whose
+// `rt_tls_record` names this thread's record; `slot` keeps the caller's thread pointer. A thread
+// with no record (C created it) stops in rt_callback_foreign_thread instead of borrowing another
+// thread's record. In a static program the thread pointer already is the record and `slot` is 0.
+fn tls_enter_callback<a>(c: (&a mut C), slot: u64) -> unit {
+    o(&mut c, view("xorl %eax,%eax\nmovq %rax,"));
+    stack_slot(&mut c, slot);
+    c.out.push(10);
+    done := label(&mut c);
+    have := label(&mut c);
+    o(&mut c, view("leaq rt_state(%rip),%rax\nmovq 184(%rax),%rax\ntestq %rax,%rax\n"));
+    jump(&mut c, view("je"), done);
+    tls_record_address(&mut c);
+    o(&mut c, view("movq (%rax),%rsi\ntestq %rsi,%rsi\n"));
+    jump(&mut c, view("jne"), have);
+    o(&mut c, view("call rt_callback_foreign_thread\n"));
+    mark(&mut c, have);
+    tp_read(&mut c);
+    o(&mut c, view("movq %rax,"));
+    stack_slot(&mut c, slot);
+    c.out.push(10);
+    tp_write(&mut c);
+    mark(&mut c, done);
     return ();
 }
-fn tls_set_slot<a>(c: (&a mut C), slot: u64) -> unit {
+// Undo either entry: restore the thread pointer `slot` saved, if it saved one.
+fn tls_leave<a>(c: (&a mut C), slot: u64) -> unit {
     o(&mut c, view("movq "));
     stack_slot(&mut c, slot);
-    if c.target != 0 {
-        o(&mut c, view(",%rdi\ntpset\n"));
-        return ();
-    }
-    o(&mut c, view(",%rsi\nmovl $4098,%edi\nmovl $158,%eax\nsyscall\n"));
+    o(&mut c, view(",%rsi\ntestq %rsi,%rsi\n"));
+    done := label(&mut c);
+    jump(&mut c, view("je"), done);
+    tp_write(&mut c);
+    mark(&mut c, done);
     return ();
 }
 fn save<a>(c: (&a mut C)) -> u64 {
@@ -6736,8 +6850,7 @@ fn ffi_emit_call<a, b, d, e, f>(
     mut tls = 0;
     if tls_bridge(&mut c) {
         tls = fresh(&mut c);
-        tls_get(&mut c, tls);
-        tls_set_global(&mut c, view("rt_host_tls"));
+        tls_enter_foreign(&mut c, tls);
     }
     if area != 0 {
         if x86 {
@@ -6979,14 +7092,14 @@ fn ffi_emit_call<a, b, d, e, f>(
             }
         }
         if tls != 0 {
-            tls_set_slot(&mut c, tls);
+            tls_leave(&mut c, tls);
         }
         own(&mut c, rslot, ret);
         return val(rslot, ret);
     }
     slot := save(&mut c);
     if tls != 0 {
-        tls_set_slot(&mut c, tls);
+        tls_leave(&mut c, tls);
     }
     if ret != 1 {
         own(&mut c, slot, ret);
@@ -7890,8 +8003,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     mut tls_slot = 0;
     if (export == 2) & tls_bridge(&mut c) {
         tls_slot = fresh(&mut c);
-        tls_get(&mut c, tls_slot);
-        tls_set_global(&mut c, view("rt_grail_tls"));
+        tls_enter_callback(&mut c, tls_slot);
         exchange(&mut c.export_tls, tls_slot);
     }
     block(&mut c);
@@ -7903,7 +8015,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     }
     cleanup(&mut c, 0);
     if tls_slot != 0 {
-        tls_set_slot(&mut c, tls_slot);
+        tls_leave(&mut c, tls_slot);
     }
     o(&mut c, view("xorq %rax,%rax\nleave\nret\n.set .F"));
     on(&mut c, frame);
@@ -12242,10 +12354,10 @@ fn raw_builtin<a>(c: (&a mut C), id: u64) -> Val {
             } else {
             if c.target == 0 {
                 get(&mut c, args[0], view("%rsi"));
-                o(&mut c, view("movl $4098,%edi\nmovl $158,%eax\nsyscall\nmovq %rsi,rt_grail_tls(%rip)\n"));
+                o(&mut c, view("movl $4098,%edi\nmovl $158,%eax\nsyscall\n"));
             } else {
                 get(&mut c, args[0], view("%rdi"));
-                o(&mut c, view("tpset\nmovq %rdi,rt_grail_tls(%rip)\n"));
+                o(&mut c, view("tpset\n"));
             }
             }
         }
@@ -21016,7 +21128,7 @@ fn statement<a>(c: (&a mut C)) -> unit {
         cleanup(&mut c, 0);
         restore := c.export_tls;
         if restore != 0 {
-            tls_set_slot(&mut c, restore);
+            tls_leave(&mut c, restore);
         }
         get(&mut c, v.t, view("%rax"));
         fret := c.export_fret;

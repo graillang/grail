@@ -176,6 +176,19 @@ const fixtures = [
     sharedLibrary: 'libdlshim.so',
     hostOnly: true,
   },
+  {
+    // Foreign calls from runtime-created threads: a pool worker and a green task each call getpid,
+    // strlen, malloc/free, close(-1) and read errno (EBADF) and pthread_self on their own glibc TCB
+    // (1, 1); then the main thread and a worker hold different errno values at the same time and
+    // each reads back its own (42, 21), with both threads inside the shim at once (2). The shim is
+    // libc-linked, so like `dlopen` it needs the target's glibc.
+    name: 'threads',
+    stdout: '1\n1\n42\n21\n2\n',
+    symbols: ['ts_errno_hold', 'pthread_self', 'getpid', 'malloc', 'free'],
+    linkNote: ['// grail-link: thread_shim.o', '// grail-link: c'],
+    modules: ['lib/pool.grl'],
+    hostOnly: true,
+  },
 ];
 const selected = process.argv[2] ? [targetName(process.argv[2])] : [hostTarget, ...targets.filter(t => t !== hostTarget)];
 const compiler = buildCompiler();
@@ -219,6 +232,14 @@ for (const target of selected) {
       '-o', join(directory, 'libdlshim.so'),
     ], { cwd: root, maxBuffer: 8 * 1024 * 1024, timeout: 300_000 });
     if (library.status !== 0) throw new Error(`dl_shim.c for ${target} failed: ${library.stderr}`);
+    // A libc-linked object for the threads fixture: real errno/pthread headers, no outlined atomics.
+    const threadShim = spawnSync(process.env.GRAIL_ASSEMBLER ?? 'clang', [
+      ...(sysroot ? [`--target=${triples[target]}`, `--sysroot=${sysroot}`] : []),
+      ...(target === 'riscv64' ? ['-march=rv64imafd', '-mabi=lp64d'] : []),
+      ...(target === 'aarch64' ? ['-mno-outline-atomics'] : []),
+      '-c', '-O1', '-fno-pic', join(root, 'tests/ffi/thread_shim.c'), '-o', join(directory, 'thread_shim.o'),
+    ], { cwd: root, maxBuffer: 8 * 1024 * 1024, timeout: 300_000 });
+    if (threadShim.status !== 0) throw new Error(`thread_shim.c for ${target} failed: ${threadShim.stderr}`);
   }
   for (const { name, stdout, symbols, defines = [], linkNote = '// grail-link: shim.o', hostOnly = false,
     modules = [], signal = null, targets: onlyTargets = null } of fixtures) {
@@ -231,11 +252,13 @@ for (const target of selected) {
       const assembly = join(directory, `${name}.s`);
       const built = spawnSync(compiler, [
         '--default-u64', '--typed-refs', '--target', target, assembly,
-        join(root, `tests/ffi/${name}.grl`), ...compilerSources,
+        join(root, `tests/ffi/${name}.grl`), ...modules.map(m => join(root, m)), ...compilerSources,
       ], { cwd: root, maxBuffer: 16 * 1024 * 1024, timeout: 900_000 });
       assert.equal(built.status, 0, `${target}/${name}: cross compilation failed: ${built.stderr}`);
       const text = readFileSync(assembly, 'utf8');
-      assert.ok(/(^|\n)(call|bl) dlsym\n/.test(text), `${target}/${name}: missing loader call after cross compilation`);
+      for (const symbol of symbols) {
+        assert.ok(new RegExp(`(^|\\n)(call|bl) ${symbol}\\n`).test(text), `${target}/${name}: missing call to ${symbol} after cross compilation`);
+      }
       crossCompiled++;
       continue;
     }
