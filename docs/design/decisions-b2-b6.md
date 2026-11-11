@@ -19,7 +19,7 @@ decision without a stated trigger is what made these items outstanding for so lo
 | --- | --- | --- |
 | B1 | Separate compilation with checked module interfaces: **accepted**. The plan of record is [separate-compilation.md](separate-compilation.md); this record fixes the decision and its obligations, not the format. | Implementation starting |
 | B2 | Ambient `host::` stays for v1 as a **recorded deviation** from the capability model, with the conditions that force the change listed below. | Decided |
-| B3 | A foreign call **blocks the executing thread**; no green-task scheduling integration is promised for v1. Foreign calls also remain main-thread-only (process-wide host TLS base). | Decided; task semantics now identical on Linux and Windows |
+| B3 | A foreign call **blocks the executing thread**; no green-task scheduling integration is promised for v1. Foreign calls are valid on every runtime thread (per-thread host TLS; runtime threads are glibc threads); callbacks on C-created threads abort by name. | Decided; task semantics now identical on Linux and Windows |
 | B4 | Windows runs **the same green scheduler as Linux** (Win32 fibers on one scheduler thread); thread-per-task is an explicit opt-in (`GRAIL_TASKS=thread`). IOCP stays a named future work item. | Decided and implemented |
 | B5 | **Abort never unwinds**; nothing may unwind across the C boundary. There is no `defer` and no cleanup runs on an abort path. | Decided |
 | B6 | Closures capture references and views and cannot outlive the borrow; **`FnMut`/mutable captures are implemented** under the six rules fixed below. | Implemented |
@@ -155,12 +155,26 @@ is promised for foreign calls**, and no part of the type system records that a f
 
 Two facts that belong to the same decision, because they bound how far "it just blocks" is true:
 
-- **FFI stays main-thread-only.** The host TLS bridge keeps one process-wide base
-  (`rt_host_tls`, `compiler/native.grl:1098-1120`) that every foreign call swaps in. A worker or
-  green thread has no libc TCB of its own, so a call that touches libc state (errno, allocator
-  caches) from a worker shares the main thread's TCB. That is a documented misuse
-  ([docs/ffi.md](../ffi.md), line 312), not merely slow code, and it applies equally to callbacks
-  arriving on a foreign thread.
+- **Host TLS is per thread; runtime threads are glibc threads.** Each OS thread's worker record
+  carries its own host TLS base (record word 56): the glibc TCB that thread's foreign calls switch
+  to, or 0 in a static program, where nothing switches. In a process that loaded libc the runtime
+  creates every thread it owns - pool workers, green scheduler threads, the reactor, offload and
+  `GRAIL_TASKS=thread` threads - through `pthread_create` (the `rt_host_thread` stub in
+  `compiler/native.grl`, armed by `_start` through process-state word 3216), so errno, the malloc
+  tcache and `pthread_self` belong to the thread that uses them. A callback finds its thread's record
+  through `rt_tls_record`, an initial-exec TLS word glibc allocates in every thread. The alternative,
+  a libc-compatible TCB the runtime allocates itself, was rejected as dishonest about glibc: its
+  `struct pthread` layout is private and version-specific, and glibc keeps each thread on its own
+  lists (the DTV that `dlopen` of a TLS-using library grows, the stack list `setxid` walks, robust
+  futexes, rseq registration, the single-threaded flag that lets malloc skip its locks), none of
+  which a fabricated TCB would join. Letting glibc build the thread costs an unused glibc-sized stack
+  per runtime thread (glibc's default size; the green stacks are the runtime's own) and is what keeps
+  every one of those invariants true by construction. **A callback on a thread C created** finds no
+  record and aborts by name (`rt_callback_foreign_thread`) instead of sharing the main thread's;
+  adopting a record for it is the next increment. Two limits remain: a callback must not suspend the
+  green task that made the foreign call (it could return into C on another thread), and glibc's
+  internal signals (`setuid`'s `SIGSETXID`, cancellation) assume the thread pointer is the TCB, which
+  is false while a thread runs Grail code.
 - **The runtime isolates only the host operations it controls.** `host::read_file`,
   `host::write_file` and `host::command` hand their blocking body to a dedicated OS thread and
   suspend the task (`rt_blocking_call` -> `rt_offload` in `compiler/runtime.grl`). `host::read_fd`,
@@ -177,21 +191,24 @@ was the single largest source of confusion between [concurrency-v1.md](concurren
 runtime. (b) Offload every foreign call to a thread: rejected for v1 - `rt_offload` calls a
 two-argument Grail function through `raw_call2`, so a general trampoline is needed for arbitrary
 signatures, it costs a thread per call, and it does not fix the process-wide TLS base, which is the
-real reason a worker cannot call libc. (c) Reject foreign calls lexically inside a task scope
+real reason a worker could not call libc (since fixed separately, above). (c) Reject foreign calls lexically inside a task scope
 (compile error): attractive, but it needs a checked suspension/effect summary - the same missing
 machinery as B1's interface contracts - so it is a later increment, not a v1 promise.
 
-**Revisit when** any of: the host TLS base becomes per-thread (then the main-thread restriction
-becomes "callbacks run on the thread that made the call" and worker-side FFI becomes legal); a
+**Revisit when** any of: callbacks on C-created threads adopt a record (the host TLS base is
+per-thread now, so worker-side FFI is legal and callbacks run on the thread that made the call); a
 foreign-call offload trampoline exists; effect/suspension summaries are published, at which point
 "this call blocks" becomes checkable and a `nosuspend` context can be enforced.
 
 **Consequence if wrong.** The failure mode is a runtime fault, not a diagnostic: a server that
 calls a blocking foreign function from tasks starves or deadlocks its worker pool (correctly, in
-the sense that it blocks exactly as documented), and multi-threaded FFI corrupts libc state silently
-instead of failing. If instead we had promised isolation we do not have, libraries would rely on it.
+the sense that it blocks exactly as documented), and multi-threaded FFI corrupted libc state silently
+until host TLS became per-thread; a callback on a C-created thread now aborts by name. If instead we had promised isolation we do not have, libraries would rely on it.
 
-**Enforced by.** Documentation now: [docs/ffi.md](../ffi.md) (main-thread limit and "Task
+**Enforced by.** `tests/ffi/threads.grl` (`bun tools/test-ffi.mjs`, x86-64 and, with a glibc sysroot,
+AArch64 and RISC-V 64 under qemu) runs libc calls with errno from a pool worker and a green task and
+holds two errno values on two threads at once. Documentation: [docs/ffi.md](../ffi.md) (the per-thread
+rule and "Task
 scheduling is the same on both platforms"), [concurrency-v1.md](concurrency-v1.md) (what is
 offloaded and what is not), this page, and the "Suspension effects and non-suspending cleanup" row
 of [implementation-status.md](implementation-status.md). Tests: `tasks-read-file-offload` and
@@ -532,7 +549,7 @@ because a stale claim is what makes a decided item get re-opened.
 The vocabulary this page deliberately does not settle: the module-interface details beyond the
 obligations in B1 (its plan of record is [separate-compilation.md](separate-compilation.md)), the
 capability types and their names (B2's revisit trigger), a foreign-call offload trampoline or
-per-thread host TLS (B3's revisit trigger), the IOCP implementation (B4), any unwinding or `defer`
+record adoption for callbacks on C-created threads (B3's revisit trigger), the IOCP implementation (B4), any unwinding or `defer`
 feature (B5), and any widening of `FnMut` beyond the six rules above (B6) — for example making a
 by-value `FnMut` parameter callable, which needs `mut` parameters. Each of those is a design task
 with a stated trigger, not an open question about these decisions.

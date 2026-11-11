@@ -153,11 +153,12 @@ export function dynamicLinkFlags(target, linkArgs) {
     const multiarch = `usr/lib/${target}-linux-gnu`;
     const dirs = ['lib64', 'usr/lib64', multiarch, 'lib', 'usr/lib'].map(d => join(sysroot, d)).filter(existsSync);
     // --sysroot resolves the absolute paths inside glibc's libc.so linker script.
-    return [`--sysroot=${sysroot}`, ...(loader ? ['--dynamic-linker', loader] : []), ...dirs.map(d => `-L${d}`)];
+    return [`--sysroot=${sysroot}`, ...(loader ? ['--dynamic-linker', loader] : []), ...dirs.map(d => `-L${d}`), '-lc'];
   }
   if (target !== hostTarget) return [];
   const loader = (dynamicLoaders[target] ?? []).find(candidate => existsSync(candidate));
-  return [...(loader ? ['--dynamic-linker', loader] : []), '-L/usr/lib', '-L/usr/lib64'];
+  // libc always: the runtime creates its threads through a weak pthread_create (docs/ffi.md).
+  return [...(loader ? ['--dynamic-linker', loader] : []), '-L/usr/lib', '-L/usr/lib64', '-lc'];
 }
 export function assemble(source, executable, target = hostTarget, linkArgs = [], { frameworkArgs = [], sign = false, sdk = undefined } = {}) {
   targetName(target);

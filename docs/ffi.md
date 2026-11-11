@@ -614,31 +614,52 @@ A `cfn` result is accepted from an extern declaration, and a `cfn` local or capt
 callable with the C ABI. Linking any `lib` input now produces a dynamically linked
 executable with the host loader.
 
-The Grail runtime installs its worker record as the thread pointer (x86-64 FS base through
-`arch_prctl(ARCH_SET_FS)`, AArch64 `tpidr_el0`, RISC-V `tp`), which is also where glibc keeps
-its TCB (errno, malloc tcache, stack guard). On Linux the compiler therefore bridges the two
+The Grail runtime installs each OS thread's worker record as the thread pointer (x86-64 FS base
+through `arch_prctl(ARCH_SET_FS)`, AArch64 `tpidr_el0`, RISC-V `tp`), which is also where glibc keeps
+its TCB (errno, malloc tcache, stack guard, DTV). On Linux the compiler bridges the two per thread
 (x86-64 switches with `arch_prctl`; AArch64 and RISC-V write the register directly):
 
-- `_start` records the loader's FS base in `rt_host_tls` before `rt_thread_init` installs
-  Grail's record, which is also recorded in `rt_grail_tls`;
-- every `extern "C"` call saves the current FS base, switches to `rt_host_tls`, makes the
-  call and restores the saved base;
-- every exported `extern "C" fn` (a callback entry) saves the caller's FS base, switches to
-  `rt_grail_tls`, and restores the caller's base on every return path.
+- every thread's record carries its own host TLS base in record word 56: the thread's glibc TCB, or 0
+  in a static program that never loaded libc. `_start` stores the loader's base for the main thread
+  before `rt_thread_init` installs the main record;
+- in a process that loaded libc, every thread the runtime creates (pool workers, green-task scheduler
+  threads, the reactor, offload threads, `GRAIL_TASKS=thread` task threads) is created by glibc's
+  `pthread_create`, so it has a real TCB that glibc built and will tear down itself; a static program
+  keeps cloning its own threads, which have no TCB and need none;
+- every `extern "C"` call switches to the calling thread's own TCB and back, and does not switch at
+  all on a thread without one;
+- every exported `extern "C" fn` (a callback entry) finds the record of the thread it runs on through
+  `rt_tls_record`, an initial-exec ELF TLS word of the executable that glibc allocates in every thread
+  it creates, switches to it, and restores the caller's TCB on every return path.
 
-Both bases are process-wide, so foreign calls and callbacks are only valid on the main thread
-(a worker or green-task call that touches libc state shares the main thread's TCB; see
-[B3](design/decisions-b2-b6.md#b3-foreign-calls-block-the-executing-thread)): threads created by the
-Grail runtime have no libc TCB, and a callback arriving on a foreign thread would share the main
-thread's worker record. On x86-64 each switch is an
-`arch_prctl` system call; on AArch64 and RISC-V it is a register write. `tests/ffi/dlopen.grl` loads `libdlshim.so`, calls two resolved
+So foreign calls are valid on any runtime thread, including from pool jobs and green tasks, and libc
+state is the calling thread's: errno set on a worker is not the main thread's errno. A callback runs
+on the thread that called into C, with that thread's record (on a green task's scheduler thread, the
+task that made the foreign call). **A callback that arrives on a thread C created itself is not
+supported yet**: its TCB names no Grail record, and the entry aborts with a named message on stderr
+rather than borrow another thread's record (adopting a record for such a thread is the next step, see
+[B3](design/decisions-b2-b6.md#b3-foreign-calls-block-the-executing-thread)). A dynamically linked
+program is always linked against libc (`-lc` is added with the loader), because the runtime binds
+`pthread_create` weakly; a libc-loading program without it aborts by name at its first thread. On
+x86-64 a foreign call costs two `arch_prctl` system calls and a callback two, plus one TLS load; on
+AArch64 and RISC-V each switch is a register write. `tests/ffi/threads.grl` calls `getpid`, `strlen`,
+`malloc`/`free`, `close(-1)` with errno and `pthread_self` from a pool worker and from a green task,
+and holds two different errno values on the main thread and a worker at the same time.
+
+Two limits remain. A callback must not suspend the green task that made the foreign call: the task
+could resume on another scheduler thread and return into C there, on the first thread's TCB. And
+glibc's internal signals (`SIGSETXID`, which `setuid`/`setgid` broadcast to every thread, and
+`pthread_cancel`) assume the thread pointer is the TCB, which is false while a thread runs Grail
+code, so neither is supported in a Grail process.
+
+`tests/ffi/dlopen.grl` loads `libdlshim.so`, calls two resolved
 functions, passes a Grail callback that itself calls `strlen`, and closes the library
-(42, 42, 42, 0) with the runtime initialized. On AArch64 and RISC-V 64 it runs under qemu when
-a glibc sysroot is supplied: `GRAIL_SYSROOT_AARCH64` / `GRAIL_SYSROOT_RISCV64` point at a tree
+(42, 42, 42, 0) with the runtime initialized. On AArch64 and RISC-V 64 it and `threads` run under
+qemu when a glibc sysroot is supplied: `GRAIL_SYSROOT_AARCH64` / `GRAIL_SYSROOT_RISCV64` point at a tree
 with the target's `ld-linux-*.so.1`, `libc.so` and `libdl` (a Fedora-style `lib64` tree or a
 Debian multiarch tree, e.g. the extracted `libc6` and `libc6-dev` packages); the cross link
 then uses `--sysroot` and the target loader, and qemu runs with `-L sysroot`. Without one the
-fixture is cross-compiled only. The loader functions are declared from `lib "dl"`: glibc before
+two fixtures are cross-compiled only. The loader functions are declared from `lib "dl"`: glibc before
 2.34 keeps them in libdl, later versions in libc with libdl a stub.
 
 ## Tests
@@ -669,8 +690,9 @@ compiles `tests/ffi/call_scalars.grl` with the FFI build, links the two through 
 - the suite holds 20 executable fixtures: each executes on x86-64 and, through
   `qemu-<target>-static`, on AArch64 and RISC-V 64 as well, so a host with both runners reports 60
   executed fixture instances and none link-only; without a runner the cross targets link and are
-  reported as link-only (20 executed, 40 link-only here). Two more fixtures are cross-compiled only
-  (`dlopen`, which needs a target glibc sysroot). `callback_words` executes the eight-register
+  reported as link-only (21 executed, 42 link-only here). Two more fixtures, `dlopen` and `threads`,
+  need the target's glibc: they execute on the host and, with a sysroot (below), under qemu on
+  AArch64 and RISC-V 64; without one they are cross-compiled only. `callback_words` executes the eight-register
   callback on AArch64 and RISC-V 64 and asserts that x86-64 and Windows refuse it by name. Without a
   qemu runner the cross targets are linked and the ABI-level check is reported as link-only. The same
   `out_params` and `call_words` sources are `ffi-out-params` and `ffi-call-words` cases in

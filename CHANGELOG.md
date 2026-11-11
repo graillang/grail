@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- Foreign calls work on every runtime thread, not only the main one. The host TLS base is per
+  thread now (record word 56, replacing the process-wide `rt_host_tls`/`rt_grail_tls`), and in a
+  process that loaded libc the runtime creates its pool workers, green scheduler threads, reactor and
+  offload threads through `pthread_create`, so each has a glibc TCB of its own: errno, `pthread_self`
+  and the malloc tcache belong to the thread that uses them, and glibc knows the process is
+  multithreaded. A callback finds its thread's record through `rt_tls_record`, an initial-exec TLS
+  word; on a thread C created it aborts by name instead of sharing the main thread's record (adoption
+  is next). Static programs are unchanged except that a foreign call on a thread without a TCB no
+  longer switches the thread pointer. A dynamic link now always adds `-lc`. On x86-64 a foreign call
+  costs one `arch_prctl` fewer (two instead of three). `tests/ffi/threads.grl` (`bun tools/test-ffi.mjs`)
+  executes libc calls and errno from a pool worker and a green task and errno isolation between two
+  threads on x86-64, and under qemu on AArch64 and RISC-V 64 with a glibc sysroot; the previous
+  runtime fails it (shared errno 42/42).
 - Fixed: a generic instantiated on both `f32` and `f64` no longer shares one specialisation - the structural type key now records float width, so the f64 call ran the f32 body before (found by the per-module work).
 - Fixed: `&mut` of an `extern "C"` record held in a field of a plain record (`set_y(&mut bag.pair,
   7)`, or the same reference passed to C as an `R *`) silently lost the write: the place was wrapped

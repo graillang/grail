@@ -102,7 +102,7 @@ SysV x86-64, AAPCS64 and RV64; out-parameter slots (`slot: &mut H`) for handles,
 `extern "C"` records, the last being the C `R *` a callee fills in place; calls of seven to nine
 word arguments through the target's registers and then the outgoing stack; variadic C calls; C
 callbacks and `cfn` function pointers including the COM-shaped seven-argument slot; and
-`dlopen`/`dlsym`/`dlclose` on the three Linux targets through a host-TLS bridge (main thread only)
+`dlopen`/`dlsym`/`dlclose` on the three Linux targets through a per-thread host-TLS bridge (any runtime thread)
 or, on Windows x86-64, through ordinary `LoadLibraryA`/`GetProcAddress` imports.
 
 `bun tools/test-ffi.mjs` holds 19 executable fixtures; on a host with the qemu runners all 57
@@ -114,8 +114,7 @@ Still refused with a diagnostic rather than approximated: `byval` on the Windows
 ABIs (`byval is not implemented for the Windows x86-64 and Windows ARM64 ABIs; pass the record by
 pointer`); a `byval` record parameter on a C callback; a by-value record *result* whose embedded
 records contain floats; variadic callbacks; callback results that are function pointers; the address
-of a *temporary* record (`cptr needs a named record`); foreign calls and callbacks on threads other
-than the main thread on Linux; and dynamic loading on macOS. The C headers under `include/grail` are the runtime ABI contract.
+of a *temporary* record (`cptr needs a named record`); callbacks arriving on a thread C created (they abort by name); and dynamic loading on macOS. The C headers under `include/grail` are the runtime ABI contract.
 
 ## Graphics and shaders
 

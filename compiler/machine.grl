@@ -1283,6 +1283,16 @@ fn instruction<a, b>(o: (&a mut Out), line: &b [u8]) -> unit {
         }
         return ();
     }
+    // The address of this thread's `rt_tls_record` (an initial-exec TLS word of the executable),
+    // computed from the thread pointer, which must be a libc TCB at this point.
+    if eq(view((op)), view("tlsaddr")) {
+        if target == 1 {
+            put(&mut o, view("mrs x9,tpidr_el0\nadd x9,x9,#:tprel_hi12:rt_tls_record\nadd x9,x9,#:tprel_lo12_nc:rt_tls_record\n"));
+        } else {
+            put(&mut o, view("lui t0,%tprel_hi(rt_tls_record)\nadd t0,t0,tp,%tprel_add(rt_tls_record)\naddi t0,t0,%tprel_lo(rt_tls_record)\n"));
+        }
+        return ();
+    }
     if eq(view((op)), view("tpset")) {
         if target == 1 {
             put(&mut o, view("msr tpidr_el0,x0\n"));
@@ -1484,8 +1494,7 @@ pub fn lower<a>(input: &a [u8], target: u64, plat: u64) -> u8[] {
                     if (line[0] == 46)
                         || (line[line.len() - 1] == 58)
                         || starts(view(line), view("rt_state:"))
-                        || starts(view(line), view("rt_host_tls:"))
-                        || starts(view(line), view("rt_grail_tls:")) {
+                        || starts(view(line), view("rt_tls_record:")) {
                         put(&mut out, view((line)));
                         put(&mut out, view("\n"));
                     } else {
