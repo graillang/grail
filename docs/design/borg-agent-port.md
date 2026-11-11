@@ -241,7 +241,7 @@ Adding a per-OS backend is an extension of an existing seam, not a new architect
 | Borg need | Grail today | Work | Stage |
 | --- | --- | --- | --- |
 | File/dir/env/argv/time | Present (`fs`, `env`, `host` ops) | None | — |
-| Pipes, `fork`/`exec`/`wait` | Present (`host::command`) | argv/env/cwd options, `WNOHANG` | 2 |
+| Pipes, `fork`/`exec`/`wait` | Present (`host::command`, `host::command_with` for an explicit argv and environment) | cwd option, `WNOHANG` | 2 |
 | JSON (exact decimals) | Absent | Codec in Grail | 0 |
 | Unix sockets + peer creds | Absent (`AF_INET` only) | New `AF_UNIX` ops + `SO_PEERCRED` | 2 |
 | Signals, process groups, PDEATHSIG | Absent (only `exit`) | New ops + typed results | 2 |
@@ -312,6 +312,53 @@ usage.
 
 Not portable early despite looking pure: anything reachable from `reqwest`, `sqlx`,
 `tokio::fs`, `tokio::process`, `libloading`, `arboard`, `gpui`, or `blu-lang`.
+
+### Session replay, as built
+
+`borg/src/replay.grl` is the first piece of that `borg-view` row: it folds a journal into the state
+Borg's own projection builds, `SessionState::reduce` (session_store.rs:906) applying
+`SessionState::apply` (session_store.rs:929) over the five transcript kinds `borg/src/events.grl`
+carries. What it reconstructs is exactly what those kinds write: the cursor, when the session
+started, the activity clock, status and its detail, the title with the rule that a *generated* title
+is final (session_store.rs:952), and the first and latest prompt with the latest reply
+(session_store.rs:1320-1336). It is not a transcript: message rows, the goal, the plan and the agent
+roster are separate aggregates in Borg, fed by event kinds the port does not carry, so replay does
+not invent them.
+
+It folds decoded events, never bytes, so it cannot disagree with the reader about what an event says.
+`replay_stream` starts from a `borg_events::Stream` and propagates the reader's refusal — which
+yields no events at all — instead of folding the rows that happened to arrive before the cut.
+
+A refused journal produces no state. The diagnostic names the event index and the reason:
+
+| Reason | Refused when | The rule |
+| --- | --- | --- |
+| `sequence` | the event's sequence is not `last + 1` | session_store.rs:930 |
+| `session` | the event carries another session's `session_id` | a journal is one session's events |
+| `unknown-actor` | a message actor outside `EventActor`'s four variants | contract.rs:2455 |
+| `unknown-message-status` | a message status outside `MessageStatus`' four variants | contract.rs:2470 |
+| `stream` | the byte reader refused before any event reached the fold | `borg_events` (21 is a cut tail) |
+
+One rule does not refuse: a title event while the current title was generated is *dropped*, because
+that is the model's own rule, and refusing it would reject journals Borg itself writes. The fold
+counts the drop (`titles_frozen`) so the state records it instead of the event vanishing silently.
+
+`borg/tests/replay_test.grl` covers the clean journal, the empty one (which replays to
+`SessionState::default`, not an error), out-of-order, unknown actor, unknown message status, a
+foreign session, the sticky title, and a journal replayed from the typed byte stream both intact and
+cut short. It also generates journals: a seeded xorshift produces six events per seed, and for each
+seed replaying twice must produce the same checksum, and replaying `prefix + [last]` must produce
+what `replay(prefix)` followed by a direct `apply` produces — including when either refuses, where
+both must refuse at the same index for the same reason. The committed reference is produced by
+`borg/tests/parity/ref/src/bin/replay.rs`, an independent implementation of the same rules that also
+writes and reads the byte stream, so a fingerprint or checksum difference shows up as a diff line.
+
+What replay still cannot cover, and why that is visible rather than silent: a real journal from a
+running session also carries `PlanProjected`, `SubagentRegistered`, `SessionConfigured`, usage and
+provider events, none of which the port models. `decode_stream` refuses an unknown tag and hands
+back no events, so replaying such a journal fails by name today instead of returning the subset it
+understood. Closing the gap means porting those kinds and their projection arms in
+session_store.rs:941-1341, not extending the fold with fields nothing writes.
 
 ## 13. Staged plan
 

@@ -25,6 +25,315 @@
   `--verify-facts`. It costs compile time (3.2 s -> 6.0 s end to end on `sieve`). See
   `docs/design/typed-ir.md`, "Implemented: the range fact (F3)", including the one rule that would
   make the benchmarks prove.
+- FFI: a C callback's extern-record parameter is borrowed, not owned. The parameter prologue marked
+  every parameter as an owning binding, so the epilogue ran the record's drop glue on the address C
+  handed over — freeing the caller's struct (or its stack) — and the process then aborted inside the
+  runtime's free path at exit, after `main` had printed everything and returned 0. That is the abort
+  the RHI work recorded in `docs/rhi.md`: the shape is "a record crosses an `extern "C"` call", and
+  the two-declarations-of-one-symbol case that pinned it is now a case of its own. A callback's
+  record parameter is the `const R *` the C caller owns, so `func`'s prologue registers it through
+  `borrow_parameter` (a real place, no drop glue) instead of `own`, and the fields stay readable
+  under the ordinary borrow rules. Verified by `ffi-record-callback-parameter` in
+  `tests/native-cases.json` (20, and the process reaches its exit status) and by the same shape in
+  `tests/ffi/record_pointers.grl` against a real C shim.
+
+- FFI: the address of a Grail-owned `extern "C"` record is now a value, and C can fill a record in
+  place. `unsafe cptr(&r)` is a `CPtr` and `cptr_mut(&mut r)` a `CMutPtr` holding the address of the
+  record's own fields — the same pointer a record *parameter* already was — so a struct that points
+  at another struct (`VkInstanceCreateInfo::pApplicationInfo`, `VkRenderPassCreateInfo::pAttachments`)
+  is expressible without laying bytes out by hand; a field, a binding and a declaration parameter
+  typed `const void *`/`void *` all take it. `p: &mut R` in a declaration is the C `R *` the callee
+  writes, and the caller reads the typed fields afterwards
+  (`vkGetPhysicalDeviceSurfaceCapabilitiesKHR`). An `extern "C"` record binding declared without an
+  initializer gets `sizeof(struct)` zeroed bytes instead of nothing, so `&mut r` is a valid pointer
+  and a callee that reads a field it does not overwrite reads 0 - but the binding still holds no
+  *value*: reading a field (or moving the record) before a foreign call or an assignment wrote it is
+  refused with `use of moved, borrowed or partially initialized value`, which is what keeps a zeroed
+  handle from being read as one. With handle-typed fields filled by C through `&mut`, or seeded from
+  handles the program already holds, `vkQueueSubmit`'s `pCommandBuffers` and `VkPresentInfoKHR`'s
+  `pSwapchains` are expressible as arrays of handles. The borrow rules are the call-scoped ones
+  `cptr` already had, with named failures for each hazard: `cptr needs a named record: the address of
+  a temporary would not outlive the pointer`, `cptr takes the address of an extern "C" record; a
+  Grail record has no C layout`, `the value handed to C as a writable pointer is already borrowed in
+  this expression`, `the value handed to C as a read-only pointer is already mutably borrowed in this
+  expression`, and `an extern C out-parameter needs a binding to write into; a temporary record would
+  be discarded`. Also fixed, on the way: an embedded record's place (`o.inner`) is a proxy slot
+  holding its interior address, so `&mut o.inner` no longer reads the first field as an address
+  (it faulted on x86-64 and wrote through a stack slot on assignment); and a C callback's record
+  parameter is now borrowed rather than owned, because the epilogue used to free C's struct, which
+  aborted in the runtime's free path at exit after `main` had already printed everything. Verified
+  by `tests/ffi/record_pointers.grl` against a real C shim on all three targets (including a handle
+  Grail reads out of an array C filled comparing equal to the one C hands back), fourteen new cases
+  in `tests/native-cases.json`, and a new book chapter (`Calling C`) whose Grail and Rust twins link
+  one C file.
+
+- `parallel_for_chunks` and a job handle: the two things the pool surface was missing, and the
+  measured entry cost the owned-chunk shape paid is gone. `parallel_for_chunks(&mut data[a: b],
+  chunks, f)` splits an exclusive slice into disjoint exclusive chunks and hands each job `&mut [T]`
+  over its own elements, so no element is moved or copied: the same 3M-u64 CPU-bound pass measures
+  94 ms through `pool::for_chunks` (which moves every element into its chunk) against 38 ms in place
+  as one job, 63 ms against 11 ms as eight. The split is `size = ceil(n/chunks)`, chunk `k` being
+  `[k*size, min(n, k*size+size))`, so disjointness and coverage are arithmetic rather than a checked
+  property, and the runtime still asserts the chunk lengths sum to the element count. The element
+  type goes through the same structural walk `parallel_map` uses, asking `transferable`: `&mut
+  [File]` is refused exactly as `&[File]` is. A chunk callback cannot reach outside its chunk:
+  the argument is an exclusive loan of the whole vector, so a capture that could alias that data - a
+  move, a shared slice, a sub-range's slice - is a borrow error at the call site; a captured `&mut
+  [T]` is refused by name (every worker calls one closure); and the slice a callback holds has its
+  own length, so an index past it is a bounds abort. `parallel_spawn(f) -> Job<R>` with
+  `parallel_join(h) -> R` is spawn-then-wait as two statements, on the runtime's existing submit and
+  wait. `Job<R>` is a move-only type kind like `Task<R>`: the closure's environment moves into the
+  job through a heap box the job drops on the worker that ran it, the result is owned and
+  transferable, a callback that captured a borrow is refused (the handle's type records no such
+  lifetime), a job may not return another handle, sharing a handle is denied, and the handle's drop
+  *waits* - so dropping it instead of joining is a wait-and-discard, never a leak or a double free.
+  Nothing reachable from a handle is frame memory and it has exactly one owner, which is why it may
+  outlive the frame and cannot dangle. `lib/pool.grl` wraps all three as `chunks_mut`, `spawn` and
+  `wait`. Native cases: `pool-chunks-mut-split` (uneven, one, zero, more chunks than elements, more
+  chunks than workers, a sub-range, empty, nested chunking, f32/u32/bytes, all by content),
+  `pool-chunks-mut-timing`, `pool-job-handle`, six chunk rejections, four job rejections, the
+  out-of-chunk bounds abort, and the borrowed-closure refusal. No reseed is needed: the compiler's
+  own sources do not call the new builtins.
+- Separate compilation, stage 4 (first half): **a build cache**. `grail build --cache` reuses what a
+  previous build produced, from a content-addressed store under `.work/cache/<target>/`. An unchanged
+  program is not rebuilt at all, and an unchanged module is not reassembled: the store is keyed by what
+  actually determines each output - a module's source digest, the digests of the interfaces it reads,
+  the compiler's own digest, the target, the assembler's and the linker's identity, and the compiler's
+  whole flag vector - and each entry is filed under the digest of its bytes, published by rename, and
+  re-hashed before it is ever reused, so a corrupted or unreadable entry is a miss and never a wrong
+  binary. `grail build --cache` reports one line - what hit, what missed by name, and what ran. The
+  flag implies `--split`, so it is available where that is: the Linux x86-64 assembler path, without
+  `--debug`. `grail build` also accepts `--overflow=wrap|checked`, which until now only the compiler
+  driver itself could pass. Without `--cache` nothing about a build changes. `tools/cache-test.mjs`
+  proves the six claims (a cached build is the uncached build byte for byte, a second build is a full
+  hit and 12x faster, one module's edit misses that module and its importers and nothing else, a flag
+  change misses everything, a tampered interface misses the importer, corruption rebuilds and repairs)
+  and pins the one thing the module level cannot do yet: the emitter numbers its local labels over one
+  stream, so an edit re-spells every module emitted after it and those modules reassemble.
+
+- Separate compilation, stage 2: **checked module interfaces**. `grail check --interface DIR` writes
+  one `DIR/<module>.iface` per module plus `DIR/interfaces.manifest`; `grail build --interface DIR`
+  reads them instead of the modules' sources, and refuses by name when an interface is missing, when
+  the source it was built from no longer hashes to the digest it records, or (with `--verify`) when
+  it disagrees with the module. An interface carries what an importer needs to check a call -
+  exported declarations with their parameter and return types, types with their full structure, and
+  the audit results that must not be re-derived (`handle ... transfer= share=`, and a closure type's
+  environment record) - and nothing a body would carry. Text, versioned, one declaration per line,
+  sorted by name, with a digest over the file. `tools/interface-test.mjs` proves that a program built
+  against interfaces behaves like the program built from source (corpus, and the compiler compiling
+  itself), that stale and tampered interfaces are refused - an edited `transfer`/`share`/environment
+  entry, a re-digested file, and a file whose manifest entry was rewritten - and that an interface
+  leaks no body, no local name and no synthetic declaration. Bodies and generic templates still come from source: that
+  is stage 3 (bodies in interfaces) and stage 4 (one object per module, and the cache).
+
+- Windows task scheduling is now the same as Linux: a task is green on Windows, not an OS thread.
+  One scheduler thread runs the tasks cooperatively, a task runs until it yields or blocks, and
+  suspension parks the task rather than the thread. The switch is a Win32 fiber
+  (`CreateFiberEx`/`SwitchToFiber`/`DeleteFiber`/`ConvertThreadToFiber`, declared in
+  `compiler/os-windows.grl`, since `raw_switch` is not lowered for the PE targets) and the run queue
+  parks on the same address wait (`WaitOnAddress`/`WakeByAddressAll`) the Linux build uses for its
+  idle word. Windows has no epoll/eventfd/timerfd, so the platform reports no reactor
+  (`rt_os_reactor()` = 0) and the runtime parks tasks *inside* blocking host operations instead:
+  `host::read_file`, `host::write_file`, `host::command`, `host::read_fd`, `host::write_fd` and
+  `host::sleep_ms` run the blocking call on a helper thread (`rt_offload`) and suspend the task, so
+  another task keeps running, exactly as the reactor does on Linux. What is now identical:
+  `spawn`/`join`/`task_scope`/`parallel_map`, cancellation, scope-exit joining, the run-until-it-
+  yields-or-blocks rule, and the blocking-operation handoff. What still differs: Linux works the
+  queue with one scheduler thread per CPU (4-64) so two ready tasks can run at once, while Windows
+  has one thread and therefore a FIFO, deterministic interleaving; task stack cost is 256 KiB of
+  mapping on Linux and a 64 KiB-in-256 KiB fiber on Windows. The previous thread-per-task scheduler
+  is kept as an explicit opt-in, `GRAIL_TASKS=thread`, on every platform: each task then owns an OS
+  thread, a task that never yields still progresses, suspension blocks that thread, `rt_wait_fd`
+  returns immediately and `rt_reactor_fence` is a no-op. It is the better shape for CPU-bound
+  fan-out once a `Send`/`Sync` check exists; there is none yet, so it is not the default. A program
+  ported from Linux keeps its task semantics and must only stop relying on global interleaving
+  order. Verified by execution under Wine (`bun tools/windows.mjs check`):
+  `tasks-scope-and-parallel-map`, `tasks-sleep-overlap`, and the new `tasks-interleave-at-yield`
+  (deterministic FIFO interleaving at yields), `tasks-sleep-progress` (a parked sleeper does not
+  stop another task), `tasks-read-file-offload` (`host::read_file` from a task offloads and another
+  task runs) and `tasks-thread-mode` (the opt-in mode still runs). The same four programs are also
+  executed as Linux ELF where their result is platform-independent.
+- Transferable and shareable, derived and default-denied, and a real soundness hole closed. The
+  parallel surface asked one question of a type and answered it with a structural walk; the walk is
+  now the design note's two properties and it reaches a closure's captures. `transfer_capability(c,
+  ty, shared, trail, depth)` keeps its role as the single derivation engine and `shared` selects
+  which property is asked, so `transferable(T)` and `shareable(T)` come from one recursion and stay
+  genuinely distinct (a movable-but-not-shareable decoder context is one and not the other). Rules by
+  kind: scalars (now including `char`) are both; a record, enum or union is both when every field is;
+  a vector is its element; a typed slice is its element and is shareable only read-only; `&T` is
+  shareable when `T` is (so a `&File` is refused even though nothing can be written through it);
+  `&mut T` transfers but is never shareable; `Mutex<T>` and `Task<R>` and `byval(R)` behave as the
+  table in `docs/design/parallelism.md` says; `Scope<C>` is neither. **A foreign handle is neither
+  unless its own declaration says otherwise** - `handle File: transferable;`, `handle
+  PhysicalDevice: transferable, shareable;`, `handle Window;` - and `shareable` alone is an error
+  because sharing implies moving. `sys_grail` audits `File`, `Socket` and `Process` transferable-only
+  (owned OS resources with no wrapper-side state, but nothing serializes two users of one) and
+  `Thread` as neither (disposal is the creating thread's bookkeeping, and the shim hands every handle
+  out through a `_Thread_local` slot); `abundance/src/rhi_vulkan.grl` audits `Instance` as neither
+  (created and destroyed on the display's thread, every child dead before it) and `PhysicalDevice` as
+  both (it owns nothing and every operation is a query). The hole: a closure type carried only its
+  signature, so `parallel_map` checked the item, the result and the context but never the callback,
+  and `g := |x: u64, u: u64| -> u64 touch(&h, x)` compiled - a plain-data signature with a
+  thread-affine capture that every worker could reach. The environment is now part of the closure's
+  type (`Ty.env`, interned into the type key, so two closures with one signature and different
+  captures are the different types they already were as layouts), the walk classifies every capture,
+  and `parallel_map` also refuses an `FnMut` callback because every worker shares one closure object.
+  Rejections name the field instead of the type: `cannot share closure capture `a`: a.file is
+  thread-affine (a foreign handle with no audited classification)`, `cannot share parallel_map
+  context: file is thread-affine`, `cannot transfer spawned result: thread-affine (a foreign handle
+  with no audited classification)`. The parallel surface speaks `transferable`/`shareable`; the
+  opt-in generic bounds keep their old `Send`/`Share` names, since renaming a user-visible bound is a
+  separate language change. `CStr`, `CPtr`/`CMutPtr` and `CFn` stay denied. Pinned by 12 cases in
+  `tests/native-cases.json` - two accepted (a closure capturing a record of plain data and a shared
+  slice of numbers, and a transferable handle crossing as a spawned result) and ten rejected, each
+  with the field in its diagnostic. A scoped job primitive calls `require_capability_named` for the
+  values it moves and `require_parallel_closure` for the closure it accepts, `shared` = 1 when the
+  environment is called by several workers. Classification must reach B1's interface files before
+  separate compilation can check it; `docs/design/parallelism.md` records the table, the audit and
+  that contract.
+- Parallelism stage 1: a real bounded work-stealing job pool in the runtime, and `lib/pool.grl` as
+  the safe surface over it. The pool is one process-wide singleton created by the first parallel
+  call: N workers (default max(4, available CPUs) capped at 64, `GRAIL_POOL_WORKERS` overrides it),
+  one bounded ring per worker plus a bounded injection ring for threads that are not workers, owner
+  push/pop at the tail (LIFO) and thieves taking from the head (FIFO) with a rotating victim cursor,
+  and idle workers parked in the kernel on one futex wake sequence read *before* each scan, so no
+  wakeup is lost and nothing spins for work. A job owns its callback, one environment word, one
+  argument word and the single word it returns; the worker publishes the result with a release store
+  and the thread that waits for the job frees the record, so every allocation has one releasing
+  thread. A waiting worker runs queued work itself, so nested parallelism cannot deadlock even on a
+  one-worker pool. `parallel_map` is now a client of the pool - it submits a few contiguous owned
+  ranges per worker and waits for every job - instead of creating and joining threads per call, and
+  it asserts that the per-job item counts sum to the item count, so an item written twice or not at
+  all aborts rather than returning a plausible wrong answer. `rt_offload` stays the blocking path;
+  a blocking foreign call never runs on a pool worker. Safe surface: `pool::map(items, f)`,
+  `pool::run(count, f)`, `pool::for_chunks(data, chunks, f)` (consume a vector, one contiguous owned
+  chunk per job, results concatenated in chunk order) and `pool::join(a, b)`; results are always in
+  input order, and the ownership rule "everything a job's closure touches it owns" is stated in the
+  module. Once the structural classification landed, item, result, context and the closure's
+  captured environment are all classified: a handle - bare, inside a record, or captured - is refused
+  by name (`cannot share closure capture `h`: h.file is thread-affine ...`), as are an `FnMut`
+  closure shared with workers, a `Task` handle, an exclusive borrow, a mutable slice and an
+  unproven type parameter. `CStr`, `CPtr`, `CMutPtr` and `cfn` stay deliberately unclassified, so
+  they are refused as unclassified foreign authority rather than silently allowed; a classification
+  states that a value may move, never that the library behind it tolerates that, and `unsafe module`
+  code can still build anything - the safe surface is as strong as the classification under it, not
+  more.
+  Measured on 24 reported cores, 3M CPU-bound elements, one job vs four: 27 ms → 8 ms (3.4x) at the
+  default size, 28 → 12 ms (2.3x) at four workers, 27 → 28 ms (0.96x) at one. Six native cases:
+  owned-chunk split equals the sequential answer, `map` order independent of completion order,
+  uneven work without deadlock, nested parallelism on a one-worker pool, an aborting job that
+  ends the process instead of hanging, and the speedup assertion (which skips honestly below four cores).
+  The test harness gained an `env` field for the one-worker case.
+- Fixed an interaction between the pool and the Windows green scheduler, found only when the two
+  branches met: the pool cached its pointer in `raw_state()+88`, and the green scheduler's new
+  task-mode cache then stored the resolved mode (1) there, so a program that ran a `task_scope`
+  before its first `parallel_map` read 1 as the pool pointer and faulted at address 0x9 - correct
+  output first, then SIGSEGV inside `rt_parallel_map` (`program-parallel-primes`), and the same page
+  fault under Wine. The pool's words are now 3200/3208, taken from named accessors that appear in a
+  single process-state table in `compiler/runtime.grl` (word, owner, accessor, claimant) instead of
+  a comment nobody owns. The same review found a second borrowing of the same kind: the pool read
+  "which worker am I" from thread-record word 48, which is free on Linux but is the Windows address
+  wait's per-thread expected-value slot, so every Windows wait and the pool marker fought over it;
+  a worker now publishes its thread record into its own worker block and `rt_pool_self` scans the
+  worker array, touching no thread-record word on any platform. Pinned by `pool-from-green-task`
+  (parallel work entered from a task scope and from spawned tasks), which fails with 139 against the
+  merged-but-unfixed runtime.
+- Book and status documents match the 2026-11-10 increments. The book (54 examples, each with its
+  Rust comparison) adds strict bool conditions (`strict-condition`: an integer condition is refused
+  in both languages), consuming loops over owned elements (`consume-owned`) and range loops in
+  *Branches and loops*, and a *Calling C* section in *Cleanup and current boundaries* with the
+  `byval` record marker (`byval-record`), the handle and out-parameter surface, and what the FFI
+  still refuses. Claims that map iteration, owned-element consumption, `FnMut`, borrowed captures,
+  `char`, the sampling profiler, `.debug_info` locals or the language server were missing or
+  rejected are gone, and so are the comparison notes that said Grail comparisons produce a number
+  rather than `bool`. [docs/design/language-readiness.md](docs/design/language-readiness.md) now
+  reports B1 stage 1, B2, B6 and B7 as implemented, with the Windows `byval` refusal;
+  [docs/platform-status.md](docs/platform-status.md) replaces the stale FFI, tooling and COM rows;
+  [docs/ffi.md](docs/ffi.md) documents the `byval` marker instead of listing it as decided-but-absent;
+  and [docs/design/decisions-b2-b6.md](docs/design/decisions-b2-b6.md) records what landed for B1,
+  B2 and B7.
+- Fixed: the `FnMut` entry below had a duplicated half-paragraph spliced into it.
+- Borg journals replay into the in-memory session state (`borg/src/replay.grl`). The module folds a
+  decoded event stream with the rules of `SessionState::reduce`/`apply` (session_store.rs:906-959,
+  1036-1041, 1320-1336) over the five transcript kinds `borg/src/events.grl` carries, and
+  reconstructs exactly what those kinds write: the sequence cursor, when the session started, the
+  activity clock, status and detail, the title with the rule that a generated title is final
+  (session_store.rs:952), the first and latest prompt and the latest reply. It folds typed events
+  rather than bytes, so it cannot disagree with the reader about what an event says, and
+  `replay_stream` propagates the reader's refusal — a cut tail, an unknown tag — instead of folding
+  the rows that arrived before the cut; a refused stream yields no state at all. An event that cannot
+  apply is refused by name with the index that stopped the fold and never skipped or forced:
+  `sequence` (not the expected `last + 1`), `session` (another session's `session_id`),
+  `unknown-actor` and `unknown-message-status` (outside `EventActor`'s and `MessageStatus`'
+  four variants), and `stream` (the reader's own code). The one rule that drops rather than refuses —
+  a title event while the current title was generated — is the model's own rule, so replay counts
+  the drop (`titles_frozen`) instead of rejecting a journal Borg writes. `borg_events` gains typed
+  accessors (`title_value`, `status_value`, `actor_value`, `tokens_value`, ...) so a fold can tell an
+  absent optional from a text that happens to be `-`, and `no_event()`. `borg/tests/replay_test.grl`
+  covers a clean journal, the empty one (which replays to the default state, not an error),
+  out-of-order, unknown actor, unknown message status, a foreign session, the sticky title, and a
+  journal read back from the typed byte stream intact and cut short, then generates journals: a
+  seeded xorshift makes six events per seed and each seed must replay to the same checksum twice and
+  to the same checksum as `prefix + [last]` versus `replay(prefix)` plus a direct `apply` — refusals
+  compared by index and reason, so both sides must fail identically. The committed reference
+  (`borg/tests/parity/ref/src/bin/replay.rs`) is an independent implementation of the same rules and
+  of the byte stream, and the suite compares fingerprints and FNV-1a checksums field by field.
+  `docs/design/borg-agent-port.md` records what replay reconstructs, the refusal table, and what it
+  cannot cover yet: a real journal also carries `PlanProjected`, `SubagentRegistered` and provider
+  events, whose unknown tags the reader refuses, so replaying one fails by name rather than
+  returning the subset it understood.
+- Explicit environments for spawned processes: `host::command_with(argv, env)` runs `argv` with
+  `env` as the child's *whole* environment and returns the same status encoding `host::command`
+  returns (0–255 exit code, 128+N for a signal, 256+errno when the child could not be started, and
+  278 = 256+EINVAL for a vector or entry that cannot be used). Nothing is inherited: an empty vector
+  means the child starts with no environment from us, and a malformed entry (no `=`, or an empty
+  name) is refused before anything is spawned, because `execve` would otherwise start the child with
+  no environment at all and `CreateProcess` rejects the block. Both vectors are consumed, like
+  `host::command`. `host::environment()` reports this process's own environment as `NAME=VALUE`
+  entries, which is the additive spelling made explicit — `env := host::environment();
+  env.push("APP_MODE=batch".copy()); host::command_with(argv, env)`. The executable search stays in
+  the parent against the parent's `PATH`, so an explicit environment does not stop `"sh"` from being
+  found. The spawn moved out of the portable runtime into the platform modules: `rt_spawn_wait` is
+  `fork`/`execve`/`wait4` in `compiler/os-linux.grl` and `compiler/darwin.grl`, and `CreateProcessA`
+  with an explicit (sorted, double-NUL-terminated) environment block in `compiler/os-windows.grl`,
+  which also makes `host::command` work on windows-x86_64 for the first time: a NULL block inherits,
+  a non-NULL one replaces. The Windows argument vector is quoted back into the command line with the
+  `CommandLineToArgvW` rules; the ARM64 PE target reports the call as unimplemented because the
+  ARM64 Win32 call path passes seven register arguments and `CreateProcessA` needs ten. Tests: six
+  native cases (`command-with-env-carries-its-entries`, `-empty-env-clears-everything`,
+  `-built-from-the-inherited-one`, `command-without-env-still-inherits`, `-refuses-malformed-entry`,
+  `-reports-a-signalled-child`) and four Windows cases executed under Wine (`command-with-env`,
+  `-inherit-env`, `-empty-env`, `-argv-round-trip`) plus one static ARM64 build. A host builtin that
+  `compiler/*.grl` itself calls needs a **two-step bootstrap**, because the checked-in seed *is* the
+  compiler and carries the `host::` table of the commit it was recorded from: stage a compiler that
+  knows the builtin and point `GRAIL_COMPILER` at it, then reseed with that same variable
+  (`bun tools/bootstrap.mjs update all` — `bootstrap.mjs` uses `buildCompiler()`, which honours
+  `GRAIL_COMPILER`), then confirm on a clean tree (`rm -rf .work && bun tools/native.mjs build` with
+  no `GRAIL_COMPILER`). `bun tools/bootstrap.mjs verify x86_64` is the 20-second version of that
+  check: it still reports "checked-in bootstrap is stale" when `GRAIL_COMPILER` is set, which is the
+  case the suites cannot catch. Until the reseed lands, a plain build of this branch fails at the seed with
+  `unknown function` for `host::environment`; `docs/testing.md` records the cycle next to the other
+  reseed notes.
+- `authority::spawn_with(&a, argv, env)` gates an explicit environment with the same `may_spawn`
+  grant as `authority::spawn`: spawning with an environment of your choosing is still a spawn, so
+  neither route becomes a way around the other, and a file grant is refused exactly as it is for a
+  plain spawn. `authority::environment()` returns this process's own entries so a program compiled
+  with `--deny-ambient-host` can build an additive environment without opting into `use host;`;
+  reading your own environment stays ungated, because every grant already implies the process can
+  see its own configuration. What the grant covers is unchanged and still narrow: it decides
+  *whether* a child starts, not what program it runs, and the child's own environment reads are
+  outside the model.
+- `grail profile` no longer uses a rendezvous file: the arming request
+  (`GRAIL_PROFILE="1 RATE CAPACITY SAMPLES"`) travels in the target's environment through
+  `host::command_with`, the samples go to a private `mkdir`-claimed scratch directory under
+  `TMPDIR`, and nothing is written to the target's working directory. A killed run can no longer
+  leave a stale request behind, the target no longer needs a writable working directory, and
+  concurrent profiles no longer collide on `.grail-profile/`. The runtime reads the variable at
+  startup instead of a config file. A profiled program that spawns Grail children with the
+  inherited environment now arms them too (they share one sample file); a child started with an
+  explicit environment is not armed unless the request is copied into it. `tools/test-profile.mjs`
+  now also asserts that the target still sees a variable the runner set, and that no
+  `grail-profile-` scratch directory is left behind.
 - Typed-IR F1, a sequence-header fact for the LLVM backend: the front end now records, beside the
   word stream, that a frame slot or a call's argument 0 holds a pointer to a 24-byte sequence header
   -- `{data, len, cap}` for a vector, `what` 2/3/4 with element width 8/4/1 -- and the LLVM lifter
@@ -101,30 +410,6 @@
   now covers the SDL3 window alone; `tools/abundance-test.mjs` links one system library per probe,
   so the Vulkan probe runs on a machine with no display server while the window probe skips there.
 - `FnMut`: a closure that mutates a captured value now works, with the rules B6 fixed in advance.
-  The body is scanned for a store to a capture or to a place rooted at it (`n = ..`, `n += ..`,
-  `s.field = ..`, `v[i] = ..`, `*r = ..`), a mutable borrow of it (`&mut n`) and method calls that
-  may mutate their receiver; a closure with any such capture is `FnMut(...)` instead of `Fn(...)`.
-  Only the written captures are mutable in the body, and the body's hidden environment parameter is
-  `&mut Env`, so a store goes through an exclusive reference to the environment field and the
-  existing loan checks apply. Calling an `FnMut` value needs a mutable binding (`mut f = |...|`),
-  borrows the closure exclusively for the whole call and ends that borrow when the call returns: a
-  second simultaneous call (`f(f(1))`) or a live shared borrow of the closure is rejected, and a
-  `FnMut` closure used where `Fn` is required (the `Fn(...)` parameter type, a function value
-  coerced to it, `vecs::sort_by` and the other stdlib callbacks) is rejected with a diagnostic that
-  says why instead of being silently made exclusive. A closure that writes nothing stays `Fn` and is
-  accepted where `FnMut` is expected, by value and as `&mut Fn(...)` for `&mut FnMut(...)`; `FnMut`
-  is written in type position like `Fn`. A by-value `FnMut` parameter cannot be called, because
-  parameters are not mutable storage — adapters take `&mut FnMut(...)`, and even then a callable
-  reached through a reference parameter can be called once in straight-line code (the pre-existing
-  `access has no live reference authority` limitation, which reproduces on `main` with `&Fn`).
-  `compiler/native.grl`, fourteen cases in `tests/native-cases.json` (`closure-fnmut-counter`,
-  `-disjoint-captures`, `-sequential-calls`, `-second-call-rejected`, `-shared-borrow-rejected`,
-  `-not-fn-rejected`, `-sort-by-rejected`, `-vector-element`, `-captured-field`,
-  `-needs-mut-binding`, `-through-exclusive-reference`, `-mixed-captures`,
-  `closure-shared-capture-still-fn`, `closure-shared-borrow-of-fn-closure`) plus the two former
-  read-only rejections now accepted as `closure-capture-mutation-fnmut` and
-  `closure-capture-borrow-mut-fnmut`, the book example `fnmut`, and the B6 decision record.
-tates a captured value now works, with the rules B6 fixed in advance.
   The body is scanned for a store to a capture or to a place rooted at it (`n = ..`, `n += ..`,
   `s.field = ..`, `v[i] = ..`, `*r = ..`), a mutable borrow of it (`&mut n`) and method calls that
   may mutate their receiver; a closure with any such capture is `FnMut(...)` instead of `Fn(...)`.

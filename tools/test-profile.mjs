@@ -61,12 +61,14 @@ if (!compiler) {
   console.error('profile: no Grail compiler found; set GRAIL_COMPILER');
   process.exit(2);
 }
-const work = mkdtempSync(join(tmpdir(), 'grail-profile-'));
+const work = mkdtempSync(join(tmpdir(), 'grail-prof-'));
 try {
   const source = join(work, 'main.grl');
   // `hot` is a CPU-bound loop; `cool` is a much smaller function, and `main` only drives them.
   writeFileSync(source, [
     'use host;',
+    // The profiled program reports a variable the runner sets: `grail profile` passes the child the
+    // inherited environment plus the arming request, so the target still sees its own configuration.
     'fn hot(n: u64) -> u64 {',
     '    mut acc: u64 = 0;',
     '    mut i: u64 = 0;',
@@ -86,6 +88,7 @@ try {
     '    return t;',
     '}',
     'fn main() {',
+    '    println(host::env(view("GRAIL_PROFILE_ENV_PROBE")));',
     '    deadline := host::now_ms() + 600;',
     '    mut total: u64 = 0;',
     '    mut k: u64 = 0;',
@@ -107,7 +110,14 @@ try {
   assert.equal(image.readUInt16LE(16), 2, 'a default Grail build must be ET_EXEC (non-PIE)');
   const rate = '500';
   const report = join(work, 'report.txt');
-  const profiled = ok([compiler, 'profile', '--rate', rate, '--out', report, '--', binary], { cwd: work, env });
+  // Scratch directories the profiler owns, before and after the run: none may be left behind.
+  const scratch = () => readdirSync(tmpdir()).filter(name => name.startsWith('grail-profile-')).sort();
+  const before = scratch();
+  const profiled = ok([compiler, 'profile', '--rate', rate, '--out', report, '--', binary],
+    { cwd: work, env: { ...env, GRAIL_PROFILE_ENV_PROBE: 'visible' } });
+  // No rendezvous file: the request travelled in the child's environment.
+  assert.equal(profiled.stdout.split('\n')[0], 'visible', 'grail profile did not pass the parent environment to the target');
+  assert.deepEqual(scratch(), before, 'grail profile left a grail-profile- scratch directory behind');
   // The program's own output is forwarded first; the report follows it.
   const text = profiled.stdout.slice(profiled.stdout.indexOf('grail profile:'));
   assert.ok(text.startsWith('grail profile:'), `no report in\n${profiled.stdout}`);
@@ -163,9 +173,10 @@ try {
     console.log('profile: no llvm-strip/strip available; skipping the [unknown] coverage check');
   }
 
-  // The rendezvous directory is `grail profile`'s own, and it must not leak.
-  assert.equal(existsSync(join(work, '.grail-profile')), false, 'grail profile left .grail-profile behind');
-  console.log('profile: hot function dominates the sampled profile');
+  // The old rendezvous directory must stay gone: the arming request no longer goes through a file
+  // in the working directory.
+  assert.equal(existsSync(join(work, '.grail-profile')), false, 'grail profile wrote a rendezvous directory');
+  console.log(`profile: hot function dominates the sampled profile (${before.length} scratch dirs in TMPDIR before, ${scratch().length} after)`);
 } finally {
   rmSync(work, { recursive: true, force: true });
 }

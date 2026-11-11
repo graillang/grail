@@ -523,30 +523,24 @@ fn compile<a, b, d, e, g>(
     modules: (&d u8[][]),
     output: &e [u8],
     target: &g [u8],
-    flags: u64
+    flags: u64,
+    iface: &d [u8],
+    verify: u64
 ) -> u64 {
-    return compile_mode(h, entry, modules, output, target, flags);
+    return compile_mode(h, entry, modules, output, target, flags, iface, verify);
 }
-// check_only: type-check and generate code, but do not assemble or link.
-fn compile_mode<a, b, d, e, g>(
-    h: (&a Home),
-    entry: &b [u8],
-    modules: (&d u8[][]),
-    output: &e [u8],
-    target: &g [u8],
-    flags: u64
-) -> u64 {
+// The compiler invocation, spelled out in one place: the build cache keys on this vector, so a flag
+// or an input that the driver passes is in the key by construction and cannot be forgotten there.
+//   grail [--target T] [--debug] [--deny-ambient-host] [--split] [--overflow=...]
+//         [--interface DIR [--verify-interface]] OUT.s ENTRY.grl MODULE.grl... RUNTIME PLATFORM
+fn build_argv<a, b, d, e, g>(h: (&a Home), entry: &b [u8], modules: (&d u8[][]), asm: &e [u8], target: &g [u8], flags: u64, iface: &d [u8], verify: u64) -> u8[][] {
     check_only := flags % 2;
     debug := (flags / 2) % 2;
     deny := (flags / 4) % 2;
     split := (flags / 8) % 2;
-    asm := cat(view(output), view(".s"));
-    object := cat(view(output), view(".o"));
-    mut command = u8[][
-        host::exe_path(),
-        copy(view("--target")),
-        copy(view(target))
-    ];
+    wrap := (flags / 16) % 2;
+    checked := (flags / 32) % 2;
+    mut command = u8[][host::exe_path(), copy(view("--target")), copy(view(target))];
     if debug != 0 {
         command.push(copy(view("--debug")));
     }
@@ -555,6 +549,26 @@ fn compile_mode<a, b, d, e, g>(
     }
     if split != 0 {
         command.push(copy(view("--split")));
+    }
+    if wrap != 0 {
+        command.push(copy(view("--overflow=wrap")));
+    }
+    if checked != 0 {
+        command.push(copy(view("--overflow=checked")));
+    }
+    // B1 stage 2: `grail check --interface DIR` writes the interfaces, `grail build --interface DIR`
+    // reads them instead of the modules' sources, and `--verify` compares the two.
+    if iface.len() != 0 {
+        emit := u64(check_only != 0) * u64(verify == 0);
+        if emit != 0 {
+            command.push(copy(view("--emit-interface")));
+        } else {
+            command.push(copy(view("--interface")));
+        }
+        command.push(copy(view(iface)));
+        if (emit == 0) & (verify != 0) {
+            command.push(copy(view("--verify-interface")));
+        }
     }
     command.push(copy(view(asm)));
     command.push(copy(view(entry)));
@@ -580,21 +594,30 @@ fn compile_mode<a, b, d, e, g>(
     } else {
         command.push(copy(view(h.os)));
     }
-    if host::command(command) != 0 {
-        return 1;
-    }
-    if check_only != 0 {
-        if split != 0 {
-            remove_split(view(output));
-        } else {
-            host::remove(view(asm), 0);
-        }
-        return 0;
-    }
-    if eq(view(target), view("windows-x86_64")) {
-        say(view("grail: windows-x86_64 images are cross-built with `bun tools/windows.mjs`"));
-        return 1;
-    }
+    return command;
+}
+// check_only: type-check and generate code, but do not assemble or link.
+fn compile_mode<a, b, d, e, g>(
+    h: (&a Home),
+    entry: &b [u8],
+    modules: (&d u8[][]),
+    output: &e [u8],
+    target: &g [u8],
+    flags: u64,
+    iface: &d [u8],
+    verify: u64
+) -> u64 {
+    check_only := flags % 2;
+    debug := (flags / 2) % 2;
+    deny := (flags / 4) % 2;
+    split := (flags / 8) % 2;
+    wrap := (flags / 16) % 2;
+    checked := (flags / 32) % 2;
+    cache := (flags / 64) % 2;
+    asm := cat(view(output), view(".s"));
+    object := cat(view(output), view(".o"));
+    // The toolchain is decided by the target alone, so it is known before the compiler runs - which
+    // is what lets a build cache key on the assembler and the linker as well as on the sources.
     mut triple = copy(view("--target=x86_64-linux-gnu"));
     mut emulation = copy(view("elf_x86_64"));
     // Mach-O targets reuse the CPU backends but have their own object format and linker.
@@ -622,7 +645,56 @@ fn compile_mode<a, b, d, e, g>(
     }
     assemble.push(triple);
     assemble.push(copy(view("-c")));
+    command := build_argv(&h, view(entry), &modules, view(asm), view(target), flags, iface, verify);
+    // B1 stage 4: an unchanged program is not rebuilt at all, and what is rebuilt assembles and links
+    // through the content-addressed store. Without --cache nothing below changes a thing.
+    mut store = Cache { root: cache_root(view(target)), fast: 0, tmp: u8[], hits: 0, misses: 0, names: u8[][] };
+    mut id = BuildId {
+        flags: u8[],
+        compiler: u8[],
+        assembler: u8[],
+        linker: u8[],
+        ifaces: u8[],
+        iface_dir: u8[],
+        sources: u8[][],
+        digests: u8[][]
+    };
+    mut program = u8[];
+    if cache != 0 {
+        store.fast = cache_hash_tool();
+        stage := cache_stage(&mut store);
+        store.tmp = path_join(view(stage), view("digest"));
+        cache_ensure(&mut store);
+        id = cache_build_id(&mut store, &command, view(asm), view(emulation), &assemble);
+        program = cache_program_key(&mut store, &id, view(target), view(asm));
+        // `--verify` asks for the interfaces to be checked against the sources, and `--check` asks for
+        // the program to be checked at all: a build that skips the compiler run has to skip the
+        // shortcut instead.
+        if (verify == 0) & (check_only == 0) {
+            if cache_up_to_date(&mut store, view(program), view(output)) == 1 {
+                return 0;
+            }
+        }
+    }
+    if host::command(command) != 0 {
+        return 1;
+    }
+    if check_only != 0 {
+        if split != 0 {
+            remove_split(view(output));
+        } else {
+            host::remove(view(asm), 0);
+        }
+        return 0;
+    }
+    if eq(view(target), view("windows-x86_64")) {
+        say(view("grail: windows-x86_64 images are cross-built with `bun tools/windows.mjs`"));
+        return 1;
+    }
     if split != 0 {
+        if cache != 0 {
+            return cache_split(&mut store, &id, view(dirname(view(entry))), view(output), view(target), view(emulation), &assemble, view(program));
+        }
         return build_split(view(dirname(view(entry))), view(output), view(target), view(emulation), &assemble);
     }
     assemble.push(copy(view(asm)));
@@ -719,18 +791,23 @@ fn build_split<a, b, d, e, g>(
         say(view("grail: assembling failed (needs clang)"));
         return 1;
     }
+    return link_objects(view(output), view(target), view(emulation), &parts.objects, &parts.link);
+}
+// One link, from objects already on disk: the cache reuses exactly this, so a cached image and an
+// uncached one are the same link of the same objects.
+fn link_objects<a, b, d, e, g>(output: &a [u8], target: &b [u8], emulation: &d [u8], objects: (&e u8[][]), inputs: (&g u8[][])) -> u64 {
     mut link = u8[][
         tool(view("GRAIL_LINKER"), view("ld.lld")),
         copy(view("-m")),
         copy(view(emulation))
     ];
-    for i in parts.objects.len() {
-        link.push(item(&parts.objects, i));
+    for i in objects.len() {
+        link.push(item(&objects, i));
     }
-    for i in parts.link.len() {
-        link.push(item(&parts.link, i));
+    for i in inputs.len() {
+        link.push(item(&inputs, i));
     }
-    dynamic := dynamic_link_flags(view(target), &parts.link);
+    dynamic := dynamic_link_flags(view(target), inputs);
     for i in dynamic.len() {
         link.push(item(&dynamic, i));
     }
@@ -742,6 +819,722 @@ fn build_split<a, b, d, e, g>(
     }
     return 0;
 }
+// ---- build cache (B1 stage 4) ----
+//
+// An unchanged module is not reassembled and an unchanged program is not relinked. Three keys, each
+// over exactly what determines the artifact it names (docs/design/separate-compilation.md, "Stage 4
+// as built: a build cache"):
+//
+//   map/prog/<key>   every input the build reads, the compiler and the toolchain  -> the image
+//   map/lnk/<key>    the object set, the link inputs and the linker               -> the image
+//   map/mod/<key>    one module's inputs and the assembler                        -> its object
+//
+// The store is content addressed under .work/cache/<target>:
+//
+//   blob/<sha256>    artifact bytes; the file name is the digest of the bytes inside it
+//   map/KIND/<key>   a record: `field value` lines naming the blob the key produced
+//   stage/           every write lands here first and is renamed into place, so a crash leaves no
+//                    half-written entry
+//
+// A blob is only reused after its bytes have been hashed again and matched against the name it is
+// filed under, so a corrupted, truncated or unreadable entry is a miss - never a wrong build.
+//
+// The module key is the one the design note asks for: the module's source digest, the digests of the
+// interfaces it reads, the compiler's digest, the target, every flag that changes code generation and
+// the assembler's identity. It does not cover one thing that today's whole-program front end decides:
+// the module's emitted assembly depends on *other* modules' bodies, because the optimizer inlines
+// across module boundaries. So a module record also carries the digest of the assembly the object was
+// built from, and an entry is only reused when that digest still matches the assembly just emitted.
+// When stage 4 proper (one compiler invocation per module) lands, the guard becomes redundant.
+struct Cache {
+    root: u8[],
+    // 1 when the host has sha256sum: a 12 MB compiler binary then hashes in milliseconds instead of
+    // the seconds the in-language reader costs.
+    fast: u64,
+    tmp: u8[],
+    hits: u64,
+    misses: u64,
+    // The modules that missed, in emission order, for the one-line report.
+    names: u8[][]
+}
+struct BuildId {
+    flags: u8[],
+    compiler: u8[],
+    assembler: u8[],
+    linker: u8[],
+    ifaces: u8[],
+    iface_dir: u8[],
+    sources: u8[][],
+    digests: u8[][]
+}
+fn cache_root<a>(target: &a [u8]) -> u8[] {
+    return cat(view(".work/cache/"), view(target));
+}
+fn cache_stage<a>(c: (&a mut Cache)) -> u8[] {
+    return path_join(view(c.root), view("stage"));
+}
+fn cache_ensure<a>(c: (&a mut Cache)) -> unit {
+    host::mkdir(view(".work"));
+    host::mkdir(view(".work/cache"));
+    host::mkdir(view(c.root));
+    host::mkdir(view(path_join(view(c.root), view("blob"))));
+    host::mkdir(view(path_join(view(c.root), view("map"))));
+    host::mkdir(view(path_join(view(c.root), view("map/prog"))));
+    host::mkdir(view(path_join(view(c.root), view("map/lnk"))));
+    host::mkdir(view(path_join(view(c.root), view("map/mod"))));
+    host::mkdir(view(path_join(view(c.root), view("stage"))));
+    return ();
+}
+// Whether `sha256sum` can stand in for the in-language digest. It is the same SHA-256 either way.
+fn cache_hash_tool() -> u64 {
+    mut run = u8[][
+        copy(view("sh")),
+        copy(view("-c")),
+        copy(view("command -v sha256sum >/dev/null 2>&1"))
+    ];
+    if host::command(run) == 0 {
+        return 1;
+    }
+    return 0;
+}
+// The SHA-256 of a file as 64 lowercase hex characters; empty when the file cannot be read.
+fn cache_digest_file<a, b>(c: (&a mut Cache), path: &b [u8]) -> u8[] {
+    if host::exists(view(path)) == 0 {
+        return u8[];
+    }
+    if c.fast != 0 {
+        mut script = u8[];
+        push_bytes(&mut script, view("sha256sum "));
+        sh_word(&mut script, view(path));
+        push_bytes(&mut script, view(" > "));
+        sh_word(&mut script, view(c.tmp));
+        mut run = u8[][copy(view("sh")), copy(view("-c")), script];
+        if host::command(run) == 0 {
+            if host::exists(view(c.tmp)) != 0 {
+                text := host::read_file(view(c.tmp));
+                if 64 <= text.len() {
+                    mut out = u8[];
+                    for i in 64 {
+                        out.push(text[i]);
+                    }
+                    return out;
+                }
+            }
+        }
+    }
+    return native::iface_digest(&host::read_file(view(path)));
+}
+// A toolchain's identity: the words it is invoked with plus the version it reports. Nothing cheaper
+// separates two builds of the same tool.
+fn cache_tool_id<a, b>(c: (&a mut Cache), words_in: (&b u8[][])) -> u8[] {
+    mut text = u8[];
+    mut script = u8[];
+    for i in words_in.len() {
+        word := item(&words_in, i);
+        push_bytes(&mut text, view(word));
+        text.push(10);
+        sh_word(&mut script, view(word));
+        script.push(32);
+    }
+    push_bytes(&mut script, view("--version > "));
+    sh_word(&mut script, view(c.tmp));
+    push_bytes(&mut script, view(" 2>&1"));
+    mut run = u8[][copy(view("sh")), copy(view("-c")), script];
+    if host::command(run) == 0 {
+        if host::exists(view(c.tmp)) != 0 {
+            version := host::read_file(view(c.tmp));
+            push_bytes(&mut text, view(version));
+        }
+    }
+    return native::iface_digest(&text);
+}
+fn cache_record_path<a, b, d>(root: &a [u8], kind: &b [u8], key: &d [u8]) -> u8[] {
+    map := path_join(view(root), view("map"));
+    dir := path_join(view(map), view(kind));
+    return path_join(view(dir), view(key));
+}
+// One `field value` line of a record; empty when the record is absent or does not have that field.
+fn cache_field<a, b, d, e>(root: &a [u8], kind: &b [u8], key: &d [u8], field: &e [u8]) -> u8[] {
+    path := cache_record_path(view(root), view(kind), view(key));
+    if host::exists(view(path)) == 0 {
+        return u8[];
+    }
+    text := host::read_file(view(path));
+    rows := lines(view(text));
+    for i in rows.len() {
+        row := item(&rows, i);
+        w := words(view(row));
+        if (2 <= w.len()) & eq(view(item(&w, 0)), view(field)) {
+            return item(&w, 1);
+        }
+    }
+    return u8[];
+}
+// The rest of a line after a fixed-length field: paths may contain spaces, so a record names a file
+// by writing its digest first and the path after it.
+fn cache_rest<a>(row: &a [u8], start: u64) -> u8[] {
+    mut i = start;
+    while (i < row.len()) & (row[i] == 32) {
+        i += 1;
+    }
+    mut out = u8[];
+    while i < row.len() {
+        out.push(row[i]);
+        i += 1;
+    }
+    return out;
+}
+// Publish a record: write it in `stage/`, then rename it into place.
+fn cache_record_put<a, b, d, e>(c: (&a mut Cache), kind: &b [u8], key: &d [u8], body: &e [u8]) -> unit {
+    stage := cache_stage(&mut c);
+    name := cat(view("rec."), view(key));
+    pending := path_join(view(stage), view(name));
+    if host::write_file(view(pending), view(body)) != 0 {
+        return ();
+    }
+    dest := cache_record_path(view(c.root), view(kind), view(key));
+    mut run = u8[][copy(view("mv")), copy(view("-f")), pending, dest];
+    host::command(run);
+    return ();
+}
+// File an artifact under the digest of its bytes, through a staging copy and a rename.
+fn cache_blob_put<a, b>(c: (&a mut Cache), path: &b [u8]) -> u8[] {
+    digest := cache_digest_file(&mut c, view(path));
+    if digest.len() != 64 {
+        return u8[];
+    }
+    blobs := path_join(view(c.root), view("blob"));
+    blob := path_join(view(blobs), view(digest));
+    // A blob that is already filed under this name is only reused if its bytes still hash to it: a
+    // corrupted entry is replaced, so corruption costs one rebuild and not every build after it.
+    if cache_blob_ok(&mut c, view(digest)) {
+        return digest;
+    }
+    stage := cache_stage(&mut c);
+    name := cat(view("blob."), view(digest));
+    pending := path_join(view(stage), view(name));
+    host::remove(view(pending), 0);
+    mut copy_run = u8[][copy(view("cp")), copy(view(path)), copy(view(pending))];
+    if host::command(copy_run) != 0 {
+        return u8[];
+    }
+    mut move_run = u8[][copy(view("mv")), copy(view("-f")), pending, blob];
+    if host::command(move_run) != 0 {
+        return u8[];
+    }
+    return digest;
+}
+// A blob is usable only when its bytes still hash to the name it is filed under.
+fn cache_blob_ok<a, b>(c: (&a mut Cache), digest: &b [u8]) -> bool {
+    if digest.len() != 64 {
+        return false;
+    }
+    blobs := path_join(view(c.root), view("blob"));
+    blob := path_join(view(blobs), view(digest));
+    if host::exists(view(blob)) == 0 {
+        return false;
+    }
+    actual := cache_digest_file(&mut c, view(blob));
+    return eq(view(actual), view(digest));
+}
+// Put a filed artifact back at `dest`, through a staging name so `dest` is only ever the whole file.
+fn cache_blob_restore<a, b, d>(c: (&a mut Cache), digest: &b [u8], dest: &d [u8], executable: u64) -> u64 {
+    blobs := path_join(view(c.root), view("blob"));
+    blob := path_join(view(blobs), view(digest));
+    if host::exists(view(blob)) == 0 {
+        return 1;
+    }
+    pending := cat(view(dest), view(".cache-pending"));
+    mut script = u8[];
+    push_bytes(&mut script, view("set -e\ncp "));
+    sh_word(&mut script, view(blob));
+    script.push(32);
+    sh_word(&mut script, view(pending));
+    if executable != 0 {
+        push_bytes(&mut script, view("\nchmod 755 "));
+        sh_word(&mut script, view(pending));
+    }
+    push_bytes(&mut script, view("\nmv -f "));
+    sh_word(&mut script, view(pending));
+    script.push(32);
+    sh_word(&mut script, view(dest));
+    mut run = u8[][copy(view("sh")), copy(view("-c")), script];
+    if host::command(run) != 0 {
+        return 1;
+    }
+    return 0;
+}
+fn cache_contains<a, b>(text: &a [u8], needle: &b [u8]) -> bool {
+    if needle.len() > text.len() {
+        return false;
+    }
+    mut i: u64 = 0;
+    while i + needle.len() <= text.len() {
+        mut j: u64 = 0;
+        mut ok = 1;
+        while j < needle.len() {
+            if text[i + j] != needle[j] {
+                ok = 0;
+                break;
+            }
+            j += 1;
+        }
+        if ok != 0 {
+            return true;
+        }
+        i += 1;
+    }
+    return false;
+}
+fn cache_decimal<a>(out: (&a mut u8[]), n: u64) -> unit {
+    if 9 < n {
+        cache_decimal(&mut out, n / 10);
+    }
+    out.push(48 + n % 10);
+    return ();
+}
+// The part a files holds: `STEM.NNN.module.s` -> `NNN.module`, unique within one build.
+fn part_id<a>(path: &a [u8]) -> u8[] {
+    mut end = path.len();
+    if (end > 1) & (path[end - 1] == 115) & (path[end - 2] == 46) {
+        end -= 2;
+    }
+    mut i = end;
+    mut stop = end;
+    mut count: u64 = 0;
+    while i > 0 {
+        i -= 1;
+        if path[i] == 46 {
+            count += 1;
+            if count == 2 {
+                stop = i + 1;
+                break;
+            }
+        }
+    }
+    mut out = u8[];
+    mut k = stop;
+    while k < end {
+        out.push(path[k]);
+        k += 1;
+    }
+    return out;
+}
+// The module a part file holds: the last dot-separated segment of the stem.
+fn part_module<a>(path: &a [u8]) -> u8[] {
+    mut end = path.len();
+    if (end > 1) & (path[end - 1] == 115) & (path[end - 2] == 46) {
+        end -= 2;
+    }
+    mut i = end;
+    mut at = end;
+    while i > 0 {
+        i -= 1;
+        if path[i] == 46 {
+            at = i + 1;
+            break;
+        }
+    }
+    mut out = u8[];
+    mut k = at;
+    while k < end {
+        out.push(path[k]);
+        k += 1;
+    }
+    return out;
+}
+// The index of the input a module was emitted from, plus one; 0 when no input declares it.
+fn cache_source_of<s, d, n>(sources: (&s u8[][]), digests: (&d u8[][]), name: &n [u8]) -> u64 {
+    for i in sources.len() {
+        if eq(view(basename(view(item(&sources, i)))), view(name)) {
+            return i + 1;
+        }
+    }
+    return 0;
+}
+// What an importer reads of a dependency: its interface when the build reads interfaces, and the
+// dependency's source digest otherwise - a stand-in that costs extra misses instead of being wrong.
+fn cache_dep_digest<a, b, n>(c: (&a mut Cache), id: (&b BuildId), name: &n [u8]) -> u8[] {
+    if id.iface_dir.len() != 0 {
+        name_file := cat(view(name), view(".iface"));
+        path := path_join(view(id.iface_dir), view(name_file));
+        if host::exists(view(path)) != 0 {
+            return cache_digest_file(&mut c, view(path));
+        }
+    }
+    i := cache_source_of(&id.sources, &id.digests, view(name));
+    if i == 0 {
+        return u8[];
+    }
+    return item(&id.digests, i - 1);
+}
+// Whether a module's source names another module: `use NAME` or a `NAME::` reference.
+fn cache_mentions<a, b>(text: &a [u8], name: &b [u8]) -> bool {
+    qualified := cat(view(name), view("::"));
+    if cache_contains(view(text), view(qualified)) {
+        return true;
+    }
+    used := cat(view("use "), view(name));
+    return cache_contains(view(text), view(used));
+}
+// The key material of one build: the flag vector as the compiler will see it, the compiler's own
+// digest, the inputs in command-line order with their digests, the interfaces read, and the tools.
+fn cache_build_id<a, b, d, e, g>(c: (&a mut Cache), argv: (&b u8[][]), asm: &d [u8], emulation: &e [u8], assemble: (&g u8[][])) -> BuildId {
+    mut id = BuildId {
+        flags: u8[],
+        compiler: u8[],
+        assembler: u8[],
+        linker: u8[],
+        ifaces: u8[],
+        iface_dir: u8[],
+        sources: u8[][],
+        digests: u8[][]
+    };
+    mut flagbuf = u8[];
+    push_bytes(&mut flagbuf, view("grail-cache-flags 1\n"));
+    mut i: u64 = 1;
+    while i < argv.len() {
+        a := item(&argv, i);
+        if eq(view(a), view("--target")) & (i + 1 < argv.len()) {
+            push_bytes(&mut flagbuf, view("target "));
+            push_bytes(&mut flagbuf, view(item(&argv, i + 1)));
+            flagbuf.push(10);
+            i += 2;
+        } else {
+            if (eq(view(a), view("--interface")) || eq(view(a), view("--emit-interface"))) & (i + 1 < argv.len()) {
+                id.iface_dir = item(&argv, i + 1);
+                // The interfaces a module reads are named one by one in its own key, so the set as a
+                // whole belongs to the program key and not to the flag vector every module shares.
+                manifest := path_join(view(id.iface_dir), view("interfaces.manifest"));
+                id.ifaces = cache_digest_file(&mut c, view(manifest));
+                i += 2;
+            } else {
+                if (a.len() != 0) & (a[0] == 45) {
+                    push_bytes(&mut flagbuf, view(a));
+                    flagbuf.push(10);
+                    i += 1;
+                } else {
+                    if !eq(view(a), view(asm)) {
+                        digest := cache_digest_file(&mut c, view(a));
+                        id.sources.push(copy(view(a)));
+                        id.digests.push(digest);
+                    }
+                    i += 1;
+                }
+            }
+        }
+    }
+    id.flags = native::iface_digest(&flagbuf);
+    exe := host::exe_path();
+    id.compiler = cache_digest_file(&mut c, view(exe));
+    id.assembler = cache_tool_id(&mut c, assemble);
+    mut linker = u8[][tool(view("GRAIL_LINKER"), view("ld.lld")), copy(view("-m")), copy(view(emulation))];
+    id.linker = cache_tool_id(&mut c, &linker);
+    return id;
+}
+fn cache_program_key<a, b, d, e>(c: (&a mut Cache), id: (&b BuildId), target: &d [u8], asm: &e [u8]) -> u8[] {
+    mut buf = u8[];
+    push_bytes(&mut buf, view("grail-cache-program 1\ntarget "));
+    push_bytes(&mut buf, view(target));
+    push_bytes(&mut buf, view("\nflags "));
+    push_bytes(&mut buf, view(id.flags));
+    push_bytes(&mut buf, view("\ncompiler "));
+    push_bytes(&mut buf, view(id.compiler));
+    push_bytes(&mut buf, view("\nassembler "));
+    push_bytes(&mut buf, view(id.assembler));
+    push_bytes(&mut buf, view("\nlinker "));
+    push_bytes(&mut buf, view(id.linker));
+    push_bytes(&mut buf, view("\nifaces "));
+    push_bytes(&mut buf, view(id.ifaces));
+    push_bytes(&mut buf, view("\noutput "));
+    push_bytes(&mut buf, view(asm));
+    buf.push(10);
+    for i in id.sources.len() {
+        push_bytes(&mut buf, view(item(&id.sources, i)));
+        buf.push(32);
+        push_bytes(&mut buf, view(item(&id.digests, i)));
+        buf.push(10);
+    }
+    return native::iface_digest(&buf);
+}
+fn cache_module_key<a, b, d, e, g>(c: (&a mut Cache), id: (&b BuildId), target: &d [u8], part: &e [u8], parts: (&g u8[][])) -> u8[] {
+    name := part_module(view(part));
+    mut buf = u8[];
+    push_bytes(&mut buf, view("grail-cache-module 1\npart "));
+    push_bytes(&mut buf, view(part_id(view(part))));
+    push_bytes(&mut buf, view("\ntarget "));
+    push_bytes(&mut buf, view(target));
+    push_bytes(&mut buf, view("\nflags "));
+    push_bytes(&mut buf, view(id.flags));
+    push_bytes(&mut buf, view("\ncompiler "));
+    push_bytes(&mut buf, view(id.compiler));
+    push_bytes(&mut buf, view("\nassembler "));
+    push_bytes(&mut buf, view(id.assembler));
+    // Only the interfaces *this* module reads, which the dependency lines below carry: the digest of
+    // the whole interface set is an input of the program, not of any one module.
+    at := cache_source_of(&id.sources, &id.digests, view(name));
+    push_bytes(&mut buf, view("\nsource "));
+    if at != 0 {
+        push_bytes(&mut buf, view(item(&id.digests, at - 1)));
+    }
+    buf.push(10);
+    // The trusted base: every module is emitted against the runtime and the platform module.
+    for k in id.sources.len() {
+        base_name := basename(view(item(&id.sources, k)));
+        if eq(view(base_name), view("runtime")) || eq(view(base_name), view("os-linux")) || eq(view(base_name), view("darwin")) {
+            push_bytes(&mut buf, view("base "));
+            push_bytes(&mut buf, view(base_name));
+            buf.push(32);
+            push_bytes(&mut buf, view(item(&id.digests, k)));
+            buf.push(10);
+        }
+    }
+    // What this module reads of its dependencies, in emission order.
+    if at != 0 {
+        text := host::read_file(view(item(&id.sources, at - 1)));
+        for k in parts.len() {
+            other := part_module(view(item(&parts, k)));
+            if !eq(view(other), view(name)) & cache_mentions(view(text), view(other)) {
+                push_bytes(&mut buf, view("dep "));
+                push_bytes(&mut buf, view(other));
+                buf.push(32);
+                push_bytes(&mut buf, view(cache_dep_digest(&mut c, id, view(other))));
+                buf.push(10);
+            }
+        }
+    }
+    return native::iface_digest(&buf);
+}
+// The one line a cached build prints: what was reused, what was not, and what ran.
+fn cache_report<a>(c: (&a mut Cache), relinked: u64) -> unit {
+    host::print(view("grail: cache: "));
+    host::print_num(c.hits);
+    host::print(view(" hit, "));
+    host::print_num(c.misses);
+    host::print(view(" miss"));
+    if c.misses != 0 {
+        host::print(view(" ("));
+        for i in c.names.len() {
+            if i != 0 {
+                host::print(view(", "));
+            }
+            host::print(view(item(&c.names, i)));
+        }
+        host::print(view(")"));
+    }
+    host::print(view("; "));
+    if relinked == 0 {
+        host::print(view("image reused"));
+    } else {
+        host::print(view("image linked"));
+    }
+    say(view(""));
+    return ();
+}
+// The whole-program key is over every input the build reads, so a hit means nothing has to run: the
+// image in the store is the image this build would produce.
+fn cache_up_to_date<a, b, d>(c: (&a mut Cache), key: &b [u8], output: &d [u8]) -> u64 {
+    blob := cache_field(view(c.root), view("prog"), view(key), view("blob"));
+    if !cache_blob_ok(&mut c, view(blob)) {
+        return 0;
+    }
+    count := cache_field(view(c.root), view("prog"), view(key), view("parts"));
+    // The image a whole-program hit hands back is only this program's image if the files the link
+    // named are still the files it was linked with.
+    record := cache_record_path(view(c.root), view("prog"), view(key));
+    if host::exists(view(record)) == 0 {
+        return 0;
+    }
+    body := host::read_file(view(record));
+    rows := lines(view(body));
+    for i in rows.len() {
+        row := item(&rows, i);
+        if starts(view(row), view("link ")) & (69 <= row.len()) {
+            mut wanted = u8[];
+            for k in 64 {
+                wanted.push(row[5 + k]);
+            }
+            path := cache_rest(view(row), 69);
+            actual := cache_digest_file(&mut c, view(path));
+            if !eq(view(actual), view(wanted)) {
+                return 0;
+            }
+        }
+    }
+    mut here = u8[];
+    if host::exists(view(output)) != 0 {
+        here = cache_digest_file(&mut c, view(output));
+    }
+    if !eq(view(here), view(blob)) {
+        if cache_blob_restore(&mut c, view(blob), view(output), 1) != 0 {
+            return 0;
+        }
+    }
+    // The same shape as a rebuild reports, so one line always says what hit, what missed and what ran.
+    host::print(view("grail: cache: "));
+    host::print(view(count));
+    host::print(view(" hit, 0 miss; program up to date\n"));
+    return 1;
+}
+// Assemble and link through the store, then file what was produced. The compiler has already written
+// the parts manifest; everything after it is reused or recomputed per module.
+fn cache_split<a, b, d, e, g, k, m>(
+    c: (&a mut Cache),
+    id: (&b BuildId),
+    base: &d [u8],
+    output: &e [u8],
+    target: &g [u8],
+    emulation: &k [u8],
+    assemble: (&m u8[][]),
+    program: &d [u8]
+) -> u64 {
+    manifest := cat(view(output), view(".parts"));
+    mut text = u8[];
+    if host::exists(view(manifest)) != 0 {
+        text = host::read_file(view(manifest));
+    }
+    if !starts(view(text), view("// grail-parts 1")) {
+        say(view("grail: missing or unreadable parts manifest "));
+        say(view(manifest));
+        return 1;
+    }
+    parts := read_split(view(manifest), view(base));
+    if parts.asm.len() == 0 {
+        say(view("grail: the parts manifest lists no modules"));
+        return 1;
+    }
+    mut miss_sources = u8[][];
+    mut miss_objects = u8[][];
+    mut miss_at = u64[];
+    mut digests = u8[][];
+    for i in parts.asm.len() {
+        part := item(&parts.asm, i);
+        object := item(&parts.objects, i);
+        key := cache_module_key(&mut c, id, view(target), view(part), &parts.asm);
+        asm_digest := cache_digest_file(&mut c, view(part));
+        recorded := cache_field(view(c.root), view("mod"), view(key), view("asm"));
+        blob := cache_field(view(c.root), view("mod"), view(key), view("blob"));
+        mut reused = 0;
+        if (recorded.len() == 64) & eq(view(recorded), view(asm_digest)) & cache_blob_ok(&mut c, view(blob)) {
+            if cache_blob_restore(&mut c, view(blob), view(object), 0) == 0 {
+                reused = 1;
+            }
+        }
+        if reused != 0 {
+            c.hits += 1;
+            digests.push(blob);
+        } else {
+            c.misses += 1;
+            c.names.push(part_module(view(part)));
+            miss_sources.push(part);
+            miss_objects.push(object);
+            miss_at.push(i);
+            digests.push(copy(view("")));
+        }
+    }
+    if miss_sources.len() != 0 {
+        if assemble_parts(assemble, &miss_sources, &miss_objects) != 0 {
+            say(view("grail: assembling failed (needs clang)"));
+            return 1;
+        }
+        // File the new objects only after they assembled, so a failed assembly leaves no entry.
+        for i in miss_sources.len() {
+            part := item(&miss_sources, i);
+            object := item(&miss_objects, i);
+            key := cache_module_key(&mut c, id, view(target), view(part), &parts.asm);
+            asm_digest := cache_digest_file(&mut c, view(part));
+            blob := cache_blob_put(&mut c, view(object));
+            mut filed = copy(view(blob));
+            if filed.len() != 64 {
+                filed = cache_digest_file(&mut c, view(object));
+            }
+            // The object's position in link order is the position of its part.
+            slot := miss_at[i];
+            digests[slot] = filed;
+            if blob.len() == 64 {
+                mut record = u8[];
+                push_bytes(&mut record, view("// grail-cache-module 1\nmodule "));
+                push_bytes(&mut record, view(part_module(view(part))));
+                push_bytes(&mut record, view("\nasm "));
+                push_bytes(&mut record, view(asm_digest));
+                push_bytes(&mut record, view("\nblob "));
+                push_bytes(&mut record, view(blob));
+                record.push(10);
+                cache_record_put(&mut c, view("mod"), view(key), view(record));
+            }
+        }
+    }
+    // The image is determined by the object set, the link inputs and the linker.
+    mut linkbuf = u8[];
+    push_bytes(&mut linkbuf, view("grail-cache-link 1\ntarget "));
+    push_bytes(&mut linkbuf, view(target));
+    push_bytes(&mut linkbuf, view("\nlinker "));
+    push_bytes(&mut linkbuf, view(id.linker));
+    push_bytes(&mut linkbuf, view("\noutput "));
+    push_bytes(&mut linkbuf, view(output));
+    linkbuf.push(10);
+    for i in digests.len() {
+        push_bytes(&mut linkbuf, view(item(&digests, i)));
+        linkbuf.push(10);
+    }
+    // A `// grail-link:` input that is a file on disk is part of what the image is: an archive or an
+    // object that changed has to relink even though no source did.
+    for i in parts.link.len() {
+        input := item(&parts.link, i);
+        push_bytes(&mut linkbuf, view(input));
+        linkbuf.push(32);
+        push_bytes(&mut linkbuf, view(cache_digest_file(&mut c, view(input))));
+        linkbuf.push(10);
+    }
+    link_key := native::iface_digest(&linkbuf);
+    image := cache_field(view(c.root), view("lnk"), view(link_key), view("blob"));
+    mut linked: u64 = 0;
+    mut final = copy(view(image));
+    if cache_blob_ok(&mut c, view(image)) {
+        if cache_blob_restore(&mut c, view(image), view(output), 1) != 0 {
+            linked = 1;
+        }
+    } else {
+        linked = 1;
+    }
+    if linked != 0 {
+        if link_objects(view(output), view(target), view(emulation), &parts.objects, &parts.link) != 0 {
+            return 1;
+        }
+        final = cache_blob_put(&mut c, view(output));
+        if final.len() == 64 {
+            mut record = u8[];
+            push_bytes(&mut record, view("// grail-cache-link 1\nblob "));
+            push_bytes(&mut record, view(final));
+            record.push(10);
+            cache_record_put(&mut c, view("lnk"), view(link_key), view(record));
+        }
+    }
+    if final.len() == 64 {
+        mut record = u8[];
+        push_bytes(&mut record, view("// grail-cache-program 1\nblob "));
+        push_bytes(&mut record, view(final));
+        push_bytes(&mut record, view("\nparts "));
+        cache_decimal(&mut record, parts.asm.len());
+        push_bytes(&mut record, view("\noutput "));
+        push_bytes(&mut record, view(output));
+        record.push(10);
+        for i in parts.link.len() {
+            input := item(&parts.link, i);
+            if host::exists(view(input)) != 0 {
+                push_bytes(&mut record, view("link "));
+                push_bytes(&mut record, view(cache_digest_file(&mut c, view(input))));
+                record.push(32);
+                push_bytes(&mut record, view(input));
+                record.push(10);
+            }
+        }
+        cache_record_put(&mut c, view("prog"), view(program), view(record));
+    }
+    cache_report(&mut c, linked);
+    return 0;
+}
+
 fn load_project() -> Project {
     mut p = Project {
         name: u8[],
@@ -810,7 +1603,20 @@ struct Options {
     debug: u64,
     deny: u64,
     split: u64,
+    // 0 when the flag is absent, 1 for `--overflow=wrap`, 2 for `--overflow=checked`.
+    overflow: u64,
+    // The build cache (B1 stage 4): reuse per-module objects and an unchanged program.
+    cache: u64,
+    // Module interfaces (B1 stage 2): `--interface DIR` reads them, `grail check` writes them, and
+    // `--verify` compares the two instead of trusting either.
+    iface: u8[],
+    verify: u64,
     paths: u8[][]
+}
+// The code-generation flag vector, in one place: it is what the compiler is told, and what the build
+// cache keys on. Bit 0 check only, 1 debug, 2 deny ambient host, 3 split, 4/5 overflow, 6 cache.
+fn flag_bits<a>(o: (&a Options)) -> u64 {
+    return o.debug * 2 + o.deny * 4 + o.split * 8 + o.overflow * 16 + o.cache * 64;
 }
 fn options<a>(args: (&a u8[][])) -> Options {
     mut o = Options {
@@ -822,6 +1628,10 @@ fn options<a>(args: (&a u8[][])) -> Options {
         debug: 0,
         deny: 0,
         split: 0,
+        overflow: 0,
+        cache: 0,
+        iface: u8[],
+        verify: 0,
         paths: u8[][],
     };
     mut i = 0;
@@ -855,11 +1665,36 @@ fn options<a>(args: (&a u8[][])) -> Options {
                                 // One object per module, assembled concurrently (B1 stage 1).
                                 o.split = 1;
                             } else {
+                            if eq(view(a), view("--cache")) {
+                                // Reuse per-module objects and an unchanged program (B1 stage 4).
+                                // Per-module objects only exist on the split path, so it implies it.
+                                o.cache = 1;
+                                o.split = 1;
+                            } else {
+                            if eq(view(a), view("--overflow=wrap")) {
+                                o.overflow = 1;
+                            } else {
+                            if eq(view(a), view("--overflow=checked")) {
+                                o.overflow = 2;
+                            } else {
+                            if eq(view(a), view("--interface")) & (i + 1 < args.len()) {
+                                // Module interfaces (B1 stage 2): the directory holding them.
+                                i += 1;
+                                o.iface = item(&args, i);
+                            } else {
+                            if eq(view(a), view("--verify")) {
+                                o.verify = 1;
+                            } else {
                             if ends(view(a), view(".grl")) & (o.file.len() == 0) {
                                 o.file = copy(view(a));
                                 o.paths.push(a);
                             } else {
                                 o.paths.push(a);
+                            }
+                            }
+                            }
+                            }
+                            }
                             }
                             }
                             }
@@ -878,6 +1713,14 @@ fn build<a, b>(args: (&a u8[][]), o: (&b mut Options)) -> u64 {
     if h.runtime.len() == 0 {
         return 1;
     }
+    // The cache reuses the per-module objects only the split path produces, and the split path is
+    // the Linux x86_64 assembler path: name that here instead of failing later with a --split error.
+    if o.cache != 0 {
+        if !eq(view(o.target), view("x86_64")) || (o.debug != 0) {
+            say(view("grail: --cache is implemented for the linux x86_64 assembler path, without --debug"));
+            return 1;
+        }
+    }
     host::mkdir(view("target"));
     if o.file.len() != 0 {
         if o.output.len() == 0 {
@@ -885,7 +1728,7 @@ fn build<a, b>(args: (&a u8[][]), o: (&b mut Options)) -> u64 {
             o.output = path_join(view("target"), view(stem));
         }
         mut none = u8[][];
-        return compile(&h, view(o.file), &none, view(o.output), view(o.target), o.debug * 2 + o.deny * 4 + o.split * 8);
+        return compile(&h, view(o.file), &none, view(o.output), view(o.target), flag_bits(&o), view(o.iface), o.verify);
     }
     p := load_project();
     if p.name.len() == 0 {
@@ -896,7 +1739,7 @@ fn build<a, b>(args: (&a u8[][]), o: (&b mut Options)) -> u64 {
         o.output = path_join(view("target"), view(p.name));
     }
     modules := project_modules(&p, 1);
-    return compile(&h, view(p.entry), &modules, view(o.output), view(o.target), o.debug * 2 + o.deny * 4 + o.split * 8);
+    return compile(&h, view(p.entry), &modules, view(o.output), view(o.target), flag_bits(&o), view(o.iface), o.verify);
 }
 fn check_command<a>(args: (&a u8[][])) -> u64 {
     o := options(&args);
@@ -910,7 +1753,7 @@ fn check_command<a>(args: (&a u8[][])) -> u64 {
         stem := basename(view(o.file));
         out := path_join(view("target"), view(stem));
         mut none = u8[][];
-        status = compile_mode(&h, view(o.file), &none, view(out), view(o.target), 1 + o.debug * 2 + o.deny * 4 + o.split * 8);
+        status = compile_mode(&h, view(o.file), &none, view(out), view(o.target), 1 + flag_bits(&o), view(o.iface), o.verify);
     } else {
         p := load_project();
         if p.name.len() == 0 {
@@ -919,7 +1762,7 @@ fn check_command<a>(args: (&a u8[][])) -> u64 {
         }
         out := path_join(view("target"), view(p.name));
         modules := project_modules(&p, 1);
-        status = compile_mode(&h, view(p.entry), &modules, view(out), view(o.target), 1 + o.debug * 2 + o.deny * 4 + o.split * 8);
+        status = compile_mode(&h, view(p.entry), &modules, view(out), view(o.target), 1 + flag_bits(&o), view(o.iface), o.verify);
     }
     if status == 0 {
         say(view("ok"));
@@ -981,7 +1824,7 @@ fn test_command<a>(args: (&a u8[][])) -> u64 {
         host::print(view("test "));
         host::print(view(f));
         host::print(view(" ... "));
-        mut status = compile(&h, view(f), &modules, view(out), view(o.target), o.debug * 2 + o.deny * 4 + o.split * 8);
+        mut status = compile(&h, view(f), &modules, view(out), view(o.target), flag_bits(&o), view(o.iface), o.verify);
         if status == 0 {
             exe := path_join(view("."), view(out));
             status = host::command(u8[][exe]);
@@ -1244,10 +2087,11 @@ fn debug_command<a>(args: (&a u8[][])) -> u64 {
     return host::command(decoded);
 }
 // ---- `grail profile` -------------------------------------------------------------------------
-// The target profiles itself: its runtime reads .grail-profile/config, arms an ITIMER_PROF timer
-// and writes the interrupted instruction pointers to the file named there (see runtime.grl). This
-// side owns the rendezvous file, the ELF symbol table and the report; no perf, nm or addr2line is
-// involved, and only the program's own instruction pointer is sampled.
+// The target profiles itself: its runtime reads GRAIL_PROFILE from its environment, arms an
+// ITIMER_PROF timer and writes the interrupted instruction pointers to the file named there (see
+// runtime.grl). This side owns the request, the scratch directory, the ELF symbol table and the
+// report; no perf, nm or addr2line is involved, and only the program's own instruction pointer is
+// sampled.
 struct Symbol {
     start: u64,
     function: u8[],
@@ -1531,6 +2375,31 @@ fn by_count<a, b>(counts: (&a u64[]), slots: (&b u64[])) -> u64[] {
     }
     return order;
 }
+// Where per-run scratch lives: TMPDIR when the environment names one, /tmp otherwise. `grail
+// profile` refuses non-Linux targets, so there is no platform-specific temp directory here.
+fn profile_temp() -> u8[] {
+    named := host::env(view("TMPDIR"));
+    if named.len() != 0 {
+        return named;
+    }
+    return copy(view("/tmp"));
+}
+// A directory of our own for one run: `mkdir` is the atomic claim, so two profilers started in the
+// same millisecond cannot share a sample file, and the directory is removed once the report is read.
+fn profile_scratch() -> u8[] {
+    base := profile_temp();
+    stamp := host::now_ms();
+    mut n: u64 = 0;
+    while n < 10000 {
+        name := cat(view("grail-profile-"), view(decimal(stamp + n)));
+        dir := path_join(view(base), view(name));
+        if host::mkdir(view(dir)) == 0 {
+            return dir;
+        }
+        n += 1;
+    }
+    return u8[];
+}
 fn profile_command<a>(args: (&a u8[][])) -> u64 {
     mut rate: u64 = 200;
     mut out_path = u8[];
@@ -1575,13 +2444,15 @@ fn profile_command<a>(args: (&a u8[][])) -> u64 {
         say(view(program));
         return 2;
     }
-    // Rendezvous: the runtime looks for this file relative to the working directory it inherits.
-    dir := copy(view(".grail-profile"));
+    // The arming request travels in the child's environment, so the target needs no writable
+    // working directory and a killed run cannot leave a stale request behind for the next one.
+    dir := profile_scratch();
+    if dir.len() == 0 {
+        say(view("grail profile: cannot create a directory for the samples under "));
+        say(view(profile_temp()));
+        return 2;
+    }
     samples := path_join(view(dir), view("samples"));
-    config := path_join(view(dir), view("config"));
-    host::mkdir(view(dir));
-    host::remove(view(samples), 0);
-    host::remove(view(config), 0);
     mut text = decimal(1);
     text.push(32);
     text = cat(view(text), view(decimal(rate)));
@@ -1589,12 +2460,11 @@ fn profile_command<a>(args: (&a u8[][])) -> u64 {
     text = cat(view(text), view(decimal(65536)));
     text.push(32);
     text = cat(view(text), view(samples));
-    text.push(10);
-    if host::write_file(view(config), text) != 0 {
-        say(view("grail profile: cannot write "));
-        say(view(config));
-        return 2;
-    }
+    // The inherited environment plus the request, so the profiled program still sees everything it
+    // would have seen; a child started with an explicit environment is not armed unless it copies
+    // this entry.
+    mut environment = host::environment();
+    environment.push(cat(view("GRAIL_PROFILE="), view(text)));
     mut command = u8[][];
     command.push(item(&rest, 0));
     for n in rest.len() {
@@ -1602,7 +2472,7 @@ fn profile_command<a>(args: (&a u8[][])) -> u64 {
             command.push(item(&rest, n));
         }
     }
-    status := host::command(command);
+    status := host::command_with(command, environment);
     mut out = u8[];
     mut title = cat(view("grail profile: "), view(program));
     push_line(&mut out, view(title));
@@ -1612,13 +2482,11 @@ fn profile_command<a>(args: (&a u8[][])) -> u64 {
             view("  no samples: the target did not arm the sampling runtime at startup")
         );
         say(view(out));
-        host::remove(view(config), 0);
         host::remove(view(dir), 1);
         return status;
     }
     data := host::read_file(view(samples));
     host::remove(view(samples), 0);
-    host::remove(view(config), 0);
     host::remove(view(dir), 1);
     if data.len() < 48 {
         say(view("grail profile: truncated sample file"));
@@ -1764,8 +2632,10 @@ fn profile_command<a>(args: (&a u8[][])) -> u64 {
 fn help() {
     say(view("grail - the Grail compiler and project tool\n"));
     say(view("usage:"));
-    say(view("  grail build [FILE.grl] [-o OUT] [--target x86_64|aarch64|riscv64|macos-x86_64|macos-aarch64] [--split]"));
+    say(view("  grail build [FILE.grl] [-o OUT] [--target x86_64|aarch64|riscv64|macos-x86_64|macos-aarch64] [--split] [--cache] [--overflow=wrap|checked] [--interface DIR [--verify]]"));
     say(view("  grail check [FILE.grl]            type-check without building"));
+    say(view("  grail check --interface DIR       write one checked interface per module"));
+    say(view("  grail check --interface DIR --verify   refuse an interface that disagrees with its sources"));
     say(view("  grail debug lines|info BINARY     print DWARF line rows or .debug_info"));
     say(view("  grail profile [--rate N] [--out FILE] -- PROGRAM [ARGS]   sampling profile"));
     say(view("  grail run [FILE.grl] [-- ARGS...]"));

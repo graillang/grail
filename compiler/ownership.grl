@@ -3,13 +3,19 @@ module ownership;
 // Ownership state is separate from emitted register numbers. Places form storage trees;
 // loans name storage and optional exclusive ancestors. Indices are one-based; zero is absent.
 // Status: 0 uninitialized, 1 definitely live, 2 moved/ended, 3 maybe live.
+// `filled` says whether the storage holds a value yet. They are separate because a foreign
+// out-parameter needs storage it can be handed a pointer to (status live, borrowable) before any
+// value exists: zeroed bytes are not an initialised record, so reading them is refused until the
+// callee (or an assignment) wrote them. Every other place is filled when it is initialised.
 // Errors: 1 unknown, 2 not definitely live, 3 conflicting loan, 4 no write authority,
-//         5 partially moved aggregate, 6 live child loan, 7 incompatible control-flow shape.
+//         5 partially moved aggregate, 6 live child loan, 7 incompatible control-flow shape,
+//         8 storage holds no value yet.
 // This is the checker core, not yet frontend enforcement or a language soundness proof.
 pub struct Place {
     parent: u64,
     status: u64,
-    copy: u64
+    copy: u64,
+    filled: u64
 }
 pub struct Loan {
     source: u64,
@@ -26,7 +32,14 @@ pub fn new() -> State {
     return State { places: Place[], loans: Loan[] };
 }
 pub fn root<a>(s: (&a mut State), copy: u64, initialized: u64) -> u64 {
-    s.places.push(Place { parent: 0, status: initialized, copy: copy });
+    s.places.push(Place { parent: 0, status: initialized, copy: copy, filled: initialized });
+    return s.places.len();
+}
+// Storage that exists and may be borrowed but holds no value yet: the place a foreign
+// out-parameter is handed, and what `mut r: R;` gives an extern record. `read`/`take` refuse it
+// until `filled` says a write happened.
+pub fn unfilled_slot<a>(s: (&a mut State), copy: u64) -> u64 {
+    s.places.push(Place { parent: 0, status: 1, copy: copy, filled: 0 });
     return s.places.len();
 }
 pub fn field<a>(s: (&a mut State), parent: u64, copy: u64) -> u64 {
@@ -35,7 +48,8 @@ pub fn field<a>(s: (&a mut State), parent: u64, copy: u64) -> u64 {
     }
     mut p = &s.places[parent - 1];
     status := p.status;
-    s.places.push(Place { parent: parent, status: status, copy: copy });
+    filled := p.filled;
+    s.places.push(Place { parent: parent, status: status, copy: copy, filled: filled });
     return s.places.len();
 }
 fn parent_of<a>(s: (&a State), id: u64) -> u64 {
@@ -92,6 +106,19 @@ fn complete<a>(s: (&a State), id: u64) -> u64 {
     }
     return 0;
 }
+// 8 when the storage reachable from `id` still holds no value: a record declared without an
+// initializer has zeroed bytes C may fill, but Grail may not read them until it did.
+fn unfilled<a>(s: (&a State), id: u64) -> u64 {
+    for i in s.places.len() {
+        if overlaps(&s, id, i + 1) {
+            mut p = &s.places[i];
+            if p.filled == 0 {
+                return 8;
+            }
+        }
+    }
+    return 0;
+}
 fn conflict<a>(s: (&a State), id: u64, exclusive: u64) -> u64 {
     for i in s.loans.len() {
         mut l = &s.loans[i];
@@ -113,7 +140,20 @@ pub fn read(s: (&a State), id: u64) -> u64 {
     if e != 0 {
         return e;
     }
+    f := unfilled(&s, id);
+    if f != 0 {
+        return f;
+    }
     return conflict(&s, id, 0);
+}
+fn fill_tree<a>(s: (&a mut State), id: u64) -> unit {
+    for i in s.places.len() {
+        if ancestor(&s, id, i + 1) {
+            mut p = &mut s.places[i];
+            exchange(&mut p.filled, 1);
+        }
+    }
+    return ();
 }
 fn set_tree<a>(s: (&a mut State), id: u64, status: u64) -> unit {
     for i in s.places.len() {
@@ -128,6 +168,10 @@ pub fn take<a>(s: (&a mut State), id: u64) -> u64 {
     e := complete(&s, id);
     if e != 0 {
         return e;
+    }
+    f := unfilled(&s, id);
+    if f != 0 {
+        return f;
     }
     mut p = &s.places[id - 1];
     copy := p.copy;
@@ -162,6 +206,19 @@ pub fn drop_value<a>(s: (&a mut State), id: u64) -> u64 {
     }
     return cleanup(&mut s, id);
 }
+// A foreign call that writes through a pointer gives the storage a value. `initialize` cannot be
+// used for it: the exclusive loan the call itself took on the place is live, and `initialize`
+// refuses a place with a live loan. The write is exactly what makes the place hold a value, so the
+// status is set directly. Reads afterwards are ordinary reads of an initialised place, and the
+// drop glue was registered when the binding was created.
+pub fn filled<a>(s: (&a mut State), id: u64) -> unit {
+    if id == 0 || s.places.len() < id {
+        return ();
+    }
+    set_tree(&mut s, id, 1);
+    fill_tree(&mut s, id);
+    return ();
+}
 pub fn initialize<a>(s: (&a mut State), id: u64) -> u64 {
     if id == 0 || s.places.len() < id {
         return 1;
@@ -178,6 +235,7 @@ pub fn initialize<a>(s: (&a mut State), id: u64) -> u64 {
         return c;
     }
     set_tree(&mut s, id, 1);
+    fill_tree(&mut s, id);
     return 0;
 }
 // Negative errors are not represented by loan IDs: zero means borrow denied, with no mutation.
@@ -293,7 +351,7 @@ pub fn snapshot<a>(s: (&a State)) -> State {
     mut loans = Loan[];
     for i in s.places.len() {
         mut p = &s.places[i];
-        places.push(Place { parent: p.parent, status: p.status, copy: p.copy });
+        places.push(Place { parent: p.parent, status: p.status, copy: p.copy, filled: p.filled });
     }
     for i in s.loans.len() {
         mut l = &s.loans[i];
@@ -393,7 +451,8 @@ pub fn merge<a, b>(s: (&a mut State), saved: (&b State)) -> unit {
         if parent != 0 {
             state = status(&s, parent);
         }
-        s.places.push(Place { parent: parent, status: state, copy: copy });
+        filled := p.filled;
+        s.places.push(Place { parent: parent, status: state, copy: copy, filled: filled });
         i = i + 1;
     }
     for i in s.places.len() {

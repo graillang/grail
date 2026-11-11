@@ -6,7 +6,7 @@ import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import assert from 'node:assert/strict';
 import { command, compileProgram as compileElf, execute, root } from './native.mjs';
-import { compileProgram, headers, inspectImage, inspectObject, inspectRelocations, inspectUnwind, kernel32, rawSection, windowsAarch64, windowsTarget } from './windows.mjs';
+import { compileProgram, headers, inspectImage, inspectObject, inspectRelocations, inspectUnwind, kernel32, linked, rawSection, runtimeImports, windowsAarch64, windowsTarget } from './windows.mjs';
 
 const elfTarget = 'x86_64';
 
@@ -27,13 +27,21 @@ function winePrefix() {
   return process.env.WINEPREFIX ?? join(root, '.work/wine-prefix');
 }
 
-function runWine(wine, executable, args, cwd) {
+function runWine(wine, executable, args, cwd, extra = {}) {
   return spawnSync(wine, [executable, ...args], {
     cwd,
     timeout: 300_000,
     maxBuffer: 8 * 1024 * 1024,
-    env: { ...process.env, WINEPREFIX: winePrefix(), WINEDEBUG: '-all' },
+    env: { ...process.env, WINEPREFIX: winePrefix(), WINEDEBUG: '-all', ...extra },
   });
+}
+
+// The runtime's own Win32 declarations (`extern "C" lib "kernel32"` in compiler/os-windows.grl)
+// must match the table the suite checks import slots against: a symbol added to one and not the
+// other either fails to link or silently leaves a slot unchecked.
+function runtimeDeclarations() {
+  const source = readFileSync(join(root, 'compiler/os-windows.grl'), 'utf8');
+  return [...source.matchAll(/^extern "C" lib "([^"]+)" fn (\w+)/gm)].map(([, library, name]) => ({ library, name }));
 }
 
 // The compiler's import table and the generated library must stay in step.
@@ -46,6 +54,15 @@ function compilerImports() {
 export async function check(compiler) {
   const declared = compilerImports();
   assert.deepEqual(declared, [...kernel32].sort(), 'compiler Win32 import table and kernel32.lib disagree');
+  // Fiber entry points are the green-task switch on Windows; the runtime declares them itself.
+  const runtimeDeclared = runtimeDeclarations();
+  for (const { library, name } of runtimeDeclared) {
+    const table = runtimeImports[/\.dll$/i.test(library) ? library : `${library}.dll`] ?? [];
+    assert.ok(table.includes(name), `os-windows.grl declares ${name} but windows.mjs does not list it`);
+  }
+  for (const name of Object.values(runtimeImports).flat()) {
+    assert.ok(runtimeDeclared.some(d => d.name === name), `windows.mjs lists runtime import ${name} that os-windows.grl does not declare`);
+  }
   const cases = JSON.parse(readFileSync(join(root, 'tests/windows-cases.json'), 'utf8'));
   const work = join(root, '.work/windows-tests');
   const wine = wineAvailable();
@@ -88,7 +105,7 @@ export async function check(compiler) {
     assert.match(object, /Machine: IMAGE_FILE_MACHINE_AMD64 \(0x8664\)/, `${test.name}: wrong COFF machine`);
     assert.match(object, /Name: grail_entry\n\s+Value: \d+\n\s+Section: \.text/, `${test.name}: grail_entry is not defined in .text`);
     for (const symbol of importSlots(built.object)) {
-      assert.ok(kernel32.includes(symbol.replace('__imp_', '')), `${test.name}: no short import for ${symbol}`);
+      assert.ok(linked.includes(symbol.replace('__imp_', '')), `${test.name}: no short import for ${symbol}`);
     }
 
     // Unwind evidence: every .def function carries .seh_* directives and the object has records.
@@ -122,9 +139,16 @@ export async function check(compiler) {
         assert.ok(imported.includes(name), `${test.name}: expected ${name} in the import table`);
       }
     }
+    // A task case must link the green switch (fibers) *and* keep the opt-in thread-per-task path:
+    // the mode is a runtime choice, so both are in the same image.
+    if (test.tasks) {
+      for (const name of ['CreateFiberEx', 'SwitchToFiber', 'DeleteFiber', 'ConvertThreadToFiber', 'CreateThread']) {
+        assert.ok(imported.includes(name), `${test.name}: task case does not link ${name}`);
+      }
+    }
 
     if (wine) {
-      const run = runWine(wine, built.executable, test.args ?? [], directory);
+      const run = runWine(wine, built.executable, test.args ?? [], directory, test.env ?? {});
       assert.equal(run.status, test.status ?? 0, `${test.name}: wine exit ${run.status}: ${run.stderr}`);
       assert.equal(run.stdout.toString(), test.stdout, `${test.name}: wine stdout`);
       executed++;
@@ -135,7 +159,7 @@ export async function check(compiler) {
 
   // windows-aarch64: PE/COFF for ARM64. There is no ARM64 Windows runner on this host, so these
   // cases are validated statically: assembly shape, COFF machine, relocations and the image.
-  const armCases = ['hello', 'integer-print', 'file-write-read', 'argument-list', 'com-interop', 'ffi-call-abi', 'thread-join', 'ffi-call-records'];
+  const armCases = ['hello', 'integer-print', 'file-write-read', 'argument-list', 'com-interop', 'ffi-call-abi', 'thread-join', 'ffi-call-records', 'command-with-env'];
   for (const name of armCases) {
     const test = cases.find(c => c.name === name);
     const directory = join(work, `arm64-${name}`);
@@ -189,7 +213,7 @@ export async function check(compiler) {
     assert.match(object, /Machine: IMAGE_FILE_MACHINE_ARM64 \(0xAA64\)/, `${name}/${windowsAarch64}: wrong COFF machine`);
     assert.match(object, /Name: grail_entry\n\s+Value: \d+\n\s+Section: \.text/, `${name}/${windowsAarch64}: grail_entry is not in .text`);
     for (const symbol of importSlots(built.object)) {
-      assert.ok(kernel32.includes(symbol.replace('__imp_', '')), `${name}/${windowsAarch64}: no short import for ${symbol}`);
+      assert.ok(linked.includes(symbol.replace('__imp_', '')), `${name}/${windowsAarch64}: no short import for ${symbol}`);
     }
     // Unwind evidence: one .xdata record per function, with the frame size the compiler set.
     const defs = (assembly.match(/^\.def /gm) ?? []).length;
@@ -292,7 +316,7 @@ export async function check(compiler) {
       writeFileSync(source, test.source);
     }
     const elf = compileElf(compiler, [source], directory, { target: elfTarget, name: test.name });
-    const run = execute(elf, test.args ?? [], elfTarget, { cwd: directory });
+    const run = execute(elf, test.args ?? [], elfTarget, { cwd: directory, env: { ...process.env, ...(test.env ?? {}) } });
     assert.equal(run.status, test.status ?? 0, `${test.name}: linux exit ${run.status}: ${run.stderr}`);
     assert.equal(run.stdout.toString(), test.stdout, `${test.name}: linux stdout`);
     passed++;

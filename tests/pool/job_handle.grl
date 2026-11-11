@@ -1,0 +1,66 @@
+// A job handle: spawn now, wait later. Everything here is checked by content, and every value that
+// crosses into a job is owned, so nothing in this file depends on the order the jobs finish in.
+use pool;
+
+fn total(v: u64[]) -> u64 {
+    mut t = 0;
+    for x in v { t = t ^ x; }
+    return t;
+}
+fn read(x: u64, unused: u64) -> u64 { return x; }
+// A handle that outlives the frame that made it: the captured vector moves into the job, so nothing
+// points at `make`'s stack after it returns.
+fn make() -> Job<u64[]> {
+    data := u64[1, 2, 3, 4];
+    return parallel_spawn(|| -> u64[] {
+        mut out = u64[];
+        for i in data.len() { out.push(data[i] * 10); }
+        return out;
+    });
+}
+fn main() {
+    // 1. Spawn, do something else, then wait. The result is owned and in the handle's type.
+    first := pool::spawn(|| -> u64[] { mut v = u64[]; for i in 4 { v.push(i + 1); } return v; });
+    warm := parallel_map(u64[5, 6, 7], 0, read);
+    assert(warm.len() == 3);
+    got := pool::wait(first);
+    assert(got.len() == 4);
+    assert(got[0] == 1);
+    assert(got[3] == 4);
+
+    // 2. Two live jobs, joined in the opposite order from the order they were started.
+    a := pool::spawn(|| -> u64 total(u64[1, 2, 3]));
+    b := pool::spawn(|| -> u64 total(u64[10, 20]));
+    second := pool::wait(b);
+    firsts := pool::wait(a);
+    assert(firsts == 0);
+    assert(second == 30);
+
+    // 3. A handle from a frame that has already returned.
+    later := make();
+    joined := pool::wait(later);
+    assert(joined.len() == 4);
+    assert(joined[3] == 40);
+
+    // 4. A handle that is never waited on: its drop waits and discards, so the process neither
+    //    leaks the job nor leaves a worker writing into a dead frame.
+    abandoned := pool::spawn(|| -> u64[] { mut v = u64[]; for i in 100 { v.push(i); } return v; });
+    println("abandoned");
+
+    // 5. A job that runs a job and chunks a vector of its own: the pool is reentrant, and a worker
+    //    that waits on a job it queued helps instead of sleeping.
+    outer := parallel_spawn(|| -> u64 {
+        inner := parallel_spawn(|| -> u64 total(u64[7, 7, 7]));
+        mut v = u64[1, 2, 3, 4];
+        parallel_for_chunks(&mut v[0: 4], 2, |s: &mut [u64]| -> unit { for i in s.len() { s[i] = s[i] + 1; } });
+        return parallel_join(inner) + total(v);
+    });
+    assert(parallel_join(outer) == 7);
+
+    // 6. The result can be anything owned, including a record of an earlier job's result.
+    made := parallel_spawn(|| -> u64[] { mut v = u64[]; v.push(99); return v; });
+    again := parallel_spawn(|| -> u64 total(u64[2, 4]));
+    assert(parallel_join(again) == 6);
+    assert(parallel_join(made)[0] == 99);
+    println("ok");
+}

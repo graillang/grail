@@ -1,0 +1,27 @@
+// A task blocked in host::sleep_ms must not prevent another task from making progress. One task
+// sleeps 80 ms and only then reads a shared word; the other writes that word and never yields. If
+// the sleep parked the *scheduler* instead of the task, the writer would run only after the sleeper
+// woke and the sleeper would read 0; the joined sum proves it read the written value instead.
+// Same expected output on Linux (timerfd) and on Windows (the sleep runs on a helper thread and the
+// task parks): 7 * 100 + 1 from the sleeper plus 1 from the writer = 702.
+unsafe module runtime;
+use host;
+fn sleeper(n: u64, word: u64) -> u64 {
+    host::sleep_ms(80);
+    return rt_atomic_load(word) * 100 + n;
+}
+fn writer(n: u64, word: u64) -> u64 {
+    rt_atomic_store(word, 7);
+    return n;
+}
+fn body<s>(sc: (&s Scope<u64>), word: u64) -> u64 {
+    slow := spawn(sc, 1, sleeper);
+    fast := spawn(sc, 1, writer);
+    return join(slow) + join(fast);
+}
+fn main() {
+    word := rt_alloc(8);
+    raw_store(word, 0);
+    println(task_scope(word, body));
+    rt_free(word);
+}

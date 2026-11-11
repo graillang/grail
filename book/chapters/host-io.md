@@ -22,6 +22,23 @@ Commands receive an argument vector, not shell syntax. `host::command` consumes 
 returns a process status; this example executes `/bin/true`. Do not pass untrusted input to a
 shell you explicitly choose to launch.
 
+A child inherits this process's environment. `host::command_with(argv, env)` replaces it: the child
+starts with exactly the `NAME=VALUE` entries it is handed and nothing else, and the result is the
+same status encoding `host::command` returns. `host::environment()` reports this process's own
+environment as entries, so the additive spelling is explicit rather than assumed:
+
+```grl
+mut env = host::environment();
+env.push("APP_MODE=batch".copy());
+status := host::command_with(argv, env);    // inherited entries plus APP_MODE
+host::command_with(argv, u8[][]);           // no environment at all
+```
+
+Both spellings consume their vectors, like `host::command`. The executable search happens in the
+parent, against the parent's `PATH`, so an explicit environment does not stop `"sh"` from being
+found. A malformed entry - no `=` or an empty name - is refused without spawning anything, with the
+status `256 + EINVAL` (`278`).
+
 **Try it:** change the input fixture text in `book/book.json`, update the expected output and file,
 then run `just book-check` to see the checks catch a mismatch.
 

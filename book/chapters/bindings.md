@@ -7,7 +7,7 @@ these local declarations. Statements end with semicolons.
 {{example:bindings}}
 
 `answer += 2` is shorthand for adding to its current value. The next chapter covers the arithmetic
-and compound operators. `assert` aborts when its numeric condition is zero.
+and compound operators. `assert` aborts when its condition is zero; it accepts a `bool` or an integer.
 
 ## Typed bindings
 

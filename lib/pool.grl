@@ -1,0 +1,130 @@
+module pool;
+
+// Data-parallel jobs over the process-wide pool (docs/design/parallelism.md, stages 1 and 2).
+//
+// THE OWNERSHIP RULE, in one line: everything a job's closure touches it owns or borrows
+// exclusively. A job takes its inputs by value, builds an owned result, and the only shared memory
+// two jobs can see is what the language says they may: read-only data classified shareable. On top
+// of that stage 2 adds one primitive whose inputs are *constructed* disjoint - `chunks_mut` hands
+// each job an exclusive `&mut [T]` over its own region of the caller's slice - and a job handle,
+// `spawn`/`wait`, for the two-statement form. No reference ever crosses a job boundary.
+//
+// What the checker enforces here, and what it still does not:
+//   - checked, structurally, through the compiler's transferable/shareable classification: the item,
+//     the result, the shared context AND the closure's captured environment. A `handle` (file,
+//     socket, window) is thread-affine and carries no audited classification, so a handle - bare,
+//     nested in a record, or captured by the closure - is refused by name:
+//         cannot share closure capture `h`: h.file is thread-affine (a foreign handle with no
+//         audited classification)
+//     An `FnMut` closure is refused (concurrent workers would race on its own environment, so a
+//     capture is written through a Mutex or the result is owned instead); a `Task` handle, an
+//     exclusive borrow, a mutable slice and a type parameter with no capability proof are refused
+//     for the same reason. Plain data - integers, floats, bytes and records/enums of them - is
+//     accepted, and so is an audited declaration (`handle File: transferable;` - which is still not
+//     shareable unless it says `transferable, shareable`).
+//   - not checked: whether the *foreign library* behind a value is safe on another thread is what an
+//     audited declaration states, not something this module can see. `CStr`, `CPtr`, `CMutPtr` and
+//     `cfn` are deliberately unclassified, so they are refused as "unclassified foreign authority"
+//     rather than silently allowed, and there is no audited opt-in for them yet - a legitimate
+//     foreign blob cannot cross a job boundary today. `unsafe module` code can build or convert
+//     anything, so the classification above is exactly as strong as the safe surface over it. And
+//     two jobs writing the same OS descriptor is not a data race any type system can catch; it stays
+//     a documented hazard.
+//   - a job handle (`spawn`/`wait`) *is* a job that outlives the statement that started it, and its
+//     shape is what keeps that sound: the closure's captures are moved into the job (heap-owned, so
+//     no frame is reachable), a callback that captured a *borrow* is refused, the result is an owned
+//     value that cannot hold borrows, and the handle is move-only with a drop that waits - one wait
+//     takes the result and frees the record, so two threads can never own one job. See
+//     `parallel_spawn` in `compiler/native.grl` and `rt_parallel_spawn` in `compiler/runtime.grl`.
+//     A capture may be read or written by the job but not moved out of its environment: build the
+//     result inside the callback instead of returning a captured value.
+//
+// Ordering is a property of the API, not of the scheduler: results come back in input order
+// whatever order the jobs finish in.
+//
+// A named `fn` passed where a `Fn` is expected needs the type arguments written out
+// (`pool::map<u64,u64>(items, work)`, `pool::spawn<u64>(work)`) - a `fn` value and an `Fn` signature
+// are different types to inference, which is a property of the language, not of this module. An
+// anonymous closure infers. The builtins (`parallel_map`, `parallel_for_chunks`, `parallel_spawn`)
+// accept either form directly.
+
+// One job per input element, results in input order. The closure captures are read-only on every
+// worker, so they must be plain data (see above).
+pub fn map<T:Send,U:Send>(items:T[],f:Fn(T)->U)->U[]{
+    return parallel_map(items,0,|item: T, unused: u64| -> U f(item));
+}
+
+// `count` independent jobs, job `i` calling f(i); results in index order, so this is the parallel
+// "map over 0..count" and the shape a chunked loop takes when the caller does its own splits.
+pub fn run<U:Send>(count:u64,f:Fn(u64)->U)->U[]{
+    mut index=u64[];
+    for i in count{index.push(i);}
+    return parallel_map(index,0,|i: u64, unused: u64| -> U f(i));
+}
+
+// The chunked shape, and the one Abundance's geometry/encode/compress work uses: consume the
+// vector, hand each job one contiguous, exclusively owned chunk, and concatenate the results in
+// chunk order. Elements are moved into their chunk, never copied, and no chunk can see another.
+// The split is still two worth-paying passes over the data (each element leaves the vector and
+// enters its chunk) because a split without an exclusive borrow cannot hand out slices; that pass
+// is what stage 2's `&mut [T]` chunks remove.
+pub fn for_chunks<T:Send,U:Send>(data:T[],chunks:u64,f:Fn(T[])->U)->U[]{
+    n:=data.len();
+    if n==0{return U[];}
+    mut count=chunks;
+    if count==0{count=1;}
+    if n<count{count=n;}
+    size:=(n+count-1)/count;
+    // Reverse once so chunks come out in input order while elements are popped (moved), not copied.
+    mut source=data;mut rev=T[];
+    while source.len()!=0{rev.push(source.pop());}
+    mut parts=T[][];
+    while rev.len()!=0{
+        mut take=size;
+        if rev.len()<take{take=rev.len();}
+        mut part=T[];
+        mut i=0;
+        while i<take{part.push(rev.pop());i+=1;}
+        parts.push(part);
+    }
+    return parallel_map(parts,0,|part: T[], unused: u64| -> U f(part));
+}
+
+// The in-place chunked shape, and the one Abundance's geometry/encode/compress work wants. The
+// compiler splits the exclusive slice into disjoint exclusive chunks, so each job writes the
+// caller's own elements: nothing is moved and nothing is copied, which is the whole difference from
+// `for_chunks`. The split is constructed from `chunks` and the length alone - chunk k is
+// [k*size, min(n, k*size+size)) with size = ceil(n/chunks) - so no element can belong to two jobs
+// and no job can address another's region. Asking for more chunks than elements gives one chunk per
+// element; asking for zero gives one chunk.
+//
+// Inside the callback ordinary Grail rules apply, which is what makes the writes safe: the slice it
+// holds has its own length, so an index past it is a bounds abort, and there is no way to name the
+// caller's data again - the argument is an exclusive loan of the whole thing, so any capture that
+// could reach it (a move, a shared slice, an exclusive slice) is a borrow error at the call site.
+pub fn chunks_mut<T:Send>(data: (&mut [T]), chunks: u64, f: Fn((&mut [T]))->unit) -> unit {
+    parallel_for_chunks(data, chunks, f);
+}
+
+// Two branches of a job graph, both owned: `first` runs on a worker while `second` runs on the
+// calling thread, so both make progress and the results come back owned, in the order given.
+// This is what "spawn two jobs, then join" means without a handle that could outlive the call.
+pub struct Pair<A,B>{first:A,second:B}
+pub fn join<A:Send,B:Send>(first:Fn()->A,second:Fn()->B)->Pair<A,B>{
+    mut one=u64[0];
+    mut done=parallel_map(one,0,|i: u64, unused: u64| -> A first());
+    return Pair{first:done.pop(),second:second()};
+}
+
+// A job handle: `spawn` starts a job and returns it, `wait` takes its result. This is spawn-then-wait
+// outside a structured call, so the caller can do other work (or start a second job) between the
+// two, and the handle may outlive the frame it was made in - its captures were moved into it and its
+// result comes back owned. The compiler refuses a callback that captured a borrow, because the
+// handle's type would not record that lifetime; everything else about the handle is ownership:
+// dropping it instead of waiting on it waits and discards, so a job never outlives its last owner.
+pub fn spawn<R:Send>(f:Fn()->R)->Job<R>{
+    return parallel_spawn(f);
+}
+pub fn wait<R:Send>(job:Job<R>)->R{
+    return parallel_join(job);
+}

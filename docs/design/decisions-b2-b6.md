@@ -19,11 +19,11 @@ decision without a stated trigger is what made these items outstanding for so lo
 | --- | --- | --- |
 | B1 | Separate compilation with checked module interfaces: **accepted**. The plan of record is [separate-compilation.md](separate-compilation.md); this record fixes the decision and its obligations, not the format. | Implementation starting |
 | B2 | Ambient `host::` stays for v1 as a **recorded deviation** from the capability model, with the conditions that force the change listed below. | Decided |
-| B3 | A foreign call **blocks the executing thread**; no green-task scheduling integration is promised for v1. Foreign calls also remain main-thread-only (process-wide host TLS base). | Decided |
-| B4 | Windows uses **thread-per-blocking-call**. IOCP is a named future work item with the design sketch in this page. Green tasks on Windows currently abort at scheduler start. | Decided |
+| B3 | A foreign call **blocks the executing thread**; no green-task scheduling integration is promised for v1. Foreign calls also remain main-thread-only (process-wide host TLS base). | Decided; task semantics now identical on Linux and Windows |
+| B4 | Windows runs **the same green scheduler as Linux** (Win32 fibers on one scheduler thread); thread-per-task is an explicit opt-in (`GRAIL_TASKS=thread`). IOCP stays a named future work item. | Decided and implemented |
 | B5 | **Abort never unwinds**; nothing may unwind across the C boundary. There is no `defer` and no cleanup runs on an abort path. | Decided |
 | B6 | Closures capture references and views and cannot outlive the borrow; **`FnMut`/mutable captures are implemented** under the six rules fixed below. | Implemented |
-| B7 | Records passed by value to C: **accepted**, spelling `v: byval R`. | Implementation after B1 |
+| B7 | Records passed by value to C: **accepted**, spelling `v: byval R`. | Implemented on x86-64, AArch64 and RISC-V 64; Windows x86-64 and ARM64 refuse the marker |
 
 ## B1: separate compilation accepted
 
@@ -57,10 +57,13 @@ origin checks, clients are either unsound (a program with a borrow that is inval
 edge is accepted) or we fall back to whole-program checking. The cost is a redesign of the artifact
 format, not of the language.
 
-**Enforced by.** Nothing yet: the implementation is in progress. Until it lands every build is
-whole-program - the compiler reads all input files and writes one assembly file - and
-[implementation-status.md](implementation-status.md) keeps reporting "Separate compilation with
-checked library contracts" as missing. The readiness row B1 tracks it.
+**Enforced by.** Stage 1: `grail build --split` writes one assembly file per module (`.grail_part`
+markers from the emitter, offsets from the optimizer, the writer cutting the finished stream), the
+CLI assembles the parts concurrently and links once, and `bun tools/split-test.mjs` (`just test-split`,
+a CI job) proves that the parts concatenate to the single assembly file and that `--split` and
+whole-program builds run the same program. Whole-program emission is still the default and there is no
+interface artifact yet, so [implementation-status.md](implementation-status.md) keeps reporting
+"Separate compilation with checked library contracts" as missing. The readiness row B1 tracks it.
 
 ## B2: ambient host authority, a recorded deviation
 
@@ -85,6 +88,23 @@ What actually exists today (verified against the compiler):
   `cptr_mut` need a lexical `unsafe { }` block (`native.grl:9267-9272`, `11108-11134`).
 - FFI is therefore gated by `unsafe`, while files, processes, sockets, environment and process exit
   through `host::` are not gated at all.
+
+**What landed since, and what it does not change.** Two increments give a program a way out of the
+deviation without changing the default:
+
+- `lib/authority.grl` is an ordinary Grail module (not a builtin) whose `Authority` value carries one
+  grant - read or write under a root, processes, sockets - and whose gated functions refuse a path
+  outside it before the operating system sees it. Containment is lexical and component-wise after
+  normalising `.`, `..` and duplicate separators, so `/database` is not under `/data`; a denial is a
+  distinct `authority::Error` value, not an OS error. `docs/authority.md` states the rule and the
+  paths it does not cover.
+- `--deny-ambient-host` turns every `host::` reference in a module that has not written `use host;`
+  into a compile error, and `lib/authority.grl` is the only standard-library module that opts in. A
+  program written against `authority::` therefore needs no ambient access at all.
+
+Neither is the capability model: `host::` stays ambient unless the switch is given, the switch is
+per-build rather than per-component, and there is still no place to express "this component may not
+spawn processes" for a module the build did not author. Revisit triggers 1-4 are unchanged.
 
 **Revisit when** any of these becomes true; each one breaks the deviation rather than merely making
 it inconvenient:
@@ -116,8 +136,10 @@ the process, and there is no diagnostic to catch it. If the change is made too l
 mechanical: dozens of stdlib entry points and call sites gain a parameter, with the compiler
 finding all of them.
 
-**Enforced by.** Today: the compiler's sealing of the runtime (above), the `unsafe` gate on FFI, and
-documentation - the readiness row B2, the "Explicit authority / capabilities" row of
+**Enforced by.** Today: `lib/authority.grl` and its `bun tools/test-authority.mjs` suite,
+`--deny-ambient-host` in `compiler/cli.grl`, the book's *Capabilities instead of ambient access*
+section with its `authority` example, the compiler's sealing of the runtime (above), the `unsafe` gate
+on FFI, and documentation - the readiness row B2, the "Explicit authority / capabilities" row of
 [implementation-status.md](implementation-status.md), the V3 order in
 [syntax-v2-scope.md](syntax-v2-scope.md), and the "no ambient console authority" paragraph of
 [surface-sketch.md](surface-sketch.md). The deviation itself is recorded in this page.
@@ -139,12 +161,15 @@ Two facts that belong to the same decision, because they bound how far "it just 
   caches) from a worker shares the main thread's TCB. That is a documented misuse
   ([docs/ffi.md](../ffi.md), line 312), not merely slow code, and it applies equally to callbacks
   arriving on a foreign thread.
-- **The runtime isolates only the three host operations it controls.** `host::read_file`,
-  `host::write_file` and `host::command` call `rt_offload` when they run in a green task
-  (`compiler/runtime.grl:625, 682, 907`), which hands the blocking body to a dedicated OS thread,
-  suspends the task and wakes it on completion (`rt_offload`, `runtime.grl:1855`). That is a
-  property of those three builtins, not a contract for user foreign calls, and it costs one OS
-  thread per blocking call.
+- **The runtime isolates only the host operations it controls.** `host::read_file`,
+  `host::write_file` and `host::command` hand their blocking body to a dedicated OS thread and
+  suspend the task (`rt_blocking_call` -> `rt_offload` in `compiler/runtime.grl`). `host::read_fd`,
+  `host::write_fd` and `host::sleep_ms` park the task too, by whichever mechanism the platform has:
+  on Linux the epoll registration and a timerfd suspend it, and on Windows - which has no reactor -
+  the call itself runs on a helper thread (`rt_io` -> `rt_offload`). Either way the *task* waits
+  and the scheduler thread keeps running other tasks, which is what makes the two platforms
+  observably identical (see B4). That is a property of those builtins, not a contract for user
+  foreign calls, and on the offload path it costs one OS thread per blocking call.
 
 **Alternatives considered.** (a) Keep the aspirational wording ("blocking foreign calls are
 explicitly isolated") and treat it as done: rejected, it is false for every `extern "C"` call and
@@ -166,57 +191,106 @@ calls a blocking foreign function from tasks starves or deadlocks its worker poo
 the sense that it blocks exactly as documented), and multi-threaded FFI corrupts libc state silently
 instead of failing. If instead we had promised isolation we do not have, libraries would rely on it.
 
-**Enforced by.** Documentation now: [docs/ffi.md](../ffi.md), line 312 (main-thread limit),
-[concurrency-v1.md](concurrency-v1.md) (corrected to state what is offloaded and what is not), this
-page, and the "Suspension effects and non-suspending cleanup" row of
-[implementation-status.md](implementation-status.md). Tests: blocking-call isolation remains an
-acceptance gate named in [concurrency-v1.md](concurrency-v1.md); nothing enforces the absence of a
-blocking foreign call today.
+**Enforced by.** Documentation now: [docs/ffi.md](../ffi.md) (main-thread limit and "Task
+scheduling is the same on both platforms"), [concurrency-v1.md](concurrency-v1.md) (what is
+offloaded and what is not), this page, and the "Suspension effects and non-suspending cleanup" row
+of [implementation-status.md](implementation-status.md). Tests: `tasks-read-file-offload` and
+`tasks-sleep-progress` execute the handoff on Windows under Wine and as Linux ELF, so the offload is
+verified on both sides; blocking-call isolation remains an acceptance gate named in
+[concurrency-v1.md](concurrency-v1.md), and nothing enforces the absence of a blocking foreign call
+today.
 
-## B4: Windows thread-per-blocking-call, IOCP deferred
+## B4: Windows runs the same green scheduler, thread-per-task is opt-in
 
-**Decision.** On Windows every I/O operation is synchronous and occupies its calling OS thread:
-`ReadFile`/`WriteFile`/`CloseHandle` with no `OVERLAPPED` structure and no completion port
-(`compiler/os-windows.grl:28-51`). Thread-per-blocking-call is the v1 policy. IOCP is a named future
-work item with the sketch below; it is not promised for v1 and no code is written for it yet.
+**Decision.** Task semantics are **the same on both platforms**: a `spawn`ned task is a green task
+on Windows exactly as on Linux. One Windows scheduler thread runs the tasks cooperatively, a task
+runs until it yields or blocks, `sleep`/`wait_fd`/I/O park the *task*, and a blocking host
+operation does not stall the other tasks because the runtime offloads it, just as on Linux. The
+thread-per-task scheduler that the earlier B4 decision shipped as the only Windows mode is kept as
+an **explicit opt-in** (`GRAIL_TASKS=thread`), because it is the better shape for CPU-bound fan-out
+once there is a `Send`/`Sync` check - and it is not the default precisely because there is none.
 
-**What is true today, verified, and worse than the plans say.** The portable runtime's scheduler
-treats a failed `epoll_create` as fatal (`rt_sched`, `compiler/runtime.grl:1318-1332`), and the
-Windows OS layer answers the readiness operations - epoll (291), eventfd (290), sockets, `mremap` -
-with `-ENOSYS` (`compiler/os-windows.grl:200`). So the first green-task spawn is not slow or
-degraded on Windows: **it aborts the process**. Reproduced in this review with a task-scope program:
-the same source prints `42` and exits 0 on Linux x86-64, and exits 134 with no output under Wine.
-OS threads, in contrast, do work on Windows x86-64 (`CreateThread`/`WaitForSingleObject`; the
-`thread-join` and `thread-wake` cases run under Wine), which is exactly why thread-per-blocking-call
-is the right v1 answer there.
+**Readiness mechanism, stated honestly.** Windows has no epoll, eventfd or timerfd, and the
+compiler's Win32 import table (`compiler/native.grl`) has no `CreateEvent`, `CreateWaitableTimer` or
+Winsock entry points this workstream may add (it is owned elsewhere). So the design uses the two
+primitives that exist:
 
-**IOCP sketch** (for the future work item, enough to pick it up without rediscovering the shape):
-one completion port created where the scheduler now creates its epoll fd; overlapped
-`ReadFile`/`WriteFile` with a completion key identifying the pending operation; a reactor thread
-calling `GetQueuedCompletionStatus` where the reactor now calls `epoll_wait`; the portable
-`rt_wait_ready`/`rt_suspend`/`rt_wake` protocol unchanged, with the readiness id translation living
-in `os-windows.grl`; `WaitOnAddress`/`WakeByAddress*` keep serving the futex operations. The
-prerequisite is that handles are opened as overlapped (including console handles) and that a
-Windows concurrency test lane exists, which is why this is not a port of one function.
+1. **Fibers, not a hand-written stack switch.** `compiler/native.grl` emits `ud2` for `raw_switch`
+   on the PE targets, so the Windows platform module switches with `CreateFiberEx`/`SwitchToFiber`/
+   `DeleteFiber`/`ConvertThreadToFiber` (declared in `compiler/os-windows.grl` as
+   `extern "C" lib "kernel32"`, which the short-import library and `tools/windows.mjs` pick up).
+   A task is a fiber on the single scheduler thread; the fiber proc is an `extern "C"` definition
+   because Win32 starts a fiber through a `cfn`.
+2. **The run queue parks on an address wait** (`WaitOnAddress`/`WakeByAddressAll` on the
+   scheduler's idle sequence word) - the same word the Linux build waits on with `FUTEX_WAIT` -
+   **and blocking primitives are offloaded to a helper thread** that wakes the parked task, which is
+   the policy the earlier B4 decision named thread-per-blocking-call, now applied *below* the task
+   abstraction instead of replacing it. So there is no waitable-event set and no socket-pair
+   self-pipe: for `host::read_file`, `host::write_file`, `host::command`, `host::read_fd`,
+   `host::write_fd` and `host::sleep_ms` the blocking call runs on its own thread (`rt_offload`) and
+   the task suspends on its park word; `rt_wait_fd` itself reports ready, because on Windows the
+   task is already parked inside the operation that could block.
 
-**Alternatives considered.** (a) Ship IOCP now: rejected for sequencing - the Windows port needs
-correct file and console I/O before it needs 10k concurrent connections, and an overlapped I/O lane
-without a Windows test runner would be unverified code. (b) `select`-based reactor: rejected, no
-per-operation completion, and sockets still need overlapped I/O to scale. (c) Emulate epoll with
-`WaitForMultipleObjects`: rejected, bounded at 64 handles and the wrong completion shape.
-(d) Keep green tasks "working" on Windows by silently serialising them: rejected - it would be a
-parallel API executing sequentially, which [concurrency-v1.md](concurrency-v1.md) explicitly
-forbids.
+**What is now identical, precisely.** `spawn`, `join`, `task_scope`, `parallel_map`, cancellation,
+result publication, scope-exit joining and the blocking host operations have the same observable
+behaviour on both platforms: a task runs until it yields or blocks, a parked task lets the others
+run, and `host::read_file` inside a task does not stop another task from making progress. What is
+*not* identical is the interleaving order guarantee and the cost model:
 
-**Consequence if wrong.** A Windows program that spawns a task aborts at the first spawn today, so
-the failure is immediate and loud rather than subtle. If thread-per-call is kept too long, a server
-pays one OS thread per blocked operation and runs into thread limits and per-thread stack memory
-(each green task already maps 256 KiB, so the same shape at 10k connections is not viable). If IOCP
-is adopted later, the portable suspend/resume protocol survives; only the OS layer changes.
+- Linux works the queue with one scheduler thread per CPU (clamped to 4-64), so two ready tasks can
+  run at the same time; Windows has one scheduler thread, so its queue is FIFO and a two-task
+  interleaving is deterministic. Portable code may rely on "runs until it yields or blocks" and on
+  scope/join, not on either order.
+- A task costs a 256 KiB stack mapping on Linux and a 64 KiB-in-256 KiB fiber on Windows; a blocked
+  task costs a scheduler thread on Linux and the only scheduler thread on Windows.
+- The opt-in `GRAIL_TASKS=thread` mode changes semantics, not just performance: each task is an OS
+  thread, so two tasks really run at once (no cooperative tick), a task that never yields still
+  progresses, suspension blocks that task's thread, `rt_wait_fd` returns immediately and
+  `rt_reactor_fence` is a no-op. It is the mode to use for CPU-bound fan-out and the mode to avoid
+  for anything that assumes tasks are serialised, until `Send`/`Sync` exists.
 
-**Enforced by.** `compiler/os-windows.grl` (`-ENOSYS` for readiness, synchronous `ReadFile`),
-`compiler/runtime.grl` (fatal scheduler start), [windows-backend.md](windows-backend.md), the
-readiness row B4, and the "Windows I/O" part of [implementation-status.md](implementation-status.md).
+**IOCP sketch** (unchanged future work item, for whoever picks it up): one completion port created
+where the scheduler now creates its epoll fd; overlapped `ReadFile`/`WriteFile` with a completion
+key identifying the pending operation; a reactor thread calling `GetQueuedCompletionStatus` where
+the reactor now calls `epoll_wait`; the portable `rt_wait_fd`/`rt_suspend`/`rt_wake` protocol
+unchanged, with the readiness translation living in `os-windows.grl`. That would replace the
+offload-a-blocking-primitive mechanism with real readiness and remove the helper thread per blocked
+call; it changes no task-visible semantics, which is why it is not a blocker for green tasks.
+
+**Earlier state, kept because it explains the code.** Before this change the Windows scheduler was
+thread-per-task, and before *that* the portable scheduler treated a failed `epoll_create` as fatal,
+so the first green-task spawn aborted the process on Windows (reproduced under Wine: exit 134 with
+no output, against `42` on Linux). The thread-per-task scheduler is what made `spawn`,
+`task_scope` and `parallel_map` work under Wine at all; it is now the opt-in mode rather than the
+default.
+
+**Alternatives considered.** (a) Hand-written stack switch on the PE targets: rejected - it needs
+`raw_switch` lowering in `compiler/native.grl`, which another workstream owns, and Win32 fibers are
+the supported way to switch stacks on Windows. (b) `CreateEvent` per wait plus
+`WaitForMultipleObjects` as the readiness mechanism: rejected - bounded at 64 handles, it needs an
+import the compiler does not have, and it would only serve timers, since there are no non-blocking
+handles to wait on. (c) A socket-pair self-pipe: rejected - Winsock is not imported and the runtime
+has no socket layer on Windows, so the pipe would be the only thing it used. (d) Keep thread-per-task
+as the default "because it works": rejected - it is exactly the semantic divergence this record
+removes, and it hides races that Linux would also have. (e) Ship IOCP now: rejected for sequencing -
+an overlapped-I/O lane is a bigger change and changes nothing user-visible that green tasks need.
+
+**Consequence if wrong.** If fibers turn out to be a poor fit (context-switch cost, tooling, or a
+host that already uses fibers), only `compiler/os-windows.grl`'s five context functions change: the
+portable scheduler, the task API and the tests are written against them. If the single scheduler
+thread is too slow for a workload, the opt-in thread mode is available today, and raising
+`rt_os_workers()` for Windows later would be a performance change that does not alter the contract
+(the "runs until it yields" rule is preserved by any number of scheduler threads).
+
+**Enforced by.** `compiler/os-windows.grl` (fibers, `rt_os_reactor()` = 0, one scheduler thread),
+`compiler/runtime.grl` (`rt_task_mode`/`rt_task_threads`, `rt_io`, `rt_offload`),
+`compiler/os-linux.grl` and `compiler/darwin.grl` (the same context functions, stack-switch based),
+`tools/windows.mjs` (`runtimeImports`) and `tools/test-windows.mjs` (declaration cross-check, fiber
+imports for task cases, `GRAIL_TASKS` for the opt-in case). Executed evidence under Wine:
+`tasks-scope-and-parallel-map`, `tasks-sleep-overlap`, `tasks-interleave-at-yield`,
+`tasks-sleep-progress`, `tasks-read-file-offload`, `tasks-thread-mode`. Documentation:
+[docs/ffi.md](../ffi.md) ("Task scheduling is the same on both platforms"),
+[concurrency-v1.md](concurrency-v1.md), [windows-backend.md](windows-backend.md).
 
 ## B5: abort never unwinds
 
@@ -407,9 +481,16 @@ one: the classification is shared with results, so only the marker changes. A wr
 classification is worse - it miscompiles silently - which is why the implementation must extend the
 executed record tests rather than adding a compile-only case.
 
-**Enforced by.** [docs/ffi.md](../ffi.md) (today: refused, with the decision recorded) and readiness
-rows A3/B7. The compiler currently rejects a record parameter passed by value; the implementation
-replaces that diagnostic with the syntax.
+**Enforced by.** [docs/ffi.md](../ffi.md) (the `byval` row and the syntax), readiness rows A3/B7, the
+book example `byval-record`, and `tests/ffi/byval_records.grl` with its C twins in
+`tests/ffi/byval_shim.c`: 4-, 8-, 16- and 24-byte records, mixed int/float fields, an ImVec2-shaped
+float pair, an embedded array, a `byval` parameter after six integer arguments, a record sharing the
+stack area with a following scalar, and a call through a `cfn` declaring the same signature - each
+twin returns a checksum over every field it received, and the fixture executes on x86-64, AArch64 and
+RISC-V 64. The refusals are pinned as `ffi-reject-byval-plain-record`, `ffi-reject-byval-scalar` and
+`ffi-reject-byval-callback`, and the Windows x86-64/ARM64 refusal is the diagnostic
+`byval is not implemented for the Windows x86-64 and Windows ARM64 ABIs; pass the record by
+pointer`.
 
 ## Corrections to earlier documents
 

@@ -1,0 +1,570 @@
+module borg_replay;
+use borg_events;
+use borg_journal;
+use core;
+use strings;
+
+// Session replay: folding a journal back into the in-memory session state.
+//
+// A journal is only useful if reading it back reconstructs the session that wrote it. Borg does
+// that with `SessionState::reduce`, which applies every event in order to a default state; this
+// module ports that fold for the five transcript kinds `borg_events` carries:
+//
+//   SessionState::default            session_store.rs:837-900  every field has a default, so an
+//                                                              empty journal is a valid session
+//   SessionState::reduce             session_store.rs:906-914  `for event in events { apply }`
+//   SessionState::apply              session_store.rs:929-935  `expected = latest + 1`; a sequence
+//                                                              that is not the next one is an error
+//   activity clock                   session_store.rs:582-602  which kinds move `activity_at`
+//   SessionStarted                   session_store.rs:945      `started_at = event.created_at`
+//   SessionTitled                    session_store.rs:947-959  only while the title was generated
+//   StatusChanged                    session_store.rs:1036-1041 status and detail, both replaced
+//   Message                          session_store.rs:1320-1336 first/latest prompt, latest reply
+//
+// The state reconstructed here is exactly the one those fields hold. It is not a transcript: Borg's
+// projection keeps the *session* facts (when it started, what it is called, what it is doing, the
+// last prompt and reply) and nowhere else in the fold are message rows rebuilt. A message log, a
+// goal, the plan and the agent roster are separate aggregates in Borg, fed by event kinds the port
+// does not carry yet, so inventing them here would be inventing semantics rather than replaying.
+//
+// Three rules are the reason this is a fold and not a decoder:
+//
+//   * a cursor that skips a sequence number is an error, not a gap to paper over
+//     (`session_store.rs:930`), so a journal with a hole in it refuses instead of reporting the
+//     state of a session that never existed;
+//   * a message whose `actor` or `status` is outside `EventActor` (contract.rs:2455) or
+//     `MessageStatus` (contract.rs:2470) cannot be represented in the model, so it is refused by
+//     name instead of being coerced into a field the model has no variant for;
+//   * an event carrying another session's `session_id` is refused, because a journal is one
+//     session's events and folding a second session into the same state would merge two transcripts.
+//
+// One rule deliberately does *not* refuse. A title event while the current title was *generated* is
+// dropped (`session_store.rs:952`), because that is the model's own rule: once generation has named
+// the session, later title events do not replace it. Replay reproduces the drop and counts it
+// (`titles_frozen`), so the state says so instead of the fold silently returning and the reader
+// having to guess whether anything happened.
+//
+// The typed kinds are applied through `borg_events`, not by re-decoding bytes, so replay cannot
+// disagree with the reader about what an event says; and because `decode_stream` hands back no
+// events at all when it refuses, a truncated journal propagates the reader's refusal instead of
+// yielding a state built from the events that happened to arrive first.
+
+// Why a journal could not be replayed.
+pub enum Reason {
+    // The byte reader refused the stream before any event reached the fold. The payload is the
+    // reader's status code (`borg_events` TRUNCATED_EVENT and friends).
+    Stream(u64),
+    // The event's sequence number is not the one the projection expected next.
+    Sequence,
+    // The event belongs to a different session than the one the journal started.
+    Session,
+    // A message actor outside `EventActor`'s four variants.
+    UnknownActor,
+    // A message status outside `MessageStatus`' four variants.
+    UnknownMessageStatus
+}
+
+// A refusal names where the fold stopped and why. `at` is the index of the event in the journal the
+// caller passed; a stream the reader refused has no index, because no event was handed over.
+pub struct Refusal {
+    at: u64?,
+    reason: Reason,
+    detail: string
+}
+
+// The reconstructed session: `SessionState` minus the fields whose event kinds are not ported.
+pub struct State {
+    session_id: string,
+    latest_sequence: u64,
+    started_at: string?,
+    activity_at: string?,
+    status: borg_journal::Status?,
+    status_detail: string?,
+    title: string?,
+    title_generated: bool,
+    title_usage_tokens: u64?,
+    title_model: string?,
+    first_prompt: string?,
+    latest_prompt: string?,
+    latest_response: string?,
+    events_seen: u64,
+    titles_applied: u64,
+    titles_frozen: u64
+}
+
+// `SessionState::default` (session_store.rs:837): every field starts empty, so an empty journal
+// replays to a session that has not started, has no title, no status and no prompts.
+pub fn empty() -> State {
+    return State {
+        session_id: "".text(),
+        latest_sequence: 0,
+        started_at: None,
+        activity_at: None,
+        status: None,
+        status_detail: None,
+        title: None,
+        title_generated: false,
+        title_usage_tokens: None,
+        title_model: None,
+        first_prompt: None,
+        latest_prompt: None,
+        latest_response: None,
+        events_seen: 0,
+        titles_applied: 0,
+        titles_frozen: 0
+    };
+}
+
+fn same<a, b>(left: (&a [u8]), right: (&b [u8])) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    for i in left.len() {
+        if left[i] != right[i] {
+            return false;
+        }
+    }
+    return true;
+}
+
+fn copy_text<a>(value: (&a string?)) -> string? {
+    match value {
+        Some(text) => { copied := text.text(); return Some(copied); },
+        None => { return None; }
+    }
+}
+
+fn copy_number<a>(value: (&a u64?)) -> u64? {
+    match value {
+        Some(number) => { return Some(number); },
+        None => { return None; }
+    }
+}
+
+// A status is an enum, so it is copied by name rather than moved out of the borrowed state, the
+// same way `borg_events` copies one out of a borrowed event.
+fn status_named<a>(name: (&a [u8])) -> borg_journal::Status {
+    mut out = borg_journal::starting();
+    match borg_events::status_of(name) {
+        mapped: borg_journal::Status => { out = mapped; },
+        failure: borg_events::EventError => { }
+    }
+    return out;
+}
+
+fn copy_status<a>(value: (&a borg_journal::Status?)) -> borg_journal::Status? {
+    match value {
+        Some(inner) => { return Some(status_named(&borg_journal::status_name(inner))); },
+        None => { return None; }
+    }
+}
+
+// `advances_activity_clock` (session_store.rs:594-599): a status that means work is starting or
+// waiting moves the clock; a terminal mark does not, because the work that caused it already moved
+// the clock moments earlier.
+fn active_status<a>(value: (&a borg_journal::Status)) -> bool {
+    match value {
+        Starting => { return true; },
+        Running => { return true; },
+        WaitingForApproval => { return true; },
+        _ => { return false; }
+    }
+}
+
+fn copy_state<a>(value: (&a State)) -> State {
+    return State {
+        session_id: value.session_id.text(),
+        latest_sequence: value.latest_sequence,
+        started_at: copy_text(&value.started_at),
+        activity_at: copy_text(&value.activity_at),
+        status: copy_status(&value.status),
+        status_detail: copy_text(&value.status_detail),
+        title: copy_text(&value.title),
+        title_generated: value.title_generated,
+        title_usage_tokens: copy_number(&value.title_usage_tokens),
+        title_model: copy_text(&value.title_model),
+        first_prompt: copy_text(&value.first_prompt),
+        latest_prompt: copy_text(&value.latest_prompt),
+        latest_response: copy_text(&value.latest_response),
+        events_seen: value.events_seen,
+        titles_applied: value.titles_applied,
+        titles_frozen: value.titles_frozen
+    };
+}
+
+// `EventActor` (contract.rs:2455-2460).
+fn known_actor<a>(name: (&a [u8])) -> bool {
+    if same(name, "user") { return true; }
+    if same(name, "assistant") { return true; }
+    if same(name, "tool") { return true; }
+    if same(name, "system") { return true; }
+    return false;
+}
+
+// `MessageStatus` (contract.rs:2470-2475).
+fn known_message_status<a>(name: (&a [u8])) -> bool {
+    if same(name, "queued") { return true; }
+    if same(name, "in_progress") { return true; }
+    if same(name, "complete") { return true; }
+    if same(name, "failed") { return true; }
+    return false;
+}
+
+// `advances_activity_clock` (session_store.rs:582-602) for the five ported kinds: a title is bookkeeping
+// and a terminal status is tidying up; everything else is activity.
+fn advances_clock<a>(event: (&a borg_events::Event)) -> bool {
+    tag := borg_events::tag_of(event);
+    if same(&tag, "session_titled") {
+        return false;
+    }
+    if same(&tag, "status_changed") {
+        match borg_events::status_value(event) {
+            Some(status) => { return active_status(&status); },
+            None => { return false; }
+        }
+    }
+    return true;
+}
+
+fn absent<a>(value: (&a string?)) -> bool {
+    match value {
+        Some(text) => { return false; },
+        None => { return true; }
+    }
+}
+
+// One event onto one state: `SessionState::apply` (session_store.rs:929). `at` is the event's index
+// in the journal the caller is folding, and is carried into any refusal so the diagnostic names the
+// row that could not be applied.
+pub fn apply<a>(state: (&a State), event: (&a borg_events::Event), at: u64) -> State | Refusal {
+    session := borg_events::event_session(event);
+    established := state.session_id.text();
+    if established.len() > 0 {
+        if !same(&established, &session) {
+            return Refusal { at: Some(at), reason: Reason::Session, detail: session };
+        }
+    }
+    // `saturating_add(1)` (session_store.rs:930): at the top of the range the expected sequence
+    // stays put rather than wrapping to zero, which would accept the first event again.
+    mut expected = state.latest_sequence;
+    if expected != 18446744073709551615 {
+        expected = expected + 1;
+    }
+    sequence := borg_events::event_sequence(event);
+    if sequence != expected {
+        return Refusal { at: Some(at), reason: Reason::Sequence, detail: format("{}/{}", expected, sequence) };
+    }
+    tag := borg_events::tag_of(event);
+    if same(&tag, "message") {
+        mut actor = "".text();
+        match borg_events::actor_value(event) {
+            Some(name) => { actor = name; },
+            None => { }
+        }
+        if !known_actor(&actor) {
+            return Refusal { at: Some(at), reason: Reason::UnknownActor, detail: actor };
+        }
+        mut row_status = "".text();
+        match borg_events::message_status_value(event) {
+            Some(name) => { row_status = name; },
+            None => { }
+        }
+        if !known_message_status(&row_status) {
+            return Refusal { at: Some(at), reason: Reason::UnknownMessageStatus, detail: row_status };
+        }
+    }
+    mut next = copy_state(state);
+    next.session_id = session;
+    next.latest_sequence = sequence;
+    next.events_seen = next.events_seen + 1;
+    if advances_clock(event) {
+        next.activity_at = Some(borg_events::event_created(event));
+    }
+    if same(&tag, "session_started") {
+        next.started_at = Some(borg_events::event_created(event));
+    } else if same(&tag, "session_titled") {
+        if next.title_generated {
+            // session_store.rs:952: a generated title is final, so this event changes nothing.
+            next.titles_frozen = next.titles_frozen + 1;
+        } else {
+            next.title = borg_events::title_value(event);
+            next.title_generated = borg_events::generated_value(event);
+            next.title_usage_tokens = borg_events::tokens_value(event);
+            next.title_model = borg_events::model_value(event);
+            next.titles_applied = next.titles_applied + 1;
+        }
+    } else if same(&tag, "status_changed") {
+        next.status = borg_events::status_value(event);
+        next.status_detail = borg_events::detail_value(event);
+    } else if same(&tag, "message") {
+        // session_store.rs:1320-1336: the first and latest prompt come from a user message, the
+        // latest reply from a completed assistant message, and an empty or blank text changes
+        // neither. `str::trim` strips Unicode whitespace; `strings::trim` strips the four ASCII
+        // whitespace bytes, a difference only a journal with exotic whitespace could see.
+        mut body = "".text();
+        match borg_events::text_value(event) {
+            Some(text) => { body = text; },
+            None => { }
+        }
+        mut actor = "".text();
+        match borg_events::actor_value(event) {
+            Some(name) => { actor = name; },
+            None => { }
+        }
+        mut row_status = "".text();
+        match borg_events::message_status_value(event) {
+            Some(name) => { row_status = name; },
+            None => { }
+        }
+        prompt := strings::trim(&body).text();
+        if prompt.len() > 0 {
+            if same(&actor, "user") {
+                if absent(&next.first_prompt) {
+                    next.first_prompt = Some(prompt.text());
+                }
+                next.latest_prompt = Some(prompt);
+            } else if same(&actor, "assistant") {
+                if same(&row_status, "complete") {
+                    next.latest_response = Some(prompt);
+                }
+            }
+        }
+    }
+    return next;
+}
+
+// `SessionState::reduce` (session_store.rs:906): apply every event in order, and stop at the first
+// one that cannot be applied. There is no partial state to return: a refusal means the journal does
+// not describe a session.
+pub fn replay<a>(events: (&a borg_events::Event[])) -> State | Refusal {
+    mut state = empty();
+    mut index = 0;
+    while index < events.len() {
+        match apply(&state, &events[index], index) {
+            next: State => { state = next; },
+            refusal: Refusal => { return refusal; }
+        }
+        index += 1;
+    }
+    return state;
+}
+
+// Replay a journal that was read from bytes. The reader refuses a stream whole - a truncated tail,
+// an unknown tag and an over-long length all come back with no events at all - so that refusal is
+// propagated with the reader's own code rather than folded into a state built from the events that
+// arrived first.
+pub fn replay_stream<a>(stream: (&a borg_events::Stream)) -> State | Refusal {
+    code := borg_events::stream_status(stream);
+    if code != borg_events::STREAM_OK {
+        return Refusal { at: None, reason: Reason::Stream(code), detail: "".text() };
+    }
+    events := borg_events::stream_events(stream);
+    return replay(&events);
+}
+
+// ---- the state, rendered ----
+//
+// Two states are the same when their fingerprints are: every field, in a fixed order, with text
+// length-prefixed so no two different states can render the same bytes. This is what the idempotence
+// property compares, and what gives a replay a value cheap enough to print and compare across
+// implementations.
+
+fn put_bytes<a>(out: (&mut u8[]), text: (&a [u8])) {
+    for byte in text {
+        out.push(byte);
+    }
+}
+
+fn put_key<a>(out: (&mut u8[]), key: (&a [u8])) {
+    if out.len() > 0 {
+        out.push(59);
+    }
+    put_bytes(out, key);
+    out.push(61);
+}
+
+fn put_number<a>(out: (&mut u8[]), key: (&a [u8]), value: u64) {
+    put_key(out, key);
+    shown := format("{}", value);
+    put_bytes(out, &shown);
+}
+
+fn put_flag<a>(out: (&mut u8[]), key: (&a [u8]), value: bool) {
+    put_key(out, key);
+    if value {
+        put_bytes(out, "true");
+    } else {
+        put_bytes(out, "false");
+    }
+}
+
+fn put_text<a>(out: (&mut u8[]), key: (&a [u8]), value: string?) {
+    put_key(out, key);
+    match value {
+        Some(text) => {
+            length := format("{}", text.len());
+            put_bytes(out, &length);
+            out.push(58);
+            put_bytes(out, &text);
+        },
+        None => { out.push(45); }
+    }
+}
+
+fn put_optional_number<a>(out: (&mut u8[]), key: (&a [u8]), value: u64?) {
+    put_key(out, key);
+    match value {
+        Some(number) => {
+            shown := format("{}", number);
+            put_bytes(out, &shown);
+        },
+        None => { out.push(45); }
+    }
+}
+
+// A status renders as its name, length-prefixed like any other text, so a fingerprint is a sequence
+// of the same three field shapes and nothing depends on where in the line a name happens to end.
+fn put_status<a>(out: (&mut u8[]), key: (&a [u8]), value: (&a borg_journal::Status?)) {
+    match value {
+        Some(inner) => {
+            name := borg_journal::status_name(inner);
+            put_text(out, key, Some(name));
+        },
+        None => { put_text(out, key, None); }
+    }
+}
+
+pub fn fingerprint<a>(state: (&a State)) -> string {
+    mut out = u8[];
+    put_number(&mut out, "seq", state.latest_sequence);
+    put_text(&mut out, "session", Some(state.session_id.text()));
+    put_text(&mut out, "started", copy_text(&state.started_at));
+    put_text(&mut out, "activity", copy_text(&state.activity_at));
+    put_status(&mut out, "status", &state.status);
+    put_text(&mut out, "detail", copy_text(&state.status_detail));
+    put_text(&mut out, "title", copy_text(&state.title));
+    put_flag(&mut out, "generated", state.title_generated);
+    put_optional_number(&mut out, "tokens", copy_number(&state.title_usage_tokens));
+    put_text(&mut out, "model", copy_text(&state.title_model));
+    put_text(&mut out, "first", copy_text(&state.first_prompt));
+    put_text(&mut out, "prompt", copy_text(&state.latest_prompt));
+    put_text(&mut out, "response", copy_text(&state.latest_response));
+    put_number(&mut out, "events", state.events_seen);
+    put_key(&mut out, "titles");
+    counters := format("{}/{}", state.titles_applied, state.titles_frozen);
+    put_bytes(&mut out, &counters);
+    return out.text();
+}
+
+// FNV-1a over the fingerprint: a checksum of the reconstructed state, not a digest. Two replays of
+// one journal must produce the same value, and so must a replay and the same events applied one at a
+// time.
+pub fn checksum<a>(state: (&a State)) -> u64 {
+    shown := fingerprint(state);
+    mut hash = 14695981039346656037;
+    for byte in &shown {
+        hash = hash ^ u64(byte);
+        hash = wrapping_mul(hash, 1099511628211);
+    }
+    return hash;
+}
+
+fn hex_digit(value: u64) -> u8 {
+    if value < 10 {
+        return u8(48 + value);
+    }
+    return u8(87 + value);
+}
+
+// The checksum as 16 lowercase hex digits, most significant first.
+pub fn checksum_text<a>(state: (&a State)) -> string {
+    mut value = checksum(state);
+    mut digits = u8[];
+    mut index = 0;
+    while index < 16 {
+        digits.push(hex_digit(value % 16));
+        value = value / 16;
+        index += 1;
+    }
+    mut out = u8[];
+    mut at = 16;
+    while at > 0 {
+        at -= 1;
+        out.push(digits[at]);
+    }
+    return out.text();
+}
+
+// ---- accessors ----
+
+pub fn session_of<a>(state: (&a State)) -> string { return state.session_id.text(); }
+pub fn sequence_of<a>(state: (&a State)) -> u64 { return state.latest_sequence; }
+pub fn events_of<a>(state: (&a State)) -> u64 { return state.events_seen; }
+pub fn titles_of<a>(state: (&a State)) -> string { return format("{}/{}", state.titles_applied, state.titles_frozen); }
+
+fn shown<a>(value: (&a string?)) -> string {
+    match value {
+        Some(text) => { return text.text(); },
+        None => { return "-".text(); }
+    }
+}
+
+fn shown_number<a>(value: (&a u64?)) -> string {
+    match value {
+        Some(number) => { return format("{}", number); },
+        None => { return "-".text(); }
+    }
+}
+
+pub fn started_of<a>(state: (&a State)) -> string { return shown(&state.started_at); }
+pub fn activity_of<a>(state: (&a State)) -> string { return shown(&state.activity_at); }
+pub fn status_of<a>(state: (&a State)) -> string {
+    match &state.status {
+        Some(inner) => { return borg_journal::status_name(inner); },
+        None => { return "-".text(); }
+    }
+}
+pub fn detail_of<a>(state: (&a State)) -> string { return shown(&state.status_detail); }
+pub fn title_of<a>(state: (&a State)) -> string { return shown(&state.title); }
+pub fn generated_of<a>(state: (&a State)) -> string {
+    if state.title_generated {
+        return "true".text();
+    }
+    return "false".text();
+}
+pub fn tokens_of<a>(state: (&a State)) -> string { return shown_number(&state.title_usage_tokens); }
+pub fn model_of<a>(state: (&a State)) -> string { return shown(&state.title_model); }
+pub fn first_prompt_of<a>(state: (&a State)) -> string { return shown(&state.first_prompt); }
+pub fn latest_prompt_of<a>(state: (&a State)) -> string { return shown(&state.latest_prompt); }
+pub fn latest_response_of<a>(state: (&a State)) -> string { return shown(&state.latest_response); }
+
+pub fn reason_name<a>(value: (&a Reason)) -> string {
+    match value {
+        Stream(code) => { return "stream".text(); },
+        Sequence => { return "sequence".text(); },
+        Session => { return "session".text(); },
+        UnknownActor => { return "unknown-actor".text(); },
+        UnknownMessageStatus => { return "unknown-message-status".text(); }
+    }
+}
+
+// `-` when the reader refused the stream: there is no event to point at.
+pub fn refusal_at<a>(value: (&a Refusal)) -> string {
+    return shown_number(&value.at);
+}
+
+pub fn refusal_reason<a>(value: (&a Refusal)) -> string {
+    return reason_name(&value.reason);
+}
+
+pub fn refusal_detail<a>(value: (&a Refusal)) -> string {
+    return value.detail.text();
+}
+
+// The reader's status code for a stream refusal, and `-` for a refusal the fold made itself.
+pub fn refusal_code<a>(value: (&a Refusal)) -> string {
+    match &value.reason {
+        Stream(code) => { return format("{}", code); },
+        _ => { return "-".text(); }
+    }
+}

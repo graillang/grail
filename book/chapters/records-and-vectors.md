@@ -29,7 +29,7 @@ byte and stops the program if the value does not fit.
 
 Popping an empty collection or indexing out of bounds aborts. Vectors of owners drop their
 remaining elements; callers own popped elements. `==` compares vectors of numbers element by element.
-`for value in values` copies scalar elements; a vector of owners is read with `for value in &values`.
+`for value in values` moves owned elements out of the vector and consumes it; plain values such as numbers are copied, so a numeric vector stays usable. `for value in &values` borrows the elements either way (see [Branches and loops](control-flow.html)).
 Any vector can be sliced (see [Views and slices](views.html)).
 
 **Try it:** use `u8[][]`, push `u8[]`, and inspect the popped buffer's length.

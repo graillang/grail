@@ -384,6 +384,77 @@ fn copy_optional<a>(value: (&a string?)) -> string? {
     }
 }
 
+// ---- typed accessors ----
+//
+// The accessors above render a field for display and answer `-` when a kind has no such field. A
+// fold over the journal needs the typed value instead: an absent optional has to stay
+// distinguishable from a text that happens to be `-`, and a status has to be the enum the model
+// compares rather than its name. Each of these returns `None` for every kind that does not carry
+// the field.
+
+pub fn title_value<a>(value: (&a Event)) -> string? {
+    match &value.kind {
+        Titled(inner) => { return Some(inner.title.text()); },
+        _ => { return None; }
+    }
+}
+
+pub fn generated_value<a>(value: (&a Event)) -> bool {
+    match &value.kind {
+        Titled(inner) => { return inner.generated; },
+        _ => { return false; }
+    }
+}
+
+pub fn tokens_value<a>(value: (&a Event)) -> u64? {
+    match &value.kind {
+        Titled(inner) => { return copy_optional_number(&inner.usage_tokens); },
+        _ => { return None; }
+    }
+}
+
+pub fn model_value<a>(value: (&a Event)) -> string? {
+    match &value.kind {
+        Titled(inner) => { return copy_optional(&inner.model); },
+        _ => { return None; }
+    }
+}
+
+pub fn status_value<a>(value: (&a Event)) -> borg_journal::Status? {
+    match &value.kind {
+        Status(inner) => { return Some(copy_status(&inner.status)); },
+        _ => { return None; }
+    }
+}
+
+pub fn detail_value<a>(value: (&a Event)) -> string? {
+    match &value.kind {
+        Status(inner) => { return copy_optional(&inner.detail); },
+        _ => { return None; }
+    }
+}
+
+pub fn actor_value<a>(value: (&a Event)) -> string? {
+    match &value.kind {
+        Message(inner) => { return Some(inner.actor.text()); },
+        _ => { return None; }
+    }
+}
+
+pub fn message_status_value<a>(value: (&a Event)) -> string? {
+    match &value.kind {
+        Message(inner) => { return Some(inner.status.text()); },
+        _ => { return None; }
+    }
+}
+
+pub fn text_value<a>(value: (&a Event)) -> string? {
+    match &value.kind {
+        Message(inner) => { return Some(inner.text.text()); },
+        _ => { return None; }
+    }
+}
+
 // ---- encoding ----
 
 fn put(members: (&mut borg_json::Member[]), key: (&[u8]), value: borg_json::Json) {
@@ -611,6 +682,13 @@ fn copy_list<a>(value: (&a string[])) -> string[] {
         index = index + 1;
     }
     return out;
+}
+
+// The zero event. `decode_event` uses it on a refusal path; a caller that has to hold an `Event`
+// where nothing decoded - a generated journal, a refused stream - gets it from here instead of
+// borrowing one it would have to fabricate.
+pub fn no_event() -> Event {
+    return empty_event();
 }
 
 fn empty_event() -> Event {

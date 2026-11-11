@@ -1,6 +1,8 @@
 # Language readiness before graphics and porting
 
 Audit date: 2026-11-09, against `main` with the nested-record, float-record and CodeView-locals work.
+Updated 2026-11-10: B1 stage 1, B2, B6 (FnMut) and B7 (`byval`) landed, so the rows below report what
+the compiler does instead of what was decided for it.
 Priority is Windows first, then Linux, then macOS. Evidence is the compiler, the test suites and
 the design notes named below; `implementation-status.md` is current except where noted.
 
@@ -10,7 +12,7 @@ the design notes named below; `implementation-status.md` is current except where
 | --- | --- | --- | --- |
 | A1 | FFI floats | **Done** for direct and `cfn` calls and for callbacks (parameters and results) on SysV, Win64, AAPCS64, RV64 LP64D | `tests/ffi/call_abi.grl`, `callback_floats.grl` on 3 Linux targets + Windows x64 (Wine) |
 | A2 | FFI narrow integers | **Done** for calls and callbacks (callee-side extension), and narrow C-record field stores write only their width | same; native case `ffi-c-record-narrow-assign` |
-| A3 | C records by value | **Done except by-value arguments**: results in registers or a hidden pointer on every ABI, including float-field results (SysV eightbyte classes, AAPCS64 HFAs, RV64 flattening); `f32`/`f64` fields; nested records embedded by value. Remaining: records passed *by value* as arguments (spelling `byval` decided, B7; implementation after B1) | `call_records.grl`, `float_records.grl`, `float_record_results.grl`, `nested_records.grl` |
+| A3 | C records by value | **Done**: results in registers or a hidden pointer on every ABI, including float-field results (SysV eightbyte classes, AAPCS64 HFAs, RV64 flattening); `f32`/`f64` fields; nested records embedded by value; arguments passed by value with `v: byval R` on SysV x86-64, AAPCS64 and RV64, from one classification shared with results. Windows x86-64 and ARM64 refuse the marker rather than guess MSVC's struct rules | `call_records.grl`, `float_records.grl`, `float_record_results.grl`, `nested_records.grl`, `byval_records.grl` |
 | A4 | Stack arguments / variadic | **Done**: any number of arguments; variadic C calls on SysV, Win64, AAPCS64 (Linux and Apple's stack convention), RV64 | `call_variadic.grl` on 3 Linux targets + Windows x64; `test-macos` (static) |
 | A5 | Windows FFI / COM | **Done**: `extern "C"` calls and callbacks (Win64 thunk); COM methods of any arity and with floats through a typed `cfn` vtable slot | Windows suite: 33 checks, 19 under Wine; `call_com_slot.grl` |
 | A6 | Dynamic loading | **Done**: Windows x64 (Wine), Linux x86-64/AArch64/RISC-V (host-TLS bridge; executed under qemu with glibc sysroots), macOS linked for both targets | `dlopen.grl`, `ffi-dynamic-loading`, `test-macos` |
@@ -19,12 +21,13 @@ the design notes named below; `implementation-status.md` is current except where
 | A9 | Process stdio capture | **Done** (`pipe`, `spawn_with`, `read_to_end`) | Linux + Wine |
 | A10 | Windows ARM64 threads | **Done statically** (bridge emitted and published); no ARM64 Windows runner | ARM64 static checks |
 | A11 | Mutable/borrowed captures, borrowed closure params | **Done**: borrowed captures, mutable captures (`FnMut`) and exclusive calls | Closures capture references and views and cannot escape their borrow (native cases `closure-captures-reference`, `closure-borrowed-capture-escape-rejected`); a closure that writes a capture is `FnMut` and calling it takes exclusive access (B6: `closure-fnmut-counter`, `closure-fnmut-second-call-rejected`, `closure-fnmut-not-fn-rejected`). A by-value `FnMut` parameter cannot be called (parameters are not mutable storage); adapters take `&mut FnMut(...)`. `docs/design/closures.md` |
-| A12 | Iteration | **Partial**: `vecs::fold` (any type), `any/all/count/position_num`; generic predicates need A11 | native case `vecs-fold-and-predicates` |
+| A12 | Iteration | **Partial**: counted and range loops, `for k, v in &map` / `&mut map` over insertion order, and consuming loops over owned vector elements; `vecs::fold` (any type), `any/all/count/position_num`. The stdlib predicates still take `Fn`, so a mutating comparator is refused there | native cases `consume-loop-semantics`, `hashmap-iteration-order-and-model-3000`, `vecs-fold-and-predicates` |
 | A13 | Debug info | **Done for line tables and typed locals**: DWARF lines + base types on Linux x86-64, AArch64 and RISC-V 64 (`--verify` clean; gdb prints typed locals); CodeView on Windows x64 with line tables and S_GPROC32/S_REGREL32 symbols (typed, rbp-relative parameters and locals) in the PDB. Remaining: record/string member layout (owned values show as their 8-byte handle) | `tools/test-debug-lines.mjs` |
 
-Remaining implementable core gap: record and string member layout in the debug info. Everything
-else in A1-A13 is either done or waits on a decided item in section B (by-value record arguments get
-B7's `byval` spelling; mutating closure captures are implemented under B6's rules).
+Remaining implementable core gap: record and string member layout in the debug info. Every other
+A-row is done or explicitly partial (A12); nothing in A waits on a B decision any more. B2, B6 and B7
+are implemented and B1's stage 1 has landed - the parts of B1 and B7 that remain are the checked
+module-interface artifact and the Windows struct ABI, named in their own sections.
 
 ## B. Owner decisions (settled 2026-11-10)
 
@@ -35,13 +38,13 @@ is not asked again:
 
 | # | Decision | Status | One-line summary |
 | --- | --- | --- | --- |
-| B1 | Separate compilation and checked module interfaces | **Accepted, implementation starting** | Per-module objects plus a checked text interface with a hash-verified dependency list; the plan of record is [separate-compilation.md](separate-compilation.md). See [B1](decisions-b2-b6.md#b1-separate-compilation-accepted). |
+| B1 | Separate compilation and checked module interfaces | **Stage 1 implemented** (`grail build --split`, Linux x86-64) | Emission is cut at module boundaries, so each module gets its own assembly file and object and the link happens once: assemble time −38 % and total ~17.3 s → ~16.8 s on the compiler, with identical code. The checked text interface with a hash-verified dependency list is still the plan of record ([separate-compilation.md](separate-compilation.md)). See [B1](decisions-b2-b6.md#b1-separate-compilation-accepted). |
 | B2 | Authority / capability model for OS access | **Implemented** (`lib/authority.grl`, `--deny-ambient-host`) | OS access is an owned grant with lexical, component-wise containment, and denial is distinct from an OS error. Ambient `host::` remains the default and is a recorded deviation until untrusted or plugin code arrives. See [authority.md](../authority.md) and [B2](decisions-b2-b6.md#b2-ambient-host-authority-a-recorded-deviation). |
 | B3 | Suspension and blocking contract for foreign calls | **Implemented: a foreign call blocks the executing thread** | No green-task offload, suspension effect or isolation is promised for `extern "C"` calls in v1, and FFI stays main-thread-only because the host TLS base is process-wide. See [B3](decisions-b2-b6.md#b3-foreign-calls-block-the-executing-thread). |
-| B4 | Windows I/O readiness model | **Implemented: thread-per-task on Windows, IOCP deferred** | Synchronous `ReadFile`/`WriteFile` on Windows; IOCP is a named future work item with a sketch, and green tasks on Windows abort at scheduler start today. See [B4](decisions-b2-b6.md#b4-windows-thread-per-blocking-call-iocp-deferred). |
+| B4 | Windows I/O readiness model | **Implemented: green tasks on Windows (fibers on one scheduler thread), thread-per-task as opt-in, IOCP deferred** | Synchronous `ReadFile`/`WriteFile` and no epoll/eventfd/timerfd, so a blocking host operation runs on a helper thread while the task parks; task semantics now match Linux, and `GRAIL_TASKS=thread` selects the old thread-per-task scheduler. IOCP is a named future work item with a sketch. See [B4](decisions-b2-b6.md#b4-windows-runs-the-same-green-scheduler-thread-per-task-is-opt-in). |
 | B5 | Abort / unwind policy | **Decided: abort never unwinds** | `rt_abort` raises `SIGABRT` (Windows: `ExitProcess(134)`) and runs no cleanup at all - no `defer`, no drops, no message; nothing may unwind across the C boundary, which the compiler does not enforce. See [B5](decisions-b2-b6.md#b5-abort-never-unwinds). |
-| B6 | Closure capture model | **Decided: references and views are captured, `FnMut` deferred** | Closures capture direct references/views and cannot outlive the borrow (rejected: `returned borrow escapes its declared input lifetime`); mutating a capture is rejected today, and the six rules for `FnMut` are fixed in advance. See [B6](decisions-b2-b6.md#b6-references-captured-fnmut-deferred). |
-| B7 | Records passed by value to C | **Accepted, spelling `byval`**, implementation after B1 | `v: byval R` passes the whole record; bare `R` stays the C `R *`, and the per-ABI result classifier is reused for arguments. See [B7](decisions-b2-b6.md#b7-byval-record-parameters-accepted). |
+| B6 | Closure capture model | **Implemented, `FnMut` included** | Closures capture direct references/views and cannot outlive the borrow (rejected: `returned borrow escapes its declared input lifetime`); a closure that writes a capture is `FnMut`, its binding must be mutable, and a call takes the closure exclusively. A `FnMut` where `Fn` is required is refused. See [B6](decisions-b2-b6.md#b6-references-captured-fnmut-implemented). |
+| B7 | Records passed by value to C | **Implemented** for x86-64, AArch64 and RISC-V 64; Windows x86-64 and ARM64 refuse `byval` | `v: byval R` passes the whole record; bare `R` stays the C `R *`, and the per-ABI result classifier is reused for arguments. See [B7](decisions-b2-b6.md#b7-byval-record-parameters-accepted). |
 
 ## C. Libraries (not language core; needed by the ports, scheduled with them)
 
@@ -103,6 +106,7 @@ microseconds for ordinary magnitudes, more for very large or small exponents).
 
 A1-A5 (one compiler batch), A6, A7-A9, A10, A11-A12, A13; one bootstrap refresh per compiler
 batch. The B-items are decided (section B above and
-[decisions-b2-b6.md](decisions-b2-b6.md)): B1 and B7 are being implemented, B2-B6 are settled and
-binding, and each names the condition that would reopen it. Graphics work (D3D12 pipelines,
+[decisions-b2-b6.md](decisions-b2-b6.md)): B2, B6 and B7 are implemented, B1's stage 1 has landed and
+its checked interface artifact is the next increment, B3-B5 describe behaviour the code already has,
+and each item names the condition that would reopen it. Graphics work (D3D12 pipelines,
 presentation, Metal) waits for the checkpoint after section A.

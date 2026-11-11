@@ -116,6 +116,17 @@
     "note": "extern C out-parameters on Win64: the slot address is the C H *, a null-initialized slot reads as zero, and the callee's write is visible to Grail; the out slot as a stack argument and as the last argument after a record pointer and a two-word view"
   },
   {
+    "name": "ffi-record-pointers",
+    "file": "tests/ffi/record_pointers.grl",
+    "shim": {
+      "windows-x86_64": "tests/ffi/shim.c",
+      "windows-aarch64": "tests/ffi/shim.c"
+    },
+    "stdout": "13\n5\n0\n4194304\n0\n0\n110\n77\n1\n433\n8\n",
+    "status": 0,
+    "note": "records by pointer and record out-parameters on Win64: cptr(&r) is the struct address a create-info field holds, &mut R is the callee's T *, an array of handles crosses out and back and the handle Grail reads equals the one C wrote, and one count record across two declarations of one symbol exits without aborting"
+  },
+  {
     "name": "ffi-call-words",
     "source": "\n// More than six word arguments. The per-target integer register file decides where the seventh and\n// eighth words go - registers on AAPCS64 and RISC-V 64, the outgoing stack area on x86-64 SysV - and\n// the ninth word is on the stack everywhere. Every C twin weights its arguments by position, so a\n// word that is dropped, duplicated or read from the wrong place changes the printed sum.\nextern \"C\" lib \"shim.o\" fn c_words7(a0: i64, a1: i64, a2: i64, a3: i64, a4: i64, a5: i64, a6: i64) -> i64;\nextern \"C\" lib \"shim.o\" fn c_words8(\n    a0: i64, a1: i64, a2: i64, a3: i64, a4: i64, a5: i64, a6: i64, a7: i64\n) -> i64;\nextern \"C\" lib \"shim.o\" fn c_words9(\n    a0: i64, a1: i64, a2: i64, a3: i64, a4: i64, a5: i64, a6: i64, a7: i64, a8: i64\n) -> i64;\nextern \"C\" lib \"shim.o\" fn c_words9_order(\n    a0: i64, a1: i64, a2: i64, a3: i64, a4: i64, a5: i64, a6: i64, a7: i64, a8: i64\n) -> i64;\nextern \"C\" lib \"shim.o\" fn c_words8n(a0: i32, a1: i32, a2: i32, a3: i32, a4: i32, a5: i32, a6: i32, a7: i32) -> i32;\n\n// A value the compiler cannot fold: each argument below is produced by a Grail call immediately\n// before the foreign call, so the seventh and eighth words are moved into the last argument\n// registers by a store the optimizer must keep alive across the call.\nfn step(x: i64) -> i64 {\n    return x * 3 + 1;\n}\n\nfn main() -> u64 {\n    unsafe {\n        println(c_words7(1, 2, 3, 4, 5, 6, 7));\n        println(c_words8(1, 2, 3, 4, 5, 6, 7, 8));\n        println(c_words9(1, 2, 3, 4, 5, 6, 7, 8, 9));\n        println(c_words9_order(1, 2, 3, 4, 5, 6, 7, 8, 9));\n        println(c_words8n(1, 2, 3, 4, 5, 6, 7, 8));\n        println(c_words9(step(1), step(2), step(3), step(4), step(5), step(6), step(7), step(8), step(9)));\n        println(c_words8(step(9), step(8), step(7), step(6), step(5), step(4), step(3), step(2)));\n        println(c_words7(step(2), step(4), step(6), step(8), step(10), step(12), step(14)));\n    }\n    return 0;\n}\n",
     "shim": {
@@ -216,7 +227,8 @@
     "linux": true,
     "stdout": "42\n9\n",
     "status": 0,
-    "note": "spawn/task_scope/parallel_map under the thread-per-task scheduler (this used to abort on a failed epoll_create)"
+    "note": "spawn/task_scope/parallel_map on the green scheduler: fibers on one scheduler thread, the same cooperative semantics Linux has",
+    "tasks": true
   },
   {
     "name": "tasks-sleep-overlap",
@@ -224,7 +236,8 @@
     "linux": true,
     "stdout": "6\ntrue\n",
     "status": 0,
-    "note": "four sleeping tasks overlap: suspension is the task thread's own blocking sleep, not a serialised wait"
+    "note": "four sleeping tasks overlap: each parks the task and lets the others run (the sleep runs on a helper thread because Windows has no timerfd)",
+    "tasks": true
   },
   {
     "name": "ffi-nested-records",
@@ -236,5 +249,75 @@
     "stdout": "49044\n21\n3\n-7\n100000000000\n42\n9\n77\n154\n6\n7\n42\n",
     "status": 0,
     "note": "extern records embedded by value at C offsets"
+  },
+  {
+    "name": "tasks-interleave-at-yield",
+    "file": "tests/concurrency/interleave.grl",
+    "entry": "main",
+    "tasks": true,
+    "stdout": "aaabbbaaabbb3\n",
+    "status": 0,
+    "note": "one scheduler thread, FIFO run queue: a task runs until it yields, so the two tasks alternate in a fixed order and neither is preempted mid-run. Not run as ELF: a Linux queue has a worker per CPU, where the order is deliberately free."
+  },
+  {
+    "name": "tasks-sleep-progress",
+    "file": "tests/concurrency/sleep_progress.grl",
+    "entry": "main",
+    "tasks": true,
+    "linux": true,
+    "stdout": "702\n",
+    "status": 0,
+    "note": "a task parked in host::sleep_ms does not stop another task from making progress: the sleeper reads the word the other task wrote while it slept"
+  },
+  {
+    "name": "tasks-read-file-offload",
+    "file": "tests/concurrency/read_file_offload.grl",
+    "entry": "main",
+    "tasks": true,
+    "linux": true,
+    "stdout": "512\n",
+    "status": 0,
+    "note": "host::read_file from a task hands the blocking I/O to an offload thread and parks the task (rt_blocking_call/rt_offload), so another task runs while the file is being read, on Windows as on Linux"
+  },
+  {
+    "name": "tasks-thread-mode",
+    "file": "tests/concurrency/thread_mode.grl",
+    "entry": "main",
+    "tasks": true,
+    "linux": true,
+    "env": {
+      "GRAIL_TASKS": "thread"
+    },
+    "stdout": "1\n2\n",
+    "status": 0,
+    "note": "the opt-in thread-per-task scheduler (GRAIL_TASKS=thread) still runs: a task that never yields makes progress beside another because both own an OS thread; rt_task_threads() reports the mode as 1"
+  },
+  {
+    "name": "command-with-env",
+    "source": "use host;\nfn main() {\n    mut env = u8[][];\n    env.push(\"FOO=bar\".copy());\n    mut argv = u8[][];\n    argv.push(\"cmd\".copy());\n    argv.push(\"/c\".copy());\n    argv.push(\"if \\\"%FOO%\\\"==\\\"bar\\\" (exit 3) else (exit 9)\".copy());\n    println(host::command_with(argv, env));\n}\n",
+    "stdout": "3\n",
+    "status": 0,
+    "note": "CreateProcessA with an explicit environment block: FOO reaches the child"
+  },
+  {
+    "name": "command-inherit-env",
+    "source": "use host;\nfn main() {\n    mut argv = u8[][];\n    argv.push(\"cmd\".copy());\n    argv.push(\"/c\".copy());\n    argv.push(\"if defined PATH (exit 5) else (exit 6)\".copy());\n    println(host::command(argv));\n}\n",
+    "stdout": "5\n",
+    "status": 0,
+    "note": "host::command passes a NULL environment block, so the child keeps this process's variables"
+  },
+  {
+    "name": "command-empty-env",
+    "source": "use host;\nfn main() {\n    mut env = u8[][];\n    mut argv = u8[][];\n    argv.push(\"cmd\".copy());\n    argv.push(\"/c\".copy());\n    argv.push(\"if defined PATH (exit 5) else (exit 6)\".copy());\n    println(host::command_with(argv, env));\n}\n",
+    "stdout": "6\n",
+    "status": 0,
+    "note": "an explicit empty block replaces the environment; Wine still adds its own system variables, PATH is not one of them"
+  },
+  {
+    "name": "command-argv-round-trip",
+    "source": "use host;\nfn main() {\n    if host::argc() == 3 {\n        println(host::arg(1));\n        println(host::arg(2));\n    } else {\n        if host::argc() == 1 {\n            mut env = host::environment();\n            mut argv = u8[][];\n            argv.push(host::arg(0));\n            argv.push(\"one two\".copy());\n            argv.push(\"q\\\"uote\\\\ tail\".copy());\n            println(host::command_with(argv, env));\n        } else {\n            println(host::argc());\n        }\n    }\n}\n",
+    "stdout": "one two\nq\"uote\\ tail\n0\n",
+    "status": 0,
+    "note": "the argument vector is quoted back into a command line: a spaced argument, a literal quote and a backslash reach the child unchanged"
   }
 ]

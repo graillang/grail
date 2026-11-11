@@ -22,6 +22,7 @@ export const imports = {
     'CloseHandle',
     'CreateDirectoryA',
     'CreateFileA',
+    'CreateProcessA',
     'CreateThread',
     'DeleteFileA',
     'ExitProcess',
@@ -31,6 +32,7 @@ export const imports = {
     'GetCurrentProcessId',
     'GetEnvironmentStringsA',
     'GetEnvironmentVariableA',
+    'GetExitCodeProcess',
     'GetFileAttributesA',
     'GetLastError',
     'GetStdHandle',
@@ -58,8 +60,22 @@ export const imports = {
     'WakeByAddressAll',
   ],
 };
+// Win32 entry points the *runtime* declares for itself, in compiler/os-windows.grl, with
+// `extern "C" lib "kernel32"`. They are not in the compiler's table because the compiler never
+// emits them: only the Windows platform module calls them (green-task fibers). The list here is
+// cross-checked against those declarations by tools/test-windows.mjs.
+export const runtimeImports = {
+  'kernel32.dll': [
+    'ConvertThreadToFiber',
+    'CreateFiberEx',
+    'DeleteFiber',
+    'SwitchToFiber',
+  ],
+};
 // Flat list used to cross-check the compiler's import table.
 export const kernel32 = Object.values(imports).flat();
+// Every symbol a linked Windows program may need a short import for.
+export const linked = [...Object.values(imports).flat(), ...Object.values(runtimeImports).flat()];
 const workDirectory = join(root, '.work/windows');
 
 // A COFF short import object: a 20-byte import header followed by "Symbol\0DLL\0". LLD turns these

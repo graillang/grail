@@ -152,7 +152,127 @@ fn rt_accept4(fd: u64) -> u64 {
     return raw_syscall4(242, fd, 0, 0, 526336);
 }
 
+// Runs `argv` (a NUL-terminated table of words) once per candidate in `paths` and waits for the
+// child. `envp` is a NUL-terminated "NAME=VALUE" table the child starts with, or 0 to inherit this
+// process's environment. fork/execve/wait4 only: every candidate, every string and the whole
+// environment are prepared by the caller, so the post-fork child allocates nothing, takes no
+// runtime lock and runs no cleanup.
+//
+// Returns 0..255 for an exit code, 128+N when signal N ended the child, and 256+errno when the child
+// could not be forked or reaped.
+fn rt_spawn_wait(paths: u64, argv: u64, envp: u64) -> u64 {
+    mut environment = envp;
+    if environment == 0 {
+        environment = raw_load(raw_state() + 16);
+    }
+    child := rt_syscall(57, 0, 0, 0);
+    if child == 0 {
+        n := rt_len(paths);
+        mut i = 0;
+        while i < n {
+            // execve only returns when the candidate failed; the next one is tried with the same
+            // environment. No dynamic loader is involved, so envp is the child's whole environment.
+            rt_syscall(59, rt_at(paths, i), argv, environment);
+            i += 1;
+        }
+        rt_syscall(60, 127, 0, 0);
+    }
+    if rt_error(child) {
+        return 256 + wrapping_sub(0, child);
+    }
+    status := rt_alloc(8);
+    mut waited = 0;
+    while 1 {
+        waited = rt_syscall(61, child, status, 0);
+        if waited != wrapping_sub(0, 4) {
+            break;
+        }
+    }
+    mut result = 0;
+    if rt_error(waited) {
+        result = 256 + wrapping_sub(0, waited);
+    } else {
+        code := raw_load(status);
+        sig := code & 127;
+        if sig != 0 {
+            result = 128 + sig;
+        } else {
+            result = rt_div(code, 256) & 255;
+        }
+    }
+    rt_free(status);
+    return result;
+}
+
 // Linux keeps argv/envp from the entry stub and needs no further process setup.
 fn rt_os_init() -> u64 {
+    return 0;
+}
+
+// ---- green-task execution contexts ----
+// Linux has both halves of the green design: a direct stack switch (raw_switch, emitted for the ELF
+// targets) and a readiness reactor (epoll plus eventfd/timerfd), so a task parks on an epoll
+// registration and a host operation that would block is offloaded instead (rt_offload).
+fn rt_os_reactor() -> u64 {
+    return 1;
+}
+// Scheduler threads behind the shared run queue: one per CPU, clamped to [4, 64].
+fn rt_os_workers() -> u64 {
+    mut workers = rt_cpus();
+    if workers < 4 {
+        workers = 4;
+    }
+    if 64 < workers {
+        workers = 64;
+    }
+    return workers;
+}
+fn rt_os_sched_prepare() -> u64 {
+    return 0;
+}
+// A task stack with a guard page below it. Its initial switch frame is what the target's switch
+// saves, and the address it resumes into is rt_green_main.
+fn rt_os_ctx_new(t: u64) -> u64 {
+    size := 262144;
+    stack := raw_map(size);
+    if rt_error(stack) {
+        rt_abort();
+    }
+    if rt_error(rt_syscall(10, stack, 4096, 0)) {
+        rt_abort();
+    }
+    raw_store(t + 8, stack);
+    raw_store(t + 16, size);
+    // x86-64 8 words (resume first); AArch64 22 words (resume first); RISC-V 26 words (resume
+    // last).
+    target := raw_target();
+    mut words = 8;
+    mut slot = 0;
+    if target == 1 {
+        words = 22;
+    }
+    if target == 2 {
+        words = 26;
+        slot = 25;
+    }
+    frame := stack + size - words * 8;
+    raw_store(frame + slot * 8, rt_green_main);
+    raw_store(t, frame);
+    return frame;
+}
+fn rt_os_ctx_enter(t: u64) -> u64 {
+    w := raw_tp_get();
+    raw_switch(w + 8, raw_load(t));
+    return 0;
+}
+fn rt_os_ctx_leave(t: u64) -> u64 {
+    w := raw_tp_get();
+    raw_switch(t, raw_load(w + 8));
+    return 0;
+}
+fn rt_os_ctx_release(t: u64) -> u64 {
+    if rt_error(rt_syscall(11, raw_load(t + 8), raw_load(t + 16), 0)) {
+        rt_abort();
+    }
     return 0;
 }

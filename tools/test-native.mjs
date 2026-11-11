@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, mkdirSync, rmSync, readdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, rmSync, readdirSync, existsSync } from 'node:fs';
 import { join, basename, resolve, dirname } from 'node:path';
 import assert from 'node:assert/strict';
 import { root, compilerSources, hostTarget, targetName, buildCompiler, compileProgram, execute } from './native.mjs';
@@ -15,6 +15,29 @@ const compiler = buildCompiler();
 const work = join(root, '.work/native-tests', target);
 mkdirSync(work, { recursive: true });
 const cases = JSON.parse(readFileSync(join(root, 'tests/native-cases.json'), 'utf8'));
+
+// A full run is minutes per backend, so the runner is sliceable. All three knobs are opt-in and a
+// plain invocation behaves exactly as before:
+//   GRAIL_TEST_FILTER=<regex>   only cases whose name matches (iterate on one area)
+//   GRAIL_TEST_SHARD=<i>/<n>     run shard i of n, chosen by position (parallel gates)
+//   GRAIL_TEST_RESUME=1          skip cases that already passed for this compiler + backend
+const filterArg = process.env.GRAIL_TEST_FILTER;
+const filter = filterArg ? new RegExp(filterArg) : null;
+const shardArg = process.env.GRAIL_TEST_SHARD;
+let shard = null;
+if (shardArg) {
+  const match = /^(\d+)\/(\d+)$/.exec(shardArg);
+  assert.ok(match, `GRAIL_TEST_SHARD must be i/n, got ${shardArg}`);
+  const [index, count] = [Number(match[1]), Number(match[2])];
+  assert.ok(count >= 1 && index >= 1 && index <= count, `GRAIL_TEST_SHARD ${shardArg}: index must be 1..${count}`);
+  shard = { index: index - 1, count };
+}
+const resume = process.env.GRAIL_TEST_RESUME === '1';
+// The marker names the compiler (its path is a content hash) and the backend, so a rebuilt compiler
+// or a different --backend never reuses another run's passes.
+const backend = `${process.env.GRAIL_BACKEND ?? 'native'}${process.env.GRAIL_VERIFY_FACTS === '1' ? '+facts' : ''}`;
+const markers = join(work, 'pass', basename(compiler) + '-' + backend);
+if (resume) mkdirSync(markers, { recursive: true });
 const legacyFiles = new Set();
 for (const test of cases) {
   if (test.removedSyntax !== undefined) assert.ok(test.removedSyntax === true && test.reject, `${test.name}: removedSyntax requires an intentional rejection`);
@@ -57,10 +80,15 @@ for (let i = 0; i < cases.length; i++) {
 }
 let passed = 0;
 let skipped = 0;
-for (const test of cases) {
+let filtered = 0;
+let resumed = 0;
+for (const [position, test] of cases.entries()) {
   // A case may name the targets it applies to (`"targets": ["x86_64"]`), for fixtures that link a
   // host C library or exercise a host-only facility.
   if (test.targets && !test.targets.includes(target)) { skipped++; continue; }
+  if (filter && !filter.test(test.name)) { filtered++; continue; }
+  if (shard && position % shard.count !== shard.index) { filtered++; continue; }
+  if (resume && existsSync(join(markers, test.name))) { resumed++; continue; }
   // Only a documented, explicit legacyRefs reason may opt a fixture out of typed mode.
   const typedRefs = test.legacyRefs === undefined;
   const directory = join(work, test.name);
@@ -80,9 +108,27 @@ for (const test of cases) {
     if (test.diagnostic) assert.ok(`${result.stdout}${result.stderr}`.includes(test.diagnostic), `${test.name}: expected diagnostic ${test.diagnostic}: ${result.stdout}${result.stderr}`);
     assert.equal(readFileSync(assembly, 'utf8'), 'prior valid artifact', `${test.name}: invalid program overwrote prior output`);
   } else {
+    // Interface-first: emit one interface per module, then compile the same program against them.
+    // The interface build is the build this case's behaviour is asserted on when the case asks for
+    // it, so a gap in an interface is a test failure rather than a silent difference.
+    let viaInterface;
+    if (test.interfaces) {
+      const ifaces = join(directory, 'ifaces');
+      const numeric = [...(test.defaultU64 === false ? [] : ['--default-u64']), ...(typedRefs ? ['--typed-refs'] : [])];
+      const emit = execute(compiler, [...numeric, '--target', target, '--overflow=' + (test.overflow ?? 'checked'), '--emit-interface', ifaces, join(directory, 'emit.s'), ...files, runtime, osRuntime]);
+      assert.equal(emit.status, 0, `${test.name}: emitting interfaces failed: ${emit.stdout}${emit.stderr}`);
+      const verify = execute(compiler, [...numeric, '--target', target, '--interface', ifaces, '--verify-interface', join(directory, 'verify.s'), ...files, runtime, osRuntime]);
+      assert.equal(verify.status, 0, `${test.name}: interfaces disagree with their sources: ${verify.stdout}${verify.stderr}`);
+      viaInterface = { ifaces };
+    }
     const executable = compileProgram(compiler, files, directory, { target, overflow: test.overflow ?? 'checked', defaultU64: test.defaultU64 !== false, typedRefs, runtime, osRuntime });
+    // The interface build is a second program from the same sources; it has to behave the same.
+    const interfaceExecutable = viaInterface ? compileProgram(compiler, files, directory, { target, overflow: test.overflow ?? 'checked', defaultU64: test.defaultU64 !== false, typedRefs, runtime, osRuntime, name: 'program-interface', interfaces: viaInterface.ifaces }) : null;
     if (test.compileOnly) { passed++; continue; }
-    const result = execute(executable, test.args ?? [], target, { cwd: directory });
+    // A case may pin the environment it needs (`"env": {"GRAIL_POOL_WORKERS": "1"}`), which is how a
+    // test proves a pool size the host would not otherwise choose. Everything else is inherited.
+    const options = test.env ? { cwd: directory, env: { ...process.env, ...test.env } } : { cwd: directory };
+    const result = execute(executable, test.args ?? [], target, options);
     if (result.error) throw result.error;
     // A case that dies by signal can still pin its output: an abort must not resume the foreign or
     // Grail code that ran before it, so what was printed up to the abort is part of the contract.
@@ -92,11 +138,20 @@ for (const test of cases) {
       const occurrences = errors.split(test.stderr).length - 1;
       assert.equal(occurrences, test.stderrCount ?? 1, `${test.name}: expected ${test.stderrCount ?? 1} x ${JSON.stringify(test.stderr)} in ${JSON.stringify(errors)}`);
     }
+    if (interfaceExecutable) {
+      const ifaceResult = execute(interfaceExecutable, test.args ?? [], target, options);
+      assert.equal(ifaceResult.status, result.status, `${test.name}: the interface build exits differently: ${ifaceResult.stderr}`);
+      assert.equal(ifaceResult.stdout.toString(), result.stdout.toString(), `${test.name}: the interface build prints something else`);
+    }
     if (test.signal) {
       assert.equal(result.signal, test.signal, `${test.name}: ${result.status}: ${result.stderr}`);
       if (test.stdout !== undefined) assert.equal(result.stdout.toString(), test.stdout, test.name);
     } else { assert.equal(result.status, test.status ?? 0, `${test.name}: ${result.signal}: ${result.stderr}`); assert.equal(result.stdout.toString(), test.stdout, test.name); }
   }
+  if (resume) writeFileSync(join(markers, test.name), '');
   passed++;
 }
-console.log(`${target}: ${passed} native execution/rejection regressions passed` + (skipped ? `, ${skipped} skipped (host-only)` : ''));
+console.log(`${target}: ${passed} native execution/rejection regressions passed`
+  + (skipped ? `, ${skipped} skipped (host-only)` : '')
+  + (filtered ? `, ${filtered} not selected (filter/shard)` : '')
+  + (resumed ? `, ${resumed} already passed (resumed)` : ''));
