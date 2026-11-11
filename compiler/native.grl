@@ -10022,6 +10022,34 @@ fn static_literal_view<a>(c: (&a mut C)) -> Val {
     release_temporary(&mut c, source);
     return val(slot, ty);
 }
+// `cstr("literal")`: a pointer to NUL-terminated bytes in read-only static storage. The
+// literal must end in NUL itself (`"name\0"`), which is checked now rather than at run time.
+fn static_literal_cstr<a>(c: (&a mut C)) -> Val {
+    p := c.pos;
+    bytes := decode_literal(&mut c, p);
+    if (bytes.len() == 0) || (bytes[bytes.len() - 1] != 0) {
+        fail(&mut c, view("cstr of a literal requires the literal to end in a NUL byte (\\0)"));
+    }
+    advance(&mut c);
+    expect(&mut c, view(")"));
+    data := label(&mut c);
+    if c.plat == 1 {
+        o(&mut c, view(".pushsection __TEXT,__cstring\n"));
+    } else {
+        o(&mut c, view(".pushsection .rodata\n"));
+    }
+    mark(&mut c, data);
+    for i in bytes.len() {
+        o(&mut c, view(".byte "));
+        on(&mut c, bytes[i]);
+        c.out.push(10);
+    }
+    o(&mut c, view(".popsection\nleaq "));
+    lname(&mut c, data);
+    o(&mut c, view("(%rip),%rax\n"));
+    slot := save(&mut c);
+    return val(slot, intern(&mut c, 24, 0));
+}
 fn string_lit<a>(c: (&a mut C)) -> Val {
     p := c.pos;
     bytes := decode_literal(&mut c, p);
@@ -13619,6 +13647,15 @@ fn builtin<a>(c: (&a mut C), id: u64) -> Val {
         expect(&mut c, view(")"));
         return v;
     }
+    if (id == 39) & (kind(&mut c) == 3) & (kind_at(&mut c, here + 1) == 41) {
+        // cstr("literal"): the bytes live in read-only static storage for the whole program, so
+        // the pointer carries no borrow and may be kept in a binding or a record field. The NUL
+        // is checked here rather than at run time.
+        if (c.raw == 0) & (c.unsafe_depth == 0) {
+            fail(&mut c, view("cstr requires an unsafe block"));
+        }
+        return static_literal_cstr(&mut c);
+    }
     if (id == 40) || (id == 41) {
         exchange(&mut c.cptr_address, id - 39);
     }
@@ -13664,15 +13701,19 @@ fn builtin<a>(c: (&a mut C), id: u64) -> Val {
         if (c.raw == 0) & (c.unsafe_depth == 0) {
             fail(&mut c, view("cstr requires an unsafe block"));
         }
+        operand := a.t;
         x := deref(&mut c, a);
         k := ty_kind(&mut c, x.ty);
         if (k != 2) & (k != 3) & (k != 4) & (k != 5) {
             fail(&mut c, view("cstr requires byte sequence or view"));
         }
-        // The owned sequence stays alive until the end of the statement, so the
-        // pointer handed to C is valid for the whole call.
+        // The pointer borrows the bytes for as long as it is live, exactly like cptr: the
+        // storage cannot be modified, moved or dropped while a CStr made from it is kept, and
+        // the CStr cannot outlive it. (A literal is handled above and needs no borrow.)
         slot := apply(&mut c, view("rt_cstr_view"), one(x.t));
-        return val(slot, intern(&mut c, 24, 0));
+        ty := intern(&mut c, 24, 0);
+        pointer_borrow(&mut c, slot, ty, operand, x.t, 0);
+        return val(slot, ty);
     }
     if (id == 37) || (id == 38) {
         expect(&mut c, view(")"));

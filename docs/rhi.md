@@ -610,7 +610,7 @@ The proxy is now made only for a C-layout container, and `tests/ffi/record_field
 the shape with a Grail callee and with a C callee that checksums the fields before writing them. The
 RHI still keeps each slot record as its own binding; that remains sound and need not change.
 
-**2. a `CStr` taken from a string literal must not outlive the statement that made it.** `cstr(value)`
+**2. (fixed) a `CStr` taken from a string literal used to dangle after its statement.** `cstr("...\0")` now points into static read-only storage, so it may be kept in a binding or a record field, and `cstr(bytes)` holds a loan on `bytes` like `cptr` does (pinned by `ffi-cstr-literal-kept-in-binding` and `ffi-reject-cstr-bytes-modified-while-live`). The original report, kept for the history: `cstr(value)`
 is zero-copy, and for a literal the bytes are a temporary: keeping the `CStr` in a binding and using it
 in a later statement reads freed memory. It reads *correctly* often enough to be missed - it did here -
 which is why the pipeline's entry-point names are copied out of the SPIR-V into byte-sequence bindings

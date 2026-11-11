@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Fixed: `cstr("literal\0")` no longer dangles after its statement - it points into static read-only storage, so a `CStr` kept in a binding or record field stays valid; a literal without a trailing NUL is a compile error rather than a runtime abort. `cstr(bytes)` now holds a loan on `bytes` for as long as the `CStr` is live, under the same rule as `cptr`.
 - Foreign calls work on every runtime thread, not only the main one. The host TLS base is per
   thread now (record word 56, replacing the process-wide `rt_host_tls`/`rt_grail_tls`), and in a
   process that loaded libc the runtime creates its pool workers, green scheduler threads, reactor and
