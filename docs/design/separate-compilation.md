@@ -284,20 +284,38 @@ grail ... --no-entry           # this object is one module of a link, not a prog
 
 ### Instantiations are emitted once
 
-The unit of deduplication is the *key*: the template's `module::name` plus the canonical spelling of
-its type arguments - the same spelling the interface format uses, after `canonical_type` has erased
-aliases and lifted captured lifetimes into fresh slots. It lives in the emitted symbol:
+The unit of deduplication is the *key*: the template's `module::name` plus a **structural**
+spelling of its type arguments (`type_key`) - kind, mode, lifetime slots, the nominal name, the type
+arguments, a payload that is a type, an interface's *name* for a proof. It lives in the emitted
+symbol:
 
 ```
 f_pair_make$3075c71d            # 16 hex digits: first 8 bytes of SHA-256 of the key
 ```
 
-Why it is stable across compilation orders: the key is a function of the types alone. A position in
-`c.specs` (what stage 2 emitted, `$0`, `$1`, …) is a function of the order this run met
-instantiations in, of which other modules are in the build, and of how much each module instantiates
-- none of which two compiler invocations can reproduce. The digest can: verified by compiling the
-same program with its modules in different orders and with an extra module present, where the symbol
-is byte-identical.
+Two properties matter, and they are different:
+
+- **it is total.** Nothing in the walk can refuse. A drop helper is referenced from every scope exit
+  and a specialisation from every call, so a name is wanted in the middle of an ordinary build; if
+  the name came from the interface's spelling, then any store kind the *format* cannot express would
+  fail a build that has nothing to do with interfaces. That is exactly the regression this design
+  first shipped, and `type_key` exists so it cannot come back: the interface writer keeps its
+  refusal, the naming path cannot reach it, and `tools/interface-test.mjs` asserts that in the
+  source as well as in behaviour.
+- **it is a function of the type alone.** A position in `c.specs` (what stage 2 emitted, `$0`, `$1`,
+  …) is a function of the order this run met instantiations in, of which other modules are in the
+  build, and of how much each module instantiates - none of which two compiler invocations can
+  reproduce. No index this run chose goes into `type_key`, including the two the store does expose:
+  a proof's interface id becomes the interface's name, and an unknown kind's payload is walked as a
+  type when it points into the type table. Verified by compiling the same program with its modules
+  in different orders and with an extra module present, where the symbol is byte-identical - and by
+  the case that decides it, two modules instantiating one generic on a *capturing closure*, whose
+  environment record is synthesised per program and named by registration order: both ask for the
+  same key, one body serves them, and the linked program prints what the source build prints.
+
+One definition per key, not per entry in `c.specs`: two interned argument lists can describe the same
+type (two closures with the same captures, two views of different element types), so the emitter
+records the names it has emitted and skips a repeat. The key is the identity; an index is not.
 
 With the key fixed, the ownership rule is one line: **a specialisation's body is emitted by the
 module that defines the template, and only there.** A run that loaded a module's surface *and
@@ -319,10 +337,14 @@ sorted by key, and a module that asks for nothing still gets a request file so a
 longer made cannot keep a dead body alive.
 
 Drop helpers had the same index-versus-content bug and got the same treatment: `.D<hex>` from the
-SHA-256 of the canonical type spelling, emitted `.weak` (a pure function of the type it drops, so two
-objects that emit it emit the same body and the linker merges them) and in a part of their own
-(`.helpers`) rather than the runtime's, so a linked build takes each module's code from exactly one
-object and merges the helpers.
+SHA-256 of `type_key`, emitted `.weak` (a pure function of the type it drops, so two objects that
+both emit it emit the same body and the linker merges them) and in a part of their own (`.helpers`)
+rather than the runtime's, so a linked build takes each module's code from exactly one object and
+merges the helpers. Two further run-local names surfaced the same way once a build had more than one
+object, and are fixed here rather than in stage 4 because they are the same bug: a closure body is
+now `<module>_c<index>` rather than `c<index>` (an index in this run's closure table), and a request
+file carries the environment records its keys mention, so an instantiation on a closure can be served
+by the module that defines the template.
 
 ### What the caller still checks
 
@@ -388,6 +410,11 @@ per importing module.
 - **Requests are not re-checked for bounds.** The defining module re-specialises a request and
   replays the body against the substituted types (which is a real check), but it does not re-run
   `require_constraints` on the request's arguments: the run that asked for it already did.
+- **A request is written in the interface format.** The defining module parses it with the interface
+  reader, so a type the format cannot spell cannot be asked for across a module boundary: that case
+  is refused by name at the boundary rather than named locally, because a type with no spelling
+  cannot appear in an exported signature either. Naming the same type *inside* one build - a drop
+  helper, a specialisation two modules of that build share - is unaffected: `type_key` is total.
 - **A request file has no manifest.** `--use` verifies each interface's own digest; a directory
   rewritten wholesale is trusted, exactly as the manifest's own note says. Signing is stage 4's.
 - **No `__start`/runtime sharing.** `--no-entry` keeps a module's object from defining the process

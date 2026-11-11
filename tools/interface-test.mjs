@@ -696,6 +696,149 @@ function proveCapabilityAcrossInstantiation() {
   return { refusal: viaInterfaceBad.output.trim().split('\n')[0] };
 }
 
+// ---- (f) naming a type must never be able to fail a build -------------------
+// A drop helper is referenced from every scope exit and a specialisation from every call, so both
+// want a name in the middle of an ordinary build. If that name were derived from the *interface
+// spelling* of the type, then any type the format cannot express - a store extension another
+// branch adds, today - would abort a build that has nothing to do with interfaces at all.
+//
+// Two claims, one static and one dynamic:
+//   1. the naming functions do not call the interface writer, so its refusal is unreachable from
+//      them (checked in the source, which is the only place the absence of a call is visible);
+//   2. a key is a function of the type, so two runs agree on it: the same instantiation compiled
+//      twice, in different orders, gets the same symbol - including one whose type argument is a
+//      closure, whose environment record is synthesised and named per program.
+function proveNamingIsTotal() {
+  const source = readFileSync(join(root, 'compiler/native.grl'), 'utf8');
+  const body = name => {
+    const at = source.indexOf(`fn ${name}<`);
+    assert.ok(at >= 0, `compiler/native.grl: no ${name}`);
+    let depth = 0;
+    let i = source.indexOf('{', at);
+    const from = i;
+    for (; i < source.length; i += 1) {
+      if (source[i] === '{') depth += 1;
+      else if (source[i] === '}') {
+        depth -= 1;
+        if (depth === 0) return source.slice(from, i);
+      }
+    }
+    throw new Error(`compiler/native.grl: unterminated ${name}`);
+  };
+  for (const name of ['type_key', 'drop_symbol', 'special_key', 'special_name']) {
+    assert.ok(
+      !body(name).includes('iface_type_raw'),
+      `compiler/native.grl: ${name} uses the interface writer, so a spelling it cannot provide would fail a build`,
+    );
+  }
+  // The writer keeps its refusal: it is the interface's own, and the format still may not silently
+  // write something it cannot read back.
+  assert.ok(body('iface_type_raw').includes('iface_refuse'), 'compiler/native.grl: iface_type_raw lost its refusal');
+
+  // (2) the same instantiation, twice, in two orders, with a closure-typed argument.
+  const directory = join(work, 'naming');
+  mkdirSync(directory, { recursive: true });
+  const program = join(directory, 'naming.grl');
+  writeFileSync(program, `fn keep<T>(value: T) -> T {
+    return value;
+}
+fn twice<T>(value: T) -> T {
+    return keep<T>(keep<T>(value));
+}
+fn main() {
+    base := 7;
+    printer := |x: u64| -> u64 x + base;
+    println(twice<u64>(1) + printer(2));
+    chosen := keep(printer);
+    println(chosen(3));
+}
+`);
+  const files = [program, runtime, platform];
+  const first = compile(files, join(directory, 'a'));
+  assert.equal(first.status, 0, `naming: the program does not compile\n${first.output}`);
+  const secondDir = join(directory, 'b');
+  const second = compile(files, secondDir);
+  assert.equal(second.status, 0, `naming: the same program does not compile twice\n${second.output}`);
+  const symbols = text => [...text.matchAll(/f_[a-z_]+_?[a-z]*\$[0-9a-z]+/g)].map(m => m[0]).sort();
+  const a = symbols(readFileSync(first.asm, 'utf8'));
+  const b = symbols(readFileSync(second.asm, 'utf8'));
+  assert.ok(a.length > 0, 'naming: the program produced no specialisation symbols to compare');
+  assert.deepEqual(b, a, 'naming: the same program in another directory produced different specialisation symbols');
+  // Every one of them is the hex form: nothing here needed the run-local fallback.
+  for (const symbol of a) {
+    assert.match(symbol, /\$[0-9a-f]{16}$/, `naming: ${symbol} is not content-addressed`);
+  }
+  const exe = link(files, join(directory, 'a'));
+  const ran = run(exe);
+  assert.equal(ran.status, 0, 'naming: the program does not run');
+  // twice(1) + printer(2) = 1 + (2 + 7); chosen(3) = 3 + 7.
+  assert.equal(ran.stdout, `${1 + (2 + 7)}\n${3 + 7}\n`, `naming: the program prints ${JSON.stringify(ran.stdout)}`);
+  return { symbols: a.length };
+}
+
+// ---- (g) two modules, one type whose identity is not a name -----------------
+// The case that decides whether the key is right. `closure_a` and `closure_b` both instantiate
+// `closure_gen::keep<T>` on a *capturing closure*: a type with no name at all, whose environment
+// record is synthesised per program and numbered by registration order. A key built from that name
+// would differ between the two modules, each would emit its own body, and a valid program would
+// either duplicate the body or fail to link. The key describes the captures instead, so both
+// modules ask for the same instantiation and exactly one body serves them.
+function proveStructuralKeyAcrossModules() {
+  const directory = join(work, 'closure-key');
+  mkdirSync(directory, { recursive: true });
+  const fixtures = name => join(root, 'tests/interfaces', name);
+  const all = [
+    fixtures('closure_main.grl'),
+    fixtures('closure_a.grl'),
+    fixtures('closure_b.grl'),
+    fixtures('closure_gen.grl'),
+    runtime,
+    platform,
+  ];
+  const source = compile(all, join(directory, 'source'));
+  assert.equal(source.status, 0, `closure-key: source build failed\n${source.output}`);
+  const expected = run(link(all, join(directory, 'source')));
+
+  const ifaces = emit(all, directory);
+  const dirs = { main: join(directory, 'main'), closure_a: join(directory, 'a'), closure_b: join(directory, 'b') };
+  const main = compile([fixtures('closure_main.grl'), runtime, platform], dirs.main, ['--use', ifaces, '--split', '--emit-interface', ifaces]);
+  assert.equal(main.status, 0, `closure-key: the entry module does not compile against interfaces\n${main.output}`);
+  for (const [module, fixture] of [['closure_a', 'closure_a.grl'], ['closure_b', 'closure_b.grl']]) {
+    const built = compile([fixtures(fixture), runtime, platform], dirs[module], ['--use', ifaces, '--split', '--no-entry', '--emit-interface', ifaces]);
+    assert.equal(built.status, 0, `closure-key: ${module} does not compile against interfaces\n${built.output}`);
+  }
+
+  const pattern = /^f_closure_gen_keep\$[0-9a-f]{16}:$/;
+  for (const module of ['main', 'closure_a', 'closure_b']) {
+    assert.equal(definitions(parts(dirs[module]).files, pattern), 0, `closure-key: ${module} emitted a body it does not own`);
+  }
+  // Both importers asked for the same instantiation: one key, so one body.
+  const requests = ['closure_a', 'closure_b'].map(module => {
+    const text = readFileSync(join(ifaces, `${module}.sreq`), 'utf8');
+    const line = text.split('\n').find(row => row.startsWith('request closure_gen::keep '));
+    assert.ok(line, `closure-key: ${module} did not record its instantiation\n${text}`);
+    return line;
+  });
+  assert.equal(requests[1], requests[0], 'closure-key: the two modules disagree about the instantiation key');
+
+  const genericDir = join(directory, 'gen');
+  const served = compile([fixtures('closure_gen.grl'), runtime, platform], genericDir, ['--serve', ifaces, '--split', '--no-entry']);
+  assert.equal(served.status, 0, `closure-key: the defining module does not serve the request\n${served.output}`);
+  assert.equal(definitions(parts(genericDir).files, pattern), 1, 'closure-key: the defining module did not emit exactly one body');
+
+  const linked = [
+    ...parts(dirs.main).files,
+    ...partsOfModule(dirs.closure_a, 'closure_a'),
+    ...partsOfModule(dirs.closure_b, 'closure_b'),
+    ...partsOfModule(genericDir, 'closure_gen'),
+  ];
+  assert.equal(definitions(linked, pattern), 1, 'closure-key: the linked objects do not hold exactly one body');
+  const ran = run(linkParts(linked, directory, 'program', dirs.main));
+  assert.equal(ran.status, expected.status, 'closure-key: the separately compiled program exits differently');
+  assert.equal(ran.stdout, expected.stdout, 'closure-key: the separately compiled program prints something else');
+  return { key: requests[0].replace('request closure_gen::keep ', ''), stdout: JSON.stringify(ran.stdout) };
+}
+
 const generics = proveGenericBodies();
 report(
   'imported generic: one emitted body, no source needed',
@@ -704,6 +847,18 @@ report(
 
 const capability = proveCapabilityAcrossInstantiation();
 report('capability metadata survives an instantiation', capability.refusal);
+
+const closureKey = proveStructuralKeyAcrossModules();
+report(
+  'two modules, one unnameable type: one body',
+  `${closureKey.key} asked for by both, one definition, output ${closureKey.stdout} as built from source`,
+);
+
+const naming = proveNamingIsTotal();
+report(
+  'naming a type cannot fail a build, and is the same in every run',
+  `${naming.symbols} content-addressed symbols, identical across runs`,
+);
 
 const corpus = proveCorpus();
 report('corpus agrees with source builds', `${corpus} programs (interface build, verify build and source build agree)` + (full ? ' - full corpus' : ''));

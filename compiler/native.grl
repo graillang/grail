@@ -401,8 +401,12 @@ struct C {
     body_module: u8[],
     serving: u8[][],
     req_module: u8[][],
-    req_key: u8[][],
+    req_spec: u64[],
     drop_names: u8[][],
+    spec_emitted: u8[][],
+    spell_lenient: u64,
+    spell_failed: u64,
+    drop_emitted: u8[][],
     iface_emit: u8[],
     iface_verify: u64,
     // Every module the program loaded, in command-line order, with what its interface records about
@@ -3581,6 +3585,132 @@ fn alias_field<a>(c: (&a mut C), slot: u64, ty: u64, base: u64, field: u64, via:
 // spelling, cached per type. A type index is a position in *this* run's table, and separate
 // compilation cannot reproduce another run's table; the spelling is a function of the type alone,
 // so two objects that both emit a helper for a type emit the same name for the same body.
+// Whether the interface format has a spelling for this type. Asked by the two places that need a
+// spelling rather than a name - a request line, which the defining module parses, and a diagnostic -
+// so neither has to call the writer unguarded.
+fn iface_spellable<a>(c: (&a mut C), ty: u64) -> bool {
+    mut scratch = u8[];
+    exchange(&mut c.spell_lenient, 1);
+    exchange(&mut c.spell_failed, 0);
+    iface_type_raw(&mut scratch, &mut c, ty);
+    failed := c.spell_failed;
+    exchange(&mut c.spell_lenient, 0);
+    exchange(&mut c.spell_failed, 0);
+    return failed == 0;
+}
+// A type's identity, spelled structurally and *totally*: every kind is answered, including one this
+// compiler does not know, and nothing here can fail. That matters because a name is wanted in the
+// middle of an ordinary build - a drop helper is referenced from every scope exit, a specialisation
+// from every call - and a build must not fail because an optional serialisation has no spelling for
+// a type.
+//
+// Everything it writes is a function of the type: the kind, its mode, its lifetime slots, the
+// nominal name (or, for a synthesised environment record, the captures it holds), its type
+// arguments, its payload when the payload is a type, and an interface's *name* for a proof. No
+// index this run chose goes in, so two runs - and two modules of one program - compute the same key
+// for the same type, whatever order they met it in.
+//
+// The interface writer keeps its own spelling and its own refusal: this describes a type, it does
+// not promise an interface can carry one.
+fn type_key<a>(c: (&a mut C), out: (&a mut u8[]), ty: u64, depth: u64) -> unit {
+    k := ty_kind(&mut c, ty);
+    mode := ty_mode(&mut c, ty);
+    out.push(40);
+    decimal(&mut out, k);
+    out.push(58);
+    decimal(&mut out, mode);
+    // The region numbers are part of a reference or view type's identity: `(&[1] T)` and `(&[2] T)`
+    // are different types, and leaving them out made two helpers collide on one label.
+    rs := type_regions(&mut c, ty);
+    for i in rs.len() {
+        out.push(47);
+        decimal(&mut out, rs[i]);
+    }
+    if 16 < depth {
+        // A store this deep is a cycle; the marker is still a function of the type and the cap
+        // keeps the walk finite.
+        push_bytes(&mut out, view(":~"));
+        return ();
+    }
+    if (k == 8) || (k == 23) || (k == 28) {
+        arg := ty_arg(&mut c, ty);
+        mut module = c.decls[arg].module.copy();
+        mut name = c.decls[arg].name.copy();
+        count := c.decls[arg].count;
+        first := c.decls[arg].first;
+        out.push(32);
+        if same(view(module), view(".closure")) {
+            // An environment record is synthesised per program and named by registration order, so
+            // its name is not a property of the type; its captures are.
+            push_bytes(&mut out, view("(env"));
+            for i in count {
+                field_ty := c.fields[first + i].ty;
+                out.push(32);
+                type_key(&mut c, &mut out, field_ty, depth + 1);
+            }
+            push_bytes(&mut out, view(")"));
+        } else {
+            push_bytes(&mut out, view(module));
+            push_bytes(&mut out, view("::"));
+            push_bytes(&mut out, view(name));
+        }
+    }
+    args := type_args(&mut c, ty);
+    for i in args.len() {
+        out.push(32);
+        type_key(&mut c, &mut out, args[i], depth + 1);
+    }
+    arg := ty_arg(&mut c, ty);
+    if (k == 6) || (k == 7) || (k == 10) || (k == 12) || (k == 13) || (k == 14) || (k == 16) || (k == 20)
+        || (k == 25) || (k == 26) || (k == 27) {
+        // The payload is a type.
+        out.push(32);
+        type_key(&mut c, &mut out, arg, depth + 1);
+    } else if k == 15 {
+        // A proof names an interface; the id is a position in this program's interface table, so the
+        // interface's own name goes in instead.
+        out.push(32);
+        mut module = c.interfaces[arg - 1].module.copy();
+        mut name = c.interfaces[arg - 1].name.copy();
+        push_bytes(&mut out, view(module));
+        push_bytes(&mut out, view("::"));
+        push_bytes(&mut out, view(name));
+    } else if (k == 1) || (k == 2) || (k == 3) || (k == 4) || (k == 5) || (k == 11) || (k == 17) || (k == 19)
+        || (k == 21) || (k == 22) || (k == 24) {
+        // No payload of its own: the kind, the mode and the regions are the whole type. A view is
+        // here rather than with the payload kinds because the interface format spells it without an
+        // element and its drop does not depend on one either.
+    } else if (k == 8) || (k == 23) || (k == 28) {
+        // The nominal payload is already in the key.
+    } else if k == 18 {
+        // An integer width is part of the type and is not a run-local choice.
+        out.push(32);
+        decimal(&mut out, arg);
+    } else if k == 9 {
+        // A type parameter's slot number is what the declaration counts, not what this run chose.
+        out.push(32);
+        decimal(&mut out, arg);
+    } else {
+        // A store extension this compiler does not know. Its payload is a type if the number points
+        // into the type table, so walk it; either way the kind, the mode, the regions and the
+        // arguments above are a function of the type, and the emitter's code for an unknown kind
+        // depends on nothing else.
+        if arg < c.types.len() {
+            out.push(32);
+            type_key(&mut c, &mut out, arg, depth + 1);
+        } else {
+            out.push(32);
+            decimal(&mut out, arg);
+        }
+    }
+    env := ty_env(&mut c, ty);
+    if env != 0 {
+        out.push(32);
+        type_key(&mut c, &mut out, env, depth + 1);
+    }
+    out.push(41);
+    return ();
+}
 fn drop_symbol<a>(c: (&a mut C), ty: u64) -> u8[] {
     while c.drop_names.len() <= ty {
         c.drop_names.push(u8[]);
@@ -3589,7 +3719,7 @@ fn drop_symbol<a>(c: (&a mut C), ty: u64) -> u8[] {
         return c.drop_names[ty].copy();
     }
     mut key = u8[];
-    iface_type_raw(&mut key, &mut c, ty);
+    type_key(&mut c, &mut key, ty, 0);
     mut name = u8[];
     push_bytes(&mut name, view(".D"));
     digest := iface_digest(&key);
@@ -3599,6 +3729,30 @@ fn drop_symbol<a>(c: (&a mut C), ty: u64) -> u8[] {
     exchange(&mut c.drop_names[ty], name.copy());
     return name;
 }
+// True when this specialisation has already been emitted in this object, whatever entry asked
+// first: the name is the identity, and two entries can share one.
+fn spec_taken<a>(c: (&a mut C), index: u64) -> u64 {
+    name := special_name(&mut c, index);
+    for i in c.spec_emitted.len() {
+        if same(view(c.spec_emitted[i]), view(name)) {
+            return 1;
+        }
+    }
+    c.spec_emitted.push(name.copy());
+    return 0;
+}
+// True when this helper has already been defined in this object, whatever index asked first.
+fn drop_taken<a>(c: (&a mut C), ty: u64) -> u64 {
+    name := drop_symbol(&mut c, ty);
+    for i in c.drop_emitted.len() {
+        if same(view(c.drop_emitted[i]), view(name)) {
+            return 1;
+        }
+    }
+    c.drop_emitted.push(name.copy());
+    return 0;
+}
+
 fn drop_name<a>(c: (&a mut C), ty: u64) -> unit {
     name := drop_symbol(&mut c, ty);
     push_bytes(&mut c.out, view(name));
@@ -4314,7 +4468,15 @@ fn type_name<a>(c: (&a mut C), ty: u64) -> u8[] {
         push_bytes(&mut out, view(iface_plain_word(k)));
         return out;
     }
-    iface_type_raw(&mut out, &mut c, ty);
+    // Only a type the interface format can spell is handed to the writer: naming a type for a
+    // diagnostic must not be able to fail where the diagnostic itself is the point.
+    if iface_spellable(&mut c, ty) {
+        iface_type_raw(&mut out, &mut c, ty);
+        return out;
+    }
+    push_bytes(&mut out, view("a value of store kind "));
+    decimal(&mut out, k);
+    push_bytes(&mut out, view(" (this compiler cannot spell it)"));
     return out;
 }
 fn require_constraints<a, b, d>(c: (&a mut C), arguments: (&b u64[]), bounds: (&d u64[])) -> unit {
@@ -10137,7 +10299,7 @@ fn special_key<a>(c: (&a mut C), index: u64) -> u8[] {
     push_bytes(&mut out, view(name));
     for i in args.len() {
         out.push(32);
-        iface_type_raw(&mut out, &mut c, args[i]);
+        type_key(&mut c, &mut out, args[i], 0);
     }
     return out;
 }
@@ -10152,6 +10314,26 @@ fn special_name<a>(c: (&a mut C), index: u64) -> u8[] {
     digest := iface_digest(&key);
     for i in 16 {
         out.push(digest[i]);
+    }
+    return out;
+}
+// The key a request line carries: the same template reference and the *interface* spelling of its
+// arguments, because the module that reads the request parses it with the interface reader. Only
+// written for an instantiation whose types all have a spelling; the caller checks first.
+fn request_key<a>(c: (&a mut C), index: u64) -> u8[] {
+    mut module = c.funcs[c.specs[index].template].module.copy();
+    mut name = c.funcs[c.specs[index].template].name.copy();
+    mut args = u64[];
+    for i in c.specs[index].args.len() {
+        args.push(c.specs[index].args[i]);
+    }
+    mut out = u8[];
+    push_bytes(&mut out, view(module));
+    push_bytes(&mut out, view("::"));
+    push_bytes(&mut out, view(name));
+    for i in args.len() {
+        out.push(32);
+        iface_type_raw(&mut out, &mut c, args[i]);
     }
     return out;
 }
@@ -10254,10 +10436,42 @@ fn emit_specializations<a>(c: (&a mut C)) -> unit {
         // module's object, compiled from its interface.
         mut tmodule = c.funcs[template].module.copy();
         if iface_owned(&mut c, view(tmodule)) & !serving(&mut c, view(tmodule)) {
+            mut spellable = 1;
+            for j in c.specs[i].args.len() {
+                arg := c.specs[i].args[j];
+                if iface_spellable(&mut c, arg) == false {
+                    spellable = 0;
+                }
+            }
+            if spellable == 0 {
+                // The defining module has to emit this body, and the only way to ask it is a request
+                // line that names the instantiation in the interface format. A type that format
+                // cannot spell cannot appear in an exported signature either, so this is the point
+                // to refuse it - by name, rather than writing a request the other build cannot
+                // read.
+                mut msg = u8[];
+                push_bytes(&mut msg, view("cannot instantiate `"));
+                push_bytes(&mut msg, view(tmodule));
+                push_bytes(&mut msg, view("::"));
+                push_bytes(&mut msg, view(c.funcs[template].name.copy()));
+                push_bytes(&mut msg, view("` on a type this build cannot name across an interface: the module that defines the template would have to emit the body"));
+                fail(&mut c, view(msg));
+            }
             // This run references the body and does not emit it, so the module that owns it has to:
             // the request is filed under the requester, keyed by the same string as the symbol.
             c.req_module.push(c.specs[i].requester.copy());
-            c.req_key.push(special_key(&mut c, i));
+            // The key is rendered when the file is written, not here: rendering it registers the
+            // environment records it mentions, and those rows belong to this module's file.
+            c.req_spec.push(i);
+            i = i + 1;
+            continue;
+        }
+        // One definition per key, not per entry in `c.specs`: two interned argument lists can
+        // describe the same type - a capturing closure whose environment record was synthesised
+        // twice has the same captures and a different declaration index - and the key is what
+        // decides identity, so the first emission serves both. The call sites already reference the
+        // same symbol, so emitting twice would be a duplicate definition.
+        if spec_taken(&mut c, i) != 0 {
             i = i + 1;
             continue;
         }
@@ -14701,7 +14915,14 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
     // The environment's place exists before the captures are stored, so a borrowed capture can
     // record its loan against the field it lands in.
     own(&mut c, obj, fnty);
-    mut symbol = copy_bytes(view("c"));
+    // The body's symbol carries the module it belongs to: `c<index>` alone is a position in this
+    // run's closure table, so two objects of one program both define `c0` and a build made of
+    // several objects cannot link (B1 stage 3). A module is compiled once, so within it the index is
+    // still enough.
+    mut here = module_copy(&mut c);
+    mut symbol = unit_module(&mut c, view(here));
+    symbol.push(95);
+    symbol.push(99);
     decimal(&mut symbol, index);
     o(&mut c, view("leaq "));
     mangle(&mut c, view(".closure"), view(symbol));
@@ -21778,12 +21999,20 @@ fn emit_drops<a>(c: (&a mut C)) -> unit {
         arg := ty_arg(&mut c, ty);
         if concrete_type(&mut c, ty) {
             if needs_drop(&mut c, ty) {
+                // One definition per key, not per interned index: two indices can describe the same
+                // drop - a view of one element type and a view of another both only release the
+                // backing store - and the key is what decides identity. The body is a function of
+                // exactly the components the key records, so the first definition serves both.
+                if drop_taken(&mut c, ty) != 0 {
+                    ty += 1;
+                    continue;
+                }
                 done := label(&mut c);
                 // Defined here and called from every module, and a pure function of the type it
                 // drops - so the name is content-addressed and the binding is weak: two objects
                 // that both emit it emit the same body, and the linker merges them. `--split`
-                // already needed the name to be visible across parts; a build made of several
-                // objects needs it too (B1 stage 3).
+                // needs the name visible across parts, and a build made of several objects needs it
+                // too (B1 stage 3).
                 o(&mut c, view(".weak "));
                 drop_name(&mut c, ty);
                 c.out.push(10);
@@ -22372,7 +22601,12 @@ fn iface_type_raw<a, b>(out: (&a mut u8[]), c: (&b mut C), ty: u64) -> unit {
         return ();
     }
     // A store extension with no spelling: refuse rather than write something that reads back as a
-    // different type.
+    // different type. A caller that only asked *whether* a type has a spelling (`spell_lenient`)
+    // records the gap and gets on with the build: naming a type must never be able to fail one.
+    if c.spell_lenient != 0 {
+        exchange(&mut c.spell_failed, 1);
+        return ();
+    }
     iface_refuse(view("<interface>"), view("this interface format cannot express a type of that kind"));
     return ();
 }
@@ -23675,12 +23909,21 @@ fn specs_emit_all<a>(c: (&a mut C)) -> unit {
             continue;
         }
         done.push(m.copy());
+        // Rendering a key registers the environment records it names, so the registry is cleared
+        // per module and its rows go into this module's file.
+        exchange(&mut c.iface_env, u64[]);
+        exchange(&mut c.iface_env_names, u8[][]);
         mut keys = u8[][];
-        for j in c.req_key.len() {
+        for j in c.req_spec.len() {
             if same(view(c.req_module[j]), view(m)) {
-                keys.push(c.req_key[j].copy());
+                index := c.req_spec[j];
+                keys.push(request_key(&mut c, index));
             }
         }
+        // A request key can name a synthesised environment record - an instantiation on a closure -
+        // and the defining module has to rebuild that record to compile the body. The rows for it
+        // travel here exactly as they do in an interface, so a request is a self-contained fragment
+        // rather than a reference to something only the requester knows.
         mut text = u8[];
         push_bytes(&mut text, view("// grail-specs 1\n"));
         push_bytes(&mut text, view("module "));
@@ -23691,6 +23934,11 @@ fn specs_emit_all<a>(c: (&a mut C)) -> unit {
             push_bytes(&mut text, view("request "));
             push_bytes(&mut text, view(keys[order[j]]));
             text.push(10);
+        }
+        for j in c.iface_env.len() {
+            decl := c.iface_env[j];
+            local := c.iface_env_names[j].copy();
+            iface_emit_env(&mut c, &mut text, decl, view(local));
         }
         file := iface_join(view(dir), view(m), view(".sreq"));
         written := host::write_file(view(file), view(text));
@@ -24073,6 +24321,50 @@ fn specs_serve<a, b>(c: (&a mut C), dir: &b [u8]) -> unit {
             iface_refuse(view(file), view("is not a request file; expected a `// grail-specs 1` header"));
         }
         lines := iface_lines(&text);
+        // Names first, requests second: a request may name an environment record whose rows come
+        // later in the file.
+        mut owner = u8[];
+        for i in lines.len() {
+            line := lines[i].copy();
+            if line.len() == 0 {
+                continue;
+            }
+            mut probe = ip_here(view(line), view(file), i + 1);
+            if ip_done(&probe) {
+                continue;
+            }
+            if same(view(ip_word(&mut probe)), view("module")) {
+                owner = ip_word(&mut probe);
+            }
+        }
+        for i in lines.len() {
+            iface_register(&mut c, view(lines[i]), view(file), i + 1, view(owner));
+        }
+        // The records a request names have to be *defined*, not just named: their fields are what
+        // the key and the emitted body are built from.
+        mut state = IState {
+            module: owner.copy(),
+            unsafe: 0,
+            source: 0,
+            cur_decl: 18446744073709551615,
+            first: 0,
+            section: 0,
+            owner: 0,
+            contract: 0,
+            implementation: 0,
+            last_func: 0,
+            last_decl: 0,
+            impl_first: 0,
+            impl_names: u8[][],
+            body_func: 0,
+            body_total: 0,
+            body_left: 0,
+            body_text: u8[],
+            body_name: u8[]
+        };
+        for i in lines.len() {
+            iface_define(&mut c, &mut state, view(lines[i]), view(file), i + 1);
+        }
         for i in lines.len() {
             line := lines[i].copy();
             if line.len() == 0 {
@@ -24084,6 +24376,9 @@ fn specs_serve<a, b>(c: (&a mut C), dir: &b [u8]) -> unit {
             }
             word := ip_word(&mut p);
             if same(view(word), view("module")) {
+                continue;
+            }
+            if same(view(word), view("env")) || same(view(word), view("field")) {
                 continue;
             }
             if !same(view(word), view("request")) {
@@ -25138,8 +25433,12 @@ pub fn main() -> u64 {
         body_module: u8[],
         serving: u8[][],
         req_module: u8[][],
-        req_key: u8[][],
+        req_spec: u64[],
         drop_names: u8[][],
+        spec_emitted: u8[][],
+        spell_lenient: 0,
+        spell_failed: 0,
+        drop_emitted: u8[][],
         iface_emit: u8[],
         iface_verify: 0,
         iface_list: IModule[],
