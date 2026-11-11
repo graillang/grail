@@ -629,6 +629,169 @@ with its element width, which is the half of the design that outlives this attem
 vector-fact-on-a-descriptor abort rather than corrupt a length, exercised by
 `tools/test-facts.mjs`'s `--f1-what=2` case.
 
+### Implemented: the range fact (F3)
+
+The lever is in `compiler/llvm.grl` and it is the lifter's own: the front end's stream is unchanged,
+`optimize.grl` and `machine.grl` are untouched, the word stream of all five benchmarks is
+byte-identical to the F1 branch's, and the native backend emits exactly what it emitted before. What
+the range fact changes is the lowering of the six accessors that bounds-check -- `rt_slot`,
+`rt_slot4`, `rt_slotb` and the `rt_at`/`rt_at4`/`rt_atb` loaders above them.
+
+**What a fact is.** A *state* is one flat `u64[]` per block, and the lattice is a little richer than
+"an integer in [lo, hi]" because the bounds check is not the only thing the word machine hides:
+
+| kind | the word in the location is | join |
+| --- | --- | --- |
+| 0 | nothing this analysis can type | absorbing: a location two paths disagree about stays untyped |
+| 1 | an integer in [lo, hi], and/or a value proven `< len(identity)` | hull, and the `< len` bound survives only when both paths state it against the same length generation |
+| 2 | a sequence header of identity *k* (`rt_new`'s result, and every copy of it) | survives while both paths name the same identity |
+| 3 | the address of frame slot *k* (the front end's `&v`, loaded back at the accessor) | same |
+| 4 | the length word of identity *k* (a `+8` load, or `rt_len`'s result) | same |
+| 5 | the 0/1 word a comparison was materialised into | same |
+
+and per identity, alongside the locations: a lower bound on the length, whether it is known at all,
+and a *generation* counter bumped by every event that may move it. A bound stated against a length
+that has since moved proves nothing, so the generation is part of the fact.
+
+**Where facts are established.** All of these are proofs:
+
+- a literal (`movq $c,%rax`, `movabsq`), a masking (`andq`), and the truncation to a narrow type
+  (`movl`, `movb`, `movzbq` -- the last two land on the register they zero-extend into);
+- the arithmetic over them: `addq`/`subq` (with an underflow check), `incq`/`decq`, `imulq`/`mulq`
+  (bounded so the product cannot wrap), `shlq`/`shrq`;
+- a comparison already checked on the path: the taken and fall-through edges of `cmpq` + `jcc` are
+  refined with the relation the branch tests, on both operands, and a proven comparison also *decides*
+  the branch, which is what makes the front end's cold `rt_abort` arms unreachable;
+- the loop guard as the front end actually emits it: every `while`/`for` condition is materialised as
+  a 0/1 word (`cmpq`; `setcc`; `movzbq`; `xorq $1`; `testq`; `jcc`), so the analysis records which
+  comparison a `setcc` came from and, at the `testq`, refines the comparison's own operands -- and
+  follows the copies that carried them (`movq -120(%rbp),%rax` then `movq %rax,-128(%rbp)`), so the
+  fact lands on the slot the loop counter lives in rather than on a register the block reuses;
+- the length: `rt_new` gives a fresh identity of length 0, `rt_fill`/`rt_fill4`/`rt_fillb` of a
+  constant count give that length, `rt_vec_copy` gives a copy of its source's, and a `rt_push` grows
+  it by one.
+
+**Where facts are dropped.** Each of these is a rule, not an accident of the code:
+
+- a write to the location (`movq`/`movl`/`arithmetic`/`popq`), which ends whatever it held;
+- an address that escapes: `leaq -N(%rbp)` marks the slot, and a *store through a register* then ends
+  the facts of every escaped slot, because such a store can reach exactly those;
+- a call this analysis does not model: it may hold a pointer into the frame and may take any of its
+  six argument words by reference, so the escaped slots and the caller-saved registers are dropped and
+  any identity whose header word it was handed loses its length. The six accessors, `rt_len`,
+  `rt_view`, `rt_write`, `rt_slice`/`rt_vslice` and the float helpers are the ones that cannot: they
+  are given the header *word*, never the slot's address;
+- the callee-saved registers are *not* dropped: the stream spills them at entry and reloads them at
+  exit, which is where the loop counters live;
+- a narrowing that is not provably in range ends the fact instead of being reinterpreted;
+- a join the lattice cannot express (two kinds, two identities, two length generations);
+- a refinement that contradicts the fact the path started from.
+
+**It is behind a flag.** `--range-facts` (off by default) turns the pass on; `--verify-facts` keeps
+checking whatever facts exist, so the two together are what proves a removal. The flag exists because
+the pass does not yet pay for itself: it removes no check on the corpus and costs compile time (see
+*Measured* and *Was it worth it?*), and a default that is ~90% slower to compile for 0% of runtime is
+not a default. The ticket that would let it be turned on is at the end of this section.
+
+**The consumer.** At a call to one of the six accessors, when argument 0 is a header of identity *k*
+and argument 1 is a word the facts put below `len(k)` -- either below a known lower bound on it, or
+below a length word the same generation still bounds -- the accessor's body is emitted in place of the
+call with the check removed: `data + i*width` through a typed load of `+0`, `align 8`/`align 4`/
+`align 1` by element width, and the value loaded for the `rt_at` family. Nothing is assumed: the
+address arithmetic is the accessor's own, and the six accessors' bodies are exactly
+`if (i < len) == 0 { rt_abort(); }` followed by that address.
+
+`--verify-facts` re-inserts the check it removes -- `icmp ult i64 %i, <len>` and a cold
+`rt_abort.cold` -- at every site whose check was elided, so a wrong fact aborts on the spot instead of
+reading or writing whatever is at the address. The flag also writes one `; range <line> <verdict>`
+comment per verdict into the module, so a test (or a CI log) shows exactly which sites the proof
+covered.
+
+**Measured.** `tools/bench.mjs --rounds 9` (paired medians), x86-64, `--backend=llvm`, same host, one run per
+side, C `-O2 -ffp-contract=off`. "before" is `origin/typed-ir-f1` built from the same tree:
+
+| benchmark | C `-O2` before | Grail before | ratio | C `-O2` after | Grail after | ratio |
+| --- | --- | --- | --- | --- | --- | --- |
+| fnv | 0.513 s | 0.519 s | 1.00x | 0.511 s | 0.519 s | 1.00x |
+| sieve | 0.479 s | 0.580 s | 1.21x | 0.448 s | 0.571 s | 1.28x |
+| sort | 0.826 s | 1.101 s | 1.33x | 0.816 s | 1.076 s | 1.32x |
+| nbody | 0.098 s | 0.168 s | 1.71x | 0.098 s | 0.169 s | 1.72x |
+| matmul | 0.195 s | 0.224 s | 1.15x | 0.191 s | 0.224 s | 1.17x |
+
+**Nothing moves, and the reason is that nothing fires.** The Grail column is the same to the
+millisecond on four of the five (`fnv` 0.519 -> 0.519, `matmul` 0.224 -> 0.224, `nbody` 0.168 ->
+0.169, `sort` 1.101 -> 1.076, `sieve` 0.580 -> 0.571 -- the spread of that one is 0.107 s, so it is
+noise); the ratios differ only because the C baseline drifted 2-6% between the two runs, which every
+measurement in this document has had to correct for. The removed-check count is the flat statement:
+**0 of the front end's bounds checks on all five benchmarks**, and the run was made on a shared
+machine, so the paired design is what keeps the comparison honest.
+
+**What does fire.** Two fixtures, and only where the length is a literal the analysis can hold:
+
+    fn main() {
+        mut v = u8[0; 10];
+        mut i: u64 = 2;
+        while i < 5 { if v[i] == 0 { println(i); } i += 1; }
+    }
+
+proves `v[i]` at its one access (1 of 1 checks, `; range 44 3`), and prints `2 3 4` identically
+through the native backend, through LLVM, and through LLVM with `--verify-facts` (which re-inserts
+the compare and the cold abort). The same program with `n` a local instead of a literal (`u8[0;
+n + 1]`, `while i <= n`) still proves it, but only while the fill's constant survives to the call;
+the sieve-shaped version of it -- two nested loops over a 101-element vector -- proves nothing,
+because the extra loop copies the counter through slots the decision machinery cannot follow. That
+fixture is kept in the report rather than the tree for that reason.
+
+**Why the benchmarks do not fire.** Each one needs a length the analysis cannot state:
+
+- `sort`, `matmul` and `fnv` fill their vectors with `for i in N { v.push(x) }`. The length after
+  such a loop is `N`, and the analysis never reads it, because it has no rule for a loop's *trip
+  count*: the fixpoint's join at the loop header is a lower bound on the length, taken as a minimum,
+  so it correctly keeps the pre-loop value (`0`) for the loop body and cannot express the exit value
+  (`N`). `sieve` is different: its `u8[0; n + 1]` is a constant `rt_fill`, which the pass does read
+  (`len >= 50000001`), and its `composite[i]` check is the one that *would* go -- what stops it is
+  that its counter also reaches the accessor through an extra copy, and the pass loses the bound
+  there.
+- `nbody` hands its three vectors to `energy(&p, &v, &m)`, which takes their addresses. The rules
+  drop every fact about a slot whose address escapes, correctly: an unknown callee may rebind it. It
+  does not, but only a region/effect fact -- "this call does not grow or rebind what it borrows" --
+  can say so, and that is not a range fact.
+
+**Cost, and why the pass is off by default.** With the pass on, the lifter runs it for every function
+that both creates a sequence and reads one: `sieve` 3.2 s -> 5.5 s and `nbody` 3.3 s -> 6.1 s end to
+end (`--backend=llvm`, same host; measured with other work on the machine, so an upper bound). Two
+thirds of the original cost came from what the `creates` gate and the worklist fixedpoint removed, and
+the rest is one forward walk per function plus a second walk to record the verdicts. With the flag off
+-- which is the default, and what every gate in the project compiles with -- the pass is skipped
+entirely and the compiler is back to F1's numbers: **3.2 s / 3.3 s** on the same two programs.
+
+
+**Was it worth it?** No -- not as a performance lever, and the flat number above is the whole of it: on this corpus the
+range fact removes no check, so it moves no benchmark, and the pass therefore ships behind
+`--range-facts` rather than on. What is in the tree is the *proof machinery*,
+which is the part that had to exist before any loop summary could be believed:
+
+- a fact lattice that is sound by construction (a join with two kinds, two identities or two length
+  generations is `unknown`, every refinement narrows what is already held, and a contradictory
+  refinement clears the fact rather than inventing an empty set);
+- the establishment rules the front end's own stream supports, including the 0/1 word it
+  materialises every `while` guard into, with the copies that carried a comparison's operands
+  followed back to the slot the loop counter lives in;
+- the drop rules, and `--verify-facts` re-inserting exactly the check a fact removed, at every site,
+  so a wrong fact aborts on the first out-of-range index instead of on the last element;
+- the consumer, which is the accessor body with the compare taken out.
+
+The next ticket is one rule, and it is worth writing down while the analysis is fresh: **summarise a
+counted fill loop**. Detect a loop (a header block and a single backedge) whose guard the analysis
+already decodes; the counter's lower bound at the header is its initial value, so the trip count is
+`bound - lo + 1`; count the `rt_push` calls to each identity in the body (the same pass already
+counts one per iteration); then attach `len(k) = len_before + trip * pushes` to the loop's *exit
+edge*, not to the header's join. That is the one place the lattice cannot express the answer on its
+own -- the join must stay a minimum for the body -- so it has to be an edge annotation. With it,
+`sort`, `matmul`, `fnv` and `sieve` all have both halves of their proof, and `nbody` still needs the
+region fact for `energy(&p, ...)`.
+
+
 ## Staged plan and checkpoints
 
 Each stage is independently shippable; each stage's checkpoint is a measurement, not an opinion.

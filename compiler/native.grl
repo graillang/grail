@@ -271,6 +271,9 @@ struct C {
     // 1 with --verify-facts: the lifter checks every word a fact treats as an f32, and every word
     // it treats as a sequence header.
     verify_facts: u64,
+    // 1 with --range-facts: the LLVM lifter derives range facts and removes the bounds check a
+    // fact proves redundant (docs/design/typed-ir.md). Off by default; see that document for why.
+    range_facts: u64,
     // --f1-what=N: a test aid that records a deliberately wrong F1 kind for every binding, so the
     // checks --verify-facts emits can be shown to fire (docs/design/typed-ir.md, "Tests that catch
     // a wrong fact"). 0, the default, records the type the front end actually has.
@@ -25904,6 +25907,7 @@ pub fn main() -> u64 {
         f1_counts: u64[],
         f1_ord: 0,
         verify_facts: 0,
+        range_facts: 0,
         f1_what: 0,
         debug_funcs: DebugFunc[],
         debug_vars: DebugVar[],
@@ -26239,7 +26243,12 @@ pub fn main() -> u64 {
                                             exchange(&mut c.verify_facts, 1);
                                             offset += 1;
                                         } else {
-                                            break;
+                                            if same(view(option), view("--range-facts")) {
+                                                exchange(&mut c.range_facts, 1);
+                                                offset += 1;
+                                            } else {
+                                                break;
+                                            }
                                         }
                                     }
                                 }
@@ -26281,6 +26290,9 @@ pub fn main() -> u64 {
     }
     if (c.verify_facts != 0) && (c.backend == 0) {
         fail_option(&mut c, view("--verify-facts checks the facts the LLVM lifter consumes; add --backend=llvm"));
+    }
+    if (c.range_facts != 0) && (c.backend == 0) {
+        fail_option(&mut c, view("--range-facts derives range facts in the LLVM lifter; add --backend=llvm"));
     }
     // Splitting is a build-shape change on the native assembly path; the line tables and the LLVM
     // route inspect the whole stream, and the Mach-O/PE writers rewrite it after selection.
@@ -26626,7 +26638,7 @@ pub fn main() -> u64 {
         }
         if c.backend != 0 {
             // LLVM IR for the lifted functions beside the native remainder: PATH.ll and PATH.
-            lowered := llvm::lower(view(out), view("x86_64-unknown-linux-gnu"), &c.facts, c.verify_facts);
+            lowered := llvm::lower(view(out), view("x86_64-unknown-linux-gnu"), &c.facts, c.verify_facts, c.range_facts);
             mut ir_path = copy_bytes(view(path));
             push_bytes(&mut ir_path, view(".ll"));
             written := host::write_file(view(ir_path), view(lowered.ir));
@@ -26645,7 +26657,7 @@ pub fn main() -> u64 {
     if c.backend != 0 {
         // LLVM IR (PATH.ll) for the lifted functions; the remainder goes through the usual
         // instruction selection, followed by the calling-convention thunks.
-        lowered := llvm::lower_for(view(out), target, &c.facts, c.verify_facts);
+        lowered := llvm::lower_for(view(out), target, &c.facts, c.verify_facts, c.range_facts);
         mut ir_path = copy_bytes(view(path));
         push_bytes(&mut ir_path, view(".ll"));
         written := host::write_file(view(ir_path), view(lowered.ir));

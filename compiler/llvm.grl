@@ -193,6 +193,14 @@ struct L {
     ccount: u64[],
     // Ordinal of the next `call rt_f64_op` in the function being lowered.
     fordinal: u64,
+    // One range-fact verdict per instruction line of the function being lowered (see range_proofs),
+    // and the line the instruction being lowered came from.
+    proof: u64[],
+    rline: u64,
+    // 1 with --range-facts: derive range facts from the stream and remove the bounds check a fact
+    // proves redundant. Off by default: the pass does not pay for itself on the corpus yet
+    // (docs/design/typed-ir.md), and it costs compile time.
+    ranges: u64,
     // 1 with --verify-facts: check `fpext(fptrunc(d)) == d` at every word that a fact treats as
     // an f32, so a mis-typed fact aborts instead of silently changing a value.
     verify: u64
@@ -1831,6 +1839,18 @@ fn lower_call<a, b, c>(l: (&a mut L), target: &b [u8], facts: (&c Facts)) -> uni
     // hoisted for that slot stale; the fields are re-read once it returns.
     invalidate_args(&mut l, view(target));
     l.calls.push(copy(target));
+    // A range fact proves the index this accessor is handed is below the sequence's length, so the
+    // compare and its cold exit cannot fire: the accessor's body is emitted here with the check
+    // removed (docs/design/typed-ir.md).
+    if l.proof.len() > l.rline {
+        if l.proof[l.rline] == 3 {
+            which := rg_accessor(target);
+            if which != 0 {
+                unchecked_access(&mut l, which);
+                return ();
+            }
+        }
+    }
     hf := call_header(&facts, view(l.fname), view(target), ord);
     if hf.width != 0 {
         kid := reg_index(view("rdi")) + 1;
@@ -1890,6 +1910,53 @@ fn lower_call<a, b, c>(l: (&a mut L), target: &b [u8], facts: (&c Facts)) -> uni
     r1 := def(&mut l, view("extractvalue {i64, i64} {}, 1"), &u8[][pair]);
     set_reg(&mut l, view("rax"), view(r0));
     set_reg(&mut l, view("rdx"), view(r1));
+    set_chain(&mut l, reg_index(view("rax")) + 1, 0, 0, 0);
+    set_chain(&mut l, reg_index(view("rdx")) + 1, 0, 0, 0);
+    clear_args(&mut l);
+    refresh(&mut l);
+    return ();
+}
+
+// The body of a bounds-checked accessor with the check removed. A range fact proves the index the
+// call is handed is below the sequence's length, so `if (i < len) == 0 { rt_abort(); }` -- the
+// compare and the cold exit at the top of `rt_slot`/`rt_slot4`/`rt_slotb` and of the load wrappers
+// above them -- cannot fire, and the address is `data + i*width` exactly as the accessor computes
+// it. `--verify-facts` re-emits the check, so a fact that is wrong aborts on the spot instead of
+// reading whatever is at the address.
+fn unchecked_access(l: (&mut L), which: u64) -> unit {
+    w := rg_width(which);
+    h := get_reg(&mut l, view("rdi"));
+    i := get_reg(&mut l, view("rsi"));
+    hp := def(&mut l, view("inttoptr i64 {} to ptr"), &u8[][copy(view(h))]);
+    d := def(&mut l, view("load i64, ptr {}, align 8"), &u8[][copy(view(hp))]);
+    if l.verify != 0 {
+        lp := def(&mut l, view("getelementptr i8, ptr {}, i64 8"), &u8[][copy(view(hp))]);
+        ln := def(&mut l, view("load i64, ptr {}, align 8"), &u8[][lp]);
+        ok := def(&mut l, view("icmp ult i64 {}, {}"), &u8[][copy(view(i)), ln]);
+        good := fresh_block(&mut l);
+        wrong := fresh_block(&mut l);
+        emit(&mut l, view("br i1 {}, label %{}, label %{}"), &u8[][ok, copy(view(good)), copy(view(wrong))]);
+        begin_block(&mut l, view(wrong));
+        emit(&mut l, view("call void @\"rt_abort.cold\"() #0"), &u8[][]);
+        emit(&mut l, view("unreachable"), &u8[][]);
+        begin_block(&mut l, view(good));
+    }
+    off := def(&mut l, view("mul i64 {}, {}"), &u8[][copy(view(i)), copy_width(w)]);
+    a := def(&mut l, view("add i64 {}, {}"), &u8[][d, off]);
+    mut res = copy(view(a));
+    if which >= 4 {
+        ap := def(&mut l, view("inttoptr i64 {} to ptr"), &u8[][copy(view(a))]);
+        ty := width_type(8 * w);
+        al := copy_width(w);
+        v := def(&mut l, view("load {}, ptr {}, align {}"), &u8[][copy(view(ty)), ap, al]);
+        if w != 8 {
+            res = def(&mut l, view("zext {} {} to i64"), &u8[][ty, v]);
+        } else {
+            res = copy(view(v));
+        }
+    }
+    set_reg(&mut l, view("rax"), view(res));
+    set_reg(&mut l, view("rdx"), view("0"));
     set_chain(&mut l, reg_index(view("rax")) + 1, 0, 0, 0);
     set_chain(&mut l, reg_index(view("rdx")) + 1, 0, 0, 0);
     clear_args(&mut l);
@@ -2475,6 +2542,8 @@ fn lower_function<a, b, c>(l: (&a mut L), lines: (&b u8[][]), f: (&b Func), fact
     exchange(&mut l.vo2, i64[]);
     exchange(&mut l.cnames, u8[][]);
     exchange(&mut l.ccount, u64[]);
+    exchange(&mut l.proof, u64[]);
+    l.rline = 0;
     for i in facts.items.len() {
         q := &facts.items[i];
         // Only the call this rewrite knows: `rt_f64_op(op, lhs, rhs)` on two f32 operands.
@@ -2570,6 +2639,16 @@ fn lower_function<a, b, c>(l: (&a mut L), lines: (&b u8[][]), f: (&b Func), fact
     }
     mut deepest: u64 = 0;
     l.split = frame_split(&instrs, &mut deepest);
+    // The range facts of this function, one verdict per line (see range_proofs). The frame the
+    // front end declared does not always cover every slot the body spills to, so the deepest one
+    // the stream addresses sets the count.
+    mut nslots = size / 8;
+    if deepest + 1 > nslots {
+        nslots = deepest + 1;
+    }
+    if l.ranges != 0 {
+        l.proof = range_proofs(&instrs, nslots, l.split);
+    }
     if l.split != 0 {
         // One alloca per slot; the prologue's zeroing covers the slots below the parameters.
         slots := size / 8;
@@ -2635,6 +2714,19 @@ fn lower_function<a, b, c>(l: (&a mut L), lines: (&b u8[][]), f: (&b Func), fact
     }
     emit(&mut l, view("br label %body"), &u8[][]);
     begin_block(&mut l, view("body"));
+    if l.verify != 0 {
+        // The range facts this function used, as comments, so a test can read them off the module.
+        for i in l.proof.len() {
+            if l.proof[i] != 0 {
+                mut c = copy(view("; range "));
+                num(&mut c, i);
+                c.push(32);
+                num(&mut c, l.proof[i]);
+                c.push(10);
+                emit(&mut l, view(c), &u8[][]);
+            }
+        }
+    }
     for m in instrs.len() {
         if l.fail != 0 {
             return ();
@@ -2657,12 +2749,1759 @@ fn lower_function<a, b, c>(l: (&a mut L), lines: (&b u8[][]), f: (&b Func), fact
             next := fresh_block(&mut l);
             begin_block(&mut l, view(next));
         }
+        l.rline = m;
         instruction(&mut l, line, &facts);
     }
     if l.term == 0 {
         emit(&mut l, view("unreachable"), &u8[][]);
     }
     return ();
+}
+
+// ---- the range fact: "this slot holds an integer in [lo, hi]" ----
+//
+// The bounds check costs a compare and a branch per element and LLVM cannot remove it, because the
+// loop guard proves nothing about the index it is handed. A range fact is the missing proof, and it
+// is a proof, not an assumption: every fact below is established from a literal, from a masking or a
+// truncation to a narrow type, from an arithmetic chain over facts already established, or from a
+// comparison that was already checked on the same path; and every fact is dropped by a write to the
+// slot, by a call that may take it by reference, by an escaping address, and by a narrowing that is
+// not provably in range. `--verify-facts` re-emits the check a fact removes, so a wrong fact aborts
+// on the spot instead of reading whatever happens to be at the address.
+//
+// A state is a flat `u64[]` of `5 * nloc + 3 * nid` words.
+// Per location i (0-13 a register in `reg_index` order, 14+k frame slot k):
+//   kind 0 no fact (and dead for good: a location two paths disagree about stays untyped),
+//   1 the interval [lo, hi], 2 a sequence header of identity `lo`, 3 the address of frame slot
+//   `lo`, 4 the length word of identity `lo`; `sym` is identity+1 while the word is proven to be
+//   `< len(identity)`, and `sgen` is the length generation that bound was stated in.
+// Per identity k: `have` (1 when `lb` is meaningful), `lb` a lower bound on the length, and `gen`,
+// bumped by every event that may change the length -- the generation an `sym` bound is checked
+// against, because a bound stated against a length that has since moved proves nothing.
+struct RC {
+    nloc: u64,
+    nid: u64,
+    // 1 when the frame is split, so each slot is a storage location of its own.
+    split: u64,
+    // The frame slots whose address the function takes (`leaq -N(%rbp)`): a store through a
+    // register may write those, and no other frame slot.
+    esc: u64[],
+    // The identity a `rt_new`/`rt_vec_copy` call creates, plus one, by line; 0 for other lines.
+    seed: u64[]
+}
+fn rg_none() -> u64 {
+    return 18446744073709551615;
+}
+fn rg_max() -> u64 {
+    return 18446744073709551615;
+}
+fn rc_new(nslots: u64, split: u64) -> RC {
+    mut esc = u64[];
+    for i in nslots {
+        esc.push(0);
+    }
+    return RC { nloc: 14 + nslots, nid: 0, split: split, esc: esc, seed: u64[] };
+}
+fn rc_state(rc: (&RC)) -> u64[] {
+    mut st = u64[];
+    for i in 5 * rc.nloc + 3 * rc.nid {
+        st.push(0);
+    }
+    for i in rc.nloc {
+        st[5 * i + 2] = rg_max();
+    }
+    return st;
+}
+// The location a storage operand names, plus one (0-13 a register, 14+k frame slot k); 0 when the
+// operand names no storage this analysis tracks.
+fn rg_storage(op: (&[u8])) -> u64 {
+    if (op.len() != 0) && (op[0] == 37) {
+        r := reg_index(view(sub(op, 1, op.len())));
+        if r < 14 {
+            return r + 1;
+        }
+        return 0;
+    }
+    if !ends(op, view("(%rbp)")) || (op.len() < 6) {
+        return 0;
+    }
+    n := op.len() - 6;
+    if n < 2 {
+        return 0;
+    }
+    d := parse_int(view(sub(op, 0, n)));
+    if (d.ok == 0) || (d.v >= 0) || (d.v < -1073741824) {
+        return 0;
+    }
+    k := u64(0 - (d.v + 1)) / 8;
+    if 0 - i64(8 * (k + 1)) != d.v {
+        return 0;
+    }
+    return 15 + k;
+}
+// The 8- and 16-bit aliases of a register this analysis tracks: `setb %al` and `movzbq %al,%rax`
+// are how the front end materialises a comparison, and both halves have to land on `rax`.
+fn rg_alias(rc: (&RC), op: (&[u8])) -> u64 {
+    if (op.len() < 2) || (op[0] != 37) {
+        return rg_none();
+    }
+    n := view(sub(op, 1, op.len()));
+    if eq(n, view("al")) || eq(n, view("ax")) || eq(n, view("eax")) {
+        return 0;
+    }
+    if eq(n, view("cl")) || eq(n, view("cx")) || eq(n, view("ecx")) {
+        return 2;
+    }
+    if eq(n, view("dl")) || eq(n, view("dx")) || eq(n, view("edx")) {
+        return 3;
+    }
+    return rg_none();
+}
+fn rg_loc(rc: (&RC), op: (&[u8])) -> u64 {
+    al := rg_alias(&rc, &op);
+    if al != rg_none() {
+        return al;
+    }
+    id := rg_storage(view(op));
+    if id == 0 {
+        return rg_none();
+    }
+    if id >= 15 && rc.split == 0 {
+        return rg_none();
+    }
+    return id - 1;
+}
+// A memory operand `off(%reg)`: `ok` 1 when it is exactly that, else through a register this
+// analysis does not name.
+struct Mem {
+    ok: u64,
+    off: i64,
+    base: u64
+}
+fn no_mem() -> Mem {
+    return Mem { ok: 0, off: 0, base: rg_none() };
+}
+fn rg_mem(op: (&[u8])) -> Mem {
+    if (op.len() == 0) || (op[0] == 36) || !has(op, view("(")) || !ends(op, view(")")) {
+        return no_mem();
+    }
+    mut open = op.len();
+    for i in op.len() {
+        if (op[i] == 40) & (open == op.len()) {
+            open = i;
+        }
+    }
+    if open == op.len() {
+        return no_mem();
+    }
+    inner := operands(view(sub(op, open + 1, op.len() - 1)));
+    if inner.len() != 1 {
+        return no_mem();
+    }
+    reg := view(inner[0]);
+    if (reg.len() < 2) || (reg[0] != 37) {
+        return no_mem();
+    }
+    r := reg_index(view(sub(reg, 1, reg.len())));
+    if r >= 14 {
+        return no_mem();
+    }
+    mut off: i64 = 0;
+    if open > 0 {
+        p := parse_int(view(sub(op, 0, open)));
+        if p.ok == 0 {
+            return no_mem();
+        }
+        off = p.v;
+    }
+    return Mem { ok: 1, off: off, base: r };
+}
+fn rg_k(st: (&u64[]), i: u64) -> u64 {
+    if 5 * i + 5 > st.len() {
+        return 0;
+    }
+    return st[5 * i];
+}
+fn rg_lo(st: (&u64[]), i: u64) -> u64 {
+    if 5 * i + 5 > st.len() {
+        return 0;
+    }
+    return st[5 * i + 1];
+}
+fn rg_hi(st: (&u64[]), i: u64) -> u64 {
+    if 5 * i + 5 > st.len() {
+        return rg_max();
+    }
+    return st[5 * i + 2];
+}
+fn rg_sym(st: (&u64[]), i: u64) -> u64 {
+    if 5 * i + 5 > st.len() {
+        return 0;
+    }
+    return st[5 * i + 3];
+}
+fn rg_sgen(st: (&u64[]), i: u64) -> u64 {
+    if 5 * i + 5 > st.len() {
+        return 0;
+    }
+    return st[5 * i + 4];
+}
+fn rg_put(st: (&mut u64[]), i: u64, kind: u64, lo: u64, hi: u64, sym: u64, sgen: u64) -> unit {
+    if 5 * i + 5 > st.len() {
+        return ();
+    }
+    st[5 * i] = kind;
+    st[5 * i + 1] = lo;
+    st[5 * i + 2] = hi;
+    st[5 * i + 3] = sym;
+    st[5 * i + 4] = sgen;
+    return ();
+}
+fn rg_clear(st: (&mut u64[]), i: u64) -> unit {
+    rg_put(&mut st, i, 0, 0, rg_max(), 0, 0);
+    return ();
+}
+fn rg_span(st: (&mut u64[]), i: u64, lo: u64, hi: u64) -> unit {
+    if lo > hi {
+        rg_clear(&mut st, i);
+        return ();
+    }
+    rg_put(&mut st, i, 1, lo, hi, 0, 0);
+    return ();
+}
+fn rg_word(st: (&mut u64[]), i: u64, lo: u64, hi: u64, sym: u64, sgen: u64) -> unit {
+    if lo > hi {
+        // The refinement contradicts the fact the path started from: nothing is known here.
+        rg_clear(&mut st, i);
+        return ();
+    }
+    if (sym == 0) & (sgen == 0) {
+        rg_put(&mut st, i, 1, lo, hi, 0, 0);
+        return ();
+    }
+    rg_put(&mut st, i, 1, lo, hi, sym, sgen);
+    return ();
+}
+fn rg_header(st: (&mut u64[]), i: u64, id: u64) -> unit {
+    rg_put(&mut st, i, 2, id, 0, 0, 0);
+    return ();
+}
+fn rg_addr(st: (&mut u64[]), i: u64, k: u64) -> unit {
+    rg_put(&mut st, i, 3, k, 0, 0, 0);
+    return ();
+}
+fn rg_lenw(st: (&mut u64[]), i: u64, id: u64) -> unit {
+    rg_put(&mut st, i, 4, id, 0, 0, 0);
+    return ();
+}
+fn rg_have(rc: (&RC), st: (&u64[]), k: u64) -> u64 {
+    b := 5 * rc.nloc + 3 * k;
+    if b + 3 > st.len() {
+        return 0;
+    }
+    return st[b];
+}
+fn rg_lb(rc: (&RC), st: (&u64[]), k: u64) -> u64 {
+    b := 5 * rc.nloc + 3 * k;
+    if b + 3 > st.len() {
+        return 0;
+    }
+    return st[b + 1];
+}
+fn rg_lgen(rc: (&RC), st: (&u64[]), k: u64) -> u64 {
+    b := 5 * rc.nloc + 3 * k;
+    if b + 3 > st.len() {
+        return 0;
+    }
+    return st[b + 2];
+}
+fn rg_lset(rc: (&RC), st: (&mut u64[]), k: u64, have: u64, lb: u64, gen: u64) -> unit {
+    b := 5 * rc.nloc + 3 * k;
+    if b + 3 > st.len() {
+        return ();
+    }
+    st[b] = have;
+    st[b + 1] = lb;
+    st[b + 2] = gen;
+    return ();
+}
+// The length of identity k may have changed: the lower bound is gone and every bound stated
+// against the old length is invalid.
+fn rg_kill_len(rc: (&RC), st: (&mut u64[]), k: u64) -> unit {
+    g := rg_lgen(&rc, &st, k);
+    rg_lset(&rc, &mut st, k, 0, 0, wrapping_add(g, 1));
+    return ();
+}
+// The length of identity k grows by `n`: a bound that was known stays known, and the generation
+// moves so a bound stated against the old length cannot be used.
+fn rg_grow_len(rc: (&RC), st: (&mut u64[]), k: u64, n: u64) -> unit {
+    mut have: u64 = 0;
+    mut lb: u64 = 0;
+    if rg_have(&rc, &st, k) != 0 {
+        have = 1;
+        lb = wrapping_add(rg_lb(&rc, &st, k), n);
+    }
+    g := rg_lgen(&rc, &st, k);
+    rg_lset(&rc, &mut st, k, have, lb, wrapping_add(g, 1));
+    return ();
+}
+// The length of identity k is exactly `n`, which is what a fill of a constant count says.
+fn rg_set_len(rc: (&RC), st: (&mut u64[]), k: u64, n: u64) -> unit {
+    g := rg_lgen(&rc, &st, k);
+    rg_lset(&rc, &mut st, k, 1, n, wrapping_add(g, 1));
+    return ();
+}
+// dst |= src over both halves of the state; 1 when dst changed.
+fn rg_join(rc: (&RC), dst: (&mut u64[]), src: (&u64[])) -> u64 {
+    mut changed = 0;
+    if dst.len() != src.len() {
+        return 0;
+    }
+    for i in rc.nloc {
+        b := 5 * i;
+        dk := dst[b];
+        sk := src[b];
+        if dk != sk {
+            // A location the two paths type differently holds a word this analysis cannot type.
+            if (dk != 0) || (dst[b + 2] != rg_max()) {
+                changed = 1;
+            }
+            rg_clear(&mut dst, i);
+            continue;
+        }
+        if dk == 1 {
+            mut lo = dst[b + 1];
+            if src[b + 1] < lo {
+                lo = src[b + 1];
+                changed = 1;
+            }
+            mut hi = dst[b + 2];
+            if src[b + 2] > hi {
+                hi = src[b + 2];
+                changed = 1;
+            }
+            mut sym = dst[b + 3];
+            mut sgen = dst[b + 4];
+            if (src[b + 3] != sym) || (src[b + 4] != sgen) {
+                sym = 0;
+                sgen = 0;
+            }
+            dst[b + 1] = lo;
+            dst[b + 2] = hi;
+            dst[b + 3] = sym;
+            dst[b + 4] = sgen;
+            continue;
+        }
+        // A kind that is not an interval survives only while both paths agree on the identity.
+        if (dk != 0) & (dst[b + 1] != src[b + 1]) {
+            rg_clear(&mut dst, i);
+            changed = 1;
+        }
+    }
+    for i in rc.nid {
+        b := 5 * rc.nloc + 3 * i;
+        mut gen = dst[b + 2];
+        if src[b + 2] > gen {
+            gen = src[b + 2];
+        }
+        mut have = dst[b];
+        mut lb = dst[b + 1];
+        if (have != 0) & (src[b] != 0) {
+            if src[b + 1] < lb {
+                lb = src[b + 1];
+            }
+        } else {
+            have = 0;
+            lb = 0;
+        }
+        if (gen != dst[b + 2]) || (have != dst[b]) || (lb != dst[b + 1]) {
+            changed = 1;
+        }
+        dst[b] = have;
+        dst[b + 1] = lb;
+        dst[b + 2] = gen;
+    }
+    return changed;
+}
+// The interval of an operand that has one.
+struct Span {
+    ok: u64,
+    lo: u64,
+    hi: u64,
+    sym: u64,
+    sgen: u64
+}
+fn no_span() -> Span {
+    return Span { ok: 0, lo: 0, hi: 0, sym: 0, sgen: 0 };
+}
+// A decimal immediates's value as a word: a negative one keeps its bit pattern.
+fn rg_imm(op: (&[u8])) -> Span {
+    if (op.len() < 2) || (op[0] != 36) {
+        return no_span();
+    }
+    mut i: u64 = 1;
+    mut neg = 0;
+    if op[i] == 45 {
+        neg = 1;
+        i += 1;
+    }
+    mut v: u64 = 0;
+    mut any = 0;
+    while i < op.len() {
+        ch := op[i];
+        if (ch < 48) || (ch > 57) {
+            return no_span();
+        }
+        v = wrapping_add(wrapping_mul(v, 10), ch - 48);
+        any = 1;
+        i += 1;
+    }
+    if any == 0 {
+        return no_span();
+    }
+    if neg != 0 {
+        v = wrapping_mul(v, 18446744073709551615);
+    }
+    return Span { ok: 1, lo: v, hi: v, sym: 0, sgen: 0 };
+}
+// The identity a location holds a header of, plus one, looking one dereference through an address
+// of a frame slot (`&v`, which is how a borrow reaches an accessor). 0 when it holds no header.
+fn rg_hdr_of(rc: (&RC), st: (&u64[]), loc: u64) -> u64 {
+    if loc == rg_none() {
+        return 0;
+    }
+    if rg_k(&st, loc) == 2 {
+        return rg_lo(&st, loc) + 1;
+    }
+    if rg_k(&st, loc) == 3 {
+        sk := rg_lo(&st, loc);
+        return rg_hdr_of(&rc, &st, 14 + sk);
+    }
+    return 0;
+}
+// The fact an operand carries. `ok` 1 is the interval [lo, hi], 2 a sequence header of identity
+// `lo`, 3 the address of frame slot `lo`, 4 the length word of identity `lo`; 0 no fact.
+fn rg_read(rc: (&RC), st: (&u64[]), op: (&[u8])) -> Span {
+    if (op.len() != 0) && (op[0] == 36) {
+        return rg_imm(op);
+    }
+    loc := rg_loc(&rc, op);
+    if loc != rg_none() {
+        k := rg_k(&st, loc);
+        if k == 0 {
+            return no_span();
+        }
+        return Span { ok: k, lo: rg_lo(&st, loc), hi: rg_hi(&st, loc), sym: rg_sym(&st, loc), sgen: rg_sgen(&st, loc) };
+    }
+    m := rg_mem(op);
+    if m.ok == 0 {
+        return no_span();
+    }
+    h := rg_hdr_of(&rc, &st, m.base);
+    if h != 0 {
+        if m.off == 8 {
+            return Span { ok: 4, lo: h - 1, hi: 0, sym: 0, sgen: 0 };
+        }
+        return no_span();
+    }
+    // A load through the address of a frame slot reads that slot's word.
+    if (rg_k(&st, m.base) == 3) & (m.off == 0) {
+        sk := rg_lo(&st, m.base);
+        loc2 := 14 + sk;
+        k2 := rg_k(&st, loc2);
+        if k2 == 1 {
+            return Span { ok: 1, lo: rg_lo(&st, loc2), hi: rg_hi(&st, loc2), sym: rg_sym(&st, loc2), sgen: rg_sgen(&st, loc2) };
+        }
+        if k2 != 0 {
+            return Span { ok: k2, lo: rg_lo(&st, loc2), hi: 0, sym: 0, sgen: 0 };
+        }
+    }
+    return no_span();
+}
+fn rg_span_of(rc: (&RC), st: (&u64[]), op: (&[u8])) -> Span {
+    s := rg_read(&rc, &st, op);
+    if s.ok != 1 {
+        return no_span();
+    }
+    return s;
+}
+// A write to `op` ends whatever fact it held: a register or a frame slot directly, or -- through a
+// register -- the frame slots whose address escaped, which are the only ones such a store reaches.
+fn rg_wrote(rc: (&RC), st: (&mut u64[]), op: (&[u8])) -> unit {
+    loc := rg_loc(&rc, op);
+    if loc != rg_none() {
+        rg_clear(&mut st, loc);
+        return ();
+    }
+    m := rg_mem(op);
+    if m.ok == 0 {
+        return ();
+    }
+    if rg_k(&st, m.base) == 3 {
+        sk := rg_lo(&st, m.base);
+        rg_clear(&mut st, 14 + sk);
+    }
+    for k in rc.esc.len() {
+        if rc.esc[k] != 0 {
+            rg_clear(&mut st, 14 + k);
+        }
+    }
+    return ();
+}
+// 1 when the value the operand names lies below `len(identity)`: either below a known lower bound
+// on that length, or below a length word the same generation of the length still bounds.
+fn rg_below(rc: (&RC), st: (&u64[]), s: (&Span), id: u64) -> bool {
+    if s.ok != 1 {
+        return false;
+    }
+    if rg_have(&rc, &st, id) != 0 {
+        if s.hi < rg_lb(&rc, &st, id) {
+            return true;
+        }
+    }
+    if s.sym == id + 1 {
+        if s.sgen == rg_lgen(&rc, &st, id) {
+            return true;
+        }
+    }
+    return false;
+}
+fn rg_span_clamp(st: (&mut u64[]), loc: u64, top: u64) -> unit {
+    if rg_k(&st, loc) != 1 {
+        rg_clear(&mut st, loc);
+        return ();
+    }
+    mut hi = rg_hi(&st, loc);
+    if hi > top {
+        hi = top;
+    }
+    mut lo = rg_lo(&st, loc);
+    if lo > top {
+        lo = 0;
+    }
+    rg_word(&mut st, loc, lo, hi, 0, 0);
+    return ();
+}
+// `movq`/`movl`-family: the destination takes the source's fact when it has one, narrowed to the
+// width the move keeps.
+fn rg_move(rc: (&RC), st: (&mut u64[]), src: (&[u8]), dst: (&[u8]), width: u64) -> unit {
+    dloc := rg_loc(&rc, dst);
+    if dloc == rg_none() {
+        rg_wrote(&rc, &mut st, dst);
+        return ();
+    }
+    s0 := rg_read(&rc, &st, src);
+    if s0.ok == 0 {
+        rg_clear(&mut st, dloc);
+        return ();
+    }
+    if s0.ok >= 2 {
+        if (s0.ok == 3) & (width != 64) {
+            rg_clear(&mut st, dloc);
+            return ();
+        }
+        rg_put(&mut st, dloc, s0.ok, s0.lo, s0.hi, s0.sym, s0.sgen);
+        return ();
+    }
+    // Narrowing is a fact only when the value is provably in range; otherwise the truncation ends
+    // the fact, which is why a `movl` of a wide word is [0, 2^32) and nothing more.
+    mut top = rg_max();
+    if width == 32 {
+        top = 4294967295;
+    }
+    if width == 8 {
+        top = 255;
+    }
+    if width == 16 {
+        top = 65535;
+    }
+    mut lo = s0.lo;
+    mut hi = s0.hi;
+    mut sym = s0.sym;
+    mut sgen = s0.sgen;
+    if hi > top {
+        if (sym == 0) & (width != 64) {
+            lo = 0;
+            hi = top;
+        } else {
+            rg_clear(&mut st, dloc);
+            return ();
+        }
+    }
+    if width != 64 {
+        sym = 0;
+        sgen = 0;
+    }
+    rg_word(&mut st, dloc, lo, hi, sym, sgen);
+    return ();
+}
+fn rg_width_of(op: (&[u8])) -> u64 {
+    if eq(op, view("movl")) {
+        return 32;
+    }
+    if eq(op, view("movb")) {
+        return 8;
+    }
+    if eq(op, view("movzbq")) {
+        return 8;
+    }
+    if eq(op, view("movzwq")) {
+        return 16;
+    }
+    if eq(op, view("movslq")) {
+        return 32;
+    }
+    return 64;
+}
+// 1 when a call is one of the read-only accessors: it reads the sequence it is given and writes
+// neither the sequence's header nor any storage the caller owns.
+fn rg_readonly(name: (&[u8])) -> bool {
+    if starts(name, view("rt_slot")) || starts(name, view("rt_at")) {
+        return true;
+    }
+    if eq(name, view("rt_len")) || eq(name, view("rt_view")) || eq(name, view("rt_write")) {
+        return true;
+    }
+    if eq(name, view("rt_slice")) || eq(name, view("rt_vslice")) {
+        return true;
+    }
+    if eq(name, view("rt_f64_op")) || eq(name, view("rt_f32_round")) || eq(name, view("rt_f64_sqrt")) {
+        return true;
+    }
+    return false;
+}
+// The caller-saved registers a call clobbers. The callee-saved ones keep their facts: the stream
+// spills them at entry and reloads them at exit, which is where the loop counters live.
+fn rg_clobber(rc: (&RC), st: (&mut u64[])) -> unit {
+    rg_clear(&mut st, 0);
+    rg_clear(&mut st, 2);
+    rg_clear(&mut st, 3);
+    rg_clear(&mut st, 4);
+    rg_clear(&mut st, 5);
+    rg_clear(&mut st, 6);
+    rg_clear(&mut st, 7);
+    rg_clear(&mut st, 8);
+    rg_clear(&mut st, 9);
+    return ();
+}
+// A call this analysis does not know may hold a pointer into the frame and write through it, so
+// every slot whose address the function took loses its fact. A read-only accessor is given the
+// sequence's word rather than the slot's address (`&v` is a load, not an argument), so it does not.
+fn rg_clear_escaped(rc: (&RC), st: (&mut u64[])) -> unit {
+    for k in rc.esc.len() {
+        if rc.esc[k] != 0 {
+            rg_clear(&mut st, 14 + k);
+        }
+    }
+    return ();
+}
+// The effect of a call: the two accessors that grow a sequence, the two that give one a known
+// length, and everything else -- which may take any argument by reference and is therefore a drop.
+fn rg_call(rc: (&RC), st: (&mut u64[]), target: (&[u8]), seed: u64, trip: u64) -> unit {
+    if eq(target, view("rt_new")) {
+        if seed != 0 {
+            rg_clobber(&rc, &mut st);
+            g := rg_lgen(&rc, &st, seed - 1);
+            rg_header(&mut st, 0, seed - 1);
+            rg_lset(&rc, &mut st, seed - 1, 1, 0, g);
+        }
+        return ();
+    }
+    if starts(target, view("rt_push")) {
+        arg := rg_loc(&rc, view("%rdi"));
+        h := rg_hdr_of(&rc, &st, arg);
+        if h != 0 {
+            rg_grow_len(&rc, &mut st, h - 1, trip);
+        }
+        rg_clobber(&rc, &mut st);
+        return ();
+    }
+    if starts(target, view("rt_fill")) {
+        arg := rg_loc(&rc, view("%rdi"));
+        h := rg_hdr_of(&rc, &st, arg);
+        if h != 0 {
+            n := rg_span_of(&rc, &st, view("%rdx"));
+            if n.ok != 0 {
+                rg_set_len(&rc, &mut st, h - 1, n.lo);
+            } else {
+                rg_kill_len(&rc, &mut st, h - 1);
+            }
+        }
+        rg_clobber(&rc, &mut st);
+        return ();
+    }
+    if eq(target, view("rt_vec_copy")) {
+        if seed != 0 {
+            src := rg_loc(&rc, view("%rdi"));
+            h := rg_hdr_of(&rc, &st, src);
+            rg_clobber(&rc, &mut st);
+            rg_header(&mut st, 0, seed - 1);
+            if h != 0 {
+                hv := rg_have(&rc, &st, h - 1);
+                lb := rg_lb(&rc, &st, h - 1);
+                g := rg_lgen(&rc, &st, seed - 1);
+                rg_lset(&rc, &mut st, seed - 1, hv, lb, g);
+            }
+        }
+        return ();
+    }
+    if eq(target, view("rt_len")) {
+        arg := rg_loc(&rc, view("%rdi"));
+        h := rg_hdr_of(&rc, &st, arg);
+        rg_clobber(&rc, &mut st);
+        if h != 0 {
+            rg_lenw(&mut st, 0, h - 1);
+        }
+        return ();
+    }
+    if rg_readonly(target) {
+        rg_clobber(&rc, &mut st);
+        return ();
+    }
+    // Anything else may take a sequence by reference and rewrite its header: every identity whose
+    // header word the call is given loses its length, and every slot a store through a register
+    // could reach loses its fact.
+    for i in 6 {
+        arg := rg_loc(&rc, view(arg_reg(i)));
+        h := rg_hdr_of(&rc, &st, arg);
+        if h != 0 {
+            rg_kill_len(&rc, &mut st, h - 1);
+        }
+    }
+    rg_clobber(&rc, &mut st);
+    rg_clear_escaped(&rc, &mut st);
+    return ();
+}
+// One instruction's effect on the state.
+fn rg_step(rc: (&RC), st: (&mut u64[]), line: (&[u8]), seed: u64, trip: u64, at: u64, pcmp: (&mut u64[]), prov: (&mut u64[]), snap: (&mut u64[]), out: (&mut u64[])) -> unit {
+    mut space = line.len();
+    for i in line.len() {
+        if (line[i] == 32) & (space == line.len()) {
+            space = i;
+        }
+    }
+    mut op = sub(line, 0, space);
+    rest := trim(view(sub(line, space + 1, line.len())));
+    o := operands(view(rest));
+    n := o.len();
+    // A word a register was copied from, so a bound on the register bounds the slot as well: the
+    // front end materialises every comparison into a 0/1 word and reloads its operands by the time
+    // the branch runs, so this is the only place a loop guard survives.
+    w := rg_written(&rc, line);
+    if w != rg_none() {
+        if 2 * w + 2 <= prov.len() {
+            prov[2 * w] = 0;
+            prov[2 * w + 1] = 0;
+        }
+    }
+
+    if (eq(view(op), view("movq")) || eq(view(op), view("movabsq"))) && (n == 2) {
+        rg_move(&rc, &mut st, view(o[0]), view(o[1]), 64);
+        // `movq A,B` makes B the value of A: a bound on either is a bound on both until one of
+        // them is written, which is how a loop counter reaches the guard through the temporaries
+        // the front end copies it into.
+        dloc := rg_loc(&rc, view(o[1]));
+        sloc := rg_loc(&rc, view(o[0]));
+        if (dloc != rg_none()) & (sloc != rg_none()) {
+            // Resolve one link, and keep the slot: a frame slot is where the front end keeps a
+            // word a comparison is about, and a register the value was born in is no use as an
+            // operand once it has been reloaded with something else.
+            mut src = sloc + 1;
+            mut at2 = at;
+            if 2 * sloc + 2 <= prov.len() {
+                if prov[2 * sloc] != 0 {
+                    if prov[2 * sloc] - 1 >= 14 {
+                        src = prov[2 * sloc];
+                        at2 = prov[2 * sloc + 1];
+                    }
+                }
+            }
+            if 2 * dloc + 2 <= prov.len() {
+                prov[2 * dloc] = src;
+                prov[2 * dloc + 1] = at2;
+            }
+        }
+        return ();
+    }
+    if (eq(view(op), view("movl")) || eq(view(op), view("movb")) || eq(view(op), view("movzbq")) || eq(view(op), view("movzwq"))) && (n == 2) {
+        w := rg_width_of(view(op));
+        rg_move(&rc, &mut st, view(o[0]), view(o[1]), w);
+        return ();
+    }
+    if (eq(view(op), view("movsd")) || eq(view(op), view("movss")) || eq(view(op), view("movd")) || eq(view(op), view("movaps"))) && (n == 2) {
+        rg_wrote(&rc, &mut st, view(o[1]));
+        return ();
+    }
+    if eq(view(op), view("cmpq")) || eq(view(op), view("cmpb")) || eq(view(op), view("cmpl")) {
+        // What each operand is, as of this line: the branch that tests this comparison reads a 0/1
+        // word long after both registers have been reused, and a loop guard has to land on the slot
+        // the counter was loaded from.
+        pcmp[0] = at + 1;
+        for q in snap.len() {
+            snap[q] = prov[q];
+        }
+        for i in 2 {
+            if i < n {
+                r := rg_loc(&rc, view(o[i]));
+                mut src: u64 = 0;
+                mut at2: u64 = 0;
+                if r != rg_none() {
+                    if 2 * r + 2 <= prov.len() {
+                        src = prov[2 * r];
+                        at2 = prov[2 * r + 1];
+                    }
+                }
+                pcmp[1 + 2 * i] = src;
+                pcmp[2 + 2 * i] = at2;
+            }
+        }
+        return ();
+    }
+    if eq(view(op), view("testq")) || eq(view(op), view("testl")) {
+        return ();
+    }
+    if starts(view(op), view("set")) {
+        // A comparison materialised as a 0/1 word: record which comparison it is, so the branch
+        // that tests it refines the comparison's own operands.
+        if n != 1 {
+            return ();
+        }
+        dloc := rg_loc(&rc, view(o[0]));
+        if pcmp[0] == 0 {
+            rg_clear(&mut st, dloc);
+            return ();
+        }
+        mut js = copy(view("j"));
+        put(&mut js, view(sub(view(op), 3, op.len())));
+        rel := rg_jump_rel(view(js));
+        if rel == 0 {
+            rg_clear(&mut st, dloc);
+            return ();
+        }
+        rg_put(&mut st, dloc, 5, pcmp[0] - 1, rel, 0, 0);
+        return ();
+    }
+    if eq(view(op), view("xorq")) && (n == 2) {
+        dloc := rg_loc(&rc, view(o[1]));
+        imm := rg_imm(view(o[0]));
+        if (rg_k(&st, dloc) == 5) & (imm.ok == 1) & (imm.lo == 1) {
+            mut neg: u64 = 0;
+            if rg_sym(&st, dloc) == 0 {
+                neg = 1;
+            }
+            price := rg_lo(&st, dloc);
+            prel := rg_hi(&st, dloc);
+            rg_put(&mut st, dloc, 5, price, prel, neg, 0);
+            return ();
+        }
+        if dloc != rg_none() {
+            rg_clear(&mut st, dloc);
+            return ();
+        }
+        rg_wrote(&rc, &mut st, view(o[1]));
+        return ();
+    }
+    if (eq(view(op), view("addq")) || eq(view(op), view("subq"))) && (n == 2) {
+        mut minus = 0;
+        if eq(view(op), view("subq")) {
+            minus = 1;
+        }
+        rg_arith(&rc, &mut st, view(o[0]), view(o[1]), minus);
+        return ();
+    }
+    if eq(view(op), view("incq")) && (n == 1) {
+        rg_step_const(&rc, &mut st, view(o[0]), 1);
+        return ();
+    }
+    if eq(view(op), view("decq")) && (n == 1) {
+        rg_step_const(&rc, &mut st, view(o[0]), 0);
+        return ();
+    }
+    if eq(view(op), view("imulq")) {
+        if n == 2 {
+            rg_mul(&rc, &mut st, view(o[1]), view(o[0]), 0);
+            return ();
+        }
+        if n == 3 {
+            rg_mul(&rc, &mut st, view(o[2]), view(o[1]), 0);
+            return ();
+        }
+    }
+    if eq(view(op), view("mulq")) && (n == 1) {
+        rg_mul(&rc, &mut st, view("%rax"), view(o[0]), 1);
+        return ();
+    }
+    if (eq(view(op), view("divq")) || eq(view(op), view("idivq"))) && (n == 1) {
+        rg_clear(&mut st, 0);
+        rg_clear(&mut st, 3);
+        return ();
+    }
+    if eq(view(op), view("andq")) && (n == 2) {
+        rg_mask(&rc, &mut st, view(o[0]), view(o[1]));
+        return ();
+    }
+    if (eq(view(op), view("shlq")) || eq(view(op), view("shrq")) || eq(view(op), view("sarq"))) && (n == 2) {
+        rg_shift(&rc, &mut st, view(o[0]), view(o[1]), view(op));
+        return ();
+    }
+    if eq(view(op), view("leaq")) && (n == 2) {
+        dloc := rg_loc(&rc, view(o[1]));
+        id := rg_storage(view(o[0]));
+        if dloc == rg_none() {
+            return ();
+        }
+        if id >= 15 {
+            rg_addr(&mut st, dloc, id - 15);
+            return ();
+        }
+        rg_clear(&mut st, dloc);
+        return ();
+    }
+    if eq(view(op), view("call")) && (n >= 1) {
+        rg_call(&rc, &mut st, view(o[0]), seed, trip);
+        return ();
+    }
+    if eq(view(op), view("popq")) && (n == 1) {
+        rg_wrote(&rc, &mut st, view(o[0]));
+        return ();
+    }
+    if eq(view(op), view("retq")) || eq(view(op), view("jmp")) || eq(view(op), view("nop")) || eq(view(op), view("nopw")) || starts(line, view("j")) || eq(view(op), view("pushq")) {
+        return ();
+    }
+    // Anything else ends the facts of the words it names.
+    for i in n {
+        id := rg_loc(&rc, view(o[i]));
+        if id != rg_none() {
+            rg_clear(&mut st, id);
+            continue;
+        }
+        rg_wrote(&rc, &mut st, view(o[i]));
+    }
+    return ();
+}
+// The location a line writes: the last operand of the moves and of the arithmetic, both words for
+// a widening multiply or a divide. `rg_none` when the line writes none this analysis tracks.
+// The stream operand of a location this analysis tracks: `%rax` for a register, `-8(%rbp)` for a
+// frame slot.
+fn rg_operand(loc: u64) -> u8[] {
+    if loc < 14 {
+        names := u8[][copy(view("rax")), copy(view("rbx")), copy(view("rcx")), copy(view("rdx")), copy(view("rsi")), copy(view("rdi")), copy(view("r8")), copy(view("r9")), copy(view("r10")), copy(view("r11")), copy(view("r12")), copy(view("r13")), copy(view("r14")), copy(view("r15"))];
+        mut out = copy(view("%"));
+        put(&mut out, view(names[loc]));
+        return out;
+    }
+    return slot_needle(loc - 14);
+}
+fn rg_written(rc: (&RC), line: (&[u8])) -> u64 {
+    mut space = line.len();
+    for i in line.len() {
+        if (line[i] == 32) & (space == line.len()) {
+            space = i;
+        }
+    }
+    op := view(sub(line, 0, space));
+    if eq(op, view("mulq")) || eq(op, view("divq")) || eq(op, view("idivq")) || eq(op, view("cqto")) {
+        return 0;
+    }
+    mut writes = 0;
+    if eq(op, view("movq")) || eq(op, view("movabsq")) || eq(op, view("movl")) || eq(op, view("movb")) {
+        writes = 1;
+    }
+    if eq(op, view("movzbq")) || eq(op, view("movzwq")) || eq(op, view("movsd")) || eq(op, view("movss")) || eq(op, view("movd")) {
+        writes = 1;
+    }
+    if eq(op, view("leaq")) || eq(op, view("addq")) || eq(op, view("subq")) || eq(op, view("andq")) || eq(op, view("orq")) {
+        writes = 1;
+    }
+    if eq(op, view("xorq")) || eq(op, view("shlq")) || eq(op, view("shrq")) || eq(op, view("sarq")) || eq(op, view("imulq")) {
+        writes = 1;
+    }
+    if eq(op, view("popq")) || eq(op, view("incq")) || eq(op, view("decq")) || eq(op, view("negq")) || eq(op, view("notq")) {
+        writes = 1;
+    }
+    if starts(op, view("set")) {
+        writes = 1;
+    }
+    if writes == 0 {
+        return rg_none();
+    }
+    o := operands(view(trim(view(sub(line, space + 1, line.len())))));
+    if o.len() == 0 {
+        return rg_none();
+    }
+    return rg_loc(&rc, view(o[o.len() - 1]));
+}
+// 1 when some line in [from, to) writes location `loc`.
+fn rg_written_since(rc: (&RC), instrs: (&u8[][]), from: u64, to: u64, loc: u64) -> u64 {
+    mut i = from;
+    while i < to {
+        if i < instrs.len() {
+            if rg_written(&rc, view(instrs[i])) == loc {
+                return 1;
+            }
+        }
+        i += 1;
+    }
+    return 0;
+}
+// 1 when some line in [from, to) writes frame slot `k`.
+fn rg_slot_written(rc: (&RC), instrs: (&u8[][]), from: u64, to: u64, k: u64) -> u64 {
+    mut i = from;
+    while i < to {
+        if i < instrs.len() {
+            if rg_written(&rc, view(instrs[i])) == 14 + k {
+                return 1;
+            }
+        }
+        i += 1;
+    }
+    return 0;
+}
+// A bound on `op` also bounds the slot it was loaded from, which is what carries a loop guard
+// through the front end's materialised comparison: `movq -N(%rbp),%rax` then `cmpq` then the
+// boolean. The copy is good while no line from the load to the branch wrote that slot.
+// The operand to read a comparison's side as: the register itself, or the slot it held at the
+// comparison, which is the word the fact is really about.
+fn rg_op_at(rc: (&RC), pcmp: (&u64[]), side: u64, op: (&[u8]), instrs: (&u8[][]), stop: u64) -> u8[] {
+    b := 1 + 2 * side;
+    if b + 2 > pcmp.len() {
+        return copy(view(op));
+    }
+    if pcmp[b] == 0 {
+        return copy(view(op));
+    }
+    if rg_written_since(&rc, &instrs, pcmp[b + 1], stop, pcmp[b] - 1) != 0 {
+        return copy(view(op));
+    }
+    return rg_operand(pcmp[b] - 1);
+}
+fn rg_refine_op(rc: (&RC), st: (&mut u64[]), pcmp: (&u64[]), side: u64, op: (&[u8]), other: (&[u8]), rel: u64, instrs: (&u8[][]), stop: u64, snap: (&u64[])) -> unit {
+    r := rg_loc(&rc, op);
+    if r == rg_none() {
+        rg_bound(&rc, &mut st, op, other, rel);
+        return ();
+    }
+    if r >= 14 {
+        // A slot is the value itself; a register holds the comparison's operand only until it is
+        // reused, so its register half is refined through the chain below and not on its own.
+        rg_bound(&rc, &mut st, op, other, rel);
+    }
+    // Follow the copies: while nothing wrote `src` since `dst` was copied from it, a bound on one
+    // is a bound on the other. A loop counter reaches its guard through exactly such a copy.
+    b := 1 + 2 * side;
+    if b + 2 > pcmp.len() {
+        return ();
+    }
+    if pcmp[b] == 0 {
+        // No slot carries this word: the register does, and the fact is about it -- sound as long
+        // as the lines between the comparison and the branch did not write it.
+        if rg_written_since(&rc, &instrs, pcmp[0], stop, r) == 0 {
+            rg_bound(&rc, &mut st, op, other, rel);
+        }
+        return ();
+    }
+    mut loc = pcmp[b];
+    // The refined word is the one the comparison saw: it still holds it unless the lines after the
+    // comparison wrote it. (`pcmp[0]` is the line after the comparison.)
+    mut at2 = pcmp[0];
+    mut depth: u64 = 0;
+    while (loc != 0) & (depth < 4) {
+        if rg_written_since(&rc, &instrs, at2, stop, loc - 1) != 0 {
+            return ();
+        }
+        src := rg_operand(loc - 1);
+        rg_bound(&rc, &mut st, view(src), other, rel);
+        // One more link: the word that location was itself copied from, as the snapshot saw it.
+        mut next: u64 = 0;
+        mut nat: u64 = 0;
+        if 2 * (loc - 1) + 2 <= snap.len() {
+            next = snap[2 * (loc - 1)];
+            nat = snap[2 * (loc - 1) + 1] + 1;
+        }
+        loc = next;
+        at2 = nat;
+        depth += 1;
+    }
+    return ();
+}
+// `addq $c` / `subq $c` shift an interval; two intervals add when the sum cannot overflow.
+fn rg_arith(rc: (&RC), st: (&mut u64[]), src: (&[u8]), dst: (&[u8]), minus: u64) -> unit {
+    loc := rg_loc(&rc, dst);
+    if loc == rg_none() {
+        rg_wrote(&rc, &mut st, dst);
+        return ();
+    }
+    a := rg_span_of(&rc, &st, dst);
+    b := rg_span_of(&rc, &st, src);
+    if (a.ok == 0) || (b.ok == 0) {
+        rg_clear(&mut st, loc);
+        return ();
+    }
+    if minus == 0 {
+        if (a.hi > 4611686018427387903) || (b.hi > 4611686018427387903) {
+            rg_clear(&mut st, loc);
+            return ();
+        }
+        rg_word(&mut st, loc, a.lo + b.lo, a.hi + b.hi, 0, 0);
+        return ();
+    }
+    if (a.lo < b.hi) || (a.hi > 4611686018427387903) {
+        rg_clear(&mut st, loc);
+        return ();
+    }
+    rg_word(&mut st, loc, a.lo - b.hi, a.hi - b.lo, 0, 0);
+    return ();
+}
+fn rg_step_const(rc: (&RC), st: (&mut u64[]), dst: (&[u8]), up: u64) -> unit {
+    loc := rg_loc(&rc, dst);
+    if loc == rg_none() {
+        rg_wrote(&rc, &mut st, dst);
+        return ();
+    }
+    a := rg_span_of(&rc, &st, dst);
+    if a.ok == 0 {
+        rg_clear(&mut st, loc);
+        return ();
+    }
+    if up != 0 {
+        if a.hi > 4611686018427387903 {
+            rg_clear(&mut st, loc);
+            return ();
+        }
+        rg_word(&mut st, loc, a.lo + 1, a.hi + 1, 0, 0);
+        return ();
+    }
+    if a.lo == 0 {
+        rg_clear(&mut st, loc);
+        return ();
+    }
+    rg_word(&mut st, loc, a.lo - 1, a.hi - 1, 0, 0);
+    return ();
+}
+// `imulq b,$dst` or `mulq b` (`wide` 1 makes it the rax * b form, which also writes rdx).
+fn rg_mul(rc: (&RC), st: (&mut u64[]), dst: (&[u8]), src: (&[u8]), wide: u64) -> unit {
+    loc := rg_loc(&rc, dst);
+    if wide != 0 {
+        rg_clear(&mut st, 3);
+    }
+    if loc == rg_none() {
+        rg_wrote(&rc, &mut st, dst);
+        return ();
+    }
+    a := rg_span_of(&rc, &st, dst);
+    b := rg_span_of(&rc, &st, src);
+    if (a.ok == 0) || (b.ok == 0) {
+        rg_clear(&mut st, loc);
+        return ();
+    }
+    if (a.lo == a.hi) & (b.lo == b.hi) {
+        mut bad = 0;
+        if a.lo != 0 {
+            if b.lo > 18446744073709551615 / a.lo {
+                bad = 1;
+            }
+        }
+        if bad != 0 {
+            rg_clear(&mut st, loc);
+            return ();
+        }
+        rg_word(&mut st, loc, a.lo * b.lo, a.lo * b.lo, 0, 0);
+        return ();
+    }
+    if (a.hi > 3037000499) || (b.hi > 3037000499) {
+        rg_clear(&mut st, loc);
+        return ();
+    }
+    rg_word(&mut st, loc, a.lo * b.lo, a.hi * b.hi, 0, 0);
+    return ();
+}
+// `andq`: a mask bounds the result by the mask itself, which is what makes a narrowing to a narrow
+// type a fact.
+fn rg_mask(rc: (&RC), st: (&mut u64[]), src: (&[u8]), dst: (&[u8])) -> unit {
+    loc := rg_loc(&rc, dst);
+    if loc == rg_none() {
+        rg_wrote(&rc, &mut st, dst);
+        return ();
+    }
+    a := rg_span_of(&rc, &st, dst);
+    b := rg_span_of(&rc, &st, src);
+    mut top = rg_max();
+    if b.ok != 0 {
+        top = b.hi;
+    } else {
+        rg_clear(&mut st, loc);
+        return ();
+    }
+    mut hi = top;
+    mut lo: u64 = 0;
+    if a.ok != 0 {
+        if a.hi < hi {
+            hi = a.hi;
+        }
+        if (a.lo | a.hi) == 0 {
+            lo = 0;
+        }
+    }
+    rg_word(&mut st, loc, lo, hi, 0, 0);
+    return ();
+}
+fn rg_shift(rc: (&RC), st: (&mut u64[]), src: (&[u8]), dst: (&[u8]), op: (&[u8])) -> unit {
+    loc := rg_loc(&rc, dst);
+    if loc == rg_none() {
+        rg_wrote(&rc, &mut st, dst);
+        return ();
+    }
+    a := rg_span_of(&rc, &st, dst);
+    c := rg_imm(src);
+    if (a.ok == 0) || (c.ok == 0) || (c.hi >= 64) {
+        rg_clear(&mut st, loc);
+        return ();
+    }
+    if eq(op, view("shlq")) {
+        if (c.hi == 0) || (a.hi > (rg_max() >> c.hi)) {
+            rg_clear(&mut st, loc);
+            return ();
+        }
+        rg_word(&mut st, loc, a.lo << c.hi, a.hi << c.hi, 0, 0);
+        return ();
+    }
+    rg_word(&mut st, loc, a.lo >> c.hi, a.hi >> c.hi, 0, 0);
+    return ();
+}
+// The relation a comparison establishes: 1 `x < y`, 2 `x <= y`, 3 `x >= y`, 4 `x > y`.
+fn rg_bound(rc: (&RC), st: (&mut u64[]), x: (&[u8]), y: (&[u8]), rel: u64) -> unit {
+    loc := rg_loc(&rc, x);
+    if loc == rg_none() {
+        return ();
+    }
+    yr := rg_read(&rc, &st, y);
+    s := rg_span_of(&rc, &st, x);
+    mut lo: u64 = 0;
+    mut hi = rg_max();
+    if s.ok != 0 {
+        lo = s.lo;
+        hi = s.hi;
+    }
+    if yr.ok == 4 {
+        // `x < len(k)`: a bound against the length word itself, valid while that length stands.
+        if rel == 1 {
+            g := rg_lgen(&rc, &st, yr.lo);
+            rg_word(&mut st, loc, lo, hi, yr.lo + 1, g);
+        }
+        return ();
+    }
+    if (yr.ok != 1) || (yr.lo != yr.hi) {
+        return ();
+    }
+    c := yr.lo;
+    if rel == 1 {
+        if c == 0 {
+            rg_clear(&mut st, loc);
+            return ();
+        }
+        if c - 1 < hi {
+            hi = c - 1;
+        }
+    }
+    if rel == 2 {
+        if c < hi {
+            hi = c;
+        }
+    }
+    if rel == 3 {
+        if c > lo {
+            lo = c;
+        }
+    }
+    if rel == 4 {
+        if c == rg_max() {
+            rg_clear(&mut st, loc);
+            return ();
+        }
+        if c + 1 > lo {
+            lo = c + 1;
+        }
+    }
+    if rel == 5 {
+        lo = c;
+        hi = c;
+    }
+    rg_word(&mut st, loc, lo, hi, 0, 0);
+    return ();
+}
+fn rg_relate(rc: (&RC), st: (&mut u64[]), a: (&[u8]), b: (&[u8]), rel: u64, pcmp: (&u64[]), instrs: (&u8[][]), stop: u64, snap: (&u64[])) -> unit {
+    // `cmpq a,b` establishes `b rel a`; the same comparison also bounds `a` against `b`. `pcmp`
+    // holds the slot each operand was loaded from at the comparison, as [line+1, bsrc, bat,
+    // asrc, aat].
+    rg_refine_op(&rc, &mut st, &pcmp, 1, b, rg_op_at(&rc, &pcmp, 0, a, &instrs, stop), rel, &instrs, stop, &snap);
+    inv := rg_flip(rel);
+    rg_refine_op(&rc, &mut st, &pcmp, 0, a, rg_op_at(&rc, &pcmp, 1, b, &instrs, stop), inv, &instrs, stop, &snap);
+    return ();
+}
+// The accessors whose body is `if (i < len) == 0 { rt_abort(); } return data + i*W`, as the width
+// they scale by: 1-3 are the address forms of 8, 4 and 1 bytes, 4-6 the loading forms.
+fn rg_accessor(name: (&[u8])) -> u64 {
+    if eq(name, view("rt_slot")) {
+        return 1;
+    }
+    if eq(name, view("rt_slot4")) {
+        return 2;
+    }
+    if eq(name, view("rt_slotb")) {
+        return 3;
+    }
+    if eq(name, view("rt_at")) {
+        return 4;
+    }
+    if eq(name, view("rt_at4")) {
+        return 5;
+    }
+    if eq(name, view("rt_atb")) {
+        return 6;
+    }
+    return 0;
+}
+fn rg_width(which: u64) -> u64 {
+    if (which == 2) || (which == 5) {
+        return 4;
+    }
+    if (which == 3) || (which == 6) {
+        return 1;
+    }
+    return 8;
+}
+// The first token of a line.
+fn rg_op(line: (&[u8])) -> u8[] {
+    mut space = line.len();
+    for i in line.len() {
+        if (line[i] == 32) & (space == line.len()) {
+            space = i;
+        }
+    }
+    return sub(line, 0, space);
+}
+// 1 when nothing after this line is reached by falling through it.
+fn rg_ends_block(line: (&[u8])) -> u64 {
+    if eq(line, view("retq")) || eq(line, view("leave")) || eq(line, view("call rt_abort")) {
+        return 1;
+    }
+    if line.len() > 1 {
+        if line[0] == 106 {
+            return 1;
+        }
+    }
+    return 0;
+}
+// The block a jump line targets.
+fn rg_target(bname: (&u8[][]), line: (&[u8])) -> u64 {
+    mut space = line.len();
+    for i in line.len() {
+        if (line[i] == 32) & (space == line.len()) {
+            space = i;
+        }
+    }
+    if space >= line.len() {
+        return rg_none();
+    }
+    t := trim(view(sub(line, space + 1, line.len())));
+    for i in bname.len() {
+        if eq(view(bname[i]), view(t)) {
+            return i;
+        }
+    }
+    return rg_none();
+}
+// The relation `dst rel src` a conditional jump tests: 1 `<`, 2 `<=`, 3 `>=`, 4 `>`, 5 `==`,
+// 6 `!=`, 0 when it tests something this analysis does not decide (a sign or a parity).
+fn rg_jump_rel(op: (&[u8])) -> u64 {
+    if eq(op, view("jb")) || eq(op, view("jc")) {
+        return 1;
+    }
+    if eq(op, view("jbe")) {
+        return 2;
+    }
+    if eq(op, view("jae")) || eq(op, view("jnc")) {
+        return 3;
+    }
+    if eq(op, view("ja")) {
+        return 4;
+    }
+    if eq(op, view("je")) || eq(op, view("jz")) {
+        return 5;
+    }
+    if eq(op, view("jne")) || eq(op, view("jnz")) {
+        return 6;
+    }
+    return 0;
+}
+// The same comparison read the other way round: `b rel a` is also `a flip(rel) b`.
+fn rg_flip(rel: u64) -> u64 {
+    if rel == 1 {
+        return 4;
+    }
+    if rel == 2 {
+        return 3;
+    }
+    if rel == 3 {
+        return 2;
+    }
+    if rel == 4 {
+        return 1;
+    }
+    return rel;
+}
+// The relation that holds when `rel` does not: the edge of a branch that is not taken.
+fn rg_inverse(rel: u64) -> u64 {
+    if rel == 1 {
+        return 3;
+    }
+    if rel == 2 {
+        return 4;
+    }
+    if rel == 3 {
+        return 1;
+    }
+    if rel == 4 {
+        return 2;
+    }
+    if rel == 5 {
+        return 6;
+    }
+    return 5;
+}
+// The verdict of a call line: 3 when the accessor's bounds check cannot fire here.
+fn rg_call_verdict(rc: (&RC), st: (&u64[]), line: (&[u8])) -> u64 {
+    o := operands(view(sub(line, 5, line.len())));
+    if o.len() != 1 {
+        return 0;
+    }
+    if rg_accessor(view(o[0])) == 0 {
+        return 0;
+    }
+    id := rg_hdr_of(&rc, &st, 5);
+    if id == 0 {
+        return 0;
+    }
+    s := rg_span_of(&rc, &st, view("%rsi"));
+    if !rg_below(&rc, &st, &s, id - 1) {
+        return 0;
+    }
+    return 3;
+}
+// dst |= src, taking src wholesale when dst has nothing on it yet.
+fn rg_into(rc: (&RC), st: (&mut u64[][]), nblk: u64, b: u64, src: (&u64[])) -> u64 {
+    if b >= nblk {
+        return 0;
+    }
+    if st[b].len() == 0 {
+        st[b] = src.copy();
+        return 1;
+    }
+    return rg_join(&rc, &mut st[b], &src);
+}
+// Walks a block from `cur`, applying each instruction and recording the two verdicts a fact proves.
+fn rg_run(rc: (&RC), cur: (&mut u64[]), instrs: (&u8[][]), start: u64, stop: u64, trip: (&u64[]), out: (&mut u64[]), proofs: u64, prov: (&mut u64[]), pcmp: (&mut u64[]), snap: (&mut u64[])) -> unit {
+    for i in stop - start {
+        n := start + i;
+        line := view(instrs[n]);
+        if proofs != 0 {
+            if starts(line, view("call ")) {
+                out[n] = rg_call_verdict(&rc, &cur, line);
+            }
+        }
+        rg_step(&rc, &mut cur, line, rc.seed[n], trip[n], n, &mut pcmp, &mut prov, &mut snap, &mut out);
+    }
+    return ();
+}
+// The two states a conditional jump hands its successors: each edge is refined with the relation
+// the branch tests, on both operands. A branch is never *decided*: the state a block is entered with
+// is the join over every path that reaches it, so a comparison that holds there holds on every
+// arrival -- including a loop's last, which is why deciding a guard from it would be wrong.
+fn rg_edges(rc: (&RC), st: (&mut u64[][]), nblk: u64, s1: u64, s2: u64, instrs: (&u8[][]), start: u64, stop: u64, cur: (&u64[]), out: (&mut u64[]), pcmp: (&u64[]), snap: (&u64[])) -> u64 {
+    if s2 == rg_none() {
+        if s1 != rg_none() {
+            if rg_into(&rc, &mut st, nblk, s1, &cur) != 0 {
+                return 1;
+            }
+        }
+        return 0;
+    }
+    last := view(instrs[stop - 1]);
+    rel := rg_jump_rel(view(rg_op(last)));
+    mut taken = cur.copy();
+    mut fall = cur.copy();
+    if (rel != 0) & (stop - start >= 2) {
+        cmp := view(instrs[stop - 2]);
+        if starts(cmp, view("cmpq ")) {
+            o := operands(view(sub(cmp, 5, cmp.len())));
+            if o.len() == 2 {
+                rg_relate(&rc, &mut taken, view(o[0]), view(o[1]), rel, &pcmp, &instrs, stop, &snap);
+                rg_relate(&rc, &mut fall, view(o[0]), view(o[1]), rg_inverse(rel), &pcmp, &instrs, stop, &snap);
+            }
+        }
+        if starts(cmp, view("testq ")) {
+            // `testq %rax,%rax` on a comparison the front end materialised as a 0/1 word: the jump
+            // is the comparison itself, so its two edges bound the comparison's own operands.
+            o := operands(view(sub(cmp, 6, cmp.len())));
+            if o.len() == 2 {
+                loc := rg_loc(&rc, view(o[0]));
+                if (loc != rg_none()) & (rg_k(&cur, loc) == 5) {
+                    t := rg_lo(&cur, loc);
+                    prel := rg_hi(&cur, loc);
+                    neg := rg_sym(&cur, loc);
+                    if t < instrs.len() {
+                        co := operands(view(sub(view(instrs[t]), 5, instrs[t].len())));
+                        if co.len() == 2 {
+                            // `holds` 1 when the taken edge means `a prel b` is true.
+                            mut holds: u64 = 0;
+                            if rel == 5 {
+                                if neg != 0 {
+                                    holds = 1;
+                                }
+                            } else {
+                                if neg == 0 {
+                                    holds = 1;
+                                }
+                            }
+                            if holds != 0 {
+                                rg_relate(&rc, &mut taken, view(co[0]), view(co[1]), prel, &pcmp, &instrs, stop, &snap);
+                                rg_relate(&rc, &mut fall, view(co[0]), view(co[1]), rg_inverse(prel), &pcmp, &instrs, stop, &snap);
+                            } else {
+                                rg_relate(&rc, &mut fall, view(co[0]), view(co[1]), prel, &pcmp, &instrs, stop, &snap);
+                                rg_relate(&rc, &mut taken, view(co[0]), view(co[1]), rg_inverse(prel), &pcmp, &instrs, stop, &snap);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // 1 when the target changed, 2 when the fall-through did, 3 for both.
+    mut changed = 0;
+    if rg_into(&rc, &mut st, nblk, s2, &fall) != 0 {
+        changed = 2;
+    }
+    if rg_into(&rc, &mut st, nblk, s1, &taken) != 0 {
+        changed = changed | 1;
+    }
+    return changed;
+}
+// One verdict per instruction line: 0 nothing, 1 the conditional jump on this line always takes its
+// target, 2 it never does, 3 the bounds-checked accessor call on this line cannot fail.
+fn range_proofs(instrs: (&u8[][]), nslots: u64, split: u64) -> u64[] {
+    n := instrs.len();
+    mut out = u64[];
+    for i in n {
+        out.push(0);
+    }
+    if n == 0 {
+        return out;
+    }
+    // Nothing to prove in a function that reads no sequence, and nothing to prove in one that only
+    // borrows one: a range fact needs a header identity, and every location is untyped at entry, so
+    // the identity has to be created here (`rt_new`, `rt_vec_copy`, a constant fill).
+    mut reads = 0;
+    mut creates = 0;
+    for i in n {
+        line := view(instrs[i]);
+        if starts(line, view("cmpq 8(%")) {
+            reads = 1;
+        }
+        if starts(line, view("call rt_slot")) || starts(line, view("call rt_at")) {
+            reads = 1;
+        }
+        if eq(line, view("call rt_new")) || eq(line, view("call rt_vec_copy")) || starts(line, view("call rt_fill")) {
+            creates = 1;
+        }
+    }
+    if (reads == 0) || (creates == 0) {
+        return out;
+    }
+    mut rc = rc_new(nslots, split);
+    // One identity per `rt_new`/`rt_vec_copy` call, in stream order, so a fact established by one
+    // walk of the stream is the same identity in every later walk.
+    mut nid: u64 = 0;
+    for i in n {
+        line := view(instrs[i]);
+        mut s: u64 = 0;
+        if eq(line, view("call rt_new")) || eq(line, view("call rt_vec_copy")) {
+            nid += 1;
+            s = nid;
+        }
+        rc.seed.push(s);
+    }
+    rc.nid = nid + 2;
+    for i in n {
+        line := view(instrs[i]);
+        if starts(line, view("leaq ")) {
+            o := operands(view(sub(line, 5, line.len())));
+            if o.len() == 2 {
+                id := rg_storage(view(o[0]));
+                if id >= 15 {
+                    if id - 15 < nslots {
+                        rc.esc[id - 15] = 1;
+                    }
+                }
+            }
+        }
+    }
+    // Blocks: a label line starts one, and the block before it ends there.
+    mut bstart = u64[];
+    mut bstop = u64[];
+    mut bname = u8[][];
+    mut bof = u64[];
+    mut cur: u64 = 0;
+    bstart.push(0);
+    bname.push(u8[]);
+    for i in n {
+        line := view(instrs[i]);
+        name := label_of(line);
+        if (name.len() != 0) & (name.len() + 1 == line.len()) {
+            if i != bstart[cur] {
+                bstop.push(i);
+                bstart.push(i);
+                bname.push(name);
+                cur += 1;
+            } else {
+                bname[cur] = name;
+            }
+        }
+        // A block also ends after a jump or a return: the lines that follow are reached only along
+        // the other edge, which is where the front end's `jb` past a cold `rt_abort` puts them.
+        if rg_ends_block(line) != 0 {
+            if i + 1 < n {
+                bstop.push(i + 1);
+                bstart.push(i + 1);
+                bname.push(u8[]);
+                cur += 1;
+            }
+        }
+        bof.push(cur);
+    }
+    bstop.push(n);
+    nblk := bstart.len();
+    // Successors from the last line of the block: `jmp` names one, a conditional jump names the
+    // target and falls through, `retq` and the non-returning `rt_abort` name none.
+    mut s1 = u64[];
+    mut s2 = u64[];
+    for b in nblk {
+        st := bstart[b];
+        en := bstop[b];
+        mut t1 = rg_none();
+        mut t2 = rg_none();
+        if en == st {
+            if b + 1 < nblk {
+                t1 = b + 1;
+            }
+        } else {
+            last := view(instrs[en - 1]);
+            mut done = 0;
+            if eq(last, view("retq")) || eq(last, view("call rt_abort")) || eq(last, view("leave")) {
+                done = 1;
+            }
+            if done == 0 {
+                if starts(last, view("jmp")) {
+                    t1 = rg_target(&bname, last);
+                } else {
+                    if (last.len() > 1) & (last[0] == 106) & (last[1] != 109) {
+                        t1 = rg_target(&bname, last);
+                        if b + 1 < nblk {
+                            t2 = b + 1;
+                        }
+                    } else {
+                        if b + 1 < nblk {
+                            t1 = b + 1;
+                        }
+                    }
+                }
+            }
+        }
+        s1.push(t1);
+        s2.push(t2);
+    }
+    // Per line: how many times one execution of the enclosing counted fill loop grows a length.
+    mut trip = u64[];
+    for i in n {
+        trip.push(1);
+    }
+    // The states, block by block: the first path that reaches a block types it, every later one
+    // joins into it. Blocks are in stream order, so a forward pass reaches every forward edge once.
+    mut stx = u64[][];
+    mut dirty = u64[];
+    for b in nblk {
+        stx.push(u64[]);
+        dirty.push(1);
+    }
+    stx[0] = rc_state(&rc);
+    // The scratch a block walk reuses: the copy provenance of each location, that map as the last
+    // comparison saw it, and the comparison's record.
+    mut prov = u64[];
+    mut snap = u64[];
+    for q in 2 * rc.nloc {
+        prov.push(0);
+        snap.push(0);
+    }
+    mut pcmp2 = u64[];
+    for q in 5 {
+        pcmp2.push(0);
+    }
+    mut rounds: u64 = 0;
+    mut changed: u64 = 1;
+    // A worklist: only the blocks a join changed are walked again, so the cost is one pass over
+    // the function plus the blocks a loop actually re-enters.
+    while (changed != 0) & (rounds < 24) {
+        changed = 0;
+        rounds += 1;
+        for b in nblk {
+            if (dirty[b] == 0) || (stx[b].len() == 0) {
+                continue;
+            }
+            dirty[b] = 0;
+            for q in prov.len() {
+                prov[q] = 0;
+                snap[q] = 0;
+            }
+            for q in 5 {
+                pcmp2[q] = 0;
+            }
+            mut cur2 = stx[b].copy();
+            rg_run(&rc, &mut cur2, &instrs, bstart[b], bstop[b], &trip, &mut out, 1, &mut prov, &mut pcmp2, &mut snap);
+            mask := rg_edges(&rc, &mut stx, nblk, s1[b], s2[b], &instrs, bstart[b], bstop[b], &cur2, &mut out, &pcmp2, &snap);
+            if (mask & 1) != 0 {
+                if s1[b] != rg_none() {
+                    dirty[s1[b]] = 1;
+                }
+                changed = 1;
+            }
+            if (mask & 2) != 0 {
+                if (s2[b] != rg_none()) & (s2[b] < nblk) {
+                    dirty[s2[b]] = 1;
+                }
+                changed = 1;
+            }
+        }
+    }
+    // The verdicts are read off the fixpoint and nowhere else. A branch decided from a state that
+    // still had a backedge left to join could decide a loop's exit the wrong way round -- the
+    // counter is in range on every iteration but the last -- so the walk that records them runs
+    // once more, over every reachable block, when nothing is left to change. At the fixpoint the
+    // joins it performs again change nothing.
+    for b in nblk {
+        if stx[b].len() == 0 {
+            continue;
+        }
+        for q in prov.len() {
+            prov[q] = 0;
+            snap[q] = 0;
+        }
+        for q in 5 {
+            pcmp2[q] = 0;
+        }
+        mut cur3 = stx[b].copy();
+        rg_run(&rc, &mut cur3, &instrs, bstart[b], bstop[b], &trip, &mut out, 1, &mut prov, &mut pcmp2, &mut snap);
+        rg_edges(&rc, &mut stx, nblk, s1[b], s2[b], &instrs, bstart[b], bstop[b], &cur3, &mut out, &pcmp2, &snap);
+    }
+    return out;
 }
 
 // ---- the module ----
@@ -2773,14 +4612,14 @@ fn rename_calls<a, b>(line: &a [u8], lifted: (&b Set)) -> u8[] {
     }
     return out;
 }
-pub fn lower_for<a, b>(stream: &a [u8], target: u64, facts: (&b Facts), verify: u64) -> Lowered {
+pub fn lower_for<a, b>(stream: &a [u8], target: u64, facts: (&b Facts), verify: u64, ranges: u64) -> Lowered {
     triple := target_triple(target);
-    return lower_target(stream, view(triple), target, facts, verify);
+    return lower_target(stream, view(triple), target, facts, verify, ranges);
 }
-pub fn lower<a, b, c>(stream: &a [u8], triple: &b [u8], facts: (&c Facts), verify: u64) -> Lowered {
-    return lower_target(stream, triple, 0, facts, verify);
+pub fn lower<a, b, c>(stream: &a [u8], triple: &b [u8], facts: (&c Facts), verify: u64, ranges: u64) -> Lowered {
+    return lower_target(stream, triple, 0, facts, verify, ranges);
 }
-fn lower_target<a, b, c>(stream: &a [u8], triple: &b [u8], target: u64, facts: (&c Facts), verify: u64) -> Lowered {
+fn lower_target<a, b, c>(stream: &a [u8], triple: &b [u8], target: u64, facts: (&c Facts), verify: u64, ranges: u64) -> Lowered {
     lines := split_lines(stream);
     // Names the stream declared `.weak` (content-addressed drop helpers, which two objects may
     // both define). A function kept native is re-declared below; it must keep weak binding, not
@@ -2800,7 +4639,7 @@ fn lower_target<a, b, c>(stream: &a [u8], triple: &b [u8], target: u64, facts: (
             set_add(&mut weak, view(sub(wl, 6, wl.len())));
         }
     }
-    mut l = L { target: target, ir: u8[], body: u8[], fail: 0, t: 0, dead: 0, term: 0, labels: set_new(16), calls: u8[][], addrs: u8[][], split: 0, refs: u8[][], lifted: u8[][], flags: 0, frame: 0, fslots: u64[], fops: u64[], fordinal: 0, verify: verify, hslots: u64[], hwhat: u64[], hwidth: u64[], eon: u64[], edata: u8[][], elen: u8[][], vk: u64[], vo: u64[], vo2: i64[], hcall: u64[], hcallwhat: u64[], cnames: u8[][], ccount: u64[], sibwhat: 0, sibwidth: 0, sd: u8[], sl: u8[], fname: u8[], sibnames: u8[][], sibbodies: u8[][], eblk: u64[], blk: 0, dnames: u8[][] };
+    mut l = L { target: target, ir: u8[], body: u8[], fail: 0, t: 0, dead: 0, term: 0, labels: set_new(16), calls: u8[][], addrs: u8[][], split: 0, refs: u8[][], lifted: u8[][], flags: 0, frame: 0, fslots: u64[], fops: u64[], fordinal: 0, verify: verify, hslots: u64[], hwhat: u64[], hwidth: u64[], eon: u64[], edata: u8[][], elen: u8[][], vk: u64[], vo: u64[], vo2: i64[], hcall: u64[], hcallwhat: u64[], cnames: u8[][], ccount: u64[], sibwhat: 0, sibwidth: 0, sd: u8[], sl: u8[], fname: u8[], sibnames: u8[][], sibbodies: u8[][], eblk: u64[], blk: 0, dnames: u8[][], proof: u64[], rline: 0, ranges: ranges };
     mut funcs = Func[];
     mut data = u8[][];
     split(&lines, &mut funcs, &mut data);
