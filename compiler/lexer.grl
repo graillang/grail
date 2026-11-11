@@ -45,7 +45,8 @@ fn punctuation(c: u64) -> bool {
         || (c == 46)
         || (c == 33)
         || (c == 63)
-        || (c == 124);
+        || (c == 124)
+        || (c == 64);
 }
 fn pair_kind(c: u64, d: u64) -> u64 {
     if (c == 45) & (d == 62) {
@@ -304,9 +305,19 @@ pub fn tokenize<a>(source: &a [u8]) -> Token<a>[] {
                                 }
                             }
                         } else {
-                            assert(punctuation(c));
+                            // A character the language has no use for is a token of its own (kind
+                            // 999, one whole UTF-8 character), which the compiler reports with its
+                            // position instead of the lexer aborting without a word.
                             kind = c;
+                            if !punctuation(c) {
+                                kind = 999;
+                            }
                             i = i + 1;
+                            if 191 < c {
+                                while (i < size) && ((source[i] & 192) == 128) {
+                                    i = i + 1;
+                                }
+                            }
                         }
                     }
                 }

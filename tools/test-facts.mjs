@@ -166,16 +166,16 @@ ok('--verify-facts re-inserts a runtime check for it', /icmp ult i64 %t\d+, %t\d
 ok('--verify-facts records the verdict it checked', /^; range \d+ 3$/m.test(checkedIr));
 
 // ---- the fixpoint must converge before it decides anything ----
-// The joins have no widening and the fixpoint stops after a round cap, so a loop longer than the cap
-// is judged on an interval that has not converged: `while i < 100` over `u8[0; 30]` was proved after
-// 24 rounds with `i` in about [0, 23], and the --range-facts build read 70 bytes past the end instead
-// of aborting. A pushing loop never converges either (the length generation moves every round). In
-// both the pass must record no verdict and keep the accessor call, i.e. the checked code.
+// Before widening, a loop longer than the round cap was judged on an interval that had not
+// converged: `while i < 100` over `u8[0; 30]` was proved after 24 rounds with `i` in about [0, 23],
+// and the --range-facts build read 70 bytes past the end instead of aborting. With widening it
+// converges, and the guard (100) still does not prove the access against the length (30), so the
+// pass must keep the accessor call - the checked code - and record no verdict.
 const mainOf = text => {
   const at = text.indexOf('define {i64, i64} @"f_main_main"');
   return text.slice(at, text.indexOf('\n}\n', at));
 };
-for (const [fixture, aborts] of [['range_long_trip.grl', true], ['range_push_loop.grl', false]]) {
+for (const [fixture, aborts] of [['range_long_trip.grl', true]]) {
   const tag = fixture.replace('.grl', '').replace(/_/g, '-');
   const native = run([build(`${tag}-native`, fixture, { backend: 'native' }).exe]);
   const on = build(`${tag}-on`, fixture, { backend: 'llvm', rangeFacts: true });
@@ -186,6 +186,23 @@ for (const [fixture, aborts] of [['range_long_trip.grl', true], ['range_push_loo
     `exit ${onRun.status} ${JSON.stringify(onRun.stdout.trim())} vs exit ${native.status} ${JSON.stringify(native.stdout.trim())}`);
   ok(`${fixture}: --range-facts keeps the accessor call`, accessorCalls(mainOf(readFileSync(on.ll, 'utf8'))) === 1);
   ok(`${fixture}: no verdict is recorded`, !readFileSync(verify.ll, 'utf8').includes('; range '));
+}
+
+// ---- widening proves loops the cap used to stop ----
+// `while i < 300` over `u8[1; 300]` converges only because the head's join widens `i`, and a loop
+// that pushes converges only because the length generation is widened; in both the guard then
+// proves `v[i]`, so the accessor call goes and --verify-facts records the verdict it checks.
+for (const [fixture, expect] of [['range_long_proof.grl', '300'], ['range_push_loop.grl', '0']]) {
+  const tag = fixture.replace('.grl', '').replace(/_/g, '-');
+  const native = run([build(`${tag}-native`, fixture, { backend: 'native' }).exe]);
+  const on = build(`${tag}-on`, fixture, { backend: 'llvm', rangeFacts: true });
+  const verify = build(`${tag}-verify`, fixture, { backend: 'llvm', rangeFacts: true, verifyFacts: true });
+  const onRun = run([on.exe]);
+  const verifyRun = run([verify.exe]);
+  ok(`${fixture}: --range-facts matches native`, onRun.status === 0 && onRun.stdout === native.stdout && native.stdout.trim() === expect,
+    `${JSON.stringify(onRun.stdout.trim())} vs ${JSON.stringify(native.stdout.trim())}`);
+  ok(`${fixture}: widening proves the access and drops the accessor call`, accessorCalls(mainOf(readFileSync(on.ll, 'utf8'))) === 0);
+  ok(`${fixture}: --verify-facts records and checks the verdict`, /^; range \d+ 3$/m.test(readFileSync(verify.ll, 'utf8')) && verifyRun.stdout === native.stdout);
 }
 
 if (failed) {

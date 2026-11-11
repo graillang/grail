@@ -686,18 +686,19 @@ that has since moved proves nothing, so the generation is part of the fact.
 - a narrowing that is not provably in range ends the fact instead of being reinterpreted;
 - a join the lattice cannot express (two kinds, two identities, two length generations);
 - a refinement that contradicts the fact the path started from;
-- **a fixpoint that has not converged**: the joins have no widening and the worklist stops after 24
-  rounds, so a function still changing at the cap gets *no* verdicts and every access keeps its
-  check. Without this rule the pass was unsound: a loop counter's interval grows by one step per
-  round, so `while i < 100` over `u8[0; 30]` was judged with `i` in about [0, 23] and the
-  `--range-facts` build read 70 bytes past the end instead of aborting
-  (`compiler/tests/range_long_trip.grl`; `--verify-facts` caught it). A loop that pushes never
-  converges either, because the length generation moves every round
-  (`compiler/tests/range_push_loop.grl`). Both are pinned in `tools/test-facts.mjs`. The rule costs
-  every loop longer than the cap its proof -- `nbody`'s 2,000,000-step loop among them -- and real
-  widening (an interval that grows across a join jumps to the guard's bound or to unknown; a
-  generation that differs across a join becomes a fresh per-join value with that identity's
-  bounds dropped) is what would give them back.
+- **widening at loop heads, and no verdicts without a fixpoint**: from the fourth round, a join on a
+  back edge (into a block at or before the one the edge leaves) widens instead of creeping: an
+  upper bound that grew jumps to the smallest immediate in the function that covers it - the guard's
+  own bound, so `while i < 300` holds `i` at [0, 300] at the head and the guard narrows it to
+  [0, 299] in the body - or to the maximum; a lower bound that fell goes to 0; a length generation
+  the paths disagree on becomes a fixed value per (block, identity) that no bound was stated
+  against. Forward joins never widen (widening the guard's edge into the body threw away the very
+  bound it proved). Every loop now converges in a few rounds: `compiler/tests/range_long_proof.grl`
+  (300 trips) and `range_push_loop.grl` (a loop that pushes) are proved. The 24-round cap stays as
+  a backstop: a function still changing there gets *no* verdicts and keeps every check. Before
+  widening that rule was what kept the pass sound - `while i < 100` over `u8[0; 30]` was judged
+  with `i` in about [0, 23] and read 70 bytes past the end (`range_long_trip.grl`, still pinned:
+  it converges now and keeps its check, since 100 does not prove an index into 30).
 
 **It is behind a flag.** `--range-facts` (off by default) turns the pass on; `--verify-facts` keeps
 checking whatever facts exist, so the two together are what proves a removal. The flag exists because

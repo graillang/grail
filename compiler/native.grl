@@ -356,6 +356,9 @@ struct C {
     // Slot holding the host TLS base inside an exported function's body, or 0.
     export_tls: u64,
     export_adopt: u64,
+    // The pass a module-level compile-time form runs in (0 inside a function body).
+    ct_pass: u64,
+    ct_in_if: bool,
     // Copy-backs for `p: &mut R` callback parameters: (C pointer slot, copy slot, bytes) triples.
     export_copyback: u64[],
     rnames: u8[][],
@@ -4333,6 +4336,16 @@ fn load_file<a>(c: (&a mut C), index: u64) -> unit {
     exchange(&mut c.toks, toks);
     exchange(&mut c.src, src);
     exchange(&mut c.pos, 0);
+    for i in c.toks.len() {
+        if c.toks[i].kind == 999 {
+            exchange(&mut c.pos, i);
+            exchange(&mut c.file, index);
+            if c.src[c.toks[i].start] == 35 {
+                fail(&mut c, view("`#` is not Grail syntax: comments start with //, and compile-time forms with @"));
+            }
+            fail(&mut c, view("unexpected character"));
+        }
+    }
     // Token positions are indices into this file: a call-flex hint record or a `None` span from
     // another file is stale.
     exchange(&mut c.cf_start, 0);
@@ -8621,11 +8634,437 @@ fn interface_call<a, b>(c: (&a mut C), contract: u64, name: &b [u8]) -> Val {
     return call(&mut c, view(module), view(name));
 }
 // const NAME: T = literal; (integers, bool, text). Uses inline the value.
+// ---- compile-time constant expressions (docs/design/comptime.md, stage C1) ----
+// A folded value: an integer (ty 0, unsigned 64-bit arithmetic, overflow is an error), a bool
+// (bool_type), or a target tag such as `.windows` (ct_tag_ty). The folder reads tokens and emits no
+// code; it is what `@if`, `@assert`, `@expr` and the right-hand side of a constant evaluate.
+struct CVal {
+    value: u64,
+    ty: u64
+}
+fn ct_tag_ty() -> u64 {
+    return 18446744073709551614;
+}
+// A tag's type is a sentinel, not an index into the type table, so it is never handed to is_bool.
+fn ct_is_bool<a>(c: (&a mut C), ty: u64) -> bool {
+    if ty == ct_tag_ty() {
+        return false;
+    }
+    return is_bool(&mut c, ty);
+}
+fn ct_val(value: u64, ty: u64) -> CVal {
+    return CVal { value: value, ty: ty };
+}
+// The tags `target.os` and `target.arch` compare against.
+fn ct_tag<a>(c: (&a mut C), name: &a [u8]) -> u64 {
+    if same(view(name), view("linux")) { return 1; }
+    if same(view(name), view("windows")) { return 2; }
+    if same(view(name), view("macos")) { return 3; }
+    if same(view(name), view("x86_64")) { return 11; }
+    if same(view(name), view("aarch64")) { return 12; }
+    if same(view(name), view("riscv64")) { return 13; }
+    fail(&mut c, view("unknown target tag: expected .linux, .windows, .macos, .x86_64, .aarch64 or .riscv64"));
+    return 0;
+}
+fn ct_bool<a>(c: (&a mut C), v: CVal, what: &a [u8]) -> u64 {
+    if !ct_is_bool(&mut c, v.ty) {
+        fail(&mut c, view(what));
+    }
+    return v.value;
+}
+fn ct_int<a>(c: (&a mut C), v: CVal) -> u64 {
+    if (v.ty == ct_tag_ty()) || ct_is_bool(&mut c, v.ty) {
+        fail(&mut c, view("this compile-time operator needs integers"));
+    }
+    return v.value;
+}
+// size_of / align_of: defined where the size is a fact of the target - scalars, bool, handles and
+// C pointers, and extern "C" records (their C layout). A Grail record or vector is a managed
+// object whose layout the language does not promise, so it is refused rather than given a number.
+fn ct_layout<a>(c: (&a mut C), align: u64) -> u64 {
+    expect(&mut c, view("("));
+    ty := parse_type(&mut c);
+    expect(&mut c, view(")"));
+    if ct_is_bool(&mut c, ty) {
+        return 1;
+    }
+    k := ty_kind(&mut c, ty);
+    if (is_c_record(&mut c, ty) != 0) & (c.ct_pass != 0) & (c.ct_pass < 3) & c.ct_in_if {
+        // A module-level @if decides which declarations exist, so it is decided in every pass,
+        // before record layouts are complete: it can test scalars and target, not a record.
+        fail(&mut c, view("a module-level @if cannot depend on the layout of a record; test it with @assert, or inside a function"));
+    }
+    if (ty == 0) || (k == 18) || (k == 21) || (k == 23) || (k == 24) || (k == 26) || (is_c_record(&mut c, ty) != 0) {
+        if align != 0 {
+            return ffi_field_align(&mut c, ty);
+        }
+        return ffi_field_size(&mut c, ty);
+    }
+    fail(&mut c, view("size_of and align_of take a scalar, a handle or C pointer, or an extern \"C\" record: a Grail record or vector has no layout the language promises"));
+    return 0;
+}
+fn ct_primary<a>(c: (&a mut C)) -> CVal {
+    here := c.pos;
+    k := kind(&mut c);
+    bt := bool_type(&mut c);
+    if k == 2 {
+        t := tok_text(&mut c, here);
+        v := literal_value(&mut c, view(t));
+        advance(&mut c);
+        return ct_val(v, 0);
+    }
+    if is(&mut c, view("true")) || is(&mut c, view("false")) {
+        v := u64(is(&mut c, view("true")));
+        advance(&mut c);
+        return ct_val(v, bt);
+    }
+    if eat(&mut c, view("(")) {
+        v := ct_expr(&mut c, 0);
+        expect(&mut c, view(")"));
+        return v;
+    }
+    if eat(&mut c, view("!")) {
+        v := ct_primary(&mut c);
+        b := ct_bool(&mut c, v, view("! needs a bool"));
+        return ct_val(1 - b, bt);
+    }
+    if eat(&mut c, view(".")) {
+        name := ident(&mut c);
+        return ct_val(ct_tag(&mut c, view(name)), ct_tag_ty());
+    }
+    if k == 1 {
+        if is(&mut c, view("size_of")) || is(&mut c, view("align_of")) {
+            align := u64(is(&mut c, view("align_of")));
+            advance(&mut c);
+            return ct_val(ct_layout(&mut c, align), 0);
+        }
+        if is(&mut c, view("target")) & (next_kind(&mut c) == 46) {
+            advance(&mut c);
+            advance(&mut c);
+            field := ident(&mut c);
+            arch := c.target;
+            if same(view(field), view("os")) {
+                mut os = 1;
+                if (arch == 3) || (arch == 4) {
+                    os = 2;
+                }
+                if c.plat == 1 {
+                    os = 3;
+                }
+                return ct_val(os, ct_tag_ty());
+            }
+            if same(view(field), view("arch")) {
+                mut a = 11;
+                if (arch == 1) || (arch == 4) {
+                    a = 12;
+                }
+                if arch == 2 {
+                    a = 13;
+                }
+                return ct_val(a, ct_tag_ty());
+            }
+            if same(view(field), view("pointer_bits")) {
+                return ct_val(64, 0);
+            }
+            fail(&mut c, view("target has os, arch and pointer_bits"));
+        }
+        mut module = module_copy(&mut c);
+        mut name = ident(&mut c);
+        if eat(&mut c, view("::")) {
+            module = name;
+            name = ident(&mut c);
+        }
+        for i in c.constants.len() {
+            q := &c.constants[i];
+            if same(view(q.module), view(module)) & same(view(q.name), view(name)) {
+                ty := q.ty;
+                value := q.value;
+                if (ty == 3) || is_float(&mut c, ty) {
+                    exchange(&mut c.pos, here);
+                    fail(&mut c, view("only integer and bool constants can be used in a compile-time expression"));
+                }
+                if ct_is_bool(&mut c, ty) {
+                    return ct_val(value, bt);
+                }
+                return ct_val(value, 0);
+            }
+        }
+        exchange(&mut c.pos, here);
+        fail(&mut c, view("not a compile-time constant: a compile-time expression may use literals, constants, size_of, align_of and target"));
+    }
+    fail(&mut c, view("expected a compile-time constant expression"));
+    return ct_val(0, 0);
+}
+fn ct_expr<a>(c: (&a mut C), min: u64) -> CVal {
+    mut left = ct_primary(&mut c);
+    bt := bool_type(&mut c);
+    while true {
+        k := kind(&mut c);
+        p := prec(k);
+        if (p == 0) || (p <= min) {
+            break;
+        }
+        advance(&mut c);
+        right := ct_expr(&mut c, p);
+        if (k == 274) || (k == 273) {
+            a := ct_bool(&mut c, left, view("|| and && need bools"));
+            b := ct_bool(&mut c, right, view("|| and && need bools"));
+            if k == 274 {
+                left = ct_val(u64((a != 0) || (b != 0)), bt);
+            } else {
+                left = ct_val(u64((a != 0) && (b != 0)), bt);
+            }
+            continue;
+        }
+        if is_comparison(k) {
+            if (left.ty == ct_tag_ty()) != (right.ty == ct_tag_ty()) {
+                fail(&mut c, view("a target tag compares only with another tag"));
+            }
+            if ct_is_bool(&mut c, left.ty) != ct_is_bool(&mut c, right.ty) {
+                fail(&mut c, view("a compile-time comparison needs two values of the same kind"));
+            }
+            a := left.value;
+            b := right.value;
+            mut r = false;
+            if k == 258 { r = a == b; }
+            if k == 259 { r = a != b; }
+            if (left.ty == ct_tag_ty()) & (k != 258) & (k != 259) {
+                fail(&mut c, view("target tags support only == and !="));
+            }
+            if k == 60 { r = a < b; }
+            if k == 62 { r = a > b; }
+            if k == 269 { r = a <= b; }
+            if k == 270 { r = a >= b; }
+            left = ct_val(u64(r), bt);
+            continue;
+        }
+        if ((k == 38) || (k == 124)) & ct_is_bool(&mut c, left.ty) {
+            a := ct_bool(&mut c, left, view("& and | on a bool need two bools"));
+            b := ct_bool(&mut c, right, view("& and | on a bool need two bools"));
+            if k == 38 {
+                left = ct_val(a & b, bt);
+            } else {
+                left = ct_val(a | b, bt);
+            }
+            continue;
+        }
+        a := ct_int(&mut c, left);
+        b := ct_int(&mut c, right);
+        mut r: u64 = 0;
+        if k == 38 { r = a & b; }
+        if k == 124 { r = a | b; }
+        if k == 94 { r = a ^ b; }
+        if (k == 271) || (k == 272) {
+            if 63 < b {
+                fail(&mut c, view("compile-time shift amount must be below 64"));
+            }
+            if k == 271 {
+                r = a << b;
+                if (r >> b) != a {
+                    fail(&mut c, view("compile-time integer overflow"));
+                }
+            } else {
+                r = a >> b;
+            }
+        }
+        if k == 43 {
+            r = wrapping_add(a, b);
+            if r < a {
+                fail(&mut c, view("compile-time integer overflow"));
+            }
+        }
+        if k == 45 {
+            if b > a {
+                fail(&mut c, view("compile-time integer underflow: constants are unsigned"));
+            }
+            r = a - b;
+        }
+        if k == 42 {
+            if (a != 0) & (b > 18446744073709551615 / a) {
+                fail(&mut c, view("compile-time integer overflow"));
+            }
+            r = a * b;
+        }
+        if (k == 47) || (k == 37) {
+            if b == 0 {
+                fail(&mut c, view("compile-time division by zero"));
+            }
+            if k == 47 {
+                r = a / b;
+            } else {
+                r = a % b;
+            }
+        }
+        if k == 267 {
+            r = 1;
+            for i in b {
+                if (a != 0) & (r > 18446744073709551615 / a) {
+                    fail(&mut c, view("compile-time integer overflow"));
+                }
+                r = r * a;
+            }
+        }
+        left = ct_val(r, 0);
+    }
+    return left;
+}
+// `@if cond { ... } else @if cond { ... } else { ... }`: the branch whose condition holds is
+// compiled; the others are skipped token for token - parsed only far enough to find their braces,
+// never type-checked or emitted - so they may name declarations that exist only on another target.
+// `top` selects declarations (module level) or statements (inside a function).
+fn ct_if<a>(c: (&a mut C), pass: u64, top: u64) -> unit {
+    expect(&mut c, view("if"));
+    mut done = 0;
+    while true {
+        cond := ct_expr(&mut c, 0);
+        take := ct_bool(&mut c, cond, view("@if needs a bool condition"));
+        ct_branch(&mut c, pass, top, u64((take != 0) & (done == 0)));
+        if take != 0 {
+            done = 1;
+        }
+        if !eat(&mut c, view("else")) {
+            return ();
+        }
+        after := c.pos + 1;
+        if (kind(&mut c) == 64) & is_at(&mut c, after, view("if")) {
+            advance(&mut c);
+            advance(&mut c);
+            continue;
+        }
+        ct_branch(&mut c, pass, top, u64(done == 0));
+        return ();
+    }
+    return ();
+}
+fn ct_branch<a>(c: (&a mut C), pass: u64, top: u64, take: u64) -> unit {
+    open := c.pos;
+    if !is(&mut c, view("{")) {
+        fail(&mut c, view("expected { after the @if condition"));
+    }
+    close := block_end(&mut c, open);
+    if take == 0 {
+        exchange(&mut c.pos, close + 1);
+        return ();
+    }
+    if top == 0 {
+        block(&mut c);
+        return ();
+    }
+    advance(&mut c);
+    while c.pos < close {
+        toplevel_item(&mut c, pass);
+    }
+    expect(&mut c, view("}"));
+    return ();
+}
+// `@assert(cond, "message")`: a compile error carrying the message when cond is false.
+fn ct_assert<a>(c: (&a mut C)) -> unit {
+    at := c.pos;
+    expect(&mut c, view("assert"));
+    expect(&mut c, view("("));
+    cond := ct_expr(&mut c, 0);
+    holds := ct_bool(&mut c, cond, view("@assert needs a bool condition"));
+    expect(&mut c, view(","));
+    if kind(&mut c) != 3 {
+        fail(&mut c, view("@assert needs a message: @assert(condition, \"why it must hold\")"));
+    }
+    lit := c.pos;
+    text := decode_literal(&mut c, lit);
+    advance(&mut c);
+    expect(&mut c, view(")"));
+    expect(&mut c, view(";"));
+    if holds == 0 {
+        exchange(&mut c.pos, at - 1);
+        mut msg = u8[];
+        push_bytes(&mut msg, view("@assert failed: "));
+        push_bytes(&mut msg, view(text));
+        fail(&mut c, view(msg));
+    }
+    return ();
+}
+// `@` at the start of a statement or a module item.
+fn ct_form<a>(c: (&a mut C), pass: u64, top: u64) -> unit {
+    advance(&mut c);
+    mut level = 0;
+    if top != 0 {
+        level = pass;
+    }
+    old_pass := exchange(&mut c.ct_pass, level);
+    if is(&mut c, view("if")) {
+        old_in_if := exchange(&mut c.ct_in_if, true);
+        ct_if(&mut c, pass, top);
+        exchange(&mut c.ct_in_if, old_in_if);
+        exchange(&mut c.ct_pass, old_pass);
+        return ();
+    }
+    if is(&mut c, view("assert")) {
+        if (top != 0) & (pass != 3) {
+            // A module-level assertion is checked once, in the last pass, when every declaration
+            // and record layout it can name is complete; earlier passes only step over it.
+            while !is(&mut c, view(";")) {
+                advance(&mut c);
+            }
+            advance(&mut c);
+            return ();
+        }
+        ct_assert(&mut c);
+        exchange(&mut c.ct_pass, old_pass);
+        return ();
+    }
+    fail(&mut c, view("unknown compile-time form: expected @if or @assert here (@for, @embed and value generics are later stages)"));
+    return ();
+}
+// `NAME := expr;` at module level: a compile-time constant with its type inferred - u64 for an
+// integer, bool for a bool, string for a text literal. The typed spelling is `const NAME: T = expr;`.
+fn module_binding<a>(c: (&a mut C), pass: u64) -> unit {
+    name := ident(&mut c);
+    advance(&mut c);
+    if pass != 1 {
+        while !is(&mut c, view(";")) {
+            advance(&mut c);
+        }
+        advance(&mut c);
+        return ();
+    }
+    module := module_copy(&mut c);
+    for i in c.constants.len() {
+        k := &c.constants[i];
+        if same(view(k.module), view(module)) & same(view(k.name), view(name)) {
+            fail(&mut c, view("duplicate constant"));
+        }
+    }
+    mut ty = 0;
+    mut value = 0;
+    mut text = u8[];
+    if kind(&mut c) == 3 {
+        ty = 3;
+        lit := c.pos;
+        text = decode_literal(&mut c, lit);
+        advance(&mut c);
+    } else {
+        if kind(&mut c) == 5 {
+            fail(&mut c, view("a float constant needs its type: const NAME: f64 = 1.5;"));
+        }
+        v := ct_expr(&mut c, 0);
+        if v.ty == ct_tag_ty() {
+            fail(&mut c, view("a target tag is not a value a program can hold; compare it in @if"));
+        }
+        value = v.value;
+        if is_bool(&mut c, v.ty) {
+            ty = bool_type(&mut c);
+        }
+    }
+    expect(&mut c, view(";"));
+    c.constants.push(Constant { module: module, name: name, ty: ty, value: value, text: text });
+    return ();
+}
 fn constant_declaration<a>(c: (&a mut C), pass: u64) -> unit {
     expect(&mut c, view("const"));
     name := ident(&mut c);
     expect(&mut c, view(":"));
-    if pass != 2 {
+    // Registered in the first pass, so a module-level `@if` and every later declaration can fold
+    // against it.
+    if pass != 1 {
         while !is(&mut c, view(";")) {
             advance(&mut c);
         }
@@ -8668,7 +9107,7 @@ fn constant_declaration<a>(c: (&a mut C), pass: u64) -> unit {
             );
         return ();
     }
-    if k == 2 {
+    if (k == 2) & (negative != 0) {
         t := tok_text(&mut c, here);
         value = literal_value(&mut c, view(t));
         advance(&mut c);
@@ -8678,8 +9117,30 @@ fn constant_declaration<a>(c: (&a mut C), pass: u64) -> unit {
         if literal_fits(&mut c, ty, value, negative) == 0 {
             fail(&mut c, view("integer literal out of range for its type"));
         }
-        if negative != 0 {
-            value = wrapping_sub(0, value);
+        value = wrapping_sub(0, value);
+    } else if (k != 5) & (k != 3) & (negative == 0) {
+        // A compile-time constant expression: literals, other constants, size_of, align_of,
+        // target, arithmetic, comparisons.
+        v := ct_expr(&mut c, 0);
+        value = v.value;
+        if is_bool(&mut c, ty) {
+            if !is_bool(&mut c, v.ty) {
+                exchange(&mut c.pos, here);
+                fail(&mut c, view("bool constant needs a bool value"));
+            }
+        } else {
+            if (ty != 0) & (ty_kind(&mut c, ty) != 18) {
+                exchange(&mut c.pos, here);
+                fail(&mut c, view("constants must be integer, float, bool or text"));
+            }
+            if (v.ty != 0) {
+                exchange(&mut c.pos, here);
+                fail(&mut c, view("integer constant needs an integer value"));
+            }
+            if literal_fits(&mut c, ty, value, 0) == 0 {
+                exchange(&mut c.pos, here);
+                fail(&mut c, view("constant value out of range for its type"));
+            }
         }
     } else {
         if negative != 0 {
@@ -8854,14 +9315,29 @@ fn toplevel<a>(c: (&a mut C), pass: u64) -> unit {
         expect(&mut c, view(";"));
     }
     while kind(&mut c) != 0 {
+        toplevel_item(&mut c, pass);
+    }
+    return ();
+}
+// One module-level item.
+fn toplevel_item<a>(c: (&a mut C), pass: u64) -> unit {
+    if true {
+        if kind(&mut c) == 64 {
+            ct_form(&mut c, pass, 1);
+            return ();
+        }
+        if (kind(&mut c) == 1) & (next_kind(&mut c) == 261) {
+            module_binding(&mut c, pass);
+            return ();
+        }
         public := u64(eat(&mut c, view("pub")));
         if is(&mut c, view("extern")) {
             extern_declaration(&mut c, pass, public);
-            continue;
+            return ();
         }
         if is(&mut c, view("handle")) {
             handle_declaration(&mut c, pass);
-            continue;
+            return ();
         }
         if is(&mut c, view("type")) {
             alias_declaration(&mut c, pass);
@@ -18330,6 +18806,22 @@ fn map_expression<a>(c: (&a mut C), expected: u64) -> Val {
 
 fn primary<a>(c: (&a mut C)) -> Val {
     k := kind(&mut c);
+    // `@expr`: the next operand, folded at compile time (stage C1: literals, constants, size_of,
+    // align_of and target; a call in it is the run tier, C3).
+    if k == 64 {
+        advance(&mut c);
+        v := ct_primary(&mut c);
+        if v.ty == ct_tag_ty() {
+            fail(&mut c, view("a target tag is not a value a program can hold; compare it in @if"));
+        }
+        return val(imm(&mut c, v.value), v.ty);
+    }
+    if (k == 1) & (is(&mut c, view("size_of")) || is(&mut c, view("align_of"))) & (next_kind(&mut c) == 40) {
+        align := u64(is(&mut c, view("align_of")));
+        advance(&mut c);
+        n := ct_layout(&mut c, align);
+        return val(imm(&mut c, n), 0);
+    }
     if (k == 42) & (c.typed_refs != 0) {
         // `*r`: dereference; postfix accessors bind tighter (`*r.f` is `*(r.f)`).
         advance(&mut c);
@@ -21885,6 +22377,11 @@ fn zero_record_binding<a>(c: (&a mut C), name: u8[], ty: u64, mutable: u64) -> u
 }
 fn statement<a>(c: (&a mut C)) -> unit {
     emit_loc(&mut c);
+    after := c.pos + 1;
+    if (kind(&mut c) == 64) & (is_at(&mut c, after, view("if")) || is_at(&mut c, after, view("assert"))) {
+        ct_form(&mut c, 0, 0);
+        return ();
+    }
     // An `unsafe { ... }` block is the explicit boundary for foreign calls. It is
     // lexical and checked: move/drop/borrow rules still apply inside the body.
     if is(&mut c, view("unsafe")) {
@@ -26588,6 +27085,8 @@ pub fn main() -> u64 {
         pending_symbol: u8[],
         export_tls: 0,
         export_adopt: 0,
+        ct_pass: 0,
+        ct_in_if: false,
         export_copyback: u64[],
         rnames: u8[][],
         tnames: u8[][],
