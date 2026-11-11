@@ -703,10 +703,6 @@ times move with the page cache, the ratio does not):
 - The **label renumbering** above disappears with it: a module compiled alone emits its own text, its
   own labels, and is determined by its own key. At that point the emitted-assembly guard becomes
   redundant and the module entry can be keyed by its inputs alone.
-- **Store maintenance.** There is no garbage collection: entries that nothing names accumulate under
-  `.work/cache/<target>/blob`, exactly as `.work/native/<hash>` directories do today.
-- **Visibility.** `pub` is still not a checked boundary, so an interface still carries a module's whole
-  top-level surface and every edit to it invalidates its importers.
 - **Store maintenance.** Every build that opens the store advances its generation
   (`.work/cache/<target>/generation`), and every record a build writes or reuses records that
   generation beside it (`map/<kind>/<key>.used`). `grail cache prune [--keep N]` drops the records no
