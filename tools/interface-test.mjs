@@ -845,6 +845,34 @@ function proveStructuralKeyAcrossModules() {
   return { key: names[0].replace(/:$/, ''), stdout: JSON.stringify(ran.stdout) };
 }
 
+// Separately compiled modules calling each other's inherent methods, interface implementations and
+// a generic that instantiates another generic: each module compiled alone against interfaces, only
+// its own part linked. Symbols name declarations, not this run's table positions, and a nested
+// instantiation is emitted by the module that asked for the outer one.
+function proveUnitsAcrossModules() {
+  const directory = join(work, 'units');
+  mkdirSync(directory, { recursive: true });
+  const fixtures = name => join(root, 'tests/interfaces', name);
+  const all = [fixtures('units_main.grl'), fixtures('units_shapes.grl'), runtime, platform];
+  const source = compile(all, join(directory, 'source'));
+  assert.equal(source.status, 0, `units: source build failed\n${source.output}`);
+  const expected = run(link(all, join(directory, 'source')));
+  const ifaces = emit(all, directory);
+  const mainDir = join(directory, 'main');
+  const shapesDir = join(directory, 'shapes');
+  const main = compile([fixtures('units_main.grl'), runtime, platform], mainDir, ['--use', ifaces, '--split']);
+  assert.equal(main.status, 0, `units: the entry module does not compile against interfaces\n${main.output}`);
+  const shapes = compile([fixtures('units_shapes.grl'), runtime, platform], shapesDir, ['--use', ifaces, '--split', '--no-entry']);
+  assert.equal(shapes.status, 0, `units: units_shapes does not compile against interfaces\n${shapes.output}`);
+  const linked = [...parts(mainDir).files, ...partsOfModule(shapesDir, 'units_shapes')];
+  const text = linked.map(file => readFileSync(file, 'utf8')).join('\n');
+  assert.doesNotMatch(text, /\.(inherent|impl|interface)_\d/, 'units: a symbol still spells a table index');
+  const ran = run(linkParts(linked, directory, 'program', mainDir));
+  assert.equal(ran.status, expected.status, `units: the separately compiled program exits ${ran.status}`);
+  assert.equal(ran.stdout, expected.stdout, `units: the separately compiled program prints ${JSON.stringify(ran.stdout)}`);
+  return JSON.stringify(ran.stdout);
+}
+
 const generics = proveGenericBodies();
 report(
   'imported generic: each importer emits it weak, one name, no source needed',
@@ -859,6 +887,9 @@ report(
   'two modules, one unnameable type: one name',
   `${closureKey.key} emitted by both under one name, output ${closureKey.stdout} as built from source`,
 );
+
+const units = proveUnitsAcrossModules();
+report('methods, implementations and nested generics across separately compiled modules', `output ${units} as built from source`);
 
 const naming = proveNamingIsTotal();
 report(

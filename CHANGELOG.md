@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Fixed (separate compilation): methods, interface implementations and interfaces were emitted under symbols that spelled a position in the compiling run's declaration tables, so a module compiled alone could not call another module's method; the symbols now spell the declaration (module, type or interface name, and a digest of an implementation's type). A specialisation instantiated inside another specialisation is emitted by the module that asked for the outer one.
 - Changed (separate compilation): every module emits the specialisations its code uses, weak and content-addressed, replaying the template from its interface when the source is not in the build; the linker keeps one copy. The `--serve` option and `.sreq` request files are gone, so a module's object depends only on its own source and the interfaces it reads.
 - Added: an iterator protocol. A record with an inherent `fn next(self: &mut Self) -> T?` is iterable: `for x in it` takes the iterator, `for x in &mut it` lends it so the loop can stop early and a later loop carry on; `for x in &it` is refused by name. A plain `for` over a vector compiles exactly as before.
 - Added: `lib/iter.grl`, lazy adapters over a closure-backed `Iter<T>` - `upto`, `of`, `map`, `filter`, `take`, `enumerate`, `zip` and `collect` - with a new book chapter, *Iteration*, and Rust comparisons.

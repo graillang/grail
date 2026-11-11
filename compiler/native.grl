@@ -569,9 +569,11 @@ fn module_index<a>(name: &a [u8], from: u64) -> u64 {
 // file declares; every other name is already the module.
 fn unit_module<a, b>(c: (&a mut C), m: &b [u8]) -> u8[] {
     if starts_with(view(m), view(".impl_")) {
+        // `.impl_K` is written from c.current_impl, which is 1-based (0 means none), so it names
+        // implementations[K - 1]; module_index returns K + 1.
         n := module_index(view(m), 6);
-        if (n != 0) & (n <= c.implementations.len()) {
-            return c.implementations[n - 1].module.copy();
+        if (1 < n) & (n - 1 <= c.implementations.len()) {
+            return c.implementations[n - 2].module.copy();
         }
     }
     if starts_with(view(m), view(".inherent_")) {
@@ -6160,9 +6162,60 @@ fn mangle_into<a, b, d>(out: (&a mut u8[]), plat: u64, m: &b [u8], n: &d [u8]) -
     push_bytes(&mut out, n);
     return ();
 }
+// The unit name a symbol spells. `.inherent_K`, `.impl_K` and `.interface_K` are positions in this
+// run's declaration tables - good keys inside one run, but two runs that compile different modules
+// number them differently, so a module calling another's method would name a symbol the other
+// object never defines. The symbol spells the declaration instead: the type's module and name, the
+// interface's module and name, and for an implementation also a digest of the implementing type
+// (B1 stage 4).
+fn symbol_unit<a, b>(c: (&a mut C), m: &b [u8]) -> u8[] {
+    if starts_with(view(m), view(".inherent_")) {
+        n := module_index(view(m), 10);
+        if (n != 0) & (n <= c.decls.len()) {
+            mut out = copy_bytes(view(".inherent$"));
+            push_bytes(&mut out, view(c.decls[n - 1].module));
+            out.push(36);
+            push_bytes(&mut out, view(c.decls[n - 1].name));
+            return out;
+        }
+    }
+    if starts_with(view(m), view(".impl_")) {
+        n := module_index(view(m), 6);
+        if (1 < n) & (n - 1 <= c.implementations.len()) {
+            contract := c.implementations[n - 2].contract;
+            ty := c.implementations[n - 2].ty;
+            mut out = copy_bytes(view(".impl$"));
+            push_bytes(&mut out, view(c.implementations[n - 2].module));
+            out.push(36);
+            if (contract != 0) & (contract <= c.interfaces.len()) {
+                push_bytes(&mut out, view(c.interfaces[contract - 1].name));
+            }
+            out.push(36);
+            mut key = u8[];
+            type_key(&mut c, &mut key, ty, 0);
+            digest := iface_digest(&key);
+            for i in 16 {
+                out.push(digest[i]);
+            }
+            return out;
+        }
+    }
+    if starts_with(view(m), view(".interface_")) {
+        n := module_index(view(m), 11);
+        if (1 < n) & (n - 1 <= c.interfaces.len()) {
+            mut out = copy_bytes(view(".interface$"));
+            push_bytes(&mut out, view(c.interfaces[n - 2].module));
+            out.push(36);
+            push_bytes(&mut out, view(c.interfaces[n - 2].name));
+            return out;
+        }
+    }
+    return m.copy();
+}
 fn mangle<a, b, d>(c: (&a mut C), m: &b [u8], n: &d [u8]) -> unit {
     plat := c.plat;
-    mangle_into(&mut c.out, plat, m, n);
+    unit := symbol_unit(&mut c, m);
+    mangle_into(&mut c.out, plat, view(unit), n);
     return ();
 }
 // The symbol a function body is emitted under, as a value: the one thing the fact table is keyed
@@ -7741,10 +7794,14 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         return ();
     }
     mut m = module_copy(&mut c);
-    // A specialisation is requested by the module whose body instantiates the template. A replayed
-    // template counts as its own module, which is right: the nested instantiations are the defining
-    // module's to emit, and its own run discovers them while it replays the body.
-    exchange(&mut c.body_module, m.copy());
+    // A specialisation is requested by the module whose body instantiates the template.
+    mut asker = m.copy();
+    if c.current_spec != 0 {
+        // A specialisation the replayed body instantiates in turn is asked for by the same module
+        // that asked for this one, and is emitted into its part (B1 stage 4).
+        asker = c.specs[c.current_spec - 1].requester.copy();
+    }
+    exchange(&mut c.body_module, asker);
     export := c.pending_ext;
     export_symbol := c.pending_symbol.copy();
     if c.current_impl != 0 {
@@ -7771,7 +7828,8 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         spec := c.current_spec;
         label = special_name(&mut c, spec - 1);
     }
-    sym := body_label(&c, view(m), view(label), view(export_symbol), export);
+    sym_unit := symbol_unit(&mut c, view(m));
+    sym := body_label(&c, view(sym_unit), view(label), view(export_symbol), export);
     exchange(&mut c.facts_fn, sym);
     exchange(&mut c.f64_ops, 0);
     exchange(&mut c.call_ord, 0);
