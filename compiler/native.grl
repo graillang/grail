@@ -10954,6 +10954,8 @@ fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
                         if resolved != 0 {
                             expected := bind_types(&mut c, formal, &map);
                             v = adopt_value(&mut c, v, astart, aend, expected);
+                        } else {
+                            v = widen_to_fnmut_formal(&mut c, v, formal);
                         }
                         infer_type(&mut c, formal, v.ty, &mut map);
                     }
@@ -14529,6 +14531,23 @@ fn fn_as_fnmut<a>(c: (&a mut C), ty: u64, expected: u64) -> u64 {
         return 0;
     }
     return 1;
+}
+// A `Fn` closure passed for a generic `FnMut(..)` parameter whose type variables are not all known
+// yet (`vecs::map(v, |x: u64| -> u64 x * 2)` learns `U` from the closure itself): `adopt_value`
+// cannot widen against a formal it cannot bind, so the closure's own signature is widened to
+// `FnMut` first and inference then reads the same parameter and result types from it.
+fn widen_to_fnmut_formal<a>(c: (&a mut C), v: Val, formal: u64) -> Val {
+    if (ty_kind(&mut c, v.ty) != 20) || (ty_kind(&mut c, formal) != 20) {
+        return v;
+    }
+    if (ty_mode(&mut c, v.ty) != 0) || (ty_mode(&mut c, formal) != 1) {
+        return v;
+    }
+    result := ty_arg(&mut c, v.ty);
+    regions := type_regions(&mut c, v.ty);
+    args := type_args(&mut c, v.ty);
+    widened := intern_args(&mut c, 20, result, 1, regions, args);
+    return move_as(&mut c, v, widened);
 }
 // `&mut Fn(...)` used where `&mut FnMut(...)` is expected: same referent, same loan, wider call
 // contract. Only the reference's own type changes, so nothing is copied or re-owned.

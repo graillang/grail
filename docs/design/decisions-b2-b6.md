@@ -394,8 +394,10 @@ Implemented and verified in `compiler/native.grl` (`closure_literal`, `capture_w
 - **Widening.** A closure that writes nothing is `Fn` and is accepted where `FnMut` is expected,
   because an exclusive call is a stricter promise than the shared call `Fn` makes: by value
   (`move_as`, one owner, never a copy) and as `&mut Fn(...)` for `&mut FnMut(...)`
-  (`reference_as_fnmut`, same referent and loan, wider call contract). The reverse direction is the
-  rejection above.
+  (`reference_as_fnmut`, same referent and loan, wider call contract). For a generic `FnMut(T) -> U`
+  parameter whose variables the closure itself determines, the closure's signature is widened before
+  inference (`widen_to_fnmut_formal`, `closure-fn-widens-to-generic-fnmut`). The reverse direction is
+  the rejection above.
 
 Evidence (native corpus, all executed on x86-64): `closure-fnmut-counter`,
 `closure-fnmut-disjoint-captures`, `closure-fnmut-sequential-calls`,
