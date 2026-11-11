@@ -95,6 +95,26 @@ signal 6`), while natively the process exits 134 (128+SIGABRT) - the B5 policy. 
 exit *status* of an abort therefore carries `"targets": ["x86_64"]`, and the policy is verified natively
 (plus on Windows under Wine, with its own case), not through emulation.
 
+**Full matrix per batch, not per merge.** A full gate is 860 cases on three backends plus two
+emulated targets; running it for every branch makes each merge cost an hour. The budget that works:
+
+| when | what |
+|---|---|
+| every merge | the suites for the area that changed, **one shard** (`GRAIL_TEST_SHARD=1/4`) |
+| every batch | the full matrix once, in CI rather than here |
+| publication (a release, or a batch of compiler work is done) | reseed the bootstrap, then fresh-clone build + full matrix |
+
+**Reseed at publication points only.** The published seed exists so a clone with no development
+compiler can build; development uses a tree-built compiler (`GRAIL_COMPILER`) and does not need a
+fresh seed. A stale seed makes `preflight` red, which is correct and expected between publications -
+reseed when you publish, not when you merge. A reseed regenerates three targets by self-compiling the
+compiler, and the aarch64/riscv64 halves run under qemu: budget ~90 minutes, and do not start one
+while agents are gating, because both want the same cores.
+
+**Cross-target legs belong in CI.** aarch64 and riscv64 under qemu are 40+ minutes each for the full
+corpus; a native arm64 runner does them in minutes. Run them locally when the target is what you are
+changing, not as part of every gate.
+
 **Slice a suite instead of waiting for it.** A full native run is minutes per backend, so the runner
 takes three opt-in knobs (a plain invocation is unchanged):
 
