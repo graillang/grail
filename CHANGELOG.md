@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Added: debug info describes what values contain (DWARF, Linux). A Grail record is a pointer to a structure of its fields, a string/byte sequence/vector a pointer to its {data, len, cap} header with typed elements, a view {data, len}, a reference a pointer to its referent, and an extern "C" record its C layout - so `print **o` in gdb shows `{count = 7, ratio = 2.5, inner = ...}` and `print (*s)->data` the text.
 - Added: compile-time evaluation, stage C1 (`docs/design/comptime.md`, book chapter *Compile time*). Module constants take constant expressions (`const MASK: u64 = PAGE - 1;`, or `MASK := PAGE - 1;` with the type inferred); `@if target.os == .windows { } else { }` compiles only the branch that holds, at module level or in a function, without type-checking the other; `@assert(cond, "message")` is a compile error with the message; `@expr` folds an operand; `size_of`/`align_of` give the target layout of scalars, handles and C records. Checked arithmetic: an overflow is a compile error.
 - Fixed: a character the language does not use (such as `#`) made the compiler abort without a message; it is now an error at its position, and `#` says that comments start with `//`.
 - Range facts (`--range-facts`) widen at loop heads with thresholds, so a loop of any trip count, and a loop that pushes, converges and can be proved; previously the fixpoint hit its 24-round cap and decided nothing.

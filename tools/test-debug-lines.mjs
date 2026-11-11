@@ -4,7 +4,7 @@
 // lines with llvm-dwarfdump, exercises `grail debug lines`, and checks that a normal build has
 // no line table. Nothing here executes a cross target.
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { readFileSync, existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import assert from 'node:assert/strict';
@@ -111,6 +111,38 @@ try {
   const infoCommand = ok([compiler, 'debug', 'info', debugBinary]).stdout;
   assert.match(infoCommand, /DW_TAG_subprogram/, 'grail debug info did not print subprograms');
   assert.match(infoCommand, /DW_AT_name\s+\("total"\)/, 'grail debug info did not print the local');
+
+  // Record, string, vector and C-record members: a debugger walks a Grail value's fields through
+  // the pointers the program holds (tests/debug_members.grl).
+  {
+    const membersSource = join(root, 'tests/debug_members.grl');
+    const asm = join(work, 'members.s');
+    const exe = join(work, 'members');
+    ok([compiler, '--target', 'x86_64', '--debug', asm, membersSource, runtime, osLinux]);
+    ok(['clang', '--target=x86_64-linux-gnu', '-c', asm, '-o', `${exe}.o`]);
+    ok(['ld.lld', '-m', 'elf_x86_64', `${exe}.o`, '-o', exe]);
+    const membersInfo = ok(['llvm-dwarfdump', '--debug-info', exe]).stdout;
+    for (const [structure, fields] of [['Outer', ['count', 'ratio', 'inner', 'label']], ['Inner', ['id', 'tag']], ['Pt', ['x', 'y', 'w']], ['u8[]', ['data', 'len', 'cap']]]) {
+      assert.match(membersInfo, new RegExp(`DW_TAG_structure_type\\s+DW_AT_name\\s+\\("${structure.replace(/[[\]]/g, '\\$&')}"\\)`), `no structure type ${structure}`);
+      for (const field of fields) {
+        assert.match(membersInfo, new RegExp(`DW_TAG_member\\s+DW_AT_name\\s+\\("${field}"\\)`), `${structure} has no member ${field}`);
+      }
+    }
+    assert.match(membersInfo, /DW_AT_name\s+\("y"\)[\s\S]*?DW_AT_data_member_location\s+\((?:0x0)?4\)/, 'Pt.y is not at offset 4');
+    const membersVerified = ok(['llvm-dwarfdump', '--verify', exe]).stdout;
+    assert.match(membersVerified, /No errors\./, `member DWARF does not verify:\n${membersVerified}`);
+    if (run(['gdb', '--version']).status === 0) {
+      const line = readFileSync(membersSource, 'utf8').split('\n').findIndex(row => row.includes('total := ')) + 1;
+      const shown = run(['gdb', '-q', '-batch', '-ex', 'set debuginfod enabled off', '-ex', `break debug_members.grl:${line}`, '-ex', 'run',
+        '-ex', 'print **o', '-ex', 'print *(*o)->inner', '-ex', 'print (*o)->label->data', '-ex', 'print **p', '-ex', 'print (*v)->data[0]@3', '-ex', 'print (*s)->data', exe]).stdout;
+      for (const expected of ['count = 7, ratio = 2.5', 'id = 42', '"outer-label"', 'x = -3, y = 9, w = 1.5', '{10, 20, 30}', '"hello debugger"']) {
+        assert.ok(shown.includes(expected), `gdb did not show ${expected}:\n${shown}`);
+      }
+      console.log('debug-lines: gdb prints record, nested record, string, vector and C-record members');
+    } else {
+      console.log('debug-lines: gdb not installed; member DWARF checked with llvm-dwarfdump only');
+    }
+  }
 
   const plainBinary = build(join(work, 'plain.s'), join(work, 'plain'), false);
   const plainDump = ok(['llvm-dwarfdump', '--debug-line', plainBinary]).stdout;
