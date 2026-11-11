@@ -402,10 +402,10 @@ per importing module.
 - **No typed IR.** The body is text that the body pass replays; the "one parse, no re-check" shape
   needs the typed IR that stage 3 was originally scheduled after, so it is still ahead of us. What
   is gone is the *source* dependency and the duplicate emission.
-- **No driver.** `--use`/`--serve`/`--no-entry` are the primitives a driver needs, not the driver:
-  the order (importers first, so their request files exist; defining modules after) is the caller's
-  job today, and a request discovered while a defining module replays its own template is filed in
-  *its* request file, so a plan that chains two modules deep needs to iterate to a fixpoint.
+- **No driver.** `--use`/`--no-entry` are the primitives a driver needs, not the driver. (The
+  request protocol this stage first shipped also needed importers built before the defining module
+  and iterated to a fixpoint; the weak-emission model that replaced it has no ordering
+  constraint.)
 - **Requests are not re-checked for bounds.** The defining module re-specialises a request and
   replays the body against the substituted types (which is a real check), but it does not re-run
   `require_constraints` on the request's arguments: the run that asked for it already did.
