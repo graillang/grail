@@ -346,27 +346,8 @@ for (const target of selected) {
     executed++;
   }
 }
-// `byval` is implemented only where the classification can be executed: the Windows ABIs use
-// different struct rules and have no FFI execution path here, so they are refused rather than
-// guessed (docs/ffi.md).
-const windows = spawnSync(compiler, [
-  '--default-u64', '--typed-refs', '--target', 'windows-x86_64', join(work, 'windows-byval.s'),
-  join(root, 'tests/ffi/byval_records.grl'), join(root, 'compiler/runtime.grl'), join(root, 'compiler/os-windows.grl'),
-], { cwd: root, maxBuffer: 16 * 1024 * 1024, timeout: 900_000 });
-assert.notEqual(windows.status, 0, 'windows-x86_64: byval was accepted instead of refused');
-assert.match(`${windows.stdout}${windows.stderr}`, /byval is not implemented for the Windows x86-64 and Windows ARM64 ABIs/,
-  'windows-x86_64: missing byval refusal diagnostic');
-
-// Callbacks with stack-passed arguments: Linux targets execute callback_words and callback_stack
-// above; the Win64 prologue reads arguments past the sixth from the caller's frame (208+8i(%rbp)
-// from the body), so the Windows build must accept both instead of refusing them.
-for (const fixture of ['callback_words', 'callback_stack']) {
-  const accepted = spawnSync(compiler, [
-    '--default-u64', '--typed-refs', '--target', 'windows-x86_64', join(work, `windows-${fixture}.s`),
-    join(root, `tests/ffi/${fixture}.grl`), join(root, 'compiler/runtime.grl'), join(root, 'compiler/os-windows.grl'),
-  ], { cwd: root, maxBuffer: 16 * 1024 * 1024, timeout: 900_000 });
-  assert.equal(accepted.status, 0, `windows-x86_64: ${fixture} was refused: ${accepted.stdout}${accepted.stderr}`);
-}
+// Windows: byval records, callbacks with stack arguments and record writes, and nested-float
+// results execute under Wine as tests/windows-cases.json cases (tools/windows.mjs).
 
 const skipped = linkedOnly ? ` (${linkedOnly} linked but not executed: no cross emulator installed)` : '';
 console.log(`ffi: ${executed} linked and executed, ${linkedOnly} linked only, ${crossCompiled} cross-compiled only${skipped}`);

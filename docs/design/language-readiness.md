@@ -27,8 +27,8 @@ the design notes named below; `implementation-status.md` is current except where
 Remaining implementable core gap: record and string member layout in the debug info. Every other
 A-row is done or explicitly partial (A12); nothing in A waits on a B decision any more. B2, B6 and B7
 are implemented, and B1 stages 1-4 have landed (per-module emission, checked interfaces, generics
-across modules, the build cache). What remains of B1 is one compiler invocation per module; of B7,
-the Windows struct ABI - both named in their own sections.
+across modules, the build cache). What remains of B1 is one compiler invocation per module, named in
+its own section.
 
 ## B. Owner decisions (settled 2026-11-10)
 
@@ -45,7 +45,7 @@ is not asked again:
 | B4 | Windows I/O readiness model | **Implemented: green tasks on Windows (fibers on one scheduler thread), thread-per-task as opt-in, IOCP deferred** | Synchronous `ReadFile`/`WriteFile` and no epoll/eventfd/timerfd, so a blocking host operation runs on a helper thread while the task parks; task semantics now match Linux, and `GRAIL_TASKS=thread` selects the old thread-per-task scheduler. IOCP is a named future work item with a sketch. See [B4](decisions-b2-b6.md#b4-windows-runs-the-same-green-scheduler-thread-per-task-is-opt-in). |
 | B5 | Abort / unwind policy | **Decided: abort never unwinds** | `rt_abort` raises `SIGABRT` (Windows: `ExitProcess(134)`) and runs no cleanup at all - no `defer`, no drops, no message; nothing may unwind across the C boundary, which the compiler does not enforce. See [B5](decisions-b2-b6.md#b5-abort-never-unwinds). |
 | B6 | Closure capture model | **Implemented, `FnMut` included** | Closures capture direct references/views and cannot outlive the borrow (rejected: `returned borrow escapes its declared input lifetime`); a closure that writes a capture is `FnMut`, its binding must be mutable, and a call takes the closure exclusively. A `FnMut` where `Fn` is required is refused. See [B6](decisions-b2-b6.md#b6-references-captured-fnmut-implemented). |
-| B7 | Records passed by value to C | **Implemented** for x86-64, AArch64 and RISC-V 64; Windows x86-64 and ARM64 refuse `byval` | `v: byval R` passes the whole record; bare `R` stays the C `R *`, and the per-ABI result classifier is reused for arguments. See [B7](decisions-b2-b6.md#b7-byval-record-parameters-accepted). |
+| B7 | Records passed by value to C | **Implemented** on every ABI, Win64 and Windows ARM64 included | `v: byval R` passes the whole record; bare `R` stays the C `R *`, and the per-ABI result classifier is reused for arguments. See [B7](decisions-b2-b6.md#b7-byval-record-parameters-accepted). |
 
 ## C. Libraries (not language core; needed by the ports, scheduled with them)
 
