@@ -705,6 +705,14 @@ times move with the page cache, the ratio does not):
   redundant and the module entry can be keyed by its inputs alone.
 - **Store maintenance.** There is no garbage collection: entries that nothing names accumulate under
   `.work/cache/<target>/blob`, exactly as `.work/native/<hash>` directories do today.
+- **Visibility.** `pub` is still not a checked boundary, so an interface still carries a module's whole
+  top-level surface and every edit to it invalidates its importers.
+- **Store maintenance.** Every build that opens the store advances its generation
+  (`.work/cache/<target>/generation`), and every record a build writes or reuses records that
+  generation beside it (`map/<kind>/<key>.used`). `grail cache prune [--keep N]` drops the records no
+  build used in the last N (default 10), then every blob no remaining record names, and whatever a
+  killed build left in `stage/`; `grail cache clear` empties the store. A store pruned right after a
+  build keeps exactly what that build used (`tools/cache-test.mjs`, (f)).
 
 ## What must stay true
 
