@@ -15,6 +15,7 @@
   executes libc calls and errno from a pool worker and a green task and errno isolation between two
   threads on x86-64, and under qemu on AArch64 and RISC-V 64 with a glibc sysroot; the previous
   runtime fails it (shared errno 42/42).
+- Fixed: a generic instantiated on both `f32` and `f64` no longer shares one specialisation - the structural type key now records float width, so the f64 call ran the f32 body before (found by the per-module work).
 - Fixed: LLVM builds no longer fail with `changed binding to STB_GLOBAL` - a kept-native function the emitter declared `.weak` (content-addressed drop helpers) keeps that binding instead of being re-declared `.globl`. The weak-name table is sized for every name, so programs with many drop helpers no longer hang the lowering.
 - Fixed: `GRAIL_TEST_RESUME` keys pass markers by the compiler's content-hash directory rather than its file name, which is `grail` for every build, so a rebuilt compiler never inherits another build's passes.
 - Measured what the validation in a Grail program costs, split by kind; the compiler is untouched.
