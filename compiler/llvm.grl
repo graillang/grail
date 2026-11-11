@@ -2785,7 +2785,15 @@ fn lower_target<a, b, c>(stream: &a [u8], triple: &b [u8], target: u64, facts: (
     // Names the stream declared `.weak` (content-addressed drop helpers, which two objects may
     // both define). A function kept native is re-declared below; it must keep weak binding, not
     // gain `.globl`, or the assembler rejects the module (`changed binding to STB_GLOBAL`).
-    mut weak = set_new(64);
+    // `Set` is a fixed-size open-addressed table with no growth, so it must be sized for every
+    // name it will hold: count the `.weak` lines first (a full table probes forever).
+    mut nweak = 0;
+    for i in lines.len() {
+        if starts(view(lines[i]), view(".weak ")) {
+            nweak += 1;
+        }
+    }
+    mut weak = set_new(nweak + 1);
     for i in lines.len() {
         wl := view(lines[i]);
         if starts(wl, view(".weak ")) {
