@@ -24232,7 +24232,7 @@ fn iface_digest<a>(data: &a [u8]) -> u8[] {
 //
 // Grammar (docs/design/separate-compilation.md has the full description and a worked example):
 //
-//   file      := "// grail-interface 1" NL header+ declaration* "digest " HEX NL
+//   file      := "// grail-interface 3" NL header+ declaration* "digest " HEX NL
 //   type      := WORD [" " MODE] [" " "[" REGIONS "]"] PAYLOAD
 //
 // One word per store kind; MODE and REGIONS are written only when they are not 0 and empty, and the
@@ -24381,7 +24381,7 @@ fn iface_type_raw<a, b>(out: (&a mut u8[]), c: (&b mut C), ty: u64) -> unit {
         }
         return ();
     }
-    if (k == 6) || (k == 13) || (k == 14) || (k == 16) || (k == 26) || (k == 27) {
+    if (k == 6) || (k == 13) || (k == 14) || (k == 16) || (k == 26) || (k == 27) || (k == 29) {
         push_bytes(&mut out, view("("));
         push_bytes(&mut out, view(iface_plain_word(k)));
         iface_extra(&mut out, mode, &rs);
@@ -24595,6 +24595,9 @@ fn iface_plain_word(k: u64) -> string {
     }
     if k == 27 {
         return "slice";
+    }
+    if k == 29 {
+        return "job";
     }
     return "unknown";
 }
@@ -25430,6 +25433,12 @@ fn iface_parse_type<a>(c: (&a mut C), p: (&a mut IPos)) -> u64 {
             ip_expect(&mut p, view(")"));
             return intern_args(&mut c, 27, t, mode, rs, u64[]);
         }
+        if same(view(head), view("job")) {
+            // A pool job handle (`Job<T>`): its result type.
+            t := iface_parse_type(&mut c, &mut p);
+            ip_expect(&mut p, view(")"));
+            return intern_args(&mut c, 29, t, mode, rs, u64[]);
+        }
         if same(view(head), view("handle")) || same(view(head), view("byval")) {
             ref := ip_ref(&mut p);
             named_mode := ip_mode(&mut p);
@@ -25558,7 +25567,7 @@ fn iface_module_text<a, b, d>(c: (&a mut C), m: &b [u8], path: &d [u8], in_std: 
     exchange(&mut c.iface_env, u64[]);
     exchange(&mut c.iface_env_names, u8[][]);
     mut out = u8[];
-    push_bytes(&mut out, view("// grail-interface 2\n"));
+    push_bytes(&mut out, view("// grail-interface 3\n"));
     iface_line(&mut out, view("module"), view(m));
     push_bytes(&mut out, view("source "));
     iface_quoted(&mut out, view(path));
@@ -25911,7 +25920,7 @@ fn iface_load<a, b>(c: (&a mut C), path: &a [u8], source_path: &b [u8], phase: u
     if text.len() == 0 {
         iface_refuse(view(path), view("cannot read interface file"));
     }
-    if !iface_starts(view(text), view("// grail-interface 2\n")) {
+    if !iface_starts(view(text), view("// grail-interface 3\n")) {
         if iface_starts(view(text), view("// grail-interface ")) {
             mut version = u8[];
             mut i = 19;
@@ -25922,10 +25931,10 @@ fn iface_load<a, b>(c: (&a mut C), path: &a [u8], source_path: &b [u8], phase: u
             mut msg = u8[];
             push_bytes(&mut msg, view("was written in interface format "));
             push_bytes(&mut msg, view(version));
-            push_bytes(&mut msg, view(", this compiler reads format 2"));
+            push_bytes(&mut msg, view(", this compiler reads format 3"));
             iface_refuse(view(path), view(msg));
         }
-        iface_refuse(view(path), view("is not an interface file (no `// grail-interface 1` header)"));
+        iface_refuse(view(path), view("is not an interface file (no `// grail-interface` header)"));
     }
     iface_self_check(view(path), view(text));
     lines := iface_lines(&text);

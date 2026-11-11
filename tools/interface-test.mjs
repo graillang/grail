@@ -448,7 +448,6 @@ function corpusCases() {
 
 function proveCorpus() {
   const selected = corpusCases();
-  const unexpressible = [];
   let passed = 0;
   for (const { index, test, modules } of selected) {
     const directory = join(work, `${index}-${test.name.replace(/[^A-Za-z0-9_-]/g, '_')}`);
@@ -470,20 +469,11 @@ function proveCorpus() {
       const viaInterface = compile(files, join(directory, 'interface'), ['--interface', ifaces]);
       assert.equal(viaInterface.status, 0, `${test.name}: interface build failed\n${viaInterface.output}`);
     } else {
-      try {
-        proveEquivalent(test.name, files, directory, { stdout: test.stdout, args: test.args ?? [], env: test.env ?? {} });
-      } catch (error) {
-        // A named limitation is not a failure: the format cannot yet express every type the corpus
-        // uses, and a program that says so is reported rather than dropped or forced to pass.
-        if (!/cannot express a type of that kind/.test(String(error?.message))) throw error;
-        unexpressible.push(test.name);
-        continue;
-      }
+      // The format expresses every type the corpus uses (format 3); a program it refuses is a
+      // failure, so a new store kind cannot land without an interface spelling.
+      proveEquivalent(test.name, files, directory, { stdout: test.stdout, args: test.args ?? [], env: test.env ?? {} });
     }
     passed += 1;
-  }
-  if (unexpressible.length) {
-    console.log(`interface: not expressible yet (${unexpressible.length}): ${unexpressible.join(', ')}`);
   }
   return passed;
 }
@@ -598,7 +588,7 @@ function proveGenericBodies() {
   const ifaces = emit(all, directory);
   const generic = join(ifaces, 'generic.iface');
   const text = readFileSync(generic, 'utf8');
-  assert.ok(text.startsWith('// grail-interface 2\n'), 'generics: the interface format version did not change with the body carriage');
+  assert.ok(text.startsWith('// grail-interface 3\n'), 'generics: the interface does not carry the current format version');
   assert.match(text, /^fn generic::twice <1> /m, 'generics: generic.iface does not declare the template');
   assert.doesNotMatch(text, /\bpos \d+$/, 'generics: a body is still a source position, not carried text');
   assert.match(text, /^body \d+$/m, 'generics: generic.iface carries no body section');
