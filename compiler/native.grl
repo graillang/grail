@@ -349,6 +349,8 @@ struct C {
     // Slot holding the host TLS base inside an exported function's body, or 0.
     export_tls: u64,
     export_adopt: u64,
+    // Copy-backs for `p: &mut R` callback parameters: (C pointer slot, copy slot, bytes) triples.
+    export_copyback: u64[],
     rnames: u8[][],
     tnames: u8[][],
     closures: Closure[],
@@ -1557,6 +1559,20 @@ fn tls_leave_callback<a>(c: (&a mut C), slot: u64, adopt: u64) -> unit {
     stack_slot(&mut c, adopt);
     o(&mut c, view(",%rdi\ncall rt_release_record\n"));
     mark(&mut c, done);
+    return ();
+}
+// Before a callback's frame is torn down: copy each `p: &mut R` parameter's Grail copy back into
+// the struct C passed (see the prologue). Runs before cleanup frees the copies; the copy slot is
+// read at exit, so a record swapped in through `p` is the one written back.
+fn callback_copy_back<a>(c: (&a mut C)) -> unit {
+    n := c.export_copyback.len() / 3;
+    for k in n {
+        keep := c.export_copyback[3 * k];
+        copy := c.export_copyback[3 * k + 1];
+        size := c.export_copyback[3 * k + 2];
+        bytes := imm(&mut c, size);
+        invoke(&mut c, view("rt_copy_bytes"), three(keep, copy, bytes));
+    }
     return ();
 }
 // Undo either entry: restore the thread pointer `slot` saved, if it saved one.
@@ -5969,7 +5985,10 @@ fn base_named<a>(c: (&a mut C), first: u8[]) -> u64 {
             fail(&mut c, view("cfn type exceeds 64 arguments"));
         }
         for i in params.len() {
-            if ffi_out_param(&mut c, params[i]) {
+            // `&mut R` of an extern record is the C `R *` a callback writes through (copy-in/copy-out
+            // in the callback, the record's own address at a call); any other out-parameter is a
+            // declaration-only feature.
+            if ffi_out_param(&mut c, params[i]) & (ffi_record_out_param(&mut c, params[i]) == 0) {
                 fail(
                     &mut c,
                     view("an out-parameter is only for an extern \"C\" declaration; a cfn type cannot declare one")
@@ -6669,23 +6688,10 @@ fn ffi_byval_ahead<a>(c: (&a mut C)) -> bool {
 // Parses the record type after `byval` and returns the parameter type.
 fn ffi_byval_parameter<a>(c: (&a mut C)) -> u64 {
     ty := parse_type(&mut c);
-    if ffi_byval_target(&mut c) == 0 {
-        fail(
-            &mut c,
-            view("byval is not implemented for the Windows x86-64 and Windows ARM64 ABIs; pass the record by pointer")
-        );
-    }
     if is_c_record(&mut c, ty) == 0 {
         fail(&mut c, view("byval must name an extern \"C\" record type; a bare record parameter is a pointer"));
     }
     return intern(&mut c, 28, ty);
-}
-// 1 when this target's by-value classification is implemented and exercised by the FFI gate.
-fn ffi_byval_target<a>(c: (&a mut C)) -> u64 {
-    if (c.target == 3) || (c.target == 4) {
-        return 0;
-    }
-    return 1;
 }
 fn ffi_direct_type<a>(c: (&a mut C), ty: u64) -> bool {
     if is_float(&mut c, ty) {
@@ -6792,12 +6798,7 @@ fn ffi_emit_call<a, b, d, e, f>(
             rslot = invoke(&mut c, view("rt_rec"), one(words));
             rmode = 1;
             rdecl = rd;
-            if ffi_record_has_nested(&mut c, rd) & ffi_record_has_float_deep(&mut c, rd) {
-                // Classifying floats inside an embedded record needs the flattened field list;
-                // refuse rather than read the wrong registers.
-                fail(&mut c, view("extern C record results with floats inside an embedded record are not supported yet"));
-            }
-            if ffi_record_has_float(&mut c, rd) {
+            if ffi_record_has_float_deep(&mut c, rd) {
                 fplan = ffi_float_plan(&mut c, rd, abi);
             }
             if fplan == 2 {
@@ -6893,7 +6894,8 @@ fn ffi_emit_call<a, b, d, e, f>(
     if abi == 1 {
         base = 32; // the callee's register home area
     }
-    mut area = base + stack * 8 + copies;
+    copy_base := (base + stack * 8 + 15) / 16 * 16;
+    mut area = copy_base + copies;
     area = (area + 15) / 16 * 16;
     if 2048 < area {
         fail(&mut c, view("extern C call needs more than 2 KiB of stack arguments"));
@@ -6925,7 +6927,7 @@ fn ffi_emit_call<a, b, d, e, f>(
         variadic_arg := fixed < i + 1;
         rv_var := (abi == 3) & variadic_arg;
         if plans[i].byval != 0 {
-            ffi_byval_emit(&mut c, args[i], &plans[i], base + stack * 8, x86, abi);
+            ffi_byval_emit(&mut c, args[i], &plans[i], copy_base, x86, abi);
             ints = plans[i].ints;
             floats = plans[i].floats;
             next = plans[i].stack;
@@ -7842,9 +7844,10 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
             ffi_callback_fits(&mut c, first, count);
             for i in count {
                 formal := c.params[first + i];
-                if ffi_out_param(&mut c, formal) {
-                    // Grail has no deref-assignment, so a callback cannot store through the pointer
-                    // C hands it; only a declaration Grail calls writes the slot from Grail's side.
+                if ffi_out_param(&mut c, formal) & (ffi_record_out_param(&mut c, formal) == 0) {
+                    // Grail has no deref-assignment, so a callback cannot store a word through the
+                    // pointer C hands it; only a declaration Grail calls writes such a slot. A
+                    // `&mut R` record parameter is the exception (bound by copy-in/copy-out below).
                     fail(
                         &mut c,
                         view("an out-parameter is only for an extern \"C\" declaration parameter; a C callback cannot take one")
@@ -8047,6 +8050,30 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         if (export == 2) & (is_c_record(&mut c, ty) != 0) {
             borrow_parameter(&mut c, slot, ty);
             init_parameter(&mut c, slot, ty);
+        } else if (export == 2) & (ffi_record_out_param(&mut c, ty) != 0) {
+            // `p: &mut R` in a C callback: C passed the `R *` it owns. The body works on a
+            // Grail-owned copy - every Grail operation through `p` is then sound, whole-value
+            // replacement included - and each exit copies the bytes back into C's struct before
+            // the copy is freed (callback_copy_back). Cost: one record-sized copy each way.
+            rty := ty_arg(&mut c, ty);
+            d := ty_arg(&mut c, rty);
+            copy := c_record_copy(&mut c, slot, rty);
+            own(&mut c, copy, rty);
+            keep := fresh(&mut c);
+            get(&mut c, slot, view("%rax"));
+            o(&mut c, view("movq %rax,"));
+            stack_slot(&mut c, keep);
+            o(&mut c, view("\nleaq "));
+            stack_slot(&mut c, copy);
+            o(&mut c, view(",%rax\nmovq %rax,"));
+            stack_slot(&mut c, slot);
+            c.out.push(10);
+            size := ffi_record_size(&mut c, d);
+            c.export_copyback.push(keep);
+            c.export_copyback.push(copy);
+            c.export_copyback.push(size);
+            own(&mut c, slot, ty);
+            init_parameter(&mut c, slot, ty);
         } else {
             own(&mut c, slot, ty);
             init_parameter(&mut c, slot, ty);
@@ -8064,6 +8091,10 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     block(&mut c);
     exchange(&mut c.export_tls, 0);
     exchange(&mut c.export_adopt, 0);
+    if c.terminated == 0 {
+        callback_copy_back(&mut c);
+    }
+    exchange(&mut c.export_copyback, u64[]);
     if c.raw == 0 {
         if (c.terminated == 0) & (ret != 1) {
             fail(&mut c, view("function may fall through without return"));
@@ -9445,8 +9476,22 @@ fn ffi_byval_mode<a>(
         }
         return decision;
     }
-    // RV64 (abi 3). Win64 (abi 1) never reaches here: ffi_byval_parameter refuses `byval` on the
-    // Windows targets when the declaration is parsed.
+    if abi == 1 {
+        // Win64: a record of 1, 2, 4 or 8 bytes travels as one integer word in its positional slot
+        // (rcx/rdx/r8/r9, then the stack) - floats included, Win64 never passes a struct in xmm -
+        // and any other size by reference to a caller-made copy whose address takes the slot.
+        if (size == 1) || (size == 2) || (size == 4) || (size == 8) {
+            if ints < 4 {
+                decision.push(1);
+            } else {
+                decision.push(2);
+            }
+        } else {
+            decision.push(4);
+        }
+        return decision;
+    }
+    // RV64 (abi 3).
     if 16 < size {
         decision.push(4);
         return decision;
@@ -9513,10 +9558,16 @@ fn ffi_byval_plan<a>(c: (&a mut C), d: u64, abi: u64, ints: u64, floats: u64, st
         }
     }
     if mode == 4 {
+        // Each copy starts 16-byte aligned (Win64 requires it; harmless elsewhere): the copy area
+        // itself starts on a 16-byte boundary above the stack arguments.
         copy_rel = copies2;
-        copy_bytes = ffi_align_up(size, 8);
+        copy_bytes = ffi_align_up(size, 16);
         copies2 = copies2 + copy_bytes;
-        if ints2 < 8 {
+        mut regs = 8;
+        if abi == 1 {
+            regs = 4;
+        }
+        if ints2 < regs {
             moves.push(ffi_move(0, 0, 4, ints2));
             ints2 = ints2 + 1;
         } else {
@@ -9553,6 +9604,11 @@ fn ffi_byval_plan<a>(c: (&a mut C), d: u64, abi: u64, ints: u64, floats: u64, st
 // Places one byval argument's bytes where the plan says, making the copy a by-reference argument
 // needs at `copy_base` bytes above the outgoing stack pointer.
 fn ffi_byval_emit<a>(c: (&a mut C), slot: u64, plan: (&FFIPlan), copy_base: u64, x86: u64, abi: u64) -> unit {
+    // Win64 stack arguments start above the callee's 32-byte register home area.
+    mut home = 0;
+    if abi == 1 {
+        home = 32;
+    }
     if 0 < plan.copy_bytes {
         for w in plan.copy_bytes / 8 {
             get(&mut c, slot, view("%rax"));
@@ -9574,7 +9630,7 @@ fn ffi_byval_emit<a>(c: (&a mut C), slot: u64, plan: (&FFIPlan), copy_base: u64,
                 o(&mut c, view(ffi_int_reg(abi, m.index)));
                 c.out.push(10);
             } else {
-                ffi_store_stack(&mut c, x86, m.index * 8);
+                ffi_store_stack(&mut c, x86, home + m.index * 8);
             }
             continue;
         }
@@ -9595,7 +9651,7 @@ fn ffi_byval_emit<a>(c: (&a mut C), slot: u64, plan: (&FFIPlan), copy_base: u64,
             ffi_float_arg(&mut c, m.index, m.size == 4, x86);
         }
         if m.dst == 3 {
-            ffi_store_stack(&mut c, x86, m.index * 8);
+            ffi_store_stack(&mut c, x86, home + m.index * 8);
         }
     }
     return ();
@@ -9627,7 +9683,10 @@ fn ffi_float_arg<a>(c: (&a mut C), index: u64, single: bool, x86: u64) -> unit {
 // or two fields, at least one float), 0 the integer-register/memory rules (Win64 by size, AAPCS64
 // non-HFA composites, RV64 records the flattening rule does not cover).
 fn ffi_float_plan<a>(c: (&a mut C), d: u64, abi: u64) -> u64 {
-    count := c.decls[d].count;
+    // Classified over the flattened scalar leaves, so a float inside an embedded record counts
+    // exactly as one at the top level (the C ABIs all classify the flattened field list).
+    leaves := ffi_leaves(&mut c, d, 0);
+    count := leaves.len();
     if abi == 0 {
         return 1;
     }
@@ -9635,14 +9694,12 @@ fn ffi_float_plan<a>(c: (&a mut C), d: u64, abi: u64) -> u64 {
         if (count == 0) || (4 < count) {
             return 0;
         }
-        first := field_ty(&mut c, d, 0);
-        if !is_float(&mut c, first) {
+        kind := leaves[0].cls;
+        if kind == 0 {
             return 0;
         }
-        single := is_f32(&mut c, first);
         for i in count {
-            ty := field_ty(&mut c, d, i);
-            if !is_float(&mut c, ty) || is_f32(&mut c, ty) != single {
+            if leaves[i].cls != kind {
                 return 0;
             }
         }
@@ -9654,12 +9711,11 @@ fn ffi_float_plan<a>(c: (&a mut C), d: u64, abi: u64) -> u64 {
         }
         mut floats = 0;
         for i in count {
-            ty := field_ty(&mut c, d, i);
-            if is_float(&mut c, ty) {
+            if leaves[i].cls != 0 {
                 floats = floats + 1;
             } else {
                 // Only scalar integers pair with a float (handles and CStr are pointer words).
-                if 8 < ffi_field_size(&mut c, ty) {
+                if 8 < leaves[i].size {
                     return 0;
                 }
             }
@@ -9671,12 +9727,14 @@ fn ffi_float_plan<a>(c: (&a mut C), d: u64, abi: u64) -> u64 {
     }
     return 0;
 }
-// Stores a float-classified record result from the return registers into its allocation.
+// Stores a float-classified record result from the return registers into its allocation, leaf by
+// leaf of the flattened record (embedded records included).
 fn ffi_float_result<a>(c: (&a mut C), slot: u64, d: u64, plan: u64) -> unit {
-    count := c.decls[d].count;
+    leaves := ffi_leaves(&mut c, d, 0);
+    count := leaves.len();
     size := ffi_record_size(&mut c, d);
     if plan == 1 {
-        // SysV: each eightbyte is SSE when all its fields are floats, else INTEGER; INTEGER
+        // SysV: each eightbyte is SSE when all its leaves are floats, else INTEGER; INTEGER
         // eightbytes come from rax then rdx, SSE ones from xmm0 then xmm1.
         mut eights = (size + 7) / 8;
         mut ints = 0;
@@ -9686,9 +9744,7 @@ fn ffi_float_result<a>(c: (&a mut C), slot: u64, d: u64, plan: u64) -> unit {
         for e in eights {
             mut sse = 1;
             for i in count {
-                ty := field_ty(&mut c, d, i);
-                off := ffi_offset(&mut c, d, i);
-                if (off / 8 == e) & !is_float(&mut c, ty) {
+                if (leaves[i].off / 8 == e) & (leaves[i].cls == 0) {
                     sse = 0;
                 }
             }
@@ -9714,31 +9770,30 @@ fn ffi_float_result<a>(c: (&a mut C), slot: u64, d: u64, plan: u64) -> unit {
     if plan == 2 {
         get(&mut c, slot, view("%r10"));
         for i in count {
-            ty := field_ty(&mut c, d, i);
-            single := is_f32(&mut c, ty);
-            off := ffi_offset(&mut c, d, i);
-            ffi_float_store(&mut c, i, single, off);
+            ffi_float_store(&mut c, i, leaves[i].cls == 1, leaves[i].off);
         }
         return ();
     }
-    // RV64 flattened: floats in fa0, fa1 in field order; the integer field (if any) in a0, which
+    // RV64 flattened: floats in fa0, fa1 in leaf order; the integer leaf (if any) in a0, which
     // the call lowering leaves in %rax.
     held := save(&mut c);
     get(&mut c, slot, view("%r10"));
     mut fk = 0;
     for i in count {
-        ty := field_ty(&mut c, d, i);
-        if is_float(&mut c, ty) {
-            single := is_f32(&mut c, ty);
-            off := ffi_offset(&mut c, d, i);
-            ffi_float_store(&mut c, fk, single, off);
+        if leaves[i].cls != 0 {
+            ffi_float_store(&mut c, fk, leaves[i].cls == 1, leaves[i].off);
             fk = fk + 1;
         }
     }
     for i in count {
-        ty := field_ty(&mut c, d, i);
-        if !is_float(&mut c, ty) {
-            cfield_store(&mut c, slot, d, i, held);
+        if leaves[i].cls == 0 {
+            get(&mut c, slot, view("%rax"));
+            o(&mut c, view("addq $"));
+            on(&mut c, leaves[i].off);
+            o(&mut c, view(",%rax\n"));
+            addr := save(&mut c);
+            w := imm(&mut c, leaves[i].size);
+            invoke(&mut c, view("rt_store_sized"), three(addr, held, w));
         }
     }
     return ();
@@ -9754,28 +9809,6 @@ fn ffi_float_store<a>(c: (&a mut C), k: u64, single: bool, off: u64) -> unit {
     on(&mut c, off);
     c.out.push(10);
     return ();
-}
-// 1 when a C-layout record has a floating-point field (its by-value classification differs).
-fn ffi_record_has_float<a>(c: (&a mut C), d: u64) -> bool {
-    count := c.decls[d].count;
-    for i in count {
-        ty := field_ty(&mut c, d, i);
-        if is_float(&mut c, ty) {
-            return true;
-        }
-    }
-    return false;
-}
-// 1 when a C-layout record embeds another extern record.
-fn ffi_record_has_nested<a>(c: (&a mut C), d: u64) -> bool {
-    count := c.decls[d].count;
-    for i in count {
-        ty := field_ty(&mut c, d, i);
-        if is_c_record(&mut c, ty) != 0 {
-            return true;
-        }
-    }
-    return false;
 }
 // Floats anywhere in the record, embedded records included.
 fn ffi_record_has_float_deep<a>(c: (&a mut C), d: u64) -> bool {
@@ -11708,6 +11741,7 @@ fn indirect_call<a>(c: (&a mut C), value: Val, opened: u64) -> Val {
     // fields (or as a copy of them, for a `byval` parameter), and Grail keeps ownership - the same
     // rule a direct extern call follows.
     mut shared = u64[];
+    cfn_call := kind == 25;
     if opened == 0 {
         expect(&mut c, view("("));
     }
@@ -11724,7 +11758,7 @@ fn indirect_call<a>(c: (&a mut C), value: Val, opened: u64) -> Val {
             if c.raw == 0 {
                 value = adopt_value(&mut c, value, astart, aend, expected);
             }
-            slot := value.t;
+            mut slot = value.t;
             mut actual = value.ty;
             if (actual == 0
                     || ((c.lit_negative != 0) && c.lit_start == astart && c.lit_end == aend))
@@ -11750,6 +11784,23 @@ fn indirect_call<a>(c: (&a mut C), value: Val, opened: u64) -> Val {
                     borrowed = 1;
                     shared.push(slot);
                 }
+            }
+            if cfn_call & (c.raw == 0) & (ffi_record_out_param(&mut c, expected) != 0) {
+                // `&mut R` through a C function pointer is the C `R *`, exactly as at a direct
+                // extern call: the word that crosses is the record's own address, loaded through
+                // the borrow, and C's writes land in the record.
+                place := target_of(&mut c, slot);
+                if borrowed_temporary(&mut c, place) {
+                    fail(
+                        &mut c,
+                        view("an extern C out-parameter needs a binding to write into; a temporary record would be discarded")
+                    );
+                }
+                ownership::filled(&mut c.check, place);
+                x := deref(&mut c, val(slot, actual));
+                slot = x.t;
+                borrowed = 1;
+                shared.push(slot);
             }
             sources.push(slot);
             types.push(actual);
@@ -21852,6 +21903,7 @@ fn statement<a>(c: (&a mut C)) -> unit {
         }
         validate_return(&mut c, val(v.t, v.ty));
         move_out(&mut c, val(v.t, v.ty));
+        callback_copy_back(&mut c);
         cleanup(&mut c, 0);
         restore := c.export_tls;
         if restore != 0 {
@@ -26674,6 +26726,7 @@ pub fn main() -> u64 {
         pending_symbol: u8[],
         export_tls: 0,
         export_adopt: 0,
+        export_copyback: u64[],
         rnames: u8[][],
         tnames: u8[][],
         closures: Closure[],

@@ -218,3 +218,33 @@ typedef double (*cs_floats)(double, double, double, double, double, double, doub
 double c_call_floats(cs_floats cb) {
   return cb(0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5, 9.5, 7);
 }
+
+/* Callbacks writing into a struct C passes by pointer (tests/ffi/callback_record_write.grl). The
+ * guards around `p` catch a write that lands outside it; the checksum is computed by C after the
+ * callback returns, so a write Grail kept in a private copy shows up as a wrong result. */
+struct rw_point { int x; int y; double w; };
+struct rw_frame { long before; struct rw_point p; long after; };
+typedef int (*rw_cb)(struct rw_point *, int);
+long c_call_record_write(rw_cb cb, int mode) {
+  struct rw_frame f = {111, {4, 5, 0.5}, 222};
+  int r = cb(&f.p, mode);
+  if (f.before != 111 || f.after != 222) return -1;
+  return (long)r * 100000 + (long)f.p.x * 1000 + (long)f.p.y * 10 + (long)(f.p.w * 4);
+}
+
+/* Record results whose embedded records hold floats (tests/ffi/nested_float_results.grl). Each ABI
+ * classifies the flattened field list: SysV per eightbyte (np_pd: two SSE eightbytes, xmm0/xmm1;
+ * nf_mixed: INTEGER then SSE, rax/xmm0), AAPCS64 homogeneous aggregates through nesting (nh_3d:
+ * d0-d2; memory on SysV and RV64 at 24 bytes), RV64 one float plus one integer (nf_fi: fa0 + a0). */
+struct np_pair { float x; float y; };
+struct np_pd { struct np_pair p; double d; };
+struct np_pd c_np_pd(float x, double d) { struct np_pd r = {{x, x * 2.0f}, d}; return r; }
+struct nf_if { int i; float f; };
+struct nf_mixed { struct nf_if a; double d; };
+struct nf_mixed c_nf_mixed(int i, double d) { struct nf_mixed r = {{i, 0.25f}, d}; return r; }
+struct nh_2d { double x; double y; };
+struct nh_3d { struct nh_2d a; double z; };
+struct nh_3d c_nh_3d(double s) { struct nh_3d r = {{s, s + 1.0}, s + 2.0}; return r; }
+struct nf_f { float f; };
+struct nf_fi { struct nf_f a; int i; };
+struct nf_fi c_nf_fi(float f, int i) { struct nf_fi r = {{f}, i}; return r; }

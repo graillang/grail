@@ -110,11 +110,10 @@ fixture instances execute (19 on x86-64 alone, 38 reported link-only without a r
 `ffi-out-params`, `ffi-call-words` and callback-abort sources are also `tests/windows-cases.json`
 cases that execute under Wine on Windows x86-64.
 
-Still refused with a diagnostic rather than approximated: `byval` on the Windows x86-64 and ARM64
-ABIs (`byval is not implemented for the Windows x86-64 and Windows ARM64 ABIs; pass the record by
-pointer`); a `byval` record parameter on a C callback; a by-value record *result* whose embedded
-records contain floats; variadic callbacks; callback results that are function pointers; the address
-of a *temporary* record (`cptr needs a named record`); callbacks arriving on a thread C created (they abort by name); and dynamic loading on macOS. The C headers under `include/grail` are the runtime ABI contract.
+Still refused with a diagnostic rather than approximated: a `byval` record parameter on a C
+callback; variadic callbacks; callback results that are function pointers; the address of a
+*temporary* record (`cptr needs a named record`); and dynamic loading on macOS. `byval` works on
+every ABI, Win64 included (executed under Wine; Windows ARM64 follows AAPCS64 and is cross-built). The C headers under `include/grail` are the runtime ABI contract.
 
 ## Graphics and shaders
 

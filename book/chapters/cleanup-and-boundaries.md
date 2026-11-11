@@ -57,9 +57,9 @@ The rest of the surface is implemented and executed, and `docs/ffi.md` is the co
   calls stay on the main thread; on Windows x86-64 the loader is reached through ordinary
   `LoadLibraryA`/`GetProcAddress` imports. macOS dynamic loading is not implemented.
 
-Windows x86-64 and ARM64 refuse `byval` rather than guess MSVC's struct rules. Still refused, with a
-diagnostic: a `byval` callback parameter, an out-parameter on a callback or `cfn` type, more integer
-argument words than a callback's registers can carry, the address of a *temporary* record (`cptr
+`byval` follows each ABI's struct rules, Windows included. Still refused, with a
+diagnostic: a `byval` callback parameter, a handle or pointer out-parameter on a callback or `cfn`
+type, the address of a *temporary* record (`cptr
 needs a named record`) or of a record that has no C layout, foreign calls from a thread other than
 the main one on Linux, and dynamic loading on macOS. Tests that execute the C ABI against real
 libraries live in `tests/ffi/`; the book's own C examples link a freestanding shim beside them

@@ -56,6 +56,12 @@ const fixtures = [
     symbols: ['c_vec2', 'c_vec3d', 'c_fi', 'c_di', 'c_quad'],
   },
   {
+    // Record results with floats inside an embedded record, classified over the flattened leaves.
+    name: 'nested_float_results',
+    stdout: '1.5 3 10.25\n-7 0.25 3.5\n0.5 1.5 2.5\n2.75 42\n',
+    symbols: ['c_np_pd', 'c_nf_mixed', 'c_nh_3d', 'c_nf_fi'],
+  },
+  {
     // Extern records embedded by value (offsets, projection, assignment, copy-out, results).
     name: 'nested_records',
     stdout: '49044\n21\n3\n-7\n100000000000\n42\n9\n77\n154\n6\n7\n42\n',
@@ -170,6 +176,16 @@ const fixtures = [
     stdout: '204\n',
     symbols: ['c_call_words8'],
     defines: ['g_words8'],
+  },
+  {
+    // A callback writing into the struct C passes (`p: &mut R`): copy-in/copy-out, written back on
+    // every exit. mode 0 edits y and w then falls through (1, x=4, y=15, w=1.5 -> 104156); mode 1
+    // returns early after editing x (7, x=14, y=5 -> 714052); mode 2 replaces the whole value
+    // (returns 4+5=9, x=9, y=8, w=2.25 -> 909089).
+    name: 'callback_record_write',
+    stdout: '104156\n714052\n909089\n',
+    symbols: ['c_call_record_write'],
+    defines: ['edit'],
   },
   {
     // Callbacks with arguments on the caller's stack (decision B7 follow-up, docs/ffi.md): 24
@@ -330,27 +346,8 @@ for (const target of selected) {
     executed++;
   }
 }
-// `byval` is implemented only where the classification can be executed: the Windows ABIs use
-// different struct rules and have no FFI execution path here, so they are refused rather than
-// guessed (docs/ffi.md).
-const windows = spawnSync(compiler, [
-  '--default-u64', '--typed-refs', '--target', 'windows-x86_64', join(work, 'windows-byval.s'),
-  join(root, 'tests/ffi/byval_records.grl'), join(root, 'compiler/runtime.grl'), join(root, 'compiler/os-windows.grl'),
-], { cwd: root, maxBuffer: 16 * 1024 * 1024, timeout: 900_000 });
-assert.notEqual(windows.status, 0, 'windows-x86_64: byval was accepted instead of refused');
-assert.match(`${windows.stdout}${windows.stderr}`, /byval is not implemented for the Windows x86-64 and Windows ARM64 ABIs/,
-  'windows-x86_64: missing byval refusal diagnostic');
-
-// Callbacks with stack-passed arguments: Linux targets execute callback_words and callback_stack
-// above; the Win64 prologue reads arguments past the sixth from the caller's frame (208+8i(%rbp)
-// from the body), so the Windows build must accept both instead of refusing them.
-for (const fixture of ['callback_words', 'callback_stack']) {
-  const accepted = spawnSync(compiler, [
-    '--default-u64', '--typed-refs', '--target', 'windows-x86_64', join(work, `windows-${fixture}.s`),
-    join(root, `tests/ffi/${fixture}.grl`), join(root, 'compiler/runtime.grl'), join(root, 'compiler/os-windows.grl'),
-  ], { cwd: root, maxBuffer: 16 * 1024 * 1024, timeout: 900_000 });
-  assert.equal(accepted.status, 0, `windows-x86_64: ${fixture} was refused: ${accepted.stdout}${accepted.stderr}`);
-}
+// Windows: byval records, callbacks with stack arguments and record writes, and nested-float
+// results execute under Wine as tests/windows-cases.json cases (tools/windows.mjs).
 
 const skipped = linkedOnly ? ` (${linkedOnly} linked but not executed: no cross emulator installed)` : '';
 console.log(`ffi: ${executed} linked and executed, ${linkedOnly} linked only, ${crossCompiled} cross-compiled only${skipped}`);

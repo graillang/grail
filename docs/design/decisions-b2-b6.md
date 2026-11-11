@@ -23,7 +23,7 @@ decision without a stated trigger is what made these items outstanding for so lo
 | B4 | Windows runs **the same green scheduler as Linux** (Win32 fibers on one scheduler thread); thread-per-task is an explicit opt-in (`GRAIL_TASKS=thread`). IOCP stays a named future work item. | Decided and implemented |
 | B5 | **Abort never unwinds**; nothing may unwind across the C boundary. There is no `defer` and no cleanup runs on an abort path. | Decided |
 | B6 | Closures capture references and views and cannot outlive the borrow; **`FnMut`/mutable captures are implemented** under the six rules fixed below. | Implemented |
-| B7 | Records passed by value to C: **accepted**, spelling `v: byval R`. | Implemented on x86-64, AArch64 and RISC-V 64; Windows x86-64 and ARM64 refuse the marker |
+| B7 | Records passed by value to C: **accepted**, spelling `v: byval R`. | Implemented on every ABI: SysV x86-64, AAPCS64, RV64, Win64 and Windows ARM64 |
 
 ## B1: separate compilation accepted
 
@@ -510,9 +510,9 @@ float pair, an embedded array, a `byval` parameter after six integer arguments, 
 stack area with a following scalar, and a call through a `cfn` declaring the same signature - each
 twin returns a checksum over every field it received, and the fixture executes on x86-64, AArch64 and
 RISC-V 64. The refusals are pinned as `ffi-reject-byval-plain-record`, `ffi-reject-byval-scalar` and
-`ffi-reject-byval-callback`, and the Windows x86-64/ARM64 refusal is the diagnostic
-`byval is not implemented for the Windows x86-64 and Windows ARM64 ABIs; pass the record by
-pointer`.
+`ffi-reject-byval-callback`. Win64 passes 1, 2, 4 and 8-byte records in their positional integer slot
+and any other size by reference to a 16-byte-aligned copy, executed under Wine (`ffi-byval-records`);
+Windows ARM64 uses the AAPCS64 lowering.
 
 ## Corrections to earlier documents
 

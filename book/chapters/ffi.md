@@ -151,6 +151,6 @@ soundness bug.
   as a borrow now and the fields stay readable under the ordinary rules.
 
 What still has no expression: pointer arithmetic (an array of dynamic length is a fixed-capacity
-record with its count checked afterwards), writing *through* a pointer inside a C callback (there is
-no deref-assignment), and a `byval` record on the Windows ABIs. `docs/ffi.md` states each of those
-with the diagnostic it produces.
+record with its count checked afterwards). A C callback writes into the struct C hands it by taking
+`p: &mut R`, and `byval` records work on every ABI, Windows included. `docs/ffi.md` states each
+remaining limit with the diagnostic it produces.

@@ -1,0 +1,29 @@
+// C record results whose floats sit inside an embedded record. The register classification runs
+// over the flattened field list on every ABI (SysV eightbytes, AAPCS64 homogeneous aggregates, RV64
+// float+int pairs), so each field must come back from the register C put it in; see the shim.
+extern "C" record Pair { x: f32, y: f32 }
+extern "C" record PairD { p: Pair, d: f64 }
+extern "C" record IntF { i: i32, f: f32 }
+extern "C" record Mixed { a: IntF, d: f64 }
+extern "C" record Two { x: f64, y: f64 }
+extern "C" record Three { a: Two, z: f64 }
+extern "C" record OneF { f: f32 }
+extern "C" record FI { a: OneF, i: i32 }
+extern "C" lib "shim.o" fn c_np_pd(x: f32, d: f64) -> PairD;
+extern "C" lib "shim.o" fn c_nf_mixed(i: i32, d: f64) -> Mixed;
+extern "C" lib "shim.o" fn c_nh_3d(s: f64) -> Three;
+extern "C" lib "shim.o" fn c_nf_fi(f: f32, i: i32) -> FI;
+
+fn main() -> u64 {
+    unsafe {
+        a := c_np_pd(1.5, 10.25);
+        println("{} {} {}", a.p.x, a.p.y, a.d);
+        b := c_nf_mixed(-7, 3.5);
+        println("{} {} {}", b.a.i, b.a.f, b.d);
+        t := c_nh_3d(0.5);
+        println("{} {} {}", t.a.x, t.a.y, t.z);
+        f := c_nf_fi(2.75, 42);
+        println("{} {}", f.a.f, f.i);
+    }
+    return 0;
+}
