@@ -83,10 +83,12 @@ fn digest<a>(input: &a [u8]) -> u8[] {
 - `unsafe cptr(bytes)` takes the data pointer of a byte sequence or view; `unsafe cptr_mut(&mut
   bytes)` requires write access (a mutable sequence or `&mut [u8]`), and C's writes are visible
   in the Grail bytes afterwards. `cnull()` is the null pointer, for optional parameters.
-- Both are `unsafe` for the same reason as `cstr`: the pointer carries no length or lifetime,
-  so C may read or write past the bytes, or keep the pointer after Grail frees them. The Grail
-  side stays responsible for passing a buffer of the size C expects.
-- The bytes stay owned by Grail and alive until the end of the statement that made the pointer.
+- Both are `unsafe` for the same reason as `cstr`: the pointer carries no length, so C may read or
+  write past the bytes, and nothing stops C from keeping it after the call. The Grail side stays
+  responsible for passing a buffer of the size C expects.
+- The bytes stay owned by Grail, and the pointer is a borrow of them for as long as it is live. That
+  is the same rule as for a record address (see "Pointer lifetimes" below), so `cptr(&b)` kept in a
+  binding forbids `b.push(...)` until the pointer's last use.
 
 ### Records by pointer
 
@@ -124,18 +126,75 @@ fn main() -> u64 {
 - The record must be a name: `cptr(&AppInfo { ... })` is refused with `cptr needs a named record:
   the address of a temporary would not outlive the pointer`, because a temporary's storage is a
   binding nobody can see and its lifetime would be a guess the caller cannot check.
-- The borrow is the ordinary call-scoped one: while the pointer is live the record cannot be moved,
-  dropped or handed to C again. `c_two(cptr(&r), cptr_mut(&mut r))` fails with `the value handed to
-  C as a writable pointer is already borrowed in this expression`, and the read-only-then-writable
-  order with `the value handed to C as a read-only pointer is already mutably borrowed in this
-  expression`. `cptr_mut` also requires a mutable place, as `cptr_mut` of a byte sequence does.
-- It is `unsafe` for the same reason as `cptr` of bytes: the pointer carries no length and no
-  lifetime once C holds it. Grail keeps ownership of the record and frees it at the end of the Grail
-  scope, so C must not free or retain it.
+- The pointer is a borrow of the record, held for as long as the pointer is live (see "Pointer
+  lifetimes" below). Within one call, `c_two(cptr(&r), cptr_mut(&mut r))` fails with `the value
+  handed to C as a writable pointer is already borrowed in this expression`, and the
+  read-only-then-writable order with `the value handed to C as a read-only pointer is already
+  mutably borrowed in this expression`. `cptr_mut` also requires a mutable place, as `cptr_mut` of a
+  byte sequence does.
+- It is `unsafe` for the same reason as `cptr` of bytes: the pointer carries no length, and what C
+  does with it is unchecked. Grail keeps ownership of the record and frees it at the end of the
+  Grail scope, so C must not free it or keep it past the call.
 - A field of an embedded record is interior storage, and its address is the `R *` a nested struct
   member has in C: `cptr(&pairs.first)` where `pairs` is a record of `RefPair` fields points into
   `pairs` at that element's offset. An array of structs is therefore a record of embedded records
   and needs no separate array type — the record's address *is* the array.
+
+### Pointer lifetimes
+
+A `CPtr`/`CMutPtr` made by `cptr`/`cptr_mut` from Grail storage (a named `extern "C"` record, a
+field of one, a byte sequence or a view) holds the same loan a reference to that storage would. It
+is checked with the ordinary ownership machinery and not with a separate one: the pointer value is a
+holder of the loan, and the loan follows the pointer wherever the pointer goes.
+
+- **Where the pointer lives.** It may live in a binding (`p := cptr(&r)`), in a copy of one
+  (`q := p`), in a record field (`info.p_app = cptr(&app)`, or a field of a record literal), in a
+  value read back out of that field, in a record the field's record was moved into, and in a
+  closure that captured it. The borrow lasts until the last use of whichever of these is used last.
+  Last use is what a reference has too: a pointer nobody reads again does not hold anything.
+- **What it forbids while live.** The borrowed storage cannot be assigned, modified, moved or
+  dropped. A `cptr_mut` pointer is the exclusive borrow, so the storage cannot be read through
+  another path either. Each refusal names the storage, the binding holding the pointer and the
+  `cptr` that made it:
+
+  ```text
+  cannot assign to `sub` while a C pointer to it is live in `p` (made by cptr at line 5)
+  cannot modify `sub` while a C pointer to it is live in `p` (made by cptr at line 5)
+  cannot move `sub` while a C pointer to it is live in `p` (made by cptr at line 5)
+  cannot drop `b` while a C pointer to it is live in `p` (made by cptr at line 5)
+  cannot use `sub` while a C pointer to it is live in `p` (made by cptr_mut at line 5)
+  cannot borrow `sub` while a C pointer to it is live in `p` (made by cptr at line 5)
+  ```
+
+- **It cannot outlive the storage.** A pointer kept in something that outlives the storage fails
+  where the storage ends, and a returned pointer, including one inside a returned record or a
+  returned closure, fails at the `return`:
+
+  ```text
+  `app` goes out of scope while a C pointer to it is live in `info` (made by cptr at line 9)
+  `app` goes out of scope while a C pointer to it is live in `*out` (made by cptr at line 2)
+  cannot return a C pointer to `app`: the pointer would outlive it (made by cptr at line 3)
+  ```
+
+  A pointer into a borrowed parameter (`cptr(app)` for `app: &AppInfo`, `cptr(bytes)` for a view)
+  carries the parameter's lifetime. It may live in locals for the whole call but may not be
+  returned, because `CPtr` has no lifetime parameter to carry it out.
+- **Grail calls are assumed to pass pointers on.** A Grail function's `CPtr` parameter is a plain
+  word inside the callee, so the caller does the conservative thing: when an argument carries a C
+  pointer, the call's result (if its type can hold one: a `CPtr`, a record or container with one
+  inside, a closure) and the referent of every `&mut` argument whose type can hold one are taken
+  to keep that pointer too. `fn keep(p: CPtr) -> CPtr { return p; }` therefore cannot launder a
+  borrow, and neither can `fn put(out: &mut CreateInfo, p: CPtr)`.
+- **C calls borrow, and C must not keep the pointer.** An `extern "C"` call that takes a `CPtr`, or
+  a record whose fields hold one, borrows it for the duration of the call, the same as a record or
+  view parameter. The declaration cannot say that C retains the pointer. A program whose C library
+  does keep one (a callback's user data, a descriptor C reads later) must keep the storage alive
+  itself, in a record whose scope encloses every call C makes with that pointer, and that is
+  unchecked. A `CPtr` that C *returns* is C's pointer and carries no Grail borrow.
+
+`tests/native-cases.json` (`ffi-reject-cptr-*`, `ffi-cptr-*`) has each refusal and each accepted
+shape. `cptr` of a temporary is still refused outright (`cptr needs a named record`), because
+nothing names its storage.
 
 ### Byte views
 
@@ -584,11 +643,12 @@ Not implemented yet, and each rejected rather than approximated:
   `owned storage mutation requires mut` (reading the fields works, and the storage is C's);
 - pointer arithmetic, an index of a `CPtr`, and a view built from an address: an array is a
   fixed-capacity record with its count checked afterwards, and elements are reached by field name;
-- a record address that outlives the statement that took it. The borrow is statement-scoped, exactly
-  as `cptr` of a byte sequence is, so a `CPtr` kept in a binding or in a record field is a pointer
-  the compiler stops tracking: `p := cptr(&sub); sub = other;` compiles, and the pointer dangles.
-  Taking the address of a *temporary* is refused for that reason, because there is no name to
-  outlive anything;
+- a pointer that C keeps after the call returns. A `CPtr` made by `cptr`/`cptr_mut` is a checked borrow
+  inside Grail (see "Pointer lifetimes"), but an `extern "C"` declaration cannot state that C retains
+  it. A library that does (callback user data) needs storage whose lifetime the program controls,
+  and that is the programmer's responsibility. A `CStr` from `cstr(...)` is not tracked yet: it still
+  lives only for the statement that made it, so a `CStr` of a temporary or literal kept in a binding
+  or field dangles (docs/rhi.md, "What the FFI does not do safely", item 2);
 - variadic callbacks, callback results that are themselves function pointers, and
   taking the address of a foreign *declaration* (`f := c_add;` is rejected: a C
   declaration is not a Grail function value);

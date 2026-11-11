@@ -40,10 +40,10 @@ record Grail owns is passed as the *address of its own fields*, which is exactly
   `use of moved, borrowed or partially initialized value`. Zeroed bytes are not an initialised
   handle.
 
-`cptr` is `unsafe` for the same reason as `cptr` of a byte sequence: the pointer carries no length
-and no lifetime once C holds it, so C must not keep it or free it. The record it points at must be a
-name, not a temporary, and it cannot move, be dropped, or be handed to C a second time while the
-pointer is live. The compiler says so by name:
+`cptr` is `unsafe` for the same reason as `cptr` of a byte sequence: the pointer carries no length,
+and C must not keep it or free it once the call returns. On the Grail side it is a borrow like any
+other. The record it points at must be a name, not a temporary, and it cannot move, be dropped, or be
+handed to C a second time in one call. The compiler says so by name:
 
 ```grl
 info.p_app = cptr(&AppInfo { api_version: 1, flags: 0 });
@@ -67,6 +67,21 @@ to read `api_version`, and `book_fill` writes `api_version` through `&mut filled
 the zero the binding started with. Both languages run the same C file — Grail's pointer field is
 Rust's `*const AppInfo`, Grail's `&mut AppInfo` is Rust's `*mut AppInfo` — so the numbers are the
 same numbers.
+
+The pointer borrows `app` for as long as the pointer lives, and not only for the statement that
+made it. It lives in `info`, in a binding, in a copy of either or in a closure that captured it, and
+`app` stays borrowed until the last use of whichever of those comes last. Replacing `app` before that
+is the error below, and so is letting the pointer outlive it: keeping it in a record from an outer
+scope, returning it, or returning a closure that holds it.
+
+{{example:ffi-pointer-lifetime}}
+
+A Grail function that takes a `CPtr` and returns one, or that stores one through a `&mut` record
+parameter, is assumed to pass on whatever its arguments pointed at, so a helper cannot launder the
+borrow. A call to C borrows the pointer for that call only: C must not keep it. When C really does
+keep a pointer (a registered callback's user data, a long-lived descriptor), the storage has to be
+something the program controls, such as a record that outlives every call C makes with that
+pointer. There is no annotation that tells the compiler "C keeps this" yet.
 
 ## Arrays of handles
 
@@ -105,9 +120,11 @@ data.
   write through a pointer it is given (there is no deref-assignment), and there is no pointer
   arithmetic, so an array of dynamic length is a fixed-capacity record with its count checked
   afterwards.
-- A `CPtr` is a word with no lifetime: the borrow that produced it lasts for the statement, so a
-  pointer kept in a binding past that statement is the program's responsibility, and the address of
-  a temporary is refused outright.
+- A `CPtr` made by `cptr`/`cptr_mut` is a borrow of the record or bytes it points at. The
+  borrow lasts as long as the pointer is live (in a binding, a record field or a closure), so the
+  storage cannot be replaced, moved or dropped under it, and the pointer cannot be returned or kept
+  past the storage's scope. The address of a temporary is refused outright. A `CPtr` that C *returns*
+  is C's pointer and carries no borrow.
 
 ## What this month added
 
