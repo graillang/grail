@@ -20,9 +20,19 @@ is `@`.
 
 Constant expressions use literals, other constants, `size_of`, `align_of`, `target.os`,
 `target.arch` and `target.pointer_bits`, with the usual operators; arithmetic is checked, so an
-overflow is a compile error rather than a wrapped value. Calling a function at compile time, and
-value parameters such as `fn rotl<@k: u64>`, come with the next stages of the design
+overflow is a compile error rather than a wrapped value. Calling a function at compile time comes with the next stage of the design
 (`docs/design/comptime.md`).
+
+## Value parameters
+
+A generic list can take values as well as types. `@k: u64` declares one; a call gives it a
+constant, and each distinct value is its own specialisation, with the value baked in:
+
+{{example:value-generics}}
+
+Inside the function the value is an ordinary constant of its declared type, and the `@` forms see
+it - the `@assert` above runs once per instantiation, so `rotl<64>(x)` is a compile error at the
+call. A value parameter cannot be inferred from the arguments, so the call always names it.
 
 The Rust version spreads the same ideas over `const`, `const _: () = assert!(...)` and
 `#[cfg(...)]`; Grail uses one marker for all of them.

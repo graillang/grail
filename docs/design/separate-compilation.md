@@ -745,7 +745,16 @@ Each run reads the interfaces of the modules built before it and writes its own 
 module's run parses its own source and nothing else; every specialisation it uses is emitted weak
 in its own object (the emission model above). The parts are assembled and the program is linked
 once. `tools/split-test.mjs` builds a project with a generic from another module and the standard
-library's `vecs::sort` both ways and requires the same output from eight separate runs. The cache
-is not yet keyed on this build shape: `--per-module` recompiles every module, and keying each
-module's object on its own sources plus the interfaces it read is the next step.
+library's `vecs::sort` both ways and requires the same output from eight separate runs.
+
+With `--cache`, each module's run is keyed by its inputs alone: the build's flags, compiler and
+assembler, the target, the module's name and source digests, and the *surface* of every interface
+the run can read (each interface without its `sha256` and `digest` lines, which change with the
+module's body). A hit restores the run's parts manifest, objects and interface and skips the compiler
+run and the assembler; a miss runs both and files the outputs. Because a module compiled alone emits
+its own text and labels, the emitted-assembly guard the whole-program cache needs is not used on
+this path. Measured on the eight-run project: a warm rebuild is 8 hit, 0 miss; editing one
+module's body is 7 hit, 1 miss (that module); changing its surface reruns it and the runs after it.
+The key names every interface present, not just the ones a module reads, so a surface change
+reruns some modules that do not import it - conservative, never stale.
 
