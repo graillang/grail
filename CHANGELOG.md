@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Added: an iterator protocol. A record with an inherent `fn next(self: &mut Self) -> T?` is iterable: `for x in it` takes the iterator, `for x in &mut it` lends it so the loop can stop early and a later loop carry on; `for x in &it` is refused by name. A plain `for` over a vector compiles exactly as before.
+- Added: `lib/iter.grl`, lazy adapters over a closure-backed `Iter<T>` - `upto`, `of`, `map`, `filter`, `take`, `enumerate`, `zip` and `collect` - with a new book chapter, *Iteration*, and Rust comparisons.
+- Fixed: a closure body that instantiates a generic (`Some(i)` inside `|| ...`) no longer leaves an undefined symbol at link time; closures and specialisations are emitted to a fixpoint.
 - Added: a C callback may take any number of parameters. Arguments past the registers are read from the caller's stack on SysV x86-64, AAPCS64, RV64 (which first spills extra floats into free integer registers) and Win64, instead of the parameter list being refused (`tests/ffi/callback_stack.grl`, executed on x86-64, AArch64 and RISC-V).
 - Added: a C callback that arrives on a thread C created now runs instead of aborting. The outermost callback on such a thread adopts a record (its own TCB, no task state) for the duration of the call and releases it on return, so it can allocate, make foreign calls with its own errno, and be re-entered through C.
 - Fixed: `cstr("literal\0")` no longer dangles after its statement - it points into static read-only storage, so a `CStr` kept in a binding or record field stays valid; a literal without a trailing NUL is a compile error rather than a runtime abort. `cstr(bytes)` now holds a loan on `bytes` for as long as the `CStr` is live, under the same rule as `cptr`.
