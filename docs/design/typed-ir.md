@@ -687,6 +687,12 @@ that has since moved proves nothing, so the generation is part of the fact.
 - a join the lattice cannot express (two kinds, two identities, two length generations);
 - a refinement that contradicts the fact the path started from.
 
+**It is behind a flag.** `--range-facts` (off by default) turns the pass on; `--verify-facts` keeps
+checking whatever facts exist, so the two together are what proves a removal. The flag exists because
+the pass does not yet pay for itself: it removes no check on the corpus and costs compile time (see
+*Measured* and *Was it worth it?*), and a default that is ~90% slower to compile for 0% of runtime is
+not a default. The ticket that would let it be turned on is at the end of this section.
+
 **The consumer.** At a call to one of the six accessors, when argument 0 is a header of identity *k*
 and argument 1 is a word the facts put below `len(k)` -- either below a known lower bound on it, or
 below a length word the same generation still bounds -- the accessor's body is emitted in place of the
@@ -751,16 +757,18 @@ fixture is kept in the report rather than the tree for that reason.
   does not, but only a region/effect fact -- "this call does not grow or rebind what it borrows" --
   can say so, and that is not a range fact.
 
-**Cost.** The pass runs inside the lifter for every function that both creates a sequence and reads
-one, and it costs compile time: `sieve` 3.2 s -> 6.0 s and `nbody` 3.2 s -> 6.2 s end to end
-(`--backend=llvm`, same host, measured with two processes sharing the machine, so an upper bound).
-Two thirds of the original cost came from what the `creates` gate and the worklist fixedpoint
-removed; the rest is one forward walk per function plus a second walk to record the verdicts after
-the fixpoint.
+**Cost, and why the pass is off by default.** With the pass on, the lifter runs it for every function
+that both creates a sequence and reads one: `sieve` 3.2 s -> 5.5 s and `nbody` 3.3 s -> 6.1 s end to
+end (`--backend=llvm`, same host; measured with other work on the machine, so an upper bound). Two
+thirds of the original cost came from what the `creates` gate and the worklist fixedpoint removed, and
+the rest is one forward walk per function plus a second walk to record the verdicts. With the flag off
+-- which is the default, and what every gate in the project compiles with -- the pass is skipped
+entirely and the compiler is back to F1's numbers: **3.2 s / 3.3 s** on the same two programs.
 
 
 **Was it worth it?** No -- not as a performance lever, and the flat number above is the whole of it: on this corpus the
-range fact removes no check, so it moves no benchmark. What is in the tree is the *proof machinery*,
+range fact removes no check, so it moves no benchmark, and the pass therefore ships behind
+`--range-facts` rather than on. What is in the tree is the *proof machinery*,
 which is the part that had to exist before any loop summary could be believed:
 
 - a fact lattice that is sound by construction (a join with two kinds, two identities or two length

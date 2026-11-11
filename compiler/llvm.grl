@@ -197,6 +197,10 @@ struct L {
     // and the line the instruction being lowered came from.
     proof: u64[],
     rline: u64,
+    // 1 with --range-facts: derive range facts from the stream and remove the bounds check a fact
+    // proves redundant. Off by default: the pass does not pay for itself on the corpus yet
+    // (docs/design/typed-ir.md), and it costs compile time.
+    ranges: u64,
     // 1 with --verify-facts: check `fpext(fptrunc(d)) == d` at every word that a fact treats as
     // an f32, so a mis-typed fact aborts instead of silently changing a value.
     verify: u64
@@ -1838,11 +1842,13 @@ fn lower_call<a, b, c>(l: (&a mut L), target: &b [u8], facts: (&c Facts)) -> uni
     // A range fact proves the index this accessor is handed is below the sequence's length, so the
     // compare and its cold exit cannot fire: the accessor's body is emitted here with the check
     // removed (docs/design/typed-ir.md).
-    if (l.proof.len() > l.rline) & (l.proof[l.rline] == 3) {
-        which := rg_accessor(target);
-        if which != 0 {
-            unchecked_access(&mut l, which);
-            return ();
+    if l.proof.len() > l.rline {
+        if l.proof[l.rline] == 3 {
+            which := rg_accessor(target);
+            if which != 0 {
+                unchecked_access(&mut l, which);
+                return ();
+            }
         }
     }
     hf := call_header(&facts, view(l.fname), view(target), ord);
@@ -2640,7 +2646,9 @@ fn lower_function<a, b, c>(l: (&a mut L), lines: (&b u8[][]), f: (&b Func), fact
     if deepest + 1 > nslots {
         nslots = deepest + 1;
     }
-    l.proof = range_proofs(&instrs, nslots, l.split);
+    if l.ranges != 0 {
+        l.proof = range_proofs(&instrs, nslots, l.split);
+    }
     if l.split != 0 {
         // One alloca per slot; the prologue's zeroing covers the slots below the parameters.
         slots := size / 8;
@@ -4604,16 +4612,16 @@ fn rename_calls<a, b>(line: &a [u8], lifted: (&b Set)) -> u8[] {
     }
     return out;
 }
-pub fn lower_for<a, b>(stream: &a [u8], target: u64, facts: (&b Facts), verify: u64) -> Lowered {
+pub fn lower_for<a, b>(stream: &a [u8], target: u64, facts: (&b Facts), verify: u64, ranges: u64) -> Lowered {
     triple := target_triple(target);
-    return lower_target(stream, view(triple), target, facts, verify);
+    return lower_target(stream, view(triple), target, facts, verify, ranges);
 }
-pub fn lower<a, b, c>(stream: &a [u8], triple: &b [u8], facts: (&c Facts), verify: u64) -> Lowered {
-    return lower_target(stream, triple, 0, facts, verify);
+pub fn lower<a, b, c>(stream: &a [u8], triple: &b [u8], facts: (&c Facts), verify: u64, ranges: u64) -> Lowered {
+    return lower_target(stream, triple, 0, facts, verify, ranges);
 }
-fn lower_target<a, b, c>(stream: &a [u8], triple: &b [u8], target: u64, facts: (&c Facts), verify: u64) -> Lowered {
+fn lower_target<a, b, c>(stream: &a [u8], triple: &b [u8], target: u64, facts: (&c Facts), verify: u64, ranges: u64) -> Lowered {
     lines := split_lines(stream);
-    mut l = L { target: target, ir: u8[], body: u8[], fail: 0, t: 0, dead: 0, term: 0, labels: set_new(16), calls: u8[][], addrs: u8[][], split: 0, refs: u8[][], lifted: u8[][], flags: 0, frame: 0, fslots: u64[], fops: u64[], fordinal: 0, verify: verify, hslots: u64[], hwhat: u64[], hwidth: u64[], eon: u64[], edata: u8[][], elen: u8[][], vk: u64[], vo: u64[], vo2: i64[], hcall: u64[], hcallwhat: u64[], cnames: u8[][], ccount: u64[], sibwhat: 0, sibwidth: 0, sd: u8[], sl: u8[], fname: u8[], sibnames: u8[][], sibbodies: u8[][], eblk: u64[], blk: 0, dnames: u8[][], proof: u64[], rline: 0 };
+    mut l = L { target: target, ir: u8[], body: u8[], fail: 0, t: 0, dead: 0, term: 0, labels: set_new(16), calls: u8[][], addrs: u8[][], split: 0, refs: u8[][], lifted: u8[][], flags: 0, frame: 0, fslots: u64[], fops: u64[], fordinal: 0, verify: verify, hslots: u64[], hwhat: u64[], hwidth: u64[], eon: u64[], edata: u8[][], elen: u8[][], vk: u64[], vo: u64[], vo2: i64[], hcall: u64[], hcallwhat: u64[], cnames: u8[][], ccount: u64[], sibwhat: 0, sibwidth: 0, sd: u8[], sl: u8[], fname: u8[], sibnames: u8[][], sibbodies: u8[][], eblk: u64[], blk: 0, dnames: u8[][], proof: u64[], rline: 0, ranges: ranges };
     mut funcs = Func[];
     mut data = u8[][];
     split(&lines, &mut funcs, &mut data);
