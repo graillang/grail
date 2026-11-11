@@ -729,3 +729,21 @@ Some corpus programs use a type the interface format cannot describe (`grail: <i
 interface format cannot express a type of that kind`). Those are reported by `interface-test` as a
 named list rather than failing the run, so the gap stays visible: an interface build of such a program
 is refused, never silently approximated.
+
+## One compiler invocation per module (`grail build --per-module`)
+
+The driver groups the program's sources by the module each declares (the runtime and platform
+files, which declare none, are module `runtime`; an entry file without a `module` line is `main`),
+orders the groups so each comes after the modules it `use`s - `runtime` first - and compiles each
+group with its own compiler run:
+
+    grail <flags> [--use DIR] --emit-interface DIR --split [--no-entry] <module>.s <its files>
+
+Each run reads the interfaces of the modules built before it and writes its own beside them, so a
+module's run parses its own source and nothing else; every specialisation it uses is emitted weak
+in its own object (the emission model above). The parts are assembled and the program is linked
+once. `tools/split-test.mjs` builds a project with a generic from another module and the standard
+library's `vecs::sort` both ways and requires the same output from eight separate runs. The cache
+is not yet keyed on this build shape: `--per-module` recompiles every module, and keying each
+module's object on its own sources plus the interfaces it read is the next step.
+

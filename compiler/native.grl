@@ -2505,7 +2505,13 @@ fn func_directive<a, b, d>(c: (&a mut C), m: &b [u8], name: &b [u8], symbol: &d 
     // --split assembles one object per module, so a definition another part calls has to be visible
     // to the linker: every function becomes global. The code is unchanged, and the single-file
     // build keeps its local symbols.
-    if c.split != 0 {
+    // A specialisation is emitted weak in every build shape (B1 stage 4): its binding is stated once,
+    // here, so the assembler never sees a global symbol turn weak.
+    if c.current_spec != 0 {
+        o(&mut c, view(".weak "));
+        export_name(&mut c, view(m), view(name), view(symbol), export);
+        o(&mut c, view("\n"));
+    } else if c.split != 0 {
         o(&mut c, view(".globl "));
         export_name(&mut c, view(m), view(name), view(symbol), export);
         o(&mut c, view("\n"));
@@ -8384,11 +8390,6 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     }
     exchange(&mut c.caddr, u64[]);
     func_directive(&mut c, view(m), view(name), view(body_symbol), export);
-    if c.current_spec != 0 {
-        o(&mut c, view(".weak "));
-        export_name(&mut c, view(m), view(name), view(body_symbol), export);
-        c.out.push(10);
-    }
     if (c.debug != 0) & (c.validating == 0) {
         dstart = label(&mut c);
         mark(&mut c, dstart);
@@ -25998,8 +25999,13 @@ fn iface_module_text<a, b, d>(c: (&a mut C), m: &b [u8], path: &d [u8], in_std: 
         iface_interface_ref(&mut out, &mut c, contract);
         push_bytes(&mut out, view(" for "));
         iface_type(&mut out, &mut c, ty);
-        owner := ty_arg(&mut c, ty) + 1;
-        iface_emit_impl_params(&mut c, &mut out, owner);
+        // Only a named type has declaration parameters (an `impl<T> Ord for Pair<T>`); for `u64`,
+        // bytes or a string the type's argument is a width or nothing, not a declaration, and reading
+        // it as one picked up whatever declaration sat at that index.
+        if ty_kind(&mut c, ty) == 8 {
+            owner := ty_arg(&mut c, ty) + 1;
+            iface_emit_impl_params(&mut c, &mut out, owner);
+        }
         out.push(10);
         owner := private_module(view(".impl_"), index + 1);
         methods := iface_func_ids(&mut c, view(owner));

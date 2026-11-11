@@ -618,6 +618,7 @@ fn compile_mode<a, b, d, e, g>(
     wrap := (flags / 16) % 2;
     checked := (flags / 32) % 2;
     cache := (flags / 64) % 2;
+    per_module := (flags / 128) % 2;
     asm := cat(view(output), view(".s"));
     object := cat(view(output), view(".o"));
     // The toolchain is decided by the target alone, so it is known before the compiler runs - which
@@ -679,6 +680,9 @@ fn compile_mode<a, b, d, e, g>(
                 return 0;
             }
         }
+    }
+    if per_module != 0 {
+        return per_module_build(&command, view(asm), view(output), view(target), view(emulation), &assemble);
     }
     if host::command(command) != 0 {
         return 1;
@@ -796,6 +800,222 @@ fn build_split<a, b, d, e, g>(
         return 1;
     }
     return link_objects(view(output), view(target), view(emulation), &parts.objects, &parts.link);
+}
+// ---- B1 stage 4: one compiler invocation per module (`grail build --per-module`) ----
+// The program's sources are grouped by the module each declares; the groups are compiled in
+// dependency order, each by its own compiler run that reads only the interfaces of modules built
+// before it and writes its own interface beside them, then every run's parts are assembled and the
+// program is linked once. A module's run parses that module's source and no other.
+struct ModuleGroup {
+    name: u8[],
+    files: u8[][],
+    uses: u8[][],
+    done: u64
+}
+fn ident_byte(c: u8) -> bool {
+    return ((c >= 97) & (c <= 122)) || ((c >= 65) & (c <= 90)) || ((c >= 48) & (c <= 57)) || (c == 95);
+}
+// The word after each line-leading `keyword` of a source file (`module NAME;`, `use NAME;`).
+fn scan_words<a, b>(path: &a [u8], keyword: &b [u8]) -> u8[][] {
+    text := host::read_file(view(path));
+    mut out = u8[][];
+    mut i = 0;
+    while i < text.len() {
+        while (i < text.len()) && ((text[i] == 32) || (text[i] == 9) || (text[i] == 13)) {
+            i += 1;
+        }
+        mut word = u8[];
+        while (i < text.len()) && ident_byte(text[i]) {
+            word.push(text[i]);
+            i += 1;
+        }
+        if eq(view(word), view(keyword)) {
+            while (i < text.len()) && ((text[i] == 32) || (text[i] == 9)) {
+                i += 1;
+            }
+            mut name = u8[];
+            while (i < text.len()) && ident_byte(text[i]) {
+                name.push(text[i]);
+                i += 1;
+            }
+            if name.len() != 0 {
+                out.push(name);
+            }
+        }
+        while (i < text.len()) && (text[i] != 10) {
+            i += 1;
+        }
+        i += 1;
+    }
+    return out;
+}
+fn group_of<a, b>(groups: (&a ModuleGroup[]), name: &b [u8]) -> u64 {
+    for i in groups.len() {
+        if eq(view(groups[i].name), view(name)) {
+            return i + 1;
+        }
+    }
+    return 0;
+}
+fn per_module_build<a, b, d, e, g, k>(
+    command: (&a u8[][]),
+    asm: &b [u8],
+    output: &d [u8],
+    target: &e [u8],
+    emulation: &g [u8],
+    prefix: (&k u8[][])
+) -> u64 {
+    if !eq(view(target), view("x86_64")) {
+        say(view("grail: --per-module is implemented for the linux x86_64 assembler path"));
+        return 1;
+    }
+    mut at = 0;
+    while (at < command.len()) && !eq(view(command[at]), view(asm)) {
+        at += 1;
+    }
+    if at == command.len() {
+        say(view("grail: --per-module could not find the program's sources in the build command"));
+        return 1;
+    }
+    compiler := item(&command, 0);
+    mut flags = u8[][];
+    mut i = 1;
+    while i < at {
+        a := item(&command, i);
+        if eq(view(a), view("--interface")) {
+            i += 2;
+            continue;
+        }
+        if !eq(view(a), view("--split")) {
+            flags.push(a);
+        }
+        i += 1;
+    }
+    // Group the sources. The runtime and platform files come last in every build command and declare
+    // no module: the compiler treats them as module `runtime`, the base every module's code calls
+    // into, so that group is built first. Any other file without a `module` line is the entry's,
+    // module `main`.
+    mut groups = ModuleGroup[];
+    count := command.len() - at - 1;
+    for j in count {
+        file := item(&command, at + 1 + j);
+        names := scan_words(view(file), view("module"));
+        mut name = copy(view("main"));
+        if count - 2 <= j {
+            name = copy(view("runtime"));
+        }
+        if names.len() != 0 {
+            name = item(&names, 0);
+        }
+        uses := scan_words(view(file), view("use"));
+        g := group_of(&groups, view(name));
+        if g == 0 {
+            groups.push(ModuleGroup { name: name, files: u8[][file], uses: uses, done: 0 });
+        } else {
+            groups[g - 1].files.push(file);
+            for u in uses.len() {
+                groups[g - 1].uses.push(item(&uses, u));
+            }
+        }
+    }
+    entry_name := groups[0].name.copy();
+    base := u8[][copy(view("runtime"))];
+    dir := cat(view(output), view(".modules"));
+    host::mkdir(view(dir));
+    ifaces := path_join(view(dir), view("interfaces"));
+    host::mkdir(view(ifaces));
+    // Every build writes the interface directory afresh, so a module removed from the program leaves
+    // no interface behind for another to read.
+    old := host::list_dir(view(ifaces));
+    for j in old.len() {
+        host::remove(view(path_join(view(ifaces), view(old[j]))), 0);
+    }
+    mut objects = u8[][];
+    mut link = u8[][];
+    mut built = 0;
+    while built < groups.len() {
+        // The next group: a base group first, then any group whose program-local uses are built.
+        mut pick = groups.len();
+        for g in groups.len() {
+            if (pick == groups.len()) && (groups[g].done == 0) {
+                mut ready = true;
+                mut is_base = false;
+                for b in base.len() {
+                    if eq(view(base[b]), view(groups[g].name)) {
+                        is_base = true;
+                    }
+                }
+                if !is_base {
+                    for b in base.len() {
+                        bg := group_of(&groups, view(base[b]));
+                        if (bg != 0) && (groups[bg - 1].done == 0) {
+                            ready = false;
+                        }
+                    }
+                    for u in groups[g].uses.len() {
+                        ug := group_of(&groups, view(groups[g].uses[u]));
+                        if (ug != 0) && (ug - 1 != g) && (groups[ug - 1].done == 0) {
+                            ready = false;
+                        }
+                    }
+                }
+                if ready {
+                    pick = g;
+                }
+            }
+        }
+        if pick == groups.len() {
+            say(view("grail: --per-module found a cycle of `use` between modules; build without --per-module"));
+            return 1;
+        }
+        name := groups[pick].name.copy();
+        stem := path_join(view(dir), view(name));
+        unit_asm := cat(view(stem), view(".s"));
+        mut run = u8[][compiler.copy()];
+        for f in flags.len() {
+            run.push(item(&flags, f));
+        }
+        if built != 0 {
+            run.push(copy(view("--use")));
+            run.push(ifaces.copy());
+        }
+        run.push(copy(view("--emit-interface")));
+        run.push(ifaces.copy());
+        run.push(copy(view("--split")));
+        if !eq(view(name), view(entry_name)) {
+            run.push(copy(view("--no-entry")));
+        }
+        run.push(unit_asm.copy());
+        for f in groups[pick].files.len() {
+            run.push(groups[pick].files[f].copy());
+        }
+        if host::command(run) != 0 {
+            return 1;
+        }
+        parts := read_split(view(cat(view(stem), view(".parts"))), view(dir));
+        if assemble_parts(&prefix, &parts.asm, &parts.objects) != 0 {
+            say(view("grail: assembling failed (needs clang)"));
+            return 1;
+        }
+        for o in parts.objects.len() {
+            objects.push(item(&parts.objects, o));
+        }
+        for l in parts.link.len() {
+            input := item(&parts.link, l);
+            mut seen = false;
+            for m in link.len() {
+                if eq(view(link[m]), view(input)) {
+                    seen = true;
+                }
+            }
+            if !seen {
+                link.push(input);
+            }
+        }
+        groups[pick].done = 1;
+        built += 1;
+    }
+    return link_objects(view(output), view(target), view(emulation), &objects, &link);
 }
 // One link, from objects already on disk: the cache reuses exactly this, so a cached image and an
 // uncached one are the same link of the same objects.
@@ -1611,6 +1831,8 @@ struct Options {
     overflow: u64,
     // The build cache (B1 stage 4): reuse per-module objects and an unchanged program.
     cache: u64,
+    // One compiler invocation per module (B1 stage 4): `--per-module`.
+    per_module: u64,
     // Module interfaces (B1 stage 2): `--interface DIR` reads them, `grail check` writes them, and
     // `--verify` compares the two instead of trusting either.
     iface: u8[],
@@ -1618,9 +1840,10 @@ struct Options {
     paths: u8[][]
 }
 // The code-generation flag vector, in one place: it is what the compiler is told, and what the build
-// cache keys on. Bit 0 check only, 1 debug, 2 deny ambient host, 3 split, 4/5 overflow, 6 cache.
+// cache keys on. Bit 0 check only, 1 debug, 2 deny ambient host, 3 split, 4/5 overflow, 6 cache,
+// 7 one compiler invocation per module.
 fn flag_bits<a>(o: (&a Options)) -> u64 {
-    return o.debug * 2 + o.deny * 4 + o.split * 8 + o.overflow * 16 + o.cache * 64;
+    return o.debug * 2 + o.deny * 4 + o.split * 8 + o.overflow * 16 + o.cache * 64 + o.per_module * 128;
 }
 fn options<a>(args: (&a u8[][])) -> Options {
     mut o = Options {
@@ -1634,6 +1857,7 @@ fn options<a>(args: (&a u8[][])) -> Options {
         split: 0,
         overflow: 0,
         cache: 0,
+        per_module: 0,
         iface: u8[],
         verify: 0,
         paths: u8[][],
@@ -1669,6 +1893,10 @@ fn options<a>(args: (&a u8[][])) -> Options {
                                 // One object per module, assembled concurrently (B1 stage 1).
                                 o.split = 1;
                             } else {
+                            if eq(view(a), view("--per-module")) {
+                                // One compiler invocation per module, in dependency order (B1 stage 4).
+                                o.per_module = 1;
+                            } else {
                             if eq(view(a), view("--cache")) {
                                 // Reuse per-module objects and an unchanged program (B1 stage 4).
                                 // Per-module objects only exist on the split path, so it implies it.
@@ -1694,6 +1922,7 @@ fn options<a>(args: (&a u8[][])) -> Options {
                                 o.paths.push(a);
                             } else {
                                 o.paths.push(a);
+                            }
                             }
                             }
                             }

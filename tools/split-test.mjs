@@ -15,7 +15,7 @@
 //
 // Usage: bun tools/split-test.mjs [--target T] [--timing]
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { readdirSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import assert from 'node:assert/strict';
 import { buildCompiler, command, compilerSources, emulations, hostTarget, linkInputs, root, targetName, triples } from './native.mjs';
@@ -251,6 +251,25 @@ for (const test of cases) {
   assert.equal(a.stdout, 'twice(21) = 42\n', 'driver: unexpected program output');
   assert.ok(existsSync(join(project, 'target/demo-split.parts')), 'driver: missing parts manifest');
   console.log('split: driver: grail build --split agrees with grail build');
+
+  // One compiler invocation per module (B1 stage 4): a module that instantiates a generic from
+  // another, and one that uses the standard library's interfaces and implementations (vecs::sort
+  // through order::Ord). Each module is compiled by its own run against the interfaces of the
+  // modules before it, then linked once; the program must agree with the whole-program build.
+  writeFileSync(join(project, 'src/pair.grl'), 'module pair;\n\nuse util;\n\npub struct Pair<T> {\n    a: T,\n    b: T\n}\n\npub fn make<T>(a: T, b: T) -> Pair<T> {\n    return Pair { a: a, b: b };\n}\n\npub fn doubled(x: u64) -> u64 {\n    return util::twice(x) + 1;\n}\n');
+  writeFileSync(join(project, 'src/main.grl'), 'use pair;\nuse util;\nuse vecs;\n\npub fn main() -> u64 {\n    p := pair::make<u64>(3, 4);\n    mut v = u64[5, 1, 3];\n    vecs::sort(&mut v);\n    println(v[0] * 100 + v[1] * 10 + v[2]);\n    println(p.a + p.b);\n    util::report("doubled", pair::doubled(10) + util::twice(v.len()));\n    return 0;\n}\n');
+  build(['-o', 'target/whole']);
+  build(['--per-module', '-o', 'target/modules']);
+  const whole = run(join(project, 'target/whole'));
+  const modules = run(join(project, 'target/modules'));
+  assert.equal(whole.stdout, '135\n7\ndoubled = 27\n', 'per-module: unexpected whole-program output');
+  assert.equal(modules.stdout, whole.stdout, 'per-module: the module-at-a-time build prints differently');
+  assert.equal(modules.status, whole.status, 'per-module: exit status differs');
+  const built = readdirSync(join(project, 'target/modules.modules')).filter(name => name.endsWith('.parts')).map(name => name.slice(0, -6)).sort();
+  for (const module of ['main', 'pair', 'util', 'vecs', 'order', 'core', 'runtime']) {
+    assert.ok(built.includes(module), `per-module: no compiler run for module ${module} (${built.join(', ')})`);
+  }
+  console.log(`split: driver: grail build --per-module (${built.length} compiler runs: ${built.join(', ')}) agrees with grail build`);
 }
 
 if (timing) {
