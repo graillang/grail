@@ -373,9 +373,9 @@ Implemented and verified in `compiler/native.grl` (`closure_literal`, `capture_w
   `same_type` separates them). A `FnMut` closure used where `Fn` is required is rejected with
   `a closure that mutates a captured value is FnMut, not Fn: calling it needs exclusive access to
   the closure, so it cannot be used where a shared call is required`. That covers the `Fn(...)`
-  parameter type, function values coerced to it, and the stdlib callback shapes
-  (`vecs::sort_by`, `sort_by_key`, `fold`, `filter_nums`, …) — the evidence case
-  `closure-fnmut-sort-by-rejected` is a comparator that increments a captured counter.
+  parameter type, function values coerced to it, and the `pool` callbacks that reach a worker. The
+  sequential stdlib callbacks (`vecs::sort_by`, `sort_by_key`, `fold`, `filter_nums`, …) were `Fn`
+  when B6 landed and take `FnMut` since A12's first step (`closure-fnmut-sort-by-counts`).
 - **Environment.** The closure body's hidden first parameter is `&Env` for `Fn` and `&mut Env` for
   `FnMut`, so a store reaches the environment field through an exclusive reference and the existing
   loan machinery has real authority to check. A store to a plain capture is compiled like `*r = v`
@@ -394,13 +394,15 @@ Implemented and verified in `compiler/native.grl` (`closure_literal`, `capture_w
 - **Widening.** A closure that writes nothing is `Fn` and is accepted where `FnMut` is expected,
   because an exclusive call is a stricter promise than the shared call `Fn` makes: by value
   (`move_as`, one owner, never a copy) and as `&mut Fn(...)` for `&mut FnMut(...)`
-  (`reference_as_fnmut`, same referent and loan, wider call contract). The reverse direction is the
-  rejection above.
+  (`reference_as_fnmut`, same referent and loan, wider call contract). For a generic `FnMut(T) -> U`
+  parameter whose variables the closure itself determines, the closure's signature is widened before
+  inference (`widen_to_fnmut_formal`, `closure-fn-widens-to-generic-fnmut`). The reverse direction is
+  the rejection above.
 
 Evidence (native corpus, all executed on x86-64): `closure-fnmut-counter`,
 `closure-fnmut-disjoint-captures`, `closure-fnmut-sequential-calls`,
 `closure-fnmut-second-call-rejected`, `closure-fnmut-shared-borrow-rejected`,
-`closure-fnmut-not-fn-rejected`, `closure-fnmut-sort-by-rejected`,
+`closure-fnmut-not-fn-rejected`, `closure-fnmut-sort-by-counts`,
 `closure-shared-capture-still-fn`, `closure-shared-borrow-of-fn-closure`,
 `closure-fnmut-vector-element`, `closure-fnmut-captured-field`,
 `closure-fnmut-needs-mut-binding`, `closure-fnmut-through-exclusive-reference`,
@@ -416,8 +418,9 @@ move rules keep their cases.
 - Calling a `FnMut` closure through a `&FnMut`/`&Fn` reference — a shared reference to the closure
   cannot grant the exclusive access a call needs (`mutation through readonly frame`).
 - A by-value `FnMut` *parameter* cannot be called in the callee: Grail parameters are not declared
-  mutable, and calling one would need exactly that. Take `&mut FnMut(...)` instead. This is rule 5's
-  shape and the reason the stdlib callables stay `Fn` (they only read).
+  mutable, and calling one would need exactly that. Take `&mut FnMut(...)` instead, or move the
+  parameter into a `mut` binding and call that, which is how the sequential stdlib callbacks take
+  `FnMut` (`mut call = f;`). This is rule 5's shape.
 - Using a captured `&mut` in a way the write scan does not recognise as a write is refused by the
   read-only field type rather than silently allowed. Handing a captured `&mut u64` to a function
   that takes `&mut u64` in a closure whose body writes nothing else reports plain
