@@ -234,6 +234,39 @@
   change misses everything, a tampered interface misses the importer, corruption rebuilds and repairs)
   and pins the one thing the module level cannot do yet: the emitter numbers its local labels over one
   stream, so an edit re-spells every module emitted after it and those modules reassemble.
+- Separate compilation, stage 3: **generic bodies in interfaces**. A type-generic template's body
+  now travels in its module's interface (`// grail-interface 2`): one quoted `line` row per source
+  line under the template's `fn` line, so a changed statement is a changed line in a review diff.
+  `grail ... --use DIR` builds a module against a directory of interfaces whose sources are not on
+  the command line at all, and `--serve DIR` makes the module that *defines* a template emit the
+  instantiations its importers asked for. A specialisation's symbol is now content-addressed -
+  `f_<module>_<name>$<16 hex of the SHA-256 of module::name plus the canonical argument types>` -
+  so the definition and the reference agree in every compilation order, and the body is emitted
+  once, in the defining module's part, while importers reference it; each importer writes
+  `DIR/<module>.sreq` naming what it references, and the defining module's build serves that list.
+  The key is a *total structural* description of the type (`type_key`), not the interface's spelling
+  and not an index: naming a type happens on every scope exit and every call, so it must never be
+  able to fail a build, and it embeds no number this run chose - a proof carries its interface's
+  name, an unknown store kind has its payload walked as a type, and one definition is emitted per
+  key rather than per interned index. Drop helpers are content-addressed the same way and `.weak`
+  for the same reason, closure bodies are named after the module that owns them rather than by an
+  index in this run's closure table, and a request file carries the environment records its keys
+  mention, so a generic instantiated on a capturing closure can be served by the module that defines
+  it and two importers still share one body. Capability metadata keeps its force across an
+  instantiation: a `T: Share` bound and a handle's audited `transfer`/`share` are read from the
+  interface, so instantiating a template on a handle that is transferable but not shareable is
+  refused by name (`type does not satisfy Share: handles::Lock is thread-affine (declared
+  transferable, not shareable)`) whether the module came from source or from its interface. Also
+  fixed: the interface manifest was never actually enforced (`iface_words` returned the whole file
+  as one word), and `--verify` now covers carried bodies. `tools/interface-test.mjs` proves one
+  emitted body across two importers, identical behaviour against the source build, the refusal by
+  name, and that a template without a body is refused. What stage 3 does not do: a body is still replayed (re-parsed and re-checked) once per
+  instantiation at the *caller*, because the checker is per-instantiation and there is no typed IR
+  yet; only emission moved. A request line must be written in the interface format, so an
+  instantiation on a type with no spelling is refused by name at that boundary (a type that cannot
+  be spelled cannot appear in an exported signature either). A generic instantiation
+  discovered while a defining module replays one of its own templates is filed in *its* request
+  file, so a driver has to iterate to a fixpoint (stage 4).
 
 - Separate compilation, stage 2: **checked module interfaces**. `grail check --interface DIR` writes
   one `DIR/<module>.iface` per module plus `DIR/interfaces.manifest`; `grail build --interface DIR`
