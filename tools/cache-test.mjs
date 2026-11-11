@@ -145,6 +145,8 @@ function proveStore() {
     const directory = join(store, 'map', kind);
     if (!existsSync(directory)) continue;
     for (const name of readdirSync(directory)) {
+      // `<key>.used` is the record's last-used build generation (grail cache prune), not a record.
+      if (name.endsWith('.used')) continue;
       const body = readFileSync(join(directory, name), 'utf8');
       const blob = body.split('\n').find(row => row.startsWith('blob '))?.slice(5);
       assert.ok(blob, `${kind}/${name}: a record must name a blob`);
@@ -322,6 +324,37 @@ function proveCorruption() {
   return { rebuilt: rebuilt.line, healed: healed.line, afterImage: afterImage.line };
 }
 
+// ---- (f) pruning ------------------------------------------------------------------------------
+// `grail cache prune --keep N` drops the records no build used in the last N builds and then every
+// blob no remaining record names. A store pruned right after a build keeps exactly what that build
+// used: the next build of the same sources is still a full hit, and no record names a missing blob.
+function prune(keep) {
+  const result = spawnSync(compiler, ['cache', 'prune', '--keep', String(keep)], { cwd: project, encoding: 'utf8', timeout: 900_000 });
+  assert.equal(result.status, 0, `grail cache prune failed\n${result.stdout}${result.stderr}`);
+  const match = result.stdout.match(/cache: pruned (\d+) records and (\d+) blobs; kept (\d+) records and (\d+) blobs/);
+  assert.ok(match, `unexpected prune report: ${result.stdout}`);
+  return { records: Number(match[1]), blobs: Number(match[2]), keptRecords: Number(match[3]), keptBlobs: Number(match[4]) };
+}
+function provePruning() {
+  write(3);
+  const first = build(['--cache', '-o', program]);
+  assert.equal(first.status, 0, `build failed\n${first.output}`);
+  const nothing = prune(10);
+  assert.equal(nothing.records + nothing.blobs, 0, 'a default prune right after a build must keep everything');
+  write(5);
+  const edited = build(['--cache', '-o', program]);
+  assert.equal(edited.status, 0, `edited build failed\n${edited.output}`);
+  const pruned = prune(0);
+  assert.ok(pruned.records > 0 && pruned.blobs > 0, `--keep 0 after an edit must drop the superseded entries: ${JSON.stringify(pruned)}`);
+  const again = build(['--cache', '-o', program]);
+  assert.equal(again.status, 0, `build after prune failed\n${again.output}`);
+  assert.equal(again.line.misses, 0, `what the last build used must survive a prune\n${again.output}`);
+  assert.equal(run(program), '22', 'the pruned store must still give the right program');
+  proveStore();
+  write(3);
+  return { pruned, again: again.line };
+}
+
 // ---- run --------------------------------------------------------------------------------------
 // The timings come first, from an empty store, so "cold" means cold.
 const reuse = proveReuse();
@@ -331,6 +364,7 @@ const precision = provePrecision();
 const flagProof = proveFlags();
 const interfaceProof = proveInterfaces();
 const corruption = proveCorruption();
+const pruning = provePruning();
 const finalStore = proveStore();
 
 const ms = value => `${value.toFixed(1)}ms`;
@@ -343,5 +377,6 @@ console.log(`               ${precision.shifted.hits} hit, ${precision.shifted.m
 console.log(`(c) flags      --overflow=wrap: ${flagProof.wrapped.hits} hit, ${flagProof.wrapped.misses} miss; back: ${flagProof.back.misses} miss`);
 console.log(`(d) interface  warm ${interfaceProof.warm.hits} hit; tampered: ${interfaceProof.after.hits} hit, ${interfaceProof.after.misses} miss (${interfaceProof.after.names.join(', ')})`);
 console.log(`(e) corruption helper entry: ${corruption.rebuilt.hits} hit, ${corruption.rebuilt.misses} miss (${corruption.rebuilt.names.join(', ')}); healed: ${corruption.healed.misses} miss; image: ${corruption.afterImage.what}`);
+console.log(`(f) pruning    --keep 0 after an edit dropped ${pruning.pruned.records} records and ${pruning.pruned.blobs} blobs; next build ${pruning.again.hits} hit, ${pruning.again.misses} miss`);
 console.log('');
 console.log('build cache verified');

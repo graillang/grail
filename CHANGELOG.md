@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Added: `grail cache prune [--keep N]` drops build-cache records no build used in the last N builds (10 by default) and every blob nothing then names; `grail cache clear` empties the store.
 - Added: compile-time stage C2 - value parameters on functions. `fn rotl<@k: u64>(x: u64)` is called as `rotl<13>(x)`; every distinct value is its own specialisation, the parameter is a constant inside the body, and `@assert`/`@if` see it, so a bad value is a compile error at the call. Interfaces spell the binding `(const N)`.
 - Added: `grail build --per-module --cache` keys each module's compiler run by its own sources and the surfaces of the interfaces it can read, so editing one module's body recompiles that module alone; a warm rebuild compiles nothing.
 - Range facts: stores through an element pointer, drop flags a block itself clears, loads through a frame slot's address, and drop-glue calls no longer erase what the analysis knows about a vector (each verified across the corpus with `--verify-facts`).
