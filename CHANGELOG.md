@@ -17,6 +17,16 @@
   command of a settled frame: 2 draw lists, 310 vertices, 501 indices, 167 triangles, byte-identical
   to the same frames through ImGui's own C++ API in `abundance/tests/parity/imgui.cpp`. That is 11
   reference programs now, and the ten ports are unchanged.
+- Dear ImGui, the io fields as numbers: `imgui_layout_probe.grl` printed ImGuiIO's `DisplaySize`,
+  `DeltaTime` and `Framerate` as the *bit pattern* of their binary64 widening (1280.0 came out as
+  `4653344314980564992`), which was a correct read presented as an unreadable number. The probe now
+  prints `imgui.io.display_size 1280 720`, `imgui.io.delta_time 0.015625` and `imgui.io.framerate 64`
+  and asserts them by value - `display_size_is_1280x720`, `delta_time_is_1_over_64`,
+  `delta_time_in_range`, `framerate_in_range` - and `imgui_frame_probe.grl` pins the same fields to the
+  window SDL reports (`io.display_size_is_window_pixels`), so a float field arriving as a raw word
+  fails on the first comparison instead of looking plausible. The parity reference keeps the encoding
+  only where it is an exactness mechanism (vertex positions, uvs, clip rectangles) and now says so in
+  the labels (`pos_bits`, `uv_bits`, `clip_bits`, `target.min_x_bits`); its io lines are 1280, 720, 1.
 - Dear ImGui reaches the GPU: `abundance/src/imgui_platform.grl` (new) binds `ImGui_ImplSDL3_InitForVulkan`,
   `ImGui_ImplVulkan_Init`, both backends' `NewFrame`, `ImGui_ImplVulkan_RenderDrawData` and both
   shutdowns, in a second shared library (`libgrail_imgui_platform.so`) whose own dependencies are
