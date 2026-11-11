@@ -27,6 +27,8 @@
   make the benchmarks prove. Off by default: with the pass on, compile time is 3.2 s -> 5.5 s on
   `sieve` for no runtime gain yet, so default builds are unchanged (3.2 s / 3.3 s, F1's numbers) and
   `tools/test-facts.mjs` exercises the pass on a fixture instead.
+- Fixed: LLVM builds no longer fail with `changed binding to STB_GLOBAL` - a kept-native function the emitter declared `.weak` (content-addressed drop helpers) keeps that binding instead of being re-declared `.globl`. The weak-name table is sized for every name, so programs with many drop helpers no longer hang the lowering.
+- Fixed: `GRAIL_TEST_RESUME` keys pass markers by the compiler's content-hash directory rather than its file name, which is `grail` for every build, so a rebuilt compiler never inherits another build's passes.
 - Measured what the validation in a Grail program costs, split by kind; the compiler is untouched.
   [tools/checks-budget.mjs](tools/checks-budget.mjs) classifies the abort arms in the emitted `.ll`
   by the predicate that guards them (bounds: the arms inside the sequence accessors; overflow: the
@@ -191,6 +193,31 @@
   missed here, and the pipeline's entry-point names now come out of the SPIR-V into byte-sequence
   bindings instead. Both are `compiler/` bugs and `compiler/` is off limits in this increment, so they
   are reported rather than patched.
+- Typed-IR range facts for the LLVM backend (F3), behind `--range-facts`: the lifter derives, from
+  the word stream alone, that a slot holds an integer in `[lo, hi]` at a point, and uses it where
+  the front end's bounds check lives. A *state* is one flat vector per block over the 14 registers, the frame slots
+  and one length per sequence identity; the facts are established from literals, masks, truncations
+  to a narrow type, arithmetic over facts already held, and comparisons already checked on the path
+  -- including the 0/1 word the front end materialises every `while` guard into, whose operands the
+  analysis follows back through the copies that carried them -- and they are dropped by a write to
+  the location, by an address that escapes, by any call that may take an argument by reference, and
+  by a narrowing that is not provably in range. Where a fact puts an accessor's index below the
+  sequence's length, the accessor's body is emitted in place of the call with the bounds compare and
+  its cold `rt_abort` removed, `align 8`/`align 4`/`align 1` by element width; `--verify-facts`
+  re-inserts exactly that check (a cold abort if any index is out of range), and writes the verdicts
+  into the module as `; range` comments. Nothing else changes: the word stream is byte-identical to
+  the F1 branch's on all five benchmarks, and `optimize.grl`, `machine.grl` and the native backend
+  are untouched. Measured with `tools/bench.mjs --rounds 9` against `typed-ir-f1`: **no benchmark
+  moves** (0.519/0.571/1.076/0.169/0.224 s, the same as before within the spread) because **no check
+  is removed on any of the five** -- their sequences are filled by counted push loops, whose trip
+  count this pass does not summarise, and `nbody` hands its vectors to `energy(&p, ...)`, an escape
+  the rules drop the fact on. What it does prove is a fixture's `v[i]` under a literal-length
+  sequence and a `while i < 5` guard, identically through the native backend, LLVM, and LLVM with
+  `--verify-facts`. It costs compile time (3.2 s -> 6.0 s end to end on `sieve`). See
+  `docs/design/typed-ir.md`, "Implemented: the range fact (F3)", including the one rule that would
+  make the benchmarks prove. Off by default: with the pass on, compile time is 3.2 s -> 5.5 s on
+  `sieve` for no runtime gain yet, so default builds are unchanged (3.2 s / 3.3 s, F1's numbers) and
+  `tools/test-facts.mjs` exercises the pass on a fixture instead.
 - FFI: a C callback's extern-record parameter is borrowed, not owned. The parameter prologue marked
   every parameter as an owning binding, so the epilogue ran the record's drop glue on the address C
   handed over — freeing the caller's struct (or its stack) — and the process then aborted inside the

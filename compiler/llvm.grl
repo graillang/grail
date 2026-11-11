@@ -4621,6 +4621,24 @@ pub fn lower<a, b, c>(stream: &a [u8], triple: &b [u8], facts: (&c Facts), verif
 }
 fn lower_target<a, b, c>(stream: &a [u8], triple: &b [u8], target: u64, facts: (&c Facts), verify: u64, ranges: u64) -> Lowered {
     lines := split_lines(stream);
+    // Names the stream declared `.weak` (content-addressed drop helpers, which two objects may
+    // both define). A function kept native is re-declared below; it must keep weak binding, not
+    // gain `.globl`, or the assembler rejects the module (`changed binding to STB_GLOBAL`).
+    // `Set` is a fixed-size open-addressed table with no growth, so it must be sized for every
+    // name it will hold: count the `.weak` lines first (a full table probes forever).
+    mut nweak = 0;
+    for i in lines.len() {
+        if starts(view(lines[i]), view(".weak ")) {
+            nweak += 1;
+        }
+    }
+    mut weak = set_new(nweak + 1);
+    for i in lines.len() {
+        wl := view(lines[i]);
+        if starts(wl, view(".weak ")) {
+            set_add(&mut weak, view(sub(wl, 6, wl.len())));
+        }
+    }
     mut l = L { target: target, ir: u8[], body: u8[], fail: 0, t: 0, dead: 0, term: 0, labels: set_new(16), calls: u8[][], addrs: u8[][], split: 0, refs: u8[][], lifted: u8[][], flags: 0, frame: 0, fslots: u64[], fops: u64[], fordinal: 0, verify: verify, hslots: u64[], hwhat: u64[], hwidth: u64[], eon: u64[], edata: u8[][], elen: u8[][], vk: u64[], vo: u64[], vo2: i64[], hcall: u64[], hcallwhat: u64[], cnames: u8[][], ccount: u64[], sibwhat: 0, sibwidth: 0, sd: u8[], sl: u8[], fname: u8[], sibnames: u8[][], sibbodies: u8[][], eblk: u64[], blk: 0, dnames: u8[][], proof: u64[], rline: 0, ranges: ranges };
     mut funcs = Func[];
     mut data = u8[][];
@@ -4716,6 +4734,9 @@ fn lower_target<a, b, c>(stream: &a [u8], triple: &b [u8], target: u64, facts: (
             l.addrs.pop();
         }
         mut g = copy(view(".globl "));
+        if set_has(&weak, view(f.name)) {
+            g = copy(view(".weak "));
+        }
         put(&mut g, view(f.name));
         native_lines.push(g);
         mut h = copy(view(".hidden "));
