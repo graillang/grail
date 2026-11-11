@@ -6127,6 +6127,61 @@
     "note": "a type mismatch names the expected and the found type in source syntax"
   },
   {
+    "name": "comptime-value-generics",
+    "source": "fn rotl<@k: u64>(x: u64) -> u64 {\n    @assert(k < 64, \"rotate amount out of range\");\n    if k == 0 {\n        return x;\n    }\n    return (x << k) | (x >> (64 - k));\n}\nfn scale<@n: u64>(x: u64) -> u64 {\n    return x * n;\n}\nfn pick<@wide: bool>(x: u64) -> u64 {\n    @if wide {\n        return x * 1000;\n    } else {\n        return x;\n    }\n}\nfn main() -> u64 {\n    println(rotl<1>(5));\n    println(rotl<8>(1));\n    println(scale<3>(7) + scale<4>(7));\n    println(pick<true>(2) + pick<false>(2));\n    return 0;\n}\n",
+    "stdout": "10\n256\n49\n2002\n",
+    "status": 0,
+    "note": "comptime C2: value parameters <@k: u64> bind per call site; each value is its own specialisation; @assert and @if see the value"
+  },
+  {
+    "name": "comptime-value-generic-assert",
+    "source": "fn rotl<@k: u64>(x: u64) -> u64 {\n    @assert(k < 64, \"rotate amount out of range\");\n    if k == 0 {\n        return x;\n    }\n    return (x << k) | (x >> (64 - k));\n}\nfn scale<@n: u64>(x: u64) -> u64 {\n    return x * n;\n}\nfn pick<@wide: bool>(x: u64) -> u64 {\n    @if wide {\n        return x * 1000;\n    } else {\n        return x;\n    }\n}\nfn main() -> u64 {\n    println(rotl<64>(5));\n    println(rotl<8>(1));\n    println(scale<3>(7) + scale<4>(7));\n    println(pick<true>(2) + pick<false>(2));\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": "@assert failed: rotate amount out of range"
+  },
+  {
+    "name": "comptime-value-generic-needs-argument",
+    "source": "fn rotl<@k: u64>(x: u64) -> u64 {\n    @assert(k < 64, \"rotate amount out of range\");\n    if k == 0 {\n        return x;\n    }\n    return (x << k) | (x >> (64 - k));\n}\nfn scale<@n: u64>(x: u64) -> u64 {\n    return x * n;\n}\nfn pick<@wide: bool>(x: u64) -> u64 {\n    @if wide {\n        return x * 1000;\n    } else {\n        return x;\n    }\n}\nfn main() -> u64 {\n    println(rotl<1>(5));\n    println(rotl<8>(1));\n    println(scale(7));\n    println(pick<true>(2) + pick<false>(2));\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": "which a call cannot infer"
+  },
+  {
+    "name": "comptime-value-param-not-a-type",
+    "source": "fn f<@n: u64>(x: n) -> u64 {\n    return 0;\n}\nfn main() -> u64 {\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": "this is a value parameter, not a type"
+  },
+  {
+    "name": "c-array-fields",
+    "source": "extern \"C\" record Px { x: i32, w: f32 }\nextern \"C\" record Box { tag: u16, name: [u8; 8], ids: [u32; 4], ws: [f32; 2], ps: [Px; 2], small: [i16; 3] }\nfn main() -> u64 {\n    @assert(size_of(Box) == 60, \"Box has C's layout\");\n    mut b = Box { tag: 1, name: u8[0; 8], ids: u32[1, 2, 3, 4], ws: f32[0.5, 1.5], ps: Px[Px { x: -1, w: 0.25 }, Px { x: 2, w: 4.0 }], small: i16[-7, 0, 7] };\n    ids := b.ids;\n    println(\"{} {} {}\", ids.len(), ids[0], ids[3]);\n    ws := b.ws;\n    println(\"{} {}\", ws[0], ws[1]);\n    ps := b.ps;\n    println(\"{} {}\", ps[0].x, ps[1].w);\n    small := b.small;\n    println(\"{} {}\", small[0], small[2]);\n    mut name = b.name;\n    name[0] = 71;\n    name[1] = 114;\n    b.name = name;\n    println(b.name.text().len());\n    mut next = b.ids;\n    next[3] = 40;\n    b.ids = next;\n    again := b.ids;\n    println(\"{} {}\", again[0], again[3]);\n    b.ws = f32[2.0, 3.0];\n    println(b.ws[1]);\n    return 0;\n}\n",
+    "stdout": "4 1 4\n0.5 1.5\n-1 4\n-7 7\n8\n1 40\n3\n",
+    "note": "[T; N] fields in an extern record: laid out inline (size_of), read whole as vectors (bytes for u8, narrow f32/u32, records, i16), assigned whole"
+  },
+  {
+    "name": "c-array-length-mismatch",
+    "source": "extern \"C\" record Px { x: i32, w: f32 }\nextern \"C\" record Box { tag: u16, name: [u8; 8], ids: [u32; 4], ws: [f32; 2], ps: [Px; 2], small: [i16; 3] }\nfn main() -> u64 {\n    mut b = Box { tag: 1, name: u8[0; 8], ids: u32[1, 2, 3, 4], ws: f32[0.5, 1.5], ps: Px[Px { x: -1, w: 0.25 }, Px { x: 2, w: 4.0 }], small: i16[-7, 0, 7] };\n    b.ids = u32[1, 2, 3];\n    return 0;\n}\n",
+    "signal": "SIGABRT",
+    "note": "assigning a vector whose length is not the C array's aborts: C reads all N elements"
+  },
+  {
+    "name": "cstr-bytes-needs-unsafe",
+    "source": "fn name_len(s: CStr) -> u64 {\n    return cstr_bytes(s).len();\n}\nfn main() -> u64 {\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": "cstr_bytes requires an unsafe block"
+  },
+  {
+    "name": "c-array-length-positive",
+    "source": "extern \"C\" record Z { a: [u8; 0] }\nfn main() -> u64 {\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": "a C array length is a positive integer constant"
+  },
+  {
+    "name": "extern-lib-link-only",
+    "source": "extern \"C\" lib \"m\";\nfn main() -> u64 {\n    println(1);\n    return 0;\n}\n",
+    "stdout": "1\n",
+    "note": "extern \"C\" lib \"m\"; requests a library with no declarations from it (a C++ shim's C runtime)"
+  },
+  {
     "name": "visibility-public-surface",
     "files": [
       "tests/visibility/vis_main.grl",

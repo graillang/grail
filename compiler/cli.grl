@@ -682,7 +682,7 @@ fn compile_mode<a, b, d, e, g>(
         }
     }
     if per_module != 0 {
-        return per_module_build(&command, view(asm), view(output), view(target), view(emulation), &assemble);
+        return per_module_build(&command, view(asm), view(output), view(target), view(emulation), &assemble, &mut store, &id, cache);
     }
     if host::command(command) != 0 {
         return 1;
@@ -857,13 +857,178 @@ fn group_of<a, b>(groups: (&a ModuleGroup[]), name: &b [u8]) -> u64 {
     }
     return 0;
 }
-fn per_module_build<a, b, d, e, g, k>(
+fn bytes_less<a, b>(x: &a [u8], y: &b [u8]) -> bool {
+    mut i = 0;
+    while (i < x.len()) & (i < y.len()) {
+        if x[i] != y[i] {
+            return x[i] < y[i];
+        }
+        i += 1;
+    }
+    return x.len() < y.len();
+}
+// The cache key of one module's compiler run (B1 stage 4): the build's flags, compiler and assembler,
+// the target, the module's name and its own source files, and every interface the run can read - the
+// ones written by the runs before it, by name and content. An edit that leaves a module's interface
+// unchanged therefore reruns that module alone; one that changes it reruns the modules after it.
+fn unit_key<a, b, d, e, g, k>(store: (&a mut Cache), id: (&b BuildId), target: &d [u8], name: &e [u8], files: (&g u8[][]), ifaces: &k [u8]) -> u8[] {
+    mut buf = u8[];
+    push_bytes(&mut buf, view("grail-cache-unit 1\ntarget "));
+    push_bytes(&mut buf, view(target));
+    push_bytes(&mut buf, view("\nflags "));
+    push_bytes(&mut buf, view(id.flags));
+    push_bytes(&mut buf, view("\ncompiler "));
+    push_bytes(&mut buf, view(id.compiler));
+    push_bytes(&mut buf, view("\nassembler "));
+    push_bytes(&mut buf, view(id.assembler));
+    push_bytes(&mut buf, view("\nmodule "));
+    push_bytes(&mut buf, view(name));
+    buf.push(10);
+    for i in files.len() {
+        f := item(&files, i);
+        push_bytes(&mut buf, view("source "));
+        push_bytes(&mut buf, view(cache_digest_file(&mut store, view(f))));
+        buf.push(32);
+        push_bytes(&mut buf, view(f));
+        buf.push(10);
+    }
+    mut names = u8[][];
+    listed := host::list_dir(view(ifaces));
+    for i in listed.len() {
+        n := item(&listed, i);
+        if ends(view(n), view(".iface")) {
+            mut at = names.len();
+            while (0 < at) && bytes_less(view(n), view(names[at - 1])) {
+                at -= 1;
+            }
+            names.insert(at, n);
+        }
+    }
+    for i in names.len() {
+        n := item(&names, i);
+        // An interface's surface, without the lines that change with its module's body alone: the
+        // source file's sha256 and the whole-file digest. An edit that keeps the surface keeps
+        // every other module's key.
+        text := host::read_file(view(path_join(view(ifaces), view(n))));
+        rows := lines(view(text));
+        mut surface = u8[];
+        for r in rows.len() {
+            row := item(&rows, r);
+            if !starts(view(row), view("sha256 ")) & !starts(view(row), view("digest ")) {
+                push_bytes(&mut surface, view(row));
+                surface.push(10);
+            }
+        }
+        push_bytes(&mut buf, view("interface "));
+        push_bytes(&mut buf, view(native::iface_digest(&surface)));
+        buf.push(32);
+        push_bytes(&mut buf, view(n));
+        buf.push(10);
+    }
+    return native::iface_digest(&buf);
+}
+// Put a module run's outputs back from the store: its parts manifest, its interface and every object
+// the manifest names. Any missing or damaged blob makes it a miss (nothing is half-restored that a
+// later step would trust: the run that follows rewrites all of it).
+fn unit_restore<a, b, d, e, g>(store: (&a mut Cache), key: &b [u8], stem: &d [u8], ifaces: &e [u8], name: &g [u8], base: &d [u8]) -> bool {
+    path := cache_record_path(view(store.root), view("unit"), view(key));
+    if host::exists(view(path)) == 0 {
+        return false;
+    }
+    text := host::read_file(view(path));
+    rows := lines(view(text));
+    mut parts_blob = u8[];
+    mut iface_blob = u8[];
+    mut objs = u8[][];
+    for i in rows.len() {
+        w := words(view(item(&rows, i)));
+        if (2 <= w.len()) & eq(view(item(&w, 0)), view("parts")) {
+            parts_blob = item(&w, 1);
+        }
+        if (2 <= w.len()) & eq(view(item(&w, 0)), view("iface")) {
+            iface_blob = item(&w, 1);
+        }
+        if (2 <= w.len()) & eq(view(item(&w, 0)), view("obj")) {
+            objs.push(item(&w, 1));
+        }
+    }
+    if !cache_blob_ok(&mut store, view(parts_blob)) {
+        return false;
+    }
+    for i in objs.len() {
+        if !cache_blob_ok(&mut store, view(objs[i])) {
+            return false;
+        }
+    }
+    if (iface_blob.len() != 0) && !cache_blob_ok(&mut store, view(iface_blob)) {
+        return false;
+    }
+    manifest := cat(view(stem), view(".parts"));
+    if cache_blob_restore(&mut store, view(parts_blob), view(manifest), 0) != 0 {
+        return false;
+    }
+    parts := read_split(view(manifest), view(base));
+    if parts.objects.len() != objs.len() {
+        return false;
+    }
+    for i in objs.len() {
+        if cache_blob_restore(&mut store, view(objs[i]), view(item(&parts.objects, i)), 0) != 0 {
+            return false;
+        }
+    }
+    if iface_blob.len() != 0 {
+        dest := path_join(view(ifaces), view(cat(view(name), view(".iface"))));
+        if cache_blob_restore(&mut store, view(iface_blob), view(dest), 0) != 0 {
+            return false;
+        }
+    }
+    return true;
+}
+// File a module run's outputs under its key, after they assembled.
+fn unit_file<a, b, d, e, g>(store: (&a mut Cache), key: &b [u8], stem: &d [u8], objects: (&e u8[][]), ifaces: &g [u8], name: &g [u8]) -> unit {
+    manifest := cat(view(stem), view(".parts"));
+    parts_blob := cache_blob_put(&mut store, view(manifest));
+    if parts_blob.len() != 64 {
+        return ();
+    }
+    mut record = u8[];
+    push_bytes(&mut record, view("// grail-cache-unit 1\nmodule "));
+    push_bytes(&mut record, view(name));
+    push_bytes(&mut record, view("\nparts "));
+    push_bytes(&mut record, view(parts_blob));
+    record.push(10);
+    iface := path_join(view(ifaces), view(cat(view(name), view(".iface"))));
+    if host::exists(view(iface)) != 0 {
+        b := cache_blob_put(&mut store, view(iface));
+        if b.len() != 64 {
+            return ();
+        }
+        push_bytes(&mut record, view("iface "));
+        push_bytes(&mut record, view(b));
+        record.push(10);
+    }
+    for i in objects.len() {
+        b := cache_blob_put(&mut store, view(item(&objects, i)));
+        if b.len() != 64 {
+            return ();
+        }
+        push_bytes(&mut record, view("obj "));
+        push_bytes(&mut record, view(b));
+        record.push(10);
+    }
+    cache_record_put(&mut store, view("unit"), view(key), view(record));
+    return ();
+}
+fn per_module_build<a, b, d, e, g, k, m, n>(
     command: (&a u8[][]),
     asm: &b [u8],
     output: &d [u8],
     target: &e [u8],
     emulation: &g [u8],
-    prefix: (&k u8[][])
+    prefix: (&k u8[][]),
+    store: (&m mut Cache),
+    id: (&n BuildId),
+    cache: u64
 ) -> u64 {
     if !eq(view(target), view("x86_64")) {
         say(view("grail: --per-module is implemented for the linux x86_64 assembler path"));
@@ -971,6 +1136,18 @@ fn per_module_build<a, b, d, e, g, k>(
         name := groups[pick].name.copy();
         stem := path_join(view(dir), view(name));
         unit_asm := cat(view(stem), view(".s"));
+        mut key = u8[];
+        mut reused = false;
+        if cache != 0 {
+            key = unit_key(&mut store, id, view(target), view(name), &groups[pick].files, view(ifaces));
+            reused = unit_restore(&mut store, view(key), view(stem), view(ifaces), view(name), view(dir));
+            if reused {
+                store.hits += 1;
+            } else {
+                store.misses += 1;
+                store.names.push(name.copy());
+            }
+        }
         mut run = u8[][compiler.copy()];
         for f in flags.len() {
             run.push(item(&flags, f));
@@ -989,13 +1166,20 @@ fn per_module_build<a, b, d, e, g, k>(
         for f in groups[pick].files.len() {
             run.push(groups[pick].files[f].copy());
         }
-        if host::command(run) != 0 {
-            return 1;
+        if !reused {
+            if host::command(run) != 0 {
+                return 1;
+            }
         }
         parts := read_split(view(cat(view(stem), view(".parts"))), view(dir));
-        if assemble_parts(&prefix, &parts.asm, &parts.objects) != 0 {
-            say(view("grail: assembling failed (needs clang)"));
-            return 1;
+        if !reused {
+            if assemble_parts(&prefix, &parts.asm, &parts.objects) != 0 {
+                say(view("grail: assembling failed (needs clang)"));
+                return 1;
+            }
+            if cache != 0 {
+                unit_file(&mut store, view(key), view(stem), &parts.objects, view(ifaces), view(name));
+            }
         }
         for o in parts.objects.len() {
             objects.push(item(&parts.objects, o));
@@ -1014,6 +1198,25 @@ fn per_module_build<a, b, d, e, g, k>(
         }
         groups[pick].done = 1;
         built += 1;
+    }
+    if cache != 0 {
+        mut line = copy(view("cache: "));
+        push_bytes(&mut line, view(decimal(store.hits)));
+        push_bytes(&mut line, view(" hit, "));
+        push_bytes(&mut line, view(decimal(store.misses)));
+        push_bytes(&mut line, view(" miss"));
+        if store.names.len() != 0 {
+            push_bytes(&mut line, view(" ("));
+            for i in store.names.len() {
+                if i != 0 {
+                    push_bytes(&mut line, view(", "));
+                }
+                push_bytes(&mut line, view(store.names[i]));
+            }
+            push_bytes(&mut line, view(")"));
+        }
+        line.push(10);
+        host::print(view(line));
     }
     return link_objects(view(output), view(target), view(emulation), &objects, &link);
 }
@@ -1106,6 +1309,7 @@ fn cache_ensure<a>(c: (&a mut Cache)) -> unit {
     host::mkdir(view(path_join(view(c.root), view("map/prog"))));
     host::mkdir(view(path_join(view(c.root), view("map/lnk"))));
     host::mkdir(view(path_join(view(c.root), view("map/mod"))));
+    host::mkdir(view(path_join(view(c.root), view("map/unit"))));
     host::mkdir(view(path_join(view(c.root), view("stage"))));
     return ();
 }

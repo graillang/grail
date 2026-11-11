@@ -80,8 +80,9 @@ The table, as printed on this machine (x86-64, Dear ImGui 1.93.0):
 | `Vec2` | 8 | `x` 0, `y` 4 |
 | `GrVulkanInitInfo` | 104 | `api_version` 0, `instance` 8, `physical_device` 16, `device` 24, `queue_family` 32, `queue` 40, `descriptor_pool` 48, `descriptor_pool_size` 56, `min_image_count` 60, `image_count` 64, `pipeline_cache` 72, `render_pass` 80, `subpass` 88, `msaa_samples` 92, `use_dynamic_rendering` 96, `color_format` 100 |
 
-`Io` stops at `MousePos` because `bool MouseDown[5]` follows it and a record has no array field, so 240
-is the largest prefix that is one `memcpy`. `DrawCmd` reads five fields rather than being the struct
+`Io` stops at `MousePos`, where ImGuiIO's first array (`bool MouseDown[5]`) begins: 240 bytes are
+the prefix Abundance reads, and one `memcpy`. A record can carry the arrays after it as `[T; N]`
+fields (docs/ffi.md, "C arrays") once something needs them. `DrawCmd` reads five fields rather than being the struct
 (`ImTextureRef` and the callback words are copied field by field), which is why its own size is not
 compared.
 
@@ -254,7 +255,7 @@ window is skipped, with the platform's own words.
 ## Limits, stated
 
 - **`Io` is a prefix, and it is read-only.** It is one `memcpy` of the 240 bytes through `MousePos`;
-  `bool MouseDown[5]` follows and a record has no array field. Writing *to* ImGuiIO goes through named
+  it ends where `bool MouseDown[5]` begins, and nothing reads past it yet. Writing *to* ImGuiIO goes through named
   calls (`frame_begin` for `DisplaySize`/`DeltaTime`, `add_backend_flags`, `style_set`,
   `ini_filename`) rather than a write-back of the record, because a write-back would also copy pointer
   fields and ImGui's own queue state.

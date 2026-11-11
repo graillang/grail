@@ -31,6 +31,10 @@ extern "C" fn c_identity(v: u64) -> u64;
 - A declaration has no body and is not a definition. It is callable from any file in the
   same module.
 
+`extern "C" lib "name";` with no declaration after it asks the linker for `name` and nothing else:
+a module that binds a C++ shim states the C runtime the shim expects this way
+(`abundance/src/imgui.grl`). On Windows, where an import names a symbol, it requests nothing.
+
 ## Supported types
 
 | Grail type | C type | Argument words |
@@ -213,6 +217,50 @@ terminator at runtime (a non-terminated sequence aborts). It is `unsafe` because
 pointer has no lifetime tracking across the call: C may keep it, and the bytes stay owned
 by Grail.
 
+`unsafe cstr_bytes(s)` goes the other way: it copies the bytes of a C string - one C returned
+(`SDL_GetError()`), or one Grail made - into a fresh `u8[]`, up to the NUL. A null `CStr` reads as
+empty. It is `unsafe` because only C knows the string is terminated and alive for the copy; the
+result is ordinary Grail bytes with no tie to C memory.
+
+### C arrays
+
+A C array is reached in one of two ways, and neither is pointer arithmetic: Grail code only ever
+holds a vector with its own length and bounds checks.
+
+**Inline in a record**: a field `f: [T; N]` is N elements of `T` laid out in place, exactly as the C
+member `T f[N]` (size N * size of T, alignment of T). Grail code reads the field whole, as a fresh
+vector of N elements (`T[]`; `[u8; N]` reads as the byte sequence `u8[]`), and assigns it whole
+from a vector of exactly N elements - any other length aborts, since C reads all N:
+
+```grl
+extern "C" record PhysicalDeviceProperties { api_version: u32, device_type: u32, device_name: [u8; 256] }
+
+name := props.device_name;        // 256 bytes, copied out
+props.device_name = renamed;      // renamed.len() must be 256
+println(props.device_name[0]);    // a chained read indexes the copy
+```
+
+An element may be an integer, `f32`/`f64`, a `handle`, `CStr`, `CPtr` or an `extern "C"` record. There
+is no reference into the inline array (`&r.f` is rejected): a reference would let code reach past
+its N elements, which is exactly what C arrays get wrong.
+
+**Handed out by pointer and length**: `unsafe cslice(T, p, n)` copies the `n` elements of `T` at the
+`CPtr` `p` - an array C returned along with its count - into a `T[]`:
+
+```grl
+names := cslice(CStr, SDL_Vulkan_GetInstanceExtensions(count), u64(count.value));
+for i in names.len() {
+    println(cstr_bytes(names[i]).text());
+}
+```
+
+It is `unsafe` because only C knows that `p` points at `n` live elements. After the copy the
+vector is Grail's.
+
+Verified by `tests/ffi/c_arrays.grl` on every target: C fills a record of byte, `u32`, `f32`,
+`i8` and record arrays, Grail reads each back and assigns one, and C sums what it then sees; and
+the string, integer and record arrays C hands out are copied with `cslice`.
+
 ### Callbacks and function pointers
 
 A Grail function can be handed to C and called back:
@@ -262,8 +310,8 @@ extern "C" fn c_mixed_fill(m: Mixed, d: i64) -> i64;
 - fields are laid out with C rules — natural alignment, padding between fields, and tail
   padding up to the record alignment — so `offsetof` agrees with the C compiler
   (`a: i32, b: i16, c: i8, d: i64` is `0, 4, 6, 8`, size 16, alignment 8);
-- a field may be an 8/16/32/64-bit integer, an `f32`/`f64`, a `handle`, a `CStr` or another
-  `extern "C" record`, which is embedded by value: its bytes sit at the field's C offset with
+- a field may be an 8/16/32/64-bit integer, an `f32`/`f64`, a `handle`, a `CStr`, an inline C
+  array `[T; N]` (see C arrays above) or another `extern "C" record`, which is embedded by value: its bytes sit at the field's C offset with
   its own alignment and size, exactly like a C struct member. Anything else (an ordinary Grail
   record, a `string`, a view) is rejected, because those values are pointers and embedding one
   would store the pointer, not the bytes;
@@ -649,8 +697,8 @@ Not implemented yet, and each rejected rather than approximated:
   classification runs over the flattened field list, so a float inside an embedded record is
   classified like one at the top level (`tests/ffi/call_records.grl`, `float_record_results.grl`,
   `nested_float_results.grl`);
-- pointer arithmetic, an index of a `CPtr`, and a view built from an address: an array is a
-  fixed-capacity record with its count checked afterwards, and elements are reached by field name;
+- pointer arithmetic, an index of a `CPtr`, a view built from an address, and a reference into an
+  inline C array: C arrays are copied into vectors (`[T; N]` fields, `cslice`), see C arrays above;
 - a pointer that C keeps after the call returns. A `CPtr` made by `cptr`/`cptr_mut` is a checked borrow
   inside Grail (see "Pointer lifetimes"), but an `extern "C"` declaration cannot state that C retains
   it. A library that does (callback user data) needs storage whose lifetime the program controls,

@@ -393,6 +393,8 @@ struct C {
     // the compiler reads interfaces or looks names up for itself, which skips the visibility check.
     decl_public: u64,
     vis_off: u64,
+    // Set when a compile-time expression read a value parameter that is not bound yet.
+    ct_unbound: u64,
     // Copy-backs for `p: &mut R` callback parameters: (C pointer slot, copy slot, bytes) triples.
     export_copyback: u64[],
     rnames: u8[][],
@@ -4274,7 +4276,7 @@ fn type_key<a>(c: (&a mut C), out: (&a mut u8[]), ty: u64, depth: u64) -> unit {
         // element and its drop does not depend on one either.
     } else if (k == 8) || (k == 23) || (k == 28) {
         // The nominal payload is already in the key.
-    } else if (k == 18) || (k == 21) {
+    } else if (k == 18) || (k == 21) || (k == 31) {
         // An integer or float width is part of the type and is not a run-local choice.
         out.push(32);
         decimal(&mut out, arg);
@@ -5529,6 +5531,31 @@ fn lifetime_parameters<a>(c: (&a mut C)) -> unit {
     exchange(&mut c.type_interfaces, u64[][]);
     if eat(&mut c, view("<")) {
         while true {
+            if eat(&mut c, view("@")) {
+                // A value parameter (docs/design/comptime.md, C2): `@k: u64` in the generic list. It
+                // is a type parameter whose binding is a type-level constant, so specialisation,
+                // naming and interfaces handle it with no second mechanism; bounds bit 4 marks it
+                // and the bits above carry its declared type.
+                n := ident(&mut c);
+                for i in c.tnames.len() {
+                    if same(view(c.tnames[i]), view(n)) {
+                        fail(&mut c, view("duplicate generic parameter"));
+                    }
+                }
+                expect(&mut c, view(":"));
+                vty := parse_type(&mut c);
+                if !integer(&mut c, vty) & !is_bool(&mut c, vty) {
+                    fail(&mut c, view("a value parameter is an integer or a bool"));
+                }
+                c.tnames.push(n);
+                c.type_bounds.push(4 + 8 * vty);
+                c.type_interfaces.push(u64[]);
+                if eat(&mut c, view(">")) {
+                    break;
+                }
+                expect(&mut c, view(","));
+                continue;
+            }
             n := ident(&mut c);
             is_type := (64 < n[0]) & (n[0] < 91);
             if is_type {
@@ -5737,7 +5764,10 @@ fn bind_types<a, b>(c: (&a mut C), ty: u64, map: (&b u64[])) -> u64 {
 }
 fn field_type<a>(c: (&a mut C), ty: u64, index: u64) -> u64 {
     d := ty_arg(&mut c, ty);
-    t := field_ty(&mut c, d, index);
+    // An inline C array field reads as a vector of its elements (bytes for u8) in Grail code;
+    // cfield_load and cfield_store copy between the two whole.
+    mut t = field_ty(&mut c, d, index);
+    t = carray_surface(&mut c, t);
     mut rs = type_regions(&mut c, ty);
     mut args = type_args(&mut c, ty);
     field := bind_types(&mut c, t, &args);
@@ -6357,6 +6387,16 @@ fn parse_type<a>(c: (&a mut C)) -> u64 {
     if is(&mut c, view("[")) {
         advance(&mut c);
         k := parse_type(&mut c);
+        if eat(&mut c, view(";")) {
+            // `[T; N]`: N elements of T laid out inline, as a C array inside an extern record. In
+            // Grail code the field reads and writes as a vector T[] of exactly N elements.
+            n := ct_expr(&mut c, 0);
+            if (n.ty != 0) || (n.value == 0) {
+                fail(&mut c, view("a C array length is a positive integer constant"));
+            }
+            expect(&mut c, view("]"));
+            return intern_args(&mut c, 32, k, n.value, u64[], u64[]);
+        }
         expect(&mut c, view(":"));
         v := parse_type(&mut c);
         expect(&mut c, view("]"));
@@ -6627,6 +6667,9 @@ fn base_named<a>(c: (&a mut C), first: u8[]) -> u64 {
     for i in c.tnames.len() {
         t := &c.tnames[i];
         if same(view(t), view(first)) {
+            if (i < c.type_bounds.len()) && ((c.type_bounds[i] & 4) != 0) {
+                fail(&mut c, view("this is a value parameter, not a type"));
+            }
             if c.bindings.len() != 0 {
                 return c.bindings[i];
             }
@@ -8075,6 +8118,11 @@ fn ffi_field_align<a>(c: (&a mut C), ty: u64) -> u64 {
         return 8;
     }
     k := ty_kind(&mut c, ty);
+    if k == 32 {
+        // An inline C array is aligned like its element.
+        elem := ty_arg(&mut c, ty);
+        return ffi_field_align(&mut c, elem);
+    }
     // An embedded extern record: its bytes in place, with its own C alignment and size.
     if is_c_record(&mut c, ty) != 0 {
         inner := ty_arg(&mut c, ty);
@@ -8104,6 +8152,11 @@ fn ffi_field_size<a>(c: (&a mut C), ty: u64) -> u64 {
         return 8;
     }
     k := ty_kind(&mut c, ty);
+    if k == 32 {
+        // An inline C array: N elements back to back.
+        elem := ty_arg(&mut c, ty);
+        return ffi_field_size(&mut c, elem) * ty_mode(&mut c, ty);
+    }
     // An embedded extern record: its bytes in place, with its own C alignment and size.
     if is_c_record(&mut c, ty) != 0 {
         inner := ty_arg(&mut c, ty);
@@ -8351,6 +8404,16 @@ fn extern_declaration<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
                 break;
             }
         }
+    }
+    if (0 < input.len()) & (symbol.len() == 0) & is(&mut c, view(";")) {
+        // `extern "C" lib "c";`: a library this module needs linked although it calls nothing in
+        // it directly - the C runtime a C++ shim it binds expects, say. A PE import names a symbol,
+        // so on Windows there is nothing to request.
+        advance(&mut c);
+        if (c.target != 3) & (c.target != 4) {
+            ffi_link(&mut c, view(input));
+        }
+        return ();
     }
     if is(&mut c, view("record")) {
         if 0 < input.len() + symbol.len() {
@@ -9389,6 +9452,44 @@ fn ct_is_bool<a>(c: (&a mut C), ty: u64) -> bool {
 fn ct_val(value: u64, ty: u64) -> CVal {
     return CVal { value: value, ty: ty };
 }
+// A value parameter in scope named `name`: index + 1, or 0.
+fn value_param<a, b>(c: (&a mut C), name: &b [u8]) -> u64 {
+    // type_bounds can be shorter than tnames (closures carry their parent's names), and `&` does
+    // not short-circuit, so the bound is read only once the index is known to be in range.
+    for i in c.tnames.len() {
+        if (i < c.type_bounds.len()) && same(view(c.tnames[i]), name) {
+            if (c.type_bounds[i] & 4) != 0 {
+                return i + 1;
+            }
+        }
+    }
+    return 0;
+}
+// A value parameter's value in the specialisation being compiled, and its declared type. Unbound
+// (a template checked before any instantiation) it reads as 0 and sets ct_unbound, which makes an
+// @assert that depends on it wait for the instantiation instead of judging a placeholder.
+fn value_param_value<a>(c: (&a mut C), i: u64) -> CVal {
+    vty := c.type_bounds[i] / 8;
+    mut value = 0;
+    if i < c.bindings.len() {
+        mut b = c.bindings[i];
+        // A binding may arrive behind an indirection (kind 10), as canonical_type also unwraps.
+        while (b != 0) && (b != 18446744073709551615) && (ty_kind(&mut c, b) == 10) {
+            b = ty_arg(&mut c, b);
+        }
+        if (b != 0) && (b != 18446744073709551615) && (ty_kind(&mut c, b) == 31) {
+            value = ty_arg(&mut c, b);
+        } else {
+            exchange(&mut c.ct_unbound, 1);
+        }
+    } else {
+        exchange(&mut c.ct_unbound, 1);
+    }
+    if is_bool(&mut c, vty) {
+        return ct_val(value, bool_type(&mut c));
+    }
+    return ct_val(value, 0);
+}
 // The tags `target.os` and `target.arch` compare against.
 fn ct_tag<a>(c: (&a mut C), name: &a [u8]) -> u64 {
     if same(view(name), view("linux")) { return 1; }
@@ -9501,6 +9602,16 @@ fn ct_primary<a>(c: (&a mut C)) -> CVal {
                 return ct_val(64, 0);
             }
             fail(&mut c, view("target has os, arch and pointer_bits"));
+        }
+        after := c.pos + 1;
+        here_tok := c.pos;
+        if !is_at(&mut c, after, view("::")) {
+            name_text := tok_text(&mut c, here_tok);
+            vp := value_param(&mut c, view(name_text));
+            if vp != 0 {
+                advance(&mut c);
+                return value_param_value(&mut c, vp - 1);
+            }
         }
         mut module = module_copy(&mut c);
         mut name = ident(&mut c);
@@ -9694,6 +9805,7 @@ fn ct_branch<a>(c: (&a mut C), pass: u64, top: u64, take: u64) -> unit {
 // `@assert(cond, "message")`: a compile error carrying the message when cond is false.
 fn ct_assert<a>(c: (&a mut C)) -> unit {
     at := c.pos;
+    exchange(&mut c.ct_unbound, 0);
     expect(&mut c, view("assert"));
     expect(&mut c, view("("));
     cond := ct_expr(&mut c, 0);
@@ -9707,7 +9819,8 @@ fn ct_assert<a>(c: (&a mut C)) -> unit {
     advance(&mut c);
     expect(&mut c, view(")"));
     expect(&mut c, view(";"));
-    if holds == 0 {
+    unbound := exchange(&mut c.ct_unbound, 0);
+    if (holds == 0) & (unbound == 0) {
         exchange(&mut c.pos, at - 1);
         mut msg = u8[];
         push_bytes(&mut msg, view("@assert failed: "));
@@ -10210,11 +10323,63 @@ fn rec_store<a>(c: (&a mut C), base: u64, k: u64, value: u64) -> unit {
 // C-layout field access: exact byte offset, exact field width. Fields narrower than
 // eight bytes use portable byte-wise helpers so every target stays correct without
 // new instruction selection.
+// The runtime copy parameters of a C array field's element: (size, signed, kind, record words),
+// kind 0 an integer or word, 1 an f32, 2 an extern record.
+fn carray_elem<a>(c: (&a mut C), arr: u64) -> u64[] {
+    elem := ty_arg(&mut c, arr);
+    return carray_elem_of(&mut c, elem);
+}
+fn carray_elem_of<a>(c: (&a mut C), elem: u64) -> u64[] {
+    size := ffi_field_size(&mut c, elem);
+    mut signed = 0;
+    mut kind = 0;
+    mut words = 0;
+    if ty_kind(&mut c, elem) == 18 {
+        signed = ty_mode(&mut c, elem);
+    }
+    if is_f32(&mut c, elem) {
+        kind = 1;
+    }
+    if (ty_kind(&mut c, elem) == 18) & (ty_arg(&mut c, elem) == 8) & (signed == 0) {
+        kind = 3;
+    }
+    if narrow_code(&mut c, elem) != 0 {
+        // f32/u32/i32 vectors hold 32-bit units laid out as C lays out the array.
+        kind = 4;
+    }
+    if is_c_record(&mut c, elem) != 0 {
+        kind = 2;
+        rd := ty_arg(&mut c, elem);
+        words = ffi_record_words(&mut c, rd);
+    }
+    return u64[size, signed, kind, words];
+}
 fn cfield_load<a>(c: (&a mut C), base: u64, d: u64, k: u64, address: u64) -> u64 {
     ty := field_ty(&mut c, d, k);
     off := ffi_offset(&mut c, d, k);
     size := ffi_field_size(&mut c, ty);
     more := exchange(&mut c.cfield_more, 0);
+    if ty_kind(&mut c, ty) == 32 {
+        // Read whole into a fresh vector, which a chained `.len()`, `[i]` or `.text()` then uses;
+        // there is no reference into the inline array (`&r.f`, `&mut r.f`), as that would let code
+        // reach past its N elements.
+        if address != 0 {
+            fail(&mut c, view("a C array field has no reference: read it whole as a vector, or assign it whole"));
+        }
+        e := carray_elem(&mut c, ty);
+        get(&mut c, base, view("%rax"));
+        o(&mut c, view("addq $"));
+        on(&mut c, off);
+        o(&mut c, view(",%rax\n"));
+        at := save(&mut c);
+        mut args = u64[at];
+        count := ty_mode(&mut c, ty);
+        args.push(imm(&mut c, count));
+        for j in 4 {
+            args.push(imm(&mut c, e[j]));
+        }
+        return invoke(&mut c, view("rt_carray_load"), args);
+    }
     if is_c_record(&mut c, ty) != 0 {
         // The embedded record's bytes start at base+off: a further projection (o.inner.x) and an
         // assignment place (o.inner = r) use that interior address; a value read copies them
@@ -10283,6 +10448,26 @@ fn cfield_store<a>(c: (&a mut C), base: u64, d: u64, k: u64, value: u64) -> unit
     ty := field_ty(&mut c, d, k);
     off := ffi_offset(&mut c, d, k);
     size := ffi_field_size(&mut c, ty);
+    if ty_kind(&mut c, ty) == 32 {
+        // A whole vector into the inline array: its length must be the array's (checked at run time).
+        e := carray_elem(&mut c, ty);
+        get(&mut c, base, view("%rax"));
+        o(&mut c, view("addq $"));
+        on(&mut c, off);
+        o(&mut c, view(",%rax\n"));
+        at := save(&mut c);
+        mut args = u64[at, value];
+        count := ty_mode(&mut c, ty);
+        args.push(imm(&mut c, count));
+        args.push(imm(&mut c, e[0]));
+        args.push(imm(&mut c, e[2]));
+        invoke(&mut c, view("rt_carray_store"), args);
+        // The vector was handed over (callers move it in) and its elements are now in the array.
+        vty := carray_surface(&mut c, ty);
+        get(&mut c, value, view("%rdi"));
+        drop_call(&mut c, vty);
+        return ();
+    }
     if is_c_record(&mut c, ty) != 0 {
         get(&mut c, base, view("%rax"));
         o(&mut c, view("leaq "));
@@ -11216,6 +11401,14 @@ fn field_path<a>(c: (&a mut C), id: u64, lty: u64, address: u64) -> Val {
         outer_c := c.decls[d].c_layout;
         next_dot := kind(&mut c) == 46;
         inner_c := is_c_record(&mut c, fty);
+        raw_fty := field_ty(&mut c, d, k);
+        if (outer_c != 0) & (address == 0) & (ty_kind(&mut c, raw_fty) == 32) {
+            // A C array field read whole is a fresh vector (rt_carray_load copied the elements out):
+            // reading it reads the container, and the reader owns the copy.
+            observe(&mut c, b);
+            own(&mut c, n, fty);
+            return val(n, fty);
+        }
         if outer_c != 0 && address == 0 && !next_dot && inner_c {
             // A copied-out embedded C record is a fresh value, independent of the field's place:
             // reading it is a read of the containing record, and the copy is owned by the reader.
@@ -11830,6 +12023,21 @@ fn coerce_view<a>(c: (&a mut C), v: Val, formal: u64) -> Val {
     }
     return v;
 }
+// A field's type as Grail code sees it: an inline C array `[T; N]` is the vector `T[]` it is copied
+// to and from.
+fn surface_field_ty<a>(c: (&a mut C), d: u64, k: u64) -> u64 {
+    t := field_ty(&mut c, d, k);
+    return carray_surface(&mut c, t);
+}
+// `[T; N]` reads as `T[]` - `[u8; N]` as the byte sequence, as `u8[]` always is - so a char buffer
+// is ordinary bytes in Grail code.
+fn carray_surface<a>(c: (&a mut C), t: u64) -> u64 {
+    if ty_kind(&mut c, t) != 32 {
+        return t;
+    }
+    elem := ty_arg(&mut c, t);
+    return vec_of(&mut c, elem);
+}
 fn record<a>(c: (&a mut C), d: u64, explicit: u64) -> Val {
     expect(&mut c, view("{"));
     count := c.decls[d].count;
@@ -11856,7 +12064,7 @@ fn record<a>(c: (&a mut C), d: u64, explicit: u64) -> Val {
             has_colon := eat(&mut c, view(":"));
             astart := c.pos;
             k := find_field(&mut c, d, view(f));
-            field := field_ty(&mut c, d, k);
+            field := surface_field_ty(&mut c, d, k);
             mut context = 18446744073709551615;
             mut known = 1;
             for i in map.len() {
@@ -11891,7 +12099,7 @@ fn record<a>(c: (&a mut C), d: u64, explicit: u64) -> Val {
                 }
             }
             seen.push(k);
-            ft := field_ty(&mut c, d, k);
+            ft := surface_field_ty(&mut c, d, k);
             if literal_target(&mut c, ft) & (c.lit_start == astart) & (c.lit_end == aend) {
                 if adopt_literal(&mut c, astart, aend, ft) {
                     v = val(v.t, ft);
@@ -12321,11 +12529,30 @@ fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
     count := info.count;
     template_first := info.first;
     types := info.types;
+    // Which generic slots are value parameters (bounds bit 4), copied out so the loop below can
+    // advance the parser while it reads them.
+    mut value_slots = u64[];
+    for i in info.bounds.len() {
+        value_slots.push(info.bounds[i] & 4);
+    }
     mut map = u64[];
     if eat(&mut c, view("<")) {
         while true {
-            t := parse_type(&mut c);
-            map.push(t);
+            slot := map.len();
+            if (slot < value_slots.len()) && (value_slots[slot] != 0) {
+                // A value argument: a compile-time constant expression, bound as a type-level
+                // constant so `rotl<13>` and `rotl<14>` are different specialisations. It binds
+                // tighter than a comparison, so the `>` that closes the list is not read as one;
+                // a comparison argument is parenthesised, `f<(N > 4)>`.
+                v := ct_expr(&mut c, prec(62));
+                if v.ty == ct_tag_ty() {
+                    fail(&mut c, view("a value argument is an integer or a bool, not a target tag"));
+                }
+                map.push(intern(&mut c, 31, v.value));
+            } else {
+                t := parse_type(&mut c);
+                map.push(t);
+            }
             if eat(&mut c, view(">")) {
                 break;
             }
@@ -12336,6 +12563,9 @@ fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
         }
     } else {
         for i in types {
+            if (i < value_slots.len()) && (value_slots[i] != 0) {
+                fail(&mut c, view("this function has a value parameter, which a call cannot infer: give it explicitly, as in rotl<13>(x)"));
+            }
             map.push(18446744073709551615);
         }
     }
@@ -13164,6 +13394,12 @@ fn builtin_id<a>(n: &a [u8]) -> u64 {
     }
     if same(view(n), view("cnull")) {
         return 42;
+    }
+    if same(view(n), view("cstr_bytes")) {
+        return 46;
+    }
+    if same(view(n), view("cslice")) {
+        return 47;
     }
     if same(view(n), view("view_mut")) {
         return 38;
@@ -15109,6 +15345,58 @@ fn builtin<a>(c: (&a mut C), id: u64) -> Val {
         // `cnull()`: the null data pointer, for optional C pointer parameters.
         expect(&mut c, view(")"));
         return val(imm(&mut c, 0), intern_full(&mut c, 26, 0, 0, u64[]));
+    }
+    if id == 47 {
+        // `cslice(T, p, n)`: copy the `n` elements of C type `T` at `p` (a C array C handed out by
+        // pointer and length) into a Grail vector, which is then bounds-checked like any other.
+        // Unsafe: C must have handed out at least n elements, alive for the copy.
+        if (c.raw == 0) & (c.unsafe_depth == 0) {
+            fail(&mut c, view("cslice requires an unsafe block"));
+        }
+        elem := parse_type(&mut c);
+        ek := ty_kind(&mut c, elem);
+        if !integer(&mut c, elem) & !is_f32(&mut c, elem) & (is_c_record(&mut c, elem) == 0) & (ek != 24) & (ek != 26) {
+            fail(&mut c, view("cslice copies integers, f32, CStr, CPtr or extern records"));
+        }
+        expect(&mut c, view(","));
+        pv := expr(&mut c, 0);
+        px := deref(&mut c, pv);
+        pk := ty_kind(&mut c, px.ty);
+        if (pk != 24) & (pk != 26) {
+            fail(&mut c, view("cslice reads through a CPtr"));
+        }
+        expect(&mut c, view(","));
+        nv := expr(&mut c, 0);
+        nx := deref(&mut c, nv);
+        if !integer(&mut c, nx.ty) {
+            fail(&mut c, view("cslice takes an element count"));
+        }
+        expect(&mut c, view(")"));
+        e := carray_elem_of(&mut c, elem);
+        mut args = u64[px.t, nx.t];
+        for j in 4 {
+            args.push(imm(&mut c, e[j]));
+        }
+        slot := invoke(&mut c, view("rt_carray_load"), args);
+        vty := vec_of(&mut c, elem);
+        own(&mut c, slot, vty);
+        return val(slot, vty);
+    }
+    if id == 46 {
+        // `cstr_bytes(s)`: copy a C string (a CStr C returned, or one Grail made) into Grail bytes,
+        // up to its NUL. Reading C memory is unsafe: C must have handed out a terminated string.
+        if (c.raw == 0) & (c.unsafe_depth == 0) {
+            fail(&mut c, view("cstr_bytes requires an unsafe block"));
+        }
+        a := expr(&mut c, 0);
+        expect(&mut c, view(")"));
+        x := deref(&mut c, a);
+        if ty_kind(&mut c, x.ty) != 24 {
+            fail(&mut c, view("cstr_bytes takes a CStr"));
+        }
+        slot := apply(&mut c, view("rt_cstr_bytes"), one(x.t));
+        own(&mut c, slot, 2);
+        return val(slot, 2);
     }
     if (id == 13) || (id == 14) {
         if !borrow_place_ahead(&mut c) {
@@ -19688,6 +19976,21 @@ fn primary<a>(c: (&a mut C)) -> Val {
         }
         return val(imm(&mut c, v.value), v.ty);
     }
+    if (k == 1) & (c.tnames.len() != 0) {
+        // A value parameter (`n` in `fn f<@n: u64>`) reads as its constant. Checked before every
+        // other name, because the parameter also lives in the type-parameter table, where other
+        // paths would take it for a type.
+        here_tok := c.pos;
+        name_text := tok_text(&mut c, here_tok);
+        vp := value_param(&mut c, view(name_text));
+        if (vp != 0) & (next_kind(&mut c) != 40) {
+            advance(&mut c);
+            v := value_param_value(&mut c, vp - 1);
+            exchange(&mut c.ct_unbound, 0);
+            vty := c.type_bounds[vp - 1] / 8;
+            return val(imm(&mut c, v.value), vty);
+        }
+    }
     if (k == 1) & (is(&mut c, view("size_of")) || is(&mut c, view("align_of"))) & (next_kind(&mut c) == 40) {
         align := u64(is(&mut c, view("align_of")));
         advance(&mut c);
@@ -20351,6 +20654,13 @@ fn primary<a>(c: (&a mut C)) -> Val {
     constant := constant_value(&mut c, view(m), view(first));
     if constant.ty != 18446744073709551615 {
         return constant;
+    }
+    vp := value_param(&mut c, view(first));
+    if vp != 0 {
+        v := value_param_value(&mut c, vp - 1);
+        exchange(&mut c.ct_unbound, 0);
+        mut vty = c.type_bounds[vp - 1] / 8;
+        return val(imm(&mut c, v.value), vty);
     }
     function := find_func(&mut c, view(m), view(first));
     if function != 0 {
@@ -21166,7 +21476,10 @@ fn index_view<a>(c: (&a mut C), value: Val, access: u64) -> Val {
         own(&mut c, slot, ty);
         bind_loan(&mut c, slot, xt, root, access == 2);
         set_target(&mut c, slot, target, slot + 1);
-        if (access == 0) & scalar(&mut c, elem) {
+        ek := ty_kind(&mut c, elem);
+        // A read of a one-word plain element is the value: numbers, and the C words - a handle, a
+        // CStr, a CPtr - which copy freely and have no place a reference could reach into.
+        if (access == 0) & (scalar(&mut c, elem) || (ek == 23) || (ek == 24) || (ek == 26)) {
             get(&mut c, slot, view("%rax"));
             o(&mut c, view("movq (%rax),%rax\n"));
             result := save(&mut c);
@@ -24243,6 +24556,9 @@ fn statement<a>(c: (&a mut C)) -> unit {
         mut target = id;
         mut through = 0;
         mut fieldty = 0;
+        if (kind(&mut c) == 46) & (carray_assign(&mut c, id, ty) != 0) {
+            return ();
+        }
         if kind(&mut c) == 46 {
             a := field_path(&mut c, id, ty, 2);
             target = a.t;
@@ -24272,6 +24588,49 @@ fn statement<a>(c: (&a mut C)) -> unit {
         }
     }
     return ();
+}
+// `r.f = v;` where `f` is an inline C array of the local extern record `r`: the vector's elements are
+// copied into the array (its length must be the array's). Returns 0 without consuming anything when
+// the statement is not that shape.
+fn carray_assign<a>(c: (&a mut C), id: u64, ty: u64) -> u64 {
+    mut rty = ty;
+    if ty_kind(&mut c, rty) == 7 {
+        rty = ty_arg(&mut c, rty);
+    }
+    if (ty_kind(&mut c, rty) != 8) || (is_c_record(&mut c, rty) == 0) {
+        return 0;
+    }
+    name_at := c.pos + 1;
+    eq_at := c.pos + 2;
+    if (kind_at(&mut c, name_at) != 1) || (kind_at(&mut c, eq_at) != 61) {
+        return 0;
+    }
+    d := ty_arg(&mut c, rty);
+    fname := tok_text(&mut c, name_at);
+    k := find_field(&mut c, d, view(fname));
+    raw := field_ty(&mut c, d, k);
+    if ty_kind(&mut c, raw) != 32 {
+        return 0;
+    }
+    require_write(&mut c, id);
+    advance(&mut c);
+    advance(&mut c);
+    advance(&mut c);
+    v := expr(&mut c, 0);
+    expect(&mut c, view(";"));
+    want := surface_field_ty(&mut c, d, k);
+    require_type(&mut c, v.ty, want);
+    x := move_value(&mut c, v);
+    mut base = id;
+    if ty_kind(&mut c, ty) == 7 {
+        // Through `&mut R`: the reference's target is the record's storage.
+        target := deref(&mut c, val(id, ty));
+        base = target.t;
+    }
+    cfield_store(&mut c, base, d, k, x.t);
+    // cfield_store dropped the vector once its elements were copied: the temporary is spent.
+    move_out(&mut c, x);
+    return 1;
 }
 // The rest of an assignment once its target is known: `target` is the binding slot (through =
 // 0, `l` its local) or a field reference (through = 1, `fieldty` the field type).
@@ -25263,6 +25622,13 @@ fn iface_type_raw<a, b>(out: (&a mut u8[]), c: (&b mut C), ty: u64) -> unit {
         } else {
             push_bytes(&mut out, view("f64"));
         }
+        return ();
+    }
+    if k == 31 {
+        // A value parameter's binding (comptime C2): the constant itself.
+        push_bytes(&mut out, view("(const "));
+        decimal(&mut out, arg);
+        push_bytes(&mut out, view(")"));
         return ();
     }
     if (k == 1) || (k == 2) || (k == 3) || (k == 4) || (k == 11) || (k == 17) || (k == 19) || (k == 22) || (k == 24) {
@@ -26336,6 +26702,12 @@ fn iface_parse_type<a>(c: (&a mut C), p: (&a mut IPos)) -> u64 {
             t := iface_parse_type(&mut c, &mut p);
             ip_expect(&mut p, view(")"));
             return intern_args(&mut c, 27, t, mode, rs, u64[]);
+        }
+        if same(view(head), view("const")) {
+            // A value parameter's binding: `(const N)`.
+            n := ip_number(&mut p);
+            ip_expect(&mut p, view(")"));
+            return intern(&mut c, 31, n);
         }
         if same(view(head), view("job")) {
             // A pool job handle (`Job<T>`): its result type.
@@ -28302,6 +28674,7 @@ pub fn main() -> u64 {
         ct_in_if: false,
         decl_public: 1,
         vis_off: 0,
+        ct_unbound: 0,
         export_copyback: u64[],
         rnames: u8[][],
         tnames: u8[][],
