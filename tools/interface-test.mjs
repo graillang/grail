@@ -500,7 +500,7 @@ function proveCallerRejected() {
   assert.ok(existsSync(join(ifaces, 'interfaces.manifest')), 'the emitting run wrote no interfaces');
   const rejected = compile(files, join(directory, 'build'), ['--interface', ifaces]);
   assert.equal(rejected.status, 1, 'a caller that disagrees with the interface must be rejected');
-  assert.match(rejected.output, /reject_user\.grl:\d+:\d+: function argument count/, `the rejection must be in the caller's file: ${rejected.output}`);
+  assert.match(rejected.output, /error: function argument count\n\s*--> \S*reject_user\.grl:\d+:\d+/, `the rejection must be in the caller's file: ${rejected.output}`);
   return rejected.output.trim().split('\n')[0];
 }
 

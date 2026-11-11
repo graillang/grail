@@ -484,6 +484,13 @@ struct C {
     // The link inputs each module's `extern "C" lib "..."` declarations ask for. `libs` stays
     // program-wide (that is what the stream carries); this attributes them to a module so an
     // interface can re-request them.
+    // Extra context for the next error (G11): secondary labels at other source positions, and
+    // `help:` / `note:` lines under the source excerpt. Set just before `fail`.
+    diag_labels: DiagLabel[],
+    diag_help: u8[][],
+    diag_notes: u8[][],
+    // Text under the primary span (`expected `u64`, found `string``).
+    diag_primary: u8[],
     lib_owner: u8[][]
 }
 
@@ -3620,6 +3627,7 @@ fn require_write<a>(c: (&a mut C), slot: u64) -> unit {
         } else {
             if ownership::initialize(&mut c.check, target) != 0 {
                 pointer_conflict(&mut c, target, view("modify"), 0);
+                borrow_context(&mut c, target, view("modify"));
                 fail(
                     &mut c,
                     view("field assignment conflicts with live borrow or moved storage")
@@ -3669,6 +3677,7 @@ fn require_write<a>(c: (&a mut C), slot: u64) -> unit {
             loan := ownership::borrow_place(&mut c.check, place, 1);
             if loan == 0 {
                 pointer_conflict(&mut c, place, view("modify"), 0);
+                borrow_context(&mut c, place, view("modify"));
                 fail(&mut c, view("mutation conflicts with live borrow"));
             }
             ownership::end_loan(&mut c.check, loan);
@@ -4475,55 +4484,165 @@ fn is<a, b>(c: (&a mut C), s: &b [u8]) -> bool {
     t := tok_text(&mut c, p);
     return same(view(t), s);
 }
-fn fail<a, b>(c: (&a mut C), msg: &b [u8]) -> unit {
-    p := c.pos;
-    m := tok_text(&mut c, p);
-    t := &c.toks[p];
-    st := t.start;
-    exchange(&mut c.out, u8[]);
-    // file:line:column: message (byte offset kept for tools)
+// Edit distance between two names (insertions, deletions, substitutions), for "did you mean".
+fn edit_distance<a, b>(x: &a [u8], y: &b [u8]) -> u64 {
+    mut row = u64[];
+    for j in y.len() + 1 {
+        row.push(j);
+    }
+    for i in x.len() {
+        mut diagonal = row[0];
+        row[0] = i + 1;
+        for j in y.len() {
+            above := row[j + 1];
+            mut best = above + 1;
+            if row[j] + 1 < best {
+                best = row[j] + 1;
+            }
+            mut swap = diagonal;
+            if x[i] != y[j] {
+                swap = diagonal + 1;
+            }
+            if swap < best {
+                best = swap;
+            }
+            row[j + 1] = best;
+            diagonal = above;
+        }
+    }
+    return row[y.len()];
+}
+// The closest name this scope could have meant: live locals, then this module's functions,
+// constants and types. Close means at most a third of the name's length edited (at least one).
+fn suggest_name<a, b, d>(c: (&a mut C), module: &b [u8], name: &d [u8]) -> u8[] {
+    mut limit = name.len() / 3;
+    if limit == 0 {
+        limit = 1;
+    }
+    mut best = u8[];
+    mut best_cost = limit + 1;
+    for i in c.locals.len() {
+        candidate := c.locals[i].name.copy();
+        if (candidate.len() != 0) & (candidate[0] != 46) {
+            cost := edit_distance(view(name), view(candidate));
+            if cost < best_cost {
+                best_cost = cost;
+                best = candidate;
+            }
+        }
+    }
+    for i in c.funcs.len() {
+        if same(view(c.funcs[i].module), module) {
+            candidate := c.funcs[i].name.copy();
+            cost := edit_distance(view(name), view(candidate));
+            if cost < best_cost {
+                best_cost = cost;
+                best = candidate;
+            }
+        }
+    }
+    for i in c.constants.len() {
+        if same(view(c.constants[i].module), module) {
+            candidate := c.constants[i].name.copy();
+            cost := edit_distance(view(name), view(candidate));
+            if cost < best_cost {
+                best_cost = cost;
+                best = candidate;
+            }
+        }
+    }
+    for i in c.decls.len() {
+        if same(view(c.decls[i].module), module) {
+            candidate := c.decls[i].name.copy();
+            cost := edit_distance(view(name), view(candidate));
+            if cost < best_cost {
+                best_cost = cost;
+                best = candidate;
+            }
+        }
+    }
+    return best;
+}
+// A secondary label: another source position that explains the error (`borrowed here`).
+struct DiagLabel {
+    pos: u64,
+    file: u64,
+    text: u8[]
+}
+fn diag_label<a, b>(c: (&a mut C), pos: u64, text: &b [u8]) -> unit {
+    file := c.file;
+    c.diag_labels.push(DiagLabel { pos: pos, file: file, text: text.copy() });
+    return ();
+}
+fn diag_help<a, b>(c: (&a mut C), text: &b [u8]) -> unit {
+    c.diag_help.push(text.copy());
+    return ();
+}
+fn diag_note<a, b>(c: (&a mut C), text: &b [u8]) -> unit {
+    c.diag_notes.push(text.copy());
+    return ();
+}
+// Line (1-based), column (1-based) and the bounds of the line holding byte `at` of `src`.
+struct DiagPos {
+    line: u64,
+    column: u64,
+    begin: u64,
+    finish: u64
+}
+fn diag_pos(src: &u8[], at: u64) -> DiagPos {
     mut line = 1;
     mut column = 1;
-    for i in st {
-        if c.src[i] == 10 {
+    for i in at {
+        if src[i] == 10 {
             line += 1;
             column = 1;
         } else {
             column += 1;
         }
     }
-    file := c.file;
-    path := file_path(&mut c, file);
-    o(&mut c, view(path));
-    c.out.push(58);
-    on(&mut c, line);
-    c.out.push(58);
-    on(&mut c, column);
-    o(&mut c, view(": "));
-    o(&mut c, msg);
-    o(&mut c, view(" at byte "));
-    on(&mut c, st);
-    o(&mut c, view(" near '"));
-    o(&mut c, view(m));
-    o(&mut c, view("'\n"));
-    // The source line, with a caret under the error column.
-    mut begin = st;
+    mut begin = at;
     while 0 < begin {
-        if c.src[begin - 1] == 10 {
+        if src[begin - 1] == 10 {
             break;
         }
         begin -= 1;
     }
-    mut finish = st;
-    while finish < c.src.len() {
-        if c.src[finish] == 10 {
+    mut finish = at;
+    while finish < src.len() {
+        if src[finish] == 10 {
             break;
         }
         finish += 1;
     }
-    o(&mut c, view("  | "));
-    for i in finish - begin {
-        b := c.src[begin + i];
+    return DiagPos { line: line, column: column, begin: begin, finish: finish };
+}
+fn diag_digits(n: u64) -> u64 {
+    mut d = 1;
+    mut v = n;
+    while 9 < v {
+        v = v / 10;
+        d += 1;
+    }
+    return d;
+}
+// `width` spaces then " | ", the gutter of a line without a number.
+fn diag_gutter<a>(c: (&a mut C), width: u64) -> unit {
+    for i in width {
+        c.out.push(32);
+    }
+    o(&mut c, view(" |"));
+    return ();
+}
+// One numbered source line and its underline: `^` for the primary span, `-` for a label.
+fn diag_excerpt<a, b, d>(c: (&a mut C), width: u64, at: &d DiagPos, span: u64, mark: u8, label: &b [u8]) -> unit {
+    n := diag_digits(at.line);
+    for i in width - n {
+        c.out.push(32);
+    }
+    on(&mut c, at.line);
+    o(&mut c, view(" | "));
+    for i in at.finish - at.begin {
+        b := c.src[at.begin + i];
         if b == 9 {
             c.out.push(32);
         } else {
@@ -4531,21 +4650,130 @@ fn fail<a, b>(c: (&a mut C), msg: &b [u8]) -> unit {
         }
     }
     c.out.push(10);
-    o(&mut c, view("  | "));
-    for i in column - 1 {
+    diag_gutter(&mut c, width);
+    c.out.push(32);
+    for i in at.column - 1 {
         c.out.push(32);
     }
-    mut width = m.len();
-    if width == 0 {
-        width = 1;
+    for i in span {
+        c.out.push(mark);
     }
-    if 60 < width {
-        width = 60;
-    }
-    for i in width {
-        c.out.push(94);
+    if label.len() != 0 {
+        c.out.push(32);
+        o(&mut c, label);
     }
     c.out.push(10);
+    return ();
+}
+// Every compile error, rendered the way rustc does: the message, the location, the source line
+// with the offending token underlined, any secondary labels (other lines that explain it, in source
+// order), and `help:` / `note:` lines. A rejected program exits with status 1.
+fn fail<a, b>(c: (&a mut C), msg: &b [u8]) -> unit {
+    p := c.pos;
+    m := tok_text(&mut c, p);
+    st := c.toks[p].start;
+    exchange(&mut c.out, u8[]);
+    here := diag_pos(&c.src, st);
+    file := c.file;
+    path := file_path(&mut c, file);
+    // Labels in this file, by line, and the widest line number the excerpt prints.
+    labels := exchange(&mut c.diag_labels, DiagLabel[]);
+    helps := exchange(&mut c.diag_help, u8[][]);
+    primary := exchange(&mut c.diag_primary, u8[]);
+    notes := exchange(&mut c.diag_notes, u8[][]);
+    mut width = diag_digits(here.line);
+    mut shown = DiagLabel[];
+    for i in labels.len() {
+        l := &labels[i];
+        if (l.file == file) & (l.pos < c.toks.len()) & (l.pos != p) {
+            lp := diag_pos(&c.src, c.toks[l.pos].start);
+            if width < diag_digits(lp.line) {
+                width = diag_digits(lp.line);
+            }
+            shown.push(DiagLabel { pos: l.pos, file: l.file, text: l.text.copy() });
+        }
+    }
+    o(&mut c, view("error: "));
+    o(&mut c, msg);
+    c.out.push(10);
+    for i in width {
+        c.out.push(32);
+    }
+    o(&mut c, view("--> "));
+    o(&mut c, view(path));
+    c.out.push(58);
+    on(&mut c, here.line);
+    c.out.push(58);
+    on(&mut c, here.column);
+    c.out.push(10);
+    diag_gutter(&mut c, width);
+    c.out.push(10);
+    // The primary line and the labels, in source order; a gap of more than one line is `...`.
+    mut done = false;
+    mut last_line = 0;
+    mut k = 0;
+    while (k < shown.len()) || !done {
+        mut next_label = shown.len();
+        mut best = 0;
+        for j in shown.len() {
+            lj := c.toks[shown[j].pos].start;
+            if (shown[j].pos != 0) & ((next_label == shown.len()) || (lj < best)) {
+                next_label = j;
+                best = lj;
+            }
+        }
+        if !done & ((next_label == shown.len()) || (st <= best)) {
+            if (last_line != 0) & (last_line + 1 < here.line) {
+                o(&mut c, view("...\n"));
+            }
+            mut span = m.len();
+            if span == 0 {
+                span = 1;
+            }
+            if 60 < span {
+                span = 60;
+            }
+            diag_excerpt(&mut c, width, &here, span, 94, view(primary));
+            last_line = here.line;
+            done = true;
+            continue;
+        }
+        lp := diag_pos(&c.src, best);
+        if (last_line != 0) & (last_line + 1 < lp.line) {
+            o(&mut c, view("...\n"));
+        }
+        ltok := shown[next_label].pos;
+        mut lspan = tok_text(&mut c, ltok).len();
+        if lspan == 0 {
+            lspan = 1;
+        }
+        if 60 < lspan {
+            lspan = 60;
+        }
+        text := shown[next_label].text.copy();
+        diag_excerpt(&mut c, width, &lp, lspan, 45, view(text));
+        last_line = lp.line;
+        shown[next_label].pos = 0;
+        k += 1;
+    }
+    for i in helps.len() {
+        diag_gutter(&mut c, width);
+        c.out.push(10);
+        for j in width {
+            c.out.push(32);
+        }
+        o(&mut c, view(" = help: "));
+        o(&mut c, view(helps[i]));
+        c.out.push(10);
+    }
+    for i in notes.len() {
+        for j in width {
+            c.out.push(32);
+        }
+        o(&mut c, view(" = note: "));
+        o(&mut c, view(notes[i]));
+        c.out.push(10);
+    }
     host::print(view(c.out));
     // A rejected program is an ordinary failure (status 1), not a crash of the compiler.
     host::exit(1);
@@ -5696,6 +5924,94 @@ fn borrow_walk<a, b>(c: (&a mut C), ty: u64, trail: (&b mut u64[])) -> bool {
     }
     return false;
 }
+// A type as the programmer writes it: `u64`, `string`, `u8[]`, `&mut Pair<u64>`, `T?`. Falls back to
+// the interface spelling for the kinds that have no surface syntax.
+fn source_type_name<a>(c: (&a mut C), ty: u64) -> u8[] {
+    mut out = u8[];
+    if ty == 0 {
+        push_bytes(&mut out, view("u64"));
+        return out;
+    }
+    k := ty_kind(&mut c, ty);
+    arg := ty_arg(&mut c, ty);
+    if k == 18 {
+        if ty_mode(&mut c, ty) != 0 {
+            out.push(105);
+        } else {
+            out.push(117);
+        }
+        decimal(&mut out, arg);
+        return out;
+    }
+    if k == 21 {
+        if arg == 32 {
+            push_bytes(&mut out, view("f32"));
+        } else {
+            push_bytes(&mut out, view("f64"));
+        }
+        return out;
+    }
+    if k == 19 {
+        push_bytes(&mut out, view("bool"));
+        return out;
+    }
+    if k == 22 {
+        push_bytes(&mut out, view("char"));
+        return out;
+    }
+    if k == 3 {
+        push_bytes(&mut out, view("string"));
+        return out;
+    }
+    if k == 4 {
+        push_bytes(&mut out, view("u8[]"));
+        return out;
+    }
+    if k == 6 {
+        inner := source_type_name(&mut c, arg);
+        push_bytes(&mut out, view(inner));
+        push_bytes(&mut out, view("[]"));
+        return out;
+    }
+    if k == 7 {
+        out.push(38);
+        if ty_mode(&mut c, ty) != 0 {
+            push_bytes(&mut out, view("mut "));
+        }
+        inner := source_type_name(&mut c, arg);
+        push_bytes(&mut out, view(inner));
+        return out;
+    }
+    if k == 8 {
+        owner := c.decls[arg].module.copy();
+        args := type_args(&mut c, ty);
+        if same(view(owner), view(".union")) & (args.len() == 1) {
+            inner := source_type_name(&mut c, args[0]);
+            push_bytes(&mut out, view(inner));
+            out.push(63);
+            return out;
+        }
+        here := module_copy(&mut c);
+        if !same(view(owner), view(here)) & (owner.len() != 0) & (owner[0] != 46) {
+            push_bytes(&mut out, view(owner));
+            push_bytes(&mut out, view("::"));
+        }
+        push_bytes(&mut out, view(c.decls[arg].name));
+        if args.len() != 0 {
+            out.push(60);
+            for i in args.len() {
+                if i != 0 {
+                    push_bytes(&mut out, view(", "));
+                }
+                inner := source_type_name(&mut c, args[i]);
+                push_bytes(&mut out, view(inner));
+            }
+            out.push(62);
+        }
+        return out;
+    }
+    return type_name(&mut c, ty);
+}
 fn require_type<a>(c: (&a mut C), actual: u64, expected: u64) -> unit {
     // While a type hint is pending the function is recompiled anyway; mismatches are not final.
     if c.tolerant != 0 {
@@ -5746,6 +6062,14 @@ fn require_type<a>(c: (&a mut C), actual: u64, expected: u64) -> unit {
                 }
             }
         }
+        mut said = copy_bytes(view("expected `"));
+        wanted := source_type_name(&mut c, want);
+        push_bytes(&mut said, view(wanted));
+        push_bytes(&mut said, view("`, found `"));
+        got := source_type_name(&mut c, actual);
+        push_bytes(&mut said, view(got));
+        push_bytes(&mut said, view("`"));
+        exchange(&mut c.diag_primary, said);
         fail(&mut c, view("type mismatch"));
     }
     return ();
@@ -11856,6 +12180,20 @@ fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
         }
     }
     if f == 0 {
+        mut back = c.pos;
+        while (0 < back) & !((kind_at(&mut c, back) == 1) & same(view(tok_text(&mut c, back)), view(name))) {
+            back -= 1;
+        }
+        exchange(&mut c.pos, back);
+        guess := suggest_name(&mut c, view(m), view(name));
+        if guess.len() != 0 {
+            mut help = copy_bytes(view("a name with a similar spelling is in `"));
+            push_bytes(&mut help, view(m));
+            push_bytes(&mut help, view("`: `"));
+            push_bytes(&mut help, view(guess));
+            push_bytes(&mut help, view("`"));
+            diag_help(&mut c, view(help));
+        }
         fail(&mut c, view("unknown function"));
     }
     info := &c.funcs[f - 1];
@@ -14432,6 +14770,20 @@ fn is_pointer_loan<a>(c: (&a mut C), loan: u64) -> u64 {
 // The binding whose storage contains `place` (`app`, or `info` for a field of it), or the binding
 // whose referent does (`*out`). Empty when the place is a temporary nobody named.
 fn place_name<a>(c: (&a mut C), place: u64) -> u8[] {
+    // The local that owns the storage names it first (`v`, not `*r` for an `r := &v`); a name
+    // through a reference is the fallback, for storage this function reaches only by reference.
+    mut k = c.locals.len();
+    while k != 0 {
+        k = k - 1;
+        id := c.locals[k].id;
+        name := c.locals[k].name.copy();
+        if (name.len() != 0) & (name[0] != 46) {
+            root := place_of(&mut c, id);
+            if (root != 0) & ownership::ancestor(&c.check, root, place) {
+                return name;
+            }
+        }
+    }
     mut i = c.locals.len();
     while i != 0 {
         i = i - 1;
@@ -14439,10 +14791,6 @@ fn place_name<a>(c: (&a mut C), place: u64) -> u8[] {
         id := l.id;
         name := l.name.copy();
         if (name.len() != 0) & (name[0] != 46) {
-            root := place_of(&mut c, id);
-            if (root != 0) & ownership::ancestor(&c.check, root, place) {
-                return name;
-            }
             target := target_of(&mut c, id);
             if (target != 0) & ownership::ancestor(&c.check, target, place) {
                 mut deref = u8[];
@@ -14470,6 +14818,96 @@ fn token_line<a>(c: (&a mut C), at: u64) -> u64 {
 // that holds the pointer and the line of the `cptr` that made it; otherwise return and let the
 // caller report the ordinary conflict. `action` is the verb phrase: "assign to", "move", ...
 // `reading` restricts the check to writable pointers (a read conflicts only with `cptr_mut`).
+// The token naming `name` in the declaration that a local's `born` position follows: the binding
+// is recorded after its initializer, so the name sits a little before it.
+fn decl_token<a, b>(c: (&a mut C), from: u64, name: &b [u8]) -> u64 {
+    mut at = from;
+    mut steps = 0;
+    while (0 < at) & (steps < 256) {
+        at -= 1;
+        steps += 1;
+        if (kind_at(&mut c, at) == 1) & same(view(tok_text(&mut c, at)), view(name)) {
+            return at;
+        }
+    }
+    return from;
+}
+// The newest local named `name`, or 0.
+fn local_named<a, b>(c: (&a mut C), name: &b [u8]) -> u64 {
+    mut i = c.locals.len();
+    while 0 < i {
+        i -= 1;
+        if same(view(c.locals[i].name), view(name)) {
+            return i + 1;
+        }
+    }
+    return 0;
+}
+// Labels for a write that a live borrow forbids: where each local holding a borrow of `place`
+// took it, and where that local is used next - the use that keeps the borrow alive.
+fn borrow_context<a, b>(c: (&a mut C), place: u64, action: &b [u8]) -> unit {
+    if (place == 0) || (c.raw != 0) {
+        return ();
+    }
+    mut subject = place_name(&mut c, place);
+    mut found = false;
+    for i in c.check.loans.len() {
+        l := &c.check.loans[i];
+        live := l.live;
+        source := l.source;
+        if (live != 0) & (ownership::ancestor(&c.check, place, source) || ownership::ancestor(&c.check, source, place)) {
+            for j in c.bonds.len() {
+                b := &c.bonds[j];
+                h := b.holder;
+                if (b.loan == i + 1) & !found {
+                    state := ownership::status(&c.check, h);
+                    if (state == 1) || (state == 3) {
+                        holder := place_name(&mut c, h);
+                        local := local_named(&mut c, view(holder));
+                        if (holder.len() != 0) & (local != 0) {
+                            born := c.locals[local - 1].born;
+                            last := c.locals[local - 1].last;
+                            at := decl_token(&mut c, born, view(holder));
+                            mut text = copy_bytes(view("`"));
+                            push_bytes(&mut text, view(holder));
+                            push_bytes(&mut text, view("` borrows `"));
+                            push_bytes(&mut text, view(subject));
+                            push_bytes(&mut text, view("` here"));
+                            diag_label(&mut c, at, view(text));
+                            if last > c.pos {
+                                mut later = copy_bytes(view("the borrow is still in use here"));
+                                diag_label(&mut c, last, view(later));
+                            }
+                            mut help = copy_bytes(view("finish using `"));
+                            push_bytes(&mut help, view(holder));
+                            push_bytes(&mut help, view("` before you "));
+                            push_bytes(&mut help, action);
+                            push_bytes(&mut help, view(" `"));
+                            push_bytes(&mut help, view(subject));
+                            push_bytes(&mut help, view("`, or borrow it again afterwards"));
+                            diag_help(&mut c, view(help));
+                            found = true;
+                            // The conflict is found once the statement is parsed; point at its
+                            // start (`v.push(3)`), not at the token after it.
+                            mut start = c.pos;
+                            while 0 < start {
+                                k := kind_at(&mut c, start - 1);
+                                if (k == 59) || (k == 123) || (k == 125) {
+                                    break;
+                                }
+                                start -= 1;
+                            }
+                            if start < c.pos {
+                                exchange(&mut c.pos, start);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return ();
+}
 fn pointer_conflict<a, b>(c: (&a mut C), place: u64, action: &b [u8], reading: u64) -> unit {
     if (c.raw != 0) || (place == 0) {
         return ();
@@ -19796,6 +20234,19 @@ fn primary<a>(c: (&a mut C)) -> Val {
     if r != 0 {
         return record(&mut c, r - 1, 18446744073709551615);
     }
+    // Point at the name itself, and offer the closest one in scope.
+    mut back = c.pos;
+    while (0 < back) & !((kind_at(&mut c, back) == 1) & same(view(tok_text(&mut c, back)), view(first))) {
+        back -= 1;
+    }
+    exchange(&mut c.pos, back);
+    guess := suggest_name(&mut c, view(m), view(first));
+    if guess.len() != 0 {
+        mut help = copy_bytes(view("a name with a similar spelling is in scope: `"));
+        push_bytes(&mut help, view(guess));
+        push_bytes(&mut help, view("`"));
+        diag_help(&mut c, view(help));
+    }
     fail(&mut c, view("undefined name"));
     return val(0, 0);
 }
@@ -21299,6 +21750,7 @@ fn reserve_compound<a>(c: (&a mut C), slot: u64, through: u64) -> u64 {
         loan = ownership::borrow_place(&mut c.check, place, 0);
     }
     if loan == 0 {
+        borrow_context(&mut c, place, view("modify"));
         fail(&mut c, view("compound assignment target conflicts with live borrow"));
     }
     pin := imm(&mut c, 0);
@@ -23645,6 +24097,18 @@ fn statement<a>(c: (&a mut C)) -> unit {
         mutable := entry.mutable;
         if mutable == 0 {
             if kind(&mut c) != 46 {
+                born := c.locals[l - 1].born;
+                at := decl_token(&mut c, born, view(name));
+                mut text = copy_bytes(view("`"));
+                push_bytes(&mut text, view(name));
+                push_bytes(&mut text, view("` is declared here, without `mut`"));
+                diag_label(&mut c, at, view(text));
+                mut help = copy_bytes(view("declare it mutable: `mut "));
+                push_bytes(&mut help, view(name));
+                push_bytes(&mut help, view(" = ...`"));
+                diag_help(&mut c, view(help));
+                here := c.pos;
+                exchange(&mut c.pos, here - 1);
                 fail(&mut c, view("assignment requires mut"));
             }
         }
@@ -23816,6 +24280,7 @@ fn assignment_tail<a>(c: (&a mut C), l: u64, id: u64, ty: u64, target: u64, thro
             if place != 0 {
                 if !ownership::can_cleanup(&c.check, place) {
                     pointer_conflict(&mut c, place, view("assign to"), 0);
+                    borrow_context(&mut c, place, view("assign to"));
                     fail(&mut c, view("assignment conflicts with live borrow"));
                 }
             }
@@ -27496,6 +27961,10 @@ pub fn main() -> u64 {
         iface_env_names: u8[][],
         virt_path: u8[][],
         virt_text: u8[][],
+        diag_labels: DiagLabel[],
+        diag_help: u8[][],
+        diag_notes: u8[][],
+        diag_primary: u8[],
         lib_owner: u8[][],
     };
     exchange(&mut c.target, host::target());
