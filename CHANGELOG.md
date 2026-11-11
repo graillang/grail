@@ -52,6 +52,33 @@
   splits the same work between `rustc`'s incremental mode and Cargo, so a pair of programs would
   compare nothing. That section also says plainly that neither flag is in this tree yet, so the book
   does not claim to verify it.
+- Dear ImGui, called from Grail: the immediate-mode UI layer the editor needs, over the FFI the
+  previous increment landed. `abundance/src/imgui.grl` (new) is the context, the frame, `ImGuiIO` and
+  the draw data; `abundance/src/imgui_widgets.grl` (new) the widgets and ImGui's ID stack. The C++
+  boundary is `abundance/tools/imgui_shim.h`/`.cpp` - one ImGui entry point per function, and a plain
+  C `struct` for every record that crosses - built with the pinned Dear ImGui 1.93.0 checkout into two
+  shared libraries (`libgrail_imgui.so`, `libgrail_imgui_platform.so`) by
+  `abundance/tools/build-imgui.mjs`, which also prints and diffs the record table. No struct is laid
+  out by hand: `GrIo` is ImGuiIO's 240-byte prefix through `MousePos`, asserted field by field with
+  `offsetof` at compile time, printed by a C program against a C++ program's own table, and checked
+  again at run time by `imgui_layout_probe.grl` in both directions. `imgui_test.grl` (new) runs
+  widgets, IDs, a table, a child, an `InputU64` (ImGui's `InputScalar` over `ImGuiDataType_U64`), a
+  real click on a button's own rectangle, and then prints every vertex, every triangle and every draw
+  command of a settled frame: 2 draw lists, 310 vertices, 501 indices, 167 triangles, byte-identical
+  to the same frames through ImGui's own C++ API in `abundance/tests/parity/imgui.cpp`. That is 11
+  reference programs now, and the ten ports are unchanged.
+- Dear ImGui reaches the GPU: `abundance/src/imgui_platform.grl` (new) binds `ImGui_ImplSDL3_InitForVulkan`,
+  `ImGui_ImplVulkan_Init`, both backends' `NewFrame`, `ImGui_ImplVulkan_RenderDrawData` and both
+  shutdowns, in a second shared library (`libgrail_imgui_platform.so`) whose own dependencies are
+  `libSDL3` and `libvulkan`, so no headless program loads either. `ImGui_ImplVulkan_InitInfo` crosses as
+  `VulkanInitInfo` - the fields a host has - and the shim translates it into the real struct and zeroes
+  the rest; the record's 104-byte layout is round-tripped through the C offsets before the backend is
+  initialised. `imgui_frame_probe.grl` (new) runs the frame the editor needs end to end: SDL3 window,
+  device, swapchain, the RHI's clear render pass, ImGui recording into the command buffer inside it,
+  submit, present, and a readback of the presented image - 5 frames, 208 vertices and 348 indices per
+  settled frame, 22908 of 230400 pixels not the clear colour, and the last two frames' images
+  byte-identical. `imgui.status`/`imgui.frame.status` verdicts; a machine with no display server or
+  driver skips with the platform's own words.
 - RHI increment 4b, in four steps that each run before the next. The gate was the FFI's record
   pointer (`cptr(&record)`, record out-parameters, arrays of handles), so the whole Vulkan create-info
   graph is now records and pointers into them rather than byte layout:

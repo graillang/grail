@@ -12,7 +12,10 @@ graphics contract (`graphics/include/grail/`), and the three do not overlap:
 | The C ABI backend (`graphics/`, `GR_BACKEND_NULL`) | C/C++ hosts | the `grail_rhi.h` contract | the contract, a null backend, and a Vulkan device probe in C |
 
 The FFI route is the one that makes Grail the language of the renderer rather than a client of
-one. It is also the only route where the *language* is the thing being tested: every limitation
+one. The first consumer of that route is the editor's UI: `docs/imgui.md` has Dear ImGui called
+from Grail over these same modules - the window from `rhi_sdl3`, the device, the swapchain and the
+clear render pass from `rhi_device`, `rhi_swapchain` and `rhi_render` - with ImGui's own Vulkan
+renderer recording into a command buffer inside that pass. It is also the only route where the *language* is the thing being tested: every limitation
 below is a statement about Grail's FFI, not about SDL3 or Vulkan - and the two compiler bugs this
 increment walked into ("What the FFI does not do safely") are statements about the language too.
 
