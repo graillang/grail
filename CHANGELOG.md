@@ -52,6 +52,66 @@
   splits the same work between `rustc`'s incremental mode and Cargo, so a pair of programs would
   compare nothing. That section also says plainly that neither flag is in this tree yet, so the book
   does not claim to verify it.
+- RHI increment 4b, in four steps that each run before the next. The gate was the FFI's record
+  pointer (`cptr(&record)`, record out-parameters, arrays of handles), so the whole Vulkan create-info
+  graph is now records and pointers into them rather than byte layout:
+  **1. device, queue, swapchain, images and views.** `abundance/src/rhi_device.grl` (new) creates the
+  logical device with `pQueueCreateInfos` pointing at a `VkDeviceQueueCreateInfo` record whose
+  `pQueuePriorities` points at a one-field record holding the `float`, and `ppEnabledExtensionNames`
+  pointing at a record of `CStr` fields - the array itself - to enable `VK_KHR_swapchain`;
+  `abundance/src/rhi_swapchain.grl` (new) creates the swapchain from the four decisions
+  `abundance_rhi_surface` already makes (B8G8R8A8_SRGB, currentExtent, minImageCount+1, MAILBOX with
+  FIFO fallback), takes its images through a record of handle fields (`vkGetSwapchainImagesKHR`
+  writing them in place, four on this machine) and makes one 2D colour view per image. The surface's
+  `supportedUsageFlags` decides whether a transfer source can be asked for; the report says
+  `rhi.swapchain.readback supported` or names the missing bit. The probe's
+  handle ledger is now per class - window, instance, surface, device, queue, swapchain, image, image
+  view, and a total - with the queue closed by `vkDestroyDevice` and the images by
+  `vkDestroySwapchainKHR`, so `rhi.handles.total created 14 destroyed 14 live 0` is a fact about this
+  machine rather than an assumption.
+  **2. a clear, a fence and a present loop.** `abundance/src/rhi_render.grl` (new) has the render pass
+  (`pAttachments`/`pSubpasses`/`pDependencies`, each a record passed with `cptr(&record)`), one
+  framebuffer per image view (`pAttachments` as a record of one `ImageView` field), a command pool and
+  one command buffer, a clear colour as a `VkClearValue` record, `VkSubmitInfo`/`VkPresentInfoKHR` with
+  their arrays of handles as one-field records, and the barriers that move the image from
+  COLOR_ATTACHMENT_OPTIMAL to TRANSFER_SRC_OPTIMAL and PRESENT_SRC_KHR. The probe runs the
+  acquire/submit/present loop for `GRAIL_RHI_FRAMES` frames (default 3), waiting on a
+  fence each frame, and prints one `rhi.frame` line per frame plus
+  `rhi.swapchain.result frames 3 of 3`. The pool carries
+  VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT: one command buffer is re-recorded every frame, and
+  beginning it again without that bit is undefined behaviour (it segfaults on RADV).
+  **3. one triangle, drawn from the committed SPIR-V.** `abundance/src/rhi_pipeline.grl` (new) creates
+  both shader modules from `abundance_rhi_shader_blob`'s bytes, and builds
+  `VkGraphicsPipelineCreateInfo`'s nine pointers out of records: the two stages as a record of two
+  `VkPipelineShaderStageCreateInfo`s (`pName` a `CStr` field), the vertex input from the layout the
+  shader build extracted (locations 0/1/2, offsets 0/12/20, formats R32G32B32/R32G32/R32G32B32A32,
+  stride 36 - checked to be contiguous and to sum to the stride), triangle list, a static viewport and
+  scissor, fill, no culling, one sample, blending off, no depth and no dynamic state. The vertex data
+  is a 108-byte record of three 36-byte vertices and is copied in with `vkCmdUpdateBuffer` from
+  `cptr(&triangle)` - no staging buffer and no mapped memory - followed by a memory barrier to the
+  vertex stage. The probe reads the entry point out of the SPIR-V's own `OpEntryPoint` and passes the
+  bytes it found, so a renamed shader cannot leave a stale name behind.
+  **4. the readback.** Every presented frame is copied out of the swapchain image
+  (`vkCmdCopyImageToBuffer`, one `VkBufferImageCopy` region record, into a host-visible coherent
+  buffer) after a COLOR_ATTACHMENT_OPTIMAL -> TRANSFER_SRC_OPTIMAL barrier, then barriered on to
+  PRESENT_SRC_KHR, and after the fence the buffer is mapped, memcpy'd into Grail bytes and checked:
+  626688 cleared pixels and 294912 covered ones out of 921600, none of any other colour, the covered
+  count equal to the triangle's own area (0.32 x width x height), the corner (4,4) reading 0,0,0,255
+  and the centre (640,270) reading 0,0,255,255 in B8G8R8A8 order, and the same FNV-1a digest for all
+  three frames. "It presented" is not the evidence; the bytes are.
+- FFI, found by increment 4b and recorded in `docs/rhi.md` ("What the FFI does not do safely"),
+  both reproducible without Vulkan and neither worked around by laying bytes out by hand:
+  **`&mut` of an extern record field of a plain record does not reach the field's storage.** A write
+  through such a reference lands in the proxy slot, not in the container - `set_y(&mut bag.pair, 7)`
+  leaves `bag.pair.y` at 0 and puts the 7 in the next field. A slot array written through such a
+  reference is a record of null handles, which is how it was found: a null `VkFramebuffer` handle, and
+  a segfault inside the driver. Direct field writes and passing the interior record by value are both
+  correct; only the reference is wrong. **A `CStr` taken from a string literal must not outlive the
+  statement that made it**: `cstr` is zero-copy and a literal's bytes are a temporary, so keeping the
+  `CStr` in a binding and using it later reads freed memory - it read correctly often enough to be
+  missed here, and the pipeline's entry-point names now come out of the SPIR-V into byte-sequence
+  bindings instead. Both are `compiler/` bugs and `compiler/` is off limits in this increment, so they
+  are reported rather than patched.
 - FFI: a C callback's extern-record parameter is borrowed, not owned. The parameter prologue marked
   every parameter as an owning binding, so the epilogue ran the record's drop glue on the address C
   handed over — freeing the caller's struct (or its stack) — and the process then aborted inside the
@@ -153,6 +213,70 @@
   leaks no body, no local name and no synthetic declaration. Bodies and generic templates still come from source: that
   is stage 3 (bodies in interfaces) and stage 4 (one object per module, and the cache).
 
+- RHI increment 4a, the shader side: HLSL compiles offline to SPIR-V, the bytes are committed, and
+  the one create info that carries them is expressible today. `abundance/tests/shaders/
+  rhi_triangle.hlsl` is the source of truth (one vertex and one pixel stage);
+  `bun abundance/tools/build-shaders.mjs` compiles it with `glslangValidator -D -V --target-env
+  vulkan1.2 -S vert -e vs_main` (and `-S frag -e ps_main`), runs `spirv-val` on each module, extracts
+  the `VertexIn` layout, cross-checks that extraction against the compiled stage's own `OpName` /
+  `OpDecorate Location` / `OpTypeVector` decorations, and writes the `.spv` files, a manifest
+  (`abundance/tests/shaders/shaders.json`: compiler version, exact flags, entry points, sizes,
+  fnv1a64 hashes, layout, cross-check status) and `abundance/src/rhi_shader_blob.grl` (the bytes as
+  constants plus the layout). All four artifacts are committed, so a clean checkout builds, tests and
+  renders with no shader compiler installed; the generator is a maintenance tool, not a build step.
+  `abundance/src/rhi_shader.grl` (new) holds the loader shape - `VkShaderModuleCreateInfo` as an
+  `extern "C" record` (40 bytes; sType 0, pNext 8, flags 16, codeSize 24, pCode 32) whose `pCode` is
+  the one pointer inside a Vulkan create info the FFI can already fill, `unsafe cptr(&bytes)` - plus
+  a small SPIR-V decode (magic, version, generator, bound, schema, first `OpEntryPoint`) that checks
+  a module the way a loader can without a driver. `abundance/tests/rhi_shader_probe.grl` (new) is
+  the fourth probe and the only graphics check that links nothing at all: it runs under `env -i`,
+  with no display, no ICD and no shader compiler, reconstructs the bytes from the generated
+  constants, hashes them with Abundance's own `fnv1a64` and matches the recorded hash, decodes the
+  header and entry points, builds the create info and checks `codeSize`, and validates the layout
+  (declaration-order locations, contiguous offsets, stride equal to the sum). The suite runs it in
+  the default set and also ties its printed hash to the manifest; the generator's own `--check` is
+  two-tiered - everything that needs no toolchain always runs, and the recompile demands identical
+  bytes only when this machine's glslang matches the version the manifest records, otherwise it
+  prints `shader hash differs (glslang 11:16.6.0 recorded, <detected> present): not compared` and
+  passes. Verified with `DISPLAY`/`WAYLAND_DISPLAY` unset, `VK_ICD_FILENAMES=/nonexistent` and
+  `glslangValidator`/`spirv-val`/`spirv-dis` off `PATH`: `rhi_shader: ok`, the other three probes
+  skip, `10 test program(s) passed, 4 RHI probe(s) run`. Handle accounting in the swapchain probe is
+  now per class (`rhi.handles.window`, `.instance`, `.surface`, then `.total`), and a disagreement in
+  any class or in the total fails the run, so increment 4b's device, swapchain, images, views,
+  semaphores and fences arrive as classes rather than as one count they could hide in.
+- RHI increment 3: `abundance/src/rhi_surface.grl` (new) creates a real `VkSurfaceKHR` from the
+  SDL3 window and reads back what that surface accepts. The instance is now created with the
+  platform's own extension set: `abundance_rhi_vulkan::instance_create_info_with(extensions, count)`
+  fills `ppEnabledExtensionNames` from a `CPtr`, and `SDL_Vulkan_GetInstanceExtensions` returns
+  exactly that shape — C's `const char *const *` — so the array is C's memory and Grail never has to
+  build an array of strings (this host: 2 extensions for the `x11` driver, and the loader offers
+  `VK_KHR_surface`, `VK_KHR_xlib_surface` and `VK_KHR_wayland_surface`, each named in the report).
+  `SDL_Vulkan_CreateSurface` reaches the platform `vkCreate*SurfaceKHR` for whichever video driver
+  served the window, so no platform extension is named in Grail. `VkSurfaceCapabilitiesKHR` is an
+  `extern "C" record` (52 bytes of scalars, offsets checked with a C program against
+  `offsetof`/`sizeof`) rather than a byte buffer, and the format and present-mode lists are
+  fixed-capacity records of scalars — the record *is* the array, the count query and the seeded fill
+  call are the idiom the physical device list already used. On top of that the module makes the four
+  decisions a swapchain needs, each a stated rule instead of a constant: format (sRGB first, ties
+  keeping the surface's order, `format_by application` when the surface reports no preference),
+  present mode (MAILBOX, then FIFO, then FIFO_RELAXED, then IMMEDIATE), extent (`currentExtent`
+  unless it is `UINT32_MAX`, otherwise the window's pixel size clamped into the surface's range) and
+  image count (`minImageCount + 1`, clamped to a non-zero `maxImageCount`). The device is now chosen
+  as the highest-ranked one that has a queue family which both runs graphics and presents to this
+  surface (`vkGetPhysicalDeviceSurfaceSupportKHR`), not merely the fastest device on the machine.
+  `abundance/tests/rhi_swapchain_probe.grl` (new, wired into `tools/abundance-test.mjs` as the third
+  probe) prints the whole chain, takes the frame count as `argv[1]` (`GRAIL_RHI_FRAMES`, default 3),
+  skips with `rhi.status skipped no-display` where there is no display server, and asserts its own
+  handle balance (`rhi.handles created 3 destroyed 3 live 0`, a leak fails the run) because the
+  validation layer is not installed on this host; where it is installed the suite forces it on
+  through the loader (`VK_LOADER_LAYERS_ENABLE`/`VK_INSTANCE_LAYERS`) for a second run and fails on
+  any validation message, after requiring the layer's manifest to name a real ELF shared object,
+  since the loader skips a broken layer silently. What did *not* land is the swapchain itself and
+  everything downstream of it — device, `VkSwapchainKHR`, image views, the render pass, the clear and
+  the present — because all of them need an expression whose value is the address of an `extern "C"`
+  record Grail owns, and the submit/present arrays are arrays of *handles*, which cannot even be
+  seeded. The probe reports `rhi.swapchain.result frames 0 of 3` plus one `unavailable` line per
+  blocked call rather than pretending; docs/rhi.md lists the calls and what each one needs.
 - Windows task scheduling is now the same as Linux: a task is green on Windows, not an OS thread.
   One scheduler thread runs the tasks cooperatively, a task runs until it yields or blocks, and
   suspension parks the task rather than the thread. The switch is a Win32 fiber
