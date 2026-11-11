@@ -727,7 +727,12 @@ Shares of the checked-over-C gap, in the same run:
 
 *interaction* is `all checks - (the three deltas)`: the individual deletions do not sum, because
 removing a check changes what LLVM unrolls and schedules. *floor* is the residual `no arms / C - 1`
-as a share of the gap -- the representation and whatever else is not a check.
+as a share of the gap -- the representation and whatever else is not a check. Two readings to be
+careful with: the *bounds* and *other* columns are measured on the wrap base (the only build where
+the accessor arms can be deleted without also deleting the arithmetic ones), which understates
+`matmul` by 50 points -- the checked-base measurement under *Which proof would remove the most
+checks* is the one to use for bounds -- and `fnv`'s row is entirely noise, a floor above 100% of the
+gap meaning the check-free build is slower than the checked one.
 
 ### `--overflow=wrap` does not measure the overflow check
 
@@ -763,7 +768,11 @@ disagreement is the variant, not the check.
 
 `fnv` and `nbody` reproduce to 0.005. `sieve`, `sort` and `matmul` are 3-5 points off and two of the
 three order differently, while the *other* base moves the same three rows by 2-9 points in the
-opposite direction -- i.e. the spread of this measurement is the size of the discrepancy. The floors
+opposite direction. The same variant measured twice is the measure of that: "every abort arm
+deleted" is 1.073x of C for `matmul` in the run above and 1.042x in the `floor` run below, 3 points
+apart on the same binaries in the same hour, which is the size of the discrepancy -- so the ceiling
+reproduces to this host's resolution and not tighter, and the quoted values are themselves one
+day's reading of it. The floors
 land where the design says they are, which is the more useful check: `1.002 / 1.042 / 1.120 / 1.121 /
 1.256` here (see the next section) against the design's ~1.00 / 1.05 / 1.16 (sort) / 1.34 (nbody).
 
