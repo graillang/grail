@@ -9126,30 +9126,9 @@ fn callback_int_words(abi: u64) -> u64 {
     }
     return ffi_int_regs(abi);
 }
-// Ceiling for readback of an exported callback's parameter list; see ffi_callback_fits.
+// Every parameter list a C caller can produce is readable by a callback prologue: the words past
+// the argument registers are read from the caller's stack (callback_params), so nothing is refused.
 fn ffi_callback_fits<a>(c: (&a mut C), first: u64, count: u64) -> unit {
-    abi := ffi_abi(&mut c);
-    mut ints = 0;
-    mut floats = 0;
-    for i in count {
-        formal := c.params[first + i];
-        if is_float(&mut c, formal) {
-            floats = floats + 1;
-        } else {
-            ints = ints + ffi_words(&mut c, formal);
-        }
-    }
-    if callback_int_words(abi) < ints {
-        fail(
-            &mut c,
-            view(
-                "a C callback cannot read that many integer argument words: this target passes the rest on the stack and the callback prologue reads registers only; pass a pointer or a record instead"
-            )
-        );
-    }
-    if 8 < floats {
-        fail(&mut c, view("a C callback cannot read that many floating-point arguments: this target passes the rest on the stack"));
-    }
     return ();
 }
 // An exported callback's prologue: each parameter is read from where a C caller put it (Win64:
@@ -9159,30 +9138,43 @@ fn ffi_callback_fits<a>(c: (&a mut C), first: u64, count: u64) -> unit {
 fn callback_params<a>(c: (&a mut C), count: u64) -> unit {
     win := c.target == 3;
     x86 := c.target == 0 || win;
+    rv := c.target == 2;
     // Win64 arguments arrive in Grail's registers because the thunk under the C symbol has already
     // moved them; everywhere else the C integer argument registers of the target's own ABI are read
     // directly, so the seventh and eighth words come from %r10/%r11 (x6/x7, a6/a7).
+    // Past the registers the caller's stack holds the rest, in order, one 8-byte slot each: after
+    // the prologue's 16-byte frame record that is 16(%rbp) on SysV, AAPCS64 and RV64 (x29/s0 is
+    // the frame pointer there). On Win64 argument i sits 8+8i above the thunk's entry rsp, which
+    // is 208+8i above the body's frame once the thunk's two pushes, 168 bytes, its call and the
+    // body's push are accounted for; the thunk itself already moved arguments five and six.
     abi := ffi_abi(&mut c);
+    regs := callback_int_words(abi);
     mut ints = 0;
     mut floats = 0;
+    mut stack = 0;
     for i in count {
         // The parameter locals are the function's first bindings, in declaration order.
         ty := c.locals[i].ty;
         if is_float(&mut c, ty) {
             single := is_f32(&mut c, ty);
+            // 0 vector register, 1 an integer register (RV64 only), 2 the caller's stack.
+            mut place = 0;
             mut fpos = floats;
             if win {
                 fpos = i;
-            }
-            if win & (3 < i) {
-                // Stack-passed on Win64: the thunk moved the raw word into Grail's register.
-                o(&mut c, view("movq "));
-                o(&mut c, view(argreg(i)));
-                o(&mut c, view(",%rax\n"));
-                if single {
-                    o(&mut c, view("movd %eax,%xmm0\ncvtss2sd %xmm0,%xmm0\nmovq %xmm0,%rax\n"));
+                if 3 < i {
+                    place = 2;
                 }
             } else {
+                if 7 < floats {
+                    if rv & (ints < regs) {
+                        place = 1;
+                    } else {
+                        place = 2;
+                    }
+                }
+            }
+            if place == 0 {
                 if x86 {
                     if single {
                         o(&mut c, view("cvtss2sd %xmm"));
@@ -9202,20 +9194,66 @@ fn callback_params<a>(c: (&a mut C), count: u64) -> unit {
                     }
                     c.out.push(10);
                 }
-            }
-            floats = floats + 1;
-        } else {
-            mut ipos = ints;
-            if win {
-                ipos = i;
-            }
-            o(&mut c, view("movq "));
-            if win {
-                o(&mut c, view(argreg(ipos)));
+                floats = floats + 1;
             } else {
-                o(&mut c, view(ffi_int_reg(abi, ipos)));
+                if place == 1 {
+                    // RV64 passes a float that finds no free FP register in the next integer
+                    // register, as its bits.
+                    o(&mut c, view("movq "));
+                    o(&mut c, view(ffi_int_reg(abi, ints)));
+                    o(&mut c, view(",%rax\n"));
+                    ints = ints + 1;
+                } else {
+                    if win {
+                        if 5 < i {
+                            o(&mut c, view("movq "));
+                            on(&mut c, 208 + 8 * i);
+                            o(&mut c, view("(%rbp),%rax\n"));
+                        } else {
+                            // Win64 arguments five and six: the thunk moved the raw word.
+                            o(&mut c, view("movq "));
+                            o(&mut c, view(argreg(i)));
+                            o(&mut c, view(",%rax\n"));
+                        }
+                    } else {
+                        o(&mut c, view("movq "));
+                        on(&mut c, 16 + 8 * stack);
+                        o(&mut c, view("(%rbp),%rax\n"));
+                        stack = stack + 1;
+                    }
+                }
+                if single {
+                    if x86 {
+                        o(&mut c, view("movd %eax,%xmm0\ncvtss2sd %xmm0,%xmm0\nmovq %xmm0,%rax\n"));
+                    } else {
+                        o(&mut c, view("cf32widen\n"));
+                    }
+                }
             }
-            o(&mut c, view(",%rax\n"));
+        } else {
+            if win {
+                if 5 < i {
+                    o(&mut c, view("movq "));
+                    on(&mut c, 208 + 8 * i);
+                    o(&mut c, view("(%rbp),%rax\n"));
+                } else {
+                    o(&mut c, view("movq "));
+                    o(&mut c, view(argreg(i)));
+                    o(&mut c, view(",%rax\n"));
+                }
+            } else {
+                if ints < regs {
+                    o(&mut c, view("movq "));
+                    o(&mut c, view(ffi_int_reg(abi, ints)));
+                    o(&mut c, view(",%rax\n"));
+                    ints = ints + 1;
+                } else {
+                    o(&mut c, view("movq "));
+                    on(&mut c, 16 + 8 * stack);
+                    o(&mut c, view("(%rbp),%rax\n"));
+                    stack = stack + 1;
+                }
+            }
             suffix := ffi_narrow(&mut c, ty);
             if suffix.len() != 0 {
                 if x86 {
@@ -9226,7 +9264,6 @@ fn callback_params<a>(c: (&a mut C), count: u64) -> unit {
                     c.out.push(10);
                 }
             }
-            ints = ints + 1;
         }
         o(&mut c, view("movq %rax,"));
         stack_slot(&mut c, i);

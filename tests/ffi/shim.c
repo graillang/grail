@@ -202,3 +202,19 @@ struct count_record {
     unsigned count;
 };
 long long c_enum_count(const struct count_record *count) { return (long long)count->count; }
+
+/* Callbacks with more arguments than the argument registers (tests/ffi/callback_stack.grl): ten
+ * integers, ten doubles and four narrow/single values, so every target passes some on the stack,
+ * and ten doubles before an integer, which RV64 spills into the integer registers first. */
+typedef double (*cs_wide)(long, long, long, long, long, long, long, long, long, long,
+                          double, double, double, double, double, double, double, double, double, double,
+                          short, float, unsigned char, long);
+double c_call_wide(cs_wide cb) {
+  return cb(1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
+            0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5, 9.5,
+            -3, 2.25f, 200, 11);
+}
+typedef double (*cs_floats)(double, double, double, double, double, double, double, double, double, double, long);
+double c_call_floats(cs_floats cb) {
+  return cb(0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5, 9.5, 7);
+}

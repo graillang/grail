@@ -1,0 +1,39 @@
+module ffi_callback_stack;
+
+// C calling back into Grail with more arguments than fit in registers. Every parameter carries its
+// own weight, so a word read from the wrong stack slot or register changes the result: the narrow
+// `i16` must be sign-extended (-3), the `u8` zero-extended (200), and the `f32` widened (2.25).
+// `g_wide`: ten integers then ten doubles then four more - SysV spills the 7th integer onward and
+// the 9th double onward, AAPCS64 and RV64 the 9th of each. `g_floats`: ten doubles then an
+// integer - RV64 passes the 9th and 10th doubles in integer registers a0/a1 before using the stack.
+extern "C" fn g_wide(
+    a0: i64, a1: i64, a2: i64, a3: i64, a4: i64, a5: i64, a6: i64, a7: i64, a8: i64, a9: i64,
+    f0: f64, f1: f64, f2: f64, f3: f64, f4: f64, f5: f64, f6: f64, f7: f64, f8: f64, f9: f64,
+    b: i16, s: f32, u: u8, last: i64
+) -> f64 {
+    ints := a0 + 2 * a1 + 3 * a2 + 4 * a3 + 5 * a4 + 6 * a5 + 7 * a6 + 8 * a7 + 9 * a8 + 10 * a9
+        + 11 * i64(b) + 12 * i64(u) + 13 * last;
+    floats := f0 + 2.0 * f1 + 3.0 * f2 + 4.0 * f3 + 5.0 * f4 + 6.0 * f5 + 7.0 * f6 + 8.0 * f7
+        + 9.0 * f8 + 10.0 * f9 + 11.0 * f64(s);
+    return f64(ints) + 4.0 * floats;
+}
+extern "C" fn g_floats(
+    f0: f64, f1: f64, f2: f64, f3: f64, f4: f64, f5: f64, f6: f64, f7: f64, f8: f64, f9: f64, i: i64
+) -> f64 {
+    return f0 + 2.0 * f1 + 3.0 * f2 + 4.0 * f3 + 5.0 * f4 + 6.0 * f5 + 7.0 * f6 + 8.0 * f7
+        + 9.0 * f8 + 10.0 * f9 + 100.0 * f64(i);
+}
+extern "C" lib "shim.o" fn c_call_wide(
+    cb: cfn(i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, i16, f32, u8, i64) -> f64
+) -> f64;
+extern "C" lib "shim.o" fn c_call_floats(
+    cb: cfn(f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, i64) -> f64
+) -> f64;
+
+fn main() -> u64 {
+    unsafe {
+        println(c_call_wide(g_wide));
+        println(c_call_floats(g_floats));
+    }
+    return 0;
+}

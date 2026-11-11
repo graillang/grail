@@ -170,7 +170,16 @@ const fixtures = [
     stdout: '204\n',
     symbols: ['c_call_words8'],
     defines: ['g_words8'],
-    targets: ['aarch64', 'riscv64'],
+  },
+  {
+    // Callbacks with arguments on the caller's stack (decision B7 follow-up, docs/ffi.md): 24
+    // parameters mixing integers, doubles, a sign-extended i16, a widened f32 and a zero-extended
+    // u8, and a doubles-first list RV64 spills into integer registers. 2895 + 4 * 382.25 = 4424;
+    // 357.5 + 700 = 1057.5.
+    name: 'callback_stack',
+    stdout: '4424\n1057.5\n',
+    symbols: ['c_call_wide', 'c_call_floats'],
+    defines: ['g_wide', 'g_floats'],
   },
   {
     // Dynamic loader hooks: a shared library is loaded by path, two symbols are
@@ -332,19 +341,15 @@ assert.notEqual(windows.status, 0, 'windows-x86_64: byval was accepted instead o
 assert.match(`${windows.stdout}${windows.stderr}`, /byval is not implemented for the Windows x86-64 and Windows ARM64 ABIs/,
   'windows-x86_64: missing byval refusal diagnostic');
 
-// A callback whose parameters do not fit the target's integer argument registers is refused by
-// name instead of reading a register that holds something else (x86-64 SysV passes the seventh word
-// on the stack; the Win64 thunk moves only the fifth and sixth).
-for (const target of ['x86_64', 'windows-x86_64']) {
-  const platform = target === 'x86_64' ? 'os-linux.grl' : 'os-windows.grl';
-  const refused = spawnSync(compiler, [
-    '--default-u64', '--typed-refs', '--target', target, join(work, `${target}-callback-words.s`),
-    join(root, 'tests/ffi/callback_words.grl'), join(root, 'compiler/runtime.grl'),
-    join(root, `compiler/${platform}`),
+// Callbacks with stack-passed arguments: Linux targets execute callback_words and callback_stack
+// above; the Win64 prologue reads arguments past the sixth from the caller's frame (208+8i(%rbp)
+// from the body), so the Windows build must accept both instead of refusing them.
+for (const fixture of ['callback_words', 'callback_stack']) {
+  const accepted = spawnSync(compiler, [
+    '--default-u64', '--typed-refs', '--target', 'windows-x86_64', join(work, `windows-${fixture}.s`),
+    join(root, `tests/ffi/${fixture}.grl`), join(root, 'compiler/runtime.grl'), join(root, 'compiler/os-windows.grl'),
   ], { cwd: root, maxBuffer: 16 * 1024 * 1024, timeout: 900_000 });
-  assert.notEqual(refused.status, 0, `${target}: a seven-or-more word callback was accepted`);
-  assert.match(`${refused.stdout}${refused.stderr}`, /a C callback cannot read that many integer argument words/,
-    `${target}: missing callback register diagnostic`);
+  assert.equal(accepted.status, 0, `windows-x86_64: ${fixture} was refused: ${accepted.stdout}${accepted.stderr}`);
 }
 
 const skipped = linkedOnly ? ` (${linkedOnly} linked but not executed: no cross emulator installed)` : '';

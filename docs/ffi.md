@@ -462,13 +462,15 @@ same argument/result plumbing as a Grail call. Frames stay 16-byte aligned at ca
 generated Grail functions preserve the callee-saved registers they allocate (the internal prologue
 saves and restores them), which is what lets C call back into an `extern "C"` definition.
 
-The reverse direction — C calling a Grail callback — reads parameters from the register file only,
-because there is no caller frame to read stack arguments from (on Win64 a thunk under the C symbol
-moves the four registers and the fifth and sixth stack words into Grail's registers, and no further).
-An exported callback may therefore use up to six integer argument words on x86-64 and Windows, and up
-to eight on AArch64 and RISC-V 64, plus up to eight floating-point arguments. A longer parameter list
-is refused by name rather than read from a register that holds something else:
-`a C callback cannot read that many integer argument words`.
+The reverse direction — C calling a Grail callback — reads each parameter from where the target's
+C ABI put it: the argument registers first, then the caller's stack. Past the registers, arguments sit
+one 8-byte slot each above the callback's frame record, at `16(%rbp)` onward on SysV x86-64, AAPCS64 and
+RV64 (the frame pointer is `x29`/`s0` there). On Win64 a thunk under the C symbol moves the four
+registers and the fifth and sixth stack words into Grail's registers, and the body reads argument
+`i >= 6` at `208+8i(%rbp)`, past the thunk's saved state and the 32-byte home area. RV64 passes a
+floating-point argument that finds no free FP register in the next free integer register before
+using the stack. Narrow integers are sign- or zero-extended and `f32` widened wherever they arrive
+(`tests/ffi/callback_stack.grl`: 24 parameters, and ten doubles before an integer).
 
 ## The unsafe boundary
 
@@ -627,10 +629,9 @@ use. `tests/ffi/call_abi.grl` executes on x86-64, AArch64 and RISC-V Linux and, 
 
 Not implemented yet, and each rejected rather than approximated:
 
-- C-callable callbacks that need more integer argument words than the target passes in registers (six
-  on x86-64, eight on AArch64 and RISC-V 64): the callback prologue has no caller frame to read stack
-  arguments from, so a longer parameter list is refused by name; macOS callbacks use the same
-  SysV/AAPCS64 lowering but are compiled and linked only (no macOS runner);
+- macOS callbacks use the same SysV/AAPCS64 lowering, stack arguments included, but are compiled and
+  linked only (no macOS runner); Windows callbacks with stack arguments are compiled and checked, not
+  executed (the Wine runner has no C shim to call them);
 - an out-parameter on a C callback or a `cfn` type: only a declaration Grail calls can write a slot
   (see Out-parameters above);
 - a `byval` record parameter on Windows (x86-64 and ARM64) and on a C callback, and a record
