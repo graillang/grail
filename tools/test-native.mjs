@@ -36,7 +36,8 @@ const resume = process.env.GRAIL_TEST_RESUME === '1';
 // The marker names the compiler (its path is a content hash) and the backend, so a rebuilt compiler
 // or a different --backend never reuses another run's passes.
 const backend = `${process.env.GRAIL_BACKEND ?? 'native'}${process.env.GRAIL_VERIFY_FACTS === '1' ? '+facts' : ''}`;
-const markers = join(work, 'pass', basename(compiler) + '-' + backend);
+// Key by the compiler's content-addressed directory, not its file name: every build is named `grail`.
+const markers = join(work, 'pass', basename(dirname(compiler)) + '-' + backend);
 if (resume) mkdirSync(markers, { recursive: true });
 const legacyFiles = new Set();
 for (const test of cases) {

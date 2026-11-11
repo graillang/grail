@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Fixed: LLVM builds no longer fail with `changed binding to STB_GLOBAL` - a kept-native function the emitter declared `.weak` (content-addressed drop helpers) keeps that binding instead of being re-declared `.globl`. The weak-name table is sized for every name, so programs with many drop helpers no longer hang the lowering.
+- Fixed: `GRAIL_TEST_RESUME` keys pass markers by the compiler's content-hash directory rather than its file name, which is `grail` for every build, so a rebuilt compiler never inherits another build's passes.
 - Measured what the validation in a Grail program costs, split by kind; the compiler is untouched.
   [tools/checks-budget.mjs](tools/checks-budget.mjs) classifies the abort arms in the emitted `.ll`
   by the predicate that guards them (bounds: the arms inside the sequence accessors; overflow: the
