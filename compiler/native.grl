@@ -377,6 +377,8 @@ struct C {
     // The pass a module-level compile-time form runs in (0 inside a function body).
     ct_pass: u64,
     ct_in_if: bool,
+    // Set when a compile-time expression read a value parameter that is not bound yet.
+    ct_unbound: u64,
     // Copy-backs for `p: &mut R` callback parameters: (C pointer slot, copy slot, bytes) triples.
     export_copyback: u64[],
     rnames: u8[][],
@@ -4260,7 +4262,7 @@ fn type_key<a>(c: (&a mut C), out: (&a mut u8[]), ty: u64, depth: u64) -> unit {
         // element and its drop does not depend on one either.
     } else if (k == 8) || (k == 23) || (k == 28) {
         // The nominal payload is already in the key.
-    } else if (k == 18) || (k == 21) {
+    } else if (k == 18) || (k == 21) || (k == 31) {
         // An integer or float width is part of the type and is not a run-local choice.
         out.push(32);
         decimal(&mut out, arg);
@@ -5504,6 +5506,31 @@ fn lifetime_parameters<a>(c: (&a mut C)) -> unit {
     exchange(&mut c.type_interfaces, u64[][]);
     if eat(&mut c, view("<")) {
         while true {
+            if eat(&mut c, view("@")) {
+                // A value parameter (docs/design/comptime.md, C2): `@k: u64` in the generic list. It
+                // is a type parameter whose binding is a type-level constant, so specialisation,
+                // naming and interfaces handle it with no second mechanism; bounds bit 4 marks it
+                // and the bits above carry its declared type.
+                n := ident(&mut c);
+                for i in c.tnames.len() {
+                    if same(view(c.tnames[i]), view(n)) {
+                        fail(&mut c, view("duplicate generic parameter"));
+                    }
+                }
+                expect(&mut c, view(":"));
+                vty := parse_type(&mut c);
+                if !integer(&mut c, vty) & !is_bool(&mut c, vty) {
+                    fail(&mut c, view("a value parameter is an integer or a bool"));
+                }
+                c.tnames.push(n);
+                c.type_bounds.push(4 + 8 * vty);
+                c.type_interfaces.push(u64[]);
+                if eat(&mut c, view(">")) {
+                    break;
+                }
+                expect(&mut c, view(","));
+                continue;
+            }
             n := ident(&mut c);
             is_type := (64 < n[0]) & (n[0] < 91);
             if is_type {
@@ -6555,6 +6582,9 @@ fn base_named<a>(c: (&a mut C), first: u8[]) -> u64 {
     for i in c.tnames.len() {
         t := &c.tnames[i];
         if same(view(t), view(first)) {
+            if (c.type_bounds[i] & 4) != 0 {
+                fail(&mut c, view("this is a value parameter, not a type"));
+            }
             if c.bindings.len() != 0 {
                 return c.bindings[i];
             }
@@ -9288,6 +9318,40 @@ fn ct_is_bool<a>(c: (&a mut C), ty: u64) -> bool {
 fn ct_val(value: u64, ty: u64) -> CVal {
     return CVal { value: value, ty: ty };
 }
+// A value parameter in scope named `name`: index + 1, or 0.
+fn value_param<a, b>(c: (&a mut C), name: &b [u8]) -> u64 {
+    for i in c.tnames.len() {
+        if same(view(c.tnames[i]), name) & ((c.type_bounds[i] & 4) != 0) {
+            return i + 1;
+        }
+    }
+    return 0;
+}
+// A value parameter's value in the specialisation being compiled, and its declared type. Unbound
+// (a template checked before any instantiation) it reads as 0 and sets ct_unbound, which makes an
+// @assert that depends on it wait for the instantiation instead of judging a placeholder.
+fn value_param_value<a>(c: (&a mut C), i: u64) -> CVal {
+    vty := c.type_bounds[i] / 8;
+    mut value = 0;
+    if i < c.bindings.len() {
+        mut b = c.bindings[i];
+        // A binding may arrive behind an indirection (kind 10), as canonical_type also unwraps.
+        while (b != 0) && (b != 18446744073709551615) && (ty_kind(&mut c, b) == 10) {
+            b = ty_arg(&mut c, b);
+        }
+        if (b != 0) && (b != 18446744073709551615) && (ty_kind(&mut c, b) == 31) {
+            value = ty_arg(&mut c, b);
+        } else {
+            exchange(&mut c.ct_unbound, 1);
+        }
+    } else {
+        exchange(&mut c.ct_unbound, 1);
+    }
+    if is_bool(&mut c, vty) {
+        return ct_val(value, bool_type(&mut c));
+    }
+    return ct_val(value, 0);
+}
 // The tags `target.os` and `target.arch` compare against.
 fn ct_tag<a>(c: (&a mut C), name: &a [u8]) -> u64 {
     if same(view(name), view("linux")) { return 1; }
@@ -9400,6 +9464,16 @@ fn ct_primary<a>(c: (&a mut C)) -> CVal {
                 return ct_val(64, 0);
             }
             fail(&mut c, view("target has os, arch and pointer_bits"));
+        }
+        after := c.pos + 1;
+        here_tok := c.pos;
+        if !is_at(&mut c, after, view("::")) {
+            name_text := tok_text(&mut c, here_tok);
+            vp := value_param(&mut c, view(name_text));
+            if vp != 0 {
+                advance(&mut c);
+                return value_param_value(&mut c, vp - 1);
+            }
         }
         mut module = module_copy(&mut c);
         mut name = ident(&mut c);
@@ -9593,6 +9667,7 @@ fn ct_branch<a>(c: (&a mut C), pass: u64, top: u64, take: u64) -> unit {
 // `@assert(cond, "message")`: a compile error carrying the message when cond is false.
 fn ct_assert<a>(c: (&a mut C)) -> unit {
     at := c.pos;
+    exchange(&mut c.ct_unbound, 0);
     expect(&mut c, view("assert"));
     expect(&mut c, view("("));
     cond := ct_expr(&mut c, 0);
@@ -9606,7 +9681,8 @@ fn ct_assert<a>(c: (&a mut C)) -> unit {
     advance(&mut c);
     expect(&mut c, view(")"));
     expect(&mut c, view(";"));
-    if holds == 0 {
+    unbound := exchange(&mut c.ct_unbound, 0);
+    if (holds == 0) & (unbound == 0) {
         exchange(&mut c.pos, at - 1);
         mut msg = u8[];
         push_bytes(&mut msg, view("@assert failed: "));
@@ -12200,11 +12276,30 @@ fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
     count := info.count;
     template_first := info.first;
     types := info.types;
+    // Which generic slots are value parameters (bounds bit 4), copied out so the loop below can
+    // advance the parser while it reads them.
+    mut value_slots = u64[];
+    for i in info.bounds.len() {
+        value_slots.push(info.bounds[i] & 4);
+    }
     mut map = u64[];
     if eat(&mut c, view("<")) {
         while true {
-            t := parse_type(&mut c);
-            map.push(t);
+            slot := map.len();
+            if (slot < value_slots.len()) && (value_slots[slot] != 0) {
+                // A value argument: a compile-time constant expression, bound as a type-level
+                // constant so `rotl<13>` and `rotl<14>` are different specialisations. It binds
+                // tighter than a comparison, so the `>` that closes the list is not read as one;
+                // a comparison argument is parenthesised, `f<(N > 4)>`.
+                v := ct_expr(&mut c, prec(62));
+                if v.ty == ct_tag_ty() {
+                    fail(&mut c, view("a value argument is an integer or a bool, not a target tag"));
+                }
+                map.push(intern(&mut c, 31, v.value));
+            } else {
+                t := parse_type(&mut c);
+                map.push(t);
+            }
             if eat(&mut c, view(">")) {
                 break;
             }
@@ -12215,6 +12310,9 @@ fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
         }
     } else {
         for i in types {
+            if (i < value_slots.len()) && (value_slots[i] != 0) {
+                fail(&mut c, view("this function has a value parameter, which a call cannot infer: give it explicitly, as in rotl<13>(x)"));
+            }
             map.push(18446744073709551615);
         }
     }
@@ -19563,6 +19661,21 @@ fn primary<a>(c: (&a mut C)) -> Val {
         }
         return val(imm(&mut c, v.value), v.ty);
     }
+    if (k == 1) & (c.tnames.len() != 0) {
+        // A value parameter (`n` in `fn f<@n: u64>`) reads as its constant. Checked before every
+        // other name, because the parameter also lives in the type-parameter table, where other
+        // paths would take it for a type.
+        here_tok := c.pos;
+        name_text := tok_text(&mut c, here_tok);
+        vp := value_param(&mut c, view(name_text));
+        if (vp != 0) & (next_kind(&mut c) != 40) {
+            advance(&mut c);
+            v := value_param_value(&mut c, vp - 1);
+            exchange(&mut c.ct_unbound, 0);
+            vty := c.type_bounds[vp - 1] / 8;
+            return val(imm(&mut c, v.value), vty);
+        }
+    }
     if (k == 1) & (is(&mut c, view("size_of")) || is(&mut c, view("align_of"))) & (next_kind(&mut c) == 40) {
         align := u64(is(&mut c, view("align_of")));
         advance(&mut c);
@@ -20225,6 +20338,13 @@ fn primary<a>(c: (&a mut C)) -> Val {
     constant := constant_value(&mut c, view(m), view(first));
     if constant.ty != 18446744073709551615 {
         return constant;
+    }
+    vp := value_param(&mut c, view(first));
+    if vp != 0 {
+        v := value_param_value(&mut c, vp - 1);
+        exchange(&mut c.ct_unbound, 0);
+        mut vty = c.type_bounds[vp - 1] / 8;
+        return val(imm(&mut c, v.value), vty);
     }
     function := find_func(&mut c, view(m), view(first));
     if function != 0 {
@@ -25135,6 +25255,13 @@ fn iface_type_raw<a, b>(out: (&a mut u8[]), c: (&b mut C), ty: u64) -> unit {
         }
         return ();
     }
+    if k == 31 {
+        // A value parameter's binding (comptime C2): the constant itself.
+        push_bytes(&mut out, view("(const "));
+        decimal(&mut out, arg);
+        push_bytes(&mut out, view(")"));
+        return ();
+    }
     if (k == 1) || (k == 2) || (k == 3) || (k == 4) || (k == 11) || (k == 17) || (k == 19) || (k == 22) || (k == 24) {
         push_bytes(&mut out, view(iface_plain_word(k)));
         return ();
@@ -26206,6 +26333,12 @@ fn iface_parse_type<a>(c: (&a mut C), p: (&a mut IPos)) -> u64 {
             t := iface_parse_type(&mut c, &mut p);
             ip_expect(&mut p, view(")"));
             return intern_args(&mut c, 27, t, mode, rs, u64[]);
+        }
+        if same(view(head), view("const")) {
+            // A value parameter's binding: `(const N)`.
+            n := ip_number(&mut p);
+            ip_expect(&mut p, view(")"));
+            return intern(&mut c, 31, n);
         }
         if same(view(head), view("job")) {
             // A pool job handle (`Job<T>`): its result type.
@@ -27876,6 +28009,7 @@ pub fn main() -> u64 {
         export_adopt: 0,
         ct_pass: 0,
         ct_in_if: false,
+        ct_unbound: 0,
         export_copyback: u64[],
         rnames: u8[][],
         tnames: u8[][],

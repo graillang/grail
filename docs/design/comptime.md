@@ -1,7 +1,9 @@
 # Compile-time evaluation
 
 Status: **C1 implemented** (constants, `@if`, `@assert`, `@expr` over constant expressions, `size_of`,
-`align_of`, `target`); C2-C4 are design. Each stage lands with native cases and a book section
+`align_of`, `target`); **C2 implemented for functions** (value parameters `<@k: u64>`, bound per call
+site, one specialisation per value, visible to `@assert` and `@if`; records with value parameters
+are next); C3-C4 are design. Each stage lands with native cases and a book section
 (chapter *Compile time*).
 
 Grail runs code at compile time with one sigil, `@`. Everything Zig's `comptime` does - constants,
