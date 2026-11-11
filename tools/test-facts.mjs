@@ -134,8 +134,39 @@ ok('a wrong fact aborts under --verify-facts', wrongRun.status !== 0,
   `exit ${wrongRun.status}, printed ${JSON.stringify(wrongRun.stdout.trim())}`);
 ok('the right facts do not abort', run([f1checked.exe]).status === 0);
 
+// ---- the range fact: a proved index, the check removed, and the check put back ----
+// `u8[0; 10]` gives the analysis a literal length and `while i < 5` bounds the index, so every access
+// in the fixture is in range. The default build must be untouched (the pass is off), the
+// --range-facts build must drop the accessors' compare, and --verify-facts must put a runtime check
+// back at each site -- which cannot fire, and does not.
+const rangeNative = build('range-native', 'range_fact.grl', { backend: 'native' });
+const rangePlain = build('range-plain', 'range_fact.grl', { backend: 'llvm' });
+const rangeOn = build('range-on', 'range_fact.grl', { backend: 'llvm', rangeFacts: true });
+const rangeChecked = build('range-on-verify', 'range_fact.grl', { backend: 'llvm', rangeFacts: true, verifyFacts: true });
+const rangeReference = run([rangeNative.exe]).stdout.trim();
+ok('range fixture: the native reference prints something', rangeReference.length > 0, rangeReference);
+ok('range fixture: the default LLVM build matches native', run([rangePlain.exe]).stdout.trim() === rangeReference);
+ok('range fixture: --range-facts matches native', run([rangeOn.exe]).stdout.trim() === rangeReference,
+  `${run([rangeOn.exe]).stdout.trim()} vs ${rangeReference}`);
+const rangeCheckedRun = run([rangeChecked.exe]);
+ok('range fixture: --verify-facts re-inserts the check and it does not fire',
+  rangeCheckedRun.status === 0 && rangeCheckedRun.stdout.trim() === rangeReference,
+  `exit ${rangeCheckedRun.status}, ${JSON.stringify(rangeCheckedRun.stdout.trim())}`);
+
+const plainIr = readFileSync(rangePlain.ll, 'utf8');
+const onIr = readFileSync(rangeOn.ll, 'utf8');
+const checkedIr = readFileSync(rangeChecked.ll, 'utf8');
+const accessorCalls = text => (text.match(/call \{i64, i64\} @"rt_atb"/g) ?? []).length;
+ok('the pass is off by default: the accessor is called and no verdict is recorded',
+  accessorCalls(plainIr) > 0 && !plainIr.includes('; range '));
+ok('--range-facts proves the access it is given and stops calling the accessor',
+  accessorCalls(onIr) < accessorCalls(plainIr) && /load i8, ptr %t\d+, align 1/.test(onIr),
+  `${accessorCalls(onIr)} vs ${accessorCalls(plainIr)} calls`);
+ok('--verify-facts re-inserts a runtime check for it', /icmp ult i64 %t\d+, %t\d+/.test(checkedIr));
+ok('--verify-facts records the verdict it checked', /^; range \d+ 3$/m.test(checkedIr));
+
 if (failed) {
   console.log(`facts: ${failed} check(s) failed`);
   process.exit(1);
 }
-console.log('facts: the f32 and F1 facts hold, --verify-facts checks every one of them, and a wrong F1 fact aborts');
+console.log('facts: the f32, F1 and range facts hold, --verify-facts checks every one of them, and a wrong fact aborts');
