@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Added: several errors per compile. An error in a function body no longer ends the compile: the compiler reports it and goes on checking the rest of the program with that body skipped, up to 20 errors, then `error: aborting due to N previous errors`. The common diagnostics carry an error code (`error[E0004]: type mismatch`), and `grail explain CODE` prints what it means and how it is usually fixed (docs/diagnostics.md).
 - Added: `extern "C" lib "name";` requests a library with no declaration from it (the ImGui binding states the C runtime its C++ shim needs). Indexing a vector of handles, `CStr` or `CPtr` now reads the element, as for numbers.
 - Added: C arrays and C strings read back. A field `f: [T; N]` in an `extern "C" record` is a C array laid out inline; Grail reads it whole as a vector (`[u8; N]` as bytes) and assigns it whole from exactly N elements. `unsafe cslice(T, p, n)` copies an array C hands out by pointer and length into a vector, and `unsafe cstr_bytes(s)` copies a C string into bytes. Abundance uses them for `VkPhysicalDeviceProperties`, the physical-device list and SDL's extension names, replacing byte-offset decoding, an eight-field slot record and strlen/memcpy copies.
 - Added: compile-time stage C2 - value parameters on functions. `fn rotl<@k: u64>(x: u64)` is called as `rotl<13>(x)`; every distinct value is its own specialisation, the parameter is a constant inside the body, and `@assert`/`@if` see it, so a bad value is a compile error at the call. Interfaces spell the binding `(const N)`.

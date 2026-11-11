@@ -1,6 +1,7 @@
 module cli;
 use host;
 use fmt;
+use explain;
 
 // The `grail` command-line tool. The same binary is the compiler: subcommands drive it by
 // re-invoking itself (`grail [--target T] OUT.s ENTRY.grl MODULE.grl...`), then assemble and link.
@@ -3074,6 +3075,7 @@ fn help() {
     say(view("  grail check --interface DIR       write one checked interface per module"));
     say(view("  grail check --interface DIR --verify   refuse an interface that disagrees with its sources"));
     say(view("  grail debug lines|info BINARY     print DWARF line rows or .debug_info"));
+    say(view("  grail explain CODE                 what an error code means (error[E0004])"));
     say(view("  grail profile [--rate N] [--out FILE] -- PROGRAM [ARGS]   sampling profile"));
     say(view("  grail run [FILE.grl] [-- ARGS...]"));
     say(view("  grail test [FILES or DIRS]        compile and run tests/ (exit status 0 = pass)"));
@@ -3096,6 +3098,7 @@ pub fn is_command<a>(name: &a [u8]) -> bool {
         || eq(view(name), view("fetch"))
         || eq(view(name), view("debug"))
         || eq(view(name), view("profile"))
+        || eq(view(name), view("explain"))
         || eq(view(name), view("install"))
         || eq(view(name), view("help"))
         || eq(view(name), view("--help"))
@@ -3137,6 +3140,20 @@ pub fn run() -> u64 {
     }
     if eq(view(name), view("debug")) {
         return debug_command(&args);
+    }
+    if eq(view(name), view("explain")) {
+        // `grail explain E0004`: what an error code means and how it is usually fixed.
+        if args.len() != 1 {
+            say(view("usage: grail explain CODE   (the code an error prints, as in error[E0004])"));
+            return 1;
+        }
+        text := explain::text(view(item(&args, 0)));
+        if text.len() == 0 {
+            say(view("grail: no such error code"));
+            return 1;
+        }
+        host::print(view(text));
+        return 0;
     }
     if eq(view(name), view("profile")) {
         return profile_command(&args);
