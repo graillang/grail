@@ -25,7 +25,7 @@ the design notes named below; `implementation-status.md` is current except where
 | A13 | Debug info | **Done**: DWARF lines + base types on Linux x86-64, AArch64 and RISC-V 64 (`--verify` clean; gdb prints typed locals); CodeView on Windows x64 with line tables and S_GPROC32/S_REGREL32 symbols (typed, rbp-relative parameters and locals) in the PDB. DWARF also describes members: records, strings, vectors, views, references and C records show their fields in gdb (`tests/debug_members.grl`). CodeView on Windows carries the same member layout as LF_STRUCTURE/LF_FIELDLIST/LF_MEMBER/LF_POINTER records in the PDB | `tools/test-debug-lines.mjs` |
 
 Every
-A-row is done or explicitly partial (A12); nothing in A waits on a B decision any more. B2, B6 and B7
+A-row is done; nothing in A waits on a B decision any more. B2, B6 and B7
 are implemented, and B1 stages 1-4 have landed (per-module emission, checked interfaces, generics
 across modules, the build cache). What remains of B1 is one compiler invocation per module, named in
 its own section.
