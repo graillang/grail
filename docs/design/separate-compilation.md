@@ -731,3 +731,21 @@ Format 3 spells every store kind the compiler has; the last one added was the po
 now treats a refusal (`this interface format cannot express a type of that kind`) as a failure, so
 a new store kind cannot land without its interface spelling. The refusal itself stays: an interface
 is never written with an approximated type.
+
+## One compiler invocation per module (`grail build --per-module`)
+
+The driver groups the program's sources by the module each declares (the runtime and platform
+files, which declare none, are module `runtime`; an entry file without a `module` line is `main`),
+orders the groups so each comes after the modules it `use`s - `runtime` first - and compiles each
+group with its own compiler run:
+
+    grail <flags> [--use DIR] --emit-interface DIR --split [--no-entry] <module>.s <its files>
+
+Each run reads the interfaces of the modules built before it and writes its own beside them, so a
+module's run parses its own source and nothing else; every specialisation it uses is emitted weak
+in its own object (the emission model above). The parts are assembled and the program is linked
+once. `tools/split-test.mjs` builds a project with a generic from another module and the standard
+library's `vecs::sort` both ways and requires the same output from eight separate runs. The cache
+is not yet keyed on this build shape: `--per-module` recompiles every module, and keying each
+module's object on its own sources plus the interfaces it read is the next step.
+
