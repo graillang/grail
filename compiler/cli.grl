@@ -571,30 +571,59 @@ fn build_argv<a, b, d, e, g>(h: (&a Home), entry: &b [u8], modules: (&d u8[][]),
         }
     }
     command.push(copy(view(asm)));
-    command.push(copy(view(entry)));
-    for i in modules.len() {
-        command.push(item(&modules, i));
+    // The program, in link order: the entry, the project's modules, the standard-library modules it
+    // reaches, the runtime and one platform module. One list, shared with the per-module planner.
+    sources := program_sources(&h, view(entry), &modules, view(target));
+    for i in sources.len() {
+        command.push(item(&sources, i));
     }
-    // Only the standard-library modules the program reaches through `use` (transitively) are
-    // compiled; lib/NAME.grl is module NAME.
+    return command;
+}
+// Every source a build reads, in link order: the entry, the project's modules, the
+// standard-library modules the program reaches through `use` (transitively - lib/NAME.grl is module
+// NAME), the runtime and exactly one platform module. `build_argv` and the per-module planner share
+// this, so the two build shapes cannot disagree about what the program is.
+fn program_sources<a, b, d>(h: (&a Home), entry: &b [u8], modules: (&d u8[][]), target: &b [u8]) -> u8[][] {
     mut sources = u8[][];
-    sources.push(copy(view(entry)));
+    add_source(&mut sources, view(entry));
     for i in modules.len() {
-        sources.push(item(&modules, i));
+        add_source(&mut sources, view(item(&modules, i)));
     }
-    used := used_std(view(h.std), &sources);
+    reachable := copy_list(&sources);
+    used := used_std(view(h.std), &reachable);
     for i in used.len() {
-        command.push(item(&used, i));
+        add_source(&mut sources, view(item(&used, i)));
     }
-    command.push(copy(view(h.runtime)));
+    add_source(&mut sources, view(h.runtime));
     // One platform module per target: darwin.grl owns the libSystem boundary, os-linux.grl the
     // Linux syscalls. They define the same rt_syscall* set, so only one may be compiled.
     if is_macho(view(target)) {
-        command.push(path_join(view(dirname(view(h.runtime))), view("darwin.grl")));
+        add_source(&mut sources, view(path_join(view(dirname(view(h.runtime))), view("darwin.grl"))));
     } else {
-        command.push(copy(view(h.os)));
+        add_source(&mut sources, view(h.os));
     }
-    return command;
+    return sources;
+}
+// One file per name. The same source can be named twice with different path spellings - a project
+// module reached again through `use` - and compiling one file twice is a duplicate declaration.
+// Two files that share a name are the same file for every purpose here (`cache_source_of` already
+// identifies a module by its file name), and a module that is two files has two different names.
+fn add_source<a, b>(list: (&a mut u8[][]), path: &b [u8]) {
+    name := basename(view(path));
+    for i in list.len() {
+        if eq(view(basename(view(item(&list, i)))), view(name)) {
+            return ();
+        }
+    }
+    list.push(copy(view(path)));
+    return ();
+}
+fn copy_list<a>(from: (&a u8[][])) -> u8[][] {
+    mut out = u8[][];
+    for i in from.len() {
+        out.push(item(&from, i));
+    }
+    return out;
 }
 // check_only: type-check and generate code, but do not assemble or link.
 fn compile_mode<a, b, d, e, g>(
@@ -1535,6 +1564,470 @@ fn cache_split<a, b, d, e, g, k, m>(
     return 0;
 }
 
+// ---- the per-module cache: the key an object is filed under ----
+// A module's object is a function of its own sources, the interfaces it read, the generic bodies it
+// replayed, the compiler, the assembler and the flags. The first four are not all known before the
+// compiler runs - which interfaces a module reads is what the compiler reports - so the record
+// carries the dependency set it was built with and the next build re-checked it: every recorded
+// dependency must still hash to what it did, or the module is compiled again.
+//
+// This replaces the guard the whole-program cache needed. That one filed the digest of the emitted
+// assembly beside the object and refused reuse when the text changed, because a module's text could
+// change with another module's body. Now it cannot: a module compiled alone emits its own text.
+struct Deps {
+    kind: u8[][],
+    path: u8[][]
+}
+// The dependency report a module's compiler invocation wrote: `iface NAME` lines name DIRECT's
+// interfaces, `source PATH` lines name the sources a generic body was replayed from.
+fn read_deps<a, b>(path: &a [u8], dir: &b [u8]) -> Deps {
+    mut d = Deps { kind: u8[][], path: u8[][] };
+    if host::exists(view(path)) == 0 {
+        return d;
+    }
+    text := host::read_file(view(path));
+    rows := lines(view(text));
+    for i in rows.len() {
+        row := item(&rows, i);
+        if (row.len() != 0) & !starts(view(row), view("//")) {
+            w := words(view(row));
+            if 2 <= w.len() {
+                k := item(&w, 0);
+                v := item(&w, 1);
+                if eq(view(k), view("iface")) {
+                    iface_file := cat(view(v), view(".iface"));
+                    d.kind.push(copy(view("iface")));
+                    d.path.push(path_join(view(dir), view(iface_file)));
+                } else {
+                    if eq(view(k), view("source")) {
+                        d.kind.push(copy(view("source")));
+                        d.path.push(copy(view(v)));
+                    }
+                }
+            }
+        }
+    }
+    return d;
+}
+// Every line of a record whose first word is `field`, so a record can carry a list.
+fn cache_field_rows<a, b, d, e>(root: &a [u8], kind: &b [u8], key: &d [u8], field: &e [u8]) -> u8[][] {
+    mut out = u8[][];
+    record := cache_record_path(view(root), view(kind), view(key));
+    mut text = u8[];
+    if host::exists(view(record)) != 0 {
+        text = host::read_file(view(record));
+    }
+    rows := lines(view(text));
+    for i in rows.len() {
+        row := item(&rows, i);
+        w := words(view(row));
+        if (2 <= w.len()) & eq(view(item(&w, 0)), view(field)) {
+            out.push(copy(view(row)));
+        }
+    }
+    return out;
+}
+// The program one module's invocation compiles: its own files, and the ABI base every module shares.
+fn module_key<a, b, d, e, g, k, m>(c: (&a mut Cache), p: (&b Plan), name: &d [u8], target: &e [u8], flags: u64, compiler: &g [u8], assembler: &g [u8], base: &k [u8]) -> u8[] {
+    mut buf = u8[];
+    push_bytes(&mut buf, view("grail-cache-module 2\nmodule "));
+    push_bytes(&mut buf, view(name));
+    push_bytes(&mut buf, view("\ntarget "));
+    push_bytes(&mut buf, view(target));
+    push_bytes(&mut buf, view("\nflags "));
+    cache_decimal(&mut buf, flags);
+    push_bytes(&mut buf, view("\ncompiler "));
+    push_bytes(&mut buf, view(compiler));
+    push_bytes(&mut buf, view("\nassembler "));
+    push_bytes(&mut buf, view(assembler));
+    push_bytes(&mut buf, view("\nbase "));
+    push_bytes(&mut buf, view(base));
+    buf.push(10);
+    for i in p.names.len() {
+        if eq(view(item(&p.names, i)), view(name)) {
+            files := &p.files[i];
+            for j in files.len() {
+                path := item(&files, j);
+                push_bytes(&mut buf, view(path));
+                buf.push(32);
+                push_bytes(&mut buf, view(cache_digest_file(&mut c, view(path))));
+                buf.push(10);
+            }
+        }
+    }
+    return native::iface_digest(&buf);
+}
+// A record is only usable when every dependency it names still hashes to what it did.
+fn cache_deps_fresh<a, b, d>(c: (&a mut Cache), root: &a [u8], kind: &b [u8], key: &d [u8]) -> bool {
+    rows := cache_field_rows(view(root), view(kind), view(key), view("dep"));
+    for i in rows.len() {
+        row := item(&rows, i);
+        digest := cache_rest(view(row), 4);
+        mut split = 0;
+        mut j = 0;
+        while j < digest.len() {
+            if (digest[j] == 32) & (split == 0) {
+                split = j;
+            }
+            j += 1;
+        }
+        if split == 0 {
+            return false;
+        }
+        mut recorded = u8[];
+        for k in split {
+            recorded.push(digest[k]);
+        }
+        mut path = u8[];
+        j = split + 1;
+        while j < digest.len() {
+            path.push(digest[j]);
+            j += 1;
+        }
+        if !eq(view(cache_digest_file(&mut c, view(path))), view(recorded)) {
+            return false;
+        }
+    }
+    return true;
+}
+// Compile, assemble, cache and link one module per invocation. Nothing about a module's object is
+// decided by another module's code, so a hit is a hit on the module's own inputs alone.
+fn cache_plan<a, b, d, e, g, k>(h: (&a Home), p: (&b Plan), output: &d [u8], target: &e [u8], emulation: &k [u8], prefix: (&k u8[][]), flags: u64, iface: &d [u8], asm_out: &d [u8]) -> u64 {
+    mut c = Cache { root: cache_root(view(target)), fast: 0, tmp: u8[], hits: 0, misses: 0, names: u8[][] };
+    c.fast = cache_hash_tool();
+    stage := cache_stage(&mut c);
+    c.tmp = path_join(view(stage), view("digest"));
+    cache_ensure(&mut c);
+    root := c.root.copy();
+    exe := host::exe_path();
+    compiler := cache_digest_file(&mut c, view(exe));
+    assembler := cache_tool_id(&mut c, prefix);
+    // The trusted base: the runtime and platform module every object is emitted against. Its
+    // sources are in every module's key, because its ABI is in every module's code.
+    mut base_buf = u8[];
+    for i in p.names.len() {
+        if eq(view(item(&p.names, i)), view("runtime")) {
+            files := &p.files[i];
+            for j in files.len() {
+                path := item(&files, j);
+                push_bytes(&mut base_buf, view(cache_digest_file(&mut c, view(path))));
+                base_buf.push(10);
+            }
+        }
+    }
+    base := native::iface_digest(&view(base_buf));
+    mut objects = u8[][];
+    mut asm = u8[][];
+    mut inputs = u8[][];
+    for i in p.names.len() {
+        name := item(&p.names, i);
+        files := &p.files[i];
+        path := module_asm(view(output), view(name));
+        object := with_object_ext(view(path));
+        deps := cat(view(path), view(".deps"));
+        key := module_key(&mut c, &p, view(name), view(target), flags, view(compiler), view(assembler), view(base));
+        blob := cache_field(view(root), view("mod"), view(key), view("blob"));
+        mut reused = 0;
+        if (blob.len() == 64) & cache_deps_fresh(&mut c, view(root), view("mod"), view(key)) & cache_blob_ok(&mut c, view(blob)) {
+            if cache_blob_restore(&mut c, view(blob), view(object), 0) == 0 {
+                reused = 1;
+            }
+        }
+        if reused != 0 {
+            c.hits += 1;
+        } else {
+            c.misses += 1;
+            c.names.push(copy(view(name)));
+            entry := u64(plan_has(&p, view(name)));
+            argv := module_argv(&h, view(name), &files, view(path), view(target), flags, view(iface), view(deps), entry);
+            if host::command(argv) != 0 {
+                return 1;
+            }
+            if assemble_parts(&prefix, &asm_one(view(path)), &asm_one(view(object))) != 0 {
+                say(view("grail: assembling failed (needs clang)"));
+                return 1;
+            }
+            // The object is filed only after it assembled, with the dependency set the run reported.
+            filed := cache_blob_put(&mut c, view(object));
+            if filed.len() == 64 {
+                mut record = u8[];
+                push_bytes(&mut record, view("// grail-cache-module 2\nmodule "));
+                push_bytes(&mut record, view(name));
+                push_bytes(&mut record, view("\nblob "));
+                push_bytes(&mut record, view(filed));
+                record.push(10);
+                d := read_deps(view(deps), view(iface));
+                for j in d.path.len() {
+                    push_bytes(&mut record, view("dep "));
+                    push_bytes(&mut record, view(cache_digest_file(&mut c, view(d.path[j]))));
+                    record.push(32);
+                    push_bytes(&mut record, view(d.path[j]));
+                    record.push(10);
+                }
+                cache_record_put(&mut c, view("mod"), view(key), view(record));
+            }
+        }
+        text := host::read_file(view(path));
+        if cache_contains(view(text), view("// grail-link:")) {
+            base_dir := dirname(view(path));
+            found := link_inputs(view(text), view(base_dir));
+            for j in found.len() {
+                add_unique(&mut inputs, view(item(&found, j)));
+            }
+        }
+        asm.push(path);
+        objects.push(object);
+    }
+    // The image is determined by the object set, the link inputs and the linker - and by nothing
+    // else, now that each object depends on its own module alone.
+    mut linkbuf = u8[];
+    push_bytes(&mut linkbuf, view("grail-cache-link 2\ntarget "));
+    push_bytes(&mut linkbuf, view(target));
+    push_bytes(&mut linkbuf, view("\nlinker "));
+    mut linker_words = u8[][tool(view("GRAIL_LINKER"), view("ld.lld")), copy(view("-m")), copy(view(emulation))];
+    push_bytes(&mut linkbuf, view(cache_tool_id(&mut c, &linker_words)));
+    push_bytes(&mut linkbuf, view("\noutput "));
+    push_bytes(&mut linkbuf, view(output));
+    linkbuf.push(10);
+    for i in objects.len() {
+        path := item(&objects, i);
+        push_bytes(&mut linkbuf, view(cache_digest_file(&mut c, view(path))));
+        linkbuf.push(10);
+    }
+    for i in inputs.len() {
+        input := item(&inputs, i);
+        push_bytes(&mut linkbuf, view(input));
+        linkbuf.push(32);
+        push_bytes(&mut linkbuf, view(cache_digest_file(&mut c, view(input))));
+        linkbuf.push(10);
+    }
+    link_key := native::iface_digest(&linkbuf);
+    image := cache_field(view(root), view("lnk"), view(link_key), view("blob"));
+    mut linked: u64 = 0;
+    if cache_blob_ok(&mut c, view(image)) {
+        if cache_blob_restore(&mut c, view(image), view(output), 1) != 0 {
+            linked = 1;
+        }
+    } else {
+        linked = 1;
+    }
+    if linked != 0 {
+        if link_objects(view(output), view(target), view(emulation), &objects, &inputs) != 0 {
+            return 1;
+        }
+        stored := cache_blob_put(&mut c, view(output));
+        if stored.len() == 64 {
+            mut record = u8[];
+            push_bytes(&mut record, view("// grail-cache-link 2\nblob "));
+            push_bytes(&mut record, view(stored));
+            record.push(10);
+            cache_record_put(&mut c, view("lnk"), view(link_key), view(record));
+        }
+    }
+    cache_report(&mut c, linked);
+    return 0;
+}
+// A one-element list, so assembling one part reuses the driver's concurrent assembler path.
+fn asm_one<a>(path: &a [u8]) -> u8[][] {
+    mut out = u8[][];
+    out.push(copy(view(path)));
+    return out;
+}
+
+// ---- B1 stage 4: one compiler invocation per module ----
+// The build plans a module graph instead of taking a file list. A module is a set of source files
+// that declare the same `module` name (the runtime is two files), and each one is compiled by its
+// own invocation against the interfaces in `--interface DIR`. What that buys is the front end: an
+// unchanged module is not parsed, not checked and not emitted, because nothing else runs.
+struct Plan {
+    names: u8[][],
+    files: u8[][][],
+    entry: u8[]
+}
+// The module a source file declares, read from the head of the file: `module NAME;` (optionally
+// after `unsafe`), or the file's own stem when it declares none - an entry file may omit it, and
+// the compiler then names the module after the file.
+fn source_module<a>(path: &a [u8]) -> u8[] {
+    text := host::read_file(view(path));
+    rows := lines(view(text));
+    for i in rows.len() {
+        row := item(&rows, i);
+        if (row.len() != 0) & !starts(view(row), view("//")) {
+            w := words(view(row));
+            if w.len() != 0 {
+                first := item(&w, 0);
+                mut at = 0;
+                if eq(view(first), view("unsafe")) {
+                    at = 1;
+                }
+                if (at < w.len()) & eq(view(item(&w, at)), view("module")) {
+                    if at + 1 < w.len() {
+                        mut name = item(&w, at + 1);
+                        return name_of(view(name));
+                    }
+                }
+            }
+            break;
+        }
+    }
+    return path_stem_of(view(path));
+}
+// `NAME;` -> `NAME`, `NAME` -> `NAME`.
+fn name_of<a>(word: &a [u8]) -> u8[] {
+    mut n = word.len();
+    while (0 < n) & ((word[n - 1] == 59) || (word[n - 1] == 13)) {
+        n -= 1;
+    }
+    mut out = u8[];
+    for i in n {
+        out.push(word[i]);
+    }
+    return out;
+}
+// The stem of a path: `src/app.grl` -> `app`.
+fn path_stem_of<a>(p: &a [u8]) -> u8[] {
+    mut start = 0;
+    mut i = 0;
+    while i < p.len() {
+        if p[i] == 47 {
+            start = i + 1;
+        }
+        i += 1;
+    }
+    mut end = p.len();
+    if (4 < end) & (p[end - 1] == 108) & (p[end - 2] == 114) & (p[end - 3] == 103) & (p[end - 4] == 46) {
+        end = end - 4;
+    }
+    mut out = u8[];
+    i = start;
+    while i < end {
+        out.push(p[i]);
+        i += 1;
+    }
+    return out;
+}
+// Group the program's sources by the module they declare, in the order they first appear. The
+// runtime and the platform module are one module in two files, which is why a module is a list.
+fn plan_modules<a>(sources: (&a u8[][])) -> Plan {
+    mut plan = Plan { names: u8[][], files: u8[][][], entry: u8[] };
+    for i in sources.len() {
+        path := item(&sources, i);
+        name := source_module(view(path));
+        if i == 0 {
+            plan.entry = name.copy();
+        }
+        mut slot = plan.names.len();
+        for j in plan.names.len() {
+            if eq(view(plan.names[j]), view(name)) {
+                slot = j;
+            }
+        }
+        if slot == plan.names.len() {
+            plan.names.push(name.copy());
+            mut fresh = u8[][];
+            fresh.push(copy(view(path)));
+            plan.files.push(fresh);
+        } else {
+            plan.files[slot].push(copy(view(path)));
+        }
+    }
+    return plan;
+}
+// Whether a module in the plan holds the entry, so exactly one invocation synthesizes `_start`.
+fn plan_has<a, b>(p: (&a Plan), name: &b [u8]) -> bool {
+    return eq(view(p.entry), view(name));
+}
+// The assembly one module's invocation writes.
+fn module_asm<a, b>(output: &a [u8], name: &b [u8]) -> u8[] {
+    mut out = copy(view(output));
+    out.push(46);
+    push_bytes(&mut out, view(name));
+    push_bytes(&mut out, view(".s"));
+    return out;
+}
+// One module's compiler invocation, spelled out in one place for the same reason `build_argv` is:
+// what it passes is what the module's key is over.
+fn module_argv<a, b, d>(h: (&a Home), name: &b [u8], files: (&d u8[][]), asm: &b [u8], target: &b [u8], flags: u64, iface: &b [u8], deps: &b [u8], entry: u64) -> u8[][] {
+    wrap := (flags / 16) % 2;
+    checked := (flags / 32) % 2;
+    deny := (flags / 4) % 2;
+    mut command = u8[][host::exe_path(), copy(view("--target")), copy(view(target))];
+    if deny != 0 {
+        command.push(copy(view("--deny-ambient-host")));
+    }
+    if wrap != 0 {
+        command.push(copy(view("--overflow=wrap")));
+    }
+    if checked != 0 {
+        command.push(copy(view("--overflow=checked")));
+    }
+    command.push(copy(view("--module")));
+    command.push(copy(view(name)));
+    if iface.len() != 0 {
+        command.push(copy(view("--interface")));
+        command.push(copy(view(iface)));
+    }
+    command.push(copy(view("--deps")));
+    command.push(copy(view(deps)));
+    if entry == 0 {
+        // A module that does not hold the entry synthesizes no `_start`, and nothing in it is the
+        // process entry even when it looks like one.
+        command.push(copy(view("--no-entry")));
+    }
+    command.push(copy(view(asm)));
+    for i in files.len() {
+        command.push(item(&files, i));
+    }
+    return command;
+}
+// Compile every module in the plan, one invocation each, and assemble it.
+fn build_modules<a, b, d, e, g>(h: (&a Home), p: (&b Plan), output: &d [u8], target: &e [u8], emulation: &g [u8], prefix: (&g u8[][]), flags: u64, iface: &d [u8]) -> u64 {
+    mut asm = u8[][];
+    mut objects = u8[][];
+    for i in p.names.len() {
+        name := item(&p.names, i);
+        files := &p.files[i];
+        path := module_asm(view(output), view(name));
+        deps := cat(view(path), view(".deps"));
+        entry := u64(plan_has(&p, view(name)));
+        argv := module_argv(&h, view(name), &files, view(path), view(target), flags, view(iface), view(deps), entry);
+        if host::command(argv) != 0 {
+            return 1;
+        }
+        objects.push(with_object_ext(view(path)));
+        asm.push(path);
+    }
+    if assemble_parts(&prefix, &asm, &objects) != 0 {
+        say(view("grail: assembling failed (needs clang)"));
+        return 1;
+    }
+    // The link inputs are the union of what the modules asked for: `// grail-link:` travels with
+    // the module that declared it.
+    mut inputs = u8[][];
+    for i in asm.len() {
+        text := host::read_file(view(item(&asm, i)));
+        // A module that declares no foreign input has no request line, and scanning it would only
+        // walk an assembly that may hold nothing but `.text`.
+        if cache_contains(view(text), view("// grail-link:")) {
+            base := dirname(view(item(&asm, i)));
+            found := link_inputs(view(text), view(base));
+            for j in found.len() {
+                add_unique(&mut inputs, view(item(&found, j)));
+            }
+        }
+    }
+    return link_objects(view(output), view(target), view(emulation), &objects, &inputs);
+}
+fn add_unique<a, b>(list: (&a mut u8[][]), name: &b [u8]) {
+    for i in list.len() {
+        if eq(view(item(&list, i)), view(name)) {
+            return ();
+        }
+    }
+    list.push(copy(view(name)));
+    return ();
+}
+
 fn load_project() -> Project {
     mut p = Project {
         name: u8[],
@@ -1611,7 +2104,11 @@ struct Options {
     // `--verify` compares the two instead of trusting either.
     iface: u8[],
     verify: u64,
-    paths: u8[][]
+    paths: u8[][],
+    // B1 stage 4: compile exactly this module, against `iface`, and nothing else.
+    module_name: u8[],
+    // Compile the program one module per invocation instead of one whole-program pass.
+    per_module: u64
 }
 // The code-generation flag vector, in one place: it is what the compiler is told, and what the build
 // cache keys on. Bit 0 check only, 1 debug, 2 deny ambient host, 3 split, 4/5 overflow, 6 cache.
@@ -1633,6 +2130,8 @@ fn options<a>(args: (&a u8[][])) -> Options {
         iface: u8[],
         verify: 0,
         paths: u8[][],
+        module_name: u8[],
+        per_module: 0,
     };
     mut i = 0;
     mut passthrough = 0;
@@ -1685,11 +2184,22 @@ fn options<a>(args: (&a u8[][])) -> Options {
                             if eq(view(a), view("--verify")) {
                                 o.verify = 1;
                             } else {
+                            if eq(view(a), view("--module")) & (i + 1 < args.len()) {
+                                // One module, one invocation: this build emits that module alone.
+                                i += 1;
+                                o.module_name = item(&args, i);
+                            } else {
+                            if eq(view(a), view("--per-module")) {
+                                // Every module in its own invocation, linked once (B1 stage 4).
+                                o.per_module = 1;
+                            } else {
                             if ends(view(a), view(".grl")) & (o.file.len() == 0) {
                                 o.file = copy(view(a));
                                 o.paths.push(a);
                             } else {
                                 o.paths.push(a);
+                            }
+                            }
                             }
                             }
                             }
@@ -1721,7 +2231,52 @@ fn build<a, b>(args: (&a u8[][]), o: (&b mut Options)) -> u64 {
             return 1;
         }
     }
+    if (o.module_name.len() != 0) || (o.per_module != 0) {
+        if !eq(view(o.target), view("x86_64")) || (o.debug != 0) {
+            say(view("grail: --module and --per-module are implemented for the linux x86_64 assembler path, without --debug"));
+            return 1;
+        }
+        if o.iface.len() == 0 {
+            say(view("grail: --module and --per-module compile against interfaces; add --interface DIR"));
+            return 1;
+        }
+    }
     host::mkdir(view("target"));
+    if o.module_name.len() != 0 {
+        return build_one_module(&h, &o);
+    }
+    if o.per_module != 0 {
+        // The program is whatever the command line names - an entry and its modules - plus the
+        // standard-library modules it reaches, the runtime and the platform module.
+        mut sources = u8[][];
+        if o.file.len() != 0 {
+            entry := copy(view(o.file));
+            mut modules = u8[][];
+            for i in o.paths.len() {
+                if !eq(view(item(&o.paths, i)), view(entry)) {
+                    modules.push(item(&o.paths, i));
+                }
+            }
+            sources = program_sources(&h, view(entry), &modules, view(o.target));
+            if o.output.len() == 0 {
+                o.output = path_join(view("target"), view(source_module(view(entry))));
+            }
+        } else {
+            p := load_project();
+            if p.name.len() == 0 {
+                say(view("grail: no .grl file given and no grail.pkg here (try `grail new NAME`)"));
+                return 1;
+            }
+            modules := project_modules(&p, 1);
+            sources = program_sources(&h, view(p.entry), &modules, view(o.target));
+            if o.output.len() == 0 {
+                o.output = path_join(view("target"), view(p.name));
+            }
+        }
+        plan := plan_modules(&sources);
+        asm := cat(view(o.output), view(".s"));
+        return compile_plan(&h, &plan, &o, view(asm));
+    }
     if o.file.len() != 0 {
         if o.output.len() == 0 {
             stem := basename(view(o.file));
@@ -1740,6 +2295,69 @@ fn build<a, b>(args: (&a u8[][]), o: (&b mut Options)) -> u64 {
     }
     modules := project_modules(&p, 1);
     return compile(&h, view(p.entry), &modules, view(o.output), view(o.target), flag_bits(&o), view(o.iface), o.verify);
+}
+// `grail build --module NAME --interface DIR`: one module, one invocation, one object. The source
+// is the project file that declares NAME (or the file on the command line).
+fn build_one_module<a, b>(h: (&a Home), o: (&b Options)) -> u64 {
+    mut sources = u8[][];
+    if o.paths.len() != 0 {
+        for i in o.paths.len() {
+            sources.push(item(&o.paths, i));
+        }
+    } else {
+        p := load_project();
+        if p.name.len() == 0 {
+            say(view("grail: no .grl file given and no grail.pkg here (try `grail new NAME`)"));
+            return 1;
+        }
+        modules := project_modules(&p, 1);
+        all := program_sources(&h, view(p.entry), &modules, view(o.target));
+        for i in all.len() {
+            sources.push(item(&all, i));
+        }
+    }
+    mut files = u8[][];
+    for i in sources.len() {
+        if eq(view(source_module(view(item(&sources, i)))), view(o.module_name)) {
+            files.push(item(&sources, i));
+        }
+    }
+    if files.len() == 0 {
+        say(view("grail: no source in this project declares module "));
+        say(view(o.module_name));
+        say(view("\n"));
+        return 1;
+    }
+    mut output = copy(view(o.output));
+    if output.len() == 0 {
+        output = path_join(view("target"), view(o.module_name));
+    }
+    asm := module_asm(view(output), view(o.module_name));
+    deps := cat(view(asm), view(".deps"));
+    plan := plan_modules(&sources);
+    entry := u64(plan_has(&plan, view(o.module_name)));
+    argv := module_argv(&h, view(o.module_name), &files, view(asm), view(o.target), flag_bits(&o), view(o.iface), view(deps), entry);
+    if host::command(argv) != 0 {
+        return 1;
+    }
+    object := with_object_ext(view(asm));
+    mut prefix = u8[][tool(view("GRAIL_ASSEMBLER"), view("clang")), copy(view("--target=x86_64-linux-gnu")), copy(view("-c"))];
+    if assemble_parts(&prefix, &asm_one(view(asm)), &asm_one(view(object))) != 0 {
+        say(view("grail: assembling failed (needs clang)"));
+        return 1;
+    }
+    say(view("grail: wrote "));
+    say(view(object));
+    say(view("\n"));
+    return 0;
+}
+// `grail build --per-module --interface DIR`: the whole program, one invocation per module.
+fn compile_plan<a, b, d>(h: (&a Home), p: (&b Plan), o: (&d Options), asm: &d [u8]) -> u64 {
+    mut prefix = u8[][tool(view("GRAIL_ASSEMBLER"), view("clang")), copy(view("--target=x86_64-linux-gnu")), copy(view("-c"))];
+    if o.cache != 0 {
+        return cache_plan(&h, &p, view(o.output), view(o.target), view("elf_x86_64"), &prefix, flag_bits(&o), view(o.iface), view(asm));
+    }
+    return build_modules(&h, &p, view(o.output), view(o.target), view("elf_x86_64"), &prefix, flag_bits(&o), view(o.iface));
 }
 fn check_command<a>(args: (&a u8[][])) -> u64 {
     o := options(&args);

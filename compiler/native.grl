@@ -425,7 +425,10 @@ struct C {
     // Types whose drop helper this run's code calls, in discovery order, and a flag per type so
     // asking twice is O(1): the request is on the hot path of every scope that ends.
     drop_wanted: u64[],
-    drop_seen: u64[]
+    drop_seen: u64[],
+    // The keys of the helpers emitted so far: two types can have one identity (two closures that
+    // capture the same types have the same environment), and one symbol may be defined once.
+    drop_done: u8[][]
 }
 
 fn same<a, b>(x: &a [u8], y: &b [u8]) -> bool {
@@ -536,13 +539,10 @@ fn unit_module<a, b>(c: (&a mut C), m: &b [u8]) -> u8[] {
 // part of the name: two modules that instantiate the same foreign generic each emit the closure it
 // creates, and neither may name it the same as the other.
 fn closure_symbol<a, b>(c: (&a mut C), module: &b [u8], name: &b [u8]) -> unit {
-    if c.emit_unit.len() == 0 {
-        owner := unit_module(&mut c, view(module));
-        mangle(&mut c, view(owner), view(name));
-        return ();
-    }
-    unit := c.emit_unit.copy();
-    owner := unit_module(&mut c, view(unit));
+    // The fragment already identifies the closure: an ordinary one by its index within the module,
+    // one created inside a replayed specialisation by that specialisation's key. So the symbol is
+    // the same in every object that emits it, and two of those objects link to one body.
+    owner := unit_module(&mut c, view(module));
     mangle(&mut c, view(owner), view(name));
     return ();
 }
@@ -4422,21 +4422,99 @@ fn key_hash<a>(data: &a [u8]) -> u8[] {
     }
     return out;
 }
-// The spelling two invocations agree on for one type: a named record by `module::name`, everything
-// else structurally. It is the interface format's spelling, which is already the one canonical
-// description of a type the compiler has.
+// The identity of one type: a total function of the store's own fields, written so two runs that
+// build the same type write the same bytes and two runs that build different types never do.
+//
+// This is deliberately *not* the interface format's spelling. An interface describes a surface, and
+// it refuses a type it cannot express rather than inventing a spelling - the right behaviour for a
+// file that has to read back as the same type. A symbol name cannot refuse: it is needed for drop
+// glue, for specialisations and for private units, on every type the program mentions. So the key
+// is written here, from the kind, the mode, the payload that kind actually carries, the type's
+// arguments and a closure's environment - and it cannot fail.
+//
+// Declarations are named, never numbered: a record is `<module>::<name>`, so two compilations that
+// order their tables differently still agree. The one exception is a closure's environment record,
+// which is named by what it holds rather than by its `.closure::envN` name, because that name is a
+// counter within one compilation and two closures with the same captures are the same type for
+// every purpose this key is used for.
 fn type_identity<a>(c: (&a mut C), ty: u64) -> u8[] {
     mut out = u8[];
-    iface_type_raw(&mut out, &mut c, ty);
-    // `f32` and `f64` are both kind 21 and the interface spelling does not separate them (only the
-    // declared width does), so a name keyed on the spelling alone would file `impl Ord for f32` and
-    // `impl Ord for f64` under one symbol. The width is appended for exactly that kind; every other
-    // kind's payload is either in the spelling already or is a table index, which must stay out.
-    if ty_kind(&mut c, ty) == 21 {
-        out.push(58);
-        decimal(&mut out, ty_arg(&mut c, ty));
-    }
+    type_shape(&mut out, &mut c, ty, 0);
     return out;
+}
+fn type_shape<a, b>(out: (&a mut u8[]), c: (&b mut C), ty: u64, depth: u64) -> unit {
+    // A nominal type can reach itself through a pointer-shaped field; the key is a description, so
+    // a bounded depth turns a cycle into a marker instead of a recursion.
+    if 8 < depth {
+        push_bytes(out, view("(deep)"));
+        return ();
+    }
+    k := ty_kind(&mut c, ty);
+    mode := ty_mode(&mut c, ty);
+    arg := ty_arg(&mut c, ty);
+    args := type_args(&mut c, ty);
+    env := ty_env(&mut c, ty);
+    out.push(40);
+    decimal(out, k);
+    out.push(58);
+    decimal(out, mode);
+    out.push(58);
+    if (k == 8) || (k == 23) || (k == 28) {
+        // The payload is a declaration.
+        decl_name(out, &mut c, arg, depth);
+    } else if k == 15 {
+        // A proof's payload is an interface.
+        ref := arg;
+        push_bytes(out, view(c.interfaces[ref - 1].module));
+        out.push(58);
+        out.push(58);
+        push_bytes(out, view(c.interfaces[ref - 1].name));
+    } else if (k == 6) || (k == 7) || (k == 10) || (k == 12) || (k == 13) || (k == 14) || (k == 16) || (k == 20) || (k == 25) || (k == 26) || (k == 27) {
+        // The payload is a nested type.
+        type_shape(&mut out, &mut c, arg, depth + 1);
+    } else if (k == 9) || (k == 18) || (k == 21) {
+        // The payload is a scalar the kind carries: a parameter index, an integer width, a float
+        // precision. One word each, and no table index among them.
+        decimal(out, arg);
+    }
+    // Every kind also has its arguments and, for a closure, its environment.
+    out.push(91);
+    for i in args.len() {
+        if i != 0 {
+            out.push(44);
+        }
+        type_shape(&mut out, &mut c, args[i], depth + 1);
+    }
+    out.push(93);
+    if env != 0 {
+        type_shape(&mut out, &mut c, env, depth + 1);
+    }
+    out.push(41);
+    return ();
+}
+// One declaration's identity: `module::name`, except for a closure's environment record, which is
+// named by its fields - two closures that capture the same types have the same environment type,
+// and the counter in `.closure::envN` is not an identity.
+fn decl_name<a, b>(out: (&a mut u8[]), c: (&b mut C), decl: u64, depth: u64) -> unit {
+    module := c.decls[decl].module.copy();
+    name := c.decls[decl].name.copy();
+    first := c.decls[decl].first;
+    count := c.decls[decl].count;
+    if !same(view(module), view(".closure")) {
+        push_bytes(out, view(module));
+        out.push(58);
+        out.push(58);
+        push_bytes(out, view(name));
+        return ();
+    }
+    push_bytes(out, view("(env"));
+    for i in count {
+        t := c.fields[first + i].ty;
+        out.push(32);
+        type_shape(&mut out, &mut c, t, depth + 1);
+    }
+    out.push(41);
+    return ();
 }
 // The unit a type's own methods live in: `.inherent$<module>$<Type>`, an identity two modules
 // agree on. `index` is 0-based, the same convention `c.inherent` uses.
@@ -4493,9 +4571,7 @@ fn drop_key<a>(c: (&a mut C), ty: u64) -> u8[] {
     if cached.len() != 0 {
         return cached.copy();
     }
-    mut text = c.emit_unit.copy();
-    text.push(10);
-    push_bytes(&mut text, view(type_identity(&mut c, ty)));
+    text := type_identity(&mut c, ty);
     key := key_hash(view(text));
     exchange(&mut c.drop_names[ty], key.copy());
     return key;
@@ -4511,7 +4587,15 @@ fn spec_key<a>(c: (&a mut C), index: u64) -> u8[] {
     if cached.len() != 0 {
         return cached.copy();
     }
-    mut text = c.emit_unit.copy();
+    // The template and its canonical arguments, and nothing about who instantiated it: the same
+    // specialisation has one name in every object that emits it, so the copies are the same symbol
+    // and the linker keeps one.
+    template := c.specs[index].template;
+    tm := c.funcs[template].module.copy();
+    tn := c.funcs[template].name.copy();
+    mut text = copy_bytes(view(tm));
+    text.push(58);
+    push_bytes(&mut text, view(tn));
     text.push(10);
     for i in c.specs[index].args.len() {
         arg := c.specs[index].args[i];
@@ -7619,6 +7703,13 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     }
     exchange(&mut c.caddr, u64[]);
     func_directive(&mut c, view(m), view(name), view(body_symbol), export);
+    if (c.emit_unit.len() != 0) & (c.current_spec != 0) & (export == 0) {
+        // A specialisation is one symbol for the whole program: two modules that instantiate the
+        // same generic emit the same body under the same name, and the linker keeps one of them.
+        o(&mut c, view(".weak "));
+        export_name(&mut c, view(m), view(name), view(body_symbol), export);
+        o(&mut c, view("\n"));
+    }
     if (c.debug != 0) & (c.validating == 0) {
         dstart = label(&mut c);
         mark(&mut c, dstart);
@@ -10948,7 +11039,7 @@ fn emit_fn_thunk<a>(c: (&a mut C)) -> unit {
         // sequence, so a weak definition in each object is the same body once the linker is done.
         unit := c.emit_unit.copy();
         part(&mut c, view(unit));
-        o(&mut c, view(".weak grail_fn_thunk\n.globl grail_fn_thunk\n"));
+        o(&mut c, view(".weak grail_fn_thunk\n"));
     } else {
         part(&mut c, view("runtime"));
         if c.split != 0 {
@@ -14795,6 +14886,14 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
     // record its loan against the field it lands in.
     own(&mut c, obj, fnty);
     mut symbol = copy_bytes(view("closure$"));
+    if c.current_spec != 0 {
+        // A closure a generic's body creates belongs to the specialisation, not to the module that
+        // happened to instantiate it: two modules that instantiate the same specialisation must
+        // emit the same closure symbol.
+        spec := c.current_spec - 1;
+        push_bytes(&mut symbol, view(spec_key(&mut c, spec)));
+        symbol.push(36);
+    }
     decimal(&mut symbol, index);
     here := module_copy(&mut c);
     o(&mut c, view("leaq "));
@@ -15083,6 +15182,11 @@ fn emit_closures<a>(c: (&a mut C)) -> unit {
         unit := module_copy(&mut c);
         part(&mut c, view(unit));
         func_directive(&mut c, view(unit), view(symbol), view(symbol), 0);
+        if c.emit_unit.len() != 0 {
+            o(&mut c, view(".weak "));
+            closure_symbol(&mut c, view(unit), view(symbol));
+            c.out.push(10);
+        }
         closure_symbol(&mut c, view(unit), view(symbol));
         o(&mut c, view(":\npushq %rbp\nmovq %rsp,%rbp\n"));
         frame := label(&mut c);
@@ -21889,16 +21993,33 @@ fn emit_drops<a>(c: (&a mut C)) -> unit {
 }
 fn emit_drop_one<a>(c: (&a mut C), ty: u64) -> unit {
     {
+        done_key := drop_key(&mut c, ty);
+        for i in c.drop_done.len() {
+            if same(view(c.drop_done[i]), view(done_key)) {
+                return ();
+            }
+        }
+        c.drop_done.push(done_key.copy());
         kind := ty_kind(&mut c, ty);
         arg := ty_arg(&mut c, ty);
         if concrete_type(&mut c, ty) {
             if needs_drop(&mut c, ty) {
                 done := label(&mut c);
                 if (c.split != 0) || (c.emit_unit.len() != 0) {
-                    // Defined here, called from every module: the linker has to see the name.
-                    o(&mut c, view(".globl "));
-                    drop_name(&mut c, ty);
-                    c.out.push(10);
+                    // Defined here, called from every module: the linker has to see the name. Two
+                    // modules that need the same helper emit the same body under the same name, so
+                    // the name is weak and the linker keeps one.
+                    if c.emit_unit.len() != 0 {
+                        // `.weak` alone: the symbol is still visible to the linker, and a second
+                        // object that emits the same helper does not collide with it.
+                        o(&mut c, view(".weak "));
+                        drop_name(&mut c, ty);
+                        c.out.push(10);
+                    } else {
+                        o(&mut c, view(".globl "));
+                        drop_name(&mut c, ty);
+                        c.out.push(10);
+                    }
                 }
                 drop_name(&mut c, ty);
                 o(&mut c, view(":\ntestq %rdi,%rdi\n"));
@@ -25077,6 +25198,7 @@ pub fn main() -> u64 {
         impl_names: u8[][],
         drop_wanted: u64[],
         drop_seen: u64[],
+        drop_done: u8[][],
     };
     exchange(&mut c.target, host::target());
     for k in 5 {
