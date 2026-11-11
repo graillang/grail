@@ -346,6 +346,25 @@ pub fn end_loan<a>(s: (&a mut State), id: u64) -> u64 {
     exchange(&mut p.live, 0);
     return 0;
 }
+// An exclusive loan with no live reborrows becomes a shared one: what it still permits is a subset
+// of what it permitted. `cptr(&mut v)` uses it, because the pointer it makes is read-only.
+pub fn share<a>(s: (&a mut State), id: u64) -> u64 {
+    if id == 0 || s.loans.len() < id {
+        return 1;
+    }
+    for i in s.loans.len() {
+        child := &s.loans[i];
+        active := child.live;
+        if active != 0 && i + 1 != id {
+            if loan_ancestor(&s, id, i + 1) {
+                return 6;
+            }
+        }
+    }
+    mut l = &mut s.loans[id - 1];
+    exchange(&mut l.mode, 0);
+    return 0;
+}
 pub fn snapshot<a>(s: (&a State)) -> State {
     mut places = Place[];
     mut loans = Loan[];

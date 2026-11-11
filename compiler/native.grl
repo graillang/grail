@@ -191,6 +191,13 @@ struct Origin {
     place: u64,
     region: u64
 }
+// A loan held by a C pointer made from Grail storage (`cptr`/`cptr_mut`): `at` is the token of the
+// `cptr` that took it, so a conflict can say which pointer is still live.
+struct Pointer {
+    loan: u64,
+    at: u64,
+    writable: u64
+}
 struct Member {
     base: u64,
     field: u64,
@@ -389,6 +396,7 @@ struct C {
     breaks: ownership::State,
     hasbreak: u64,
     bonds: Bond[],
+    pointers: Pointer[],
     origins: Origin[],
     scope_end: u64,
     loop_start: u64,
@@ -2700,6 +2708,7 @@ fn call_bonds<a>(
             fail(&mut c, view("borrowed result has no declared input source"));
         }
     }
+    pointer_results(&mut c, result.t, result.ty, first, &args);
     normalize_readonly(&mut c, result.t, result.ty);
     close_loans(&mut c);
     return ();
@@ -3095,7 +3104,7 @@ fn expire_locals<a>(c: (&a mut C)) -> unit {
         k := ty_kind(&mut c, ty);
         mut carrier = k == 5 || k == 7 || k == 27;
         root := place_of(&mut c, slot);
-        if (k == 6) || (k == 8) {
+        if (k == 6) || (k == 8) || (k == 26) {
             for j in c.bonds.len() {
                 mut b = &c.bonds[j];
                 holder := b.holder;
@@ -3120,7 +3129,7 @@ fn expire_locals<a>(c: (&a mut C)) -> unit {
                         place := info.place;
                         if place != 0 {
                             if ownership::can_cleanup(&c.check, place) {
-                                if (k == 6) || (k == 8) {
+                                if (k == 6) || (k == 8) || (k == 26) {
                                     ownership::cleanup(&mut c.check, place);
                                     close_loans(&mut c);
                                 } else {
@@ -3244,6 +3253,7 @@ fn require_write<a>(c: (&a mut C), slot: u64) -> unit {
             }
         } else {
             if ownership::initialize(&mut c.check, target) != 0 {
+                pointer_conflict(&mut c, target, view("modify"), 0);
                 fail(
                     &mut c,
                     view("field assignment conflicts with live borrow or moved storage")
@@ -3292,6 +3302,7 @@ fn require_write<a>(c: (&a mut C), slot: u64) -> unit {
         } else {
             loan := ownership::borrow_place(&mut c.check, place, 1);
             if loan == 0 {
+                pointer_conflict(&mut c, place, view("modify"), 0);
                 fail(&mut c, view("mutation conflicts with live borrow"));
             }
             ownership::end_loan(&mut c.check, loan);
@@ -3516,6 +3527,7 @@ fn bind_loan<a>(c: (&a mut C), value: u64, source: u64, target: u64, mode: u64) 
                 view("the value handed to C as a read-only pointer is already mutably borrowed in this expression")
             );
         }
+        pointer_conflict(&mut c, target, view("borrow"), u64(mode == 0));
         fail(&mut c, view("borrow conflicts with active access"));
     }
     holder := place_of(&mut c, value);
@@ -3633,6 +3645,7 @@ fn validate_return<a>(c: (&a mut C), v: Val) -> unit {
                 }
                 if region != 18446744073709551615 {
                     if (region == 0) || (allowed == 0) {
+                        pointer_escape(&mut c, loan);
                         fail(&mut c, view("returned borrow escapes its declared input lifetime"));
                     }
                 }
@@ -3679,6 +3692,7 @@ fn observe<a>(c: (&a mut C), slot: u64) -> unit {
         }
     } else {
         if ownership::read(&c.check, place) != 0 {
+            pointer_conflict(&mut c, place, view("use"), 1);
             fail(&mut c, view("use of moved, borrowed or partially initialized value"));
         }
     }
@@ -3958,6 +3972,7 @@ fn release<a>(c: (&a mut C), index: u64) -> unit {
         if base == 0 {
             if place != 0 {
                 if ownership::cleanup(&mut c.check, place) != 0 {
+                    pointer_conflict(&mut c, place, view(""), 0);
                     fail(&mut c, view("storage ends while borrowed"));
                 }
                 close_loans(&mut c);
@@ -3967,6 +3982,7 @@ fn release<a>(c: (&a mut C), index: u64) -> unit {
     }
     if place != 0 {
         if ownership::cleanup(&mut c.check, place) != 0 {
+            pointer_conflict(&mut c, place, view(""), 0);
             fail(&mut c, view("cleanup conflicts with live loan"));
         }
     }
@@ -4019,6 +4035,7 @@ fn move_out<a>(c: (&a mut C), v: Val) -> unit {
     if place != 0 {
         capture_authority(&mut c, place);
         if ownership::take(&mut c.check, place) != 0 {
+            pointer_conflict(&mut c, place, view("move"), 0);
             fail(&mut c, view("move of unavailable or borrowed value"));
         }
     }
@@ -4044,10 +4061,15 @@ fn move_value<a>(c: (&a mut C), v: Val) -> Val {
     target := target_of(&mut c, v.t);
     move_out(&mut c, val(v.t, v.ty));
     own(&mut c, slot, v.ty);
-    dst := place_of(&mut c, slot);
+    mut dst = place_of(&mut c, slot);
     kind := ty_kind(&mut c, v.ty);
     if contains_borrow(&mut c, v.ty, 0) {
         return_bonds(&mut c, old, dst, u64(kind == 6 || kind == 8));
+    } else {
+        if (kind == 26) & (dst == 0) & (old != 0) & (c.raw == 0) {
+            dst = pointer_place(&mut c, slot, v.ty);
+        }
+        pointer_copy(&mut c, old, dst, v.ty);
     }
     if ty_kind(&mut c, v.ty) == 7 {
         set_target(&mut c, slot, target, slot + 1);
@@ -6328,7 +6350,7 @@ fn bind<a>(c: (&a mut C), name: u8[], ty: u64, id: u64, mutable: u64) -> unit {
     if c.raw == 0 {
         if place_of(&mut c, id) == 0 {
             kind := ty_kind(&mut c, ty);
-            if (kind == 1) || (kind == 2) || (kind == 12) || (kind == 17) || (kind == 18) || (kind == 19) || (kind == 21) || (kind == 22) {
+            if (kind == 1) || (kind == 2) || (kind == 12) || (kind == 17) || (kind == 18) || (kind == 19) || (kind == 21) || (kind == 22) || (kind == 26) {
                 place := ownership::root(&mut c.check, 1, 1);
                 c
                     .resources
@@ -7728,6 +7750,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     exchange(&mut c.members, Member[]);
     exchange(&mut c.terminated, 0);
     exchange(&mut c.bonds, Bond[]);
+    exchange(&mut c.pointers, Pointer[]);
     exchange(&mut c.origins, Origin[]);
     first := c.params.len();
     mut count = 0;
@@ -13165,7 +13188,7 @@ fn exchange_into<a>(c: (&a mut C), a: Val, b: Val) -> Val {
 // (`VkRenderPassCreateInfo::pAttachments`). The borrow is the ordinary call-scoped one: the record
 // cannot be moved, dropped, or borrowed again while the pointer is live, and the pointer carries no
 // length or lifetime, which is why the whole expression sits in an `unsafe` block.
-fn cptr_record<a>(c: (&a mut C), x: Val, writable: u64) -> Val {
+fn cptr_record<a>(c: (&a mut C), reference: u64, x: Val, writable: u64) -> Val {
     if is_c_record(&mut c, x.ty) == 0 {
         fail(
             &mut c,
@@ -13197,7 +13220,9 @@ fn cptr_record<a>(c: (&a mut C), x: Val, writable: u64) -> Val {
     // holds a view record, one word further out, which is why `rt_view_ptr` reads that one.
     get(&mut c, x.t, view("%rax"));
     slot := save(&mut c);
-    return val(slot, intern_full(&mut c, 26, 0, writable, u64[]));
+    ty := intern_full(&mut c, 26, 0, writable, u64[]);
+    pointer_borrow(&mut c, slot, ty, reference, x.t, writable);
+    return val(slot, ty);
 }
 // 1 when `place` belongs to the hidden binding `borrow_temporary` created for `&expr`, i.e. the
 // record the caller is taking the address of is not a name.
@@ -13214,6 +13239,342 @@ fn borrowed_temporary<a>(c: (&a mut C), place: u64) -> bool {
         }
     }
     return false;
+}
+// ---- C pointers made from Grail storage --------------------------------------------------------
+// `cptr`/`cptr_mut` of a record or of bytes is a borrow of that storage, the same loan a reference
+// holds: the pointer value is a holder of it (a bond from its own place), the loan follows the
+// pointer into bindings, record fields, closure environments and moves of whatever holds it, and it
+// ends only once nothing that holds the pointer is live. While it is live the storage cannot be
+// assigned, moved, dropped or (for a `cptr_mut`) used through another path, and a pointer that
+// would outlive it - returned, or kept in something that outlives the storage - is refused.
+// `pointers` remembers which loans are C pointers, so those conflicts can say so by name.
+fn pointer_borrow<a>(c: (&a mut C), slot: u64, ty: u64, reference: u64, storage: u64, writable: u64) -> unit {
+    if c.raw != 0 {
+        return ();
+    }
+    holder := pointer_place(&mut c, slot, ty);
+    // `cptr(&r)`, `cptr(view)`: the operand is a reference that already holds the loan, so the
+    // pointer holds it too. `cptr(bytes)` of an owned sequence borrows the binding itself.
+    source := place_of(&mut c, reference);
+    if (writable == 0) & (source != 0) & !is_local_slot(&mut c, reference) {
+        // `cptr(&mut v)` is a read-only pointer: the `&mut` temporary exists only to make it, so its
+        // exclusive loan becomes the shared one the pointer holds, and `v` stays readable.
+        for i in c.bonds.len() {
+            b := &c.bonds[i];
+            h := b.holder;
+            loan := b.loan;
+            guard := b.guard;
+            if (h == source) & (guard == 0) & (loan_live(&mut c, loan) != 0) {
+                ownership::share(&mut c.check, loan);
+            }
+        }
+    }
+    if (source != 0) & has_bonds(&mut c, source) {
+        transfer_bonds(&mut c, source, holder);
+    } else {
+        target := place_of(&mut c, storage);
+        if target == 0 {
+            return ();
+        }
+        bind_loan(&mut c, slot, storage, target, writable);
+    }
+    pointer_loans(&mut c, holder, writable);
+    return ();
+}
+// Record every live loan `holder` holds as a C-pointer loan made here.
+fn pointer_loans<a>(c: (&a mut C), holder: u64, writable: u64) -> unit {
+    at := c.pos;
+    for i in c.bonds.len() {
+        b := &c.bonds[i];
+        h := b.holder;
+        loan := b.loan;
+        guard := b.guard;
+        if (h == holder) & (guard == 0) {
+            if loan_live(&mut c, loan) != 0 {
+                c.pointers.push(Pointer { loan: loan, at: at, writable: writable });
+            }
+        }
+    }
+    return ();
+}
+// The place of a C pointer value: a copy root, so reading it never moves it.
+fn pointer_place<a>(c: (&a mut C), slot: u64, ty: u64) -> u64 {
+    place := ownership::root(&mut c.check, 1, 1);
+    c
+        .resources
+        .push(
+            Resource {
+                slot: slot,
+                ty: ty,
+                flag: 0,
+                base: 0,
+                field: 0,
+                via: 0,
+                place: place,
+                target: 0,
+                authority: 0
+            }
+        );
+    return place;
+}
+// Hand `src`'s C-pointer loans to `dst` when a value that may hold a pointer is copied or moved
+// (`q := p`, `m := info`): the copy points at the same storage, so it holds the same loans.
+fn pointer_copy<a>(c: (&a mut C), src: u64, dst: u64, ty: u64) -> unit {
+    if (c.raw != 0) || (src == 0) || (dst == 0) || (c.pointers.len() == 0) {
+        return ();
+    }
+    if contains_borrow(&mut c, ty, 0) {
+        return ();
+    }
+    pointer_transfer(&mut c, src, dst);
+    return ();
+}
+// Every live C-pointer loan held inside `src` is held by `dst` as well.
+fn pointer_transfer<a>(c: (&a mut C), src: u64, dst: u64) -> unit {
+    if (src == 0) || (dst == 0) {
+        return ();
+    }
+    n := c.bonds.len();
+    for i in n {
+        b := &c.bonds[i];
+        holder := b.holder;
+        loan := b.loan;
+        guard := b.guard;
+        if ownership::ancestor(&c.check, src, holder) {
+            if (loan_live(&mut c, loan) != 0) & (is_pointer_loan(&mut c, loan) != 0) {
+                bond_kind(&mut c, dst, loan, guard);
+            }
+        }
+    }
+    return ();
+}
+fn holds_pointer<a>(c: (&a mut C), src: u64) -> bool {
+    if src == 0 {
+        return false;
+    }
+    for i in c.bonds.len() {
+        b := &c.bonds[i];
+        holder := b.holder;
+        loan := b.loan;
+        if ownership::ancestor(&c.check, src, holder) {
+            if (loan_live(&mut c, loan) != 0) & (is_pointer_loan(&mut c, loan) != 0) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+// 1 when a value of `ty` can keep a C pointer: the pointer itself, a record or container with one
+// inside, or a closure (its captures are not in its type).
+fn pointer_carrier<a>(c: (&a mut C), ty: u64) -> bool {
+    mut trail = u64[];
+    return pointer_walk(&mut c, ty, &mut trail);
+}
+fn pointer_walk<a, b>(c: (&a mut C), ty: u64, trail: (&b mut u64[])) -> bool {
+    k := ty_kind(&mut c, ty);
+    arg := ty_arg(&mut c, ty);
+    if (k == 26) || (k == 20) {
+        return true;
+    }
+    if (k == 10) || (k == 6) || (k == 13) || (k == 29) {
+        return pointer_walk(&mut c, arg, &mut trail);
+    }
+    if k == 8 {
+        for i in trail.len() {
+            if trail[i] == ty {
+                return false;
+            }
+        }
+        trail.push(ty);
+        d := &c.decls[arg];
+        count := d.count;
+        for i in count {
+            t := field_type(&mut c, ty, i);
+            if pointer_walk(&mut c, t, &mut trail) {
+                trail.pop();
+                return true;
+            }
+        }
+        trail.pop();
+    }
+    return false;
+}
+// A Grail callee sees its pointer parameters as plain words and is not checked against them, so the
+// caller assumes the worst: the result, and the referent of every `&mut` argument, may keep any C
+// pointer an argument carried in. `fn keep(p: CPtr) -> CPtr` therefore cannot launder a borrow.
+fn pointer_results<a, b>(c: (&a mut C), rslot: u64, rty: u64, first: u64, args: (&b u64[])) -> unit {
+    if (c.raw != 0) || (c.pointers.len() == 0) {
+        return ();
+    }
+    mut holder = place_of(&mut c, rslot);
+    keep := pointer_carrier(&mut c, rty);
+    for i in args.len() {
+        src := place_of(&mut c, args[i]);
+        if holds_pointer(&mut c, src) {
+            if keep {
+                if (holder == 0) & (ty_kind(&mut c, rty) == 26) {
+                    holder = pointer_place(&mut c, rslot, rty);
+                }
+                pointer_transfer(&mut c, src, holder);
+            }
+            for j in args.len() {
+                formal := c.params[first + j];
+                if (ty_kind(&mut c, formal) == 7) & (ty_mode(&mut c, formal) != 0) {
+                    inner := ty_arg(&mut c, formal);
+                    if pointer_carrier(&mut c, inner) {
+                        referent := target_of(&mut c, args[j]);
+                        pointer_transfer(&mut c, src, referent);
+                    }
+                }
+            }
+        }
+    }
+    return ();
+}
+// A returned value holds the C-pointer loan `loan` on storage that does not outlive the call.
+fn pointer_escape<a>(c: (&a mut C), loan: u64) -> unit {
+    n := is_pointer_loan(&mut c, loan);
+    if n == 0 {
+        return ();
+    }
+    p := &c.pointers[n - 1];
+    at := p.at;
+    writable := p.writable;
+    l := &c.check.loans[loan - 1];
+    source := l.source;
+    subject := place_name(&mut c, source);
+    mut msg = u8[];
+    if subject.len() != 0 {
+        dput(&mut msg, view("cannot return a C pointer to `"));
+        dput(&mut msg, view(subject));
+        dput(&mut msg, view("`: the pointer would outlive it"));
+    } else {
+        dput(&mut msg, view("cannot return a C pointer to borrowed storage: the pointer would outlive the borrow"));
+    }
+    dput(&mut msg, view(" (made by "));
+    if writable != 0 {
+        dput(&mut msg, view("cptr_mut"));
+    } else {
+        dput(&mut msg, view("cptr"));
+    }
+    dput(&mut msg, view(" at line "));
+    decimal(&mut msg, token_line(&mut c, at));
+    dput(&mut msg, view(")"));
+    fail(&mut c, view(msg));
+    return ();
+}
+fn is_pointer_loan<a>(c: (&a mut C), loan: u64) -> u64 {
+    for i in c.pointers.len() {
+        p := &c.pointers[i];
+        if p.loan == loan {
+            return i + 1;
+        }
+    }
+    return 0;
+}
+// The binding whose storage contains `place` (`app`, or `info` for a field of it), or the binding
+// whose referent does (`*out`). Empty when the place is a temporary nobody named.
+fn place_name<a>(c: (&a mut C), place: u64) -> u8[] {
+    mut i = c.locals.len();
+    while i != 0 {
+        i = i - 1;
+        l := &c.locals[i];
+        id := l.id;
+        name := l.name.copy();
+        if (name.len() != 0) & (name[0] != 46) {
+            root := place_of(&mut c, id);
+            if (root != 0) & ownership::ancestor(&c.check, root, place) {
+                return name;
+            }
+            target := target_of(&mut c, id);
+            if (target != 0) & ownership::ancestor(&c.check, target, place) {
+                mut deref = u8[];
+                deref.push(42);
+                dput(&mut deref, view(name));
+                return deref;
+            }
+        }
+    }
+    return u8[];
+}
+// The line of the token at `at`, for "made by cptr at line N".
+fn token_line<a>(c: (&a mut C), at: u64) -> u64 {
+    t := &c.toks[at];
+    st := t.start;
+    mut line = 1;
+    for i in st {
+        if c.src[i] == 10 {
+            line += 1;
+        }
+    }
+    return line;
+}
+// If a live C pointer borrows storage overlapping `place`, fail naming the storage, the binding
+// that holds the pointer and the line of the `cptr` that made it; otherwise return and let the
+// caller report the ordinary conflict. `action` is the verb phrase: "assign to", "move", ...
+// `reading` restricts the check to writable pointers (a read conflicts only with `cptr_mut`).
+fn pointer_conflict<a, b>(c: (&a mut C), place: u64, action: &b [u8], reading: u64) -> unit {
+    if (c.raw != 0) || (place == 0) {
+        return ();
+    }
+    for i in c.pointers.len() {
+        p := &c.pointers[i];
+        loan := p.loan;
+        at := p.at;
+        writable := p.writable;
+        l := &c.check.loans[loan - 1];
+        live := l.live;
+        source := l.source;
+        mut relevant = live != 0;
+        if (reading != 0) & (writable == 0) {
+            relevant = false;
+        }
+        if relevant & (ownership::ancestor(&c.check, place, source) || ownership::ancestor(&c.check, source, place)) {
+            mut holder = u8[];
+            for j in c.bonds.len() {
+                b := &c.bonds[j];
+                h := b.holder;
+                if (b.loan == loan) & (holder.len() == 0) {
+                    state := ownership::status(&c.check, h);
+                    if (state == 1) || (state == 3) {
+                        holder = place_name(&mut c, h);
+                    }
+                }
+            }
+            mut subject = place_name(&mut c, source);
+            if subject.len() == 0 {
+                subject = place_name(&mut c, place);
+            }
+            mut msg = u8[];
+            if action.len() == 0 {
+                dput(&mut msg, view("`"));
+                dput(&mut msg, view(subject));
+                dput(&mut msg, view("` goes out of scope while a C pointer to it is live"));
+            } else {
+                dput(&mut msg, view("cannot "));
+                dput(&mut msg, action);
+                dput(&mut msg, view(" `"));
+                dput(&mut msg, view(subject));
+                dput(&mut msg, view("` while a C pointer to it is live"));
+            }
+            if holder.len() != 0 {
+                dput(&mut msg, view(" in `"));
+                dput(&mut msg, view(holder));
+                dput(&mut msg, view("`"));
+            }
+            dput(&mut msg, view(" (made by "));
+            if writable != 0 {
+                dput(&mut msg, view("cptr_mut"));
+            } else {
+                dput(&mut msg, view("cptr"));
+            }
+            dput(&mut msg, view(" at line "));
+            decimal(&mut msg, token_line(&mut c, at));
+            dput(&mut msg, view(")"));
+            fail(&mut c, view(msg));
+        }
+    }
+    return ();
 }
 fn builtin<a>(c: (&a mut C), id: u64) -> Val {
     if (id == 17) || (id == 18) {
@@ -13272,10 +13633,11 @@ fn builtin<a>(c: (&a mut C), id: u64) -> Val {
             fail(&mut c, view("cptr and cptr_mut require an unsafe block"));
         }
         writable := id == 41;
+        operand := a.t;
         x := deref(&mut c, a);
         k := ty_kind(&mut c, x.ty);
         if k == 8 {
-            return cptr_record(&mut c, x, writable);
+            return cptr_record(&mut c, operand, x, writable);
         }
         if (k != 2) & (k != 3) & (k != 4) & (k != 5) {
             fail(&mut c, view("cptr requires a byte sequence or view"));
@@ -13290,7 +13652,9 @@ fn builtin<a>(c: (&a mut C), id: u64) -> Val {
             }
         }
         slot := apply(&mut c, view("rt_view_ptr"), one(x.t));
-        return val(slot, intern_full(&mut c, 26, 0, writable, u64[]));
+        ty := intern_full(&mut c, 26, 0, writable, u64[]);
+        pointer_borrow(&mut c, slot, ty, operand, x.t, writable);
+        return val(slot, ty);
     }
     if id == 39 {
         // `cstr(sequence)` is the checked, zero-copy C string view: the bytes must
@@ -15616,6 +15980,14 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
             get(&mut c, slot, view("%rax"));
             copy := save(&mut c);
             rec_store(&mut c, obj, 2 + j, copy);
+            // A C pointer captured by copy keeps its loans in the environment, so the closure is
+            // what must not outlive the storage it points at.
+            if (c.raw == 0) & (c.pointers.len() != 0) {
+                root := place_of(&mut c, obj);
+                field_place := member_place(&mut c, root, 2 + j, ty);
+                captured := place_of(&mut c, slot);
+                pointer_transfer(&mut c, captured, field_place);
+            }
         }
     }
     file := c.file;
@@ -15821,6 +16193,7 @@ fn emit_closures<a>(c: (&a mut C)) -> unit {
         exchange(&mut c.members, Member[]);
         exchange(&mut c.terminated, 0);
         exchange(&mut c.bonds, Bond[]);
+        exchange(&mut c.pointers, Pointer[]);
         exchange(&mut c.origins, Origin[]);
         mut regions = u8[][];
         regions.push(copy_bytes(view("env")));
@@ -22059,6 +22432,7 @@ fn statement<a>(c: (&a mut C)) -> unit {
             if place != 0 {
                 capture_authority(&mut c, place);
                 if ownership::drop_value(&mut c.check, place) != 0 {
+                    pointer_conflict(&mut c, place, view("drop"), 0);
                     fail(&mut c, view("drop of moved or unavailable value"));
                 }
             }
@@ -22329,6 +22703,7 @@ fn assignment_tail<a>(c: (&a mut C), l: u64, id: u64, ty: u64, target: u64, thro
             place := place_of(&mut c, target);
             if place != 0 {
                 if !ownership::can_cleanup(&c.check, place) {
+                    pointer_conflict(&mut c, place, view("assign to"), 0);
                     fail(&mut c, view("assignment conflicts with live borrow"));
                 }
             }
@@ -26134,6 +26509,7 @@ pub fn main() -> u64 {
         breaks: ownership::new(),
         hasbreak: 0,
         bonds: Bond[],
+        pointers: Pointer[],
         origins: Origin[],
         scope_end: 0,
         loop_start: 0,
