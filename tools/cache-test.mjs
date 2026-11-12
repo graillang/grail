@@ -232,13 +232,18 @@ function proveInterfaces() {
   const manifestPath = join(ifaces, 'interfaces.manifest');
   writeFileSync(manifestPath, readFileSync(manifestPath, 'utf8').replace(/^util \S+/m, `util ${digest(tampered)}`));
 
+  // A whole-program build compiles every module from its source and requires each interface to say
+  // what the source says, so an interface that was edited (and re-digested) is refused - before the
+  // cache can hand back anything built from it.
   const after = build(['--cache', '--interface', ifaces, '-o', program]);
-  assert.equal(after.status, 0, `the tampered interface must build\n${after.output}`);
-  assert.ok(after.line.names.includes('main'), `the importer must miss: ${after.output}`);
-  assert.ok(!after.line.names.includes('util'), `a module that reads no interface must hit: ${after.output}`);
-  assert.ok(!after.line.names.includes('helper'), `a module that reads another interface must hit: ${after.output}`);
-  assert.equal(run(program), '19', 'the importer must be rebuilt against the tampered interface');
-  return { warm: warm.line, after: after.line };
+  assert.equal(after.status, 1, `an interface that disagrees with its source must be refused\n${after.output}`);
+  assert.match(after.output, /does not match this interface/, `the refusal must say why\n${after.output}`);
+  writeFileSync(path, original);
+  writeFileSync(manifestPath, readFileSync(manifestPath, 'utf8').replace(/^util \S+/m, `util ${digest(original)}`));
+  const restored = build(['--cache', '--interface', ifaces, '-o', program]);
+  assert.equal(restored.line.misses, 0, `the restored interface must be a full hit again\n${restored.output}`);
+  assert.equal(run(program), '16', 'the restored build must print the source build\'s answer');
+  return { warm: warm.line, after: restored.line };
 }
 
 // ---- (f) a corrupted entry --------------------------------------------------------------------
@@ -375,7 +380,7 @@ console.log(`(a) reuse      cold ${ms(reuse.cold.ms)} -> warm ${ms(reuse.warm.ms
 console.log(`(b) precision  ${precision.line.hits} hit, ${precision.line.misses} miss (${precision.line.names.join(', ')}) for an edit in util, order ${precision.order.join(' ')}`);
 console.log(`               ${precision.shifted.hits} hit, ${precision.shifted.misses} miss (${precision.shifted.names.join(', ')}) for an edit in main: the modules after it are re-spelled`);
 console.log(`(c) flags      --overflow=wrap: ${flagProof.wrapped.hits} hit, ${flagProof.wrapped.misses} miss; back: ${flagProof.back.misses} miss`);
-console.log(`(d) interface  warm ${interfaceProof.warm.hits} hit; tampered: ${interfaceProof.after.hits} hit, ${interfaceProof.after.misses} miss (${interfaceProof.after.names.join(', ')})`);
+console.log(`(d) interface  warm ${interfaceProof.warm.hits} hit; a tampered interface is refused; restored: ${interfaceProof.after.hits} hit, ${interfaceProof.after.misses} miss`);
 console.log(`(e) corruption helper entry: ${corruption.rebuilt.hits} hit, ${corruption.rebuilt.misses} miss (${corruption.rebuilt.names.join(', ')}); healed: ${corruption.healed.misses} miss; image: ${corruption.afterImage.what}`);
 console.log(`(f) pruning    --keep 0 after an edit dropped ${pruning.pruned.records} records and ${pruning.pruned.blobs} blobs; next build ${pruning.again.hits} hit, ${pruning.again.misses} miss`);
 console.log('');
