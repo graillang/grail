@@ -30,6 +30,36 @@ explicitly as `identity<u64>(42)`. But the body must remain valid for an unknown
 
 Even specializing this function to `u64` does not make duplicating `T` valid. Generic definitions
 are checked even when unused. Unconstrained `T` also does not support arbitrary arithmetic, field
-access or copy-loads. No trait system is promised by these examples.
+access or copy-loads; what a bounded `T` can do is what its interfaces declare.
+
+## Interfaces and default methods
+
+An interface lists the methods a type must provide. A method written with a body is a *default*:
+an implementation can leave it out and gets that body, compiled for its own type, or write its own
+to override it (Rust's provided methods). A default can call the interface's other methods and the
+private helpers of the interface's module.
+
+```grl
+interface Shape {
+    fn area(self: &Self) -> u64;
+    fn name(self: &Self) -> string {
+        return "shape";
+    }
+}
+
+impl Shape for Circle {
+    fn area(self: &Self) -> u64 {
+        return 3 * self.r * self.r;
+    }
+}
+
+fn show<T: Shape>(s: &T) {
+    println("{} {}", s.name(), s.area());
+}
+```
+
+Inside `show`, `s.name()` is the bound's method; `Shape::name(s)` is the same call, and is how to
+pick one when two bounds declare the same name. An implementation must write every method that has
+no default, and only methods the interface declares.
 
 **Try it:** instantiate identity with a string, then consume the returned string exactly once.

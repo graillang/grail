@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Added: default methods on interfaces. A method written with a body is a default that an implementation may leave out or override; it is compiled per implementing type, can call the interface's other methods and its module's private helpers, and reports errors at the interface. Methods of a bounded type parameter can be called with method syntax (`s.name()` for `T: Shape`). An implementation's missing or foreign method is now reported by name, at the `impl` or the method.
 - Added: compile-time stage C3, the run tier. `TABLE := build();` and `@fib(30)` call ordinary functions while compiling: the compiler builds and runs a probe of the program's own code, with files, the clock, the network and processes refused, and bakes the integer, bool or string result into the program. Constants are computed on first use, a dependency cycle is reported as one, and results are cached in `.work/comptime`.
 - Added: compile-time stage C4 and value parameters on records. `@for f in fields(T) { ... }` (and `variants(E)`) compiles its block once per field with `f.name`, `f.index` and `x.@f`, so a generic `show<T>` prints any record; `@embed("file")` places a file's bytes in the program as `u8[]` (such a build skips `--cache`). `struct Ring<T, @N: u64>` takes a value parameter, `Ring<u64, 8>` is its own type, and a function infers `N` from an argument of that type.
 - Fixed: `grail fmt` no longer aborts on a source whose line ranges close a bracket before opening one (the formatter's unsigned bracket depth underflowed under checked arithmetic).

@@ -111,13 +111,20 @@ struct Interface {
     // 0 when declared without `pub`: private to `module` (separate-compilation.md, "Visibility").
     public: u64,
     defined: u64,
-    methods: u64[]
+    methods: u64[],
+    // Per method, parallel to `methods`: the `fn` token of a default body + 1 (0: none), and the
+    // file it is in. An implementation that leaves the method out gets this body (default_methods).
+    defaults: u64[],
+    default_files: u64[]
 }
 struct Implementation {
     contract: u64,
     ty: u64,
     module: u8[],
-    methods: u64[]
+    methods: u64[],
+    // Where `impl` is written + 1 (0: read from an interface file), for diagnostics.
+    file: u64,
+    pos: u64
 }
 struct Closure {
     decl: u64,
@@ -449,6 +456,8 @@ struct C {
     implementations: Implementation[],
     self_type: u64,
     current_impl: u64,
+    // Functions default_methods copied into an implementation from its interface.
+    default_copies: u64[],
     headers_complete: u64,
     resources: Resource[],
     loopmark: u64,
@@ -5523,7 +5532,19 @@ fn ensure_interface<a>(c: (&a mut C), module: u8[], name: u8[]) -> u64 {
     if existing != 0 {
         return existing;
     }
-    c.interfaces.push(Interface { module: module, name: name, public: 1, defined: 0, methods: u64[] });
+    c
+        .interfaces
+        .push(
+            Interface {
+                module: module,
+                name: name,
+                public: 1,
+                defined: 0,
+                methods: u64[],
+                defaults: u64[],
+                default_files: u64[],
+            }
+        );
     return c.interfaces.len();
 }
 fn base_type<a>(c: (&a mut C), ty: u64) -> u64 {
@@ -9225,6 +9246,7 @@ fn interface_declaration<a>(c: (&a mut C), pass: u64) -> unit {
     self := intern_args(&mut c, 9, 0, 0, u64[], proofs);
     exchange(&mut c.self_type, self + 1);
     while !eat(&mut c, view("}")) {
+        header := c.pos;
         expect(&mut c, view("fn"));
         name := ident(&mut c);
         lifetime_parameters(&mut c);
@@ -9255,7 +9277,14 @@ fn interface_declaration<a>(c: (&a mut C), pass: u64) -> unit {
         if eat(&mut c, view("->")) {
             ret = parse_type(&mut c);
         }
-        expect(&mut c, view(";"));
+        // `fn name(...) -> T { body }` is a default: an implementation may leave it out.
+        mut default = 0;
+        if is(&mut c, view("{")) {
+            default = header + 1;
+            skip_braces(&mut c);
+        } else {
+            expect(&mut c, view(";"));
+        }
         mut bounds = u64[0];
         mut requirements = u64[][];
         requirements.push(u64[id]);
@@ -9288,11 +9317,99 @@ fn interface_declaration<a>(c: (&a mut C), pass: u64) -> unit {
                 }
             );
         index := c.funcs.len() - 1;
+        here_file := c.file;
         item := &mut c.interfaces[id - 1];
         item.methods.push(index);
+        item.defaults.push(default);
+        item.default_files.push(here_file);
     }
     exchange(&mut c.self_type, 0);
     return ();
+}
+// ---- default interface methods ---------------------------------------------------------------------
+// An implementation that leaves out a method with a default body gets that body as if it had been
+// written in the implementation: it is compiled once per implementing type, with `Self` that type,
+// names resolving in the interface's module, and diagnostics pointing at the interface (Rust's
+// provided methods). `pass` 2 declares them once every implementation's own methods are known;
+// pass 3 emits their bodies.
+fn default_methods<a>(c: (&a mut C), pass: u64) -> unit {
+    saved_file := c.file;
+    saved_module := c.module.copy();
+    saved_raw := c.raw;
+    mut touched = false;
+    for k in c.implementations.len() {
+        implementation := &c.implementations[k];
+        contract := implementation.contract;
+        ty := implementation.ty;
+        owner := implementation.module.copy();
+        own := copy_numbers(&implementation.methods);
+        if iface_owned(&mut c, view(owner)) {
+            continue;
+        }
+        interface := &c.interfaces[contract - 1];
+        expected := copy_numbers(&interface.methods);
+        defaults := copy_numbers(&interface.defaults);
+        files := copy_numbers(&interface.default_files);
+        home := interface.module.copy();
+        for j in expected.len() {
+            if (defaults.len() <= j) || (defaults[j] == 0) {
+                continue;
+            }
+            name := c.funcs[expected[j]].name.copy();
+            mut written = false;
+            for m in own.len() {
+                if same(view(c.funcs[own[m]].name), view(name)) && !default_copy(&c, own[m]) {
+                    written = true;
+                }
+            }
+            if written {
+                continue;
+            }
+            touched = true;
+            load_file(&mut c, files[j]);
+            exchange(&mut c.file, files[j]);
+            exchange(&mut c.pos, defaults[j] - 1);
+            exchange(&mut c.raw, 0);
+            exchange(&mut c.module, home.copy());
+            opted := u64(host_opted(&c, view(c.module)));
+            exchange(&mut c.host_optin, opted);
+            module_modes(&mut c);
+            exchange(&mut c.rnames, u8[][]);
+            exchange(&mut c.tnames, u8[][]);
+            exchange(&mut c.type_bounds, u64[]);
+            exchange(&mut c.type_interfaces, u64[][]);
+            exchange(&mut c.current_impl, k + 1);
+            exchange(&mut c.self_type, ty + 1);
+            before := c.funcs.len();
+            func(&mut c, pass, 0);
+            exchange(&mut c.current_impl, 0);
+            exchange(&mut c.self_type, 0);
+            if pass == 2 {
+                item := &mut c.implementations[k];
+                item.methods.push(before);
+                c.default_copies.push(before);
+            }
+        }
+    }
+    if touched {
+        load_file(&mut c, saved_file);
+        exchange(&mut c.file, saved_file);
+        exchange(&mut c.module, saved_module);
+        exchange(&mut c.raw, saved_raw);
+        opted := u64(host_opted(&c, view(c.module)));
+        exchange(&mut c.host_optin, opted);
+        module_modes(&mut c);
+    }
+    return ();
+}
+// Whether method `index` is a copied default rather than written in its implementation.
+fn default_copy<a>(c: (&a C), index: u64) -> bool {
+    for i in c.default_copies.len() {
+        if c.default_copies[i] == index {
+            return true;
+        }
+    }
+    return false;
 }
 fn impl_has_for<a>(c: (&a mut C)) -> bool {
     mut i = c.pos;
@@ -9361,6 +9478,8 @@ fn implementation<a>(c: (&a mut C), pass: u64) -> unit {
     if c.raw != 0 {
         fail(&mut c, view("unsafe runtime cannot implement safe interfaces"));
     }
+    impl_file := c.file;
+    impl_pos := c.pos;
     expect(&mut c, view("impl"));
     // `impl Type { fn ... }`: methods and associated functions of a nominal type in this module.
     if ((kind(&mut c) == 1) & (next_kind(&mut c) == 123))
@@ -9486,7 +9605,16 @@ fn implementation<a>(c: (&a mut C), pass: u64) -> unit {
         }
         c
             .implementations
-            .push(Implementation { contract: contract, ty: ty, module: owner, methods: u64[] });
+            .push(
+                Implementation {
+                    contract: contract,
+                    ty: ty,
+                    module: owner,
+                    methods: u64[],
+                    file: impl_file,
+                    pos: impl_pos + 1,
+                }
+            );
         id = c.implementations.len();
     }
     if id == 0 {
@@ -9559,10 +9687,53 @@ fn check_interfaces<a>(c: (&a mut C)) -> unit {
         contract := item.contract;
         ty := item.ty;
         methods := copy_numbers(&item.methods);
+        impl_file := item.file;
+        impl_pos := item.pos;
         interface := &c.interfaces[contract - 1];
         expected := copy_numbers(&interface.methods);
-        if methods.len() != expected.len() {
-            fail(&mut c, view("interface implementation method count"));
+        // A method the interface does not declare is reported where it is written; a required one
+        // that is missing, at the `impl`.
+        for j in methods.len() {
+            g := &c.funcs[methods[j]];
+            mut known = false;
+            for e in expected.len() {
+                if same(view(c.funcs[expected[e]].name), view(g.name)) {
+                    known = true;
+                }
+            }
+            if !known {
+                file := g.file;
+                pos := g.pos;
+                mut message = u8[];
+                push_bytes(&mut message, view("method `"));
+                push_bytes(&mut message, view(g.name));
+                push_bytes(&mut message, view("` is not a member of the interface"));
+                load_file(&mut c, file);
+                exchange(&mut c.file, file);
+                exchange(&mut c.pos, pos);
+                fail(&mut c, view(message));
+            }
+        }
+        for e in expected.len() {
+            name := c.funcs[expected[e]].name.copy();
+            mut present = false;
+            for j in methods.len() {
+                if same(view(c.funcs[methods[j]].name), view(name)) {
+                    present = true;
+                }
+            }
+            if !present {
+                mut message = u8[];
+                push_bytes(&mut message, view("missing interface method `"));
+                push_bytes(&mut message, view(name));
+                push_bytes(&mut message, view("` (it has no default body)"));
+                if impl_pos != 0 {
+                    load_file(&mut c, impl_file);
+                    exchange(&mut c.file, impl_file);
+                    exchange(&mut c.pos, impl_pos - 1);
+                }
+                fail(&mut c, view(message));
+            }
         }
         for j in expected.len() {
             abstract := expected[j];
@@ -19647,7 +19818,15 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
     inty := value.ty;
     x := deref(&mut c, value);
     xt := x.t;
-    xty := x.ty;
+    mut xty = x.ty;
+    // A specialisation binds a bounded parameter to its concrete record (kind 10 wraps it): its
+    // methods are the record's.
+    if ty_kind(&mut c, xty) == 10 {
+        concrete := base_type(&mut c, xty);
+        if ty_kind(&mut c, concrete) == 8 {
+            xty = concrete;
+        }
+    }
     k := ty_kind(&mut c, xty);
     if k == 8 {
         d := ty_arg(&mut c, xty);
@@ -19700,6 +19879,47 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
         slot := rec_load(&mut c, xt, field, 0);
         projected := alias_field(&mut c, slot, ft, xt, field, 0);
         return indirect_call(&mut c, projected, 1);
+    }
+    // `item.name()` on a type parameter bounded by interfaces: the bound that declares `name`
+    // (Rust's method syntax on generic bounds; `Interface::name(item)` is the same call).
+    // The bounds are the parameter's proofs (satisfies_interface).
+    if k == 9 {
+        proofs := type_args(&mut c, xty);
+        mut bounds = u64[];
+        for i in proofs.len() {
+            if ty_kind(&mut c, proofs[i]) == 15 {
+                bounds.push(ty_arg(&mut c, proofs[i]));
+            }
+        }
+        mut owner = u8[];
+        mut method = 0;
+        for i in bounds.len() {
+            module := private_module(view(".interface_"), bounds[i]);
+            m2 := find_func(&mut c, view(module), view(name));
+            if m2 != 0 {
+                if method != 0 {
+                    fail(&mut c, view("ambiguous method: several bounds define it (use Interface::method)"));
+                }
+                owner = module;
+                method = m2;
+            }
+        }
+        if method != 0 {
+            info := &c.funcs[method - 1];
+            first := info.first;
+            count := info.count;
+            if count == 0 {
+                fail(&mut c, view("associated function called as a method (use Interface::name)"));
+            }
+            formal := c.params[first];
+            prepared := method_receiver(&mut c, input, inty, xty, formal);
+            rv := prepared.t;
+            rty := prepared.ty;
+            exchange(&mut c.receiver, rv);
+            exchange(&mut c.receiver_ty, rty);
+            exchange(&mut c.has_receiver, 1);
+            return call(&mut c, view(owner), view(name));
+        }
     }
     if k == 11 {
         return atomic_method(&mut c, val(xt, xty), view(name));
@@ -28934,7 +29154,14 @@ fn iface_define<a, b, d>(c: (&a mut C), st: (&a mut IState), line: &b [u8], path
         c
             .implementations
             .push(
-                Implementation { contract: id, ty: ty, module: st.module.copy(), methods: u64[] }
+                Implementation {
+                    contract: id,
+                    ty: ty,
+                    module: st.module.copy(),
+                    methods: u64[],
+                    file: 0,
+                    pos: 0,
+                }
             );
         exchange(&mut st.section, 3);
         exchange(&mut st.contract, id);
@@ -29610,6 +29837,7 @@ pub fn main() -> u64 {
         implementations: Implementation[],
         self_type: 0,
         current_impl: 0,
+        default_copies: u64[],
         headers_complete: 0,
         resources: Resource[],
         loopmark: 0,
@@ -29992,6 +30220,9 @@ pub fn main() -> u64 {
             }
             i = i + 1;
         }
+        if pass == 2 {
+            default_methods(&mut c, 3);
+        }
         // The definition sweep for the interfaces read above, once every module's names exist.
         // `--interface` and `--use` both land here; the path each interface came from was recorded
         // when its names were registered.
@@ -30002,6 +30233,7 @@ pub fn main() -> u64 {
             }
         }
         if pass == 1 {
+            default_methods(&mut c, 2);
             exchange(&mut c.headers_complete, 1);
             check_interfaces(&mut c);
             validate_type_constraints(&mut c);
