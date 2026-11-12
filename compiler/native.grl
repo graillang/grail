@@ -436,6 +436,11 @@ struct C {
     closures: Closure[],
     fn_thunk_used: u64,
     closure_env: u64,
+    // What the next closure literal is expected to be (closure_hint): its parameter types and result,
+    // each 18446744073709551615 when not known yet.
+    hint_params: u64[],
+    hint_ret: u64,
+    hint_set: u64,
     inherent: u64,
     constants: Constant[],
     impl_params: ImplParams[],
@@ -15115,6 +15120,11 @@ fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
                 if known != 0 {
                     formal := c.params[template_first + argi];
                     context = bind_types(&mut c, formal, &map);
+                } else if (kind(&mut c) == 124) || (kind(&mut c) == 274) {
+                    // A closure argument of a generic call: the parameter types the call already
+                    // fixes type its parameters; its result is inferred from its body.
+                    formal := c.params[template_first + argi];
+                    closure_hint(&mut c, formal, &map);
                 }
             }
             // A reference or view binding passed by name is reborrowed, not moved: `f(r); g(r);`
@@ -20168,11 +20178,180 @@ fn capture_place<a, b>(c: (&a mut C), name: &b [u8], write: u64) -> Val {
     }
     return ref;
 }
+// ---- closure inference ----------------------------------------------------------------------------
+// `iter::of(v).map(|x| x * 2)`: a closure literal's parameter types come from the function type it is
+// passed or bound as (Rust's rule), and an omitted result type from that type or from its body.
+// `map` is the call's inference so far: a parameter whose type mentions an unfixed type parameter is
+// left unknown.
+fn closure_hint<a, b>(c: (&a mut C), expected: u64, map: (&b u64[])) -> unit {
+    k := ty_kind(&mut c, expected);
+    if (k != 20) && (k != 12) {
+        return ();
+    }
+    params := type_args(&mut c, expected);
+    mut hp = u64[];
+    for i in params.len() {
+        hp.push(bound_or_unknown(&mut c, params[i], &map));
+    }
+    ret := ty_arg(&mut c, expected);
+    hr := bound_or_unknown(&mut c, ret, &map);
+    exchange(&mut c.hint_params, hp);
+    exchange(&mut c.hint_ret, hr);
+    exchange(&mut c.hint_set, 1);
+    return ();
+}
+fn bound_or_unknown<a, b>(c: (&a mut C), ty: u64, map: (&b u64[])) -> u64 {
+    if map.len() == 0 {
+        return ty;
+    }
+    if mentions_unbound(&mut c, ty, &map) {
+        return 18446744073709551615;
+    }
+    return bind_types(&mut c, ty, &map);
+}
+fn mentions_unbound<a, b>(c: (&a mut C), ty: u64, map: (&b u64[])) -> bool {
+    k := ty_kind(&mut c, ty);
+    if k == 9 {
+        i := ty_arg(&mut c, ty);
+        return (map.len() <= i) || (map[i] == 18446744073709551615);
+    }
+    if k == 15 {
+        return false;
+    }
+    if (k == 6) || (k == 7) || (k == 5) || (k == 27) || (k == 12) || (k == 13) || (k == 14) || (k == 16) || (k == 20) || (k == 29) || (k == 10) || (k == 30) {
+        inner := ty_arg(&mut c, ty);
+        if mentions_unbound(&mut c, inner, &map) {
+            return true;
+        }
+    }
+    args := type_args(&mut c, ty);
+    for i in args.len() {
+        a := args[i];
+        if mentions_unbound(&mut c, a, &map) {
+            return true;
+        }
+    }
+    return false;
+}
+// The type of a closure's expression body (at c.pos), found by compiling it once in isolation and
+// throwing the result away: the parameters are bound to their types and the enclosing locals the
+// body names to theirs, as emit_closures binds them; nothing it does survives.
+fn closure_body_type<a, b, d>(c: (&a mut C), names: (&b u8[][]), params: (&d u64[])) -> u64 {
+    start := c.pos;
+    // The body's end, as closure_literal finds it.
+    mut end = start;
+    mut depth = 0;
+    while true {
+        k := kind_at(&mut c, end);
+        if k == 0 {
+            break;
+        }
+        if (k == 40) || (k == 91) || (k == 123) {
+            depth += 1;
+        }
+        if (k == 41) || (k == 93) || (k == 125) {
+            if depth == 0 {
+                break;
+            }
+            depth -= 1;
+        }
+        if ((k == 44) || (k == 59)) && (depth == 0) {
+            break;
+        }
+        end += 1;
+    }
+    // Enclosing locals the body names (the closure's would-be captures), with their types.
+    mut cap_names = u8[][];
+    mut cap_types = u64[];
+    for i in start..end {
+        if kind_at(&mut c, i) == 1 {
+            name := tok_text(&mut c, i);
+            if closure_free_name(&mut c, view(name), &names) & closure_free_name(&mut c, view(name), &cap_names) {
+                local := find_local(&mut c, view(name));
+                if local != 0 {
+                    t := local_ty(&mut c, local - 1);
+                    cap_names.push(name);
+                    cap_types.push(t);
+                }
+            }
+        }
+    }
+    out_mark := c.out.len();
+    closures_mark := c.closures.len();
+    specs_mark := c.specs.len();
+    saved_locals := exchange(&mut c.locals, Local[]);
+    saved_resources := exchange(&mut c.resources, Resource[]);
+    saved_check := exchange(&mut c.check, ownership::new());
+    saved_members := exchange(&mut c.members, Member[]);
+    saved_bonds := exchange(&mut c.bonds, Bond[]);
+    saved_pointers := exchange(&mut c.pointers, Pointer[]);
+    saved_origins := exchange(&mut c.origins, Origin[]);
+    saved_next := exchange(&mut c.next, 0);
+    saved_scope := exchange(&mut c.scope_end, end);
+    saved_loop_start := exchange(&mut c.loop_start, 0);
+    saved_loop_end := exchange(&mut c.loop_end, 0);
+    saved_terminated := exchange(&mut c.terminated, 0);
+    saved_result := exchange(&mut c.result, 18446744073709551615);
+    saved_validating := exchange(&mut c.validating, 1);
+    saved_cf_start := exchange(&mut c.cf_start, 0);
+    saved_cf_end := exchange(&mut c.cf_end, 0);
+    saved_cf_local := exchange(&mut c.cf_local, 0);
+    for j in params.len() {
+        id := fresh(&mut c);
+        bind(&mut c, names[j].copy(), params[j], id, 0);
+    }
+    for j in cap_types.len() {
+        id := fresh(&mut c);
+        bind(&mut c, cap_names[j].copy(), cap_types[j], id, 0);
+    }
+    for j in c.locals.len() {
+        mut l = &mut c.locals[j];
+        exchange(&mut l.last, end);
+        slot := l.id;
+        ty := l.ty;
+        own(&mut c, slot, ty);
+        init_parameter(&mut c, slot, ty);
+    }
+    v := expr(&mut c, 0);
+    result := v.ty;
+    exchange(&mut c.pos, start);
+    while out_mark < c.out.len() {
+        c.out.pop();
+    }
+    while closures_mark < c.closures.len() {
+        c.closures.pop();
+    }
+    while specs_mark < c.specs.len() {
+        c.specs.pop();
+    }
+    exchange(&mut c.locals, saved_locals);
+    exchange(&mut c.resources, saved_resources);
+    exchange(&mut c.check, saved_check);
+    exchange(&mut c.members, saved_members);
+    exchange(&mut c.bonds, saved_bonds);
+    exchange(&mut c.pointers, saved_pointers);
+    exchange(&mut c.origins, saved_origins);
+    exchange(&mut c.next, saved_next);
+    exchange(&mut c.scope_end, saved_scope);
+    exchange(&mut c.loop_start, saved_loop_start);
+    exchange(&mut c.loop_end, saved_loop_end);
+    exchange(&mut c.terminated, saved_terminated);
+    exchange(&mut c.result, saved_result);
+    exchange(&mut c.validating, saved_validating);
+    exchange(&mut c.cf_start, saved_cf_start);
+    exchange(&mut c.cf_end, saved_cf_end);
+    exchange(&mut c.cf_local, saved_cf_local);
+    // An unsuffixed literal body is u64, as a binding of it would be.
+    return result;
+}
 fn closure_literal<a>(c: (&a mut C)) -> Val {
     // Inside a generic function the closure is compiled once per specialization, with its bindings.
     if (c.tnames.len() != 0) & (c.bindings.len() == 0) & (c.validating == 0) {
         fail(&mut c, view("closures inside generic functions are not supported here"));
     }
+    hinted := exchange(&mut c.hint_set, 0) != 0;
+    hint_params := exchange(&mut c.hint_params, u64[]);
+    hint_ret := exchange(&mut c.hint_ret, 18446744073709551615);
     mut names = u8[][];
     mut params = u64[];
     mut param_regions = 0;
@@ -20189,8 +20368,17 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
             outer_parsing := exchange(&mut c.parsing_input, 1);
             while true {
                 n := ident(&mut c);
-                expect(&mut c, view(":"));
-                ty := parse_type(&mut c);
+                mut ty = 0;
+                if eat(&mut c, view(":")) {
+                    ty = parse_type(&mut c);
+                } else {
+                    // `|x|`: the parameter's type is the expected function type's.
+                    index := params.len();
+                    if !hinted || (hint_params.len() <= index) || (hint_params[index] == 18446744073709551615) {
+                        fail(&mut c, view("closure parameter needs a type here (nothing fixes it): write |x: T|"));
+                    }
+                    ty = hint_params[index];
+                }
                 names.push(n);
                 params.push(ty);
                 if eat(&mut c, view("|")) {
@@ -20208,6 +20396,11 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
     mut ret = 1;
     if eat(&mut c, view("->")) {
         ret = parse_type(&mut c);
+    } else if hinted && (hint_ret != 18446744073709551615) {
+        ret = hint_ret;
+    } else if hinted && !is(&mut c, view("{")) {
+        // An expression body whose type nothing fixes yet (`map`'s U): its type is the result.
+        ret = closure_body_type(&mut c, &names, &params);
     }
     start := c.pos;
     if is(&mut c, view("{")) {
@@ -24540,6 +24733,12 @@ fn expr<a>(c: (&a mut C), min: u64) -> Val {
 }
 fn expr_expected<a>(c: (&a mut C), min: u64, expected: u64) -> Val {
     lstart := c.pos;
+    if (kind(&mut c) == 124) || (kind(&mut c) == 274) {
+        if expected != 18446744073709551615 {
+            none := u64[];
+            closure_hint(&mut c, expected, &none);
+        }
+    }
     mut first = val(0, 0);
     if is(&mut c, view("[")) {
         first = map_expression(&mut c, expected);
@@ -31729,6 +31928,9 @@ pub fn main() -> u64 {
         closures: Closure[],
         fn_thunk_used: 0,
         closure_env: 0,
+        hint_params: u64[],
+        hint_ret: 18446744073709551615,
+        hint_set: 0,
         inherent: 0,
         constants: Constant[],
         impl_params: ImplParams[],

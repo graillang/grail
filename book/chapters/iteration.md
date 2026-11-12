@@ -38,7 +38,7 @@ without copying them; the vector stays borrowed while the chain or any item from
 takes `&&T` and reads through both with `**x` (or copies the inner reference out, `r := *x`):
 
 ```grl
-for x in iter::filter(iter::refs(&v), |x: &&u64| -> bool **x % 2 == 1) {
+for x in iter::refs(&v).filter(|x| **x % 2 == 1) {
     total = total + *x;
 }
 ```
