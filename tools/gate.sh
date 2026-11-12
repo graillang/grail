@@ -17,7 +17,8 @@ mkdir -p "$G"
 rm -f "$G/DONE"
 
 # At most three jobs: wait for a slot before starting one.
-slot() { while [ "$(jobs -rp | wc -l)" -ge 3 ]; do wait -n; done; }
+# GATE_JOBS lowers the cap further (a host that overheats): GATE_JOBS=1 runs the legs one by one.
+slot() { while [ "$(jobs -rp | wc -l)" -ge "${GATE_JOBS:-3}" ]; do wait -n; done; }
 leg() { local log=$1; shift; slot; ( "$@" > "$G/$log.log" 2>&1; echo "exit=$?" >> "$G/$log.log" ) & }
 
 if [ $reseed = 1 ]; then
