@@ -75,6 +75,22 @@ impl<T: Show> Show for Box<T> {
 }
 ```
 
+## Operators
+
+Implement an interface from `ops` and the operator works on your type (Rust's `std::ops`):
+`ops::Add`, `Sub`, `Mul`, `Div` and `Rem` give `+ - * / %` (taking both operands), `ops::Eq` gives
+`==` and `!=` (borrowing them), and `order::Ord`'s `less` gives `<`, `<=`, `>` and `>=`. A generic
+function bounded by one, `fn sum3<T: ops::Add>(a: T, b: T, c: T) -> T { return a + b + c; }`, takes
+records and the built-in numbers alike.
+
+```grl
+impl ops::Add for V {
+    fn add(self: Self, other: Self) -> Self {
+        return V { x: self.x + other.x, y: self.y + other.y };
+    }
+}
+```
+
 ## Associated types
 
 An interface can leave a type for each implementation to choose: `type Item;` declares it, the

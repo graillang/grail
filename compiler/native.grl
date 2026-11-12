@@ -24158,6 +24158,115 @@ fn index_view<a>(c: (&a mut C), value: Val, access: u64) -> Val {
     exchange(&mut c.byte_end, c.pos);
     return val(result, 0);
 }
+// ---- operator interfaces (lib/ops.grl) ------------------------------------------------------------
+// `a + b` on a type with `impl ops::Add` is `ops::Add::add(a, b)`; `==`/`!=` use `ops::Eq::eq` and
+// the orderings `order::Ord::less`. Returns ty 18446744073709551615 when the operator is the
+// built-in one (no such interface in the program, or a type without an implementation).
+fn operator_call<a>(c: (&a mut C), k: u64, left: Val, right: Val) -> Val {
+    none := val(0, 18446744073709551615);
+    mut lty = left.ty;
+    lk := ty_kind(&mut c, lty);
+    if lk == 10 {
+        lty = base_type(&mut c, lty);
+    }
+    k2 := ty_kind(&mut c, lty);
+    // A specialised parameter (kind 10) wraps whatever its argument is, a number included: its
+    // operators go through the bound's implementation too.
+    if (k2 != 8) && (k2 != 9) && (lk != 10) {
+        return none;
+    }
+    mut module = "ops";
+    mut iname = "";
+    mut mname = "";
+    mut swap = false;
+    mut negate = false;
+    if k == 43 {
+        iname = "Add";
+        mname = "add";
+    } else if k == 45 {
+        iname = "Sub";
+        mname = "sub";
+    } else if k == 42 {
+        iname = "Mul";
+        mname = "mul";
+    } else if k == 47 {
+        iname = "Div";
+        mname = "div";
+    } else if k == 37 {
+        iname = "Rem";
+        mname = "rem";
+    } else if (k == 258) || (k == 259) {
+        iname = "Eq";
+        mname = "eq";
+        negate = k == 259;
+    } else if (k == 60) || (k == 62) || (k == 269) || (k == 270) {
+        module = "order";
+        iname = "Ord";
+        mname = "less";
+        // a > b is less(b, a); a <= b is !less(b, a); a >= b is !less(a, b).
+        swap = (k == 62) || (k == 269);
+        negate = (k == 269) || (k == 270);
+    } else {
+        return none;
+    }
+    id := find_interface(&c, view(module), view(iname));
+    if id == 0 {
+        return none;
+    }
+    if k2 == 9 {
+        if !satisfies_interface(&mut c, lty, id) {
+            return none;
+        }
+    } else if find_implementation(&mut c, id, lty) == 0 {
+        return none;
+    }
+    owner := private_module(view(".interface_"), id);
+    method := find_func(&mut c, view(owner), view(mname));
+    if method == 0 {
+        return none;
+    }
+    first := c.funcs[method - 1].first;
+    formal := c.params[first];
+    mut at = left.t;
+    mut aty = left.ty;
+    mut bt = right.t;
+    mut bty = right.ty;
+    if swap {
+        at = right.t;
+        aty = right.ty;
+        bt = left.t;
+        bty = left.ty;
+    }
+    // By-reference parameters borrow the operands for the call; by-value ones take them.
+    if ty_kind(&mut c, formal) == 7 {
+        ra := place_slot(&mut c, at, aty, 0);
+        at = ra.t;
+        aty = ra.ty;
+        rb := place_slot(&mut c, bt, bty, 0);
+        bt = rb.t;
+        bty = rb.ty;
+    }
+    mut args = u64[];
+    mut types = u64[];
+    mut sources = u64[];
+    args.push(at);
+    types.push(aty);
+    sources.push(at);
+    args.push(bt);
+    types.push(bty);
+    sources.push(bt);
+    mut map = u64[];
+    map.push(left.ty);
+    mut result = emit_resolved_call(&mut c, method, map, args, types, sources);
+    if negate {
+        get(&mut c, result.t, view("%rax"));
+        o(&mut c, view("xorq $1,%rax\n"));
+        slot := save(&mut c);
+        rty := result.ty;
+        result = val(slot, rty);
+    }
+    return result;
+}
 fn expr<a>(c: (&a mut C), min: u64) -> Val {
     return expr_expected(&mut c, min, 18446744073709551615);
 }
@@ -24328,6 +24437,18 @@ fn expr_expected<a>(c: (&a mut C), min: u64, expected: u64) -> Val {
                                 right = adopt_value(&mut c, right, rstart, rend, ty);
                             }
                             mut rty = right.ty;
+                            // An operator on a record or enum type with an operator interface
+                            // implementation (or a parameter bounded by one): the method call.
+                            if c.raw == 0 {
+                                rt0 := right.t;
+                                over := operator_call(&mut c, k, val(t, ty), val(rt0, rty));
+                                if over.ty != 18446744073709551615 {
+                                    t = over.t;
+                                    ty = over.ty;
+                                    left_lit = false;
+                                    continue;
+                                }
+                            }
                             if c.raw == 0 {
                                 rlit := (c.lit_start == rstart) & (c.lit_end == rend);
                                 llit := left_lit;

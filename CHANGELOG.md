@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Added: operator interfaces. `lib/ops.grl` has `Add`, `Sub`, `Mul`, `Div`, `Rem` and `Eq`; implementing one makes `+ - * / %` or `==`/`!=` work on a record or enum type, and `order::Ord` gives `<`, `<=`, `>`, `>=`. The built-in numbers implement them too, so `T: ops::Add` code takes records and numbers alike.
 - Added: generic interface implementations. `impl<T: Show> Show for Box<T>` implements an interface for every instantiation whose parameters meet the bounds; its methods are specialised per type and dispatch through calls, method syntax, generic bounds, default methods, associated types and `dyn` vtables. `iter::Iterator` (`type Item; fn next(...)`) is the standard iterator interface, implemented for `iter::Iter<T>`. Interface methods also work with method syntax on non-record types (`impl Show for u64` makes `x.show()` work).
 - Added: iterator adapters as methods. `iter::Iter<T>` has `map`, `filter`, `take`, `enumerate`, `zip`, `collect`, `count` and `fold` methods, so chains read left to right: `iter::of(v).filter(...).map(...).collect()`.
 - Added: two-phase borrows, as in Rust. A call's `&mut x` argument (or a `&mut self` receiver `x.m(...)`) is borrowed after the other arguments are evaluated, so they may still read `x`: `bump(&mut c, c.pos)`, `ty_kind(&mut c, ty_arg(&mut c, t))` and `c.bump(c.pos)` compile. A borrow that stays alive through the call, such as `take(&mut c, &c.pos)`, is still refused.
