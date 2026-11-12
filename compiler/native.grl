@@ -9085,6 +9085,14 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         mut l = &c.locals[i];
         slot := l.id;
         ty := l.ty;
+        if (export == 0) & (c.backend != 0) & (c.raw == 0) & (c.facts_fn.len() != 0) {
+            // A shared-reference parameter: this function cannot write what it points at, so a
+            // caller's frame slot passed by address keeps its contents across the call.
+            if (ty_kind(&mut c, ty) == 7) && (ty_mode(&mut c, ty) == 0) {
+                fname := copy_bytes(view(c.facts_fn));
+                llvm::fact_shared_param(&mut c.facts, fname, i);
+            }
+        }
         // A C callback's extern-record parameter is the address of a struct the *caller* owns: it
         // is borrowed, never freed here. Owning it made the epilogue free C's storage, which is the
         // exit-time abort in the runtime's free path after main had already printed everything.

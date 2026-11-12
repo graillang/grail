@@ -6376,5 +6376,23 @@
     "reject": true,
     "diagnostic": "conflicts with",
     "note": "the reference stays live through its later call, so the captured vector cannot change in between"
+  },
+  {
+    "name": "range-fill-loop",
+    "source": "fn main() {\n    n: u64 := 64;\n    mut a = u64[];\n    mut b = u64[];\n    for i in n * 2 {\n        a.push(i);\n        b.push(i * 3);\n        b.push(i + 1);\n    }\n    mut s = 0;\n    for i in n * 2 {\n        s = s + a[i] + b[2 * i + 1];\n    }\n    println(s);\n}\n",
+    "stdout": "16384\n",
+    "note": "a counted fill loop's pushes give the vectors' lengths after it (range facts: rg_fill_loops)"
+  },
+  {
+    "name": "range-fill-loop-skip-not-summarised",
+    "source": "fn main() {\n    n: u64 := 64;\n    mut a = u64[];\n    for i in n {\n        if i % 2 == 0 {\n            continue;\n        }\n        a.push(i);\n    }\n    println(a.len());\n    println(a[n - 1]);\n}\n",
+    "signal": "SIGABRT",
+    "note": "a fill loop that can skip its push is not summarised: the out-of-range read still aborts"
+  },
+  {
+    "name": "comptime-run-tier-tables",
+    "source": "fn crc_table() -> u32[] {\n    mut t = u32[];\n    for n in 256 {\n        mut c: u32 = u32(n);\n        for k in 8 {\n            if (c & 1) != 0 {\n                c = 3988292384 ^ (c >> 1);\n            } else {\n                c = c >> 1;\n            }\n        }\n        t.push(c);\n    }\n    return t;\n}\nfn squares() -> u64[] {\n    mut v = u64[];\n    for i in 10 {\n        v.push(i * i);\n    }\n    return v;\n}\nfn magic() -> u8[] {\n    return u8[71, 82, 76];\n}\nCRC := crc_table();\nSQ := squares();\nMAGIC := magic();\nfn crc32(data: u8[]) -> u32 {\n    table := CRC;\n    mut c: u32 = 4294967295;\n    for b in &data {\n        c = table[u64((c ^ u32(b)) & 255)] ^ (c >> 8);\n    }\n    return c ^ 4294967295;\n}\nfn main() -> u64 {\n    println(CRC.len());\n    println(CRC[1]);\n    println(SQ[9]);\n    println(MAGIC.text());\n    println(crc32(u8[104, 101, 108, 108, 111]));\n    return 0;\n}\n",
+    "stdout": "256\n1996959894\n81\nGRL\n907060870\n",
+    "note": "compile-time calls may give a vector of integers or bytes: a CRC table computed while compiling"
   }
 ]

@@ -686,6 +686,27 @@ that has since moved proves nothing, so the generation is part of the fact.
 - a narrowing that is not provably in range ends the fact instead of being reinterpreted;
 - a join the lattice cannot express (two kinds, two identities, two length generations);
 - a refinement that contradicts the fact the path started from;
+- **shared-reference calls keep escaped slots**: a call the analysis does not know clears every frame
+  slot whose address the function took, since the callee may write through the address. The front
+  end now records which parameters of each function are shared references (`fact_shared_param`,
+  dumped as `; fact F param N shared`), and `rg_mut_escape` follows each `leaq` of a slot through
+  register and frame-temporary copies to the next call. A slot whose every address reaches only
+  shared-reference parameters, or is only read through (`movq (%rax),...`), keeps its facts across
+  the call; any store through it, jump, label or other use before the call counts as an escape. In
+  nbody, `energy(&p, &v, &m)` no longer erases the vectors' identities, so `main` proves 12 of its 17
+  bounds-checked accesses (it proved none), and nbody goes from about 1.8x to about 1.5x of C
+  (llvm, range facts). The remaining checks are in `main`'s update loop.
+- **counted fill loops** (`rg_fill_loops`, the summary the section below asked for): a loop in the
+  front end's `for i in N { ... }` shape - counter start `K` (`movq $K,I` or through `%rax`), guard
+  `movq E,%rcx; movq I,%rax; cmpq %rcx,%rax; jae .LX`, latch `incq I; jmp .LH` - whose body is
+  straight-line (its only branches skip a single `call rt_abort`), calls only functions that cannot
+  shrink or rebind a vector, never writes `I`, `E` or a pushed vector's slot, and whose exit label
+  is reached from the guard alone, ran at least `E - K` times and pushed each vector held in a
+  non-escaped frame slot the number of times its body names it. At `.LX` the vector's length is
+  then at least `(lower bound of E - K) * pushes`. In matmul the three 65,536-element fills now give
+  the kernel's `a[i*n+k]`, `b[k*n+j]` and `c[i*n+j]` their lengths: about 1.4x to 1.0x of C
+  (llvm, range facts, busy host). `range-fill-loop` pins the rule, and
+  `range-fill-loop-skip-not-summarised` pins that a loop that can skip its push is not summarised.
 - **element stores, decided drop flags, loads through a slot address, drop glue**: four transfer
   rules that keep a vector's facts alive through the code `p[i] = x` and its temporaries lower to.
   `rt_slot` returns the address of one heap element (kind 6), and a store through it changes that

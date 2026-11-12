@@ -73,6 +73,13 @@ pub fn fact_header_arg<a>(facts: (&a mut Facts), name: u8[], ordinal: u64, calle
     facts.items.push(Fact { kind: 1, fn: name, a: ordinal, b: 0, callee: callee, what: what, width: width });
     return ();
 }
+// Parameter `index` of the function whose body symbol is `name` is a shared reference (`&T`): the
+// function cannot write the referent, so a caller's frame slot whose address it is given keeps
+// its contents across the call (range facts, rg_mut_escape).
+pub fn fact_shared_param<a>(facts: (&a mut Facts), name: u8[], index: u64) -> unit {
+    facts.items.push(Fact { kind: 2, fn: name, a: index, b: 0, callee: u8[], what: 8, width: 0 });
+    return ();
+}
 pub fn facts_len<a>(facts: (&a Facts)) -> u64 {
     return facts.items.len();
 }
@@ -83,6 +90,13 @@ fn dump_facts<a>(out: (&a mut u8[]), facts: (&a Facts)) -> unit {
         f := &facts.items[i];
         put(&mut out, view("; fact "));
         put(&mut out, view(f.fn));
+        if f.kind == 2 {
+            // A shared-reference parameter (fact_shared_param): not a type fact.
+            put(&mut out, view(" param "));
+            num(&mut out, f.a);
+            put(&mut out, view(" shared\n"));
+            continue;
+        }
         if f.kind == 0 {
             put(&mut out, view(" slot "));
         } else {
@@ -2647,7 +2661,26 @@ fn lower_function<a, b, c>(l: (&a mut L), lines: (&b u8[][]), f: (&b Func), fact
         nslots = deepest + 1;
     }
     if l.ranges != 0 {
-        l.proof = range_proofs(&instrs, nslots, l.split);
+        // Which parameters of which functions are shared references (front-end facts, kind 2).
+        mut shared_names = u8[][];
+        mut shared_masks = u64[];
+        for i in facts.items.len() {
+            q := &facts.items[i];
+            if (q.kind == 2) & (q.a < 6) {
+                mut found = shared_names.len();
+                for k in shared_names.len() {
+                    if eq(view(shared_names[k]), view(q.fn)) {
+                        found = k;
+                    }
+                }
+                if found == shared_names.len() {
+                    shared_names.push(copy(view(q.fn)));
+                    shared_masks.push(0);
+                }
+                shared_masks[found] = shared_masks[found] | (1 << q.a);
+            }
+        }
+        l.proof = range_proofs(&instrs, nslots, l.split, &shared_names, &shared_masks);
     }
     if l.split != 0 {
         // One alloca per slot; the prologue's zeroing covers the slots below the parameters.
@@ -2787,8 +2820,21 @@ struct RC {
     // The frame slots whose address the function takes (`leaq -N(%rbp)`): a store through a
     // register may write those, and no other frame slot.
     esc: u64[],
+    // The escaped slots whose address may reach code that can write the slot: every escaped slot
+    // except those whose every address goes only to shared-reference parameters (rg_mut_escape).
+    // A call this analysis does not know clears these.
+    mesc: u64[],
     // The identity a `rt_new`/`rt_vec_copy` call creates, plus one, by line; 0 for other lines.
-    seed: u64[]
+    seed: u64[],
+    // Counted fill loops (rg_fill_loops): at the exit label's line, `fill_at` is the first entry
+    // plus one; each entry is a vector slot, the pushes into it per iteration, the loop bound's
+    // operand and the counter's start, and `fill_next` chains the entries of one exit.
+    fill_at: u64[],
+    fill_slot: u8[][],
+    fill_pushes: u64[],
+    fill_bound: u8[][],
+    fill_start: u64[],
+    fill_next: u64[]
 }
 fn rg_none() -> u64 {
     return 18446744073709551615;
@@ -2801,7 +2847,8 @@ fn rc_new(nslots: u64, split: u64) -> RC {
     for i in nslots {
         esc.push(0);
     }
-    return RC { nloc: 14 + nslots, nid: 0, split: split, esc: esc, seed: u64[] };
+    mesc := esc.copy();
+    return RC { nloc: 14 + nslots, nid: 0, split: split, esc: esc, mesc: mesc, seed: u64[], fill_at: u64[], fill_slot: u8[][], fill_pushes: u64[], fill_bound: u8[][], fill_start: u64[], fill_next: u64[] };
 }
 fn rc_state(rc: (&RC)) -> u64[] {
     mut st = u64[];
@@ -3425,8 +3472,8 @@ fn rg_clobber(rc: (&RC), st: (&mut u64[])) -> unit {
 // every slot whose address the function took loses its fact. A read-only accessor is given the
 // sequence's word rather than the slot's address (`&v` is a load, not an argument), so it does not.
 fn rg_clear_escaped(rc: (&RC), st: (&mut u64[])) -> unit {
-    for k in rc.esc.len() {
-        if rc.esc[k] != 0 {
+    for k in rc.mesc.len() {
+        if rc.mesc[k] != 0 {
             rg_clear(&mut st, 14 + k);
         }
     }
@@ -4261,7 +4308,275 @@ fn rg_run(rc: (&RC), cur: (&mut u64[]), instrs: (&u8[][]), start: u64, stop: u64
                 out[n] = rg_call_verdict(&rc, &cur, line);
             }
         }
+        if (n < rc.fill_at.len()) && (rc.fill_at[n] != 0) {
+            rg_fill_exit(&rc, &mut cur, rc.fill_at[n] - 1);
+        }
         rg_step(&rc, &mut cur, line, rc.seed[n], trip[n], n, &mut pcmp, &mut prov, &mut snap, &mut out);
+    }
+    return ();
+}
+// The exit of a counted fill loop (rg_fill_loops): the loop ran at least `bound - start` times, each
+// iteration pushed `pushes` elements onto the vector in `slot`, and nothing in the body can shrink
+// it, so its length is at least `(bound - start) * pushes` - whatever it was before. Only lower
+// bounds are used: the bound's lower bound, the counter's exact start.
+fn rg_fill_exit(rc: (&RC), st: (&mut u64[]), first: u64) -> unit {
+    mut e = first;
+    while true {
+        bound := rg_span_of(&rc, &st, view(rc.fill_bound[e]));
+        h := rg_hdr_of(&rc, &st, rg_loc(&rc, view(rc.fill_slot[e])));
+        if (bound.ok != 0) && (h != 0) && (bound.lo > rc.fill_start[e]) {
+            iters := bound.lo - rc.fill_start[e];
+            p := rc.fill_pushes[e];
+            if (p != 0) && (iters <= 4294967295) && (p <= 4294967295) {
+                mut lb = iters * p;
+                k := h - 1;
+                if (rg_have(&rc, &st, k) != 0) && (rg_lb(&rc, &st, k) > lb) {
+                    lb = rg_lb(&rc, &st, k);
+                }
+                g := rg_lgen(&rc, &st, k);
+                rg_lset(&rc, &mut st, k, 1, lb, wrapping_add(g, 1));
+            }
+        }
+        if rc.fill_next[e] == 0 {
+            return ();
+        }
+        e = rc.fill_next[e] - 1;
+    }
+    return ();
+}
+// `jcc NAME` names exactly the label NAME (not one whose name merely ends the same way).
+fn rg_names_label(line: (&[u8]), name: (&[u8])) -> bool {
+    return ends(line, name) && (line.len() > name.len()) && (line[line.len() - name.len() - 1] == 32);
+}
+fn rg_ends_colon(line: (&[u8])) -> bool {
+    return (line.len() > 0) && (line[line.len() - 1] == 58);
+}
+fn rg_frame_op(op: (&[u8])) -> bool {
+    return (op.len() > 6) && (op[0] == 45) && ends(op, view("(%rbp)"));
+}
+// The only calls a fill loop's body may make: ones that cannot shrink or rebind a vector.
+fn rg_fill_call_ok(target: (&[u8])) -> bool {
+    return eq(target, view("rt_abort")) || eq(target, view("rt_int_cast")) || eq(target, view("rt_f32_from_int"))
+        || eq(target, view("rt_f64_op")) || eq(target, view("rt_f32_round")) || eq(target, view("rt_len"))
+        || starts(target, view("rt_at")) || starts(target, view("rt_slot")) || starts(target, view("rt_push"));
+}
+// Counted fill loops, recognised in the shape the front end emits for `for i in N { ... }`:
+//     movq $K,I            (the counter's start)
+//   .LH:
+//     movq E,%rcx ; movq I,%rax ; cmpq %rcx,%rax ; jae .LX
+//     body
+//   .LS:
+//     incq I ; jmp .LH
+//   .LX:
+// The body must be straight-line: its only branches skip a single `call rt_abort`, it makes only
+// the calls rg_fill_call_ok allows, it never writes I, E or a pushed vector's slot, and .LX is
+// reached from nowhere but the guard. Then every iteration that reaches the latch executed each
+// `call rt_push*` exactly once, on the vector its `movq S,%rdi` named.
+fn rg_fill_loops(rc: (&mut RC), instrs: (&u8[][])) -> unit {
+    n := instrs.len();
+    for i in n {
+        rc.fill_at.push(0);
+    }
+    mut j = 0;
+    while j + 2 < n {
+        latch := view(instrs[j]);
+        if !(starts(latch, view("incq ")) && starts(view(instrs[j + 1]), view("jmp .L")) && rg_ends_colon(view(instrs[j + 2]))) {
+            j += 1;
+            continue;
+        }
+        counter := view(sub(latch, 5, latch.len()));
+        head_name := view(sub(view(instrs[j + 1]), 4, instrs[j + 1].len()));
+        exit_line := view(instrs[j + 2]);
+        exit_name := view(sub(exit_line, 0, exit_line.len() - 1));
+        // The head label, the guard, and the counter's start right before it.
+        mut h = n;
+        for q in j {
+            if (instrs[q].len() == head_name.len() + 1) && starts(view(instrs[q]), head_name) && rg_ends_colon(view(instrs[q])) {
+                h = q;
+            }
+        }
+        mut ok = rg_frame_op(counter) && (h != n) && (h >= 1) && (h + 4 < j);
+        mut bound = u8[];
+        mut start: u64 = 0;
+        if ok {
+            g1 := view(instrs[h + 1]);
+            ok = starts(g1, view("movq ")) && ends(g1, view(",%rcx"));
+            if ok {
+                bound = copy(view(sub(g1, 5, g1.len() - 5)));
+                ok = rg_frame_op(view(bound));
+            }
+            mut want = copy(view("movq "));
+            for q in counter.len() {
+                want.push(counter[q]);
+            }
+            for q in 5 {
+                want.push(view(",%rax")[q]);
+            }
+            ok = ok && eq(view(instrs[h + 2]), view(want)) && eq(view(instrs[h + 3]), view("cmpq %rcx,%rax"));
+            mut jae = copy(view("jae "));
+            for q in exit_name.len() {
+                jae.push(exit_name[q]);
+            }
+            ok = ok && eq(view(instrs[h + 4]), view(jae));
+            // The counter's start: `movq $K,I`, or `K` into %rax and then `movq %rax,I`.
+            pre := view(instrs[h - 1]);
+            mut want_store = copy(view("movq %rax,"));
+            for q in counter.len() {
+                want_store.push(counter[q]);
+            }
+            if ok && starts(pre, view("movq $")) && ends(pre, view(counter)) {
+                k := parse_int(view(sub(pre, 6, pre.len() - counter.len() - 1)));
+                ok = (k.ok != 0) && (k.v >= 0);
+                if ok {
+                    start = u64(k.v);
+                }
+            } else if ok && eq(pre, view(want_store)) && (h >= 2) {
+                pre2 := view(instrs[h - 2]);
+                if eq(pre2, view("xorq %rax,%rax")) || eq(pre2, view("xorl %eax,%eax")) {
+                    start = 0;
+                } else if (starts(pre2, view("movq $")) || starts(pre2, view("movabsq $"))) && ends(pre2, view(",%rax")) {
+                    mut d = 6;
+                    if starts(pre2, view("movabsq $")) {
+                        d = 9;
+                    }
+                    k := parse_int(view(sub(pre2, d, pre2.len() - 5)));
+                    ok = (k.ok != 0) && (k.v >= 0);
+                    if ok {
+                        start = u64(k.v);
+                    }
+                } else {
+                    ok = false;
+                }
+            } else {
+                ok = false;
+            }
+        }
+        // The exit is reached only from the guard.
+        if ok {
+            mut spaced = copy(view(" "));
+            for q in exit_name.len() {
+                spaced.push(exit_name[q]);
+            }
+            mut uses = 0;
+            for q in n {
+                line := view(instrs[q]);
+                if ends(line, view(spaced)) {
+                    uses += 1;
+                }
+            }
+            ok = uses == 1;
+        }
+        // The body.
+        mut slots = u8[][];
+        mut counts = u64[];
+        mut q = h + 5;
+        mut rdi = u8[];
+        while ok && (q < j) {
+            line := view(instrs[q]);
+            if starts(line, view(".pushsection")) {
+                while (q < j) && !starts(view(instrs[q]), view(".popsection")) {
+                    q += 1;
+                }
+                q += 1;
+                continue;
+            }
+            if rg_ends_colon(line) {
+                // A label: the target of the abort skip just before it, or the `continue` label.
+                mut fine = q == j - 1;
+                if (q >= 2) && eq(view(instrs[q - 1]), view("call rt_abort")) {
+                    prev := view(instrs[q - 2]);
+                    name := view(sub(line, 0, line.len() - 1));
+                    fine = fine || (starts(prev, view("j")) && rg_names_label(prev, name));
+                }
+                ok = fine;
+                q += 1;
+                continue;
+            }
+            if starts(line, view("jmp")) {
+                ok = false;
+                continue;
+            }
+            if starts(line, view("j")) {
+                // Must skip exactly one `call rt_abort` to the label right after it.
+                ok = (q + 2 < j) && eq(view(instrs[q + 1]), view("call rt_abort")) && rg_ends_colon(view(instrs[q + 2]))
+                    && rg_names_label(line, view(sub(view(instrs[q + 2]), 0, instrs[q + 2].len() - 1)));
+                q += 1;
+                continue;
+            }
+            mut space = line.len();
+            for t in line.len() {
+                if (line[t] == 32) & (space == line.len()) {
+                    space = t;
+                }
+            }
+            op := view(sub(line, 0, space));
+            o := operands(view(trim(view(sub(line, space + 1, line.len())))));
+            if eq(op, view("call")) {
+                target := view(o[0]);
+                ok = (o.len() == 1) && rg_fill_call_ok(target);
+                if ok && starts(target, view("rt_push")) {
+                    // A push onto a vector held anywhere else than a frame slot whose address never
+                    // escapes is not summarised (it is still only a push: nothing else changes).
+                    sid := rg_storage(view(rdi));
+                    summarise := rg_frame_op(view(rdi)) && (sid >= 15) && (sid - 15 < rc.esc.len()) && (rc.esc[sid - 15] == 0);
+                    if summarise {
+                        mut found = slots.len();
+                        for t in slots.len() {
+                            if eq(view(slots[t]), view(rdi)) {
+                                found = t;
+                            }
+                        }
+                        if found == slots.len() {
+                            slots.push(rdi.copy());
+                            counts.push(0);
+                        }
+                        counts[found] = counts[found] + 1;
+                    }
+                }
+                rdi = u8[];
+                q += 1;
+                continue;
+            }
+            if eq(op, view("leaq")) && (o.len() >= 1) && (rg_frame_op(view(o[0])) && (eq(view(o[0]), counter) || eq(view(o[0]), view(bound)))) {
+                ok = false;
+            }
+            if o.len() >= 1 {
+                last := view(o[o.len() - 1]);
+                if eq(last, counter) || eq(last, view(bound)) {
+                    ok = false;
+                }
+                if eq(op, view("movq")) && (o.len() == 2) && eq(last, view("%rdi")) {
+                    rdi = copy(view(o[0]));
+                } else if eq(last, view("%rdi")) || eq(last, view("%edi")) {
+                    rdi = u8[];
+                }
+            }
+            q += 1;
+        }
+        // No pushed vector's slot is written in the body.
+        if ok {
+            for t in slots.len() {
+                for r in h + 5..j {
+                    line := view(instrs[r]);
+                    o := operands(view(trim(view(sub(line, 5, line.len())))));
+                    if starts(line, view("movq ")) && (o.len() == 2) && eq(view(o[1]), view(slots[t])) {
+                        ok = false;
+                    }
+                }
+            }
+        }
+        if ok && (slots.len() != 0) {
+            for t in slots.len() {
+                next := rc.fill_at[j + 2];
+                rc.fill_slot.push(slots[t].copy());
+                rc.fill_pushes.push(counts[t]);
+                rc.fill_bound.push(bound.copy());
+                rc.fill_start.push(start);
+                rc.fill_next.push(next);
+                rc.fill_at[j + 2] = rc.fill_slot.len();
+            }
+        }
+        j += 1;
     }
     return ();
 }
@@ -4416,9 +4731,210 @@ fn rg_edges(rc: (&RC), st: (&mut u64[][]), nblk: u64, s1: u64, s2: u64, instrs: 
     }
     return changed;
 }
+// True unless the address `leaq` on line `at` puts in `dest` provably reaches only
+// shared-reference parameters: it is followed through register and frame-temporary copies to the
+// next call, where every argument register still holding it must be a parameter the callee
+// declares `&T`, no callee-saved register may hold it, and no temporary holding it is read
+// anywhere else in the function. A label, a jump, a store through it, or any other use is an
+// escape (the conservative answer).
+fn rg_mut_escape(instrs: (&u8[][]), at: u64, dest: (&[u8]), names: (&u8[][]), masks: (&u64[])) -> bool {
+    mut holders = u8[][];
+    holders.push(copy(dest));
+    mut j = at + 1;
+    while j < instrs.len() {
+        line := view(instrs[j]);
+        if (line.len() == 0) || (line[line.len() - 1] == 58) || starts(line, view("j")) || starts(line, view("ret")) {
+            return true;
+        }
+        mut space = line.len();
+        for q in line.len() {
+            if (line[q] == 32) & (space == line.len()) {
+                space = q;
+            }
+        }
+        op := view(sub(line, 0, space));
+        o := operands(view(trim(view(sub(line, space + 1, line.len())))));
+        if eq(op, view("call")) {
+            mut mask: u64 = 0;
+            if o.len() == 1 {
+                for q in names.len() {
+                    if eq(view(names[q]), view(o[0])) {
+                        mask = masks[q];
+                    }
+                }
+            }
+            for h in holders.len() {
+                hv := view(holders[h]);
+                r := rg_arg_index(hv);
+                if r != 99 {
+                    if ((mask >> r) & 1) == 0 {
+                        return true;
+                    }
+                } else if starts(hv, view("%")) {
+                    if eq(hv, view("%rbx")) || eq(hv, view("%r12")) || eq(hv, view("%r13")) || eq(hv, view("%r14")) || eq(hv, view("%r15")) {
+                        return true;
+                    }
+                } else {
+                    // A frame temporary: dead once nothing else in the function reads it.
+                    for q in instrs.len() {
+                        if ((q < at) || (q > j)) && rg_mentions(view(instrs[q]), hv) {
+                            return true;
+                        }
+                    }
+                }
+            }
+            return false;
+        }
+        mut touches = false;
+        for q in o.len() {
+            for h in holders.len() {
+                if rg_mentions(view(o[q]), view(holders[h])) {
+                    touches = true;
+                }
+            }
+        }
+        if eq(op, view("movq")) && (o.len() == 2) {
+            mut from_holder = false;
+            for h in holders.len() {
+                if eq(view(o[0]), view(holders[h])) {
+                    from_holder = true;
+                }
+            }
+            if from_holder {
+                dst := view(o[1]);
+                if starts(dst, view("%")) || (starts(dst, view("-")) && rg_mentions(dst, view("(%rbp)"))) {
+                    holders.push(copy(dst));
+                    j += 1;
+                    continue;
+                }
+                return true;
+            }
+            // A load through a holder (`movq (%rax),%rdi`, `movq 8(%rax),%rdi`) reads the slot: it
+            // cannot change it, and the value loaded is the slot's contents, not its address.
+            src := view(o[0]);
+            mut through = false;
+            for h in holders.len() {
+                hv := view(holders[h]);
+                if starts(hv, view("%")) && rg_mentions(src, hv) && rg_mentions(src, view("(")) && !rg_mentions(view(o[1]), hv) {
+                    through = true;
+                }
+                if starts(hv, view("%")) && eq(view(o[1]), hv) && rg_mentions(src, view("(")) && rg_mentions(src, hv) {
+                    through = true;
+                }
+            }
+            if through && !rg_mentions(src, view("(%rbp)")) {
+                mut kept2 = u8[][];
+                for h in holders.len() {
+                    if !eq(view(o[1]), view(holders[h])) {
+                        kept2.push(holders[h].copy());
+                    }
+                }
+                holders = kept2;
+                j += 1;
+                continue;
+            }
+            // Overwriting a holder ends it; reading through one is a use.
+            mut kept = u8[][];
+            for h in holders.len() {
+                if !eq(view(o[1]), view(holders[h])) {
+                    kept.push(holders[h].copy());
+                }
+            }
+            if rg_mentions_any(view(o[0]), &holders) {
+                return true;
+            }
+            holders = kept;
+            j += 1;
+            continue;
+        }
+        if touches && (o.len() >= 1) {
+            // An instruction that only writes a holder (a new address, a constant, a load into it)
+            // retires it; any other mention of a holder is a use.
+            last := view(o[o.len() - 1]);
+            pure_write := eq(op, view("leaq")) || eq(op, view("movabsq")) || eq(op, view("movl")) || eq(op, view("movzbq"))
+                || eq(op, view("movzwq")) || eq(op, view("popq")) || starts(op, view("set"));
+            mut reads_holder = false;
+            for q in o.len() - 1 {
+                if rg_mentions_any(view(o[q]), &holders) {
+                    reads_holder = true;
+                }
+            }
+            mut writes_holder = false;
+            for h in holders.len() {
+                if eq(last, view(holders[h])) {
+                    writes_holder = true;
+                }
+            }
+            if pure_write & writes_holder & !reads_holder {
+                mut kept = u8[][];
+                for h in holders.len() {
+                    if !eq(last, view(holders[h])) {
+                        kept.push(holders[h].copy());
+                    }
+                }
+                holders = kept;
+                j += 1;
+                continue;
+            }
+            return true;
+        }
+        j += 1;
+    }
+    return true;
+}
+fn rg_arg_index(r: (&[u8])) -> u64 {
+    if eq(r, view("%rdi")) {
+        return 0;
+    }
+    if eq(r, view("%rsi")) {
+        return 1;
+    }
+    if eq(r, view("%rdx")) {
+        return 2;
+    }
+    if eq(r, view("%rcx")) {
+        return 3;
+    }
+    if eq(r, view("%r8")) {
+        return 4;
+    }
+    if eq(r, view("%r9")) {
+        return 5;
+    }
+    return 99;
+}
+// True when `text` contains `part`.
+fn rg_mentions(text: (&[u8]), part: (&[u8])) -> bool {
+    if part.len() == 0 {
+        return false;
+    }
+    mut i = 0;
+    while i + part.len() <= text.len() {
+        mut hit = true;
+        for q in part.len() {
+            if text[i + q] != part[q] {
+                hit = false;
+                break;
+            }
+        }
+        if hit {
+            return true;
+        }
+        i += 1;
+    }
+    return false;
+}
+fn rg_mentions_any(text: (&[u8]), parts: (&u8[][])) -> bool {
+    for q in parts.len() {
+        if rg_mentions(text, view(parts[q])) {
+            return true;
+        }
+    }
+    return false;
+}
 // One verdict per instruction line: 0 nothing, 1 the conditional jump on this line always takes its
 // target, 2 it never does, 3 the bounds-checked accessor call on this line cannot fail.
-fn range_proofs(instrs: (&u8[][]), nslots: u64, split: u64) -> u64[] {
+fn range_proofs(instrs: (&u8[][]), nslots: u64, split: u64, shared_names: (&u8[][]), shared_masks: (&u64[])) -> u64[] {
     n := instrs.len();
     mut out = u64[];
     for i in n {
@@ -4470,6 +4986,9 @@ fn range_proofs(instrs: (&u8[][]), nslots: u64, split: u64) -> u64[] {
                 if id >= 15 {
                     if id - 15 < nslots {
                         rc.esc[id - 15] = 1;
+                        if rg_mut_escape(&instrs, i, view(o[1]), &shared_names, &shared_masks) {
+                            rc.mesc[id - 15] = 1;
+                        }
                     }
                 }
             }
@@ -4549,6 +5068,8 @@ fn range_proofs(instrs: (&u8[][]), nslots: u64, split: u64) -> u64[] {
         s1.push(t1);
         s2.push(t2);
     }
+    // Counted fill loops, now that the escaped slots are known.
+    rg_fill_loops(&mut rc, &instrs);
     // Per line: how many times one execution of the enclosing counted fill loop grows a length.
     mut trip = u64[];
     for i in n {
