@@ -6151,13 +6151,17 @@ fn type_matches<a, b>(c: (&a mut C), pattern: u64, actual: u64, map: (&b mut u64
 }
 // The symbol an interface method resolves to for `ty`: the method itself, or - in a generic
 // implementation - its specialisation for the bindings that make the implementation fit `ty`.
-fn interface_symbol<a>(c: (&a mut C), contract: u64, ty: u64, actual: u64) -> u8[] {
+fn interface_symbol<a, b>(c: (&a mut C), contract: u64, ty: u64, actual: u64, own: (&b u64[])) -> u8[] {
     if c.funcs[actual].types == 0 {
         return c.funcs[actual].name.copy();
     }
     implementation := find_implementation(&mut c, contract, ty);
     base := base_type(&mut c, ty);
-    bindings := impl_bindings(&mut c, implementation, base);
+    // The implementation's parameters (when it is generic), then the method's own.
+    mut bindings = impl_bindings(&mut c, implementation, base);
+    for k in own.len() {
+        bindings.push(own[k]);
+    }
     index := specialize(&mut c, actual, &bindings);
     return special_name(&mut c, index);
 }
@@ -6627,7 +6631,8 @@ fn dyn_box<a>(c: (&a mut C), v: Val, expected: u64) -> Val {
             name := c.funcs[methods[j]].name.copy();
             owner := interface_of_method(&mut c, methods[j]);
             actual := resolve_interface_method(&mut c, owner, concrete, view(name));
-            interface_symbol(&mut c, owner, concrete, actual);
+            none := u64[];
+            interface_symbol(&mut c, owner, concrete, actual, &none);
         }
     }
     observe(&mut c, v.t);
@@ -6687,7 +6692,8 @@ fn emit_vtables<a>(c: (&a mut C)) -> unit {
             owner := interface_of_method(&mut c, methods[j]);
             actual := resolve_interface_method(&mut c, owner, concrete, view(name));
             module := c.funcs[actual].module.copy();
-            symbol := interface_symbol(&mut c, owner, concrete, actual);
+            none := u64[];
+            symbol := interface_symbol(&mut c, owner, concrete, actual, &none);
             o(&mut c, view(".quad "));
             mangle(&mut c, view(module), view(symbol));
             c.out.push(10);
@@ -6712,7 +6718,8 @@ fn check_object_safety<a>(c: (&a mut C), id: u64) -> unit {
         count := f.count;
         ret := f.ret;
         fname := f.name.copy();
-        mut bad = count == 0;
+        // A generic method has no single vtable entry (Rust's rule).
+        mut bad = (count == 0) || (f.types > 1);
         if !bad {
             receiver := c.params[first];
             referent := ty_arg(&mut c, receiver);
@@ -10519,8 +10526,19 @@ fn interface_declaration<a>(c: (&a mut C), pass: u64) -> unit {
         expect(&mut c, view("fn"));
         name := ident(&mut c);
         lifetime_parameters(&mut c);
-        if c.tnames.len() != 0 {
-            fail(&mut c, view("interface method type parameters are not implemented yet"));
+        // `fn map<U>(...)`: the method's own type parameters follow Self (parameter 0).
+        own_names := exchange(&mut c.tnames, u8[][]);
+        own_bounds := exchange(&mut c.type_bounds, u64[]);
+        own_sets := exchange(&mut c.type_interfaces, u64[][]);
+        if own_names.len() != 0 {
+            c.tnames.push(copy_bytes(view("Self")));
+            c.type_bounds.push(0);
+            c.type_interfaces.push(u64[id]);
+            for k in own_names.len() {
+                c.tnames.push(own_names[k].copy());
+                c.type_bounds.push(own_bounds[k]);
+                c.type_interfaces.push(copy_numbers(&own_sets[k]));
+            }
         }
         module := private_module(view(".interface_"), id);
         if find_func(&mut c, view(module), view(name)) != 0 {
@@ -10576,6 +10594,15 @@ fn interface_declaration<a>(c: (&a mut C), pass: u64) -> unit {
         mut bounds = u64[0];
         mut requirements = u64[][];
         requirements.push(u64[id]);
+        mut method_types = 1;
+        if c.tnames.len() != 0 {
+            bounds = copy_numbers(&c.type_bounds);
+            requirements = copy_constraints(&c.type_interfaces);
+            method_types = c.tnames.len();
+        }
+        exchange(&mut c.tnames, u8[][]);
+        exchange(&mut c.type_bounds, u64[]);
+        exchange(&mut c.type_interfaces, u64[][]);
         regions := c.rnames.len();
         item_public_9 := c.decl_public;
         item_home_9 := module_copy(&mut c);
@@ -10590,7 +10617,7 @@ fn interface_declaration<a>(c: (&a mut C), pass: u64) -> unit {
                     first: first,
                     count: count,
                     ret: ret,
-                    types: 1,
+                    types: method_types,
                     regions: regions,
                     file: 0,
                     pos: 0,
@@ -10727,6 +10754,10 @@ fn impl_self<a>(c: (&a mut C), owner: u64) -> u64 {
     if r != 0 {
         p := &c.impl_params[r - 1];
         return p.self_ty;
+    }
+    // A non-generic interface implementation whose method has its own type parameters.
+    if owner >= generic_impl_key(0) {
+        return c.implementations[owner - generic_impl_key(0) - 1].ty;
     }
     return intern_args(&mut c, 8, owner - 1, 0, u64[], u64[]);
 }
@@ -10970,9 +11001,6 @@ fn implementation<a>(c: (&a mut C), pass: u64) -> unit {
         before := c.funcs.len();
         // func prepends the implementation's own parameters (prepend_impl_params).
         func(&mut c, pass, 0);
-        if c.tnames.len() != impl_tnames.len() {
-            fail(&mut c, view("an interface method cannot have type parameters of its own"));
-        }
         if pass == 2 {
             item := &mut c.implementations[id - 1];
             item.methods.push(before);
@@ -11183,8 +11211,25 @@ fn check_interfaces<a>(c: (&a mut C)) -> unit {
             name := f.name.copy();
             actual := resolve_interface_method(&mut c, contract, ty, view(name));
             mut arguments = u64[ty];
-            signature := bound_signature(&mut c, abstract, &arguments);
             mut own = impl_param_types(&mut c, i + 1);
+            // The method's own type parameters, matched by position on both sides.
+            abstract_own := c.funcs[abstract].types - 1;
+            actual_own := c.funcs[actual].types - own.len();
+            if abstract_own != actual_own {
+                g := &c.funcs[actual];
+                file := g.file;
+                pos := g.pos;
+                load_file(&mut c, file);
+                exchange(&mut c.file, file);
+                exchange(&mut c.pos, pos);
+                fail(&mut c, view("method type parameters do not match the interface"));
+            }
+            for k in abstract_own {
+                marker := intern_args(&mut c, 9, 1000 + k, 0, u64[], u64[]);
+                arguments.push(marker);
+                own.push(marker);
+            }
+            signature := bound_signature(&mut c, abstract, &arguments);
             concrete := bound_signature(&mut c, actual, &own);
             if same_type(&mut c, concrete, signature) == 0 {
                 // Report at the implementing method, not wherever parsing ended.
@@ -15582,7 +15627,11 @@ fn emit_resolved_call<a>(
             } else {
                 actual := resolve_interface_method(&mut c, contract, self, view(name));
                 destination = c.funcs[actual].module.copy();
-                symbol = interface_symbol(&mut c, contract, self, actual);
+                mut own = u64[];
+                for k in 1..map.len() {
+                    own.push(map[k]);
+                }
+                symbol = interface_symbol(&mut c, contract, self, actual, &own);
             }
         }
     }
@@ -15717,7 +15766,11 @@ fn specialized_function_value<a>(c: (&a mut C), index: u64, map: u64[]) -> Val {
         self := map[0];
         actual := resolve_interface_method(&mut c, contract, self, view(name));
         module := c.funcs[actual].module.copy();
-        symbol := interface_symbol(&mut c, contract, self, actual);
+        mut own = u64[];
+        for k in 1..map.len() {
+            own.push(map[k]);
+        }
+        symbol := interface_symbol(&mut c, contract, self, actual, &own);
         o(&mut c, view("leaq "));
         mangle(&mut c, view(module), view(symbol));
         o(&mut c, view("(%rip),%rax\n"));

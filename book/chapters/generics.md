@@ -69,6 +69,13 @@ implementation of `Shape` needs one of `Named` for the same type, and anything k
 `Shape` - a bound `T: Shape`, a default method's `self`, a `dyn Shape` - can call `Named`'s
 methods too. List several with `+`: `interface Store: Read + Write`.
 
+## Generic interface methods
+
+An interface method can have type parameters of its own, after `Self`:
+`fn wrap<U>(self: &Self, u: U) -> U[];`. Each implementation writes the same parameters, and each
+call is compiled for the types it uses. As in Rust, such a method has no single entry in a `dyn`
+vtable, so an interface with one cannot be used as `dyn`.
+
 ## Generic implementations
 
 An implementation can be generic itself: `impl<T: Show> Show for Box<T>` makes every `Box<T>` a

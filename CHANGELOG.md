@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Added: generic interface methods. `fn wrap<U>(self: &Self, u: U) -> U[];` in an interface, implemented with the same parameters, is specialised per call through bounds, `Interface::method` calls and default methods; an implementation with different type parameters is refused, and (Rust's rule) an interface with one cannot be `dyn`.
 - Added: interface inheritance. `interface Shape: Named + Sized` requires every implementation of `Shape` to have implementations of `Named` and `Sized` for the same type, and lets a bound `T: Shape`, a default method or a `dyn Shape` call their methods (a dyn vtable carries them too). Interface files record the supers.
 - Added: closure parameter and result inference. `iter::of(v).filter(|x| *x > 1).map(|x| x * 2)` and `f: Fn(u64, u64) -> u64 = |a, b| a * b` need no annotations: a closure takes its parameter types from the function type it is passed or bound as, and its result from that type or, for an expression body whose type nothing fixes yet (`map`'s `U`), from the body. A parameter nothing fixes is still an error that says to write `|x: T|`.
 - Added: `map` from reference items to owned ones (`iter::refs(&v).map(|x: &u64| -> u64 *x * 2)`). A generic function's result may carry the lifetimes of its type arguments, as Rust's returned `impl Trait` does: the result keeps the loans of the arguments that carry them, so `v` stays borrowed while the mapped iterator lives. A moved value now carries every live loan it holds, whatever its type shows.
