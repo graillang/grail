@@ -147,8 +147,14 @@ for (const [position, test] of cases.entries()) {
     // A diagnostic the runtime promises (once per process) is part of the observable contract.
     if (test.stderr !== undefined) {
       const errors = result.stderr.toString();
-      const occurrences = errors.split(test.stderr).length - 1;
-      assert.equal(occurrences, test.stderrCount ?? 1, `${test.name}: expected ${test.stderrCount ?? 1} x ${JSON.stringify(test.stderr)} in ${JSON.stringify(errors)}`);
+      // One substring, carried `stderrCount` times (once by default), or a list of substrings, each
+      // carried once: a backtrace pins its frames apart because a file's absolute path sits between
+      // them, and on qemu targets the emulator appends a line of its own.
+      for (const pin of [test.stderr].flat()) {
+        const wanted = Array.isArray(test.stderr) ? 1 : (test.stderrCount ?? 1);
+        const occurrences = errors.split(pin).length - 1;
+        assert.equal(occurrences, wanted, `${test.name}: expected ${wanted} x ${JSON.stringify(pin)} in ${JSON.stringify(errors)}`);
+      }
     }
     if (interfaceExecutable) {
       const ifaceResult = execute(interfaceExecutable, test.args ?? [], target, options);
