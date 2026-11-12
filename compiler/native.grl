@@ -1,6 +1,7 @@
 module native;
 use lexer;
 use host;
+use explain;
 use ownership;
 use machine;
 use optimize;
@@ -403,6 +404,12 @@ struct C {
     ct_loop_index: u64[],
     // Set once a compile used `@embed`, which reads a file the build cache does not key on.
     embed_used: u64,
+    // Several errors per compile (docs/diagnostics.md): the bodies an earlier run of this compile
+    // already reported an error in, as file index and position pairs, skipped here; and the body
+    // being checked now, which an error in it adds to that list.
+    skip_bodies: u64[],
+    body_file: u64,
+    body_pos: u64,
     // Copy-backs for `p: &mut R` callback parameters: (C pointer slot, copy slot, bytes) triples.
     export_copyback: u64[],
     rnames: u8[][],
@@ -2974,6 +2981,24 @@ fn caps_walk<a, b>(c: (&a mut C), ty: u64, trail: (&b mut u64[])) -> u64[] {
             add_region(&mut rs, r);
         }
     }
+    if (k == 12) || (k == 20) || (k == 25) {
+        // A function value's lifetimes are the ones its signature names: a closure whose type says
+        // it returns `&a T` (or takes one) may carry borrows of `a`, which is what lets an adapter
+        // hand out references into the collection its closure captured.
+        inner := caps_walk(&mut c, arg, &mut trail);
+        for i in inner.len() {
+            mut r = inner[i];
+            add_region(&mut rs, r);
+        }
+        params := type_args(&mut c, ty);
+        for p in params.len() {
+            pinner := caps_walk(&mut c, params[p], &mut trail);
+            for i in pinner.len() {
+                mut r = pinner[i];
+                add_region(&mut rs, r);
+            }
+        }
+    }
     if k == 8 {
         for i in trail.len() {
             if trail[i] == ty {
@@ -4717,7 +4742,14 @@ fn fail<a, b>(c: (&a mut C), msg: &b [u8]) -> unit {
             shown.push(DiagLabel { pos: l.pos, file: l.file, text: l.text.copy() });
         }
     }
-    o(&mut c, view("error: "));
+    code := explain::code_of(msg);
+    if code.len() == 0 {
+        o(&mut c, view("error: "));
+    } else {
+        o(&mut c, view("error["));
+        o(&mut c, view(code));
+        o(&mut c, view("]: "));
+    }
     o(&mut c, msg);
     c.out.push(10);
     for i in width {
@@ -4799,9 +4831,57 @@ fn fail<a, b>(c: (&a mut C), msg: &b [u8]) -> unit {
         c.out.push(10);
     }
     host::print(view(c.out));
+    next_error(&mut c);
     // A rejected program is an ordinary failure (status 1), not a crash of the compiler.
     host::exit(1);
     return ();
+}
+// After an error in a function body: run this compile again with that body skipped, so it reports
+// the next error too (up to 20). The program is rejected either way; nothing is written. An error
+// outside any body - a declaration, a signature - ends the compile, since what follows it would
+// mostly be consequences of it.
+fn next_error<a>(c: (&a mut C)) -> unit {
+    reported := c.skip_bodies.len() / 2 + 1;
+    if (c.body_pos == 0) || (20 <= reported) {
+        error_summary(reported);
+        return ();
+    }
+    for i in c.skip_bodies.len() / 2 {
+        if (c.skip_bodies[2 * i] == c.body_file) & (c.skip_bodies[2 * i + 1] == c.body_pos) {
+            error_summary(reported);
+            return ();
+        }
+    }
+    mut self = copy_bytes(view("/proc/self/exe"));
+    if host::exists(view(self)) == 0 {
+        self = host::arg(0);
+    }
+    mut run = u8[][self];
+    mut at = decimal_bytes(c.body_file);
+    at.push(58);
+    push_bytes(&mut at, view(decimal_bytes(c.body_pos)));
+    run.push(copy_bytes(view("--skip-body")));
+    run.push(at);
+    for i in host::argc() - 1 {
+        run.push(host::arg(i + 1));
+    }
+    host::command(run);
+    return ();
+}
+fn error_summary(count: u64) -> unit {
+    if count < 2 {
+        return ();
+    }
+    mut line = copy_bytes(view("error: aborting due to "));
+    push_bytes(&mut line, view(decimal_bytes(count)));
+    push_bytes(&mut line, view(" previous errors\n"));
+    host::print(view(line));
+    return ();
+}
+fn decimal_bytes(n: u64) -> u8[] {
+    mut out = u8[];
+    decimal(&mut out, n);
+    return out;
 }
 // Command-line errors happen before any token stream exists, so they bypass the caret diagnostic.
 fn fail_option<a, b>(c: (&a mut C), msg: &b [u8]) -> unit {
@@ -5988,6 +6068,29 @@ fn borrow_walk<a, b>(c: (&a mut C), ty: u64, trail: (&b mut u64[])) -> bool {
         rs := type_regions(&mut c, ty);
         if rs.len() != 0 {
             return true;
+        }
+        // A closure type from a signature carries no capture list, but one whose result names a
+        // lifetime no parameter supplies (`Fn() -> &a T`) can only return a reference into what it
+        // captured: it holds that borrow, and moving or binding it must keep the loan.
+        result := caps_walk(&mut c, arg, &mut trail);
+        mut supplied = u64[];
+        params := type_args(&mut c, ty);
+        for p in params.len() {
+            more := caps_walk(&mut c, params[p], &mut trail);
+            for i in more.len() {
+                supplied.push(more[i]);
+            }
+        }
+        for i in result.len() {
+            mut found = false;
+            for j in supplied.len() {
+                if supplied[j] == result[i] {
+                    found = true;
+                }
+            }
+            if !found {
+                return true;
+            }
         }
         return false;
     }
@@ -8636,6 +8739,23 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         }
         skip_braces(&mut c);
         return ();
+    }
+    if pass == 3 {
+        // A body an earlier run reported an error in is not checked again: its signature still
+        // stands for its callers, so the rest of the program is checked against it.
+        here_file := c.file;
+        for i in c.skip_bodies.len() / 2 {
+            if (c.skip_bodies[2 * i] == here_file) & (c.skip_bodies[2 * i + 1] == position + 1) {
+                while kind(&mut c) != 123 {
+                    advance(&mut c);
+                }
+                skip_braces(&mut c);
+                return ();
+            }
+        }
+        exchange(&mut c.body_file, here_file);
+        // Position + 1, so 0 still means "not in a body".
+        exchange(&mut c.body_pos, position + 1);
     }
     mut m = module_copy(&mut c);
     // A specialisation is requested by the module whose body instantiates the template.
@@ -13912,7 +14032,26 @@ fn indirect_call<a>(c: (&a mut C), value: Val, opened: u64) -> Val {
                 fail(&mut c, view("callable arity mismatch"));
             }
             astart := c.pos;
-            mut value = expr(&mut c, 0);
+            // A reference or view binding passed by name is reborrowed, not moved, exactly as at a
+            // direct call (reborrow_argument): `k(x)` leaves `x` usable afterwards.
+            mut value = val(0, 0);
+            mut reborrow = reborrow_argument(&mut c);
+            if reborrow != 0 {
+                // Only references take this path here: a view argument is already a copy the
+                // closure's parameter type expects.
+                here_tok := c.pos;
+                arg_name := tok_text(&mut c, here_tok);
+                l := find_local(&mut c, view(arg_name));
+                lty := local_ty(&mut c, l - 1);
+                if ty_kind(&mut c, lty) != 7 {
+                    reborrow = 0;
+                }
+            }
+            if reborrow != 0 {
+                value = place(&mut c, reborrow - 1, 0);
+            } else {
+                value = expr(&mut c, 0);
+            }
             aend := c.pos;
             expected := signature[index];
             if c.raw == 0 {
@@ -14010,6 +14149,29 @@ fn indirect_call<a>(c: (&a mut C), value: Val, opened: u64) -> Val {
     slot := save(&mut c);
     own(&mut c, slot, resulttype);
     call_writebacks(&mut c, first, &sources, &types);
+    result_caps := type_caps(&mut c, resulttype, 0);
+    if (kind == 20) & (result_caps.len() != 0) {
+        // A closure that returns a reference returns one into what it captured: the result holds
+        // the closure's own loans (an adapter yielding `&a T` out of the vector it borrowed).
+        callee_place := place_of(&mut c, pointer);
+        result_place := place_of(&mut c, slot);
+        // A result that is itself a reference takes the loans as its source (role 0, so
+        // stored_source can find what it points into); anything holding one aggregates them.
+        mut role = 1;
+        if ty_kind(&mut c, resulttype) == 7 {
+            role = 0;
+        }
+        if (callee_place != 0) & (result_place != 0) {
+            n := c.bonds.len();
+            for i in n {
+                holder := c.bonds[i].holder;
+                loan := c.bonds[i].loan;
+                if (loan_live(&mut c, loan) != 0) && ownership::ancestor(&c.check, callee_place, holder) {
+                    bond_kind(&mut c, result_place, loan, role);
+                }
+            }
+        }
+    }
     call_bonds(&mut c, val(slot, resulttype), first, &sources, resulttype);
     release_temporary(&mut c, input);
     if call_loan != 0 {
@@ -17981,20 +18143,31 @@ fn closure_free_name<a, b>(c: (&a mut C), name: &b [u8], params: (&a u8[][])) ->
     return true;
 }
 // A capture that is itself a reference or view: the pointer moves into the environment and the
-// loan moves with it. Aggregates that merely contain a borrow keep their own layout and dropper, so
-// they are rejected rather than silently copied.
+// loan moves with it. An aggregate holding a loan - an iterator over a borrowed vector - moves in as
+// the owned value it is, with its own layout and dropper; its loans move with it as well, so the
+// closure carries their lifetimes: see capture_aggregate_regions.
 fn capture_borrow<a>(c: (&a mut C), ty: u64) -> bool {
     k := ty_kind(&mut c, ty);
     if (k == 5) || (k == 7) || (k == 27) {
         return true;
     }
-    if contains_borrow(&mut c, ty, 0) {
-        fail(
-            &mut c,
-            view("closures can capture owned values and direct references, not a struct or enum holding a borrow")
-        );
-    }
     return false;
+}
+// The lifetimes the loans held anywhere inside a captured aggregate borrow.
+fn capture_aggregate_regions<a, b>(c: (&a mut C), slot: u64, caps: (&b mut u64[])) -> unit {
+    place := place_of(&mut c, slot);
+    if place == 0 {
+        return ();
+    }
+    for i in c.bonds.len() {
+        holder := c.bonds[i].holder;
+        loan := c.bonds[i].loan;
+        if (loan_live(&mut c, loan) != 0) && ownership::ancestor(&c.check, place, holder) {
+            source := c.check.loans[loan - 1].source;
+            add_region(&mut caps, region_of(&mut c, source));
+        }
+    }
+    return ();
 }
 // The lifetime a captured reference actually borrows: the region of the place its live loan reads.
 // A local source has region 0, which no closure type may carry out of the function.
@@ -18354,6 +18527,8 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
             // A capture contributes the lifetime it borrows to the closure's type.
             if capture_borrow(&mut c, ty) {
                 add_region(&mut caps, capture_region(&mut c, id));
+            } else if contains_borrow(&mut c, ty, 0) {
+                capture_aggregate_regions(&mut c, id, &mut caps);
             }
             observe(&mut c, id);
             if needs_drop(&mut c, ty) || ty_kind(&mut c, ty) == 7 {
@@ -18389,6 +18564,8 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
         if borrow {
             add_region(&mut caps, capture_region(&mut c, id));
             field = capture_field_type(&mut c, ty);
+        } else if contains_borrow(&mut c, ty, 0) {
+            capture_aggregate_regions(&mut c, id, &mut caps);
         }
         c.fields.push(Field { name: name.copy(), ty: field });
         slots.push(id);
@@ -18481,6 +18658,13 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
             rec_store(&mut c, obj, 2 + j, pointer);
             move_out(&mut c, val(slot, ty));
         } else if needs_drop(&mut c, ty) {
+            if contains_borrow(&mut c, ty, 0) {
+                // An aggregate holding a borrow: its loans go with it into the environment field.
+                root := place_of(&mut c, obj);
+                field_place := member_place(&mut c, root, 2 + j, ty);
+                source := place_of(&mut c, slot);
+                transfer_bonds(&mut c, source, field_place);
+            }
             held := move_value(&mut c, val(slot, ty));
             rec_store(&mut c, obj, 2 + j, held.t);
             move_out(&mut c, held);
@@ -19306,7 +19490,16 @@ fn pattern_loop<a>(
     entry := ownership::snapshot(&c.check);
     exchange(&mut c.terminated, 0);
     block(&mut c);
-    if c.terminated == 0 {
+    // The pattern's binding ends with each iteration, before the jump back: release it first, so
+    // neither the backedge check nor the state the loop exits with still holds this iteration's
+    // item (an iterator that hands out references left its last item's loan in the exit state,
+    // and a second loop after it then saw that stale storage "consumed" on its own backedge).
+    terminated := c.terminated;
+    if pattern != 0 {
+        cleanup(&mut c, payloads);
+        pop_locals(&mut c, patmark);
+    }
+    if terminated == 0 {
         loopstate := ownership::snapshot(&c.loopcheck);
         if ownership::backedge(&c.check, &loopstate) != 0 {
             fail(&mut c, view("loop backedge consumes entry storage"));
@@ -19315,7 +19508,7 @@ fn pattern_loop<a>(
     // A body that always returns or continues reaches the exit only through the entry state
     // (and any breaks): its dead end state, where `return` dropped every local, must not be
     // merged in.
-    if c.terminated != 0 {
+    if terminated != 0 {
         ownership::restore(&mut c.check, &entry);
     } else {
         ownership::merge(&mut c.check, &entry);
@@ -19325,10 +19518,6 @@ fn pattern_loop<a>(
         ownership::merge(&mut c.check, &broken);
     }
     exchange(&mut c.terminated, 0);
-    if pattern != 0 {
-        cleanup(&mut c, payloads);
-        pop_locals(&mut c, patmark);
-    }
     jump(&mut c, view("jmp"), head);
     if pattern != 0 {
         mark(&mut c, nomatch);
@@ -29381,6 +29570,9 @@ pub fn main() -> u64 {
         ct_loop_decls: u64[],
         ct_loop_index: u64[],
         embed_used: 0,
+        skip_bodies: u64[],
+        body_file: 0,
+        body_pos: 0,
         export_copyback: u64[],
         rnames: u8[][],
         tnames: u8[][],
@@ -29522,6 +29714,29 @@ pub fn main() -> u64 {
             // first, so the program's own entry file (which may omit its `module` line) is second.
             exchange(&mut c.probe_mode, 1);
             offset += 1;
+        } else if same(view(option), view("--skip-body")) {
+            // Internal: a function body an earlier run of this same compile reported an error in
+            // (`FILE:POS`). It is skipped, so the run goes on to the next error.
+            if argc < offset + 3 {
+                fail_option(&mut c, view("--skip-body needs FILE:POS"));
+            }
+            at := host::arg(offset + 2);
+            mut f = 0;
+            mut q = 0;
+            mut seen_colon = false;
+            for i in at.len() {
+                ch := at[i];
+                if ch == 58 {
+                    seen_colon = true;
+                } else if seen_colon {
+                    q = q * 10 + u64(ch - 48);
+                } else {
+                    f = f * 10 + u64(ch - 48);
+                }
+            }
+            c.skip_bodies.push(f);
+            c.skip_bodies.push(q);
+            offset += 2;
         } else if same(view(option), view("--deny-ambient-host")) || same(view(option), view("--split")) {
             // --split: one assembly file per module. OUT.s is replaced by OUT.NNN.module.s files,
             // and OUT.parts lists them in link order for the driver.
@@ -29826,6 +30041,12 @@ pub fn main() -> u64 {
     }
     emit_fn_thunk(&mut c);
     emit_drops(&mut c);
+    if c.skip_bodies.len() != 0 {
+        // Every error this compile has is reported; the program is still rejected, and nothing it
+        // would have written is.
+        error_summary(c.skip_bodies.len() / 2);
+        host::exit(1);
+    }
     if c.no_entry != 0 {
         // A run that emits one module's code for a link, not a program (B1 stage 3): the entry stub
         // and the process state belong to the run that holds the entry, so the linker sees one

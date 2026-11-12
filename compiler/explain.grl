@@ -1,0 +1,170 @@
+module explain;
+
+// Error codes (docs/diagnostics.md). The diagnostics a program most often hits carry a code -
+// `error[E0004]: type mismatch` - and `grail explain E0004` prints what the error means and how it
+// is usually fixed. A diagnostic without a code is still a full diagnostic; it is just rare enough
+// that its message says everything there is to say.
+
+fn has<a, b>(text: &a [u8], part: &b [u8]) -> bool {
+    if part.len() > text.len() {
+        return false;
+    }
+    mut i = 0;
+    while i + part.len() <= text.len() {
+        mut hit = true;
+        for j in part.len() {
+            if text[i + j] != part[j] {
+                hit = false;
+                break;
+            }
+        }
+        if hit {
+            return true;
+        }
+        i += 1;
+    }
+    return false;
+}
+
+fn same<a, b>(x: &a [u8], y: &b [u8]) -> bool {
+    if x.len() != y.len() {
+        return false;
+    }
+    for i in x.len() {
+        if x[i] != y[i] {
+            return false;
+        }
+    }
+    return true;
+}
+
+// The code a diagnostic message carries, or "" for one without. The more specific messages come
+// first, so "use of moved, borrowed or partially initialized value" is a move error, not a borrow.
+pub fn code_of<a>(msg: &a [u8]) -> string {
+    if has(msg, "is private to module") {
+        return "E0017";
+    }
+    if has(msg, "@assert failed") {
+        return "E0019";
+    }
+    if has(msg, "requires an unsafe block") {
+        return "E0020";
+    }
+    if has(msg, "use of moved") {
+        return "E0006";
+    }
+    if has(msg, "move of unavailable") {
+        return "E0007";
+    }
+    if has(msg, "drop of moved") {
+        return "E0016";
+    }
+    if has(msg, "borrow conflicts") || has(msg, "conflicts with live borrow") || has(msg, "conflicts with active loan") {
+        return "E0008";
+    }
+    if has(msg, "mutation through readonly") {
+        return "E0009";
+    }
+    if has(msg, "escapes its declared input lifetime") {
+        return "E0010";
+    }
+    if has(msg, "non-exhaustive") {
+        return "E0011";
+    }
+    if has(msg, "does not satisfy Send") {
+        return "E0012";
+    }
+    if has(msg, "does not satisfy Share") {
+        return "E0013";
+    }
+    if has(msg, "does not satisfy interface bound") {
+        return "E0014";
+    }
+    if has(msg, "literal out of range") || has(msg, "integer out of range") {
+        return "E0015";
+    }
+    if has(msg, "requires mut") {
+        return "E0005";
+    }
+    if has(msg, "type mismatch") {
+        return "E0004";
+    }
+    if has(msg, "unknown type") {
+        return "E0003";
+    }
+    if has(msg, "unknown function") {
+        return "E0002";
+    }
+    if has(msg, "undefined name") {
+        return "E0001";
+    }
+    if has(msg, "argument count") || has(msg, "missing argument") {
+        return "E0018";
+    }
+    return "";
+}
+
+// What `grail explain CODE` prints, or "" for a code that does not exist.
+pub fn text<a>(code: &a [u8]) -> string {
+    if same(code, "E0001") {
+        return "E0001: undefined name\n\nA name was used that nothing in scope declares: no local binding, parameter, function,\nconstant or imported item has it.\n\n    fn main() -> u64 {\n        return total;        // nothing declares `total`\n    }\n\nDeclare it first (`total := 0;`), fix the spelling - the help line suggests the closest name in\nscope - or, for another module's item, qualify it (`math::total`) and add `use math;`.\n";
+    }
+    if same(code, "E0002") {
+        return "E0002: unknown function\n\nA call names a function that is not declared, in this module or in the module the call\nqualifies it with.\n\n    println(lenght(v));      // the function is `len`, a method: v.len()\n\nCheck the spelling and the module (`strings::split`, not `split`), and that the module is named\nby a `use` and passed to the build.\n";
+    }
+    if same(code, "E0003") {
+        return "E0003: unknown type\n\nA type name does not resolve: no record, enum, alias, handle or type parameter of that name is\nin scope.\n\n    fn area(s: Shape) -> u64 { ... }   // `Shape` is declared in module `shapes`\n\nQualify a type from another module (`shapes::Shape`) and `use` it, declare it, or add it to the\nfunction's type parameters (`fn f<T>(x: T)`).\n";
+    }
+    if same(code, "E0004") {
+        return "E0004: type mismatch\n\nA value of one type was given where another is required: an argument, a return value, an\nassignment or an operand. The message names both, as `expected X, found Y`.\n\n    fn half(x: u64) -> u64 { return x / 2; }\n    half(\"ten\");           // expected `u64`, found `string`\n\nGrail converts nothing implicitly: convert explicitly (`u64(b)`, `bytes.text()`), or change the\ndeclared type.\n";
+    }
+    if same(code, "E0005") {
+        return "E0005: mutation requires mut\n\nA binding declared with `:=` cannot be assigned again or mutated in place.\n\n    x := 1;\n    x = 2;                   // `x` is not mutable\n\nDeclare it mutable: `mut x = 1;`. A parameter that a function changes is taken as `&mut T`, and\nthe caller passes `&mut value`.\n";
+    }
+    if same(code, "E0006") {
+        return "E0006: use of a moved value\n\nA value that owns storage (a vector, a string, a record holding one) moves when it is assigned,\npassed or returned; the old binding can no longer be used.\n\n    v := u64[1, 2];\n    w := v;                  // `v` moves into `w`\n    println(v.len());        // error: `v` was moved\n\nBorrow instead of moving (`&v`, a `&T` parameter), copy explicitly (`v.copy()`), or use the new\nowner.\n";
+    }
+    if same(code, "E0007") {
+        return "E0007: move of an unavailable value\n\nA value cannot move out while it is borrowed, or out of a place that does not own it (a field\nbehind a reference, an element of a vector you only borrowed).\n\nMove after the borrow ends, take a copy (`x.copy()`), or move the whole owner instead of one of\nits parts.\n";
+    }
+    if same(code, "E0008") {
+        return "E0008: borrow conflict\n\nWhile a reference to a value is live, the value cannot be changed through another path, and a\nmutable reference excludes every other access.\n\n    mut v = u64[1];\n    first := &v[0];\n    v.push(2);               // `first` still borrows `v`\n    println(*first);\n\nEnd the borrow before the change (use `first` earlier, or copy the element), or restructure so\nonly one path changes the value at a time. The error shows where the borrow was taken and where\nit is still used.\n";
+    }
+    if same(code, "E0009") {
+        return "E0009: mutation through a read-only reference\n\nA `&T` reference allows reading only.\n\n    fn reset(v: &u64[]) { v.push(0); }   // `v` is read-only\n\nTake `&mut T` and pass `&mut value` at the call.\n";
+    }
+    if same(code, "E0010") {
+        return "E0010: a reference outlives its lifetime\n\nA reference returned or stored must not outlive the value it points into. A function returning\na reference names which input it borrows from (`fn first<a>(v: &a u64[]) -> &a u64`), and the\nresult may only point into that input.\n\nReturn an owned value instead, or tie the result to the input it really borrows.\n";
+    }
+    if same(code, "E0011") {
+        return "E0011: non-exhaustive match\n\nA `match` must handle every variant of the enum (or every value, with a `_` arm).\n\nAdd the missing arms the message names, or a final `_ => { ... }`.\n";
+    }
+    if same(code, "E0012") {
+        return "E0012: type is not Send\n\nA value handed to another thread (spawn, a parallel map) must be `Send`: safe to move to a\ndifferent thread. Borrowed references, and handles declared thread-affine, are not.\n\nMove an owned value in, or declare a handle `transferable` once you have checked the library\nallows it (docs/ffi.md, \"Opaque handles\").\n";
+    }
+    if same(code, "E0013") {
+        return "E0013: type is not Share\n\nA value read by several threads at once must be `Share`. Mutable state and thread-affine handles\nare not.\n\nShare an immutable value, put the state behind a `Mutex`, or give each thread its own copy.\n";
+    }
+    if same(code, "E0014") {
+        return "E0014: type does not satisfy an interface bound\n\nA generic function requires its type parameter to implement an interface (`T: order::Ord`), and\nthe type given does not.\n\nImplement it (`impl order::Ord for Point { ... }`), or call the function with a type that does.\n";
+    }
+    if same(code, "E0015") {
+        return "E0015: literal out of range\n\nAn integer literal does not fit the type it is given (`x: u8 = 300`).\n\nUse a wider type, or a value that fits.\n";
+    }
+    if same(code, "E0016") {
+        return "E0016: drop of a moved value\n\nA value is dropped (goes out of scope, or is overwritten) after it has already moved.\n\nThis usually means one path through a function moves the value and another still uses or\nreplaces it: move it on every path, or on none.\n";
+    }
+    if same(code, "E0017") {
+        return "E0017: private item\n\nAn item without `pub` belongs to its module; other modules cannot name it.\n\n    module shapes;\n    fn square(x: u64) -> u64 { return x * x; }\n\n    shapes::square(2)        // `square` is private to module `shapes`\n\nMark it `pub` in its module if it is meant to be used from outside, or use the public function\nthat wraps it.\n";
+    }
+    if same(code, "E0018") {
+        return "E0018: wrong number of arguments\n\nA call passes more or fewer arguments than the function declares.\n\nCheck the function's signature; a method's receiver is the value before the dot, not an\nargument.\n";
+    }
+    if same(code, "E0019") {
+        return "E0019: @assert failed\n\nA compile-time assertion did not hold. For a value parameter (`fn rotl<@k: u64>`) it fails at\nthe call that gave the bad value; the message is the assertion's own.\n\nPass a value the assertion allows, or fix the condition.\n";
+    }
+    if same(code, "E0020") {
+        return "E0020: requires an unsafe block\n\nAn operation the compiler cannot check - calling C, making a C pointer, reading C memory - must\nbe written inside `unsafe { ... }`, which marks the code a reviewer has to check by hand.\n\nWrap the call: `unsafe { n := strlen(name); }`.\n";
+    }
+    return "";
+}

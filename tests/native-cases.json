@@ -5133,12 +5133,6 @@
     "diagnostic": "use of moved"
   },
   {
-    "name": "closure-aggregate-borrow-capture-rejected",
-    "source": "struct W<a> { r: (&a u64) }\nfn main() {\n    n := 5;\n    w := W { r: &n };\n    f := |x: u64| -> u64 { return *w.r + x; };\n    println(\"{}\", f(1));\n}\n",
-    "reject": true,
-    "diagnostic": "not a struct or enum holding a borrow"
-  },
-  {
     "name": "bounds-abort-index-equals-len",
     "source": "fn main(){v:=u64[1,2,3];i:u64:=3;println(v[i]);}",
     "signal": "SIGABRT"
@@ -6292,5 +6286,82 @@
     "source": "fn f() -> u64 {\n    return A + 1;\n}\nA := f();\nfn main() -> u64 {\n    println(A);\n    return 0;\n}\n",
     "reject": true,
     "diagnostic": "the constants depend on each other in a cycle"
+  },
+  {
+    "name": "errors-several-per-compile",
+    "source": "fn a() -> u64 {\n    x := 1;\n    x = 2;\n    return x;\n}\nfn b() -> u64 {\n    return undefined_thing;\n}\nfn ok() -> u64 {\n    return 4;\n}\nfn c2() -> u64 {\n    y: u64 = \"text\";\n    return y;\n}\nfn main() -> u64 {\n    println(ok());\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "error[E0005]: assignment requires mut",
+      "error[E0001]: undefined name",
+      "expected :=",
+      "error: aborting due to 3 previous errors"
+    ],
+    "note": "an error in a function body does not end the compile: each body with an error is reported, the rest still checked against its signature"
+  },
+  {
+    "name": "errors-declaration-stops",
+    "source": "fn f(x: Nope) -> u64 {\n    return 0;\n}\nfn g() -> u64 {\n    return missing;\n}\nfn main() -> u64 {\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": "error[E0003]: unknown type",
+    "note": "an error in a signature ends the compile: what follows would be its consequences"
+  },
+  {
+    "name": "iterator-resume-borrowing",
+    "source": "use core;\n\n// A record with `next(self: &mut Self) -> T?` is an iterator: `for x in it` calls `next` until it\n// returns None.\nstruct Countdown {\n    n: u64\n}\nimpl Countdown {\n    fn next(self: &mut Self) -> u64? {\n        if self.n == 0 {\n            return None;\n        }\n        self.n = self.n - 1;\n        return Some(self.n);\n    }\n}\n\n// An iterator that borrows a vector hands out references into it; while it lives, the vector\n// cannot be changed.\nstruct Items<a> {\n    items: (&a u64[]),\n    pos: u64\n}\nimpl<a> Items<a> {\n    fn next(self: &mut Self) -> (&a u64)? {\n        if self.pos < self.items.len() {\n            p := self.pos;\n            self.pos = p + 1;\n            return Some(&self.items[p]);\n        }\n        return None;\n    }\n}\n\nfn main() -> u64 {\n    prices := u64[120, 80, 45, 10];\n    mut it = Items { items: &prices, pos: 0 };\n    for p in &mut it {\n        if *p == 80 {\n            break;\n        }\n        println(\"first {}\", *p);\n    }\n    for p in &mut it {\n        println(\"then {}\", *p);\n    }\n    mut again = Items { items: &prices, pos: 2 };\n    for p in &mut again {\n        println(\"again {}\", *p);\n    }\n    return 0;\n}\n",
+    "stdout": "first 120\nthen 45\nthen 10\nagain 45\nagain 10\n",
+    "modules": [
+      "lib/core.grl"
+    ],
+    "note": "an iterator that holds a reference is lent to a second loop after a first one, and a second iterator over the same vector follows"
+  },
+  {
+    "name": "iterator-adapter-references",
+    "source": "use core;\nuse iter;\n\nfn first<a>(v: &a u64[]) -> Fn() -> (&a u64) {\n    return || -> (&a u64) {\n        return &v[0];\n    };\n}\n\nfn main() -> u64 {\n    mut prices = u64[3, 4, 5];\n    mut total = 0;\n    for p in iter::refs(&prices) {\n        total = total + *p;\n    }\n    firsts := iter::collect(iter::take(iter::refs(&prices), 2));\n    println(\"{} {}\", total, firsts.len());\n    // The closure owns its environment, so its borrow lasts until its scope ends.\n    {\n        f := first(&prices);\n        println(*f());\n    }\n    prices.push(total);\n    println(prices.len());\n    return 0;\n}\n",
+    "stdout": "12 2\n3\n4\n",
+    "modules": [
+      "lib/iter.grl",
+      "lib/core.grl"
+    ],
+    "note": "iter::refs yields references through a closure; a closure returning &a T keeps the vector borrowed; the vector can change once both are done"
+  },
+  {
+    "name": "iterator-adapter-references-borrow",
+    "source": "use core;\nuse iter;\n\nfn main() -> u64 {\n    mut prices = u64[3, 4, 5];\n    mut it = iter::refs(&prices);\n    x := it.next();\n    prices.push(9);\n    println(*x.unwrap());\n    return 0;\n}\n",
+    "modules": [
+      "lib/iter.grl",
+      "lib/core.grl"
+    ],
+    "reject": true,
+    "diagnostic": "mutation conflicts with live borrow"
+  },
+  {
+    "name": "closure-borrow-escapes-unnamed",
+    "source": "use core;\n\nfn first<a>(v: &a u64[]) -> Fn() -> u64 {\n    return || -> u64 {\n        return v[0];\n    };\n}\n\nfn main() -> u64 {\n    return 0;\n}\n",
+    "modules": [
+      "lib/core.grl"
+    ],
+    "reject": true,
+    "diagnostic": "returned borrow escapes its declared input lifetime",
+    "note": "a returned closure that borrows must name the lifetime in its type"
+  },
+  {
+    "name": "closure-aggregate-borrow-capture",
+    "source": "struct W<a> { r: (&a u64) }\nfn main() {\n    n := 5;\n    w := W { r: &n };\n    f := |x: u64| -> u64 { return *w.r + x; };\n    println(\"{}\", f(1));\n}\n",
+    "stdout": "6\n",
+    "note": "a closure may capture a record holding a borrow; the record's loans move into the environment"
+  },
+  {
+    "name": "closure-aggregate-borrow-capture-checked",
+    "source": "struct W<a> { r: (&a u64) }\nfn main() {\n    mut n = 5;\n    w := W { r: &n };\n    f := |x: u64| -> u64 { return *w.r + x; };\n    n = 7;\n    println(\"{}\", f(1));\n}\n",
+    "reject": true,
+    "diagnostic": "conflicts with",
+    "note": "the captured record's loan stays live through the closure: n cannot change while f may still read it"
+  },
+  {
+    "name": "closure-reference-argument-reborrowed",
+    "source": "fn main() -> u64 {\n    v := u64[3, 4, 5];\n    mut k = |p: (&u64)| -> bool { return *p > 3; };\n    x := &v[1];\n    if k(x) {\n        println(*x);\n    }\n    return 0;\n}\n",
+    "stdout": "4\n",
+    "note": "a reference passed by name to a closure is reborrowed, as at a direct call"
   }
 ]

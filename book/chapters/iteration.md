@@ -10,9 +10,9 @@ until it returns `None`, binding each `Some` value to `x`.
 breaks early leaves the rest for later. `for x in &it` is refused, because `next` has to advance
 the iterator. An iterator that holds a reference, like `Items<a>`, keeps its vector borrowed for as
 long as it lives, so pushing to `prices` inside the loop is a borrow error, exactly as it is in
-Rust. One limit today: an iterator that holds a reference cannot be lent to a second loop after a
-first one (the checker keeps a loan from the first loop's `next` calls live), so resume only
-iterators that own their state, like `Countdown`.
+Rust. Lending works for either kind: `for x in &mut it` twice resumes where the first loop
+stopped, whether the iterator owns its state, like `Countdown`, or borrows a collection, like
+`Items`.
 
 Grail has no traits, so the protocol is structural: the compiler looks for an inherent `next` with
 that shape. A plain `for` over a vector is unaffected and compiles to the same counted loop as
@@ -27,6 +27,11 @@ The `iter` module chains work lazily over an `Iter<T>` - a closure that yields t
 `upto(lo, hi)` counts, `of(v)` moves the elements out of a vector, and `map`, `filter`, `take`,
 `enumerate` and `zip` wrap one iterator in another; `collect` pulls everything into a vector.
 `Iter<T>` is itself an iterator by the protocol above, so any adapter chain can sit in a `for`.
-The closures passed to adapters are `FnMut`, so they may update their own captures. Items that
-borrow from a vector cannot be produced through a closure yet, so borrowed iteration uses
-`for x in &v` or a record iterator such as `Items<a>`.
+The closures passed to adapters are `FnMut`, so they may update their own captures. `refs(&v)`
+yields references into a vector you keep, so a loop or a chain such as `take` can use borrowed items
+without copying them; the vector stays borrowed while the chain or any item from it is in use. Two
+limits today: `filter` cannot take reference items yet (its predicate would receive a reference to
+a reference), and `map` from reference items to owned ones is refused, because `Iter<U>` does not
+carry the lifetime of what it still borrows - collect or loop over `refs(&v)` instead. The same
+holds for any closure whose type returns a reference: `Fn() -> &a T` keeps what it captured
+borrowed for lifetime `a`.
