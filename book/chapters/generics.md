@@ -62,4 +62,34 @@ Inside `show`, `s.name()` is the bound's method; `Shape::name(s)` is the same ca
 pick one when two bounds declare the same name. An implementation must write every method that has
 no default, and only methods the interface declares.
 
+## Associated types
+
+An interface can leave a type for each implementation to choose: `type Item;` declares it, the
+interface's signatures name it `Self::Item`, and an implementation fixes it with `type Item = ...;`
+before its methods. A generic function names it through its parameter's bound, `T::Item`:
+
+```grl
+interface Source {
+    type Item;
+    fn pull(self: &mut Self) -> Self::Item?;
+}
+
+impl Source for Counter {
+    type Item = u64;
+    fn pull(self: &mut Self) -> u64? { ... }
+}
+
+fn drain<T: Source>(src: &mut T) -> T::Item[] {
+    mut out = T::Item[];
+    while let Some(x) = src.pull() {
+        out.push(x);
+    }
+    return out;
+}
+```
+
+`drain(&mut counter)` returns a `u64[]`; the same function drains a source of strings into a
+`string[]`. Inside a generic body `T::Item` is as opaque as `T` itself. Not yet: bounds on an
+associated type (`type Item: Ord;`) and pinning one in a bound (`T: Source<Item = u64>`).
+
 **Try it:** instantiate identity with a string, then consume the returned string exactly once.
