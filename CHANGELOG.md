@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Fixed: the LLVM backend no longer re-declares a weak vtable `.globl` when it exports it (the assembler refused `changed binding to STB_GLOBAL` for `dyn` with fixed associated types).
 - Added: tuples. `(u64, string)` types and `(1, "a")` values (each tuple size is a generic record with fields `0`, `1`, ...), `t.0` / `t.0.1`, `(q, r) := divmod(17, 5);` destructuring, and `(A, B)[...]` literals. `iter::enumerate` and `iter::zip` yield tuples; `iter::Indexed` and `iter::Pair` are gone (`p.index`/`p.value` and `z.left`/`z.right` become `.0`/`.1`). The book no longer calls tuples deliberately absent.
 - Added: generic interface methods. `fn wrap<U>(self: &Self, u: U) -> U[];` in an interface, implemented with the same parameters, is specialised per call through bounds, `Interface::method` calls and default methods; an implementation with different type parameters is refused, and (Rust's rule) an interface with one cannot be `dyn`.
 - Added: interface inheritance. `interface Shape: Named + Sized` requires every implementation of `Shape` to have implementations of `Named` and `Sized` for the same type, and lets a bound `T: Shape`, a default method or a `dyn Shape` call their methods (a dyn vtable carries them too). Interface files record the supers.
