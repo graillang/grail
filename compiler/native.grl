@@ -2952,6 +2952,24 @@ fn caps_walk<a, b>(c: (&a mut C), ty: u64, trail: (&b mut u64[])) -> u64[] {
             add_region(&mut rs, r);
         }
     }
+    if (k == 12) || (k == 20) || (k == 25) {
+        // A function value's lifetimes are the ones its signature names: a closure whose type says
+        // it returns `&a T` (or takes one) may carry borrows of `a`, which is what lets an adapter
+        // hand out references into the collection its closure captured.
+        inner := caps_walk(&mut c, arg, &mut trail);
+        for i in inner.len() {
+            mut r = inner[i];
+            add_region(&mut rs, r);
+        }
+        params := type_args(&mut c, ty);
+        for p in params.len() {
+            pinner := caps_walk(&mut c, params[p], &mut trail);
+            for i in pinner.len() {
+                mut r = pinner[i];
+                add_region(&mut rs, r);
+            }
+        }
+    }
     if k == 8 {
         for i in trail.len() {
             if trail[i] == ty {
@@ -5925,6 +5943,29 @@ fn borrow_walk<a, b>(c: (&a mut C), ty: u64, trail: (&b mut u64[])) -> bool {
         rs := type_regions(&mut c, ty);
         if rs.len() != 0 {
             return true;
+        }
+        // A closure type from a signature carries no capture list, but one whose result names a
+        // lifetime no parameter supplies (`Fn() -> &a T`) can only return a reference into what it
+        // captured: it holds that borrow, and moving or binding it must keep the loan.
+        result := caps_walk(&mut c, arg, &mut trail);
+        mut supplied = u64[];
+        params := type_args(&mut c, ty);
+        for p in params.len() {
+            more := caps_walk(&mut c, params[p], &mut trail);
+            for i in more.len() {
+                supplied.push(more[i]);
+            }
+        }
+        for i in result.len() {
+            mut found = false;
+            for j in supplied.len() {
+                if supplied[j] == result[i] {
+                    found = true;
+                }
+            }
+            if !found {
+                return true;
+            }
         }
         return false;
     }
@@ -13121,7 +13162,15 @@ fn indirect_call<a>(c: (&a mut C), value: Val, opened: u64) -> Val {
                 fail(&mut c, view("callable arity mismatch"));
             }
             astart := c.pos;
-            mut value = expr(&mut c, 0);
+            // A reference or view binding passed by name is reborrowed, not moved, exactly as at a
+            // direct call (reborrow_argument): `k(x)` leaves `x` usable afterwards.
+            mut value = val(0, 0);
+            reborrow := reborrow_argument(&mut c);
+            if reborrow != 0 {
+                value = place(&mut c, reborrow - 1, 0);
+            } else {
+                value = expr(&mut c, 0);
+            }
             aend := c.pos;
             expected := signature[index];
             if c.raw == 0 {
@@ -13219,6 +13268,29 @@ fn indirect_call<a>(c: (&a mut C), value: Val, opened: u64) -> Val {
     slot := save(&mut c);
     own(&mut c, slot, resulttype);
     call_writebacks(&mut c, first, &sources, &types);
+    result_caps := type_caps(&mut c, resulttype, 0);
+    if (kind == 20) & (result_caps.len() != 0) {
+        // A closure that returns a reference returns one into what it captured: the result holds
+        // the closure's own loans (an adapter yielding `&a T` out of the vector it borrowed).
+        callee_place := place_of(&mut c, pointer);
+        result_place := place_of(&mut c, slot);
+        // A result that is itself a reference takes the loans as its source (role 0, so
+        // stored_source can find what it points into); anything holding one aggregates them.
+        mut role = 1;
+        if ty_kind(&mut c, resulttype) == 7 {
+            role = 0;
+        }
+        if (callee_place != 0) & (result_place != 0) {
+            n := c.bonds.len();
+            for i in n {
+                holder := c.bonds[i].holder;
+                loan := c.bonds[i].loan;
+                if (loan_live(&mut c, loan) != 0) && ownership::ancestor(&c.check, callee_place, holder) {
+                    bond_kind(&mut c, result_place, loan, role);
+                }
+            }
+        }
+    }
     call_bonds(&mut c, val(slot, resulttype), first, &sources, resulttype);
     release_temporary(&mut c, input);
     if call_loan != 0 {
@@ -17190,20 +17262,31 @@ fn closure_free_name<a, b>(c: (&a mut C), name: &b [u8], params: (&a u8[][])) ->
     return true;
 }
 // A capture that is itself a reference or view: the pointer moves into the environment and the
-// loan moves with it. Aggregates that merely contain a borrow keep their own layout and dropper, so
-// they are rejected rather than silently copied.
+// loan moves with it. An aggregate holding a loan - an iterator over a borrowed vector - moves in as
+// the owned value it is, with its own layout and dropper; its loans move with it as well, so the
+// closure carries their lifetimes: see capture_aggregate_regions.
 fn capture_borrow<a>(c: (&a mut C), ty: u64) -> bool {
     k := ty_kind(&mut c, ty);
     if (k == 5) || (k == 7) || (k == 27) {
         return true;
     }
-    if contains_borrow(&mut c, ty, 0) {
-        fail(
-            &mut c,
-            view("closures can capture owned values and direct references, not a struct or enum holding a borrow")
-        );
-    }
     return false;
+}
+// The lifetimes the loans held anywhere inside a captured aggregate borrow.
+fn capture_aggregate_regions<a, b>(c: (&a mut C), slot: u64, caps: (&b mut u64[])) -> unit {
+    place := place_of(&mut c, slot);
+    if place == 0 {
+        return ();
+    }
+    for i in c.bonds.len() {
+        holder := c.bonds[i].holder;
+        loan := c.bonds[i].loan;
+        if (loan_live(&mut c, loan) != 0) && ownership::ancestor(&c.check, place, holder) {
+            source := c.check.loans[loan - 1].source;
+            add_region(&mut caps, region_of(&mut c, source));
+        }
+    }
+    return ();
 }
 // The lifetime a captured reference actually borrows: the region of the place its live loan reads.
 // A local source has region 0, which no closure type may carry out of the function.
@@ -17563,6 +17646,8 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
             // A capture contributes the lifetime it borrows to the closure's type.
             if capture_borrow(&mut c, ty) {
                 add_region(&mut caps, capture_region(&mut c, id));
+            } else if contains_borrow(&mut c, ty, 0) {
+                capture_aggregate_regions(&mut c, id, &mut caps);
             }
             observe(&mut c, id);
             if needs_drop(&mut c, ty) || ty_kind(&mut c, ty) == 7 {
@@ -17598,6 +17683,8 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
         if borrow {
             add_region(&mut caps, capture_region(&mut c, id));
             field = capture_field_type(&mut c, ty);
+        } else if contains_borrow(&mut c, ty, 0) {
+            capture_aggregate_regions(&mut c, id, &mut caps);
         }
         c.fields.push(Field { name: name.copy(), ty: field });
         slots.push(id);
@@ -17688,6 +17775,13 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
             rec_store(&mut c, obj, 2 + j, pointer);
             move_out(&mut c, val(slot, ty));
         } else if needs_drop(&mut c, ty) {
+            if contains_borrow(&mut c, ty, 0) {
+                // An aggregate holding a borrow: its loans go with it into the environment field.
+                root := place_of(&mut c, obj);
+                field_place := member_place(&mut c, root, 2 + j, ty);
+                source := place_of(&mut c, slot);
+                transfer_bonds(&mut c, source, field_place);
+            }
             held := move_value(&mut c, val(slot, ty));
             rec_store(&mut c, obj, 2 + j, held.t);
             move_out(&mut c, held);
@@ -18513,7 +18607,16 @@ fn pattern_loop<a>(
     entry := ownership::snapshot(&c.check);
     exchange(&mut c.terminated, 0);
     block(&mut c);
-    if c.terminated == 0 {
+    // The pattern's binding ends with each iteration, before the jump back: release it first, so
+    // neither the backedge check nor the state the loop exits with still holds this iteration's
+    // item (an iterator that hands out references left its last item's loan in the exit state,
+    // and a second loop after it then saw that stale storage "consumed" on its own backedge).
+    terminated := c.terminated;
+    if pattern != 0 {
+        cleanup(&mut c, payloads);
+        pop_locals(&mut c, patmark);
+    }
+    if terminated == 0 {
         loopstate := ownership::snapshot(&c.loopcheck);
         if ownership::backedge(&c.check, &loopstate) != 0 {
             fail(&mut c, view("loop backedge consumes entry storage"));
@@ -18522,7 +18625,7 @@ fn pattern_loop<a>(
     // A body that always returns or continues reaches the exit only through the entry state
     // (and any breaks): its dead end state, where `return` dropped every local, must not be
     // merged in.
-    if c.terminated != 0 {
+    if terminated != 0 {
         ownership::restore(&mut c.check, &entry);
     } else {
         ownership::merge(&mut c.check, &entry);
@@ -18532,10 +18635,6 @@ fn pattern_loop<a>(
         ownership::merge(&mut c.check, &broken);
     }
     exchange(&mut c.terminated, 0);
-    if pattern != 0 {
-        cleanup(&mut c, payloads);
-        pop_locals(&mut c, patmark);
-    }
     jump(&mut c, view("jmp"), head);
     if pattern != 0 {
         mark(&mut c, nomatch);
