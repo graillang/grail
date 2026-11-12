@@ -1,7 +1,8 @@
 fn main() {
-    let base: u64 = 40;
+    let base = 40;
     let mut answer = base;
     answer += 2;
-    assert_eq!(answer, 42);
+    let total: u64 = 42;
+    assert_eq!(answer, total);
     println!("{answer}");
 }

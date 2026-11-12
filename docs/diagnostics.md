@@ -26,6 +26,13 @@ and nothing is written (`tests/native-cases.json`, `errors-several-per-compile`)
 An error outside any body - in a declaration or a signature - ends the compile at that error: what
 follows would mostly be its consequences (`errors-declaration-stops`).
 
+Each distinct diagnostic - its file, line, column and message - is printed once and counted once. A
+generic template's body is replayed for its validation and again for every specialisation, so one
+compile can reach the same source line several times; only the first reach is reported, and the
+count in the summary is the number of distinct errors, not of replayed bodies. A body an earlier run
+reported an error in is skipped whether it is checked directly or replayed, so the next run moves on
+to the next error instead of spending the 20-error budget on the same one (`diag-dedupe-*`).
+
 ## Error codes
 
 The diagnostics a program most often hits carry a code, and `grail explain CODE` prints what the

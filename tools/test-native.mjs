@@ -114,8 +114,17 @@ for (const [position, test] of cases.entries()) {
     assert.equal(result.status, 1, `${test.name}: a rejected program must exit 1: ${result.stdout}${result.stderr}`);
     // `diagnostic` is one required fragment of the error output, or a list of them (the message and
     // its location are on different lines of a rendered error).
-    for (const fragment of [test.diagnostic ?? []].flat()) {
+    const diagnostics = [test.diagnostic ?? []].flat();
+    for (const fragment of diagnostics) {
       assert.ok(`${result.stdout}${result.stderr}`.includes(fragment), `${test.name}: expected diagnostic ${fragment}: ${result.stdout}${result.stderr}`);
+    }
+    // A rejection may pin how many times its diagnostic is printed, exactly as `stderrCount` does for
+    // runtime output: a replayed generic body reaches the same source line again, and it has to be
+    // reported - and counted - once (docs/diagnostics.md).
+    if (test.diagnosticCount !== undefined) {
+      assert.equal(diagnostics.length, 1, `${test.name}: diagnosticCount needs exactly one diagnostic`);
+      const occurrences = `${result.stdout}${result.stderr}`.split(diagnostics[0]).length - 1;
+      assert.equal(occurrences, test.diagnosticCount, `${test.name}: expected ${test.diagnosticCount} x ${JSON.stringify(diagnostics[0])} in ${JSON.stringify(`${result.stdout}${result.stderr}`)}`);
     }
     assert.equal(readFileSync(assembly, 'utf8'), 'prior valid artifact', `${test.name}: invalid program overwrote prior output`);
   } else {

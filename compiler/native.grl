@@ -434,6 +434,10 @@ struct C {
     skip_bodies: u64[],
     body_file: u64,
     body_pos: u64,
+    // The diagnostics this compile has already printed, as `file:line:column:message` keys carried
+    // by `--reported` from one re-run to the next. A replayed generic body that reaches the same
+    // error again is silent, and it counts once (docs/diagnostics.md).
+    reported: u8[][],
     // Copy-backs for `p: &mut R` callback parameters: (C pointer slot, copy slot, bytes) triples.
     export_copyback: u64[],
     rnames: u8[][],
@@ -5144,6 +5148,31 @@ fn fail<a, b>(c: (&a mut C), msg: &b [u8]) -> unit {
     here := diag_pos(&c.src, st);
     file := c.file;
     path := file_path(&mut c, file);
+    // One diagnostic per distinct (file, line, column, message). A generic template is replayed for
+    // its validation and again for each specialisation, so the same source line can be reached
+    // several times in one compile; only the first reach of it is printed, and only that one is
+    // counted in the summary. The key is short enough to carry through `--reported`.
+    mut key = copy_bytes(view(path));
+    key.push(58);
+    push_bytes(&mut key, view(decimal_bytes(here.line)));
+    key.push(58);
+    push_bytes(&mut key, view(decimal_bytes(here.column)));
+    key.push(58);
+    push_bytes(&mut key, view(msg));
+    mut fresh = true;
+    for i in c.reported.len() {
+        if same(view(c.reported[i]), view(key)) {
+            fresh = false;
+        }
+    }
+    if !fresh {
+        // Already reported by an earlier run: print nothing, count nothing, and still skip the
+        // body, so this run goes on to the next error.
+        next_error(&mut c, view(""));
+        host::exit(1);
+        return ();
+    }
+    c.reported.push(key.copy());
     // Labels in this file, by line, and the widest line number the excerpt prints.
     labels := exchange(&mut c.diag_labels, DiagLabel[]);
     helps := exchange(&mut c.diag_help, u8[][]);
@@ -5250,7 +5279,7 @@ fn fail<a, b>(c: (&a mut C), msg: &b [u8]) -> unit {
         c.out.push(10);
     }
     host::print(view(c.out));
-    next_error(&mut c);
+    next_error(&mut c, view(key));
     // A rejected program is an ordinary failure (status 1), not a crash of the compiler.
     host::exit(1);
     return ();
@@ -5259,15 +5288,16 @@ fn fail<a, b>(c: (&a mut C), msg: &b [u8]) -> unit {
 // the next error too (up to 20). The program is rejected either way; nothing is written. An error
 // outside any body - a declaration, a signature - ends the compile, since what follows it would
 // mostly be consequences of it.
-fn next_error<a>(c: (&a mut C)) -> unit {
-    reported := c.skip_bodies.len() / 2 + 1;
-    if (c.body_pos == 0) || (20 <= reported) {
-        error_summary(reported);
+fn next_error<a, b>(c: (&a mut C), key: &b [u8]) -> unit {
+    // The cap is on runs, not on printed diagnostics: a chain that makes no progress still ends.
+    attempts := c.skip_bodies.len() / 2 + 1;
+    if (c.body_pos == 0) || (20 <= attempts) {
+        error_summary(c.reported.len());
         return ();
     }
     for i in c.skip_bodies.len() / 2 {
         if (c.skip_bodies[2 * i] == c.body_file) & (c.skip_bodies[2 * i + 1] == c.body_pos) {
-            error_summary(reported);
+            error_summary(c.reported.len());
             return ();
         }
     }
@@ -5281,6 +5311,10 @@ fn next_error<a>(c: (&a mut C)) -> unit {
     push_bytes(&mut at, view(decimal_bytes(c.body_pos)));
     run.push(copy_bytes(view("--skip-body")));
     run.push(at);
+    if key.len() != 0 {
+        run.push(copy_bytes(view("--reported")));
+        run.push(copy_bytes(key));
+    }
     for i in host::argc() - 1 {
         run.push(host::arg(i + 1));
     }
@@ -9805,9 +9839,11 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         skip_braces(&mut c);
         return ();
     }
-    if pass == 3 {
+    if (pass == 3) || (pass == 4) {
         // A body an earlier run reported an error in is not checked again: its signature still
-        // stands for its callers, so the rest of the program is checked against it.
+        // stands for its callers, so the rest of the program is checked against it. Pass 4 replays
+        // a generic template's body - for its validation and for each specialisation - and it is
+        // the same source body, so the same record skips it and names it.
         here_file := c.file;
         for i in c.skip_bodies.len() / 2 {
             if (c.skip_bodies[2 * i] == here_file) & (c.skip_bodies[2 * i + 1] == position + 1) {
@@ -26729,16 +26765,21 @@ fn statement<a>(c: (&a mut C)) -> unit {
                 && typed_binding_ahead(&mut c)) {
         mutable := u64(eat(&mut c, view("mut")));
         name := ident(&mut c);
-        // `mut x: T = expr;` and `x: T := expr;` declare the type; the initializer is checked against it.
+        // `mut x: T = expr;`, `x: T = expr;` and `x: T := expr;` declare the type; the initializer
+        // is checked against it.
         name_at := c.pos - 1;
         if is(&mut c, view(":")) {
             if typed_binding_ahead_at(&mut c, name_at) {
                 advance(&mut c);
                 ty := parse_type(&mut c);
+                // `x: T = v` and `x: T := v` are the same immutable typed binding; the mutable form
+                // is `mut x: T = v`, the same `=`.
                 if mutable != 0 {
                     expect(&mut c, view("="));
+                } else if is(&mut c, view(":=")) {
+                    advance(&mut c);
                 } else {
-                    expect(&mut c, view(":="));
+                    expect(&mut c, view("="));
                 }
                 vstart := c.pos;
                 mut v = expr_expected(&mut c, 0, ty);
@@ -31859,6 +31900,7 @@ pub fn main() -> u64 {
         skip_bodies: u64[],
         body_file: 0,
         body_pos: 0,
+        reported: u8[][],
         export_copyback: u64[],
         rnames: u8[][],
         tnames: u8[][],
@@ -32031,6 +32073,14 @@ pub fn main() -> u64 {
             }
             c.skip_bodies.push(f);
             c.skip_bodies.push(q);
+            offset += 2;
+        } else if same(view(option), view("--reported")) {
+            // Internal: a diagnostic an earlier run of this same compile already printed. A replay
+            // that reaches it again is not printed and not counted a second time.
+            if argc < offset + 3 {
+                fail_option(&mut c, view("--reported needs a key"));
+            }
+            c.reported.push(copy_bytes(host::arg(offset + 2)));
             offset += 2;
         } else if same(view(option), view("--deny-ambient-host")) || same(view(option), view("--split")) {
             // --split: one assembly file per module. OUT.s is replaced by OUT.NNN.module.s files,
@@ -32350,7 +32400,7 @@ pub fn main() -> u64 {
     if c.skip_bodies.len() != 0 {
         // Every error this compile has is reported; the program is still rejected, and nothing it
         // would have written is.
-        error_summary(c.skip_bodies.len() / 2);
+        error_summary(c.reported.len());
         host::exit(1);
     }
     if c.no_entry != 0 {

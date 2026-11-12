@@ -1,8 +1,9 @@
 # Bindings and reassignment
 
 `name := value` declares an immutable binding. `mut name = value` declares a mutable one.
-Plain `=` updates an existing mutable binding; it never declares a name. Types are inferred for
-these local declarations. Statements end with semicolons.
+`=` after an existing name updates a mutable binding; with a type in front of it
+(`name: T = value`) it declares instead. Types are inferred for the untyped declarations.
+Statements end with semicolons.
 
 {{example:bindings}}
 
@@ -11,12 +12,18 @@ and compound operators. `assert` aborts when its condition is zero; it accepts a
 
 ## Typed bindings
 
-Add a type before the initializer. The immutable form keeps `:=`, the mutable form uses `=`:
+Add a type before the initializer. The immutable form uses `=` and the mutable form does too; `:=`
+is accepted as well, so an older `limit: u8 := 200;` keeps working:
 
 ```grl
-limit: u8 := 200;
+limit: u8 = 200;
 mut total: i32 = 0;
+legacy: u8 := 200;
 ```
+
+Either spelling fixes the type of the binding, and the initializer is checked against it, so
+`small: u8 = 256;` and `x: u64 = true;` are errors rather than bindings whose type a later use has to
+discover.
 
 ## Literal bindings take their type from use
 
@@ -51,8 +58,9 @@ bytes it reaches can still change. Declaring the capability needs no `mut`; repl
 itself would. Mutable access is always explicit, so a read-only borrow never quietly becomes
 writable. Use `&mut owner` uniformly for records, vectors, maps, scalars and byte buffers.
 
-Bindings are lexically scoped. A new `:=` declaration may shadow a name; `=` always means
-reassignment. Function parameters are fixed bindings too: to mutate a by-value owner, move it
-into a `mut` local, or accept an explicit mutable reference from the caller.
+Bindings are lexically scoped. A new declaration - `:=`, or a typed `name: T = value` - may shadow
+a name; `=` on an existing name means reassignment. Function parameters are fixed bindings too: to
+mutate a by-value owner, move it into a `mut` local, or accept an explicit mutable reference from the
+caller.
 
 **Try it:** change `mut answer = base` into `answer := base`. The compound assignment should fail.
