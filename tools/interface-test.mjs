@@ -41,7 +41,7 @@ const runtime = join(root, 'compiler/runtime.grl');
 const platform = join(root, 'compiler/os-linux.grl');
 
 const sha256 = data => createHash('sha256').update(data).digest('hex');
-const numeric = ['--default-u64', '--typed-refs', '--target', target];
+const numeric = ['--target', target];
 
 // One compiler run. `flags` are the interface flags under test; everything else is what the driver
 // passes for a whole-program build (there is no project cache in stage 2).
@@ -248,7 +248,7 @@ function proveSelfHosting() {
   const asmA = join(directory, 'sample-a.s');
   const asmB = join(directory, 'sample-b.s');
   for (const [compilerPath, asm] of [[a, asmA], [b, asmB]]) {
-    const result = spawnSync(compilerPath, ['--default-u64', '--typed-refs', '--target', target, asm, ...sampleFiles], { encoding: 'utf8', maxBuffer: 512 * 1024 * 1024 });
+    const result = spawnSync(compilerPath, ['--target', target, asm, ...sampleFiles], { encoding: 'utf8', maxBuffer: 512 * 1024 * 1024 });
     assert.equal(result.status, 0, `compiler: a program failed to compile\n${result.stdout ?? ''}${result.stderr ?? ''}`);
   }
   assert.equal(readFileSync(asmB, 'utf8'), readFileSync(asmA, 'utf8'), 'compiler: the two compilers compile a program differently');

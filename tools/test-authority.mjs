@@ -29,7 +29,7 @@ function compile(name, entry, { deny = false, prior = false } = {}) {
   mkdirSync(directory, { recursive: true });
   const assembly = join(directory, 'program.s');
   if (prior) writeFileSync(assembly, 'prior valid artifact\n');
-  const args = ['--default-u64', '--typed-refs', '--target', target];
+  const args = ['--target', target];
   if (deny) args.push('--deny-ambient-host');
   args.push(assembly, entry, ...standard, runtime, osRuntime);
   return { directory, assembly, result: runCompiler(args) };

@@ -133,9 +133,9 @@ function rejection(argv, pattern, message) {
   check(result.status !== 0, message);
   has(`${result.stdout ?? ''}${result.stderr ?? ''}`, pattern, `${message} (wrong diagnostic)`);
 }
-rejection(['--default-u64', '--typed-refs', '--target', 'x86_64', join(work, 'reject.s'), join(elfDirectory, 'hello.grl'), join(root, 'compiler/os-linux.grl'), join(root, 'compiler/darwin.grl'), join(root, 'compiler/runtime.grl')],
+rejection(['--target', 'x86_64', join(work, 'reject.s'), join(elfDirectory, 'hello.grl'), join(root, 'compiler/os-linux.grl'), join(root, 'compiler/darwin.grl'), join(root, 'compiler/runtime.grl')],
   /duplicate function/, 'darwin.grl compiled alongside os-linux.grl for an ELF target');
-rejection(['--default-u64', '--typed-refs', '--target', 'macos-riscv64', join(work, 'reject2.s'), join(elfDirectory, 'hello.grl'), join(root, 'compiler/runtime.grl')],
+rejection(['--target', 'macos-riscv64', join(work, 'reject2.s'), join(elfDirectory, 'hello.grl'), join(root, 'compiler/runtime.grl')],
   /unsupported target/, 'macos-riscv64 was accepted');
 
 // Platform linkage beyond libSystem: a framework stub must reach the linked image as a real
@@ -309,7 +309,7 @@ for (const target of machoTargets) {
 // last lands at sp+80 right before the call.
 {
   const asm = join(work, 'variadic-arm64.s');
-  command([compiler, '--default-u64', '--typed-refs', '--target', 'macos-aarch64', asm,
+  command([compiler, '--target', 'macos-aarch64', asm,
     join(root, 'tests/ffi/call_variadic.grl'), join(root, 'compiler/runtime.grl'), join(root, 'compiler/darwin.grl')]);
   const text = readFileSync(asm, 'utf8');
   has(text, /str x9,\[sp,#80\]\nbl _c_vmix/, 'macos-aarch64: variadic arguments are not stored in 8-byte stack slots');

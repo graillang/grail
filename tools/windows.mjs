@@ -166,7 +166,7 @@ export function compileProgram(compiler, inputs, directory, {
   const object = join(directory, `${name}.obj`);
   const executable = join(directory, `${name}.exe`);
   const files = [...inputs.map(p => resolve(root, p)), resolve(root, runtime), resolve(root, osRuntime)];
-  command([compiler, '--default-u64', '--typed-refs', ...(debug ? ['--debug'] : []), '--target', target, assembly, ...files]);
+  command([compiler, ...(debug ? ['--debug'] : []), '--target', target, assembly, ...files]);
   assemble(assembly, object, target);
   // A C-ABI shim (for example the in-process COM object) is assembled for the same target.
   const shimObjects = shims.map((shim, i) => {

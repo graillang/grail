@@ -93,10 +93,9 @@ options, accessors and 2000 float plus i64 text round trips. Implementation-defi
 JSONTestSuite cases are decided strictly: lone surrogates, invalid UTF-8, a BOM and numbers
 beyond f64 are rejected; very long or huge-exponent numbers that are in range are accepted.
 
-Both modules are outside the compiler's built-in stdlib list (`stdlib_module` in
-`compiler/native.grl`), so they compile in the program's literal mode; every integer binding is
-annotated, and the native cases run both test programs with `--default-u64` and with default i64
-literals (the `grail build`/`grail test` mode).
+Both modules are ordinary library modules rather than part of the compiler's built-in stdlib, and
+every integer binding in them is annotated, so they compile the same way for every caller now that
+an unsuffixed integer literal is always a `u64` unless its context types it otherwise.
 
 Costs to know: the CLI compiles every top-level `lib/*.grl` into every program and there is no
 dead-code elimination yet, so `json.grl` adds about 0.7 s and 0.7 MB of assembly to each

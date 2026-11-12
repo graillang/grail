@@ -69,7 +69,7 @@ try {
     ? `benchmark      C -O2      Grail (${process.env.GRAIL_BACKEND ?? 'native'})      ratio   (median of ${rounds} paired, spread C/G)`
     : `benchmark      C -O2      Grail (${process.env.GRAIL_BACKEND ?? 'native'})      ratio`);
   for (const name of names) {
-    const exe = compileProgram(grail, [join(root, 'bench', `${name}.grl`), join(root, 'lib/core.grl')], join(work, name), { typedRefs: true }), cexe = join(work, `${name}-c`);
+    const exe = compileProgram(grail, [join(root, 'bench', `${name}.grl`), join(root, 'lib/core.grl')], join(work, name)), cexe = join(work, `${name}-c`);
     run(['clang', '-O2', '-ffp-contract=off', join(root, 'bench', `${name}.c`), '-o', cexe, '-lm']);
     let g, c, spread = '';
     if (rounds) {

@@ -306,7 +306,7 @@ for (const target of selected) {
       // linked there because the host's libc and loader are not target libraries.
       const assembly = join(directory, `${name}.s`);
       const built = spawnSync(compiler, [
-        '--default-u64', '--typed-refs', '--target', target, assembly,
+        '--target', target, assembly,
         join(root, `tests/ffi/${name}.grl`), ...modules.map(m => join(root, m)), ...compilerSources,
       ], { cwd: root, maxBuffer: 16 * 1024 * 1024, timeout: 900_000 });
       assert.equal(built.status, 0, `${target}/${name}: cross compilation failed: ${built.stderr}`);
@@ -321,7 +321,7 @@ for (const target of selected) {
     // relative to the declaring source, which is the documented rule.
     const source = join(directory, `${name}.grl`);
     copyFileSync(join(root, `tests/ffi/${name}.grl`), source);
-    const executable = compileProgram(compiler, [source, ...modules.map(m => join(root, m))], directory, { target, name, defaultU64: true, typedRefs: true });
+    const executable = compileProgram(compiler, [source, ...modules.map(m => join(root, m))], directory, { target, name });
     const assembly = readFileSync(join(directory, `${name}.s`), 'utf8');
     const notes = assembly.split('\n').filter(line => line.startsWith('// grail-link: '));
     const expectedNotes = Array.isArray(linkNote) ? linkNote : [linkNote];

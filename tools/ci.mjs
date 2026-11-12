@@ -195,7 +195,7 @@ export function buildTarget(platformId, options = {}) {
   const work = join(root, '.work/ci', target.id);
   mkdirSync(work, { recursive: true });
   const assembly = join(work, 'compiler.s');
-  command([stage0, '--default-u64', '--typed-refs', '--target', target.compilerTarget, assembly, ...compilerSources]);
+  command([stage0, '--target', target.compilerTarget, assembly, ...compilerSources]);
   const executable = assemble(assembly, join(work, `grail${target.executableSuffix}`), target.compilerTarget);
   const binary = inspectBinary(executable);
   if (binary.format !== 'elf' || binary.arch !== target.arch) {
@@ -432,8 +432,6 @@ function crossCompileCheck(target) {
   const directory = join(root, '.work/ci', target.id, 'smoke');
   const executable = compileProgram(stage0, ['book/examples/hello.grl'], directory, {
     target: target.compilerTarget,
-    defaultU64: false,
-    typedRefs: false,
     name: 'hello',
   });
   const info = inspectBinary(executable);

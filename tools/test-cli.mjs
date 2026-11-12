@@ -44,8 +44,8 @@ for (const [i, file] of sources.entries()) {
 }
 checks += sources.length;
 const original = join(work, 'original.s'), reformatted = join(work, 'reformatted.s');
-command([grail, '--default-u64', '--typed-refs', original, ...compilerSources]);
-command([grail, '--default-u64', '--typed-refs', reformatted, ...compilerSources.map(f => formatted.get(f))]);
+command([grail, original, ...compilerSources]);
+command([grail, reformatted, ...compilerSources.map(f => formatted.get(f))]);
 // The runtime-error call-site table records source lines and file names, which formatting and the
 // copies' paths change by design; everything else must be byte-identical.
 const withoutSites = (text) => text.replace(/\n\.section grail_sites,"a"\n[\s\S]*?\n\.text\n/g, '\n');
@@ -86,7 +86,7 @@ for (const target of ['x86_64', 'aarch64', 'riscv64']) {
   run(['build', 'hello.grl', '--target', target, '-o', out]);
   const r = execute(out, [], target); assert.equal(String(r.stdout), '42\n', `${target} program`);
   const asm = join(work, `grail-${target}.s`);
-  command([grail, '--default-u64', '--typed-refs', '--target', target, asm, ...compilerSources]);
+  command([grail, '--target', target, asm, ...compilerSources]);
   const tool = assemble(asm, join(work, `grail-${target}`), target);
   const sample = join(work, `messy-${target}.grl`); copyFileSync(join(root, 'tests/fmt/messy.grl'), sample);
   const f = execute(tool, ['fmt', sample], target); assert.equal(f.status, 0, `${target} grail fmt: ${f.stderr}`);

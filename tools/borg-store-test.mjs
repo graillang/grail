@@ -69,7 +69,7 @@ writeFileSync(runtime, runtimeSource.slice(0, start) + patched + runtimeSource.s
 
 const compiler = buildCompiler();
 const assembly = join(work, 'store.s');
-run(compiler, ['--default-u64', '--typed-refs', '--target', 'x86_64', '--overflow=checked', assembly,
+run(compiler, ['--target', 'x86_64', '--overflow=checked', assembly,
   'borg/tests/ffi/store_test.grl', 'borg/src/ffi/store.grl', 'lib/sys/grail_ffi.grl',
   'borg/src/events.grl', 'borg/src/journal.grl', 'borg/src/json.grl', 'lib/core.grl', 'lib/strings.grl', 'lib/vecs.grl', 'lib/order.grl',
   'lib/hash.grl', 'lib/io.grl', 'lib/fs.grl', 'lib/env.grl', runtime,

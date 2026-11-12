@@ -98,13 +98,13 @@ one to use below. Set `GRAIL_COMPILER=/path/to/grail` to substitute a developmen
 ### 2.2 Compile the compiler's own sources with the report on
 
 The compiler's sources are the ten files in `compilerSources`. The first to be *parsed* must be the
-entry file, because it holds `pub fn main`. `--default-u64 --typed-refs` are the modes the compiler
-is built in, and they change which literals and receivers are `u64`.
+entry file, because it holds `pub fn main`. Typed references and `u64` literals are the compiler's
+only modes now, so there is nothing to select on the command line.
 
 ```sh
 cd /home/shulgin/grail
 G=$(bun tools/native.mjs build)
-$G --default-u64 --typed-refs --strict-bool-report /tmp/strict-bool.s \
+$G --strict-bool-report /tmp/strict-bool.s \
    compiler/native.grl compiler/lexer.grl compiler/ownership.grl compiler/machine.grl \
    compiler/optimize.grl compiler/llvm.grl compiler/fmt.grl compiler/cli.grl \
    compiler/runtime.grl compiler/os-linux.grl > /tmp/strict-bool.txt
@@ -149,7 +149,7 @@ The same command over every standard-library module plus the runtime reports not
 cd /home/shulgin/grail
 G=$(bun tools/native.mjs build)
 printf 'use core;\nuse strings;\nuse fs;\nuse json;\nuse hashmap;\nuse vecs;\nfn main() { return (); }\n' > /tmp/stdlib-probe.grl
-$G --default-u64 --typed-refs --strict-bool-report /tmp/stdlib-probe.s /tmp/stdlib-probe.grl \
+$G --strict-bool-report /tmp/stdlib-probe.s /tmp/stdlib-probe.grl \
    $(ls lib/*.grl) compiler/runtime.grl compiler/os-linux.grl | wc -l    # 0
 ```
 
@@ -160,7 +160,7 @@ standard library is both clean and the worked example for the compiler's own hel
 
 ```sh
 G=$(bun tools/native.mjs build)
-$G --default-u64 --typed-refs --strict-bool /tmp/strict-bool.s compiler/native.grl ...
+$G --strict-bool /tmp/strict-bool.s compiler/native.grl ...
 # compiler/...: bool and integer do not mix; ...   (first violation only)
 # exit status 1
 ```
@@ -621,7 +621,7 @@ their own check. Add `tools/strict-bool.mjs`:
 ```js
 // tools/strict-bool.mjs: fail if a tree that is meant to be clean reports anything.
 import { buildCompiler, command, compilerSources, root } from './native.mjs';
-const result = command([buildCompiler(), '--default-u64', '--typed-refs', '--strict-bool-report',
+const result = command([buildCompiler(), '--strict-bool-report',
   `${root}/.work/strict-bool.s`, ...compilerSources, /* the tree's own entry and modules */]);
 const report = result.stdout.toString().trim();   // command() returns Buffers
 if (report !== '') { console.error(report); process.exit(1); }
@@ -656,8 +656,8 @@ That is the same information as `strict_return` without a compiler change, and i
 ## 6. How it landed
 
 Branch `strictbool-full` off `main` at 33f37af (phase 1 was already merged as `strictbool-preds`).
-Every number below is `--strict-bool-report` over the ten compiler sources with
-`--default-u64 --typed-refs`, measured at the commit named.
+Every number below is `--strict-bool-report` over the ten compiler sources, measured at the commit
+named - when typed references and the u64 default were still switches, which is now the only mode.
 
 | step | commit subject | reports |
 |---|---|---|

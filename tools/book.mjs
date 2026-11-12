@@ -102,7 +102,7 @@ export function verifyExample(example, compiler, suppliedArgs, target = hostTarg
   const prior = 'prior valid artifact\n';
   writeFileSync(asm, prior);
   // `std` lists standard-library modules (lib/NAME.grl) linked like `grail build` does.
-  const args = [compiler, '--default-u64', '--typed-refs', '--target', target, asm, sourcePath(example.entry), ...(example.modules ?? []).map(sourcePath), ...(example.std ?? []).map(name => join(root, 'lib', `${name}.grl`)), join(root, 'compiler/runtime.grl'), join(root, 'compiler/os-linux.grl')];
+  const args = [compiler, '--target', target, asm, sourcePath(example.entry), ...(example.modules ?? []).map(sourcePath), ...(example.std ?? []).map(name => join(root, 'lib', `${name}.grl`)), join(root, 'compiler/runtime.grl'), join(root, 'compiler/os-linux.grl')];
   const result = Bun.spawnSync(args, { cwd: root, stdout: 'pipe', stderr: 'pipe' });
   if (example.diagnostic !== undefined) {
     const diagnostic = result.stdout.toString() + result.stderr.toString();

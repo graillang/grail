@@ -17,7 +17,7 @@ export const serverSources = [
 ];
 
 export function buildServer({ directory = join(root, '.work/lsp'), compiler = buildCompiler() } = {}) {
-  return compileProgram(compiler, serverSources, directory, { name: 'grail-lsp', typedRefs: true });
+  return compileProgram(compiler, serverSources, directory, { name: 'grail-lsp' });
 }
 
 if (import.meta.main) {

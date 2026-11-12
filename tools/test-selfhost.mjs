@@ -9,12 +9,11 @@ import { assemble, buildCompiler, command, compilerSources, root } from './nativ
 const stage1 = buildCompiler();
 const work = join(root, '.work/selfhost');
 mkdirSync(work, { recursive: true });
-const flags = ['--default-u64', '--typed-refs'];
 const stage2Assembly = join(work, 'stage2.s');
-command([stage1, ...flags, stage2Assembly, ...compilerSources]);
+command([stage1, stage2Assembly, ...compilerSources]);
 const stage2 = assemble(stage2Assembly, join(work, 'stage2'));
 const stage3Assembly = join(work, 'stage3.s');
-command([stage2, ...flags, stage3Assembly, ...compilerSources]);
+command([stage2, stage3Assembly, ...compilerSources]);
 const a = readFileSync(stage2Assembly);
 const b = readFileSync(stage3Assembly);
 if (!a.equals(b)) {
