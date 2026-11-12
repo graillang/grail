@@ -29383,11 +29383,20 @@ fn emit_drops<a>(c: (&a mut C)) -> unit {
         all.push(c.drop_refs[i]);
     }
     mut at = 0;
-    // The walk interns types of its own (a field's type is built on demand), so it keeps absorbing
-    // what it adds: a helper whose element or field helper was never emitted is an undefined symbol.
-    while (at < all.len()) || (all.len() < c.types.len()) {
+    mut ref_at = 0;
+    // The walk interns types of its own (a field's type is built on demand) and the bodies it emits
+    // name further helpers, so it keeps absorbing both: a helper that is named but never emitted is
+    // an undefined symbol at link time.
+    while true {
         while all.len() < c.types.len() {
             all.push(all.len());
+        }
+        while ref_at < c.drop_refs.len() {
+            all.push(c.drop_refs[ref_at]);
+            ref_at = ref_at + 1;
+        }
+        if at == all.len() {
+            break;
         }
         ty := all[at];
         at = at + 1;
