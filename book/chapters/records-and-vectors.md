@@ -33,7 +33,15 @@ says what went wrong and where, as Rust's panics do:
 ```
 error: index 7 out of bounds for length 3
  --> src/main.grl:2:12
+ = called from src/main.grl:9:5
+ = called from src/main.grl:14:5
 ```
+
+Each `= called from` line is the next frame up, named by the statement that called it: a backtrace,
+up to 32 frames. The locations come from a table of statement positions the compiler emits for native
+Linux builds of every target (x86-64, AArch64 and RISC-V). Windows, macOS, `--debug`, `--split`,
+`--no-error-sites` and the LLVM backend carry no table, so what they print for a failed check names
+no place.
 
 The same goes for division by zero, `unwrap` of `None`, and overflow under `--overflow=checked`. Vectors of owners drop their
 remaining elements; callers own popped elements. `==` compares vectors of numbers element by element.

@@ -14,15 +14,18 @@ fn rt_abort() -> u64 {
 }
 // ---- runtime errors ----------------------------------------------------------------------------
 // A check that fails stops the program the way it always has (SIGABRT, exit status 134), but first
-// says what failed and where:
+// says what failed and where, then names its callers, as a Rust panic does:
 //     error: index 7 out of bounds for length 3
 //      --> src/main.grl:2:12
-// The location comes from the call-site table the compiler emits (section `grail_sites`, see
-// native.grl site_table): the frame-pointer chain is walked to the first return address that
-// belongs to code outside the runtime. Without a table (debug builds, the LLVM backend, other
-// targets for now) the message is printed alone.
+//      = called from src/main.grl:9:5
+// The locations come from the table of statement positions the compiler emits (section
+// `grail_sites`, see native.grl site_table): the frame-pointer chain is walked outwards, and every
+// frame whose return address falls in a statement outside the runtime adds a line. Without a table
+// (debug builds, the LLVM backend, Windows, macOS) the message is printed alone.
 fn rt_fail(kind: u64, a: u64, b: u64) -> u64 {
-    buf := rt_alloc(512);
+    // The message writers stop at the limit; a site line's own tail (`:line:col` and the newline) is
+    // what the reserve past it is for.
+    buf := rt_alloc(rt_fail_limit() + 196);
     mut n = rt_fail_put(buf, 0, "error: ");
     if kind == 1 {
         n = rt_fail_put(buf, n, "index ");
@@ -78,10 +81,14 @@ fn rt_trap(a: u64, b: u64, kind: u64) -> u64 {
     }
     return rt_fail(kind, a, b);
 }
+// The point every failure-message writer stops at, so the buffer's own length is never a concern.
+fn rt_fail_limit() -> u64 {
+    return 3900;
+}
 fn rt_fail_put(buf: u64, n: u64, text: string) -> u64 {
     mut at = n;
     for i in text.len() {
-        if at < 500 {
+        if at < rt_fail_limit() {
             raw_putbyte(buf + at, u64(text[i]));
             at = at + 1;
         }
@@ -98,7 +105,7 @@ fn rt_fail_num(buf: u64, n: u64, v: u64) -> u64 {
             break;
         }
     }
-    if 500 < n + digits {
+    if rt_fail_limit() < n + digits {
         return n;
     }
     mut y = v;
@@ -110,7 +117,8 @@ fn rt_fail_num(buf: u64, n: u64, v: u64) -> u64 {
     }
     return n + digits;
 }
-// ` --> file:line:col` for the innermost frame outside the runtime, or nothing.
+// ` --> file:line:col` for the frame that failed, then one ` = called from` line per further frame
+// that lies in a statement - at most 32 of them.
 fn rt_fail_where(buf: u64, n: u64) -> u64 {
     // The program's entry stores the compiler-emitted rt_sites in state word 3400; it fills in the
     // table's start, end and the caller's frame pointer. No table: no word, or zeros.
@@ -127,36 +135,60 @@ fn rt_fail_where(buf: u64, n: u64) -> u64 {
     }
     mut frame = raw_load(info + 16);
     mut depth = 0;
-    while (frame != 0) & (depth < 64) {
+    mut lines = 0;
+    mut at = n;
+    while (frame != 0) & (depth < 64) & (lines < 32) {
         ret := raw_load(frame + 8);
+        // The statement the return address is in: the entry with the greatest address not past it.
+        // Its file is zero for code that names no place (a prologue, the runtime's own statements).
+        mut hit = 0;
+        mut hit_at = 0;
         mut e = begin;
         while e < end {
-            if raw_load(e) == ret {
-                flags := raw_load(e + 16);
-                if (flags >> 63) == 0 {
-                    mut at = rt_fail_put(buf, n, " --> ");
-                    name := raw_load(e + 8);
-                    mut i = 0;
-                    while (raw_byte(name + i) != 0) & (at < 440) {
-                        raw_putbyte(buf + at, raw_byte(name + i));
-                        at = at + 1;
-                        i = i + 1;
-                    }
-                    raw_putbyte(buf + at, 58);
-                    at = rt_fail_num(buf, at + 1, flags & 4294967295);
-                    raw_putbyte(buf + at, 58);
-                    at = rt_fail_num(buf, at + 1, (flags >> 32) & 2147483647);
-                    raw_putbyte(buf + at, 10);
-                    return at + 1;
-                }
-                e = end;
+            a := raw_load(e);
+            mut take = a <= ret;
+            if take && (hit != 0) {
+                take = hit_at < a;
+            }
+            if take {
+                hit = e;
+                hit_at = a;
             }
             e = e + 24;
+        }
+        if hit != 0 {
+            name := raw_load(hit + 8);
+            if name != 0 {
+                if lines == 0 {
+                    at = rt_fail_line(buf, at, hit, " --> ");
+                } else {
+                    at = rt_fail_line(buf, at, hit, " = called from ");
+                }
+                lines = lines + 1;
+            }
         }
         frame = raw_load(frame);
         depth = depth + 1;
     }
-    return n;
+    return at;
+}
+// One backtrace line: `mark`, then the entry's file, line and column.
+fn rt_fail_line(buf: u64, n: u64, e: u64, mark: string) -> u64 {
+    mut at = rt_fail_put(buf, n, mark);
+    name := raw_load(e + 8);
+    mut i = 0;
+    while (raw_byte(name + i) != 0) & (at < rt_fail_limit()) {
+        raw_putbyte(buf + at, raw_byte(name + i));
+        at = at + 1;
+        i = i + 1;
+    }
+    flags := raw_load(e + 16);
+    raw_putbyte(buf + at, 58);
+    at = rt_fail_num(buf, at + 1, flags & 4294967295);
+    raw_putbyte(buf + at, 58);
+    at = rt_fail_num(buf, at + 1, flags >> 32);
+    raw_putbyte(buf + at, 10);
+    return at + 1;
 }
 fn rt_error(n: u64) -> u64 {
     return 18446744073709547520 < n;
