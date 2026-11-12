@@ -695,8 +695,18 @@ that has since moved proves nothing, so the generation is part of the fact.
   the call; any store through it, jump, label or other use before the call counts as an escape. In
   nbody, `energy(&p, &v, &m)` no longer erases the vectors' identities, so `main` proves 12 of its 17
   bounds-checked accesses (it proved none), and nbody goes from about 1.8x to about 1.5x of C
-  (llvm, range facts). The remaining checks in `main`'s update loop, and matmul's fill-loop
-  summary, are the next steps.
+  (llvm, range facts). The remaining checks are in `main`'s update loop.
+- **counted fill loops** (`rg_fill_loops`, the summary the section below asked for): a loop in the
+  front end's `for i in N { ... }` shape - counter start `K` (`movq $K,I` or through `%rax`), guard
+  `movq E,%rcx; movq I,%rax; cmpq %rcx,%rax; jae .LX`, latch `incq I; jmp .LH` - whose body is
+  straight-line (its only branches skip a single `call rt_abort`), calls only functions that cannot
+  shrink or rebind a vector, never writes `I`, `E` or a pushed vector's slot, and whose exit label
+  is reached from the guard alone, ran at least `E - K` times and pushed each vector held in a
+  non-escaped frame slot the number of times its body names it. At `.LX` the vector's length is
+  then at least `(lower bound of E - K) * pushes`. In matmul the three 65,536-element fills now give
+  the kernel's `a[i*n+k]`, `b[k*n+j]` and `c[i*n+j]` their lengths: about 1.4x to 1.0x of C
+  (llvm, range facts, busy host). `range-fill-loop` pins the rule, and
+  `range-fill-loop-skip-not-summarised` pins that a loop that can skip its push is not summarised.
 - **element stores, decided drop flags, loads through a slot address, drop glue**: four transfer
   rules that keep a vector's facts alive through the code `p[i] = x` and its temporaries lower to.
   `rt_slot` returns the address of one heap element (kind 6), and a store through it changes that

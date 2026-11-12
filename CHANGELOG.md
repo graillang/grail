@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Improved: range facts summarise counted fill loops (`for i in N { v.push(x) }` leaves `len(v) >= N`), so matmul's kernel needs no bounds checks with `--range-facts` (about 1.4x to 1.0x of C).
 - Improved: range facts survive calls that take a vector by shared reference (`energy(&p, &v, &m)`): the front end records shared-reference parameters and the analysis keeps a slot's facts when its address reaches only those. nbody's `main` now proves 12 of 17 bounds checks (none before), about 1.8x to 1.5x of C with `--range-facts`.
 - Changed: `pub` is a checked visibility boundary. Every item - function, extern declaration, record, enum, handle, constant, alias, interface and method - is private to its module unless it is `pub`, and naming a private item from another module is an error (`` `helper` is private to module `vis_lib` ``, with a help line). Interfaces carry only the public surface plus the private items a public generic's body needs (marked `private`). A whole-program build with `--interface` now compiles every module from source and checks its interface against it; the transitional path that compiled a module's bodies against its interface's declarations is gone. Abundance, the standard library and the tests mark what they export.
 - Added: `extern "C" lib "name";` requests a library with no declaration from it (the ImGui binding states the C runtime its C++ shim needs). Indexing a vector of handles, `CStr` or `CPtr` now reads the element, as for numbers.
