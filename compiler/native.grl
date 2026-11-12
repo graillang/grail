@@ -549,10 +549,9 @@ struct C {
     // program-wide (that is what the stream carries); this attributes them to a module so an
     // interface can re-request them.
     // Extra context for the next error (G11): secondary labels at other source positions, and
-    // `help:` / `note:` lines under the source excerpt. Set just before `fail`.
+    // `help:` lines under the source excerpt. Set just before `fail`.
     diag_labels: DiagLabel[],
     diag_help: u8[][],
-    diag_notes: u8[][],
     // Text under the primary span (`expected `u64`, found `string``).
     diag_primary: u8[],
     lib_owner: u8[][]
@@ -5099,10 +5098,6 @@ fn diag_help<a, b>(c: (&a mut C), text: &b [u8]) -> unit {
     c.diag_help.push(text.copy());
     return ();
 }
-fn diag_note<a, b>(c: (&a mut C), text: &b [u8]) -> unit {
-    c.diag_notes.push(text.copy());
-    return ();
-}
 // Line (1-based), column (1-based) and the bounds of the line holding byte `at` of `src`.
 struct DiagPos {
     line: u64,
@@ -5226,7 +5221,6 @@ fn fail<a, b>(c: (&a mut C), msg: &b [u8]) -> unit {
     labels := exchange(&mut c.diag_labels, DiagLabel[]);
     helps := exchange(&mut c.diag_help, u8[][]);
     primary := exchange(&mut c.diag_primary, u8[]);
-    notes := exchange(&mut c.diag_notes, u8[][]);
     mut width = diag_digits(here.line);
     mut shown = DiagLabel[];
     for i in labels.len() {
@@ -5317,14 +5311,6 @@ fn fail<a, b>(c: (&a mut C), msg: &b [u8]) -> unit {
         }
         o(&mut c, view(" = help: "));
         o(&mut c, view(helps[i]));
-        c.out.push(10);
-    }
-    for i in notes.len() {
-        for j in width {
-            c.out.push(32);
-        }
-        o(&mut c, view(" = note: "));
-        o(&mut c, view(notes[i]));
         c.out.push(10);
     }
     host::print(view(c.out));
@@ -7543,12 +7529,6 @@ fn make_union<a>(c: (&a mut C), args: u64[], success: u64, module: u8[], prefix:
         d = c.decls.len();
     }
     return intern_args(&mut c, 8, d - 1, 0, u64[], args);
-}
-fn union_type<a>(c: (&a mut C), left: u64, right: u64) -> u64 {
-    mut args = u64[];
-    append_ordinary(&mut c, left, &mut args);
-    append_ordinary(&mut c, right, &mut args);
-    return make_union(&mut c, args, 0, copy_bytes(view(".union")), view("Union"));
 }
 fn result_union_type<a>(c: (&a mut C), successes: u64[], failures: u64[]) -> u64 {
     mut args = u64[];
@@ -17040,47 +17020,6 @@ fn element_code<a>(c: (&a mut C), ty: u64) -> u64 {
     }
     return 0;
 }
-fn format_precision<a, b>(c: (&a mut C), text: &b [u8], start: u64) -> u64 {
-    mut i = start + 2;
-    if !(i < text.len()) {
-        fail(&mut c, view("bad format spec (expected {:.N})"));
-    }
-    if text[i] != 46 {
-        fail(&mut c, view("bad format spec (expected {:.N})"));
-    }
-    i += 1;
-    mut n = 0;
-    mut any = 0;
-    while i < text.len() {
-        d := text[i];
-        if (d < 48) || (57 < d) {
-            break;
-        }
-        n = n * 10 + d - 48;
-        any = 1;
-        if 300 < n {
-            fail(&mut c, view("format precision too large"));
-        }
-        i += 1;
-    }
-    if any == 0 {
-        fail(&mut c, view("bad format spec (expected {:.N})"));
-    }
-    if !(i < text.len()) {
-        fail(&mut c, view("bad format spec (expected {:.N})"));
-    }
-    if text[i] != 125 {
-        fail(&mut c, view("bad format spec (expected {:.N})"));
-    }
-    return n;
-}
-fn format_precision_end<a>(text: &a [u8], start: u64) -> u64 {
-    mut i = start;
-    while text[i] != 125 {
-        i += 1;
-    }
-    return i + 1;
-}
 fn format_arg<a>(c: (&a mut C), acc: u64, input: Val) -> bool {
     original := input.t;
     inty := input.ty;
@@ -19031,9 +18970,6 @@ fn big_shr1<a>(x: (&a mut u64[])) -> unit {
     big_trim(&mut x);
     return ();
 }
-fn float_bits<a, b>(c: (&a mut C), text: &b [u8]) -> u64 {
-    return float_bits_p(&mut c, view(text), 53);
-}
 // Correctly rounded decimal -> binary with p significand bits (53 binary64, 24 binary32); the
 // result is always the binary64 word holding that value.
 fn float_bits_p<a, b>(c: (&a mut C), text: &b [u8], p: u64) -> u64 {
@@ -19356,16 +19292,6 @@ fn int_code<a>(c: (&a mut C), ty: u64) -> u64 {
         wrap = 512;
     }
     return bits + signed * 256 + wrap;
-}
-fn decimal_value<a>(t: &a [u8]) -> u64 {
-    mut v = 0;
-    for i in t.len() {
-        d := t[i];
-        if (47 < d) & (d < 58) {
-            v = wrapping_add(wrapping_mul(v, 10), d - 48);
-        }
-    }
-    return v;
 }
 // Integer literal text (decimal, 0x hex, 0b binary, 0o octal, with _ separators) -> value.
 // 'a', '\n', '\u{1F600}', 'é' (UTF-8): the Unicode scalar value of a character literal token.
@@ -28971,14 +28897,6 @@ fn iface_key<a, b>(out: (&a mut u8[]), key: &a [u8], n: u64) -> unit {
     out.push(10);
     return ();
 }
-fn iface_kv<a, b, d>(out: (&a mut u8[]), key: &a [u8], inner: &b [u8], n: u64) -> unit {
-    push_bytes(&mut out, view(key));
-    out.push(32);
-    push_bytes(&mut out, view(inner));
-    out.push(61);
-    decimal(&mut out, n);
-    return ();
-}
 fn iface_target_word(target: u64, plat: u64) -> string {
     if plat != 0 {
         if target == 0 {
@@ -29052,16 +28970,6 @@ fn iface_params<a>(c: (&a mut C), index: u64) -> u64[] {
         out.push(c.params[f.first + i]);
     }
     return out;
-}
-fn iface_emit_type_params<a>(c: (&a mut C), out: (&a mut u8[]), index: u64) -> unit {
-    f := &c.funcs[index];
-    if f.types == 0 {
-        return ();
-    }
-    push_bytes(&mut out, view(" <"));
-    decimal(&mut out, f.types);
-    push_bytes(&mut out, view(">"));
-    return ();
 }
 // `fn NAME <N> (T, T) -> T` plus the flags a caller needs. Per-parameter bounds, interface
 // requirements and a generic template's body marker follow on their own lines, so they cost a
@@ -30698,16 +30606,6 @@ fn iface_load<a, b>(c: (&a mut C), path: &a [u8], source_path: &b [u8], phase: u
     return module;
 }
 
-fn funcs_of_module<a, b>(c: (&a mut C), m: &b [u8]) -> u64 {
-    mut n = 0;
-    for i in c.funcs.len() {
-        if same(view(c.funcs[i].module), view(m)) {
-            n += 1;
-            return n;
-        }
-    }
-    return n;
-}
 // Every interface in DIR that no file on the command line declares becomes part of this program:
 // its declarations, and the bodies of its generic templates. Its *code* does not - it belongs to the
 // object its own module was compiled into - so nothing is emitted for it here; that is what makes a
@@ -31919,7 +31817,6 @@ pub fn main() -> u64 {
         virt_text: u8[][],
         diag_labels: DiagLabel[],
         diag_help: u8[][],
-        diag_notes: u8[][],
         diag_primary: u8[],
         lib_owner: u8[][],
     };
