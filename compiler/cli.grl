@@ -935,6 +935,7 @@ fn unit_restore<a, b, d, e, g>(store: (&a mut Cache), key: &b [u8], stem: &d [u8
     if host::exists(view(path)) == 0 {
         return false;
     }
+    cache_touch(view(store.root), view("unit"), view(key));
     text := host::read_file(view(path));
     rows := lines(view(text));
     mut parts_blob = u8[];
@@ -1311,6 +1312,23 @@ fn cache_ensure<a>(c: (&a mut Cache)) -> unit {
     host::mkdir(view(path_join(view(c.root), view("map/mod"))));
     host::mkdir(view(path_join(view(c.root), view("map/unit"))));
     host::mkdir(view(path_join(view(c.root), view("stage"))));
+    // One generation per build that opens the store: what `grail cache prune` measures age in.
+    generation := cache_generation(view(c.root)) + 1;
+    host::write_file(view(path_join(view(c.root), view("generation"))), view(decimal(generation)));
+    return ();
+}
+// The store's build counter (0 for a store no build has opened yet).
+fn cache_generation<a>(root: &a [u8]) -> u64 {
+    path := path_join(view(root), view("generation"));
+    if host::exists(view(path)) == 0 {
+        return 0;
+    }
+    return number_of(view(host::read_file(view(path))));
+}
+// Record that the current build used a record: `map/<kind>/<key>.used` holds its generation.
+fn cache_touch<a, b, d>(root: &a [u8], kind: &b [u8], key: &d [u8]) -> unit {
+    used := cat(view(cache_record_path(view(root), view(kind), view(key))), view(".used"));
+    host::write_file(view(used), view(decimal(cache_generation(view(root)))));
     return ();
 }
 // Whether `sha256sum` can stand in for the in-language digest. It is the same SHA-256 either way.
@@ -1387,6 +1405,7 @@ fn cache_field<a, b, d, e>(root: &a [u8], kind: &b [u8], key: &d [u8], field: &e
     if host::exists(view(path)) == 0 {
         return u8[];
     }
+    cache_touch(view(root), view(kind), view(key));
     text := host::read_file(view(path));
     rows := lines(view(text));
     for i in rows.len() {
@@ -1423,7 +1442,123 @@ fn cache_record_put<a, b, d, e>(c: (&a mut Cache), kind: &b [u8], key: &d [u8], 
     dest := cache_record_path(view(c.root), view(kind), view(key));
     mut run = u8[][copy(view("mv")), copy(view("-f")), pending, dest];
     host::command(run);
+    cache_touch(view(c.root), view(kind), view(key));
     return ();
+}
+fn hex_byte(b: u8) -> bool {
+    return ((48 <= b) & (b <= 57)) || ((97 <= b) & (b <= 102));
+}
+// `grail cache prune [--keep N]`: drop every record no build used in the last N (default 10), then
+// every blob no remaining record names, and whatever a killed build left in `stage/`.
+// `grail cache clear` empties the store. Both cover every target under .work/cache.
+fn cache_command<a>(args: (&a u8[][])) -> u64 {
+    if args.len() == 0 {
+        say(view("usage: grail cache prune [--keep N] | grail cache clear"));
+        return 1;
+    }
+    sub := item(&args, 0);
+    if eq(view(sub), view("clear")) {
+        mut run = u8[][copy(view("rm")), copy(view("-rf")), copy(view(".work/cache"))];
+        host::command(run);
+        host::print(view("cache: cleared\n"));
+        return 0;
+    }
+    if !eq(view(sub), view("prune")) {
+        say(view("usage: grail cache prune [--keep N] | grail cache clear"));
+        return 1;
+    }
+    mut keep = 10;
+    if (args.len() == 3) && eq(view(item(&args, 1)), view("--keep")) {
+        keep = number_of(view(item(&args, 2)));
+    }
+    mut records_dropped = 0;
+    mut records_kept = 0;
+    mut blobs_dropped = 0;
+    mut blobs_kept = 0;
+    if host::exists(view(".work/cache")) == 0 {
+        host::print(view("cache: empty\n"));
+        return 0;
+    }
+    targets := host::list_dir(view(".work/cache"));
+    for t in targets.len() {
+        root := path_join(view(".work/cache"), view(item(&targets, t)));
+        now := cache_generation(view(root));
+        mut live = u8[];
+        kinds := u8[][copy(view("prog")), copy(view("lnk")), copy(view("mod")), copy(view("unit"))];
+        for k in kinds.len() {
+            dir := path_join(view(path_join(view(root), view("map"))), view(item(&kinds, k)));
+            if host::exists(view(dir)) == 0 {
+                continue;
+            }
+            entries := host::list_dir(view(dir));
+            for e in entries.len() {
+                name := item(&entries, e);
+                if ends(view(name), view(".used")) {
+                    continue;
+                }
+                record := path_join(view(dir), view(name));
+                used_path := cat(view(record), view(".used"));
+                mut used = 0;
+                if host::exists(view(used_path)) != 0 {
+                    used = number_of(view(host::read_file(view(used_path))));
+                }
+                if (used + keep) < now {
+                    host::remove(view(record), 0);
+                    host::remove(view(used_path), 0);
+                    records_dropped += 1;
+                    continue;
+                }
+                records_kept += 1;
+                // Every 64-hex-digit run a record holds is a blob it names.
+                text := host::read_file(view(record));
+                mut run = 0;
+                for i in text.len() {
+                    if hex_byte(text[i]) {
+                        run += 1;
+                    } else {
+                        run = 0;
+                    }
+                    if run == 64 {
+                        for j in 64 {
+                            live.push(text[i + 1 - 64 + j]);
+                        }
+                        live.push(10);
+                    }
+                }
+            }
+        }
+        blobs := path_join(view(root), view("blob"));
+        if host::exists(view(blobs)) != 0 {
+            names := host::list_dir(view(blobs));
+            for b in names.len() {
+                name := item(&names, b);
+                if cache_contains(view(live), view(name)) {
+                    blobs_kept += 1;
+                } else {
+                    host::remove(view(path_join(view(blobs), view(name))), 0);
+                    blobs_dropped += 1;
+                }
+            }
+        }
+        stage := path_join(view(root), view("stage"));
+        if host::exists(view(stage)) != 0 {
+            leftovers := host::list_dir(view(stage));
+            for l in leftovers.len() {
+                host::remove(view(path_join(view(stage), view(item(&leftovers, l)))), 0);
+            }
+        }
+    }
+    mut line = copy(view("cache: pruned "));
+    push_bytes(&mut line, view(decimal(records_dropped)));
+    push_bytes(&mut line, view(" records and "));
+    push_bytes(&mut line, view(decimal(blobs_dropped)));
+    push_bytes(&mut line, view(" blobs; kept "));
+    push_bytes(&mut line, view(decimal(records_kept)));
+    push_bytes(&mut line, view(" records and "));
+    push_bytes(&mut line, view(decimal(blobs_kept)));
+    push_bytes(&mut line, view(" blobs\n"));
+    host::print(view(line));
+    return 0;
 }
 // File an artifact under the digest of its bytes, through a staging copy and a rename.
 fn cache_blob_put<a, b>(c: (&a mut Cache), path: &b [u8]) -> u8[] {
@@ -3074,6 +3209,8 @@ fn help() {
     say(view("  grail check --interface DIR       write one checked interface per module"));
     say(view("  grail check --interface DIR --verify   refuse an interface that disagrees with its sources"));
     say(view("  grail debug lines|info BINARY     print DWARF line rows or .debug_info"));
+    say(view("  grail cache prune [--keep N]       drop cache entries no build used in the last N (10)"));
+    say(view("  grail cache clear                  empty the build cache"));
     say(view("  grail profile [--rate N] [--out FILE] -- PROGRAM [ARGS]   sampling profile"));
     say(view("  grail run [FILE.grl] [-- ARGS...]"));
     say(view("  grail test [FILES or DIRS]        compile and run tests/ (exit status 0 = pass)"));
@@ -3096,6 +3233,7 @@ pub fn is_command<a>(name: &a [u8]) -> bool {
         || eq(view(name), view("fetch"))
         || eq(view(name), view("debug"))
         || eq(view(name), view("profile"))
+        || eq(view(name), view("cache"))
         || eq(view(name), view("install"))
         || eq(view(name), view("help"))
         || eq(view(name), view("--help"))
@@ -3137,6 +3275,9 @@ pub fn run() -> u64 {
     }
     if eq(view(name), view("debug")) {
         return debug_command(&args);
+    }
+    if eq(view(name), view("cache")) {
+        return cache_command(&args);
     }
     if eq(view(name), view("profile")) {
         return profile_command(&args);

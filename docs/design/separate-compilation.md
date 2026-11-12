@@ -159,13 +159,41 @@ The audit metadata the parallelism design asks for travels with it:
   module at all.
 - **The runtime.** `module runtime` (the portable runtime and the platform module) is the trusted
   base: it is compiled from source in every build and has no interface.
-- **Anything the language keeps private.** `pub` is not a visibility boundary in Grail today: a
-  caller can name any top-level declaration of another module, and the corpus does so
-  (`stream_def::Stream` and `stream_def::fopen` are not `pub`). An interface therefore carries the
-  module's whole top-level surface - exactly what an importer can name - and adds a `pub` flag only
-  once the language grows a visibility rule to enforce. `tools/interface-test.mjs` pins the part that
-  is enforceable now: no body, no local name, no synthetic module and no other module's declaration
-  appears in an interface.
+- **Anything the module keeps private** (see Visibility below), except what a public template's body
+  needs. `tools/interface-test.mjs` also pins that no body, no local name, no synthetic module and no
+  other module's declaration appears in an interface.
+
+### Visibility
+
+`pub` is a checked boundary. Every item - function, `extern` declaration, record, enum, handle,
+constant, type alias, interface and inherent method - is private to the module that declares it
+unless it carries `pub`. Naming a private item from another module (`m::helper(x)`, `m::Secret {..}`,
+`m::hidden`, `p.offset()`, a bound `T: m::Private`, `impl m::Private for T`) is refused at the use:
+
+```
+error: `helper` is private to module `vis_lib`
+help: declare it `pub` in `vis_lib` to use it from `main`
+```
+
+The methods of an `impl Interface for T` are as visible as the interface. Two exemptions keep the
+trusted base working: the runtime reaches every module, and its own items (which never take `pub`)
+are reachable from the unsafe modules that call into it. Visibility is checked where a name is
+resolved, so the compiler's own lookups - an interface being read, a template body replayed in an
+importer, which compiles in its own module - are not affected.
+
+An interface carries the public surface: every `pub` item, every interface implementation and closure
+environment, and, to a fixpoint, each private item that text already carried mentions - the
+private helper a public generic's body calls, a private type a public signature names. A carried
+private item is followed by a `private <kind> <name>` line at the end of the file, so an importer
+can compile the template against it but cannot name it. Everything else stays out, so an edit to a
+private function's signature no longer changes the interfaces of its module's importers.
+`tests/visibility/` pins the surface (`visibility-public-surface`, built from interfaces too) and the
+four refusals.
+
+A whole-program build given `--interface DIR` compiles every module from its source and requires
+each module's interface in `DIR` to say what the source says (a changed source is refused as
+stale); interfaces stand in for source only where the source is absent (`--use`, the per-module
+build).
 
 ### Refusals
 
@@ -675,10 +703,12 @@ times move with the page cache, the ratio does not):
 - The **label renumbering** above disappears with it: a module compiled alone emits its own text, its
   own labels, and is determined by its own key. At that point the emitted-assembly guard becomes
   redundant and the module entry can be keyed by its inputs alone.
-- **Visibility.** `pub` is still not a checked boundary, so an interface still carries a module's whole
-  top-level surface and every edit to it invalidates its importers.
-- **Store maintenance.** There is no garbage collection: entries that nothing names accumulate under
-  `.work/cache/<target>/blob`, exactly as `.work/native/<hash>` directories do today.
+- **Store maintenance.** Every build that opens the store advances its generation
+  (`.work/cache/<target>/generation`), and every record a build writes or reuses records that
+  generation beside it (`map/<kind>/<key>.used`). `grail cache prune [--keep N]` drops the records no
+  build used in the last N (default 10), then every blob no remaining record names, and whatever a
+  killed build left in `stage/`; `grail cache clear` empties the store. A store pruned right after a
+  build keeps exactly what that build used (`tools/cache-test.mjs`, (f)).
 
 ## What must stay true
 
@@ -717,8 +747,6 @@ Recorded here rather than discovered later:
   re-spell every module emitted after it;
 - the driver plans a module graph instead of taking a file list, and decides which modules must be
   compiled from source because a generic body is needed;
-- visibility: `pub` becomes a checked boundary, which shrinks an interface to the exported surface
-  and needs a language rule the corpus does not have yet;
 - the authenticity question the manifest cannot answer: anything that can rewrite `DIR` can rewrite
   `interfaces.manifest`, so a cache that has to resist a hostile writer needs signed or keyed
   manifests. The store added above states the same boundary for itself.
