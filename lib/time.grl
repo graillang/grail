@@ -1,0 +1,50 @@
+module time;
+use host;
+
+// Clocks, elapsed-time measurements and sleeping.
+//
+// `Instant` is monotonic: it only moves forward and ignores changes to the wall clock, so the
+// difference between two instants is the reliable measurement. The runtime reads both clocks in
+// milliseconds, so a difference is exact to one millisecond; values are nanoseconds so a duration
+// can be added, compared and divided without a second type.
+//
+// `unix_seconds` is the wall clock, for a log stamp or a date - not for measuring. `sleep_ms`
+// suspends the calling task, not a worker thread, so other tasks keep running.
+
+// A monotonic point in time, from `now()`.
+pub struct Instant {
+    nanos: u64
+}
+
+// The monotonic clock, in nanoseconds.
+pub fn now() -> Instant {
+    return Instant { nanos: host::now_ms() * 1000000 };
+}
+
+impl Instant {
+    // Nanoseconds since this instant was taken.
+    pub fn elapsed_ns(self: (&Instant)) -> u64 {
+        return host::now_ms() * 1000000 - self.nanos;
+    }
+    // Whole milliseconds since this instant was taken; the usual choice for a report.
+    pub fn elapsed_ms(self: (&Instant)) -> u64 {
+        return self.elapsed_ns() / 1000000;
+    }
+}
+
+// A duration in nanoseconds, from a millisecond count.
+pub fn nanos_from_ms(milliseconds: u64) -> u64 {
+    return milliseconds * 1000000;
+}
+// The whole milliseconds in a nanosecond count.
+pub fn millis_from_nanos(nanoseconds: u64) -> u64 {
+    return nanoseconds / 1000000;
+}
+// Seconds since the Unix epoch, from the wall clock.
+pub fn unix_seconds() -> u64 {
+    return host::wall_ms() / 1000;
+}
+// Suspends this task for at least `milliseconds` (the runtime's clock granularity may round up).
+pub fn sleep_ms(milliseconds: u64) {
+    host::sleep_ms(milliseconds);
+}
