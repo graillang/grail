@@ -202,14 +202,6 @@ whatever is stored there next. Insertion, lookup and removal are the vector oper
 `insert` moves the value in, `remove` moves it back out - so the arena is ordinary safe Grail with no
 pointer of its own.
 
-### What is not there yet
-
-`Arc<T>`'s teardown frees its two count cells and the block, but the exit-time allocation check still
-reports a leak when the last handle drops, so an `Arc` program is not yet corpus-clean; `Rc<T>` and
-`Weak<T>` are. An `Arena<T>` compiles, but a program using one fails to link on a helper the compiler
-does not emit for the vector field of a generic slot record (`.D` symbol of the element type); that
-is a compiler fix, not a library one.
-
 ## Calling C
 
 A foreign function is declared with its C name and signature, and each call sits in an `unsafe`

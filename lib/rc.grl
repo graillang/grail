@@ -153,27 +153,28 @@ impl<T> Drop for Arc<T> {
         unsafe {
             p := self.block;
             base := p.cast(u64).sub(2);
+            // Each count cell has exactly one owner at a time: the block's word, or the handle
+            // that read it out. Handing the cell back is a `write` (which consumes the handle);
+            // keeping it is a `drop` (which frees the cell).
             strong := base.cast(Atomic<u64>).read();
             prev := strong.fetch_sub(1);
             if prev != 1 {
                 base.cast(Atomic<u64>).write(strong);
-            } else {
-                base.cast(Atomic<u64>).write(strong);
-                v := p.read();
-                drop(v);
-                weak := base.add(1).cast(Atomic<u64>).read();
-                wprev := weak.fetch_sub(1);
-                if wprev != 1 {
-                    base.add(1).cast(Atomic<u64>).write(weak);
-                } else {
-                    // The last handle of any kind: both count cells and the block go.
-                    cell := base.cast(Atomic<u64>).read();
-                    drop(cell);
-                    cell2 := base.add(1).cast(Atomic<u64>).read();
-                    drop(cell2);
-                    free(base);
-                }
+                return ();
             }
+            v := p.read();
+            drop(v);
+            weak := base.add(1).cast(Atomic<u64>).read();
+            wprev := weak.fetch_sub(1);
+            if wprev != 1 {
+                base.cast(Atomic<u64>).write(strong);
+                base.add(1).cast(Atomic<u64>).write(weak);
+                return ();
+            }
+            // The last handle of any kind: both cells are ours now, and then the block.
+            drop(strong);
+            drop(weak);
+            free(base);
         }
     }
 }
