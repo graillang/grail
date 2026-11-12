@@ -7119,5 +7119,89 @@
       "call rt_trap"
     ],
     "note": "an owned vector can be pushed by the body, so its refined length is not used to drop a bounds check"
+  },
+  {
+    "name": "refinement-strict-proved",
+    "source": "fn take(align: u64 where align % 16 == 0) -> u64 {\n    return align;\n}\n\nfn main() -> u64 {\n    println(take(16));\n    return 0;\n}\n",
+    "stdout": "16\n",
+    "flags": [
+      "--strict-refinements"
+    ],
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "strict mode accepts a program whose every obligation is proved"
+  },
+  {
+    "name": "refinement-strict-unproved",
+    "source": "fn take(align: u64 where align % 16 == 0) -> u64 {\n    return align;\n}\n\nfn main() -> u64 {\n    println(take(17));\n    return 0;\n}\n",
+    "reject": true,
+    "flags": [
+      "--strict-refinements"
+    ],
+    "diagnostic": [
+      "cannot prove the refinement `align % 16 == 0`",
+      "= the facts at the call do not settle it",
+      "= the facts in scope were:",
+      "input.grl:6:"
+    ],
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "strict mode refuses it at the call, naming the predicate and the facts the prover had"
+  },
+  {
+    "name": "refinement-strict-attribute-fn",
+    "source": "fn take(align: u64 where align % 16 == 0) -> u64 {\n    return align;\n}\n\n@strict\nfn caller() -> u64 {\n    return take(17);\n}\n\nfn main() -> u64 {\n    println(caller());\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "cannot prove the refinement `align % 16 == 0`",
+      "input.grl:7:"
+    ],
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "`@strict` on a function makes only that function's obligations errors"
+  },
+  {
+    "name": "refinement-strict-module-proved",
+    "source": "module m;\n@strict;\n\nstruct Ray {\n    t_max: f32 where t_max > 0.0\n}\n\nfn mark(t: f32) -> f32 {\n    return t;\n}\n\nfn main() -> u64 {\n    t := mark(1.5);\n    if t > 0.0 {\n        r := Ray { t_max: t };\n        println(r.t_max);\n    }\n    return 0;\n}\n",
+    "stdout": "1.5\n",
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "`@strict;` makes the whole module strict, and a proved field obligation passes"
+  },
+  {
+    "name": "refinement-strict-field-unproved",
+    "source": "struct Ray {\n    t_max: f32 where t_max.is_finite() && t_max > 0.0\n}\n\nfn zero() -> f32 {\n    return 0.0;\n}\n\nfn main() -> u64 {\n    z := zero();\n    r := Ray { t_max: z / z };\n    println(r.t_max);\n    return 0;\n}\n",
+    "reject": true,
+    "flags": [
+      "--strict-refinements"
+    ],
+    "diagnostic": [
+      "cannot prove the refinement `t_max.is_finite() && t_max > 0.0`",
+      "= the value is not a name or a constant",
+      "input.grl:11:"
+    ],
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "strict mode refuses the record literal rather than checking it at run time"
   }
 ]

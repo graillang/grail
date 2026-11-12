@@ -507,6 +507,12 @@ struct C {
     // start at its `{`. Zero inside a closure, where no enclosing function's facts hold.
     body_lo: u64,
     body_hi: u64,
+    // Strict refinements (docs/design/refinements.md): `--strict-refinements` for the whole program,
+    // `@strict;` for a module (it stays with the module's name, so a replayed body keeps it), and
+    // `@strict` on a declaration for the function that follows.
+    strict_refinements: u64,
+    strict_modules: u8[][],
+    strict_next: u64,
     cur_name: u8[],
     cur_file: u64,
     cur_pos: u64,
@@ -5880,8 +5886,14 @@ fn ref_field<a, b>(c: (&a mut C), d: u64, k: u64, slot: u64, term: &b [u8], pos:
     // The field's name stands for the value being stored: a proof reads the value's own term.
     mut terms = u8[][copy_bytes(view(term))];
     mut proved = 0;
+    mut report = u64(ref_strict(&c));
+    need := pv_need(&mut c, view(who), pf, plo);
     if term.len() != 0 {
-        proved = pv_proved(&mut c, Pred { file: pf, lo: plo, hi: phi }, &names, &terms, pos);
+        proved = pv_proved(&mut c, Pred { file: pf, lo: plo, hi: phi }, &names, &terms, pos, report, view(need));
+    }
+    if (report != 0) & (proved == 0) {
+        // No term to read means no proof: strict mode refuses the literal itself.
+        pv_strict_fail_why(&mut c, Pred { file: pf, lo: plo, hi: phi }, pos, view(need), view("the value is not a name or a constant"));
     }
     ref_check(&mut c, Pred { file: pf, lo: plo, hi: phi }, &names, &slots, &tys, who, pf, plo, proved);
     return ();
@@ -5933,8 +5945,13 @@ fn ref_result<a, b>(c: (&a mut C), slot: u64, ty: u64, term: &b [u8], pos: u64) 
     at_pos := c.cur_pos;
     mut terms = u8[][copy_bytes(view(term))];
     mut proved = 0;
+    mut report = u64(ref_strict(&c));
+    need := pv_need(&mut c, view(name), at_file, at_pos);
     if term.len() != 0 {
-        proved = pv_proved(&mut c, Pred { file: pf, lo: plo, hi: phi }, &names, &terms, pos);
+        proved = pv_proved(&mut c, Pred { file: pf, lo: plo, hi: phi }, &names, &terms, pos, report, view(need));
+    }
+    if (report != 0) & (proved == 0) {
+        pv_strict_fail_why(&mut c, Pred { file: pf, lo: plo, hi: phi }, pos, view(need), view("the returned value is not a name or a constant"));
     }
     ref_check(&mut c, Pred { file: pf, lo: plo, hi: phi }, &names, &slots, &tys, name, at_file, at_pos, proved);
     return ();
@@ -6872,10 +6889,14 @@ fn pv_scope<a>(c: (&a mut C), start: u64, pos: u64, facts: (&a mut Atom[])) -> u
 }
 // The proof of one obligation: `pred`'s atoms, with `names` renamed to `terms`, all follow from the
 // facts in scope at `pos`.
-fn pv_proved<a>(c: (&a mut C), pred: Pred, names: (&a u8[][]), terms: (&a u8[][]), pos: u64) -> u64 {
+fn pv_proved<a, b>(c: (&a mut C), pred: Pred, names: (&a u8[][]), terms: (&a u8[][]), pos: u64, report: u64, need: &b [u8]) -> u64 {
     if (c.body_hi == 0) || (c.validating != 0) {
         return 0;
     }
+    // The range is kept in locals: reading the predicate consumes the value.
+    pf := pred.file;
+    plo := pred.lo;
+    phi := pred.hi;
     mut atoms = Atom[];
     if !pv_read_pred(&mut c, pred, &mut atoms) {
         return 0;
@@ -6886,26 +6907,37 @@ fn pv_proved<a>(c: (&a mut C), pred: Pred, names: (&a u8[][]), terms: (&a u8[][]
     for j in atoms.len() {
         rel := atoms[j].rel;
         x := pv_rename(view(atoms[j].a), &names, &terms);
-        if x.len() == 0 {
-            return 0;
-        }
+        mut ok = x.len() != 0;
         mut y = u8[];
-        if atoms[j].b.len() != 0 {
+        if ok & (atoms[j].b.len() != 0) {
             y = pv_rename(view(atoms[j].b), &names, &terms);
-            if y.len() == 0 {
-                return 0;
-            }
+            ok = y.len() != 0;
         }
-        if !pv_holds(&facts, rel, view(x), view(y), atoms[j].k) {
+        if ok {
+            ok = pv_holds(&facts, rel, view(x), view(y), atoms[j].k);
+        }
+        if !ok {
+            if report != 0 {
+                // `pred` was consumed reading it; the diagnostic needs its range, not the value.
+                pv_strict_fail(&mut c, Pred { file: pf, lo: plo, hi: phi }, pos, view(need));
+            }
             return 0;
         }
     }
     return 1;
 }
+// A call the prover cannot discharge. Strict mode reports it here, at the call, with the predicate
+// and the reason; otherwise the check stays and the call keeps the checked entry.
+fn pv_call_give_up<a, b, d>(c: (&a mut C), report: u64, pred: Pred, at: u64, need: &b [u8], why: &d [u8]) -> u64 {
+    if report != 0 {
+        pv_strict_fail_why(&mut c, pred, at, view(need), view(why));
+    }
+    return 0;
+}
 // The proof of a call: every refined parameter's predicate, with its names replaced by the
 // arguments' own terms, follows from the facts at the call. A function with no refined parameter
 // needs no proof and is never routed to the second entry.
-fn pv_call_proved<a>(c: (&a mut C), f: u64, count: u64, spans: (&a u64[]), at: u64) -> u64 {
+fn pv_call_proved<a>(c: (&a mut C), f: u64, count: u64, spans: (&a u64[]), at: u64, report: u64) -> u64 {
     if (f == 0) || (f > c.funcs.len()) || (c.body_hi == 0) {
         return 0;
     }
@@ -6919,31 +6951,45 @@ fn pv_call_proved<a>(c: (&a mut C), f: u64, count: u64, spans: (&a u64[]), at: u
         }
     }
     if any == 0 {
+        // Nothing is owed, so there is nothing to prove and nothing to report.
         return 0;
     }
+    mut first = no_pred();
+    for i in c.funcs[f - 1].ppreds.len() {
+        if i < c.funcs[f - 1].ppreds.len() {
+            p := &c.funcs[f - 1].ppreds[i];
+            if (p.hi != 0) & !has_pred(&first) {
+                first = Pred { file: p.file, lo: p.lo, hi: p.hi };
+            }
+        }
+    }
+    cname := c.funcs[f - 1].name.copy();
+    cfile := c.funcs[f - 1].file;
+    cpos := c.funcs[f - 1].pos;
+    mut need = pv_need(&mut c, view(cname), cfile, cpos);
     mut names = u8[][];
     mut terms = u8[][];
     for i in count {
         if i >= c.funcs[f - 1].pnames.len() {
-            return 0;
+            return pv_call_give_up(&mut c, report, first, at, view(need), view("the parameter has no name to substitute"));
         }
         if (2 * i + 1) >= spans.len() {
-            return 0;
+            return pv_call_give_up(&mut c, report, first, at, view(need), view("the argument's source is unknown"));
         }
         nm := c.funcs[f - 1].pnames[i].copy();
         if nm.len() == 0 {
-            return 0;
+            return pv_call_give_up(&mut c, report, first, at, view(need), view("the parameter has no name to substitute"));
         }
         tm := pv_span_term(&mut c, spans[2 * i], spans[2 * i + 1]);
         if tm.len() == 0 {
-            return 0;
+            return pv_call_give_up(&mut c, report, first, at, view(need), view("an argument is not a name or a constant"));
         }
         names.push(nm);
         terms.push(tm);
     }
     for i in count {
         if pv_span_mutates(&mut c, spans[2 * i], spans[2 * i + 1]) {
-            return 0;
+            return pv_call_give_up(&mut c, report, first, at, view(need), view("an argument is borrowed or calls something"));
         }
     }
     mut facts = Atom[];
@@ -6964,23 +7010,22 @@ fn pv_call_proved<a>(c: (&a mut C), f: u64, count: u64, spans: (&a u64[]), at: u
         }
         mut atoms = Atom[];
         if !pv_read_pred(&mut c, Pred { file: pf, lo: plo, hi: phi }, &mut atoms) {
-            return 0;
+            return pv_call_give_up(&mut c, report, Pred { file: pf, lo: plo, hi: phi }, at, view(need), view("the predicate is not a conjunction the prover reads"));
         }
         for j in atoms.len() {
             rel := atoms[j].rel;
             x := pv_rename(view(atoms[j].a), &names, &terms);
-            if x.len() == 0 {
-                return 0;
-            }
+            mut ok = x.len() != 0;
             mut y = u8[];
-            if atoms[j].b.len() != 0 {
+            if ok & (atoms[j].b.len() != 0) {
                 y = pv_rename(view(atoms[j].b), &names, &terms);
-                if y.len() == 0 {
-                    return 0;
-                }
+                ok = y.len() != 0;
             }
-            if !pv_holds(&facts, rel, view(x), view(y), atoms[j].k) {
-                return 0;
+            if ok {
+                ok = pv_holds(&facts, rel, view(x), view(y), atoms[j].k);
+            }
+            if !ok {
+                return pv_call_give_up(&mut c, report, Pred { file: pf, lo: plo, hi: phi }, at, view(need), view("the facts at the call do not settle it"));
             }
         }
     }
@@ -7041,6 +7086,118 @@ fn pv_bound_stable<a, b>(c: (&a mut C), index: &b [u8], base: &b [u8]) -> bool {
         i += 1;
     }
     return true;
+}
+// Whether this module compiles in strict mode: the flag, a `@strict;` in the module, or a `@strict`
+// on the declaration being compiled.
+fn ref_module_strict<a, b>(c: (&a C), m: &b [u8]) -> bool {
+    for i in c.strict_modules.len() {
+        if same(view(c.strict_modules[i]), view(m)) {
+            return true;
+        }
+    }
+    return false;
+}
+fn ref_strict<a>(c: (&a C)) -> bool {
+    if c.strict_refinements != 0 {
+        return true;
+    }
+    if c.strict_next != 0 {
+        return true;
+    }
+    m := c.module.copy();
+    return ref_module_strict(&c, view(m));
+}
+// `required by <fn> at <where>`: the second line of a strict-mode diagnostic.
+fn pv_need<a, b>(c: (&a mut C), fn_name: &b [u8], at_file: u64, at_pos: u64) -> u8[] {
+    mut out = copy_bytes(view("required by "));
+    push_bytes(&mut out, view(fn_name));
+    at := src_where(&mut c, at_file, at_pos);
+    if at.len() != 0 {
+        push_bytes(&mut out, view(" at "));
+        push_bytes(&mut out, view(at));
+    }
+    return out;
+}
+// One atom as the diagnostic spells it, in the shape the prover reads.
+fn pv_atom_text<a>(x: (&a Atom)) -> u8[] {
+    mut out = u8[];
+    push_bytes(&mut out, view(x.a));
+    if x.rel == 4 {
+        push_bytes(&mut out, view(".is_finite()"));
+        return out;
+    }
+    if x.rel == 5 {
+        push_bytes(&mut out, view(".is_nan()"));
+        return out;
+    }
+    if x.rel == 3 {
+        push_bytes(&mut out, view(" % "));
+        decimal(&mut out, u64(x.k));
+        push_bytes(&mut out, view(" == 0"));
+        return out;
+    }
+    if x.rel == 0 {
+        push_bytes(&mut out, view(" < "));
+    }
+    if x.rel == 1 {
+        push_bytes(&mut out, view(" <= "));
+    }
+    if x.rel == 2 {
+        push_bytes(&mut out, view(" == "));
+    }
+    push_bytes(&mut out, view(x.b));
+    if x.k < 0 {
+        push_bytes(&mut out, view(" - "));
+        decimal(&mut out, u64(0 - x.k));
+    } else {
+        if 0 < x.k {
+            push_bytes(&mut out, view(" + "));
+            decimal(&mut out, u64(x.k));
+        }
+    }
+    return out;
+}
+fn pv_facts_text<a>(facts: (&a Atom[])) -> u8[] {
+    mut out = u8[];
+    for i in facts.len() {
+        push_bytes(&mut out, view("\n   "));
+        item := &facts[i];
+        push_bytes(&mut out, view(pv_atom_text(&item)));
+    }
+    if facts.len() == 0 {
+        push_bytes(&mut out, view("\n   (none)"));
+    }
+    return out;
+}
+// Under strict mode an unproved obligation is a compile error, at the place the obligation is owed:
+// the predicate, which declaration required it, and the facts the prover had.
+fn pv_strict_fail<a, b>(c: (&a mut C), pred: Pred, pos: u64, need: &b [u8]) -> unit {
+    pv_strict_fail_why(&mut c, pred, pos, view(need), view(""));
+    return ();
+}
+fn pv_strict_fail_why<a, b, d>(c: (&a mut C), pred: Pred, pos: u64, need: &b [u8], why: &d [u8]) -> unit {
+    text := pred_text(&mut c, pred);
+    mut facts = Atom[];
+    body := c.body_lo;
+    if c.body_hi != 0 {
+        pv_scope(&mut c, body, pos, &mut facts);
+    }
+    mut msg = copy_bytes(view("cannot prove the refinement `"));
+    push_bytes(&mut msg, view(text));
+    push_bytes(&mut msg, view("`"));
+    if need.len() != 0 {
+        push_bytes(&mut msg, view("\n = "));
+        push_bytes(&mut msg, view(need));
+    }
+    if why.len() != 0 {
+        push_bytes(&mut msg, view("\n = "));
+        push_bytes(&mut msg, view(why));
+    }
+    push_bytes(&mut msg, view("\n = the facts in scope were:"));
+    push_bytes(&mut msg, view(pv_facts_text(&facts)));
+    exchange(&mut c.pos, pos);
+    fail(&mut c, view(msg));
+    return ();
 }
 // A refined parameter states a bound the body's indexing can use: `i < v.len()` on `v: &u64[]` is
 // exactly what the check on `v[i]` needs, so the entry sets the pair a `for i in v.len()` loop sets
@@ -14551,9 +14708,47 @@ fn toplevel<a>(c: (&a mut C), pass: u64) -> unit {
     return ();
 }
 // One module-level item.
+// `@strict;` makes every refinement obligation in this module a compile error, and `@strict` before
+// a declaration makes that declaration's (docs/design/refinements.md). Returns 0 when the tokens are
+// not this form, 1 when a declaration follows, and 2 when the module form was consumed alone.
+fn ref_strict_form<a>(c: (&a mut C)) -> u64 {
+    next := c.pos + 1;
+    if kind_at(&mut c, next) != 1 {
+        return 0;
+    }
+    word := tok_text(&mut c, next);
+    if !same(view(word), view("strict")) {
+        return 0;
+    }
+    advance(&mut c);
+    advance(&mut c);
+    if eat(&mut c, view(";")) {
+        // The mode is kept by module name, so a replayed body is compiled in the mode its module
+        // asked for, wherever the replay happens.
+        m := module_copy(&mut c);
+        if !ref_module_strict(&c, view(m)) {
+            c.strict_modules.push(m);
+        }
+        return 2;
+    }
+    exchange(&mut c.strict_next, 1);
+    return 1;
+}
 fn toplevel_item<a>(c: (&a mut C), pass: u64) -> unit {
     if true {
         if kind(&mut c) == 64 {
+            mode := ref_strict_form(&mut c);
+            if mode != 0 {
+                if mode == 1 {
+                    // `@strict` before a declaration: that declaration's obligations only.
+                    public := u64(eat(&mut c, view("pub")));
+                    exchange(&mut c.decl_public, public);
+                    declaration_item(&mut c, pass, public);
+                    exchange(&mut c.decl_public, 1);
+                    exchange(&mut c.strict_next, 0);
+                }
+                return ();
+            }
             ct_form(&mut c, pass, 1);
             return ();
         }
@@ -17537,7 +17732,8 @@ fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
     // call proved nothing about the code they reach, and keep the checked entry.
     mut proved = 0;
     if (c.raw == 0) & (c.validating == 0) & (method == 0) & (c.funcs[f - 1].ext == 0) & (c.funcs[f - 1].contract == 0) {
-        proved = pv_call_proved(&mut c, f, count, &spans, call_at);
+        strict := u64(ref_strict(&c));
+        proved = pv_call_proved(&mut c, f, count, &spans, call_at, strict);
     }
     return emit_resolved_call(&mut c, f, map, args, argtypes, sources, proved);
 }
@@ -34411,6 +34607,9 @@ pub fn main() -> u64 {
         cur_rpred: no_pred(),
         body_lo: 0,
         body_hi: 0,
+        strict_refinements: 0,
+        strict_modules: u8[][],
+        strict_next: 0,
         cur_name: u8[],
         cur_file: 0,
         cur_pos: 0,
@@ -34707,6 +34906,10 @@ pub fn main() -> u64 {
                                         exchange(&mut c.f1_what, n);
                                         offset += 1;
                                     } else {
+                                        if same(view(option), view("--strict-refinements")) {
+                                            exchange(&mut c.strict_refinements, 1);
+                                            offset += 1;
+                                        } else {
                                         if same(view(option), view("--verify-facts")) {
                                             exchange(&mut c.verify_facts, 1);
                                             offset += 1;
@@ -34723,6 +34926,7 @@ pub fn main() -> u64 {
                                             } else {
                                                 break;
                                             }
+                                        }
                                         }
                                     }
                                 }
@@ -34750,7 +34954,7 @@ pub fn main() -> u64 {
         fail_option(
             &mut c,
             view(
-                "usage: grail [--target ARCH] [--overflow=checked|wrap] [--debug] [--backend=llvm [--verify-facts]] [--deny-ambient-host] [--split] OUT.s ENTRY.grl MODULE.grl..."
+                "usage: grail [--target ARCH] [--overflow=checked|wrap] [--debug] [--verify-facts] [--strict-refinements] [--deny-ambient-host] [--split] OUT.s ENTRY.grl MODULE.grl..."
             )
         );
     }

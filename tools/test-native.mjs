@@ -102,7 +102,7 @@ for (const [position, test] of cases.entries()) {
   if (test.reject) {
     const assembly = join(directory, 'prior.s');
     writeFileSync(assembly, 'prior valid artifact');
-    const result = execute(compiler, ['--target', target, assembly, ...files, runtime, osRuntime]);
+    const result = execute(compiler, ['--target', target, ...(test.flags ?? []), assembly, ...files, runtime, osRuntime]);
     assert.equal(result.signal, null, `${test.name}: compiler crashed (${result.signal}): ${result.stdout}${result.stderr}`);
     assert.equal(result.status, 1, `${test.name}: a rejected program must exit 1: ${result.stdout}${result.stderr}`);
     // `diagnostic` is one required fragment of the error output, or a list of them (the message and
@@ -133,7 +133,7 @@ for (const [position, test] of cases.entries()) {
       assert.equal(verify.status, 0, `${test.name}: interfaces disagree with their sources: ${verify.stdout}${verify.stderr}`);
       viaInterface = { ifaces };
     }
-    const executable = compileProgram(compiler, files, directory, { target, overflow: test.overflow ?? 'checked', runtime, osRuntime });
+    const executable = compileProgram(compiler, files, directory, { target, overflow: test.overflow ?? 'checked', runtime, osRuntime, extra: test.flags ?? [] });
     // A codegen case pins what a build must (and must not) find in the assembly it emitted: a proved
     // entry point, or a bounds check the refinements removed. `compileProgram` leaves the `.s` beside
     // the program.
