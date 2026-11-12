@@ -378,7 +378,8 @@ export function compileProgram(compiler, inputs, directory, { target = hostTarge
   const files = [...inputs.map(p => resolve(root, p)), resolve(root, runtime), ...platform];
   const llvm = backend === 'llvm';
   if (llvm && !['x86_64', 'aarch64', 'riscv64'].includes(target)) throw new Error('the LLVM backend is implemented for Linux x86_64, aarch64 and riscv64');
-  if (verifyFacts && !llvm) throw new Error('--verify-facts checks the LLVM lifter; it needs the llvm backend');
+  // On the native backend --verify-facts cross-checks the refinements the prover discharged: a proved
+  // obligation still emits its runtime check, so a wrong proof aborts instead of passing unnoticed.
   if (rangeFacts && !llvm) throw new Error('--range-facts derives range facts in the LLVM lifter; it needs the llvm backend');
   // `interfaces` compiles against the interface directory a previous emit produced instead of the
   // modules' sources (B1 stage 2). It changes what the checker sees, not what it is given.

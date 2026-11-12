@@ -137,7 +137,9 @@ for (const [position, test] of cases.entries()) {
     // A codegen case pins what a build must (and must not) find in the assembly it emitted: a proved
     // entry point, or a bounds check the refinements removed. `compileProgram` leaves the `.s` beside
     // the program.
-    if (test.asm || test.asmAbsent) {
+    // `asm` pins describe the default build; --verify-facts deliberately keeps the checks a proof
+    // removed, so that build is not what they describe.
+    if ((test.asm || test.asmAbsent) && process.env.GRAIL_VERIFY_FACTS !== '1') {
       const text = readFileSync(join(directory, 'program.s'), 'utf8');
       for (const pin of test.asm ?? []) assert.ok(text.includes(pin), `${test.name}: expected assembly to contain ${JSON.stringify(pin)}`);
       for (const pin of test.asmAbsent ?? []) assert.ok(!text.includes(pin), `${test.name}: expected assembly not to contain ${JSON.stringify(pin)}`);

@@ -5729,8 +5729,9 @@ fn ref_check<a, b, d, e>(c: (&a mut C), pred: Pred, names: (&b u8[][]), slots: (
     if c.validating != 0 {
         return ();
     }
-    // A proved obligation needs no check: the proof is the whole of what it needs.
-    if proved != 0 {
+    // A proved obligation needs no check: the proof is the whole of what it needs. `--verify-facts`
+    // emits it anyway, so a prover bug shows up as a failing test rather than as a silent hole.
+    if (proved != 0) & (c.verify_facts == 0) {
         return ();
     }
     n := c.ref_next;
@@ -17860,7 +17861,8 @@ fn emit_resolved_call<a>(
         // A direct call whose refined parameters were all proved enters past the checks. Anything
         // indirect (a vtable's entry, a function value) proved nothing, and a call through an
         // interface may reach an implementation with predicates of its own.
-        if (proved != 0) & (dyn_entry == 0) & (contract == 0) {
+        // `--verify-facts` keeps the check the proof removed, so the call keeps the checked entry.
+        if (proved != 0) & (dyn_entry == 0) & (contract == 0) & (c.verify_facts == 0) {
             o(&mut c, view(".proved"));
         }
         c.out.push(10);
@@ -34967,7 +34969,9 @@ pub fn main() -> u64 {
         fail_option(&mut c, view("--backend=llvm is implemented for Linux x86_64, aarch64 and riscv64 without --debug"));
     }
     if (c.verify_facts != 0) && (c.backend == 0) {
-        fail_option(&mut c, view("--verify-facts checks the facts the LLVM lifter consumes; add --backend=llvm"));
+        // On the native backend the flag checks the refinements the prover discharged: every one of
+        // them still emits its runtime check, so a wrong proof aborts instead of going unnoticed.
+        exchange(&mut c.verify_facts, 2);
     }
     if (c.range_facts != 0) && (c.backend == 0) {
         fail_option(&mut c, view("--range-facts derives range facts in the LLVM lifter; add --backend=llvm"));

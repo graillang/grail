@@ -16,7 +16,9 @@
   index path; a body that binds either name again, or a base that is not a shared reference, keeps it.
   `--strict-refinements`, `@strict;` for a module and `@strict` before a declaration turn an
   unproved obligation into a compile error at the call, the literal or the `return`, naming the
-  predicate, the declaration that requires it, and the facts the prover had.
+  predicate, the declaration that requires it, and the facts the prover had. `--verify-facts` (now
+  accepted on the native backend) re-emits the check of every obligation the prover discharged and
+  enters the checked entry, so a wrong proof aborts instead of passing unnoticed.
 
 - Added: tuples. `(u64, string)` types and `(1, "a")` values (each tuple size is a generic record with fields `0`, `1`, ...), `t.0` / `t.0.1`, `(q, r) := divmod(17, 5);` destructuring, and `(A, B)[...]` literals. `iter::enumerate` and `iter::zip` yield tuples; `iter::Indexed` and `iter::Pair` are gone (`p.index`/`p.value` and `z.left`/`z.right` become `.0`/`.1`). The book no longer calls tuples deliberately absent.
 - Added: generic interface methods. `fn wrap<U>(self: &Self, u: U) -> U[];` in an interface, implemented with the same parameters, is specialised per call through bounds, `Interface::method` calls and default methods; an implementation with different type parameters is refused, and (Rust's rule) an interface with one cannot be `dyn`.
