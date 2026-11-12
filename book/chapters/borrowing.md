@@ -17,6 +17,20 @@ Last-use analysis respects shadows and loop backedges, but remains conservative.
 opaque returned references may keep whole possible input frames borrowed rather than identifying
 one exact field.
 
+## Arguments that read what another argument borrows
+
+A call's `&mut x` argument is borrowed after the call's other arguments are evaluated (Rust's
+two-phase borrows), so those arguments may still read `x`:
+
+```grl
+bump(&mut c, c.pos);
+c.bump(c.pos);
+v.push(v.len());
+```
+
+The value read is copied before the borrow starts. A borrow that lives through the call is still
+a conflict: `take(&mut c, &c.pos)` is refused.
+
 ## Borrowing a temporary
 
 `&expression` keeps a temporary alive until the end of the enclosing block, like a hidden

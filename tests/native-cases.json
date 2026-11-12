@@ -6593,5 +6593,24 @@
       "lib/io.grl"
     ],
     "stdout": "ping\nos error 22\n"
+  },
+  {
+    "name": "two-phase-borrow-arguments",
+    "source": "struct C {\n    pos: u64,\n    log: u64[],\n}\nfn bump(c: &mut C, by: u64) -> u64 {\n    c.pos = c.pos + by;\n    return c.pos;\n}\nfn peek(c: &mut C) -> u64 {\n    return c.pos * 10;\n}\nfn main() -> u64 {\n    mut c = C { pos: 1, log: u64[] };\n    println(bump(&mut c, c.pos));\n    println(bump(&mut c, peek(&mut c)));\n    r := &c;\n    println(r.pos);\n    return 0;\n}\n",
+    "stdout": "2\n22\n22\n",
+    "note": "f(&mut c, c.pos) and f(&mut c, g(&mut c)): the &mut argument is borrowed after the others"
+  },
+  {
+    "name": "two-phase-borrow-receiver",
+    "source": "struct C {\n    pos: u64,\n}\nimpl C {\n    fn bump(self: &mut Self, by: u64) -> u64 {\n        self.pos = self.pos + by;\n        return self.pos;\n    }\n}\nfn main() -> u64 {\n    mut c = C { pos: 1 };\n    println(c.bump(c.pos));\n    mut v = u64[1, 2];\n    v.push(v.len());\n    println(v.len());\n    return 0;\n}\n",
+    "stdout": "2\n3\n",
+    "note": "c.bump(c.pos) with a &mut self method, and v.push(v.len())"
+  },
+  {
+    "name": "two-phase-borrow-rejects-live-conflict",
+    "source": "struct C {\n    pos: u64,\n}\nfn take(c: &mut C, x: &u64) -> u64 {\n    c.pos = 5;\n    return *x;\n}\nfn main() -> u64 {\n    mut c = C { pos: 1 };\n    println(take(&mut c, &c.pos));\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": "borrow conflicts with active access",
+    "note": "a shared borrow that lives through the call still conflicts"
   }
 ]

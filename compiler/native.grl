@@ -445,6 +445,10 @@ struct C {
     receiver: u64,
     receiver_ty: u64,
     has_receiver: u64,
+    // A `&mut self` receiver call() borrows after its arguments (has_receiver 3).
+    lazy_input: u64,
+    lazy_inty: u64,
+    lazy_xty: u64,
     lit_start: u64,
     lit_end: u64,
     lit_value: u64,
@@ -14337,6 +14341,129 @@ fn type_args_for_spec<a>(c: (&a mut C), index: u64) -> u64[] {
     }
     return out;
 }
+// Whether the method call whose `.` is at `dot` has a plain local receiver (`c.m(...)`) that one
+// of its arguments names; c.pos is just past the `(`.
+fn receiver_read_by_args<a>(c: (&a mut C), dot: u64) -> bool {
+    if dot < 2 {
+        return false;
+    }
+    if (kind_at(&mut c, dot - 1) != 1) || (kind_at(&mut c, dot - 2) == 46) || (kind_at(&mut c, dot - 2) == 260) {
+        return false;
+    }
+    root := tok_text(&mut c, dot - 1);
+    if find_local(&mut c, view(root)) == 0 {
+        return false;
+    }
+    ranges := argument_ranges(&mut c);
+    if ranges.len() < 3 {
+        return false;
+    }
+    close := ranges[ranges.len() - 1];
+    for q in c.pos..close {
+        if (kind_at(&mut c, q) == 1) && same(view(tok_text(&mut c, q)), view(root)) {
+            return true;
+        }
+    }
+    return false;
+}
+// The token range [start, end) of each argument of the call whose `(` was just read, then the
+// position of its `)`, flattened: start0, end0, start1, end1, ..., close. Empty when the list
+// holds a closure (`|a, b|` has commas of its own) or cannot be scanned simply.
+fn argument_ranges<a>(c: (&a mut C)) -> u64[] {
+    mut out = u64[];
+    mut depth = 0;
+    mut at = c.pos;
+    mut begin = at;
+    while true {
+        k := kind_at(&mut c, at);
+        if k == 0 {
+            return u64[];
+        }
+        if (k == 124) || (k == 274) {
+            return u64[];
+        }
+        if (k == 40) || (k == 91) || (k == 123) {
+            depth += 1;
+        } else if (k == 41) || (k == 93) || (k == 125) {
+            if depth == 0 {
+                out.push(begin);
+                out.push(at);
+                out.push(at);
+                return out;
+            }
+            depth -= 1;
+        } else if (k == 44) && (depth == 0) {
+            out.push(begin);
+            out.push(at);
+            begin = at + 1;
+        }
+        at += 1;
+    }
+    return out;
+}
+// The order to take the arguments in: unchanged (empty) unless an argument is `&mut path` and
+// another argument mentions the path's root, in which case such arguments go last.
+fn two_phase_order<a, b>(c: (&a mut C), ranges: (&b u64[])) -> u64[] {
+    if ranges.len() < 5 {
+        return u64[];
+    }
+    n := (ranges.len() - 1) / 2;
+    mut late = u64[];
+    mut roots = u8[][];
+    for i in n {
+        a := ranges[2 * i];
+        b := ranges[2 * i + 1];
+        mut simple = (b >= a + 3) && (kind_at(&mut c, a) == 38) && is_at(&mut c, a + 1, view("mut")) && (kind_at(&mut c, a + 2) == 1);
+        // `&mut x` or `&mut x.f.g`: a path with no call or index, so taking it later changes nothing.
+        mut q = a + 3;
+        while simple && (q < b) {
+            if (kind_at(&mut c, q) == 46) && (q + 1 < b) && (kind_at(&mut c, q + 1) == 1) {
+                q += 2;
+            } else {
+                simple = false;
+            }
+        }
+        if simple {
+            late.push(i);
+            roots.push(tok_text(&mut c, a + 2));
+        }
+    }
+    if late.len() == 0 {
+        return u64[];
+    }
+    // Only when another argument reads the same root: everywhere else the order stays as written.
+    mut needed = false;
+    for j in late.len() {
+        for i in n {
+            if i != late[j] {
+                for q in ranges[2 * i]..ranges[2 * i + 1] {
+                    if (kind_at(&mut c, q) == 1) && same(view(tok_text(&mut c, q)), view(roots[j])) {
+                        needed = true;
+                    }
+                }
+            }
+        }
+    }
+    if !needed {
+        return u64[];
+    }
+    mut order = u64[];
+    for i in n {
+        mut is_late = false;
+        for j in late.len() {
+            if late[j] == i {
+                is_late = true;
+            }
+        }
+        if !is_late {
+            order.push(i);
+        }
+    }
+    for j in late.len() {
+        order.push(late[j]);
+    }
+    return order;
+}
 fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
     if c.raw == 0 {
         if same(view(m), view("runtime")) {
@@ -14424,7 +14551,13 @@ fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
     mut argtypes = u64[];
     mut sources = u64[];
     mut deferred = u64[];
-    if method != 0 {
+    if method == 3 {
+        // Taken after the arguments (two-phase): a placeholder holds parameter 0's place.
+        args.push(0);
+        argtypes.push(0);
+        sources.push(0);
+    }
+    if (method != 0) && (method != 3) {
         if count == 0 {
             fail(&mut c, view("method needs a receiver parameter"));
         }
@@ -14446,11 +14579,29 @@ fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
     if method != 2 {
         more = !eat(&mut c, view(")"));
     }
+    // Two-phase borrows (Rust's): an argument `&mut place` is taken after the other arguments, so
+    // they may still read what it will borrow - `f(&mut c, c.pos)`, `g(&mut c, h(&mut c, x))`.
+    // Taking an address has no effect of its own, so only the loan's start moves.
+    first_arg := args.len();
+    mut ranges = u64[];
+    mut order = u64[];
+    if more != 0 {
+        ranges = argument_ranges(&mut c);
+        order = two_phase_order(&mut c, &ranges);
+    }
+    mut slot_k = 0;
     if more != 0 {
         while true {
+            if order.len() != 0 {
+                exchange(&mut c.pos, ranges[2 * order[slot_k]]);
+            }
+            mut argi = args.len();
+            if order.len() != 0 {
+                argi = first_arg + order[slot_k];
+            }
             astart := c.pos;
             mut context = 18446744073709551615;
-            if args.len() < count {
+            if argi < count {
                 mut known = 1;
                 for j in map.len() {
                     if map[j] == 18446744073709551615 {
@@ -14458,7 +14609,7 @@ fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
                     }
                 }
                 if known != 0 {
-                    formal := c.params[template_first + args.len()];
+                    formal := c.params[template_first + argi];
                     context = bind_types(&mut c, formal, &map);
                 }
             }
@@ -14474,8 +14625,8 @@ fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
             }
             aend := c.pos;
             if c.raw == 0 {
-                if ((v.ty == 0) || ((c.lit_negative != 0) && (c.lit_start == astart) && (c.lit_end == aend))) && (args.len() < count) {
-                    formal := c.params[template_first + args.len()];
+                if ((v.ty == 0) || ((c.lit_negative != 0) && (c.lit_start == astart) && (c.lit_end == aend))) && (argi < count) {
+                    formal := c.params[template_first + argi];
                     if (types == 0) & literal_target(&mut c, formal) {
                         if adopt_literal(&mut c, astart, aend, formal) {
                             v = val(v.t, formal);
@@ -14483,8 +14634,8 @@ fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
                     }
                 }
             }
-            if (c.raw == 0) & (args.len() < count) {
-                formal := c.params[template_first + args.len()];
+            if (c.raw == 0) & (argi < count) {
+                formal := c.params[template_first + argi];
                 if (types == 0) & is_f32(&mut c, formal) {
                     v = adopt_float(&mut c, v, astart, aend, formal);
                 }
@@ -14502,7 +14653,7 @@ fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
                     capture_authority(&mut c, target);
                 }
             }
-            index := args.len();
+            index := argi;
             variadic := c.funcs[f - 1].ext == 2;
             if count < index + 1 && !variadic {
                 fail(&mut c, view("function argument count"));
@@ -14515,6 +14666,17 @@ fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
                 held := move_value(&mut c, v);
                 sources.push(held.t);
                 args.push(held.t);
+                if order.len() != 0 {
+                    if c.pos != ranges[2 * order[slot_k] + 1] {
+                        fail(&mut c, view("expected , or ) after an argument"));
+                    }
+                    slot_k += 1;
+                    if slot_k == order.len() {
+                        exchange(&mut c.pos, ranges[ranges.len() - 1] + 1);
+                        break;
+                    }
+                    continue;
+                }
                 if eat(&mut c, view(")")) {
                     break;
                 }
@@ -14622,11 +14784,60 @@ fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
                 sources.push(held.t);
                 args.push(held.t);
             }
+            if order.len() != 0 {
+                if c.pos != ranges[2 * order[slot_k] + 1] {
+                    fail(&mut c, view("expected , or ) after an argument"));
+                }
+                slot_k += 1;
+                if slot_k == order.len() {
+                    exchange(&mut c.pos, ranges[ranges.len() - 1] + 1);
+                    break;
+                }
+                continue;
+            }
             if eat(&mut c, view(")")) {
                 break;
             }
             expect(&mut c, view(","));
         }
+    }
+    if method == 3 {
+        formal := c.params[template_first];
+        lin := c.lazy_input;
+        lty := c.lazy_inty;
+        lx := c.lazy_xty;
+        prepared := method_receiver(&mut c, lin, lty, lx, formal);
+        if c.raw == 0 {
+            require_type(&mut c, prepared.ty, formal);
+        }
+        pty := prepared.ty;
+        held := move_value(&mut c, prepared);
+        exchange(&mut args[0], held.t);
+        exchange(&mut argtypes[0], pty);
+        exchange(&mut sources[0], held.t);
+    }
+    // Arguments taken out of order go back to parameter order.
+    if order.len() != 0 {
+        mut a2 = u64[];
+        mut t2 = u64[];
+        mut s2 = u64[];
+        for k in first_arg {
+            a2.push(args[k]);
+            t2.push(argtypes[k]);
+            s2.push(sources[k]);
+        }
+        for position in order.len() {
+            for k in order.len() {
+                if order[k] == position {
+                    a2.push(args[first_arg + k]);
+                    t2.push(argtypes[first_arg + k]);
+                    s2.push(sources[first_arg + k]);
+                }
+            }
+        }
+        args = a2;
+        argtypes = t2;
+        sources = s2;
     }
     if (args.len() != count) && (!(c.funcs[f - 1].ext == 2)) {
         fail(&mut c, view("function argument count"));
@@ -20722,6 +20933,7 @@ fn char_method<a>(n: &a [u8]) -> bool {
 fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
     // ' '.is_whitespace(): a bare character literal receiver of a char method is a char.
     literal_receiver := (value.ty == 0) & (c.lit_end == c.pos) & (c.lit_value < 128);
+    dot_at := c.pos;
     advance(&mut c);
     name := ident(&mut c);
     expect(&mut c, view("("));
@@ -20775,10 +20987,20 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
             info := &c.funcs[method - 1];
             first := info.first;
             count := info.count;
+            types := info.types;
             if count == 0 {
                 fail(&mut c, view("associated function called as a method (use Type::name)"));
             }
             formal := c.params[first];
+            // Two-phase borrows for a `&mut self` method whose arguments read the receiver
+            // (`c.bump(c.pos)`): the receiver is borrowed after the arguments (call).
+            if (types == 0) && (ty_kind(&mut c, formal) == 7) && (ty_mode(&mut c, formal) == 1) && receiver_read_by_args(&mut c, dot_at) {
+                exchange(&mut c.lazy_input, input);
+                exchange(&mut c.lazy_inty, inty);
+                exchange(&mut c.lazy_xty, xty);
+                exchange(&mut c.has_receiver, 3);
+                return call(&mut c, view(owner), view(name));
+            }
             prepared := method_receiver(&mut c, input, inty, xty, formal);
             rv := prepared.t;
             rty := prepared.ty;
@@ -30920,6 +31142,9 @@ pub fn main() -> u64 {
         receiver: 0,
         receiver_ty: 0,
         has_receiver: 0,
+        lazy_input: 0,
+        lazy_inty: 0,
+        lazy_xty: 0,
         lit_start: 0,
         lit_end: 0,
         lit_value: 0,
