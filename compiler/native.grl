@@ -101,6 +101,9 @@ struct Func {
     file: u64,
     pos: u64,
     raw: u64,
+    // 1 for `unsafe fn`: its body is checked one unsafe level down, and a call to it from safe code
+    // outside an `unsafe` block is refused.
+    unsafe_fn: u64,
     bounds: u64[],
     constraints: u64[][],
     contract: u64,
@@ -387,6 +390,9 @@ struct C {
     raw: u64,
     // Lexical `unsafe { ... }` depth. Foreign calls are rejected at depth 0.
     unsafe_depth: u64,
+    // Set by a leading `unsafe` on a top-level item (`unsafe fn`, `unsafe struct ...`), consumed by
+    // the declaration that owns it, so the hatch applies to one item at a time.
+    pending_unsafe: u64,
     // 1 while the operand of a `return` is being checked: `p.as_ref()` may only be returned, since
     // the borrow it makes takes the function's result lifetime.
     in_return: u64,
@@ -5817,6 +5823,24 @@ fn transfer_capability<a, b>(
         }
     }
     if k == 8 {
+        // An audited `unsafe struct ... : transferable, shareable` states the contract itself, and
+        // the walk below would only deny it again for the pointer that made it unsafe. Every type
+        // argument must still classify, as Rust requires of `unsafe impl<T: Send + Sync>`.
+        mut audited = c.decls[arg].share;
+        if shared == 0 {
+            audited = c.decls[arg].transfer;
+        }
+        if audited != 0 {
+            args := type_args(&mut c, ty);
+            for i in args.len() {
+                if transfer_capability(&mut c, args[i], shared, &mut trail, depth + 1) == 0 {
+                    trail.pop();
+                    return 0;
+                }
+            }
+            trail.pop();
+            return true;
+        }
         count := c.decls[arg].count;
         first := c.decls[arg].first;
         allowed = 1;
@@ -6194,6 +6218,7 @@ fn builtin_drop_interface<a>(c: (&a mut C)) -> unit {
                 file: 0,
                 pos: 0,
                 raw: 0,
+                unsafe_fn: 0,
                 bounds: bounds,
                 constraints: requirements,
                 contract: id,
@@ -7108,7 +7133,8 @@ fn bind_types<a, b>(c: (&a mut C), ty: u64, map: (&b u64[])) -> u64 {
         base := bind_types(&mut c, arg, &map);
         return project(&mut c, base, mode);
     }
-    if (k == 6) || (k == 27) || (k == 28) || (k == 7) || (k == 12) || (k == 13) || (k == 14) || (k == 16) || (k == 20) || (k == 29) {
+    if (k == 6) || (k == 27) || (k == 28) || (k == 7) || (k == 12) || (k == 13) || (k == 14) || (k == 16) || (k == 20) || (k == 29)
+        || (k == 34) {
         arg = bind_types(&mut c, arg, &map);
     }
     mut args = type_args(&mut c, ty);
@@ -7152,7 +7178,8 @@ fn concrete_type<a>(c: (&a mut C), ty: u64) -> bool {
         return false;
     }
     arg := ty_arg(&mut c, ty);
-    if (k == 6) || (k == 27) || (k == 7) || (k == 10) || (k == 12) || (k == 13) || (k == 14) || (k == 16) || (k == 20) || (k == 29) {
+    if (k == 6) || (k == 27) || (k == 7) || (k == 10) || (k == 12) || (k == 13) || (k == 14) || (k == 16) || (k == 20) || (k == 29)
+        || (k == 34) {
         if !concrete_type(&mut c, arg) {
             return false;
         }
@@ -8810,6 +8837,43 @@ fn decl<a>(c: (&a mut C), pass: u64) -> unit {
     advance(&mut c);
     name := ident(&mut c);
     lifetime_parameters(&mut c);
+    // `unsafe struct C<T>: transferable, shareable`: an audited capability contract for a record
+    // that holds raw pointers or foreign state on purpose. The hook is the `unsafe` keyword, so a
+    // plain `struct` cannot claim a classification by accident.
+    unsafe_decl := exchange(&mut c.pending_unsafe, 0);
+    mut transfer = 0;
+    mut share = 0;
+    if eat(&mut c, view(":")) {
+        if unsafe_decl == 0 {
+            fail(&mut c, view("a capability classification needs `unsafe struct`: `unsafe struct C<T>: transferable, shareable`"));
+        }
+        if is_enum != 0 {
+            fail(&mut c, view("a capability classification is for a struct, not an enum"));
+        }
+        mut more = 1;
+        while more != 0 {
+            if is(&mut c, view("transferable")) {
+                transfer = 1;
+            } else {
+                if is(&mut c, view("shareable")) {
+                    share = 1;
+                } else {
+                    fail(
+                        &mut c,
+                        view("a struct is classified `transferable` or `transferable, shareable`; a struct with no classification stays thread-affine")
+                    );
+                }
+            }
+            advance(&mut c);
+            more = u64(eat(&mut c, view(",")));
+        }
+    }
+    if (share != 0) & (transfer == 0) {
+        fail(
+            &mut c,
+            view("`shareable` implies `transferable`: a value that may be used on another thread may also be moved to it")
+        );
+    }
     exchange(&mut c.parsing_input, 0);
     exchange(&mut c.output_region, 0);
     regions := c.rnames.len();
@@ -8829,8 +8893,8 @@ fn decl<a>(c: (&a mut C), pass: u64) -> unit {
                         name: name,
                         is_enum: is_enum,
                         opaque: 0,
-                        transfer: 0,
-                        share: 0,
+                        transfer: transfer,
+                        share: share,
                         c_layout: 0,
                         first: 0,
                         count: 0,
@@ -8894,8 +8958,8 @@ fn decl<a>(c: (&a mut C), pass: u64) -> unit {
             name: name,
             is_enum: is_enum,
             opaque: 0,
-            transfer: 0,
-            share: 0,
+            transfer: transfer,
+            share: share,
             c_layout: 0,
             first: first,
             count: count,
@@ -10249,6 +10313,7 @@ fn extern_declaration<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
                 file: c.file,
                 pos: position,
                 raw: c.raw,
+                unsafe_fn: 0,
                 bounds: u64[],
                 constraints: u64[][],
                 contract: 0,
@@ -10272,6 +10337,8 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     mut dstart = 0;
     mut dend = 0;
     expect(&mut c, view("fn"));
+    // `unsafe fn`: consumed here, whatever pass this is, so the next item does not inherit it.
+    unsafe_fn := exchange(&mut c.pending_unsafe, 0);
     mut name = ident(&mut c);
     lifetime_parameters(&mut c);
     exchange(&mut c.input_regions, u64[]);
@@ -10506,6 +10573,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
                     file: file,
                     pos: position,
                     raw: raw,
+                    unsafe_fn: unsafe_fn,
                     bounds: bounds,
                     constraints: constraints,
                     contract: 0,
@@ -10709,7 +10777,16 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         exchange(&mut c.export_tls, tls_slot);
         exchange(&mut c.export_adopt, adopt_slot);
     }
+    // An `unsafe fn`'s body sits one level down: raw pointers and foreign calls in it need no inner
+    // `unsafe` block, and the caller owes the block instead.
+    depth := c.unsafe_depth;
+    if unsafe_fn != 0 {
+        exchange(&mut c.unsafe_depth, depth + 1);
+    }
     block(&mut c);
+    if unsafe_fn != 0 {
+        exchange(&mut c.unsafe_depth, depth);
+    }
     exchange(&mut c.export_tls, 0);
     exchange(&mut c.export_adopt, 0);
     if c.terminated == 0 {
@@ -11005,6 +11082,7 @@ fn interface_declaration<a>(c: (&a mut C), pass: u64) -> unit {
                     file: 0,
                     pos: 0,
                     raw: 0,
+                    unsafe_fn: 0,
                     bounds: bounds,
                     constraints: requirements,
                     contract: id,
@@ -12945,7 +13023,16 @@ fn host_opted<a, b>(c: (&a C), m: &b [u8]) -> bool {
     return false;
 }
 fn toplevel<a>(c: (&a mut C), pass: u64) -> unit {
-    raw := u64(eat(&mut c, view("unsafe")));
+    // `unsafe module m;` is the trusted-module hatch. A leading `unsafe` before anything else is an
+    // item's own hatch (`unsafe fn`, `unsafe struct ...`), so only `unsafe` + `module` is read here.
+    mut raw = 0;
+    if is(&mut c, view("unsafe")) {
+        after := c.pos + 1;
+        if is_at(&mut c, after, view("module")) {
+            advance(&mut c);
+            raw = 1;
+        }
+    }
     exchange(&mut c.raw, raw);
     mut m = "main".copy();
     if eat(&mut c, view("module")) {
@@ -13010,7 +13097,15 @@ fn toplevel_item<a>(c: (&a mut C), pass: u64) -> unit {
         public := u64(eat(&mut c, view("pub")));
         // Every item takes `pub`; without it the item is private to this module.
         exchange(&mut c.decl_public, public);
+        // `unsafe fn` and `unsafe struct C<T>: transferable, shareable`: the hatch for one item. The
+        // declaration that owns it consumes the flag; anything else that leaves it set is refused.
+        item_unsafe := u64(eat(&mut c, view("unsafe")));
+        saved_unsafe := exchange(&mut c.pending_unsafe, item_unsafe);
         declaration_item(&mut c, pass, public);
+        if c.pending_unsafe != 0 {
+            fail(&mut c, view("`unsafe` applies to a function or to a struct's capability classification"));
+        }
+        exchange(&mut c.pending_unsafe, saved_unsafe);
         exchange(&mut c.decl_public, 1);
         return ();
     }
@@ -14580,7 +14675,7 @@ fn infer_type<a, b>(c: (&a mut C), formal: u64, actual: u64, map: (&b mut u64[])
             fail(&mut c, view("generic reference mode mismatch"));
         }
     }
-    if (k == 6) || (k == 27) || (k == 7) || (k == 13) || (k == 14) || (k == 16) || (k == 29) {
+    if (k == 6) || (k == 27) || (k == 7) || (k == 13) || (k == 14) || (k == 16) || (k == 29) || (k == 34) {
         aa := ty_arg(&mut c, actual);
         infer_type(&mut c, arg, aa, &mut map);
         return ();
@@ -15180,7 +15275,8 @@ fn canonical_type<a, b>(c: (&a mut C), ty: u64, next: (&b mut u64)) -> u64 {
     if k == 10 {
         return canonical_type(&mut c, arg, &mut next);
     }
-    if (k == 6) || (k == 27) || (k == 7) || (k == 12) || (k == 13) || (k == 14) || (k == 16) || (k == 20) || (k == 29) {
+    if (k == 6) || (k == 27) || (k == 7) || (k == 12) || (k == 13) || (k == 14) || (k == 16) || (k == 20) || (k == 29)
+        || (k == 34) {
         arg = canonical_type(&mut c, arg, &mut next);
     }
     mut args = type_args(&mut c, ty);
@@ -15579,6 +15675,12 @@ fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
             diag_help(&mut c, view(help));
         }
         fail(&mut c, view("unknown function"));
+    }
+    // An `unsafe fn` is called from inside an `unsafe` block, like the foreign calls it stands for.
+    if c.funcs[f - 1].unsafe_fn != 0 {
+        if (c.raw == 0) & (c.unsafe_depth == 0) {
+            fail(&mut c, view("unsafe function called outside an `unsafe` block"));
+        }
     }
     info := &c.funcs[f - 1];
     count := info.count;
@@ -22383,11 +22485,67 @@ fn pointer_method<a, d>(c: (&a mut C), value: Val, pty: u64, name: &d [u8]) -> V
         return val(imm(&mut c, 0), intern(&mut c, 2, 0));
     }
     if same(view(name), view("as_ref")) || same(view(name), view("as_mut")) {
-        // A borrow made from a raw pointer has to be registered as the function's returned
-        // reference (its frame source), which is the one piece of the returning-reference
-        // bookkeeping this increment does not do yet. Refused by name rather than handed out
-        // unchecked.
-        fail(&mut c, view("as_ref and as_mut are not implemented yet: read the value with p.read() or copy it through a reference you already hold"));
+        expect(&mut c, view(")"));
+        write := u64(same(view(name), view("as_mut")));
+        if (write != 0) & (mode == 0) {
+            fail(&mut c, view("as_mut needs a *mut T; a *T only reads"));
+        }
+        // The reference this makes is the function's declared result: its lifetime is the caller's,
+        // and the pointer is the assertion that the storage there holds the pointee. So it may only
+        // be the returned value, and only where the result says what it borrows.
+        if c.in_return == 0 {
+            fail(
+                &mut c,
+                view("as_ref and as_mut are only the returned value of a function whose result is `&T` or `&mut T`")
+            );
+        }
+        rty := c.result;
+        mut right = u64(ty_kind(&mut c, rty) == 7);
+        if right != 0 {
+            if ty_mode(&mut c, rty) != write {
+                right = 0;
+            }
+        }
+        if right != 0 {
+            rref := ty_arg(&mut c, rty);
+            if same_type(&mut c, rref, pointee) == 0 {
+                right = 0;
+            }
+        }
+        if right == 0 {
+            fail(
+                &mut c,
+                view("the function's result must be exactly the reference this gives: `&T` for as_ref, `&mut T` for as_mut")
+            );
+        }
+        rs := type_regions(&mut c, rty);
+        if rs.len() == 0 {
+            fail(&mut c, view("the result reference needs a declared lifetime"));
+        }
+        region := rs[0];
+        release_temporary(&mut c, word);
+        // The referent is storage this function does not track - the pointer is the assertion - so
+        // the reference's frame source is an external place in the result's lifetime, borrowed and
+        // bonded exactly as a returned capture is (add_external_capture).
+        place := ownership::root(&mut c.check, 0, 1);
+        c
+            .resources
+            .push(
+                Resource {
+                    slot: address,
+                    ty: rty,
+                    flag: 0,
+                    base: 0,
+                    field: 0,
+                    via: 0,
+                    place: place,
+                    target: 0,
+                    authority: 0,
+                }
+            );
+        source := add_external_capture(&mut c, place, region, write);
+        set_target(&mut c, address, source, address + 1);
+        return val(address, rty);
     }
     mut msg = copy_bytes(view("a raw pointer has addr, is_null, cast, add, sub, read, write, as_ref and as_mut; not "));
     push_bytes(&mut msg, view(name));
@@ -29137,6 +29295,7 @@ fn host_fn<a, b>(c: (&a mut C), name: &b [u8], ret: u64) -> unit {
                 file: 0,
                 pos: 0,
                 raw: 0,
+                unsafe_fn: 0,
                 bounds: u64[],
                 constraints: u64[][],
                 contract: 0,
@@ -32607,6 +32766,7 @@ fn iface_define_func<a>(c: (&a mut C), st: (&a mut IState), p: (&a mut IPos)) ->
                 file: st.source,
                 pos: 0,
                 raw: st.unsafe,
+                unsafe_fn: 0,
                 bounds: bounds,
                 constraints: requirements,
                 contract: contract,
@@ -32842,6 +33002,7 @@ pub fn main() -> u64 {
         cont: 0,
         raw: 0,
         unsafe_depth: 0,
+        pending_unsafe: 0,
         in_return: 0,
         cptr_address: 0,
         embedded: u64[],

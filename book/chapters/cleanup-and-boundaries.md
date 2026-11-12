@@ -38,9 +38,59 @@ it names: a pointer made from a reference keeps that reference's loan for the re
 so the storage cannot be moved or freed underneath it. A record holding a raw pointer is
 thread-affine, so it cannot cross to another thread.
 
-Not there yet: `p.as_ref()` and `p.as_mut()` (they need the returned-reference bookkeeping), an
-`unsafe fn` declaration, and the `unsafe struct C<T>: transferable, shareable` opt-in for records
-that hold raw pointers on purpose.
+### Handing a borrow back out
+
+`p.as_ref()` and `p.as_mut()` turn a pointer into a reference again. They may only be the *returned*
+value of a function whose result is a reference of the same type, because that result is what names
+the lifetime the borrow gets:
+
+```grl
+unsafe fn value_of<a>(p: *mut u64, anchor: &a u64) -> &a u64 {
+    return p.as_ref();
+}
+```
+
+The pointer is the assertion that the storage there holds the pointee; the region comes from the
+declared result, so the caller's borrow checking still applies (here the reference lives no longer
+than `anchor`). `as_mut` gives `&mut T`, needs a `*mut T`, and the result must be `&mut T`. Used
+anywhere else - a binding, an argument, a longer chain - both are refused by name.
+
+### `unsafe fn`
+
+A function whose contract the checker cannot see is declared `unsafe fn`. Its body sits one level
+down, so it needs no inner `unsafe` block, and every call from safe code must be inside one:
+
+```grl
+unsafe fn bump(p: *mut u64) -> u64 {
+    q := p.read() + 1;      // no inner `unsafe` needed
+    p.write(q);
+    return q;
+}
+
+fn main() {
+    mut x: u64 = 41;
+    unsafe { println(bump(ptr_of(&mut x))); }   // 42
+}
+```
+
+### Audited records
+
+A record that holds a raw pointer (or other foreign state) is thread-affine, which is the right
+default but wrong for a type that is *designed* to be shared. `unsafe struct` states the audited
+contract where the type is declared:
+
+```grl
+unsafe struct Arcish<T>: transferable, shareable {
+    p: *mut T,
+    n: u64
+}
+```
+
+The classification takes `unsafe` on purpose - a plain `struct` cannot claim one - and only a struct
+can take it (`shareable` implies `transferable`). The type arguments must still classify, as Rust
+requires of `unsafe impl<T: Send + Sync>`: `Arcish<Handle>` is accepted only for handles that are
+safe to move and to share. What the declaration buys is the walk of the fields skipped; what it does
+not buy is anything the foreign code itself does behind that pointer.
 
 
 

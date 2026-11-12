@@ -6818,12 +6818,6 @@
     "diagnostic": "a raw pointer operation needs an unsafe block: read"
   },
   {
-    "name": "reject-ptr-as-ref-not-implemented",
-    "source": "fn look(p: *u64) -> u64 {\n    unsafe {\n        r := p.as_ref();\n        return 0;\n    }\n}\nfn main() -> u64 { return 0; }\n",
-    "reject": true,
-    "diagnostic": "as_ref and as_mut are not implemented yet"
-  },
-  {
     "name": "reject-pointer-write-through-shared",
     "source": "fn main() -> u64 {\n    mut x: u64 = 1;\n    unsafe {\n        p := ptr_of(&x);\n        p.write(2);\n    }\n    return 0;\n}\n",
     "reject": true,
@@ -6900,5 +6894,67 @@
     "source": "interface Drop {\n    fn drop(self: &mut Self);\n}\npub fn main() -> u64 {\n    return 0;\n}\n",
     "reject": true,
     "diagnostic": "`Drop` is built in"
+  },
+  {
+    "name": "unsafe-fn-body-and-call",
+    "source": "unsafe fn bump(p: *mut u64) -> u64 {\n    q := p.read() + 1;\n    p.write(q);\n    return q;\n}\npub fn main() -> u64 {\n    mut x: u64 = 41;\n    mut v = 0;\n    unsafe {\n        v = bump(ptr_of(&mut x));\n    }\n    println(\"{} {}\", v, x);\n    return 0;\n}\n",
+    "stdout": "42 42\n"
+  },
+  {
+    "name": "reject-unsafe-fn-call-outside-unsafe",
+    "source": "unsafe fn risky(x: u64) -> u64 {\n    return x + 1;\n}\npub fn main() -> u64 {\n    v := risky(41);\n    println(\"{}\", v);\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": "unsafe function called outside an `unsafe` block"
+  },
+  {
+    "name": "unsafe-struct-transferable-and-shareable",
+    "source": "unsafe struct Arcish<T> {\n    p: *mut T,\n    n: u64\n}\nfn make<T>(p: *mut T) -> Arcish<T> {\n    return Arcish { p: p, n: 1 };\n}\nfn needs_send<T: Send>(x: Arcish<T>) -> u64 {\n    return x.n;\n}\nfn needs_share<T: Share>(x: Arcish<T>) -> u64 {\n    return x.n + 1;\n}\npub fn main() -> u64 {\n    unsafe {\n        q := alloc(u64, 1);\n        a := make(q);\n        b := make(q);\n        println(\"send {} share {}\", needs_send(a), needs_share(b));\n        free(q);\n    }\n    return 0;\n}\n",
+    "stdout": "send 1 share 2\n"
+  },
+  {
+    "name": "reject-unsafe-struct-type-argument-unclassified",
+    "source": "struct Plain {\n    p: *mut u64,\n    n: u64\n}\nunsafe struct Arcish<T> {\n    p: *mut T,\n    n: u64\n}\nfn make<T>(p: *mut T) -> Arcish<T> {\n    return Arcish { p: p, n: 1 };\n}\nfn needs_send<T: Send>(x: Arcish<T>) -> u64 {\n    return x.n;\n}\npub fn main() -> u64 {\n    unsafe {\n        q := alloc(Plain, 1);\n        a := make(q);\n        println(\"sent {}\", needs_send(a));\n        free(q);\n    }\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": "type does not satisfy Send: main::Plain is unclassified foreign authority"
+  },
+  {
+    "name": "reject-struct-classification-needs-unsafe",
+    "source": "struct Plain: transferable {\n    n: u64\n}\npub fn main() -> u64 {\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": "a capability classification needs `unsafe struct`"
+  },
+  {
+    "name": "reject-enum-classification",
+    "source": "unsafe enum Choice: transferable {\n    A(u64),\n    B\n}\npub fn main() -> u64 {\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": "a capability classification is for a struct, not an enum"
+  },
+  {
+    "name": "ptr-as-ref-returned",
+    "source": "unsafe fn at<a>(p: *mut u64, anchor: &a u64) -> &a u64 {\n    return p.as_ref();\n}\npub fn main() -> u64 {\n    mut anchor: u64 = 5;\n    unsafe {\n        q := alloc(u64, 2);\n        q.write(21);\n        r := at(q, &anchor);\n        println(\"{}\", *r);\n        free(q);\n    }\n    return 0;\n}\n",
+    "stdout": "21\n"
+  },
+  {
+    "name": "ptr-as-mut-returned",
+    "source": "unsafe fn at_mut<a>(p: *mut u64, anchor: &a mut u64) -> &a mut u64 {\n    return p.as_mut();\n}\npub fn main() -> u64 {\n    unsafe {\n        q := alloc(u64, 2);\n        q.write(7);\n        mut acc: u64 = 1;\n        r := at_mut(q, &mut acc);\n        *r = 33;\n        println(\"{}\", q.read());\n        free(q);\n    }\n    return 0;\n}\n",
+    "stdout": "33\n"
+  },
+  {
+    "name": "reject-ptr-as-ref-not-returned",
+    "source": "fn peek(p: *mut u64) -> u64 {\n    unsafe {\n        r := p.as_ref();\n        return *r;\n    }\n}\npub fn main() -> u64 {\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": "as_ref and as_mut are only the returned value of a function whose result is"
+  },
+  {
+    "name": "reject-ptr-as-ref-result-not-reference",
+    "source": "unsafe fn peek(p: *mut u64) -> u64 {\n    return p.as_ref().read();\n}\npub fn main() -> u64 {\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": "the function's result must be exactly the reference this gives"
+  },
+  {
+    "name": "reject-ptr-as-mut-on-shared-pointer",
+    "source": "unsafe fn peek<a>(p: *u64, anchor: &a u64) -> &a u64 {\n    return p.as_mut();\n}\npub fn main() -> u64 {\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": "as_mut needs a *mut T; a *T only reads"
   }
 ]
