@@ -5787,6 +5787,47 @@ fn ref_params<a>(c: (&a mut C)) -> unit {
     }
     return ();
 }
+// How many parameters of the function being compiled carry a predicate.
+fn ref_pred_count<a>(c: (&a mut C)) -> u64 {
+    mut n = 0;
+    for i in c.cur_ppreds.len() {
+        if i < c.cur_ppreds.len() {
+            p := &c.cur_ppreds[i];
+            if p.hi != 0 {
+                n += 1;
+            }
+        }
+    }
+    return n;
+}
+// The second entry of a function with refined parameters: the bodys starts here, and a call site
+// that proved every parameter predicate jumps past the checks to it (docs/design/refinements.md).
+// Both entries share the frame, the parameter bookkeeping and the exit path; only the checks are
+// skipped, and only by a caller that gave the prover enough to discharge them.
+fn ref_entry<a, b, d>(c: (&a mut C), m: &b [u8], name: &b [u8], body_symbol: &d [u8], export: u64) -> unit {
+    if ref_pred_count(&mut c) == 0 {
+        return ();
+    }
+    // The binding is stated here, as it is for the checked entry: a specialisation is emitted by
+    // every object that instantiates it and stays weak, and a split build's objects have to see
+    // each other's symbols.
+    if c.plat != 1 {
+        if c.current_spec != 0 {
+            o(&mut c, view(".weak "));
+            export_name(&mut c, view(m), view(name), view(body_symbol), export);
+            o(&mut c, view(".proved\n"));
+        } else {
+            if c.split != 0 {
+                o(&mut c, view(".globl "));
+                export_name(&mut c, view(m), view(name), view(body_symbol), export);
+                o(&mut c, view(".proved\n"));
+            }
+        }
+    }
+    export_name(&mut c, view(m), view(name), view(body_symbol), export);
+    o(&mut c, view(".proved:\n"));
+    return ();
+}
 // `field: T where P` at the value's entry into a record: a literal must establish every refined
 // field it fills, so `Ray { t_max: x }` is where the ray's invariant is owed.
 fn ref_field<a>(c: (&a mut C), d: u64, k: u64, slot: u64) -> unit {
@@ -11003,6 +11044,8 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     // their bookkeeping is done (a view's target is tracked), and the first statement has not been
     // reached, so a failure inside the check reports the call site rather than a line of this body.
     ref_params(&mut c);
+    // A call site that proved every refined parameter jumps to this second entry, past the checks.
+    ref_entry(&mut c, view(m), view(name), view(body_symbol), export);
     mut tls_slot = 0;
     mut adopt_slot = 0;
     if (export == 2) & tls_bridge(&mut c) {
@@ -16259,7 +16302,7 @@ fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
         exchange(&mut argtypes[index], actual);
         exchange(&mut sources[index], slot);
     }
-    return emit_resolved_call(&mut c, f, map, args, argtypes, sources);
+    return emit_resolved_call(&mut c, f, map, args, argtypes, sources, 0);
 }
 // Checked emission for parsed calls and compiler-prepared collection operations.
 fn emit_resolved_call<a>(
@@ -16268,7 +16311,8 @@ fn emit_resolved_call<a>(
     map: u64[],
     args: u64[],
     argtypes: u64[],
-    sources: u64[]
+    sources: u64[],
+    proved: u64
 ) -> Val {
     mut f = index;
     info := &c.funcs[f - 1];
@@ -16380,6 +16424,12 @@ fn emit_resolved_call<a>(
     } else {
         o(&mut c, view("call "));
         mangle(&mut c, view(destination), view(symbol));
+        // A direct call whose refined parameters were all proved enters past the checks. Anything
+        // indirect (a vtable's entry, a function value) proved nothing, and a call through an
+        // interface may reach an implementation with predicates of its own.
+        if (proved != 0) & (dyn_entry == 0) & (contract == 0) {
+            o(&mut c, view(".proved"));
+        }
         c.out.push(10);
     }
     slot := save(&mut c);
@@ -23668,7 +23718,7 @@ fn map_call<a, b>(c: (&a mut C), name: &b [u8], ty: u64, values: Val[]) -> Val {
         actuals.push(held.ty);
         sources.push(held.t);
     }
-    return emit_resolved_call(&mut c, f, types, args, actuals, sources);
+    return emit_resolved_call(&mut c, f, types, args, actuals, sources, 0);
 }
 fn map_new<a>(c: (&a mut C), ty: u64) -> Val {
     first := invoke(&mut c, view("rt_random_seed"), u64[]);
@@ -25647,7 +25697,7 @@ fn operator_call<a>(c: (&a mut C), k: u64, left: Val, right: Val) -> Val {
     sources.push(bt);
     mut map = u64[];
     map.push(left.ty);
-    mut result = emit_resolved_call(&mut c, method, map, args, types, sources);
+    mut result = emit_resolved_call(&mut c, method, map, args, types, sources, 0);
     if negate {
         get(&mut c, result.t, view("%rax"));
         o(&mut c, view("xorq $1,%rax\n"));

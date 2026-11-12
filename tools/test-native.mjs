@@ -134,6 +134,14 @@ for (const [position, test] of cases.entries()) {
       viaInterface = { ifaces };
     }
     const executable = compileProgram(compiler, files, directory, { target, overflow: test.overflow ?? 'checked', runtime, osRuntime });
+    // A codegen case pins what a build must (and must not) find in the assembly it emitted: a proved
+    // entry point, or a bounds check the refinements removed. `compileProgram` leaves the `.s` beside
+    // the program.
+    if (test.asm || test.asmAbsent) {
+      const text = readFileSync(join(directory, 'program.s'), 'utf8');
+      for (const pin of test.asm ?? []) assert.ok(text.includes(pin), `${test.name}: expected assembly to contain ${JSON.stringify(pin)}`);
+      for (const pin of test.asmAbsent ?? []) assert.ok(!text.includes(pin), `${test.name}: expected assembly not to contain ${JSON.stringify(pin)}`);
+    }
     // The interface build is a second program from the same sources; it has to behave the same.
     const interfaceExecutable = viaInterface ? compileProgram(compiler, files, directory, { target, overflow: test.overflow ?? 'checked', runtime, osRuntime, name: 'program-interface', interfaces: viaInterface.ifaces }) : null;
     if (test.compileOnly) { passed++; continue; }
