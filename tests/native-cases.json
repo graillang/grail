@@ -6456,5 +6456,50 @@
     ],
     "stdout": "7\n",
     "note": "a pub interface in another module may elide method lifetimes, as functions do"
+  },
+  {
+    "name": "dyn-interface-objects",
+    "source": "interface Shape {\n    fn area(self: &Self) -> u64;\n    fn name(self: &Self) -> string {\n        return \"shape\";\n    }\n    fn grow(self: &mut Self, by: u64) -> unit;\n}\nstruct Square {\n    side: u64,\n}\nstruct Circle {\n    r: u64,\n    label: string,\n}\nimpl Shape for Square {\n    fn area(self: &Self) -> u64 {\n        return self.side * self.side;\n    }\n    fn name(self: &Self) -> string {\n        return \"square\";\n    }\n    fn grow(self: &mut Self, by: u64) -> unit {\n        self.side = self.side + by;\n        return ();\n    }\n}\nimpl Shape for Circle {\n    fn area(self: &Self) -> u64 {\n        return 3 * self.r * self.r;\n    }\n    fn grow(self: &mut Self, by: u64) -> unit {\n        self.r = self.r + by;\n        return ();\n    }\n}\nfn total(shapes: &(dyn Shape)[]) -> u64 {\n    mut t = 0;\n    for s in shapes {\n        t = t + s.area();\n    }\n    return t;\n}\nfn describe(s: &dyn Shape) -> unit {\n    println(\"{} {}\", s.name(), s.area());\n    return ();\n}\nfn main() -> u64 {\n    mut shapes = (dyn Shape)[];\n    shapes.push(Square { side: 2 });\n    shapes.push(Circle { r: 1, label: \"c\" });\n    println(total(&shapes));\n    mut one: dyn Shape = Square { side: 5 };\n    one.grow(1);\n    describe(&one);\n    describe(&shapes[1]);\n    return 0;\n}\n",
+    "modules": [
+      "lib/core.grl"
+    ],
+    "stdout": "7\nsquare 36\nshape 3\n",
+    "note": "a vector of dyn Shape holding different types, &dyn and &mut dyn receivers, a default method through the vtable, drop of an object owning a string"
+  },
+  {
+    "name": "dyn-reject-self-result",
+    "source": "interface S{fn make(self:&Self)->Self;}fn f(x:&dyn S){}fn main(){}",
+    "reject": true,
+    "diagnostic": "interface `S` cannot be used as dyn: method `make` must take &self or &mut self first and use Self nowhere else"
+  },
+  {
+    "name": "dyn-reject-by-value-receiver",
+    "source": "interface S{fn get(self:Self)->u64;}fn f(x:&dyn S){}fn main(){}",
+    "reject": true,
+    "diagnostic": "cannot be used as dyn: method `get`"
+  },
+  {
+    "name": "dyn-reject-associated-types",
+    "source": "interface S{type Item;fn get(self:&Self)->u64;}fn f(x:&dyn S){}fn main(){}",
+    "reject": true,
+    "diagnostic": "cannot be used as dyn: it has associated types"
+  },
+  {
+    "name": "dyn-reject-not-implemented",
+    "source": "interface S{fn get(self:&Self)->u64;}struct A{x:u64}fn main(){d: dyn S := A{x:1};}",
+    "reject": true,
+    "diagnostic": "this type does not implement the interface the dyn type names"
+  },
+  {
+    "name": "dyn-reject-use-after-move",
+    "source": "interface S{fn get(self:&Self)->u64;}struct A{x:u64}impl S for A{fn get(self:&Self)->u64{return self.x;}}fn main(){d: dyn S := A{x:1};e:=d;println(d.get());}",
+    "reject": true,
+    "diagnostic": "use of moved, borrowed or partially initialized value"
+  },
+  {
+    "name": "dyn-reject-mut-receiver-on-immutable",
+    "source": "interface S{fn get(self:&Self)->u64;fn bump(self:&mut Self)->unit;}struct A{x:u64}impl S for A{fn get(self:&Self)->u64{return self.x;}fn bump(self:&mut Self)->unit{self.x=self.x+1;return ();}}fn main(){d: dyn S := A{x:1};d.bump();}",
+    "reject": true,
+    "diagnostic": "owned storage mutation requires mut"
   }
 ]
