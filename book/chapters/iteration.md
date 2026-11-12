@@ -26,7 +26,9 @@ The `iter` module chains work lazily over an `Iter<T>` - a closure that yields t
 
 `upto(lo, hi)` counts, `of(v)` moves the elements out of a vector, and `map`, `filter`, `take`,
 `enumerate` and `zip` wrap one iterator in another; `collect` pulls everything into a vector.
-`Iter<T>` is itself an iterator by the protocol above, so any adapter chain can sit in a `for`.
+`Iter<T>` is itself an iterator by the protocol above, so any adapter chain can sit in a `for`. Each adapter is also a method, so a chain reads left to right:
+`iter::of(v).filter(|x: &u64| -> bool *x > 1).map(|x: u64| -> u64 x * 2).collect()`; `count()` and
+`fold(init, f)` consume one.
 The closures passed to adapters are `FnMut`, so they may update their own captures. `refs(&v)`
 yields references into a vector you keep, so a loop or a chain such as `take` can use borrowed items
 without copying them; the vector stays borrowed while the chain or any item from it is in use.
