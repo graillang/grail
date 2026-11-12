@@ -6996,7 +6996,7 @@
   },
   {
     "name": "rc-weak-upgrade",
-    "source": "use rc;\nstruct Tag {\n    n: u64\n}\nimpl Drop for Tag {\n    fn drop(self: &mut Tag) {\n        println(\"drop tag {}\", self.n);\n    }\n}\npub fn main() -> u64 {\n    a := rc::new(Tag { n: 7 });\n    b := a.clone();\n    println(\"strong {} {}\", a.strong_count(), b.strong_count());\n    println(\"value {}\", b.get().n);\n    drop(b);\n    println(\"after one {}\", a.strong_count());\n    drop(a);\n    println(\"dropped\");\n    mut n = rc::new(41u64);\n    w := rc::downgrade(&n);\n    println(\"weak {} strong {}\", n.weak_count(), n.strong_count());\n    u := w.upgrade()!;\n    println(\"upgraded {} {}\", *u.get(), u.strong_count());\n    drop(u);\n    println(\"still {}\", n.strong_count());\n    drop(n);\n    mut gone = 0;\n    match w.upgrade() {\n        Some(r) => {\n            gone = 1;\n        },\n        None => {\n            gone = 2;\n        },\n    }\n    println(\"gone {}\", gone);\n    drop(w);\n    println(\"end\");\n    return 0;\n}\n",
+    "source": "use rc;\nstruct Tag {\n    n: u64\n}\nimpl Drop for Tag {\n    fn drop(self: &mut Tag) {\n        println(\"drop tag {}\", self.n);\n    }\n}\npub fn main() -> u64 {\n    a := rc::new(Tag { n: 7 });\n    b := a.clone();\n    println(\"strong {} {}\", a.strong_count(), b.strong_count());\n    println(\"value {}\", b.get().n);\n    drop(b);\n    println(\"after one {}\", a.strong_count());\n    drop(a);\n    println(\"dropped\");\n    mut n = rc::new(41u64);\n    w := rc::downgrade(&n);\n    println(\"weak {} strong {}\", n.weak_count(), n.strong_count());\n    match w.upgrade() {\n        Some(r) => {\n            println(\"upgraded {} {}\", *r.get(), r.strong_count());\n        },\n        None => {\n            println(\"upgrade lost\");\n        },\n    }\n    println(\"still {}\", n.strong_count());\n    drop(n);\n    mut gone = 0;\n    match w.upgrade() {\n        Some(r) => {\n            gone = 1;\n        },\n        None => {\n            gone = 2;\n        },\n    }\n    println(\"gone {}\", gone);\n    drop(w);\n    println(\"end\");\n    return 0;\n}\n",
     "modules": [
       "lib/rc.grl",
       "lib/core.grl"
@@ -7012,5 +7012,13 @@
     ],
     "reject": true,
     "diagnostic": "does not satisfy Share"
+  },
+  {
+    "name": "drop-payload-pattern-once",
+    "source": "struct Tag {\n    n: u64\n}\nimpl Drop for Tag {\n    fn drop(self: &mut Tag) {\n        println(\"drop {}\", self.n);\n    }\n}\nenum Held {\n    Full(Tag),\n    Empty\n}\nfn maybe(give: u64) -> Tag? {\n    if give != 0 {\n        return Some(Tag { n: 1 });\n    }\n    return None;\n}\npub fn main() -> u64 {\n    match maybe(1) {\n        Some(r) => {\n            println(\"some {}\", r.n);\n        },\n        None => {\n            println(\"none\");\n        },\n    }\n    h := Held::Full(Tag { n: 2 });\n    match h {\n        Full(t) => {\n            println(\"full {}\", t.n);\n        },\n        Empty => {\n            println(\"empty\");\n        },\n    }\n    match maybe(0) {\n        Some(r) => {\n            println(\"unexpected {}\", r.n);\n        },\n        None => {\n            println(\"none again\");\n        },\n    }\n    println(\"end\");\n    return 0;\n}\n",
+    "stdout": "some 1\ndrop 1\nfull 2\ndrop 2\nnone again\nend\n",
+    "modules": [
+      "lib/core.grl"
+    ]
   }
 ]
