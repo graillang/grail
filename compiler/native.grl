@@ -6986,6 +6986,120 @@ fn pv_call_proved<a>(c: (&a mut C), f: u64, count: u64, spans: (&a u64[]), at: u
     }
     return 1;
 }
+// The base a `.len` term is the length of: `v.len` answers `v`, anything else answers empty.
+fn pv_len_base<a>(t: &a [u8]) -> u8[] {
+    n := t.len();
+    if n <= 4 {
+        return u8[];
+    }
+    if (t[n - 4] != 46) || (t[n - 3] != 108) || (t[n - 2] != 101) || (t[n - 1] != 110) {
+        return u8[];
+    }
+    mut out = u8[];
+    for i in 0 .. n - 4 {
+        out.push(t[i]);
+    }
+    return out;
+}
+// Whether the body leaves a bound on a shared reference usable: neither name is written or bound
+// again, no mutable loan of either appears, and the reference is only indexed or asked its length.
+fn pv_bound_stable<a, b>(c: (&a mut C), index: &b [u8], base: &b [u8]) -> bool {
+    mut i = c.body_lo;
+    while i < c.body_hi {
+        k := kind_at(&mut c, i);
+        if k == 1 {
+            t := tok_text(&mut c, i);
+            if same(view(t), view(index)) || same(view(t), view(base)) {
+                nk := kind_at(&mut c, i + 1);
+                // A write of any kind makes what the entry knew about the name stale.
+                if (nk == 61) || (nk == 262) || (nk == 263) || (nk == 264) || (nk == 265) || (nk == 266) || (nk == 268) {
+                    return false;
+                }
+                if i >= 2 {
+                    pk := kind_at(&mut c, i - 1);
+                    if pk == 1 {
+                        before := tok_text(&mut c, i - 1);
+                        // `&mut NAME` is a loan a callee can write through.
+                        if same(view(before), view("mut")) & (kind_at(&mut c, i - 2) == 38) {
+                            return false;
+                        }
+                        // `mut NAME = ..`, `let NAME ..`, `for NAME in ..`: the name is bound again.
+                        if same(view(before), view("mut")) || same(view(before), view("let")) || same(view(before), view("for")) {
+                            return false;
+                        }
+                    }
+                }
+                // `v.push(x)` and its siblings can change what the bound was measured against.
+                if same(view(t), view(base)) & (kind_at(&mut c, i + 1) == 46) & (kind_at(&mut c, i + 3) == 40) {
+                    m := tok_text(&mut c, i + 2);
+                    if !same(view(m), view("len")) {
+                        return false;
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+    return true;
+}
+// A refined parameter states a bound the body's indexing can use: `i < v.len()` on `v: &u64[]` is
+// exactly what the check on `v[i]` needs, so the entry sets the pair a `for i in v.len()` loop sets
+// (bce_index, bce_base) for this body. Nothing is assumed that the entry did not already check - the
+// checked entry checks it, and a proved one had it proved - and a body that could make the bound
+// stale sets nothing.
+fn pv_bce<a>(c: (&a mut C)) -> unit {
+    if (c.validating != 0) || (c.body_hi == 0) {
+        return ();
+    }
+    for i in c.cur_ppreds.len() {
+        mut pf = 0;
+        mut plo = 0;
+        mut phi = 0;
+        if i < c.cur_ppreds.len() {
+            p := &c.cur_ppreds[i];
+            pf = p.file;
+            plo = p.lo;
+            phi = p.hi;
+        }
+        if phi == 0 {
+            continue;
+        }
+        mut atoms = Atom[];
+        if !pv_read_pred(&mut c, Pred { file: pf, lo: plo, hi: phi }, &mut atoms) {
+            continue;
+        }
+        for j in atoms.len() {
+            // Only `i < v.len()` bounds an index. `i <= v.len() - 1` arrives in that shape too, and
+            // any other comparison says nothing about an access.
+            if (atoms[j].rel != 0) || (atoms[j].k != 0) {
+                continue;
+            }
+            index_name := atoms[j].a.copy();
+            bound := pv_len_base(view(atoms[j].b));
+            if (index_name.len() == 0) || (bound.len() == 0) {
+                continue;
+            }
+            l := find_local(&mut c, view(bound));
+            if l == 0 {
+                continue;
+            }
+            bty := local_ty(&mut c, l - 1);
+            k := ty_kind(&mut c, bty);
+            // Only a shared reference (or a shared slice) has a length this function cannot change:
+            // an owned vector could be pushed in the body.
+            if !((k == 7) || (k == 27)) || (ty_mode(&mut c, bty) != 0) {
+                continue;
+            }
+            if !pv_bound_stable(&mut c, view(index_name), view(bound)) {
+                continue;
+            }
+            exchange(&mut c.bce_index, index_name);
+            exchange(&mut c.bce_base, bound);
+            return ();
+        }
+    }
+    return ();
+}
 fn ident<a>(c: (&a mut C)) -> u8[] {
     if kind(&mut c) != 1 {
         fail(&mut c, view("expected identifier"));
@@ -12138,6 +12252,10 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     // The body begins after the checks: the second entry jumps here.
     body_lbl := label(&mut c);
     mark(&mut c, body_lbl);
+    // A refined parameter can state what the body's bounds checks need (pv_bce), for this body only.
+    old_bce_index := exchange(&mut c.bce_index, u8[]);
+    old_bce_base := exchange(&mut c.bce_base, u8[]);
+    pv_bce(&mut c);
     mut tls_slot = 0;
     mut adopt_slot = 0;
     if (export == 2) & tls_bridge(&mut c) {
@@ -12148,6 +12266,8 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         exchange(&mut c.export_adopt, adopt_slot);
     }
     block(&mut c);
+    exchange(&mut c.bce_index, old_bce_index);
+    exchange(&mut c.bce_base, old_bce_base);
     exchange(&mut c.export_tls, 0);
     exchange(&mut c.export_adopt, 0);
     if c.terminated == 0 {

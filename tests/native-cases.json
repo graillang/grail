@@ -7074,5 +7074,50 @@
       "call f_refined_take.proved"
     ],
     "note": "a refinement carried by an interface is owed by a caller in another module, and its constant argument proves it there too"
+  },
+  {
+    "name": "refinement-bce-from-param",
+    "source": "fn get(v: &u64[], i: u64 where i < v.len()) -> u64 {\n    return v[i];\n}\n\nfn main() -> u64 {\n    v := u64[10, 20, 30];\n    println(get(&v, 1));\n    return 0;\n}\n",
+    "stdout": "20\n",
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "asmAbsent": [
+      "call rt_trap"
+    ],
+    "note": "`i < v.len()` on the entry is what `v[i]`'s bounds check needs: the access emits no trap at all"
+  },
+  {
+    "name": "refinement-bce-shadowed-index",
+    "source": "fn get(v: &u64[], i: u64 where i < v.len()) -> u64 {\n    mut sum = 0;\n    {\n        mut i = 9;\n        sum += v[i];\n    }\n    return sum;\n}\n\nfn main() -> u64 {\n    v := u64[10, 20, 30];\n    println(get(&v, 1));\n    return 0;\n}\n",
+    "signal": "SIGABRT",
+    "stderr": [
+      "error: index 9 out of bounds for length 3\n --> "
+    ],
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "a binding of the index name makes the entry's bound stale: the check stays and catches it"
+  },
+  {
+    "name": "refinement-bce-owned-vector-checked",
+    "source": "fn get(v: u64[], i: u64 where i < v.len()) -> u64 {\n    return v[i];\n}\n\nfn main() -> u64 {\n    v := u64[10, 20, 30];\n    println(get(v, 1));\n    return 0;\n}\n",
+    "stdout": "20\n",
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "asm": [
+      "call rt_trap"
+    ],
+    "note": "an owned vector can be pushed by the body, so its refined length is not used to drop a bounds check"
   }
 ]

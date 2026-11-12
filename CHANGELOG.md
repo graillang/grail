@@ -10,7 +10,10 @@
   the checks. `take(16)` against `align % 16 == 0`, a ray built under `t.is_finite() && t > 0.0`, and
   `return x` for `ensures result.is_finite()` are all discharged. Anything the prover cannot read - a
   `||`, an unreadable term, an argument that is not a name or a constant, an indirect call - keeps its
-  check, so a program is never weaker than the checked one.
+  check, so a program is never weaker than the checked one. A refined parameter (`i < v.len()` on
+  `v: &u64[]`) also feeds the existing bounds-check elimination for the whole body, so
+  `fn get(v: &u64[], i: u64 where i < v.len()) -> u64 { return v[i]; }` compiles with no check on the
+  index path; a body that binds either name again, or a base that is not a shared reference, keeps it.
 
 - Added: tuples. `(u64, string)` types and `(1, "a")` values (each tuple size is a generic record with fields `0`, `1`, ...), `t.0` / `t.0.1`, `(q, r) := divmod(17, 5);` destructuring, and `(A, B)[...]` literals. `iter::enumerate` and `iter::zip` yield tuples; `iter::Indexed` and `iter::Pair` are gone (`p.index`/`p.value` and `z.left`/`z.right` become `.0`/`.1`). The book no longer calls tuples deliberately absent.
 - Added: generic interface methods. `fn wrap<U>(self: &Self, u: U) -> U[];` in an interface, implemented with the same parameters, is specialised per call through bounds, `Interface::method` calls and default methods; an implementation with different type parameters is refused, and (Rust's rule) an interface with one cannot be `dyn`.
