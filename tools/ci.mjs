@@ -497,6 +497,10 @@ function lint() {
   check('LSP server exists', existsSync(join(root, 'tools/lsp/main.grl')));
   check('LSP stdio test exists', existsSync(join(root, 'tools/lsp-test.mjs')));
   check('CI runs the LSP stdio test', readFileSync(join(root, '.github/workflows/ci.yml'), 'utf8').includes('tools/lsp-test.mjs'));
+  check('VS Code extension manifest exists', existsSync(join(root, 'editors/vscode/package.json')));
+  check('TextMate grammar for .grl exists', existsSync(join(root, 'editors/vscode/syntaxes/grail.tmLanguage.json')));
+  const grammarTest = spawnSync(process.execPath, [join(root, 'tools/grammar-test.mjs')], { encoding: 'utf8' });
+  check('editor grammar test passes', grammarTest.status === 0, grammarTest.status === 0 ? 'bun tools/grammar-test.mjs' : (grammarTest.stderr ?? '').trim().split('\n').slice(0, 3).join(' '));
   check('DWARF line-table test exists', existsSync(join(root, 'tools/test-debug-lines.mjs')));
   check('sampling profiler test exists', existsSync(join(root, 'tools/test-profile.mjs')));
   check('sampling profiler doc exists', existsSync(join(root, 'docs/tooling/profiler.md')));

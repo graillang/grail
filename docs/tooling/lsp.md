@@ -12,6 +12,16 @@ bun tools/lsp.mjs            # build (cached by source digest) and serve on stdi
 The launcher builds it with `--default-u64 --typed-refs`, the flags `tools/native.mjs`
 already uses for the compiler and the other Grail programs the test harness builds.
 
+## Editors
+
+`editors/vscode/` is a VS Code extension for `.grl` files: a TextMate grammar (scope name
+`source.grail`, so any grammar-based editor can use it) plus a client for this server. Its three
+settings are the command above — `grail.server.path` (default `bun`), `grail.server.args` (default
+`["tools/lsp.mjs"]`) and `grail.server.cwd` (default: the first workspace folder) — and it needs no
+dependency beyond the editor. Installing it, pointing it at another server executable, and using
+the grammar elsewhere are in [editors/README.md](../../editors/README.md).
+`bun tools/grammar-test.mjs` checks the grammar itself.
+
 Editors point their Grail client at that command. The server needs a `grail` executable to
 run the compiler for diagnostics: `GRAIL_LSP_COMPILER`, then `GRAIL_COMPILER`, then `grail`
 on `PATH`, in that order. The launcher passes the compiler it built from this tree, so a
