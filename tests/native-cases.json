@@ -2541,12 +2541,6 @@
     "diagnostic": "type mismatch"
   },
   {
-    "name": "typed-binding-immutable-needs-colon-eq",
-    "source": "fn main(){x: i32 = 5;}",
-    "reject": true,
-    "diagnostic": "expected :="
-  },
-  {
     "name": "for-in-borrowed-elements",
     "source": "struct Person{name:string,age:u32}\nfn total<a>(people:(&a Person[]))->u32{mut sum: u32 = 0;for p in people{sum+=p.age;}return sum;}\nfn birthday<a>(people:(&a mut Person[])){for p in people{p.age+=1;}}\nfn main(){mut people=Person[Person{name:\"Ann\".text(),age:30},Person{name:\"Bo\".text(),age:25}];\n for p in &people{println(\"{} {}\", p.name, p.age);}println(total(&people));birthday(&mut people);println(total(&people));\n words:=u8[][u8[1,2],u8[3]];mut n=0;for w in &words{n+=w.len();if n>100{break;}}println(n);people.push(Person{name:\"Cy\".text(),age:1});println(people.len());}\n",
     "stdout": "Ann 30\nBo 25\n55\n57\n3\n3\n"
@@ -6294,7 +6288,7 @@
     "diagnostic": [
       "error[E0005]: assignment requires mut",
       "error[E0001]: undefined name",
-      "expected :=",
+      "expected `u64`, found `u8[]`",
       "error: aborting due to 3 previous errors"
     ],
     "note": "an error in a function body does not end the compile: each body with an error is reported, the rest still checked against its signature"
@@ -6593,5 +6587,51 @@
       "lib/io.grl"
     ],
     "stdout": "ping\nos error 22\n"
+  },
+  {
+    "name": "diag-dedupe-generic-validation",
+    "source": "interface Shape { fn area(self: &Self) -> u64; }\nfn show<T: Shape>(s: &T) -> u64 { return s.bogus(); }\nfn main() -> u64 { return 0; }\n",
+    "reject": true,
+    "diagnostic": "collection method requires collection/view",
+    "diagnosticCount": 1
+  },
+  {
+    "name": "diag-dedupe-generic-specialisation",
+    "source": "interface Shape { fn area(self: &Self) -> u64; }\nstruct Sq { n: u64 }\nimpl Shape for Sq { fn area(self: &Sq) -> u64 { return self.n; } }\nfn show<T: Shape>(s: &T) -> u64 { return s.bogus(); }\nfn main() -> u64 { mut q = Sq { n: 3 }; return show(&q); }\n",
+    "reject": true,
+    "diagnostic": "collection method requires collection/view",
+    "diagnosticCount": 1
+  },
+  {
+    "name": "diag-dedupe-counts-distinct-errors",
+    "source": "interface Shape { fn area(self: &Self) -> u64; }\nfn show<T: Shape>(s: &T) -> u64 { return s.bogus(); }\nfn other() -> u64 { return 3.nope(); }\nfn main() -> u64 { return 0; }\n",
+    "reject": true,
+    "diagnostic": "aborting due to 2 previous errors",
+    "diagnosticCount": 1
+  },
+  {
+    "name": "diag-dedupe-message-once-per-location",
+    "source": "interface Shape { fn area(self: &Self) -> u64; }\nfn show<T: Shape>(s: &T) -> u64 { return s.bogus(); }\nfn other() -> u64 { return 3.nope(); }\nfn main() -> u64 { return 0; }\n",
+    "reject": true,
+    "diagnostic": "collection method requires collection/view",
+    "diagnosticCount": 2
+  },
+  {
+    "name": "binding-typed-equals-immutable",
+    "source": "fn main() -> u64 {\n    a: u64 = 5;\n    b: u64 := 6;\n    mut c: u64 = 7;\n    c = c + 1;\n    n: u8 = 200;\n    neg: i32 = -5;\n    name: string = \"grail\";\n    println(a);\n    println(b);\n    println(c);\n    println(n);\n    println(neg);\n    println(name);\n    return 0;\n}\n",
+    "stdout": "5\n6\n8\n200\n-5\ngrail\n"
+  },
+  {
+    "name": "binding-typed-equals-checked",
+    "source": "fn main() -> u64 { x: u64 = true; return x; }\n",
+    "reject": true,
+    "diagnostic": "type mismatch"
+  },
+  {
+    "name": "binding-typed-equals-literal-range",
+    "source": "fn main() -> u64 { small: u8 = 256; return u64(small); }\n",
+    "reject": true,
+    "diagnostic": "integer literal out of range for its type",
+    "diagnosticCount": 1
   }
 ]
