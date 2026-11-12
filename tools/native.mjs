@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { gunzipSync } from 'node:zlib';
+import { constants as zlibConstants, zstdCompressSync, zstdDecompressSync } from 'node:zlib';
 export const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 // Executable/bootstrap targets: these are assembled, linked and run on this host (or under QEMU).
 export const targets = ['x86_64', 'aarch64', 'riscv64'];
@@ -247,6 +247,87 @@ export function execute(executable, args = [], target = hostTarget, options = {}
     cwd: root, maxBuffer: 16 * 1024 * 1024, timeout: 900_000, ...options,
   });
 }
+// Bootstrap seeds. The seed assembly *is* the compiler, it compresses about 20:1 to 30:1, and a reseed
+// rewrites it, so it is stored compressed: checked in as text it would add ~50 MB per reseed (GitHub
+// warns per file above 50 MB - GH001) while nothing reads it as text. `zstd` decompresses the ~160 MB
+// AArch64/RISC-V seeds far faster than gzip and Bun ships libzstd, so no tool or npm package is needed.
+// Every reader goes through seedAssemblyPath(), which holds the bytes to the manifest's digests and
+// decompresses once into a file named by the compressed digest under .work.
+export const seedDirectory = join(root, 'compiler/bootstrap');
+export const seedCache = join(root, '.work/bootstrap-seeds');
+export const seedManifestSchema = 2;
+const seedCompressionLevel = 19;
+export const digest = bytes => createHash('sha256').update(bytes).digest('hex');
+// The x86-64 seed keeps the name `native.s` (it is this host's compiler) with the compressed suffix.
+export function seedFile(target) {
+  return target === 'x86_64' ? 'native.s.zst' : `${target}.s.zst`;
+}
+export function compressSeed(assembly) {
+  return zstdCompressSync(assembly, { params: { [zlibConstants.ZSTD_c_compressionLevel]: seedCompressionLevel } });
+}
+export function readSeedManifest() {
+  const manifest = JSON.parse(readFileSync(join(seedDirectory, 'manifest.json'), 'utf8'));
+  if (manifest.schema !== seedManifestSchema) {
+    throw new Error(`compiler/bootstrap/manifest.json is schema ${manifest.schema}, expected ${seedManifestSchema} (stale tool copy or old seed format)`);
+  }
+  return manifest;
+}
+export function seedEntry(target) {
+  const entry = readSeedManifest().targets?.[target];
+  if (!entry) throw new Error(`compiler/bootstrap/manifest.json records no ${target} bootstrap seed (run bun tools/bootstrap.mjs update all)`);
+  return entry;
+}
+// Manifest entries name the compressed file, the digest of the compressed bytes it caches by, and the
+// digest and size of the assembly it decompresses to - the identity a seed promises, and the only
+// reason a stale seed is visible at all.
+export function seedManifest(sources) {
+  const entries = {};
+  for (const target of targets) {
+    const file = seedFile(target);
+    const path = join(seedDirectory, file);
+    if (!existsSync(path)) continue;
+    const compressed = readFileSync(path);
+    const assembly = zstdDecompressSync(compressed);
+    entries[target] = {
+      file,
+      compression: 'zstd',
+      sha256: digest(assembly),
+      compressedSha256: digest(compressed),
+      uncompressedBytes: assembly.length,
+    };
+  }
+  return { schema: seedManifestSchema, sources, targets: entries };
+}
+// The decompressed seed for `target`, verified against the manifest and cached by compressed digest.
+export function seedAssemblyPath(target) {
+  const entry = seedEntry(target);
+  const path = join(seedDirectory, entry.file);
+  if (!existsSync(path)) throw new Error(`missing bootstrap seed compiler/bootstrap/${entry.file} (run bun tools/bootstrap.mjs update all)`);
+  const compressed = readFileSync(path);
+  const key = digest(compressed);
+  if (entry.compressedSha256 && entry.compressedSha256 !== key) {
+    throw new Error(`Bootstrap integrity check failed: compiler/bootstrap/${entry.file} is ${key}, the manifest records ${entry.compressedSha256}`);
+  }
+  const cached = join(seedCache, `${key}.s`);
+  if (existsSync(cached)) return cached;
+  if (entry.compression !== 'zstd') throw new Error(`compiler/bootstrap/${entry.file} declares unsupported compression ${entry.compression}`);
+  const assembly = zstdDecompressSync(compressed);
+  const actual = digest(assembly);
+  if (actual !== entry.sha256) {
+    throw new Error(`Bootstrap integrity check failed: compiler/bootstrap/${entry.file} decompresses to ${actual}, the manifest records ${entry.sha256}`);
+  }
+  mkdirSync(seedCache, { recursive: true });
+  const pending = `${cached}.pending`;
+  writeFileSync(pending, assembly);
+  renameSync(pending, cached);
+  return cached;
+}
+// A run that produces a seed must name its files the same way every time: the site table writes them
+// relative to the working directory (PWD), while spawnSync's cwd is `root`, so pin PWD to it instead
+// of whatever directory the shell happened to be in.
+export function compilerEnvironment() {
+  return { ...process.env, PWD: root };
+}
 export function buildCompiler() {
   // Explicit development bootstrap, used while a new intrinsic is staged before artifact refresh.
   if (process.env.GRAIL_COMPILER) {
@@ -255,11 +336,8 @@ export function buildCompiler() {
     return supplied;
   }
   if (process.platform !== 'linux' || !hostTarget) throw new Error('Grail currently supports Linux on x86-64, ARM64 and RISC-V 64; other operating systems are not implemented');
-  const boot = join(root, 'compiler/bootstrap', hostTarget === 'x86_64' ? 'native.s' : `${hostTarget}.s.gz`);
-  const recorded = JSON.parse(readFileSync(join(root, 'compiler/bootstrap/manifest.json'), 'utf8'));
-  const bootBytes = boot.endsWith('.gz') ? gunzipSync(readFileSync(boot)) : readFileSync(boot);
-  const bootDigest = createHash('sha256').update(bootBytes).digest('hex');
-  if (recorded.targets[hostTarget]?.sha256 !== bootDigest) throw new Error('Bootstrap integrity check failed');
+  const boot = join(seedDirectory, seedFile(hostTarget));
+  const assembly = seedAssemblyPath(hostTarget);
   const hash = createHash('sha256');
   hash.update(readFileSync(fileURLToPath(import.meta.url)));
   hash.update(readFileSync(boot));
@@ -268,11 +346,9 @@ export function buildCompiler() {
   const executable = join(directory, 'grail');
   if (existsSync(executable)) return executable;
   mkdirSync(directory, { recursive: true });
-  let assembly = boot;
-  if (boot.endsWith('.gz')) { assembly = join(directory, 'bootstrap.s'); writeFileSync(assembly, gunzipSync(readFileSync(boot))); }
   const bootstrap = assemble(assembly, join(directory, 'bootstrap'));
   const output = join(directory, 'compiler.s');
-  command([bootstrap, '--default-u64', '--typed-refs', output, ...compilerSources]);
+  command([bootstrap, '--default-u64', '--typed-refs', output, ...compilerSources], { env: compilerEnvironment() });
   const pending = assemble(output, join(directory, 'grail.pending'));
   renameSync(pending, executable);
   return executable;

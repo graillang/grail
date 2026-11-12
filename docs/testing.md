@@ -44,8 +44,26 @@ compiler for every target and *runs* the aarch64/riscv64 results to check self-h
 it starts and refuses to publish if they change mid-run, so do not edit `compiler/*.grl` while it
 runs. Expect up to an hour per emulated target.
 
+**The seed is checked in compressed.** `compiler/bootstrap/native.s.zst` (and `aarch64.s.zst`,
+`riscv64.s.zst`) is the same assembly zstd-compressed, so a reseed adds a few megabytes instead of
+50 or 160. It is the file a clone assembles: `bootstrap.mjs update` writes it, and every reader
+(`tools/native.mjs buildCompiler`, `ci.mjs preflight`, `bootstrap.mjs verify`) goes through
+`seedAssemblyPath`, which decompresses once into `.work/bootstrap-seeds/<compressed-digest>.s` and
+holds the result to the manifest. `manifest.json` records the digest of the compressed bytes *and*
+the digest and size of the assembly they decompress to, so a stale or corrupt seed is refused by
+exactly the same check as before. It is plain zstd (Bun's `node:zlib` compresses and decompresses it,
+so no tool or package is needed), and the `zstd` CLI can read it too - `zstd -dc
+compiler/bootstrap/native.s.zst | sha256sum` must print the `sha256` in the manifest. Never edit a
+seed by hand; `bun tools/bootstrap.mjs update <arch>` rewrites it.
+
+The seed carries no path from the machine that built it: a call-site table names each file relative to
+the working directory (`compiler/native.grl`, the form a runtime error prints), so `bootstrap.mjs
+verify` matches in any clone and a reseed is a change in the compiler, not in where it was run.
+`tools/native.mjs` pins `PWD` to the tree root for the compiler runs that produce a seed, so running
+the tools from a subdirectory cannot reintroduce absolute names.
+
 **A host builtin that the compiler itself calls needs a two-step bootstrap.** The checked-in seed
-(`compiler/bootstrap/native.s`) *is* the compiler, including its table of `host::` builtins in
+(`compiler/bootstrap/native.s.zst`) *is* the compiler, including its table of `host::` builtins in
 `compiler/native.grl` — so a seed recorded before the builtin existed cannot compile a
 `compiler/*.grl` that calls it:
 

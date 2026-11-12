@@ -6,13 +6,13 @@ import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { gzipSync, gunzipSync } from 'node:zlib';
+import { gzipSync } from 'node:zlib';
 import {
   PLATFORMS, LANES, BUILD_ONLY, PLANNED, SUPPORTED, artifactName, artifactPattern, buildPlan,
   detectToolchain, findRunner, gitCommit, hostPlatformId, inspectBinary, platformById,
   readVersion, root,
 } from './platforms.mjs';
-import { buildCompiler, command, compilerSources, assemble, compileProgram } from './native.mjs';
+import { buildCompiler, command, compilerSources, assemble, compileProgram, digest, seedDirectory, seedFile, seedAssemblyPath, readSeedManifest } from './native.mjs';
 import { compileProgram as compileWindowsProgram, headers as windowsHeaders, inspectImage as inspectPeImage, inspectObject as inspectPeObject } from './windows.mjs';
 import { createPackage, sha256, verifyPackage, writeChecksums } from './package.mjs';
 import { buildObjectBundle, verifyObjectBundle } from './objects.mjs';
@@ -54,10 +54,10 @@ function sourceDigests() {
 }
 
 export function bootstrapStatus() {
-  const directory = join(root, 'compiler/bootstrap');
-  const manifestPath = join(directory, 'manifest.json');
+  const manifestPath = join(seedDirectory, 'manifest.json');
   if (!existsSync(manifestPath)) return { fresh: false, detail: 'compiler/bootstrap/manifest.json is missing' };
-  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+  let manifest;
+  try { manifest = readSeedManifest(); } catch (error) { return { fresh: false, detail: error.message }; }
   const actualSources = sourceDigests();
   const sourcesMatch = JSON.stringify(manifest.sources) === JSON.stringify(actualSources);
   const changed = Object.keys(actualSources).filter(name => manifest.sources?.[name] !== actualSources[name]);
@@ -65,11 +65,14 @@ export function bootstrapStatus() {
   for (const target of ['x86_64', 'aarch64', 'riscv64']) {
     const recorded = manifest.targets?.[target];
     if (!recorded) { targets[target] = { match: false, detail: 'not recorded' }; continue; }
-    const path = join(directory, recorded.file);
-    if (!existsSync(path)) { targets[target] = { match: false, detail: `missing ${recorded.file}` }; continue; }
-    const bytes = recorded.file.endsWith('.gz') ? gunzipSync(readFileSync(path)) : readFileSync(path);
-    const digest = sha256(bytes);
-    targets[target] = { match: digest === recorded.sha256, file: recorded.file, sha256: digest };
+    // Reading a seed decompresses it once into .work and checks both the compressed and the
+    // uncompressed digest, so a mismatch here is corruption, not staleness.
+    try {
+      const path = seedAssemblyPath(target);
+      targets[target] = { match: true, file: recorded.file, sha256: digest(readFileSync(path)) };
+    } catch (error) {
+      targets[target] = { match: false, file: recorded.file, detail: error.message };
+    }
   }
   const targetsMatch = Object.values(targets).every(entry => entry.match);
   return {
@@ -94,8 +97,8 @@ function stage0Info() {
   const host = hostPlatformId();
   if (!host) return { kind: 'bootstrap', path: null, exists: false, info: null };
   const platform = platformById(host);
-  const file = platform.arch === 'x86_64' ? 'native.s' : `${platform.arch}.s.gz`;
-  return { kind: 'bootstrap', path: join(root, 'compiler/bootstrap', file), exists: existsSync(join(root, 'compiler/bootstrap', file)), info: null };
+  const file = join(seedDirectory, seedFile(platform.arch));
+  return { kind: 'bootstrap', path: file, exists: existsSync(file), info: null };
 }
 
 export function preflight() {
