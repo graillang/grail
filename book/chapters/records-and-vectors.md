@@ -54,8 +54,11 @@ Any vector can be sliced (see [Views and slices](views.html)).
 
 A function can return several values in a named record. `Stats` gives each result a clear name, and
 callers access its fields with `.`. Field punning shortens the literal: `Stats { low, high,
-mean: ... }` takes `low` and `high` from the variables in scope. Tuples are not part of the language,
-so a named record is how a function returns more than one value.
+mean: ... }` takes `low` and `high` from the variables in scope.
+
+When the values need no names, return a tuple: `fn divmod(a: u64, b: u64) -> (u64, u64)` returns
+`(a / b, a % b)`, `(q, r) := divmod(17, 5);` takes it apart, and `t.0`, `t.1` read one element. A
+tuple owns its elements like a record owns its fields; `enumerate` and `zip` yield tuples.
 
 {{example:records-patterns}}
 

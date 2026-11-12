@@ -449,6 +449,8 @@ struct C {
     receiver: u64,
     receiver_ty: u64,
     has_receiver: u64,
+    // The next record() builds a tuple positionally.
+    positional: u64,
     // A `&mut self` receiver call() borrows after its arguments (has_receiver 3).
     lazy_input: u64,
     lazy_inty: u64,
@@ -7397,8 +7399,175 @@ fn find_decl_internal<a, b, d>(c: (&a mut C), m: &b [u8], n: &d [u8]) -> u64 {
             return i + 1;
         }
     }
+    // `.tuple::TupleN` (an interface file naming a tuple type): made on first use.
+    if same(view(m), view(".tuple")) && (n.len() > 5) {
+        mut count = 0;
+        for i in 5..n.len() {
+            count = count * 10 + u64(n[i] - 48);
+        }
+        return tuple_decl(&mut c, count) + 1;
+    }
     return 0;
 }
+// ---- tuples --------------------------------------------------------------------------------------
+// `(A, B)` is the generic record `.tuple::Tuple2<A, B>` with fields `0` and `1`, made the first time
+// a tuple of that size is named: interning, ownership, drops, generics and interface files are the
+// record's. `(a, b)` builds one (record, positionally), `t.0` reads a field, and `(x, y) := t;` takes
+// it apart (tuple_destructure).
+fn tuple_decl<a>(c: (&a mut C), count: u64) -> u64 {
+    mut name = copy_bytes(view("Tuple"));
+    decimal(&mut name, count);
+    for i in c.decls.len() {
+        x := &c.decls[i];
+        if same(view(x.module), view(".tuple")) & same(view(x.name), view(name)) {
+            return i;
+        }
+    }
+    if (count < 2) || (count > 12) {
+        fail(&mut c, view("a tuple has 2 to 12 elements"));
+    }
+    first := c.fields.len();
+    mut bounds = u64[];
+    mut constraints = u64[][];
+    for i in count {
+        mut field = u8[];
+        decimal(&mut field, i);
+        ty := intern_args(&mut c, 9, i, 0, u64[], u64[]);
+        c.fields.push(Field { name: field, ty: ty });
+        bounds.push(0);
+        constraints.push(u64[]);
+    }
+    c
+        .decls
+        .push(
+            Decl {
+                public: 1,
+                module: copy_bytes(view(".tuple")),
+                name: name,
+                is_enum: 0,
+                opaque: 0,
+                transfer: 0,
+                share: 0,
+                c_layout: 0,
+                first: first,
+                count: count,
+                regions: 0,
+                types: count,
+                success: 0,
+                bounds: bounds,
+                constraints: constraints,
+            }
+        );
+    return c.decls.len() - 1;
+}
+// The tuple record type of these element types.
+fn tuple_type<a, b>(c: (&a mut C), elements: (&b u64[])) -> u64 {
+    d := tuple_decl(&mut c, elements.len());
+    return intern_args(&mut c, 8, d, 0, u64[], copy_numbers(&elements));
+}
+// Whether the parenthesis at c.pos opens a tuple: a comma at its own depth (not inside a closure's
+// `|...|`) before its `)`.
+fn tuple_ahead<a>(c: (&a mut C)) -> bool {
+    mut depth = 0;
+    mut q = c.pos;
+    mut bars = 0;
+    while q < c.toks.len() {
+        k := kind_at(&mut c, q);
+        if (k == 40) || (k == 91) || (k == 123) {
+            depth += 1;
+        } else if (k == 41) || (k == 93) || (k == 125) {
+            depth -= 1;
+            if depth == 0 {
+                return false;
+            }
+        } else if (k == 124) && (depth == 1) {
+            bars += 1;
+        } else if (k == 44) && (depth == 1) && (bars % 2 == 0) {
+            return true;
+        } else if (k == 59) && (depth <= 1) {
+            return false;
+        }
+        q += 1;
+    }
+    return false;
+}
+// `( ident , ident ... ) :=` at c.pos.
+fn tuple_pattern_ahead<a>(c: (&a mut C)) -> bool {
+    mut q = c.pos + 1;
+    while true {
+        if kind_at(&mut c, q) != 1 {
+            return false;
+        }
+        q += 1;
+        if kind_at(&mut c, q) == 41 {
+            return kind_at(&mut c, q + 1) == 261;
+        }
+        if kind_at(&mut c, q) != 44 {
+            return false;
+        }
+        q += 1;
+    }
+    return false;
+}
+// The `)` matching the `(` at c.pos.
+fn paren_close<a>(c: (&a mut C)) -> u64 {
+    mut depth = 0;
+    mut q = c.pos;
+    while q < c.toks.len() {
+        k := kind_at(&mut c, q);
+        if (k == 40) || (k == 91) || (k == 123) {
+            depth += 1;
+        } else if (k == 41) || (k == 93) || (k == 125) {
+            depth -= 1;
+            if depth == 0 {
+                return q;
+            }
+        }
+        q += 1;
+    }
+    return q;
+}
+// `(a, b, c) := expr;` - a tuple's elements bound to new names; `_` skips one (it is dropped).
+fn tuple_destructure<a>(c: (&a mut C)) -> unit {
+    expect(&mut c, view("("));
+    mut names = u8[][];
+    while true {
+        names.push(ident(&mut c));
+        if eat(&mut c, view(")")) {
+            break;
+        }
+        expect(&mut c, view(","));
+    }
+    expect(&mut c, view(":="));
+    v := expr(&mut c, 0);
+    expect(&mut c, view(";"));
+    held := move_value(&mut c, v);
+    ty := base_type(&mut c, held.ty);
+    mut ok = ty_kind(&mut c, ty) == 8;
+    if ok {
+        d := ty_arg(&mut c, ty);
+        ok = same(view(c.decls[d].module), view(".tuple")) && (c.decls[d].count == names.len());
+    }
+    if !ok {
+        fail(&mut c, view("tuple pattern does not match the value's type"));
+    }
+    source := place_of(&mut c, held.t);
+    for i in names.len() {
+        fty := field_type(&mut c, ty, i);
+        part := rec_load(&mut c, held.t, i, 0);
+        own(&mut c, part, fty);
+        dest := place_of(&mut c, part);
+        if contains_borrow(&mut c, fty, 0) {
+            transfer_bonds(&mut c, source, dest);
+        }
+        stored_source(&mut c, part, fty);
+        bind(&mut c, names[i].copy(), fty, part, 0);
+    }
+    move_out(&mut c, val(held.t, held.ty));
+    invoke(&mut c, view("rt_free"), one(held.t));
+    return ();
+}
+
 // These declarations back concise syntax and are not public nominal types.
 fn find_decl<a, b, d>(c: (&a mut C), m: &b [u8], n: &d [u8]) -> u64 {
     here := module_copy(&mut c);
@@ -7971,6 +8140,19 @@ fn parse_type_base<a>(c: (&a mut C)) -> u64 {
         }
         old := exchange(&mut c.no_union, 0);
         t := parse_type(&mut c);
+        // `(A, B)`: a tuple type.
+        if eat(&mut c, view(",")) {
+            mut elements = u64[t];
+            while !eat(&mut c, view(")")) {
+                e := parse_type(&mut c);
+                elements.push(e);
+                if !is(&mut c, view(")")) {
+                    expect(&mut c, view(","));
+                }
+            }
+            exchange(&mut c.no_union, old);
+            return tuple_type(&mut c, &elements);
+        }
         exchange(&mut c.no_union, old);
         expect(&mut c, view(")"));
         return t;
@@ -14543,8 +14725,25 @@ fn carray_surface<a>(c: (&a mut C), t: u64) -> u64 {
     elem := ty_arg(&mut c, t);
     return vec_of(&mut c, elem);
 }
+// Consumes the current token if it is of kind `k`.
+fn eat_kind<a>(c: (&a mut C), k: u64) -> bool {
+    if kind(&mut c) == k {
+        advance(&mut c);
+        return true;
+    }
+    return false;
+}
 fn record<a>(c: (&a mut C), d: u64, explicit: u64) -> Val {
-    expect(&mut c, view("{"));
+    // A tuple literal `(a, b)` is a record built positionally (tuple_decl).
+    positional := exchange(&mut c.positional, 0) != 0;
+    // The closing bracket's token kind: `)` or `}`.
+    mut close = 125;
+    if positional {
+        expect(&mut c, view("("));
+        close = 41;
+    } else {
+        expect(&mut c, view("{"));
+    }
     count := c.decls[d].count;
     if c.decls[d].opaque != 0 {
         fail(&mut c, view("opaque handles cannot be constructed"));
@@ -14563,10 +14762,18 @@ fn record<a>(c: (&a mut C), d: u64, explicit: u64) -> Val {
     }
     sz := imm(&mut c, size);
     n := invoke(&mut c, view("rt_rec"), one(sz));
-    if !eat(&mut c, view("}")) {
+    mut index = 0;
+    if !eat_kind(&mut c, close) {
         while true {
-            f := ident(&mut c);
-            has_colon := eat(&mut c, view(":"));
+            mut f = u8[];
+            mut has_colon = true;
+            if positional {
+                decimal(&mut f, index);
+                index += 1;
+            } else {
+                f = ident(&mut c);
+                has_colon = eat(&mut c, view(":"));
+            }
             astart := c.pos;
             k := find_field(&mut c, d, view(f));
             field := surface_field_ty(&mut c, d, k);
@@ -14655,11 +14862,11 @@ fn record<a>(c: (&a mut C), d: u64, explicit: u64) -> Val {
             } else {
                 rec_store(&mut c, n, k, held.t);
             }
-            if eat(&mut c, view("}")) {
+            if eat_kind(&mut c, close) {
                 break;
             }
             expect(&mut c, view(","));
-            if eat(&mut c, view("}")) {
+            if eat_kind(&mut c, close) {
                 break;
             }
         }
@@ -23211,11 +23418,39 @@ fn primary<a>(c: (&a mut C)) -> Val {
                 q += 1;
             }
             if kind_at(&mut c, q + 1) == 91 {
-                advance(&mut c);
-                ty := parse_type(&mut c);
-                expect(&mut c, view(")"));
+                // `(T)[...]` or a tuple type `(A, B)[...]`.
+                ty := parse_type_base(&mut c);
                 return finish_type_literal(&mut c, ty);
             }
+        }
+        if tuple_ahead(&mut c) {
+            // `(a, b)`: a tuple, built as its record with the elements in field order.
+            mut count = 0;
+            mut depth = 0;
+            mut q = c.pos;
+            mut bars = 0;
+            while q < c.toks.len() {
+                kk := kind_at(&mut c, q);
+                if (kk == 40) || (kk == 91) || (kk == 123) {
+                    depth += 1;
+                } else if (kk == 41) || (kk == 93) || (kk == 125) {
+                    depth -= 1;
+                    if depth == 0 {
+                        if kind_at(&mut c, q - 1) != 44 {
+                            count += 1;
+                        }
+                        break;
+                    }
+                } else if (kk == 124) && (depth == 1) {
+                    bars += 1;
+                } else if (kk == 44) && (depth == 1) && (bars % 2 == 0) {
+                    count += 1;
+                }
+                q += 1;
+            }
+            d := tuple_decl(&mut c, count);
+            exchange(&mut c.positional, 1);
+            return record(&mut c, d, 18446744073709551615);
         }
         advance(&mut c);
         if eat(&mut c, view(")")) {
@@ -27010,6 +27245,9 @@ fn statement<a>(c: (&a mut C)) -> unit {
     if is(&mut c, view("{")) {
         block(&mut c);
         return ();
+    }
+    if is(&mut c, view("(")) && tuple_pattern_ahead(&mut c) {
+        return tuple_destructure(&mut c);
     }
     if is(&mut c, view("mut"))
         || next_kind(&mut c) == 261
@@ -32152,6 +32390,7 @@ pub fn main() -> u64 {
         receiver: 0,
         receiver_ty: 0,
         has_receiver: 0,
+        positional: 0,
         lazy_input: 0,
         lazy_inty: 0,
         lazy_xty: 0,

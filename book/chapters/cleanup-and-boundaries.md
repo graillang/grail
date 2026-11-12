@@ -109,7 +109,7 @@ Indexed map assignment currently updates a named map or a field path only; a tem
 nested target such as `nested["a"]["b"] = 1` is rejected. Map iteration only borrows the map, so
 `for key, value in map` over an owned map is refused: write `&map`.
 
-Tail-expression returns and tuples are deliberately absent, not pending.
+Tail-expression returns are deliberately absent, not pending.
 
 ## Where to go next
 
