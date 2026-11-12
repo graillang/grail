@@ -123,7 +123,9 @@ struct Interface {
     // Associated types (`type Item;`), by index, and the interfaces each must implement
     // (`type Item: Ord;`).
     assoc: u8[][],
-    assoc_bounds: u64[][]
+    assoc_bounds: u64[][],
+    // `interface B: A + C`: interfaces every implementation of this one also implements.
+    supers: u64[]
 }
 struct Implementation {
     contract: u64,
@@ -6033,6 +6035,7 @@ fn ensure_interface<a>(c: (&a mut C), module: u8[], name: u8[]) -> u64 {
                 default_files: u64[],
                 assoc: u8[][],
                 assoc_bounds: u64[][],
+                supers: u64[],
             }
         );
     return c.interfaces.len();
@@ -6185,6 +6188,67 @@ fn impl_param_types<a>(c: (&a mut C), id: u64) -> u64[] {
     }
     return out;
 }
+// ---- interface inheritance --------------------------------------------------------------------------
+// `interface B: A` (Rust's supertraits): implementing B requires implementing A, and anything known to
+// implement B - a bound `T: B`, a `dyn B` - implements A too. `all_supers` is the transitive set.
+fn all_supers<a>(c: (&a mut C), id: u64) -> u64[] {
+    mut out = u64[];
+    mut todo = copy_numbers(&c.interfaces[id - 1].supers);
+    while todo.len() != 0 {
+        s := todo.pop();
+        mut seen = s == id;
+        for i in out.len() {
+            if out[i] == s {
+                seen = true;
+            }
+        }
+        if !seen {
+            out.push(s);
+            more := copy_numbers(&c.interfaces[s - 1].supers);
+            for j in more.len() {
+                todo.push(more[j]);
+            }
+        }
+    }
+    return out;
+}
+// Whether `id` is `contract` or extends it.
+fn interface_implies<a>(c: (&a mut C), id: u64, contract: u64) -> bool {
+    if id == contract {
+        return true;
+    }
+    supers := all_supers(&mut c, id);
+    for i in supers.len() {
+        if supers[i] == contract {
+            return true;
+        }
+    }
+    return false;
+}
+// The interface an interface method belongs to (its module is `.interface_N`).
+fn interface_of_method<a>(c: (&a mut C), index: u64) -> u64 {
+    for i in c.interfaces.len() {
+        methods := copy_numbers(&c.interfaces[i].methods);
+        for j in methods.len() {
+            if methods[j] == index {
+                return i + 1;
+            }
+        }
+    }
+    return 0;
+}
+// A dyn object's methods in vtable order: the interface's own, then each super's (all_supers order).
+fn dyn_methods<a>(c: (&a mut C), id: u64) -> u64[] {
+    mut out = copy_numbers(&c.interfaces[id - 1].methods);
+    supers := all_supers(&mut c, id);
+    for i in supers.len() {
+        more := copy_numbers(&c.interfaces[supers[i] - 1].methods);
+        for j in more.len() {
+            out.push(more[j]);
+        }
+    }
+    return out;
+}
 fn satisfies_interface<a>(c: (&a mut C), ty: u64, contract: u64) -> bool {
     actual := base_type(&mut c, ty);
     // `T::Item` where the interface says `type Item: B;`.
@@ -6195,7 +6259,7 @@ fn satisfies_interface<a>(c: (&a mut C), ty: u64, contract: u64) -> bool {
         if j < c.interfaces[owner - 1].assoc_bounds.len() {
             bounds := copy_numbers(&c.interfaces[owner - 1].assoc_bounds[j]);
             for i in bounds.len() {
-                if bounds[i] == contract {
+                if interface_implies(&mut c, bounds[i], contract) {
                     return true;
                 }
             }
@@ -6203,14 +6267,16 @@ fn satisfies_interface<a>(c: (&a mut C), ty: u64, contract: u64) -> bool {
         return false;
     }
     if ty_kind(&mut c, actual) == 33 {
-        return ty_arg(&mut c, actual) == contract;
+        object := ty_arg(&mut c, actual);
+        return interface_implies(&mut c, object, contract);
     }
     if ty_kind(&mut c, actual) == 9 {
         proofs := type_args(&mut c, actual);
         for i in proofs.len() {
             p := proofs[i];
             if ty_kind(&mut c, p) == 15 {
-                if ty_arg(&mut c, p) == contract {
+                bound := ty_arg(&mut c, p);
+                if interface_implies(&mut c, bound, contract) {
                     return true;
                 }
             }
@@ -6556,11 +6622,12 @@ fn dyn_box<a>(c: (&a mut C), v: Val, expected: u64) -> Val {
         c.vtables.push(concrete);
         // A generic implementation's methods are specialised for this type now, while
         // specialisations are still being emitted; emit_vtables only names them.
-        methods := copy_numbers(&c.interfaces[id - 1].methods);
+        methods := dyn_methods(&mut c, id);
         for j in methods.len() {
             name := c.funcs[methods[j]].name.copy();
-            actual := resolve_interface_method(&mut c, id, concrete, view(name));
-            interface_symbol(&mut c, id, concrete, actual);
+            owner := interface_of_method(&mut c, methods[j]);
+            actual := resolve_interface_method(&mut c, owner, concrete, view(name));
+            interface_symbol(&mut c, owner, concrete, actual);
         }
     }
     observe(&mut c, v.t);
@@ -6614,12 +6681,13 @@ fn emit_vtables<a>(c: (&a mut C)) -> unit {
             o(&mut c, view("0"));
         }
         c.out.push(10);
-        methods := copy_numbers(&c.interfaces[id - 1].methods);
+        methods := dyn_methods(&mut c, id);
         for j in methods.len() {
             name := c.funcs[methods[j]].name.copy();
-            actual := resolve_interface_method(&mut c, id, concrete, view(name));
+            owner := interface_of_method(&mut c, methods[j]);
+            actual := resolve_interface_method(&mut c, owner, concrete, view(name));
             module := c.funcs[actual].module.copy();
-            symbol := interface_symbol(&mut c, id, concrete, actual);
+            symbol := interface_symbol(&mut c, owner, concrete, actual);
             o(&mut c, view(".quad "));
             mangle(&mut c, view(module), view(symbol));
             c.out.push(10);
@@ -6632,8 +6700,8 @@ fn emit_vtables<a>(c: (&a mut C)) -> unit {
 // `Self` appears nowhere else - not in other parameters, not in the result - and the interface has
 // no associated types, which a `dyn I` could not name.
 fn check_object_safety<a>(c: (&a mut C), id: u64) -> unit {
-    item := &c.interfaces[id - 1];
-    methods := copy_numbers(&item.methods);
+    // A dyn object carries its supers' methods too (dyn_methods).
+    methods := dyn_methods(&mut c, id);
     mut message = u8[];
     push_bytes(&mut message, view("interface `"));
     push_bytes(&mut message, view(c.interfaces[id - 1].name));
@@ -10327,7 +10395,35 @@ fn interface_declaration<a>(c: (&a mut C), pass: u64) -> unit {
     module := module_copy(&mut c);
     id := ensure_interface(&mut c, module, name);
     interface_public := c.decl_public;
+    // `interface B: A + C`.
+    mut supers = u64[];
+    if eat(&mut c, view(":")) {
+        while true {
+            first := ident(&mut c);
+            mut sm = module_copy(&mut c);
+            mut sn = first.copy();
+            if eat(&mut c, view("::")) {
+                sm = first.copy();
+                sn = ident(&mut c);
+            } else {
+                imported := resolve_import(&mut c, view(sn));
+                if imported.len() != 0 {
+                    sm = imported;
+                }
+            }
+            sup := ensure_interface(&mut c, sm, sn);
+            if sup == id {
+                fail(&mut c, view("an interface cannot extend itself"));
+            }
+            supers.push(sup);
+            if !eat(&mut c, view("+")) {
+                break;
+            }
+        }
+    }
     if pass == 1 {
+        item := &mut c.interfaces[id - 1];
+        exchange(&mut item.supers, supers.copy());
         item := &c.interfaces[id - 1];
         defined := item.defined;
         if defined != 0 {
@@ -10983,6 +11079,25 @@ fn check_interfaces<a>(c: (&a mut C)) -> unit {
                     push_bytes(&mut message, view("` (write: type "));
                     push_bytes(&mut message, view(assoc[a]));
                     push_bytes(&mut message, view(" = ...;)"));
+                    load_file(&mut c, impl_file);
+                    exchange(&mut c.file, impl_file);
+                    exchange(&mut c.pos, impl_pos - 1);
+                    fail(&mut c, view(message));
+                }
+            }
+        }
+        // Implementing `B: A` requires an implementation of A for the same type.
+        if impl_pos != 0 {
+            supers := all_supers(&mut c, contract);
+            ity := c.implementations[i].ty;
+            for s in supers.len() {
+                if !satisfies_interface(&mut c, ity, supers[s]) {
+                    mut message = u8[];
+                    push_bytes(&mut message, view("implementing `"));
+                    push_bytes(&mut message, view(c.interfaces[contract - 1].name));
+                    push_bytes(&mut message, view("` requires implementing `"));
+                    push_bytes(&mut message, view(c.interfaces[supers[s] - 1].name));
+                    push_bytes(&mut message, view("` for the same type"));
                     load_file(&mut c, impl_file);
                     exchange(&mut c.file, impl_file);
                     exchange(&mut c.pos, impl_pos - 1);
@@ -15456,9 +15571,11 @@ fn emit_resolved_call<a>(
             self := map[0];
             selfbase := base_type(&mut c, self);
             if ty_kind(&mut c, selfbase) == 33 {
-                methods := copy_numbers(&c.interfaces[contract - 1].methods);
+                object := ty_arg(&mut c, selfbase);
+                methods := dyn_methods(&mut c, object);
                 for j in methods.len() {
-                    if same(view(c.funcs[methods[j]].name), view(name)) {
+                    // The method of `contract` (the interface itself or a super) of that name.
+                    if (dyn_entry == 0) && same(view(c.funcs[methods[j]].name), view(name)) && same(view(c.funcs[methods[j]].module), view(private_module(view(".interface_"), contract))) {
                         dyn_entry = j + 2;
                     }
                 }
@@ -21721,8 +21838,22 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
     // (Rust's method syntax on generic bounds; `Interface::name(item)` is the same call).
     // `object.name()` on `dyn I`: I's method, called through the object's vtable.
     if k == 33 {
-        owner := private_module(view(".interface_"), ty_arg(&mut c, xty));
-        method := find_func(&mut c, view(owner), view(name));
+        object := ty_arg(&mut c, xty);
+        mut owner = private_module(view(".interface_"), object);
+        mut method = find_func(&mut c, view(owner), view(name));
+        if method == 0 {
+            supers := all_supers(&mut c, object);
+            for i in supers.len() {
+                if method == 0 {
+                    candidate := private_module(view(".interface_"), supers[i]);
+                    m2 := find_func(&mut c, view(candidate), view(name));
+                    if m2 != 0 {
+                        owner = candidate;
+                        method = m2;
+                    }
+                }
+            }
+        }
         if method == 0 {
             fail(&mut c, view("the interface has no method of that name"));
         }
@@ -21743,7 +21874,12 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
         mut bounds = u64[];
         for i in proofs.len() {
             if ty_kind(&mut c, proofs[i]) == 15 {
-                bounds.push(ty_arg(&mut c, proofs[i]));
+                b := ty_arg(&mut c, proofs[i]);
+                bounds.push(b);
+                more := all_supers(&mut c, b);
+                for j in more.len() {
+                    bounds.push(more[j]);
+                }
             }
         }
         mut owner = u8[];
@@ -30307,6 +30443,13 @@ fn iface_module_text<a, b, d>(c: (&a mut C), m: &b [u8], path: &d [u8], in_std: 
         push_bytes(&mut out, view("interface "));
         iface_interface_ref(&mut out, &mut c, index + 1);
         out.push(10);
+        // The interfaces it extends.
+        supers := copy_numbers(&c.interfaces[index].supers);
+        for j in supers.len() {
+            push_bytes(&mut out, view("super "));
+            iface_interface_ref(&mut out, &mut c, supers[j]);
+            out.push(10);
+        }
         // Associated types in declaration order: a projection names one by index.
         assoc := copy_names(&c.interfaces[index].assoc);
         for j in assoc.len() {
@@ -31280,6 +31423,25 @@ fn iface_define<a, b, d>(c: (&a mut C), st: (&a mut IState), line: &b [u8], path
         if !have {
             item := &mut c.interfaces[st.contract - 1];
             item.assoc.push(name);
+        }
+        return ();
+    }
+    if same(view(word), view("super")) {
+        if st.section != 2 {
+            iface_fail(&p, view("a `super` line belongs to an interface"));
+        }
+        ref := ip_ref(&mut p);
+        sup := ensure_interface(&mut c, ip_ref_module(&ref), ip_ref_name(&ref));
+        known := copy_numbers(&c.interfaces[st.contract - 1].supers);
+        mut have = false;
+        for j in known.len() {
+            if known[j] == sup {
+                have = true;
+            }
+        }
+        if !have {
+            item := &mut c.interfaces[st.contract - 1];
+            item.supers.push(sup);
         }
         return ();
     }

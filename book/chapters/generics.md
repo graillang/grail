@@ -62,6 +62,13 @@ Inside `show`, `s.name()` is the bound's method; `Shape::name(s)` is the same ca
 pick one when two bounds declare the same name. An implementation must write every method that has
 no default, and only methods the interface declares.
 
+## Interfaces that extend others
+
+`interface Shape: Named { ... }` says every `Shape` is also a `Named` (Rust's supertraits): an
+implementation of `Shape` needs one of `Named` for the same type, and anything known to be a
+`Shape` - a bound `T: Shape`, a default method's `self`, a `dyn Shape` - can call `Named`'s
+methods too. List several with `+`: `interface Store: Read + Write`.
+
 ## Generic implementations
 
 An implementation can be generic itself: `impl<T: Show> Show for Box<T>` makes every `Box<T>` a
