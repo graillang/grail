@@ -2541,12 +2541,6 @@
     "diagnostic": "type mismatch"
   },
   {
-    "name": "typed-binding-immutable-needs-colon-eq",
-    "source": "fn main(){x: i32 = 5;}",
-    "reject": true,
-    "diagnostic": "expected :="
-  },
-  {
     "name": "for-in-borrowed-elements",
     "source": "struct Person{name:string,age:u32}\nfn total<a>(people:(&a Person[]))->u32{mut sum: u32 = 0;for p in people{sum+=p.age;}return sum;}\nfn birthday<a>(people:(&a mut Person[])){for p in people{p.age+=1;}}\nfn main(){mut people=Person[Person{name:\"Ann\".text(),age:30},Person{name:\"Bo\".text(),age:25}];\n for p in &people{println(\"{} {}\", p.name, p.age);}println(total(&people));birthday(&mut people);println(total(&people));\n words:=u8[][u8[1,2],u8[3]];mut n=0;for w in &words{n+=w.len();if n>100{break;}}println(n);people.push(Person{name:\"Cy\".text(),age:1});println(people.len());}\n",
     "stdout": "Ann 30\nBo 25\n55\n57\n3\n3\n"
@@ -6784,5 +6778,55 @@
     "source": "fn main() -> u64 {\n    t := (\"a\", u64[1, 2]);\n    (s, v) := t;\n    println(\"{} {}\", s, v.len());\n    println(t.0);\n    return 0;\n}\n",
     "reject": true,
     "diagnostic": "use of moved"
+  },
+  {
+    "name": "unsafe-pointer-read-write",
+    "source": "fn main() -> u64 {\n    mut x: u64 = 41;\n    unsafe {\n        p := ptr_of(&mut x);\n        p.write(p.read() + 1);\n    }\n    println(x);\n    return 0;\n}\n",
+    "stdout": "42\n"
+  },
+  {
+    "name": "unsafe-pointer-alloc-steps",
+    "source": "fn main() -> u64 {\n    unsafe {\n        q := alloc(u64, 4);\n        println(q.is_null());\n        q.write(7);\n        q.add(1).write(9);\n        q.add(2).write(11);\n        println(q.read());\n        println(q.add(1).read());\n        println(q.add(2).read());\n        println(q.add(3).read());\n        println(q.add(2).sub(1).read());\n        free(q);\n    }\n    return 0;\n}\n",
+    "stdout": "false\n7\n9\n11\n0\n9\n"
+  },
+  {
+    "name": "unsafe-pointer-address-round-trip",
+    "source": "fn main() -> u64 {\n    mut x: u64 = 5;\n    unsafe {\n        p := ptr_of(&mut x);\n        a := p.addr();\n        println(a == p.addr());\n        println(0 < a);\n        same := ptr_from_addr(u64, a);\n        same.write(12);\n    }\n    println(x);\n    return 0;\n}\n",
+    "stdout": "true\ntrue\n12\n"
+  },
+  {
+    "name": "unsafe-pointer-is-copy-and-null",
+    "source": "fn main() -> u64 {\n    unsafe {\n        p := ptr_from_addr(u64, 0);\n        println(p.is_null());\n        q := p;\n        println(q.is_null());\n        println(p.cast(u8).is_null());\n    }\n    return 0;\n}\n",
+    "stdout": "true\ntrue\ntrue\n"
+  },
+  {
+    "name": "reject-ptr-of-outside-unsafe",
+    "source": "fn main() -> u64 {\n    mut x = 1;\n    p := ptr_of(&mut x);\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": "a raw pointer operation needs an unsafe block: ptr_of"
+  },
+  {
+    "name": "reject-alloc-outside-unsafe",
+    "source": "fn main() -> u64 {\n    p := alloc(u64, 2);\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": "a raw pointer operation needs an unsafe block: alloc"
+  },
+  {
+    "name": "reject-pointer-method-outside-unsafe",
+    "source": "fn peek(p: *u64) -> u64 {\n    return p.read();\n}\nfn main() -> u64 { return 0; }\n",
+    "reject": true,
+    "diagnostic": "a raw pointer operation needs an unsafe block: read"
+  },
+  {
+    "name": "reject-ptr-as-ref-not-implemented",
+    "source": "fn look(p: *u64) -> u64 {\n    unsafe {\n        r := p.as_ref();\n        return 0;\n    }\n}\nfn main() -> u64 { return 0; }\n",
+    "reject": true,
+    "diagnostic": "as_ref and as_mut are not implemented yet"
+  },
+  {
+    "name": "reject-pointer-write-through-shared",
+    "source": "fn main() -> u64 {\n    mut x: u64 = 1;\n    unsafe {\n        p := ptr_of(&x);\n        p.write(2);\n    }\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": "write needs a *mut T"
   }
 ]

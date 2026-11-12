@@ -383,6 +383,9 @@ struct C {
     raw: u64,
     // Lexical `unsafe { ... }` depth. Foreign calls are rejected at depth 0.
     unsafe_depth: u64,
+    // 1 while the operand of a `return` is being checked: `p.as_ref()` may only be returned, since
+    // the borrow it makes takes the function's result lifetime.
+    in_return: u64,
     // Set while an operand of `cptr`/`cptr_mut` is being checked, so a borrow conflict inside it
     // is reported as the C aliasing it is. 1 for `cptr` (read-only), 2 for `cptr_mut` (writable).
     cptr_address: u64,
@@ -5651,7 +5654,7 @@ fn transfer_capability<a, b>(
     if k == 24 {
         return deny(&mut c, 7);
     }
-    if k == 26 {
+    if (k == 26) || (k == 34) {
         return deny(&mut c, 7);
     }
     if k == 25 {
@@ -7093,14 +7096,14 @@ fn same_type<a>(c: (&a mut C), x: u64, y: u64) -> u64 {
     }
     aa := ty_arg(&mut c, x);
     bb := ty_arg(&mut c, y);
-    if (a == 5) || (a == 7) || (a == 27) {
+    if (a == 5) || (a == 7) || (a == 27) || (a == 34) {
         am := ty_mode(&mut c, x);
         bm := ty_mode(&mut c, y);
         if am != bm {
             return 0;
         }
     }
-    if (a == 6) || (a == 7) || (a == 27) || (a == 28) || (a == 13) || (a == 14) || (a == 16) || (a == 29) {
+    if (a == 6) || (a == 7) || (a == 27) || (a == 28) || (a == 13) || (a == 14) || (a == 16) || (a == 29) || (a == 34) {
         return same_type(&mut c, aa, bb);
     }
     if a == 8 {
@@ -8052,9 +8055,27 @@ fn parse_reference<a>(c: (&a mut C)) -> u64 {
     rs.push(r);
     return intern_full(&mut c, 7, e, mode, rs);
 }
+// `*T` / `*mut T`: a raw pointer (kind 34, argument T, mode 1 when mutable). It is one word, Copy
+// and has no drop; every operation on it needs an `unsafe` block (docs/design/unsafe.md).
+// `**T` is the `**` token, a pointer to a pointer.
+fn parse_raw_pointer<a>(c: (&a mut C)) -> u64 {
+    if kind(&mut c) == 267 {
+        advance(&mut c);
+        inner := parse_type(&mut c);
+        once := intern_full(&mut c, 34, inner, 0, u64[]);
+        return intern_full(&mut c, 34, once, 0, u64[]);
+    }
+    expect(&mut c, view("*"));
+    mode := u64(eat(&mut c, view("mut")));
+    inner := parse_type(&mut c);
+    return intern_full(&mut c, 34, inner, mode, u64[]);
+}
 fn parse_type_base<a>(c: (&a mut C)) -> u64 {
     if eat(&mut c, view("&")) {
         return parse_reference(&mut c);
+    }
+    if (kind(&mut c) == 42) || (kind(&mut c) == 267) {
+        return parse_raw_pointer(&mut c);
     }
     // `dyn I` / `dyn module::I`: a value of any type implementing I, chosen at run time.
     here_dyn := c.pos;
@@ -16447,6 +16468,18 @@ fn builtin_id<a>(n: &a [u8]) -> u64 {
     if same(view(n), view("cslice")) {
         return 47;
     }
+    if same(view(n), view("ptr_of")) {
+        return 48;
+    }
+    if same(view(n), view("alloc")) {
+        return 49;
+    }
+    if same(view(n), view("free")) {
+        return 50;
+    }
+    if same(view(n), view("ptr_from_addr")) {
+        return 51;
+    }
     if same(view(n), view("view_mut")) {
         return 38;
     }
@@ -18351,6 +18384,71 @@ fn builtin<a>(c: (&a mut C), id: u64) -> Val {
         expect(&mut c, view(")"));
         return val(imm(&mut c, 0), intern_full(&mut c, 26, 0, 0, u64[]));
     }
+    if id == 48 {
+        // `ptr_of(&x)` is `*T` and `ptr_of(&mut x)` is `*mut T`: the address a reference already
+        // carries, since a Grail reference holds the address of the slot holding the value. The
+        // pointer keeps the reference's loan for the rest of the function: the storage it names is
+        // pinned, which is the conservative answer a raw pointer deserves.
+        raw_pointer_gate(&mut c, view("ptr_of"));
+        a := expr(&mut c, 0);
+        expect(&mut c, view(")"));
+        // The value the operand *is*: a reference already holds the address, so no deref.
+        if ty_kind(&mut c, a.ty) != 7 {
+            fail(&mut c, view("ptr_of takes a reference: ptr_of(&x) is *T, ptr_of(&mut x) is *mut T"));
+        }
+        target := ty_arg(&mut c, a.ty);
+        mode := ty_mode(&mut c, a.ty);
+        return val(a.t, intern_full(&mut c, 34, target, mode, u64[]));
+    }
+    if id == 49 {
+        // `alloc(T, n)`: `*mut T` over n zeroed elements. The element size is the one `add`/`sub`
+        // step by: the natural width of a sized integer, f32 and f64, one word for everything else.
+        raw_pointer_gate(&mut c, view("alloc"));
+        elem := parse_type(&mut c);
+        expect(&mut c, view(","));
+        nv := expr(&mut c, 0);
+        expect(&mut c, view(")"));
+        nx := deref(&mut c, nv);
+        if !integer(&mut c, nx.ty) {
+            fail(&mut c, view("alloc takes an element count"));
+        }
+        size := ptr_stride(&mut c, elem);
+        get(&mut c, nx.t, view("%rax"));
+        o(&mut c, view("movq $"));
+        on(&mut c, size);
+        o(&mut c, view(",%rcx\nimulq %rcx,%rax\n"));
+        total := save(&mut c);
+        pslot := invoke(&mut c, view("rt_alloc"), one(total));
+        zslot := invoke(&mut c, view("rt_zero"), two(pslot, total));
+        return val(pslot, intern_full(&mut c, 34, elem, 1, u64[]));
+    }
+    if id == 50 {
+        // `free(p)`: release an `alloc`ed block. Nothing in the types tracks whether the block is
+        // still reachable from another pointer: that is the caller's contract, as in C.
+        raw_pointer_gate(&mut c, view("free"));
+        a := expr(&mut c, 0);
+        expect(&mut c, view(")"));
+        x := deref(&mut c, a);
+        if ty_kind(&mut c, x.ty) != 34 {
+            fail(&mut c, view("free takes a raw pointer"));
+        }
+        pslot := invoke(&mut c, view("rt_free"), one(x.t));
+        return val(imm(&mut c, 0), intern(&mut c, 2, 0));
+    }
+    if id == 51 {
+        // `ptr_from_addr(T, a)`: a `*mut T` at the address `a`. An address carries no provenance, so
+        // the pointer it makes is the writable kind and the caller vouches for it.
+        raw_pointer_gate(&mut c, view("ptr_from_addr"));
+        elem := parse_type(&mut c);
+        expect(&mut c, view(","));
+        av := expr(&mut c, 0);
+        expect(&mut c, view(")"));
+        ax := deref(&mut c, av);
+        if !integer(&mut c, ax.ty) {
+            fail(&mut c, view("ptr_from_addr takes a u64 address"));
+        }
+        return val(ax.t, intern_full(&mut c, 34, elem, 1, u64[]));
+    }
     if id == 47 {
         // `cslice(T, p, n)`: copy the `n` elements of C type `T` at `p` (a C array C handed out by
         // pointer and length) into a Grail vector, which is then bounds-checked like any other.
@@ -19625,7 +19723,7 @@ fn is_bool<a>(c: (&a mut C), ty: u64) -> bool {
 // Copy scalars: u64, sized integers and bool are loaded by value from collections.
 fn scalar<a>(c: (&a mut C), ty: u64) -> bool {
     k := ty_kind(&mut c, ty);
-    return (ty == 0) || (k == 18) || (k == 19) || (k == 21) || (k == 22);
+    return (ty == 0) || (k == 18) || (k == 19) || (k == 21) || (k == 22) || (k == 34);
 }
 fn int_type<a>(c: (&a mut C), bits: u64, signed: u64) -> u64 {
     if (bits == 64) & (signed == 0) {
@@ -22002,6 +22100,166 @@ fn char_method<a>(n: &a [u8]) -> bool {
         || same(view(n), view("to_lowercase"))
         || same(view(n), view("len_utf8"));
 }
+// `*T` is one word: the natural width of a sized integer, 4 and 8 for f32 and f64, and one word for
+// everything else, because a record, vector or string value is a pointer to its own storage.
+fn ptr_stride<a>(c: (&a mut C), ty: u64) -> u64 {
+    k := ty_kind(&mut c, ty);
+    if k == 18 {
+        return ty_arg(&mut c, ty) / 8;
+    }
+    if k == 21 {
+        if ty_arg(&mut c, ty) == 32 {
+            return 4;
+        }
+        return 8;
+    }
+    return 8;
+}
+// Every operation on a raw pointer reads or writes memory the checker has not followed, so each one
+// needs an `unsafe` block. The type itself is spellable anywhere.
+fn raw_pointer_gate<a, b>(c: (&a mut C), what: &b [u8]) -> unit {
+    if (c.raw == 0) & (c.unsafe_depth == 0) {
+        mut msg = copy_bytes(view("a raw pointer operation needs an unsafe block: "));
+        push_bytes(&mut msg, view(what));
+        fail(&mut c, view(msg));
+    }
+    return ();
+}
+// The methods of a `*T`. The receiver's word is the address; `name` is the method already read and
+// `(` already expected.
+fn pointer_method<a, d>(c: (&a mut C), value: Val, pty: u64, name: &d [u8]) -> Val {
+    raw_pointer_gate(&mut c, view(name));
+    word := value.t;
+    x := deref(&mut c, value);
+    address := x.t;
+    pointee := ty_arg(&mut c, pty);
+    mode := ty_mode(&mut c, pty);
+    if same(view(name), view("addr")) {
+        expect(&mut c, view(")"));
+        release_temporary(&mut c, word);
+        return val(address, 0);
+    }
+    if same(view(name), view("is_null")) {
+        expect(&mut c, view(")"));
+        get(&mut c, address, view("%rax"));
+        o(&mut c, view("testq %rax,%rax\nsete %al\nmovzbq %al,%rax\n"));
+        slot := save(&mut c);
+        release_temporary(&mut c, word);
+        return val(slot, bool_type(&mut c));
+    }
+    if same(view(name), view("cast")) {
+        elem := parse_type(&mut c);
+        expect(&mut c, view(")"));
+        release_temporary(&mut c, word);
+        return val(address, intern_full(&mut c, 34, elem, mode, u64[]));
+    }
+    if same(view(name), view("add")) || same(view(name), view("sub")) {
+        nv := expr(&mut c, 0);
+        expect(&mut c, view(")"));
+        nx := deref(&mut c, nv);
+        if !integer(&mut c, nx.ty) {
+            fail(&mut c, view("add and sub take a step count"));
+        }
+        size := ptr_stride(&mut c, pointee);
+        get(&mut c, nx.t, view("%rax"));
+        o(&mut c, view("movq $"));
+        on(&mut c, size);
+        o(&mut c, view(",%rcx\nimulq %rcx,%rax\n"));
+        step := save(&mut c);
+        get(&mut c, address, view("%rax"));
+        get(&mut c, step, view("%rcx"));
+        if same(view(name), view("add")) {
+            o(&mut c, view("addq %rcx,%rax\n"));
+        } else {
+            o(&mut c, view("subq %rcx,%rax\n"));
+        }
+        slot := save(&mut c);
+        release_temporary(&mut c, word);
+        return val(slot, pty);
+    }
+    if same(view(name), view("read")) {
+        expect(&mut c, view(")"));
+        slot := ptr_load(&mut c, address, pointee);
+        release_temporary(&mut c, word);
+        return val(slot, pointee);
+    }
+    if same(view(name), view("write")) {
+        if mode == 0 {
+            fail(&mut c, view("write needs a *mut T; a *T only reads"));
+        }
+        v := expr(&mut c, 0);
+        expect(&mut c, view(")"));
+        ptr_store(&mut c, address, v.t, pointee);
+        release_temporary(&mut c, word);
+        return val(imm(&mut c, 0), intern(&mut c, 2, 0));
+    }
+    if same(view(name), view("as_ref")) || same(view(name), view("as_mut")) {
+        // A borrow made from a raw pointer has to be registered as the function's returned
+        // reference (its frame source), which is the one piece of the returning-reference
+        // bookkeeping this increment does not do yet. Refused by name rather than handed out
+        // unchecked.
+        fail(&mut c, view("as_ref and as_mut are not implemented yet: read the value with p.read() or copy it through a reference you already hold"));
+    }
+    mut msg = copy_bytes(view("a raw pointer has addr, is_null, cast, add, sub, read, write, as_ref and as_mut; not "));
+    push_bytes(&mut msg, view(name));
+    fail(&mut c, view(msg));
+    return val(0, 0);
+}
+// `p.read()`: the pointee loaded at its natural width, the same instruction raw_load and friends
+// emit for the intrinsic of that width. A float pointee is refused rather than reinterpreted.
+fn ptr_load<a>(c: (&a mut C), address: u64, pointee: u64) -> u64 {
+    width := ptr_width(&mut c, pointee);
+    get(&mut c, address, view("%rax"));
+    if width == 8 {
+        o(&mut c, view("movq (%rax),%rax\n"));
+    }
+    if width == 4 {
+        o(&mut c, view("movl (%rax),%eax\n"));
+    }
+    if width == 2 {
+        o(&mut c, view("movzwl (%rax),%eax\n"));
+    }
+    if width == 1 {
+        o(&mut c, view("movzbq (%rax),%rax\n"));
+    }
+    return save(&mut c);
+}
+// `p.write(v)`: the pointee stored at its natural width, with no drop of what was there - the same
+// contract as Rust's `ptr::write`.
+fn ptr_store<a>(c: (&a mut C), address: u64, v: u64, pointee: u64) -> unit {
+    width := ptr_width(&mut c, pointee);
+    get(&mut c, address, view("%rcx"));
+    get(&mut c, v, view("%rax"));
+    if width == 8 {
+        o(&mut c, view("movq %rax,(%rcx)\n"));
+    }
+    if width == 4 {
+        o(&mut c, view("movl %eax,(%rcx)\n"));
+    }
+    if width == 2 {
+        o(&mut c, view("movw %ax,(%rcx)\n"));
+    }
+    if width == 1 {
+        o(&mut c, view("movb %al,(%rcx)\n"));
+    }
+    return ();
+}
+// The width a raw pointer steps and loads by: the natural width of a sized integer and of f32/f64,
+// one word for everything else (a record, vector or string value is a pointer to its storage).
+fn ptr_width<a>(c: (&a mut C), pointee: u64) -> u64 {
+    k := ty_kind(&mut c, pointee);
+    if k == 21 {
+        fail(&mut c, view("read and write do not reinterpret a float pointee yet; use an f64[] view"));
+    }
+    if k == 18 {
+        bits := ty_arg(&mut c, pointee) / 8;
+        if bits == 8 {
+            return 8;
+        }
+        return bits;
+    }
+    return 8;
+}
 fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
     // ' '.is_whitespace(): a bare character literal receiver of a char method is a char.
     literal_receiver := (value.ty == 0) & (c.lit_end == c.pos) & (c.lit_value < 128);
@@ -22028,6 +22286,9 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
         }
     }
     k := ty_kind(&mut c, xty);
+    if k == 34 {
+        return pointer_method(&mut c, val(xt, xty), xty, view(name));
+    }
     if k == 8 {
         d := ty_arg(&mut c, xty);
         mut owner = private_module(view(".inherent_"), d);
@@ -27202,7 +27463,9 @@ fn statement<a>(c: (&a mut C)) -> unit {
     if eat(&mut c, view("return")) {
         rstart := c.pos;
         expected_result := c.result;
+        exchange(&mut c.in_return, 1);
         mut v = expr_expected(&mut c, 0, expected_result);
+        exchange(&mut c.in_return, 0);
         rend := c.pos;
         expect(&mut c, view(";"));
         // Context lowering (None/Some, union injection, a function used as a closure) is not a
@@ -29232,7 +29495,7 @@ fn iface_type_raw<a, b>(out: (&a mut u8[]), c: (&b mut C), ty: u64) -> unit {
         }
         return ();
     }
-    if (k == 6) || (k == 13) || (k == 14) || (k == 16) || (k == 26) || (k == 27) || (k == 29) {
+    if (k == 6) || (k == 13) || (k == 14) || (k == 16) || (k == 26) || (k == 27) || (k == 29) || (k == 34) {
         push_bytes(&mut out, view("("));
         push_bytes(&mut out, view(iface_plain_word(k)));
         iface_extra(&mut out, mode, &rs);
@@ -29464,6 +29727,9 @@ fn iface_plain_word(k: u64) -> string {
     }
     if k == 26 {
         return "cptr";
+    }
+    if k == 34 {
+        return "ptr";
     }
     if k == 27 {
         return "slice";
@@ -30287,6 +30553,11 @@ fn iface_parse_type<a>(c: (&a mut C), p: (&a mut IPos)) -> u64 {
             t := iface_parse_type(&mut c, &mut p);
             ip_expect(&mut p, view(")"));
             return intern_args(&mut c, 26, t, mode, rs, u64[]);
+        }
+        if same(view(head), view("ptr")) {
+            t := iface_parse_type(&mut c, &mut p);
+            ip_expect(&mut p, view(")"));
+            return intern_args(&mut c, 34, t, mode, rs, u64[]);
         }
         if same(view(head), view("slice")) {
             t := iface_parse_type(&mut c, &mut p);
@@ -32350,6 +32621,7 @@ pub fn main() -> u64 {
         cont: 0,
         raw: 0,
         unsafe_depth: 0,
+        in_return: 0,
         cptr_address: 0,
         embedded: u64[],
         libs: u8[][],

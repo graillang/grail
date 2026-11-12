@@ -1,4 +1,48 @@
-# Cleanup and current boundaries
+
+## Unsafe code: raw pointers
+
+`unsafe { ... }` is the hatch for work the checker cannot follow. It already gated foreign calls
+and the C pointer builtins; it now also gates raw pointers, `*T` and `*mut T`.
+
+A raw pointer is one word, `Copy`, and drops nothing. It is written `*T` or `*mut T`, and `**T` is a
+pointer to a pointer. The type can be spelled anywhere - a parameter, a field, a return - but every
+operation on it needs an `unsafe` block, and each one is refused by name outside one:
+
+```grl
+fn main() {
+    mut x: u64 = 41;
+    unsafe {
+        p := ptr_of(&mut x);     // *mut u64: the address a reference already carries
+        p.write(p.read() + 1);
+        q := alloc(u64, 4);      // *mut u64 over four zeroed elements
+        q.add(1).write(9);       // steps by the element width
+        println(q.add(1).read());
+        free(q);
+    }
+    println(x);                  // 42
+}
+```
+
+| operation | what it is |
+| --- | --- |
+| `ptr_of(&x)` / `ptr_of(&mut x)` | `*T` / `*mut T`: the address of the slot holding the value |
+| `alloc(T, n)` | `*mut T` over `n` zeroed elements; `free(p)` releases it |
+| `p.addr()` / `ptr_from_addr(T, a)` | the address as a `u64`, and a `*mut T` at one |
+| `p.add(n)` / `p.sub(n)` | step by the element width: the natural width of a sized integer, f32 and f64, one word for everything else |
+| `p.read()` / `p.write(v)` | load and store at that width; `write` needs `*mut T` |
+| `p.is_null()` / `p.cast(U)` | the null pointer, and the same address as `*U` |
+
+`p.read()` on an owned value duplicates ownership and `p.write(v)` moves `v` in without dropping
+what was there - the same contract as Rust's `ptr::read` and `ptr::write`. A pointer also pins what
+it names: a pointer made from a reference keeps that reference's loan for the rest of the function,
+so the storage cannot be moved or freed underneath it. A record holding a raw pointer is
+thread-affine, so it cannot cross to another thread.
+
+Not there yet: `p.as_ref()` and `p.as_mut()` (they need the returned-reference bookkeeping), an
+`unsafe fn` declaration, and the `unsafe struct C<T>: transferable, shareable` opt-in for records
+that hold raw pointers on purpose.
+
+
 
 Owned values are released deterministically on normal control flow. You usually do not write
 `drop`; an explicit drop simply requests an earlier end when no live borrow prevents it.
