@@ -6778,5 +6778,96 @@
     "source": "fn main() -> u64 {\n    t := (\"a\", u64[1, 2]);\n    (s, v) := t;\n    println(\"{} {}\", s, v.len());\n    println(t.0);\n    return 0;\n}\n",
     "reject": true,
     "diagnostic": "use of moved"
+  },
+  {
+    "name": "refinement-param-violated",
+    "source": "fn take(align: u64 where align % 16 == 0) -> u64 {\n    return align;\n}\n\nfn main() -> u64 {\n    println(take(16));\n    println(take(17));\n    return 0;\n}\n",
+    "signal": "SIGABRT",
+    "stderr": [
+      "error: refinement violated: align % 16 == 0\n --> ",
+      "input.grl:7:5\n = required by take at ",
+      "input.grl:1:1\n"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "a refined parameter is checked at its entry; the failure names the predicate, the call site and the declaration",
+    "backends": [
+      "native"
+    ]
+  },
+  {
+    "name": "refinement-field-violated",
+    "source": "struct Ray {\n    t_max: f32 where t_max.is_finite() && t_max > 0.0\n}\n\nfn zero() -> f32 {\n    return 0.0;\n}\n\nfn main() -> u64 {\n    ok := Ray { t_max: 1.5 };\n    println(ok.t_max);\n    z := zero();\n    bad := Ray { t_max: z / z };\n    println(bad.t_max);\n    return 0;\n}\n",
+    "signal": "SIGABRT",
+    "stderr": [
+      "error: refinement violated: t_max.is_finite() && t_max > 0.0\n --> ",
+      "input.grl:13:5\n = required by Ray.t_max at ",
+      "input.grl:2:22\n"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "a record literal owes every refined field: the NaN ray is refused where it is built",
+    "backends": [
+      "native"
+    ]
+  },
+  {
+    "name": "refinement-result-violated",
+    "source": "fn normalize(x: f32) -> f32 ensures result.is_finite() {\n    z := x - x;\n    return z / z;\n}\n\nfn zero() -> f32 {\n    return 0.0;\n}\n\nfn main() -> u64 {\n    println(normalize(zero()));\n    return 0;\n}\n",
+    "signal": "SIGABRT",
+    "stderr": [
+      "error: refinement violated: result.is_finite()\n --> ",
+      "input.grl:3:5\n = called from ",
+      "input.grl:11:5\n = required by normalize at ",
+      "input.grl:1:1\n"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "`ensures` is checked at every return: a NaN result is refused where it is returned",
+    "backends": [
+      "native"
+    ]
+  },
+  {
+    "name": "refinement-impure-rejected",
+    "source": "fn helper(x: u64) -> bool {\n    return x > 0;\n}\n\nfn scale(x: u64 where helper(x)) -> u64 {\n    return x;\n}\n\nfn main() -> u64 {\n    println(scale(4));\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "a refinement predicate cannot call a function: helper is not pure"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "a predicate may not run user code or have a side effect"
+  },
+  {
+    "name": "refinement-field-assignment-violated",
+    "source": "struct Ray {\n    t_max: f32 where t_max > 0.0\n}\n\nfn zero() -> f32 {\n    return 0.0;\n}\n\nfn main() -> u64 {\n    mut r: Ray = Ray { t_max: 1.5 };\n    r.t_max = 2.5;\n    println(r.t_max);\n    r.t_max = zero();\n    println(r.t_max);\n    return 0;\n}\n",
+    "signal": "SIGABRT",
+    "stderr": [
+      "error: refinement violated: t_max > 0.0\n --> ",
+      "input.grl:13:5\n = required by Ray.t_max at ",
+      "input.grl:2:22\n"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "a field assignment owes the field's predicate too",
+    "backends": [
+      "native"
+    ]
   }
 ]

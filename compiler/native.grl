@@ -495,9 +495,15 @@ struct C {
     cf_local: u64,
     bce_index: u8[],
     bce_base: u8[],
-    // The refinements of the function being compiled: its parameters' predicates and its `ensures`.
+    // The refinements of the function being compiled: its parameters' predicates and its `ensures`,
+    // the source name of the declaration (a specialisation is reported under its template's name),
+    // where it is written, and the serial that keeps each obligation's data labels apart.
     cur_ppreds: Pred[],
     cur_rpred: Pred,
+    cur_name: u8[],
+    cur_file: u64,
+    cur_pos: u64,
+    ref_next: u64,
     lit_negative: u64,
     // Span of the most recent byte read (`bytes[i]`): an untyped word known to be 0..255.
     byte_start: u64,
@@ -5455,12 +5461,21 @@ fn pred_text<a>(c: (&a mut C), p: Pred) -> u8[] {
         load_file(&mut c, p.file);
         exchange(&mut c.file, p.file);
     }
-    for i in p.lo .. p.hi {
-        if i != p.lo {
-            out.push(32);
+    // The predicate's own text, whitespace runs collapsed to one space: what the author wrote.
+    from := c.toks[p.lo].start;
+    to := c.toks[p.hi - 1].end;
+    mut space = false;
+    for i in from .. to {
+        ch := c.src[i];
+        if (ch == 10) || (ch == 9) || (ch == 13) || (ch == 32) {
+            space = true;
+        } else {
+            if space & (out.len() != 0) {
+                out.push(32);
+            }
+            space = false;
+            out.push(ch);
         }
-        t := tok_text(&mut c, i);
-        push_bytes(&mut out, view(t));
     }
     if saved_file != p.file {
         load_file(&mut c, saved_file);
@@ -5567,6 +5582,293 @@ fn pred_scan<a, b>(c: (&a mut C), stop_a: &a [u8], stop_b: &b [u8]) -> Pred {
     pred_check(&mut c, lo, i, view("a refinement predicate cannot be empty"), view(stop_a));
     exchange(&mut c.pos, i);
     return Pred { file: c.file, lo: lo, hi: i };
+}
+// A predicate carried by an interface: its text becomes a virtual source of its own, so the range is
+// that file's whole token stream and replay compiles exactly what the defining module compiled.
+fn pred_of_text<a, b, d>(c: (&a mut C), label: &b [u8], text: &d [u8]) -> Pred {
+    file := virtual_source(&mut c, view(label), view(text));
+    saved_file := c.file;
+    saved_pos := c.pos;
+    load_file(&mut c, file);
+    n := c.toks.len();
+    if saved_file != file {
+        if saved_file != 0 {
+            load_file(&mut c, saved_file);
+        }
+        exchange(&mut c.file, saved_file);
+        exchange(&mut c.pos, saved_pos);
+    }
+    return Pred { file: file, lo: 0, hi: n };
+}
+// `file:line:col` of a token in `file`: where a declaration is written, for the requirement line.
+fn src_where<a>(c: (&a mut C), file: u64, pos: u64) -> u8[] {
+    saved_file := c.file;
+    saved_pos := c.pos;
+    if (saved_file != file) & (file != 0) {
+        load_file(&mut c, file);
+        exchange(&mut c.file, file);
+    }
+    path := site_path(&c, file);
+    mut line = 1;
+    mut col = 1;
+    mut stop = 0;
+    if pos < c.toks.len() {
+        stop = c.toks[pos].start;
+    }
+    for i in stop {
+        if c.src[i] == 10 {
+            line += 1;
+            col = 1;
+        } else {
+            col += 1;
+        }
+    }
+    mut out = path.copy();
+    out.push(58);
+    decimal(&mut out, line);
+    out.push(58);
+    decimal(&mut out, col);
+    if (saved_file != file) & (file != 0) {
+        load_file(&mut c, saved_file);
+        exchange(&mut c.file, saved_file);
+        exchange(&mut c.pos, saved_pos);
+    }
+    return out;
+}
+// A NUL-terminated string in .rodata, labelled so the check can name it.
+fn ref_data<a, b, d>(c: (&a mut C), label: &b [u8], text: &d [u8]) -> unit {
+    o(&mut c, view(".pushsection .rodata\n"));
+    o(&mut c, view(label));
+    o(&mut c, view(":\n.asciz \""));
+    for i in text.len() {
+        ch := text[i];
+        if (ch == 34) || (ch == 92) {
+            c.out.push(92);
+        }
+        if ch == 10 {
+            c.out.push(92);
+            c.out.push(110);
+        } else {
+            c.out.push(ch);
+        }
+    }
+    o(&mut c, view("\"\n.popsection\n"));
+    return ();
+}
+// Compile a predicate at its own position with `names` bound to the values in `slots`. The bindings
+// are ordinary locals pushed for the predicate and dropped afterwards: a predicate only reads, and
+// creating (or dropping) a value here would be a side effect it does not have.
+fn pred_value<a, b, d, e>(c: (&a mut C), pred: Pred, names: (&b u8[][]), slots: (&d u64[]), tys: (&e u64[])) -> Val {
+    saved_file := c.file;
+    saved_pos := c.pos;
+    if (saved_file != pred.file) & (pred.file != 0) {
+        load_file(&mut c, pred.file);
+        exchange(&mut c.file, pred.file);
+    }
+    mark := c.locals.len();
+    for k in names.len() {
+        c
+            .locals
+            .push(
+                Local {
+                    name: names[k].copy(),
+                    ty: tys[k],
+                    id: slots[k],
+                    last: 1000000000,
+                    born: 0,
+                    mutable: 0,
+                    flex: 0,
+                    lit: 0,
+                    neg: 0,
+                    origin: 0,
+                    at: 0,
+                }
+            );
+    }
+    exchange(&mut c.pos, pred.lo);
+    v := expr(&mut c, 0);
+    while mark < c.locals.len() {
+        c.locals.pop();
+    }
+    if (saved_file != pred.file) & (pred.file != 0) {
+        load_file(&mut c, saved_file);
+        exchange(&mut c.file, saved_file);
+    }
+    exchange(&mut c.pos, saved_pos);
+    return v;
+}
+// ` = required by <fn> at <where>` - the line a failure names after the location.
+fn ref_requirement<a>(c: (&a mut C), fn_name: &a [u8], at: &a [u8]) -> u8[] {
+    mut out = copy_bytes(view(" = required by "));
+    push_bytes(&mut out, view(fn_name));
+    push_bytes(&mut out, view(" at "));
+    push_bytes(&mut out, view(at));
+    out.push(10);
+    return out;
+}
+// One obligation: `pred` must hold of the values in `slots`, or the program stops saying which
+// predicate it violated and which function required it. An obligation the prover discharges emits no
+// check at all (step 3's hook is `ref_proved`, which is false for now).
+fn ref_check<a, b, d, e>(c: (&a mut C), pred: Pred, names: (&b u8[][]), slots: (&d u64[]), tys: (&e u64[]), fn_name: u8[], at_file: u64, at_pos: u64) -> unit {
+    if !has_pred(&pred) {
+        return ();
+    }
+    if c.validating != 0 {
+        return ();
+    }
+    n := c.ref_next;
+    c.ref_next = n + 1;
+    v := pred_value(&mut c, Pred { file: pred.file, lo: pred.lo, hi: pred.hi }, &names, &slots, &tys);
+    if c.raw == 0 {
+        require_type(&mut c, v.ty, 0);
+    }
+    get(&mut c, v.t, view("%rax"));
+    o(&mut c, view("testq %rax,%rax\n"));
+    ok := label(&mut c);
+    jump(&mut c, view("jnz"), ok);
+    text := pred_text(&mut c, pred);
+    at := src_where(&mut c, at_file, at_pos);
+    req := ref_requirement(&mut c, view(fn_name), view(at));
+    mut pred_label = copy_bytes(view(".Lrfp"));
+    decimal(&mut pred_label, n);
+    mut req_label = copy_bytes(view(".Lrfr"));
+    decimal(&mut req_label, n);
+    ref_data(&mut c, view(pred_label), view(text));
+    ref_data(&mut c, view(req_label), view(req));
+    o(&mut c, view("leaq "));
+    o(&mut c, view(pred_label));
+    o(&mut c, view("(%rip),%rdi\nleaq "));
+    o(&mut c, view(req_label));
+    o(&mut c, view("(%rip),%rsi\ncall rt_refine\n"));
+    mark(&mut c, ok);
+    return ();
+}
+// The obligations at a value's entry into a function: each parameter's predicate, checked where the
+// parameter is (so the values are the arguments'), with the call site as the location a failure
+// reports - the frame above this one.
+fn ref_params<a>(c: (&a mut C)) -> unit {
+    if c.cur_ppreds.len() == 0 {
+        return ();
+    }
+    mut emitted = 0;
+    for i in c.cur_ppreds.len() {
+        // Copied out: the predicate list is a field of `c`, which the check borrows.
+        mut pf = 0;
+        mut plo = 0;
+        mut phi = 0;
+        if i < c.cur_ppreds.len() {
+            p := &c.cur_ppreds[i];
+            pf = p.file;
+            plo = p.lo;
+            phi = p.hi;
+        }
+        if (phi == 0) || (i >= c.locals.len()) {
+            continue;
+        }
+        mut none = u8[][];
+        mut slots = u64[];
+        mut tys = u64[];
+        slot := local_id(&mut c, i);
+        ty := local_ty(&mut c, i);
+        slots.push(slot);
+        tys.push(ty);
+        name := c.cur_name.copy();
+        at_file := c.cur_file;
+        at_pos := c.cur_pos;
+        ref_check(&mut c, Pred { file: pf, lo: plo, hi: phi }, &none, &slots, &tys, name, at_file, at_pos);
+        emitted = emitted + 1;
+    }
+    if emitted != 0 {
+        // The last check's own return address must not be the first statement's address, or a
+        // failure would name that statement instead of the call: one jump keeps it in the prologue.
+        past := label(&mut c);
+        jump(&mut c, view("jmp"), past);
+        mark(&mut c, past);
+    }
+    return ();
+}
+// `field: T where P` at the value's entry into a record: a literal must establish every refined
+// field it fills, so `Ray { t_max: x }` is where the ray's invariant is owed.
+fn ref_field<a>(c: (&a mut C), d: u64, k: u64, slot: u64) -> unit {
+    f := c.decls[d].first + k;
+    if f >= c.fields.len() {
+        return ();
+    }
+    mut pf = 0;
+    mut plo = 0;
+    mut phi = 0;
+    mut fname = u8[];
+    mut fty = 0;
+    mut owner = u8[];
+    if f < c.fields.len() {
+        p := &c.fields[f];
+        pf = p.pred.file;
+        plo = p.pred.lo;
+        phi = p.pred.hi;
+        fname = p.name.copy();
+        fty = p.ty;
+        owner = c.decls[d].name.copy();
+    }
+    if phi == 0 {
+        return ();
+    }
+    mut who = u8[];
+    push_bytes(&mut who, view(owner));
+    who.push(46);
+    push_bytes(&mut who, view(fname));
+    mut names = u8[][fname];
+    mut slots = u64[slot];
+    mut tys = u64[fty];
+    ref_check(&mut c, Pred { file: pf, lo: plo, hi: phi }, &names, &slots, &tys, who, pf, plo);
+    return ();
+}
+// The same obligation at `r.f = v`: the field is named in the source, so its predicate is found by
+// name in the record's declaration.
+fn ref_field_named<a, b>(c: (&a mut C), ty: u64, fname: &b [u8], slot: u64) -> unit {
+    mut shape = ty;
+    if ty_kind(&mut c, shape) == 7 {
+        shape = ty_arg(&mut c, shape);
+    }
+    if ty_kind(&mut c, shape) != 8 {
+        return ();
+    }
+    d := ty_arg(&mut c, shape);
+    if d >= c.decls.len() {
+        return ();
+    }
+    first := c.decls[d].first;
+    count := c.decls[d].count;
+    for i in count {
+        f := first + i;
+        if f < c.fields.len() {
+            if same(view(c.fields[f].name), view(fname)) {
+                ref_field(&mut c, d, i, slot);
+                return ();
+            }
+        }
+    }
+    return ();
+}
+// `-> T ensures P` at every `return`: `result` is the value on its way out.
+fn ref_result<a>(c: (&a mut C), slot: u64, ty: u64) -> unit {
+    mut pf = 0;
+    mut plo = 0;
+    mut phi = 0;
+    p := &c.cur_rpred;
+    pf = p.file;
+    plo = p.lo;
+    phi = p.hi;
+    if phi == 0 {
+        return ();
+    }
+    mut names = u8[][copy_bytes(view("result"))];
+    mut slots = u64[slot];
+    mut tys = u64[ty];
+    name := c.cur_name.copy();
+    at_file := c.cur_file;
+    at_pos := c.cur_pos;
+    ref_check(&mut c, Pred { file: pf, lo: plo, hi: phi }, &names, &slots, &tys, name, at_file, at_pos);
+    return ();
 }
 fn ident<a>(c: (&a mut C)) -> u8[] {
     if kind(&mut c) != 1 {
@@ -10246,6 +10548,9 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     mut dend = 0;
     expect(&mut c, view("fn"));
     mut name = ident(&mut c);
+    c.cur_name = name.copy();
+    c.cur_file = c.file;
+    c.cur_pos = position;
     lifetime_parameters(&mut c);
     exchange(&mut c.input_regions, u64[]);
     exchange(&mut c.receiver_region, 0);
@@ -10637,6 +10942,9 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         exchange(&mut c.export_fret, 0);
         store_params(&mut c, count);
     }
+    // The parameter refinements hold here, where the parameters are the arguments they were given.
+    // Before the frame zeroing on purpose: the check's own return address must stay inside the
+    // prologue's no-position range, so a failure reports the call site rather than this statement.
     o(&mut c, view("leaq -.F"));
     on(&mut c, frame);
     o(&mut c, view("(%rbp),%rdi\nmovq $.F"));
@@ -10691,6 +10999,10 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
             init_parameter(&mut c, slot, ty);
         }
     }
+    // The parameter refinements hold here: the parameters are the arguments they were given and
+    // their bookkeeping is done (a view's target is tracked), and the first statement has not been
+    // reached, so a failure inside the check reports the call site rather than a line of this body.
+    ref_params(&mut c);
     mut tls_slot = 0;
     mut adopt_slot = 0;
     if (export == 2) & tls_bridge(&mut c) {
@@ -15051,6 +15363,7 @@ fn record<a>(c: (&a mut C), d: u64, explicit: u64) -> Val {
             if c.decls[d].c_layout != 0 {
                 cfield_store(&mut c, n, d, k, held.t);
             } else {
+                ref_field(&mut c, d, k, held.t);
                 rec_store(&mut c, n, k, held.t);
             }
             if eat_kind(&mut c, close) {
@@ -15089,6 +15402,7 @@ fn record<a>(c: (&a mut C), d: u64, explicit: u64) -> Val {
         if c.decls[d].c_layout != 0 {
             cfield_store(&mut c, n, d, k, newslot);
         } else {
+            ref_field(&mut c, d, k, newslot);
             rec_store(&mut c, n, k, newslot);
         }
         exchange(&mut sources[index], newslot);
@@ -26425,10 +26739,38 @@ fn chained_field_assignment<a>(c: (&a mut C)) -> unit {
     }
     head := place(&mut c, 1, 0);
     base := chain_walk(&mut c, head, final_run);
+    // The field this store lands in, for its refinement: `r.f = v` owes f's predicate, and a chain
+    // `a.b.f = v` owes the one of the record `f` is declared in. The chain's types are walked here so
+    // the obligation names the right record, not the head's.
+    mut fname = u8[];
+    mut record_ty = 0;
+    mut cur = base.ty;
+    if ty_kind(&mut c, cur) == 7 {
+        cur = ty_arg(&mut c, cur);
+    }
+    mut k = c.pos;
+    while (kind_at(&mut c, k) == 46) & (kind_at(&mut c, k + 1) == 1) {
+        step := tok_text(&mut c, k + 1);
+        if ty_kind(&mut c, cur) != 8 {
+            break;
+        }
+        d := ty_arg(&mut c, cur);
+        idx := field_index(&mut c, d, view(step));
+        if idx == 0 {
+            break;
+        }
+        record_ty = cur;
+        fname = step;
+        cur = field_type(&mut c, cur, idx - 1);
+        if ty_kind(&mut c, cur) == 7 {
+            cur = ty_arg(&mut c, cur);
+        }
+        k = k + 2;
+    }
     a := field_path(&mut c, base.t, base.ty, 2);
     target := a.t;
     fieldty := ty_arg(&mut c, a.ty);
-    assignment_tail(&mut c, 0, base.t, base.ty, target, u64[1, fieldty]);
+    assignment_tail(&mut c, 0, base.t, base.ty, target, u64[1, fieldty], view(fname), record_ty);
     return ();
 }
 // Legacy vector/byte assignment evaluates RHS before parsing its mutable target.
@@ -27404,6 +27746,7 @@ fn statement<a>(c: (&a mut C)) -> unit {
             require_type(&mut c, v.ty, expected_result);
         }
         validate_return(&mut c, val(v.t, v.ty));
+        ref_result(&mut c, v.t, v.ty);
         move_out(&mut c, val(v.t, v.ty));
         callback_copy_back(&mut c);
         cleanup(&mut c, 0);
@@ -28287,7 +28630,8 @@ fn statement<a>(c: (&a mut C)) -> unit {
                     a := field_path(&mut c, head.t, head.ty, 2);
                     target := a.t;
                     fieldty := ty_arg(&mut c, a.ty);
-                    assignment_tail(&mut c, 0, head.t, head.ty, target, u64[1, fieldty]);
+                    mut none = u8[];
+                    assignment_tail(&mut c, 0, head.t, head.ty, target, u64[1, fieldty], view(none), 0);
                     return ();
                 }
                 capture_assignment(&mut c, view(name));
@@ -28322,13 +28666,28 @@ fn statement<a>(c: (&a mut C)) -> unit {
         if (kind(&mut c) == 46) & (carray_assign(&mut c, id, ty) != 0) {
             return ();
         }
+        mut fname = u8[];
+        here_at := c.pos;
+        if (kind(&mut c) == 46) & (kind_at(&mut c, here_at + 1) == 1) {
+            fname = tok_text(&mut c, here_at + 1);
+        }
         if kind(&mut c) == 46 {
             a := field_path(&mut c, id, ty, 2);
             target = a.t;
             through = 1;
             fieldty = ty_arg(&mut c, a.ty);
         }
-        assignment_tail(&mut c, l, id, ty, target, u64[through, fieldty]);
+        mut field_name = u8[];
+        mut record_ty = 0;
+        if through != 0 {
+            field_name = fname;
+            mut shape = ty;
+            if ty_kind(&mut c, shape) == 7 {
+                shape = ty_arg(&mut c, shape);
+            }
+            record_ty = shape;
+        }
+        assignment_tail(&mut c, l, id, ty, target, u64[through, fieldty], view(field_name), record_ty);
         return ();
     }
     mut v = expr(&mut c, 0);
@@ -28397,7 +28756,7 @@ fn carray_assign<a>(c: (&a mut C), id: u64, ty: u64) -> u64 {
 }
 // The rest of an assignment once its target is known: `target` is the binding slot (through =
 // 0, `l` its local) or a field reference (through = 1, `fieldty` the field type).
-fn assignment_tail<a>(c: (&a mut C), l: u64, id: u64, ty: u64, target: u64, through_fieldty: u64[]) -> unit {
+fn assignment_tail<a, b>(c: (&a mut C), l: u64, id: u64, ty: u64, target: u64, through_fieldty: u64[], fname: &b [u8], rtype: u64) -> unit {
     through := through_fieldty[0];
     fieldty := through_fieldty[1];
     if through != 0 {
@@ -28507,6 +28866,9 @@ fn assignment_tail<a>(c: (&a mut C), l: u64, id: u64, ty: u64, target: u64, thro
         }
     }
 
+    if (through != 0) & (operator == 61) & (fname.len() != 0) {
+        ref_field_named(&mut c, rtype, view(fname), v.t);
+    }
     mut storage = ty;
     if through != 0 {
         storage = fieldty;
@@ -29858,6 +30220,41 @@ fn iface_emit_func<a, b>(c: (&a mut C), out: (&a mut u8[]), index: u64, m: &b [u
             out.push(10);
         }
     }
+    // The refinements travel with the declaration: a caller in another module owes exactly the
+    // predicates this module's own callers owe, checked by the same code.
+    for i in c.funcs[index].ppreds.len() {
+        mut pf = 0;
+        mut plo = 0;
+        mut phi = 0;
+        if i < c.funcs[index].ppreds.len() {
+            pp := &c.funcs[index].ppreds[i];
+            pf = pp.file;
+            plo = pp.lo;
+            phi = pp.hi;
+        }
+        if phi == 0 {
+            continue;
+        }
+        text := pred_text(&mut c, Pred { file: pf, lo: plo, hi: phi });
+        push_bytes(&mut out, view("where "));
+        decimal(&mut out, i);
+        out.push(32);
+        iface_quoted(&mut out, view(text));
+        out.push(10);
+    }
+    mut rpf = 0;
+    mut rplo = 0;
+    mut rphi = 0;
+    rp := &c.funcs[index].rpred;
+    rpf = rp.file;
+    rplo = rp.lo;
+    rphi = rp.hi;
+    if rphi != 0 {
+        text := pred_text(&mut c, Pred { file: rpf, lo: rplo, hi: rphi });
+        push_bytes(&mut out, view("ensures "));
+        iface_quoted(&mut out, view(text));
+        out.push(10);
+    }
     if (types != 0) & (contract == 0) {
         // A generic template's body travels with the interface: without it a module that
         // instantiates the template cannot be compiled unless this module's source is on the
@@ -29961,6 +30358,24 @@ fn iface_emit_decl<a, b>(c: (&a mut C), out: (&a mut u8[]), index: u64, m: &b [u
         out.push(32);
         iface_type(&mut out, &mut c, ty);
         out.push(10);
+        // A field's refinement travels with it, so a construction in another module owes it.
+        mut fpf = 0;
+        mut fplo = 0;
+        mut fphi = 0;
+        if first + i < c.fields.len() {
+            fp := &c.fields[first + i].pred;
+            fpf = fp.file;
+            fplo = fp.lo;
+            fphi = fp.hi;
+        }
+        if fphi != 0 {
+            text := pred_text(&mut c, Pred { file: fpf, lo: fplo, hi: fphi });
+            push_bytes(&mut out, view("fwhere "));
+            iface_quoted(&mut out, view(field));
+            out.push(32);
+            iface_quoted(&mut out, view(text));
+            out.push(10);
+        }
     }
     return ();
 }
@@ -32037,6 +32452,72 @@ fn iface_define<a, b, d>(c: (&a mut C), st: (&a mut IState), line: &b [u8], path
         }
         return ();
     }
+    if same(view(word), view("where")) {
+        // A parameter's predicate, carried as text and rebuilt as a virtual source.
+        at := ip_number(&mut p);
+        text := ip_quoted(&mut p);
+        if st.last_func == 0 {
+            iface_fail(&p, view("`where` must follow a function"));
+        }
+        index := st.last_func - 1;
+        mut label = u8[];
+        push_bytes(&mut label, view(path));
+        label.push(58);
+        push_bytes(&mut label, view(c.funcs[index].module));
+        push_bytes(&mut label, view("::"));
+        push_bytes(&mut label, view(c.funcs[index].name));
+        label.push(35);
+        decimal(&mut label, at);
+        pred := pred_of_text(&mut c, view(label), view(text));
+        f := &mut c.funcs[index];
+        while f.ppreds.len() <= at {
+            f.ppreds.push(no_pred());
+        }
+        exchange(&mut f.ppreds[at], pred);
+        return ();
+    }
+    if same(view(word), view("ensures")) {
+        text := ip_quoted(&mut p);
+        if st.last_func == 0 {
+            iface_fail(&p, view("`ensures` must follow a function"));
+        }
+        index := st.last_func - 1;
+        mut label = u8[];
+        push_bytes(&mut label, view(path));
+        label.push(58);
+        push_bytes(&mut label, view(c.funcs[index].module));
+        push_bytes(&mut label, view("::"));
+        push_bytes(&mut label, view(c.funcs[index].name));
+        push_bytes(&mut label, view("#result"));
+        pred := pred_of_text(&mut c, view(label), view(text));
+        exchange(&mut c.funcs[index].rpred, pred);
+        return ();
+    }
+    if same(view(word), view("fwhere")) {
+        name := ip_quoted(&mut p);
+        text := ip_quoted(&mut p);
+        if st.last_decl == 0 {
+            iface_fail(&p, view("`fwhere` must follow a type"));
+        }
+        index := st.last_decl - 1;
+        first := c.decls[index].first;
+        count := c.decls[index].count;
+        for i in count {
+            if (first + i < c.fields.len()) & same(view(c.fields[first + i].name), view(name)) {
+                mut label = u8[];
+                push_bytes(&mut label, view(path));
+                label.push(58);
+                push_bytes(&mut label, view(c.decls[index].name));
+                label.push(46);
+                push_bytes(&mut label, view(name));
+                pred := pred_of_text(&mut c, view(label), view(text));
+                mut target = &mut c.fields[first + i];
+                exchange(&mut target.pred, pred);
+                return ();
+            }
+        }
+        iface_fail(&p, view("`fwhere` names a field of this type"));
+    }
     if same(view(word), view("body")) {
         // `body N` and the N `line` rows that follow are a generic template's own text. The rows
         // are rebuilt into a source file of this interface, so replay parses exactly what the
@@ -32603,6 +33084,10 @@ pub fn main() -> u64 {
         bce_base: u8[],
         cur_ppreds: Pred[],
         cur_rpred: no_pred(),
+        cur_name: u8[],
+        cur_file: 0,
+        cur_pos: 0,
+        ref_next: 0,
         lit_negative: 0,
         byte_start: 0,
         byte_end: 0,
