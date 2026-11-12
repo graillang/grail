@@ -1726,6 +1726,29 @@ fn site_path<a>(c: (&a C), index: u64) -> u8[] {
     }
     return host::arg(index + c.arg_offset);
 }
+// Names a position's file relative to the working directory when it lies under it - `src/main.grl`,
+// the form a reader wants, and the one that keeps a checkout's own location out of what the compiler
+// emits (a seed built from absolute paths used to record them). Anything else keeps the form it was
+// given. There is no cwd builtin, so the working directory is PWD, read once per table; an unset or
+// unrelated PWD trims nothing.
+fn site_relative<a, b>(path: &a [u8], cwd: &b [u8]) -> u8[] {
+    if (cwd.len() == 0) || (path.len() <= cwd.len()) {
+        return path.copy();
+    }
+    for i in cwd.len() {
+        if path[i] != cwd[i] {
+            return path.copy();
+        }
+    }
+    mut start = cwd.len();
+    if cwd[cwd.len() - 1] != 47 {
+        if path[start] != 47 {
+            return path.copy();
+        }
+        start += 1;
+    }
+    return (path[start: path.len()]).copy();
+}
 // Turns the markers into the call-site table. Each call into
 // the runtime gets a label after it - its return address - and an entry: address, file name,
 // line | col << 32 | internal << 63. An inline `call rt_abort` becomes `call rt_trap` with its kind.
@@ -1843,11 +1866,13 @@ fn site_table<a, b>(c: (&a mut C), text: &b [u8]) -> u8[] {
         push_bytes(&mut out, view("\n.section grail_sites,\"a\"\n.p2align 3\n"));
         push_bytes(&mut out, view(entries));
         push_bytes(&mut out, view(".section .rodata\n"));
+        cwd := host::env(view("PWD"));
         for f in files.len() {
             push_bytes(&mut out, view(".Lgf"));
             decimal(&mut out, files[f]);
             push_bytes(&mut out, view(":\n.asciz \""));
-            path := site_path(&c, files[f]);
+            given := site_path(&c, files[f]);
+            path := site_relative(view(given), view(cwd));
             for k in path.len() {
                 ch := path[k];
                 if (ch == 34) || (ch == 92) {

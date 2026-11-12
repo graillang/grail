@@ -56,11 +56,11 @@ so no tool or package is needed), and the `zstd` CLI can read it too - `zstd -dc
 compiler/bootstrap/native.s.zst | sha256sum` must print the `sha256` in the manifest. Never edit a
 seed by hand; `bun tools/bootstrap.mjs update <arch>` rewrites it.
 
-Because the compiler embeds the absolute path of each source it compiles, `bootstrap.mjs verify` only
-matches in a checkout with the same path as the one that last reseeded each target - a moved clone
-reports `checked-in bootstrap is stale` with an assembly that differs only in those path strings.
-`ci.mjs preflight` has no such constraint (it compares source and seed digests), and
-`bun tools/bootstrap.mjs update <arch>` from here republishes that target's seed for this path.
+The seed carries no path from the machine that built it: a call-site table names each file relative to
+the working directory (`compiler/native.grl`, the form a runtime error prints), so `bootstrap.mjs
+verify` matches in any clone and a reseed is a change in the compiler, not in where it was run.
+`tools/native.mjs` pins `PWD` to the tree root for the compiler runs that produce a seed, so running
+the tools from a subdirectory cannot reintroduce absolute names.
 
 **A host builtin that the compiler itself calls needs a two-step bootstrap.** The checked-in seed
 (`compiler/bootstrap/native.s.zst`) *is* the compiler, including its table of `host::` builtins in

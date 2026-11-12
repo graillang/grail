@@ -322,6 +322,12 @@ export function seedAssemblyPath(target) {
   renameSync(pending, cached);
   return cached;
 }
+// A run that produces a seed must name its files the same way every time: the site table writes them
+// relative to the working directory (PWD), while spawnSync's cwd is `root`, so pin PWD to it instead
+// of whatever directory the shell happened to be in.
+export function compilerEnvironment() {
+  return { ...process.env, PWD: root };
+}
 export function buildCompiler() {
   // Explicit development bootstrap, used while a new intrinsic is staged before artifact refresh.
   if (process.env.GRAIL_COMPILER) {
@@ -342,7 +348,7 @@ export function buildCompiler() {
   mkdirSync(directory, { recursive: true });
   const bootstrap = assemble(assembly, join(directory, 'bootstrap'));
   const output = join(directory, 'compiler.s');
-  command([bootstrap, '--default-u64', '--typed-refs', output, ...compilerSources]);
+  command([bootstrap, '--default-u64', '--typed-refs', output, ...compilerSources], { env: compilerEnvironment() });
   const pending = assemble(output, join(directory, 'grail.pending'));
   renameSync(pending, executable);
   return executable;

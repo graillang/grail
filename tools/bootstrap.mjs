@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {
   root, compilerSources, targets, hostTarget, targetName, buildCompiler, assemble, command, execute,
   digest, compressSeed, seedDirectory, seedFile, seedManifest, seedAssemblyPath, readSeedManifest,
+  compilerEnvironment,
 } from './native.mjs';
 const sha = digest;
 const sourceDigests = () => Object.fromEntries(compilerSources.map(p => [p.slice(root.length + 1), sha(readFileSync(p))]));
@@ -21,10 +22,10 @@ for (const target of selected) {
   const work = join(root, '.work/bootstrap', target);
   mkdirSync(work, { recursive: true });
   const first = join(work, 'compiler.s'), second = join(work, 'self.s');
-  command([compiler, '--default-u64', '--typed-refs', '--target', target, first, ...compilerSources]);
+  command([compiler, '--default-u64', '--typed-refs', '--target', target, first, ...compilerSources], { env: compilerEnvironment() });
   const executable = assemble(first, join(work, 'compiler'), target);
   // Emulated self-compilation of the whole compiler can take close to an hour (notably RV64 under qemu).
-  const result = execute(executable, ['--default-u64', '--typed-refs', '--target', target, second, ...compilerSources], target, { timeout: Number(process.env.GRAIL_BOOTSTRAP_TIMEOUT_MS ?? 7_200_000) });
+  const result = execute(executable, ['--default-u64', '--typed-refs', '--target', target, second, ...compilerSources], target, { timeout: Number(process.env.GRAIL_BOOTSTRAP_TIMEOUT_MS ?? 7_200_000), env: compilerEnvironment() });
   if (result.error) throw result.error;
   assert.equal(result.status, 0, `${target}: compiler execution failed (${result.signal})\n${result.stdout}${result.stderr}`);
   const expected = readFileSync(first);
