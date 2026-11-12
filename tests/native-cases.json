@@ -1185,7 +1185,7 @@
     "name": "interface-missing-method",
     "source": "interface Value{fn value<a>(x:(&a Self))->u64;}impl Value for u64{}fn main(){}",
     "reject": true,
-    "diagnostic": "implementation method count"
+    "diagnostic": "missing interface method `value` (it has no default body)"
   },
   {
     "name": "interface-duplicate-implementation",
@@ -6394,5 +6394,143 @@
     "source": "fn crc_table() -> u32[] {\n    mut t = u32[];\n    for n in 256 {\n        mut c: u32 = u32(n);\n        for k in 8 {\n            if (c & 1) != 0 {\n                c = 3988292384 ^ (c >> 1);\n            } else {\n                c = c >> 1;\n            }\n        }\n        t.push(c);\n    }\n    return t;\n}\nfn squares() -> u64[] {\n    mut v = u64[];\n    for i in 10 {\n        v.push(i * i);\n    }\n    return v;\n}\nfn magic() -> u8[] {\n    return u8[71, 82, 76];\n}\nCRC := crc_table();\nSQ := squares();\nMAGIC := magic();\nfn crc32(data: u8[]) -> u32 {\n    table := CRC;\n    mut c: u32 = 4294967295;\n    for b in &data {\n        c = table[u64((c ^ u32(b)) & 255)] ^ (c >> 8);\n    }\n    return c ^ 4294967295;\n}\nfn main() -> u64 {\n    println(CRC.len());\n    println(CRC[1]);\n    println(SQ[9]);\n    println(MAGIC.text());\n    println(crc32(u8[104, 101, 108, 108, 111]));\n    return 0;\n}\n",
     "stdout": "256\n1996959894\n81\nGRL\n907060870\n",
     "note": "compile-time calls may give a vector of integers or bytes: a CRC table computed while compiling"
+  },
+  {
+    "name": "interface-default-methods",
+    "files": [
+      "compiler/tests/default_methods.grl",
+      "compiler/tests/default_methods_lib.grl"
+    ],
+    "stdout": "square 4 40\nshape 3 30\n30\n",
+    "note": "an implementation inherits default bodies it leaves out, across modules; a default calls other interface methods and its own module's private helpers; method syntax works on a bounded parameter"
+  },
+  {
+    "name": "interface-default-type-error-at-interface",
+    "source": "interface Shape{fn area(self:&Self)->u64;fn name(self:&Self)->u64{return \"shape\";}}struct Square{side:u64}impl Shape for Square{fn area(self:&Self)->u64{return self.side;}}fn main(){}",
+    "defaultU64": true,
+    "reject": true,
+    "diagnostic": "type mismatch"
+  },
+  {
+    "name": "interface-reject-foreign-method",
+    "source": "interface Value{fn value<a>(x:(&a Self))->u64;}impl Value for u64{fn value<a>(x:(&a Self))->u64{return 1;}fn extra<a>(x:(&a Self))->u64{return 2;}}fn main(){}",
+    "reject": true,
+    "diagnostic": "method `extra` is not a member of the interface"
+  },
+  {
+    "name": "iter-filter-reference-items",
+    "source": "use iter;\nfn main() -> u64 {\n    v := u64[1, 2, 3, 4, 5];\n    mut total = 0;\n    for x in iter::filter(iter::refs(&v), |x: &&u64| -> bool **x % 2 == 1) {\n        total = total + *x;\n    }\n    println(total);\n    return 0;\n}\n",
+    "modules": [
+      "lib/iter.grl",
+      "lib/core.grl"
+    ],
+    "stdout": "9\n",
+    "note": "filter over refs(&v): the predicate takes &&T and reads through it with **x"
+  },
+  {
+    "name": "closure-loop-over-reference-iterator",
+    "source": "use iter;\nfn count<a>(it: iter::Iter<(&a u64)>) -> u64 {\n    mut src = it;\n    mut n = 0;\n    while let Some(x) = src.next() {\n        n = n + *x;\n    }\n    return n;\n}\nfn main() -> u64 {\n    v := u64[1, 2, 3];\n    println(count(iter::refs(&v)));\n    mut src = iter::refs(&v);\n    mut f = || -> u64 {\n        mut n = 0;\n        while let Some(x) = src.next() {\n            n = n + *x;\n        }\n        return n;\n    };\n    println(f());\n    return 0;\n}\n",
+    "modules": [
+      "lib/iter.grl",
+      "lib/core.grl"
+    ],
+    "stdout": "6\n6\n",
+    "note": "a closure's loop over a captured iterator of references: each turn's shared borrow of outside storage is not a consumed entry"
+  },
+  {
+    "name": "double-deref-rejects-owned",
+    "source": "fn get<a, b>(r: &a (&b u8[])) -> u8[] {\n    return **r;\n}\nfn main() -> u64 {\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": "cannot copy an owned value out of a reference; use exchange"
+  },
+  {
+    "name": "interface-associated-types",
+    "files": [
+      "compiler/tests/assoc_types.grl",
+      "compiler/tests/assoc_lib.grl"
+    ],
+    "modules": [
+      "lib/core.grl"
+    ],
+    "stdout": "3 9\ntrue 2\n",
+    "note": "type Item; in an interface, type Item = ...; per implementation, T::Item / Self::Item in signatures and T::Item[] literals, across modules"
+  },
+  {
+    "name": "interface-reject-missing-associated-type",
+    "source": "interface S{type Item;fn get(self:&Self)->Self::Item;}struct A{x:u64}impl S for A{fn get(self:&Self)->u64{return self.x;}}fn main(){}",
+    "reject": true,
+    "diagnostic": "missing associated type `Item` (write: type Item = ...;)"
+  },
+  {
+    "name": "interface-reject-foreign-associated-type",
+    "source": "interface S{type Item;fn get(self:&Self)->Self::Item;}struct A{x:u64}impl S for A{type Item=u64;type Other=u64;fn get(self:&Self)->u64{return self.x;}}fn main(){}",
+    "reject": true,
+    "diagnostic": "associated type `Other` is not a member of the interface"
+  },
+  {
+    "name": "interface-reject-unknown-projection",
+    "source": "interface S{type Item;fn get(self:&Self)->Self::Item;}fn f<T:S>(t:&T)->T::Nope{return S::get(t);}fn main(){}",
+    "reject": true,
+    "diagnostic": "no associated type of that name in this parameter's bounds"
+  },
+  {
+    "name": "interface-reject-associated-type-mismatch",
+    "source": "interface S{type Item;fn get(self:&Self)->Self::Item;}struct A{x:u64}impl S for A{type Item=u64;fn get(self:&Self)->u8[]{return u8[];}}fn main(){}",
+    "reject": true,
+    "diagnostic": "method signature does not match the interface"
+  },
+  {
+    "name": "interface-elided-lifetimes-in-module",
+    "files": [
+      "compiler/tests/elided_interface.grl",
+      "compiler/tests/elided_interface_lib.grl"
+    ],
+    "stdout": "7\n",
+    "note": "a pub interface in another module may elide method lifetimes, as functions do"
+  },
+  {
+    "name": "dyn-interface-objects",
+    "source": "interface Shape {\n    fn area(self: &Self) -> u64;\n    fn name(self: &Self) -> string {\n        return \"shape\";\n    }\n    fn grow(self: &mut Self, by: u64) -> unit;\n}\nstruct Square {\n    side: u64,\n}\nstruct Circle {\n    r: u64,\n    label: string,\n}\nimpl Shape for Square {\n    fn area(self: &Self) -> u64 {\n        return self.side * self.side;\n    }\n    fn name(self: &Self) -> string {\n        return \"square\";\n    }\n    fn grow(self: &mut Self, by: u64) -> unit {\n        self.side = self.side + by;\n        return ();\n    }\n}\nimpl Shape for Circle {\n    fn area(self: &Self) -> u64 {\n        return 3 * self.r * self.r;\n    }\n    fn grow(self: &mut Self, by: u64) -> unit {\n        self.r = self.r + by;\n        return ();\n    }\n}\nfn total(shapes: &(dyn Shape)[]) -> u64 {\n    mut t = 0;\n    for s in shapes {\n        t = t + s.area();\n    }\n    return t;\n}\nfn describe(s: &dyn Shape) -> unit {\n    println(\"{} {}\", s.name(), s.area());\n    return ();\n}\nfn main() -> u64 {\n    mut shapes = (dyn Shape)[];\n    shapes.push(Square { side: 2 });\n    shapes.push(Circle { r: 1, label: \"c\" });\n    println(total(&shapes));\n    mut one: dyn Shape = Square { side: 5 };\n    one.grow(1);\n    describe(&one);\n    describe(&shapes[1]);\n    return 0;\n}\n",
+    "modules": [
+      "lib/core.grl"
+    ],
+    "stdout": "7\nsquare 36\nshape 3\n",
+    "note": "a vector of dyn Shape holding different types, &dyn and &mut dyn receivers, a default method through the vtable, drop of an object owning a string"
+  },
+  {
+    "name": "dyn-reject-self-result",
+    "source": "interface S{fn make(self:&Self)->Self;}fn f(x:&dyn S){}fn main(){}",
+    "reject": true,
+    "diagnostic": "interface `S` cannot be used as dyn: method `make` must take &self or &mut self first and use Self nowhere else"
+  },
+  {
+    "name": "dyn-reject-by-value-receiver",
+    "source": "interface S{fn get(self:Self)->u64;}fn f(x:&dyn S){}fn main(){}",
+    "reject": true,
+    "diagnostic": "cannot be used as dyn: method `get`"
+  },
+  {
+    "name": "dyn-reject-associated-types",
+    "source": "interface S{type Item;fn get(self:&Self)->u64;}fn f(x:&dyn S){}fn main(){}",
+    "reject": true,
+    "diagnostic": "cannot be used as dyn: it has associated types"
+  },
+  {
+    "name": "dyn-reject-not-implemented",
+    "source": "interface S{fn get(self:&Self)->u64;}struct A{x:u64}fn main(){d: dyn S := A{x:1};}",
+    "reject": true,
+    "diagnostic": "this type does not implement the interface the dyn type names"
+  },
+  {
+    "name": "dyn-reject-use-after-move",
+    "source": "interface S{fn get(self:&Self)->u64;}struct A{x:u64}impl S for A{fn get(self:&Self)->u64{return self.x;}}fn main(){d: dyn S := A{x:1};e:=d;println(d.get());}",
+    "reject": true,
+    "diagnostic": "use of moved, borrowed or partially initialized value"
+  },
+  {
+    "name": "dyn-reject-mut-receiver-on-immutable",
+    "source": "interface S{fn get(self:&Self)->u64;fn bump(self:&mut Self)->unit;}struct A{x:u64}impl S for A{fn get(self:&Self)->u64{return self.x;}fn bump(self:&mut Self)->unit{self.x=self.x+1;return ();}}fn main(){d: dyn S := A{x:1};d.bump();}",
+    "reject": true,
+    "diagnostic": "owned storage mutation requires mut"
   }
 ]

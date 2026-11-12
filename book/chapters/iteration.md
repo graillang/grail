@@ -29,9 +29,17 @@ The `iter` module chains work lazily over an `Iter<T>` - a closure that yields t
 `Iter<T>` is itself an iterator by the protocol above, so any adapter chain can sit in a `for`.
 The closures passed to adapters are `FnMut`, so they may update their own captures. `refs(&v)`
 yields references into a vector you keep, so a loop or a chain such as `take` can use borrowed items
-without copying them; the vector stays borrowed while the chain or any item from it is in use. Two
-limits today: `filter` cannot take reference items yet (its predicate would receive a reference to
-a reference), and `map` from reference items to owned ones is refused, because `Iter<U>` does not
+without copying them; the vector stays borrowed while the chain or any item from it is in use.
+`filter` over reference items hands its predicate a reference to each item, as Rust does, so it
+takes `&&T` and reads through both with `**x`:
+
+```grl
+for x in iter::filter(iter::refs(&v), |x: &&u64| -> bool **x % 2 == 1) {
+    total = total + *x;
+}
+```
+
+One limit today: `map` from reference items to owned ones is refused, because `Iter<U>` does not
 carry the lifetime of what it still borrows - collect or loop over `refs(&v)` instead. The same
 holds for any closure whose type returns a reference: `Fn() -> &a T` keeps what it captured
 borrowed for lifetime `a`.

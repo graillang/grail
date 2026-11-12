@@ -21,6 +21,10 @@ use cli;
 // 22 char, 23 opaque foreign handle (arg = decl), 24 CStr, 25 cfn pointer, 26 bare C pointer,
 // 27 slice (arg = element, mode 1 writable), 28 byval(extern record),
 // 29 job (arg = result): a running pool job handle. Move-only, like Task<R>, and its drop waits.
+// 33 interface object `dyn I` (arg = interface id): one word, a heap cell {value, vtable}; the
+//    vtable is {drop, method 0, method 1, ...} for the concrete type (dyn_box, emit_vtables).
+// 30 associated-type projection `T::Item` (arg = T, mode = interface id * 1024 + associated index):
+//    only ever over a type parameter; binding T to a concrete type resolves it (project).
 
 struct Tok {
     kind: u64,
@@ -111,13 +115,25 @@ struct Interface {
     // 0 when declared without `pub`: private to `module` (separate-compilation.md, "Visibility").
     public: u64,
     defined: u64,
-    methods: u64[]
+    methods: u64[],
+    // Per method, parallel to `methods`: the `fn` token of a default body + 1 (0: none), and the
+    // file it is in. An implementation that leaves the method out gets this body (default_methods).
+    defaults: u64[],
+    default_files: u64[],
+    // Associated types (`type Item;`), by index.
+    assoc: u8[][]
 }
 struct Implementation {
     contract: u64,
     ty: u64,
     module: u8[],
-    methods: u64[]
+    methods: u64[],
+    // Where `impl` is written + 1 (0: read from an interface file), for diagnostics.
+    file: u64,
+    pos: u64,
+    // `type Item = u64;`: the associated types it gives, by name.
+    assoc_names: u8[][],
+    assoc_types: u64[]
 }
 struct Closure {
     decl: u64,
@@ -449,6 +465,12 @@ struct C {
     implementations: Implementation[],
     self_type: u64,
     current_impl: u64,
+    // Functions default_methods copied into an implementation from its interface.
+    default_copies: u64[],
+    // `dyn I` objects this object builds: (interface, concrete type) pairs, and the interfaces
+    // named as `dyn`, whose object safety check_interfaces checks.
+    vtables: u64[],
+    dyn_ifaces: u64[],
     headers_complete: u64,
     resources: Resource[],
     loopmark: u64,
@@ -2696,7 +2718,9 @@ fn needs_drop<a>(c: (&a mut C), ty: u64) -> bool {
         || (k == 13)
         || (k == 16)
         || (k == 20)
-        || (k == 29);
+        || (k == 29)
+        || (k == 30)
+        || (k == 33);
 }
 fn resource<a>(c: (&a mut C), slot: u64) -> u64 {
     mut i = c.resources.len();
@@ -3974,6 +3998,55 @@ fn borrow_reference<a>(
     set_target(&mut c, slot, target, slot + 1);
     return val(slot, ty);
 }
+// The loop backedge check (ownership::backedge), with one more loan that cannot consume entry
+// storage: a shared borrow of storage outside the function (an origin place, such as what a
+// captured iterator over references lends out on each turn). Such storage is never moved or
+// rewritten here, and shared loans never conflict, so a fresh one per turn is still a fixpoint.
+fn backedge_ok<a, b>(c: (&a mut C), entry: (&b ownership::State)) -> bool {
+    code := ownership::backedge(&c.check, &entry);
+    if code == 0 {
+        return true;
+    }
+    if code != 3 {
+        return false;
+    }
+    for i in entry.loans.len() {
+        if (i < c.check.loans.len()) && (c.check.loans[i].live != entry.loans[i].live) {
+            return false;
+        }
+    }
+    mut i = entry.loans.len();
+    while i < c.check.loans.len() {
+        l := &c.check.loans[i];
+        live := l.live;
+        mode := l.mode;
+        source := l.source;
+        parent := l.parent;
+        if live != 0 {
+            mut stable = false;
+            if mode == 0 {
+                for j in entry.loans.len() {
+                    old := &entry.loans[j];
+                    if (old.live != 0) && (old.mode == 0) && (old.source == source) && (old.parent == parent) {
+                        stable = true;
+                    }
+                }
+                if (parent == 0) && !stable {
+                    for k in c.origins.len() {
+                        if c.origins[k].place == source {
+                            stable = true;
+                        }
+                    }
+                }
+            }
+            if !stable {
+                return false;
+            }
+        }
+        i += 1;
+    }
+    return true;
+}
 fn view_bonds<a>(c: (&a mut C), slot: u64, source: u64, mode: u64) -> unit {
     if c.raw != 0 {
         return ();
@@ -4320,6 +4393,12 @@ fn type_key<a>(c: (&a mut C), out: (&a mut u8[]), ty: u64, depth: u64) -> unit {
         // A type parameter's slot number is what the declaration counts, not what this run chose.
         out.push(32);
         decimal(&mut out, arg);
+    } else if k == 33 {
+        // An interface object: the interface by name, not by this run's index.
+        out.push(32);
+        push_bytes(&mut out, view(c.interfaces[arg - 1].module));
+        push_bytes(&mut out, view("::"));
+        push_bytes(&mut out, view(c.interfaces[arg - 1].name));
     } else {
         // A store extension this compiler does not know. Its payload is a type if the number points
         // into the type table, so walk it; either way the kind, the mode, the regions and the
@@ -5111,6 +5190,11 @@ fn transfer_capability<a, b>(
         }
         return true;
     }
+    // An associated type of a parameter has no capability bounds to rely on; nor does an interface
+    // object, whose concrete type is unknown.
+    if (k == 30) || (k == 33) {
+        return deny(&mut c, 8);
+    }
     // A capability proof (kind 9) carries its own bits: 1 transferable, 2 shareable.
     if k == 9 {
         proof := ty_mode(&mut c, ty);
@@ -5526,7 +5610,20 @@ fn ensure_interface<a>(c: (&a mut C), module: u8[], name: u8[]) -> u64 {
     if existing != 0 {
         return existing;
     }
-    c.interfaces.push(Interface { module: module, name: name, public: 1, defined: 0, methods: u64[] });
+    c
+        .interfaces
+        .push(
+            Interface {
+                module: module,
+                name: name,
+                public: 1,
+                defined: 0,
+                methods: u64[],
+                defaults: u64[],
+                default_files: u64[],
+                assoc: u8[][],
+            }
+        );
     return c.interfaces.len();
 }
 fn base_type<a>(c: (&a mut C), ty: u64) -> u64 {
@@ -5552,6 +5649,9 @@ fn find_implementation<a>(c: (&a mut C), contract: u64, ty: u64) -> u64 {
 }
 fn satisfies_interface<a>(c: (&a mut C), ty: u64, contract: u64) -> bool {
     actual := base_type(&mut c, ty);
+    if ty_kind(&mut c, actual) == 33 {
+        return ty_arg(&mut c, actual) == contract;
+    }
     if ty_kind(&mut c, actual) == 9 {
         proofs := type_args(&mut c, actual);
         for i in proofs.len() {
@@ -5848,6 +5948,251 @@ fn substitute<a, b>(c: (&a mut C), ty: u64, map: (&b u64[])) -> u64 {
     env := ty_env(&mut c, ty);
     return intern_env(&mut c, k, arg, mode, rs, args, env);
 }
+// ---- interface objects (`dyn I`) ---------------------------------------------------------------------
+// Rust's trait objects, owned: a `dyn I` is one word, a heap cell {value, vtable}. A value of a type
+// implementing I becomes one where a `dyn I` is expected (dyn_box); a method called on it loads its
+// entry from the vtable (emit_resolved_call); dropping it drops the value through the vtable and
+// frees the cell. `&dyn I` and `&mut dyn I` are ordinary references to such a value.
+fn dyn_box<a>(c: (&a mut C), v: Val, expected: u64) -> Val {
+    id := ty_arg(&mut c, expected);
+    concrete := base_type(&mut c, v.ty);
+    kind := ty_kind(&mut c, concrete);
+    if (kind == 9) || (kind == 30) {
+        fail(&mut c, view("a dyn value needs a concrete type, not a type parameter"));
+    }
+    if find_implementation(&mut c, id, concrete) == 0 {
+        fail(&mut c, view("this type does not implement the interface the dyn type names"));
+    }
+    if contains_borrow(&mut c, concrete, 0) {
+        fail(&mut c, view("a dyn value cannot hold borrowed data: its lifetime would be lost"));
+    }
+    mut known = false;
+    for i in c.vtables.len() / 2 {
+        have := c.vtables[2 * i + 1];
+        if (c.vtables[2 * i] == id) && (same_type(&mut c, have, concrete) != 0) {
+            known = true;
+        }
+    }
+    if !known {
+        c.vtables.push(id);
+        c.vtables.push(concrete);
+    }
+    observe(&mut c, v.t);
+    sz := imm(&mut c, 2);
+    cell := invoke(&mut c, view("rt_rec"), one(sz));
+    rec_store(&mut c, cell, 0, v.t);
+    o(&mut c, view("leaq "));
+    vt := vtable_symbol(&mut c, id, concrete);
+    push_bytes(&mut c.out, view(vt));
+    o(&mut c, view("(%rip),%rax\n"));
+    table := save(&mut c);
+    rec_store(&mut c, cell, 1, table);
+    move_out(&mut c, val(v.t, v.ty));
+    own(&mut c, cell, expected);
+    return val(cell, expected);
+}
+// A vtable's name is a function of the concrete type and the interface, like a drop helper's, so
+// two objects that both build one emit the same weak definition.
+fn vtable_symbol<a>(c: (&a mut C), id: u64, concrete: u64) -> u8[] {
+    mut key = u8[];
+    type_key(&mut c, &mut key, concrete, 0);
+    push_bytes(&mut key, view(" as "));
+    push_bytes(&mut key, view(c.interfaces[id - 1].module));
+    push_bytes(&mut key, view("::"));
+    push_bytes(&mut key, view(c.interfaces[id - 1].name));
+    digest := iface_digest(&key);
+    mut name = u8[];
+    push_bytes(&mut name, view(".V"));
+    for i in 16 {
+        name.push(digest[i]);
+    }
+    return name;
+}
+fn emit_vtables<a>(c: (&a mut C)) -> unit {
+    if c.vtables.len() == 0 {
+        return ();
+    }
+    o(&mut c, view(".data\n.p2align 3\n"));
+    for i in c.vtables.len() / 2 {
+        id := c.vtables[2 * i];
+        concrete := c.vtables[2 * i + 1];
+        vt := vtable_symbol(&mut c, id, concrete);
+        o(&mut c, view(".weak "));
+        push_bytes(&mut c.out, view(vt));
+        c.out.push(10);
+        push_bytes(&mut c.out, view(vt));
+        o(&mut c, view(":\n.quad "));
+        if needs_drop(&mut c, concrete) {
+            drop_name(&mut c, concrete);
+        } else {
+            o(&mut c, view("0"));
+        }
+        c.out.push(10);
+        methods := copy_numbers(&c.interfaces[id - 1].methods);
+        for j in methods.len() {
+            name := c.funcs[methods[j]].name.copy();
+            actual := resolve_interface_method(&mut c, id, concrete, view(name));
+            module := c.funcs[actual].module.copy();
+            symbol := c.funcs[actual].name.copy();
+            o(&mut c, view(".quad "));
+            mangle(&mut c, view(module), view(symbol));
+            c.out.push(10);
+        }
+    }
+    o(&mut c, view(".text\n"));
+    return ();
+}
+// Rust's object safety: every method takes the object by reference as its first parameter, and
+// `Self` appears nowhere else - not in other parameters, not in the result - and the interface has
+// no associated types, which a `dyn I` could not name.
+fn check_object_safety<a>(c: (&a mut C), id: u64) -> unit {
+    item := &c.interfaces[id - 1];
+    methods := copy_numbers(&item.methods);
+    assoc := item.assoc.len();
+    mut message = u8[];
+    push_bytes(&mut message, view("interface `"));
+    push_bytes(&mut message, view(c.interfaces[id - 1].name));
+    push_bytes(&mut message, view("` cannot be used as dyn: "));
+    if assoc != 0 {
+        push_bytes(&mut message, view("it has associated types"));
+        fail(&mut c, view(message));
+    }
+    for j in methods.len() {
+        f := &c.funcs[methods[j]];
+        first := f.first;
+        count := f.count;
+        ret := f.ret;
+        fname := f.name.copy();
+        mut bad = count == 0;
+        if !bad {
+            receiver := c.params[first];
+            referent := ty_arg(&mut c, receiver);
+            bad = (ty_kind(&mut c, receiver) != 7) || mentions_self(&mut c, referent, 1);
+        }
+        for k in 1..count {
+            param := c.params[first + k];
+            if mentions_self(&mut c, param, 0) {
+                bad = true;
+            }
+        }
+        if mentions_self(&mut c, ret, 0) {
+            bad = true;
+        }
+        if bad {
+            push_bytes(&mut message, view("method `"));
+            push_bytes(&mut message, view(fname));
+            push_bytes(&mut message, view("` must take &self or &mut self first and use Self nowhere else"));
+            fail(&mut c, view(message));
+        }
+    }
+    return ();
+}
+// Whether a type mentions `Self` (type parameter 0 of an interface method). With `top` set, the
+// type itself being `Self` is allowed (the referent of the receiver), only a nested use is not.
+fn mentions_self<a>(c: (&a mut C), ty: u64, top: u64) -> bool {
+    k := ty_kind(&mut c, ty);
+    if (k == 9) && (ty_arg(&mut c, ty) == 0) {
+        return top == 0;
+    }
+    if k == 30 {
+        return true;
+    }
+    if (k == 6) || (k == 27) || (k == 7) || (k == 12) || (k == 13) || (k == 14) || (k == 16) || (k == 20) || (k == 29) {
+        inner := ty_arg(&mut c, ty);
+        if mentions_self(&mut c, inner, 0) {
+            return true;
+        }
+    }
+    args := type_args(&mut c, ty);
+    for i in args.len() {
+        if ty_kind(&mut c, args[i]) != 15 {
+            if mentions_self(&mut c, args[i], 0) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+// ---- associated types -----------------------------------------------------------------------------
+// `T::Item` for a type parameter `T` whose bounds declare `type Item;` is a projection type (kind 30);
+// for a concrete type it is the type its implementation gives (`type Item = u64;`). Binding `T`
+// resolves a projection (bind_types), so a specialisation only ever sees concrete types.
+fn assoc_type<a, b>(c: (&a mut C), base: u64, name: &b [u8]) -> u64 {
+    b := base_type(&mut c, base);
+    k := ty_kind(&mut c, b);
+    if (k == 9) || (k == 30) {
+        proofs := type_args(&mut c, b);
+        mut found = 0;
+        for i in proofs.len() {
+            if ty_kind(&mut c, proofs[i]) == 15 {
+                id := ty_arg(&mut c, proofs[i]);
+                assoc := copy_names(&c.interfaces[id - 1].assoc);
+                for j in assoc.len() {
+                    if same(view(assoc[j]), view(name)) {
+                        if found != 0 {
+                            fail(&mut c, view("ambiguous associated type: several bounds declare it"));
+                        }
+                        found = intern_full(&mut c, 30, b, id * 1024 + j, u64[]);
+                    }
+                }
+            }
+        }
+        if found == 0 {
+            fail(&mut c, view("no associated type of that name in this parameter's bounds"));
+        }
+        return found;
+    }
+    // Type id 0 is u64, so whether one was found is its own flag.
+    mut found = 0;
+    mut any = false;
+    for i in c.implementations.len() {
+        item := &c.implementations[i];
+        ity := item.ty;
+        names := copy_names(&item.assoc_names);
+        types := copy_numbers(&item.assoc_types);
+        if same_type(&mut c, ity, b) != 0 {
+            for j in names.len() {
+                if same(view(names[j]), view(name)) {
+                    if any && (same_type(&mut c, found, types[j]) == 0) {
+                        fail(&mut c, view("ambiguous associated type: several implementations give it"));
+                    }
+                    found = types[j];
+                    any = true;
+                }
+            }
+        }
+    }
+    if !any {
+        fail(&mut c, view("no implementation of this type gives an associated type of that name"));
+    }
+    return found;
+}
+// The projection `base::(interface, index)` once `base` is bound: still a projection over a type
+// parameter, otherwise what `base`'s implementation of the interface gives.
+fn project<a>(c: (&a mut C), base: u64, mode: u64) -> u64 {
+    b := base_type(&mut c, base);
+    k := ty_kind(&mut c, b);
+    if (k == 9) || (k == 30) {
+        return intern_full(&mut c, 30, b, mode, u64[]);
+    }
+    contract := mode / 1024;
+    index := mode % 1024;
+    implementation := find_implementation(&mut c, contract, b);
+    if implementation == 0 {
+        fail(&mut c, view("missing interface implementation for an associated type"));
+    }
+    name := c.interfaces[contract - 1].assoc[index].copy();
+    item := &c.implementations[implementation - 1];
+    names := copy_names(&item.assoc_names);
+    types := copy_numbers(&item.assoc_types);
+    for j in names.len() {
+        if same(view(names[j]), view(name)) {
+            return types[j];
+        }
+    }
+    fail(&mut c, view("missing associated type in an interface implementation"));
+    return 0;
+}
 fn bind_types<a, b>(c: (&a mut C), ty: u64, map: (&b u64[])) -> u64 {
     k := ty_kind(&mut c, ty);
     mode := ty_mode(&mut c, ty);
@@ -5857,6 +6202,10 @@ fn bind_types<a, b>(c: (&a mut C), ty: u64, map: (&b u64[])) -> u64 {
             fail(&mut c, view("unbound type parameter"));
         }
         return map[arg];
+    }
+    if k == 30 {
+        base := bind_types(&mut c, arg, &map);
+        return project(&mut c, base, mode);
     }
     if (k == 6) || (k == 27) || (k == 28) || (k == 7) || (k == 12) || (k == 13) || (k == 14) || (k == 16) || (k == 20) || (k == 29) {
         arg = bind_types(&mut c, arg, &map);
@@ -5898,7 +6247,7 @@ fn field_type<a>(c: (&a mut C), ty: u64, index: u64) -> u64 {
 }
 fn concrete_type<a>(c: (&a mut C), ty: u64) -> bool {
     k := ty_kind(&mut c, ty);
-    if k == 9 {
+    if (k == 9) || (k == 30) {
         return false;
     }
     arg := ty_arg(&mut c, ty);
@@ -6045,8 +6394,14 @@ fn same_type<a>(c: (&a mut C), x: u64, y: u64) -> u64 {
         bm := ty_mode(&mut c, y);
         return (aa == bb) & (am == bm);
     }
-    if (a == 9) || (a == 21) {
+    if (a == 9) || (a == 21) || (a == 33) {
         return aa == bb;
+    }
+    if a == 30 {
+        if ty_mode(&mut c, x) != ty_mode(&mut c, y) {
+            return 0;
+        }
+        return same_type(&mut c, aa, bb);
     }
     if a == 10 {
         am := ty_mode(&mut c, x);
@@ -6658,6 +7013,10 @@ fn lifetime_candidate<a>(c: (&a mut C), p: u64) -> bool {
     if type_keyword(&mut c, view(n)) {
         return false;
     }
+    // `&dyn I` is a reference to an interface object, not lifetime `dyn`.
+    if same(view(n), view("dyn")) && (kind_at(&mut c, p + 1) == 1) {
+        return false;
+    }
     return token_starts_type(&mut c, p + 1) || is_at(&mut c, p + 1, view("mut"));
 }
 fn is_at<a, b>(c: (&a mut C), p: u64, text: &b [u8]) -> bool {
@@ -6794,6 +7153,52 @@ fn parse_type_base<a>(c: (&a mut C)) -> u64 {
     if eat(&mut c, view("&")) {
         return parse_reference(&mut c);
     }
+    // `dyn I` / `dyn module::I`: a value of any type implementing I, chosen at run time.
+    here_dyn := c.pos;
+    if is(&mut c, view("dyn")) && (kind_at(&mut c, here_dyn + 1) == 1) {
+        advance(&mut c);
+        first := ident(&mut c);
+        mut m = module_copy(&mut c);
+        mut n = first.copy();
+        if eat(&mut c, view("::")) {
+            m = first.copy();
+            n = ident(&mut c);
+        } else {
+            imported := resolve_import(&mut c, view(n));
+            if imported.len() != 0 {
+                m = imported;
+            }
+        }
+        id := ensure_interface(&mut c, m, n);
+        interface_visible(&mut c, id);
+        mut known = false;
+        for i in c.dyn_ifaces.len() {
+            if c.dyn_ifaces[i] == id {
+                known = true;
+            }
+        }
+        if !known {
+            c.dyn_ifaces.push(id);
+        }
+        return intern(&mut c, 33, id);
+    }
+    // `&&T`, which the lexer reads as one `&&` token: a shared reference to `&T`, elided lifetime.
+    if eat(&mut c, view("&&")) {
+        inner := parse_reference(&mut c);
+        mut r = 0;
+        if c.parsing_input != 0 {
+            r = fresh_lifetime(&mut c);
+            note_input_region(&mut c, r);
+        } else {
+            if c.output_region == 0 {
+                fail(&mut c, view("elided output reference needs one input lifetime"));
+            }
+            r = c.output_region;
+        }
+        mut rs = u64[];
+        rs.push(r);
+        return intern_full(&mut c, 7, inner, 0, rs);
+    }
     if eat(&mut c, view("(")) {
         if eat(&mut c, view(")")) {
             return 1;
@@ -6817,25 +7222,39 @@ fn base_named<a>(c: (&a mut C), first: u8[]) -> u64 {
             if (i < c.type_bounds.len()) && ((c.type_bounds[i] & 4) != 0) {
                 fail(&mut c, view("this is a value parameter, not a type"));
             }
+            mut param = 0;
             if c.bindings.len() != 0 {
-                return c.bindings[i];
+                param = c.bindings[i];
+            } else {
+                bounds := c.type_bounds[i];
+                mut proofs = u64[];
+                set := copy_numbers(&c.type_interfaces[i]);
+                for j in set.len() {
+                    id := set[j];
+                    proof := intern(&mut c, 15, id);
+                    proofs.push(proof);
+                }
+                param = intern_args(&mut c, 9, i, bounds, u64[], proofs);
             }
-            bounds := c.type_bounds[i];
-            mut proofs = u64[];
-            set := copy_numbers(&c.type_interfaces[i]);
-            for j in set.len() {
-                id := set[j];
-                proof := intern(&mut c, 15, id);
-                proofs.push(proof);
+            // `T::Item`: an associated type of one of T's bounds.
+            if is(&mut c, view("::")) && (next_kind(&mut c) == 1) {
+                advance(&mut c);
+                assoc_name := ident(&mut c);
+                return assoc_type(&mut c, param, view(assoc_name));
             }
-            return intern_args(&mut c, 9, i, bounds, u64[], proofs);
+            return param;
         }
     }
     if same(view(first), view("Self")) & ((c.self_type != 0)) {
-        st := c.self_type - 1;
+        mut st = c.self_type - 1;
         if c.bindings.len() != 0 {
             b := copy_numbers(&c.bindings);
-            return bind_types(&mut c, st, &b);
+            st = bind_types(&mut c, st, &b);
+        }
+        if is(&mut c, view("::")) && (next_kind(&mut c) == 1) {
+            advance(&mut c);
+            assoc_name := ident(&mut c);
+            return assoc_type(&mut c, st, view(assoc_name));
         }
         return st;
     }
@@ -9222,6 +9641,35 @@ fn interface_declaration<a>(c: (&a mut C), pass: u64) -> unit {
         if !is(&mut c, view("{")) {
             fail(&mut c, view("expected interface body"));
         }
+        // Associated types are known from the first pass on, so a signature anywhere can name
+        // `T::Item` whatever order the files come in.
+        mut depth = 0;
+        mut at = c.pos;
+        while kind_at(&mut c, at) != 0 {
+            kt := kind_at(&mut c, at);
+            if kt == 123 {
+                depth += 1;
+            } else if kt == 125 {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            } else if depth == 1 {
+                word := tok_text(&mut c, at);
+                if same(view(word), view("type")) && (kind_at(&mut c, at + 1) == 1) {
+                    assoc_name := tok_text(&mut c, at + 1);
+                    existing := copy_names(&c.interfaces[id - 1].assoc);
+                    for k in existing.len() {
+                        if same(view(existing[k]), view(assoc_name)) {
+                            fail(&mut c, view("duplicate associated type"));
+                        }
+                    }
+                    item := &mut c.interfaces[id - 1];
+                    item.assoc.push(assoc_name);
+                }
+            }
+            at += 1;
+        }
         skip_braces(&mut c);
         return ();
     }
@@ -9236,6 +9684,12 @@ fn interface_declaration<a>(c: (&a mut C), pass: u64) -> unit {
     self := intern_args(&mut c, 9, 0, 0, u64[], proofs);
     exchange(&mut c.self_type, self + 1);
     while !eat(&mut c, view("}")) {
+        if eat(&mut c, view("type")) {
+            ident(&mut c);
+            expect(&mut c, view(";"));
+            continue;
+        }
+        header := c.pos;
         expect(&mut c, view("fn"));
         name := ident(&mut c);
         lifetime_parameters(&mut c);
@@ -9248,12 +9702,22 @@ fn interface_declaration<a>(c: (&a mut C), pass: u64) -> unit {
         }
         first := c.params.len();
         expect(&mut c, view("("));
+        // Elided lifetimes follow the function rules (func): each input reference gets its own,
+        // and an elided output takes the receiver's, or the only input's.
+        exchange(&mut c.input_regions, u64[]);
+        exchange(&mut c.receiver_region, 0);
+        exchange(&mut c.output_region, 0);
+        exchange(&mut c.parsing_input, 1);
         mut count = 0;
         if !eat(&mut c, view(")")) {
             while true {
-                ident(&mut c);
+                p := ident(&mut c);
                 expect(&mut c, view(":"));
                 ty := parse_type(&mut c);
+                if same(view(p), view("self")) & (ty_kind(&mut c, ty) == 7) {
+                    rr := outer_region(&mut c, ty);
+                    exchange(&mut c.receiver_region, rr);
+                }
                 c.params.push(ty);
                 count += 1;
                 if eat(&mut c, view(")")) {
@@ -9262,11 +9726,27 @@ fn interface_declaration<a>(c: (&a mut C), pass: u64) -> unit {
                 expect(&mut c, view(","));
             }
         }
+        exchange(&mut c.parsing_input, 0);
+        if c.receiver_region != 0 {
+            exchange(&mut c.output_region, c.receiver_region);
+        } else {
+            if c.input_regions.len() == 1 {
+                exchange(&mut c.output_region, c.input_regions[0]);
+            }
+        }
         mut ret = 1;
         if eat(&mut c, view("->")) {
             ret = parse_type(&mut c);
         }
-        expect(&mut c, view(";"));
+        exchange(&mut c.output_region, 0);
+        // `fn name(...) -> T { body }` is a default: an implementation may leave it out.
+        mut default = 0;
+        if is(&mut c, view("{")) {
+            default = header + 1;
+            skip_braces(&mut c);
+        } else {
+            expect(&mut c, view(";"));
+        }
         mut bounds = u64[0];
         mut requirements = u64[][];
         requirements.push(u64[id]);
@@ -9299,11 +9779,99 @@ fn interface_declaration<a>(c: (&a mut C), pass: u64) -> unit {
                 }
             );
         index := c.funcs.len() - 1;
+        here_file := c.file;
         item := &mut c.interfaces[id - 1];
         item.methods.push(index);
+        item.defaults.push(default);
+        item.default_files.push(here_file);
     }
     exchange(&mut c.self_type, 0);
     return ();
+}
+// ---- default interface methods ---------------------------------------------------------------------
+// An implementation that leaves out a method with a default body gets that body as if it had been
+// written in the implementation: it is compiled once per implementing type, with `Self` that type,
+// names resolving in the interface's module, and diagnostics pointing at the interface (Rust's
+// provided methods). `pass` 2 declares them once every implementation's own methods are known;
+// pass 3 emits their bodies.
+fn default_methods<a>(c: (&a mut C), pass: u64) -> unit {
+    saved_file := c.file;
+    saved_module := c.module.copy();
+    saved_raw := c.raw;
+    mut touched = false;
+    for k in c.implementations.len() {
+        implementation := &c.implementations[k];
+        contract := implementation.contract;
+        ty := implementation.ty;
+        owner := implementation.module.copy();
+        own := copy_numbers(&implementation.methods);
+        if iface_owned(&mut c, view(owner)) {
+            continue;
+        }
+        interface := &c.interfaces[contract - 1];
+        expected := copy_numbers(&interface.methods);
+        defaults := copy_numbers(&interface.defaults);
+        files := copy_numbers(&interface.default_files);
+        home := interface.module.copy();
+        for j in expected.len() {
+            if (defaults.len() <= j) || (defaults[j] == 0) {
+                continue;
+            }
+            name := c.funcs[expected[j]].name.copy();
+            mut written = false;
+            for m in own.len() {
+                if same(view(c.funcs[own[m]].name), view(name)) && !default_copy(&c, own[m]) {
+                    written = true;
+                }
+            }
+            if written {
+                continue;
+            }
+            touched = true;
+            load_file(&mut c, files[j]);
+            exchange(&mut c.file, files[j]);
+            exchange(&mut c.pos, defaults[j] - 1);
+            exchange(&mut c.raw, 0);
+            exchange(&mut c.module, home.copy());
+            opted := u64(host_opted(&c, view(c.module)));
+            exchange(&mut c.host_optin, opted);
+            module_modes(&mut c);
+            exchange(&mut c.rnames, u8[][]);
+            exchange(&mut c.tnames, u8[][]);
+            exchange(&mut c.type_bounds, u64[]);
+            exchange(&mut c.type_interfaces, u64[][]);
+            exchange(&mut c.current_impl, k + 1);
+            exchange(&mut c.self_type, ty + 1);
+            before := c.funcs.len();
+            func(&mut c, pass, 0);
+            exchange(&mut c.current_impl, 0);
+            exchange(&mut c.self_type, 0);
+            if pass == 2 {
+                item := &mut c.implementations[k];
+                item.methods.push(before);
+                c.default_copies.push(before);
+            }
+        }
+    }
+    if touched {
+        load_file(&mut c, saved_file);
+        exchange(&mut c.file, saved_file);
+        exchange(&mut c.module, saved_module);
+        exchange(&mut c.raw, saved_raw);
+        opted := u64(host_opted(&c, view(c.module)));
+        exchange(&mut c.host_optin, opted);
+        module_modes(&mut c);
+    }
+    return ();
+}
+// Whether method `index` is a copied default rather than written in its implementation.
+fn default_copy<a>(c: (&a C), index: u64) -> bool {
+    for i in c.default_copies.len() {
+        if c.default_copies[i] == index {
+            return true;
+        }
+    }
+    return false;
 }
 fn impl_has_for<a>(c: (&a mut C)) -> bool {
     mut i = c.pos;
@@ -9372,6 +9940,8 @@ fn implementation<a>(c: (&a mut C), pass: u64) -> unit {
     if c.raw != 0 {
         fail(&mut c, view("unsafe runtime cannot implement safe interfaces"));
     }
+    impl_file := c.file;
+    impl_pos := c.pos;
     expect(&mut c, view("impl"));
     // `impl Type { fn ... }`: methods and associated functions of a nominal type in this module.
     if ((kind(&mut c) == 1) & (next_kind(&mut c) == 123))
@@ -9497,7 +10067,18 @@ fn implementation<a>(c: (&a mut C), pass: u64) -> unit {
         }
         c
             .implementations
-            .push(Implementation { contract: contract, ty: ty, module: owner, methods: u64[] });
+            .push(
+                Implementation {
+                    contract: contract,
+                    ty: ty,
+                    module: owner,
+                    methods: u64[],
+                    file: impl_file,
+                    pos: impl_pos + 1,
+                    assoc_names: u8[][],
+                    assoc_types: u64[],
+                }
+            );
         id = c.implementations.len();
     }
     if id == 0 {
@@ -9507,6 +10088,25 @@ fn implementation<a>(c: (&a mut C), pass: u64) -> unit {
     exchange(&mut c.self_type, ty + 1);
     expect(&mut c, view("{"));
     while !eat(&mut c, view("}")) {
+        // `type Item = u64;`: an associated type, before the methods that name it.
+        if eat(&mut c, view("type")) {
+            assoc_name := ident(&mut c);
+            expect(&mut c, view("="));
+            assoc_ty := parse_type(&mut c);
+            expect(&mut c, view(";"));
+            if pass == 2 {
+                existing := copy_names(&c.implementations[id - 1].assoc_names);
+                for k in existing.len() {
+                    if same(view(existing[k]), view(assoc_name)) {
+                        fail(&mut c, view("duplicate associated type"));
+                    }
+                }
+                item := &mut c.implementations[id - 1];
+                item.assoc_names.push(assoc_name);
+                item.assoc_types.push(assoc_ty);
+            }
+            continue;
+        }
         before := c.funcs.len();
         func(&mut c, pass, 0);
         if c.tnames.len() != 0 {
@@ -9553,6 +10153,12 @@ fn resolve_interface_method<a, b>(c: (&a mut C), contract: u64, ty: u64, name: &
     return 0;
 }
 fn check_interfaces<a>(c: (&a mut C)) -> unit {
+    for i in c.dyn_ifaces.len() {
+        id := c.dyn_ifaces[i];
+        if c.interfaces[id - 1].defined != 0 {
+            check_object_safety(&mut c, id);
+        }
+    }
     for i in c.interfaces.len() {
         item := &c.interfaces[i];
         defined := item.defined;
@@ -9570,10 +10176,98 @@ fn check_interfaces<a>(c: (&a mut C)) -> unit {
         contract := item.contract;
         ty := item.ty;
         methods := copy_numbers(&item.methods);
+        impl_file := item.file;
+        impl_pos := item.pos;
         interface := &c.interfaces[contract - 1];
         expected := copy_numbers(&interface.methods);
-        if methods.len() != expected.len() {
-            fail(&mut c, view("interface implementation method count"));
+        // Every associated type the interface declares, and only those.
+        assoc := copy_names(&interface.assoc);
+        given := copy_names(&item.assoc_names);
+        for g in given.len() {
+            mut known = false;
+            for a in assoc.len() {
+                if same(view(assoc[a]), view(given[g])) {
+                    known = true;
+                }
+            }
+            if !known {
+                mut message = u8[];
+                push_bytes(&mut message, view("associated type `"));
+                push_bytes(&mut message, view(given[g]));
+                push_bytes(&mut message, view("` is not a member of the interface"));
+                if impl_pos != 0 {
+                    load_file(&mut c, impl_file);
+                    exchange(&mut c.file, impl_file);
+                    exchange(&mut c.pos, impl_pos - 1);
+                }
+                fail(&mut c, view(message));
+            }
+        }
+        if impl_pos != 0 {
+            for a in assoc.len() {
+                mut present = false;
+                for g in given.len() {
+                    if same(view(assoc[a]), view(given[g])) {
+                        present = true;
+                    }
+                }
+                if !present {
+                    mut message = u8[];
+                    push_bytes(&mut message, view("missing associated type `"));
+                    push_bytes(&mut message, view(assoc[a]));
+                    push_bytes(&mut message, view("` (write: type "));
+                    push_bytes(&mut message, view(assoc[a]));
+                    push_bytes(&mut message, view(" = ...;)"));
+                    load_file(&mut c, impl_file);
+                    exchange(&mut c.file, impl_file);
+                    exchange(&mut c.pos, impl_pos - 1);
+                    fail(&mut c, view(message));
+                }
+            }
+        }
+        // A method the interface does not declare is reported where it is written; a required one
+        // that is missing, at the `impl`.
+        for j in methods.len() {
+            g := &c.funcs[methods[j]];
+            mut known = false;
+            for e in expected.len() {
+                if same(view(c.funcs[expected[e]].name), view(g.name)) {
+                    known = true;
+                }
+            }
+            if !known {
+                file := g.file;
+                pos := g.pos;
+                mut message = u8[];
+                push_bytes(&mut message, view("method `"));
+                push_bytes(&mut message, view(g.name));
+                push_bytes(&mut message, view("` is not a member of the interface"));
+                load_file(&mut c, file);
+                exchange(&mut c.file, file);
+                exchange(&mut c.pos, pos);
+                fail(&mut c, view(message));
+            }
+        }
+        for e in expected.len() {
+            name := c.funcs[expected[e]].name.copy();
+            mut present = false;
+            for j in methods.len() {
+                if same(view(c.funcs[methods[j]].name), view(name)) {
+                    present = true;
+                }
+            }
+            if !present {
+                mut message = u8[];
+                push_bytes(&mut message, view("missing interface method `"));
+                push_bytes(&mut message, view(name));
+                push_bytes(&mut message, view("` (it has no default body)"));
+                if impl_pos != 0 {
+                    load_file(&mut c, impl_file);
+                    exchange(&mut c.file, impl_file);
+                    exchange(&mut c.pos, impl_pos - 1);
+                }
+                fail(&mut c, view(message));
+            }
         }
         for j in expected.len() {
             abstract := expected[j];
@@ -12546,6 +13240,11 @@ fn string_from_bytes<a, b>(c: (&a mut C), bytes: (&b u8[])) -> Val {
 fn infer_type<a, b>(c: (&a mut C), formal: u64, actual: u64, map: (&b mut u64[])) -> unit {
     k := ty_kind(&mut c, formal);
     arg := ty_arg(&mut c, formal);
+    // A projection fixes nothing by itself: its parameter is inferred from elsewhere and the
+    // argument is checked against the bound signature afterwards.
+    if k == 30 {
+        return ();
+    }
     if k == 9 {
         old := map[arg];
         if old == 18446744073709551615 {
@@ -13766,13 +14465,25 @@ fn emit_resolved_call<a>(
             }
         }
     }
+    // Through an interface object the method is the vtable's entry: 1 + its index.
+    mut dyn_entry = 0;
     if contract != 0 {
         if c.validating == 0 {
             self := map[0];
-            actual := resolve_interface_method(&mut c, contract, self, view(name));
-            f := &c.funcs[actual];
-            destination = f.module.copy();
-            symbol = f.name.copy();
+            selfbase := base_type(&mut c, self);
+            if ty_kind(&mut c, selfbase) == 33 {
+                methods := copy_numbers(&c.interfaces[contract - 1].methods);
+                for j in methods.len() {
+                    if same(view(c.funcs[methods[j]].name), view(name)) {
+                        dyn_entry = j + 2;
+                    }
+                }
+            } else {
+                actual := resolve_interface_method(&mut c, contract, self, view(name));
+                f := &c.funcs[actual];
+                destination = f.module.copy();
+                symbol = f.name.copy();
+            }
         }
     }
     // A foreign call is the unsafe boundary: it is rejected outside `unsafe`.
@@ -13799,9 +14510,17 @@ fn emit_resolved_call<a>(
         move_out(&mut c, val(slot, ty));
     }
     load_call_args(&mut c, &args, 0);
-    o(&mut c, view("call "));
-    mangle(&mut c, view(destination), view(symbol));
-    c.out.push(10);
+    if dyn_entry != 0 {
+        // The receiver is a reference to the object's slot: the cell it holds starts with the
+        // value, so the cell is the `&Self` the implementation expects; word 1 is the vtable.
+        o(&mut c, view("movq (%rdi),%rdi\nmovq 8(%rdi),%rax\nmovq "));
+        on(&mut c, (dyn_entry - 1) * 8);
+        o(&mut c, view("(%rax),%rax\ncall *%rax\n"));
+    } else {
+        o(&mut c, view("call "));
+        mangle(&mut c, view(destination), view(symbol));
+        c.out.push(10);
+    }
     slot := save(&mut c);
     own(&mut c, slot, ret);
     call_writebacks(&mut c, first, &sources, &argtypes);
@@ -17829,6 +18548,9 @@ fn is_option_storage<a>(c: (&a mut C), ty: u64) -> bool {
 // A bare literal (including a negated one) takes a sized integer type from its context.
 fn adopt_value<a>(c: (&a mut C), v: Val, start: u64, end: u64, expected: u64) -> Val {
     if (c.raw == 0) & (expected != 0) & (expected != 18446744073709551615) {
+        if (ty_kind(&mut c, expected) == 33) && (ty_kind(&mut c, v.ty) != 33) {
+            return dyn_box(&mut c, v, expected);
+        }
         if (ty_kind(&mut c, v.ty) == 12) & (ty_kind(&mut c, expected) == 20) {
             return function_as_closure(&mut c, v, expected);
         }
@@ -19596,7 +20318,7 @@ fn pattern_loop<a>(
     }
     if terminated == 0 {
         loopstate := ownership::snapshot(&c.loopcheck);
-        if ownership::backedge(&c.check, &loopstate) != 0 {
+        if !backedge_ok(&mut c, &loopstate) {
             fail(&mut c, view("loop backedge consumes entry storage"));
         }
     }
@@ -19742,7 +20464,15 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
     inty := value.ty;
     x := deref(&mut c, value);
     xt := x.t;
-    xty := x.ty;
+    mut xty = x.ty;
+    // A specialisation binds a bounded parameter to its concrete record (kind 10 wraps it): its
+    // methods are the record's.
+    if ty_kind(&mut c, xty) == 10 {
+        concrete := base_type(&mut c, xty);
+        if ty_kind(&mut c, concrete) == 8 {
+            xty = concrete;
+        }
+    }
     k := ty_kind(&mut c, xty);
     if k == 8 {
         d := ty_arg(&mut c, xty);
@@ -19795,6 +20525,65 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
         slot := rec_load(&mut c, xt, field, 0);
         projected := alias_field(&mut c, slot, ft, xt, field, 0);
         return indirect_call(&mut c, projected, 1);
+    }
+    // `item.name()` on a type parameter bounded by interfaces: the bound that declares `name`
+    // (Rust's method syntax on generic bounds; `Interface::name(item)` is the same call).
+    // `object.name()` on `dyn I`: I's method, called through the object's vtable.
+    if k == 33 {
+        owner := private_module(view(".interface_"), ty_arg(&mut c, xty));
+        method := find_func(&mut c, view(owner), view(name));
+        if method == 0 {
+            fail(&mut c, view("the interface has no method of that name"));
+        }
+        info := &c.funcs[method - 1];
+        first := info.first;
+        formal := c.params[first];
+        prepared := method_receiver(&mut c, input, inty, xty, formal);
+        rv := prepared.t;
+        rty := prepared.ty;
+        exchange(&mut c.receiver, rv);
+        exchange(&mut c.receiver_ty, rty);
+        exchange(&mut c.has_receiver, 1);
+        return call(&mut c, view(owner), view(name));
+    }
+    // The bounds are the parameter's proofs (satisfies_interface).
+    if k == 9 {
+        proofs := type_args(&mut c, xty);
+        mut bounds = u64[];
+        for i in proofs.len() {
+            if ty_kind(&mut c, proofs[i]) == 15 {
+                bounds.push(ty_arg(&mut c, proofs[i]));
+            }
+        }
+        mut owner = u8[];
+        mut method = 0;
+        for i in bounds.len() {
+            module := private_module(view(".interface_"), bounds[i]);
+            m2 := find_func(&mut c, view(module), view(name));
+            if m2 != 0 {
+                if method != 0 {
+                    fail(&mut c, view("ambiguous method: several bounds define it (use Interface::method)"));
+                }
+                owner = module;
+                method = m2;
+            }
+        }
+        if method != 0 {
+            info := &c.funcs[method - 1];
+            first := info.first;
+            count := info.count;
+            if count == 0 {
+                fail(&mut c, view("associated function called as a method (use Interface::name)"));
+            }
+            formal := c.params[first];
+            prepared := method_receiver(&mut c, input, inty, xty, formal);
+            rv := prepared.t;
+            rty := prepared.ty;
+            exchange(&mut c.receiver, rv);
+            exchange(&mut c.receiver_ty, rty);
+            exchange(&mut c.has_receiver, 1);
+            return call(&mut c, view(owner), view(name));
+        }
     }
     if k == 11 {
         return atomic_method(&mut c, val(xt, xty), view(name));
@@ -20982,6 +21771,32 @@ fn primary<a>(c: (&a mut C)) -> Val {
         n := ct_layout(&mut c, align);
         return val(imm(&mut c, n), 0);
     }
+    if (k == 267) & (c.typed_refs != 0) {
+        // `**r` for `r: &&T` (what `filter` hands its predicate over reference items): the inner
+        // reference is only passed through, never kept, so it needs no loan of its own.
+        advance(&mut c);
+        r := expr(&mut c, 10);
+        observe(&mut c, r.t);
+        if ty_kind(&mut c, r.ty) != 7 {
+            fail(&mut c, view("* requires a typed reference"));
+        }
+        inner := ty_arg(&mut c, r.ty);
+        if (ty_kind(&mut c, inner) != 7) || (ty_mode(&mut c, inner) != 0) {
+            fail(&mut c, view("** needs a reference to a shared reference"));
+        }
+        n := ref_load(&mut c, r.t, inner);
+        release_temporary(&mut c, r.t);
+        target := ty_arg(&mut c, inner);
+        if needs_drop(&mut c, target) {
+            fail(&mut c, view("cannot copy an owned value out of a reference; use exchange"));
+        }
+        k2 := ty_kind(&mut c, target);
+        if (k2 == 5) || (k2 == 27) || (k2 == 7) {
+            fail(&mut c, view("** copies a plain value; borrow views and references through one level"));
+        }
+        m := ref_load(&mut c, n, target);
+        return val(m, target);
+    }
     if (k == 42) & (c.typed_refs != 0) {
         // `*r`: dereference; postfix accessors bind tighter (`*r.f` is `*(r.f)`).
         advance(&mut c);
@@ -21240,6 +22055,29 @@ fn primary<a>(c: (&a mut C)) -> Val {
         exchange(&mut c.none_start, p);
         exchange(&mut c.none_end, c.pos);
         return val(imm(&mut c, 0), 0);
+    }
+    // `dyn I[...]`: a sequence literal of interface objects.
+    if same(view(first), view("dyn")) && (kind(&mut c) == 1) && (find_local(&mut c, view(first)) == 0) {
+        back := c.pos - 1;
+        exchange(&mut c.pos, back);
+        ty := parse_type_base(&mut c);
+        return finish_type_literal(&mut c, ty);
+    }
+    // `T::Item[...]` / `Self::Item[...]`: a sequence literal of an associated type.
+    here_pos := c.pos;
+    if is(&mut c, view("::")) && (kind_at(&mut c, here_pos + 1) == 1) && (kind_at(&mut c, here_pos + 2) == 91) {
+        mut generic = same(view(first), view("Self")) && (c.self_type != 0);
+        for i in c.tnames.len() {
+            if same(view(c.tnames[i]), view(first)) {
+                generic = true;
+            }
+        }
+        if generic && (find_local(&mut c, view(first)) == 0) {
+            back := c.pos - 1;
+            exchange(&mut c.pos, back);
+            ty := parse_type_base(&mut c);
+            return finish_type_literal(&mut c, ty);
+        }
     }
     if type_literal_ahead(&mut c, view(first)) {
         // Rewind and re-read the whole head as a type so `<...>` arguments work.
@@ -22599,7 +23437,11 @@ fn expr_expected<a>(c: (&a mut C), min: u64, expected: u64) -> Val {
         first = map_expression(&mut c, expected);
     } else {
         after_open := c.pos + 1;
-        if is(&mut c, view("(")) & is_at(&mut c, after_open, view("[")) {
+        if is(&mut c, view("(")) & is_at(&mut c, after_open, view("dyn")) & (kind_at(&mut c, after_open + 1) == 1) {
+            // `(dyn I)[...]`: the parenthesised spelling of the same literal.
+            ty := parse_type_base(&mut c);
+            first = finish_type_literal(&mut c, ty);
+        } else if is(&mut c, view("(")) & is_at(&mut c, after_open, view("[")) {
             advance(&mut c);
             first = expr_expected(&mut c, 0, expected);
             expect(&mut c, view(")"));
@@ -24496,7 +25338,7 @@ fn map_loop<a, b, d>(c: (&a mut C), name: &b [u8], value_name: &d [u8]) -> unit 
     }
     if c.terminated == 0 {
         loopstate := ownership::snapshot(&c.loopcheck);
-        if ownership::backedge(&c.check, &loopstate) != 0 {
+        if !backedge_ok(&mut c, &loopstate) {
             fail(&mut c, view("loop backedge consumes entry storage"));
         }
     }
@@ -24605,7 +25447,7 @@ fn statement<a>(c: (&a mut C)) -> unit {
             }
         } else {
             loopstate := ownership::snapshot(&c.loopcheck);
-            if ownership::backedge(&c.check, &loopstate) != 0 {
+            if !backedge_ok(&mut c, &loopstate) {
                 fail(&mut c, view("continue consumes loop-entry storage"));
             }
         }
@@ -25080,7 +25922,7 @@ fn statement<a>(c: (&a mut C)) -> unit {
         }
         if c.terminated == 0 {
             loopstate := ownership::snapshot(&c.loopcheck);
-            if ownership::backedge(&c.check, &loopstate) != 0 {
+            if !backedge_ok(&mut c, &loopstate) {
                 fail(&mut c, view("loop backedge consumes entry storage"));
             }
         }
@@ -26187,6 +27029,15 @@ fn emit_drops<a>(c: (&a mut C)) -> unit {
                 if kind == 10 {
                     drop_call(&mut c, arg);
                 }
+                if kind == 33 {
+                    // {value, vtable}: the vtable's first word drops the value (0 when nothing does).
+                    skip := label(&mut c);
+                    o(&mut c, view("movq 8(%r12),%rax\nmovq (%rax),%rax\ntestq %rax,%rax\n"));
+                    jump(&mut c, view("jz"), skip);
+                    o(&mut c, view("movq (%r12),%rdi\ncall *%rax\n"));
+                    mark(&mut c, skip);
+                    o(&mut c, view("movq %r12,%rdi\ncall rt_free\n"));
+                }
                 if kind == 6 {
                     if needs_drop(&mut c, arg) {
                         head := label(&mut c);
@@ -26707,6 +27558,23 @@ fn iface_type_raw<a, b>(out: (&a mut u8[]), c: (&b mut C), ty: u64) -> unit {
             out.push(32);
             iface_type_raw(&mut out, &mut c, args[i]);
         }
+        push_bytes(&mut out, view(")"));
+        return ();
+    }
+    if k == 33 {
+        push_bytes(&mut out, view("(dyn "));
+        iface_interface_ref(&mut out, &mut c, arg);
+        push_bytes(&mut out, view(")"));
+        return ();
+    }
+    if k == 30 {
+        // `(assoc PARAM INTERFACE INDEX)`: the interface by name, since ids are this run's.
+        push_bytes(&mut out, view("(assoc "));
+        iface_type_raw(&mut out, &mut c, arg);
+        out.push(32);
+        iface_interface_ref(&mut out, &mut c, mode / 1024);
+        out.push(32);
+        decimal(&mut out, mode % 1024);
         push_bytes(&mut out, view(")"));
         return ();
     }
@@ -27725,6 +28593,28 @@ fn iface_parse_type<a>(c: (&a mut C), p: (&a mut IPos)) -> u64 {
             ip_expect(&mut p, view(")"));
             return intern_args(&mut c, 10, t, n, u64[], u64[]);
         }
+        if same(view(head), view("dyn")) {
+            ref := ip_ref(&mut p);
+            ip_expect(&mut p, view(")"));
+            id := find_interface(&c, view(ip_ref_module(&ref)), view(ip_ref_name(&ref)));
+            if id == 0 {
+                iface_fail(&p, view("names an interface this program does not declare"));
+            }
+            return intern(&mut c, 33, id);
+        }
+        if same(view(head), view("assoc")) {
+            t := iface_parse_type(&mut c, &mut p);
+            ref := ip_ref(&mut p);
+            n := ip_number(&mut p);
+            ip_expect(&mut p, view(")"));
+            module := ip_ref_module(&ref);
+            name := ip_ref_name(&ref);
+            id := find_interface(&c, view(module), view(name));
+            if id == 0 {
+                iface_fail(&p, view("names an interface this program does not declare"));
+            }
+            return intern_full(&mut c, 30, t, id * 1024 + n, u64[]);
+        }
         if same(view(head), view("proof")) {
             ref := ip_ref(&mut p);
             ip_expect(&mut p, view(")"));
@@ -28109,6 +28999,13 @@ fn iface_module_text<a, b, d>(c: (&a mut C), m: &b [u8], path: &d [u8], in_std: 
         push_bytes(&mut out, view("interface "));
         iface_interface_ref(&mut out, &mut c, index + 1);
         out.push(10);
+        // Associated types in declaration order: a projection names one by index.
+        assoc := copy_names(&c.interfaces[index].assoc);
+        for j in assoc.len() {
+            push_bytes(&mut out, view("assoc "));
+            push_bytes(&mut out, view(assoc[j]));
+            out.push(10);
+        }
         owner := private_module(view(".interface_"), index + 1);
         methods := iface_func_ids(&mut c, view(owner));
         mnames := iface_names_of_funcs(&mut c, &methods);
@@ -28148,6 +29045,15 @@ fn iface_module_text<a, b, d>(c: (&a mut C), m: &b [u8], path: &d [u8], in_std: 
             iface_emit_impl_params(&mut c, &mut out, owner);
         }
         out.push(10);
+        names := copy_names(&c.implementations[index].assoc_names);
+        types := copy_numbers(&c.implementations[index].assoc_types);
+        for j in names.len() {
+            push_bytes(&mut out, view("assoctype "));
+            push_bytes(&mut out, view(names[j]));
+            out.push(32);
+            iface_type(&mut out, &mut c, types[j]);
+            out.push(10);
+        }
         owner := private_module(view(".impl_"), index + 1);
         methods := iface_func_ids(&mut c, view(owner));
         mnames := iface_names_of_funcs(&mut c, &methods);
@@ -29042,7 +29948,16 @@ fn iface_define<a, b, d>(c: (&a mut C), st: (&a mut IState), line: &b [u8], path
         c
             .implementations
             .push(
-                Implementation { contract: id, ty: ty, module: st.module.copy(), methods: u64[] }
+                Implementation {
+                    contract: id,
+                    ty: ty,
+                    module: st.module.copy(),
+                    methods: u64[],
+                    file: 0,
+                    pos: 0,
+                    assoc_names: u8[][],
+                    assoc_types: u64[],
+                }
             );
         exchange(&mut st.section, 3);
         exchange(&mut st.contract, id);
@@ -29051,6 +29966,35 @@ fn iface_define<a, b, d>(c: (&a mut C), st: (&a mut IState), line: &b [u8], path
         exchange(&mut st.last_decl, 0);
         owner := ty_arg(&mut c, ty) + 1;
         iface_impl_record(&mut c, &mut st, owner, params[0], lifetimes[0]);
+        return ();
+    }
+    if same(view(word), view("assoc")) {
+        if st.section != 2 {
+            iface_fail(&p, view("an `assoc` line belongs to an interface"));
+        }
+        name := ip_ident(&mut p);
+        known := copy_names(&c.interfaces[st.contract - 1].assoc);
+        mut have = false;
+        for j in known.len() {
+            if same(view(known[j]), view(name)) {
+                have = true;
+            }
+        }
+        if !have {
+            item := &mut c.interfaces[st.contract - 1];
+            item.assoc.push(name);
+        }
+        return ();
+    }
+    if same(view(word), view("assoctype")) {
+        if st.section != 3 {
+            iface_fail(&p, view("an `assoctype` line belongs to an implementation"));
+        }
+        name := ip_ident(&mut p);
+        ty := iface_parse_type(&mut c, &mut p);
+        item := &mut c.implementations[st.implementation - 1];
+        item.assoc_names.push(name);
+        item.assoc_types.push(ty);
         return ();
     }
     if same(view(word), view("rname")) || same(view(word), view("ptype")) {
@@ -29718,6 +30662,9 @@ pub fn main() -> u64 {
         implementations: Implementation[],
         self_type: 0,
         current_impl: 0,
+        default_copies: u64[],
+        vtables: u64[],
+        dyn_ifaces: u64[],
         headers_complete: 0,
         resources: Resource[],
         loopmark: 0,
@@ -30100,6 +31047,9 @@ pub fn main() -> u64 {
             }
             i = i + 1;
         }
+        if pass == 2 {
+            default_methods(&mut c, 3);
+        }
         // The definition sweep for the interfaces read above, once every module's names exist.
         // `--interface` and `--use` both land here; the path each interface came from was recorded
         // when its names were registered.
@@ -30110,6 +31060,7 @@ pub fn main() -> u64 {
             }
         }
         if pass == 1 {
+            default_methods(&mut c, 2);
             exchange(&mut c.headers_complete, 1);
             check_interfaces(&mut c);
             validate_type_constraints(&mut c);
@@ -30149,6 +31100,7 @@ pub fn main() -> u64 {
     }
     emit_fn_thunk(&mut c);
     emit_drops(&mut c);
+    emit_vtables(&mut c);
     if c.skip_bodies.len() != 0 {
         // Every error this compile has is reported; the program is still rejected, and nothing it
         // would have written is.
