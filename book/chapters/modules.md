@@ -71,20 +71,23 @@ mode and Cargo's fingerprinting - so a pair of programs would compare nothing a 
 The Grail behaviour is stated below instead, with the one part of it this book can execute marked as
 such.
 
-What this tree builds today, and what it does not:
+What this tree does:
 
-- `grail build` reads every file on the command line, checks the whole program, and emits one
-  assembly file. `grail build --split` cuts that finished stream at module boundaries and links one
-  object per module (Linux x86-64, without `--debug` or the LLVM backend). The code does not change:
-  the parts minus their prologues concatenate to the single file byte for byte, and the linked
-  programs print the same output. This is the shape `tools/split-test.mjs` pins.
-- **Not in this tree yet**, on branches `b1-interfaces` and `b1-cache`: checked module interfaces and
-  the build cache flag. Neither is part of `bun tools/book.mjs check`, so nothing below is verified by
-  the book - it is the behaviour those branches record, restated so a reader knows what is coming
-  rather than discovering it.
+- `grail build` of a program of more than one module runs the compiler once per module, in dependency
+  order. Each run parses its own sources, reads the interfaces the runs before it wrote, writes its
+  own interface and one assembly file, and the program is linked once. A program of one module of its
+  own - where `grail new` starts - is a single compiler run and a single file, which is all it needs.
+  Linux x86-64, AArch64 and RISC-V take this path; Windows and macOS build the whole program, and so
+  does `--whole-program`, which asks for the one-run build. `--per-module` asked for this path before
+  it was the default, and is still accepted.
+- `grail build --split` is the older shape: one run checks the whole program and emits one stream,
+  which is then cut at module boundaries so that one object per module can be assembled (Linux
+  x86-64, without `--debug` or the LLVM backend). The code does not change: the parts minus their
+  prologues concatenate to the single file byte for byte, and the linked programs print the same
+  output. That is the shape `tools/split-test.mjs` pins, beside the default build's agreement with
+  `--whole-program` on every Linux target.
 
-Checked module interfaces, as `b1-interfaces` builds them (`docs/design/separate-compilation.md`;
-its stage-2 and stage-4 "as built" sections live on those branches):
+Checked module interfaces (`docs/design/separate-compilation.md` has the built shape):
 `grail check --interface DIR` writes one text file per module plus a manifest, `grail build
 --interface DIR` compiles against those files instead of the imported modules' sources, and
 `--verify` re-reads the sources and refuses the first line that disagrees. A file is refused by name
@@ -96,26 +99,25 @@ answer for the wrong reason. It does not carry bodies: generics still record a s
 the module's code is still parsed and emitted in the same run - so the checked surface is real and
 the rebuild saving is not yet.
 
-The build cache, as `b1-cache` builds it (`grail build --cache`, which implies `--split`, and is
-available where `--split` is). It is not one key but three, each over exactly the inputs that
-determine one artifact: the linked image keyed by every input the build reads, the compiler's own
-digest, the target, the flag vector and the assembler's and linker's identity; the link keyed by the
-object digests; and one module's object keyed by its source digest, the interfaces it reads and its
-position in the emission stream. The flag list is not maintained by hand - the key hashes the
-invocation vector, so a flag added to the driver is in the key by construction. Entries live under
+The build cache (`grail build --cache`). In a per-module build it keeps each module's compiler run:
+its key is over the module's own source digests, the surface of every interface it can read (each
+interface without the digest lines that change with a body), the compiler's and the assembler's
+identity, the target and the flag vector. The flag list is not maintained by hand - the key hashes
+the invocation vector, so a flag added to the driver is in the key by construction. Entries live under
 `.work/cache/<target>/` with the digest in the path and every write staged and renamed, and a blob is
 reused only after its bytes are hashed again and match the name it is filed under, so a corrupted or
-truncated entry is a miss and a rebuild rather than a wrong answer.
+truncated entry is a miss and a rebuild rather than a wrong answer. A whole-program build keeps the
+older objects: the linked image keyed by every input the build reads, the link keyed by the object
+digests, and one module's object keyed by its source digest and its place in the emission stream.
 
-What that looks like from the outside, on the branch's own proof project (three modules plus the
-runtime and the start stub, five parts): a first build with a cold store misses everything; an
-unchanged rebuild reports `program up to date` and reuses all five; editing one module's constant
-misses that module and the one that reads it; a corrupted object entry is rebuilt and its entry
-repaired, with output identical to the uncached build. Two honest limits are worth more than the
-numbers: a module's key names the interfaces it reads, not the bodies behind them, and because the
-front end is still one whole-program pass a module's emitted text can change when *another* module
-changes - so a module entry also records the digest of the assembly it was built from and reuse
-requires it to match. The cost is a miss, never a stale object. The cache also claims no authenticity:
-anything that can write `.work/` can plant an entry whose bytes match its name.
+What that looks like from the outside, on a three-module project beside the runtime and the start
+stub: a first build with a cold store misses everything; an unchanged rebuild reports `program up to
+date` and reuses every run (about 15x faster here); editing one module's body reruns that module
+alone; changing what it declares reruns the runs after it, because their keys name its interface's
+surface; a corrupted object entry is rebuilt and its entry repaired, with output identical to the
+uncached build. One honest limit is worth more than the numbers: a module's key names the interfaces
+it reads, not the bodies behind them - which is what makes a body edit cheap, and why a surface change
+is conservative. The cache also claims no authenticity: anything that can write `.work/` can plant an
+entry whose bytes match its name.
 
 **Try it:** add another helper and change the call. Keep all source files in the invocation.

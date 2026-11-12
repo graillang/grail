@@ -18,7 +18,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { readdirSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import assert from 'node:assert/strict';
-import { buildCompiler, command, compilerSources, emulations, hostTarget, linkInputs, root, targetName, triples } from './native.mjs';
+import { buildCompiler, command, compilerSources, emulations, execute, hostTarget, linkInputs, root, runner, targetName, triples } from './native.mjs';
 
 const flags = process.argv.slice(2);
 const target = targetName(flags.includes('--target') ? flags[flags.indexOf('--target') + 1] : hostTarget);
@@ -109,6 +109,12 @@ function symbols(path) {
   return text.split('\n').map(line => line.trim().split(/\s+/)).filter(f => f.length === 3 && /^[TtWwDdBbRr]$/.test(f[1]));
 }
 
+// The modules a per-module build ran the compiler for: one `<module>.s` beside the image.
+function moduleRuns(project, image) {
+  const directory = join(project, `${image}.modules`);
+  assert.ok(existsSync(directory), `${image}.modules: the default build must make one file per module`);
+  return readdirSync(directory).filter(name => name.endsWith('.s')).map(name => name.slice(0, -2)).sort();
+}
 function run(executable) {
   const result = spawnSync(executable, [], { encoding: 'utf8', timeout: 900_000 });
   return { status: result.status, stdout: result.stdout ?? '', stderr: result.stderr ?? '' };
@@ -242,7 +248,7 @@ for (const test of cases) {
     assert.equal(result.status, 0, `grail build ${args.join(' ')}: ${result.stdout}${result.stderr}`);
   };
   // The split build has no runtime-error location table; the reference is built without one too.
-  build(['--no-error-sites', '-o', 'target/demo']);
+  build(['--whole-program', '--no-error-sites', '-o', 'target/demo']);
   build(['--split', '-o', 'target/demo-split']);
   const single = join(project, 'target/demo');
   const split = join(project, 'target/demo-split');
@@ -261,18 +267,48 @@ for (const test of cases) {
   // modules before it, then linked once; the program must agree with the whole-program build.
   writeFileSync(join(project, 'src/pair.grl'), 'module pair;\n\nuse util;\n\npub struct Pair<T> {\n    a: T,\n    b: T\n}\n\npub fn make<T>(a: T, b: T) -> Pair<T> {\n    return Pair { a: a, b: b };\n}\n\npub fn doubled(x: u64) -> u64 {\n    return util::twice(x) + 1;\n}\n');
   writeFileSync(join(project, 'src/main.grl'), 'use pair;\nuse util;\nuse vecs;\n\npub fn main() -> u64 {\n    p := pair::make<u64>(3, 4);\n    mut v = u64[5, 1, 3];\n    vecs::sort(&mut v);\n    println(v[0] * 100 + v[1] * 10 + v[2]);\n    println(p.a + p.b);\n    util::report("doubled", pair::doubled(10) + util::twice(v.len()));\n    return 0;\n}\n');
-  build(['-o', 'target/whole']);
-  build(['--per-module', '-o', 'target/modules']);
+  build(['--whole-program', '-o', 'target/whole']);
+  build(['-o', 'target/modules']);
+  // `--per-module` asked for this build before it was the default; the alias must still mean it.
+  build(['--per-module', '-o', 'target/alias']);
   const whole = run(join(project, 'target/whole'));
   const modules = run(join(project, 'target/modules'));
+  const alias = run(join(project, 'target/alias'));
   assert.equal(whole.stdout, '135\n7\ndoubled = 27\n', 'per-module: unexpected whole-program output');
   assert.equal(modules.stdout, whole.stdout, 'per-module: the module-at-a-time build prints differently');
   assert.equal(modules.status, whole.status, 'per-module: exit status differs');
-  const built = readdirSync(join(project, 'target/modules.modules')).filter(name => name.endsWith('.parts')).map(name => name.slice(0, -6)).sort();
+  assert.equal(alias.stdout, modules.stdout, 'per-module: --per-module and the default print differently');
+  const built = moduleRuns(project, 'target/modules');
   for (const module of ['main', 'pair', 'util', 'vecs', 'order', 'core', 'runtime']) {
     assert.ok(built.includes(module), `per-module: no compiler run for module ${module} (${built.join(', ')})`);
   }
-  console.log(`split: driver: grail build --per-module (${built.length} compiler runs: ${built.join(', ')}) agrees with grail build`);
+  // (The images cannot be compared byte for byte here: each object's symbol table names the assembly
+  // file it was assembled from, and that path carries the image name.)
+  assert.deepEqual(moduleRuns(project, 'target/alias'), built, 'per-module: --per-module and the default differ');
+  console.log(`split: driver: grail build (${built.length} compiler runs: ${built.join(', ')}) agrees with --whole-program`);
+
+  // The same holds on the cross targets: the default is one run per module there too, and the
+  // program it links makes the same answer as the whole-program build.
+  for (const cross of ['aarch64', 'riscv64']) {
+    const qemu = runner(cross)[0];
+    if (cross !== hostTarget && spawnSync(qemu, ['--version'], { encoding: 'utf8' }).status !== 0) {
+      console.log(`split: driver: ${cross} not run (no ${qemu})`);
+      continue;
+    }
+    build(['--target', cross, '-o', `target/modules-${cross}`]);
+    build(['--target', cross, '--whole-program', '-o', `target/whole-${cross}`]);
+    const crossModules = execute(join(project, `target/modules-${cross}`), [], cross);
+    const crossWhole = execute(join(project, `target/whole-${cross}`), [], cross);
+    // `execute` hands back Buffers; the text is what is compared.
+    const modulesOut = (crossModules.stdout ?? '').toString();
+    const wholeOut = (crossWhole.stdout ?? '').toString();
+    assert.equal(modulesOut, '135\n7\ndoubled = 27\n', `${cross}: unexpected per-module output`);
+    assert.equal(modulesOut, wholeOut, `${cross}: the per-module build prints differently`);
+    assert.equal(crossModules.status, crossWhole.status, `${cross}: exit status differs`);
+    const ran = moduleRuns(project, `target/modules-${cross}`);
+    assert.ok(ran.length > 1, `${cross}: the default build must run the compiler per module (${ran.join(', ')})`);
+    console.log(`split: driver: ${cross}: grail build (${ran.length} compiler runs: ${ran.join(', ')}) agrees with --whole-program`);
+  }
 }
 
 if (timing) {

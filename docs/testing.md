@@ -183,9 +183,10 @@ gate is 2–3 hours; run it in a watched job that logs to a file rather than hol
   diagnostics and intentional rejections). `GRAIL_BACKEND=llvm` runs the same corpus through the
   LLVM backend.
 - `test-selfhost.mjs` — the compiler compiles itself twice and the two outputs must be identical.
-- `split-test.mjs` — per-module emission (B1 stage 1): the parts must concatenate to the single
-  assembly file, the objects must match it outside relocations, and the linked programs must behave
-  identically. It also covers `grail build --split` itself.
+- `split-test.mjs` — per-module emission: the parts must concatenate to the single assembly file, the
+  objects must match it outside relocations, and the linked programs must behave identically. It also
+  covers `grail build --split` itself, and proves that the default per-module build (`--per-module`
+  included) makes the same program as `--whole-program` on x86-64, AArch64 and RISC-V.
 - `book.mjs check` — every book example compiles, runs, and matches its expected output next to an
   equivalent Rust program.
 - `abundance-test.mjs`, `borg-test.mjs` — the ports, compared bit-for-bit against their C++ and

@@ -760,29 +760,46 @@ now treats a refusal (`this interface format cannot express a type of that kind`
 a new store kind cannot land without its interface spelling. The refusal itself stays: an interface
 is never written with an approximated type.
 
-## One compiler invocation per module (`grail build --per-module`)
+## One compiler invocation per module (the default build)
 
-The driver groups the program's sources by the module each declares (the runtime and platform
-files, which declare none, are module `runtime`; an entry file without a `module` line is `main`),
-orders the groups so each comes after the modules it `use`s - `runtime` first - and compiles each
-group with its own compiler run:
+`grail build` of a program of more than one module is one compiler run per module. The runtime, the
+platform module and the standard library's `core` prelude are in every program and do not count as
+modules of their own: what is left is what the program is made of. A program of one module of its own
+is a single compiler run and a single assembly file, which is all it needs.
 
-    grail <flags> [--use DIR] --emit-interface DIR --split [--no-entry] <module>.s <its files>
+The driver groups the program's sources by the module each declares (the runtime and platform files,
+which declare none, are module `runtime`; an entry file without a `module` line is `main`), orders the
+groups so each comes after the modules it `use`s - `runtime` first - and compiles each group with its
+own compiler run:
+
+    grail <flags> [--use DIR] --emit-interface DIR --separate [--no-entry] <module>.s <its files>
 
 Each run reads the interfaces of the modules built before it and writes its own beside them, so a
-module's run parses its own source and nothing else; every specialisation it uses is emitted weak
-in its own object (the emission model above). The parts are assembled and the program is linked
-once. `tools/split-test.mjs` builds a project with a generic from another module and the standard
-library's `vecs::sort` both ways and requires the same output from eight separate runs.
+module's run parses its own source and nothing else; every specialisation it uses is emitted weak in
+its own object (the emission model above). `--separate` says what the run is: one object of a
+program, not a program, so every definition becomes global and the run writes one file. The object is
+assembled with the target's usual assembler and the program is linked once. Runtime-error locations
+work per module: each object carries its own statement table, so a check that fails in a module the
+entry never mentions reports that module's `file:line` and the frames above it.
+
+`--whole-program` asks for the older one-run build, `--split` (below) for the older parts shape, and
+`--per-module` is still accepted as a name for the default. Windows and macOS have no per-module
+object path here, so they build the whole program, and an `--interface` build checks every module
+against its interface in one run.
+
+`tools/split-test.mjs` builds a project with a generic from another module and the standard library's
+`vecs::sort` both ways and requires the same output from eight separate runs, on x86-64, AArch64 and
+RISC-V (the cross targets are run under qemu).
 
 With `--cache`, each module's run is keyed by its inputs alone: the build's flags, compiler and
-assembler, the target, the module's name and source digests, and the *surface* of every interface
-the run can read (each interface without its `sha256` and `digest` lines, which change with the
-module's body). A hit restores the run's parts manifest, objects and interface and skips the compiler
-run and the assembler; a miss runs both and files the outputs. Because a module compiled alone emits
-its own text and labels, the emitted-assembly guard the whole-program cache needs is not used on
-this path. Measured on the eight-run project: a warm rebuild is 8 hit, 0 miss; editing one
-module's body is 7 hit, 1 miss (that module); changing its surface reruns it and the runs after it.
-The key names every interface present, not just the ones a module reads, so a surface change
+assembler, the target, the module's name and source digests, and the *surface* of every interface the
+run can read (each interface without its `sha256` and `digest` lines, which change with the module's
+body). A hit restores the run's object, its link inputs and its interface and skips the compiler run
+and the assembler; a miss runs both and files the outputs. The image is filed under the program key,
+so a rebuild of unchanged sources prints `program up to date` and runs nothing. Because a module
+compiled alone emits its own text and labels, the emitted-assembly guard the whole-program cache needs
+is not used on this path. Measured on the eight-run project: a warm rebuild is 8 hit, 0 miss; editing
+one module's body is 7 hit, 1 miss (that module); changing its surface reruns it and the runs after
+it. The key names every interface present, not just the ones a module reads, so a surface change
 reruns some modules that do not import it - conservative, never stale.
 
