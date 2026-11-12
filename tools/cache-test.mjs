@@ -113,7 +113,7 @@ function recordBuild(name) {
   const reference = join(project, 'target', `${name}.ref`);
   const split = build(['--split', '-o', reference]);
   assert.equal(split.status, 0, `${name}: the uncached split build failed\n${split.output}`);
-  const cached = build(['--cache', '-o', join(project, 'target', name)]);
+  const cached = build(['--whole-program', '--cache', '-o', join(project, 'target', name)]);
   assert.equal(cached.status, 0, `${name}: the cached build failed\n${cached.output}`);
   assert.ok(cached.line, `${name}: a cached build must report its hits and misses\n${cached.output}`);
   assert.deepEqual(
@@ -141,18 +141,23 @@ function proveStore() {
   let records = 0;
   // Every entry a record can hand back is filed under the digest of its bytes. A blob no record names
   // is unreachable, and reuse verifies content anyway, so it is not a correctness question.
-  for (const kind of ['prog', 'lnk', 'mod']) {
+  for (const kind of ['prog', 'lnk', 'mod', 'unit']) {
     const directory = join(store, 'map', kind);
     if (!existsSync(directory)) continue;
+    // A program, link or module record names one blob; a module run's record names its object, its
+    // link inputs and its interface.
+    const fields = kind === 'unit' ? ['links', 'obj', 'iface'] : ['blob'];
     for (const name of readdirSync(directory)) {
       // `<key>.used` is the record's last-used build generation (grail cache prune), not a record.
       if (name.endsWith('.used')) continue;
       const body = readFileSync(join(directory, name), 'utf8');
-      const blob = body.split('\n').find(row => row.startsWith('blob '))?.slice(5);
-      assert.ok(blob, `${kind}/${name}: a record must name a blob`);
-      assert.ok(blobs.includes(blob), `${kind}/${name}: names a blob that is not in the store`);
-      assert.equal(digest(readFileSync(join(blobDirectory, blob))), blob, `${kind}/${name}: names a blob that does not hash to it`);
-      records += 1;
+      const named = fields.map(field => new RegExp(`^${field} ([0-9a-f]{64})$`, 'm').exec(body)?.[1]).filter(Boolean);
+      assert.ok(named.length > 0, `${kind}/${name}: a record must name a blob`);
+      for (const blob of named) {
+        assert.ok(blobs.includes(blob), `${kind}/${name}: names a blob that is not in the store`);
+        assert.equal(digest(readFileSync(join(blobDirectory, blob))), blob, `${kind}/${name}: names a blob that does not hash to it`);
+        records += 1;
+      }
     }
   }
   assert.ok(records > 0, 'the store has no records');
@@ -162,10 +167,10 @@ function proveStore() {
 // ---- (b) a full hit, and what it saves ---------------------------------------------------------
 function proveReuse() {
   rmSync(store, { recursive: true, force: true });
-  const cold = build(['--cache', '-o', program]);
+  const cold = build(['--whole-program', '--cache', '-o', program]);
   assert.equal(cold.status, 0, `cold build failed\n${cold.output}`);
   assert.equal(cold.line.misses, cold.line.hits + cold.line.misses, 'a cold store cannot hit anything');
-  const warm = build(['--cache', '-o', program], { measure: true });
+  const warm = build(['--whole-program', '--cache', '-o', program], { measure: true });
   assert.equal(warm.status, 0, `warm build failed\n${warm.output}`);
   assert.equal(warm.line.misses, 0, `a second build of unchanged sources must be a full hit\n${warm.output}`);
   assert.match(warm.line.what, /program up to date/, 'a full hit must not relink or recompile');
@@ -179,7 +184,7 @@ function proveReuse() {
 function provePrecision() {
   const before = emissionOrder();
   setScale(4);
-  const result = build(['--cache', '-o', program]);
+  const result = build(['--whole-program', '--cache', '-o', program]);
   assert.equal(result.status, 0, `a source edit failed to build\n${result.output}`);
   assert.ok(result.line.names.includes('util'), `the edited module must miss: ${result.output}`);
   assert.ok(result.line.names.includes('main'), `the module that reads it must miss: ${result.output}`);
@@ -189,7 +194,7 @@ function provePrecision() {
   // And the thing the module key cannot see: the emitted text of every later module is re-spelled,
   // so those modules miss through the emitted-text guard even though nothing they declare changed.
   setMainUnused();
-  const shifted = build(['--cache', '-o', program]);
+  const shifted = build(['--whole-program', '--cache', '-o', program]);
   assert.equal(shifted.status, 0, `the second edit failed to build\n${shifted.output}`);
   assert.ok(shifted.line.names.includes('main'), `the edited module must miss: ${shifted.output}`);
   const order = emissionOrder();
@@ -200,10 +205,10 @@ function provePrecision() {
 
 // ---- (d) a code-generation flag ---------------------------------------------------------------
 function proveFlags() {
-  const wrapped = build(['--cache', '--overflow=wrap', '-o', program]);
+  const wrapped = build(['--whole-program', '--cache', '--overflow=wrap', '-o', program]);
   assert.equal(wrapped.status, 0, `--overflow=wrap failed\n${wrapped.output}`);
   assert.equal(wrapped.line.hits, 0, `a different flag vector must miss everything: ${wrapped.output}`);
-  const back = build(['--cache', '-o', program]);
+  const back = build(['--whole-program', '--cache', '-o', program]);
   assert.equal(back.line.misses, 0, `the original flags must still be a full hit: ${back.output}`);
   return { wrapped: wrapped.line, back: back.line };
 }
@@ -289,7 +294,7 @@ function proveCorruption() {
   const output = join(project, 'target/corrupt');
   rmSync(store, { recursive: true, force: true });
   write(6);
-  assert.equal(build(['--cache', '-o', output]).status, 0, 'the cold build failed');
+  assert.equal(build(['--whole-program', '--cache', '-o', output]).status, 0, 'the cold build failed');
   assert.equal(run(output), '25', 'the cold build prints the wrong answer');
   const reference = join(project, 'target/corrupt.ref');
   assert.equal(build(['--split', '-o', reference]).status, 0, 'the uncached build failed');
@@ -304,7 +309,7 @@ function proveCorruption() {
   assert.ok(entries.length > 0, 'no program entry for this output');
   for (const entry of entries) writeFileSync(entry, '');
 
-  const rebuilt = build(['--cache', '-o', output]);
+  const rebuilt = build(['--whole-program', '--cache', '-o', output]);
   assert.equal(rebuilt.status, 0, `the build after corruption failed\n${rebuilt.output}`);
   assert.ok(rebuilt.line, `an unreadable entry must be a miss, not a crash\n${rebuilt.output}`);
   assert.ok(rebuilt.line.names.includes('helper'), `a corrupted entry must be a miss: ${rebuilt.output}`);
@@ -312,7 +317,7 @@ function proveCorruption() {
   assert.equal(run(output), '25', 'a corrupted entry must not produce a wrong program');
   assert.deepEqual(bytes(output), bytes(reference), 'a build after corruption is not the uncached build');
   assert.equal(digest(readFileSync(join(store, 'blob', object))), object, 'the corrupted entry must be repaired');
-  const healed = build(['--cache', '-o', output]);
+  const healed = build(['--whole-program', '--cache', '-o', output]);
   assert.equal(healed.line.misses, 0, `a repaired store must hit again\n${healed.output}`);
 
   // The linked image: a whole-program hit hands the output back from the store, so the image has to be
@@ -320,7 +325,7 @@ function proveCorruption() {
   const image = imageBlob(output);
   assert.ok(image, 'no program entry names the image of this output');
   corrupt(join(store, 'blob', image));
-  const afterImage = build(['--cache', '-o', output]);
+  const afterImage = build(['--whole-program', '--cache', '-o', output]);
   assert.equal(afterImage.status, 0, `the build after image corruption failed\n${afterImage.output}`);
   assert.equal(afterImage.line.what, 'image linked', 'a corrupted image must be linked again, not reused');
   assert.equal(run(output), '25', 'a corrupted image must not produce a wrong program');
@@ -342,22 +347,101 @@ function prune(keep) {
 }
 function provePruning() {
   write(3);
-  const first = build(['--cache', '-o', program]);
+  const first = build(['--whole-program', '--cache', '-o', program]);
   assert.equal(first.status, 0, `build failed\n${first.output}`);
   const nothing = prune(10);
   assert.equal(nothing.records + nothing.blobs, 0, 'a default prune right after a build must keep everything');
   write(5);
-  const edited = build(['--cache', '-o', program]);
+  const edited = build(['--whole-program', '--cache', '-o', program]);
   assert.equal(edited.status, 0, `edited build failed\n${edited.output}`);
   const pruned = prune(0);
   assert.ok(pruned.records > 0 && pruned.blobs > 0, `--keep 0 after an edit must drop the superseded entries: ${JSON.stringify(pruned)}`);
-  const again = build(['--cache', '-o', program]);
+  const again = build(['--whole-program', '--cache', '-o', program]);
   assert.equal(again.status, 0, `build after prune failed\n${again.output}`);
   assert.equal(again.line.misses, 0, `what the last build used must survive a prune\n${again.output}`);
   assert.equal(run(program), '22', 'the pruned store must still give the right program');
   proveStore();
   write(3);
   return { pruned, again: again.line };
+}
+
+// ---- (g) the default build's cache: one record per module --------------------------------------
+// `grail build` of a multi-module program runs the compiler once per module, and that is what
+// `--cache` reuses: each run is keyed by its own sources and by the surface of the interfaces it can
+// read, so an edit in one module reruns that module and nothing else.
+function moduleRuns() {
+  const directory = join(project, 'target/mods.modules');
+  assert.ok(existsSync(directory), 'the default build must make one file per module');
+  return readdirSync(directory).filter(name => name.endsWith('.s')).map(name => name.slice(0, -2)).sort();
+}
+function proveModules() {
+  const output = join(project, 'target/mods');
+  rmSync(store, { recursive: true, force: true });
+  write(3);
+  const cold = build(['--cache', '-o', output]);
+  assert.equal(cold.status, 0, `the cold module build failed\n${cold.output}`);
+  assert.ok(cold.line, `a cached module build must report its hits and misses\n${cold.output}`);
+  assert.equal(cold.line.misses, cold.line.hits + cold.line.misses, 'a cold store cannot hit anything');
+  for (const module of ['main', 'util', 'helper', 'core', 'runtime']) {
+    assert.ok(moduleRuns().includes(module), `no compiler run for module ${module}: ${moduleRuns().join(', ')}`);
+  }
+  assert.equal(run(output), '16', 'the module build prints the wrong answer');
+
+  // The cached build is the build it replaces: the same output name, built again with no cache. (The
+  // name has to be the same - every object's symbol table names the assembly file it came from.)
+  const cachedImage = bytes(output);
+  assert.equal(build(['-o', output]).status, 0, 'the uncached default build failed');
+  assert.deepEqual(bytes(output), cachedImage, 'the cached module build is not the uncached one');
+
+  const warm = build(['--cache', '-o', output], { measure: true });
+  assert.equal(warm.status, 0, `the warm module build failed\n${warm.output}`);
+  assert.equal(warm.line.misses, 0, `a second build of unchanged sources must be a full hit\n${warm.output}`);
+  assert.match(warm.line.what, /program up to date/, 'a full hit must not relink or recompile');
+  assert.ok(warm.ms < cold.ms, `a full hit must be faster: ${cold.ms.toFixed(0)}ms -> ${warm.ms.toFixed(0)}ms`);
+
+  // One module's body: only that module's run is redone, because the key is that module's own source
+  // and the interfaces' surfaces - and a body edit leaves the surface alone.
+  writeFileSync(join(project, 'src/helper.grl'), helperSource.replace('x + 7', 'x + 8'));
+  const body = build(['--cache', '-o', output]);
+  assert.equal(body.status, 0, `the body edit failed to build\n${body.output}`);
+  assert.deepEqual(body.line.names, ['helper'], `a body edit must rerun that module alone: ${body.output}`);
+  assert.equal(run(output), '17', 'the rebuilt program must use the new body');
+
+  // A surface edit is visible to the runs after it, so they are redone too - conservative, never
+  // stale: a module that reads the changed interface must not keep an object built from the old one.
+  writeFileSync(join(project, 'src/util.grl'), `${utilSource(3)}\npub fn extra() -> u64 {\n    return 1;\n}\n`);
+  const surface = build(['--cache', '-o', output]);
+  assert.equal(surface.status, 0, `the surface edit failed to build\n${surface.output}`);
+  assert.ok(surface.line.names.includes('util'), `the edited module must miss: ${surface.output}`);
+  assert.ok(surface.line.names.length > 1, `a surface edit must rerun the runs after it: ${surface.output}`);
+  const surfaceImage = bytes(output);
+  assert.equal(build(['-o', output]).status, 0, 'the uncached surface build failed');
+  assert.deepEqual(bytes(output), surfaceImage, 'the module build after a surface edit is not the uncached one');
+
+  // A damaged object is a miss, a rebuild and a repaired entry - never a wrong program. The record to
+  // damage is the one that answers for this build: the blob whose bytes are the object on disk now.
+  const directory = join(store, 'map', 'unit');
+  const object = digest(readFileSync(join(project, 'target/mods.modules/helper.o')));
+  const unit = readdirSync(directory).filter(name => !name.endsWith('.used')).map(name => readFileSync(join(directory, name), 'utf8'))
+    .find(text => text.includes('module helper') && text.includes(`obj ${object}`));
+  assert.ok(unit, 'no module run record for the object helper has now');
+  corrupt(join(store, 'blob', object));
+  // The image entry that would answer for this build has to go too, or the program shortcut hands the
+  // image back and the module level is never consulted.
+  const image = digest(readFileSync(output));
+  let cleared = 0;
+  for (const entry of programRecords(output)) {
+    if (readFileSync(entry, 'utf8').includes(`blob ${image}\n`)) { writeFileSync(entry, ''); cleared += 1; }
+  }
+  assert.ok(cleared > 0, 'no program entry names the image of this output');
+  const rebuilt = build(['--cache', '-o', output]);
+  assert.equal(rebuilt.status, 0, `the build after corruption failed\n${rebuilt.output}`);
+  assert.ok(rebuilt.line.names.includes('helper'), `a corrupted object must be a miss: ${rebuilt.output}`);
+  assert.equal(run(output), '17', 'a corrupted object must not produce a wrong program');
+  assert.deepEqual(bytes(output), surfaceImage, 'a build after corruption is not the uncached build');
+  assert.equal(digest(readFileSync(join(store, 'blob', object))), object, 'the corrupted object must be repaired');
+  write();
+  return { cold, warm, body, surface, rebuilt };
 }
 
 // ---- run --------------------------------------------------------------------------------------
@@ -370,6 +454,7 @@ const flagProof = proveFlags();
 const interfaceProof = proveInterfaces();
 const corruption = proveCorruption();
 const pruning = provePruning();
+const modules = proveModules();
 const finalStore = proveStore();
 
 const ms = value => `${value.toFixed(1)}ms`;
@@ -378,6 +463,8 @@ console.log('(-) identity   every cached build above is the uncached build, byte
 console.log(`(-) store      ${finalStore.blobs} blobs, ${finalStore.records} records, every blob filed under its own digest`);
 console.log(`(a) reuse      cold ${ms(reuse.cold.ms)} -> warm ${ms(reuse.warm.ms)} (${reuse.ratio.toFixed(1)}x): ${reuse.warm.line.hits} hit, ${reuse.warm.line.misses} miss; ${reuse.warm.line.what}`);
 console.log(`(b) precision  ${precision.line.hits} hit, ${precision.line.misses} miss (${precision.line.names.join(', ')}) for an edit in util, order ${precision.order.join(' ')}`);
+console.log(`(g) modules    cold ${ms(modules.cold.ms)} -> warm ${ms(modules.warm.ms)} (${(modules.cold.ms / modules.warm.ms).toFixed(1)}x): ${modules.warm.line.hits} hit, ${modules.warm.line.misses} miss; ${modules.warm.line.what}`);
+console.log(`(g) modules    a body edit reruns ${modules.body.line.names.join(', ')}; a surface edit reruns ${modules.surface.line.hits + modules.surface.line.misses - modules.surface.line.hits} of ${modules.surface.line.hits + modules.surface.line.misses} runs`);
 console.log(`               ${precision.shifted.hits} hit, ${precision.shifted.misses} miss (${precision.shifted.names.join(', ')}) for an edit in main: the modules after it are re-spelled`);
 console.log(`(c) flags      --overflow=wrap: ${flagProof.wrapped.hits} hit, ${flagProof.wrapped.misses} miss; back: ${flagProof.back.misses} miss`);
 console.log(`(d) interface  warm ${interfaceProof.warm.hits} hit; a tampered interface is refused; restored: ${interfaceProof.after.hits} hit, ${interfaceProof.after.misses} miss`);

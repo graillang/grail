@@ -299,6 +299,9 @@ struct C {
     out: u8[],
     // 1 (--split): mark module boundaries in `out` and write one assembly file per module.
     split: u64,
+    // 1 (--separate): this run's code is one object of a program, not a program: every definition
+    // becomes global so the linker can bind across objects. One file, and its own site table.
+    separate: u64,
     // The module of the run being emitted, so a marker opens a run only when the module changes.
     part: u8[],
     // Where the markers ended up in the optimized stream, and the module each names.
@@ -2082,8 +2085,14 @@ fn tls_record_address<a>(c: (&a mut C)) -> unit {
     }
     return ();
 }
+// The run's code goes into an object of its own, either as one `--split` part or as the one file
+// `--separate` writes: a definition another object calls has to be visible to the linker, so every
+// function (and the process state) becomes global. The whole-program build keeps its local symbols.
+fn own_object<a>(c: (&a C)) -> bool {
+    return (c.split != 0) || (c.separate != 0);
+}
 fn tls_bss<a>(c: (&a mut C)) -> unit {
-    if c.split != 0 {
+    if own_object(&c) {
         o(&mut c, view(".globl rt_state\n"));
         if tls_bridge(&mut c) {
             o(&mut c, view(".globl rt_tls_record\n"));
@@ -2868,7 +2877,7 @@ fn func_directive<a, b, d>(c: (&a mut C), m: &b [u8], name: &b [u8], symbol: &d 
         o(&mut c, view(".weak "));
         export_name(&mut c, view(m), view(name), view(symbol), export);
         o(&mut c, view("\n"));
-    } else if c.split != 0 {
+    } else if own_object(&c) {
         o(&mut c, view(".globl "));
         export_name(&mut c, view(m), view(name), view(symbol), export);
         o(&mut c, view("\n"));
@@ -15002,7 +15011,7 @@ fn emit_fn_thunk<a>(c: (&a mut C)) -> unit {
         return ();
     }
     part(&mut c, view("runtime"));
-    if c.split != 0 {
+    if own_object(&c) {
         o(&mut c, view(".globl grail_fn_thunk\n"));
     }
     o(&mut c, view("grail_fn_thunk:\npushq %rbp\nmovq %rsp,%rbp\nmovq (%rdi),%rax\nmovq 16(%rax),%rax\n"));
@@ -30858,6 +30867,7 @@ pub fn main() -> u64 {
         pos: 0,
         out: u8[],
         split: 0,
+        separate: 0,
         part: u8[],
         marks: u64[],
         part_names: u8[][],
@@ -31147,6 +31157,11 @@ pub fn main() -> u64 {
             // A run that emits one module's code for a link, not a program: no entry stub, so the
             // process state is defined once, by the run that holds the entry.
             exchange(&mut c.no_entry, 1);
+            offset += 1;
+        } else if same(view(option), view("--separate")) {
+            // One object of a program (B1 stage 4): every definition global, so a part call binds
+            // through the linker instead of staying a symbol of this stream.
+            exchange(&mut c.separate, 1);
             offset += 1;
         } else if same(view(option), view("--verify-interface")) {
             // Check the interfaces on disk against the sources just parsed instead of trusting

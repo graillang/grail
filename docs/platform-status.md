@@ -159,9 +159,9 @@ local locations for Linux x86-64 and CodeView line tables with typed symbols for
 (`grail build --debug`, read back with `grail debug lines` and `grail debug info`); the language
 server `tools/lsp/main.grl` (JSON-RPC over stdio, full-text sync, compiler-sourced diagnostics,
 same-file definition) with its stdio test; the sampling profiler `grail profile` for Linux x86-64
-(ITIMER_PROF in the program's own runtime, ELF `.symtab` attribution, no `perf`); `grail build
---split` for per-module emission on Linux x86-64; and the authority model (`lib/authority.grl`,
-`--deny-ambient-host`). Not implemented: debugger attach, breakpoints and DAP; profiling on other
+(ITIMER_PROF in the program's own runtime, ELF `.symtab` attribution, no `perf`); `grail build`
+one compiler run per module on Linux x86-64, AArch64 and RISC-V (`--split` keeps the older parts
+shape, x86-64 only); and the authority model (`lib/authority.grl`, `--deny-ambient-host`). Not implemented: debugger attach, breakpoints and DAP; profiling on other
 targets; hosted macOS release artifacts.
 
 ## Applications
@@ -198,7 +198,7 @@ bun tools/book.mjs check        # every book example, Grail and Rust, with expec
 bun tools/test-authority.mjs    # capability values and `--deny-ambient-host`
 bun tools/lsp-test.mjs          # the language server over stdio
 bun tools/test-profile.mjs      # sampling profiler attribution (Linux x86-64)
-bun tools/split-test.mjs        # per-module emission agrees with the whole-program build
+bun tools/split-test.mjs        # the per-module build agrees with --whole-program, on every Linux target
 make -C graphics test           # RHI C ABI, null/SDL window, shader library, graph (450)
 make -C graphics vk-surface     # swapchain, acquire, draw, present (GPU; 162)
 make -C graphics vk-smoke       # Vulkan device core, shader modules, pipeline cache (GPU)
