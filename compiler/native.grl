@@ -80,7 +80,32 @@ struct Alias {
 }
 struct Field {
     name: u8[],
-    ty: u64
+    ty: u64,
+    // `field: T where P`: the field's predicate, or no_pred() when it has none.
+    pred: Pred
+}
+// A refinement predicate, kept as a token range in the file it was written in (docs/design/
+// refinements.md). The range is never parsed where it is written: the obligation compiles the
+// expression where the value enters, with the names bound to the values there.
+struct Pred {
+    // The file the tokens are in: a source file, or the virtual source an interface carries.
+    file: u64,
+    lo: u64,
+    hi: u64
+}
+fn no_pred() -> Pred {
+    return Pred { file: 0, lo: 0, hi: 0 };
+}
+fn copy_preds<a>(p: (&a Pred[])) -> Pred[] {
+    mut out = Pred[];
+    for i in p.len() {
+        item := &p[i];
+        out.push(Pred { file: item.file, lo: item.lo, hi: item.hi });
+    }
+    return out;
+}
+fn has_pred<a>(p: (&a Pred)) -> bool {
+    return p.hi != 0;
 }
 struct Func {
     module: u8[],
@@ -107,7 +132,10 @@ struct Func {
     symbol: u8[],
     // The source text of a generic template's declaration, captured at the declaration pass so the
     // interface can carry it (B1 stage 3). Empty for everything else: only a template is replayed.
-    body: u8[]
+    body: u8[],
+    // `p: T where P`, one per parameter in order, and `-> T ensures P` for the result.
+    ppreds: Pred[],
+    rpred: Pred
 }
 struct Interface {
     module: u8[],
@@ -467,6 +495,9 @@ struct C {
     cf_local: u64,
     bce_index: u8[],
     bce_base: u8[],
+    // The refinements of the function being compiled: its parameters' predicates and its `ensures`.
+    cur_ppreds: Pred[],
+    cur_rpred: Pred,
     lit_negative: u64,
     // Span of the most recent byte read (`bytes[i]`): an untyped word known to be 0..255.
     byte_start: u64,
@@ -5405,6 +5436,138 @@ fn expect<a, b>(c: (&a mut C), s: &b [u8]) -> unit {
     }
     return ();
 }
+// ---- refinement predicates (docs/design/refinements.md) ------------------------------------------
+// `p: T where P` and `-> T ensures P` keep P as a token range in the file it was written in - a
+// source file, or the virtual source an interface carries. Nothing is parsed at the declaration: the
+// obligation compiles the expression where the value enters (a call site, a record literal, a
+// `return`), with the names bound to the values there.
+//
+// A predicate's text, its tokens separated by single spaces: what a runtime error and a diagnostic
+// show.
+fn pred_text<a>(c: (&a mut C), p: Pred) -> u8[] {
+    mut out = u8[];
+    if !has_pred(&p) {
+        return out;
+    }
+    saved_file := c.file;
+    saved_pos := c.pos;
+    if saved_file != p.file {
+        load_file(&mut c, p.file);
+        exchange(&mut c.file, p.file);
+    }
+    for i in p.lo .. p.hi {
+        if i != p.lo {
+            out.push(32);
+        }
+        t := tok_text(&mut c, i);
+        push_bytes(&mut out, view(t));
+    }
+    if saved_file != p.file {
+        load_file(&mut c, saved_file);
+        exchange(&mut c.file, saved_file);
+        exchange(&mut c.pos, saved_pos);
+    }
+    return out;
+}
+// The pure calls a predicate may make: `len()` (through a `.`), `is_finite()` and `is_nan()`.
+fn pred_pure_call<a, b, d>(name: &a [u8], before: &b [u8], dot: &d [u8]) -> bool {
+    if same(view(name), view("is_finite")) || same(view(name), view("is_nan")) {
+        return true;
+    }
+    return same(view(name), view("len")) & same(view(before), view(dot));
+}
+// Refuse a predicate that could run user code or have a side effect (docs/design/refinements.md,
+// "Where predicates go"). The stop tokens are not part of the predicate.
+fn pred_check<a, b, d>(c: (&a mut C), lo: u64, hi: u64, what: &b [u8], stop_a: &d [u8]) -> unit {
+    if lo == hi {
+        fail(&mut c, view(what));
+    }
+    mut i = lo;
+    while i < hi {
+        t := tok_text(&mut c, i);
+        mut before = u8[];
+        if i != 0 {
+            before = tok_text(&mut c, i - 1);
+        }
+        if kind_at(&mut c, i) == 1 {
+            mut after_ok = false;
+            if i + 1 < c.toks.len() {
+                after_ok = same(view(tok_text(&mut c, i + 1)), view("("));
+            }
+            if after_ok & !pred_pure_call(view(t), view(before), view(".")) {
+                mut msg = "a refinement predicate cannot call a function: ";
+                msg.append(view(t));
+                msg.append(view(" is not pure"));
+                fail(&mut c, view(msg));
+            }
+            if same(view(t), view("mut"))
+                || same(view(t), view("return"))
+                || same(view(t), view("while"))
+                || same(view(t), view("for"))
+                || same(view(t), view("loop"))
+                || same(view(t), view("break"))
+                || same(view(t), view("continue"))
+                || same(view(t), view("drop")) {
+                mut msg = "a refinement predicate cannot run a statement: ";
+                msg.append(view(t));
+                fail(&mut c, view(msg));
+            }
+        }
+        if same(view(t), view("="))
+            || same(view(t), view("+="))
+            || same(view(t), view("-="))
+            || same(view(t), view("*="))
+            || same(view(t), view("/="))
+            || same(view(t), view("%="))
+            || same(view(t), view("&="))
+            || same(view(t), view("|="))
+            || same(view(t), view("^="))
+            || same(view(t), view("<<="))
+            || same(view(t), view(">>="))
+            || same(view(t), view("|"))
+            || same(view(t), view(";"))
+            || same(view(t), view(stop_a)) {
+            mut msg = "a refinement predicate cannot assign or branch: ";
+            msg.append(view(t));
+            fail(&mut c, view(msg));
+        }
+        i += 1;
+    }
+    return ();
+}
+// Read a predicate into a token range, up to (not including) one of the two stop tokens at bracket
+// depth 0. `c.pos` is left on the stop token, so the caller still reads its own comma, brace or
+// arrow.
+fn pred_scan<a, b>(c: (&a mut C), stop_a: &a [u8], stop_b: &b [u8]) -> Pred {
+    lo := c.pos;
+    mut depth = 0;
+    mut i = c.pos;
+    while i < c.toks.len() {
+        t := tok_text(&mut c, i);
+        k := kind_at(&mut c, i);
+        if depth == 0 && (same(view(t), view(stop_a)) || same(view(t), view(stop_b))) {
+            break;
+        }
+        if (k == 40) || (k == 91) || (k == 123) {
+            depth += 1;
+        }
+        if (k == 41) || (k == 93) || (k == 125) {
+            if depth == 0 {
+                break;
+            }
+            depth -= 1;
+        }
+        i += 1;
+    }
+    if i == c.toks.len() {
+        mut msg = "a refinement predicate is not closed: ";
+        msg.append(view(stop_b));
+        fail(&mut c, view(msg));
+    }
+    pred_check(&mut c, lo, i, view("a refinement predicate cannot be empty"), view(stop_a));
+    exchange(&mut c.pos, i);
+    return Pred { file: c.file, lo: lo, hi: i };
+}
 fn ident<a>(c: (&a mut C)) -> u8[] {
     if kind(&mut c) != 1 {
         fail(&mut c, view("expected identifier"));
@@ -7433,7 +7596,7 @@ fn tuple_decl<a>(c: (&a mut C), count: u64) -> u64 {
         mut field = u8[];
         decimal(&mut field, i);
         ty := intern_args(&mut c, 9, i, 0, u64[], u64[]);
-        c.fields.push(Field { name: field, ty: ty });
+        c.fields.push(Field { name: field, ty: ty, pred: no_pred() });
         bounds.push(0);
         constraints.push(u64[]);
     }
@@ -7745,7 +7908,7 @@ fn make_union<a>(c: (&a mut C), args: u64[], success: u64, module: u8[], prefix:
             mut field = u8[];
             decimal(&mut field, i);
             param := intern_args(&mut c, 9, i, 0, u64[], u64[]);
-            c.fields.push(Field { name: field, ty: param });
+            c.fields.push(Field { name: field, ty: param, pred: no_pred() });
         }
         mut bounds = u64[];
         mut constraints = u64[][];
@@ -8661,6 +8824,7 @@ fn decl<a>(c: (&a mut C), pass: u64) -> unit {
         while true {
             f := ident(&mut c);
             mut ty = 1;
+            mut fp = no_pred();
             if is_enum != 0 {
                 if eat(&mut c, view("(")) {
                     ty = parse_type(&mut c);
@@ -8669,8 +8833,13 @@ fn decl<a>(c: (&a mut C), pass: u64) -> unit {
             } else {
                 expect(&mut c, view(":"));
                 ty = parse_type(&mut c);
+                // `field: T where P`: the field's refinement (docs/design/refinements.md).
+                if is(&mut c, view("where")) {
+                    advance(&mut c);
+                    fp = pred_scan(&mut c, view(","), view("}"));
+                }
             }
-            pending.push(Field { name: f, ty: ty });
+            pending.push(Field { name: f, ty: ty, pred: fp });
             count = count + 1;
             if eat(&mut c, view("}")) {
                 break;
@@ -9788,7 +9957,7 @@ fn ffi_record<a>(c: (&a mut C), pass: u64) -> unit {
             expect(&mut c, view(":"));
             ty := parse_type(&mut c);
             ffi_field(&mut c, ty);
-            pending.push(Field { name: f, ty: ty });
+            pending.push(Field { name: f, ty: ty, pred: no_pred() });
             count = count + 1;
             if eat(&mut c, view("}")) {
                 break;
@@ -10058,6 +10227,8 @@ fn extern_declaration<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
                 ext: 1 + variadic,
                 symbol: symbol,
                 body: u8[],
+                ppreds: Pred[],
+                rpred: no_pred(),
             }
         );
     return ();
@@ -10175,6 +10346,7 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     exchange(&mut c.origins, Origin[]);
     first := c.params.len();
     mut count = 0;
+    mut ppreds = Pred[];
     expect(&mut c, view("("));
     if !eat(&mut c, view(")")) {
         while true {
@@ -10187,6 +10359,13 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
                 );
             }
             ty := parse_type(&mut c);
+            // `p: T where P`: the parameter's refinement (docs/design/refinements.md).
+            mut pp = no_pred();
+            if is(&mut c, view("where")) {
+                advance(&mut c);
+                pp = pred_scan(&mut c, view(","), view(")"));
+            }
+            ppreds.push(pp);
             if same(view(p), view("self")) & (ty_kind(&mut c, ty) == 7) {
                 rr := outer_region(&mut c, ty);
                 exchange(&mut c.receiver_region, rr);
@@ -10219,9 +10398,17 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         }
     }
     mut ret = 1;
+    mut rpred = no_pred();
     if eat(&mut c, view("->")) {
         ret = parse_type(&mut c);
+        // `-> T ensures P`: the result's refinement, with `result` naming the value.
+        if is(&mut c, view("ensures")) {
+            advance(&mut c);
+            rpred = pred_scan(&mut c, view("{"), view(";"));
+        }
     }
+    c.cur_ppreds = copy_preds(&ppreds);
+    c.cur_rpred = Pred { file: rpred.file, lo: rpred.lo, hi: rpred.hi };
     exchange(&mut c.output_region, 0);
     exchange(&mut c.result, ret);
     if pass == 2 {
@@ -10315,6 +10502,8 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
                     ext: export,
                     symbol: export_symbol,
                     body: u8[],
+                    ppreds: copy_preds(&ppreds),
+                    rpred: Pred { file: rpred.file, lo: rpred.lo, hi: rpred.hi },
                 }
             );
         index := c.funcs.len();
@@ -10811,6 +11000,8 @@ fn interface_declaration<a>(c: (&a mut C), pass: u64) -> unit {
                     ext: 0,
                     symbol: u8[],
                     body: u8[],
+                    ppreds: Pred[],
+                    rpred: no_pred(),
                 }
             );
         index := c.funcs.len() - 1;
@@ -16072,9 +16263,9 @@ fn fn_value_decl<a>(c: (&a mut C)) -> u64 {
         }
     }
     first := c.fields.len();
-    c.fields.push(Field { name: copy_bytes(view("__code")), ty: 0 });
-    c.fields.push(Field { name: copy_bytes(view("__drop")), ty: 0 });
-    c.fields.push(Field { name: copy_bytes(view("target")), ty: 0 });
+    c.fields.push(Field { name: copy_bytes(view("__code")), ty: 0, pred: no_pred() });
+    c.fields.push(Field { name: copy_bytes(view("__drop")), ty: 0, pred: no_pred() });
+    c.fields.push(Field { name: copy_bytes(view("target")), ty: 0, pred: no_pred() });
     item_public_11 := c.decl_public;
     c
         .decls
@@ -20916,8 +21107,8 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
     mut decl_name = copy_bytes(view("Closure"));
     decimal(&mut decl_name, index);
     first := c.fields.len();
-    c.fields.push(Field { name: copy_bytes(view("__code")), ty: 0 });
-    c.fields.push(Field { name: copy_bytes(view("__drop")), ty: 0 });
+    c.fields.push(Field { name: copy_bytes(view("__code")), ty: 0, pred: no_pred() });
+    c.fields.push(Field { name: copy_bytes(view("__drop")), ty: 0, pred: no_pred() });
     mut slots = u64[];
     mut types = u64[];
     mut borrowed = u64[];
@@ -20938,7 +21129,7 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
         } else if contains_borrow(&mut c, ty, 0) {
             capture_aggregate_regions(&mut c, id, &mut caps);
         }
-        c.fields.push(Field { name: name.copy(), ty: field });
+        c.fields.push(Field { name: name.copy(), ty: field, pred: no_pred() });
         slots.push(id);
         types.push(field);
         borrowed.push(borrow);
@@ -28678,6 +28869,8 @@ fn host_fn<a, b>(c: (&a mut C), name: &b [u8], ret: u64) -> unit {
                 ext: 0,
                 symbol: u8[],
                 body: u8[],
+                ppreds: Pred[],
+                rpred: no_pred(),
             }
         );
     return ();
@@ -31571,7 +31764,7 @@ fn iface_define<a, b, d>(c: (&a mut C), st: (&a mut IState), line: &b [u8], path
         if st.cur_decl == 18446744073709551615 {
             iface_fail(&p, view("a field must follow the type it belongs to"));
         }
-        c.fields.push(Field { name: name, ty: ty });
+        c.fields.push(Field { name: name, ty: ty, pred: no_pred() });
         count := st.cur_decl;
         d := &mut c.decls[st.cur_decl];
         exchange(&mut d.first, st.first);
@@ -32122,6 +32315,8 @@ fn iface_define_func<a>(c: (&a mut C), st: (&a mut IState), p: (&a mut IPos)) ->
                 ext: ext,
                 symbol: symbol,
                 body: u8[],
+                ppreds: Pred[],
+                rpred: no_pred(),
             }
         );
     index := c.funcs.len() - 1;
@@ -32406,6 +32601,8 @@ pub fn main() -> u64 {
         cf_local: 0,
         bce_index: u8[],
         bce_base: u8[],
+        cur_ppreds: Pred[],
+        cur_rpred: no_pred(),
         lit_negative: 0,
         byte_start: 0,
         byte_end: 0,
