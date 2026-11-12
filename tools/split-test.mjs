@@ -33,7 +33,9 @@ const prologue = '.text\n';
 function compile(name, inputs, split) {
   const asm = join(work, `${name}${split ? '.split' : '.single'}.s`);
   const args = [compiler, '--default-u64', '--typed-refs', '--target', target];
-  if (split) args.push('--split');
+  // A split build carries no runtime-error call-site table, so the single reference is built without
+  // one too: the proof is that splitting changes nothing else.
+  if (split) args.push('--split'); else args.push('--no-error-sites');
   args.push(asm, ...inputs);
   const started = process.hrtime.bigint();
   command(args);
@@ -239,7 +241,8 @@ for (const test of cases) {
     const result = spawnSync(compiler, ['build', ...args], { cwd: project, env, encoding: 'utf8' });
     assert.equal(result.status, 0, `grail build ${args.join(' ')}: ${result.stdout}${result.stderr}`);
   };
-  build(['-o', 'target/demo']);
+  // The split build has no runtime-error location table; the reference is built without one too.
+  build(['--no-error-sites', '-o', 'target/demo']);
   build(['--split', '-o', 'target/demo-split']);
   const single = join(project, 'target/demo');
   const split = join(project, 'target/demo-split');

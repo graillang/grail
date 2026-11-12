@@ -90,6 +90,8 @@ for (const [position, test] of cases.entries()) {
   // A case may name the targets it applies to (`"targets": ["x86_64"]`), for fixtures that link a
   // host C library or exercise a host-only facility.
   if (test.targets && !test.targets.includes(target)) { skipped++; continue; }
+  // A case that pins native-backend output (runtime error locations) names its backends.
+  if (test.backends && !test.backends.includes(process.env.GRAIL_BACKEND ?? 'native')) { skipped++; continue; }
   if (filter && !filter.test(test.name)) { filtered++; continue; }
   if (shard && position % shard.count !== shard.index) { filtered++; continue; }
   if (resume && existsSync(join(markers, test.name))) { resumed++; continue; }

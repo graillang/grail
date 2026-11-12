@@ -46,7 +46,10 @@ checks += sources.length;
 const original = join(work, 'original.s'), reformatted = join(work, 'reformatted.s');
 command([grail, '--default-u64', '--typed-refs', original, ...compilerSources]);
 command([grail, '--default-u64', '--typed-refs', reformatted, ...compilerSources.map(f => formatted.get(f))]);
-assert.ok(readFileSync(original).equals(readFileSync(reformatted)), 'formatted compiler compiles to different assembly'); checks++;
+// The runtime-error call-site table records source lines and file names, which formatting and the
+// copies' paths change by design; everything else must be byte-identical.
+const withoutSites = (text) => text.replace(/\n\.section grail_sites,"a"\n[\s\S]*?\n\.text\n/g, '\n');
+assert.equal(withoutSites(readFileSync(original, 'utf8')), withoutSites(readFileSync(reformatted, 'utf8')), 'formatted compiler compiles to different assembly'); checks++;
 
 // 3. Project workflow: new / run / test / fmt / add / fetch / build.
 run(['new', 'demo']); const demo = join(work, 'demo');

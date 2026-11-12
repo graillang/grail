@@ -332,6 +332,7 @@ struct C {
     // 1 with --range-facts: the LLVM lifter derives range facts and removes the bounds check a
     // fact proves redundant (docs/design/typed-ir.md). Off by default; see that document for why.
     range_facts: u64,
+    no_sites: u64,
     // --f1-what=N: a test aid that records a deliberately wrong F1 kind for every binding, so the
     // checks --verify-facts emits can be shown to fire (docs/design/typed-ir.md, "Tests that catch
     // a wrong fact"). 0, the default, records the type the front end actually has.
@@ -620,17 +621,19 @@ fn emit_path<a, b>(c: (&a mut C), path: &b [u8]) -> unit {
 // they landed; the parts minus those markers are the single-file stream, which is what
 // tools/split-test.mjs checks.
 fn part<a, b>(c: (&a mut C), name: &b [u8]) -> unit {
-    if c.split == 0 {
-        return ();
-    }
     if same(view(c.part), view(name)) {
         // Still the same module: the run continues, and its file already has its `.text`.
         return ();
     }
     c.part = name.copy();
-    o(&mut c, view(".grail_part "));
-    o(&mut c, name);
-    o(&mut c, view("\n.text\n"));
+    if c.split != 0 {
+        o(&mut c, view(".grail_part "));
+        o(&mut c, name);
+        o(&mut c, view("\n.text\n"));
+    }
+    // Each module's literals start eight-aligned, in one file as in parts: a part object's section
+    // is aligned on its own, so the single build pads where the split link will.
+    o(&mut c, view(".pushsection .rodata\n.p2align 3\n.popsection\n"));
     return ();
 }
 // Decimal digits of a synthetic module suffix plus one, or 0 when the suffix is not a number.
@@ -1610,8 +1613,10 @@ fn debug_sections<a, b>(c: &a C, entry: &b [u8]) -> u8[] {
 // can say where it failed (runtime.grl rt_fail). The front end leaves `.gpos FILE LINE COL` markers
 // at statements and `.gkind K` before its own inline `call rt_abort`; the optimizer passes
 // directives through untouched, and site_table turns them into labelled entries afterwards.
+// Not with --split: its parts are slices of the image at offsets recorded before the markers would
+// be removed.
 fn site_table_on<a>(c: (&a C)) -> bool {
-    return (c.target == 0) && (c.plat == 0) && (c.backend == 0) && (c.debug == 0);
+    return (c.target == 0) && (c.plat == 0) && (c.backend == 0) && (c.debug == 0) && (c.split == 0) && (c.no_sites == 0);
 }
 fn site_pos<a>(c: (&a mut C)) -> unit {
     p := c.pos;
@@ -1642,6 +1647,8 @@ fn site_pos<a>(c: (&a mut C)) -> unit {
     exchange(&mut c.site_off, st);
     exchange(&mut c.site_line, line);
     exchange(&mut c.site_col, col);
+    // The last word says whether this is the unsafe runtime (runtime.grl, os-*.grl), whose sites a
+    // failure report skips to find the program's own.
     o(&mut c, view(".gpos "));
     f := c.file;
     on(&mut c, f);
@@ -1649,6 +1656,9 @@ fn site_pos<a>(c: (&a mut C)) -> unit {
     on(&mut c, line);
     c.out.push(32);
     on(&mut c, col);
+    c.out.push(32);
+    raw := u64(c.raw != 0);
+    on(&mut c, raw);
     c.out.push(10);
     return ();
 }
@@ -1709,30 +1719,24 @@ fn site_words<a>(line: &a [u8]) -> u64[] {
     }
     return out;
 }
-// The runtime's own files: their sites are skipped when reporting where a check failed.
-fn site_internal<a>(path: &a [u8]) -> bool {
-    mut cut = 0;
-    for i in path.len() {
-        if path[i] == 47 {
-            cut = i + 1;
-        }
+// A position's file name: a command-line input, or a generic body an interface carried (load_file).
+fn site_path<a>(c: (&a C), index: u64) -> u8[] {
+    if 1000000 <= index {
+        return c.virt_path[index - 1000000].copy();
     }
-    mut base = u8[];
-    for i in cut..path.len() {
-        base.push(path[i]);
-    }
-    return site_starts(view(base), view("runtime.grl")) || site_starts(view(base), view("os-"));
+    return host::arg(index + c.arg_offset);
 }
-// Turns the markers into the call-site table (or, when `strip`, just removes them). Each call into
+// Turns the markers into the call-site table. Each call into
 // the runtime gets a label after it - its return address - and an entry: address, file name,
 // line | col << 32 | internal << 63. An inline `call rt_abort` becomes `call rt_trap` with its kind.
-fn site_table<a, b>(c: (&a mut C), text: &b [u8], strip: u64) -> u8[] {
+fn site_table<a, b>(c: (&a mut C), text: &b [u8]) -> u8[] {
     mut out = u8[];
     mut entries = u8[];
     mut files = u64[];
     mut cur_file = 0;
     mut cur_line = 0;
     mut cur_col = 0;
+    mut cur_internal = false;
     mut own_internal = true;
     mut seen_own = false;
     mut pending = 0;
@@ -1740,7 +1744,6 @@ fn site_table<a, b>(c: (&a mut C), text: &b [u8], strip: u64) -> u8[] {
     mut prev2 = u8[];
     mut count = 0;
     mut line = u8[];
-    offset := c.arg_offset;
     for i in text.len() {
         b := text[i];
         if b != 10 {
@@ -1748,39 +1751,29 @@ fn site_table<a, b>(c: (&a mut C), text: &b [u8], strip: u64) -> u8[] {
             continue;
         }
         if site_starts(view(line), view(".gpos ")) {
-            if strip == 0 {
-                w := site_words(view(line));
-                if w.len() == 3 {
-                    path := host::arg(w[0] + offset);
-                    internal := site_internal(view(path));
-                    if !seen_own {
-                        seen_own = true;
-                        own_internal = internal;
-                    }
-                    // An inlined runtime body keeps its function's own position.
-                    if !internal || own_internal {
-                        cur_file = w[0];
-                        cur_line = w[1];
-                        cur_col = w[2];
-                    }
+            w := site_words(view(line));
+            if w.len() == 4 {
+                internal := w[3] != 0;
+                if !seen_own {
+                    seen_own = true;
+                    own_internal = internal;
+                }
+                // An inlined runtime body keeps its function's own position.
+                if !internal || own_internal {
+                    cur_file = w[0];
+                    cur_line = w[1];
+                    cur_col = w[2];
+                    cur_internal = internal;
                 }
             }
             line = u8[];
             continue;
         }
         if site_starts(view(line), view(".gkind ")) {
-            if strip == 0 {
-                w := site_words(view(line));
-                if w.len() == 1 {
-                    pending = w[0];
-                }
+            w := site_words(view(line));
+            if w.len() == 1 {
+                pending = w[0];
             }
-            line = u8[];
-            continue;
-        }
-        if strip != 0 {
-            push_bytes(&mut out, view(line));
-            out.push(10);
             line = u8[];
             continue;
         }
@@ -1820,9 +1813,8 @@ fn site_table<a, b>(c: (&a mut C), text: &b [u8], strip: u64) -> u8[] {
             if !known {
                 files.push(cur_file);
             }
-            path := host::arg(cur_file + offset);
             mut flags = cur_line | (cur_col << 32);
-            if site_internal(view(path)) {
+            if cur_internal {
                 flags = flags | 9223372036854775808;
             }
             push_bytes(&mut entries, view(".quad .Lgs"));
@@ -1844,11 +1836,10 @@ fn site_table<a, b>(c: (&a mut C), text: &b [u8], strip: u64) -> u8[] {
         push_bytes(&mut out, view(line));
     }
     // rt_sites(out): the table's bounds and the caller's frame pointer, for runtime.grl
-    // rt_fail_where. Weak references, so a link with no table (no sites) reads zeros.
-    if strip == 0 {
-        push_bytes(&mut out, view("\n.text\n.weak __start_grail_sites\n.weak __stop_grail_sites\n.globl rt_sites\nrt_sites:\nleaq __start_grail_sites(%rip),%rax\nmovq %rax,(%rdi)\nleaq __stop_grail_sites(%rip),%rax\nmovq %rax,8(%rdi)\nmovq %rbp,16(%rdi)\nxorq %rax,%rax\nret\n"));
-    }
-    if (strip == 0) && (count != 0) {
+    // rt_fail_where. Weak references, so a link with no table (no sites) reads zeros; weak itself,
+    // since every object of a separately compiled program carries one.
+    push_bytes(&mut out, view("\n.text\n.weak __start_grail_sites\n.weak __stop_grail_sites\n.weak rt_sites\nrt_sites:\nleaq __start_grail_sites(%rip),%rax\nmovq %rax,(%rdi)\nleaq __stop_grail_sites(%rip),%rax\nmovq %rax,8(%rdi)\nmovq %rbp,16(%rdi)\nxorq %rax,%rax\nret\n"));
+    if count != 0 {
         push_bytes(&mut out, view("\n.section grail_sites,\"a\"\n.p2align 3\n"));
         push_bytes(&mut out, view(entries));
         push_bytes(&mut out, view(".section .rodata\n"));
@@ -1856,7 +1847,7 @@ fn site_table<a, b>(c: (&a mut C), text: &b [u8], strip: u64) -> u8[] {
             push_bytes(&mut out, view(".Lgf"));
             decimal(&mut out, files[f]);
             push_bytes(&mut out, view(":\n.asciz \""));
-            path := host::arg(files[f] + offset);
+            path := site_path(&c, files[f]);
             for k in path.len() {
                 ch := path[k];
                 if (ch == 34) || (ch == 92) {
@@ -30851,6 +30842,7 @@ pub fn main() -> u64 {
         f1_ord: 0,
         verify_facts: 0,
         range_facts: 0,
+        no_sites: 0,
         f1_what: 0,
         debug_funcs: DebugFunc[],
         debug_vars: DebugVar[],
@@ -31235,6 +31227,12 @@ pub fn main() -> u64 {
                                             if same(view(option), view("--range-facts")) {
                                                 exchange(&mut c.range_facts, 1);
                                                 offset += 1;
+                                            } else if same(view(option), view("--no-error-sites")) {
+                                                // No call-site table: runtime errors print their
+                                                // message without a location (tools comparing a
+                                                // build with a --split one byte for byte).
+                                                exchange(&mut c.no_sites, 1);
+                                                offset += 1;
                                             } else {
                                                 break;
                                             }
@@ -31562,12 +31560,7 @@ pub fn main() -> u64 {
         }
     }
     if site_table_on(&c) {
-        // Split output is a set of parts with their own label spaces: markers are only removed.
-        mut strip = 0;
-        if c.split != 0 {
-            strip = 1;
-        }
-        tabled := site_table(&mut c, view(out), strip);
+        tabled := site_table(&mut c, view(out));
         out = tabled;
     }
     if c.plat == 1 {

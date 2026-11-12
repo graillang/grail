@@ -545,7 +545,11 @@ fn build_argv<a, b, d, e, g>(h: (&a Home), entry: &b [u8], modules: (&d u8[][]),
     split := (flags / 8) % 2;
     wrap := (flags / 16) % 2;
     checked := (flags / 32) % 2;
+    no_sites := (flags / 256) % 2;
     mut command = u8[][host::exe_path(), copy(view("--target")), copy(view(target))];
+    if no_sites != 0 {
+        command.push(copy(view("--no-error-sites")));
+    }
     if debug != 0 {
         command.push(copy(view("--debug")));
     }
@@ -2208,6 +2212,8 @@ struct Options {
     cache: u64,
     // One compiler invocation per module (B1 stage 4): `--per-module`.
     per_module: u64,
+    // `--no-error-sites`: no runtime-error location table (byte-for-byte comparisons with --split).
+    no_sites: u64,
     // Module interfaces (B1 stage 2): `--interface DIR` reads them, `grail check` writes them, and
     // `--verify` compares the two instead of trusting either.
     iface: u8[],
@@ -2216,9 +2222,9 @@ struct Options {
 }
 // The code-generation flag vector, in one place: it is what the compiler is told, and what the build
 // cache keys on. Bit 0 check only, 1 debug, 2 deny ambient host, 3 split, 4/5 overflow, 6 cache,
-// 7 one compiler invocation per module.
+// 7 one compiler invocation per module, 8 no runtime-error location table.
 fn flag_bits<a>(o: (&a Options)) -> u64 {
-    return o.debug * 2 + o.deny * 4 + o.split * 8 + o.overflow * 16 + o.cache * 64 + o.per_module * 128;
+    return o.debug * 2 + o.deny * 4 + o.split * 8 + o.overflow * 16 + o.cache * 64 + o.per_module * 128 + o.no_sites * 256;
 }
 fn options<a>(args: (&a u8[][])) -> Options {
     mut o = Options {
@@ -2233,6 +2239,7 @@ fn options<a>(args: (&a u8[][])) -> Options {
         overflow: 0,
         cache: 0,
         per_module: 0,
+        no_sites: 0,
         iface: u8[],
         verify: 0,
         paths: u8[][],
@@ -2281,6 +2288,9 @@ fn options<a>(args: (&a u8[][])) -> Options {
                             if eq(view(a), view("--overflow=wrap")) {
                                 o.overflow = 1;
                             } else {
+                            if eq(view(a), view("--no-error-sites")) {
+                                o.no_sites = 1;
+                            } else {
                             if eq(view(a), view("--overflow=checked")) {
                                 o.overflow = 2;
                             } else {
@@ -2297,6 +2307,7 @@ fn options<a>(args: (&a u8[][])) -> Options {
                                 o.paths.push(a);
                             } else {
                                 o.paths.push(a);
+                            }
                             }
                             }
                             }
