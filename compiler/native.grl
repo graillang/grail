@@ -396,6 +396,11 @@ struct C {
     vis_off: u64,
     // Set when a compile-time expression read a value parameter that is not bound yet.
     ct_unbound: u64,
+    // site_pos's position cache (file, byte offset, line, column).
+    site_file: u64,
+    site_off: u64,
+    site_line: u64,
+    site_col: u64,
     // `--comptime-probe`: this compile builds the probe program for a compile-time call (C3).
     probe_mode: u64,
     // `@for f in fields(T)` bindings in scope, innermost last: name, decl, field index.
@@ -1578,9 +1583,277 @@ fn debug_sections<a, b>(c: &a C, entry: &b [u8]) -> u8[] {
     dput(&mut out, view(".byte 0\n.Ldebug_cu_end:\n"));
     return out;
 }
+// ---- runtime error locations -------------------------------------------------------------------
+// Native x86-64 Linux builds record where each call into the runtime is made, so a failing check
+// can say where it failed (runtime.grl rt_fail). The front end leaves `.gpos FILE LINE COL` markers
+// at statements and `.gkind K` before its own inline `call rt_abort`; the optimizer passes
+// directives through untouched, and site_table turns them into labelled entries afterwards.
+fn site_table_on<a>(c: (&a C)) -> bool {
+    return (c.target == 0) && (c.plat == 0) && (c.backend == 0) && (c.debug == 0);
+}
+fn site_pos<a>(c: (&a mut C)) -> unit {
+    p := c.pos;
+    if c.toks.len() <= p {
+        return ();
+    }
+    st := c.toks[p].start;
+    // Line and column, counted on from the last position in the same file (statements are mostly
+    // visited in order; going back restarts from the top).
+    if (c.site_file != c.file) || (st < c.site_off) {
+        exchange(&mut c.site_file, c.file);
+        exchange(&mut c.site_off, 0);
+        exchange(&mut c.site_line, 1);
+        exchange(&mut c.site_col, 1);
+    }
+    mut line = c.site_line;
+    mut col = c.site_col;
+    mut i = c.site_off;
+    while (i < st) && (i < c.src.len()) {
+        if c.src[i] == 10 {
+            line += 1;
+            col = 1;
+        } else {
+            col += 1;
+        }
+        i += 1;
+    }
+    exchange(&mut c.site_off, st);
+    exchange(&mut c.site_line, line);
+    exchange(&mut c.site_col, col);
+    o(&mut c, view(".gpos "));
+    f := c.file;
+    on(&mut c, f);
+    c.out.push(32);
+    on(&mut c, line);
+    c.out.push(32);
+    on(&mut c, col);
+    c.out.push(10);
+    return ();
+}
+// Before an inline `call rt_abort`: what the check was (runtime.grl rt_fail's kinds).
+fn site_kind<a>(c: (&a mut C), kind: u64) -> unit {
+    if site_table_on(&c) {
+        o(&mut c, view(".gkind "));
+        on(&mut c, kind);
+        c.out.push(10);
+    }
+    return ();
+}
+fn site_starts<a, b>(line: &a [u8], prefix: &b [u8]) -> bool {
+    if line.len() < prefix.len() {
+        return false;
+    }
+    for i in prefix.len() {
+        if line[i] != prefix[i] {
+            return false;
+        }
+    }
+    return true;
+}
+fn site_contains<a, b>(line: &a [u8], part: &b [u8]) -> bool {
+    mut i = 0;
+    while i + part.len() <= line.len() {
+        mut hit = true;
+        for j in part.len() {
+            if line[i + j] != part[j] {
+                hit = false;
+                break;
+            }
+        }
+        if hit {
+            return true;
+        }
+        i += 1;
+    }
+    return false;
+}
+fn site_words<a>(line: &a [u8]) -> u64[] {
+    mut out = u64[];
+    mut v = 0;
+    mut digits = 0;
+    for i in line.len() {
+        ch := line[i];
+        if (48 <= ch) & (ch <= 57) {
+            v = v * 10 + u64(ch - 48);
+            digits += 1;
+        } else if digits != 0 {
+            out.push(v);
+            v = 0;
+            digits = 0;
+        }
+    }
+    if digits != 0 {
+        out.push(v);
+    }
+    return out;
+}
+// The runtime's own files: their sites are skipped when reporting where a check failed.
+fn site_internal<a>(path: &a [u8]) -> bool {
+    mut cut = 0;
+    for i in path.len() {
+        if path[i] == 47 {
+            cut = i + 1;
+        }
+    }
+    mut base = u8[];
+    for i in cut..path.len() {
+        base.push(path[i]);
+    }
+    return site_starts(view(base), view("runtime.grl")) || site_starts(view(base), view("os-"));
+}
+// Turns the markers into the call-site table (or, when `strip`, just removes them). Each call into
+// the runtime gets a label after it - its return address - and an entry: address, file name,
+// line | col << 32 | internal << 63. An inline `call rt_abort` becomes `call rt_trap` with its kind.
+fn site_table<a, b>(c: (&a mut C), text: &b [u8], strip: u64) -> u8[] {
+    mut out = u8[];
+    mut entries = u8[];
+    mut files = u64[];
+    mut cur_file = 0;
+    mut cur_line = 0;
+    mut cur_col = 0;
+    mut own_internal = true;
+    mut seen_own = false;
+    mut pending = 0;
+    mut prev1 = u8[];
+    mut prev2 = u8[];
+    mut count = 0;
+    mut line = u8[];
+    offset := c.arg_offset;
+    for i in text.len() {
+        b := text[i];
+        if b != 10 {
+            line.push(b);
+            continue;
+        }
+        if site_starts(view(line), view(".gpos ")) {
+            if strip == 0 {
+                w := site_words(view(line));
+                if w.len() == 3 {
+                    path := host::arg(w[0] + offset);
+                    internal := site_internal(view(path));
+                    if !seen_own {
+                        seen_own = true;
+                        own_internal = internal;
+                    }
+                    // An inlined runtime body keeps its function's own position.
+                    if !internal || own_internal {
+                        cur_file = w[0];
+                        cur_line = w[1];
+                        cur_col = w[2];
+                    }
+                }
+            }
+            line = u8[];
+            continue;
+        }
+        if site_starts(view(line), view(".gkind ")) {
+            if strip == 0 {
+                w := site_words(view(line));
+                if w.len() == 1 {
+                    pending = w[0];
+                }
+            }
+            line = u8[];
+            continue;
+        }
+        if strip != 0 {
+            push_bytes(&mut out, view(line));
+            out.push(10);
+            line = u8[];
+            continue;
+        }
+        // A function starts: positions are its own again.
+        if (line.len() > 1) && (line[line.len() - 1] == 58) && !site_starts(view(line), view(".")) {
+            seen_own = false;
+            own_internal = true;
+            cur_file = 0;
+        }
+        // Only a check in program code is rewritten: the runtime's own aborts (rt_fail ends in one)
+        // stay plain, or a failing check would report itself forever.
+        mut is_abort = site_starts(view(line), view("call rt_abort")) && (line.len() == 13) && seen_own && !own_internal;
+        is_call := site_starts(view(line), view("call rt_"));
+        if is_abort {
+            mut kind = pending;
+            if (kind == 0) && site_starts(view(prev1), view("jb ")) && site_contains(view(prev2), view("cmpq 8(%rdi),%rsi")) {
+                kind = 1;
+            }
+            push_bytes(&mut out, view("movq $"));
+            decimal(&mut out, kind);
+            push_bytes(&mut out, view(",%rdx\ncall rt_trap\n"));
+            pending = 0;
+        } else {
+            push_bytes(&mut out, view(line));
+            out.push(10);
+        }
+        if (is_abort || is_call) && (cur_file != 0) {
+            push_bytes(&mut out, view(".Lgs"));
+            decimal(&mut out, count);
+            push_bytes(&mut out, view(":\n"));
+            mut known = false;
+            for f in files.len() {
+                if files[f] == cur_file {
+                    known = true;
+                }
+            }
+            if !known {
+                files.push(cur_file);
+            }
+            path := host::arg(cur_file + offset);
+            mut flags = cur_line | (cur_col << 32);
+            if site_internal(view(path)) {
+                flags = flags | 9223372036854775808;
+            }
+            push_bytes(&mut entries, view(".quad .Lgs"));
+            decimal(&mut entries, count);
+            push_bytes(&mut entries, view("\n.quad .Lgf"));
+            decimal(&mut entries, cur_file);
+            push_bytes(&mut entries, view("\n.quad "));
+            decimal(&mut entries, flags);
+            entries.push(10);
+            count += 1;
+        }
+        if (line.len() != 0) && !site_starts(view(line), view(".")) {
+            prev2 = prev1;
+            prev1 = line;
+        }
+        line = u8[];
+    }
+    if line.len() != 0 {
+        push_bytes(&mut out, view(line));
+    }
+    // rt_sites(out): the table's bounds and the caller's frame pointer, for runtime.grl
+    // rt_fail_where. Weak references, so a link with no table (no sites) reads zeros.
+    if strip == 0 {
+        push_bytes(&mut out, view("\n.text\n.weak __start_grail_sites\n.weak __stop_grail_sites\n.globl rt_sites\nrt_sites:\nleaq __start_grail_sites(%rip),%rax\nmovq %rax,(%rdi)\nleaq __stop_grail_sites(%rip),%rax\nmovq %rax,8(%rdi)\nmovq %rbp,16(%rdi)\nxorq %rax,%rax\nret\n"));
+    }
+    if (strip == 0) && (count != 0) {
+        push_bytes(&mut out, view("\n.section grail_sites,\"a\"\n.p2align 3\n"));
+        push_bytes(&mut out, view(entries));
+        push_bytes(&mut out, view(".section .rodata\n"));
+        for f in files.len() {
+            push_bytes(&mut out, view(".Lgf"));
+            decimal(&mut out, files[f]);
+            push_bytes(&mut out, view(":\n.asciz \""));
+            path := host::arg(files[f] + offset);
+            for k in path.len() {
+                ch := path[k];
+                if (ch == 34) || (ch == 92) {
+                    out.push(92);
+                }
+                out.push(ch);
+            }
+            push_bytes(&mut out, view("\"\n"));
+        }
+        push_bytes(&mut out, view(".text\n"));
+    }
+    return out;
+}
 // Source line/column of the current token. The assembler turns .loc into .debug_line.
 fn emit_loc<a>(c: (&a mut C)) -> unit {
     if c.debug == 0 {
+        if site_table_on(&c) && (c.validating == 0) {
+            site_pos(&mut c);
+        }
         return ();
     }
     p := c.pos;
@@ -17823,6 +18096,7 @@ fn adopt_value<a>(c: (&a mut C), v: Val, start: u64, end: u64, expected: u64) ->
                     jump(&mut c, view("jmp"), done);
                     mark(&mut c, next);
                 }
+                site_kind(&mut c, 4);
                 o(&mut c, view("call rt_abort\n"));
                 mark(&mut c, done);
                 slot := held.t;
@@ -17957,6 +18231,7 @@ fn widen_to_u64<a>(c: (&a mut C), v: Val) -> Val {
     o(&mut c, view("shrq $63,%rax\ntestq %rax,%rax\n"));
     ok := label(&mut c);
     jump(&mut c, view("jz"), ok);
+    site_kind(&mut c, 3);
     o(&mut c, view("call rt_abort\n"));
     mark(&mut c, ok);
     return val(slot, 0);
@@ -18027,6 +18302,7 @@ fn int_binary<a>(c: (&a mut C), k: u64, left: u64, right: u64, ty: u64) -> Val {
         o(&mut c, view(",%rcx\ncmpq %rcx,%rdx\n"));
         ok := label(&mut c);
         jump(&mut c, view("jb"), ok);
+        site_kind(&mut c, 2);
         o(&mut c, view("call rt_abort\n"));
         mark(&mut c, ok);
         return val(save(&mut c), ty);
@@ -18050,6 +18326,7 @@ fn int_binary<a>(c: (&a mut C), k: u64, left: u64, right: u64, ty: u64) -> Val {
         o(&mut c, view("shrq $63,%rdx\ntestq %rdx,%rdx\n"));
         ok := label(&mut c);
         jump(&mut c, view("jz"), ok);
+        site_kind(&mut c, 2);
         o(&mut c, view("call rt_abort\n"));
         mark(&mut c, ok);
         return val(save(&mut c), ty);
@@ -18061,6 +18338,7 @@ fn int_binary<a>(c: (&a mut C), k: u64, left: u64, right: u64, ty: u64) -> Val {
         o(&mut c, view("testq %rcx,%rcx\n"));
         nz := label(&mut c);
         jump(&mut c, view("jnz"), nz);
+        site_kind(&mut c, 5);
         o(&mut c, view("call rt_abort\n"));
         mark(&mut c, nz);
         if signed != 0 {
@@ -18106,6 +18384,7 @@ fn int_binary<a>(c: (&a mut C), k: u64, left: u64, right: u64, ty: u64) -> Val {
                 on(&mut c, half);
                 o(&mut c, view(",%rcx\ncmpq %rcx,%rax\n"));
                 jump(&mut c, view("jb"), done);
+                site_kind(&mut c, 2);
                 o(&mut c, view("call rt_abort\n"));
                 mark(&mut c, done);
             }
@@ -21662,6 +21941,7 @@ fn propagate_result_union<a>(c: (&a mut C), x: Val, unwrap: u64) -> Val {
     before := ownership::snapshot(&c.check);
     mark(&mut c, failure);
     if unwrap != 0 {
+        site_kind(&mut c, 6);
         o(&mut c, view("call rt_abort\n"));
     } else {
         for i in s..args.len() {
@@ -21747,6 +22027,7 @@ fn propagate_union<a>(c: (&a mut C), x: Val, unwrap: u64) -> Val {
     jump(&mut c, view("je"), ok);
     before := ownership::snapshot(&c.check);
     if unwrap != 0 {
+        site_kind(&mut c, 6);
         o(&mut c, view("call rt_abort\n"));
     } else {
         endmap := label(&mut c);
@@ -21839,6 +22120,7 @@ fn propagate<a>(c: (&a mut C), v: Val, unwrap: u64) -> Val {
     jump(&mut c, view("je"), ok);
     before := ownership::snapshot(&c.check);
     if unwrap != 0 {
+        site_kind(&mut c, 6);
         o(&mut c, view("call rt_abort\n"));
     } else {
         result := c.result;
@@ -21920,6 +22202,7 @@ fn binary<a>(c: (&a mut C), k: u64, left: u64, right: u64) -> u64 {
     if ((k == 43) || (k == 45) || (k == 42)) && (((c.overflow != 0) || (c.raw != 0))) {
         ok := label(&mut c);
         jump(&mut c, view("jnc"), ok);
+        site_kind(&mut c, 2);
         o(&mut c, view("call rt_abort\n"));
         mark(&mut c, ok);
     }
@@ -21937,6 +22220,7 @@ fn binary<a>(c: (&a mut C), k: u64, left: u64, right: u64) -> u64 {
             o(&mut c, view("cmpq %rcx,%rax\n"));
             ok := label(&mut c);
             jump(&mut c, view("jnc"), ok);
+            site_kind(&mut c, 2);
             o(&mut c, view("call rt_abort\n"));
             mark(&mut c, ok);
             get(&mut c, right, view("%rcx"));
@@ -21960,6 +22244,7 @@ fn binary<a>(c: (&a mut C), k: u64, left: u64, right: u64) -> u64 {
         o(&mut c, view("testq %rcx,%rcx\n"));
         ok := label(&mut c);
         jump(&mut c, view("jnz"), ok);
+        site_kind(&mut c, 5);
         o(&mut c, view("call rt_abort\n"));
         mark(&mut c, ok);
         o(&mut c, view("xorq %rdx,%rdx\ndivq %rcx\n"));
@@ -23706,6 +23991,7 @@ fn index_assignment<a>(c: (&a mut C)) -> unit {
             o(&mut c, view("cmpq %rcx,%rax\n"));
             ok := label(&mut c);
             jump(&mut c, view("jb"), ok);
+            site_kind(&mut c, 11);
             o(&mut c, view("call rt_abort\n"));
             mark(&mut c, ok);
         }
@@ -25349,6 +25635,7 @@ fn statement<a>(c: (&a mut C)) -> unit {
         o(&mut c, view("testq %rax,%rax\n"));
         ok := label(&mut c);
         jump(&mut c, view("jnz"), ok);
+        site_kind(&mut c, 12);
         o(&mut c, view("call rt_abort\n"));
         mark(&mut c, ok);
         return ();
@@ -29565,6 +29852,10 @@ pub fn main() -> u64 {
         decl_public: 1,
         vis_off: 0,
         ct_unbound: 0,
+        site_file: 0,
+        site_off: 0,
+        site_line: 1,
+        site_col: 1,
         probe_mode: 0,
         ct_loop_names: u8[][],
         ct_loop_decls: u64[],
@@ -30120,6 +30411,10 @@ pub fn main() -> u64 {
         }
     }
     }
+    if site_table_on(&c) && (c.no_entry == 0) {
+        // Where a runtime error can find the call-site table (runtime.grl rt_fail_where).
+        o(&mut c, view("leaq rt_sites(%rip),%rax\nmovq %rax,rt_state+3400(%rip)\n"));
+    }
     if tls_bridge(&mut c) {
         // Record the loader's TLS base before the runtime installs its own worker record.
         tls_capture(&mut c);
@@ -30204,6 +30499,15 @@ pub fn main() -> u64 {
         } else {
             out = optimize::optimize(view(c.out));
         }
+    }
+    if site_table_on(&c) {
+        // Split output is a set of parts with their own label spaces: markers are only removed.
+        mut strip = 0;
+        if c.split != 0 {
+            strip = 1;
+        }
+        tabled := site_table(&mut c, view(out), strip);
+        out = tabled;
     }
     if c.plat == 1 {
         prefixed := darwinify(view(out));

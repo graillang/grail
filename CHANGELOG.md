@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Added: runtime errors say what failed and where. A failed bounds check, division by zero, overflow under `--overflow=checked`, `unwrap` of None/Err, a slice out of range, a C-array length mismatch and other checks now print `error: index 7 out of bounds for length 3` and ` --> src/main.grl:2:5` before aborting (native x86-64 Linux builds; elsewhere the message prints without a location).
 - Added: compile-time stage C3, the run tier. `TABLE := build();` and `@fib(30)` call ordinary functions while compiling: the compiler builds and runs a probe of the program's own code, with files, the clock, the network and processes refused, and bakes the integer, bool or string result into the program. Constants are computed on first use, a dependency cycle is reported as one, and results are cached in `.work/comptime`.
 - Added: compile-time stage C4 and value parameters on records. `@for f in fields(T) { ... }` (and `variants(E)`) compiles its block once per field with `f.name`, `f.index` and `x.@f`, so a generic `show<T>` prints any record; `@embed("file")` places a file's bytes in the program as `u8[]` (such a build skips `--cache`). `struct Ring<T, @N: u64>` takes a value parameter, `Ring<u64, 8>` is its own type, and a function infers `N` from an argument of that type.
 - Fixed: `grail fmt` no longer aborts on a source whose line ranges close a bracket before opening one (the formatter's unsigned bracket depth underflowed under checked arithmetic).

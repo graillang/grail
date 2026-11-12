@@ -12,12 +12,158 @@ fn rt_abort() -> u64 {
     rt_hard_exit(134);
     return 0;
 }
+// ---- runtime errors ----------------------------------------------------------------------------
+// A check that fails stops the program the way it always has (SIGABRT, exit status 134), but first
+// says what failed and where:
+//     error: index 7 out of bounds for length 3
+//      --> src/main.grl:2:12
+// The location comes from the call-site table the compiler emits (section `grail_sites`, see
+// native.grl site_table): the frame-pointer chain is walked to the first return address that
+// belongs to code outside the runtime. Without a table (debug builds, the LLVM backend, other
+// targets for now) the message is printed alone.
+fn rt_fail(kind: u64, a: u64, b: u64) -> u64 {
+    buf := rt_alloc(512);
+    mut n = rt_fail_put(buf, 0, "error: ");
+    if kind == 1 {
+        n = rt_fail_put(buf, n, "index ");
+        n = rt_fail_num(buf, n, a);
+        n = rt_fail_put(buf, n, " out of bounds for length ");
+        n = rt_fail_num(buf, n, b);
+    } else if kind == 2 {
+        n = rt_fail_put(buf, n, "arithmetic overflow");
+    } else if kind == 3 {
+        n = rt_fail_put(buf, n, "negative value converted to an unsigned type");
+    } else if kind == 4 {
+        n = rt_fail_put(buf, n, "value has no matching variant");
+    } else if kind == 5 {
+        n = rt_fail_put(buf, n, "division by zero");
+    } else if kind == 6 {
+        n = rt_fail_put(buf, n, "unwrap of None or Err");
+    } else if kind == 7 {
+        n = rt_fail_put(buf, n, "range ");
+        n = rt_fail_num(buf, n, a);
+        n = rt_fail_put(buf, n, "..");
+        n = rt_fail_num(buf, n, b);
+        n = rt_fail_put(buf, n, " out of bounds");
+    } else if kind == 8 {
+        n = rt_fail_put(buf, n, "pop from an empty vector");
+    } else if kind == 9 {
+        n = rt_fail_put(buf, n, "byte value ");
+        n = rt_fail_num(buf, n, a);
+        n = rt_fail_put(buf, n, " does not fit in u8");
+    } else if kind == 10 {
+        n = rt_fail_put(buf, n, "C array length mismatch: got ");
+        n = rt_fail_num(buf, n, a);
+        n = rt_fail_put(buf, n, " elements for an array of ");
+        n = rt_fail_num(buf, n, b);
+    } else if kind == 11 {
+        n = rt_fail_put(buf, n, "index out of bounds");
+    } else if kind == 12 {
+        n = rt_fail_put(buf, n, "assertion failed");
+    } else {
+        n = rt_fail_put(buf, n, "the program aborted");
+    }
+    raw_putbyte(buf + n, 10);
+    n = n + 1;
+    n = rt_fail_where(buf, n);
+    rt_write_all(2, buf, n);
+    rt_abort();
+    return 0;
+}
+// An inline check in compiled code failed (the compiler rewrote its `call rt_abort`): for an index
+// check the vector is in `a` and the index in `b`.
+fn rt_trap(a: u64, b: u64, kind: u64) -> u64 {
+    if kind == 1 {
+        return rt_fail(1, b, raw_load(wrapping_add(a, 8)));
+    }
+    return rt_fail(kind, a, b);
+}
+fn rt_fail_put(buf: u64, n: u64, text: string) -> u64 {
+    mut at = n;
+    for i in text.len() {
+        if at < 500 {
+            raw_putbyte(buf + at, u64(text[i]));
+            at = at + 1;
+        }
+    }
+    return at;
+}
+fn rt_fail_num(buf: u64, n: u64, v: u64) -> u64 {
+    mut digits = 0;
+    mut x = v;
+    while true {
+        digits = digits + 1;
+        x = x / 10;
+        if x == 0 {
+            break;
+        }
+    }
+    if 500 < n + digits {
+        return n;
+    }
+    mut y = v;
+    mut k = digits;
+    while 0 < k {
+        k = k - 1;
+        raw_putbyte(buf + n + k, 48 + y % 10);
+        y = y / 10;
+    }
+    return n + digits;
+}
+// ` --> file:line:col` for the innermost frame outside the runtime, or nothing.
+fn rt_fail_where(buf: u64, n: u64) -> u64 {
+    // The program's entry stores the compiler-emitted rt_sites in state word 3400; it fills in the
+    // table's start, end and the caller's frame pointer. No table: no word, or zeros.
+    helper := raw_load(raw_state() + 3400);
+    if helper == 0 {
+        return n;
+    }
+    info := rt_alloc(24);
+    raw_call2(helper, info, 0);
+    begin := raw_load(info);
+    end := raw_load(info + 8);
+    if (begin == 0) + (end <= begin) {
+        return n;
+    }
+    mut frame = raw_load(info + 16);
+    mut depth = 0;
+    while (frame != 0) & (depth < 64) {
+        ret := raw_load(frame + 8);
+        mut e = begin;
+        while e < end {
+            if raw_load(e) == ret {
+                flags := raw_load(e + 16);
+                if (flags >> 63) == 0 {
+                    mut at = rt_fail_put(buf, n, " --> ");
+                    name := raw_load(e + 8);
+                    mut i = 0;
+                    while (raw_byte(name + i) != 0) & (at < 440) {
+                        raw_putbyte(buf + at, raw_byte(name + i));
+                        at = at + 1;
+                        i = i + 1;
+                    }
+                    raw_putbyte(buf + at, 58);
+                    at = rt_fail_num(buf, at + 1, flags & 4294967295);
+                    raw_putbyte(buf + at, 58);
+                    at = rt_fail_num(buf, at + 1, (flags >> 32) & 2147483647);
+                    raw_putbyte(buf + at, 10);
+                    return at + 1;
+                }
+                e = end;
+            }
+            e = e + 24;
+        }
+        frame = raw_load(frame);
+        depth = depth + 1;
+    }
+    return n;
+}
 fn rt_error(n: u64) -> u64 {
     return 18446744073709547520 < n;
 }
 fn rt_div(n: u64, d: u64) -> u64 {
     if d == 0 {
-        rt_abort();
+        rt_fail(5, 0, 0);
     }
     mut q = 0;
     mut r = n;
@@ -366,7 +512,7 @@ fn rt_slotu(s: u64, i: u64) -> u64 {
 // The address of byte i of a sequence or view (both start {ptr, len}), bounds-checked.
 fn rt_slotb(s: u64, i: u64) -> u64 {
     if (i < raw_load(wrapping_add(s, 8))) == 0 {
-        rt_abort();
+        rt_fail(1, i, raw_load(wrapping_add(s, 8)));
     }
     return wrapping_add(raw_load(s), i);
 }
@@ -375,14 +521,14 @@ fn rt_atbu(s: u64, i: u64) -> u64 {
 }
 fn rt_atb(s: u64, i: u64) -> u64 {
     if (i < raw_load(wrapping_add(s, 8))) == 0 {
-        rt_abort();
+        rt_fail(1, i, raw_load(wrapping_add(s, 8)));
     }
     return raw_byte(wrapping_add(raw_load(s), i));
 }
 fn rt_pop(s: u64) -> u64 {
     n := raw_load(wrapping_add(s, 8));
     if n == 0 {
-        rt_abort();
+        rt_fail(8, 0, 0);
     }
     v := raw_load(wrapping_add(raw_load(s), wrapping_mul(n - 1, 8)));
     raw_store(wrapping_add(raw_load(s), wrapping_mul(n - 1, 8)), 0);
@@ -394,7 +540,7 @@ fn rt_len(s: u64) -> u64 {
 }
 fn rt_slot(s: u64, i: u64) -> u64 {
     if (i < raw_load(wrapping_add(s, 8))) == 0 {
-        rt_abort();
+        rt_fail(1, i, raw_load(wrapping_add(s, 8)));
     }
     return wrapping_add(raw_load(s), wrapping_mul(i, 8));
 }
@@ -409,15 +555,18 @@ fn rt_at(s: u64, i: u64) -> u64 {
 }
 fn rt_write(s: u64, i: u64, v: u64) -> u64 {
     // A byte store stops the program when the value does not fit a byte.
-    if ((i < raw_load(wrapping_add(s, 8))) == 0) + (255 < v) {
-        rt_abort();
+    if (i < raw_load(wrapping_add(s, 8))) == 0 {
+        rt_fail(1, i, raw_load(wrapping_add(s, 8)));
+    }
+    if 255 < v {
+        rt_fail(9, v, 0);
     }
     raw_putbyte(wrapping_add(raw_load(s), i), v);
     return 0;
 }
 fn rt_slice(s: u64, a: u64, b: u64) -> u64 {
     if (b < a) + (raw_load(wrapping_add(s, 8)) < b) {
-        rt_abort();
+        rt_fail(7, a, b);
     }
     v := rt_alloc(24);
     raw_store(v, wrapping_add(raw_load(s), a));
@@ -427,7 +576,7 @@ fn rt_slice(s: u64, a: u64, b: u64) -> u64 {
 // A typed slice {ptr + a*width, b - a} of a vector or slice (both start {ptr, len}); a <= b <= len.
 fn rt_vslice(s: u64, a: u64, b: u64, width: u64) -> u64 {
     if (b < a) + (raw_load(wrapping_add(s, 8)) < b) {
-        rt_abort();
+        rt_fail(7, a, b);
     }
     v := rt_alloc(24);
     raw_store(v, wrapping_add(raw_load(s), wrapping_mul(a, width)));
@@ -477,7 +626,7 @@ fn rt_carray_load(src: u64, n: u64, size: u64, signed: u64, kind: u64, words: u6
 // The vector's length must be the array's: a C array has no room for more and C reads all N.
 fn rt_carray_store(dst: u64, v: u64, n: u64, size: u64, kind: u64) -> u64 {
     if rt_len(v) != n {
-        rt_abort();
+        rt_fail(10, rt_len(v), n);
     }
     mut i = 0;
     while i < n {
@@ -1463,6 +1612,7 @@ fn rt_thread_join(handle: u64) -> u64 {
 //   3224         compile-time probe mode      os-linux: rt_comptime_on   comptime-c3
 //   3232..3384   compile-time refusal text    os-linux: rt_comptime_check comptime-c3
 //   3392         Windows thread bridge        os-windows: rt_win_bridge  --
+//   3400         call-site table helper       _start; rt_fail_where      runtime-errors
 //   3840         Windows fiber state          os-windows                 --
 //   3856..       Windows fiber table          os-windows                 --
 //
