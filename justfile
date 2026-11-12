@@ -24,6 +24,11 @@ book-test:
 book-check-grail:
     bun tools/book.mjs check --grail-only
 
+# The full merge gate: every target, both backends and every tool suite, three legs at a time.
+# `just gate --reseed` republishes the bootstrap first. Logs and summary.txt in .work/gate.
+gate *args:
+    tools/gate.sh "$@"
+
 # Build the sole Grail-written compiler from its assembly bootstrap.
 build:
     bun tools/native.mjs build

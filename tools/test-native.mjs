@@ -12,8 +12,6 @@ for (const file of [...compilerSources, ...readdirSync(join(root, 'lib')).filter
 
 const target = targetName(process.argv[2] ?? hostTarget);
 const compiler = buildCompiler();
-const work = join(root, '.work/native-tests', target);
-mkdirSync(work, { recursive: true });
 const cases = JSON.parse(readFileSync(join(root, 'tests/native-cases.json'), 'utf8'));
 
 // A full run is minutes per backend, so the runner is sliceable. All three knobs are opt-in and a
@@ -36,6 +34,9 @@ const resume = process.env.GRAIL_TEST_RESUME === '1';
 // The marker names the compiler (its path is a content hash) and the backend, so a rebuilt compiler
 // or a different --backend never reuses another run's passes.
 const backend = `${process.env.GRAIL_BACKEND ?? 'native'}${process.env.GRAIL_VERIFY_FACTS === '1' ? '+facts' : ''}`;
+// The backend also names the work directory, so a native and an LLVM run of one target can overlap.
+const work = join(root, '.work/native-tests', backend === 'native' ? target : `${target}-${backend}`);
+mkdirSync(work, { recursive: true });
 // Key by the compiler's content-addressed directory, not its file name: every build is named `grail`.
 const markers = join(work, 'pass', basename(dirname(compiler)) + '-' + backend);
 if (resume) mkdirSync(markers, { recursive: true });

@@ -123,8 +123,8 @@ takes three opt-in knobs (a plain invocation is unchanged):
     GRAIL_TEST_RESUME=1 bun tools/test-native.mjs x86_64             # skip cases that already passed
 
 Shards are safe to run **in parallel with each other** in one worktree: each case owns
-`.work/native-tests/<target>/<case>`, and a shard's case set is disjoint from every other shard's. What
-is *not* safe is a shard or a filtered run started while a **full** run of the same target is still
+`.work/native-tests/<target>/<case>`, and a shard's case set is disjoint from every other shard's. Native and LLVM runs of one target use separate directories (`x86_64`, `x86_64-llvm`, `x86_64-llvm+facts`), so they may overlap too. What
+is *not* safe is a shard or a filtered run started while a **full** run of the same target and backend is still
 alive — they select overlapping cases and then collide on the same directory (`unable to rename
 temporary … .o.tmp`). Kill the full run first; a killed shell does not kill it. Resume markers are keyed by the compiler's content-addressed
 path and the backend, so a rebuilt compiler or a different `--backend` never reuses another run's passes.
@@ -185,3 +185,14 @@ gate is 2–3 hours; run it in a watched job that logs to a file rather than hol
   thread-per-task scheduler.
 - `lsp-test.mjs`, `test-profile.mjs`, `test-authority.mjs` — the language server, the sampling
   profiler and the capability model.
+
+## The full gate
+
+`tools/gate.sh [--reseed] [LOGDIR]` runs every leg the merge gate needs: the corpus on x86-64,
+AArch64 and RISC-V, the LLVM backend plain and with range facts verified, and every tool suite
+(self-host, FFI, CLI, interface, cache, split, facts, debug lines, Abundance, Borg, grammar,
+Windows under Wine, the book, lint). `--reseed` first republishes the bootstrap; `bootstrap.mjs
+update all` already proves self-hosting and assembly identity on every target, so no separate
+`verify` follows. At most three legs run at once - this machine has crashed under more - and
+independent legs overlap within that cap. Each leg logs to `LOGDIR/<leg>.log` ending in `exit=N`;
+`LOGDIR/summary.txt` lists failures first, and `LOGDIR/DONE` is written last.

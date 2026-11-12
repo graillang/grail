@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Added: `tools/gate.sh` (`just gate [--reseed]`), the full merge gate in one script: every target, both backends and every tool suite, overlapping independent legs three at a time, with no duplicate `verify` after a reseed and a `summary.txt` that lists failures first. Native and LLVM corpus runs of one target now use separate work directories, so they can run at once.
 - Fixed: a closure held by reference (`f: &Fn(...)`, or `r := &g`) can be called more than once, in loops and branches. The scan that finds a binding's last use skipped `name(...)`, so the reference's loan ended after its first call.
 - Improved: range facts summarise counted fill loops (`for i in N { v.push(x) }` leaves `len(v) >= N`), so matmul's kernel needs no bounds checks with `--range-facts` (about 1.4x to 1.0x of C).
 - Improved: range facts survive calls that take a vector by shared reference (`energy(&p, &v, &m)`): the front end records shared-reference parameters and the analysis keeps a slot's facts when its address reaches only those. nbody's `main` now proves 12 of 17 bounds checks (none before), about 1.8x to 1.5x of C with `--range-facts`.
