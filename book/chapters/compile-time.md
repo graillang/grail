@@ -36,3 +36,26 @@ call. A value parameter cannot be inferred from the arguments, so the call alway
 
 The Rust version spreads the same ideas over `const`, `const _: () = assert!(...)` and
 `#[cfg(...)]`; Grail uses one marker for all of them.
+
+## Reflection
+
+`@for f in fields(T) { ... }` compiles its block once per field of a record, in declaration order.
+Inside, `f.name` is the field's name as a string, `f.index` its position, and `x.@f` the field
+itself, typed as that field is - so one generic function prints, compares or serialises any record:
+
+```grl
+fn show<T>(v: &T) {
+    @for f in fields(T) {
+        println("{} = {}", f.name, v.@f);
+    }
+}
+```
+
+`variants(E)` does the same over an enum's variants (`v.name`, `v.index`). `@embed("logo.png")` is
+a file's bytes, read while compiling and placed in the program as `u8[]`; the path is relative to the
+source file.
+
+A record takes value parameters as functions do: `struct Ring<T, @N: u64>` makes `Ring<u64, 8>` and
+`Ring<u64, 16>` two types, and `fn capacity<T, @N: u64>(r: &Ring<T, N>) -> u64` reads `N` back from
+its argument's type.
+

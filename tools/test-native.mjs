@@ -79,6 +79,9 @@ for (let i = 0; i < cases.length; i++) {
     return path;
   });
 }
+// A case's `data` files (what an `@embed` reads) are staged under their own names beside its
+// sources, so a path relative to the source resolves as it does in a project.
+for (const test of cases) for (const file of test.data ?? []) writeFileSync(join(snapshot, basename(file)), readFileSync(resolve(root, file)));
 let passed = 0;
 let skipped = 0;
 let filtered = 0;

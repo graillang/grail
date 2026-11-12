@@ -395,6 +395,12 @@ struct C {
     vis_off: u64,
     // Set when a compile-time expression read a value parameter that is not bound yet.
     ct_unbound: u64,
+    // `@for f in fields(T)` bindings in scope, innermost last: name, decl, field index.
+    ct_loop_names: u8[][],
+    ct_loop_decls: u64[],
+    ct_loop_index: u64[],
+    // Set once a compile used `@embed`, which reads a file the build cache does not key on.
+    embed_used: u64,
     // Copy-backs for `p: &mut R` callback parameters: (C pointer slot, copy slot, bytes) triples.
     export_copyback: u64[],
     rnames: u8[][],
@@ -5648,6 +5654,29 @@ fn lifetime_arguments<a>(c: (&a mut C)) -> u64[] {
     }
     return rs;
 }
+// A value argument of a record type (`8` in `Ring<u64, 8>`): a value parameter in scope stands
+// for its binding (or, in a template, for itself), anything else is a compile-time constant.
+fn type_level_value<a>(c: (&a mut C)) -> u64 {
+    if kind(&mut c) == 1 {
+        here_tok := c.pos;
+        name_text := tok_text(&mut c, here_tok);
+        vp := value_param(&mut c, view(name_text));
+        if vp != 0 {
+            advance(&mut c);
+            i := vp - 1;
+            if c.bindings.len() != 0 {
+                return c.bindings[i];
+            }
+            bounds := c.type_bounds[i];
+            return intern_args(&mut c, 9, i, bounds, u64[], u64[]);
+        }
+    }
+    v := ct_expr(&mut c, prec(62));
+    if v.ty == ct_tag_ty() {
+        fail(&mut c, view("a value argument is an integer or a bool, not a target tag"));
+    }
+    return intern(&mut c, 31, v.value);
+}
 fn nominal_type<a>(c: (&a mut C), d: u64) -> u64 {
     // An opaque handle is one word with no layout: it cannot be constructed,
     // inspected or dropped, only produced by C and handed back to C.
@@ -5669,8 +5698,14 @@ fn nominal_type<a>(c: (&a mut C), d: u64) -> u64 {
                 mut r = region_id(&mut c);
                 rs.push(r);
             } else {
-                t := parse_type(&mut c);
-                args.push(t);
+                j := i - count;
+                record_bounds := declaration_bounds(&c, d);
+                if (j < record_bounds.len()) && ((record_bounds[j] & 4) != 0) {
+                    args.push(type_level_value(&mut c));
+                } else {
+                    t := parse_type(&mut c);
+                    args.push(t);
+                }
             }
         }
         expect(&mut c, view(">"));
@@ -9613,6 +9648,21 @@ fn ct_primary<a>(c: (&a mut C)) -> CVal {
                 return value_param_value(&mut c, vp - 1);
             }
         }
+        dot_at := c.pos + 1;
+        if (c.ct_loop_names.len() != 0) & is_at(&mut c, dot_at, view(".")) {
+            loop_tok := c.pos;
+            loop_name := tok_text(&mut c, loop_tok);
+            b := ct_loop_binding(&mut c, view(loop_name));
+            if b != 0 {
+                advance(&mut c);
+                advance(&mut c);
+                what := ident(&mut c);
+                if !same(view(what), view("index")) {
+                    fail(&mut c, view("in a compile-time condition a field from @for has .index"));
+                }
+                return ct_val(c.ct_loop_index[b - 1], 0);
+            }
+        }
         mut module = module_copy(&mut c);
         mut name = ident(&mut c);
         if eat(&mut c, view("::")) {
@@ -9858,8 +9908,103 @@ fn ct_form<a>(c: (&a mut C), pass: u64, top: u64) -> unit {
         exchange(&mut c.ct_pass, old_pass);
         return ();
     }
-    fail(&mut c, view("unknown compile-time form: expected @if or @assert here (@for, @embed and value generics are later stages)"));
+    if is(&mut c, view("for")) {
+        if top != 0 {
+            fail(&mut c, view("@for is a statement: it unrolls a block inside a function"));
+        }
+        ct_for(&mut c);
+        exchange(&mut c.ct_pass, old_pass);
+        return ();
+    }
+    fail(&mut c, view("unknown compile-time form: expected @if, @assert or @for here"));
     return ();
+}
+// `@for f in fields(T) { ... }` / `@for v in variants(E) { ... }`: the block is compiled once per
+// field (or variant), in declaration order, with `f` a compile-time value: `f.name` is its name as a
+// string, `f.index` its position, and `x.@f` the field itself. Each copy is type-checked with that
+// field's type, so the body may do what the field's type allows. In a generic function checked
+// before it is instantiated, `T` has no fields yet: the block is checked in each specialisation.
+fn ct_for<a>(c: (&a mut C)) -> unit {
+    expect(&mut c, view("for"));
+    name := ident(&mut c);
+    expect(&mut c, view("in"));
+    which := ident(&mut c);
+    want_enum := same(view(which), view("variants"));
+    if !want_enum & !same(view(which), view("fields")) {
+        fail(&mut c, view("@for iterates fields(T) or variants(E)"));
+    }
+    expect(&mut c, view("("));
+    ty := parse_type(&mut c);
+    expect(&mut c, view(")"));
+    open := c.pos;
+    if !is(&mut c, view("{")) {
+        fail(&mut c, view("expected { after the @for list"));
+    }
+    close := block_end(&mut c, open);
+    mut t = ty;
+    while (t != 0) && (t != 18446744073709551615) && (ty_kind(&mut c, t) == 10) {
+        t = ty_arg(&mut c, t);
+    }
+    if (t == 18446744073709551615) || (ty_kind(&mut c, t) == 9) {
+        exchange(&mut c.pos, close + 1);
+        return ();
+    }
+    k := ty_kind(&mut c, t);
+    if k != 8 {
+        if want_enum {
+            fail(&mut c, view("variants takes an enum type"));
+        }
+        fail(&mut c, view("fields takes a record type"));
+    }
+    d := ty_arg(&mut c, t);
+    is_enum := c.decls[d].is_enum;
+    if want_enum & (is_enum == 0) {
+        fail(&mut c, view("variants takes an enum type; use fields for a record"));
+    }
+    if !want_enum & (is_enum != 0) {
+        fail(&mut c, view("fields takes a record type; use variants for an enum"));
+    }
+    count := c.decls[d].count;
+    // The block's tokens are compiled once per field, so a binding whose last use is inside it is
+    // still used by the next copy: the same window a run-time loop sets keeps it alive to the end.
+    mut start = c.loop_start;
+    mut end = c.loop_end;
+    if end == 0 {
+        start = open;
+        end = close;
+    }
+    old_start := exchange(&mut c.loop_start, start);
+    old_end := exchange(&mut c.loop_end, end);
+    for i in count {
+        c.ct_loop_names.push(name.copy());
+        c.ct_loop_decls.push(d);
+        c.ct_loop_index.push(i);
+        exchange(&mut c.pos, open);
+        block(&mut c);
+        c.ct_loop_names.pop();
+        c.ct_loop_decls.pop();
+        c.ct_loop_index.pop();
+    }
+    exchange(&mut c.loop_start, old_start);
+    exchange(&mut c.loop_end, old_end);
+    exchange(&mut c.pos, close + 1);
+    return ();
+}
+// The `@for` binding named `name`, innermost first: index + 1, or 0.
+fn ct_loop_binding<a, b>(c: (&a mut C), name: &b [u8]) -> u64 {
+    mut i = c.ct_loop_names.len();
+    while i > 0 {
+        if same(view(c.ct_loop_names[i - 1]), name) {
+            return i;
+        }
+        i -= 1;
+    }
+    return 0;
+}
+fn ct_loop_field_name<a>(c: (&a mut C), b: u64) -> u8[] {
+    d := c.ct_loop_decls[b - 1];
+    first := c.decls[d].first;
+    return c.fields[first + c.ct_loop_index[b - 1]].name.copy();
 }
 // `NAME := expr;` at module level: a compile-time constant with its type inferred - u64 for an
 // integer, bool for a bool, string for a text literal. The typed spelling is `const NAME: T = expr;`.
@@ -11334,8 +11479,14 @@ fn field_path<a>(c: (&a mut C), id: u64, lty: u64, address: u64) -> Val {
         if ty_kind(&mut c, ty) == 7 {
             via = 1;
         }
-        base := deref(&mut c, val(t, ty));
+        mut base = deref(&mut c, val(t, ty));
         mut b = base.t;
+        // A record reached through a bound type parameter (`v.@f` in a generic, unrolled per
+        // specialisation) arrives behind an indirection.
+        while ty_kind(&mut c, base.ty) == 10 {
+            inner := ty_arg(&mut c, base.ty);
+            base = val(base.t, inner);
+        }
         if ty_kind(&mut c, base.ty) != 8 {
             fail(&mut c, view("field projection requires record"));
         }
@@ -11652,10 +11803,60 @@ fn static_literal_cstr<a>(c: (&a mut C)) -> Val {
     slot := save(&mut c);
     return val(slot, intern(&mut c, 24, 0));
 }
+// `@embed("path")`: the bytes of a file, read while compiling and placed in the program as
+// read-only data, as a `u8[]`. The path is relative to the source file that names it. A build that
+// embeds a file is not served from the build cache, which keys on sources only.
+fn embed_file<a>(c: (&a mut C)) -> Val {
+    advance(&mut c);
+    advance(&mut c);
+    expect(&mut c, view("("));
+    if kind(&mut c) != 3 {
+        fail(&mut c, view("@embed takes a path string"));
+    }
+    lit := c.pos;
+    rel := decode_literal(&mut c, lit);
+    advance(&mut c);
+    expect(&mut c, view(")"));
+    mut path = rel.copy();
+    if (rel.len() == 0) || (rel[0] != 47) {
+        mut base = u8[];
+        if c.file < 1000000 {
+            offset := c.arg_offset;
+            base = host::arg(c.file + offset);
+        }
+        mut cut = 0;
+        for i in base.len() {
+            if base[i] == 47 {
+                cut = i + 1;
+            }
+        }
+        mut joined = u8[];
+        for i in cut {
+            joined.push(base[i]);
+        }
+        push_bytes(&mut joined, view(rel));
+        path = joined;
+    }
+    if host::exists(view(path)) == 0 {
+        mut msg = copy_bytes(view("@embed cannot read "));
+        push_bytes(&mut msg, view(path));
+        fail(&mut c, view(msg));
+    }
+    exchange(&mut c.embed_used, 1);
+    bytes := host::read_file(view(path));
+    ptr := rodata_bytes(&mut c, &bytes);
+    n := imm(&mut c, bytes.len());
+    t := invoke(&mut c, view("rt_bytes_from"), two(ptr, n));
+    return own(&mut c, t, 2);
+}
 fn string_lit<a>(c: (&a mut C)) -> Val {
     p := c.pos;
     bytes := decode_literal(&mut c, p);
     advance(&mut c);
+    return string_from_bytes(&mut c, &bytes);
+}
+// The bytes as read-only data, and the address of the first one.
+fn rodata_bytes<a, b>(c: (&a mut C), bytes: (&b u8[])) -> u64 {
     mut l = label(&mut c);
     rodata(&mut c);
     mark(&mut c, l);
@@ -11667,7 +11868,10 @@ fn string_lit<a>(c: (&a mut C)) -> Val {
     o(&mut c, view(".byte 0\n.popsection\nleaq "));
     lname(&mut c, l);
     o(&mut c, view("(%rip),%rax\n"));
-    ptr := save(&mut c);
+    return save(&mut c);
+}
+fn string_from_bytes<a, b>(c: (&a mut C), bytes: (&b u8[])) -> Val {
+    ptr := rodata_bytes(&mut c, bytes);
     n := imm(&mut c, bytes.len());
     t := invoke(&mut c, view("rt_string_lit"), two(ptr, n));
     return own(&mut c, t, 3);
@@ -11820,6 +12024,16 @@ fn constructed_type<a>(c: (&a mut C), decl: u64, hint: u64, map: u64[]) -> u64 {
 }
 // Record member names.
 fn member_name<a>(c: (&a mut C)) -> u8[] {
+    if kind(&mut c) == 64 {
+        // `x.@f`: the field an `@for` binding names.
+        advance(&mut c);
+        n := ident(&mut c);
+        b := ct_loop_binding(&mut c, view(n));
+        if b == 0 {
+            fail(&mut c, view("x.@f needs a field from an enclosing @for f in fields(T)"));
+        }
+        return ct_loop_field_name(&mut c, b);
+    }
     if kind(&mut c) == 2 {
         p := c.pos;
         t := tok_text(&mut c, p);
@@ -12563,9 +12777,8 @@ fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
         }
     } else {
         for i in types {
-            if (i < value_slots.len()) && (value_slots[i] != 0) {
-                fail(&mut c, view("this function has a value parameter, which a call cannot infer: give it explicitly, as in rotl<13>(x)"));
-            }
+            // A value parameter is inferred like a type when an argument's type fixes it
+            // (`capacity(&r)` with `r: Ring<u64, 8>`); one left open is refused after inference.
             map.push(18446744073709551615);
         }
     }
@@ -12795,6 +13008,9 @@ fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
         if map[i] == 18446744073709551615 {
             if deferred.len() != 0 {
                 fail(&mut c, view("ambiguous union type inference"));
+            }
+            if (i < value_slots.len()) && (value_slots[i] != 0) {
+                fail(&mut c, view("this function has a value parameter no argument fixes: give it explicitly, as in rotl<13>(x)"));
             }
             fail(&mut c, view("cannot infer function type argument"));
         }
@@ -19968,6 +20184,29 @@ fn primary<a>(c: (&a mut C)) -> Val {
     k := kind(&mut c);
     // `@expr`: the next operand, folded at compile time (stage C1: literals, constants, size_of,
     // align_of and target; a call in it is the run tier, C3).
+    embed_at := c.pos + 1;
+    if (k == 64) & is_at(&mut c, embed_at, view("embed")) {
+        return embed_file(&mut c);
+    }
+    if (k == 1) & (c.ct_loop_names.len() != 0) & (next_kind(&mut c) == 46) {
+        here_tok := c.pos;
+        loop_name := tok_text(&mut c, here_tok);
+        b := ct_loop_binding(&mut c, view(loop_name));
+        if b != 0 {
+            advance(&mut c);
+            advance(&mut c);
+            what := ident(&mut c);
+            if same(view(what), view("name")) {
+                field_name := ct_loop_field_name(&mut c, b);
+                return string_from_bytes(&mut c, &field_name);
+            }
+            if same(view(what), view("index")) {
+                index := c.ct_loop_index[b - 1];
+                return val(imm(&mut c, index), int_type(&mut c, 64, 0));
+            }
+            fail(&mut c, view("a field from @for has .name and .index (and x.@f for the value)"));
+        }
+    }
     if k == 64 {
         advance(&mut c);
         v := ct_primary(&mut c);
@@ -23578,7 +23817,7 @@ fn zero_record_binding<a>(c: (&a mut C), name: u8[], ty: u64, mutable: u64) -> u
 fn statement<a>(c: (&a mut C)) -> unit {
     emit_loc(&mut c);
     after := c.pos + 1;
-    if (kind(&mut c) == 64) & (is_at(&mut c, after, view("if")) || is_at(&mut c, after, view("assert"))) {
+    if (kind(&mut c) == 64) & (is_at(&mut c, after, view("if")) || is_at(&mut c, after, view("assert")) || is_at(&mut c, after, view("for"))) {
         ct_form(&mut c, 0, 0);
         return ();
     }
@@ -28675,6 +28914,10 @@ pub fn main() -> u64 {
         decl_public: 1,
         vis_off: 0,
         ct_unbound: 0,
+        ct_loop_names: u8[][],
+        ct_loop_decls: u64[],
+        ct_loop_index: u64[],
+        embed_used: 0,
         export_copyback: u64[],
         rnames: u8[][],
         tnames: u8[][],

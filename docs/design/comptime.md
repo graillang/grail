@@ -1,10 +1,11 @@
 # Compile-time evaluation
 
-Status: **C1 implemented** (constants, `@if`, `@assert`, `@expr` over constant expressions, `size_of`,
-`align_of`, `target`); **C2 implemented for functions** (value parameters `<@k: u64>`, bound per call
-site, one specialisation per value, visible to `@assert` and `@if`; records with value parameters
-are next); C3-C4 are design. Each stage lands with native cases and a book section
-(chapter *Compile time*).
+Status: **C1, C2 and C4 implemented.** C1: constants, `@if`, `@assert`, `@expr` over constant
+expressions, `size_of`, `align_of`, `target`. C2: value parameters on functions and records
+(`fn rotl<@k: u64>`, `struct Ring<T, @N: u64>`), bound per call site or inferred from an argument's
+type, one specialisation per value. C4: `@for f in fields(T)` / `variants(E)` with `f.name`,
+`f.index` and `x.@f`, and `@embed("path")`. C3, the run tier that executes a function call while
+compiling, is design.
 
 Grail runs code at compile time with one sigil, `@`. Everything Zig's `comptime` does - constants,
 static branches, unrolled loops, value parameters, reflection, compile errors - is spelled with `@`

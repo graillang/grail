@@ -6143,7 +6143,7 @@
     "name": "comptime-value-generic-needs-argument",
     "source": "fn rotl<@k: u64>(x: u64) -> u64 {\n    @assert(k < 64, \"rotate amount out of range\");\n    if k == 0 {\n        return x;\n    }\n    return (x << k) | (x >> (64 - k));\n}\nfn scale<@n: u64>(x: u64) -> u64 {\n    return x * n;\n}\nfn pick<@wide: bool>(x: u64) -> u64 {\n    @if wide {\n        return x * 1000;\n    } else {\n        return x;\n    }\n}\nfn main() -> u64 {\n    println(rotl<1>(5));\n    println(rotl<8>(1));\n    println(scale(7));\n    println(pick<true>(2) + pick<false>(2));\n    return 0;\n}\n",
     "reject": true,
-    "diagnostic": "which a call cannot infer"
+    "diagnostic": "no argument fixes: give it explicitly"
   },
   {
     "name": "comptime-value-param-not-a-type",
@@ -6229,5 +6229,46 @@
     ],
     "reject": true,
     "diagnostic": "`offset` is private to module `vis_lib`"
+  },
+  {
+    "name": "comptime-reflection-fields",
+    "source": "struct Header {\n    magic: u64,\n    version: u64,\n    flags: u64\n}\nenum Shape {\n    Circle(u64),\n    Square(u64),\n    Point\n}\nfn show<T>(v: &T) -> u64 {\n    mut total = 0;\n    @for f in fields(T) {\n        println(\"{} = {}\", f.name, v.@f);\n        total = total + v.@f;\n    }\n    return total;\n}\nfn main() -> u64 {\n    h := Header { magic: 7, version: 2, flags: 9 };\n    @for f in fields(Header) {\n        @if f.index == 0 {\n            println(\"first field {}\", f.name);\n        }\n    }\n    println(show(&h));\n    mut count = 0;\n    @for v in variants(Shape) {\n        println(\"{}: {}\", v.index, v.name);\n        count = count + 1;\n    }\n    println(count);\n    return 0;\n}\n",
+    "stdout": "first field magic\nmagic = 7\nversion = 2\nflags = 9\n18\n0: Circle\n1: Square\n2: Point\n3\n",
+    "note": "comptime C4: @for over fields(T) and variants(E) unrolls per item; f.name, f.index and x.@f; a generic show<T> unrolls per specialisation; f.index works in @if"
+  },
+  {
+    "name": "comptime-embed",
+    "files": [
+      "tests/comptime/embed.grl"
+    ],
+    "stdout": "13\nhello, embed\n",
+    "note": "@embed reads a file relative to its source while compiling and places the bytes in read-only data",
+    "data": [
+      "tests/comptime/greeting.txt"
+    ]
+  },
+  {
+    "name": "comptime-for-fields-of-enum",
+    "source": "enum E {\n    A,\n    B\n}\nfn main() -> u64 {\n    @for f in fields(E) {\n        println(f.name);\n    }\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": "fields takes a record type; use variants for an enum"
+  },
+  {
+    "name": "comptime-field-outside-for",
+    "source": "struct P {\n    x: u64\n}\nfn main() -> u64 {\n    p := P { x: 1 };\n    println(p.@f);\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": "x.@f needs a field from an enclosing @for"
+  },
+  {
+    "name": "comptime-value-generic-records",
+    "source": "struct Ring<T, @N: u64> {\n    slots: T[],\n    head: u64\n}\nfn capacity<T, @N: u64>(r: &Ring<T, N>) -> u64 {\n    @assert(N > 0, \"a ring needs room\");\n    return N;\n}\nfn make<@N: u64>(fill: u64) -> Ring<u64, N> {\n    mut slots = u64[];\n    for i in N {\n        slots.push(fill);\n    }\n    return Ring<u64, N> { slots: slots, head: 0 };\n}\nfn main() -> u64 {\n    small := make<2>(7);\n    big := make<5>(1);\n    println(\"{} {}\", capacity(&small), capacity(&big));\n    println(\"{} {}\", small.slots.len(), big.slots[4]);\n    return 0;\n}\n",
+    "stdout": "2 5\n2 1\n",
+    "note": "comptime C2 on records: struct Ring<T, @N: u64>; Ring<u64, 2> and Ring<u64, 5> are distinct types; a function infers N from its argument's type"
+  },
+  {
+    "name": "comptime-value-generic-record-assert",
+    "source": "struct Ring<T, @N: u64> {\n    slots: T[],\n    head: u64\n}\nfn capacity<T, @N: u64>(r: &Ring<T, N>) -> u64 {\n    @assert(N > 0, \"a ring needs room\");\n    return N;\n}\nfn make<@N: u64>(fill: u64) -> Ring<u64, N> {\n    mut slots = u64[];\n    for i in N {\n        slots.push(fill);\n    }\n    return Ring<u64, N> { slots: slots, head: 0 };\n}\nfn main() -> u64 {\n    small := make<0>(7);\n    big := make<5>(1);\n    println(\"{} {}\", capacity(&small), capacity(&big));\n    println(\"{} {}\", small.slots.len(), big.slots[4]);\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": "@assert failed: a ring needs room"
   }
 ]

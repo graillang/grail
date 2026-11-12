@@ -600,6 +600,36 @@ fn build_argv<a, b, d, e, g>(h: (&a Home), entry: &b [u8], modules: (&d u8[][]),
     }
     return command;
 }
+// True when the entry or any module source mentions `@embed(`.
+fn sources_embed<a, b>(entry: &a [u8], modules: (&b u8[][])) -> bool {
+    mut files = u8[][copy(view(entry))];
+    for i in modules.len() {
+        files.push(item(&modules, i));
+    }
+    needle := "@embed(";
+    for f in files.len() {
+        path := item(&files, f);
+        if host::exists(view(path)) == 0 {
+            continue;
+        }
+        text := host::read_file(view(path));
+        mut i = 0;
+        while i + needle.len() <= text.len() {
+            mut hit = true;
+            for j in needle.len() {
+                if text[i + j] != needle[j] {
+                    hit = false;
+                    break;
+                }
+            }
+            if hit {
+                return true;
+            }
+            i += 1;
+        }
+    }
+    return false;
+}
 // check_only: type-check and generate code, but do not assemble or link.
 fn compile_mode<a, b, d, e, g>(
     h: (&a Home),
@@ -617,8 +647,13 @@ fn compile_mode<a, b, d, e, g>(
     split := (flags / 8) % 2;
     wrap := (flags / 16) % 2;
     checked := (flags / 32) % 2;
-    cache := (flags / 64) % 2;
+    mut cache = (flags / 64) % 2;
     per_module := (flags / 128) % 2;
+    if (cache != 0) && sources_embed(view(entry), &modules) {
+        // `@embed` reads a file the cache does not key on, so its result cannot be reused safely.
+        say(view("grail: --cache is skipped: a source uses @embed, whose file the cache does not track"));
+        cache = 0;
+    }
     asm := cat(view(output), view(".s"));
     object := cat(view(output), view(".o"));
     // The toolchain is decided by the target alone, so it is known before the compiler runs - which
