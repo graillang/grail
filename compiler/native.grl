@@ -1627,9 +1627,10 @@ fn debug_sections<a, b>(c: &a C, entry: &b [u8]) -> u8[] {
 // markers at statements and `.gkind K` before its own inline `call rt_abort`; the optimizer passes
 // directives through untouched, and site_table turns them into labelled entries afterwards.
 // Not with --split: its parts are slices of the image at offsets recorded before the markers would
-// be removed. Not on Windows or macOS, which keep no table.
+// be removed. Not on macOS, which has no section to bracket. Windows puts the table in grouped PE
+// sections (site_table) instead of the `grail_sites` section an ELF linker brackets for us.
 fn site_table_on<a>(c: (&a C)) -> bool {
-    return (c.target < 3) && (c.plat == 0) && (c.backend == 0) && (c.debug == 0) && (c.split == 0) && (c.no_sites == 0);
+    return (c.plat == 0) && (c.backend == 0) && (c.debug == 0) && (c.split == 0) && (c.no_sites == 0);
 }
 fn site_pos<a>(c: (&a mut C)) -> unit {
     p := c.pos;
@@ -1851,8 +1852,9 @@ fn site_table<a, b>(c: (&a mut C), text: &b [u8]) -> u8[] {
             own_internal = true;
             cur_file = 0;
             pending_site = false;
-            // Not the data labels: a range in .bss names nothing and must not swallow code.
-            if !site_starts(view(line), view("rt_state:")) && !site_starts(view(line), view("rt_tls_record:")) {
+            // Not the data labels, whose range would swallow code, and not the PE entry, which is
+            // emitted as `.globl grail_entry` then `grail_entry:` and would get the label between.
+            if !site_starts(view(line), view("rt_state:")) && !site_starts(view(line), view("rt_tls_record:")) && !site_starts(view(line), view("grail_entry:")) {
                 site_label(&mut out, count);
                 site_entry(&mut entries, count, 0, 0);
                 count += 1;
@@ -1903,16 +1905,36 @@ fn site_table<a, b>(c: (&a mut C), text: &b [u8]) -> u8[] {
         push_bytes(&mut out, view(line));
     }
     // rt_sites(out): the table's bounds and the caller's frame pointer, for runtime.grl
-    // rt_fail_where. Weak, since every object of a separately compiled program carries one.
-    push_bytes(&mut out, view("\n.text\n.weak __start_grail_sites\n.weak __stop_grail_sites\n.weak rt_sites\nrt_sites:\nleaq __start_grail_sites(%rip),%rax\nmovq %rax,(%rdi)\nleaq __stop_grail_sites(%rip),%rax\nmovq %rax,8(%rdi)\nmovq %rbp,16(%rdi)\nxorq %rax,%rax\nret\n"));
+    // rt_fail_where. The body is Grail's pseudo text: it is x86-64 as it stands, and machine::lower
+    // turns it into AArch64 or RISC-V for those targets.
+    pe := (c.target == 3) || (c.target == 4);
+    push_bytes(&mut out, view("\n.text\n"));
+    if !pe {
+        // An ELF or Mach-O linker gives the section its start and stop symbols; the helper is weak
+        // because every object of a separately compiled program carries one and the linker keeps one.
+        push_bytes(&mut out, view(".weak __start_grail_sites\n.weak __stop_grail_sites\n.weak rt_sites\n"));
+    }
+    push_bytes(&mut out, view("rt_sites:\nleaq __start_grail_sites(%rip),%rax\nmovq %rax,(%rdi)\nleaq __stop_grail_sites(%rip),%rax\nmovq %rax,8(%rdi)\nmovq %rbp,16(%rdi)\nxorq %rax,%rax\nret\n"));
     // Past the end of the text the table says nothing: a frame whose return address is out there (in
     // libc above the image, say) is not one of the program's own.
     site_label(&mut out, count);
     site_entry(&mut entries, count, 0, 0);
     count += 1;
-    push_bytes(&mut out, view("\n.section grail_sites,\"a\"\n.p2align 3\n"));
-    push_bytes(&mut out, view(entries));
-    push_bytes(&mut out, view(".section .rodata\n"));
+    if pe {
+        // A PE linker provides no `__start_`/`__stop_` symbols, so the table is bracketed by the
+        // grouped sections lld-link sorts and merges: `$a` holds the symbol that opens the merged
+        // section, `$b` the entries, `$z` the symbol that closes it, so `__start` is the first entry
+        // and `__stop` the byte past the last however many objects contribute. The markers are local
+        // labels - a Windows program is one object, and rt_sites sits beside them - and `dr` makes
+        // the merged section read-only data.
+        push_bytes(&mut out, view("\n.section grail_sites$a,\"dr\"\n__start_grail_sites:\n.section grail_sites$b,\"dr\"\n.p2align 3\n"));
+        push_bytes(&mut out, view(entries));
+        push_bytes(&mut out, view(".section grail_sites$z,\"dr\"\n__stop_grail_sites:\n.section .rdata,\"dr\"\n"));
+    } else {
+        push_bytes(&mut out, view("\n.section grail_sites,\"a\"\n.p2align 3\n"));
+        push_bytes(&mut out, view(entries));
+        push_bytes(&mut out, view(".section .rodata\n"));
+    }
     cwd := host::env(view("PWD"));
     for f in files.len() {
         push_bytes(&mut out, view(".Lgf"));
