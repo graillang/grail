@@ -54,6 +54,55 @@ early returns, propagation and loop transfers. Native programs check for zero li
 allocations at normal exit. This is not a guarantee about resident memory: the allocator caches
 small slabs for reuse, while large single-object arenas are released immediately.
 
+## Cleanup you can write: `impl Drop`
+
+A type's fields say what it holds. A type that owns something its fields do not describe - a count in
+someone else's memory, a resource a foreign library handed out - says so itself, with Rust's `Drop`:
+
+```grl
+struct Session {
+    id: u64,
+    tags: string
+}
+impl Drop for Session {
+    fn drop(self: &mut Session) {
+        println("closing session {} ({})", self.id, self.tags);
+    }
+}
+```
+
+`Drop` is a built-in interface, like `Send` and `Share`: the name is reserved, nothing imports it, and
+`fn drop(self: &mut Self)` is its only method. An implementation that does not have that shape is
+refused at the `impl`, and so is one for a type declared in another module.
+
+The method runs at the head of the cleanup the compiler generates anyway, before the fields are
+released, and the fields are released afterwards exactly as they would be without it. The order is
+fixed:
+
+```grl
+fn main() {
+    s := Session { id: 7, tags: "beta" };
+    println("work");
+    drop(s);                 // ends the storage now, not at the end of the scope
+    println("done");
+}
+```
+
+- a value's own `drop` first, then its fields in declaration order;
+- a scope's locals in reverse declaration order;
+- vector elements front to back; an interface object's `drop` goes through its vtable to the same
+  helper, so a `dyn` carrying the value runs it too.
+
+`drop` is the compiler's to call, so `x.drop()` is refused by name: the call belongs to the glue, and
+`drop(x)` is how a program ends a value's storage early. A value that implements `Drop` is also
+opaque to partial moves, as in Rust: a field cannot be taken out of an owned value of that type, and
+`match p { Session { .. } => ... }` cannot take it apart, because the fields the glue would walk
+afterwards are no longer there. `match &p { Session { .. } => ... }` binds them as references and is
+fine.
+
+Generic code inherits the hook: `impl<T> Drop for Holder<T>` runs for every `Holder<U>` that is
+dropped, because each instantiation's glue calls that instantiation's `drop`.
+
 ## Calling C
 
 A foreign function is declared with its C name and signature, and each call sits in an `unsafe`

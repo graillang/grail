@@ -61,6 +61,10 @@ struct Decl {
     c_layout: u64,
     first: u64,
     count: u64,
+    // 1 when an `impl Drop` in this program applies to every instantiation of this declaration: the
+    // user's `drop` runs at the head of the type's compiler-generated drop helper. Asked about every
+    // type `emit_drops` walks, so it is a per-declaration bit rather than a scan of the impl table.
+    drop: u64,
     regions: u64,
     types: u64,
     success: u64,
@@ -536,6 +540,10 @@ struct C {
     // The module whose body is being compiled right now, and the modules whose requested
     // specialisations this run emits (B1 stage 3).
     body_module: u8[],
+    // The built-in `Drop` interface (`builtin_drop_interface`) and how many `impl Drop`s are generic
+    // (an implementation no declaration's `drop` bit can answer for).
+    drop_iface: u64,
+    drop_generic: u64,
     drop_names: u8[][],
     spec_emitted: u8[][],
     spell_lenient: u64,
@@ -3044,6 +3052,16 @@ fn invoke<a, b>(c: (&a mut C), name: &b [u8], args: u64[]) -> u64 {
 // Owned values have independent stack flags. Aliased field loads are not owners until moved.
 fn needs_drop<a>(c: (&a mut C), ty: u64) -> bool {
     k := ty_kind(&mut c, ty);
+    // A record or enum always owns its fields' storage, and an `impl Drop` adds its call at the head
+    // of that helper. The declaration's bit answers the question in one read: emit_drops asks it for
+    // every type, and every drop site asks it for every value.
+    // The declaration is indexed only for a record: `&` evaluates both sides, and another kind's
+    // argument is not a declaration index.
+    if k == 8 {
+        if c.decls[ty_arg(&mut c, ty)].drop != 0 {
+            return true;
+        }
+    }
     return (k == 3)
         || (k == 4)
         || (k == 5)
@@ -4770,6 +4788,70 @@ fn type_key<a>(c: (&a mut C), out: (&a mut u8[]), ty: u64, depth: u64) -> unit {
     out.push(41);
     return ();
 }
+// Note what an `impl Drop` covers. A self type that is the declaration applied to its own parameters
+// in order covers every instantiation of it, so the declaration carries the bit; anything else
+// (`impl Drop for Box<u64>`, or a generic implementation on one type argument) is left to the
+// implementation table, which is only scanned when such an implementation exists.
+fn drop_impl_registered<a>(c: (&a mut C), ty: u64) -> unit {
+    mut counted = 0;
+    if ty_kind(&mut c, ty) == 8 {
+        d := ty_arg(&mut c, ty);
+        params := c.decls[d].types;
+        args := type_args(&mut c, ty);
+        mut every = (args.len() == params) & (args.len() != 0);
+        for i in args.len() {
+            a := args[i];
+            if (ty_kind(&mut c, a) != 9) || (ty_arg(&mut c, a) != i) {
+                every = false;
+            }
+        }
+        if every || (params == 0) {
+            item := &mut c.decls[d];
+            exchange(&mut item.drop, 1);
+            return ();
+        }
+        counted = 1;
+    }
+    if counted != 0 {
+        n := c.drop_generic;
+        exchange(&mut c.drop_generic, n + 1);
+    }
+    return ();
+}
+// 1 when `ty` is a record whose type has an `impl Drop` in this program - the declaration's bit when
+// the implementation covers every instantiation of it, and the implementation table for the rest
+// (`impl<T> Drop for Box<T>`, `impl Drop for Box<u64>`). Nothing is scanned in a program without one.
+fn drop_type<a>(c: (&a mut C), ty: u64) -> u64 {
+    if ty_kind(&mut c, ty) != 8 {
+        return 0;
+    }
+    if c.decls[ty_arg(&mut c, ty)].drop != 0 {
+        return 1;
+    }
+    if c.drop_generic == 0 {
+        return 0;
+    }
+    iface := c.drop_iface;
+    if find_implementation(&mut c, iface, ty) == 0 {
+        return 0;
+    }
+    return 1;
+}
+// The user `drop` a type's characters calls, as a linker symbol, or empty when it has none. A
+// generic implementation answers for every instantiation its pattern matches, and the name is the
+// specialisation's - the body is emitted by the normal specialisation drain, which runs after this.
+fn drop_hook_symbol<a>(c: (&a mut C), ty: u64) -> u8[] {
+    if (c.drop_iface == 0) || (drop_type(&mut c, ty) == 0) {
+        return u8[];
+    }
+    iface := c.drop_iface;
+    actual := resolve_interface_method(&mut c, iface, ty, view("drop"));
+    mut own = u64[];
+    label := interface_symbol(&mut c, iface, ty, actual, &own);
+    module := c.funcs[actual].module.copy();
+    unit := symbol_unit(&mut c, view(module));
+    return body_label(&c, view(unit), view(label), view(""), 0);
+}
 fn drop_symbol<a>(c: (&a mut C), ty: u64) -> u8[] {
     while c.drop_names.len() <= ty {
         c.drop_names.push(u8[]);
@@ -4779,6 +4861,14 @@ fn drop_symbol<a>(c: (&a mut C), ty: u64) -> u8[] {
     }
     mut key = u8[];
     type_key(&mut c, &mut key, ty, 0);
+    // The user's `drop` is part of what the helper does, so it is part of the key: two objects that
+    // both know the implementation emit one body and the linker merges them, and an object that
+    // never saw the implementation cannot be handed a helper that silently skips it.
+    hook := drop_hook_symbol(&mut c, ty);
+    if hook.len() != 0 {
+        push_bytes(&mut key, view(" drop "));
+        push_bytes(&mut key, view(hook));
+    }
     mut name = u8[];
     push_bytes(&mut name, view(".D"));
     digest := iface_digest(&key);
@@ -4881,6 +4971,19 @@ fn move_out<a>(c: (&a mut C), v: Val) -> unit {
     index := resource(&mut c, v.t);
     if index == 0 {
         fail(&mut c, view("owned value lacks ownership record"));
+    }
+    // Moving a field out of an owned record leaves a hole its drop helper would walk. A record with a
+    // user `Drop` is opaque to that walk, so the move is refused (`match &p` borrows instead).
+    base_slot := c.resources[index - 1].base;
+    via_slot := c.resources[index - 1].via;
+    if (base_slot != 0) & (via_slot == 0) {
+        parent := resource(&mut c, base_slot - 1);
+        if parent != 0 {
+            pty := c.resources[parent - 1].ty;
+            if drop_type(&mut c, pty) != 0 {
+                fail(&mut c, view("a field cannot be moved out of a value that implements Drop"));
+            }
+        }
     }
     mut r = &c.resources[index - 1];
     flag := r.flag;
@@ -6044,6 +6147,70 @@ fn ensure_interface<a>(c: (&a mut C), module: u8[], name: u8[]) -> u64 {
             }
         );
     return c.interfaces.len();
+}
+// ---- the built-in `Drop` interface --------------------------------------------------------------
+// `impl Drop for T { fn drop(self: &mut T) { ... } }` states what a value's storage holds that its
+// fields do not describe, and the compiler calls it from the drop helper it already generates for T,
+// before the fields are released. The interface is built here instead of being declared in a source
+// module, so every program has it without an import; it is registered before any source is parsed,
+// so its id and its method's function index are the same in every run, and an interface file that
+// spells it `.builtin::Drop` reads back as this one.
+fn builtin_drop_interface<a>(c: (&a mut C)) -> unit {
+    id := ensure_interface(&mut c, copy_bytes(view(".builtin")), copy_bytes(view("Drop")));
+    // `fn drop(self: &mut Self) -> unit;` - Self is the interface's own type parameter (kind 9,
+    // argument 0) carrying the proof that it implements Drop, exactly as `interface_declaration`
+    // builds it, so an implementation's `fn drop(self: &mut T)` checks against it unchanged.
+    proof := intern(&mut c, 15, id);
+    mut proofs = u64[];
+    proofs.push(proof);
+    self := intern_args(&mut c, 9, 0, 0, u64[], proofs);
+    region := fresh_lifetime(&mut c);
+    mut rs = u64[];
+    rs.push(region);
+    receiver := intern_full(&mut c, 7, self, 1, rs);
+    // The lifetime was allocated only to give the receiver a region: the run's region table starts
+    // empty when the first module is parsed.
+    exchange(&mut c.rnames, u8[][]);
+    first := c.params.len();
+    c.params.push(receiver);
+    method_module := private_module(view(".interface_"), id);
+    mut bounds = u64[0];
+    mut requirements = u64[][];
+    requirements.push(u64[id]);
+    exchange(&mut c.drop_iface, id);
+    c
+        .funcs
+        .push(
+            Func {
+                module: method_module,
+                name: copy_bytes(view("drop")),
+                public: 1,
+                home: copy_bytes(view(".builtin")),
+                first: first,
+                count: 1,
+                ret: 1,
+                types: 1,
+                regions: 1,
+                file: 0,
+                pos: 0,
+                raw: 0,
+                bounds: bounds,
+                constraints: requirements,
+                contract: id,
+                owner: 0,
+                ext: 0,
+                symbol: u8[],
+                body: u8[],
+            }
+        );
+    index := c.funcs.len() - 1;
+    item := &mut c.interfaces[id - 1];
+    exchange(&mut item.defined, 1);
+    exchange(&mut item.public, 1);
+    item.methods.push(index);
+    item.defaults.push(0);
+    item.default_files.push(0);
+    return ();
 }
 fn base_type<a>(c: (&a mut C), ty: u64) -> u64 {
     mut out = ty;
@@ -7454,6 +7621,7 @@ fn tuple_decl<a>(c: (&a mut C), count: u64) -> u64 {
                 c_layout: 0,
                 first: first,
                 count: count,
+                drop: 0,
                 regions: 0,
                 types: count,
                 success: 0,
@@ -7553,6 +7721,9 @@ fn tuple_destructure<a>(c: (&a mut C)) -> unit {
     }
     if !ok {
         fail(&mut c, view("tuple pattern does not match the value's type"));
+    }
+    if drop_type(&mut c, ty) != 0 {
+        fail(&mut c, view("a value that implements Drop cannot be destructured"));
     }
     source := place_of(&mut c, held.t);
     for i in names.len() {
@@ -7771,6 +7942,7 @@ fn make_union<a>(c: (&a mut C), args: u64[], success: u64, module: u8[], prefix:
                     c_layout: 0,
                     first: first,
                     count: args.len(),
+                    drop: 0,
                     regions: 0,
                     types: args.len(),
                     success: success,
@@ -8623,6 +8795,7 @@ fn handle_declaration<a>(c: (&a mut C), pass: u64) -> unit {
                 c_layout: 0,
                 first: 0,
                 count: 0,
+                drop: 0,
                 regions: 0,
                 types: 0,
                 success: 0,
@@ -8661,6 +8834,7 @@ fn decl<a>(c: (&a mut C), pass: u64) -> unit {
                         c_layout: 0,
                         first: 0,
                         count: 0,
+                        drop: 0,
                         regions: regions,
                         types: types,
                         success: 0,
@@ -8725,6 +8899,7 @@ fn decl<a>(c: (&a mut C), pass: u64) -> unit {
             c_layout: 0,
             first: first,
             count: count,
+            drop: 0,
             regions: c.rnames.len(),
             types: types,
             success: 0,
@@ -9777,6 +9952,7 @@ fn ffi_record<a>(c: (&a mut C), pass: u64) -> unit {
                         c_layout: 1,
                         first: 0,
                         count: 0,
+                        drop: 0,
                         regions: 0,
                         types: 0,
                         success: 0,
@@ -9843,6 +10019,7 @@ fn ffi_record<a>(c: (&a mut C), pass: u64) -> unit {
             c_layout: 1,
             first: first,
             count: count,
+            drop: 0,
             regions: 0,
             types: 0,
             success: 0,
@@ -10602,6 +10779,9 @@ fn interface_declaration<a>(c: (&a mut C), pass: u64) -> unit {
     if same(view(name), view("Send")) || same(view(name), view("Share")) {
         fail(&mut c, view("structural capability names are reserved"));
     }
+    if same(view(name), view("Drop")) {
+        fail(&mut c, view("`Drop` is built in: write `impl Drop for T { fn drop(self: &mut T) { ... } }`"));
+    }
     module := module_copy(&mut c);
     id := ensure_interface(&mut c, module, name);
     interface_public := c.decl_public;
@@ -11120,7 +11300,11 @@ fn implementation<a>(c: (&a mut C), pass: u64) -> unit {
             module = imported;
         }
     }
-    contract := find_interface(&c, view(module), view(name));
+    mut contract = find_interface(&c, view(module), view(name));
+    // `Drop` belongs to no module, so a bare `impl Drop for T` names it directly.
+    if (contract == 0) & (qualified == 0) & same(view(name), view("Drop")) {
+        contract = c.drop_iface;
+    }
     interface_visible(&mut c, contract);
     if contract == 0 {
         fail(&mut c, view("unknown implemented interface"));
@@ -11160,6 +11344,9 @@ fn implementation<a>(c: (&a mut C), pass: u64) -> unit {
                 }
             );
         id = c.implementations.len();
+        if contract == c.drop_iface {
+            drop_impl_registered(&mut c, ty);
+        }
         if impl_tnames.len() != 0 {
             c
                 .impl_params
@@ -16111,6 +16298,7 @@ fn fn_value_decl<a>(c: (&a mut C)) -> u64 {
                 c_layout: 0,
                 first: first,
                 count: 3,
+                drop: 0,
                 regions: 0,
                 types: 0,
                 success: 0,
@@ -21057,6 +21245,7 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
                 c_layout: 0,
                 first: first,
                 count: count,
+                drop: 0,
                 regions: 0,
                 types: 0,
                 success: 0,
@@ -22296,6 +22485,7 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
         // Otherwise an interface method implemented for this type: value.less(other).
         if method == 0 {
             mut found = 0;
+            mut found_impl = 0;
             for i in c.implementations.len() {
                 item := &c.implementations[i];
                 ity := item.ty;
@@ -22314,9 +22504,17 @@ fn collection_method<a>(c: (&a mut C), value: Val) -> Val {
                             );
                         }
                         found = 1;
+                        found_impl = i + 1;
                         owner = candidate;
                         method = m2;
                     }
+                }
+            }
+            // `drop` is not the program's to call: the type's helper runs it when the owner's storage
+            // ends, and `drop(x)` is how a program ends that storage early.
+            if (found_impl != 0) & (c.drop_iface != 0) {
+                if c.implementations[found_impl - 1].contract == c.drop_iface {
+                    fail(&mut c, view("`drop` is generated by the compiler: `drop(x)` ends the value's storage early"));
                 }
             }
         }
@@ -27061,6 +27259,11 @@ fn record_match<a>(c: (&a mut C), sslot: u64, sty: u64, x: Val, byref: u64, refm
     if c.decls[d].c_layout != 0 {
         fail(&mut c, view("a record pattern needs a Grail record, not an extern record"));
     }
+    // A moved scrutinee gives each field to its binder; a record with a user `Drop` cannot be taken
+    // apart that way, so `match &p` (fields bound as references) is the form that works.
+    if (byref == 0) & (drop_type(&mut c, xty) != 0) {
+        fail(&mut c, view("a value that implements Drop cannot be destructured; match &p binds its fields as references"));
+    }
     if byref == 0 {
         move_out(&mut c, val(xt, xty));
     }
@@ -28992,6 +29195,7 @@ fn emit_drops<a>(c: (&a mut C)) -> unit {
                     continue;
                 }
                 done := label(&mut c);
+                hook := drop_hook_symbol(&mut c, ty);
                 // Defined here and called from every module, and a pure function of the type it
                 // drops - so the name is content-addressed and the binding is weak: two objects
                 // that both emit it emit the same body, and the linker merges them. `--split`
@@ -29007,6 +29211,16 @@ fn emit_drops<a>(c: (&a mut C)) -> unit {
                     &mut c,
                     view("pushq %rbp\nmovq %rsp,%rbp\npushq %r12\npushq %r13\nmovq %rdi,%r12\n")
                 );
+                // The user's `drop` runs first, with the value as its receiver; the field walk below
+                // releases what the fields own, as Rust does after a `Drop` impl has run.
+                if hook.len() != 0 {
+                    // A record's `&mut T` is the address of a cell holding the record pointer, not the
+                    // pointer itself, so the receiver is one scratch word (two, to keep the call
+                    // 16-byte aligned).
+                    o(&mut c, view("subq $16,%rsp\nmovq %r12,(%rsp)\nmovq %rsp,%rdi\ncall "));
+                    push_bytes(&mut c.out, view(hook));
+                    o(&mut c, view("\naddq $16,%rsp\n"));
+                }
                 if (kind == 3) || (kind == 4) {
                     o(&mut c, view("call rt_drop_seq\n"));
                 }
@@ -31646,6 +31860,7 @@ fn iface_register<a, b, d>(c: (&a mut C), line: &b [u8], path: &d [u8], n: u64, 
                     c_layout: u64(same(view(kind), view("record"))),
                     first: 0,
                     count: 0,
+                    drop: 0,
                     regions: lifetimes[0],
                     types: params[0],
                     success: 0,
@@ -31676,6 +31891,7 @@ fn iface_register<a, b, d>(c: (&a mut C), line: &b [u8], path: &d [u8], n: u64, 
                     c_layout: 0,
                     first: 0,
                     count: 0,
+                    drop: 0,
                     regions: 0,
                     types: 0,
                     success: 0,
@@ -31961,6 +32177,11 @@ fn iface_define<a, b, d>(c: (&a mut C), st: (&a mut IState), line: &b [u8], path
                     assoc_types: u64[],
                 }
             );
+        // An importer that reads the implementation from a file gets the same declaration bit the
+        // source parse set, so its drop glue calls the user `drop` too.
+        if (c.drop_iface != 0) & (id == c.drop_iface) {
+            drop_impl_registered(&mut c, ty);
+        }
         exchange(&mut st.section, 3);
         exchange(&mut st.contract, id);
         exchange(&mut st.implementation, c.implementations.len());
@@ -32729,6 +32950,8 @@ pub fn main() -> u64 {
         no_entry: 0,
         iface_used: u8[][],
         body_module: u8[],
+        drop_iface: 0,
+        drop_generic: 0,
         drop_names: u8[][],
         spec_emitted: u8[][],
         spell_lenient: 0,
@@ -32752,6 +32975,8 @@ pub fn main() -> u64 {
     for k in 5 {
         intern(&mut c, k + 1, 0);
     }
+    // `Drop` exists in every program, before any source is parsed (builtin_drop_interface).
+    builtin_drop_interface(&mut c);
     host_fn(&mut c, view("target"), 0);
     host_fn(&mut c, view("argc"), 0);
     host_fn(&mut c, view("arg"), 2);
@@ -33140,6 +33365,17 @@ pub fn main() -> u64 {
     }
     emit_fn_thunk(&mut c);
     emit_drops(&mut c);
+    // A drop helper can be the first thing to ask for a generic `Drop` implementation's
+    // specialisation, so anything it requested is emitted before the helpers are written out.
+    helpers_specs := c.specs.len();
+    while (specs_done < c.specs.len()) || (closures_done < c.closures.len()) {
+        specs_done = drain_specs(&mut c, specs_done);
+        closures_done = emit_closures(&mut c, closures_done);
+    }
+    if specs_done != helpers_specs {
+        // Those bodies can intern more types, and a type with no helper is an undefined symbol.
+        emit_drops(&mut c);
+    }
     emit_vtables(&mut c);
     if c.skip_bodies.len() != 0 {
         // Every error this compile has is reported; the program is still rejected, and nothing it
