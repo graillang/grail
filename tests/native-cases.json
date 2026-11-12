@@ -6385,5 +6385,31 @@
     "source": "interface Value{fn value<a>(x:(&a Self))->u64;}impl Value for u64{fn value<a>(x:(&a Self))->u64{return 1;}fn extra<a>(x:(&a Self))->u64{return 2;}}fn main(){}",
     "reject": true,
     "diagnostic": "method `extra` is not a member of the interface"
+  },
+  {
+    "name": "iter-filter-reference-items",
+    "source": "use iter;\nfn main() -> u64 {\n    v := u64[1, 2, 3, 4, 5];\n    mut total = 0;\n    for x in iter::filter(iter::refs(&v), |x: &&u64| -> bool **x % 2 == 1) {\n        total = total + *x;\n    }\n    println(total);\n    return 0;\n}\n",
+    "modules": [
+      "lib/iter.grl",
+      "lib/core.grl"
+    ],
+    "stdout": "9\n",
+    "note": "filter over refs(&v): the predicate takes &&T and reads through it with **x"
+  },
+  {
+    "name": "closure-loop-over-reference-iterator",
+    "source": "use iter;\nfn count<a>(it: iter::Iter<(&a u64)>) -> u64 {\n    mut src = it;\n    mut n = 0;\n    while let Some(x) = src.next() {\n        n = n + *x;\n    }\n    return n;\n}\nfn main() -> u64 {\n    v := u64[1, 2, 3];\n    println(count(iter::refs(&v)));\n    mut src = iter::refs(&v);\n    mut f = || -> u64 {\n        mut n = 0;\n        while let Some(x) = src.next() {\n            n = n + *x;\n        }\n        return n;\n    };\n    println(f());\n    return 0;\n}\n",
+    "modules": [
+      "lib/iter.grl",
+      "lib/core.grl"
+    ],
+    "stdout": "6\n6\n",
+    "note": "a closure's loop over a captured iterator of references: each turn's shared borrow of outside storage is not a consumed entry"
+  },
+  {
+    "name": "double-deref-rejects-owned",
+    "source": "fn get<a, b>(r: &a (&b u8[])) -> u8[] {\n    return **r;\n}\nfn main() -> u64 {\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": "cannot copy an owned value out of a reference; use exchange"
   }
 ]

@@ -3980,6 +3980,55 @@ fn borrow_reference<a>(
     set_target(&mut c, slot, target, slot + 1);
     return val(slot, ty);
 }
+// The loop backedge check (ownership::backedge), with one more loan that cannot consume entry
+// storage: a shared borrow of storage outside the function (an origin place, such as what a
+// captured iterator over references lends out on each turn). Such storage is never moved or
+// rewritten here, and shared loans never conflict, so a fresh one per turn is still a fixpoint.
+fn backedge_ok<a, b>(c: (&a mut C), entry: (&b ownership::State)) -> bool {
+    code := ownership::backedge(&c.check, &entry);
+    if code == 0 {
+        return true;
+    }
+    if code != 3 {
+        return false;
+    }
+    for i in entry.loans.len() {
+        if (i < c.check.loans.len()) && (c.check.loans[i].live != entry.loans[i].live) {
+            return false;
+        }
+    }
+    mut i = entry.loans.len();
+    while i < c.check.loans.len() {
+        l := &c.check.loans[i];
+        live := l.live;
+        mode := l.mode;
+        source := l.source;
+        parent := l.parent;
+        if live != 0 {
+            mut stable = false;
+            if mode == 0 {
+                for j in entry.loans.len() {
+                    old := &entry.loans[j];
+                    if (old.live != 0) && (old.mode == 0) && (old.source == source) && (old.parent == parent) {
+                        stable = true;
+                    }
+                }
+                if (parent == 0) && !stable {
+                    for k in c.origins.len() {
+                        if c.origins[k].place == source {
+                            stable = true;
+                        }
+                    }
+                }
+            }
+            if !stable {
+                return false;
+            }
+        }
+        i += 1;
+    }
+    return true;
+}
 fn view_bonds<a>(c: (&a mut C), slot: u64, source: u64, mode: u64) -> unit {
     if c.raw != 0 {
         return ();
@@ -6811,6 +6860,23 @@ fn parse_reference<a>(c: (&a mut C)) -> u64 {
 fn parse_type_base<a>(c: (&a mut C)) -> u64 {
     if eat(&mut c, view("&")) {
         return parse_reference(&mut c);
+    }
+    // `&&T`, which the lexer reads as one `&&` token: a shared reference to `&T`, elided lifetime.
+    if eat(&mut c, view("&&")) {
+        inner := parse_reference(&mut c);
+        mut r = 0;
+        if c.parsing_input != 0 {
+            r = fresh_lifetime(&mut c);
+            note_input_region(&mut c, r);
+        } else {
+            if c.output_region == 0 {
+                fail(&mut c, view("elided output reference needs one input lifetime"));
+            }
+            r = c.output_region;
+        }
+        mut rs = u64[];
+        rs.push(r);
+        return intern_full(&mut c, 7, inner, 0, rs);
     }
     if eat(&mut c, view("(")) {
         if eat(&mut c, view(")")) {
@@ -19672,7 +19738,7 @@ fn pattern_loop<a>(
     }
     if terminated == 0 {
         loopstate := ownership::snapshot(&c.loopcheck);
-        if ownership::backedge(&c.check, &loopstate) != 0 {
+        if !backedge_ok(&mut c, &loopstate) {
             fail(&mut c, view("loop backedge consumes entry storage"));
         }
     }
@@ -21106,6 +21172,32 @@ fn primary<a>(c: (&a mut C)) -> Val {
         advance(&mut c);
         n := ct_layout(&mut c, align);
         return val(imm(&mut c, n), 0);
+    }
+    if (k == 267) & (c.typed_refs != 0) {
+        // `**r` for `r: &&T` (what `filter` hands its predicate over reference items): the inner
+        // reference is only passed through, never kept, so it needs no loan of its own.
+        advance(&mut c);
+        r := expr(&mut c, 10);
+        observe(&mut c, r.t);
+        if ty_kind(&mut c, r.ty) != 7 {
+            fail(&mut c, view("* requires a typed reference"));
+        }
+        inner := ty_arg(&mut c, r.ty);
+        if (ty_kind(&mut c, inner) != 7) || (ty_mode(&mut c, inner) != 0) {
+            fail(&mut c, view("** needs a reference to a shared reference"));
+        }
+        n := ref_load(&mut c, r.t, inner);
+        release_temporary(&mut c, r.t);
+        target := ty_arg(&mut c, inner);
+        if needs_drop(&mut c, target) {
+            fail(&mut c, view("cannot copy an owned value out of a reference; use exchange"));
+        }
+        k2 := ty_kind(&mut c, target);
+        if (k2 == 5) || (k2 == 27) || (k2 == 7) {
+            fail(&mut c, view("** copies a plain value; borrow views and references through one level"));
+        }
+        m := ref_load(&mut c, n, target);
+        return val(m, target);
     }
     if (k == 42) & (c.typed_refs != 0) {
         // `*r`: dereference; postfix accessors bind tighter (`*r.f` is `*(r.f)`).
@@ -24621,7 +24713,7 @@ fn map_loop<a, b, d>(c: (&a mut C), name: &b [u8], value_name: &d [u8]) -> unit 
     }
     if c.terminated == 0 {
         loopstate := ownership::snapshot(&c.loopcheck);
-        if ownership::backedge(&c.check, &loopstate) != 0 {
+        if !backedge_ok(&mut c, &loopstate) {
             fail(&mut c, view("loop backedge consumes entry storage"));
         }
     }
@@ -24730,7 +24822,7 @@ fn statement<a>(c: (&a mut C)) -> unit {
             }
         } else {
             loopstate := ownership::snapshot(&c.loopcheck);
-            if ownership::backedge(&c.check, &loopstate) != 0 {
+            if !backedge_ok(&mut c, &loopstate) {
                 fail(&mut c, view("continue consumes loop-entry storage"));
             }
         }
@@ -25205,7 +25297,7 @@ fn statement<a>(c: (&a mut C)) -> unit {
         }
         if c.terminated == 0 {
             loopstate := ownership::snapshot(&c.loopcheck);
-            if ownership::backedge(&c.check, &loopstate) != 0 {
+            if !backedge_ok(&mut c, &loopstate) {
                 fail(&mut c, view("loop backedge consumes entry storage"));
             }
         }
