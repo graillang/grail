@@ -27,7 +27,15 @@ each step mutably for the statement, and a mutating method call such as `rows[i]
 `world.items[i].tags.clear()` does the same. On byte buffers, `buf[i] = b` stores a
 byte and stops the program if the value does not fit.
 
-Popping an empty collection or indexing out of bounds aborts. Vectors of owners drop their
+Popping an empty collection or indexing out of bounds stops the program with a message that
+says what went wrong and where, as Rust's panics do:
+
+```
+error: index 7 out of bounds for length 3
+ --> src/main.grl:2:12
+```
+
+The same goes for division by zero, `unwrap` of `None`, and overflow under `--overflow=checked`. Vectors of owners drop their
 remaining elements; callers own popped elements. `==` compares vectors of numbers element by element.
 `for value in values` moves owned elements out of the vector and consumes it; plain values such as numbers are copied, so a numeric vector stays usable. `for value in &values` borrows the elements either way (see [Branches and loops](control-flow.html)).
 Any vector can be sliced (see [Views and slices](views.html)).
