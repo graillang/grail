@@ -102,13 +102,6 @@ These are refusals with a diagnostic, not silent behaviour:
 - A function parameter is not mutable storage, so a `FnMut` value taken *by value* cannot be called
   in the callee directly. Move it into a mutable binding first (`mut call = f;`, as the stdlib does)
   or take `&mut FnMut(...)` (shown above).
-- A method call on a captured value counts as a write unless the capture is a shared reference or
-  view, so a `Fn` closure cannot call even a reading method on a captured record, vector or string;
-  declaring the closure `mut` and calling it exclusively is the fix.
 - Handing a captured `&mut` to another function, or iterating a captured view mutably, is only
   accepted inside a `FnMut` closure; the forms the compiler recognises as writes are the ones
   listed above.
-- A callable reached through a *reference parameter* (`&Fn`, `&mut Fn`, `&mut FnMut`) can be called
-  once, in straight-line code: a second call, or a call inside an `if` or a loop, is rejected today
-  with `access has no live reference authority`. Calling a closure you hold directly is not
-  affected. That is the existing reference-parameter limitation, not something `FnMut` adds.

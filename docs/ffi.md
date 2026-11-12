@@ -702,16 +702,16 @@ Not implemented yet, and each rejected rather than approximated:
 - a pointer that C keeps after the call returns. A `CPtr` made by `cptr`/`cptr_mut` is a checked borrow
   inside Grail (see "Pointer lifetimes"), but an `extern "C"` declaration cannot state that C retains
   it. A library that does (callback user data) needs storage whose lifetime the program controls,
-  and that is the programmer's responsibility. A `CStr` from `cstr(...)` is not tracked yet: it still
-  lives only for the statement that made it, so a `CStr` of a temporary or literal kept in a binding
-  or field dangles (docs/rhi.md, "What the FFI does not do safely", item 2);
+  and that is the programmer's responsibility. Inside Grail a `CStr` is checked like a `CPtr`: one
+  of a literal points at static storage and may be kept, and one of bytes borrows them, so they
+  cannot change or be dropped while it is live;
 - variadic callbacks, callback results that are themselves function pointers, and
   taking the address of a foreign *declaration* (`f := c_add;` is rejected: a C
   declaration is not a Grail function value);
 - dynamic loading on macOS (Linux uses the TLS bridge below on all three architectures;
   Windows x86-64 needs none, since `LoadLibraryA`/`GetProcAddress` are ordinary imports and the
-  runtime does not own the TEB), and foreign calls or callbacks on threads other than the main
-  thread on Linux;
+  runtime does not own the TEB). Foreign calls and callbacks work on any thread on Linux, including
+  threads C itself created (`tests/ffi/threads.grl`, `foreign_thread.grl`);
 
 ## Dynamic loading and the host TLS bridge
 

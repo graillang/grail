@@ -3454,8 +3454,11 @@ fn last_name<a, b>(c: (&a mut C), name: &b [u8], from: u64, to: u64) -> u64 {
                 use = 0;
             }
         }
+        // `name(` is a use too: a local holding a closure (or a reference to one) is called by its
+        // name, and the call reads it. Counting a same-named function's call as well only keeps the
+        // local alive a little longer, which is the conservative side.
         mut next = kind_at(&mut c, i + 1);
-        if (next == 58) || (next == 40) || (next == 260) || (next == 261) {
+        if (next == 58) || (next == 260) || (next == 261) {
             use = 0;
         }
         if kind == 1 && en - st == name.len() && i != skip && hidden == 0 && use != 0 {
@@ -9793,8 +9796,8 @@ fn ct_primary<a>(c: (&a mut C)) -> CVal {
             text := ct_take_call_text(&mut c);
             here_module := module_copy(&mut c);
             r := run_tier(&mut c, view(here_module), view(text), view(""));
-            if r.ty == 3 {
-                fail(&mut c, view("a compile-time call in an expression must give an integer or a bool; bind a string with NAME := f();"));
+            if (r.ty == 3) || ((r.ty != 0) && (ct_seq_elem(&mut c, r.ty) != 18446744073709551615)) {
+                fail(&mut c, view("a compile-time call in an expression must give an integer or a bool; bind a string or a table with NAME := f();"));
             }
             return ct_val(r.value, r.ty);
         }
@@ -10187,10 +10190,23 @@ fn ct_pending_type<a>(c: (&a mut C), i: u64) -> u64 {
         return 0;
     }
     ret := c.funcs[f - 1].ret;
-    if is_bool(&mut c, ret) || (ret == 3) {
+    if is_bool(&mut c, ret) || (ret == 3) || (ct_seq_elem(&mut c, ret) != 18446744073709551615) {
         return ret;
     }
     return 0;
+}
+// The element type of a vector of integers (bytes count as u8), or the "none" word.
+fn ct_seq_elem<a>(c: (&a mut C), ty: u64) -> u64 {
+    if ty == 2 {
+        return int_type(&mut c, 8, 0);
+    }
+    if (ty != 0) && (ty != 3) && (ty_kind(&mut c, ty) == 6) {
+        elem := ty_arg(&mut c, ty);
+        if integer(&mut c, elem) && !is_bool(&mut c, elem) {
+            return elem;
+        }
+    }
+    return 18446744073709551615;
 }
 fn ct_list_has<a, b>(list: &a [u8], item: &b [u8]) -> bool {
     mut start = 0;
@@ -10263,8 +10279,11 @@ fn run_tier<a, b, d, e>(c: (&a mut C), module: &b [u8], text: &d [u8], key: &e [
         rty = bool_type(&mut c);
     } else if ret == 3 {
         rty = 3;
+    } else if ct_seq_elem(&mut c, ret) != 18446744073709551615 {
+        // A vector of integers, or bytes: a table, which is what running code early is for.
+        rty = ret;
     } else if !integer(&mut c, ret) {
-        fail(&mut c, view("a compile-time call must give an integer, a bool or a string (a value the program can hold as data)"));
+        fail(&mut c, view("a compile-time call must give an integer, a bool, a string, bytes or a vector of integers (a value the program can hold as data)"));
     }
     // The probe: this module's names qualified, the value printed.
     mut qualified = u8[];
@@ -10296,6 +10315,9 @@ fn run_tier<a, b, d, e>(c: (&a mut C), module: &b [u8], text: &d [u8], key: &e [
     push_bytes(&mut probe, view(qualified));
     if rty == 3 {
         push_bytes(&mut probe, view(";\n    print(v);\n    return 0;\n}\n"));
+    } else if (rty != 0) && (ct_seq_elem(&mut c, rty) != 18446744073709551615) {
+        // One element per line, as an unsigned word.
+        push_bytes(&mut probe, view(";\n    for i in v.len() {\n        println(u64(v[i]));\n    }\n    return 0;\n}\n"));
     } else {
         push_bytes(&mut probe, view(";\n    println(v);\n    return 0;\n}\n"));
     }
@@ -10325,9 +10347,18 @@ fn run_tier<a, b, d, e>(c: (&a mut C), module: &b [u8], text: &d [u8], key: &e [
     if host::exists(view(out_path)) == 0 {
         mut mk = u8[][copy_bytes(view("mkdir")), copy_bytes(view("-p")), dir.copy()];
         host::command(mk);
-        probe_src := path_cat(view(dir), view("/probe.grl"));
-        probe_s := path_cat(view(dir), view("/probe.s"));
-        probe_exe := path_cat(view(dir), view("/probe"));
+        // Compiles that run the same call at once (parallel test shards, a parallel build) share
+        // `dir`: each builds under names of its own - keyed by this compile's output path - and
+        // only the finished value is published, by rename, so no one reads a half-written file.
+        own_key := iface_digest(&host::arg(offset + 1));
+        mut tag = copy_bytes(view("/"));
+        for i in 12 {
+            tag.push(own_key[i]);
+        }
+        probe_src := path_cat(view(path_cat(view(dir), view(tag))), view(".probe.grl"));
+        probe_s := path_cat(view(path_cat(view(dir), view(tag))), view(".probe.s"));
+        probe_exe := path_cat(view(path_cat(view(dir), view(tag))), view(".probe"));
+        value_tmp := path_cat(view(path_cat(view(dir), view(tag))), view(".value"));
         host::write_file(view(probe_src), view(probe));
         self := host::exe_path();
         mut cmd = ct_shell_quote(view(self));
@@ -10391,7 +10422,7 @@ fn run_tier<a, b, d, e>(c: (&a mut C), module: &b [u8], text: &d [u8], key: &e [
         mut run = copy_bytes(view("GRAIL_COMPTIME=1 timeout 30 "));
         push_bytes(&mut run, view(ct_shell_quote(view(probe_exe))));
         push_bytes(&mut run, view(" > "));
-        push_bytes(&mut run, view(ct_shell_quote(view(path_cat(view(dir), view("/value.tmp"))))));
+        push_bytes(&mut run, view(ct_shell_quote(view(value_tmp))));
         mut sh2 = u8[][copy_bytes(view("sh")), copy_bytes(view("-c")), run];
         status := host::command(sh2);
         if status != 0 {
@@ -10408,12 +10439,38 @@ fn run_tier<a, b, d, e>(c: (&a mut C), module: &b [u8], text: &d [u8], key: &e [
             }
             fail(&mut c, view(msg));
         }
-        mut mv = u8[][copy_bytes(view("mv")), path_cat(view(dir), view("/value.tmp")), out_path.copy()];
+        mut mv = u8[][copy_bytes(view("mv")), copy_bytes(view("-f")), value_tmp.copy(), out_path.copy()];
         host::command(mv);
+        mut tidy = u8[][copy_bytes(view("rm")), copy_bytes(view("-f")), probe_src.copy(), probe_s.copy(), probe_exe.copy()];
+        host::command(tidy);
     }
     printed := host::read_file(view(out_path));
     if rty == 3 {
         return CTRes { ty: 3, value: 0, text: printed };
+    }
+    if (rty != 0) && (ct_seq_elem(&mut c, rty) != 18446744073709551615) {
+        // The elements, laid out at the element's C width (little-endian), for read-only data.
+        elem := ct_seq_elem(&mut c, rty);
+        width := ffi_field_size(&mut c, elem);
+        mut data = u8[];
+        mut count = 0;
+        mut v: u64 = 0;
+        mut digits = 0;
+        for i in printed.len() {
+            ch := printed[i];
+            if (48 <= ch) & (ch <= 57) {
+                v = v * 10 + u64(ch - 48);
+                digits += 1;
+            } else if digits != 0 {
+                for b in width {
+                    data.push(u8((v >> (8 * b)) & 255));
+                }
+                count += 1;
+                v = 0;
+                digits = 0;
+            }
+        }
+        return CTRes { ty: rty, value: count, text: data };
     }
     mut body = printed.copy();
     while (body.len() > 0) && (body[body.len() - 1] == 10) {
@@ -10740,6 +10797,10 @@ fn constant_value<a, b, d>(c: (&a mut C), module: &b [u8], name: &d [u8]) -> Val
                         empty := u8[];
                         return string_from_bytes(&mut c, &empty);
                     }
+                    if (pty != 0) && (ct_seq_elem(&mut c, pty) != 18446744073709551615) {
+                        fresh := invoke(&mut c, view("rt_new"), u64[]);
+                        return own(&mut c, fresh, pty);
+                    }
                     return val(slot, pty);
                 }
             }
@@ -10756,6 +10817,32 @@ fn constant_value<a, b, d>(c: (&a mut C), module: &b [u8], name: &d [u8]) -> Val
             khome := k.module.copy();
             if kpublic == 0 {
                 require_visible(&mut c, view(khome), view(name));
+            }
+            if (ty != 3) && (ty != 0) && (ct_seq_elem(&mut c, ty) != 18446744073709551615) {
+                // A compile-time table: its elements in read-only data, copied into a fresh vector
+                // at each use (as a string constant is).
+                elem := ct_seq_elem(&mut c, ty);
+                l := label(&mut c);
+                rodata(&mut c);
+                o(&mut c, view(".balign 8\n"));
+                mark(&mut c, l);
+                for j in text.len() {
+                    o(&mut c, view(".byte "));
+                    on(&mut c, text[j]);
+                    c.out.push(10);
+                }
+                o(&mut c, view(".byte 0\n.popsection\nleaq "));
+                lname(&mut c, l);
+                o(&mut c, view("(%rip),%rax\n"));
+                ptr := save(&mut c);
+                e := carray_elem_of(&mut c, elem);
+                mut args = u64[ptr];
+                args.push(imm(&mut c, value));
+                for j in 4 {
+                    args.push(imm(&mut c, e[j]));
+                }
+                t := invoke(&mut c, view("rt_carray_load"), args);
+                return own(&mut c, t, ty);
             }
             if ty == 3 {
                 l := label(&mut c);
@@ -27186,7 +27273,13 @@ fn iface_emit_const<a, b>(c: (&a mut C), out: (&a mut u8[]), index: u64, m: &b [
     iface_ref(&mut out, view(module), view(name));
     out.push(32);
     iface_type(&mut out, &mut c, ty);
-    if ty == 3 {
+    if (ty != 3) && (ty != 0) && (ct_seq_elem(&mut c, ty) != 18446744073709551615) {
+        push_bytes(&mut out, view(" seq "));
+        decimal(&mut out, value);
+        out.push(32);
+        hex := iface_hex(&text);
+        iface_quoted(&mut out, view(hex));
+    } else if ty == 3 {
         push_bytes(&mut out, view(" str "));
         hex := iface_hex(&text);
         iface_quoted(&mut out, view(hex));
@@ -28856,7 +28949,14 @@ fn iface_define<a, b, d>(c: (&a mut C), st: (&a mut IState), line: &b [u8], path
         kind := ip_ident(&mut p);
         mut value = 0;
         mut text = u8[];
-        if same(view(kind), view("str")) {
+        if same(view(kind), view("seq")) {
+            value = ip_number(&mut p);
+            hex := ip_quoted(&mut p);
+            text = iface_unhex(&hex);
+            if ct_seq_elem(&mut c, ty) == 18446744073709551615 {
+                iface_fail(&p, view("a table constant needs a vector of integers or bytes"));
+            }
+        } else if same(view(kind), view("str")) {
             hex := ip_quoted(&mut p);
             text = iface_unhex(&hex);
             if ty != 3 {
@@ -28866,7 +28966,7 @@ fn iface_define<a, b, d>(c: (&a mut C), st: (&a mut IState), line: &b [u8], path
             if same(view(kind), view("int")) {
                 value = ip_number(&mut p);
             } else {
-                iface_fail(&p, view("constants are `int N` or `str HEX`"));
+                iface_fail(&p, view("constants are `int N`, `str HEX` or `seq N HEX`"));
             }
         }
         item_public_16 := c.decl_public;

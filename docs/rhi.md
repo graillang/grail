@@ -565,30 +565,20 @@ What is *not* here, by intent rather than by limitation:
 
 ## What the FFI does not do safely
 
-Two defects in the record-pointer work surfaced while building this increment (the first is now
-fixed). Both are compiler bugs rather than missing features, both are reproducible without Vulkan,
-both are written down here because they constrain how the RHI is written until they are fixed, and
-neither is worked around by laying bytes out by hand. (`compiler/` is off limits in this increment, so they are reported rather than
-patched.)
+Two defects in the record-pointer work surfaced while building the early increments. Both were
+compiler bugs, both are fixed, and both are kept here with their minimal cases for the history.
 
-- **`VkApplicationInfo` is not passed yet.** `vkCreateInstance` is called with `pApplicationInfo`
-  null, which is legal - the specification then fixes the instance at API version 1.0 - so
-  `rhi.vulkan.instance.api` reads `1.0.0` while the loader is 1.4.363 and the driver supports
-  1.4.354. Every call the probe makes is core 1.0, so nothing else is affected; the port is what
-  changes the number.
-- **`vkCreateDevice` is not declared yet.** `queueCreateInfoCount` must be at least one, so
-  `pQueueCreateInfos` cannot be avoided by passing null the way `pApplicationInfo` can - it is the
-  first thing the port needs.
-- **No instance extension is enabled yet**, because the module has no `ppEnabledExtensionNames` to
-  point at. With the forms above that is a record of `CStr` fields and one call.
+`vkCreateInstance` is still called with `pApplicationInfo` null by choice - the instance then asks
+for API 1.0, and every call the RHI makes is core 1.0 - so `rhi.vulkan.instance.api` reads `1.0.0`
+while the loader is newer. `vkCreateDevice`, the device's queue create infos and the enabled
+extension names are records built in Grail and passed with `cptr(&record)` (`rhi_device.grl`).
 
-The alternative this module refuses: laying the create-infos out in `u8[]` byte buffers at
-hard-coded offsets, which is what it already does for structs C *writes* (extensions, layers,
-properties, queue families - none of which a record can express). Doing it for structs Grail
-*builds* would put `sType`, the counts and the pointer slots outside the type system's reach, and the
-pointer slots could not be written into a `u8[]` at all. A mis-ordered create-info field has to be a
-compile error or a failing check, never a plausible-looking number, so the structs Grail *builds*
-stay records.
+The rule this module keeps: the structs Grail *builds* are `extern "C"` records, never byte buffers
+at hard-coded offsets, so a mis-ordered create-info field is a compile error or a failing check
+rather than a plausible-looking number. Structs C fills in as an array in one buffer (extensions,
+layers, queue families) are still read from bytes at their C offsets; a single struct C fills in is
+a record with its arrays inline (`[T; N]`).
+
 **1. Fixed: `&mut` of an extern record field of a plain record now reaches the field's storage.** A
 place made from an interior extern record used to be wrapped in the proxy slot an *embedded* C-layout
 field needs, even when the container was a plain record whose field already is a word holding the
@@ -634,13 +624,10 @@ pointers to one record in one call, an out-parameter without a binding).
 
 ### One record, one call
 
-A workaround from increment 3 that still holds, and the reason it is written down: passing one count
-record to two *different declarations of the same symbol* (`vkEnumeratePhysicalDevices` as a count
-query, then as the single-slot form) made the program abort at exit, inside the runtime's free path,
-after it had already printed everything and returned 0 from `main`. Each call gets its own record
-now - `rhi_swapchain::swapchain_images` and `rhi_render::create_semaphores` both build a fresh
-`Uint32Out` per call for that reason. The two-declaration idiom itself is fine, and this increment
-uses it three more times.
+Fixed. Passing one count record to two declarations of the same symbol (`vkEnumeratePhysicalDevices`
+as a count query, then as the slot-filling form) used to abort at exit inside the runtime's free
+path. It no longer does: one `Count` record through both declarations runs clean, so a record per
+call is a style choice now, not a workaround.
 
 ## Linking, skipping and the GPU lock
 
