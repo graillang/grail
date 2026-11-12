@@ -1,6 +1,7 @@
 module cli;
 use host;
 use fmt;
+use explain;
 
 // The `grail` command-line tool. The same binary is the compiler: subcommands drive it by
 // re-invoking itself (`grail [--target T] OUT.s ENTRY.grl MODULE.grl...`), then assemble and link.
@@ -600,6 +601,36 @@ fn build_argv<a, b, d, e, g>(h: (&a Home), entry: &b [u8], modules: (&d u8[][]),
     }
     return command;
 }
+// True when the entry or any module source mentions `@embed(`.
+fn sources_embed<a, b>(entry: &a [u8], modules: (&b u8[][])) -> bool {
+    mut files = u8[][copy(view(entry))];
+    for i in modules.len() {
+        files.push(item(&modules, i));
+    }
+    needle := "@embed(";
+    for f in files.len() {
+        path := item(&files, f);
+        if host::exists(view(path)) == 0 {
+            continue;
+        }
+        text := host::read_file(view(path));
+        mut i = 0;
+        while i + needle.len() <= text.len() {
+            mut hit = true;
+            for j in needle.len() {
+                if text[i + j] != needle[j] {
+                    hit = false;
+                    break;
+                }
+            }
+            if hit {
+                return true;
+            }
+            i += 1;
+        }
+    }
+    return false;
+}
 // check_only: type-check and generate code, but do not assemble or link.
 fn compile_mode<a, b, d, e, g>(
     h: (&a Home),
@@ -617,8 +648,13 @@ fn compile_mode<a, b, d, e, g>(
     split := (flags / 8) % 2;
     wrap := (flags / 16) % 2;
     checked := (flags / 32) % 2;
-    cache := (flags / 64) % 2;
+    mut cache = (flags / 64) % 2;
     per_module := (flags / 128) % 2;
+    if (cache != 0) && sources_embed(view(entry), &modules) {
+        // `@embed` reads a file the cache does not key on, so its result cannot be reused safely.
+        say(view("grail: --cache is skipped: a source uses @embed, whose file the cache does not track"));
+        cache = 0;
+    }
     asm := cat(view(output), view(".s"));
     object := cat(view(output), view(".o"));
     // The toolchain is decided by the target alone, so it is known before the compiler runs - which
@@ -3211,6 +3247,7 @@ fn help() {
     say(view("  grail debug lines|info BINARY     print DWARF line rows or .debug_info"));
     say(view("  grail cache prune [--keep N]       drop cache entries no build used in the last N (10)"));
     say(view("  grail cache clear                  empty the build cache"));
+    say(view("  grail explain CODE                 what an error code means (error[E0004])"));
     say(view("  grail profile [--rate N] [--out FILE] -- PROGRAM [ARGS]   sampling profile"));
     say(view("  grail run [FILE.grl] [-- ARGS...]"));
     say(view("  grail test [FILES or DIRS]        compile and run tests/ (exit status 0 = pass)"));
@@ -3234,6 +3271,7 @@ pub fn is_command<a>(name: &a [u8]) -> bool {
         || eq(view(name), view("debug"))
         || eq(view(name), view("profile"))
         || eq(view(name), view("cache"))
+        || eq(view(name), view("explain"))
         || eq(view(name), view("install"))
         || eq(view(name), view("help"))
         || eq(view(name), view("--help"))
@@ -3278,6 +3316,20 @@ pub fn run() -> u64 {
     }
     if eq(view(name), view("cache")) {
         return cache_command(&args);
+    }
+    if eq(view(name), view("explain")) {
+        // `grail explain E0004`: what an error code means and how it is usually fixed.
+        if args.len() != 1 {
+            say(view("usage: grail explain CODE   (the code an error prints, as in error[E0004])"));
+            return 1;
+        }
+        text := explain::text(view(item(&args, 0)));
+        if text.len() == 0 {
+            say(view("grail: no such error code"));
+            return 1;
+        }
+        host::print(view(text));
+        return 0;
     }
     if eq(view(name), view("profile")) {
         return profile_command(&args);

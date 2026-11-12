@@ -5,6 +5,9 @@ unsafe module runtime;
 // target's syscall ABI.
 fn rt_syscall(n: u64, a: u64, b: u64, c: u64) -> u64 {
     if raw_target() == 0 {
+        if rt_comptime_on() {
+            rt_comptime_check(n, a);
+        }
         return raw_syscall(n, a, b, c);
     }
     if n == 0 {
@@ -206,6 +209,87 @@ fn rt_spawn_wait(paths: u64, argv: u64, envp: u64) -> u64 {
 
 // Linux keeps argv/envp from the entry stub and needs no further process setup.
 fn rt_os_init() -> u64 {
+    return 0;
+}
+
+// ---- compile-time evaluation (docs/design/comptime.md, C3) ----
+// A probe the compiler runs for a compile-time call has GRAIL_COMPTIME=1 in its environment. Then
+// only what computing a value needs gets through: writing the value to stdout (and an abort's
+// message to stderr), memory, signals, thread setup and exit. Files, the clock, randomness, the
+// network and other processes are refused, so a compile-time result depends on the source alone.
+// The decision is made once and kept in state word 3224.
+// A probe reached a constant that is still being computed: a dependency cycle (exit 4).
+fn rt_comptime_cycle() -> u64 {
+    raw_syscall(231, 4, 0, 0);
+    return 0;
+}
+fn rt_comptime_on() -> bool {
+    word := raw_state() + 3224;
+    mut mode = raw_load(word);
+    if mode == 0 {
+        mode = 1;
+        envp := raw_load(raw_state() + 16);
+        if envp != 0 {
+            mut i = 0;
+            while raw_load(envp + i * 8) != 0 {
+                e := raw_load(envp + i * 8);
+                if rt_comptime_entry(e) {
+                    mode = 2;
+                }
+                i = i + 1;
+            }
+        }
+        raw_store(word, mode);
+    }
+    return mode == 2;
+}
+fn rt_comptime_entry(e: u64) -> bool {
+    // "GRAIL_COMPTIME=1" and its terminator. No allocation here: this runs inside rt_syscall,
+    // which the allocator itself calls.
+    return (raw_byte(e + 0) == 71) &
+        (raw_byte(e + 1) == 82) &
+        (raw_byte(e + 2) == 65) &
+        (raw_byte(e + 3) == 73) &
+        (raw_byte(e + 4) == 76) &
+        (raw_byte(e + 5) == 95) &
+        (raw_byte(e + 6) == 67) &
+        (raw_byte(e + 7) == 79) &
+        (raw_byte(e + 8) == 77) &
+        (raw_byte(e + 9) == 80) &
+        (raw_byte(e + 10) == 84) &
+        (raw_byte(e + 11) == 73) &
+        (raw_byte(e + 12) == 77) &
+        (raw_byte(e + 13) == 69) &
+        (raw_byte(e + 14) == 61) &
+        (raw_byte(e + 15) == 49) &
+        (raw_byte(e + 16) == 0);
+}
+fn rt_comptime_allowed(n: u64) -> bool {
+    return (n == 9) | (n == 10) | (n == 11) | (n == 12) | (n == 13) | (n == 14) | (n == 24) | (n == 25)
+        | (n == 28) | (n == 39) | (n == 60) | (n == 131) | (n == 158) | (n == 186) | (n == 202)
+        | (n == 218) | (n == 231) | (n == 234);
+}
+fn rt_comptime_check(n: u64, a: u64) -> u64 {
+    if (n == 1) & ((a == 1) | (a == 2)) {
+        return 0;
+    }
+    if rt_comptime_allowed(n) {
+        return 0;
+    }
+    // The message is built in state words 3232..3384 (claimed for this), not allocated.
+    scratch := raw_state() + 3232;
+    raw_store(scratch + 0, 7142773272180060773);
+    raw_store(scratch + 8, 8371458798651469167);
+    raw_store(scratch + 16, 7306086967037750633);
+    raw_store(scratch + 24, 2338616626601091872);
+    raw_store(scratch + 32, 7308332182666572661);
+    raw_store(scratch + 40, 7142820508308876403);
+    raw_store(scratch + 48, 7526676252395269996);
+    raw_store(scratch + 56, 8245940784540295269);
+    raw_store(scratch + 64, 8030604370216165483);
+    raw_store(scratch + 72, 2941629332940131);
+    raw_syscall(1, 2, scratch, 79);
+    raw_syscall(231, 3, 0, 0);
     return 0;
 }
 

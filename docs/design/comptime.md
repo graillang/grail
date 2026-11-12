@@ -1,10 +1,10 @@
 # Compile-time evaluation
 
-Status: **C1 implemented** (constants, `@if`, `@assert`, `@expr` over constant expressions, `size_of`,
-`align_of`, `target`); **C2 implemented for functions** (value parameters `<@k: u64>`, bound per call
-site, one specialisation per value, visible to `@assert` and `@if`; records with value parameters
-are next); C3-C4 are design. Each stage lands with native cases and a book section
-(chapter *Compile time*).
+Status: **C1-C4 implemented.** C1: constants, `@if`, `@assert`, `@expr` over constant
+expressions, `size_of`, `align_of`, `target`. C2: value parameters on functions and records
+(`fn rotl<@k: u64>`, `struct Ring<T, @N: u64>`), bound per call site or inferred from an argument's
+type. C3: `NAME := f(...);` and `@f(...)` run the call - see "The run tier as built" below. C4:
+`@for f in fields(T)` / `variants(E)` with `f.name`, `f.index` and `x.@f`, and `@embed("path")`.
 
 Grail runs code at compile time with one sigil, `@`. Everything Zig's `comptime` does - constants,
 static branches, unrolled loops, value parameters, reflection, compile errors - is spelled with `@`
@@ -135,3 +135,30 @@ generic `show`, `hash` or serialiser a few lines.
 - **C3** the run tier: `@expr` and module constants that call functions; effect refusal, the step
   budget, the probe cache, dependency order.
 - **C4** `fields`/`variants`, `@for`, `v.@f`, `@embed`.
+
+## The run tier as built
+
+A module constant whose value is a call (`TABLE := build_table();`) is recorded with the call's text
+and computed on first use, when every signature is known; any still unused at the end of the
+compile are computed then. `@f(...)` in an expression is computed where it stands. Either way the
+compiler writes a probe - `module grail_probe; use M; fn main() { v := M::f(...); println(v); }`, the
+call's names qualified with their module - compiles it with this program's own files in
+`--comptime-probe` mode (the probe may name the module's private items), links it, and runs it with
+`GRAIL_COMPTIME=1` in its environment and a 30-second limit. The value is read back: an integer, a
+bool or a string (the call's declared result type says which).
+
+- **Effects.** With `GRAIL_COMPTIME=1` the Linux runtime's `rt_syscall` lets through only writes to
+  stdout and stderr, memory, signals, thread setup and exit; anything else (files, the clock, the
+  network, processes) stops the probe with `compile-time code cannot use files, the clock, the
+  network or processes`. A probe that reaches C is refused before it runs.
+- **Order and cycles.** A constant being computed is listed in `GRAIL_COMPTIME_PENDING` for the
+  probe. Reading it from code the probe runs stops it, reported as a cycle; a nested compile-time
+  form is otherwise computed by its own probe, at most 8 deep. Inside a probe, `@f(...)` in an
+  expression is simply the call, and `@assert` is left to the program's own compile.
+- **Cache.** Results live in `.work/comptime/<digest>/value`, keyed by the probe text and every input
+  file, so an unchanged program never runs a probe twice.
+- **Limits.** The call must be to a non-generic function returning an integer, bool or string;
+  vectors and records as compile-time results are not supported yet. The probe is built and run
+  for the host (x86_64 Linux), so `target.*` inside compile-time code describes the host, not a
+  cross target.
+

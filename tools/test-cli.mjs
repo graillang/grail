@@ -18,6 +18,14 @@ let checks = 0;
 // 1. Golden layout.
 const messy = join(work, 'messy.grl');
 copyFileSync(join(root, 'tests/fmt/messy.grl'), messy);
+// grail explain: an error code's explanation, and a refusal for a code that does not exist.
+{
+  const known = run(['explain', 'E0004']);
+  assert.equal(known.status, 0, `grail explain E0004 failed: ${known.stderr ?? ''}`);
+  assert.match(known.stdout, /^E0004: type mismatch/, 'grail explain prints the code and its title first'); checks++;
+  const unknown = run(['explain', 'E9999'], undefined, false);
+  assert.equal(unknown.status, 1, 'an unknown error code is refused'); checks++;
+}
 run(['fmt', messy]);
 assert.equal(readFileSync(messy, 'utf8'), readFileSync(join(root, 'tests/fmt/messy.expected.grl'), 'utf8'), 'golden formatting');
 assert.equal(run(['fmt', '--check', messy]).status, 0); checks++;
