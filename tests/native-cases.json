@@ -7222,5 +7222,36 @@
       "call rt_refine"
     ],
     "note": "`--verify-facts` keeps the check a proof removed and enters the checked entry, so a wrong proof aborts"
+  },
+  {
+    "name": "refinement-match-arm-call-checked",
+    "source": "enum Pick {\n    Second(u64),\n    First\n}\n\nfn take_second(v: &u64[], i: u64 where i < v.len()) -> u64 {\n    return v[i];\n}\n\nfn unwrap(p: Pick, v: &u64[], i: u64 where i < v.len()) -> u64 {\n    match p {\n        Second(i) => {\n            return take_second(v, i);\n        },\n        First => {\n            return 0;\n        }\n    }\n}\n\nfn main() -> u64 {\n    v := u64[10, 20, 30];\n    println(unwrap(Pick::Second(9), &v, 1));\n    return 0;\n}\n",
+    "signal": "SIGABRT",
+    "stderr": [
+      "error: refinement violated: i < v.len()\n --> ",
+      " = required by take_second at "
+    ],
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "an arm's binding shadows the refined parameter: the facts before the `match` are not about the arm's `i`, so the call keeps its check"
+  },
+  {
+    "name": "refinement-bce-match-arm-checked",
+    "source": "enum Pick {\n    Second(u64),\n    First\n}\n\nfn pick_index(p: Pick, v: &u64[], i: u64 where i < v.len()) -> u64 {\n    match p {\n        Second(i) => {\n            return v[i];\n        },\n        First => {\n            return 0;\n        }\n    }\n}\n\nfn main() -> u64 {\n    v := u64[10, 20, 30];\n    println(pick_index(Pick::Second(9), &v, 1));\n    return 0;\n}\n",
+    "signal": "SIGABRT",
+    "stderr": [
+      "error: index 9 out of bounds for length 3\n --> "
+    ],
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "a body with a `match` arm gets no bounds-check elimination from the entry's bound"
   }
 ]

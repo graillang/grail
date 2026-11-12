@@ -6664,6 +6664,14 @@ fn pv_scope<a>(c: (&a mut C), start: u64, pos: u64, facts: (&a mut Atom[])) -> u
         }
         t := pv_tok(&mut c, i);
         if k == 1 {
+            if same(view(t), view("match")) {
+                // An arm binds names the walk cannot follow, and its body runs in that binding, so
+                // what was known before the `match` is not what the arm's names mean.
+                exchange(&mut facts, Atom[]);
+                exchange(&mut frames, PvFrame[]);
+                i += 1;
+                continue;
+            }
             if same(view(t), view("else")) {
                 pending = 0;
                 pending_atoms = Atom[];
@@ -6801,6 +6809,17 @@ fn pv_scope<a>(c: (&a mut C), start: u64, pos: u64, facts: (&a mut Atom[])) -> u
             if (same(view(t), view("mut")) || same(view(t), view("let"))) & (kind_at(&mut c, i + 1) == 1) {
                 nm := tok_text(&mut c, i + 1);
                 pv_kill(&mut facts, view(nm));
+                // `let Variant(name) = ..` (and `if let`) also binds what the pattern names.
+                if (kind_at(&mut c, i + 2) == 40) & (kind_at(&mut c, i + 4) == 41) {
+                    mut j = i + 3;
+                    while (j < pos) & (kind_at(&mut c, j) != 41) {
+                        if kind_at(&mut c, j) == 1 {
+                            bound := tok_text(&mut c, j);
+                            pv_kill(&mut facts, view(bound));
+                        }
+                        j += 1;
+                    }
+                }
                 i += 2;
                 continue;
             }
@@ -7055,6 +7074,11 @@ fn pv_bound_stable<a, b>(c: (&a mut C), index: &b [u8], base: &b [u8]) -> bool {
         k := kind_at(&mut c, i);
         if k == 1 {
             t := tok_text(&mut c, i);
+            // `match` arms and `let` patterns bind names the token walk cannot follow; a body with
+            // either could index with a name this bound says nothing about.
+            if same(view(t), view("match")) || same(view(t), view("let")) {
+                return false;
+            }
             if same(view(t), view(index)) || same(view(t), view(base)) {
                 nk := kind_at(&mut c, i + 1);
                 // A write of any kind makes what the entry knew about the name stale.

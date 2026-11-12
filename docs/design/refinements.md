@@ -66,7 +66,9 @@ programs; the default build stays solver-free.
 
 As built, the prover reads one more source of facts than the list above: a refined parameter of the
 function being compiled holds at its body's start, because the entry checked it or the caller proved
-it. Comparisons go through a difference graph of at most twenty terms with literals as exact
+it. Two constructs reset what the walk knows rather than being followed: a `match` may bind any name,
+so it drops every fact (and a body with one gets no bounds-check elimination), and a `let` pattern
+drops the names it binds. Both keep a shadowed name from inheriting a fact about the outer one. Comparisons go through a difference graph of at most twenty terms with literals as exact
 vertices; only facts whose offset is zero or negative take part, since `b + k` with a positive `k`
 can wrap in a `--overflow=wrap` build and then the integer reading would be the wrong one.
 
