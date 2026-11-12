@@ -43,7 +43,8 @@ for x in iter::filter(iter::refs(&v), |x: &&u64| -> bool **x % 2 == 1) {
 }
 ```
 
-One limit today: `map` from reference items to owned ones is refused, because `Iter<U>` does not
-carry the lifetime of what it still borrows - collect or loop over `refs(&v)` instead. The same
+`map` from reference items to owned ones works too: `iter::refs(&v).map(|x: &u64| -> u64 *x * 2)`
+is an `Iter<u64>` that still reads `v`, so `v` stays borrowed until it is done - as in Rust, a
+generic function's result keeps the borrows of its arguments' type parameters. The same
 holds for any closure whose type returns a reference: `Fn() -> &a T` keeps what it captured
 borrowed for lifetime `a`.

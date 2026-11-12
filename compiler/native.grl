@@ -4403,6 +4403,16 @@ fn validate_return<a>(c: (&a mut C), v: Val) -> unit {
     }
     result := c.result;
     mut rs = type_caps(&mut c, result, 0);
+    // A specialisation's result may carry its type arguments' lifetimes (captured_bonds).
+    bound := copy_numbers(&c.bindings);
+    for i in bound.len() {
+        if bound[i] != 18446744073709551615 {
+            more := type_caps(&mut c, bound[i], 0);
+            for j in more.len() {
+                add_region(&mut rs, more[j]);
+            }
+        }
+    }
     mut found = 0;
     for i in c.bonds.len() {
         mut b = &c.bonds[i];
@@ -4836,6 +4846,20 @@ fn move_out<a>(c: (&a mut C), v: Val) -> unit {
     }
     return ();
 }
+// Whether storage at or below `place` holds a live loan.
+fn holds_live_loan<a>(c: (&a mut C), place: u64) -> bool {
+    if place == 0 {
+        return false;
+    }
+    for i in c.bonds.len() {
+        holder := c.bonds[i].holder;
+        loan := c.bonds[i].loan;
+        if ownership::ancestor(&c.check, place, holder) && (loan_live(&mut c, loan) != 0) {
+            return true;
+        }
+    }
+    return false;
+}
 fn move_value<a>(c: (&a mut C), v: Val) -> Val {
     get(&mut c, v.t, view("%rax"));
     slot := save(&mut c);
@@ -4845,7 +4869,10 @@ fn move_value<a>(c: (&a mut C), v: Val) -> Val {
     own(&mut c, slot, v.ty);
     mut dst = place_of(&mut c, slot);
     kind := ty_kind(&mut c, v.ty);
-    if contains_borrow(&mut c, v.ty, 0) {
+    // A value typed by a generic signature (`Iter<T>`, T still a parameter), or a generic call's result
+    // that captured its arguments' loans (captured_bonds: an `Iter<u64>` mapping references), may hold
+    // borrows its type does not show; its loans move with it all the same.
+    if contains_borrow(&mut c, v.ty, 0) || !concrete_type(&mut c, v.ty) || holds_live_loan(&mut c, old) {
         return_bonds(&mut c, old, dst, u64(kind == 6 || kind == 8));
     } else {
         if (kind == 26) & (dst == 0) & (old != 0) & (c.raw == 0) {
@@ -15436,8 +15463,50 @@ fn emit_resolved_call<a>(
     slot := save(&mut c);
     own(&mut c, slot, ret);
     call_writebacks(&mut c, first, &sources, &argtypes);
+    // Before call_bonds, whose close_loans ends the loans of arguments the call consumed.
+    captured_bonds(&mut c, val(slot, ret), &map, &sources, &argtypes);
     call_bonds(&mut c, val(slot, ret), first, &sources, signature_ret);
     return val(slot, ret);
+}
+// A generic function's result may carry the lifetimes of its type arguments (Rust's rule for a
+// returned `impl Trait`): `map(refs(&v), f)` returns an `Iter<u64>` whose closure still reads `v`.
+// So the result holds the loans of every argument whose actual type carries one of them, and `v`
+// stays borrowed while the result lives (validate_return allows the same lifetimes).
+fn captured_bonds<a, b, d, e>(c: (&a mut C), result: Val, map: (&b u64[]), sources: (&d u64[]), argtypes: (&e u64[])) -> unit {
+    if (c.raw != 0) || (map.len() == 0) {
+        return ();
+    }
+    // Only when a type argument holds a borrow: otherwise the result can carry none.
+    mut borrowed = false;
+    for i in map.len() {
+        if map[i] != 18446744073709551615 {
+            t := map[i];
+            if contains_borrow(&mut c, t, 0) {
+                borrowed = true;
+            }
+        }
+    }
+    if !borrowed {
+        return ();
+    }
+    holder := place_of(&mut c, result.t);
+    if holder == 0 {
+        return ();
+    }
+    aggregate := ty_kind(&mut c, result.ty) != 5;
+    for i in sources.len() {
+        if i < argtypes.len() {
+            t := argtypes[i];
+            // A reference argument is lent for the call only; what it points at is the caller's.
+                    if (ty_kind(&mut c, t) != 7) && contains_borrow(&mut c, t, 0) {
+                source := place_of(&mut c, sources[i]);
+                if source != 0 {
+                    return_bonds(&mut c, source, holder, u64(aggregate));
+                }
+            }
+        }
+    }
+    return ();
 }
 fn specialized_function_value<a>(c: (&a mut C), index: u64, map: u64[]) -> Val {
     // A foreign declaration names a C symbol, not a Grail callable: its address

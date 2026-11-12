@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Added: `map` from reference items to owned ones (`iter::refs(&v).map(|x: &u64| -> u64 *x * 2)`). A generic function's result may carry the lifetimes of its type arguments, as Rust's returned `impl Trait` does: the result keeps the loans of the arguments that carry them, so `v` stays borrowed while the mapped iterator lives. A moved value now carries every live loan it holds, whatever its type shows.
 - Added: a shared reference can be copied out through a shared reference, as in Rust (`&T` is `Copy`): `r := *x` for `x: &&u64` (what `filter` hands its predicate) gives an `&u64` with the inner lifetime. An exclusive reference still needs an explicit reborrow.
 - Added: associated-type bounds and constraints. `type Item: order::Ord;` in an interface lets generic code use the bound on `T::Item` (an implementation giving a type without it is refused); `I: iter::Iterator<Item = u64>` pins it for a function; `dyn iter::Iterator<Item = u64>` is an interface object of an interface with associated types.
 - Added: operator interfaces. `lib/ops.grl` has `Add`, `Sub`, `Mul`, `Div`, `Rem` and `Eq`; implementing one makes `+ - * / %` or `==`/`!=` work on a record or enum type, and `order::Ord` gives `<`, `<=`, `>`, `>=`. The built-in numbers implement them too, so `T: ops::Add` code takes records and numbers alike.

@@ -6742,5 +6742,36 @@
     "source": "fn pick<a, b>(rr: &a (&b mut u64[])) -> &b mut u64[] {\n    return *rr;\n}\nfn main() -> u64 {\n    return 0;\n}\n",
     "reject": true,
     "diagnostic": "indirect reference copies require explicit reborrow"
+  },
+  {
+    "name": "iter-map-reference-items",
+    "source": "use iter;\nfn main() -> u64 {\n    v := u64[1, 2, 3];\n    doubled := iter::refs(&v).map(|x: &u64| -> u64 *x * 10).collect();\n    println(doubled.len());\n    mut t = 0;\n    for d in iter::map(iter::refs(&v), |x: &u64| -> u64 *x + 1) {\n        t = t + d;\n    }\n    println(t);\n    return 0;\n}\n",
+    "modules": [
+      "lib/iter.grl",
+      "lib/core.grl"
+    ],
+    "stdout": "3\n9\n",
+    "note": "map from reference items to owned ones: a generic result captures its type arguments' lifetimes"
+  },
+  {
+    "name": "iter-map-reference-items-keeps-borrow",
+    "source": "use iter;\nfn main() -> u64 {\n    mut v = u64[1, 2, 3];\n    m := iter::map(iter::refs(&v), |x: &u64| -> u64 *x + 1);\n    v.push(4);\n    println(m.count());\n    return 0;\n}\n",
+    "modules": [
+      "lib/iter.grl",
+      "lib/core.grl"
+    ],
+    "reject": true,
+    "diagnostic": "mutation conflicts with live borrow",
+    "note": "the mapped iterator still borrows v"
+  },
+  {
+    "name": "iter-map-reference-items-keeps-borrow-store",
+    "source": "use iter;\nfn main() -> u64 {\n    mut v = u64[1, 2, 3];\n    m := iter::map(iter::refs(&v), |x: &u64| -> u64 *x + 1);\n    v[0] = 9;\n    println(m.count());\n    return 0;\n}\n",
+    "modules": [
+      "lib/iter.grl",
+      "lib/core.grl"
+    ],
+    "reject": true,
+    "diagnostic": "conflicts with"
   }
 ]
