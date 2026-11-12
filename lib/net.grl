@@ -1,0 +1,148 @@
+module net;
+use host;
+use io;
+
+// TCP over the runtime's socket layer: `TcpStream` for a connection, `TcpListener` for a
+// listening port. Reads, writes and accepts suspend the calling task while they wait, so other
+// tasks keep running on the same workers.
+//
+// Addresses are IPv4 dotted quads (`"127.0.0.1"`); there is no name lookup. A stream or listener
+// owns one descriptor: `close` releases it, and because Grail has no destructor a value that is
+// simply dropped leaks its descriptor until the process exits.
+//
+// A refused or failed connection is an `io::Error`, whose `show` names the common cases. Reading a
+// closed connection is not an error: `read` returns 0 bytes and `read_all` returns what it got.
+
+// One open TCP connection.
+pub struct TcpStream {
+    fd: u64
+}
+
+// One listening TCP port.
+pub struct TcpListener {
+    fd: u64
+}
+
+// True for exactly four dot-separated decimal parts, each 0-255 and each with at least one digit.
+fn is_ipv4<a>(text: (&a [u8])) -> bool {
+    mut parts = 0;
+    mut digits = 0;
+    mut value = 0;
+    for b in text {
+        if b == 46 {
+            if digits == 0 || parts == 3 {
+                return false;
+            }
+            parts += 1;
+            digits = 0;
+            value = 0;
+        } else {
+            if b < 48 || b > 57 || digits == 3 {
+                return false;
+            }
+            value = value * 10 + u64(b) - 48;
+            if value > 255 {
+                return false;
+            }
+            digits += 1;
+        }
+    }
+    return parts == 3 && digits > 0;
+}
+
+fn invalid() -> io::Error {
+    return io::from_errno(22); // EINVAL
+}
+
+// Connects to `host_ip` (an IPv4 dotted quad) on `port`, waiting for the handshake.
+pub fn connect(host_ip: string, port: u64) -> TcpStream |? io::Error {
+    if !is_ipv4(view(host_ip)) || port > 65535 {
+        return invalid();
+    }
+    fd := host::tcp_connect(view(host_ip), port);
+    if fd > 9223372036854775807 {
+        return io::from_errno(wrapping_sub(0, fd));
+    }
+    return TcpStream { fd: fd };
+}
+
+// Listens on `port`; port 0 asks the operating system for an unused port, which `port` reports.
+// `ip` must be a dotted quad. The native runtime's listener covers every local interface for the
+// port, so a loopback client reaches it at 127.0.0.1; a bind the operating system refuses aborts,
+// as in the rest of the runtime's socket layer.
+pub fn bind(ip: string, port: u64) -> TcpListener |? io::Error {
+    if !is_ipv4(view(ip)) || port > 65535 {
+        return invalid();
+    }
+    return TcpListener { fd: host::tcp_listen(port) };
+}
+
+impl TcpStream {
+    // The underlying descriptor, for a host:: call this module does not wrap.
+    pub fn fd(self: (&TcpStream)) -> u64 {
+        return self.fd;
+    }
+
+    // Reads up to `buffer.len()` bytes into `buffer` and returns how many were read; 0 means the
+    // peer closed the connection.
+    pub fn read(self: (&mut TcpStream), buffer: (&mut u8[])) -> u64 {
+        data := host::read_fd(self.fd, buffer.len());
+        mut count = data.len();
+        mut i = 0;
+        while i < count {
+            buffer[i] = data[i];
+            i += 1;
+        }
+        return count;
+    }
+
+    // Every byte until the peer closes the connection (or a reset ends it).
+    pub fn read_all(self: (&mut TcpStream)) -> u8[] {
+        mut out = u8[];
+        loop {
+            data := host::read_fd(self.fd, 4096);
+            count := data.len();
+            if count == 0 {
+                break;
+            }
+            for b in data {
+                out.push(b);
+            }
+        }
+        return out;
+    }
+
+    // Writes every byte, waiting while the socket is full; false means the connection failed
+    // partway through and only a prefix was written.
+    pub fn write_all(self: (&mut TcpStream), data: (&[u8])) -> bool {
+        length := data.len();
+        written := host::write_fd(self.fd, data);
+        return written == length;
+    }
+
+    // Releases the descriptor. The stream cannot be used afterwards; use it exactly once.
+    pub fn close(self: TcpStream) {
+        host::close(self.fd);
+    }
+}
+
+impl TcpListener {
+    // The port the listener is bound to (the operating system's choice when 0 was requested).
+    pub fn port(self: (&TcpListener)) -> u64 {
+        return host::tcp_port(self.fd);
+    }
+
+    // Waits for the next connection.
+    pub fn accept(self: (&TcpListener)) -> TcpStream |? io::Error {
+        fd := host::tcp_accept(self.fd);
+        if fd > 9223372036854775807 {
+            return io::from_errno(wrapping_sub(0, fd));
+        }
+        return TcpStream { fd: fd };
+    }
+
+    // Releases the descriptor; the listener cannot accept afterwards.
+    pub fn close(self: TcpListener) {
+        host::close(self.fd);
+    }
+}

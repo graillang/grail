@@ -224,8 +224,8 @@ JSON is not an implementation detail here; it is the product's interoperability 
 | Aspect | State (evidence) |
 | --- | --- |
 | Compiler | 24,843 lines of Grail (`compiler/*.grl`): lexer, native checker/lowering, ownership, optimizer, machine selection, runtime |
-| Standard library | 740 lines across 13 modules (`lib/*.grl`); `io`, `fs`, `process`, `strings`, `vecs`, `hashmap`, `collections`, `math`, `order`, `env`, `core`, `hash`, `concurrent_map` |
-| Host operations | 28 `f_host_*` operations: args/env/exe, open/read/write/close/pipe, read_file/write_file, exists/mkdir/create_dir/list_dir/remove, print/newline/print_num, now_ms/sleep_ms/exit/target, and `tcp_connect`/`tcp_listen`/`tcp_accept`/`tcp_port` |
+| Standard library | 7022 lines across 25 modules (`lib/*.grl`); `io`, `fs`, `process`, `time`, `net`, `env`, `strings`, `vecs`, `hashmap`, `collections`, `concurrent_map`, `iter`, `pool`, `math`, `order`, `core`, `hash`, `authority` and the codecs (`json`, `jpeg`, `png`, `zlib`, `zstd`, `sha256`, `xxhash`) |
+| Host operations | 29 `f_host_*` operations: args/env/exe, open/read/write/close/pipe, read_file/write_file, exists/mkdir/create_dir/list_dir/remove, print/newline/print_num, now_ms/wall_ms/sleep_ms/exit/target, and `tcp_connect`/`tcp_listen`/`tcp_accept`/`tcp_port` |
 | Syscall boundary | `compiler/runtime.grl` maps **stable operation IDs** to per-architecture Linux syscall numbers (`rt_syscall`); already carries x86-64, AArch64 and RISC-V numbers |
 | Targets | Linux only: x86-64, ARM64, RISC-V 64. Assembly + Clang/LLD, no C or Rust seed |
 | Errors | Optional `T?` and structural result unions, `?` propagation; `io::from_errno` maps **Linux** errno numbers (`lib/io.grl`) |

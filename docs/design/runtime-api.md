@@ -332,6 +332,7 @@ runtime, FFI and tests:
 | `host::create_dir`, `remove` | `fs::mkdir`, `remove_file`, `remove_dir` | empty-only directory removal |
 | `host::exe_path` | `path::executable` | |
 | `host::now_ms`, `sleep_ms` | `time::now`, `time::sleep` | nanoseconds; task-aware sleep |
+| `host::wall_ms` | `time::unix_seconds` | the wall clock, for stamps only |
 | `host::tcp_listen`, `tcp_accept`, `tcp_connect`, `tcp_port` | `net` | readiness stays private |
 | `host::command` | `process::Command`/`run` | argv, not shell syntax |
 | `host::command_with` | `process::Command::env_clear` + `env` | the second vector is the child's whole environment |

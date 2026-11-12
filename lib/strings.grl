@@ -32,11 +32,55 @@ pub fn join_with<a,b>(parts:(&a u8[][]),separator:&b [u8])->u8[]{
 pub fn to_upper<a>(text:&a [u8])->u8[]{mut out=u8[];for b in text{if (b>=97)&(b<=122){out.push(b-32);}else{out.push(b);}}return out;}
 pub fn to_lower<a>(text:&a [u8])->u8[]{mut out=u8[];for b in text{if (b>=65)&(b<=90){out.push(b+32);}else{out.push(b);}}return out;}
 // Decimal digits only; None for empty input, other characters or overflow.
-pub fn parse_num<a>(text:&a [u8])->u64?{
+pub fn parse_u64<a>(text:&a [u8])->u64?{
     if text.len()==0{return None;}mut value=0;
     for b in text{if (b<48)||(b>57){return None;}if value>1844674407370955161{return None;}
         next:=value*10;if next>18446744073709551615-(b-48){return None;}value=next+(b-48);}
     return Some(value);
+}
+// The same parser under its historical name, used by existing callers.
+pub fn parse_num<a>(text:&a [u8])->u64?{return parse_u64(text);}
+// An optional '-' or '+', then decimal digits; None for bad input or a value outside i64.
+pub fn parse_i64<a>(text:&a [u8])->i64?{
+    if text.len()==0{return None;}
+    mut start=0;mut negative=false;
+    if text[0]==45{negative=true;start=1;}else{if text[0]==43{start=1;}}
+    if start==text.len(){return None;}
+    mut magnitude=0;
+    for i in start..text.len(){
+        b:=text[i];if (b<48)||(b>57){return None;}
+        if magnitude>922337203685477580{return None;}
+        next:=magnitude*10;if next>18446744073709551615-(b-48){return None;}
+        magnitude=next+(b-48);
+    }
+    if negative{
+        if magnitude>9223372036854775808{return None;}
+        if magnitude==9223372036854775808{return Some(i64(0)-i64(9223372036854775807)-i64(1));}
+        return Some(i64(0)-i64(magnitude));
+    }
+    if magnitude>9223372036854775807{return None;}
+    return Some(i64(magnitude));
+}
+// Decimal text of an unsigned value.
+pub fn from_u64(value:u64)->string{
+    if value==0{return "0".text();}
+    mut digits=u8[];mut rest=value;
+    while rest>0{digits.push(u8(rest%10)+48);rest=rest/10;}
+    mut out=u8[];mut i=digits.len();
+    while i>0{i-=1;out.push(digits[i]);}
+    return out.text();
+}
+// Decimal text of a signed value, with a minus sign when negative.
+pub fn from_i64(value:i64)->string{
+    if value>=0{return from_u64(u64(value));}
+    mut digits=u8[];mut rest=value;
+    while rest<0{
+        digit:=0-(rest%10);digits.push(u8(digit)+48);rest=rest/10;
+    }
+    digits.push(45);
+    mut out=u8[];mut i=digits.len();
+    while i>0{i-=1;out.push(digits[i]);}
+    return out.text();
 }
 
 // Unicode code points of UTF-8 text (`string` values are always valid UTF-8; for raw bytes, invalid
