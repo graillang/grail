@@ -1,6 +1,7 @@
 module native;
 use lexer;
 use host;
+use explain;
 use ownership;
 use machine;
 use optimize;
@@ -395,6 +396,12 @@ struct C {
     vis_off: u64,
     // Set when a compile-time expression read a value parameter that is not bound yet.
     ct_unbound: u64,
+    // Several errors per compile (docs/diagnostics.md): the bodies an earlier run of this compile
+    // already reported an error in, as file index and position pairs, skipped here; and the body
+    // being checked now, which an error in it adds to that list.
+    skip_bodies: u64[],
+    body_file: u64,
+    body_pos: u64,
     // Copy-backs for `p: &mut R` callback parameters: (C pointer slot, copy slot, bytes) triples.
     export_copyback: u64[],
     rnames: u8[][],
@@ -4727,7 +4734,14 @@ fn fail<a, b>(c: (&a mut C), msg: &b [u8]) -> unit {
             shown.push(DiagLabel { pos: l.pos, file: l.file, text: l.text.copy() });
         }
     }
-    o(&mut c, view("error: "));
+    code := explain::code_of(msg);
+    if code.len() == 0 {
+        o(&mut c, view("error: "));
+    } else {
+        o(&mut c, view("error["));
+        o(&mut c, view(code));
+        o(&mut c, view("]: "));
+    }
     o(&mut c, msg);
     c.out.push(10);
     for i in width {
@@ -4809,9 +4823,57 @@ fn fail<a, b>(c: (&a mut C), msg: &b [u8]) -> unit {
         c.out.push(10);
     }
     host::print(view(c.out));
+    next_error(&mut c);
     // A rejected program is an ordinary failure (status 1), not a crash of the compiler.
     host::exit(1);
     return ();
+}
+// After an error in a function body: run this compile again with that body skipped, so it reports
+// the next error too (up to 20). The program is rejected either way; nothing is written. An error
+// outside any body - a declaration, a signature - ends the compile, since what follows it would
+// mostly be consequences of it.
+fn next_error<a>(c: (&a mut C)) -> unit {
+    reported := c.skip_bodies.len() / 2 + 1;
+    if (c.body_pos == 0) || (20 <= reported) {
+        error_summary(reported);
+        return ();
+    }
+    for i in c.skip_bodies.len() / 2 {
+        if (c.skip_bodies[2 * i] == c.body_file) & (c.skip_bodies[2 * i + 1] == c.body_pos) {
+            error_summary(reported);
+            return ();
+        }
+    }
+    mut self = copy_bytes(view("/proc/self/exe"));
+    if host::exists(view(self)) == 0 {
+        self = host::arg(0);
+    }
+    mut run = u8[][self];
+    mut at = decimal_bytes(c.body_file);
+    at.push(58);
+    push_bytes(&mut at, view(decimal_bytes(c.body_pos)));
+    run.push(copy_bytes(view("--skip-body")));
+    run.push(at);
+    for i in host::argc() - 1 {
+        run.push(host::arg(i + 1));
+    }
+    host::command(run);
+    return ();
+}
+fn error_summary(count: u64) -> unit {
+    if count < 2 {
+        return ();
+    }
+    mut line = copy_bytes(view("error: aborting due to "));
+    push_bytes(&mut line, view(decimal_bytes(count)));
+    push_bytes(&mut line, view(" previous errors\n"));
+    host::print(view(line));
+    return ();
+}
+fn decimal_bytes(n: u64) -> u8[] {
+    mut out = u8[];
+    decimal(&mut out, n);
+    return out;
 }
 // Command-line errors happen before any token stream exists, so they bypass the caret diagnostic.
 fn fail_option<a, b>(c: (&a mut C), msg: &b [u8]) -> unit {
@@ -8636,6 +8698,23 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         }
         skip_braces(&mut c);
         return ();
+    }
+    if pass == 3 {
+        // A body an earlier run reported an error in is not checked again: its signature still
+        // stands for its callers, so the rest of the program is checked against it.
+        here_file := c.file;
+        for i in c.skip_bodies.len() / 2 {
+            if (c.skip_bodies[2 * i] == here_file) & (c.skip_bodies[2 * i + 1] == position + 1) {
+                while kind(&mut c) != 123 {
+                    advance(&mut c);
+                }
+                skip_braces(&mut c);
+                return ();
+            }
+        }
+        exchange(&mut c.body_file, here_file);
+        // Position + 1, so 0 still means "not in a body".
+        exchange(&mut c.body_pos, position + 1);
     }
     mut m = module_copy(&mut c);
     // A specialisation is requested by the module whose body instantiates the template.
@@ -28774,6 +28853,9 @@ pub fn main() -> u64 {
         decl_public: 1,
         vis_off: 0,
         ct_unbound: 0,
+        skip_bodies: u64[],
+        body_file: 0,
+        body_pos: 0,
         export_copyback: u64[],
         rnames: u8[][],
         tnames: u8[][],
@@ -28910,7 +28992,30 @@ pub fn main() -> u64 {
     }
     while offset + 1 < argc {
         option := host::arg(offset + 1);
-        if same(view(option), view("--deny-ambient-host")) || same(view(option), view("--split")) {
+        if same(view(option), view("--skip-body")) {
+            // Internal: a function body an earlier run of this same compile reported an error in
+            // (`FILE:POS`). It is skipped, so the run goes on to the next error.
+            if argc < offset + 3 {
+                fail_option(&mut c, view("--skip-body needs FILE:POS"));
+            }
+            at := host::arg(offset + 2);
+            mut f = 0;
+            mut q = 0;
+            mut seen_colon = false;
+            for i in at.len() {
+                ch := at[i];
+                if ch == 58 {
+                    seen_colon = true;
+                } else if seen_colon {
+                    q = q * 10 + u64(ch - 48);
+                } else {
+                    f = f * 10 + u64(ch - 48);
+                }
+            }
+            c.skip_bodies.push(f);
+            c.skip_bodies.push(q);
+            offset += 2;
+        } else if same(view(option), view("--deny-ambient-host")) || same(view(option), view("--split")) {
             // --split: one assembly file per module. OUT.s is replaced by OUT.NNN.module.s files,
             // and OUT.parts lists them in link order for the driver.
             if same(view(option), view("--split")) {
@@ -29212,6 +29317,12 @@ pub fn main() -> u64 {
     }
     emit_fn_thunk(&mut c);
     emit_drops(&mut c);
+    if c.skip_bodies.len() != 0 {
+        // Every error this compile has is reported; the program is still rejected, and nothing it
+        // would have written is.
+        error_summary(c.skip_bodies.len() / 2);
+        host::exit(1);
+    }
     if c.no_entry != 0 {
         // A run that emits one module's code for a link, not a program (B1 stage 3): the entry stub
         // and the process state belong to the run that holds the entry, so the linker sees one
