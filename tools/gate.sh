@@ -3,7 +3,8 @@
 #   tools/gate.sh [--reseed] [LOGDIR]
 # --reseed first republishes the bootstrap (`bootstrap.mjs update all`, which already proves
 # self-hosting and assembly identity on every target, so no separate `verify` follows) and commits
-# it. Logs go to LOGDIR (default .work/gate), one per leg; LOGDIR/DONE is written last.
+# it. Logs go to LOGDIR (default .work/gate), one per leg; LOGDIR/DONE is written last. Run it again
+# on the same LOGDIR after an interruption and it skips what already passed.
 #
 # Load is capped at three heavy jobs at a time: this machine has hard-crashed under more. Within
 # that cap the independent legs overlap - the LLVM corpus runs while the emulated AArch64/RISC-V
@@ -19,12 +20,19 @@ rm -f "$G/DONE"
 # At most three jobs: wait for a slot before starting one.
 # GATE_JOBS lowers the cap further (a host that overheats): GATE_JOBS=1 runs the legs one by one.
 slot() { while [ "$(jobs -rp | wc -l)" -ge "${GATE_JOBS:-3}" ]; do wait -n; done; }
-leg() { local log=$1; shift; slot; ( "$@" > "$G/$log.log" 2>&1; echo "exit=$?" >> "$G/$log.log" ) & }
+# A leg whose log already ends in exit=0 is skipped, so a gate cut short (a host reset) resumes
+# where it stopped when run again on the same LOGDIR.
+done_ok() { [ -f "$1" ] && tail -1 "$1" | grep -qx 'exit=0'; }
+leg() { local log=$1; shift; done_ok "$G/$log.log" && return 0; slot; ( "$@" > "$G/$log.log.tmp" 2>&1; echo "exit=$?" >> "$G/$log.log.tmp"; mv "$G/$log.log.tmp" "$G/$log.log" ) & }
 
-if [ $reseed = 1 ]; then
-  bun tools/bootstrap.mjs update all > "$G/reseed.log" 2>&1
-  echo "exit=$?" >> "$G/reseed.log"
-  git add compiler/bootstrap && git commit -q -m "Reseed the bootstrap" >> "$G/reseed.log" 2>&1
+if [ $reseed = 1 ] && ! done_ok "$G/reseed.log"; then
+  bun tools/bootstrap.mjs update all > "$G/reseed.log.tmp" 2>&1
+  status=$?
+  if [ $status = 0 ]; then
+    git add compiler/bootstrap && git commit -q -m "Reseed the bootstrap" >> "$G/reseed.log.tmp" 2>&1
+  fi
+  echo "exit=$status" >> "$G/reseed.log.tmp"
+  mv "$G/reseed.log.tmp" "$G/reseed.log"
 fi
 bun tools/ci.mjs preflight > "$G/preflight.log" 2>&1
 C=$(bun tools/native.mjs build 2>&1 | tail -1)
