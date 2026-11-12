@@ -395,6 +395,8 @@ struct C {
     vis_off: u64,
     // Set when a compile-time expression read a value parameter that is not bound yet.
     ct_unbound: u64,
+    // `--comptime-probe`: this compile builds the probe program for a compile-time call (C3).
+    probe_mode: u64,
     // `@for f in fields(T)` bindings in scope, innermost last: name, decl, field index.
     ct_loop_names: u8[][],
     ct_loop_decls: u64[],
@@ -6235,6 +6237,10 @@ fn require_visible<a, b, d>(c: (&a mut C), home: &b [u8], name: &d [u8]) -> unit
     if same(view(here), view(home)) || same(view(here), view("runtime")) || same(view(home), view("runtime")) {
         return ();
     }
+    // A compile-time call is the module's own code run early: its probe may name private items.
+    if (c.probe_mode != 0) & same(view(here), view("grail_probe")) {
+        return ();
+    }
     mut text = copy_bytes(view("`"));
     push_bytes(&mut text, view(name));
     push_bytes(&mut text, view("` is private to module `"));
@@ -9663,12 +9669,22 @@ fn ct_primary<a>(c: (&a mut C)) -> CVal {
                 return ct_val(c.ct_loop_index[b - 1], 0);
             }
         }
+        if ct_call_ahead(&mut c) {
+            text := ct_take_call_text(&mut c);
+            here_module := module_copy(&mut c);
+            r := run_tier(&mut c, view(here_module), view(text), view(""));
+            if r.ty == 3 {
+                fail(&mut c, view("a compile-time call in an expression must give an integer or a bool; bind a string with NAME := f();"));
+            }
+            return ct_val(r.value, r.ty);
+        }
         mut module = module_copy(&mut c);
         mut name = ident(&mut c);
         if eat(&mut c, view("::")) {
             module = name;
             name = ident(&mut c);
         }
+        resolve_pending_named(&mut c, view(module), view(name));
         for i in c.constants.len() {
             q := &c.constants[i];
             if same(view(q.module), view(module)) & same(view(q.name), view(name)) {
@@ -9854,6 +9870,14 @@ fn ct_branch<a>(c: (&a mut C), pass: u64, top: u64, take: u64) -> unit {
 }
 // `@assert(cond, "message")`: a compile error carrying the message when cond is false.
 fn ct_assert<a>(c: (&a mut C)) -> unit {
+    if c.probe_mode != 0 {
+        // The program's own compile checks its assertions; a probe only computes a value.
+        while !is(&mut c, view(";")) {
+            advance(&mut c);
+        }
+        advance(&mut c);
+        return ();
+    }
     at := c.pos;
     exchange(&mut c.ct_unbound, 0);
     expect(&mut c, view("assert"));
@@ -9918,6 +9942,400 @@ fn ct_form<a>(c: (&a mut C), pass: u64, top: u64) -> unit {
     }
     fail(&mut c, view("unknown compile-time form: expected @if, @assert or @for here"));
     return ();
+}
+// ---- the run tier (docs/design/comptime.md, C3) -------------------------------------------------
+// A compile-time form that calls a function is evaluated by running it: the compiler writes a probe
+// program whose `main` prints the call's value, compiles it together with this program's own
+// files (so the call is this program's code, compiled by this compiler), links and runs it with
+// every ambient effect refused, and reads the value back. Results are cached by the digest of the
+// probe and every input file, so an unchanged program never runs a probe twice.
+struct CTRes {
+    ty: u64,
+    value: u64,
+    text: u8[]
+}
+// True when the next tokens are a call `name(` or `module::name(`, not one of the constant-tier
+// builtins.
+fn ct_call_ahead<a>(c: (&a mut C)) -> bool {
+    if kind(&mut c) != 1 {
+        return false;
+    }
+    here := c.pos;
+    first := tok_text(&mut c, here);
+    if same(view(first), view("size_of")) || same(view(first), view("align_of")) || same(view(first), view("target")) {
+        return false;
+    }
+    mut at = here + 1;
+    if kind_at(&mut c, at) == 260 {
+        at = at + 2;
+    }
+    return kind_at(&mut c, at) == 40;
+}
+// The source text of the call starting here, through its closing parenthesis; the tokens are
+// consumed.
+fn ct_take_call_text<a>(c: (&a mut C)) -> u8[] {
+    first := c.pos;
+    while kind(&mut c) != 40 {
+        advance(&mut c);
+    }
+    mut depth = 0;
+    mut last = c.pos;
+    while true {
+        k := kind(&mut c);
+        if k == 40 {
+            depth += 1;
+        }
+        if k == 41 {
+            depth -= 1;
+            if depth == 0 {
+                last = c.pos;
+                advance(&mut c);
+                break;
+            }
+        }
+        if k == 0 {
+            fail(&mut c, view("unterminated compile-time call"));
+        }
+        advance(&mut c);
+    }
+    start := c.toks[first].start;
+    end := c.toks[last].end;
+    mut out = u8[];
+    for i in start..end {
+        out.push(c.src[i]);
+    }
+    return out;
+}
+// Module constants whose value is a call are evaluated on first use.
+fn resolve_pending_named<a, b, d>(c: (&a mut C), module: &b [u8], name: &d [u8]) -> unit {
+    for i in c.constants.len() {
+        if (c.constants[i].ty == 18446744073709551613) && same(view(c.constants[i].module), module) && same(view(c.constants[i].name), name) {
+            resolve_pending(&mut c, i);
+        }
+    }
+    return ();
+}
+fn resolve_pending<a>(c: (&a mut C), i: u64) -> unit {
+    m := c.constants[i].module.copy();
+    n := c.constants[i].name.copy();
+    text := c.constants[i].text.copy();
+    mut key = m.copy();
+    push_bytes(&mut key, view("::"));
+    push_bytes(&mut key, view(n));
+    pending := host::env(view("GRAIL_COMPTIME_PENDING"));
+    if ct_list_has(view(pending), view(key)) {
+        mut msg = copy_bytes(view("constant `"));
+        push_bytes(&mut msg, view(n));
+        push_bytes(&mut msg, view("` depends on itself through a compile-time call"));
+        fail(&mut c, view(msg));
+    }
+    r := run_tier(&mut c, view(m), view(text), view(key));
+    exchange(&mut c.constants[i].ty, r.ty);
+    exchange(&mut c.constants[i].value, r.value);
+    exchange(&mut c.constants[i].text, r.text);
+    return ();
+}
+// Every constant still pending at the end of a compile is evaluated, so its errors are reported and
+// an interface records its value. A probe compile evaluates only what it uses.
+fn resolve_all_pending<a>(c: (&a mut C)) -> unit {
+    if c.probe_mode != 0 {
+        return ();
+    }
+    for i in c.constants.len() {
+        if c.constants[i].ty == 18446744073709551613 {
+            resolve_pending(&mut c, i);
+        }
+    }
+    return ();
+}
+// The type a pending constant will have: its call's result type.
+fn ct_pending_type<a>(c: (&a mut C), i: u64) -> u64 {
+    text := c.constants[i].text.copy();
+    m := c.constants[i].module.copy();
+    toks := lexer::tokenize(view(text));
+    if toks.len() == 0 {
+        return 0;
+    }
+    mut fmod = m.copy();
+    mut fname = slice_bytes(view(text), toks[0].start, toks[0].end);
+    if (toks.len() > 2) && (toks[1].kind == 260) {
+        fmod = fname.copy();
+        fname = slice_bytes(view(text), toks[2].start, toks[2].end);
+    }
+    f := ct_module_names(&mut c, view(fmod), view(fname));
+    if f == 0 {
+        return 0;
+    }
+    ret := c.funcs[f - 1].ret;
+    if is_bool(&mut c, ret) || (ret == 3) {
+        return ret;
+    }
+    return 0;
+}
+fn ct_list_has<a, b>(list: &a [u8], item: &b [u8]) -> bool {
+    mut start = 0;
+    mut i = 0;
+    while i <= list.len() {
+        if (i == list.len()) || (list[i] == 44) {
+            if i - start == item.len() {
+                mut hit = true;
+                for j in item.len() {
+                    if list[start + j] != item[j] {
+                        hit = false;
+                    }
+                }
+                if hit {
+                    return true;
+                }
+            }
+            start = i + 1;
+        }
+        i += 1;
+    }
+    return false;
+}
+// A function or constant of `module` named `name` (no visibility check: the probe's own lookup).
+fn ct_module_names<a, b, d>(c: (&a mut C), module: &b [u8], name: &d [u8]) -> u64 {
+    for i in c.funcs.len() {
+        if same(view(c.funcs[i].module), module) && same(view(c.funcs[i].name), name) {
+            return i + 1;
+        }
+    }
+    return 0;
+}
+fn ct_shell_quote<a>(text: &a [u8]) -> u8[] {
+    mut out = copy_bytes(view("'"));
+    for i in text.len() {
+        if text[i] == 39 {
+            push_bytes(&mut out, view("'\\''"));
+        } else {
+            out.push(text[i]);
+        }
+    }
+    out.push(39);
+    return out;
+}
+fn run_tier<a, b, d, e>(c: (&a mut C), module: &b [u8], text: &d [u8], key: &e [u8]) -> CTRes {
+    // The call's function, for its result type.
+    toks := lexer::tokenize(text);
+    if (toks.len() < 3) || (toks[0].kind != 1) {
+        fail(&mut c, view("a compile-time call is `f(...)` or `module::f(...)`"));
+    }
+    mut fmod = module.copy();
+    mut fname = slice_bytes(text, toks[0].start, toks[0].end);
+    if (toks.len() > 2) && (toks[1].kind == 260) && (toks[2].kind == 1) {
+        fmod = fname.copy();
+        fname = slice_bytes(text, toks[2].start, toks[2].end);
+    }
+    f := ct_module_names(&mut c, view(fmod), view(fname));
+    if f == 0 {
+        mut msg = copy_bytes(view("compile-time call to an unknown function `"));
+        push_bytes(&mut msg, view(fname));
+        msg.push(96);
+        fail(&mut c, view(msg));
+    }
+    ret := c.funcs[f - 1].ret;
+    if c.funcs[f - 1].types != 0 {
+        fail(&mut c, view("a compile-time call names a generic function; call a function of concrete types"));
+    }
+    mut rty = 0;
+    if is_bool(&mut c, ret) {
+        rty = bool_type(&mut c);
+    } else if ret == 3 {
+        rty = 3;
+    } else if !integer(&mut c, ret) {
+        fail(&mut c, view("a compile-time call must give an integer, a bool or a string (a value the program can hold as data)"));
+    }
+    // The probe: this module's names qualified, the value printed.
+    mut qualified = u8[];
+    mut last_end = 0;
+    for i in toks.len() {
+        tstart := toks[i].start;
+        tend := toks[i].end;
+        tkind := toks[i].kind;
+        for j in last_end..tstart {
+            qualified.push(text[j]);
+        }
+        word := slice_bytes(text, tstart, tend);
+        prev_scope := (i >= 1) && (toks[i - 1].kind == 260);
+        prev_dot := (i >= 1) && (toks[i - 1].kind == 46);
+        next_scope := (i + 1 < toks.len()) && (toks[i + 1].kind == 260);
+        if (tkind == 1) && !prev_scope && !prev_dot && !next_scope && (ct_module_names(&mut c, module, view(word)) != 0) {
+            push_bytes(&mut qualified, module);
+            push_bytes(&mut qualified, view("::"));
+        }
+        push_bytes(&mut qualified, view(word));
+        last_end = tend;
+    }
+    for j in last_end..text.len() {
+        qualified.push(text[j]);
+    }
+    mut probe = copy_bytes(view("module grail_probe;\n\nuse "));
+    push_bytes(&mut probe, module);
+    push_bytes(&mut probe, view(";\n\nfn main() -> u64 {\n    v := "));
+    push_bytes(&mut probe, view(qualified));
+    if rty == 3 {
+        push_bytes(&mut probe, view(";\n    print(v);\n    return 0;\n}\n"));
+    } else {
+        push_bytes(&mut probe, view(";\n    println(v);\n    return 0;\n}\n"));
+    }
+    // The cache key: the probe and every input file.
+    mut keyed = probe.copy();
+    offset := c.arg_offset;
+    argc := host::argc();
+    mut files = u8[][];
+    mut fi = offset + 2;
+    if c.probe_mode != 0 {
+        // A probe compile's own first file is its probe; a nested probe takes the program's files.
+        fi = offset + 3;
+    }
+    while fi < argc {
+        path := host::arg(fi);
+        files.push(path.copy());
+        push_bytes(&mut keyed, view(path));
+        push_bytes(&mut keyed, view(host::read_file(view(path))));
+        fi += 1;
+    }
+    digest := iface_digest(&keyed);
+    mut dir = copy_bytes(view(".work/comptime/"));
+    for i in 24 {
+        dir.push(digest[i]);
+    }
+    out_path := path_cat(view(dir), view("/value"));
+    if host::exists(view(out_path)) == 0 {
+        mut mk = u8[][copy_bytes(view("mkdir")), copy_bytes(view("-p")), dir.copy()];
+        host::command(mk);
+        probe_src := path_cat(view(dir), view("/probe.grl"));
+        probe_s := path_cat(view(dir), view("/probe.s"));
+        probe_exe := path_cat(view(dir), view("/probe"));
+        host::write_file(view(probe_src), view(probe));
+        self := host::exe_path();
+        mut cmd = ct_shell_quote(view(self));
+        mut opt = 1;
+        while opt < offset + 1 {
+            a := host::arg(opt);
+            if same(view(a), view("--default-u64")) || same(view(a), view("--typed-refs")) || starts_with(view(a), view("--overflow=")) {
+                cmd.push(32);
+                push_bytes(&mut cmd, view(a));
+            }
+            opt += 1;
+        }
+        push_bytes(&mut cmd, view(" --target x86_64 --comptime-probe "));
+        push_bytes(&mut cmd, view(ct_shell_quote(view(probe_s))));
+        cmd.push(32);
+        push_bytes(&mut cmd, view(ct_shell_quote(view(probe_src))));
+        for i in files.len() {
+            cmd.push(32);
+            push_bytes(&mut cmd, view(ct_shell_quote(view(files[i]))));
+        }
+        mut pending = host::env(view("GRAIL_COMPTIME_PENDING"));
+        if key.len() != 0 {
+            if pending.len() != 0 {
+                pending.push(44);
+            }
+            push_bytes(&mut pending, key);
+        }
+        depth_text := host::env(view("GRAIL_COMPTIME_DEPTH"));
+        mut depth = 0;
+        for i in depth_text.len() {
+            depth = depth * 10 + u64(depth_text[i] - 48);
+        }
+        if 8 <= depth {
+            fail(&mut c, view("compile-time calls nest more than 8 deep"));
+        }
+        mut compile = copy_bytes(view("GRAIL_COMPTIME_DEPTH="));
+        decimal(&mut compile, depth + 1);
+        push_bytes(&mut compile, view(" GRAIL_COMPTIME_PENDING="));
+        push_bytes(&mut compile, view(ct_shell_quote(view(pending))));
+        compile.push(32);
+        push_bytes(&mut compile, view(cmd));
+        mut sh = u8[][copy_bytes(view("sh")), copy_bytes(view("-c")), compile];
+        if host::command(sh) != 0 {
+            mut msg = copy_bytes(view("compile-time call `"));
+            push_bytes(&mut msg, text);
+            push_bytes(&mut msg, view("` did not compile (the errors above)"));
+            fail(&mut c, view(msg));
+        }
+        asm := host::read_file(view(probe_s));
+        if ct_list_has_sub(view(asm), view("// grail-link: ")) {
+            fail(&mut c, view("compile-time code cannot call C: the call reaches an extern function"));
+        }
+        mut cc = host::env(view("GRAIL_CC"));
+        if cc.len() == 0 {
+            cc = copy_bytes(view("cc"));
+        }
+        mut link = u8[][cc, copy_bytes(view("-nostdlib")), copy_bytes(view("-static")), copy_bytes(view("-o")), probe_exe.copy(), probe_s.copy()];
+        if host::command(link) != 0 {
+            fail(&mut c, view("compile-time call: linking the probe failed (needs cc)"));
+        }
+        mut run = copy_bytes(view("GRAIL_COMPTIME=1 timeout 30 "));
+        push_bytes(&mut run, view(ct_shell_quote(view(probe_exe))));
+        push_bytes(&mut run, view(" > "));
+        push_bytes(&mut run, view(ct_shell_quote(view(path_cat(view(dir), view("/value.tmp"))))));
+        mut sh2 = u8[][copy_bytes(view("sh")), copy_bytes(view("-c")), run];
+        status := host::command(sh2);
+        if status != 0 {
+            mut msg = copy_bytes(view("compile-time call `"));
+            push_bytes(&mut msg, text);
+            if status == 124 {
+                push_bytes(&mut msg, view("` ran past the 30 s limit"));
+            } else if status == 4 {
+                push_bytes(&mut msg, view("` reads a constant that is still being computed: the constants depend on each other in a cycle"));
+            } else {
+                push_bytes(&mut msg, view("` aborted (exit "));
+                decimal(&mut msg, status);
+                push_bytes(&mut msg, view(")"));
+            }
+            fail(&mut c, view(msg));
+        }
+        mut mv = u8[][copy_bytes(view("mv")), path_cat(view(dir), view("/value.tmp")), out_path.copy()];
+        host::command(mv);
+    }
+    printed := host::read_file(view(out_path));
+    if rty == 3 {
+        return CTRes { ty: 3, value: 0, text: printed };
+    }
+    mut body = printed.copy();
+    while (body.len() > 0) && (body[body.len() - 1] == 10) {
+        body.pop();
+    }
+    if rty != 0 {
+        return CTRes { ty: rty, value: u64(same(view(body), view("true"))), text: u8[] };
+    }
+    mut v = 0;
+    for i in body.len() {
+        v = v * 10 + u64(body[i] - 48);
+    }
+    return CTRes { ty: 0, value: v, text: u8[] };
+}
+fn ct_list_has_sub<a, b>(text: &a [u8], part: &b [u8]) -> bool {
+    mut i = 0;
+    while i + part.len() <= text.len() {
+        mut hit = true;
+        for j in part.len() {
+            if text[i + j] != part[j] {
+                hit = false;
+                break;
+            }
+        }
+        if hit {
+            return true;
+        }
+        i += 1;
+    }
+    return false;
+}
+fn slice_bytes<a>(text: &a [u8], start: u64, end: u64) -> u8[] {
+    mut out = u8[];
+    for i in start..end {
+        out.push(text[i]);
+    }
+    return out;
+}
+fn path_cat<a, b>(x: &a [u8], y: &b [u8]) -> u8[] {
+    mut out = copy_bytes(x);
+    push_bytes(&mut out, y);
+    return out;
 }
 // `@for f in fields(T) { ... }` / `@for v in variants(E) { ... }`: the block is compiled once per
 // field (or variant), in declaration order, with `f` a compile-time value: `f.name` is its name as a
@@ -10028,6 +10446,15 @@ fn module_binding<a>(c: (&a mut C), pass: u64) -> unit {
     mut ty = 0;
     mut value = 0;
     mut text = u8[];
+    if ct_call_ahead(&mut c) {
+        // `NAME := f(...);`: the run tier (C3). The call is evaluated when the constant is first
+        // used - by then every function's signature is known - by compiling and running a probe.
+        text = ct_take_call_text(&mut c);
+        expect(&mut c, view(";"));
+        constant_public := c.decl_public;
+        c.constants.push(Constant { module: module, name: name, public: constant_public, ty: 18446744073709551613, value: 0, text: text });
+        return ();
+    }
     if kind(&mut c) == 3 {
         ty = 3;
         lit := c.pos;
@@ -10175,6 +10602,30 @@ fn constant_declaration<a>(c: (&a mut C), pass: u64) -> unit {
     return ();
 }
 fn constant_value<a, b, d>(c: (&a mut C), module: &b [u8], name: &d [u8]) -> Val {
+    if c.probe_mode != 0 {
+        // In a probe, a constant still being evaluated cannot be known; reading it is a cycle only
+        // if the probed call gets there, so the read becomes a run-time stop the runner reports.
+        mut key = copy_bytes(module);
+        push_bytes(&mut key, view("::"));
+        push_bytes(&mut key, name);
+        pending := host::env(view("GRAIL_COMPTIME_PENDING"));
+        if ct_list_has(view(pending), view(key)) {
+            for i in c.constants.len() {
+                if same(view(c.constants[i].module), module) && same(view(c.constants[i].name), name) {
+                    slot := invoke(&mut c, view("rt_comptime_cycle"), u64[]);
+                    pty := ct_pending_type(&mut c, i);
+                    if pty == 3 {
+                        // Never reached at run time (the call above exits); a real string keeps the
+                        // ownership checker's view of the program whole.
+                        empty := u8[];
+                        return string_from_bytes(&mut c, &empty);
+                    }
+                    return val(slot, pty);
+                }
+            }
+        }
+    }
+    resolve_pending_named(&mut c, module, name);
     for i in c.constants.len() {
         k := &c.constants[i];
         if same(view(k.module), view(module)) & same(view(k.name), view(name)) {
@@ -10273,7 +10724,8 @@ fn toplevel<a>(c: (&a mut C), pass: u64) -> unit {
         m = ident(&mut c);
         expect(&mut c, view(";"));
     } else {
-        if c.file != 2 || raw != 0 {
+        entry_file := (c.file == 2) || ((c.file == 3) & (c.probe_mode != 0));
+        if !entry_file || raw != 0 {
             fail(&mut c, view("dependency files require an explicit module"));
         }
     }
@@ -20207,6 +20659,16 @@ fn primary<a>(c: (&a mut C)) -> Val {
             fail(&mut c, view("a field from @for has .name and .index (and x.@f for the value)"));
         }
     }
+    if (k == 64) & (c.probe_mode != 0) {
+        // Inside a probe, `@f(...)` is the same value computed now: call it, rather than start
+        // another probe (which would compile this same program again).
+        after_at := c.pos + 1;
+        exchange(&mut c.pos, after_at);
+        if ct_call_ahead(&mut c) {
+            return primary(&mut c);
+        }
+        exchange(&mut c.pos, after_at - 1);
+    }
     if k == 64 {
         advance(&mut c);
         v := ct_primary(&mut c);
@@ -28914,6 +29376,7 @@ pub fn main() -> u64 {
         decl_public: 1,
         vis_off: 0,
         ct_unbound: 0,
+        probe_mode: 0,
         ct_loop_names: u8[][],
         ct_loop_decls: u64[],
         ct_loop_index: u64[],
@@ -29054,7 +29517,12 @@ pub fn main() -> u64 {
     }
     while offset + 1 < argc {
         option := host::arg(offset + 1);
-        if same(view(option), view("--deny-ambient-host")) || same(view(option), view("--split")) {
+        if same(view(option), view("--comptime-probe")) {
+            // Internal: this compile builds the probe for a compile-time call. The probe file comes
+            // first, so the program's own entry file (which may omit its `module` line) is second.
+            exchange(&mut c.probe_mode, 1);
+            offset += 1;
+        } else if same(view(option), view("--deny-ambient-host")) || same(view(option), view("--split")) {
             // --split: one assembly file per module. OUT.s is replaced by OUT.NNN.module.s files,
             // and OUT.parts lists them in link order for the driver.
             if same(view(option), view("--split")) {
@@ -29344,6 +29812,8 @@ pub fn main() -> u64 {
     }
     // Requests are read once every declaration is known: a request names a template and the types
     // to instantiate it with, which is all `specialize` needs to add the body to this build.
+    // Constants a compile-time call gives that nothing used are evaluated now (C3).
+    resolve_all_pending(&mut c);
     emit_specializations(&mut c);
     // A closure body can instantiate a generic (`Some(x)` inside `|| ...`) and a specialisation can
     // create a closure, so the two are emitted to a fixpoint; request files are written once both
