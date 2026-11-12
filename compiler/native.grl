@@ -4846,6 +4846,40 @@ fn move_out<a>(c: (&a mut C), v: Val) -> unit {
     }
     return ();
 }
+// Whether a value of this type can hold a borrow its type does not show: a function value or an
+// interface object (a closure that captured a reference), or something holding one.
+fn may_hide_borrow<a>(c: (&a mut C), ty: u64) -> bool {
+    mut trail = u64[];
+    return hide_walk(&mut c, ty, &mut trail);
+}
+fn hide_walk<a, b>(c: (&a mut C), ty: u64, trail: (&b mut u64[])) -> bool {
+    k := ty_kind(&mut c, ty);
+    arg := ty_arg(&mut c, ty);
+    if (k == 12) || (k == 20) || (k == 25) || (k == 33) {
+        return true;
+    }
+    if (k == 10) || (k == 6) || (k == 13) || (k == 14) || (k == 16) || (k == 29) {
+        return hide_walk(&mut c, arg, &mut trail);
+    }
+    if k == 8 {
+        for i in trail.len() {
+            if trail[i] == ty {
+                return false;
+            }
+        }
+        trail.push(ty);
+        count := c.decls[arg].count;
+        for i in count {
+            t := field_type(&mut c, ty, i);
+            if hide_walk(&mut c, t, &mut trail) {
+                trail.pop();
+                return true;
+            }
+        }
+        trail.pop();
+    }
+    return false;
+}
 // Whether storage at or below `place` holds a live loan.
 fn holds_live_loan<a>(c: (&a mut C), place: u64) -> bool {
     if place == 0 {
@@ -4872,7 +4906,7 @@ fn move_value<a>(c: (&a mut C), v: Val) -> Val {
     // A value typed by a generic signature (`Iter<T>`, T still a parameter), or a generic call's result
     // that captured its arguments' loans (captured_bonds: an `Iter<u64>` mapping references), may hold
     // borrows its type does not show; its loans move with it all the same.
-    if contains_borrow(&mut c, v.ty, 0) || !concrete_type(&mut c, v.ty) || holds_live_loan(&mut c, old) {
+    if contains_borrow(&mut c, v.ty, 0) || !concrete_type(&mut c, v.ty) || (may_hide_borrow(&mut c, v.ty) && holds_live_loan(&mut c, old)) {
         return_bonds(&mut c, old, dst, u64(kind == 6 || kind == 8));
     } else {
         if (kind == 26) & (dst == 0) & (old != 0) & (c.raw == 0) {
