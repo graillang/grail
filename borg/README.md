@@ -411,8 +411,7 @@ and an absent file, naming each reason.
   read through one-line copy helpers.
 - **Smaller findings**: `const` is not accepted (use a function); `mut x := v` is invalid (`mut x = v`);
   match patterns use bare variant names (`Num(t)`, not `Json::Num(t)`); a statement after a diverging
-  `loop` is rejected as unreachable; the four `cfg`-free test programs need no compiler flags beyond
-  `--default-u64 --typed-refs`, which the runner passes.
+  `loop` is rejected as unreachable; the four `cfg`-free test programs need no compiler flags.
 
 ## Not in scope yet
 

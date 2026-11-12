@@ -51,7 +51,7 @@ const bits = [
 function build(directory, fixture, options) {
   const path = join(work, directory);
   mkdirSync(path, { recursive: true });
-  const exe = compileProgram(compiler, [join(root, 'compiler/tests', fixture)], path, { name: 'program', typedRefs: true, ...options });
+  const exe = compileProgram(compiler, [join(root, 'compiler/tests', fixture)], path, { name: 'program', ...options });
   return { exe, ll: join(path, 'program.s.ll') };
 }
 

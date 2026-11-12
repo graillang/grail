@@ -115,7 +115,7 @@ for (const test of tests) {
   const expected = regenerate ? regenerateReference(name) : readFileSync(expectedPath, 'utf8');
   const paths = fixturePaths(name);
   const executable = compileProgram(compiler, [`borg/tests/${test}`, ...portSources, ...stdModules],
-    join(work, name), { name, typedRefs: true });
+    join(work, name), { name });
   const result = execute(executable, paths);
   if (result.status !== 0) {
     failures += 1;

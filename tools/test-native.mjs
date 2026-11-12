@@ -40,20 +40,16 @@ mkdirSync(work, { recursive: true });
 // Key by the compiler's content-addressed directory, not its file name: every build is named `grail`.
 const markers = join(work, 'pass', basename(dirname(compiler)) + '-' + backend);
 if (resume) mkdirSync(markers, { recursive: true });
-const legacyFiles = new Set();
 for (const test of cases) {
   if (test.removedSyntax !== undefined) assert.ok(test.removedSyntax === true && test.reject, `${test.name}: removedSyntax requires an intentional rejection`);
-  if (test.legacyRefs !== undefined) {
-    assert.ok(typeof test.legacyRefs === 'string' && test.legacyRefs.trim(), `${test.name}: legacyRefs requires an explanation`);
-    for (const file of [...(test.files ?? []), ...(test.modules ?? [])]) legacyFiles.add(resolve(root, file));
-  } else if (test.source && legacyReferenceSyntax.test(test.source)) {
+  if (test.source && legacyReferenceSyntax.test(test.source)) {
     assert.ok(test.reject && test.removedSyntax === true, `${test.name}: legacy syntax is only allowed as intentional removed-syntax rejection input`);
   }
 }
 for (const directory of ['compiler/tests', 'book/examples', 'abundance/src', 'abundance/tests']) {
   for (const file of readdirSync(join(root, directory)).filter(f => f.endsWith('.grl'))) {
     const path = join(root, directory, file);
-    if (!legacyFiles.has(path)) assert.doesNotMatch(readFileSync(path, 'utf8'), legacyReferenceSyntax, `${path}: legacy fixture reference syntax`);
+    assert.doesNotMatch(readFileSync(path, 'utf8'), legacyReferenceSyntax, `${path}: legacy fixture reference syntax`);
   }
 }
 
@@ -96,8 +92,6 @@ for (const [position, test] of cases.entries()) {
   if (filter && !filter.test(test.name)) { filtered++; continue; }
   if (shard && position % shard.count !== shard.index) { filtered++; continue; }
   if (resume && existsSync(join(markers, test.name))) { resumed++; continue; }
-  // Only a documented, explicit legacyRefs reason may opt a fixture out of typed mode.
-  const typedRefs = test.legacyRefs === undefined;
   const directory = join(work, test.name);
   rmSync(directory, { recursive: true, force: true });
   mkdirSync(directory, { recursive: true });
@@ -108,8 +102,7 @@ for (const [position, test] of cases.entries()) {
   if (test.reject) {
     const assembly = join(directory, 'prior.s');
     writeFileSync(assembly, 'prior valid artifact');
-    const numeric = [...(test.defaultU64 === false ? [] : ['--default-u64']), ...(typedRefs ? ['--typed-refs'] : [])];
-    const result = execute(compiler, [...numeric, '--target', target, assembly, ...files, runtime, osRuntime]);
+    const result = execute(compiler, ['--target', target, assembly, ...files, runtime, osRuntime]);
     assert.equal(result.signal, null, `${test.name}: compiler crashed (${result.signal}): ${result.stdout}${result.stderr}`);
     assert.equal(result.status, 1, `${test.name}: a rejected program must exit 1: ${result.stdout}${result.stderr}`);
     // `diagnostic` is one required fragment of the error output, or a list of them (the message and
@@ -134,16 +127,15 @@ for (const [position, test] of cases.entries()) {
     let viaInterface;
     if (test.interfaces) {
       const ifaces = join(directory, 'ifaces');
-      const numeric = [...(test.defaultU64 === false ? [] : ['--default-u64']), ...(typedRefs ? ['--typed-refs'] : [])];
-      const emit = execute(compiler, [...numeric, '--target', target, '--overflow=' + (test.overflow ?? 'checked'), '--emit-interface', ifaces, join(directory, 'emit.s'), ...files, runtime, osRuntime]);
+      const emit = execute(compiler, ['--target', target, '--overflow=' + (test.overflow ?? 'checked'), '--emit-interface', ifaces, join(directory, 'emit.s'), ...files, runtime, osRuntime]);
       assert.equal(emit.status, 0, `${test.name}: emitting interfaces failed: ${emit.stdout}${emit.stderr}`);
-      const verify = execute(compiler, [...numeric, '--target', target, '--interface', ifaces, '--verify-interface', join(directory, 'verify.s'), ...files, runtime, osRuntime]);
+      const verify = execute(compiler, ['--target', target, '--interface', ifaces, '--verify-interface', join(directory, 'verify.s'), ...files, runtime, osRuntime]);
       assert.equal(verify.status, 0, `${test.name}: interfaces disagree with their sources: ${verify.stdout}${verify.stderr}`);
       viaInterface = { ifaces };
     }
-    const executable = compileProgram(compiler, files, directory, { target, overflow: test.overflow ?? 'checked', defaultU64: test.defaultU64 !== false, typedRefs, runtime, osRuntime });
+    const executable = compileProgram(compiler, files, directory, { target, overflow: test.overflow ?? 'checked', runtime, osRuntime });
     // The interface build is a second program from the same sources; it has to behave the same.
-    const interfaceExecutable = viaInterface ? compileProgram(compiler, files, directory, { target, overflow: test.overflow ?? 'checked', defaultU64: test.defaultU64 !== false, typedRefs, runtime, osRuntime, name: 'program-interface', interfaces: viaInterface.ifaces }) : null;
+    const interfaceExecutable = viaInterface ? compileProgram(compiler, files, directory, { target, overflow: test.overflow ?? 'checked', runtime, osRuntime, name: 'program-interface', interfaces: viaInterface.ifaces }) : null;
     if (test.compileOnly) { passed++; continue; }
     // A case may pin the environment it needs (`"env": {"GRAIL_POOL_WORKERS": "1"}`), which is how a
     // test proves a pool size the host would not otherwise choose. Everything else is inherited.

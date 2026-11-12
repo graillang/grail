@@ -272,32 +272,34 @@ export function buildCompiler() {
   if (boot.endsWith('.gz')) { assembly = join(directory, 'bootstrap.s'); writeFileSync(assembly, gunzipSync(readFileSync(boot))); }
   const bootstrap = assemble(assembly, join(directory, 'bootstrap'));
   const output = join(directory, 'compiler.s');
+  // The checked-in seed is a compiler from before typed references and the u64 default became the
+  // only modes, so it still needs the switches to read today's compiler sources. This is the one
+  // invocation that must keep them until the seed is reseeded from a compiler that has neither.
   command([bootstrap, '--default-u64', '--typed-refs', output, ...compilerSources]);
   const pending = assemble(output, join(directory, 'grail.pending'));
   renameSync(pending, executable);
   return executable;
 }
 // Emit assembly only: shared libraries and link-only tests need the object without a program link.
-export function compileOnly(compiler, inputs, directory, { target = hostTarget, name = 'module', defaultU64 = true, typedRefs = false, exports = [], runtime = join(root, 'compiler/runtime.grl'), osRuntime = join(root, 'compiler/os-linux.grl'), darwin = join(root, 'compiler/darwin.grl') } = {}) {
+export function compileOnly(compiler, inputs, directory, { target = hostTarget, name = 'module', exports = [], runtime = join(root, 'compiler/runtime.grl'), osRuntime = join(root, 'compiler/os-linux.grl'), darwin = join(root, 'compiler/darwin.grl') } = {}) {
   targetName(target);
   mkdirSync(directory, { recursive: true });
   const assembly = join(directory, `${name}.s`);
   const platform = machoTargets.includes(target) ? [resolve(root, darwin)] : [resolve(root, osRuntime)];
   const files = [...inputs.map(p => resolve(root, p)), resolve(root, runtime), ...platform];
-  const numeric = [...(defaultU64 ? ['--default-u64'] : []), ...(typedRefs ? ['--typed-refs'] : []), ...exports.flatMap(name => ['--export', name])];
+  const numeric = [...exports.flatMap(name => ['--export', name])];
   command([compiler, ...numeric, '--target', target, assembly, ...files]);
   return assembly;
 }
 // backend 'llvm' (or GRAIL_BACKEND=llvm) lowers through compiler/llvm.grl: the compiler writes
 // NAME.s.ll beside NAME.s, clang -O2 compiles it, and the object joins the link.
-export function compileProgram(compiler, inputs, directory, { target = hostTarget, overflow = 'checked', name = 'program', defaultU64 = true, typedRefs = false, interfaces = null, runtime = join(root, 'compiler/runtime.grl'), osRuntime = join(root, 'compiler/os-linux.grl'), darwin = join(root, 'compiler/darwin.grl'), frameworks = [], sdk = process.env.GRAIL_SDK, sign = false, backend = process.env.GRAIL_BACKEND ?? 'native', verifyFacts = process.env.GRAIL_VERIFY_FACTS === '1', rangeFacts = process.env.GRAIL_RANGE_FACTS === '1', extra = [] } = {}) {
+export function compileProgram(compiler, inputs, directory, { target = hostTarget, overflow = 'checked', name = 'program', interfaces = null, runtime = join(root, 'compiler/runtime.grl'), osRuntime = join(root, 'compiler/os-linux.grl'), darwin = join(root, 'compiler/darwin.grl'), frameworks = [], sdk = process.env.GRAIL_SDK, sign = false, backend = process.env.GRAIL_BACKEND ?? 'native', verifyFacts = process.env.GRAIL_VERIFY_FACTS === '1', rangeFacts = process.env.GRAIL_RANGE_FACTS === '1', extra = [] } = {}) {
   targetName(target);
   if (!['checked', 'wrap'].includes(overflow)) throw new Error('overflow must be checked or wrap');
   mkdirSync(directory, { recursive: true });
   const assembly = join(directory, `${name}.s`);
   const platform = machoTargets.includes(target) ? [resolve(root, darwin)] : [resolve(root, osRuntime)];
   const files = [...inputs.map(p => resolve(root, p)), resolve(root, runtime), ...platform];
-  const numeric = [...(defaultU64 ? ['--default-u64'] : []), ...(typedRefs ? ['--typed-refs'] : [])];
   const llvm = backend === 'llvm';
   if (llvm && !['x86_64', 'aarch64', 'riscv64'].includes(target)) throw new Error('the LLVM backend is implemented for Linux x86_64, aarch64 and riscv64');
   if (verifyFacts && !llvm) throw new Error('--verify-facts checks the LLVM lifter; it needs the llvm backend');
@@ -305,7 +307,7 @@ export function compileProgram(compiler, inputs, directory, { target = hostTarge
   // `interfaces` compiles against the interface directory a previous emit produced instead of the
   // modules' sources (B1 stage 2). It changes what the checker sees, not what it is given.
   const interfaceFlags = interfaces ? ['--interface', interfaces] : [];
-  command([compiler, ...numeric, ...interfaceFlags, ...(llvm ? ['--backend=llvm'] : []), ...(verifyFacts ? ['--verify-facts'] : []), ...(rangeFacts ? ['--range-facts'] : []), ...extra, '--target', target, `--overflow=${overflow}`, assembly, ...files]);
+  command([compiler, ...interfaceFlags, ...(llvm ? ['--backend=llvm'] : []), ...(verifyFacts ? ['--verify-facts'] : []), ...(rangeFacts ? ['--range-facts'] : []), ...extra, '--target', target, `--overflow=${overflow}`, assembly, ...files]);
   const linkArgs = linkInputs(readFileSync(assembly, 'utf8'), dirname(resolve(root, inputs[0])));
   if (llvm) {
     const object = join(directory, `${name}.ll.o`);

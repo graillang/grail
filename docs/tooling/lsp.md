@@ -9,8 +9,8 @@ hands it the parent's stdio.
 bun tools/lsp.mjs            # build (cached by source digest) and serve on stdio
 ```
 
-The launcher builds it with `--default-u64 --typed-refs`, the flags `tools/native.mjs`
-already uses for the compiler and the other Grail programs the test harness builds.
+The launcher builds it the way `tools/native.mjs` builds the compiler and every other Grail program
+the test harness builds: with the language's one set of modes, and no flags to select them.
 
 ## Editors
 

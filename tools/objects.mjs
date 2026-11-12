@@ -177,7 +177,7 @@ export function buildObjectBundle({ platform, version, outDir, stage0 = null, co
 
   const sources = emittedSources(target.id);
   const compilerAssembly = join(work, 'grail.s');
-  command([compiler, '--default-u64', '--typed-refs', '--target', target.compilerTarget, compilerAssembly, ...sources]);
+  command([compiler, '--target', target.compilerTarget, compilerAssembly, ...sources]);
   const compilerObject = join(work, objectName(target.id, 'grail'));
   assembleObject(target.id, compilerAssembly, compilerObject);
 

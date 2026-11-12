@@ -44,22 +44,19 @@ Formatting is idempotent and does not change meaning: formatted compiler sources
 byte-identical assembly. It is a token-level pretty-printer, not yet an expression reflow engine
 (e.g. it does not split long operator chains).
 
-### Internal reference migration
+### Typed references and the u64 default
 
 Compiler and standard-library source use typed `&value` / `&mut value` references and
-`&[u8]` / `&mut [u8]` byte views (named lifetimes precede `mut`). Internal numeric defaults
-remain `u64`; user modules still default to `i64`.
+`&[u8]` / `&mut [u8]` byte views (named lifetimes precede `mut`), and an unsuffixed integer
+literal is a `u64` unless its context types it otherwise. Both are the language's only modes: the
+`--default-u64` and `--typed-refs` switches that used to select them are accepted as no-ops for one
+release. The removed dialect (`borrow(x)`, `borrow_mut(x)`, `read<a>`, `mut<a>`, `&mut a T`) is
+rejected by name everywhere, including the deliberate removed-syntax rejection inputs of the native
+corpus.
 
-For staged self-hosting, pass **both** `--default-u64 --typed-refs` when compiling the compiler
-sources with a migration-capable compiler. The narrow `--typed-refs` switch changes reference
-syntax independently of numeric defaults. Standard-library modules always use typed references.
-The normal native and book regression corpus also enables `--typed-refs`, including safety
-rejections; only deliberate removed-syntax rejection inputs retain the old spellings. Ordinary
-user modules reject the removed dialect and still default to `i64`. A fixture requiring legacy
-semantics must opt out with an explicit, explained `legacyRefs` marker.
-
-Bootstrap artifacts are intentionally not refreshed by this migration. Until their scheduled
-refresh, use a tree-built migration-capable compiler for development suites:
+The checked-in bootstrap seed predates this, so it still needs both switches to read today's
+sources; `tools/native.mjs` passes them to that one invocation and to nothing else. Until the seed
+is refreshed from a compiler that has neither, use a tree-built compiler for development suites:
 
 ```sh
 GRAIL_COMPILER=/path/to/tree-built/grail bun tools/test-native.mjs

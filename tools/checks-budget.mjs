@@ -172,7 +172,7 @@ function emit(grail, name, work, overflow) {
   const assembly = join(work, `${name}-${tag}.s`);
   const inputs = [join(root, 'bench', `${name}.grl`), join(root, 'lib/core.grl'),
     join(root, 'compiler/runtime.grl'), join(root, 'compiler/os-linux.grl')];
-  command([grail, '--default-u64', '--typed-refs', '--backend=llvm', '--target', 'x86_64',
+  command([grail, '--backend=llvm', '--target', 'x86_64',
     `--overflow=${overflow}`, assembly, ...inputs]);
   const text = readFileSync(`${assembly}.ll`, 'utf8');
   return { ll: text, asm: assembly, tag };

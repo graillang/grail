@@ -160,7 +160,7 @@ try {
     const asm = join(work, `${target}.s`);
     const obj = join(work, `${target}.o`);
     const exe = join(work, `${target}-debug`);
-    ok([compiler, '--typed-refs', '--debug', '--target', target, asm, source, runtime, osLinux]);
+    ok([compiler, '--debug', '--target', target, asm, source, runtime, osLinux]);
     ok(['clang', `--target=${triple}`, ...extra, '-c', asm, '-o', obj]);
     ok(['ld.lld', obj, '-o', exe]);
     const lines = ok(['llvm-dwarfdump', '--debug-line', exe]).stdout;

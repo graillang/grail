@@ -118,7 +118,7 @@ const cases = [
 
 function compileAssembly(testCase, target, name) {
   const assembly = join(work, `${name}.s`);
-  run(compiler, ['--default-u64', '--typed-refs', '--target', target, '--overflow=checked',
+  run(compiler, ['--target', target, '--overflow=checked',
     assembly, testCase.entry, wrapper, runtime, osRuntime]);
   const text = readFileSync(assembly, 'utf8');
   const notes = text.split('\n').filter(line => line.startsWith('// grail-link: '));
