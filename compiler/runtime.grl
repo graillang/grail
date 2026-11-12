@@ -118,6 +118,31 @@ fn rt_fail_num(buf: u64, n: u64, v: u64) -> u64 {
     }
     return n + digits;
 }
+// A refinement obligation failed (docs/design/refinements.md). The compiler emits both strings as
+// data beside the check: the predicate's own text and ` = required by <fn> at <where>`. The location
+// line is the call site - the frame above this function - exactly as a failed check reports it.
+fn rt_refine(msg: u64, req: u64) -> u64 {
+    buf := rt_alloc(1024);
+    mut n = rt_fail_put(buf, 0, "error: refinement violated: ");
+    mut i = 0;
+    while (raw_byte(msg + i) != 0) & (n < rt_fail_limit() - 400) {
+        raw_putbyte(buf + n, raw_byte(msg + i));
+        n = n + 1;
+        i = i + 1;
+    }
+    raw_putbyte(buf + n, 10);
+    n = n + 1;
+    n = rt_fail_where(buf, n);
+    mut j = 0;
+    while (raw_byte(req + j) != 0) & (n < rt_fail_limit()) {
+        raw_putbyte(buf + n, raw_byte(req + j));
+        n = n + 1;
+        j = j + 1;
+    }
+    rt_write_all(2, buf, n);
+    rt_abort();
+    return 0;
+}
 // ` --> file:line:col` for the frame that failed, then one ` = called from` line per further frame
 // that lies in a statement - at most 32 of them.
 fn rt_fail_where(buf: u64, n: u64) -> u64 {

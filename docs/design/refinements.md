@@ -1,6 +1,9 @@
 # Refinement types: checked invariants on values
 
-Status: design, approved for implementation (gaps round, G24).
+Status: implemented (gaps round, G24): the syntax (`a483462`), the runtime checks that keep the
+feature sound (`031fd33`), the prover with its second entry point (`a6fe6b0`, `3fee023`),
+bounds-check elimination from a refined parameter (`a0d2dda`), strict mode (`5001170`) and the
+`--verify-facts` cross-check on the native backend (`4ef15d8`).
 
 ## What it is
 
@@ -61,11 +64,37 @@ The prover is sound and incomplete by design: when it cannot see a proof the che
 backend (Z3 via `--prover=z3`) can be added later behind the same interface without changing
 programs; the default build stays solver-free.
 
+As built, the prover reads one more source of facts than the list above: a refined parameter of the
+function being compiled holds at its body's start, because the entry checked it or the caller proved
+it. Two constructs reset what the walk knows rather than being followed: a `match` may bind any name,
+so it drops every fact (and a body with one gets no bounds-check elimination), and a `let` pattern
+drops the names it binds. Both keep a shadowed name from inheriting a fact about the outer one. Comparisons go through a difference graph of at most twenty terms with literals as exact
+vertices; only facts whose offset is zero or negative take part, since `b + k` with a positive `k`
+can wrap in a `--overflow=wrap` build and then the integer reading would be the wrong one.
+
+A function with refined parameters has two entries. The checked one runs the parameter checks in the
+prologue; the second, `<symbol>.proved`, is an out-of-line copy of the prologue's bytes followed by a
+jump to the body, so a proved call needs no jump in the function itself. A call site takes it only
+when every refined parameter's predicate is proved there; a method call, an interface method resolved
+to an implementation, a function value and a foreign call keep the checked entry.
+
+Strict mode is `--strict-refinements` for the program, `@strict;` for the rest of a module (kept by
+module name, so a replayed generic body keeps it) and `@strict` before a declaration. The error names
+the predicate, the declaration that requires it, why the proof failed, and the facts the prover had.
+
 ## Verification
 
-`--verify-facts` already checks every range fact the LLVM lifter is told. The same mode re-checks
-each refinement obligation the prover discharged by emitting the runtime check anyway and asserting
-it never fires on the corpus, so a prover bug shows up as a failing test, not as a silent hole.
+`--verify-facts` already checks every range fact the LLVM lifter is told, and the LLVM lifter still
+needs it for that. On the native backend the flag now means this instead: each refinement obligation
+the prover discharged emits its runtime check anyway and the call enters the checked entry, so the
+corpus asserts no such check ever fires and a prover bug shows up as a failing test, not as a silent
+hole.
+
+The tests are in `tests/native-cases.json` (every `refinement-` case): proved and unproved for the
+parameter, field and result positions; the three motivating cases; the guards that drop a proof; the
+bounds-check elimination on the emitted assembly; strict mode accepting a proved program and
+refusing an unproved one; a function value still checking; and a cross-module proof through an
+interface.
 
 ## Not in this version
 

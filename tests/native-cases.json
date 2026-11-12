@@ -7031,5 +7031,496 @@
       "lib/core.grl"
     ],
     "stdout": "len 2\ngot 1\ntook 1\ndrop 1\nlen 1\nstale\nstale after reuse\nreused 3\nend\ndrop 3\ndrop 2\n"
+  },
+  {
+    "name": "refinement-param-violated",
+    "source": "fn take(align: u64 where align % 16 == 0) -> u64 {\n    return align;\n}\n\nfn main() -> u64 {\n    println(take(16));\n    println(take(17));\n    return 0;\n}\n",
+    "signal": "SIGABRT",
+    "stderr": [
+      "error: refinement violated: align % 16 == 0\n --> ",
+      "input.grl:7:5\n = required by take at ",
+      "input.grl:1:1\n"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "a refined parameter is checked at its entry; the failure names the predicate, the call site and the declaration",
+    "backends": [
+      "native"
+    ]
+  },
+  {
+    "name": "refinement-field-violated",
+    "source": "struct Ray {\n    t_max: f32 where t_max.is_finite() && t_max > 0.0\n}\n\nfn zero() -> f32 {\n    return 0.0;\n}\n\nfn main() -> u64 {\n    ok := Ray { t_max: 1.5 };\n    println(ok.t_max);\n    z := zero();\n    bad := Ray { t_max: z / z };\n    println(bad.t_max);\n    return 0;\n}\n",
+    "signal": "SIGABRT",
+    "stderr": [
+      "error: refinement violated: t_max.is_finite() && t_max > 0.0\n --> ",
+      "input.grl:13:5\n = required by Ray.t_max at ",
+      "input.grl:2:22\n"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "a record literal owes every refined field: the NaN ray is refused where it is built",
+    "backends": [
+      "native"
+    ]
+  },
+  {
+    "name": "refinement-result-violated",
+    "source": "fn normalize(x: f32) -> f32 ensures result.is_finite() {\n    z := x - x;\n    return z / z;\n}\n\nfn zero() -> f32 {\n    return 0.0;\n}\n\nfn main() -> u64 {\n    println(normalize(zero()));\n    return 0;\n}\n",
+    "signal": "SIGABRT",
+    "stderr": [
+      "error: refinement violated: result.is_finite()\n --> ",
+      "input.grl:3:5\n = called from ",
+      "input.grl:11:5\n = required by normalize at ",
+      "input.grl:1:1\n"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "`ensures` is checked at every return: a NaN result is refused where it is returned",
+    "backends": [
+      "native"
+    ]
+  },
+  {
+    "name": "refinement-impure-rejected",
+    "source": "fn helper(x: u64) -> bool {\n    return x > 0;\n}\n\nfn scale(x: u64 where helper(x)) -> u64 {\n    return x;\n}\n\nfn main() -> u64 {\n    println(scale(4));\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "a refinement predicate cannot call a function: helper is not pure"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "a predicate may not run user code or have a side effect"
+  },
+  {
+    "name": "refinement-field-assignment-violated",
+    "source": "struct Ray {\n    t_max: f32 where t_max > 0.0\n}\n\nfn zero() -> f32 {\n    return 0.0;\n}\n\nfn main() -> u64 {\n    mut r: Ray = Ray { t_max: 1.5 };\n    r.t_max = 2.5;\n    println(r.t_max);\n    r.t_max = zero();\n    println(r.t_max);\n    return 0;\n}\n",
+    "signal": "SIGABRT",
+    "stderr": [
+      "error: refinement violated: t_max > 0.0\n --> ",
+      "input.grl:13:5\n = required by Ray.t_max at ",
+      "input.grl:2:22\n"
+    ],
+    "targets": [
+      "x86_64",
+      "aarch64",
+      "riscv64"
+    ],
+    "note": "a field assignment owes the field's predicate too",
+    "backends": [
+      "native"
+    ]
+  },
+  {
+    "name": "refinement-proved-entry",
+    "source": "fn take(align: u64 where align % 16 == 0) -> u64 {\n    return align;\n}\n\nfn untaken(x: u64) -> u64 {\n    return x;\n}\n\nfn main() -> u64 {\n    println(take(16));\n    println(untaken(3));\n    return 0;\n}\n",
+    "stdout": "16\n3\n",
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "asm": [
+      "f_main_take.proved:",
+      "call f_main_take.proved"
+    ],
+    "asmAbsent": [
+      "f_main_untaken.proved",
+      "call f_main_take\n"
+    ],
+    "note": "a function whose parameters are refined carries a second entry; the prover routes the constant call to it, a function with no predicate carries none, and an unproved call keeps the checked entry"
+  },
+  {
+    "name": "refinement-param-proved-binding",
+    "source": "fn take(align: u64 where align % 16 == 0) -> u64 {\n    return align;\n}\n\nfn main() -> u64 {\n    n := 32;\n    println(take(n));\n    return 0;\n}\n",
+    "stdout": "32\n",
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "asm": [
+      "call f_main_take.proved"
+    ],
+    "note": "a binding of a constant settles `align % 16 == 0` by divisibility, so the call enters past the check"
+  },
+  {
+    "name": "refinement-param-checked-after-write",
+    "source": "fn take(align: u64 where align % 16 == 0) -> u64 {\n    return align;\n}\n\nfn main() -> u64 {\n    mut n = 48;\n    n += 1;\n    n -= 1;\n    println(take(n));\n    return 0;\n}\n",
+    "stdout": "48\n",
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "asm": [
+      "call f_main_take\n"
+    ],
+    "asmAbsent": [
+      "call f_main_take.proved"
+    ],
+    "note": "a write kills the facts that name the target: the check stays, and passes because 48 is a multiple of 16"
+  },
+  {
+    "name": "refinement-field-proved",
+    "source": "struct Ray {\n    t_max: f32 where t_max.is_finite() && t_max > 0.0\n}\n\nfn mark(t: f32) -> f32 {\n    return t;\n}\n\nfn main() -> u64 {\n    t := mark(1.5);\n    if t.is_finite() && t > 0.0 {\n        r := Ray { t_max: t };\n        println(r.t_max);\n    }\n    return 0;\n}\n",
+    "stdout": "1.5\n",
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "asmAbsent": [
+      "call rt_refine"
+    ],
+    "note": "the guard states both float-class facts the field wants, so the literal owes no check at all"
+  },
+  {
+    "name": "refinement-field-param-proved",
+    "source": "struct Ray {\n    t_max: f32 where t_max.is_finite() && t_max > 0.0\n}\n\nfn ray_from(t: f32 where t.is_finite() && t > 0.0) -> Ray {\n    return Ray { t_max: t };\n}\n\nfn main() -> u64 {\n    r := ray_from(1.5);\n    println(r.t_max);\n    return 0;\n}\n",
+    "stdout": "1.5\n",
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "the parameter's own predicate is what the field is checked against, and the caller's literal proves the parameter"
+  },
+  {
+    "name": "refinement-field-unproved-runtime",
+    "source": "struct Ray {\n    t_max: f32 where t_max.is_finite() && t_max > 0.0\n}\n\nfn mark(t: f32) -> f32 {\n    return t;\n}\n\nfn zero() -> f32 {\n    return 0.0;\n}\n\nfn main() -> u64 {\n    z := zero();\n    t := mark(z / z);\n    r := Ray { t_max: t };\n    println(r.t_max);\n    return 0;\n}\n",
+    "signal": "SIGABRT",
+    "stderr": [
+      "error: refinement violated: t_max.is_finite() && t_max > 0.0\n --> ",
+      " = required by Ray.t_max at "
+    ],
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "nothing proves the NaN ray: the field's check stays and fires where the record is built"
+  },
+  {
+    "name": "refinement-ensures-proved",
+    "source": "fn ident(x: f32 where x.is_finite()) -> f32 ensures result.is_finite() {\n    return x;\n}\n\nfn main() -> u64 {\n    println(ident(2.5));\n    return 0;\n}\n",
+    "stdout": "2.5\n",
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "returning a finite parameter proves `result.is_finite()`; the parameter is proved by the literal"
+  },
+  {
+    "name": "refinement-ensures-nan-param",
+    "source": "fn normalize(x: f32 where x.is_finite()) -> f32 ensures result.is_finite() {\n    return x + 0.0;\n}\n\nfn zero() -> f32 {\n    return 0.0;\n}\n\nfn main() -> u64 {\n    z := zero();\n    println(normalize(z / z));\n    return 0;\n}\n",
+    "signal": "SIGABRT",
+    "stderr": [
+      "error: refinement violated: x.is_finite()\n --> ",
+      " = required by normalize at "
+    ],
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "a NaN argument cannot be proved finite, so normalize's parameter check is kept and catches it at the call"
+  },
+  {
+    "name": "refinement-ensures-unproved-runtime",
+    "source": "fn squash(x: f32 where x.is_finite()) -> f32 ensures result.is_finite() {\n    z := x - x;\n    return z / z;\n}\n\nfn main() -> u64 {\n    println(squash(2.0));\n    return 0;\n}\n",
+    "signal": "SIGABRT",
+    "stderr": [
+      "error: refinement violated: result.is_finite()\n --> ",
+      " = required by squash at "
+    ],
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "a result the prover cannot name is not proved: the `ensures` check stays and fires at the return"
+  },
+  {
+    "name": "refinement-function-value-checked",
+    "source": "fn take(align: u64 where align % 16 == 0) -> u64 {\n    return align;\n}\n\nfn main() -> u64 {\n    f := take;\n    println(f(16));\n    println(f(17));\n    return 0;\n}\n",
+    "signal": "SIGABRT",
+    "stderr": [
+      "error: refinement violated: align % 16 == 0\n --> ",
+      " = required by take at "
+    ],
+    "stdout": "16\n",
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "asmAbsent": [
+      "call f_main_take.proved"
+    ],
+    "note": "an indirect call proved nothing: a function value always takes the checked entry"
+  },
+  {
+    "name": "refinement-loop-fact-proves-call",
+    "source": "fn get(v: &u64[], i: u64 where i < v.len()) -> u64 {\n    return v[i];\n}\n\nfn total(v: &u64[]) -> u64 {\n    mut sum = 0;\n    for i in v.len() {\n        sum += get(v, i);\n    }\n    return sum;\n}\n\nfn main() -> u64 {\n    v := u64[10, 20, 30];\n    println(total(&v));\n    return 0;\n}\n",
+    "stdout": "60\n",
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "`for i in v.len()` states `i < v.len()`, which is exactly get's predicate"
+  },
+  {
+    "name": "refinement-graph-proves-call",
+    "source": "fn get(v: &u64[], i: u64 where i < v.len()) -> u64 {\n    return v[i];\n}\n\nfn second(v: &u64[], j: u64 where j < v.len()) -> u64 {\n    k := j;\n    return get(v, k);\n}\n\nfn main() -> u64 {\n    v := u64[7, 8, 9];\n    println(second(&v, 1));\n    return 0;\n}\n",
+    "stdout": "8\n",
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "`k == j` and `j < v.len()` reach `k < v.len()` through the difference graph"
+  },
+  {
+    "name": "refinement-interface-proved",
+    "files": [
+      "tests/interfaces/refined_user.grl"
+    ],
+    "modules": [
+      "tests/interfaces/refined.grl"
+    ],
+    "interfaces": true,
+    "stdout": "16\n32\n",
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "asm": [
+      "call f_refined_take.proved"
+    ],
+    "note": "a refinement carried by an interface is owed by a caller in another module, and its constant argument proves it there too"
+  },
+  {
+    "name": "refinement-bce-from-param",
+    "source": "fn get(v: &u64[], i: u64 where i < v.len()) -> u64 {\n    return v[i];\n}\n\nfn main() -> u64 {\n    v := u64[10, 20, 30];\n    println(get(&v, 1));\n    return 0;\n}\n",
+    "stdout": "20\n",
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "asmAbsent": [
+      "call rt_trap"
+    ],
+    "note": "`i < v.len()` on the entry is what `v[i]`'s bounds check needs: the access emits no trap at all"
+  },
+  {
+    "name": "refinement-bce-shadowed-index",
+    "source": "fn get(v: &u64[], i: u64 where i < v.len()) -> u64 {\n    mut sum = 0;\n    {\n        mut i = 9;\n        sum += v[i];\n    }\n    return sum;\n}\n\nfn main() -> u64 {\n    v := u64[10, 20, 30];\n    println(get(&v, 1));\n    return 0;\n}\n",
+    "signal": "SIGABRT",
+    "stderr": [
+      "error: index 9 out of bounds for length 3\n --> "
+    ],
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "a binding of the index name makes the entry's bound stale: the check stays and catches it"
+  },
+  {
+    "name": "refinement-bce-owned-vector-checked",
+    "source": "fn get(v: u64[], i: u64 where i < v.len()) -> u64 {\n    return v[i];\n}\n\nfn main() -> u64 {\n    v := u64[10, 20, 30];\n    println(get(v, 1));\n    return 0;\n}\n",
+    "stdout": "20\n",
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "asm": [
+      "call rt_trap"
+    ],
+    "note": "an owned vector can be pushed by the body, so its refined length is not used to drop a bounds check"
+  },
+  {
+    "name": "refinement-strict-proved",
+    "source": "fn take(align: u64 where align % 16 == 0) -> u64 {\n    return align;\n}\n\nfn main() -> u64 {\n    println(take(16));\n    return 0;\n}\n",
+    "stdout": "16\n",
+    "flags": [
+      "--strict-refinements"
+    ],
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "strict mode accepts a program whose every obligation is proved"
+  },
+  {
+    "name": "refinement-strict-unproved",
+    "source": "fn take(align: u64 where align % 16 == 0) -> u64 {\n    return align;\n}\n\nfn main() -> u64 {\n    println(take(17));\n    return 0;\n}\n",
+    "reject": true,
+    "flags": [
+      "--strict-refinements"
+    ],
+    "diagnostic": [
+      "cannot prove the refinement `align % 16 == 0`",
+      "= the facts at the call do not settle it",
+      "= the facts in scope were:",
+      "input.grl:6:"
+    ],
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "strict mode refuses it at the call, naming the predicate and the facts the prover had"
+  },
+  {
+    "name": "refinement-strict-attribute-fn",
+    "source": "fn take(align: u64 where align % 16 == 0) -> u64 {\n    return align;\n}\n\n@strict\nfn caller() -> u64 {\n    return take(17);\n}\n\nfn main() -> u64 {\n    println(caller());\n    return 0;\n}\n",
+    "reject": true,
+    "diagnostic": [
+      "cannot prove the refinement `align % 16 == 0`",
+      "input.grl:7:"
+    ],
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "`@strict` on a function makes only that function's obligations errors"
+  },
+  {
+    "name": "refinement-strict-module-proved",
+    "source": "module m;\n@strict;\n\nstruct Ray {\n    t_max: f32 where t_max > 0.0\n}\n\nfn mark(t: f32) -> f32 {\n    return t;\n}\n\nfn main() -> u64 {\n    t := mark(1.5);\n    if t > 0.0 {\n        r := Ray { t_max: t };\n        println(r.t_max);\n    }\n    return 0;\n}\n",
+    "stdout": "1.5\n",
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "`@strict;` makes the whole module strict, and a proved field obligation passes"
+  },
+  {
+    "name": "refinement-strict-field-unproved",
+    "source": "struct Ray {\n    t_max: f32 where t_max.is_finite() && t_max > 0.0\n}\n\nfn zero() -> f32 {\n    return 0.0;\n}\n\nfn main() -> u64 {\n    z := zero();\n    r := Ray { t_max: z / z };\n    println(r.t_max);\n    return 0;\n}\n",
+    "reject": true,
+    "flags": [
+      "--strict-refinements"
+    ],
+    "diagnostic": [
+      "cannot prove the refinement `t_max.is_finite() && t_max > 0.0`",
+      "= the value is not a name or a constant",
+      "input.grl:11:"
+    ],
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "strict mode refuses the record literal rather than checking it at run time"
+  },
+  {
+    "name": "refinement-verify-facts-keeps-check",
+    "source": "fn take(align: u64 where align % 16 == 0) -> u64 {\n    return align;\n}\n\nfn main() -> u64 {\n    println(take(16));\n    return 0;\n}\n",
+    "stdout": "16\n",
+    "flags": [
+      "--verify-facts"
+    ],
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "asm": [
+      "call f_main_take\n",
+      "call rt_refine"
+    ],
+    "note": "`--verify-facts` keeps the check a proof removed and enters the checked entry, so a wrong proof aborts"
+  },
+  {
+    "name": "refinement-match-arm-call-checked",
+    "source": "enum Pick {\n    Second(u64),\n    First\n}\n\nfn take_second(v: &u64[], i: u64 where i < v.len()) -> u64 {\n    return v[i];\n}\n\nfn unwrap(p: Pick, v: &u64[], i: u64 where i < v.len()) -> u64 {\n    match p {\n        Second(i) => {\n            return take_second(v, i);\n        },\n        First => {\n            return 0;\n        }\n    }\n}\n\nfn main() -> u64 {\n    v := u64[10, 20, 30];\n    println(unwrap(Pick::Second(9), &v, 1));\n    return 0;\n}\n",
+    "signal": "SIGABRT",
+    "stderr": [
+      "error: refinement violated: i < v.len()\n --> ",
+      " = required by take_second at "
+    ],
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "an arm's binding shadows the refined parameter: the facts before the `match` are not about the arm's `i`, so the call keeps its check"
+  },
+  {
+    "name": "refinement-bce-match-arm-checked",
+    "source": "enum Pick {\n    Second(u64),\n    First\n}\n\nfn pick_index(p: Pick, v: &u64[], i: u64 where i < v.len()) -> u64 {\n    match p {\n        Second(i) => {\n            return v[i];\n        },\n        First => {\n            return 0;\n        }\n    }\n}\n\nfn main() -> u64 {\n    v := u64[10, 20, 30];\n    println(pick_index(Pick::Second(9), &v, 1));\n    return 0;\n}\n",
+    "signal": "SIGABRT",
+    "stderr": [
+      "error: index 9 out of bounds for length 3\n --> "
+    ],
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "a body with a `match` arm gets no bounds-check elimination from the entry's bound"
+  },
+  {
+    "name": "refinement-match-does-not-leak-facts",
+    "source": "enum Pick {\n    Second(u64),\n    First\n}\n\nfn take(align: u64 where align % 16 == 0) -> u64 {\n    return align;\n}\n\nfn after_match(p: Pick) -> u64 {\n    mut n = 1;\n    match p {\n        Second(x) => {\n            n = x;\n        },\n        First => {\n            n = 1;\n        }\n    }\n    if n % 16 == 0 {\n        n = 16;\n    }\n    return take(n);\n}\n\nfn main() -> u64 {\n    println(after_match(Pick::First));\n    return 0;\n}\n",
+    "signal": "SIGABRT",
+    "stderr": [
+      "error: refinement violated: align % 16 == 0\n --> ",
+      " = required by take at "
+    ],
+    "targets": [
+      "x86_64"
+    ],
+    "backends": [
+      "native"
+    ],
+    "note": "what a `match` drops stays dropped: the `if` after it cannot leave a fact behind for the call below"
   }
 ]

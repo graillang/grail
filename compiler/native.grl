@@ -84,7 +84,32 @@ struct Alias {
 }
 struct Field {
     name: u8[],
-    ty: u64
+    ty: u64,
+    // `field: T where P`: the field's predicate, or no_pred() when it has none.
+    pred: Pred
+}
+// A refinement predicate, kept as a token range in the file it was written in (docs/design/
+// refinements.md). The range is never parsed where it is written: the obligation compiles the
+// expression where the value enters, with the names bound to the values there.
+struct Pred {
+    // The file the tokens are in: a source file, or the virtual source an interface carries.
+    file: u64,
+    lo: u64,
+    hi: u64
+}
+fn no_pred() -> Pred {
+    return Pred { file: 0, lo: 0, hi: 0 };
+}
+fn copy_preds<a>(p: (&a Pred[])) -> Pred[] {
+    mut out = Pred[];
+    for i in p.len() {
+        item := &p[i];
+        out.push(Pred { file: item.file, lo: item.lo, hi: item.hi });
+    }
+    return out;
+}
+fn has_pred<a>(p: (&a Pred)) -> bool {
+    return p.hi != 0;
 }
 struct Func {
     module: u8[],
@@ -114,7 +139,13 @@ struct Func {
     symbol: u8[],
     // The source text of a generic template's declaration, captured at the declaration pass so the
     // interface can carry it (B1 stage 3). Empty for everything else: only a template is replayed.
-    body: u8[]
+    body: u8[],
+    // `p: T where P`, one per parameter in order, and `-> T ensures P` for the result.
+    ppreds: Pred[],
+    rpred: Pred,
+    // The parameters' source names, parallel to `ppreds`: a call site needs them to put the
+    // arguments' terms in the predicate's place, and an interface carries the ones a predicate uses.
+    pnames: u8[][]
 }
 struct Interface {
     module: u8[],
@@ -483,6 +514,25 @@ struct C {
     cf_local: u64,
     bce_index: u8[],
     bce_base: u8[],
+    // The refinements of the function being compiled: its parameters' predicates and its `ensures`,
+    // the source name of the declaration (a specialisation is reported under its template's name),
+    // where it is written, and the serial that keeps each obligation's data labels apart.
+    cur_ppreds: Pred[],
+    cur_rpred: Pred,
+    // The token range of the body being compiled: the facts the prover reads at a program point
+    // start at its `{`. Zero inside a closure, where no enclosing function's facts hold.
+    body_lo: u64,
+    body_hi: u64,
+    // Strict refinements (docs/design/refinements.md): `--strict-refinements` for the whole program,
+    // `@strict;` for a module (it stays with the module's name, so a replayed body keeps it), and
+    // `@strict` on a declaration for the function that follows.
+    strict_refinements: u64,
+    strict_modules: u8[][],
+    strict_next: u64,
+    cur_name: u8[],
+    cur_file: u64,
+    cur_pos: u64,
+    ref_next: u64,
     lit_negative: u64,
     // Span of the most recent byte read (`bytes[i]`): an untyped word known to be 0..255.
     byte_start: u64,
@@ -5571,6 +5621,1837 @@ fn expect<a, b>(c: (&a mut C), s: &b [u8]) -> unit {
     }
     return ();
 }
+// ---- refinement predicates (docs/design/refinements.md) ------------------------------------------
+// `p: T where P` and `-> T ensures P` keep P as a token range in the file it was written in - a
+// source file, or the virtual source an interface carries. Nothing is parsed at the declaration: the
+// obligation compiles the expression where the value enters (a call site, a record literal, a
+// `return`), with the names bound to the values there.
+//
+// A predicate's text, its tokens separated by single spaces: what a runtime error and a diagnostic
+// show.
+fn pred_text<a>(c: (&a mut C), p: Pred) -> u8[] {
+    mut out = u8[];
+    if !has_pred(&p) {
+        return out;
+    }
+    saved_file := c.file;
+    saved_pos := c.pos;
+    if saved_file != p.file {
+        load_file(&mut c, p.file);
+        exchange(&mut c.file, p.file);
+    }
+    // The predicate's own text, whitespace runs collapsed to one space: what the author wrote.
+    from := c.toks[p.lo].start;
+    to := c.toks[p.hi - 1].end;
+    mut space = false;
+    for i in from .. to {
+        ch := c.src[i];
+        if (ch == 10) || (ch == 9) || (ch == 13) || (ch == 32) {
+            space = true;
+        } else {
+            if space & (out.len() != 0) {
+                out.push(32);
+            }
+            space = false;
+            out.push(ch);
+        }
+    }
+    if saved_file != p.file {
+        load_file(&mut c, saved_file);
+        exchange(&mut c.file, saved_file);
+        exchange(&mut c.pos, saved_pos);
+    }
+    return out;
+}
+// The pure calls a predicate may make: `len()` (through a `.`), `is_finite()` and `is_nan()`.
+fn pred_pure_call<a, b, d>(name: &a [u8], before: &b [u8], dot: &d [u8]) -> bool {
+    if same(view(name), view("is_finite")) || same(view(name), view("is_nan")) {
+        return true;
+    }
+    return same(view(name), view("len")) & same(view(before), view(dot));
+}
+// Refuse a predicate that could run user code or have a side effect (docs/design/refinements.md,
+// "Where predicates go"). The stop tokens are not part of the predicate.
+fn pred_check<a, b, d>(c: (&a mut C), lo: u64, hi: u64, what: &b [u8], stop_a: &d [u8]) -> unit {
+    if lo == hi {
+        fail(&mut c, view(what));
+    }
+    mut i = lo;
+    while i < hi {
+        t := tok_text(&mut c, i);
+        mut before = u8[];
+        if i != 0 {
+            before = tok_text(&mut c, i - 1);
+        }
+        if kind_at(&mut c, i) == 1 {
+            mut after_ok = false;
+            if i + 1 < c.toks.len() {
+                after_ok = same(view(tok_text(&mut c, i + 1)), view("("));
+            }
+            if after_ok & !pred_pure_call(view(t), view(before), view(".")) {
+                mut msg = "a refinement predicate cannot call a function: ";
+                msg.append(view(t));
+                msg.append(view(" is not pure"));
+                fail(&mut c, view(msg));
+            }
+            if same(view(t), view("mut"))
+                || same(view(t), view("return"))
+                || same(view(t), view("while"))
+                || same(view(t), view("for"))
+                || same(view(t), view("loop"))
+                || same(view(t), view("break"))
+                || same(view(t), view("continue"))
+                || same(view(t), view("drop")) {
+                mut msg = "a refinement predicate cannot run a statement: ";
+                msg.append(view(t));
+                fail(&mut c, view(msg));
+            }
+        }
+        if same(view(t), view("="))
+            || same(view(t), view("+="))
+            || same(view(t), view("-="))
+            || same(view(t), view("*="))
+            || same(view(t), view("/="))
+            || same(view(t), view("%="))
+            || same(view(t), view("&="))
+            || same(view(t), view("|="))
+            || same(view(t), view("^="))
+            || same(view(t), view("<<="))
+            || same(view(t), view(">>="))
+            || same(view(t), view("|"))
+            || same(view(t), view(";"))
+            || same(view(t), view(stop_a)) {
+            mut msg = "a refinement predicate cannot assign or branch: ";
+            msg.append(view(t));
+            fail(&mut c, view(msg));
+        }
+        i += 1;
+    }
+    return ();
+}
+// Read a predicate into a token range, up to (not including) one of the two stop tokens at bracket
+// depth 0. `c.pos` is left on the stop token, so the caller still reads its own comma, brace or
+// arrow.
+fn pred_scan<a, b>(c: (&a mut C), stop_a: &a [u8], stop_b: &b [u8]) -> Pred {
+    lo := c.pos;
+    mut depth = 0;
+    mut i = c.pos;
+    while i < c.toks.len() {
+        t := tok_text(&mut c, i);
+        k := kind_at(&mut c, i);
+        if depth == 0 && (same(view(t), view(stop_a)) || same(view(t), view(stop_b))) {
+            break;
+        }
+        if (k == 40) || (k == 91) || (k == 123) {
+            depth += 1;
+        }
+        if (k == 41) || (k == 93) || (k == 125) {
+            if depth == 0 {
+                break;
+            }
+            depth -= 1;
+        }
+        i += 1;
+    }
+    if i == c.toks.len() {
+        mut msg = "a refinement predicate is not closed: ";
+        msg.append(view(stop_b));
+        fail(&mut c, view(msg));
+    }
+    pred_check(&mut c, lo, i, view("a refinement predicate cannot be empty"), view(stop_a));
+    exchange(&mut c.pos, i);
+    return Pred { file: c.file, lo: lo, hi: i };
+}
+// A predicate carried by an interface: its text becomes a virtual source of its own, so the range is
+// that file's whole token stream and replay compiles exactly what the defining module compiled.
+fn pred_of_text<a, b, d>(c: (&a mut C), label: &b [u8], text: &d [u8]) -> Pred {
+    file := virtual_source(&mut c, view(label), view(text));
+    saved_file := c.file;
+    saved_pos := c.pos;
+    load_file(&mut c, file);
+    n := c.toks.len();
+    if saved_file != file {
+        if saved_file != 0 {
+            load_file(&mut c, saved_file);
+        }
+        exchange(&mut c.file, saved_file);
+        exchange(&mut c.pos, saved_pos);
+    }
+    return Pred { file: file, lo: 0, hi: n };
+}
+// `file:line:col` of a token in `file`: where a declaration is written, for the requirement line.
+fn src_where<a>(c: (&a mut C), file: u64, pos: u64) -> u8[] {
+    saved_file := c.file;
+    saved_pos := c.pos;
+    if (saved_file != file) & (file != 0) {
+        load_file(&mut c, file);
+        exchange(&mut c.file, file);
+    }
+    path := site_path(&c, file);
+    mut line = 1;
+    mut col = 1;
+    mut stop = 0;
+    if pos < c.toks.len() {
+        stop = c.toks[pos].start;
+    }
+    for i in stop {
+        if c.src[i] == 10 {
+            line += 1;
+            col = 1;
+        } else {
+            col += 1;
+        }
+    }
+    mut out = path.copy();
+    out.push(58);
+    decimal(&mut out, line);
+    out.push(58);
+    decimal(&mut out, col);
+    if (saved_file != file) & (file != 0) {
+        load_file(&mut c, saved_file);
+        exchange(&mut c.file, saved_file);
+        exchange(&mut c.pos, saved_pos);
+    }
+    return out;
+}
+// A NUL-terminated string in .rodata, labelled so the check can name it.
+fn ref_data<a, b, d>(c: (&a mut C), label: &b [u8], text: &d [u8]) -> unit {
+    o(&mut c, view(".pushsection .rodata\n"));
+    o(&mut c, view(label));
+    o(&mut c, view(":\n.asciz \""));
+    for i in text.len() {
+        ch := text[i];
+        if (ch == 34) || (ch == 92) {
+            c.out.push(92);
+        }
+        if ch == 10 {
+            c.out.push(92);
+            c.out.push(110);
+        } else {
+            c.out.push(ch);
+        }
+    }
+    o(&mut c, view("\"\n.popsection\n"));
+    return ();
+}
+// Compile a predicate at its own position with `names` bound to the values in `slots`. The bindings
+// are ordinary locals pushed for the predicate and dropped afterwards: a predicate only reads, and
+// creating (or dropping) a value here would be a side effect it does not have.
+fn pred_value<a, b, d, e>(c: (&a mut C), pred: Pred, names: (&b u8[][]), slots: (&d u64[]), tys: (&e u64[])) -> Val {
+    saved_file := c.file;
+    saved_pos := c.pos;
+    if (saved_file != pred.file) & (pred.file != 0) {
+        load_file(&mut c, pred.file);
+        exchange(&mut c.file, pred.file);
+    }
+    mark := c.locals.len();
+    for k in names.len() {
+        c
+            .locals
+            .push(
+                Local {
+                    name: names[k].copy(),
+                    ty: tys[k],
+                    id: slots[k],
+                    last: 1000000000,
+                    born: 0,
+                    mutable: 0,
+                    flex: 0,
+                    lit: 0,
+                    neg: 0,
+                    origin: 0,
+                    at: 0,
+                }
+            );
+    }
+    exchange(&mut c.pos, pred.lo);
+    v := expr(&mut c, 0);
+    while mark < c.locals.len() {
+        c.locals.pop();
+    }
+    if (saved_file != pred.file) & (pred.file != 0) {
+        load_file(&mut c, saved_file);
+        exchange(&mut c.file, saved_file);
+    }
+    exchange(&mut c.pos, saved_pos);
+    return v;
+}
+// ` = required by <fn> at <where>` - the line a failure names after the location.
+fn ref_requirement<a>(c: (&a mut C), fn_name: &a [u8], at: &a [u8]) -> u8[] {
+    mut out = copy_bytes(view(" = required by "));
+    push_bytes(&mut out, view(fn_name));
+    push_bytes(&mut out, view(" at "));
+    push_bytes(&mut out, view(at));
+    out.push(10);
+    return out;
+}
+// One obligation: `pred` must hold of the values in `slots`, or the program stops saying which
+// predicate it violated and which function required it. An obligation the prover discharges emits no
+// check at all (step 3's hook is `ref_proved`, which is false for now).
+fn ref_check<a, b, d, e>(c: (&a mut C), pred: Pred, names: (&b u8[][]), slots: (&d u64[]), tys: (&e u64[]), fn_name: u8[], at_file: u64, at_pos: u64, proved: u64) -> unit {
+    if !has_pred(&pred) {
+        return ();
+    }
+    if c.validating != 0 {
+        return ();
+    }
+    // A proved obligation needs no check: the proof is the whole of what it needs. `--verify-facts`
+    // emits it anyway, so a prover bug shows up as a failing test rather than as a silent hole.
+    if (proved != 0) & (c.verify_facts == 0) {
+        return ();
+    }
+    n := c.ref_next;
+    c.ref_next = n + 1;
+    v := pred_value(&mut c, Pred { file: pred.file, lo: pred.lo, hi: pred.hi }, &names, &slots, &tys);
+    if c.raw == 0 {
+        require_type(&mut c, v.ty, 0);
+    }
+    get(&mut c, v.t, view("%rax"));
+    o(&mut c, view("testq %rax,%rax\n"));
+    ok := label(&mut c);
+    jump(&mut c, view("jnz"), ok);
+    text := pred_text(&mut c, pred);
+    at := src_where(&mut c, at_file, at_pos);
+    req := ref_requirement(&mut c, view(fn_name), view(at));
+    mut pred_label = copy_bytes(view(".Lrfp"));
+    decimal(&mut pred_label, n);
+    mut req_label = copy_bytes(view(".Lrfr"));
+    decimal(&mut req_label, n);
+    ref_data(&mut c, view(pred_label), view(text));
+    ref_data(&mut c, view(req_label), view(req));
+    o(&mut c, view("leaq "));
+    o(&mut c, view(pred_label));
+    o(&mut c, view("(%rip),%rdi\nleaq "));
+    o(&mut c, view(req_label));
+    o(&mut c, view("(%rip),%rsi\ncall rt_refine\n"));
+    mark(&mut c, ok);
+    return ();
+}
+// The obligations at a value's entry into a function: each parameter's predicate, checked where the
+// parameter is (so the values are the arguments'), with the call site as the location a failure
+// reports - the frame above this one.
+fn ref_params<a>(c: (&a mut C)) -> unit {
+    if c.cur_ppreds.len() == 0 {
+        return ();
+    }
+    mut emitted = 0;
+    for i in c.cur_ppreds.len() {
+        // Copied out: the predicate list is a field of `c`, which the check borrows.
+        mut pf = 0;
+        mut plo = 0;
+        mut phi = 0;
+        if i < c.cur_ppreds.len() {
+            p := &c.cur_ppreds[i];
+            pf = p.file;
+            plo = p.lo;
+            phi = p.hi;
+        }
+        if (phi == 0) || (i >= c.locals.len()) {
+            continue;
+        }
+        mut none = u8[][];
+        mut slots = u64[];
+        mut tys = u64[];
+        slot := local_id(&mut c, i);
+        ty := local_ty(&mut c, i);
+        slots.push(slot);
+        tys.push(ty);
+        name := c.cur_name.copy();
+        at_file := c.cur_file;
+        at_pos := c.cur_pos;
+        ref_check(&mut c, Pred { file: pf, lo: plo, hi: phi }, &none, &slots, &tys, name, at_file, at_pos, 0);
+        emitted = emitted + 1;
+    }
+    if emitted != 0 {
+        // The last check's own return address must not be the first statement's address, or a
+        // failure would name that statement instead of the call: one jump keeps it in the prologue.
+        past := label(&mut c);
+        jump(&mut c, view("jmp"), past);
+        mark(&mut c, past);
+    }
+    return ();
+}
+// How many parameters of the function being compiled carry a predicate.
+fn ref_pred_count<a>(c: (&a mut C)) -> u64 {
+    mut n = 0;
+    for i in c.cur_ppreds.len() {
+        if i < c.cur_ppreds.len() {
+            p := &c.cur_ppreds[i];
+            if p.hi != 0 {
+                n += 1;
+            }
+        }
+    }
+    return n;
+}
+// The second entry of a function with refined parameters (docs/design/refinements.md): the frame
+// and the parameter stores, then a jump straight to the body, past the checks. It is out of line
+// because a `call` to an entry inside the function would skip the prologue the body needs, and it is
+// a copy of the prologue's own bytes because that prologue is the same code either way - the checked
+// entry runs it and then the checks, this one runs it and then the body.
+//
+// Only a call site that proved every parameter predicate reaches it. An indirect call - a function
+// value, a vtable entry, a foreign call - has proved nothing, and uses the checked entry.
+fn ref_entry<a, b, d>(c: (&a mut C), m: &b [u8], name: &b [u8], body_symbol: &d [u8], export: u64, body: u64, prologue: (&a [u8])) -> unit {
+    if (ref_pred_count(&mut c) == 0) || (export == 2) || (prologue.len() == 0) {
+        return ();
+    }
+    // The binding is stated here, as it is for the checked entry: a specialisation is emitted by
+    // every object that instantiates it and stays weak, and a split build's objects have to see
+    // each other's symbols.
+    if c.plat != 1 {
+        if c.current_spec != 0 {
+            o(&mut c, view(".weak "));
+            export_name(&mut c, view(m), view(name), view(body_symbol), export);
+            o(&mut c, view(".proved\n"));
+        } else {
+            if c.split != 0 {
+                o(&mut c, view(".globl "));
+                export_name(&mut c, view(m), view(name), view(body_symbol), export);
+                o(&mut c, view(".proved\n"));
+            }
+        }
+    }
+    export_name(&mut c, view(m), view(name), view(body_symbol), export);
+    o(&mut c, view(".proved:\n"));
+    push_bytes(&mut c.out, view(prologue));
+    jump(&mut c, view("jmp"), body);
+    return ();
+}
+// `field: T where P` at the value's entry into a record: a literal must establish every refined
+// field it fills, so `Ray { t_max: x }` is where the ray's invariant is owed.
+fn ref_field<a, b>(c: (&a mut C), d: u64, k: u64, slot: u64, term: &b [u8], pos: u64) -> unit {
+    f := c.decls[d].first + k;
+    if f >= c.fields.len() {
+        return ();
+    }
+    mut pf = 0;
+    mut plo = 0;
+    mut phi = 0;
+    mut fname = u8[];
+    mut fty = 0;
+    mut owner = u8[];
+    if f < c.fields.len() {
+        p := &c.fields[f];
+        pf = p.pred.file;
+        plo = p.pred.lo;
+        phi = p.pred.hi;
+        fname = p.name.copy();
+        fty = p.ty;
+        owner = c.decls[d].name.copy();
+    }
+    if phi == 0 {
+        return ();
+    }
+    mut who = u8[];
+    push_bytes(&mut who, view(owner));
+    who.push(46);
+    push_bytes(&mut who, view(fname));
+    mut names = u8[][fname];
+    mut slots = u64[slot];
+    mut tys = u64[fty];
+    // The field's name stands for the value being stored: a proof reads the value's own term.
+    mut terms = u8[][copy_bytes(view(term))];
+    mut proved = 0;
+    mut report = u64(ref_strict(&c));
+    need := pv_need(&mut c, view(who), pf, plo);
+    if term.len() != 0 {
+        proved = pv_proved(&mut c, Pred { file: pf, lo: plo, hi: phi }, &names, &terms, pos, report, view(need));
+    }
+    if (report != 0) & (proved == 0) {
+        // No term to read means no proof: strict mode refuses the literal itself.
+        pv_strict_fail_why(&mut c, Pred { file: pf, lo: plo, hi: phi }, pos, view(need), view("the value is not a name or a constant"));
+    }
+    ref_check(&mut c, Pred { file: pf, lo: plo, hi: phi }, &names, &slots, &tys, who, pf, plo, proved);
+    return ();
+}
+// The same obligation at `r.f = v`: the field is named in the source, so its predicate is found by
+// name in the record's declaration.
+fn ref_field_named<a, b, d>(c: (&a mut C), ty: u64, fname: &b [u8], slot: u64, term: &d [u8], pos: u64) -> unit {
+    mut shape = ty;
+    if ty_kind(&mut c, shape) == 7 {
+        shape = ty_arg(&mut c, shape);
+    }
+    if ty_kind(&mut c, shape) != 8 {
+        return ();
+    }
+    d := ty_arg(&mut c, shape);
+    if d >= c.decls.len() {
+        return ();
+    }
+    first := c.decls[d].first;
+    count := c.decls[d].count;
+    for i in count {
+        f := first + i;
+        if f < c.fields.len() {
+            if same(view(c.fields[f].name), view(fname)) {
+                ref_field(&mut c, d, i, slot, term, pos);
+                return ();
+            }
+        }
+    }
+    return ();
+}
+// `-> T ensures P` at every `return`: `result` is the value on its way out.
+fn ref_result<a, b>(c: (&a mut C), slot: u64, ty: u64, term: &b [u8], pos: u64) -> unit {
+    mut pf = 0;
+    mut plo = 0;
+    mut phi = 0;
+    p := &c.cur_rpred;
+    pf = p.file;
+    plo = p.lo;
+    phi = p.hi;
+    if phi == 0 {
+        return ();
+    }
+    mut names = u8[][copy_bytes(view("result"))];
+    mut slots = u64[slot];
+    mut tys = u64[ty];
+    name := c.cur_name.copy();
+    at_file := c.cur_file;
+    at_pos := c.cur_pos;
+    mut terms = u8[][copy_bytes(view(term))];
+    mut proved = 0;
+    mut report = u64(ref_strict(&c));
+    need := pv_need(&mut c, view(name), at_file, at_pos);
+    if term.len() != 0 {
+        proved = pv_proved(&mut c, Pred { file: pf, lo: plo, hi: phi }, &names, &terms, pos, report, view(need));
+    }
+    if (report != 0) & (proved == 0) {
+        pv_strict_fail_why(&mut c, Pred { file: pf, lo: plo, hi: phi }, pos, view(need), view("the returned value is not a name or a constant"));
+    }
+    ref_check(&mut c, Pred { file: pf, lo: plo, hi: phi }, &names, &slots, &tys, name, at_file, at_pos, proved);
+    return ();
+}
+// ---- the prover (docs/design/refinements.md, "The prover") ----------------------------------------
+// An obligation is discharged from a small fact set read off the source tokens of the function being
+// compiled, never inferred from the IR: what is proved is a property of the program the author wrote,
+// and everything the prover cannot read it does not assume. So a check is removed only when a proof
+// exists, and a program is never weaker than the checked one - the prover is an optimisation of a
+// feature that is already sound.
+//
+// A term is a parameter's or local's name, a length spelled `v.len` (for `v.len()`), or a literal. An
+// atom is `a < b + k`, `a <= b + k`, `a == b + k`, `a % k == 0`, `finite(a)` or `nan(a)`. Terms are
+// compared by text: two occurrences of `i` in one function name the same variable unless a binding
+// between them shadowed it, and a binding drops the facts that name it.
+struct Atom {
+    // 0 `<`, 1 `<=`, 2 `==`, 3 `%`, 4 `finite`, 5 `nan`.
+    rel: u64,
+    a: u8[],
+    b: u8[],
+    k: i64
+}
+fn copy_atom_value<a>(x: (&a Atom)) -> Atom {
+    return Atom { rel: x.rel, a: x.a.copy(), b: x.b.copy(), k: x.k };
+}
+// One open `{` while the facts at a program point are collected: where its facts begin in the list,
+// whether it is the then-block of an `if` (1) or anything else (0), and what an `else` after it may
+// assume - the negation of the condition, when that negation is itself one comparison.
+struct PvFrame {
+    mark: u64,
+    kind: u64,
+    neg: Atom[]
+}
+// The weight of "no path": larger than any bound a fact can state, small enough that two of them
+// added together stay inside i64.
+fn pv_inf() -> i64 {
+    return 4611686018427387904;
+}
+fn pv_tok<a>(c: (&a mut C), i: u64) -> u8[] {
+    if i >= c.toks.len() {
+        return u8[];
+    }
+    return tok_text(&mut c, i);
+}
+// A decimal the prover compares exactly: digits only, and short enough that its value is exact. A
+// longer literal is left unread rather than modelled at the wrong value.
+fn pv_digits<a>(t: &a [u8]) -> bool {
+    if (t.len() == 0) || (15 < t.len()) {
+        return false;
+    }
+    for i in t.len() {
+        if (t[i] < 48) || (57 < t[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+fn pv_number<a>(t: &a [u8]) -> i64 {
+    mut v: i64 = 0;
+    for i in t.len() {
+        v = v * 10 + i64(t[i] - 48);
+    }
+    return v;
+}
+// A literal the prover may name as a value: an integer, or a float spelled with digits and one dot. A
+// float literal is opaque - it is never ordered against another term - but a value can be `finite`.
+fn pv_literal<a>(t: &a [u8]) -> bool {
+    if pv_digits(view(t)) {
+        return true;
+    }
+    if (t.len() == 0) || (15 < t.len()) {
+        return false;
+    }
+    mut dot = 0;
+    mut digits = 0;
+    for i in t.len() {
+        b := t[i];
+        if b == 46 {
+            dot += 1;
+        } else {
+            if (b < 48) || (57 < b) {
+                return false;
+            }
+            digits += 1;
+        }
+    }
+    return (dot == 1) & (digits != 0);
+}
+// A word the prover must not mistake for a variable.
+fn pv_keyword<a>(t: &a [u8]) -> bool {
+    return same(view(t), view("true"))
+        || same(view(t), view("false"))
+        || same(view(t), view("if"))
+        || same(view(t), view("else"))
+        || same(view(t), view("while"))
+        || same(view(t), view("for"))
+        || same(view(t), view("in"))
+        || same(view(t), view("let"))
+        || same(view(t), view("mut"))
+        || same(view(t), view("return"))
+        || same(view(t), view("assert"))
+        || same(view(t), view("break"))
+        || same(view(t), view("continue"))
+        || same(view(t), view("loop"))
+        || same(view(t), view("match"))
+        || same(view(t), view("where"))
+        || same(view(t), view("ensures"))
+        || same(view(t), view("fn"));
+}
+// The term at `at`, with the number of tokens it spans in `used`: a name, `name.len()` or a literal.
+// Empty text means the tokens there are not one this prover knows.
+fn pv_term<a>(c: (&a mut C), at: u64, used: (&a mut u64)) -> u8[] {
+    exchange(used, 1);
+    if at >= c.toks.len() {
+        return u8[];
+    }
+    k := kind_at(&mut c, at);
+    if (k == 2) || (k == 5) {
+        t := tok_text(&mut c, at);
+        if pv_literal(view(t)) {
+            return t;
+        }
+        return u8[];
+    }
+    if k != 1 {
+        return u8[];
+    }
+    t := tok_text(&mut c, at);
+    if pv_keyword(view(t)) {
+        return u8[];
+    }
+    // `NAME.len()` is the length of the thing NAME names.
+    if (kind_at(&mut c, at + 1) == 46) & (kind_at(&mut c, at + 2) == 1) & (kind_at(&mut c, at + 3) == 40) & (kind_at(&mut c, at + 4) == 41) {
+        m := tok_text(&mut c, at + 2);
+        if same(view(m), view("len")) {
+            mut out = t.copy();
+            push_bytes(&mut out, view(".len"));
+            exchange(used, 5);
+            return out;
+        }
+    }
+    return t;
+}
+// The atom at `at`, or false when the tokens there are not one this prover models. `>` is turned into
+// its `<` form with the operands swapped, so one shape covers every comparison.
+fn pv_atom<a>(c: (&a mut C), at: u64, atom: (&a mut Atom), used: (&a mut u64)) -> bool {
+    exchange(used, 0);
+    mut u1 = 0;
+    mut t1 = pv_term(&mut c, at, &mut u1);
+    if t1.len() == 0 {
+        return false;
+    }
+    mut i = at + u1;
+    // `x.is_finite()` / `x.is_nan()`
+    if (kind_at(&mut c, i) == 46) & (kind_at(&mut c, i + 2) == 40) & (kind_at(&mut c, i + 3) == 41) {
+        m := pv_tok(&mut c, i + 1);
+        mut rel = 4;
+        if same(view(m), view("is_nan")) {
+            rel = 5;
+        }
+        if same(view(m), view("is_finite")) || same(view(m), view("is_nan")) {
+            exchange(atom, Atom { rel: rel, a: t1, b: u8[], k: 0 });
+            exchange(used, (i + 4) - at);
+            return true;
+        }
+        return false;
+    }
+    // `a % k == 0`
+    if kind_at(&mut c, i) == 37 {
+        mut u2 = 0;
+        mut t2 = pv_term(&mut c, i + 1, &mut u2);
+        if !pv_digits(view(t2)) {
+            return false;
+        }
+        mut j = i + 1 + u2;
+        if kind_at(&mut c, j) != 258 {
+            return false;
+        }
+        mut u3 = 0;
+        mut t3 = pv_term(&mut c, j + 1, &mut u3);
+        if !same(view(t3), view("0")) {
+            return false;
+        }
+        exchange(atom, Atom { rel: 3, a: t1, b: u8[], k: pv_number(view(t2)) });
+        exchange(used, (j + 1 + u3) - at);
+        return true;
+    }
+    // A comparison. `>` swaps its operands, so `<`, `<=`, `==` and their mirrors share one shape.
+    op := kind_at(&mut c, i);
+    mut rel = 99;
+    mut flip = 0;
+    if op == 60 {
+        rel = 0;
+    }
+    if op == 269 {
+        rel = 1;
+    }
+    if op == 258 {
+        rel = 2;
+    }
+    if op == 62 {
+        rel = 0;
+        flip = 1;
+    }
+    if op == 270 {
+        rel = 1;
+        flip = 1;
+    }
+    if rel == 99 {
+        return false;
+    }
+    mut u2 = 0;
+    mut t2 = pv_term(&mut c, i + 1, &mut u2);
+    if t2.len() == 0 {
+        return false;
+    }
+    mut j = i + 1 + u2;
+    mut kk: i64 = 0;
+    if (kind_at(&mut c, j) == 43) || (kind_at(&mut c, j) == 45) {
+        sign := kind_at(&mut c, j);
+        mut u3 = 0;
+        mut t3 = pv_term(&mut c, j + 1, &mut u3);
+        if !pv_digits(view(t3)) {
+            return false;
+        }
+        kk = pv_number(view(t3));
+        if sign == 45 {
+            kk = 0 - kk;
+        }
+        j = j + 1 + u3;
+    }
+    if flip != 0 {
+        // `x > y + k` is `y < x - k`.
+        exchange(atom, Atom { rel: rel, a: t2, b: t1, k: 0 - kk });
+    } else {
+        exchange(atom, Atom { rel: rel, a: t1, b: t2, k: kk });
+    }
+    exchange(used, j - at);
+    return true;
+}
+// The atoms a predicate or a condition states, a conjunction only: a `||`, a `!` or an atom the
+// prover cannot read means "nothing proved", which is the safe answer.
+fn pv_atoms<a>(c: (&a mut C), lo: u64, hi: u64, out: (&a mut Atom[])) -> bool {
+    mut i = lo;
+    mut count = 0;
+    while i < hi {
+        k := kind_at(&mut c, i);
+        if k == 273 {
+            i += 1;
+            continue;
+        }
+        if (k == 274) || (k == 33) || (k == 124) {
+            return false;
+        }
+        if (k == 40) || (k == 41) {
+            i += 1;
+            continue;
+        }
+        mut atom = Atom { rel: 0, a: u8[], b: u8[], k: 0 };
+        mut used = 0;
+        if !pv_atom(&mut c, i, &mut atom, &mut used) {
+            return false;
+        }
+        if used == 0 {
+            return false;
+        }
+        if 16 <= out.len() {
+            return false;
+        }
+        out.push(atom);
+        count += 1;
+        i += used;
+    }
+    return count != 0;
+}
+// Read a predicate's atoms where it is written. A predicate carried by an interface is its own
+// virtual source, so the file is switched for the read and switched back.
+fn pv_read_pred<a>(c: (&a mut C), pred: Pred, out: (&a mut Atom[])) -> bool {
+    mut pf = pred.file;
+    mut plo = pred.lo;
+    mut phi = pred.hi;
+    if (phi == 0) || (pf == 0) {
+        return false;
+    }
+    saved_file := c.file;
+    saved_pos := c.pos;
+    if saved_file != pf {
+        load_file(&mut c, pf);
+        exchange(&mut c.file, pf);
+    }
+    ok := pv_atoms(&mut c, plo, phi, &mut out);
+    if saved_file != pf {
+        load_file(&mut c, saved_file);
+        exchange(&mut c.file, saved_file);
+        exchange(&mut c.pos, saved_pos);
+    }
+    return ok;
+}
+fn pv_add<a>(facts: (&a mut Atom[]), rel: u64, a: &a [u8], b: &a [u8], k: i64) -> unit {
+    if 64 <= facts.len() {
+        return ();
+    }
+    facts.push(Atom { rel: rel, a: copy_bytes(view(a)), b: copy_bytes(view(b)), k: k });
+    return ();
+}
+// Drop every fact that mentions a name or its length: a binding of the name shadows what the facts
+// said, and a write through it makes them false.
+fn pv_kill<a>(facts: (&a mut Atom[]), name: &a [u8]) -> unit {
+    mut len_name = copy_bytes(view(name));
+    push_bytes(&mut len_name, view(".len"));
+    mut keep = Atom[];
+    for i in facts.len() {
+        x := &facts[i];
+        mut hit = same(view(x.a), view(name)) || same(view(x.b), view(name));
+        if !hit {
+            hit = same(view(x.a), view(len_name)) || same(view(x.b), view(len_name));
+        }
+        if !hit {
+            keep.push(Atom { rel: x.rel, a: x.a.copy(), b: x.b.copy(), k: x.k });
+        }
+    }
+    exchange(facts, keep);
+    return ();
+}
+// What an `else` may assume from the condition that failed: only a single comparison has a negation
+// that is itself one comparison, and anything else states nothing.
+fn pv_negation<a>(atoms: (&a Atom[]), out: (&a mut Atom[])) -> unit {
+    if atoms.len() != 1 {
+        return ();
+    }
+    x := &atoms[0];
+    rel := x.rel;
+    a := x.a.copy();
+    b := x.b.copy();
+    k := x.k;
+    if rel == 0 {
+        // `!(a < b + k)` is `b <= a - k - 1`.
+        pv_add(&mut out, 1, view(b), view(a), 0 - k - 1);
+        return ();
+    }
+    if rel == 1 {
+        // `!(a <= b + k)` is `b < a - k`.
+        pv_add(&mut out, 0, view(b), view(a), 0 - k);
+        return ();
+    }
+    return ();
+}
+// An index into the difference graph's term table, adding the term when it is new. `999` means the
+// table is full, and then nothing that would need it is proved.
+fn pv_term_index<a>(terms: (&a mut u8[][]), t: &a [u8]) -> u64 {
+    for i in terms.len() {
+        if same(view(terms[i]), view(t)) {
+            return i;
+        }
+    }
+    if 20 <= terms.len() {
+        return 999;
+    }
+    terms.push(copy_bytes(view(t)));
+    return terms.len() - 1;
+}
+// The literal a term stands for, when the facts say it equals one: `x := 16` answers `16 % 16`.
+fn pv_resolve<a>(facts: (&a Atom[]), t: &a [u8]) -> u8[] {
+    mut cur = copy_bytes(view(t));
+    mut step = 0;
+    while step < 4 {
+        mut found = u8[];
+        for i in facts.len() {
+            if (facts[i].rel == 2) & (facts[i].k == 0) {
+                if same(view(facts[i].a), view(cur)) & pv_literal(view(facts[i].b)) {
+                    found = facts[i].b.copy();
+                }
+                if same(view(facts[i].b), view(cur)) & pv_literal(view(facts[i].a)) {
+                    found = facts[i].a.copy();
+                }
+            }
+        }
+        if found.len() == 0 {
+            return cur;
+        }
+        exchange(&mut cur, found);
+        step += 1;
+    }
+    return cur;
+}
+// Whether `a REL b + k` follows from the facts: `%` divisibility, a float class, or the difference
+// graph closed over the comparisons. Only facts and obligations whose `k` is zero or negative take
+// part in the graph: `b + k` with `k` positive can wrap at run time in a wrap build, and then the
+// integer reading of the fact would be the wrong one.
+fn pv_implies<a>(facts: (&a Atom[]), rel: u64, a: &a [u8], b: &a [u8], k: i64) -> bool {
+    if rel == 4 {
+        for i in facts.len() {
+            if (facts[i].rel == 4) & same(view(facts[i].a), view(a)) {
+                return true;
+            }
+        }
+        // A literal with no `nan` or `inf` in its spelling is finite.
+        return pv_literal(view(a));
+    }
+    if rel == 5 {
+        for i in facts.len() {
+            if (facts[i].rel == 5) & same(view(facts[i].a), view(a)) {
+                return true;
+            }
+        }
+        return false;
+    }
+    if rel == 3 {
+        if (0 < k) & pv_digits(view(a)) & (pv_number(view(a)) % k == 0) {
+            return true;
+        }
+        for i in facts.len() {
+            if (facts[i].rel == 3) & same(view(facts[i].a), view(a)) {
+                m := facts[i].k;
+                if (0 < k) & (0 < m) & (m % k == 0) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+    // A comparison at run time is exact only where its own arithmetic cannot wrap: two literals are
+    // exact whatever `k` is, and `k <= 0` needs `b >= -k`, or the checked build would have stopped
+    // before the comparison.
+    if !((k <= 0) || (pv_digits(view(a)) & pv_digits(view(b)))) {
+        return false;
+    }
+    // The difference graph: `d[j * n + i]` is the smallest `i - j` the facts allow, closed by
+    // Floyd-Warshall over the terms the facts and the obligation mention. A literal is an exact
+    // vertex, so `16` and `20` order each other.
+    mut terms = u8[][];
+    ai := pv_term_index(&mut terms, view(a));
+    if ai == 999 {
+        return false;
+    }
+    mut bi = 999;
+    if b.len() != 0 {
+        bi = pv_term_index(&mut terms, view(b));
+        if bi == 999 {
+            return false;
+        }
+    }
+    for i in facts.len() {
+        r := facts[i].rel;
+        if (r == 4) || (r == 5) || (r == 3) || (0 < facts[i].k) {
+            continue;
+        }
+        if (facts[i].a.len() == 0) || (facts[i].b.len() == 0) {
+            continue;
+        }
+        xi := pv_term_index(&mut terms, view(facts[i].a));
+        if xi == 999 {
+            return false;
+        }
+        yi := pv_term_index(&mut terms, view(facts[i].b));
+        if yi == 999 {
+            return false;
+        }
+    }
+    n := terms.len();
+    mut d = i64[];
+    for i in n * n {
+        d.push(pv_inf());
+    }
+    for i in n {
+        d[i * n + i] = 0;
+    }
+    // Literals are exact vertices: their difference is known without any fact.
+    for i in n {
+        for j in n {
+            if pv_digits(view(terms[i])) & pv_digits(view(terms[j])) {
+                d[j * n + i] = pv_number(view(terms[i])) - pv_number(view(terms[j]));
+            }
+        }
+    }
+    for i in facts.len() {
+        r := facts[i].rel;
+        if (r == 4) || (r == 5) || (r == 3) || (0 < facts[i].k) {
+            continue;
+        }
+        if (facts[i].a.len() == 0) || (facts[i].b.len() == 0) {
+            continue;
+        }
+        xi := pv_term_index(&mut terms, view(facts[i].a));
+        yi := pv_term_index(&mut terms, view(facts[i].b));
+        if (xi == 999) || (yi == 999) {
+            return false;
+        }
+        mut w = facts[i].k;
+        if r == 0 {
+            // `a < b + k` is `a - b <= k - 1`.
+            w = w - 1;
+        }
+        if w < d[yi * n + xi] {
+            d[yi * n + xi] = w;
+        }
+        if r == 2 {
+            if (0 - w) < d[xi * n + yi] {
+                d[xi * n + yi] = 0 - w;
+            }
+        }
+    }
+    mut mid = 0;
+    while mid < n {
+        for u0 in n {
+            A := d[u0 * n + mid];
+            if A != pv_inf() {
+                for w0 in n {
+                    B := d[mid * n + w0];
+                    if B != pv_inf() {
+                        if A + B < d[u0 * n + w0] {
+                            d[u0 * n + w0] = A + B;
+                        }
+                    }
+                }
+            }
+        }
+        mid += 1;
+    }
+    if b.len() == 0 {
+        // A comparison against the zero the atom leaves out: `a < 0` is `a - 0 <= -1`.
+        if rel == 0 {
+            return d[ai * n + ai] <= i64(0) - i64(1);
+        }
+        return false;
+    }
+    mut want: i64 = k;
+    if rel == 0 {
+        want = k - 1;
+    }
+    if !(d[bi * n + ai] <= want) {
+        return false;
+    }
+    if rel == 2 {
+        return d[ai * n + bi] <= 0 - k;
+    }
+    return true;
+}
+// Whether an obligation's atom follows from the facts, with a side the facts equate with a literal
+// read as that literal.
+fn pv_holds<a>(facts: (&a Atom[]), rel: u64, a: &a [u8], b: &a [u8], k: i64) -> bool {
+    if (rel == 3) || (rel == 4) {
+        r := pv_resolve(&facts, view(a));
+        return pv_implies(&facts, rel, view(r), view(b), k);
+    }
+    return pv_implies(&facts, rel, view(a), view(b), k);
+}
+// `name` (or `name.len`) with the callee's parameters renamed to the caller's terms. A length of a
+// literal cannot be renamed, and says so with empty text.
+fn pv_rename<a, b>(t: &a [u8], from: (&b u8[][]), to: (&b u8[][])) -> u8[] {
+    if t.len() == 0 {
+        return u8[];
+    }
+    for i in from.len() {
+        if same(view(from[i]), view(t)) {
+            return copy_bytes(view(to[i]));
+        }
+        mut len_form = from[i].copy();
+        push_bytes(&mut len_form, view(".len"));
+        if same(view(len_form), view(t)) {
+            if pv_literal(view(to[i])) {
+                return u8[];
+            }
+            mut out = to[i].copy();
+            push_bytes(&mut out, view(".len"));
+            return out;
+        }
+    }
+    return copy_bytes(view(t));
+}
+// The single term a source span names, or empty when it is anything else - arithmetic, a call, a
+// field: an argument the prover cannot name is an obligation it cannot prove. A leading `&` borrows
+// the term it names, whose value is still that term's.
+fn pv_span_term<a>(c: (&a mut C), lo: u64, hi: u64) -> u8[] {
+    mut i = lo;
+    if (i < hi) & (kind_at(&mut c, i) == 38) {
+        i += 1;
+        if (i < hi) & (kind_at(&mut c, i) == 1) {
+            m := tok_text(&mut c, i);
+            if same(view(m), view("mut")) {
+                i += 1;
+            }
+        }
+    }
+    if i >= hi {
+        return u8[];
+    }
+    mut used = 0;
+    t := pv_term(&mut c, i, &mut used);
+    if t.len() == 0 {
+        return u8[];
+    }
+    if i + used != hi {
+        return u8[];
+    }
+    return t;
+}
+// Whether a span could write through a name it mentions: `&mut` takes an exclusive loan, and a call
+// may write what it is given. A call site with such an argument proves nothing, since another
+// argument's evaluation could change what the proof read.
+fn pv_span_mutates<a>(c: (&a mut C), lo: u64, hi: u64) -> bool {
+    mut i = lo;
+    while i < hi {
+        k := kind_at(&mut c, i);
+        if k == 38 {
+            if kind_at(&mut c, i + 1) == 1 {
+                m := tok_text(&mut c, i + 1);
+                if same(view(m), view("mut")) {
+                    return true;
+                }
+            }
+        }
+        if k == 1 {
+            if kind_at(&mut c, i + 1) == 40 {
+                return true;
+            }
+            if (kind_at(&mut c, i + 1) == 46) & (kind_at(&mut c, i + 3) == 40) {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    return false;
+}
+// The facts the function being compiled assumes at its body's start: each refined parameter's
+// predicate holds here, because the entry checked it or the caller proved it.
+fn pv_seed_params<a>(c: (&a mut C), facts: (&a mut Atom[])) -> unit {
+    for i in c.cur_ppreds.len() {
+        mut pf = 0;
+        mut plo = 0;
+        mut phi = 0;
+        if i < c.cur_ppreds.len() {
+            p := &c.cur_ppreds[i];
+            pf = p.file;
+            plo = p.lo;
+            phi = p.hi;
+        }
+        if phi == 0 {
+            continue;
+        }
+        mut atoms = Atom[];
+        if pv_read_pred(&mut c, Pred { file: pf, lo: plo, hi: phi }, &mut atoms) {
+            for j in atoms.len() {
+                pv_add(&mut facts, atoms[j].rel, view(atoms[j].a), view(atoms[j].b), atoms[j].k);
+            }
+        }
+    }
+    return ();
+}
+// Kill the facts about every name a call's arguments mention: the callee may write through them.
+fn pv_kill_spans<a>(c: (&a mut C), facts: (&a mut Atom[]), lo: u64, hi: u64) -> unit {
+    mut i = lo;
+    while i < hi {
+        if kind_at(&mut c, i) == 1 {
+            n := tok_text(&mut c, i);
+            pv_kill(&mut facts, view(n));
+        }
+        i += 1;
+    }
+    return ();
+}
+// The facts that hold at token `pos` of the function body `[start, pos)`: the assumptions a refined
+// parameter gives at entry, the conditions of the enclosing `if`/`while` (and, in an `else`, the
+// negation of a single comparison), an `assert`, the bounds of a `for` loop, and a binding of a
+// simple value. An assignment kills the facts that name its target, a loan or a method call on a
+// vector kills its length's, and a call kills the facts about the names it is given.
+fn pv_scope<a>(c: (&a mut C), start: u64, pos: u64, facts: (&a mut Atom[])) -> unit {
+    pv_seed_params(&mut c, &mut facts);
+    mut frames = PvFrame[];
+    mut i = start;
+    // The condition of an `if` whose block is about to open, and what the block it just closed would
+    // let an `else` assume.
+    mut pending = 0;
+    mut pending_atoms = Atom[];
+    mut pending_neg = Atom[];
+    mut closed = 0;
+    mut closed_neg = Atom[];
+    while i < pos {
+        k := kind_at(&mut c, i);
+        if k == 123 {
+            mark := facts.len();
+            frames.push(PvFrame { mark: mark, kind: pending, neg: pending_neg });
+            for j in pending_atoms.len() {
+                pv_add(&mut facts, pending_atoms[j].rel, view(pending_atoms[j].a), view(pending_atoms[j].b), pending_atoms[j].k);
+            }
+            pending = 0;
+            pending_atoms = Atom[];
+            pending_neg = Atom[];
+            i += 1;
+            continue;
+        }
+        if k == 125 {
+            if frames.len() != 0 {
+                fr := frames.pop();
+                while fr.mark < facts.len() {
+                    facts.pop();
+                }
+                closed = 0;
+                closed_neg = Atom[];
+                if fr.kind == 1 {
+                    closed = 1;
+                    for j in fr.neg.len() {
+                        closed_neg.push(copy_atom_value(&fr.neg[j]));
+                    }
+                }
+            }
+            i += 1;
+            continue;
+        }
+        t := pv_tok(&mut c, i);
+        if k == 1 {
+            if same(view(t), view("match")) {
+                // An arm binds names the walk cannot follow, and its body runs in that binding, so
+                // what was known before the `match` is not what the arm's names mean. The frames
+                // stay: their marks move to zero, so the `}` that closes any enclosing block still
+                // drops what was added after the `match` instead of letting it outlive its block.
+                exchange(&mut facts, Atom[]);
+                for f in frames.len() {
+                    exchange(&mut frames[f].mark, 0);
+                }
+                i += 1;
+                continue;
+            }
+            if same(view(t), view("else")) {
+                pending = 0;
+                pending_atoms = Atom[];
+                pending_neg = Atom[];
+                if (closed != 0) & (kind_at(&mut c, i + 1) == 123) {
+                    pending = 2;
+                    pending_atoms = closed_neg;
+                    closed = 0;
+                    closed_neg = Atom[];
+                }
+                i += 1;
+                continue;
+            }
+            if same(view(t), view("if")) || same(view(t), view("while")) {
+                mut j = i + 1;
+                mut depth = 0;
+                mut close = pos;
+                while j < pos {
+                    kk := kind_at(&mut c, j);
+                    if (kk == 40) || (kk == 91) {
+                        depth += 1;
+                    }
+                    if ((kk == 41) || (kk == 93)) & (0 < depth) {
+                        depth -= 1;
+                    }
+                    if (depth == 0) & ((kk == 123) || (kk == 59)) {
+                        close = j;
+                        break;
+                    }
+                    j += 1;
+                }
+                mut cond = Atom[];
+                mut ok = pv_atoms(&mut c, i + 1, close, &mut cond);
+                pending = 0;
+                pending_atoms = Atom[];
+                pending_neg = Atom[];
+                if ok & (close < pos) & (kind_at(&mut c, close) == 123) {
+                    pending = 2;
+                    if same(view(t), view("if")) {
+                        pending = 1;
+                        pv_negation(&cond, &mut pending_neg);
+                    }
+                    pending_atoms = cond;
+                }
+                // Leave the cursor on the `{` (or the `;`): the block it opens is what holds the
+                // condition's facts, and its `}` drops them.
+                i = close;
+                continue;
+            }
+            if same(view(t), view("assert")) & (kind_at(&mut c, i + 1) == 40) {
+                mut j = i + 2;
+                mut depth = 0;
+                while j < pos {
+                    kk := kind_at(&mut c, j);
+                    if (kk == 40) || (kk == 91) {
+                        depth += 1;
+                    }
+                    if (kk == 41) || (kk == 93) {
+                        if depth == 0 {
+                            break;
+                        }
+                        depth -= 1;
+                    }
+                    j += 1;
+                }
+                mut cond = Atom[];
+                if pv_atoms(&mut c, i + 2, j, &mut cond) {
+                    for m in cond.len() {
+                        pv_add(&mut facts, cond[m].rel, view(cond[m].a), view(cond[m].b), cond[m].k);
+                    }
+                }
+                i = j + 1;
+                continue;
+            }
+            // `for k, v in &m` names both halves of a pair: both bindings shadow what the names said.
+            if same(view(t), view("for")) & (kind_at(&mut c, i + 1) == 1) & (kind_at(&mut c, i + 2) == 44) & (kind_at(&mut c, i + 3) == 1) {
+                first_name := tok_text(&mut c, i + 1);
+                second_name := tok_text(&mut c, i + 3);
+                pv_kill(&mut facts, view(first_name));
+                pv_kill(&mut facts, view(second_name));
+                i += 4;
+                continue;
+            }
+            if same(view(t), view("for")) & (kind_at(&mut c, i + 1) == 1) & (kind_at(&mut c, i + 2) == 1) {
+                loop_name := tok_text(&mut c, i + 1);
+                in_word := tok_text(&mut c, i + 2);
+                if same(view(in_word), view("in")) {
+                    // The iterable ends at the body's `{`.
+                    mut j = i + 3;
+                    mut depth = 0;
+                    mut close = pos;
+                    while j < pos {
+                        kk := kind_at(&mut c, j);
+                        if (kk == 40) || (kk == 91) {
+                            depth += 1;
+                        }
+                        if ((kk == 41) || (kk == 93)) & (0 < depth) {
+                            depth -= 1;
+                        }
+                        if (depth == 0) & (kk == 123) {
+                            close = j;
+                            break;
+                        }
+                        j += 1;
+                    }
+                    pv_kill(&mut facts, view(loop_name));
+                    // `for i in a..b` counts from a up to (not including) b; `for i in n` and
+                    // `for i in v.len()` count from zero, so the loop variable is below the bound.
+                    mut dots = close;
+                    mut m = i + 3;
+                    while m + 1 < close {
+                        if (kind_at(&mut c, m) == 46) & (kind_at(&mut c, m + 1) == 46) {
+                            dots = m;
+                            break;
+                        }
+                        m += 1;
+                    }
+                    if dots < close {
+                        aterm := pv_span_term(&mut c, i + 3, dots);
+                        bterm := pv_span_term(&mut c, dots + 2, close);
+                        if (aterm.len() != 0) & (bterm.len() != 0) {
+                            pv_add(&mut facts, 1, view(aterm), view(loop_name), 0);
+                            pv_add(&mut facts, 0, view(loop_name), view(bterm), 0);
+                        }
+                    } else {
+                        bterm := pv_span_term(&mut c, i + 3, close);
+                        if bterm.len() != 0 {
+                            pv_add(&mut facts, 0, view(loop_name), view(bterm), 0);
+                        }
+                    }
+                    i = close;
+                    continue;
+                }
+            }
+            if (same(view(t), view("mut")) || same(view(t), view("let"))) & (kind_at(&mut c, i + 1) == 1) {
+                nm := tok_text(&mut c, i + 1);
+                pv_kill(&mut facts, view(nm));
+                // `let Variant(name) = ..` (and `if let`) also binds what the pattern names.
+                if (kind_at(&mut c, i + 2) == 40) & (kind_at(&mut c, i + 4) == 41) {
+                    mut j = i + 3;
+                    while (j < pos) & (kind_at(&mut c, j) != 41) {
+                        if kind_at(&mut c, j) == 1 {
+                            bound := tok_text(&mut c, j);
+                            pv_kill(&mut facts, view(bound));
+                        }
+                        j += 1;
+                    }
+                }
+                i += 2;
+                continue;
+            }
+            // `NAME := VALUE`
+            if kind_at(&mut c, i + 1) == 261 {
+                pv_kill(&mut facts, view(t));
+                mut j = i + 2;
+                mut depth = 0;
+                while j < pos {
+                    kk := kind_at(&mut c, j);
+                    if (kk == 40) || (kk == 91) || (kk == 123) {
+                        depth += 1;
+                    }
+                    if ((kk == 41) || (kk == 93) || (kk == 125)) & (0 < depth) {
+                        depth -= 1;
+                    }
+                    if (depth == 0) & (kk == 59) {
+                        break;
+                    }
+                    j += 1;
+                }
+                term := pv_span_term(&mut c, i + 2, j);
+                if term.len() != 0 {
+                    pv_add(&mut facts, 2, view(t), view(term), 0);
+                }
+                i = j + 1;
+                continue;
+            }
+            // A plain write, and the compound writes, kill what the name's facts said.
+            if (kind_at(&mut c, i + 1) == 61) || (kind_at(&mut c, i + 1) == 262) || (kind_at(&mut c, i + 1) == 263) || (kind_at(&mut c, i + 1) == 264) || (kind_at(&mut c, i + 1) == 265) || (kind_at(&mut c, i + 1) == 266) {
+                pv_kill(&mut facts, view(t));
+                i += 2;
+                continue;
+            }
+            // `NAME.field = VALUE` writes a field, not the name.
+            if (kind_at(&mut c, i + 1) == 46) & (kind_at(&mut c, i + 2) == 1) & (kind_at(&mut c, i + 3) == 61) {
+                i += 4;
+                continue;
+            }
+            // A method call may write its receiver (`v.push(x)`): forget what the base's length was.
+            if (kind_at(&mut c, i + 1) == 46) & (kind_at(&mut c, i + 2) == 1) & (kind_at(&mut c, i + 3) == 40) {
+                pv_kill(&mut facts, view(t));
+                mut j = i + 4;
+                mut depth = 0;
+                while j < pos {
+                    kk := kind_at(&mut c, j);
+                    if (kk == 40) {
+                        depth += 1;
+                    }
+                    if kk == 41 {
+                        if depth == 0 {
+                            break;
+                        }
+                        depth -= 1;
+                    }
+                    j += 1;
+                }
+                pv_kill_spans(&mut c, &mut facts, i + 4, j);
+                i = j + 1;
+                continue;
+            }
+            // A call may write through any name it is given.
+            if kind_at(&mut c, i + 1) == 40 {
+                mut j = i + 2;
+                mut depth = 0;
+                while j < pos {
+                    kk := kind_at(&mut c, j);
+                    if kk == 40 {
+                        depth += 1;
+                    }
+                    if kk == 41 {
+                        if depth == 0 {
+                            break;
+                        }
+                        depth -= 1;
+                    }
+                    j += 1;
+                }
+                pv_kill_spans(&mut c, &mut facts, i + 2, j);
+                i = j + 1;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    return ();
+}
+// The proof of one obligation: `pred`'s atoms, with `names` renamed to `terms`, all follow from the
+// facts in scope at `pos`.
+fn pv_proved<a, b>(c: (&a mut C), pred: Pred, names: (&a u8[][]), terms: (&a u8[][]), pos: u64, report: u64, need: &b [u8]) -> u64 {
+    if (c.body_hi == 0) || (c.validating != 0) {
+        return 0;
+    }
+    // The range is kept in locals: reading the predicate consumes the value.
+    pf := pred.file;
+    plo := pred.lo;
+    phi := pred.hi;
+    mut atoms = Atom[];
+    if !pv_read_pred(&mut c, pred, &mut atoms) {
+        return 0;
+    }
+    mut facts = Atom[];
+    body := c.body_lo;
+    pv_scope(&mut c, body, pos, &mut facts);
+    for j in atoms.len() {
+        rel := atoms[j].rel;
+        x := pv_rename(view(atoms[j].a), &names, &terms);
+        mut ok = x.len() != 0;
+        mut y = u8[];
+        if ok & (atoms[j].b.len() != 0) {
+            y = pv_rename(view(atoms[j].b), &names, &terms);
+            ok = y.len() != 0;
+        }
+        if ok {
+            ok = pv_holds(&facts, rel, view(x), view(y), atoms[j].k);
+        }
+        if !ok {
+            if report != 0 {
+                // `pred` was consumed reading it; the diagnostic needs its range, not the value.
+                pv_strict_fail(&mut c, Pred { file: pf, lo: plo, hi: phi }, pos, view(need));
+            }
+            return 0;
+        }
+    }
+    return 1;
+}
+// A call the prover cannot discharge. Strict mode reports it here, at the call, with the predicate
+// and the reason; otherwise the check stays and the call keeps the checked entry.
+fn pv_call_give_up<a, b, d>(c: (&a mut C), report: u64, pred: Pred, at: u64, need: &b [u8], why: &d [u8]) -> u64 {
+    if report != 0 {
+        pv_strict_fail_why(&mut c, pred, at, view(need), view(why));
+    }
+    return 0;
+}
+// The proof of a call: every refined parameter's predicate, with its names replaced by the
+// arguments' own terms, follows from the facts at the call. A function with no refined parameter
+// needs no proof and is never routed to the second entry.
+fn pv_call_proved<a>(c: (&a mut C), f: u64, count: u64, spans: (&a u64[]), at: u64, report: u64) -> u64 {
+    if (f == 0) || (f > c.funcs.len()) || (c.body_hi == 0) {
+        return 0;
+    }
+    mut any = 0;
+    for i in c.funcs[f - 1].ppreds.len() {
+        if i < c.funcs[f - 1].ppreds.len() {
+            p := &c.funcs[f - 1].ppreds[i];
+            if p.hi != 0 {
+                any = 1;
+            }
+        }
+    }
+    if any == 0 {
+        // Nothing is owed, so there is nothing to prove and nothing to report.
+        return 0;
+    }
+    mut first = no_pred();
+    for i in c.funcs[f - 1].ppreds.len() {
+        if i < c.funcs[f - 1].ppreds.len() {
+            p := &c.funcs[f - 1].ppreds[i];
+            if (p.hi != 0) & !has_pred(&first) {
+                first = Pred { file: p.file, lo: p.lo, hi: p.hi };
+            }
+        }
+    }
+    cname := c.funcs[f - 1].name.copy();
+    cfile := c.funcs[f - 1].file;
+    cpos := c.funcs[f - 1].pos;
+    mut need = pv_need(&mut c, view(cname), cfile, cpos);
+    mut names = u8[][];
+    mut terms = u8[][];
+    for i in count {
+        if i >= c.funcs[f - 1].pnames.len() {
+            return pv_call_give_up(&mut c, report, first, at, view(need), view("the parameter has no name to substitute"));
+        }
+        if (2 * i + 1) >= spans.len() {
+            return pv_call_give_up(&mut c, report, first, at, view(need), view("the argument's source is unknown"));
+        }
+        nm := c.funcs[f - 1].pnames[i].copy();
+        if nm.len() == 0 {
+            return pv_call_give_up(&mut c, report, first, at, view(need), view("the parameter has no name to substitute"));
+        }
+        tm := pv_span_term(&mut c, spans[2 * i], spans[2 * i + 1]);
+        if tm.len() == 0 {
+            return pv_call_give_up(&mut c, report, first, at, view(need), view("an argument is not a name or a constant"));
+        }
+        names.push(nm);
+        terms.push(tm);
+    }
+    for i in count {
+        if pv_span_mutates(&mut c, spans[2 * i], spans[2 * i + 1]) {
+            return pv_call_give_up(&mut c, report, first, at, view(need), view("an argument is borrowed or calls something"));
+        }
+    }
+    mut facts = Atom[];
+    body := c.body_lo;
+    pv_scope(&mut c, body, at, &mut facts);
+    for i in c.funcs[f - 1].ppreds.len() {
+        mut pf = 0;
+        mut plo = 0;
+        mut phi = 0;
+        if i < c.funcs[f - 1].ppreds.len() {
+            p := &c.funcs[f - 1].ppreds[i];
+            pf = p.file;
+            plo = p.lo;
+            phi = p.hi;
+        }
+        if phi == 0 {
+            continue;
+        }
+        mut atoms = Atom[];
+        if !pv_read_pred(&mut c, Pred { file: pf, lo: plo, hi: phi }, &mut atoms) {
+            return pv_call_give_up(&mut c, report, Pred { file: pf, lo: plo, hi: phi }, at, view(need), view("the predicate is not a conjunction the prover reads"));
+        }
+        for j in atoms.len() {
+            rel := atoms[j].rel;
+            x := pv_rename(view(atoms[j].a), &names, &terms);
+            mut ok = x.len() != 0;
+            mut y = u8[];
+            if ok & (atoms[j].b.len() != 0) {
+                y = pv_rename(view(atoms[j].b), &names, &terms);
+                ok = y.len() != 0;
+            }
+            if ok {
+                ok = pv_holds(&facts, rel, view(x), view(y), atoms[j].k);
+            }
+            if !ok {
+                return pv_call_give_up(&mut c, report, Pred { file: pf, lo: plo, hi: phi }, at, view(need), view("the facts at the call do not settle it"));
+            }
+        }
+    }
+    return 1;
+}
+// The base a `.len` term is the length of: `v.len` answers `v`, anything else answers empty.
+fn pv_len_base<a>(t: &a [u8]) -> u8[] {
+    n := t.len();
+    if n <= 4 {
+        return u8[];
+    }
+    if (t[n - 4] != 46) || (t[n - 3] != 108) || (t[n - 2] != 101) || (t[n - 1] != 110) {
+        return u8[];
+    }
+    mut out = u8[];
+    for i in 0 .. n - 4 {
+        out.push(t[i]);
+    }
+    return out;
+}
+// Whether the body leaves a bound on a shared reference usable: neither name is written or bound
+// again, no mutable loan of either appears, and the reference is only indexed or asked its length.
+fn pv_bound_stable<a, b>(c: (&a mut C), index: &b [u8], base: &b [u8]) -> bool {
+    mut i = c.body_lo;
+    while i < c.body_hi {
+        k := kind_at(&mut c, i);
+        if k == 1 {
+            t := tok_text(&mut c, i);
+            // `match` arms and `let` patterns bind names the token walk cannot follow; a body with
+            // either could index with a name this bound says nothing about.
+            if same(view(t), view("match")) || same(view(t), view("let")) {
+                return false;
+            }
+            if same(view(t), view(index)) || same(view(t), view(base)) {
+                nk := kind_at(&mut c, i + 1);
+                // A write of any kind makes what the entry knew about the name stale.
+                if (nk == 61) || (nk == 262) || (nk == 263) || (nk == 264) || (nk == 265) || (nk == 266) || (nk == 268) {
+                    return false;
+                }
+                if i >= 2 {
+                    pk := kind_at(&mut c, i - 1);
+                    if pk == 1 {
+                        before := tok_text(&mut c, i - 1);
+                        // `&mut NAME` is a loan a callee can write through.
+                        if same(view(before), view("mut")) & (kind_at(&mut c, i - 2) == 38) {
+                            return false;
+                        }
+                        // `mut NAME = ..`, `let NAME ..`, `for NAME in ..`: the name is bound again.
+                        if same(view(before), view("mut")) || same(view(before), view("let")) || same(view(before), view("for")) {
+                            return false;
+                        }
+                    }
+                }
+                // `v.push(x)` and its siblings can change what the bound was measured against.
+                if same(view(t), view(base)) & (kind_at(&mut c, i + 1) == 46) & (kind_at(&mut c, i + 3) == 40) {
+                    m := tok_text(&mut c, i + 2);
+                    if !same(view(m), view("len")) {
+                        return false;
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+    return true;
+}
+// Whether this module compiles in strict mode: the flag, a `@strict;` in the module, or a `@strict`
+// on the declaration being compiled.
+fn ref_module_strict<a, b>(c: (&a C), m: &b [u8]) -> bool {
+    for i in c.strict_modules.len() {
+        if same(view(c.strict_modules[i]), view(m)) {
+            return true;
+        }
+    }
+    return false;
+}
+fn ref_strict<a>(c: (&a C)) -> bool {
+    if c.strict_refinements != 0 {
+        return true;
+    }
+    if c.strict_next != 0 {
+        return true;
+    }
+    m := c.module.copy();
+    return ref_module_strict(&c, view(m));
+}
+// `required by <fn> at <where>`: the second line of a strict-mode diagnostic.
+fn pv_need<a, b>(c: (&a mut C), fn_name: &b [u8], at_file: u64, at_pos: u64) -> u8[] {
+    mut out = copy_bytes(view("required by "));
+    push_bytes(&mut out, view(fn_name));
+    at := src_where(&mut c, at_file, at_pos);
+    if at.len() != 0 {
+        push_bytes(&mut out, view(" at "));
+        push_bytes(&mut out, view(at));
+    }
+    return out;
+}
+// One atom as the diagnostic spells it, in the shape the prover reads.
+fn pv_atom_text<a>(x: (&a Atom)) -> u8[] {
+    mut out = u8[];
+    push_bytes(&mut out, view(x.a));
+    if x.rel == 4 {
+        push_bytes(&mut out, view(".is_finite()"));
+        return out;
+    }
+    if x.rel == 5 {
+        push_bytes(&mut out, view(".is_nan()"));
+        return out;
+    }
+    if x.rel == 3 {
+        push_bytes(&mut out, view(" % "));
+        decimal(&mut out, u64(x.k));
+        push_bytes(&mut out, view(" == 0"));
+        return out;
+    }
+    if x.rel == 0 {
+        push_bytes(&mut out, view(" < "));
+    }
+    if x.rel == 1 {
+        push_bytes(&mut out, view(" <= "));
+    }
+    if x.rel == 2 {
+        push_bytes(&mut out, view(" == "));
+    }
+    push_bytes(&mut out, view(x.b));
+    if x.k < 0 {
+        push_bytes(&mut out, view(" - "));
+        decimal(&mut out, u64(0 - x.k));
+    } else {
+        if 0 < x.k {
+            push_bytes(&mut out, view(" + "));
+            decimal(&mut out, u64(x.k));
+        }
+    }
+    return out;
+}
+fn pv_facts_text<a>(facts: (&a Atom[])) -> u8[] {
+    mut out = u8[];
+    for i in facts.len() {
+        push_bytes(&mut out, view("\n   "));
+        item := &facts[i];
+        push_bytes(&mut out, view(pv_atom_text(&item)));
+    }
+    if facts.len() == 0 {
+        push_bytes(&mut out, view("\n   (none)"));
+    }
+    return out;
+}
+// Under strict mode an unproved obligation is a compile error, at the place the obligation is owed:
+// the predicate, which declaration required it, and the facts the prover had.
+fn pv_strict_fail<a, b>(c: (&a mut C), pred: Pred, pos: u64, need: &b [u8]) -> unit {
+    pv_strict_fail_why(&mut c, pred, pos, view(need), view(""));
+    return ();
+}
+fn pv_strict_fail_why<a, b, d>(c: (&a mut C), pred: Pred, pos: u64, need: &b [u8], why: &d [u8]) -> unit {
+    text := pred_text(&mut c, pred);
+    mut facts = Atom[];
+    body := c.body_lo;
+    if c.body_hi != 0 {
+        pv_scope(&mut c, body, pos, &mut facts);
+    }
+    mut msg = copy_bytes(view("cannot prove the refinement `"));
+    push_bytes(&mut msg, view(text));
+    push_bytes(&mut msg, view("`"));
+    if need.len() != 0 {
+        push_bytes(&mut msg, view("\n = "));
+        push_bytes(&mut msg, view(need));
+    }
+    if why.len() != 0 {
+        push_bytes(&mut msg, view("\n = "));
+        push_bytes(&mut msg, view(why));
+    }
+    push_bytes(&mut msg, view("\n = the facts in scope were:"));
+    push_bytes(&mut msg, view(pv_facts_text(&facts)));
+    exchange(&mut c.pos, pos);
+    fail(&mut c, view(msg));
+    return ();
+}
+// A refined parameter states a bound the body's indexing can use: `i < v.len()` on `v: &u64[]` is
+// exactly what the check on `v[i]` needs, so the entry sets the pair a `for i in v.len()` loop sets
+// (bce_index, bce_base) for this body. Nothing is assumed that the entry did not already check - the
+// checked entry checks it, and a proved one had it proved - and a body that could make the bound
+// stale sets nothing.
+fn pv_bce<a>(c: (&a mut C)) -> unit {
+    if (c.validating != 0) || (c.body_hi == 0) {
+        return ();
+    }
+    for i in c.cur_ppreds.len() {
+        mut pf = 0;
+        mut plo = 0;
+        mut phi = 0;
+        if i < c.cur_ppreds.len() {
+            p := &c.cur_ppreds[i];
+            pf = p.file;
+            plo = p.lo;
+            phi = p.hi;
+        }
+        if phi == 0 {
+            continue;
+        }
+        mut atoms = Atom[];
+        if !pv_read_pred(&mut c, Pred { file: pf, lo: plo, hi: phi }, &mut atoms) {
+            continue;
+        }
+        for j in atoms.len() {
+            // Only `i < v.len()` bounds an index. `i <= v.len() - 1` arrives in that shape too, and
+            // any other comparison says nothing about an access.
+            if (atoms[j].rel != 0) || (atoms[j].k != 0) {
+                continue;
+            }
+            index_name := atoms[j].a.copy();
+            bound := pv_len_base(view(atoms[j].b));
+            if (index_name.len() == 0) || (bound.len() == 0) {
+                continue;
+            }
+            l := find_local(&mut c, view(bound));
+            if l == 0 {
+                continue;
+            }
+            bty := local_ty(&mut c, l - 1);
+            k := ty_kind(&mut c, bty);
+            // Only a shared reference (or a shared slice) has a length this function cannot change:
+            // an owned vector could be pushed in the body.
+            if !((k == 7) || (k == 27)) || (ty_mode(&mut c, bty) != 0) {
+                continue;
+            }
+            if !pv_bound_stable(&mut c, view(index_name), view(bound)) {
+                continue;
+            }
+            exchange(&mut c.bce_index, index_name);
+            exchange(&mut c.bce_base, bound);
+            return ();
+        }
+    }
+    return ();
+}
 fn ident<a>(c: (&a mut C)) -> u8[] {
     if kind(&mut c) != 1 {
         fail(&mut c, view("expected identifier"));
@@ -7684,7 +9565,7 @@ fn tuple_decl<a>(c: (&a mut C), count: u64) -> u64 {
         mut field = u8[];
         decimal(&mut field, i);
         ty := intern_args(&mut c, 9, i, 0, u64[], u64[]);
-        c.fields.push(Field { name: field, ty: ty });
+        c.fields.push(Field { name: field, ty: ty, pred: no_pred() });
         bounds.push(0);
         constraints.push(u64[]);
     }
@@ -8000,7 +9881,7 @@ fn make_union<a>(c: (&a mut C), args: u64[], success: u64, module: u8[], prefix:
             mut field = u8[];
             decimal(&mut field, i);
             param := intern_args(&mut c, 9, i, 0, u64[], u64[]);
-            c.fields.push(Field { name: field, ty: param });
+            c.fields.push(Field { name: field, ty: param, pred: no_pred() });
         }
         mut bounds = u64[];
         mut constraints = u64[][];
@@ -8974,6 +10855,7 @@ fn decl<a>(c: (&a mut C), pass: u64) -> unit {
         while true {
             f := ident(&mut c);
             mut ty = 1;
+            mut fp = no_pred();
             if is_enum != 0 {
                 if eat(&mut c, view("(")) {
                     ty = parse_type(&mut c);
@@ -8982,8 +10864,13 @@ fn decl<a>(c: (&a mut C), pass: u64) -> unit {
             } else {
                 expect(&mut c, view(":"));
                 ty = parse_type(&mut c);
+                // `field: T where P`: the field's refinement (docs/design/refinements.md).
+                if is(&mut c, view("where")) {
+                    advance(&mut c);
+                    fp = pred_scan(&mut c, view(","), view("}"));
+                }
             }
-            pending.push(Field { name: f, ty: ty });
+            pending.push(Field { name: f, ty: ty, pred: fp });
             count = count + 1;
             if eat(&mut c, view("}")) {
                 break;
@@ -10103,7 +11990,7 @@ fn ffi_record<a>(c: (&a mut C), pass: u64) -> unit {
             expect(&mut c, view(":"));
             ty := parse_type(&mut c);
             ffi_field(&mut c, ty);
-            pending.push(Field { name: f, ty: ty });
+            pending.push(Field { name: f, ty: ty, pred: no_pred() });
             count = count + 1;
             if eat(&mut c, view("}")) {
                 break;
@@ -10375,6 +12262,9 @@ fn extern_declaration<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
                 ext: 1 + variadic,
                 symbol: symbol,
                 body: u8[],
+                ppreds: Pred[],
+                rpred: no_pred(),
+                pnames: u8[][],
             }
         );
     return ();
@@ -10394,6 +12284,9 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     // `unsafe fn`: consumed here, whatever pass this is, so the next item does not inherit it.
     unsafe_fn := exchange(&mut c.pending_unsafe, 0);
     mut name = ident(&mut c);
+    c.cur_name = name.copy();
+    c.cur_file = c.file;
+    c.cur_pos = position;
     lifetime_parameters(&mut c);
     exchange(&mut c.input_regions, u64[]);
     exchange(&mut c.receiver_region, 0);
@@ -10494,6 +12387,8 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     exchange(&mut c.origins, Origin[]);
     first := c.params.len();
     mut count = 0;
+    mut ppreds = Pred[];
+    mut pnames = u8[][];
     expect(&mut c, view("("));
     if !eat(&mut c, view(")")) {
         while true {
@@ -10506,6 +12401,14 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
                 );
             }
             ty := parse_type(&mut c);
+            // `p: T where P`: the parameter's refinement (docs/design/refinements.md).
+            mut pp = no_pred();
+            if is(&mut c, view("where")) {
+                advance(&mut c);
+                pp = pred_scan(&mut c, view(","), view(")"));
+            }
+            ppreds.push(pp);
+            pnames.push(p.copy());
             if same(view(p), view("self")) & (ty_kind(&mut c, ty) == 7) {
                 rr := outer_region(&mut c, ty);
                 exchange(&mut c.receiver_region, rr);
@@ -10538,9 +12441,17 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         }
     }
     mut ret = 1;
+    mut rpred = no_pred();
     if eat(&mut c, view("->")) {
         ret = parse_type(&mut c);
+        // `-> T ensures P`: the result's refinement, with `result` naming the value.
+        if is(&mut c, view("ensures")) {
+            advance(&mut c);
+            rpred = pred_scan(&mut c, view("{"), view(";"));
+        }
     }
+    c.cur_ppreds = copy_preds(&ppreds);
+    c.cur_rpred = Pred { file: rpred.file, lo: rpred.lo, hi: rpred.hi };
     exchange(&mut c.output_region, 0);
     exchange(&mut c.result, ret);
     if pass == 2 {
@@ -10635,6 +12546,9 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
                     ext: export,
                     symbol: export_symbol,
                     body: u8[],
+                    ppreds: copy_preds(&ppreds),
+                    rpred: Pred { file: rpred.file, lo: rpred.lo, hi: rpred.hi },
+                    pnames: copy_names(&pnames),
                 }
             );
         index := c.funcs.len();
@@ -10670,6 +12584,9 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     start := c.pos;
     end := block_end(&mut c, start);
     exchange(&mut c.scope_end, end);
+    // The facts an obligation may read start at this `{` (see pv_scope).
+    exchange(&mut c.body_lo, start);
+    exchange(&mut c.body_hi, end);
     for i in c.locals.len() {
         mut l = &c.locals[i];
         name := l.name.copy();
@@ -10741,7 +12658,10 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         }
     }
     export_name(&mut c, view(m), view(name), view(body_symbol), export);
-    o(&mut c, view(":\npushq %rbp\nmovq %rsp,%rbp\n"));
+    o(&mut c, view(":\n"));
+    // Where the prologue's own bytes begin: the second entry replays them, then jumps to the body.
+    pro_start := c.out.len();
+    o(&mut c, view("pushq %rbp\nmovq %rsp,%rbp\n"));
     frame := label(&mut c);
     if c.target == 4 {
         o(&mut c, view("framesub .F"));
@@ -10768,6 +12688,9 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         exchange(&mut c.export_fret, 0);
         store_params(&mut c, count);
     }
+    // The parameter refinements hold here, where the parameters are the arguments they were given.
+    // Before the frame zeroing on purpose: the check's own return address must stay inside the
+    // prologue's no-position range, so a failure reports the call site rather than this statement.
     o(&mut c, view("leaq -.F"));
     on(&mut c, frame);
     o(&mut c, view("(%rbp),%rdi\nmovq $.F"));
@@ -10822,6 +12745,23 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
             init_parameter(&mut c, slot, ty);
         }
     }
+    // The parameter refinements hold here: the parameters are the arguments they were given and
+    // their bookkeeping is done (a view's target is tracked), and the first statement has not been
+    // reached, so a failure inside the check reports the call site rather than a line of this body.
+    // The prologue's bytes, for the second entry (ref_entry): everything from the frame setup to
+    // here is what a proved call has to run, and the checks are what it may skip.
+    mut prologue = u8[];
+    for i in pro_start .. c.out.len() {
+        prologue.push(c.out[i]);
+    }
+    ref_params(&mut c);
+    // The body begins after the checks: the second entry jumps here.
+    body_lbl := label(&mut c);
+    mark(&mut c, body_lbl);
+    // A refined parameter can state what the body's bounds checks need (pv_bce), for this body only.
+    old_bce_index := exchange(&mut c.bce_index, u8[]);
+    old_bce_base := exchange(&mut c.bce_base, u8[]);
+    pv_bce(&mut c);
     mut tls_slot = 0;
     mut adopt_slot = 0;
     if (export == 2) & tls_bridge(&mut c) {
@@ -10841,6 +12781,8 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
     if unsafe_fn != 0 {
         exchange(&mut c.unsafe_depth, depth);
     }
+    exchange(&mut c.bce_index, old_bce_index);
+    exchange(&mut c.bce_base, old_bce_base);
     exchange(&mut c.export_tls, 0);
     exchange(&mut c.export_adopt, 0);
     if c.terminated == 0 {
@@ -10898,6 +12840,9 @@ fn func<a>(c: (&a mut C), pass: u64, public: u64) -> unit {
         };
         record_debug_func(&mut c, view(name), view(m), &site);
     }
+    // The second entry, out of line: reached only by a call site that proved every predicate. It
+    // sits after the function's own range, so a debug line table never attributes it to the body.
+    ref_entry(&mut c, view(m), view(name), view(body_symbol), export, body_lbl, view(prologue));
     exchange(&mut c.hints, u64[]);
     return ();
 }
@@ -11144,6 +13089,9 @@ fn interface_declaration<a>(c: (&a mut C), pass: u64) -> unit {
                     ext: 0,
                     symbol: u8[],
                     body: u8[],
+                    ppreds: Pred[],
+                    rpred: no_pred(),
+                    pnames: u8[][],
                 }
             );
         index := c.funcs.len() - 1;
@@ -13138,9 +15086,47 @@ fn toplevel<a>(c: (&a mut C), pass: u64) -> unit {
     return ();
 }
 // One module-level item.
+// `@strict;` makes every refinement obligation in this module a compile error, and `@strict` before
+// a declaration makes that declaration's (docs/design/refinements.md). Returns 0 when the tokens are
+// not this form, 1 when a declaration follows, and 2 when the module form was consumed alone.
+fn ref_strict_form<a>(c: (&a mut C)) -> u64 {
+    next := c.pos + 1;
+    if kind_at(&mut c, next) != 1 {
+        return 0;
+    }
+    word := tok_text(&mut c, next);
+    if !same(view(word), view("strict")) {
+        return 0;
+    }
+    advance(&mut c);
+    advance(&mut c);
+    if eat(&mut c, view(";")) {
+        // The mode is kept by module name, so a replayed body is compiled in the mode its module
+        // asked for, wherever the replay happens.
+        m := module_copy(&mut c);
+        if !ref_module_strict(&c, view(m)) {
+            c.strict_modules.push(m);
+        }
+        return 2;
+    }
+    exchange(&mut c.strict_next, 1);
+    return 1;
+}
 fn toplevel_item<a>(c: (&a mut C), pass: u64) -> unit {
     if true {
         if kind(&mut c) == 64 {
+            mode := ref_strict_form(&mut c);
+            if mode != 0 {
+                if mode == 1 {
+                    // `@strict` before a declaration: that declaration's obligations only.
+                    public := u64(eat(&mut c, view("pub")));
+                    exchange(&mut c.decl_public, public);
+                    declaration_item(&mut c, pass, public);
+                    exchange(&mut c.decl_public, 1);
+                    exchange(&mut c.strict_next, 0);
+                }
+                return ();
+            }
             ct_form(&mut c, pass, 1);
             return ();
         }
@@ -15217,6 +17203,8 @@ fn record<a>(c: (&a mut C), d: u64, explicit: u64) -> Val {
             if c.decls[d].c_layout != 0 {
                 cfield_store(&mut c, n, d, k, held.t);
             } else {
+                fterm := pv_span_term(&mut c, astart, aend);
+                ref_field(&mut c, d, k, held.t, view(fterm), astart);
                 rec_store(&mut c, n, k, held.t);
             }
             if eat_kind(&mut c, close) {
@@ -15255,6 +17243,8 @@ fn record<a>(c: (&a mut C), d: u64, explicit: u64) -> Val {
         if c.decls[d].c_layout != 0 {
             cfield_store(&mut c, n, d, k, newslot);
         } else {
+            fterm := pv_span_term(&mut c, start, end);
+            ref_field(&mut c, d, k, newslot, view(fterm), start);
             rec_store(&mut c, n, k, newslot);
         }
         exchange(&mut sources[index], newslot);
@@ -15699,6 +17689,9 @@ fn two_phase_order<a, b>(c: (&a mut C), ranges: (&b u64[])) -> u64[] {
     return order;
 }
 fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
+    // The program point the prover reads: everything up to the callee's name holds when the call is
+    // made, and the arguments (which follow) are what it proves about.
+    call_at := c.pos;
     if c.raw == 0 {
         if same(view(m), view("runtime")) {
             fail(&mut c, view("safe code cannot call unsafe runtime functions"));
@@ -15791,6 +17784,11 @@ fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
     mut argtypes = u64[];
     mut sources = u64[];
     mut deferred = u64[];
+    // Two token positions per parameter, in parameter order however the arguments were written.
+    mut spans = u64[];
+    for i in count * 2 {
+        spans.push(0);
+    }
     if method == 3 {
         // Taken after the arguments (two-phase): a placeholder holds parameter 0's place.
         args.push(0);
@@ -15869,6 +17867,10 @@ fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
                 v = expr_expected(&mut c, 0, context);
             }
             aend := c.pos;
+            if argi < count {
+                spans[2 * argi] = astart;
+                spans[2 * argi + 1] = aend;
+            }
             if c.raw == 0 {
                 if ((v.ty == 0) || ((c.lit_negative != 0) && (c.lit_start == astart) && (c.lit_end == aend))) && (argi < count) {
                     formal := c.params[template_first + argi];
@@ -16118,7 +18120,15 @@ fn call<a, b, d>(c: (&a mut C), m: &b [u8], name: &d [u8]) -> Val {
         exchange(&mut argtypes[index], actual);
         exchange(&mut sources[index], slot);
     }
-    return emit_resolved_call(&mut c, f, map, args, argtypes, sources);
+    // A direct Grail call may enter past the callee's checks when every refined parameter is
+    // discharged here. A method call, an interface method solved to an implementation, and a foreign
+    // call proved nothing about the code they reach, and keep the checked entry.
+    mut proved = 0;
+    if (c.raw == 0) & (c.validating == 0) & (method == 0) & (c.funcs[f - 1].ext == 0) & (c.funcs[f - 1].contract == 0) {
+        strict := u64(ref_strict(&c));
+        proved = pv_call_proved(&mut c, f, count, &spans, call_at, strict);
+    }
+    return emit_resolved_call(&mut c, f, map, args, argtypes, sources, proved);
 }
 // Checked emission for parsed calls and compiler-prepared collection operations.
 fn emit_resolved_call<a>(
@@ -16127,7 +18137,8 @@ fn emit_resolved_call<a>(
     map: u64[],
     args: u64[],
     argtypes: u64[],
-    sources: u64[]
+    sources: u64[],
+    proved: u64
 ) -> Val {
     mut f = index;
     info := &c.funcs[f - 1];
@@ -16239,6 +18250,13 @@ fn emit_resolved_call<a>(
     } else {
         o(&mut c, view("call "));
         mangle(&mut c, view(destination), view(symbol));
+        // A direct call whose refined parameters were all proved enters past the checks. Anything
+        // indirect (a vtable's entry, a function value) proved nothing, and a call through an
+        // interface may reach an implementation with predicates of its own.
+        // `--verify-facts` keeps the check the proof removed, so the call keeps the checked entry.
+        if (proved != 0) & (dyn_entry == 0) & (contract == 0) & (c.verify_facts == 0) {
+            o(&mut c, view(".proved"));
+        }
         c.out.push(10);
     }
     slot := save(&mut c);
@@ -16436,9 +18454,9 @@ fn fn_value_decl<a>(c: (&a mut C)) -> u64 {
         }
     }
     first := c.fields.len();
-    c.fields.push(Field { name: copy_bytes(view("__code")), ty: 0 });
-    c.fields.push(Field { name: copy_bytes(view("__drop")), ty: 0 });
-    c.fields.push(Field { name: copy_bytes(view("target")), ty: 0 });
+    c.fields.push(Field { name: copy_bytes(view("__code")), ty: 0, pred: no_pred() });
+    c.fields.push(Field { name: copy_bytes(view("__drop")), ty: 0, pred: no_pred() });
+    c.fields.push(Field { name: copy_bytes(view("target")), ty: 0, pred: no_pred() });
     item_public_11 := c.decl_public;
     c
         .decls
@@ -21358,8 +23376,8 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
     mut decl_name = copy_bytes(view("Closure"));
     decimal(&mut decl_name, index);
     first := c.fields.len();
-    c.fields.push(Field { name: copy_bytes(view("__code")), ty: 0 });
-    c.fields.push(Field { name: copy_bytes(view("__drop")), ty: 0 });
+    c.fields.push(Field { name: copy_bytes(view("__code")), ty: 0, pred: no_pred() });
+    c.fields.push(Field { name: copy_bytes(view("__drop")), ty: 0, pred: no_pred() });
     mut slots = u64[];
     mut types = u64[];
     mut borrowed = u64[];
@@ -21380,7 +23398,7 @@ fn closure_literal<a>(c: (&a mut C)) -> Val {
         } else if contains_borrow(&mut c, ty, 0) {
             capture_aggregate_regions(&mut c, id, &mut caps);
         }
-        c.fields.push(Field { name: name.copy(), ty: field });
+        c.fields.push(Field { name: name.copy(), ty: field, pred: no_pred() });
         slots.push(id);
         types.push(field);
         borrowed.push(borrow);
@@ -21692,6 +23710,13 @@ fn emit_closures<a>(c: (&a mut C), from: u64) -> u64 {
         exchange(&mut c.cf_start, 0);
         exchange(&mut c.cf_end, 0);
         exchange(&mut c.cf_local, 0);
+        // A closure body is not the enclosing function's body: the facts read before a call there
+        // belong to a different scope, and a refinement of the enclosing function is not assumed -
+        // nor owed - inside it.
+        exchange(&mut c.body_lo, 0);
+        exchange(&mut c.body_hi, 0);
+        exchange(&mut c.cur_ppreds, Pred[]);
+        exchange(&mut c.cur_rpred, no_pred());
         exchange(&mut c.resources, Resource[]);
         exchange(&mut c.next, 0);
         exchange(&mut c.scope_end, 0);
@@ -23841,7 +25866,7 @@ fn map_call<a, b>(c: (&a mut C), name: &b [u8], ty: u64, values: Val[]) -> Val {
         actuals.push(held.ty);
         sources.push(held.t);
     }
-    return emit_resolved_call(&mut c, f, types, args, actuals, sources);
+    return emit_resolved_call(&mut c, f, types, args, actuals, sources, 0);
 }
 fn map_new<a>(c: (&a mut C), ty: u64) -> Val {
     first := invoke(&mut c, view("rt_random_seed"), u64[]);
@@ -25820,7 +27845,7 @@ fn operator_call<a>(c: (&a mut C), k: u64, left: Val, right: Val) -> Val {
     sources.push(bt);
     mut map = u64[];
     map.push(left.ty);
-    mut result = emit_resolved_call(&mut c, method, map, args, types, sources);
+    mut result = emit_resolved_call(&mut c, method, map, args, types, sources, 0);
     if negate {
         get(&mut c, result.t, view("%rax"));
         o(&mut c, view("xorq $1,%rax\n"));
@@ -26912,10 +28937,38 @@ fn chained_field_assignment<a>(c: (&a mut C)) -> unit {
     }
     head := place(&mut c, 1, 0);
     base := chain_walk(&mut c, head, final_run);
+    // The field this store lands in, for its refinement: `r.f = v` owes f's predicate, and a chain
+    // `a.b.f = v` owes the one of the record `f` is declared in. The chain's types are walked here so
+    // the obligation names the right record, not the head's.
+    mut fname = u8[];
+    mut record_ty = 0;
+    mut cur = base.ty;
+    if ty_kind(&mut c, cur) == 7 {
+        cur = ty_arg(&mut c, cur);
+    }
+    mut k = c.pos;
+    while (kind_at(&mut c, k) == 46) & (kind_at(&mut c, k + 1) == 1) {
+        step := tok_text(&mut c, k + 1);
+        if ty_kind(&mut c, cur) != 8 {
+            break;
+        }
+        d := ty_arg(&mut c, cur);
+        idx := field_index(&mut c, d, view(step));
+        if idx == 0 {
+            break;
+        }
+        record_ty = cur;
+        fname = step;
+        cur = field_type(&mut c, cur, idx - 1);
+        if ty_kind(&mut c, cur) == 7 {
+            cur = ty_arg(&mut c, cur);
+        }
+        k = k + 2;
+    }
     a := field_path(&mut c, base.t, base.ty, 2);
     target := a.t;
     fieldty := ty_arg(&mut c, a.ty);
-    assignment_tail(&mut c, 0, base.t, base.ty, target, u64[1, fieldty]);
+    assignment_tail(&mut c, 0, base.t, base.ty, target, u64[1, fieldty], view(fname), record_ty);
     return ();
 }
 // Legacy vector/byte assignment evaluates RHS before parsing its mutable target.
@@ -27898,6 +29951,8 @@ fn statement<a>(c: (&a mut C)) -> unit {
             require_type(&mut c, v.ty, expected_result);
         }
         validate_return(&mut c, val(v.t, v.ty));
+        rterm := pv_span_term(&mut c, rstart, rend);
+        ref_result(&mut c, v.t, v.ty, view(rterm), rstart);
         move_out(&mut c, val(v.t, v.ty));
         callback_copy_back(&mut c);
         cleanup(&mut c, 0);
@@ -28781,7 +30836,8 @@ fn statement<a>(c: (&a mut C)) -> unit {
                     a := field_path(&mut c, head.t, head.ty, 2);
                     target := a.t;
                     fieldty := ty_arg(&mut c, a.ty);
-                    assignment_tail(&mut c, 0, head.t, head.ty, target, u64[1, fieldty]);
+                    mut none = u8[];
+                    assignment_tail(&mut c, 0, head.t, head.ty, target, u64[1, fieldty], view(none), 0);
                     return ();
                 }
                 capture_assignment(&mut c, view(name));
@@ -28816,13 +30872,28 @@ fn statement<a>(c: (&a mut C)) -> unit {
         if (kind(&mut c) == 46) & (carray_assign(&mut c, id, ty) != 0) {
             return ();
         }
+        mut fname = u8[];
+        here_at := c.pos;
+        if (kind(&mut c) == 46) & (kind_at(&mut c, here_at + 1) == 1) {
+            fname = tok_text(&mut c, here_at + 1);
+        }
         if kind(&mut c) == 46 {
             a := field_path(&mut c, id, ty, 2);
             target = a.t;
             through = 1;
             fieldty = ty_arg(&mut c, a.ty);
         }
-        assignment_tail(&mut c, l, id, ty, target, u64[through, fieldty]);
+        mut field_name = u8[];
+        mut record_ty = 0;
+        if through != 0 {
+            field_name = fname;
+            mut shape = ty;
+            if ty_kind(&mut c, shape) == 7 {
+                shape = ty_arg(&mut c, shape);
+            }
+            record_ty = shape;
+        }
+        assignment_tail(&mut c, l, id, ty, target, u64[through, fieldty], view(field_name), record_ty);
         return ();
     }
     mut v = expr(&mut c, 0);
@@ -28891,7 +30962,7 @@ fn carray_assign<a>(c: (&a mut C), id: u64, ty: u64) -> u64 {
 }
 // The rest of an assignment once its target is known: `target` is the binding slot (through =
 // 0, `l` its local) or a field reference (through = 1, `fieldty` the field type).
-fn assignment_tail<a>(c: (&a mut C), l: u64, id: u64, ty: u64, target: u64, through_fieldty: u64[]) -> unit {
+fn assignment_tail<a, b>(c: (&a mut C), l: u64, id: u64, ty: u64, target: u64, through_fieldty: u64[], fname: &b [u8], rtype: u64) -> unit {
     through := through_fieldty[0];
     fieldty := through_fieldty[1];
     if through != 0 {
@@ -29001,6 +31072,10 @@ fn assignment_tail<a>(c: (&a mut C), l: u64, id: u64, ty: u64, target: u64, thro
         }
     }
 
+    if (through != 0) & (operator == 61) & (fname.len() != 0) {
+        rterm := pv_span_term(&mut c, vstart, vend);
+        ref_field_named(&mut c, rtype, view(fname), v.t, view(rterm), vstart);
+    }
     mut storage = ty;
     if through != 0 {
         storage = fieldty;
@@ -29364,6 +31439,9 @@ fn host_fn<a, b>(c: (&a mut C), name: &b [u8], ret: u64) -> unit {
                 ext: 0,
                 symbol: u8[],
                 body: u8[],
+                ppreds: Pred[],
+                rpred: no_pred(),
+                pnames: u8[][],
             }
         );
     return ();
@@ -30392,6 +32470,52 @@ fn iface_emit_func<a, b>(c: (&a mut C), out: (&a mut u8[]), index: u64, m: &b [u
             out.push(10);
         }
     }
+    // The refinements travel with the declaration: a caller in another module owes exactly the
+    // predicates this module's own callers owe, checked by the same code.
+    for i in c.funcs[index].ppreds.len() {
+        mut pf = 0;
+        mut plo = 0;
+        mut phi = 0;
+        if i < c.funcs[index].ppreds.len() {
+            pp := &c.funcs[index].ppreds[i];
+            pf = pp.file;
+            plo = pp.lo;
+            phi = pp.hi;
+        }
+        if phi == 0 {
+            continue;
+        }
+        text := pred_text(&mut c, Pred { file: pf, lo: plo, hi: phi });
+        push_bytes(&mut out, view("where "));
+        decimal(&mut out, i);
+        out.push(32);
+        iface_quoted(&mut out, view(text));
+        out.push(10);
+        // The parameter's own name: a proof at a call site substitutes the arguments for it.
+        if i < c.funcs[index].pnames.len() {
+            pname := c.funcs[index].pnames[i].copy();
+            if pname.len() != 0 {
+                push_bytes(&mut out, view("pname "));
+                decimal(&mut out, i);
+                out.push(32);
+                iface_quoted(&mut out, view(pname));
+                out.push(10);
+            }
+        }
+    }
+    mut rpf = 0;
+    mut rplo = 0;
+    mut rphi = 0;
+    rp := &c.funcs[index].rpred;
+    rpf = rp.file;
+    rplo = rp.lo;
+    rphi = rp.hi;
+    if rphi != 0 {
+        text := pred_text(&mut c, Pred { file: rpf, lo: rplo, hi: rphi });
+        push_bytes(&mut out, view("ensures "));
+        iface_quoted(&mut out, view(text));
+        out.push(10);
+    }
     if (types != 0) & (contract == 0) {
         // A generic template's body travels with the interface: without it a module that
         // instantiates the template cannot be compiled unless this module's source is on the
@@ -30495,6 +32619,24 @@ fn iface_emit_decl<a, b>(c: (&a mut C), out: (&a mut u8[]), index: u64, m: &b [u
         out.push(32);
         iface_type(&mut out, &mut c, ty);
         out.push(10);
+        // A field's refinement travels with it, so a construction in another module owes it.
+        mut fpf = 0;
+        mut fplo = 0;
+        mut fphi = 0;
+        if first + i < c.fields.len() {
+            fp := &c.fields[first + i].pred;
+            fpf = fp.file;
+            fplo = fp.lo;
+            fphi = fp.hi;
+        }
+        if fphi != 0 {
+            text := pred_text(&mut c, Pred { file: fpf, lo: fplo, hi: fphi });
+            push_bytes(&mut out, view("fwhere "));
+            iface_quoted(&mut out, view(field));
+            out.push(32);
+            iface_quoted(&mut out, view(text));
+            out.push(10);
+        }
     }
     return ();
 }
@@ -32305,7 +34447,7 @@ fn iface_define<a, b, d>(c: (&a mut C), st: (&a mut IState), line: &b [u8], path
         if st.cur_decl == 18446744073709551615 {
             iface_fail(&p, view("a field must follow the type it belongs to"));
         }
-        c.fields.push(Field { name: name, ty: ty });
+        c.fields.push(Field { name: name, ty: ty, pred: no_pred() });
         count := st.cur_decl;
         d := &mut c.decls[st.cur_decl];
         exchange(&mut d.first, st.first);
@@ -32582,6 +34724,88 @@ fn iface_define<a, b, d>(c: (&a mut C), st: (&a mut IState), line: &b [u8], path
             }
         }
         return ();
+    }
+    if same(view(word), view("where")) {
+        // A parameter's predicate, carried as text and rebuilt as a virtual source.
+        at := ip_number(&mut p);
+        text := ip_quoted(&mut p);
+        if st.last_func == 0 {
+            iface_fail(&p, view("`where` must follow a function"));
+        }
+        index := st.last_func - 1;
+        mut label = u8[];
+        push_bytes(&mut label, view(path));
+        label.push(58);
+        push_bytes(&mut label, view(c.funcs[index].module));
+        push_bytes(&mut label, view("::"));
+        push_bytes(&mut label, view(c.funcs[index].name));
+        label.push(35);
+        decimal(&mut label, at);
+        pred := pred_of_text(&mut c, view(label), view(text));
+        f := &mut c.funcs[index];
+        while f.ppreds.len() <= at {
+            f.ppreds.push(no_pred());
+        }
+        exchange(&mut f.ppreds[at], pred);
+        return ();
+    }
+    if same(view(word), view("pname")) {
+        // A refined parameter's source name, so a call site in another module can prove the
+        // predicate by substituting its own terms.
+        at := ip_number(&mut p);
+        name := ip_quoted(&mut p);
+        if st.last_func == 0 {
+            iface_fail(&p, view("`pname` must follow a function"));
+        }
+        index := st.last_func - 1;
+        f := &mut c.funcs[index];
+        while f.pnames.len() <= at {
+            f.pnames.push(u8[]);
+        }
+        exchange(&mut f.pnames[at], name);
+        return ();
+    }
+    if same(view(word), view("ensures")) {
+        text := ip_quoted(&mut p);
+        if st.last_func == 0 {
+            iface_fail(&p, view("`ensures` must follow a function"));
+        }
+        index := st.last_func - 1;
+        mut label = u8[];
+        push_bytes(&mut label, view(path));
+        label.push(58);
+        push_bytes(&mut label, view(c.funcs[index].module));
+        push_bytes(&mut label, view("::"));
+        push_bytes(&mut label, view(c.funcs[index].name));
+        push_bytes(&mut label, view("#result"));
+        pred := pred_of_text(&mut c, view(label), view(text));
+        exchange(&mut c.funcs[index].rpred, pred);
+        return ();
+    }
+    if same(view(word), view("fwhere")) {
+        name := ip_quoted(&mut p);
+        text := ip_quoted(&mut p);
+        if st.last_decl == 0 {
+            iface_fail(&p, view("`fwhere` must follow a type"));
+        }
+        index := st.last_decl - 1;
+        first := c.decls[index].first;
+        count := c.decls[index].count;
+        for i in count {
+            if (first + i < c.fields.len()) & same(view(c.fields[first + i].name), view(name)) {
+                mut label = u8[];
+                push_bytes(&mut label, view(path));
+                label.push(58);
+                push_bytes(&mut label, view(c.decls[index].name));
+                label.push(46);
+                push_bytes(&mut label, view(name));
+                pred := pred_of_text(&mut c, view(label), view(text));
+                mut target = &mut c.fields[first + i];
+                exchange(&mut target.pred, pred);
+                return ();
+            }
+        }
+        iface_fail(&p, view("`fwhere` names a field of this type"));
     }
     if same(view(word), view("body")) {
         // `body N` and the N `line` rows that follow are a generic template's own text. The rows
@@ -32862,6 +35086,9 @@ fn iface_define_func<a>(c: (&a mut C), st: (&a mut IState), p: (&a mut IPos)) ->
                 ext: ext,
                 symbol: symbol,
                 body: u8[],
+                ppreds: Pred[],
+                rpred: no_pred(),
+                pnames: u8[][],
             }
         );
     index := c.funcs.len() - 1;
@@ -33149,6 +35376,17 @@ pub fn main() -> u64 {
         cf_local: 0,
         bce_index: u8[],
         bce_base: u8[],
+        cur_ppreds: Pred[],
+        cur_rpred: no_pred(),
+        body_lo: 0,
+        body_hi: 0,
+        strict_refinements: 0,
+        strict_modules: u8[][],
+        strict_next: 0,
+        cur_name: u8[],
+        cur_file: 0,
+        cur_pos: 0,
+        ref_next: 0,
         lit_negative: 0,
         byte_start: 0,
         byte_end: 0,
@@ -33451,6 +35689,10 @@ pub fn main() -> u64 {
                                         exchange(&mut c.f1_what, n);
                                         offset += 1;
                                     } else {
+                                        if same(view(option), view("--strict-refinements")) {
+                                            exchange(&mut c.strict_refinements, 1);
+                                            offset += 1;
+                                        } else {
                                         if same(view(option), view("--verify-facts")) {
                                             exchange(&mut c.verify_facts, 1);
                                             offset += 1;
@@ -33467,6 +35709,7 @@ pub fn main() -> u64 {
                                             } else {
                                                 break;
                                             }
+                                        }
                                         }
                                     }
                                 }
@@ -33494,7 +35737,7 @@ pub fn main() -> u64 {
         fail_option(
             &mut c,
             view(
-                "usage: grail [--target ARCH] [--overflow=checked|wrap] [--debug] [--backend=llvm [--verify-facts]] [--deny-ambient-host] [--split] OUT.s ENTRY.grl MODULE.grl..."
+                "usage: grail [--target ARCH] [--overflow=checked|wrap] [--debug] [--verify-facts] [--strict-refinements] [--deny-ambient-host] [--split] OUT.s ENTRY.grl MODULE.grl..."
             )
         );
     }
@@ -33507,7 +35750,9 @@ pub fn main() -> u64 {
         fail_option(&mut c, view("--backend=llvm is implemented for Linux x86_64, aarch64 and riscv64 without --debug"));
     }
     if (c.verify_facts != 0) && (c.backend == 0) {
-        fail_option(&mut c, view("--verify-facts checks the facts the LLVM lifter consumes; add --backend=llvm"));
+        // On the native backend the flag checks the refinements the prover discharged: every one of
+        // them still emits its runtime check, so a wrong proof aborts instead of going unnoticed.
+        exchange(&mut c.verify_facts, 2);
     }
     if (c.range_facts != 0) && (c.backend == 0) {
         fail_option(&mut c, view("--range-facts derives range facts in the LLVM lifter; add --backend=llvm"));
